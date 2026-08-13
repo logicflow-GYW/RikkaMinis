@@ -221,7 +221,6 @@ object ConfigBackup {
                 })
                 put("strategy", group.strategy.name)
                 put("fallbackStrategy", group.fallbackStrategy.name)
-                put("recovery", group.recovery.name)
                 group.defaultThinkingLevel?.let { put("defaultThinkingLevel", it.name) }
                 group.contextLimitTokens?.let { put("contextLimitTokens", it) }
                 group.lastContextLimitTokens?.let { put("lastContextLimitTokens", it) }
@@ -673,10 +672,6 @@ object ConfigBackup {
                         fallbackStrategy = enumOrDefault(
                             g.optString("fallbackStrategy"),
                             com.openminis.app.data.model.FallbackStrategy.default,
-                        ),
-                        recovery = enumOrDefault(
-                            g.optString("recovery"),
-                            com.openminis.app.data.model.RecoveryStrategy.continueLast,
                         ),
                         defaultThinkingLevel = g.optString("defaultThinkingLevel")
                             .takeIf { it.isNotEmpty() }

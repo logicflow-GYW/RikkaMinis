@@ -7,7 +7,6 @@ import com.openminis.app.data.db.toProviderConfig
 import com.openminis.app.data.model.FallbackStrategy
 import com.openminis.app.data.model.ProviderCredential
 import com.openminis.app.data.model.ProviderType
-import com.openminis.app.data.model.RecoveryStrategy
 import com.openminis.app.data.model.RoutingStrategy
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
@@ -54,7 +53,6 @@ class ProviderConfigSafeParseTest {
                 name = "G",
                 strategy = "NEW_STRATEGY_9",
                 fallbackStrategy = "NEW_FALLBACK_9",
-                recovery = "NEW_RECOVERY_9",
                 memberEntryIdsJson = "[]",
             )
         ),
@@ -73,7 +71,7 @@ class ProviderConfigSafeParseTest {
         val group = config.modelGroups.single()
         assertEquals("unknown strategy must not throw, fall back to first value", RoutingStrategy.fallback, group.strategy)
         assertEquals("unknown fallbackStrategy must not throw, fall back to first value", FallbackStrategy.default, group.fallbackStrategy)
-        assertEquals("unknown recovery must not throw, fall back to first value", RecoveryStrategy.continueLast, group.recovery)
+        // recovery removed
     }
 
     @Test
@@ -95,7 +93,6 @@ class ProviderConfigSafeParseTest {
                     name = "G",
                     strategy = RoutingStrategy.loadBalance.name,
                     fallbackStrategy = FallbackStrategy.always.name,
-                    recovery = RecoveryStrategy.honorFirst.name,
                     memberEntryIdsJson = "[]",
                 )
             ),
@@ -111,7 +108,7 @@ class ProviderConfigSafeParseTest {
         val group = config.modelGroups.single()
         assertEquals(RoutingStrategy.loadBalance, group.strategy)
         assertEquals(FallbackStrategy.always, group.fallbackStrategy)
-        assertEquals(RecoveryStrategy.honorFirst, group.recovery)
+        // recovery removed
     }
 
     @Test

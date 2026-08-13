@@ -9,7 +9,6 @@ import com.openminis.app.config.ConfigValue
 import com.openminis.app.config.fields.ClosureField
 import com.openminis.app.data.model.FallbackStrategy
 import com.openminis.app.data.model.ModelGroup
-import com.openminis.app.data.model.RecoveryStrategy
 import com.openminis.app.data.model.RoutingStrategy
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.data.repository.ProviderRepository
@@ -39,7 +38,6 @@ class GroupsCollection(
             nameField(forId),
             strategyField(forId),
             fallbackStrategyField(forId),
-            recoveryField(forId),
             defaultThinkingLevelField(forId),
             contextLimitField(forId),
             entriesField(forId),
@@ -71,12 +69,6 @@ class GroupsCollection(
             runCatching { FallbackStrategy.valueOf(it) }.getOrNull()
         } ?: FallbackStrategy.default
 
-        // T-recovery: wire token matches the enum name. Absent / unrecognised
-        // falls back to continueLast (existing behaviour).
-        val recovery = (obj["recovery"] as? ConfigValue.Str)?.value?.let {
-            runCatching { RecoveryStrategy.valueOf(it) }.getOrNull()
-        } ?: RecoveryStrategy.continueLast
-
         // Wire token is lowercase (`off`/`low`/…) to match iOS; empty / absent
         // means "no override" (null). An unrecognised token is ignored (null).
         val defaultThinking = (obj["default_thinking_level"] as? ConfigValue.Str)?.value
@@ -92,7 +84,6 @@ class GroupsCollection(
             memberEntryIds = members,
             strategy = strategy,
             fallbackStrategy = fallback,
-            recovery = recovery,
             defaultThinkingLevel = defaultThinking,
             contextLimitTokens = contextLimit,
         )
@@ -174,26 +165,6 @@ class GroupsCollection(
                 val parsed = runCatching { FallbackStrategy.valueOf(s) }.getOrNull()
                     ?: throw ConfigError.InvalidValue("Unknown fallback strategy")
                 mutate(id) { it.fallbackStrategy = parsed }
-            },
-        )
-
-    private fun recoveryField(id: String): ConfigField =
-        ClosureField(
-            path = "groups.$id.recovery",
-            displayName = "Recovery policy",
-            description = "continueLast (stay on fallback member) / honorFirst (always try first member; skip rate-limited) / cooldown (skip rate-limited members only, keep binding).",
-            valueSchema = ConfigSchema.StrEnum(listOf("continueLast", "honorFirst", "cooldown")),
-            risk = ConfigRisk.SENSITIVE,
-            revertable = true,
-            reader = {
-                val g = group(id) ?: return@ClosureField ConfigValue.Null
-                ConfigValue.Str(g.recovery.name)
-            },
-            writer = { v ->
-                val s = (v as? ConfigValue.Str)?.value ?: throw ConfigError.TypeMismatch("string")
-                val parsed = runCatching { RecoveryStrategy.valueOf(s) }.getOrNull()
-                    ?: throw ConfigError.InvalidValue("Unknown recovery strategy")
-                mutate(id) { it.recovery = parsed }
             },
         )
 

@@ -583,7 +583,6 @@ internal object ProviderMutationMethods {
             put("name", group.name)
             put("strategy", group.strategy.name)
             put("fallbackStrategy", group.fallbackStrategy.name)
-            put("recovery", group.recovery.name)
             put("isDefault", group.id == cfg.defaultPrimaryGroupId)
             put("inAgentLoop", group.id in cfg.agentLoopGroupIds)
             val ids = JSONArray()

@@ -882,7 +882,6 @@ internal object ConfigBuiltins {
                                     "name" to ConfigValue.Str(g.name),
                                     "strategy" to ConfigValue.Str(g.strategy.name),
                                     "fallback_strategy" to ConfigValue.Str(g.fallbackStrategy.name),
-                                    "recovery" to ConfigValue.Str(g.recovery.name),
                                     "entries" to ConfigValue.Arr(entries),
                                 )
                             )

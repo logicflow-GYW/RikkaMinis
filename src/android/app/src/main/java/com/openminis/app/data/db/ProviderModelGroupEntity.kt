@@ -20,7 +20,7 @@ data class ProviderModelGroupEntity(
     @ColumnInfo(name = "default_thinking_level") val defaultThinkingLevel: String? = null,
     @ColumnInfo(name = "context_limit_tokens") val contextLimitTokens: Int? = null,
     @ColumnInfo(name = "last_context_limit_tokens") val lastContextLimitTokens: Int? = null,
-    @ColumnInfo(name = "recovery") val recovery: String,
+    @ColumnInfo(name = "recovery") val recovery: String = "continueLast",
     @ColumnInfo(name = "member_entry_ids_json") val memberEntryIdsJson: String,
     @ColumnInfo(name = "sort_order") val sortOrder: Int = 0,
 )

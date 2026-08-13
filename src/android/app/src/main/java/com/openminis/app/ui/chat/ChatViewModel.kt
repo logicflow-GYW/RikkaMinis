@@ -3834,7 +3834,6 @@ class ChatViewModel(
     private fun resolveProviderFromGroup(
         groupId: String,
         preferredEntryId: String? = null,
-        bypassRecovery: Boolean = false,
     ): Boolean {
         val group = providerRepository.group(groupId) ?: return false
         // [T-disabled-provider-via-group-android] Resolve through
@@ -3850,88 +3849,15 @@ class ChatViewModel(
         // member so the session can still proceed on a now-degraded group.
         val enabledMembers = providerRepository.enabledMemberEntries(group)
         if (enabledMembers.isEmpty()) return false
-        val recovery = group.recovery
-        val now = if (recovery != com.openminis.app.data.model.RecoveryStrategy.continueLast)
-            System.currentTimeMillis() else 0L
-        val targetEntry = when {
-            // [T-recovery] An explicit manual pick inside the group (bypassRecovery
-            // = true, set by selectGroupEntry) ALWAYS wins — user intent is
-            // explicit, e.g. "run this session on the paid key no matter what".
-            preferredEntryId != null && bypassRecovery -> {
-                enabledMembers.firstOrNull { it.id == preferredEntryId } ?: enabledMembers.first()
-            }
-            // [T-recovery] cooldown (own branch, BEFORE the combined honorFirst
-            // / cooldown branch below): honour the persisted binding when its
-            // member is NOT cooling down (so the session stays on the member it
-            // settled on), but if that member IS rate-limited, temporarily route
-            // to the first non-cooling member (round-robin-ish fallback). Unlike
-            // honorFirst there is NO preferred-order bias — the binding stays
-            // authoritative except while it is cooling.
-            preferredEntryId != null && recovery == com.openminis.app.data.model.RecoveryStrategy.cooldown -> {
-                val bound = enabledMembers.firstOrNull { it.id == preferredEntryId }
-                if (bound != null && (rateLimitCooldowns[bound.id] ?: 0L) < now) {
-                    bound
-                } else {
-                    enabledMembers.firstOrNull { entry ->
-                        (rateLimitCooldowns[entry.id] ?: 0L) < now
-                    } ?: enabledMembers.minByOrNull { rateLimitCooldowns[it.id] ?: 0L }
-                        ?: enabledMembers.first()
-                }
-            }
-            // [T-recovery] continueLast (existing behaviour): respect the session
-            // binding so a persisted fallback keeps routing to the member it
-            // settled on.
-            preferredEntryId != null && recovery == com.openminis.app.data.model.RecoveryStrategy.continueLast -> {
-                enabledMembers.firstOrNull { it.id == preferredEntryId } ?: enabledMembers.first()
-            }
-            // [T-recovery] honorFirst: ignore any persisted fallback binding
-            // (preferredEntryId) and re-resolve from the head of the group,
-            // skipping members still inside their rate-limit cooldown. This is
-            // the "return to the free preferred key once its window cools down"
-            // behaviour. When EVERY member is cooling down, pick the one whose
-            // cooldown expires soonest so the session never deadlocks.
-            recovery == com.openminis.app.data.model.RecoveryStrategy.honorFirst -> {
-                enabledMembers.firstOrNull { entry ->
-                    (rateLimitCooldowns[entry.id] ?: 0L) < now
-                } ?: enabledMembers.minByOrNull { rateLimitCooldowns[it.id] ?: 0L }
-                    ?: enabledMembers.first()
-            }
-            group.strategy == com.openminis.app.data.model.RoutingStrategy.loadBalance -> {
-                // [loadBalance] No bound member (fresh session): distribute sessions
-                // across members round-robin instead of always taking the head. The
-                // rotation base is the globally last-used entry, so distribution
-                // survives app restarts. Mirrors iOS ModelGroupRouter's per-session
-                // rotation and the voice path's per-session seed. A manual pick
-                // inside the group still wins via preferredEntryId above; the NEXT
-                // fresh session rotates onward.
-                val lastIdx = enabledMembers.indexOfFirst { it.id == providerRepository.lastUsedEntryId }
-                val rotated = enabledMembers[(lastIdx + 1) % enabledMembers.size]
-                // [T-loadbalance-rotation-advance] Advance the rotation cursor to
-                // the member we just resolved. Without this write-back,
-                // lastUsedEntryId is only ever set by manual picks (selectGroupEntry
-                // / selectEntry) and the auto-rotation never moves — every fresh
-                // session lands on the same member and loadBalance degenerates into
-                // fallback. Writing it here makes each new session advance one
-                // member (round-robin across enabled members, persisted across app
-                // restarts via SharedPreferences), which is the intended
-                // "per-session rotation" behaviour.
-                providerRepository.lastUsedEntryId = rotated.id
-                rotated
-            }
-            else -> {
-                // [T-recovery] cooldown mode without any persisted binding:
-                // still skip members inside their rate-limit cooldown, but no
-                // preference re-ordering (the binding is the authority, and
-                // there is none to honour).
-                if (recovery == com.openminis.app.data.model.RecoveryStrategy.cooldown) {
-                    enabledMembers.firstOrNull { entry ->
-                        (rateLimitCooldowns[entry.id] ?: 0L) < now
-                    } ?: enabledMembers.minByOrNull { rateLimitCooldowns[it.id] ?: 0L }
-                        ?: enabledMembers.first()
-                } else {
-                    enabledMembers.first()
-                }
-            }
+        val targetEntry = if (preferredEntryId != null) {
+            enabledMembers.firstOrNull { it.id == preferredEntryId } ?: enabledMembers.first()
+        } else if (group.strategy == com.openminis.app.data.model.RoutingStrategy.loadBalance) {
+            val lastIdx = enabledMembers.indexOfFirst { it.id == providerRepository.lastUsedEntryId }
+            val rotated = enabledMembers[(lastIdx + 1) % enabledMembers.size]
+            providerRepository.lastUsedEntryId = rotated.id
+            rotated
+        } else {
+            enabledMembers.first()
         }
         val instance = providerRepository.instance(targetEntry.providerInstanceId) ?: return false
         val apiKey = providerRepository.loadApiKey(instance.id) ?: return false
@@ -3967,7 +3893,7 @@ class ChatViewModel(
         // [T-recovery] Explicit user pick overrides any recovery/cooldown
         // policy — the user asked for THIS member, deliver it.
         rateLimitCooldowns.clear()
-        val resolved = resolveProviderFromGroup(groupId, entryId, bypassRecovery = true)
+        val resolved = resolveProviderFromGroup(groupId, entryId)
         if (resolved) {
             persistBinding("""{"type":"group","groupId":"$groupId","lastEntryId":"$entryId"}""")
             applyGroupSessionDefaults(groupId)
@@ -6615,9 +6541,7 @@ class ChatViewModel(
         // change mid-loop would be a user action that triggers switchModelAndRerun,
         // which restarts the whole loop with a fresh capture — so a stale read
         // here is impossible in practice.
-        val recovery = _selectedGroupId.value?.let { groupId ->
-            providerRepository.group(groupId)?.recovery
-        } ?: com.openminis.app.data.model.RecoveryStrategy.continueLast
+        val recovery = "continueLast"
 
         // Accumulate tool inputs across all turns (so persist includes all, not just current turn)
         val allToolInputs = mutableMapOf<String, String>()
@@ -7334,30 +7258,8 @@ class ChatViewModel(
                         // — a group can hold several entries for the same model
                         // behind different providers, and rate limits are
                         // per-endpoint.
-                        if (isRateLimit && recovery != com.openminis.app.data.model.RecoveryStrategy.continueLast) {
-                            if (failedEntryId != null) {
-                                rateLimitCooldowns[failedEntryId] =
-                                    System.currentTimeMillis() + RATE_LIMIT_COOLDOWN_DEFAULT_MS
-                                Log.i(TAG, "⏳ ${currentProvider.model.displayName} rate-limited; cooldown ${RATE_LIMIT_COOLDOWN_DEFAULT_MS / 1000}s (recovery=$recovery)")
-                            }
-                        }
+                        
                         // Persist the fallback model so re-entering the session starts from here.
-                        // [T-recovery] BUT only persist for continueLast (existing behaviour:
-                        // the session stays on where it fell back to). For honorFirst /
-                        // cooldown the fallback is TRANSIENT — the next agent loop re-resolves
-                        // from the group head and returns to the preferred member once its
-                        // cooldown window expires. Persisting here would burn the very
-                        // binding we deliberately avoid, welding the session to the paid
-                        // member forever.
-                        val groupId = _selectedGroupId.value
-                        val isTransientRecovery =
-                            recovery == com.openminis.app.data.model.RecoveryStrategy.honorFirst ||
-                                recovery == com.openminis.app.data.model.RecoveryStrategy.cooldown
-                        if (!isTransientRecovery && groupId != null && newEntry != null) {
-                            persistBinding("""{"type":"group","groupId":"$groupId","lastEntryId":"${newEntry.id}"}""")
-                        } else if (!isTransientRecovery && newEntry != null) {
-                            persistBinding("""{"type":"entry","entryId":"${newEntry.id}"}""")
-                        }
                         val infoText = fallbackReasons.joinToString("\n") + "\n🔄 Switched to ${currentProvider.model.displayName}"
                         allToolBlocks.removeAll { it.kind == "info" }
                         allToolBlocks.add(0, AssistantBlock(

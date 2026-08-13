@@ -11,7 +11,6 @@ import android.view.accessibility.AccessibilityNodeInfo
 import com.openminis.app.accessibility.MinisAccessibilityService
 import com.openminis.app.accessibility.NodeRegistry
 import com.openminis.app.logging.AppLogger
-import com.openminis.app.macro.MacroSystem
 import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
 import com.openminis.app.sandbox.NativeOffloadResult
@@ -27,8 +26,6 @@ import org.json.JSONObject
  * matches the rest of `android-*` so `--quiet` strips it cleanly.
  */
 class AccessibilityOffloadHandler(private val context: Context) : NativeOffloadHandler {
-    private val macroSystem: MacroSystem by lazy { MacroSystem(context) }
-
     companion object {
         private const val TAG = "A11yOffload"
         private const val TOOL = "android-a11y-cli"
@@ -49,7 +46,6 @@ Groups:
   notify    watch | once
   dialog    detect | dismiss
   extract   text | list | form
-  macro     record | stop | list | show | replay | delete | export | guard
   service   status | ping
 
 Output: JSON envelope { ok, data | error: { code, message } }.
@@ -79,23 +75,7 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         private const val NOTIFY_HELP = "notify watch [--package P] [--text-contains S] [--duration ms] | notify once [--timeout ms]\n"
         private const val DIALOG_HELP = "dialog detect | dialog dismiss [--confirm|--deny|--button TEXT]\n"
         private const val EXTRACT_HELP = "extract text | list [--auto-scroll] | form\n"
-        private const val MACRO_HELP = """macro record | stop | list | show | replay | delete | export | guard
-
-  macro record <name> [--description S]      Start recording a macro. Perform
-                                             actions on the device, then
-                                             `macro stop` to save.
-    --duration <sec>                         Auto-stop after N seconds (default 120).
-  macro stop                                 Stop the active recording and save it.
-  macro list                                 List saved macros with metadata.
-  macro show <name>                          Show the recorded action sequence.
-  macro replay <name> [--loops N]            Replay a macro.
-    --no-guard                               Disable the sensitive-operation guard.
-    --action-delay <ms>                      Delay between actions (default 500).
-  macro delete <name>                        Delete a macro.
-  macro export <name>                        Export macro as JSON to stdout.
-  macro guard                                Check current screen for sensitive content.
-"""
-    }
+        }
 
     override fun handle(request: NativeOffloadRequest): NativeOffloadResult {
         val args = OffloadArgs(
@@ -149,7 +129,6 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
                 "notify"    -> notifySub(args)
                 "dialog"    -> dialogSub(args)
                 "extract"   -> extractSub(args)
-                "macro"     -> macroSub(args)
                 "service"   -> serviceSub(args)
                 "--version" -> NativeOffloadResult(0, "android-a11y-cli 0.1\n")
                 else        -> NativeOffloadResult(2, "$TOOL: unknown subcommand '$sub'\n$TOP_HELP")
@@ -1064,139 +1043,6 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         for (i in 0 until node.childCount) collectFormFields(node.getChild(i), maxDepth, depth + 1, arr, registry)
     }
 
-    // ── macro ───────────────────────────────────────────────────────────
-
-    private fun macroSub(args: OffloadArgs): NativeOffloadResult {
-        return when (args.positional.getOrNull(1)) {
-            null     -> NativeOffloadResult(2, MACRO_HELP)
-            "record" -> macroRecord(args)
-            "stop"   -> macroStop(args)
-            "list"   -> macroList(args)
-            "show"   -> macroShow(args)
-            "replay" -> macroReplay(args)
-            "delete" -> macroDelete(args)
-            "export" -> macroExport(args)
-            "guard"  -> macroGuard(args)
-            else     -> NativeOffloadResult(2, "$TOOL macro: unknown action\n$MACRO_HELP")
-        }
-    }
-
-    private fun macroRecord(args: OffloadArgs): NativeOffloadResult {
-        val name = args.positional.getOrNull(2)
-            ?: return NativeOffloadResult(2, "$TOOL macro record: missing <name>\n")
-        val description = args.get("description")
-        val durationSec = args.getLong("duration") ?: 120L
-        val svc = svcOrThrow()
-        val ok = macroSystem.startRecording(name, description, svc)
-        if (!ok) return err(args, "RECORDING_ALREADY_ACTIVE",
-            "A recording is already in progress. Use `macro stop` first.")
-        // Auto-stop after duration (async)
-        if (durationSec > 0) {
-            Thread {
-                Thread.sleep(durationSec * 1000L)
-                macroSystem.stopRecording()?.let { recording ->
-                    macroSystem.storage.save(recording)
-                }
-            }.apply { isDaemon = true; start() }
-        }
-        return ok(args, JSONObject().apply {
-            put("recording", name)
-            put("autoStopSec", durationSec)
-            put("hint", "Perform actions on the device, then run `macro stop` to save.")
-        })
-    }
-
-    private fun macroStop(args: OffloadArgs): NativeOffloadResult {
-        val recording = macroSystem.stopRecording()
-            ?: return err(args, "NO_RECORDING", "No macro recording in progress.")
-        val saved = macroSystem.storage.save(recording)
-        if (!saved) return err(args, "SAVE_FAILED", "Failed to save macro '${recording.name}'.")
-        return ok(args, JSONObject().apply {
-            put("name", recording.name)
-            put("actionCount", recording.actions.size)
-            put("actions", JSONArray().apply {
-                for (a in recording.actions) {
-                    put(JSONObject().apply {
-                        put("type", a.type)
-                        put("description", a.description ?: "")
-                    })
-                }
-            })
-        })
-    }
-
-    private fun macroList(args: OffloadArgs): NativeOffloadResult {
-        val infos = macroSystem.storage.list()
-        val arr = JSONArray()
-        for (info in infos) {
-            arr.put(JSONObject().apply {
-                put("name", info.name)
-                put("createdAt", info.createdAt)
-                put("actionCount", info.actionCount)
-                put("replayCount", info.replayCount)
-                info.lastReplayedAt?.let { put("lastReplayedAt", it) }
-                info.description?.let { put("description", it) }
-                info.packageName?.let { put("packageName", it) }
-            })
-        }
-        return ok(args, JSONObject().put("count", arr.length()).put("macros", arr))
-    }
-
-    private fun macroShow(args: OffloadArgs): NativeOffloadResult {
-        val name = args.positional.getOrNull(2)
-            ?: return NativeOffloadResult(2, "$TOOL macro show: missing <name>\n")
-        val recording = macroSystem.storage.load(name)
-            ?: return err(args, "NOT_FOUND", "Macro '$name' not found.")
-        return ok(args, recording.toJson())
-    }
-
-    private fun macroReplay(args: OffloadArgs): NativeOffloadResult {
-        val name = args.positional.getOrNull(2)
-            ?: return NativeOffloadResult(2, "$TOOL macro replay: missing <name>\n")
-        val recording = macroSystem.storage.load(name)
-            ?: return err(args, "NOT_FOUND", "Macro '$name' not found.")
-        val loops = args.getInt("loops") ?: 1
-        val actionDelay = args.getLong("action-delay") ?: 500L
-        val useGuard = !args.hasFlag("no-guard")
-        val svc = svcOrThrow()
-        val outcome = macroSystem.replay(recording, svc, loops, actionDelay, useGuard)
-        val updated = recording.withIncrementedReplay()
-        macroSystem.storage.save(updated)
-        return ok(args, JSONObject().apply {
-            put("success", outcome.success)
-            put("totalActions", outcome.totalActions)
-            put("failures", outcome.failures)
-            put("blocks", outcome.blocks)
-            outcome.error?.let { put("error", it) }
-        })
-    }
-
-    private fun macroDelete(args: OffloadArgs): NativeOffloadResult {
-        val name = args.positional.getOrNull(2)
-            ?: return NativeOffloadResult(2, "$TOOL macro delete: missing <name>\n")
-        val existed = macroSystem.storage.delete(name)
-        return ok(args, JSONObject().put("deleted", existed).put("name", name))
-    }
-
-    private fun macroExport(args: OffloadArgs): NativeOffloadResult {
-        val name = args.positional.getOrNull(2)
-            ?: return NativeOffloadResult(2, "$TOOL macro export: missing <name>\n")
-        val json = macroSystem.storage.export(name)
-            ?: return err(args, "NOT_FOUND", "Macro '$name' not found.")
-        return NativeOffloadResult(0, json + "\n")
-    }
-
-    private fun macroGuard(args: OffloadArgs): NativeOffloadResult {
-        val result = macroSystem.guard.check()
-        return ok(args, JSONObject().apply {
-            put("blocked", result.blocked)
-            result.reason?.let { put("reason", it) }
-            result.matchedKeyword?.let { put("matchedKeyword", it) }
-            result.matchedPackage?.let { put("matchedPackage", it) }
-            result.matchedActivity?.let { put("matchedActivity", it) }
-        })
-    }
-
     // ── helpers ──────────────────────────────────────────────────────────
 
     private class NotRunning(msg: String) : RuntimeException(msg)
@@ -1264,12 +1110,6 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
             "notify"   -> if (v == "watch") "a11y_cli: watching notifications" else "a11y_cli: notify $v"
             "dialog"   -> "a11y_cli: dialog $v"
             "extract"  -> "a11y_cli: extracting ${v.ifBlank { "text" }}"
-            "macro"    -> when (v) {
-                "record" -> "a11y_cli: recording macro ${target ?: ""}"
-                "replay" -> "a11y_cli: replaying macro ${target ?: ""}"
-                "stop"   -> "a11y_cli: stopping macro recording"
-                else     -> "a11y_cli: macro $v"
-            }
             "service"  -> "a11y_cli: service $v"
             else       -> "Running: a11y_cli $sub"
         }
