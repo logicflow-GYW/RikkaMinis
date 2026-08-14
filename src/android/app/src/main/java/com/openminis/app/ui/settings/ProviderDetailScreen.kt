@@ -706,8 +706,6 @@ private fun refreshResultMessage(
 ): String = when (result) {
     com.openminis.app.data.repository.ModelRefreshResult.SUCCESS_API ->
         context.getString(R.string.provider_detail_refresh_success_api, modelCount)
-    com.openminis.app.data.repository.ModelRefreshResult.SUCCESS_MODELS_DEV ->
-        context.getString(R.string.provider_detail_refresh_success_models_dev, modelCount)
     com.openminis.app.data.repository.ModelRefreshResult.NO_KEY ->
         context.getString(R.string.provider_detail_refresh_no_key)
     com.openminis.app.data.repository.ModelRefreshResult.PRESERVED ->

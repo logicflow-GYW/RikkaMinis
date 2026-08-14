@@ -741,7 +741,6 @@
     <string name="provider_detail_https_api_example_placeholder">https://api.example.com</string>
     <string name="provider_detail_models_count_header">Modelle (%1$d)</string>
     <string name="provider_detail_refresh_success_api">Aktualisiert – %1$d Modelle vom Anbieter geladen.</string>
-    <string name="provider_detail_refresh_success_models_dev">Keine Live-Liste; models.dev-Registry verwendet (%1$d Modelle). Ergebnisse können ungenau sein.</string>
     <string name="provider_detail_refresh_no_key">Kein API-Schlüssel konfiguriert – nichts zu aktualisieren.</string>
     <string name="provider_detail_refresh_preserved">Kein passender models.dev-Eintrag – bestehende Modellliste behalten.</string>
     <string name="provider_detail_refresh_failed">Modelle konnten nicht aktualisiert werden.</string>

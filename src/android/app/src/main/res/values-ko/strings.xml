@@ -741,7 +741,6 @@
     <string name="provider_detail_https_api_example_placeholder">https://api.example.com</string>
     <string name="provider_detail_models_count_header">모델 (%1$d)</string>
     <string name="provider_detail_refresh_success_api">새로고침됨 – 공급자에서 %1$d개 모델을 불러왔습니다.</string>
-    <string name="provider_detail_refresh_success_models_dev">라이브 목록이 없어 models.dev 레지스트리 사용(%1$d개). 결과는 대략적일 수 있습니다.</string>
     <string name="provider_detail_refresh_no_key">API 키가 설정되지 않음 – 새로고침할 내용 없음.</string>
     <string name="provider_detail_refresh_preserved">일치하는 models.dev 항목 없음 – 기존 모델 목록 유지.</string>
     <string name="provider_detail_refresh_failed">모델을 새로고침할 수 없습니다.</string>

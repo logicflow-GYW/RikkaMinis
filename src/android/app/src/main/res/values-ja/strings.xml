@@ -741,7 +741,6 @@
     <string name="provider_detail_https_api_example_placeholder">https://api.example.com</string>
     <string name="provider_detail_models_count_header">モデル (%1$d)</string>
     <string name="provider_detail_refresh_success_api">更新完了 – プロバイダーから%1$d件のモデルを読み込みました。</string>
-    <string name="provider_detail_refresh_success_models_dev">ライブリストなし。models.dev レジストリを使用（%1$d件）。結果は不正確な場合があります。</string>
     <string name="provider_detail_refresh_no_key">APIキーが設定されていません – 更新対象なし。</string>
     <string name="provider_detail_refresh_preserved">一致する models.dev エントリなし – 既存のモデルリストを保持。</string>
     <string name="provider_detail_refresh_failed">モデルを更新できませんでした。</string>

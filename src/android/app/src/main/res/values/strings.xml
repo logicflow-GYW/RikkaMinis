@@ -1056,7 +1056,6 @@
     <string name="provider_detail_models_count_header">Models (%1$d)</string>
     <!-- [provider-mgmt-opt] Refresh-model feedback strings (was silent). -->
     <string name="provider_detail_refresh_success_api">Refreshed — loaded %1$d models from the provider.</string>
-    <string name="provider_detail_refresh_success_models_dev">No live list; used models.dev registry (%1$d models). Results may be approximate.</string>
     <string name="provider_detail_refresh_no_key">No API key configured — nothing to refresh.</string>
     <string name="provider_detail_refresh_preserved">No matching models.dev entry — kept existing model list.</string>
     <string name="provider_detail_refresh_failed">Could not refresh models.</string>

@@ -908,7 +908,6 @@
     <string name="provider_detail_https_api_example_placeholder">https://api.example.com</string>
     <string name="provider_detail_models_count_header">模型 (%1$d)</string>
     <string name="provider_detail_refresh_success_api">已刷新——从提供商加载了 %1$d 个模型。</string>
-    <string name="provider_detail_refresh_success_models_dev">无实时列表；已使用 models.dev 注册表（%1$d 个模型）。结果可能不精确。</string>
     <string name="provider_detail_refresh_no_key">未配置 API 密钥——没有可刷新的内容。</string>
     <string name="provider_detail_refresh_preserved">无匹配的 models.dev 条目——保留现有模型列表。</string>
     <string name="provider_detail_refresh_failed">无法刷新模型。</string>

@@ -852,7 +852,6 @@
     <string name="provider_detail_https_api_example_placeholder">https://api.example.com</string>
     <string name="provider_detail_models_count_header">Модели (%1$d)</string>
     <string name="provider_detail_refresh_success_api">Обновлено – загружено %1$d моделей от провайдера.</string>
-    <string name="provider_detail_refresh_success_models_dev">Живого списка нет; использован реестр models.dev (%1$d моделей). Результаты могут быть приблизительными.</string>
     <string name="provider_detail_refresh_no_key">Ключ API не настроен — обновлять нечего.</string>
     <string name="provider_detail_refresh_preserved">Совпадений в models.dev нет — сохранён текущий список моделей.</string>
     <string name="provider_detail_refresh_failed">Не удалось обновить модели.</string>

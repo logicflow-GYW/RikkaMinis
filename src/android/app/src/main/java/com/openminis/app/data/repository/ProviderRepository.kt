@@ -27,7 +27,6 @@ import com.openminis.app.data.model.hasAudioOutput
 import com.openminis.app.data.model.hasVoiceModality
 import com.openminis.app.data.model.isVoiceTemplateSeedShape
 import com.openminis.app.data.model.withInferredVoiceModality
-import com.openminis.app.provider.ModelsDevApi
 import com.openminis.app.provider.registerModelListProviders
 import org.json.JSONArray
 import org.json.JSONObject
@@ -1749,24 +1748,19 @@ class ProviderRepository(private val context: Context) {
             }
         }
 
-        // Step 3: Fallback to models.dev by base URL.
-        // We try this even for third-party hosts (DashScope/Bailian, etc.) — the
-        // models.dev registry covers many "Anthropic-compatible" or "OpenAI-compatible"
-        // gateways by hostname, and when there's no match `fetchModels` returns
-        // empty so the existing list (vLLM/Ollama on a private host) is preserved.
-        val fallbackBaseURL = modelsDevBaseURL(instance)
-        val fallbackModels = ModelsDevApi.fetchModels(fallbackBaseURL)
-        if (fallbackModels.isNotEmpty()) {
-            android.util.Log.i("ProviderRepo", "models.dev fallback returned ${fallbackModels.size} models for ${instance.label}")
-            replaceEntries(instance.id, fallbackModels)
-            return ModelRefreshResult.SUCCESS_MODELS_DEV
-        }
+        // [model-list-source] The provider's live API is the ONLY source of
+        // truth for the model list. No static-catalog fallback (models.dev
+        // registry / bundled snapshot): a missing or invalid key must leave
+        // the list empty (or untouched), never silently filled from a stale
+        // directory. enrichModels() in the *ModelsApi layer still uses
+        // models.dev purely to backfill metadata (context window, output,
+        // reasoning, modalities) onto models the API already returned.
         if (apiKey == null) {
-            android.util.Log.i("ProviderRepo", "refreshModels: no API key and no models.dev match — nothing to load for ${instance.label}")
+            android.util.Log.i("ProviderRepo", "refreshModels: no API key — nothing to load for ${instance.label}")
             return ModelRefreshResult.NO_KEY
         }
         if (isThirdParty) {
-            android.util.Log.i("ProviderRepo", "Third-party endpoint, no models.dev match — preserving existing models for ${instance.label}")
+            android.util.Log.i("ProviderRepo", "Third-party endpoint, fetch failed — preserving existing models for ${instance.label}")
             return ModelRefreshResult.PRESERVED
         }
         return ModelRefreshResult.FAILURE
@@ -1854,19 +1848,6 @@ class ProviderRepository(private val context: Context) {
         cal.timeInMillis = bMs
         return aYear == cal.get(java.util.Calendar.YEAR)
             && aDay == cal.get(java.util.Calendar.DAY_OF_YEAR)
-    }
-
-    /** Resolve the models.dev lookup base URL for an instance. */
-    private fun modelsDevBaseURL(instance: ProviderInstance): String {
-        instance.effectiveBaseURL?.let { return it }
-        return when (instance.providerType) {
-            ProviderType.anthropic -> "https://api.anthropic.com/v1"
-            ProviderType.gemini -> "https://generativelanguage.googleapis.com"
-            ProviderType.openAI -> "https://api.openai.com/v1"
-            ProviderType.openRouter -> "https://openrouter.ai/api/v1"
-            ProviderType.xAI -> "https://api.x.ai/v1"
-            ProviderType.kimiCode -> "https://api.kimi.com/coding/v1"
-        }
     }
 
     // API Key management
@@ -2305,11 +2286,9 @@ class ProviderRepository(private val context: Context) {
 enum class ModelRefreshResult {
     /** Live provider /v1/models succeeded. */
     SUCCESS_API,
-    /** No live API results; used the models.dev registry by hostname. May be approximate. */
-    SUCCESS_MODELS_DEV,
-    /** No API key configured and no models.dev match — nothing loaded. */
+    /** No API key configured — nothing loaded (model list stays empty/untouched). */
     NO_KEY,
-    /** Third-party custom base with no matching models.dev entry; kept existing list. */
+    /** Third-party custom base whose live fetch failed; kept existing list. */
     PRESERVED,
     /** All known sources failed. */
     FAILURE,

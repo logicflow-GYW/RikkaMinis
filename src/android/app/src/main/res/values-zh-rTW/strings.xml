@@ -402,7 +402,6 @@
     <string name="provider_detail_https_api_example_placeholder">https://api.example.com</string>
     <string name="provider_detail_models_count_header">模型 (%1$d)</string>
     <string name="provider_detail_refresh_success_api">已重新整理——已從提供者載入 %1$d 個模型。</string>
-    <string name="provider_detail_refresh_success_models_dev">無即時清單；已使用 models.dev 註冊表（%1$d 個模型）。結果可能不精確。</string>
     <string name="provider_detail_refresh_no_key">未設定 API 金鑰——沒有可重新整理的內容。</string>
     <string name="provider_detail_refresh_preserved">無相符的 models.dev 項目——保留現有模型清單。</string>
     <string name="provider_detail_refresh_failed">無法重新整理模型。</string>
