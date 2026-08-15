@@ -185,8 +185,8 @@ object PerfBaselineReport {
                         eventCounts[type] = (eventCounts[type] ?: 0) + 1
                     } catch (_: Exception) { /* skip */ }
                 }
-            } catch (_: Exception) {
-                AppLogger.warn(TAG, "Failed to read ${file.name}: ${_}")
+            } catch (e: Exception) {
+                AppLogger.warning(TAG, "Failed to read ${file.name}: ${e.message}")
             }
         }
 
