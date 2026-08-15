@@ -56,6 +56,11 @@ object PerfBaselineCollector {
         this.baselineDir = baselineDir
         if (!baselineDir.exists()) baselineDir.mkdirs()
         enabled = true
+        sessionTtfb.clear()
+        sessionToolCount.clear()
+        sessionToolDuration.clear()
+        lastColdStartMs = 0L
+        lastMemorySnapshotMs = 0L
         rotateWriter()
         AppLogger.info(TAG, "collector v$COLLECTOR_VERSION initialized, dir=${baselineDir.absolutePath}")
     }

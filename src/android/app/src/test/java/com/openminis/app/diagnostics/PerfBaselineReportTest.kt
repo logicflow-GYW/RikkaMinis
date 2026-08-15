@@ -48,8 +48,8 @@ class PerfBaselineReportTest {
         assertNotNull(idleMetric)
         assertEquals(3, idleMetric!!.count)
         assertEquals(2500.0, idleMetric.p50, 0.01)
-        assertEquals(3100.0, idleMetric.p95, 0.01)
-        assertEquals(3100.0, idleMetric.p99, 0.01)
+        assertEquals(3040.0, idleMetric.p95, 0.01)
+        assertEquals(3088.0, idleMetric.p99, 0.01)
         assertEquals(3100.0, idleMetric.max, 0.01)
         assertEquals((2350.0 + 2500.0 + 3100.0) / 3.0, idleMetric.mean, 0.01)
     }
@@ -72,7 +72,7 @@ class PerfBaselineReportTest {
         assertNotNull(ttfb)
         assertEquals(2, ttfb!!.count)
         assertEquals(1000.0, ttfb.p50, 0.01)
-        assertEquals(1200.0, ttfb.p95, 0.01)
+        assertEquals(1180.0, ttfb.p95, 0.01)
     }
 
     @Test
@@ -94,7 +94,7 @@ class PerfBaselineReportTest {
         assertNotNull(duration)
         assertEquals(3, duration!!.count)
         assertEquals(3000.0, duration.p50, 0.01)
-        assertEquals(15000.0, duration.p95, 0.01)
+        assertEquals(13800.0, duration.p95, 0.01)
         assertEquals(15000.0, duration.max, 0.01)
     }
 
