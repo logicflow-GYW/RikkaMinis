@@ -5026,11 +5026,15 @@ private fun ChatInputArea(
     // Commit D turns these into a single request protocol).
 
         // ─── Input area (iOS-style: rounded box with text + buttons below) ───
+        // [composer-width-align-rikkahub] The input card's horizontal inset
+        // is raised from 12dp to 16dp to line up its edges with the message
+        // list's 16dp gutter — the list and the composer previously sat on
+        // different rails, which read as a narrower input box than the chat.
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .padding(horizontal = 12.dp)
+                .padding(horizontal = 16.dp)
                 .padding(top = 2.dp, bottom = 8.dp),
         ) {
             // T13 banner moved INSIDE the LazyColumn so it renders at the
@@ -5105,7 +5109,7 @@ private fun ChatInputArea(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp)
+                            .padding(horizontal = 16.dp)
                             // T240: keep a thin visible border instead of the
                             // diffuse 8dp halo that bled out past the panel edge.
                             .shadow(elevation = 3.dp, shape = RoundedCornerShape(10.dp))
@@ -5279,7 +5283,7 @@ private fun ChatInputArea(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp)
+                            .padding(horizontal = 16.dp)
                             .shadow(elevation = 8.dp, shape = RoundedCornerShape(10.dp))
                             .background(ChatColors.inputBg, RoundedCornerShape(10.dp))
                             .border(0.5.dp, ChatColors.toolBorder, RoundedCornerShape(10.dp)),
