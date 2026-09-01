@@ -1439,24 +1439,36 @@ fun ChatScreen(
         }
     }
 
-    // [fix/scroll-follow-simplify] RikkaHub-style simple explicit follow.
-    // Item granularity is message-level under AGGREGATE_MESSAGE_ITEMS, so the
-    // fragment-churn the old guard stack fought is gone. Streaming auto-follow
-    // = the exact rikkahub ChatList contract: `isAtBottom() && streaming` →
-    // requestScrollToItem at the bottom sentinel, driven directly off the
-    // rendered viewport (no state machine, no defensive guard).
+    // [fix/stream-follow-detached-deadlock] Gate contract, rewritten:
     //   - isStreaming: the user is getting something — follow the growing tail.
     //   - listState.isScrollInProgress: never fight a live gesture / fling.
-    //   - isAtBottom (isBottomSentinelVisible): only nudge when the sentinel
-    //     is already on screen — a history reader is never yanked.
-    // When the sentinel is in view, forward-layout anchoring already holds the
-    // bottom and requestScrollToItem(sentinel) is a harmless no-op scrolling to
-    // the current position, so the effect simply keeps a bottom-anchored viewer
-    // pinned as the tail grows. Explicit user intents (Send / FabDown /
-    // Resume / Retry / InitialOpen) keep flowing through the follow reducer +
-    // consumer above, which still scroll when the sentinel has scrolled out.
-    // The old data-collector StreamRowsChanged dispatch (which neither ran
-    // under AGGREGATE_MESSAGE_ITEMS nor is needed with this effect) was removed.
+    //   - followState.isFollowing: the USER's OWN verdict from drag-end
+    //     (raw list position, ChatScreen drag-stop handler) — FOLLOWING means
+    //     "the user wants the tail", DETACHED means "a history reader must
+    //     never be yanked". This REPLACES the old isBottomSentinelVisible gate:
+    //   - shouldRequestFollowScroll (canScrollForward): the clamp
+    //     guard from [fix/place-storm-follow-clamp-loop] — when the viewport
+    //     is flush against the bottom (canScrollForward == false) a
+    //     requestScrollToItem is UNREACHABLE (LazyListMeasure clamps it back,
+    //     visibleItemsInfo re-emits, the loop re-requests: the 60Hz measure
+    //     storm of minis-2026-09-01__2_.log). Skip; request once when the
+    //     clamp was released (new content grew the list).
+    //
+    // WHY the sentinel gate had to go (log forensics minis-2026-09-01__5_.log,
+    // 65b8a749 build, follow broken the whole streaming turn): with a forward
+    // layout anchored at firstVisibleItem, a pinned bottom viewport's rows
+    // GROW IN HEIGHT as tokens stream in — the anchor index never changes,
+    // so the growth pushes the 5dp bottom sentinel OUT of the viewport. The
+    // old contract then permanently read atBottom == false and the effect
+    // went silent for the rest of the turn: the viewport froze, every new
+    // token rendered off-screen, and the user had to drag / tap the FAB to
+    // catch up (21s placed-report gap at 19:26:54→19:27:15 with zero touches
+    // = the streaming row entirely off-viewport). Before 91498d74 the effect
+    // "worked" only because the clamp storm re-clamped the viewport to the
+    // bottom on every frame — the follow behaviour WAS the storm. The
+    // storm fix removed the follower; this restores it on the state-machine
+    // rail: FOLLOWING (drag-end verdict) + clamp released → one request per
+    // growth, clamped → silence. Frequency = content growth, never 60Hz.
     if (SIMPLE_FOLLOW) {
         val bottomScrollTarget: (Int) -> Int? = { total -> safeBottomScrollIndex(total) }
         LaunchedEffect(listState, isStreaming) {
@@ -1464,10 +1476,10 @@ fun ChatScreen(
                 .collect { vis ->
                     if (listState.isScrollInProgress) return@collect
                     if (!isStreaming) return@collect
+                    if (isUserDragging) return@collect
+                    if (!followState.isFollowing) return@collect
                     val total = listState.layoutInfo.totalItemsCount
                     if (total == 0) return@collect
-                    val atBottom = isBottomSentinelVisible(listState.layoutInfo)
-                    if (!atBottom) return@collect
                     // [fix/place-storm-follow-clamp-loop] Clamp guard: the
                     // sentinel being visible + content flush against the
                     // bottom (canScrollForward == false) means any
