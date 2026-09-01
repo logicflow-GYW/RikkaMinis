@@ -1468,6 +1468,16 @@ fun ChatScreen(
                     if (total == 0) return@collect
                     val atBottom = isBottomSentinelVisible(listState.layoutInfo)
                     if (!atBottom) return@collect
+                    // [fix/place-storm-follow-clamp-loop] Clamp guard: the
+                    // sentinel being visible + content flush against the
+                    // bottom (canScrollForward == false) means any
+                    // requestScrollToItem is UNREACHABLE — the list clamps it
+                    // right back, visibleItemsInfo re-emits, and the loop
+                    // re-requests: a self-sustaining 60Hz measure storm that
+                    // lasted the whole streaming turn (PlaceStorm dumps,
+                    // minis-2026-09-01__2_.log). Only nudge when the clamp
+                    // was actually released (new content grew the list).
+                    if (!shouldRequestFollowScroll(listState.canScrollForward)) return@collect
                     val scrollIdx = bottomScrollTarget(total)
                     if (scrollIdx != null) {
                         listState.requestScrollToItem(scrollIdx)

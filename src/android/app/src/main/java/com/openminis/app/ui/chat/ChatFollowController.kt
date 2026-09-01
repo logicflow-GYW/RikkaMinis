@@ -194,3 +194,35 @@ internal fun shouldScrollToBottomOnFirstRows(
     isFollowing: Boolean,
 ): Boolean =
     pendingBottomRequest == BottomRequestReason.INITIAL_OPEN && isFollowing
+
+/**
+ * [fix/place-storm-follow-clamp-loop] Should the SIMPLE_FOLLOW streaming
+ * auto-follow effect issue `requestScrollToItem(sentinel)` this tick?
+ *
+ * Log forensics (minis-2026-09-01__2_.log, PlaceStorm dumps): the old
+ * contract — `isStreaming && sentinel visible && !scrollInProgress →
+ * requestScrollToItem(total-1, 0)` — is an UNREACHABLE request whenever the
+ * viewport is already clamped at the bottom. `requestScrollToItem(index, 0)`
+ * asks the list to put the sentinel at the TOP of the viewport, but
+ * LazyListMeasure forbids scrolling past the end: the request writes scroll
+ * state → remeasure → the position is clamped back to (firstIdx=1,
+ * firstOff=2366) → visibleItemsInfo changes → the snapshotFlow re-emits →
+ * the effect requests again. A self-sustaining 60Hz measure loop for the
+ * ENTIRE streaming turn (PlaceStorm: 60 places/sec, size unchanged, dumps
+ * with firstIdx/firstOff frozen at the clamped position). The 2026-08-31
+ * "10s freeze" was this loop plus the v1 per-frame logger (~16ms/frame of
+ * string-build + logcat IPC on the main thread); the loop itself survived
+ * the v2 logger fix.
+ *
+ * The guard: when the viewport cannot scroll forward any further
+ * (`canScrollForward == false`), the content is already flush against the
+ * bottom — a new request can only re-trigger the clamp write cycle, never
+ * move anything. Skip it. Real follow work is not lost: the tail only needs
+ * a nudge when the clamp was RELEASED (new content grew the list while we
+ * were pinned), which is exactly the `canScrollForward == true` branch.
+ *
+ * Pure, JVM-testable; mirrors the decideBottomScroll gate pattern.
+ */
+internal fun shouldRequestFollowScroll(
+    canScrollForward: Boolean,
+): Boolean = canScrollForward
