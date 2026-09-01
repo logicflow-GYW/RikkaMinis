@@ -2931,6 +2931,19 @@ fun ChatScreen(
                 // prewarm when (if) it has finished by then, else -1.
                 var lastColdPrewarmMs by remember(sessionId) { mutableStateOf(-1L) }
                 var coldOpenSummaryEmitted by remember(sessionId) { mutableStateOf(false) }
+                // [place-storm-residual-2nd-source] Same-size placed-event
+                // throttle: during IME/insets animations and user drags over
+                // a taller-than-viewport item, onPlaced re-fires every frame
+                // (60Hz) with an IDENTICAL size — each one emitting a full
+                // PerfLongCtx line (log I/O + native-heap read) that itself
+                // costs frames. 2026-09-01 log: 608 placed lines in 17s, 91%
+                // during a plain drag of the 7723px newest row. Only report
+                // a placed event when the size CHANGED (or >2s since the
+                // last report, so a genuinely re-placed identical-size row
+                // still surfaces eventually). Milestone cadence is preserved
+                // because every real content growth changes the size.
+                var lastPlacedReportKey by remember(sessionId) { mutableStateOf<String?>(null) }
+                var lastPlacedReportAtMs by remember(sessionId) { mutableStateOf(0L) }
                 val screenMountAtMs = remember(sessionId) { System.currentTimeMillis() }
                 // T-streaming-side-channel: messages-level changes (new
                 // message, retry, etc.) AND streamingById deltas both feed
@@ -3636,11 +3649,23 @@ fun ChatScreen(
                                 .then(
                                     if (isNewestItem) {
                                         Modifier.onPlaced {
-                                            com.openminis.app.diagnostics.PerfLongCtx.step(
-                                                sessionId,
-                                                "lazyColumn.firstItem.placed",
-                                                "size=${it.size.width}x${it.size.height}",
-                                            )
+                                            val nowMs = System.currentTimeMillis()
+                                            val sizeKey = "${it.size.width}x${it.size.height}"
+                                            if (shouldReportPlaced(
+                                                    lastPlacedReportKey,
+                                                    lastPlacedReportAtMs,
+                                                    sizeKey,
+                                                    nowMs,
+                                                )
+                                            ) {
+                                                lastPlacedReportKey = sizeKey
+                                                lastPlacedReportAtMs = nowMs
+                                                com.openminis.app.diagnostics.PerfLongCtx.step(
+                                                    sessionId,
+                                                    "lazyColumn.firstItem.placed",
+                                                    "size=$sizeKey",
+                                                )
+                                            }
                                             // [T-android-jank-diag-logging]
                                             // One quotable line per session
                                             // open, after the first frame's

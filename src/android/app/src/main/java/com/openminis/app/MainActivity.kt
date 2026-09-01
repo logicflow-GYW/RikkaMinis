@@ -88,6 +88,18 @@ class MainActivity : ComponentActivity() {
     private var hasResumedFromBackground = false
 
     /**
+     * T293 follow-up / launch-resume navigation fix: [onStart] fires while
+     * the Activity (and therefore the current NavBackStackEntry) is still
+     * STARTED — not RESUMED. `safeNavigate`'s RESUMED guard silently drops
+     * the launch-session navigation in exactly that window, so "New Chat on
+     * launch" did nothing when resuming from the recents tray (log evidence
+     * 2026-09-01: "resume → mode=NewChat, navigating to …" logged, but the
+     * destination never composed — no ChatScreen MOUNT for the new route).
+     * Defer the actual navigate to the first [onResume] after [onStart].
+     */
+    private var pendingLaunchSessionRoute: String? = null
+
+    /**
      * Used by the "go to settings" gate to open e.g. the app-details or
      * Notification Access settings page. We don't rely on the result —
      * [OffloadPermissionManager.requestSettingsGate] polls until the
@@ -518,8 +530,22 @@ class MainActivity : ComponentActivity() {
         if (mode != 2) return
         val nav = navController ?: return
         val newRoute = Routes.chat("__new__${java.util.UUID.randomUUID()}")
-        AppLogger.info("LaunchSession", "resume → mode=NewChat, navigating to $newRoute")
-        nav.safeNavigate(newRoute) {
+        AppLogger.info("LaunchSession", "resume → mode=NewChat, deferring navigate to onResume (lifecycle=$lifecycle.currentState)")
+        pendingLaunchSessionRoute = newRoute
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // [launch-resume navigation fix] See [pendingLaunchSessionRoute]: the
+        // navigate deferred from onStart lands here, where the Activity and
+        // the NavBackStackEntry are at RESUMED so the navigation actually
+        // composes the destination. Exactly-once — the pending route is
+        // consumed whether or not the navigate succeeds.
+        val pendingRoute = pendingLaunchSessionRoute ?: return
+        pendingLaunchSessionRoute = null
+        val nav = navController ?: return
+        AppLogger.info("LaunchSession", "onResume executing deferred navigate to $pendingRoute")
+        nav.safeNavigate(pendingRoute) {
             popUpTo(nav.graph.startDestinationId) { inclusive = true }
         }
     }

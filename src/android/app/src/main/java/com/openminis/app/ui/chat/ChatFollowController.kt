@@ -226,3 +226,36 @@ internal fun shouldScrollToBottomOnFirstRows(
 internal fun shouldRequestFollowScroll(
     canScrollForward: Boolean,
 ): Boolean = canScrollForward
+
+/**
+ * [fix/place-storm-residual-2nd-source] Should this `onPlaced` callback for
+ * the newest row emit a `lazyColumn.firstItem.placed` PerfLongCtx line?
+ *
+ * Log forensics (minis-2026-09-01__4_.log): after the SIMPLE_FOLLOW clamp
+ * guard landed, a residual pattern remained — during IME/insets animations
+ * and during user drags over a taller-than-viewport newest row (e.g.
+ * 992x7723), `onPlaced` re-fires every frame (60Hz) with an IDENTICAL size.
+ * Each fire previously emitted a full PerfLongCtx line: string build +
+ * `Debug.getNativeHeapAllocatedSize()` + logcat IPC, per frame, on the main
+ * thread — 608 lines in 17s of which ~91% were a plain user drag. The
+ * logging itself is a per-frame cost amplifier.
+ *
+ * Contract: report a placed event only when the size CHANGED (real content
+ * growth / relayout) or when more than [repeatReportGapMs] elapsed since
+ * the last report (so a genuinely re-placed identical-size row still
+ * surfaces eventually — e.g. a long drag that pauses on the same size for
+ * seconds). First fire always reports (`lastKey == null`).
+ *
+ * Pure, JVM-testable; same file as the other follow gates.
+ */
+internal fun shouldReportPlaced(
+    lastKey: String?,
+    lastAtMs: Long,
+    sizeKey: String,
+    nowMs: Long,
+    repeatReportGapMs: Long = 2_000,
+): Boolean {
+    if (lastKey == null) return true
+    if (lastKey != sizeKey) return true
+    return nowMs - lastAtMs >= repeatReportGapMs
+}
