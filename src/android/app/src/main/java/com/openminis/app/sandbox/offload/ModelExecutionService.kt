@@ -894,7 +894,20 @@ class ModelExecutionService : Service() {
                 )
             }
             val tools = parseToolsJson(req.optJSONArray("tools"))
-            val thinkingLevel = safeEnum(getString(req, "thinking_level"), com.openminis.app.data.model.ThinkingLevel.OFF)
+            // [T-thinking-off-omitted-key] thinking_level is deliberately OMITTED
+            // from the request JSON when OFF (ModelExecutionDispatcher: "don't
+            // serialize defaults"). optString returns "" for a missing key, and
+            // the strict safeEnum (T-model-exec-strict-enum) treats "" as an
+            // UNKNOWN value and throws — so a thinking-OFF turn never reached
+            // HTTP and died as "unknown t0 value: " with 3 retries + failover
+            // all failing the same way. The key ABSENT means OFF, exactly what
+            // the default parameter expresses. A present-but-unparseable value
+            // (newer enum case from a main-process-only build) still throws —
+            // that strict contract is unchanged.
+            val thinkingLevel = req.optString("thinking_level", "").let {
+                if (it.isEmpty()) com.openminis.app.data.model.ThinkingLevel.OFF
+                else safeEnum(it, com.openminis.app.data.model.ThinkingLevel.OFF)
+            }
 
             // ── API key: read from EncryptedSharedPreferences (same uid) ──
             // [T-stale-apikey-worker-cache] Same guard as executeRun: if the
