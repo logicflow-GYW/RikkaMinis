@@ -1,8 +1,5 @@
 package com.openminis.app.ui.chat
 
-import com.openminis.app.data.model.LLMModel
-import com.openminis.app.data.model.ProviderInstance
-import com.openminis.app.provider.LLMProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -16,6 +13,11 @@ import org.junit.Test
  * so a later step that moves construction can't silently drift defaults
  * (e.g. loopExitedNormally must start false, or every normal completion
  * would take the runaway-turn path).
+ *
+ * Provider typing: [AgentLoopState.currentProvider] is exercised via a
+ * minimal fake implementing just the surface AgentLoopState touches
+ * (name/model/instanceContext); the full LLMProvider surface is irrelevant
+ * to state-holder semantics.
  */
 class AgentLoopStateTest {
 
@@ -68,16 +70,34 @@ class AgentLoopStateTest {
 
     @Test fun `currentProvider is reassignable`() {
         val s = state()
-        s.currentProvider = FakeProvider2()
+        s.currentProvider = FakeProvider("fake2")
         assertEquals("fake2", s.currentProvider.name)
     }
 
-    private open class FakeProvider(
-        override val name: String,
-    ) : LLMProvider {
-        override var model: LLMModel = LLMModel()
-        override var instanceContext: ProviderInstance? = null
+    @Test fun `blocks can be appended and grown like the loop does`() {
+        val s = state()
+        s.allToolBlocks.add(AssistantBlock(id = "text_0_0_0", kind = "text", content = "hello"))
+        s.blockSeq = 1
+        s.accumulatedText += "hello"
+        s.allToolInputs["tool_1"] = """{"a":1}"""
+        s.toolInputChunkRings["tool_1"] = mutableListOf("""{"a":1}""")
+        assertEquals(1, s.allToolBlocks.size)
+        assertEquals("hello", s.allToolBlocks[0].content)
+        assertTrue(s.allToolBlocks[0].isText)
+        assertEquals(1, s.blockSeq)
+        assertEquals("hello", s.accumulatedText)
+        assertEquals("""{"a":1}""", s.allToolInputs["tool_1"])
+        assertEquals(1, s.toolInputChunkRings["tool_1"]!!.size)
     }
 
-    private class FakeProvider2 : FakeProvider("fake2")
+    /** Minimal LLMProvider surface for state-holder semantics (JVM only). */
+    private class FakeProvider(
+        override val name: String,
+    ) : com.openminis.app.provider.LLMProvider {
+        override var model: com.openminis.app.data.model.LLMModel =
+            com.openminis.app.data.model.LLMModel(
+                id = "m", displayName = "m", provider = "p",
+            )
+        override var instanceContext: com.openminis.app.data.model.ProviderInstance? = null
+    }
 }
