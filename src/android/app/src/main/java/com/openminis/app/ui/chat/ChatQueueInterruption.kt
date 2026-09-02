@@ -103,7 +103,7 @@ internal suspend fun ChatViewModel.truncateBeforeEdit(messageId: String) {
     AppLogger.info(
         ChatViewModel.TAG_STREAM,
         "✏️ truncateBeforeEdit cutoffSortOrder=$cutoffSortOrder remaining=${remaining.size}"
-    )
+)
 }
 
 
@@ -111,7 +111,7 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     finishedAssistantId: String,
     finishedAccumulatedText: String,
     finishedAllToolBlocks: List<AssistantBlock>,
-    ): InjectedTurn? {
+): InjectedTurn? {
     if (_promptQueue.value.isEmpty()) return null
     val queued = _promptQueue.value
     _promptQueue.value = emptyList()
@@ -177,7 +177,7 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
                 AgentContentPart.Text("(Interrupted mid-task by a new user message. Decide based on the new message and overall context whether the prior task should continue — do not forget or abandon it unless the user explicitly says to stop, or the new message makes clear it is no longer needed.)"),
             ),
         ),
-    )
+)
 
     // Persist the queued user message as its own DB row + append to
     // agentHistory so the next API call carries it.
@@ -192,7 +192,7 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
             contentParts = combinedParts,
             dbMessageId = userEntity.id,
         ),
-    )
+)
 
     // Finalize the just-finished assistant bubble in the UI on Main:
     // (a) un-queue the queued chat bubbles, (b) flush the side-channel
@@ -257,7 +257,7 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
         ChatViewModel.TAG_STREAM,
         "injectQueuedPromptsAsNewTurn: injected ${queued.size} queued prompt(s) as new turn, " +
             "finishedId=$finishedAssistantId newId=$newAssistantId",
-    )
+)
     return InjectedTurn(newAssistantId)
 }
 
@@ -277,7 +277,7 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
     provider: LLMProvider,
     systemPrompt: String?,
     fallbackStrategy: com.openminis.app.data.model.FallbackStrategy,
-    ): String? {
+): String? {
     while (_promptQueue.value.isNotEmpty()) {
         val queued = _promptQueue.value
         _promptQueue.value = emptyList()

@@ -7581,6 +7581,118 @@ Environment variables:
         }
     }
 
+    fun resume() {
+        if (_isStreaming.value || !_canResume.value) return
+        val provider = currentProvider ?: run {
+            _error.value = "No provider configured"
+            return
+        }
+        _canResume.value = false
+        _error.value = null
+        // [T-error-persist-android] resume() follows finalizeAtTurnLimit's
+        // setInlineError (which persisted an error sticker on the last assistant
+        // row). Clear it now so a successful resume doesn't merge-resurrect the
+        // turn-limit banner on the next reload.
+        clearPersistedLastAssistantError()
+        AppLogger.info(TAG, "▶️ resume: continuing partial assistant message (no new header emitted)")
+        // [T-android-tool-autoscroll] Start-of-turn snap. The thinking
+        // placeholder is the only visible delta until the model's first
+        // token, and the auto-follow tuple won't advance until content
+        // streams — ChatScreen would otherwise leave the placeholder
+        // behind the input bar.
+        _forceScrollToBottom.tryEmit(Unit)
+
+        // If history ends with assistant (Case 2: text-cancel committed a
+        // partial assistant turn), append a continue reminder as a user
+        // message. If it ends with user tool_result (Case 1), it's already
+        // a valid starting point for the next API call — no reminder needed.
+        val historyEndsWithAssistant =
+            agentHistory.lastOrNull()?.role == LLMMessage.Role.ASSISTANT
+        if (historyEndsWithAssistant) {
+            val reminder =
+                "<system-reminder>The user stopped the previous response but now wants to continue. Pick up exactly where you left off.</system-reminder>"
+            val parts = listOf<AgentContentPart>(AgentContentPart.Text(reminder))
+            agentHistory.add(
+                LLMMessage(
+                    role = LLMMessage.Role.USER,
+                    content = reminder,
+                    contentParts = parts,
+                )
+            )
+            viewModelScope.launch(Dispatchers.IO) {
+                val partsJson = """[{"type":"text","value":${escapeJson(reminder)}}]"""
+                chatRepository.appendMessage(activeSessionId, "user", partsJson)
+            }
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val baseSystemPrompt = buildSystemPrompt()
+            val systemPrompt = baseSystemPrompt
+
+            AppLogger.info(TAG_STREAM, "resume _isStreaming=true (sid=$activeSessionId)")
+            _isStreaming.value = true
+            streamEpoch++
+            streamJob = launch(Dispatchers.IO) {
+                AppLogger.info(TAG_STREAM, "resume streamJob ENTER sid=$activeSessionId")
+                try {
+                    SessionConcurrencyManager.acquireSlot(activeSessionId)
+                    AppLogger.debug(TAG_STREAM, "resume streamJob slot acquired")
+                    SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+                    val activeFallbackStrategy = run {
+                        val groupId = _selectedGroupId.value
+                        groupId?.let {
+                            providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy
+                        } ?: com.openminis.app.data.model.FallbackStrategy.default
+                    }
+                    val fallbackProviders = buildFallbackProviders(provider)
+                    try {
+                        AppLogger.info(TAG_STREAM, "resume runAgentLoop CALL")
+                        runAgentLoop(
+                            provider = provider,
+                            systemPrompt = systemPrompt,
+                            fallbackProviders = fallbackProviders,
+                            fallbackStrategy = activeFallbackStrategy,
+                        )
+                        AppLogger.info(TAG_STREAM, "resume runAgentLoop RETURN normal")
+                        drainQueuedPrompts(provider, systemPrompt, activeFallbackStrategy)
+                        AppLogger.info(TAG_STREAM, "resume drainQueuedPrompts RETURN")
+                    } catch (e: CancellationException) {
+                        AppLogger.info(TAG_STREAM, "resume runAgentLoop CANCELLED")
+                        Log.d(TAG, "Agent loop cancelled (resume)")
+                    } catch (e: Exception) {
+                        AppLogger.error(TAG_STREAM, "resume runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
+                        Log.e(TAG, "Agent loop error (resume)", e)
+                        reportAgentLoopError(e)
+                    } finally {
+                        AppLogger.info(TAG_STREAM, "resume streamJob FINALLY enter")
+                        // [T-android-overlay-reply-status-34599] Surface
+                        // the assistant's most recent reply text to the
+                        // overlay BEFORE setInactive so the post-completion
+                        // overlay state (no-running, has-outcome) carries a
+                        // non-null excerpt. Reading _messages here is safe:
+                        // we're in the finally block of the agent loop and
+                        // the stream has already flushed its last delta.
+                        publishOverlayReplyExcerpt(activeSessionId)
+                        SessionActivityTracker.setInactive(activeSessionId)
+                        SessionConcurrencyManager.releaseSlot(activeSessionId)
+                        AppLogger.info(TAG_STREAM, "resume streamJob FINALLY exit")
+                    }
+                } catch (e: CancellationException) {
+                    AppLogger.info(TAG_STREAM, "resume streamJob CANCELLED waiting for slot")
+                    Log.d(TAG, "Cancelled while waiting for concurrency slot (resume)")
+                }
+                // [T-android-stale-streamjob-clears-isstreaming] guard.
+                if (streamJob === coroutineContext[Job]) {
+                    AppLogger.info(TAG_STREAM, "resume _isStreaming=false (about to set)")
+                    _isStreaming.value = false
+                } else {
+                    AppLogger.info(TAG_STREAM, "resume _isStreaming SKIPPED (stale job)")
+                }
+                AppLogger.info(TAG_STREAM, "resume streamJob EXIT")
+            }
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         // [T-chat-sysinfo-coalesce] Flush any pending coalesce window so the

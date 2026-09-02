@@ -71,7 +71,7 @@ internal suspend fun ChatViewModel.persistAssistantTurn(
         reasoningContent = reasoningContent,
         usageModelId = modelId,
         usageEntryId = entryId,
-    )
+)
     return entity.id
 }
 
@@ -94,7 +94,7 @@ internal fun ChatViewModel.finalizeAtTurnLimit(
     updateAssistantMessage(
         assistantId, text, false, blocks,
         isAwaitingModelResponse = false,
-    )
+)
     // [T-android-thinking-indicator-linger] updateAssistantMessage drains
     // _streamingById[assistantId] above, but the agent loop ran on
     // Dispatchers.IO while this finalize hops to Main — a late streaming
@@ -114,7 +114,7 @@ internal fun ChatViewModel.finalizeAtTurnLimit(
         "Stopped after $MAX_AGENT_TURNS agent turns to prevent runaway " +
         "tool use. The model kept calling tools without finishing — tap " +
         "Resume to continue from here, or send a new message to start over.",
-    )
+)
     _canResume.value = true
 }
 
@@ -174,7 +174,7 @@ internal fun ChatViewModel.rollbackIncompleteTurn(): Boolean? {
         isStreaming = false,
         isAwaitingModelResponse = false,
         toolBlocks = keptToolBlocks,
-    )
+)
     _messages.value = msgs
     // [T-error-persist-android] Clear the persisted error sticker on the last
     // assistant row up-front. The DB-sync below only DELETES the trailing

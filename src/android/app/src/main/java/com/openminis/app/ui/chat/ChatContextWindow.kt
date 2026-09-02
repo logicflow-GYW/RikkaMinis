@@ -332,11 +332,11 @@ internal fun ChatViewModel.trimContextHistoryWindow(
         ChatViewModel.TAG,
         "[ContextTrim] dropped $droppedCount messages (~$droppedTokens tokens) to fit $contextWindow limit; " +
         "history ${kept.size + droppedCount}→${kept.size} msgs, kept $keepTurns newest turn(s)"
-    )
+)
     appendSystemInfo(
         text = context.getString(R.string.sysmsg_context_trimmed, contextWindow, droppedCount),
         iconKind = "compact",
-    )
+)
 }
 internal fun ChatViewModel.estimateContextHistoryTokens(): Int {
     var totalChars = 0
