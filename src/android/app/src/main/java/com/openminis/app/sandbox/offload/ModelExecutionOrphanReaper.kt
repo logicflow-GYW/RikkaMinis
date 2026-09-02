@@ -40,7 +40,10 @@ object ModelExecutionOrphanReaper {
         val root = File(context.cacheDir, STAGING_ROOT)
         if (!root.isDirectory) return 0
         val canonicalRoot = runCatching { root.canonicalFile }.getOrElse { root }
-        val deleted = 0
+        // [fix/audit-s2h3] was `val deleted = 0` — never incremented, so the
+        // caller's "reclaimed N run dir(s)" log always printed 0 and hid the
+        // real orphan-reap volume.
+        var deleted = 0
         val children = runCatching { root.listFiles() ?: emptyArray() }.getOrDefault(emptyArray())
         for (child in children) {
             if (!child.isDirectory) continue
@@ -63,6 +66,7 @@ object ModelExecutionOrphanReaper {
             if (System.currentTimeMillis() - mtime < ORPHAN_AGE_MS) continue
             val ok = runCatching { child.deleteRecursively(); true }.getOrDefault(false)
             if (ok) {
+                deleted++
                 Log.i(TAG, "reaped orphan run dir: ${child.name} (mtime ${mtime}ms)")
             } else {
                 Log.w(TAG, "reaper failed to delete orphan: ${child.name}")

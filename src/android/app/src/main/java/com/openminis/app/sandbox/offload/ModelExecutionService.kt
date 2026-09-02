@@ -991,6 +991,13 @@ class ModelExecutionService : Service() {
                             systemPrompt = systemPrompt,
                             maxTokens = maxTokens,
                             temperature = temperature,
+                            // [fix/audit-s2h1] Non-streaming executeRun (:753) passes
+                            // imageParts but this streaming call site omitted it —
+                            // the dispatcher serializes image_parts (buildRequestJson),
+                            // the worker parsed them (:886) and then dropped them,
+                            // so streaming turns with user images silently lost the
+                            // images and the model only saw the text.
+                            imageParts = imageParts,
                             tools = tools,
                             thinkingLevel = thinkingLevel,
                         ).collect { chunk ->

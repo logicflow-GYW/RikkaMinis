@@ -1173,6 +1173,13 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
         tab.inUseGraceJob?.cancel()
         tab.inUseGraceJob = null
         tabs.remove(tab)
+        // [fix/audit-s4m3/s4m4] Tab ids are monotonic and never reused, so
+        // anything keyed by tab id leaks forever once the tab is gone:
+        // savedURLs entries were only consumed on createTab (recreate-with-id)
+        // and persisted into the state JSON; tabLocks Mutexes were never
+        // removed at all. Both are "only-grow" tables on long soak.
+        savedURLs.remove(tab.id)
+        tabLocks.remove(tab.id)
         tab.manager.destroy()
     }
 
@@ -1231,8 +1238,13 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
         val isLongIdle = { tab: Tab -> !tab.inUse && (now - tab.lastActivityDate.time) >= idleTimeoutMs }
         val victims = when (policy) {
             TrimPolicy.BrowserTabKillPolicy.DROP_ALL_BUT_SELECTED -> {
-                // Keep only the selected tab.
-                _tabs.value.filter { it.id != _selectedTabId.value }
+                // Keep only the selected tab. [fix/audit-s4h2] Also keep tabs
+                // with an agent action mid-flight: the class docs promise
+                // "Tabs in use ... are protected so ongoing work isn't
+                // corrupted mid-evaluation", but this branch previously only
+                // filtered on id != selected — destroying a busy tab's WebView
+                // under TRIM_MEMORY_RUNNING_CRITICAL, mid-evaluateJavascript.
+                _tabs.value.filter { it.id != _selectedTabId.value && !it.inUse }
             }
             TrimPolicy.BrowserTabKillPolicy.DROP_ALL_IDLE -> {
                 // Drop all idle tabs (foreground low pressure / overall pressure).

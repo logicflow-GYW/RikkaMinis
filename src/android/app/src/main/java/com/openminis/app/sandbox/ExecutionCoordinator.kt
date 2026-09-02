@@ -879,6 +879,10 @@ object ExecutionCoordinator {
             // T124a: snapshot belongs to the now-dead shell.
             lastInjectedKeys.remove(sessionId)
             lastActiveMs.remove(sessionId)
+            // [fix/audit-s4l2] sessionDidTerminate() also removes the session
+            // mutex; this stop path did not, so the mutex map grew forever on
+            // sessions stopped (not terminated). Keep the two paths consistent.
+            mutexes.remove(sessionId)
             shell?.stop()
             Log.i(TAG, "[$sessionId] Shell stopped by user")
         } else {
@@ -887,6 +891,8 @@ object ExecutionCoordinator {
             shells.clear()
             lastInjectedKeys.clear()
             lastActiveMs.clear()
+            // [fix/audit-s4l2] see above: clear the per-session mutexes too.
+            mutexes.clear()
             @Suppress("DEPRECATION")
             ShellExecutor.destroyCurrent()
         }

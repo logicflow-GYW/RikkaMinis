@@ -104,7 +104,16 @@ object ChatStreamOffloadHandler {
         requestJson: String,
         thinkingEnabled: Boolean = false,
     ): Flow<LLMStreamChunk> = flow {
+        // [fix/audit-s2h4] activeStreams was incremented BEFORE the staging try.
+        // If root.mkdirs()/d.mkdir() threw ("stream staging failed"), the flow
+        // failed without ever reaching the terminal finally's activeStreams--,
+        // so the counter leaked +1 forever. maybeReclaimModelService skips the
+        // :modelservice shutdown while activeStreams > 0 — a few staging
+        // failures under cache-dir pressure permanently disabled model-service
+        // reclamation. Track incrementing with its own try/finally so EVERY
+        // exit path pairs ++ with --.
         activeStreams++
+        try {
         val dir = try {
             val root = File(context.cacheDir, STAGING_ROOT)
             root.mkdirs()
@@ -309,7 +318,9 @@ object ChatStreamOffloadHandler {
         } finally {
             // [B2] A stream is no longer in flight regardless of how we exited
             // (timeout / external cancel / normal close).
-            activeStreams--
+            // [fix/audit-s2h4] the decrement moved to the OUTER finally (paired
+            // with the increment's own try/finally) so staging failures also
+            // decrement. Keeping it here too would double-decrement.
             // [TF-F] Unified terminal-and-exit protocol: never delete a run dir
             // while the worker might still be writing to it. Only when
             //   - a terminal marker exists (worker's LAST write), AND
@@ -326,6 +337,12 @@ object ChatStreamOffloadHandler {
                 }
                 awaitTerminalAndWorkerExitThenDelete(dir, runId)
             } catch (_: Exception) {}
+        }
+        } finally {
+            // [fix/audit-s2h4] Pairs the outer activeStreams++ (moved inside a
+            // dedicated try/finally in 2026-09-02): staging failures previously
+            // skipped this decrement entirely.
+            activeStreams = (activeStreams - 1).coerceAtLeast(0)
         }
     }.flowOn(Dispatchers.IO)
 

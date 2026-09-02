@@ -12,6 +12,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import java.io.File
@@ -218,20 +221,29 @@ fun rememberSystemResourceMonitor(active: Boolean): SystemResourceMonitor {
     val context = LocalContext.current
     val monitor = remember { SystemResourceMonitor() }
     var tick by remember { mutableStateOf(0) }
+    val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(active) {
         if (!active) {
             monitor.reset()
             return@LaunchedEffect
         }
-        // Prime the baseline; first read returns 0% by design (no prior
-        // tick snapshot to subtract). Two seconds later we have a real
-        // delta, matching iOS's first-tick behavior.
-        monitor.sampleOnce(context)
-        tick++
-        while (isActive) {
-            delay(2000)
+        // [fix/audit-s1m2] While an agent shell command keeps running in the
+        // background the composable stays composed and the old loop kept
+        // sampling every 2 s (proc reads + Debug.getMemoryInfo +
+        // ActivityManager) even with the app backgrounded. Gate the polling
+        // on the host lifecycle being (at least) STARTED, matching
+        // rememberBrowserLiveSnapshot's repeatOnLifecycle pattern.
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            // Prime the baseline; first read returns 0% by design (no prior
+            // tick snapshot to subtract). Two seconds later we have a real
+            // delta, matching iOS's first-tick behavior.
             monitor.sampleOnce(context)
             tick++
+            while (isActive) {
+                delay(2000)
+                monitor.sampleOnce(context)
+                tick++
+            }
         }
     }
     // Read `tick` so Compose tracks this snapshot state and recomposes
