@@ -346,21 +346,53 @@ object ConfigBackup {
             }
         }
 
-        // Chat history: session metadata + text-only message parts, limited to
-        // the last chatWindowDays of activity and the most recent
-        // MAX_CHAT_MESSAGES_PER_SESSION messages per session. Media parts
+        // Chat history: session metadata + text-only message parts. The
+        // window (chatWindowDays) and per-session cap
+        // (MAX_CHAT_MESSAGES_PER_SESSION) bound *what is eligible*, but the
+        // payload itself is sized by a byte budget, not by those knobs:
+        // eligible messages are packed newest-first, session by session
+        // (sessions ordered by updatedAt DESC), until the budget runs out.
+        // Granularity is a single message — no "days" ladder that can drop
+        // 30 days at once when the data is lumpy. Media parts
         // (images/videos/files) are dropped — they dominate the size and point
-        // at payloads that will not exist on the target device. The result is
-        // small enough to embed directly in this JSON document.
+        // at payloads that will not exist on the target device.
         val chatSessions = JSONArray()
         val chatMessages = JSONArray()
+        var chatTruncated: JSONObject? = null
         if (chatRepo != null && chatWindowDays > 0) {
+            // Serialize the non-chat skeleton ONCE to measure its exact
+            // serialized cost; the chat sections get whatever budget is left
+            // under MAX_PAYLOAD_BYTES. SAFETY_MARGIN_BYTES absorbs the JSON
+            // escaping / separators between the skeleton and the chat arrays
+            // plus any drift between the estimate and the final document.
+            val skeletonJson = JSONObject().apply {
+                put("format", "openminis.config.backup")
+                put("version", FORMAT_VERSION)
+                put("createdAt", System.currentTimeMillis())
+                put("includesSecrets", includeSecrets)
+                put("fields", fields)
+                put("providers", providers)
+                put("groups", groups)
+                put("envVars", envVars)
+                put("skills", skills)
+                put("memoryFiles", memoryFiles)
+                put("mcpServers", mcpServers)
+                put("chatSessions", JSONArray())
+                put("chatMessages", JSONArray())
+                if (readFailures > 0) put("readFailures", readFailures)
+            }.toString()
+            val skeletonChars = skeletonJson.length
+
             val cutoff = System.currentTimeMillis() - chatWindowDays * 24L * 3600 * 1000
             val sessions = runCatching {
                 chatRepo.dao.sessionsUpdatedSince(cutoff)
             }.getOrDefault(emptyList())
-            for (session in sessions) {
-                chatSessions.put(JSONObject().apply {
+
+            // DAO contract: sessions ordered by updatedAt DESC; messagesLast
+            // returns newest-first. That is exactly the packing order — the
+            // most recent context always lands in the backup first.
+            val packInput = sessions.map { session ->
+                val sessionJson = JSONObject().apply {
                     put("id", session.id)
                     put("title", session.title)
                     put("modelId", session.modelId)
@@ -374,21 +406,45 @@ object ConfigBackup {
                     put("pinnedAt", session.pinnedAt)
                     put("editCount", session.editCount)
                     put("thinkingOverride", session.thinkingOverride)
-                })
-                for (message in runCatching {
-                    chatRepo.dao.messagesLast(session.id, MAX_CHAT_MESSAGES_PER_SESSION)
-                }.getOrDefault(emptyList()).reversed()) {
-                    val cleaned = sanitizeChatParts(message.partsJson) ?: continue
-                    chatMessages.put(JSONObject().apply {
-                        put("id", message.id)
-                        put("sessionId", message.sessionId)
-                        put("role", message.role)
-                        put("partsJson", cleaned)
-                        put("createdAt", message.createdAt)
-                        put("sortOrder", message.sortOrder)
-                        put("reasoningContent", capReasoningContent(message.reasoningContent))
-                    })
                 }
+                val messages = runCatching {
+                    chatRepo.dao.messagesLast(session.id, MAX_CHAT_MESSAGES_PER_SESSION)
+                }.getOrDefault(emptyList()).map { m ->
+                    BudgetChatMessage(
+                        id = m.id,
+                        sessionId = m.sessionId,
+                        role = m.role,
+                        partsJson = m.partsJson,
+                        createdAt = m.createdAt,
+                        sortOrder = m.sortOrder,
+                        reasoningContent = m.reasoningContent,
+                    )
+                }
+                sessionJson to messages
+            }
+
+            val packed = packChatHistoryWithBudget(
+                skeletonChars = skeletonChars,
+                budgetTotalChars = (MAX_PAYLOAD_BYTES - SAFETY_MARGIN_BYTES).toLong(),
+                sessionsInOrder = packInput,
+                sanitize = ::sanitizeChatParts,
+                capReasoning = ::capReasoningContent,
+            )
+            for (s in packed.sessions) chatSessions.put(s)
+            for (m in packed.messages) chatMessages.put(m)
+
+            if (packed.sessionsDropped > 0 || packed.messagesDropped > 0) {
+                chatTruncated = JSONObject().apply {
+                    put("sessionsDropped", packed.sessionsDropped)
+                    put("messagesDropped", packed.messagesDropped)
+                    put("budgetBytes", MAX_PAYLOAD_BYTES)
+                }
+                Log.w(
+                    TAG,
+                    "export: chat history budget-trimmed " +
+                        "(sessionsDropped=${packed.sessionsDropped} " +
+                        "messagesDropped=${packed.messagesDropped})",
+                )
             }
         }
 
@@ -406,16 +462,17 @@ object ConfigBackup {
             put("mcpServers", mcpServers)
             put("chatSessions", chatSessions)
             put("chatMessages", chatMessages)
+            chatTruncated?.let { put("chatTruncated", it) }
             if (readFailures > 0) put("readFailures", readFailures)
-        }.toString(2)
+        }.toString()
 
         // [T-backup-export-size-cap] Enforce the same ceiling on the export
-        // side that import already checks (MAX_PAYLOAD_BYTES). The doc
-        // comment on the constant claimed "export refuses to build beyond
-        // this", but nothing actually did — a giant payload (many chat
-        // sessions / huge memory files / large skills) could still be built
-        // and then OOM the import side on the receiving device. Refusing
-        // here keeps the failure local and actionable.
+        // side that import already checks (MAX_PAYLOAD_BYTES). With the byte
+        // budget packing above, chat history alone can no longer blow the
+        // cap — it is trimmed to fit. What remains possible is the non-chat
+        // skeleton itself growing past the cap (pathological skills /
+        // memory files), and for that the hard refusal below stays: it keeps
+        // the failure local and actionable instead of OOMing the import side.
         if (payload.length > MAX_PAYLOAD_BYTES) {
             throw IllegalStateException(
                 "Backup too large (${payload.length} chars, max $MAX_PAYLOAD_BYTES)",
@@ -978,6 +1035,21 @@ object ConfigBackup {
             skipped.add("${chatSessionsArr.length()} chat session(s): not restorable here")
         }
 
+        // [T-backup-byte-budget] Surface budget trimming so a restore is
+        // never silently partial: the exporting device cut chat history to
+        // fit MAX_PAYLOAD_BYTES, and the user should know how much was left
+        // out (and that the exporting device's local DB still holds it all).
+        root.optJSONObject("chatTruncated")?.let { tr ->
+            val s = tr.optInt("sessionsDropped", 0)
+            val m = tr.optInt("messagesDropped", 0)
+            if (s > 0 || m > 0) {
+                skipped.add(
+                    "chat history was budget-trimmed at export: " +
+                        "$m message(s) and $s session(s) not carried (full history stays on the source device)"
+                )
+            }
+        }
+
 
         } catch (t: Throwable) {
             fatal = t.message ?: "import failed"
@@ -1054,6 +1126,31 @@ object ConfigBackup {
     /** Hard cap on messages carried per session in a chat-history backup. */
     internal const val MAX_CHAT_MESSAGES_PER_SESSION = 200
 
+    /** [T-backup-chat-slim] Chat text parts (assistant replies, pasted code /
+     *  logs) are capped at this many characters per message part. Backup
+     *  history is for context continuity on a new device, not a verbatim
+     *  archive — the local DB keeps the full text either way. Aligns text
+     *  with the existing tool-output / reasoning caps so no part type can
+     *  silently dominate the payload. */
+    internal const val MAX_BACKUP_TEXT_CHARS = 4000
+
+    /** [T-backup-chat-slim] tool_use input (the arguments JSON a model chose)
+     *  is capped at this many characters. It is an escaped JSON string in
+     *  parts_json (see ChatViewModel.buildAssistantPartsJson) and previously
+     *  rode the backup uncapped — a single huge command/file write argument
+     *  could dominate the payload. tool_title and short args survive intact;
+     *  oversized ones keep their head with a truncation marker. */
+    internal const val MAX_BACKUP_TOOL_INPUT_CHARS = 2000
+
+    /** [T-backup-byte-budget] Headroom subtracted from MAX_PAYLOAD_BYTES
+     *  before packing chat history: absorbs JSON separators, the trailing
+     *  chatTruncated block, and any drift between the per-message
+     *  JSONObject.toString() estimates and the final document. 1MB is ~1.5%
+     *  of the cap — large enough that the final length check never trips
+     *  from estimation noise, small enough to be irrelevant to how much
+     *  chat fits. */
+    internal const val SAFETY_MARGIN_BYTES = 1024 * 1024
+
     /** [T-backup-chat-slim] Tool outputs in backups are truncated to this
      *  many characters. Full tool results are transient execution traces —
      *  on another device they are rarely useful at full size, and they are
@@ -1118,8 +1215,9 @@ object ConfigBackup {
      * history stays light in backups. Keeps text / thinking / tool_use
      * parts; drops image and video entries (their base64 payloads dominate
      * size and are useless on another device); removes the
-     * <user-attached-files> inventory, which references local paths.
-     * Returns null when nothing textual survives.
+     * <user-attached-files> inventory, which references local paths; caps
+     * text / toolUse.input / toolResult.output so no part type can
+     * dominate. Returns null when nothing textual survives.
      */
     internal fun sanitizeChatParts(partsJson: String?): String? {
         if (partsJson.isNullOrBlank()) return null
@@ -1140,7 +1238,32 @@ object ConfigBackup {
                 if (v.isBlank()) continue
                 val cleaned = v.replace(ATTACHED_FILES_REGEX, "").trim()
                 if (cleaned.isBlank()) continue
-                el.put("value", cleaned)
+                // [T-backup-chat-slim] Cap text parts like tool outputs —
+                // pasted logs / code dumps previously rode uncapped.
+                el.put(
+                    "value",
+                    if (cleaned.length > MAX_BACKUP_TEXT_CHARS) {
+                        cleaned.take(MAX_BACKUP_TEXT_CHARS) +
+                            "\n… [truncated ${cleaned.length - MAX_BACKUP_TEXT_CHARS} chars]"
+                    } else cleaned
+                )
+            }
+            if (type == "toolUse" || type == "tool_use") {
+                // [T-backup-chat-slim] Cap the arguments JSON. "input" is
+                // stored as an escaped JSON STRING (see
+                // ChatViewModel.buildAssistantPartsJson), and import reads it
+                // defensively (JSON parse failure → empty args), so a head
+                // slice + marker stays restorable as text even when the cut
+                // lands mid-JSON.
+                val value = el.optJSONObject("value") ?: el
+                val input = value.optString("input")
+                if (input.length > MAX_BACKUP_TOOL_INPUT_CHARS) {
+                    value.put(
+                        "input",
+                        input.take(MAX_BACKUP_TOOL_INPUT_CHARS) +
+                            "\n… [truncated ${input.length - MAX_BACKUP_TOOL_INPUT_CHARS} chars]"
+                    )
+                }
             }
             if (type == "toolResult" || type == "tool_result") {
                 val value = el.optJSONObject("value") ?: el
