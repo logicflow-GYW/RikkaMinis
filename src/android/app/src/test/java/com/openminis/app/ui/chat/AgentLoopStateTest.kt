@@ -99,5 +99,27 @@ class AgentLoopStateTest {
                 id = "m", displayName = "m", provider = "p",
             )
         override var instanceContext: com.openminis.app.data.model.ProviderInstance? = null
+
+        override suspend fun sendMessageClamped(
+            messages: List<com.openminis.app.data.model.LLMMessage>,
+            systemPrompt: String?,
+            maxTokens: Int,
+            temperature: Double?,
+            imageParts: List<com.openminis.app.data.model.LLMMessage.ImagePart>,
+            tools: List<com.openminis.app.data.model.AgentToolDefinition>,
+            thinkingLevel: com.openminis.app.data.model.ThinkingLevel,
+        ): com.openminis.app.data.model.LLMResponse =
+            throw UnsupportedOperationException("state-holder test fake")
+
+        override fun streamMessageClamped(
+            messages: List<com.openminis.app.data.model.LLMMessage>,
+            systemPrompt: String?,
+            maxTokens: Int,
+            temperature: Double?,
+            imageParts: List<com.openminis.app.data.model.LLMMessage.ImagePart>,
+            tools: List<com.openminis.app.data.model.AgentToolDefinition>,
+            thinkingLevel: com.openminis.app.data.model.ThinkingLevel,
+        ): kotlinx.coroutines.flow.Flow<com.openminis.app.data.model.LLMStreamChunk> =
+            throw UnsupportedOperationException("state-holder test fake")
     }
 }
