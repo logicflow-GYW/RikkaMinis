@@ -279,3 +279,22 @@ data class AssistantBlock(
 ) {
     val isText: Boolean get() = kind == "text"
 }
+
+
+// [T-chat-cancelled-marker] Sentinel prefix on synthetic tool_result output
+// marking user-cancelled calls (moved here from ChatViewModel.Companion in
+// FE-5 so the pure transcript rebuild can reference it without depending on
+// the ViewModel). Aligned with iOS AIChatViewModel.swift:5163 so a session
+// sync'd between platforms shows the same `<system-reminder>…` text the model
+// sees on the next API call (rather than "[cancelled by user]" which iOS
+// would treat as opaque tool output).
+const val CANCELLED_MARKER =
+    "<system-reminder>The user cancelled this operation. The returned result may be incomplete.</system-reminder>"
+
+/**
+ * Pre-T13 cancelled marker. Kept only so [buildChatMessagesTranscript]'s
+ * tool-block restore can still recognise rows persisted by earlier app
+ * versions and surface them as CANCELLED instead of FAILED. Never emitted
+ * by this version.
+ */
+internal const val LEGACY_CANCELLED_MARKER = "[cancelled by user]"

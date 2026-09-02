@@ -354,24 +354,6 @@ class ChatViewModel(
          */
         private const val GLOBAL_MAX_TOKENS_CEILING = 128_000
         /**
-         * Sentinel prefix on synthetic tool_result output marking
-         * user-cancelled calls. Aligned with iOS
-         * AIChatViewModel.swift:5163 so a session sync'd between
-         * platforms shows the same `<system-reminder>…` text the model
-         * sees on the next API call (rather than "[cancelled by user]"
-         * which iOS would treat as opaque tool output).
-         */
-        const val CANCELLED_MARKER =
-            "<system-reminder>The user cancelled this operation. The returned result may be incomplete.</system-reminder>"
-
-        /**
-         * Pre-T13 cancelled marker. Kept only so [toLLMMessage]'s
-         * tool-block restore can still recognise rows persisted by
-         * earlier app versions and surface them as CANCELLED instead
-         * of FAILED. Never emitted by this version.
-         */
-        private const val LEGACY_CANCELLED_MARKER = "[cancelled by user]"
-        /**
          * Number of recent user-text turns kept verbatim as inference anchors when
          * compactAll runs. The summary stands in for everything older; the LLM
          * still sees the last N user-text turns + their assistant replies + tool
@@ -10204,30 +10186,7 @@ class ChatViewModel(
     private fun buildAssistantPartsJson(
         parts: List<AgentContentPart>,
         toolBlockMeta: Map<String, AssistantBlock>,
-    ): String = buildString {
-        append("[")
-        parts.forEachIndexed { index, part ->
-            if (index > 0) append(",")
-            when (part) {
-                is AgentContentPart.Text -> {
-                    append("""{"type":"text","value":${escapeJson(part.text)}}""")
-                }
-                is AgentContentPart.ToolUse -> {
-                    // Skip tool_use with blank name — upstream bug guard.
-                    val name = part.name
-                    if (name.isBlank()) return@forEachIndexed
-                    val inputStr = part.input.toString()
-                    val meta = toolBlockMeta[part.id]
-                    val desc = meta?.toolTitle ?: ""
-                    val pageURL = meta?.browserURL ?: ""
-                    val imgPath = meta?.imageFilePath ?: ""
-                    append("""{"type":"toolUse","value":{"toolUseId":${escapeJson(part.id)},"name":${escapeJson(name)},"input":${escapeJson(inputStr)},"description":${escapeJson(desc)},"pageURL":${escapeJson(pageURL)},"imageFilePath":${escapeJson(imgPath)},"thoughtSignature":null}}""")
-                }
-                else -> { /* tool_result is persisted via persistToolResultMessage */ }
-            }
-        }
-        append("]")
-    }
+    ): String = buildAssistantTurnPartsJson(parts, toolBlockMeta)
 
     private suspend fun persistAssistantTurn(
         parts: List<AgentContentPart>,
@@ -10242,9 +10201,7 @@ class ChatViewModel(
     ): String? {
         if (parts.isEmpty()) return null
         val partsJson = buildAssistantPartsJson(parts, toolBlockMeta)
-        val tokenJson = usage?.let {
-            """{"inputTokens":${it.inputTokens},"outputTokens":${it.outputTokens},"cacheCreationTokens":${it.cacheCreationInputTokens ?: 0},"cacheReadTokens":${it.cacheReadInputTokens ?: 0},"latestContextTokens":${it.latestContextTokens}}"""
-        }
+        val tokenJson = usage?.let { buildUsageJson(it) }
         val entity = chatRepository.appendMessage(
             realSessionId.ifEmpty { sessionId }, "assistant", partsJson, tokenJson,
             reasoningContent = reasoningContent,
@@ -10258,15 +10215,7 @@ class ChatViewModel(
     private suspend fun persistToolResultMessage(parts: List<AgentContentPart>): String? {
         val results = parts.filterIsInstance<AgentContentPart.ToolResult>()
         if (results.isEmpty()) return null
-        val partsJson = buildString {
-            append("[")
-            results.forEachIndexed { index, result ->
-                if (index > 0) append(",")
-                val snapshotText = escapeJson(result.content.lines().takeLast(30).joinToString("\n"))
-                append("""{"type":"toolResult","value":{"toolUseId":${escapeJson(result.id)},"name":${escapeJson(result.name)},"output":${escapeJson(result.content)},"success":${!result.isError},"snapshot":{"type":"text","text":$snapshotText}}}""")
-            }
-            append("]")
-        }
+        val partsJson = buildToolResultPartsJson(results)
         val entity = chatRepository.appendMessage(realSessionId.ifEmpty { sessionId }, "user", partsJson)
         return entity.id
     }
@@ -11626,19 +11575,8 @@ Environment variables:
      * Only emits text parts — tool_use / tool_result paths are handled by
      * the existing persistence code in the agent loop.
      */
-    private fun buildAssistantPartsJson(parts: List<AgentContentPart>): String {
-        val sb = StringBuilder("[")
-        var first = true
-        for (p in parts) {
-            if (p !is AgentContentPart.Text) continue
-            if (!first) sb.append(',') else first = false
-            sb.append("""{"type":"text","value":""")
-            sb.append(escapeJson(p.text))
-            sb.append('}')
-        }
-        sb.append(']')
-        return sb.toString()
-    }
+    private fun buildAssistantPartsJson(parts: List<AgentContentPart>): String =
+        buildTextOnlyAssistantPartsJson(parts)
 
     /**
      * Resume an interrupted agent loop. Injects a `<system-reminder>` into
@@ -11832,396 +11770,19 @@ Environment variables:
      * data from user-role messages back into their corresponding AssistantBlocks.
      * This mirrors iOS's toChatMessage() which reads both toolUse and toolResult parts.
      */
-    /**
-     * Matches a `<system-reminder>...</system-reminder>` block, including any
-     * surrounding whitespace / newlines, so a part that is *only* a reminder
-     * collapses to empty text instead of leaving a blank gap. DOTALL so `.`
-     * spans newlines (reminders run multi-line in the cancel/resume paths).
-     *
-     * Only applied at the UI-render transform — agentHistory + DB rows keep
-     * the raw text so the LLM continues to see the reminder on subsequent
-     * turns (matches iOS, where system-reminder text is appended to
-     * agentHistory/AgentMessage parts but never to the chat-list ChatMessage).
-     */
-    private val systemReminderRegex =
-        Regex("\\s*<system-reminder>.*?</system-reminder>\\s*", RegexOption.DOT_MATCHES_ALL)
-
-    private fun stripSystemReminders(text: String): String =
-        if (!text.contains("<system-reminder>")) text
-        else systemReminderRegex.replace(text, "")
-
-    /**
-     * [T-android-retry-attachment-loss] Remove the `<user-attached-files>` XML
-     * inventory from a persisted text part for DISPLAY only. The XML is now
-     * persisted (iOS parity) so the model keeps the file paths across retry /
-     * reload, but it must never render in the user bubble — the file chips are
-     * rebuilt from the mediaRef parts instead. Mirrors the index-based strip
-     * already used by editMessage / the title-fallback path.
-     */
-    private fun stripAttachedFilesXml(text: String): String {
-        val startIdx = text.indexOf("<user-attached-files>")
-        if (startIdx < 0) return text
-        val endTag = "</user-attached-files>"
-        val endIdx = text.indexOf(endTag, startIdx)
-        return if (endIdx >= 0) {
-            text.substring(0, startIdx) + text.substring(endIdx + endTag.length)
-        } else {
-            text.substring(0, startIdx)
+    private fun buildChatMessages(parsed: List<ParsedRow>): List<ChatMessage> =
+        buildChatMessagesTranscript(parsed, mediaStore.mediaBaseDir) { msg ->
+            Log.w(TAG, msg)
         }
-    }
-
-    private fun buildChatMessages(parsed: List<ParsedRow>): List<ChatMessage> {
-        // First pass: extract all toolResult data keyed by toolUseId.
-        // No JSON parsing — parts are already parsed.
-        val toolResultMap = mutableMapOf<String, ToolResultData>()
-        for (row in parsed) {
-            if (row.entity.role != "user") continue
-            for (part in row.parts) {
-                if (part is ParsedPart.ToolResult) {
-                    if (part.toolUseId.isNotEmpty()) {
-                        toolResultMap[part.toolUseId] = ToolResultData(
-                            output = part.output,
-                            success = part.success,
-                        )
-                    }
-                }
-            }
-        }
-
-        // Second pass: convert messages, merging tool results into blocks.
-        // Filter out user messages that only contain toolResult parts (no visible text).
-        return parsed.mapNotNull { row ->
-            val entity = row.entity
-            var text = ""
-            val blocks = mutableListOf<AssistantBlock>()
-            val restoredImageUris = mutableListOf<Uri>()
-            val restoredAttachmentNames = mutableListOf<String>()
-            val restoredAttachmentUris = mutableListOf<Uri>()
-
-            if (entity.role == "assistant" && !entity.reasoningContent.isNullOrEmpty()) {
-                blocks.add(AssistantBlock(
-                    id = "thinking_restored_${entity.id}",
-                    kind = "thinking",
-                    content = entity.reasoningContent,
-                    toolTitle = "Thinking",
-                    toolStatus = ToolBlockStatus.SUCCESS,
-                ))
-            }
-
-            if (row.malformed) {
-                // T-PARTS-FALLBACK: short placeholder so the row still appears
-                // (so the user can delete or scroll past it) but no longer
-                // pulls megabytes through the layout pass.
-                Log.w(
-                    TAG,
-                    "buildChatMessages: failed to parse partsJson for id=${entity.id} " +
-                        "len=${row.sourceChars} role=${entity.role}",
-                )
-                text = "(message could not be parsed: ${row.sourceChars} bytes)"
-            } else {
-                var textBlockCounter = 0
-                for (part in row.parts) {
-                    when (part) {
-                        is ParsedPart.Text -> {
-                            val raw = part.value
-                            // Strip <system-reminder> and <user-attached-files>
-                            // from UI display only. The DB row + agentHistory
-                            // keep the raw text so the LLM still sees it.
-                            val t = stripAttachedFilesXml(stripSystemReminders(raw)).let {
-                                if (it != raw) it.trim() else it
-                            }
-                            if (t.isEmpty()) continue
-                            text += t
-                            if (entity.role == "assistant") {
-                                blocks.add(AssistantBlock(
-                                    id = "text_restored_${entity.id}_${textBlockCounter++}",
-                                    kind = "text",
-                                    content = t,
-                                ))
-                            }
-                        }
-                        is ParsedPart.ToolUse -> {
-                            val toolId = part.id
-                            if (toolId.startsWith("thinking_")) continue
-                            val result = toolResultMap[toolId]
-                            blocks.add(AssistantBlock(
-                                id = toolId,
-                                kind = "tool_use",
-                                toolName = part.name,
-                                toolTitle = part.description,
-                                toolArgs = part.input,
-                                content = result?.output?.lines()?.takeLast(80)?.joinToString("\n") ?: "",
-                                toolStatus = when {
-                                    result == null -> ToolBlockStatus.SUCCESS
-                                    !result.success && (
-                                        result.output.startsWith(CANCELLED_MARKER) ||
-                                            result.output.startsWith(LEGACY_CANCELLED_MARKER)
-                                    ) -> ToolBlockStatus.CANCELLED
-                                    // [T-dedup-neutral-status] Same-turn dedup
-                                    // drops carry a success-flagged synthetic
-                                    // "Deduplicated: …" result — restore the
-                                    // neutral DEDUPLICATED pill (was: SUCCESS,
-                                    // which made the block's status visually
-                                    // drift FAILED→SUCCESS across a reload).
-                                    result.success && result.output.startsWith("Deduplicated:") ->
-                                        ToolBlockStatus.DEDUPLICATED
-                                    result.success -> ToolBlockStatus.SUCCESS
-                                    else -> ToolBlockStatus.FAILED
-                                },
-                                browserURL = part.pageURL,
-                                imageFilePath = part.imageFilePath,
-                            ))
-                        }
-                        is ParsedPart.MediaRef -> {
-                            // T128: restore persisted media file:// URIs so images and
-                            // attachments survive a session reload.
-                            // T150: non-image attachments are streamed separately;
-                            // only image files are inlined below.
-                            if (entity.role != "user") continue
-                            val rel = part.relativePath
-                            if (rel.isEmpty()) continue
-                            val file = java.io.File(mediaStore.mediaBaseDir, rel)
-                            if (!file.exists()) continue
-                            val name = part.originalFileName.ifEmpty { file.name }
-                            if (part.mimeType.startsWith("image/")) {
-                                restoredImageUris.add(Uri.fromFile(file))
-                            } else {
-                                restoredAttachmentUris.add(Uri.fromFile(file))
-                            }
-                            restoredAttachmentNames.add(name)
-                        }
-                        is ParsedPart.ToolResult -> {
-                            // handled in first pass (toolResultMap)
-                        }
-                    }
-                }
-            }
-
-            // Skip user messages with no visible content
-            if (entity.role == "user" && text.isBlank() && restoredImageUris.isEmpty()) return@mapNotNull null
-            // Skip assistant messages that became empty
-            if (entity.role == "assistant" && text.isBlank() && blocks.isEmpty()) return@mapNotNull null
-            ChatMessage(
-                id = entity.id,
-                role = entity.role,
-                content = text,
-                imageUris = restoredImageUris,
-                attachmentNames = restoredAttachmentNames,
-                attachmentUris = restoredAttachmentUris,
-                toolBlocks = blocks,
-                sourceDbIds = listOf(entity.id),
-                error = entity.errorInfo?.takeIf { it.isNotBlank() },
-            )
-        }.let { messages ->
-            // Merge consecutive assistant messages into one:
-            val merged = mutableListOf<ChatMessage>()
-            for (msg in messages) {
-                val prev = merged.lastOrNull()
-                if (msg.role == "assistant" && prev?.role == "assistant") {
-                    val seen = mutableSetOf<String>()
-                    val combinedBlocks = (prev.toolBlocks + msg.toolBlocks)
-                        .asReversed()
-                        .filter { seen.add(it.id) }
-                        .asReversed()
-                    val combinedText = when {
-                        prev.content.isBlank() -> msg.content
-                        msg.content.isBlank() -> prev.content
-                        else -> prev.content + "\n\n" + msg.content
-                    }
-                    merged[merged.lastIndex] = prev.copy(
-                        id = msg.id,
-                        content = combinedText,
-                        toolBlocks = combinedBlocks,
-                        sourceDbIds = prev.sourceDbIds + msg.sourceDbIds,
-                        error = msg.error ?: prev.error,
-                    )
-                } else {
-                    merged.add(msg)
-                }
-            }
-            merged
-        }
-    }
-
-    private data class ToolResultData(val output: String, val success: Boolean)
-
     private fun MessageEntity.toLLMMessage(): LLMMessage {
         val parts = parsePartsJson(partsJson)
         val malformed = parts.isEmpty() && partsJson.isNotBlank()
-        return buildSingleLlmMessage(this, partsJson, parts, malformed)
+        return buildSingleLlmMessage(this, partsJson, parts, malformed, mediaStore.mediaBaseDir)
     }
 
-    private fun buildLlmMessages(parsed: List<ParsedRow>): List<LLMMessage> {
-        val result = ArrayList<LLMMessage>(parsed.size)
-        for (row in parsed) {
-            result.add(buildSingleLlmMessage(row.entity, row.entity.partsJson, row.parts, row.malformed))
-        }
-        return result
-    }
+    private fun buildLlmMessages(parsed: List<ParsedRow>): List<LLMMessage> =
+        buildLlmMessagesFromParsed(parsed, mediaStore.mediaBaseDir)
 
-    private fun buildSingleLlmMessage(
-        entity: MessageEntity,
-        partsJson: String,
-        parts: List<ParsedPart>,
-        malformed: Boolean,
-    ): LLMMessage {
-        val r = if (entity.role == "user") LLMMessage.Role.USER else LLMMessage.Role.ASSISTANT
-        val contentParts = mutableListOf<AgentContentPart>()
-        val imageParts = mutableListOf<LLMMessage.ImagePart>()
-        val textContent = StringBuilder()
-
-        if (malformed) {
-            textContent.append(partsJson)
-            contentParts.add(AgentContentPart.Text(partsJson))
-        } else {
-            for (part in parts) {
-                when (part) {
-                    is ParsedPart.Text -> {
-                        val value = part.value
-                        if (value.contains("<user-attached-files>")) {
-                            contentParts.add(AgentContentPart.Text(value))
-                        } else {
-                            textContent.append(value)
-                            contentParts.add(AgentContentPart.Text(value))
-                        }
-                    }
-                    is ParsedPart.ToolUse -> {
-                        val inputJson = try {
-                            org.json.JSONObject(part.input)
-                        } catch (_: Exception) {
-                            org.json.JSONObject()
-                        }
-                        contentParts.add(AgentContentPart.ToolUse(
-                            id = part.id,
-                            name = part.name,
-                            input = inputJson,
-                        ))
-                    }
-                    is ParsedPart.ToolResult -> {
-                        contentParts.add(AgentContentPart.ToolResult(
-                            id = part.toolUseId,
-                            name = part.name,
-                            content = part.output,
-                            isError = !part.success,
-                        ))
-                    }
-                    is ParsedPart.MediaRef -> {
-                        // T128: restore persisted image files so they survive a
-                        // session reload; only image mediaRefs are inlined into the
-                        // model request (T150: non-image attachments are streamed
-                        // to disk and never re-inlined into contentParts).
-                        val rel = part.relativePath
-                        if (rel.isEmpty()) continue
-                        val mime = part.mimeType
-                        if (!mime.startsWith("image/")) continue
-                        val file = java.io.File(mediaStore.mediaBaseDir, rel)
-                        if (!file.exists()) continue
-                        val bytes = try { file.readBytes() } catch (_: Exception) { continue }
-                        val restoredPath = part.linuxPath
-                        imageParts.add(LLMMessage.ImagePart(bytes, mime, linuxPath = restoredPath))
-                        contentParts.add(AgentContentPart.ImageData(bytes, mime, linuxPath = restoredPath))
-                    }
-                }
-            }
-        }
-
-        return LLMMessage(
-            role = r,
-            content = textContent.toString(),
-            imageParts = imageParts,
-            contentParts = contentParts,
-            dbMessageId = entity.id,
-            reasoningContent = entity.reasoningContent,
-        )
-    }
-
-    /**
-     * Extract a string value for `key` from *partial* (possibly truncated) JSON
-     * without needing a complete, parseable object. Mirrors iOS
-     * `extractPartialStringValue(_:from:)` in AIChatViewModel.swift.
-     *
-     * Returns content up to the first unescaped `"`, or the remaining buffer
-     * if the closing quote has not streamed yet.
-     */
-    private fun extractPartialStringValue(key: String, json: String): String? {
-        val patterns = listOf("\"$key\": \"", "\"$key\":\"")
-        for (p in patterns) {
-            val at = json.indexOf(p)
-            if (at < 0) continue
-            val after = json.substring(at + p.length)
-            return unescapePartialJsonString(findUnescapedEnd(after))
-        }
-        return null
-    }
-
-    /** Return substring up to the first unescaped `"`, or the whole string if none. */
-    private fun findUnescapedEnd(s: String): String {
-        var i = 0
-        val n = s.length
-        while (i < n) {
-            val c = s[i]
-            if (c == '\\') {
-                // Skip escaped character (could be `\"`, `\\`, `\n`, etc.)
-                i += 2
-                continue
-            }
-            if (c == '"') return s.substring(0, i)
-            i++
-        }
-        return s
-    }
-
-    /** Unescape common JSON string escapes. */
-    private fun unescapePartialJsonString(s: String): String =
-        s.replace("\\n", "\n")
-            .replace("\\t", "\t")
-            .replace("\\\"", "\"")
-            .replace("\\/", "/")
-            .replace("\\\\", "\\")
-
-    /**
-     * Humanize a snake_case tool name into a Title-Case label for pill headers
-     * while the model's own `tool_title` arg has not yet streamed in.
-     * e.g. `file_write` → "Write File", `shell_execute` → "Execute Shell".
-     */
-    private fun friendlyToolTitle(toolName: String): String = when (toolName) {
-        "shell_execute" -> "Execute Shell"
-        "file_read" -> "Read File"
-        "file_write" -> "Write File"
-        "file_edit" -> "Edit File"
-        "browser_use" -> "Browse Web"
-        "read_image" -> "Read Image"
-        "memory_write" -> "Write Memory"
-        "memory_get" -> "Read Memory"
-        "web_search" -> "Search Web"
-        else -> toolName
-            .split('_')
-            .filter { it.isNotEmpty() }
-            .joinToString(" ") { it.replaceFirstChar { ch -> ch.uppercase() } }
-    }
-
-    /**
-     * Parse the JSON tool-arguments string into a plain Map for the loop
-     * detector. Malformed JSON degrades gracefully to an empty map — the
-     * detector still hashes the tool name, so identical bad calls are still
-     * detected as a loop.
-     */
-    private fun parseToolParams(argsJson: String): Map<String, Any?> {
-        if (argsJson.isBlank()) return emptyMap()
-        return try {
-            val obj = JSONObject(argsJson)
-            val out = HashMap<String, Any?>(obj.length())
-            val keys = obj.keys()
-            while (keys.hasNext()) {
-                val k = keys.next()
-                val v = obj.get(k)
-                out[k] = if (v == JSONObject.NULL) null else v
-            }
-            out
-        } catch (_: Exception) {
-            emptyMap()
-        }
-    }
 }
 
 internal fun sanitizeAgentHistoryMessages(messages: MutableList<LLMMessage>) {
