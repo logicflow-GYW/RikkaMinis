@@ -11,7 +11,7 @@ import org.junit.Test
 /**
  * [T7-agent-runtime-integration] T7-A trace schema 映射纯 JVM 测试。
  *
- * 验证 ChatViewModel companion 里 T5 枚举 → trace schema v2 字符串的映射，
+ * 验证 ChatAgentTraceObserver companion 里 T5 枚举 → trace schema v2 字符串的映射，
  * 保证写入 JSONL 的 state_transition / terminal_state / terminal_reason
  * 与 docs/stability/trace-schema-v2.md 的枚举完全一致（驼峰 / snake_case），
  * 防止 `.name`（全大写）或拼写漂移污染审计数据。
@@ -38,14 +38,14 @@ class T7TraceSchemaMappingTest {
         )
         assertEquals(AgentRunPhase.entries.size, expected.size)
         AgentRunPhase.entries.forEach { phase ->
-            assertEquals("phase ${phase.name} must map to schema enum", expected[phase], ChatViewModel.t7PhaseSchema(phase))
+            assertEquals("phase ${phase.name} must map to schema enum", expected[phase], ChatAgentTraceObserver.t7PhaseSchema(phase))
         }
     }
 
     @Test
     fun `phase mapping never emits ALL-CAPS enum name`() {
         AgentRunPhase.entries.forEach { phase ->
-            val mapped = ChatViewModel.t7PhaseSchema(phase)
+            val mapped = ChatAgentTraceObserver.t7PhaseSchema(phase)
             // schema 枚举是 PascalCase（如 "CallingModel"），绝不能是 enum 的 ALL-CAPS name
             assertTrue(
                 "phase ${phase.name} must not map to ALL-CAPS enum name, was '$mapped'",
@@ -69,7 +69,7 @@ class T7TraceSchemaMappingTest {
             assertEquals(
                 "terminal ${terminal.name} must map to schema enum",
                 expected[terminal],
-                ChatViewModel.t7TerminalSchema(terminal),
+                ChatAgentTraceObserver.t7TerminalSchema(terminal),
             )
         }
     }
@@ -93,20 +93,20 @@ class T7TraceSchemaMappingTest {
             assertEquals(
                 "reason ${reason.name} must map to schema enum",
                 expected[reason],
-                ChatViewModel.t7TerminalReasonSchema(reason),
+                ChatAgentTraceObserver.t7TerminalReasonSchema(reason),
             )
         }
     }
 
     @Test
     fun `terminal reason null maps to null`() {
-        assertNull(ChatViewModel.t7TerminalReasonSchema(null))
+        assertNull(ChatAgentTraceObserver.t7TerminalReasonSchema(null))
     }
 
     @Test
     fun `terminal reason mapping never emits ALL-CAPS enum name`() {
         AgentTerminalReason.entries.forEach { reason ->
-            val mapped = ChatViewModel.t7TerminalReasonSchema(reason)
+            val mapped = ChatAgentTraceObserver.t7TerminalReasonSchema(reason)
             if (mapped != null) {
                 // schema terminal_reason 是 snake_case 全小写
                 assertTrue(

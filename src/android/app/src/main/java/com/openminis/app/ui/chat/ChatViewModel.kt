@@ -13,14 +13,9 @@ import androidx.compose.foundation.lazy.LazyListState
 import com.openminis.app.agent.runtime.AgentExecutionBudget
 import com.openminis.app.agent.runtime.AgentRunEvent
 import com.openminis.app.agent.runtime.AgentRunPhase
-import com.openminis.app.agent.runtime.AgentRunReducer
 import com.openminis.app.agent.runtime.AgentRunState
-import com.openminis.app.agent.runtime.AgentRunTransition
 import com.openminis.app.agent.runtime.AgentTerminal
 import com.openminis.app.agent.runtime.AgentTerminalReason
-import com.openminis.app.agent.runtime.BudgetDecision
-import com.openminis.app.agent.runtime.BudgetExhaustedReason
-import com.openminis.app.agent.runtime.BudgetSnapshot
 import com.openminis.app.agent.runtime.ProviderAttemptOutcome
 import com.openminis.app.agent.Level
 import com.openminis.app.agent.ToolLoopDetector
@@ -145,68 +140,14 @@ class ChatViewModel(
          * AIChatViewModel.preflightEmptyStringAllowedFields.
          * [T-preflight-empty-string-allowed]
          */
-        /** T9: trace retention cap per session (oldest pruned first). */
-        const val MAX_TRACE_FILES_PER_SESSION = 20
+        /** T9: trace retention cap per session (oldest pruned first).
+         *  Moved to ChatAgentTraceObserver.Companion — kept here as an alias
+         *  because runAgentLoop's inline docs reference it. */
+        const val MAX_TRACE_FILES_PER_SESSION =
+            com.openminis.app.ui.chat.ChatAgentTraceObserver.MAX_TRACE_FILES_PER_SESSION
 
-        // ── T7-A: 观察预算默认上限（advisory 观察用，不阻断任何行为）──
-        // 这些数字只用于 trace 记录当前消耗进度（budget_consume/refuse 事件），
-        // 不改变生产行为；T7-C 接入 enforced 模式前由 T4-B/T10 依据真实基线校准。
-        private const val T7_OBSERVE_MAX_TURNS = 200
-        private const val T7_OBSERVE_MAX_PROVIDER_ATTEMPTS = 64
-        private const val T7_OBSERVE_MAX_TOOL_CALLS = 128
-        private const val T7_OBSERVE_MAX_SHELL_COMMANDS = 128
-        private const val T7_OBSERVE_MAX_COMPACTION_CALLS = 8
-        private const val T7_OBSERVE_MAX_CONCURRENT_TOOLS = 4
-        /** 观察 deadline：60 分钟单调时间（advisory，不阻断）。 */
-        private const val T7_OBSERVE_DEADLINE_MS = 60L * 60L * 1000L
 
-        /**
-         * T7-A: 把 [AgentRunPhase] 映射为 trace schema v2 的 state_transition
-         * 枚举字符串（驼峰，如 "CallingModel"）。schema 枚举见
-         * docs/stability/trace-schema-v2.md —— 不能用 `.name`（全大写）。
-         * internal 顶层纯函数（无实例依赖），供 JVM 测试直接断言。
-         */
-        internal fun t7PhaseSchema(phase: AgentRunPhase): String = when (phase) {
-            AgentRunPhase.IDLE -> "Idle"
-            AgentRunPhase.PREPARING -> "Preparing"
-            AgentRunPhase.CALLING_MODEL -> "CallingModel"
-            AgentRunPhase.EXECUTING_TOOLS -> "ExecutingTools"
-            AgentRunPhase.RETRYING -> "Retrying"
-            AgentRunPhase.FALLING_BACK -> "FallingBack"
-            AgentRunPhase.COMPACTING -> "Compacting"
-            AgentRunPhase.FINALIZING -> "Finalizing"
-            AgentRunPhase.SUCCEEDED -> "Succeeded"
-            AgentRunPhase.FAILED -> "Failed"
-            AgentRunPhase.CANCELLED -> "Cancelled"
-            AgentRunPhase.INTERRUPTED -> "Interrupted"
-        }
-
-        /**
-         * T7-A: 把 [AgentTerminal] 映射为 trace schema v2 的 terminal_state
-         * 枚举（驼峰）。不能用 `.name`（全大写）。
-         */
-        internal fun t7TerminalSchema(terminal: AgentTerminal): String = when (terminal) {
-            AgentTerminal.SUCCEEDED -> "Succeeded"
-            AgentTerminal.FAILED -> "Failed"
-            AgentTerminal.CANCELLED -> "Cancelled"
-            AgentTerminal.INTERRUPTED -> "Interrupted"
-        }
-
-        /**
-         * T7-A: 把 [AgentTerminalReason] 映射为 trace schema v2 的
-         * terminal_reason 枚举（snake_case）。
-         */
-        internal fun t7TerminalReasonSchema(reason: AgentTerminalReason?): String? = when (reason) {
-            null -> null
-            AgentTerminalReason.COMPLETED -> "completed_normally"
-            AgentTerminalReason.EXECUTION_FAILED -> "all_fallbacks_exhausted"
-            AgentTerminalReason.USER_CANCELLED -> "user_cancelled"
-            AgentTerminalReason.DEADLINE_EXCEEDED -> "deadline_reached"
-            AgentTerminalReason.PROCESS_INTERRUPTED -> "process_interrupted"
-            AgentTerminalReason.PERSISTENCE_FAILED -> "persistence_failed"
-            // schema 无 outcome_unknown 枚举；结果未知最接近"执行未确认完成"语义
-            AgentTerminalReason.OUTCOME_UNKNOWN -> "process_interrupted"
-        }
+        
 
         private val PREFLIGHT_EMPTY_STRING_ALLOWED_FIELDS: Map<String, Set<String>> = mapOf(
             "file_edit" to setOf("new_string"),
@@ -975,87 +916,26 @@ class ChatViewModel(
     private val groupRouter = com.openminis.app.data.routing.GroupRouter()
 
     /**
-     * T9: agent execution trace recorder. Side-channel only — records one
-     * JSONL line per event into the session's `workspace/.traces/agent-<ts>.jsonl`
-     * so a full agent run (turns → tool calls → results → token usage) can be
-     * replayed / filtered / exported afterwards. The trace NEVER alters the
-     * LLM result path; a write failure is swallowed like the failure hook.
-     */
-    private val agentTraceRecorder = AgentTraceRecorder(appendLine = { line -> appendTraceLine(line) })
-
-    /**
-     * Host-side state backing [agentTraceRecorder]:
-     *  - [traceRunFile] — the file of the run currently being recorded
-     *    (null when no run is active). Captured at runAgentLoop entry so every
-     *    event of one run lands in the same file even though the recorder's
-     *    sink is a stateless callback.
-     *  - [activeTraceTurn] — current loop turn index, read by executeTool so
-     *    tool events carry the turn they belong to.
-     */
-    @Volatile
-    private var traceRunFile: File? = null
-
-    @Volatile
-    private var activeTraceTurn = -1
-
-    /**
-     * T7: Agent Run 观察状态（T7-A 阶段只接入 trace，不改变行为）。
+     * T9: agent execution trace recorder + T7 observation state, extracted to
+     * [ChatAgentTraceObserver] (FE-5 route C step 1). Side-channel only —
+     * records one JSONL line per event into the session's
+     * `workspace/.traces/agent-<ts>.jsonl` so a full agent run (turns → tool
+     * calls → results → token usage) can be replayed / filtered / exported
+     * afterwards. The trace NEVER alters the LLM result path; a write failure
+     * is swallowed like the failure hook.
      *
-     *  - [activeRunId] — 本轮 run 的唯一标识（T1 runId 语义；T7-A 阶段用
-     *    局部 UUID，T7-B 接 SessionSlotController 后替换为槽位 runId）。
-     *  - [activeRunBudget] — 本轮 run 的观察预算（advisory）：各计数
-     *    consume 并在 trace 里记录 budget_consume / budget_refuse，但
-     *    **不阻断任何行为**（T7-C 才启用 deadline/计数预算的 enforced 语义）。
+     * The trace dir resolution runs through PRootKernel per session; the
+     * reducer-rejection warnings go through AppLogger with the original
+     * TAG_STREAM tag so logcat filtering is unchanged.
      */
-    @Volatile
-    private var activeRunId: String? = null
-
-    @Volatile
-    private var activeRunBudget: AgentExecutionBudget? = null
-
-    /**
-     * T7-C: 本轮 run 因预算耗尽（deadline / 计数上限）而中断的原因。
-     * 由调用点（turn/provider/tool/shell 循环）在 Denied 时设置，
-     * runAgentLoop 出口据此选择显式终态（BudgetExhausted 不是静默失败）。
-     */
-    @Volatile
-    private var t7BudgetStopReason: String? = null
-
-    /**
-     * T7-A: 观察用当前 phase（schema 枚举字符串）。仅用于让 UserCancelled /
-     * 中断等"任意阶段可达"的事件有准确的 from；不是状态机单一事实源
-     * （T7-D 才接 reducer）。
-     */
-    @Volatile
-    private var t7ObservedPhase: String? = null
-
-    /**
-     * T7-D: 终态 reducer 旁路验证状态 —— 类级持有，使 compactAll /
-     * cancelStream / executeTool 等独立函数也能发事件（null = 无活跃 run）。
-     * 只在 runAgentLoop 生命周期内非 null：入口初始化为 IDLE，
-     * t7EndRun 落终态后置 null。
-     */
-    @Volatile
-    private var t7ReducerState: AgentRunState? = null
-
-    /**
-     * T7-D: 把 AgentRun 事件发给 T5 状态机（旁路验证）。reducer 拒绝时只
-     * 记录日志，不改生产行为；无活跃 run 时 no-op。
-     */
-    private fun t7Reduce(event: AgentRunEvent) {
-        val state = t7ReducerState ?: return
-        when (val r = AgentRunReducer.reduce(state, event)) {
-            is AgentRunTransition.Accepted -> {
-                if (r.changed) t7ReducerState = r.state
-            }
-            is AgentRunTransition.Rejected -> {
-                AppLogger.warning(
-                    TAG_STREAM,
-                    "T7-D reducer REJECTED ${event::class.simpleName}: ${r.rejection.message}",
-                )
-            }
-        }
-    }
+    private val traceObserver = ChatAgentTraceObserver(
+        traceDirResolver = { sid ->
+            PRootKernel.resolveSessionHostPath(sid, "/var/minis/workspace/.traces", context)
+        },
+        wallClockMs = System::currentTimeMillis,
+        monotonicClockMs = System::nanoTime,
+        warn = { tag, msg -> AppLogger.warning(tag, msg) },
+    )
 
 
     /**
@@ -2042,18 +1922,18 @@ class ChatViewModel(
         _isCompacting.value = true
         // T7-A: 观察 —— compact 开始（advisory）
         // T7-C: compaction 预算耗尽 → 跳过 compact，不改变历史
-        if (!t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_COMPACTION_CALLS) { it.consumeCompaction() }) {
+        if (!traceObserver.t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_COMPACTION_CALLS) { it.consumeCompaction() }) {
             _isCompacting.value = false
             appendSystemInfo(context.getString(R.string.sysmsg_compact_budget_exhausted), "compact")
             return
         }
-        t7State(
-            t7ObservedPhase ?: t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS),
-            t7PhaseSchema(AgentRunPhase.COMPACTING),
+        traceObserver.t7State(
+            traceObserver.t7ObservedPhase ?: ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS),
+            ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.COMPACTING),
             "CompactionStarted",
         )
         // T7-D: 旁路验证 —— compact 开始
-        t7Reduce(AgentRunEvent.CompactionStarted("compact_all"))
+        traceObserver.t7Reduce(AgentRunEvent.CompactionStarted("compact_all"))
         viewModelScope.launch(Dispatchers.IO) {
             // [T-android-compact-queued-drain] Only a SUCCESSFUL compact kicks
             // the queued-prompt drain below; failure/cancel/empty-summary paths
@@ -2225,13 +2105,13 @@ class ChatViewModel(
             } finally {
                 _isCompacting.value = false
                 // T7-A: 观察 —— compact 结束（无论成败都回到调用模型阶段）
-                t7State(
-                    t7PhaseSchema(AgentRunPhase.COMPACTING),
-                    t7PhaseSchema(AgentRunPhase.CALLING_MODEL),
+                traceObserver.t7State(
+                    ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.COMPACTING),
+                    ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL),
                     "CompactionFinished",
                 )
                 // T7-D: 旁路验证 —— compact 结束
-                t7Reduce(AgentRunEvent.CompactionFinished())
+                traceObserver.t7Reduce(AgentRunEvent.CompactionFinished())
             }
             // [T-android-compact-queued-drain] A successful compact must let
             // any queued prompts proceed — previously nothing re-triggered the
@@ -4841,7 +4721,7 @@ class ChatViewModel(
         if (_isStreaming.value) return
         _canResume.value = false
         // T7-A: 观察 —— 用户请求重试消息（开启新 run；旧 run 若已关闭则事件落空无害）
-        t7Retry(
+        traceObserver.t7Retry(
             operationType = "user_retry",
             operationName = null,
             safetyLevel = null,
@@ -6060,7 +5940,7 @@ class ChatViewModel(
         // !isStreaming so this is normally a no-op.
         flushAllStreamingDeltas()
         // T7-A: 观察 —— 用户请求重试上一轮（开启新 run）
-        t7Retry(
+        traceObserver.t7Retry(
             operationType = "user_retry",
             operationName = null,
             safetyLevel = null,
@@ -6795,23 +6675,24 @@ class ChatViewModel(
         // runId 先取局部 UUID（T7-B 接 SessionSlotController 后改为槽位 runId）；
         // 预算只做观察（consume 并记录，不阻断），T7-C 再启用 enforced。
         val runId = java.util.UUID.randomUUID().toString()
-        activeRunId = runId
+        traceObserver.activeRunId = runId
         val observeBudget = AgentExecutionBudget(
             startedAtMonotonicMs = SystemClock.elapsedRealtime(),
-            deadlineMonotonicMs = SystemClock.elapsedRealtime() + T7_OBSERVE_DEADLINE_MS,
-            maxTurns = T7_OBSERVE_MAX_TURNS,
-            maxProviderAttempts = T7_OBSERVE_MAX_PROVIDER_ATTEMPTS,
-            maxToolCalls = T7_OBSERVE_MAX_TOOL_CALLS,
-            maxShellCommands = T7_OBSERVE_MAX_SHELL_COMMANDS,
-            maxCompactionCalls = T7_OBSERVE_MAX_COMPACTION_CALLS,
-            maxConcurrentTools = T7_OBSERVE_MAX_CONCURRENT_TOOLS,
+            deadlineMonotonicMs = SystemClock.elapsedRealtime() + ChatAgentTraceObserver.T7_OBSERVE_DEADLINE_MS,
+            maxTurns = ChatAgentTraceObserver.T7_OBSERVE_MAX_TURNS,
+            maxProviderAttempts = ChatAgentTraceObserver.T7_OBSERVE_MAX_PROVIDER_ATTEMPTS,
+            maxToolCalls = ChatAgentTraceObserver.T7_OBSERVE_MAX_TOOL_CALLS,
+            maxShellCommands = ChatAgentTraceObserver.T7_OBSERVE_MAX_SHELL_COMMANDS,
+            maxCompactionCalls = ChatAgentTraceObserver.T7_OBSERVE_MAX_COMPACTION_CALLS,
+            maxConcurrentTools = ChatAgentTraceObserver.T7_OBSERVE_MAX_CONCURRENT_TOOLS,
             maxEstimatedTokens = null, // token 计数不稳定，观察期不强制
             monotonicClock = { SystemClock.elapsedRealtime() },
         )
-        activeRunBudget = observeBudget
-        traceRunFile = newTraceFile()
-        activeTraceTurn = -1
-        agentTraceRecorder.beginRun(
+        traceObserver.activeRunBudget = observeBudget
+        traceObserver.traceRunFile = traceObserver.newTraceFile(activeSessionId)
+        traceObserver.releaseSessionId = activeSessionId
+        traceObserver.activeTraceTurn = -1
+        traceObserver.agentTraceRecorder.beginRun(
             runId = runId,
             sessionId = activeSessionId,
             provider = provider.javaClass.simpleName,
@@ -6821,26 +6702,26 @@ class ChatViewModel(
             initialBudgetJson = t7InitialBudgetJson(observeBudget),
         )
         // T7-A: 状态机观察 —— run 开始（Idle → Preparing）
-        t7ObservedPhase = t7PhaseSchema(AgentRunPhase.PREPARING)
-        agentTraceRecorder.stateTransition(
-            from = t7PhaseSchema(AgentRunPhase.IDLE),
-            to = t7PhaseSchema(AgentRunPhase.PREPARING),
+        traceObserver.t7ObservedPhase = ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.PREPARING)
+        traceObserver.agentTraceRecorder.stateTransition(
+            from = ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.IDLE),
+            to = ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.PREPARING),
             reason = "RunStarted",
         )
         // T7-D: 旁路验证 —— RunStarted 事件
         // TF-G P1-3 fix: the reducer state machine MUST be initialised BEFORE
-        // issuing RunStarted, or t7Reduce() no-ops (t7ReducerState==null → the
+        // issuing RunStarted, or traceObserver.t7Reduce() no-ops (traceObserver.t7ReducerState==null → the
         // leading `?: return`) and the FIRST event is silently dropped. Then
         // every later event (ProviderAttemptStarted / ToolStarted / …) hits a
         // fresh IDLE reducer that has never seen RunStarted → "requires
         // RunStarted first" → spammy REJECTED in normal production paths.
-        t7ReducerState = AgentRunState.initial()
-        t7Reduce(AgentRunEvent.RunStarted(runId))
+        traceObserver.t7ReducerState = AgentRunState.initial()
+        traceObserver.t7Reduce(AgentRunEvent.RunStarted(runId))
         // T7-B: session slot lease 观察 —— streamJob 在进入 runAgentLoop 前
         // 已经成功 acquireSlot；此处登记 lease（trace 侧），语义是
-        // "run 持有会话并发槽位"。释放统一在 t7EndRun(finalize) 发出，
+        // "run 持有会话并发槽位"。释放统一在 traceObserver.t7EndRun(finalize) 发出，
         // 保证任何终态（正常/取消/异常）都有对应的 release 事件。
-        t7ResourceAcquire(
+        traceObserver.t7ResourceAcquire(
             resourceType = AgentTraceRecorder.RESOURCE_SESSION_SLOT,
             resourceId = activeSessionId,
             leaseToken = "slot-$runId",
@@ -6991,15 +6872,15 @@ class ChatViewModel(
         for (turn in 0 until MAX_AGENT_TURNS) {
             // T7-C: deadline 到达后不发新 provider/tool 请求 —— turn 循环入口检查。
             // 中断标记后走统一 finalize（BudgetExhausted 不是静默失败）。
-            if (activeRunBudget?.isExpired() == true) {
-                t7BudgetStopReason = "deadline_reached"
-                t7State(
-                    t7ObservedPhase ?: t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS),
-                    t7PhaseSchema(AgentRunPhase.FINALIZING),
+            if (traceObserver.activeRunBudget?.isExpired() == true) {
+                traceObserver.t7BudgetStopReason = "deadline_reached"
+                traceObserver.t7State(
+                    traceObserver.t7ObservedPhase ?: ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS),
+                    ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.FINALIZING),
                     "DeadlineReached",
                 )
                 // T7-D: 旁路验证 —— deadline 到达
-                t7Reduce(AgentRunEvent.DeadlineReached())
+                traceObserver.t7Reduce(AgentRunEvent.DeadlineReached())
                 break
             }
             // Sanitize history before each API call (mirrors iOS pre-API validation)
@@ -7007,17 +6888,17 @@ class ChatViewModel(
 
             // T9: per-turn trace hook
             val turnStartMs = System.currentTimeMillis()
-            activeTraceTurn = turn
-            agentTraceRecorder.turnStart(turn)
+            traceObserver.activeTraceTurn = turn
+            traceObserver.agentTraceRecorder.turnStart(turn)
             // T7-A: 每轮消耗 turn 预算（advisory 观察，不阻断）
             // T7-C: turn 计数耗尽 → 中断本轮 run
-            if (!t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_TURNS) { it.consumeTurn() }) {
-                t7BudgetStopReason = "turn_limit"
+            if (!traceObserver.t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_TURNS) { it.consumeTurn() }) {
+                traceObserver.t7BudgetStopReason = "turn_limit"
                 // T7-D: 旁路验证 —— 计数耗尽进入收尾
-                t7Reduce(AgentRunEvent.ProcessInterrupted("budget_exhausted(turn_limit)"))
-                t7State(
-                    t7ObservedPhase ?: t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS),
-                    t7PhaseSchema(AgentRunPhase.FINALIZING),
+                traceObserver.t7Reduce(AgentRunEvent.ProcessInterrupted("budget_exhausted(turn_limit)"))
+                traceObserver.t7State(
+                    traceObserver.t7ObservedPhase ?: ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS),
+                    ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.FINALIZING),
                     "BudgetExhausted(turn_limit)",
                 )
                 break
@@ -7153,34 +7034,34 @@ class ChatViewModel(
             var retryAttempt = 0  // per-turn auto-retry counter (resets on each new turn)
             while (!collectDone) {
                 // T7-C: deadline 到达后不发新 provider 请求
-                if (activeRunBudget?.isExpired() == true) {
-                    t7BudgetStopReason = "deadline_reached"
-                    t7State(
-                        t7ObservedPhase ?: t7PhaseSchema(AgentRunPhase.CALLING_MODEL),
-                        t7PhaseSchema(AgentRunPhase.FINALIZING),
+                if (traceObserver.activeRunBudget?.isExpired() == true) {
+                    traceObserver.t7BudgetStopReason = "deadline_reached"
+                    traceObserver.t7State(
+                        traceObserver.t7ObservedPhase ?: ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL),
+                        ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.FINALIZING),
                         "DeadlineReached",
                     )
                     // T7-D: 旁路验证 —— deadline 到达
-                    t7Reduce(AgentRunEvent.DeadlineReached())
+                    traceObserver.t7Reduce(AgentRunEvent.DeadlineReached())
                     break
                 }
                 try {
                     // T7-A: provider attempt 开始（每次 retry/fallback 都会重新进入）
                     // T7-C: provider attempt 预算耗尽 → 不再尝试（不走 fallback）
-                    if (!t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_PROVIDER_ATTEMPTS) { it.consumeProviderAttempt() }) {
-                        t7BudgetStopReason = "provider_attempt_limit"
+                    if (!traceObserver.t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_PROVIDER_ATTEMPTS) { it.consumeProviderAttempt() }) {
+                        traceObserver.t7BudgetStopReason = "provider_attempt_limit"
                         // T7-D: 旁路验证 —— 计数耗尽进入收尾
-                        t7Reduce(AgentRunEvent.ProcessInterrupted("budget_exhausted(provider_attempts)"))
-                        t7State(
-                            t7ObservedPhase ?: t7PhaseSchema(AgentRunPhase.CALLING_MODEL),
-                            t7PhaseSchema(AgentRunPhase.FINALIZING),
+                        traceObserver.t7Reduce(AgentRunEvent.ProcessInterrupted("budget_exhausted(provider_attempts)"))
+                        traceObserver.t7State(
+                            traceObserver.t7ObservedPhase ?: ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL),
+                            ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.FINALIZING),
                             "BudgetExhausted(provider_attempts)",
                         )
                         collectDone = true
                         break
                     }
                     // T7-D: 旁路验证 —— ProviderAttemptStarted
-                    t7Reduce(AgentRunEvent.ProviderAttemptStarted)
+                    traceObserver.t7Reduce(AgentRunEvent.ProviderAttemptStarted)
                     // [T-android-enhanced-cache] Stamp the per-turn Enhanced
                     // Cache flag onto the active provider here — the single
                     // choke point every turn passes through, regardless of how
@@ -7544,9 +7425,9 @@ class ChatViewModel(
                     lastOtherToolInputMs = 0L
                     collectDone = true
                     // T7-A: 观察 —— provider 尝试成功（T5 ProviderAttemptFinished(SUCCESS)）
-                    t7State(t7PhaseSchema(AgentRunPhase.CALLING_MODEL), t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS), "ProviderAttemptFinished(SUCCESS)")
+                    traceObserver.t7State(ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL), ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS), "ProviderAttemptFinished(SUCCESS)")
                     // T7-D: 旁路验证 —— provider 成功
-                    t7Reduce(AgentRunEvent.ProviderAttemptFinished(ProviderAttemptOutcome.SUCCESS))
+                    traceObserver.t7Reduce(AgentRunEvent.ProviderAttemptFinished(ProviderAttemptOutcome.SUCCESS))
                     // Stream completed without error — clear any lingering retry UI state.
                     if (_autoRetryAttempt.value != 0 || _autoRetryCountdown.value != 0) {
                         _autoRetryAttempt.value = 0
@@ -7595,12 +7476,12 @@ class ChatViewModel(
                         val errDesc = actual.message ?: actual.javaClass.simpleName
                         Log.w(TAG, "🔁 Transient error on ${currentProvider.model.displayName}, retry $retryAttempt/${AUTO_RETRY_DELAYS_SEC.size} in ${delaySec}s: $errDesc")
                         // T7-A: 观察 —— provider 瞬态失败（T5 ProviderAttemptFinished(TRANSIENT_FAILURE)）
-                        t7State(t7PhaseSchema(AgentRunPhase.CALLING_MODEL), t7PhaseSchema(AgentRunPhase.RETRYING), "ProviderAttemptFinished(TRANSIENT_FAILURE)")
+                        traceObserver.t7State(ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL), ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.RETRYING), "ProviderAttemptFinished(TRANSIENT_FAILURE)")
                         // T7-D: 旁路验证 —— provider 瞬态失败
-                        t7Reduce(AgentRunEvent.ProviderAttemptFinished(ProviderAttemptOutcome.TRANSIENT_FAILURE))
+                        traceObserver.t7Reduce(AgentRunEvent.ProviderAttemptFinished(ProviderAttemptOutcome.TRANSIENT_FAILURE))
                         // T7-A: 观察 —— provider 瞬态失败决定重试（T3 语义：provider
                         // 调用视为 READ_ONLY 级，透明重试在预算内允许）
-                        t7Retry(
+                        traceObserver.t7Retry(
                             operationType = "provider_attempt",
                             operationName = currentProvider.model.displayName,
                             safetyLevel = AgentTraceRecorder.SAFETY_READ_ONLY,
@@ -7675,9 +7556,9 @@ class ChatViewModel(
                         lastFileToolInputMs = 0L
                         lastOtherToolInputMs = 0L
                         // T7-A: 观察 —— 决定重试（T5 RetryRequested：RETRYING → CALLING_MODEL）
-                        t7State(t7PhaseSchema(AgentRunPhase.RETRYING), t7PhaseSchema(AgentRunPhase.CALLING_MODEL), "RetryRequested(provider_attempt)")
+                        traceObserver.t7State(ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.RETRYING), ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL), "RetryRequested(provider_attempt)")
                         // T7-D: 旁路验证 —— 重试请求
-                        t7Reduce(AgentRunEvent.RetryRequested("transient"))
+                        traceObserver.t7Reduce(AgentRunEvent.RetryRequested("transient"))
                         continue  // retry on same provider
                     }
                     // Retries exhausted or non-retryable — proceed to fallback / throw.
@@ -7706,14 +7587,14 @@ class ChatViewModel(
                         fallbackStrategy == com.openminis.app.data.model.FallbackStrategy.always
                     // T7-A: 观察 —— provider 尝试失败需 fallback（T5 ProviderAttemptFinished(FALLBACK_FAILURE)）
                     if (shouldFallback) {
-                        t7State(t7PhaseSchema(AgentRunPhase.CALLING_MODEL), t7PhaseSchema(AgentRunPhase.FALLING_BACK), "ProviderAttemptFinished(FALLBACK_FAILURE)")
+                        traceObserver.t7State(ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL), ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.FALLING_BACK), "ProviderAttemptFinished(FALLBACK_FAILURE)")
                         // T7-D: 旁路验证 —— provider fallback 失败
-                        t7Reduce(AgentRunEvent.ProviderAttemptFinished(ProviderAttemptOutcome.FALLBACK_FAILURE))
+                        traceObserver.t7Reduce(AgentRunEvent.ProviderAttemptFinished(ProviderAttemptOutcome.FALLBACK_FAILURE))
                     } else {
                         // 非 fallback 错误（如终止性错误）—— 观察为致命失败
-                        t7State(t7PhaseSchema(AgentRunPhase.CALLING_MODEL), t7PhaseSchema(AgentRunPhase.FINALIZING), "ProviderAttemptFinished(FATAL_FAILURE)")
+                        traceObserver.t7State(ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL), ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.FINALIZING), "ProviderAttemptFinished(FATAL_FAILURE)")
                         // T7-D: 旁路验证 —— provider 致命失败
-                        t7Reduce(AgentRunEvent.ProviderAttemptFinished(ProviderAttemptOutcome.FATAL_FAILURE))
+                        traceObserver.t7Reduce(AgentRunEvent.ProviderAttemptFinished(ProviderAttemptOutcome.FATAL_FAILURE))
                     }
                     val next = if (shouldFallback) remainingFallbacks.removeFirstOrNull() else null
                     if (next != null) {
@@ -7737,10 +7618,10 @@ class ChatViewModel(
                         fallbackReasons.add("⚠️ ${currentProvider.model.displayName}: $reason")
                         Log.i(TAG, "🔀 $reason on ${currentProvider.model.displayName}, switching to ${next.provider.model.displayName} (realModelChange=$isRealModelChange)")
                         // T7-A: 观察 —— fallback 选中新成员（T5 FallbackSelected 语义）
-                        t7State(t7PhaseSchema(AgentRunPhase.FALLING_BACK), t7PhaseSchema(AgentRunPhase.CALLING_MODEL), "FallbackSelected(${next.provider.model.displayName})")
+                        traceObserver.t7State(ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.FALLING_BACK), ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL), "FallbackSelected(${next.provider.model.displayName})")
                         // T7-D: 旁路验证 —— fallback 选中
-                        t7Reduce(AgentRunEvent.FallbackSelected(fallbackMemberIndex = next.entryId.hashCode()))
-                        t7Retry(
+                        traceObserver.t7Reduce(AgentRunEvent.FallbackSelected(fallbackMemberIndex = next.entryId.hashCode()))
+                        traceObserver.t7Retry(
                             operationType = "provider_fallback",
                             operationName = next.provider.model.displayName,
                             safetyLevel = AgentTraceRecorder.SAFETY_READ_ONLY,
@@ -7886,7 +7767,7 @@ class ChatViewModel(
                                 // TF-H: reducer must leave FALLING_BACK before
                                 // finalizing — otherwise RunFinalized is REJECTED
                                 // with "requires FINALIZING (current=FALLING_BACK)".
-                                t7Reduce(AgentRunEvent.FallbackExhausted)
+                                traceObserver.t7Reduce(AgentRunEvent.FallbackExhausted)
                                 throw com.openminis.app.data.model.FallbackExhaustedError(
                                     summary = summary,
                                     detail = "$trail\n${actual.message ?: actual.toString()}",
@@ -7897,7 +7778,7 @@ class ChatViewModel(
                         // the reducer has left the running phases before the outer
                         // finalizer sends RunFinalized.
                         if (!shouldFallback) {
-                            t7Reduce(AgentRunEvent.ProcessInterrupted("provider_fatal_not_fallbackable"))
+                            traceObserver.t7Reduce(AgentRunEvent.ProcessInterrupted("provider_fatal_not_fallbackable"))
                         }
                         throw actual  // re-throw unwrapped, all fallbacks exhausted
                     }
@@ -8039,7 +7920,7 @@ class ChatViewModel(
                         lengthWallEmptyHits++
                         if (lengthWallEmptyHits < 3) {
                             // T9: log the wasted empty-length iteration
-                            agentTraceRecorder.turnEnd(
+                            traceObserver.agentTraceRecorder.turnEnd(
                                 turn = turn,
                                 tokensIn = lastUsage?.inputTokens,
                                 tokensOut = lastUsage?.outputTokens,
@@ -8068,7 +7949,7 @@ class ChatViewModel(
                         // Truncated mid-answer: continue so the model finishes.
                         lengthWallEmptyHits = 0
                         // T9: log the truncated turn before continuing
-                        agentTraceRecorder.turnEnd(
+                        traceObserver.agentTraceRecorder.turnEnd(
                             turn = turn,
                             tokensIn = lastUsage?.inputTokens,
                             tokensOut = lastUsage?.outputTokens,
@@ -8245,7 +8126,7 @@ class ChatViewModel(
                 }
 
                 // T9: close out the final turn (no tool calls → normal completion)
-                agentTraceRecorder.turnEnd(
+                traceObserver.agentTraceRecorder.turnEnd(
                     turn = turn,
                     tokensIn = lastUsage?.inputTokens,
                     tokensOut = lastUsage?.outputTokens,
@@ -8254,7 +8135,7 @@ class ChatViewModel(
                 )
                 loopExitedNormally = true
                 // T7-D: 旁路验证 —— 工具序列完成，进入收尾
-                t7Reduce(AgentRunEvent.WorkCompleted)
+                traceObserver.t7Reduce(AgentRunEvent.WorkCompleted)
                 break
             }
             AppLogger.info(TAG_STREAM, "runAgentLoop turn=$turn dispatching ${toolCalls.size} tool call(s), continuing")
@@ -8681,7 +8562,7 @@ class ChatViewModel(
             }
 
             // T9: close out this tool-running turn (tokens + finish + elapsed)
-            agentTraceRecorder.turnEnd(
+            traceObserver.agentTraceRecorder.turnEnd(
                 turn = turn,
                 tokensIn = lastUsage?.inputTokens,
                 tokensOut = lastUsage?.outputTokens,
@@ -8758,7 +8639,7 @@ class ChatViewModel(
         // (b) is the only case that needs the inline-error/Resume hand-holding;
         // (a) must NOT be touched or every normal completion gets a fake "hit
         // 200 turns" sticker (the bug user hit at v1.4.0-dev tip).
-        if (!loopExitedNormally && t7BudgetStopReason == null) {
+        if (!loopExitedNormally && traceObserver.t7BudgetStopReason == null) {
             AppLogger.warning(
                 TAG_STREAM,
                 "runAgentLoop EXIT — hit MAX_AGENT_TURNS=$MAX_AGENT_TURNS, finalizing as resumable",
@@ -8766,10 +8647,10 @@ class ChatViewModel(
             withContext(Dispatchers.Main) {
                 finalizeAtTurnLimit(assistantId, accumulatedText, allToolBlocks)
             }
-        } else if (t7BudgetStopReason != null) {
+        } else if (traceObserver.t7BudgetStopReason != null) {
             // T7-C: 预算耗尽（deadline / 计数上限）—— 显式终态，不是静默失败。
             // 不经过 finalizeAtTurnLimit（那是 200 轮的 Resume 语义）。
-            AppLogger.warning(TAG_STREAM, "runAgentLoop EXIT — budget stop: $t7BudgetStopReason")
+            AppLogger.warning(TAG_STREAM, "runAgentLoop EXIT — budget stop: $traceObserver.t7BudgetStopReason")
         } else {
             AppLogger.info(TAG_STREAM, "runAgentLoop EXIT (loop body ended naturally)")
         }
@@ -8777,8 +8658,8 @@ class ChatViewModel(
         // T7-A: 2.0 终态收尾 —— 正常退出 / 达到轮数上限都走这里
         // T7-C: 预算中断 → deadline 走 Interrupted(DEADLINE_EXCEEDED)，
         //       计数耗尽走 Failed(EXECUTION_FAILED) + error 标注具体维度
-        val budgetStop = t7BudgetStopReason
-        t7EndRun(
+        val budgetStop = traceObserver.t7BudgetStopReason
+        traceObserver.t7EndRun(
             terminal = when {
                 budgetStop == "deadline_reached" -> AgentTerminal.INTERRUPTED
                 budgetStop != null -> AgentTerminal.FAILED
@@ -8798,21 +8679,21 @@ class ChatViewModel(
                 else -> null
             },
         )
-        traceRunFile = null
-        t7BudgetStopReason = null
+        traceObserver.traceRunFile = null
+        traceObserver.t7BudgetStopReason = null
         } catch (e: CancellationException) {
             // T9: cancel is intentional — trace the interruption
             runCatching {
-                agentTraceRecorder.error(turn = activeTraceTurn, phase = "cancel", message = "runAgentLoop cancelled")
+                traceObserver.agentTraceRecorder.error(turn = traceObserver.activeTraceTurn, phase = "cancel", message = "runAgentLoop cancelled")
                 // T7-A: 2.0 终态 —— 用户取消
-                t7EndRun(
+                traceObserver.t7EndRun(
                     terminal = AgentTerminal.CANCELLED,
                     reason = AgentTerminalReason.USER_CANCELLED,
                     durationMs = System.currentTimeMillis() - traceStartMs,
                     error = "cancelled",
                 )
             }
-            traceRunFile = null
+            traceObserver.traceRunFile = null
             // Job cancelled mid-task (user stop / session switch / queue
             // takeover): rethrow so cancellation propagates as before (e.g.
             // the queue switch handler depends on it).
@@ -8820,16 +8701,16 @@ class ChatViewModel(
         } catch (e: Exception) {
             // T9: log the unexpected error, then rethrow
             runCatching {
-                agentTraceRecorder.error(turn = activeTraceTurn, phase = "exception", message = "${e.javaClass.simpleName}: ${e.message}")
+                traceObserver.agentTraceRecorder.error(turn = traceObserver.activeTraceTurn, phase = "exception", message = "${e.javaClass.simpleName}: ${e.message}")
                 // T7-A: 2.0 终态 —— 执行失败
-                t7EndRun(
+                traceObserver.t7EndRun(
                     terminal = AgentTerminal.FAILED,
                     reason = AgentTerminalReason.EXECUTION_FAILED,
                     durationMs = System.currentTimeMillis() - traceStartMs,
                     error = "${e.javaClass.simpleName}: ${e.message}",
                 )
             }
-            traceRunFile = null
+            traceObserver.traceRunFile = null
             // Unexpected failure: rethrow so the caller's error handling
             // behaves exactly as before.
             throw e
@@ -8905,25 +8786,25 @@ class ChatViewModel(
 
         // T9: record tool call event
         val etStartMs = System.currentTimeMillis()
-        agentTraceRecorder.toolCall(activeTraceTurn, toolId, name, argsJson)
+        traceObserver.agentTraceRecorder.toolCall(traceObserver.activeTraceTurn, toolId, name, argsJson)
         // T7-A: 观察 —— 工具调用消耗 tool_calls 预算（advisory，不阻断）
         // T7-C: tool_calls 预算耗尽 → 不执行工具，返回明确错误给 LLM（不是静默失败）
-        if (!t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_TOOL_CALLS) { it.consumeToolCall() }) {
-            t7BudgetStopReason = "tool_call_limit"
+        if (!traceObserver.t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_TOOL_CALLS) { it.consumeToolCall() }) {
+            traceObserver.t7BudgetStopReason = "tool_call_limit"
             // T7-D: 旁路验证 —— 计数耗尽进入收尾
-            t7Reduce(AgentRunEvent.ProcessInterrupted("budget_exhausted(tool_calls)"))
+            traceObserver.t7Reduce(AgentRunEvent.ProcessInterrupted("budget_exhausted(tool_calls)"))
             return ToolExecutionResult("Error: Agent budget exhausted (tool_calls)", false, toolTitle = toolTitle)
         }
-        t7State(t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS), t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS), "ToolStarted($name)")
+        traceObserver.t7State(ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS), ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS), "ToolStarted($name)")
         // T7-D: 旁路验证 —— 工具开始
-        t7Reduce(AgentRunEvent.ToolStarted(name))
+        traceObserver.t7Reduce(AgentRunEvent.ToolStarted(name))
 
         // T7-B: tool slot lease —— 工具执行期间占用一个并发工具槽位
         // （budget 的 tryAcquireToolSlot，advisory），trace 侧登记 acquire；
         // finally 无条件 release（成功/异常/取消都释放，不泄漏槽位）。
-        val toolLease = "tool-$toolId-${activeRunId ?: "norun"}"
-        activeRunBudget?.tryAcquireToolSlot()
-        t7ResourceAcquire(
+        val toolLease = "tool-$toolId-${traceObserver.activeRunId ?: "norun"}"
+        traceObserver.activeRunBudget?.tryAcquireToolSlot()
+        traceObserver.t7ResourceAcquire(
             resourceType = AgentTraceRecorder.RESOURCE_TOOL_SLOT,
             resourceId = toolId,
             leaseToken = toolLease,
@@ -8969,8 +8850,8 @@ class ChatViewModel(
             }
         } finally {
             // T7-B: 无条件释放 tool slot —— 覆盖成功、普通异常、CancellationException
-            activeRunBudget?.releaseToolSlot()
-            t7ResourceRelease(
+            traceObserver.activeRunBudget?.releaseToolSlot()
+            traceObserver.t7ResourceRelease(
                 resourceType = AgentTraceRecorder.RESOURCE_TOOL_SLOT,
                 resourceId = toolId,
                 leaseToken = toolLease,
@@ -8979,8 +8860,8 @@ class ChatViewModel(
         }
 
         // T9: record tool result event
-        agentTraceRecorder.toolResult(
-            turn = activeTraceTurn,
+        traceObserver.agentTraceRecorder.toolResult(
+            turn = traceObserver.activeTraceTurn,
             toolId = toolId,
             name = name,
             success = result.success,
@@ -8988,9 +8869,9 @@ class ChatViewModel(
             durationMs = System.currentTimeMillis() - etStartMs,
         )
         // T7-A: 观察 —— 工具结束（ToolFinished 语义）
-        t7State(t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS), t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS), "ToolFinished($name)")
+        traceObserver.t7State(ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS), ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS), "ToolFinished($name)")
         // T7-D: 旁路验证 —— 工具结束（resultKnown = 结果已到达）
-        t7Reduce(AgentRunEvent.ToolFinished(name, resultKnown = true))
+        traceObserver.t7Reduce(AgentRunEvent.ToolFinished(name, resultKnown = true))
 
         // T3: failure-learning automation hook. Side-channel only — the
         // failed result still flows to the LLM exactly as before; this just
@@ -9152,255 +9033,6 @@ class ChatViewModel(
         }
     }
 
-    /**
-     * T9: persist one trace line into the run's trace file. The file is
-     * captured once at runAgentLoop entry ([newTraceFile]) so a single run
-     * never fragments across files. Failures are swallowed — tracing must
-     * never break the agent loop.
-     */
-    private fun appendTraceLine(line: String) {
-        runCatching {
-            val file = traceRunFile ?: return
-            file.appendText("$line\n")
-        }
-    }
-
-    /**
-     * T7-A: advisory 预算消耗 + trace 记录。consume 结果无论 Allowed 还是
-     * Denied 都只写 trace，**不阻断**（Denied 意味着观察上限到达，记录
-     * budget_refuse 供审计；T7-C 接入 enforced 模式后才在 Denied 处停止）。
-     * dimension/refuseReason 用 AgentTraceRecorder 的 schema 常量。
-     */
-    private fun t7ConsumeAndTrace(
-        dimension: String,
-        consume: (AgentExecutionBudget) -> BudgetDecision,
-    ): Boolean {
-        val budget = activeRunBudget ?: return true  // 观察未启动（无预算）→ 不阻断
-        // consume 本身是纯逻辑（计数 + 决策），不包 runCatching —— 预算状态
-        // 变化不因 trace 失败而丢失；trace 记录单独包 runCatching。
-        val decision = consume(budget)
-        return when (decision) {
-            is BudgetDecision.Allowed -> {
-                runCatching {
-                    val snap = budget.snapshot()
-                    agentTraceRecorder.budgetConsume(
-                        dimension = dimension,
-                        consumed = 1,
-                        remaining = t7Remaining(dimension, snap),
-                        total = t7Total(dimension, budget),
-                    )
-                }
-                true
-            }
-            is BudgetDecision.Denied -> {
-                val deniedReason = decision.reason  // smart-cast to Denied
-                runCatching {
-                    agentTraceRecorder.budgetRefuse(
-                        dimension = dimension,
-                        requested = 1,
-                        remaining = t7Remaining(dimension, budget.snapshot()),
-                        reason = when (deniedReason) {
-                            BudgetExhaustedReason.TURN_LIMIT,
-                            BudgetExhaustedReason.PROVIDER_ATTEMPT_LIMIT,
-                            BudgetExhaustedReason.TOOL_CALL_LIMIT,
-                            BudgetExhaustedReason.SHELL_COMMAND_LIMIT,
-                            BudgetExhaustedReason.COMPACTION_CALL_LIMIT,
-                            BudgetExhaustedReason.CONCURRENT_TOOLS_LIMIT,
-                            BudgetExhaustedReason.TOKEN_BUDGET_EXCEEDED -> AgentTraceRecorder.REFUSE_BUDGET_EXHAUSTED
-                            BudgetExhaustedReason.DEADLINE_EXPIRED -> AgentTraceRecorder.REFUSE_DEADLINE_REACHED
-                        },
-                    )
-                }
-                false  // T7-C: Denied → 调用点必须停止（不再发新请求/工具）
-            }
-        }
-    }
-
-    private fun t7Remaining(dimension: String, snap: BudgetSnapshot): Int = when (dimension) {
-        AgentTraceRecorder.DIMENSION_TURNS -> snap.turnsUsed.let { T7_OBSERVE_MAX_TURNS - it }
-        AgentTraceRecorder.DIMENSION_PROVIDER_ATTEMPTS -> T7_OBSERVE_MAX_PROVIDER_ATTEMPTS - snap.providerAttemptsUsed
-        AgentTraceRecorder.DIMENSION_TOOL_CALLS -> T7_OBSERVE_MAX_TOOL_CALLS - snap.toolCallsUsed
-        AgentTraceRecorder.DIMENSION_SHELL_COMMANDS -> T7_OBSERVE_MAX_SHELL_COMMANDS - snap.shellCommandsUsed
-        AgentTraceRecorder.DIMENSION_COMPACTION_CALLS -> T7_OBSERVE_MAX_COMPACTION_CALLS - snap.compactionCallsUsed
-        AgentTraceRecorder.DIMENSION_CONCURRENT_TOOLS -> T7_OBSERVE_MAX_CONCURRENT_TOOLS - snap.concurrentToolsActive
-        else -> 0
-    }
-
-    private fun t7Total(dimension: String, budget: AgentExecutionBudget): Int = when (dimension) {
-        AgentTraceRecorder.DIMENSION_TURNS -> budget.maxTurns
-        AgentTraceRecorder.DIMENSION_PROVIDER_ATTEMPTS -> budget.maxProviderAttempts
-        AgentTraceRecorder.DIMENSION_TOOL_CALLS -> budget.maxToolCalls
-        AgentTraceRecorder.DIMENSION_SHELL_COMMANDS -> budget.maxShellCommands
-        AgentTraceRecorder.DIMENSION_COMPACTION_CALLS -> budget.maxCompactionCalls
-        AgentTraceRecorder.DIMENSION_CONCURRENT_TOOLS -> budget.maxConcurrentTools
-        else -> 0
-    }
-
-    /**
-     * T7-A: stateTransition 的容错封装 —— trace 观察失败不影响主执行。
-     * 同时维护 [t7ObservedPhase] 供"任意阶段可达"事件（UserCancelled 等）
-     * 作为准确的 from。
-     */
-    private fun t7State(from: String, to: String, reason: String?) {
-        runCatching { agentTraceRecorder.stateTransition(from, to, reason) }
-        t7ObservedPhase = to
-    }
-
-    /**
-     * T7-A: retryDecision 的容错封装 —— 记录 T3 重试策略的观察结果。
-     */
-    private fun t7Retry(
-        operationType: String,
-        operationName: String?,
-        safetyLevel: String?,
-        outcome: String?,
-        reason: String?,
-        attempt: Int?,
-        maxAttempts: Int?,
-        willRetry: Boolean?,
-    ) {
-        runCatching {
-            agentTraceRecorder.retryDecision(
-                operationType = operationType,
-                operationName = operationName,
-                safetyLevel = safetyLevel,
-                outcome = outcome,
-                reason = reason,
-                attempt = attempt,
-                maxAttempts = maxAttempts,
-                willRetry = willRetry,
-            )
-        }
-    }
-
-    /**
-     * T7-B: 资源 lease 的容错封装 —— 记录 resource_acquire 事件并消耗
-     * 对应预算维度（advisory）。resourceType 用 AgentTraceRecorder 的
-     * RESOURCE_* 常量；leaseToken 用 runId + 资源前缀保证唯一。
-     * 观察失败不影响主执行。
-     */
-    private fun t7ResourceAcquire(
-        resourceType: String,
-        resourceId: String,
-        leaseToken: String,
-    ) {
-        runCatching { agentTraceRecorder.resourceAcquire(resourceType, resourceId, leaseToken) }
-    }
-
-    /**
-     * T7-B: 资源 lease 释放的容错封装 —— 记录 resource_release 事件并释放
-     * 对应预算维度（幂等）。releasedBy 用 AgentTraceRecorder 的 RELEASED_*
-     * 常量，供审计判断释放原因（normal/cancel/finalize/error/timeout）。
-     */
-    private fun t7ResourceRelease(
-        resourceType: String,
-        resourceId: String,
-        leaseToken: String,
-        releasedBy: String,
-    ) {
-        runCatching { agentTraceRecorder.resourceRelease(resourceType, resourceId, leaseToken, releasedBy) }
-    }
-
-    /**
-     * T7-B: 统一终态收尾 —— 写 2.0 trace_end（terminal state + budget 终态
-     * 快照），并清空本轮观察上下文。幂等：trace 侧由 recorder 的 terminal
-     * 去重保证只写一次；本函数对 null budget 安全（观察未启动时 no-op）。
-     */
-    private fun t7EndRun(
-        terminal: AgentTerminal,
-        reason: AgentTerminalReason?,
-        durationMs: Long,
-        error: String? = null,
-    ) {
-        val budget = activeRunBudget
-        val runId = activeRunId
-        // T7-D: 终态 reducer —— RunFinalized 只产生一次终态（reducer 幂等保护）
-        t7Reduce(
-            AgentRunEvent.RunFinalized(
-                terminal = terminal,
-                reason = reason,
-            )
-        )
-        runCatching {
-            // T7-B: session slot lease 释放 —— 任何终态路径都在这里 release，
-            // 与 runAgentLoop 入口的 acquire 配对（lease 平衡可被审计）。
-            runId?.let { rid ->
-                t7ResourceRelease(
-                    resourceType = AgentTraceRecorder.RESOURCE_SESSION_SLOT,
-                    resourceId = activeSessionId,
-                    leaseToken = "slot-$rid",
-                    releasedBy = when (terminal) {
-                        AgentTerminal.SUCCEEDED -> AgentTraceRecorder.RELEASED_NORMAL
-                        AgentTerminal.CANCELLED -> AgentTraceRecorder.RELEASED_CANCEL
-                        AgentTerminal.INTERRUPTED -> AgentTraceRecorder.RELEASED_RECOVERY
-                        AgentTerminal.FAILED -> AgentTraceRecorder.RELEASED_ERROR
-                    },
-                )
-            }
-            val snap = budget?.snapshot()
-            agentTraceRecorder.endRun(
-                terminalState = t7TerminalSchema(terminal),
-                terminalReason = t7TerminalReasonSchema(reason),
-                durationMs = durationMs,
-                totalProviderAttempts = snap?.providerAttemptsUsed,
-                totalToolCalls = snap?.toolCallsUsed,
-                totalShellCommands = snap?.shellCommandsUsed,
-                totalCompactions = snap?.compactionCallsUsed,
-                budgetFinalJson = snap?.let { t7BudgetSnapshotJson(it) },
-                leasesRemaining = 0,
-                error = error,
-            )
-        }
-        activeRunBudget = null
-        activeRunId = null
-        t7ObservedPhase = null
-        t7BudgetStopReason = null
-        t7ReducerState = null  // T7-D: run 结束，状态机清理
-    }
-
-    /**
-     * T9: allocate the trace file for a new run:
-     * `minis-sessions/<sid>/workspace/.traces/agent-<stamp>.jsonl`.
-     * Collision-safe (appends -2/-3…) and applies a simple retention cap
-     * (oldest files pruned beyond [MAX_TRACE_FILES_PER_SESSION]) so a chatty
-     * session can't accumulate unbounded trace data.
-     */
-    private fun newTraceFile(): File? {
-        return runCatching {
-            val stamps = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
-            val baseName = "agent-${stamps.format(Date())}"
-            val dir = PRootKernel.resolveSessionHostPath(
-                activeSessionId,
-                "/var/minis/workspace/.traces",
-                context,
-            ) ?: return null
-            dir.mkdirs()
-            var file = File(dir, "$baseName.jsonl")
-            var n = 2
-            while (file.exists()) {
-                file = File(dir, "$baseName-$n.jsonl")
-                n++
-            }
-            // Allocate the file now so its timestamp marks it as the newest —
-            // retention (which prunes oldest FIRST) then never kills the file
-            // we are about to write into.
-            file.createNewFile()
-            retainTraceFiles(dir)
-            file
-        }.getOrNull()
-    }
-
-    /** Keep at most [MAX_TRACE_FILES_PER_SESSION] files in [dir], oldest first. */
-    private fun retainTraceFiles(dir: File) {
-        runCatching {
-            val files = dir.listFiles { f -> f.isFile && f.name.endsWith(".jsonl") }
-                ?.sortedBy { it.lastModified() }?.toMutableList() ?: return
-            while (files.size > MAX_TRACE_FILES_PER_SESSION) {
-                files.removeAt(0).delete()
-            }
-        }
-    }
-
     private fun maybeReloadSkillsForPath(argsJson: String) {
         com.openminis.app.ui.chat.maybeReloadSkillsForPath(argsJson, skillRepository)
     }
@@ -9414,13 +9046,13 @@ class ChatViewModel(
     ): ToolExecutionResult {
         // T7-A: 观察 —— shell 命令消耗 shell_commands 预算（advisory，不阻断）
         // T7-C: shell_commands 预算耗尽 → 不执行命令，返回明确错误
-        if (!t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_SHELL_COMMANDS) { it.consumeShellCommand() }) {
+        if (!traceObserver.t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_SHELL_COMMANDS) { it.consumeShellCommand() }) {
             return ToolExecutionResult("Error: Agent budget exhausted (shell_commands)", false)
         }
         // T7-B: shell lease —— 执行期间占用 shell 资源，finally 无条件释放
         // （覆盖成功、异常、取消路径，不泄漏 shell 槽位）
-        val shellLease = "shell-${toolId}-${activeRunId ?: "norun"}"
-        t7ResourceAcquire(
+        val shellLease = "shell-${toolId}-${traceObserver.activeRunId ?: "norun"}"
+        traceObserver.t7ResourceAcquire(
             resourceType = AgentTraceRecorder.RESOURCE_SHELL,
             resourceId = "shell_execute",
             leaseToken = shellLease,
@@ -9461,7 +9093,7 @@ class ChatViewModel(
             )
         } finally {
             // T7-B: 无条件释放 shell lease —— 覆盖成功、异常、取消路径
-            t7ResourceRelease(
+            traceObserver.t7ResourceRelease(
                 resourceType = AgentTraceRecorder.RESOURCE_SHELL,
                 resourceId = "shell_execute",
                 leaseToken = shellLease,
@@ -10909,13 +10541,13 @@ Environment variables:
         streamJob?.cancel()
         _isStreaming.value = false
         // T7-A: 观察 —— 用户取消（T5 UserCancelled 语义，进入收尾）
-        t7State(
-            t7ObservedPhase ?: t7PhaseSchema(AgentRunPhase.CALLING_MODEL),
-            t7PhaseSchema(AgentRunPhase.FINALIZING),
+        traceObserver.t7State(
+            traceObserver.t7ObservedPhase ?: ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL),
+            ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.FINALIZING),
             "UserCancelled",
         )
         // T7-D: 旁路验证 —— 用户取消
-        t7Reduce(AgentRunEvent.UserCancelled("user_stop"))
+        traceObserver.t7Reduce(AgentRunEvent.UserCancelled("user_stop"))
         // T-streaming-side-channel: flush any in-flight delta back into the
         // canonical message so the rest of cancelStream's cleanup (publish
         // overlay excerpt, persist, retry-eligible state) sees the real
