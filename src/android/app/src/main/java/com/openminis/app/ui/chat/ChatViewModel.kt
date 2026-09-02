@@ -947,7 +947,7 @@ class ChatViewModel(
         override fun string(resId: Int, vararg args: Any): String = context.getString(resId, *args)
         override fun emitFallbackToast(text: String) { _fallbackToastEvent.tryEmit(text) }
         override fun updateSessionPreview(text: String) {
-            chatRepository.updateSessionPreview(realSessionId.ifEmpty { sessionId }, text)
+            viewModelScope.launch { chatRepository.updateSessionPreview(realSessionId.ifEmpty { sessionId }, text) }
         }
         override val agentHistory: MutableList<LLMMessage> get() = this@ChatViewModel.agentHistory
         override val agentTools: List<AgentToolDefinition> get() = this@ChatViewModel.agentTools
@@ -1007,7 +1007,20 @@ class ChatViewModel(
             finishedAllToolBlocks: List<AssistantBlock>,
         ): InjectedTurn? = this@ChatViewModel.injectQueuedPromptsAsNewTurn(
             finishedAssistantId, finishedAccumulatedText, finishedAllToolBlocks)
-        override suspend fun drainQueuedPrompts(): String? = this@ChatViewModel.drainQueuedPrompts()
+        override suspend fun drainQueuedPrompts(): String? {
+            // The engine-facing surface is argless; the VM implementation
+            // takes (provider, systemPrompt, fallbackStrategy) — those are
+            // the values the original loop captured at send/retry/resume
+            // entry. Rebuild them here exactly the way those callers did.
+            val provider = currentProvider ?: return null
+            val systemPrompt = buildSystemPrompt()
+            val activeFallbackStrategy = run {
+                val groupId = _selectedGroupId.value
+                groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
+                    ?: com.openminis.app.data.model.FallbackStrategy.default
+            }
+            return this@ChatViewModel.drainQueuedPrompts(provider, systemPrompt, activeFallbackStrategy)
+        }
         override fun finalizeAtTurnLimit(assistantId: String, text: String, blocks: List<AssistantBlock>) =
             this@ChatViewModel.finalizeAtTurnLimit(assistantId, text, blocks)
         override val toolLoopDetector: ToolLoopDetector get() = this@ChatViewModel.toolLoopDetector
@@ -5288,7 +5301,9 @@ class ChatViewModel(
      * entry — its sole purpose is to break up the consecutive-user run for
      * the next API call; chat history reconstruction would just hide it.
      */
-    private data class InjectedTurn(val newAssistantId: String)
+    // [FE-5 route C step 3] Loop-session queue types — InjectedTurn moved to
+    // AgentLoopHost.kt (the engine returns/consumes it); the VM keeps its own
+    // alias-free references. The old private nested data class is gone.
 
     private suspend fun injectQueuedPromptsAsNewTurn(
         finishedAssistantId: String,
@@ -5459,7 +5474,7 @@ class ChatViewModel(
         provider: LLMProvider,
         systemPrompt: String?,
         fallbackStrategy: com.openminis.app.data.model.FallbackStrategy,
-    ) {
+    ): String? {
         while (_promptQueue.value.isNotEmpty()) {
             val queued = _promptQueue.value
             _promptQueue.value = emptyList()
@@ -5569,6 +5584,7 @@ class ChatViewModel(
                 break
             }
         }
+        return null
     }
 
     fun sendMessage(text: String) {

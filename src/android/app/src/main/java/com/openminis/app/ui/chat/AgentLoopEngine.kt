@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import com.openminis.app.R
 
 /**
  * FE-5 route C step 3: the agent loop engine. The ~1940-line body of
@@ -63,6 +64,7 @@ internal class AgentLoopEngine(
 ) {
     private companion object {
         private const val TAG_STREAM = "ChatVMStream"
+        private const val TAG = "ChatViewModel"
     }
 
     /** Verbatim lift of ChatViewModel.unwrapFlowException (used by the retry path). */
@@ -75,7 +77,8 @@ internal class AgentLoopEngine(
         return e
     }
 
-    private suspend fun runAgentLoop(
+    /** Verbatim lift of ChatViewModel.runAgentLoop entry (FE-5 route C step 3). */
+    internal suspend fun runAgentLoop(
         provider: LLMProvider,
         systemPrompt: String?,
         fallbackProviders: List<FallbackCandidate> = emptyList(),
