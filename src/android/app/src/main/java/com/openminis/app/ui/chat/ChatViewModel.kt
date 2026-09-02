@@ -4229,7 +4229,8 @@ class ChatViewModel(
      * snapshots) without forcing the render layer to consult the delta map.
      */
     internal fun effectiveContent(id: String): String? {
-        val delta = _streamingById.value[id]        if (delta != null) return delta.content
+        val delta = _streamingById.value[id]
+        if (delta != null) return delta.content
         return _messages.value.firstOrNull { it.id == id }?.content
     }
 
