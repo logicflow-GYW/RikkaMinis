@@ -58,13 +58,8 @@ import com.openminis.app.provider.LLMProvider
 import com.openminis.app.provider.ProviderFactory
 import com.openminis.app.provider.catalogMaxThinkingLevel
 import com.openminis.app.provider.effectiveMaxThinkingLevel
-import com.openminis.app.agent.shell.BashismDetector
-import com.openminis.app.agent.shell.BashismReminder
-import com.openminis.app.agent.shell.OnDemandBash
 import com.openminis.app.sandbox.ExecutionCoordinator
 import com.openminis.app.sandbox.PRootKernel
-import com.openminis.app.terminal.MinisOpenUrlBroker
-import com.openminis.app.terminal.MinisUrlMarker
 import com.openminis.app.tools.AgentTraceRecorder
 import com.openminis.app.tools.AgentTools
 import com.openminis.app.tools.FileEditTool
@@ -9072,116 +9067,42 @@ class ChatViewModel(
 
         // 4. Build system prompt + history
         val systemPrompt = SubagentSkill.buildSystemPrompt(skill)
-        val history = mutableListOf(LLMMessage(role = LLMMessage.Role.USER, content = query))
         val provider = currentProvider ?: return ToolExecutionResult(
             "Error: No active provider available", false, toolTitle = title,
         )
 
-        // 5. Run the sub-agent loop
-        val resultSb = StringBuilder()
-        var turns = 0
-        var lastText = ""
-
-        try {
-            while (turns < config.maxTurns) {
-                turns++
-                val instance = provider.instanceContext ?: return ToolExecutionResult(
-                    "Error: No provider instance context for sub-agent remote execution",
-                    false, toolTitle = title,
-                )
-                val textSb = StringBuilder()
-                val toolCalls = mutableListOf<SubagentToolCall>()
-
-                // TF-D: sub-agent runs through :modelservice via the gateway. Chunks
-                // are accumulated incrementally as they stream in — never buffered
-                // wholesale via `toList()` (unbounded retention of the whole turn).
-                ProviderExecutionGateway.stream(
+        // 5. Run the sub-agent loop (extracted engine). Guard first: the
+        // original returned this exact error when the provider had no
+        // instance context (setup failure, not a mid-run error).
+        if (provider.instanceContext == null) {
+            return ToolExecutionResult(
+                "Error: No provider instance context for sub-agent remote execution",
+                false, toolTitle = title,
+            )
+        }
+        return com.openminis.app.ui.chat.runSubagentLoop(
+            skillName = skillName,
+            query = query,
+            title = "Sub-agent: ${skill.name}",
+            config = config,
+            systemPrompt = systemPrompt,
+            streamProvider = { messages ->
+                val instance = provider.instanceContext!!
+                com.openminis.app.sandbox.offload.ProviderExecutionGateway.stream(
                     context = context,
                     instance = instance,
                     model = provider.model,
-                    messages = history.toList(),
+                    messages = messages,
                     systemPrompt = systemPrompt,
                     maxTokens = config.maxOutputTokens,
                     temperature = null,
                     tools = subagentTools,
                     thinkingLevel = ThinkingLevel.OFF,
-                ).collect { chunk ->
-                    when (chunk) {
-                        is LLMStreamChunk.Text -> textSb.append(chunk.text)
-                        is LLMStreamChunk.ToolCallComplete -> {
-                            toolCalls.add(SubagentToolCall(chunk.id, chunk.name, chunk.args))
-                        }
-                        else -> {}
-                    }
-                }
-
-                val text = textSb.toString()
-                lastText = text
-                if (text.isNotBlank()) {
-                    if (resultSb.isNotEmpty()) resultSb.append('\n')
-                    resultSb.append(text)
-                }
-
-                if (toolCalls.isEmpty()) {
-                    // Model finished naturally — no more tool calls
-                    break
-                }
-
-                // Append assistant turn with tool uses to history
-                history.add(LLMMessage(
-                    role = LLMMessage.Role.ASSISTANT,
-                    content = text,
-                    contentParts = toolCalls.map { call ->
-                        AgentContentPart.ToolUse(id = call.id, name = call.name, input = call.args)
-                    },
-                ))
-
-                // Execute tools sequentially
-                for (call in toolCalls) {
-                    val result = executeSubagentTool(call.name, call.args.toString())
-                    val resultContent = if (result.success) {
-                        result.output
-                    } else {
-                        "Error: ${result.output}"
-                    }
-                    history.add(LLMMessage(
-                        role = LLMMessage.Role.USER,
-                        content = "Result of ${call.name} (${call.id}):\n$resultContent",
-                        contentParts = listOf(AgentContentPart.ToolResult(
-                            id = call.id, name = call.name,
-                            content = resultContent, isError = !result.success,
-                        )),
-                    ))
-                }
-            }
-        } catch (e: Exception) {
-            val msg = e.message ?: e.javaClass.simpleName
-            AppLogger.warning(TAG, "[Subagent] '$skillName' error after $turns turn(s): $msg")
-            val partial = resultSb.toString().ifBlank { "" }
-            val summary = buildString {
-                append("Sub-agent '$skillName' encountered an error after $turns turn(s).\n")
-                if (partial.isNotBlank()) {
-                    append("\nPartial output:\n---\n$partial\n---\n")
-                }
-                append("\nError: $msg")
-            }
-            return ToolExecutionResult(summary, false, toolTitle = "Sub-agent: ${skill.name}")
-        }
-
-        if (turns >= config.maxTurns && lastText.isNotBlank()) {
-            resultSb.append("\n\n[Sub-agent reached max turns (${config.maxTurns})]")
-        }
-
-        val finalText = resultSb.toString().trim()
-        if (finalText.isBlank()) {
-            return ToolExecutionResult(
-                "Sub-agent '$skillName' completed in $turns turn(s) with no output.",
-                true, toolTitle = "Sub-agent: ${skill.name}",
-            )
-        }
-
-        val summary = "Sub-agent '$skillName' completed in $turns turn(s).\n\n---\n$finalText"
-        return ToolExecutionResult(summary, true, toolTitle = "Sub-agent: ${skill.name}")
+                )
+            },
+            executeSubTool = { name, subArgs -> executeSubagentTool(name, subArgs) },
+            log = { AppLogger.warning(TAG, it) },
+        )
     }
 
     /**
@@ -9481,39 +9402,7 @@ class ChatViewModel(
     }
 
     private fun maybeReloadSkillsForPath(argsJson: String) {
-        runCatching {
-            val path = JSONObject(argsJson).optString("path", "")
-            if (path.contains("/skills/") && path.endsWith("SKILL.md")) {
-                skillRepository?.reloadFromDisk()
-            }
-        }
-    }
-
-    /** Sentinel returned by the bash wrapper when bash is missing at run time,
-     *  distinct from a script that legitimately exits 127 (T-bash-on-demand M5). */
-    private val BASH_MISSING_SENTINEL = 119
-
-    /** Wrap a script to run under bash via a guest-side self-written temp file
-     *  (base64, single line, self-cleaning), guarding on `command -v bash` so a
-     *  vanished bash is detected precisely for inline self-heal.
-     *
-     *  The whole wrapper runs inside a SUBSHELL `( … )`. This is load-bearing on
-     *  Android: PersistentShell drives commands as `{cmd}; echo …_EXIT_$?…` and
-     *  reads the exit code from that marker line. A bare `|| exit 119` would exit
-     *  the persistent shell process itself BEFORE the marker echo runs, so no
-     *  marker is emitted and PersistentShell.parseExitCode falls back to -1 —
-     *  the M5 self-heal sentinel check (== 119 / 30464) then never matches and a
-     *  vanished bash is never re-installed. Wrapping in a subshell makes
-     *  `exit 119` leave only the subshell, so `$?` = 119 reaches the marker. */
-    private fun wrapForBash(script: String): String {
-        // [T-heredoc-trailing-newline] A heredoc that ends the decoded file with
-        // no trailing newline fails with "unexpected end of file". Guarantee one.
-        val normalized = if (script.endsWith("\n")) script else script + "\n"
-        val b64 = android.util.Base64.encodeToString(
-            normalized.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
-        return "( command -v bash >/dev/null 2>&1 || exit $BASH_MISSING_SENTINEL; " +
-            "printf %s '$b64' | base64 -d > /tmp/.minis-exec-\$\$.sh && " +
-            "bash /tmp/.minis-exec-\$\$.sh; rc=\$?; rm -f /tmp/.minis-exec-\$\$.sh; exit \$rc )"
+        com.openminis.app.ui.chat.maybeReloadSkillsForPath(argsJson, skillRepository)
     }
 
     private suspend fun executeShellCommand(
@@ -9536,180 +9425,40 @@ class ChatViewModel(
             resourceId = "shell_execute",
             leaseToken = shellLease,
         )
+        // FE-5 route B: the engine owns bashism detection / coordinator
+        // dispatch / URL brokering / env redaction; this wrapper only owns
+        // the T7 lease lifecycle and the toolBlocks UI side channel.
         try {
-            return try {
-                val args = JSONObject(argsJson)
-                var command = args.optString("command", "")
-                val timeoutSec = args.optInt("timeout", 900).coerceIn(1, 900)
-                val delaySec = args.optInt("delay", 0).coerceAtLeast(0)
-                val toolTitle = args.optString("tool_title", "shell_execute")
-
-                if (command.isBlank()) {
-                    return ToolExecutionResult("Error: 'command' is required", false, toolTitle = toolTitle)
-                }
-
-            // [T-android-overlay-finalize item 1] Removed the
-            // shell-specific status hack ("shell: $toolTitle"). Since the
-            // dispatch loop (~5003) now surfaces `tool_title` in the overlay
-            // label uniformly via SessionActivityTracker.updateToolStatus(
-            // status, toolName, isRunning, toolTitle), the per-tool override
-            // produced redundant "shell / shell: <title>" rows. Lifecycle
-            // status ("Running: shell_execute") set by the dispatch loop is
-            // sufficient.
-
-            // Delay execution: block the agent flow without occupying the shell,
-            // allowing other concurrent tasks to use it during the wait period.
-            if (delaySec > 0) {
-                for (remaining in delaySec downTo 1) {
-                    val idx = toolBlocks.indexOfFirst { it.id == toolId }
-                    if (idx >= 0) {
-                        val mm = remaining / 60
-                        val ss = remaining % 60
-                        val countdown = if (mm > 0) String.format("%d:%02d", mm, ss) else "${ss}s"
-                        toolBlocks[idx] = toolBlocks[idx].copy(content = "⏳ Waiting $countdown before executing...")
-                        withContext(Dispatchers.Main) {
-                            updateAssistantMessage(assistantId, currentText, true, toolBlocks)
+            resetDisplayBuffer(toolId)
+            val result = try {
+                executeShellCommandEngine(
+                    argsJson = argsJson,
+                    dispatchSessionId = activeSessionId,
+                    context = context,
+                    toolKey = toolId,
+                    onBlockUpdate = { displayContent ->
+                        val idx = toolBlocks.indexOfFirst { it.id == toolId }
+                        if (idx >= 0) {
+                            toolBlocks[idx] = toolBlocks[idx].copy(content = displayContent)
+                            viewModelScope.launch(Dispatchers.Main) {
+                                updateAssistantMessage(assistantId, currentText, true, toolBlocks)
+                            }
                         }
-                    }
-                    kotlinx.coroutines.delay(1000)
-                }
-                val idx = toolBlocks.indexOfFirst { it.id == toolId }
-                if (idx >= 0) {
-                    toolBlocks[idx] = toolBlocks[idx].copy(content = "")
-                }
+                    },
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return ToolExecutionResult("Error: ${e.message}", false)
+            } finally {
+                resetDisplayBuffer(toolId)
             }
-
-            // activeSessionId resolves to the persisted id once
-            // ensureSession() has run, so every shell runs in a directory
-            // that survives VM recreation.
-            val dispatchSessionId = activeSessionId
-
-            // [T-bash-on-demand] Detect busybox-ash-incompatible bash syntax and,
-            // if found, transparently install + switch to bash. Install time is
-            // NOT charged against the command timeout (OnDemandBash has its own
-            // budget). `command` is rewritten to the bash-wrapped form on the S/E
-            // path; `bashReminder` is attached if we fall back to sh. Only this
-            // agent path runs here; the in-app terminal is untouched.
-            BashismDetector.ensureLoaded(context)
-            val bashism = BashismDetector.detect(command)
-            var bashReminder: String? = null
-            val originalCommand = command
-            var bashScript: String? = null   // set when we bash-wrapped; enables M5 self-heal retry
-            if (bashism.needsBash) {
-                val executor = OnDemandBash.Executor { c, t ->
-                    ExecutionCoordinator.execute(sessionId = dispatchSessionId, command = c, timeout = t).exitCode
-                }
-                when (val outcome = OnDemandBash.ensureBash(context, executor)) {
-                    is OnDemandBash.Outcome.Available -> {
-                        if (bashism.mustSwitchInterpreter) {
-                            // §3.2 M3: self-write the script in the guest (base64,
-                            // single line, self-cleaning) and run it under bash.
-                            // The `command -v bash || exit 119` guard detects a
-                            // bash that vanished after our cache check (M5) so we
-                            // can self-heal below instead of failing.
-                            command = wrapForBash(command)
-                            bashScript = originalCommand // remember for self-heal retry
-                        }
-                        // T1-only (script invokes bash itself) → run as-is under sh.
-                    }
-                    is OnDemandBash.Outcome.Unavailable ->
-                        bashReminder = BashismReminder.build(bashism.hits, outcome.reason)
-                }
-            }
-
-            var result = ExecutionCoordinator.execute(
-                sessionId = dispatchSessionId,
-                command = command,
-                timeout = timeoutSec * 1000L,
-                lineCallback = lc@{ rawLine ->
-                    // Strip any OSC MinisOpenURL markers emitted by
-                    // /usr/local/bin/minis-open and forward the captured
-                    // URLs to the broker so the chat screen can present the
-                    // in-app preview. Lines that were *entirely* a marker
-                    // (nothing visible afterwards) are dropped so the tool
-                    // output doesn't grow blank rows.
-                    val (cleanedLine, capturedUrls) = MinisUrlMarker.extract(rawLine)
-                    for (raw in capturedUrls) MinisOpenUrlBroker.offer(raw)
-                    if (cleanedLine.isEmpty() && rawLine.isNotEmpty()) return@lc
-
-                    val idx = toolBlocks.indexOfFirst { it.id == toolId }
-                    if (idx >= 0) {
-                        val current = toolBlocks[idx].content
-                        val updated = if (current.isEmpty()) cleanedLine else "$current\n$cleanedLine"
-                        // Keep last 50 lines for display
-                        val trimmed = updated.lines().takeLast(50).joinToString("\n")
-                        toolBlocks[idx] = toolBlocks[idx].copy(content = trimmed)
-                        viewModelScope.launch(Dispatchers.Main) {
-                            updateAssistantMessage(assistantId, currentText, true, toolBlocks)
-                        }
-                    }
-                },
+            return ToolExecutionResult(
+                output = result.output,
+                success = result.success,
+                toolTitle = result.toolTitle,
+                timedOut = result.timedOut,
             )
-
-            // [T-bash-on-demand] M5 self-heal: our bash wrapper returns sentinel
-            // 119 when bash vanished (user apk del'd) after we cached it
-            // available. Re-probe + reinstall once and rerun THIS command under
-            // bash inline, so it still succeeds instead of failing.
-            // Accept both the raw sentinel (119) and the wait(2)-encoded status
-            // (119 << 8 = 30464) the coordinator may surface.
-            if ((result.exitCode == BASH_MISSING_SENTINEL ||
-                    result.exitCode == (BASH_MISSING_SENTINEL shl 8)) && bashScript != null) {
-                OnDemandBash.markDisappeared()
-                val executor = OnDemandBash.Executor { c, t ->
-                    ExecutionCoordinator.execute(sessionId = dispatchSessionId, command = c, timeout = t).exitCode
-                }
-                val healed = OnDemandBash.ensureBash(context, executor)
-                command = if (healed is OnDemandBash.Outcome.Available) wrapForBash(bashScript!!) else bashScript!!
-                result = ExecutionCoordinator.execute(
-                    sessionId = dispatchSessionId, command = command, timeout = timeoutSec * 1000L)
-            }
-
-            // Also scrub markers from the aggregated one-shot output and
-            // broker any URLs that only appeared there (defensive — handles
-            // executors that don't fire lineCallback for every line).
-            val (cleanedOutput, oneShotUrls) = MinisUrlMarker.extract(result.output)
-            for (raw in oneShotUrls) MinisOpenUrlBroker.offer(raw)
-            val output = if (cleanedOutput.isBlank()) "(no output)" else cleanedOutput
-            val exitInfo = if (result.exitCode != 0) " (exit code ${result.exitCode})" else ""
-            // Exit code 124 is the BusyBox/GNU timeout-utility convention for
-            // a command that exceeded its budget. PersistentShell returns this
-            // when its `withTimeoutOrNull(timeout)` wrapper fires.
-            val timedOut = result.exitCode == 124
-
-            // Redact env-var values that leaked into the captured output
-            // before the model sees them. No-op when Privacy Mode is OFF.
-            // Done after exitInfo is appended so the suffix can't accidentally
-            // contain a secret that escaped masking. The user-visible streamed
-            // content (toolBlocks above) is intentionally left unmasked.
-            val finalOutput = "$output$exitInfo"
-            val (redactedOut, redactHits) = com.openminis.app.data.EnvVarRedactor.redactIfEnabled(finalOutput)
-            if (redactHits > 0) {
-                android.util.Log.i("EnvVarRedact", "shell_execute: masked $redactHits env-var value(s) in tool result")
-            }
-
-            // [T-bash-on-demand] M5 self-heal: bash disappeared (user apk del'd)
-            // → re-probe next time.
-            if (result.exitCode == 127 && bashism.mustSwitchInterpreter) {
-                OnDemandBash.markDisappeared()
-            }
-            // §4.2: append the bashism reminder when we fell back to sh and the
-            // command failed OR any silent-class rule was hit (S-class exit-0
-            // exception, default-on).
-            val withReminder = bashReminder?.let { rem ->
-                if (result.exitCode != 0 || bashism.hasSilent) "$redactedOut\n\n$rem" else redactedOut
-            } ?: redactedOut
-
-            ToolExecutionResult(
-                output = withReminder,
-                success = result.exitCode == 0,
-                toolTitle = toolTitle,
-                timedOut = timedOut,
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            ToolExecutionResult("Error: ${e.message}", false)
-        }
         } finally {
             // T7-B: 无条件释放 shell lease —— 覆盖成功、异常、取消路径
             t7ResourceRelease(
@@ -9721,83 +9470,15 @@ class ChatViewModel(
         }
     }
 
-    private suspend fun executeBrowserUseTool(argsJson: String): ToolExecutionResult {
-        val input = BrowserActionInput.parse(argsJson)
-            ?: return ToolExecutionResult("Error: Invalid browser_use input", false)
-
-        return try {
-            val result = browserTabPool.execute(input)
-            val toolTitle = try {
-                JSONObject(argsJson).optString("tool_title", "browser_use")
-            } catch (_: Exception) { "browser_use" }
-
-            var output = result.text
-            // [T-android-browser-toolresult-guard] Bound browser tool result text
-            // before it enters ToolExecutionResult → message → renderer/LLM context.
-            // A 900KiB get_text (Fix-03 cap) made the main thread hang (ANR) when
-            // the toolResult message rendered full-width, and no LLM context can
-            // use 900K chars anyway. Truncate to a readable bound with an explicit
-            // notice so the agent knows it was cut (truncated flag already flows
-            // from the bridge; this is the final belt-and-suspenders bound).
-            val browserToolResultMaxChars = 64 * 1024
-            if (output.length > browserToolResultMaxChars) {
-                val truncatedNotice = "\n\n…[tool result truncated: ${output.length} chars > $browserToolResultMaxChars — re-run get_text with a selector/scroll to read the rest]"
-                output = output.take(browserToolResultMaxChars) + truncatedNotice
-            }
-            var persistentImagePath: String? = result.imageFilePath
-            var inferenceBytes: ByteArray? = null
-
-            // Persist browser screenshots to /var/minis/browser/<session>/ so the
-            // agent can reference them via minis:// in subsequent tool calls
-            // (mirrors iOS AIChatViewModel case "browser_use").
-            val base64 = result.base64Image
-            var linuxImagePath: String? = null
-            if (base64 != null) {
-                val raw = try {
-                    android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
-                } catch (_: Exception) { null }
-                if (raw != null) {
-                    // Anthropic supports up to 8000×8000 / 5MB; we standardize at 2000
-                    // long edge across attachments / browser / read_image.
-                    inferenceBytes = resizeJpegToMaxEdge(raw, 2000) ?: raw
-                    val filename = "screenshot_${System.currentTimeMillis() / 1000}.jpg"
-                    val persistPath = persistBrowserArtifact(filename, raw)
-                    if (persistPath != null) {
-                        persistentImagePath = persistPath
-                        linuxImagePath = "/var/minis/browser/$filename"
-                        linuxPathToMinisURL(linuxImagePath)?.let {
-                            output = "$output\nminis_url: $it"
-                        }
-                    }
-                }
-            }
-
-            // Persist fetched files (fetch action) and append minis_url
-            val fetchData = result.fetchedFileData
-            val fetchName = result.fetchedFileName
-            if (fetchData != null && fetchName != null) {
-                persistBrowserArtifact(fetchName, fetchData)
-                linuxPathToMinisURL("/var/minis/browser/$fetchName")?.let {
-                    output = "$output\nminis_url: $it"
-                }
-            }
-
-            ToolExecutionResult(
-                output = output,
-                success = result.success,
-                imageData = inferenceBytes,
-                imageMimeType = if (inferenceBytes != null) "image/jpeg" else null,
-                toolTitle = toolTitle,
-                pageURL = result.pageURL,
-                imageFilePath = persistentImagePath,
-                imageLinuxPath = linuxImagePath,
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            ToolExecutionResult("Error: ${e.message}", false)
-        }
-    }
+    private suspend fun executeBrowserUseTool(argsJson: String): ToolExecutionResult =
+        com.openminis.app.ui.chat.executeBrowserUseTool(
+            argsJson = argsJson,
+            tabPool = browserTabPool,
+            artifactWriter = { filename, data ->
+                persistBrowserArtifact(filename, data)
+            },
+            resizeJpeg = { raw, edge -> resizeJpegToMaxEdge(raw, edge) },
+        )
 
     /**
      * Write bytes to <filesDir>/minis-sessions/<sessionId>/browser/<filename>.
@@ -9805,34 +9486,11 @@ class ChatViewModel(
      * read it back via file_read / file_write / minis:// URLs.
      * Returns the host absolute path on success, null otherwise.
      */
-    private fun persistBrowserArtifact(filename: String, data: ByteArray): String? {
-        val sid = activeSessionId.takeIf { it.isNotEmpty() } ?: return null
-        return try {
-            val dir = java.io.File(context.filesDir, "minis-sessions/$sid/browser").apply { mkdirs() }
-            val file = java.io.File(dir, filename)
-            file.writeBytes(data)
-            file.absolutePath
-        } catch (e: Exception) {
-            android.util.Log.w("ChatViewModel", "persistBrowserArtifact failed: ${e.message}")
-            null
-        }
-    }
+    private fun persistBrowserArtifact(filename: String, data: ByteArray): String? =
+        com.openminis.app.ui.chat.persistBrowserArtifact(activeSessionId, filename, data, context)
 
-    /**
-     * Convert a Linux path under /var/minis/ to a percent-encoded minis:// URL.
-     * Mirrors iOS AIChatViewModel.linuxPathToMinisURL.
-     */
-    private fun linuxPathToMinisURL(path: String): String? {
-        val prefix = "/var/minis/"
-        if (!path.startsWith(prefix)) return null
-        val rest = path.removePrefix(prefix)
-        val slash = rest.indexOf('/')
-        if (slash < 0) return null
-        val namespace = rest.substring(0, slash)
-        val filename = rest.substring(slash + 1)
-        val encoded = java.net.URLEncoder.encode(filename, "UTF-8").replace("+", "%20")
-        return "minis://$namespace/$encoded"
-    }
+    private fun linuxPathToMinisURL(path: String): String? =
+        com.openminis.app.ui.chat.linuxPathToMinisURL(path)
 
     /**
      * Resize a JPEG so its longest edge is at most `maxEdge` px. Returns null
@@ -9855,54 +9513,25 @@ class ChatViewModel(
 
     private fun executeMemoryWriteTool(argsJson: String): ToolExecutionResult {
         val repo = memoryRepository ?: return ToolExecutionResult("Error: Memory not available", false)
-        if (!_memoryEnabled.value) {
-            val msg = "Memory writes are disabled for this session (user toggled /memory off). Reads remain available."
-            return ToolExecutionResult(msg, false, toolTitle = "Memory (disabled)")
+        return com.openminis.app.ui.chat.executeMemoryWriteTool(argsJson, repo, _memoryEnabled.value) { record ->
+            _memoryToolRecords.value = _memoryToolRecords.value + record
         }
-        val result = MemoryTools.executeMemoryWrite(argsJson, repo)
-        // Record for SessionMemorySheet
-        val content = try {
-            JSONObject(argsJson).optString("content", "")
-        } catch (_: Exception) { "" }
-        _memoryToolRecords.value = _memoryToolRecords.value + MemoryToolRecord(
-            title = result.toolTitle,
-            isWrite = true,
-            preview = content.lines().firstOrNull { it.isNotBlank() }?.take(100) ?: "",
-            output = result.output,
-            writtenContent = content,
-        )
-        return ToolExecutionResult(result.output, result.success, toolTitle = result.toolTitle)
     }
 
     private fun executeMemoryGetTool(argsJson: String): ToolExecutionResult {
         val repo = memoryRepository ?: return ToolExecutionResult("Error: Memory not available", false)
-        val result = MemoryTools.executeMemoryGet(argsJson, repo)
-        val keywords = try {
-            JSONObject(argsJson).optString("keywords", "")
-        } catch (_: Exception) { "" }
-        _memoryToolRecords.value = _memoryToolRecords.value + MemoryToolRecord(
-            title = result.toolTitle,
-            isWrite = false,
-            preview = if (keywords.isNotBlank()) "Search: $keywords" else result.output.take(100),
-            output = result.output,
-            keywords = keywords,
-        )
-        return ToolExecutionResult(result.output, result.success, toolTitle = result.toolTitle)
+        return com.openminis.app.ui.chat.executeMemoryGetTool(argsJson, repo) { record ->
+            _memoryToolRecords.value = _memoryToolRecords.value + record
+        }
     }
 
     // [T6-rollup] On-demand memory rollup: distills the previous day's daily
     // log into MEMORY-ROLLUP.md. Uses the same memory dir as the repository.
     private fun executeMemoryRollupTool(): ToolExecutionResult {
         val repo = memoryRepository ?: return ToolExecutionResult("Error: Memory not available", false)
-        val memoryDir = repo.memoryDirectory()
-        val result = MemoryRollupTool.execute(memoryDir)
-        _memoryToolRecords.value = _memoryToolRecords.value + MemoryToolRecord(
-            title = result.toolTitle,
-            isWrite = false,
-            preview = result.output.take(100),
-            output = result.output,
-        )
-        return ToolExecutionResult(result.output, result.success, toolTitle = result.toolTitle)
+        return com.openminis.app.ui.chat.executeMemoryRollupTool(repo) { record ->
+            _memoryToolRecords.value = _memoryToolRecords.value + record
+        }
     }
 
     // ─── UI Helpers ──────────────────────────────────────────────────────
