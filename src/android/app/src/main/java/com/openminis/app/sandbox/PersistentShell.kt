@@ -64,6 +64,15 @@ class PersistentShell(
     @Volatile
     private var pendingCallback: CommandCallback? = null
 
+    /**
+     * [fix/audit-s4h3] True while a command is mid-flight on this shell
+     * (callback pending). ExecutionCoordinator's idle recycler uses this to
+     * avoid reaping a shell whose `lastActiveMs` is stale only because the
+     * timestamp updates on command COMPLETION, not start.
+     */
+    val isBusy: Boolean
+        get() = pendingCallback != null
+
     val isAlive: Boolean
         get() = process?.isAlive == true
 

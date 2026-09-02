@@ -32,6 +32,10 @@ import java.util.concurrent.ConcurrentHashMap
  * Manages up to 3 browser tabs for the agent, mirroring iOS BrowserTabPool.
  * All tabs share the same cookie store by default on Android.
  */
+
+/** [fix/audit-s4h1] Raised when the pool is at MAX_TABS and no tab freed up within the bounded wait. */
+class BrowserTabPoolExhaustedException(message: String) : Exception(message)
+
 class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
 
     companion object {
@@ -691,8 +695,15 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
         implicitTab: Boolean,
         acquireTabId: Int? = null,
     ): BrowserActionResult {
-        val tab = acquireTab(acquireTabId ?: input.tabId)
-            ?: return BrowserActionResult.error("Failed to acquire browser tab")
+        // [fix/audit-s4h1] acquireTab can now throw BrowserTabPoolExhausted
+        // instead of silently hijacking a busy tab — surface it as an error
+        // result (recoverable, visible) rather than letting it propagate out
+        // of the browser action path.
+        val tab = try {
+            acquireTab(acquireTabId ?: input.tabId)
+        } catch (e: BrowserTabPoolExhaustedException) {
+            return BrowserActionResult.error(e.message ?: "all browser tabs busy")
+        } ?: return BrowserActionResult.error("Failed to acquire browser tab")
         return try {
             val result = tab.manager.execute(input)
 
@@ -871,7 +882,20 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
                     if (picked != null) break
                 }
             }
-            picked ?: currentTabs.firstOrNull()
+            // [fix/audit-s4h1] The old fallback was `picked ?: currentTabs
+            // .firstOrNull()` — the LOWEST-ID (= oldest-created) tab, which at
+            // this point is necessarily still inUse=true (any free tab would
+            // have been picked above), i.e. exactly the trampling the comment
+            // above forbids: one session's navigate/execute_js stomps another
+            // session's in-flight action. Fail explicitly instead: the caller
+            // surfaces an "all tabs busy" error, which is recoverable, while
+            // a silently hijacked tab is not.
+            if (picked == null) {
+                throw BrowserTabPoolExhaustedException(
+                    "all ${currentTabs.size} tab(s) busy after waiting ${IMPLICIT_TAB_WAIT_MS}ms"
+                )
+            }
+            picked
         }
 
         if (tab != null) {

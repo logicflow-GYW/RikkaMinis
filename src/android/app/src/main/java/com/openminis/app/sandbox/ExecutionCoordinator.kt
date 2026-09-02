@@ -353,6 +353,11 @@ object ExecutionCoordinator {
             // command. At most 2 attempts total — guards against infinite retry
             // loops. The agent/user sees a single successful result for
             // transient infra failures.
+            // [fix/audit-s4h3] Stamp activity at command START too: the 1-min
+            // idle sweeper previously saw only completion stamps, so a command
+            // issued >10min after the previous completion looked idle and got
+            // reaped 60s into its execution (now also blocked by isBusy).
+            lastActiveMs[sessionId] = SystemClock.elapsedRealtime()
             val (result, shell) = executeWithShellRetry(
                 sessionId = sessionId,
                 command = command,
@@ -671,7 +676,16 @@ object ExecutionCoordinator {
      */
     fun sessionDidTerminate(sessionId: String) {
         val shell = shells.remove(sessionId)
-        mutexes.remove(sessionId)
+        // [fix/audit-s4h4] Do NOT remove the per-session mutex here. This is
+        // called from inside `mutex.withLock` (the post-command RSS/memory
+        // checks at :386/:445/:509/:533/:546/:558) — removing the map entry
+        // while the lock is HELD lets a concurrent `mutexes.getOrPut` mint a
+        // brand-new Mutex for the same session, acquire it immediately, and
+        // run in parallel with the command still inside this withLock block
+        // (breaking per-session command serialization). The mutex is small;
+        // it is now removed only by stopCurrentCommand / dispose paths that
+        // never hold it, and its lifetime is bounded by session id churn,
+        // not by shell recycling.
         // T124a: drop the snapshot too — a future shell for the same id
         // restarts from a clean baseline, so the next applyEnvironment
         // shouldn't try to `unset` keys that don't exist in the new shell.
@@ -817,6 +831,16 @@ object ExecutionCoordinator {
     fun recycleIdleShells() {
         val now = SystemClock.elapsedRealtime()
         for (sessionId in shells.keys) {
+            // [fix/audit-s4h3] Skip shells with a command mid-flight. The old
+            // check keyed only on lastActiveMs, which updates on command
+            // COMPLETION (not start) — so a freshly-started long command (big
+            // git fetch / apk add) could be SIGKILLed 60s in, and any command
+            // started >10min after the previous completion was reaped almost
+            // immediately. Non-idempotent commands then re-ran with duplicated
+            // side effects. cleanupProotTmp already had an isAlive-style guard;
+            // this is the same protection for the reaper.
+            val shell = shells[sessionId]
+            if (shell != null && shell.isBusy) continue
             val last = lastActiveMs[sessionId] ?: 0L
             if (last != 0L && (now - last) > SHELL_IDLE_TIMEOUT_MS) {
                 Log.w(TAG, "[$sessionId] shell idle ${(now - last) / 1000}s — recycling")
