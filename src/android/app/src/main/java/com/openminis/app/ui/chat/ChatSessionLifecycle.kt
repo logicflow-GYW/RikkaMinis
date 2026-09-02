@@ -1,13 +1,5 @@
 package com.openminis.app.ui.chat
 
-// [FE-5 batch 5] Session lifecycle & compaction cluster extracted verbatim
-// from ChatViewModel as extension functions: session load/restore, context
-// compaction, the compaction-marker graying heal pass, and provider/group
-// state resolution. Same pattern as ChatViewModelUiStateExt — the functions
-// operate on the VM's own members via extension receivers, no logic change.
-// The thin delegating shells (walkBackUserTurnsBounded / buildChatMessages /
-// buildLlmMessages / findModelEntry) stay in ChatViewModel.
-
 import android.util.Log
 import com.openminis.app.data.db.CompactMarkerEntity
 import com.openminis.app.data.db.MessageEntity
@@ -15,11 +7,10 @@ import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ThinkingLevel
-import com.openminis.app.data.routing.RoutingStrategy
+import com.openminis.app.data.model.RoutingStrategy
 import com.openminis.app.logging.AppLogger
-import com.openminis.app.perf.PerfLongCtx
 import com.openminis.app.provider.LLMProvider
-import com.openminis.app.provider.ProviderExecutionGateway
+import com.openminis.app.sandbox.offload.ProviderExecutionGateway
 import com.openminis.app.provider.ProviderFactory
 import com.openminis.app.sandbox.ExecutionCoordinator
 import kotlinx.coroutines.CancellationException
@@ -35,15 +26,14 @@ import com.openminis.app.tools.AgentTraceRecorder
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.flow.toList
-import kotlinx.coroutines.flow.first
-import com.openminis.app.tools.AgentTraceRecorder
-import com.openminis.app.agent.runtime.AgentRunPhase
-import com.openminis.app.agent.runtime.AgentRunEvent
-import com.openminis.app.R
-import androidx.lifecycle.viewModelScope
 
+// [FE-5 batch 5] Session lifecycle & compaction cluster extracted verbatim
+// from ChatViewModel as extension functions: session load/restore, context
+// compaction, the compaction-marker graying heal pass, and provider/group
+// state resolution. Same pattern as ChatViewModelUiStateExt — the functions
+// operate on the VM's own members via extension receivers, no logic change.
+// The thin delegating shells (walkBackUserTurnsBounded / buildChatMessages /
+// buildLlmMessages / findModelEntry) stay in ChatViewModel.
 
 internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null) {
     AppLogger.info(ChatViewModel.TAG, "[Compact] compactAll() invoked streaming=${_isStreaming.value} compacting=${_isCompacting.value} historySize=${agentHistory.size} anchorOverride=$anchorIdxOverride")
@@ -917,12 +907,12 @@ internal fun ChatViewModel.loadSession() {
             // and FileReadTool / AIChatViewModel.executeFileRead enforce
             // an 80 KB hard cap upstream, only metadata is needed for
             // future audits.
-            val ChatViewModel.OVERSIZE_THRESHOLD = 50_000
-            val oversized = messages.filter { it.partsJson.length >= ChatViewModel.OVERSIZE_THRESHOLD }
+            val OVERSIZE_THRESHOLD = 50_000
+            val oversized = messages.filter { it.partsJson.length >= OVERSIZE_THRESHOLD }
             if (oversized.isNotEmpty()) {
                 println(
                     "[T-HANG-DIAG] oversized-messages session=$sessionId " +
-                        "count=${oversized.size} threshold=${ChatViewModel.OVERSIZE_THRESHOLD}",
+                        "count=${oversized.size} threshold=${OVERSIZE_THRESHOLD}",
                 )
                 for (m in oversized) {
                     val raw = m.partsJson
