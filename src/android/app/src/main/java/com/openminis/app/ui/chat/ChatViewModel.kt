@@ -1864,7 +1864,7 @@ class ChatViewModel(
      * read-modify-write that used to recompose the entire LazyColumn on every
      * system notice during compact/revert failure chains.
      */
-    private fun appendSystemInfo(text: String, iconKind: String, payload: String? = null) {
+    internal fun appendSystemInfo(text: String, iconKind: String, payload: String? = null) {
         val block = AssistantBlock(
             id = "sysinfo_${System.currentTimeMillis()}",
             kind = "info",
@@ -5722,7 +5722,7 @@ class ChatViewModel(
      * @param provider The current LLM provider (carries defaultMaxTokens).
      * @param lastContextTokens API-reported input token count from the last call (0 = first call).
      */
-    private fun dynamicMaxTokens(provider: LLMProvider, lastContextTokens: Int = 0): Int {
+    internal fun dynamicMaxTokens(provider: LLMProvider, lastContextTokens: Int = 0): Int {
         val model = currentModel ?: return minOf(GLOBAL_MAX_TOKENS_CEILING, provider.defaultMaxOutputTokens)
         // Ceiling: min(global cap, model.maxOutputTokens-or-provider-default).
         // The global cap means we never send more than 128K regardless of
@@ -6958,7 +6958,7 @@ Environment variables:
      * the mediaRef JSON parts that need to be embedded in parts_json so the
      * attachments survive a session reload (T128).
      */
-    private data class PreparedAttachments(
+    internal data class PreparedAttachments(
         val imageParts: List<LLMMessage.ImagePart>,
         val imageUris: List<Uri>,
         val attachmentNames: List<String>,
@@ -7656,7 +7656,7 @@ Environment variables:
         buildChatMessagesTranscript(parsed, mediaStore.mediaBaseDir) { msg ->
             Log.w(TAG, msg)
         }
-    private fun MessageEntity.toLLMMessage(): LLMMessage {
+    internal fun MessageEntity.toLLMMessage(): LLMMessage {
         val parts = parsePartsJson(partsJson)
         val malformed = parts.isEmpty() && partsJson.isNotBlank()
         return buildSingleLlmMessage(this, partsJson, parts, malformed, mediaStore.mediaBaseDir)

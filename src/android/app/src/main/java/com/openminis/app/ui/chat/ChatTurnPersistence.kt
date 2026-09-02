@@ -15,11 +15,12 @@ import com.openminis.app.data.model.LLMUsage
 import com.openminis.app.provider.LLMProvider
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.service.SessionActivityTracker
+import com.openminis.app.service.SessionConcurrencyManager
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.coroutineContext
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.launch
 import androidx.lifecycle.viewModelScope
 
@@ -166,7 +167,7 @@ internal fun ChatViewModel.rollbackIncompleteTurn(): Boolean? {
     //    RUNNING execution all have no tool_result, so they'd orphan).
     val lastMsg = msgs[lastAssistantIdx]
     val keptToolBlocks = lastMsg.toolBlocks.filter { block ->
-        block.toolStatus !in IN_FLIGHT_TOOL_STATUSES
+        block.toolStatus !in ChatViewModel.IN_FLIGHT_TOOL_STATUSES
     }
     msgs[lastAssistantIdx] = lastMsg.copy(
         error = null,
@@ -237,10 +238,10 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
     // _isStreaming was already set synchronously by the caller.
     val launchedProvider = provider
     streamJob = viewModelScope.launch(Dispatchers.IO) {
-        AppLogger.info(TAG_STREAM, "$label streamJob ENTER sid=$activeSessionId")
+        AppLogger.info(ChatViewModel.TAG_STREAM, "$label streamJob ENTER sid=$activeSessionId")
         try {
             SessionConcurrencyManager.acquireSlot(activeSessionId)
-            AppLogger.debug(TAG_STREAM, "$label streamJob slot acquired")
+            AppLogger.debug(ChatViewModel.TAG_STREAM, "$label streamJob slot acquired")
             SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
             val activeFallbackStrategy = run {
                 val groupId = _selectedGroupId.value
@@ -249,19 +250,19 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
             }
             val fallbackProviders = buildFallbackProviders(launchedProvider)
             try {
-                AppLogger.info(TAG_STREAM, "$label runAgentLoop CALL")
+                AppLogger.info(ChatViewModel.TAG_STREAM, "$label runAgentLoop CALL")
                 runAgentLoop(
                     provider = launchedProvider,
                     systemPrompt = systemPrompt,
                     fallbackProviders = fallbackProviders,
                     fallbackStrategy = activeFallbackStrategy,
                 )
-                AppLogger.info(TAG_STREAM, "$label runAgentLoop RETURN normal")
+                AppLogger.info(ChatViewModel.TAG_STREAM, "$label runAgentLoop RETURN normal")
             } catch (e: CancellationException) {
-                AppLogger.info(TAG_STREAM, "$label runAgentLoop CANCELLED")
+                AppLogger.info(ChatViewModel.TAG_STREAM, "$label runAgentLoop CANCELLED")
                 Log.d(ChatViewModel.TAG, "Agent loop cancelled")
             } catch (e: Exception) {
-                AppLogger.error(TAG_STREAM, "$label runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
+                AppLogger.error(ChatViewModel.TAG_STREAM, "$label runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
                 Log.e(ChatViewModel.TAG, "Agent loop error ($label)", e)
                 // [T-error-no-permanent-scars] The banner shows a human
                 // summary; raw error codes / fallback trail go to the
@@ -273,7 +274,7 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
                 // variant instead of a clean success.
                 SessionActivityTracker.markStreamError(activeSessionId)
             } finally {
-                AppLogger.info(TAG_STREAM, "$label streamJob FINALLY enter")
+                AppLogger.info(ChatViewModel.TAG_STREAM, "$label streamJob FINALLY enter")
                 // [T-android-overlay-reply-status-34599] Surface
                 // the assistant's most recent reply text to the
                 // overlay BEFORE setInactive so the post-completion
@@ -284,10 +285,10 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
                 publishOverlayReplyExcerpt(activeSessionId)
                 SessionActivityTracker.setInactive(activeSessionId)
                 SessionConcurrencyManager.releaseSlot(activeSessionId)
-                AppLogger.info(TAG_STREAM, "$label streamJob FINALLY exit")
+                AppLogger.info(ChatViewModel.TAG_STREAM, "$label streamJob FINALLY exit")
             }
         } catch (e: CancellationException) {
-            AppLogger.info(TAG_STREAM, "$label streamJob CANCELLED waiting for slot")
+            AppLogger.info(ChatViewModel.TAG_STREAM, "$label streamJob CANCELLED waiting for slot")
             Log.d(ChatViewModel.TAG, "Cancelled while waiting for concurrency slot")
         }
         // [T-android-stale-streamjob-clears-isstreaming] Only the current
@@ -298,12 +299,12 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
         // the new turn is still streaming. See `var streamJob` KDoc and
         // XIN 2026-06-12 log (20:22:26 / 20:23:25).
         if (streamJob === coroutineContext[Job]) {
-            AppLogger.info(TAG_STREAM, "$label _isStreaming=false (about to set)")
+            AppLogger.info(ChatViewModel.TAG_STREAM, "$label _isStreaming=false (about to set)")
             _isStreaming.value = false
         } else {
-            AppLogger.info(TAG_STREAM, "$label _isStreaming SKIPPED (stale job; current=${streamJob?.hashCode()} this=${coroutineContext[Job]?.hashCode()})")
+            AppLogger.info(ChatViewModel.TAG_STREAM, "$label _isStreaming SKIPPED (stale job; current=${streamJob?.hashCode()} this=${coroutineContext[Job]?.hashCode()})")
         }
-        AppLogger.info(TAG_STREAM, "$label streamJob EXIT")
+        AppLogger.info(ChatViewModel.TAG_STREAM, "$label streamJob EXIT")
     }
     return true
 }

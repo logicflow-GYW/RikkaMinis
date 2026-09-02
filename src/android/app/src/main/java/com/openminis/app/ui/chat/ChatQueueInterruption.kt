@@ -8,6 +8,11 @@ package com.openminis.app.ui.chat
 // still operate on the VM's own queue/state members, only their file location
 // changed. No logic change.
 
+import kotlinx.coroutines.withContext
+import com.openminis.app.provider.LLMProvider
+import com.openminis.app.data.model.AgentContentPart
+import com.openminis.app.service.SessionConcurrencyManager
+import com.openminis.app.service.SessionActivityTracker
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.logging.AppLogger
 import android.util.Log
@@ -96,7 +101,7 @@ internal suspend fun ChatViewModel.truncateBeforeEdit(messageId: String) {
         agentHistory.add(entity.toLLMMessage())
     }
     AppLogger.info(
-        TAG_STREAM,
+        ChatViewModel.TAG_STREAM,
         "✏️ truncateBeforeEdit cutoffSortOrder=$cutoffSortOrder remaining=${remaining.size}"
     )
 }
@@ -152,7 +157,7 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     // loop doesn't spin.
     if (combinedParts.isEmpty()) {
         AppLogger.warning(
-            TAG_STREAM,
+            ChatViewModel.TAG_STREAM,
             "injectQueuedPromptsAsNewTurn: ${queued.size} queued prompt(s) produced no content, skipping",
         )
         return null
@@ -249,7 +254,7 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     }
 
     AppLogger.info(
-        TAG_STREAM,
+        ChatViewModel.TAG_STREAM,
         "injectQueuedPromptsAsNewTurn: injected ${queued.size} queued prompt(s) as new turn, " +
             "finishedId=$finishedAssistantId newId=$newAssistantId",
     )
@@ -360,7 +365,7 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
             // verify a queued prompt continues on the ACTUAL active entry
             // (post-fallback) rather than replaying a stale chain.
             AppLogger.info(
-                TAG_STREAM,
+                ChatViewModel.TAG_STREAM,
                 "drain re-entry anchored provider=${drainedProvider.model.id} " +
                     "entryId=${_activeEntryId.value} staleSnapshot=${provider.model.id} candidates=${drainFallbacks.map { it.entryId }}",
             )
@@ -428,17 +433,17 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
         // T145: claim the streaming flag synchronously before launching
         // the streamJob so a concurrent send/retry tap is rejected by the
         // entry guard. Mirrors sendMessage discipline.
-        AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel _isStreaming=true (sync, sid=$activeSessionId)")
+        AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel _isStreaming=true (sync, sid=$activeSessionId)")
         _isStreaming.value = true
         streamEpoch++
         _canResume.value = false
         _error.value = null
 
         streamJob = launch(Dispatchers.IO) {
-            AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel streamJob ENTER sid=$activeSessionId")
+            AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob ENTER sid=$activeSessionId")
             try {
                 SessionConcurrencyManager.acquireSlot(activeSessionId)
-                AppLogger.debug(TAG_STREAM, "resumeQueueAfterCancel streamJob slot acquired")
+                AppLogger.debug(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob slot acquired")
                 SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
 
                 val activeFallbackStrategy = run {
@@ -447,21 +452,21 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
                         ?: com.openminis.app.data.model.FallbackStrategy.default
                 }
                 try {
-                    AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel drainQueuedPrompts CALL")
+                    AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel drainQueuedPrompts CALL")
                     drainQueuedPrompts(
                         provider = provider,
                         systemPrompt = systemPrompt,
                         fallbackStrategy = activeFallbackStrategy,
                     )
-                    AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel drainQueuedPrompts RETURN")
+                    AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel drainQueuedPrompts RETURN")
                 } catch (e: CancellationException) {
-                    AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel drain CANCELLED")
+                    AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel drain CANCELLED")
                 } catch (e: Exception) {
-                    AppLogger.error(TAG_STREAM, "resumeQueueAfterCancel drain EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
+                    AppLogger.error(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel drain EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
                     Log.e(ChatViewModel.TAG, "Queued drain error (resumeQueueAfterCancel)", e)
                     reportAgentLoopError(e)
                 } finally {
-                    AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel streamJob FINALLY enter")
+                    AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob FINALLY enter")
                     // [T-android-overlay-reply-status-34599] Surface
                     // the assistant's most recent reply text to the
                     // overlay BEFORE setInactive so the post-completion
@@ -472,19 +477,19 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
                     publishOverlayReplyExcerpt(activeSessionId)
                     SessionActivityTracker.setInactive(activeSessionId)
                     SessionConcurrencyManager.releaseSlot(activeSessionId)
-                    AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel streamJob FINALLY exit")
+                    AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob FINALLY exit")
                 }
             } catch (e: CancellationException) {
-                AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel streamJob CANCELLED waiting for slot")
+                AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob CANCELLED waiting for slot")
             }
             // [T-android-stale-streamjob-clears-isstreaming] guard.
             if (streamJob === coroutineContext[Job]) {
-                AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel _isStreaming=false (about to set)")
+                AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel _isStreaming=false (about to set)")
                 _isStreaming.value = false
             } else {
-                AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel _isStreaming SKIPPED (stale job)")
+                AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel _isStreaming SKIPPED (stale job)")
             }
-            AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel streamJob EXIT")
+            AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob EXIT")
         }
     }
 }
