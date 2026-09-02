@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Log
+import androidx.lifecycle.viewModelScope
 import com.openminis.app.agent.runtime.AgentRunEvent
 import com.openminis.app.agent.runtime.AgentRunPhase
 import com.openminis.app.data.model.AgentContentPart
@@ -173,12 +174,6 @@ internal fun ChatViewModel.applyRequestImageBudget(messages: List<LLMMessage>): 
     return mutated
 }
 
-
-/** Latest in-memory compact marker, used by [effectiveAgentHistory] to
- * resolve boundaries the same way iOS `cachedLatestMarker` does. Refreshed
- * on every compactAll write and on session reload. */
-@Volatile
-
 /**
  * Show a transient error on the last assistant message while keeping isStreaming=true
  * so the "thinking" indicator and streaming UI stay intact during auto-retry countdowns.
@@ -223,14 +218,6 @@ internal fun ChatViewModel.clearInlineError() {
 }
 
 /**
- * [T-error-persist-android] Fire-and-forget: clear the persisted error
- * sticker on the session's last assistant row. Called from the resume / retry
- * entrypoints that drop the in-memory error but don't go through
- * [clearInlineError], so a recovered turn can't merge-resurrect the old
- * banner on the next reload. No-op when there's no session/row yet.
- */
-
-/**
  * Instance entry point used by the tool-dispatch path. The real logic lives
  * in the companion so tests can reach it without a ChatViewModel.
  */
@@ -238,7 +225,7 @@ internal fun ChatViewModel.preflightValidateToolCall(
     name: String,
     args: JSONObject,
     tools: List<AgentToolDefinition>,
-): String? = preflightValidateToolCallImpl(name, args, tools)
+): String? = ChatViewModel.preflightValidateToolCallImpl(name, args, tools)
 
 internal suspend fun ChatViewModel.executeTool(
     name: String,
@@ -677,7 +664,7 @@ internal fun ChatViewModel.updateAssistantMessage(
         // final chunk before a pause still lands; a fresh delta cancels
         // and replaces it.
         val st = streamFlushStates.getOrPut(id) {
-            StreamFlushState().also { it.lastFlushedLen = 0 }
+            ChatViewModel.StreamFlushState().also { it.lastFlushedLen = 0 }
         }
         val prev = _streamingById.value[id]
         // [T-android-stream-flush-review] Structural change also covers an
@@ -817,13 +804,6 @@ internal fun ChatViewModel.updateAssistantMessage(
         _streamingById.value = _streamingById.value - id
     }
 }
-
-/**
- * Read a message's content + toolBlocks honoring any active streaming
- * delta. Use this from non-render code that needs the "current" view of
- * a message during a live turn (e.g. agent history builders, persistence
- * snapshots) without forcing the render layer to consult the delta map.
- */
 
 /**
  * Build the "内置集成" prompt fragment: the list of bundled platform
@@ -1792,14 +1772,3 @@ internal fun ChatViewModel.resolveTitleProvider(): LLMProvider? {
 
     return ProviderFactory.create(instance, apiKey, entry.model, context)
 }
-
-/** Parse LLM response for title/category JSON. Multiple fallback strategies. */
-/**
- * [T-android-overlay-reply-status-34599] Pull the most recent
- * assistant text out of `_messages` and hand it to
- * [SessionActivityTracker.publishLastReply]. The tracker truncates
- * to a fixed-width excerpt and pairs it with [sessionId] so the
- * floating overlay can render a "tap to open this chat" capsule
- * after the stream completes. No-op when no assistant message has
- * content yet (e.g. fail during the very first turn).
- */

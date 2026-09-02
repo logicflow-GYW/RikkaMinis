@@ -4222,9 +4222,14 @@ class ChatViewModel(
             .runAgentLoop(provider, systemPrompt, fallbackProviders, fallbackStrategy)
     }
 
+    /**
+     * Read a message's content + toolBlocks honoring any active streaming
+     * delta. Use this from non-render code that needs the "current" view of
+     * a message during a live turn (e.g. agent history builders, persistence
+     * snapshots) without forcing the render layer to consult the delta map.
+     */
     internal fun effectiveContent(id: String): String? {
-        val delta = _streamingById.value[id]
-        if (delta != null) return delta.content
+        val delta = _streamingById.value[id]        if (delta != null) return delta.content
         return _messages.value.firstOrNull { it.id == id }?.content
     }
 
@@ -4366,6 +4371,15 @@ class ChatViewModel(
     internal var titleGenerationInFlight = false
     internal val TITLE_MAX_ATTEMPTS = 3
 
+    /**
+     * [T-android-overlay-reply-status-34599] Pull the most recent
+     * assistant text out of `_messages` and hand it to
+     * [SessionActivityTracker.publishLastReply]. The tracker truncates
+     * to a fixed-width excerpt and pairs it with [sessionId] so the
+     * floating overlay can render a "tap to open this chat" capsule
+     * after the stream completes. No-op when no assistant message has
+     * content yet (e.g. fail during the very first turn).
+     */
     internal fun publishOverlayReplyExcerpt(sessionId: String) {
         val snapshot = _messages.value
         val text = snapshot.asReversed().firstOrNull { msg ->
