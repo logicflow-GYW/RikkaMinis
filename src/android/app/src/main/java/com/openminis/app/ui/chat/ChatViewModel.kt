@@ -1458,7 +1458,7 @@ class ChatViewModel(
      * value), we keep the minOf clamp — never assume a window larger than the
      * model physically supports.
      */
-    private fun effectiveContextWindowTokens(): Int? {
+    internal fun effectiveContextWindowTokens(): Int? {
         val config = providerRepository.config.value
         val liveModel = _activeEntryId.value
             ?.let { id -> config.modelEntries.find { it.id == id }?.model }
