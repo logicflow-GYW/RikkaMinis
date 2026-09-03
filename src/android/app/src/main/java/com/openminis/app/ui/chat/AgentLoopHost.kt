@@ -53,6 +53,14 @@ internal interface AgentLoopHost {
     fun unavailableGroupMembers(): List<String>
 
     // ── assistant message presentation ────────────────────────────────────
+    /**
+     * Append the empty assistant placeholder bubble to the UI message list
+     * before the first stream chunk arrives (mirrors iOS isAwaitingModelResponse
+     * "thinking" gap). Must run on Main so the message is present before the
+     * first streaming delta — otherwise [com.openminis.app.ui.chat.mergeStreamingOverlay]
+     * cannot match the assistantId and the live reply never renders.
+     */
+    suspend fun addAssistantPlaceholder(assistantId: String, thinkingLevel: ThinkingLevel?)
     fun updateAssistantMessage(
         assistantId: String,
         text: String,

@@ -946,6 +946,21 @@ class ChatViewModel(
         override fun trimContextHistoryWindow(contextWindow: Int, lastContextTokens: Int) =
             this@ChatViewModel.trimContextHistoryWindow(contextWindow, lastContextTokens)
         override fun unavailableGroupMembers(): List<String> = this@ChatViewModel.unavailableGroupMembers()
+        override suspend fun addAssistantPlaceholder(assistantId: String, thinkingLevel: ThinkingLevel?) {
+            // [T-android-stream-flush-review] Restores the placeholder-bubble
+            // append lost in the FE-5 route C extraction (be7d3a5). Mirrors the
+            // pre-extraction runAgentLoop entry: empty assistant message with
+            // isStreaming=true + isAwaitingModelResponse=true so the "Minis is
+            // thinking" indicator shows during the initial request gap, and the
+            // streaming side-channel has a canonical message id to overlay onto.
+            withContext(Dispatchers.Main) {
+                _messages.value = _messages.value + ChatMessage(
+                    id = assistantId, role = "assistant", content = "", isStreaming = true,
+                    isAwaitingModelResponse = true,
+                    thinkingLevel = thinkingLevel,
+                )
+            }
+        }
         override fun updateAssistantMessage(
             assistantId: String, text: String, isStreaming: Boolean,
             blocks: List<AssistantBlock>, isAwaitingModelResponse: Boolean,

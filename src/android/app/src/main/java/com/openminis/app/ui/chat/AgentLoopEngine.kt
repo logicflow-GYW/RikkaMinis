@@ -161,6 +161,16 @@ internal class AgentLoopEngine(
         )
         loopState.assistantId = "assistant_${System.currentTimeMillis()}"
 
+        // [T-android-stream-flush-review] Restore the placeholder-bubble append
+        // lost in the FE-5 route C extraction (be7d3a5). The pre-extraction loop
+        // created an empty assistant message (isStreaming=true,
+        // isAwaitingModelResponse=true) on Main BEFORE the turn loop, so the
+        // "Minis is thinking" indicator shows during the first-request gap AND
+        // the streaming side-channel has a canonical message id to overlay onto.
+        // Without it the live reply never renders (only appears after a cold
+        // reload re-builds the transcript from DB).
+        host.addAssistantPlaceholder(loopState.assistantId, host.thinkingLevel)
+
         // T7-D: 终态 reducer 状态机入口已在 RunStarted 前初始化（见上）；
         // 此处不再重复 init —— 重复 `AgentRunState.initial()` 会重置已经把
         // RunStarted 消费掉的 reducer 回 IDLE，导致后续事件再次 REJECTED。
