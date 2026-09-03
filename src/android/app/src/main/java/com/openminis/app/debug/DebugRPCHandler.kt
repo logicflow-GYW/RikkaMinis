@@ -1112,7 +1112,7 @@ class DebugRPCHandler(private val context: Context) {
 
         AppLogger.info("DebugRPC", "debug.sessions.exec argv=${argvTail.joinToString(" ")}")
         val app = context.applicationContext as com.openminis.app.MinisApp
-        val handler = com.openminis.app.sandbox.offload.SessionsOffloadHandler(app.chatRepository)
+        val handler = com.openminis.app.sandbox.offload.SessionsOffloadHandler(app.chatRepository, context)
         val request = com.openminis.app.sandbox.NativeOffloadRequest(
             pid = -1,
             argv = listOf("minis-sessions-cli") + argvTail,
