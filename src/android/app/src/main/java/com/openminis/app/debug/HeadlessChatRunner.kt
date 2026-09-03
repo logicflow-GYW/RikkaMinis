@@ -9,6 +9,7 @@ import com.openminis.app.ui.chat.ChatViewModelStore
 import com.openminis.app.ui.chat.InputAttachment
 import com.openminis.app.ui.chat.addAttachment
 import com.openminis.app.ui.chat.selectEntry
+import com.openminis.app.ui.chat.setThinkingLevel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext

@@ -50,7 +50,7 @@ fun TokenUsageSheet(
     viewModel: ChatViewModel,
     onDismiss: () -> Unit,
 ) {
-    var stats by remember { mutableStateOf<ChatViewModel.SessionTokenStats?>(null) }
+    var stats by remember { mutableStateOf<SessionTokenStats?>(null) }
     val contextWindow = remember { viewModel.currentModelContextWindow }
     val contextWindowSource = remember { viewModel.currentModelContextWindowSource }
     val groupLimit = remember { viewModel.currentGroupContextLimit }
