@@ -267,7 +267,7 @@ class ChatViewModel(
          * Resume button rather than a silently stuck "thinking" indicator.
          * Mirrors iOS AIChatViewModel.maxAgentTurns.
          */
-        private const val MIN_MAX_TOKENS = 1024
+        internal const val MIN_MAX_TOKENS = 1024
         // [fix/voice-crash-observability] Generous cap on the persisted draft
         // string (see syncComposerDraft). Covers the vast majority of voice
         // dictations while bounding per-keystroke SharedPreferences serialization
@@ -287,7 +287,7 @@ class ChatViewModel(
          * the value is still clamped by the model's own maxOutputTokens and
          * the remaining context window in dynamicMaxTokens().
          */
-        private const val GLOBAL_MAX_TOKENS_CEILING = 128_000
+        internal const val GLOBAL_MAX_TOKENS_CEILING = 128_000
         /**
          * Number of recent user-text turns kept verbatim as inference anchors when
          * compactAll runs. The summary stands in for everything older; the LLM
@@ -3805,105 +3805,6 @@ class ChatViewModel(
         }
     }
 
-    /**
-     * Unwrap exceptions thrown inside callbackFlow.
-     * callbackFlow wraps internal throws into CancellationException(cause=original).
-     * This extracts the original LLMError if present.
-     */
-    /**
-     * Sanitize agentHistory before each API call to ensure tool_use/tool_result pairing.
-     * Mirrors iOS AIChatViewModel pre-API validation.
-     *
-     * Ensures: every assistant message with tool_use is immediately followed by a user
-     * message containing the matching tool_result(s). Handles:
-     * - Duplicate tool IDs across messages (from provider fallback/retry)
-     * - Orphaned tool_use without any tool_result
-     * - Orphaned tool_result without matching tool_use
-     * - Assistant text after tool_use in the same message (Anthropic rejects this)
-     */
-    private fun sanitizeAgentHistory() {
-        sanitizeAgentHistoryMessages(agentHistory)
-    }
-
-    /**
-     * [T-compact-slice-tool-pairing] Core tool_use/tool_result pairing repair,
-     * extracted from [sanitizeAgentHistory] so it can also be applied to the
-     * compacted-slice result returned by [effectiveAgentHistory]. The compact
-     * slice (walkBack cap / preAnchor prune / postAnchor splice) can split a
-     * tool round across the boundary, leaving an orphan tool_result whose
-     * tool_use was cut off — the API then rejects the request with
-     * "Messages with role 'tool' must be a response to a preceding message
-     * with 'tool_calls'". Running the same repair on the FINAL outgoing slice
-     * closes that gap regardless of where the boundary lands.
-     *
-     * Mirrors iOS AIChatViewModel pre-API validation. Ensures: every assistant
-     * message with tool_use is immediately followed by a user message with the
-     * matching tool_result(s). Handles:
-     * - Duplicate tool IDs across messages (from provider fallback/retry)
-     * - Orphaned tool_use without any tool_result
-     * - Orphaned tool_result without matching tool_use
-     * - Assistant text after tool_use in the same message (Anthropic rejects this)
-     */
-
-    private fun unwrapFlowException(e: Throwable): Throwable {
-        var cause: Throwable? = e
-        while (cause != null) {
-            if (cause is com.openminis.app.data.model.LLMError) return cause
-            cause = cause.cause
-        }
-        return e
-    }
-
-    /**
-     * [T-error-no-permanent-scars] Uniform terminal-error reporter for every
-     * runAgentLoop call site (send / retryLast / resume / queued-drain). Shows
-     * a human summary on the banner and keeps the raw error text (fallback
-     * trail, original error codes) in the collapsed `errorDetail` disclosure.
-     */
-    internal fun reportAgentLoopError(e: Exception) {
-        if (e is com.openminis.app.data.model.FallbackExhaustedError) {
-            setInlineError(e.summary, e.detail)
-        } else {
-            val errActual = unwrapFlowException(e)
-            val errSummary = (errActual as? com.openminis.app.data.model.LLMError)?.userMessage
-                ?: errActual.message?.takeIf { it.isNotBlank() }
-                ?: "Unknown error"
-            setInlineError(errSummary, errActual.message)
-        }
-    }
-
-    /**
-     * Compute max output tokens that fits within the remaining context window.
-     * Logic mirrors iOS's dynamicMaxTokens():
-     *   result = min(provider.defaultMaxTokens, max(contextWindow - inputTokens, MIN_MAX_TOKENS))
-     *
-     * @param provider The current LLM provider (carries defaultMaxTokens).
-     * @param lastContextTokens API-reported input token count from the last call (0 = first call).
-     */
-    internal fun dynamicMaxTokens(provider: LLMProvider, lastContextTokens: Int = 0): Int {
-        val model = currentModel ?: return minOf(GLOBAL_MAX_TOKENS_CEILING, provider.defaultMaxOutputTokens)
-        // Ceiling: min(global cap, model.maxOutputTokens-or-provider-default).
-        // The global cap means we never send more than 128K regardless of
-        // what the model claims it can output.
-        val maxOutputCeiling = minOf(GLOBAL_MAX_TOKENS_CEILING, provider.effectiveMaxOutputTokens(model))
-        // [T-context-window-sources] Single source of truth for the context
-        // window: route through effectiveContextWindowTokens() (group-priority
-        // when the model window is heuristic, minOf clamp when explicit) so
-        // output sizing uses the SAME window as offload/trim/block — not the
-        // raw model guess, which for a 1M model silently reported as 128K
-        // would cap output alongside capping the budget. Falls back to the
-        // model's own window when effective resolution fails (no live model).
-        val contextWindow = effectiveContextWindowTokens() ?: model.contextWindowTokens
-        if (contextWindow <= 0) return maxOutputCeiling
-        val inputTokens = if (lastContextTokens > 0) lastContextTokens else 0
-        val remaining = contextWindow - inputTokens
-        val clamped = maxOf(remaining, MIN_MAX_TOKENS)
-        val result = minOf(maxOutputCeiling, clamped)
-        if (result < maxOutputCeiling) {
-            android.util.Log.i(TAG, "dynamicMaxTokens: $result (remaining=$remaining, ceiling=$maxOutputCeiling, window=$contextWindow, input=$inputTokens, model=${model.id})")
-        }
-        return result
-    }
 
 
     /**
