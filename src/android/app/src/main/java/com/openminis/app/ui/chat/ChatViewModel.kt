@@ -511,7 +511,7 @@ class ChatViewModel(
     internal fun clearStreamFlushState(id: String) {
         streamFlushStates.remove(id)?.trailingJob?.cancel()
     }
-    private fun clearAllStreamFlushStates() {
+    internal fun clearAllStreamFlushStates() {
         streamFlushStates.values.forEach { it.trailingJob?.cancel() }
         streamFlushStates.clear()
     }
@@ -3970,63 +3970,6 @@ class ChatViewModel(
      * a message during a live turn (e.g. agent history builders, persistence
      * snapshots) without forcing the render layer to consult the delta map.
      */
-    internal fun effectiveContent(id: String): String? {
-        val delta = _streamingById.value[id]
-        if (delta != null) return delta.content
-        return _messages.value.firstOrNull { it.id == id }?.content
-    }
-
-    /**
-     * Force-drain any outstanding streaming delta for [id] back into the
-     * canonical message and clear the side-channel slot. Called from turn
-     * exit paths (cancel / error / retry / resume / clearChat) so the
-     * canonical message reflects all accumulated content even if the last
-     * [updateAssistantMessage] call had isStreaming=true.
-     */
-    private fun flushStreamingDelta(id: String) {
-        val delta = _streamingById.value[id] ?: return
-        val current = _messages.value
-        val idx = current.indexOfLast { it.id == id }
-        if (idx >= 0) {
-            val updated = current.toMutableList()
-            updated[idx] = current[idx].copy(
-                content = delta.content,
-                isStreaming = false,
-                toolBlocks = delta.toolBlocks,
-                isAwaitingModelResponse = delta.isAwaitingModelResponse,
-            )
-            _messages.value = updated
-        }
-        // [T-android-stream-flush-review] Cancel the pending trailing flush
-        // BEFORE clearing the side channel — otherwise its viewModelScope
-        // coroutine (not cancelled by streamJob.cancel) fires later and
-        // re-adds the orphan side-channel entry, reviving a stale "thinking"
-        // row after the turn was stopped/drained.
-        clearStreamFlushState(id)
-        _streamingById.value = _streamingById.value - id
-    }
-
-    /** Drain ALL outstanding streaming deltas (called on global resets). */
-    internal fun flushAllStreamingDeltas() {
-        clearAllStreamFlushStates()
-        val pending = _streamingById.value
-        if (pending.isEmpty()) return
-        val current = _messages.value.toMutableList()
-        var changed = false
-        for ((id, delta) in pending) {
-            val idx = current.indexOfLast { it.id == id }
-            if (idx < 0) continue
-            current[idx] = current[idx].copy(
-                content = delta.content,
-                isStreaming = false,
-                toolBlocks = delta.toolBlocks,
-                isAwaitingModelResponse = delta.isAwaitingModelResponse,
-            )
-            changed = true
-        }
-        if (changed) _messages.value = current
-        _streamingById.value = emptyMap()
-    }
 
     /**
      * Build the ordered AgentContentPart list for this turn by walking the slice of
