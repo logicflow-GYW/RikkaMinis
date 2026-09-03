@@ -868,7 +868,10 @@ class ChatViewModel(
      * fixed list of definition objects, no I/O.
      */
     internal val agentTools: List<AgentToolDefinition>
-        get() = AgentTools.makeAgentTools(memoryEnabled = _memoryEnabled.value)
+        get() = AgentTools.makeAgentTools(
+            memoryEnabled = _memoryEnabled.value,
+            subagentEnabled = com.openminis.app.data.SubagentPrefs.isEnabled(context),
+        )
 
     /**
      * Per-session loop detector. Reset alongside [agentHistory] whenever the

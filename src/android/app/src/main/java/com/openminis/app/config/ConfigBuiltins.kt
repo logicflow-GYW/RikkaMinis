@@ -115,6 +115,24 @@ internal object ConfigBuiltins {
                 maxValue = com.openminis.app.data.ConcurrencyPrefs.MAX,
             )
         )
+        // [T-subagent-toggle] Cross-session sub-agent dispatch switch. Same
+        // prefs+key as SubagentPrefs so Settings / minis-config / the agent
+        // all read-write one source of truth. OFF by default (side-effectful:
+        // lets the agent open new sessions and run long-lived work).
+        val subagentPrefs = context.getSharedPreferences(
+            com.openminis.app.data.SubagentPrefs.PREFS,
+            Context.MODE_PRIVATE,
+        )
+        r.register(
+            PrefsBoolField(
+                path = "runtime.subagentEnabled",
+                displayName = "Sub-agent / cross-session dispatch",
+                description = "When ON, the agent can spawn independent sub-agents and dispatch work to other chat sessions (exposes the spawn_agent tool and enables minis-sessions-cli send). OFF by default: this lets the agent open new sessions and run long-lived work, so it stays disabled until you explicitly turn it on.",
+                prefs = subagentPrefs,
+                key = com.openminis.app.data.SubagentPrefs.KEY_ENABLED,
+                defaultValue = false,
+            )
+        )
     }
 
     // -- Master switch surface (read-only via the registry; UI toggles it) --

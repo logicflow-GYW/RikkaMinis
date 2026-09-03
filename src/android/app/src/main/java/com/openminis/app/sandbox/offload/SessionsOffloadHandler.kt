@@ -36,6 +36,12 @@ import java.util.TimeZone
  */
 class SessionsOffloadHandler(
     private val repo: ChatRepository,
+    // [T-subagent-toggle] Context is needed to drive headless session
+    // creation + prompt via ChatMutationMethods (the same machinery the
+    // debug RPC `chat.prompt` uses). Gated by SubagentPrefs — `send` refuses
+    // when the user has not enabled the "sub-agent / cross-session dispatch"
+    // switch, so the extra injection is inert until then.
+    private val context: android.content.Context,
 ) : NativeOffloadHandler {
 
     override fun handle(request: NativeOffloadRequest): NativeOffloadResult {
@@ -55,6 +61,7 @@ class SessionsOffloadHandler(
                 "list" -> cmdList(args)
                 "search" -> cmdSearch(args)
                 "messages" -> cmdMessages(args)
+                "send" -> cmdSend(args)
                 else -> {
                     val err = errorEnvelope(
                         sub,
@@ -205,6 +212,83 @@ class SessionsOffloadHandler(
         return emit("messages", data, args)
     }
 
+    /**
+     * [T-subagent-toggle] `send` — create/continue a session and prompt it
+     * headlessly. This is the production surface for cross-session dispatch
+     * (the capability that makes `task-dispatch`'s manual copy-paste step
+     * redundant and lets `spawn_agent` graduate to a real independent session).
+     *
+     * Gated by [com.openminis.app.data.SubagentPrefs] — OFF (default) returns
+     * a typed error envelope, so the capability is inert until the user flips
+     * the switch. When ON it reuses [com.openminis.app.debug.ChatMutationMethods]
+     * (the same `chat.prompt` path as the debug RPC): create a session when no
+     * `--session` is given, else continue the existing one; `--wait` (default)
+     * blocks for the final assistant text, `--async` returns immediately with
+     * the session id so the caller can poll via `messages`.
+     */
+    private fun cmdSend(args: OffloadArgs): NativeOffloadResult {
+        if (!com.openminis.app.data.SubagentPrefs.isEnabled(context)) {
+            val err = errorEnvelope(
+                "send",
+                "SUBAGENT_DISABLED",
+                "Cross-session dispatch is disabled. Enable the sub-agent switch " +
+                    "in Settings → Agent Runtime to use 'send'.",
+            )
+            return NativeOffloadResult(
+                EXIT_INVALID_ARGS,
+                OffloadOutput.formatBody(err.toString(2), args) + "\n",
+            )
+        }
+        val prompt = args.get("prompt")
+        if (prompt.isNullOrBlank()) {
+            val err = errorEnvelope(
+                "send",
+                "INVALID_ARGS",
+                "--prompt <text> is required. Optionally pass --session <id> to " +
+                    "continue an existing session (default: create a new one).",
+            )
+            return NativeOffloadResult(
+                EXIT_INVALID_ARGS,
+                OffloadOutput.formatBody(err.toString(2), args) + "\n" + HELP_TEXT,
+            )
+        }
+        val sessionId = args.get("session") ?: args.get("id")
+        val async = args.hasFlag("async")
+        val waitTimeoutSec = (args.getInt("wait-timeout") ?: 600).coerceIn(1, 1800)
+
+        val params = org.json.JSONObject()
+            .put("prompt", prompt)
+            .put("wait", !async)
+            .put("waitTimeout", waitTimeoutSec)
+        if (!sessionId.isNullOrBlank()) params.put("sessionId", sessionId)
+
+        return try {
+            val result = runBlocking {
+                com.openminis.app.debug.ChatMutationMethods.prompt(context, params)
+            }
+            val data = JSONObject()
+                .put("session_id", result.optString("sessionId"))
+                .put("is_new_session", result.optBoolean("isNewSession"))
+                .put("status", result.optString("status"))
+                .put("model", result.opt("modelName"))
+                if (result.has("responseText") && !result.isNull("responseText")) {
+                    data.put("response_text", result.optString("responseText"))
+                }
+                if (result.has("timedOut")) data.put("timed_out", result.optBoolean("timedOut"))
+            emit("send", data, args)
+        } catch (t: Throwable) {
+            val err = errorEnvelope(
+                "send",
+                "SEND_FAILED",
+                t.message ?: t.javaClass.simpleName,
+            )
+            NativeOffloadResult(
+                1,
+                OffloadOutput.formatBody(err.toString(2), args) + "\n",
+            )
+        }
+    }
+
     // ─── arg parsing helpers ──────────────────────────────────────────
 
     private fun parseIds(args: OffloadArgs): List<String>? {
@@ -297,6 +381,8 @@ COMMANDS:
   list      List recent sessions (default: 50, max: 100)
   search    Search message content across sessions (requires --keywords)
   messages  Read messages from a specific session (requires --id)
+  send      Create/continue a session and prompt it headlessly
+            (requires the sub-agent switch in Settings → Agent Runtime)
 
 OPTIONS:
   --keywords <words>    Space-separated keywords (AND logic, required for search)
@@ -307,6 +393,10 @@ OPTIONS:
   --start <YYYY-MM-DD>  Filter results after this date (inclusive)
   --end <YYYY-MM-DD>    Filter results before this date (inclusive, end of day)
   --limit <n>           Max results (default: 50, max: 100)
+  --prompt <text>       (send only) The prompt to send
+  --session <id>        (send only) Continue an existing session (default: new)
+  --async               (send only) Return immediately with the session id
+  --wait-timeout <sec>  (send only) Max wait for --wait completion (default 600)
   --help, -h            Show this help message
   --compact             Minimize JSON output
   -q, --quiet           Output only data field

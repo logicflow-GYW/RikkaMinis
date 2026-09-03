@@ -493,7 +493,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         // (writes a 17-byte exit-0 stub at /usr/local/bin/minis-sessions-cli
         // so PATH lookup succeeds; PRoot intercepts the execve before
         // the stub runs and routes to this handler).
-        NativeOffloadServer.register("minis-sessions-cli", SessionsOffloadHandler(chatRepository))
+        NativeOffloadServer.register("minis-sessions-cli", SessionsOffloadHandler(chatRepository, this))
         // T322: android-shizuku-cli — privileged Android control via Shizuku.
         // The handler short-circuits with a typed error envelope when the
         // user hasn't installed / started / authorized Shizuku, so we
