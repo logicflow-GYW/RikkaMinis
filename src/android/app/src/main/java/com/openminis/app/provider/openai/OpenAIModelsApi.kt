@@ -55,76 +55,84 @@ object OpenAIModelsApi {
             .build()
 
         val response = client.newCall(request).execute()
-        val body = response.body?.string() ?: return@withContext fallback
+        // [fix/audit-s4m1] try/finally guarantees close across every early
+        // return@withContext below (body-null, !isSuccessful, empty data,
+        // parse throw). Previously a successful models-list fetch leaked a
+        // Response + connection handle.
+        try {
+            val body = response.body?.string() ?: return@withContext fallback
 
-        if (!response.isSuccessful) {
-            if (context != null && (response.code == 401 || response.code == 403)) {
-                cache.invalidate(context, cacheKey)
-            }
-            return@withContext fallback
-        }
-
-        val models = try {
-            val json = JSONObject(body)
-            val data = json.optJSONArray("data") ?: return@withContext fallback
-            val parsed = mutableListOf<LLMModel>()
-            for (i in 0 until data.length()) {
-                val obj = data.getJSONObject(i)
-                val id = obj.getString("id")
-
-                // Only filter by chat prefixes for official OpenAI endpoints;
-                // custom endpoints (vLLM, Ollama) may serve any model ID.
-                if (!isCustomBase) {
-                    if (!chatPrefixes.any { id.startsWith(it) }) continue
-                    if (excludeSuffixes.any { id.contains(it) }) continue
-                    if (id.contains(":ft-")) continue
+            if (!response.isSuccessful) {
+                if (context != null && (response.code == 401 || response.code == 403)) {
+                    cache.invalidate(context, cacheKey)
                 }
-
-                val displayName = obj.optString("name", id)
-                // Third-party gateways (vLLM, OpenRouter-compat proxies) often
-                // report per-model modalities under `architecture.{input,output}_modalities`
-                // the same way OpenRouter does — pick them up so vision/audio
-                // models are routable without waiting for models.dev enrichment.
-                val arch = obj.optJSONObject("architecture")
-                // OpenAI / OpenRouter return modalities as `image_input` / `text_output` with
-                // suffixes; the rest of the codebase (models.dev, capability fragments,
-                // ModelEntryDetailScreen toggles) uses the bare form. Normalize at the parse
-                // boundary so persisted overrides round-trip correctly through the toggles.
-                val inputModalities = arch?.optJSONArray("input_modalities")?.toStringList().normalizeModalities()
-                val outputModalities = arch?.optJSONArray("output_modalities")?.toStringList().normalizeModalities()
-
-                // T119: known reasoning families (GPT-5.x, o-series, Codex
-                // Mini) get supportsReasoning pre-set to true so the
-                // Thinking pill enables before models.dev enrichment lands
-                // — for brand-new ids (e.g. gpt-5.5) the catalog rarely has
-                // the `reasoning` flag yet, and without this the pill
-                // stays disabled.
-                val idLower = id.lowercase()
-                val knownReasoning = idLower.startsWith("gpt-5") ||
-                    idLower.startsWith("o1") ||
-                    idLower.startsWith("o3") ||
-                    idLower.startsWith("o4") ||
-                    idLower.contains("codex")
-
-                parsed.add(
-                    LLMModel(
-                        id = id,
-                        displayName = displayName,
-                        provider = if (isCustomBase) "Custom" else "OpenAI",
-                        inputModalities = inputModalities,
-                        outputModalities = outputModalities,
-                        supportsReasoning = if (knownReasoning) true else null,
-                    )
-                )
+                return@withContext fallback
             }
-            if (parsed.isEmpty()) return@withContext fallback
-            ModelsDevApi.enrichModels(parsed)
-        } catch (_: Exception) {
-            return@withContext fallback
-        }
 
-        if (context != null) cache.save(context, cacheKey, models)
-        models
+            val models = try {
+                val json = JSONObject(body)
+                val data = json.optJSONArray("data") ?: return@withContext fallback
+                val parsed = mutableListOf<LLMModel>()
+                for (i in 0 until data.length()) {
+                    val obj = data.getJSONObject(i)
+                    val id = obj.getString("id")
+
+                    // Only filter by chat prefixes for official OpenAI endpoints;
+                    // custom endpoints (vLLM, Ollama) may serve any model ID.
+                    if (!isCustomBase) {
+                        if (!chatPrefixes.any { id.startsWith(it) }) continue
+                        if (excludeSuffixes.any { id.contains(it) }) continue
+                        if (id.contains(":ft-")) continue
+                    }
+
+                    val displayName = obj.optString("name", id)
+                    // Third-party gateways (vLLM, OpenRouter-compat proxies) often
+                    // report per-model modalities under `architecture.{input,output}_modalities`
+                    // the same way OpenRouter does — pick them up so vision/audio
+                    // models are routable without waiting for models.dev enrichment.
+                    val arch = obj.optJSONObject("architecture")
+                    // OpenAI / OpenRouter return modalities as `image_input` / `text_output` with
+                    // suffixes; the rest of the codebase (models.dev, capability fragments,
+                    // ModelEntryDetailScreen toggles) uses the bare form. Normalize at the parse
+                    // boundary so persisted overrides round-trip correctly through the toggles.
+                    val inputModalities = arch?.optJSONArray("input_modalities")?.toStringList().normalizeModalities()
+                    val outputModalities = arch?.optJSONArray("output_modalities")?.toStringList().normalizeModalities()
+
+                    // T119: known reasoning families (GPT-5.x, o-series, Codex
+                    // Mini) get supportsReasoning pre-set to true so the
+                    // Thinking pill enables before models.dev enrichment lands
+                    // — for brand-new ids (e.g. gpt-5.5) the catalog rarely has
+                    // the `reasoning` flag yet, and without this the pill
+                    // stays disabled.
+                    val idLower = id.lowercase()
+                    val knownReasoning = idLower.startsWith("gpt-5") ||
+                        idLower.startsWith("o1") ||
+                        idLower.startsWith("o3") ||
+                        idLower.startsWith("o4") ||
+                        idLower.contains("codex")
+
+                    parsed.add(
+                        LLMModel(
+                            id = id,
+                            displayName = displayName,
+                            provider = if (isCustomBase) "Custom" else "OpenAI",
+                            inputModalities = inputModalities,
+                            outputModalities = outputModalities,
+                            supportsReasoning = if (knownReasoning) true else null,
+                        )
+                    )
+                }
+                if (parsed.isEmpty()) return@withContext fallback
+                ModelsDevApi.enrichModels(parsed)
+            } catch (_: Exception) {
+                return@withContext fallback
+            }
+
+            if (context != null) cache.save(context, cacheKey, models)
+            models
+        } finally {
+            response.close()
+        }
     }
 
     private fun JSONArray.toStringList(): List<String> {

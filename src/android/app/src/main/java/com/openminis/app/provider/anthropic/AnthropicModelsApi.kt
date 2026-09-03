@@ -94,28 +94,35 @@ object AnthropicModelsApi {
                 android.util.Log.e("AnthropicModels", "Fetch error (level=$idx): ${e.message}")
                 continue
             }
-            val body = response.body?.string() ?: run {
-                android.util.Log.w("AnthropicModels", "Empty response body (level=$idx)")
-                ""
-            }
-
-            if (!response.isSuccessful) {
-                android.util.Log.e("AnthropicModels", "Fetch failed (level=$idx): ${response.code} ${body.take(200)}")
-                // 401/403 almost always means the credential rotated; drop any stale
-                // cache entry so the next lookup hits the network again.
-                if (context != null && (response.code == 401 || response.code == 403)) {
-                    AnthropicModelsCache.invalidate(context, cacheKey)
+            // [fix/audit-s4m1] close on every path — this loop `continue`s on
+            // failures and returns on success, and each level previously leaked
+            // a Response; the leak amplified across fallback levels.
+            try {
+                val body = response.body?.string() ?: run {
+                    android.util.Log.w("AnthropicModels", "Empty response body (level=$idx)")
+                    ""
                 }
-                lastFailureCode = response.code
-                lastFailureBody = body
-                continue
-            }
 
-            if (idx > 0) {
-                android.util.Log.i("AnthropicModels", "Parent-path fallback succeeded at level=$idx base=$candidate")
+                if (!response.isSuccessful) {
+                    android.util.Log.e("AnthropicModels", "Fetch failed (level=$idx): ${response.code} ${body.take(200)}")
+                    // 401/403 almost always means the credential rotated; drop any stale
+                    // cache entry so the next lookup hits the network again.
+                    if (context != null && (response.code == 401 || response.code == 403)) {
+                        AnthropicModelsCache.invalidate(context, cacheKey)
+                    }
+                    lastFailureCode = response.code
+                    lastFailureBody = body
+                    continue
+                }
+
+                if (idx > 0) {
+                    android.util.Log.i("AnthropicModels", "Parent-path fallback succeeded at level=$idx base=$candidate")
+                }
+                android.util.Log.d("AnthropicModels", "Response ${response.code}, body length: ${body.length}")
+                return@withContext parseAndCache(body, isCustomEndpoint, context, cacheKey)
+            } finally {
+                response.close()
             }
-            android.util.Log.d("AnthropicModels", "Response ${response.code}, body length: ${body.length}")
-            return@withContext parseAndCache(body, isCustomEndpoint, context, cacheKey)
         }
 
         // All candidate bases failed.

@@ -44,22 +44,26 @@ class BrowserHistoryStore private constructor(private val context: Context) {
 
     fun record(url: String, title: String) {
         if (url.isEmpty()) return
-        // Deduplicate consecutive visits to same URL
-        if (entries.lastOrNull()?.url == url) return
+        synchronized(entries) {
+            // Deduplicate consecutive visits to same URL
+            if (entries.lastOrNull()?.url == url) return
 
-        entries.add(Entry(url = url, title = title))
-        pruneOld()
+            entries.add(Entry(url = url, title = title))
+            pruneOldLocked()
+        }
         save()
     }
 
-    fun getEntries(): List<Entry> = entries.sortedByDescending { it.timestamp }
+    fun getEntries(): List<Entry> = synchronized(entries) { entries.sortedByDescending { it.timestamp } }
 
     fun search(query: String): List<Entry> {
         if (query.isBlank()) return getEntries()
         val q = query.lowercase()
-        return entries.filter {
-            it.title.lowercase().contains(q) || it.url.lowercase().contains(q)
-        }.sortedByDescending { it.timestamp }
+        return synchronized(entries) {
+            entries.filter {
+                it.title.lowercase().contains(q) || it.url.lowercase().contains(q)
+            }.sortedByDescending { it.timestamp }
+        }
     }
 
     fun groupedByDay(): Map<String, List<Entry>> {
@@ -85,15 +89,22 @@ class BrowserHistoryStore private constructor(private val context: Context) {
 
     /** Get unique domains from history (for cookie domain listing). */
     fun uniqueDomains(): List<String> {
-        return entries.map { it.domain }.filter { it.isNotEmpty() }.distinct().sorted()
+        return synchronized(entries) { entries.map { it.domain }.filter { it.isNotEmpty() }.distinct().sorted() }
     }
 
     fun clear() {
-        entries.clear()
+        synchronized(entries) { entries.clear() }
         save()
     }
 
     private fun pruneOld() {
+        synchronized(entries) { pruneOldLocked() }
+    }
+
+    // [fix/audit-s6m2] callers must hold the entries lock — this is a
+    // check-then-act mutation (removeAll scans + mutates) that must be atomic
+    // against concurrent record()/clear().
+    private fun pruneOldLocked() {
         val cutoff = System.currentTimeMillis() - MAX_AGE_MS
         entries.removeAll { it.timestamp < cutoff }
     }

@@ -48,26 +48,30 @@ object OpenRouterModelsApi {
             .build()
 
         val response = client.newCall(request).execute()
-        val body = response.body?.string() ?: return@withContext emptyList()
+        try {
+            val body = response.body?.string() ?: return@withContext emptyList()
 
-        if (!response.isSuccessful) {
-            if (context != null && (response.code == 401 || response.code == 403)) {
-                cache.invalidate(context, cacheKey)
+            if (!response.isSuccessful) {
+                if (context != null && (response.code == 401 || response.code == 403)) {
+                    cache.invalidate(context, cacheKey)
+                }
+                return@withContext emptyList()
             }
-            return@withContext emptyList()
-        }
 
-        val models = try {
-            val json = JSONObject(body)
-            val data = json.optJSONArray("data") ?: return@withContext emptyList()
-            parseModels(data)
-        } catch (_: Exception) {
-            return@withContext emptyList()
-        }
+            val models = try {
+                val json = JSONObject(body)
+                val data = json.optJSONArray("data") ?: return@withContext emptyList()
+                parseModels(data)
+            } catch (_: Exception) {
+                return@withContext emptyList()
+            }
 
-        val enriched = ModelsDevApi.enrichModels(models)
-        if (context != null) cache.save(context, cacheKey, enriched)
-        enriched
+            val enriched = ModelsDevApi.enrichModels(models)
+            if (context != null) cache.save(context, cacheKey, enriched)
+            enriched
+        } finally {
+            response.close()
+        }
     }
 
     private fun parseModels(data: JSONArray): List<LLMModel> {

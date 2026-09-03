@@ -100,19 +100,24 @@ class AnthropicProvider(
     ): LLMResponse = withContext(Dispatchers.IO) {
         val body = buildRequestBody(messages, systemPrompt, maxTokens, stream = false, temperature = temperature, imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel)
         val request = buildRequest(body.toString(), body)
-        val response = client.newCall(request).execute()
-        val responseBody = response.body?.string() ?: ""
+        // [fix/audit-s4m1] response was never closed on success OR error — the
+        // .use{} guarantees release on all three paths (success / mapHttpError
+        // throw / any other exception). Previously every non-streaming call
+        // leaked a Response + connection handle.
+        client.newCall(request).execute().use { response ->
+            val responseBody = response.body?.string() ?: ""
 
-        if (!response.isSuccessful) {
-            throw mapHttpError(
-                response.code,
-                responseBody,
-                parseRetryAfterMs(response.headers["Retry-After"], System.currentTimeMillis()),
-            )
+            if (!response.isSuccessful) {
+                throw mapHttpError(
+                    response.code,
+                    responseBody,
+                    parseRetryAfterMs(response.headers["Retry-After"], System.currentTimeMillis()),
+                )
+            }
+
+            val json = JSONObject(responseBody)
+            parseResponse(json)
         }
-
-        val json = JSONObject(responseBody)
-        parseResponse(json)
     }
 
     override fun streamMessageClamped(

@@ -76,23 +76,25 @@ class GeminiProvider(
             .applyUserAgentOverride(null)
             .build()
 
-        val response = client.newCall(request).execute()
-        val responseBody = response.body?.string() ?: ""
+        // [fix/audit-s4m1] response closed via .use{} on all paths.
+        client.newCall(request).execute().use { response ->
+            val responseBody = response.body?.string() ?: ""
 
-        if (!response.isSuccessful) {
-            throw mapHttpError(
-                response.code,
-                responseBody,
-                parseRetryAfterMs(response.headers["Retry-After"], System.currentTimeMillis()),
-            )
+            if (!response.isSuccessful) {
+                throw mapHttpError(
+                    response.code,
+                    responseBody,
+                    parseRetryAfterMs(response.headers["Retry-After"], System.currentTimeMillis()),
+                )
+            }
+
+            val json = JSONObject(responseBody)
+            val text = extractText(json)
+            val finishReason = extractFinishReason(json)
+            val usage = extractUsage(json)
+            val mediaAttachments = extractInlineMedia(json)
+            LLMResponse(text, finishReason ?: "end_turn", usage, mediaAttachments)
         }
-
-        val json = JSONObject(responseBody)
-        val text = extractText(json)
-        val finishReason = extractFinishReason(json)
-        val usage = extractUsage(json)
-        val mediaAttachments = extractInlineMedia(json)
-        LLMResponse(text, finishReason ?: "end_turn", usage, mediaAttachments)
     }
 
     override fun streamMessageClamped(

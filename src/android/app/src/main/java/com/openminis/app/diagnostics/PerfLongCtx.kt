@@ -82,7 +82,18 @@ object PerfLongCtx {
      */
     fun end(sessionId: String, name: String = "end", extra: String = "") {
         step(sessionId, name, extra)
+        // [fix/audit-s7l1] previously only lastNsBySession was removed here —
+        // clickNsBySession + the three row-compose maps keyed by sessionId
+        // grew unbounded across the process lifetime (one entry per opened
+        // session, never reclaimed). The click timestamp comment says it's
+        // "left in place for late-arriving steps", but those late steps are
+        // always bounded by the same navigation cycle that calls end() — so
+        // reclaim everything on end() and let a fresh click() re-seed.
         lastNsBySession.remove(sessionId)
+        clickNsBySession.remove(sessionId)
+        rowComposeCount.remove(sessionId)
+        rowComposeStartNs.remove(sessionId)
+        rowComposeTypes.remove(sessionId)
     }
 
     /**

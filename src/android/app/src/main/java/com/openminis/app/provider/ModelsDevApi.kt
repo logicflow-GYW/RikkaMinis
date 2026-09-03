@@ -245,22 +245,27 @@ object ModelsDevApi {
         try {
             val request = Request.Builder().url(SOURCE_URL).build()
             val response = client.newCall(request).execute()
-            if (!response.isSuccessful) {
-                Log.e(TAG, "models.dev HTTP error: ${response.code}")
-                response.close()
-                return
-            }
-            val body = response.body?.string() ?: return
-            response.close()
-
-            val parsed = parseRegistry(body)
-            if (parsed != null) {
-                synchronized(this) {
-                    cachedRegistry = parsed
-                    cacheTimestamp = System.currentTimeMillis()
+            try {
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "models.dev HTTP error: ${response.code}")
+                    return
                 }
-                saveDiskCache(body)
-                Log.d(TAG, "Background-refreshed models.dev registry: ${parsed.size} providers")
+                val body = response.body?.string() ?: return
+
+                val parsed = parseRegistry(body)
+                if (parsed != null) {
+                    synchronized(this) {
+                        cachedRegistry = parsed
+                        cacheTimestamp = System.currentTimeMillis()
+                    }
+                    saveDiskCache(body)
+                    Log.d(TAG, "Background-refreshed models.dev registry: ${parsed.size} providers")
+                }
+            } finally {
+                // [fix/audit-s4l1] close on all paths — previously a null body
+                // (204 no-content) returned early WITHOUT close, leaking the
+                // Response.
+                response.close()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to fetch models.dev: ${e.message}")
