@@ -105,6 +105,8 @@
     <string name="settings_max_concurrent_subtitle">Limit: %1$d · Läuft: %2$d · Wartet: %3$d</string>
     <string name="settings_max_concurrent_dialog_title">Max. gleichzeitige Sitzungen</string>
     <string name="settings_max_concurrent_restart_hint">Wirkt ab dem nächsten App-Start.</string>
+    <string name="settings_subagent_dispatch">Sub-Agent-Verteilung</string>
+    <string name="settings_subagent_dispatch_subtitle">Erlaubt dem Agenten, Sub-Agents zu starten und Arbeit an andere Chat-Sitzungen zu verteilen (spawn_agent + minis-sessions-cli send)</string>
     <string name="settings_section_storage">Speicher</string>
     <string name="settings_storage_subtitle">Alpine-Linux-Rootfs verwalten und Dateien durchsuchen</string>
     <string name="settings_section_permissions">Berechtigungen</string>

@@ -244,6 +244,8 @@
     <string name="settings_max_concurrent_subtitle">Limit: %1$d · Running: %2$d · Waiting: %3$d</string>
     <string name="settings_max_concurrent_dialog_title">Max concurrent sessions</string>
     <string name="settings_max_concurrent_restart_hint">Takes effect on next app start.</string>
+    <string name="settings_subagent_dispatch">Sub-agent dispatch</string>
+    <string name="settings_subagent_dispatch_subtitle">Let the agent spawn sub-agents and dispatch work to other chat sessions (spawn_agent + minis-sessions-cli send)</string>
     <string name="settings_section_storage">Storage</string>
     <string name="settings_storage_subtitle">Manage Alpine Linux rootfs and browse files</string>
     <string name="settings_section_permissions">Permissions</string>

@@ -141,6 +141,8 @@
     <string name="settings_max_concurrent_subtitle">上限：%1$d · 运行中：%2$d · 排队中：%3$d</string>
     <string name="settings_max_concurrent_dialog_title">最大并发会话数</string>
     <string name="settings_max_concurrent_restart_hint">下次启动应用时生效。</string>
+    <string name="settings_subagent_dispatch">子代理派发</string>
+    <string name="settings_subagent_dispatch_subtitle">允许 agent 派生子代理并将任务派发到其他会话（spawn_agent + minis-sessions-cli send）</string>
     <string name="settings_section_storage">存储</string>
     <string name="settings_storage_subtitle">管理 Alpine Linux rootfs 并浏览文件</string>
     <string name="settings_section_permissions">权限</string>

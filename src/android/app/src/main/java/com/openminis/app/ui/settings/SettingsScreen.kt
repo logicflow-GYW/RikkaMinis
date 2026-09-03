@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.Backup
@@ -199,6 +200,11 @@ fun SettingsScreen(
                     onClick = onEnvVarsClick,
                     showDivider = false,
                 )
+                // [T-subagent-toggle] Cross-session sub-agent dispatch switch.
+                // OFF by default (side-effectful: lets the agent open new sessions
+                // and run long-lived work). Direct inline switch (no sub-page) —
+                // same pattern as the Memory global toggle.
+                SubagentDispatchSetting()
                 // [D-2] Cross-session concurrency cap — configurable + observable.
                 // Lets the user run at the Phase-0 floor (2 slots) for a while,
                 // read live occupancy (running/waiting) and evaluate widening to 3.
@@ -414,6 +420,32 @@ private fun SettingsItem(
             )
         }
     }
+}
+
+/**
+ * [T-subagent-toggle] Cross-session sub-agent dispatch switch. Reads
+ * [com.openminis.app.data.SubagentPrefs] directly (same prefs+key as
+ * ConfigBuiltins' `runtime.subagentEnabled`) so the UI, minis-config, and the
+ * agent all share one source of truth. OFF by default.
+ */
+@Composable
+private fun SubagentDispatchSetting() {
+    val context = LocalContext.current
+    var enabled by remember {
+        mutableStateOf(com.openminis.app.data.SubagentPrefs.isEnabled(context))
+    }
+    SettingsSwitchRow(
+        icon = Icons.Outlined.AccountTree,
+        iconColor = Color(0xFF34C759),
+        title = stringResource(R.string.settings_subagent_dispatch),
+        subtitle = stringResource(R.string.settings_subagent_dispatch_subtitle),
+        checked = enabled,
+        onCheckedChange = { newValue ->
+            enabled = newValue
+            com.openminis.app.data.SubagentPrefs.setEnabled(context, newValue)
+        },
+        showDivider = true,
+    )
 }
 
 /**

@@ -105,6 +105,8 @@
     <string name="settings_max_concurrent_subtitle">上限: %1$d · 実行中: %2$d · 待機: %3$d</string>
     <string name="settings_max_concurrent_dialog_title">同時セッション数の上限</string>
     <string name="settings_max_concurrent_restart_hint">次回アプリ起動時に反映されます。</string>
+    <string name="settings_subagent_dispatch">サブエージェントの派遣</string>
+    <string name="settings_subagent_dispatch_subtitle">エージェントがサブエージェントを起動し、他のチャットセッションへ作業を派遣することを許可（spawn_agent + minis-sessions-cli send）</string>
     <string name="settings_section_storage">ストレージ</string>
     <string name="settings_storage_subtitle">Alpine Linux rootfs を管理してファイルを参照</string>
     <string name="settings_section_permissions">権限</string>
