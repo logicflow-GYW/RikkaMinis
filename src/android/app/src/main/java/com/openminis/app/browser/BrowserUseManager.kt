@@ -27,6 +27,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.UUID
 
 /**
  * Manages a single Android WebView for browser automation.
