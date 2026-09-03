@@ -615,6 +615,13 @@ class ModelExecutionService : Service() {
                     com.openminis.app.data.model.LLMMessage.Role.USER
                 },
                 content = obj.optString("content", ""),
+                // [fix/audit-s3m1] Non-streaming executeRun now parses
+                // contentParts exactly like the streaming path (:870) — the
+                // dispatcher serializes contentParts (buildRequestJson :95),
+                // and previously tool results / images carried as parts were
+                // silently dropped here, so non-streaming turns (title
+                // generation / compaction / QuickTest) saw text only.
+                contentParts = parseContentParts(obj),
                 audioParts = jsonObjList(obj.optJSONArray("audio_parts")).mapNotNull { a ->
                     val b64 = a.optString("data", "")
                     if (b64.isEmpty()) null
@@ -751,6 +758,12 @@ class ModelExecutionService : Service() {
                     maxTokens = maxTokens,
                     temperature = temperature,
                     imageParts = imageParts,
+                    // [fix/audit-s3m1] tools now parsed and forwarded, matching
+                    // the streaming path (:1001) — the dispatcher serializes
+                    // tools (buildRequestJson :140) but this call site dropped
+                    // them, so non-streaming function-calling turns ran with
+                    // an empty tool surface.
+                    tools = parseToolsJson(req.optJSONArray("tools")),
                 )
             }
         } catch (e: Throwable) {
@@ -1376,21 +1389,48 @@ class ModelExecutionService : Service() {
     ) {
         val obj = try { val t = inputJson.trim(); if (t.startsWith("{")) JSONObject(t) else null }
         catch (_: Exception) { null } ?: return
-        val ip = obj.optJSONObject("image_passthrough") ?: return
-        val body = ip.optJSONObject("extra_body")
-        if (body != null) {
-            val bodyMap = linkedMapOf<String, Any?>()
-            for (key in body.keys()) { bodyMap[key] = body.get(key) }
-            openAI.imageExtraBody = bodyMap
+        // [fix/audit-s3m2] This reader used to expect an `image_passthrough`
+        // envelope that NO caller ever wrote (dead dialect — grep found this
+        // line as the only reference to the key in the whole repo). The
+        // in-process ModelUseOffloadHandler.parseImagePassthrough uses a
+        // different dialect: implicit top-level keys (not in the reserved
+        // set) + explicit extra_body / extra_headers / endpoint_path. Parse
+        // the SAME dialect here so passthrough extras survive the worker
+        // path too (e.g. Seedream image-to-image `image` body field),
+        // instead of being silently dropped.
+        val body = LinkedHashMap<String, Any?>()
+        for (key in obj.keys()) {
+            if (key in IMAGE_PASSTHROUGH_RESERVED_KEYS) continue
+            body[key] = obj.opt(key)
         }
-        ip.optString("path", "").ifEmpty { null }?.let { openAI.imagePathOverride = it }
-        val hdrs = ip.optJSONObject("extra_headers")
-        if (hdrs != null) {
-            val hdrsMap = linkedMapOf<String, String>()
-            for (key in hdrs.keys()) { hdrsMap[key] = hdrs.optString(key, "") }
-            openAI.imageExtraHeaders = hdrsMap
+        obj.optJSONObject("extra_body")?.let { eb ->
+            for (key in eb.keys()) body[key] = eb.opt(key)
+        }
+        if (body.isNotEmpty()) openAI.imageExtraBody = body
+        val headers = LinkedHashMap<String, String>()
+        obj.optJSONObject("extra_headers")?.let { eh ->
+            for (key in eh.keys()) {
+                val v = eh.opt(key)
+                if (v is String) headers[key] = v
+            }
+        }
+        if (headers.isNotEmpty()) openAI.imageExtraHeaders = headers
+        obj.optString("endpoint_path", "").trim().takeIf { it.isNotEmpty() }?.let {
+            openAI.imagePathOverride = it
         }
     }
+
+    /**
+     * Keys consumed by the image-gen schema itself (parseImageGenConfig) or
+     * the chat schema — mirrors ModelUseOffloadHandler.imageReservedKeys.
+     * Any OTHER top-level key in inputJson folds into the passthrough body.
+     */
+    private val IMAGE_PASSTHROUGH_RESERVED_KEYS: Set<String> = setOf(
+        "messages", "model", "chat_model", "prompt", "n", "number_of_images",
+        "size", "image_size", "quality", "generation_config", "endpoint",
+        "image_endpoint", "endpoint_path", "extra_body", "extra_headers",
+        "stream", "temperature", "max_tokens",
+    )
 }
 
 /**

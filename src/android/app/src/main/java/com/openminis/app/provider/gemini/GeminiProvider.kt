@@ -170,9 +170,29 @@ class GeminiProvider(
                 // Extract function calls from streaming response
                 val functionCalls = extractFunctionCalls(json)
                 for ((fcName, fcArgs) in functionCalls) {
+                    // [audit-s4l2] id is client-minted: Gemini's streamGenerateContent
+                    // gives functionCall NO server-side id (unlike OpenAI's
+                    // tool_call_id). We use nanoTime because the SSE is INCREMENTAL
+                    // (extractTextAndThinking appends deltas without dedupe, and text
+                    // visibly never duplicates) — each functionCall's full args
+                    // arrive once in a single chunk, so a fresh id per occurrence is
+                    // safe and unique. NOTE: if a future Gemini stream mode ever
+                    // switches to cumulative candidate snapshots, this must become a
+                    // stable name-indexed id so the engine's per-turn dedupe
+                    // (dedupeToolStartId) can collapse repeats.
                     val toolId = "gemini_${System.nanoTime()}"
                     send(LLMStreamChunk.ToolUseStart(toolId, fcName))
                     send(LLMStreamChunk.ToolCallComplete(toolId, fcName, fcArgs))
+                }
+
+                // [fix/audit-s4m4] The request side sets responseModalities
+                // (buildThinkingLevelConfig/Gemini image+audio generation),
+                // so the model may stream inlineData parts back. The
+                // non-streaming path extracts them via extractInlineMedia
+                // (:94) — the SSE loop previously only read text/thinking
+                // parts, silently dropping media bytes on streaming turns.
+                extractInlineMedia(json).forEach { media ->
+                    send(LLMStreamChunk.MediaAttachment(media))
                 }
 
                 extractUsage(json)?.let { usage ->
@@ -367,7 +387,7 @@ class GeminiProvider(
                         put("thinkingLevel", when (level) {
                             ThinkingLevel.LOW -> "low"
                             ThinkingLevel.MEDIUM -> "medium"
-                            ThinkingLevel.HIGH, ThinkingLevel.XHIGH -> "high"
+                            ThinkingLevel.HIGH, ThinkingLevel.XHIGH, ThinkingLevel.MAX, ThinkingLevel.ULTRA -> "high"
                             else -> "low"
                         })
                         put("includeThoughts", true)
