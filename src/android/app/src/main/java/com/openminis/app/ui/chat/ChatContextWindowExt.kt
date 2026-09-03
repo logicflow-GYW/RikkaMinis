@@ -127,6 +127,59 @@ internal fun ChatViewModel.maybeTriggerAutoCompact() {
 }
 
 /**
+ * [T-auto-compact-in-loop] Turn-boundary automatic summarization for the
+ * agent loop. Called from runAgentLoop BEFORE the hard
+ * [trimContextHistoryWindow] fallback, while `_isStreaming` is still true but
+ * the previous turn's collect has completed (no pending delta).
+ *
+ * Differences from [maybeTriggerAutoCompact] (the sendMessage path):
+ *   - Uses the engine's live `lastContextTokens` param (loopState) instead of
+ *     the VM's `_lastTurnContextTokens` snapshot.
+ *   - Triggers `compactAll(allowInStream = true)` so the in-stream guard
+ *     doesn't abort it at a turn boundary.
+ *   - AWAITS completion (bounded) so the next provider call sees the summary,
+ *     not a half-compacted history. Returns true iff a compact was started
+ *     (caller should await before proceeding).
+ */
+internal suspend fun ChatViewModel.maybeAutoCompactInLoop(
+    contextWindow: Int,
+    lastContextTokens: Int,
+): Boolean {
+    if (_isCompacting.value) return false
+    if (contextWindow <= 0 || lastContextTokens <= 0) return false
+    val policy = ContextPolicy.forContextWindow(contextWindow)
+    // Only fire while we're in the compact band (NEEDS_COMPACT), i.e. BEFORE
+    // the hard ceiling forces trimContextHistoryWindow to drop turns verbatim.
+    if (policy.check(lastContextTokens, contextWindow) != ContextPolicy.CheckResult.NEEDS_COMPACT) {
+        return false
+    }
+    val anchorId = _cachedLatestMarker?.lastCompactedMessageId
+    val tail = ContextCompactor.estimateTailTokens(agentHistory, anchorId)
+    val decision = ContextCompactor.decide(
+        estimatedTokens = lastContextTokens,
+        contextWindow = contextWindow,
+        policy = policy,
+        tailTokens = tail,
+        isCompacting = false,
+        lastAutoCompactAtMs = lastAutoCompactAtMs,
+    )
+    if (decision != ContextCompactor.Decision.AUTO_COMPACT) {
+        AppLogger.info(ChatViewModel.TAG, "[AutoCompactLoop] skipped: $decision tokens=$lastContextTokens window=$contextWindow tail=$tail")
+        return false
+    }
+    lastAutoCompactAtMs = System.currentTimeMillis()
+    appendSystemInfo(
+        text = context.getString(R.string.sysmsg_context_full_auto, lastContextTokens, contextWindow),
+        iconKind = "compact",
+    )
+    AppLogger.info(ChatViewModel.TAG, "[AutoCompactLoop] triggering (tokens=$lastContextTokens window=$contextWindow tail=$tail)")
+    compactAll(allowInStream = true) // fire-and-forget; internally launches on IO
+    // Await completion so the next provider call assembles summary + tail.
+    awaitAutoCompactIfNeeded()
+    return true
+}
+
+/**
  * Called at the top of the send coroutine: if [maybeTriggerAutoCompact]
  * fired (or a compact is otherwise in flight), wait for it to finish so
  * the persisted user message is appended AFTER the compacted range and

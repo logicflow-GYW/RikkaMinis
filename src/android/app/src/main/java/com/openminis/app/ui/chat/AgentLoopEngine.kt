@@ -228,17 +228,37 @@ internal class AgentLoopEngine(
                     contextWindow = window,
                     lastContextTokens = loopState.lastContextTokens,
                 )
-                // [T-context-limit-enforce] After offload, what remains in the
-                // estimate must still fit the (possibly group-clamped) window.
-                // Offload only rewrites large tool outputs to short stubs; a
-                // long verbose chat can still exceed the cap, so trim oldest
-                // complete turns as the last-resort structural shrink. This is
-                // what makes the group's `contextLimitTokens` a true hard cap
-                // on the request actually sent to the API.
+                // [T-auto-compact-in-loop] Before falling back to the hard trim
+                // (which drops the oldest turns verbatim and inserts a jarring
+                // "trimmed N messages" line mid-answer), try to summarise the
+                // old turns into a `<context-summary>` instead. Summarising
+                // preserves semantic continuity; the hard trim remains the
+                // last-resort structural shrink only when a compact can't fire
+                // (still-compacting / debounced / tail too small / at the hard
+                // ceiling). This is what makes "context reached the limit"
+                // feel like a clean fold instead of an abrupt cut while the
+                // model is mid-task.
+                val compacted = host.maybeAutoCompactInLoop(
+                    contextWindow = window,
+                    lastContextTokens = loopState.lastContextTokens,
+                )
+                // [T-context-limit-enforce] After offload (and possibly auto-
+                // compact), what remains must still fit the window. Offload only
+                // rewrites large tool outputs to short stubs; a long verbose
+                // chat can still exceed the cap, so trim oldest complete turns
+                // as the last-resort structural shrink. This is what makes the
+                // group's `contextLimitTokens` a true hard cap on the request
+                // actually sent to the API. When auto-compact just folded the
+                // old turns into a summary, the trim is a no-op (history is
+                // already under budget) — but keeping the call unconditional
+                // preserves the hard-cap guarantee.
                 host.trimContextHistoryWindow(
                     contextWindow = window,
                     lastContextTokens = loopState.lastContextTokens,
                 )
+                if (compacted) {
+                    AppLogger.info(TAG_STREAM, "auto-compact folded old turns; proceeding with summary + tail")
+                }
             }
 
             // Mark where this turn's blocks start in loopState.allToolBlocks so we can persist

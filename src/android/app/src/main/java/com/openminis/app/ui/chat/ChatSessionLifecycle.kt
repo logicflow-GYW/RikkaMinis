@@ -35,9 +35,15 @@ import kotlinx.coroutines.withContext
 // The thin delegating shells (walkBackUserTurnsBounded / buildChatMessages /
 // buildLlmMessages / findModelEntry) stay in ChatViewModel.
 
-internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null) {
-    AppLogger.info(ChatViewModel.TAG, "[Compact] compactAll() invoked streaming=${_isStreaming.value} compacting=${_isCompacting.value} historySize=${agentHistory.size} anchorOverride=$anchorIdxOverride")
-    if (_isStreaming.value) {
+internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStream: Boolean = false) {
+    AppLogger.info(ChatViewModel.TAG, "[Compact] compactAll() invoked streaming=${_isStreaming.value} compacting=${_isCompacting.value} historySize=${agentHistory.size} anchorOverride=$anchorIdxOverride allowInStream=$allowInStream")
+    // [T-auto-compact-in-loop] allowInStream relaxes the in-stream guard for
+    // the agent-loop turn boundary: the loop has finished the previous turn's
+    // collect (no pending streaming delta) and awaits this compact before the
+    // next provider call, so the guard's "don't tear the streaming UI" concern
+    // does not apply. All other callers (manual /compact, sendMessage auto-
+    // compact) keep the strict guard via the default false.
+    if (_isStreaming.value && !allowInStream) {
         AppLogger.info(ChatViewModel.TAG, "[Compact] aborted: stream in progress")
         appendSystemInfo(
             text = context.getString(R.string.sysmsg_compact_busy_turn),

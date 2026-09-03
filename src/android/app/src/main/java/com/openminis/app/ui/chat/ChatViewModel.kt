@@ -945,6 +945,8 @@ class ChatViewModel(
             this@ChatViewModel.offloadContextIfNeeded(contextWindow, lastContextTokens, force)
         override fun trimContextHistoryWindow(contextWindow: Int, lastContextTokens: Int) =
             this@ChatViewModel.trimContextHistoryWindow(contextWindow, lastContextTokens)
+        override suspend fun maybeAutoCompactInLoop(contextWindow: Int, lastContextTokens: Int): Boolean =
+            this@ChatViewModel.maybeAutoCompactInLoop(contextWindow, lastContextTokens)
         override fun unavailableGroupMembers(): List<String> = this@ChatViewModel.unavailableGroupMembers()
         override suspend fun addAssistantPlaceholder(assistantId: String, thinkingLevel: ThinkingLevel?) {
             // [T-android-stream-flush-review] Restores the placeholder-bubble

@@ -50,6 +50,15 @@ internal interface AgentLoopHost {
     fun checkContextBeforeSend(): Boolean
     fun offloadContextIfNeeded(contextWindow: Int, lastContextTokens: Int, force: Boolean = false)
     fun trimContextHistoryWindow(contextWindow: Int, lastContextTokens: Int)
+    /**
+     * [T-auto-compact-in-loop] Turn-boundary automatic summarization: before
+     * the loop falls back to the hard [trimContextHistoryWindow] (which drops
+     * the oldest turns verbatim and breaks semantic continuity), ask the host
+     * to summarise the old turns into a `<context-summary>` instead. Returns
+     * true when a compact was actually started (the host gates on
+     * _isCompacting / in-stream state), so the loop can await it.
+     */
+    suspend fun maybeAutoCompactInLoop(contextWindow: Int, lastContextTokens: Int): Boolean
     fun unavailableGroupMembers(): List<String>
 
     // ── assistant message presentation ────────────────────────────────────

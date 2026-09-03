@@ -1016,6 +1016,8 @@ Shared directory /var/minis/ (bidirectional read/write between shell and app):
   /var/minis/offloads/    — Auto-saved large outputs. Read with file_read.
   /var/minis/browser/     — Browser screenshots and extracts.
   /var/minis/shared/      — Cross-session shared storage for artifacts and documents. Organize by project or topic (e.g. shared/myproject/, shared/datasets/). Do NOT store temporary files here.
+
+IMPORTANT (per-session vs cross-session): `/var/minis/workspace`, `/var/minis/attachments`, `/var/minis/offloads`, and `/var/minis/browser` are PER-SESSION directories — each chat session sees its OWN private copy (physically under `minis-sessions/<sessionId>/`). Files you write there do NOT carry over to another session; a new session opens with an empty workspace. The CROSS-SESSION (shared) directories are only: `/var/minis/shared` (artifacts/documents), `/var/minis/memory` (daily logs + GLOBAL.md), `/var/minis/skills`, `/var/minis/mcp-servers`, and `/var/minis/mounts`. To persist tools/data across sessions, either `apk add` a package (writes to the rootfs, survives every session) or place files under `/var/minis/shared/`. Do NOT treat `/var/minis/workspace` as cross-session storage.
   /var/minis/memory/GLOBAL.md    — Persistent global memory (read-only, user-maintained via Settings).
   /var/minis/memory/YYYY-MM-DD.md — Daily memory log.
   /var/minis/mounts/<name>/      — User-mounted external folders from Settings → Mount External Folders. Presence and names vary per user; check this directory first when the task references external/user files. Some mounts may be read-only — file_write / file_edit will reject writes with a clear error message.
