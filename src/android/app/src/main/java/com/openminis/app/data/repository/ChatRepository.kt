@@ -318,13 +318,36 @@ class ChatRepository(
             val row = try {
                 dao.loadMessagesPage(sessionId, baseOffset + i, 1).firstOrNull()
             } catch (e: SQLiteBlobTooBigException) {
-                null
+                // [fix/audit-s5h2] a genuinely un-materialisable oversized row
+                // is now represented by a proxy MessageEntity instead of being
+                // silently DROPPED. The KDoc promises "substitute a proxy …
+                // transcript stays continuous"; the previous `null ?: continue`
+                // skipped the row entirely, so compaction / fork / rerun /
+                // regenerate-title operated on a transcript with a hole (and
+                // `out.size < total` downstream invariants broke). Keep the
+                // row's identity + sort_order so downstream joins stay
+                // continuous, and mark the content as elided.
+                oversizedProxyRow(sessionId, baseOffset + i)
             } catch (e: IllegalStateException) {
-                if (e.message?.contains("CursorWindow", ignoreCase = true) == true) null else throw e
-            } ?: continue
-            result.add(row)
+                if (e.message?.contains("CursorWindow", ignoreCase = true) == true) {
+                    oversizedProxyRow(sessionId, baseOffset + i)
+                } else throw e
+            }
+            if (row != null) result.add(row)
         }
         return result
+    }
+
+    /** Placeholder row for a row too large to materialise (see KDoc above). */
+    private fun oversizedProxyRow(sessionId: String, sortOrder: Int): MessageEntity {
+        return MessageEntity(
+            id = "oversized-$sessionId-$sortOrder",
+            sessionId = sessionId,
+            role = "assistant",
+            partsJson = """[{"type":"text","value":{"text":"[oversized content elided]"}}]""",
+            createdAt = 0L,
+            sortOrder = sortOrder,
+        )
     }
 
     suspend fun deleteMessagesAfter(sessionId: String, keepCount: Int) =

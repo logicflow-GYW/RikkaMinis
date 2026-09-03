@@ -102,7 +102,15 @@ class ToolFailureHook(
         if (trimmed.isEmpty()) return "(empty)"
         // Take the first non-empty line, or the full string if no line-break.
         val firstLine = trimmed.lines().firstOrNull()?.trim() ?: trimmed
-        return firstLine.take(SUMMARY_MAX_LENGTH)
+        // [fix/audit-s6l2] Normalize volatile tokens (timestamps, request ids,
+        // hex/digit runs) out of the dedupe key — otherwise the same root error
+        // with a fresh timestamp/requestId in the first line produces a DIFFERENT
+        // summary and defeats the 10-min dedupe window, re-writing the block.
+        return firstLine
+            .replace(Regex("""\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?"""), "<ts>")
+            .replace(Regex("""\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b""", RegexOption.IGNORE_CASE), "<uuid>")
+            .replace(Regex("""\b\d{10,}\b"""), "<n>")
+            .take(SUMMARY_MAX_LENGTH)
     }
 
     /** Build a complete formatted error block. */

@@ -80,7 +80,6 @@ import androidx.core.content.FileProvider
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.ui.components.rememberIosBounceOverscrollEffect
 import com.openminis.app.ui.markdown.MarkdownText
-import com.openminis.app.ui.chat.StreamingMarkdownText
 import com.openminis.app.ui.media.InlineAudioPlayer
 import com.openminis.app.ui.media.InlineVideoPlayer
 import kotlinx.coroutines.Dispatchers

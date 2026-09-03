@@ -522,11 +522,14 @@ object ConfigBackup {
     }
 
     /**
-     * Provider credential keys, mirroring [ConfigValue.SECRET_KEYS] plus the
-     * Gemini-only OAuth side-channel strings that are equally sensitive.
+     * Provider credential keys, mirroring [ConfigValue.SECRET_KEYS]. The
+     * Gemini-only `oauthEmail`/`oauthGcpProject` keys were historically listed
+     * here, but they have no producer anywhere in the codebase (grep finds
+     * zero writers) — the real OAuth credential is `oauthToken`. Removed so
+     * the secret-strip list reflects what can actually appear in a payload.
      */
     private val SECRET_PROVIDER_KEYS = listOf(
-        "apiKey", "oauthToken", "manualOAuthToken", "oauthEmail", "oauthGcpProject",
+        "apiKey", "oauthToken", "manualOAuthToken",
     )
 
     /** Thrown for payloads that aren't ours, or are from a future major format. */

@@ -201,28 +201,36 @@ object ModelExecutionDispatcher {
      * dispatch failure (timeout / IO / service unavailable) so callers can
      * fall back to the in-process path.
      */
-    suspend fun dispatch(context: Context, requestJson: String): String? =
-        dispatchOnce(context, requestJson)
-            // [T-stale-apikey-worker-cache] One transparent re-dispatch after a
-            // confirmed worker death: the worker process was killed (stale-key
-            // abort / hard crash) before writing anything, so the request was
-            // never served. A fresh startService spawns a NEW worker whose
-            // first-ever prefs load sees the just-saved API key. Bounded to a
-            // single retry so a worker that keeps dying surfaces as a real
-            // null to the caller.
-            ?: run {
-                Log.w(TAG, "dispatch got no result — one retry after worker death (stale-key cache / crash), pid re-spawn expected")
-                dispatchOnce(context, requestJson)
-            }
+    suspend fun dispatch(context: Context, requestJson: String): String? {
+        // [fix/audit-s3l2] Only retry on a CONFIRMED worker death. The previous
+        // code retried on ANY null result, but dispatchOnce also returns null
+        // on timeout — where the worker may STILL be executing the provider
+        // call (slow image/long-text generation). Re-dispatching then started
+        // a second provider call → duplicate billing / duplicate generation.
+        // A timeout must NOT be transparently retried; only the stale-key
+        // worker-death (worker beat then died before writing any output) is
+        // safe to re-run onto a fresh process.
+        val first = dispatchOnce(context, requestJson)
+        if (first.result != null) return first.result
+        return if (first.workerDied) {
+            Log.w(TAG, "dispatch got no result after confirmed worker death — one retry onto a fresh process (stale-key cache / crash)")
+            dispatchOnce(context, requestJson).result
+        } else {
+            // timeout / IO / service-unavailable: do NOT re-dispatch (worker
+            // may still be running the request); surface null to the caller
+            // for its in-process fallback.
+            null
+        }
+    }
 
-    private suspend fun dispatchOnce(context: Context, requestJson: String): String? {
+    private suspend fun dispatchOnce(context: Context, requestJson: String): DispatchOutcome {
         val dir = try {
             val root = File(context.cacheDir, STAGING_ROOT)
             root.mkdirs()
             val d = File(root, "run-${UUID.randomUUID()}")
-            if (!d.mkdir()) return null
+            if (!d.mkdir()) return DispatchOutcome(null, false)
             d
-        } catch (_: Exception) { return null }
+        } catch (_: Exception) { return DispatchOutcome(null, false) }
 
         val requestFile = File(dir, "request.json")
         val resultFile = File(dir, ModelExecutionService.RESULT_FILE)
@@ -231,7 +239,7 @@ object ModelExecutionDispatcher {
         } catch (e: Exception) {
             Log.w(TAG, "write request failed: ${e.message}")
             dir.deleteRecursively()
-            return null
+            return DispatchOutcome(null, false)
         }
 
         try {
@@ -242,7 +250,7 @@ object ModelExecutionDispatcher {
         } catch (e: Exception) {
             Log.w(TAG, "startService failed: ${e.message}")
             logDispatchFailure(dir)
-            return null
+            return DispatchOutcome(null, false)
         }
 
         // Poll for the result file.
@@ -322,8 +330,11 @@ object ModelExecutionDispatcher {
                     "pid still alive/unknown or terminal not reached; orphan reaper may reclaim",
             )
         }
-        return result
+        return DispatchOutcome(result, workerDied)
     }
+
+    /** Outcome of a single [dispatchOnce] attempt. */
+    private data class DispatchOutcome(val result: String?, val workerDied: Boolean)
 
     /**
      * [TF-F] Wait (bounded) for the run's terminal marker. Returns true when

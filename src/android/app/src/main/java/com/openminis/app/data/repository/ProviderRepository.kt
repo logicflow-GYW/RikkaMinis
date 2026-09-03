@@ -38,19 +38,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 
-// Modality bit layout — must match src/ios/Providers/LLMTypes.swift
-// ModelModality OptionSet rawValue exactly. Used by export/import to
-// transmit modality info as a single Int that iOS can decode.
-private const val MODALITY_BIT_TEXT_IN = 1 shl 0
-private const val MODALITY_BIT_TEXT_OUT = 1 shl 1
-private const val MODALITY_BIT_IMG_IN = 1 shl 2
-private const val MODALITY_BIT_PDF_IN = 1 shl 3
-private const val MODALITY_BIT_AUD_IN = 1 shl 4
-private const val MODALITY_BIT_VID_IN = 1 shl 5
-private const val MODALITY_BIT_IMG_OUT = 1 shl 6
-private const val MODALITY_BIT_AUD_OUT = 1 shl 7
-private const val MODALITY_BIT_VID_OUT = 1 shl 8
-
 class ProviderRepository(private val context: Context) {
 
     // [T-android-thinking-level-arch] coerceInputValues makes kotlinx.serialization
@@ -416,22 +403,6 @@ class ProviderRepository(private val context: Context) {
             return dbConfig
         }
         return ProviderConfig()
-    }
-
-    /**
-     * Stable hash of the JSON mirror string, used as the in-DB synced-state
-     * marker. SHA-256 hex so collisions are negligible. Returns null only
-     * if [str] is null (caller normalizes).
-     */
-    private fun hashJsonMirror(str: String): String {
-        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(str.toByteArray())
-        return buildString(digest.size * 2) {
-            for (b in digest) {
-                val v = b.toInt() and 0xFF
-                append(Character.forDigit(v shr 4, 16))
-                append(Character.forDigit(v and 0xF, 16))
-            }
-        }
     }
 
     /**
@@ -1863,16 +1834,6 @@ class ProviderRepository(private val context: Context) {
         }
     }
 
-    private fun isSameCalendarDay(aMs: Long, bMs: Long): Boolean {
-        val cal = java.util.Calendar.getInstance()
-        cal.timeInMillis = aMs
-        val aYear = cal.get(java.util.Calendar.YEAR)
-        val aDay = cal.get(java.util.Calendar.DAY_OF_YEAR)
-        cal.timeInMillis = bMs
-        return aYear == cal.get(java.util.Calendar.YEAR)
-            && aDay == cal.get(java.util.Calendar.DAY_OF_YEAR)
-    }
-
     // API Key management
     fun saveApiKey(instanceId: String, key: String) {
         encryptedPrefs.edit().putString("apikey_$instanceId", key).commit()
@@ -2297,91 +2258,6 @@ class ProviderRepository(private val context: Context) {
             if (srcId.isNotEmpty()) entryMap[srcId] = resolvedEntryId
         }
         return existing.id to entryMap
-    }
-
-    // -- Modality interop with iOS ----------------------------------------
-    //
-    // iOS encodes ModelModality as a single Int bitfield (OptionSet rawValue);
-    // Android carries inputModalities / outputModalities as bare string lists
-    // ("text" / "image" / "pdf" / "audio" / "video"). The export/import path
-    // writes both encodings so the wire format is portable in either
-    // direction without losing fidelity:
-    //   - Android → Android: the native string lists round-trip exactly.
-    //   - Android → iOS:    iOS reads `modalityOverride` Int and ignores
-    //                       the unknown list keys (forward-compatible).
-    //   - iOS → Android:    Android prefers the native list keys when
-    //                       present (Android-original export); otherwise
-    //                       decodes `modalityOverride` Int back into lists.
-    //
-    // Bit layout constants live at file scope above the class (Kotlin
-    // forbids a second companion object, and ProviderRepository already
-    // has one).
-
-    private fun modalityBitfieldFromLists(
-        inputs: List<String>?,
-        outputs: List<String>?,
-    ): Int {
-        var bits = 0
-        inputs?.forEach { raw ->
-            when (raw.lowercase()) {
-                "text" -> bits = bits or MODALITY_BIT_TEXT_IN
-                "image" -> bits = bits or MODALITY_BIT_IMG_IN
-                "pdf" -> bits = bits or MODALITY_BIT_PDF_IN
-                "audio" -> bits = bits or MODALITY_BIT_AUD_IN
-                "video" -> bits = bits or MODALITY_BIT_VID_IN
-            }
-        }
-        outputs?.forEach { raw ->
-            when (raw.lowercase()) {
-                "text" -> bits = bits or MODALITY_BIT_TEXT_OUT
-                "image" -> bits = bits or MODALITY_BIT_IMG_OUT
-                "audio" -> bits = bits or MODALITY_BIT_AUD_OUT
-                "video" -> bits = bits or MODALITY_BIT_VID_OUT
-            }
-        }
-        return bits
-    }
-
-    private fun modalityListsFromBitfield(bits: Int): Pair<List<String>?, List<String>?> {
-        if (bits == 0) return null to null
-        val inputs = buildList {
-            if (bits and MODALITY_BIT_TEXT_IN != 0) add("text")
-            if (bits and MODALITY_BIT_IMG_IN != 0) add("image")
-            if (bits and MODALITY_BIT_PDF_IN != 0) add("pdf")
-            if (bits and MODALITY_BIT_AUD_IN != 0) add("audio")
-            if (bits and MODALITY_BIT_VID_IN != 0) add("video")
-        }
-        val outputs = buildList {
-            if (bits and MODALITY_BIT_TEXT_OUT != 0) add("text")
-            if (bits and MODALITY_BIT_IMG_OUT != 0) add("image")
-            if (bits and MODALITY_BIT_AUD_OUT != 0) add("audio")
-            if (bits and MODALITY_BIT_VID_OUT != 0) add("video")
-        }
-        return inputs.ifEmpty { null } to outputs.ifEmpty { null }
-    }
-
-    /**
-     * Read modality info from a JSON object. Returns (inputs, outputs):
-     *   - native `inputModalities` / `outputModalities` list keys take
-     *     precedence (Android-original export — lossless).
-     *   - if neither list is present, decode iOS's `modalityOverride`
-     *     bitfield as the fallback.
-     *   - if neither shape is present, returns null pair (caller treats
-     *     as "no modality info" → baseModel defaults apply).
-     */
-    private fun readModalitiesWithBitfieldFallback(
-        obj: JSONObject,
-    ): Pair<List<String>?, List<String>?> {
-        val nativeIn = obj.optJSONArray("inputModalities")?.let { arr ->
-            (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotEmpty() } }.takeIf { it.isNotEmpty() }
-        }
-        val nativeOut = obj.optJSONArray("outputModalities")?.let { arr ->
-            (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotEmpty() } }.takeIf { it.isNotEmpty() }
-        }
-        if (nativeIn != null || nativeOut != null) return nativeIn to nativeOut
-        if (!obj.has("modalityOverride")) return null to null
-        val bits = obj.optInt("modalityOverride", 0)
-        return modalityListsFromBitfield(bits)
     }
 }
 

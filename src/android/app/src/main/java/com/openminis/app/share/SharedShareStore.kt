@@ -47,5 +47,12 @@ object SharedShareStore {
     fun cleanSharedFiles(context: Context) {
         val dir = sharedFileDirectory(context)
         dir.listFiles()?.forEach { runCatching { it.delete() } }
+        // [fix/audit-s7m2] the staging byte counter in ShareReceiverActivity is
+        // process-lifetime cumulative (survives Activity recreation) but was
+        // never decremented when files were actually deleted. A long-lived
+        // process that staged+consumed many shares would trip the 500MB cap
+        // with NOTHING on disk. Since cleanSharedFiles deletes the entire
+        // staged set, the counter resets to zero here.
+        ShareReceiverActivity.resetStagedBytes()
     }
 }

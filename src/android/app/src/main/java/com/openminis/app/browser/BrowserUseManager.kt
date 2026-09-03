@@ -606,12 +606,21 @@ class BrowserUseManager(
         if (result.success && BrowserAction.visualChangeActions.contains(input.action)) {
             val newUrl = withContext(Dispatchers.Main) { webView.url }
             if (prevUrl != null && newUrl != null) {
-                val prevNoHash = prevUrl.substringBefore("#")
-                val curNoHash = newUrl.substringBefore("#")
-                if (prevNoHash != curNoHash) {
-                    result = result.copy(
-                        text = result.text + "\n[URL Changed] Page navigated: $prevUrl -> $newUrl. Take a screenshot to see the current state before continuing."
-                    )
+                // [fix/audit-s6l1] skip noise from intercepted/internally-owned
+                // URLs (about:blank, minis://) — hash comparison is meaningless
+                // for them and previously produced spurious "Page navigated"
+                // lines.
+                val isNoise = { u: String ->
+                    u == "about:blank" || u.startsWith("minis://") || u.startsWith("data:")
+                }
+                if (!isNoise(prevUrl) && !isNoise(newUrl)) {
+                    val prevNoHash = prevUrl.substringBefore("#")
+                    val curNoHash = newUrl.substringBefore("#")
+                    if (prevNoHash != curNoHash) {
+                        result = result.copy(
+                            text = result.text + "\n[URL Changed] Page navigated: $prevUrl -> $newUrl. Take a screenshot to see the current state before continuing."
+                        )
+                    }
                 }
             }
         }

@@ -25,10 +25,13 @@ package com.openminis.app.sandbox.offload
  *   - STOPPING + quiescent → DEAD (killProcess).
  *   - DEAD → terminal, never revived/killed.
  *
- * [shutdownRequested] is only the main process's EXPLICIT drain request
- * (memory pressure); it never forces a kill — it only affects whether an idle
- * worker lingers in DRAINED instead of dying immediately. Either way a fully
- * quiescent worker self-reaps.
+ * [shutdownRequested] is the main process's EXPLICIT drain request (memory
+ * pressure). It never forces a kill; in the current implementation a fully
+ * quiescent worker self-reaps to DEAD regardless (QUIESCE_PENDING/DRAINED are
+ * declared for API stability but are not entered — a quiescent worker goes
+ * straight ACTIVE/QUIESCE_PENDING/DRAINED → STOPPING → DEAD). The parameter
+ * is plumbed through for observability and future drain semantics but does
+ * not change the transition outcome today.
  *
  * All functions are pure — no Android dependencies, JVM testable.
  */

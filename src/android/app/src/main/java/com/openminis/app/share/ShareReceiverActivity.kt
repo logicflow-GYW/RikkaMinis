@@ -55,6 +55,11 @@ class ShareReceiverActivity : ComponentActivity() {
          * across Activity instances.
          */
         private val totalStagedBytes = java.util.concurrent.atomic.AtomicLong(0)
+
+        /** Reset the cumulative staged-byte counter after the staged set is deleted. */
+        fun resetStagedBytes() {
+            totalStagedBytes.set(0L)
+        }
     }
 
     // T-n01-andmenu-l10n: pre-Tiramisu locale override (see MainActivity).

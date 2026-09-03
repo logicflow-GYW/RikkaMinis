@@ -393,8 +393,15 @@ object BrowserUseJS {
                 }
                 if (bestParent) bestParent.children.push(node); else roots.push(node);
             }
-            function prune(node) {
-                for (var i = 0; i < node.children.length; i++) prune(node.children[i]);
+            function prune(node, depth) {
+                // [fix/audit-s6h3] prune recurses on the representative-node
+                // tree with NO depth guard — a pathological deeply-nested DOM
+                // (e.g. <div>×5000) could blow the V8 call stack here before
+                // trimDepth's MAX_DEPTH clamp ever ran. Bound the recursion;
+                // nodes past the bound simply skip the group-collapse
+                // optimization (trimDepth still truncates them correctly).
+                if (depth >= MAX_DEPTH) return;
+                for (var i = 0; i < node.children.length; i++) prune(node.children[i], depth + 1);
                 if (node.isGroup && node.children.length === 1 && !node.text) {
                     var child = node.children[0];
                     node.children = child.children;
@@ -406,7 +413,7 @@ object BrowserUseJS {
                 }
                 node.children = node.children.filter(function(c) { return !(c.isGroup && c.children.length === 0 && !c.text); });
             }
-            for (var i = 0; i < roots.length; i++) prune(roots[i]);
+            for (var i = 0; i < roots.length; i++) prune(roots[i], 1);
             roots = roots.filter(function(r) { return !(r.isGroup && r.children.length === 0 && !r.text); });
             function trimDepth(node, depth) { if (depth >= MAX_DEPTH) { node.children = []; return; } for (var i = 0; i < node.children.length; i++) trimDepth(node.children[i], depth + 1); }
             for (var i = 0; i < roots.length; i++) trimDepth(roots[i], 1);

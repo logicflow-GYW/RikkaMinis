@@ -135,7 +135,13 @@ object OnDemandBash {
             }
             val code = c.responseCode
             c.disconnect()
-            code in 200..499
+            // [fix/audit-s6m3] reachable = 2xx/3xx only. Previously 400..499
+            // counted as "reachable", so a mirror HEAD returning 403/404 (CDN
+            // refuses HEAD or path missing) was treated as reachable and the
+            // install still failed with one wasted attempt + an extra failCount
+            // — misclassifying an unreachable mirror as reachable. 4xx means the
+            // endpoint answered but won't serve us; treat as unreachable.
+            code in 200..399
         } catch (_: Exception) {
             false
         }

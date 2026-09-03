@@ -108,7 +108,13 @@ private fun BlockContent(
     baseStyle: TextStyle,
     mathSpans: List<MarkdownParser.MathSpan> = emptyList(),
 ) {
-    android.util.Log.d("MdRender", "BlockContent: ${block::class.simpleName}")
+    // [fix/audit-s2l4b] per-block per-recomposition Log.d is a main-thread
+    // amplification (string build + logcat IPC every frame for every block
+    // in a streaming doc) — same family as the place-storm probe amplifier.
+    // Gate to debug builds so release doesn't pay the string-build cost.
+    if (com.openminis.app.BuildConfig.DEBUG) {
+        android.util.Log.d("MdRender", "BlockContent: ${block::class.simpleName}")
+    }
     when (block) {
         is MarkdownParser.Block.Heading -> HeadingBlock(block, color)
         is MarkdownParser.Block.Paragraph -> ParagraphBlock(block.content, color, baseStyle, mathSpans)
@@ -507,9 +513,10 @@ private fun InlineContent(
 
     // Strip any leftover math placeholders (U+FFFC MATH<n> U+FFFC). The
     // ParagraphBlock split path resolves them when math spans are
-    // threaded through, but lists/headings/table cells don't carry the
-    // span list — collapsing the placeholder here keeps the U+FFFC
-    // sentinel from leaking into the rendered glyph stream.
+    // threaded through; lists/headings don't carry the span list (table
+    // cells DO via TableView/TableCell) — collapsing the placeholder here
+    // keeps the U+FFFC sentinel from leaking into the rendered glyph
+    // stream for the paths that can't resolve it.
     val cleaned = remember(text) {
         if (text.contains('￼')) {
             text.replace(Regex("\\uFFFCMATH\\d+\\uFFFC"), "")

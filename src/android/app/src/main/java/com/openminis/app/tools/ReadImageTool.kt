@@ -81,9 +81,16 @@ object ReadImageTool {
             val imageBytes = out.toByteArray()
 
             if (scaled !== original) scaled.recycle()
+            // [fix/audit-s6h1] original.recycle() ran BEFORE reading
+            // original.width/height for the metadata string — reading a
+            // recycled Bitmap throws IllegalStateException, so every
+            // successfully-decoded image failed with "Can't call getWidth()
+            // on a recycled bitmap". Cache the dimensions first, then recycle.
+            val width = original.width
+            val height = original.height
             original.recycle()
 
-            val metadata = "[$path | ${original.width}x${original.height} | ${file.length()} bytes]"
+            val metadata = "[$path | ${width}x${height} | ${file.length()} bytes]"
             ToolExecutionResult(
                 output = metadata,
                 success = true,
