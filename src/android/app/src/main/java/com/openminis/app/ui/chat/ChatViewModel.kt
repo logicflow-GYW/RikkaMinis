@@ -3965,13 +3965,6 @@ class ChatViewModel(
     }
 
     /**
-     * Read a message's content + toolBlocks honoring any active streaming
-     * delta. Use this from non-render code that needs the "current" view of
-     * a message during a live turn (e.g. agent history builders, persistence
-     * snapshots) without forcing the render layer to consult the delta map.
-     */
-
-    /**
      * Build the ordered AgentContentPart list for this turn by walking the slice of
      * `allToolBlocks` that belongs to the current turn (from `turnStartBlockIndex` to
      * the end). Text blocks become `Text`, tool_use blocks become `ToolUse` — the

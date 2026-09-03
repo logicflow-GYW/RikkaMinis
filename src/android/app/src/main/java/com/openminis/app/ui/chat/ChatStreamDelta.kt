@@ -3,6 +3,12 @@ package com.openminis.app.ui.chat
 // [FE-5 batch 7] Streaming-delta drain cluster extracted verbatim from
 // ChatViewModel as extension functions (same pattern as ChatPromptAndTools).
 
+/**
+ * Read a message's content + toolBlocks honoring any active streaming
+ * delta. Use this from non-render code that needs the "current" view of
+ * a message during a live turn (e.g. agent history builders, persistence
+ * snapshots) without forcing the render layer to consult the delta map.
+ */
 internal fun ChatViewModel.effectiveContent(id: String): String? {
     val delta = _streamingById.value[id]
     if (delta != null) return delta.content
