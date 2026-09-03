@@ -6,6 +6,7 @@ import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMUsage
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -112,7 +113,7 @@ class ChatTurnPartsJsonTest {
     // ── buildToolResultPartsJson ───────────────────────────────────
 
     @Test
-    fun `toolResult json round-trips with snapshot tail`() {
+    fun `toolResult json round-trips without legacy snapshot field`() {
         val longOutput = (1..100).joinToString("\n") { "line$it" }
         val parts = listOf(
             AgentContentPart.ToolResult(id = "r1", name = "file_read", content = longOutput, isError = false),
@@ -124,10 +125,9 @@ class ChatTurnPartsJsonTest {
         assertEquals("file_read", tr.name)
         assertEquals(longOutput, tr.output)
         assertTrue(tr.success)
-        // snapshot caps at 30 lines
-        val snapshot = org.json.JSONArray(json).getJSONObject(0)
-            .getJSONObject("value").getJSONObject("snapshot").getString("text")
-        assertEquals(30, snapshot.lines().size)
+        // [fix/audit-s1l1] legacy snapshot preview field removed — nothing reads it
+        val value = org.json.JSONArray(json).getJSONObject(0).getJSONObject("value")
+        assertFalse(value.has("snapshot"))
     }
 
     // ── extractPartialStringValue ──────────────────────────────────

@@ -937,7 +937,7 @@ class ChatViewModel(
         override val agentTools: List<AgentToolDefinition> get() = this@ChatViewModel.agentTools
         override fun sanitizeAgentHistory() = this@ChatViewModel.sanitizeAgentHistory()
         override fun effectiveContextWindowTokens(): Int? = this@ChatViewModel.effectiveContextWindowTokens()
-        override fun effectiveAgentHistory(): List<LLMMessage> = effectiveAgentHistory()
+        override fun effectiveAgentHistory(): List<LLMMessage> = this@ChatViewModel.effectiveAgentHistory()
         override fun applyRequestImageBudget(messages: List<LLMMessage>): List<LLMMessage> =
             this@ChatViewModel.applyRequestImageBudget(messages)
         override fun checkContextBeforeSend(): Boolean = this@ChatViewModel.checkContextBeforeSend()
@@ -989,7 +989,7 @@ class ChatViewModel(
             finishedAssistantId: String,
             finishedAccumulatedText: String,
             finishedAllToolBlocks: List<AssistantBlock>,
-        ): InjectedTurn? = injectQueuedPromptsAsNewTurn(
+        ): InjectedTurn? = this@ChatViewModel.injectQueuedPromptsAsNewTurn(
             finishedAssistantId, finishedAccumulatedText, finishedAllToolBlocks)
         override suspend fun drainQueuedPrompts(): String? {
             // The engine-facing surface is argless; the VM implementation

@@ -87,14 +87,16 @@ internal fun buildUsageJson(usage: LLMUsage): String =
 /**
  * Serialize a list of tool results into the user-role parts_json persisted by
  * persistToolResultMessage. Mirrors the inline buildString it replaces.
- * Snapshot caps at the last 30 lines — same as the original inline logic.
+ * The legacy per-result "snapshot" preview field was dropped [fix/audit-s1l1]:
+ * it duplicated the tail of `output`, no parser/UI code reads it (verified
+ * via grep + ConfigBackup already strips it on export), and it inflated every
+ * persisted tool-result row by up to 30 lines of redundant JSON.
  */
 internal fun buildToolResultPartsJson(results: List<AgentContentPart.ToolResult>): String = buildString {
     append("[")
     results.forEachIndexed { index, result ->
         if (index > 0) append(",")
-        val snapshotText = escapeJson(result.content.lines().takeLast(30).joinToString("\n"))
-        append("""{"type":"toolResult","value":{"toolUseId":${escapeJson(result.id)},"name":${escapeJson(result.name)},"output":${escapeJson(result.content)},"success":${!result.isError},"snapshot":{"type":"text","text":$snapshotText}}}""")
+        append("""{"type":"toolResult","value":{"toolUseId":${escapeJson(result.id)},"name":${escapeJson(result.name)},"output":${escapeJson(result.content)},"success":${!result.isError}}}""")
     }
     append("]")
 }
