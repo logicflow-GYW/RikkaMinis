@@ -88,7 +88,7 @@ fun InlineAudioPlayer(
     var position by remember { mutableStateOf("0:00") }
     var error by remember { mutableStateOf<String?>(null) }
 
-    val mediaPlayer = remember { MediaPlayer() }
+    val mediaPlayer = remember(filePath) { MediaPlayer() }
 
     DisposableEffect(filePath) {
         try {

@@ -8,6 +8,7 @@ import com.openminis.app.logging.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -80,27 +81,37 @@ class MCPOAuthController(private val context: Context) {
             callbackServer = null
 
             val callback = try {
-                suspendCancellableCoroutine<Pair<String, String?>?> { cont ->
-                    val srv = OAuthCallbackServer(port) { code, state ->
-                        if (cont.isActive) cont.resume(code to state)
-                    }
-                    callbackServer = srv
-                    // If the user dismisses the Custom Tab, stop() fires this so
-                    // we don't hang until the OS eventually tears the socket down.
-                    srv.onExternalCancel = { if (cont.isActive) cont.resume(null) }
-                    srv.start()
-                    AppLogger.info(TAG, "[Authorize] '$server' callback server on :$port")
+                // [fix/audit-s7m1] the KDoc promises "waits up to 5 min" but the
+                // coroutine had NO timeout — a user dismissing the Custom Tab via
+                // back (which fires no navigation callback, so onExternalCancel
+                // never runs) left the continuation un-resumed forever. The
+                // finally below then never ran, the caller's oauthBusy stayed
+                // true permanently (button dead), and the loopback ServerSocket
+                // leaked until process death. withTimeoutOrNull(5 min) makes the
+                // timeout real; invokeOnCancellation already stops the server.
+                withTimeoutOrNull(5 * 60_000L) {
+                    suspendCancellableCoroutine<Pair<String, String?>?> { cont ->
+                        val srv = OAuthCallbackServer(port) { code, state ->
+                            if (cont.isActive) cont.resume(code to state)
+                        }
+                        callbackServer = srv
+                        // If the user dismisses the Custom Tab, stop() fires this so
+                        // we don't hang until the OS eventually tears the socket down.
+                        srv.onExternalCancel = { if (cont.isActive) cont.resume(null) }
+                        srv.start()
+                        AppLogger.info(TAG, "[Authorize] '$server' callback server on :$port")
 
-                    cont.invokeOnCancellation {
-                        srv.stop()
-                        callbackServer = null
-                    }
+                        cont.invokeOnCancellation {
+                            srv.stop()
+                            callbackServer = null
+                        }
 
-                    // Do NOT set FLAG_ACTIVITY_NEW_TASK — MainActivity is
-                    // singleTask (matches ClaudeOAuthManager's note about IME).
-                    CustomTabsIntent.Builder().setShowTitle(true).build()
-                        .launchUrl(context, Uri.parse(authUrl))
-                    AppLogger.info(TAG, "[Authorize] '$server' opened Custom Tab")
+                        // Do NOT set FLAG_ACTIVITY_NEW_TASK — MainActivity is
+                        // singleTask (matches ClaudeOAuthManager's note about IME).
+                        CustomTabsIntent.Builder().setShowTitle(true).build()
+                            .launchUrl(context, Uri.parse(authUrl))
+                        AppLogger.info(TAG, "[Authorize] '$server' opened Custom Tab")
+                    }
                 }
             } finally {
                 callbackServer?.stop()

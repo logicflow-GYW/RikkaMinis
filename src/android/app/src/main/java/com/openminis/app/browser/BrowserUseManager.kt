@@ -185,19 +185,41 @@ class BrowserUseManager(
             .forEach { runCatching { it.delete() } }
     }
 
-    /** Deferred used by executeJS to receive results from async scripts via JS bridge. */
+    /**
+     * Deferred used by executeJS to receive results from async scripts via JS
+     * bridge. [fix/audit-s6h2] each request is tagged with a unique token that
+     * the JS callbacks echo back; a late resolve/reject from a TIMED-OUT prior
+     * request is discarded instead of completing the next request's deferred
+     * (which previously caused cross-request result串台 — request A's data
+     * delivered to request B).
+     */
     private var asyncJsDeferred: CompletableDeferred<String>? = null
+    private var asyncJsActiveToken: String? = null
+
+    /** Allocate a fresh deferred + token for an async JS bridge request. */
+    private fun beginAsyncJsRequest(): Pair<CompletableDeferred<String>, String> {
+        val token = UUID.randomUUID().toString()
+        val deferred = CompletableDeferred<String>()
+        asyncJsDeferred = deferred
+        asyncJsActiveToken = token
+        return deferred to token
+    }
+
+    private fun finishAsyncJsRequest() {
+        asyncJsDeferred = null
+        asyncJsActiveToken = null
+    }
 
     /** JavaScript interface for async script result callbacks. */
     private val jsBridge = object {
         @JavascriptInterface
-        fun resolve(result: String) {
-            asyncJsDeferred?.complete(result)
+        fun resolve(token: String, result: String) {
+            if (token == asyncJsActiveToken) asyncJsDeferred?.complete(result)
         }
 
         @JavascriptInterface
-        fun reject(error: String) {
-            asyncJsDeferred?.complete("{\"error\":${JSONObject.quote(error)}}")
+        fun reject(token: String, error: String) {
+            if (token == asyncJsActiveToken) asyncJsDeferred?.complete("{\"error\":${JSONObject.quote(error)}}")
         }
 
         /**
@@ -938,22 +960,21 @@ class BrowserUseManager(
         // Android WebView doesn't resolve Promises from evaluateJavascript,
         // so we use a JS bridge callback (__minis__.resolve / __minis__.reject).
         return try {
-            val deferred = CompletableDeferred<String>()
-            asyncJsDeferred = deferred
+            val (deferred, token) = beginAsyncJsRequest()
             val wrapped = """
                 (async function(){
                     try {
                         var __r__ = (async function(){ $script })();
                         var __v__ = await __r__;
                         if (__v__ === undefined || __v__ === null) {
-                            __minis__.resolve(String(__v__));
+                            __minis__.resolve('$token', String(__v__));
                         } else if (typeof __v__ === 'object') {
-                            __minis__.resolve(JSON.stringify(__v__));
+                            __minis__.resolve('$token', JSON.stringify(__v__));
                         } else {
-                            __minis__.resolve(String(__v__));
+                            __minis__.resolve('$token', String(__v__));
                         }
                     } catch(e) {
-                        __minis__.reject(e.message || String(e));
+                        __minis__.reject('$token', e.message || String(e));
                     }
                 })();
             """.trimIndent()
@@ -962,10 +983,10 @@ class BrowserUseManager(
             }
             val raw = withTimeoutOrNull(30_000L) { deferred.await() }
                 ?: run {
-                    asyncJsDeferred = null
+                    finishAsyncJsRequest()
                     return BrowserActionResult.error("JavaScript execution timed out (30s)")
                 }
-            asyncJsDeferred = null
+            finishAsyncJsRequest()
             val json = try { JSONObject(raw) } catch (_: Exception) { null }
             if (json != null) {
                 if (json.has("error")) {
@@ -977,7 +998,7 @@ class BrowserUseManager(
                 BrowserActionResult(text = raw)
             }
         } catch (e: Exception) {
-            asyncJsDeferred = null
+            finishAsyncJsRequest()
             BrowserActionResult.error("JavaScript error: ${e.message}")
         }
     }
@@ -1074,21 +1095,20 @@ class BrowserUseManager(
      * pattern used by [executeJS].
      */
     private suspend fun awaitPromiseJs(js: String): String? {
-        val deferred = CompletableDeferred<String>()
-        asyncJsDeferred = deferred
+        val (deferred, token) = beginAsyncJsRequest()
         val wrapped = """
             (async function(){
                 try {
                     var __v__ = await ($js);
                     if (__v__ === undefined || __v__ === null) {
-                        __minis__.resolve('null');
+                        __minis__.resolve('$token', 'null');
                     } else if (typeof __v__ === 'object') {
-                        __minis__.resolve(JSON.stringify(__v__));
+                        __minis__.resolve('$token', JSON.stringify(__v__));
                     } else {
-                        __minis__.resolve(String(__v__));
+                        __minis__.resolve('$token', String(__v__));
                     }
                 } catch(e) {
-                    __minis__.reject(e && e.message ? e.message : String(e));
+                    __minis__.reject('$token', e && e.message ? e.message : String(e));
                 }
             })();
         """.trimIndent()
@@ -1096,7 +1116,7 @@ class BrowserUseManager(
             webView.evaluateJavascript(wrapped, null)
         }
         val raw = withTimeoutOrNull(60_000L) { deferred.await() }
-        asyncJsDeferred = null
+        finishAsyncJsRequest()
         return raw
     }
 

@@ -1203,30 +1203,30 @@ class ProviderRepository(private val context: Context) {
     // added items in the picker, mirrors iOS appendIfNeeded behaviour.
 
     /** Append [entryId] to the agent-loop direct-pin list if not already there. */
-    fun addAgentLoopEntry(entryId: String) {
+    fun addAgentLoopEntry(entryId: String) = synchronized(configLock) {
         val cur = _config.value.agentLoopModelEntryIds.toList()
-        if (entryId in cur) return
+        if (entryId in cur) return@synchronized
         setAgentLoopEntryIds(cur + entryId)
     }
 
     /** Remove [entryId] from the agent-loop direct-pin list. No-op if absent. */
-    fun removeAgentLoopEntry(entryId: String) {
+    fun removeAgentLoopEntry(entryId: String) = synchronized(configLock) {
         val cur = _config.value.agentLoopModelEntryIds.toList()
-        if (entryId !in cur) return
+        if (entryId !in cur) return@synchronized
         setAgentLoopEntryIds(cur.filterNot { it == entryId })
     }
 
     /** Append [groupId] to the agent-loop group-pin list if not already there. */
-    fun addAgentLoopGroup(groupId: String) {
+    fun addAgentLoopGroup(groupId: String) = synchronized(configLock) {
         val cur = _config.value.agentLoopGroupIds.toList()
-        if (groupId in cur) return
+        if (groupId in cur) return@synchronized
         setAgentLoopGroupIds(cur + groupId)
     }
 
     /** Remove [groupId] from the agent-loop group-pin list. No-op if absent. */
-    fun removeAgentLoopGroup(groupId: String) {
+    fun removeAgentLoopGroup(groupId: String) = synchronized(configLock) {
         val cur = _config.value.agentLoopGroupIds.toList()
-        if (groupId !in cur) return
+        if (groupId !in cur) return@synchronized
         setAgentLoopGroupIds(cur.filterNot { it == groupId })
     }
 

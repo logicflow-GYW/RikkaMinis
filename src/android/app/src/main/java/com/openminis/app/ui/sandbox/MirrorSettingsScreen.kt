@@ -252,41 +252,50 @@ object MirrorSpeedTestViewModel {
                 results.clear()
             }
 
-            val all = MirrorCatalog.allMirrors
-            val total = all.size
-            var completed = 0
-            val perCategory = mutableMapOf<MirrorCategory, MutableList<MirrorTestResult>>()
+            // [fix/audit-s2m1] isTesting must reset even when this job is
+            // cancelled mid-flight (user retaps → currentJob?.cancel() at the
+            // top, or runTest cancels a running runAllTests). The reset lived
+            // only on the normal-completion path, so a cancellation skipped it
+            // and left the singleton's isTesting=true forever — the "test
+            // fastest" button (enabled = !isTesting) was permanently dead
+            // until process restart.
+            try {
+                val all = MirrorCatalog.allMirrors
+                val total = all.size
+                var completed = 0
+                val perCategory = mutableMapOf<MirrorCategory, MutableList<MirrorTestResult>>()
 
-            val deferred = all.map { mirror ->
-                async { testMirror(mirror) }
-            }
-            for (d in deferred) {
-                val result = d.await()
-                completed++
-                perCategory.getOrPut(result.mirror.category) { mutableListOf() }.add(result)
-                val progress = completed.toFloat() / total.toFloat()
-                withContext(Dispatchers.Main) { testProgress = progress }
-            }
+                val deferred = all.map { mirror ->
+                    async { testMirror(mirror) }
+                }
+                for (d in deferred) {
+                    val result = d.await()
+                    completed++
+                    perCategory.getOrPut(result.mirror.category) { mutableListOf() }.add(result)
+                    val progress = completed.toFloat() / total.toFloat()
+                    withContext(Dispatchers.Main) { testProgress = progress }
+                }
 
-            val sorted = perCategory.mapValues { (_, list) -> list.sortedWith(latencyComparator) }
-            withContext(Dispatchers.Main) {
-                results.clear()
-                results.putAll(sorted)
+                val sorted = perCategory.mapValues { (_, list) -> list.sortedWith(latencyComparator) }
+                withContext(Dispatchers.Main) {
+                    results.clear()
+                    results.putAll(sorted)
 
-                // Auto-select fastest for categories without prior selection
-                for (cat in MirrorCategory.entries) {
-                    if (selectedMirrorId[cat] == null) {
-                        val fastest = sorted[cat]?.firstOrNull { it.isSuccess }
-                        if (fastest != null) {
-                            selectedMirrorId[cat] = fastest.mirror.id
-                            persist(context, cat)
+                    // Auto-select fastest for categories without prior selection
+                    for (cat in MirrorCategory.entries) {
+                        if (selectedMirrorId[cat] == null) {
+                            val fastest = sorted[cat]?.firstOrNull { it.isSuccess }
+                            if (fastest != null) {
+                                selectedMirrorId[cat] = fastest.mirror.id
+                                persist(context, cat)
+                            }
                         }
                     }
                 }
-
-                isTesting = false
+                Log.i(TAG, "Mirror speed test complete: ${sorted.mapValues { it.value.size }}")
+            } finally {
+                withContext(Dispatchers.Main) { isTesting = false }
             }
-            Log.i(TAG, "Mirror speed test complete: ${sorted.mapValues { it.value.size }}")
         }
     }
 
@@ -297,24 +306,27 @@ object MirrorSpeedTestViewModel {
                 isTesting = true
                 testProgress = 0f
             }
-            val mirrors = MirrorCatalog.mirrors(category)
-            val total = mirrors.size
-            var completed = 0
-            val list = mutableListOf<MirrorTestResult>()
+            try {
+                val mirrors = MirrorCatalog.mirrors(category)
+                val total = mirrors.size
+                var completed = 0
+                val list = mutableListOf<MirrorTestResult>()
 
-            val deferred = mirrors.map { mirror -> async { testMirror(mirror) } }
-            val results = deferred.awaitAll()
-            for (r in results) {
-                completed++
-                list.add(r)
-                val p = completed.toFloat() / total.toFloat()
-                withContext(Dispatchers.Main) { testProgress = p }
-            }
+                val deferred = mirrors.map { mirror -> async { testMirror(mirror) } }
+                val results = deferred.awaitAll()
+                for (r in results) {
+                    completed++
+                    list.add(r)
+                    val p = completed.toFloat() / total.toFloat()
+                    withContext(Dispatchers.Main) { testProgress = p }
+                }
 
-            val sorted = list.sortedWith(latencyComparator)
-            withContext(Dispatchers.Main) {
-                this@MirrorSpeedTestViewModel.results[category] = sorted
-                isTesting = false
+                val sorted = list.sortedWith(latencyComparator)
+                withContext(Dispatchers.Main) {
+                    this@MirrorSpeedTestViewModel.results[category] = sorted
+                }
+            } finally {
+                withContext(Dispatchers.Main) { isTesting = false }
             }
         }
     }

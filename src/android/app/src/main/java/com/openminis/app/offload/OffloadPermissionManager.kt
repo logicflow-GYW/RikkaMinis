@@ -370,20 +370,29 @@ object OffloadPermissionManager {
 
                 // Show dialog and wait for response.
                 val info = toolRegistry.find { it.toolName == toolName }
-                val response = suspendCancellableCoroutine<Response> { cont ->
-                    pendingContinuation = cont
-                    _pendingRequest.value = PermissionRequest(
-                        toolName = toolName,
-                        toolTitle = toolTitle,
-                        description = "Allow ${info?.displayName ?: toolName} access?",
-                        sessionId = sessionId,
-                    )
-                    cont.invokeOnCancellation {
-                        _pendingRequest.value = null
-                        pendingContinuation = null
+                val response = withTimeoutOrNull(SYSTEM_DIALOG_TIMEOUT_MS) {
+                    suspendCancellableCoroutine<Response> { cont ->
+                        pendingContinuation = cont
+                        _pendingRequest.value = PermissionRequest(
+                            toolName = toolName,
+                            toolTitle = toolTitle,
+                            description = "Allow ${info?.displayName ?: toolName} access?",
+                            sessionId = sessionId,
+                        )
+                        cont.invokeOnCancellation {
+                            _pendingRequest.value = null
+                            pendingContinuation = null
+                        }
                     }
                 }
 
+                // [fix/audit-s3m3] checkPermission was the one suspend waiter
+                // WITHOUT a timeout (requestAndroidPermission :157 and
+                // requestSettingsGate :242 both have one). If the UI swallowed
+                // the dialog (user switched away, state glitch) the
+                // continuation never resumed → the runBlocking caller in
+                // OffloadGate blocked a native-offload worker thread forever
+                // (pool max 2). Timeout now returns null → treat as deny.
                 when (response) {
                     Response.ALLOW_SESSION -> {
                         grants.add(toolName)
@@ -394,6 +403,7 @@ object OffloadPermissionManager {
                         denials.add(toolName)
                         false
                     }
+                    null -> false  // timed out or cancelled: deny rather than block forever
                 }
             }
         }
