@@ -125,6 +125,24 @@ Android-specific product changes that are not present upstream.
 - **Settings consistency fixes.** Restored preferences refresh the live
   settings UI, and previously disconnected/missing settings keys are now
   registered and included in backups.
+- **Sub-agent dispatch is OFF by default.** The agent can spawn independent
+  sub-agents via the `spawn_agent` tool and dispatch work to other chat
+  sessions via `minis-sessions-cli send` — but that is a side-effectful
+  capability (opens new sessions, burns tokens, runs long-lived work), so it
+  is disabled by default behind a switch in Settings → Agent Runtime
+  ("Sub-agent dispatch"). When OFF, `spawn_agent` never enters the tool
+  schema and `minis-sessions-cli send` answers with an explicit rejection;
+  when ON, both work, and the sub-agent's own tool set is filtered so it
+  cannot spawn again (recursion is structurally impossible).
+- **Long-conversation auto-summary compaction.** When a conversation is
+  nearing its context cap mid-answer, the agent loop first tries to fold the
+  oldest turns into a `<context-summary>` via the context compactor (instead
+  of the old behaviour of hard-dropping the oldest turns and inserting a
+  jarring "trimmed N messages" line mid-stream); hard trimming stays only as
+  the last-resort hard cap. The system prompt also clarifies per-session vs
+  cross-session storage semantics: `workspace/attachments/offloads/browser`
+  are private per session (physically under `minis-sessions/<sid>/`), while
+  only `shared/memory/skills/mcp-servers/mounts` are shared across sessions.
 - **Bundled platform integrations (GitHub / Cloudflare / Hugging Face).**
   Full detail in [Built-in platform integrations](#built-in-platform-integrationsgithub--cloudflare--hugging-face).
   In short: three platform skills (semantic memory, GitHub automation, and
@@ -282,7 +300,7 @@ Tokens are only used for authenticating those explicit requests.
 | **Skills & memory** | Extensible skills plus persistent memory across sessions. Complete skill bundles and memory files are included in local backups. |
 | **Platform integrations** | Built-in GitHub / Cloudflare / Hugging Face platform skills; available capability per platform is derived dynamically from the tokens you configure (see previous section). |
 | **Local backup & restore** | Export configuration, credentials (optional), skills, memory, MCP servers and chat history (text, last N days) to one portable JSON file. |
-| **Workspaces** | Organise work into separate contexts, addressable via `minis://workspace/`. |
+| **Workspaces** | Organise work into separate contexts, addressable via `minis://workspace/`. Workspace, attachment, offload and browser directories are **per-session private** (`minis-sessions/<sid>/`); only `shared/`, `memory/`, `skills/`, `mcp-servers/` and mounted folders are shared across sessions. |
 | **Native offloads** | Heavy or platform-specific work is handed to native code instead of the sandbox. |
 
 **→ [OpenMinis/MinisSkills](https://github.com/OpenMinis/MinisSkills)** — ready-made

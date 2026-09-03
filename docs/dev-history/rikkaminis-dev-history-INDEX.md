@@ -1,6 +1,6 @@
 # rikkaminis-dev-history 按天索引
 
-快速跳转到每日开发日志。共 700 条记录，28 天。
+快速跳转到每日开发日志。共 749 条记录，33 天。
 
 ## 2026-08-03（11 条）
 
@@ -119,7 +119,7 @@
 - `10:24` **RikkaMinis footer 按钮失效 — 真正根因 = dispatch 等 close() 挂起（2026-08-05，commit 599fe97）**
   - 用户复验 5b54408 仍失效（v220000091）。最终根因不是 LaunchedEffect 自取消（那个也修了），而是 **dispatch 顺序**…
 - `10:58` **Cloudflare 小号接入 Minis MCP — 已完成（2026-08-05）**
-  - 用户把 Cloudflare 小号（Account ID fd094fe9b223cabceae541d2910f2a4a，Logos7313@outlook.…
+  - 用户把 Cloudflare 小号（Account ID ***CF_ACCOUNT_ID***，[EMAIL]…
 - `13:46` **ippure.com 广告拦截 — 已完成（2026-08-05）**
   - 用户要求记住 ippure.com（IP 纯净度检测站，VitePress 工具站，无 App，无下载页）并给出拦截其广告的规则。
 - `13:49` **WebToApp 打包 ippure.com 无广告 App — 配置方案（2026-08-05）**
@@ -872,7 +872,7 @@
 ## 2026-08-16（13 条）
 
 - `05:17` **临时密钥窗口补核心文件测试（2026-08-15 深夜）**
-  - 用临时密钥（api2.yunshuzhilian.asia，deepseek-v4-flash 无限额度）的剩余窗口，给 4 个核心大文件补纯函数测试：
+  - 用临时密钥（api.***.yunshuzhilian.asia，deepseek-v4-flash 无限额度）的剩余窗口，给 4 个核心大文件补纯函数测试：
 - `08:59` **RikkaMinis 系统性代码审计（main 681bb18）**
   - 完成代码层系统审计，报告：`/var/minis/shared/rikkaminis-code-audit-20260816.md`。确认：P0 公开 `min…
 - `09:38` **审计修复合并 main 完成（2fcc96c）**
@@ -966,9 +966,9 @@
 - `08:58` **断流诊断采集链路已就绪（2026-08-18 08:58）**
   - - 用户已确认断流形态=第2种：回答已开始输出，中途突然停（无错误提示、无声无息停）。
 - `09:01` **断流定性重大进展（2026-08-18 09:01，provider 层排除网络断流）**
-  - - **provider 层 100% 无断流**：扫描 ms2.log 全部 llmhost.net + token.sensenova.cn 请求，每个都有…
+  - - **provider 层 100% 无断流**：扫描 ms2.log 全部 llmhost.net + token.***.sensenova.cn 请求，每个都有…
 - `09:03` **断流诊断第2次复现（2026-08-18 09:03）——provider 层铁证健康**
-  - - 扫描全部 ms2.log：每个 provider 请求（llmhost.net + token.sensenova.cn）都在 modelservice 侧…
+  - - 扫描全部 ms2.log：每个 provider 请求（llmhost.net + token.***.sensenova.cn）都在 modelservice 侧…
 - `09:22` **断流根因重大进展（2026-08-18 09:21）——最可能根因锁定**
   - ### 现象新事实
 - `09:22` **思考跑正文（任务 A）闭环状态（2026-08-18 09:25）**
@@ -1474,7 +1474,7 @@
 - `23:34` **会话任务 C：readAppendedChunks 统一到 BoundedLineReader 完成并已合并 main（2026-08-29）**
   - - 分支 fix/chat-stream-line-reader-unify → 21b0de5，ff 合并 main（0d78c71 → 21b0de5），远…
 
-## 2026-08-30（3 条）
+## 2026-08-30（4 条）
 
 - `00:21` **会话任务 D：safeEnum 跨版本兜底收紧完成并已合并 main（2026-08-29 深夜）**
   - - 任务：ModelExecutionService.safeEnum 从「未知值→默认值」改成「未知值→抛 UnknownEnumValueException…
@@ -1482,3 +1482,115 @@
   - main 从 ea096be 推进到 d49235c（A→B→C→D 四 commit 依次 ff），release CI run 33262714099 su…
 - `13:45` **文档收尾：README/docs 与当前代码对齐（2026-08-30）**
   - 用户指示：文档部分经多轮修改已与代码脱节，要求核对并更新收尾。审计 main@d49235c（fetch 后）逐篇对照，纯文档改动提交 9beae14d 推上 …
+- `15:08` **RikkaMinis 收尾：安全止血 + 开源 + 封存（2026-08-30）**
+  - 用户诉求：开发收尾，把开发数据丢云端封存当备份 + 开源开发历史。过程中发现并处理了一个**安全泄露**。
+
+## 2026-08-31（12 条）
+
+- `13:03` **吸收开源 Agent 生态三件套之 ①③ 落地（2026-08-31）**
+  - 背景：用户给了 Mem0/LangGraph/E2B/Langfuse/LiteLLM 等开源项目清单，评估后拍板吸收三个增量：①记忆时间衰减 ③trace 回…
+- `13:13` **LiteLLM 吸收三件套 A+B+C 合并 main（2026-08-31）**
+  - 背景：用户调研 BerriAI/litellm（57.6k stars 开源 AI 网关），让我评估「能不能整合进 RikkaMinis」。结论：网关层（多租户…
+- `13:28` **任务② memory facts 派发准备完成（2026-08-31）**
+  - - 两决策点用户拍板：A=写入时 agent 自声明（memory_write 加可选 facts 参数，零额外 LLM 调用）+ rollup 时机文案提示回…
+- `14:43` **LiteLLM 成本层 V2：JSON 价格表 + 用户可编辑价格（2026-08-31，commit fbe888e7）**
+  - 用户反馈 Usage 页看不到「预估费用」→ 根因：价格目录是硬编码 Kotlin map，只覆盖 40 个内置模型，**中转站模型（deepseek-v4-p…
+- `14:44` **facts 任务收口：memory-facts + litellm-cost-json 双分支合并 main（2026-08-31）**
+  - - main = c87df78b（ea6b9213 → fbe888e7[litellm] → c87df78b[memory-facts]），release…
+- `16:57` **砍除 USD 成本估算 + 修复 facts 空时间戳（2026-08-31，commit b4e166fb）**
+  - **背景**：用户真机验证「Usage 页费用显示有的有、有的没有」。定位：价格目录 model_prices.json（44 键）只解析到 1148 个实际 …
+- `17:17` **第二轮开源清单评估：12 项目裁定，A/B/C 待拍板**
+  - 用户给了第二份 Agent 生态开源清单（Mem0/Zep/Chroma/LangGraph/AutoGen/CrewAI/E2B/Composio/Open …
+- `18:02` **语义索引增量重建 + facts 种子回填（2026-08-31 下午）**
+  - **背景**：用户问「现在能做什么」，定位到瓶颈是 facts 生产量（上线 24h 只有 1 条）。做了两件事 + 一次事故复盘。
+- `18:49` **B 方案落地：facts 查询相关检索（2026-08-31，commit d76354d3 合并 main）**
+  - **背景**：用户拍板直接在本会话做 B（检索信号融合，Mem0 V3 概念启发），不必拆任务书。改动小、纯 Kotlin JVM 可测。
+- `20:40` **卡死诊断：冷启动进 chat 界面卡死 ~10s（2026-08-31，minis-2026-08-31.log）**
+  - 用户报"装更新后整个应用卡死一段时间"。日志分析结论（证据链完整）：
+- `21:36` **facts 查询标点假命中修复 + 双分支合并（2026-08-31 晚）**
+  - **背景**：用户要验证"facts 检索是否起效果"（本地事实库根据输入匹配→注入提示词那条链路，不是 HF 语义索引）。用用户 5 句真实输入回测（jieb…
+- `23:03` **备份超限修复：字节预算线性裁剪（2026-08-31 晚，commit 93773448 合并 main）**
+  - **问题**：用户手动全量备份报 `Backup too large (72658077 chars, max 67108864)`——72MB 顶爆 64MB…
+
+## 2026-09-01（7 条）
+
+- `02:26` **开发线转移 + 成熟度门槛（2026-09-01 凌晨，用户拍板）**
+  - ### 仓库架构决策
+- `15:12` **PlaceStorm 根因定位与修复（2026-09-01，用户日志实测驱动）**
+  - ### 用户问题与关键事实
+- `15:53` **place-storm 修复收口：小号 main 已合并（2026-09-01）**
+  - - 分支 fix/place-storm-follow-clamp-loop 分支 CI run 33480996005 success（head_sha=70…
+- `16:54` **place-storm 钳位修复汇入主号收口（2026-09-01）**
+  - 用户拍板：小号 70f927d1 的 SIMPLE_FOLLOW 钳位守卫修复已在 lab 真机验证（日志 minis-2026-09-01__3_.log 全…
+- `19:07` **place-storm 残留源修复 + launch-resume 导航修复（2026-09-01，commit 65b8a74 合并 main）**
+  - ### 用户试运行日志验证结论（minis-2026-09-01__4_.log，主号 91498d74 构建）
+- `19:27` **阶段性总结（2026-09-01）——应用当前状态速览**
+  - ### 仓库现状
+- `20:27` **自动跟随失效修复（2026-09-01，commit 65418137 合并 main）**
+  - **问题**：底部自动跟随在流式期间整个回合失效。用户提供 minis-2026-09-01__5_.log（65b8a749 构建）实测。
+
+## 2026-09-02（13 条）
+
+- `08:53` **thinking-OFF turn 崩溃修复（2026-09-02，commit de2dca7d 合并 main）**
+  - **症状**：关闭思考模式后无法使用——每次请求 3 次 transient retry + 模型 failover 链全灭，报 `unknown t0 val…
+- `11:14` **session4 浏览器/沙箱层审计完成（rikka-bug-hunt）**
+  - 审计 `/tmp/rikka` 的 browser/ 全目录 + ExecutionCoordinator.kt + RootfsManager.kt，报告：`…
+- `12:16` **session2 执行层审计完成（rikka-bug-hunt）**
+  - 审计 `/tmp/rikka`（@de2dca7d）6 文件（ChatViewModel 12338 / ModelExecutionService 1458 …
+- `12:16` **2026-09-02 12:16:26**
+- `12:26` **Bug-Hunt 四会话审计收口（2026-09-02）**
+  - 四会话并行审计 /tmp/rikka @ de2dca7d：HIGH 11 报出 / 10 实锤 1 误报，MEDIUM ~15 实锤。收口报告：/var/mi…
+- `12:27` **2026-09-02 12:27:06**
+  - **可复用教训**：①「写侧序列化、读侧没接」是跨进程协议缺口的高发形态，audit 时要对每个 buildRequestJson 写的键在 Service 两…
+- `13:09` **2026-09-02 13:09:41**
+  - ## llm-bug-audit skill 固化（2026-09-02）
+- `14:41` **FE-5 ChatViewModel 拆分第一批完成（2026-09-02，commit 8f0d64dc 合并 main）**
+  - **状态**：第一批（序列化/转录纯函数层）已闭环。分支 CI run 33598710219 success（head_sha=8f0d64dc 核对一致，全…
+- `16:39` **FE-5 第二批拆分完成 + 第三批交接（2026-09-02）**
+  - **第二批（route B 工具执行层）已合并 main `b38a186f`**：ChatViewModel 11899→11528（-371）。两个新文件：
+- `19:01` **FE-5 第三批 route C 前两步完成（2026-09-02，commit f297481 合并 main）**
+  - **交付**：ChatViewModel 11528→11037（-491）。两个新文件 + 1 提升类：
+- `20:24` **FE-5 route C ③ 完成待 CI + 第四批交接（2026-09-02 晚）**
+  - **route C ③（AgentLoopEngine 主体搬迁）已完成编码**，commit be7d3a5，分支 `refactor/fe5-route-c…
+- `20:53` **FE-5 route C ③ CI 红修复 + 沙箱重建（2026-09-02 晚）**
+  - **CI run 33629407247 失败原因**（交接文档预言的「引擎没过真实 Android 编译链」）：全是编译错误——
+- `23:17` **FE-5 第四/五批合并拆分（2026-09-02 晚，commit 9a3949f）**
+  - **用户拍板**：后面几批合并一起拆，拆完做系统性 bug 扫描（llm-bug-audit），不必逐批保真。先彻底解决「拆」再扫 bug。
+
+## 2026-09-03（14 条）
+
+- `01:08` **FE-5 第五批第一簇完成 + 第二簇交接（2026-09-03）**
+  - **进度**：ChatViewModel 12338 → 6499（累计 −5839，约 47%）。目标 3500-4000，还差 ~2500-3000。
+- `07:28` **FE-5 第五批第二簇完成（2026-09-03）**
+  - **交付**：分支 refactor/fe5-batch6-cluster2，commit 9b8a0a03 + 8c451f7f + 5236b8bd，CI …
+- `09:46` **FE-5 第三簇拆分会话——流程纠偏记录（2026-09-03）**
+  - **进度**：ChatViewModel 4755 → 4334（本会话 −421，累计 FE-5 −8004，约 65%）。三个新 extension 文件：…
+- `10:06` **FE-5 第三簇交接前状态快照（2026-09-03 会话收尾）**
+  - **main @ f8e3b6b**（本地=远端一致，工作树干净）。release CI 33706046499 触发中（f8e3b6b 的完整验证）。
+- `10:56` **FE-5 第五批第四簇（slash/token）完成（2026-09-03）**
+  - **进度**：ChatViewModel 4334 → 4065（−269，累计 FE-5 −8273，约 67%）。目标 3500-4000，还差 ~65-5…
+- `12:11` **FE-5 第五批全部拆完（2026-09-03 会话收尾）**
+  - **终态**：ChatViewModel 4334 → **3581**（本会话第四/五/六簇 −753，累计 FE-5 −8757，约 71%）。**已进入目…
+- `14:54` **FE-5 bug-audit session4（provider 域）完成（2026-09-03）**
+  - 审计 29 文件 / 9108 行（provider + providers 域），报告 /var/minis/shared/fe5-bug-audit/rep…
+- `15:19` **FE-5 bug-audit session2（ui 除 chat 域）完成（2026-09-03）**
+  - 审计 89 文件清单（约 33284 行）+ 全 ui 域 grep 探针（172 文件 / 76305 行）。报告 /var/minis/shared/fe5…
+- `15:55` **FE-5 bug-audit session7（杂项域）完成（2026-09-03）**
+  - 审计 93 文件 / ~23686 行（backup/config/debug/speech/diagnostics/webapp/crash/share/mc…
+- `16:56` **FE-5 bug-audit session1（Chat 核心域）完成（2026-09-03）**
+  - 审计 83 文件 / 43033 行（chat 域全量）。报告 /var/minis/shared/fe5-bug-audit/reports/session1…
+- `17:02` **FE-5 bug-audit session3（sandbox+offload 域）完成（2026-09-03）**
+  - 审计 66 文件 / 24146 行（sandbox/ + offload/ 全量）。报告 /var/minis/shared/fe5-bug-audit/re…
+- `19:34` **FE-5 bug-audit 全库扫描 + 修复收口（2026-09-03）**
+  - 全库 678 文件 / 199,705 行 / 9.2MB，7 域并行审计（deepseek-v4-flash-0731 带工具 + R 类拆分规则库）。**报…
+- `21:00` **修复：assistant 占位气泡在 FE-5 route C 拆分中丢失（2026-09-03 真机验证通过，已合并 main @ 5af0306）**
+  - **用户症状**：发送指令后 AI 正常运作（日志显示 tool 调用、流式 delta、persist 全在跑）但界面不渲染回复内容；无"正在思考"指示；切后…
+- `21:18` **5af0306 真机验证测试完成（2026-09-03）**
+  - - 真机 beta.1273（versionCode 220001273，20:53 安装）= main HEAD 5af0306（占位气泡修复版），用户从分支…
+
+## 2026-09-04（2 条）
+
+- `00:19` **subagent 跨会话派发功能验证（2026-09-04）**
+  - 验证了 HEAD 813eaf6 的 subagent 跨会话派发功能（eaa3a10 引入，SessionsOffloadHandler + Subagent…
+- `00:19` **三问题修复收尾（2026-09-03 晚，全部合并 main @ 73925e9）**
+  - 用户提出三个问题，全部完成并验证：

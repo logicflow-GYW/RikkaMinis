@@ -95,6 +95,19 @@ SHA-256  FC:0C:40:0D:B7:7E:C1:81:A3:35:18:C2:E8:13:6A:AE
 - **记忆页管理改进。** 记忆页文件列表支持「查看更多」展开/收起。
 - **设置一致性修复。** 恢复的偏好会刷新实时设置界面，此前缺失/断连的设置键
   现已注册并纳入备份。
+- **子代理派发默认关闭。** 智能体可以通过 `spawn_agent` 工具派生独立子代理、
+  或通过 `minis-sessions-cli send` 把工作派发给其他聊天会话——但这是有副作用
+  的能力（会开新会话、消耗 token、跑长任务），默认关闭：设置 → Agent Runtime
+  里的 "Sub-agent dispatch" 开关控制。关闭时 `spawn_agent` 完全不进入工具
+  列表、`minis-sessions-cli send` 返回明确的拒绝错误；打开后可用，且子代理
+  自身的工具集被过滤（不允许再 spawn，递归结构上不可能）。
+- **长对话自动摘要压缩。** AI 回答过程中上下文接近上限时，先用上下文压缩器
+  把最老的回合折叠成 `<context-summary>`（替代原先直接硬裁剪丢最老消息、
+  并在回答中插入生硬的 "trimmed N messages" 压缩线的行为）；硬裁剪只作为
+  最后的兜底硬上限。系统提示词也澄清了工作目录的会话隔离语义：
+  `workspace/attachments/offloads/browser` 是每会话私有（物理位于
+  `minis-sessions/<sid>/`），只有 `shared/memory/skills/mcp-servers/mounts`
+  跨会话共享。
 - **三大平台内置集成（GitHub / Cloudflare / Hugging Face）。** 完整能力见下文
   [内置平台集成](#内置平台集成github--cloudflare--hugging-face)。简单说：三个
   平台技能（语义记忆、GitHub 自动化、Cloudflare 运维）直接打进 APK，构建系统
@@ -217,7 +230,7 @@ token 只用于这些显式请求的鉴权。
 | **技能与记忆** | 可扩展技能 + 跨会话的持久记忆。完整技能包与记忆文件包含在本地备份中。 |
 | **平台集成** | 内置 GitHub / Cloudflare / Hugging Face 三平台技能，按配置的 token 动态注入可用能力（详见上节）。 |
 | **本地备份与恢复** | 把配置、凭据（可选）、技能、记忆、MCP 服务器与聊天历史（文本、最近 N 天）导出到一个可移植的 JSON 文件。 |
-| **工作区** | 把工作组织到独立上下文中，通过 `minis://workspace/` 访问。 |
+| **工作区** | 把工作组织到独立上下文中，通过 `minis://workspace/` 访问。工作区、附件、offload 与浏览器目录是**每会话私有**的（`minis-sessions/<sid>/`）；跨会话共享的只有 `shared/`、`memory/`、`skills/`、`mcp-servers/` 与挂载目录。 |
 | **原生卸载（offload）** | 繁重或平台特定的工作交给原生代码而非沙箱处理。 |
 
 **→ [OpenMinis/MinisSkills](https://github.com/OpenMinis/MinisSkills)** — 现成技能。
