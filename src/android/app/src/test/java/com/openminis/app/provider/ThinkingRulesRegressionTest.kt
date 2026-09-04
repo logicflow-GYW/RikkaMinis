@@ -656,6 +656,44 @@ class ThinkingRulesRegressionTest {
         }
     }
 
+    /**
+     * Rule: the OpenRouter nested branch (`reasoning:{effort}`) must clamp MiMo/Agnes
+     * xhigh→high like the pre-refactor chain did (main 7aea092d called
+     * clampEffortForModel there too — the registry port initially dropped it).
+     * OpenRouter serves xiaomi/mimo-v2.5, and MiMo validates reasoning_effort against
+     * a STRICT low/medium/high enum (iOS c5efeb1e), so a raw xhigh is a hard 400.
+     * evidence §A "[MiMo] 模型 id 拼写变体" · 72968c4f + c5efeb1e.
+     */
+    @Test
+    fun `openrouter nested reasoning clamps mimo xhigh to high`() {
+        val basePath = server.url("/openrouter.ai/api/v1").toString().trimEnd('/')
+        for (id in listOf("xiaomi/mimo-v2.5", "xiaomi/mimo-v2.5-pro")) {
+            val body = capture(model = model(id), level = ThinkingLevel.XHIGH, basePath = basePath)
+            val nested = body.optJSONObject("reasoning")?.optString("effort", "")
+            assertEquals(
+                "OpenRouter mimo $id must receive reasoning.effort=high, not xhigh: $body",
+                "high",
+                nested,
+            )
+        }
+    }
+
+    @Test
+    fun `openrouter nested reasoning keeps xhigh for non-clamped models`() {
+        val basePath = server.url("/openrouter.ai/api/v1").toString().trimEnd('/')
+        val body = capture(
+            model = model("deepseek/deepseek-v4-flash"),
+            level = ThinkingLevel.XHIGH,
+            basePath = basePath,
+        )
+        val nested = body.optJSONObject("reasoning")?.optString("effort", "")
+        assertEquals(
+            "OpenRouter accepts xhigh for non-MiMo ids and must keep it: $body",
+            "xhigh",
+            nested,
+        )
+    }
+
     // ── [T-thinking-levels-data-driven] declared tiers drive the UI ceiling ──
     //
     // Field report (Alice, 2026-08-20..31): deepseek-v4 and GLM could not be

@@ -364,13 +364,16 @@ object ThinkingRuleResolver {
 
             is ThinkingWireFormat.ReasoningEffortNested -> {
                 // OMIT when off so forced-reasoning backends don't reject
-                // `effort:"none"`. No MiMo/Agnes clamp and no declared-set clamp:
-                // the pre-refactor OpenRouter branch emitted the raw tier
-                // (clampEffortForModel was only on the generic root path), and
-                // OpenRouter itself accepts xhigh — the clamp-free behaviour is
-                // pinned by the golden snapshot.
+                // `effort:"none"`. MiMo/Agnes xhigh→high clamp preserved from
+                // the pre-refactor OpenRouter branch — it emitted
+                // `clampEffortForModel(...)` (main 7aea092d), and those
+                // backends validate reasoning_effort against a STRICT
+                // low/medium/high enum (iOS c5efeb1e). OpenRouter serves
+                // xiaomi/mimo-v2.5, so the raw tier really does reach such a
+                // backend. No declared-set clamp (the pre-refactor branch had
+                // none).
                 if (!ctx.level.isEnabled) return null to null
-                val effort = wireEffort(ctx.level)
+                val effort = clampEffortForModel(wireEffort(ctx.level), lid)
                 body.put("reasoning", JSONObject().put("effort", effort))
                 effort to effort
             }
