@@ -291,6 +291,41 @@ class OpenAIProvider constructor(
          */
         private const val STREAM_FIRST_DATA_TIMEOUT_MS =
             com.openminis.app.sandbox.offload.FirstChunkTimeoutPolicy.GENERATION_TIMEOUT_SEC * 1000L
+
+        /**
+         * [T-relay-host-adaptation] SiliconFlow (api.siliconflow.cn) model
+         * allowlist: only these exact model ids accept an `enable_thinking`
+         * toggle. Absorbed from RikkaHub's ChatCompletionsAPI host table —
+         * sending the field to any other id on this relay is silently ignored
+         * (or rejected). Kept as a Set for O(1) membership on the hot path.
+         */
+        private val SILICONFLOW_THINKING_MODELS = setOf(
+            "Pro/moonshotai/Kimi-K2.5",
+            "Pro/zai-org/GLM-5",
+            "Pro/zai-org/GLM-5.1",
+            "Pro/zai-org/GLM-4.7",
+            "deepseek-ai/DeepSeek-V3.2",
+            "Pro/deepseek-ai/DeepSeek-V3.2",
+            "Qwen/Qwen3.5-397B-A17B",
+            "Qwen/Qwen3.5-122B-A10B",
+            "Qwen/Qwen3.5-35B-A3B",
+            "Qwen/Qwen3.5-27B",
+            "Qwen/Qwen3.5-9B",
+            "Qwen/Qwen3.5-4B",
+            "zai-org/GLM-4.6",
+            "Qwen/Qwen3-8B",
+            "Qwen/Qwen3-14B",
+            "Qwen/Qwen3-32B",
+            "Qwen/Qwen3-30B-A3B",
+            "tencent/Hunyuan-A13B-Instruct",
+            "zai-org/GLM-4.5V",
+            "deepseek-ai/DeepSeek-V3.1-Terminus",
+            "Pro/deepseek-ai/DeepSeek-V3.1-Terminus",
+            "deepseek-ai/DeepSeek-V4-Flash",
+            "Pro/deepseek-ai/DeepSeek-V4-Flash",
+            "deepseek-ai/DeepSeek-V4-Pro",
+            "Pro/deepseek-ai/DeepSeek-V4-Pro",
+        )
     }
 
     // MARK: - Image passthrough [T-android-model-use-image-passthrough GH#62]
@@ -1170,6 +1205,30 @@ class OpenAIProvider constructor(
                                 }
                                 send(LLMStreamChunk.ThinkingDelta(rc))
                             }
+
+                            // [T-relay-host-adaptation] Mistral reasoning dialect:
+                            // reasoning arrives inside `delta.content[]` as
+                            // {"type":"thinking","thinking":[{"type":"text","text":"…"}]}
+                            // (NOT reasoning_content/reasoning). Absorbed from
+                            // RikkaHub's ChatCompletionsStreamDecoder.
+                            d.optJSONArray("content")?.let { contentArr ->
+                                for (ci in 0 until contentArr.length()) {
+                                    val contentItem = contentArr.optJSONObject(ci) ?: continue
+                                    if (contentItem.optString("type", "") != "thinking") continue
+                                    val thinkingArr = contentItem.optJSONArray("thinking") ?: continue
+                                    for (ti in 0 until thinkingArr.length()) {
+                                        val thinkingItem = thinkingArr.optJSONObject(ti) ?: continue
+                                        val thinkingText = thinkingItem.safeOptString("text", "")
+                                        if (thinkingText.isNotEmpty()) {
+                                            reasoningAccum.append(thinkingText)
+                                            if (!sawReasoningDelta) {
+                                                sawReasoningDelta = true
+                                            }
+                                            send(LLMStreamChunk.ThinkingDelta(thinkingText))
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         // Text content (with think-tag extraction — enabled for
@@ -1655,11 +1714,19 @@ class OpenAIProvider constructor(
         }
         body.put("stream", stream)
 
-        if (temperature != null) {
+        // [T-relay-host-adaptation] Some reasoning families reject an explicit
+        // `temperature` (400) or silently ignore it. Absorbed from RikkaHub's
+        // isModelAllowTemperature: o-series (o1/o3/o4), gpt-5.x, and Kimi
+        // K2.5/K2.6/K3 are self-reasoning — omit temperature for them.
+        if (temperature != null && isModelAllowTemperature(model.id)) {
             body.put("temperature", clampOutboundTemperature(temperature))
         }
 
-        if (stream && !isOpenRouter) {
+        // [T-relay-host-adaptation] Mistral does NOT support stream_options
+        // (mirrors RikkaHub — it 400s on include_usage); OpenRouter uses its own
+        // usage fields. Only emit include_usage on hosts that accept it.
+        val host = basePath.toHttpUrlOrNull()?.host ?: ""
+        if (stream && !isOpenRouter && host != "api.mistral.ai") {
             body.put("stream_options", JSONObject().put("include_usage", true))
         }
 
@@ -2113,10 +2180,83 @@ class OpenAIProvider constructor(
         return if (effort == "xhigh" && (lid.contains("mimo") || lid.contains("agnes"))) "high" else effort
     }
 
+    /**
+     * [T-relay-host-adaptation] Whether this model accepts an explicit
+     * `temperature` field. Absorbed from RikkaHub's isModelAllowTemperature —
+     * o-series (o1/o3/o4-*) and gpt-5.x self-reason and reject/ignore
+     * temperature; Kimi K2.5/K2.6/K3 are Moonshot-restricted (their endpoint
+     * 400s on temperature). Everything else keeps the historical clamp.
+     */
+    private fun isModelAllowTemperature(modelId: String): Boolean {
+        val lid = modelId.lowercase()
+        if (lid.startsWith("o") && lid.length >= 2 && lid[1].isDigit()) return false
+        if (lid.startsWith("gpt-5")) return false
+        if (lid.startsWith("kimi-k2.5") || lid.startsWith("kimi-k2.6") ||
+            lid.startsWith("kimi-k3") || lid == "k3"
+        ) {
+            return false
+        }
+        return true
+    }
+
     private fun injectThinkingParams(body: JSONObject, level: ThinkingLevel, maxTokens: Int) {
         // [T-android-thinking-level-arch] `level` is already clamped to the model
         // ceiling by LLMProvider.streamMessage/sendMessage — do NOT re-clamp.
         val lid = model.id.lowercase()
+        val host = basePath.toHttpUrlOrNull()?.host ?: ""
+
+        // [T-relay-host-adaptation] Host-precise adaptation table, absorbed from
+        // RikkaHub's ChatCompletionsAPI `when(host)` switch. A relay is
+        // identified by its baseUrl HOST, not by the model id — the same model
+        // id (e.g. qwen3.8-max) means different wire dialects on DashScope vs
+        // SiliconFlow vs Volcengine Ark vs a private relay. The model-id
+        // `lid.contains()` branches below remain as the FALLBACK for unknown
+        // hosts (vendor-native direct endpoints), but every known relay host is
+        // resolved here first so switching relays no longer lands on the wrong
+        // (or a 400-rejected) thinking field.
+        when (host) {
+            "api.siliconflow.cn" -> {
+                // SiliconFlow: enable_thinking is honored only by an allowlist.
+                if (model.id in SILICONFLOW_THINKING_MODELS) {
+                    body.put("enable_thinking", level.isEnabled)
+                }
+                return
+            }
+
+            "api.moonshot.cn" -> {
+                body.put("thinking", JSONObject().apply {
+                    put("type", if (level.isEnabled) "enabled" else "disabled")
+                    // K2.6: thinking.keep defaults to null (drop history thinking);
+                    // must be "all" for retention-style thinking when enabled.
+                    if (level.isEnabled && lid.contains("k2.6")) put("keep", "all")
+                })
+                return
+            }
+
+            "api.xiaomimimo.com", "token-plan-cn.xiaomimimo.com" -> {
+                body.put("thinking", JSONObject().apply {
+                    put("type", if (level.isEnabled) "enabled" else "disabled")
+                })
+                return
+            }
+
+            "chat.intern-ai.org.cn" -> {
+                body.put("thinking_mode", level.isEnabled)
+                return
+            }
+
+            "open.bigmodel.cn" -> {
+                body.put("thinking", JSONObject().apply {
+                    put("type", if (level.isEnabled) "enabled" else "disabled")
+                })
+                return
+            }
+
+            "aiping.cn" -> {
+                body.put("enable_thinking", level.isEnabled)
+                return
+            }
+        }
 
         if (isOpenRouter) {
             if (!level.isEnabled) return
