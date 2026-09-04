@@ -44,11 +44,16 @@ private val TealDarkOnSecondary = Color(0xFF1C3532)
 private val TealDarkSecondaryContainer = Color(0xFF334B48)
 private val TealDarkOnSecondaryContainer = Color(0xFFCCE8E4)
 private val TealDarkBackground = Color(0xFF0E1514)
-private val TealDarkOnBackground = Color(0xFFDEE4E2)
+// Dark text is neutral (not the teal-tinted #DEE4E2). The teal tint reads
+// "cold" and strains CJK glyphs when the page underneath is pure black
+// (NeutralDarkGroupedBg = #000). Neutral near-white keeps the same contrast
+// but reads warmer/sharper — mirrors RikkaHub's dark theme which uses a
+// pure neutral #FCFCFC for onSurface/onBackground.
+private val TealDarkOnBackground = Color(0xFFF4F5F4)
 private val TealDarkSurface = Color(0xFF0E1514)
-private val TealDarkOnSurface = Color(0xFFDEE4E2)
+private val TealDarkOnSurface = Color(0xFFF4F5F4)
 private val TealDarkSurfaceVariant = Color(0xFF3F4947)
-private val TealDarkOnSurfaceVariant = Color(0xFFBEC9C6)
+private val TealDarkOnSurfaceVariant = Color(0xFFC2C6C4)
 private val TealDarkOutline = Color(0xFF899390)
 
 // Neutral grouped-card surfaces (iOS-style system-grouped background).

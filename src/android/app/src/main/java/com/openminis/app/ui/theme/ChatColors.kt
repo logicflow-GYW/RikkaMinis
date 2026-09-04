@@ -119,8 +119,13 @@ val DarkChatPalette = ChatPalette(
     inputIconBorder = Color(0xFF595959),
     inputBorder = Color(0x40545458),
     primaryText = Color(0xFFFFFFFF),
-    secondaryText = Color(0x99EBEBF5),
-    tertiaryText = Color(0x4DEBEBF5),
+    // Secondary/tertiary text switched from the blue-violet #EBEBF5 (B=245,
+    // a cold tint that reads "dim + cold" on pure black) to neutral greys.
+    // Secondary 60% -> opaque #B5B5B8 (10.3:1, was 7.4:1); tertiary 30% ->
+    // opaque #8E8E92 (6.4:1, was 2.5:1 — below WCAG AA and the real cause of
+    // the "hard to read" feeling). disabled stays dim (exempt from AA).
+    secondaryText = Color(0xFFB5B5B8),
+    tertiaryText = Color(0xFF8E8E92),
     disabledText = Color(0x2EEBEBF5),
     // [T-android-user-bubble-dark-contrast] The old 0x247676D7 was a 14%-alpha
     // translucent blue-grey that washed out to near-invisible on the #000 chat
