@@ -1,6 +1,6 @@
 # rikkaminis-dev-history 按天索引
 
-快速跳转到每日开发日志。共 749 条记录，33 天。
+快速跳转到每日开发日志。共 758 条记录，33 天。
 
 ## 2026-08-03（11 条）
 
@@ -1588,9 +1588,26 @@
 - `21:18` **5af0306 真机验证测试完成（2026-09-03）**
   - - 真机 beta.1273（versionCode 220001273，20:53 安装）= main HEAD 5af0306（占位气泡修复版），用户从分支…
 
-## 2026-09-04（2 条）
+## 2026-09-04（11 条）
 
 - `00:19` **subagent 跨会话派发功能验证（2026-09-04）**
   - 验证了 HEAD 813eaf6 的 subagent 跨会话派发功能（eaa3a10 引入，SessionsOffloadHandler + Subagent…
 - `00:19` **三问题修复收尾（2026-09-03 晚，全部合并 main @ 73925e9）**
   - 用户提出三个问题，全部完成并验证：
+- `09:37` **子代理设置行 UI 修复（2026-09-04，已合并 main @ 07d63699）**
+  - 用户反馈：设置页「子代理派发」副标题太长占 3 行（其他设置项都 1 行），要求压到 ~18 字符内。
+- `10:35` **Diff 驱动定向审计完成（a1abcb6b..07d63699，4 实锤，未修复待用户拍板）**
+  - 审计 main 在全库审计（a1abcb6b）后的 7 个提交（subagent 开关 + auto-compact + 占位气泡修复），+328 行新代码。报…
+- `11:01` **diff-audit 0904 四实锤修复闭环（合并 main @ b21ef1a1）**
+  - 按用户要求"工程量不大直接修"，分支 fix/diff-audit-0904 修复 4 处，分支 CI 33830806928 success（head_sha…
+- `13:17` **思考字段决策键根治（tokenrhythm qwen 报错，2026-09-04）**
+  - 用户场景：tokenrhythm.studio + qwen3.8-max，开思考就报错（低档也报错），关思考没事。RikkaHub 不报错。
+- `13:43` **上游 OpenMinis iOS 端差异分析（2026-09-04，/tmp/openminis sparse clone @ 4ef2900）**
+  - **背景**：用户让查上游苹果版有什么 RikkaMinis 可吸收。上游是双端仓库（iOS 442 swift/23.2万行 vs Android 477 k…
+- `21:23` **feat/thinking-rules-port 分支审计（2026-09-04）**
+  - **范围**：main(7aea092d)→f7865b2b，2 commits +3440/−217（thinking 规则引擎 port + Phase 2…
+- `21:29` **thinking-rules-port 分支待合并（2026-09-04，CI f7865b2b run 33873927997 success）**
+- `21:35` **2026-09-04 21:35:12**
+  - 用户开 bug-audit 会话处理该分支的 bug hunt；本会话收尾，未做 ff 合并 main。
+- `21:53` **thinking-rules-port 分支已合并 main @ 1ba1310e（2026-09-04 晚）**
+  - D3 修复闭环：nested 分支补 `clampEffortForModel(wireEffort(ctx.level), lid)`（commit 1ba1…

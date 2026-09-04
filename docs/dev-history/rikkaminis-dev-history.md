@@ -4,8 +4,8 @@
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
 - 合并范围：2026-08-03 ～ 2026-09-04，共 33 天
-- 条目总数：749（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
-- 总字符数：872607 / 总行数：14603
+- 条目总数：758（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
+- 总字符数：882446 / 总行数：14741
 
 ---
 
@@ -14596,6 +14596,144 @@ ChatViewModel 6499 → 4755（−1744）。新文件 ChatPromptAndTools.kt（177
 
 ### 用户验证
 - 用户已通过下载 zip 解压安装验证子代理开关。压缩体验优化待真机观察（开超长多轮 task 看是否干净折叠成摘要）。
+
+<!-- 2026-09-04 09:37:55 -->
+## 子代理设置行 UI 修复（2026-09-04，已合并 main @ 07d63699）
+
+
+用户反馈：设置页「子代理派发」副标题太长占 3 行（其他设置项都 1 行），要求压到 ~18 字符内。
+
+**改动**（分支 fix/settings-subagent-row，分支 CI 绿后 ff 合并 main）：
+1. 7 个语言文件 `settings_subagent_dispatch_subtitle` 全部砍掉括号技术细节 `(spawn_agent + minis-sessions-cli send)`，只保留"这是什么"：
+   - zh: `允许将任务派发到其他会话`（10 字符）
+   - zh-rTW/ja/ko/de/ru/en 同步短化（en: "Dispatch work to other chat sessions"）
+2. SettingsScreen.kt：环境变量行 `showDivider = false` → `true`——环境变量是旧列表末尾遗留，子代理开关插它后面后视觉分组颠倒（导航项组尾无线、开关组中间有 line），修正使"导航项五连 → 开关组二连"分隔正确。
+
+**可复用点**：SettingsRow 的 subtitle 最多 3 行、bodySmall 12sp，中文行宽预算 ≈ 一行能放 18-20 字。设置页文案应保持 ≤18 个全角字符，避免破坏行高统一（MD3 固定 minHeight 56dp）。
+
+main release CI 33826045117 触发中，未等结果（改动纯资源+divider，分支 CI 已绿，用户同意不等）。
+
+<!-- 2026-09-04 10:35:50 -->
+## Diff 驱动定向审计完成（a1abcb6b..07d63699，4 实锤，未修复待用户拍板）
+
+
+审计 main 在全库审计（a1abcb6b）后的 7 个提交（subagent 开关 + auto-compact + 占位气泡修复），+328 行新代码。报告：/var/minis/shared/fe5-bug-audit/reports/diff-audit-09-04.md
+
+**实锤 4**：
+- **F3（HIGH）**：compact 后 trim 用旧 token 数必然再裁——compact band [W-20K,W) 与 trim 0.95W 重叠；compact 只写 marker 不裁 agentHistory，所以 baseTokens 仍超 budget，trim 裁最老 6 轮 → anchor 可能被裁 → effectiveAgentHistory "degrading to full history (no summary)" → summary 静默失效 + 每轮重复 compact 烧 token。AgentLoopEngine.kt:255 注释"trim is a no-op"是错的。
+- **H1（M）**：maybeAutoCompactInLoop 在 IO 线程调 appendSystemInfo——appendSystemInfo 是无锁 read-modify-write（5 个裸 var + _messages 拼接），KDoc 声称 Main 但调用点不在。旧 trim 同款问题但触发频率从罕见变常态。
+- **F2（M）**：in-loop compact 灰化与 loadSession applyCompactMarkerGraying 两条手写边界算法可能分叉（walk vs insertIdx）。
+- **F4（L）**：AgentTools 注释 "recursion structurally impossible" 过时——send 路径可一层嵌套。
+
+**撤销 2**：runBlocking 占 worker 槽（agent shell 不走 offload server）；SharedPreferences 读频率（内存级缓存）。
+
+**方法沉淀**：diff 驱动定向审计（git diff 老→新 + 全读改动文件 + 5 疑点机械核实）比重新全库扫性价比高得多——上次扫过的代码不用重扫，新面 328 行 15 分钟扫完。git 考古（git show <老提交>:<file>）是判断"新引入 vs 存量"的关键一步，影响定级（存量=老 bug，新引入=回归）。
+
+<!-- 2026-09-04 11:01:03 -->
+## diff-audit 0904 四实锤修复闭环（合并 main @ b21ef1a1）
+
+
+按用户要求"工程量不大直接修"，分支 fix/diff-audit-0904 修复 4 处，分支 CI 33830806928 success（head_sha b21ef1a17 核对一致），ff 合并 main，删远端+本地分支。
+
+**修复内容**：
+- F3（HIGH）：compacted 后跳过本轮 trim（`if (!compacted)` 包裹 trimContextHistoryWindow），防 anchor 被裁 → summary 静默失效 + 每轮重复 compact 烧 token 的死循环。
+- H1（M）：maybeAutoCompactInLoop 的 appendSystemInfo 包 withContext(Dispatchers.Main)（+ Dispatchers/withContext import）。
+- F2（M）：compactAll 灰化匹配谓词从 `msg.id == cutoffId` 扩展为 `id ∨ sourceDbIds.contains(cutoffId)`；anchor 无 UI 行时回退到"最后 settled 行"边界，防当前 streaming 行被灰化并随 copy() 传染整 run。T84 计数段谓词同步扩展。
+- F4（L）：AgentTools 注释纠正——send 路径可一层嵌套，depth-1+ 过滤仍有效。
+
+**修复中的关键发现**（可复用）：
+- **F2 根因比报告更深**：UI ChatMessage 的 id 存在两种方言——冷启动重建 `id=entity.id`（DB id），活会话 `id=assistant_<ts>`（运行时 id），且 tool-result carrier 在 UI 里**无行**。compactAll 灰化用 id-only 谓词匹配 DB id 的 anchor，活会话永远匹配不上 → passedCutoff 恒 false → 全列灰化含当前 streaming 行。修 match 谓词 + settled 行兜底。
+- **map{} 返回不可变 List**：想 clear/addAll 要改 `var cleaned` + 重赋值（mapIndexed 返回新 List），不能当 MutableList 用——一次编译错误当场抓出。
+
+**方法沉淀**：diff 驱动定向审计（git diff 老→新 + 全读改动文件 + 5 疑点机械核实）比重新全库扫性价比高得多——上次扫过的代码不用重扫，新面 328 行 15 分钟扫完。git 考古（git show <老提交>:<file>）是判断"新引入 vs 存量"的关键一步，影响定级（存量=老 bug，新引入=回归）。
+
+<!-- 2026-09-04 13:17:56 -->
+## 思考字段决策键根治（tokenrhythm qwen 报错，2026-09-04）
+
+
+用户场景：tokenrhythm.studio + qwen3.8-max，开思考就报错（低档也报错），关思考没事。RikkaHub 不报错。
+
+**实测铁证**（curl 直测 tokenrhythm）：
+- `enable_thinking: true/false` → 接受（模型家族字段，qwen 通用）
+- `reasoning_effort: low/medium/high/max` → 接受，思考生效（max 返回 reasoning_tokens）
+- `thinking_budget: N` → UNKNOWN_FIELD 400（DashScope 私有）
+- `extra_body` → UNKNOWN_FIELD 400（DashScope 私有）
+- `reasoning_effort: none/low` 不能关思考（仍返回 reasoning_content），关思考只能用 `enable_thinking:false`
+
+**根因**：Minis 的 injectThinkingParams 对 `lid.contains("qwen")` 的模型开思考时发三件套 `enable_thinking + thinking_budget + extra_body`，后两个是阿里百炼（DashScope）私有字段，标准 OpenAI-compatible 中转站不认识直接 400。关思考只发 `enable_thinking:false`（模型家族字段，中转站接受）所以不报错。
+
+**根治**（commit 7aea092d）：ON 分支把私有字段门控从 `lid.contains("qwen")` 改成 `isDashScope`（官方 host），非官方 qwen fallthrough 到通用 `reasoning_effort`。OFF 分支保持 `lid.contains("qwen") || isDashScope` 发 `enable_thinking:false`（这是模型家族字段，跟着模型走是对的）。
+
+**核心可复用规律（决策键选择）**：
+- 协议由谁决定，决策键就选谁。`enable_thinking` 由**模型家族**决定 → 用模型名；`thinking_budget/extra_body` 由**服务端**（百炼官方）决定 → 用 host。
+- RikkaHub 用 `when(host)` 表 + else 兜底（系统性穷举）；Minis 用 `lid.contains()` + 几个布尔标志（想到几个加几个，没想到落 generic）。前者覆盖面=表本身，后者覆盖面随 bug 报告增长。
+- 字段的"决定因素"不是铁板一块：同一个模型，不同字段可能由不同实体决定，不能一刀切全挂模型名或全挂 host。
+
+**架构差异**：Minis 模型是一等公民（ModelEntry/LLMModel 带能力声明），中转商只是 ProviderInstance 的 customBaseURL 字符串；RikkaHub 反过来，baseUrl 是核心字段，host 天然是决策键。
+
+<!-- 2026-09-04 13:43:40 -->
+## 上游 OpenMinis iOS 端差异分析（2026-09-04，/tmp/openminis sparse clone @ 4ef2900）
+
+
+**背景**：用户让查上游苹果版有什么 RikkaMinis 可吸收。上游是双端仓库（iOS 442 swift/23.2万行 vs Android 477 kt/18.5万行），iOS 功能面明显更全。
+
+**可吸收清单（按价值排序）**：
+1. **Thinking 规则表全套（最高价值）**：`src/ios/Providers/Thinking/` 的 ThinkingWireFormat（含 qwenRootOnly/deepSeekSibling/booleanToggle/extraBodyToggle/customPath escape hatch）+ ThinkingRuleResolver（first-match-wins 声明式规则表）+ Phase2 用户自定义规则（ThinkingRuleEditor UI + ThinkingRuleCache + ThinkingRulesSection）。**Android 端已 1:1 镜像 port（`provider/thinking/` 包）**，本地 RikkaMinis 仍是老式 if-return（OpenAIProvider.injectThinkingParams，7aea092d 的 host 门控是治标）。这正是昨天 RikkaHub 对比诊断 P0 的完整落地形态——用户不用等发版，30 秒自配规则解决「换中转商 400」。
+2. **ScheduledAgentRunner 定时任务**：上游 Android 已有完整 scheduled 包（Task+AlarmReceiver+Manager+Store），本地无此包。
+3. **DynamicIslandSupport 灵动岛探针**：上游 Android 有（API36 canPostPromotedNotifications 能力探针），本地仅 AndroidManifest 一处引用。
+4. **HealthManager（Health Connect）**：上游 Android 有 stub（API34 Health Connect 步数/心率/睡眠），本地无。
+5. **系统媒体控制**：iOS MediaOffload（now-playing/play/pause/next/prev/volume/search，apple-media），本地只有 InlineMediaPlayer（app 内播放），无系统级。
+6. **Vision OCR**：iOS VisionOffload（apple-vision ocr/barcode/classify/detect/faces），本地只有 ReadImageTool（喂图给模型），无本地 OCR/barcode。
+
+**不推荐（iOS 平台特有）**：iCloud Sync V2（SyncCore+transport 抽象，LANTransport 是 skeleton 未实现）、App Intents/Siri、HealthKit/HomeKit/NFC/Maps、Live Activity/Widget、iSH（Android 用 PRoot）。
+
+**关键教训**：上游 thinking 规则表带 golden snapshot 测试（ThinkingWireGoldenSnapshotTests 182 rows 等，从旧实现生成 pin 住），是「协议+验证」的范式样本——正合用户「框架 > 单一功能、可验证」偏好。
+
+<!-- 2026-09-04 21:23:41 -->
+## feat/thinking-rules-port 分支审计（2026-09-04）
+
+
+**范围**：main(7aea092d)→f7865b2b，2 commits +3440/−217（thinking 规则引擎 port + Phase 2 自定义规则）。CI f7865b2b run 33873927997 success；上轮 9db76bda failure 是 2 个测试断言写错（relay qwen ON 期望 enable_thinking、deepseek HIGH 期望 high——对照老链确认真实语义是 reasoning_effort/max），f7865b2b 只改测试期望值，合法。
+
+**发现（唯一实锤）**：D3 MEDIUM——OpenRouter ReasoningEffortNested 分支丢了 clampEffortForModel，MiMo/Agnes xhigh 直通上 wire（OpenRouter 有 xiaomi/mimo-v2.5，XHIGH 档 → 严格枚举 400）。注释自辩"pre-refactor OpenRouter branch emitted raw tier"与 main:2263 铁证矛盾（老链有 clamp）。修法一行：nested 分支补 clamp。报告中另三个差异（D1 generic-OFF declared 拦截/D2 self-reasoning skip 声明驱动化/D4 DeepSeekSibling 档位数据驱动）全是上游 22647505 有意吸收，models.dev 线上数据量化过触发面——D1 现实不可达（仅 gpt-realtime-2.1，不走 chat/completions）。
+
+**审计方法可复用**：规则链 refactor 审计 = 逐分支 diff 对照老 if-return 链 + **注释自辩与 git show main:<file>:<line> 铁证交叉验证**（本次 D3 就是靠这个抓的——注释声称与老链一致，git show 打脸）。触发面量化用 curl models.dev/api.json 线上数据全量扫描，把"行为变化"精确到"哪些模型 id 真实受影响"，防止把有意行为当 bug 修。
+
+**已排除疑点**：init IO 路径没调 loadAllThinkingRulesIntoCache（冷启动早期用户规则 fallback built-in，安全形状，iOS 同构）；UI 层 runBlocking Room（既有模式，小表非 ANR 量级）；reasoningEcho 字段 resolver 不消费（Phase 2 声明如此但 UI 可编辑保存 misleading）；Room 7→8 迁移逐字段核对一致；LLMModel 新字段四处同步完整（copy() 不列=沿用 baseModel）；8 语言字符串键机械核对 0 缺失。
+
+报告：/var/minis/workspace/thinking-audit/report.md（含 findings.md 过程稿）
+
+<!-- 2026-09-04 21:29:23 -->
+## thinking-rules-port 分支待合并（2026-09-04，CI f7865b2b run 33873927997 success）
+
+<!-- 2026-09-04 21:35:12 -->
+## 2026-09-04 21:35:12
+
+
+用户开 bug-audit 会话处理该分支的 bug hunt；本会话收尾，未做 ff 合并 main。
+
+**分支状态**：`feat/thinking-rules-port` @ f7865b2b，基于 main HEAD 7aea092d，CI success。改动 = 9db76bda（引擎 port + Phase 2 全栈）+ f7865b2b（2 个 relay 测试断言修正）。
+
+**交付物**：
+1. thinking 包 5 文件（ThinkingWireFormat/ThinkingRule/ThinkingRuleResolver/ThinkingRuleCoding/ThinkingRuleCache），upstream 1:1 port，删 Gemini/Anthropic 桥（本地两 provider 独立 emitter）
+2. LLMModel 新字段 reasoningEffortValues/declaresNoEffortTiers + catalog ceiling clamp + ModelsDevApi 解析（数据驱动 refinement 全链）
+3. Phase 2 全栈：ProviderThinkingRuleEntity + Migration(7→8) + DAO 8 方法 + Repository 8 方法 + ProviderFactory 接线 + supportsCustomThinkingRules + ThinkingRulesSection/ThinkingRuleEditor 两 UI + ProviderDetailScreen 集成 + 36 条 7 语言字符串（zh/zh-rTW 已人工中文化）
+4. 3 个测试：ThinkingRulesRegressionTest（已适配本地语义）、ThinkingRuleCustomMergeTest、ThinkingLevelTest
+5. 顺手吸收 3 个上游 bug 修复（本地同款静默失效）：Responses 路径 isMistral 门控、echo 侧 forbidReasoningField、unified 谓词补 venice
+
+**有意分歧（勿回退）**：7aea092d host-gating（qwen 双发仅 DashScope）+ 2ecf5e19 relay 路由 + mimo/agnes OFF 豁免 + 吸收 847822eb sibling + 22647505 声明集。
+
+**收尾建议**：bug-audit 会话扫完 → ff 合并 main → release CI → 真机验证
+
+<!-- 2026-09-04 21:53:37 -->
+## thinking-rules-port 分支已合并 main @ 1ba1310e（2026-09-04 晚）
+
+
+D3 修复闭环：nested 分支补 `clampEffortForModel(wireEffort(ctx.level), lid)`（commit 1ba1310e，+47/−6），新增 2 条回归测试（`openrouter nested reasoning clamps mimo xhigh to high` / `keeps xhigh for non-clamped models`）。分支 CI run 33878995977 success（head_sha 1ba1310e 核对一致），ff 合并 main（7aea092d→1ba1310e），main push 触发 release CI run 33880350214（用户拍板不等结果，改动纯逻辑+测试，分支 CI 已绿）。本地+远端分支已删。
+
+**教训（可复用）**：build-apk.yml 的 push 触发器只对 `main` 分支——特性分支 push 后**不会自动触发 CI**，必须手动 `gh-actions-dispatch --ref <branch>`。之前两轮分支 CI 都是 dispatch 的。合并 main 后 push 才自动触发 release CI。
+
+**潜在后续**（本次审计排除但可留意）：① init 块 IO load 路径没调 loadAllThinkingRulesIntoCache（冷启动极早期用户规则 fallback built-in，iOS 同构，安全）；② UI 层 thinkingRules/reorder/save/delete 主线程 runBlocking Room（小表，非 ANR 量级，风格债）；③ reasoningEcho 字段 resolver 不消费但 UI 可编辑保存（Phase 2 声明如此，mildly misleading）；④ ja/ko/de 缺 modeldetail_video_output/provider_detail_export_confirm_*（main 存量缺键，ceb5a470 引入）。
 
 ---
 
