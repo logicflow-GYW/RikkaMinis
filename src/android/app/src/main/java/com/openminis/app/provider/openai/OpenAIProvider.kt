@@ -2398,7 +2398,16 @@ class OpenAIProvider constructor(
             lid.startsWith("o") || lid.startsWith("gpt-5") -> {
                 body.put("reasoning_effort", effortStr)
             }
-            lid.contains("qwen") || isDashScope -> {
+            // [T-qwen-thinking-private-fields-host-gated] The `thinking_budget`
+            // + `extra_body` fields are Bailian/DashScope PRIVATE — a standard
+            // OpenAI-compatible relay (e.g. tokenrhythm.studio) 400s on them
+            // with UNKNOWN_FIELD. Previously gated on `lid.contains("qwen")`
+            // which wrongly treated EVERY relay's qwen as official Bailian, so
+            // turning thinking on against any relay qwen always failed. Gate on
+            // the official host only: non-DashScope qwen falls through to the
+            // generic `reasoning_effort` branch below (verified live: relays
+            // accept reasoning_effort max/high and it enables thinking).
+            isDashScope -> {
                 var budget = when (level) {
                     ThinkingLevel.LOW -> 4096
                     ThinkingLevel.MEDIUM -> 16384
