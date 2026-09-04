@@ -11,6 +11,21 @@ data class LLMModel(
     val maxOutputTokens: Int? = null,
     val supportsReasoning: Boolean? = null,
     val interleavedReasoningField: String? = null,
+    // [T-reasoning-effort-data-driven] Effort tiers this model accepts, from the
+    // models.dev `reasoning_options` entry of type `effort` (e.g. ["high","max"]
+    // for zhipuai glm-5.2). Mirrors iOS LLMModel.reasoningEffortValues.
+    //
+    // Presence (non-null, non-empty) means "controlled by reasoning_effort" and
+    // replaces the old hardcoded deepseek/glm/kimi/minimax skip list; the
+    // contents are the ALLOWED tiers, which the request builder clamps onto.
+    val reasoningEffortValues: List<String>? = null,
+    // [OpenMinis#163] The catalog affirmatively declares NO effort tiers for
+    // this model — it reasons, but takes no `reasoning_effort` parameter.
+    // Mirrors iOS LLMModel.declaresNoEffortTiers. Distinct from
+    // `reasoningEffortValues == null`, which also covers "the catalog has never
+    // heard of this model". Nullable so decoding a model persisted before this
+    // field existed yields null ("unknown", pre-existing behaviour).
+    val declaresNoEffortTiers: Boolean? = null,
     // Input/output modalities from models.dev (e.g. "text", "image", "audio", "video", "pdf").
     // Mirrors iOS ModelModality flags. When null, treat as text-in/text-out only.
     val inputModalities: List<String>? = null,

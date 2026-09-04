@@ -240,6 +240,26 @@ data class ProviderInstance(
      */
     val supportsAzureMode: Boolean
         get() = providerType == ProviderType.openAI && credentialType == ProviderCredential.apiKey
+
+    /**
+     * [T-android-thinking-rules-phase2] Whether the custom thinking-rules editor
+     * is surfaced for this instance. Only the OpenAI-compatible request path
+     * consults [com.openminis.app.provider.thinking.ThinkingRuleResolver]:
+     *   • anthropic/gemini build their thinking shape in their own emitters —
+     *     user rules would be silently ignored, so show a notice, not an editor;
+     *   • the Responses API and Codex OAuth both bypass the Chat-Completions
+     *     body where rules apply — same notice treatment.
+     * Mirrors iOS `supportsCustomThinkingRules`.
+     */
+    val supportsCustomThinkingRules: Boolean
+        get() = when (providerType) {
+            ProviderType.anthropic, ProviderType.gemini -> false
+            else -> {
+                val codexOAuth = credentialType == ProviderCredential.oauth &&
+                    customBaseURL.isNullOrBlank()
+                !useResponsesAPI && !codexOAuth
+            }
+        }
 }
 
 @Serializable

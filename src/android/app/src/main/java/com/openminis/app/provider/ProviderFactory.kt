@@ -96,6 +96,12 @@ object ProviderFactory {
             }
         }).also { provider ->
             provider.instanceContext = instance
+            // [T-android-thinking-rules-phase2] Tag OpenAI-family providers with their
+            // owning instance id so the thinking resolver can look up this instance's
+            // user-authored custom rules. Only OpenAIProvider consults the resolver's
+            // custom-rule path (Gemini/Anthropic use their own emitters), so this is the
+            // only type that needs it.
+            (provider as? OpenAIProvider)?.thinkingRuleInstanceId = instance.id
         }
     }
 }

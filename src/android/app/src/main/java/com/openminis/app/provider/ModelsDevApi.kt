@@ -136,6 +136,8 @@ object ModelsDevApi {
             interleavedReasoningField = devModel.interleavedField ?: model.interleavedReasoningField,
             inputModalities = devModel.inputModalities ?: model.inputModalities,
             outputModalities = devModel.outputModalities ?: model.outputModalities,
+            reasoningEffortValues = devModel.reasoningEffortValues ?: model.reasoningEffortValues,
+            declaresNoEffortTiers = if (devModel.declaresNoEffortTiers) true else model.declaresNoEffortTiers,
         )
     }
 
@@ -155,6 +157,8 @@ object ModelsDevApi {
                 interleavedReasoningField = model.interleavedField,
                 inputModalities = model.inputModalities,
                 outputModalities = model.outputModalities,
+                reasoningEffortValues = model.reasoningEffortValues,
+                declaresNoEffortTiers = if (model.declaresNoEffortTiers) true else null,
             )
         }
     }
@@ -343,6 +347,29 @@ object ModelsDevApi {
         val inputModalities = parseArray("input")
         val outputModalities = parseArray("output")
 
+        // [T-reasoning-effort-data-driven] reasoning_options is an array of
+        // {type, values?, min?, max?}; pick the `effort` entry's values.
+        var reasoningEffortValues: List<String>? = null
+        val reasoningOptions = obj.optJSONArray("reasoning_options")
+        reasoningOptions?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val opt = arr.optJSONObject(i) ?: continue
+                if (opt.optString("type") != "effort") continue
+                val vals = opt.optJSONArray("values") ?: continue
+                val out = mutableListOf<String>()
+                for (j in 0 until vals.length()) {
+                    vals.optString(j, "").takeIf { it.isNotEmpty() }?.let { out.add(it.lowercase()) }
+                }
+                reasoningEffortValues = out.takeIf { it.isNotEmpty() }
+                break
+            }
+        }
+        // [OpenMinis#163] The catalog AFFIRMATIVELY says this model has no
+        // effort tiers (reasoning_options present but no usable `effort` entry),
+        // as opposed to saying nothing at all — the latter must stay permissive
+        // so third-party relays the catalog never heard of keep working.
+        val declaresNoEffortTiers = reasoningOptions != null && reasoningEffortValues == null
+
         return ModelDevEntry(
             id = id,
             name = name,
@@ -353,6 +380,8 @@ object ModelsDevApi {
             interleavedField = interleavedField,
             inputModalities = inputModalities,
             outputModalities = outputModalities,
+            reasoningEffortValues = reasoningEffortValues,
+            declaresNoEffortTiers = declaresNoEffortTiers,
         )
     }
 
@@ -424,5 +453,12 @@ object ModelsDevApi {
         // modalities.input / modalities.output from models.dev (e.g. ["text","image"]).
         val inputModalities: List<String>?,
         val outputModalities: List<String>?,
+        // [T-reasoning-effort-data-driven] `values` of the reasoning_options
+        // entry whose type == "effort"; null when the model declares only
+        // toggle / budget_tokens (different mechanisms, not effort control).
+        val reasoningEffortValues: List<String>?,
+        // [OpenMinis#163] True when reasoning_options was PRESENT but declared
+        // no usable effort tier — "reasons, but takes no reasoning_effort".
+        val declaresNoEffortTiers: Boolean = false,
     )
 }

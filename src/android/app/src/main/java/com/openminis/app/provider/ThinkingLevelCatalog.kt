@@ -77,7 +77,37 @@ val LLMModel.catalogMaxThinkingLevel: ThinkingLevel
         // ceiling of that family's non-reasoning members (mimo-v2.5-tts/-asr).
         // [T-fallback-thinking-preclamp]
         if (supportsReasoning == false) return ThinkingLevel.OFF
+        // [T-thinking-levels-data-driven] A declared effort set is a stronger
+        // statement than any id-substring rule: it names the exact tiers the
+        // backend accepts. Take its top tier as the ceiling so a model whose
+        // declaration reaches beyond the hardcoded default (XHIGH) — e.g.
+        // zhipuai glm-5.2 / deepseek-v4, both ["high","max"] — is actually
+        // reachable from the UI (mirrors iOS 47dc71b3). Fixes only the CEILING;
+        // clampEffort stays as-is.
+        selectableThinkingLevels.lastOrNull()?.let { return it }
         return ThinkingLevelCatalog.declaredMaxLevel(id) ?: ThinkingLevel.XHIGH
+    }
+
+/**
+ * [T-thinking-levels-data-driven] The thinking levels worth OFFERING for this
+ * model, derived from the catalog's declared effort tiers. Returning one level
+ * per DISTINCT declared tier makes the picker honest: every option produces a
+ * different request. Empty when nothing is declared, so the legacy id-rule
+ * ceiling still applies. OFF is never included (it's a separate toggle).
+ */
+val LLMModel.selectableThinkingLevels: List<ThinkingLevel>
+    get() {
+        val declared = reasoningEffortValues
+        if (declared.isNullOrEmpty()) return emptyList()
+        val mapping = listOf(
+            "low" to ThinkingLevel.LOW,
+            "medium" to ThinkingLevel.MEDIUM,
+            "high" to ThinkingLevel.HIGH,
+            "xhigh" to ThinkingLevel.XHIGH,
+            "max" to ThinkingLevel.MAX,
+        )
+        val set = declared.map { it.lowercase() }.toSet()
+        return mapping.filter { set.contains(it.first) }.map { it.second }
     }
 
 /**

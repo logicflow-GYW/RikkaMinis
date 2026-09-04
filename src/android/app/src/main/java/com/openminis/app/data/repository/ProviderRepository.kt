@@ -7,6 +7,7 @@ import com.openminis.app.data.db.ProviderConfigDao
 import com.openminis.app.data.db.ProviderConfigMetaKeys
 import com.openminis.app.data.db.ProviderConfigSnapshot
 import com.openminis.app.data.db.ProviderDatabase
+import com.openminis.app.data.db.ProviderThinkingRuleEntity
 import com.openminis.app.data.db.compositeEntryKey
 import com.openminis.app.data.db.toProviderConfig
 import com.openminis.app.data.db.toSnapshot
@@ -29,6 +30,9 @@ import com.openminis.app.data.model.hasVoiceModality
 import com.openminis.app.data.model.isVoiceTemplateSeedShape
 import com.openminis.app.data.model.withInferredVoiceModality
 import com.openminis.app.provider.registerModelListProviders
+import com.openminis.app.provider.thinking.ThinkingRule
+import com.openminis.app.provider.thinking.ThinkingRuleCoding
+import com.openminis.app.provider.thinking.ThinkingRuleResolver
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -486,6 +490,9 @@ class ProviderRepository(private val context: Context) {
             _config.value = loadConfig()
             _configLoaded.value = true
         }
+        // [T-android-thinking-rules-phase2] Warm the resolver's custom-rule cache
+        // once config is available, so the (sync) request builder can read user rules.
+        loadAllThinkingRulesIntoCache()
         if (!configLoadComplete.isCompleted) configLoadComplete.complete(Unit)
     }
 
@@ -764,6 +771,12 @@ class ProviderRepository(private val context: Context) {
 
         saveConfig(config)
         deleteApiKey(instanceId)
+        // [T-android-thinking-rules-phase2] The instance is gone — drop its custom
+        // rules from Room and the resolver cache (they can never fire again).
+        runCatching {
+            runBlocking { providerDao.deleteThinkingRulesForInstance(instanceId) }
+            ThinkingRuleResolver.setCustomRules(instanceId, emptyList())
+        }
     }
 
     /**
@@ -791,6 +804,119 @@ class ProviderRepository(private val context: Context) {
 
     fun instance(id: String): ProviderInstance? =
         _config.value.instances.find { it.id == id }
+
+    // ── [T-android-thinking-rules-phase2] Custom thinking rules ──
+
+    /** Load one instance's custom rules from Room, in stored order. */
+    fun thinkingRules(instanceId: String): List<ThinkingRule> = runBlocking {
+        runCatching { providerDao.loadThinkingRules(instanceId).map { ThinkingRuleCoding.toRule(it) } }
+            .getOrDefault(emptyList())
+    }
+
+    /** The persisted ids for one instance's custom rules, parallel to [thinkingRules]. */
+    fun thinkingRuleIds(instanceId: String): List<String> = runBlocking {
+        runCatching { providerDao.loadThinkingRules(instanceId).map { it.id } }.getOrDefault(emptyList())
+    }
+
+    /** First model id served by [instanceId], for the resolution-trace sample. Null if none. */
+    fun firstModelId(instanceId: String): String? {
+        ensureConfigLoaded()
+        return _config.value.modelEntries.firstOrNull { it.providerInstanceId == instanceId }?.baseModel?.id
+    }
+
+    /** Warm the resolver cache with every instance's custom rules (called on config load). */
+    fun loadAllThinkingRulesIntoCache() {
+        runCatching {
+            val rows = runBlocking { providerDao.loadAllThinkingRules() }
+            val byInstance = rows.groupBy { it.providerInstanceId }
+                .mapValues { (_, rs) -> rs.sortedBy { it.sortOrder }.map { ThinkingRuleCoding.toRule(it) } }
+            ThinkingRuleResolver.setAllCustomRules(byInstance)
+        }
+    }
+
+    private fun republishThinkingCache(instanceId: String) {
+        ThinkingRuleResolver.setCustomRules(instanceId, thinkingRules(instanceId))
+    }
+
+    /**
+     * Insert or update a custom rule. [id] null ⇒ new rule minted at the TOP of the
+     * list (position 0) — a rule overriding a built-in is useless below it; existing
+     * rules shift down. A non-null [id] updates in place, preserving position.
+     * Returns the rule id.
+     */
+    fun saveThinkingRule(instanceId: String, rule: ThinkingRule, id: String? = null): String = runBlocking {
+        val existing = providerDao.loadThinkingRules(instanceId).toMutableList()
+        val ruleId = id ?: java.util.UUID.randomUUID().toString()
+        val idx = existing.indexOfFirst { it.id == ruleId }
+        if (idx >= 0) {
+            // Update in place at its current sort_order.
+            existing[idx] = ThinkingRuleCoding.toEntity(rule, ruleId, instanceId, existing[idx].sortOrder)
+        } else {
+            // New rule at the top; everything else shifts down.
+            existing.add(0, ThinkingRuleCoding.toEntity(rule, ruleId, instanceId, 0))
+        }
+        val renumbered = existing.mapIndexed { i, e -> e.copy(sortOrder = i) }
+        providerDao.replaceThinkingRules(instanceId, renumbered)
+        republishThinkingCache(instanceId)
+        ruleId
+    }
+
+    fun deleteThinkingRule(instanceId: String, id: String) = runBlocking {
+        providerDao.deleteThinkingRule(id)
+        // Renumber survivors so sort_order stays dense.
+        val survivors = providerDao.loadThinkingRules(instanceId)
+            .sortedBy { it.sortOrder }
+            .mapIndexed { i, e -> e.copy(sortOrder = i) }
+        providerDao.replaceThinkingRules(instanceId, survivors)
+        republishThinkingCache(instanceId)
+    }
+
+    /** Reorder an instance's custom rules to match [orderedIds] (a permutation). */
+    fun reorderThinkingRules(instanceId: String, orderedIds: List<String>) = runBlocking {
+        val byId = providerDao.loadThinkingRules(instanceId).associateBy { it.id }
+        val reordered = orderedIds.mapNotNull { byId[it] }
+            .mapIndexed { i, e -> e.copy(sortOrder = i) }
+        // Keep any id the caller omitted (defensive against a partial list) appended.
+        val omitted = byId.values.filter { it.id !in orderedIds }.map { it }
+        providerDao.replaceThinkingRules(instanceId, reordered + omitted)
+        republishThinkingCache(instanceId)
+    }
+
+    /**
+     * Built-in rules relevant to THIS instance, for the Provider-detail UI. Mirrors iOS
+     * builtInRulesForDisplay: resolve the vendor context from the instance's base URL,
+     * then keep every AllModels-scoped rule (endpoint/provider-type defaults) plus any
+     * ModelPattern rule the provider actually serves a matching model for. An empty
+     * catalog keeps everything (list must not be mysteriously empty before first fetch).
+     */
+    fun builtInThinkingRulesForDisplay(instanceId: String): List<ThinkingRule> {
+        ensureConfigLoaded()
+        val config = _config.value
+        val inst = config.instances.find { it.id == instanceId } ?: return emptyList()
+        val base = (inst.effectiveBaseURL ?: "").lowercase()
+        val ctx = com.openminis.app.provider.thinking.ThinkingResolveContext(
+            modelId = "",
+            supportsReasoning = null,
+            declaredEffortValues = null,
+            level = ThinkingLevel.OFF,
+            maxTokens = 0,
+            isOpenRouter = base.contains("openrouter.ai"),
+            usesUnifiedReasoningEffort = base.contains("volces") || base.contains("ark.") || base.contains("venice.ai"),
+            isMistral = base.contains("mistral.ai"),
+            isDashScope = base.contains("dashscope"),
+            isXAI = base.contains("api.x.ai"),
+            isOfficialDeepSeek = base.contains("api.deepseek.com"),
+            offEffort = null,
+        )
+        val modelIds = config.modelEntries.filter { it.providerInstanceId == instanceId }.map { it.model.id }
+        return ThinkingRuleResolver.builtInRules(ctx).filter { rule ->
+            when (rule.scope) {
+                is ThinkingRule.Scope.AllModels -> true
+                is ThinkingRule.Scope.ModelPattern ->
+                    modelIds.isEmpty() || modelIds.any { rule.scope.matches(it) }
+            }
+        }
+    }
 
     fun enabledInstances(providerType: ProviderType): List<ProviderInstance> =
         _config.value.instances.filter { it.providerType == providerType && it.isEnabled }

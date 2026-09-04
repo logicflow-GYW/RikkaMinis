@@ -113,6 +113,7 @@ fun ProviderDetailScreen(
 
     if (instance == null && !deleted) { onBack(); return }
     if (instance == null) return
+    val currentInstance = instance
 
     var label by remember { mutableStateOf(instance.label) }
     val labelChanged = label != instance.label
@@ -239,6 +240,9 @@ fun ProviderDetailScreen(
                 showDivider = false,
             )
         }
+
+        // ─── Thinking Rules [T-android-thinking-rules-phase2 §3] ─────
+        ThinkingRulesSection(instance = currentInstance, providerRepository = providerRepository)
 
         // ─── Models ─────────────────────────────────────────────────
         SettingsSection(
