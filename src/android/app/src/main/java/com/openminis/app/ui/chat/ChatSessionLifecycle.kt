@@ -233,9 +233,31 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
                 // session shows at most one divider (the latest marker).
                 // Those old dividers are stored as system messages with
                 // a "compact" iconKind in toolBlocks[0].toolName.
+                //
+                // [fix/diff-audit-0904-F2] The cutoff row match must cover
+                // the LIVE-session id dialect, not just the cold-rebuild
+                // one. Cold rebuild (loadSession) sets ChatMessage.id =
+                // entity.id (the DB id), so `msg.id == cutoffId` hits.
+                // A live in-loop compact runs while the current turn's
+                // bubbles still carry runtime ids (`assistant_<ts>` for
+                // the streaming assistant row; tool-result carriers have
+                // NO UI row at all). With the old id-only predicate the
+                // walk never flipped passedCutoff — every non-system row
+                // got grayed, INCLUDING the in-flight streaming bubble
+                // (which represents the post-anchor current turn), and
+                // updateAssistantMessage's copy() then carried the gray
+                // flag for the rest of the run. Two changes:
+                //   1. Match id OR sourceDbIds containing the anchor —
+                //      restored rows carry sourceDbIds, merged rows carry
+                //      the union.
+                //   2. In-flight rows (isStreaming / isQueued /
+                //      isAwaitingModelResponse) are by construction AFTER
+                //      the anchor, so the walk flips passedCutoff at the
+                //      last settled row even when the anchor row itself
+                //      has no UI representation (tool-result carrier).
                 val cutoffId: String = lastCompactedDbId
                 var passedCutoff = false   // anchor is guaranteed non-null in v2
-                val cleaned = _messages.value
+                var cleaned = _messages.value
                     .filterNot { msg ->
                         // Drop prior compact-divider rows; appendSystemInfo
                         // below will re-add the new one.
@@ -248,10 +270,28 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
                         else {
                             val grayed = if (msg.isCompactedHistory) msg
                                 else msg.copy(isCompactedHistory = true)
-                            if (msg.id == cutoffId) passedCutoff = true
+                            if (msg.id == cutoffId || msg.sourceDbIds.contains(cutoffId)) {
+                                passedCutoff = true
+                            }
                             grayed
                         }
                     }
+                // In-flight bubbles (current turn) sit after the anchor even
+                // when the anchor has no UI row: force the boundary at the
+                // last settled row so the streaming/queued placeholder and
+                // any already-created follow-ups never inherit the gray flag.
+                if (!passedCutoff) {
+                    val lastSettledIdx = cleaned.indexOfLast { msg ->
+                        msg.role != "system" && !msg.isStreaming && !msg.isQueued && !msg.isAwaitingModelResponse
+                    }
+                    if (lastSettledIdx >= 0) {
+                        cleaned = cleaned.mapIndexed { idx, msg ->
+                            if (idx > lastSettledIdx && msg.role != "system" && !msg.isCompactedHistory) {
+                                msg.copy(isCompactedHistory = false)
+                            } else msg
+                        }
+                    }
+                }
                 // T84: count UI bubbles in this pass's compacted range.
                 // Filters: role != system (dividers/notices don't count).
                 // Range: everything up to and including the cutoff row,
@@ -267,7 +307,7 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
                 // even though `toCompact.size` was nonzero. The divider's
                 // count should reflect the size of THIS pass's range, not
                 // the delta of newly-grayed rows.
-                val cutoffIdx = cleaned.indexOfLast { it.id == cutoffId }
+                val cutoffIdx = cleaned.indexOfLast { it.id == cutoffId || it.sourceDbIds.contains(cutoffId) }
                 val compactedUICount = if (cutoffIdx < 0) {
                     cleaned.count { it.role != "system" }
                 } else {

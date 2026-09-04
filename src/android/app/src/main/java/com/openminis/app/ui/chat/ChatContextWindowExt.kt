@@ -5,6 +5,8 @@ import com.openminis.app.data.ContextPolicy
 import com.openminis.app.conversation.ContextCompactor
 import com.openminis.app.R
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 // [FE-5 batch 8] Context management cluster (reloadSessionFromDb /
 // checkContextBeforeSend / maybeTriggerAutoCompact / awaitAutoCompactIfNeeded)
@@ -168,10 +170,17 @@ internal suspend fun ChatViewModel.maybeAutoCompactInLoop(
         return false
     }
     lastAutoCompactAtMs = System.currentTimeMillis()
-    appendSystemInfo(
-        text = context.getString(R.string.sysmsg_context_full_auto, lastContextTokens, contextWindow),
-        iconKind = "compact",
-    )
+    // [fix/diff-audit-0904-H1] appendSystemInfo is an unlocked
+    // read-modify-write over _messages + 5 pendingSysInfo* vars; its KDoc
+    // contract is "runs on Main". This extension is called from the agent
+    // loop, which runs on Dispatchers.IO — hop to Main for the UI write
+    // instead of racing the coalesce-flush job.
+    withContext(Dispatchers.Main) {
+        appendSystemInfo(
+            text = context.getString(R.string.sysmsg_context_full_auto, lastContextTokens, contextWindow),
+            iconKind = "compact",
+        )
+    }
     AppLogger.info(ChatViewModel.TAG, "[AutoCompactLoop] triggering (tokens=$lastContextTokens window=$contextWindow tail=$tail)")
     compactAll(allowInStream = true) // fire-and-forget; internally launches on IO
     // Await completion so the next provider call assembles summary + tail.

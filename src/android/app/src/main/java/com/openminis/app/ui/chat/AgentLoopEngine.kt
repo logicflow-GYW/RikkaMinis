@@ -242,22 +242,27 @@ internal class AgentLoopEngine(
                     contextWindow = window,
                     lastContextTokens = loopState.lastContextTokens,
                 )
-                // [T-context-limit-enforce] After offload (and possibly auto-
-                // compact), what remains must still fit the window. Offload only
-                // rewrites large tool outputs to short stubs; a long verbose
-                // chat can still exceed the cap, so trim oldest complete turns
-                // as the last-resort structural shrink. This is what makes the
-                // group's `contextLimitTokens` a true hard cap on the request
-                // actually sent to the API. When auto-compact just folded the
-                // old turns into a summary, the trim is a no-op (history is
-                // already under budget) — but keeping the call unconditional
-                // preserves the hard-cap guarantee.
-                host.trimContextHistoryWindow(
-                    contextWindow = window,
-                    lastContextTokens = loopState.lastContextTokens,
-                )
-                if (compacted) {
-                    AppLogger.info(TAG_STREAM, "auto-compact folded old turns; proceeding with summary + tail")
+                // [fix/diff-audit-0904-F3] When auto-compact just fired, SKIP the
+                // trim this turn. Compact does NOT shrink agentHistory (it only
+                // writes the marker; effectiveAgentHistory does the summary+tail
+                // projection at request time), so trimContextHistoryWindow would
+                // still see baseTokens > budget with the SAME stale
+                // lastContextTokens and drop the oldest turns — the very turns
+                // the just-written marker anchors on. Losing the anchor makes
+                // effectiveAgentHistory degrade to full history (summary silently
+                // discarded), and next turn re-compacts + re-trims in a loop,
+                // burning one summary API call per turn. The hard cap is still
+                // honored: effectiveAgentHistory's summary+tail projection is what
+                // is actually sent, and the next turn's Usage chunk refreshes
+                // lastContextTokens so a genuinely over-budget history still
+                // trims on the next iteration.
+                if (!compacted) {
+                    host.trimContextHistoryWindow(
+                        contextWindow = window,
+                        lastContextTokens = loopState.lastContextTokens,
+                    )
+                } else {
+                    AppLogger.info(TAG_STREAM, "auto-compact folded old turns; skipping hard trim this turn (anchor preserved)")
                 }
             }
 
