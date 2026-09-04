@@ -484,8 +484,10 @@ class ThinkingRulesRegressionTest {
             body.has("thinking"),
         )
         assertEquals(
+            // [T-android-thinking-level-arch] DeepSeek V4 tops out at "max"; every
+            // high-and-above tier collapses onto it — HIGH→max, not high.
             "relay controls thinking via standard root reasoning_effort: $body",
-            "high",
+            "max",
             body.optString("reasoning_effort", null),
         )
     }
@@ -551,13 +553,16 @@ class ThinkingRulesRegressionTest {
     }
 
     @Test
-    fun `relay hosted qwen gets portable enable_thinking only`() {
+    fun `relay hosted qwen gets portable reasoning_effort only`() {
         // The relay leg of the same split (tokenrhythm-class 400 fix, 7aea092d):
-        // a non-DashScope base must NOT receive thinking_budget/extra_body.
+        // a non-DashScope base falls through to the generic reasoning_effort path —
+        // NO Bailian-private thinking_budget/extra_body, and NO enable_thinking
+        // (that toggle is OFF-only; ON is controlled by the tier field).
         val body = capture(model = model("qwen3-32b"), level = ThinkingLevel.MEDIUM)
-        assertTrue("root enable_thinking expected: $body", body.has("enable_thinking"))
+        assertEquals("relay controls qwen thinking via reasoning_effort: $body", "medium", body.optString("reasoning_effort", null))
         assertFalse("relay must not receive Bailian-private thinking_budget: $body", body.has("thinking_budget"))
         assertFalse("relay must not receive Bailian-private extra_body: $body", body.has("extra_body"))
+        assertFalse("relay ON turn must not carry the OFF-only enable_thinking toggle: $body", body.has("enable_thinking"))
     }
 
     // ============================================================ BOUNDARY
