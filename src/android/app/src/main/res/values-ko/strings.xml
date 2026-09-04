@@ -106,7 +106,7 @@
     <string name="settings_max_concurrent_dialog_title">동시 세션 수 상한</string>
     <string name="settings_max_concurrent_restart_hint">다음 앱 시작 시 적용됩니다.</string>
     <string name="settings_subagent_dispatch">하위 에이전트 파견</string>
-    <string name="settings_subagent_dispatch_subtitle">에이전트가 하위 에이전트를 시작하고 다른 채팅 세션으로 작업을 파견하도록 허용 (spawn_agent + minis-sessions-cli send)</string>
+    <string name="settings_subagent_dispatch_subtitle">다른 세션으로 작업 파견 허용</string>
     <string name="settings_section_storage">저장 공간</string>
     <string name="settings_storage_subtitle">Alpine Linux rootfs를 관리하고 파일을 탐색</string>
     <string name="settings_section_permissions">권한</string>

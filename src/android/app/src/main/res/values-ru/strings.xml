@@ -146,7 +146,7 @@
     <string name="settings_max_concurrent_dialog_title">Макс. одновременных сеансов</string>
     <string name="settings_max_concurrent_restart_hint">Применяется при следующем запуске приложения.</string>
     <string name="settings_subagent_dispatch">Запуск субагентов</string>
-    <string name="settings_subagent_dispatch_subtitle">Разрешить агенту запускать субагентов и передавать задачи другим чатам (spawn_agent + minis-sessions-cli send)</string>
+    <string name="settings_subagent_dispatch_subtitle">Передавать задачи другим сессиям</string>
     <string name="settings_section_storage">Хранилище</string>
     <string name="settings_storage_subtitle">Управление корневой ФС Alpine Linux и просмотр файлов</string>
     <string name="settings_section_permissions">Разрешения</string>

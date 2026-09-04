@@ -198,7 +198,7 @@ fun SettingsScreen(
                     title = stringResource(R.string.settings_env_vars),
                     subtitle = stringResource(R.string.settings_env_vars_subtitle),
                     onClick = onEnvVarsClick,
-                    showDivider = false,
+                    showDivider = true,
                 )
                 // [T-subagent-toggle] Cross-session sub-agent dispatch switch.
                 // OFF by default (side-effectful: lets the agent open new sessions
