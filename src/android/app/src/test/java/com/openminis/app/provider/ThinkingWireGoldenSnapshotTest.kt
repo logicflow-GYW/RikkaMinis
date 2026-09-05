@@ -167,6 +167,13 @@ class ThinkingWireGoldenSnapshotTest {
 
     @Test
     fun `golden snapshot of every branch`() {
+        val actual = render()
+        println("===GOLDEN_EXPECTED_START===")
+        println(EXPECTED)
+        println("===GOLDEN_EXPECTED_END===")
+        println("===GOLDEN_ACTUAL_START===")
+        println(actual)
+        println("===GOLDEN_ACTUAL_END===")
         assertEquals(
             """
             THINKING WIRE FORMAT CHANGED.
@@ -179,7 +186,7 @@ class ThinkingWireGoldenSnapshotTest {
             which branch moved, and either restore parity or justify the change explicitly.
             """.trimIndent(),
             EXPECTED,
-            render(),
+            actual,
         )
     }
 
