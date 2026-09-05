@@ -230,6 +230,17 @@ class RootfsManager private constructor(private val context: Context) {
                 .putBoolean("rootfs.freshInstall", true)
                 .apply()
 
+            // [T-rootfs-event-log] Persist the install generation (survives
+            // wipes — lives outside rootfsDir) and record why this extraction
+            // happened, so "did the sandbox reset?" has a durable answer.
+            installGeneration += 1
+            RootfsEventLog.writeBootId(context.filesDir, installGeneration)
+            RootfsEventLog.logEvent(
+                eventLogsDir,
+                RootfsEventLog.Events.INSTALL,
+                "gen=$installGeneration",
+            )
+
             // [Refactor-apk-world] A fresh extraction ships only the factory
             // packages. Re-apply the host-side snapshot of user packages
             // (recorded by dumpApkWorld) so a reset / rebuild doesn't wipe
@@ -454,10 +465,22 @@ class RootfsManager private constructor(private val context: Context) {
         // leaving the terminal broken for a manual retry.
         if (!verifyIntegrity().apkDatabase) {
             Log.w(TAG, "[Repair] apk database unusable, falling back to full reset")
+            // [T-rootfs-event-log] This is the SILENT WIPE that used to be
+            // invisible outside rotating logcat — record it on the host.
+            RootfsEventLog.logEvent(
+                eventLogsDir,
+                RootfsEventLog.Events.STAGE3_RESET,
+                "trigger=apkDatabaseUnusable missing=${initial.missing.joinToString(",")}",
+            )
             runCatching { reset() }
         }
 
         val final = verifyIntegrity()
+        RootfsEventLog.logEvent(
+            eventLogsDir,
+            RootfsEventLog.Events.AUTO_REPAIR,
+            "result=${if (final.healthy) "healthy" else "still-broken"}",
+        )
         Log.i(TAG, "[Repair] final health: ${final.missing.ifEmpty { listOf("OK") }}")
         final.healthy
     }
@@ -593,6 +616,12 @@ class RootfsManager private constructor(private val context: Context) {
     /** Host-side retry list for packages that failed to restore. */
     val apkWorldFailedFile: File get() = File(context.filesDir, "apk-world-failed.txt")
 
+    /** [T-rootfs-event-log] Host-side append-only lifecycle event log dir (survives rootfs wipes). */
+    private val eventLogsDir: File get() = File(context.filesDir, "logs")
+
+    /** [T-rootfs-event-log] Install-generation counter, bumped on every fresh extraction. */
+    private var installGeneration: Long = 0L
+
     /**
      * Snapshot the currently installed packages to the host side
      * (filesDir/apk-world.txt). Reads Alpine's `lib/apk/db/installed`
@@ -657,11 +686,23 @@ class RootfsManager private constructor(private val context: Context) {
         val code = runApkAddInGuest(args)
         if (code == 0) {
             Log.i(TAG, "[ApkWorld] restore OK (${args.size} packages)")
+            // [T-rootfs-event-log] The auto-restore that makes apk packages
+            // "survive" resets — record it so users can see it happened.
+            RootfsEventLog.logEvent(
+                eventLogsDir,
+                RootfsEventLog.Events.APKWORLD_RESTORE,
+                "ok=${args.size} failed=0",
+            )
             try { apkWorldFailedFile.delete() } catch (_: Exception) {}
             return@withContext true
         }
         writeApkWorldFailed(args)
         Log.w(TAG, "[ApkWorld] restore failed (exit=$code) — ${args.size} pkg(s) queued for retry")
+        RootfsEventLog.logEvent(
+            eventLogsDir,
+            RootfsEventLog.Events.APKWORLD_RESTORE,
+            "ok=0 failed=${args.size} exit=$code",
+        )
         false
     }
 
@@ -700,9 +741,19 @@ class RootfsManager private constructor(private val context: Context) {
         if (stillFailed.isEmpty()) {
             try { apkWorldFailedFile.delete() } catch (_: Exception) {}
             Log.i(TAG, "[ApkWorld] retry fully succeeded")
+            RootfsEventLog.logEvent(
+                eventLogsDir,
+                RootfsEventLog.Events.APKWORLD_RETRY,
+                "ok=${args.size} failed=0",
+            )
         } else {
             writeApkWorldFailed(stillFailed)
             Log.w(TAG, "[ApkWorld] ${stillFailed.size} package(s) still failing: ${stillFailed.take(5).joinToString()}")
+            RootfsEventLog.logEvent(
+                eventLogsDir,
+                RootfsEventLog.Events.APKWORLD_RETRY,
+                "ok=${args.size - stillFailed.size} failed=${stillFailed.size}",
+            )
         }
         allOk
     }
@@ -810,6 +861,10 @@ class RootfsManager private constructor(private val context: Context) {
         // boot path also dumps, but a manual reset can happen mid-session
         // between boots, so dump here too as the authoritative last state.
         dumpApkWorld()
+        // [T-rootfs-event-log] Manual resets come from the Rootfs management
+        // screen; log them so a wipe is always attributable to a human action
+        // vs an automatic repair.
+        RootfsEventLog.logEvent(eventLogsDir, RootfsEventLog.Events.MANUAL_RESET)
         rootfsDir.deleteRecursively()
         installIfNeeded()
     }
