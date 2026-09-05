@@ -23,5 +23,6 @@ fun ThinkingLevel.localizedName(context: Context): String =
             ThinkingLevel.XHIGH -> R.string.thinking_level_xhigh
             ThinkingLevel.MAX -> R.string.thinking_level_max
             ThinkingLevel.ULTRA -> R.string.thinking_level_ultra
+            ThinkingLevel.AUTO -> R.string.thinking_level_auto
         },
     )

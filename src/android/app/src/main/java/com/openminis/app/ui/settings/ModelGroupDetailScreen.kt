@@ -482,12 +482,20 @@ fun ModelGroupDetailScreen(
                                 ThinkingLevel.MAX -> stringResource(R.string.model_group_detail_thinking_max)
                                 ThinkingLevel.ULTRA -> stringResource(R.string.model_group_detail_thinking_ultra)
                                 ThinkingLevel.OFF -> stringResource(R.string.model_group_detail_thinking_low)
+                                ThinkingLevel.AUTO -> stringResource(R.string.model_group_detail_thinking_auto)
                             }
                         }
                         // Steps exclude OFF (the toggle above carries OFF
                         // semantics) and everything above the group ceiling.
+                        // [T-thinking-auto-level] AUTO is the vendor-default
+                        // choice: exempt from the ceiling filter and pinned to
+                        // the FRONT of the row (it is not an intensity).
                         val cases = ThinkingLevel.entries
-                            .filter { it != ThinkingLevel.OFF && it.rank <= groupMaxThinkingLevel.rank }
+                            .filter {
+                                it != ThinkingLevel.OFF &&
+                                    (it == ThinkingLevel.AUTO || it.rank <= groupMaxThinkingLevel.rank)
+                            }
+                            .sortedBy { if (it == ThinkingLevel.AUTO) -1 else it.rank }
                             .map { it to labelFor(it) }
                         SettingsCardBlock {
                             Text(

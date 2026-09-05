@@ -823,6 +823,7 @@
     <string name="model_group_detail_thinking_medium">Средняя</string>
     <string name="model_group_detail_thinking_high">Высокая</string>
     <string name="model_group_detail_thinking_max">Максимальная</string>
+    <string name="model_group_detail_thinking_auto">Авто</string>
     <string name="model_group_detail_limit_context_window">Ограничить контекстное окно</string>
     <string name="model_group_detail_max_context">Макс. контекст</string>
     <string name="model_group_detail_unlimited">Без ограничений</string>
@@ -991,6 +992,7 @@
     <string name="thinking_level_medium">Среднее</string>
     <string name="thinking_level_high">Высокое</string>
     <string name="thinking_level_max">Максимум</string>
+    <string name="thinking_level_auto">Авто</string>
     <string name="model_picker_title">Выбор модели</string>
     <string name="model_picker_done">Готово</string>
     <string name="model_picker_search_placeholder">Поиск моделей</string>
@@ -1456,4 +1458,20 @@
     <string name="thinking_fmt_qwen_desc">Qwen/DashScope: enable_thinking и thinking_budget меньше максимального числа токенов.</string>
     <string name="thinking_fmt_custom_title">Свой путь к полю</string>
     <string name="thinking_fmt_custom_desc">Запасной вариант: путь через точку и значение для High для эндпоинта, не описанного выше.</string>
+    <string name="provider_test_connection">Проверить соединение</string>
+    <string name="provider_test_connection_hint">Отправить минимальный запрос по реальному пути чата</string>
+    <string name="provider_test_running">Отправка тестового запроса…</string>
+    <string name="provider_test_no_key">API-ключ ещё не сохранён</string>
+    <string name="provider_test_no_model">Нет тестовой модели — сначала добавьте модель</string>
+    <string name="provider_custom_knobs_title">Расширенная настройка (эксперт)</string>
+    <string name="provider_custom_knobs_expand">Развернуть</string>
+    <string name="provider_custom_knobs_collapse">Свернуть</string>
+    <string name="provider_custom_knobs_warning">Одноимённые поля ЗАМЕНЯЮТ значения по умолчанию (включая заголовок авторизации) и могут сломать рабочий провайдер. Только для необычных релеев.</string>
+    <string name="provider_custom_header_name">Имя заголовка</string>
+    <string name="provider_custom_header_value">Значение заголовка</string>
+    <string name="provider_custom_header_add">Добавить заголовок</string>
+    <string name="provider_custom_body_key">Ключ тела</string>
+    <string name="provider_custom_body_value_json">Значение тела (JSON)</string>
+    <string name="provider_custom_body_add">Добавить поле тела</string>
+    <string name="provider_custom_knobs_save">Сохранить</string>
 </resources>

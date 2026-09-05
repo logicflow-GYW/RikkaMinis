@@ -1,6 +1,7 @@
 package com.openminis.app.provider.openai
 
 import android.util.Base64
+import com.openminis.app.data.mergeCustomBody
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMError
@@ -269,6 +270,9 @@ class OpenAIProvider constructor(
 ) : LLMProvider {
     override val name = "OpenAI"
     override var instanceContext: com.openminis.app.data.model.ProviderInstance? = null
+    private val bodyMergeJson = kotlinx.serialization.json.Json {
+        ignoreUnknownKeys = true
+    }
 
     /**
      * [T-android-thinking-rules-phase2] Owning provider-instance id, set by
@@ -1820,6 +1824,12 @@ class OpenAIProvider constructor(
         val includeReasoning =
             (thinkingLevel.isEnabled || modelAlwaysReasons) && modelMayReason && !forbidReasoningField
         val echoReasoning = includeReasoning
+        // [T-thinking-auto-level] AUTO does not assert "thinking is on": captured
+        // reasoning is still echoed (round-tripping real history, required by
+        // DeepSeek/MiMo multi-turn), but the EMPTY placeholder is suppressed —
+        // an empty reasoning_content is a field-presence signal that thinking
+        // should be on, which AUTO deliberately does not claim.
+        //
         // T-mimo-reasoning-echo-34671: Mimo V2.5 returns 400 Param Incorrect on
         // multi-turn tool-call history when any prior assistant turn (especially
         // a tool_calls-bearing one) omits `reasoning_content`. Mimo's docs say
@@ -1829,7 +1839,7 @@ class OpenAIProvider constructor(
         // echo gate (includeReasoning) is true. OpenAI o-series ignores
         // unknown message-level `reasoning_content` so this stays harmless
         // there; non-reasoning models gate this off via includeReasoning=false.
-        val placeholderAllowed = includeReasoning
+        val placeholderAllowed = includeReasoning && thinkingLevel != ThinkingLevel.AUTO
 
         val lastUserIndex = sanitizedMessages.indexOfLast { it.role == LLMMessage.Role.USER }
         for ((index, msg) in sanitizedMessages.withIndex()) {
@@ -2061,9 +2071,19 @@ class OpenAIProvider constructor(
      * keys overwrite; `model` is force-restored last.
      */
     private fun mergeChatExtraBody(body: JSONObject) {
-        if (chatExtraBody.isEmpty()) return
-        for ((k, v) in chatExtraBody) body.put(k, v ?: JSONObject.NULL)
-        body.put("model", model.id)
+        if (chatExtraBody.isNotEmpty()) {
+            for ((k, v) in chatExtraBody) body.put(k, v ?: JSONObject.NULL)
+        }
+        // [T-provider-extra-body] Per-instance user-authored body fields
+        // (RikkaHub parity), merged through the tested mergeCustomBody so the
+        // org.json conversion + dotted-path handling live in ONE place. Runs
+        // AFTER chatExtraBody (passthrough wins over UI-authored fields).
+        instanceContext?.customBodyFields
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { body.mergeCustomBody(it, bodyMergeJson, forceModel = model.id) }
+        if (instanceContext?.customBodyFields.isNullOrEmpty()) {
+            body.put("model", model.id)
+        }
     }
 
     /**
@@ -2345,6 +2365,22 @@ class OpenAIProvider constructor(
         val trace = ThinkingRuleResolver.apply(body, ctx)
         // [T-thinking-rules-observability] Which rule actually won must be inspectable,
         // or a rule layer just replaces one hidden variable with a more complicated one.
+        // [T-thinking-resolve-in-log] The INPUT side of the decision is logged first
+        // (mirrors iOS `[resolve.in]`): when a relay 400s, the full decision input must
+        // be reconstructable from logs alone — endpoint predicates, declared tiers, and
+        // the off-tier in play — not just the winner. Otherwise a wrong rule fires for
+        // reasons invisible after the fact.
+        com.openminis.app.logging.AppLogger.info(
+            "Thinking",
+            "[resolve.in] model=${model.id} level=${level.name} " +
+                "openrouter=$isOpenRouter unified=$usesUnifiedReasoningEffort " +
+                "mistral=$isMistral dashscope=$isDashScope xai=$isXAI " +
+                "officialDeepSeek=$isOfficialDeepSeek " +
+                "supportsReasoning=${model.supportsReasoning} " +
+                "declared=${model.reasoningEffortValues?.joinToString("|") ?: "null"} " +
+                "declaresNoEffort=${model.declaresNoEffortTiers == true} " +
+                "offEffort=${explicitOffEffort() ?: "null"} maxTokens=$maxTokens",
+        )
         com.openminis.app.logging.AppLogger.info(
             "Thinking",
             "[resolve] model=${model.id} level=${level.name} ${trace.logLine}",
@@ -2485,6 +2521,9 @@ class OpenAIProvider constructor(
         // guard it here as well — only xhigh for those two families is affected.
         // [T-android-thinking-level-arch] `thinkingLevel` is already clamped by
         // LLMProvider.streamMessage/sendMessage before reaching here.
+        // [T-thinking-auto-level] AUTO maps to null effort; the effort branch
+        // below skips, and the OFF branch is gated by !isEnabled (AUTO is
+        // enabled), so AUTO emits NO reasoning object — vendor default applies.
         val effort = if (thinkingLevel.isEnabled) {
             mapThinkingLevelToResponsesEffort(thinkingLevel)?.let { clampEffortForModel(it) }
         } else null
@@ -2793,6 +2832,9 @@ class OpenAIProvider constructor(
      */
     private fun mapThinkingLevelToResponsesEffort(level: ThinkingLevel): String? = when (level) {
         ThinkingLevel.OFF -> null
+        // [T-thinking-auto-level] no effort opinion — caller omits the reasoning
+        // object entirely (see buildResponsesAPIBody's effort handling).
+        ThinkingLevel.AUTO -> null
         ThinkingLevel.LOW -> "low"
         ThinkingLevel.MEDIUM -> "medium"
         ThinkingLevel.HIGH -> "high"

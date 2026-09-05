@@ -703,6 +703,7 @@
     <string name="model_group_detail_back">戻る</string>
     <string name="model_group_detail_name">名前</string>
     <string name="model_group_detail_the_label_shown_in_the_model_picker_save">モデルピッカーに表示されるラベル。他の場所をタップすると自動的に保存されます。</string>
+    <string name="model_group_detail_thinking_auto">自動</string>
     <string name="model_group_detail_routing_strategy">ルーティング戦略</string>
     <string name="model_group_detail_fallback">フォールバック</string>
     <string name="model_group_detail_load_balance">負荷分散</string>
@@ -886,6 +887,7 @@
     <string name="thinking_level_medium">中</string>
     <string name="thinking_level_high">高</string>
     <string name="thinking_level_max">最大</string>
+    <string name="thinking_level_auto">自動</string>
     <string name="model_picker_title">モデルを選択</string>
     <string name="model_picker_done">完了</string>
     <string name="model_picker_search_placeholder">モデルを検索</string>
@@ -1308,4 +1310,20 @@
     <string name="thinking_fmt_qwen_desc">Qwen/DashScope：enable_thinking と、最大トークン数を下回る thinking_budget を指定します。</string>
     <string name="thinking_fmt_custom_title">カスタムのフィールドパス</string>
     <string name="thinking_fmt_custom_desc">最終手段です。上記に該当しないエンドポイント向けに、ドット区切りのパスと High のときの値を指定します。</string>
+    <string name="provider_test_connection">接続テスト</string>
+    <string name="provider_test_connection_hint">実際のチャット経路で最小リクエストを送信</string>
+    <string name="provider_test_running">テストリクエスト送信中…</string>
+    <string name="provider_test_no_key">APIキーが未保存です</string>
+    <string name="provider_test_no_model">テスト可能なモデルがありません — モデルを追加してください</string>
+    <string name="provider_custom_knobs_title">高度なカスタム（エキスパート）</string>
+    <string name="provider_custom_knobs_expand">展開</string>
+    <string name="provider_custom_knobs_collapse">折りたたむ</string>
+    <string name="provider_custom_knobs_warning">同名フィールドはデフォルト（認証ヘッダー含む）を上書きし、正常なプロバイダーを壊す可能性があります。特殊な中継のみに使用。</string>
+    <string name="provider_custom_header_name">ヘッダー名</string>
+    <string name="provider_custom_header_value">ヘッダー値</string>
+    <string name="provider_custom_header_add">ヘッダーを追加</string>
+    <string name="provider_custom_body_key">Body キー</string>
+    <string name="provider_custom_body_value_json">Body 値 (JSON)</string>
+    <string name="provider_custom_body_add">Body フィールドを追加</string>
+    <string name="provider_custom_knobs_save">保存</string>
 </resources>

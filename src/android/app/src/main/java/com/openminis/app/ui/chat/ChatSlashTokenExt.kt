@@ -223,8 +223,9 @@ fun ChatViewModel.setThinkingLevel(level: ThinkingLevel) {
     // already filters to availableThinkingLevels, but never fully trust the
     // caller — cap to the current model's ceiling so a stale/over-range
     // request can't persist a level the model can't reach.
+    // [T-thinking-auto-level] AUTO is exempt: vendor-default, not an intensity.
     val ceiling = currentModelMaxThinkingLevel
-    val clamped = if (level.rank > ceiling.rank) ceiling else level
+    val clamped = if (level == ThinkingLevel.AUTO || level.rank <= ceiling.rank) level else ceiling
     if (_thinkingLevel.value == clamped) return
     _thinkingLevel.value = clamped
     persistThinkingOverride(clamped)

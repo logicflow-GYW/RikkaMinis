@@ -605,6 +605,7 @@
     <string name="thinking_level_max">極高</string>
     <string name="thinking_level_xhigh">超高</string>
     <string name="thinking_level_ultra">至高</string>
+    <string name="thinking_level_auto">自動</string>
     <string name="thinking_level_sheet_title">思考強度</string>
     <string name="model_picker_title">選擇模型</string>
     <string name="model_picker_done">完成</string>
@@ -1448,6 +1449,7 @@
     <string name="model_group_detail_thinking_xhigh">超高</string>
     <string name="model_group_detail_thinking_max">最高</string>
     <string name="model_group_detail_thinking_ultra">至高</string>
+    <string name="model_group_detail_thinking_auto">自動</string>
     <string name="model_group_detail_limit_context_window">限制上下文視窗</string>
     <string name="model_group_detail_max_context">最大上下文</string>
     <string name="model_group_detail_unlimited">不限</string>
@@ -1595,4 +1597,20 @@
     <string name="thinking_fmt_qwen_desc">Qwen/DashScope：enable_thinking 加一個不超過最大 token 的 thinking_budget。</string>
     <string name="thinking_fmt_custom_title">自訂欄位路徑</string>
     <string name="thinking_fmt_custom_desc">逃生艙：點分路徑加 High 檔的值，用於上述未涵蓋的端點。</string>
+    <string name="provider_test_connection">測試連線</string>
+    <string name="provider_test_connection_hint">透過真實聊天路徑傳送最小請求</string>
+    <string name="provider_test_running">正在傳送測試請求…</string>
+    <string name="provider_test_no_key">尚未儲存 API 金鑰</string>
+    <string name="provider_test_no_model">沒有可測試的模型 — 請先新增模型</string>
+    <string name="provider_custom_knobs_title">進階自訂（專家）</string>
+    <string name="provider_custom_knobs_expand">展開</string>
+    <string name="provider_custom_knobs_collapse">收合</string>
+    <string name="provider_custom_knobs_warning">同名字段會覆蓋預設值（含驗證標頭），可能破壞正常服務。僅對奇怪的中轉站使用。</string>
+    <string name="provider_custom_header_name">標頭名稱</string>
+    <string name="provider_custom_header_value">標頭值</string>
+    <string name="provider_custom_header_add">新增標頭</string>
+    <string name="provider_custom_body_key">Body 鍵</string>
+    <string name="provider_custom_body_value_json">Body 值 (JSON)</string>
+    <string name="provider_custom_body_add">新增 Body 欄位</string>
+    <string name="provider_custom_knobs_save">儲存</string>
 </resources>

@@ -197,6 +197,10 @@ interface LLMProvider {
      * `model`.
      */
     fun clampThinkingLevel(level: ThinkingLevel): ThinkingLevel {
+        // [T-thinking-auto-level] AUTO expresses no intensity and is not a wire
+        // tier — the per-model ceiling must not touch it (its appended rank is
+        // an artifact, not an intensity). Leave it verbatim.
+        if (level == ThinkingLevel.AUTO) return level
         val ceiling = model.catalogMaxThinkingLevel
         return if (level.rank > ceiling.rank) ceiling else level
     }

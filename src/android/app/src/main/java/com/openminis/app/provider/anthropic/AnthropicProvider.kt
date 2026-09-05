@@ -368,7 +368,19 @@ class AnthropicProvider(
         //     Anthropic also requires temperature=1 on the request.
         // Claude 4.6+ rejects temperature outright (handled by the temperature guard
         // above; we don't re-inject it here).
-        if (thinkingLevel.isEnabled) {
+        // [T-thinking-auto-level] AUTO expresses no effort opinion. RikkaHub
+        // parity: adaptive-generation models get the explicit adaptive switch
+        // with summarized display but NO output_config (vendor decides the
+        // intensity); legacy (<=4.5) models get nothing — their default is no
+        // thinking, which is exactly AUTO's "let the vendor decide".
+        if (thinkingLevel == ThinkingLevel.AUTO) {
+            if (modelUsesAdaptiveThinking(model.id)) {
+                body.put("thinking", JSONObject().apply {
+                    put("type", "adaptive")
+                    put("display", "summarized")
+                })
+            }
+        } else if (thinkingLevel.isEnabled) {
             if (modelUsesAdaptiveThinking(model.id)) {
                 // [T-anthropic-thinking-display] Explicitly request summarized
                 // thinking. This is the SECOND half of the "thinking on but no
@@ -809,6 +821,7 @@ class AnthropicProvider(
                 ThinkingLevel.XHIGH,
                 ThinkingLevel.MAX,
                 ThinkingLevel.ULTRA -> maxTokens
+                ThinkingLevel.AUTO -> 0 // unreachable; AUTO handled at emission
             }
             // Anthropic requires budget_tokens STRICTLY LESS THAN max_tokens; an
             // equal value is a 400 ("thinking.budget_tokens must be less than
@@ -835,6 +848,7 @@ class AnthropicProvider(
             ThinkingLevel.XHIGH,
             ThinkingLevel.MAX,
             ThinkingLevel.ULTRA -> "max"
+            ThinkingLevel.AUTO -> "low" // unreachable; AUTO handled at emission
         }
     }
 

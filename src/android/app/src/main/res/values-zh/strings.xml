@@ -874,6 +874,7 @@
     <string name="model_group_detail_thinking_xhigh">超高</string>
     <string name="model_group_detail_thinking_max">最高</string>
     <string name="model_group_detail_thinking_ultra">至高</string>
+    <string name="model_group_detail_thinking_auto">自动</string>
     <string name="model_group_detail_limit_context_window">限制上下文窗口</string>
     <string name="model_group_detail_max_context">最大上下文</string>
     <string name="model_group_detail_unlimited">不限</string>
@@ -1160,6 +1161,7 @@
     <string name="thinking_level_max">极高</string>
     <string name="thinking_level_xhigh">超高</string>
     <string name="thinking_level_ultra">至高</string>
+    <string name="thinking_level_auto">自动</string>
     <string name="thinking_level_sheet_title">思考强度</string>
     <string name="model_picker_title">选择模型</string>
     <string name="model_picker_done">完成</string>
@@ -1618,4 +1620,20 @@
     <string name="thinking_fmt_qwen_desc">Qwen/DashScope：enable_thinking 加一个不超过最大 token 的 thinking_budget。</string>
     <string name="thinking_fmt_custom_title">自定义字段路径</string>
     <string name="thinking_fmt_custom_desc">逃生舱：点分路径加 High 档的值，用于上述未覆盖的端点。</string>
+    <string name="provider_test_connection">测试连接</string>
+    <string name="provider_test_connection_hint">通过真实聊天路径发送最小请求</string>
+    <string name="provider_test_running">正在发送测试请求…</string>
+    <string name="provider_test_no_key">尚未保存 API 密钥</string>
+    <string name="provider_test_no_model">没有可测试的模型 — 请先添加模型</string>
+    <string name="provider_custom_knobs_title">高级自定义（专家）</string>
+    <string name="provider_custom_knobs_expand">展开</string>
+    <string name="provider_custom_knobs_collapse">收起</string>
+    <string name="provider_custom_knobs_warning">同名字段会覆盖默认值（含认证头），可能破坏正常服务。仅对奇怪的中转站使用。</string>
+    <string name="provider_custom_header_name">Header 名</string>
+    <string name="provider_custom_header_value">Header 值</string>
+    <string name="provider_custom_header_add">添加 Header</string>
+    <string name="provider_custom_body_key">Body 键</string>
+    <string name="provider_custom_body_value_json">Body 值 (JSON)</string>
+    <string name="provider_custom_body_add">添加 Body 字段</string>
+    <string name="provider_custom_knobs_save">保存</string>
 </resources>

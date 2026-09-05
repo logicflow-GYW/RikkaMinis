@@ -308,6 +308,22 @@ object ThinkingRuleResolver {
     fun apply(body: JSONObject, ctx: ThinkingResolveContext): ThinkingResolveTrace {
         val before = body.keys().asSequence().toSet()
 
+        // ---- AUTO: let the vendor decide ----
+        // [T-thinking-auto-level] AUTO expresses no effort opinion, so the
+        // resolver must NOT emit any thinking control — the model's own default
+        // applies (reasoning models reason, non-reasoning models do not).
+        // Mirrors RikkaHub's AUTO semantics on OpenAI-official/unified-gateway
+        // endpoints and Gemini. Custom rules do NOT override AUTO: an explicit
+        // tier is a deliberate intensity choice, AUTO is the absence of one.
+        if (ctx.level == ThinkingLevel.AUTO) {
+            return ThinkingResolveTrace(
+                matchedRuleLabel = "auto",
+                matchedRuleKind = ThinkingRule.Kind.PROVIDER_TYPE_DEFAULT,
+                formatSource = "auto-omit",
+                emittedKeys = emptyList(),
+            )
+        }
+
         // ---- Stage A: first-match-wins ----
         // [T-android-thinking-rules-phase2] User-authored custom rules (stored order)
         // are prepended above the built-ins, so a custom rule can override a vendor
@@ -531,6 +547,9 @@ object ThinkingRuleResolver {
                     ThinkingLevel.HIGH -> 32768
                     ThinkingLevel.XHIGH, ThinkingLevel.MAX, ThinkingLevel.ULTRA -> 65536
                     ThinkingLevel.OFF -> 0
+                    // [T-thinking-auto-level] unreachable — AUTO returns at the
+                    // top of apply(); kept for exhaustiveness.
+                    ThinkingLevel.AUTO -> 0
                 }
                 if (budget > 0 && ctx.maxTokens > 0) {
                     // [T-android-qwen3-thinking-budget-max-tokens-constraint] absorbed
@@ -667,6 +686,129 @@ object ThinkingRuleResolver {
         else -> "high"
     }
 
+    // ---- Gemini / Anthropic (Phase 2 §1) ----
+    //
+    // Gemini does not share the OpenAI body shape — it writes into
+    // `generationConfig.thinkingConfig`. This function owns the per-family rules so
+    // every vendor's thinking contract is described in ONE place (mirrors iOS
+    // ThinkingRuleResolver.geminiThinkingConfig). Emission still happens in
+    // GeminiProvider (the generationConfig envelope), which delegates here.
+
+    /**
+     * [T-gemini37-minimal-400] Gemini 3.x Flash models that reject
+     * `thinkingLevel: "minimal"` with a 400 and must use "low" as their OFF floor.
+     *
+     * Matched by minor version rather than an exact-id list: 3.7 is where Google
+     * dropped the level, so anything from 3.7 up is assumed to have dropped it
+     * too. Guessing "low" for a model that would have accepted "minimal" costs a
+     * slightly higher thinking floor; guessing "minimal" for one that rejects it
+     * makes the model unusable outright. The asymmetry decides the default.
+     */
+    private fun rejectsMinimalLevel(lowerId: String): Boolean {
+        val m = Regex("""gemini-3\.(\d+)""").find(lowerId) ?: return false
+        val minor = m.groupValues[1].toIntOrNull() ?: return false
+        return minor >= 7
+    }
+
+    /**
+     * The `generationConfig.thinkingConfig` object for a Gemini request, or null when the
+     * model takes no thinking config at all (specialized -tts/-image/-embedding/-vision
+     * modalities, 2.5 Flash Lite, and any id matching none of the families).
+     */
+    fun geminiThinkingConfig(modelId: String, level: ThinkingLevel): JSONObject? {
+        // [T-gemini-tts-thinking-400 / OpenMinis#226] Specialized modalities take
+        // precedence over EVERY family rule and over the requested level: these models
+        // reject the thinking parameter outright, so sending one is a hard 400
+        // ("Thinking level is not supported for this model.").
+        //
+        // Checked FIRST because these ids also match a family pattern —
+        // `gemini-3.1-flash-tts-preview` contains "gemini-3", so any later placement is
+        // shadowed. Android previously had no such test at all, so all three Gemini TTS
+        // models were unusable; iOS had one but below the family branches, equally dead.
+        val lowerId = modelId.lowercase()
+        val noThinkingSuffixes = listOf("-tts", "-image", "-embedding", "-vision")
+        if (noThinkingSuffixes.any { lowerId.endsWith(it) || lowerId.contains("$it-") }) {
+            return null
+        }
+
+        val isGemini3 = modelId.contains("gemini-3")
+        val is25Pro = modelId.contains("gemini-2.5-pro")
+        val is25Flash = modelId.contains("gemini-2.5-flash") && !modelId.contains("lite")
+        val is25FlashLite = modelId.contains("gemini-2.5-flash-lite")
+
+        if (is25FlashLite) return null
+
+        return when {
+            isGemini3 -> JSONObject().apply {
+                if (level == ThinkingLevel.OFF) {
+                    // 3.x cannot fully disable thinking; the floor is the weakest
+                    // level the model will accept.
+                    //
+                    // [T-gemini37-minimal-400] "minimal" is NOT universal across the
+                    // 3.x Flash family. Verified on-device: gemini-3-flash-preview /
+                    // 3.5-flash / 3.6-flash accept it, but gemini-3.7-flash returns a
+                    // hard 400 "Thinking level MINIMAL is not supported for this model."
+                    // on EVERY request. So with thinking OFF, 3.7 Flash was completely
+                    // unusable, not merely un-thinking. "low" is accepted by the whole
+                    // family and is the same floor 3.x Pro already used, so fall back to
+                    // it for the models that reject minimal rather than probing at
+                    // runtime.
+                    val acceptsMinimal = modelId.contains("flash") && !rejectsMinimalLevel(lowerId)
+                    put("thinkingLevel", if (acceptsMinimal) "minimal" else "low")
+                } else {
+                    put(
+                        "thinkingLevel",
+                        when (level) {
+                            ThinkingLevel.LOW -> "low"
+                            ThinkingLevel.MEDIUM -> "medium"
+                            // MAX/ULTRA were appended to ThinkingLevel after this
+                            // branch was written (for GPT-5.6) and fell through the
+                            // old `else -> "low"`, silently sending the WEAKEST level
+                            // when the user asked for the strongest. Gemini's ladder
+                            // tops out at "high", so every tier at or above HIGH maps
+                            // there.
+                            ThinkingLevel.HIGH, ThinkingLevel.XHIGH,
+                            ThinkingLevel.MAX, ThinkingLevel.ULTRA,
+                            -> "high"
+                            ThinkingLevel.OFF -> "low" // unreachable; OFF handled above
+                            ThinkingLevel.AUTO -> "low" // unreachable; AUTO handled above
+                        },
+                    )
+                    put("includeThoughts", true)
+                }
+            }
+            is25Pro -> JSONObject().apply {
+                put(
+                    "thinkingBudget",
+                    when (level) {
+                        ThinkingLevel.OFF -> 128 // minimum; 0 is rejected (df8a823d)
+                        ThinkingLevel.LOW -> 2048
+                        ThinkingLevel.MEDIUM -> 8192
+                        ThinkingLevel.HIGH -> 16384
+                        ThinkingLevel.XHIGH, ThinkingLevel.MAX, ThinkingLevel.ULTRA -> 32768
+                        ThinkingLevel.AUTO -> 0 // unreachable; AUTO handled above
+                    },
+                )
+                if (level.isEnabled) put("includeThoughts", true)
+            }
+            is25Flash -> JSONObject().apply {
+                put(
+                    "thinkingBudget",
+                    when (level) {
+                        ThinkingLevel.OFF -> 0
+                        ThinkingLevel.LOW -> 1024
+                        ThinkingLevel.MEDIUM -> 4096
+                        ThinkingLevel.HIGH -> 8192
+                        ThinkingLevel.XHIGH, ThinkingLevel.MAX, ThinkingLevel.ULTRA -> 16384
+                        ThinkingLevel.AUTO -> 0 // unreachable; AUTO handled above
+                    },
+                )
+                if (level.isEnabled) put("includeThoughts", true)
+            }
+            else -> null
+        }
+    }
+
     fun wireEffort(level: ThinkingLevel): String = when (level) {
         ThinkingLevel.OFF, ThinkingLevel.LOW -> "low"
         ThinkingLevel.MEDIUM -> "medium"
@@ -675,6 +817,7 @@ object ThinkingRuleResolver {
         // ULTRA is a client-side "Max + orchestration" concept and is NEVER a valid
         // server effort string (iOS b38bf3d5).
         ThinkingLevel.MAX, ThinkingLevel.ULTRA -> "max"
+        ThinkingLevel.AUTO -> "low" // unreachable; AUTO returns at the top of apply()
     }
 
     /**

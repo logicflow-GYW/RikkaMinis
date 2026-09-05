@@ -1441,7 +1441,12 @@ class ChatViewModel(
     val availableThinkingLevels: List<ThinkingLevel>
         get() {
             val ceiling = currentModelMaxThinkingLevel
-            return ThinkingLevel.entries.filter { it != ThinkingLevel.OFF && it.rank <= ceiling.rank }
+            return ThinkingLevel.entries.filter {
+                it != ThinkingLevel.OFF &&
+                    // [T-thinking-auto-level] AUTO is exempt from the ceiling
+                    // (vendor-default choice, not an intensity).
+                    (it == ThinkingLevel.AUTO || it.rank <= ceiling.rank)
+            }
         }
 
     // [T-anthropic-context-window] Token Usage sheet's context-window row.
@@ -2027,9 +2032,11 @@ class ChatViewModel(
                     if (freshInstance != null && providerRouteChanged(cachedInstance, freshInstance)) {
                         val freshKey = providerRepository.loadApiKey(freshInstance.id)
                         if (freshKey != null) {
+                            // [T-provider-key-roulette] rotate when multiple keys are stored
+                            val rotatedKey = ProviderFactory.pickApiKey(freshInstance.id, freshKey)
                             currentProvider = ProviderFactory.create(
                                 freshInstance,
-                                freshKey,
+                                rotatedKey ?: freshKey,
                                 cachedProvider.model,
                                 context,
                             )

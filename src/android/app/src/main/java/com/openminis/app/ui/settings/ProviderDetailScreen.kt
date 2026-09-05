@@ -237,12 +237,25 @@ fun ProviderDetailScreen(
                 subtitle = connectionSummary(instance, storedKey),
                 onClick = onConnectionClick,
                 showChevron = true,
-                showDivider = false,
+                showDivider = true,
+            )
+            // [T-provider-connection-tester] One-tap live check: fires a real
+            // minimal request through the SAME provider path chat uses, so a
+            // green result proves URL+key+model selection end-to-end before the
+            // user commits to daily driving.
+            ConnectionTestRow(
+                instance = currentInstance,
+                storedKey = storedKey,
+                repository = providerRepository,
             )
         }
 
         // ─── Thinking Rules [T-android-thinking-rules-phase2 §3] ─────
         ThinkingRulesSection(instance = currentInstance, providerRepository = providerRepository)
+
+        // [T-provider-extra-headers] Advanced per-provider escape hatches
+        // (custom headers / body fields), RikkaHub parity.
+        CustomKnobsSection(instance = currentInstance, repository = providerRepository)
 
         // ─── Models ─────────────────────────────────────────────────
         SettingsSection(

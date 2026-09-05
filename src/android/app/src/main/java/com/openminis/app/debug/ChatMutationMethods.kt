@@ -461,7 +461,9 @@ internal object ChatMutationMethods {
             // now maps to the real MAX tier.
             "max" -> ThinkingLevel.MAX
             "ultra" -> ThinkingLevel.ULTRA
-            else -> throw RPCException(-32602, "Invalid thinkingLevel: $raw (expected off/low/medium/high/xhigh/max/ultra)")
+            // [T-thinking-auto-level] vendor-default choice ("let the model decide").
+            "auto" -> ThinkingLevel.AUTO
+            else -> throw RPCException(-32602, "Invalid thinkingLevel: $raw (expected off/low/medium/high/xhigh/max/ultra/auto)")
         }
     }
 

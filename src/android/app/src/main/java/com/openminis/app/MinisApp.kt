@@ -259,6 +259,11 @@ class MinisApp : Application(), ImageLoaderFactory {
         // never pass through a ViewModel.
         com.openminis.app.data.FastModePrefs.prime(this)
 
+        // [T-provider-key-roulette] Warm the LRU multi-key rotation state so
+        // the first provider build of the process rotates against the
+        // cold-start file hint instead of always picking key #1.
+        com.openminis.app.data.KeyRoulette.init(cacheDir)
+
         // [D-2] Warm the cross-session concurrency cap from prefs so the three
         // coordinated gates (SessionConcurrencyManager / ExecutionCoordinator /
         // NativeOffloadServer) read the user-configured value at first use.

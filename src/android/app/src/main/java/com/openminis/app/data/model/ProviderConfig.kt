@@ -40,7 +40,21 @@ enum class ThinkingLevel {
     // Kotlinx Serialization encodes enums by NAME string ("OFF"/"LOW"/...),
     // not declaration-order ordinal, so appending does not corrupt already-
     // persisted data. GPT-5.6 sol/terra reach ULTRA, luna reaches MAX.
-    OFF, LOW, MEDIUM, HIGH, XHIGH, MAX, ULTRA;
+    OFF, LOW, MEDIUM, HIGH, XHIGH, MAX, ULTRA,
+
+    /**
+     * [T-thinking-auto-level] "Let the vendor decide" — RikkaHub's AUTO(-1).
+     * Appended last so no existing rank/ordinal shifts. Semantics:
+     *  • Enabled (isEnabled == true), but expresses NO effort opinion.
+     *  • Every wire emitter OMITS all thinking control fields for AUTO — the
+     *    vendor's model default applies (reasoning models reason, non-reasoning
+     *    models do not). Mirrors RikkaHub's AUTO branch on OpenAI official,
+     *    unified gateways and Gemini ("auto mode: don't set parameters").
+     *  • NOT subject to the model ceiling clamp (rank is an artifact of the
+     *    append rule, not an intensity), and NOT offered as a per-model
+     *    selection — the picker shows it as the "default" choice only.
+     */
+    AUTO;
 
     val isEnabled: Boolean get() = this != OFF
 
@@ -53,6 +67,7 @@ enum class ThinkingLevel {
             XHIGH -> "XHigh"   // was "Max"; the label now belongs to the new MAX case
             MAX -> "Max"
             ULTRA -> "Ultra"
+            AUTO -> "Auto"
         }
 
     /** Intensity ordinal used for intersection / clamp comparisons —
@@ -149,6 +164,14 @@ data class ModelGroup(
     // restores the previous value instead of snapping back to 128K. Default
     // null lets old JSON deserialize cleanly (kotlinx.serialization).
     var lastContextLimitTokens: Int? = null,
+    // [T-provider-extra-headers] Per-instance user-authored HTTP headers,
+    // merged AFTER defaults (same-name REPLACE semantics). Persisted in
+    // customHeadersJson on the Room row.
+    var customHeaders: List<CustomHeader> = emptyList(),
+    // [T-provider-extra-body] Per-instance user-authored chat body fields,
+    // recursively merged at the END of the request builder (user keys win,
+    // `model` force-restored). Persisted in customBodyJson on the Room row.
+    var customBodyFields: List<CustomBodyField> = emptyList(),
 )
 
 /**

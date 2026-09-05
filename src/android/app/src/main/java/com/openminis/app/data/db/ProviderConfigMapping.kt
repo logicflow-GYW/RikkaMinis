@@ -1,5 +1,7 @@
 package com.openminis.app.data.db
 
+import com.openminis.app.data.model.CustomBodyField
+import com.openminis.app.data.model.CustomHeader
 import com.openminis.app.data.model.FallbackStrategy
 import com.openminis.app.data.model.ImageEndpointMode
 import com.openminis.app.data.model.LLMModel
@@ -14,6 +16,7 @@ import com.openminis.app.data.model.RoutingStrategy
 import com.openminis.app.data.model.ThinkingLevel
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 /**
@@ -88,6 +91,10 @@ fun ProviderConfig.toSnapshot(
             imageEndpointMode = inst.imageEndpointMode.name,
             imageEndpointResolved = inst.imageEndpointResolved?.name,
             customUserAgent = inst.customUserAgent,
+            // [T-provider-extra-headers] Serialize the two new knob lists; null
+            // when empty so old rows stay byte-identical.
+            customHeadersJson = inst.customHeaders.takeIf { it.isNotEmpty() }?.let { jsonForBlobs.encodeToString(it) },
+            customBodyJson = inst.customBodyFields.takeIf { it.isNotEmpty() }?.let { jsonForBlobs.encodeToString(it) },
             isEnabled = if (inst.isEnabled) 1 else 0,
             sortOrder = idx,
             createdAt = inst.createdAt,
@@ -212,6 +219,15 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
             customBaseURL = row.customBaseURL,
             appendV1Suffix = row.appendV1Suffix != 0,
             customUserAgent = row.customUserAgent,
+            // [T-provider-extra-headers] Safe decode of the two knob lists;
+            // corrupt JSON → empty (an escape hatch that can't parse must not
+            // wipe the provider).
+            customHeaders = row.customHeadersJson?.let {
+                runCatching { jsonForBlobs.decodeFromString<List<CustomHeader>>(it) }.getOrNull()
+            } ?: emptyList(),
+            customBodyFields = row.customBodyJson?.let {
+                runCatching { jsonForBlobs.decodeFromString<List<CustomBodyField>>(it) }.getOrNull()
+            } ?: emptyList(),
             useResponsesAPI = row.useResponsesAPI != 0,
             azureMode = row.azureMode != 0,
             // [GH#68] Safe parse: null (pre-migration rows) or an unknown

@@ -36,7 +36,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ProviderConfigMetaEntity::class,
         ProviderThinkingRuleEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = false,
 )
 abstract class ProviderDatabase : RoomDatabase() {
@@ -193,6 +193,15 @@ abstract class ProviderDatabase : RoomDatabase() {
             }
         }
 
+        // [T-provider-extra-headers] 8→9 adds the per-instance custom header /
+        // body JSON columns (user-authored escape hatches, RikkaHub parity).
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE provider_instances ADD COLUMN custom_headers_json TEXT")
+                db.execSQL("ALTER TABLE provider_instances ADD COLUMN custom_body_json TEXT")
+            }
+        }
+
         fun getInstance(context: Context): ProviderDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -200,7 +209,7 @@ abstract class ProviderDatabase : RoomDatabase() {
                     ProviderDatabase::class.java,
                     "provider.db",
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                     .build()
                     .also { INSTANCE = it }
             }
