@@ -11,6 +11,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 
@@ -168,26 +169,9 @@ class ThinkingWireGoldenSnapshotTest {
     @Test
     fun `golden snapshot of every branch`() {
         val actual = render()
-        println("===GOLDEN_EXPECTED_START===")
-        println(EXPECTED)
-        println("===GOLDEN_EXPECTED_END===")
-        println("===GOLDEN_ACTUAL_START===")
-        println(actual)
-        println("===GOLDEN_ACTUAL_END===")
-        assertEquals(
-            """
-            THINKING WIRE FORMAT CHANGED.
-
-            This is the byte-for-byte oracle for the thinking rule layer. If you are
-            mid-refactor and see this fail, the rule engine emits a different request
-            than this baseline for at least one (model, level) pair.
-
-            Do not "fix" this by pasting the new output in. Diff the two blocks, identify
-            which branch moved, and either restore parity or justify the change explicitly.
-            """.trimIndent(),
-            EXPECTED,
-            actual,
-        )
+        if (EXPECTED != actual) {
+            fail("GOLDEN MISMATCH\n===EXPECTED===\n$EXPECTED\n===ACTUAL===\n$actual")
+        }
     }
 
     companion object {
