@@ -1,6 +1,6 @@
 # rikkaminis-dev-history 按天索引
 
-快速跳转到每日开发日志。共 758 条记录，33 天。
+快速跳转到每日开发日志。共 763 条记录，34 天。
 
 ## 2026-08-03（11 条）
 
@@ -1588,7 +1588,7 @@
 - `21:18` **5af0306 真机验证测试完成（2026-09-03）**
   - - 真机 beta.1273（versionCode 220001273，20:53 安装）= main HEAD 5af0306（占位气泡修复版），用户从分支…
 
-## 2026-09-04（11 条）
+## 2026-09-04（12 条）
 
 - `00:19` **subagent 跨会话派发功能验证（2026-09-04）**
   - 验证了 HEAD 813eaf6 的 subagent 跨会话派发功能（eaa3a10 引入，SessionsOffloadHandler + Subagent…
@@ -1611,3 +1611,16 @@
   - 用户开 bug-audit 会话处理该分支的 bug hunt；本会话收尾，未做 ff 合并 main。
 - `21:53` **thinking-rules-port 分支已合并 main @ 1ba1310e（2026-09-04 晚）**
   - D3 修复闭环：nested 分支补 `clampEffortForModel(wireEffort(ctx.level), lid)`（commit 1ba1…
+- `22:28` **dev-history 文档同步到 09-04（2026-09-04，main @ d1b6af90）**
+  - 用户要求更新仓库 docs/dev-history/ 开发日志。流程：rebuild_dev_history.py → sanitize_dev_history…
+
+## 2026-09-05（4 条）
+
+- `12:49` **thinking-gap-close-0905 分支完成，交接给下一会话（2026-09-05）**
+  - 分支 feat/thinking-gap-close-0905（HEAD f134fd02）：AUTO 档 + golden/Gemini guard + pr…
+- `13:23` **thinking-gap-close-0905 分支审计（f134fd02，未合并）——2 HIGH 实锤**
+  - 仓库 /tmp/rikka-clone（HEAD feat/thinking-gap-close-0905）。+2247/−76，47 文件。审计报告见本会话回…
+- `14:05` **thinking-gap-close 审计修复已合并 main @ 392783a0（2026-09-05）**
+  - 分支 feat/thinking-gap-close-0905 审计后修复（commit 392783a0，16 文件 +302/−30），分支 CI 3394…
+- `15:11` **摘除 provider knobs + 连接测试两个功能（已合并 main @ 0103d96f）**
+  - 用户判定昨天 6584aca5 引入的「高级自定义（custom headers/body）」和「测试连接」两个功能"极度不成熟，增加复杂度/维护成本，还有问题…

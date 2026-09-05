@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-04）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-05）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-09-04，共 33 天
-- 条目总数：758（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
-- 总字符数：882446 / 总行数：14741
+- 合并范围：2026-08-03 ～ 2026-09-05，共 34 天
+- 条目总数：763（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
+- 总字符数：888174 / 总行数：14814
 
 ---
 
@@ -14734,6 +14734,79 @@ D3 修复闭环：nested 分支补 `clampEffortForModel(wireEffort(ctx.level), l
 **教训（可复用）**：build-apk.yml 的 push 触发器只对 `main` 分支——特性分支 push 后**不会自动触发 CI**，必须手动 `gh-actions-dispatch --ref <branch>`。之前两轮分支 CI 都是 dispatch 的。合并 main 后 push 才自动触发 release CI。
 
 **潜在后续**（本次审计排除但可留意）：① init 块 IO load 路径没调 loadAllThinkingRulesIntoCache（冷启动极早期用户规则 fallback built-in，iOS 同构，安全）；② UI 层 thinkingRules/reorder/save/delete 主线程 runBlocking Room（小表，非 ANR 量级，风格债）；③ reasoningEcho 字段 resolver 不消费但 UI 可编辑保存（Phase 2 声明如此，mildly misleading）；④ ja/ko/de 缺 modeldetail_video_output/provider_detail_export_confirm_*（main 存量缺键，ceb5a470 引入）。
+
+<!-- 2026-09-04 22:28:36 -->
+## dev-history 文档同步到 09-04（2026-09-04，main @ d1b6af90）
+
+
+用户要求更新仓库 docs/dev-history/ 开发日志。流程：rebuild_dev_history.py → sanitize_dev_history.py → 验证 → 同步挂载副本 → 分支提交合并。
+
+- 条目 749 → **758**（新增 9/4 白天全部 10 条：UI 修复/审计/thinking port 等）
+- 修复一处记忆日志占位时间戳 `21:??:??` → 21:35:12（源头在 /var/minis/memory/2026-09-04.md，改后重跑脚本）
+- README 统计同步 749→758
+- 分支 docs/dev-history-0904，ff 合并 main，commit d1b6af90，本地+远端分支已删
+- 教训：裸 `git push origin --delete <branch>` 在沙箱无凭据会失败（No such device or address），要用 gh_sync.sh push 的 `--branch :<name>` 语法（askpass 机制）
+
+## 2026-09-05
+
+<!-- 2026-09-05 12:49:07 -->
+## thinking-gap-close-0905 分支完成，交接给下一会话（2026-09-05）
+
+
+分支 feat/thinking-gap-close-0905（HEAD f134fd02）：AUTO 档 + golden/Gemini guard + provider knobs（custom headers/body + KeyRoulette + 连接测试行）。CI 68baf97c 绿，f134fd02 补 dispatch 待绿。交接文档：/var/minis/shared/thinking-gap-close-handoff.md。
+
+**关键教训（可复用）**：
+1. **golden/snapshot 测试的 EXPECTED 绝不能手写推测**——必须从真实运行输出生成。这次 5 轮 CI 红全是推测值 vs 真实 wire 输出的差异。正确流程：testLogging FULL + showStandardStreams + println 抓全文 → 贴回 → 恢复干净断言。
+2. 文件编辑锚点匹配错误类：`var lastContextLimitTokens` 同时存在于 ModelGroup 和 ProviderInstance，file_edit 匹配到了错误的类，把 knobs 字段插进了 ModelGroup。scan gate 四路同步检查抓出来的。
+3. LLMResponse 的文本字段是 `.text` 不是 `.content`。
+4. gradle 测试日志默认不打印 stdout——要在 testOptions.unitTests.all { it.testLogging { showStandardStreams = true ... } } 显式开。
+
+<!-- 2026-09-05 13:23:47 -->
+## thinking-gap-close-0905 分支审计（f134fd02，未合并）——2 HIGH 实锤
+
+
+仓库 /tmp/rikka-clone（HEAD feat/thinking-gap-close-0905）。+2247/−76，47 文件。审计报告见本会话回复。
+
+**H1（写侧序列化读侧没接，FE-5 D1/D7 同根因第 3 次复发）**：ModelExecutionDispatcher.buildRequestJson 不序列化 customHeaders/customBodyFields，ModelExecutionService 重建 ProviderInstance 也没读（默认 emptyList）→ 主聊天流式（AgentLoopEngine→streamChatTurnOffloaded→Gateway.stream）、标题/压缩/QuickTest 全走 worker → **用户配的 knobs 在真实聊天路径静默失效**；只有 ConnectionTestRow（主进程直连）和 minis-model-use run（主进程直连）生效 → "测试连接 ✓ 但聊天不生效"的分裂。修复需三处同步：buildRequestJson 序列化 + worker 重建 + providerRouteChanged 补两字段（否则 cached instanceContext 旧快照）。
+
+**H2（KeyRoulette 架构性无效）**：13 个 ProviderFactory.create 调用点只有 2 个过 pickApiKey，且那 2 个（selectEntry/route-rebuild）只构建 provider 对象不发请求；**所有真实请求要么在 worker（自己读 EncryptedPrefs 原始多 key 串 → Authorization: Bearer "sk-a, sk-b" → 401）**，要么在主进程直连路径（同样原始串）。多 key 用户主聊天 100% 401。修法：ProviderFactory.create 内部统一 KeyRoulette.next(apiKey, instance.id) 单点收口 + worker 进程 init(cacheDir)。
+
+**M1**：AUTO 追加枚举末尾（ordinal 8 最大）→ ChatComposerWidgets:934 `maxAvailable = availableLevels.lastOrNull{it!=OFF}` 恒返回 AUTO → isClamped 恒 false，clamp 橙色高亮失效（本分支 UI 回归，修法 `lastOrNull{it!=OFF&&it!=AUTO}`）。**M2**：AUTO.rank=8 会赢 ModelGroupDetailScreen:473 的 group ceiling maxByOrNull{rank}，backup import "maxThinkingLevel":"AUTO" 可让 picker 档位泄漏（有 per-request clamp 兜底，纯 UI）。**M3**：Gemini/Anthropic 实例的 custom headers UI 可配但 chat 路径不消费（只有 OpenAI 家族接了），无类型门控无提示。
+
+**LOW**：workflow artifact 残留 golden_actual/expected.txt 死路径（最终 commit 已删 dump 代码，upload-artifact 多 path 有 APK 在不报错）；ProviderConfig.AUTO KDoc "every emitter omits ALL thinking fields" 与 AnthropicProvider AUTO→adaptive 分支矛盾（行为是 golden pin 的有意行为，注释过强）；KeyRoulette.next 嵌套 synchronized(lock) 可重入冗余。
+
+**教训**：跨进程架构（offload worker）里加 provider 级字段，必须在「dispatcher 序列化 → worker 重建 → providerRouteChanged」三处同步——four_way_sync_check.py 只覆盖 Model/Entity/Snapshot/ProviderConfig 四层，**没覆盖 worker 边界这第五层**。审计新分支时先画执行路径矩阵（哪条路径在哪个进程发 HTTP），再对照字段覆盖。
+
+<!-- 2026-09-05 14:05:32 -->
+## thinking-gap-close 审计修复已合并 main @ 392783a0（2026-09-05）
+
+
+分支 feat/thinking-gap-close-0905 审计后修复（commit 392783a0，16 文件 +302/−30），分支 CI 33948346008 success（head_sha 核对一致），ff 合并 main（d1b6af90→392783a0），release CI 33948860330 触发中（用户拍板不等，改动已过分支 CI）。远端+本地分支已删。
+
+**修复内容**：
+- **H1 knobs 跨进程断裂**：ModelExecutionDispatcher.buildRequestJson 序列化 custom_headers/custom_body_fields（空则省略）；ModelExecutionService 两处重建（executeRun:604/streaming:871）读回；新增 KnobWireCodec.kt（共享解码 + 5 个 JVM 测试沙箱验证绿）；providerRouteChanged 补两字段；CustomKnobsSection 门控仅 OpenAI 家族（openAI/openRouter/xAI/kimiCode），Gemini/Anthropic 隐藏整节防静默失效
+- **H2 KeyRoulette 架构性无效**：旋转收口进 ProviderFactory.create 单点（13 调用点全覆盖）；ModelExecutionService.onCreate init(cacheDir)；删 pickApiKey + ChatModelRouting/ChatViewModel 两处手工调用
+- **M1** ChatComposerWidgets:934 clamp 高亮 `lastOrNull{!=OFF&&!=AUTO}`（AUTO rank=8 曾恒赢）
+- **M2** ModelGroupDetailScreen:473 group ceiling filter 排除 AUTO
+- **LOW**：workflow 删 golden dump 死路径；AUTO KDoc 修正（Anthropic adaptive 例外）；KeyRoulette 去嵌套 synchronized
+- 测试：KnobWireCodecTest(5) + ModelExecutionDispatcherTest(+2) + ChatProviderRouteLogicTest(+1)
+
+**教训复用**：跨进程加 provider 字段 = dispatcher 序列化 + worker 重建 + providerRouteChanged 三处同步，codec 抽独立文件可 JVM 测试（four_way_sync_check.py 的第五层盲区）；KeyRoulette 类"旋转逻辑"必须收口在单点工厂而非调用点（调用点只构建对象不发请求=无效覆盖）。
+
+<!-- 2026-09-05 15:11:01 -->
+## 摘除 provider knobs + 连接测试两个功能（已合并 main @ 0103d96f）
+
+
+用户判定昨天 6584aca5 引入的「高级自定义（custom headers/body）」和「测试连接」两个功能"极度不成熟，增加复杂度/维护成本，还有问题"，决定精准摘除（非 git 回滚——那会连带干掉 thinking 全家桶）。
+
+**分支** refactor/remove-knobs-connection-test，CI run 33951184406 success（head_sha 0103d96f 核对一致），ff 合并 main（392783a0→0103d96f），release CI 33951818862 触发中。
+
+**摘除范围**：CustomKnobsSection + CustomProviderKnobs + CustomHeaders + CustomBodyMerge + KnobWireCodec + ConnectionTestRow + ProviderConnectionTester（7 主代码文件）+ 数据层字段/迁移 + worker 序列化 + 路由检测 + 16 字符串×7 语言。
+**保留**：KeyRoulette（独立功能，修多 key 401 真 bug）；chatExtraBody/chatExtraHeaders passthrough Map 通道（minis-model-use CLI 在用，早于 knobs）。
+
+**数据层**：Room ProviderDatabase 8→9 加的两列（custom_headers_json/custom_body_json）通过新增 MIGRATION_9_10 DROP COLUMN 摘掉（minSdk 26 安全），version 9→10。
+
+**可复用教训**：判断"回滚 vs 精准摘除"先看功能是否与别的功能共 commit——knobs/连接测试 和 thinking 全家桶挤在同一个 6584aca5 commit，回滚会误伤，只能逐文件外科手术。chatExtraBody 这类 pre-existing 的 Map 通道与新增的 customBodyFields List 通道是两条独立路径，摘除时别误删前者。
 
 ---
 
