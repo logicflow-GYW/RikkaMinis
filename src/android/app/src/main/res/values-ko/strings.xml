@@ -1302,20 +1302,4 @@
     <string name="thinking_fmt_qwen_desc">Qwen/DashScope: enable_thinking과 최대 토큰 수보다 작은 thinking_budget을 사용합니다.</string>
     <string name="thinking_fmt_custom_title">사용자 지정 필드 경로</string>
     <string name="thinking_fmt_custom_desc">예외 처리용입니다. 위에서 다루지 않은 엔드포인트를 위해 점으로 구분한 경로와 High일 때의 값을 지정합니다.</string>
-    <string name="provider_test_connection">연결 테스트</string>
-    <string name="provider_test_connection_hint">실제 채팅 경로로 최소 요청 전송</string>
-    <string name="provider_test_running">테스트 요청 전송 중…</string>
-    <string name="provider_test_no_key">저장된 API 키 없음</string>
-    <string name="provider_test_no_model">테스트할 모델 없음 — 모델을 먼저 추가하세요</string>
-    <string name="provider_custom_knobs_title">고급 사용자 지정 (전문가)</string>
-    <string name="provider_custom_knobs_expand">펼치기</string>
-    <string name="provider_custom_knobs_collapse">접기</string>
-    <string name="provider_custom_knobs_warning">같은 이름의 필드는 기본값(인증 헤더 포함)을 덮어쓰며 정상적인 공급자를 망가뜨릴 수 있습니다. 특이한 릴레이에만 사용하세요.</string>
-    <string name="provider_custom_header_name">헤더 이름</string>
-    <string name="provider_custom_header_value">헤더 값</string>
-    <string name="provider_custom_header_add">헤더 추가</string>
-    <string name="provider_custom_body_key">Body 키</string>
-    <string name="provider_custom_body_value_json">Body 값 (JSON)</string>
-    <string name="provider_custom_body_add">Body 필드 추가</string>
-    <string name="provider_custom_knobs_save">저장</string>
 </resources>

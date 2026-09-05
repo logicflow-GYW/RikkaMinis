@@ -1458,20 +1458,4 @@
     <string name="thinking_fmt_qwen_desc">Qwen/DashScope: enable_thinking и thinking_budget меньше максимального числа токенов.</string>
     <string name="thinking_fmt_custom_title">Свой путь к полю</string>
     <string name="thinking_fmt_custom_desc">Запасной вариант: путь через точку и значение для High для эндпоинта, не описанного выше.</string>
-    <string name="provider_test_connection">Проверить соединение</string>
-    <string name="provider_test_connection_hint">Отправить минимальный запрос по реальному пути чата</string>
-    <string name="provider_test_running">Отправка тестового запроса…</string>
-    <string name="provider_test_no_key">API-ключ ещё не сохранён</string>
-    <string name="provider_test_no_model">Нет тестовой модели — сначала добавьте модель</string>
-    <string name="provider_custom_knobs_title">Расширенная настройка (эксперт)</string>
-    <string name="provider_custom_knobs_expand">Развернуть</string>
-    <string name="provider_custom_knobs_collapse">Свернуть</string>
-    <string name="provider_custom_knobs_warning">Одноимённые поля ЗАМЕНЯЮТ значения по умолчанию (включая заголовок авторизации) и могут сломать рабочий провайдер. Только для необычных релеев.</string>
-    <string name="provider_custom_header_name">Имя заголовка</string>
-    <string name="provider_custom_header_value">Значение заголовка</string>
-    <string name="provider_custom_header_add">Добавить заголовок</string>
-    <string name="provider_custom_body_key">Ключ тела</string>
-    <string name="provider_custom_body_value_json">Значение тела (JSON)</string>
-    <string name="provider_custom_body_add">Добавить поле тела</string>
-    <string name="provider_custom_knobs_save">Сохранить</string>
 </resources>

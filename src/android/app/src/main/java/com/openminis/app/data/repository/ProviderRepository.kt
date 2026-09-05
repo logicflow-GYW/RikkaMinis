@@ -713,13 +713,7 @@ class ProviderRepository(private val context: Context) {
             if (prior.effectiveBaseURL != next.effectiveBaseURL ||
                 prior.credentialType != next.credentialType ||
                 prior.isEnabled != next.isEnabled ||
-                prior.useResponsesAPI != next.useResponsesAPI ||
-                // [T-provider-extra-headers] headers / body fields change the
-                // wire contract, so a stale model list would misrepresent the
-                // upstream. Custom-headers don't strictly require it, but
-                // over-invalidating is the cheap, safe direction.
-                prior.customHeaders != next.customHeaders ||
-                prior.customBodyFields != next.customBodyFields
+                prior.useResponsesAPI != next.useResponsesAPI
             ) {
                 invalidateModelCache(next.id)
             }

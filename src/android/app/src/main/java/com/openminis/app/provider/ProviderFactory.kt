@@ -111,22 +111,6 @@ object ProviderFactory {
             // custom-rule path (Gemini/Anthropic use their own emitters), so this is the
             // only type that needs it.
             (provider as? OpenAIProvider)?.thinkingRuleInstanceId = instance.id
-            // [T-provider-extra-headers] Apply user-authored headers to every provider
-            // that accepts them. Same-name REPLACE semantics over defaults — the UI
-            // labels this as advanced.
-            if (instance.customHeaders.isNotEmpty()) {
-                (provider as? OpenAIProvider)?.chatExtraHeaders =
-                    instance.customHeaders.associate { it.name to it.value }
-                (provider as? OpenAIProvider)?.imageExtraHeaders =
-                    instance.customHeaders.associate { it.name to it.value }
-            }
-            // [T-provider-extra-body] NOTE: custom body fields are NOT stuffed
-            // into chatExtraBody here — OpenAIProvider.mergeChatExtraBody reads
-            // instanceContext.customBodyFields directly through the tested
-            // mergeCustomBody (org.json conversion + dotted paths + model
-            // force-restore live in ONE place). Setting chatExtraBody here
-            // would duplicate the merge AND carry kotlinx JsonElement values
-            // that org.json.put() rejects.
         }
     }
 

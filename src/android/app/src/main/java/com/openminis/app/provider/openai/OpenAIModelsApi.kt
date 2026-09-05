@@ -1,8 +1,6 @@
 package com.openminis.app.provider.openai
 
 import android.content.Context
-import com.openminis.app.data.applyCustomHeaders
-import com.openminis.app.data.model.CustomHeader
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.normalizeModalities
 import com.openminis.app.logging.AppLogger
@@ -37,10 +35,6 @@ object OpenAIModelsApi {
         // [T-provider-custom-user-agent] Per-provider UA override; null/blank
         // keeps the default UA. Threaded from ProviderRepository.refreshModels.
         customUserAgent: String? = null,
-        // [T-provider-extra-headers] Per-instance user headers, applied AFTER
-        // the defaults with same-name REPLACE semantics. Threaded from
-        // ProviderRepository.refreshModels for parity with chat requests.
-        customHeaders: List<CustomHeader> = emptyList(),
     ): List<LLMModel> = withContext(Dispatchers.IO) {
         val isCustomBase = baseURL != null && !isOfficialOpenAI(baseURL)
         // For third-party endpoints (vLLM, Ollama, etc.), return empty on failure
@@ -58,8 +52,6 @@ object OpenAIModelsApi {
             .header("Authorization", "Bearer $apiKey")
             // [T-provider-custom-user-agent] models-list UA override.
             .applyUserAgentOverride(customUserAgent)
-            // [T-provider-extra-headers] same-name REPLACE over the defaults.
-            .applyCustomHeaders(customHeaders)
             .build()
 
         val response = client.newCall(request).execute()

@@ -78,29 +78,6 @@ object ModelExecutionDispatcher {
             put("image_endpoint_mode", instance.imageEndpointMode.name)
             instance.imageEndpointResolved?.let { put("image_endpoint_resolved", it.name) }
             put("azure_mode", instance.azureMode)
-            // [T-provider-extra-headers/body] The worker builds its provider from
-            // THIS JSON alone — a knob not serialized here is a knob that never
-            // reaches chat/compaction/title requests (worker-side default empty).
-            if (instance.customHeaders.isNotEmpty()) {
-                put("custom_headers", JSONArray().apply {
-                    instance.customHeaders.forEach { h ->
-                        put(JSONObject().apply {
-                            put("name", h.name)
-                            put("value", h.value)
-                        })
-                    }
-                })
-            }
-            if (instance.customBodyFields.isNotEmpty()) {
-                put("custom_body_fields", JSONArray().apply {
-                    instance.customBodyFields.forEach { b ->
-                        put(JSONObject().apply {
-                            put("key", b.key)
-                            put("value_json", b.valueJson)
-                        })
-                    }
-                })
-            }
 
             put("model_id", model.id)
             put("model_display_name", model.displayName)

@@ -1,7 +1,6 @@
 package com.openminis.app.provider.openai
 
 import android.util.Base64
-import com.openminis.app.data.mergeCustomBody
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMError
@@ -270,9 +269,6 @@ class OpenAIProvider constructor(
 ) : LLMProvider {
     override val name = "OpenAI"
     override var instanceContext: com.openminis.app.data.model.ProviderInstance? = null
-    private val bodyMergeJson = kotlinx.serialization.json.Json {
-        ignoreUnknownKeys = true
-    }
 
     /**
      * [T-android-thinking-rules-phase2] Owning provider-instance id, set by
@@ -2074,16 +2070,7 @@ class OpenAIProvider constructor(
         if (chatExtraBody.isNotEmpty()) {
             for ((k, v) in chatExtraBody) body.put(k, v ?: JSONObject.NULL)
         }
-        // [T-provider-extra-body] Per-instance user-authored body fields
-        // (RikkaHub parity), merged through the tested mergeCustomBody so the
-        // org.json conversion + dotted-path handling live in ONE place. Runs
-        // AFTER chatExtraBody (passthrough wins over UI-authored fields).
-        instanceContext?.customBodyFields
-            ?.takeIf { it.isNotEmpty() }
-            ?.let { body.mergeCustomBody(it, bodyMergeJson, forceModel = model.id) }
-        if (instanceContext?.customBodyFields.isNullOrEmpty()) {
-            body.put("model", model.id)
-        }
+        body.put("model", model.id)
     }
 
     /**

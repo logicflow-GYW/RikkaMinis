@@ -67,8 +67,6 @@ private object OpenAIModelListAdapter : ModelListProvider {
             baseURL,
             // [T-provider-custom-user-agent] models-list UA override.
             customUserAgent = instance.customUserAgent,
-            // [T-provider-extra-headers] per-instance user headers parity.
-            customHeaders = instance.customHeaders,
             // Bypass the 7-day ProviderModelsCache so a freshly-added custom
             // provider re-validates its URL+key against the live endpoint.
             forceRefresh = forceRefresh,

@@ -1690,20 +1690,4 @@
     <string name="thinking_fmt_qwen_desc">Qwen/DashScope: enable_thinking plus a thinking_budget below max tokens.</string>
     <string name="thinking_fmt_custom_title">Custom field path</string>
     <string name="thinking_fmt_custom_desc">Escape hatch: a dotted path plus a value at High for an endpoint not covered above.</string>
-    <string name="provider_test_connection">Test connection</string>
-    <string name="provider_test_connection_hint">Send a minimal request through the real chat path</string>
-    <string name="provider_test_running">Sending test request…</string>
-    <string name="provider_test_no_key">No API key saved yet</string>
-    <string name="provider_test_no_model">No test model available — add a model first</string>
-    <string name="provider_custom_knobs_title">Advanced customisation (expert)</string>
-    <string name="provider_custom_knobs_expand">Expand</string>
-    <string name="provider_custom_knobs_collapse">Collapse</string>
-    <string name="provider_custom_knobs_warning">Same-name fields REPLACE defaults (including the auth header) and can break a working provider. Use only for unusual relays.</string>
-    <string name="provider_custom_header_name">Header name</string>
-    <string name="provider_custom_header_value">Header value</string>
-    <string name="provider_custom_header_add">Add header</string>
-    <string name="provider_custom_body_key">Body key</string>
-    <string name="provider_custom_body_value_json">Body value (JSON)</string>
-    <string name="provider_custom_body_add">Add body field</string>
-    <string name="provider_custom_knobs_save">Save</string>
 </resources>

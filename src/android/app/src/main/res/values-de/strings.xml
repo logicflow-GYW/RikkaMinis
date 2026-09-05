@@ -1303,20 +1303,4 @@
     <string name="thinking_fmt_qwen_desc">Qwen/DashScope: enable_thinking und ein thinking_budget unterhalb der maximalen Tokenzahl.</string>
     <string name="thinking_fmt_custom_title">Eigener Feldpfad</string>
     <string name="thinking_fmt_custom_desc">Notlösung: ein Pfad in Punktnotation und ein Wert bei High für einen oben nicht abgedeckten Endpunkt.</string>
-    <string name="provider_test_connection">Verbindung testen</string>
-    <string name="provider_test_connection_hint">Minimale Anfrage über den echten Chat-Pfad senden</string>
-    <string name="provider_test_running">Testanfrage wird gesendet…</string>
-    <string name="provider_test_no_key">Noch kein API-Schlüssel gespeichert</string>
-    <string name="provider_test_no_model">Kein Testmodell verfügbar — zuerst Modell hinzufügen</string>
-    <string name="provider_custom_knobs_title">Erweiterte Anpassung (Experte)</string>
-    <string name="provider_custom_knobs_expand">Aufklappen</string>
-    <string name="provider_custom_knobs_collapse">Zuklappen</string>
-    <string name="provider_custom_knobs_warning">Gleichnamige Felder ERSETZEN Standardwerte (inkl. Auth-Header) und können einen funktionierenden Anbieter beschädigen. Nur für ungewöhnliche Relays.</string>
-    <string name="provider_custom_header_name">Header-Name</string>
-    <string name="provider_custom_header_value">Header-Wert</string>
-    <string name="provider_custom_header_add">Header hinzufügen</string>
-    <string name="provider_custom_body_key">Body-Schlüssel</string>
-    <string name="provider_custom_body_value_json">Body-Wert (JSON)</string>
-    <string name="provider_custom_body_add">Body-Feld hinzufügen</string>
-    <string name="provider_custom_knobs_save">Speichern</string>
 </resources>

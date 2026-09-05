@@ -31,10 +31,6 @@ data class ProviderInstanceEntity(
     @ColumnInfo(name = "image_endpoint_mode") val imageEndpointMode: String? = null,
     @ColumnInfo(name = "image_endpoint_resolved") val imageEndpointResolved: String? = null,
     @ColumnInfo(name = "custom_user_agent") val customUserAgent: String? = null,
-    // [T-provider-extra-headers] kotlinx-serialized List<CustomHeader>; null = none.
-    @ColumnInfo(name = "custom_headers_json") val customHeadersJson: String? = null,
-    // [T-provider-extra-body] kotlinx-serialized List<CustomBodyField>; null = none.
-    @ColumnInfo(name = "custom_body_json") val customBodyJson: String? = null,
     @ColumnInfo(name = "is_enabled") val isEnabled: Int = 1,
     @ColumnInfo(name = "sort_order") val sortOrder: Int = 0,
     @ColumnInfo(name = "created_at") val createdAt: Long,
