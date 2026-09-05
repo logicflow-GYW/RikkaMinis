@@ -179,6 +179,54 @@ class ModelExecutionDispatcherTest {
     }
 
     @Test
+    fun `custom knobs are serialized`() {
+        val json = JSONObject(ModelExecutionDispatcher.buildRequestJson(
+            instance = sampleInstance().copy(
+                customHeaders = listOf(
+                    com.openminis.app.data.model.CustomHeader("X-Foo", "bar"),
+                    com.openminis.app.data.model.CustomHeader("X-Baz", "qux"),
+                ),
+                customBodyFields = listOf(
+                    com.openminis.app.data.model.CustomBodyField("generationConfig.temperature", "0.2"),
+                ),
+            ),
+            model = sampleModel(),
+            messages = emptyList(),
+            systemPrompt = null,
+            maxTokens = 4096,
+            temperature = null,
+            imageParts = emptyList(),
+            inputJson = "",
+            outputExt = null,
+        ))
+        val headers = json.getJSONArray("custom_headers")
+        assertEquals(2, headers.length())
+        assertEquals("X-Foo", headers.getJSONObject(0).getString("name"))
+        assertEquals("bar", headers.getJSONObject(0).getString("value"))
+        val bodies = json.getJSONArray("custom_body_fields")
+        assertEquals(1, bodies.length())
+        assertEquals("generationConfig.temperature", bodies.getJSONObject(0).getString("key"))
+        assertEquals("0.2", bodies.getJSONObject(0).getString("value_json"))
+    }
+
+    @Test
+    fun `empty custom knobs omit the keys`() {
+        val json = JSONObject(ModelExecutionDispatcher.buildRequestJson(
+            instance = sampleInstance(),
+            model = sampleModel(),
+            messages = emptyList(),
+            systemPrompt = null,
+            maxTokens = 4096,
+            temperature = null,
+            imageParts = emptyList(),
+            inputJson = "",
+            outputExt = null,
+        ))
+        assertFalse(json.has("custom_headers"))
+        assertFalse(json.has("custom_body_fields"))
+    }
+
+    @Test
     fun `nullables are omitted not null`() {
         val json = JSONObject(ModelExecutionDispatcher.buildRequestJson(
             instance = sampleInstance().copy(customBaseURL = null, customUserAgent = null),

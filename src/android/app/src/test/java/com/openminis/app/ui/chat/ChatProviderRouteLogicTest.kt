@@ -98,4 +98,26 @@ class ChatProviderRouteLogicTest {
             )
         )
     }
+
+    @Test
+    fun customKnobsChangeTriggers() {
+        // [T-provider-extra-headers/body] Knobs change the wire contract and
+        // must rebuild the cached provider (instanceContext snapshot).
+        assertTrue(
+            providerRouteChanged(
+                instance(),
+                instance {
+                    copy(customHeaders = listOf(com.openminis.app.data.model.CustomHeader("X-Foo", "bar")))
+                }
+            )
+        )
+        assertTrue(
+            providerRouteChanged(
+                instance(),
+                instance {
+                    copy(customBodyFields = listOf(com.openminis.app.data.model.CustomBodyField("temperature", "0.9")))
+                }
+            )
+        )
+    }
 }

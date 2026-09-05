@@ -46,10 +46,11 @@ enum class ThinkingLevel {
      * [T-thinking-auto-level] "Let the vendor decide" — RikkaHub's AUTO(-1).
      * Appended last so no existing rank/ordinal shifts. Semantics:
      *  • Enabled (isEnabled == true), but expresses NO effort opinion.
-     *  • Every wire emitter OMITS all thinking control fields for AUTO — the
-     *    vendor's model default applies (reasoning models reason, non-reasoning
-     *    models do not). Mirrors RikkaHub's AUTO branch on OpenAI official,
-     *    unified gateways and Gemini ("auto mode: don't set parameters").
+     *  • OpenAI-family emitters (chat/completions + Responses) omit ALL
+     *    thinking control fields for AUTO; Anthropic sends only the bare
+     *    `thinking:{type:"adaptive"}` switch for adaptive-generation models
+     *    (vendor picks the budget); Gemini omits thinkingConfig entirely.
+     *    Mirrors RikkaHub's AUTO branch.
      *  • NOT subject to the model ceiling clamp (rank is an artifact of the
      *    append rule, not an intensity), and NOT offered as a per-model
      *    selection — the picker shows it as the "default" choice only.

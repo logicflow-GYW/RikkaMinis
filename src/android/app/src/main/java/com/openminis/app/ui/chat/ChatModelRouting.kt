@@ -65,9 +65,9 @@ fun ChatViewModel.selectEntry(entryId: String) {
     _selectedGroupId.value = null
     _selectedGroupName.value = ""
     _activeEntryId.value = entry.id
-    // [T-provider-key-roulette] rotate when multiple keys are stored
-    val rotatedKey = ProviderFactory.pickApiKey(instance.id, apiKey) ?: apiKey
-    currentProvider = ProviderFactory.create(instance, rotatedKey, entry.model, context)
+    // [T-provider-key-roulette] Rotation happens inside ProviderFactory.create —
+    // no call site touches the stored key directly.
+    currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context)
     persistBinding("""{"type":"entry","entryId":"$entryId"}""")
     // [T-newchat-default-model-fallback-android] Remember this as the
     // global last-used model so the NEXT new chat (when no default group

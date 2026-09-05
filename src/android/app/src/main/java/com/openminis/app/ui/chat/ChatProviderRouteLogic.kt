@@ -37,5 +37,10 @@ fun providerRouteChanged(a: ProviderInstance, b: ProviderInstance): Boolean {
         a.useResponsesAPI != b.useResponsesAPI ||
         a.azureMode != b.azureMode ||
         a.customUserAgent != b.customUserAgent ||
-        a.imageEndpointMode != b.imageEndpointMode
+        a.imageEndpointMode != b.imageEndpointMode ||
+        // [T-provider-extra-headers/body] Knobs change the wire contract, so the
+        // cached provider must be rebuilt to pick them up (the cached
+        // instanceContext otherwise holds the pre-edit snapshot forever).
+        a.customHeaders != b.customHeaders ||
+        a.customBodyFields != b.customBodyFields
 }

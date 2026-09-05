@@ -463,13 +463,16 @@ fun ModelGroupDetailScreen(
                         // ACTUAL model at send time, so offering the true ceiling
                         // here is safe. Exclude OFF; fall back to XHIGH when no
                         // member reasons (only reached with reasoning enabled).
+                        // [T-thinking-auto-level] AUTO is vendor-default, not an
+                        // intensity — it must not win the maxByOrNull ceiling
+                        // (its appended rank 8 is an artifact, not intensity).
                         val groupMaxThinkingLevel = remember(group.memberEntryIds, config.modelEntries) {
                             group.memberEntryIds
                                 .mapNotNull { entryId ->
                                     config.modelEntries.find { it.id == entryId }
                                         ?.effectiveMaxThinkingLevel
                                 }
-                                .filter { it != ThinkingLevel.OFF }
+                                .filter { it != ThinkingLevel.OFF && it != ThinkingLevel.AUTO }
                                 .maxByOrNull { it.rank }
                                 ?: ThinkingLevel.XHIGH
                         }

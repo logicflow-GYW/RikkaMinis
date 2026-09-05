@@ -931,7 +931,7 @@ internal fun ThinkingLevelPicker(
     // would look entirely unselected — as if thinking were off. Mirror iOS
     // (fb349342): highlight the highest available capsule in orange with an
     // up-arrow, signalling "your setting is higher, this model caps here".
-    val maxAvailable = availableLevels.lastOrNull { it != ThinkingLevel.OFF }
+    val maxAvailable = availableLevels.lastOrNull { it != ThinkingLevel.OFF && it != ThinkingLevel.AUTO }
     val isClamped = current.isEnabled && maxAvailable != null && current.rank > maxAvailable.rank
     val clampOrange = Color(0xFFFF9500)
     Row(

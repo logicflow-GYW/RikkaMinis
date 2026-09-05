@@ -2032,11 +2032,11 @@ class ChatViewModel(
                     if (freshInstance != null && providerRouteChanged(cachedInstance, freshInstance)) {
                         val freshKey = providerRepository.loadApiKey(freshInstance.id)
                         if (freshKey != null) {
-                            // [T-provider-key-roulette] rotate when multiple keys are stored
-                            val rotatedKey = ProviderFactory.pickApiKey(freshInstance.id, freshKey)
+                            // [T-provider-key-roulette] Rotation happens inside
+                            // ProviderFactory.create.
                             currentProvider = ProviderFactory.create(
                                 freshInstance,
-                                rotatedKey ?: freshKey,
+                                freshKey,
                                 cachedProvider.model,
                                 context,
                             )

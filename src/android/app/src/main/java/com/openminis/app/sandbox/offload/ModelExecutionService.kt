@@ -151,6 +151,15 @@ class ModelExecutionService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onCreate() {
+        super.onCreate()
+        // [T-provider-key-roulette] The worker builds providers through
+        // ProviderFactory, whose create() now rotates multi-key strings. Warm the
+        // LRU state from the main process's persisted file so rotation continues
+        // across the process boundary instead of restarting from key #1.
+        com.openminis.app.data.KeyRoulette.init(cacheDir)
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val requestDir = intent?.getStringExtra(EXTRA_REQUEST_DIR)
             ?: run { stopSelf(startId); return START_NOT_STICKY }
@@ -592,6 +601,8 @@ class ModelExecutionService : Service() {
             },
             azureMode = req.optBoolean("azure_mode", false),
             pinned = false,
+            customHeaders = parseKnobHeaders(req.optJSONArray("custom_headers")),
+            customBodyFields = parseKnobBodyFields(req.optJSONArray("custom_body_fields")),
         )
 
         // ── Reconstruct LLMModel ──
@@ -857,6 +868,8 @@ class ModelExecutionService : Service() {
                 },
                 azureMode = req.optBoolean("azure_mode", false),
                 pinned = false,
+                customHeaders = parseKnobHeaders(req.optJSONArray("custom_headers")),
+                customBodyFields = parseKnobBodyFields(req.optJSONArray("custom_body_fields")),
             )
 
             // ── Reconstruct LLMModel ──
@@ -1313,6 +1326,16 @@ class ModelExecutionService : Service() {
 
     private fun jsonObjList(arr: JSONArray?): List<JSONObject> =
         if (arr == null) emptyList() else (0 until arr.length()).map { arr.getJSONObject(it) }
+
+    // [T-provider-extra-headers/body] Worker-side rebuild of the two knob lists
+    // serialized by ModelExecutionDispatcher. Corrupt/missing entries degrade to
+    // empty (same escape-hatch contract as the Room decode path) so a malformed
+    // row can never wipe a request — it just doesn't apply the knob.
+    private fun parseKnobHeaders(arr: JSONArray?): List<com.openminis.app.data.model.CustomHeader> =
+        arr?.parseKnobHeaders() ?: emptyList()
+
+    private fun parseKnobBodyFields(arr: JSONArray?): List<com.openminis.app.data.model.CustomBodyField> =
+        arr?.parseKnobBodyFields() ?: emptyList()
 
     // ── passthrough parsing (mirrors ModelUseOffloadHandler) ──
 

@@ -303,10 +303,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: RikkaMinis-apk
-          path: |
-            src/android/app/build/outputs/apk/release/app-release.apk
-            src/android/app/build/tmp/golden_actual.txt
-            src/android/app/build/tmp/golden_expected.txt
+          path: src/android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
       # Rename to a versioned, arch-tagged filename mirroring the official

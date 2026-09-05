@@ -13,8 +13,17 @@ object ProviderFactory {
      * Create a provider for an API-key instance.
      * [context] is retained for call-site compatibility; OAuth (which needed
      * it for encrypted token storage) was removed.
+     *
+     * [T-provider-key-roulette] Single choke point for multi-key rotation: the
+     * stored key MAY contain several keys separated by whitespace/commas, and
+     * every caller — main-process direct paths AND the offload worker — builds
+     * its provider through this factory. Rotating here means no call site can
+     * accidentally send the raw multi-key string as a Bearer token. Single
+     * keys pass through verbatim.
      */
     fun create(instance: ProviderInstance, apiKey: String, model: LLMModel, context: Context? = null): LLMProvider {
+        // [T-provider-key-roulette] LRU rotation on the provider-instance id.
+        val effectiveKey = com.openminis.app.data.KeyRoulette.next(apiKey, instance.id)
         // T174: route through ProviderInstance.effectiveBaseURL instead of
         // re-implementing the trim-+-endsWith dance inline. The previous
         // version did `url.endsWith("/v1")` on the raw, untrimmed string,
@@ -34,17 +43,17 @@ object ProviderFactory {
             ProviderType.anthropic -> {
                 // [T-provider-custom-user-agent] Only meaningful for custom-base
                 // (relay) instances; on the official direct path it's null.
-                if (basePath != null) AnthropicProvider(apiKey, model, basePath, customUserAgent = instance.customUserAgent)
-                else AnthropicProvider(apiKey, model)
+                if (basePath != null) AnthropicProvider(effectiveKey, model, basePath, customUserAgent = instance.customUserAgent)
+                else AnthropicProvider(effectiveKey, model)
             }
             ProviderType.gemini -> {
-                if (basePath != null) GeminiProvider(apiKey, model, basePath)
-                else GeminiProvider(apiKey, model)
+                if (basePath != null) GeminiProvider(effectiveKey, model, basePath)
+                else GeminiProvider(effectiveKey, model)
             }
             ProviderType.openAI -> {
                 val base = basePath ?: "https://api.openai.com/v1"
                 OpenAIProvider(
-                    apiKey = apiKey,
+                    apiKey = effectiveKey,
                     model = model,
                     basePath = base,
                     useResponsesAPI = instance.useResponsesAPI,
@@ -63,7 +72,7 @@ object ProviderFactory {
             ProviderType.openRouter -> {
                 // OpenRouter uses OpenAI-compatible API with custom base URL and headers
                 OpenAIProvider(
-                    apiKey = apiKey,
+                    apiKey = effectiveKey,
                     model = model,
                     basePath = "https://openrouter.ai/api/v1",
                     extraHeaders = mapOf(
@@ -77,7 +86,7 @@ object ProviderFactory {
                 // endpoint at api.x.ai/v1. API key passed through verbatim.
                 val base = basePath ?: "https://api.x.ai/v1"
                 OpenAIProvider(
-                    apiKey = apiKey,
+                    apiKey = effectiveKey,
                     model = model,
                     basePath = base,
                 )
@@ -89,7 +98,7 @@ object ProviderFactory {
                 // Custom bases go through effectiveBaseURL's /v1-append logic.
                 val base = basePath ?: "${KimiConstants.CODING_API_BASE}/v1"
                 OpenAIProvider(
-                    apiKey = apiKey,
+                    apiKey = effectiveKey,
                     model = model,
                     basePath = base,
                 )
@@ -127,8 +136,4 @@ object ProviderFactory {
      * rotate LRU. Callers (repo/model service) call this instead of using the
      * stored key directly.
      */
-    fun pickApiKey(instanceId: String, storedKey: String?): String? {
-        if (storedKey.isNullOrBlank()) return storedKey
-        return com.openminis.app.data.KeyRoulette.next(storedKey, instanceId)
-    }
 }

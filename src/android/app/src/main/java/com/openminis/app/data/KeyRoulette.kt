@@ -66,7 +66,10 @@ object KeyRoulette {
         val list = split(keys)
         if (list.size <= 1) return keys
         synchronized(lock) {
-            val now = synchronized(lock) { ++drawCounter }
+            // [T-provider-key-roulette] Monotonic draw counter is the true LRU
+            // key — wall-clock ms collides when draws land in the same
+            // millisecond (bursty retry loops), biasing rotation toward one key.
+            val now = ++drawCounter
             val stale = list.map { it to (lastUsed["$providerId|$it"] ?: 0L) }
                 .minByOrNull { it.second }?.first ?: list.first()
             lastUsed["$providerId|$stale"] = now

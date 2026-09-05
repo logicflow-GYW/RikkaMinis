@@ -43,6 +43,21 @@ fun CustomKnobsSection(
     instance: ProviderInstance,
     repository: ProviderRepository,
 ) {
+    // [T-provider-extra-headers] Gate: only OpenAI-family providers consume
+    // these knobs on the wire today. Gemini/Anthropic would save them and show
+    // them with zero effect — hide the whole section instead of lying.
+    val supported = remember(instance.providerType) {
+        when (instance.providerType) {
+            com.openminis.app.data.model.ProviderType.openAI,
+            com.openminis.app.data.model.ProviderType.openRouter,
+            com.openminis.app.data.model.ProviderType.xAI,
+            com.openminis.app.data.model.ProviderType.kimiCode,
+            -> true
+            else -> false
+        }
+    }
+    if (!supported) return
+
     var expanded by remember { mutableStateOf(false) }
     val headers = remember { mutableStateListOf<CustomHeader>().apply { addAll(instance.customHeaders) } }
     val bodies = remember { mutableStateListOf<CustomBodyField>().apply { addAll(instance.customBodyFields) } }
