@@ -73,7 +73,7 @@ object ProviderConnectionTester {
                 "Timed out after 45s — endpoint accepted the connection but never answered",
                 latency(),
             )
-            val content = response.content.trim().ifEmpty { "(empty response)" }
+            val content = response.text.trim().ifEmpty { "(empty response)" }
             Result(true, null, "OK · ${content.take(80)}", latency())
         } catch (t: CancellationException) {
             throw t
