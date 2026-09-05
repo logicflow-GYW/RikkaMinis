@@ -185,6 +185,16 @@ android {
 
     testOptions {
         unitTests.isReturnDefaultValues = true
+        unitTests.all {
+            it.testLogging {
+                events("failed", "passed", "skipped")
+                showExceptions = true
+                showStackTraces = true
+                showStandardStreams = true
+                showCauses = true
+                exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+            }
+        }
     }
 
     lint {
