@@ -36,6 +36,10 @@ FIELD_ALIASES = {
     "ModelGroup": {
         "memberEntryIds": "memberEntryIdsJson",
     },
+    "ProviderInstance": {
+        "customHeaders": "customHeadersJson",
+        "customBodyFields": "customBodyJson",
+    },
 }
 
 def read(path):

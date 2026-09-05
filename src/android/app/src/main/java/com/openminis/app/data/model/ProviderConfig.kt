@@ -164,14 +164,6 @@ data class ModelGroup(
     // restores the previous value instead of snapping back to 128K. Default
     // null lets old JSON deserialize cleanly (kotlinx.serialization).
     var lastContextLimitTokens: Int? = null,
-    // [T-provider-extra-headers] Per-instance user-authored HTTP headers,
-    // merged AFTER defaults (same-name REPLACE semantics). Persisted in
-    // customHeadersJson on the Room row.
-    var customHeaders: List<CustomHeader> = emptyList(),
-    // [T-provider-extra-body] Per-instance user-authored chat body fields,
-    // recursively merged at the END of the request builder (user keys win,
-    // `model` force-restored). Persisted in customBodyJson on the Room row.
-    var customBodyFields: List<CustomBodyField> = emptyList(),
 )
 
 /**
@@ -233,6 +225,14 @@ data class ProviderInstance(
     // instances may be pinned at once. Boolean default false == old
     // persisted JSON stays valid (coerceInputValues covers missing field).
     var pinned: Boolean = false,
+    // [T-provider-extra-headers] Per-instance user-authored HTTP headers,
+    // merged AFTER defaults (same-name REPLACE semantics). Persisted in
+    // customHeadersJson on the Room row.
+    var customHeaders: List<CustomHeader> = emptyList(),
+    // [T-provider-extra-body] Per-instance user-authored chat body fields,
+    // recursively merged at the END of the request builder (user keys win,
+    // `model` force-restored). Persisted in customBodyJson on the Room row.
+    var customBodyFields: List<CustomBodyField> = emptyList(),
 ) {
     /** Returns the effective API base URL, applying v1 suffix if configured. */
     val effectiveBaseURL: String?
