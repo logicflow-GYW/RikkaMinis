@@ -169,13 +169,14 @@ class ThinkingWireGoldenSnapshotTest {
     @Test
     fun `golden snapshot of every branch`() {
         val actual = render()
+        println("===GOLDEN_EXPECTED_START===")
+        println(EXPECTED)
+        println("===GOLDEN_EXPECTED_END===")
+        println("===GOLDEN_ACTUAL_START===")
+        println(actual)
+        println("===GOLDEN_ACTUAL_END===")
         if (EXPECTED != actual) {
-            val f = java.io.File("build/tmp/golden_actual.txt")
-            f.parentFile.mkdirs()
-            f.writeText(actual)
-            val e = java.io.File("build/tmp/golden_expected.txt")
-            e.writeText(EXPECTED)
-            throw AssertionError("golden mismatch: see build/tmp/golden_actual.txt")
+            throw AssertionError("golden mismatch")
         }
     }
 
