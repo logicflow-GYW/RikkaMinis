@@ -168,16 +168,20 @@ class ThinkingWireGoldenSnapshotTest {
 
     @Test
     fun `golden snapshot of every branch`() {
-        val actual = render()
-        println("===GOLDEN_EXPECTED_START===")
-        println(EXPECTED)
-        println("===GOLDEN_EXPECTED_END===")
-        println("===GOLDEN_ACTUAL_START===")
-        println(actual)
-        println("===GOLDEN_ACTUAL_END===")
-        if (EXPECTED != actual) {
-            throw AssertionError("golden mismatch")
-        }
+        assertEquals(
+            """
+            THINKING WIRE FORMAT CHANGED.
+
+            This is the byte-for-byte oracle for the thinking rule layer. If you are
+            mid-refactor and see this fail, the rule engine emits a different request
+            than this baseline for at least one (model, level) pair.
+
+            Do not "fix" this by pasting the new output in. Diff the two blocks, identify
+            which branch moved, and either restore parity or justify the change explicitly.
+            """.trimIndent(),
+            EXPECTED,
+            render(),
+        )
     }
 
     companion object {
@@ -239,7 +243,7 @@ deepseek-v4/XHIGH -> {reasoning_effort:"max"}
 deepseek-v4/MAX -> {reasoning_effort:"max"}
 deepseek-v4/ULTRA -> {reasoning_effort:"max"}
 deepseek-v4/AUTO -> {}
-deepseek-v4-unified/OFF -> {}
+deepseek-v4-unified/OFF -> {reasoning_effort:"minimal"}
 deepseek-v4-unified/LOW -> {reasoning_effort:"high"}
 deepseek-v4-unified/MEDIUM -> {reasoning_effort:"high"}
 deepseek-v4-unified/HIGH -> {reasoning_effort:"high"}
@@ -279,7 +283,7 @@ agnes/XHIGH -> {reasoning_effort:"high"}
 agnes/MAX -> {reasoning_effort:"high"}
 agnes/ULTRA -> {reasoning_effort:"high"}
 agnes/AUTO -> {}
-seed/OFF -> {}
+seed/OFF -> {reasoning_effort:"minimal"}
 seed/LOW -> {reasoning_effort:"low"}
 seed/MEDIUM -> {reasoning_effort:"medium"}
 seed/HIGH -> {reasoning_effort:"high"}

@@ -46,13 +46,6 @@ class ThinkingWireAnthropicSnapshotTest {
 
     @Test
     fun `anthropic thinking tables golden snapshot`() {
-        val actual = render()
-        println("===ANTHROPIC_EXPECTED_START===")
-        println(EXPECTED)
-        println("===ANTHROPIC_EXPECTED_END===")
-        println("===ANTHROPIC_ACTUAL_START===")
-        println(actual)
-        println("===ANTHROPIC_ACTUAL_END===")
         assertEquals(
             """
             ANTHROPIC THINKING MAPPING CHANGED.
@@ -63,7 +56,7 @@ class ThinkingWireAnthropicSnapshotTest {
             explicitly.
             """.trimIndent(),
             EXPECTED,
-            actual,
+            render(),
         )
     }
 
