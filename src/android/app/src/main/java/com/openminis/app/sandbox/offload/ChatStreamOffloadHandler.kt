@@ -229,7 +229,7 @@ object ChatStreamOffloadHandler {
                                         if (chunk !is LLMStreamChunk.QueueStatus) {
                                             emittedChunks = true
                                         }
-                                        emit(it)
+                                        emit(chunk)
                                     }
                                 }
                             }
