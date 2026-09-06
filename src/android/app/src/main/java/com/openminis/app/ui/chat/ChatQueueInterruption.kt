@@ -434,7 +434,7 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
         }
         var provider: LLMProvider = initialProvider
 
-        val baseSystemPrompt = buildSystemPrompt()
+        val baseSystemPrompt = systemPromptForSession()
         val systemPrompt = baseSystemPrompt
 
         // T145: claim the streaming flag synchronously before launching

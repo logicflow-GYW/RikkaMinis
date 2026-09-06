@@ -135,6 +135,26 @@ internal class AgentLoopState(
     var lengthWallEmptyHits: Int = 0
 
     /**
+     * [feat/hermes-tier1] Text-continuation attempts for the CURRENT
+     * length-wall wall (finish_reason="length" with visible text). Hermes
+     * caps text continuation at 4 nudges then aborts with a typed result —
+     * without a cap a model that re-truncates on every continuation attempt
+     * burns unbounded billed calls. Reset on a successful tool-call turn
+     * (the wall was cleared) and on a clean finish.
+     */
+    var lengthWallContinues: Int = 0
+
+    /**
+     * [feat/hermes-tier1] Consecutive empty completions whose usage proves
+     * zero output tokens (deterministic empty, Hermes empty_response_guard
+     * port). After [REPETITION_DETERMINISTIC_EMPTY_LIMIT] consecutive
+     * deterministic empties the loop stops retrying the same provider and
+     * surfaces the empty-turn hint — retrying a provider that PROVABLY
+     * produced zero tokens just re-bills full input for nothing.
+     */
+    var deterministicEmptyStreak: Int = 0
+
+    /**
      * [T-length-wall-seam-dedup] True when the PREVIOUS turn ended with
      * finish_reason="length" and had visible text. Only then is the next
      * turn's text a "continuation" whose head may illegally repeat the

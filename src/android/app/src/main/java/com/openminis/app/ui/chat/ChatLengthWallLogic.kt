@@ -1,5 +1,7 @@
 package com.openminis.app.ui.chat
 
+import kotlin.math.ceil
+
 /**
  * Pure helpers for the [T-length-wall-continue] path in ChatViewModel.runAgentLoop.
  *
@@ -159,3 +161,77 @@ fun lengthWallReminder(truncatedTail: String): String =
         "Do NOT repeat any text you have already output — do not restart the sentence, " +
         "do not re-emit the phrase before the cut point. Continue seamlessly as if writing " +
         "one continuous reply.</system-reminder>"
+
+/** Fragment length below which the repetition check doesn't run: short
+ *  truncations trivially contain repeated tokens and are legitimately
+ *  continued. Mirrors Hermes repetition_guard.MIN_FRAGMENT_LENGTH. */
+const val REPETITION_MIN_FRAGMENT_LENGTH = 400
+
+/** Exact-repeat window; far beyond ordinary phrasing reuse (citations,
+ *  headings, similar code). Mirrors Hermes `_REPEAT_WINDOW` (60). */
+private const val REPETITION_REPEAT_WINDOW = 60
+
+/** A window repeating at least this often is a repetition signal even for
+ *  short fragments. Mirrors Hermes `_MIN_REPEAT_COUNT` (5). */
+private const val REPETITION_MIN_REPEAT_COUNT = 5
+
+/** "Repetition-dominated" = repeated windows cover at least this fraction of
+ *  the fragment. Mirrors Hermes `_DOMINANCE_RATIO` (0.5). */
+private const val REPETITION_DOMINANCE_RATIO = 0.5
+
+/**
+ * [feat/hermes-tier1] True when [text] shows the signature of a model
+ * repetition loop: a single 60+ char substring recurring often enough to
+ * cover at least half the fragment (or one normalized line repeated enough
+ * to cover half of it). Ported from Hermes `agent/repetition_guard.py`
+ * (Nous Research) — a model in a degenerate repetition loop can spend its
+ * ENTIRE output budget echoing one fragment, and continuing such a fragment
+ * via the length-wall path only stitches more repeated text into the reply.
+ *
+ * Deliberately conservative and fail-open: short fragments, non-repeating
+ * text, and any unusual-but-legitimate shape (citations, headings, code)
+ * return false so continuation proceeds as before. mergeLengthWallSeam
+ * stays as the belt-and-braces for smaller repeats; this guard only stops
+ * the WHOLESALE loops that no seam trim can rescue.
+ *
+ * Deterministic and side-effect free (FE-4 route-A pure function).
+ */
+fun isRepetitionDominated(text: String): Boolean {
+    val n = text.length
+    if (n < REPETITION_MIN_FRAGMENT_LENGTH) return false
+
+    // Fast path: one normalized line duplicated enough to cover half the
+    // fragment — the common echo shape.
+    val lineCounts = HashMap<String, Int>()
+    for (rawLine in text.lineSequence()) {
+        val line = rawLine.trim()
+        if (line.isEmpty()) continue
+        lineCounts[line] = (lineCounts[line] ?: 0) + 1
+    }
+    for ((line, count) in lineCounts) {
+        if (count >= REPETITION_MIN_REPEAT_COUNT &&
+            count.toLong() * line.length >= n.toLong() * REPETITION_DOMINANCE_RATIO
+        ) {
+            return true
+        }
+    }
+
+    // General path: fixed-size windows sliding one char at a time, catching
+    // loops that don't align to line boundaries. A window must appear
+    // `needed` times to cover >= DOMINANCE_RATIO (and >= MIN_REPEAT_COUNT).
+    val window = REPETITION_REPEAT_WINDOW
+    val needed = maxOf(
+        REPETITION_MIN_REPEAT_COUNT,
+        ceil(n * REPETITION_DOMINANCE_RATIO / window).toInt(),
+    )
+    val windowCounts = HashMap<String, Int>()
+    var i = 0
+    while (i + window <= n) {
+        val key = text.substring(i, i + window)
+        val next = (windowCounts[key] ?: 0) + 1
+        if (next >= needed) return true
+        windowCounts[key] = next
+        i++
+    }
+    return false
+}

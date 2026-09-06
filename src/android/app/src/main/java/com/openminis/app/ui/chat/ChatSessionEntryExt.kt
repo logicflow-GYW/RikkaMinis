@@ -83,6 +83,11 @@ internal suspend fun ChatViewModel.ensureSession(): String {
         thinkingLevel = _thinkingLevel.value.name,
     )
     realSessionId = session.id
+    // [feat/hermes-tier1] Draft materialised a NEW session id: re-key the
+    // frozen system prompt cache so the prompt built for the draft (if any)
+    // is not silently reused under the real id. Session-scoped anchors are
+    // the cache's invalidation contract.
+    invalidateSystemPromptCache()
     // Move our cached VM from the draft key ("__new__...") to the real
     // sessionId so re-entering the session reuses the same instance.
     if (isDraft) {

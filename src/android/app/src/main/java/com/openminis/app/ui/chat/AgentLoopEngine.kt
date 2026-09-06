@@ -52,6 +52,24 @@ import com.openminis.app.R
 /** Hard cap on agent-loop turns (moved from ChatViewModel companion, FE-5 route C). */
 internal const val MAX_AGENT_TURNS = 200
 
+/**
+ * [feat/hermes-tier1] Max text-continuation rounds per length-wall wall.
+ * A truncated (finish_reason="length") turn with visible text is continued
+ * at most this many times; past the cap the loop stops continuing, rolls
+ * the seam back to the last clean fold, and surfaces the truncation error.
+ * Mirrors Hermes turn_truncation's continuation ceiling of 4.
+ */
+internal const val MAX_LENGTH_WALL_TEXT_CONTINUES = 4
+
+/**
+ * [feat/hermes-tier1] Consecutive deterministic-empty completions (usage
+ * proves output_tokens == 0) after which the loop gives up instead of
+ * re-billing. Mirrors Hermes empty_response_guard's skip-retries-on-2-
+ * deterministic-empties (adapted: RikkaMinis keeps one reminder round for
+ * the tool-result case, so the streak limit is 2 here).
+ */
+internal const val DETERMINISTIC_EMPTY_LIMIT = 2
+
 /** Per-tool ring cap for ToolInputDelta snapshots (moved from ChatViewModel companion). */
 internal const val TOOL_INPUT_CHUNK_RING_MAX = 10
 
@@ -1196,6 +1214,12 @@ internal class AgentLoopEngine(
 
             // Map toolUseId -> input JSON string for persistence (accumulated across turns)
             toolCalls.forEach { (id, _, args) -> loopState.allToolInputs[id] = args.toString() }
+            // [feat/hermes-tier1] A tool-call turn clears the length-wall
+            // continuation budget AND the deterministic-empty streak: the
+            // model recovered and is doing new work, so future walls get a
+            // fresh allowance (mirrors Hermes resetting per-wall retry state).
+            loopState.lengthWallContinues = 0
+            loopState.deterministicEmptyStreak = 0
             val toolInputMap = loopState.allToolInputs
             // Prefer the opaque blob from LLMStreamChunk.ReasoningContent when the
             // provider emitted one — that path preserves empty strings (DeepSeek V4
@@ -1248,6 +1272,35 @@ internal class AgentLoopEngine(
                         // a node that burned its whole budget just pays for the
                         // same wall again".
                         loopState.lengthWallEmptyHits++
+                        // [feat/hermes-tier1] Deterministic-empty fast-exit:
+                        // when the usage block PROVES zero output tokens
+                        // (outputTokens==0) on consecutive empty length-walls,
+                        // the provider is deterministically returning nothing —
+                        // retrying re-bills the full input for a provably
+                        // identical result (Hermes empty_response_guard port).
+                        // Whitespace-only output or a missing usage block keeps
+                        // the legacy 3-hit budget (fail-open).
+                        val usageForEmptyCheck = lastUsage
+                        val usageProvesEmpty = usageForEmptyCheck != null &&
+                            usageForEmptyCheck.outputTokens == 0
+                        if (usageProvesEmpty) {
+                            loopState.deterministicEmptyStreak++
+                            if (loopState.deterministicEmptyStreak >= DETERMINISTIC_EMPTY_LIMIT) {
+                                AppLogger.warning(
+                                    TAG_STREAM,
+                                    "runAgentLoop turn=$turn finish=length empty ×$loopState.deterministicEmptyStreak with usage.outputTokens==0 — deterministic empty, skipping remaining retries",
+                                )
+                                withContext(Dispatchers.Main) {
+                                    host.setInlineError(host.string(R.string.error_output_truncated_repeated))
+                                }
+                                // Fall through to the normal break path (persist + exit).
+                                // Do NOT `break` here directly: it would skip
+                                // `loopState.loopExitedNormally = true` and misclassify as a
+                                // MAX_AGENT_TURNS runaway.
+                            }
+                        } else {
+                            loopState.deterministicEmptyStreak = 0
+                        }
                         if (loopState.lengthWallEmptyHits < 3) {
                             // T9: log the wasted empty-length iteration
                             traceObserver.agentTraceRecorder.turnEnd(
@@ -1277,19 +1330,50 @@ internal class AgentLoopEngine(
                         // MAX_AGENT_TURNS runaway.
                     } else {
                         // Truncated mid-answer: continue so the model finishes.
+                        // [feat/hermes-tier1] Repetition guard FIRST (Hermes
+                        // turn_truncation order: abort BEFORE continuing): if
+                        // the visible output is dominated by a degenerate
+                        // repetition loop, continuing only stitches more
+                        // repeated text into the reply. Also enforce the
+                        // continuation ceiling — a model that re-truncates on
+                        // every attempt burns billed calls without bound.
                         loopState.lengthWallEmptyHits = 0
-                        // T9: log the truncated turn before continuing
-                        traceObserver.agentTraceRecorder.turnEnd(
-                            turn = turn,
-                            tokensIn = lastUsage?.inputTokens,
-                            tokensOut = lastUsage?.outputTokens,
-                            finishReason = turnFinishReason,
-                            durationMs = System.currentTimeMillis() - turnStartMs,
-                        )
-                        AppLogger.warning(
-                            TAG_STREAM,
-                            "runAgentLoop turn=$turn finish=length — truncated (${turnText.length} chars), continuing loop to let the model finish",
-                        )
+                        loopState.deterministicEmptyStreak = 0
+                        if (isRepetitionDominated(turnText)) {
+                            AppLogger.warning(
+                                TAG_STREAM,
+                                "runAgentLoop turn=$turn finish=length but output is repetition-dominated (${turnText.length} chars) — aborting instead of continuing the degenerate response",
+                            )
+                            withContext(Dispatchers.Main) {
+                                host.setInlineError(host.string(R.string.error_output_truncated_repeated))
+                            }
+                            // Fall through to the normal break path (persist +
+                            // exit). NOT `loopExitedNormally` (this is an
+                            // abort), but also NOT a runaway misclassification:
+                            // see the deterministic-empty branch above for the
+                            // same pattern.
+                        } else if (loopState.lengthWallContinues >= MAX_LENGTH_WALL_TEXT_CONTINUES) {
+                            AppLogger.warning(
+                                TAG_STREAM,
+                                "runAgentLoop turn=$turn finish=length — continuation ceiling $MAX_LENGTH_WALL_TEXT_CONTINUES reached, giving up (accumulated ${loopState.accumulatedText.length} chars)",
+                            )
+                            withContext(Dispatchers.Main) {
+                                host.setInlineError(host.string(R.string.error_output_truncated_repeated))
+                            }
+                        } else {
+                            loopState.lengthWallContinues++
+                            // T9: log the truncated turn before continuing
+                            traceObserver.agentTraceRecorder.turnEnd(
+                                turn = turn,
+                                tokensIn = lastUsage?.inputTokens,
+                                tokensOut = lastUsage?.outputTokens,
+                                finishReason = turnFinishReason,
+                                durationMs = System.currentTimeMillis() - turnStartMs,
+                            )
+                            AppLogger.warning(
+                                TAG_STREAM,
+                                "runAgentLoop turn=$turn finish=length — truncated (${turnText.length} chars), continuing loop to let the model finish (${loopState.lengthWallContinues}/$MAX_LENGTH_WALL_TEXT_CONTINUES)",
+                            )
                         // [T-length-wall-prefill] When the provider accepts
                         // an assistant-final prefill, the truncated assistant
                         // text is ALREADY the last message in host.agentHistory
@@ -1346,6 +1430,7 @@ internal class AgentLoopEngine(
                             )
                         )
                         continue
+                        } // [feat/hermes-tier1] else — continuation budget branch
                     }
                 }
                 AppLogger.info(TAG_STREAM, "runAgentLoop turn=$turn no tool calls → break (finishReason=$turnFinishReason)")

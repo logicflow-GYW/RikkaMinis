@@ -232,7 +232,7 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
 ): Boolean {
     var provider = initialProvider
 
-    val baseSystemPrompt = buildSystemPrompt()
+    val baseSystemPrompt = systemPromptForSession()
     val systemPrompt = baseSystemPrompt
 
     // _isStreaming was already set synchronously by the caller.

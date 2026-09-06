@@ -471,6 +471,61 @@ class ChatViewModel(
     internal var streamEpoch = 0L
 
     /**
+     * [feat/hermes-tier1] Session-scoped system prompt freeze (Hermes prompt
+     * cache invariant port: "Per-conversation prompt caching is sacred").
+     *
+     * buildSystemPrompt() re-reads disk every call (memory fragments, skills,
+     * MCP disclosure, rollup). The pieces it assembles change between turns
+     * — a memory write mid-session, a skill install, a daily-log rollup —
+     * and every change mutates the request prefix AFTER the tools' cached
+     * prefix, so provider prefix caches (OpenAI/DeepSeek automatic, Anthropic
+     * cache_control) miss on EVERY turn that follows a fragment change.
+     * Freezing the prompt for the lifetime of the session keeps the prefix
+     * byte-stable, which is exactly what prefix caches key on.
+     *
+     * Invalidation anchors (all session-scoped, matching Hermes' deferred
+     * invalidation default):
+     *  - session switch (activeSessionId change) — new conversation, new prompt
+     *  - retry/rerun/resume paths reuse the frozen prompt: the conversation
+     *    is the same, and re-reading disk would put DIFFERENT prefixes on
+     *    the same logical turn.
+     *  - memory toggle, skill install etc. take effect next session
+     *    (cache-aware deferred invalidation — same trade Hermes makes).
+     */
+    private var frozenSystemPrompt: String? = null
+    private var frozenSystemPromptSessionId: String? = null
+
+    /**
+     * Return the system prompt for the current session, rebuilding only when
+     * the session id changed (or the frozen value was cleared). All turn
+     * entry points (send / retryLast / resume / rerun tail / queue drain /
+     * resumeQueueAfterCancel) must go through this instead of calling
+     * [buildSystemPrompt] directly.
+     */
+    internal fun systemPromptForSession(): String? {
+        val sid = activeSessionId
+        val cached = frozenSystemPrompt
+        if (cached != null && frozenSystemPromptSessionId == sid) {
+            return cached
+        }
+        val built = buildSystemPrompt()
+        frozenSystemPrompt = built
+        frozenSystemPromptSessionId = sid
+        return built
+    }
+
+    /**
+     * Drop the frozen prompt so the next [systemPromptForSession] rebuilds.
+     * Called on explicit session lifecycle transitions (new session created
+     * by ensureSession, loadSession switching conversations) — NOT on every
+     * send, which is the whole point.
+     */
+    internal fun invalidateSystemPromptCache() {
+        frozenSystemPrompt = null
+        frozenSystemPromptSessionId = null
+    }
+
+    /**
      * [T-stale-finally-vs-new-claim] Snapshot of [streamEpoch] taken by the
      * task that most recently CLAIMED the streaming state. New-turn entry
      * points do `streamEpoch++` then `_isStreaming=true` synchronously, then
@@ -1047,7 +1102,7 @@ class ChatViewModel(
             // the values the original loop captured at send/retry/resume
             // entry. Rebuild them here exactly the way those callers did.
             val provider = currentProvider ?: return null
-            val systemPrompt = buildSystemPrompt()
+            val systemPrompt = systemPromptForSession()
             val activeFallbackStrategy = run {
                 val groupId = _selectedGroupId.value
                 groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
@@ -3021,7 +3076,7 @@ class ChatViewModel(
             ))
 
             // Build system prompt
-            val baseSystemPrompt = buildSystemPrompt()
+            val baseSystemPrompt = systemPromptForSession()
             val systemPrompt = baseSystemPrompt
 
             // Start agent loop with fallback. _isStreaming was set synchronously at top.
@@ -3177,7 +3232,7 @@ class ChatViewModel(
                 )
             }
 
-            val baseSystemPrompt = buildSystemPrompt()
+            val baseSystemPrompt = systemPromptForSession()
             val systemPrompt = baseSystemPrompt
 
             // _isStreaming was already set synchronously at the top.
@@ -3415,7 +3470,7 @@ class ChatViewModel(
         }
 
         viewModelScope.launch(Dispatchers.IO) {
-            val baseSystemPrompt = buildSystemPrompt()
+            val baseSystemPrompt = systemPromptForSession()
             val systemPrompt = baseSystemPrompt
 
             AppLogger.info(TAG_STREAM, "resume _isStreaming=true (sid=$activeSessionId)")

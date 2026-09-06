@@ -793,6 +793,12 @@ internal fun ChatViewModel.loadSession() {
         _sessionTitle.value = session.title ?: "New Chat"
         _sessionCategory.value = session.category
         _memoryEnabled.value = session.memoryEnabled != 0
+        // [feat/hermes-tier1] Session switch → the frozen system prompt from
+        // the previous conversation must not leak into this one. New
+        // sessions materialise their id via ensureSession (draft → real id),
+        // which also re-keys the cache; explicit invalidation here covers
+        // the "open an existing conversation" path.
+        invalidateSystemPromptCache()
         // T239: hydrate persisted thinking-mode override. null = unset
         // (use OFF as the legacy default); non-null = explicit user
         // choice persisted across cold-start. runCatching guards against
