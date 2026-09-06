@@ -1256,6 +1256,84 @@ internal class AgentLoopEngine(
                 else -> false // stop / end_turn / tool-call turns: clean boundary
             }
 
+            // [feat/content-filter-fallback] A content-filter / safety-block
+            // finish (content_filter, Gemini SAFETY/RECITATION/…, Anthropic
+            // refusal) is a DETERMINISTIC member-level refusal: this member
+            // will answer the same way on every retry. Instead of falling
+            // through to the blank-bubble path below, consume the fallback
+            // chain immediately — a different member may have a different
+            // safety posture and answer fine. Guard rails:
+            //  - only when there is no usable output (a content_filter WITH
+            //    partial text is a finished answer for our purposes — the
+            //    model said what it was allowed to say);
+            //  - the empty assistant turn added above is dropped before
+            //    continuing (mirrors the empty-after-toolresult retry path);
+            //  - the loopExitedNormally flow below is skipped entirely via
+            //    `continue`.
+            if (toolCalls.isEmpty() && turnTextRaw.isEmpty() &&
+                ContentFilterFinishPolicy.isBlockedFinish(turnFinishReason)
+            ) {
+                // [feat/content-filter-fallback] A content-filter / safety-
+                // block finish with NO usable output is a DETERMINISTIC
+                // member-level refusal: this member will answer the same way
+                // on every retry. Consume the fallback chain immediately — a
+                // different member may have a different safety posture and
+                // answer fine. (A content_filter WITH partial text falls
+                // through: the model said what it was allowed to say, which
+                // is a finished answer.)
+                val next = loopState.remainingFallbacks.removeFirstOrNull()
+                if (next != null) {
+                    AppLogger.warning(
+                        TAG_STREAM,
+                        "runAgentLoop turn=$turn finish=$turnFinishReason (content filter / safety block) on ${loopState.currentProvider.model.displayName} — falling back to ${next.provider.model.displayName}",
+                    )
+                    loopState.fallbackReasons.add("⚠️ ${loopState.currentProvider.model.displayName}: $turnFinishReason")
+                    val failedProvider = loopState.currentProvider
+                    loopState.currentProvider = next.provider
+                    host.setCurrentProvider(next.provider)
+                    host.noteModelNames(modelName = next.provider.model.displayName, providerName = null, entryId = null)
+                    // Same entry-precision rule as the error-path fallback:
+                    // resolve the group ENTRY by id, not by modelId (a group
+                    // can hold several entries for the same modelId behind
+                    // different instances).
+                    host.activeConfigModelEntries.find { it.id == next.entryId }?.let { newEntry ->
+                        host.setActiveEntryId(newEntry.id)
+                        host.updateCurrentModel(newEntry.model)
+                        val newLabel = host.providerInstanceLabel(newEntry.providerInstanceId)
+                        if (newLabel != null) {
+                            host.setProviderName(newLabel.ifEmpty { newEntry.model.provider })
+                        }
+                    }
+                    if (next.provider.model.id != failedProvider.model.id) host.bumpFallbackTrigger()
+                    host.emitFallbackToast(
+                        host.string(R.string.fallback_switched_to, next.provider.model.displayName)
+                    )
+                    // NOTE: no rollback of allToolBlocks needed here — the
+                    // blocked turn produced no text and no tool blocks
+                    // (guard requires turnTextRaw.isEmpty()); nothing was
+                    // streamed to the screen. Reset the per-attempt retry
+                    // budget so the fallback member gets its own full
+                    // transient-retry allowance.
+                    retryAttempt = 0
+                    // skip the rest of this turn's post-processing (history
+                    // add / persist) — `continue` targets the OUTER for(turn)
+                    // loop, same as the length-wall and EOF-stub branches.
+                    continue
+                }
+                // Fallback chain exhausted or absent (single-model) — surface
+                // a human-readable error instead of the silent blank bubble
+                // this path produced before.
+                AppLogger.warning(
+                    TAG_STREAM,
+                    "runAgentLoop turn=$turn finish=$turnFinishReason (content filter / safety block) — no fallback available, surfacing error",
+                )
+                withContext(Dispatchers.Main) {
+                    host.setInlineError(host.string(R.string.error_content_filtered))
+                }
+                loopState.loopExitedNormally = true
+                break
+            }
+
             // Build assistant contentParts for history
             val assistantParts = mutableListOf<AgentContentPart>()
             if (turnText.isNotEmpty()) {

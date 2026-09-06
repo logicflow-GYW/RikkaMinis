@@ -1075,7 +1075,7 @@
     <string name="error_tech_detail">技術詳細</string>
     <string name="fallback_switched_to">%1$s に切り替えました</string>
     <string name="error_output_truncated_repeated">モデルが出力長の上限に繰り返し達しました。モデル設定でコンテキスト制限を下げるか、質問をより小さな部分に分けてください。</string>
-    <string name="error_stream_interrupted">モデルとの接続が中断され、応答を完了できませんでした。もう一度お試しください。</string>
+        <string name="error_content_filtered">モデルの安全フィルターによりこの応答がブロックされました。表現を変えるか、別のモデルに切り替えてください。</string>
     <string name="error_empty_response_context_large">モデルが空の応答を返しました。会話のコンテキストが大きすぎる可能性があります — 圧縮するか、新しいセッションを開始してください。</string>
     <string name="error_empty_response_after_tool">ツールの結果の後、リマインダーを送っても、モデルは応答を返しませんでした。過負荷の可能性があります — もう一度試すか、モデルを切り替えてください。</string>
     <string name="thinking_truncated_hint">%2$dK 文字のうち末尾 %1$dK 文字を表示中</string>

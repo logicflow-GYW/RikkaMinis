@@ -836,7 +836,7 @@
     <string name="error_tech_detail">技術詳情</string>
     <string name="fallback_switched_to">已切換至 %1$s</string>
     <string name="error_output_truncated_repeated">模型多次達到輸出長度上限而被截斷。請嘗試在模型設定中調低上下文限制，或將問題拆分為較小的部分。</string>
-    <string name="error_stream_interrupted">與模型的連線中斷，回答未能完成——請重試。</string>
+        <string name="error_content_filtered">模型的安全過濾器攔截了這條回答。請嘗試換個說法，或切換其他模型。</string>
     <string name="error_empty_response_context_large">模型回傳了空回應。對話上下文可能過大 —— 請嘗試壓縮上下文或開啟新工作階段。</string>
     <string name="error_empty_response_after_tool">在工具結果之後，即使經過提醒，模型仍未回傳任何回應。它可能已過載 —— 請重試或切換模型。</string>
     <string name="thinking_truncated_hint">顯示最後 %1$dK / 共 %2$dK 字元</string>
