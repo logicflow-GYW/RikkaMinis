@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-05）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-06）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-09-05，共 34 天
-- 条目总数：763（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
-- 总字符数：888174 / 总行数：14814
+- 合并范围：2026-08-03 ～ 2026-09-06，共 35 天
+- 条目总数：794（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
+- 总字符数：917474 / 总行数：15219
 
 ---
 
@@ -14807,6 +14807,411 @@ D3 修复闭环：nested 分支补 `clampEffortForModel(wireEffort(ctx.level), l
 **数据层**：Room ProviderDatabase 8→9 加的两列（custom_headers_json/custom_body_json）通过新增 MIGRATION_9_10 DROP COLUMN 摘掉（minSdk 26 安全），version 9→10。
 
 **可复用教训**：判断"回滚 vs 精准摘除"先看功能是否与别的功能共 commit——knobs/连接测试 和 thinking 全家桶挤在同一个 6584aca5 commit，回滚会误伤，只能逐文件外科手术。chatExtraBody 这类 pre-existing 的 Map 通道与新增的 customBodyFields List 通道是两条独立路径，摘除时别误删前者。
+
+<!-- 2026-09-05 15:49:36 -->
+## dev-history 文档同步到 09-05（2026-09-05，main @ 12bfbbaf）
+
+
+用户要求更新仓库 + 本地两份开发档案。流程照旧：rebuild_dev_history.py → sanitize_dev_history.py → 验证 → 同步挂载副本 → 分支提交合并。
+
+- 条目 758 → **763**（新增 09-05 全部 4 条：thinking-gap-close 分支完成/审计 2 HIGH/修复合并 main/knobs+连接测试摘除），合并范围 33→34 天
+- 验证：fences=32 even、ts=763 与头部一致、outOrder=0；INDEX 自动更新 763 条/34 天
+- 分支 docs/dev-history-0905（commit 12bfbbaf，纯文档 2 文件 +92/−6），基于 main HEAD 0103d96f 无分叉，ff 合并 main，push 后删本地+远端分支
+- 教训复用：gh_sync.sh push 只认 `--branch`，传 `--repo` 会被忽略导致静默不推；删远端分支用 `push --branch :<name>`（askpass 机制）
+
+<!-- 2026-09-05 16:46:11 -->
+## 2026-09-05 16:46:11
+
+用户报"最近经常遇到沙盒重置、kotlinc 等工具不见了"。调查结论（三源验证：文件时间戳 + 日志 + 语义记忆）：
+
+**rootfs 实际只重置过一次**：9/2 17:44（/etc/alpine-release mtime 铁证）。之后至今（9/5）没有再回滚——/tmp 文件按天连续分布（9/2:41、9/3:45、9/4:33、9/5:39 个共存）。8/26 有更早一次完整回退前科（语义记忆 0.371 命中）。
+
+**"工具不见了"的真因是三层混淆**：
+1. apk 层（/etc/apk/world）= durable，rootfs 不回滚就不丢。当前 world 只有 15 个显式包。
+2. pip 装的包 + /opt/bin/kotlinc-2.0.20（8/26 恢复时的位置）= 在 9/2 重置中真丢了（huggingface_hub 消失就是证据）。
+3. **kotlinc 其实从未丢**：/tmp/kotlinc（9/1 下载解压）一直活着且可运行（2.0.20 + JRE 17.0.18），丢的只是 PATH 捷径——每个新会话的 agent 都要重新 `ln -sf /tmp/kotlinc/bin/kotlinc /usr/local/bin/kotlinc`，不ln就 command -v 找不到 → 表现为"kotlinc 不见了"。
+
+**本次修复**：apk add ripgrep py3-pip py3-numpy；pip 装 huggingface_hub（--break-system-packages）；kotlinc 符号链接固化 /usr/local/bin；kotlinc.zip + 7 个 JVM 测试 jar（junit/hamcrest/kotlin-stdlib/okhttp/okio/org.json/mockwebserver）固化到 /var/minis/shared/sandbox-env/（唯一穿越多次重置的层）。
+
+**一键重建脚本**：sh /var/minis/shared/setup-sandbox-env.sh（v2，幂等，apk→kotlinc(优先 shared zip 免下载)→jvm-libs 软链 /tmp/jvmtest-libs + /opt/jvm-libs→pip→自检，已跑通验证）。新会话遇到"工具不见"直接跑它。
+
+**附带发现**：手机存储 97% 满（462G 只剩 13G，df / 实测）——rootfs quota 20G 之内没问题，但手机整体快满，用户可留意。
+
+<!-- 2026-09-05 17:26:03 -->
+## 2026-09-05 17:26:03
+
+A+B+C 三项按用户拍板"直接干"全部落地:
+
+**分支 feat/rootfs-event-log @ 5ebff693**(4 文件 +244,基于 main 12bfbbaf),已推远端,CI run 33957501361 in_progress(gh_ci_wait 等待被打断,结果未知不得假设绿)。
+- **A rootfs 事件日志**:RootfsEventLog.kt(纯 JVM,append-only,128KB 自截断,吞异常)+ 7 个 JVM 测试沙箱验证 7/7 绿。RootfsManager 8 发射点:INSTALL(gen 计数)/REPAIR_STAGE3_RESET(静默全量重置头号嫌疑)/AUTO_REPAIR/MANUAL_RESET/APKWORLD_RESTORE ok+fail/APKWORLD_RETRY ok+fail。宿主侧 filesDir/logs/rootfs-events.log(沙箱内 /var/minis/logs/)+ rootfs-boot-id 代际计数双保险。
+- **B 系统提示词**(ChatPromptAndTools ~1020):持久层四事实(apk 自动恢复//tmp 仅重建清/pip 不保护/workspace 空=per-session 设计)+归因前验证协议。
+- **C skill**(不走 CI):evidence-discipline v1.1.0 加「环境异常检查协议」节——三件套(apk world mtime/ls -lt /tmp/rootfs-events.log)+误诊模式+恢复脚本路径。
+
+**静态自检**:pristine 对照括号计数同 ±1 = regex 假阳性,改动括号中性;无冲突标记。
+
+**待下会话收尾**(交接文档 /var/minis/shared/rootfs-event-log-handoff.md):等 CI 核对 head_sha→ff 合并 main→release CI 确认→删本地远端分支→真机验证(手动 reset 后 cat /var/minis/logs/rootfs-events.log 应见 MANUAL_RESET+INSTALL+APKWORLD_RESTORE 行)。
+
+**工具性教训**:gh_ci_wait.sh 长轮询(>20min timeout)会被 tool 执行中断——长等待改用 bridge 端点轮询或缩短 --timeout 分多次查。
+<!-- 2026-09-05 17:2x -->
+
+<!-- 2026-09-05 17:33:25 -->
+## feat/rootfs-event-log 收尾闭环（2026-09-05 17:5x）
+
+
+**产出**：main @ **5ebff693**（12bfbbaf ff 合并）。分支→main 全链路干净。
+
+- **审计结论**：4 文件 +244 全审，**无 bug 无需修复**，直接合并。
+- **分支 CI**：run 33957501361 success，head_sha=5ebff693 API 核对一致（bridge 绿 + API head_sha 双确认）。
+- **release CI**：run 33958152449 push 触发，head_sha=5ebff693 核对一致，in_progress 未等（用户拍板不等）。
+- 本地+远端分支已删；交接文档已更新为 closed 状态。
+- **待真机验证**（用户侧 ground truth）：装新 APK → 设置→沙箱手动 reset → 沙箱 `cat /var/minis/logs/rootfs-events.log` 应见 `MANUAL_RESET` + `INSTALL gen=N` + `APKWORLD_RESTORE ok=...`。
+
+**审计疑点核查记录**（可复用）：
+- `installGeneration` 进程内存计数 + host 侧 boot-id：boot-id 归零与"新装归零"同值=最坏漏报，不影响功能；无一致性依赖。
+- `/var/minis/logs` bind mount 双处确认（ExecutionCoordinator:650 + PRootKernel:238），非死承诺。
+- readBootId 无生产调用点=备用探测器，无 bug。
+- 日志 I/O 全在 IO 上下文 + 全吞异常，不影响主流程。
+
+**gh_sync.sh gh-actions-runs 备注列为空**（python 子进程 out 变量空）——查 head_sha 直接用环境变量 GITHUB_TOKEN 裸 python urllib 即可，更快更可靠。
+
+<!-- 2026-09-05 22:11:38 -->
+## rootfs-event-log 真机验证确认（2026-09-05 用户补记）
+
+用户确认 main @ 5ebff693（rootfs 事件日志）真机早已测试通过：装新 APK 后手动 reset，沙箱 `cat /var/minis/logs/rootfs-events.log` 可见 MANUAL_RESET + INSTALL gen=N + APKWORLD_RESTORE 行，符合预期。此前交接文档和记忆里一直挂着"待用户真机验证"，实际用户已闭环只是没记录。教训：**用户侧的 ground truth 确认后要立刻写入记忆/交接文档，不能只靠 agent 侧闭环就以为全链路完了**。交接文档 /var/minis/shared/rootfs-event-log-handoff.md 已更新为全链路闭环状态。
+
+## 2026-09-06
+
+<!-- 2026-09-06 09:51:50 -->
+## MCP 记忆增强盘点结论 + server-memory 配置完成（2026-09-06）
+
+
+用户问三个主流记忆 MCP 哪个能用上。盘点结论：
+- **server-memory**（官方）：JSONL 知识图谱，零依赖 → ✅ 已配置使用
+- **mem0-mcp**：⚠️ 仓库已 archived（2026-08-20 后停止维护），且依赖向量库 + 需要嵌入 API，不适合
+- **mcp-ai-memory**：❌ 依赖 PostgreSQL + pgvector + Redis 全家桶，Android 沙箱跑不起来（48 stars 小项目，npm 上有同名包）
+
+**RikkaMinis 已具备的 MCP 基础设施**（评估前没意识到的关键事实）：
+- `minis-mcp-cli`（/usr/local/bin）：MCP 客户端 CLI，支持 HTTP + STDIO 双传输，daemon 保活，配置在 /var/minis/mcp-servers/servers.json（Claude Desktop 兼容格式，Settings UI 同读）
+- 有原生 MCP 集成（MCPIntegrationsScreen 设置 UI、SessionMcpsSheet 会话工具、MCPOAuth 全套）
+- stdio 传输自带 deps.py 自动解析缺失命令（npx/node/uvx 等自动 apk add 或 pip install）
+
+**server-memory 配置完成（已实测全链路）**：
+- `minis-mcp-cli add --name memory --command npx --args "-y @modelcontextprotocol/server-memory"`
+- Node v22.23.2 已装（apk add nodejs npm，rootfs 层持久）
+- 实测通过：initialize 握手 → create_entities 写入 → search_nodes 查询全通
+- 9 个工具：create_entities / create_relations / add_observations / delete_entities / delete_observations / delete_relations / read_graph / search_nodes / open_nodes
+- 使用文档（实体名下划线、观测原子化、关系主动语态、search 是关键词非语义）：/var/minis/shared/mcp-memory-knowledge-graph.md
+
+**与现有语义记忆的分工**：语义记忆（HF 向量）存叙事经验；知识图谱（JSONL）存结构化事实。互补不替代。
+**注意事项**：JSONL 存在沙箱（npx 默认路径），rootfs 重建会丢；重要图谱应镜像到共享层。
+
+<!-- 2026-09-06 09:54:26 -->
+## 知识图谱种子数据灌入完成（2026-09-06，续）
+
+
+- **10 实体 + 11 关系**已写入 MCP 知识图谱：RikkaMinis/OpenMinis/logicflow-GYW/rikkaflow/Logos7313/rikka-ci-bridge/semantic_memory/knowledge_graph_mcp/gh_sync.sh/Redmi_Note_12_Turbo
+- **数据文件位置**：/root/.npm/_npx/<hash>/node_modules/@modelcontextprotocol/server-memory/dist/memory.jsonl（npx 缓存，易失，hash 每次装可能变，勿硬编码）
+- **备份+恢复闭环已实测**：
+  - 备份：`python3 /var/minis/shared/knowledge-graph-backup/restore_knowledge_graph.py --backup`（62 条记录 = 11 实体+40 观测+11 关系）
+  - 恢复：同脚本无参数（create_entities → add_observations → create_relations，幂等）
+  - 备份文件：/var/minis/shared/knowledge-graph-backup/memory.jsonl
+- **使用文档已更新**：/var/minis/shared/mcp-memory-knowledge-graph.md（含数据位置/恢复流程章节）
+- 验证：search_nodes 按 "CI"/"github_account" 查询均正确返回关联实体+关系
+
+<!-- 2026-09-06 10:09:36 -->
+## 知识图谱自动同步器完成（sync_kg.py）—— 新会话开场请增量跑一次
+
+
+**脚本**：/var/minis/shared/knowledge-graph-backup/sync_kg.py
+**机制**：每日日志（/var/minis/memory/*.md 按 ## 分割）→ LLM 提炼（minis-model-use run deepseek-v4-flash）→ 幂等写入 MCP 图谱 → 自动备份
+**用法**：`python3 sync_kg.py`（增量，推荐）；`--since YYYY-MM-DD`（历史积压）；`--dry-run`（试跑）
+**增量状态**：sync-state.json 记录已处理条目标题哈希；失败条目不标记，下次重试
+
+**踩坑（重要，复用）**：
+- minis-model-use run 的 **顶层 system 字段会被商汤 API 忽略 + 触发限流**；必须用 messages 数组里的 {"role":"system"}——这是 OpenAI 标准格式，工具转换时顶层 system 丢了（工具 bug 变体）
+- deepseek-v4-flash 有速率限制，批量跑会偶发 model_use_failed；脚本已做退避重试（10/20/40s ×3）
+- LLM 提炼输出偶发不带围栏的 JSON、偶发嵌套错误（entities 里套 entities）——解析要多层容错
+
+**首次实跑结果（2026-09-06）**：
+- 近 4 天 35 条日志 → 成功 24 条 → 图谱 21→185 实体、27→153 关系、备份 758 条
+- 质量：核心事实好（项目/账号/工具/依赖）；缺点：class/function/UI 组件名被当实体（孤立多）、偶尔悬空关系
+- 结论：可接受，不追求 100% 覆盖历史；优先喂近期高价值日志
+
+**约定**：新会话开场查记忆时，顺手 `cd /var/minis/shared/knowledge-graph-backup && python3 sync_kg.py` 增量同步一次（无新条目秒退）。last_sync 在 sync-state.json。
+
+**当前图谱规模**：~185 实体 / ~153 关系（2026-09-06 10:09 快照）；备份在 /var/minis/shared/knowledge-graph-backup/memory.jsonl
+
+<!-- 2026-09-06 12:09:51 -->
+## 知识图谱全量灌入完成 + LLM 切换到 tokenrhythm（2026-09-06 中午）
+
+
+**图谱现在：3627 实体 / 4739 关系**（从今天早上的 185/153 爆发式增长，覆盖 2026-07-31 ~ 09-06 全部 798 条日志），备份 20318 条记录。
+
+**LLM 提炼后端切换**：
+- 用户反馈商汤科技（SENSENOVA）质量不行，给了 tokenrhythm.studio（sk_tr_... 存在 /var/minis/shared/secrets/tokenrhythm.env，权限 600）
+- 模型：deepseek-v4-flash-0731（tokenrhythm 上 2 秒级响应，质量比商汤的 deepseek-v4-flash 好）
+- sync_kg.py 已改为直接 curl tokenrhythm /v1/chat/completions（不再走 minis-model-use）
+- tokenrhythm 上其他模型：qwen3.8-max（60s+ 超时慢）、glm-5.3-flash（33s）、deepseek-v4-pro-0813（35s）、qwen3.7-flash（30s）——只有 flash-0731 是秒回，批量灌历史用它
+- TokenRhythm provider 已加到 RikkaMinis（entry_id ***UUID***），key 设置了 $$TR_TOKENRHYTHM_KEY 引用但那个 env var 还没建（minis-config 不能写 env var 值）；provider 目前没接 key 不可用，要可用需用户在 Settings→Environments 建 TR_TOKENRHYTHM_KEY
+
+**批量灌历史经验**：
+- 单日 `--only-date YYYY-MM-DD` 是最稳的批次单位（超过 ~250 条会撞 900s 超时）
+- 完整跑完 798 条 ≈ 1.5 小时（逐日循环）
+- 失败条目自动跳过不标记，下次增量自动重试；最终 0 残留
+- 图谱类型分布：tool 562 / project 515 / framework 421 / branch 243 / file 191 / class 121 ...
+- 核心实体（RikkaMinis/OpenMinis/账号/worker/记忆系统/脚本/设备）全部正确存在
+
+**后续**：增量模式 `python3 sync_kg.py` 日常跑即可（tokenrhythm flash-0731，2 秒/条）
+
+<!-- 2026-09-06 12:15:44 -->
+## 知识图谱备份安全性核查（2026-09-06）—— 图谱数据不会被备份导出
+
+
+用户问"删应用前做备份，图谱那部分会不会也被备份"。代码级核查结论：
+
+**图谱数据真正位置**：
+1. **live 数据**：`/root/.npm/_npx/<hash>/.../server-memory/dist/memory.jsonl`——PRoot 沙箱 **rootfs 内部**（不是 minis-global 共享层）
+2. **备份副本**：`/var/minis/shared/knowledge-graph-backup/memory.jsonl`——在**共享层**（宿主 filesDir/minis-global）
+
+**备份机制（ConfigBackup.kt）导出内容**：structured JSON 单文档，含 providers（可脱敏）/groups/envVars/skills/memoryFiles(daily logs + GLOBAL.md)/mcpServers(仅 servers.json 配置，不含私有数据)/chat 文本。**不含**：
+- 沙箱 rootfs 内容（PRoot 内部数据，备份代码根本无路径访问）
+- MCP server 运行时产生的数据文件（memory.jsonl）——只导出配置，OAuth/数据文件明确注释"not here / stays out"
+
+**结论**：删应用前备份 → 图谱 live 数据（rootfs 内）**不会进备份**；备份副本（/var/minis/shared 下）是否进备份取决于 MemoryRepository 导出的 memoryFileNames 范围——memory 目录导出的是 *目录下文件列表*，`knowledge-graph-backup/` 是 shared 下的**子目录**，不在 memory 目录，**大概率也不进备份**。真正会进备份的只是 **servers.json 配置**（含 $$VAR 引用 key，不含 value）。
+
+**安全性含义**：删应用 = 图谱全部丢失（live + 备份副本都随应用数据删除）。除非用户手动把 knowledge-graph-backup/ 导出到外部。**这是设计使然**——知识图谱是本地记忆，不进备份是隐私安全特性。想持久化需自行复制到 WebDAV/外部。
+
+<!-- 2026-09-06 13:40:50 -->
+## 主号→小号全量同步（2026-09-06 13:40，merge 350843f）
+
+
+**背景**：用户要求"把主号的成果与小号同步"。主号 logicflow-GYW/RikkaMinis main @ 5ebff693（09-05），小号 rikkaflow/RikkaMinis main @ 70f927d1（09-01）。merge-base = 7c6d0a64（09-01 回滚点）。主号领先 70 提交，小号领先 18 提交（分叉）。
+
+**执行方式**：本地 git 三路 merge（不用覆盖式同步）
+- 网络坑：HTTPS clone/tarball 经代理中断（early EOF/SSL 截断）。解法：`--depth 75` 浅克隆 + `git config http.version=HTTP/1.1` + `GIT_HTTP_LOW_SPEED_LIMIT/TIME` 生效；tarball 走 `github.com/<owner>/archive/refs/heads/main.tar.gz` 一次成功（codeload 会被限流截断）
+- 冲突 4 文件 8 块：ConfigBackup(3)/ChatFollowController(1)/ChatScreen(2)/ChatViewModel(2)，全部按"保小号独有、取主号新实现"原则解决
+- **小号独有功能手工移植到主号新架构**：
+  1. CompactSummaryCache 缓存 → 移植进 ChatSessionLifecycle.generateCompactSummaryWithSplitting（主号该函数在 ChatSessionLifecycle.kt 是顶层扩展，不在 ChatViewModel）
+  2. facts 查询注入（extractQueryTokens + searchFacts + formatFactsForPrompt）→ 移植进 ChatPromptAndTools.buildSystemPrompt（主号 FE-5 后 memory 注入区在这，不在 ChatViewModel）
+- dual-appid lab 身份（com.openminis.app.lab）在 merge 里自动保留（build-apk.yml 三路 merge 自动合并）
+- 小号独有 11 文件全保留：BackupStreamWriter/MemoryFact/CompactSummaryCache/ChatFactsQueryLogic/trace_eval_check.py + 6 测试
+- 主号新功能全吸收：thinking 引擎 port+Phase2 规则、FE-5 chat 重构、KeyRoulette、RootfsEventLog、SubagentPrefs、knobs 移除
+
+**推送**：gh_sync.sh push 用主号 token 推小号 → permission denied。解法：GIT_ASKPASS 脚本 echo $GITHUB_TOKEN_FULL_RIGHT + git push origin main（token 不落盘）
+
+**遗留**：小号 CI（Build APK run 34014565585）已验证 head_sha=350843f 后 in_progress，结论待查。
+
+**教训（可复用）**：
+- 跨账号 push：gh_sync.sh 只认 GITHUB_TOKEN（主号），推小号必须 GIT_ASKPASS + GITHUB_TOKEN_FULL_RIGHT
+- 三路 merge 时"小号独有功能在半重构代码库里的位置"必须重新定位（ChatViewModel → ChatSessionLifecycle/ChatPromptAndTools），不能假设原文件原位置
+- 检查功能是否真保留：grep 引用点而非只看文件存在（extractQueryTokens 零引用点 = 注入丢失的信号）
+
+<!-- 2026-09-06 14:02:27 -->
+## 小号同步 CI 闭环确认（2026-09-06 13:55）
+
+
+主号→小号 merge 350843f 的 CI **success**（run 34014575216，head_sha=350843f 核对一致）：
+- Run unit tests (full suite) 通过（合并后的小号+主号全部 JVM 测试）
+- T9 perf gate、instrumented compile gate、native clean build 全过
+- APK 打包 + 签名 + 发布成功（release android-latest → RikkaMinis-arm64-v8a.apk 14MB）
+- 注：同 commit push 自动触发 + 手动 dispatch 双 run，GitHub 自动 cancel 了一个（34014565585 cancelled），以 dispatch 那个为准——**以后触发 CI 别 push 后又 dispatch 同 commit，会浪费一个 run**（虽然 GitHub 会自动 cancel 重的）
+
+远端核查：merge commit parents = [70f927d(小号旧), 5ebff69(主号)]；小号独有 3 文件 + 主号新 3 文件全部存在。同步完成。
+
+<!-- 2026-09-06 15:53:49 -->
+## 商汤思考档 400 双 bug 修复闭环（2026-09-06，main @ 6b95929）
+
+<!-- 2026-09-06 15:55 -->
+
+**用户报障**：买的 API key（商汤 token.***.sensenova.cn），思考档开到"超高"报错、中低档正常；且按指引添加的自定义规则（CustomPath reasoning_effort=xhigh）保存成功但聊天仍 400。
+
+**双 bug 实锤（日志+实测钉死）**：
+1. **档位枚举 400**：商汤网关流式接口严格枚举 reasoning_effort ∈ {low, medium, high, xhigh, none}，**无 max**（实测：非流式接受 max，流式 400 "field ReasoningEffort invalid"）。而应用内置 deepseek-v4-relay 规则把 HIGH 及以上全映射成 "max"（deepSeekV4Effort）→ 高/超高/最大/极限全 400。同网关 glm-5.2/deepseek-v4-pro 不严格（实测 max/xhigh 都过），只有 deepseek-v4-flash 严格。
+2. **worker 规则缓存断链（真正 bug）**：ThinkingRuleResolver 自定义规则缓存只在主进程 ProviderRepository.ensureConfigLoaded 加载；`:modelservice` worker 从不加载 → 用户自定义规则在聊天流式/标题/压缩/QuickTest 全部静默失效。真机 logcat 铁证：`[resolve] rule=deepseek-v4-relay`（内置规则），预览却命中自定义规则。**与 knobs H1（0905）同根因同模式：跨进程字段只写了主进程侧。**
+
+**修复（分支 fix/worker-thinking-rules-cache @ 6b95929，7 文件 +310，已 ff 合并 main）**：
+1. `ModelExecutionDispatcher.buildRequestJson` 序列化 `thinking_rules`（ThinkingRuleCoding.encodeRuleJson 新函数）
+2. `ModelExecutionService` 流式+非流式两路径在 ProviderFactory.create 前调 `restoreThinkingRules(req)` → `ThinkingRuleResolver.restoreCustomRulesFromJson`
+3. OpenAIProvider host 表加 `token.***.sensenova.cn`/`api.sensenova.cn` 分支：ON 档一律 xhigh（网关最强合法档），OFF 发实测可关闭思考的 `reasoning_effort:"none"`，AUTO/supportsReasoning=false 跳过
+4. 测试：WorkerThinkingRulesRestoreTest(5) + ModelExecutionDispatcherTest(+1)，沙箱 JVM 15/15 绿
+
+**沙箱 JVM 编译经验（复用）**：/tmp/jvmtc/compile.sh 单次编译闭包；桩需同名包（androidx.room/kotlinx.serialization/androidx.compose.runtime/android.content/android.app/android.os/android.util/android.net/android.content.pm）；SharedPreferences 桩要全接口（getAll/getStringSet/float/contains/listener）；Context 要 filesDir+applicationInfo+getDataDir+getSharedPreferences；Context.applicationInfo 属性与 getApplicationInfo() 有 JVM 签名冲突（@JvmName 规避）；ModelExecutionService 用轻量 stub 类（real 文件 Android Service 依赖太重）；NetworkMonitor/AppLogger/OpenAIProvider/ProviderFactory 依赖太深裁出闭包；Index 注解用 vararg。jar 清单：junit/hamcrest/org.json/kotlin-stdlib/coroutines-1.9.0/okhttp/okio + 新下 kotlinx-serialization-core/json-jvm-1.6.3（其实用桩替代了，没用到）。
+
+**闭环状态**：分支 CI #1314 success（head_sha 6b95929 核对一致）→ 用户下载 zip 装包真机验证**超高档正常** ✅ → ff 合并 main → push 触发 release CI run 34020323169 in_progress（用户拍板不等）→ 本地+远端分支已删。
+
+**遗留**：release CI 结论未确认（bridge 查 status/main）。
+
+<!-- 2026-09-06 16:07:33 -->
+## 主号→小号同步 6b95929（2026-09-06 16:0x，merge 9047a8ef）
+
+
+**同步内容**：主号 main 6b95929（商汤思考档 400 双 bug 修复：worker thinking rules 跨进程恢复 + sensenova effort enum clamp，7 文件 +310）→ 小号 main。
+
+**执行方式**：本地三路 merge（alt/main 350843f + 主号 6b95929，merge-base=5ebff69），ort 策略零冲突全自动合并。merge commit **9047a8ef9a874ffca464cc2e735612d2c62ac9e6**（parents: 350843f + 6b95929）。修复点 5/5 验证落位（encodeRuleJson/thinking_rules 序列化/restoreThinkingRules×3/sensenova host×4/新测试 WorkerThinkingRulesRestoreTest 5 用例）。
+
+**推送**：GIT_ASKPASS + GITHUB_TOKEN_FULL_RIGHT 推 https://github.com/rikkaflow/RikkaMinis.git alt-sync-0906:main，350843f7..9047a8ef。远端 fetch 确认 HEAD=9047a8ef。
+
+**CI**：run #66 自动触发，head_sha=9047a8ef 核对一致，in_progress（elapsed 110s 时超时退出），**结论未确认**（用户拍板不等）。
+
+**遗留**：小号 CI run #66 结论待查（bridge 查 status 或 API 查 runs）。
+
+**可复用**：gh_ci_wait.sh 对已自动触发的 run 有幂等检测（"idempotent: active run #66 already targets main@..." 自动复用不重复 dispatch）；上次小号 Build APK 343/338 号 run 被 cancel 因为 push 自动触发+手动 dispatch 双 run。
+
+<!-- 2026-09-06 16:22:03 -->
+## 2026-09-06 16:22:03
+
+用户报"模型组负载均衡不生效，后台看不到其他模型被使用"。代码级核查（main @ 6b95929）：功能生效，但语义是**会话级轮转**不是请求级。GroupRouter.select 的 loadBalance 分支 = `usable[(stickyIdx+1) % size]`（锚点 providerRepository.lastUsedEntryId，SharedPreferences 全局持久）；轮转只在「新会话解析」时发生：draft loadSession / 用户选组（ChatModelRouting.selectGroup）。会话一旦绑定，binding JSON 写入 lastEntryId（ensureSession），之后 restoreFromBinding 走 preferredEntryId 优先 → 永久粘住该成员，同一会话/重开旧会话都不再轮转。健康回写（429 熔断/5xx/401）已在 AgentLoopEngine 1001-1124 接线。UI footer 文案其实是准确的（"将会话分摊到组内的各个模型"）。验证法：连开 3 个全新会话各发一条消息，顶部模型名应轮转；若不动才是 bug。另：标题/压缩子模型 resolveTitleSubEntry 不走 GroupRouter，永远用第一个成员。
+
+<!-- 2026-09-06 17:15:12 -->
+## Hermes Agent（Nous Research）吸收分析（2026-09-06）
+
+源码 /tmp/hermes/hermes-agent-main（20.6 万行 Python），报告 /var/minis/shared/hermes-agent-absorb-analysis.md。
+关键结论：harness 纪律型成熟。Top 吸收点：① verification_stop 验证守卫 harness 化（对应 evidence-discipline skill 的确定性化）；② micro-compaction 的「用户消息永不压缩」原则；③ prompt cache 不变量（辅助上下文注入 user message 不进 system prompt）——**待核查：RikkaMinis facts 注入在 buildSystemPrompt 是否每轮打破 prefix cache（哈希两轮比对）**；④ error_classifier 表驱动错误→恢复策略 + empty_response_guard（确定性空检测 + 成本感知重试预算 $0.25）；⑤ compaction recall eval 方法（召回率度量，判卷可用 tokenrhythm flash）；⑥ 小件：repetition_guard(61行)/turn_liveness/checkpoint shadow-git/FTS5 CJK bigram/curator 技能生命周期/两段式标题（instant 确定性 + LLM 升级，provenance derived<llm<user）。
+不建议：TUI/网关/Electron 形态类、credential_pool（KeyRoulette 够用）、tool_search（工具集还小）。
+记忆闭环参考：nudge 每 10 turn、turn 后 fork 审查直接落库、写入审批门控 staged→approve。
+
+<!-- 2026-09-06 17:30:51 -->
+## 小号同步 CI 遗留闭环确认（2026-09-06 晚）
+
+小号 rikkaflow/RikkaMinis main @ 9047a8ef（merge 6b95929）的 CI run 34020741695 **success**（head_sha=9047a8ef 核对一致）；主号 main @ 6b95929 的 release CI run 34020323169 **success**。9/6 全部同步/发布闭环完成：主号 6b95929（thinking rules worker restore + sensenova effort clamp）→ 小号 9047a8ef，两条线都是绿。
+
+<!-- 2026-09-06 18:16:04 -->
+## 2026-09-06 18:16:04
+
+负载均衡请求级改造 + 停止按钮竞态修复全链路闭环（main @ cd32795，分支 CI run 34026082245 head_sha 核对一致后 ff 合并，release CI 34026796848 in_progress 用户拍板不等，本地+远端分支已删）。
+
+**功能**：feat/per-message-load-balance 两提交。① 09d3965 per-message 轮转：GroupRouter.nextLoadBalanceMember（纯 JVM，锚点=会话 activeEntry 非全局 lastUsedEntryId，+1 回绕，健康门控，当前成员冷却/缺失时跳到第一可用）+ ChatViewModel.rotateForNewTurn 只挂 sendMessage + drainQueuedPrompts（覆盖 resumeQueueAfterCancel）两个新回合入口；retry/rerun/resume/手动选人不轮转；首条消息保持解析成员；每次轮转重写 binding lastEntryId。selectGroup/selectGroupEntry 设一次性 pendingEntryOverride（流式中不设，防 rerun 双服务）。UI 文案 7 语言改「每条新消息依次切换」。GroupRouterTest 44/44 绿（/tmp/lbtest.sh 可复跑）。② cd32795 停止按钮失效修复（用户日志 17:31:16 铁证：新回合 .466 置 true，旧任务 finally .467 翻 false，旧 streamJob===Job 引用守卫在 claim 窗口失效）：streamingClaimEpoch(@Volatile) 由 7 个入口在同步 _isStreaming=true 后发布，全部 _isStreaming=false 写点（stale-job 守卫分支 + setup-aborted 分支）加 epoch 门；cancelStream 保持无条件。
+
+**验证要点（用户真机未验）**：同会话连发 2-3 条消息，顶栏模型应逐条切换，logcat 过滤 "🔄LB"（ChatVMRouting tag）。前两份日志"没轮转"均非 bug：①只发首条消息（保持成员）②全程只 retry+手动选人（设计上不轮转）。
+
+<!-- 2026-09-06 19:09:48 -->
+## Hermes Tier-1 harness 四改动合并 main（2026-09-06 晚，main @ d7ee353e）
+
+分支 feat/hermes-tier1-harness → 分支 CI 34028554543 success（bridge 核对）→ ff 合并 main → push 触发 release CI（未等）→ 本地+远端分支已删。JVM 15/15 绿（沙箱 kotlinc 2.0.20，序列化需 -Xplugin=kotlinx-serialization-compiler-plugin）。
+四改动：① isRepetitionDominated（Hermes repetition_guard port，60+字符窗口重复≥50%/单行×5 → length-wall 续写改为中止）② 确定性空快出（usage.outputTokens==0 连续 2 次 → 跳过剩余 3-hit 重试，fail-open）③ 续写上限 MAX_LENGTH_WALL_TEXT_CONTINUES=4（工具回合重置）④ 会话级 system prompt 冻结 systemPromptForSession()（六调用点收口，loadSession/ensureSession 锚点失效，cache-aware deferred invalidation）。
+教训：① 测试构造反例——模板句只改数字会共享 60-char 窗口合法 trip（14 行 needed=11），"a".repeat(400) 本身就是退化形状；guard 语义与 Python 原版一致，是测试期望写错。② JVM 闭包：AgentLoopEngine 常量被影子文件替代时 CI 会编译真实版对照（AgentLoopConstants.kt shadow）。③ file_write 的 heredoc 内容含 `<<'EOF'` 标记时用 shell 建桩文件更稳。
+**用户真机未验**。**未做**：compaction recall eval（种子级）、Tier 2（错误分类表/content_filter fallback）。
+
+<!-- 2026-09-06 19:37:28 -->
+## EOF 断流静默停修复合并 main（2026-09-06 晚，main @ 1150e05f）
+
+用户症状：回答到一半突然停，手动发"继续"才接上。根因 = 中转商 SSE 断流（无 finish_reason）：旧 T-truncated-stream-retry 删半截答案重新生成（浪费 + 重发开头），第二次 EOF 静默 break 无任何提示。修复（分支 fix/eof-stub-continuation @ 1150e05f，CI 34030248271 success head_sha 核对一致，ff 合并 main，分支已删）：
+- ChatEofStubLogic.kt：eofStubReminder（network-stub 提醒，锚定断点禁重复，与 lengthWallReminder 文本可区分）+ looksLikeMidSentenceCut（纯诊断日志用，不 gate 行为）
+- 引擎：有可见内容的 EOF → 保留半截 + 注入 stub reminder 继续循环，上限 MAX_EOF_STUB_CONTINUES=2（工具回合重置）；EOF 参与 seam 去重（lastTurnWasLengthWall 在 finish_reason==null 时保留、干净边界清除）；无内容 EOF 保留旧一次性重试；超限给可见错误不再静默
+- didRetryTruncatedTurn 字段保留（空 EOF 路径仍用）；JVM 22/22 绿
+**用户真机未验**。**待办**：提前 EOS 检测（路径 B）等用户抓 logcat 确认中转商吐假 stop 再做；未回答完 Tier 2 收益问题（错误分类表/content_filter fallback/compaction recall eval）。
+
+<!-- 2026-09-06 19:40:09 -->
+## 会话交接（2026-09-06 晚）→ 交接文档 /var/minis/shared/hermes-tier1-handoff.md
+
+main @ 1150e05f（tier-1 harness 四改动 + EOF 断流静默停修复，双分支 CI 绿 ff 合并）。**main release CI run 34030771852 结论未等**——新会话开场先查 bridge /status/main。**用户真机未验**（EOF 自动续写/正常回归/prompt 冻结）。
+待办排序（已与用户对齐）：① compaction recall eval 种子（最高比/量）② content_filter→fallback ③ verification_stop ④ 错误分类表。路径 B（提前 EOS 检测）等用户抓 logcat 确认假 stop 再做。
+新会话开场动作：查 release CI 结论 → 读交接文档 → 请用户验证清单。
+
+<!-- 2026-09-06 20:06:30 -->
+## compaction recall eval 种子跑通（2026-09-06 晚）
+
+
+- 脚本 /var/minis/shared/compaction-recall-eval/compaction_eval.py（Hermes evals/compaction 移植 + RikkaMinis 压缩管线忠实 port），报告 REPORT.md，runs/run1
+- 记分卡（12 题，transcript=真实 50K 会话 c49317a7）：control 66.7% / **current 62.5%（kept 1428 tok = 2.8%）** / current_notrunc 45.8% / codex_style 20.8%。初步：现状压缩召回损失 ≈1 题噪声；500-char 截断没伤事实密度；codex 姿态无 recovery 臂不 viable
+- 教训：① tokenrhythm 必须绕代理直连（urllib 用 ProxyHandler({})，对齐 sync_kg --noproxy *）+ temperature 0.2，否则 429/限流；② deepseek-v4-flash JSON 输出尾部带杂质 → raw_decode 取第一个值，判卷要 dict、出题要 list 分开函数（共用解包会类型错乱）；③ minis-sessions-cli messages 用缩写 ID 返回 total=0（静默空），必须完整 session ID；④ 判卷语义 NOT IN CONTEXT+猜对=1 分时 flash 地板噪声 ±25 分，种子版看形状不看排序
+- 待办：固化版 20-30 题 × 3 transcript × 2-3 seed + codex_style recovery 臂（FTS5 keyword_search verbatim port）；**用户真机验证 EOF 修复**（main release CI 34030771852 已 success 19:49，android-latest 已更新）
+- Tier 2 进度：① compaction recall eval 种子 ✅ → ② content_filter fallback → ③ verification_stop → ④ 错误分类表
+
+<!-- 2026-09-06 20:15:35 -->
+## 真机验证状态更新（2026-09-06 晚，用户拍板）
+
+
+- **用户已装 android-latest（main @ 1150e05f release CI 绿的包）**，验证方式 = 日常使用即验证（用户明确："你的工作就在验证范围内，感觉挺顺利"），无需专门测试仪式
+- 本会话（40+ 条消息，工具密集+长文本混合）全程无断流无静默停 = 正常聊天回归 ✅
+- 中途 memory_write 后会话照常 = system prompt 冻结 deferred invalidation 实例通过 ✅
+- EOF 真实断流（中转商 SSE 故障）是低频事件，待自然触发时看 logcat TAG_STREAM（"EOF-truncated stream ... network-stub continuation"）；路径 B 前置证据也靠这个
+- 手机存储 97%：用户拍板暂时不管
+- 遗留待办序不变：② content_filter→fallback（已开工侦察）→ ③ verification_stop → ④ 错误分类表（等坑踩够）
+
+<!-- 2026-09-06 20:45:45 -->
+## "Stream error 手动重试"根因确诊（2026-09-06 晚，纯代码读穿，无需日志）
+
+
+**用户观察**：单选具体模型时 stream error 出手动重试按钮；模型组模式"似乎会自动重试"。
+
+**确诊根因链**（全部代码证实）：
+1. worker 流中抛错（如 IOException 代理掉线）→ OpenAIProvider:1415 `cancel("Stream error", mapError(e))`（mapError 已正确分类为 NetworkError）
+2. worker 外层 catch（ModelExecutionService ~251）写错误线 `{"t":"error","m":t.message}` — **只写 message，异常类型丢弃**，m="Stream error"
+3. ChatStreamOffloadHandler:199 重抛 `ModelStreamErrorException(m, hadChunks=emittedChunks)` — 纯 RuntimeException 无分类
+4. AgentLoopEngine catch（~785）：`isTransient = NetworkError||TransientError||5xx||workerDiedZeroChunk` — hadChunks=true 的 ModelStreamErrorException 全不命中 → **不自动重试**（hadChunks=false 有 zero-chunk 重试，0824 已修）
+5. `shouldFallback = isFallbackable || strategy==always` — 非 LLMError → false → **不走 fallback**
+6. → fatal → reportAgentLoopError → 横幅+重试按钮
+
+**设计注释（AgentLoopEngine ~806）**：hadChunks=true 不重发是为防"重复答案"（用户已看到半截）。**但该设计过时**：transient/fallback 路径已有 rollbackTurnBlocksTo 回滚机制，可安全自动重试（回滚半截再重发≠重复）。
+
+**"组模式会重试"的解释**：组/单模型的差别不在分类，在**失败时机**——首 chunk 前（hadChunks=false）失败 → 两模式都自动重试/换成员；流中（hadChunks=true）失败 → 两模式都 fatal 按手动。用户观察到的差异是时机分布，非模式差异。
+
+**修法（=Tier 2 ② 改形，1-1.5 会话）**：① worker 错误线加结构化字段 `{"t":"error","m":...,"kind":"network|rate_limit|provider|...","hadChunks":bool}`（向后兼容）；② handler 重抛带 kind 的类型化异常；③ 引擎：hadChunks=true+kind∈{network,transient} → 用 rollback 机制自动重试（同 transient 路径），kind=rate_limit → 直接 fallback。顺手把 "Stream error" 裸文案改走 LLMError.userMessage。
+
+<!-- 2026-09-06 21:30:41 -->
+## stream-error 自动恢复修复合并 main（2026-09-06 深夜，main @ 82735b14）
+
+
+- 分支 fix/stream-error-silent-recovery 两提交（e8500bb8 + 82735b14 编译修复）ff 合并 main；分支 CI 34035507023 success（head_sha 核对）；**release CI 34036206767 in_progress 未等**（用户拍板先交接）
+- 改动：错误线加 kind 字段（ChatStreamJsonl）+ worker cause-链分类器（ChatStreamErrorPolicyKind）+ 引擎决策（ChatStreamErrorPolicy：network/transient→自动重试，rate_limited/invalid_key/provider→直接 fallback，null→FATAL 旧行为）+ 引擎接线复用 transient 路径（rollback 半截防重复）+ 横幅人话 error_stream_interrupted 7 语言；JVM 16/16 绿
+- 交接文档 /var/minis/shared/stream-error-recovery-handoff.md（含用户真机验证清单：断流应见"重试 1/3"自动恢复而非横幅）
+- 教训：CI 首跑红 = ChatErrorHandling 扩展函数里裸 `string()` 不可解析——它是 AgentLoopHost 接口方法非 ChatViewModel 成员，必须 `context.getString`（ChatViewModel 有 context 字段）；沙箱闭包测试编不过这个错（不编该文件）
+- 用户已确认：日常使用即验证；EOF 静默停路径未自然复现，待观察
+
+<!-- 2026-09-06 21:49:21 -->
+## stream-error 自动恢复 + EOF 真机验证闭环（2026-09-06 深夜，用户确认）
+
+- 用户已真机验证通过：新装 android-latest（main @ 82735b14 release CI success）后，特意换了一个质量差的 API key 触发断流/错误场景，验证了 stream-error 自动恢复路径生效——应用是新装的那个，处理好了。
+- 教训复用（证据纪律）：用户侧 ground truth 确认后立即写入记忆，不能只靠 agent 侧"合并+发布"就认为闭环。用户之前的验证往往在"日常使用"里完成，agent 需主动记录而非等专门测试仪式。
+- 至此 stream-error 修复 + EOF 修复（1150e05f）代码→CI→发布→真机验证全链路闭环。
+- 下一步：推进 Tier 2 队列 ② content_filter→fallback。
+
+<!-- 2026-09-06 22:35:41 -->
+## Tier 2 ② content_filter→fallback 合并 main（2026-09-06 深夜，main @ f311aa99）
+
+- 分支 feat/content-filter-fallback 两提交（b8e8dda7 功能 + f311aa99 i18n 修复）ff 合并 main；分支 CI 34038969226 success（head_sha 核对一致）；release CI push 自动触发未等
+- 功能：ContentFilterFinishPolicy（新纯 JVM 分类器）统一识别三方言拦截 finish（Chat Completions content_filter / Gemini SAFETY/RECITATION/PROHIBITED_CONTENT/… / Anthropic refusal）→ 空输出时立即消费 fallback 链（entry 精确解析+toast+capsule flash+retry 预算重置，镜像错误路径语义）；有部分文本视为已完成回答不触发；链耗尽/单模型 → error_content_filtered 人话横幅（7 语言）；JVM 8/8 绿
+- **教训（重要，自陷坑）**：python 正则往 strings.xml 插字符串时用了 `m.start(2)` 替换锚点而非 `m.end(2)` 追加——把 error_stream_interrupted 从 7 个语言文件全删了，CI i18n 孤儿键检查抓到（run 34038722584 failure）。修复=恢复锚点行。以后插字符串必须 `src[:m.end(2)] + new + src[m.end(2):]` 并本地跑 `sh scripts/scan/scan.sh` 再提交
+- 本地 scan gate 4 项全过是提交前的有效门（four_way_sync + i18n + enum_parse + provider_boundary）
+- Tier 2 剩余：①固化（20-30 题×3 transcript×2-3 seed + codex recovery 臂）③ verification_stop ④ 错误分类表；用户倾向全部一起处理
+
+<!-- 2026-09-06 23:03:14 -->
+## 现场抓取：「回答到一半突然停」第2次自然复现（2026-09-06 23:0x，未捕获直接证据）
+
+- 用户报"回答着回答着突然停"——即当前会话（正在做 verification_stop 时）。立即用 android-shizuku-cli 抓 logcat（约停后 1-3 分钟内，多轮抓取）。
+- **抓到的全部事实**：本会话（glm-5.3 via agentrouter.org，turn 1→19+ 连续 tool 循环正常推进）ChatVMStream 只有例行 dispatching/offload 行；无 EOF-truncated、无 stream ended WITHOUT finish_reason、无 Transient/retry、无 cancel 异常、无 error/warn。缓冲区里"停的那次"的 provider 流日志已被后续 tool 调用的日志洪流冲掉（SSE delta 太密集，ring buffer 只剩最近几分钟）。
+- **教训（重要，方法论级）**：logcat ring buffer 在这种"agent 自己高频跑 logcat 命令"的会话里存不住历史——**要抓"突然停"的现场必须装持续采集器**（setsid 后台 logcat 流式落盘，Skill 里早有此法），事后补抓只能拿到被冲掉的结果。用户上次报同类症状也是没抓住。这是第 2 次错过现场。
+- **下次行动**：给用户挂常驻采集器（AppLogger 落盘或 setsid logcat -f 文件），等自然复现。路径 B（提前假 stop 检测）依旧等这个证据。
+- 注：用户之前真机验证结论"新包处理好了"对应的是差 key 的 stream-error 场景（错误路径），这次的"突然停"是另一形态：无错误的静默停（finish=stop 但内容戛然而止的假 stop 嫌疑最大，或 UI 层渲染停）。需要 logcat 佐证才能定性。
+
+<!-- 2026-09-06 23:15:06 -->
+## 突然停根因确诊（finish_reason=network_error 伪正常结束）+ verification_stop 分支推送（2026-09-06 深夜）
+
+- **用户抓到第三次复现的完整现场**（提前开了应用内日志，上传 /var/minis/attachments/uploads/minis-2026-09-06__3_.log）——前两次 ring buffer 被冲掉的教训后这次铁证在手
+- **根因链（日志+代码双源确诊）**：agentrouter.org（glm-5.3）把**自己的上游故障包装成正常 SSE finish 帧**——finish_reason="network_error" + 零内容 + 干净 [DONE]。无 EOF、无 error 线、无异常 → EOF 修复（管异常路径）和 stream-error 修复（管 error 线）**都不触发**；引擎走"no tool calls → break"；finishedCleanly=false（network_error 不在白名单）→ 连空响应提示都跳过 → 用户看到回答戛然而止无任何提示。日志铁证：`empty turn detected: turn=37 finishReason=network_error` + `no tool calls → break` + `runAgentLoop EXIT (loop body ended naturally)`
+- **修法**（并入 feat/verification-stop 分支）：ContentFilterFinishPolicy.isErrorShapedFinish（network_error/server_error/provider_error/service_unavailable/upstream_error/bad_gateway/timeout/gateway_timeout 精确集合）+ 引擎：错误形态 finish + 有半截内容 → network-stub 续写（共享 EOF 预算 2 次）；空内容 → 一次性重试再失败给 error_stream_interrupted 横幅。JVM 10/10 + 16/16 绿，scan gate 4 项过
+- **同分支还有 verification_stop（Tier 2 ③）**：VerificationStopPolicy 纯函数（命令分类 test/lint/typecheck/build/ad-hoc + 代码 vs 文稿路径判定）+ Pass 3 记账（file_write/file_edit 成功记 code path、验证形状 shell 记证据+PASS 记戳）+ turn 收尾门控（无新鲜通过证据的代码编辑 → 注入有界 nudge ≤2 次）。踩坑：分类器初版三 bug（env 前缀剥离后 return null / cat 误命中 / JUnitCore FQCN 不匹配）全部测试驱动修掉——TDD 价值再次验证
+- 分支 feat/verification-stop 已推送 + dispatch CI（结果未等）
+- 常驻 logcat 采集器仍在跑：/sdcard/Download/minis-stream-watch.log（2MB×4 ring）
+
+<!-- 2026-09-06 23:28:07 -->
+## Tier 2 ③ verification_stop + network_error 修复合并 main（2026-09-06 深夜，main @ 54a836ae）
+
+- 分支 feat/verification-stop 单提交 54a836ae ff 合并 main；分支 CI 34041687429 success（head_sha 核对一致）；release CI push 自动触发未等；本地+远端分支已删
+- 内容：① finish_reason=network_error 伪正常结束修复（isErrorShapedFinish 8 种精确集合；有半截→stub 续写共享 EOF 预算；空→一次性重试+失败横幅）② verification_stop 收尾门控（VerificationStopPolicy 纯函数分类 + Pass 3 记账 + turn 收尾无新鲜通过证据的代码编辑注入 nudge ≤2）
+- 待用户装新包验证："突然停"应变成自动接上/自动重试；采集器 /sdcard/Download/minis-stream-watch.log 仍在跑
+- Tier 2 全景：①固化（用户拍板降级不做）②✅已合并 ③✅已合并 ④继续等坑
+- 注意：verification_stop 上真机后，用户自己作为 agent 的会话里改代码收尾时会开始收到"先验证再总结"的 nudge——这是预期行为，用户应知晓
+
+<!-- 2026-09-06 23:34:55 -->
+## 收尾交接（2026-09-06 深夜）
+
+- 交接文档 /var/minis/shared/tier2-closeout-handoff.md（突然停三形态闭环总表 + Tier 2 最终状态 + backlog + 采集器重挂命令）
+- release CI 34042382100（main @ 54a836ae）in_progress，用户拍板不等——**新会话开场先查 bridge /status/main**，绿后确认 android-latest APK 更新即可
+- 用户拍板：本轮阶段性收尾。剩余=纯等待观察（network_error 修复真机验证、content_filter 自然复现、EOF 静默停观察）+ 纪律性搁置（Tier 2 ④ 等坑、codex recovery 臂留钩子）
+- 本日 main 推进：1150e05f（EOF）→ 82735b14（stream-error）→ f311aa99（content_filter fallback）→ 54a836ae（verification_stop + network_error 修复），四笔全部当日闭环
+- 验证提醒：装新包后 verification_stop 会让 agent 会话改代码收尾前多一轮验证 nudge（设计行为，用户已知）
 
 ---
 
