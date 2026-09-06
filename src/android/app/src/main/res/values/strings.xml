@@ -1520,6 +1520,7 @@
     <string name="fallback_switched_to">Switched to %1$s</string>
     <string name="error_output_truncated_repeated">The model hit the output length limit repeatedly. Try lowering the context limit in model settings, or ask the question in smaller parts.</string>
         <string name="error_content_filtered">The model\'s safety filter blocked this response. Try rephrasing, or switch to another model.</string>
+        <string name="error_stream_interrupted">The connection to the model was interrupted. The response could not be completed — try again.</string>
     <string name="error_empty_response_context_large">The model returned an empty response. The conversation context may be too large — try compacting or starting a new session.</string>
     <string name="error_empty_response_after_tool">The model returned no response after a tool result, even after a reminder. It may be overloaded — please retry or switch models.</string>
     <!-- [T-thinking-render-perf-android] Inline windowed-tail hint + large-content viewer entry. -->
