@@ -1,6 +1,7 @@
 package com.openminis.app.provider.thinking
 
 import com.openminis.app.data.model.ThinkingLevel
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -137,6 +138,31 @@ object ThinkingRuleResolver {
         customRulesCache = customRulesCache.toMutableMap().apply {
             if (rules.isEmpty()) remove(instanceId) else put(instanceId, rules)
         }
+    }
+
+    /**
+     * [T-worker-thinking-rules-restore] Restore one instance's custom rules from the
+     * serialized request-JSON field (`thinking_rules`) written by the dispatcher.
+     *
+     * The worker process (`:modelservice`) never touches ProviderRepository — its only
+     * inputs are the request file and EncryptedSharedPreferences — so the cache is empty
+     * there and every custom rule was silently ignored on the offloaded chat path
+     * (observed 2026-09-06: a user-authored sensenova clamp resolved to the BUILT-IN
+     * `deepseek-v4-relay` inside `:modelservice` while the rule preview in the main
+     * process resolved to the custom rule). This is the same cross-process sync class
+     * as the knobs fields: write side (main) and read side (worker) must both carry it.
+     *
+     * Returns the restored rule count for the request-run log.
+     */
+    @Synchronized
+    fun restoreCustomRulesFromJson(instanceId: String, field: JSONArray?): Int {
+        if (instanceId.isBlank() || field == null) return 0
+        val rules = (0 until field.length()).mapNotNull { i ->
+            val o = field.optJSONObject(i) ?: return@mapNotNull null
+            ThinkingRuleCoding.decodeRuleJson(o)
+        }
+        setCustomRules(instanceId, rules)
+        return rules.size
     }
 
     /** This instance's custom rules in priority order, or empty. */

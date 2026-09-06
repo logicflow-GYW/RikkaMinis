@@ -2320,6 +2320,32 @@ class OpenAIProvider constructor(
                 body.put("enable_thinking", level.isEnabled)
                 return
             }
+
+            // [T-sensenova-effort-enum] Sensenova's OpenAI-compat gateway
+            // (token.sensenova.cn / api.sensenova.cn) validates reasoning_effort
+            // against a STRICT {low, medium, high, xhigh, none} enum on the streaming
+            // path and rejects "max" with
+            //   400 field ReasoningEffort invalid, should be one of: low, medium, high, xhigh, none
+            // while deepseek-v4's built-in relay rule (and the generic wireEffort map)
+            // emit "max" for every tier above HIGH. Measured live 2026-09-06:
+            // non-streaming accepted max, streaming 400'd it — so the clamp applies
+            // unconditionally. deepseek-v4-flash was the observed victim; the same
+            // shape protects glm-5.2 / kimi-k3 / sensenova-* ids on this host.
+            "token.sensenova.cn", "api.sensenova.cn" -> {
+                if (level == ThinkingLevel.AUTO) return
+                if (model.supportsReasoning == false) return
+                if (!level.isEnabled) {
+                    // Measured live: `reasoning_effort:"none"` is accepted and really
+                    // stops the reasoning stream; enable_thinking is honoured but does
+                    // NOT suppress reasoning_content on deepseek-v4-flash.
+                    body.put("reasoning_effort", "none")
+                    return
+                }
+                // ON: clamp the tier onto the gateway's enum. HIGH and above all land
+                // on xhigh — the strongest tier the endpoint accepts.
+                body.put("reasoning_effort", "xhigh")
+                return
+            }
         }
 
         // [T-android-thinking-rules-phase2] Everything below the host table is now

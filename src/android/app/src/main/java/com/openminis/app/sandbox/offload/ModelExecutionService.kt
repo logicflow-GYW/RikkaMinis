@@ -575,6 +575,11 @@ class ModelExecutionService : Service() {
 
     private fun executeRun(requestJson: String, dir: File): String {
         val req = JSONObject(requestJson)
+        // [T-worker-thinking-rules-restore] Restore this instance's custom thinking
+        // rules from the request JSON BEFORE building the provider — the worker
+        // process never touches ProviderRepository, so the resolver cache is empty
+        // here otherwise. Mirrors the streaming path.
+        restoreThinkingRules(req)
 
         // ── Reconstruct ProviderInstance ──
         val instance = com.openminis.app.data.model.ProviderInstance(
@@ -840,6 +845,10 @@ class ModelExecutionService : Service() {
                 output!!.flush()
             }
             val req = JSONObject(requestJson)
+            // [T-worker-thinking-rules-restore] Same restore as executeRun — the
+            // streaming path is the main chat path, where the sensenova clamp bug
+            // was observed live.
+            restoreThinkingRules(req)
 
             // ── Reconstruct ProviderInstance (mirrors executeRun) ──
             val instance = com.openminis.app.data.model.ProviderInstance(
@@ -1322,6 +1331,23 @@ class ModelExecutionService : Service() {
 
     private fun jsonObjList(arr: JSONArray?): List<JSONObject> =
         if (arr == null) emptyList() else (0 until arr.length()).map { arr.getJSONObject(it) }
+
+    /**
+     * [T-worker-thinking-rules-restore] Restore the request's per-instance custom
+     * thinking rules into [com.openminis.app.provider.thinking.ThinkingRuleResolver]'s
+     * cache. No-op when the dispatcher omitted the field (no custom rules — the
+     * overwhelmingly common case, and byte-identical to the pre-fix behaviour).
+     */
+    private fun restoreThinkingRules(req: JSONObject) {
+        val count = com.openminis.app.provider.thinking.ThinkingRuleResolver
+            .restoreCustomRulesFromJson(
+                instanceId = req.optString("instance_id", "remote"),
+                field = req.optJSONArray("thinking_rules"),
+            )
+        if (count > 0) {
+            Log.i(TAG, "thinking rules restored: instance=${req.optString("instance_id", "remote")} count=$count")
+        }
+    }
 
     // ── passthrough parsing (mirrors ModelUseOffloadHandler) ──
 

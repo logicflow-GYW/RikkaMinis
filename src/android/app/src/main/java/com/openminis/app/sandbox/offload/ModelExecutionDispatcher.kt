@@ -9,6 +9,8 @@ import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.provider.thinking.ThinkingRuleCoding
+import com.openminis.app.provider.thinking.ThinkingRuleResolver
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
@@ -192,6 +194,19 @@ object ModelExecutionDispatcher {
             }
             if (thinkingLevel != ThinkingLevel.OFF) put("thinking_level", thinkingLevel.name)
             if (streaming) put("streaming", true)
+            // [T-worker-thinking-rules-restore] The worker process never touches
+            // ProviderRepository, so the resolver's custom-rule cache is empty there —
+            // user-authored rules were silently ignored on EVERY offloaded path (chat
+            // streaming, titles, compaction, QuickTest). Serialize this instance's
+            // rules alongside the level so the worker can restore the cache before
+            // building the provider. Same class of cross-process sync as the knobs
+            // fields (H1, 2026-09-05): write side and read side must both carry it.
+            val customRules = ThinkingRuleResolver.customRulesFor(instance.id)
+            if (customRules.isNotEmpty()) {
+                put("thinking_rules", JSONArray().apply {
+                    customRules.forEach { put(ThinkingRuleCoding.encodeRuleJson(it)) }
+                })
+            }
         }.toString()
     }
 

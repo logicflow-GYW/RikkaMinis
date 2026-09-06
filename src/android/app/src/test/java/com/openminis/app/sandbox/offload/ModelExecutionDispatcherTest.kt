@@ -5,6 +5,7 @@ import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ProviderCredential
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.model.ProviderType
+import com.openminis.app.provider.thinking.ThinkingRuleResolver
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -213,6 +214,57 @@ class ModelExecutionDispatcherTest {
         ))
         assertFalse(json.has("custom_headers"))
         assertFalse(json.has("custom_body_fields"))
+    }
+
+    @Test
+    fun `thinking rules serialized only when present`() {
+        // [T-worker-thinking-rules-restore] No custom rules in the resolver cache →
+        // the request must NOT carry the field (don't serialize defaults).
+        ThinkingRuleResolver.setCustomRules(sampleInstance().id, emptyList())
+        val plain = JSONObject(ModelExecutionDispatcher.buildRequestJson(
+            instance = sampleInstance(),
+            model = sampleModel(),
+            messages = emptyList(),
+            systemPrompt = null,
+            maxTokens = 4096,
+            temperature = null,
+            imageParts = emptyList(),
+            inputJson = "",
+            outputExt = null,
+        ))
+        assertFalse(plain.has("thinking_rules"))
+
+        // With a rule in the cache → the field appears and round-trips.
+        ThinkingRuleResolver.setCustomRules(
+            sampleInstance().id,
+            listOf(
+                com.openminis.app.provider.thinking.ThinkingRule(
+                    kind = com.openminis.app.provider.thinking.ThinkingRule.Kind.CUSTOM,
+                    scope = com.openminis.app.provider.thinking.ThinkingRule.Scope.ModelPattern("deepseek-v4*"),
+                    wireFormat = com.openminis.app.provider.thinking.ThinkingWireFormat.CustomPath(
+                        path = "reasoning_effort",
+                        values = mapOf(com.openminis.app.data.model.ThinkingLevel.HIGH to "xhigh"),
+                        offValue = "none",
+                    ),
+                    label = "sensenova ds clamp",
+                ),
+            ),
+        )
+        val withRules = JSONObject(ModelExecutionDispatcher.buildRequestJson(
+            instance = sampleInstance(),
+            model = sampleModel(),
+            messages = emptyList(),
+            systemPrompt = null,
+            maxTokens = 4096,
+            temperature = null,
+            imageParts = emptyList(),
+            inputJson = "",
+            outputExt = null,
+        ))
+        val arr = withRules.optJSONArray("thinking_rules")
+        assertTrue(arr != null && arr.length() == 1)
+        assertEquals("sensenova ds clamp", arr?.optJSONObject(0)?.optString("label"))
+        ThinkingRuleResolver.setCustomRules(sampleInstance().id, emptyList())
     }
 
     @Test

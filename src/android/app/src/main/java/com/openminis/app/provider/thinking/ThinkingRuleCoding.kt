@@ -170,4 +170,42 @@ object ThinkingRuleCoding {
             label = e.label,
         )
     }
+
+    // ---- [T-worker-thinking-rules-restore] request-JSON (cross-process) ----
+
+    /**
+     * Encode a custom rule into the request-JSON shape the worker restores from.
+     * Same field names as [toEntity] so the two serializers stay mentally aligned;
+     * a JSONObject (not the Room row) because the request file is the only channel
+     * across the process boundary.
+     */
+    fun encodeRuleJson(rule: ThinkingRule): JSONObject = JSONObject().apply {
+        put("label", rule.label)
+        when (val s = rule.scope) {
+            is ThinkingRule.Scope.AllModels -> put("scopeKind", "allModels")
+            is ThinkingRule.Scope.ModelPattern -> {
+                put("scopeKind", "modelPattern")
+                put("scopePattern", s.pattern)
+            }
+        }
+        encodeWireFormat(rule.wireFormat)?.let { put("wireFormatJson", it) }
+        encodeEcho(rule.reasoningEcho)?.let { put("reasoningEchoJson", it) }
+    }
+
+    /** Mirror of [toRule] over the request-JSON shape. Defensive: bad rows degrade to "no opinion" rules. */
+    fun decodeRuleJson(o: JSONObject): ThinkingRule? {
+        val label = o.optString("label", "")
+        if (label.isEmpty()) return null
+        val scope = when (o.optString("scopeKind", "allModels")) {
+            "modelPattern" -> ThinkingRule.Scope.ModelPattern(o.optString("scopePattern", "*"))
+            else -> ThinkingRule.Scope.AllModels
+        }
+        return ThinkingRule(
+            kind = ThinkingRule.Kind.CUSTOM,
+            scope = scope,
+            wireFormat = decodeWireFormat(o.optString("wireFormatJson", "").ifEmpty { null }),
+            reasoningEcho = decodeEcho(o.optString("reasoningEchoJson", "").ifEmpty { null }),
+            label = label,
+        )
+    }
 }
