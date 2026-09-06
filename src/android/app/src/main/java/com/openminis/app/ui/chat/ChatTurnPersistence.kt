@@ -236,6 +236,11 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
     val systemPrompt = baseSystemPrompt
 
     // _isStreaming was already set synchronously by the caller.
+    // [T-stale-finally-vs-new-claim] The caller already published the claim
+    // epoch right after its synchronous _isStreaming=true (covering the full
+    // claim window including the system-prompt build before this call);
+    // capture it here for the finally-block gate.
+    val launchEpoch = streamingClaimEpoch
     val launchedProvider = provider
     streamJob = viewModelScope.launch(Dispatchers.IO) {
         AppLogger.info(ChatViewModel.TAG_STREAM, "$label streamJob ENTER sid=$activeSessionId")
@@ -298,11 +303,25 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
         // already taken over would otherwise hide the Stop button while
         // the new turn is still streaming. See `var streamJob` KDoc and
         // XIN 2026-06-12 log (20:22:26 / 20:23:25).
-        if (streamJob === coroutineContext[Job]) {
+        //
+        // [T-stale-finally-vs-new-claim] Second gate, epoch-based. The
+        // reference-equality guard alone has a claim window: the new turn
+        // sets _isStreaming=true synchronously but only reassigns `streamJob`
+        // later (after DB sync + system-prompt build). A cancelled previous
+        // job's finally landing in that window passes the reference check
+        // (streamJob still points at IT) and flips the flag off under the
+        // brand-new turn — field-observed 2026-09-06 17:31:16 (third
+        // mid-stream switchModel-groupEntry: new turn claimed true at
+        // .466, old finally set false at .467, new loop then ran with the
+        // Stop button dead until the next state flip). Capturing the claim
+        // epoch at takeover and requiring THIS job's launch epoch to match
+        // closes that window.
+        val jobEpoch = launchEpoch
+        if (streamJob === coroutineContext[Job] && jobEpoch == streamingClaimEpoch) {
             AppLogger.info(ChatViewModel.TAG_STREAM, "$label _isStreaming=false (about to set)")
             _isStreaming.value = false
         } else {
-            AppLogger.info(ChatViewModel.TAG_STREAM, "$label _isStreaming SKIPPED (stale job; current=${streamJob?.hashCode()} this=${coroutineContext[Job]?.hashCode()})")
+            AppLogger.info(ChatViewModel.TAG_STREAM, "$label _isStreaming SKIPPED (stale job; current=${streamJob?.hashCode()} this=${coroutineContext[Job]?.hashCode()} jobEpoch=$jobEpoch claimEpoch=$streamingClaimEpoch)")
         }
         AppLogger.info(ChatViewModel.TAG_STREAM, "$label streamJob EXIT")
     }

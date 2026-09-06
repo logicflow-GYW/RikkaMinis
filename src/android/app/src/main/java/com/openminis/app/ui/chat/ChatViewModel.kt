@@ -471,6 +471,24 @@ class ChatViewModel(
     internal var streamEpoch = 0L
 
     /**
+     * [T-stale-finally-vs-new-claim] Snapshot of [streamEpoch] taken by the
+     * task that most recently CLAIMED the streaming state. New-turn entry
+     * points do `streamEpoch++` then `_isStreaming=true` synchronously, then
+     * set this — so between the increment and this snapshot, an OLD task's
+     * finally block must NOT flip `_isStreaming` back to false even if its
+     * `streamJob === coroutineContext[Job]` guard somehow still matches (the
+     * new task hasn't reassigned `streamJob` yet — that happens later, after
+     * DB sync + system-prompt build).
+     *
+     * Old-task finally blocks capture their epoch at job-launch time and
+     * compare: lower than [streamingClaimEpoch] ⇒ a newer turn has taken
+     * over ⇒ leave `_isStreaming` alone. Compare against the claim epoch,
+     * NOT against the raw increment: a stale finally racing BETWEEN the
+     * increment and the claim snapshot would still see the old value there.
+     */
+    @Volatile internal var streamingClaimEpoch = -1L
+
+    /**
      * 当前活跃回合的 epoch，供 ChatScreen 传入 [mergeStreamingOverlay] 做过滤。
      * 新回合入口递增后，旧回合的 trailing-flush / 残余 delta 因 epoch 不匹配被忽略，
      * 不再产生第二条"正在思考…"残留行。
@@ -2372,6 +2390,10 @@ class ChatViewModel(
         AppLogger.info(TAG_STREAM, "rerunFromToolBlock _isStreaming=true (sync, sid=$activeSessionId)")
         _isStreaming.value = true
         streamEpoch++
+        // [T-stale-finally-vs-new-claim] Publish the claim so an older job's
+        // finally can't flip _isStreaming off during the setup window.
+        streamingClaimEpoch = streamEpoch
+        val sendEpoch = streamingClaimEpoch
 
         viewModelScope.launch(Dispatchers.IO) {
             var streamLaunched = false
@@ -2488,8 +2510,13 @@ class ChatViewModel(
                 streamLaunched = runRerunStreamTail(initialProvider, "rerunFromToolBlock")
             } finally {
                 if (!streamLaunched) {
-                    AppLogger.info(TAG_STREAM, "rerunFromToolBlock _isStreaming=false (setup aborted)")
-                    _isStreaming.value = false
+                    // [T-stale-finally-vs-new-claim] Only clear under our own claim.
+                    if (sendEpoch == streamingClaimEpoch) {
+                        AppLogger.info(TAG_STREAM, "rerunFromToolBlock _isStreaming=false (setup aborted)")
+                        _isStreaming.value = false
+                    } else {
+                        AppLogger.info(TAG_STREAM, "rerunFromToolBlock _isStreaming=false SKIPPED (superseded; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch)")
+                    }
                 }
             }
         }
@@ -2571,6 +2598,10 @@ class ChatViewModel(
         AppLogger.info(TAG_STREAM, "retry _isStreaming=true (sync, sid=$activeSessionId)")
         _isStreaming.value = true
         streamEpoch++
+        // [T-stale-finally-vs-new-claim] Publish the claim so an older job's
+        // finally can't flip _isStreaming off during the setup window.
+        streamingClaimEpoch = streamEpoch
+        val sendEpoch = streamingClaimEpoch
 
         viewModelScope.launch(Dispatchers.IO) {
             // If setup throws before the inner streamJob is launched, the
@@ -2630,8 +2661,13 @@ class ChatViewModel(
             streamLaunched = runRerunStreamTail(provider, "retryFromMessage")
             } finally {
                 if (!streamLaunched) {
-                    AppLogger.info(TAG_STREAM, "retry _isStreaming=false (setup aborted)")
-                    _isStreaming.value = false
+                    // [T-stale-finally-vs-new-claim] Only clear under our own claim.
+                    if (sendEpoch == streamingClaimEpoch) {
+                        AppLogger.info(TAG_STREAM, "retry _isStreaming=false (setup aborted)")
+                        _isStreaming.value = false
+                    } else {
+                        AppLogger.info(TAG_STREAM, "retry _isStreaming=false SKIPPED (superseded; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch)")
+                    }
                 }
             }
         }
@@ -2903,6 +2939,10 @@ class ChatViewModel(
         // mergeStreamingOverlay. Must happen AFTER the sweep — the sweep
         // handles the old turn's remnants, the epoch seals this turn.
         streamEpoch++
+        // [T-stale-finally-vs-new-claim] Publish the claim so an older job's
+        // finally can't flip _isStreaming off during the setup window.
+        streamingClaimEpoch = streamEpoch
+        val sendEpoch = streamingClaimEpoch
 
         // T187: when the user is editing a previous message, truncate the
         // conversation from that message (inclusive) before persisting the
@@ -3045,19 +3085,25 @@ class ChatViewModel(
                     Log.d(TAG, "Cancelled while waiting for concurrency slot")
                 }
                 // [T-android-stale-streamjob-clears-isstreaming] guard — see
-                // `var streamJob` KDoc; identical pattern as runRerunStreamTail.
-                if (streamJob === coroutineContext[Job]) {
+                // `var streamJob` KDoc; identical pattern as runRerunStreamTail,
+                // plus the epoch gate against the claim window.
+                if (streamJob === coroutineContext[Job] && sendEpoch == streamingClaimEpoch) {
                     AppLogger.info(TAG_STREAM, "send _isStreaming=false (about to set)")
                     _isStreaming.value = false
                 } else {
-                    AppLogger.info(TAG_STREAM, "send _isStreaming SKIPPED (stale job)")
+                    AppLogger.info(TAG_STREAM, "send _isStreaming SKIPPED (stale job; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch)")
                 }
                 AppLogger.info(TAG_STREAM, "send streamJob EXIT")
             }
             } finally {
                 if (!streamLaunched) {
-                    AppLogger.info(TAG_STREAM, "send _isStreaming=false (setup aborted)")
-                    _isStreaming.value = false
+                    // [T-stale-finally-vs-new-claim] Only clear under our own claim.
+                    if (sendEpoch == streamingClaimEpoch) {
+                        AppLogger.info(TAG_STREAM, "send _isStreaming=false (setup aborted)")
+                        _isStreaming.value = false
+                    } else {
+                        AppLogger.info(TAG_STREAM, "send _isStreaming=false SKIPPED (superseded; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch)")
+                    }
                 }
             }
         }
@@ -3093,6 +3139,10 @@ class ChatViewModel(
         AppLogger.info(TAG_STREAM, "retryLast _isStreaming=true (sync, sid=$activeSessionId)")
         _isStreaming.value = true
         streamEpoch++
+        // [T-stale-finally-vs-new-claim] Publish the claim so an older job's
+        // finally can't flip _isStreaming off during the setup window.
+        streamingClaimEpoch = streamEpoch
+        val sendEpoch = streamingClaimEpoch
 
         viewModelScope.launch(Dispatchers.IO) {
             var streamLaunched = false
@@ -3182,19 +3232,25 @@ class ChatViewModel(
                     AppLogger.info(TAG_STREAM, "retryLast streamJob CANCELLED waiting for slot")
                     Log.d(TAG, "Cancelled while waiting for concurrency slot")
                 }
-                // [T-android-stale-streamjob-clears-isstreaming] guard.
-                if (streamJob === coroutineContext[Job]) {
+                // [T-android-stale-streamjob-clears-isstreaming] guard +
+                // epoch gate (see runRerunStreamTail).
+                if (streamJob === coroutineContext[Job] && sendEpoch == streamingClaimEpoch) {
                     AppLogger.info(TAG_STREAM, "retryLast _isStreaming=false (about to set)")
                     _isStreaming.value = false
                 } else {
-                    AppLogger.info(TAG_STREAM, "retryLast _isStreaming SKIPPED (stale job)")
+                    AppLogger.info(TAG_STREAM, "retryLast _isStreaming SKIPPED (stale job; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch)")
                 }
                 AppLogger.info(TAG_STREAM, "retryLast streamJob EXIT")
             }
             } finally {
                 if (!streamLaunched) {
-                    AppLogger.info(TAG_STREAM, "retryLast _isStreaming=false (setup aborted)")
-                    _isStreaming.value = false
+                    // [T-stale-finally-vs-new-claim] Only clear under our own claim.
+                    if (sendEpoch == streamingClaimEpoch) {
+                        AppLogger.info(TAG_STREAM, "retryLast _isStreaming=false (setup aborted)")
+                        _isStreaming.value = false
+                    } else {
+                        AppLogger.info(TAG_STREAM, "retryLast _isStreaming=false SKIPPED (superseded; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch)")
+                    }
                 }
             }
         }
@@ -3365,6 +3421,10 @@ class ChatViewModel(
             AppLogger.info(TAG_STREAM, "resume _isStreaming=true (sid=$activeSessionId)")
             _isStreaming.value = true
             streamEpoch++
+            // [T-stale-finally-vs-new-claim] Publish the claim so an older
+            // job's finally can't flip _isStreaming off during setup.
+            streamingClaimEpoch = streamEpoch
+            val sendEpoch = streamingClaimEpoch
             streamJob = launch(Dispatchers.IO) {
                 AppLogger.info(TAG_STREAM, "resume streamJob ENTER sid=$activeSessionId")
                 try {
@@ -3414,12 +3474,13 @@ class ChatViewModel(
                     AppLogger.info(TAG_STREAM, "resume streamJob CANCELLED waiting for slot")
                     Log.d(TAG, "Cancelled while waiting for concurrency slot (resume)")
                 }
-                // [T-android-stale-streamjob-clears-isstreaming] guard.
-                if (streamJob === coroutineContext[Job]) {
+                // [T-android-stale-streamjob-clears-isstreaming] guard +
+                // epoch gate (see runRerunStreamTail).
+                if (streamJob === coroutineContext[Job] && sendEpoch == streamingClaimEpoch) {
                     AppLogger.info(TAG_STREAM, "resume _isStreaming=false (about to set)")
                     _isStreaming.value = false
                 } else {
-                    AppLogger.info(TAG_STREAM, "resume _isStreaming SKIPPED (stale job)")
+                    AppLogger.info(TAG_STREAM, "resume _isStreaming SKIPPED (stale job; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch)")
                 }
                 AppLogger.info(TAG_STREAM, "resume streamJob EXIT")
             }

@@ -180,13 +180,24 @@ internal fun ChatViewModel.switchModelAndRerun(label: String) {
         AppLogger.info(ChatViewModel.TAG_STREAM, "$label _isStreaming=true (sync, sid=$activeSessionId)")
         _isStreaming.value = true
         streamEpoch++
+        // [T-stale-finally-vs-new-claim] Publish the claim SYNCHRONOUSLY
+        // here (not inside runRerunStreamTail, which runs after the
+        // system-prompt build): the epoch gate must already cover the whole
+        // claim window starting at _isStreaming=true.
+        streamingClaimEpoch = streamEpoch
         var streamLaunched = false
+        val switchEpoch = streamingClaimEpoch
         try {
             streamLaunched = runRerunStreamTail(provider, label)
         } finally {
             if (!streamLaunched) {
-                AppLogger.info(ChatViewModel.TAG_STREAM, "$label _isStreaming=false (setup aborted)")
-                _isStreaming.value = false
+                // [T-stale-finally-vs-new-claim] Only clear under our own claim.
+                if (switchEpoch == streamingClaimEpoch) {
+                    AppLogger.info(ChatViewModel.TAG_STREAM, "$label _isStreaming=false (setup aborted)")
+                    _isStreaming.value = false
+                } else {
+                    AppLogger.info(ChatViewModel.TAG_STREAM, "$label _isStreaming=false SKIPPED (superseded)")
+                }
             }
         }
     }
