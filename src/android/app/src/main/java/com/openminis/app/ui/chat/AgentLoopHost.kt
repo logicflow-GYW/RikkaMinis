@@ -143,6 +143,22 @@ internal interface AgentLoopHost {
         blocks: List<AssistantBlock>,
     )
 
+    /**
+     * [fix/budget-stop-silent-exit] Finalize a run interrupted by an execution
+     * budget stop (provider-attempt limit / turn limit / deadline). Same shape
+     * as [finalizeAtTurnLimit] — keep accumulated content, drop streaming
+     * state, attach an inline banner, mark resumable — but with a distinct
+     * message so the user can tell "ran out of runway" from "hit the 200-turn
+     * ceiling". [reason] is the t7BudgetStopReason string (e.g.
+     * "provider_attempt_limit").
+     */
+    fun finalizeBudgetStop(
+        assistantId: String,
+        text: String,
+        blocks: List<AssistantBlock>,
+        reason: String,
+    )
+
     // ── routing / retry bookkeeping ───────────────────────────────────────
     val toolLoopDetector: ToolLoopDetector
     val groupRouter: com.openminis.app.data.routing.GroupRouter

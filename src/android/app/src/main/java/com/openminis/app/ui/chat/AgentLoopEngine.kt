@@ -2383,8 +2383,26 @@ internal class AgentLoopEngine(
             }
         } else if (traceObserver.t7BudgetStopReason != null) {
             // T7-C: 预算耗尽（deadline / 计数上限）—— 显式终态，不是静默失败。
-            // 不经过 host.finalizeAtTurnLimit（那是 200 轮的 Resume 语义）。
-            AppLogger.warning(TAG_STREAM, "runAgentLoop EXIT — budget stop: $traceObserver.t7BudgetStopReason")
+            // [fix/budget-stop-silent-exit] A budget stop is NOT a clean
+            // completion: the run was interrupted mid-work (the model still
+            // owed the user a next tool call or a final answer). The old path
+            // only logged a WARN and returned "normal" — the UI tore down the
+            // streaming state with NO inline error and NO resume affordance,
+            // which users experience as "the reply just stopped" (field log
+            // 2026-09-07: 3 empty turns burned in 4ms against a refused
+            // provider-attempt gate, then a silent exit). Finalize EXACTLY
+            // like the turn-limit path: keep the accumulated text/blocks on
+            // screen, attach a human banner, and mark resumable so "Resume"
+            // (or a new message) continues with the budget reset.
+            AppLogger.warning(TAG_STREAM, "runAgentLoop EXIT — budget stop: $traceObserver.t7BudgetStopReason, finalizing as resumable")
+            withContext(Dispatchers.Main) {
+                host.finalizeBudgetStop(
+                    loopState.assistantId,
+                    loopState.accumulatedText,
+                    loopState.allToolBlocks,
+                    reason = traceObserver.t7BudgetStopReason ?: "unknown",
+                )
+            }
         } else {
             AppLogger.info(TAG_STREAM, "runAgentLoop EXIT (loop body ended naturally)")
         }

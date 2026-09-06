@@ -1112,6 +1112,8 @@ class ChatViewModel(
         }
         override fun finalizeAtTurnLimit(assistantId: String, text: String, blocks: List<AssistantBlock>) =
             this@ChatViewModel.finalizeAtTurnLimit(assistantId, text, blocks)
+        override fun finalizeBudgetStop(assistantId: String, text: String, blocks: List<AssistantBlock>, reason: String) =
+            this@ChatViewModel.finalizeBudgetStop(assistantId, text, blocks, reason)
         override val toolLoopDetector: ToolLoopDetector get() = this@ChatViewModel.toolLoopDetector
         override val groupRouter: com.openminis.app.data.routing.GroupRouter get() = this@ChatViewModel.groupRouter
         override val thinkingLevel: ThinkingLevel get() = _thinkingLevel.value

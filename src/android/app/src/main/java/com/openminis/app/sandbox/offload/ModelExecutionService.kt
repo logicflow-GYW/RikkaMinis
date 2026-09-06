@@ -104,16 +104,22 @@ class ModelExecutionService : Service() {
         private const val FIRST_CHUNK_TIMEOUT_MS = 30_000L
 
         /**
-         * TF-F P0-C: provider worker global serialization. `:modelservice` is a
-         * single Android process reused across requests; running two provider
-         * calls concurrently in it shares one unsafe lifecycle / one native-heap
-         * budget (the very thing the short-lived worker exists to contain). Until
-         * real evidence warrants more, requests execute ONE AT A TIME: each
-         * onStartCommand enqueues, and the first-queued acquires this mutex before
-         * dispatching to the provider. This keeps `activeRequests` (in-flight, in
-         * the provider) and the lifecycle transition honest.
+         * TF-F P0-C → feat/provider-exec-concurrency (2026-09-06): the
+         * provider-call serialization point. Originally a plain Mutex (all
+         * requests ONE AT A TIME — "until real evidence warrants more");
+         * that evidence arrived as multi-session users watching every other
+         * session freeze behind one long-thinking stream. Now a bounded
+         * slot pool of [ProviderExecSlotPolicy.MAX_CONCURRENT_PROVIDER_RUNS]
+         * permits: concurrent streams, queued remainder, observable queue
+         * depth. See [ProviderExecSlotPolicy] for the sizing rationale —
+         * the guard still covers exactly the provider network call region
+         * (unsafe lifecycle + native-heap budget sharing), just for N=2
+         * instead of N=1.
          */
-        private val executionMutex = kotlinx.coroutines.sync.Mutex()
+        private val executionSlots = kotlinx.coroutines.sync.Semaphore(
+            ProviderExecSlotPolicy.MAX_CONCURRENT_PROVIDER_RUNS,
+        )
+
     }
 
     /** Worker-side registry: number of requests currently being executed. */
@@ -174,8 +180,42 @@ class ModelExecutionService : Service() {
         }
 
         val runId = runIdOf(dir) ?: ""
+        // [feat/provider-exec-concurrency] Bounded queue admission. The slot
+        // pool bounds CONCURRENT execution, but without an admission bound the
+        // queue itself grows without limit (each queued request = a Thread + a
+        // run dir + a client poller). Reject beyond MAX_QUEUED_REQUESTS with a
+        // typed transient error line + result so the caller's auto-retry
+        // re-dispatches (typically onto a fresher worker) instead of pinning
+        // resources for the whole 30-min generation backstop.
+        val queuedNow = synchronized(lifecycleLock) {
+            queuedRequests.get()
+        }
+        if (queuedNow >= ProviderExecSlotPolicy.MAX_QUEUED_REQUESTS) {
+            Log.w(TAG, "rejecting runId=$runId: worker queue full (queued=$queuedNow)")
+            try {
+                runCatching { ModelExecutionRunDir.writeReady(dir) }
+                val streamOut = File(dir, STREAM_FILE)
+                runCatching {
+                    java.io.FileWriter(streamOut, true).use { w ->
+                        w.append(ChatStreamJsonl.errorLine(
+                            "provider worker queue full (queued=$queuedNow)",
+                            ChatStreamErrorPolicyKind.KIND_TRANSIENT,
+                        )).append('\n')
+                    }
+                }
+                writeResultAtomically(dir, JSONObject().apply {
+                    put("error", "worker_queue_full")
+                    put("message", "provider worker queue full (queued=$queuedNow)")
+                    put("exit_code", 3)
+                }.toString())
+                runCatching { ModelExecutionRunDir.writeTerminal(dir) }
+            } catch (_: Throwable) {}
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         // TF-H: register before enqueue so the completion thread always sees
         // this request when it re-checks under the lifecycle lock.
+
         synchronized(lifecycleLock) {
             activeRequests.incrementAndGet()
             queuedRequests.incrementAndGet()
@@ -245,7 +285,8 @@ class ModelExecutionService : Service() {
                         "uid=${procState.identity?.uid} startTicks=${procState.identity?.procStartTicks}",
                 )
 
-                executionMutex.withLock {
+                executionSlots.acquire()
+                try {
                     synchronized(lifecycleLock) { queuedRequests.decrementAndGet() }
                     try {
                         val requestText = requestFile.readText()
@@ -280,7 +321,10 @@ class ModelExecutionService : Service() {
                             }.toString())
                         } catch (_: Throwable) {}
                     }
+                } finally {
+                    executionSlots.release()
                 }
+
 
                 // ── TF-I: the ACK barrier + finalize run OUTSIDE the mutex ──
                 // The client must have consumed the result/stream before we
@@ -366,13 +410,21 @@ class ModelExecutionService : Service() {
     private fun finishRequestLocked(dir: File, generation: Long): ModelExecutionWorkerState {
         val runId = runIdOf(dir)
         // This request is done regardless of generation: the active count must
-        // always drop. Generation only gates the final-state/terminal/reap
-        // decision for the NEWEST request.
+        // always drop.
         activeRequests.decrementAndGet()
-        if (generation != requestGeneration.get()) {
-            Log.i(TAG, "finishRequest ignored (stale generation $generation vs ${requestGeneration.get()}), runId=$runId")
-            return lifecycleState
-        }
+        // [feat/provider-exec-concurrency] TF-H's generation gate is a LEAK
+        // under concurrent runs: with request A finishing after B already
+        // bumped requestGeneration, A's early return skipped BOTH its own
+        // terminal write AND the reap decision — under serialization B only
+        // arrived after A finished (so the gate never fired mid-flight), but
+        // with 2 slots A and B finish in any order and the non-newest
+        // finisher would strand the worker alive forever (no terminal for its
+        // run dir, no quiescence check from anyone). New rule: EVERY finisher
+        // finalizes its OWN run dir (state + terminal); the self-reap
+        // decision is re-taken by every finisher against the CURRENT
+        // counters, so the LAST one out correctly reaps a drained worker.
+        // The generation check survives ONLY inside maybeSelfReapLocked as a
+        // belt-and-suspenders re-verify before killProcess.
         val dirMissing = !dir.isDirectory
         if (dirMissing) {
             Log.w(
@@ -412,9 +464,13 @@ class ModelExecutionService : Service() {
         // TF-H: final state + terminal are written under the lock. terminal is
         // now the LAST write of the run — it must not appear while the worker
         // may still be ack-waiting.
+        // [feat/provider-exec-concurrency] EVERY finisher writes its own dir's
+        // terminal (not only the killer): the client's deletion protocol waits
+        // for terminal + worker-exit, and a non-newest finisher under
+        // concurrency must not leave its run dir without a terminal marker.
         ModelExecutionMailbox.writeState(dir, next, activeRequests.get(), unacked = pendingAckTokens.size)
+        ModelExecutionRunDir.writeTerminal(dir)
         if (ModelExecutionLifecycle.shouldKill(next, quiescence)) {
-            ModelExecutionRunDir.writeTerminal(dir)
             maybeSelfReapLocked(dir, next, quiescence, runId, generation)
         } else {
             Log.i(
@@ -429,10 +485,16 @@ class ModelExecutionService : Service() {
 
     /**
      * TF-H: called while holding [lifecycleLock]. Re-checks the CURRENT
-     * counters, pending ACK tokens, queued count, terminal marker, and that
-     * this is still the newest generation before allowing self-reap. Without
-     * this, the lock-free old code killed a worker right after a new request
-     * had revived it.
+     * counters, pending ACK tokens, queued count, and terminal marker before
+     * allowing self-reap. Without this, the lock-free old code killed a worker
+     * right after a new request had revived it.
+     *
+     * [feat/provider-exec-concurrency] The generation re-verify is now a
+     * belt-and-suspenders ONLY: the primary safety under concurrency is the
+     * counter re-check (active==0 && queued==0 && acks empty). Generation is
+     * still consulted — a request that arrived AFTER this finisher captured
+     * its snapshot must block the reap — but it no longer replaces the
+     * counter check (see finishRequestLocked KDoc for the leak it caused).
      */
     private fun maybeSelfReapLocked(
         dir: File,
@@ -441,14 +503,12 @@ class ModelExecutionService : Service() {
         runId: String?,
         capturedGeneration: Long,
     ) {
-        if (capturedGeneration != requestGeneration.get()) {
-            Log.i(TAG, "self-reap skipped (stale generation $capturedGeneration vs ${requestGeneration.get()}), runId=$runId")
-            return
-        }
+        val generationStale = capturedGeneration != requestGeneration.get()
         if (ModelExecutionLifecycle.shouldKill(state, quiescence) &&
             activeRequests.get() == 0 &&
             queuedRequests.get() == 0 &&
-            pendingAckTokens.isEmpty()
+            pendingAckTokens.isEmpty() &&
+            !generationStale
         ) {
             if (!ModelExecutionRunDir.terminalPresent(dir)) {
                 Log.w(
@@ -462,6 +522,11 @@ class ModelExecutionService : Service() {
             Log.i(TAG, "terminal written, quiescent self-reap, pid=${android.os.Process.myPid()}")
             ModelExecutionRunLog.log(dir, android.os.Process.myPid(), ModelExecutionRunLog.Phase.SELF_REAP, "quiescent", runId = runId)
             selfReap()
+        } else if (generationStale) {
+            // A newer request revived the worker after this finisher captured
+            // its snapshot — the reap decision belongs to that request's own
+            // finisher now. Not an error; log for diagnostics.
+            Log.i(TAG, "self-reap skipped (stale generation $capturedGeneration vs ${requestGeneration.get()}), runId=$runId")
         }
     }
 
@@ -526,6 +591,13 @@ class ModelExecutionService : Service() {
     }
 
     /**
+     * Max time the stale-key poison reap watchdog waits for concurrent runs to
+     * drain before giving up (bounded to half the generation backstop so a
+     * wedged sibling never pins a poisoned process forever).
+     */
+    private val POISON_REAP_WAIT_MS = 15 * 60_000L
+
+    /**
      * [T-stale-apikey-worker-cache] Stale-secrets abort. The main process
      * rewrote `provider_secrets` after this worker was born, so our cached
      * EncryptedSharedPreferences map may hold the OLD API key. We cannot
@@ -537,20 +609,43 @@ class ModelExecutionService : Service() {
      * death → transient → auto-retry re-dispatches → a NEW worker process
      * loads the fresh key on its first-ever prefs read.
      *
-     * Call sites run inside the request thread while holding executionMutex;
+     * Call sites run inside the request thread while holding a slot;
      * killing the process here also bypasses the ack barrier — correct,
      * because nothing was served. The run dir is left as an orphan for the
      * reaper (no terminal marker is ever written by a killed worker).
+     *
+     * [feat/provider-exec-concurrency] Under N>1 slots an immediate
+     * killProcess would take down CONCURRENT victims (another request may be
+     * mid-stream holding a second slot — killing the process severs it with
+     * no error line, no result, exactly the "stream truncated by an
+     * unrelated sibling" class of bug). New protocol:
+     *   - poison flag: no NEW request will read the (possibly stale) key
+     *     after this point (the admission check in onStartCommand rejects
+     *     with a transient error → the client's retry lands on a fresh
+     *     worker that reads the new key);
+     *   - THIS request emits a typed transient error line + result so its
+     *     own client sees an auto-retryable failure (not a silent
+     *     worker-death);
+     *   - delayed self-reap: a watchdog thread waits for the OTHER slots to
+     *     drain (activeRequests → 0) then kills the process. The retry's
+     *     re-dispatch may revive this process first (onStartCommand flips
+     *     poisoned back to false after a fresh key check? No — the retry
+     *     hits a NEW process: admission rejection is sticky) — the delayed
+     *     kill only fires if nobody else is using the process.
      */
+    @Volatile
+    private var keyCachePoisoned = false
+
     private fun abortOnStaleKeyCache(runId: String?, dir: File?) {
         val pid = android.os.Process.myPid()
+        keyCachePoisoned = true
         Log.w(
             TAG,
             "stale_key_cache: provider_secrets.xml rewritten by the main process after this " +
-                "worker started — killing worker pid=$pid runId=$runId so the retry spawns a " +
-                "fresh process that reads the new key",
+                "worker started — poisoning worker pid=$pid runId=$runId (transient error now, " +
+                "delayed self-reap after concurrent runs drain)",
         )
-        // Log BEFORE kill so classifyWorkerDeath's tail summary shows the cause.
+        // Log the cause so classifyWorkerDeath's tail summary can show it.
         if (dir != null) {
             ModelExecutionRunLog.log(
                 dir, pid,
@@ -559,8 +654,25 @@ class ModelExecutionService : Service() {
                 runId = runId,
             )
         }
-        selfReap()
+        // Delayed self-reap: wait for concurrent runs to drain, then die so
+        // the next dispatch births a fresh process. Bounded — even if a
+        // concurrent stream runs to the full 30-min backstop, the watchdog
+        // gives up and lets the normal finishRequest path decide.
+        Thread {
+            var waitedMs = 0L
+            while (waitedMs < POISON_REAP_WAIT_MS) {
+                try { Thread.sleep(500) } catch (_: InterruptedException) { return@Thread }
+                if (activeRequests.get() == 0) {
+                    Log.i(TAG, "poisoned worker self-reaping (drained), pid=$pid")
+                    selfReap()
+                    return@Thread
+                }
+                waitedMs += 500
+            }
+            Log.w(TAG, "poison reap watchdog expired (${POISON_REAP_WAIT_MS}ms) — leaving lifecycle to finishRequest, pid=$pid")
+        }.apply { isDaemon = true }.start()
     }
+
 
     /**
      * TF-H: non-streaming runs ack like streaming ones once the client wrote

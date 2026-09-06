@@ -393,8 +393,11 @@ internal class ChatAgentTraceObserver(
         // ── T7-A: 观察预算默认上限（advisory 观察用，不阻断任何行为）──
         // 这些数字只用于 trace 记录当前消耗进度（budget_consume/refuse 事件），
         // 不改变生产行为；T7-C 接入 enforced 模式前由 T4-B/T10 依据真实基线校准。
+        // [fix/budget-stop-silent-exit] provider attempts 64→128：真实长任务基线
+        // （2026-09-07 field log：28 分钟 agent 会话烧满 64 次，任务仍在中途）
+        // 证明 64 在 enforced 语义下会截断合法长任务。128 = 2× 观测到的真实峰值。
         internal const val T7_OBSERVE_MAX_TURNS = 200
-        internal const val T7_OBSERVE_MAX_PROVIDER_ATTEMPTS = 64
+        internal const val T7_OBSERVE_MAX_PROVIDER_ATTEMPTS = 128
         internal const val T7_OBSERVE_MAX_TOOL_CALLS = 128
         internal const val T7_OBSERVE_MAX_SHELL_COMMANDS = 128
         internal const val T7_OBSERVE_MAX_COMPACTION_CALLS = 8

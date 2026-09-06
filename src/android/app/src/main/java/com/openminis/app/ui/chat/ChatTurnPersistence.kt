@@ -118,6 +118,46 @@ internal fun ChatViewModel.finalizeAtTurnLimit(
     _canResume.value = true
 }
 
+/**
+ * [fix/budget-stop-silent-exit] Budget-stop finalization — same teardown
+ * shape as [finalizeAtTurnLimit] with a budget-specific banner. The run was
+ * interrupted mid-work by an execution budget (provider attempts / turns /
+ * deadline), NOT by the model finishing: without this, the loop exited with
+ * only a logcat WARN and the UI silently dropped the streaming state — the
+ * field-reported "reply just stops" (2026-09-07 log: provider_attempt_limit
+ * after 64 attempts, 3 empty turns burned in 4ms, zero user-visible signal).
+ */
+internal fun ChatViewModel.finalizeBudgetStop(
+    assistantId: String,
+    text: String,
+    blocks: List<AssistantBlock>,
+    reason: String,
+) {
+    updateAssistantMessage(
+        assistantId, text, false, blocks,
+        isAwaitingModelResponse = false,
+    )
+    clearStreamFlushState(assistantId)
+    if (_streamingById.value.containsKey(assistantId)) {
+        _streamingById.value = _streamingById.value - assistantId
+    }
+    val detail = when (reason) {
+        "provider_attempt_limit" ->
+            "the run reached its provider-call limit (64 calls)"
+        "turn_limit" ->
+            "the run reached its turn limit"
+        "deadline_reached" ->
+            "the run reached its time limit"
+        else -> "an execution budget was exhausted ($reason)"
+    }
+    setInlineError(
+        "Run paused: $detail. Your work so far is kept — tap Resume to " +
+        "continue with a fresh budget, or send a new message to start over.",
+    )
+    _canResume.value = true
+}
+
+
 
 /** Retry the last agent turn (triggered by inline error Retry button).
  *
