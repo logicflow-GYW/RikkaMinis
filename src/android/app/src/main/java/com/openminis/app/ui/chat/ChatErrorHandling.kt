@@ -74,7 +74,7 @@ internal fun ChatViewModel.reportAgentLoopError(e: Exception) {
         // failure stays visible in logcat (Minis.ModelExecution* tags).
         val errSummary = when (errActual) {
             is com.openminis.app.sandbox.offload.ModelStreamErrorException ->
-                string(R.string.error_stream_interrupted)
+                context.getString(R.string.error_stream_interrupted)
             is com.openminis.app.data.model.LLMError -> errActual.userMessage
             else -> errActual.message?.takeIf { it.isNotBlank() } ?: "Unknown error"
         }
