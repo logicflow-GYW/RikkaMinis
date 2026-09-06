@@ -332,7 +332,7 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
                 // rationale as the send path's finally: whatever the
                 // worker reported while queued must not leak into the
                 // next run's typing indicator.
-                _queueWaitingAhead.value = -1
+                resetQueueWaitingAhead()
                 // [T-android-overlay-reply-status-34599] Surface
                 // the assistant's most recent reply text to the
                 // overlay BEFORE setInactive so the post-completion

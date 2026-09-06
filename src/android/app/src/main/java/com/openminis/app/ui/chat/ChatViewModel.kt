@@ -737,6 +737,17 @@ class ChatViewModel(
      */
     private val _queueWaitingAhead = MutableStateFlow(-1)
     val queueWaitingAhead: StateFlow<Int> = _queueWaitingAhead.asStateFlow()
+
+    /**
+     * [audit-0907 B2] Reset the queue-position state. Every streamJob entry
+     * point's finally calls this (send / retryLast / resume /
+     * runRerunStreamTail / resumeQueueAfterCancel) — the field itself stays
+     * private so extension-file code can only reset, never set.
+     */
+    internal fun resetQueueWaitingAhead() {
+        _queueWaitingAhead.value = -1
+    }
+
     val isStreaming: StateFlow<Boolean> = _isStreaming.asStateFlow()
 
     /**
@@ -3141,7 +3152,7 @@ class ChatViewModel(
                         // [feat/provider-exec-concurrency] Reset queue-position
                         // state — the run is over, whatever it showed must not
                         // leak into the next one.
-                        _queueWaitingAhead.value = -1
+                        resetQueueWaitingAhead()
                         // [T-android-overlay-reply-status-34599] Surface
                         // the assistant's most recent reply text to the
                         // overlay BEFORE setInactive so the post-completion
@@ -3294,7 +3305,7 @@ class ChatViewModel(
                         // rationale as the send path's finally: whatever the
                         // worker reported while queued must not leak into the
                         // next run's typing indicator.
-                        _queueWaitingAhead.value = -1
+                        resetQueueWaitingAhead()
                         // [T-android-overlay-reply-status-34599] Surface
                         // the assistant's most recent reply text to the
                         // overlay BEFORE setInactive so the post-completion
@@ -3541,7 +3552,7 @@ class ChatViewModel(
                         // rationale as the send path's finally: whatever the
                         // worker reported while queued must not leak into the
                         // next run's typing indicator.
-                        _queueWaitingAhead.value = -1
+                        resetQueueWaitingAhead()
                         // [T-android-overlay-reply-status-34599] Surface
                         // the assistant's most recent reply text to the
                         // overlay BEFORE setInactive so the post-completion
