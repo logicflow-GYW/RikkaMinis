@@ -955,7 +955,7 @@ class ModelExecutionService : Service() {
                 // error line so the client surfaces a transient failure (and
                 // its auto-retry re-dispatches) instead of hanging on a
                 // stream that will never produce chunks.
-                appendLine(ChatStreamJsonl.errorLine(WorkerKeyFreshness.STALE_KEY_CACHE))
+                appendLine(ChatStreamJsonl.errorLine(WorkerKeyFreshness.STALE_KEY_CACHE, ChatStreamErrorPolicyKind.KIND_TRANSIENT))
                 return
             }
             val apiKey = try {
@@ -964,7 +964,7 @@ class ModelExecutionService : Service() {
             } catch (_: Exception) { "" }
             ModelExecutionRunLog.log(dir, android.os.Process.myPid(), ModelExecutionRunLog.Phase.REQUEST_PARSED, "streaming=true model=${model.id}", runId = runIdOf(dir))
             if (apiKey.isEmpty()) {
-                appendLine(ChatStreamJsonl.errorLine("missing_api_key"))
+                appendLine(ChatStreamJsonl.errorLine("missing_api_key", ChatStreamErrorPolicyKind.KIND_INVALID_KEY))
                 writeResultAtomically(dir, JSONObject().apply {
                     put("error", "missing_api_key")
                     put("message", "No API key configured for ${instance.label}.")
@@ -1068,6 +1068,13 @@ class ModelExecutionService : Service() {
             val cancelled = t is ModelExecutionCancelledException
             Log.w(TAG, "stream failed: ${t.message}", t)
             ModelExecutionRunLog.log(dir, android.os.Process.myPid(), ModelExecutionRunLog.Phase.STREAM_ERROR, t.message ?: t.javaClass.simpleName, runId = runId)
+            // [fix/stream-error-silent-recovery] Stamp a machine-readable kind
+            // on the error line: the client's engine can then auto-retry
+            // transient failures (network drop / relay reset) instead of
+            // surfacing a hard banner. kindForLlmError walks the cause chain,
+            // so provider-layer `cancel("Stream error", cause=NetworkError)`
+            // still resolves to "network" after unwrapping.
+            val errKind = ChatStreamErrorPolicyKind.of(t)
             // [TF-B cancel contract] Acknowledge a cancel before the client may
             // delete the dir.
             if (cancelled) {
@@ -1075,7 +1082,7 @@ class ModelExecutionService : Service() {
             }
             try {
                 output?.let { out ->
-                    out.append(ChatStreamJsonl.errorLine(t.message ?: "stream_failed")).append('\n')
+                    out.append(ChatStreamJsonl.errorLine(t.message ?: "stream_failed", errKind)).append('\n')
                     out.flush()
                 }
             } catch (_: Throwable) {}

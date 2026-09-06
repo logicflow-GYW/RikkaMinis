@@ -1223,6 +1223,7 @@
     <string name="error_tech_detail">Технические детали</string>
     <string name="fallback_switched_to">Переключено на %1$s</string>
     <string name="error_output_truncated_repeated">Модель неоднократно достигала предела длины вывода. Попробуйте снизить лимит контекста в настройках модели или разбейте вопрос на более мелкие части.</string>
+    <string name="error_stream_interrupted">Соединение с моделью прервано, ответ не был завершён — попробуйте снова.</string>
     <string name="error_empty_response_context_large">Модель вернула пустой ответ. Контекст беседы может быть слишком большим — попробуйте сжать его или начать новую сессию.</string>
     <string name="error_empty_response_after_tool">Модель не вернула ответ после результата инструмента, даже после напоминания. Возможно, она перегружена — попробуйте ещё раз или смените модель.</string>
     <string name="thinking_truncated_hint">Показаны последние %1$dK из %2$dK символов</string>

@@ -199,6 +199,11 @@ object ChatStreamOffloadHandler {
                                         throw ModelStreamErrorException(
                                             ChatStreamJsonl.errorMessage(line),
                                             hadChunks = emittedChunks,
+                                            // [fix/stream-error-silent-recovery] carry the
+                                            // worker's machine-readable kind through so
+                                            // the engine can auto-retry transient
+                                            // failures; null for legacy untyped lines.
+                                            kind = ChatStreamJsonl.errorKind(line),
                                         )
                                     }
                                     ChatStreamJsonl.decode(line)?.let {

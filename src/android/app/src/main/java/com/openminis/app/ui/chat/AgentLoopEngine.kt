@@ -818,10 +818,30 @@ internal class AgentLoopEngine(
                         ((actual is com.openminis.app.sandbox.offload.ModelWorkerDiedException) ||
                             (actual is com.openminis.app.sandbox.offload.ModelStreamErrorException)) &&
                         (actual as? com.openminis.app.sandbox.offload.ModelExecutionStreamException)?.hadChunks == false
+                    // [fix/stream-error-silent-recovery] A mid-stream failure
+                    // (hadChunks=true) used to fall through to the fatal path:
+                    // the worker→client error line carried no type info, so the
+                    // engine couldn't tell a proxy blip from a fatal error and
+                    // surfaced "Stream error" + a manual retry button. The
+                    // worker now stamps a machine-readable kind on the error
+                    // line; classify() maps it. AUTO_RETRY is safe even with
+                    // partial output on screen — rollbackTurnBlocksTo (below)
+                    // rewinds the half-delivered text before the resend, so no
+                    // duplicate is possible. FALLBACK_NOW skips same-provider
+                    // retries (rate-limit / bad-key members can't self-heal).
+                    // Null kind (legacy worker) → FATAL, byte-identical to the
+                    // old behavior.
+                    val streamErrorAction =
+                        (actual as? com.openminis.app.sandbox.offload.ModelStreamErrorException)
+                            ?.let { ChatStreamErrorPolicy.classify(it.kind) }
+                    val streamErrorAutoRetry = streamErrorAction == ChatStreamErrorPolicy.Action.AUTO_RETRY
+                    val streamErrorFallbackNow =
+                        streamErrorAction == ChatStreamErrorPolicy.Action.FALLBACK_NOW
                     val isTransient = actual is com.openminis.app.data.model.LLMError.NetworkError ||
                         actual is com.openminis.app.data.model.LLMError.TransientError ||
                         is5xx ||
-                        workerDiedZeroChunk
+                        workerDiedZeroChunk ||
+                        streamErrorAutoRetry
                     // [T-fallback-retry-original] Restored original behavior: all members
                     // (including fallback chain members) get bounded retries on transient
                     // errors. This absorbs intermittent stream resets that the fallback
@@ -938,7 +958,17 @@ internal class AgentLoopEngine(
                     // group immediately — rate limits (429), bad/expired API keys
                     // (401) and provider errors (4xx/5xx, incl. per-provider 403
                     // quota). `always` additionally falls back on every error.
+                    // [fix/stream-error-silent-recovery] TYPED stream errors
+                    // mirror the LLMError semantics they were classified from:
+                    //  - rate_limited / invalid_key / provider kinds skip
+                    //    same-provider retries entirely (retrying a member
+                    //    that answered "you can't use me" is wasted latency);
+                    //  - network / transient kinds retry first, then fall
+                    //    back after exhaustion — exactly how a NetworkError
+                    //    flows through this catch block.
                     val shouldFallback =
+                        streamErrorFallbackNow ||
+                        streamErrorAutoRetry ||
                         (actual as? com.openminis.app.data.model.LLMError)?.isFallbackable == true ||
                         fallbackStrategy == com.openminis.app.data.model.FallbackStrategy.always
                     // T7-A: 观察 —— provider 尝试失败需 fallback（T5 ProviderAttemptFinished(FALLBACK_FAILURE)）

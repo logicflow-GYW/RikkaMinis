@@ -109,9 +109,19 @@ object ChatStreamJsonl {
     /** Sentinel line marking the end of a stream. */
     const val DONE_LINE: String = """{"t":"done"}"""
 
-    /** Error line template (m = message). */
+    /** Error line template (m = message, k = optional machine-readable kind). */
     fun errorLine(message: String): String =
         JSONObject().put("t", "error").put("m", message).toString()
+
+    /**
+     * Typed error line: carries a machine-readable kind alongside the human
+     * message so the client can classify the failure WITHOUT re-parsing raw
+     * error text. `k` is optional — consumers must treat a missing kind as
+     * "unknown" (backward compatible with older workers that only write m).
+     */
+    fun errorLine(message: String, kind: String?): String =
+        JSONObject().put("t", "error").put("m", message)
+            .putOpt("k", kind?.takeIf { it.isNotBlank() }).toString()
 
     /** Decode a single line back into a chunk, or null if unparseable. */
     fun decode(line: String): LLMStreamChunk? {
@@ -177,4 +187,12 @@ object ChatStreamJsonl {
     /** Extract the message from an error line. */
     fun errorMessage(line: String): String =
         runCatching { JSONObject(line.trim()).optString("m", "stream_failed") }.getOrElse { "stream_failed" }
+
+    /**
+     * Extract the machine-readable kind from an error line ("network",
+     * "rate_limited", …), or null when absent (legacy worker / untyped path).
+     * [ChatStreamErrorPolicy] decides how to treat a null kind.
+     */
+    fun errorKind(line: String): String? =
+        runCatching { JSONObject(line.trim()).optString("k", "").ifEmpty { null } }.getOrElse { null }
 }

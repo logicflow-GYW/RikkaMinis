@@ -1,6 +1,7 @@
 package com.openminis.app.ui.chat
 
 import android.util.Log
+import com.openminis.app.R
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.provider.LLMProvider
 
@@ -67,9 +68,16 @@ internal fun ChatViewModel.reportAgentLoopError(e: Exception) {
         setInlineError(e.summary, e.detail)
     } else {
         val errActual = unwrapFlowException(e)
-        val errSummary = (errActual as? com.openminis.app.data.model.LLMError)?.userMessage
-            ?: errActual.message?.takeIf { it.isNotBlank() }
-            ?: "Unknown error"
+        // [fix/stream-error-silent-recovery] A stream interruption reaching the
+        // banner means auto-retry AND fallback both failed — show a human
+        // summary, not the raw "Stream error" wrap message. The original
+        // failure stays visible in logcat (Minis.ModelExecution* tags).
+        val errSummary = when (errActual) {
+            is com.openminis.app.sandbox.offload.ModelStreamErrorException ->
+                string(R.string.error_stream_interrupted)
+            is com.openminis.app.data.model.LLMError -> errActual.userMessage
+            else -> errActual.message?.takeIf { it.isNotBlank() } ?: "Unknown error"
+        }
         setInlineError(errSummary, errActual.message)
     }
 }

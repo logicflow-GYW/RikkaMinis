@@ -70,5 +70,14 @@ class ModelWorkerDiedException(
 }
 
 /** The worker completed but wrote an explicit error line in the stream. */
-class ModelStreamErrorException(message: String, hadChunks: Boolean) :
-    ModelExecutionStreamException(message, null, hadChunks)
+class ModelStreamErrorException(
+    message: String,
+    hadChunks: Boolean,
+    /**
+     * Machine-readable failure kind from the worker's error line ("network",
+     * "rate_limited", …), or null when the worker didn't classify it (legacy
+     * error lines, [ModelExecutionService] untyped paths). Decoded by
+     * [ChatStreamErrorPolicy] — the engine never string-matches messages.
+     */
+    val kind: String? = null,
+) : ModelExecutionStreamException(message, null, hadChunks)
