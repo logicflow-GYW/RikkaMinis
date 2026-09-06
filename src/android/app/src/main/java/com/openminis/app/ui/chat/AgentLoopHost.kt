@@ -159,6 +159,15 @@ internal interface AgentLoopHost {
         reason: String,
     )
 
+    /**
+     * [feat/provider-exec-concurrency] Queue-position observability hook.
+     * Called when the :modelservice worker reports this run is waiting for
+     * an execution slot (another session's stream holds the pool).
+     * [waitingAhead] = requests queued ahead of this one; 0 = the slot was
+     * acquired and the provider call is starting.
+     */
+    fun onQueueStatus(waitingAhead: Int)
+
     // ── routing / retry bookkeeping ───────────────────────────────────────
     val toolLoopDetector: ToolLoopDetector
     val groupRouter: com.openminis.app.data.routing.GroupRouter

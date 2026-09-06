@@ -727,6 +727,16 @@ class ChatViewModel(
     }
 
     internal val _isStreaming = MutableStateFlow(false)
+
+    /**
+     * [feat/provider-exec-concurrency] Queue position for the active stream,
+     * as reported by the :modelservice worker (requests ahead of us waiting
+     * for an execution slot). -1 = not queued / unknown (idle or running).
+     * The UI reads this to render "queued behind N" on the typing indicator
+     * instead of an indistinguishable silent wait.
+     */
+    private val _queueWaitingAhead = MutableStateFlow(-1)
+    val queueWaitingAhead: StateFlow<Int> = _queueWaitingAhead.asStateFlow()
     val isStreaming: StateFlow<Boolean> = _isStreaming.asStateFlow()
 
     /**
@@ -1114,6 +1124,9 @@ class ChatViewModel(
             this@ChatViewModel.finalizeAtTurnLimit(assistantId, text, blocks)
         override fun finalizeBudgetStop(assistantId: String, text: String, blocks: List<AssistantBlock>, reason: String) =
             this@ChatViewModel.finalizeBudgetStop(assistantId, text, blocks, reason)
+        override fun onQueueStatus(waitingAhead: Int) {
+            _queueWaitingAhead.value = waitingAhead
+        }
         override val toolLoopDetector: ToolLoopDetector get() = this@ChatViewModel.toolLoopDetector
         override val groupRouter: com.openminis.app.data.routing.GroupRouter get() = this@ChatViewModel.groupRouter
         override val thinkingLevel: ThinkingLevel get() = _thinkingLevel.value
@@ -3125,6 +3138,10 @@ class ChatViewModel(
                         SessionActivityTracker.markStreamError(activeSessionId)
                     } finally {
                         AppLogger.info(TAG_STREAM, "send streamJob FINALLY enter")
+                        // [feat/provider-exec-concurrency] Reset queue-position
+                        // state — the run is over, whatever it showed must not
+                        // leak into the next one.
+                        _queueWaitingAhead.value = -1
                         // [T-android-overlay-reply-status-34599] Surface
                         // the assistant's most recent reply text to the
                         // overlay BEFORE setInactive so the post-completion

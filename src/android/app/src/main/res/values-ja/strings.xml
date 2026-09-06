@@ -560,6 +560,7 @@
     <string name="browser_reload">再読み込み</string>
     <string name="browser_minis_browsing">RikkaMinis がブラウジング中</string>
     <string name="chat_typing_indicator">%1$s が考えています</string>
+    <string name="chat_queued_indicator">待機中 — 前に %1$d 件のリクエスト</string>
     <string name="chat_input_placeholder">%1$s にメッセージ（@ でファイルを参照）</string>
     <string name="browser_takeover">操作引き継ぎ</string>
     <string name="browser_settings_done">完了</string>

@@ -190,6 +190,7 @@
     <string name="browser_reload">重新載入</string>
     <string name="browser_minis_browsing">RikkaMinis 正在瀏覽</string>
     <string name="chat_typing_indicator">%1$s 正在思考</string>
+    <string name="chat_queued_indicator">排隊中 — 前面還有 %1$d 個請求</string>
     <string name="chat_input_placeholder">傳訊息給 %1$s（@ 提及檔案）</string>
     <string name="browser_takeover">接管</string>
     <string name="browser_settings_done">完成</string>

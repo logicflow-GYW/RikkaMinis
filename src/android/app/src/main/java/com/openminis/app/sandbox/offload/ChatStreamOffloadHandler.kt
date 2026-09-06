@@ -206,8 +206,17 @@ object ChatStreamOffloadHandler {
                                             kind = ChatStreamJsonl.errorKind(line),
                                         )
                                     }
-                                    ChatStreamJsonl.decode(line)?.let {
-                                        emittedChunks = true
+                                    ChatStreamJsonl.decode(line)?.let { chunk ->
+                                        // [feat/provider-exec-concurrency] A
+                                        // QueueStatus frame is NOT model
+                                        // output: it must not flip
+                                        // emittedChunks (which gates the
+                                        // 0-chunk auto-retry semantics and
+                                        // the idle-stall watchdog's
+                                        // hadChunks classification).
+                                        if (chunk !is LLMStreamChunk.QueueStatus) {
+                                            emittedChunks = true
+                                        }
                                         emit(it)
                                     }
                                 }

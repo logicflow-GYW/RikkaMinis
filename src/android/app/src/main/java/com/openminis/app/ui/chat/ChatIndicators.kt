@@ -88,7 +88,7 @@ internal fun StreamingDotsText() {
 // ─── Typing Indicator (three dots pulsing) ────────────────────────────────────
 
 @Composable
-internal fun TypingIndicator() {
+internal fun TypingIndicator(queueWaitingAhead: Int = -1) {
     val infiniteTransition = rememberInfiniteTransition(label = "typing")
     // Live Soul name → "<custom name> is thinking…" when the user renamed
     // the assistant in Soul settings. SoulStore.cachedMetadata is a StateFlow
@@ -98,12 +98,23 @@ internal fun TypingIndicator() {
     val soulMeta by com.openminis.app.agent.SoulStore.cachedMetadata.collectAsState()
     val soulName = soulMeta.name.trim().ifEmpty { com.openminis.app.agent.SoulMetadata.DEFAULT.name }
 
+    // [feat/provider-exec-concurrency] While this session's request waits for
+    // a provider execution slot (another session holds the pool), show the
+    // queue position instead of the plain thinking dots — the difference
+    // between "the model is slow" and "you are queued" is exactly what users
+    // could not tell during the serialized-mutex era.
+    val queued = queueWaitingAhead > 0
+
     Row(
         modifier = Modifier.padding(top = 2.dp, bottom = 8.dp),
         verticalAlignment = Alignment.Bottom,
     ) {
         Text(
-            text = stringResource(R.string.chat_typing_indicator, soulName),
+            text = if (queued) {
+                stringResource(R.string.chat_queued_indicator, queueWaitingAhead)
+            } else {
+                stringResource(R.string.chat_typing_indicator, soulName)
+            },
             fontSize = 15.sp,
             color = ChatColors.tertiaryText,
         )

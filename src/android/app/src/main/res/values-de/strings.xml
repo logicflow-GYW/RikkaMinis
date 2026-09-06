@@ -560,6 +560,7 @@
     <string name="browser_reload">Neu laden</string>
     <string name="browser_minis_browsing">RikkaMinis surft</string>
     <string name="chat_typing_indicator">%1$s denkt nach</string>
+    <string name="chat_queued_indicator">In Warteschlange — %1$d Anfrage(n) voraus</string>
     <string name="chat_input_placeholder">Nachricht an %1$s (@ um Dateien zu erwähnen)</string>
     <string name="browser_takeover">Übernehmen</string>
     <string name="browser_settings_done">Fertig</string>

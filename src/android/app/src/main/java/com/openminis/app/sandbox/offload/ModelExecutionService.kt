@@ -187,25 +187,35 @@ class ModelExecutionService : Service() {
         // typed transient error line + result so the caller's auto-retry
         // re-dispatches (typically onto a fresher worker) instead of pinning
         // resources for the whole 30-min generation backstop.
+        //
+        // Also rejects when the worker is KEY-POISONED: a stale-key abort
+        // already poisoned this process (its cached EncryptedSharedPreferences
+        // map may hold the OLD API key). A NEW request landing here must not
+        // read the possibly-stale key — it gets the same typed transient
+        // rejection so its client retries onto a fresh worker. This is the
+        // admission half of the concurrency-safe stale-key handoff (the
+        // delayed drain reap in abortOnStaleKeyCache is the other half).
         val queuedNow = synchronized(lifecycleLock) {
             queuedRequests.get()
         }
-        if (queuedNow >= ProviderExecSlotPolicy.MAX_QUEUED_REQUESTS) {
-            Log.w(TAG, "rejecting runId=$runId: worker queue full (queued=$queuedNow)")
+        val poisoned = keyCachePoisoned
+        if (queuedNow >= ProviderExecSlotPolicy.MAX_QUEUED_REQUESTS || poisoned) {
+            val why = if (poisoned) "stale key cache (poisoned worker)" else "worker queue full (queued=$queuedNow)"
+            Log.w(TAG, "rejecting runId=$runId: $why")
             try {
                 runCatching { ModelExecutionRunDir.writeReady(dir) }
                 val streamOut = File(dir, STREAM_FILE)
                 runCatching {
                     java.io.FileWriter(streamOut, true).use { w ->
                         w.append(ChatStreamJsonl.errorLine(
-                            "provider worker queue full (queued=$queuedNow)",
+                            "provider worker rejected: $why",
                             ChatStreamErrorPolicyKind.KIND_TRANSIENT,
                         )).append('\n')
                     }
                 }
                 writeResultAtomically(dir, JSONObject().apply {
-                    put("error", "worker_queue_full")
-                    put("message", "provider worker queue full (queued=$queuedNow)")
+                    put("error", if (poisoned) WorkerKeyFreshness.STALE_KEY_CACHE else "worker_queue_full")
+                    put("message", "provider worker rejected: $why")
                     put("exit_code", 3)
                 }.toString())
                 runCatching { ModelExecutionRunDir.writeTerminal(dir) }
@@ -285,7 +295,32 @@ class ModelExecutionService : Service() {
                         "uid=${procState.identity?.uid} startTicks=${procState.identity?.procStartTicks}",
                 )
 
-                executionSlots.acquire()
+                // [feat/provider-exec-concurrency] Queue observability (A):
+                // publish the queue position BEFORE blocking on the slot, and
+                // keep it fresh while waiting. A streaming client reads this
+                // from stream.jsonl and can show "queued behind N" instead of
+                // an indistinguishable silent wait. Non-streaming requests
+                // have no stream reader mid-flight; the frame is skipped for
+                // them (their client polls result.json only).
+                val wantsQueueFrames = runCatching {
+                    JSONObject(requestFile.readText()).optBoolean("streaming", false)
+                }.getOrDefault(false)
+                if (wantsQueueFrames) {
+                    var lastPublished = -1
+                    while (!executionSlots.tryAcquire(QUEUE_FRAME_POLL_MS) ) {
+                        val waitingNow = synchronized(lifecycleLock) { queuedRequests.get() }
+                        if (waitingNow != lastPublished) {
+                            lastPublished = waitingNow
+                            runCatching {
+                                java.io.FileWriter(File(dir, STREAM_FILE), true).use { w ->
+                                    w.append(ChatStreamJsonl.encode(LLMStreamChunk.QueueStatus(waitingNow))).append('\n')
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    executionSlots.acquire()
+                }
                 try {
                     synchronized(lifecycleLock) { queuedRequests.decrementAndGet() }
                     try {
@@ -590,12 +625,14 @@ class ModelExecutionService : Service() {
         runCatching { android.os.Process.killProcess(android.os.Process.myPid()) }
     }
 
-    /**
-     * Max time the stale-key poison reap watchdog waits for concurrent runs to
+    /** Max time the stale-key poison reap watchdog waits for concurrent runs to
      * drain before giving up (bounded to half the generation backstop so a
-     * wedged sibling never pins a poisoned process forever).
-     */
+     * wedged sibling never pins a poisoned process forever). */
     private val POISON_REAP_WAIT_MS = 15 * 60_000L
+
+    /** [feat/provider-exec-concurrency] Poll interval for the queue-position
+     *  publisher while waiting on an execution slot. */
+    private val QUEUE_FRAME_POLL_MS = 500L
 
     /**
      * [T-stale-apikey-worker-cache] Stale-secrets abort. The main process
@@ -627,11 +664,14 @@ class ModelExecutionService : Service() {
      *     own client sees an auto-retryable failure (not a silent
      *     worker-death);
      *   - delayed self-reap: a watchdog thread waits for the OTHER slots to
-     *     drain (activeRequests → 0) then kills the process. The retry's
-     *     re-dispatch may revive this process first (onStartCommand flips
-     *     poisoned back to false after a fresh key check? No — the retry
-     *     hits a NEW process: admission rejection is sticky) — the delayed
-     *     kill only fires if nobody else is using the process.
+     *     drain (activeRequests → 0) then kills the process, so the next
+     *     dispatch births a fresh process that reads the new key on its
+     *     first-ever prefs load. A retry re-dispatch may hit this same
+     *     process first — the admission check rejects it (poisoned) with a
+     *     transient error, and the client's NEXT retry lands on the fresh
+     *     process the delayed reap created. Bounded: if a concurrent sibling
+     *     streams past POISON_REAP_WAIT_MS, the watchdog gives up and the
+     *     normal finishRequest lifecycle owns the eventual death.
      */
     @Volatile
     private var keyCachePoisoned = false
@@ -1055,19 +1095,25 @@ class ModelExecutionService : Service() {
             // ── API key: read from EncryptedSharedPreferences (same uid) ──
             // [T-stale-apikey-worker-cache] Same guard as executeRun: if the
             // main process saved a new key after this worker was born, our
-            // cached prefs map is stale — abort (kill) so the client's retry
-            // spawns a fresh process that reads the new key. No error line /
-            // result.json is written: the client must see a 0-chunk worker
-            // death, not a terminal failure. See WorkerKeyFreshness.
+            // cached prefs map is stale — abort so the client's retry spawns a
+            // fresh process that reads the new key. See WorkerKeyFreshness.
+            // [feat/provider-exec-concurrency] The abort is NO LONGER an
+            // immediate killProcess (that would sever a concurrent sibling
+            // stream holding another slot): it poisons the worker (admission
+            // check rejects new requests with a typed transient error) and
+            // schedules a delayed drain reap. THIS run must therefore emit
+            // its own terminal evidence — transient error line + result — so
+            // the client classifies it as auto-retryable and re-dispatches
+            // (onto a fresh worker that reads the new key), never as a
+            // silent worker death.
             WorkerKeyFreshness.captureBaseline(getDataDir())
             if (WorkerKeyFreshness.isStaleNow(getDataDir())) {
                 abortOnStaleKeyCache(runId, dir)
-                // killProcess never returns on success. The lines below only
-                // run in the pathological "kill failed" case: emit a typed
-                // error line so the client surfaces a transient failure (and
-                // its auto-retry re-dispatches) instead of hanging on a
-                // stream that will never produce chunks.
                 appendLine(ChatStreamJsonl.errorLine(WorkerKeyFreshness.STALE_KEY_CACHE, ChatStreamErrorPolicyKind.KIND_TRANSIENT))
+                writeResultAtomically(dir, JSONObject().apply {
+                    put("error", WorkerKeyFreshness.STALE_KEY_CACHE)
+                    put("exit_code", 2)
+                }.toString())
                 return
             }
             val apiKey = try {

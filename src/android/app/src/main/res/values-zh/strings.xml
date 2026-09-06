@@ -675,6 +675,7 @@
     <string name="browser_reload">重新加载</string>
     <string name="browser_minis_browsing">RikkaMinis 正在浏览</string>
     <string name="chat_typing_indicator">%1$s 正在思考</string>
+    <string name="chat_queued_indicator">排队中 — 前面还有 %1$d 个请求</string>
     <string name="chat_input_placeholder">发消息给 %1$s（@ 提及文件）</string>
     <string name="chat_attachment_limit">仅附加了前 %1$d 个项目。</string>
     <string name="browser_takeover">接管</string>

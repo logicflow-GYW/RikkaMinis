@@ -499,6 +499,9 @@ fun ChatScreen(
     val messages by viewModel.uiMessages.collectAsState()
     val hasOlderMessages by viewModel.hasOlderMessages.collectAsState()
     val isStreaming by viewModel.isStreaming.collectAsState()
+    // [feat/provider-exec-concurrency] Queue position for the active stream
+    // (-1 = not queued). Rendered by TypingIndicator as "queued behind N".
+    val queueWaitingAhead by viewModel.queueWaitingAhead.collectAsState()
     val canResume by viewModel.canResume.collectAsState()
     val error by viewModel.error.collectAsState()
     val modelName by viewModel.modelName.collectAsState()
@@ -3948,7 +3951,7 @@ fun ChatScreen(
                                     { viewModel.revertCompact() }
                                 } else null,
                             )
-                            is FlatChatItem.AssistantTyping -> TypingIndicator()
+                            is FlatChatItem.AssistantTyping -> TypingIndicator(queueWaitingAhead = queueWaitingAhead)
                             is FlatChatItem.AssistantError -> InlineErrorBanner(
                                 error = item.error,
                                 errorDetail = item.errorDetail,

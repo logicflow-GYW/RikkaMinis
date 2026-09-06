@@ -749,6 +749,15 @@ internal class AgentLoopEngine(
                         turnTruncated = chunk.truncated
                     }
                     is LLMStreamChunk.Started -> { /* no-op */ }
+                    is LLMStreamChunk.QueueStatus -> {
+                        // [feat/provider-exec-concurrency] Queue-position frame
+                        // from the worker: forward to the host so the UI can
+                        // show "queued behind N" instead of an indistinguishable
+                        // silent wait while another session holds the slots.
+                        withContext(Dispatchers.Main) {
+                            host.onQueueStatus(chunk.waiting)
+                        }
+                    }
                     is LLMStreamChunk.MediaAttachment -> {
                         // [T-codex-gpt-image2-oauth-android] Model-generated
                         // media (gpt-image-2 image). Inline chat display is out

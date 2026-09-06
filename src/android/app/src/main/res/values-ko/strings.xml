@@ -560,6 +560,7 @@
     <string name="browser_reload">새로 고침</string>
     <string name="browser_minis_browsing">RikkaMinis가 브라우징 중</string>
     <string name="chat_typing_indicator">%1$s가 생각하는 중</string>
+    <string name="chat_queued_indicator">대기 중 — 앞에 %1$d개 요청</string>
     <string name="chat_input_placeholder">%1$s에게 메시지 (@로 파일 참조)</string>
     <string name="browser_takeover">제어 인계</string>
     <string name="browser_settings_done">완료</string>

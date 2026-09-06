@@ -461,6 +461,10 @@
     <string name="browser_minis_browsing">RikkaMinis is browsing</string>
     <!-- Streaming indicator shown while the assistant is composing a reply. %1$s is the Soul-customized assistant name (default "RikkaMinis"). -->
     <string name="chat_typing_indicator">%1$s is thinking</string>
+    <!-- [feat/provider-exec-concurrency] Shown on the typing indicator while
+         this session's request waits for a provider execution slot held by
+         another session's stream. -->
+    <string name="chat_queued_indicator">Queued — %1$d request(s) ahead</string>
     <!-- Composer placeholder. %1$s is the Soul-customized assistant name (default "RikkaMinis"). The parenthetical is an inline hint reminding the user that typing '@' opens the file-mention picker. T-android-placeholder-single-line collapses the prior two-row (title + hint) layout into a single line, matching iOS 19e1d61f. -->
     <string name="chat_input_placeholder">Message %1$s (@ to mention files)</string>
     <string name="chat_attachment_limit">Only the first %1$d items were attached.</string>

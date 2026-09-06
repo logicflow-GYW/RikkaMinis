@@ -69,6 +69,12 @@ object ChatStreamJsonl {
             .put("mime", chunk.attachment.mimeType)
             .put("b64", java.util.Base64.getEncoder().encodeToString(chunk.attachment.data))
             .toString()
+        // [feat/provider-exec-concurrency] queue-position frame: emitted by
+        // the worker while waiting for an execution slot. See QueueStatus.
+        is LLMStreamChunk.QueueStatus -> JSONObject()
+            .put("t", "queue")
+            .put("w", chunk.waiting)
+            .toString()
     }
 
     /**
@@ -167,6 +173,7 @@ object ChatStreamJsonl {
             }
             "error" -> null // errors are surfaced by the handler, not as chunks
             "done" -> LLMStreamChunk.Finished(stopReason = null, truncated = false)
+            "queue" -> LLMStreamChunk.QueueStatus(obj.optInt("w", 0))
             else -> null
         }
     }

@@ -35,4 +35,13 @@ sealed class LLMStreamChunk {
      * one-shot, so this typically arrives once near the end of the stream.
      */
     data class MediaAttachment(val attachment: LLMMediaAttachment) : LLMStreamChunk()
+
+    /**
+     * [feat/provider-exec-concurrency] Queue-position observability. Emitted
+     * by the :modelservice worker before acquiring an execution slot when
+     * other requests are ahead (and on position changes while waiting).
+     * Purely informational — never affects stream semantics; consumers that
+     * don't know it ignore it via their `else ->` branches.
+     */
+    data class QueueStatus(val waiting: Int) : LLMStreamChunk()
 }
