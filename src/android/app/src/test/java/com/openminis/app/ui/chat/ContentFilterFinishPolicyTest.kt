@@ -66,4 +66,23 @@ class ContentFilterFinishPolicyTest {
         assertFalse(ContentFilterFinishPolicy.isBlockedFinish("safety_check"))
         assertFalse(ContentFilterFinishPolicy.isBlockedFinish("xrefusal"))
     }
+
+    // ── [fix/finish-reason-network-error] error-shaped pseudo-finishes ─────
+
+    @Test
+    fun `error-shaped finish reasons classify`() {
+        for (r in listOf("network_error", "server_error", "provider_error",
+                         "service_unavailable", "upstream_error", "bad_gateway",
+                         "timeout", "gateway_timeout", "Network_Error")) {
+            assertTrue("expected error-shaped: $r", ContentFilterFinishPolicy.isErrorShapedFinish(r))
+        }
+    }
+
+    @Test
+    fun `normal and blocked reasons are not error-shaped`() {
+        for (r in listOf("stop", "end_turn", "length", "tool_calls", "max_tokens",
+                         "content_filter", "safety", "refusal", null, "", "unknown")) {
+            assertFalse("expected NOT error-shaped: $r", ContentFilterFinishPolicy.isErrorShapedFinish(r))
+        }
+    }
 }

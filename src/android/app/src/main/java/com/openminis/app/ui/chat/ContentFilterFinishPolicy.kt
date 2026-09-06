@@ -44,6 +44,31 @@ object ContentFilterFinishPolicy {
     )
 
     /**
+     * [fix/finish-reason-network-error] Error-SHAPED finish reasons: relays
+     * (observed in the field: agentrouter.org / glm-5.3) sometimes surface an
+     * upstream failure as a normal SSE finish frame — finish_reason =
+     * "network_error" with zero content and a clean [DONE]. The stream looks
+     * COMPLETE to every layer (no EOF, no error line, no exception) while the
+     * model reply is actually missing. Classify these so the engine can treat
+     * the turn as a transient stream failure instead of a finished answer.
+     */
+    private val ERROR_SHAPED_REASONS = setOf(
+        "network_error", "server_error", "provider_error", "service_unavailable",
+        "upstream_error", "bad_gateway", "timeout", "gateway_timeout",
+    )
+
+    /**
+     * True when a turn's finish reason is an error-shaped pseudo-finish (the
+     * relay reporting ITS OWN failure inside a normal finish frame). Null /
+     * unknown reasons are NOT error-shaped (conservative: only the known
+     * error spellings trigger recovery).
+     */
+    fun isErrorShapedFinish(reason: String?): Boolean {
+        if (reason.isNullOrBlank()) return false
+        return reason.trim().lowercase() in ERROR_SHAPED_REASONS
+    }
+
+    /**
      * True when a turn's finish reason means "the provider blocked this
      * content" — the member's answer is unusable and deterministic.
      * Null / unknown reasons are NOT blocked (conservative: never trigger

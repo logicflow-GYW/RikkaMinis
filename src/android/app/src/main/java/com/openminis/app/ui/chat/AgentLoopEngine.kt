@@ -1256,6 +1256,71 @@ internal class AgentLoopEngine(
                 else -> false // stop / end_turn / tool-call turns: clean boundary
             }
 
+            // [fix/finish-reason-network-error] Field-observed (2026-09-06
+            // log, user-uploaded): a relay (agentrouter.org / glm-5.3) turned
+            // ITS OWN upstream failure into a normal SSE finish frame —
+            // finish_reason="network_error", zero content, clean [DONE]. No
+            // EOF, no error line, no exception: every existing guard (EOF
+            // stub, stream-error kind) is keyed on the ABNORMAL paths, so
+            // this pseudo-finish sailed through as "no tool calls → break"
+            // and the user saw the reply die mid-answer with NO banner and
+            // NO retry. Treat error-shaped finishes as transient stream
+            // failures:
+            //  - with visible partial content → same recovery as an
+            //    EOF-truncated stream (network-stub continuation, bounded);
+            //  - with no content → one-shot retry (drop the empty turn),
+            //    then the normal empty-turn hint path takes over.
+            if (toolCalls.isEmpty() && ContentFilterFinishPolicy.isErrorShapedFinish(turnFinishReason)) {
+                if (turnTextRaw.isNotEmpty()) {
+                    if (loopState.eofStubContinues < MAX_EOF_STUB_CONTINUES) {
+                        loopState.eofStubContinues++
+                        AppLogger.warning(
+                            TAG_STREAM,
+                            "runAgentLoop turn=$turn finish=$turnFinishReason (error-shaped) with ${turnTextRaw.length} chars — network-stub continuation ${loopState.eofStubContinues}/$MAX_EOF_STUB_CONTINUES",
+                        )
+                        val stubReminder = eofStubReminder(turnText.takeLast(80))
+                        host.agentHistory.add(
+                            LLMMessage(
+                                role = LLMMessage.Role.USER,
+                                content = stubReminder,
+                                contentParts = listOf(AgentContentPart.Text(stubReminder)),
+                            )
+                        )
+                        loopState.lastTurnWasLengthWall = true
+                        continue
+                    }
+                    AppLogger.warning(
+                        TAG_STREAM,
+                        "runAgentLoop turn=$turn finish=$turnFinishReason (error-shaped) stub ceiling hit — giving up with visible error",
+                    )
+                    withContext(Dispatchers.Main) {
+                        host.setInlineError(host.string(R.string.error_stream_interrupted))
+                    }
+                    // fall through to normal persist + exit (partial kept)
+                } else {
+                    // Empty + error-shaped: the relay failed BEFORE emitting
+                    // anything. One-shot retry (fresh turn re-reads history),
+                    // then the empty-turn hint path reports it visibly.
+                    if (!loopState.didRetryTruncatedTurn) {
+                        loopState.didRetryTruncatedTurn = true
+                        AppLogger.warning(
+                            TAG_STREAM,
+                            "runAgentLoop turn=$turn finish=$turnFinishReason (error-shaped) with no content — one-shot retry",
+                        )
+                        continue
+                    }
+                    AppLogger.warning(
+                        TAG_STREAM,
+                        "runAgentLoop turn=$turn finish=$turnFinishReason (error-shaped) empty after retry — surfacing error",
+                    )
+                    withContext(Dispatchers.Main) {
+                        host.setInlineError(host.string(R.string.error_stream_interrupted))
+                    }
+                    loopState.loopExitedNormally = true
+                    break
+                }
+            }
+
             // [feat/content-filter-fallback] A content-filter / safety-block
             // finish (content_filter, Gemini SAFETY/RECITATION/…, Anthropic
             // refusal) is a DETERMINISTIC member-level refusal: this member
@@ -1568,6 +1633,38 @@ internal class AgentLoopEngine(
                         } // [feat/hermes-tier1] else — continuation budget branch
                     }
                 }
+                // [feat/verification-stop] Turn-end verification guard
+                // (Hermes verification_stop port, Tier-2 #3). The model is
+                // about to finish its reply. If this run edited CODE files
+                // and the newest passing verification evidence predates the
+                // last edit, inject ONE bounded follow-up nudge instead of
+                // letting the turn close unverified — the nudge tells the
+                // model to run the relevant check, read failures, repair,
+                // and summarize what actually passed. Policy-only: nothing
+                // runs a check here (VerificationStopPolicy owns the shape
+                // classification; the engine only tracks edit/verify order).
+                val verifyNudge = VerificationStopPolicy.buildNudge(
+                    changedPaths = loopState.changedCodePaths.toList(),
+                    attempts = loopState.verifyNudgeAttempts,
+                    lastEvidenceDetail = loopState.lastVerificationDetail,
+                )
+                if (verifyNudge != null) {
+                    loopState.verifyNudgeAttempts++
+                    AppLogger.warning(
+                        TAG_STREAM,
+                        "runAgentLoop turn=$turn finish=$turnFinishReason but unverified code edits " +
+                            "(${loopState.changedCodePaths.size} path(s)) — injecting verify nudge " +
+                            "${loopState.verifyNudgeAttempts}/${VerificationStopPolicy.MAX_VERIFY_NUDGES}",
+                    )
+                    val nudgeMsg = LLMMessage(
+                        role = LLMMessage.Role.USER,
+                        content = verifyNudge,
+                        contentParts = listOf(AgentContentPart.Text(verifyNudge)),
+                    )
+                    host.agentHistory.add(nudgeMsg)
+                    continue
+                }
+
                 AppLogger.info(TAG_STREAM, "runAgentLoop turn=$turn no tool calls → break (finishReason=$turnFinishReason)")
                 withContext(Dispatchers.Main) {
                     host.updateAssistantMessage(loopState.assistantId, loopState.accumulatedText, false, loopState.allToolBlocks)
@@ -2051,6 +2148,39 @@ internal class AgentLoopEngine(
                     "${result.output}\n\n${postRecord.message}"
                 } else {
                     result.output
+                }
+
+                // [feat/verification-stop] edit/verify bookkeeping. Edit side:
+                // a SUCCESSFUL file_write/file_edit on a code path marks the
+                // run's evidence stale (bumps lastEditSeq). Verify side: a
+                // verification-shaped shell command records its outcome and,
+                // when it PASSED, bumps lastVerifySeq — the turn-end guard
+                // compares the two stamps. Non-code paths (prose/config) are
+                // filtered by the policy so a SKILL.md edit never demands a
+                // verification script.
+                when {
+                    result.success && (name == "file_write" || name == "file_edit") -> {
+                        VerificationStopPolicy.changedPathFromArgs(name, p.argsStr)?.let { path ->
+                            if (!VerificationStopPolicy.isNonCodePath(path)) {
+                                loopState.changedCodePaths.add(path)
+                                loopState.lastEditSeq++
+                            }
+                        }
+                    }
+                    name == "shell_execute" -> {
+                        val cmd = try { JSONObject(p.argsStr).optString("command", "") } catch (_: Exception) { "" }
+                        val kind = VerificationStopPolicy.verificationKind(cmd)
+                        if (kind != null) {
+                            val outcome = when {
+                                result.success -> "PASSED"
+                                result.timedOut -> "TIMED OUT"
+                                else -> "FAILED"
+                            }
+                            loopState.lastVerificationDetail = "${cmd.take(120)} → $outcome"
+                            if (result.success) loopState.lastVerifySeq++
+                            AppLogger.info(TAG_STREAM, "[verification-stop] evidence: kind=$kind outcome=$outcome cmd=${cmd.take(80)}")
+                        }
+                    }
                 }
 
                 val blockIdx = loopState.allToolBlocks.indexOfFirst { it.id == id }

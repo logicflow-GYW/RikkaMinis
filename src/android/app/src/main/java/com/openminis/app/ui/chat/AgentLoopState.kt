@@ -175,4 +175,30 @@ internal class AgentLoopState(
      * point. Normal turn boundaries must NOT go through seam-dedup.
      */
     var lastTurnWasLengthWall: Boolean = false
+
+    // ── [feat/verification-stop] edit/verify evidence tracking ────────────
+
+    /**
+     * Code file paths changed by successful file_write / file_edit calls in
+     * this run (deduped). Feeds VerificationStopPolicy.buildNudge at the
+     * turn-end guard.
+     */
+    val changedCodePaths: MutableSet<String> = linkedSetOf()
+
+    /**
+     * Human-readable detail of the newest verification-shaped shell result
+     * (command + outcome), or null when none ran yet this run.
+     */
+    var lastVerificationDetail: String? = null
+
+    /**
+     * Monotonic sequence stamps: an edit and a verification only satisfy the
+     * guard when the verification's stamp is NEWER than every edit's stamp.
+     */
+    var lastEditSeq: Long = 0
+    var lastVerifySeq: Long = 0
+
+    /** How many verify nudges have been injected this run (bounded by
+     *  VerificationStopPolicy.MAX_VERIFY_NUDGES). */
+    var verifyNudgeAttempts: Int = 0
 }
