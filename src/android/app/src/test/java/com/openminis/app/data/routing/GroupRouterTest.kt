@@ -362,4 +362,85 @@ class GroupRouterTest {
         val order = router.fallbackOrder(g, activeEntryId = "b", primaryModelId = "model-b", modelIdOf = { it }, costTierOf = costTierOf)
         assertEquals(listOf("c", "a"), order)
     }
+
+    // ─── nextLoadBalanceMember: per-message rotation ──────────────────────
+
+    private fun lbGroup(vararg ids: String) = group(*ids, strategy = RoutingStrategy.loadBalance)
+
+    @Test fun perMessage_advancesOneStepPastCurrent() {
+        val router = routerWithClock()
+        val g = lbGroup("a", "b", "c")
+        val members = listOf(member("a"), member("b"), member("c"))
+        assertEquals("b", router.nextLoadBalanceMember(g, "a", null, members))
+        assertEquals("c", router.nextLoadBalanceMember(g, "b", null, members))
+    }
+
+    @Test fun perMessage_wrapsAroundAtEnd() {
+        val router = routerWithClock()
+        val g = lbGroup("a", "b", "c")
+        assertEquals("a", router.nextLoadBalanceMember(g, "c", null, listOf(member("a"), member("b"), member("c"))))
+    }
+
+    @Test fun perMessage_notLoadBalance_returnsNull() {
+        val router = routerWithClock()
+        val g = group("a", "b") // fallback strategy
+        assertNull(router.nextLoadBalanceMember(g, "a", null, listOf(member("a"), member("b"))))
+    }
+
+    @Test fun perMessage_singleMember_returnsNull() {
+        val router = routerWithClock()
+        val g = lbGroup("a")
+        assertNull(router.nextLoadBalanceMember(g, "a", null, listOf(member("a"))))
+    }
+
+    @Test fun perMessage_currentNotInGroup_jumpsToFirst() {
+        val router = routerWithClock()
+        val g = lbGroup("a", "b")
+        // Restored old session anchored outside the group (or null) → the
+        // rotation can't advance from an unknown anchor; land on the first
+        // usable member rather than staying put on a possibly-stale entry.
+        assertEquals("a", router.nextLoadBalanceMember(g, "z", null, listOf(member("a"), member("b"))))
+        assertEquals("a", router.nextLoadBalanceMember(g, null, null, listOf(member("a"), member("b"))))
+    }
+
+    @Test fun perMessage_pendingPickWins() {
+        val router = routerWithClock()
+        val g = lbGroup("a", "b", "c")
+        // User hand-picked "c" for the next turn — it wins over rotation.
+        assertEquals("c", router.nextLoadBalanceMember(g, "a", "c", listOf(member("a"), member("b"), member("c"))))
+    }
+
+    @Test fun perMessage_pendingPickIgnoredWhenUnusable() {
+        val router = routerWithClock()
+        val g = lbGroup("a", "b", "c")
+        // Pick's provider went cooling — fall back to normal rotation.
+        router.recordResult("c", com.openminis.app.data.routing.RouteOutcome.RateLimited(retryAfterMs = 60_000L))
+        assertEquals("b", router.nextLoadBalanceMember(g, "a", "c", listOf(member("a"), member("b"), member("c"))))
+    }
+
+    @Test fun perMessage_skipsCoolingMember() {
+        val router = routerWithClock()
+        val g = lbGroup("a", "b", "c")
+        router.recordResult("b", com.openminis.app.data.routing.RouteOutcome.RateLimited(retryAfterMs = 60_000L))
+        // a → next would be b, but b is cooling → skip to c.
+        assertEquals("c", router.nextLoadBalanceMember(g, "a", null, listOf(member("a"), member("b"), member("c"))))
+    }
+
+    @Test fun perMessage_allOthersCooling_staysOnCurrent() {
+        val router = routerWithClock()
+        val g = lbGroup("a", "b", "c")
+        router.recordResult("b", com.openminis.app.data.routing.RouteOutcome.RateLimited(retryAfterMs = 60_000L))
+        router.recordResult("c", com.openminis.app.data.routing.RouteOutcome.RateLimited(retryAfterMs = 60_000L))
+        // b and c are cooling → only a usable → rotation lands back on a
+        // (wrap-around within the usable set, no change).
+        assertEquals("a", router.nextLoadBalanceMember(g, "a", null, listOf(member("a"), member("b"), member("c"))))
+    }
+
+    @Test fun perMessage_currentCooling_jumpsToFirstUsable() {
+        val router = routerWithClock()
+        val g = lbGroup("a", "b", "c")
+        router.recordResult("a", com.openminis.app.data.routing.RouteOutcome.RateLimited(retryAfterMs = 60_000L))
+        // Current member demoted → don't resend into it; lead with the first usable.
+        assertEquals("b", router.nextLoadBalanceMember(g, "a", null, listOf(member("a"), member("b"), member("c"))))
+    }
 }

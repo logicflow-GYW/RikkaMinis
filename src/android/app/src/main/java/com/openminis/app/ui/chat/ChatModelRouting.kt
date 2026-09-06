@@ -20,8 +20,20 @@ fun ChatViewModel.selectGroup(groupId: String) {
     // choosing a group is an explicit "I want to work with this group"
     // signal (also how a re-authed member becomes usable again).
     groupRouter.clearHealth()
+    // [T-per-message-load-balance] A group (re-)selection supersedes any
+    // pending member pick from a previous selection.
+    pendingEntryOverride = null
     val resolved = resolveProviderFromGroup(groupId)
     if (resolved) {
+        // [T-per-message-load-balance] resolveProviderFromGroup already
+        // advanced the rotation to the member now shown in the top bar —
+        // pin it so THIS member serves the next new user turn (otherwise
+        // the next send would immediately rotate past it and the member
+        // the user just saw selected would never serve a message).
+        // While streaming, switchModelAndRerun below already re-serves the
+        // current turn on the resolved member; pinning would make it serve
+        // the next message too, so only arm while idle.
+        if (!_isStreaming.value) _activeEntryId.value?.let { pendingEntryOverride = it }
         persistBinding("""{"type":"group","groupId":"$groupId"}""")
         applyGroupSessionDefaults(groupId)
         // [switchModelAndRerun] Model-switch-during-streaming (Plan A).
@@ -38,6 +50,13 @@ fun ChatViewModel.selectGroupEntry(groupId: String, entryId: String) {
     groupRouter.clearHealth()
     val resolved = resolveProviderFromGroup(groupId, entryId)
     if (resolved) {
+        // [T-per-message-load-balance] The user hand-picked THIS member. When
+        // idle, it serves the NEXT new user turn (one-shot pick consumed by
+        // rotateForNewTurn), then rotation resumes from it. When streaming,
+        // switchModelAndRerun below already re-serves the current turn on the
+        // pick — setting a pending override here would make it serve the next
+        // message too (two turns in a row), so only arm it while idle.
+        if (!_isStreaming.value) pendingEntryOverride = entryId
         persistBinding("""{"type":"group","groupId":"$groupId","lastEntryId":"$entryId"}""")
         applyGroupSessionDefaults(groupId)
         // [T-newchat-default-model-fallback-android] Record the actually-
@@ -69,6 +88,9 @@ fun ChatViewModel.selectEntry(entryId: String) {
     // no call site touches the stored key directly.
     currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context)
     persistBinding("""{"type":"entry","entryId":"$entryId"}""")
+    // [T-per-message-load-balance] Leaving the group for a direct entry pick
+    // invalidates any pending in-group member override.
+    pendingEntryOverride = null
     // [T-newchat-default-model-fallback-android] Remember this as the
     // global last-used model so the NEXT new chat (when no default group
     // is set) defaults back to it. Tier 2 of the new-chat fallback chain.
@@ -242,6 +264,72 @@ internal fun ChatViewModel.buildFallbackProviders(primaryProvider: LLMProvider):
         result.add(FallbackCandidate(p, entryId))
     }
     return result
+}
+
+/**
+ * [T-per-message-load-balance] Advance the loadBalance rotation for ONE new
+ * user turn. Called from exactly two places — [ChatViewModel.sendMessage]
+ * (fresh send) and [drainQueuedPrompts] (each queued prompt is its own new
+ * user turn) — NEVER from retry / rerun / resume paths: replaying an
+ * existing turn must not advance the rotation.
+ *
+ * Semantics:
+ *  - Only loadBalance groups with 2+ enabled members rotate; everything
+ *    else is a no-op (fallback / cheapestFirst keep their own semantics).
+ *  - The FIRST message of a session does not rotate: the session-binding
+ *    resolution already picked a member (via group resolution or the user's
+ *    explicit pick), so the new turn keeps it. From the second completed
+ *    assistant turn onwards, each new message advances one step.
+ *  - A one-shot user pick ([pendingEntryOverride], set by selectGroupEntry)
+ *    overrides the rotation for exactly one turn, then rotation resumes
+ *    from that member.
+ *  - The anchor is the session's actually-active entry (NOT the global
+ *    lastUsedEntryId): a restored old session can leave the global anchor
+ *    pointing outside this group, which would make `(idx+1) % n` skip or
+ *    clamp instead of advancing.
+ *
+ * On success this mirrors a member switch: currentModel / _modelName /
+ * _providerName / _activeEntryId / currentProvider are rebuilt, and the
+ * session binding's lastEntryId is re-persisted so reload keeps the new
+ * member. Rotation state stays recoverable across restarts.
+ */
+internal fun ChatViewModel.rotateForNewTurn(label: String) {
+    val groupId = _selectedGroupId.value ?: return
+    val group = providerRepository.group(groupId) ?: return
+    val currentEntryId = _activeEntryId.value
+    // Consume a pending one-shot pick (set by selectGroupEntry) BEFORE the
+    // first-message check: on a fresh session the pick already resolved the
+    // member (pending == current, consuming is a no-op) — but consuming late
+    // would let the pick leak into the SECOND message and serve it twice.
+    val pick = pendingEntryOverride
+    pendingEntryOverride = null
+    // Keep the just-resolved member for the session's first message:
+    // rotateForNewTurn runs BEFORE the new user row is appended, so any
+    // assistant row already in the message list belongs to a PRIOR
+    // completed turn. (Draft sessions start with an empty list.)
+    if (_messages.value.none { it.role == "assistant" }) return
+    val members = providerRepository.enabledMemberEntries(group)
+    val targetId = groupRouter.nextLoadBalanceMember(
+        group = group,
+        currentEntryId = currentEntryId,
+        pendingEntryId = pick,
+        members = members,
+    ) ?: return
+    if (targetId == currentEntryId) return
+    val targetEntry = members.firstOrNull { it.id == targetId } ?: return
+    val instance = providerRepository.instance(targetEntry.providerInstanceId) ?: return
+    val apiKey = providerRepository.loadApiKey(instance.id) ?: return
+    currentModel = targetEntry.model
+    _modelName.value = targetEntry.model.displayName
+    _providerName.value = instance.label.ifEmpty { targetEntry.model.provider }
+    _activeEntryId.value = targetEntry.id
+    // [T-provider-key-roulette] Rotation happens inside ProviderFactory.create.
+    currentProvider = ProviderFactory.create(instance, apiKey, targetEntry.model, context)
+    persistBinding("""{"type":"group","groupId":"$groupId","lastEntryId":"$targetId"}""")
+    AppLogger.info(
+        "ChatVMRouting",
+        "🔄LB $label rotate entry=$currentEntryId -> $targetId model=${targetEntry.model.id}",
+    )
 }
 
 /**

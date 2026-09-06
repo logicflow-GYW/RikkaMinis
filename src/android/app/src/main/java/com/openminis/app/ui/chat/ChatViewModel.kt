@@ -900,6 +900,18 @@ class ChatViewModel(
     internal val groupRouter = com.openminis.app.data.routing.GroupRouter()
 
     /**
+     * [T-per-message-load-balance] One-shot entry override for the NEXT new
+     * user turn. Set by [selectGroupEntry] when the user hand-picks a member
+     * inside a loadBalance group — that pick serves the next turn (instead of
+     * the rotation advancing past the current member), and is consumed exactly
+     * once by [ChatViewModel.rotateForNewTurn] so rotation resumes from the
+     * user's pick afterwards. Null when no override is pending. Never
+     * persisted (rotation anchoring is already durable via the session
+     * binding's lastEntryId).
+     */
+    internal var pendingEntryOverride: String? = null
+
+    /**
      * T9: agent execution trace recorder + T7 observation state, extracted to
      * [ChatAgentTraceObserver] (FE-5 route C step 1). Side-channel only —
      * records one JSONL line per event into the session's
@@ -2845,6 +2857,12 @@ class ChatViewModel(
         // iOS AIChatView.swift:2255 (`hasInjectedShareContent = false`
         // inside the send button's tap closure).
         if (_hasInjectedShareContent.value) _hasInjectedShareContent.value = false
+
+        // [T-per-message-load-balance] Advance the per-message rotation for
+        // this new user turn (loadBalance groups only; no-op otherwise)
+        // BEFORE snapshotting the provider, so this turn is served by the
+        // next member in rotation.
+        rotateForNewTurn("send")
 
         val initialProvider = currentProvider
         if (initialProvider == null) {

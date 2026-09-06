@@ -853,7 +853,7 @@
     <string name="model_group_detail_unavailable">不可用</string>
     <string name="model_group_name_saved">名称已保存</string>
     <string name="model_group_routing_fallback_footer">按顺序尝试模型。如果某个失败，则推进到下一个。</string>
-    <string name="model_group_routing_loadbalance_footer">将会话分摊到组内的各个模型。</string>
+    <string name="model_group_routing_loadbalance_footer">每条新消息依次切换到组内的下一个模型。</string>
     <string name="model_group_fallback_default_footer">仅因限流（429）和服务器错误（5xx）回退。</string>
     <string name="model_group_fallback_always_footer">高级选项：任何错误都回退，包括网络和认证失败。除非明确需要，否则建议使用默认策略。</string>
     <string name="model_group_no_models">此组中没有模型。</string>

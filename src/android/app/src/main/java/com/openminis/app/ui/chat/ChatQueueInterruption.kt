@@ -359,7 +359,14 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
             // active provider too, so the drain chain continues AFTER the
             // current entry (and, with the fixed entry-anchor, never
             // re-includes the active entry itself).
-            val drainedProvider = currentProvider ?: provider
+            val drainedProvider = run {
+                // [T-per-message-load-balance] Each queued prompt is its own
+                // new user turn — advance the loadBalance rotation before
+                // re-anchoring, so the drain serves queued messages across
+                // the group's members too.
+                rotateForNewTurn("drain")
+                currentProvider ?: provider
+            }
             val drainFallbacks = buildFallbackProviders(drainedProvider)
             // [P0-fallback-reentry] Log the drain anchor so the user can
             // verify a queued prompt continues on the ACTUAL active entry

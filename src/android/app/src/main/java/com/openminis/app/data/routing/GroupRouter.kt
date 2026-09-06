@@ -65,6 +65,51 @@ class GroupRouter(
     }
 
     /**
+     * [T-per-message-load-balance] Pick the member that serves the NEXT new
+     * user turn in a loadBalance group — per-message rotation (was:
+     * per-session rotation at group-resolution time only).
+     *
+     * Semantics (see ChatViewModel.rotateForNewTurn for the wiring):
+     *  - anchor = the session's actually-active entry (NOT the global
+     *    lastUsedEntryId, which a restored old session can leave pointing at
+     *    a member outside this group — that would make the rotation skip or
+     *    clamp); advances one step past it with wrap-around.
+     *  - [pendingEntryId] (one-shot user pick) wins when still usable — the
+     *    user explicitly asked for this member for the next turn.
+     *  - members whose provider is disabled / cooling / circuit-open / dead
+     *    are skipped. If the CURRENT member is itself demoted (or absent
+     *    from the group — e.g. a restored old session anchored outside),
+     *    the first usable member is chosen instead of resending into a
+     *    known-failing member. If EVERY member is unusable, null keeps the
+     *    current member (stay put rather than break the session).
+     *
+     * @return the entry id to serve the next turn, or null to keep the
+     *   current member (no group / not loadBalance / single-member group /
+     *   every member unusable).
+     */
+    fun nextLoadBalanceMember(
+        group: ModelGroup,
+        currentEntryId: String?,
+        pendingEntryId: String?,
+        members: List<ModelEntry>,
+    ): String? {
+        if (group.strategy != RoutingStrategy.loadBalance) return null
+        if (members.size <= 1) return null
+        val usable = members.filter { isUsable(it.id) }
+        if (usable.isEmpty()) return null
+        // Current member missing from the group or demoted (cooling /
+        // circuit-open / dead) → jump to the first usable member instead of
+        // sending into a member we already know is failing.
+        val currentIdx = usable.indexOfFirst { it.id == currentEntryId }
+        if (currentIdx < 0) return usable.first().id
+        // One-shot user pick for this turn (still usable, still a member).
+        if (pendingEntryId != null && usable.any { it.id == pendingEntryId }) {
+            return pendingEntryId
+        }
+        return usable[(currentIdx + 1) % usable.size].id
+    }
+
+    /**
      * Ordered fallback candidates for [group]: starts from the member AFTER
      * [activeEntryId] and cycles the group.
      *
