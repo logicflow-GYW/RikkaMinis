@@ -70,6 +70,14 @@ internal const val MAX_LENGTH_WALL_TEXT_CONTINUES = 4
  */
 internal const val DETERMINISTIC_EMPTY_LIMIT = 2
 
+/**
+ * [fix/eof-stub-continuation] Max continuation rounds for EOF-truncated
+ * streams (stream ended with NO finish_reason). The partial answer is KEPT
+ * and a network-stub reminder asks the model to continue; past this cap the
+ * loop gives up with a visible error instead of a silent mid-sentence stop.
+ */
+internal const val MAX_EOF_STUB_CONTINUES = 2
+
 /** Per-tool ring cap for ToolInputDelta snapshots (moved from ChatViewModel companion). */
 internal const val TOOL_INPUT_CHUNK_RING_MAX = 10
 
@@ -1201,7 +1209,22 @@ internal class AgentLoopEngine(
             } else {
                 loopState.accumulatedText += turnTextRaw
             }
-            loopState.lastTurnWasLengthWall = turnFinishReason == "length" && turnTextRaw.isNotEmpty()
+            // [fix/eof-stub-continuation] EOF-stub continuations behave like
+            // length-wall continuations for seam-dedup purposes: the next
+            // turn's head may repeat the truncated tail. The stub branch
+            // (below, finish-path) sets this flag when it injects the
+            // network-stub reminder; here it must NOT be cleared when the
+            // previous turn was an EOF stub (turnFinishReason is null on the
+            // next streamed turn, which would reset the flag before the seam
+            // merge could use it). Cleared only on a NORMAL finish (stop /
+            // end_turn / tool-call turn) — those are clean turn boundaries
+            // where head-overlap trimming would be wrong.
+            loopState.lastTurnWasLengthWall = when {
+                turnTextRaw.isEmpty() -> false
+                turnFinishReason == "length" -> true
+                turnFinishReason == null -> loopState.lastTurnWasLengthWall
+                else -> false // stop / end_turn / tool-call turns: clean boundary
+            }
 
             // Build assistant contentParts for history
             val assistantParts = mutableListOf<AgentContentPart>()
@@ -1220,6 +1243,10 @@ internal class AgentLoopEngine(
             // fresh allowance (mirrors Hermes resetting per-wall retry state).
             loopState.lengthWallContinues = 0
             loopState.deterministicEmptyStreak = 0
+            // [fix/eof-stub-continuation] A tool-call turn is proof the model
+            // produced new work after any EOF — reset the stub-continuation
+            // budget so long tool-heavy runs keep full allowance.
+            loopState.eofStubContinues = 0
             val toolInputMap = loopState.allToolInputs
             // Prefer the opaque blob from LLMStreamChunk.ReasoningContent when the
             // provider emitted one — that path preserves empty strings (DeepSeek V4
@@ -1519,23 +1546,78 @@ internal class AgentLoopEngine(
                 // [T-truncated-stream-retry] The provider signalled the model
                 // turn ended WITHOUT a server finish_reason (EOF / connection
                 // drop mid-stream). The user may have seen a partial answer
-                // (or a blank bubble) that never got a proper end — silently
-                // accepting it loses the tail of the reply. Retry ONCE with the
-                // accumulated context re-appended, mirroring the empty-turn
-                // one-shot guard: it can never loop, and a second truncation
-                // falls through to the normal break below (the user keeps the
-                // partial content + an inline hint is surfaced by the caller).
-                if (turnTruncated && !loopState.didRetryTruncatedTurn) {
+                // (or a blank bubble) that never got a proper end.
+                //
+                // [fix/eof-stub-continuation] Hermes network-stub pattern
+                // (agent/conversation_loop.py): KEEP the partial text as the
+                // model's own last turn — it is already in agentHistory and
+                // accumulatedText, and it is perfectly good content — then
+                // append a synthetic user-role reminder anchoring the exact
+                // cut point and continue. The legacy behavior DELETED the
+                // partial turn and regenerated from scratch (wasting every
+                // streamed token; the regeneration frequently re-emitted a
+                // different opening — screen-level duplication), and a SECOND
+                // EOF broke silently: mid-sentence stop, no hint, user had to
+                // type "继续" by hand. Now: continue in-loop up to
+                // MAX_EOF_STUB_CONTINUES, then give up with a VISIBLE error.
+                // The stacking guard drops a stale stub reminder so consecutive
+                // EOFs do not pile up reminder turns (same pattern as the
+                // length-wall reminder below).
+                if (turnTruncated && hasVisibleContent) {
+                    if (loopState.eofStubContinues < MAX_EOF_STUB_CONTINUES) {
+                        loopState.eofStubContinues++
+                        AppLogger.warning(
+                            TAG_STREAM,
+                            "runAgentLoop turn=$turn EOF-truncated stream (${turnText.length} chars kept, mid-sentence=${looksLikeMidSentenceCut(turnText)}) — network-stub continuation ${loopState.eofStubContinues}/$MAX_EOF_STUB_CONTINUES",
+                        )
+                        // Drop any stale stub reminder from a previous EOF so
+                        // reminders never stack (guard mirrors length-wall).
+                        val prevTail = host.agentHistory.lastOrNull()
+                        val tailIsEofStubReminder = prevTail != null &&
+                            prevTail.role == LLMMessage.Role.USER &&
+                            prevTail.contentParts.size == 1 &&
+                            (prevTail.contentParts.first() as? AgentContentPart.Text)?.text
+                                ?.contains("cut off by a network error") == true
+                        if (tailIsEofStubReminder) {
+                            host.agentHistory.removeAt(host.agentHistory.size - 1)
+                        }
+                        val stubReminder = eofStubReminder(turnText.takeLast(80))
+                        host.agentHistory.add(
+                            LLMMessage(
+                                role = LLMMessage.Role.USER,
+                                content = stubReminder,
+                                contentParts = listOf(AgentContentPart.Text(stubReminder)),
+                            )
+                        )
+                        // Reset the seam-dedup marker: the NEXT turn is a
+                        // continuation of THIS truncation, exactly like a
+                        // length-wall continuation (head-overlap trim applies).
+                        // lastTurnWasLengthWall was already set by the shared
+                        // seam logic above only for finish_reason=="length";
+                        // EOF truncation needs the same treatment.
+                        loopState.lastTurnWasLengthWall = true
+                        continue
+                    }
+                    AppLogger.warning(
+                        TAG_STREAM,
+                        "runAgentLoop turn=$turn EOF-truncated ×$loopState.eofStubContinues (ceiling $MAX_EOF_STUB_CONTINUES) — giving up with visible error",
+                    )
+                    withContext(Dispatchers.Main) {
+                        host.setInlineError(host.string(R.string.error_output_truncated_repeated))
+                    }
+                    // Fall through to the normal break path (persist + exit)
+                    // so the partial answer the user already saw is persisted.
+                } else if (turnTruncated && !loopState.didRetryTruncatedTurn) {
+                    // EOF with NO visible content (blank/whitespace stream):
+                    // there is nothing worth keeping, so the legacy one-shot
+                    // retry (drop the empty assistant turn, regenerate) is
+                    // still the right move. didRetryTruncatedTurn keeps its
+                    // original one-shot semantics on this path.
                     loopState.didRetryTruncatedTurn = true
                     AppLogger.warning(
                         TAG_STREAM,
-                        "truncated turn detected (no finish_reason) — retrying one round (turn=$turn) hasVisibleContent=$hasVisibleContent"
+                        "runAgentLoop turn=$turn EOF-truncated stream with no visible content — one-shot retry (drop empty turn)",
                     )
-                    // Drop this turn's just-appended assistant role from
-                    // host.agentHistory so the retry continuations cleanly. The
-                    // partial text is NOT persisted as the final assistant
-                    // message — the retry either completes it or the second
-                    // truncation leaves the in-progress bubble intact.
                     host.agentHistory.removeAt(host.agentHistory.size - 1)
                     continue
                 }

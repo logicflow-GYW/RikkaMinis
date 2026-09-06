@@ -127,6 +127,19 @@ internal class AgentLoopState(
     var didRetryTruncatedTurn: Boolean = false
 
     /**
+     * [fix/eof-stub-continuation] EOF-truncated-stream continuation count.
+     * Replaces the one-shot [didRetryTruncatedTurn] semantics: instead of
+     * deleting the partial answer and regenerating (waste + re-emission) or
+     * breaking silently on the second EOF, the engine keeps the partial
+     * text as the model's own last turn and appends a network-stub reminder
+     * (Hermes conversation_loop network-stub pattern). Capped at
+     * [MAX_EOF_STUB_CONTINUES] per run; the counter resets on tool-call
+     * turns (model produced new work) so long tool-heavy runs keep full
+     * allowance.
+     */
+    var eofStubContinues: Int = 0
+
+    /**
      * [T-length-wall-continue] Consecutive finish_reason="length" turns that
      * produced NO visible content and NO tool calls. First hit: continue the
      * loop. 3+ empty walls in a row: drop the per-turn max_tokens cap and
