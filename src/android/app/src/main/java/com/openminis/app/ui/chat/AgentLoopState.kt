@@ -201,4 +201,18 @@ internal class AgentLoopState(
     /** How many verify nudges have been injected this run (bounded by
      *  VerificationStopPolicy.MAX_VERIFY_NUDGES). */
     var verifyNudgeAttempts: Int = 0
+
+    /**
+     * [audit-0907 B5] A terminal inline error was already surfaced inside
+     * the loop body (error-shaped finish ceiling / repetition abort /
+     * deterministic-empty fast-exit / length-wall continuation ceiling).
+     * Those branches fall through to the normal persist+break path with
+     * loopExitedNormally still false — without this flag the exit-side
+     * MAX_AGENT_TURNS check misclassifies them as a runaway and calls
+     * finalizeAtTurnLimit, OVERWRITING the specific error banner the user
+     * already saw with a generic "Stopped after 200 agent turns" sticker.
+     * Failure-terminal, deliberately distinct from loopExitedNormally
+     * (which maps to SUCCEEDED/COMPLETED in t7EndRun — these map to FAILED).
+     */
+    var terminalErrorSurfaced: Boolean = false
 }

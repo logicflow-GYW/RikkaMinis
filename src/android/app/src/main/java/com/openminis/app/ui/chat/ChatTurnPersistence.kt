@@ -328,6 +328,11 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
                 SessionActivityTracker.markStreamError(activeSessionId)
             } finally {
                 AppLogger.info(ChatViewModel.TAG_STREAM, "$label streamJob FINALLY enter")
+                // [audit-0907 B2] Reset queue-position state — same
+                // rationale as the send path's finally: whatever the
+                // worker reported while queued must not leak into the
+                // next run's typing indicator.
+                _queueWaitingAhead.value = -1
                 // [T-android-overlay-reply-status-34599] Surface
                 // the assistant's most recent reply text to the
                 // overlay BEFORE setInactive so the post-completion

@@ -1305,6 +1305,11 @@ internal class AgentLoopEngine(
                     withContext(Dispatchers.Main) {
                         host.setInlineError(host.string(R.string.error_stream_interrupted))
                     }
+                    // [audit-0907 B5] Failure-terminal with a specific banner
+                    // already on screen — flag so the exit side does not
+                    // misclassify this as a MAX_AGENT_TURNS runaway and
+                    // overwrite the banner via finalizeAtTurnLimit.
+                    loopState.terminalErrorSurfaced = true
                     // fall through to normal persist + exit (partial kept)
                 } else {
                     // Empty + error-shaped: the relay failed BEFORE emitting
@@ -1316,6 +1321,14 @@ internal class AgentLoopEngine(
                             TAG_STREAM,
                             "runAgentLoop turn=$turn finish=$turnFinishReason (error-shaped) with no content — one-shot retry",
                         )
+                        // [audit-0907 B1] Drop the empty assistant turn just
+                        // appended above — the retry must re-ask from the
+                        // user's message, not present [.., ASSISTANT("")] to
+                        // the provider (tail empty-assistant invites relays
+                        // to echo another empty completion, chaining the very
+                        // failure this branch recovers from). Same shape as
+                        // the EOF-empty one-shot retry below.
+                        host.agentHistory.removeAt(host.agentHistory.size - 1)
                         continue
                     }
                     AppLogger.warning(
@@ -1502,6 +1515,10 @@ internal class AgentLoopEngine(
                                 withContext(Dispatchers.Main) {
                                     host.setInlineError(host.string(R.string.error_output_truncated_repeated))
                                 }
+                                // [audit-0907 B5] Failure-terminal (specific
+                                // banner shown) — see the flag's KDoc; prevents
+                                // the exit-side runaway misclassification.
+                                loopState.terminalErrorSurfaced = true
                                 // Fall through to the normal break path (persist + exit).
                                 // Do NOT `break` here directly: it would skip
                                 // `loopState.loopExitedNormally = true` and misclassify as a
@@ -1533,6 +1550,10 @@ internal class AgentLoopEngine(
                         withContext(Dispatchers.Main) {
                             host.setInlineError(host.string(R.string.error_output_truncated_repeated))
                         }
+                        // [audit-0907 B5] Failure-terminal (specific banner
+                        // shown) — prevents the exit-side runaway
+                        // misclassification from overwriting it.
+                        loopState.terminalErrorSurfaced = true
                         // Fall through to the normal break path (persist + exit).
                         // Do NOT `break` here directly: it would skip
                         // `loopState.loopExitedNormally = true` and misclassify as a
@@ -1556,6 +1577,10 @@ internal class AgentLoopEngine(
                             withContext(Dispatchers.Main) {
                                 host.setInlineError(host.string(R.string.error_output_truncated_repeated))
                             }
+                            // [audit-0907 B5] Failure-terminal (specific banner
+                            // shown) — prevents the exit-side runaway
+                            // misclassification from overwriting it.
+                            loopState.terminalErrorSurfaced = true
                             // Fall through to the normal break path (persist +
                             // exit). NOT `loopExitedNormally` (this is an
                             // abort), but also NOT a runaway misclassification:
@@ -1569,6 +1594,10 @@ internal class AgentLoopEngine(
                             withContext(Dispatchers.Main) {
                                 host.setInlineError(host.string(R.string.error_output_truncated_repeated))
                             }
+                            // [audit-0907 B5] Failure-terminal (specific banner
+                            // shown) — prevents the exit-side runaway
+                            // misclassification from overwriting it.
+                            loopState.terminalErrorSurfaced = true
                         } else {
                             loopState.lengthWallContinues++
                             // T9: log the truncated turn before continuing
@@ -1819,6 +1848,10 @@ internal class AgentLoopEngine(
                     withContext(Dispatchers.Main) {
                         host.setInlineError(host.string(R.string.error_output_truncated_repeated))
                     }
+                    // [audit-0907 B5] Failure-terminal (specific banner shown)
+                    // — prevents the exit-side runaway misclassification from
+                    // overwriting it.
+                    loopState.terminalErrorSurfaced = true
                     // Fall through to the normal break path (persist + exit)
                     // so the partial answer the user already saw is persisted.
                 } else if (turnTruncated && !loopState.didRetryTruncatedTurn) {
@@ -2382,7 +2415,7 @@ internal class AgentLoopEngine(
         // (b) is the only case that needs the inline-error/Resume hand-holding;
         // (a) must NOT be touched or every normal completion gets a fake "hit
         // 200 turns" sticker (the bug user hit at v1.4.0-dev tip).
-        if (!loopState.loopExitedNormally && traceObserver.t7BudgetStopReason == null) {
+        if (!loopState.loopExitedNormally && !loopState.terminalErrorSurfaced && traceObserver.t7BudgetStopReason == null) {
             AppLogger.warning(
                 TAG_STREAM,
                 "runAgentLoop EXIT — hit MAX_AGENT_TURNS=$MAX_AGENT_TURNS, finalizing as resumable",
@@ -2436,6 +2469,11 @@ internal class AgentLoopEngine(
             durationMs = System.currentTimeMillis() - traceStartMs,
             error = when {
                 budgetStop != null -> "budget_exhausted($budgetStop)"
+                // [audit-0907 B5] A failure-terminal error was already
+                // surfaced inline (EOF stub ceiling / repetition abort / …) —
+                // label it as such, NOT as a runaway turn-loop (which it
+                // isn't: the loop exited via a typed failure branch).
+                loopState.terminalErrorSurfaced -> "terminal_error_surfaced"
                 !loopState.loopExitedNormally -> "MAX_AGENT_TURNS"
                 else -> null
             },
