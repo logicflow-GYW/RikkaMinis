@@ -85,6 +85,14 @@ internal suspend fun ChatViewModel.persistToolResultMessage(parts: List<AgentCon
     return entity.id
 }
 
+/**
+ * [fix/budget-stop-banner] The provider-attempt budget shown in the budget-
+ * stop banner. Reads the REAL budget constant so the banner can never drift
+ * from the enforced limit (the first ship hardcoded "64" while the budget
+ * had already been raised to 128 — user hit the wall and saw a stale number).
+ */
+internal val PROVIDER_ATTEMPT_LIMIT_FOR_BANNER: Int =
+    ChatAgentTraceObserver.T7_OBSERVE_MAX_PROVIDER_ATTEMPTS
 
 internal fun ChatViewModel.finalizeAtTurnLimit(
     assistantId: String,
@@ -143,7 +151,7 @@ internal fun ChatViewModel.finalizeBudgetStop(
     }
     val detail = when (reason) {
         "provider_attempt_limit" ->
-            "the run reached its provider-call limit (64 calls)"
+            "the run reached its provider-call limit ($PROVIDER_ATTEMPT_LIMIT_FOR_BANNER calls)"
         "turn_limit" ->
             "the run reached its turn limit"
         "deadline_reached" ->

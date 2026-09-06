@@ -396,6 +396,9 @@ internal class ChatAgentTraceObserver(
         // [fix/budget-stop-silent-exit] provider attempts 64→128：真实长任务基线
         // （2026-09-07 field log：28 分钟 agent 会话烧满 64 次，任务仍在中途）
         // 证明 64 在 enforced 语义下会截断合法长任务。128 = 2× 观测到的真实峰值。
+        // [fix/budget-stop-banner] 用户实测 128 也会撞墙（超长 agent 会话）——
+        // 但 Resume 语义保证无损续跑，撞墙从"静默死"变成"分节"。预算不追着极端
+        // 长任务无限抬（防失控循环烧 token），横幅数字引用本常量（Banner mirror）。
         internal const val T7_OBSERVE_MAX_TURNS = 200
         internal const val T7_OBSERVE_MAX_PROVIDER_ATTEMPTS = 128
         internal const val T7_OBSERVE_MAX_TOOL_CALLS = 128
