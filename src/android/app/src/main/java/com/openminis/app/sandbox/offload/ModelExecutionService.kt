@@ -115,9 +115,23 @@ class ModelExecutionService : Service() {
          * the guard still covers exactly the provider network call region
          * (unsafe lifecycle + native-heap budget sharing), just for N=2
          * instead of N=1.
+         *
+         * Deliberately a java.util.concurrent.Semaphore, NOT the kotlinx
+         * one: the queue-frame publisher needs TIMED tryAcquire, and
+         * kotlinx.coroutines 1.9.0's Semaphore has a documented
+         * permit-loss race when a queued acquire() is cancelled by
+         * withTimeoutOrNull (fixed upstream only in 1.10; reproduced at
+         * ~0.5-2% per timed-out acquire in sandbox probes — a permit vanishes
+         * while acquire/release counts stay balanced). A lost permit in a
+         * 2-slot pool halves throughput permanently; after two losses the
+         * worker starves forever. The JDK Semaphore's tryAcquire(timeout)
+         * has no such window and works fine inside runBlocking (it parks
+         * the thread; the surrounding coroutine just blocks — acceptable
+         * here because the request thread is dedicated to this run).
          */
-        private val executionSlots = kotlinx.coroutines.sync.Semaphore(
+        private val executionSlots = java.util.concurrent.Semaphore(
             ProviderExecSlotPolicy.MAX_CONCURRENT_PROVIDER_RUNS,
+            true, // fairness: FIFO waiters — queue position is honest
         )
 
     }
@@ -302,12 +316,20 @@ class ModelExecutionService : Service() {
                 // an indistinguishable silent wait. Non-streaming requests
                 // have no stream reader mid-flight; the frame is skipped for
                 // them (their client polls result.json only).
+                //
+                // Implementation note: the queue publisher uses the JDK
+                // Semaphore's timed tryAcquire — atomic (no permit handoff
+                // race like kotlinx 1.9.0's cancellable acquire), fair (FIFO
+                // waiters, so the published position matches arrival order),
+                // and thread-parking inside the runBlocking thread (the
+                // request thread is dedicated to this run, so parking it is
+                // free). On timeout publish a frame and re-enter the queue.
                 val wantsQueueFrames = runCatching {
                     JSONObject(requestFile.readText()).optBoolean("streaming", false)
                 }.getOrDefault(false)
                 if (wantsQueueFrames) {
                     var lastPublished = -1
-                    while (!executionSlots.tryAcquire(QUEUE_FRAME_POLL_MS) ) {
+                    while (!executionSlots.tryAcquire(QUEUE_FRAME_POLL_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
                         val waitingNow = synchronized(lifecycleLock) { queuedRequests.get() }
                         if (waitingNow != lastPublished) {
                             lastPublished = waitingNow

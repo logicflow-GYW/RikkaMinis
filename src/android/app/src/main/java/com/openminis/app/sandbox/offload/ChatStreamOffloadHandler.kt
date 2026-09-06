@@ -145,6 +145,18 @@ object ChatStreamOffloadHandler {
         // backstop that bounds the worst case, not the primary liveness signal.
         val streamTimeoutMs =
             com.openminis.app.sandbox.offload.FirstChunkTimeoutPolicy.GENERATION_TIMEOUT_SEC * 1000L
+        // [feat/provider-exec-concurrency] Queue-wait extension: under the
+        // slot pool, this request may spend up to MAX_QUEUED (worst-case
+        // handoff latency) waiting for a slot BEFORE its 30-min generation
+        // budget even starts. The hard wall must cover queue wait +
+        // generation, not generation alone — otherwise a legitimately queued
+        // request is killed by the client while the worker still has it
+        // queued/starting (the worker's queue frames + fresh heartbeat prove
+        // liveness; only this wall would fire). Extension = one full extra
+        // generation budget (bounded: 2× total, no unbounded growth).
+        val queueExtensionMs =
+            if (com.openminis.app.sandbox.offload.ProviderExecSlotPolicy.MAX_CONCURRENT_PROVIDER_RUNS > 1) streamTimeoutMs
+            else 0L
         // (TF-J2: death is now driven by the worker liveness beat file; see the
         // poll-loop decision. No /proc identity-mismatch window is needed.)
         try {
@@ -175,7 +187,7 @@ object ChatStreamOffloadHandler {
                 throw RuntimeException("start model service failed", e)
             }
 
-            val timedOut = withTimeoutOrNull(streamTimeoutMs) {
+            val timedOut = withTimeoutOrNull(streamTimeoutMs + queueExtensionMs) {
                 while (true) {
                     ensureActive()
                     val newLen = streamFile.length()
@@ -327,7 +339,7 @@ object ChatStreamOffloadHandler {
                 }
             } == null
             if (timedOut) {
-                throw RuntimeException("stream timed out after ${streamTimeoutMs}ms")
+                throw RuntimeException("stream timed out after ${streamTimeoutMs + queueExtensionMs}ms (incl. queue wait)")
             }
         } finally {
             // [B2] A stream is no longer in flight regardless of how we exited
