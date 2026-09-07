@@ -304,6 +304,50 @@ class ModelExecutionDispatcherTest {
         assertFalse(json.has("messages"))
     }
 
+    // [T-worker-reasoning-content-roundtrip] DeepSeek V4 requires the
+    // reasoning_content of tool_calls-bearing assistant turns to round-trip
+    // across the worker IPC boundary. Pin the serializer side: non-null →
+    // present (empty string included — field-presence signal), null → key
+    // absent (worker maps absent back to null).
+    @Test
+    fun `assistant reasoningContent is serialized when non-null`() {
+        val json = JSONObject(ModelExecutionDispatcher.buildRequestJson(
+            instance = sampleInstance(),
+            model = sampleModel(),
+            messages = listOf(
+                LLMMessage(
+                    role = LLMMessage.Role.ASSISTANT,
+                    content = "tool call turn",
+                    reasoningContent = "step 1: inspect\nstep 2: plan",
+                ),
+                LLMMessage(
+                    role = LLMMessage.Role.ASSISTANT,
+                    content = "non-thinking turn",
+                    reasoningContent = "",
+                ),
+                LLMMessage(
+                    role = LLMMessage.Role.ASSISTANT,
+                    content = "no captured reasoning",
+                    reasoningContent = null,
+                ),
+            ),
+            systemPrompt = null,
+            maxTokens = 4096,
+            temperature = null,
+            imageParts = emptyList(),
+            inputJson = "",
+            outputExt = null,
+        ))
+        val messages = json.getJSONArray("messages")
+        assertEquals("step 1: inspect\nstep 2: plan", messages.getJSONObject(0).getString("reasoning_content"))
+        // Empty string is MEANINGFUL (DeepSeek V4 emits "" on non-thinking
+        // turns) — it must stay present, not be collapsed to absent.
+        assertEquals("", messages.getJSONObject(1).getString("reasoning_content"))
+        assertTrue(messages.getJSONObject(1).has("reasoning_content"))
+        // null → key absent, so the worker can distinguish null from "".
+        assertFalse(messages.getJSONObject(2).has("reasoning_content"))
+    }
+
     private fun JSONArray.toList(): List<String> =
         (0 until length()).map { getString(it) }
 }

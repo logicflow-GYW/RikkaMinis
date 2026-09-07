@@ -809,6 +809,18 @@ class ModelExecutionService : Service() {
                     com.openminis.app.data.model.LLMMessage.Role.USER
                 },
                 content = obj.optString("content", ""),
+                // [T-worker-reasoning-content-roundtrip] Read back the
+                // reasoning_content serialized by ModelExecutionDispatcher —
+                // WITHOUT this, every offloaded request (chat streaming /
+                // titles / compaction / QuickTest) loses the assistant turns'
+                // captured reasoning, and DeepSeek V4 (thinking on +
+                // tool_calls in history) 400s with "The 'reasoning_content'
+                // in the thinking mode must be passed back to the API".
+                // Empty string is meaningful (field-presence signal) — only
+                // a MISSING key maps to null.
+                reasoningContent = obj.optString("reasoning_content", "").let {
+                    if (it.isEmpty() && !obj.has("reasoning_content")) null else it
+                },
                 // [fix/audit-s3m1] Non-streaming executeRun now parses
                 // contentParts exactly like the streaming path (:870) — the
                 // dispatcher serializes contentParts (buildRequestJson :95),
@@ -1078,6 +1090,12 @@ class ModelExecutionService : Service() {
                         com.openminis.app.data.model.LLMMessage.Role.USER
                     },
                     content = obj.optString("content", ""),
+                    // [T-worker-reasoning-content-roundtrip] Same read-back as
+                    // executeRun: missing key → null, present (even "") → keep.
+                    // See the full rationale at the executeRun reconstruction.
+                    reasoningContent = obj.optString("reasoning_content", "").let {
+                        if (it.isEmpty() && !obj.has("reasoning_content")) null else it
+                    },
                     contentParts = parseContentParts(obj),
                     audioParts = jsonObjList(obj.optJSONArray("audio_parts")).mapNotNull { a ->
                         val b64 = a.optString("data", "")

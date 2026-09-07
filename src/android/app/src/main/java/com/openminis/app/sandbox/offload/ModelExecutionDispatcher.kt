@@ -94,6 +94,24 @@ object ModelExecutionDispatcher {
                         put(JSONObject().apply {
                             put("role", m.role.value)
                             put("content", m.content)
+                            // [T-worker-reasoning-content-roundtrip] DeepSeek V4
+                            // family: once thinking is on, the API REQUIRES every
+                            // tool_calls-bearing assistant message in history to
+                            // carry its original `reasoning_content` back
+                            // (400 "The 'reasoning_content' in the thinking mode
+                            // must be passed back to the API" otherwise). The
+                            // main-process OpenAIProvider echo logic reads
+                            // LLMMessage.reasoningContent — but this worker IPC
+                            // serializer dropped it, so EVERY offloaded path
+                            // (chat streaming / titles / compaction / QuickTest)
+                            // silently lost the field and the next tool-turn 400'd.
+                            // Same family as knobs H1 / worker thinking-rules:
+                            // cross-process field wired on the main-process side
+                            // only. Serialize when non-null (null = nothing was
+                            // captured; empty string is meaningful — DeepSeek V4
+                            // emits `reasoning_content: ""` on non-thinking turns
+                            // and the echo must round-trip exactly that).
+                            m.reasoningContent?.let { put("reasoning_content", it) }
                             if (m.contentParts.isNotEmpty()) {
                                 put("contentParts", JSONArray().apply {
                                     m.contentParts.forEach { part ->
