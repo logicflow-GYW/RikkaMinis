@@ -295,7 +295,6 @@ fun RuntimeLimitsScreen(onBack: () -> Unit) {
                 horizontalArrangement = Arrangement.End,
             ) {
                 MinisTextButton(
-                    text = stringResource(R.string.common_save),
                     onClick = {
                         SubagentPrefs.setEnabled(context, subagentEnabled)
                         ConcurrencyPrefs.setMaxConcurrentSessions(context, maxSessions)
@@ -321,7 +320,9 @@ fun RuntimeLimitsScreen(onBack: () -> Unit) {
                         )
                         onBack()
                     },
-                )
+                ) {
+                    Text(stringResource(R.string.common_save))
+                }
             }
         }
     }
