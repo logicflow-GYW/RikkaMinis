@@ -11,7 +11,6 @@ import android.util.Base64
 import android.util.Log
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
-import android.webkit.FileChooserParams
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
