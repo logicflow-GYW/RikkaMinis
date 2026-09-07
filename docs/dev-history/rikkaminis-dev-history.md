@@ -4,8 +4,8 @@
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
 - 合并范围：2026-08-03 ～ 2026-09-07，共 36 天
-- 条目总数：802（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
-- 总字符数：926169 / 总行数：15338
+- 条目总数：809（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
+- 总字符数：935320 / 总行数：15432
 
 ---
 
@@ -15331,6 +15331,100 @@ JVM：BudgetStopFixTest 3/3 绿，括号配平过。
 
 用户要求总结 RikkaMinis 应用全貌。素材来源：/tmp/rikka-git 源码（main @ 2c32d726，浅克隆约 40 提交，完整历史在记忆 + docs/dev-history 794 条档案）+ README.md + docs/DESIGN_PHILOSOPHY.md + docs/DEVELOPMENT_LIFECYCLE.md。
 关键结构数据：487 个 kt 文件/166K 行；三进程（app 主进程 + :modelservice + :toolservice）；Room DB version 12（ProviderDatabase 独立 10、AppDatabase 12）；语言 7+1（en/zh/zh-rTW/de/ja/ko/ru + values）；24 个 NativeOffloadHandler 实现。
+
+<!-- 2026-09-07 08:33:23 -->
+## ARCHITECTURE.md + dev-history 0907 同步（2026-09-07，main @ 3356a4cd）
+
+用户要求「做架构全貌文档 + 更新仓库文档」已闭环：
+- **docs/ARCHITECTURE.md** 新建（224 行）：结构视角全貌——血统/规模基线（fork 点 e488b1b1=v1.10；934 commits≈上游12+自写922；Android 代码 413 文件 146.7K 行 → 487 文件 166.5K 行，净+74 文件/+19.8K 行）、三进程形态、包结构地图、双 Room 库+四层同步+worker 第五层、护栏体系表、错误自愈三形态、沙箱/offload、差异化功能层、质量基础设施、演进三阶段、**复杂度边界声明**（继承 vs 原创，维护者必读）。
+- **dev-history 档案同步**：rebuild+sanitize 到 09-07（802 条/36 天，原 794/35），fences=32 even / ts=802 / outOrder=0，dev-history/README.md 统计同步；挂载副本（笔记/RikkaMinis开发档案/）已 cp 同步 MOUNT_SYNC_OK。
+- **README.md** 加 ARCHITECTURE 入口链接。
+- 流程：分支 docs/architecture-overview → 单提交 3356a4cd → push（无 CI 触发，docs paths 过滤确认）→ ff 合并 main → push main → 删分支。纯文档改动零构建成本闭环。
+- 教训复用：gh_sync.sh push 分支后 ff 合并 main 再 push main 的顺序；dev-history 重建后必须同步挂载副本。
+
+<!-- 2026-09-07 10:52:46 -->
+## ChatScreen 拆分批次 1 合并 main（2026-09-07，main @ cf8d8a93）
+
+用户要求拆分四个超大文件（ChatScreen 6439 / ChatViewModel 3782 / StreamingMarkdownText 3754 / OpenAIProvider 3174），评估后按四批推进。批次 1 闭环：
+- **改动**：ChatScreen.kt 6439→4789 行。ChatInputArea.kt（1837 行，composer 整体 verbatim 搬运，private→internal）+ ChatScreenStatics.kt（149 行，颜色常量/sentinel/scrollbar/ScrollFollowKey）新建。
+- **验证链**：本地 verbatim 逐行对比 HEAD PASS + 括号配平 PASS + 符号解析检查 → 分支 CI 首跑红（private in file 可见性缺口：ATTACHMENT_PICK_LIMIT/ScrollBottomKey/isBottomSentinelVisible/ScrollFollowKey 四符号搬走后仍是 private，主文件在用）→ 修复 commit cf8d8a93 → CI 34076949149 success（head_sha 双源核对）→ ff 合并 main → push → 分支已删。
+- **教训（拆分专用）**：①跨文件可见性检查必须做「主文件继续引用的符号是否被 internal 化」，只查重复定义不够——private in file 错误就是漏了这步 ②ChatInputArea 搬运时 import 列表必须复制原文件全套（292 个），裸搬必炸 ③verbatim 校验脚本（strip 字符串+注释后逐行对比 HEAD）是搬运正确性的硬证据。
+- **后续批次**（用户已批准继续）：批次 2 StreamingMarkdownText 三层拆（MarkdownStreamMerge 纯函数/MarkdownBlockModel/渲染层）；批次 3 OpenAIProvider（ResponsesAPI 方言/ThinkTags/NetTraceListener）；批次 4 ChatViewModel（retry 域沉到 Ext/Compaction）。批次 1 内部还有 follow 区/TopBar/list/sheets 未拆（ChatScreen 剩 4789 行）。
+- release CI 触发于 main @ cf8d8a93，未等完（用户验证装 android-latest 即可）。
+
+<!-- 2026-09-07 11:23:06 -->
+## ChatScreen 拆分批次 2 合并 main（2026-09-07，main @ 16c20c08）
+
+StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMerge.kt（256 行，流式合并纯函数，零 Compose 依赖）+ MarkdownBlockModel.kt（514 行，MdBlock sealed 模型 + block parser 全家）。
+- **过程坑①**：第一版把 MarkdownParseCaches 也搬去模型层，反向依赖检查抓到它引用渲染层的 parseInline/safeInlineSplitOffset/MdColors——inline 解析层深度耦合，不是纯模型。回滚留在渲染文件。
+- **过程坑②（复用）**：批次 1 的可见性教训再次复发——ListItem/TaskItem（internal 签名暴露 private 类型）+ looksLikeMath/findInlineMathClose（模型层调用渲染层函数）共 22 个编译错误，全部 internal 化修复。**教训升级：拆分前应该把「internal 签名暴露的 private 类型」也纳入检查——不只是符号引用，还有签名暴露面**。
+- **工具沉淀**：raw 跨文件 private 扫描全是误报（import 行的 androidx、KDoc 提及、扩展接收者类型 ChatViewModel 都会误中）——必须 strip 注释/字符串/import 后再扫，且排除「接收者类型=声明」的扩展函数。精确版扫描脚本思路在 /tmp/batch2（会话级，不持久）。
+- 验证链：verbatim 逐行 PASS + 括号 PASS + 反向依赖无 → CI 首跑红（可见性 22 错）→ 修复 16c20c08 → CI 34078644257 success（head_sha 双核对）→ ff 合并 main → 分支已删。
+- 批次 3+4 用户已拍板合并一起做：OpenAIProvider（ResponsesAPI 方言/ThinkTags/NetTraceListener 三块搬运）+ ChatViewModel（retry 域下沉）。批次 1 的 ChatScreen 剩余部分（follow 区/TopBar/list/sheets）留待后续。
+
+<!-- 2026-09-07 12:03:08 -->
+## ChatScreen 四文件拆分批次 3+4 合并 main（2026-09-07，main @ 29a20a47）
+
+用户拍板批次 3+4 合一个分支做。全部四批拆分完成。
+- **改动**：OpenAIProvider.kt 3174→2763（ThinkTagScanning.kt 187 行 + OkHttpNetTraceListener.kt 256 行）；ChatViewModel.kt 3782→3636（ChatRetryOps.kt 170 行，retryLast 成扩展函数）。ResponsesAPI 方言成员留在类内——它们是 class 成员消费构造参数状态，抽取=类拆分非 verbatim 搬运，明确搁置。
+- **两轮 CI 红的教训（新知识）**：
+  1. 第一轮：OkHttpNetTraceListener import 写错——Proxy 是 java.net.Proxy 不是 okhttp3.Proxy（不存在），Connection/Request/Response 漏 import。Proxy 不可解析导致所有 override 不匹配签名（"overrides nothing" + "cannot infer type" 级联 20+ 错）。**教训：搬运类的 import 清单必须从原文件抄而不是手写。**
+  2. 第二轮：retryLast 从成员函数变扩展函数后，body 里的 viewModelScope/嵌套 launch/coroutineContext[Job] 靠成员作用域解析的符号全部失效。viewModelScope 不可解析→launch lambda 的 CoroutineScope receiver 推断失败→内部所有 suspend 调用级联报错。**教训：成员函数→扩展函数搬运，作用域符号（viewModelScope/coroutineContext/bare launch）需要 3 个显式 import：androidx.lifecycle.viewModelScope + kotlinx.coroutines.launch + kotlin.coroutines.coroutineContext；companion 常量要限定（ChatViewModel.TAG）。**
+- 验证链：verbatim PASS + 括号 PASS + 精确符号扫描 → CI 两轮红（import/作用域）→ 修复 → 第三轮 34080864946 success（head_sha=29a20a47 双核对）→ ff 合并 main → 分支已删。
+- **四批总账**：ChatScreen 6439→4789、StreamingMarkdownText 3755→3017、OpenAIProvider 3174→2763、ChatViewModel 3782→3636；新文件 8 个（ChatInputArea/ChatScreenStatics/MarkdownStreamMerge/MarkdownBlockModel/ThinkTagScanning/OkHttpNetTraceListener/ChatRetryOps）。main 推进：cf8d8a93 → 16c20c08 → 29a20a47。
+- 遗留：ChatScreen 剩 4789 行（follow 区/TopBar/list/sheets 四块未拆，原批次 1 计划内的后续）；OpenAIProvider ResponsesAPI 类成员抽取需类拆分。release CI @ 29a20a47 已触发，用户装 android-latest 回归即可。
+
+<!-- 2026-09-07 12:26:29 -->
+## Runtime Limits 面板分支推送（2026-09-07，分支 feat/runtime-limits-panel @ d908e90）
+
+
+用户需求三连：①64→128 预算是否硬编码（答：是，ChatAgentTraceObserver const）②抽出来变可调 ③"能调的都放进去"，以现值为默认；UI 要求：Settings 列表描述保持简短，详细说明+风险放页面里；子代理开关+并发数两行"突兀"要统一。
+
+**范围**：19 个旋钮四组进一个 RuntimeLimitsScreen 页面——①会话与派发（子代理开关+并发会话数，从 Settings 内联行迁入）②循环预算（turns 200/provider 128/tool 128/shell 128/压缩 8/并发工具 4/时限 60min）③流恢复（length-wall 4/EOF 2/空快出 2/瞬态重试 3/验证 nudge 2）④网络与 worker（生成硬墙 30min/首包 30s+45s/worker 槽位 2/排队准入 6）。
+
+**架构**：AgentRuntimeLimitsPrefs（prime 缓存模式，镜像 ConcurrencyPrefs）+ ConfigBuiltins 注册 16 个 runtime.* 路径（minis-config 可读写+备份携带）+ 引擎 runAgentLoop 入口读（下一条消息生效）+ 横幅/剩余量读真值防漂移 + worker 侧槽位池换代生效。原 const 降级为 DEFAULT 供测试锚定。
+
+**验证链（已过）**：沙箱 JVM 闭包 7/7（stub-Context 全链路：默认值/prime clamp/save 暖缓存/延迟推导）+ 仓库版纯 JVM 测试 4/4 + scan gate 4/4（i18n 无孤儿键）+ 17 文件括号配平 + 跨文件符号一致性（R.string 45 key×7 语言全对齐/prefs API 全存在/nav 接线）。
+
+**坑①（重要）**：/tmp/rikka-limits 克隆后 .git/objects/pack 出现 PRoot 幽灵目录项（目录项存在但 ENOENT）——git 全废但工作树完好。解法：重克隆 rikka-limits2 + 明确文件清单覆盖。**教训：PRoot 下 clone 大仓库 pack 极易损坏，重要工作要尽早 commit；恢复靠"我知道我改了哪 25 个文件"的清单**。
+
+**坑②**：期间 main 前进 3 提交（批次 3+4 合并：OpenAIProvider 拆分 + ChatViewModel retryLast）——覆盖前先 `git diff 16c20c0 29a20a4 --name-only` 查冲突面，OpenAIProvider 是唯一交叠且我的三处超时替换行号语义仍成立。
+
+**坑③**：sed 全局替换 STREAM_FIRST_DATA_TIMEOUT_MS 后 const→val 忘了 OpenAIProvider 里那个是 const val（函数调用不能进 const 初始化器），已改运行期 val。
+
+**状态**：分支已推送 + CI 已 dispatch（run 结果未等）。下一步：查 CI → 绿则 ff 合并 main → release → 用户真机验证（重点：面板显示/改预算下一条消息生效/横幅数字随设置变）。
+
+<!-- 2026-09-07 13:07:52 -->
+## Runtime Limits 面板全链路闭环（2026-09-07，main @ 059aa66）
+
+
+**已合并 main 并收尾**：分支 feat/runtime-limits-panel 三提交（d908e90 主体 + 4f52adb OpenAIProvider rebase 修复 + 059aa66 MinisTextButton content slot）ff 合并 main @ 059aa66，push 触发 release CI 34085325828（in_progress，用户拍板不等）。本地+远端分支已删。
+
+**功能**：19 个原硬编码 agent 运行时常量 → Settings → Agent Runtime → Runtime Limits 单页四组（会话与派发/循环预算/流恢复/网络与 worker），默认值全部等于原硬编码值。AgentRuntimeLimitsPrefs（prime 缓存）+ ConfigBuiltins 16 个 runtime.* 路径 + 引擎每 run 读取（下一条消息生效）+ 横幅读真值防漂移 + worker 槽位换代生效。45 字符串 × 7 语言，孤儿 dialog 键清 2 个。
+
+**CI 三轮红一轮绿（教训都在）**：①第一轮把陈旧工作树的 OpenAIProvider 整文件覆盖到已拆分的新基线 → Redeclaration 墙（ThinkTag/NetTrace 双声明）——**覆盖式同步前必须先 git diff 基线间文件清单**；②MinisTextButton 没有 text= 参数（content slot 模式）；③clip import 被清理脚本误删。沙箱闭包编译抓不到 Android UI 层错误（组件签名），**Compose UI 改动分支 CI 是唯一裁决**。
+
+**用户真机验证清单（装 android-latest 后）**：①Settings → Agent Runtime → Runtime Limits 入口存在，点进去四组 19 项、默认值与列表一致 ②子代理开关/并发会话数从区块行迁入页面（原两行消失）③改 provider 预算 → 撞墙横幅数字跟着变 ④改恢复参数下一条消息生效。
+
+**PRoot 坑（重要）**：/tmp/rikka-limits 的 .git/objects/pack 幽灵目录项（目录项在但 ENOENT）= git 报废但工作树完好；恢复路径 = 重克隆 + 文件清单覆盖。以后 clone 后立即 commit 一次做锚点。
+
+<!-- 2026-09-07 14:25:55 -->
+## Runtime Limits 审计修复合并 main（2026-09-07，main @ 90ec25e）
+
+
+用户要求复查 runtime-limits 三提交（d908e90/4f52adb/059aa66）+ 拆分批次。审计实锤 4 个问题，全修，分支 fix/runtime-limits-audit 单提交 90ec25e（7 文件 +91/−23），分支 CI 34088478623 success（head_sha 双核对）→ ff 合并 main → release CI 34089532943 success（bridge + API 双源）→ 分支已删。
+
+**修的 4 个**：
+- **H1 worker 进程没 prime**：MinisApp 的 :modelservice/:toolservice 早退分支只 prime 了 FastModePrefs，但 worker 恰是槽位池（liveProviderSlots companion init）/准入（liveQueueAdmission）/OpenAIProvider 超时（decideGenerationTimeoutSec）的执行地 → 用户调的 slots/walls 在所有 offload 路径静默回落默认。修：两个分支补 AgentRuntimeLimitsPrefs.prime(this)。**同 knobs H1（0905）/worker thinking-rules 同族第 3 次：跨进程字段只接主进程侧。**
+- **H2 横幅报实时值而非本次 run 快照**：引擎在 runAgentLoop 入口快照预算，但 finalizeAtTurnLimit/finalizeBudgetStop 横幅时间点重新读 prefs → run 中改设置横幅就报错数（64vs128 同款漂移的复发面）。修：引擎传 maxTurnsThisRun/maxProviderAttemptsThisRun 穿过 AgentLoopHost 接口进横幅（默认参数保 JVM 测试路径）。
+- **H3 t7Remaining 读实时 prefs**：remaining 会随设置中途变化跳变/变负。修：从 activeRunBudget（消费来源同一对象）推导，无 budget 才回落。
+- **M1 minis-config 写不达缓存**：PrefsIntField 直写 SharedPreferences，primed 缓存永不刷新 → agent 会话 `minis-config set runtime.*` 要重启进程才生效。修：ConfigBuiltins 注册 OnSharedPreferenceChangeListener 写后 re-prime。
+
+**验证过的非问题（防复发）**：ChatRetryOps verbatim 搬运字节级一致（仅 3 处预期 TAG 限定）；OpenAIProvider rebase 后只剩 3 处超时替换、批次 3/4 拆分完好；i18n 45 key×7+1 语言无孤儿；scan gate 4/4；backup scope 覆盖 runtime.*；slider 边界被 prefs 读取端 pre-clamp。
+
+**审计方法论沉淀**：①先双源核对已合 CI 是否真实绿（bridge+API head_sha）——runtime-limits 当时分支 CI 确实绿过，问题是 CI 覆盖不到跨进程 prime 语义 ②按「谁在哪个进程读这个值」画消费矩阵，跨进程读者逐个查 prime ③引擎快照语义 vs 展示层实时读的分叉是这套面板的系统性风险面——所有展示"本次 run 数字"的地方都必须从 run 快照取 ④PrefsIntField 写路径 + 进程内缓存 = 永远的"写了不生效"配方，凡注册 Prefs*Field 都要问"缓存谁负责刷新"。
+
+**坑**：gh_ci_wait.sh 的 --expect 传短 sha 会被当不匹配丢掉自己的 run（"does not match expected"全是 12 位 vs 7 位自比）——传完整 40 位 sha 或直接 API 查。
 
 ---
 

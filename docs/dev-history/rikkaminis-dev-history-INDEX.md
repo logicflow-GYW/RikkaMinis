@@ -1,6 +1,6 @@
 # rikkaminis-dev-history 按天索引
 
-快速跳转到每日开发日志。共 802 条记录，36 天。
+快速跳转到每日开发日志。共 809 条记录，36 天。
 
 ## 2026-08-03（11 条）
 
@@ -1692,7 +1692,7 @@
 - `23:58` **dev-history 0906 同步 + 主号→小号全量同步（2026-09-06 深夜）**
   - **主号 main @ 7d928fa3**（docs(dev-history): sync archive to 2026-09-06, 794 entrie…
 
-## 2026-09-07（7 条）
+## 2026-09-07（14 条）
 
 - `01:31` **provider-exec-concurrency 分支（A+B 多会话并发）+ 突然停第4形态（预算墙）双修复**
   - **分支** feat/provider-exec-concurrency（未合并 main），三提交：
@@ -1708,3 +1708,17 @@
   - **范围**：09-06/09-07 共 13 提交 47 文件 +3521/−131（并发/流恢复/content-filter/验证守卫/hermes gu…
 - `08:15` **RikkaMinis 全貌梳理请求（2026-09-07）**
   - 用户要求总结 RikkaMinis 应用全貌。素材来源：/tmp/rikka-git 源码（main @ 2c32d726，浅克隆约 40 提交，完整历史在记忆…
+- `08:33` **ARCHITECTURE.md + dev-history 0907 同步（2026-09-07，main @ 3356a4cd）**
+  - 用户要求「做架构全貌文档 + 更新仓库文档」已闭环：
+- `10:52` **ChatScreen 拆分批次 1 合并 main（2026-09-07，main @ cf8d8a93）**
+  - 用户要求拆分四个超大文件（ChatScreen 6439 / ChatViewModel 3782 / StreamingMarkdownText 3754 /…
+- `11:23` **ChatScreen 拆分批次 2 合并 main（2026-09-07，main @ 16c20c08）**
+  - StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMerge.kt（256 行，流式合并纯函…
+- `12:03` **ChatScreen 四文件拆分批次 3+4 合并 main（2026-09-07，main @ 29a20a47）**
+  - 用户拍板批次 3+4 合一个分支做。全部四批拆分完成。
+- `12:26` **Runtime Limits 面板分支推送（2026-09-07，分支 feat/runtime-limits-panel @ d908e90）**
+  - 用户需求三连：①64→128 预算是否硬编码（答：是，ChatAgentTraceObserver const）②抽出来变可调 ③"能调的都放进去"，以现值为默…
+- `13:07` **Runtime Limits 面板全链路闭环（2026-09-07，main @ 059aa66）**
+  - **已合并 main 并收尾**：分支 feat/runtime-limits-panel 三提交（d908e90 主体 + 4f52adb OpenAIPro…
+- `14:25` **Runtime Limits 审计修复合并 main（2026-09-07，main @ 90ec25e）**
+  - 用户要求复查 runtime-limits 三提交（d908e90/4f52adb/059aa66）+ 拆分批次。审计实锤 4 个问题，全修，分支 fix/ru…

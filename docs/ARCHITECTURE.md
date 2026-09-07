@@ -20,7 +20,7 @@
 | UI 灵感 | RikkaHub（左滑会话抽屉、极简顶栏、消息流布局；借鉴灵感非代码） |
 | 平台 | Android-only（上游 iOS 树与第三方 C 源码已删除） |
 | 提交构成 | 全仓 934 commits ≈ 上游 12 + fork 后自写 ~922（8/1 起 36 天） |
-| Android 代码量 | fork 基线 413 文件 ≈ 146.7K 行 → 当前 487 文件 ≈ 166.5K 行（**净 +74 文件 / +19.8K 行**，另有大量修改） |
+| Android 代码量 | fork 基线 413 文件 ≈ 146.7K 行 → 当前 494 文件 ≈ 167.2K 行（**净 +81 文件 / +20.5K 行**，另有大量修改） |
 
 **关键认知**：这个 app 60% 以上的复杂度（沙箱、多进程、offload、浏览器）来自
 上游架构，fork 当天就已存在。本 fork 36 天的工作集中在三块：**功能增量**
@@ -119,6 +119,14 @@
 > 并发槽的历史教训：kotlinx.coroutines 1.9.0 的 timed-acquire 会**吃许可**
 > （KTKU-354，1.10 修），换 java.util.concurrent.Semaphore 后 2000 轮探针
 > 零丢失——需要 timed acquire 时别用 kotlinx 信号量。
+>
+> **可调性**：上表的全部数值不再是代码常量——Settings → Agent Runtime →
+> Runtime Limits 面板（19 项，四组：会话与派发 / 循环预算 / 流恢复 / 网络与
+> worker）把它们暴露为运行时设置，默认值等于原硬编码值，改后下一条消息生效。
+> 实现模式：`AgentRuntimeLimitsPrefs` prime 缓存 + `ConfigBuiltins` 注册
+> `runtime.*` 路径（minis-config 可读写）+ 引擎每 run 入口快照预算（横幅读
+> 快照而非实时值，防 run 中改设置导致数字漂移）+ worker 进程侧同样 prime
+> （槽位池/准入在 `:modelservice` 执行，曾因主进程侧 prime 而静默回落默认）。
 
 ### 5.3 错误自愈三形态（近期主线）
 
@@ -206,7 +214,22 @@
 第三阶段的产出在 UI 上几乎没有体现——app 外观与 8 月中差别不大，但底层多了
 数百个边界处理。这是"代码清单比观感复杂得多"的主要原因。
 
-## 12. 复杂度边界声明（维护者必读）
+## 12. 借鉴登记（参考项目的思想来源）
+
+本 fork 大量借鉴同类 agent 项目的**设计思想**（非代码复制——每个落地都
+按 RikkaMinis 的架构重写并有测试）。登记于此，便于追溯"这个设计为什么长这样"：
+
+| 参考项目 | 借鉴内容 | 落地形态 |
+|---|---|---|
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent)（Nous Research，MIT） | **harness 纪律**：真机事故→守卫模块；prompt cache 不变量；表驱动错误恢复 | repetition_guard 移植（重复中止）、empty_response_guard 确定性空快出、continuation ceiling、session 级 system prompt 冻结、verification_stop 验证门控、预算护栏（turn/provider 上限可见化+Resume）、并发槽 |
+| [OmniBot](https://github.com/omnimind-ai/OmniBot) | 工具并发白名单、回合折叠 UI、自动压缩、记忆 rollup | 工具回合折叠、上下文压缩器（用户消息永不压缩）、子代理系统 |
+| [RikkaHub](https://github.com/rikkahub/rikkahub)（AGPL-3.0） | 聊天 UI 交互（左滑抽屉、消息流跟随、输入栏聚焦） | 左滑会话抽屉、极简顶栏、auto-follow 双条件守卫 |
+| [OpenClaw](https://github.com/riley0122/OpenClaw)（参考于上游技能体系） | 技能目录化、触发式 skill | 可扩展技能系统（/var/minis/skills/） |
+
+> 完整参考清单（含未落地备选）见 README「致谢」与 `docs/dev-history` 中
+> 各调研条目（OmniBot 调研 08-12、Hermes 吸收分析 09-06 等）。
+
+## 13. 复杂度边界声明（维护者必读）
 
 - **继承复杂度（别动，除非出 bug）**：三进程架构、PRoot 沙箱、offload 机制、
   浏览器 TabPool、Provider 适配层、Termux 终端。这些是上游 v1.10 的设计，

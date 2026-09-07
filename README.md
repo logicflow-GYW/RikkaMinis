@@ -347,6 +347,10 @@ ANSI/CSI/OSC 解析与 TUI 渲染引擎。
 **Android 端侧 AI 智能体参考** — 以下项目为 RikkaMinis 的 agent 运行时、
 自动化与系统集成能力提供了设计参考（借鉴思路，非代码复制）：
 
+- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — harness 纪律型
+  agent 参考：repetition_guard（重复中止）、empty_response_guard（确定性空快出）、
+  continuation ceiling、session 级 system prompt 冻结、verification_stop 验证
+  门控、预算护栏可见化。落地清单见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §12
 - **[OmniBot](https://github.com/omnimind-ai/OmniBot)** — 工具并发、回合折叠、
   自动压缩、记忆 rollup、子代理系统
 - **[肉包 Roubao](https://github.com/Turbo1123/roubao)** — 宏脚本、执行追踪
