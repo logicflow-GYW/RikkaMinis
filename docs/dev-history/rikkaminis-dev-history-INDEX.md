@@ -1,6 +1,6 @@
 # rikkaminis-dev-history 按天索引
 
-快速跳转到每日开发日志。共 809 条记录，36 天。
+快速跳转到每日开发日志。共 810 条记录，36 天。
 
 ## 2026-08-03（11 条）
 
@@ -1692,7 +1692,7 @@
 - `23:58` **dev-history 0906 同步 + 主号→小号全量同步（2026-09-06 深夜）**
   - **主号 main @ 7d928fa3**（docs(dev-history): sync archive to 2026-09-06, 794 entrie…
 
-## 2026-09-07（14 条）
+## 2026-09-07（15 条）
 
 - `01:31` **provider-exec-concurrency 分支（A+B 多会话并发）+ 突然停第4形态（预算墙）双修复**
   - **分支** feat/provider-exec-concurrency（未合并 main），三提交：
@@ -1722,3 +1722,5 @@
   - **已合并 main 并收尾**：分支 feat/runtime-limits-panel 三提交（d908e90 主体 + 4f52adb OpenAIPro…
 - `14:25` **Runtime Limits 审计修复合并 main（2026-09-07，main @ 90ec25e）**
   - 用户要求复查 runtime-limits 三提交（d908e90/4f52adb/059aa66）+ 拆分批次。审计实锤 4 个问题，全修，分支 fix/ru…
+- `15:14` **文档更新 + Hermes 借鉴登记 + 小号同步（2026-09-07，main @ 5e81aa1a / alt @ 3e8dc9e6）**
+  - **任务**：用户要求更新文档 + 同步小号，并把"这次新借鉴的东西"在文档做登记。

@@ -4,8 +4,8 @@
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
 - 合并范围：2026-08-03 ～ 2026-09-07，共 36 天
-- 条目总数：809（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
-- 总字符数：935320 / 总行数：15432
+- 条目总数：810（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
+- 总字符数：936808 / 总行数：15454
 
 ---
 
@@ -15425,6 +15425,28 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 **审计方法论沉淀**：①先双源核对已合 CI 是否真实绿（bridge+API head_sha）——runtime-limits 当时分支 CI 确实绿过，问题是 CI 覆盖不到跨进程 prime 语义 ②按「谁在哪个进程读这个值」画消费矩阵，跨进程读者逐个查 prime ③引擎快照语义 vs 展示层实时读的分叉是这套面板的系统性风险面——所有展示"本次 run 数字"的地方都必须从 run 快照取 ④PrefsIntField 写路径 + 进程内缓存 = 永远的"写了不生效"配方，凡注册 Prefs*Field 都要问"缓存谁负责刷新"。
 
 **坑**：gh_ci_wait.sh 的 --expect 传短 sha 会被当不匹配丢掉自己的 run（"does not match expected"全是 12 位 vs 7 位自比）——传完整 40 位 sha 或直接 API 查。
+
+<!-- 2026-09-07 15:14:03 -->
+## 文档更新 + Hermes 借鉴登记 + 小号同步（2026-09-07，main @ 5e81aa1a / alt @ 3e8dc9e6）
+
+
+**任务**：用户要求更新文档 + 同步小号，并把"这次新借鉴的东西"在文档做登记。
+
+**文档更新**（docs/borrow-registry-0907 → 单提交 5e81aa1a，5 文件 +142/−7，ff 合并 main）：
+- **README 致谢**补 Hermes Agent（harness 纪律：repetition_guard/empty_response_guard/continuation ceiling/system prompt 冻结/verification_stop/预算护栏可见化）
+- **ARCHITECTURE.md 新增 §12 借鉴登记表**（Hermes/OmniBot/RikkaHub/OpenClaw → 落地形态），原 §12 复杂度边界声明顺延为 §13
+- ARCHITECTURE §5.2 护栏表补"可调性"段（Runtime Limits 面板 19 项四组 + AgentRuntimeLimitsPrefs prime + run 快照横幅 + worker 侧 prime）
+- 代码量基线更新：413→494 文件 / ≈167.2K 行（净 +81 文件 / +20.5K 行）
+- dev-history 档案重建 802→**809 条**（36→37 天含今日全部 14 条），fences even / ts 对齐 / outOrder=0，dev-history/README.md 统计同步
+
+**小号同步**（alt-sync-0907 → merge 3e8dc9e6，双亲 151574d6 + 5e81aa1a）：
+- 20 提交待同步；唯一冲突 ChatScreen.kt（小号 inline ChatInputArea vs 主号拆分版）
+- **冲突解决要点（可复用）**：主号把 ChatInputArea verbatim 移出 ChatScreen.kt，小号侧函数体与主号拆分版**逐行一致**（仅主号版多 @Composable+internal 签名两行）→ 直接取主号侧文件（checkout --theirs），无功能丢失
+- 坑：gh_sync.sh push 只认 --remote 不认 --repo（传 --repo 被忽略且默认推 origin 走代理 TLS 失败）；本地 `git branch -f alt/main` 会创建本地分支遮蔽 remote-tracking 导致 refname ambiguous——**改远端指针不要 branch -f，直接 push 本地分支到远端 ref（alt-sync-0907:main）**
+- 推小号 main 须 `GITHUB_TOKEN="$GITHUB_TOKEN_FULL_RIGHT"`（默认主号 token permission denied）
+- 小号 push main 自动触发 CI run **34094139466**（head_sha=3e8dc9e6 一致），用户拍板不等（主号同内容已绿过）——新会话如需要可查结论
+
+本地+远端 alt-sync-0907 已删，工作树干净，双线状态：主号 5e81aa1a / 小号 3e8dc9e6。
 
 ---
 
