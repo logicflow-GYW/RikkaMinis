@@ -7,6 +7,9 @@ package com.openminis.app.ui.chat
 // agentHistory/...) is already internal, so no visibility changes needed.
 
 import android.util.Log
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.launch
+import androidx.lifecycle.viewModelScope
 import com.openminis.app.tools.AgentTraceRecorder
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.service.SessionActivityTracker
