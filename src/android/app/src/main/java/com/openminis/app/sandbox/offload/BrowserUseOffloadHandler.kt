@@ -156,6 +156,17 @@ class BrowserUseOffloadHandler(private val app: MinisApp) : NativeOffloadHandler
         args.getInt("scroll-count", "scroll_count")?.let { obj.put("scroll_count", it) }
         args.getInt("timeout")?.let { obj.put("timeout", it) }
         if (args.hasFlag("fuzzy")) obj.put("fuzzy", true)
+        // [feat/browser-console-network-upload] diagnostics + upload params.
+        if (args.hasFlag("clear")) obj.put("clear", true)
+        args.get("paths")?.let { raw ->
+            // Comma- or whitespace-separated Linux paths (quoting multiple
+            // paths through busybox-ash is painful; a single flat string is
+            // the shell-friendly shape).
+            val tokens = raw.split(Regex("[,\\s]+"))
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+            if (tokens.isNotEmpty()) obj.put("paths", JSONArray(tokens))
+        }
         args.get("keywords")?.let { raw ->
             // Comma- or whitespace-separated list.
             val tokens = raw.split(Regex("[,\\s]+"))
@@ -384,6 +395,9 @@ class BrowserUseOffloadHandler(private val app: MinisApp) : NativeOffloadHandler
             "go_back", "back"    -> "browser: go back"
             "reload"             -> "browser: reload"
             "find"               -> "browser: find ${txt ?: sel ?: ""}".trim()
+            "get_console_messages" -> "browser: read console"
+            "get_network_requests" -> "browser: read network requests"
+            "file_upload"        -> "browser: upload file"
             else                 -> "browser: $action"
         }
     }
@@ -402,7 +416,7 @@ class BrowserUseOffloadHandler(private val app: MinisApp) : NativeOffloadHandler
          */
         private val BOOLEAN_FLAGS = setOf(
             "compact", "quiet", "with-base64", "with_base64",
-            "reset", "fuzzy", "help",
+            "reset", "fuzzy", "help", "clear",
         )
 
         // Error codes — match iOS NOFF_ERR_* constants.
@@ -451,6 +465,17 @@ ACTIONS:
                   the shell intact — write the array to a temp file first.
   scroll_and_collect --scroll-count <n> --item-selector <css> [--keywords <list>]
   wait_for_dom_stable [--timeout <ms>]
+  get_console_messages [--clear]
+                  Read the page's JS console output (errors/logs) captured in
+                  this tab. --clear empties the buffer after reading.
+  get_network_requests [--clear]
+                  Read the requests the page made (method, URL; response
+                  status + duration from the page's Performance API when
+                  available). --clear empties both buffers.
+  file_upload     --paths <linux paths, comma/space separated>
+                  Answer a page file chooser (an <input type=file> opened by
+                  click/execute_js) with files from the sandbox. Paths must
+                  live under /var/minis/** or the sandbox tree.
 
 COMMON OPTIONS:
   --tab-id <n>     Route the action to a specific tab (default: active tab)

@@ -43,6 +43,17 @@ data class BrowserActionInput(
      * (Unix seconds). Values are loosely typed (String / Boolean / Number).
      */
     val cookies: List<Map<String, Any?>>? = null,
+    /**
+     * When true on get_console_messages / get_network_requests, clear the
+     * buffer after reading it. [feat/browser-console-network-upload]
+     */
+    val clear: Boolean = false,
+    /**
+     * Linux paths of files to hand to a page-opened file chooser
+     * (file_upload). Resolved to host files via PRootKernel at execution
+     * time. [feat/browser-console-network-upload]
+     */
+    val paths: List<String>? = null,
 ) {
     companion object {
         fun parse(json: String): BrowserActionInput? {
@@ -77,10 +88,34 @@ data class BrowserActionInput(
                     timeoutMs = if (obj.has("timeout")) obj.optInt("timeout") else null,
                     fullPage = obj.optBoolean("full_page", false),
                     cookies = parseCookies(obj),
+                    clear = obj.optBoolean("clear", false),
+                    paths = parseStringList(obj, "paths"),
                 )
             } catch (_: Exception) {
                 null
             }
+        }
+
+        /**
+         * Parse a list-of-strings param that may arrive as a real JSON array,
+         * a JSON-encoded STRING (`"[\"a\",\"b\"]"` — schema-faithful models
+         * emit the string form), or a plain comma/whitespace-separated string
+         * (`"/tmp/a.png,/tmp/b.png"`). Returns null when absent / empty.
+         * [feat/browser-console-network-upload]
+         */
+        private fun parseStringList(obj: JSONObject, key: String): List<String>? {
+            val arr: JSONArray? = obj.optJSONArray(key)
+                ?: obj.optString(key).takeIf { it.isNotBlank() }
+                    ?.let { runCatching { JSONArray(it) }.getOrNull() }
+            if (arr != null) {
+                return (0 until arr.length())
+                    .mapNotNull { arr.optString(it).takeIf(String::isNotBlank) }
+                    .takeIf { it.isNotEmpty() }
+            }
+            return obj.optString(key).takeIf { it.isNotBlank() }
+                ?.split(Regex("[,\\s]+"))
+                ?.mapNotNull { it.trim().takeIf(String::isNotEmpty) }
+                ?.takeIf { it.isNotEmpty() }
         }
 
         /**

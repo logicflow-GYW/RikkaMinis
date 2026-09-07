@@ -3,19 +3,25 @@ package com.openminis.app.browser
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
 import android.util.Base64
 import android.util.Log
+import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
+import android.webkit.FileChooserParams
 import android.webkit.JavascriptInterface
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.core.content.FileProvider
+import com.openminis.app.sandbox.PRootKernel
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -81,6 +87,20 @@ class BrowserUseManager(
         // actually observe two equal readings.
         private const val MIN_DOM_STABLE_TIMEOUT_MS = 1_000
         private const val MAX_DOM_STABLE_TIMEOUT_MS = 60_000
+
+        /**
+         * [feat/browser-console-network-upload] Ring-buffer caps for the
+         * per-tab diagnostics buffers. Console entries are small; network
+         * entries carry a full URL. 200/100 entries keep the last few page
+         * loads visible without unbounded growth.
+         */
+        private const val CONSOLE_BUFFER_CAP = 200
+        private const val NETWORK_BUFFER_CAP = 100
+
+        /** Output cap for the diagnostics readouts (mirrors get_text's
+         *  readable-bound philosophy — a chatty page shouldn't flood the
+         *  LLM context). */
+        private const val DIAGNOSTICS_TEXT_CAP = 16_000
 
         @SuppressLint("SetJavaScriptEnabled")
         fun configureWebView(webView: WebView, profile: UserAgentProfile, customUA: String? = null) {
@@ -196,6 +216,63 @@ class BrowserUseManager(
      */
     private var asyncJsDeferred: CompletableDeferred<String>? = null
     private var asyncJsActiveToken: String? = null
+
+    // ── [feat/browser-console-network-upload] diagnostics buffers ────────────
+
+    /** One page JS console message, captured in onConsoleMessage. */
+    data class ConsoleEntry(
+        val timestamp: Long,
+        val level: String,
+        val message: String,
+        val line: Int,
+        val source: String,
+    )
+
+    /**
+     * One network request observed at shouldInterceptRequest. NOTE: the
+     * WebView API only exposes the REQUEST at interception time — response
+     * status + duration are merged from the page's PerformanceResourceTiming
+     * entries (Chromium 109+) at read time, and show "?" when unavailable.
+     */
+    data class NetworkEntry(
+        val timestamp: Long,
+        val method: String,
+        val url: String,
+        val isMainFrame: Boolean,
+    )
+
+    private val consoleLog = ArrayDeque<ConsoleEntry>()
+    private val networkLog = ArrayDeque<NetworkEntry>()
+
+    /** onConsoleMessage arrives on the main thread, shouldInterceptRequest on
+     *  a background thread — both buffers are synchronized for safety. */
+    private fun recordConsole(entry: ConsoleEntry) = synchronized(consoleLog) {
+        if (consoleLog.size >= CONSOLE_BUFFER_CAP) consoleLog.removeFirst()
+        consoleLog.addLast(entry)
+    }
+
+    private fun recordNetwork(entry: NetworkEntry) = synchronized(networkLog) {
+        if (networkLog.size >= NETWORK_BUFFER_CAP) networkLog.removeFirst()
+        networkLog.addLast(entry)
+    }
+
+    /**
+     * The file chooser a page opened (an <input type="file"> the agent
+     * clicked), awaiting a file_upload action. WebView requires the callback
+     * to be answered EXACTLY ONCE: file_upload resolves it with FileProvider
+     * URIs; navigation away (onPageStarted) or a newer chooser cancels it
+     * with null so a stale callback can never swallow a later upload.
+     */
+    private var pendingFileChooser: ValueCallback<Array<Uri>>? = null
+    private var pendingFileAccept: String? = null
+
+    private fun cancelPendingFileChooser(reason: String) {
+        val pending = pendingFileChooser ?: return
+        pendingFileChooser = null
+        pendingFileAccept = null
+        runCatching { pending.onReceiveValue(null) }
+        Log.i(TAG, "file chooser cancelled: $reason")
+    }
 
     /** Allocate a fresh deferred + token for an async JS bridge request. */
     private fun beginAsyncJsRequest(): Pair<CompletableDeferred<String>, String> {
@@ -441,10 +518,36 @@ class BrowserUseManager(
                 }
             }
 
+            override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                // [feat/browser-console-network-upload] A pending file chooser
+                // belongs to the page that opened it. Navigating away cancels
+                // it (answered with null) so a stale chooser can never
+                // swallow a file_upload meant for the next page.
+                cancelPendingFileChooser("page navigated to ${url?.take(80)}")
+            }
+
             override fun shouldInterceptRequest(
                 view: WebView, request: WebResourceRequest
             ): android.webkit.WebResourceResponse? {
                 val url = request.url ?: return null
+                // [feat/browser-console-network-upload] Observe (never
+                // intercept) every real http/https request the page makes —
+                // main frame + subresources + XHR/fetch all pass through
+                // here. minis:// resolutions are app plumbing, not page
+                // traffic, and are not recorded. This callback runs on a
+                // background thread; the ring buffer is synchronized.
+                val scheme = url.scheme
+                if (scheme == "http" || scheme == "https") {
+                    recordNetwork(
+                        NetworkEntry(
+                            timestamp = System.currentTimeMillis(),
+                            method = request.method ?: "GET",
+                            url = url.toString(),
+                            isMainFrame = request.isForMainFrame,
+                        )
+                    )
+                }
                 if (url.scheme != "minis") return null
                 // [audit-RC13] Only serve minis:// from page-initiated loads that
                 // are either the main frame (agent navigation / top-level href)
@@ -553,6 +656,49 @@ class BrowserUseManager(
                 _pageTitle.value = title ?: ""
             }
 
+            /**
+             * [feat/browser-console-network-upload] Capture every page JS
+             * console message into the per-tab ring buffer so the agent can
+             * read page errors (get_console_messages) instead of guessing at
+             * a blank/broken page. Return false — default logging continues.
+             */
+            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                consoleMessage ?: return false
+                recordConsole(
+                    ConsoleEntry(
+                        timestamp = System.currentTimeMillis(),
+                        level = consoleMessage.messageLevel()?.name ?: "LOG",
+                        message = consoleMessage.message() ?: "",
+                        line = consoleMessage.lineNumber(),
+                        source = consoleMessage.sourceId() ?: "",
+                    )
+                )
+                return false
+            }
+
+            /**
+             * [feat/browser-console-network-upload] The page opened a file
+             * chooser (agent clicked an <input type="file">). Returning true
+             * means WE own the answer: the file_upload action resolves the
+             * callback with FileProvider URIs. A stale chooser (page opened
+             * a second one, or navigation) is cancelled with null first —
+             * WebView tolerates exactly one live callback per chooser.
+             */
+            override fun onShowFileChooser(
+                view: WebView,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?,
+            ): Boolean {
+                val callback = filePathCallback ?: return false
+                pendingFileChooser?.let { old -> runCatching { old.onReceiveValue(null) } }
+                pendingFileChooser = callback
+                pendingFileAccept = fileChooserParams?.acceptTypes
+                    ?.filterNotNull()?.joinToString(",")
+                    ?.takeIf { it.isNotBlank() }
+                Log.i(TAG, "file chooser opened (accept=$pendingFileAccept)")
+                return true
+            }
+
             override fun onCreateWindow(
                 view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message
             ): Boolean {
@@ -593,8 +739,35 @@ class BrowserUseManager(
                 input.scrollCount, input.itemSelector, input.keywords,
             )
             BrowserAction.WAIT_FOR_DOM_STABLE -> return waitForDomStable(input.timeoutMs)
+            BrowserAction.GET_CONSOLE_MESSAGES -> return getConsoleMessages(input.clear)
+            BrowserAction.GET_NETWORK_REQUESTS -> return getNetworkRequests(input.clear)
+            // Non-return branch: falls through to the visualChange snapshot so
+            // the agent sees the page's reaction to the uploaded file.
+            BrowserAction.FILE_UPLOAD -> fileUpload(input.paths)
             BrowserAction.NEW_TAB, BrowserAction.CLOSE_TAB, BrowserAction.LIST_TABS ->
                 return BrowserActionResult.error("Tab management actions must be routed through BrowserTabPool")
+        }
+
+        // [feat/browser-console-network-upload] If a click / execute_js just
+        // opened a page file chooser (an <input type="file">), tell the agent
+        // what to do next — the page is blocked waiting for files and only
+        // file_upload can answer it. Without this hint the agent sees a
+        // successful click and moves on, leaving the chooser dangling until
+        // navigation cancels it.
+        if (result.success &&
+            (input.action == BrowserAction.CLICK || input.action == BrowserAction.EXECUTE_JS) &&
+            pendingFileChooser != null
+        ) {
+            delay(150) // onShowFileChooser is posted to the main thread — give it a beat
+            if (pendingFileChooser != null) {
+                val accept = pendingFileAccept?.takeIf { it.isNotBlank() }
+                result = result.copy(
+                    text = result.text + "\n[File chooser opened]" +
+                        (accept?.let { " (accept: $it)" } ?: "") +
+                        " — the page is waiting for files. Call file_upload with 'paths' " +
+                        "(Linux paths, e.g. [\"/var/minis/attachments/img.png\"]) to answer it."
+                )
+            }
         }
 
         // Auto-capture screenshot after visual-change actions
@@ -1838,10 +2011,195 @@ class BrowserUseManager(
     @Volatile
     private var destroyed = false
 
+    // ── [feat/browser-console-network-upload] diagnostics + file upload ──────
+
+    /**
+     * get_console_messages — the page's JS console output captured in this
+     * tab (per-manager buffer, capped at [CONSOLE_BUFFER_CAP]). Use after a
+     * suspicious page state (blank render, failed captcha, broken upload) to
+     * see JS errors instead of guessing. --clear empties the buffer.
+     */
+    private suspend fun getConsoleMessages(clear: Boolean): BrowserActionResult {
+        val entries = synchronized(consoleLog) {
+            val copy = consoleLog.toList()
+            if (clear) consoleLog.clear()
+            copy
+        }
+        if (entries.isEmpty()) {
+            return BrowserActionResult(
+                text = "No console messages captured" + if (clear) " (buffer cleared)" else "",
+            )
+        }
+        val sb = StringBuilder("Console messages (${entries.size}):\n")
+        for (e in entries) {
+            sb.append('[').append(e.level).append("] ").append(e.message)
+            if (e.source.isNotBlank()) {
+                sb.append("  (").append(e.source.substringAfterLast('/'))
+                    .append(':').append(e.line).append(')')
+            }
+            sb.append('\n')
+        }
+        if (clear) sb.append("\n(buffer cleared after read)")
+        var text = sb.toString().trimEnd()
+        if (text.length > DIAGNOSTICS_TEXT_CAP) {
+            text = text.take(DIAGNOSTICS_TEXT_CAP) +
+                "\n…(truncated: ${text.length} chars > $DIAGNOSTICS_TEXT_CAP — re-run with clear=true to start fresh)"
+        }
+        return BrowserActionResult(text = text)
+    }
+
+    /**
+     * get_network_requests — requests the page made, captured at
+     * shouldInterceptRequest. Native interception only sees the request, so
+     * response status + duration are merged from the page's
+     * PerformanceResourceTiming entries (Chromium 109+; older WebView shows
+     * "?"). --clear empties both the native buffer and the page's
+     * resource-timing entries.
+     */
+    private suspend fun getNetworkRequests(clear: Boolean): BrowserActionResult {
+        // Pull timing data (status/duration by URL) from the page's
+        // Performance API. responseStatus needs Chromium 109+ — anything
+        // older returns null status and we print "?".
+        val timingByUrl = mutableMapOf<String, org.json.JSONObject>()
+        val timingJs = """
+            (function() {
+                try {
+                    var entries = performance.getEntriesByType('resource');
+                    var out = [];
+                    for (var i = 0; i < entries.length; i++) {
+                        var e = entries[i];
+                        out.push({name: e.name, status: (typeof e.responseStatus === 'number') ? e.responseStatus : null, duration: Math.round(e.duration)});
+                    }
+                    if (${if (clear) "true" else "false"}) { try { performance.clearResourceTimings(); } catch (err) {} }
+                    return JSON.stringify(out);
+                } catch (err) { return '[]'; }
+            })();
+        """.trimIndent()
+        runCatching {
+            val raw = evaluateJavascript(timingJs)
+            val arr = org.json.JSONArray(raw.takeIf { it.startsWith("[") } ?: "[]")
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                timingByUrl[o.optString("name")] = o
+            }
+        } // timing merge is best-effort — a page without JS context still gets the request list
+
+        val entries = synchronized(networkLog) {
+            val copy = networkLog.toList()
+            if (clear) networkLog.clear()
+            copy
+        }
+        if (entries.isEmpty()) {
+            return BrowserActionResult(
+                text = "No network requests captured" + if (clear) " (buffer cleared)" else "",
+            )
+        }
+        val sb = StringBuilder("Network requests (${entries.size}):\n")
+        for (e in entries) {
+            val t = timingByUrl[e.url]
+            val status = t?.opt("status")
+            val duration = t?.opt("duration")
+            sb.append(if (e.isMainFrame) "MAIN " else "sub  ")
+                .append(e.method).append(' ').append(e.url)
+            if (t != null) {
+                sb.append("  -> ").append(status?.let { it.toString() } ?: "?")
+                if (duration is Number) sb.append(" ").append(duration).append("ms")
+            }
+            sb.append('\n')
+        }
+        if (clear) sb.append("\n(buffer cleared after read)")
+        var text = sb.toString().trimEnd()
+        if (text.length > DIAGNOSTICS_TEXT_CAP) {
+            text = text.take(DIAGNOSTICS_TEXT_CAP) +
+                "\n…(truncated: ${text.length} chars > $DIAGNOSTICS_TEXT_CAP — re-run with clear=true to start fresh)"
+        }
+        return BrowserActionResult(text = text)
+    }
+
+    /**
+     * file_upload — answer a page-triggered file chooser (an <input
+     * type="file"> the agent opened via click / execute_js) with files from
+     * the Linux sandbox. Paths are resolved through [PRootKernel] to host
+     * files and handed to the WebView as FileProvider content URIs (only
+     * declared provider roots are shareable: minis-sessions/, minis-global/,
+     * alpine-rootfs/ — i.e. everything under /var/minis/ and the sandbox
+     * tree). Validation happens BEFORE the chooser callback is consumed, so
+     * a bad path leaves the chooser open for a corrected retry.
+     */
+    private suspend fun fileUpload(paths: List<String>?): BrowserActionResult {
+        if (paths.isNullOrEmpty()) {
+            return BrowserActionResult.error(
+                "file_upload requires 'paths' — Linux paths of the files to upload, " +
+                    "e.g. [\"/var/minis/attachments/photo.png\"]",
+            )
+        }
+        val callback = pendingFileChooser
+            ?: return BrowserActionResult.error(
+                "No file chooser is open on this tab. Trigger one first: click the page's " +
+                    "<input type=\"file\"> element (click / execute_js), then immediately " +
+                    "call file_upload.",
+            )
+        // Resolve Linux paths -> host files. Fail WITHOUT consuming the
+        // callback so a corrected retry can still answer the same chooser.
+        val hostFiles = mutableListOf<File>()
+        for (linuxPath in paths) {
+            val host = runCatching { PRootKernel.resolveHostPath(linuxPath) }.getOrNull()
+            if (host == null || !host.exists() || !host.isFile) {
+                return BrowserActionResult.error(
+                    "file_upload: cannot resolve '$linuxPath' to an existing file in the sandbox",
+                )
+            }
+            hostFiles += host
+        }
+        // Host file -> shareable content URI. Files outside the declared
+        // provider roots (e.g. arbitrary /data paths) throw here — report
+        // with a copy-to-workspace remedy instead of failing the chooser.
+        val context = webView.context
+        val authority = "${context.packageName}.fileprovider"
+        val uris = arrayOfNulls<Uri>(hostFiles.size)
+        for (i in hostFiles.indices) {
+            uris[i] = try {
+                FileProvider.getUriForFile(context, authority, hostFiles[i])
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        }
+        val failedAt = uris.indexOfFirst { it == null }
+        if (failedAt >= 0) {
+            return BrowserActionResult.error(
+                "file_upload: '${paths[failedAt]}' resolves outside the shareable provider " +
+                    "roots (sessions/, global/, rootfs/) — copy it under /var/minis/workspace " +
+                    "or /var/minis/attachments first",
+            )
+        }
+        // Consume the chooser exactly once, on the main thread as WebView
+        // expects, then hand the URIs back to the page.
+        pendingFileChooser = null
+        val accept = pendingFileAccept
+        pendingFileAccept = null
+        val delivered = withContext(Dispatchers.Main) {
+            runCatching { callback.onReceiveValue(uris.filterNotNull().toTypedArray()) }.isSuccess
+        }
+        if (!delivered) {
+            return BrowserActionResult.error("file_upload failed delivering files to the page")
+        }
+        return BrowserActionResult(
+            text = "Uploaded ${hostFiles.size} file(s): ${paths.joinToString(", ")}" +
+                (accept?.let { "\n(chooser accepted: $it)" } ?: "") +
+                "\nThe page received the files and will run its upload/change handler.",
+        )
+    }
+
     fun destroy() {
         if (destroyed) return
         destroyed = true
         try {
+            // [feat/browser-console-network-upload] Answer a still-pending
+            // file chooser before tearing the WebView down — an unanswered
+            // callback holds renderer-side state.
+            runCatching { pendingFileChooser?.onReceiveValue(null) }
+            pendingFileChooser = null
+            pendingFileAccept = null
             // Remove from any parent before destroying — WebView.destroy() on
             // an attached view is undefined behavior on some OEMs and can
             // crash the app (ConnectionTerminated / missing renderer).

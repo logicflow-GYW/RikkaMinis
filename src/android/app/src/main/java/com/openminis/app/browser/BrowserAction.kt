@@ -25,7 +25,13 @@ enum class BrowserAction(val value: String) {
     GET_COOKIES("get_cookies"),
     SET_COOKIES("set_cookies"),
     SCROLL_AND_COLLECT("scroll_and_collect"),
-    WAIT_FOR_DOM_STABLE("wait_for_dom_stable");
+    WAIT_FOR_DOM_STABLE("wait_for_dom_stable"),
+    // [feat/browser-console-network-upload] Diagnostics trio absorbed from
+    // Operit's browser_* toolset. These are operate-current-page actions —
+    // they follow selectedTabId and never fan out to a fresh tab.
+    GET_CONSOLE_MESSAGES("get_console_messages"),
+    GET_NETWORK_REQUESTS("get_network_requests"),
+    FILE_UPLOAD("file_upload");
 
     /**
      * [T-browser-readaction-follow-tab-and-yolo-android] True when this action
@@ -42,7 +48,11 @@ enum class BrowserAction(val value: String) {
 
         /** Actions that visually change the page and warrant an auto-snapshot. */
         val visualChangeActions: Set<BrowserAction> = setOf(
-            NAVIGATE, CLICK, SCROLL, HOVER, TYPE
+            NAVIGATE, CLICK, SCROLL, HOVER, TYPE,
+            // [feat/browser-console-network-upload] Handing the page a file
+            // usually triggers a preview/upload handler — snapshot so the
+            // agent sees the page's reaction.
+            FILE_UPLOAD,
         )
 
         /**
