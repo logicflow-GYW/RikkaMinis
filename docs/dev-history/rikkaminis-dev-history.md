@@ -4,8 +4,8 @@
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
 - 合并范围：2026-08-03 ～ 2026-09-07，共 36 天
-- 条目总数：810（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
-- 总字符数：936808 / 总行数：15454
+- 条目总数：823（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
+- 总字符数：956636 / 总行数：15702
 
 ---
 
@@ -15447,6 +15447,254 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 - 小号 push main 自动触发 CI run **34094139466**（head_sha=3e8dc9e6 一致），用户拍板不等（主号同内容已绿过）——新会话如需要可查结论
 
 本地+远端 alt-sync-0907 已删，工作树干净，双线状态：主号 5e81aa1a / 小号 3e8dc9e6。
+
+<!-- 2026-09-07 16:08:00 -->
+## fix/worker-reasoning-content-roundtrip 合并 main（2026-09-07，main @ 742bf77e）
+
+
+**用户报告**：模型组里 danfeng 供应商 deepseek-v4-flash/pro 报 `Provider error:[400] The 'reasoning_content' in the thinking mode must be passed back to the API`，单供应商使用无此问题；那段时间 danfeng 很不稳定（429 频发），现在恢复稳定。
+
+**根因（代码级确诊）**：DeepSeek V4 系 API 硬性要求——思考模式开启时，历史中每个带 tool_calls 的 assistant 消息必须原样带回 `reasoning_content`。主进程 OpenAIProvider 的 echo 逻辑读 `LLMMessage.reasoningContent` 工作正常，但 **ModelExecutionDispatcher.buildRequestJson（worker IPC 序列化）不序列该字段，ModelExecutionService 两侧重建（executeRun:~811 + 流式:~1090）也不读** → 模型组聊天流式走 :modelservice 时历史里所有 assistant 的 reasoning_content 静默蒸发 → 下一轮 tool-turn 400 → fallback 链每个成员同样 400 + danfeng 429 叠加 = 用户看到的错误串。单供应商直连不走 worker，故无此问题。
+
+**修复（双向同步）**：Dispatcher 消息序列化补 `m.reasoningContent?.let { put("reasoning_content", it) }`（非 null 才写——空串是有意义的 field-presence 信号，DeepSeek V4 非思考回合发 ""；null 保持 key 缺席）；Service 两处读回 `obj.optString("reasoning_content","").let { if (it.isEmpty() && !obj.has("reasoning_content")) null else it }`。
+
+**同族第 3 次坑**：跨进程字段只接主进程侧（knobs H1 0905 / worker thinking-rules 0906 / 本次）。协议序列化层是 four-way-sync 检查覆盖不到的第五层。
+
+**验证链**：沙箱 JVM 闭包 ModelExecutionDispatcherTest 11/11（含新 pin 测试：blob/""/null 三态）+ RoundTripTest 端到端（dispatcher 序列化→Service 同款读回表达式）1/1 + WorkerThinkingRulesRestoreTest 回归 5/5 + 括号配平。分支 CI run 34097487460 success（head c18403e0，API+bridge 双源）→ rebase 上 docs 提交（d34c763d）→ ff 合并 main @ 742bf77e → release CI 34098862761（push 触发，用户确认构建完成后继续收尾）→ 本地+远端分支已删。
+
+**坑**：gh_sync.sh push 静默失败（askpass 脚本在 /var/minis/workspace/ 会话目录，本会话是空目录）——手动重建 askpass 后直推成功。dispatch 用 gh_sync 也无输出但实际成功（API 直查确认 204）。JVM 闭包需补 AgentRuntimeLimitsPrefs.kt（0907 runtime-limits 合入后 FirstChunkTimeoutPolicy 引用它）+ Context 桩补 applicationContext 属性。
+
+**用户真机验证清单**：装 android-latest 后开模型组（含 danfeng deepseek-v4-flash/pro）+ 开思考档 + 带工具调用的多轮会话——不应再出现 reasoning_content 400；danfeng 不稳定期 fallback 链切换也应正常工作。
+
+<!-- 2026-09-07 16:54:47 -->
+## Operit（AAswordman）吸收分析（2026-09-07）
+
+<!-- 2026-09-07 17:0x -->
+源码 /tmp/operit（浅克隆，会话级）。报告 /var/minis/shared/operit-absorb-analysis.md。7596 stars / LGPL-3.0 / app 模块 45.1 万行（RikkaMinis 2.7 倍），广度平台型成熟。
+
+**镜像型项目结论**：Operit 买广度（浏览器/工作区/本地推理/虚拟形象/插件市场/工作流编辑器），RikkaMinis 买深度（harness 守卫/流恢复/并发/预算护栏）。Operit **没有**任何 RikkaMinis 这套 harness（repetition/empty/EOF/content-filter/verification_stop 全 grep 无果）——反向验证 RikkaMinis 路线独特性。
+
+**Top 吸收点**：①定时/触发式 agent 任务（真缺口：agent 无法在会话外自动醒来；积木已齐 = WorkManager + minis-sessions-cli send + memory_rollup；Operit 参照 WorkflowScheduler 六类触发器）②浏览器三件补缺（console_messages/network_requests/file_upload；fill_form/drag/select_option 不值得——execute_js 等价）③语义记忆混合评分公式（S=S_kw+S_rev+S_sem+S_graph，排名衰减 1/(k0+r)、覆盖率增益 1+0.6c/F、长度归一 /√K；改 semantic_memory.py 查询侧即可）④密钥池成熟化蓝图（命名+可用性标记+批量探测+持久化轮转索引——将来重做连接测试照这个做）⑤远程驱动入口（External HTTP Chat Bearer 模式，需拍板安全面）⑥CI 路径分级 pr_check.py + CI 脚本自测。
+
+**不建议**：QuickJS 插件运行时/市场、本地推理 MNN/llama.cpp、工作流可视化编辑器、avator、web-chat React、ObjectBox、"严禁兜底"哲学（与 fallback 链路线正面冲突，各有理据）。
+
+**许可证**：LGPL-3.0，思想/公式/协议设计不受限，verbatim 移植需核 RikkaMinis 许可证兼容性。
+
+<!-- 2026-09-07 18:03:50 -->
+## Operit 吸收落地 2/3/6 三件闭环（2026-09-07，main @ a5346911）
+
+<!-- 2026-09-07 18:00 -->
+
+**Task 2 浏览器三件（已合并 main）**：get_console_messages（onConsoleMessage→200 条环形缓冲）/ get_network_requests（shouldInterceptRequest 观察式记录 + PerformanceResourceTiming 合并状态码） / file_upload（onShowFileChooser 挂起回调 + PRootKernel 路径解析 + FileProvider content URI + click/execute_js 后注入 [File chooser opened] 提示）。两处教训：① **FileChooserParams 是 WebChromeClient 的嵌套类，android.webkit 顶层 import 不存在**——CI 首跑红（compileReleaseKotlin Unresolved reference），沙箱 JVM 闭包只编了 Input 层抓不到这种 Android SDK 类错误，分支 CI 裁决再次不可替代；② FILE_UPLOAD 必须**非 return 分支**（赋值式）才能落到 visualChangeActions 自动快照——when 里 return 会跳过快照逻辑，这类"提前 return 跳过后置处理"要在写 when 分发时主动检查。新参数 clear/paths 走 cookies 同款双形态解析（真数组/JSON 字符串/逗号分隔）。JVM BrowserActionInputParseTest 10/10。
+
+**Task 3 语义混合评分（skill 层，不进 git）**：semantic_memory.py v1.1.0——S = cosine×recency ×(1+0.6·覆盖率) + 标题命中(≤0.45) + 反向包含(+0.2)，图传播项未吸收。A/B 对比铁证：查"proot 幽灵目录项"旧纯语义 top5 全噪音且正主不在榜，新混合分正主 #1（助推+0.336）且 top5 全 PRoot 相关；纯自然语言查询自动退化为语义无回归。新子命令 compare 可随时做 A/B。中文分词用 bigram 无依赖。
+
+**Task 6 scan 自测（已合并 main，release CI 34105486225 success head_sha 核对）**：scripts/scan/test_scan.py 15 用例——四个扫描器各配 clean+dirty fixture（four_way 三种缺口/i18n 孤儿 key/裸 valueOf/进程边界违例）+ 真实树 clean 断言，已接进 scan-gate.yml 和 build-apk.yml 两个 workflow。CI 脚本自测吸收自 Operit ci/test 模式。
+
+**流程备忘**：ripgrep 二进制因上次 apk add 超时成半成品（存在但挂死）——本仓库 grep 够用，要 rg 先 apk 完成安装或用 /usr/local/bin/rg 之外的方式验证。CI 下载的 job logs 是纯文本不是 zip（-L 跟 302 后落到文本）。三个分支全部 ff 合并+双端删枝，工作树干净，main 双源核对（bridge+API head_sha）。
+
+**遗留（用户真机验证清单）**：装 android-latest 后——①坏 JS 页面 get_console_messages 应能看到报错；②加载失败的页面 get_network_requests 应列出请求+状态码；③点击 <input type=file> 后结果文本应出现 [File chooser opened] 提示，file_upload --paths 能把沙箱文件交给页面。
+
+<!-- 2026-09-07 18:09:42 -->
+## Operit 吸收三件收尾（2026-09-07 终态）
+
+<!-- 2026-09-07 18:20 -->
+
+**全部代码工作已完成，main @ a5346911（本地=origin/main，工作树干净）**。
+
+**验证链终态**：分支 CI run 34107820356 **全 23 步骤 success**（API 逐步骤拉取核对，含首跑红的 compileReleaseKotlin 与全量单测）→ ff 合并 main → push 自动触发 release CI run **34109391551（in_progress，用户拍板不等收尾）**——同内容已过分支 CI，按惯例结论基本无悬念；新会话可查 bridge /status/main 或 run id 确认，绿后 android-latest 即含浏览器三件。
+
+**证据链补验（system-reminder 触发）**：git status 干净 + diff origin/main 为空（本地=远端）+ 成功 run 逐步骤 API 核对（23/23 success，含 "Run unit tests (full suite)" 和 "Build APK with Gradle"）——BrowserUseManager.kt 的最终状态就是 CI 编译验证过的 a5346911，无未验证改动。
+
+**用户真机验证清单（装 android-latest 后）**：①坏 JS 页面 get_console_messages 见报错；②get_network_requests 见请求+状态码；③点 <input type=file> 后见 [File chooser opened] 提示，file_upload --paths 交文件成功。日常使用自然覆盖即可。
+
+<!-- 2026-09-07 18:59:08 -->
+## 「内存又涨上去了」诊断（2026-09-07 晚，日志铁证）
+
+
+**结论：涨的是主进程 native heap（Skia 文本排版层），由本会话自己的巨型流式消息 + 每秒一次的重组触发；守卫和 LMK 都按设计工作；与浏览器三件修改无关。**
+
+**证据链**：
+- `[Perf][LongCtx]` nativeHeapMB 轨迹：18:22-18:29:44 平稳 47-48MB → **18:29:45-50 十秒内爆炸到 639MB** → 锯齿 370↔660MB。javaHeap 同期 40→100-160MB（GC 后 66-99MB）。
+- 18:29:47.850 `scudo: Can't populate more pages for size class 176`（native 耗尽信号）；18:29:45 起 `NativeAlloc concurrent copying GC` 每 ~1.5s 一次（NativeAllocationRegistry 压力触发）。
+- 被守卫拒绝的命令（System busy 866-1060MB）全部是 MemoryPressureGate /proc/self VmRSS ≥800MB post-reclaim——守卫正确工作（08-17 事故护栏）。
+- **PRoot child RSS 全程 3MB**（每条 shell 完成都记录）→ kotlinc/沙箱/后台日志采集器（585KB）全部排除。
+- lazyColumn.firstItem（reverseLayout = 最新流式消息）placed size 992×3060→3300px，compose elapsedMs 3-5.2s，1Hz 节奏精确 1.006s——219 次 compose 超 1 秒。
+- **1Hz ticker 元凶 = shell_execute delay 参数的倒计时**：ChatShellExecution.kt:99 `for (remaining in delaySec downTo 1) { onBlockUpdate("⏳ Waiting…"); delay(1000) }`——每秒改写消息块内容 → 整个巨型消息 item 全量重组。我的 delay=30/90/180 探测等待恰好喂了 5 分钟 ticker（18:36:30-18:39:48 与 delay=180 倒计时完全吻合）。流式 delta 是第二个触发源。
+- 巨型消息内容 = 我的审计输出（26KB diff dump + 代码块），20+ blocks。
+- 18:36:04 app 转后台后 ticker 照跑（后台无效重组 = 白烧电+内存）；~18:39 LMK 杀掉 900MB 的 29121 → 18:39:56 重启为 18349（完整重初始化序列，非崩溃无 FATAL）。当前 18349 RSS 279MB 健康，:modelservice 132MB。
+
+**讽刺点**：等内存回落的推荐机制（delay 参数）本身就是内存压力的维持器。
+
+**修复方向（未做，待拍板）**：A（便宜）= 倒计时 onBlockUpdate 节流/作用域收窄（只让 tool pill 订阅，或 5s 更新一次）；B（深水区）= 巨型消息全量重排 3-5s 是 LongCtx 已知痛点，需增量布局。C = 守卫无需动。
+
+## 浏览器三件审计修复合并 main（2026-09-07 晚，main @ fa92a3e）
+
+用户要求复查「刚刚的修改」（Operit 吸收三件 ba4a4a3/a534691/273afc3）。查出 3 个真 bug + 2 个非问题：
+1. **EXECUTE_JS file-chooser hint 死代码**（when 里 return 分支不可达——「提前 return 跳过后置处理」模式又一个实例）
+2. **file_upload TOCTOU 双答窗口**（callback 在 offload 协程捕获、Main 消费，中间可被 onPageStarted/新 chooser 替换 → WebView 双答未定义行为）修：Main 上身份检查原子消费 + @Volatile
+3. **file_upload 跨会话文件泄漏**（resolveHostPath 全局 fallback 扫所有 minis-sessions 树取第一个同名命中=T178 已修过的同款）修：BrowserActionInput.sessionId 内部注入（CLI 走 T340 MINIS_CHAT_SESSION_ID，ChatViewModel 走 activeSessionId），模型 JSON 永不解析该字段
+- 非问题：timing 合并（evaluateJavascript 已剥引号）、nested 检查器自身两 bug（// 检测顺序、对 HEAD 既有代码误报）已修并双向验证
+
+**CI 两轮红一轮绿**：第一轮 kspReleaseKotlin `Unclosed comment` @372 + `Parameter name expected` @86——**Kotlin 块注释嵌套陷阱**：KDoc 里写 `/var/minis/**`，`/**` 开了一层嵌套注释，单个 `*/` 关不掉外层。修掉后 fa92a3e 绿（run 34112816638 head_sha 双核对）→ ff 合并 main → release CI 34114024112 → 分支已删。
+- 教训：①Kotlin 注释嵌套——glob 序列 `/**`、`/*` 永远别进块注释文本 ②写检查器时要对已知坏样本做灵敏度反向验证 ③file_edit 里写警告注释又犯了同样的错（自食其果），第二版用文字描述替代字面量
+- 新工具：/tmp/trio-jvm/check_comment_nesting.py（嵌套感知注释配平检查器，值得进 scripts/scan/）
+
+<!-- 2026-09-07 20:08:22 -->
+## 渲染三连修交接（2026-09-07 深夜，待新会话执行）
+
+
+用户拍板：开一个新会话把三个修复一起做完（不打补丁，按不变量修）。交接文档已写：
+**/var/minis/shared/render-churn-triple-fix-handoff.md**（根因定性 + 三修精确代码锚点 + 验证 harness + 防走偏清单 + 真机验证清单）。
+
+三修概要：
+1. **进度≠内容**（小）：摘 ChatShellExecution.kt:98 倒计时 onBlockUpdate（「进度伪装成内容」唯一摘除点；:154 真实流式输出保留），仿 retry 倒计时既有正确模式（AgentLoopEngine.kt:921 + ChatViewModel.kt:938 独立 StateFlow），tool pill 订阅。
+2. **完成即冻结**（中，治本）：SUCCESS/FAILED/... 块 immutable 不读可变 state → 结构上永不重组；顺带治 LongCtx 3-5s 重排。AssistantBlock @ ChatModels.kt:265，渲染底座 = 批次 2 的 MarkdownBlockModel/MarkdownStreamMerge。
+3. **不可见即停摆**（小-中）：ON_STOP 暂停 UI-only 状态发布（内容照常持久化），ON_RESUME 一次 flush。不 cancel 流。
+
+根因一句话：**秒级临时进度写进内容状态，而内容状态失效粒度是整个 item——「谁变化」和「谁重排」的边界画错了**。代码库内 retry 倒计时（独立 StateFlow）与 delay 倒计时（写消息内容）一正一错，是同一产品里两套机制的对照证据。
+
+明确不做：倒计时 5s 节流（错架构省油）、提 800MB 阈值、大消息截断、砍 onBlockUpdate、后台 cancel 流。
+
+验证 harness：合成 20+ block 巨型消息 + delay=60 跑 5 分钟，看 [Perf][LongCtx] nativeHeapMB 轨迹 + firstItem.compose elapsedMs。修后判据：倒计时期间 firstItem 零 compose、完成块零重组、后台无 compose 事件、nativeHeap 平稳。
+
+状态锚点：main @ fa92a3e（浏览器审计修复已合并，release CI 34114024112 success 全链路闭环）。新分支建议 fix/render-progress-channel，三 commit（①②③各一）。
+
+<!-- 2026-09-07 23:5x -->
+
+<!-- 2026-09-07 20:19:41 -->
+## 浏览器三件真机验证（2026-09-07，新装 android-latest = main @ fa92a3e）
+
+
+用户要求测试新装应用的浏览器部分。结果：
+- **get_console_messages ✅**：console.error/warn/未捕获异常/CORS 错误全捕获带行号
+- **get_network_requests ✅**：URL+状态码+耗时；api.github.com→200；CORS 阻止的请求如实显示 0
+- **file_upload ❌ 触发路径不可用**：click/execute_js 全走 evaluateJavascript JS 注入 → 无 user activation → **Chromium 150（com.google.android.webview 150.0.7871.181）静默拒绝打开 file chooser** → onShowFileChooser 从未被调用（logcat 无 "file chooser opened" 日志，两次宽口径抓取确认）→ file_upload 稳定报 No file chooser is open。WebChromeClient 挂载正常（onConsoleMessage 同属该 client 且工作）。minis:// 和 https 页面行为一致。
+- **定性**：非新装包回归（console/network 证明三件代码已部署），是 file_upload 触发路径设计缺陷——内置浏览器所有点击都是 JS 注入，永远不满足 file input 的 user activation 要求。
+- **修复方向（未做，待拍板）**：CLICK 特判 file input → dispatchTouchEvent 真实 DOWN/UP（getBoundingClientRect 定位 × devicePixelRatio 转物理 px）。预计分支 fix/browser-filechooser-gesture。
+- 报告：/var/minis/shared/browser-trio-verify-findings.md
+- 测试页：/var/minis/workspace/browser-test/index.html（含 console 三形态 + fetch + file input + FILE_RECEIVED 回显）
+- 教训：a11y dump 前确认前台 Activity（当时前台是 Minis 的 tab grid/聊天界面，浏览器 WebView 不可见，真实触摸路径不可行）；android-open minis:// 会弹预览 sheet 不一定是浏览器前台。
+
+<!-- 2026-09-07 21:11:03 -->
+## 渲染三连修完成（2026-09-07 深夜，分支 fix/render-progress-channel @ 61e68224，待统一合并）
+
+
+**用户拍板：本分支不合并 main，与另一分支统一处理**（合并方：ff 合并 + release CI + 真机验证）。
+
+分支三个 commit（各自独立）：
+- **3a01f38 ① 进度≠内容**：ChatShellExecution 加 onProgressUpdate 通道（默认 no-op），delay 倒计时从 onBlockUpdate 摘除（真实流式输出保留 onBlockUpdate）；ChatViewModel.toolProgressById StateFlow + publishToolProgress；UI = LocalToolProgressById（staticCompositionLocalOf，LazyColumn 根提供稳定 flow 引用）+ ToolProgressBadge 独立小作用域 collectAsState——每秒 tick 只重组 badge Text；executeTool finally 清 badge。
+- **3890b33 ② 完成即冻结**：FlatChatItem 引用级 equals（ToolRunGroup/ToolUse 用 sameBlockRefs 元素引用比较；mdblock 去掉 messageMarkdown 参与 equals——它每 chunk 增长导致全行重组，LongCtx 3-5s 重排根因；复制 markdown 靠尾部行 rememberMessageMarkdown 注册 + turn-end reconcileAndVerifyTerminalText 兜底）；StableChatRowLedger pass1+2/pass3 无条件替换 → 条件替换（sameLiveView/rawText 内容比较）——同内容 tick 保行实例引用，LazyColumn key+equals skip 冻结完成块；ToolCallRunGroup remember 稳定 lambda（onStop/onOpenDetail/onOpenTerminal/onCopyDetails，onRetry/onRerunFromHere 保持动态）；新增 RenderChurnFreezeTest 11 用例（src/android/app/src/test/.../ui/chat/）。
+- **61e6822 ③ 不可见即停摆**：ChatViewModel.uiVisible + setUiVisible(true 时 flush)；updateAssistantMessage publish 门控（uiVisible=false 只记 pending 不发布）+ publishStreamingDelta 提取（含 MonotonicGuard）+ flushPendingStreamingOnResume（ON_RESUME 一次 flush 最新，取消 trailingJob 防重复）；终态 drain（isStreaming=false）不门控=内容；ChatScreen DisposableEffect + ProcessLifecycleOwner ON_STOP/ON_RESUME（app 级语义）。
+
+**验证**：基线实锤（修复前 delay=60 采样）：firstItem.compose + placed 以 ~1Hz 精确节奏每秒触发；CI run 34124534085 **success**（head 61e68224）；scan 4/4；注释嵌套检查 5/5。**真机验证清单**（用户装包后）：倒计时只在 tool pill 动不闪消息体 / 长会话滚动顺滑 / 后台 3 分钟回来内容一次到位 / harness 复跑 nativeHeap 平稳。
+
+**不做清单（防走偏，仍有效）**：倒计时 5s 节流、提 800MB 阈值、大消息截断、砍 onBlockUpdate、后台 cancel 流。
+
+**合并注意事项**：分支基于 fa92a3e（main 当时 HEAD）——若用户统一合并时 main 已前进（比如另一个分支已合），先 rebase 或 merge main 再 ff；RenderChurnFreezeTest 依赖同包 internal 符号，无外部依赖。
+
+<!-- 2026-09-07 21:20:18 -->
+## fix/browser-filechooser-gesture 施工完成（2026-09-07，待用户统一合并）
+
+
+**根因**：CLICK/EXECUTE_JS 全走 evaluateJavascript JS 事件 → 无 user activation → Chromium 150 对 file input 静默拒绝 → onShowFileChooser 从不触发 → file_upload 无回调可答（静默失败）。
+
+**修法（分支 fix/browser-filechooser-gesture @ 70bf2bc1，分支 CI 34125737237 success）**：
+- click() 前置 probe（BrowserUseJS.clickTargetInfo）：目标为 file input 或其 label → 改派合成 MotionEvent DOWN→64ms→UP（dispatchTouchEvent）→ 真实手势打开 chooser；其余元素 JS 路径字节不变
+- BrowserTouchPlanner.kt（新，纯 JVM）：CSS 视口坐标 → View 本地 px，公式 scale = webView.width / visualViewport.width（覆盖 density/shrink-to-fit/set_viewport 三情形）；中心出视口拒绝并报错
+- 触摸后 300ms 检查 chooser，未打开给结果文本明确 [Warning]（fail-loud，不再静默失败）
+- fileUpload 报错文案 + BrowserUseTool 三处描述改为引导 click action（execute_js 打不开 chooser）
+- 不改：fileUpload 回调消费/TOCTOU、onShowFileChooser、hint 块
+- JVM 测试 9/9：BrowserTouchPlannerTest(5) + BrowserUseJSClickTargetTest(4，含 selector 转义注入防护)
+- 已知限制 V1：隐藏 input+自绘按钮（无 label）→ probe 明确报错；execute_js 触发依然打不开（靠描述引导）
+
+**状态**：用户拍板合并与 fix/render-progress-channel 一起统一处理——**不代为合并 main、不删分支**。仓库 /tmp/rikka-fc（锚点 commit a43ba815 + 功能 commit 70bf2bc1）。
+
+**真机验证清单（合并后装 android-latest）**：
+1. navigate 到 /var/minis/shared/browser-trio-verify/test-page.html（已跨会话持久化；per-session workspace 的 browser-test/ 会丢）
+2. click selector=#fileInput → 结果文本含 `real touch gesture` + `[File chooser opened]`；logcat 出现 `file chooser opened (accept=)`
+3. file_upload paths=["/var/minis/shared/browser-trio-verify/test.txt"] → 页面 #log 显示 `FILE_RECEIVED: test.txt (45B)`
+4. 坐标点击变体 + 普通按钮 JS 点击回归不受影响
+
+**施工坑备忘**：/tmp/rikka-audit 被并行会话（fix/render-progress-channel）占用——本任务重新克隆 /tmp/rikka-fc；workspace askpass 缺失（per-session 设计）需重建后再 gh_sync push；BrowserUseJS 编译闭包需带 BrowserAction.kt（ScrollDirection 依赖）。
+
+<!-- 2026-09-07 21:54:48 -->
+## 规则体系对照复杂度五纪律的复查（2026-09-07，待拍板 2 条）
+
+
+用户贴来一段复杂度管理五纪律（地板之上不增一克/边要收费/纠缠最小化/机制可压缩/整体保持可读），问我们的规则体系是否需要吸收。复查结论：
+
+**判定**：五条里 2 条已有（地板=现有"做不到的事"门 + ARCHITECTURE §13 继承/原创二分；可读=ARCHITECTURE §12/13 + skills 本身）、1 条有雏形（纠缠→scan gate 四件）、**2 条是真缺口待吸收**：
+- **边要收费**：GLOBAL.md 决策框架只有一阶问题（做不到的事），无交互边计费。证据=加字段缺同步层同族 5 次（GH#68/pinned/knobs H1/thinking-rules/reasoning_content），每次单看都成立、边没人付钱。
+- **第 3 次复发→建机制**：self-improving-agent 现规则是 recurrence≥3 → promote 为记忆条目（规则），未升级为机制（扫描器/单点收口/引擎合并）。历史上机制总在第 4-5 次才来（four_way_sync_check、provider_boundary_guard 都是事后建的）。
+
+**实证数据（修正了"纠缠在涨"的隐含假设）**：954 commits 摩擦度量（/var/minis/shared/tools/change_friction.py，可复跑）——median files/commit=2 稳定；仅代码 mean 早期 5.1→近期 3.1 **下降**；大 commit 里 32% 是 i18n 机械扩散（已有 i18n_check）。结论：用户感到的熵增大头是**失读**不是纠缠涨；scan gate 投入在起作用。
+
+**复查抓到的真实失读点（已修）**：four-way-sync-check SKILL.md 还在教四层模型，第五层（worker IPC：buildRequestJson 序列化→Service 两处重建→providerRouteChanged）只散落在记忆里；且 provider_boundary_guard.py 把守的是网络入口路由**不覆盖 IPC 字段同步**——第五层至今无机制把守。已更新 SKILL.md v1.1.0 补第五层节+动作清单。潜在后续机制（未做，用户拍板）：worker 字段同步扫描器（ProviderInstance 字段 vs buildRequestJson put() keys vs Service 读回）进 scan gate 当第五件。
+
+**不做清单**：不建 complexity-management 新 skill（加节点不付边钱，与现有 20+ skill 触发边界纠缠）；"地板/比值"不写成哲学条目（不可操作不可验证）；摩擦不设常设监控（数据证明没必要，怀疑时复跑脚本）。
+
+**待用户拍板的两条规则文本**（GLOBAL.md 决策框架加二阶问句 + self-improving-agent 加机制升级硬规则），文本已在会话中给出。另：GLOBAL.md「经验教训」节有已 skill 化条目（四处同步条与 skill 重复）可压缩为指针——机制可压缩应用于规则系统自身。
+
+<!-- 2026-09-07 21:55:21 -->
+## 双分支预合并审计 + 2 bug 修复 + 合并 main（2026-09-07 深夜，main @ 784c4065）
+
+
+**任务**：用户要求检查云端刚跑完的两个分支 CI（fix/render-progress-channel 61e6822 / fix/browser-filechooser-gesture 70bf2bc1），有 bug 就修，没有就合并。
+
+**审计发现 2 个真 bug（CI 全绿但逻辑有误）**：
+
+1. **MEDIUM（render 分支，T288 功能回归）**：`ToolCallRunGroup` 里 `stableOnCopyDetails = remember { onCopyDetails }` 冻结首帧值。调用点 `onCopyDetails = if (!isStreaming) ({...}) else null`——group 首次组合必在流式中 → 冻结 null → 流结束后长按复制菜单的 Copy 项永不出现。且此冻结**无性能收益**（流式期间恒 null，equals 稳定，本就不破坏 pill skip）。修：删冻结，直接动态传 onCopyDetails。同类 stable 冻结（onStop/onOpenDetail/onOpenTerminalWithCommand）审计安全——分别捕获 viewModel 无状态回调/导航参数，语义跨 tick 一致。
+2. **LOW（filechooser 分支）**：`click(selector=null, x=null)` 畸形调用时 probe JS 变 `elementFromPoint(null, null)` → JS 强转 (0,0) → 若左上角恰是 file input 会误触发真实触摸（本应报参数错误）。修：probe 前置参数校验（selector 和 x+y 至少一个有效）。
+
+**审计确认安全的关键点（防复发参考）**：
+- AgentLoopEngine 的 updateAssistantMessage 全部回调包在 `withContext(Dispatchers.Main)`（行号一一对应）→ streamFlushStates HashMap 单线程访问，flushPendingStreamingOnResume 遍历安全
+- executeShellCommandEngine 唯一调用点（ChatPromptAndTools:527）已接 onProgressUpdate，默认 no-op 参数无静默消失问题
+- 引用级 equals 依赖 AssistantBlock immutable（data class val）前提成立；mdblock 同长度重写由 reconcileAndVerifyTerminalText 兜底（既有机制+测试）
+- clickTargetInfo JS 无裸 selector 拼接（注入防护测试覆盖）；MotionEvent obtain/recycle 正确
+
+**合并**：render 先 ff 合并 main @ f6d8782 → filechooser rebase（--onto origin/main a43ba815 丢 anchor 空提交）后 ff 合并 → main @ 784c4065。分支 CI 34128298314/34128302541 均 success 且 head_sha 核对 = 修复后 commit（f6d87822/fc9da88f 非假绿）。**release CI 未等结论（用户拍板收尾），新会话可查 bridge /status/main**。
+
+**坑（可复用）**：/tmp/rikka-fc 的本地 main 误指向 anchor commit a43ba815（克隆时分支指针问题）——`git merge --ff-only origin/main` 会失败且无提示原因，先 `git rev-parse main origin/main` 诊断再 `git reset --hard origin/main` 对齐。
+
+**真机验证清单（用户装 android-latest 后）**：①延迟倒计时只在 tool pill 动、消息体不闪、无每秒全量重排 ②长消息流式顺滑、完成块冻结 ③后台 3 分钟回来内容一次到位 ④长按已完成 tool run group 的 pill 应出现 Copy 菜单（T288 回归点）⑤点 file input 应触发真实触摸开 chooser，file_upload 能交文件 ⑥点非 file input 元素行为不变。
+
+<!-- 2026-09-07 22:04:23 -->
+## 规则升级已拍板落地（2026-09-07 晚，用户批准两条）
+
+
+用户批准此前复查提案的两条规则升级，均已写入并验证：
+
+1. **GLOBAL.md 决策框架 → 二阶门（边计费）**：原"做不到的事"改标为一阶门；新增二阶门——"新增几条交互边，各落在哪层/哪个进程/哪几个调用点？"逐条枚举 + 每条边指定验证者（round-trip/扫描器/人工核对）。历史依据 5 次同族复发写进条目本身。
+2. **self-improving-agent v1.1.0 → Mechanism-Upgrade Hard Rule（第 3 次复发必升级为机制）**：3rd recurrence 时禁止只记条目/提优先级——优先建扫描器进 scan gate / 单点收口 / 通用引擎；不可自动化则进 SKILL.md 清单并注明原因；都不做=显式决策需写理由。历史依据：field-sync 族 5 次复发，扫描器第 4-5 次才建。
+
+**配套**：four-way-sync-check SKILL.md v1.1.0 已补第五层（worker IPC 边界）节——之前只教四层模型，且确认 provider_boundary_guard.py 不管 IPC 字段同步（只管网络入口路由），第五层仍无机制把守。潜在后续（未做）：worker 字段同步扫描器作为 scan gate 第五件，等第 3 次触发规则或用户拍板。
+
+**未做（等用户表态）**：GLOBAL.md「经验教训」节四处同步条目已 skill 化（与 four-way-sync-check 重复），可压缩为指针——机制可压缩应用于规则系统自身的候选。
+
+<!-- 2026-09-07 22:30:06 -->
+## 最新包真机验证闭环（2026-09-07 深夜，1.0.0-beta.1372 @ main 784c4065）
+
+<!-- 2026-09-07 22:4x -->
+用户确认刚装的最新包（beta.1372，22:06 安装，release CI 34129869414 success）双分支功能全部闭环：
+
+**filechooser 手势修复（fix/browser-filechooser-gesture 70bf2bc1）全项通过**：
+- click selector=#fileInput → "real touch gesture" + [File chooser opened] ✅
+- file_upload ×3 都成功 → 页面 #log 显示 FILE_RECEIVED: test.txt (45B)（重复打开-上传闭环，TOCTOU 修复无回归）✅
+- 坐标点击变体 → real touch gesture，CSS→view px 换算一致（417,426）✅
+- 普通按钮（JS onclick 路径）→ 走 JS 路径行为不变，不误触 ✅
+- logcat 铁证：`I BrowserUseManager: file chooser opened (accept=null)`（旧版 onShowFileChooser 从不触发）✅
+- 测试页 /var/minis/shared/browser-trio-verify/test-page.html（跨会话持久化）
+
+**渲染三连修（fix/render-progress-channel 61e68224）全项通过**：
+- ①倒计时 25s 期间 firstItem.compose 计数恒 1（零新增；修复前基线 1Hz 每秒全量重排）✅
+- ②300 行长输出流式期间仅 1 次新增 compose，完成后零重组 ✅
+- ③后台 3 分钟（input keyevent 3 转后台）零 compose 事件；回前台（am start）一次 flush 到位；nativeHeap 全程 43-45MB 平稳（修复前此场景爬 639MB）✅
+- ④长按已完成 tool run group pill → 能唤起键盘、能复制（**用户真机观察确认**，T288 回归点）✅
+
+**可复用验证方法**：①并行发 delay=N 调用 + logcat 采样 `lazyColumn.firstItem.compose` 计数（恒值=零重组）；②③同理用 Perf 日志 + 转后台 am start；logcat 缓冲轮转快，关键日志要"触发后立即抓"。
+
+**坑**：a11y 截图经 shizuku base64 传输时输出是 JSON envelope，需 python json 解析取 data.stdout 再 b64decode（直接过滤行会残留 JSON 报 Invalid base64）；a11y dump 的 clickable 节点 center 坐标长按可能落在文本上弹系统文本选择菜单而非应用菜单。
 
 ---
 
