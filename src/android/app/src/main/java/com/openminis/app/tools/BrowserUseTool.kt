@@ -12,7 +12,7 @@ object BrowserUseTool {
 
     const val NAME = "browser_use"
 
-    val description = """Control web browser with up to 3 tabs. Actions: navigate to URL, take screenshot, click elements, type text, get page text, scroll, get page info, execute JavaScript, find elements by selector, hover, get readable content, set user agent, get page backbone (DOM structure), fetch resource, manage tabs (new_tab, close_tab, list_tabs), read page console messages (get_console_messages — JS errors/logs), read page network requests (get_network_requests — method/URL/status), and answer a page file chooser with sandbox files (file_upload — after clicking an <input type="file">).""".trimIndent()
+    val description = """Control web browser with up to 3 tabs. Actions: navigate to URL, take screenshot, click elements, type text, get page text, scroll, get page info, execute JavaScript, find elements by selector, hover, get readable content, set user agent, get page backbone (DOM structure), fetch resource, manage tabs (new_tab, close_tab, list_tabs), read page console messages (get_console_messages — JS errors/logs), read page network requests (get_network_requests — method/URL/status), and answer a page file chooser with sandbox files (file_upload — after a click action on the <input type="file">; file-input clicks are auto-dispatched as real touch gestures, because JS clicks cannot open file choosers).""".trimIndent()
 
     /**
      * Build the JSON tool definition for the Anthropic / OpenAI / Gemini API.
@@ -43,7 +43,7 @@ object BrowserUseTool {
 
         properties.put("selector", JSONObject().apply {
             put("type", "string")
-            put("description", "CSS selector for element interaction (click/type/hover/find_elements/get_text/scroll)")
+            put("description", "CSS selector for element interaction (click/type/hover/find_elements/get_text/scroll); clicking a file input or its label opens the page's file chooser for file_upload")
         })
 
         properties.put("text", JSONObject().apply {
@@ -108,7 +108,7 @@ object BrowserUseTool {
         properties.put("paths", JSONObject().apply {
             put("type", "array")
             put("items", JSONObject().put("type", "string"))
-            put("description", "Linux paths of files to upload via file_upload, e.g. [\"/var/minis/attachments/photo.png\"] — answer a page file chooser (an <input type=\"file\"> you clicked) with files from the sandbox")
+            put("description", "Linux paths of files to upload via file_upload, e.g. [\"/var/minis/attachments/photo.png\"] — answer a page file chooser (an <input type=\"file\"> clicked with the click action — not execute_js) with files from the sandbox")
         })
 
         val inputSchema = JSONObject()

@@ -64,6 +64,69 @@ object BrowserUseJS {
         })()
     """.trimIndent()
 
+    /**
+     * [fix/browser-filechooser-gesture] Probe the would-be click target:
+     * is it a file input (or a label bound to one)? Those need a REAL touch
+     * gesture — Chromium only opens the file chooser for user-activated
+     * clicks, and JS-dispatched events carry no activation, so the normal
+     * JS click path leaves onShowFileChooser silent and the page blocked.
+     *
+     * Returns JSON: {isFile:false} for ordinary targets (JS click proceeds
+     * unchanged); {isFile:true, cx, cy, vw, accept, tag} with the touch
+     * point in CSS viewport coordinates plus visualViewport.width for the
+     * CSS→view scale; {isFile:true, error} for file inputs we cannot reach
+     * (hidden with no visible label / center outside the viewport).
+     */
+    fun clickTargetInfo(selector: String?, x: Int?, y: Int?): String {
+        val target = if (selector != null) {
+            "document.querySelector('${jsQuote(selector)}')"
+        } else {
+            "document.elementFromPoint($x, $y)"
+        }
+        return """
+            (function() {
+                var el = $target;
+                if (!el) return JSON.stringify({error: 'Element not found'});
+                if (el.disabled) return JSON.stringify({error: 'Element is disabled', tag: el.tagName});
+                var isFile = function(n) {
+                    return n.tagName === 'INPUT' && (n.getAttribute('type') || '').toLowerCase() === 'file';
+                };
+                var input = isFile(el) ? el : null;
+                var touchEl = el;
+                if (!input && el.tagName === 'LABEL') {
+                    var forId = el.getAttribute('for');
+                    var cand = forId ? document.getElementById(forId)
+                                     : (el.querySelector('input[type=file]') || null);
+                    if (cand && isFile(cand)) { input = cand; touchEl = el; }
+                }
+                if (!input) return JSON.stringify({isFile: false});
+                var visible = function(n) {
+                    return n.getClientRects().length > 0 && n.getBoundingClientRect().width > 0;
+                };
+                if (!visible(touchEl)) {
+                    var alt = null;
+                    if (input.id) alt = document.querySelector('label[for="' + input.id + '"]');
+                    if (!alt && input.closest) alt = input.closest('label');
+                    if (alt && visible(alt)) { touchEl = alt; }
+                    else return JSON.stringify({isFile: true, error: 'file input is hidden and has no visible label — cannot open its chooser with a real touch'});
+                }
+                touchEl.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'});
+                var r = touchEl.getBoundingClientRect();
+                var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+                if (cx < 1 || cy < 1 || cx >= window.innerWidth || cy >= window.innerHeight) {
+                    return JSON.stringify({isFile: true, error: 'file input center is outside the visible viewport — scroll first'});
+                }
+                return JSON.stringify({
+                    isFile: true,
+                    tag: input.tagName,
+                    accept: input.getAttribute('accept') || '',
+                    cx: cx, cy: cy,
+                    vw: (window.visualViewport && window.visualViewport.width) || window.innerWidth
+                });
+            })()
+        """.trimIndent()
+    }
+
     // -- Type --
 
     fun type(selector: String, text: String): String = """

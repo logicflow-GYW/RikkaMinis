@@ -7,8 +7,10 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
+import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
+import android.view.MotionEvent
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
@@ -1102,12 +1104,93 @@ class BrowserUseManager(
     // -- Click --
 
     private suspend fun click(selector: String?, x: Int?, y: Int?): BrowserActionResult {
+        // [fix/browser-filechooser-gesture] File inputs need a REAL touch:
+        // Chromium only opens the page file chooser from a user-activated
+        // gesture, and JS-dispatched events (our normal click path) carry
+        // no activation, so onShowFileChooser never fires — the click
+        // "succeeds" while the page silently waits forever. Probe the
+        // target first; a file input (or a label bound to one) gets a
+        // synthesized touch instead of the JS event sequence.
+        val probe = runCatching {
+            JSONObject(evaluateJavascript(BrowserUseJS.clickTargetInfo(selector, x, y)))
+        }.getOrNull()
+        if (probe != null && probe.optBoolean("isFile", false)) {
+            if (probe.has("error")) {
+                return BrowserActionResult.error(probe.getString("error"))
+            }
+            return clickFileInputWithRealTouch(selector, x, y, probe)
+        }
         val js = when {
             selector != null -> BrowserUseJS.click(selector)
             x != null && y != null -> BrowserUseJS.clickCoordinate(x, y)
             else -> return BrowserActionResult.error("click requires 'selector' or 'coordinate_x'/'coordinate_y'")
         }
         return evaluateAndReturn(js)
+    }
+
+    /**
+     * [fix/browser-filechooser-gesture] Dispatch a synthesized touch at the
+     * file input's center so Chromium sees a genuine gesture (user
+     * activation) and opens the chooser our onShowFileChooser is waiting
+     * for. Coordinates: the probe returned CSS viewport units; touch events
+     * take WebView-local px — BrowserTouchPlanner converts via the
+     * width ratio, which absorbs density / shrink-to-fit / set_viewport.
+     */
+    private suspend fun clickFileInputWithRealTouch(
+        selector: String?,
+        x: Int?,
+        y: Int?,
+        target: JSONObject,
+    ): BrowserActionResult {
+        val cssX = target.optDouble("cx", Double.NaN)
+        val cssY = target.optDouble("cy", Double.NaN)
+        val cssVw = target.optDouble("vw", Double.NaN)
+        val accept = target.optString("accept", "")
+        val (touch, viewW, viewH) = withContext(Dispatchers.Main) {
+            val w = webView.width
+            val h = webView.height
+            Triple(BrowserTouchPlanner.plan(cssX, cssY, cssVw, w, h), w, h)
+        }
+        if (touch == null) {
+            return BrowserActionResult.error(
+                "click: cannot map file input center ($cssX, $cssY) CSS px into the WebView " +
+                    "(${viewW}x${viewH} px, viewport ${cssVw} CSS px) — element likely outside the visible area",
+            )
+        }
+        withContext(Dispatchers.Main) {
+            val downAt = SystemClock.uptimeMillis()
+            val down = MotionEvent.obtain(downAt, downAt, MotionEvent.ACTION_DOWN, touch.x, touch.y, 0)
+            val up = MotionEvent.obtain(downAt, downAt + 64, MotionEvent.ACTION_UP, touch.x, touch.y, 0)
+            try {
+                webView.dispatchTouchEvent(down)
+                webView.dispatchTouchEvent(up)
+            } finally {
+                down.recycle()
+                up.recycle()
+            }
+        }
+        // The tap → Chromium gesture → Blink user activation →
+        // onShowFileChooser chain lands asynchronously. Give it a beat,
+        // then fail LOUDLY if the chooser did not open — silent failure is
+        // the exact bug this fix closes. The [File chooser opened] hint in
+        // execute() still appends itself afterwards when it did open.
+        delay(300)
+        val opened = withContext(Dispatchers.Main) { pendingFileChooser != null }
+        val text = buildString {
+            append("clicked file input")
+            if (selector != null) append(" (selector: $selector)")
+            else if (x != null && y != null) append(" at ($x, $y)")
+            append(" with a real touch gesture at view px (${touch.x.toInt()}, ${touch.y.toInt()})")
+            if (accept.isNotBlank()) append(" — accept: $accept")
+            if (!opened) {
+                append(
+                    "\n[Warning] the WebView did not open a file chooser after the real touch — " +
+                        "the page may swallow the tap, or this WebView build ignores synthesized " +
+                        "touches. Retry the click, or inspect the element."
+                )
+            }
+        }
+        return BrowserActionResult(text = text)
     }
 
     // -- Type --
@@ -2149,7 +2232,8 @@ class BrowserUseManager(
         val callback = pendingFileChooser
             ?: return BrowserActionResult.error(
                 "No file chooser is open on this tab. Trigger one first: click the page's " +
-                    "<input type=\"file\"> element (click / execute_js), then immediately " +
+                    "visible <input type=\"file\"> (or its label) with the click action — " +
+                    "a JS click via execute_js cannot open file choosers — then immediately " +
                     "call file_upload.",
             )
         // Resolve Linux paths -> host files. Fail WITHOUT consuming the
