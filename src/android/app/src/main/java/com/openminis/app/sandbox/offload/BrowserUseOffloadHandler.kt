@@ -67,10 +67,16 @@ class BrowserUseOffloadHandler(private val app: MinisApp) : NativeOffloadHandler
                 compact = compact, quiet = quiet, exit = 2)
         }
 
-        val input = BrowserActionInput.parse(inputJson.toString())
+        val parsedInput = BrowserActionInput.parse(inputJson.toString())
             ?: return emitError(action = "execute", code = ERR_INVALID_ARGS,
                 message = "Invalid browser_use input. Required: 'action' (one of ${BrowserAction.allValues.joinToString(", ")})",
                 compact = compact, quiet = quiet, exit = 2)
+        // [fix/browser-trio-audit] Inject the requesting chat session (T340
+        // MINIS_CHAT_SESSION_ID, null for interactive terminals) so
+        // file_upload resolves per-session paths via resolveSessionHostPath
+        // instead of the global cross-session fallback. Never parsed from
+        // the model's JSON — the CLI argv cannot pick another session.
+        val input = request.sessionId?.let { parsedInput.copy(sessionId = it) } ?: parsedInput
 
         val actionName = input.action.value
 

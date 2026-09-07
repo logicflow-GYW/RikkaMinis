@@ -567,6 +567,12 @@ internal suspend fun ChatViewModel.executeBrowserUseTool(argsJson: String): Tool
     com.openminis.app.ui.chat.executeBrowserUseTool(
         argsJson = argsJson,
         tabPool = browserTabPool,
+        // [fix/browser-trio-audit] T178 pattern — same as ReadImageTool above:
+        // without the session id, file_upload would resolve
+        // /var/minis/{workspace,attachments,...} through the global
+        // last-writer-wins fallback and could hand the page ANOTHER
+        // session's same-named file.
+        sessionId = activeSessionId,
         artifactWriter = { filename, data ->
             persistBrowserArtifact(filename, data)
         },

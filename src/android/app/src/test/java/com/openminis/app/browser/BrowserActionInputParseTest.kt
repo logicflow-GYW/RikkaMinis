@@ -120,4 +120,38 @@ class BrowserActionInputParseTest {
         )!!
         assertFalse(input.clear)
     }
+
+    /**
+     * [fix/browser-trio-audit] sessionId is an internal-only field: the
+     * model's JSON must NEVER set it (otherwise a model could point
+     * file_upload at another session's files), and internal call sites
+     * inject it via copy() after parsing.
+     */
+    @Test
+    fun sessionIdIsNeverParsedFromModelJson() {
+        val input = BrowserActionInput.parse(
+            JSONObject()
+                .put("action", "file_upload")
+                .put("paths", listOf("/var/minis/attachments/a.png"))
+                .put("sessionId", "someone-elses-session")
+                .toString(),
+        )!!
+        assertNull("model-supplied sessionId must be ignored", input.sessionId)
+    }
+
+    @Test
+    fun sessionIdInjectedViaCopyRoundTrips() {
+        val parsed = BrowserActionInput.parse(
+            JSONObject()
+                .put("action", "file_upload")
+                .put("paths", listOf("/var/minis/attachments/a.png"))
+                .toString(),
+        )!!
+        val injected = parsed.copy(sessionId = "s-123")
+        assertEquals("s-123", injected.sessionId)
+        // copy() must not disturb any parsed field.
+        assertEquals(parsed.action, injected.action)
+        assertEquals(parsed.paths, injected.paths)
+        assertEquals(parsed.clear, injected.clear)
+    }
 }

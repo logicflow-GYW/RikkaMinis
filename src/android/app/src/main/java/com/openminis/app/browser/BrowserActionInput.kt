@@ -54,6 +54,17 @@ data class BrowserActionInput(
      * time. [feat/browser-console-network-upload]
      */
     val paths: List<String>? = null,
+    /**
+     * Chat session that issued this action. Injected by the internal call
+     * sites (CLI offload handler / ChatViewModel tool executor) via copy()
+     * — NEVER parsed from the model's JSON, so the model cannot point
+     * file_upload at another session's files. file_upload uses it to
+     * resolve /var/minis/{workspace,attachments,...} through
+     * resolveSessionHostPath (T178 pattern) instead of the global
+     * cross-session fallback, which returns the first same-named file
+     * across ALL sessions. [fix/browser-trio-audit]
+     */
+    val sessionId: String? = null,
 ) {
     companion object {
         fun parse(json: String): BrowserActionInput? {

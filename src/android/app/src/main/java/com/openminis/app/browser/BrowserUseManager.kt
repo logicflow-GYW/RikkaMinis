@@ -262,6 +262,11 @@ class BrowserUseManager(
      * URIs; navigation away (onPageStarted) or a newer chooser cancels it
      * with null so a stale callback can never swallow a later upload.
      */
+    // [fix/browser-trio-audit] @Volatile: every write happens on the main
+    // thread (chrome-client callbacks / destroy), but readers run on the
+    // offload coroutine (execute()'s hint check, fileUpload's initial
+    // read) — without volatile those reads may see a stale null/non-null.
+    @Volatile
     private var pendingFileChooser: ValueCallback<Array<Uri>>? = null
     private var pendingFileAccept: String? = null
 
@@ -723,7 +728,14 @@ class BrowserUseManager(
             BrowserAction.GET_TEXT -> return getText(input.selector)
             BrowserAction.SCROLL -> scroll(input.selector, input.direction, input.amount)
             BrowserAction.GET_PAGE_INFO -> return getPageInfo()
-            BrowserAction.EXECUTE_JS -> return executeJS(input.script)
+            // [fix/browser-trio-audit] EXECUTE_JS must NOT return early: the
+            // file-chooser hint below checks for it, and a `return` here made
+            // that branch dead code — execute_js is the common way agents
+            // trigger a chooser (document.querySelector('input[type=file]').click()),
+            // and its result never showed the hint. Falling through is safe:
+            // EXECUTE_JS is not in visualChangeActions, so no snapshot side
+            // effect is added by the code below.
+            BrowserAction.EXECUTE_JS -> executeJS(input.script)
             BrowserAction.FIND_ELEMENTS -> return findElements(input.selector)
             BrowserAction.HOVER -> hover(input.selector)
             BrowserAction.GET_READABLE -> return getReadable()
@@ -742,7 +754,7 @@ class BrowserUseManager(
             BrowserAction.GET_NETWORK_REQUESTS -> return getNetworkRequests(input.clear)
             // Non-return branch: falls through to the visualChange snapshot so
             // the agent sees the page's reaction to the uploaded file.
-            BrowserAction.FILE_UPLOAD -> fileUpload(input.paths)
+            BrowserAction.FILE_UPLOAD -> fileUpload(input)
             BrowserAction.NEW_TAB, BrowserAction.CLOSE_TAB, BrowserAction.LIST_TABS ->
                 return BrowserActionResult.error("Tab management actions must be routed through BrowserTabPool")
         }
@@ -2119,13 +2131,15 @@ class BrowserUseManager(
      * file_upload — answer a page-triggered file chooser (an <input
      * type="file"> the agent opened via click / execute_js) with files from
      * the Linux sandbox. Paths are resolved through [PRootKernel] to host
-     * files and handed to the WebView as FileProvider content URIs (only
+     * files (session-scoped via [BrowserActionInput.sessionId], T178
+     * pattern) and handed to the WebView as FileProvider content URIs (only
      * declared provider roots are shareable: minis-sessions/, minis-global/,
      * alpine-rootfs/ — i.e. everything under /var/minis/ and the sandbox
      * tree). Validation happens BEFORE the chooser callback is consumed, so
      * a bad path leaves the chooser open for a corrected retry.
      */
-    private suspend fun fileUpload(paths: List<String>?): BrowserActionResult {
+    private suspend fun fileUpload(input: BrowserActionInput): BrowserActionResult {
+        val paths = input.paths
         if (paths.isNullOrEmpty()) {
             return BrowserActionResult.error(
                 "file_upload requires 'paths' — Linux paths of the files to upload, " +
@@ -2140,9 +2154,21 @@ class BrowserUseManager(
             )
         // Resolve Linux paths -> host files. Fail WITHOUT consuming the
         // callback so a corrected retry can still answer the same chooser.
+        // [fix/browser-trio-audit] Session-scoped resolution first (T178
+        // pattern, same as file_read/file_edit/read_image): the global
+        // resolveHostPath fallback searches EVERY minis-sessions/<id>/ tree
+        // and returns the first same-named hit — i.e. possibly another chat
+        // session's file. resolveSessionHostPath pins per-session subdirs to
+        // THIS session; non-session paths (/tmp/...) fall through to the
+        // global resolver inside it.
+        val context = webView.context
         val hostFiles = mutableListOf<File>()
         for (linuxPath in paths) {
-            val host = runCatching { PRootKernel.resolveHostPath(linuxPath) }.getOrNull()
+            val host = runCatching {
+                input.sessionId
+                    ?.let { PRootKernel.resolveSessionHostPath(it, linuxPath, context) }
+                    ?: PRootKernel.resolveHostPath(linuxPath)
+            }.getOrNull()
             if (host == null || !host.exists() || !host.isFile) {
                 return BrowserActionResult.error(
                     "file_upload: cannot resolve '$linuxPath' to an existing file in the sandbox",
@@ -2153,7 +2179,6 @@ class BrowserUseManager(
         // Host file -> shareable content URI. Files outside the declared
         // provider roots (e.g. arbitrary /data paths) throw here — report
         // with a copy-to-workspace remedy instead of failing the chooser.
-        val context = webView.context
         val authority = "${context.packageName}.fileprovider"
         val uris = arrayOfNulls<Uri>(hostFiles.size)
         for (i in hostFiles.indices) {
@@ -2172,12 +2197,31 @@ class BrowserUseManager(
             )
         }
         // Consume the chooser exactly once, on the main thread as WebView
-        // expects, then hand the URIs back to the page.
-        pendingFileChooser = null
-        val accept = pendingFileAccept
-        pendingFileAccept = null
-        val delivered = withContext(Dispatchers.Main) {
-            runCatching { callback.onReceiveValue(uris.filterNotNull().toTypedArray()) }.isSuccess
+        // expects — and only if it is STILL the pending one. Navigation
+        // (onPageStarted) or a newer onShowFileChooser may have cancelled /
+        // replaced the callback while we were resolving paths (TOCTOU):
+        // answering a callback twice is undefined WebView behavior, and
+        // answering a replaced one hands the files to a dead chooser. The
+        // identity check runs on Main, where every other pendingFileChooser
+        // write happens, so check-then-consume is atomic.
+        // [fix/browser-trio-audit]
+        var accept: String? = null
+        val delivered: Boolean? = withContext(Dispatchers.Main) {
+            if (pendingFileChooser !== callback) {
+                null // stale — cancelled or replaced while paths were resolving
+            } else {
+                pendingFileChooser = null
+                accept = pendingFileAccept
+                pendingFileAccept = null
+                runCatching { callback.onReceiveValue(uris.filterNotNull().toTypedArray()) }.isSuccess
+            }
+        }
+        if (delivered == null) {
+            return BrowserActionResult.error(
+                "file_upload: the file chooser was cancelled or replaced while the paths were " +
+                    "being resolved (page navigated / opened a new chooser) — re-trigger it " +
+                    "(click the <input type=\"file\"> again) and retry",
+            )
         }
         if (!delivered) {
             return BrowserActionResult.error("file_upload failed delivering files to the page")
