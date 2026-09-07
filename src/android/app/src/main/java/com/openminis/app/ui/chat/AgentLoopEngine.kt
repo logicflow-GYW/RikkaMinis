@@ -1719,11 +1719,14 @@ internal class AgentLoopEngine(
                 )
                 if (verifyNudge != null) {
                     loopState.verifyNudgeAttempts++
+                    // [fix/runtime-limits-audit] The log's denominator reads the
+                    // SAME live limit buildNudge just gated on, so the counter
+                    // can't claim "2/2" while the cap is actually 3.
                     AppLogger.warning(
                         TAG_STREAM,
                         "runAgentLoop turn=$turn finish=$turnFinishReason but unverified code edits " +
                             "(${loopState.changedCodePaths.size} path(s)) — injecting verify nudge " +
-                            "${loopState.verifyNudgeAttempts}/${VerificationStopPolicy.MAX_VERIFY_NUDGES}",
+                            "${loopState.verifyNudgeAttempts}/${com.openminis.app.data.AgentRuntimeLimitsPrefs.verifyNudges()}",
                     )
                     val nudgeMsg = LLMMessage(
                         role = LLMMessage.Role.USER,
@@ -2454,7 +2457,7 @@ internal class AgentLoopEngine(
                 "runAgentLoop EXIT — hit MAX_AGENT_TURNS=$maxTurnsThisRun, finalizing as resumable",
             )
             withContext(Dispatchers.Main) {
-                host.finalizeAtTurnLimit(loopState.assistantId, loopState.accumulatedText, loopState.allToolBlocks)
+                host.finalizeAtTurnLimit(loopState.assistantId, loopState.accumulatedText, loopState.allToolBlocks, maxTurnsThisRun)
             }
         } else if (traceObserver.t7BudgetStopReason != null) {
             // T7-C: 预算耗尽（deadline / 计数上限）—— 显式终态，不是静默失败。
@@ -2476,6 +2479,11 @@ internal class AgentLoopEngine(
                     loopState.accumulatedText,
                     loopState.allToolBlocks,
                     reason = traceObserver.t7BudgetStopReason ?: "unknown",
+                    // [fix/runtime-limits-audit] Pass THIS run's budget limits
+                    // so the banner quotes what actually stopped the run, not
+                    // a live re-read that can drift mid-run.
+                    maxProviderAttemptsThisRun = observeBudget.maxProviderAttempts,
+                    maxTurnsThisRun = maxTurnsThisRun,
                 )
             }
         } else {

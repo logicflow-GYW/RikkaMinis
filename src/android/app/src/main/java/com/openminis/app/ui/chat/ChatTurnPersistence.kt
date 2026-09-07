@@ -110,6 +110,8 @@ internal fun ChatViewModel.finalizeAtTurnLimit(
     assistantId: String,
     text: String,
     blocks: List<AssistantBlock>,
+    /** [fix/runtime-limits-audit] This run's actual turn ceiling (snapshot at run entry) — banner quotes it, not a live re-read. */
+    maxTurnsThisRun: Int = com.openminis.app.data.AgentRuntimeLimitsPrefs.maxTurns(),
 ) {
     updateAssistantMessage(
         assistantId, text, false, blocks,
@@ -131,9 +133,12 @@ internal fun ChatViewModel.finalizeAtTurnLimit(
         _streamingById.value = _streamingById.value - assistantId
     }
     setInlineError(
-        // [feat/runtime-limits-panel] 横幅数字引用真上限（默认 200），避免预算
-        // 调大后横幅还报旧数字（budget-banner 同款漂移问题的预防）。
-        "Stopped after ${com.openminis.app.data.AgentRuntimeLimitsPrefs.maxTurns()} agent turns to prevent runaway " +
+        // [fix/runtime-limits-audit] The banner must quote THIS run's budget,
+        // not a live re-read: the engine snapshots limits at runAgentLoop
+        // entry, so a mid-run setting change would otherwise make the banner
+        // disagree with the budget that actually stopped the run (the exact
+        // "64 vs 128" drift bug this banner was built to prevent).
+        "Stopped after $maxTurnsThisRun agent turns to prevent runaway " +
         "tool use. The model kept calling tools without finishing — tap " +
         "Resume to continue from here, or send a new message to start over.",
 )
@@ -154,6 +159,9 @@ internal fun ChatViewModel.finalizeBudgetStop(
     text: String,
     blocks: List<AssistantBlock>,
     reason: String,
+    /** [fix/runtime-limits-audit] This run's budget limits (snapshot at run entry) — banners quote them, not live re-reads. */
+    maxProviderAttemptsThisRun: Int = providerAttemptLimitNow(),
+    maxTurnsThisRun: Int = com.openminis.app.data.AgentRuntimeLimitsPrefs.maxTurns(),
 ) {
     updateAssistantMessage(
         assistantId, text, false, blocks,
@@ -165,9 +173,12 @@ internal fun ChatViewModel.finalizeBudgetStop(
     }
     val detail = when (reason) {
         "provider_attempt_limit" ->
-            "the run reached its provider-call limit (${providerAttemptLimitNow()} calls)"
+            // [fix/runtime-limits-audit] Quote the run's snapshot limit (passed
+            // from the engine), not a live re-read — mid-run settings changes
+            // must not make the banner lie about which budget fired.
+            "the run reached its provider-call limit ($maxProviderAttemptsThisRun calls)"
         "turn_limit" ->
-            "the run reached its turn limit (${com.openminis.app.data.AgentRuntimeLimitsPrefs.maxTurns()} turns)"
+            "the run reached its turn limit ($maxTurnsThisRun turns)"
         "deadline_reached" ->
             "the run reached its time limit"
         else -> "an execution budget was exhausted ($reason)"

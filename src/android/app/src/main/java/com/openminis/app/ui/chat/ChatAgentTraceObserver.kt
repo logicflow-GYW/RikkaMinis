@@ -195,20 +195,34 @@ internal class ChatAgentTraceObserver(
         }
     }
 
-    internal fun t7Remaining(dimension: String, snap: BudgetSnapshot): Int = when (dimension) {
-        // [feat/runtime-limits-panel] 剩余量改从快照的真上限推导，不再减硬编码
-        // 常量——预算上限可被用户调节后，T7_*_DEFAULT 会与真值漂移，旧算法会
-        // 报出负数/错位的 remaining。t7Total(budget) 持有真上限，这里对齐。
-        AgentTraceRecorder.DIMENSION_TURNS -> snap.turnsUsed.let { t7TotalOf(dimension) - it }
-        AgentTraceRecorder.DIMENSION_PROVIDER_ATTEMPTS -> t7TotalOf(dimension) - snap.providerAttemptsUsed
-        AgentTraceRecorder.DIMENSION_TOOL_CALLS -> t7TotalOf(dimension) - snap.toolCallsUsed
-        AgentTraceRecorder.DIMENSION_SHELL_COMMANDS -> t7TotalOf(dimension) - snap.shellCommandsUsed
-        AgentTraceRecorder.DIMENSION_COMPACTION_CALLS -> t7TotalOf(dimension) - snap.compactionCallsUsed
-        AgentTraceRecorder.DIMENSION_CONCURRENT_TOOLS -> t7TotalOf(dimension) - snap.concurrentToolsActive
-        else -> 0
+    internal fun t7Remaining(dimension: String, snap: BudgetSnapshot): Int =
+        t7RemainingOf(dimension, snap, activeRunBudget)
+
+    /**
+     * [fix/runtime-limits-audit] Remaining is derived from THIS run's budget
+     * (the same object the consumption came from), NOT a live prefs re-read.
+     * The engine snapshots limits at runAgentLoop entry; a mid-run settings
+     * change must not make remaining jump or go negative on subsequent
+     * trace events (the run keeps the budget it started with — same
+     * rationale as the banner numbers).
+     */
+    private fun t7RemainingOf(dimension: String, snap: BudgetSnapshot, budget: AgentExecutionBudget?): Int {
+        val total = budget?.let { t7Total(dimension, it) }
+            // No budget (JVM test path / pre-prime) → fall back to the live
+            // prefs value, which reads as the defaults in that context.
+            ?: t7TotalOf(dimension)
+        return when (dimension) {
+            AgentTraceRecorder.DIMENSION_TURNS -> total - snap.turnsUsed
+            AgentTraceRecorder.DIMENSION_PROVIDER_ATTEMPTS -> total - snap.providerAttemptsUsed
+            AgentTraceRecorder.DIMENSION_TOOL_CALLS -> total - snap.toolCallsUsed
+            AgentTraceRecorder.DIMENSION_SHELL_COMMANDS -> total - snap.shellCommandsUsed
+            AgentTraceRecorder.DIMENSION_COMPACTION_CALLS -> total - snap.compactionCallsUsed
+            AgentTraceRecorder.DIMENSION_CONCURRENT_TOOLS -> total - snap.concurrentToolsActive
+            else -> 0
+        }
     }
 
-    /** [feat/runtime-limits-panel] 当前生效的维度上限（prefs 真值）。 */
+    /** [feat/runtime-limits-panel] Live prefs limit — fallback only (no active budget). */
     private fun t7TotalOf(dimension: String): Int = when (dimension) {
         AgentTraceRecorder.DIMENSION_TURNS -> com.openminis.app.data.AgentRuntimeLimitsPrefs.maxTurns()
         AgentTraceRecorder.DIMENSION_PROVIDER_ATTEMPTS -> com.openminis.app.data.AgentRuntimeLimitsPrefs.maxProviderAttempts()

@@ -1131,10 +1131,10 @@ class ChatViewModel(
             }
             return this@ChatViewModel.drainQueuedPrompts(provider, systemPrompt, activeFallbackStrategy)
         }
-        override fun finalizeAtTurnLimit(assistantId: String, text: String, blocks: List<AssistantBlock>) =
-            this@ChatViewModel.finalizeAtTurnLimit(assistantId, text, blocks)
-        override fun finalizeBudgetStop(assistantId: String, text: String, blocks: List<AssistantBlock>, reason: String) =
-            this@ChatViewModel.finalizeBudgetStop(assistantId, text, blocks, reason)
+        override fun finalizeAtTurnLimit(assistantId: String, text: String, blocks: List<AssistantBlock>, maxTurnsThisRun: Int) =
+            this@ChatViewModel.finalizeAtTurnLimit(assistantId, text, blocks, maxTurnsThisRun)
+        override fun finalizeBudgetStop(assistantId: String, text: String, blocks: List<AssistantBlock>, reason: String, maxProviderAttemptsThisRun: Int, maxTurnsThisRun: Int) =
+            this@ChatViewModel.finalizeBudgetStop(assistantId, text, blocks, reason, maxProviderAttemptsThisRun, maxTurnsThisRun)
         override fun onQueueStatus(waitingAhead: Int) {
             _queueWaitingAhead.value = waitingAhead
         }

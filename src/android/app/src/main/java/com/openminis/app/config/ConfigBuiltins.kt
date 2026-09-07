@@ -142,6 +142,23 @@ internal object ConfigBuiltins {
             com.openminis.app.data.AgentRuntimeLimitsPrefs.PREFS,
             Context.MODE_PRIVATE,
         )
+        // [fix/runtime-limits-audit] PrefsIntField writes go straight to
+        // SharedPreferences; AgentRuntimeLimitsPrefs' primed cache does NOT
+        // auto-refresh (unlike Compose-backed appearance keys, its readers
+        // are context-free engine/worker code). Without a change listener a
+        // `minis-config set runtime.*` from an agent session would land in
+        // prefs but every reader would keep serving the stale cached value
+        // until process restart — the "changed but takes effect never" bug.
+        // Re-prime on any write to this file: cheap (17 getInts), immediate,
+        // and preserves the run-consistency semantics (runs snapshot at
+        // runAgentLoop entry, so an in-flight run still keeps its budget).
+        limits.registerOnSharedPreferenceChangeListener { _, _ ->
+            com.openminis.app.data.AgentRuntimeLimitsPrefs.prime(
+                // The listener callback holds a strong ref to `limits`, whose
+                // owning Context is the application context — safe.
+                context.applicationContext,
+            )
+        }
         val L = com.openminis.app.data.AgentRuntimeLimitsPrefs
         r.register(PrefsIntField(
             path = "runtime.maxTurns",

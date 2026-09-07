@@ -141,6 +141,8 @@ internal interface AgentLoopHost {
         assistantId: String,
         text: String,
         blocks: List<AssistantBlock>,
+        /** [fix/runtime-limits-audit] The turn ceiling THIS run used (snapshot at runAgentLoop entry) — the banner quotes it so a mid-run settings change can't make the number lie. */
+        maxTurnsThisRun: Int,
     )
 
     /**
@@ -157,6 +159,9 @@ internal interface AgentLoopHost {
         text: String,
         blocks: List<AssistantBlock>,
         reason: String,
+        /** [fix/runtime-limits-audit] This run's budget limits (snapshot at run entry) — banners quote them, not live re-reads. */
+        maxProviderAttemptsThisRun: Int = com.openminis.app.data.AgentRuntimeLimitsPrefs.maxProviderAttempts(),
+        maxTurnsThisRun: Int = com.openminis.app.data.AgentRuntimeLimitsPrefs.maxTurns(),
     )
 
     /**
