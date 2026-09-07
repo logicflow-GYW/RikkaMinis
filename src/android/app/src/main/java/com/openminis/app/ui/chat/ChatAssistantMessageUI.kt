@@ -1046,6 +1046,18 @@ internal fun ToolCallRunGroup(
     // No tools → nothing to render (thinking no longer lives in this card;
     // it's a separate AssistantThinking row upstream).
     if (group.tools.isEmpty()) return
+    // [render-churn-2] Stable lambdas for the pill actions that don't
+    // depend on group content. The call site re-creates these closures on
+    // every recomposition, and an unstable lambda parameter forces the pill
+    // to recompose even when its block is frozen — which, for a 20-pill
+    // run card, meant re-running every completed pill at 1Hz during tool
+    // progress churn. Captured once: their semantics are identical across
+    // ticks (they only touch the ViewModel / parent callbacks). onRetry /
+    // onRerunFromHere stay dynamic — they genuinely depend on group state.
+    val stableOnStop = remember { onStop }
+    val stableOnOpenDetail = remember { onOpenDetail }
+    val stableOnOpenTerminal = remember { onOpenTerminalWithCommand }
+    val stableOnCopyDetails = remember { onCopyDetails }
     // [T-android-run-group-manual] The card is collapsed by default and
     // never auto-expands, not even while running — the header itself IS the
     // live status (spinner + "Running N tools" / "Thinking…"), so an
@@ -1179,11 +1191,11 @@ internal fun ToolCallRunGroup(
                         block = block,
                         allToolBlocks = group.tools,
                         onRetry = if (group.isLastCancelled && block.id == group.tools.lastOrNull()?.id) onRetry else null,
-                        onStop = onStop,
-                        onOpenTerminalWithCommand = onOpenTerminalWithCommand,
-                        onOpenDetail = onOpenDetail,
+                        onStop = stableOnStop,
+                        onOpenTerminalWithCommand = stableOnOpenTerminal,
+                        onOpenDetail = stableOnOpenDetail,
                         onRerunFromHere = onRerunFromHere,
-                        onCopyDetails = onCopyDetails,
+                        onCopyDetails = stableOnCopyDetails,
                     )
                 }
             }

@@ -272,6 +272,22 @@ import com.openminis.app.ui.browser.BrowserSheet
 import com.openminis.app.ui.theme.ChatColors
 import com.openminis.app.ui.components.MinisTextButton
 
+/**
+ * [render-churn-2] Element-reference list equality for block lists: true
+ * when both lists carry the same instances. A per-tick rebuild of unchanged
+ * blocks (publish's `toolBlocks.toList()`) compares equal WITHOUT walking
+ * multi-KB content strings — completed blocks stay frozen while only the
+ * live (copy()'d) block differs by reference.
+ */
+internal fun sameBlockRefs(a: List<AssistantBlock>, b: List<AssistantBlock>): Boolean {
+    if (a === b) return true
+    if (a.size != b.size) return false
+    for (i in a.indices) {
+        if (a[i] !== b[i]) return false
+    }
+    return true
+}
+
 @Immutable
 internal sealed class FlatChatItem {
     abstract val key: String
@@ -383,6 +399,15 @@ internal sealed class FlatChatItem {
         override val contentType = "mdblock"
         /** True when this fragment is the streaming tail of a live message. */
         val isStreaming: Boolean get() = messageIsStreaming && isLastBlockOfMessage
+        // [render-churn-2] messageMarkdown is deliberately NOT compared: it
+        // is the joined markdown of ALL text blocks in the message, so it
+        // grows on every streamed chunk — comparing its length made every
+        // mdblock row of a long message recompose on every tick (LongCtx
+        // 3-5s re-layout root cause). The selection toolbar's Copy Markdown
+        // reads the freshest registration via rememberMessageMarkdown from
+        // the trailing row (which DOES recompose while streaming), and the
+        // turn-end reconcileAndVerifyTerminalText converges same-length
+        // rewrites — so dropping it from equals loses nothing rendered.
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is AssistantMarkdownBlock) return false
@@ -391,8 +416,7 @@ internal sealed class FlatChatItem {
                 blockIndex == other.blockIndex &&
                 isLastBlockOfMessage == other.isLastBlockOfMessage &&
                 messageIsStreaming == other.messageIsStreaming &&
-                rawText.length == other.rawText.length &&
-                messageMarkdown.length == other.messageMarkdown.length
+                rawText.length == other.rawText.length
         }
         override fun hashCode(): Int {
             var h = messageId.hashCode()
@@ -401,7 +425,6 @@ internal sealed class FlatChatItem {
             h = h * 31 + isLastBlockOfMessage.hashCode()
             h = h * 31 + messageIsStreaming.hashCode()
             h = h * 31 + rawText.length
-            h = h * 31 + messageMarkdown.length
             return h
         }
     }
@@ -441,6 +464,33 @@ internal sealed class FlatChatItem {
     ) : FlatChatItem() {
         override val key = "tool:$messageId:${block.id}"
         override val contentType = "tool"
+        // [render-churn-2] Hand-rolled cheap equals: the block is compared
+        // by REFERENCE — an unchanged completed block is the same instance
+        // across ticks (only live blocks get copy()'d), so completed pills
+        // stay frozen. allToolBlocks (re-created per publish via toList())
+        // is compared element-wise by reference for the same reason. Never
+        // walk the data-class field comparison (multi-KB content strings).
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is AssistantToolUse) return false
+            if (messageId != other.messageId || block !== other.block ||
+                isLastCancelled != other.isLastCancelled) return false
+            val a = allToolBlocks
+            val b = other.allToolBlocks
+            if (a === b) return true
+            if (a.size != b.size) return false
+            for (i in a.indices) {
+                if (a[i] !== b[i]) return false
+            }
+            return true
+        }
+        override fun hashCode(): Int {
+            var h = messageId.hashCode()
+            h = h * 31 + System.identityHashCode(block)
+            h = h * 31 + isLastCancelled.hashCode()
+            h = h * 31 + allToolBlocks.size
+            return h
+        }
     }
 
     /**
@@ -495,6 +545,34 @@ internal sealed class FlatChatItem {
 
         /** Thinking + tool block count. */
         val stepCount: Int get() = thinkingBlocks.size + tools.size
+
+        // [render-churn-2] Hand-rolled cheap equals: tools/thinkingBlocks
+        // compared element-wise by REFERENCE — unchanged completed blocks
+        // are the same instances across ticks (only the live block gets
+        // copy()'d), so a per-tick rebuild of the same blocks compares
+        // equal and the completed run card stays frozen. The old
+        // data-class equals walked every field including multi-KB content
+        // strings and reported "changed" whenever the live block's content
+        // ticked, recomposing the whole group every second.
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is AssistantToolRunGroup) return false
+            if (messageId != other.messageId) return false
+            if (isRunning != other.isRunning || isLastCancelled != other.isLastCancelled) return false
+            if (messageThinkingLevel != other.messageThinkingLevel) return false
+            if (!sameBlockRefs(tools, other.tools)) return false
+            if (!sameBlockRefs(thinkingBlocks, other.thinkingBlocks)) return false
+            return true
+        }
+        override fun hashCode(): Int {
+            var h = messageId.hashCode()
+            h = h * 31 + tools.size
+            h = h * 31 + thinkingBlocks.size
+            h = h * 31 + isRunning.hashCode()
+            h = h * 31 + isLastCancelled.hashCode()
+            h = h * 31 + (messageThinkingLevel?.hashCode() ?: 0)
+            return h
+        }
     }
 
     @Immutable

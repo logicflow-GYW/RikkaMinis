@@ -622,7 +622,7 @@ internal class StableChatRowLedger(
     /** Whether two rows that share a key differ in their live-state fields. */
     private fun sameLiveView(a: FlatChatItem, b: FlatChatItem): Boolean = when {
         a is FlatChatItem.AssistantToolRunGroup && b is FlatChatItem.AssistantToolRunGroup ->
-            a.isRunning == b.isRunning && a.tools == b.tools
+            a.isRunning == b.isRunning && sameBlockRefs(a.tools, b.tools)
         else -> a == b
     }
 
@@ -688,9 +688,17 @@ internal class StableChatRowLedger(
         val oldKeys = rows.subList(start, rows.size).map { it.key }.toSet()
 
         // ── pass 1+2: non-text rows — update in place, append new ──
+        // [render-churn-2] Conditional in-place update: only replace a row
+        // when its live view actually changed (sameLiveView). The previous
+        // unconditional `rows[i] = fresh` re-created every non-text row
+        // instance on EVERY tick even when nothing changed, defeating
+        // LazyColumn's key+equals skip and recomposing the whole run card
+        // (incl. completed pills) at 1Hz during tool progress churn.
         val freshNonTextByKey = freshNonText.associateBy { it.key }
         for (i in start until rows.size) {
-            freshNonTextByKey[rows[i].key]?.let { rows[i] = it }
+            freshNonTextByKey[rows[i].key]?.let { fresh ->
+                if (!sameLiveView(rows[i], fresh)) rows[i] = fresh
+            }
         }
         for (row in freshNonText) {
             if (row.key !in oldKeys) rows.add(row)
@@ -739,7 +747,18 @@ internal class StableChatRowLedger(
             for (i in start until rows.size) {
                 val row = rows[i]
                 if (row is FlatChatItem.AssistantMarkdownBlock) {
-                    freshTextByKey[row.key]?.let { rows[i] = it }
+                    val fresh = freshTextByKey[row.key] ?: continue
+                    // [render-churn-2] Conditional replace: same-content
+                    // ticks (tool-progress churn, unchanged streamed text)
+                    // keep the published row INSTANCE — LazyColumn's
+                    // key+equals skip then freezes completed fragments. Only
+                    // content growth / streaming-flag flips replace.
+                    if (row.rawText != fresh.rawText ||
+                        row.isLastBlockOfMessage != fresh.isLastBlockOfMessage ||
+                        row.messageIsStreaming != fresh.messageIsStreaming
+                    ) {
+                        rows[i] = fresh
+                    }
                 }
             }
             for (row in freshTextRows) {
