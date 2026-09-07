@@ -55,6 +55,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.collectLatest
@@ -176,6 +177,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.snapshotFlow
@@ -339,6 +341,50 @@ internal fun AssistantHeader() {
  * legacy call site passes null everywhere → no-op actions, exactly as before
  * this class existed).
  */
+
+// [render-churn-1] Ambient source of per-tool progress text (shell delay
+// countdown). ChatScreen provides a STABLE StateFlow reference once at the
+// LazyColumn root — the reference never changes, so no scope recomposes on
+// provide. Pills read it inside their running branch via [ToolProgressBadge],
+// which confines the per-second recomposition to a tiny Text; completed
+// blocks never subscribe. Null = no provider (legacy call sites) → pills
+// fall back to the bouncing dots.
+val LocalToolProgressById = staticCompositionLocalOf<StateFlow<Map<String, String>>?> { null }
+
+/**
+ * [render-churn-1] Pill-only progress readout. Reads [LocalToolProgressById]
+ * inside its own composition scope so a per-second progress tick recomposes
+ * ONLY this badge (a small monospace Text), never the pill, never the
+ * LazyColumn row, never the message item. [fallback] is composed when no
+ * progress text is present for the tool.
+ */
+@Composable
+private fun ToolProgressBadge(
+    toolId: String,
+    fallback: @Composable () -> Unit,
+) {
+    val progressById = LocalToolProgressById.current
+    if (progressById == null) {
+        fallback()
+        return
+    }
+    val progress by progressById.collectAsState()
+    val text = progress[toolId]
+    if (text.isNullOrEmpty()) {
+        fallback()
+    } else {
+        Text(
+            text = text,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+            maxLines = 1,
+            softWrap = false,
+            modifier = Modifier.padding(start = 6.dp),
+        )
+    }
+}
+
 internal data class ToolPillActions(
     val onRetry: (() -> Unit)? = null,
     val onStop: (() -> Unit)? = null,
@@ -890,8 +936,14 @@ internal fun ToolCallPill(
                     modifier = Modifier.weight(1f, fill = false),
                 )
                 if (isRunning) {
-                    // iOS streaming: "..." bouncing dots after title text
-                    StreamingDotsText()
+                    // iOS streaming: "..." bouncing dots after title text.
+                    // [render-churn-1] The progress badge (delay countdown)
+                    // takes precedence while present — it renders in its own
+                    // tiny scope so per-second ticks never recompose the
+                    // pill or the message row.
+                    ToolProgressBadge(toolId = block.id) {
+                        StreamingDotsText()
+                    }
                 }
             }
 

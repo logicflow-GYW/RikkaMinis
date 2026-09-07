@@ -538,6 +538,13 @@ internal suspend fun ChatViewModel.executeShellCommand(
                         }
                     }
                 },
+                // [render-churn-1] Progress (delay countdown) goes to the
+                // pill-only side channel, NEVER into message content: a
+                // per-second content rewrite invalidates the whole message
+                // item and re-layouts the full block (1Hz firstItem churn,
+                // 09-07 incident). The real streamed output keeps flowing
+                // through onBlockUpdate above — that IS content.
+                onProgressUpdate = { text -> publishToolProgress(toolId, text) },
             )
         } catch (e: CancellationException) {
             throw e
@@ -545,6 +552,11 @@ internal suspend fun ChatViewModel.executeShellCommand(
             return ToolExecutionResult("Error: ${e.message}", false)
         } finally {
             resetDisplayBuffer(toolId)
+            // [render-churn-1] Clear the pill progress badge on every exit
+            // path (success/error/cancel). Idempotent; the engine already
+            // cleared it after the countdown, this guards tool-body progress
+            // leftovers (e.g. a future call site publishing progress).
+            publishToolProgress(toolId, "")
         }
         return ToolExecutionResult(
             output = result.output,

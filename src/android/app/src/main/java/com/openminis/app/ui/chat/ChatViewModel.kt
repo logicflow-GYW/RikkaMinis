@@ -938,6 +938,26 @@ class ChatViewModel(
     private val _autoRetryCountdown = MutableStateFlow(0)
     val autoRetryCountdown: StateFlow<Int> = _autoRetryCountdown.asStateFlow()
 
+    // [render-churn-1] Second-scale tool progress (shell delay countdown),
+    // keyed by tool block id. This is the tool-pill-only side channel —
+    // intentionally separate from message content: per-second writes to
+    // message content invalidate the WHOLE message item (1Hz re-compose +
+    // re-layout of the full block — the 09-07 render-churn incident). The
+    // pill subscribes via LocalToolProgressById inside the running branch,
+    // so completed blocks never read this flow. Mirror of the retry
+    // countdown pattern above (AgentLoopHost.setAutoRetryCountdown).
+    private val _toolProgressById = MutableStateFlow<Map<String, String>>(emptyMap())
+    val toolProgressById: StateFlow<Map<String, String>> = _toolProgressById.asStateFlow()
+
+    /** Publish/clear a tool block's progress text. Empty text removes the entry. */
+    internal fun publishToolProgress(toolId: String, text: String) {
+        _toolProgressById.value = if (text.isEmpty()) {
+            _toolProgressById.value - toolId
+        } else {
+            _toolProgressById.value + (toolId to text)
+        }
+    }
+
     // [T-android-stale-streamjob-clears-isstreaming] @Volatile so cross-coroutine
     // reads (the orphaned previous streamJob's tail block running on a different
     // dispatcher) see the latest assignment. Without it, an old job's

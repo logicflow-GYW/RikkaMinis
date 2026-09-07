@@ -3339,6 +3339,13 @@ fun ChatScreen(
                 // auto-push while already sticky. (See AlwaysStretchOverscroll.kt.)
                 Box {
                 AlwaysStretchOverscrollBox { sharedEffect ->
+                // [render-churn-1] Tool-pill progress flow (LocalToolProgressById)
+                // provided ONCE with a stable reference — the flow instance
+                // never changes, so this provider never invalidates children.
+                // Pills read it inside their running branch only (see
+                // ToolProgressBadge), so per-second progress ticks recompose
+                // just the badge Text, never the LazyColumn rows.
+                CompositionLocalProvider(LocalToolProgressById provides viewModel.toolProgressById) {
                 // [forward-stable] Forward (non-reverse) list: content
                 // grows at the BOTTOM, so the viewport anchor naturally stays
                 // put during streaming — no reverseLayout index-0 insertion
@@ -3963,6 +3970,7 @@ fun ChatScreen(
                         Spacer(Modifier.height(5.dp))
                     }
                 }
+                } // CompositionLocalProvider (LocalToolProgressById)
                 } // AlwaysStretchOverscrollBox
                 // SelectionDragTracker bridges gesture-published dragIntent
                 // with listState scroll observation — that's what keeps the

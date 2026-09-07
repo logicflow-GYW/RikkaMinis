@@ -59,8 +59,15 @@ internal fun wrapForBash(script: String): String {
 /**
  * The shell_execute engine. See the file-level KDoc for the parameterization
  * contract. [onBlockUpdate] receives the raw display content the block
- * should show (countdown text, streamed + trimmed lines); the caller owns
- * mutating toolBlocks + repainting.
+ * should show (streamed + trimmed lines); the caller owns mutating
+ * toolBlocks + repainting.
+ *
+ * [onProgressUpdate] is a SEPARATE channel for second-scale progress
+ * (delay countdown). It must never be routed into the message content —
+ * per-second content rewrites invalidate the whole message item at LazyColumn
+ * granularity and re-layout the full block (the 09-07 render-churn incident:
+ * 1Hz firstItem re-compose + native-heap climb). Progress belongs to the
+ * tool pill, not the message body. Default no-op keeps legacy callers valid.
  */
 internal suspend fun executeShellCommandEngine(
     argsJson: String,
@@ -68,6 +75,7 @@ internal suspend fun executeShellCommandEngine(
     context: Context,
     toolKey: String,
     onBlockUpdate: (displayContent: String) -> Unit,
+    onProgressUpdate: (displayContent: String) -> Unit = {},
 ): ToolResultShell {
     val args = JSONObject(argsJson)
     var command = args.optString("command", "")
@@ -90,15 +98,19 @@ internal suspend fun executeShellCommandEngine(
 
     // Delay execution: block the agent flow without occupying the shell,
     // allowing other concurrent tasks to use it during the wait period.
+    // [render-churn-1] The countdown is PROGRESS, not content: it goes to
+    // the tool-pill channel ([onProgressUpdate]) so the message body never
+    // churns at 1Hz. The trailing onProgressUpdate("") clears the pill
+    // badge; the message block itself is never touched by the countdown.
     if (delaySec > 0) {
         for (remaining in delaySec downTo 1) {
             val mm = remaining / 60
             val ss = remaining % 60
             val countdown = if (mm > 0) String.format("%d:%02d", mm, ss) else "${ss}s"
-            onBlockUpdate("⏳ Waiting $countdown before executing...")
+            onProgressUpdate("⏳ Waiting $countdown before executing...")
             kotlinx.coroutines.delay(1000)
         }
-        onBlockUpdate("")
+        onProgressUpdate("")
     }
 
     // [T-bash-on-demand] Detect busybox-ash-incompatible bash syntax and,
