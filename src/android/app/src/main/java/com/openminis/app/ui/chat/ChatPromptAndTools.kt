@@ -710,32 +710,20 @@ internal fun ChatViewModel.updateAssistantMessage(
             unflushed >= ChatViewModel.NEWLINE_FLUSH_MIN_CHARS
 
         fun publish(text: String, blocks: List<AssistantBlock>, awaiting: Boolean) {
-            // [T-streamlining-thinking-fix] Monotonic terminal guard: a tool
-            // block published in a terminal state (SUCCESS/FAILED/TIMEOUT/
-            // CANCELLED) must never regress to an alive state (RUNNING/
-            // STREAMING/PENDING) in a later snapshot — otherwise the tool card
-            // can get stuck "being called" indefinitely. Reads prev blocks
-            // fresh from the side-channel (not the outer `prev`, which may be
-            // stale across trailing publishes).
-            val prevBlocks = _streamingById.value[id]?.toolBlocks
-            val guarded = ToolBlockMonotonicGuard.guard(prevBlocks, blocks)
-            guarded.regressions.forEach { r ->
-                AppLogger.warning(
-                    ChatViewModel.TAG,
-                    "ToolMonotonic block id=${r.blockId} regressed " +
-                        "${r.prevStatus} -> ${r.nextStatus} (messageId=$id); clamped",
-                )
+            // [render-churn-3] ON_STOP visibility gate: while the app is in
+            // the background, do NOT publish UI-only state — just record the
+            // freshest suppressed delta so ON_RESUME flushes once (see
+            // flushPendingStreamingOnResume). Content persistence is
+            // untouched (persistAssistantTurn runs engine-side); this only
+            // stops background recomposition churn (the 09-07 incident ran
+            // the 1Hz ticker for 3 minutes in background = pure waste).
+            if (!uiVisible.value) {
+                st.pendingContent = text
+                st.pendingBlocks = blocks
+                st.pendingAwaiting = awaiting
+                return
             }
-            _streamingById.value = _streamingById.value + (
-                id to StreamingDelta(
-                    content = text,
-                    toolBlocks = guarded.blocks,
-                    isAwaitingModelResponse = awaiting,
-                    epoch = streamEpoch,
-                )
-            )
-            st.lastFlushMs = System.currentTimeMillis()
-            st.lastFlushedLen = text.length
+            publishStreamingDelta(id, text, blocks, awaiting)
         }
 
         if (structuralChange || elapsed >= throttle || newlineFlush) {
@@ -820,6 +808,68 @@ internal fun ChatViewModel.updateAssistantMessage(
     _messages.value = updated
     if (_streamingById.value.containsKey(id)) {
         _streamingById.value = _streamingById.value - id
+    }
+}
+
+/**
+ * [render-churn-3] Core streaming-delta publisher, extracted from
+ * [updateAssistantMessage]'s local `publish` closure so the ON_RESUME flush
+ * path can share it. Applies the monotonic terminal guard (a terminal tool
+ * status must never regress to alive) and writes the side-channel entry,
+ * updating the message's flush accumulator. Callers decide gating: live
+ * ticks go through the visibility-gated closure in [updateAssistantMessage];
+ * the resume flush calls this directly (the app is visible again by
+ * definition).
+ */
+internal fun ChatViewModel.publishStreamingDelta(
+    id: String,
+    text: String,
+    blocks: List<AssistantBlock>,
+    awaiting: Boolean,
+) {
+    val st = streamFlushStates.getOrPut(id) {
+        ChatViewModel.StreamFlushState().also { it.lastFlushedLen = 0 }
+    }
+    // [T-streamlining-thinking-fix] Monotonic terminal guard: a tool block
+    // published in a terminal state (SUCCESS/FAILED/TIMEOUT/CANCELLED) must
+    // never regress to an alive state (RUNNING/STREAMING/PENDING) in a later
+    // snapshot — otherwise the tool card can get stuck "being called"
+    // indefinitely. Reads prev blocks fresh from the side-channel.
+    val prevBlocks = _streamingById.value[id]?.toolBlocks
+    val guarded = ToolBlockMonotonicGuard.guard(prevBlocks, blocks)
+    guarded.regressions.forEach { r ->
+        AppLogger.warning(
+            ChatViewModel.TAG,
+            "ToolMonotonic block id=${r.blockId} regressed " +
+                "${r.prevStatus} -> ${r.nextStatus} (messageId=$id); clamped",
+        )
+    }
+    _streamingById.value = _streamingById.value + (
+        id to StreamingDelta(
+            content = text,
+            toolBlocks = guarded.blocks,
+            isAwaitingModelResponse = awaiting,
+            epoch = streamEpoch,
+        )
+    )
+    st.lastFlushMs = System.currentTimeMillis()
+    st.lastFlushedLen = text.length
+}
+
+/**
+ * [render-churn-3] One-shot flush of every message's freshest suppressed
+ * delta after ON_RESUME. Only messages with a background-suppressed pending
+ * delta are touched; each publishes exactly once with the LATEST text/blocks
+ * (intermediate ticks are coalesced away — they were never visible anyway).
+ * The pending trailing job is cancelled to prevent a duplicate publish.
+ */
+internal fun ChatViewModel.flushPendingStreamingOnResume() {
+    for ((id, st) in streamFlushStates) {
+        val pc = st.pendingContent ?: continue
+        publishStreamingDelta(id, pc, st.pendingBlocks, st.pendingAwaiting)
+        st.pendingContent = null
+        st.trailingJob?.cancel()
+        st.trailingJob = null
     }
 }
 

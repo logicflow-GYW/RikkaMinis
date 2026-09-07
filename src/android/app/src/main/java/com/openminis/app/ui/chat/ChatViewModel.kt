@@ -958,6 +958,23 @@ class ChatViewModel(
         }
     }
 
+    // [render-churn-3] Chat-screen visibility (app foreground), driven by
+    // ProcessLifecycleOwner ON_STOP/ON_RESUME in ChatScreen. When false,
+    // UI-only state publication (streaming deltas) is suppressed — the
+    // engine keeps persisting content, but nothing recomposes in the
+    // background (the 09-07 incident ran the 1Hz ticker 3 minutes in
+    // background = pure waste). ON_RESUME flushes the freshest suppressed
+    // delta once. Defaults true (the screen is visible at creation).
+    private val _uiVisible = MutableStateFlow(true)
+    val uiVisible: StateFlow<Boolean> = _uiVisible.asStateFlow()
+
+    /** [render-churn-3] Set screen visibility; a transition back to visible flushes suppressed deltas. */
+    internal fun setUiVisible(visible: Boolean) {
+        if (_uiVisible.value == visible) return
+        _uiVisible.value = visible
+        if (visible) flushPendingStreamingOnResume()
+    }
+
     // [T-android-stale-streamjob-clears-isstreaming] @Volatile so cross-coroutine
     // reads (the orphaned previous streamJob's tail block running on a different
     // dispatcher) see the latest assignment. Without it, an old job's

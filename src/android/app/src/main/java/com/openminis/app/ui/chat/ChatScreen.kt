@@ -441,6 +441,30 @@ fun ChatScreen(
     // already used elsewhere in this file via `context`, but DisposableEffect
     // is a non-composable scope so we lift the read up here.
     val tHangDiagAppContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
+    // [render-churn-3] App-visibility gate for UI-only state publication.
+    // ON_STOP → viewModel suppresses streaming-delta publishes (no
+    // background recomposition churn); ON_RESUME → one-shot flush of the
+    // freshest suppressed delta. Content persistence is untouched — this
+    // only stops invisible UI churn (the 09-07 incident ran the 1Hz
+    // ticker 3 minutes in background = pure waste). ProcessLifecycleOwner
+    // (app-level, already a dependency via lifecycle-process) matches the
+    // "app in background" semantics; per-screen ON_STOP would fire on
+    // every navigation away from the chat.
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_STOP ->
+                    viewModel.setUiVisible(false)
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME ->
+                    viewModel.setUiVisible(true)
+                else -> {}
+            }
+        }
+        androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.addObserver(observer)
+        onDispose {
+            androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.removeObserver(observer)
+        }
+    }
     androidx.compose.runtime.DisposableEffect(sessionId) {
         ChatViewModelStore.setActiveSession(sessionId)
         // [T-HANG-DIAG] enter / dispose markers around the ChatScreen lifetime
