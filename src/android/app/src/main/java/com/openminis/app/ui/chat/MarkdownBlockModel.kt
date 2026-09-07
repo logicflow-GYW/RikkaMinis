@@ -226,8 +226,8 @@ private fun splitParagraphOnWideMath(text: String): List<MdBlock> {
     return result
 }
 
-private data class ListItem(val text: String, val children: List<MdBlock> = emptyList())
-private data class TaskItem(val checked: Boolean, val text: String)
+internal data class ListItem(val text: String, val children: List<MdBlock> = emptyList())
+internal data class TaskItem(val checked: Boolean, val text: String)
 
 // ─── Block parser ───────────────────────────────────────────────────────────
 

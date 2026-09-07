@@ -2948,7 +2948,7 @@ internal fun collectInlineMathLatex(text: String): List<String> {
  * never pair a stray `$` with the next dollar that arrives later, and
  * skip `\$` (escaped) and `$$` (which would be display math).
  */
-private fun findInlineMathClose(text: String, from: Int): Int {
+internal fun findInlineMathClose(text: String, from: Int): Int {
     var k = from
     while (k < text.length) {
         val c = text[k]
@@ -2971,7 +2971,7 @@ private fun findInlineMathClose(text: String, from: Int): Int {
  * superscript/subscript marker. iOS uses the same idea
  * (MinisMarkdownParser.looksLikeMath).
  */
-private fun looksLikeMath(latex: String): Boolean {
+internal fun looksLikeMath(latex: String): Boolean {
     if (latex.isBlank()) return false
     if (latex.contains('\\')) return true
     if (latex.contains('{') || latex.contains('}')) return true
