@@ -1054,10 +1054,16 @@ internal fun ToolCallRunGroup(
     // progress churn. Captured once: their semantics are identical across
     // ticks (they only touch the ViewModel / parent callbacks). onRetry /
     // onRerunFromHere stay dynamic — they genuinely depend on group state.
+    // onCopyDetails must ALSO stay dynamic: the call site gates it on
+    // !isStreaming, so freezing it here captures the null from the first
+    // composition (a tool-run group always first composes while streaming)
+    // and the Copy menu item never appears after the stream ends (T288
+    // regression). No perf is lost: while streaming it is a stable null
+    // (equals holds, pill skip unaffected) and the null -> non-null flip
+    // at turn end recomposes the pill exactly once.
     val stableOnStop = remember { onStop }
     val stableOnOpenDetail = remember { onOpenDetail }
     val stableOnOpenTerminal = remember { onOpenTerminalWithCommand }
-    val stableOnCopyDetails = remember { onCopyDetails }
     // [T-android-run-group-manual] The card is collapsed by default and
     // never auto-expands, not even while running — the header itself IS the
     // live status (spinner + "Running N tools" / "Thinking…"), so an
@@ -1195,7 +1201,7 @@ internal fun ToolCallRunGroup(
                         onOpenTerminalWithCommand = stableOnOpenTerminal,
                         onOpenDetail = stableOnOpenDetail,
                         onRerunFromHere = onRerunFromHere,
-                        onCopyDetails = stableOnCopyDetails,
+                        onCopyDetails = onCopyDetails,
                     )
                 }
             }
