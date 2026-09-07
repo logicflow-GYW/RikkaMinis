@@ -27,3 +27,10 @@ jobs:
         run: |
           python3 --version || (echo "::error::python3 is required for the scan gate" && exit 1)
           sh scripts/scan/scan.sh
+
+      # Scanner self-test — fixtures assert each scanner actually CATCHES the
+      # bug class it was built for. A silently-regressed scanner fails open;
+      # this step makes it fail loud before the (fast) gate looks green.
+      # ~5s: fixtures are tiny temp trees, plus one clean pass over this repo.
+      - name: Scan self-test (fixture ground truth)
+        run: python3 scripts/scan/test_scan.py

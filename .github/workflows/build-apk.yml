@@ -45,6 +45,10 @@ jobs:
         run: |
           python3 --version || (echo "::error::python3 is required for the scan gate" && exit 1)
           sh scripts/scan/scan.sh
+          # Scanner self-test — same fixture ground truth as scan-gate.yml:
+          # assert the scanners still catch what they claim to catch before
+          # this build stamps its artifacts green.
+          python3 scripts/scan/test_scan.py
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
