@@ -42,10 +42,10 @@ internal val SparkleColor2 = Color(0xFF99998C) // rgb(0.6, 0.6, 0.55)
 // document picker has no native cap — so we apply the same limit on both
 // sides and toast the user when their selection is trimmed. Mirrors iOS
 // PHPickerConfiguration.selectionLimit = 50.
-private const val ATTACHMENT_PICK_LIMIT = 50
+internal const val ATTACHMENT_PICK_LIMIT = 50
 // [forward-stable] Bottom sentinel row key — the single scroll target for
 // every "go to bottom" request in the forward (non-reverse) chat list.
-private const val ScrollBottomKey = "__scroll_bottom__"
+internal const val ScrollBottomKey = "__scroll_bottom__"
 
 /**
  * [T-android-send-no-autoscroll-behind-preview] Follow-grace window after a
@@ -77,7 +77,7 @@ internal val SLASH_PICKER_FIXED_HEIGHT: Dp = 176.dp
 // currently measured inside the viewport — the authoritative "user is at the
 // very bottom" signal for the follow state machine. The sentinel is a 5dp
 // spacer so it is only measurable at the true end of the transcript.
-private fun isBottomSentinelVisible(
+internal fun isBottomSentinelVisible(
     layoutInfo: androidx.compose.foundation.lazy.LazyListLayoutInfo,
 ): Boolean {
     val total = layoutInfo.totalItemsCount
@@ -140,7 +140,7 @@ internal fun Modifier.verticalScrollbar(
 // folded into [blockSig] (FNV-1a 64-bit hash) so a RUNNING→SUCCESS flip on a
 // tool block, a new block appearing (id flips), or a kind change all wake the
 // collector even when growth/size/awaiting alone would have stayed equal.
-private data class ScrollFollowKey(
+internal data class ScrollFollowKey(
     val lastIndex: Int,
     val growth: Long,
     val toolBlockCount: Int,
