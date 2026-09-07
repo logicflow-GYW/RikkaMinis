@@ -1104,6 +1104,14 @@ class BrowserUseManager(
     // -- Click --
 
     private suspend fun click(selector: String?, x: Int?, y: Int?): BrowserActionResult {
+        // Validate arguments BEFORE the file-input probe: with both null the
+        // probe JS would evaluate elementFromPoint(null, null) — JS coerces
+        // null to 0 — and silently probe the element at (0,0), which could
+        // mis-fire a real touch at the page's top-left corner instead of
+        // rejecting the malformed call like the JS path below does.
+        if (selector == null && (x == null || y == null)) {
+            return BrowserActionResult.error("click requires 'selector' or 'coordinate_x'/'coordinate_y'")
+        }
         // [fix/browser-filechooser-gesture] File inputs need a REAL touch:
         // Chromium only opens the page file chooser from a user-activated
         // gesture, and JS-dispatched events (our normal click path) carry
