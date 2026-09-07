@@ -85,7 +85,11 @@ internal suspend fun executeBrowserUseTool(
     tabPool: BrowserTabPool,
     /** [fix/browser-trio-audit] Owning chat session — injected (never parsed
      *  from the model's JSON) so file_upload resolves per-session
-     *  /var/minis/** paths via resolveSessionHostPath (T178 pattern). */
+     *  /var/minis/... paths via resolveSessionHostPath (T178 pattern).
+     *  Caution: never write a slash immediately followed by two glob stars
+     *  inside a Kotlin block comment — Kotlin comments nest, that sequence
+     *  opens a nested level the single trailing close marker cannot shut
+     *  (it broke kspReleaseKotlin on the first CI run of this change). */
     sessionId: String? = null,
     artifactWriter: (filename: String, data: ByteArray) -> String?,
     resizeJpeg: (ByteArray, Int) -> ByteArray?,
