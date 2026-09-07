@@ -233,6 +233,8 @@ token 只用于这些显式请求的鉴权。
 | **工作区** | 把工作组织到独立上下文中，通过 `minis://workspace/` 访问。工作区、附件、offload 与浏览器目录是**每会话私有**的（`minis-sessions/<sid>/`）；跨会话共享的只有 `shared/`、`memory/`、`skills/`、`mcp-servers/` 与挂载目录。 |
 | **原生卸载（offload）** | 繁重或平台特定的工作交给原生代码而非沙箱处理。 |
 
+**→ [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — 系统全貌与复杂度边界（哪些是继承的、哪些是本 fork 自写的）。
+
 **→ [OpenMinis/MinisSkills](https://github.com/OpenMinis/MinisSkills)** — 现成技能。
 为 Claude、Codex、OpenClaw 或 Hermes Agent 构建的技能通常可以直接在 Minis 中运行。
 

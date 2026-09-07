@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-06）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-07）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-09-06，共 35 天
-- 条目总数：794（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
-- 总字符数：917474 / 总行数：15219
+- 合并范围：2026-08-03 ～ 2026-09-07，共 36 天
+- 条目总数：802（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
+- 总字符数：926169 / 总行数：15338
 
 ---
 
@@ -15212,6 +15212,125 @@ main @ 1150e05f（tier-1 harness 四改动 + EOF 断流静默停修复，双分�
 - 用户拍板：本轮阶段性收尾。剩余=纯等待观察（network_error 修复真机验证、content_filter 自然复现、EOF 静默停观察）+ 纪律性搁置（Tier 2 ④ 等坑、codex recovery 臂留钩子）
 - 本日 main 推进：1150e05f（EOF）→ 82735b14（stream-error）→ f311aa99（content_filter fallback）→ 54a836ae（verification_stop + network_error 修复），四笔全部当日闭环
 - 验证提醒：装新包后 verification_stop 会让 agent 会话改代码收尾前多一轮验证 nudge（设计行为，用户已知）
+
+<!-- 2026-09-06 23:58:20 -->
+## dev-history 0906 同步 + 主号→小号全量同步（2026-09-06 深夜）
+
+
+**主号 main @ 7d928fa3**（docs(dev-history): sync archive to 2026-09-06, 794 entries / 35 days）：
+- 重建 35 天 794 条（was 34 天 763 条），fences=32 even / ts=794 / outOrder=0，净化 87+6 处替换全干净
+- **流程修正（重要教训）**：文档更新**不需要触发构建**——build-apk.yml push 有 paths 过滤（src/android/** src/shared/** deps/** workflow），docs/** 不触发。本次先误 dispatch 了分支 CI（run 34043330389）后取消，直接 ff 合并 main 推送，验证无新 run 触发。**以后纯文档改动：分支 → 合并 main → push 即可，不 dispatch CI**
+- 3 文件 +477/−7（README.md 统计 33天/758→35天/794 + 两个 md）
+
+**小号 rikkaflow main @ 151574d6**（merge: sync main 7d928fa3 09-06 full day into alt）：
+- 同步缺口 = 主号 6b95929..7d928fa3 全部 10 提交（09d39651 负载均衡、cd327953 stop 竞态、d7ee353e hermes harness、1150e05f EOF、e8500bb8/82735b14 stream-error、b8e8dda7/f311aa99 content_filter、54a836ae verification_stop、7d928fa3 文档）
+- 三路 merge（parents: 9047a8ef + 7d928fa3，merge-base 5ebff693）零冲突，38 文件 +2808/−80
+- **坑**：/tmp/rikka-git 的 alt remote 配置已丢失（上次会话残留），需 `git remote add alt https://github.com/rikkaflow/RikkaMinis.git` 重加
+- **坑（权限）**：gh_sync.sh push 到小号必须 `GITHUB_TOKEN="$GITHUB_TOKEN_FULL_RIGHT"` 前置覆盖，否则 permission denied（默认用主号 GITHUB_TOKEN）
+- push main 自动触发小号 CI run 34043648647（in_progress 未等完，用户拍板：过了单测即无问题）；远端 alt-sync-0906 分支已删，本地分支已删，alt remote 已移除
+
+## 2026-09-07
+
+<!-- 2026-09-07 01:31:09 -->
+## provider-exec-concurrency 分支（A+B 多会话并发）+ 突然停第4形态（预算墙）双修复
+
+
+**分支** feat/provider-exec-concurrency（未合并 main），三提交：
+1. 1e20e04b：预算墙修复 + slot 池初版 —— CI 34046756650 success
+2. 8eeaccba：队列可见性 + 毒化接线 —— CI 34047304149 **failure**（tryAcquire 编译错，审计提前抓到）
+3. 644a36df：JDK Semaphore 修复 —— CI 34048800545 in_progress（新会话开场先查 bridge /status/feat/provider-exec-concurrency，绿了走 ff 合并 main → release → 真机验证）
+
+**B（真并发）**：executionMutex → JDK Semaphore(2, fair)；TF-H generation 门控改"每个 finisher 终结自己 dir + 重评 reap"（并发下旧门控会泄漏 worker）；stale-key 从 killProcess 改毒化+延迟 drain reap；准入上界 MAX_QUEUED=6 超限发 typed transient 错误行。
+
+**A（队列可见）**：QueueStatus chunk（{"t":"queue","w":N}）→ 引擎 → host.onQueueStatus → _queueWaitingAhead StateFlow → TypingIndicator 显示"排队中—前面还有 N 个"（7 语言）；客户端硬墙扩到 60min（排队 30+生成 30）。
+
+**突然停第4形态（本次日志实锤）**：finishReason=null + 3 个 1ms 空回合 + 无 offload 派发 + `budget stop: t7BudgetStopReason`——**provider_attempt 64 次耗尽**（T7_OBSERVE_MAX_PROVIDER_ATTEMPTS=64），不是中转商。修复：①64→128（2× 实测峰值）②budget stop 走 finalizeBudgetStop（保留内容+人话横幅+可 Resume），不再是纯 logcat WARN 静默退出。
+
+**方法论沉淀（kotlinx 并发库陷阱）**：kotlinx.coroutines 1.9.0 Semaphore 的 withTimeoutOrNull+acquire 取消排队会**吃许可**（acquires==releases 恒等但池子丢 permit，200 轮探针复现 ~0.5-2%/超时，KTKU-354，1.10 修复）。需要 timed tryAcquire 时用 java.util.concurrent.Semaphore（2000 轮纯 Java 探针零丢失）。且 1.9.0 根本没有 tryAcquire(timeout) API——先探针再写码。
+
+<!-- 2026-09-07 01:54:02 -->
+## provider-exec-concurrency + 预算墙修复合并 main（2026-09-07 凌晨，main @ 303d375f）
+
+
+**全链路**：分支 feat/provider-exec-concurrency 四提交（1e20e04b 预算墙+slot池 → 8eeaccba 队列可见性 → 644a36df JDK Semaphore 修复 → 303d375f import/emit 修复）ff 合并 main，分支 CI 34049271823 success（head_sha 核对一致），本地+远端分支已删。**main release CI 34049962050 in_progress 未等**。
+
+**审计战果（用户让"再检查一遍"的直接产出）**：①kotlinx 1.9.0 无 tryAcquire(timeout) API（编译炸）②withTimeoutOrNull+acquire 取消排队吃许可（200 轮探针复现 acquires==releases 恒等但池丢 permit，~0.5-2%/超时；KTKU-354，1.10 修复）→ 换 java.util.concurrent.Semaphore(2, fair)，2000 轮纯 Java 探针零丢失 ③CI 又抓到两个沙箱闭包够不着的错：LLMStreamChunk import 缺失 + `?.let { chunk -> emit(it) }` 命名 lambda 里 it 不存在。**教训：沙箱 stub 编译闭包替代不了真 Gradle 编译 Service 子类文件——重文件最终裁决必须靠分支 CI，提前 dispatch 能省一轮**。
+
+**真机验证清单（装 android-latest 后）**：①多会话并发：一个会话长思考时另一会话应并行回答不再冻结；排队时打字指示器显示"排队中—前面还有 N 个" ②突然停第4形态：预算耗尽应显示"Run paused: ...provider-call limit"横幅 + 内容保留 + 可 Resume，不再静默停 ③正常聊天回归。
+
+**修复内容速记**：B=Mutex→JDK Semaphore(2,fair)+准入上界6+毒化拒绝+finisher 各自终结 dir 重评 reap；A=QueueStatus 帧（{"t":"queue","w":N}）全链路到 TypingIndicator（7语言）+客户端硬墙 30→60min；预算墙=64→128+finalizeBudgetStop（人话横幅+Resume）。JVM 13/13 绿（QueueFrameCodec 5 + ProviderExecConcurrency 5 + BudgetStopFix 3）。
+
+<!-- 2026-09-07 02:07:02 -->
+## provider-exec-concurrency 全链路闭环（2026-09-07 凌晨收尾确认）
+
+
+**release CI 34049962050 success @ 303d375f（18:06 完成），android-latest APK（RikkaMinis-arm64-v8a.apk 13MB，18:05:58 更新）已就绪**。至此代码→分支 CI→合并 main→release CI→资产发布全链路闭环。
+
+**仅剩：用户真机验证**（装 android-latest 后三观察点）：①多会话并发——一个会话长思考时另一会话应并行回答不再冻结；排队时打字指示器显示"排队中—前面还有 N 个" ②"突然停"应显示 Run paused 横幅+保留内容+可 Resume（第4形态=provider_attempt 预算墙已修：64→128 + finalizeBudgetStop）③正常聊天回归。
+
+若①②仍复现旧症状 → 抓 logcat（采集器 /sdcard/Download/minis-stream-watch.log 可能还在跑，被冲掉就重启采集）再分析。
+
+本轮交付主线回顾：多会话伪并发确诊（executionMutex 全局串行）→ A+B 一起做 → 中途插入"突然停"第4形态日志分析（预算墙，非中转商）→ 自我审计抓 3 个真 bug（kotlinx 1.9.0 无 timed tryAcquire / withTimeoutOrNull+acquire 吃许可换 JDK Semaphore / import+emit(it)）→ 四提交合并。
+
+<!-- 2026-09-07 02:10:03 -->
+## 用户真机验证通过：多会话真并发（2026-09-07）
+
+
+**用户亲测确认**：装 android-latest（main @ 303d375f）后 2~3 个会话同时进行，**真并发生效，无冻结**——provider-exec-concurrency 分支的核心目标（B：executionMutex→Semaphore(2)）闭环 ✅。
+
+剩余观察点（无需专门测试，日常使用自然覆盖）：
+- 排队时打字指示器"排队中—前面还有 N 个"（A：QueueStatus 帧）——需 >2 个并发流才触发，机会性观察
+- "突然停"第 4 形态（预算墙）：应显示 Run paused 横幅+保留内容+可 Resume——低频，等自然复现
+- 正常聊天回归（长会话、工具密集型会话）
+
+至此"多会话伪并发"问题从用户观察 → 源码确诊 → 修复 → CI → 发布 → **用户验证**全链路闭环。
+
+<!-- 2026-09-07 02:38:15 -->
+## fix/budget-banner-number 交接（2026-09-07，交给下一会话收尾）
+
+
+**背景**：用户真机撞到 provider-attempt 预算墙，横幅正确显示但数字是错的——写死 "64 calls"，实际预算已提为 128（同一次提交改了预算忘了改文案，出生即漂移）。
+
+**分支 fix/budget-banner-number @ 615d0545**（基于 main 303d375f）：
+- ChatTurnPersistence.kt：横幅文案 `($PROVIDER_ATTEMPT_LIMIT_FOR_BANNER calls)`，该 val 直接引用 ChatAgentTraceObserver.T7_OBSERVE_MAX_PROVIDER_ATTEMPTS（永不再漂移）
+- ChatAgentTraceObserver.kt：注释补充"用户实测 128 也撞墙属预期——墙是失控循环护栏不是任务长度护栏，Resume 保证无损分节"
+- 已推送远端 + 已 dispatch CI；**轮询被打断，run 结果未知**（新会话开场先查 bridge /status/fix/budget-banner-number，或 API 查 runs?branch=fix/budget-banner-number）
+- CI 绿后：head_sha 核对 → ff 合并 main → push 触发 release → 删本地+远端分支
+- 预算值 128 保持不动（用户问"64 会不会太小"——答：已是 128，撞墙属预期极端场景，靠 Resume 续跑，不无限抬防失控烧 token）
+
+**用户已验证的多会话真并发观察点已闭环**（2-3 会话并行 ✅）；排队提示和 Run paused 横幅本次都被自然验证（横幅显示=预算墙修复生效，数字错误=本分支修）。
+
+JVM：BudgetStopFixTest 3/3 绿，括号配平过。
+
+<!-- 2026-09-07 03:35:00 -->
+## 两日改动审计闭环（2026-09-07 凌晨，main @ 2c32d726）
+
+
+**范围**：09-06/09-07 共 13 提交 47 文件 +3521/−131（并发/流恢复/content-filter/验证守卫/hermes guards/负载均衡/claim epoch/worker 规则）逐行审计。
+
+**实锤 3 个 bug 全部修复合并**（审计报告 /var/minis/workspace/audit/REPORT.md）：
+- **B1 HIGH**：error-shaped 空回合 one-shot retry 不删刚 append 的空 assistant 消息 → retry 带着 [.., ASSISTANT("")] 尾巴重发，中转商容易继续吐空（空回合串联放大器）。补 removeAt 对齐 EOF 空 retry。
+- **B2 HIGH**：_queueWaitingAhead 只在 sendMessage finally 复位；retryLast/resume/runRerunStreamTail/resumeQueueAfterCancel 四入口泄漏 → 下次 TypingIndicator 假显示"排队中—前面还有 N 个"。收口 internal resetQueueWaitingAhead()。
+- **B5 MEDIUM**：6 个失败终态分支（error-shaped ceiling/deterministic-empty/repetition-abort/length-wall ceiling/length×3/EOF ceiling）setInlineError 后 fall-through，loopExitedNormally=false → 退出侧误判 MAX_AGENT_TURNS runaway，finalizeAtTurnLimit 用"Stopped after 200 turns"横幅覆盖已显示的具体错误。加 AgentLoopState.terminalErrorSurfaced 标志，门控退出判定 + t7EndRun error 标签（terminal_error_surfaced）。
+- B3（横幅硬编码 64）由并行会话分支 fix/budget-banner-number 修（横幅读 PROVIDER_ATTEMPT_LIMIT_FOR_BANNER 常量），本次协调不重复修。
+
+**坑（复用）**：
+1. **多会话并行防踩**：审计中途发现另一会话已在我要修的文件上开了分支（fix/budget-banner-number，正在跑 CI）——开工前先 `git fetch '+refs/heads/*:refs/remotes/origin/*'` 查全部远端分支，冲突面要重新对齐；合并顺序按 CI 完成先后，后者 rebase。
+2. **sed 全局替换的自伤**：`sed -i 's/_queueWaitingAhead.value = -1/resetQueueWaitingAhead()/g'` 把刚写的方法体内部也替换成自递归——替换后必须 grep 全部写点人工核对（本次 grep 发现 747 行自递归立即修掉）。
+3. **private 字段 + 扩展文件**：ChatViewModel 的 private _queueWaitingAhead 在扩展文件（ChatQueueInterruption/ChatTurnPersistence）不可见——CI 编译红抓的。跨文件复位收口成 internal 方法（只能 reset 不能 set）。
+4. **括号配平假阳性**：ChatViewModel 字符串/注释里有 5 个不平衡 ')'——剥离注释+字符串后再计数才准（code-only 964/964 平衡）。
+
+**验证链**：TerminalErrorSurfacedTest 4/4 绿（真值表锁）+ AgentLoopState 闭包编译绿 + 分支 CI 首跑红（B2 可见性）→ 修复 → run 34053791071 success（head 2915b487 双核对）→ rebase 上 budget-banner → ff 合并 main 2c32d726 → release CI 34054645249 success → android-latest APK 19:33:52 更新。本地+远端两分支已删。
+
+**审计中核实非 bug 的（防复发）**：JDK Semaphore tryAcquire 配对闭合；finishRequestLocked generation gate 移除无 TOCTOU；毒化 worker 协议闭环；stream-error kind 全链路；i18n 三键 7+1 全覆盖；lastEditSeq/lastVerifySeq 只写不读（死字段无害，留作未来验证新鲜度判定）；systemPromptForSession 两锚点覆盖；streamingClaimEpoch 7 入口全门控。
+
+**遗留（用户真机验证清单）**：①正常聊天回归 ②错误横幅不再被"Stopped after 200 turns"覆盖（触发任一错误路径：断流/内容过滤/重复中止后看横幅文案对不对）③排队指示器只在真排队时出现。
+
+<!-- 2026-09-07 08:15:57 -->
+## RikkaMinis 全貌梳理请求（2026-09-07）
+
+用户要求总结 RikkaMinis 应用全貌。素材来源：/tmp/rikka-git 源码（main @ 2c32d726，浅克隆约 40 提交，完整历史在记忆 + docs/dev-history 794 条档案）+ README.md + docs/DESIGN_PHILOSOPHY.md + docs/DEVELOPMENT_LIFECYCLE.md。
+关键结构数据：487 个 kt 文件/166K 行；三进程（app 主进程 + :modelservice + :toolservice）；Room DB version 12（ProviderDatabase 独立 10、AppDatabase 12）；语言 7+1（en/zh/zh-rTW/de/ja/ko/ru + values）；24 个 NativeOffloadHandler 实现。
 
 ---
 

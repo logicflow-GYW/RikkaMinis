@@ -1,6 +1,6 @@
 # rikkaminis-dev-history 按天索引
 
-快速跳转到每日开发日志。共 794 条记录，35 天。
+快速跳转到每日开发日志。共 802 条记录，36 天。
 
 ## 2026-08-03（11 条）
 
@@ -1635,7 +1635,7 @@
 - `22:11` **rootfs-event-log 真机验证确认（2026-09-05 用户补记）**
   - 用户确认 main @ 5ebff693（rootfs 事件日志）真机早已测试通过：装新 APK 后手动 reset，沙箱 `cat /var/minis/lo…
 
-## 2026-09-06（26 条）
+## 2026-09-06（27 条）
 
 - `09:51` **MCP 记忆增强盘点结论 + server-memory 配置完成（2026-09-06）**
   - 用户问三个主流记忆 MCP 哪个能用上。盘点结论：
@@ -1689,3 +1689,22 @@
   - - 分支 feat/verification-stop 单提交 54a836ae ff 合并 main；分支 CI 34041687429 success（he…
 - `23:34` **收尾交接（2026-09-06 深夜）**
   - - 交接文档 /var/minis/shared/tier2-closeout-handoff.md（突然停三形态闭环总表 + Tier 2 最终状态 + ba…
+- `23:58` **dev-history 0906 同步 + 主号→小号全量同步（2026-09-06 深夜）**
+  - **主号 main @ 7d928fa3**（docs(dev-history): sync archive to 2026-09-06, 794 entrie…
+
+## 2026-09-07（7 条）
+
+- `01:31` **provider-exec-concurrency 分支（A+B 多会话并发）+ 突然停第4形态（预算墙）双修复**
+  - **分支** feat/provider-exec-concurrency（未合并 main），三提交：
+- `01:54` **provider-exec-concurrency + 预算墙修复合并 main（2026-09-07 凌晨，main @ 303d375f）**
+  - **全链路**：分支 feat/provider-exec-concurrency 四提交（1e20e04b 预算墙+slot池 → 8eeaccba 队列可见…
+- `02:07` **provider-exec-concurrency 全链路闭环（2026-09-07 凌晨收尾确认）**
+  - **release CI 34049962050 success @ 303d375f（18:06 完成），android-latest APK（RikkaMi…
+- `02:10` **用户真机验证通过：多会话真并发（2026-09-07）**
+  - **用户亲测确认**：装 android-latest（main @ 303d375f）后 2~3 个会话同时进行，**真并发生效，无冻结**——provide…
+- `02:38` **fix/budget-banner-number 交接（2026-09-07，交给下一会话收尾）**
+  - **背景**：用户真机撞到 provider-attempt 预算墙，横幅正确显示但数字是错的——写死 "64 calls"，实际预算已提为 128（同一次提交…
+- `03:35` **两日改动审计闭环（2026-09-07 凌晨，main @ 2c32d726）**
+  - **范围**：09-06/09-07 共 13 提交 47 文件 +3521/−131（并发/流恢复/content-filter/验证守卫/hermes gu…
+- `08:15` **RikkaMinis 全貌梳理请求（2026-09-07）**
+  - 用户要求总结 RikkaMinis 应用全貌。素材来源：/tmp/rikka-git 源码（main @ 2c32d726，浅克隆约 40 提交，完整历史在记忆…
