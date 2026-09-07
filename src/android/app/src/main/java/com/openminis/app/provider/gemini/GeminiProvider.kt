@@ -49,7 +49,7 @@ class GeminiProvider(
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(FirstChunkTimeoutPolicy.GENERATION_TIMEOUT_SEC.toLong(), TimeUnit.SECONDS)
+        .readTimeout(FirstChunkTimeoutPolicy.decideGenerationTimeoutSec(null).toLong(), TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         // [T-android-stale-conn-retry-hang] Shared pool — see NetworkMonitor.
         // Network-transition eviction must reach provider connections.

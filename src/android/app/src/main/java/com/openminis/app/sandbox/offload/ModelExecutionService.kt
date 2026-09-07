@@ -131,7 +131,10 @@ class ModelExecutionService : Service() {
          * here because the request thread is dedicated to this run).
          */
         private val executionSlots = java.util.concurrent.Semaphore(
-            ProviderExecSlotPolicy.MAX_CONCURRENT_PROVIDER_RUNS,
+            // [feat/runtime-limits-panel] pool sized from the user-tunable
+            // slot count (default 2). Companion init runs at worker process
+            // spawn, so a change applies to the NEXT worker process.
+            ProviderExecSlotPolicy.liveProviderSlots(),
             true, // fairness: FIFO waiters — queue position is honest
         )
 
@@ -214,7 +217,9 @@ class ModelExecutionService : Service() {
             queuedRequests.get()
         }
         val poisoned = keyCachePoisoned
-        if (queuedNow >= ProviderExecSlotPolicy.MAX_QUEUED_REQUESTS || poisoned) {
+        // [feat/runtime-limits-panel] 准入上限读 prefs 真值（每请求读，改完对
+        // 存活 worker 立即生效——比槽位数更轻量，不需要换进程）。
+        if (queuedNow >= ProviderExecSlotPolicy.liveQueueAdmission() || poisoned) {
             val why = if (poisoned) "stale key cache (poisoned worker)" else "worker queue full (queued=$queuedNow)"
             Log.w(TAG, "rejecting runId=$runId: $why")
             try {

@@ -64,10 +64,16 @@ package com.openminis.app.sandbox.offload
  */
 object FirstChunkTimeoutPolicy {
 
-    /** Default budget for direct public endpoints (seconds). */
+    /** Default budget for direct public endpoints (seconds).
+     *  [feat/runtime-limits-panel] runtime truth is
+     *  AgentRuntimeLimitsPrefs.firstChunkDirectSec() (default 30 == this);
+     *  no production caller today (route-aware split is deprecated). */
     const val DIRECT_TIMEOUT_SEC = 30
 
-    /** Budget for proxy/gateway routes (seconds). */
+    /** Budget for proxy/gateway routes (seconds).
+     *  [feat/runtime-limits-panel] runtime truth is
+     *  AgentRuntimeLimitsPrefs.firstChunkProxySec() (default 45 == this);
+     *  no production caller today (route-aware split is deprecated). */
     const val PROXY_TIMEOUT_SEC = 45
 
     /**
@@ -90,6 +96,8 @@ object FirstChunkTimeoutPolicy {
      * the primary liveness signal.
      */
     const val GENERATION_TIMEOUT_SEC = 30 * 60
+    // [feat/runtime-limits-panel] This const stays as the DOCUMENTED DEFAULT
+    // (30 min). The runtime truth is prefs-backed — see decideGenerationTimeoutSec.
 
     /**
      * Historical alias kept for callers that referenced the thinking-scoped
@@ -152,7 +160,11 @@ object FirstChunkTimeoutPolicy {
      * requirement should use [decideTimeoutSec] instead.
      */
     fun decideGenerationTimeoutSec(@Suppress("UNUSED_PARAMETER") customBaseURL: String?): Int =
-        GENERATION_TIMEOUT_SEC
+        // [feat/runtime-limits-panel] 生成硬墙改读 prefs 真值（默认 30 min）。
+        // OkHttp readTimeout（Anthropic/Gemini/OpenAI 三 provider 的
+        // GENERATION_TIMEOUT_SEC 引用）每请求构建 client 时读取，改动对新请求
+        // 生效；worker 客户端硬墙（ChatStreamOffloadHandler）同此语义。
+        com.openminis.app.data.AgentRuntimeLimitsPrefs.generationTimeoutMinutes() * 60
 
     /**
      * Decide a strict route-aware first-chunk budget for a call that is NOT a
@@ -167,6 +179,14 @@ object FirstChunkTimeoutPolicy {
      */
     @Deprecated("Use decideGenerationTimeoutSec for generation streams", level = DeprecationLevel.WARNING)
     fun decideTimeoutSec(customBaseURL: String?, thinkingEnabled: Boolean = false): Int =
-        if (thinkingEnabled) GENERATION_TIMEOUT_SEC
-        else if (isProxyRoute(customBaseURL)) PROXY_TIMEOUT_SEC else DIRECT_TIMEOUT_SEC
+        if (thinkingEnabled) decideGenerationTimeoutSec(customBaseURL)
+        else if (isProxyRoute(customBaseURL)) liveProxyTimeoutSec() else liveDirectTimeoutSec()
+
+    /** [feat/runtime-limits-panel] Live route-aware budgets (defaults 30s/45s). */
+    fun liveProxyTimeoutSec(): Int =
+        com.openminis.app.data.AgentRuntimeLimitsPrefs.firstChunkProxySec()
+
+    /** [feat/runtime-limits-panel] Live route-aware budgets (defaults 30s/45s). */
+    fun liveDirectTimeoutSec(): Int =
+        com.openminis.app.data.AgentRuntimeLimitsPrefs.firstChunkDirectSec()
 }

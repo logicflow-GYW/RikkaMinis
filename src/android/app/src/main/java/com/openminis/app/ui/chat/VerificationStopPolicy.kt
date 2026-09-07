@@ -52,7 +52,10 @@ object VerificationStopPolicy {
     private val INTERPRETERS = setOf("python", "python3", "node", "bash", "sh", "ruby", "perl")
 
     /** Max attempts the engine will nudge — beyond this the model has been
-     *  told twice and insisting would loop. Hermes default = 2. */
+     *  told twice and insisting would loop. Hermes default = 2.
+     *  [feat/runtime-limits-panel] runtime truth is
+     *  AgentRuntimeLimitsPrefs.verifyNudges() (default 2 == this); const kept
+     *  as the documented default (JVM tests of this pure policy keep it). */
     const val MAX_VERIFY_NUDGES = 2
 
     /** Max changed paths listed in the nudge text. */
@@ -160,7 +163,10 @@ object VerificationStopPolicy {
     ): String? {
         val codePaths = changedPaths.filter { !isNonCodePath(it) }.distinct().sorted()
         if (codePaths.isEmpty()) return null
-        if (attempts >= MAX_VERIFY_NUDGES) return null
+        // [feat/runtime-limits-panel] 上限改读 prefs（默认 2）。注意：这是纯 JVM
+        // policy 文件，AgentRuntimeLimitsPrefs 未 prime 时读数即默认值，纯函数
+        // 测试的行为不变。
+        if (attempts >= com.openminis.app.data.AgentRuntimeLimitsPrefs.verifyNudges()) return null
 
         val pathsList = codePaths.take(MAX_PATHS_IN_NUDGE).joinToString("\n") { "- $it" } +
             (if (codePaths.size > MAX_PATHS_IN_NUDGE) "\n- ... and ${codePaths.size - MAX_PATHS_IN_NUDGE} more" else "")

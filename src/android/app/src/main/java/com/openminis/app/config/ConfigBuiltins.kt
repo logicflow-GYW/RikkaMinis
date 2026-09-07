@@ -133,6 +133,135 @@ internal object ConfigBuiltins {
                 defaultValue = false,
             )
         )
+
+        // [feat/runtime-limits-panel] Agent runtime limits — every knob that
+        // Settings → Agent Runtime → Runtime Limits exposes, registered so
+        // minis-config can read/write them and the in-app backup carries
+        // them (same fold-in rationale as maxConcurrentSessions above).
+        val limits = context.getSharedPreferences(
+            com.openminis.app.data.AgentRuntimeLimitsPrefs.PREFS,
+            Context.MODE_PRIVATE,
+        )
+        val L = com.openminis.app.data.AgentRuntimeLimitsPrefs
+        r.register(PrefsIntField(
+            path = "runtime.maxTurns",
+            displayName = "Agent loop turn limit",
+            description = "Hard cap on agent-loop turns per run. Hitting it pauses the run (resumable) with a runaway-tool banner. Default 200. Applies to the next message (a run keeps the budget it started with).",
+            prefs = limits, key = L.KEY_MAX_TURNS,
+            defaultValue = L.TURNS_DEFAULT, minValue = L.TURNS_MIN, maxValue = L.TURNS_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.maxProviderAttempts",
+            displayName = "Provider call budget",
+            description = "Max provider calls (incl. retries/fallback) per run. Hitting it pauses the run (resumable). Default 128 (= 2x the observed 64-attempt field peak). Raising it loosens the runaway-loop guard — a stuck loop burns more tokens before being stopped.",
+            prefs = limits, key = L.KEY_MAX_PROVIDER_ATTEMPTS,
+            defaultValue = L.PROVIDER_ATTEMPTS_DEFAULT, minValue = L.PROVIDER_ATTEMPTS_MIN, maxValue = L.PROVIDER_ATTEMPTS_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.maxToolCalls",
+            displayName = "Tool call budget",
+            description = "Max tool calls per agent run. Hitting it pauses the run (resumable). Default 128. Same runaway-guard trade-off as the provider budget.",
+            prefs = limits, key = L.KEY_MAX_TOOL_CALLS,
+            defaultValue = L.TOOL_CALLS_DEFAULT, minValue = L.TOOL_CALLS_MIN, maxValue = L.TOOL_CALLS_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.maxShellCommands",
+            displayName = "Shell command budget",
+            description = "Max sandbox shell commands per agent run. Hitting it pauses the run (resumable). Default 128.",
+            prefs = limits, key = L.KEY_MAX_SHELL_COMMANDS,
+            defaultValue = L.SHELL_COMMANDS_DEFAULT, minValue = L.SHELL_COMMANDS_MIN, maxValue = L.SHELL_COMMANDS_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.maxCompactionCalls",
+            displayName = "Context compaction budget",
+            description = "Max context-compaction calls per run. Default 8. Lowering it makes long sessions hit the context window sooner (compaction is what keeps them running).",
+            prefs = limits, key = L.KEY_MAX_COMPACTION_CALLS,
+            defaultValue = L.COMPACTION_CALLS_DEFAULT, minValue = L.COMPACTION_CALLS_MIN, maxValue = L.COMPACTION_CALLS_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.maxConcurrentTools",
+            displayName = "Concurrent tool limit",
+            description = "Max tools executing at once inside one turn. Default 4. Raising it increases peak sandbox load (memory/CPU on-device).",
+            prefs = limits, key = L.KEY_MAX_CONCURRENT_TOOLS,
+            defaultValue = L.CONCURRENT_TOOLS_DEFAULT, minValue = L.CONCURRENT_TOOLS_MIN, maxValue = L.CONCURRENT_TOOLS_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.runDeadlineMinutes",
+            displayName = "Run time limit (minutes)",
+            description = "Wall-clock ceiling per agent run. Hitting it pauses the run (resumable). Default 60 min. Lowering it can cut off legitimately long builds/generations — the deadline is a backstop, not a progress signal.",
+            prefs = limits, key = L.KEY_RUN_DEADLINE_MIN,
+            defaultValue = L.DEADLINE_DEFAULT_MIN, minValue = L.DEADLINE_MIN_MIN, maxValue = L.DEADLINE_MAX_MIN,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.lengthWallContinues",
+            displayName = "Length-truncation continuations",
+            description = "Max continuation rounds after a finish_reason=length truncation. Default 4. 0 disables continuation (truncated replies end immediately with a truncation error).",
+            prefs = limits, key = L.KEY_LENGTH_WALL_CONTINUES,
+            defaultValue = L.LENGTH_WALL_DEFAULT, minValue = L.LENGTH_WALL_MIN, maxValue = L.LENGTH_WALL_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.eofStubContinues",
+            displayName = "EOF/stream-drop continuations",
+            description = "Max continuation rounds after an EOF-truncated or error-shaped stream (partial text is kept, a network-stub reminder asks the model to continue). Default 2.",
+            prefs = limits, key = L.KEY_EOF_STUB_CONTINUES,
+            defaultValue = L.EOF_STUB_DEFAULT, minValue = L.EOF_STUB_MIN, maxValue = L.EOF_STUB_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.deterministicEmptyLimit",
+            displayName = "Deterministic-empty fast-exit",
+            description = "Consecutive provably-empty completions (usage reports 0 output tokens) before the loop stops re-billing. Default 2.",
+            prefs = limits, key = L.KEY_DETERMINISTIC_EMPTY_LIMIT,
+            defaultValue = L.DET_EMPTY_DEFAULT, minValue = L.DET_EMPTY_MIN, maxValue = L.DET_EMPTY_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.transientRetries",
+            displayName = "Transient error retries",
+            description = "Auto-retry attempts for transient network errors (backoff 1/2/4/8/16s). Default 3. 0 disables auto-retry — transient errors surface immediately.",
+            prefs = limits, key = L.KEY_TRANSIENT_RETRIES,
+            defaultValue = L.TRANSIENT_RETRIES_DEFAULT, minValue = L.TRANSIENT_RETRIES_MIN, maxValue = L.TRANSIENT_RETRIES_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.verifyNudges",
+            displayName = "Verification nudges",
+            description = "Max turn-end nudges reminding the agent to verify code edits before finishing. Default 2. 0 disables the guard entirely (unverified edits close silently).",
+            prefs = limits, key = L.KEY_VERIFY_NUDGES,
+            defaultValue = L.VERIFY_NUDGES_DEFAULT, minValue = L.VERIFY_NUDGES_MIN, maxValue = L.VERIFY_NUDGES_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.generationTimeoutMinutes",
+            displayName = "Generation hard wall (minutes)",
+            description = "Absolute ceiling for one model generation stream (idle-read backstop). Default 30 min. LOWERING it risks killing healthy slow generations (long thinking / big deliverables are silent for minutes); raising it lets a wedged stream hold a worker longer.",
+            prefs = limits, key = L.KEY_GENERATION_TIMEOUT_MIN,
+            defaultValue = L.GENERATION_TIMEOUT_DEFAULT_MIN, minValue = L.GENERATION_TIMEOUT_MIN_MIN, maxValue = L.GENERATION_TIMEOUT_MAX_MIN,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.firstChunkDirectSec",
+            displayName = "First-chunk timeout, direct (seconds)",
+            description = "Route-aware first-chunk budget for DIRECT endpoints (rare; the generation stream path uses the uniform hard wall). Default 30s.",
+            prefs = limits, key = L.KEY_FIRST_CHUNK_DIRECT_SEC,
+            defaultValue = L.FIRST_CHUNK_DIRECT_DEFAULT_SEC, minValue = L.FIRST_CHUNK_DIRECT_MIN_SEC, maxValue = L.FIRST_CHUNK_DIRECT_MAX_SEC,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.firstChunkProxySec",
+            displayName = "First-chunk timeout, proxy (seconds)",
+            description = "Route-aware first-chunk budget for PROXY/gateway routes (rare; the generation stream path uses the uniform hard wall). Default 45s.",
+            prefs = limits, key = L.KEY_FIRST_CHUNK_PROXY_SEC,
+            defaultValue = L.FIRST_CHUNK_PROXY_DEFAULT_SEC, minValue = L.FIRST_CHUNK_PROXY_MIN_SEC, maxValue = L.FIRST_CHUNK_PROXY_MAX_SEC,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.providerSlots",
+            displayName = "Provider worker slots",
+            description = "Max provider calls executing concurrently in one model-service worker process. Default 2. RAISING IT IS MEMORY-RISKY: concurrent streams multiply the worker's native-heap peak (SSE buffers, DirectByteBuffer) — sized by measurement, not optimism. Applies when the next worker process spawns.",
+            prefs = limits, key = L.KEY_PROVIDER_SLOTS,
+            defaultValue = L.PROVIDER_SLOTS_DEFAULT, minValue = L.PROVIDER_SLOTS_MIN, maxValue = L.PROVIDER_SLOTS_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.queueAdmission",
+            displayName = "Worker queue admission bound",
+            description = "Max slot-waiting requests before a new dispatch is rejected with a transient error (auto re-dispatched onto a fresher worker). Default 6.",
+            prefs = limits, key = L.KEY_QUEUE_ADMISSION,
+            defaultValue = L.QUEUE_ADMISSION_DEFAULT, minValue = L.QUEUE_ADMISSION_MIN, maxValue = L.QUEUE_ADMISSION_MAX,
+        ))
     }
 
     // -- Master switch surface (read-only via the registry; UI toggles it) --

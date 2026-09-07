@@ -196,12 +196,26 @@ internal class ChatAgentTraceObserver(
     }
 
     internal fun t7Remaining(dimension: String, snap: BudgetSnapshot): Int = when (dimension) {
-        AgentTraceRecorder.DIMENSION_TURNS -> snap.turnsUsed.let { T7_OBSERVE_MAX_TURNS - it }
-        AgentTraceRecorder.DIMENSION_PROVIDER_ATTEMPTS -> T7_OBSERVE_MAX_PROVIDER_ATTEMPTS - snap.providerAttemptsUsed
-        AgentTraceRecorder.DIMENSION_TOOL_CALLS -> T7_OBSERVE_MAX_TOOL_CALLS - snap.toolCallsUsed
-        AgentTraceRecorder.DIMENSION_SHELL_COMMANDS -> T7_OBSERVE_MAX_SHELL_COMMANDS - snap.shellCommandsUsed
-        AgentTraceRecorder.DIMENSION_COMPACTION_CALLS -> T7_OBSERVE_MAX_COMPACTION_CALLS - snap.compactionCallsUsed
-        AgentTraceRecorder.DIMENSION_CONCURRENT_TOOLS -> T7_OBSERVE_MAX_CONCURRENT_TOOLS - snap.concurrentToolsActive
+        // [feat/runtime-limits-panel] 剩余量改从快照的真上限推导，不再减硬编码
+        // 常量——预算上限可被用户调节后，T7_*_DEFAULT 会与真值漂移，旧算法会
+        // 报出负数/错位的 remaining。t7Total(budget) 持有真上限，这里对齐。
+        AgentTraceRecorder.DIMENSION_TURNS -> snap.turnsUsed.let { t7TotalOf(dimension) - it }
+        AgentTraceRecorder.DIMENSION_PROVIDER_ATTEMPTS -> t7TotalOf(dimension) - snap.providerAttemptsUsed
+        AgentTraceRecorder.DIMENSION_TOOL_CALLS -> t7TotalOf(dimension) - snap.toolCallsUsed
+        AgentTraceRecorder.DIMENSION_SHELL_COMMANDS -> t7TotalOf(dimension) - snap.shellCommandsUsed
+        AgentTraceRecorder.DIMENSION_COMPACTION_CALLS -> t7TotalOf(dimension) - snap.compactionCallsUsed
+        AgentTraceRecorder.DIMENSION_CONCURRENT_TOOLS -> t7TotalOf(dimension) - snap.concurrentToolsActive
+        else -> 0
+    }
+
+    /** [feat/runtime-limits-panel] 当前生效的维度上限（prefs 真值）。 */
+    private fun t7TotalOf(dimension: String): Int = when (dimension) {
+        AgentTraceRecorder.DIMENSION_TURNS -> com.openminis.app.data.AgentRuntimeLimitsPrefs.maxTurns()
+        AgentTraceRecorder.DIMENSION_PROVIDER_ATTEMPTS -> com.openminis.app.data.AgentRuntimeLimitsPrefs.maxProviderAttempts()
+        AgentTraceRecorder.DIMENSION_TOOL_CALLS -> com.openminis.app.data.AgentRuntimeLimitsPrefs.maxToolCalls()
+        AgentTraceRecorder.DIMENSION_SHELL_COMMANDS -> com.openminis.app.data.AgentRuntimeLimitsPrefs.maxShellCommands()
+        AgentTraceRecorder.DIMENSION_COMPACTION_CALLS -> com.openminis.app.data.AgentRuntimeLimitsPrefs.maxCompactionCalls()
+        AgentTraceRecorder.DIMENSION_CONCURRENT_TOOLS -> com.openminis.app.data.AgentRuntimeLimitsPrefs.maxConcurrentTools()
         else -> 0
     }
 
@@ -399,6 +413,10 @@ internal class ChatAgentTraceObserver(
         // [fix/budget-stop-banner] 用户实测 128 也会撞墙（超长 agent 会话）——
         // 但 Resume 语义保证无损续跑，撞墙从"静默死"变成"分节"。预算不追着极端
         // 长任务无限抬（防失控循环烧 token），横幅数字引用本常量（Banner mirror）。
+        // [feat/runtime-limits-panel] 这些常量降级为 DEFAULT：运行时真值来自
+        // AgentRuntimeLimitsPrefs（Settings → Agent Runtime → Runtime Limits），
+        // 引擎在 runAgentLoop 入口构造 AgentExecutionBudget 时读取；未 prime 的
+        // JVM 测试路径仍命中这些默认值（prime 未跑时 prefs 读数即默认）。
         internal const val T7_OBSERVE_MAX_TURNS = 200
         internal const val T7_OBSERVE_MAX_PROVIDER_ATTEMPTS = 128
         internal const val T7_OBSERVE_MAX_TOOL_CALLS = 128

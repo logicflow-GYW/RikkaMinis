@@ -86,13 +86,25 @@ internal suspend fun ChatViewModel.persistToolResultMessage(parts: List<AgentCon
 }
 
 /**
- * [fix/budget-stop-banner] The provider-attempt budget shown in the budget-
- * stop banner. Reads the REAL budget constant so the banner can never drift
- * from the enforced limit (the first ship hardcoded "64" while the budget
- * had already been raised to 128 — user hit the wall and saw a stale number).
+ * [fix/budget-stop-banner → feat/runtime-limits-panel] The provider-attempt
+ * budget shown in the budget-stop banner. The first ship hardcoded "64"
+ * while the budget had already been raised to 128 (user hit the wall and
+ * saw a stale number); the fix pointed the banner at the real constant. The
+ * panel now makes the limit user-tunable, so the banner reads the LIVE value
+ * via [providerAttemptLimitNow] — this val remains only as the documented
+ * default (== T7_OBSERVE_MAX_PROVIDER_ATTEMPTS == 128) and for any code
+ * that wants the shipped default explicitly.
  */
 internal val PROVIDER_ATTEMPT_LIMIT_FOR_BANNER: Int =
     ChatAgentTraceObserver.T7_OBSERVE_MAX_PROVIDER_ATTEMPTS
+
+/**
+ * [feat/runtime-limits-panel] The REAL provider-attempt limit in force right
+ * now (prefs-backed, user-tunable). The budget-stop banner uses this so the
+ * number can never drift from the enforced limit, whatever the user set.
+ */
+internal fun providerAttemptLimitNow(): Int =
+    com.openminis.app.data.AgentRuntimeLimitsPrefs.maxProviderAttempts()
 
 internal fun ChatViewModel.finalizeAtTurnLimit(
     assistantId: String,
@@ -119,7 +131,9 @@ internal fun ChatViewModel.finalizeAtTurnLimit(
         _streamingById.value = _streamingById.value - assistantId
     }
     setInlineError(
-        "Stopped after $MAX_AGENT_TURNS agent turns to prevent runaway " +
+        // [feat/runtime-limits-panel] 横幅数字引用真上限（默认 200），避免预算
+        // 调大后横幅还报旧数字（budget-banner 同款漂移问题的预防）。
+        "Stopped after ${com.openminis.app.data.AgentRuntimeLimitsPrefs.maxTurns()} agent turns to prevent runaway " +
         "tool use. The model kept calling tools without finishing — tap " +
         "Resume to continue from here, or send a new message to start over.",
 )
@@ -151,9 +165,9 @@ internal fun ChatViewModel.finalizeBudgetStop(
     }
     val detail = when (reason) {
         "provider_attempt_limit" ->
-            "the run reached its provider-call limit ($PROVIDER_ATTEMPT_LIMIT_FOR_BANNER calls)"
+            "the run reached its provider-call limit (${providerAttemptLimitNow()} calls)"
         "turn_limit" ->
-            "the run reached its turn limit"
+            "the run reached its turn limit (${com.openminis.app.data.AgentRuntimeLimitsPrefs.maxTurns()} turns)"
         "deadline_reached" ->
             "the run reached its time limit"
         else -> "an execution budget was exhausted ($reason)"

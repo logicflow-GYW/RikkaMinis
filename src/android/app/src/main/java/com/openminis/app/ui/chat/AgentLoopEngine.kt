@@ -49,7 +49,10 @@ import com.openminis.app.R
  * stay top-level in their existing files and are called directly.
  */
 
-/** Hard cap on agent-loop turns (moved from ChatViewModel companion, FE-5 route C). */
+/** Hard cap on agent-loop turns (moved from ChatViewModel companion, FE-5 route C).
+ *  [feat/runtime-limits-panel] the loop bound now reads the user-tunable
+ *  AgentRuntimeLimitsPrefs.maxTurns() (default 200 == this constant); the
+ *  const stays as the documented default + banner fallback. */
 internal const val MAX_AGENT_TURNS = 200
 
 /**
@@ -58,6 +61,9 @@ internal const val MAX_AGENT_TURNS = 200
  * at most this many times; past the cap the loop stops continuing, rolls
  * the seam back to the last clean fold, and surfaces the truncation error.
  * Mirrors Hermes turn_truncation's continuation ceiling of 4.
+ * [feat/runtime-limits-panel] runtime truth is
+ * AgentRuntimeLimitsPrefs.lengthWallContinues() (default 4 == this); const
+ * kept as the documented default.
  */
 internal const val MAX_LENGTH_WALL_TEXT_CONTINUES = 4
 
@@ -67,6 +73,8 @@ internal const val MAX_LENGTH_WALL_TEXT_CONTINUES = 4
  * re-billing. Mirrors Hermes empty_response_guard's skip-retries-on-2-
  * deterministic-empties (adapted: RikkaMinis keeps one reminder round for
  * the tool-result case, so the streak limit is 2 here).
+ * [feat/runtime-limits-panel] runtime truth is
+ * AgentRuntimeLimitsPrefs.deterministicEmptyLimit() (default 2 == this).
  */
 internal const val DETERMINISTIC_EMPTY_LIMIT = 2
 
@@ -75,13 +83,18 @@ internal const val DETERMINISTIC_EMPTY_LIMIT = 2
  * streams (stream ended with NO finish_reason). The partial answer is KEPT
  * and a network-stub reminder asks the model to continue; past this cap the
  * loop gives up with a visible error instead of a silent mid-sentence stop.
+ * [feat/runtime-limits-panel] runtime truth is
+ * AgentRuntimeLimitsPrefs.eofStubContinues() (default 2 == this).
  */
 internal const val MAX_EOF_STUB_CONTINUES = 2
 
 /** Per-tool ring cap for ToolInputDelta snapshots (moved from ChatViewModel companion). */
 internal const val TOOL_INPUT_CHUNK_RING_MAX = 10
 
-/** Transient auto-retry backoff seconds (moved from ChatViewModel companion). */
+/** Transient auto-retry backoff seconds (moved from ChatViewModel companion).
+ *  [feat/runtime-limits-panel] superseded at runtime by
+ *  AgentRuntimeLimitsPrefs.transientRetryDelaysSec() (count-tunable, same
+ *  1/2/4s cadence at the default 3); kept as the documented default. */
 internal val AUTO_RETRY_DELAYS_SEC = intArrayOf(1, 2, 4)
 
 internal class AgentLoopEngine(
@@ -120,15 +133,22 @@ internal class AgentLoopEngine(
         // 预算只做观察（consume 并记录，不阻断），T7-C 再启用 enforced。
         val runId = java.util.UUID.randomUUID().toString()
         traceObserver.activeRunId = runId
+        // [feat/runtime-limits-panel] 预算上限改读用户可调的 AgentRuntimeLimitsPrefs
+        // （Settings → Agent Runtime → Runtime Limits）。每轮 run 入口读取一次：
+        // 改动在下一条消息生效，进行中的 run 维持启动时的预算（预算中途变更
+        // 会让剩余量记账失去基准）。未 prime 的 JVM 测试路径回落到与 T7_*_DEFAULT
+        // 相同的默认值，行为不变。
+        val runtimeLimits = com.openminis.app.data.AgentRuntimeLimitsPrefs
         val observeBudget = AgentExecutionBudget(
             startedAtMonotonicMs = SystemClock.elapsedRealtime(),
-            deadlineMonotonicMs = SystemClock.elapsedRealtime() + ChatAgentTraceObserver.T7_OBSERVE_DEADLINE_MS,
-            maxTurns = ChatAgentTraceObserver.T7_OBSERVE_MAX_TURNS,
-            maxProviderAttempts = ChatAgentTraceObserver.T7_OBSERVE_MAX_PROVIDER_ATTEMPTS,
-            maxToolCalls = ChatAgentTraceObserver.T7_OBSERVE_MAX_TOOL_CALLS,
-            maxShellCommands = ChatAgentTraceObserver.T7_OBSERVE_MAX_SHELL_COMMANDS,
-            maxCompactionCalls = ChatAgentTraceObserver.T7_OBSERVE_MAX_COMPACTION_CALLS,
-            maxConcurrentTools = ChatAgentTraceObserver.T7_OBSERVE_MAX_CONCURRENT_TOOLS,
+            deadlineMonotonicMs = SystemClock.elapsedRealtime() +
+                runtimeLimits.runDeadlineMinutes() * 60L * 1000L,
+            maxTurns = runtimeLimits.maxTurns(),
+            maxProviderAttempts = runtimeLimits.maxProviderAttempts(),
+            maxToolCalls = runtimeLimits.maxToolCalls(),
+            maxShellCommands = runtimeLimits.maxShellCommands(),
+            maxCompactionCalls = runtimeLimits.maxCompactionCalls(),
+            maxConcurrentTools = runtimeLimits.maxConcurrentTools(),
             maxEstimatedTokens = null, // token 计数不稳定，观察期不强制
             monotonicClock = { SystemClock.elapsedRealtime() },
         )
@@ -202,7 +222,10 @@ internal class AgentLoopEngine(
         // RunStarted 消费掉的 reducer 回 IDLE，导致后续事件再次 REJECTED。
 
         try {
-        for (turn in 0 until MAX_AGENT_TURNS) {
+        // [feat/runtime-limits-panel] 循环上界从 prefs 读（默认 200）。取一次局部
+        // 值保证整个 run 使用同一边界（与预算快照同理由：run 内一致性）。
+        val maxTurnsThisRun = com.openminis.app.data.AgentRuntimeLimitsPrefs.maxTurns()
+        for (turn in 0 until maxTurnsThisRun) {
             // T7-C: deadline 到达后不发新 provider/tool 请求 —— turn 循环入口检查。
             // 中断标记后走统一 finalize（BudgetExhausted 不是静默失败）。
             if (traceObserver.activeRunBudget?.isExpired() == true) {
@@ -856,11 +879,14 @@ internal class AgentLoopEngine(
                     // errors. This absorbs intermittent stream resets that the fallback
                     // member would otherwise immediately expose as a "all fallbacks
                     // exhausted" banner. See 3b3a12f for the revert context.
-                    if (isTransient && retryAttempt < AUTO_RETRY_DELAYS_SEC.size) {
-                        val delaySec = AUTO_RETRY_DELAYS_SEC[retryAttempt]
+                    // [feat/runtime-limits-panel] 重试上限/延迟改读 prefs（默认 3 次
+                    // 延迟 1/2/4s，与旧 AUTO_RETRY_DELAYS_SEC 行为一致）。
+                    val retryDelays = com.openminis.app.data.AgentRuntimeLimitsPrefs.transientRetryDelaysSec()
+                    if (isTransient && retryAttempt < retryDelays.size) {
+                        val delaySec = retryDelays[retryAttempt]
                         retryAttempt += 1
                         val errDesc = actual.message ?: actual.javaClass.simpleName
-                        Log.w("ChatViewModel", "🔁 Transient error on ${loopState.currentProvider.model.displayName}, retry $retryAttempt/${AUTO_RETRY_DELAYS_SEC.size} in ${delaySec}s: $errDesc")
+                        Log.w("ChatViewModel", "🔁 Transient error on ${loopState.currentProvider.model.displayName}, retry $retryAttempt/${retryDelays.size} in ${delaySec}s: $errDesc")
                         // T7-A: 观察 —— provider 瞬态失败（T5 ProviderAttemptFinished(TRANSIENT_FAILURE)）
                         traceObserver.t7State(ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL), ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.RETRYING), "ProviderAttemptFinished(TRANSIENT_FAILURE)")
                         // T7-D: 旁路验证 —— provider 瞬态失败
@@ -874,7 +900,7 @@ internal class AgentLoopEngine(
                             outcome = AgentTraceRecorder.OUTCOME_SAFE_TO_RETRY,
                             reason = errDesc,
                             attempt = retryAttempt,
-                            maxAttempts = AUTO_RETRY_DELAYS_SEC.size,
+                            maxAttempts = retryDelays.size,
                             willRetry = true,
                         )
                         // [T-error-no-permanent-scars] The transient banner shows a
@@ -888,7 +914,7 @@ internal class AgentLoopEngine(
                             host.setAutoRetry(retryAttempt, 0)
                             // Show the error inline on the streaming assistant message during countdown.
                             // Keeps isStreaming=true so the UI doesn't tear down the streaming state.
-                            host.setTransientInlineError("$errSummary — retrying ($retryAttempt/${AUTO_RETRY_DELAYS_SEC.size})…")
+                            host.setTransientInlineError("$errSummary — retrying ($retryAttempt/${retryDelays.size})…")
                         }
                         try {
                             for (remaining in delaySec downTo 1) {
@@ -1281,11 +1307,13 @@ internal class AgentLoopEngine(
             //    then the normal empty-turn hint path takes over.
             if (toolCalls.isEmpty() && ContentFilterFinishPolicy.isErrorShapedFinish(turnFinishReason)) {
                 if (turnTextRaw.isNotEmpty()) {
-                    if (loopState.eofStubContinues < MAX_EOF_STUB_CONTINUES) {
+                    // [feat/runtime-limits-panel] EOF/错误形态续写上限改读 prefs（默认 2）。
+                    val eofStubMax = com.openminis.app.data.AgentRuntimeLimitsPrefs.eofStubContinues()
+                    if (loopState.eofStubContinues < eofStubMax) {
                         loopState.eofStubContinues++
                         AppLogger.warning(
                             TAG_STREAM,
-                            "runAgentLoop turn=$turn finish=$turnFinishReason (error-shaped) with ${turnTextRaw.length} chars — network-stub continuation ${loopState.eofStubContinues}/$MAX_EOF_STUB_CONTINUES",
+                            "runAgentLoop turn=$turn finish=$turnFinishReason (error-shaped) with ${turnTextRaw.length} chars — network-stub continuation ${loopState.eofStubContinues}/$eofStubMax",
                         )
                         val stubReminder = eofStubReminder(turnText.takeLast(80))
                         host.agentHistory.add(
@@ -1507,7 +1535,8 @@ internal class AgentLoopEngine(
                             usageForEmptyCheck.outputTokens == 0
                         if (usageProvesEmpty) {
                             loopState.deterministicEmptyStreak++
-                            if (loopState.deterministicEmptyStreak >= DETERMINISTIC_EMPTY_LIMIT) {
+                            // [feat/runtime-limits-panel] 快出阈值改读 prefs（默认 2）。
+                            if (loopState.deterministicEmptyStreak >= com.openminis.app.data.AgentRuntimeLimitsPrefs.deterministicEmptyLimit()) {
                                 AppLogger.warning(
                                     TAG_STREAM,
                                     "runAgentLoop turn=$turn finish=length empty ×$loopState.deterministicEmptyStreak with usage.outputTokens==0 — deterministic empty, skipping remaining retries",
@@ -1586,10 +1615,12 @@ internal class AgentLoopEngine(
                             // abort), but also NOT a runaway misclassification:
                             // see the deterministic-empty branch above for the
                             // same pattern.
-                        } else if (loopState.lengthWallContinues >= MAX_LENGTH_WALL_TEXT_CONTINUES) {
+                        } else if (loopState.lengthWallContinues >= com.openminis.app.data.AgentRuntimeLimitsPrefs.lengthWallContinues()) {
+                            // [feat/runtime-limits-panel] 续写上限改读 prefs（默认 4）。
+                            val lwMax = com.openminis.app.data.AgentRuntimeLimitsPrefs.lengthWallContinues()
                             AppLogger.warning(
                                 TAG_STREAM,
-                                "runAgentLoop turn=$turn finish=length — continuation ceiling $MAX_LENGTH_WALL_TEXT_CONTINUES reached, giving up (accumulated ${loopState.accumulatedText.length} chars)",
+                                "runAgentLoop turn=$turn finish=length — continuation ceiling $lwMax reached, giving up (accumulated ${loopState.accumulatedText.length} chars)",
                             )
                             withContext(Dispatchers.Main) {
                                 host.setInlineError(host.string(R.string.error_output_truncated_repeated))
@@ -1610,7 +1641,7 @@ internal class AgentLoopEngine(
                             )
                             AppLogger.warning(
                                 TAG_STREAM,
-                                "runAgentLoop turn=$turn finish=length — truncated (${turnText.length} chars), continuing loop to let the model finish (${loopState.lengthWallContinues}/$MAX_LENGTH_WALL_TEXT_CONTINUES)",
+                                "runAgentLoop turn=$turn finish=length — truncated (${turnText.length} chars), continuing loop to let the model finish (${loopState.lengthWallContinues}/${com.openminis.app.data.AgentRuntimeLimitsPrefs.lengthWallContinues()})",
                             )
                         // [T-length-wall-prefill] When the provider accepts
                         // an assistant-final prefill, the truncated assistant
@@ -1807,11 +1838,13 @@ internal class AgentLoopEngine(
                 // EOFs do not pile up reminder turns (same pattern as the
                 // length-wall reminder below).
                 if (turnTruncated && hasVisibleContent) {
-                    if (loopState.eofStubContinues < MAX_EOF_STUB_CONTINUES) {
+                    // [feat/runtime-limits-panel] 同上：上限改读 prefs（默认 2）。
+                    val eofStubMax = com.openminis.app.data.AgentRuntimeLimitsPrefs.eofStubContinues()
+                    if (loopState.eofStubContinues < eofStubMax) {
                         loopState.eofStubContinues++
                         AppLogger.warning(
                             TAG_STREAM,
-                            "runAgentLoop turn=$turn EOF-truncated stream (${turnText.length} chars kept, mid-sentence=${looksLikeMidSentenceCut(turnText)}) — network-stub continuation ${loopState.eofStubContinues}/$MAX_EOF_STUB_CONTINUES",
+                            "runAgentLoop turn=$turn EOF-truncated stream (${turnText.length} chars kept, mid-sentence=${looksLikeMidSentenceCut(turnText)}) — network-stub continuation ${loopState.eofStubContinues}/$eofStubMax",
                         )
                         // Drop any stale stub reminder from a previous EOF so
                         // reminders never stack (guard mirrors length-wall).
@@ -2418,7 +2451,7 @@ internal class AgentLoopEngine(
         if (!loopState.loopExitedNormally && !loopState.terminalErrorSurfaced && traceObserver.t7BudgetStopReason == null) {
             AppLogger.warning(
                 TAG_STREAM,
-                "runAgentLoop EXIT — hit MAX_AGENT_TURNS=$MAX_AGENT_TURNS, finalizing as resumable",
+                "runAgentLoop EXIT — hit MAX_AGENT_TURNS=$maxTurnsThisRun, finalizing as resumable",
             )
             withContext(Dispatchers.Main) {
                 host.finalizeAtTurnLimit(loopState.assistantId, loopState.accumulatedText, loopState.allToolBlocks)

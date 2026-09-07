@@ -152,6 +152,8 @@ object Routes {
     const val FILE_BROWSER = "file_browser"
     const val FILE_PREVIEW = "file_preview"
     const val ENV_VARS = "env_vars"
+    /** [feat/runtime-limits-panel] Runtime Limits page (agent runtime knobs). */
+    const val RUNTIME_LIMITS = "runtime_limits"
     const val SKILLS = "skills"
     const val SKILL_DETAIL = "skill/{skillId}"
     const val SKILL_FILE = "skill_file/{skillId}/{relativePath}"
@@ -634,6 +636,7 @@ fun AppNavigation(
                 onModelGroupsClick = { navController.safeNavigate(Routes.MODEL_GROUPS) },
                 onRootfsClick = { navController.safeNavigate(Routes.STORAGE) },
                 onEnvVarsClick = { navController.safeNavigate(Routes.ENV_VARS) },
+                onRuntimeLimitsClick = { navController.safeNavigate(Routes.RUNTIME_LIMITS) },
                 onSkillsClick = { navController.safeNavigate(Routes.SKILLS) },
                 onTerminalClick = { navController.safeNavigate(Routes.terminal()) },
                 onMemoryClick = { navController.safeNavigate(Routes.MEMORY) },
@@ -1061,6 +1064,11 @@ fun AppNavigation(
                     onBack = { navController.safePopBackStack() },
                 )
             }
+        }
+        composable(Routes.RUNTIME_LIMITS) {
+            com.openminis.app.ui.settings.RuntimeLimitsScreen(
+                onBack = { navController.safePopBackStack() },
+            )
         }
 
         composable(Routes.SKILLS) {

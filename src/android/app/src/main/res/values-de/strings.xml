@@ -103,10 +103,54 @@
 
     <string name="settings_max_concurrent">Gleichzeitige Sitzungen</string>
     <string name="settings_max_concurrent_subtitle">Limit: %1$d · Läuft: %2$d · Wartet: %3$d</string>
-    <string name="settings_max_concurrent_dialog_title">Max. gleichzeitige Sitzungen</string>
-    <string name="settings_max_concurrent_restart_hint">Wirkt ab dem nächsten App-Start.</string>
     <string name="settings_subagent_dispatch">Sub-Agent-Verteilung</string>
     <string name="settings_subagent_dispatch_subtitle">Arbeit auf andere Sitzungen verteilen</string>
+
+    <string name="runtime_limits_title">Laufzeit-Limits</string>
+    <string name="runtime_limits_entry">Laufzeit-Limits</string>
+    <string name="runtime_limits_entry_subtitle">Sitzungen, Budgets, Wiederherstellung, Timeouts</string>
+    <string name="runtime_limits_section_sessions">Sitzungen &amp; Dispatch</string>
+    <string name="runtime_limits_section_budget">Agent-Loop-Budget</string>
+    <string name="runtime_limits_section_recovery">Stream-Wiederherstellung</string>
+    <string name="runtime_limits_section_network">Netzwerk &amp; Worker</string>
+    <string name="runtime_limits_sessions_footer">Der Sub-Agent-Schalter greift sofort; das Sitzungslimit beim nächsten App-Start. Ein höheres Limit erhögt die Speicherspitze — die letzte Verteidigung bleibt der Prozess-Watchdog.</string>
+    <string name="runtime_limits_budget_footer">Alle Budgets sind verbindlich: Bei Erreichen wird der Lauf pausiert (Inhalte bleiben, Resume zum Fortsetzen) — nie ein stiller Abbruch. Defaults sind kalibrierte Feldwerte; höher = schwächerer Schutz gegen Endlosschleifen (mehr Token-Verbrauch bis zum Stopp).</string>
+    <string name="runtime_limits_recovery_footer">Recovery-Regler: mehr Fortsetzungen/Retries überstehen instabile Netze, kosten aber erneut Token; weniger zeigt Fehler schneller. 0 deaktiviert den jeweiligen Pfad.</string>
+    <string name="runtime_limits_network_footer">Generations-Wall und Worker-Slots gelten für den NÄCHSTEN Model-Service-Worker (laufende Requests enden nach alten Limits). Eine niedrigere Wall kann gesunde langsame Generierungen fälschlich killen. Slots über 2 vervielfachen den Native-Heap-Peak — Speicherrisiko.</string>
+    <string name="runtime_limits_turns">Turn-Limit</string>
+    <string name="runtime_limits_turns_desc">Max. Turns pro Lauf (Standard 200)</string>
+    <string name="runtime_limits_provider_attempts">Provider-Aufrufe</string>
+    <string name="runtime_limits_provider_attempts_desc">Inkl. Retries/Fallback, pro Lauf (Standard 128)</string>
+    <string name="runtime_limits_tool_calls">Tool-Aufrufe</string>
+    <string name="runtime_limits_tool_calls_desc">Max. Tool-Aufrufe pro Lauf (Standard 128)</string>
+    <string name="runtime_limits_shell_commands">Shell-Befehle</string>
+    <string name="runtime_limits_shell_commands_desc">Max. Shell-Befehle pro Lauf (Standard 128)</string>
+    <string name="runtime_limits_compaction">Compaction-Aufrufe</string>
+    <string name="runtime_limits_compaction_desc">Niedriger = lange Sitzungen treffen früher das Kontextfenster (Standard 8)</string>
+    <string name="runtime_limits_concurrent_tools">Gleichzeitige Tools</string>
+    <string name="runtime_limits_concurrent_tools_desc">Tools, die gleichzeitig in einem Turn laufen (Standard 4)</string>
+    <string name="runtime_limits_deadline">Laufzeit-Limit</string>
+    <string name="runtime_limits_deadline_desc">Minuten pro Lauf; bei Erreichen Pause (Standard 60)</string>
+    <string name="runtime_limits_length_wall">Length-Fortsetzungen</string>
+    <string name="runtime_limits_length_wall_desc">Runden nach finish_reason=length (Standard 4)</string>
+    <string name="runtime_limits_eof_stub">EOF-Fortsetzungen</string>
+    <string name="runtime_limits_eof_stub_desc">Runden nach abgebrochenem/Fehler-Stream, Teil bleibt (Standard 2)</string>
+    <string name="runtime_limits_det_empty">Leer-Ausstieg</string>
+    <string name="runtime_limits_det_empty_desc">Nachweislich leere Completions bis zur Aufgabe (Standard 2)</string>
+    <string name="runtime_limits_transient_retries">Transient-Retries</string>
+    <string name="runtime_limits_transient_retries_desc">Auto-Retries mit 1/2/4/8/16s Backoff (Standard 3)</string>
+    <string name="runtime_limits_verify_nudges">Verifizierungs-Nudges</string>
+    <string name="runtime_limits_verify_nudges_desc">Nudges am Turn-Ende zur Code-Verifizierung (Standard 2)</string>
+    <string name="runtime_limits_generation_wall">Generations-Wall</string>
+    <string name="runtime_limits_generation_wall_desc">Minuten für einen Generierungs-Stream (Standard 30)</string>
+    <string name="runtime_limits_first_chunk_direct">First Chunk, direkt</string>
+    <string name="runtime_limits_first_chunk_direct_desc">Sekunden, direkte Endpunkte (Standard 30)</string>
+    <string name="runtime_limits_first_chunk_proxy">First Chunk, Proxy</string>
+    <string name="runtime_limits_first_chunk_proxy_desc">Sekunden, Proxy/Gateway-Routen (Standard 45)</string>
+    <string name="runtime_limits_provider_slots">Worker-Slots</string>
+    <string name="runtime_limits_provider_slots_desc">Gleichzeitige Provider-Runs pro Worker (Standard 2, darüber riskant)</string>
+    <string name="runtime_limits_queue_admission">Queue-Zulassung</string>
+    <string name="runtime_limits_queue_admission_desc">Max. Queue vor Ablehnung (Standard 6)</string>
     <string name="settings_section_storage">Speicher</string>
     <string name="settings_storage_subtitle">Alpine-Linux-Rootfs verwalten und Dateien durchsuchen</string>
     <string name="settings_section_permissions">Berechtigungen</string>

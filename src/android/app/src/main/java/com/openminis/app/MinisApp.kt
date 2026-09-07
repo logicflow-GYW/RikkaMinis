@@ -270,6 +270,12 @@ class MinisApp : Application(), ImageLoaderFactory {
         // Runs before ExecutionCoordinator.init / NativeOffloadServer.start.
         com.openminis.app.data.ConcurrencyPrefs.prime(this)
 
+        // [feat/runtime-limits-panel] Warm the user-tunable agent runtime
+        // limits (agent-loop budget / stream recovery / worker timeouts /
+        // slot policy). Context-free readers (engine loop, worker service,
+        // providers) must see the persisted values before first use.
+        com.openminis.app.data.AgentRuntimeLimitsPrefs.prime(this)
+
         // T283: install NDK signal handler for native crashes (SIGSEGV/
         // SIGABRT/SIGBUS/SIGFPE/SIGILL/SIGSYS). Writes a one-shot text
         // report to filesDir/logs/native-crash-<stamp>.log before re-raising

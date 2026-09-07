@@ -144,7 +144,7 @@ object ChatStreamOffloadHandler {
         // watchdogs and the worker-liveness beat, so this ceiling is a final
         // backstop that bounds the worst case, not the primary liveness signal.
         val streamTimeoutMs =
-            com.openminis.app.sandbox.offload.FirstChunkTimeoutPolicy.GENERATION_TIMEOUT_SEC * 1000L
+            com.openminis.app.sandbox.offload.FirstChunkTimeoutPolicy.decideGenerationTimeoutSec(null) * 1000L
         // [feat/provider-exec-concurrency] Queue-wait extension: under the
         // slot pool, this request may spend up to MAX_QUEUED (worst-case
         // handoff latency) waiting for a slot BEFORE its 30-min generation
@@ -155,7 +155,7 @@ object ChatStreamOffloadHandler {
         // liveness; only this wall would fire). Extension = one full extra
         // generation budget (bounded: 2× total, no unbounded growth).
         val queueExtensionMs =
-            if (com.openminis.app.sandbox.offload.ProviderExecSlotPolicy.MAX_CONCURRENT_PROVIDER_RUNS > 1) streamTimeoutMs
+            if (com.openminis.app.sandbox.offload.ProviderExecSlotPolicy.liveProviderSlots() > 1) streamTimeoutMs
             else 0L
         // (TF-J2: death is now driven by the worker liveness beat file; see the
         // poll-loop decision. No /proc identity-mismatch window is needed.)

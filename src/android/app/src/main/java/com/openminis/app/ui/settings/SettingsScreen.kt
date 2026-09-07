@@ -20,7 +20,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.Backup
@@ -37,19 +36,16 @@ import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Terminal
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -71,6 +67,8 @@ fun SettingsScreen(
     onModelGroupsClick: () -> Unit,
     onRootfsClick: () -> Unit = {},
     onEnvVarsClick: () -> Unit = {},
+    // [feat/runtime-limits-panel] entry into the Runtime Limits page.
+    onRuntimeLimitsClick: () -> Unit = {},
     onSkillsClick: () -> Unit = {},
     onTerminalClick: () -> Unit = {},
     onMemoryClick: () -> Unit = {},
@@ -204,11 +202,19 @@ fun SettingsScreen(
                 // OFF by default (side-effectful: lets the agent open new sessions
                 // and run long-lived work). Direct inline switch (no sub-page) —
                 // same pattern as the Memory global toggle.
-                SubagentDispatchSetting()
-                // [D-2] Cross-session concurrency cap — configurable + observable.
-                // Lets the user run at the Phase-0 floor (2 slots) for a while,
-                // read live occupancy (running/waiting) and evaluate widening to 3.
-                ConcurrencySlotSetting()
+                // [feat/runtime-limits-panel] SubagentDispatchSetting +
+                // ConcurrencySlotSetting (the two odd-one-out inline rows)
+                // are FOLDED into the Runtime Limits page — every tunable
+                // runtime knob now lives behind one uniform page-entry row,
+                // matching Skills/Soul/Memory/MCP/EnvVars navigation style.
+                SettingsItem(
+                    icon = Icons.Outlined.Tune,
+                    iconColor = Color(0xFF30B0C7),
+                    title = stringResource(R.string.runtime_limits_entry),
+                    subtitle = stringResource(R.string.runtime_limits_entry_subtitle),
+                    onClick = onRuntimeLimitsClick,
+                    showDivider = false,
+                )
             }
 
             // -- Storage --
@@ -421,117 +427,3 @@ private fun SettingsItem(
         }
     }
 }
-
-/**
- * [T-subagent-toggle] Cross-session sub-agent dispatch switch. Reads
- * [com.openminis.app.data.SubagentPrefs] directly (same prefs+key as
- * ConfigBuiltins' `runtime.subagentEnabled`) so the UI, minis-config, and the
- * agent all share one source of truth. OFF by default.
- */
-@Composable
-private fun SubagentDispatchSetting() {
-    val context = LocalContext.current
-    var enabled by remember {
-        mutableStateOf(com.openminis.app.data.SubagentPrefs.isEnabled(context))
-    }
-    SettingsSwitchRow(
-        icon = Icons.Outlined.AccountTree,
-        iconColor = Color(0xFF34C759),
-        title = stringResource(R.string.settings_subagent_dispatch),
-        subtitle = stringResource(R.string.settings_subagent_dispatch_subtitle),
-        checked = enabled,
-        onCheckedChange = { newValue ->
-            enabled = newValue
-            com.openminis.app.data.SubagentPrefs.setEnabled(context, newValue)
-        },
-        showDivider = true,
-    )
-}
-
-/**
- * [D-2] Cross-session concurrency cap setting: shows the configured cap plus
- * live slot occupancy (running / waiting) and lets the user pick 1–16 slots
- * (effectively uncapped). The cap is read once at app start
- * (ConcurrencyPrefs.prime) and sized into the three coordinated gates, so a
- * change takes effect on the next process start — the dialog surfaces that hint.
- */
-@Composable
-private fun ConcurrencySlotSetting() {
-    val context = LocalContext.current
-    var showDialog by remember { mutableStateOf(false) }
-
-    // Poll live occupancy (~1s) so the user can watch running/waiting while
-    // multi-session chat is active in another surface.
-    val occupancy by produceState(
-        initialValue = com.openminis.app.service.SessionConcurrencyManager.occupancy(),
-    ) {
-        while (true) {
-            value = com.openminis.app.service.SessionConcurrencyManager.occupancy()
-            kotlinx.coroutines.delay(1000L)
-        }
-    }
-
-    SettingsItem(
-        icon = Icons.Outlined.BarChart,
-        iconColor = Color(0xFF5AC8FA),
-        title = stringResource(R.string.settings_max_concurrent),
-        subtitle = stringResource(
-            R.string.settings_max_concurrent_subtitle,
-            com.openminis.app.data.ConcurrencyPrefs.maxConcurrentSessions(),
-            occupancy.active,
-            occupancy.waiting,
-        ),
-        onClick = { showDialog = true },
-        showDivider = false,
-    )
-
-    if (showDialog) {
-        var sliderValue by remember {
-            mutableStateOf(
-                com.openminis.app.data.ConcurrencyPrefs.maxConcurrentSessions().toFloat(),
-            )
-        }
-        AlertDialog(
-            onDismissRequest = { showDialog = false },
-            title = { Text(stringResource(R.string.settings_max_concurrent_dialog_title)) },
-            text = {
-                Column {
-                    Text(
-                        text = sliderValue.toInt().toString(),
-                        style = MaterialTheme.typography.headlineMedium,
-                    )
-                    Slider(
-                        value = sliderValue,
-                        onValueChange = { sliderValue = it },
-                        valueRange = com.openminis.app.data.ConcurrencyPrefs.MIN.toFloat()..
-                            com.openminis.app.data.ConcurrencyPrefs.MAX.toFloat(),
-                        steps = com.openminis.app.data.ConcurrencyPrefs.MAX -
-                            com.openminis.app.data.ConcurrencyPrefs.MIN - 1,
-                    )
-                    Text(
-                        text = stringResource(R.string.settings_max_concurrent_restart_hint),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    com.openminis.app.data.ConcurrencyPrefs.setMaxConcurrentSessions(
-                        context,
-                        sliderValue.toInt(),
-                    )
-                    showDialog = false
-                }) {
-                    Text(stringResource(R.string.common_save))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDialog = false }) {
-                    Text(stringResource(R.string.common_cancel))
-                }
-            },
-        )
-    }
-}
-

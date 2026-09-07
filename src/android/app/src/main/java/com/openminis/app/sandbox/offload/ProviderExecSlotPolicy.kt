@@ -43,6 +43,10 @@ object ProviderExecSlotPolicy {
      * Maximum provider calls executing concurrently in one `:modelservice`
      * process. 1 reproduces the old serialized behavior; 2 is the shipped
      * default (see class KDoc for the sizing rationale).
+     * [feat/runtime-limits-panel] runtime truth is
+     * AgentRuntimeLimitsPrefs.providerSlots() (default 2 == this, user-
+     * tunable 1..4); the const stays as the documented default and the
+     * worker-process floor used before prefs are primed.
      */
     const val MAX_CONCURRENT_PROVIDER_RUNS: Int = 2
 
@@ -53,6 +57,25 @@ object ProviderExecSlotPolicy {
      * cascade-queue unboundedly. Rejected requests surface as a typed
      * transient error so the caller's retry path re-dispatches (likely onto
      * a fresher worker by then).
+     * [feat/runtime-limits-panel] runtime truth is
+     * AgentRuntimeLimitsPrefs.queueAdmission() (default 6 == this, user-
+     * tunable 2..12).
      */
     const val MAX_QUEUED_REQUESTS: Int = 6
+
+    /**
+     * [feat/runtime-limits-panel] The live slot count for pool sizing. Read
+     * when a `:modelservice` worker process sizes its semaphore (process
+     * spawn), so a change applies to the NEXT worker — the current one
+     * finishes in-flight runs on its old limits (safe handoff).
+     */
+    fun liveProviderSlots(): Int =
+        com.openminis.app.data.AgentRuntimeLimitsPrefs.providerSlots()
+
+    /**
+     * [feat/runtime-limits-panel] The live queue-admission bound. Same
+     * worker-process scoping as [liveProviderSlots].
+     */
+    fun liveQueueAdmission(): Int =
+        com.openminis.app.data.AgentRuntimeLimitsPrefs.queueAdmission()
 }
