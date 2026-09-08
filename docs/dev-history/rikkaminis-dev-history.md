@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-07）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-08）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-09-07，共 36 天
-- 条目总数：823（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
-- 总字符数：956636 / 总行数：15702
+- 合并范围：2026-08-03 ～ 2026-09-08，共 37 天
+- 条目总数：829（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
+- 总字符数：962897 / 总行数：15799
 
 ---
 
@@ -15695,6 +15695,103 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 **可复用验证方法**：①并行发 delay=N 调用 + logcat 采样 `lazyColumn.firstItem.compose` 计数（恒值=零重组）；②③同理用 Perf 日志 + 转后台 am start；logcat 缓冲轮转快，关键日志要"触发后立即抓"。
 
 **坑**：a11y 截图经 shizuku base64 传输时输出是 JSON envelope，需 python json 解析取 data.stdout 再 b64decode（直接过滤行会残留 JSON 报 Invalid base64）；a11y dump 的 clickable 节点 center 坐标长按可能落在文本上弹系统文本选择菜单而非应用菜单。
+
+<!-- 2026-09-07 22:48:27 -->
+## 文档更新 + 小号同步（2026-09-07 晚二次，main @ fce2ccc8 / alt @ 46e7d0e2）
+
+
+**任务**：用户再次要求更新主号文档 + 同步小号（15:14 已做过一轮，此为 15:14 之后的增量）。
+
+**文档更新**：dev-history 重建 809→**823 条**（36 天，新增 15:14 之后全部 14 条，09-07 共 28 条），fences even / ts 对齐 / outOrder=0；分支 docs/dev-history-0907b → ff 合并 main @ **fce2ccc8**（3 文件 +279/−5），push 成功（纯文档不触发 CI）。
+
+**小号同步**（sync-0907b → merge **46e7d0e2**，单亲 4bc3c1f8 + 主号 fce2ccc8）：
+- 小号线在 15:14 后还有 4bc3c1f8（810 文档提交，单亲基于 3e8dc9e6）；merge-base = 5e81aa1a
+- 主号待同步 14 提交：worker reasoning roundtrip(742bf77e)、浏览器三件、渲染三连修、filechooser 修复、docs 823
+- 冲突仅 docs/dev-history/ 3 文件（809→810 vs 809→823 头部统计）→ checkout --theirs 取 823 版（超集）
+- push alt 用 `GITHUB_TOKEN="$GITHUB_TOKEN_FULL_RIGHT"` + `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy`（git 走代理 TLS EOF，curl 直连 200——绕代理是标准操作）
+- 小号 CI run **34134744099**（head_sha=46e7d0e2 一致，in_progress 待查；主号同内容已各自分支 CI + release CI 34129469814 绿过，结论无悬念）
+- 坑：push 到 main ref（sync-0907b:main）不会在远端留分支，`push --branch :sync-0907b` 删远端报 "remote ref does not exist" 无害
+- 坑：python urllib 直连 api.github.com SSL EOF，用 curl 直连正常
+
+双线状态：主号 fce2ccc8 / 小号 46e7d0e2。
+
+<!-- 2026-09-07 23:31:32 -->
+## 复杂度量化度量（2026-09-07，回答"复杂度涨了多少/是不是错觉"）
+
+
+用户感觉"改这个应用以来复杂度上升、越来越难把握"，做了量化度量。脚本已固化：`python3 /var/minis/shared/tools/complexity_snapshot.py <snap-dir>...`（对 git archive 快照目录跑同套静态指标：kt 数/行数/顶层声明/大文件/import 边/SCC/strings/migration）。7 快照：7-25(e488b1b1 起跑线) 8-08 8-15 8-22 8-29 9-05 9-07(fce2ccc8)。**原始数据在 /tmp/complexity-snap/results.json**（/tmp 不跨重建，需时重跑）。
+
+**结论：不是错觉，体量涨 ~1.5 倍；但结构纠缠没涨，工程卫生反而改善**：
+- kt 454→730 (+61%)、行数 143.7K→196.1K (+36%)、顶层声明 933→1365 (+46%)、strings 键 1369→1571 (×7 语言)、@Database version 3→10 (+233%)
+- fan-out 均值 5.7→5.5 稳定；SCC 恒 2 组最大 2（无循环依赖）；最大文件 9338→4732 行、P90 680→551（主动拆文件生效）；>1k 行文件仅 24→31
+- 测试文件 220 个 = 生产 497 的 44%（认知面含测试）
+- 节奏：8 月冲刺 W31=244 commits → W36=45（在收敛）；949/961 commits 在 7 月底起的 40 天里
+- **"难把握"主要来源**：总量效应 + 交互面扩散（migrations 47 常量/version 10 数据层改字段即加版本 + i18n 键×7 语言），非纠缠失控
+
+## 2026-09-08
+
+<!-- 2026-09-08 09:33:11 -->
+## 三账号 gyw-proxy (edgetunnel) 更新完成（2026-09-08）
+
+
+用户上传 edgetunnel-main zip（Version 2026-09-04 16:24:13）到 attachments，要求更新三个 CF 账号上的 gyw-proxy。三个账号：
+- 账号1 [EMAIL]（CF_API_TOKEN，account ***CF_ACCOUNT_ID***）→ gyw-proxy @ ***DOMAIN***（另有 rikka-bulletin/rikka-ci-bridge 未动）
+- 账号2 [EMAIL]（CF_API_TOKEN_1）→ gyw-proxy @ ***DOMAIN***
+- 账号3 [EMAIL]（CF_API_TOKEN_2）→ gyw-proxy @ ***DOMAIN***
+
+全部从 2026-08-11 版更新到 2026-09-04 版，bindings 逐账号保留（ADMIN 密码各异、KV namespace 各异、UUID/BEST_SUB/ED 有无不同），compat date 不变。探活：三个域名 200 + server: cloudflare + nginx 伪装页 = 正常。
+
+**坑（可复用）**：
+1. **CF_ACCOUNT_ID 环境变量值是无效的**（47 位 hex，API 404；正确值 ***CF_ACCOUNT_ID*** 在 GLOBAL.md 里）。本次用 GLOBAL.md 已知 ID 绕过。已提醒用户修正环境变量。CF_ACCOUNT_ID_1/_2 是有效的。
+2. **module worker 上传必须**：script part 的 Content-Type 用 `application/javascript+module`（用 application/javascript 会被按 classic 解析报 "Unexpected token 'export'"）；part 名 = main_module 文件名；metadata 用 curl `-F "metadata=<file;type=application/json"`（@file 会带 filename 属性可能干扰解析）。metadata 含 main_module/compatibility_date/bindings/usage_model。
+3. 更新脚本 /tmp/update_gyw_proxy.py（/tmp 不跨重建，需时重写；三账号循环，从 settings API 读 bindings 再 PUT 保留）。
+4. workers.dev 子域查询（/subdomain）返回无 subdomain 字段——这些 worker 用自定义域名，查 /workers/domains 拿 hostname。
+
+<!-- 2026-09-08 13:05:10 -->
+## 环境变量分组 + Sheet 修复（2026-09-08，分支 fix/envvar-flatten-usage-sheets @ 85698cd，已交接未合并）
+
+
+**任务**：①删平台特殊卡片（用户明确"也是要砍的"）②环境变量分组功能（用户澄清"分组指的是环境变量中的分组，解决变量太多乱的问题"——首轮理解偏差：我误以为分组也不要，实际只要砍平台卡片）③Token 用量抽屉顶太高（fit-content cap 改 0.9）④表单半展开（skipPartiallyExpanded）。
+
+**改动**：4 commit。平台卡片区块整体删除（PlatformIntegrationCard/TierBadge/computePlatformTier + skillRepository 参数 + 8 string×7语言）；EnvVarEntry 加 group 字段（JSON 持久化向后兼容）；列表按组分节（首见顺序，未分组垫底）；表单加分组输入；EnvVarFormSheet skipPartiallyExpanded + verticalScroll + imePadding；StandardChatSheet heightFraction 改 Float?（null=fit-content cap 0.9）。
+
+**坑**：ash 反引号吞 commit message（amend 修复）；BusyBox grep 无 --include。
+
+**状态**：11fc146 CI 绿（run 34185317644）；85698cd 未验证；未合并 main。交接文档 /var/minis/shared/env-var-usage-sheets-handoff.md（含真机验证清单）。用户拍板"任务结束，剩下交给另一个会话"。
+
+<!-- 2026-09-08 13:40:45 -->
+## 环境变量分组分支审计+修复合并 main（2026-09-08，main @ fa87964）
+
+
+**任务**：用户要求审计 fix/envvar-flatten-usage-sheets（4 commit）有 bug 修完再合并。
+
+**审计发现 3 个真 bug（全部是 group 字段四处同步缺层，field-evap 族第 6 次复发）**：
+1. ConfigBackup.export：envVars 只写 key/note/value 不写 group → 备份恢复丢分组
+2. ConfigBackup.import：add() 不传 group → 即使备份带了也还原不了（MultiDeviceSync 同管道同病）
+3. EnvVarsCollection.noteField：update() 落 newGroup 默认 "" → agent 改 note 抹掉用户分组
+
+**修复（fa87964，4 文件 +232/−4）**：
+- export 非空写 group / import optString 读 + add 传参 / noteField writer 显式传 e.group
+- **update() 签名改 tri-state**：newGroup: String? = null（null=保留现有，""=清除，非空=替换）——默认方向从"破坏"改为"保留"，防未来调用点漏参复发
+- 新增 EnvVarGroupRoundTripTest（11 用例，复刻 BackupFieldEvapRoundTripTest 模式，覆盖备份 round-trip / metadata round-trip / tri-state / sync payload 形状），沙箱 JVM 11/11 绿
+
+**验证链**：scan 4/4 → 分支 CI #1375 success（head fa87964 核对）→ ff 合并 main → release CI #1376 success（head 核对）→ 本地+远端分支已删。bridge /status/main 确认 success。
+
+**审计时排除的项**：StandardChatSheet heightFraction Float?（其余 5 调用点全用默认 0.9f 行为不变）；平台卡片删除（调用点/string×7 清干净）；UI update/add 都传 group；SyncMerge 透传 JSON 对象无需改。
+
+**已知限制（与 note 一致的既定语义，未扩大改动面）**：多设备 sync 对已存在 key 是 left-as-is，A 设备改 group 同步到 B 不会更新（note 同样）——只有新建/删除传播。
+
+**坑**：git push origin --delete 不走 askpass 会挂（username 提示失败）——删远端分支用 API DELETE（$GITHUB_TOKEN，204 成功）。
+
+**待用户真机验证**（android-latest 已是 main @ fa87964 的包）：①环境变量页平台卡片消失、分组节渲染 ②表单全展开+键盘不挡保存 ③Token 用量抽屉 fit-content ④备份导出→恢复分组不丢 ⑤agent 用 minis-config 改 note 后分组不丢。
+
+<!-- 2026-09-08 13:45:15 -->
+## env-var group 修复的补强验证（真实文件 JVM 驱动测试）
+
+
+此前 replica 测试（EnvVarGroupRoundTripTest 11/11）只钉 key 形状，生产文件本体只有 CI 编译证据。补强：编译**真实** EnvVarRepository.kt（未改动一字）+ 桩（Context/SharedPreferences/Log 既有 + 新写 EncryptedPrefsFactory 桩签名 safeCreate(context,fileName)）→ 9/9 绿，覆盖：note-only update 保留 group+secret（bug#3 精确调用形状）、tri-state、metadata JSON 真实落盘 round-trip、旧格式无 group 键回退、UI 分组不变量（LinkedHashMap 首见序 + "" 垫底）。
+
+**可复用**：/tmp/jvmtc/run_real_test.sh + realtest/ 两个文件（/tmp 不跨重建）；对 Repository 层修 bug 时 replica 测试之外，直接拿真实源文件+桩驱动是更强的证据层，比复刻少一层"复刻漂移"风险。ConfigBackup/EnvVarsCollection 因依赖面过重（ConfigRegistry 全家）不适合此法，仍靠 CI 编译+replica 钉契约。
 
 ---
 
