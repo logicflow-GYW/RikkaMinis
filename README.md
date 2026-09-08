@@ -351,8 +351,13 @@ ANSI/CSI/OSC 解析与 TUI 渲染引擎。
   agent 参考：repetition_guard（重复中止）、empty_response_guard（确定性空快出）、
   continuation ceiling、session 级 system prompt 冻结、verification_stop 验证
   门控、预算护栏可见化。落地清单见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §12
+- **[Operit](https://github.com/AAswordman/Operit)**（LGPL-3.0）— 浏览器工具补缺
+  （console 消息 / 网络请求瀑布 / 文件上传）、CI 脚本自测模式、语义记忆混合评分公式。
+  落地清单见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §12
 - **[OmniBot](https://github.com/omnimind-ai/OmniBot)** — 工具并发、回合折叠、
   自动压缩、记忆 rollup、子代理系统
+- **[OpenClaw](https://github.com/riley0122/OpenClaw)** — 技能目录化、触发式 skill
+  （经上游技能体系参考，落地为可扩展技能系统）
 - **[肉包 Roubao](https://github.com/Turbo1123/roubao)** — 宏脚本、执行追踪
 - **[AppAgent](https://github.com/TencentQQGYLab/AppAgent)**
 - **[MobileAgent-Android](https://github.com/GiggleWang/MobileAgent-Android)**
@@ -372,6 +377,11 @@ ANSI/CSI/OSC 解析与 TUI 渲染引擎。
 [multiplatform-markdown-renderer](https://github.com/mikepenz/multiplatform-markdown-renderer)、
 [Reorderable](https://github.com/Calvin-LL/Reorderable)、[ACRA](https://github.com/ACRA/acra)
 （均为 Apache-2.0），以及 [Shizuku](https://github.com/RikkaApps/Shizuku-API)（MIT）。
+
+**平台服务** — [Hugging Face](https://huggingface.co)（`semantic-memory` 平台技能的
+嵌入模型 `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` 经其
+Inference API 调用）、[GitHub Actions](https://github.com/features/actions)
+（APK 构建与发布 CI）。
 
 ---
 

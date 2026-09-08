@@ -426,8 +426,20 @@ UI and interaction logic (conceptual inspiration, not code reuse).
 RikkaMinis' agent runtime, automation, and system-integration capabilities
 (conceptual inspiration, not code reuse):
 
+- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — harness-discipline
+  agent reference: repetition_guard (repetition abort), empty_response_guard
+  (deterministic empty fast-exit), continuation ceiling, session-level system-prompt
+  freezing, verification_stop gate, visible budget guardrails. Landing list:
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §12
+- **[Operit](https://github.com/AAswordman/Operit)** (LGPL-3.0) — browser tool gaps
+  (console messages / network request waterfall / file upload), CI script self-test
+  pattern, hybrid memory scoring formula. Landing list:
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §12
 - **[OmniBot](https://github.com/omnimind-ai/OmniBot)** — tool concurrency,
   run folding, auto-compaction, memory rollup, sub-agent system
+- **[OpenClaw](https://github.com/riley0122/OpenClaw)** — skill cataloging,
+  trigger-based skills (referenced via the upstream skill system; landed as the
+  extensible skill system)
 - **[肉包 Roubao](https://github.com/Turbo1123/roubao)** — macro scripts,
   execution tracing
 - **[AppAgent](https://github.com/TencentQQGYLab/AppAgent)**
@@ -448,6 +460,11 @@ RikkaMinis' agent runtime, automation, and system-integration capabilities
 [multiplatform-markdown-renderer](https://github.com/mikepenz/multiplatform-markdown-renderer),
 [Reorderable](https://github.com/Calvin-LL/Reorderable), [ACRA](https://github.com/ACRA/acra)
 (all Apache-2.0), and [Shizuku](https://github.com/RikkaApps/Shizuku-API) (MIT).
+
+**Platform services** — [Hugging Face](https://huggingface.co) (embedding model
+`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` for the `semantic-memory`
+platform skill, served via its Inference API), [GitHub Actions](https://github.com/features/actions)
+(APK build & release CI).
 
 ---
 

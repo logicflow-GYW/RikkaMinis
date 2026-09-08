@@ -223,6 +223,7 @@
 |---|---|---|
 | [Hermes Agent](https://github.com/NousResearch/hermes-agent)（Nous Research，MIT） | **harness 纪律**：真机事故→守卫模块；prompt cache 不变量；表驱动错误恢复 | repetition_guard 移植（重复中止）、empty_response_guard 确定性空快出、continuation ceiling、session 级 system prompt 冻结、verification_stop 验证门控、预算护栏（turn/provider 上限可见化+Resume）、并发槽 |
 | [OmniBot](https://github.com/omnimind-ai/OmniBot) | 工具并发白名单、回合折叠 UI、自动压缩、记忆 rollup | 工具回合折叠、上下文压缩器（用户消息永不压缩）、子代理系统 |
+| [Operit](https://github.com/AAswordman/Operit)（LGPL-3.0） | 浏览器工具补缺、CI 脚本自测、语义记忆混合评分 | get_console_messages / get_network_requests / file_upload（BrowserTouchPlanner 真实手势）、scripts/scan/test_scan.py、semantic_memory.py v1.1.0 混合评分（skill 层） |
 | [RikkaHub](https://github.com/rikkahub/rikkahub)（AGPL-3.0） | 聊天 UI 交互（左滑抽屉、消息流跟随、输入栏聚焦） | 左滑会话抽屉、极简顶栏、auto-follow 双条件守卫 |
 | [OpenClaw](https://github.com/riley0122/OpenClaw)（参考于上游技能体系） | 技能目录化、触发式 skill | 可扩展技能系统（/var/minis/skills/） |
 
