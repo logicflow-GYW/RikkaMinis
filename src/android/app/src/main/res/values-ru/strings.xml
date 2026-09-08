@@ -482,6 +482,8 @@
     <string name="env_var_field_value">Значение</string>
     <string name="env_var_field_note">Заметка</string>
     <string name="env_var_field_note_placeholder">Необязательная заметка</string>
+    <string name="env_var_field_group">Группа</string>
+    <string name="env_var_field_group_placeholder">напр. Cloudflare / GitHub — пусто = без группы</string>
     <string name="env_var_error_invalid_key">Должно начинаться с буквы, использовать только буквы, цифры и подчёркивания</string>
     <string name="env_var_error_duplicate">Переменная с таким именем уже существует</string>
     <string name="log_title">Журналы</string>

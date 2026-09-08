@@ -275,6 +275,8 @@
     <string name="env_var_field_value">값</string>
     <string name="env_var_field_note">메모</string>
     <string name="env_var_field_note_placeholder">선택 메모</string>
+    <string name="env_var_field_group">그룹</string>
+    <string name="env_var_field_group_placeholder">예: Cloudflare / GitHub — 비우면 미분류</string>
     <string name="env_var_error_invalid_key">문자로 시작하며 문자/숫자/밑줄만 사용 가능</string>
     <string name="env_var_error_duplicate">같은 이름의 변수가 이미 있습니다</string>
     <string name="log_title">로그</string>

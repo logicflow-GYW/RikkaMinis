@@ -1249,6 +1249,8 @@
     <string name="env_var_field_value">值</string>
     <string name="env_var_field_note">備註</string>
     <string name="env_var_field_note_placeholder">可選備註</string>
+    <string name="env_var_field_group">分組</string>
+    <string name="env_var_field_group_placeholder">如 Cloudflare / GitHub，留空則不分組</string>
     <string name="env_var_error_invalid_key">必須以字母開頭，只能使用字母、數字、下劃線</string>
     <string name="env_var_error_duplicate">同名變數已存在</string>
     <string name="log_title">日誌</string>

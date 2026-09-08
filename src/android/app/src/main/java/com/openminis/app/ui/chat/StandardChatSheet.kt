@@ -69,7 +69,10 @@ fun StandardChatSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val configuration = LocalConfiguration.current
-    val sheetHeight = (configuration.screenHeightDp * (heightFraction ?: 1f).coerceIn(0.1f, 1f)).dp
+    // Fit-content (null) caps at the default 0.9 ceiling too — never flush
+    // against the screen top: the chat title bar stays visible above the
+    // sheet when it fully expands.
+    val sheetHeight = (configuration.screenHeightDp * (heightFraction ?: 0.9f).coerceIn(0.1f, 1f)).dp
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,

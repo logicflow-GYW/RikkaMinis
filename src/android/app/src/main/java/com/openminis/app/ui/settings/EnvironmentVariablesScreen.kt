@@ -101,16 +101,26 @@ fun EnvironmentVariablesScreen(
             )
         }
 
-        // All variables render in one flat list. Platform integrations
-        // (GitHub/CF/HF …) are ordinary entries distinguished by their
-        // note — a per-platform card made multi-account setups (e.g.
-        // CF_API_TOKEN / _1 / _2) harder to read, not easier, so it was
-        // removed in favor of the note field.
-        SettingsSection(
-            header = stringResource(R.string.env_var_section_header),
-            footer = stringResource(R.string.env_var_section_footer),
-        ) {
-            if (entries.isEmpty()) {
+        // Variables render grouped by their optional `group` label: each
+        // named group gets its own section header (in first-appearance
+        // order), and entries without a group collect under the generic
+        // "Variables" section rendered last. Platform integrations
+        // (GitHub/CF/HF …) are ordinary entries — a per-platform card
+        // made multi-account setups (e.g. CF_API_TOKEN / _1 / _2)
+        // harder to read, so groups and notes carry that context instead.
+        val groupedEntries = remember(entries) {
+            val groups = LinkedHashMap<String, MutableList<EnvVarRepository.EnvVarEntry>>()
+            for (e in entries) {
+                groups.getOrPut(e.group) { mutableListOf() }.add(e)
+            }
+            groups
+        }
+
+        if (entries.isEmpty()) {
+            SettingsSection(
+                header = stringResource(R.string.env_var_section_header),
+                footer = stringResource(R.string.env_var_section_footer),
+            ) {
                 // Centred empty-state message inside the same card so the
                 // section visually owns it (instead of an empty card +
                 // separately-positioned text block).
@@ -132,64 +142,61 @@ fun EnvironmentVariablesScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-            } else {
-                entries.forEachIndexed { index, entry ->
-                    val isVisible = entry.key in visibleKeys.value
-                    val displayValue = if (isVisible) {
-                        envVarRepository.getValue(entry.key) ?: ""
-                    } else {
-                        "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
-                    }
-                    // iOS parity (EnvironmentVariablesView.swift:139-151): show
-                    // value on one line and the optional note on a second.
-                    // SettingsRow only has one subtitle slot, so concatenate
-                    // with a newline; both render in the same secondary style.
-                    val subtitleText = if (entry.note.isNotEmpty()) {
-                        "$displayValue\n${entry.note}"
-                    } else {
-                        displayValue
-                    }
-                    SettingsRow(
-                        title = entry.key,
-                        subtitle = subtitleText,
-                        showChevron = false,
-                        showDivider = index < entries.size - 1,
-                        onClick = { editEntryId = entry.id },
-                        trailing = {
-                            Row {
-                                IconButton(onClick = {
-                                    visibleKeys.value = if (isVisible)
+            }
+        } else {
+            // Named groups first, in order of first appearance.
+            groupedEntries.forEach { (group, groupEntries) ->
+                if (group.isNotEmpty()) {
+                    SettingsSection(header = group) {
+                        groupEntries.forEachIndexed { index, entry ->
+                            EnvVarListRow(
+                                entry = entry,
+                                envVarRepository = envVarRepository,
+                                visible = entry.key in visibleKeys.value,
+                                showDivider = index < groupEntries.size - 1,
+                                onToggleVisible = {
+                                    visibleKeys.value = if (visibleKeys.value.contains(entry.key))
                                         visibleKeys.value - entry.key
                                     else
                                         visibleKeys.value + entry.key
-                                }) {
-                                    Icon(
-                                        if (isVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                                        contentDescription = stringResource(R.string.env_var_toggle_visibility),
-                                        modifier = Modifier.size(20.dp),
-                                    )
-                                }
-                                IconButton(onClick = {
+                                },
+                                onCopy = {
                                     val v = envVarRepository.getValue(entry.key) ?: ""
                                     clipboardManager.setText(AnnotatedString("${entry.key}=$v"))
-                                }) {
-                                    Icon(
-                                        Icons.Default.ContentCopy,
-                                        contentDescription = stringResource(R.string.common_copy),
-                                        modifier = Modifier.size(20.dp),
-                                    )
-                                }
-                                IconButton(onClick = { deleteEntryId = entry.id }) {
-                                    Icon(
-                                        Icons.Default.Delete,
-                                        contentDescription = stringResource(R.string.common_delete),
-                                        modifier = Modifier.size(20.dp),
-                                        tint = MaterialTheme.colorScheme.error,
-                                    )
-                                }
-                            }
-                        },
-                    )
+                                },
+                                onEdit = { editEntryId = entry.id },
+                                onDelete = { deleteEntryId = entry.id },
+                            )
+                        }
+                    }
+                }
+            }
+            // Uncategorized last, carrying the section footer.
+            groupedEntries[""]?.let { uncategorized ->
+                SettingsSection(
+                    header = stringResource(R.string.env_var_section_header),
+                    footer = stringResource(R.string.env_var_section_footer),
+                ) {
+                    uncategorized.forEachIndexed { index, entry ->
+                        EnvVarListRow(
+                            entry = entry,
+                            envVarRepository = envVarRepository,
+                            visible = entry.key in visibleKeys.value,
+                            showDivider = index < uncategorized.size - 1,
+                            onToggleVisible = {
+                                visibleKeys.value = if (visibleKeys.value.contains(entry.key))
+                                    visibleKeys.value - entry.key
+                                else
+                                    visibleKeys.value + entry.key
+                            },
+                            onCopy = {
+                                val v = envVarRepository.getValue(entry.key) ?: ""
+                                clipboardManager.setText(AnnotatedString("${entry.key}=$v"))
+                            },
+                            onEdit = { editEntryId = entry.id },
+                            onDelete = { deleteEntryId = entry.id },
+                        )
+                    }
                 }
             }
         }
@@ -238,6 +245,67 @@ fun EnvironmentVariablesScreen(
     }
 }
 
+
+@Composable
+private fun EnvVarListRow(
+    entry: EnvVarRepository.EnvVarEntry,
+    envVarRepository: EnvVarRepository,
+    visible: Boolean,
+    showDivider: Boolean,
+    onToggleVisible: () -> Unit,
+    onCopy: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val displayValue = if (visible) {
+        envVarRepository.getValue(entry.key) ?: ""
+    } else {
+        "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
+    }
+    // iOS parity (EnvironmentVariablesView.swift:139-151): show
+    // value on one line and the optional note on a second.
+    // SettingsRow only has one subtitle slot, so concatenate
+    // with a newline; both render in the same secondary style.
+    val subtitleText = if (entry.note.isNotEmpty()) {
+        "$displayValue\n${entry.note}"
+    } else {
+        displayValue
+    }
+    SettingsRow(
+        title = entry.key,
+        subtitle = subtitleText,
+        showChevron = false,
+        showDivider = showDivider,
+        onClick = onEdit,
+        trailing = {
+            Row {
+                IconButton(onClick = onToggleVisible) {
+                    Icon(
+                        if (visible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                        contentDescription = stringResource(R.string.env_var_toggle_visibility),
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+                IconButton(onClick = onCopy) {
+                    Icon(
+                        Icons.Default.ContentCopy,
+                        contentDescription = stringResource(R.string.common_copy),
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+                IconButton(onClick = onDelete) {
+                    Icon(
+                        Icons.Default.Delete,
+                        contentDescription = stringResource(R.string.common_delete),
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun EnvVarFormSheet(
@@ -257,6 +325,7 @@ private fun EnvVarFormSheet(
         mutableStateOf(editEntry?.let { envVarRepository.getValue(it.key) } ?: prefillValue)
     }
     var noteText by remember { mutableStateOf(editEntry?.note ?: prefillNote) }
+    var groupText by remember { mutableStateOf(editEntry?.group ?: "") }
 
     val isEditing = editEntry != null
     val normalizedKey = keyText.trim().uppercase()
@@ -344,6 +413,21 @@ private fun EnvVarFormSheet(
                 singleLine = true,
             )
 
+            // Optional grouping label: entries sharing a label render
+            // together under one section header in the list.
+            Text(
+                text = stringResource(R.string.env_var_field_group),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(6.dp))
+            DialogTextField(
+                value = groupText,
+                onValueChange = { groupText = it },
+                placeholder = stringResource(R.string.env_var_field_group_placeholder),
+                singleLine = true,
+            )
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End,
@@ -354,9 +438,9 @@ private fun EnvVarFormSheet(
                 MinisTextButton(
                     onClick = {
                         val success = if (isEditing) {
-                            envVarRepository.update(editEntry!!.id, keyText, valueText, noteText)
+                            envVarRepository.update(editEntry!!.id, keyText, valueText, noteText, groupText)
                         } else {
-                            envVarRepository.add(keyText, valueText, noteText)
+                            envVarRepository.add(keyText, valueText, noteText, groupText)
                         }
                         if (success) onDismiss()
                     },

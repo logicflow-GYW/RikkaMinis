@@ -35,6 +35,12 @@ class EnvVarRepository(private val context: Context) {
          * mirrors iOS EnvVarEntry.note.
          */
         val note: String = "",
+        /**
+         * Optional grouping label used to organize the variables list (e.g.
+         * "Cloudflare", "GitHub"). Empty string = uncategorized; entries
+         * with the same group render under one section header.
+         */
+        val group: String = "",
         val createdAt: Long = System.currentTimeMillis(),
     )
 
@@ -70,12 +76,12 @@ class EnvVarRepository(private val context: Context) {
 
     // -- CRUD --
 
-    fun add(key: String, value: String, note: String = ""): Boolean {
+    fun add(key: String, value: String, note: String = "", group: String = ""): Boolean {
         val normalizedKey = key.trim().uppercase()
         if (!isValidKey(normalizedKey)) return false
         if (isDuplicateKey(normalizedKey)) return false
 
-        val entry = EnvVarEntry(key = normalizedKey, note = note.trim())
+        val entry = EnvVarEntry(key = normalizedKey, note = note.trim(), group = group.trim())
         _entries.value = _entries.value + entry
         encryptedPrefs.edit().putString(normalizedKey, sanitizeValue(value)).apply()
         saveMetadata()
@@ -83,7 +89,7 @@ class EnvVarRepository(private val context: Context) {
         return true
     }
 
-    fun update(id: String, newKey: String, newValue: String, newNote: String = ""): Boolean {
+    fun update(id: String, newKey: String, newValue: String, newNote: String = "", newGroup: String = ""): Boolean {
         val normalizedKey = newKey.trim().uppercase()
         if (!isValidKey(normalizedKey)) return false
 
@@ -99,7 +105,7 @@ class EnvVarRepository(private val context: Context) {
 
         // Update metadata
         _entries.value = _entries.value.map {
-            if (it.id == id) it.copy(key = normalizedKey, note = newNote.trim()) else it
+            if (it.id == id) it.copy(key = normalizedKey, note = newNote.trim(), group = newGroup.trim()) else it
         }
 
         // Save new value
@@ -144,6 +150,7 @@ class EnvVarRepository(private val context: Context) {
                 obj.put("id", entry.id)
                 obj.put("key", entry.key)
                 if (entry.note.isNotEmpty()) obj.put("note", entry.note)
+                if (entry.group.isNotEmpty()) obj.put("group", entry.group)
                 obj.put("createdAt", entry.createdAt)
                 array.put(obj)
             }
@@ -164,6 +171,7 @@ class EnvVarRepository(private val context: Context) {
                     id = obj.optString("id", UUID.randomUUID().toString()),
                     key = obj.optString("key", ""),
                     note = obj.optString("note", ""),
+                    group = obj.optString("group", ""),
                     createdAt = obj.optLong("createdAt", 0),
                 ))
             }

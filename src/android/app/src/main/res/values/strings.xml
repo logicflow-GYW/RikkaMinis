@@ -622,6 +622,8 @@
     <string name="env_var_field_value">Value</string>
     <string name="env_var_field_note">Note</string>
     <string name="env_var_field_note_placeholder">Optional note</string>
+    <string name="env_var_field_group">Group</string>
+    <string name="env_var_field_group_placeholder">e.g. Cloudflare / GitHub — leave empty for uncategorized</string>
     <string name="env_var_error_invalid_key">Must start with a letter, use only letters/numbers/underscores</string>
     <string name="env_var_error_duplicate">A variable with this name already exists</string>
     <string name="log_title">Logs</string>

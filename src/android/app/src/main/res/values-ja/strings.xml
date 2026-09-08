@@ -275,6 +275,8 @@
     <string name="env_var_field_value">値</string>
     <string name="env_var_field_note">メモ</string>
     <string name="env_var_field_note_placeholder">メモ（任意）</string>
+    <string name="env_var_field_group">グループ</string>
+    <string name="env_var_field_group_placeholder">例: Cloudflare / GitHub — 空欄は未分類</string>
     <string name="env_var_error_invalid_key">英字で始まり、英数字とアンダースコアのみ使用可</string>
     <string name="env_var_error_duplicate">同名の変数が既に存在します</string>
     <string name="log_title">ログ</string>

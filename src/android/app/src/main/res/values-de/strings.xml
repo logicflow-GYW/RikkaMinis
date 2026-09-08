@@ -275,6 +275,8 @@
     <string name="env_var_field_value">Wert</string>
     <string name="env_var_field_note">Notiz</string>
     <string name="env_var_field_note_placeholder">Optionale Notiz</string>
+    <string name="env_var_field_group">Gruppe</string>
+    <string name="env_var_field_group_placeholder">z. B. Cloudflare / GitHub — leer für „Nicht kategorisiert"</string>
     <string name="env_var_error_invalid_key">Muss mit einem Buchstaben beginnen, nur Buchstaben/Zahlen/Unterstriche</string>
     <string name="env_var_error_duplicate">Eine Variable mit diesem Namen existiert bereits</string>
     <string name="log_title">Protokolle</string>
