@@ -631,14 +631,6 @@
     <string name="env_var_privacy_header">隱私</string>
     <string name="env_var_privacy_toggle">隱私模式</string>
     <string name="env_var_privacy_footer">開啟後，shell-execute 輸出中偵測到的環境變數值會在送達模型前被打碼（例如 `sk-1********ajhks`）。少於 8 個字元的值會被全部替換為 `*`。聊天中使用者可見的輸出維持不變。</string>
-    <string name="env_var_platform_header">平台整合</string>
-    <string name="env_var_platform_tier_2">完整</string>
-    <string name="env_var_platform_tier_1">唯讀</string>
-    <string name="env_var_platform_tier_0">需設定</string>
-    <string name="env_var_platform_var_configured">已設定</string>
-    <string name="env_var_platform_var_missing">點按新增 %1$s</string>
-    <string name="env_var_platform_var_add_title">新增 %1$s</string>
-    <string name="env_var_other_header">其他環境變數</string>
 
     <!-- T288 — 日誌 / 設定變更 -->
     <string name="logs_config_used_count">%1$d / %2$d 已使用</string>

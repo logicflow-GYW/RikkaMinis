@@ -322,14 +322,6 @@
     <string name="env_var_field_note_placeholder">可选备注</string>
     <string name="env_var_error_invalid_key">必须以字母开头，只能使用字母、数字、下划线</string>
     <string name="env_var_error_duplicate">同名变量已存在</string>
-    <string name="env_var_platform_header">平台集成</string>
-    <string name="env_var_platform_tier_2">完整</string>
-    <string name="env_var_platform_tier_1">只读</string>
-    <string name="env_var_platform_tier_0">需配置</string>
-    <string name="env_var_platform_var_configured">已配置</string>
-    <string name="env_var_platform_var_missing">点按添加 %1$s</string>
-    <string name="env_var_platform_var_add_title">添加 %1$s</string>
-    <string name="env_var_other_header">其他环境变量</string>
     <string name="log_title">日志</string>
     <string name="log_share_all">全部分享</string>
     <string name="log_section_logging">日志</string>

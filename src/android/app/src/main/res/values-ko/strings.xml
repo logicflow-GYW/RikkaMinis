@@ -276,14 +276,6 @@
     <string name="env_var_field_note">메모</string>
     <string name="env_var_field_note_placeholder">선택 메모</string>
     <string name="env_var_error_invalid_key">문자로 시작하며 문자/숫자/밑줄만 사용 가능</string>
-    <string name="env_var_platform_header">Platform Integrations</string>
-    <string name="env_var_platform_tier_2">Complete</string>
-    <string name="env_var_platform_tier_1">Read-only</string>
-    <string name="env_var_platform_tier_0">Needs config</string>
-    <string name="env_var_platform_var_configured">Configured</string>
-    <string name="env_var_platform_var_missing">Tap to add %1$s</string>
-    <string name="env_var_platform_var_add_title">Add %1$s</string>
-    <string name="env_var_other_header">Other Environment Variables</string>
     <string name="env_var_error_duplicate">같은 이름의 변수가 이미 있습니다</string>
     <string name="log_title">로그</string>
     <string name="log_share_all">전체 공유</string>
