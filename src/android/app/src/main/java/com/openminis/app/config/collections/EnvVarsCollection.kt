@@ -107,7 +107,11 @@ class EnvVarsCollection(
                 // alongside it. The repo's [update] keeps the secret
                 // in place when the same key is provided.
                 val currentValue = repo.getValue(e.key) ?: ""
-                repo.update(e.id, e.key, currentValue, s)
+                // [T-envvar-group-sync] pass the entry's existing group
+                // through: update()'s newGroup parameter defaults to ""
+                // (clear), so an unqualified note write would silently
+                // flatten the user's grouping label.
+                repo.update(e.id, e.key, currentValue, s, e.group)
             },
         )
 }

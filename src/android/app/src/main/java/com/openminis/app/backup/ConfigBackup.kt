@@ -244,6 +244,11 @@ object ConfigBackup {
                 envVars.put(JSONObject().apply {
                     put("key", entry.key)
                     put("note", entry.note)
+                    // [T-envvar-group-sync] group rides the metadata (never
+                    // secret-gated): a restore without it silently flattens
+                    // the user's grouping, which is exactly the
+                    // field-evap class [T-fix-backup-field-evap] guards.
+                    if (entry.group.isNotEmpty()) put("group", entry.group)
                     if (includeSecrets) {
                         envVarRepo.getValue(entry.key)?.let { put("value", it) }
                     }
@@ -879,7 +884,11 @@ object ConfigBackup {
                 // only has to refill the secret rather than recreate the entry.
                 val value = ev.optString("value", "")
                 val note = ev.optString("note", "")
-                if (envVarRepo.add(key, value, note)) {
+                // [T-envvar-group-sync] restore the grouping label when the
+                // backup carries it; old backups fall back to "" (uncategorized)
+                // exactly like a fresh entry.
+                val group = ev.optString("group", "")
+                if (envVarRepo.add(key, value, note, group)) {
                     envVarsImported++
                     if (value.isEmpty()) {
                         skipped.add("env var \"$key\": restored without value — re-enter it")

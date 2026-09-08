@@ -89,7 +89,19 @@ class EnvVarRepository(private val context: Context) {
         return true
     }
 
-    fun update(id: String, newKey: String, newValue: String, newNote: String = "", newGroup: String = ""): Boolean {
+    /**
+     * Update an entry. [newGroup] is tri-state by design (same shape as the
+     * note semantics callers rely on):
+     *   - `null`  (default) — keep the entry's current group untouched;
+     *   - `""`            — clear the group (back to uncategorized);
+     *   - non-empty       — set/replace the group.
+     * The default is deliberately "keep", not "": a caller that updates only
+     * the note (e.g. the minis-config envvars collection) must not be able to
+     * silently flatten the user's grouping by omitting the parameter — the
+     * field-evap recurrence class ([T-fix-backup-field-evap],
+     * [T-envvar-group-sync]) is exactly what this guards.
+     */
+    fun update(id: String, newKey: String, newValue: String, newNote: String = "", newGroup: String? = null): Boolean {
         val normalizedKey = newKey.trim().uppercase()
         if (!isValidKey(normalizedKey)) return false
 
@@ -105,7 +117,7 @@ class EnvVarRepository(private val context: Context) {
 
         // Update metadata
         _entries.value = _entries.value.map {
-            if (it.id == id) it.copy(key = normalizedKey, note = newNote.trim(), group = newGroup.trim()) else it
+            if (it.id == id) it.copy(key = normalizedKey, note = newNote.trim(), group = (newGroup ?: it.group).trim()) else it
         }
 
         // Save new value
