@@ -1317,6 +1317,13 @@
     <string name="auto_backup_run_now">Создать резервную копию сейчас</string>
     <string name="auto_backup_last_run">Последняя копия: %1$s</string>
     <string name="auto_backup_never">Ещё не выполнялось</string>
+    <string name="auto_backup_remote">Удалённые автоматические копии</string>
+    <string name="auto_backup_remote_sub">Восстановить, загрузить или удалить автоматические копии на вашем WebDAV-сервере</string>
+    <string name="auto_backup_remote_empty">На сервере пока нет автоматических копий. Копии, отправленные с других устройств (тот же WebDAV-путь), появятся здесь.</string>
+    <string name="auto_backup_remote_fetch">Загрузить локально</string>
+    <string name="auto_backup_fetched">Автоматическая копия загружена локально</string>
+    <string name="auto_backup_remote_path">Путь: %1$s</string>
+    <string name="webdav_remote_path">Путь: %1$s</string>
     <string name="auto_backup_empty">Автоматических копий пока нет.</string>
     <string name="auto_backup_restore_hint">Нажмите на копию для восстановления (сначала будет сохранён снимок текущего состояния):</string>
     <string name="backup_restored_notify_body">Восстановлено %1$d провайдеров и %2$d групп.</string>

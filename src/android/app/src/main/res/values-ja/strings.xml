@@ -1170,6 +1170,13 @@
     <string name="auto_backup_run_now">今すぐバックアップ</string>
     <string name="auto_backup_last_run">前回のバックアップ: %1$s</string>
     <string name="auto_backup_never">未実行</string>
+    <string name="auto_backup_remote">サーバー上の自動バックアップ</string>
+    <string name="auto_backup_remote_sub">WebDAV サーバー上の自動バックアップを復元・取得・削除</string>
+    <string name="auto_backup_remote_empty">サーバーに自動バックアップはまだありません。他のデバイス（同じ WebDAV パス）からアップロードされた自動バックアップがここに表示されます。</string>
+    <string name="auto_backup_remote_fetch">ローカルに取得</string>
+    <string name="auto_backup_fetched">自動バックアップをローカルに取得しました</string>
+    <string name="auto_backup_remote_path">パス: %1$s</string>
+    <string name="webdav_remote_path">パス: %1$s</string>
     <string name="auto_backup_empty">自動バックアップはまだありません。</string>
     <string name="auto_backup_restore_hint">バックアップをタップして復元（現在の状態のスナップショットが先に保存されます）:</string>
     <string name="backup_restored_notify_body">%1$d 個のプロバイダーと %2$d 個のグループを復元しました。</string>

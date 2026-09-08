@@ -1162,6 +1162,13 @@
     <string name="auto_backup_run_now">지금 백업</string>
     <string name="auto_backup_last_run">마지막 백업: %1$s</string>
     <string name="auto_backup_never">아직 실행 안 됨</string>
+    <string name="auto_backup_remote">서버의 자동 백업</string>
+    <string name="auto_backup_remote_sub">WebDAV 서버의 자동 백업 복원, 가져오기 또는 삭제</string>
+    <string name="auto_backup_remote_empty">서버에 아직 자동 백업이 없습니다. 다른 기기(동일한 WebDAV 경로)에서 업로드한 자동 백업이 여기에 표시됩니다.</string>
+    <string name="auto_backup_remote_fetch">로컬로 가져오기</string>
+    <string name="auto_backup_fetched">자동 백업을 로컬로 가져왔습니다</string>
+    <string name="auto_backup_remote_path">경로: %1$s</string>
+    <string name="webdav_remote_path">경로: %1$s</string>
     <string name="auto_backup_empty">자동 백업이 아직 없습니다.</string>
     <string name="auto_backup_restore_hint">백업을 탭하여 복원(먼저 현재 상태 스냅샷이 저장됨):</string>
     <string name="backup_restored_notify_body">%1$d개 제공자와 %2$d개 그룹을 복원했습니다.</string>

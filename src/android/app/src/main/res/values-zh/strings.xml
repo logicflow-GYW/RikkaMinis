@@ -1084,6 +1084,13 @@
     <string name="auto_backup_run_now">立即备份</string>
     <string name="auto_backup_last_run">上次备份：%1$s</string>
     <string name="auto_backup_never">尚未运行</string>
+    <string name="auto_backup_remote">远端自动备份</string>
+    <string name="auto_backup_remote_sub">恢复、拉取或删除 WebDAV 服务器上的自动备份</string>
+    <string name="auto_backup_remote_empty">远端还没有自动备份。其他设备推送的自动备份（同一 WebDAV 路径）会显示在这里。</string>
+    <string name="auto_backup_remote_fetch">拉取到本地</string>
+    <string name="auto_backup_fetched">自动备份已拉取到本地</string>
+    <string name="auto_backup_remote_path">路径：%1$s</string>
+    <string name="webdav_remote_path">路径：%1$s</string>
     <string name="auto_backup_empty">暂无自动备份文件。</string>
     <string name="auto_backup_restore_hint">点击备份文件即可恢复（恢复前会先保存当前状态快照）：</string>
     <string name="backup_section_local">本地备份</string>

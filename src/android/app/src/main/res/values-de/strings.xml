@@ -1163,6 +1163,13 @@
     <string name="auto_backup_run_now">Jetzt sichern</string>
     <string name="auto_backup_last_run">Letzte Sicherung: %1$s</string>
     <string name="auto_backup_never">Noch nie ausgeführt</string>
+    <string name="auto_backup_remote">Automatische Sicherungen auf dem Server</string>
+    <string name="auto_backup_remote_sub">Automatische Sicherungen auf Ihrem WebDAV-Server wiederherstellen, abrufen oder löschen</string>
+    <string name="auto_backup_remote_empty">Noch keine automatischen Sicherungen auf dem Server. Sicherungen, die von Ihren anderen Geräten (gleicher WebDAV-Pfad) hochgeladen wurden, erscheinen hier.</string>
+    <string name="auto_backup_remote_fetch">Lokal abrufen</string>
+    <string name="auto_backup_fetched">Automatische Sicherung lokal abgerufen</string>
+    <string name="auto_backup_remote_path">Pfad: %1$s</string>
+    <string name="webdav_remote_path">Pfad: %1$s</string>
     <string name="auto_backup_empty">Noch keine automatischen Sicherungen.</string>
     <string name="auto_backup_restore_hint">Tippen Sie auf eine Sicherung zum Wiederherstellen (zuerst wird ein Schnappschuss des aktuellen Zustands gespeichert):</string>
     <string name="backup_restored_notify_body">%1$d Anbieter und %2$d Gruppen wiederhergestellt.</string>

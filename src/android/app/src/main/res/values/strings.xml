@@ -1238,6 +1238,13 @@
     <string name="auto_backup_run_now">Back up now</string>
     <string name="auto_backup_last_run">Last backup: %1$s</string>
     <string name="auto_backup_never">Never run yet</string>
+    <string name="auto_backup_remote">Remote automatic backups</string>
+    <string name="auto_backup_remote_sub">Restore, fetch or delete automatic backups on your WebDAV server</string>
+    <string name="auto_backup_remote_empty">No remote automatic backups yet. Copies pushed by your other devices (same WebDAV path) appear here.</string>
+    <string name="auto_backup_remote_fetch">Fetch to local</string>
+    <string name="auto_backup_fetched">Automatic backup fetched to local</string>
+    <string name="auto_backup_remote_path">Path: %1$s</string>
+    <string name="webdav_remote_path">Path: %1$s</string>
     <string name="auto_backup_empty">No automatic backups yet.</string>
     <string name="auto_backup_restore_hint">Tap a backup to restore it (a snapshot of the current state is saved first):</string>
     <string name="backup_section_local">Local backup</string>

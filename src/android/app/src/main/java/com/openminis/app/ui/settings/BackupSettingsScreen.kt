@@ -177,6 +177,17 @@ fun BackupSettingsScreen(
     var autoBackupLastRun by remember {
         mutableStateOf(com.openminis.app.backup.AutoBackupManager.lastRunLabel(context))
     }
+    // [T-auto-backup-remote-dir] Remote automatic-backup management state:
+    // the WebDAV `auto/` subdirectory listing (plus legacy root stragglers),
+    // managed from a dedicated dialog inside the auto-backup section so the
+    // two backup kinds never mix in one list.
+    var autoRemoteOpen by remember { mutableStateOf(false) }
+    var autoRemoteItems by remember {
+        mutableStateOf<List<WebDavSync.AutoBackupEntry>>(emptyList())
+    }
+    var autoRemoteLoading by remember { mutableStateOf(false) }
+    var autoRemoteError by remember { mutableStateOf<String?>(null) }
+    var autoDeletePending by remember { mutableStateOf<WebDavSync.AutoBackupEntry?>(null) }
     // [fix-audit-p0-2] Local pre-restore snapshots, newest first. They used to
     // be written with no UI to list or restore them — a promise of rollback
     // with no way to roll back. Now listed here and restorable via the same
@@ -446,6 +457,32 @@ fun BackupSettingsScreen(
         }
     }
 
+    // Fetch the remote automatic-backup list and open its management dialog.
+    // Same guard pattern as openRemoteList: the auto folder lives under the
+    // SAME configured WebDAV path as manual backups (`<path>/auto/`), so a
+    // missing WebDAV config is reported the same way.
+    val openAutoRemoteList: () -> Unit = openAutoRemoteList@{
+        val cfg = webDavConfig
+        if (cfg == null) {
+            errorMessage = context.getString(R.string.webdav_configure_first)
+            return@openAutoRemoteList
+        }
+        autoRemoteOpen = true
+        autoRemoteLoading = true
+        autoRemoteError = null
+        scope.launch {
+            try {
+                autoRemoteItems = withContext(Dispatchers.IO) {
+                    WebDavSync.listAutoBackupEntries(cfg, webDavHttpClient)
+                }
+            } catch (t: Throwable) {
+                autoRemoteError = webDavErrorMessage(context, t)
+            } finally {
+                autoRemoteLoading = false
+            }
+        }
+    }
+
     // top-level page: rely on system back gesture / bottom nav (no back arrow)
     SettingsScaffold(title = stringResource(R.string.settings_backup), onBack = null) {
         // [T-auto-backup-assets] Daily automatic asset backup — see
@@ -514,6 +551,13 @@ fun BackupSettingsScreen(
                     }
                 }),
                 showDivider = false,
+            )
+            SettingsRow(
+                title = stringResource(R.string.auto_backup_remote),
+                subtitle = stringResource(R.string.auto_backup_remote_sub),
+                icon = Icons.Filled.Cloud,
+                onClick = if (operationBusy || autoBackupRunning) null else openAutoRemoteList,
+                showDivider = true,
             )
             if (autoBackupFiles.isEmpty()) {
                 Text(
@@ -887,6 +931,146 @@ fun BackupSettingsScreen(
                 onDelete = { item -> deletePending = item },
             )
         }
+    }
+
+    // Remote automatic-backup management dialog: list, restore, fetch,
+    // delete. Mirrors the manual remote sheet but scoped to the `auto/`
+    // folder (plus legacy root stragglers) so the two backup kinds never
+    // mix in one list. Restore goes through the exact same
+    // restoreWithSnapshot path as every other restore (snapshot first,
+    // rollback-able). Fetch downloads the copy into the local auto-backup
+    // list, where it behaves like a locally-generated automatic backup.
+    if (autoRemoteOpen) {
+        webDavConfig?.let { cfg ->
+            WebDavAutoDialog(
+                config = cfg,
+                items = autoRemoteItems,
+                loading = autoRemoteLoading,
+                error = autoRemoteError,
+                busy = operationBusy,
+                onDismiss = { autoRemoteOpen = false },
+                onRefresh = openAutoRemoteList,
+                onRestore = { entry ->
+                    // Same gate rationale as the manual sheet: do NOT claim
+                    // the global operationBusy across the network gap —
+                    // restoreWithSnapshot is the single claim entry.
+                    if (!operationBusy) {
+                        autoRemoteLoading = true
+                        application.applicationScope.launch {
+                            try {
+                                val json = withContext(Dispatchers.IO) {
+                                    WebDavSync.restoreAuto(cfg, entry, webDavHttpClient)
+                                }
+                                autoRemoteOpen = false
+                                restoreWithSnapshot(json)
+                            } catch (t: Throwable) {
+                                errorMessage = webDavErrorMessage(context, t)
+                                notifier.notifyWorkCompleted(
+                                    tag = "webdav-restore",
+                                    title = context.getString(R.string.webdav_notify_title_failed),
+                                    body = webDavErrorMessage(context, t),
+                                )
+                            } finally {
+                                autoRemoteLoading = false
+                            }
+                        }
+                    }
+                },
+                onFetch = { entry ->
+                    if (!operationBusy) {
+                        autoRemoteLoading = true
+                        scope.launch {
+                            try {
+                                val json = withContext(Dispatchers.IO) {
+                                    WebDavSync.restoreAuto(cfg, entry, webDavHttpClient)
+                                }
+                                val dir = File(context.filesDir, "backup-autos").apply { mkdirs() }
+                                // Remote `rikkaminis-backup-auto-<stamp>.json`
+                                // → local `rikkaminis-auto-<stamp>.json` so it
+                                // joins the local auto-backup rotation and can
+                                // be restored offline any time.
+                                val stamp = entry.item.displayName
+                                    .removePrefix(WebDavSync.AUTO_BACKUP_PREFIX)
+                                    .removeSuffix(WebDavSync.BACKUP_SUFFIX)
+                                val local = File(
+                                    dir,
+                                    com.openminis.app.backup.AutoBackupManager.LOCAL_FILE_PREFIX + stamp + ".json",
+                                )
+                                withContext(Dispatchers.IO) { local.writeText(json) }
+                                // Refresh the local auto-backup list so the
+                                // fetched copy shows up immediately (state
+                                // write back on Main — scope.launch is Main).
+                                autoBackupFiles =
+                                    withContext(Dispatchers.IO) {
+                                        com.openminis.app.backup.AutoBackupManager.listLocal(context)
+                                    }
+                                android.widget.Toast.makeText(
+                                    context,
+                                    context.getString(R.string.auto_backup_fetched),
+                                    android.widget.Toast.LENGTH_SHORT,
+                                ).show()
+                            } catch (t: Throwable) {
+                                errorMessage = webDavErrorMessage(context, t)
+                            } finally {
+                                autoRemoteLoading = false
+                            }
+                            // Refresh the remote list only AFTER the busy flag
+                            // is cleared — openAutoRemoteList() re-arms it and
+                            // fires its own async load, so ordering matters
+                            // (finally above would otherwise clobber it).
+                            openAutoRemoteList()
+                        }
+                    }
+                },
+                onDelete = { entry -> autoDeletePending = entry },
+            )
+        }
+    }
+
+    // Auto-backup delete confirmation — destructive, remote, irreversible.
+    autoDeletePending?.let { entry ->
+        AlertDialog(
+            onDismissRequest = { autoDeletePending = null },
+            title = { Text(stringResource(R.string.webdav_delete_confirm_title)) },
+            text = {
+                Text(stringResource(R.string.webdav_delete_confirm_body, entry.item.displayName))
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val cfg = webDavConfig ?: return@TextButton
+                        autoDeletePending = null
+                        operationBusy = true
+                        scope.launch {
+                            try {
+                                withContext(Dispatchers.IO) {
+                                    WebDavSync.deleteBackupFile(
+                                        cfg, entry.item, webDavHttpClient, subdir = entry.subdir,
+                                    )
+                                }
+                                Toast.makeText(
+                                    context,
+                                    context.getString(R.string.webdav_deleted),
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                                openAutoRemoteList()
+                            } catch (t: Throwable) {
+                                errorMessage = webDavErrorMessage(context, t)
+                            } finally {
+                                operationBusy = false
+                            }
+                        }
+                    },
+                ) {
+                    Text(stringResource(R.string.webdav_delete))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { autoDeletePending = null }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
     }
 
     // Delete confirmation — destructive, remote, irreversible.
@@ -1416,6 +1600,133 @@ private fun WebDavRemoteDialog(
                         }
                     }
                 }
+                // Footer: the configured path — the #1 cross-device gotcha is
+                // two devices pointing at different WebDAV paths, which makes
+                // the other device's files silently invisible.
+                Text(
+                    stringResource(R.string.webdav_remote_path, config.path),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.backup_ok))
+            }
+        },
+    )
+}
+
+@Composable
+private fun WebDavAutoDialog(
+    config: WebDavConfig,
+    items: List<WebDavSync.AutoBackupEntry>,
+    loading: Boolean,
+    error: String?,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onRefresh: () -> Unit,
+    onRestore: (WebDavSync.AutoBackupEntry) -> Unit,
+    onFetch: (WebDavSync.AutoBackupEntry) -> Unit,
+    onDelete: (WebDavSync.AutoBackupEntry) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.auto_backup_remote)) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                if (loading) {
+                    Row(
+                        modifier = Modifier.padding(vertical = 16.dp),
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.width(28.dp))
+                    }
+                } else {
+                    error?.let { message ->
+                        Text(
+                            message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        TextButton(onClick = onRefresh, enabled = !busy) {
+                            Text(stringResource(R.string.webdav_retry))
+                        }
+                    } ?: if (items.isEmpty()) {
+                        Text(
+                            stringResource(R.string.auto_backup_remote_empty),
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(vertical = 16.dp),
+                        )
+                    } else {
+                        LazyColumn {
+                            // Same stamp can theoretically exist in both the
+                            // auto/ subdir and the legacy root — key on the
+                            // location-qualified name.
+                            items(items, key = { it.item.displayName + it.subdir }) { entry ->
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 8.dp),
+                                ) {
+                                    Text(
+                                        text = entry.item.displayName,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1,
+                                    )
+                                    Text(
+                                        text = "${formatSize(entry.item.size)} · ${formatInstant(entry.item.lastModified)}" +
+                                            if (entry.subdir.isBlank()) " · root" else "",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Row(
+                                        modifier = Modifier.align(androidx.compose.ui.Alignment.End),
+                                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                                    ) {
+                                        TextButton(
+                                            onClick = { onFetch(entry) },
+                                            enabled = !busy,
+                                        ) {
+                                            Text(stringResource(R.string.auto_backup_remote_fetch))
+                                        }
+                                        TextButton(
+                                            onClick = { onRestore(entry) },
+                                            enabled = !busy,
+                                        ) {
+                                            Text(stringResource(R.string.webdav_restore))
+                                        }
+                                        TextButton(
+                                            onClick = { onDelete(entry) },
+                                            enabled = !busy,
+                                        ) {
+                                            Text(
+                                                stringResource(R.string.webdav_delete),
+                                                color = MaterialTheme.colorScheme.error,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Footer: the configured path — the #1 cross-device gotcha is
+                // two devices pointing at different WebDAV paths, which makes
+                // the other device's files silently invisible.
+                Text(
+                    stringResource(R.string.auto_backup_remote_path, config.path),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
             }
         },
         confirmButton = {

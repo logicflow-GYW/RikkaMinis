@@ -88,10 +88,11 @@ object WebDavSync {
 
     /**
      * [T-auto-backup-assets] Push an automatic backup under its own
-     * `rikkaminis-backup-auto-*` name so [pruneAutoBackups] can rotate only
-     * auto-created copies and never touch curated manual uploads. Auto
-     * backups still match [listBackupFiles]'s prefix filter, so they appear
-     * in the remote list and restore through the normal flow.
+     * `rikkaminis-backup-auto-*` name into the [AUTO_SUBDIR] subdirectory
+     * (auto-created on demand), so [pruneAutoBackups] rotates only
+     * auto-created copies and never touches curated manual uploads. Auto
+     * backups are listed by [listAutoBackupEntries] and restore through the
+     * normal flow.
      */
     fun backupAuto(
         config: WebDavConfig,
@@ -100,11 +101,12 @@ object WebDavSync {
     ): String {
         val dav = WebDavClient(config, client)
         dav.ensureCollectionExists()
+        dav.ensureCollectionExists(AUTO_SUBDIR)
         val name = "rikkaminis-backup-auto-${
             java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
                 .format(java.util.Date())
         }.json"
-        dav.put(name, payload.toByteArray(Charsets.UTF_8), "application/json")
+        dav.put("$AUTO_SUBDIR/$name", payload.toByteArray(Charsets.UTF_8), "application/json")
         return name
     }
 
@@ -112,11 +114,23 @@ object WebDavSync {
      *  [BACKUP_PREFIX], distinct from manual uploads by the `auto-` token). */
     const val AUTO_BACKUP_PREFIX = "rikkaminis-backup-auto-"
 
+    /** [T-auto-backup-assets] Automatic backups live in their own WebDAV
+     *  subdirectory (sibling of [SYNC_SUBDIR]) so machine-generated daily
+     *  copies never mix with the curated manual backups in the backup root,
+     *  and so a second device can manage the same folder predictably.
+     *  Copies pushed by older builds (flat `rikkaminis-backup-auto-*` in the
+     *  root) are still listed by [listAutoBackupEntries] for
+     *  restore/delete/fetch, but new pushes always land here. */
+    const val AUTO_SUBDIR = "auto"
+
     /**
      * [T-auto-backup-assets] Delete remote auto-backup copies beyond the
-     * newest [keep]. Only files under [AUTO_BACKUP_PREFIX] are eligible —
-     * manual `rikkaminis-backup-*` uploads are never pruned. Best-effort
-     * (Pure JVM: a deletion failure is swallowed; the next run retries).
+     * newest [keep]. Only files under [AUTO_SUBDIR] are eligible — manual
+     * `rikkaminis-backup-*` uploads are never pruned, and neither are the
+     * legacy flat `rikkaminis-backup-auto-*` stragglers still sitting in the
+     * backup root (pushed by pre-subdir builds; the user may want to inspect
+     * or migrate those by hand). Best-effort (a deletion failure is
+     * swallowed; the next run retries).
      */
     fun pruneAutoBackups(
         config: WebDavConfig,
@@ -124,13 +138,13 @@ object WebDavSync {
         client: OkHttpClient = WebDavClient.defaultClient(),
     ): Int {
         val dav = WebDavClient(config, client)
-        val stale = listBackupFiles(config, client)
-            .filter { it.displayName.startsWith(AUTO_BACKUP_PREFIX) }
-            .sortedByDescending { it.lastModified }
+        val stale = listAutoBackupEntries(config, client)
+            .filter { it.subdir == AUTO_SUBDIR }
             .drop(keep)
         var deleted = 0
-        for (item in stale) {
-            if (runCatching { dav.delete(item.href) }.isSuccess) deleted++
+        for (entry in stale) {
+            val path = "${entry.subdir}/${entry.item.displayName}"
+            if (runCatching { dav.delete(path) }.isSuccess) deleted++
         }
         return deleted
     }
@@ -138,7 +152,10 @@ object WebDavSync {
     /** How many auto-backup copies to keep on the remote (and locally). */
     const val AUTO_BACKUP_KEEP = 7
 
-    /** Remote backups, newest first. */
+    /** Remote *manual* backups, newest first. Automatic backups
+     *  ([AUTO_BACKUP_PREFIX]) are deliberately excluded — they live under
+     *  [AUTO_SUBDIR] and are managed through [listAutoBackupEntries], so the
+     *  two kinds never mix in one list. */
     fun listBackupFiles(
         config: WebDavConfig,
         client: OkHttpClient = WebDavClient.defaultClient(),
@@ -150,16 +167,10 @@ object WebDavSync {
                     !it.isCollection &&
                         (it.displayName.startsWith(BACKUP_PREFIX) ||
                             it.displayName.startsWith(LEGACY_BACKUP_PREFIX)) &&
+                        !it.displayName.startsWith(AUTO_BACKUP_PREFIX) &&
                         it.displayName.endsWith(BACKUP_SUFFIX)
                 }
-                .map {
-                    WebDavBackupItem(
-                        href = it.href,
-                        displayName = it.displayName,
-                        size = it.contentLength,
-                        lastModified = it.lastModified ?: Instant.EPOCH,
-                    )
-                }
+                .map { resourceToBackupItem(it) }
                 .sortedByDescending { it.lastModified }
         } catch (e: WebDavException) {
             // [T-backup-list-nomkcol] A read operation must not create the
@@ -168,6 +179,72 @@ object WebDavSync {
             if (e.statusCode == 404) emptyList() else throw e
         }
     }
+
+    /** An automatic backup located on the server: the listing entry plus the
+     *  subdirectory it lives in ("" = backup root, for copies pushed by
+     *  older builds before the [AUTO_SUBDIR] move). */
+    data class AutoBackupEntry(
+        val item: WebDavBackupItem,
+        val subdir: String,
+    )
+
+    /** Remote automatic backups, newest first: files under [AUTO_SUBDIR]
+     *  plus any `rikkaminis-backup-auto-*` stragglers still in the backup
+     *  root (pushed before the subdir move — kept visible so a second
+     *  device can still restore/fetch/delete them). Returns an empty list
+     *  when the folder has none yet. */
+    fun listAutoBackupEntries(
+        config: WebDavConfig,
+        client: OkHttpClient = WebDavClient.defaultClient(),
+    ): List<AutoBackupEntry> {
+        val dav = WebDavClient(config, client)
+        val inAuto = try {
+            dav.list(AUTO_SUBDIR)
+                .filter {
+                    !it.isCollection &&
+                        it.displayName.startsWith(AUTO_BACKUP_PREFIX) &&
+                        it.displayName.endsWith(BACKUP_SUFFIX)
+                }
+                .map { AutoBackupEntry(resourceToBackupItem(it), AUTO_SUBDIR) }
+        } catch (e: WebDavException) {
+            if (e.statusCode == 404) emptyList() else throw e
+        }
+        val legacyInRoot = try {
+            dav.list()
+                .filter {
+                    !it.isCollection &&
+                        it.displayName.startsWith(AUTO_BACKUP_PREFIX) &&
+                        it.displayName.endsWith(BACKUP_SUFFIX)
+                }
+                .map { AutoBackupEntry(resourceToBackupItem(it), "") }
+        } catch (e: WebDavException) {
+            if (e.statusCode == 404) emptyList() else throw e
+        }
+        return (inAuto + legacyInRoot).sortedByDescending { it.item.lastModified }
+    }
+
+    /** Download a remote automatic backup (see [listAutoBackupEntries]) and
+     *  return its JSON document, ready for [ConfigBackup.import] or for
+     *  saving as a local automatic-backup copy. */
+    fun restoreAuto(
+        config: WebDavConfig,
+        entry: AutoBackupEntry,
+        client: OkHttpClient = WebDavClient.defaultClient(),
+    ): String {
+        val path = if (entry.subdir.isBlank()) entry.item.displayName
+        else "${entry.subdir}/${entry.item.displayName}"
+        return WebDavClient(config, client)
+            .get(path)
+            .toString(Charsets.UTF_8)
+    }
+
+    private fun resourceToBackupItem(it: WebDavResourceInfo): WebDavBackupItem =
+        WebDavBackupItem(
+            href = it.href,
+            displayName = it.displayName,
+            size = it.contentLength,
+            lastModified = it.lastModified ?: Instant.EPOCH,
+        )
 
     /** Download a remote backup and return its JSON document, ready for
      *  [ConfigBackup.import]. */
