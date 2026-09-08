@@ -5,6 +5,9 @@ import com.openminis.app.ui.components.DialogTextField
 import com.openminis.app.ui.components.MinisTextButton
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -245,7 +248,10 @@ private fun EnvVarFormSheet(
     prefillValue: String = "",
     prefillNote: String = "",
 ) {
-    val sheetState = rememberModalBottomSheetState()
+    // skipPartiallyExpanded: without it the sheet opens at the half detent
+    // and the user must drag it up to reach the value/note fields and the
+    // save button. Open fully instead — the form is a single screenful.
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var keyText by remember { mutableStateOf(editEntry?.key ?: prefillKey) }
     var valueText by remember {
         mutableStateOf(editEntry?.let { envVarRepository.getValue(it.key) } ?: prefillValue)
@@ -271,6 +277,12 @@ private fun EnvVarFormSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                // Scrolling + imePadding: when the keyboard opens over the
+                // value/note fields the form can exceed the sheet height on
+                // small screens — scroll instead of clipping the save row,
+                // and let the sheet ride above the IME.
+                .verticalScroll(rememberScrollState())
+                .imePadding()
                 .padding(horizontal = 16.dp, vertical = 8.dp)
                 .padding(bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
