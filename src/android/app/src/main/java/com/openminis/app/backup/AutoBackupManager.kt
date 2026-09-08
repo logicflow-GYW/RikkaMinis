@@ -71,6 +71,15 @@ object AutoBackupManager {
         runAsync(context.applicationContext)
     }
 
+    /** [audit-0908] Single-flight guard. Two overlapping runs would race on
+     *  the same-second filename (`yyyyMMdd-HHmmss`) and interleave two
+     *  writers into one corrupt JSON — silent damage the user only discovers
+     *  on restore day. Overlap windows are real: a quick double
+     *  background→foreground transition, or the foreground beat landing while
+     *  the settings screen's "back up now" is still running (or vice versa).
+     *  A run that lands while one is in flight just joins it silently. */
+    private val inFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
     /** Trigger one automatic backup now (ignores the daily gate). */
     fun runAsync(context: Context): kotlinx.coroutines.Job? {
         val app = context.applicationContext as? MinisApp ?: return null
@@ -87,6 +96,19 @@ object AutoBackupManager {
      *  screen can drive it inside its own gate/scope and refresh UI state
      *  afterwards. Throws on failure — callers decide how to surface it. */
     suspend fun runNow(app: MinisApp) {
+        // [audit-0908] Single-flight entry (see inFlight). CAS failure means
+        // a backup is already running on another path — join it by returning.
+        // KEY_LAST_RUN is then left unset, so tomorrow's foreground beat
+        // retries: a skipped beat self-heals, a corrupt file does not.
+        if (!inFlight.compareAndSet(false, true)) return
+        try {
+            runLocked(app)
+        } finally {
+            inFlight.set(false)
+        }
+    }
+
+    private suspend fun runLocked(app: MinisApp) {
         val payload = ConfigBackup.export(
                 providerRepo = app.providerRepository,
                 includeSecrets = true,

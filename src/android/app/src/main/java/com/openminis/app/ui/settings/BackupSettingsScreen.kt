@@ -948,11 +948,21 @@ fun BackupSettingsScreen(
                 TextButton(
                     onClick = {
                         snapshotRestoreTarget = null
-                        val content = runCatching { file.readText() }.getOrNull()
-                        if (content != null) {
-                            restoreWithSnapshot(content)
-                        } else {
-                            errorMessage = errRead
+                        // [audit-0908] Auto-backup files embed the artifact
+                        // zip and can be tens of MB — reading them on the
+                        // Main thread froze the dialog dismissal for hundreds
+                        // of ms (old snapshots were ~2MB and hid this). Hop
+                        // to IO, then hand off to the existing app-scoped
+                        // restore path (which itself hops state writes to Main).
+                        scope.launch {
+                            val content = withContext(Dispatchers.IO) {
+                                runCatching { file.readText() }.getOrNull()
+                            }
+                            if (content != null) {
+                                restoreWithSnapshot(content)
+                            } else {
+                                errorMessage = errRead
+                            }
                         }
                     },
                 ) {
