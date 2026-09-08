@@ -180,15 +180,15 @@ class EnvVarGroupRoundTripTest {
     }
 
     // ------------------------------------------------------------------
-    // Sync payload shape (MultiDeviceSync rides ConfigBackup.export)
+    // Backup payload envVars shape (ConfigBackup.export serializes groups)
     // ------------------------------------------------------------------
 
     /**
-     * The sync payload is a ConfigBackup document, so the envVars array in
+     * The backup payload is a ConfigBackup document, so the envVars array in
      * it carries group the same way — pin the multi-entry shape end to end.
      */
     @Test
-    fun syncPayloadShape_carriesGroupAcrossEntries() {
+    fun backupPayloadShape_carriesGroupAcrossEntries() {
         val entries = listOf(
             EnvVarRepoEntryReplica(id = "e1", key = "CF_API_TOKEN", group = "Cloudflare"),
             EnvVarRepoEntryReplica(id = "e2", key = "CF_API_TOKEN_1", group = "Cloudflare"),

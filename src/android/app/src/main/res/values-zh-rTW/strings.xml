@@ -503,11 +503,6 @@
     <string name="backup_section_local">本機備份</string>
     <string name="webdav_section">WebDAV 備份</string>
     <string name="webdav_section_footer">將備份推送到任意 WebDAV 伺服器（Nextcloud、堅果雲、Synology…），隨時隨地還原。</string>
-    <string name="multidevice_sync_title">多端自動同步</string>
-    <string name="multidevice_sync_sub">在自己多台裝置之間，透過 WebDAV 伺服器同步設定、供應商和記憶。</string>
-    <string name="multidevice_sync_secret_title">自動同步將包含 API 金鑰</string>
-    <string name="multidevice_sync_secret_body">同步快照包含提供商的 API 金鑰和登入憑證，任何能存取您 WebDAV 伺服器的人都能讀取。要啟用含金鑰的自動同步嗎？</string>
-    <string name="multidevice_sync_secret_confirm">啟用含金鑰</string>
     <string name="webdav_server">伺服器</string>
     <string name="webdav_server_not_configured">未設定</string>
     <string name="webdav_upload">上傳備份</string>

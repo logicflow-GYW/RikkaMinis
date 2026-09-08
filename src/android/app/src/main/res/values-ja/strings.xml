@@ -1139,11 +1139,6 @@
     <string name="browser_downloads_open">開く</string>
     <string name="webdav_section">WebDAV バックアップ</string>
     <string name="webdav_section_footer">バックアップを任意の WebDAV サーバー（Nextcloud、坚果云、Synology など）にアップロードし、どの端末からでも復元できます。</string>
-    <string name="multidevice_sync_title">端末間の自動同期</string>
-    <string name="multidevice_sync_sub">WebDAV サーバーを介して、自分の端末間で設定・プロバイダー・メモリを同期します。</string>
-    <string name="multidevice_sync_secret_title">自動同期に API キーが含まれます</string>
-    <string name="multidevice_sync_secret_body">同期スナップショットには、WebDAV サーバーにアクセスできる誰でも読めるプロバイダーの API キーとログイン資格情報が含まれます。キー付きで自動同期を有効にしますか?</string>
-    <string name="multidevice_sync_secret_confirm">キー付きで有効にする</string>
     <string name="webdav_server">サーバー</string>
     <string name="webdav_server_not_configured">未設定</string>
     <string name="webdav_upload">バックアップをアップロード</string>

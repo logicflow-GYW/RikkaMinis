@@ -22,7 +22,6 @@ import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.History
@@ -105,7 +104,6 @@ fun BackupSettingsScreen(
     // confirmation (with/without secrets) triggered this picker instance.
     var exportWithSecrets by remember { mutableStateOf(false) }
     var showSecretWarning by remember { mutableStateOf(false) }
-    var showSyncSecretsWarning by remember { mutableStateOf(false) }
     var importReport by remember { mutableStateOf<ConfigBackup.ImportResult?>(null) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
@@ -150,12 +148,6 @@ fun BackupSettingsScreen(
     // ONE gate removes the entire class of "forgot to gate this entry" bugs:
     // there is now exactly one flag everyone reads and sets.
     var operationBusy by remember { mutableStateOf(false) }
-    // T-multidevice: master switch for auto-syncing light config + memory
-    // across the user's own devices via WebDAV, driven at app foreground by
-    // MinisApp.syncMultiDeviceIfEnabled().
-    var multiDeviceSyncEnabled by remember {
-        mutableStateOf(com.openminis.app.backup.MultiDeviceSync.isEnabled(context))
-    }
     // When true, the next secret-warning confirmation uploads to WebDAV
     // instead of launching the SAF file picker.
     var webDavUploadPending by remember { mutableStateOf(false) }
@@ -642,50 +634,6 @@ fun BackupSettingsScreen(
             header = stringResource(R.string.webdav_section),
             footer = stringResource(R.string.webdav_section_footer),
         ) {
-            // T-multidevice: auto-sync light config + memory across the user's
-            // own devices via the same WebDAV server. Off by default; when on,
-            // MinisApp triggers syncNow() at app foreground and the settings
-            // screens push after edits. Requires a WebDAV server configured
-            // below.
-            SettingsRow(
-                title = stringResource(R.string.multidevice_sync_title),
-                subtitle = stringResource(R.string.multidevice_sync_sub),
-                icon = Icons.Filled.Sync,
-                onClick = null,
-                showDivider = false,
-                trailing = {
-                    Switch(
-                        checked = multiDeviceSyncEnabled,
-                        onCheckedChange = { checked ->
-                            if (checked) {
-                                if (com.openminis.app.backup.MultiDeviceSync.hasConfirmedSecretsSync(context)) {
-                                    // Already confirmed — enable directly.
-                                    multiDeviceSyncEnabled = true
-                                    context.getSharedPreferences(
-                                        "backup_prefs", android.content.Context.MODE_PRIVATE
-                                    ).edit().putBoolean(
-                                        com.openminis.app.backup.MultiDeviceSync.PREF_KEY_ENABLED,
-                                        true,
-                                    ).apply()
-                                    application.syncMultiDeviceIfEnabled()
-                                } else {
-                                    // Not yet confirmed — show the dialog first.
-                                    showSyncSecretsWarning = true
-                                }
-                            } else {
-                                // Turn off — always allowed.
-                                multiDeviceSyncEnabled = false
-                                context.getSharedPreferences(
-                                    "backup_prefs", android.content.Context.MODE_PRIVATE
-                                ).edit().putBoolean(
-                                    com.openminis.app.backup.MultiDeviceSync.PREF_KEY_ENABLED,
-                                    false,
-                                ).apply()
-                            }
-                        },
-                    )
-                },
-            )
             SettingsRow(
                 title = stringResource(R.string.webdav_server),
                 subtitle = webDavConfig?.url
@@ -827,40 +775,6 @@ fun BackupSettingsScreen(
             dismissButton = {
                 TextButton(onClick = { runExport(false) }) {
                     Text(stringResource(R.string.backup_secret_without))
-                }
-            },
-        )
-    }
-
-    // T-multidevice: first-time confirmation that auto-sync snapshots may
-    // contain API keys / credentials. Shown once when the user flips the
-    // auto-sync switch on. Declining leaves the switch off; confirming
-    // marks the pref and starts a sync cycle (keys included). Before this
-    // confirmation, sync runs without secrets (see MinisApp).
-    if (showSyncSecretsWarning) {
-        AlertDialog(
-            onDismissRequest = { showSyncSecretsWarning = false },
-            title = { Text(stringResource(R.string.multidevice_sync_secret_title)) },
-            text = { Text(stringResource(R.string.multidevice_sync_secret_body)) },
-            confirmButton = {
-                TextButton(onClick = {
-                    showSyncSecretsWarning = false
-                    com.openminis.app.backup.MultiDeviceSync.markSecretsSyncConfirmed(context)
-                    multiDeviceSyncEnabled = true
-                    context.getSharedPreferences(
-                        "backup_prefs", android.content.Context.MODE_PRIVATE
-                    ).edit().putBoolean(
-                        com.openminis.app.backup.MultiDeviceSync.PREF_KEY_ENABLED,
-                        true,
-                    ).apply()
-                    application.syncMultiDeviceIfEnabled()
-                }) {
-                    Text(stringResource(R.string.multidevice_sync_secret_confirm))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showSyncSecretsWarning = false }) {
-                    Text(stringResource(R.string.cancel))
                 }
             },
         )

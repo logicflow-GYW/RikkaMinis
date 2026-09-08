@@ -15,9 +15,6 @@ import org.acra.data.StringFormat
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import com.openminis.app.browser.BrowserTabPool
-import com.openminis.app.backup.MultiDeviceSync
-import com.openminis.app.backup.WebDavClient
-import com.openminis.app.backup.WebDavConfigStore
 import com.openminis.app.data.db.AppDatabase
 import com.openminis.app.data.repository.BackgroundSettingsRepository
 import com.openminis.app.data.repository.ChatRepository
@@ -114,40 +111,6 @@ class MinisApp : Application(), ImageLoaderFactory {
     private var foregroundActivityCount: Int = 0
 
     fun isAppForeground(): Boolean = foregroundActivityCount > 0
-
-    /**
-     * T-multidevice: kick off a multi-device auto-sync when the app comes to
-     * the foreground, but ONLY if the user turned the feature on. The actual
-     * WebDAV round-trip runs on [applicationScope] so it never blocks activity
-     * startup, and is fully guarded — a failure (network down, bad creds, no
-     * folder) is logged and swallowed, never allowed to surface into normal
-     * app operation. First launch is naturally covered: the first Activity's
-     * onActivityStarted reports wasBackgrounded=true.
-     */
-    fun syncMultiDeviceIfEnabled() {
-        if (!MultiDeviceSync.isEnabled(this)) return
-        applicationScope.launch {
-            runCatching {
-                val config = WebDavConfigStore(this@MinisApp).load()
-                if (config == null) {
-                    AppLogger.info("MultiDeviceSync", "enabled but no WebDAV config; not starting")
-                    return@launch
-                }
-                val result = MultiDeviceSync.syncNow(
-                    context = this@MinisApp,
-                    providerRepo = providerRepository,
-                    envVarRepo = envVarRepository,
-                    memoryRepo = memoryRepository,
-                    config = config,
-                    client = WebDavClient.defaultClient(),
-                    includeSecrets = MultiDeviceSync.hasConfirmedSecretsSync(this@MinisApp),
-                )
-                AppLogger.info("MultiDeviceSync", result)
-            }.onFailure {
-                AppLogger.warning("MultiDeviceSync", "sync failed: ${it.message}")
-            }
-        }
-    }
 
     /**
      * T-bg-overlay phase 2: live "is the app foreground?" stream so the
@@ -634,23 +597,16 @@ class MinisApp : Application(), ImageLoaderFactory {
                 if (wasBackgrounded) _isAppForegroundFlow.value = true
                 // T-MIUI-FGS-race: app came to the foreground — unhide FG
                 // service starts and refresh it if a session was running.
-                // Must set the flag BEFORE the sync / badge work so a
+                // Must set the flag BEFORE the badge work so a
                 // concurrent setActive in the stream can start the service.
                 if (wasBackgrounded) {
                     SessionActivityTracker.setAppForeground(true)
                     SessionActivityTracker.maybeRefreshService()
                 }
-                // T-multidevice: app came to the foreground (first launch or
-                // background→foreground). Trigger an auto-sync if enabled —
-                // the first launch pulls the latest remote snapshot, a resume
-                // after edits refetches any sibling changes. Cheap no-op when
-                // the feature is off or no WebDAV is configured.
+                // [T-auto-backup-assets] Daily asset backup wakes on the
+                // background→foreground beat. runIfDue is a cheap no-op
+                // unless enabled AND the calendar day rolled over.
                 if (wasBackgrounded) {
-                    syncMultiDeviceIfEnabled()
-                    // [T-auto-backup-assets] Daily asset backup rides the same
-                    // foreground beat as sync — one place to wake both, no
-                    // extra background machinery. runIfDue is a cheap no-op
-                    // unless enabled AND the calendar day rolled over.
                     com.openminis.app.backup.AutoBackupManager.runIfDue(this@MinisApp)
                 }
                 // T298: as soon as the app transitions background → foreground,

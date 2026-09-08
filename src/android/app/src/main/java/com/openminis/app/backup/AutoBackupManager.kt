@@ -20,18 +20,17 @@ import kotlinx.coroutines.launch
  * locally under `filesDir/backup-autos/` (rotating [AUTO_BACKUP_KEEP]) and
  * pushed to the configured WebDAV server under the `auto/` subdirectory
  * as `rikkaminis-backup-auto-*` (rotated remotely by
- * WebDavSync.pruneAutoBackups) — a dedicated folder, sibling of the `sync/`
- * folder multi-device sync uses, so automatic copies never mix with the
- * curated manual backups in the backup root and a second device can manage
- * the same folder (restore/fetch/delete) from its own auto-backup section.
+ * WebDavSync.pruneAutoBackups) — a dedicated folder of its own, so
+ * automatic copies never mix with the curated manual backups in the backup
+ * root and a second device can manage the same folder (restore/fetch/delete)
+ * from its own auto-backup section.
  * Credentials always ride along: the local copy stays in app-private storage
  * and the remote is the user's own server — a backup without keys can't
  * restore a thing.
  *
  * Trigger: once per calendar day, on the first foreground transition, via
- * MinisApp's existing activity-lifecycle hook (same beat as multi-device
- * sync). No alarm/workmanager: if the app is never opened that day nothing
- * runs, matching the sync design and avoiding a background service.
+ * MinisApp's existing activity-lifecycle hook. No alarm/workmanager: if the
+ * app is never opened that day nothing runs, avoiding a background service.
  */
 object AutoBackupManager {
 

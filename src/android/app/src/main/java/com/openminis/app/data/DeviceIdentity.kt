@@ -13,7 +13,7 @@ import java.util.UUID
  * restricts).
  *
  * Usage patterns across the app:
- *   - `zoneName` — namespace any future multi-device sync records.
+ *   - `zoneName` — namespace for records scoped to this device.
  *   - `deviceName` — friendly "Pixel 8 · A3F7"-style label for debug logs
  *     and the provider-account UI (future).
  *   - `deviceId` — opaque UUID for any "my-device" disambiguation.

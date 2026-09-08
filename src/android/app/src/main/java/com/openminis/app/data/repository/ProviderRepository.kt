@@ -2243,9 +2243,9 @@ class ProviderRepository(private val context: Context) {
 
         // Restore credentials (API key, manual OAuth bearer, structured OAuth
         // login, Gemini account metadata) from the payload onto the new
-        // instance. Shared with the merge path (see [mergeImportInstanceJSON]
-        // applyCredentials) so a manual full restore applies keys even when the
-        // provider already exists under the same label.
+        // instance. Shared with the merge path (see [mergeImportInstanceJSON])
+        // so a restore applies keys even when the provider already exists
+        // under the same label.
         importInstanceCredentials(dict, instance)
 
         // Import models (replace built-in defaults)
@@ -2268,9 +2268,8 @@ class ProviderRepository(private val context: Context) {
      * exported provider JSON onto [instance] (the instance id the credentials
      * must be stored under — a fresh append or an existing merge target).
      * Covers: apiKey (OAuth token fields were removed with the OAuth login
-     * flow). Shared by [importInstanceJSON] (always applies on append) and
-     * [mergeImportInstanceJSON] (applies only when applyCredentials=true, i.e.
-     * a manual full restore — see ConfigBackup.import's isSyncMerge gating).
+     * flow). Shared by [importInstanceJSON] and [mergeImportInstanceJSON]
+     * (restores always apply the backup's keys onto the target instance).
      */
     private fun importInstanceCredentials(dict: JSONObject, instance: ProviderInstance) {
         // Decode API key (base64 or plain text)
@@ -2406,16 +2405,13 @@ class ProviderRepository(private val context: Context) {
     /**
      * [T-backup-dedup] Merge an exported provider JSON into the existing
      * instance with the same (type, label), returning its id and a source
-     * entry id → restored entry id map. @param applyCredentials: when true
-     * (manual full restore — ConfigBackup passes !isSyncMerge) the backup's
-     * credentials (apiKey / OAuth / Gemini account) are written onto the
-     * existing instance instead of being deliberately left untouched; the
-     * sync-merge path keeps local credentials.
+     * entry id → restored entry id map. The backup's credentials (apiKey /
+     * OAuth / Gemini account) are always written onto the existing instance —
+     * a restore is a restore.
      */
     fun mergeImportInstanceJSON(
         jsonStr: String,
         srcEntryIds: List<String>,
-        applyCredentials: Boolean = false,
     ): Pair<String, Map<String, String>>? {
         ensureConfigLoaded()
         val dict = try { JSONObject(jsonStr) } catch (_: Exception) { return null }
@@ -2427,12 +2423,10 @@ class ProviderRepository(private val context: Context) {
             it.providerType == providerType && it.label == label
         } ?: return null
 
-        // [T-backup-restore-credentials] A full manual restore must bring the
-        // backup's keys with it even when the provider already exists under
-        // the same label; the sync merge deliberately keeps local secrets.
-        if (applyCredentials) {
-            importInstanceCredentials(dict, existing)
-        }
+        // [T-backup-restore-credentials] A restore must bring the backup's
+        // keys with it even when the provider already exists under the same
+        // label.
+        importInstanceCredentials(dict, existing)
 
         val entries = parseImportedModelEntries(dict, existing.id)
         val entryMap = HashMap<String, String>()

@@ -1286,11 +1286,6 @@
     <string name="browser_downloads_open">Открыть</string>
     <string name="webdav_section">Резервное копирование WebDAV</string>
     <string name="webdav_section_footer">Отправляйте резервные копии на любой сервер WebDAV (Nextcloud, 坚果云, Synology…) и восстанавливайте их с любого устройства.</string>
-    <string name="multidevice_sync_title">Автосинхронизация между устройствами</string>
-    <string name="multidevice_sync_sub">Синхронизирует конфигурацию, провайдеров и память между своими устройствами через сервер WebDAV.</string>
-    <string name="multidevice_sync_secret_title">Автосинхронизация будет содержать API-ключи</string>
-    <string name="multidevice_sync_secret_body">Синхронизируемые снимки содержат API-ключи и учётные данные провайдеров, доступные любому, у кого есть доступ к вашему серверу WebDAV. Включить автосинхронизацию с ключами?</string>
-    <string name="multidevice_sync_secret_confirm">Включить с ключами</string>
     <string name="webdav_server">Сервер</string>
     <string name="webdav_server_not_configured">Не настроено</string>
     <string name="webdav_upload">Загрузить резервную копию</string>

@@ -1096,11 +1096,6 @@
     <string name="backup_section_local">本地备份</string>
     <string name="webdav_section">WebDAV 备份</string>
     <string name="webdav_section_footer">将备份推送到任意 WebDAV 服务器（Nextcloud、坚果云、群晖…），随时随地恢复。</string>
-    <string name="multidevice_sync_title">多端自动同步</string>
-    <string name="multidevice_sync_sub">在自己多台设备之间，通过 WebDAV 服务器同步配置、提供商和记忆。</string>
-    <string name="multidevice_sync_secret_title">自动同步将包含 API 密钥</string>
-    <string name="multidevice_sync_secret_body">同步快照包含提供商的 API 密钥和登录凭据，任何能访问您 WebDAV 服务器的人都能读取。要启用含密钥的自动同步吗？</string>
-    <string name="multidevice_sync_secret_confirm">启用含密钥</string>
     <string name="webdav_server">服务器</string>
     <string name="webdav_server_not_configured">未配置</string>
     <string name="webdav_upload">上传备份</string>

@@ -59,14 +59,6 @@ data class WebDavResourceInfo(
     val isCollection: Boolean,
 )
 
-/** Contents of a GET plus the server's [etag] for that resource, used to
- *  build an optimistic-lock `If-Match` / `If-None-Match` precondition on a
- *  later conditional PUT ([RC16-sync-if-match]). */
-data class WebDavGetResult(
-    val bytes: ByteArray,
-    val etag: String?,
-)
-
 /** A backup file as shown in the remote-backups list. */
 data class WebDavBackupItem(
     val href: String,
@@ -173,57 +165,31 @@ class WebDavClient(
     }
 
     /** Upload [bytes] to [path] under the backup directory, creating the
-     *  directory first if the server says it is missing.
-     *
-     *  [RC16-sync-if-match] Optimistic-lock preconditions:
-     *   - pass [ifMatchETag] to add `If-Match: <etag>` — the overwrite only
-     *     succeeds if the remote still holds that exact version; a 412
-     *     Precondition Failed means a sibling device changed it in the
-     *     meantime and this push is aborted (no clobber).
-     *   - pass [ifNoneMatch] to add `If-None-Match: *` — used when the remote
-     *     is *expected to be absent* (first-ever sync), so two devices doing
-     *     a first sync at the same time cannot both create the state file and
-     *     silently overwrite each other; one gets a 412 conflict instead.
-     *
-     *  On a conditional PUT any 409/404/412 from the server is treated as a
-     *  conflict and thrown immediately — we do NOT run the parent-collection
-     *  retry dance for conditional writes, because the push always follows a
-     *  successful listing/pull (the sync subdir already exists) and a 404 on
-     *  a preconditioned target means "the resource you based this on is gone".
-     */
+     *  directory first if the server says it is missing. */
     fun put(
         path: String,
         bytes: ByteArray,
         contentType: String = "application/json",
-        ifMatchETag: String? = null,
-        ifNoneMatch: Boolean = false,
     ) {
         val url = buildUrl(path)
-        val requestBuilder = Request.Builder()
+        val request = Request.Builder()
             .url(url)
             .put(bytes.toRequestBody(contentType.toMediaType()))
             .auth()
-        val conditional = ifMatchETag != null || ifNoneMatch
-        if (ifMatchETag != null) requestBuilder.header("If-Match", ifMatchETag)
-        else if (ifNoneMatch) requestBuilder.header("If-None-Match", "*")
-        val request = requestBuilder.build()
+            .build()
 
         client.newCall(request).execute().useSafe { response ->
             if (response.isSuccessful) return
             val code = response.code
-            if (code == 412 || conditional) {
-                throw WebDavException("Conflict: remote changed", code)
-            }
             if (code != 409 && code != 404) {
                 throw WebDavException("Upload failed (HTTP $code)", code)
             }
         }
         // Parent collection missing (409 Conflict / 404) — create the parent
         // and retry. [T-backup-put-parent] The old code ensured only the root
-        // collection, so uploading into a nested path (e.g. "sync/<name>")
+        // collection, so uploading into a nested path (e.g. "auto/<name>")
         // whose parent dir didn't exist failed twice. Creating the parent of
         // the target path (root for flat filenames) covers both cases.
-        // (Unconditional PUT only — conditional conflicts threw above.)
         val parentSegs = path.substringBeforeLast('/', "")
             .split('/')
             .filter { it.isNotBlank() }
@@ -240,23 +206,14 @@ class WebDavClient(
     }
 
     /** Download [path] as raw bytes. */
-    fun get(path: String): ByteArray = getWithEtag(path).bytes
-
-    /** Download [path] plus the server's [WebDavGetResult.etag], so a
-     *  downstream push can carry it as an `If-Match` precondition
-     *  ([RC16-sync-if-match]). The etag is null when the server does not
-     *  support / does not return one. */
-    fun getWithEtag(path: String): WebDavGetResult {
+    fun get(path: String): ByteArray {
         val url = buildUrl(path)
         val request = Request.Builder().url(url).get().auth().build()
         client.newCall(request).execute().useSafe { response ->
             if (!response.isSuccessful) {
                 throw WebDavException("Download failed (HTTP ${response.code})", response.code)
             }
-            return WebDavGetResult(
-                bytes = response.body?.bytes() ?: ByteArray(0),
-                etag = response.header("ETag"),
-            )
+            return response.body?.bytes() ?: ByteArray(0)
         }
     }
 

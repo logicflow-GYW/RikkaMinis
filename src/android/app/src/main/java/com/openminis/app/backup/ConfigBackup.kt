@@ -125,11 +125,8 @@ object ConfigBackup {
         mcpRepo: MCPRepository? = null,
         chatRepo: ChatRepository? = null,
         chatWindowDays: Int = 90,
-        includeHiddenModels: Boolean = true,
-        memoryFileNames: Set<String>? = null,
         artifactRoots: List<File>? = null,
         webDavConfig: WebDavConfig? = null,
-        includeThinkingRules: Boolean = true,
     ): String {
         val registry = ConfigRegistry.get()
 
@@ -182,42 +179,8 @@ object ConfigBackup {
             // uuid positionally. `_`-prefixed to signal a backup-layer annotation;
             // importInstanceJSON ignores unknown keys, so the provider wire
             // format is untouched.
-            //
-            // [T-sync-hide-prune] When includeHiddenModels=false (multi-device
-            // auto-sync snapshots), hidden non-custom models are part of the
-            // provider's *public catalog cache*, not the user's state — they are
-            // re-pullable from the provider's /models endpoint and account for
-            // the bulk of the payload (an OpenRouter catalog can be hundreds of
-            // entries). Dropping them shrinks the snapshot to (connection +
-            // visible models + custom models) + their overrides, and keeps the
-            // sibling device from learning models the user never selected. The
-            // `models` array and `_entryIds` MUST be filtered in lockstep — they
-            // are positional-paired (in the same append-order as exportInstance
-            // JSON emits its `models` array) for import's
-            // old→new uuid remap. [filterHiddenModels] handles both sides.
             val entryIds = JSONArray()
-            if (includeHiddenModels) {
-                for (id in orderedEntryIds(providerRepo, instance.id)) entryIds.put(id)
-            } else {
-                val dropped = dropHiddenModelIds(providerRepo, instance.id)
-                val srcModels = obj.optJSONArray("models")
-                if (srcModels != null) {
-                    val visibleModels = JSONArray()
-                    for (k in 0 until srcModels.length()) {
-                        val m = srcModels.getJSONObject(k)
-                        if (dropped.contains(m.optString("modelId", ""))) continue
-                        visibleModels.put(m)
-                    }
-                    obj.put("models", visibleModels)
-                }
-                for (id in orderedEntryIds(providerRepo, instance.id)) {
-                    val entry = providerRepo.config.value.modelEntries
-                        .find { it.id == id } ?: continue
-                    val modelId = entry.baseModel.id
-                    if (dropped.contains(modelId)) continue
-                    entryIds.put(id)
-                }
-            }
+            for (id in orderedEntryIds(providerRepo, instance.id)) entryIds.put(id)
             obj.put("_entryIds", entryIds)
             providers.put(obj)
         }
@@ -247,20 +210,15 @@ object ConfigBackup {
         // (exportInstanceJSON) does not carry them, so they get their own
         // section, keyed by the owning provider's (providerType, label) —
         // import re-attaches them after the provider restore re-mints ids.
-        // Sync snapshots pass includeThinkingRules=false: rules have no
-        // per-object merge model in SyncMerge yet (v1 ships them in full
-        // backups; cross-device rule sync can ride a later merge kind).
         val thinkingRules = JSONArray()
-        if (includeThinkingRules) {
-            for (instance in providerRepo.instances) {
-                val rows = providerRepo.exportThinkingRulesJSON(instance.id) ?: continue
-                if (rows.length() == 0) continue
-                thinkingRules.put(JSONObject().apply {
-                    put("providerType", instance.providerType.name)
-                    put("providerLabel", instance.label)
-                    put("rules", rows)
-                })
-            }
+        for (instance in providerRepo.instances) {
+            val rows = providerRepo.exportThinkingRulesJSON(instance.id) ?: continue
+            if (rows.length() == 0) continue
+            thinkingRules.put(JSONObject().apply {
+                put("providerType", instance.providerType.name)
+                put("providerLabel", instance.label)
+                put("rules", rows)
+            })
         }
 
         // [T-auto-backup-assets] Artifacts: the agent's *outputs* — files under
@@ -404,14 +362,6 @@ object ConfigBackup {
         val memoryFiles = JSONArray()
         if (memoryRepo != null) {
             for (info in runCatching { memoryRepo.listAllFiles() }.getOrDefault(emptyList())) {
-                // [T-sync-memory-scope] Auto-sync passes an explicit allow-list
-                // of shared stable files (currently only GLOBAL.md) and
-                // EXCLUDES the per-device YYYY-MM-DD daily logs — a daily log
-                // is a record of *this* device's agent activity, not a shared
-                // resource, and syncing it as a whole-file overwrite destroys
-                // the receiving device's same-day entries. Manual full backups
-                // keep carrying every file (memoryFileNames == null).
-                if (memoryFileNames != null && info.name !in memoryFileNames) continue
                 val content = runCatching { memoryRepo.readFile(info.name) }.getOrNull() ?: continue
                 memoryFiles.put(JSONObject().apply {
                     put("name", info.name)
@@ -610,21 +560,6 @@ object ConfigBackup {
     }
 
     /**
-     * Returns the set of base-model ids to DROP from a sync snapshot.
-     * See [isCatalogCacheModel] for the decision rule.
-     */
-    internal fun dropHiddenModelIds(
-        providerRepo: ProviderRepository,
-        instanceId: String,
-    ): Set<String> {
-        return providerRepo.config.value.modelEntries
-            .asSequence()
-            .filter { it.providerInstanceId == instanceId && isCatalogCacheModel(it.isHidden, it.isCustom) }
-            .map { it.baseModel.id }
-            .toSet()
-    }
-
-    /**
      * Provider credential keys, mirroring [ConfigValue.SECRET_KEYS]. The
      * Gemini-only `oauthEmail`/`oauthGcpProject` keys were historically listed
      * here, but they have no producer anywhere in the codebase (grep finds
@@ -662,7 +597,6 @@ object ConfigBackup {
         memoryRepo: MemoryRepository? = null,
         mcpRepo: MCPRepository? = null,
         chatRepo: ChatRepository? = null,
-        isSyncMerge: Boolean = false,
         artifactRoots: List<File>? = null,
         onWebDavConfig: ((WebDavConfig) -> Unit)? = null,
     ): ImportResult {
@@ -750,12 +684,10 @@ object ConfigBackup {
                     // no more "OpenAI (2)" duplicates. The merge returns the
                     // source entry uuid → restored entry uuid map directly;
                     // otherwise fall back to the classic append-and-pair.
-                    // [T-backup-restore-credentials] A manual full restore
-                    // (isSyncMerge=false) applies the backup's credentials to
-                    // the existing instance; sync merges keep local secrets.
+                    // [T-backup-restore-credentials] A restore applies the
+                    // backup's credentials to the existing instance.
                     val merged = providerRepo.mergeImportInstanceJSON(
                         obj.toString(), srcEntryIds,
-                        applyCredentials = !isSyncMerge,
                     )
                     val resolvedLabel: String?
                     if (merged != null) {
@@ -804,8 +736,8 @@ object ConfigBackup {
                     }
                     providersImported++
                     // [T-auto-backup-assets] Record the restored instance id for
-                    // thinking-rule re-attachment (keyed by type+label, the same
-                    // natural key SyncMerge uses).
+                    // thinking-rule re-attachment (keyed by type+label, the
+                    // natural key the rules export uses).
                     val instId = providerRepo.instances.firstOrNull {
                         it.label == resolvedLabel &&
                             it.providerType.name == obj.optString("providerType", "")
@@ -950,13 +882,6 @@ object ConfigBackup {
         // -- Stage 3: scalar fields (defaults.* group/entry ids remapped) --
         val fields = root.optJSONObject("fields")
         if (fields != null) {
-            // [T-sync-merge-guard] On a multi-device auto-sync merge, personality
-            // fields (soul.*) are strong per-device identity — name, style, body,
-            // lang — and must not be overwritten by a sibling's snapshot. Persist
-            // them only on a full manual restore (isSyncMerge=false); never on a
-            // sync pull. This mirrors the same "user-personalization stays on the
-            // device" principle that keeps hidden models & OAuth credentials out
-            // of the sync payload.
             val keys = fields.keys()
             while (keys.hasNext()) {
                 val path = keys.next()
@@ -964,13 +889,6 @@ object ConfigBackup {
                 if (field == null) {
                     // Field was removed or renamed since the backup was taken.
                     skipped.add("$path: no longer exists in this version")
-                    continue
-                }
-                // [T-sync-merge-guard] Strongly per-device personality fields are
-                // never merged in from a sibling device's auto-sync snapshot.
-                // Only a full manual restore may write them.
-                if (shouldSkipSyncField(path, isSyncMerge)) {
-                    skipped.add("$path: personality not overwritten by auto-sync")
                     continue
                 }
                 if (field.scope !in BACKED_UP_SCOPES) {
@@ -1210,10 +1128,9 @@ object ConfigBackup {
 
         // -- Stage 9: artifact files (shared/ + mcp data, from the embedded zip) --
         // The archive routes entries by first path segment into the matching
-        // root ("shared/" → sharedRoot, "mcp/" → mcpRoot). A sync merge never
-        // restores artifacts (isSyncMerge → artifactRoots stays null): files
-        // are per-device outputs and last-writer-wins would clobber a
-        // sibling's work — they belong to full restores only.
+        // root ("shared/" → sharedRoot, "mcp/" → mcpRoot). Artifact files are
+        // restored only when the caller supplies artifact roots (manual and
+        // auto-backup restores do; a restore context without them skips).
         val artifactsObj = root.optJSONObject("artifacts")
         if (artifactsObj != null && artifactRoots != null && artifactRoots.isNotEmpty()) {
             val archive = artifactsObj.optString("archive", "")
@@ -1245,13 +1162,12 @@ object ConfigBackup {
             skipped.add("artifacts: not restorable in this context")
         }
 
-        // -- webdavConfig (server settings for the next restore / sync) --
-        // Full manual restores (and the auto-backup restore path) apply the
-        // backed-up WebDAV server config so a new install can immediately
-        // reach its remote backups; a sync merge must NEVER overwrite the
-        // local server config from a sibling.
+        // -- webdavConfig (server settings for the next restore) --
+        // Restores (manual and the auto-backup path) apply the backed-up
+        // WebDAV server config so a new install can immediately reach its
+        // remote backups.
         val wdObj = root.optJSONObject("webdavConfig")
-        if (wdObj != null && !isSyncMerge) {
+        if (wdObj != null) {
             val url = wdObj.optString("url", "")
             if (url.isNotEmpty() && onWebDavConfig != null) {
                 onWebDavConfig(
@@ -1535,19 +1451,6 @@ object ConfigBackup {
 }
 
 /**
- * [T-sync-hide-prune] Pure predicate deciding whether a model entry is part of
- * a provider's *public catalog cache* (hidden & not user-created) and should
- * therefore be excluded from an auto-sync snapshot / local retention. Hidden
- * custom models are user data and stay; hidden plain catalog entries are
- * re-pullable from the provider's /models endpoint and are dropped so a
- * snapshot carries only the user's selections, never the full catalog. Kept a
- * top-level function so the decision logic is JVM-unit-testable without an
- * Android [ProviderRepository].
- */
-internal fun isCatalogCacheModel(isHidden: Boolean, isCustom: Boolean): Boolean =
-    isHidden && !isCustom
-
-/**
  * [fix-audit-finding-1] The entry-id ordering contract.
  *
  * `_entryIds` MUST be emitted in the exact order [ProviderRepository.exportInstanceJSON]
@@ -1640,12 +1543,3 @@ internal suspend fun importChatSections(
     }
     return chatSessionsImported to chatMessagesImported
 }
-
-/**
- * [T-sync-merge-guard] On a multi-device auto-sync merge, strongly per-device
- * personality fields (soul.*) are never written from a sibling's snapshot —
- * only a full manual restore (isSyncMerge=false) may persist them. Plain
- * config fields always pass. Top-level so the gate is JVM-unit-testable.
- */
-internal fun shouldSkipSyncField(path: String, isSyncMerge: Boolean): Boolean =
-    isSyncMerge && path.startsWith("soul.")

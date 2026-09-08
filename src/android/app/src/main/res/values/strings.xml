@@ -1251,11 +1251,6 @@
     <string name="backup_section_footer">Includes providers, appearance, agent runtime defaults, environment variables, skills, memory, MCP servers and chat history (text-only, media excluded).</string>
     <string name="webdav_section">WebDAV backup</string>
     <string name="webdav_section_footer">Push backups to any WebDAV server (Nextcloud, 坚果云, Synology…) and restore from any device.</string>
-    <string name="multidevice_sync_title">Auto-sync across devices</string>
-    <string name="multidevice_sync_sub">Keep config, providers and memory in sync between your own devices on the WebDAV server.</string>
-    <string name="multidevice_sync_secret_title">Auto-sync will include API keys</string>
-    <string name="multidevice_sync_secret_body">Synced snapshots contain provider API keys and login credentials, readable by anyone with access to your WebDAV server. Enable auto-sync with keys?</string>
-    <string name="multidevice_sync_secret_confirm">Enable with keys</string>
     <string name="webdav_server">Server</string>
     <string name="webdav_server_not_configured">Not configured</string>
     <string name="webdav_upload">Upload backup</string>

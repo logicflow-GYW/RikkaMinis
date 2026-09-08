@@ -1132,11 +1132,6 @@
     <string name="browser_downloads_open">Öffnen</string>
     <string name="webdav_section">WebDAV-Backup</string>
     <string name="webdav_section_footer">Übertrage Backups auf einen beliebigen WebDAV-Server (Nextcloud, 坚果云, Synology …) und stelle sie auf jedem Gerät wieder her.</string>
-    <string name="multidevice_sync_title">Automatische Synchronisierung</string>
-    <string name="multidevice_sync_sub">Hält Konfiguration, Anbieter und Speicher zwischen eigenen Geräten über den WebDAV-Server synchron.</string>
-    <string name="multidevice_sync_secret_title">Auto-Sync enthält API-Schlüssel</string>
-    <string name="multidevice_sync_secret_body">Synchronisierte Snapshots enthalten API-Schlüssel und Anmeldedaten von Anbietern, die für jeden mit Zugriff auf Ihren WebDAV-Server lesbar sind. Auto-Sync mit Schlüsseln aktivieren?</string>
-    <string name="multidevice_sync_secret_confirm">Mit Schlüsseln aktivieren</string>
     <string name="webdav_server">Server</string>
     <string name="webdav_server_not_configured">Nicht konfiguriert</string>
     <string name="webdav_upload">Backup hochladen</string>
