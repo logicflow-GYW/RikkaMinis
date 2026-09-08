@@ -1163,6 +1163,15 @@
     <string name="webdav_test_ok">接続に成功しました</string>
     <string name="webdav_saved">サーバー設定を保存しました</string>
     <string name="webdav_uploaded">バックアップをアップロードしました</string>
+    <string name="auto_backup_section_title">自動バックアップ</string>
+    <string name="auto_backup_section_footer">アプリを毎日最初に開いたときに1回実行。能力（プロバイダー、思考ルール、スキル、環境変数、メモリ、MCP）と成果物（shared/ ファイルとナレッジグラフデータ）を対象とし、チャット履歴は意図的に除外（エージェントの作業副産物）。APIキーを含みます。ローカルコピーはアプリ領域に、リモートコピーは自分のWebDAVサーバーに保存（最新7件を保持）。</string>
+    <string name="auto_backup_enable">毎日自動バックアップ</string>
+    <string name="auto_backup_enable_sub">アプリを毎日最初に開いたときに自動バックアップ</string>
+    <string name="auto_backup_run_now">今すぐバックアップ</string>
+    <string name="auto_backup_last_run">前回のバックアップ: %1$s</string>
+    <string name="auto_backup_never">未実行</string>
+    <string name="auto_backup_empty">自動バックアップはまだありません。</string>
+    <string name="auto_backup_restore_hint">バックアップをタップして復元（現在の状態のスナップショットが先に保存されます）:</string>
     <string name="backup_restored_notify_body">%1$d 個のプロバイダーと %2$d 個のグループを復元しました。</string>
     <string name="webdav_notify_title_failed">WebDAV 操作に失敗しました</string>
     <string name="backup_notify_failed">バックアップに失敗しました</string>
@@ -1351,4 +1360,5 @@
     <string name="thinking_fmt_qwen_desc">Qwen/DashScope：enable_thinking と、最大トークン数を下回る thinking_budget を指定します。</string>
     <string name="thinking_fmt_custom_title">カスタムのフィールドパス</string>
     <string name="thinking_fmt_custom_desc">最終手段です。上記に該当しないエンドポイント向けに、ドット区切りのパスと High のときの値を指定します。</string>
+    <string name="backup_progress_title">バックアップ中…</string>
 </resources>

@@ -1310,6 +1310,15 @@
     <string name="webdav_test_ok">Соединение установлено</string>
     <string name="webdav_saved">Настройки сервера сохранены</string>
     <string name="webdav_uploaded">Резервная копия загружена</string>
+    <string name="auto_backup_section_title">Автоматическое резервное копирование</string>
+    <string name="auto_backup_section_footer">Выполняется раз в день при первом открытии приложения. Охватывает возможности (провайдеры, правила мышления, скиллы, переменные окружения, память, MCP) и результаты (файлы shared/ и данные графа знаний) — переписка намеренно исключена (побочный продукт агента). Включает API-ключи; локальные копии хранятся в хранилище приложения, удалённые отправляются на ваш WebDAV-сервер (хранятся последние 7).</string>
+    <string name="auto_backup_enable">Ежедневное автоматическое резервное копирование</string>
+    <string name="auto_backup_enable_sub">Автоматически при первом открытии приложения каждый день</string>
+    <string name="auto_backup_run_now">Создать резервную копию сейчас</string>
+    <string name="auto_backup_last_run">Последняя копия: %1$s</string>
+    <string name="auto_backup_never">Ещё не выполнялось</string>
+    <string name="auto_backup_empty">Автоматических копий пока нет.</string>
+    <string name="auto_backup_restore_hint">Нажмите на копию для восстановления (сначала будет сохранён снимок текущего состояния):</string>
     <string name="backup_restored_notify_body">Восстановлено %1$d провайдеров и %2$d групп.</string>
     <string name="webdav_notify_title_failed">Ошибка операции WebDAV</string>
     <string name="backup_notify_failed">Ошибка резервного копирования</string>
@@ -1498,4 +1507,5 @@
     <string name="thinking_fmt_qwen_desc">Qwen/DashScope: enable_thinking и thinking_budget меньше максимального числа токенов.</string>
     <string name="thinking_fmt_custom_title">Свой путь к полю</string>
     <string name="thinking_fmt_custom_desc">Запасной вариант: путь через точку и значение для High для эндпоинта, не описанного выше.</string>
+    <string name="backup_progress_title">Создание копии…</string>
 </resources>

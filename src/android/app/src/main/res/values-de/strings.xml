@@ -1156,6 +1156,15 @@
     <string name="webdav_test_ok">Verbindung OK</string>
     <string name="webdav_saved">Servereinstellungen gespeichert</string>
     <string name="webdav_uploaded">Backup hochgeladen</string>
+    <string name="auto_backup_section_title">Automatische Sicherung</string>
+    <string name="auto_backup_section_footer">Läuft einmal täglich beim ersten Öffnen der App. Sichert Fähigkeiten (Anbieter, Denkregeln, Skills, Umgebungsvariablen, Speicher, MCP) und Ergebnisse (shared/-Dateien und Wissensgraphen-Daten) – Chatverlauf ist bewusst ausgenommen (Nebenprodukt des Agenten). Enthält API-Schlüssel; lokale Kopien bleiben im App-Speicher, entfernte Kopien gehen an Ihren WebDAV-Server (die neuesten 7 werden behalten).</string>
+    <string name="auto_backup_enable">Tägliche automatische Sicherung</string>
+    <string name="auto_backup_enable_sub">Sichert automatisch beim ersten Öffnen der App an jedem Tag</string>
+    <string name="auto_backup_run_now">Jetzt sichern</string>
+    <string name="auto_backup_last_run">Letzte Sicherung: %1$s</string>
+    <string name="auto_backup_never">Noch nie ausgeführt</string>
+    <string name="auto_backup_empty">Noch keine automatischen Sicherungen.</string>
+    <string name="auto_backup_restore_hint">Tippen Sie auf eine Sicherung zum Wiederherstellen (zuerst wird ein Schnappschuss des aktuellen Zustands gespeichert):</string>
     <string name="backup_restored_notify_body">%1$d Anbieter und %2$d Gruppen wiederhergestellt.</string>
     <string name="webdav_notify_title_failed">WebDAV-Vorgang fehlgeschlagen</string>
     <string name="backup_notify_failed">Sicherung fehlgeschlagen</string>
@@ -1344,4 +1353,5 @@
     <string name="thinking_fmt_qwen_desc">Qwen/DashScope: enable_thinking und ein thinking_budget unterhalb der maximalen Tokenzahl.</string>
     <string name="thinking_fmt_custom_title">Eigener Feldpfad</string>
     <string name="thinking_fmt_custom_desc">Notlösung: ein Pfad in Punktnotation und ein Wert bei High für einen oben nicht abgedeckten Endpunkt.</string>
+    <string name="backup_progress_title">Sicherung läuft…</string>
 </resources>

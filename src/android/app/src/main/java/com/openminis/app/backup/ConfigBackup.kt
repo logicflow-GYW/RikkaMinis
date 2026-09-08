@@ -21,6 +21,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
 import java.io.ByteArrayInputStream
+import java.io.File
 
 /**
  * Local export/import of app configuration.
@@ -90,6 +91,12 @@ object ConfigBackup {
         val chatSessionsImported: Int,
         /** Chat messages restored (text-only parts). */
         val chatMessagesImported: Int,
+        /** Custom thinking rules restored (re-attached to their provider). */
+        val thinkingRulesImported: Int,
+        /** Artifact files restored (shared/ + mcp data, from the embedded zip). */
+        val artifactFilesImported: Int,
+        /** True when the payload carried a WebDAV server config that was applied. */
+        val webdavConfigImported: Boolean,
         /** Human-readable "path: why" lines for anything deliberately not applied. */
         val skipped: List<String>,
         /** True when the payload carried credentials (affects the post-import hint). */
@@ -120,6 +127,9 @@ object ConfigBackup {
         chatWindowDays: Int = 90,
         includeHiddenModels: Boolean = true,
         memoryFileNames: Set<String>? = null,
+        artifactRoots: List<File>? = null,
+        webDavConfig: WebDavConfig? = null,
+        includeThinkingRules: Boolean = true,
     ): String {
         val registry = ConfigRegistry.get()
 
@@ -230,6 +240,78 @@ object ConfigBackup {
                 group.contextLimitTokens?.let { put("contextLimitTokens", it) }
                 group.lastContextLimitTokens?.let { put("lastContextLimitTokens", it) }
             })
+        }
+
+        // [T-auto-backup-assets] Custom thinking rules: per-provider user data
+        // stored in Room (provider_thinking_rules). The provider wire format
+        // (exportInstanceJSON) does not carry them, so they get their own
+        // section, keyed by the owning provider's (providerType, label) —
+        // import re-attaches them after the provider restore re-mints ids.
+        // Sync snapshots pass includeThinkingRules=false: rules have no
+        // per-object merge model in SyncMerge yet (v1 ships them in full
+        // backups; cross-device rule sync can ride a later merge kind).
+        val thinkingRules = JSONArray()
+        if (includeThinkingRules) {
+            for (instance in providerRepo.instances) {
+                val rows = providerRepo.exportThinkingRulesJSON(instance.id) ?: continue
+                if (rows.length() == 0) continue
+                thinkingRules.put(JSONObject().apply {
+                    put("providerType", instance.providerType.name)
+                    put("providerLabel", instance.label)
+                    put("rules", rows)
+                })
+            }
+        }
+
+        // [T-auto-backup-assets] Artifacts: the agent's *outputs* — files under
+        // the shared folder (handoff docs, reports, tools, knowledge-graph
+        // exports) plus MCP server data files (servers.json, memory-server
+        // knowledge graphs). Chat transcripts are process byproduct and
+        // deliberately NOT here; the auto backup is for what the agent
+        // produced, not how it produced it. Selection is text-only and
+        // size-capped ([ArtifactBackupScope]); the archive streams to a temp
+        // file so a multi-MB set never sits fully in memory as a string.
+        val artifacts = JSONObject()
+        var artifactSkipped = 0
+        if (artifactRoots != null && artifactRoots.isNotEmpty()) {
+            val archiveFile = java.io.File.createTempFile("artifact-backup-", ".zip")
+            try {
+                var totalBytes = 0L
+                var fileCount = 0
+                java.io.FileOutputStream(archiveFile).use { fos ->
+                    java.util.zip.ZipOutputStream(fos.buffered()).use { zos ->
+                        for (root in artifactRoots) {
+                            val isMcpRoot = root.name == "mcp-servers"
+                            val allowed = if (isMcpRoot)
+                                setOf("json", "jsonl", "md")
+                            else
+                                ArtifactBackupScope.DEFAULT_ALLOWED_EXTENSIONS
+                            val sel = ArtifactBackupScope.select(
+                                root,
+                                allowedExtensions = allowed,
+                            )
+                            val prefix = if (isMcpRoot) "mcp" else "shared"
+                            artifactSkipped += sel.oversizedSkipped + sel.nonTextSkipped
+                            totalBytes += ArtifactArchiver.writeEntries(
+                                zos, root, sel.files, "$prefix/",
+                            )
+                            fileCount += sel.files.size
+                        }
+                    }
+                }
+                if (fileCount > 0) {
+                    val zipBytes = archiveFile.readBytes()
+                    artifacts.put(
+                        "archive",
+                        android.util.Base64.encodeToString(zipBytes, android.util.Base64.NO_WRAP),
+                    )
+                    artifacts.put("archiveBytes", zipBytes.size)
+                    artifacts.put("fileCount", fileCount)
+                    if (artifactSkipped > 0) artifacts.put("skipped", artifactSkipped)
+                }
+            } finally {
+                runCatching { archiveFile.delete() }
+            }
         }
 
         // Environment variables live in EnvVarRepository (metadata in a JSON
@@ -377,11 +459,13 @@ object ConfigBackup {
                 put("includesSecrets", includeSecrets)
                 put("fields", fields)
                 put("providers", providers)
+                put("thinkingRules", thinkingRules)
                 put("groups", groups)
                 put("envVars", envVars)
                 put("skills", skills)
                 put("memoryFiles", memoryFiles)
                 put("mcpServers", mcpServers)
+                put("artifacts", artifacts)
                 put("chatSessions", JSONArray())
                 put("chatMessages", JSONArray())
                 if (readFailures > 0) put("readFailures", readFailures)
@@ -460,14 +544,28 @@ object ConfigBackup {
             put("includesSecrets", includeSecrets)
             put("fields", fields)
             put("providers", providers)
+            put("thinkingRules", thinkingRules)
             put("groups", groups)
             put("envVars", envVars)
             put("skills", skills)
             put("memoryFiles", memoryFiles)
             put("mcpServers", mcpServers)
+            put("artifacts", artifacts)
             put("chatSessions", chatSessions)
             put("chatMessages", chatMessages)
             chatTruncated?.let { put("chatTruncated", it) }
+            // [T-auto-backup-assets] The WebDAV server config rides the same
+            // secrets gate as provider keys: it contains the server password.
+            // Without secrets we never carry it — a restore that drops every
+            // credential also drops the server it would reconnect to.
+            if (includeSecrets && webDavConfig != null) {
+                put("webdavConfig", JSONObject().apply {
+                    put("url", webDavConfig.url)
+                    put("username", webDavConfig.username)
+                    put("password", webDavConfig.password)
+                    put("path", webDavConfig.path)
+                })
+            }
             if (readFailures > 0) put("readFailures", readFailures)
         }.toString()
 
@@ -565,6 +663,8 @@ object ConfigBackup {
         mcpRepo: MCPRepository? = null,
         chatRepo: ChatRepository? = null,
         isSyncMerge: Boolean = false,
+        artifactRoots: List<File>? = null,
+        onWebDavConfig: ((WebDavConfig) -> Unit)? = null,
     ): ImportResult {
         // [fix-audit-p1-2] Reject oversized documents BEFORE any parsing /
         // decoding: a backup with embedded skill archives or chat history is
@@ -612,6 +712,14 @@ object ConfigBackup {
         var mcpServersImported = 0
         var chatSessionsImported = 0
         var chatMessagesImported = 0
+        var thinkingRulesImported = 0
+        var artifactFilesImported = 0
+        var webdavConfigImported = false
+        // [T-auto-backup-assets] Stage 1 records every processed provider's
+        // (providerType, label) → restored instance id so the thinking-rules
+        // stage can re-attach rules to the instance that now owns the label
+        // (merge and append paths both re-mint or reuse ids).
+        val providerKeyToId = HashMap<String, String>()
         try {
 
         // [T-backup-group-idmap] Order matters. Providers create the model
@@ -695,8 +803,46 @@ object ConfigBackup {
                         continue
                     }
                     providersImported++
+                    // [T-auto-backup-assets] Record the restored instance id for
+                    // thinking-rule re-attachment (keyed by type+label, the same
+                    // natural key SyncMerge uses).
+                    val instId = providerRepo.instances.firstOrNull {
+                        it.label == resolvedLabel &&
+                            it.providerType.name == obj.optString("providerType", "")
+                    }?.id
+                    if (instId != null) {
+                        providerKeyToId[
+                            obj.optString("providerType", "") + "\u0000" + resolvedLabel
+                        ] = instId
+                    }
                 } catch (t: Throwable) {
                     skipped.add("provider \"$label\": ${t.message ?: "import failed"}")
+                }
+            }
+        }
+
+        // -- Stage 1.5: custom thinking rules (re-attach to restored providers) --
+        // Rules ride a (providerType, providerLabel) key because the provider
+        // restore above re-minted instance ids. A rule whose provider did not
+        // survive import (skipped/rejected) is reported and skipped. Restore
+        // REPLACES the instance's rules with the backup's — a restore is a
+        // restore, and the pre-restore snapshot is the rollback safety net.
+        val thinkingRules = root.optJSONArray("thinkingRules")
+        if (thinkingRules != null) {
+            for (i in 0 until thinkingRules.length()) {
+                val group = thinkingRules.optJSONObject(i) ?: continue
+                val type = group.optString("providerType", "")
+                val label = group.optString("providerLabel", "")
+                val rules = group.optJSONArray("rules") ?: continue
+                val instId = providerKeyToId["$type\u0000$label"]
+                if (instId == null) {
+                    skipped.add("thinking rules for \"$label\" (provider not restored)")
+                    continue
+                }
+                try {
+                    thinkingRulesImported += providerRepo.restoreThinkingRules(instId, rules)
+                } catch (t: Throwable) {
+                    skipped.add("thinking rules for \"$label\": ${t.message ?: "restore failed"}")
                 }
             }
         }
@@ -1062,6 +1208,68 @@ object ConfigBackup {
             }
         }
 
+        // -- Stage 9: artifact files (shared/ + mcp data, from the embedded zip) --
+        // The archive routes entries by first path segment into the matching
+        // root ("shared/" → sharedRoot, "mcp/" → mcpRoot). A sync merge never
+        // restores artifacts (isSyncMerge → artifactRoots stays null): files
+        // are per-device outputs and last-writer-wins would clobber a
+        // sibling's work — they belong to full restores only.
+        val artifactsObj = root.optJSONObject("artifacts")
+        if (artifactsObj != null && artifactRoots != null && artifactRoots.isNotEmpty()) {
+            val archive = artifactsObj.optString("archive", "")
+            val estimatedBytes = (archive.length / 4L) * 3L
+            if (archive.isNotEmpty() && estimatedBytes <= MAX_ARTIFACT_ARCHIVE_BYTES) {
+                try {
+                    val bytes = android.util.Base64.decode(archive, android.util.Base64.NO_WRAP)
+                    val tmp = java.io.File.createTempFile("artifact-restore-", ".zip")
+                    try {
+                        tmp.writeBytes(bytes)
+                        val destByPrefix = HashMap<String, File>()
+                        for (root in artifactRoots) {
+                            val prefix = if (root.name == "mcp-servers") "mcp" else "shared"
+                            destByPrefix[prefix] = root
+                        }
+                        artifactFilesImported = ArtifactArchiver.extractZipByPrefix(tmp, destByPrefix)
+                    } finally {
+                        runCatching { tmp.delete() }
+                    }
+                } catch (t: Throwable) {
+                    skipped.add("artifacts: ${t.message ?: "extract failed"}")
+                }
+            } else if (archive.isEmpty()) {
+                skipped.add("artifacts: archive empty in backup")
+            } else {
+                skipped.add("artifacts: archive too large (${estimatedBytes} bytes)")
+            }
+        } else if (artifactsObj != null && artifactsObj.has("archive") && artifactRoots == null) {
+            skipped.add("artifacts: not restorable in this context")
+        }
+
+        // -- webdavConfig (server settings for the next restore / sync) --
+        // Full manual restores (and the auto-backup restore path) apply the
+        // backed-up WebDAV server config so a new install can immediately
+        // reach its remote backups; a sync merge must NEVER overwrite the
+        // local server config from a sibling.
+        val wdObj = root.optJSONObject("webdavConfig")
+        if (wdObj != null && !isSyncMerge) {
+            val url = wdObj.optString("url", "")
+            if (url.isNotEmpty() && onWebDavConfig != null) {
+                onWebDavConfig(
+                    WebDavConfig(
+                        url = url,
+                        username = wdObj.optString("username", ""),
+                        password = wdObj.optString("password", ""),
+                        path = wdObj.optString(
+                            "path", WebDavConfig.DEFAULT_BACKUP_DIR,
+                        ),
+                    )
+                )
+                webdavConfigImported = true
+            } else if (onWebDavConfig == null) {
+                skipped.add("WebDAV server config: not restorable here")
+            }
+        }
+
 
         } catch (t: Throwable) {
             fatal = t.message ?: "import failed"
@@ -1077,6 +1285,9 @@ object ConfigBackup {
             mcpServersImported = mcpServersImported,
             chatSessionsImported = chatSessionsImported,
             chatMessagesImported = chatMessagesImported,
+            thinkingRulesImported = thinkingRulesImported,
+            artifactFilesImported = artifactFilesImported,
+            webdavConfigImported = webdavConfigImported,
             skipped = skipped,
             hadSecrets = root.optBoolean("includesSecrets", false),
             fatal = fatal,
@@ -1093,6 +1304,8 @@ object ConfigBackup {
                     "skills=$skillsImported memoryFiles=$memoryFilesImported " +
                     "mcpServers=$mcpServersImported " +
                     "chatSessions=$chatSessionsImported chatMessages=$chatMessagesImported " +
+                    "thinkingRules=$thinkingRulesImported artifacts=$artifactFilesImported " +
+                    "webdavConfig=$webdavConfigImported " +
                     "skipped=${result.skipped.size} hadSecrets=${result.hadSecrets}"
             )
             for (line in result.skipped) Log.w(TAG, "import skipped — $line")
@@ -1191,6 +1404,13 @@ object ConfigBackup {
      *  before decoding anything (a malicious/huge file is dropped outright
      *  instead of OOMing mid-restore). */
     const val MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
+
+    /** [T-auto-backup-assets] Upper bound for a decoded artifact archive. The
+     *  export side caps the selection at [ArtifactBackupScope.MAX_ARCHIVE_BYTES]
+     *  (~12MB → ~16MB base64); this import-side ceiling mirrors it with slack
+     *  for hand-edited / future payloads, checked BEFORE the Base64 decode so
+     *  an oversized blob can't spike memory. */
+    const val MAX_ARTIFACT_ARCHIVE_BYTES = 20L * 1024 * 1024
 
     /** [fix-audit-p0-3] Snapshot files live under `filesDir/backup-snapshots`,
      *  named with second precision so two restores in the same minute can't

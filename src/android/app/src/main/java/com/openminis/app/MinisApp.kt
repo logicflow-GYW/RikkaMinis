@@ -645,7 +645,14 @@ class MinisApp : Application(), ImageLoaderFactory {
                 // the first launch pulls the latest remote snapshot, a resume
                 // after edits refetches any sibling changes. Cheap no-op when
                 // the feature is off or no WebDAV is configured.
-                if (wasBackgrounded) syncMultiDeviceIfEnabled()
+                if (wasBackgrounded) {
+                    syncMultiDeviceIfEnabled()
+                    // [T-auto-backup-assets] Daily asset backup rides the same
+                    // foreground beat as sync — one place to wake both, no
+                    // extra background machinery. runIfDue is a cheap no-op
+                    // unless enabled AND the calendar day rolled over.
+                    com.openminis.app.backup.AutoBackupManager.runIfDue(this@MinisApp)
+                }
                 // T298: as soon as the app transitions background → foreground,
                 // clear any task-completed notifications still in the tray.
                 // The user is back in front of the app — there's no point

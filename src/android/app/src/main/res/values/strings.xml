@@ -1231,6 +1231,15 @@
     <string name="settings_mount_external_folders_subtitle">Bind picked folders into /var/minis/mounts/</string>
     <string name="settings_backup">Backup &amp; Restore</string>
     <string name="settings_backup_subtitle">Export or import settings and providers</string>
+    <string name="auto_backup_section_title">Automatic backup</string>
+    <string name="auto_backup_section_footer">Runs once a day at first app open. Covers capability (providers, thinking rules, skills, env vars, memory, MCP) and outputs (shared/ files and knowledge-graph data) — chat transcripts are deliberately excluded (agent process byproduct). Includes API keys; local copies stay in app storage, remote copies go to your WebDAV server (newest 7 kept).</string>
+    <string name="auto_backup_enable">Daily automatic backup</string>
+    <string name="auto_backup_enable_sub">Backs up automatically the first time the app is opened each day</string>
+    <string name="auto_backup_run_now">Back up now</string>
+    <string name="auto_backup_last_run">Last backup: %1$s</string>
+    <string name="auto_backup_never">Never run yet</string>
+    <string name="auto_backup_empty">No automatic backups yet.</string>
+    <string name="auto_backup_restore_hint">Tap a backup to restore it (a snapshot of the current state is saved first):</string>
     <string name="backup_section_local">Local backup</string>
     <string name="backup_section_footer">Includes providers, appearance, agent runtime defaults, environment variables, skills, memory, MCP servers and chat history (text-only, media excluded).</string>
     <string name="webdav_section">WebDAV backup</string>
@@ -1734,4 +1743,5 @@
     <string name="thinking_fmt_qwen_desc">Qwen/DashScope: enable_thinking plus a thinking_budget below max tokens.</string>
     <string name="thinking_fmt_custom_title">Custom field path</string>
     <string name="thinking_fmt_custom_desc">Escape hatch: a dotted path plus a value at High for an endpoint not covered above.</string>
+    <string name="backup_progress_title">Backing up…</string>
 </resources>

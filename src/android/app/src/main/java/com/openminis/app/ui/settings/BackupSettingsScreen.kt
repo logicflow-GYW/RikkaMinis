@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.outlined.CloudDownload
@@ -112,6 +113,18 @@ fun BackupSettingsScreen(
     val webDavStore = remember { WebDavConfigStore(context) }
     val webDavHttpClient = remember { WebDavClient.defaultClient() }
     val scope = rememberCoroutineScope()
+    // [T-auto-backup-assets] Artifact roots: the agent's *outputs* that
+    // manual export, WebDAV upload, pre-restore snapshots and the daily
+    // auto-backup all carry — the shared folder (handoff docs / reports /
+    // tools / knowledge-graph exports) plus MCP server data files. Chat
+    // transcripts stay out (process byproduct, not product) — they already
+    // have their own windowed section when chatRepo is passed.
+    val artifactRoots = remember {
+        listOf(
+            File(context.filesDir, "minis-global/shared"),
+            File(context.filesDir, "minis-global/mcp-servers"),
+        )
+    }
     // Transfers that MUST complete even if the user leaves this screen
     // (WebDAV backup upload / restore) run on the app-scoped scope instead,
     // so navigating away cannot cancel them mid-flight. Completion is
@@ -119,6 +132,13 @@ fun BackupSettingsScreen(
     val application = remember { context.applicationContext as MinisApp }
     val notifier = remember { application.backgroundTaskNotifier }
     var webDavConfig by remember { mutableStateOf(webDavStore.load()) }
+    // [T-auto-backup-assets] Persist a restored WebDAV server config and
+    // refresh Compose state. Declared AFTER webDavConfig so the lambda can
+    // reference it (local-variable ordering).
+    val applyWebDavConfig: (WebDavConfig) -> Unit = { cfg ->
+        runCatching { webDavStore.save(cfg) }
+        webDavConfig = cfg
+    }
     var showWebDavConfig by remember { mutableStateOf(false) }
     var showRemoteList by remember { mutableStateOf(false) }
     // [refactor-backup-gate] SINGLE mutual-exclusion flag for ALL backup paths
@@ -144,6 +164,19 @@ fun BackupSettingsScreen(
     var remoteError by remember { mutableStateOf<String?>(null) }
     var deletePending by remember { mutableStateOf<WebDavBackupItem?>(null) }
     var snapshotNote by remember { mutableStateOf<String?>(null) }
+    // [T-auto-backup-assets] Daily asset backup state (toggle + last run +
+    // local copies). The auto payload deliberately excludes chat transcripts
+    // — see AutoBackupManager class doc. Local auto copies restore through
+    // the same snapshotRestoreTarget dialog + restoreWithSnapshot path as
+    // pre-restore snapshots (both are full JSON payloads with rollback).
+    var autoBackupEnabled by remember {
+        mutableStateOf(com.openminis.app.backup.AutoBackupManager.isEnabled(context))
+    }
+    var autoBackupRunning by remember { mutableStateOf(false) }
+    var autoBackupFiles by remember { mutableStateOf(com.openminis.app.backup.AutoBackupManager.listLocal(context)) }
+    var autoBackupLastRun by remember {
+        mutableStateOf(com.openminis.app.backup.AutoBackupManager.lastRunLabel(context))
+    }
     // [fix-audit-p0-2] Local pre-restore snapshots, newest first. They used to
     // be written with no UI to list or restore them — a promise of rollback
     // with no way to roll back. Now listed here and restorable via the same
@@ -205,6 +238,8 @@ fun BackupSettingsScreen(
                         mcpRepo = mcpRepository,
                         chatRepo = chatRepository,
                         chatWindowDays = chatWindowDays,
+                        artifactRoots = artifactRoots,
+                        webDavConfig = webDavConfig,
                     )
                 }
                 // Keep the safety snapshot LOCAL only. Uploading it to the
@@ -240,6 +275,8 @@ fun BackupSettingsScreen(
                         memoryRepo = memoryRepository,
                         mcpRepo = mcpRepository,
                         chatRepo = chatRepository,
+                        artifactRoots = artifactRoots,
+                        onWebDavConfig = applyWebDavConfig,
                     )
                 }
                 withContext(Dispatchers.Main) {
@@ -298,6 +335,8 @@ fun BackupSettingsScreen(
                         mcpRepo = mcpRepository,
                         chatRepo = chatRepository,
                         chatWindowDays = chatWindowDays,
+                        artifactRoots = artifactRoots,
+                        webDavConfig = webDavConfig,
                     )
                 }
                 withContext(Dispatchers.IO) {
@@ -409,6 +448,100 @@ fun BackupSettingsScreen(
 
     // top-level page: rely on system back gesture / bottom nav (no back arrow)
     SettingsScaffold(title = stringResource(R.string.settings_backup), onBack = null) {
+        // [T-auto-backup-assets] Daily automatic asset backup — see
+        // com.openminis.app.backup.AutoBackupManager. This is the app's ONLY automatic backup: it
+        // runs once per day at first foreground and covers capability
+        // (config/providers/thinking rules/skills/env vars/MCP/memory) plus
+        // outputs (shared/ artifacts + knowledge-graph data) but NOT chat
+        // transcripts (process byproduct — a task-runner's chat stream is
+        // mostly the agent working, and the distilled memory already keeps
+        // what matters).
+        SettingsSection(
+            header = stringResource(R.string.auto_backup_section_title),
+            footer = stringResource(R.string.auto_backup_section_footer),
+        ) {
+            SettingsRow(
+                title = stringResource(R.string.auto_backup_enable),
+                subtitle = stringResource(R.string.auto_backup_enable_sub),
+                trailing = {
+                    Switch(
+                        checked = autoBackupEnabled,
+                        onCheckedChange = { on ->
+                            autoBackupEnabled = on
+                            com.openminis.app.backup.AutoBackupManager.setEnabled(context, on)
+                        },
+                    )
+                },
+                // No row-level onClick: the Switch is the only toggle, so a
+                // tap can't double-fire (row ripple + switch) into a no-op.
+                showDivider = true,
+            )
+            SettingsRow(
+                title = stringResource(R.string.auto_backup_run_now),
+                subtitle = run {
+                    val lastRun = autoBackupLastRun
+                    if (autoBackupRunning) stringResource(R.string.backup_progress_title)
+                    else if (lastRun != null) {
+                        stringResource(R.string.auto_backup_last_run, lastRun)
+                    } else stringResource(R.string.auto_backup_never)
+                },
+                icon = Icons.Filled.Refresh,
+                onClick = if (operationBusy || autoBackupRunning) null else ({
+                    autoBackupRunning = true
+                    operationBusy = true
+                    application.applicationScope.launch {
+                        try {
+                            withContext(Dispatchers.IO) {
+                                com.openminis.app.backup.AutoBackupManager.runNow(application)
+                            }
+                            withContext(Dispatchers.Main) {
+                                autoBackupFiles = com.openminis.app.backup.AutoBackupManager.listLocal(context)
+                                autoBackupLastRun = com.openminis.app.backup.AutoBackupManager.lastRunLabel(context)
+                                android.widget.Toast.makeText(
+                                    context, savedToast, android.widget.Toast.LENGTH_SHORT,
+                                ).show()
+                            }
+                        } catch (t: Throwable) {
+                            withContext(Dispatchers.Main) {
+                                errorMessage = t.message ?: errUnknown
+                            }
+                        } finally {
+                            withContext(Dispatchers.Main) {
+                                autoBackupRunning = false
+                                operationBusy = false
+                            }
+                        }
+                    }
+                }),
+                showDivider = false,
+            )
+            if (autoBackupFiles.isEmpty()) {
+                Text(
+                    stringResource(R.string.auto_backup_empty),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+            } else {
+                Text(
+                    stringResource(R.string.auto_backup_restore_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+                autoBackupFiles.take(7).forEach { file ->
+                    SettingsRow(
+                        title = file.name.removePrefix(com.openminis.app.backup.AutoBackupManager.LOCAL_FILE_PREFIX)
+                            .removeSuffix(".json"),
+                        subtitle = java.text.SimpleDateFormat(
+                            "yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()
+                        ).format(java.util.Date(file.lastModified())),
+                        icon = Icons.Filled.Restore,
+                        onClick = { snapshotRestoreTarget = file },
+                    )
+                }
+            }
+        }
         SettingsSection(
             header = stringResource(R.string.backup_section_local),
             footer = stringResource(R.string.backup_section_footer),
@@ -570,6 +703,8 @@ fun BackupSettingsScreen(
                                 mcpRepo = mcpRepository,
                                 chatRepo = chatRepository,
                                 chatWindowDays = chatWindowDays,
+                                artifactRoots = artifactRoots,
+                                webDavConfig = webDavConfig,
                             )
                         }
                         // Resolve config on Main (it reads SharedPreferences and

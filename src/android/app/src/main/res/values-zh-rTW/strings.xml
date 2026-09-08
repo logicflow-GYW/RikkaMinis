@@ -484,6 +484,15 @@
     <string name="settings_mount_external_folders_subtitle">將選取的資料夾繫結到 /var/minis/mounts/</string>
     <string name="settings_backup">備份與還原</string>
     <string name="settings_backup_subtitle">匯出或匯入設定與提供商</string>
+    <string name="auto_backup_section_title">自動備份</string>
+    <string name="auto_backup_section_footer">每天首次開啟 App 時自動執行。涵蓋能力（供應商、思考規則、技能、環境變數、記憶、MCP）與產出（shared/ 檔案與知識圖譜資料）——聊天記錄刻意排除（Agent 工作過程產物）。含 API 金鑰；本機副本存於 App 儲存，遠端副本推送到你的 WebDAV 伺服器（保留最近 7 份）。</string>
+    <string name="auto_backup_enable">每日自動備份</string>
+    <string name="auto_backup_enable_sub">每天首次開啟 App 時自動備份</string>
+    <string name="auto_backup_run_now">立即備份</string>
+    <string name="auto_backup_last_run">上次備份：%1$s</string>
+    <string name="auto_backup_never">尚未執行</string>
+    <string name="auto_backup_empty">尚無自動備份檔案。</string>
+    <string name="auto_backup_restore_hint">點擊備份檔案即可還原（還原前會先儲存目前狀態快照）：</string>
     <string name="backup_section_local">本機備份</string>
     <string name="webdav_section">WebDAV 備份</string>
     <string name="webdav_section_footer">將備份推送到任意 WebDAV 伺服器（Nextcloud、堅果雲、Synology…），隨時隨地還原。</string>
@@ -1638,4 +1647,5 @@
     <string name="thinking_fmt_qwen_desc">Qwen/DashScope：enable_thinking 加一個不超過最大 token 的 thinking_budget。</string>
     <string name="thinking_fmt_custom_title">自訂欄位路徑</string>
     <string name="thinking_fmt_custom_desc">逃生艙：點分路徑加 High 檔的值，用於上述未涵蓋的端點。</string>
+    <string name="backup_progress_title">備份進行中…</string>
 </resources>

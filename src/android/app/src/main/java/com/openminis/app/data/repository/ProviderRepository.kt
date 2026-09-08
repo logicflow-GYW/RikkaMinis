@@ -882,6 +882,71 @@ class ProviderRepository(private val context: Context) {
         republishThinkingCache(instanceId)
     }
 
+    // ── [T-auto-backup-assets] Backup/restore of custom thinking rules ──
+    //
+    // The custom rules are per-provider user data with NO cloud sync (Android
+    // provider config is local-only). Without a backup path they silently
+    // vanish on restore — the same field-evap family as the env-var group bug.
+    // Export keeps the full entity row (including the stable rule id and
+    // sort_order) so restore is faithful; ConfigBackup attaches the owning
+    // provider's (providerType, label) so rules can be re-attached after the
+    // provider's own id was re-minted by a restore.
+
+    /** Backup JSON rows for [instanceId]'s custom rules, in stored order. */
+    fun exportThinkingRulesJSON(instanceId: String): org.json.JSONArray? = runBlocking {
+        val rows = runCatching { providerDao.loadThinkingRules(instanceId) }
+            .getOrDefault(emptyList())
+        if (rows.isEmpty()) return@runBlocking null
+        val arr = org.json.JSONArray()
+        for (row in rows.sortedBy { it.sortOrder }) {
+            arr.put(org.json.JSONObject().apply {
+                put("id", row.id)
+                put("label", row.label)
+                put("scopeKind", row.scopeKind)
+                row.scopePattern?.let { put("scopePattern", it) }
+                row.wireFormatJson?.let { put("wireFormatJson", it) }
+                row.reasoningEchoJson?.let { put("reasoningEchoJson", it) }
+                put("sortOrder", row.sortOrder)
+            })
+        }
+        arr
+    }
+
+    /**
+     * Replace [instanceId]'s custom rules with the rows from a backup,
+     * preserving each rule's id and sort_order. Returns the number of rules
+     * restored (0 when [rows] is empty or malformed). A backup section that
+     * carries no rules for this instance is a no-op — restore must never wipe
+     * rules just because an older backup predates the section.
+     */
+    fun restoreThinkingRules(instanceId: String, rows: org.json.JSONArray): Int = runBlocking {
+        val entities = ArrayList<ProviderThinkingRuleEntity>()
+        for (i in 0 until rows.length()) {
+            val o = rows.optJSONObject(i) ?: continue
+            val id = o.optString("id", "")
+            if (id.isEmpty()) continue
+            val label = o.optString("label", "")
+            if (label.isEmpty()) continue
+            val scopeKind = o.optString("scopeKind", "allModels")
+            entities.add(
+                ProviderThinkingRuleEntity(
+                    id = id,
+                    providerInstanceId = instanceId,
+                    label = label,
+                    scopeKind = scopeKind,
+                    scopePattern = o.optString("scopePattern", "").ifEmpty { null },
+                    wireFormatJson = o.optString("wireFormatJson", "").ifEmpty { null },
+                    reasoningEchoJson = o.optString("reasoningEchoJson", "").ifEmpty { null },
+                    sortOrder = o.optInt("sortOrder", i),
+                )
+            )
+        }
+        if (entities.isEmpty()) return@runBlocking 0
+        providerDao.replaceThinkingRules(instanceId, entities)
+        republishThinkingCache(instanceId)
+        entities.size
+    }
+
     /**
      * Built-in rules relevant to THIS instance, for the Provider-detail UI. Mirrors iOS
      * builtInRulesForDisplay: resolve the vendor context from the instance's base URL,

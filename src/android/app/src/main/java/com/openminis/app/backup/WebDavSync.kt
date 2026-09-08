@@ -86,6 +86,58 @@ object WebDavSync {
         dav.put(name, payload.toByteArray(Charsets.UTF_8), "application/json")
     }
 
+    /**
+     * [T-auto-backup-assets] Push an automatic backup under its own
+     * `rikkaminis-backup-auto-*` name so [pruneAutoBackups] can rotate only
+     * auto-created copies and never touch curated manual uploads. Auto
+     * backups still match [listBackupFiles]'s prefix filter, so they appear
+     * in the remote list and restore through the normal flow.
+     */
+    fun backupAuto(
+        config: WebDavConfig,
+        payload: String,
+        client: OkHttpClient = WebDavClient.defaultClient(),
+    ): String {
+        val dav = WebDavClient(config, client)
+        dav.ensureCollectionExists()
+        val name = "rikkaminis-backup-auto-${
+            java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+                .format(java.util.Date())
+        }.json"
+        dav.put(name, payload.toByteArray(Charsets.UTF_8), "application/json")
+        return name
+    }
+
+    /** [T-auto-backup-assets] Auto-backup filename prefix (subset of
+     *  [BACKUP_PREFIX], distinct from manual uploads by the `auto-` token). */
+    const val AUTO_BACKUP_PREFIX = "rikkaminis-backup-auto-"
+
+    /**
+     * [T-auto-backup-assets] Delete remote auto-backup copies beyond the
+     * newest [keep]. Only files under [AUTO_BACKUP_PREFIX] are eligible —
+     * manual `rikkaminis-backup-*` uploads are never pruned. Best-effort
+     * (Pure JVM: a deletion failure is swallowed; the next run retries).
+     */
+    fun pruneAutoBackups(
+        config: WebDavConfig,
+        keep: Int = AUTO_BACKUP_KEEP,
+        client: OkHttpClient = WebDavClient.defaultClient(),
+    ): Int {
+        val dav = WebDavClient(config, client)
+        val stale = listBackupFiles(config, client)
+            .filter { it.displayName.startsWith(AUTO_BACKUP_PREFIX) }
+            .sortedByDescending { it.lastModified }
+            .drop(keep)
+        var deleted = 0
+        for (item in stale) {
+            if (runCatching { dav.delete(item.href) }.isSuccess) deleted++
+        }
+        return deleted
+    }
+
+    /** How many auto-backup copies to keep on the remote (and locally). */
+    const val AUTO_BACKUP_KEEP = 7
+
     /** Remote backups, newest first. */
     fun listBackupFiles(
         config: WebDavConfig,

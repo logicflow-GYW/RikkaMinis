@@ -138,6 +138,10 @@ object MultiDeviceSync {
             chatWindowDays = 0,
             includeHiddenModels = false,
             memoryFileNames = SYNC_MEMORY_FILES,
+            // [T-auto-backup-assets] Sync carries no thinking rules yet (no
+            // per-object merge kind for them in SyncMerge) and never carries
+            // artifact files (per-device outputs, last-writer-wins clobbers).
+            includeThinkingRules = false,
         )
     }
 
