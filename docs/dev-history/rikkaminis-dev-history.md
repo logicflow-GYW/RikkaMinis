@@ -4,8 +4,8 @@
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
 - 合并范围：2026-08-03 ～ 2026-09-08，共 37 天
-- 条目总数：829（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
-- 总字符数：962897 / 总行数：15799
+- 条目总数：834（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
+- 总字符数：968402 / 总行数：15882
 
 ---
 
@@ -15792,6 +15792,89 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 此前 replica 测试（EnvVarGroupRoundTripTest 11/11）只钉 key 形状，生产文件本体只有 CI 编译证据。补强：编译**真实** EnvVarRepository.kt（未改动一字）+ 桩（Context/SharedPreferences/Log 既有 + 新写 EncryptedPrefsFactory 桩签名 safeCreate(context,fileName)）→ 9/9 绿，覆盖：note-only update 保留 group+secret（bug#3 精确调用形状）、tri-state、metadata JSON 真实落盘 round-trip、旧格式无 group 键回退、UI 分组不变量（LinkedHashMap 首见序 + "" 垫底）。
 
 **可复用**：/tmp/jvmtc/run_real_test.sh + realtest/ 两个文件（/tmp 不跨重建）；对 Repository 层修 bug 时 replica 测试之外，直接拿真实源文件+桩驱动是更强的证据层，比复刻少一层"复刻漂移"风险。ConfigBackup/EnvVarsCollection 因依赖面过重（ConfigRegistry 全家）不适合此法，仍靠 CI 编译+replica 钉契约。
+
+<!-- 2026-09-08 14:00:22 -->
+## 文档同步：dev-history + README 致谢更新（2026-09-08，main @ ec39da7）
+
+<!-- 2026-09-08 14:0x -->
+
+用户要求"文档与事实不相符的部分更新一下，readme 也是，致谢缺了一些，还有三平台的之类的"。已完成：
+
+**dev-history 重建**：829 条 / 37 天（823→829，新增 09-08 全部 4 条：三账号 gyw-proxy 更新、env-var 分组+Sheet 修复、审计修复合并、补强验证），fences=32 even / ts=829 / outOrder=0，sanitize 95 处替换干净。分支 docs/dev-history-0908 两 commit → ff 合并 main → push（纯文档不触发 CI）→ 删分支。
+
+**README.md + README_EN.md 致谢**：
+- 补 **Operit**（AAswordman，LGPL-3.0）——浏览器三件（console/network/file_upload）+ CI 脚本自测 + 语义混合评分（09-07 吸收，README 一直缺）
+- 补 **OpenClaw**——技能系统参考（ARCHITECTURE §12 已有登记，README 缺，现一致）
+- 新增「平台服务」段——Hugging Face（semantic-memory 嵌入模型 paraphrase-multilingual-MiniLM-L12-v2 经 Inference API）+ GitHub Actions（构建/发布 CI）
+- **英文版顺带修复**：Hermes 条目中文有英文缺（5e81aa1 只改了中文），已补齐
+- 三平台集成章节与代码核实一致（buildIntegrationStatus 仍在 ChatPromptAndTools:888、assets/skills 仍 4 技能、Tier 0/1/2 逻辑未变），未动
+
+**ARCHITECTURE.md §12** 补 Operit 行（浏览器三件/scan 自测/semantic_memory v1.1.0 混合评分落地形态）。三处文档（README/README_EN/ARCHITECTURE）借签登记现完全一致。
+
+**坑**：file_edit old_string 必须逐字符匹配原文（全角逗号 vs 半角）——第一次编辑失败重试。
+
+<!-- 2026-09-08 15:32:12 -->
+## 备份设计定调：资产 vs 副产品（用户拍板的产品哲学）
+
+
+用户纠正我的框架："这是智能体应用不是聊天应用，聊天记录里 90% 是 AI 工作过程数据，聊天记录反而是**最不重要**的。"由此定调自动备份设计：
+
+**判定三问**：①是任务的结果还是过程痕迹（资产 vs 副产品）②丢了能否重造（可再生性）③体量/恢复链依赖。
+
+**一句话**：备份"系统怎么跑"（能力资产）和"任务产出了什么"（产出资产），不备份"任务怎么跑的"（过程副产品）。
+
+**最终清单（2026-09-08 讨论定稿）**：
+- 进：提供商全套/思考规则(待补,P0)/模型组/环境变量/8scope配置/browser+mirror+技能排序(待注册表化)/技能/MCP/GLOBAL.md/WebDAV配置本身(跟随密钥门,恢复链的根) + shared/文本类(排除sandbox-env等可再生,实测排除后~4MB)/知识图谱JSONL/daily logs
+- 不进：聊天记录(自动备份默认关或1天窗,手动导出保留完整)/compact_markers/workspace临时区/MEMORY-ROLLUP(可再生)/模型目录缓存/闹钟/草稿/权限标记/设备身份/浏览器标签/挂载文件夹(SAF不可迁移)/媒体附件/WebApp快捷方式(仅手动)
+- 同步维持现状（能力资产收敛），shared/daily logs 只进备份不进同步（文件级 last-writer-wins 会互相覆盖）
+- 证据：用户手动建 shared/knowledge-graph-backup/ 目录 = 民间补丁，系统该干的事用户在用手干
+- 现状倒置实测：64MB 预算基本全为聊天设计，shared/ 零备份
+
+<!-- 2026-09-08 16:45:13 -->
+## 自动备份 A+B 施工交接（2026-09-08，feat/backup-assets-complete @ f8a2372，未合并）
+
+
+第三轮分支 CI run 34205678023 in_progress 结论未确认——新会话开场先查。交接文档 /var/minis/shared/backup-assets-complete-handoff.md（含真机验证清单+三轮 CI 修复教训）。
+
+**产品定调（用户拍板）**：智能体应用非聊天应用，聊天记录=过程副产品最不重要。自动备份= A 能力资产 + B 产出资产，聊天刻意排除（只进手动导出）。详情见前一条记忆"备份设计定调"。
+
+**改动**：ConfigBackup 三新 section（thinkingRules 按 providerType+label 键 / artifacts zip 前缀路由 shared+mcp / webdavConfig 跟密钥门）+ AutoBackupManager 每日前台触发（本地轮换7+WebDAV auto 轮换7）+ 设置 UI section + 7 语言。手动导出/快照/WebDAV 全带产出。同步不变（thinkingRules 显式关闭，无 merge kind，v1 不带）。
+
+**测试**：ArtifactBackupScopeTest 7/7 沙箱 JVM 绿；scan gate 4/4。
+**三轮 CI 修复**：inline-lambda continue 需 Kotlin 2.2（用普通 if continue）；局部 lambda 引用后声明变量错（移到声明后）；委托属性 smart cast 不可能（run 块局部变量）。
+**待办**：CI 绿→ff 合并 main→release CI→真机验证（思考规则/shared 恢复闭环、旧备份兼容）→删分支→dev-history。
+
+<!-- 2026-09-08 17:27:35 -->
+## 自动备份 A+B 审计修复 + 合并 main（2026-09-08，main @ 568d87a）
+
+<!-- 2026-09-08 18:5x -->
+
+**流程**：新会话开场查交接文档 + 分支 CI（run 34205678023 f8a2372 已 success）→ 本地全量审计（17 文件 1108 行）→ 发现 2 真 bug 修复 → 分支 CI run 34208124625（568d87ad）success → ff 合并 main @ 568d87a → push（release CI run 34209416918 自动触发）→ **用户拍板不等 release CI 结论**——android-latest 是否含本功能待查 bridge/status/main 或装包验证。
+
+**审计发现 2 个真 bug（修复 commit 568d87ad）**：
+1. **AutoBackupManager 无并发单飞**（MEDIUM，静默损坏）：快速双 background→foreground 转换 / 前台 beat 与设置页「立即备份」交叉 → 两个 runNow 并发跑 → 同秒文件名 yyyyMMdd-HHmmss 两协程交错写一个 JSON = 备份损坏（用户恢复当天才发现）。修：runNow 入口 AtomicBoolean CAS 单飞（runLocked 提取 body），CAS 失败静默并入（KEY_LAST_RUN 不写→次日 beat 自愈），runAsync 保留原样。
+2. **snapshot 恢复对话框主线程 readText**（LOW，卡顿）：auto 备份内嵌 zip 后 15-35MB（旧 snapshot ~2MB 无感），onClick（Main）直接 file.readText() 冻结对话框。修：scope.launch + withContext(IO) 读，再走既有 restoreWithSnapshot（其内部自管线程）。
+
+**审计排除（记录不修）**：重名 provider 双 group thinkingRules 后者覆盖前者（既有 merge 语义边界，同 type+label 本来就合并）；writeEntries select→read TOCTOU 毫秒窗；空备份恢复 skipped 报 "archive empty in backup"（fail-loud 设计）；WebDavConfigStore.load() 双调用（微）。
+
+**验证链**：scan gate 4/4 → 分支 CI 双绿（f8a2372 原版 + 568d87ad 修复版）→ ff 合并 → 本地+远端分支已删（204）。ArtifactBackupScopeTest 7 用例在 CI 内通过。
+
+**待办（下会话/用户）**：release CI 34209416918 结论 → android-latest 装包真机验证（清单在交接文档：自动备份 section/开关/立即备份/本地列表恢复闭环/三新键/旧备份兼容）。
+
+<!-- 2026-09-08 19:10:50 -->
+## 自动备份远端管理 + auto/ 目录分离施工交接（2026-09-08 晚，分支 feat/backup-auto-remote-dir @ 3c155f6，未合并）
+
+<!-- 2026-09-08 19:1x -->
+
+**用户多设备痛点（实测）**：A 自动备份推 WebDAV 成功；B「自动备份」区无入口（本地列表=本机文件，设计如此但无引导）；B 全量远端列表混入 auto 文件无法区分，第一轮点恢复"没恢复"（实际恢复的是 B 自己的备份）。用户拍板两项改进：①自动备份在 WebDAV 有独立文件夹 ②自动备份区镜像全量备份的远端管理（恢复/拉取到本地/删除）。
+
+**改动（1 commit，10 文件 +467/−26 + 新测试）**：WebDavSync 推 auto/ 子目录（AUTO_SUBDIR，对齐 sync/）、prune 只轮换 auto/、listBackupFiles 排除 auto-*、新增 listAutoBackupEntries（auto/+根残留合并，subdir 标注）+ restoreAuto；BackupSettingsScreen 自动备份区新增「远端自动备份」入口 → WebDavAutoDialog（恢复走 restoreWithSnapshot 快照回滚 / 拉取转本地 rikkaminis-auto-* 进本地轮换 / 删除带 subdir），两对话框 footer 显示 WebDAV 路径（path 不一致=跨设备看不见第一排查点）；strings 7 语言 +7 键；WebDavAutoBackupTest 8 用例。
+
+**验证**：scan gate 4/4；沙箱 JVM 25/25（含既有 WebDavClientTest 17）。**分支 CI 首轮红**=WebDavAutoDialog 缺 @Composable 注解（照抄 WebDavRemoteDialog 时漏了注解行；Kotlin 报 "Functions which invoke @Composable..." 连锁两错）。修后 amend → **force push 用 GIT_ASKPASS=/var/minis/workspace/.git_askpass.sh 环境变量 + git push --force**（gh_sync push 无 force 选项；--force-with-lease 报 stale info 是 remote-tracking 未更新，功能分支直接 --force 安全）。
+
+**待办（下会话）**：CI run 34218884469（head 3c155f6）结论 → ff 合并 main → release CI → 真机验证（B 设备同 path 下看到 A 的 auto 备份：恢复记忆回来/拉取进本地列表/删除；全量列表不再混；根残留仍可见标 root）→ 删分支 → dev-history。交接文档 /var/minis/shared/backup-auto-remote-dir-handoff.md。
+
+**产品语义提醒**：自动同步仍只带 GLOBAL.md（daily logs 排除是设计，防整文件覆盖毁当日日志）；完整记忆跨设备 = 自动备份 → 远端恢复。
 
 ---
 
