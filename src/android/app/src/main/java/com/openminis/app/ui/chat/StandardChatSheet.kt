@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -44,9 +45,13 @@ import com.openminis.app.ui.theme.ChatColors
  * between the indicator and the title — this version tightens it to 6dp / 4dp.
  *
  * [heightFraction] lets a caller request a smaller detent — for example
- * [TokenUsageSheet] passes 0.5f to match iOS's `.medium` detent
- * (AIChatView.swift:508). The fraction is clamped to (0, 1] so callers can't
- * accidentally collapse the sheet to nothing.
+ * a compact picker passes 0.5f. The fraction is clamped to (0, 1] so
+ * callers can't accidentally collapse the sheet to nothing. Passing
+ * `null` switches the sheet to fit-content mode: the sheet is only as
+ * tall as its content, capped at the same fraction-of-screen ceiling —
+ * used by [TokenUsageSheet], whose stat rows must all be visible on
+ * open (a fixed half-screen detent forced scrolling to the lower
+ * sections).
  *
  * [showClose] toggles the header's close button. Sheets that rely on
  * swipe-down / scrim-tap dismissal alone (e.g. [TokenUsageSheet]) pass false;
@@ -58,13 +63,13 @@ fun StandardChatSheet(
     title: String,
     onDismiss: () -> Unit,
     leadingAction: (@Composable () -> Unit)? = null,
-    heightFraction: Float = 0.9f,
+    heightFraction: Float? = 0.9f,
     showClose: Boolean = true,
     content: @Composable () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val configuration = LocalConfiguration.current
-    val sheetHeight = (configuration.screenHeightDp * heightFraction.coerceIn(0.1f, 1f)).dp
+    val sheetHeight = (configuration.screenHeightDp * (heightFraction ?: 1f).coerceIn(0.1f, 1f)).dp
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -75,7 +80,16 @@ fun StandardChatSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(sheetHeight),
+                // Fixed detents pin the height; fit-content (null) only
+                // caps it, letting the sheet shrink-wrap shorter content
+                // while still scrolling anything taller than the cap.
+                .then(
+                    if (heightFraction == null) {
+                        Modifier.heightIn(max = sheetHeight)
+                    } else {
+                        Modifier.height(sheetHeight)
+                    }
+                ),
         ) {
             StandardChatSheetHeader(
                 title = title,

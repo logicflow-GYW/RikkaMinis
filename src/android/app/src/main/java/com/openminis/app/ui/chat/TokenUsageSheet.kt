@@ -4,7 +4,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -64,18 +63,18 @@ fun TokenUsageSheet(
     StandardChatSheet(
         title = stringResource(R.string.token_usage_sheet_title),
         onDismiss = onDismiss,
-        // T148: iOS uses .presentationDetents([.medium]) for the same sheet
-        // (AIChatView.swift:508). Match that proportion on Android so the
-        // half-screen feel is consistent — the token-usage view holds maybe
-        // a screenful of stat rows max and looked overgrown at 90%.
-        heightFraction = 0.5f,
+        // Fit-content: the sheet grows to hold every stat section (Context /
+        // Thinking / Tokens / Cache / Agent Loop) so they're all visible the
+        // moment it opens — a fixed 0.5 detent (the old T148 choice, iOS
+        // `.medium` parity) clipped the lower sections behind a scroll.
+        heightFraction = null,
         // Read-only stats sheet: swipe-down and scrim tap already dismiss it,
         // so the header close button is redundant — drop it.
         showClose = false,
     ) {
         Column(
             modifier = Modifier
-                .fillMaxSize()
+                .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(top = 12.dp, bottom = 24.dp),
