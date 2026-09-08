@@ -68,7 +68,7 @@
 | `tools/` | Agent 工具定义（shell/file/browser/memory/spawn） | 13 文件 |
 | `agent/runtime/` `agent/shell/` | 预算/重试/恢复策略、bashism 纪律 | 7+3 |
 | `config/` | 可配置字段系统 + 内建项 + 确认流程 | 12 文件 |
-| `backup/` | ConfigBackup（JSON 导出）+ WebDAV + SyncMerge | 7 文件 |
+| `backup/` | ConfigBackup（JSON 导出）+ WebDAV + 自动备份 | 8 文件 |
 | `browser/` | BrowserUseManager + TabPool | 11 文件 |
 | `mcp/` | MCP 客户端 + OAuth | 5+ |
 | `ui/settings/` `ui/navigation/` `ui/sandbox/` `ui/browser/` `ui/terminal/` | 设置 15+ 屏、导航、文件预览、WebView、终端 | 40+6+6 |
@@ -180,16 +180,15 @@
 ## 9. 本 fork 差异化功能层（fork 后自写，区别于继承复杂度）
 
 1. **本地备份/恢复**（JSON 可移植：配置/凭据可选/技能/记忆/MCP/聊天纯文本 N 天）
-2. **WebDAV 远程备份**（应用级持久 scope，通知收尾，防重复触发）
-3. **多设备自动同步**（SyncMerge：Lamport 式版本折叠冲突合并；范围只含
-   配置/提供方/分组/环境变量/GLOBAL.md，每日日志按设备审计副本不纳入）
-4. **三大平台集成**（GitHub ops / Cloudflare 运维 / HF 语义记忆：requirements.json
+2. **WebDAV 远程备份**（应用级持久 scope，通知收尾，防重复触发；自动备份独立
+   `auto/` 子目录、远端恢复/拉取/删除）
+3. **三大平台集成**（GitHub ops / Cloudflare 运维 / HF 语义记忆：requirements.json
    判级 → [IntegrationStatus] 日志 + system prompt「内置集成」表格注入）
-5. **长对话压缩**（AI 摘要器折叠最老回合为 `<context-summary>`，硬裁剪仅兜底；
+4. **长对话压缩**（AI 摘要器折叠最老回合为 `<context-summary>`，硬裁剪仅兜底；
    原则：用户消息永不压缩）
-6. **UX 打磨群**（草稿持久化、链接消息聚焦、导出会话、设置页去箭头、输入栏
+5. **UX 打磨群**（草稿持久化、链接消息聚焦、导出会话、设置页去箭头、输入栏
    聚焦语义、工具结果缩略预览开关…）
-7. **质量基础设施**（见 §10）
+6. **质量基础设施**（见 §10）
 
 ## 10. 质量基础设施
 

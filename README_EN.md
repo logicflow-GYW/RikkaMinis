@@ -74,15 +74,6 @@ Android-specific product changes that are not present upstream.
   persistent scope (it completes even if you leave the settings screen),
   gives you a system tray notification when a long task finishes, and is
   guarded against accidental double-firing.
-- **Multi-device auto-sync with conflict merge.** The auto-sync toggle in
-  Settings → Storage → Backup & Restore ties several devices to the same
-  WebDAV backup; `SyncMerge` reconciles edits with Lamport-style per-object
-  version folding, so two devices used on the same day no longer overwrite
-  each other — sibling-device edits win, deletions propagate as tombstones,
-  and both devices converge to the same document. The sync scope covers
-  config / providers / groups / env vars and `GLOBAL.md` only: daily logs are
-  per-device audit copies and `MEMORY-ROLLUP.md` is distilled from daily logs,
-  so syncing those whole files would clobber one device's copy.
 - **Honest exclusions.** Chat history is carried as text only: media
   (images/videos) and attached files are dropped, and only the last N days of
   activity are included (0–365, default 90; 0 disables chat history). 
