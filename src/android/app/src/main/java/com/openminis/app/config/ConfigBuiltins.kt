@@ -163,28 +163,28 @@ internal object ConfigBuiltins {
         r.register(PrefsIntField(
             path = "runtime.maxTurns",
             displayName = "Agent loop turn limit",
-            description = "Hard cap on agent-loop turns per run. Hitting it pauses the run (resumable) with a runaway-tool banner. Default 200. Applies to the next message (a run keeps the budget it started with).",
+            description = "Hard cap on agent-loop turns per run. Hitting it pauses the run (resumable) with a runaway-tool banner. Default 256. Applies to the next message (a run keeps the budget it started with).",
             prefs = limits, key = L.KEY_MAX_TURNS,
             defaultValue = L.TURNS_DEFAULT, minValue = L.TURNS_MIN, maxValue = L.TURNS_MAX,
         ))
         r.register(PrefsIntField(
             path = "runtime.maxProviderAttempts",
             displayName = "Provider call budget",
-            description = "Max provider calls (incl. retries/fallback) per run. Hitting it pauses the run (resumable). Default 128 (= 2x the observed 64-attempt field peak). Raising it loosens the runaway-loop guard — a stuck loop burns more tokens before being stopped.",
+            description = "Max provider calls (incl. retries/fallback) per run. Hitting it pauses the run (resumable). Default 256. Raising it loosens the runaway-loop guard — a stuck loop burns more tokens before being stopped.",
             prefs = limits, key = L.KEY_MAX_PROVIDER_ATTEMPTS,
             defaultValue = L.PROVIDER_ATTEMPTS_DEFAULT, minValue = L.PROVIDER_ATTEMPTS_MIN, maxValue = L.PROVIDER_ATTEMPTS_MAX,
         ))
         r.register(PrefsIntField(
             path = "runtime.maxToolCalls",
             displayName = "Tool call budget",
-            description = "Max tool calls per agent run. Hitting it pauses the run (resumable). Default 128. Same runaway-guard trade-off as the provider budget.",
+            description = "Max tool calls per agent run. Hitting it pauses the run (resumable). Default 256. Same runaway-guard trade-off as the provider budget.",
             prefs = limits, key = L.KEY_MAX_TOOL_CALLS,
             defaultValue = L.TOOL_CALLS_DEFAULT, minValue = L.TOOL_CALLS_MIN, maxValue = L.TOOL_CALLS_MAX,
         ))
         r.register(PrefsIntField(
             path = "runtime.maxShellCommands",
             displayName = "Shell command budget",
-            description = "Max sandbox shell commands per agent run. Hitting it pauses the run (resumable). Default 128.",
+            description = "Max sandbox shell commands per agent run. Hitting it pauses the run (resumable). Default 256.",
             prefs = limits, key = L.KEY_MAX_SHELL_COMMANDS,
             defaultValue = L.SHELL_COMMANDS_DEFAULT, minValue = L.SHELL_COMMANDS_MIN, maxValue = L.SHELL_COMMANDS_MAX,
         ))
@@ -205,7 +205,7 @@ internal object ConfigBuiltins {
         r.register(PrefsIntField(
             path = "runtime.runDeadlineMinutes",
             displayName = "Run time limit (minutes)",
-            description = "Wall-clock ceiling per agent run. Hitting it pauses the run (resumable). Default 60 min. Lowering it can cut off legitimately long builds/generations — the deadline is a backstop, not a progress signal.",
+            description = "Wall-clock ceiling per agent run. Hitting it pauses the run (resumable). Default 120 min. Lowering it can cut off legitimately long builds/generations — the deadline is a backstop, not a progress signal.",
             prefs = limits, key = L.KEY_RUN_DEADLINE_MIN,
             defaultValue = L.DEADLINE_DEFAULT_MIN, minValue = L.DEADLINE_MIN_MIN, maxValue = L.DEADLINE_MAX_MIN,
         ))

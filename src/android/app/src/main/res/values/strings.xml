@@ -257,19 +257,19 @@
     <string name="runtime_limits_recovery_footer">Recovery knobs trade resilience against token spend: more continuations/retries survive flaky networks but re-bill the model; fewer surface errors faster. 0 disables that recovery path.</string>
     <string name="runtime_limits_network_footer">Generation wall and worker slots apply to the NEXT model-service worker process (in-flight runs finish on old limits). Lowering the wall risks killing healthy slow generations. Raising worker slots above 2 multiplies the worker\'s native-heap peak — memory-risky.</string>
     <string name="runtime_limits_turns">Turn limit</string>
-    <string name="runtime_limits_turns_desc">Max agent-loop turns per run (default 200)</string>
+    <string name="runtime_limits_turns_desc">Max agent-loop turns per run (default 256)</string>
     <string name="runtime_limits_provider_attempts">Provider calls</string>
-    <string name="runtime_limits_provider_attempts_desc">Incl. retries/fallback, per run (default 128)</string>
+    <string name="runtime_limits_provider_attempts_desc">Incl. retries/fallback, per run (default 256)</string>
     <string name="runtime_limits_tool_calls">Tool calls</string>
-    <string name="runtime_limits_tool_calls_desc">Max tool calls per run (default 128)</string>
+    <string name="runtime_limits_tool_calls_desc">Max tool calls per run (default 256)</string>
     <string name="runtime_limits_shell_commands">Shell commands</string>
-    <string name="runtime_limits_shell_commands_desc">Max sandbox shell commands per run (default 128)</string>
+    <string name="runtime_limits_shell_commands_desc">Max sandbox shell commands per run (default 256)</string>
     <string name="runtime_limits_compaction">Compaction calls</string>
     <string name="runtime_limits_compaction_desc">Lower = long sessions hit the context window sooner (default 8)</string>
     <string name="runtime_limits_concurrent_tools">Concurrent tools</string>
     <string name="runtime_limits_concurrent_tools_desc">Tools running at once in one turn (default 4)</string>
     <string name="runtime_limits_deadline">Run time limit</string>
-    <string name="runtime_limits_deadline_desc">Minutes per run; hitting it pauses (default 60)</string>
+    <string name="runtime_limits_deadline_desc">Minutes per run; hitting it pauses (default 120)</string>
     <string name="runtime_limits_length_wall">Length continuations</string>
     <string name="runtime_limits_length_wall_desc">Rounds after finish_reason=length (default 4)</string>
     <string name="runtime_limits_eof_stub">EOF continuations</string>

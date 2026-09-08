@@ -118,19 +118,19 @@
     <string name="runtime_limits_recovery_footer">복구 설정은 복원력과 토큰 소비의 트레이드오프입니다: 연속/재시도가 많을수록 불안정한 네트워크를 견디지만 재과금됩니다. 적을수록 오류가 빨리 드러납니다. 0으로 설정하면 해당 복구 경로가 비활성화됩니다.</string>
     <string name="runtime_limits_network_footer">생성 하드월과 워커 슬롯은 다음 model-service 워커 프로세스에 적용됩니다(진행 중인 요청은 이전 설정으로 완료). 하드월을 낮추면 건강한 느린 생성을 오탐할 위험이 있습니다. 슬롯을 2 초과로 올리면 네이티브 힙 피크가 배가됩니다 — 메모리 위험.</string>
     <string name="runtime_limits_turns">턴 상한</string>
-    <string name="runtime_limits_turns_desc">실행당 최대 턴 수(기본 200)</string>
+    <string name="runtime_limits_turns_desc">실행당 최대 턴 수(기본 256)</string>
     <string name="runtime_limits_provider_attempts">Provider 호출</string>
-    <string name="runtime_limits_provider_attempts_desc">재시도/폴백 포함, 실행당(기본 128)</string>
+    <string name="runtime_limits_provider_attempts_desc">재시도/폴백 포함, 실행당(기본 256)</string>
     <string name="runtime_limits_tool_calls">도구 호출</string>
-    <string name="runtime_limits_tool_calls_desc">실행당 최대 도구 호출 수(기본 128)</string>
+    <string name="runtime_limits_tool_calls_desc">실행당 최대 도구 호출 수(기본 256)</string>
     <string name="runtime_limits_shell_commands">셸 명령</string>
-    <string name="runtime_limits_shell_commands_desc">실행당 최대 셸 명령 수(기본 128)</string>
+    <string name="runtime_limits_shell_commands_desc">실행당 최대 셸 명령 수(기본 256)</string>
     <string name="runtime_limits_compaction">컴팩션 호출</string>
     <string name="runtime_limits_compaction_desc">낮추면 긴 세션이 더 일찍 컨텍스트 창에 도달(기본 8)</string>
     <string name="runtime_limits_concurrent_tools">동시 도구</string>
     <string name="runtime_limits_concurrent_tools_desc">한 턴에서 동시 실행되는 도구 수(기본 4)</string>
     <string name="runtime_limits_deadline">실행 시간 제한</string>
-    <string name="runtime_limits_deadline_desc">실행당 분. 상한 도달 시 일시정지(기본 60)</string>
+    <string name="runtime_limits_deadline_desc">실행당 분. 상한 도달 시 일시정지(기본 120)</string>
     <string name="runtime_limits_length_wall">길이 연속</string>
     <string name="runtime_limits_length_wall_desc">finish_reason=length 이후 연속 라운드(기본 4)</string>
     <string name="runtime_limits_eof_stub">EOF 연속</string>

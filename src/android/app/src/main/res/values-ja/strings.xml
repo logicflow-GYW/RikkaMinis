@@ -118,19 +118,19 @@
     <string name="runtime_limits_recovery_footer">リカバリ設定は耐障害性とトークン消費のトレードオフです：継続・再試行が多いほど不安定なネットワークに耐えますが再課金されます。少ないほどエラーが早く表面化します。0 でその復元経路を無効化します。</string>
     <string name="runtime_limits_network_footer">生成ハードウォールとワーカースロットは次の model-service ワーカープロセスに適用されます（実行中のリクエストは旧設定で完了）。ウォールを下げると健全な遅い生成を誤殺する恐れがあります。スロットを 2 超にするとネイティブヒープピークが倍増します——メモリリスク。</string>
     <string name="runtime_limits_turns">ターン上限</string>
-    <string name="runtime_limits_turns_desc">実行あたりの最大ターン数（デフォルト 200）</string>
+    <string name="runtime_limits_turns_desc">実行あたりの最大ターン数（デフォルト 256）</string>
     <string name="runtime_limits_provider_attempts">プロバイダー呼び出し</string>
-    <string name="runtime_limits_provider_attempts_desc">再試行/フォールバック含む、実行あたり（デフォルト 128）</string>
+    <string name="runtime_limits_provider_attempts_desc">再試行/フォールバック含む、実行あたり（デフォルト 256）</string>
     <string name="runtime_limits_tool_calls">ツール呼び出し</string>
-    <string name="runtime_limits_tool_calls_desc">実行あたりの最大ツール呼び出し数（デフォルト 128）</string>
+    <string name="runtime_limits_tool_calls_desc">実行あたりの最大ツール呼び出し数（デフォルト 256）</string>
     <string name="runtime_limits_shell_commands">シェルコマンド</string>
-    <string name="runtime_limits_shell_commands_desc">実行あたりの最大シェルコマンド数（デフォルト 128）</string>
+    <string name="runtime_limits_shell_commands_desc">実行あたりの最大シェルコマンド数（デフォルト 256）</string>
     <string name="runtime_limits_compaction">コンパクション呼び出し</string>
     <string name="runtime_limits_compaction_desc">下げると長いセッションが早くコンテキスト上限に到達（デフォルト 8）</string>
     <string name="runtime_limits_concurrent_tools">同時ツール実行</string>
     <string name="runtime_limits_concurrent_tools_desc">1ターンで同時実行するツール数（デフォルト 4）</string>
     <string name="runtime_limits_deadline">実行時間上限</string>
-    <string name="runtime_limits_deadline_desc">実行あたりの分数。上限で一時停止（デフォルト 60）</string>
+    <string name="runtime_limits_deadline_desc">実行あたりの分数。上限で一時停止（デフォルト 120）</string>
     <string name="runtime_limits_length_wall">長さ制限の継続</string>
     <string name="runtime_limits_length_wall_desc">finish_reason=length 後の継続ラウンド数（デフォルト 4）</string>
     <string name="runtime_limits_eof_stub">EOF継続</string>

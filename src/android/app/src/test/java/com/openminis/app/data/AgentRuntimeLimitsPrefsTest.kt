@@ -24,13 +24,13 @@ class AgentRuntimeLimitsPrefsTest {
     fun `defaults match the previously hard-coded constants`() {
         val p = AgentRuntimeLimitsPrefs
         // AgentLoopEngine / ChatAgentTraceObserver consts:
-        assertEquals(200, p.TURNS_DEFAULT)             // MAX_AGENT_TURNS
-        assertEquals(128, p.PROVIDER_ATTEMPTS_DEFAULT) // T7_OBSERVE_MAX_PROVIDER_ATTEMPTS
-        assertEquals(128, p.TOOL_CALLS_DEFAULT)        // T7_OBSERVE_MAX_TOOL_CALLS
-        assertEquals(128, p.SHELL_COMMANDS_DEFAULT)    // T7_OBSERVE_MAX_SHELL_COMMANDS
+        assertEquals(256, p.TURNS_DEFAULT)             // MAX_AGENT_TURNS
+        assertEquals(256, p.PROVIDER_ATTEMPTS_DEFAULT) // T7_OBSERVE_MAX_PROVIDER_ATTEMPTS
+        assertEquals(256, p.TOOL_CALLS_DEFAULT)        // T7_OBSERVE_MAX_TOOL_CALLS
+        assertEquals(256, p.SHELL_COMMANDS_DEFAULT)    // T7_OBSERVE_MAX_SHELL_COMMANDS
         assertEquals(8, p.COMPACTION_CALLS_DEFAULT)    // T7_OBSERVE_MAX_COMPACTION_CALLS
         assertEquals(4, p.CONCURRENT_TOOLS_DEFAULT)    // T7_OBSERVE_MAX_CONCURRENT_TOOLS
-        assertEquals(60, p.DEADLINE_DEFAULT_MIN)       // T7_OBSERVE_DEADLINE_MS / 60s
+        assertEquals(120, p.DEADLINE_DEFAULT_MIN)      // T7_OBSERVE_DEADLINE_MS / 120min
         // Stream recovery consts:
         assertEquals(4, p.LENGTH_WALL_DEFAULT)         // MAX_LENGTH_WALL_TEXT_CONTINUES
         assertEquals(2, p.EOF_STUB_DEFAULT)            // MAX_EOF_STUB_CONTINUES

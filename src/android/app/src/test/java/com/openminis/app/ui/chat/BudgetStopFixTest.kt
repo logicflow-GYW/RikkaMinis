@@ -27,7 +27,7 @@ class BudgetStopFixTest {
 
     @Test
     fun `provider attempt ceiling raised to 128`() {
-        assertEquals(128, ChatAgentTraceObserver.T7_OBSERVE_MAX_PROVIDER_ATTEMPTS)
+        assertEquals(256, ChatAgentTraceObserver.T7_OBSERVE_MAX_PROVIDER_ATTEMPTS)
     }
 
     @Test

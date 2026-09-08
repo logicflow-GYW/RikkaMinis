@@ -92,7 +92,7 @@ internal suspend fun ChatViewModel.persistToolResultMessage(parts: List<AgentCon
  * saw a stale number); the fix pointed the banner at the real constant. The
  * panel now makes the limit user-tunable, so the banner reads the LIVE value
  * via [providerAttemptLimitNow] — this val remains only as the documented
- * default (== T7_OBSERVE_MAX_PROVIDER_ATTEMPTS == 128) and for any code
+ * default (== T7_OBSERVE_MAX_PROVIDER_ATTEMPTS == 256) and for any code
  * that wants the shipped default explicitly.
  */
 internal val PROVIDER_ATTEMPT_LIMIT_FOR_BANNER: Int =

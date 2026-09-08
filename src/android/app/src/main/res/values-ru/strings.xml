@@ -157,19 +157,19 @@
     <string name="runtime_limits_recovery_footer">Параметры восстановления — компромисс устойчивости и расхода токенов: больше продолжений/повторов переживает нестабильную сеть, но тарифицируется заново; меньше — быстрее показывает ошибки. 0 отключает путь восстановления.</string>
     <string name="runtime_limits_network_footer">Жёсткий предел генерации и слоты worker применяются к СЛЕДУЮЩЕМУ процессу model-service (текущие запросы завершаются по старым лимитам). Занижение предела рискует убить здоровую медленную генерацию. Слоты выше 2 умножают пик native-кучи — риск по памяти.</string>
     <string name="runtime_limits_turns">Лимит ходов</string>
-    <string name="runtime_limits_turns_desc">Макс. ходов за запуск (по умолчанию 200)</string>
+    <string name="runtime_limits_turns_desc">Макс. ходов за запуск (по умолчанию 256)</string>
     <string name="runtime_limits_provider_attempts">Вызовы провайдера</string>
-    <string name="runtime_limits_provider_attempts_desc">Вкл. повторы/fallback, за запуск (по умолчанию 128)</string>
+    <string name="runtime_limits_provider_attempts_desc">Вкл. повторы/fallback, за запуск (по умолчанию 256)</string>
     <string name="runtime_limits_tool_calls">Вызовы инструментов</string>
-    <string name="runtime_limits_tool_calls_desc">Макс. вызовов инструментов за запуск (по умолчанию 128)</string>
+    <string name="runtime_limits_tool_calls_desc">Макс. вызовов инструментов за запуск (по умолчанию 256)</string>
     <string name="runtime_limits_shell_commands">Shell-команды</string>
-    <string name="runtime_limits_shell_commands_desc">Макс. shell-команд за запуск (по умолчанию 128)</string>
+    <string name="runtime_limits_shell_commands_desc">Макс. shell-команд за запуск (по умолчанию 256)</string>
     <string name="runtime_limits_compaction">Вызовы компакции</string>
     <string name="runtime_limits_compaction_desc">Ниже = долгие сессии раньше упираются в окно контекста (по умолчанию 8)</string>
     <string name="runtime_limits_concurrent_tools">Параллельные инструменты</string>
     <string name="runtime_limits_concurrent_tools_desc">Инструментов одновременно в одном ходе (по умолчанию 4)</string>
     <string name="runtime_limits_deadline">Лимит времени выполнения</string>
-    <string name="runtime_limits_deadline_desc">Минут за запуск; при достижении пауза (по умолчанию 60)</string>
+    <string name="runtime_limits_deadline_desc">Минут за запуск; при достижении пауза (по умолчанию 120)</string>
     <string name="runtime_limits_length_wall">Продолжения по длине</string>
     <string name="runtime_limits_length_wall_desc">Раундов после finish_reason=length (по умолчанию 4)</string>
     <string name="runtime_limits_eof_stub">Продолжения по EOF</string>

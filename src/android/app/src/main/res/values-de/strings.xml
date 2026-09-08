@@ -118,19 +118,19 @@
     <string name="runtime_limits_recovery_footer">Recovery-Regler: mehr Fortsetzungen/Retries überstehen instabile Netze, kosten aber erneut Token; weniger zeigt Fehler schneller. 0 deaktiviert den jeweiligen Pfad.</string>
     <string name="runtime_limits_network_footer">Generations-Wall und Worker-Slots gelten für den NÄCHSTEN Model-Service-Worker (laufende Requests enden nach alten Limits). Eine niedrigere Wall kann gesunde langsame Generierungen fälschlich killen. Slots über 2 vervielfachen den Native-Heap-Peak — Speicherrisiko.</string>
     <string name="runtime_limits_turns">Turn-Limit</string>
-    <string name="runtime_limits_turns_desc">Max. Turns pro Lauf (Standard 200)</string>
+    <string name="runtime_limits_turns_desc">Max. Turns pro Lauf (Standard 256)</string>
     <string name="runtime_limits_provider_attempts">Provider-Aufrufe</string>
-    <string name="runtime_limits_provider_attempts_desc">Inkl. Retries/Fallback, pro Lauf (Standard 128)</string>
+    <string name="runtime_limits_provider_attempts_desc">Inkl. Retries/Fallback, pro Lauf (Standard 256)</string>
     <string name="runtime_limits_tool_calls">Tool-Aufrufe</string>
-    <string name="runtime_limits_tool_calls_desc">Max. Tool-Aufrufe pro Lauf (Standard 128)</string>
+    <string name="runtime_limits_tool_calls_desc">Max. Tool-Aufrufe pro Lauf (Standard 256)</string>
     <string name="runtime_limits_shell_commands">Shell-Befehle</string>
-    <string name="runtime_limits_shell_commands_desc">Max. Shell-Befehle pro Lauf (Standard 128)</string>
+    <string name="runtime_limits_shell_commands_desc">Max. Shell-Befehle pro Lauf (Standard 256)</string>
     <string name="runtime_limits_compaction">Compaction-Aufrufe</string>
     <string name="runtime_limits_compaction_desc">Niedriger = lange Sitzungen treffen früher das Kontextfenster (Standard 8)</string>
     <string name="runtime_limits_concurrent_tools">Gleichzeitige Tools</string>
     <string name="runtime_limits_concurrent_tools_desc">Tools, die gleichzeitig in einem Turn laufen (Standard 4)</string>
     <string name="runtime_limits_deadline">Laufzeit-Limit</string>
-    <string name="runtime_limits_deadline_desc">Minuten pro Lauf; bei Erreichen Pause (Standard 60)</string>
+    <string name="runtime_limits_deadline_desc">Minuten pro Lauf; bei Erreichen Pause (Standard 120)</string>
     <string name="runtime_limits_length_wall">Length-Fortsetzungen</string>
     <string name="runtime_limits_length_wall_desc">Runden nach finish_reason=length (Standard 4)</string>
     <string name="runtime_limits_eof_stub">EOF-Fortsetzungen</string>

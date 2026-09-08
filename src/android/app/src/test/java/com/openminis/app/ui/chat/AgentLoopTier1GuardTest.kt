@@ -87,7 +87,7 @@ class AgentLoopTier1GuardTest {
     }
 
     @Test fun `turn ceiling unchanged`() {
-        assertEquals(200, MAX_AGENT_TURNS)
+        assertEquals(256, MAX_AGENT_TURNS)
     }
 
     // ── transition invariants the engine implements ───────────────────

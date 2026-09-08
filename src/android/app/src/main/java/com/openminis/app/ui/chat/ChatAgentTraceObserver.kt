@@ -431,14 +431,17 @@ internal class ChatAgentTraceObserver(
         // AgentRuntimeLimitsPrefs（Settings → Agent Runtime → Runtime Limits），
         // 引擎在 runAgentLoop 入口构造 AgentExecutionBudget 时读取；未 prime 的
         // JVM 测试路径仍命中这些默认值（prime 未跑时 prefs 读数即默认）。
-        internal const val T7_OBSERVE_MAX_TURNS = 200
-        internal const val T7_OBSERVE_MAX_PROVIDER_ATTEMPTS = 128
-        internal const val T7_OBSERVE_MAX_TOOL_CALLS = 128
-        internal const val T7_OBSERVE_MAX_SHELL_COMMANDS = 128
+        // [2026-09-09 user decision] 统一抬到 256（turns/provider/tool/shell）+ 120min
+        // deadline：128/60 仍会撞墙（Resume 无损但中断频繁），默认值与用户运行时
+        // 配置对齐（runtime.max* 与 runDeadlineMinutes 同一批调高）。
+        internal const val T7_OBSERVE_MAX_TURNS = 256
+        internal const val T7_OBSERVE_MAX_PROVIDER_ATTEMPTS = 256
+        internal const val T7_OBSERVE_MAX_TOOL_CALLS = 256
+        internal const val T7_OBSERVE_MAX_SHELL_COMMANDS = 256
         internal const val T7_OBSERVE_MAX_COMPACTION_CALLS = 8
         internal const val T7_OBSERVE_MAX_CONCURRENT_TOOLS = 4
-        /** 观察 deadline：60 分钟单调时间（advisory，不阻断）。 */
-        internal const val T7_OBSERVE_DEADLINE_MS = 60L * 60L * 1000L
+        /** 观察 deadline：120 分钟单调时间（advisory，不阻断）。 */
+        internal const val T7_OBSERVE_DEADLINE_MS = 120L * 60L * 1000L
 
         /**
          * T7-A: 把 [AgentRunPhase] 映射为 trace schema v2 的 state_transition

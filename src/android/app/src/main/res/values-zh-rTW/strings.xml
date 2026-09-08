@@ -1156,19 +1156,19 @@
     <string name="runtime_limits_recovery_footer">復原參數在韌性與 token 消耗之間取捨：續寫/重試越多越能扛住不穩定網路，但會重複計費；越少越快暴露錯誤。設為 0 即關閉該復原路徑。</string>
     <string name="runtime_limits_network_footer">生成硬牆與 worker 槽位對下一個 model-service worker 程序生效（進行中的請求按舊限制跑完）。調低硬牆有誤殺健康慢生成的風險；worker 槽位超過 2 會成倍放大 native 堆峰值——有記憶體風險。</string>
     <string name="runtime_limits_turns">回合上限</string>
-    <string name="runtime_limits_turns_desc">每次執行的最大回合數（預設 200）</string>
+    <string name="runtime_limits_turns_desc">每次執行的最大回合數（預設 256）</string>
     <string name="runtime_limits_provider_attempts">Provider 呼叫</string>
-    <string name="runtime_limits_provider_attempts_desc">含重試/後備，每次執行（預設 128）</string>
+    <string name="runtime_limits_provider_attempts_desc">含重試/後備，每次執行（預設 256）</string>
     <string name="runtime_limits_tool_calls">工具呼叫</string>
-    <string name="runtime_limits_tool_calls_desc">每次執行的最大工具呼叫數（預設 128）</string>
+    <string name="runtime_limits_tool_calls_desc">每次執行的最大工具呼叫數（預設 256）</string>
     <string name="runtime_limits_shell_commands">Shell 命令</string>
-    <string name="runtime_limits_shell_commands_desc">每次執行的最大 Shell 命令數（預設 128）</string>
+    <string name="runtime_limits_shell_commands_desc">每次執行的最大 Shell 命令數（預設 256）</string>
     <string name="runtime_limits_compaction">壓縮呼叫</string>
     <string name="runtime_limits_compaction_desc">調低會讓長工作階段更早撞上下文視窗（預設 8）</string>
     <string name="runtime_limits_concurrent_tools">並發工具</string>
     <string name="runtime_limits_concurrent_tools_desc">單回合內同時執行的工具數（預設 4）</string>
     <string name="runtime_limits_deadline">執行時限</string>
-    <string name="runtime_limits_deadline_desc">分鐘/每次執行；觸頂即暫停（預設 60）</string>
+    <string name="runtime_limits_deadline_desc">分鐘/每次執行；觸頂即暫停（預設 120）</string>
     <string name="runtime_limits_length_wall">截斷續寫</string>
     <string name="runtime_limits_length_wall_desc">finish_reason=length 後的續寫輪數（預設 4）</string>
     <string name="runtime_limits_eof_stub">斷流續寫</string>

@@ -51,9 +51,9 @@ import com.openminis.app.R
 
 /** Hard cap on agent-loop turns (moved from ChatViewModel companion, FE-5 route C).
  *  [feat/runtime-limits-panel] the loop bound now reads the user-tunable
- *  AgentRuntimeLimitsPrefs.maxTurns() (default 200 == this constant); the
+ *  AgentRuntimeLimitsPrefs.maxTurns() (default 256 == this constant); the
  *  const stays as the documented default + banner fallback. */
-internal const val MAX_AGENT_TURNS = 200
+internal const val MAX_AGENT_TURNS = 256
 
 /**
  * [feat/hermes-tier1] Max text-continuation rounds per length-wall wall.
@@ -222,7 +222,7 @@ internal class AgentLoopEngine(
         // RunStarted 消费掉的 reducer 回 IDLE，导致后续事件再次 REJECTED。
 
         try {
-        // [feat/runtime-limits-panel] 循环上界从 prefs 读（默认 200）。取一次局部
+        // [feat/runtime-limits-panel] 循环上界从 prefs 读（默认 256）。取一次局部
         // 值保证整个 run 使用同一边界（与预算快照同理由：run 内一致性）。
         val maxTurnsThisRun = com.openminis.app.data.AgentRuntimeLimitsPrefs.maxTurns()
         for (turn in 0 until maxTurnsThisRun) {
