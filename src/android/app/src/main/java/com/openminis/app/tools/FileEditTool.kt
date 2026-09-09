@@ -7,6 +7,8 @@ import com.openminis.app.sandbox.PRootKernel
 import org.json.JSONObject
 
 object FileEditTool {
+
+    private const val MAX_INPUT_BYTES = 32L * 1024 * 1024
     const val NAME = "file_edit"
 
     fun definition(): AgentToolDefinition = AgentToolDefinition(
@@ -54,6 +56,14 @@ object FileEditTool {
 
             if (!file.exists()) {
                 return ToolExecutionResult("Error: File not found: $path", false, toolTitle = toolTitle)
+            }
+
+            if (file.length() > MAX_INPUT_BYTES) {
+                return ToolExecutionResult(
+                    "Error: file too large for file_edit; use shell pagination (max 32 MiB)",
+                    false,
+                    toolTitle = toolTitle,
+                )
             }
 
             val content = file.readText()

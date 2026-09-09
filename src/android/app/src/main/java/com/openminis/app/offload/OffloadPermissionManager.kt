@@ -105,7 +105,11 @@ object OffloadPermissionManager {
      *  hosting session ends (or process death — see
      *  OFFLOAD_GLOBAL_SESSION_ID for offload-CLI-backed tools, which
      *  share one process-lifetime slot). */
-    private val sessionGrants = mutableMapOf<String, MutableSet<String>>() // sessionId -> set of toolNames
+    // [T3-M5] Read/written by the offload worker threads AND the UI; a plain
+    // mutableMapOf could corrupt or lose grants while a permission sheet was
+    // open. Keys use ConcurrentHashMap; values use newKeySet() so the sets
+    // themselves are concurrent too.
+    private val sessionGrants = java.util.concurrent.ConcurrentHashMap<String, MutableSet<String>>() // sessionId -> set of toolNames
 
     /** T338: session-scoped denials. Populated by the "Deny in this
      *  session" dialog response. Once a tool is in here for a given
@@ -113,7 +117,7 @@ object OffloadPermissionManager {
      *  — prevents the agent from spamming the user with the same
      *  request after they already said no. Cleared with
      *  [clearSessionGrants]. */
-    private val sessionDenials = mutableMapOf<String, MutableSet<String>>() // sessionId -> set of toolNames
+    private val sessionDenials = java.util.concurrent.ConcurrentHashMap<String, MutableSet<String>>() // sessionId -> set of toolNames
 
     /** Active permission request waiting for user response. */
     private val _pendingRequest = MutableStateFlow<PermissionRequest?>(null)
@@ -362,10 +366,10 @@ object OffloadPermissionManager {
                 // T338: a prior "Deny in this session" short-circuits
                 // before any grants check or dialog so the agent can't
                 // spam the user.
-                val denials = sessionDenials.getOrPut(sessionId) { mutableSetOf() }
+                val denials = sessionDenials.computeIfAbsent(sessionId) { java.util.concurrent.ConcurrentHashMap.newKeySet() }
                 if (toolName in denials) return false
 
-                val grants = sessionGrants.getOrPut(sessionId) { mutableSetOf() }
+                val grants = sessionGrants.computeIfAbsent(sessionId) { java.util.concurrent.ConcurrentHashMap.newKeySet() }
                 if (toolName in grants) return true
 
                 // Show dialog and wait for response.

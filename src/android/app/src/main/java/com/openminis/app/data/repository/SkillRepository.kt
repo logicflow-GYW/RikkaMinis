@@ -171,18 +171,25 @@ class SkillRepository(private val context: Context) {
         }
     }
 
-    fun update(id: String, name: String? = null, description: String? = null, body: String? = null): Boolean {
+    fun update(
+        id: String,
+        name: String? = null,
+        description: String? = null,
+        body: String? = null,
+        version: String? = null,
+    ): Boolean {
         val current = _skills.value.find { it.id == id } ?: return false
         val updated = current.copy(
             name = name ?: current.name,
             description = description ?: current.description,
             body = body ?: current.body,
+            version = version ?: current.version,
             updatedAt = System.currentTimeMillis(),
         )
 
         db.execSQL(
             "UPDATE skills SET name=?, description=?, version=?, updated_at=? WHERE id=?",
-            arrayOf<Any>(updated.name, updated.description, updated.version, updated.updatedAt, id)
+            arrayOf<Any>(updated.name, updated.description, updated.version ?: "", updated.updatedAt, id)
         )
         writeSkillMd(updated)
         _skills.value = _skills.value.map { if (it.id == id) updated else it }
@@ -649,6 +656,7 @@ class SkillRepository(private val context: Context) {
             name = parsed.name,
             description = parsed.description,
             body = parsed.body,
+            version = parsed.version,
         )
         if (!ok) return@withContext UpdateResult.Failure("Failed to write updated skill")
 

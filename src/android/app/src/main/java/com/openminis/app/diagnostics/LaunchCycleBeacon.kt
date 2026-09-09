@@ -162,7 +162,11 @@ object LaunchCycleBeacon {
                 ?.filter { it.name.startsWith("stall-") }
                 ?.maxByOrNull { it.lastModified() }
                 ?: return "unknown"
-            val head = stall.bufferedReader().use { it.readText().take(2000) }
+            val head = stall.bufferedReader().use { reader ->
+                    val chars = CharArray(2000)
+                    val count = reader.read(chars)
+                    if (count <= 0) "" else String(chars, 0, count)
+                }
             Regex("session[=:]\\s*([0-9a-fA-F-]{8,})").find(head)?.groupValues?.get(1) ?: "unknown"
         } catch (_: Throwable) {
             "unknown"

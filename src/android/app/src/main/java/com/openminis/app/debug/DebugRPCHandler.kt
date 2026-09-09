@@ -228,7 +228,7 @@ class DebugRPCHandler(private val context: Context) {
     // ── Screenshot ──────────────────────────────────────────────────────────
 
     private suspend fun handleScreenshot(params: JSONObject): JSONObject {
-        val scale = params.optDouble("scale", 1.0).toFloat()
+        val scale = params.optDouble("scale", 1.0).toFloat().coerceIn(0.05f, 1.0f)
 
         val activity = currentActivity?.get()
             ?: throw RPCException(-32000, "No active Activity for screenshot")

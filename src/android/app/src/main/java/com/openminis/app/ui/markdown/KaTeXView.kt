@@ -60,7 +60,14 @@ object KaTeXRendererCache {
         val cssHeight: Int,
     )
 
-    val cache = LruCache<String, CacheEntry>(200)
+    // [T10-M2] Bound the cache by BYTES, not entries. One display-mode
+    // formula can be several MB of ARGB_8888 (2000x600 px ~ 4.8 MB), so the
+    // old 200-entry cap allowed ~1 GB of native bitmaps while scrolling a
+    // math-heavy document. sizeOf() reports KB, so maxSize is 64 MB.
+    val cache = object : LruCache<String, CacheEntry>(64 * 1024) {
+        override fun sizeOf(key: String, value: CacheEntry): Int =
+            (value.bitmap.byteCount / 1024).coerceAtLeast(1)
+    }
 
     fun cacheKey(latex: String, displayMode: Boolean): String =
         (if (displayMode) "D:" else "I:") + latex

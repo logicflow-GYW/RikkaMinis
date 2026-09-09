@@ -33,7 +33,7 @@
 <body>
 <span id="math"></span>
 <script>
-function renderMath(latex, displayMode, fontSize, isDark) {
+function renderMath(latex, displayMode, fontSize, isDark, token) {
   try {
     document.body.className = isDark ? 'dark' : 'light';
     var el = document.getElementById('math');
@@ -62,12 +62,12 @@ function renderMath(latex, displayMode, fontSize, isDark) {
       requestAnimationFrame(function() {
         requestAnimationFrame(function() {
           var rect = el.getBoundingClientRect();
-          AndroidBridge.onRendered(Math.ceil(rect.width), Math.ceil(rect.height), '');
+          AndroidBridge.onRendered(Math.ceil(rect.width), Math.ceil(rect.height), '', token);
         });
       });
     });
   } catch (e) {
-    AndroidBridge.onRendered(0, 0, e.message || 'render error');
+    AndroidBridge.onRendered(0, 0, e.message || 'render error', token);
   }
 }
 </script>

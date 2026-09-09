@@ -344,7 +344,7 @@ class ChatRepository(
             id = "oversized-$sessionId-$sortOrder",
             sessionId = sessionId,
             role = "assistant",
-            partsJson = """[{"type":"text","value":{"text":"[oversized content elided]"}}]""",
+            partsJson = """[{"type":"text","value":"[oversized content elided]"}]""",
             createdAt = 0L,
             sortOrder = sortOrder,
         )

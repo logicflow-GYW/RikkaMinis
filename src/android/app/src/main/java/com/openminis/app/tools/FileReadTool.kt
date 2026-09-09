@@ -8,6 +8,8 @@ import org.json.JSONObject
 import java.io.File
 
 object FileReadTool {
+
+    private const val MAX_INPUT_BYTES = 32L * 1024 * 1024
     const val NAME = "file_read"
 
     fun definition(): AgentToolDefinition = AgentToolDefinition(
@@ -60,6 +62,14 @@ object FileReadTool {
 
             if (file.isDirectory) {
                 return ToolExecutionResult("Error: Path is a directory: $path", false, toolTitle = toolTitle)
+            }
+
+            if (file.length() > MAX_INPUT_BYTES) {
+                return ToolExecutionResult(
+                    "Error: file too large for file_read; use shell pagination (max 32 MiB)",
+                    false,
+                    toolTitle = toolTitle,
+                )
             }
 
             val size = file.length()

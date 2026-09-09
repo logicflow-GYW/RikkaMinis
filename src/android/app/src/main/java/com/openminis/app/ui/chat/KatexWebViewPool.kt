@@ -43,6 +43,7 @@ internal object KatexWebViewPool {
     private const val ASSET_HTML = "file:///android_asset/katex/katex-render.html"
     private const val DEFAULT_FONT_SIZE_PX = 17
     private const val RENDER_TIMEOUT_MS = 4_000L
+    private const val KATEX_CACHE_MAX_KB = 64 * 1024
     // Layout viewport for the offscreen WebView, in PHYSICAL pixels. KaTeX
     // needs this many px of width to lay out a formula before reporting its
     // measured width via getBoundingClientRect(). On a density-2.625 device
@@ -55,14 +56,23 @@ internal object KatexWebViewPool {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val mutex = Mutex()
-    private val cache = LruCache<String, KatexRenderResult>(150)
+    private val cache = object : LruCache<String, KatexRenderResult>(KATEX_CACHE_MAX_KB) {
+        override fun sizeOf(key: String, value: KatexRenderResult): Int =
+            (value.bitmap.byteCount / 1024).coerceAtLeast(1)
+    }
 
     @Volatile
     private var webView: WebView? = null
     @Volatile
     private var isReady = false
     @Volatile
-    private var pending: CompletableDeferred<Triple<Int, Int, String>>? = null
+    private var pending: PendingRender? = null
+    private var nextRenderToken = 0L
+
+    private class PendingRender(
+        val token: Long,
+        val deferred: CompletableDeferred<Triple<Int, Int, String>>,
+    )
 
     /**
      * Render [latex] via KaTeX. Returns null on error / timeout. Callers
@@ -96,19 +106,24 @@ internal object KatexWebViewPool {
         if (!awaitReady()) return null
 
         val deferred = CompletableDeferred<Triple<Int, Int, String>>()
-        pending = deferred
+        val token = ++nextRenderToken
+        val request = PendingRender(token, deferred)
+        pending = request
 
         val js = "renderMath(" +
             "'${latex.escapeForJs()}', " +
             "$displayMode, " +
             "$fontSizePx, " +
-            "$isDark" +
+            "$isDark, " +
+            "$token" +
             ")"
         runOnMain { wv.evaluateJavascript(js, null) }
 
         val (w, h, err) = withTimeoutOrNull(RENDER_TIMEOUT_MS) { deferred.await() }
             ?: Triple(0, 0, "timeout")
-        pending = null
+        // Clear only our own request. The mutex normally serializes this, but
+        // identity is still the safety net for cancellation/late callbacks.
+        if (pending?.token == request.token) pending = null
         if (err.isNotEmpty() || w <= 0 || h <= 0) {
             android.util.Log.w(TAG, "render failed latex='${latex.take(40)}' err=$err w=$w h=$h")
             return null
@@ -146,8 +161,11 @@ internal object KatexWebViewPool {
             settings.javaScriptEnabled = true
             settings.allowFileAccess = true
             settings.cacheMode = WebSettings.LOAD_NO_CACHE
-            addJavascriptInterface(JsBridge { w, h, err ->
-                pending?.complete(Triple(w, h, err))
+            addJavascriptInterface(JsBridge { w, h, err, callbackToken ->
+                val current = pending
+                if (current != null && current.token == callbackToken) {
+                    current.deferred.complete(Triple(w, h, err))
+                }
             }, "AndroidBridge")
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
@@ -231,10 +249,10 @@ internal object KatexWebViewPool {
             .replace("\n", "\\n")
             .replace("\r", "")
 
-    private class JsBridge(private val onResult: (Int, Int, String) -> Unit) {
+    private class JsBridge(private val onResult: (Int, Int, String, Long) -> Unit) {
         @JavascriptInterface
-        fun onRendered(width: Int, height: Int, error: String) {
-            onResult(width, height, error)
+        fun onRendered(width: Int, height: Int, error: String, token: Long) {
+            onResult(width, height, error, token)
         }
     }
 }

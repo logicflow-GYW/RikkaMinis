@@ -89,7 +89,8 @@ internal fun packChatHistoryWithBudget(
 
         var sessionFullyPacked = true
         for (message in messages) {
-            val cleaned = sanitize(message.partsJson) ?: continue
+            val cleaned = sanitize(message.partsJson)
+                ?: "[{\"type\":\"text\",\"value\":\"[media message elided]\"}]"
             val messageJson = JSONObject().apply {
                 put("id", message.id)
                 put("sessionId", message.sessionId)
