@@ -14,6 +14,7 @@ import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.print.PrintAttributes
 import android.print.PrintManager
+import android.util.LruCache
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import android.webkit.WebView
@@ -25,6 +26,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -58,9 +60,11 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -85,8 +89,11 @@ import com.openminis.app.ui.media.InlineVideoPlayer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.OutputStream
+import java.util.concurrent.atomic.AtomicBoolean
 import com.openminis.app.ui.components.MinisTextButton
 
 private const val MAX_TEXT_PREVIEW_BYTES = 512_000 // 500 KB
@@ -523,36 +530,41 @@ private fun VideoPreview(item: FileItem) {
 // ==================== PDF (native PdfRenderer) ====================
 
 /**
- * T144: in-app PDF viewer via Android's stock [PdfRenderer]. Each page is
- * rendered to a Bitmap once, scaled to the page's natural aspect at the
- * card width, and shown in a LazyColumn so 100-page PDFs don't OOM.
- * Capped at 50 pages — full doc available via Save-As / external open.
+ * [audit-0909 T10-H1] In-app PDF viewer on Android's stock [PdfRenderer],
+ * rendering pages ON DEMAND.
+ *
+ * The previous implementation rendered every page (up to 50) up front into
+ * a `List<Bitmap>`: an A4 page at targetW=1600 is 1600x2263x4B ~= 14 MB of
+ * native heap, so a 50-page document pinned ~700 MB before the first
+ * scroll. The LazyColumn only defers *composition* — it never releases the
+ * bitmaps the list already holds, so the old "so 100-page PDFs don't OOM"
+ * comment described an assumption that does not hold, and low-memory
+ * devices were killed by the LMK mid-preview.
+ *
+ * Now each page renders when it enters the composition (produceState),
+ * serialised on a Mutex because PdfRenderer allows one open page at a
+ * time, with a byte-bounded LRU keeping recent neighbours warm. Capped at
+ * 50 pages — the full document stays available via Save-As / external open.
  */
 @Composable
 private fun PdfPreview(item: FileItem) {
-    var pages by remember(item.file) { mutableStateOf<List<Bitmap>?>(null) }
+    val context = LocalContext.current
     var error by remember(item.file) { mutableStateOf<String?>(null) }
+    var pageCount by remember(item.file) { mutableStateOf<Int?>(null) }
+    val renderer = remember(item.file) { PdfPageRenderer() }
+
+    DisposableEffect(item.file) {
+        onDispose { renderer.close() }
+    }
 
     LaunchedEffect(item.file) {
         withContext(Dispatchers.IO) {
             try {
-                ParcelFileDescriptor.open(item.file, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
-                    PdfRenderer(pfd).use { renderer ->
-                        val out = ArrayList<Bitmap>(renderer.pageCount)
-                        val limit = minOf(renderer.pageCount, 50)
-                        for (i in 0 until limit) {
-                            renderer.openPage(i).use { page ->
-                                val targetW = 1600
-                                val targetH = (targetW.toFloat() * page.height / page.width).toInt()
-                                val bmp = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-                                bmp.eraseColor(android.graphics.Color.WHITE)
-                                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                                out.add(bmp)
-                            }
-                        }
-                        pages = out
-                    }
-                }
+                // Render at (about) the on-screen width instead of a fixed
+                // 1600px: same readability on a phone, a third of the
+                // memory per page.
+                val width = context.resources.displayMetrics.widthPixels.coerceIn(720, 1600)
+                pageCount = renderer.open(item.file, width)
             } catch (e: Exception) {
                 AppLogger.warning("FilePreview", "PdfRenderer failed for ${item.name}: ${e.message}")
                 error = e.message ?: "Failed to render PDF"
@@ -560,28 +572,135 @@ private fun PdfPreview(item: FileItem) {
         }
     }
 
+    // -1 = not loaded yet; 0 = empty document. Keeping the count non-null
+    // here avoids relying on when-branch smart casts for items().
+    val count = pageCount ?: -1
     when {
         error != null -> PdfOpenExternalFallback(item, error!!)
-        pages == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        count < 0 -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(stringResource(R.string.filepreview_loading_pdf), color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        pages!!.isEmpty() -> PdfOpenExternalFallback(item, stringResource(R.string.filepreview_pdf_empty))
+        count == 0 -> PdfOpenExternalFallback(item, stringResource(R.string.filepreview_pdf_empty))
         else -> {
-            val rendered = pages!!
             LazyColumn(
                 modifier = Modifier.fillMaxSize().padding(8.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                items(rendered.size) { idx ->
-                    Image(
-                        bitmap = rendered[idx].asImageBitmap(),
-                        contentDescription = stringResource(R.string.filepreview_page_n, idx + 1),
-                        modifier = Modifier.fillMaxWidth(),
-                        contentScale = ContentScale.FillWidth,
-                    )
+                items(count) { idx ->
+                    val page by produceState<Bitmap?>(initialValue = renderer.cached(idx), key1 = idx) {
+                        if (value == null) {
+                            value = withContext(Dispatchers.IO) { renderer.render(idx) }
+                        }
+                    }
+                    val bitmap = page
+                    if (bitmap != null) {
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = stringResource(R.string.filepreview_page_n, idx + 1),
+                            modifier = Modifier.fillMaxWidth(),
+                            contentScale = ContentScale.FillWidth,
+                        )
+                    } else {
+                        // A4-ish placeholder keeps the scroll position stable
+                        // while this page renders.
+                        Box(
+                            modifier = Modifier.fillMaxWidth().aspectRatio(1f / 1.4142f),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                stringResource(R.string.filepreview_page_n, idx + 1),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+/**
+ * [audit-0909 T10-H1] Byte-bounded, Mutex-serialised PDF page renderer.
+ *
+ * Evicted bitmaps are deliberately NOT recycled: an Image may still hold a
+ * reference for a frame or two, and recycling would crash the canvas with
+ * "trying to use a recycled bitmap". Their pixels live in the native heap
+ * and are freed by the NativeAllocationRegistry once the last reference is
+ * collected, so dropping the LRU entry is enough.
+ */
+private class PdfPageRenderer {
+    private val mutex = Mutex()
+    private val closed = AtomicBoolean(false)
+    private var descriptor: ParcelFileDescriptor? = null
+    private var renderer: PdfRenderer? = null
+    private var pageCount = 0
+    private var targetWidth = 0
+
+    private val cache = object : LruCache<Int, Bitmap>(CACHE_BUDGET_BYTES) {
+        override fun sizeOf(key: Int, value: Bitmap): Int = value.byteCount
+    }
+
+    suspend fun open(file: File, width: Int): Int = mutex.withLock {
+        closeLocked()
+        closed.set(false)
+        val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        val pdf = PdfRenderer(pfd)
+        descriptor = pfd
+        renderer = pdf
+        targetWidth = width
+        pageCount = minOf(pdf.pageCount, MAX_PREVIEW_PAGES)
+        pageCount
+    }
+
+    fun cached(index: Int): Bitmap? = cache.get(index)
+
+    suspend fun render(index: Int): Bitmap? = mutex.withLock {
+        if (closed.get()) return@withLock null
+        cache.get(index)?.let { return@withLock it }
+        val pdf = renderer ?: return@withLock null
+        if (index < 0 || index >= pageCount) return@withLock null
+        val width = targetWidth.coerceAtLeast(1)
+        val bitmap = pdf.openPage(index).use { page ->
+            val height = (width.toFloat() * page.height / page.width).toInt().coerceAtLeast(1)
+            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bmp ->
+                bmp.eraseColor(android.graphics.Color.WHITE)
+                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+            }
+        }
+        cache.put(index, bitmap)
+        if (closed.get()) closeLocked()
+        bitmap
+    }
+
+    /**
+     * Idempotent and safe to call while a render is in flight: if the lock
+     * is held, the in-flight render observes `closed` and closes the native
+     * handles itself on completion.
+     */
+    fun close() {
+        closed.set(true)
+        if (mutex.tryLock()) {
+            try {
+                closeLocked()
+            } finally {
+                mutex.unlock()
+            }
+        }
+    }
+
+    private fun closeLocked() {
+        cache.evictAll()
+        runCatching { renderer?.close() }
+        runCatching { descriptor?.close() }
+        renderer = null
+        descriptor = null
+        pageCount = 0
+    }
+
+    private companion object {
+        /** ~64 MB of page bitmaps (~9 A4 pages at 1080px wide). */
+        const val CACHE_BUDGET_BYTES = 64 * 1024 * 1024
+        const val MAX_PREVIEW_PAGES = 50
     }
 }
 
