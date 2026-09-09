@@ -429,7 +429,18 @@ internal fun ChatInputArea(
 
 
     val performSendOrEnqueue: (String) -> Unit = handler@{ rawText ->
-        if (viewModel.tryExecuteInputAsSlashCommand(rawText)) {
+        // [T2-M2] Fold a pending IME-burst edit into this send and cancel its
+        // 150 ms flush. The burst buffer holds dictation text that has not been
+        // committed to the view model yet: without this the send used the stale
+        // committed value (dictation tail lost) and the flush job then
+        // re-injected the full text into the just-cleared composer (ghost input
+        // → accidental double send).
+        val pendingBurst = imeBurstBuffer
+        imeBurstJob?.cancel()
+        imeBurstJob = null
+        imeBurstBuffer = null
+        val toSend = if (pendingBurst.isNullOrEmpty()) rawText else pendingBurst
+        if (viewModel.tryExecuteInputAsSlashCommand(toSend)) {
             viewModel.setInputText("")
             keyboardController?.hide()
             focusManager.clearFocus()
@@ -445,7 +456,7 @@ internal fun ChatInputArea(
         viewModel.setInputText("")
         keyboardController?.hide()
         focusManager.clearFocus()
-        viewModel.sendMessage(rawText)
+        viewModel.sendMessage(toSend)
         noteSendForInputModePref()
         // [P2-scroll-user-send] The send re-engages follow ONLY if the user was
         // already at the bottom (wasScrolledIntoHistory==false) — sending does
@@ -1260,11 +1271,21 @@ internal fun ChatInputArea(
                     // onSend; this lambda is the single source of
                     // truth for what "press Enter to send" means.
                     val performEnterSend: () -> Boolean = handler@{
-                        if (inputText.isBlank() && attachments.isEmpty()) return@handler false
+                        // [T2-M2] Fold a pending IME-burst edit in BEFORE the
+                        // guard so both the guard and the sent text match what
+                        // the user sees, and cancel the 150 ms flush so it cannot
+                        // re-inject the text after the send cleared the composer
+                        // (ghost input → double send).
+                        val pendingBurst = imeBurstBuffer
+                        imeBurstJob?.cancel()
+                        imeBurstJob = null
+                        imeBurstBuffer = null
+                        val effectiveInput = if (pendingBurst.isNullOrEmpty()) inputText else pendingBurst
+                        if (effectiveInput.isBlank() && attachments.isEmpty()) return@handler false
                         // Intercept slash commands so "/compact" et al.
                         // run locally instead of being sent as a chat
                         // turn. Mirrors iOS performSend().
-                        if (viewModel.tryExecuteInputAsSlashCommand(inputText)) {
+                        if (viewModel.tryExecuteInputAsSlashCommand(effectiveInput)) {
                             viewModel.setInputText("")
                             keyboardController?.hide()
                             focusManager.clearFocus()
@@ -1276,7 +1297,7 @@ internal fun ChatInputArea(
                         // when focus drops so any IME composing
                         // buffer is committed/dropped before the
                         // empty inputText becomes visible.
-                        val toSend = inputText
+                        val toSend = effectiveInput
                         lastSendTimeMs = SystemClock.elapsedRealtime()
                         // [P2-scroll-user-send] snapshot BEFORE sendMessage
                         // (insert pushes index 0 → 1; must not read after).

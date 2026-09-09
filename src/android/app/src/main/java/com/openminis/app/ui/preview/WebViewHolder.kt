@@ -8,6 +8,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -380,5 +381,15 @@ class WebViewHolder(
 @Composable
 fun rememberWebViewHolder(url: String): WebViewHolder {
     val context = androidx.compose.ui.platform.LocalContext.current
-    return remember(url) { WebViewHolder(context.applicationContext, url) }
+    val holder = remember(url) { WebViewHolder(context.applicationContext, url) }
+    // [T10-M3] remember(url) silently rebuilds the holder when the URL changes,
+    // while destruction was left to the caller (UrlPreviewSheet.onDismiss only).
+    // A second URL while the sheet stayed open — two OSC-1337 links, two chat
+    // links — replaced the holder and leaked a whole renderer process. Tie
+    // destruction to the holder's own lifetime; destroy() is idempotent and
+    // detaches first.
+    DisposableEffect(holder) {
+        onDispose { holder.destroy() }
+    }
+    return holder
 }

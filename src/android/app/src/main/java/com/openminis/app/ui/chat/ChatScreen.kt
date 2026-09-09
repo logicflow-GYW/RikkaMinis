@@ -1513,6 +1513,16 @@ fun ChatScreen(
     var htmlPreviewHolder by remember {
         mutableStateOf<com.openminis.app.ui.preview.WebViewHolder?>(null)
     }
+    // [T2-M1] destroy() was only wired to the explicit dismiss and deep-link
+    // replace paths, so leaving the chat screen (or rotating — the holder is
+    // remember, not saveable) dropped the holder while its WebView and renderer
+    // process stayed alive. Tie destruction to the screen's lifetime.
+    DisposableEffect(sessionId) {
+        onDispose {
+            htmlPreviewHolder?.destroy()
+            htmlPreviewHolder = null
+        }
+    }
     var htmlPreviewFallbackTitle by remember { mutableStateOf("") }
     var htmlPreviewFullscreen by remember { mutableStateOf(false) }
     val appCtx = context.applicationContext

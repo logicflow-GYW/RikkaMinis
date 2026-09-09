@@ -381,9 +381,22 @@ fun BrowserSettingsSheet(
                             )
                             IconButton(
                                 onClick = {
-                                    // Clear cookies for this domain
-                                    CookieManager.getInstance().setCookie(domain, "")
-                                    CookieManager.getInstance().flush()
+                                    // [T7-M3] setCookie(裸 host, "") was a silent
+                                    // no-op: the first argument must be a URL, and an
+                                    // empty value cannot delete an existing cookie
+                                    // (RFC 6265 requires same-name + Max-Age=0).
+                                    // Enumerate the readable names and expire each.
+                                    // HttpOnly cookies are invisible to getCookie, so
+                                    // Android offers no way to expire those per domain.
+                                    val cm = CookieManager.getInstance()
+                                    val url = if (domain.startsWith("http")) domain else "https://$domain"
+                                    val names = cm.getCookie(url).orEmpty()
+                                        .split(';')
+                                        .mapNotNull { part ->
+                                            part.substringBefore('=').trim().takeIf { it.isNotEmpty() }
+                                        }
+                                    names.forEach { cm.setCookie(url, "$it=; Max-Age=0; Path=/") }
+                                    cm.flush()
                                 },
                                 modifier = Modifier.size(32.dp),
                             ) {

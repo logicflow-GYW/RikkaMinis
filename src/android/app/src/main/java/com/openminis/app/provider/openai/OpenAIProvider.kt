@@ -13,6 +13,7 @@ import com.openminis.app.data.model.LLMStreamChunk
 import com.openminis.app.data.model.LLMUsage
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.provider.LLMProvider
+import com.openminis.app.provider.ProviderBoundary
 import com.openminis.app.sandbox.offload.FirstChunkTimeoutPolicy
 import com.openminis.app.provider.applyUserAgentOverride
 import com.openminis.app.provider.safeOptString
@@ -1296,6 +1297,13 @@ class OpenAIProvider constructor(
         headers: Map<String, String>,
         bodyObject: JSONObject?,
     ): RawPassthroughResult = withContext(Dispatchers.IO) {
+        // [T5-M3] This is a provider network entry point, so it must obey the
+        // same process boundary as sendMessage/streamMessage: the app process
+        // must not fall back to an in-process provider call (TF-D). Its only
+        // caller (ModelUseOffloadHandler) runs in the main process, so a failed
+        // remote dispatch used to land here and allocate the raw response bytes
+        // on the app heap — exactly what the :modelservice worker prevents.
+        ProviderBoundary.enforce(ProviderBoundary.currentProcessName())
         val url: String = when {
             endpoint != null && endpoint.startsWith("/") ->
                 hostRootURL(endpoint)
@@ -1367,6 +1375,11 @@ class OpenAIProvider constructor(
         size: String? = null,
         quality: String? = null,
     ): LLMResponse = withContext(Dispatchers.IO) {
+        // [T5-M3] Same process boundary as sendMessage/streamMessage — see
+        // rawPassthroughRequest. Image bytes are the largest single allocation
+        // this app makes, so leaking them into the app process is precisely
+        // what the :modelservice worker exists to prevent.
+        ProviderBoundary.enforce(ProviderBoundary.currentProcessName())
         val token = getToken()
         // [T-android-model-use-image-passthrough GH#62] Honor an explicit
         // endpoint-path override (non-standard providers); default otherwise.
@@ -2105,6 +2118,12 @@ class OpenAIProvider constructor(
         // hosts (vendor-native direct endpoints), but every known relay host is
         // resolved here first so switching relays no longer lands on the wrong
         // (or a 400-rejected) thinking field.
+        // [T5-M4] AUTO means "let the vendor decide" — omit ALL thinking
+        // control fields. The relay dialects below key off level.isEnabled, and
+        // AUTO.isEnabled == true, so picking Auto silently forced thinking ON on
+        // every listed host. The sensenova branch already returns early for
+        // AUTO; these six predate AUTO and never followed the semantics.
+        if (level == ThinkingLevel.AUTO) return
         when (host) {
             "api.siliconflow.cn" -> {
                 // SiliconFlow: enable_thinking is honored only by an allowlist.
