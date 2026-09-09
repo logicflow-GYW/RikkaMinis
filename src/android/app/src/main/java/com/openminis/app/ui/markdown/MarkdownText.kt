@@ -53,7 +53,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.AsyncImage
-import com.openminis.app.sandbox.PRootKernel
+import com.openminis.app.ui.chat.LocalMarkdownSessionId
+import com.openminis.app.ui.chat.resolveMdMediaFile
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -684,28 +685,16 @@ private fun parseInline(
  * Resolve a URL used in Markdown (`minis://...` or a plain path) to a host
  * File, suitable for MediaPlayer, MediaMetadataRetriever, or file share
  * intents. Returns null when the path can't be resolved or the file is
- * missing. Mirrors MinisImageFetcher's resolution logic so inline media
- * tracks the same rules as inline images.
+ * missing.
+ *
+ * T10-M5: delegates to the chat renderer's session-scoped resolver instead of
+ * keeping a second copy of the rules here. With a sessionId the lookup goes
+ * straight to that session's directory; without one it can only fall back to
+ * the global bind-mount map (last-writer-wins across open chats) and, on a
+ * miss, a scan of every `minis-sessions/<id>/` tree.
  */
-private fun resolveMediaFile(url: String): File? {
-    if (url.isBlank()) return null
-    // Strip a real query string, but NOT `#`: attachment filenames can
-    // contain '#' (e.g. `foo #China.mp4`). `minis://` URLs don't use
-    // fragments, so truncating at '#' would lose part of the filename.
-    val stripped = url.substringBefore('?')
-    val hostFile: File? = when {
-        stripped.startsWith("minis://") -> {
-            val decoded = java.net.URLDecoder.decode(stripped.removePrefix("minis://"), "UTF-8")
-            PRootKernel.resolveHostPath("/var/minis/$decoded")
-        }
-        stripped.startsWith("file://") -> File(Uri.parse(stripped).path ?: return null)
-        stripped.startsWith("/") -> File(stripped)
-        else -> null
-    }
-    val ok = hostFile?.let { it.exists() && it.isFile } == true
-    android.util.Log.d("MdMedia", "resolveMediaFile url=$url -> host=${hostFile?.absolutePath} exists=$ok")
-    return hostFile?.takeIf { ok }
-}
+private fun resolveMediaFile(context: Context, url: String, sessionId: String?): File? =
+    resolveMdMediaFile(context, url, sessionId)
 
 private fun filenameFromUrl(url: String): String {
     val stripped = url.substringBefore('?')
@@ -765,7 +754,8 @@ private fun MinisImageBlock(block: MarkdownParser.Block.Image) {
 private fun MinisVideoBlock(block: MarkdownParser.Block.Video) {
     android.util.Log.d("MdMedia", "MinisVideoBlock url=${block.url} alt=${block.alt}")
     val context = LocalContext.current
-    val file = remember(block.url) { resolveMediaFile(block.url) }
+    val sessionId = LocalMarkdownSessionId.current
+    val file = remember(block.url, sessionId) { resolveMediaFile(context, block.url, sessionId) }
     val filename = remember(block.url) { filenameFromUrl(block.url) }
     val surfaceBg = MaterialTheme.colorScheme.surfaceVariant
     val borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
@@ -854,19 +844,28 @@ private fun MinisVideoBlock(block: MarkdownParser.Block.Video) {
 
 @Composable
 private fun MinisAudioBlock(block: MarkdownParser.Block.Audio) {
-    val file = remember(block.url) { resolveMediaFile(block.url) }
+    val context = LocalContext.current
+    val sessionId = LocalMarkdownSessionId.current
+    val file = remember(block.url, sessionId) { resolveMediaFile(context, block.url, sessionId) }
     val filename = remember(block.url) { filenameFromUrl(block.url) }
 
     val player = remember(file?.absolutePath) {
-        if (file == null) null else MediaPlayer().apply {
-            setDataSource(file.absolutePath)
-        }
+        if (file == null) null else MediaPlayer()
     }
     var prepared by remember(file?.absolutePath) { mutableStateOf(false) }
-    LaunchedEffect(player) {
-        if (player == null) return@LaunchedEffect
+    // T10-M5: setDataSource() opens and parses the container header — real
+    // disk/codec work that used to run inside remember{}, i.e. on the main
+    // thread during composition. Open the source together with prepare() on
+    // Dispatchers.IO so a cold file can't stall the first frame.
+    LaunchedEffect(player, file?.absolutePath) {
+        val p = player ?: return@LaunchedEffect
+        val f = file ?: return@LaunchedEffect
         prepared = withContext(Dispatchers.IO) {
-            runCatching { player.prepare(); true }.getOrDefault(false)
+            runCatching {
+                p.setDataSource(f.absolutePath)
+                p.prepare()
+                true
+            }.getOrDefault(false)
         }
     }
     DisposableEffect(player) {
@@ -901,7 +900,6 @@ private fun MinisAudioBlock(block: MarkdownParser.Block.Audio) {
     val subtle = MaterialTheme.colorScheme.onSurfaceVariant
     val cardBg = MaterialTheme.colorScheme.surfaceVariant
     val borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
-    val context = LocalContext.current
 
     Row(
         modifier = Modifier

@@ -116,9 +116,15 @@ class MinisImageFetcher(
 
     companion object {
         private fun composeMtimeKey(uri: String): String {
-            // Resolve once to fetch mtime. Cheap (single stat on host fs);
-            // Coil only calls Keyer when computing/looking up cache keys,
-            // not on every recomposition.
+            // Resolve once to fetch mtime. Coil only calls Keyer when
+            // computing/looking up cache keys, not on every recomposition —
+            // but "cheap, single stat" (T10-M5 review note) only holds while
+            // the bind-mount map resolves the path. `minis://` attachments
+            // live in per-session directories that map deliberately omits, so
+            // a miss walks every `minis-sessions/<id>/<subdir>` tree and stats
+            // each candidate (PRootKernel.resolveHostPath). Rare in practice:
+            // the chat renderer hands Coil an already-resolved File and only
+            // falls back to the raw `minis://` URL when that lookup failed.
             val stripped = uri.removePrefix("minis://").substringBefore('?')
             val decoded = try {
                 java.net.URLDecoder.decode(stripped, "UTF-8")

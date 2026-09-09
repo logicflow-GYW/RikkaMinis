@@ -199,7 +199,21 @@ fun FilePreviewScreen(
                     if (item.isHtmlFile || item.isMarkdownFile || item.isTextFile ||
                         item.isJsonFile || item.isCsvFile
                     ) {
-                        IconButton(onClick = { printFile(context, item) }) {
+                        // T10-M4: text-ish files are read and wrapped into a
+                        // printable HTML document on Dispatchers.IO — the click
+                        // handler used to readBytes() the whole file (the 500 KB
+                        // cap only applied afterwards) on the UI thread. HTML
+                        // files keep loading straight through the WebView.
+                        IconButton(onClick = {
+                            if (item.isHtmlFile) {
+                                printFile(context, item, preRenderedHtml = null)
+                            } else {
+                                scope.launch {
+                                    val html = withContext(Dispatchers.IO) { buildPrintHtml(item) }
+                                    printFile(context, item, preRenderedHtml = html)
+                                }
+                            }
+                        }) {
                             Icon(Icons.Default.Print, contentDescription = stringResource(R.string.action_print))
                         }
                     }
@@ -1176,8 +1190,13 @@ private fun shareFile(context: Context, item: FileItem) {
  * The off-screen WebView must outlive this function: print is async (we kick it
  * off only after `onPageFinished`), so we hold the instance in a captured var
  * and clear it once the adapter is handed to PrintManager.
+ *
+ * T10-M4: [preRenderedHtml] is produced by [buildPrintHtml] on Dispatchers.IO
+ * by the caller; this function itself only touches the WebView, which must
+ * stay on the main thread. Pass `null` for HTML files, which load from disk
+ * through `loadUrl`.
  */
-private fun printFile(context: Context, item: FileItem) {
+private fun printFile(context: Context, item: FileItem, preRenderedHtml: String?) {
     try {
         val webView = WebView(context).apply {
             settings.javaScriptEnabled = false
@@ -1199,21 +1218,10 @@ private fun printFile(context: Context, item: FileItem) {
                 holder = null
             }
         }
-        if (item.isHtmlFile) {
+        if (preRenderedHtml == null) {
             webView.loadUrl("file://${item.file.absolutePath}")
         } else {
-            val raw = item.file.readBytes().let { bytes ->
-                val cap = if (bytes.size > MAX_TEXT_PREVIEW_BYTES) MAX_TEXT_PREVIEW_BYTES else bytes.size
-                String(bytes, 0, cap, Charsets.UTF_8)
-            }
-            val html = buildString {
-                append("<html><head><meta charset=\"utf-8\">")
-                append("<style>body{font-family:monospace;font-size:12px;white-space:pre-wrap;word-wrap:break-word;}</style>")
-                append("</head><body><pre>")
-                append(escapeHtml(raw))
-                append("</pre></body></html>")
-            }
-            webView.loadDataWithBaseURL(null, html, "text/html", "utf-8", null)
+            webView.loadDataWithBaseURL(null, preRenderedHtml, "text/html", "utf-8", null)
         }
         // Silence the unused-assignment warning while documenting intent: the
         // holder keeps `webView` reachable across the async page load.
@@ -1222,6 +1230,26 @@ private fun printFile(context: Context, item: FileItem) {
     } catch (e: Exception) {
         AppLogger.warning("FilePreview", "print failed for ${item.name}: ${e.message}")
         Toast.makeText(context, context.getString(R.string.file_print_failed_toast, e.message ?: ""), Toast.LENGTH_SHORT).show()
+    }
+}
+
+/**
+ * Read a text-ish preview file (capped at [MAX_TEXT_PREVIEW_BYTES]) and wrap
+ * it in a printable HTML document. Call from Dispatchers.IO: the read itself
+ * is unbounded (the cap applies to the bytes handed to the WebView, not to
+ * how much is read from disk).
+ */
+private fun buildPrintHtml(item: FileItem): String {
+    val raw = item.file.readBytes().let { bytes ->
+        val cap = if (bytes.size > MAX_TEXT_PREVIEW_BYTES) MAX_TEXT_PREVIEW_BYTES else bytes.size
+        String(bytes, 0, cap, Charsets.UTF_8)
+    }
+    return buildString {
+        append("<html><head><meta charset=\"utf-8\">")
+        append("<style>body{font-family:monospace;font-size:12px;white-space:pre-wrap;word-wrap:break-word;}</style>")
+        append("</head><body><pre>")
+        append(escapeHtml(raw))
+        append("</pre></body></html>")
     }
 }
 
