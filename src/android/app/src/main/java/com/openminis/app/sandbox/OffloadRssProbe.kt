@@ -92,10 +92,15 @@ object OffloadRssProbe {
     fun record(name: String, beforeKb: Long, afterKb: Long) {
         val deltaKb = afterKb - beforeKb
         val st = byHandler.computeIfAbsent(name) { Stats() }
-        st.count += 1
-        st.totalDeltaKb += deltaKb
-        st.lastDeltaKb = deltaKb
-        if (deltaKb > st.peakDeltaKb) st.peakDeltaKb = deltaKb
+        // [fix/audit-b20 / T3-L2] Up to two offload workers (Semaphore(2)) can
+        // record into the same Stats concurrently; the ConcurrentHashMap only
+        // protects the map, not the value's fields, so `+=` lost updates.
+        synchronized(st) {
+            st.count += 1
+            st.totalDeltaKb += deltaKb
+            st.lastDeltaKb = deltaKb
+            if (deltaKb > st.peakDeltaKb) st.peakDeltaKb = deltaKb
+        }
 
         // 每次调用一行观测日志（压测时可按 handler 名 grep 归类）
         Log.i(
