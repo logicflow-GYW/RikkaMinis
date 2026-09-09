@@ -255,24 +255,6 @@ jobs:
           cd src/android
           ./gradlew testReleaseUnitTest --stacktrace
 
-      # T9 report-only perf gate — executes inside the unit suite above
-      # (PerfBaselineGateTest: aggregate baseline JSONL, emit report,
-      # enforce P95>15% regression only when PERF_GATE_ENFORCE=true and a
-      # baseline.snapshot.json is committed). This step only surfaces the
-      # verdict; the actual gating happens in the test suite. Phase 2
-      # (enforced) flips on once real-device baseline data is committed —
-      # see docs/stability/perf-baseline/README.md.
-      - name: T9 perf gate verdict (report-only)
-        run: |
-          SUMMARY=src/android/app/build/reports/perf-gate/gate-summary.txt
-          if [ -f "$SUMMARY" ]; then
-            echo "::group::T9 perf gate"
-            cat "$SUMMARY"
-            echo "::endgroup::"
-          else
-            echo "::warning::T9 perf gate summary not found — check the unit-test step output for PerfBaselineGateTest"
-          fi
-
       # Compile instrumented (on-device) tests — they require a real device
       # to run, so CI only validates compilation. The task assembles the
       # debug test APK (including the ui-test-manifest dependency) and

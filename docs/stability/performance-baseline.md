@@ -1,10 +1,17 @@
 # RikkaMinis 性能基线（指标定义与待采样项）
 
+> ⚠️ **采样基础设施已移除（2026-09-09，审计批次 B19 / T9-L5）。**
+> `PerfBaselineCollector`、`PerfBaselineReport`、`PerfBaselineGateTest` 及
+> `docs/stability/perf-baseline/` 目录下的门禁数据目录约定已随死代码清理一并
+> 删除（全库零消费者）；CI 中对应的 report-only 门禁步骤也已移除。
+> **本文档只保留指标口径定义**（做性能分析时的口径参考），文中提到
+> `PerfBaselineCollector.recordFirstToken()` 等采样入口均已不存在。
+> 历史设计与交付记录见 `docs/dev-history/rikkaminis-dev-history.md`。
+
 > T0 交付物之三。基线：`9672e09e`（origin/main，2026-08-15）。
 > T9 负责：采集真实基线 → 设定 P95/P99 阈值 → report-only 门禁 →（Harness 与基线通过后）enforced 门禁。
 > T0 只定义指标口径，**不选择最终数字**。
-> T9 交付物：`PerfBaselineCollector` / `PerfBaselineReport`（2026-08-15）。
-> 注：`MemoryPressureTracker` / `SyntheticWorkload` 已在 2026-08-27 死代码清理中移除——内存压力口径统一到 `service/MemoryPressureGate`（ELEVATED=600 / CRITICAL=800），合成采样场景并入 `docs/stability/perf-baseline/README.md`。
+> 注：`MemoryPressureTracker` / `SyntheticWorkload` 已在 2026-08-27 死代码清理中移除——内存压力口径统一到 `service/MemoryPressureGate`（ELEVATED=600 / CRITICAL=800）。
 
 ---
 
@@ -24,7 +31,7 @@
 |---|---|---|
 | `cold_start_to_idle_ms` | 进程创建 → 首帧可交互（wm_on_idle） | logcat `am_proc_start` + `wm_on_idle`（已有实测经验：2026-08-12 实测 2.35s） |
 | `config_load_ms` | `loadConfigSuspending` 总耗时（db + assemble + hash） | 现有 `ProviderPerf` 插桩（`ProviderRepository.kt`，实测 108ms @ 17 实例/1237 条目/4 组） |
-| `first_turn_ttfb_ms` | 用户发送 → 首个响应 chunk | `PerfBaselineCollector.recordFirstToken()`（T9 新增） |
+| `first_turn_ttfb_ms` | 用户发送 → 首个响应 chunk | ~~`PerfBaselineCollector.recordFirstToken()`~~（采集器已移除，见顶部说明；可从 `AgentTraceRecorder` trace 聚合） |
 
 ### 2.2 执行类（Agent Run）
 
@@ -61,7 +68,7 @@
 | `trace_terminal_missing_rate` | 无 terminal event 的 run / 总 run（必须为 0） |
 | `duplicate_side_effect_rate` | 检测到的重复副作用 / 总 run（必须为 0） |
 
-## 3. 采样基础设施现状（T9 交付后）
+## 3. 采样基础设施现状（T9 交付后，2026-09-09 复核）
 
 已有：
 
@@ -72,29 +79,26 @@
 - logcat 收集经验（记忆沉淀）：`setsid sh -c 'logcat -b main -v time > /data/local/tmp/minis-boot.log &'` 后台收集器（注意 buffer 会被 SSE 日志冲掉，抓冷启动要用流式收集器）；
 - `ExecutionCoordinator` 的 shell 回收日志（RSS 高水位）。
 
-T9 新增：
-
-- `PerfBaselineCollector`（`diagnostics/PerfBaselineCollector.kt`）：统一基线 JSONL 收集器，从现有插桩补缺 first-token latency、RSS、thread count、工具耗时、资源 lease 等指标；输出到 `filesDir/perf-baseline/` 目录；
-- `PerfBaselineReport`（`diagnostics/PerfBaselineReport.kt`）：纯 JVM 聚合器，从 JSONL 基线文件计算 P50/P95/P99/mean/max，支持 delta 对比和 Markdown 报告；
+~~T9 新增：`PerfBaselineCollector` / `PerfBaselineReport`~~ — **已于 2026-09-09（审计批次 B19 / T9-L5）随死代码清理移除**：两者全库零消费者，配套的 `PerfBaselineGateTest` / `PerfBaselineCollectorTest` / `PerfBaselineReportTest`、CI 的 report-only 门禁步骤与 `docs/stability/perf-baseline/` 目录一并删除。下面提到的采集入口（如 `PerfBaselineCollector.recordFirstToken()`）已不存在。
 
 > 已移除（2026-08-27 死代码清理）：`MemoryPressureTracker`（阈值与 `MemoryPressureGate` 口径漂移，零生产入口）、`SyntheticWorkload`（零生产入口）。内存压力口径统一到 `service/MemoryPressureGate`。
 
 缺失（T9 后续依赖 T7 的）：
 
 - 统一的 run 级耗时聚合（trace 扩展后可从 JSONL 聚合，无需新埋点）；
-- 门禁执行器（report-only → enforced 的开关）。
+- 门禁执行器（report-only → enforced 的开关）——随基线采集器一并移除，如需恢复需重新引入采集与门禁。
 
 ## 4. 基线采样协议（T9 执行，T0 只定义）
 
 1. **设备**：Redmi Note 12 Turbo (marble)，Android 15 + HyperOS 3.0，用户环境（有代理变量，大传输可能被截断——采集时注意网络一致性）。
-2. **场景集**（T9 定稿，6 个场景，见 `docs/stability/perf-baseline/README.md`）：
+2. **场景集**（T9 定稿，6 个场景，原 `docs/stability/perf-baseline/README.md` 已随采集器移除）：
    - 冷启动 ×5（`COLD_START`）；
    - 简单问答（无工具）run ×20（`SIMPLE_QA`）；
    - 带工具链 run（≥3 工具）×10（`TOOL_CHAIN`）；
    - 高并发（5 会话并行）×5（`MULTI_SESSION`）；
    - compact 触发 run ×5（`COMPACT_TRIGGER`）；
    - 内存压力测试（多会话快速工具调用）×3（`MEMORY_PRESSURE`）。
-3. **报告格式**：`PerfBaselineReport.aggregate()` 输出 Markdown 报告，每个指标给出 count / p50 / p95 / p99 / max / mean；标注采样的时间与 APK 版本（commit）。
+3. **报告格式**：~~`PerfBaselineReport.aggregate()`~~（聚合器已移除，见顶部说明）输出 Markdown 报告，每个指标给出 count / p50 / p95 / p99 / max / mean；标注采样的时间与 APK 版本（commit）。
 4. **门禁策略**（蓝图 T9 原文）：
    - Phase 1：report-only——采集、存档、展示，不阻断合并；
    - Phase 2：依据 P95/P99 决定门禁阈值——只对**可证明的回归**开闸（如 run 级 P95 退化超阈值）；
