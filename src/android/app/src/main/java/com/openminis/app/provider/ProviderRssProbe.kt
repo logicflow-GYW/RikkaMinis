@@ -210,23 +210,6 @@ object ProviderRssProbe {
         return SampleHandle(stop, peak)
     }
 
-    /**
-     * 同步 block 形式的峰值采样（与手动 start/stop 等价）。返回 [block] 执行期间的采样峰值；
-     * 若 [block] 抛异常则原样抛出（不吞，保证调用路径语义不变），采样线程仍会停止。
-     */
-    fun samplePeakRssDuring(intervalMs: Long = PEAK_SAMPLE_MS, block: () -> Unit): Long {
-        val handle = startPeakSampling(intervalMs)
-        var peak = -1L
-        try {
-            block()
-            peak = handle.stop()
-        } catch (t: Throwable) {
-            handle.stop() // 确保 sampler 停止
-            throw t
-        }
-        return peak
-    }
-
     // ---- vm 解析（纯函数，可 JVM 单测）----
 
     /** 解析 /proc/self/status 文本中某 key 的 kB 值。无该行返回 0。 */

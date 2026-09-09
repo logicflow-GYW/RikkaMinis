@@ -161,8 +161,14 @@ object SessionConcurrencyManager {
     fun releaseSlot(sessionId: String) {
         val stack = activeRunIdsBySession[sessionId] ?: return
         val runId = stack.removeLastOrNull() ?: return
-        if (stack.isEmpty()) activeRunIdsBySession.remove(sessionId)
-        _runningSessions.value = _runningSessions.value - sessionId
+        // [fix/audit-b19 / T8-L1] Only drop the session from the running set
+        // when its last active run goes away. The old unconditional removal
+        // made a session with two concurrent runs look idle after one of them
+        // finished (occupancy() is read by RuntimeLimitsScreen).
+        if (stack.isEmpty()) {
+            activeRunIdsBySession.remove(sessionId)
+            _runningSessions.value = _runningSessions.value - sessionId
+        }
         val promoted = controller.release(runId)
         if (promoted != null) promote(promoted)
     }
