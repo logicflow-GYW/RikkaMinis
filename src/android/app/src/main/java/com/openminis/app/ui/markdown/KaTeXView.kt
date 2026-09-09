@@ -236,6 +236,16 @@ fun KaTeXRenderView(
                 }
             },
             modifier = Modifier.height(0.dp), // Hidden
+            // [audit-0909 T10-M1] Destroy the offscreen renderer when this
+            // AndroidView leaves the composition — which happens on the very
+            // first successful render, when `renderedBitmap != null` replaces
+            // it with an Image. Without onRelease every uncached formula left
+            // a live WebView + renderer process handle behind (no destroy()
+            // anywhere in this file), accumulating for the life of the app.
+            onRelease = { wv ->
+                wv.stopLoading()
+                wv.destroy()
+            },
         )
     }
 }

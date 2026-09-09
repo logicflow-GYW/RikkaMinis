@@ -852,12 +852,21 @@ class BrowserUseManager(
         // Wait with timeout
         val handler = Handler(Looper.getMainLooper())
         val timeoutRunnable = Runnable {
+            // [audit-0909 T7-H1] Complete UNCONDITIONALLY. navigationDeferred
+            // may have been replaced by another coroutine inside this 30s
+            // window (reloadAndWait / a second navigate / applyViewportToAllTabs
+            // from set_viewport or a UA switch). The old identity check then
+            // skipped complete() forever — this runnable fires only once, and
+            // onPageFinished only completes the *current* deferred — so the
+            // original await() hung with no completion path until the run
+            // deadline. complete() is idempotent; only the reference cleanup
+            // (and the loading flag) stay identity-guarded.
             if (navigationDeferred === deferred) {
                 Log.w(TAG, "Navigation timed out for $normalized")
                 _isLoading.value = false
-                deferred.complete(Unit)
                 navigationDeferred = null
             }
+            deferred.complete(Unit)
         }
         handler.postDelayed(timeoutRunnable, NAVIGATION_TIMEOUT_MS)
 
@@ -1533,11 +1542,14 @@ class BrowserUseManager(
         }
         val handler = Handler(Looper.getMainLooper())
         val timeoutRunnable = Runnable {
+            // [audit-0909 T7-H1] Complete unconditionally — see navigate()'s
+            // timeoutRunnable. If navigationDeferred was replaced inside the
+            // window, the old deferred otherwise had no completion path at all.
             if (navigationDeferred === deferred) {
                 _isLoading.value = false
-                deferred.complete(Unit)
                 navigationDeferred = null
             }
+            deferred.complete(Unit)
         }
         handler.postDelayed(timeoutRunnable, NAVIGATION_TIMEOUT_MS)
         try { deferred.await() } finally { handler.removeCallbacks(timeoutRunnable) }
@@ -1561,11 +1573,14 @@ class BrowserUseManager(
         webView.loadDataWithBaseURL(null, BLANK_PAGE_HTML, "text/html", "utf-8", null)
         val handler = Handler(Looper.getMainLooper())
         val timeoutRunnable = Runnable {
+            // [audit-0909 T7-H1] Complete unconditionally — see navigate()'s
+            // timeoutRunnable. If navigationDeferred was replaced inside the
+            // window, the old deferred otherwise had no completion path at all.
             if (navigationDeferred === deferred) {
                 _isLoading.value = false
-                deferred.complete(Unit)
                 navigationDeferred = null
             }
+            deferred.complete(Unit)
         }
         handler.postDelayed(timeoutRunnable, NAVIGATION_TIMEOUT_MS)
         try { deferred.await() } finally { handler.removeCallbacks(timeoutRunnable) }

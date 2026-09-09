@@ -290,10 +290,17 @@ class WebAppActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
                     val wv = WebView(ctx)
-                    CookieManager.getInstance().apply {
-                        setAcceptCookie(false)
-                        setAcceptThirdPartyCookies(wv, false)
-                    }
+                    // [audit-0909 T7-M1] Do NOT call
+                    // CookieManager.setAcceptCookie(false) here: it is a
+                    // PROCESS-WIDE switch (Android has no per-WebView
+                    // first-party cookie toggle) and it was never restored on
+                    // destroy — opening any WebApp silently stopped every
+                    // already-live agent-browser tab from accepting cookies
+                    // (login/hCaptcha failures until that tab is recreated and
+                    // BrowserUseManager.configureWebView flips the switch back
+                    // on). This asset-loader page needs no cookies anyway; the
+                    // per-WebView third-party switch below is the real knob.
+                    CookieManager.getInstance().setAcceptThirdPartyCookies(wv, false)
                     configureWebView(wv)
                     // Tap-to-show — return false so WebView still handles the input.
                     wv.setOnTouchListener { _, ev ->

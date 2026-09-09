@@ -845,40 +845,59 @@ class ProviderRepository(private val context: Context) {
      * Returns the rule id.
      */
     fun saveThinkingRule(instanceId: String, rule: ThinkingRule, id: String? = null): String = runBlocking {
-        val existing = providerDao.loadThinkingRules(instanceId).toMutableList()
         val ruleId = id ?: java.util.UUID.randomUUID().toString()
-        val idx = existing.indexOfFirst { it.id == ruleId }
-        if (idx >= 0) {
-            // Update in place at its current sort_order.
-            existing[idx] = ThinkingRuleCoding.toEntity(rule, ruleId, instanceId, existing[idx].sortOrder)
-        } else {
-            // New rule at the top; everything else shifts down.
-            existing.add(0, ThinkingRuleCoding.toEntity(rule, ruleId, instanceId, 0))
+        // [audit-0909 T4-H1] These DAO writes used to be bare. A provider.db
+        // that failed to open (e.g. a migration abort on API ≤ 33 — see
+        // ProviderDatabase.MIGRATION_9_10) threw an uncaught SQLiteException
+        // straight into the settings editor. Mirror the read paths above
+        // (runCatching) but log loudly instead of silently dropping.
+        runCatching {
+            val existing = providerDao.loadThinkingRules(instanceId).toMutableList()
+            val idx = existing.indexOfFirst { it.id == ruleId }
+            if (idx >= 0) {
+                // Update in place at its current sort_order.
+                existing[idx] = ThinkingRuleCoding.toEntity(rule, ruleId, instanceId, existing[idx].sortOrder)
+            } else {
+                // New rule at the top; everything else shifts down.
+                existing.add(0, ThinkingRuleCoding.toEntity(rule, ruleId, instanceId, 0))
+            }
+            val renumbered = existing.mapIndexed { i, e -> e.copy(sortOrder = i) }
+            providerDao.replaceThinkingRules(instanceId, renumbered)
+        }.onFailure { e ->
+            android.util.Log.e("ProviderRepo", "[audit-0909] saveThinkingRule persistence failed ($instanceId/$ruleId)", e)
         }
-        val renumbered = existing.mapIndexed { i, e -> e.copy(sortOrder = i) }
-        providerDao.replaceThinkingRules(instanceId, renumbered)
         republishThinkingCache(instanceId)
         ruleId
     }
 
     fun deleteThinkingRule(instanceId: String, id: String) = runBlocking {
-        providerDao.deleteThinkingRule(id)
-        // Renumber survivors so sort_order stays dense.
-        val survivors = providerDao.loadThinkingRules(instanceId)
-            .sortedBy { it.sortOrder }
-            .mapIndexed { i, e -> e.copy(sortOrder = i) }
-        providerDao.replaceThinkingRules(instanceId, survivors)
+        // [audit-0909 T4-H1] same bare-DAO hardening as saveThinkingRule.
+        runCatching {
+            providerDao.deleteThinkingRule(id)
+            // Renumber survivors so sort_order stays dense.
+            val survivors = providerDao.loadThinkingRules(instanceId)
+                .sortedBy { it.sortOrder }
+                .mapIndexed { i, e -> e.copy(sortOrder = i) }
+            providerDao.replaceThinkingRules(instanceId, survivors)
+        }.onFailure { e ->
+            android.util.Log.e("ProviderRepo", "[audit-0909] deleteThinkingRule persistence failed ($instanceId/$id)", e)
+        }
         republishThinkingCache(instanceId)
     }
 
     /** Reorder an instance's custom rules to match [orderedIds] (a permutation). */
     fun reorderThinkingRules(instanceId: String, orderedIds: List<String>) = runBlocking {
-        val byId = providerDao.loadThinkingRules(instanceId).associateBy { it.id }
-        val reordered = orderedIds.mapNotNull { byId[it] }
-            .mapIndexed { i, e -> e.copy(sortOrder = i) }
-        // Keep any id the caller omitted (defensive against a partial list) appended.
-        val omitted = byId.values.filter { it.id !in orderedIds }.map { it }
-        providerDao.replaceThinkingRules(instanceId, reordered + omitted)
+        // [audit-0909 T4-H1] same bare-DAO hardening as saveThinkingRule.
+        runCatching {
+            val byId = providerDao.loadThinkingRules(instanceId).associateBy { it.id }
+            val reordered = orderedIds.mapNotNull { byId[it] }
+                .mapIndexed { i, e -> e.copy(sortOrder = i) }
+            // Keep any id the caller omitted (defensive against a partial list) appended.
+            val omitted = byId.values.filter { it.id !in orderedIds }.map { it }
+            providerDao.replaceThinkingRules(instanceId, reordered + omitted)
+        }.onFailure { e ->
+            android.util.Log.e("ProviderRepo", "[audit-0909] reorderThinkingRules persistence failed ($instanceId)", e)
+        }
         republishThinkingCache(instanceId)
     }
 

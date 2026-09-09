@@ -478,7 +478,13 @@ fun ChatScreen(
         com.openminis.app.diagnostics.PerfLongCtx.step(sessionId, "chatScreen.mount")
         onDispose {
             println("[T-HANG-DIAG] ChatScreen UNMOUNT session=$sessionId")
-            ChatViewModelStore.setActiveSession(null)
+            // [audit-0909 T2-H1] compare-and-clear instead of setActiveSession(null):
+            // a Chat→Chat navigation mounts the new ChatScreen (which sets the
+            // new session) BEFORE this outgoing screen is disposed, so the old
+            // unconditional null wiped the active session of the screen the user
+            // is now looking at (minis-config session.* read empty / write threw
+            // "No active session"). Only clear when we still own the slot.
+            ChatViewModelStore.clearActiveSession(sessionId)
             // T-android-new-chat-empty-residue: drop sessions materialised by
             // a settings toggle (ensureSession via /memory, /thinking, etc.)
             // but never sent a real message. VM guards on streaming + DB count

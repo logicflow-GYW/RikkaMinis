@@ -1209,9 +1209,20 @@ fun BackupSettingsScreen(
                             snapshotNote = null
                             val snap = snapshotFiles.firstOrNull()
                             if (snap != null) {
-                                val content = runCatching { snap.readText() }.getOrNull()
-                                if (content != null) restoreWithSnapshot(content)
-                                else errorMessage = errRead
+                                // [audit-0909 T6-M3] Same off-main-thread read
+                                // as the snapshot-restore dialog above
+                                // (audit-0908): auto-backup snapshots embed the
+                                // artifact zip and can be tens of MB, and this
+                                // one sits on the "restore just failed, roll me
+                                // back NOW" path — freezing it is the worst
+                                // possible moment. Last sibling of the trio.
+                                scope.launch {
+                                    val content = withContext(Dispatchers.IO) {
+                                        runCatching { snap.readText() }.getOrNull()
+                                    }
+                                    if (content != null) restoreWithSnapshot(content)
+                                    else errorMessage = errRead
+                                }
                             }
                         },
                     ) {

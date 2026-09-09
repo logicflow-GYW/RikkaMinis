@@ -320,9 +320,15 @@ internal object ConfigBuiltins {
             ClosureField(
                 path = "session.thinkingLevel",
                 displayName = "Thinking level (current session)",
-                description = "off / low / medium / high / xhigh. Applied to the active chat.",
+                // [audit-0909 T6-M1] Keep this list in sync with
+                // thinkingLevelToToken/FromToken below (8 levels): the UI
+                // (ChatSlashTokenExt setThinkingLevel, ModelGroupDetailScreen)
+                // persists MAX/ULTRA/AUTO too, so the reader legitimately
+                // returns those tokens — a narrower StrEnum rejected the
+                // agent's own round-trip write with `validation_failed`.
+                description = "off / low / medium / high / xhigh / max / ultra / auto. Applied to the active chat.",
                 valueSchema = ConfigSchema.StrEnum(
-                    listOf("off", "low", "medium", "high", "xhigh")
+                    listOf("off", "low", "medium", "high", "xhigh", "max", "ultra", "auto")
                 ),
                 risk = ConfigRisk.NORMAL,
                 revertable = true,

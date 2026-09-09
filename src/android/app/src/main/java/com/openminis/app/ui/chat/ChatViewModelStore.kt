@@ -90,6 +90,22 @@ object ChatViewModelStore {
     }
 
     /**
+     * [audit-0909 T2-H1] Compare-and-clear. Chat→Chat navigation composes the
+     * NEW ChatScreen (setActiveSession(B)) before the OLD one is disposed —
+     * NavHost's AnimatedContent keeps the outgoing destination alive for the
+     * ~300ms transition — so an unconditional `setActiveSession(null)` in
+     * onDispose always ran last and left the app with NO active session while
+     * chat B was on screen. ConfigBuiltins' `session.*` family then read
+     * `ConfigValue.Null` / threw "No active session — open a chat first" until
+     * the user happened to pop back from a non-chat screen. Only clear when
+     * the exiting screen still owns the slot.
+     */
+    @Synchronized
+    fun clearActiveSession(sessionId: String) {
+        if (activeSessionIdInternal == sessionId) activeSessionIdInternal = null
+    }
+
+    /**
      * [T-empty-session-residue] Every session id that still has a live VM,
      * plus the foregrounded one and any draft aliases pointing at them.
      *

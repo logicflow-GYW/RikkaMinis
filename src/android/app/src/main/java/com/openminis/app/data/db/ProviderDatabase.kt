@@ -204,10 +204,57 @@ abstract class ProviderDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * [audit-0909 T4-H1] 9→10 must NOT use `ALTER TABLE DROP COLUMN`.
+         * That syntax was added in SQLite 3.35.0 (2021-03-12), while our
+         * minSdk=26 devices ship 3.18–3.32 (API 26–33; only API 34+ has
+         * 3.39+). Room 2.6.1 here uses the framework SQLite (no
+         * openHelperFactory anywhere in the repo), so on any API ≤ 33 the
+         * statement throws `syntax error` mid-migration and provider.db
+         * never opens again — there is no fallbackToDestructiveMigration,
+         * so every later provider-config save silently degrades to
+         * in-memory-only (saveConfig catches) and the thinking-rule DAO
+         * calls crash uncaught. MIGRATION_5_6 below already documented this
+         * exact constraint and used CREATE → INSERT → DROP → RENAME; this
+         * migration now follows the same pattern (see its KDoc).
+         */
         val MIGRATION_9_10 = object : Migration(9, 10) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE provider_instances DROP COLUMN custom_headers_json")
-                db.execSQL("ALTER TABLE provider_instances DROP COLUMN custom_body_json")
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS provider_instances_new (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        label TEXT NOT NULL,
+                        provider_type TEXT NOT NULL,
+                        credential_type TEXT NOT NULL,
+                        custom_base_url TEXT,
+                        append_v1_suffix INTEGER NOT NULL,
+                        use_responses_api INTEGER NOT NULL,
+                        azure_mode INTEGER NOT NULL,
+                        image_endpoint_mode TEXT,
+                        image_endpoint_resolved TEXT,
+                        custom_user_agent TEXT,
+                        is_enabled INTEGER NOT NULL,
+                        sort_order INTEGER NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        pinned INTEGER NOT NULL
+                    )
+                """.trimIndent())
+                db.execSQL("""
+                    INSERT INTO provider_instances_new (
+                        id, label, provider_type, credential_type, custom_base_url,
+                        append_v1_suffix, use_responses_api, azure_mode,
+                        image_endpoint_mode, image_endpoint_resolved, custom_user_agent,
+                        is_enabled, sort_order, created_at, pinned
+                    )
+                    SELECT
+                        id, label, provider_type, credential_type, custom_base_url,
+                        append_v1_suffix, use_responses_api, azure_mode,
+                        image_endpoint_mode, image_endpoint_resolved, custom_user_agent,
+                        is_enabled, sort_order, created_at, pinned
+                    FROM provider_instances
+                """.trimIndent())
+                db.execSQL("DROP TABLE IF EXISTS provider_instances")
+                db.execSQL("ALTER TABLE provider_instances_new RENAME TO provider_instances")
             }
         }
 
