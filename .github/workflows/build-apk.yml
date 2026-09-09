@@ -336,6 +336,8 @@ jobs:
       - name: Stage release asset
         id: stage
         run: |
+          # Keep the base version in sync with build.gradle.kts versionName
+          # (both are the stable 1.0.0 line; CI appends +<run> build metadata).
           VN="1.0.0${MINIS_VERSION_NAME_SUFFIX:-}"
           VC="${MINIS_VERSION_CODE:-22}"
           OUT="RikkaMinis-arm64-v8a.apk"
@@ -360,7 +362,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: android-latest
-          name: "RikkaMinis Android v1.0.0"
+          name: "RikkaMinis Android v${{ steps.stage.outputs.version }}"
           body: |
             Automated Android build — always the newest commit on `main`.
 
