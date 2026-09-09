@@ -35,25 +35,7 @@ class QueueFrameCodecTest {
         assertEquals(LLMStreamChunk.QueueStatus(0), ChatStreamJsonl.decode(encoded))
     }
 
-    @Test
-    fun `decodeLine carries queue chunk without correlation`() {
-        val encoded = ChatStreamJsonl.encode(LLMStreamChunk.QueueStatus(2))
-        val line = ChatStreamJsonl.decodeLine(encoded)
-        assertEquals(LLMStreamChunk.QueueStatus(2), line.chunk)
-        assertEquals(null, line.runId)
-        assertEquals(-1, line.seq)
-    }
-
-    @Test
-    fun `correlation fields still work alongside queue frames`() {
-        val encoded = ChatStreamJsonl.encodeWithCorrelation(
-            LLMStreamChunk.QueueStatus(5),
-            runId = "abc",
-            seq = 7,
-        )
-        val line = ChatStreamJsonl.decodeLine(encoded)
-        assertEquals(LLMStreamChunk.QueueStatus(5), line.chunk)
-        assertEquals("abc", line.runId)
-        assertEquals(7, line.seq)
-    }
+    // [fix/audit-b19 / T3-L1] The two cases that exercised
+    // encodeWithCorrelation/decodeLine were removed with that API: nothing in
+    // production ever called it (provider-rss v2 reservation).
 }

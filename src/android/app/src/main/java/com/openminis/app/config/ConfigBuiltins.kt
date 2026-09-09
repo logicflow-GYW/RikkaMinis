@@ -7,11 +7,8 @@ import com.openminis.app.config.collections.ModelsCollection
 import com.openminis.app.config.collections.ProvidersCollection
 import com.openminis.app.config.fields.ClosureField
 import com.openminis.app.config.fields.PrefsBoolField
-import com.openminis.app.config.fields.PrefsDoubleField
-import com.openminis.app.config.fields.PrefsEnumField
 import com.openminis.app.config.fields.PrefsIntCodedEnumField
 import com.openminis.app.config.fields.PrefsIntField
-import com.openminis.app.config.fields.PrefsLongField
 import com.openminis.app.config.fields.PrefsStringField
 import com.openminis.app.config.fields.ReadOnlyField
 import com.openminis.app.data.repository.ChatRepository

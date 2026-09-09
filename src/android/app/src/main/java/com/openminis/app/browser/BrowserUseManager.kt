@@ -638,27 +638,6 @@ class BrowserUseManager(
         return rewritten.toByteArray(Charsets.UTF_8).inputStream()
     }
 
-    private fun guessMimeType(filename: String): String {
-        val ext = filename.substringAfterLast('.', "").lowercase()
-        return when (ext) {
-            "html", "htm" -> "text/html"
-            "css" -> "text/css"
-            "js" -> "application/javascript"
-            "json" -> "application/json"
-            "png" -> "image/png"
-            "jpg", "jpeg" -> "image/jpeg"
-            "gif" -> "image/gif"
-            "svg" -> "image/svg+xml"
-            "webp" -> "image/webp"
-            "mp4" -> "video/mp4"
-            "mp3" -> "audio/mpeg"
-            "pdf" -> "application/pdf"
-            "txt", "md" -> "text/plain"
-            "xml" -> "text/xml"
-            else -> "application/octet-stream"
-        }
-    }
-
     private fun setupWebChromeClient() {
         webView.webChromeClient = object : WebChromeClient() {
             override fun onReceivedTitle(view: WebView, title: String?) {
@@ -1789,24 +1768,6 @@ class BrowserUseManager(
         }
     }
 
-    private fun extensionForMimeType(mime: String): String {
-        val lower = mime.lowercase().split(";").firstOrNull()?.trim() ?: ""
-        return when (lower) {
-            "text/html" -> "html"; "text/plain" -> "txt"; "text/css" -> "css"; "text/csv" -> "csv"
-            "application/json" -> "json"; "application/xml", "text/xml" -> "xml"
-            "application/pdf" -> "pdf"; "image/png" -> "png"; "image/jpeg" -> "jpg"
-            "image/gif" -> "gif"; "image/webp" -> "webp"; "image/svg+xml" -> "svg"
-            "application/zip" -> "zip"; "application/gzip" -> "gz"
-            else -> "bin"
-        }
-    }
-
-    private fun formatBytes(bytes: Int): String = when {
-        bytes < 1024 -> "$bytes B"
-        bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
-        else -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
-    }
-
     // -- Get Cookies --
 
     /**
@@ -1953,40 +1914,6 @@ class BrowserUseManager(
     }
 
     // -- Cookie field readers (format-tolerant) --
-
-    /** Look up `aliases` in the map: exact match first, then case-insensitive,
-     *  so httpOnly / HttpOnly / http_only all resolve. */
-    private fun cookieValue(raw: Map<String, Any?>, vararg aliases: String): Any? {
-        for (key in aliases) raw[key]?.let { return it }
-        val lowered = aliases.map { it.lowercase() }.toSet()
-        for ((k, v) in raw) if (k.lowercase() in lowered && v != null) return v
-        return null
-    }
-
-    /** String reader; numbers are stringified so a numeric `value` still works. */
-    private fun cookieString(raw: Map<String, Any?>, vararg aliases: String): String? =
-        when (val v = cookieValue(raw, *aliases)) {
-            is String -> v
-            is Number -> v.toString()
-            else -> null
-        }
-
-    /** Bool reader; tolerates JSON bool, 0/1, and stringified "true"/"false". */
-    private fun cookieBool(raw: Map<String, Any?>, vararg aliases: String): Boolean? =
-        when (val v = cookieValue(raw, *aliases)) {
-            is Boolean -> v
-            is Number -> v.toInt() != 0
-            is String -> v.lowercase() in setOf("true", "1", "yes")
-            else -> null
-        }
-
-    /** Numeric (seconds) reader; accepts JSON number or numeric string. */
-    private fun cookieNumber(raw: Map<String, Any?>, vararg aliases: String): Double? =
-        when (val v = cookieValue(raw, *aliases)) {
-            is Number -> v.toDouble()
-            is String -> v.toDoubleOrNull()
-            else -> null
-        }
 
     // -- Wait for DOM Stable --
 
