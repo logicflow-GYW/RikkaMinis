@@ -2243,6 +2243,15 @@ internal class AgentLoopEngine(
 
             // ============================ Pass 2 ============================
             val resultsById = LinkedHashMap<String, ToolExecutionResult>()
+            // [T-tool-duration-per-call] Wall time measured around each actual
+            // host.executeTool call. Pass 3 used to derive durationMs as
+            // (now − block.startTimeMs), but startTimeMs is stamped when the
+            // model *starts streaming the tool_use args* and Pass 3 runs after
+            // the whole batch, so every tool in a batch was charged the model's
+            // streaming tail PLUS the entire batch's runtime — a sub-second
+            // command in a batch containing one slow tool displayed that slow
+            // tool's duration (measured: 5.4s shown for a 5ms command).
+            val execMsById = java.util.concurrent.ConcurrentHashMap<String, Long>()
             if (pending.size > 1 && pending.all { ToolConcurrencyPolicy.isParallelSafe(it.name, it.argsStr) }) {
                 // All pending tools are parallel-safe pure reads. Launch them
                 // concurrently, then pull each result in the original order so
@@ -2250,7 +2259,10 @@ internal class AgentLoopEngine(
                 val deferred = coroutineScope {
                     pending.map { p ->
                         p.id to async {
-                            host.executeTool(p.name, p.argsStr, p.id, loopState.allToolBlocks, loopState.assistantId, loopState.accumulatedText)
+                            val execStart = System.currentTimeMillis()
+                            val r = host.executeTool(p.name, p.argsStr, p.id, loopState.allToolBlocks, loopState.assistantId, loopState.accumulatedText)
+                            execMsById[p.id] = System.currentTimeMillis() - execStart
+                            r
                         }
                     }
                 }
@@ -2277,7 +2289,9 @@ internal class AgentLoopEngine(
                             }
                         }
                     }
+                    val execStart = System.currentTimeMillis()
                     resultsById[p.id] = host.executeTool(p.name, p.argsStr, p.id, loopState.allToolBlocks, loopState.assistantId, loopState.accumulatedText)
+                    execMsById[p.id] = System.currentTimeMillis() - execStart
                 }
             }
 
@@ -2343,7 +2357,12 @@ internal class AgentLoopEngine(
 
                 val blockIdx = loopState.allToolBlocks.indexOfFirst { it.id == id }
                 if (blockIdx >= 0) {
-                    val elapsed = System.currentTimeMillis() - loopState.allToolBlocks[blockIdx].startTimeMs
+                    // Measured around this tool's own host.executeTool call —
+                    // NOT (now − startTimeMs), which is stamped at tool_use
+                    // streaming start and would charge this tool the whole
+                    // batch's runtime plus the model's streaming tail.
+                    val elapsed = execMsById[id]
+                        ?: (System.currentTimeMillis() - loopState.allToolBlocks[blockIdx].startTimeMs)
                     // Keep live-streamed content if it has more data than the truncated result.
                     // T263: takeLast(80) was applied uniformly, but it was sized for
                     // shell_execute (long stdout streams where the tail is what
