@@ -186,11 +186,11 @@ class ModelUseOffloadHandler(
         }
 
         // System prompt: --system takes precedence over --system-file
-        val explicitSystem = args.get("system") ?: args.get("system-file")?.let { readLinuxPath(it) }
+        val explicitSystem = args.get("system") ?: args.get("system-file")?.let { readLinuxPath(it, request.sessionId) }
 
         // Parse input messages: --input <path> | stdin
         val inputText = when {
-            args.get("input") != null -> readLinuxPath(args.get("input")!!)
+            args.get("input") != null -> readLinuxPath(args.get("input")!!, request.sessionId)
                 ?: return NativeOffloadResult(
                     2,
                     "minis-model-use run: cannot read --input '${args.get("input")}'\n",
@@ -198,7 +198,7 @@ class ModelUseOffloadHandler(
             else -> ""
         }
         val parsed = try {
-            parseMessages(inputText)
+            parseMessages(inputText, request.sessionId)
         } catch (e: ImageInputError) {
             return NativeOffloadResult(
                 2,
@@ -940,7 +940,7 @@ class ModelUseOffloadHandler(
 
         if (outputPath != null) {
             val hostFile = sessionScopedHostFile(outputPath, sessionId)
-                ?: PRootKernel.resolveHostPath(outputPath)
+            ?: PRootKernel.resolveHostPath(outputPath)
             if (hostFile == null) {
                 out.put("output_error", "Could not resolve --output '$outputPath'")
                 inlineTextIfPossible(result.data, out)
@@ -1195,7 +1195,7 @@ class ModelUseOffloadHandler(
         val modelSlug = entry.model.id.replace("/", "_")
         if (outputPath != null) {
             val hostFile = sessionScopedHostFile(outputPath, sessionId)
-                ?: PRootKernel.resolveHostPath(outputPath)
+            ?: PRootKernel.resolveHostPath(outputPath)
                 ?: return NativeOffloadResult(
                     2,
                     "minis-model-use run: cannot resolve --output '$outputPath'\n",
@@ -1278,7 +1278,7 @@ class ModelUseOffloadHandler(
             // global resolver as fallback. --output is absolute here (relative
             // rejected in cmdRun before the API call).
             val hostFile = sessionScopedHostFile(outputPath, sessionId)
-                ?: PRootKernel.resolveHostPath(outputPath)
+            ?: PRootKernel.resolveHostPath(outputPath)
                 ?: return NativeOffloadResult(
                     2,
                     "minis-model-use run: cannot resolve --output '$outputPath'\n",
@@ -1515,8 +1515,10 @@ class ModelUseOffloadHandler(
         return true
     }
 
-    private fun readLinuxPath(linuxPath: String): String? {
-        val hostFile: File = PRootKernel.resolveHostPath(linuxPath) ?: return null
+    private fun readLinuxPath(linuxPath: String, sessionId: String?): String? {
+        val hostFile: File = sessionId?.let {
+            PRootKernel.resolveSessionHostPath(it, linuxPath, context)
+        } ?: PRootKernel.resolveHostPath(linuxPath) ?: return null
         if (!hostFile.exists() || !hostFile.isFile) return null
         return try { hostFile.readText() } catch (_: Throwable) { null }
     }
@@ -1552,7 +1554,7 @@ class ModelUseOffloadHandler(
      * - `[{"role":"...","content":"..."}, ...]` — array of messages
      * - Plain text → wrapped as a single user message
      */
-    private fun parseMessages(text: String): List<ParsedMessage> {
+    private fun parseMessages(text: String, sessionId: String?): List<ParsedMessage> {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return emptyList()
         try {
@@ -1560,10 +1562,10 @@ class ModelUseOffloadHandler(
                 val obj = JSONObject(trimmed)
                 val arr = obj.optJSONArray("messages")
                     ?: return listOf(ParsedMessage("user", trimmed, emptyList()))
-                return parseMessageArray(arr)
+                return parseMessageArray(arr, sessionId)
             }
             if (trimmed.startsWith("[")) {
-                return parseMessageArray(JSONArray(trimmed))
+                return parseMessageArray(JSONArray(trimmed), sessionId)
             }
         } catch (e: ImageInputError) {
             // Deliberate hard errors from block parsing must NOT be swallowed
@@ -1579,7 +1581,7 @@ class ModelUseOffloadHandler(
         return listOf(ParsedMessage("user", trimmed, emptyList()))
     }
 
-    private fun parseMessageArray(arr: JSONArray): List<ParsedMessage> {
+    private fun parseMessageArray(arr: JSONArray, sessionId: String?): List<ParsedMessage> {
         val out = mutableListOf<ParsedMessage>()
         for (i in 0 until arr.length()) {
             val m = arr.optJSONObject(i) ?: continue
@@ -1600,7 +1602,7 @@ class ModelUseOffloadHandler(
                             val url = imgObj.optString("url", "").takeIf { it.isNotEmpty() }
                                 ?: continue
                             try {
-                                imgs.add(resolveImageUrl(url))
+                                imgs.add(resolveImageUrl(url, sessionId))
                             } catch (e: ImageInputError) {
                                 // Don't silently drop — surface to the agent so it
                                 // can correct the URL or fall back to text.
@@ -1658,7 +1660,7 @@ class ModelUseOffloadHandler(
      * non-zero with a descriptive message instead of silently feeding
      * the model an image-less request (the prior failure mode).
      */
-    private fun resolveImageUrl(url: String): LLMMessage.ImagePart {
+    private fun resolveImageUrl(url: String, sessionId: String?): LLMMessage.ImagePart {
         // data:<mime>;base64,<base64>
         if (url.startsWith("data:")) {
             val rest = url.substring(5)
@@ -1697,7 +1699,9 @@ class ModelUseOffloadHandler(
                     "/var/minis/<scope>/<path>, or an absolute Linux path."
             )
         }
-        val hostFile: File = PRootKernel.resolveHostPath(linuxPath)
+        val hostFile: File = sessionId?.let {
+            PRootKernel.resolveSessionHostPath(it, linuxPath, context)
+        } ?: PRootKernel.resolveHostPath(linuxPath)
             ?: File(linuxPath).takeIf { it.exists() && it.isFile }
             ?: throw ImageInputError("Image file not found at '$url'.")
         if (!hostFile.exists() || !hostFile.isFile) {

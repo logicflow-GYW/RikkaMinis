@@ -5,6 +5,7 @@ import com.openminis.app.logging.AppLogger
 import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
 import com.openminis.app.sandbox.NativeOffloadResult
+import android.content.Context
 import com.openminis.app.sandbox.PRootKernel
 import org.json.JSONArray
 import org.json.JSONObject
@@ -36,7 +37,7 @@ import java.io.File
  *   125  user_rejected / all_rejected
  *   126  permission_denied
  */
-class ConfigOffloadHandler : NativeOffloadHandler {
+class ConfigOffloadHandler(private val context: Context) : NativeOffloadHandler {
     private companion object {
         const val TAG = "ConfigOffload"
         const val EXIT_OK = 0
@@ -123,8 +124,8 @@ class ConfigOffloadHandler : NativeOffloadHandler {
                 "list-topics" -> cmdListTopics(args)
                 "topic-help" -> cmdTopicHelp(args)
                 "get" -> cmdGet(args)
-                "set" -> cmdSet(args)
-                "add" -> cmdAdd(args)
+                "set" -> cmdSet(args, request)
+                "add" -> cmdAdd(args, request)
                 "set-batch" -> cmdSetBatch(args, request)
                 else -> errorResult(
                     args, EXIT_INVALID_ARGS,
@@ -190,7 +191,7 @@ class ConfigOffloadHandler : NativeOffloadHandler {
         return envelopeResult(args, envelope)
     }
 
-    private fun cmdSet(args: OffloadArgs): NativeOffloadResult {
+    private fun cmdSet(args: OffloadArgs, request: NativeOffloadRequest): NativeOffloadResult {
         val path = args.positional.getOrNull(1)
         // [T-android-minis-config-set-shell-escape] (issue #36) `--file <path>`
         // reads the value-json from a file instead of an argv positional. The
@@ -201,7 +202,7 @@ class ConfigOffloadHandler : NativeOffloadHandler {
         // entirely. Mirrors iOS 5dcff277.
         val fileArg = args.get("file")
         val valueJSON = if (fileArg != null) {
-            readLinuxPath(fileArg) ?: return errorResult(
+            readLinuxPath(fileArg, request.sessionId) ?: return errorResult(
                 args, EXIT_INVALID_ARGS, "INVALID_ARGS",
                 "--file: could not read value from '$fileArg'."
             )
@@ -235,11 +236,11 @@ class ConfigOffloadHandler : NativeOffloadHandler {
      * applied[0].new) are all identical. Mirrors iOS `cmd_add`. (The bridge's
      * collection-add suffix is `.append` on Android.)
      */
-    private fun cmdAdd(args: OffloadArgs): NativeOffloadResult {
+    private fun cmdAdd(args: OffloadArgs, request: NativeOffloadRequest): NativeOffloadResult {
         val topic = args.positional.getOrNull(1)
         val fileArg = args.get("file")
         val valueJSON = if (fileArg != null) {
-            readLinuxPath(fileArg) ?: return errorResult(
+            readLinuxPath(fileArg, request.sessionId) ?: return errorResult(
                 args, EXIT_INVALID_ARGS, "INVALID_ARGS",
                 "--file: could not read value from '$fileArg'."
             )
@@ -343,8 +344,10 @@ class ConfigOffloadHandler : NativeOffloadHandler {
      * used by `set --file` so the value-json never transits the shell. Returns
      * null when the path can't be resolved, doesn't exist, or read fails.
      */
-    private fun readLinuxPath(linuxPath: String): String? {
-        val hostFile: File = PRootKernel.resolveHostPath(linuxPath) ?: return null
+    private fun readLinuxPath(linuxPath: String, sessionId: String?): String? {
+        val hostFile: File = sessionId?.let {
+            PRootKernel.resolveSessionHostPath(it, linuxPath, context)
+        } ?: PRootKernel.resolveHostPath(linuxPath) ?: return null
         if (!hostFile.exists() || !hostFile.isFile) return null
         return try { hostFile.readText() } catch (_: Throwable) { null }
     }

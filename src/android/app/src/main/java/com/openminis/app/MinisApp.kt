@@ -471,7 +471,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         // Mirrors iOS `config_offload_register()` in ISHKernel.m.
         NativeOffloadServer.register(
             "minis-config",
-            com.openminis.app.sandbox.offload.ConfigOffloadHandler(),
+            com.openminis.app.sandbox.offload.ConfigOffloadHandler(this),
         )
         NativeOffloadServer.register("minis-browser-use", BrowserUseOffloadHandler(this))
         // T188: minis-sessions-cli — agent-side query of chat history.
