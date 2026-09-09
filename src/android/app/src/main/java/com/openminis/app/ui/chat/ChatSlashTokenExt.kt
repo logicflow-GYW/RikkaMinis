@@ -50,9 +50,9 @@ fun ChatViewModel.thinkingInfo(): ThinkingInfo? {
 
 /**
  * Load session-level token aggregates from the database. Suspend so the
- * Token Usage sheet can fetch on demand without keeping a live subscription
- * — token data rarely changes mid-view, and we want to avoid reactive
- * overhead per token chunk.
+ * Token Usage sheet can fetch it cheaply; the sheet polls this every second
+ * while open, because agent runs grow the loop count and token totals live.
+ * Returns a plain data class, so equal snapshots skip UI recomposition.
  */
 suspend fun ChatViewModel.loadSessionTokenStats(): SessionTokenStats {
     val sid = realSessionId.ifEmpty { sessionId }

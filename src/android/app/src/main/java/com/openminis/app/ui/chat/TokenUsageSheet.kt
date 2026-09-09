@@ -25,6 +25,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import com.openminis.app.R
 import com.openminis.app.data.model.LLMModel
 
@@ -40,9 +41,11 @@ import com.openminis.app.data.model.LLMModel
  *   - Cache (Session Total): Cache Read / Cache Write / Cache Hit Rate
  *   - Agent Loop: Total Loops
  *
- * Data loads asynchronously via [ChatViewModel.loadSessionTokenStats] when the
- * sheet appears; we intentionally don't hold a live subscription — token
- * counters change per API call, not per keystroke, so pull-on-open is enough.
+ * Data refreshes live while the sheet is open: users watch this sheet DURING
+ * an agent run, where Total Loops / token totals grow every loop. Polling
+ * [ChatViewModel.loadSessionTokenStats] at 1s keeps it current; the poll dies
+ * with the sheet (LaunchedEffect scope), and equal data-class snapshots skip
+ * recomposition so a quiescent session costs nothing.
  */
 @Composable
 fun TokenUsageSheet(
@@ -57,7 +60,10 @@ fun TokenUsageSheet(
     val thinking = remember { viewModel.thinkingInfo() }
 
     LaunchedEffect(Unit) {
-        stats = viewModel.loadSessionTokenStats()
+        while (true) {
+            stats = viewModel.loadSessionTokenStats()
+            delay(1000L)
+        }
     }
 
     StandardChatSheet(
