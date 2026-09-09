@@ -51,19 +51,19 @@ object AgentRuntimeLimitsPrefs {
     const val KEY_RUN_DEADLINE_MIN = "runDeadlineMinutes"
 
     const val TURNS_MIN = 50
-    const val TURNS_MAX = 500
+    const val TURNS_MAX = 1000
     const val TURNS_DEFAULT = 256
 
     const val PROVIDER_ATTEMPTS_MIN = 16
-    const val PROVIDER_ATTEMPTS_MAX = 512
+    const val PROVIDER_ATTEMPTS_MAX = 1000
     const val PROVIDER_ATTEMPTS_DEFAULT = 256
 
     const val TOOL_CALLS_MIN = 16
-    const val TOOL_CALLS_MAX = 512
+    const val TOOL_CALLS_MAX = 1000
     const val TOOL_CALLS_DEFAULT = 256
 
     const val SHELL_COMMANDS_MIN = 16
-    const val SHELL_COMMANDS_MAX = 512
+    const val SHELL_COMMANDS_MAX = 1000
     const val SHELL_COMMANDS_DEFAULT = 256
 
     const val COMPACTION_CALLS_MIN = 2
@@ -75,7 +75,7 @@ object AgentRuntimeLimitsPrefs {
     const val CONCURRENT_TOOLS_DEFAULT = 4
 
     const val DEADLINE_MIN_MIN = 15
-    const val DEADLINE_MAX_MIN = 120
+    const val DEADLINE_MAX_MIN = 360 // 6h ceiling
     const val DEADLINE_DEFAULT_MIN = 120
 
     // ── Group 3: stream recovery / resilience (per run) ──────────────────
