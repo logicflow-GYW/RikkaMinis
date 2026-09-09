@@ -26,8 +26,11 @@ fun customizationValue(key: String): String =
 //   MINIS_VERSION_CODE       — monotonically increasing int (base + run number),
 //                              so every published build is upgrade-installable
 //                              and distinguishable by versionCode.
-//   MINIS_VERSION_NAME_SUFFIX — per-build tag, e.g. "-beta.42", so sideloaders
-//                              can tell builds apart without opening the APK.
+//   MINIS_VERSION_NAME_SUFFIX — per-build build metadata, e.g. "+42", so
+//                                sideloaders can tell builds apart from the
+//                                version shown in the app's About page without
+//                                turning 1.0.0 into a prerelease version
+//                                (semver ignores build metadata for precedence)
 // Local builds fall back to the base values (22 / "1.0.0").
 val ciVersionCode: Int? = System.getenv("MINIS_VERSION_CODE")?.toIntOrNull()
 val ciVersionSuffix: String? = System.getenv("MINIS_VERSION_NAME_SUFFIX")

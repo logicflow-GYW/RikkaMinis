@@ -221,15 +221,20 @@ jobs:
       #   - MINIS_VERSION_CODE: base 220_000_000 + workflow run number —
       #     monotonically increasing, so every published build is
       #     upgrade-installable over the previous one AND distinguishable.
-      #   - MINIS_VERSION_NAME_SUFFIX: "-beta.<run>" so sideloaders can tell
-      #     builds apart from the version shown in the app's About page.
+      #   - MINIS_VERSION_NAME_SUFFIX: "+<run>" (build metadata). 1.0.0 is the
+      #     stable release line, so the per-build number must NOT be a
+      #     prerelease identifier — "-beta.<run>" made every published build a
+      #     prerelease version, which semver ranks BELOW the plain release and
+      #     which used to sort above it in our own comparator. Build metadata
+      #     is ignored by version precedence, so sideloaders can still tell
+      #     builds apart from the About page while the version stays 1.0.0.
       # Local builds keep the hardcoded 22 / "1.0.0".
       - name: Inject build version
         run: |
           VC=$((220000000 + GITHUB_RUN_NUMBER))
           echo "MINIS_VERSION_CODE=$VC" >> "$GITHUB_ENV"
-          echo "MINIS_VERSION_NAME_SUFFIX=-beta.$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
-          echo "versionCode=$VC  versionNameSuffix=-beta.$GITHUB_RUN_NUMBER"
+          echo "MINIS_VERSION_NAME_SUFFIX=+$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "versionCode=$VC  versionNameSuffix=+$GITHUB_RUN_NUMBER"
 
       # JVM unit tests — the full suite. The test backlog that used to force a
       # scoped filter here is cleared:
@@ -373,7 +378,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: android-latest
-          name: "RikkaMinis Android (latest build)"
+          name: "RikkaMinis Android v1.0.0"
           body: |
             Automated Android build — always the newest commit on `main`.
 
@@ -389,8 +394,9 @@ jobs:
 
             ## ⚠️ 已知问题与使用边界
 
-            **请在安装前先阅读本节。** 本构建是持续集成自动产物（滚动更新），
-            不代表"修复了所有已知问题"；已知缺陷如下，工作区按可接受范围对待。
+            **请在安装前先阅读本节。** 本版是 `main` 的正式发布（滚动更新：
+            每次 `main` 构建覆盖同一 release，版本号保持 1.0.0，构建号见
+            Version 一栏）。已知缺陷如下，发布时按可接受范围对待。
 
             ### 内存占用会突然飙升
             - 长时间运行 / 并发会话多 / 大附件工具调用时，内存（RSS）可能
@@ -416,5 +422,5 @@ jobs:
             - 此构建使用 debug 签名密钥（公开常量），任何人可重签同名 APK，
               请**只从本仓库 Releases 页下载**。
           files: ${{ steps.stage.outputs.asset }}
-          prerelease: true
+          prerelease: false
           make_latest: "true"

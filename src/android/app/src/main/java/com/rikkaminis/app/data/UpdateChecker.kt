@@ -153,10 +153,24 @@ object UpdateChecker {
                     if (r.optBoolean("draft", false)) continue
                     val tag = r.optString("tag_name")
                     if (tag.isEmpty()) continue
+                    val parsedVersion = normalizeTag(tag)
+                    // [fix/updatechecker-semver-prerelease] Only version-shaped
+                    // tags may enter the comparison. The rolling download tag
+                    // "android-latest" normalizes to "android", which used to
+                    // compare GREATER than any "1.x.y" local version (letter >
+                    // digit) and therefore reported a permanent update. A tag
+                    // whose normalized form does not start with a digit is not
+                    // a version and is skipped — the rolling release stays a
+                    // download entry point, it just no longer votes on
+                    // precedence.
+                    if (parsedVersion.firstOrNull()?.isDigit() != true) {
+                        AppLogger.info(TAG, "skipping non-version tag=$tag parsed=$parsedVersion")
+                        continue
+                    }
                     val (apkUrl, apkSize) = findApkAsset(r.optJSONArray("assets"))
                     candidates += ReleaseInfo(
                         tagName = tag,
-                        versionName = normalizeTag(tag),
+                        versionName = parsedVersion,
                         releaseName = r.optString("name").ifEmpty { tag },
                         changelog = r.optString("body", ""),
                         isPrerelease = r.optBoolean("prerelease", false),
@@ -278,19 +292,10 @@ object UpdateChecker {
         return null to 0L
     }
 
-    /**
-     * Strip the leading `v` and any `-preview` / `-rc1` / etc. trailing
-     * label so the numeric comparator keeps `0.1` and `0.1-preview`
-     * treated as equivalent. Without this, "0.1 (local) vs 0.1-preview
-     * (remote)" reported the remote as newer because the trailing token
-     * fell into string comparison.
-     */
-    private fun normalizeTag(tag: String): String {
-        val trimmed = tag.trim().removePrefix("v").removePrefix("V")
-        // "0.1-preview" → "0.1"; "0.1.0" → "0.1.0"; "1.2.3-rc1" → "1.2.3"
-        val dashIdx = trimmed.indexOf('-')
-        return if (dashIdx > 0) trimmed.substring(0, dashIdx) else trimmed
-    }
+    // [fix/updatechecker-semver-prerelease] normalizeTag and compareVersions
+    // moved to data/VersionCompare.kt (same package, so the call sites in this
+    // file are unchanged). They were private members with no in-repo test;
+    // compareVersions now implements real semver prerelease precedence.
 
     /**
      * Stream the APK from [url] into `${cacheDir}/shared/minis-update.apk`,
@@ -465,23 +470,8 @@ object UpdateChecker {
         }
     }
 
-    /**
-     * Numeric-aware version comparator. `1.0.10` beats `1.0.9`. Non-numeric
-     * components fall back to lexicographic compare so a `1.0.0-rc1` build is
-     * treated as "newer than 1.0.0" — acceptable noise for our use case.
-     */
-    private fun compareVersions(a: String, b: String): Int {
-        val ap = a.split('.', '-')
-        val bp = b.split('.', '-')
-        val n = maxOf(ap.size, bp.size)
-        for (i in 0 until n) {
-            val x = ap.getOrNull(i) ?: ""
-            val y = bp.getOrNull(i) ?: ""
-            val xi = x.toIntOrNull()
-            val yi = y.toIntOrNull()
-            val c = if (xi != null && yi != null) xi.compareTo(yi) else x.compareTo(y)
-            if (c != 0) return c
-        }
-        return 0
-    }
+    // [fix/updatechecker-semver-prerelease] compareVersions moved to
+    // data/VersionCompare.kt (same package, so the five call sites above are
+    // unchanged) and now implements real semver prerelease precedence. The old
+    // inline version let "1.0.0-beta" outrank "1.0.0".
 }
