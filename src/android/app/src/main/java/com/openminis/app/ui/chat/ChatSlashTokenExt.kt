@@ -74,11 +74,17 @@ suspend fun ChatViewModel.loadSessionTokenStats(): SessionTokenStats {
             if (ctx > 0) context = ctx
         } catch (_: Exception) { /* skip malformed row */ }
     }
-    val snapshot = _messages.value
-    val assistantCount = snapshot.count { it.role == "assistant" }
-    val toolCalls = snapshot.filter { it.role == "assistant" }
-        .sumOf { msg -> msg.toolBlocks.count { it.kind != "text" && it.kind != "info" } }
-    val loops = maxOf(toolCalls, assistantCount)
+    // [T-token-usage-live-loop-count] Count from canonical + live streaming
+    // overlay, not canonical alone. The canonical list is frozen for the whole
+    // streaming turn (deltas live in `_streamingById`), so the old
+    // canonical-only count reported the pre-run value until the turn ended —
+    // "Total Loops" sat at 1 for the entire run no matter how often the sheet
+    // polled. See countAgentLoops for the full rationale.
+    val loops = countAgentLoops(
+        messages = _messages.value,
+        streaming = _streamingById.value,
+        currentEpoch = currentStreamEpoch(),
+    )
     return SessionTokenStats(input, output, cacheRead, cacheWrite, context, loops)
 }
 
