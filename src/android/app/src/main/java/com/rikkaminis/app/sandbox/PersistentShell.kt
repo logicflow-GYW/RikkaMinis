@@ -143,9 +143,17 @@ class PersistentShell(
     private class CommandCallback(
         val marker: String,
         val output: StringBuilder = StringBuilder(),
-        val lineCallback: ((String) -> Unit)?,
+        /**
+         * `(line, isPartial)` — [isPartial] means the line is the unterminated
+         * tail of the current read chunk and must REPLACE the previous partial
+         * in the display buffer instead of starting a new line. See
+         * [splitDisplayLines] / [DisplayLineBuffer].
+         */
+        val lineCallback: ((String, Boolean) -> Unit)?,
         var onComplete: ((String, Int, Boolean) -> Unit)? = null,
         var truncated: Boolean = false,
+        /** Unterminated tail carried across read chunks (see [feedLines]). */
+        var pendingPartial: String = "",
     ) {
         // [fix/crash-storm-double-resume] Completion can be signalled from
         // two threads racing each other: `stop()` (running on the memory-
@@ -321,7 +329,7 @@ class PersistentShell(
                     val scan = internalScanMarker(tail, text, cb.marker)
                     cb.appendOutput(scan.beforeMarker)
                     if (cb.lineCallback != null) {
-                        feedLines(scan.beforeMarker, cb.lineCallback)
+                        feedLines(scan.beforeMarker, cb)
                     }
                     if (scan.hit) {
                         // Signal completion with truncated flag
@@ -359,17 +367,31 @@ class PersistentShell(
         Log.i(TAG, "Persistent shell process exited")
     }
 
-    private fun feedLines(text: String, callback: (String) -> Unit) {
-        val lines = text.split('\n')
-        for (i in lines.indices) {
-            val line = lines[i].replace("\r", "")
-            if (line.isNotEmpty() && (i < lines.size - 1 || text.endsWith('\n'))) {
-                callback(line)
-            } else if (line.isNotEmpty() && i == lines.size - 1) {
-                // Partial line — still feed it for real-time updates
-                callback(line)
-            }
+    /**
+     * Feed one raw output chunk to the display callback, split into lines.
+     *
+     * A read chunk can end in the middle of a line — [internalScanMarker]
+     * withholds the trailing `markerPattern.length - 1` characters of every
+     * chunk so a marker split across reads is still found, which guarantees the
+     * fed text stops mid-line. The unterminated tail is therefore carried in
+     * [CommandCallback.pendingPartial] and reported with `isPartial = true`;
+     * the display layer replaces it when its completed form arrives instead of
+     * starting a new line. Emitting it as a complete line (the old behaviour)
+     * injected a phantom line break at every chunk boundary.
+     */
+    private fun feedLines(text: String, cb: CommandCallback) {
+        if (text.isEmpty()) return
+        val callback = cb.lineCallback ?: return
+        val chunk = splitDisplayLines(cb.pendingPartial, text)
+        cb.pendingPartial = chunk.pendingPartial
+        for (line in chunk.complete) {
+            val cleaned = line.replace("\r", "")
+            if (cleaned.isNotEmpty()) callback(cleaned, false)
         }
+        // Live tail: still pushed for real-time updates, but flagged partial so
+        // the consumer overwrites the previous fragment rather than appending.
+        val partial = chunk.pendingPartial.replace("\r", "")
+        if (partial.isNotEmpty()) callback(partial, true)
     }
 
     /**
@@ -394,7 +416,8 @@ class PersistentShell(
     suspend fun executeCommand(
         command: String,
         timeout: Long = 600_000L,
-        lineCallback: ((String) -> Unit)? = null,
+        /** `(line, isPartial)` — see [CommandCallback.lineCallback]. */
+        lineCallback: ((String, Boolean) -> Unit)? = null,
         memoryMonitor: ((Long) -> Unit)? = null,
     ): CommandResult {
         ensureStarted()

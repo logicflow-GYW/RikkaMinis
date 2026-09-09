@@ -758,7 +758,7 @@ class DebugRPCHandler(private val context: Context) {
                 sessionId = session,
                 command = command,
                 timeout = timeoutSec * 1000L,
-                lineCallback = { rawLine ->
+                lineCallback = { rawLine, _ ->
                     val (_, urls) = com.rikkaminis.app.terminal.MinisUrlMarker.extract(rawLine)
                     capturedUrls.addAll(urls)
                 },

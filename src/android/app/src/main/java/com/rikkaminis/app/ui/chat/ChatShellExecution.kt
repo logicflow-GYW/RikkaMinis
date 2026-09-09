@@ -6,6 +6,7 @@ import com.rikkaminis.app.agent.shell.BashismReminder
 import com.rikkaminis.app.agent.shell.OnDemandBash
 import com.rikkaminis.app.terminal.MinisOpenUrlBroker
 import com.rikkaminis.app.terminal.MinisUrlMarker
+import com.rikkaminis.app.sandbox.DisplayLineBuffer
 import com.rikkaminis.app.sandbox.ExecutionCoordinator
 import kotlinx.coroutines.delay
 import org.json.JSONObject
@@ -150,7 +151,7 @@ internal suspend fun executeShellCommandEngine(
         sessionId = dispatchSessionId,
         command = command,
         timeout = timeoutSec * 1000L,
-        lineCallback = lc@{ rawLine ->
+        lineCallback = lc@{ rawLine, isPartial ->
             // Strip any OSC MinisOpenURL markers emitted by
             // /usr/local/bin/minis-open and forward the captured
             // URLs to the broker so the chat screen can present the
@@ -162,8 +163,10 @@ internal suspend fun executeShellCommandEngine(
             if (cleanedLine.isEmpty() && rawLine.isNotEmpty()) return@lc
 
             // Streaming display: accumulate into this tool's window and
-            // push the trimmed last-50-lines each time.
-            streamedLinesForDisplay(rawLine, toolKey)?.let { onBlockUpdate(it) }
+            // push the trimmed last-50-lines each time. `isPartial` marks an
+            // unterminated read-chunk tail — it overwrites the previous
+            // fragment instead of starting a new line.
+            streamedLinesForDisplay(rawLine, toolKey, isPartial)?.let { onBlockUpdate(it) }
         },
     )
 
@@ -246,16 +249,28 @@ internal data class ToolResultShell(
  * `toolBlocks[idx].content`. The engine keeps its own window so the
  * parameterized [onBlockUpdate] contract stays "here is the display text".
  */
-private val displayLineBuffers = java.util.concurrent.ConcurrentHashMap<String, StringBuilder>()
+private val displayLineBuffers = java.util.concurrent.ConcurrentHashMap<String, DisplayLineBuffer>()
 
-internal fun streamedLinesForDisplay(rawLine: String, toolKey: String = "default"): String? {
-    val buf = displayLineBuffers.computeIfAbsent(toolKey) { StringBuilder() }
+/**
+ * Feed one streamed line into [toolKey]'s display window and return the
+ * trimmed last-50-lines text.
+ *
+ * [isPartial] marks an unterminated tail of the current read chunk: it
+ * REPLACES the previous fragment instead of appending a new line, so a chunk
+ * boundary landing mid-line no longer injects a phantom line break (the
+ * fragment is superseded by its completed form on the next chunk). See
+ * [splitDisplayLines] / [DisplayLineBuffer].
+ */
+internal fun streamedLinesForDisplay(
+    rawLine: String,
+    toolKey: String = "default",
+    isPartial: Boolean = false,
+): String? {
     val (cleanedLine, _) = MinisUrlMarker.extract(rawLine)
     if (cleanedLine.isEmpty() && rawLine.isNotEmpty()) return null
-    if (buf.isNotEmpty()) buf.append('\n')
-    buf.append(cleanedLine)
-    val trimmed = buf.toString().lines().takeLast(50).joinToString("\n")
-    return trimmed
+    val buf = displayLineBuffers.computeIfAbsent(toolKey) { DisplayLineBuffer() }
+    if (isPartial) buf.onPartialLine(cleanedLine) else buf.onCompleteLine(cleanedLine)
+    return buf.render()
 }
 
 internal fun resetDisplayBuffer(toolKey: String = "default") {

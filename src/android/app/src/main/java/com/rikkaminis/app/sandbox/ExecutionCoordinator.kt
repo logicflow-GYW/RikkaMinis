@@ -257,7 +257,8 @@ object ExecutionCoordinator {
         sessionId: String,
         command: String,
         timeout: Long = 600_000L,
-        lineCallback: ((String) -> Unit)? = null
+        /** `(line, isPartial)` — see PersistentShell.CommandCallback.lineCallback. */
+        lineCallback: ((String, Boolean) -> Unit)? = null
     ): CommandResult {
         // [native-rss-tool-guard] Process-RSS hard gate BEFORE any shell work.
         // Debug.getNativeHeapAllocatedSize() is blind to mmap/thread-stack/mapped
@@ -481,7 +482,8 @@ object ExecutionCoordinator {
         sessionId: String,
         command: String,
         timeout: Long,
-        lineCallback: ((String) -> Unit)?,
+        /** `(line, isPartial)` — see PersistentShell.CommandCallback.lineCallback. */
+        lineCallback: ((String, Boolean) -> Unit)?,
     ): Pair<CommandResult, PersistentShell?> {
         var attempt = 0
         var lastShell: PersistentShell? = null

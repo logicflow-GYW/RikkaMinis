@@ -10,8 +10,9 @@ import org.junit.Test
  * JVM tests for the pure functions extracted from [PersistentShell].
  *
  * [PersistentShell] itself depends on Android (Context, ProcessBuilder, etc.),
- * so these tests focus on the top-level [internalParseMinisExitCode] and
- * [internalTruncateOutput] functions extracted for JVM testability.
+ * so these tests focus on the top-level [internalParseMinisExitCode],
+ * [internalTruncateOutput], [internalScanMarker] and [splitDisplayLines] /
+ * [DisplayLineBuffer] functions extracted for JVM testability.
  *
  * Android-only behaviour (shell process lifecycle, PTY I/O, heredoc injection,
  * timeout handling, memory monitoring) is covered by the instrumented tests
@@ -328,5 +329,96 @@ class PersistentShellTest {
         assertNotNull(finalResult)
         assertEquals(42, finalResult?.exitCode)
         assertEquals("output-part1 partial ", flushed.toString())
+    }
+
+    // ── splitDisplayLines / DisplayLineBuffer ─────────────────────────
+    //
+    // Read chunks routinely end mid-line: internalScanMarker withholds the
+    // trailing (markerPattern.length - 1) characters of every chunk so a
+    // marker split across reads is still detected. Emitting that tail as a
+    // complete line put the fragments of one line on separate rows in the
+    // "RikkaMinis Computer" sheet; these tests pin the reassembly.
+
+    @Test
+    fun `splitDisplayLines carries an unterminated tail across chunks`() {
+        val first = splitDisplayLines("", "Deleted branch fix/audi")
+        assertEquals(emptyList<String>(), first.complete)
+        assertEquals("Deleted branch fix/audi", first.pendingPartial)
+
+        val second = splitDisplayLines(first.pendingPartial, "t-0909-b22 (was 54e")
+        assertEquals(emptyList<String>(), second.complete)
+        assertEquals("Deleted branch fix/audit-0909-b22 (was 54e", second.pendingPartial)
+
+        val third = splitDisplayLines(second.pendingPartial, "ade2).\n")
+        assertEquals(listOf("Deleted branch fix/audit-0909-b22 (was 54eade2)."), third.complete)
+        assertEquals("", third.pendingPartial)
+    }
+
+    @Test
+    fun `splitDisplayLines splits complete lines and keeps the tail`() {
+        val r = splitDisplayLines("", "b12: in_progress None\nmain: in_progress None\nWed")
+        assertEquals(listOf("b12: in_progress None", "main: in_progress None"), r.complete)
+        assertEquals("Wed", r.pendingPartial)
+    }
+
+    @Test
+    fun `splitDisplayLines with empty text preserves the pending partial`() {
+        val r = splitDisplayLines("half", "")
+        assertEquals(emptyList<String>(), r.complete)
+        assertEquals("half", r.pendingPartial)
+    }
+
+    @Test
+    fun `display buffer replaces a partial fragment instead of appending`() {
+        val buf = DisplayLineBuffer()
+        buf.onPartialLine("b12: in_progress No")
+        assertEquals("b12: in_progress No", buf.render())
+
+        // Completed form supersedes the fragment — no duplicate row.
+        buf.onCompleteLine("b12: in_progress None")
+        assertEquals("b12: in_progress None", buf.render())
+
+        buf.onPartialLine("Wed")
+        assertEquals("b12: in_progress None\nWed", buf.render())
+        buf.onPartialLine("Wed Sep  9 16:43:51 UTC 2026")
+        assertEquals("b12: in_progress None\nWed Sep  9 16:43:51 UTC 2026", buf.render())
+    }
+
+    @Test
+    fun `display buffer window keeps the last 50 lines`() {
+        val buf = DisplayLineBuffer()
+        for (i in 1..60) buf.onCompleteLine("line$i")
+        val lines = buf.render().lines()
+        assertEquals(50, lines.size)
+        assertEquals("line11", lines.first())
+        assertEquals("line60", lines.last())
+    }
+
+    /**
+     * Regression for the reported misalignment: these are the chunks the
+     * `date -u` output was actually split into (each one ends mid-line because
+     * of the withheld marker window). The reassembled display must contain the
+     * three real lines, not five fragments.
+     */
+    @Test
+    fun `chunked output reassembles into whole lines`() {
+        val chunks = listOf(
+            "b12: in_progress None\n",
+            "main: in_progress None\n",
+            "Wed",
+            " Sep  9 16:43:51 UTC 2026\n",
+        )
+        var pending = ""
+        val buf = DisplayLineBuffer()
+        for (chunk in chunks) {
+            val r = splitDisplayLines(pending, chunk)
+            pending = r.pendingPartial
+            r.complete.forEach { buf.onCompleteLine(it) }
+            if (pending.isNotEmpty()) buf.onPartialLine(pending)
+        }
+        assertEquals(
+            "b12: in_progress None\nmain: in_progress None\nWed Sep  9 16:43:51 UTC 2026",
+            buf.render(),
+        )
     }
 }

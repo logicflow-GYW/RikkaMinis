@@ -89,6 +89,28 @@ class ChatToolExecutorsTest {
         resetDisplayBuffer(key)
     }
 
+    @Test
+    fun `partial line replaces the previous fragment instead of appending`() {
+        val key = "test-${System.nanoTime()}"
+        resetDisplayBuffer(key)
+        streamedLinesForDisplay("b12: in_progress No", key, isPartial = true)
+        // Still the same line growing — one row, not two.
+        assertEquals("b12: in_progress No", streamedLinesForDisplay("b12: in_progress No", key, isPartial = true))
+        val out = streamedLinesForDisplay("b12: in_progress None", key, isPartial = false)
+        assertEquals("b12: in_progress None", out)
+        resetDisplayBuffer(key)
+    }
+
+    @Test
+    fun `partial fragment is superseded by its completed line`() {
+        val key = "test-${System.nanoTime()}"
+        resetDisplayBuffer(key)
+        streamedLinesForDisplay("Wed", key, isPartial = true)
+        val out = streamedLinesForDisplay("Wed Sep  9 16:43:51 UTC 2026", key, isPartial = false)
+        assertEquals("Wed Sep  9 16:43:51 UTC 2026", out)
+        resetDisplayBuffer(key)
+    }
+
     // ── runSubagentLoop ───────────────────────────────────────────
 
     private fun config(maxTurns: Int = 4) = SubagentSkill.SubagentConfig(
