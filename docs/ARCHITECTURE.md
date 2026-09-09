@@ -19,11 +19,11 @@
 | fork 日期 | 2026-08-01（上游恰好同日停止推送，fork 即接管） |
 | UI 灵感 | RikkaHub（左滑会话抽屉、极简顶栏、消息流布局；借鉴灵感非代码） |
 | 平台 | Android-only（上游 iOS 树与第三方 C 源码已删除） |
-| 提交构成 | 全仓 934 commits ≈ 上游 12 + fork 后自写 ~922（8/1 起 36 天） |
-| Android 代码量 | fork 基线 413 文件 ≈ 146.7K 行 → 当前 494 文件 ≈ 167.2K 行（**净 +81 文件 / +20.5K 行**，另有大量修改） |
+| 提交构成 | 全仓 1009 commits ≈ 上游 12 + fork 后自写 ~997（8/1 起 41 天） |
+| Android 代码量 | fork 基线 413 文件 ≈ 146.7K 行 → 当前 496 文件 ≈ 169.1K 行（**净 +83 文件 / +22.4K 行**，另有大量修改） |
 
 **关键认知**：这个 app 60% 以上的复杂度（沙箱、多进程、offload、浏览器）来自
-上游架构，fork 当天就已存在。本 fork 36 天的工作集中在三块：**功能增量**
+上游架构，fork 当天就已存在。本 fork 41 天的工作集中在三块：**功能增量**
 （备份/同步/模型组/平台集成）、**可靠性硬化**（流错误自愈/护栏/审计）、
 **质量基础设施**（scan 门禁/测试/发布链路）。没有一次"从零重写"。
 
@@ -60,18 +60,18 @@
 
 | 包 | 职责 | 体量信号 |
 |---|---|---|
-| `ui/chat/` | 聊天主屏 + 智能体循环 + 流式渲染 | 87 文件（最大包）；ChatScreen 6.4K 行、ChatViewModel 3.8K、AgentLoopEngine 2.5K、StreamingMarkdownText 3.8K |
+| `ui/chat/` | 聊天主屏 + 智能体循环 + 流式渲染 | 93 文件（最大包）；ChatScreen 4.8K 行、ChatViewModel 3.7K、AgentLoopEngine 2.6K、StreamingMarkdownText 3.0K |
 | `sandbox/` | PRoot 沙箱：RootfsManager（rootfs 解包/恢复/事件日志）、ExecutionCoordinator、PRootKernel | 14 + 43(offload) 文件 |
 | `sandbox/offload/` | NativeOffloadHandler 家族 + ModelExecutionService(:modelservice 宿主) | 43 文件 |
 | `data/` | Room（双库）+ Repository + 路由 + 用量 + 存储 | db 17 / model 14 / repository 11 |
 | `provider/` | Provider 适配器：openai/anthropic/gemini/openrouter/xai/antigravity/voice + thinking 规则 | 14 + 子包 |
-| `tools/` | Agent 工具定义（shell/file/browser/memory/spawn） | 13 文件 |
+| `tools/` | Agent 工具定义（shell/file/browser/memory/spawn） | 12 文件 |
 | `agent/runtime/` `agent/shell/` | 预算/重试/恢复策略、bashism 纪律 | 7+3 |
 | `config/` | 可配置字段系统 + 内建项 + 确认流程 | 12 文件 |
 | `backup/` | ConfigBackup（JSON 导出）+ WebDAV + 自动备份 | 8 文件 |
-| `browser/` | BrowserUseManager + TabPool | 11 文件 |
+| `browser/` | BrowserUseManager + TabPool | 12 文件 |
 | `mcp/` | MCP 客户端 + OAuth | 5+ |
-| `ui/settings/` `ui/navigation/` `ui/sandbox/` `ui/browser/` `ui/terminal/` | 设置 15+ 屏、导航、文件预览、WebView、终端 | 40+6+6 |
+| `ui/settings/` `ui/navigation/` `ui/sandbox/` `ui/browser/` `ui/terminal/` | 设置 15+ 屏、导航、文件预览、WebView、终端 | 41+6+6 |
 | `offload/ service/ accessibility/ speech/ share/ webapp/ debug/ crash/ logging/ i18n/ diagnostics/` | 进程边界工具、前台服务、无障碍、语音、分享、WebApp、调试、崩溃、日志、本地化 | — |
 
 ## 4. 数据层：双 Room 库 + 四层同步纪律
@@ -202,7 +202,7 @@
 - **验证纪律**：CI 绿 ≠ 逻辑对；ground truth 在用户侧（真机安装验证）；
   装包必验版本。
 
-## 11. 演进阶段（fork 后 36 天的形态变化）
+## 11. 演进阶段（fork 后 41 天的形态变化）
 
 | 阶段 | 时间 | 主线 | 复杂度性质 |
 |---|---|---|---|
@@ -233,7 +233,7 @@
 
 - **继承复杂度（别动，除非出 bug）**：三进程架构、PRoot 沙箱、offload 机制、
   浏览器 TabPool、Provider 适配层、Termux 终端。这些是上游 v1.10 的设计，
-  36 天只做了修补没做重构。
+  41 天只做了修补没做重构。
 - **原创复杂度（你心里有数）**：备份/同步、平台集成、护栏体系、错误自愈、
   scan 门禁、开发档案。每一条都对应一个真实事故或真实需求。
 - **修改任何跨层字段前**：先画执行路径矩阵（哪条路径在哪个进程发 HTTP），

@@ -62,6 +62,16 @@ SHA-256  FC:0C:40:0D:B7:7E:C1:81:A3:35:18:C2:E8:13:6A:AE
   多台设备间同步备份，随时上传、列出、恢复或删除远端备份。备份/恢复运行在
   应用级持久 scope（即使离开设置页也会完成），长任务结束时通过系统托盘
   通知反馈，并已防止在过程中被误触重复触发。
+- **每日自动备份。** 备份可以自动进行（设置 → 存储 → 备份与恢复，默认关闭）：
+  应用当天首次进入前台时检查一次，把**能力资产**（配置/提供商/思考规则/技能/
+  环境变量/MCP）与**产出资产**（`shared/` 产出、知识图谱数据、持久记忆）打包，
+  本地保留最近 7 份；配置了 WebDAV 时同时推送到独立的 `auto/` 目录（远端同样
+  保留 7 份，另一台设备可在自己的自动备份区恢复/拉取/删除）。聊天记录**不进**
+  自动备份——它是过程副产品，只在手动导出时携带。凭据始终随包：本地副本留在
+  应用私有目录，远端是你自己的服务器——不带密钥的备份恢复不出任何东西。
+- **环境变量分组。** 设置 → 环境变量 支持把变量归入自定义分组：列表按组
+  分节显示，未分组的排在最后，变量多了也不再是一长条平铺列表；分组随备份
+  导出/导入一起走。
 - **诚实的排除项。** 聊天历史仅以纯文本携带：媒体（图片/视频）和附件文件会被
   丢弃，只包含最近 N 天的活动（0–365，默认 90；0 表示禁用聊天历史）。
   挂载文件夹的授权无法在 Android 设备间迁移，MCP OAuth 客户端密钥/令牌
@@ -120,8 +130,11 @@ SHA-256  FC:0C:40:0D:B7:7E:C1:81:A3:35:18:C2:E8:13:6A:AE
   + vendored 的 `deps/talloc`，在 CI 中用 NDK r28 编译。Alpine rootfs
   （`alpine-minirootfs.tar`，8.5 MB）作为预置资产随仓库提交，运行时由
   `RootfsManager` 解包——proot 二进制本身不提交，完全可复现。
-- **其他原生库保持 vendored。** `libpty_bridge.so`、`libminis_crash_handler.so`
-  和 `libjieba_jni.so` 按原样提交。
+- **其余原生库按需 vendored。** `libpty_bridge.so`（遗留，已无 Kotlin 调用者）、
+  `libandroidx.graphics.path.so`、`libc++_shared.so`、
+  `libdatastore_shared_counter.so` 按原样提交；`libjieba_jni.so` 与
+  `libminis_crash_handler.so` 由 CI 从 `src/main/cpp/` 重新编译——它们的 JNI
+  符号内嵌 Kotlin 包名，上游二进制导出的仍是旧包名。
 - **单元测试在 CI 中运行。** 完整的 JVM 单元测试套件——含备份/恢复（ConfigBackupPayloadTest 等）、终端消毒、Provider 适配器、LLM 错误处理等全部测试——在 APK 构建之前执行，任何一条失败都会中止构建（无静默跳过）。
 - **构建前静态扫描门禁。** 每次 CI 构建在 Gradle 之前先跑 `scripts/scan/scan.sh`：
   四处同步检查（数据类字段在 Model→Entity→toSnapshot→toProviderConfig 四层
@@ -142,11 +155,12 @@ SHA-256  FC:0C:40:0D:B7:7E:C1:81:A3:35:18:C2:E8:13:6A:AE
 W^X 绕过补丁构建。通过 AGP 的 CMake 块产出的二进制能编译通过，却在运行时以
 `execve("/bin/sh"): Permission denied` 失败——终端永远打不开。因此本 fork 用
 `deps/build_proot.sh`（上游支持的路径——与官方二进制相同的源码、相同的 NDK
-工具链）而非 CMake 来构建它。`externalNativeBuild` 保持禁用，AGP 因此不会用
-未打补丁的 CI 构建版覆盖 vendored 的 pty_bridge / crash_handler / jieba 库。
+工具链）而非 CMake 来构建它。`externalNativeBuild` 保持禁用，AGP 因此不会覆盖
+vendored 的 pty_bridge 等库；jieba 与 crash_handler 则由专用脚本
+（`deps/build_jieba.sh` / `deps/build_crash_handler.sh`）在 CI 中重建。
 
-**权衡：** `src/android/app/src/main/cpp/` 下的改动不会被编译——只有
-`deps/proot` 通过 `build_proot.sh` 构建。改动其他原生代码意味着要恢复 CMake
+**权衡：** `src/android/app/src/main/cpp/` 下的改动不走 Gradle 编译——
+proot / jieba / crash_handler 由各自的脚本构建，其余 cpp 改动需要恢复 CMake
 块并在 CI 中安装 NDK。Kotlin、UI、提示词与模型集成不受影响——正常构建。
 
 ---
@@ -259,19 +273,24 @@ cd RikkaMinis/src/android
 
 ## 跟上上游
 
-上游是单向镜像，不接受 pull request，而本 fork 在少数文件上已经分叉。
-同步是可能的，但有操作顺序要求——尤其是 vendored 的 pty_bridge /
-crash_handler / jieba 库必须在上游 Kotlin 改动时刷新，否则应用会在运行时崩溃。
-proot **不再** vendored：它在 CI 中通过 `deps/build_proot.sh` 从源码构建，
-所以对它来说唯一需要刷新的是上游升级时的 `deps/proot` 子模块。
+上游是单向镜像，不接受 pull request。**本 fork 已停止跟随上游 rebase 同步**：
+包名迁移（`com.openminis.app` → `com.rikkaminis.app`，741 个文件）之后，两棵树
+的差异已经大到整树重放不再现实。
 
-```sh
-git fetch upstream
-git rebase upstream/main               # 不要 merge
-./scripts/sync_official_binaries.sh    # 刷新 vendored 的 pty_bridge/crash_handler/jieba 库
-```
+上游的改动改为按需**融合**——需要某个上游修复时，挑出对应 commit 手工移植，
+而不是整树重放。
 
-**→ 完整流程、冲突文件清单以及从坏同步中恢复的方法见 [docs/SYNCING_UPSTREAM.md](docs/SYNCING_UPSTREAM.md)**
+有一条约束仍然成立：原生库与 Kotlin 源码必须**配对**。vendored 的
+pty_bridge 等库，以及由 CI 从 `src/main/cpp/` 重建的 jieba / crash_handler，
+都绑定到 Kotlin 侧的类名与方法签名——搬运上游改动了 JNI 边界的 Kotlin 时，
+必须在同一次改动里同步更新对应的 C++ 源码或 vendored 库
+（`./scripts/sync_official_binaries.sh`；jieba / crash_handler 走
+`deps/build_jieba.sh` / `deps/build_crash_handler.sh`），否则应用会在运行时崩溃。
+proot 例外：它由 CI 从源码构建（`deps/build_proot.sh`），只需在上游升级时
+bump `deps/proot` 子模块。
+
+**→ 历史上的 rebase 同步流程、冲突文件清单与恢复方法见
+[docs/SYNCING_UPSTREAM.md](docs/SYNCING_UPSTREAM.md)**（保留为参考，不再是常规操作）。
 
 ---
 
@@ -302,8 +321,9 @@ git rebase upstream/main               # 不要 merge
 
 ```
 src/android/      Android 应用（Kotlin / Compose）
-  app/src/main/jniLibs/arm64-v8a/   原生库（jieba、pty bridge、crash handler）；
-                                    libproot.so 是 CI 构建产物，非 vendored
+  app/src/main/jniLibs/arm64-v8a/   原生库（pty bridge、C++ 运行时等 vendored；
+                                    jieba / crash handler 由 CI 从源码重建，
+                                    libproot.so 同样是 CI 构建产物）
   app/src/main/assets/              Alpine minirootfs + 内置平台技能（skills/）
 src/shared/       与上游 iOS 树共享的资源（bashism 规则）
 deps/             proot 源码（子模块）+ build_proot.sh（NDK r28 构建）

@@ -1,5 +1,14 @@
 # Syncing with upstream
 
+> **Status: no longer routine.** This fork stopped rebasing onto upstream after
+> the package rename (`com.openminis.app` → `com.rikkaminis.app`, 741 files):
+> the two trees are now too far apart for a whole-tree replay. Upstream changes
+> are absorbed **on demand**, one commit at a time. What follows is the
+> historical rebase procedure, kept because the hard constraints it documents
+> (vendored binaries must stay paired with the Kotlin source,
+> `build.gradle.kts` is the conflict hotspot, proot is built from source) still
+> apply whenever upstream code is ported by hand.
+
 This fork tracks [`OpenMinis/OpenMinis`](https://github.com/OpenMinis/OpenMinis)
 but deliberately diverges in a few well-defined places. This document is the
 procedure for pulling in upstream changes without breaking the build.
@@ -17,13 +26,15 @@ private repository. Practical consequences:
 
 ## What this fork changes
 
-The divergence is intentionally small, so conflicts stay manageable:
+The divergence started small but is no longer so (the package rename alone
+touched 741 files), which is why whole-tree syncing was retired. The table
+below lists the areas that matter when porting an individual upstream commit:
 
 | Area | Change | Conflicts with upstream? |
 |---|---|---|
 | `src/android/app/build.gradle.kts` | CMake/`externalNativeBuild` disabled, packaging options, version fields | **Likely** — the one file to watch |
 | `.github/workflows/build-apk.yml` | Added by this fork | No — upstream has no such file |
-| `src/android/app/src/main/jniLibs/arm64-v8a/*.so` | Vendored official binaries (pty_bridge, crash_handler, jieba, c++_shared, datastore, androidx.graphics.path) | No — upstream does not commit these |
+| `src/android/app/src/main/jniLibs/arm64-v8a/*.so` | Vendored upstream binaries (pty_bridge, c++_shared, datastore, androidx.graphics.path); the jieba/crash_handler copies are rebuilt from source in CI | No — upstream does not commit these |
 | `src/android/app/src/main/assets/alpine-minirootfs.tar` | Vendored official asset | No — same reason |
 | `.gitignore` | Un-ignores the vendored binaries | Minor, easy to resolve |
 | `scripts/sync_official_binaries.sh` | Added by this fork | No |
@@ -33,25 +44,28 @@ The divergence is intentionally small, so conflicts stay manageable:
 `deps/build_proot.sh`) matches upstream and should be kept as-is. proot itself
 is **built from source** in CI, so it is not part of the sync procedure below.
 
-So in practice **only `build.gradle.kts` needs real attention** during a rebase.
+So in practice, when porting an individual upstream commit, **`build.gradle.kts`
+is still the file to watch** — but note that a whole-tree replay is off the
+table: the package rename alone touched 741 files.
 
 ## Why the other binaries must be refreshed every time
 
 This fork does not compile native code through AGP: `externalNativeBuild` is
-disabled in `build.gradle.kts`. proot is the exception — it is built from source
-in CI via `deps/build_proot.sh` (the `deps/proot` submodule carries upstream's
-Android 10+ W^X bypass patches, so the result works on-device). The *other*
-native libraries (pty_bridge, crash_handler, jieba, c++_shared, datastore,
+disabled in `build.gradle.kts`. Three libraries are built from source in CI:
+proot (`deps/build_proot.sh`, with upstream's Android 10+ W^X bypass patches in
+the `deps/proot` submodule), jieba (`deps/build_jieba.sh`) and crash_handler
+(`deps/build_crash_handler.sh`) — the last two because their JNI symbol names
+embed the Kotlin package name, which this fork renamed to `com.rikkaminis.app`.
+The remaining vendored libraries (pty_bridge, c++_shared, datastore,
 androidx.graphics.path) are the official `.so` files, committed as-is.
 
-That means the committed binaries and the Kotlin source **must be kept as a
-matched pair**. If upstream changes a JNI method signature — say a parameter is
-added to `PtyBridge.forkExec` — the old `.so` no longer matches the new Kotlin
-declaration, and the app crashes at runtime.
-
-Never rebase onto new upstream Kotlin without also refreshing the vendored
-libraries. proot needs no refresh: it rebuilds from source; bump the
-`deps/proot` submodule only when upstream's build inputs change.
+Vendored binaries and the Kotlin source **must be kept as a matched pair**. If
+upstream changes a JNI method signature — say a parameter is added to
+`PtyBridge.forkExec` — the old `.so` no longer matches the new Kotlin
+declaration, and the app crashes at runtime. So when porting an upstream commit
+that touches a JNI boundary, refresh the vendored libraries in the same change.
+proot / jieba / crash_handler need no refresh: they rebuild from source; bump
+the `deps/proot` submodule only when upstream's build inputs change.
 
 ## Procedure
 
@@ -72,9 +86,11 @@ git rebase upstream/main
 #    Then: git add <file> && git rebase --continue
 
 # 3. Refresh the vendored libraries to match the new source.
-#    proot needs no refresh here: it is built from source in CI
-#    (deps/build_proot.sh + deps/proot submodule). Only bump deps/proot
-#    when upstream changes proot's build inputs.
+#    proot / jieba / crash_handler need no refresh here: they are built
+#    from source in CI (deps/build_proot.sh, build_jieba.sh,
+#    build_crash_handler.sh). Only bump deps/proot when upstream changes
+#    proot's build inputs. The script skips jieba/crash_handler on purpose
+#    (their symbols embed the renamed Kotlin package).
 ./scripts/sync_official_binaries.sh
 
 # 4. Review, commit, push

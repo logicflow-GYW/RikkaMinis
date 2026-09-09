@@ -58,8 +58,9 @@ class of mistake.
 ## Syncing with upstream
 
 See [docs/SYNCING_UPSTREAM.md](docs/SYNCING_UPSTREAM.md). The short version:
-rebase rather than merge, and always refresh the vendored binaries afterwards
-with `./scripts/sync_official_binaries.sh`.
+this fork no longer rebases onto upstream — port individual upstream commits by
+hand, and refresh the vendored binaries (`./scripts/sync_official_binaries.sh`)
+in the same change whenever the port touches a JNI boundary.
 
 ## License
 

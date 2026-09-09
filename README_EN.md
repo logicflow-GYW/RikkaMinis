@@ -74,6 +74,22 @@ Android-specific product changes that are not present upstream.
   persistent scope (it completes even if you leave the settings screen),
   gives you a system tray notification when a long task finishes, and is
   guarded against accidental double-firing.
+- **Daily automatic backup.** Backups can run on their own (Settings → Storage
+  → Backup & Restore; off by default): on the first foreground transition of
+  each calendar day the app packages its **capability assets** (config,
+  providers, thinking rules, skills, environment variables, MCP) plus its
+  **output assets** (`shared/` artifacts, knowledge-graph data, persistent
+  memory), keeps the newest 7 copies locally, and — when WebDAV is configured
+  — pushes them to a dedicated `auto/` folder (also rotated to 7, manageable
+  from another device's own auto-backup section: restore / fetch / delete).
+  Chat transcripts are **excluded**: they are process byproduct and only ride
+  along in a manual export. Credentials always travel with the payload — the
+  local copy stays in app-private storage and the remote is your own server,
+  because a backup without keys cannot restore anything.
+- **Environment-variable groups.** Settings → Environment Variables lets you
+  file variables under custom group labels: the list renders as sections
+  (ungrouped last) instead of one long flat list, and groups travel through
+  backup export/import.
 - **Honest exclusions.** Chat history is carried as text only: media
   (images/videos) and attached files are dropped, and only the last N days of
   activity are included (0–365, default 90; 0 disables chat history). 
@@ -157,8 +173,12 @@ See [docs/DEVELOPMENT_LIFECYCLE.md](docs/DEVELOPMENT_LIFECYCLE.md).
   8.5 MB) is committed as a prebuilt asset and unpacked at runtime by
   `RootfsManager` — the proot binary itself is not committed, fully
   reproducible.
-- **Other native libs stay vendored.** `libpty_bridge.so`,
-  `libminis_crash_handler.so` and `libjieba_jni.so` are committed as-is.
+- **The other native libs are vendored as needed.** `libpty_bridge.so`
+  (legacy — no Kotlin caller remains), `libandroidx.graphics.path.so`,
+  `libc++_shared.so` and `libdatastore_shared_counter.so` are committed as-is;
+  `libjieba_jni.so` and `libminis_crash_handler.so` are rebuilt from
+  `src/main/cpp/` by CI, because their JNI symbol names embed the Kotlin
+  package and upstream's binaries still export the old one.
 - **Backup tests run in CI.** The full JVM unit-test suite — backup/restore
   (ConfigBackupPayloadTest and friends), terminal sanitization, provider
   adapters, LLM error handling and more — runs before the APK build, and any
@@ -192,13 +212,15 @@ runtime with `execve("/bin/sh"): Permission denied` — the terminal never
 opens. This fork therefore builds it with `deps/build_proot.sh` (the
 upstream-supported path — same source, same NDK toolchain the official
 binary is built with) instead of CMake. `externalNativeBuild` stays disabled
-so AGP never overwrites the vendored pty_bridge / crash_handler / jieba
-libraries with unpatched CI-built copies.
+so AGP never overwrites vendored libraries such as pty_bridge; jieba and
+crash_handler are rebuilt from `src/main/cpp/` by their own CI scripts
+(`deps/build_jieba.sh` / `deps/build_crash_handler.sh`).
 
-**Trade-off:** edits under `src/android/app/src/main/cpp/` are not compiled —
-only `deps/proot` is built, via `build_proot.sh`. Changing the other native
-code means restoring the CMake block and installing the NDK in CI. Kotlin, UI,
-prompts and model integrations are unaffected — build normally.
+**Trade-off:** edits under `src/android/app/src/main/cpp/` do not go through
+Gradle — proot / jieba / crash_handler are built by their own scripts, and any
+other native change means restoring the CMake block and installing the NDK in
+CI. Kotlin, UI, prompts and model integrations are unaffected — build
+normally.
 
 ---
 
@@ -326,22 +348,27 @@ See [BUILDING.md](BUILDING.md) for toolchain details and troubleshooting.
 
 ## Keeping up with upstream
 
-Upstream is a one-way mirror that does not accept pull requests, and this fork
-has diverged in a handful of files. Syncing is possible but has an order of
-operations — in particular, the vendored pty_bridge / crash_handler / jieba
-libraries must be refreshed whenever upstream's Kotlin changes, or the app
-breaks at runtime. proot is **not** vendored any more: it is built from source
-in CI via `deps/build_proot.sh`, so the only thing to refresh for it is the
-`deps/proot` submodule when upstream bumps it.
+Upstream is a one-way mirror that does not accept pull requests. **This fork no
+longer rebases onto upstream.** After the package rename (`com.openminis.app` →
+`com.rikkaminis.app`, 741 files) the two trees have diverged far enough that a
+whole-tree replay is no longer practical.
 
-```sh
-git fetch upstream
-git rebase upstream/main               # not merge
-./scripts/sync_official_binaries.sh    # refresh the vendored pty_bridge/crash_handler/jieba libs
-```
+Upstream changes are now **absorbed on demand**: when a specific upstream fix is
+needed, its commit is ported by hand instead of replaying the whole tree.
 
-**→ See [docs/SYNCING_UPSTREAM.md](docs/SYNCING_UPSTREAM.md)** for the full
-procedure, the list of files that conflict, and how to recover from a bad sync.
+One constraint still holds: native libraries must stay **paired** with the
+Kotlin source. The vendored libs (pty_bridge, …) and the CI-rebuilt jieba /
+crash_handler are all bound to Kotlin class and method signatures — when a
+ported upstream change touches a JNI boundary, update the matching C++ source
+or vendored library in the same change (`./scripts/sync_official_binaries.sh`;
+jieba / crash_handler via `deps/build_jieba.sh` / `deps/build_crash_handler.sh`),
+or the app breaks at runtime. proot is the exception: it is built from source in
+CI via `deps/build_proot.sh`, so only the `deps/proot` submodule needs bumping
+when upstream changes it.
+
+**→ See [docs/SYNCING_UPSTREAM.md](docs/SYNCING_UPSTREAM.md)** for the
+historical rebase procedure, the list of files that conflicted, and how to
+recover from a bad sync (kept as reference, no longer the routine).
 
 ---
 
@@ -376,8 +403,9 @@ the point of use — the agent can only use what you grant.
 
 ```
 src/android/      Android app (Kotlin / Compose)
-  app/src/main/jniLibs/arm64-v8a/   Native libs (jieba, pty bridge, crash handler);
-                                    libproot.so is a CI build artifact, not vendored
+  app/src/main/jniLibs/arm64-v8a/   Native libs (vendored pty bridge, C++ runtime;
+                                    jieba / crash handler are rebuilt from source
+                                    in CI, as is libproot.so)
   app/src/main/assets/              Alpine minirootfs + bundled platform skills (skills/)
 src/shared/       Assets shared with upstream's iOS tree (bashism rules)
 deps/             proot source (submodule) + build_proot.sh (NDK r28 build)

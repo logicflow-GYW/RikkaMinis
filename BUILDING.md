@@ -84,8 +84,10 @@ CI runs `./deps/build_proot.sh clean` before Gradle on every build, producing
 Three settings in `app/build.gradle.kts` protect the setup:
 
 - `externalNativeBuild` is **removed**. Left enabled, AGP would compile
-  `src/main/cpp/` and overwrite `libpty_bridge.so`, `libjieba_jni.so` and
-  `libminis_crash_handler.so` with locally built copies.
+  `src/main/cpp/` and overwrite the vendored `libpty_bridge.so` with a locally
+  built copy. (jieba and crash_handler live under `src/main/cpp/` too, but are
+  compiled by dedicated scripts — see below — because their JNI symbol names
+  embed the Kotlin package name.)
 - `packaging { jniLibs { keepDebugSymbols += "**/*.so" } }` stops AGP running
   the NDK's `strip` over the proot build products.
 - `useLegacyPackaging = true` keeps the libraries extracted to
@@ -119,10 +121,12 @@ script changes, mirror it into `deps/build_proot.sh` as well.
 
 ## Refreshing the vendored helper libraries
 
-PRoot is the only sandbox binary built from source. A handful of other native
-libraries — `libpty_bridge.so`, `libminis_crash_handler.so`, `libjieba_jni.so`
-and their C++ runtime dependencies — are still committed to the repository,
-extracted verbatim from an official upstream release APK:
+A few native libraries are still committed to the repository, extracted
+verbatim from an official upstream release APK: `libpty_bridge.so` (legacy —
+no Kotlin caller remains), `libandroidx.graphics.path.so`, `libc++_shared.so`
+and `libdatastore_shared_counter.so`. The repository also still tracks
+`libjieba_jni.so` and `libminis_crash_handler.so`, but those copies are stale
+upstream binaries that CI overwrites from source on every build.
 
 ```sh
 ./scripts/sync_official_binaries.sh              # newest upstream Android release
@@ -131,9 +135,22 @@ extracted verbatim from an official upstream release APK:
 
 The script downloads the official APK, replaces those `.so` files, prints
 sha256s, and aligns `versionName` / `versionCode`. It deliberately does **not**
-touch `libproot.so` — that comes from `deps/build_proot.sh`. Run it after every
-rebase onto upstream; see [docs/SYNCING_UPSTREAM.md](docs/SYNCING_UPSTREAM.md)
-for why that is mandatory.
+touch:
+
+- `libproot.so` / `libproot-loader*.so` — built from source by
+  `deps/build_proot.sh` on every CI run;
+- `libjieba_jni.so` / `libminis_crash_handler.so` — their JNI symbol names
+  embed the Kotlin package name, and upstream's binaries still export
+  `Java_com_openminis_app_*`; copying them over this fork's renamed build would
+  silently reintroduce `UnsatisfiedLinkError`. CI rebuilds both from
+  `src/main/cpp/` via `deps/build_jieba.sh` and `deps/build_crash_handler.sh`,
+  and a symbol gate fails the build if either binary still exports the old
+  prefix.
+
+Because the fork no longer rebases onto upstream, run the script only when a
+hand-ported upstream change actually requires a newer helper library. See
+[docs/SYNCING_UPSTREAM.md](docs/SYNCING_UPSTREAM.md) for the constraint that
+makes the pairing mandatory.
 
 ---
 
@@ -231,8 +248,10 @@ noexec cache directory and dies within ~20 ms. Re-run
 guards against this on the release path.
 
 **App builds but crashes on launch after a sync** — likely a JNI signature
-mismatch between new Kotlin and the committed native libs (`libpty_bridge.so`,
-`libjieba_jni.so`, …). `adb logcat` will name the missing method; if the
+mismatch between new Kotlin and a native lib. `libpty_bridge.so` is still
+vendored; `libjieba_jni.so` and `libminis_crash_handler.so` are rebuilt by CI
+from `src/main/cpp/`, so a package rename or JNI signature change must land in
+the C++ source as well. `adb logcat` will name the missing method; if the
 mismatch is in a vendored lib, rebuild it from its source or wait for an
 upstream release that matches.
 
