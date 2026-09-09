@@ -65,6 +65,7 @@ import androidx.compose.ui.res.stringResource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -246,6 +247,11 @@ object MirrorSpeedTestViewModel {
     fun runAllTests(context: Context) {
         currentJob?.cancel()
         currentJob = scope.launch {
+            // T10-L8: capture this job so the finally block can tell whether a
+            // newer run already replaced it. A cancelled predecessor's reset
+            // could otherwise land *after* the successor set isTesting = true,
+            // leaving the UI showing "not testing" while a run is in flight.
+            val self = coroutineContext[Job]
             withContext(Dispatchers.Main) {
                 isTesting = true
                 testProgress = 0f
@@ -294,7 +300,15 @@ object MirrorSpeedTestViewModel {
                 }
                 Log.i(TAG, "Mirror speed test complete: ${sorted.mapValues { it.value.size }}")
             } finally {
-                withContext(Dispatchers.Main) { isTesting = false }
+                // T10-L8: NonCancellable is required — a plain withContext in
+                // the finally of a cancelled job throws JobCancellationException
+                // before running its body (verified against coroutines 1.9.0),
+                // which is why the [fix/audit-s2m1] reset never actually fired
+                // on the cancel path. The identity check keeps a cancelled
+                // predecessor from clearing a successor's flag.
+                withContext(NonCancellable + Dispatchers.Main) {
+                    if (currentJob === self) isTesting = false
+                }
             }
         }
     }
@@ -302,6 +316,8 @@ object MirrorSpeedTestViewModel {
     fun runTest(context: Context, category: MirrorCategory) {
         currentJob?.cancel()
         currentJob = scope.launch {
+            // T10-L8: same identity guard as runAllTests.
+            val self = coroutineContext[Job]
             withContext(Dispatchers.Main) {
                 isTesting = true
                 testProgress = 0f
@@ -326,7 +342,15 @@ object MirrorSpeedTestViewModel {
                     this@MirrorSpeedTestViewModel.results[category] = sorted
                 }
             } finally {
-                withContext(Dispatchers.Main) { isTesting = false }
+                // T10-L8: NonCancellable is required — a plain withContext in
+                // the finally of a cancelled job throws JobCancellationException
+                // before running its body (verified against coroutines 1.9.0),
+                // which is why the [fix/audit-s2m1] reset never actually fired
+                // on the cancel path. The identity check keeps a cancelled
+                // predecessor from clearing a successor's flag.
+                withContext(NonCancellable + Dispatchers.Main) {
+                    if (currentJob === self) isTesting = false
+                }
             }
         }
     }
@@ -366,17 +390,23 @@ object MirrorSpeedTestViewModel {
         selectedMirrorId[mirror.category] = mirror.id
         persist(context, mirror.category)
         if (useCustomMirror[mirror.category] == true) {
-            applyMirror(context, mirror.category)
+            // T10-L7: applyMirror copies the current config to .bak and rewrites
+            // it — disk IO that used to run inside the row's onClick.
+            scope.launch { applyMirror(context, mirror.category) }
         }
     }
 
     fun setUseCustom(context: Context, category: MirrorCategory, enabled: Boolean) {
         useCustomMirror[category] = enabled
         persist(context, category)
-        if (enabled) {
-            applyMirror(context, category)
-        } else {
-            restoreOfficial(context, category)
+        // T10-L7: both branches touch the rootfs config files; keep them off
+        // the main thread like every other IO path in this file.
+        scope.launch {
+            if (enabled) {
+                applyMirror(context, category)
+            } else {
+                restoreOfficial(context, category)
+            }
         }
     }
 

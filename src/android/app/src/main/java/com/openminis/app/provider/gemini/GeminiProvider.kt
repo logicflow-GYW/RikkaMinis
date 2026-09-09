@@ -13,6 +13,7 @@ import com.openminis.app.data.model.LLMResponse
 import com.openminis.app.data.model.LLMStreamChunk
 import com.openminis.app.data.model.LLMUsage
 import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.provider.ImageBudget
 import com.openminis.app.provider.LLMProvider
 import com.openminis.app.provider.safeOptString
 import com.openminis.app.provider.sanitizeToolPairing
@@ -318,9 +319,16 @@ class GeminiProvider(
                             parts.put(JSONObject().put("functionResponse", responseObj))
                         }
                         is AgentContentPart.ImageData -> {
+                            // T5-L1: same provider-boundary backstop as
+                            // OpenAI/Anthropic — re-encode oversize history
+                            // images (restored sessions, cross-device imports)
+                            // before base64-inlining, so a >5MB part can't push
+                            // the request past Gemini's inline-data cap.
+                            val safeBytes = ImageBudget.compressUnderBudget(part.data)
+                            val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
                             parts.put(JSONObject().put("inlineData", JSONObject().apply {
-                                put("mimeType", part.mimeType)
-                                put("data", Base64.encodeToString(part.data, Base64.NO_WRAP))
+                                put("mimeType", safeMime)
+                                put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
                             }))
                         }
                     }
@@ -329,9 +337,12 @@ class GeminiProvider(
                 // Legacy: plain text with optional images
                 if (index == lastUserIndex && imageParts.isNotEmpty()) {
                     for (part in imageParts) {
+                        // T5-L1: same backstop as the contentParts branch above.
+                        val safeBytes = ImageBudget.compressUnderBudget(part.data)
+                        val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
                         val inlineData = JSONObject()
-                        inlineData.put("mimeType", part.mimeType)
-                        inlineData.put("data", Base64.encodeToString(part.data, Base64.NO_WRAP))
+                        inlineData.put("mimeType", safeMime)
+                        inlineData.put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
                         parts.put(JSONObject().put("inlineData", inlineData))
                     }
                 }
