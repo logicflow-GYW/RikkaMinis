@@ -495,27 +495,35 @@ internal object ProviderMutationMethods {
         val id = params.optString("groupId", "").ifEmpty {
             throw RPCException(-32602, "Missing 'groupId' param")
         }
+        // [fix/audit-b18 / T9-L2] repo.group(id) returns the live object inside
+        // _config.value.modelGroups. Mutating it in place let concurrent readers
+        // (model picker, HeadlessChatRunner.applyModelOverride, groupsList) see a
+        // half-applied edit — members cleared but not yet refilled — and a throw
+        // inside updateGroup left memory changed while disk stayed old. Build a
+        // copy and commit once, the way the in-app Settings screen does.
         val current = repo.group(id)
             ?: throw RPCException(-32602, "Group not found: $id")
 
+        var updated = current
         if (params.has("name")) {
             val n = params.optString("name", "")
             if (n.isEmpty()) throw RPCException(-32602, "Group name must be non-empty")
-            current.name = n
+            updated = updated.copy(name = n)
         }
         if (params.has("memberEntryIds")) {
             val arr = params.optJSONArray("memberEntryIds") ?: JSONArray()
             val knownIds = repo.config.value.modelEntries.map { it.id }.toSet()
-            current.memberEntryIds.clear()
+            val members = mutableListOf<String>()
             for (i in 0 until arr.length()) {
                 val mid = arr.optString(i)
-                if (mid.isNotEmpty() && mid in knownIds) current.memberEntryIds.add(mid)
+                if (mid.isNotEmpty() && mid in knownIds) members.add(mid)
             }
+            updated = updated.copy(memberEntryIds = members)
         }
-        if (params.has("strategy")) current.strategy = parseStrategy(params.optString("strategy"))
-        if (params.has("fallbackStrategy")) current.fallbackStrategy = parseFallback(params.optString("fallbackStrategy"))
-        repo.updateGroup(current)
-        return JSONObject().put("group", groupToJson(repo, current))
+        if (params.has("strategy")) updated = updated.copy(strategy = parseStrategy(params.optString("strategy")))
+        if (params.has("fallbackStrategy")) updated = updated.copy(fallbackStrategy = parseFallback(params.optString("fallbackStrategy")))
+        repo.updateGroup(updated)
+        return JSONObject().put("group", groupToJson(repo, updated))
     }
 
     fun groupsDelete(context: Context, params: JSONObject): JSONObject {

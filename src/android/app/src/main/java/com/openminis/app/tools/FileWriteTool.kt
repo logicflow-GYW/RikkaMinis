@@ -57,11 +57,23 @@ object FileWriteTool {
             val file = PRootKernel.resolveSessionHostPath(sessionId, path, context)
                 ?: return ToolExecutionResult("Error: Cannot resolve path: $path", false, toolTitle = toolTitle)
 
-            // Validate UTF-8
+            // [fix/audit-b18 / T8-L2] This used to be a try/catch around
+            // content.toByteArray(UTF_8), which never throws — the JVM encoder
+            // substitutes unpaired surrogates instead of failing, so the guard
+            // was unreachable and gave a false sense that the write was
+            // validated. Use an encoder configured to REPORT malformed input,
+            // which does reject unpaired surrogates.
             try {
-                content.toByteArray(Charsets.UTF_8)
-            } catch (e: Exception) {
-                return ToolExecutionResult("Error: Content is not valid UTF-8", false, toolTitle = toolTitle)
+                Charsets.UTF_8.newEncoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                    .encode(java.nio.CharBuffer.wrap(content))
+            } catch (e: java.nio.charset.CharacterCodingException) {
+                return ToolExecutionResult(
+                    "Error: Content contains unpaired surrogates and cannot be encoded as UTF-8",
+                    false,
+                    toolTitle = toolTitle,
+                )
             }
 
             // T123: mirror iOS AIChatViewModel L8339 — auto-create the
