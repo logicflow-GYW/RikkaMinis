@@ -21,6 +21,7 @@ import java.io.File
 import java.lang.ref.WeakReference
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Interactive PTY shell session backed by the Termux terminal emulator engine
@@ -105,6 +106,13 @@ class TerminalSession(private val context: Context) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    /**
+     * [T3-M1] Monotonic token guarding against a start() that outlives its
+     * stop() (or a later start()). Both [start] and [stop] bump it; the boot
+     * coroutine bails out whenever the value it captured is stale.
+     */
+    private val startGeneration = AtomicInteger(0)
+
     @Volatile private var cols: Int = DEFAULT_COLS
     @Volatile private var rows: Int = DEFAULT_ROWS
 
@@ -127,19 +135,30 @@ class TerminalSession(private val context: Context) {
         _state.value = State.BOOTING
         cols = initialCols
         rows = initialRows
+        val myGeneration = startGeneration.incrementAndGet()
 
         scope.launch {
             try {
                 PRootKernel.boot(context)
 
-                // Seed per-session env into the shared customEnvironment so the
-                // interactive shell inherits agent-configured vars.
-                if (sessionId != null) {
-                    ExecutionCoordinator.envVarRepository?.allAsDict()?.let { envVars ->
-                        PRootKernel.customEnvironment.putAll(envVars)
-                    }
+                // [T3-M1] stop() does not cancel this coroutine, so without the
+                // generation check a stop() (or a fresh start()) during boot
+                // would still spawn a PTY afterwards — the ghost process tree
+                // that killTermuxProcessTree's own docs warn about.
+                if (myGeneration != startGeneration.get()) {
+                    Log.i(TAG, "start() superseded during boot — aborting")
+                    return@launch
                 }
 
+                // [T3-M2] Deliberately NO putAll of env vars into
+                // PRootKernel.customEnvironment. That map is process-global and
+                // never pruned, so a variable the user later deleted lingered
+                // and was re-inherited by every subsequent PTY (buildTermuxEnv
+                // below) and every agent shell (PersistentShell env loop) —
+                // deleted secrets came back to life. The terminal reads its env
+                // straight from the repository in buildTermuxEnv(); the agent
+                // shell gets a full snapshot per command via
+                // PersistentShell.applyEnvironment().
                 val rootfsManager = RootfsManager.getInstance(context)
                 val proot = rootfsManager.prootBinary.absolutePath
                 val filesDir = context.filesDir.absolutePath
@@ -160,6 +179,13 @@ class TerminalSession(private val context: Context) {
                     client,
                 )
                 session.updateSize(cols, rows)
+
+                if (myGeneration != startGeneration.get()) {
+                    Log.i(TAG, "start() superseded before attach — killing PTY")
+                    killTermuxProcessTree(session)
+                    _state.value = State.STOPPED
+                    return@launch
+                }
 
                 termuxSession = session
                 lastTranscriptLength = 0
@@ -183,6 +209,9 @@ class TerminalSession(private val context: Context) {
     }
 
     fun stop() {
+        // [T3-M1] Invalidate any in-flight start() so it can neither attach a
+        // PTY after teardown nor clobber a newer start.
+        startGeneration.incrementAndGet()
         val s = termuxSession
         termuxSession = null
         attachedView = null

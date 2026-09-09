@@ -40,15 +40,28 @@ object EncryptedPrefsFactory {
         runCatching { return build(context, fileName) }
             .onFailure { Log.w(TAG, "first create($fileName) failed: ${it.message}") }
 
-        // First wipe attempt — the encrypted XML + Tink keyset blob +
-        // master-key alias all need to go. The Tink keyset lives in its
-        // own __androidx_security_crypto_encrypted_prefs__ file keyed
-        // by the SP file name; drop both so create() regenerates them.
-        wipeEncryptedState(context, fileName)
+        // [T8-M3] Stage 1 — drop only THIS store's XML. That is the common
+        // corruption case (one file's ciphertext no longer decrypts) and the
+        // only recovery step that leaves the other encrypted stores intact.
+        deleteOwnPrefsFile(context, fileName)
+        runCatching { return build(context, fileName) }
+            .onFailure {
+                Log.w(TAG, "rebuild($fileName) after dropping its own XML failed: ${it.message}")
+            }
+
+        // [T8-M3] Stage 2 — escalate to the SHARED state. security-crypto keeps
+        // ONE Tink keyset blob (__androidx_security_crypto_encrypted_prefs__.xml)
+        // and ONE AndroidKeystore alias behind every EncryptedSharedPreferences
+        // instance, so deleting them resets all of them (provider secrets,
+        // WebDAV, env vars, OAuth, device identity, worker key). Only reachable
+        // when stage 1 proved the damage is in the shared keyset — previously
+        // this ran unconditionally, so a single corrupt file wiped everything.
+        Log.w(TAG, "escalating: shared keyset unreadable — resetting ALL encrypted stores for $fileName")
+        wipeSharedKeyset(context)
 
         runCatching { return build(context, fileName) }
             .onFailure {
-                Log.e(TAG, "rebuild($fileName) after wipe failed: ${it.message}", it)
+                Log.e(TAG, "rebuild($fileName) after shared-key reset failed: ${it.message}", it)
             }
 
         Log.w(TAG, "falling back to in-memory SharedPreferences for $fileName — credentials lost, nothing persisted")
@@ -68,14 +81,23 @@ object EncryptedPrefsFactory {
         )
     }
 
-    private fun wipeEncryptedState(context: Context, fileName: String) {
-        // XML file the SP itself reads/writes.
+    private fun prefsDir(context: Context) = File(context.applicationInfo.dataDir, "shared_prefs")
+
+    /** Drop just this store's XML — the least destructive recovery step. */
+    private fun deleteOwnPrefsFile(context: Context, fileName: String) {
+        runCatching { File(prefsDir(context), "$fileName.xml").delete() }
+            .onFailure { Log.w(TAG, "delete own prefs file failed: ${it.message}") }
+    }
+
+    /**
+     * Drop the state shared by every encrypted store: the single Tink keyset
+     * blob plus the AndroidKeystore master alias. Destructive — callers must
+     * have already established that the damage is in the shared keyset.
+     */
+    private fun wipeSharedKeyset(context: Context) {
         runCatching {
-            val dir = File(context.applicationInfo.dataDir, "shared_prefs")
-            File(dir, "$fileName.xml").delete()
-            // Tink keyset blob is stashed in this companion prefs file.
-            File(dir, "__androidx_security_crypto_encrypted_prefs__.xml").delete()
-        }.onFailure { Log.w(TAG, "wipe prefs files failed: ${it.message}") }
+            File(prefsDir(context), "__androidx_security_crypto_encrypted_prefs__.xml").delete()
+        }.onFailure { Log.w(TAG, "wipe shared keyset file failed: ${it.message}") }
 
         runCatching {
             val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

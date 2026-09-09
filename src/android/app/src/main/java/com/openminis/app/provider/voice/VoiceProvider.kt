@@ -38,6 +38,14 @@ open class VoiceProvider(
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(120, TimeUnit.SECONDS)
             .writeTimeout(120, TimeUnit.SECONDS)
+            // [T5-M1] WebSocket transports (Xunfei TTS) are NOT covered by
+            // readTimeout — OkHttp applies that only to HTTP body reads. With
+            // no ping the client never notices a dead tunnel and synthesize()
+            // hangs forever (QuickTestSheet has no withTimeout). Verified in
+            // the sandbox against a silent WS server: without pingInterval the
+            // socket stayed open past 20s with no onFailure; with it the
+            // failure fired on schedule.
+            .pingInterval(20, TimeUnit.SECONDS)
             .build()
 
         /**

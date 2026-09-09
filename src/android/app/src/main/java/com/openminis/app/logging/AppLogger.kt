@@ -8,8 +8,11 @@ import java.io.FileWriter
 import java.io.OutputStream
 import java.io.PrintStream
 import java.io.PrintWriter
-import java.text.SimpleDateFormat
-import java.util.Date
+import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
@@ -30,8 +33,22 @@ object AppLogger {
     // against a single runaway day generating hundreds of MB. Today's file
     // is always excluded from size-pruning (see pruneOldLogs).
     private const val MAX_TOTAL_SIZE_BYTES = 200L * 1024 * 1024
-    private val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-    private val timestampFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    // [T8-M2] DateTimeFormatter is immutable and thread-safe. The previous
+    // shared SimpleDateFormat instances were formatted concurrently from the UI
+    // thread, the LogcatTailer thread and the stdout/stderr capture streams;
+    // interleaved internal state produced garbled dates (which then opened the
+    // wrong log file) and could throw ArrayIndexOutOfBounds. log() did the
+    // formatting outside any lock, so the failure could also bubble into a
+    // caller as a crash.
+    private val dateFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.US)
+    private val timestampFormat = DateTimeFormatter.ofPattern("HH:mm:ss.SSS", Locale.US)
+
+    private fun todayStamp(): String = LocalDate.now().format(dateFormat)
+
+    private fun timeStamp(): String = LocalTime.now().format(timestampFormat)
+
+    private fun dateStampFor(epochMillis: Long): String =
+        Instant.ofEpochMilli(epochMillis).atZone(ZoneId.systemDefault()).toLocalDate().format(dateFormat)
 
     private const val PREF_NAME = "logging_prefs"
     private const val KEY_ENABLED = "logging_enabled"
@@ -142,8 +159,7 @@ object AppLogger {
             if (tag.startsWith("Minis.") || tag == "AppLogger") return
         }
         try {
-            val now = Date()
-            val today = dateFormat.format(now)
+            val today = todayStamp()
             val w = getWriter(today)
             w.println("[LOGCAT] $rawLine")
         } catch (_: Exception) {
@@ -214,9 +230,8 @@ object AppLogger {
     private fun writeFileLine(channel: String, line: String) {
         if (!enabled) return
         try {
-            val now = Date()
-            val today = dateFormat.format(now)
-            val timestamp = timestampFormat.format(now)
+            val today = todayStamp()
+            val timestamp = timeStamp()
             val w = getWriter(today)
             w.println("[$timestamp] [$channel] $line")
         } catch (e: Exception) {
@@ -257,9 +272,8 @@ object AppLogger {
     }
 
     private fun log(level: String, category: String, message: String) {
-        val now = Date()
-        val today = dateFormat.format(now)
-        val timestamp = timestampFormat.format(now)
+        val today = todayStamp()
+        val timestamp = timeStamp()
 
         // Also output to logcat
         val logcatTag = "Minis.$category"
@@ -425,7 +439,7 @@ object AppLogger {
     private fun pruneOldLogs() {
         val now = System.currentTimeMillis()
         val ageCutoff = now - MAX_AGE_DAYS * 24L * 60 * 60 * 1000
-        val today = dateFormat.format(Date(now))
+        val today = dateStampFor(now)
         val todayFileName = "minis-$today.log"
 
         // Phase 1: time-based — delete files older than MAX_AGE_DAYS.
