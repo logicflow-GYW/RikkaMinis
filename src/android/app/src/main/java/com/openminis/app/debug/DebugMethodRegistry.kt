@@ -295,6 +295,63 @@ object DebugMethodRegistry {
             returns = "{ok, path, hostPath, size}",
             example = ex("path" to "/tmp/hello.sh", "content" to "IyEvYmluL3NoCmVjaG8gaGVsbG8K", "encoding" to "base64", "mode" to "0755"),
         ),
+        // [fix/audit-b18 / T9-L1] These six are dispatched (DebugRPCHandler
+        // .dispatch) but were missing from this catalogue, so rpc.discover
+        // clients could not see them.
+        MethodSpec(
+            name = "debug.rawLs",
+            description = "List the sandbox rootfs (or a subdirectory) as seen from inside proot.",
+            params = listOf(
+                ParamSpec("path", "string", required = false, default = "minis-sessions", description = "Rootfs-relative path to list."),
+                ParamSpec("recursive", "bool", required = false, default = true, description = "Walk subdirectories."),
+                ParamSpec("maxDepth", "int", required = false, default = 4, description = "Recursion depth when recursive=true."),
+            ),
+            returns = "{root, entries: [{name, type, size, modified, ...}]}",
+            example = ex("path" to "minis-sessions", "maxDepth" to 2),
+        ),
+        MethodSpec(
+            name = "debug.shellExecute",
+            description = "Run a command through ExecutionCoordinator in the sandbox shell.",
+            params = listOf(
+                ParamSpec("command", "string", required = true, description = "Shell command line."),
+                ParamSpec("session", "string", required = false, default = "debug-rpc", description = "Session whose shell namespace is used."),
+                ParamSpec("timeout", "int", required = false, default = 60, description = "Seconds; clamped to [1, 900]."),
+            ),
+            returns = "{output, exit_code, session}",
+            example = ex("command" to "id", "timeout" to 30),
+        ),
+        MethodSpec(
+            name = "debug.permissions.list",
+            description = "List offload tools with their default and current permission levels.",
+            params = emptyList(),
+            returns = "{tools: [{toolName, displayName, category, defaultLevel, currentLevel, showInSettings}], count}",
+            example = ex(),
+        ),
+        MethodSpec(
+            name = "debug.update.check",
+            description = "Check GitHub releases for a newer build (same code path as the in-app updater).",
+            params = emptyList(),
+            returns = "{status: update_available|up_to_date|no_release|no_apk_asset|forbidden|network_unreachable|error, ...}",
+            example = ex(),
+        ),
+        MethodSpec(
+            name = "debug.update.download",
+            description = "Download an APK by URL into the app cache (staging for debug.update.install).",
+            params = listOf(
+                ParamSpec("url", "string", required = true, description = "APK URL."),
+            ),
+            returns = "{status: ok|error, path, size}",
+            example = ex("url" to "https://example.com/app.apk"),
+        ),
+        MethodSpec(
+            name = "debug.update.install",
+            description = "Hand a downloaded APK to the system package installer.",
+            params = listOf(
+                ParamSpec("path", "string", required = true, description = "Path returned by debug.update.download."),
+            ),
+            returns = "{status: launched|error, can_install, message?}",
+            example = ex("path" to "/data/user/0/com.openminis.app/cache/update.apk"),
+        ),
         MethodSpec(
             name = "debug.screenshot.capture",
             description = "Capture a screenshot into the in-memory ring buffer with an optional label.",
@@ -686,6 +743,17 @@ object DebugMethodRegistry {
             ),
             returns = "{sessionId, isNewSession, modelName, status, prompt, responseText, userMessageId, timedOut?}",
             example = ex("prompt" to "Hello", "wait" to true),
+        ),
+        // [fix/audit-b18 / T9-L1] Dispatched but missing from the catalogue.
+        MethodSpec(
+            name = "chat.uiPrompt",
+            description = "Send a prompt through the on-screen ChatViewModel instead of the headless runner. Requires either a chat screen on top or an explicit sessionId.",
+            params = listOf(
+                ParamSpec("prompt", "string", required = true, description = "User message text."),
+                ParamSpec("sessionId", "string", required = false, description = "Target session; defaults to the active on-screen session."),
+            ),
+            returns = "{ok, sessionId, isStreaming}",
+            example = ex("prompt" to "Hello", "sessionId" to "<session-id>"),
         ),
         MethodSpec(
             name = "chat.retry",
