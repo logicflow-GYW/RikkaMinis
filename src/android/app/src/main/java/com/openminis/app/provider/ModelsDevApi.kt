@@ -329,8 +329,9 @@ object ModelsDevApi {
             val interleaved = obj.opt("interleaved")
             when (interleaved) {
                 is JSONObject -> interleavedField = interleaved.optString("field", "").ifEmpty { null }
+                // JSON `true` decodes to Boolean.TRUE and is covered here; the
+                // old extra `true ->` branch was unreachable (T5-L3).
                 is Boolean -> if (interleaved) interleavedField = "reasoning_content"
-                true -> interleavedField = "reasoning_content" // JSON true
             }
         }
 

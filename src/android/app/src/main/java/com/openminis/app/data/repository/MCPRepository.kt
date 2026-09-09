@@ -400,27 +400,6 @@ class MCPRepository(private val context: Context) {
     // -- JSON Import (4 format variants, last-write-wins on name) --
 
     /**
-     * [T-mcp-import-unique-fallback] Build a deterministic fallback id for a
-     * bare entry that has no explicit `name`. Tries the STDIO command basename
-     * (e.g. "npx" → "mcp-npx"), else the URL host (e.g. "https://x/y" →
-     * "mcp-x"), else the generic "imported-mcp". Deterministic so re-importing
-     * the same bare entry round-trips to a stable id, but varied enough that
-     * two *different* bare entries no longer collapse onto one id.
-     */
-    internal fun deriveFallbackName(entry: JSONObject): String {
-        entry.optString("command", "").trim().ifBlank { null }?.let { cmd ->
-            val basename = cmd.substringAfterLast('/').substringAfterLast('\\').trim()
-            if (basename.isNotEmpty()) return "mcp-$basename"
-        }
-        entry.optString("url", "").trim().ifBlank { null }?.let { url ->
-            val host = runCatching { java.net.URI(url).host }
-                .getOrNull()?.replace(Regex("[^A-Za-z0-9._-]"), "_")
-            if (!host.isNullOrBlank()) return "mcp-$host"
-        }
-        return "imported-mcp"
-    }
-
-    /**
      * Parse pasted JSON and import any server entries. Returns the imported
      * configs (already merged into state + written to disk), empty on no-op.
      *

@@ -295,16 +295,27 @@ fun ImageGalleryViewer(
                             )
                             val savedToAlbumMsg = stringResource(R.string.image_saved_to_album_toast)
                             val saveFailedMsg = stringResource(R.string.image_save_failed_toast)
+                            val loadFailedMsg = stringResource(R.string.image_load_failed_toast)
+                            // T10-L4: same guard + failure reporting as the
+                            // fullscreen viewer's Save button.
+                            var saving by remember { mutableStateOf(false) }
                             ImageActionButton(
                                 icon = Icons.Outlined.Download,
                                 label = stringResource(R.string.image_action_save),
-                                onClick = {
+                                onClick = onClick@{
+                                    if (saving) return@onClick
+                                    saving = true
                                     scope.launch {
-                                        val bmp = loadBitmap(context, currentItem.model)
-                                        if (bmp != null) {
-                                            val saved = saveToGallery(context, bmp)
-                                            val msg = if (saved) savedToAlbumMsg else saveFailedMsg
+                                        try {
+                                            val bmp = loadBitmap(context, currentItem.model)
+                                            val msg = when {
+                                                bmp == null -> loadFailedMsg
+                                                saveToGallery(context, bmp) -> savedToAlbumMsg
+                                                else -> saveFailedMsg
+                                            }
                                             Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                        } finally {
+                                            saving = false
                                         }
                                     }
                                 },

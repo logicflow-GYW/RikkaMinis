@@ -1526,13 +1526,18 @@ class OpenAIProvider constructor(
                 if (urlStr.isNotEmpty()) {
                     try {
                         val dlReq = Request.Builder().url(urlStr).get().build()
-                        val dlResp = client.newCall(dlReq).execute()
-                        val dlBytes = dlResp.body?.bytes()
-                        val ctMime = dlResp.header("Content-Type")
-                        dlResp.close()
-                        if (dlBytes != null && dlBytes.isNotEmpty()) {
-                            val mime = hintMime ?: ctMime ?: detectImageMime(dlBytes)
-                            attachments.add(LLMMediaAttachment(LLMMediaAttachment.MediaType.IMAGE, mime, dlBytes))
+                        // T5-L2: `use` closes the response even when reading the
+                        // body throws mid-download. The previous explicit
+                        // close() sat after bytes(), so an IOException there
+                        // skipped it and leaked the connection instead of
+                        // returning it to the pool.
+                        client.newCall(dlReq).execute().use { dlResp ->
+                            val dlBytes = dlResp.body?.bytes()
+                            val ctMime = dlResp.header("Content-Type")
+                            if (dlBytes != null && dlBytes.isNotEmpty()) {
+                                val mime = hintMime ?: ctMime ?: detectImageMime(dlBytes)
+                                attachments.add(LLMMediaAttachment(LLMMediaAttachment.MediaType.IMAGE, mime, dlBytes))
+                            }
                         }
                     } catch (e: Exception) {
                         com.openminis.app.logging.AppLogger.warning(

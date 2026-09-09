@@ -9,8 +9,13 @@ import java.util.concurrent.ConcurrentHashMap
  * contains MULTIPLE keys separated by whitespace/commas, each new provider
  * build picks the least-recently-used key; single keys are returned verbatim.
  *
- * - LRU state persists to `key_roulette.json` under the app cache dir and
- *   expires after 24h, so a dead key does not stay pinned forever.
+ * - LRU state persists to `key_roulette.json` under the app cache dir. There
+ *   is no time-based expiry: the persisted slice is rebuilt from the
+ *   provider's *current* key list on every draw, so a key removed from the
+ *   stored key string drops out on the next draw, and a key that simply goes
+ *   unused stays at the oldest position — which is exactly what makes it the
+ *   next one selected. (T4-L3: the old 24h-expiry KDoc described a check that
+ *   compared a monotonic draw counter against a millisecond window.)
  * - The in-memory map is the source of truth during a process lifetime;
  *   the file is a cold-start hint.
  * - Thread-safe via a synchronized block; the map itself is concurrent.
@@ -20,7 +25,6 @@ import java.util.concurrent.ConcurrentHashMap
 object KeyRoulette {
 
     private val SPLIT = Regex("[\\s,]+")
-    private const val EXPIRE_MS = 24 * 60 * 60 * 1000L
     private const val FILE_NAME = "key_roulette.json"
 
     private val lastUsed = ConcurrentHashMap<String, Long>()
@@ -73,7 +77,7 @@ object KeyRoulette {
             val stale = list.map { it to (lastUsed["$providerId|$it"] ?: 0L) }
                 .minByOrNull { it.second }?.first ?: list.first()
             lastUsed["$providerId|$stale"] = now
-            persistLocked(providerId, list, now)
+            persistLocked(providerId, list)
             return stale
         }
     }
@@ -83,7 +87,7 @@ object KeyRoulette {
 
     private fun stateFile(): File? = cacheDir?.let { File(it, FILE_NAME) }
 
-    private fun persistLocked(providerId: String, list: List<String>, now: Long) {
+    private fun persistLocked(providerId: String, list: List<String>) {
         val f = stateFile() ?: return
         runCatching {
             // Rewrite only the current provider's slice; other providers' state
@@ -93,15 +97,12 @@ object KeyRoulette {
             } ?: org.json.JSONObject()
             val slice = org.json.JSONObject()
             for (k in list) slice.put(k, lastUsed["$providerId|$k"] ?: 0L)
-            // Prune entries older than the expiry window so the file does not
-            // accumulate dead keys forever.
-            val pruned = org.json.JSONObject()
-            val pkeys = slice.keys()
-            while (pkeys.hasNext()) {
-                val k = pkeys.next()
-                if (now - slice.optLong(k, 0L) < EXPIRE_MS) pruned.put(k, slice.optLong(k, 0L))
-            }
-            root.put(providerId, pruned)
+            // T4-L3: no pruning pass here. The slice only ever contains the
+            // provider's current keys, so removed keys vanish on the next draw;
+            // the previous `now - stamp < EXPIRE_MS` check compared the
+            // monotonic draw counter against a 24h millisecond window and was
+            // therefore always true (i.e. it never pruned anything).
+            root.put(providerId, slice)
             f.writeText(root.toString())
         }
     }

@@ -359,10 +359,20 @@ class FileBrowserViewModel(
     fun deleteItem(item: FileItem) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                if (item.isDirectory) {
+                // T10-L5: File.delete()/deleteRecursively() return false instead
+                // of throwing on a read-only mount or missing permission. The
+                // old code ignored the result, so loadItems() re-listed the
+                // still-present file and the user saw nothing happen.
+                val deleted = if (item.isDirectory) {
                     item.file.deleteRecursively()
                 } else {
                     item.file.delete()
+                }
+                if (!deleted) {
+                    _uiState.value = _uiState.value.copy(
+                        errorMessage = "Delete failed: ${item.name}",
+                    )
+                    return@launch
                 }
                 loadItems()
             } catch (e: Exception) {

@@ -313,16 +313,28 @@ fun FullscreenImageViewer(
                     // Save
                     val savedToAlbumMsg = stringResource(R.string.image_saved_to_album_toast)
                     val saveFailedMsg = stringResource(R.string.image_save_failed_toast)
+                    val loadFailedMsg = stringResource(R.string.image_load_failed_toast)
+                    // T10-L4: mirror the Share button's in-flight guard and
+                    // report a decode failure instead of returning silently —
+                    // a null bitmap used to look like the tap did nothing.
+                    var saving by remember { mutableStateOf(false) }
                     ImageActionButton(
                         icon = Icons.Outlined.Download,
                         label = stringResource(R.string.image_action_save),
-                        onClick = {
+                        onClick = onClick@{
+                            if (saving) return@onClick
+                            saving = true
                             scope.launch {
-                                val bmp = loadBitmap(context, model)
-                                if (bmp != null) {
-                                    val saved = saveToGallery(context, bmp)
-                                    val msg = if (saved) savedToAlbumMsg else saveFailedMsg
+                                try {
+                                    val bmp = loadBitmap(context, model)
+                                    val msg = when {
+                                        bmp == null -> loadFailedMsg
+                                        saveToGallery(context, bmp) -> savedToAlbumMsg
+                                        else -> saveFailedMsg
+                                    }
                                     Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                } finally {
+                                    saving = false
                                 }
                             }
                         },

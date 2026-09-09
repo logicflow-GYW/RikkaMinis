@@ -185,9 +185,14 @@ object UpdateChecker {
                 // Highest version we've seen at all (used for the "release
                 // exists but is older or equal" → UpToDate decision and for
                 // logging).
-                val highest = candidates.maxWithOrNull(
-                    compareBy { compareVersions(it.versionName, "0") },
-                ) ?: candidates.first()
+                // T4-L4: order by the full parsed version, not by a key that
+                // only reflects the first component — `compareVersions(v, "0")`
+                // maps both "1.2.3" and "1.9.0" to 1, so ties fell back to list
+                // order (created_at desc) and a re-published older release
+                // could win the "highest" slot.
+                val highest = candidates.maxWithOrNull { a, b ->
+                    compareVersions(a.versionName, b.versionName)
+                } ?: candidates.first()
                 AppLogger.info(
                     TAG,
                     "highest-published tag=${highest.tagName} parsed=${highest.versionName} prerelease=${highest.isPrerelease} apk=${highest.apkUrl != null}",
@@ -199,7 +204,7 @@ object UpdateChecker {
                 val upgradeCandidate = candidates
                     .filter { it.apkUrl != null }
                     .filter { compareVersions(it.versionName, localVer) > 0 }
-                    .maxWithOrNull(compareBy { compareVersions(it.versionName, "0") })
+                    .maxWithOrNull { a, b -> compareVersions(a.versionName, b.versionName) }
 
                 if (upgradeCandidate != null) {
                     AppLogger.info(
