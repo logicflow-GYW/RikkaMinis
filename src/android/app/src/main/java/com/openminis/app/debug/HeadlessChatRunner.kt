@@ -32,8 +32,14 @@ import kotlinx.coroutines.withTimeoutOrNull
  */
 internal object HeadlessChatRunner {
 
-    /** sessionId → ViewModelProvider that owns its single ChatViewModel. */
-    private val providers = mutableMapOf<String, ViewModelProvider>()
+    /**
+     * sessionId → ViewModelProvider that owns its single ChatViewModel.
+     * T9-L3: ConcurrentHashMap — writes go through @Synchronized helpers, but
+     * [cancel] reads it from the Main dispatcher while other DebugServer
+     * connections (each its own coroutine) can be inserting or removing
+     * entries; a plain HashMap read could race a structural change.
+     */
+    private val providers = java.util.concurrent.ConcurrentHashMap<String, ViewModelProvider>()
 
     private fun app(context: Context): MinisApp =
         context.applicationContext as? MinisApp

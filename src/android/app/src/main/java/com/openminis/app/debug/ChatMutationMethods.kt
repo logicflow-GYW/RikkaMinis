@@ -417,11 +417,24 @@ internal object ChatMutationMethods {
         }
     }
 
+    /** T9-L4: drop attachment blobs older than 24h before writing new ones. */
+    private fun pruneStaleAttachments(dir: File) {
+        val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
+        dir.listFiles()?.forEach { f ->
+            if (f.isFile && f.lastModified() < cutoff) runCatching { f.delete() }
+        }
+    }
+
     private fun parseAttachments(context: Context, params: JSONObject): List<InputAttachment> {
         val arr = params.optJSONArray("attachments") ?: return emptyList()
         if (arr.length() == 0) return emptyList()
         val out = mutableListOf<InputAttachment>()
         val cacheDir = File(context.cacheDir, "rpc-attachments").also { it.mkdirs() }
+        // T9-L4: nothing else ever deletes these blobs. `chat.prompt` writes one
+        // file per attachment (MB-scale payloads are possible) and the
+        // directory had no prune point at all, so a long-running harness grew
+        // the cache without bound.
+        pruneStaleAttachments(cacheDir)
         for (i in 0 until arr.length()) {
             val obj = arr.optJSONObject(i) ?: continue
             val name = obj.optString("name", "").ifEmpty { "attachment-$i" }

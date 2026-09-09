@@ -1062,6 +1062,7 @@ class DebugRPCHandler(private val context: Context) {
         // so the handler reads it via readLinuxPath() exactly like a real shell
         // invocation would. We resolve the host path via PRootKernel to honour
         // the same rootfs layout the offload server uses.
+        var inputHostFile: java.io.File? = null
         val finalArgv: List<String> = if (params.has("input")) {
             val inputBlob = params.optString("input", "")
             val linuxPath = "/tmp/.debug-modeluse-input-${System.currentTimeMillis()}.json"
@@ -1069,24 +1070,32 @@ class DebugRPCHandler(private val context: Context) {
                 ?: throw RPCException(-32603, "cannot resolve $linuxPath under rootfs")
             hostFile.parentFile?.mkdirs()
             hostFile.writeText(inputBlob)
+            // T9-L4: keep a handle so the finally below can delete the blob —
+            // this used to leave one JSON file per debug.modelUse.exec call in
+            // the rootfs /tmp for the lifetime of the install.
+            inputHostFile = hostFile
             argvTail + listOf("--input", linuxPath)
         } else argvTail
 
-        AppLogger.info("DebugRPC", "debug.modelUse.exec argv=${finalArgv.joinToString(" ")}")
-        val app = context.applicationContext as com.openminis.app.MinisApp
-        val handler = com.openminis.app.sandbox.offload.ModelUseOffloadHandler(context, app.providerRepository)
-        val request = com.openminis.app.sandbox.NativeOffloadRequest(
-            pid = -1,
-            argv = listOf("minis-model-use") + finalArgv,
-            env = emptyMap(),
-            cwd = "/",
-            sessionId = null,
-        )
-        val result = handler.handle(request)
-        return JSONObject().apply {
-            put("exitCode", result.exitCode)
-            put("output", result.output)
-            put("argv", JSONArray(finalArgv))
+        try {
+            AppLogger.info("DebugRPC", "debug.modelUse.exec argv=${finalArgv.joinToString(" ")}")
+            val app = context.applicationContext as com.openminis.app.MinisApp
+            val handler = com.openminis.app.sandbox.offload.ModelUseOffloadHandler(context, app.providerRepository)
+            val request = com.openminis.app.sandbox.NativeOffloadRequest(
+                pid = -1,
+                argv = listOf("minis-model-use") + finalArgv,
+                env = emptyMap(),
+                cwd = "/",
+                sessionId = null,
+            )
+            val result = handler.handle(request)
+            return JSONObject().apply {
+                put("exitCode", result.exitCode)
+                put("output", result.output)
+                put("argv", JSONArray(finalArgv))
+            }
+        } finally {
+            inputHostFile?.let { runCatching { it.delete() } }
         }
     }
 
