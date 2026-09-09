@@ -315,6 +315,21 @@ class WebAppActivity : ComponentActivity() {
                     webViewState = wv
                     wv
                 },
+                // [audit-0909 T7-M2] renderHost() re-runs setContent on every
+                // fullscreen toggle (back press), and each pass dropped the
+                // previous AndroidView without destroying its WebView — a live
+                // renderer per toggle (BrowserUseManager's own note puts those
+                // at 50-100 MB each, and setContent replays the composition so
+                // the factory runs again). onRelease covers both the
+                // replacement and the activity-teardown path; destroy() is
+                // idempotent and clearing the refs keeps onDestroy() from
+                // touching an already-destroyed instance.
+                onRelease = { wv ->
+                    if (webViewRef === wv) webViewRef = null
+                    if (webViewState === wv) webViewState = null
+                    wv.stopLoading()
+                    wv.destroy()
+                },
             )
 
             // Top inset spacer reserves room when system bars are visible so

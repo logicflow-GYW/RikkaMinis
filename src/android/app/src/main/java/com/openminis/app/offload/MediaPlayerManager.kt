@@ -69,8 +69,14 @@ object MediaPlayerManager {
                 "Only audio files can be played."
         }
 
+        // [audit-0909 T3-M3] Construct the player OUTSIDE the try so the
+        // catch can release it: `apply { setDataSource/prepare/start }`
+        // throws on a corrupt or unsupported file, and the old code dropped
+        // the reference without release() — every failed play leaked a
+        // native MediaPlayer (codec + buffers).
+        val player = MediaPlayer()
         return try {
-            val player = MediaPlayer().apply {
+            player.apply {
                 setDataSource(hostFile.absolutePath)
                 prepare()
                 start()
@@ -101,6 +107,8 @@ object MediaPlayerManager {
             "Playing '$filePath' (session=$sessionId, type=$mediaType, duration=$durationStr)"
         } catch (e: Exception) {
             Log.e(TAG, "Failed to play $filePath", e)
+            // [audit-0909 T3-M3] release the native codec on the failure path
+            runCatching { player.release() }
             "Error: failed to play '$filePath': ${e.message}"
         }
     }

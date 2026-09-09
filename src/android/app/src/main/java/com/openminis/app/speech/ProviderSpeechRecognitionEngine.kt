@@ -152,6 +152,14 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
             } finally {
                 runCatching { recorder.stop() }
                 recorder.release()
+                // [audit-0909 T8-M1] Release the capture flag on EVERY exit
+                // path. The loop also ends when the 60 s / maxBytes cap is
+                // reached, and that success path had no reset at all — the
+                // flag stayed true forever, so every later start() hit
+                // "A capture is already in flight" (RECOGNIZER_BUSY) and the
+                // provider ASR engine stayed dead until the user explicitly
+                // cancelled or the process restarted.
+                recording.set(false)
             }
 
             if (cancelled.get()) return@launch

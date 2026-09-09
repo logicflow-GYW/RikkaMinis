@@ -107,6 +107,16 @@ fun InlineAudioPlayer(
                 progress = 0f
                 position = "0:00"
             }
+            // [audit-0909 T10-M6] Surface playback errors explicitly. Without
+            // this the player sat in the Error state while the UI still showed
+            // an enabled Play button (the ticker's try-catch only hid the
+            // failure), and the next start()/pause() threw
+            // IllegalStateException and crashed the app.
+            mediaPlayer.setOnErrorListener { _, what, extra ->
+                isPlaying = false
+                error = "MediaPlayer error ($what/$extra)"
+                true
+            }
         } catch (e: Exception) {
             error = e.message
         }
@@ -155,12 +165,22 @@ fun InlineAudioPlayer(
                     // Play/Pause button
                     IconButton(
                         onClick = {
-                            if (isPlaying) {
-                                mediaPlayer.pause()
+                            // [audit-0909 T10-M6] A player that hit an error
+                            // (truncated / corrupt TTS output) is in the Error
+                            // state — pause()/start() then throw
+                            // IllegalStateException, which crashed the app
+                            // because this callback had no guard.
+                            try {
+                                if (isPlaying) {
+                                    mediaPlayer.pause()
+                                    isPlaying = false
+                                } else {
+                                    mediaPlayer.start()
+                                    isPlaying = true
+                                }
+                            } catch (e: Exception) {
                                 isPlaying = false
-                            } else {
-                                mediaPlayer.start()
-                                isPlaying = true
+                                error = e.message ?: "Playback failed"
                             }
                         },
                         modifier = Modifier

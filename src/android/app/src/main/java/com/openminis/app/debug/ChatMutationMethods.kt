@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.core.content.FileProvider
 import com.openminis.app.MinisApp
 import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.service.SessionBadgeStore
+import com.openminis.app.ui.chat.ChatViewModelStore
 import com.openminis.app.ui.chat.InputAttachment
 import org.json.JSONObject
 import java.io.File
@@ -401,6 +403,14 @@ internal object ChatMutationMethods {
         HeadlessChatRunner.cancel(context, sessionId)
         app.chatRepository.deleteSession(sessionId)
         HeadlessChatRunner.forget(sessionId)
+        // [audit-0909 T9-M1] Mirror the in-app delete path
+        // (ChatHistoryDrawer.deleteSessionAndCleanup): release the cached
+        // ChatViewModel (cancels its viewModelScope) and clear the session
+        // badge. Without this the VM kept its scope alive for the whole
+        // process lifetime and a deleted session could still be driven from
+        // its screen.
+        ChatViewModelStore.release(sessionId)
+        SessionBadgeStore.clear(sessionId)
         return JSONObject().apply {
             put("sessionId", sessionId)
             put("deleted", true)
