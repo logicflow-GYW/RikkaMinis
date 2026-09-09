@@ -422,6 +422,7 @@ internal fun copyBitmapToClipboard(
             // covered by any declared root and would throw
             // IllegalArgumentException at getUriForFile.
             val shareDir = File(context.cacheDir, "share").apply { mkdirs() }
+            pruneShareDir(shareDir)
             val file = File(shareDir, "clipboard_img_${System.currentTimeMillis()}.png")
             file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
             val uri = androidx.core.content.FileProvider.getUriForFile(
@@ -465,6 +466,7 @@ internal suspend fun shareImage(context: Context, model: Any) {
             // T207: see clipboard path above — must live under cache/share/
             // for FileProvider to resolve the URI.
             val shareDir = File(context.cacheDir, "share").apply { mkdirs() }
+            pruneShareDir(shareDir)
             val file = File(shareDir, "share_img_${System.currentTimeMillis()}.png")
             file.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
             val uri = androidx.core.content.FileProvider.getUriForFile(
@@ -535,6 +537,18 @@ private fun findWindowViaDialog(view: android.view.View): android.view.Window? {
         v = v.parent as? android.view.View
     }
     return null
+}
+
+/**
+ * [fix/audit-b17 / T10-L10b] Share / copy-to-clipboard blobs are written once
+ * and never deleted by anyone — they accumulate in cache/share/ for the life
+ * of the install. Prune entries older than a day before writing a new one.
+ */
+private fun pruneShareDir(dir: File) {
+    val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
+    dir.listFiles()?.forEach { f ->
+        if (f.isFile && f.lastModified() < cutoff) runCatching { f.delete() }
+    }
 }
 
 private fun findDialogWindow(root: android.view.ViewGroup): android.view.Window? {

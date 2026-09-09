@@ -149,9 +149,15 @@ fun FilePreviewScreen(
     // ImagePreview column. Gallery owns its own close / save / share /
     // copy chrome, so we skip the Scaffold + TopAppBar entirely.
     if (item.isImageFile) {
-        val galleryState = remember(item.file.absolutePath) {
-            collectImageGallery(item.file)
-        }
+        // [fix/audit-b17 / T10-L9] collectImageGallery lists the parent
+        // directory and stats every sibling — that used to run inside
+        // remember{} on the main thread during composition.
+        val galleryState = produceState(
+            initialValue = emptyList<com.openminis.app.ui.components.ImageGalleryItem>() to 0,
+            item.file.absolutePath,
+        ) {
+            value = withContext(Dispatchers.IO) { collectImageGallery(item.file) }
+        }.value
         com.openminis.app.ui.components.ImageGalleryViewer(
             items = galleryState.first,
             startIndex = galleryState.second,
@@ -358,13 +364,8 @@ private fun TextPreview(item: FileItem) {
         withContext(Dispatchers.IO) {
             try {
                 val bytes = item.file.readBytes()
-                if (bytes.size > MAX_TEXT_PREVIEW_BYTES) {
-                    content = String(bytes, 0, MAX_TEXT_PREVIEW_BYTES, Charsets.UTF_8)
-                    truncated = true
-                } else {
-                    content = String(bytes, Charsets.UTF_8)
-                    truncated = false
-                }
+                content = decodeUtf8Capped(bytes)
+                truncated = bytes.size > MAX_TEXT_PREVIEW_BYTES
             } catch (e: Exception) {
                 error = e.message ?: "Failed to read file"
             }
@@ -440,8 +441,7 @@ private fun MarkdownPreview(item: FileItem) {
         withContext(Dispatchers.IO) {
             try {
                 val bytes = item.file.readBytes()
-                val cap = if (bytes.size > MAX_TEXT_PREVIEW_BYTES) MAX_TEXT_PREVIEW_BYTES else bytes.size
-                content = String(bytes, 0, cap, Charsets.UTF_8)
+                content = decodeUtf8Capped(bytes)
             } catch (e: Exception) {
                 error = e.message ?: "Failed to read file"
                 AppLogger.warning("FilePreview", "markdown read failed for ${item.name}: ${e.message}")
@@ -862,10 +862,8 @@ private fun JsonPreview(item: FileItem) {
         withContext(Dispatchers.IO) {
             try {
                 val bytes = item.file.readBytes()
-                val cap = if (bytes.size > MAX_TEXT_PREVIEW_BYTES) {
-                    truncated = true; MAX_TEXT_PREVIEW_BYTES
-                } else bytes.size
-                val raw = String(bytes, 0, cap, Charsets.UTF_8)
+                truncated = bytes.size > MAX_TEXT_PREVIEW_BYTES
+                val raw = decodeUtf8Capped(bytes)
                 pretty = try {
                     when (raw.trimStart().firstOrNull()) {
                         '{' -> org.json.JSONObject(raw).toString(2)
@@ -1240,10 +1238,7 @@ private fun printFile(context: Context, item: FileItem, preRenderedHtml: String?
  * how much is read from disk).
  */
 private fun buildPrintHtml(item: FileItem): String {
-    val raw = item.file.readBytes().let { bytes ->
-        val cap = if (bytes.size > MAX_TEXT_PREVIEW_BYTES) MAX_TEXT_PREVIEW_BYTES else bytes.size
-        String(bytes, 0, cap, Charsets.UTF_8)
-    }
+    val raw = decodeUtf8Capped(item.file.readBytes())
     return buildString {
         append("<html><head><meta charset=\"utf-8\">")
         append("<style>body{font-family:monospace;font-size:12px;white-space:pre-wrap;word-wrap:break-word;}</style>")
@@ -1251,6 +1246,19 @@ private fun buildPrintHtml(item: FileItem): String {
         append(escapeHtml(raw))
         append("</pre></body></html>")
     }
+}
+
+/**
+ * [fix/audit-b17 / T10-L10a] Decode at most [cap] bytes of UTF-8. A raw byte
+ * cut can split a multi-byte sequence, and `String(bytes, UTF_8)` then renders
+ * the stump as a trailing U+FFFD — every non-ASCII preview showed a stray "�".
+ * Drop that single replacement char when we know the cut is what produced it.
+ */
+private fun decodeUtf8Capped(bytes: ByteArray, cap: Int = MAX_TEXT_PREVIEW_BYTES): String {
+    val truncated = bytes.size > cap
+    val slice = if (truncated) bytes.copyOf(cap) else bytes
+    val text = String(slice, Charsets.UTF_8)
+    return if (truncated && text.endsWith('\uFFFD')) text.dropLast(1) else text
 }
 
 private fun escapeHtml(s: String): String =

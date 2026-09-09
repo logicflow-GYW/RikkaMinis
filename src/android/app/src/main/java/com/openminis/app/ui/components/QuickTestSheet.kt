@@ -361,9 +361,7 @@ private fun AudioReplyContent(data: ByteArray) {
     var isPlaying by remember { mutableStateOf(false) }
     val player = remember { android.media.MediaPlayer() }
     val file = remember(data) {
-        java.io.File(context.cacheDir, "quicktest-audio-${data.hashCode()}.bin").apply {
-            writeBytes(data)
-        }
+        java.io.File(context.cacheDir, "quicktest-audio-${data.hashCode()}.bin")
     }
 
     fun play() {
@@ -380,7 +378,14 @@ private fun AudioReplyContent(data: ByteArray) {
         }
     }
 
-    androidx.compose.runtime.LaunchedEffect(file) { play() }
+    // [fix/audit-b17 / T10-L9] The clip used to be written inside remember{},
+    // i.e. on the main thread during composition. Write it on IO first, then
+    // auto-play — same order as before, so setDataSource never sees a
+    // half-written file.
+    androidx.compose.runtime.LaunchedEffect(file) {
+        withContext(Dispatchers.IO) { runCatching { file.writeBytes(data) } }
+        play()
+    }
     androidx.compose.runtime.DisposableEffect(Unit) {
         onDispose {
             runCatching { player.release() }

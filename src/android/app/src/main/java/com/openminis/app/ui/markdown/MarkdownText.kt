@@ -710,7 +710,11 @@ private fun filenameFromUrl(url: String): String {
  * bundling ExoPlayer for a fullscreen experience.
  */
 private fun openMediaExternally(context: Context, file: File, mime: String) {
-    android.util.Log.d("MdMedia", "openMediaExternally file=${file.absolutePath} mime=$mime")
+    // [fix/audit-b17 / T10-L6] these logs fire per streaming delta
+    // (and per composition) — keep them out of release builds.
+    if (com.openminis.app.BuildConfig.DEBUG) {
+        android.util.Log.d("MdMedia", "openMediaExternally file=${file.absolutePath} mime=$mime")
+    }
     val authority = context.packageName + ".fileprovider"
     val uri = try {
         androidx.core.content.FileProvider.getUriForFile(context, authority, file)
@@ -752,7 +756,9 @@ private fun MinisImageBlock(block: MarkdownParser.Block.Image) {
 
 @Composable
 private fun MinisVideoBlock(block: MarkdownParser.Block.Video) {
-    android.util.Log.d("MdMedia", "MinisVideoBlock url=${block.url} alt=${block.alt}")
+    if (com.openminis.app.BuildConfig.DEBUG) {
+        android.util.Log.d("MdMedia", "MinisVideoBlock url=${block.url} alt=${block.alt}")
+    }
     val context = LocalContext.current
     val sessionId = LocalMarkdownSessionId.current
     val file = remember(block.url, sessionId) { resolveMediaFile(context, block.url, sessionId) }
@@ -764,7 +770,9 @@ private fun MinisVideoBlock(block: MarkdownParser.Block.Video) {
     // Generate a thumbnail frame off the main thread via MediaMetadataRetriever.
     val thumbnail by produceState<Bitmap?>(initialValue = null, key1 = file?.absolutePath) {
         val f = file ?: run {
-            android.util.Log.d("MdMedia", "video thumbnail skipped (no file)")
+            if (com.openminis.app.BuildConfig.DEBUG) {
+                android.util.Log.d("MdMedia", "video thumbnail skipped (no file)")
+            }
             value = null
             return@produceState
         }
@@ -773,7 +781,9 @@ private fun MinisVideoBlock(block: MarkdownParser.Block.Video) {
             try {
                 retriever.setDataSource(f.absolutePath)
                 val bmp = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                android.util.Log.d("MdMedia", "video thumbnail for ${f.name} -> ${bmp?.width}x${bmp?.height}")
+                if (com.openminis.app.BuildConfig.DEBUG) {
+                    android.util.Log.d("MdMedia", "video thumbnail for ${f.name} -> ${bmp?.width}x${bmp?.height}")
+                }
                 bmp
             } catch (t: Throwable) {
                 android.util.Log.w("MdMedia", "video thumbnail failed: ${t.message}")
