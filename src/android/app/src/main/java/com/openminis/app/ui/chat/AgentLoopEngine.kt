@@ -1315,6 +1315,26 @@ internal class AgentLoopEngine(
                             TAG_STREAM,
                             "runAgentLoop turn=$turn finish=$turnFinishReason (error-shaped) with ${turnTextRaw.length} chars — network-stub continuation ${loopState.eofStubContinues}/$eofStubMax",
                         )
+                        // [audit-0909 T1-H1] The assistant turn for this
+                        // partial reply has NOT been added yet — the loop's
+                        // single `agentHistory.add(ASSISTANT)` sits far below
+                        // (after this branch, at the assistantParts build).
+                        // Without this add, the text the model just streamed
+                        // (already on screen) never enters history: the
+                        // continuation request carries the previous USER turn
+                        // immediately followed by our stub USER message (the
+                        // model loses its own output and the turn is never
+                        // persisted — reload drops it). Same shape as the
+                        // EOF-stub branch below, which runs after the add.
+                        host.agentHistory.add(
+                            LLMMessage(
+                                role = LLMMessage.Role.ASSISTANT,
+                                content = turnText,
+                                contentParts = listOf(AgentContentPart.Text(turnText)),
+                                reasoningContent = turnReasoningBlob
+                                    ?: turnThinking.toString().takeIf { it.isNotEmpty() },
+                            )
+                        )
                         val stubReminder = eofStubReminder(turnText.takeLast(80))
                         host.agentHistory.add(
                             LLMMessage(
@@ -1349,24 +1369,50 @@ internal class AgentLoopEngine(
                             TAG_STREAM,
                             "runAgentLoop turn=$turn finish=$turnFinishReason (error-shaped) with no content — one-shot retry",
                         )
-                        // [audit-0907 B1] Drop the empty assistant turn just
-                        // appended above — the retry must re-ask from the
-                        // user's message, not present [.., ASSISTANT("")] to
-                        // the provider (tail empty-assistant invites relays
-                        // to echo another empty completion, chaining the very
-                        // failure this branch recovers from). Same shape as
-                        // the EOF-empty one-shot retry below.
-                        host.agentHistory.removeAt(host.agentHistory.size - 1)
+                        // [audit-0909 T1-H1] Nothing to drop here: this turn's
+                        // assistant message is added far below, AFTER this
+                        // branch, so the old removeAt(size-1) deleted the
+                        // PREVIOUS real message — the user's original question
+                        // on a first turn, or the USER(tool_results) carrying
+                        // the just-executed tool output on a tool turn (the
+                        // latter then got a "Tool execution was interrupted"
+                        // placeholder injected by sanitizeAgentHistory). The
+                        // retry request re-reads history as-is, which is
+                        // exactly the [audit-0907 B1] intent.
                         continue
                     }
                     AppLogger.warning(
                         TAG_STREAM,
                         "runAgentLoop turn=$turn finish=$turnFinishReason (error-shaped) empty after retry — surfacing error",
                     )
+                    // [audit-0909 T1-H1] Persist an (empty) assistant row for
+                    // THIS turn before surfacing the error. setInlineError →
+                    // updateLastAssistantError addresses the session's LAST
+                    // assistant row, and this turn has none (the placeholder
+                    // bubble is in-memory only), so without this the banner
+                    // was written onto the PREVIOUS turn's row and survived a
+                    // reload as a permanent mislabel of a successful turn.
+                    // Text("") keeps the parts list non-empty for
+                    // persistAssistantTurn's guard; the row is the same empty
+                    // assistant message the user sees.
+                    host.persistAssistantTurn(
+                        listOf(AgentContentPart.Text("")),
+                        lastUsage,
+                        null,
+                        emptyMap(),
+                        modelId = loopState.currentProvider.model.id,
+                        entryId = host.activeEntryId,
+                    )
                     withContext(Dispatchers.Main) {
                         host.setInlineError(host.string(R.string.error_stream_interrupted))
                     }
-                    loopState.loopExitedNormally = true
+                    // [audit-0909 T1-L1] Failure-terminal: do NOT set
+                    // loopExitedNormally (this is not a clean completion).
+                    // terminalErrorSurfaced keeps the exit side from
+                    // classifying it as a MAX_AGENT_TURNS runaway, and the
+                    // trace now records FAILED/EXECUTION_FAILED instead of
+                    // SUCCEEDED/COMPLETED.
+                    loopState.terminalErrorSurfaced = true
                     break
                 }
             }
@@ -1442,10 +1488,24 @@ internal class AgentLoopEngine(
                     TAG_STREAM,
                     "runAgentLoop turn=$turn finish=$turnFinishReason (content filter / safety block) — no fallback available, surfacing error",
                 )
+                // [audit-0909 T1-H1] Same row-before-banner fix as the
+                // error-shaped empty branch: this turn has no persisted row
+                // yet, so updateLastAssistantError would stamp the previous
+                // turn's row. See that branch for the full rationale.
+                host.persistAssistantTurn(
+                    listOf(AgentContentPart.Text("")),
+                    lastUsage,
+                    null,
+                    emptyMap(),
+                    modelId = loopState.currentProvider.model.id,
+                    entryId = host.activeEntryId,
+                )
                 withContext(Dispatchers.Main) {
                     host.setInlineError(host.string(R.string.error_content_filtered))
                 }
-                loopState.loopExitedNormally = true
+                // [audit-0909 T1-L1] failure-terminal, not a clean completion —
+                // see the error-shaped branch above.
+                loopState.terminalErrorSurfaced = true
                 break
             }
 
@@ -1712,11 +1772,21 @@ internal class AgentLoopEngine(
                 // and summarize what actually passed. Policy-only: nothing
                 // runs a check here (VerificationStopPolicy owns the shape
                 // classification; the engine only tracks edit/verify order).
-                val verifyNudge = VerificationStopPolicy.buildNudge(
-                    changedPaths = loopState.changedCodePaths.toList(),
-                    attempts = loopState.verifyNudgeAttempts,
-                    lastEvidenceDetail = loopState.lastVerificationDetail,
-                )
+                // [audit-0909 T1-M2] A failure-terminal banner is already on
+                // screen when one of the branches above set
+                // terminalErrorSurfaced and fell through to here (length-wall
+                // ceiling / deterministic-empty / repetition abort /
+                // EOF-stub ceiling). Injecting a verify nudge would `continue`
+                // the loop and REVIVE a run the user was just told failed —
+                // and if the revived turn then succeeds, the banner and the
+                // trace contradict the outcome. "Giving up" must not be
+                // interrupted by the turn-end guard.
+                val verifyNudge = if (loopState.terminalErrorSurfaced) null else
+                    VerificationStopPolicy.buildNudge(
+                        changedPaths = loopState.changedCodePaths.toList(),
+                        attempts = loopState.verifyNudgeAttempts,
+                        lastEvidenceDetail = loopState.lastVerificationDetail,
+                    )
                 if (verifyNudge != null) {
                     loopState.verifyNudgeAttempts++
                     // [fix/runtime-limits-audit] The log's denominator reads the
