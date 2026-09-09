@@ -20,6 +20,8 @@ import com.openminis.app.provider.clampOutboundMaxTokens
 import com.openminis.app.provider.clampOutboundTemperature
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -32,6 +34,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.io.IOException
 import com.openminis.app.sandbox.offload.FirstChunkTimeoutPolicy
 import java.util.concurrent.TimeUnit
 import com.openminis.app.provider.failOnSilentEmptyCompletion
@@ -128,7 +131,27 @@ class GeminiProvider(
             .applyUserAgentOverride(null)
             .build()
 
-        val response = client.newCall(request).execute()
+        val call = client.newCall(request)
+        val ttfbTimedOut = java.util.concurrent.atomic.AtomicBoolean(false)
+        val headersArrived = java.util.concurrent.atomic.AtomicBoolean(false)
+        val ttfbWatchdog = launch {
+            delay(30_000L)
+            if (!headersArrived.get()) {
+                ttfbTimedOut.set(true)
+                call.cancel()
+            }
+        }
+        val response = try {
+            call.execute()
+        } catch (e: IOException) {
+            if (ttfbTimedOut.get()) {
+                throw LLMError.TransientError("no response from Gemini after 30s — check network/proxy")
+            }
+            throw e
+        } finally {
+            headersArrived.set(true)
+            ttfbWatchdog.cancel()
+        }
         if (!response.isSuccessful) {
             val errorBody = response.body?.string() ?: ""
             val retryAfterMs = parseRetryAfterMs(response.headers["Retry-After"], System.currentTimeMillis())
@@ -138,6 +161,15 @@ class GeminiProvider(
 
         val reader = BufferedReader(InputStreamReader(response.body!!.byteStream()))
         try {
+            // Headers arrived but the SSE body can still stall forever on a dead
+            // tunnel. Mirror OpenAI's first-data guard: cancel the call if no
+            // payload row arrives within the configured generation ceiling.
+            val firstDataArrived = java.util.concurrent.atomic.AtomicBoolean(false)
+            val firstDataWatchdog = launch {
+                val budgetMs = FirstChunkTimeoutPolicy.decideGenerationTimeoutSec(null) * 1000L
+                delay(budgetMs)
+                if (!firstDataArrived.get()) call.cancel()
+            }
             var started = false
             var lastFinishReason: String? = null
             // [RC2-truncated-detection] Accumulated text+thinking chars. Used to
@@ -149,6 +181,8 @@ class GeminiProvider(
             while (reader.readLine().also { line = it } != null) {
                 val l = line ?: continue
                 if (!l.startsWith("data: ")) continue
+                firstDataArrived.set(true)
+                firstDataWatchdog.cancel()
                 val payload = l.removePrefix("data: ")
 
                 val json = try { JSONObject(payload) } catch (_: Exception) { continue }

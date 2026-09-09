@@ -21,6 +21,8 @@ import com.openminis.app.provider.applyUserAgentOverride
 import com.openminis.app.provider.safeOptString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -33,6 +35,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.io.IOException
 import com.openminis.app.sandbox.offload.FirstChunkTimeoutPolicy
 import java.util.concurrent.TimeUnit
 import com.openminis.app.provider.failOnSilentEmptyCompletion
@@ -157,7 +160,27 @@ class AnthropicProvider(
             headerMap[name] = request.headers[name] ?: ""
         }
 
-        val response = client.newCall(request).execute()
+        val call = client.newCall(request)
+        val ttfbTimedOut = java.util.concurrent.atomic.AtomicBoolean(false)
+        val headersArrived = java.util.concurrent.atomic.AtomicBoolean(false)
+        val ttfbWatchdog = launch {
+            delay(30_000L)
+            if (!headersArrived.get()) {
+                ttfbTimedOut.set(true)
+                call.cancel()
+            }
+        }
+        val response = try {
+            call.execute()
+        } catch (e: IOException) {
+            if (ttfbTimedOut.get()) {
+                throw LLMError.TransientError("no response from Anthropic after 30s — check network/proxy")
+            }
+            throw e
+        } finally {
+            headersArrived.set(true)
+            ttfbWatchdog.cancel()
+        }
         val durationMs = System.currentTimeMillis() - startTime
 
         if (!response.isSuccessful) {
@@ -215,11 +238,22 @@ class AnthropicProvider(
         var contentChars = 0
         var sawClearFinish = false
 
+        // A response may send headers and then never send the first SSE event
+        // when a proxy tunnel is wedged. Bound that body stall like OpenAI.
+        val firstDataArrived = java.util.concurrent.atomic.AtomicBoolean(false)
+        val firstDataWatchdog = launch {
+            val budgetMs = FirstChunkTimeoutPolicy.decideGenerationTimeoutSec(null) * 1000L
+            delay(budgetMs)
+            if (!firstDataArrived.get()) call.cancel()
+        }
+
         try {
             var line: String?
             while (reader.readLine().also { line = it } != null) {
                 val l = line ?: continue
                 if (!l.startsWith("data: ")) continue
+                firstDataArrived.set(true)
+                firstDataWatchdog.cancel()
                 val payload = l.removePrefix("data: ")
                 if (payload == "[DONE]") break
 

@@ -54,6 +54,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.AsyncImage
 import com.openminis.app.sandbox.PRootKernel
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -856,11 +857,17 @@ private fun MinisAudioBlock(block: MarkdownParser.Block.Audio) {
     val file = remember(block.url) { resolveMediaFile(block.url) }
     val filename = remember(block.url) { filenameFromUrl(block.url) }
 
-    // Dedicated MediaPlayer per card. Released on DisposableEffect dispose.
     val player = remember(file?.absolutePath) {
-        if (file == null) null else try {
-            MediaPlayer().apply { setDataSource(file.absolutePath); prepare() }
-        } catch (_: Throwable) { null }
+        if (file == null) null else MediaPlayer().apply {
+            setDataSource(file.absolutePath)
+        }
+    }
+    var prepared by remember(file?.absolutePath) { mutableStateOf(false) }
+    LaunchedEffect(player) {
+        if (player == null) return@LaunchedEffect
+        prepared = withContext(Dispatchers.IO) {
+            runCatching { player.prepare(); true }.getOrDefault(false)
+        }
     }
     DisposableEffect(player) {
         onDispose { try { player?.release() } catch (_: Throwable) {} }
@@ -868,13 +875,15 @@ private fun MinisAudioBlock(block: MarkdownParser.Block.Audio) {
 
     var isPlaying by remember { mutableStateOf(false) }
     var positionMs by remember { mutableStateOf(0) }
-    val durationMs = player?.duration ?: 0
+    val durationMs = if (prepared && player != null) {
+        runCatching { player.duration }.getOrDefault(0)
+    } else 0
 
     // Poll position while playing to drive the progress bar.
     LaunchedEffect(isPlaying) {
         while (isPlaying && player != null) {
             positionMs = try { player.currentPosition } catch (_: Throwable) { 0 }
-            if (!player.isPlaying) { isPlaying = false; break }
+            if (player != null && prepared && !player.isPlaying) { isPlaying = false; break }
             delay(200)
         }
     }
@@ -901,8 +910,8 @@ private fun MinisAudioBlock(block: MarkdownParser.Block.Audio) {
             .clip(RoundedCornerShape(10.dp))
             .background(cardBg)
             .border(0.5.dp, borderColor, RoundedCornerShape(10.dp))
-            .clickable(enabled = file != null) {
-                if (player == null) {
+            .clickable(enabled = file != null && (player == null || prepared)) {
+                if (player == null || !prepared) {
                     file?.let { openMediaExternally(context, it, "audio/*") }
                 } else {
                     if (isPlaying) { try { player.pause() } catch (_: Throwable) {} ; isPlaying = false }
