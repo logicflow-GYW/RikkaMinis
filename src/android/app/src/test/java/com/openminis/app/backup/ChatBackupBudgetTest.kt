@@ -145,8 +145,9 @@ class ChatBackupBudgetTest {
     }
 
     @Test
-    fun `messages that sanitize to null cost nothing and are skipped`() {
-        // Media-only message: sanitize returns null → not counted, not carried.
+    fun `media-only messages keep a small placeholder row`() {
+        // Media-only message: sanitize returns null, so packing keeps a
+        // bounded placeholder instead of silently deleting the turn.
         val mediaMsg = BudgetChatMessage(
             id = "m1", sessionId = "a", role = "user",
             partsJson = """[{"type":"image","image_base64":"x"}]""",
@@ -160,8 +161,9 @@ class ChatBackupBudgetTest {
             capReasoning = ::capReasoning,
         )
         assertEquals(1, result.sessions.size)
-        assertEquals(0, result.messages.size)
+        assertEquals(1, result.messages.size)
         assertEquals(0, result.messagesDropped)
+        assertTrue(result.messages[0].getString("partsJson").contains("media message elided"))
     }
 
     // ── Per-part caps (sanitizeChatParts) ───────────────────────────────
