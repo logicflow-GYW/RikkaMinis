@@ -49,7 +49,8 @@ private object GeminiModelListAdapter : ModelListProvider {
         forceRefresh: Boolean,   // no cache — accepted for interface, ignored
     ): List<LLMModel> {
         if (apiKey == null) return emptyList()
-        return GeminiModelsApi.fetchModels(apiKey)
+        // [fix/audit-b22 / T5-L6] Same as the Anthropic/OpenAI adapters above.
+        return GeminiModelsApi.fetchModels(apiKey, instance.effectiveBaseURL)
     }
 }
 

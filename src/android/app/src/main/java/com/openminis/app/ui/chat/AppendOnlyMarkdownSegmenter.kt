@@ -1,5 +1,9 @@
 package com.openminis.app.ui.chat
 
+// [fix/audit-b22 / T2-L3] RUNTIME-DEAD while AGGREGATE_MESSAGE_ITEMS = true
+// (ChatScreen.kt) — same as StableChatRowLedger: the aggregate render path
+// never reaches this segmenter. Kept for the Stage-E fallback + its tests.
+
 /**
  * One stable markdown fragment slot produced by [AppendOnlyMarkdownSegmenter].
  *

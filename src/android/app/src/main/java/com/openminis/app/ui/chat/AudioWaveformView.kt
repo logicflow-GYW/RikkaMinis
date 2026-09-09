@@ -1,5 +1,9 @@
 package com.openminis.app.ui.chat
 
+// [fix/audit-b22 / T2-L3] RUNTIME-DEAD: zero callers anywhere in the app tree
+// (the voice-input waveform that consumed it was removed). Kept only until the
+// next cleanup pass; do not wire it into a new screen without re-checking.
+
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas

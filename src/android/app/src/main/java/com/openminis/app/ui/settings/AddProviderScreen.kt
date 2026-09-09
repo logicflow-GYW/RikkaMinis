@@ -434,10 +434,13 @@ private fun ColumnScope.ApiKeyConfigSection(
             (appContext as? MinisApp)?.applicationScope?.launch {
                 val result = providerRepository.refreshModels(instance, forceRefresh = true)
                 if (result != ModelRefreshResult.SUCCESS_API) {
+                    // [fix/audit-b22 / T6-L6] These three were hardcoded Chinese
+                    // while the rest of this screen uses R.string — English
+                    // users got a Chinese toast.
                     val msg = when (result) {
-                        ModelRefreshResult.NO_KEY -> "已保存，但未读到 API 密钥"
-                        ModelRefreshResult.FAILURE -> "已保存，但模型列表拉取失败，请检查 URL 与密钥"
-                        ModelRefreshResult.PRESERVED -> "已保存，但无法从该地址拉取模型，请检查 URL"
+                        ModelRefreshResult.NO_KEY -> appContext.getString(R.string.provider_saved_no_api_key)
+                        ModelRefreshResult.FAILURE -> appContext.getString(R.string.provider_saved_models_failed)
+                        ModelRefreshResult.PRESERVED -> appContext.getString(R.string.provider_saved_models_unreachable)
                         else -> null
                     }
                     // [fix/addprovider-toast-looper] Toast 必须回主线程弹，

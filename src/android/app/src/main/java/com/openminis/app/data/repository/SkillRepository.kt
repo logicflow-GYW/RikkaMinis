@@ -405,9 +405,21 @@ class SkillRepository(private val context: Context) {
      * Parse SKILL.md content (YAML frontmatter + markdown body) and import.
      * Returns the created Skill or null on failure.
      */
-    fun importFromContent(content: String, source: ImportSource = ImportSource.FILE, sourceURL: String? = null): Skill? {
+    fun importFromContent(
+        content: String,
+        source: ImportSource = ImportSource.FILE,
+        sourceURL: String? = null,
+        // [fix/audit-b22 / T4-L8] Backup restore knows the exported id. Matching
+        // by name-slug alone created a duplicate whenever the skill had been
+        // renamed locally after the backup was taken: the incoming name slug
+        // no longer equals the local id, so restore added a second copy
+        // instead of refreshing the existing one.
+        preferredId: String? = null,
+    ): Skill? {
         val parsed = parseSkillMd(content) ?: return null
-        val id = slugify(parsed.name)
+        val id = preferredId
+            ?.takeIf { it.isNotBlank() && _skills.value.any { s -> s.id == it } }
+            ?: slugify(parsed.name)
         if (id.isNotBlank() && _skills.value.any { it.id == id }) {
             // Replace existing: update in place so URL updates refresh contents.
             val current = _skills.value.first { it.id == id }
@@ -455,7 +467,7 @@ class SkillRepository(private val context: Context) {
      * bundled sibling files (scripts/, references/, assets/, etc.) are extracted
      * alongside it into `skillsDir/<id>/`.
      */
-    fun importFromArchive(input: InputStream): Skill? {
+    fun importFromArchive(input: InputStream, preferredId: String? = null): Skill? {
         val entries = try { readZipEntries(input) } catch (e: Exception) {
             Log.w(TAG, "Failed to read zip archive: ${e.message}")
             return null
@@ -471,7 +483,7 @@ class SkillRepository(private val context: Context) {
         val skillContent = try { String(skillMdEntry.data, Charsets.UTF_8) } catch (_: Exception) { return null }
         if (skillContent.isBlank()) return null
 
-        val skill = importFromContent(skillContent, ImportSource.FILE) ?: return null
+        val skill = importFromContent(skillContent, ImportSource.FILE, preferredId = preferredId) ?: return null
 
         val prefix = if (skillMdEntry.name == "SKILL.md") "" else skillMdEntry.name.dropLast("SKILL.md".length)
         val skillDir = File(skillsDir, skill.id)

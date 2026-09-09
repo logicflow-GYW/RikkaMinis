@@ -1,5 +1,11 @@
 package com.openminis.app.ui.chat
 
+// [fix/audit-b22 / T2-L3] RUNTIME-DEAD while AGGREGATE_MESSAGE_ITEMS = true
+// (ChatScreen.kt): mergeAgentTextSnapshot / mergeLegacyStreamingText and their
+// private helpers have zero callers on the shipped path — the aggregate
+// renderer consumes the assistant message directly. Kept for the Stage-E
+// fallback; the unit tests here exercise this file, not production.
+
 // [refactor/split-streaming-markdown] Batch 2: streaming-merge PURE functions
 // moved VERBATIM from StreamingMarkdownText.kt (was lines 697-952). Zero
 // Compose dependency — plain String -> List<String> / String -> String logic

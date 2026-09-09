@@ -18,6 +18,7 @@ import com.openminis.app.browser.BrowserTabPool
 import com.openminis.app.data.db.AppDatabase
 import com.openminis.app.data.repository.BackgroundSettingsRepository
 import com.openminis.app.data.repository.ChatRepository
+import com.openminis.app.ui.chat.KatexWebViewPool
 import com.openminis.app.ui.chat.clearMarkdownParseCachesForMemoryPressure
 import com.openminis.app.data.repository.EnvVarRepository
 import com.openminis.app.data.MountedFoldersStore
@@ -962,6 +963,9 @@ class MinisApp : Application(), ImageLoaderFactory {
                 // acceptable when the alternative is being OOM-killed mid-voice-
                 // dictation.
                 runCatching { clearMarkdownParseCachesForMemoryPressure() }
+                // [fix/audit-b22 / T2-L2] The KaTeX render cache holds up to
+                // 64 MB of bitmaps and was not part of this reclaim pass.
+                runCatching { KatexWebViewPool.clearRenderCacheForMemoryPressure() }
                 System.gc()
             }
         }.onFailure {

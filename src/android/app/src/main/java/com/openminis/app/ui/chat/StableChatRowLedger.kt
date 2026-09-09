@@ -1,5 +1,12 @@
 package com.openminis.app.ui.chat
 
+// [fix/audit-b22 / T2-L3] RUNTIME-DEAD while AGGREGATE_MESSAGE_ITEMS = true
+// (ChatScreen.kt): the aggregate path returns before every call site of this
+// ledger, so nothing here runs in the shipped app. Kept as the Stage-E
+// fallback and because its unit tests target this implementation — a green
+// ledger test does NOT prove the production render path. Do not "fix" a bug
+// here and assume user-visible behaviour changed.
+
 import androidx.annotation.VisibleForTesting
 
 /**

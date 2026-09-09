@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import androidx.room.Upsert
 
 @Dao
 interface ProviderConfigDao {
@@ -24,7 +25,13 @@ interface ProviderConfigDao {
     @Query("SELECT * FROM provider_config_meta")
     suspend fun loadMeta(): List<ProviderConfigMetaEntity>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    // [fix/audit-b22 / T4-L6] Was @Insert(REPLACE): REPLACE deletes the old
+    // row and inserts a new one, so the FK's ON DELETE CASCADE wiped every
+    // provider_entries row of that instance on each sync — the exact opposite
+    // of what this DAO's incremental-sync contract promises. @Upsert emits an
+    // UPDATE for existing ids (Room falls back to INSERT-then-UPDATE on SQLite
+    // < 3.24), so the parent row — and its children — survive.
+    @Upsert
     suspend fun upsertInstances(rows: List<ProviderInstanceEntity>)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)

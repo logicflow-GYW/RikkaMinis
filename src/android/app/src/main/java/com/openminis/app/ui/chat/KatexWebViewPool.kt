@@ -56,6 +56,17 @@ internal object KatexWebViewPool {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val mutex = Mutex()
+    /**
+     * [fix/audit-b22 / T2-L2] Drop every cached formula bitmap. The cache is
+     * byte-budgeted (64 MB) but was never reclaimed under memory pressure, so
+     * on a small-heap device it could sit on a large chunk of native bitmaps
+     * while the app was being pushed into OOM. Called from MinisApp's CRITICAL
+     * trim branch; the next render simply re-renders as a cache miss.
+     */
+    fun clearRenderCacheForMemoryPressure() {
+        runCatching { cache.evictAll() }
+    }
+
     private val cache = object : LruCache<String, KatexRenderResult>(KATEX_CACHE_MAX_KB) {
         override fun sizeOf(key: String, value: KatexRenderResult): Int =
             (value.bitmap.byteCount / 1024).coerceAtLeast(1)

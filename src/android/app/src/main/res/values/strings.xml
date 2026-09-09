@@ -427,7 +427,6 @@
     <string name="filebrowser_sort_by">Sort By</string>
     <string name="filepreview_share">Share</string>
     <string name="action_print">Print</string>
-    <string name="filepreview_save_to_gallery">Save to gallery</string>
     <string name="filepreview_save_as">Save as…</string>
     <string name="filepreview_loading">Loading…</string>
     <string name="filepreview_loading_pdf">Loading PDF…</string>
@@ -1746,4 +1745,20 @@
     <string name="thinking_fmt_custom_title">Custom field path</string>
     <string name="thinking_fmt_custom_desc">Escape hatch: a dotted path plus a value at High for an endpoint not covered above.</string>
     <string name="backup_progress_title">Backing up…</string>
+    <string name="notification_tool_shell">RikkaMinis is using Shell</string>
+    <string name="notification_tool_read_file">RikkaMinis is reading File</string>
+    <string name="notification_tool_editor">RikkaMinis is using Editor</string>
+    <string name="notification_tool_edit_file">RikkaMinis is editing File</string>
+    <string name="notification_tool_browser">RikkaMinis is using Browser</string>
+    <string name="notification_tool_read_image">RikkaMinis is reading Image</string>
+    <string name="notification_tool_memory">RikkaMinis is using Memory</string>
+    <string name="notification_tool_search">RikkaMinis is using Search</string>
+    <string name="notification_tool_generic">RikkaMinis is using %1$s</string>
+    <string name="config_confirm_title_one">Confirm change</string>
+    <string name="config_confirm_title_many">Confirm %1$d changes</string>
+    <string name="config_confirm_apply">Apply</string>
+    <string name="config_confirm_reject_all">Reject All</string>
+    <string name="provider_saved_no_api_key">Saved, but no API key was found</string>
+    <string name="provider_saved_models_failed">Saved, but fetching the model list failed - check the URL and key</string>
+    <string name="provider_saved_models_unreachable">Saved, but models could not be fetched from that address - check the URL</string>
 </resources>

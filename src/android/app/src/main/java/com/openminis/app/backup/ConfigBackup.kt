@@ -990,7 +990,13 @@ object ConfigBackup {
                             null
                         } else {
                             val bytes = android.util.Base64.decode(archive, android.util.Base64.NO_WRAP)
-                            skillRepo.importFromArchive(ByteArrayInputStream(bytes))
+                            // [fix/audit-b22 / T4-L8] Pass the exported id so a
+                            // skill renamed since the backup is refreshed in
+                            // place instead of being duplicated.
+                            skillRepo.importFromArchive(
+                                ByteArrayInputStream(bytes),
+                                s.optString("id", "").takeIf { it.isNotEmpty() },
+                            )
                         }
                     } else {
                         val body = s.optString("body", "")
@@ -999,6 +1005,8 @@ object ConfigBackup {
                             body,
                             SkillRepository.ImportSource.from(s.optString("importSource", "file")),
                             s.optString("sourceURL", "").takeIf { it.isNotEmpty() },
+                            // [fix/audit-b22 / T4-L8] Same as the archive branch.
+                            s.optString("id", "").takeIf { it.isNotEmpty() },
                         )
                     }
                     if (imported == null) {

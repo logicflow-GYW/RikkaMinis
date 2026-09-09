@@ -498,14 +498,26 @@ class OpenAIProvider constructor(
         // minis-model-use (ModelUseOffloadHandler) — get them on
         // LLMResponse.mediaAttachments and can write the image to --output.
         val media = mutableListOf<LLMMediaAttachment>()
-        streamMessage(
+        // [fix/audit-b22 / T5-L7] Call the *clamped* variant. The public
+        // streamMessage() is the wrapper that runs ProviderBoundary.enforce()
+        // and records an RSS sample; sendMessage() already ran both for this
+        // call, so going through streamMessage() enforced twice and recorded
+        // two RSS deltas (kind sendMessage:* and streamMessage:*) for one
+        // request, skewing the probe's per-kind statistics.
+        //
+        // The wrapper's clampThinkingLevel() was load-bearing, though: callers
+        // that drive sendMessageClamped() directly (the thinking-wire golden
+        // tests, and any future in-process caller) rely on the model's catalog
+        // ceiling being applied before the request is built. Keep the clamp,
+        // drop only the duplicated boundary/RSS work.
+        streamMessageClamped(
             messages = messages,
             systemPrompt = systemPrompt,
             maxTokens = maxTokens,
             temperature = temperature,
             imageParts = imageParts,
             tools = tools,
-            thinkingLevel = thinkingLevel,
+            thinkingLevel = clampThinkingLevel(thinkingLevel),
         ).collect { chunk ->
             when (chunk) {
                 is LLMStreamChunk.Text -> textBuf.append(chunk.text)

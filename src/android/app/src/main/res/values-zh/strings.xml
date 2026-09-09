@@ -636,7 +636,6 @@
     <string name="filebrowser_sort_kind">类型</string>
     <string name="filepreview_share">分享</string>
     <string name="action_print">打印</string>
-    <string name="filepreview_save_to_gallery">保存到相册</string>
     <string name="filepreview_save_as">另存为…</string>
     <string name="filepreview_loading">正在加载…</string>
     <string name="filepreview_loading_pdf">正在加载 PDF…</string>
@@ -1673,4 +1672,20 @@
     <string name="thinking_fmt_custom_title">自定义字段路径</string>
     <string name="thinking_fmt_custom_desc">逃生舱：点分路径加 High 档的值，用于上述未覆盖的端点。</string>
     <string name="backup_progress_title">备份进行中…</string>
+    <string name="notification_tool_shell">正在使用 Shell</string>
+    <string name="notification_tool_read_file">正在读取文件</string>
+    <string name="notification_tool_editor">正在使用编辑器</string>
+    <string name="notification_tool_edit_file">正在编辑文件</string>
+    <string name="notification_tool_browser">正在使用浏览器</string>
+    <string name="notification_tool_read_image">正在读取图片</string>
+    <string name="notification_tool_memory">正在使用记忆</string>
+    <string name="notification_tool_search">正在搜索</string>
+    <string name="notification_tool_generic">正在使用 %1$s</string>
+    <string name="config_confirm_title_one">确认更改</string>
+    <string name="config_confirm_title_many">确认 %1$d 项更改</string>
+    <string name="config_confirm_apply">应用</string>
+    <string name="config_confirm_reject_all">全部拒绝</string>
+    <string name="provider_saved_no_api_key">已保存，但未读到 API 密钥</string>
+    <string name="provider_saved_models_failed">已保存，但模型列表拉取失败，请检查 URL 与密钥</string>
+    <string name="provider_saved_models_unreachable">已保存，但无法从该地址拉取模型，请检查 URL</string>
 </resources>

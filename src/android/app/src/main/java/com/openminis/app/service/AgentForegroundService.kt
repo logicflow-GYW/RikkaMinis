@@ -707,16 +707,19 @@ class AgentForegroundService : Service() {
      * to the raw tool name for unknowns rather than a generic string,
      * so the user still gets a hint about what's running.
      */
+    // [fix/audit-b22 / T8-L4] Every other string in this notification comes
+    // from R.string (7 locales); these labels were hardcoded English, so
+    // non-English users saw a mixed-language notification title.
     private fun toolDisplayLabel(toolName: String): String = when (toolName) {
-        "shell_execute" -> "RikkaMinis is using Shell"
-        "file_read" -> "RikkaMinis is reading File"
-        "file_write" -> "RikkaMinis is using Editor"
-        "file_edit" -> "RikkaMinis is editing File"
-        "browser_use" -> "RikkaMinis is using Browser"
-        "read_image" -> "RikkaMinis is reading Image"
-        "memory_write", "memory_get" -> "RikkaMinis is using Memory"
-        "web_search" -> "RikkaMinis is using Search"
-        else -> "RikkaMinis is using $toolName"
+        "shell_execute" -> getString(R.string.notification_tool_shell)
+        "file_read" -> getString(R.string.notification_tool_read_file)
+        "file_write" -> getString(R.string.notification_tool_editor)
+        "file_edit" -> getString(R.string.notification_tool_edit_file)
+        "browser_use" -> getString(R.string.notification_tool_browser)
+        "read_image" -> getString(R.string.notification_tool_read_image)
+        "memory_write", "memory_get" -> getString(R.string.notification_tool_memory)
+        "web_search" -> getString(R.string.notification_tool_search)
+        else -> getString(R.string.notification_tool_generic, toolName)
     }
 
     /**

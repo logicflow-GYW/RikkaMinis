@@ -82,8 +82,15 @@ private fun ConfigConfirmDialog(change: PendingConfigChange) {
             dismissOnClickOutside = false,
         ),
         title = {
+            // [fix/audit-b22 / T6-L5] Title/primary button were hardcoded
+            // English while the Cancel button next to them already used
+            // R.string — this dialog pops on every minis-config write.
             Text(
-                if (workingItems.size > 1) "Confirm ${workingItems.size} changes" else "Confirm change"
+                if (workingItems.size > 1) {
+                    stringResource(R.string.config_confirm_title_many, workingItems.size)
+                } else {
+                    stringResource(R.string.config_confirm_title_one)
+                },
             )
         },
         text = {
@@ -115,7 +122,12 @@ private fun ConfigConfirmDialog(change: PendingConfigChange) {
             }
         },
         confirmButton = {
-            val applyText = if (approvedCount == 0) "Reject All" else "Apply"
+            // [fix/audit-b22 / T6-L5] Same as the title above.
+            val applyText = if (approvedCount == 0) {
+                stringResource(R.string.config_confirm_reject_all)
+            } else {
+                stringResource(R.string.config_confirm_apply)
+            }
             MinisTextButton(
                 onClick = { ConfigConfirmationGate.userApprove(workingItems.toList()) },
                 enabled = workingItems.isNotEmpty(),
