@@ -30,7 +30,7 @@ REPO_ROOT = os.path.abspath(
 
 # Relative roots the scanners expect inside a repo tree.
 KOTLIN_APP = "src/android/app/src/main/java"
-KOTLIN_PKG = os.path.join(KOTLIN_APP, "com/openminis/app")
+KOTLIN_PKG = os.path.join(KOTLIN_APP, "com/rikkaminis/app")
 RES_VALUES = "src/android/app/src/main/res/values"
 
 PASS = 0
@@ -74,7 +74,7 @@ def check(name, ok, detail=""):
 # Fixtures
 # ─────────────────────────────────────────────────────────────────────────────
 
-FW_MODEL = """package com.openminis.app.data.model
+FW_MODEL = """package com.rikkaminis.app.data.model
 
 data class ProviderInstance(
     val id: String,
@@ -83,7 +83,7 @@ data class ProviderInstance(
 )
 """
 
-FW_ENTITY = """package com.openminis.app.data.db
+FW_ENTITY = """package com.rikkaminis.app.data.db
 
 data class ProviderInstanceEntity(
     val id: String,
@@ -92,7 +92,7 @@ data class ProviderInstanceEntity(
 )
 """
 
-FW_MAPPING = """package com.openminis.app.data.db
+FW_MAPPING = """package com.rikkaminis.app.data.db
 
 fun ProviderConfig.toSnapshot(): ProviderConfigSnapshot {
     val instanceRows = instances.mapIndexed { idx, inst ->
@@ -120,7 +120,7 @@ fun ProviderConfigSnapshot.toProviderConfig(): ProviderConfig {
 # Minimal stubs for the files the scanner reads unconditionally for the
 # (inert in this fixture) ModelGroup group.
 FW_GROUP_ENTITY_STUB = (
-    "package com.openminis.app.data.db\n"
+    "package com.rikkaminis.app.data.db\n"
     "// ModelGroup intentionally absent — exercises the parse-error-continue path.\n"
 )
 
@@ -144,12 +144,12 @@ def four_way_fixture(model_extra="", entity_extra="", snap_extra="", config_extr
 
 
 I18N_CLEAN_KT = (
-    "package com.openminis.app\n"
+    "package com.rikkaminis.app\n"
     "val title = R.string.app_name\n"
 )
 
 I18N_DIRTY_KT = (
-    "package com.openminis.app\n"
+    "package com.rikkaminis.app\n"
     "val title = R.string.app_name\n"
     "val orphan = R.string.never_defined_key\n"
 )
@@ -164,7 +164,7 @@ I18N_STRINGS = (
 
 def enum_fixture(dirty=False):
     guarded = (
-        "package com.openminis.app\n"
+        "package com.rikkaminis.app\n"
         "fun a(s: String) {\n"
         "    val x = runCatching { Foo.valueOf(s) }.getOrNull()\n"
         "}\n"
@@ -177,7 +177,7 @@ def enum_fixture(dirty=False):
         "}\n"
     )
     bare = (
-        "package com.openminis.app\n"
+        "package com.rikkaminis.app\n"
         "fun c(s: String) {\n"
         "    val z = Baz.valueOf(s)\n"
         "}\n" if dirty else ""
@@ -189,7 +189,7 @@ def enum_fixture(dirty=False):
 
 def boundary_fixture(dirty=False):
     worker = (
-        "package com.openminis.app.sandbox.offload\n"
+        "package com.rikkaminis.app.sandbox.offload\n"
         "class ModelExecutionService {\n"
         "    fun run() {\n"
         "        provider.streamMessage(request) {}\n"
@@ -198,7 +198,7 @@ def boundary_fixture(dirty=False):
         "}\n"
     )
     caller = (
-        "package com.openminis.app.ui.chat\n"
+        "package com.rikkaminis.app.ui.chat\n"
         "class ChatViewModel {\n"
         "    fun send() {\n"
         "        viewModel.sendMessage(msg)\n"

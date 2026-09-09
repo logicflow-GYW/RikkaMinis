@@ -56,7 +56,7 @@
 - **主进程**：UI + 智能体编排（AgentLoopEngine 状态机）+ 沙箱宿主 + 数据层。
 - 静态扫描门禁守护这条边界：**app 进程代码不得直调 provider 网络入口**。
 
-## 3. 包结构地图（com.openminis.app）
+## 3. 包结构地图（com.rikkaminis.app）
 
 | 包 | 职责 | 体量信号 |
 |---|---|---|

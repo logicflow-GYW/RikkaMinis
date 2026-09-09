@@ -11,7 +11,7 @@ Exit code: 0 = clean, 1 = issues found
 """
 import re, sys, os
 
-KOTLIN = "src/android/app/src/main/java/com/openminis/app/"
+KOTLIN = "src/android/app/src/main/java/com/rikkaminis/app/"
 
 SYNC_GROUPS = [
     {

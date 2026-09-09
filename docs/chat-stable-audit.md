@@ -1,7 +1,7 @@
 # 会话 B：@Stable/@Immutable 数据类纪律 — 审计结论
 
 > 分支 `fix/chat-stable-discipline` · 基线 `origin/main` (3eb1785)
-> 审计目标：`src/android/app/src/main/java/com/openminis/app/ui/chat/ChatModels.kt`
+> 审计目标：`src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatModels.kt`
 > 一句话结论：**5 个 data class 全部稳定可判，仅 `SlashCommand` 缺 `@Immutable`，已补。零「存疑」字段，零不稳定字段。**
 
 ---

@@ -299,7 +299,7 @@
             android:excludeFromRecents="false"
             android:theme="@style/Theme.Minis">
             <intent-filter>
-                <action android:name="com.openminis.app.action.OPEN_WEBAPP" />
+                <action android:name="com.rikkaminis.app.action.OPEN_WEBAPP" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>

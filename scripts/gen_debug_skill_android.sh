@@ -50,7 +50,7 @@ Transport notes (Android differs from iOS!):
   - Payloads are PLAINTEXT JSON-RPC 2.0 — there is no encrypted envelope and no
     /pair step. Do not use the iOS protocol-v1 clients against this server.
   - Auth: EVERY client (loopback AND LAN) must send the per-install device token:
-        adb shell run-as com.openminis.app cat files/debug_server_token
+        adb shell run-as com.rikkaminis.app cat files/debug_server_token
     Passed as X-Minis-Token (Authorization: Bearer also accepted).
     Or set MINIS_DEBUG_TOKEN in the environment. There is no loopback exemption —
     an on-device browser page could otherwise fetch 127.0.0.1 token-free.
@@ -81,7 +81,7 @@ def call(host: str, method: str, params: dict, token: str | None) -> dict:
             raise SystemExit(
                 "401 Unauthorized — this server requires a token on EVERY connection\n"
                 "(loopback and LAN). Read it with:\n"
-                "  adb shell run-as com.openminis.app cat files/debug_server_token\n"
+                "  adb shell run-as com.rikkaminis.app cat files/debug_server_token\n"
                 "then pass --token / MINIS_DEBUG_TOKEN. (There is no loopback exemption.)\n"
                 f"server said: {payload}"
             )
@@ -121,7 +121,7 @@ an on-device browser page could otherwise reach 127.0.0.1 token-free.
 
 ```bash
 # Every connection needs the token
-TOK=$(adb shell run-as com.openminis.app cat files/debug_server_token)
+TOK=$(adb shell run-as com.rikkaminis.app cat files/debug_server_token)
 adb forward tcp:5321 tcp:5321
 curl -s localhost:5321/ -H "X-Minis-Token: $TOK" \
      -d '{"jsonrpc":"2.0","id":1,"method":"debug.appInfo","params":{}}'

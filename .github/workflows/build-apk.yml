@@ -82,6 +82,36 @@ jobs:
       - name: Rebuild crash handler native lib from source
         run: ./deps/build_crash_handler.sh
 
+      # Same reasoning as crash_handler above, plus a package-rename constraint:
+      # JNI symbol names are derived from the Kotlin host class's fully
+      # qualified name. The vendored libjieba_jni.so carried
+      # Java_com_openminis_app_shared_JiebaEngine_*; after the package rename
+      # the Kotlin side looks for Java_com_rikkaminis_app_*, so the binary MUST
+      # be rebuilt from cpp/jieba_jni.cpp or the first Chinese-segmentation
+      # call throws UnsatisfiedLinkError.
+      - name: Rebuild jieba native lib from source
+        run: ./deps/build_jieba.sh
+
+      # Hard gate: the vendored/ rebuilt .so symbols must match the Kotlin
+      # package. Catches a stale binary after any future package rename or
+      # upstream fusion that brings back the old name.
+      - name: Verify JNI symbols match package
+        run: |
+          cd src/android/app/src/main/jniLibs/arm64-v8a
+          fail=0
+          for so in libjieba_jni.so libminis_crash_handler.so; do
+            if ! strings "$so" | grep -q "Java_com_rikkaminis_app_"; then
+              echo "::error::$so has no Java_com_rikkaminis_app_* symbols (stale binary?)"
+              fail=1
+            fi
+            if strings "$so" | grep -q "Java_com_openminis_app_"; then
+              echo "::error::$so still exports Java_com_openminis_app_* symbols"
+              fail=1
+            fi
+            echo "$so: $(strings "$so" | grep -c 'Java_com_rikkaminis_app_') new symbols"
+          done
+          exit $fail
+
       # build.gradle.kts wires `stageDebugSkillAssets` into every debug asset
       # merge. The script is `onlyIf { script.exists() }`, but it reads
       # .claude/skills/debug-server/ which is private and absent from this

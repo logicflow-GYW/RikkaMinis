@@ -33,22 +33,22 @@ val ciVersionCode: Int? = System.getenv("MINIS_VERSION_CODE")?.toIntOrNull()
 val ciVersionSuffix: String? = System.getenv("MINIS_VERSION_NAME_SUFFIX")
 
 // [dual-appid] Co-existence switch (experiment-first via the alt account).
-// The big/main account ships applicationId "com.openminis.app" (stable).
+// The big/main account ships applicationId "com.rikkaminis.app" (stable).
 // The alt account can build an install-co-existing variant by setting
-//   MINIS_APP_ID_OVERRIDE=com.openminis.app.lab   (e.g. in CI or local env)
+//   MINIS_APP_ID_OVERRIDE=com.rikkaminis.app.lab   (e.g. in CI or local env)
 // which re-points applicationId (the install identity that guarantees two
 // builds do NOT overwrite each other on the same device), the derived
 // sub-process names (<appId>:modelservice etc.) and the Shizuku provider
 // (<appId>.shizuku), and overrides the default app_name so the two installs
 // are distinguishable on the launcher. When unset, behavior is byte-for-byte
-// identical to the stable build (namespace stays com.openminis.app).
+// identical to the stable build (namespace stays com.rikkaminis.app).
 val minisAppIdOverride: String? = System.getenv("MINIS_APP_ID_OVERRIDE")?.takeIf { it.isNotBlank() }
-val minisFinalAppId: String = minisAppIdOverride ?: "com.openminis.app"
+val minisFinalAppId: String = minisAppIdOverride ?: "com.rikkaminis.app"
 val minisAppLabel: String =
     if (minisAppIdOverride != null) "RikkaMinis (Lab)" else "RikkaMinis"
 
 android {
-    namespace = "com.openminis.app"
+    namespace = "com.rikkaminis.app"
     // compileSdk 36 (Android 16) — retained for the current framework version
     // even though the Live Updates / "dynamic island" feature was removed
     // (2026-08-17). targetSdk stays 35 to avoid pulling in Android 16
@@ -70,7 +70,7 @@ android {
         resValue("string", "app_name", minisAppLabel)
         // [dual-appid] A resource alias for the runtime applicationId, so static
         // XML (res/xml/shortcuts.xml) can reference our real package instead of
-        // hard-coding "com.openminis.app". Resolves to the same value in both
+        // hard-coding "com.rikkaminis.app". Resolves to the same value in both
         // accounts; only meaningful because shortcuts targetPackage must match
         // the installed applicationId to launch MainActivity from a launcher
         // long-press. Mirrors AGP's own manifest placeholder expansion for
@@ -107,9 +107,16 @@ android {
     // libpty_bridge.so / libminis_crash_handler.so / libjieba_jni.so with
     // locally built copies — silently defeating the point of vendoring them.
     //
+    // [pkg-rename] As of the com.openminis.app -> com.rikkaminis.app rename,
+    // crash_handler and jieba are REBUILT FROM SOURCE in CI
+    // (deps/build_crash_handler.sh, deps/build_jieba.sh) because their JNI
+    // symbol names embed the package: the vendored binaries still exported
+    // Java_com_openminis_app_* and would throw UnsatisfiedLinkError. Only
+    // pty_bridge remains purely vendored (it is dead code — no Kotlin caller).
+    //
     // Consequence: edits under src/main/cpp/ are NOT compiled by this build.
     // To change native code, restore this block (and install the NDK in CI),
-    // or rebuild the .so files by hand and re-commit them to jniLibs.
+    // or rebuild the .so files with the deps/build_*.sh scripts and re-commit.
 
     // CI signing: point the `debug` signingConfig at an explicit keystore when
     // MINIS_KEYSTORE_PATH is set (see .github/workflows/build-apk.yml).

@@ -17,7 +17,7 @@
         <intent
             android:action="android.intent.action.VIEW"
             android:targetPackage="@string/package_name"
-            android:targetClass="com.openminis.app.MainActivity"
+            android:targetClass="com.rikkaminis.app.MainActivity"
             android:data="minis://action/new_chat" />
         <categories android:name="android.shortcut.conversation" />
     </shortcut>
@@ -36,7 +36,7 @@
         <intent
             android:action="android.intent.action.VIEW"
             android:targetPackage="@string/package_name"
-            android:targetClass="com.openminis.app.MainActivity"
+            android:targetClass="com.rikkaminis.app.MainActivity"
             android:data="minis://action/camera_chat" />
         <categories android:name="android.shortcut.conversation" />
     </shortcut>

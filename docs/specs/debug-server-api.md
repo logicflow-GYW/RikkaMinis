@@ -2,7 +2,7 @@
 
 > **⚠️ 平台差异说明（2026-08-30 标注）：本文档是上游 iOS 视角的 spec，描述的
 > 是 iOS 的 UIKit view-tree 调试服务器。** RikkaMinis 本 fork 是 Android
-> 实现，对应物是 `src/android/app/src/main/java/com/openminis/app/debug/` 下的
+> 实现，对应物是 `src/android/app/src/main/java/com/rikkaminis/app/debug/` 下的
 > `DebugServer.kt`（DEBUG-only，JSON-RPC 2.0），关键差异：
 > - **端口**：Android 用 `5321`（本文档其余处的 `8321` 是 iOS 端口），监听
 >   `0.0.0.0`；

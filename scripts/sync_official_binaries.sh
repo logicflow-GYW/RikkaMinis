@@ -43,12 +43,16 @@ ASSETS_DIR="$MAIN_DIR/assets"
 # The exact set this fork vendors. Keep in sync with build.gradle.kts.
 # proot (libproot.so, libproot-loader*.so, assets/proot-aarch64) is NOT here:
 # it is built from source via deps/build_proot.sh, not extracted.
+#
+# [pkg-rename] libjieba_jni.so and libminis_crash_handler.so are ALSO excluded:
+# their JNI symbol names embed the Kotlin package, and upstream's binaries still
+# export Java_com_openminis_app_*. Copying them over our renamed build would
+# silently reintroduce UnsatisfiedLinkError. They are rebuilt from source in CI
+# by deps/build_jieba.sh / deps/build_crash_handler.sh instead.
 JNI_LIBS="
 libandroidx.graphics.path.so
 libc++_shared.so
 libdatastore_shared_counter.so
-libjieba_jni.so
-libminis_crash_handler.so
 libpty_bridge.so
 "
 ASSET_FILES="

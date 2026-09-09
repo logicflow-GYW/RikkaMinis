@@ -85,7 +85,7 @@ jobjectArray emptyStringArray(JNIEnv* env) {
 extern "C" {
 
 JNIEXPORT jboolean JNICALL
-Java_com_openminis_app_shared_JiebaEngine_nativeInit(
+Java_com_rikkaminis_app_shared_JiebaEngine_nativeInit(
     JNIEnv* env, jobject /* thiz */, jstring dictDir) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_state) return JNI_TRUE;  // already initialized
@@ -122,7 +122,7 @@ Java_com_openminis_app_shared_JiebaEngine_nativeInit(
 }
 
 JNIEXPORT jobjectArray JNICALL
-Java_com_openminis_app_shared_JiebaEngine_nativeSegment(
+Java_com_rikkaminis_app_shared_JiebaEngine_nativeSegment(
     JNIEnv* env, jobject /* thiz */, jstring text) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_state) {
@@ -145,7 +145,7 @@ Java_com_openminis_app_shared_JiebaEngine_nativeSegment(
 }
 
 JNIEXPORT jobjectArray JNICALL
-Java_com_openminis_app_shared_JiebaEngine_nativeSegmentForSearch(
+Java_com_rikkaminis_app_shared_JiebaEngine_nativeSegmentForSearch(
     JNIEnv* env, jobject /* thiz */, jstring text) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_state) {
@@ -179,7 +179,7 @@ Java_com_openminis_app_shared_JiebaEngine_nativeSegmentForSearch(
 // it needs no extra dictionary files and is built per call rather than kept in
 // JiebaState.
 JNIEXPORT jobjectArray JNICALL
-Java_com_openminis_app_shared_JiebaEngine_nativePosTag(
+Java_com_rikkaminis_app_shared_JiebaEngine_nativePosTag(
     JNIEnv* env, jobject /* thiz */, jstring text) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_state) {
