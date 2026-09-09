@@ -416,8 +416,7 @@ class RootfsManager private constructor(private val context: Context) {
                     .redirectErrorStream(true)
                     .apply { environment().putAll(loaderEnv) }
                     .start()
-                val output = p.inputStream.readBytes().toString(Charset.forName("UTF-8"))
-                val code = p.waitFor()
+                val (code, output) = drainAndWait(p, 180, java.util.concurrent.TimeUnit.SECONDS)
                 Log.i(TAG, "[Repair] apk repair exit=$code output=${output.takeLast(500)}")
             }.onFailure { t ->
                 Log.e(TAG, "[Repair] apk repair process failed", t)
@@ -582,10 +581,7 @@ class RootfsManager private constructor(private val context: Context) {
                     .redirectErrorStream(true)
                     .apply { environment().putAll(loaderEnv) }
                     .start()
-                val output = p.inputStream.readBytes().toString(Charset.forName("UTF-8"))
-                val finished = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS)
-                val exitCode = if (finished) p.exitValue() else -1
-                if (p.isAlive) p.destroyForcibly()
+                val (exitCode, output) = drainAndWait(p, 120, java.util.concurrent.TimeUnit.SECONDS)
                 Log.i(TAG, "[OfflinePackages] apk add exit=$exitCode output=${output.takeLast(500)}")
                 exitCode == 0
             }.onFailure { t ->
@@ -784,6 +780,31 @@ class RootfsManager private constructor(private val context: Context) {
      *    the real reason both Stage 2.6 and the apk-world restore silently
      *    failed on device: `apk: not found` inside proot.
      */
+    /**
+     * [T3-M4] Drain [process] stdout on a daemon thread and wait with a timeout.
+     *
+     * The old pattern was `p.inputStream.readBytes()` followed by
+     * `p.waitFor(timeout)`. readBytes() blocks until EOF, so when the child hung
+     * (apk waiting on a dead network) the timeout was never reached — it was
+     * dead code and the caller blocked indefinitely, including the boot path.
+     * Drain concurrently so the timeout is actually enforced.
+     */
+    private fun drainAndWait(
+        process: Process,
+        timeout: Long,
+        unit: java.util.concurrent.TimeUnit,
+    ): Pair<Int, String> {
+        val sink = java.io.ByteArrayOutputStream()
+        val reader = Thread({
+            runCatching { process.inputStream.copyTo(sink) }
+        }, "RootfsManager-proc-drain").apply { isDaemon = true; start() }
+        val finished = process.waitFor(timeout, unit)
+        if (!finished) runCatching { process.destroyForcibly() }
+        runCatching { reader.join(2_000) }
+        val code = if (finished) process.exitValue() else -1
+        return code to sink.toString("UTF-8")
+    }
+
     private fun prootLoaderEnv(): Map<String, String> {
         val env = mutableMapOf(
             "PATH" to ALPINE_PATH,
@@ -825,10 +846,7 @@ class RootfsManager private constructor(private val context: Context) {
                 .redirectErrorStream(true)
                 .apply { environment().putAll(loaderEnv) }
                 .start()
-            val output = p.inputStream.readBytes().toString(Charset.forName("UTF-8"))
-            val finished = p.waitFor(180, java.util.concurrent.TimeUnit.SECONDS)
-            val code = if (finished) p.exitValue() else -1
-            if (p.isAlive) p.destroyForcibly()
+            val (code, output) = drainAndWait(p, 180, java.util.concurrent.TimeUnit.SECONDS)
             Log.i(TAG, "[ApkWorld] apk add exit=$code pkgs=${pkgArgs.size} output=${output.takeLast(400)}")
             code
         }.onFailure { t ->

@@ -37,6 +37,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,6 +47,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.R
@@ -85,44 +89,58 @@ fun ProviderListScreen(
 
     var showMenu by remember { mutableStateOf(false) }
 
+    val importScope = rememberCoroutineScope()
+    // [T6-M4] Toast needs a Looper; the import now runs on IO, so post the
+    // user-facing messages back to the main thread.
+    val importToastHandler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
-        val mime = context.contentResolver.getType(uri).orEmpty()
-        val name = ProviderImportZip.queryDisplayName(context, uri).orEmpty()
-        val looksLikeZip = mime == "application/zip" ||
-            mime == "application/x-zip-compressed" ||
-            name.lowercase().endsWith(".zip")
-        try {
-            if (looksLikeZip) {
-                val toastFailed = context.getString(R.string.import_zip_extract_failed)
-                val toastNoSupported = context.getString(R.string.import_zip_no_supported)
-                ProviderImportZip.importFromZip(
-                    context = context,
-                    uri = uri,
-                    onImportSingle = { jsonStr -> providerRepository.importInstanceJSON(jsonStr) },
-                    onExtractFailed = { Toast.makeText(context, toastFailed, Toast.LENGTH_SHORT).show() },
-                    onNoSupported = { Toast.makeText(context, toastNoSupported, Toast.LENGTH_SHORT).show() },
-                    onSummary = { ok, total ->
-                        val msg = context.getString(R.string.import_zip_summary, ok, total)
-                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                    },
-                )
-            } else {
-                val jsonStr = context.contentResolver.openInputStream(uri)?.bufferedReader()?.readText()
-                if (jsonStr != null) {
-                    val label = providerRepository.importInstanceJSON(jsonStr)
-                    if (label != null) {
-                        val toastMsg = context.getString(R.string.provider_import_success, label)
-                        Toast.makeText(context, toastMsg, Toast.LENGTH_SHORT).show()
+        // [T6-M4] The whole import (zip staging + extraction + file I/O) ran on
+        // the activity-result callback thread (Main); a multi-MB provider bundle
+        // froze the UI for hundreds of ms to seconds. Do the work on IO and post
+        // the Toasts back to Main.
+        importScope.launch {
+            withContext(Dispatchers.IO) {
+                val mime = context.contentResolver.getType(uri).orEmpty()
+                val name = ProviderImportZip.queryDisplayName(context, uri).orEmpty()
+                val looksLikeZip = mime == "application/zip" ||
+                    mime == "application/x-zip-compressed" ||
+                    name.lowercase().endsWith(".zip")
+                try {
+                    if (looksLikeZip) {
+                        val toastFailed = context.getString(R.string.import_zip_extract_failed)
+                        val toastNoSupported = context.getString(R.string.import_zip_no_supported)
+                        ProviderImportZip.importFromZip(
+                            context = context,
+                            uri = uri,
+                            onImportSingle = { jsonStr -> providerRepository.importInstanceJSON(jsonStr) },
+                            onExtractFailed = { importToastHandler.post { Toast.makeText(context, toastFailed, Toast.LENGTH_SHORT).show() } },
+                            onNoSupported = { importToastHandler.post { Toast.makeText(context, toastNoSupported, Toast.LENGTH_SHORT).show() } },
+                            onSummary = { ok, total ->
+                                val msg = context.getString(R.string.import_zip_summary, ok, total)
+                                importToastHandler.post { Toast.makeText(context, msg, Toast.LENGTH_SHORT).show() }
+                            },
+                        )
                     } else {
-                        Toast.makeText(context, context.getString(R.string.provider_import_invalid_file), Toast.LENGTH_SHORT).show()
+                        val jsonStr = context.contentResolver.openInputStream(uri)?.bufferedReader()?.readText()
+                        if (jsonStr != null) {
+                            val label = providerRepository.importInstanceJSON(jsonStr)
+                            if (label != null) {
+                                val toastMsg = context.getString(R.string.provider_import_success, label)
+                                importToastHandler.post { Toast.makeText(context, toastMsg, Toast.LENGTH_SHORT).show() }
+                            } else {
+                                val msg = context.getString(R.string.provider_import_invalid_file)
+                                importToastHandler.post { Toast.makeText(context, msg, Toast.LENGTH_SHORT).show() }
+                            }
+                        }
                     }
+                } catch (e: Exception) {
+                    val msg = context.getString(R.string.provider_import_read_error)
+                    importToastHandler.post { Toast.makeText(context, msg, Toast.LENGTH_SHORT).show() }
                 }
             }
-        } catch (e: Exception) {
-            Toast.makeText(context, context.getString(R.string.provider_import_read_error), Toast.LENGTH_SHORT).show()
         }
     }
 

@@ -401,43 +401,63 @@ private fun SkillImportSheet(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
-        try {
-            // [T-android-skill-import-zip] Read raw bytes so we can branch on
-            // file magic. The previous code piped the InputStream straight
-            // through `bufferedReader().readText()`, which corrupted any
-            // .zip / .skill bundle into garbage UTF-8 and surfaced as
-            // "Invalid SKILL.md content". Skills shared as bundles
-            // (scripts/, references/, assets/) are the common case on iOS;
-            // matching here aligns Android with iOS
-            // `SkillsManagementView.documentPicker` + `SkillStore.importFromArchive`.
-            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            if (bytes == null) {
-                errorText = "Failed to read file"
-                return@rememberLauncherForActivityResult
+        // [T6-M5] Reading a skill bundle (scripts/ + references/ + assets/) and
+        // unzipping it ran on the activity-result callback thread (Main), so a
+        // large import froze the sheet for its whole duration. Read + parse on
+        // IO and apply the outcome back on Main.
+        scope.launch {
+            var failure: String? = null
+            val imported = withContext(Dispatchers.IO) {
+                try {
+                    // [T-android-skill-import-zip] Read raw bytes so we can branch on
+                    // file magic. The previous code piped the InputStream straight
+                    // through `bufferedReader().readText()`, which corrupted any
+                    // .zip / .skill bundle into garbage UTF-8 and surfaced as
+                    // "Invalid SKILL.md content". Skills shared as bundles
+                    // (scripts/, references/, assets/) are the common case on iOS;
+                    // matching here aligns Android with iOS
+                    // `SkillsManagementView.documentPicker` + `SkillStore.importFromArchive`.
+                    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    if (bytes == null) {
+                        failure = "Failed to read file"
+                        false
+                    } else {
+                        // PK\x03\x04 = standard ZIP local file header; PK\x05\x06 is the
+                        // empty-archive EOCD; PK\x07\x08 is a spanned/split archive. Accept
+                        // all three so split exports from less-common zip tools don't fall
+                        // into the text path. URI may not preserve the filename extension
+                        // (some DocumentsProviders / share targets strip it), so magic-byte
+                        // sniffing is more reliable than `.zip` / `.skill` checks.
+                        val isZip = bytes.size >= 4 &&
+                            bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte() &&
+                            (bytes[2] == 0x03.toByte() || bytes[2] == 0x05.toByte() || bytes[2] == 0x07.toByte())
+                        if (isZip) {
+                            val result = skillRepository.importFromArchive(
+                                java.io.ByteArrayInputStream(bytes),
+                            )
+                            if (result != null) {
+                                true
+                            } else {
+                                failure = "Invalid skill archive — no SKILL.md found at the root or one directory deep"
+                                false
+                            }
+                        } else {
+                            val content = String(bytes, Charsets.UTF_8)
+                            val result = skillRepository.importFromContent(content, SkillRepository.ImportSource.FILE)
+                            if (result != null) {
+                                true
+                            } else {
+                                failure = "Invalid SKILL.md content"
+                                false
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    failure = "Failed to read file: ${e.message}"
+                    false
+                }
             }
-            // PK\x03\x04 = standard ZIP local file header; PK\x05\x06 is the
-            // empty-archive EOCD; PK\x07\x08 is a spanned/split archive. Accept
-            // all three so split exports from less-common zip tools don't fall
-            // into the text path. URI may not preserve the filename extension
-            // (some DocumentsProviders / share targets strip it), so magic-byte
-            // sniffing is more reliable than `.zip` / `.skill` checks.
-            val isZip = bytes.size >= 4 &&
-                bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte() &&
-                (bytes[2] == 0x03.toByte() || bytes[2] == 0x05.toByte() || bytes[2] == 0x07.toByte())
-            if (isZip) {
-                val result = skillRepository.importFromArchive(
-                    java.io.ByteArrayInputStream(bytes),
-                )
-                if (result != null) onDismiss()
-                else errorText = "Invalid skill archive — no SKILL.md found at the root or one directory deep"
-            } else {
-                val content = String(bytes, Charsets.UTF_8)
-                val result = skillRepository.importFromContent(content, SkillRepository.ImportSource.FILE)
-                if (result != null) onDismiss()
-                else errorText = "Invalid SKILL.md content"
-            }
-        } catch (e: Exception) {
-            errorText = "Failed to read file: ${e.message}"
+            if (imported) onDismiss() else errorText = failure ?: "Failed to read file"
         }
     }
 
