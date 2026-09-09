@@ -1741,14 +1741,20 @@ internal class AgentLoopEngine(
                         // carries one of these reminders (double wall), drop
                         // the old one first so consecutive length-walls do
                         // not pile up reminder turns.
-                        val prevTail = host.agentHistory.lastOrNull()
+                        // [fix/audit-b20 / T1-LOW-2] The reminder from a previous
+                        // length-wall sits *behind* this turn's assistant
+                        // message (added above), so the tail check could never
+                        // match and consecutive walls stacked. Look one entry
+                        // back and drop it there.
+                        val prevTailIdx = host.agentHistory.size - 2
+                        val prevTail = host.agentHistory.getOrNull(prevTailIdx)
                         val tailIsLengthWallReminder = prevTail != null &&
                             prevTail.role == LLMMessage.Role.USER &&
                             prevTail.contentParts.size == 1 &&
                             (prevTail.contentParts.first() as? AgentContentPart.Text)?.text
                                 ?.contains("cut off mid-sentence") == true
                         if (tailIsLengthWallReminder) {
-                            host.agentHistory.removeAt(host.agentHistory.size - 1)
+                            host.agentHistory.removeAt(prevTailIdx)
                         }
                         val reminder = lengthWallReminder(turnText.takeLast(80))
                         host.agentHistory.add(
@@ -1921,14 +1927,18 @@ internal class AgentLoopEngine(
                         )
                         // Drop any stale stub reminder from a previous EOF so
                         // reminders never stack (guard mirrors length-wall).
-                        val prevTail = host.agentHistory.lastOrNull()
+                        // [fix/audit-b20 / T1-LOW-2] Same off-by-one as the
+                        // length-wall guard: the previous stub reminder lives
+                        // behind this turn's assistant message.
+                        val prevTailIdx = host.agentHistory.size - 2
+                        val prevTail = host.agentHistory.getOrNull(prevTailIdx)
                         val tailIsEofStubReminder = prevTail != null &&
                             prevTail.role == LLMMessage.Role.USER &&
                             prevTail.contentParts.size == 1 &&
                             (prevTail.contentParts.first() as? AgentContentPart.Text)?.text
                                 ?.contains("cut off by a network error") == true
                         if (tailIsEofStubReminder) {
-                            host.agentHistory.removeAt(host.agentHistory.size - 1)
+                            host.agentHistory.removeAt(prevTailIdx)
                         }
                         val stubReminder = eofStubReminder(turnText.takeLast(80))
                         host.agentHistory.add(

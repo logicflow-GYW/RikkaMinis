@@ -1183,7 +1183,16 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
     // -- Release --
 
     fun releaseAllTabs() {
-        _tabs.value = _tabs.value.map { it.copy(inUse = false) }
+        // [fix/audit-b21 / T7-L3] `it.copy(inUse = false)` replaced every Tab
+        // with a new instance, which broke the identity link to in-flight
+        // actions: their release paths (`tab.inUse = false`, the in-use grace
+        // job, lastActivityDate bookkeeping) mutate the OLD object, so the pool
+        // kept a copy that never saw those updates. Emit a fresh list — needed
+        // for StateFlow to fire — but keep the live Tab instances.
+        _tabs.value = _tabs.value.map { tab ->
+            tab.inUse = false
+            tab
+        }
         saveState()
     }
 
