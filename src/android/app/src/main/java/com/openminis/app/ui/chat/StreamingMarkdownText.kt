@@ -1761,10 +1761,16 @@ private fun RenderMdAudio(block: MdBlock.Audio) {
         runCatching { player.duration }.getOrDefault(0)
     } else 0
 
-    LaunchedEffect(isPlaying) {
+    // T2-L1: key on the player as well. remember(file?.absolutePath) can swap
+    // in a new instance while this loop runs — the old one is released by the
+    // DisposableEffect above — and every call on a released MediaPlayer throws
+    // IllegalStateException. currentPosition was already guarded; the isPlaying
+    // probe on the next line was not, so it could kill the coroutine.
+    LaunchedEffect(isPlaying, player) {
         while (isPlaying && player != null) {
             positionMs = try { player.currentPosition } catch (_: Throwable) { 0 }
-            if (player != null && prepared && !player.isPlaying) { isPlaying = false; break }
+            val stillPlaying = try { player.isPlaying } catch (_: Throwable) { false }
+            if (player != null && prepared && !stillPlaying) { isPlaying = false; break }
             delay(200)
         }
     }

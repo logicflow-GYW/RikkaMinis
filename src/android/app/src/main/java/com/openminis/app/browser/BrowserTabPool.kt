@@ -40,7 +40,8 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
 
     companion object {
         private const val TAG = "BrowserTabPool"
-        private const val MAX_TABS = 3
+        /** [T7-L5] Tab cap. UI surfaces must read this instead of a literal 3. */
+        const val MAX_TABS = 3
         private const val IDLE_CHECK_INTERVAL_MS = 60_000L  // 60 seconds
         /** Default idle timeout — matches iOS BrowserTabPool.idleTimeout (15 minutes). */
         const val DEFAULT_IDLE_TIMEOUT_MINUTES = 15

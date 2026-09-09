@@ -200,9 +200,12 @@ class BrowserUseManager(
         val cap = MAX_SCREENSHOT_CACHE_FILES
         val files = screenshotsDir.listFiles() ?: return
         if (files.size <= cap) return
-        // Oldest first: filenames embed epoch-millis, so a plain name sort is
-        // a monotonic time sort and keeps the most recent files.
-        files.sortedBy { it.name }
+        // T7-L4: sort by mtime, not by name. Filenames do embed epoch-millis,
+        // but the two prefixes ("screenshot_", "snapshot_") sort as blocks, so
+        // a name sort keeps every screenshot ahead of every snapshot no matter
+        // how old — a just-captured screenshot could be pruned while an ancient
+        // snapshot survived.
+        files.sortedBy { it.lastModified() }
             .dropLast(cap)
             .forEach { runCatching { it.delete() } }
     }

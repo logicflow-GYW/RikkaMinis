@@ -84,8 +84,10 @@ fun UsageStatsScreen(
 
     LaunchedEffect(range) {
         // Loading skeleton only on the first load; subsequent range flips keep
-        // showing stale data instead of flashing blank.
-        if (!isLoaded) isLoaded = false
+        // showing stale data instead of flashing blank. (T6-L2: isLoaded is set
+        // to true at the end of this block and never reset, so the deleted
+        // `if (!isLoaded) isLoaded = false` was a no-op that only looked like
+        // half-written logic.)
         val records = when (range) {
             UsageRange.ALL -> chatDao.allUsageRecords()
             else -> {

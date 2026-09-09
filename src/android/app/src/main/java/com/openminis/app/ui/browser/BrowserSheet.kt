@@ -167,7 +167,7 @@ fun BrowserSheet(
             ) {
                 IconButton(
                     onClick = { scope.launch { tabPool.newTabFromUI() } },
-                    enabled = tabs.size < 3 && !isAgentBusy,
+                    enabled = tabs.size < BrowserTabPool.MAX_TABS && !isAgentBusy,
                     modifier = Modifier.size(36.dp),
                 ) {
                     Icon(Icons.Default.Add, contentDescription = stringResource(R.string.browser_new_tab), modifier = Modifier.size(20.dp))
@@ -198,7 +198,7 @@ fun BrowserSheet(
                     }
                     item {
                         Text(
-                            "${tabs.size}/3",
+                            "${tabs.size}/${BrowserTabPool.MAX_TABS}",
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Medium,
                             fontFamily = FontFamily.Monospace,
