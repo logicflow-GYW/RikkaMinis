@@ -31,9 +31,13 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
     private val _isSpeaking = MutableStateFlow(false)
     val isSpeaking: StateFlow<Boolean> = _isSpeaking.asStateFlow()
 
-    private var isPaused = false
-    private var pendingTexts = mutableListOf<String>()
-    private var pausedAtIndex = 0
+    // [fix/audit-b20 / T8-L5] Queue-drain bookkeeping. The pause/resume layer
+    // (isPaused / togglePause / pausedAtIndex) had no caller anywhere — Android
+    // TTS has no native pause and no UI ever exposed one — so it is gone. These
+    // two counters are what actually kept `isSpeaking` accurate: utterances
+    // handed to the engine, and utterances that finished (done or error).
+    private var queuedUtterances = 0
+    private var completedUtterances = 0
 
     /**
      * Rolling buffer of partial-streaming text that hasn't hit a sentence
@@ -94,10 +98,8 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
     fun speak(text: String) {
         if (!isInitialized || text.isBlank()) return
 
-        isPaused = false
-        pendingTexts.clear()
-        pendingTexts.add(text)
-        pausedAtIndex = 0
+        queuedUtterances = 1
+        completedUtterances = 0
         sentenceBuffer.setLength(0)
 
         autoDetectAndSetLanguage(text)
@@ -113,7 +115,7 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
     fun speakQueued(text: String) {
         if (!isInitialized || text.isBlank()) return
 
-        pendingTexts.add(text)
+        queuedUtterances++
         autoDetectAndSetLanguage(text)
 
         val params = buildSpeechParams()
@@ -173,35 +175,21 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
      */
     fun stop() {
         tts?.stop()
-        isPaused = false
-        pendingTexts.clear()
-        pausedAtIndex = 0
+        queuedUtterances = 0
+        completedUtterances = 0
         sentenceBuffer.setLength(0)
         _isSpeaking.value = false
     }
 
     /**
-     * Toggles pause/resume. Since Android TTS doesn't natively support pause,
-     * this stops playback and tracks position for manual resume.
+     * [fix/audit-b20 / T8-L5] Advances the drain counter and clears the
+     * speaking flag once the queue empties. Called from both onDone and the
+     * error overloads so a failed utterance still counts as finished — without
+     * that, `isSpeaking` stayed true after an error.
      */
-    fun togglePause() {
-        if (isPaused) {
-            // Resume: replay remaining texts from where we paused
-            isPaused = false
-            if (pausedAtIndex < pendingTexts.size) {
-                val remaining = pendingTexts.subList(pausedAtIndex, pendingTexts.size)
-                remaining.forEachIndexed { index, text ->
-                    autoDetectAndSetLanguage(text)
-                    val params = buildSpeechParams()
-                    val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-                    tts?.speak(text, queueMode, params, generateUtteranceId())
-                }
-                _isSpeaking.value = true
-            }
-        } else {
-            // Pause: stop and mark position
-            isPaused = true
-            tts?.stop()
+    private fun onUtteranceFinished() {
+        completedUtterances++
+        if (completedUtterances >= queuedUtterances) {
             _isSpeaking.value = false
         }
     }
@@ -258,34 +246,18 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
             }
 
             override fun onDone(utteranceId: String?) {
-                pausedAtIndex++
-                // Only mark as not speaking if nothing else is queued
-                if (pausedAtIndex >= pendingTexts.size) {
-                    _isSpeaking.value = false
-                }
+                onUtteranceFinished()
             }
 
             @Deprecated("Deprecated in API level 21")
             override fun onError(utteranceId: String?) {
                 Log.e(TAG, "TTS error for utterance: $utteranceId")
-                // [T-android-tts-onerror-drift] Advance the position counter on
-                // error too, so pause/resume doesn't replay (or skip) the failed
-                // utterance: without this, pausedAtIndex lags the actually-spoken
-                // count by one after an error, and the next resume rebuilds the
-                // remaining subList from the wrong offset.
-                pausedAtIndex++
-                if (pausedAtIndex >= pendingTexts.size) {
-                    _isSpeaking.value = false
-                }
+                onUtteranceFinished()
             }
 
             override fun onError(utteranceId: String?, errorCode: Int) {
                 Log.e(TAG, "TTS error for utterance $utteranceId, code: $errorCode")
-                // See [T-android-tts-onerror-drift] on the deprecated overload.
-                pausedAtIndex++
-                if (pausedAtIndex >= pendingTexts.size) {
-                    _isSpeaking.value = false
-                }
+                onUtteranceFinished()
             }
         }
 }

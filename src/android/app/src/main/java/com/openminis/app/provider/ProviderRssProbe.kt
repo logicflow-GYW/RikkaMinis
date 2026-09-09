@@ -287,14 +287,21 @@ object ProviderRssProbe {
     fun record(record: ProbeRecord) {
         if (record.kind.isEmpty()) return
         val st = byKind.computeIfAbsent(record.kind) { Stats() }
-        st.count += 1
-        st.totalDeltaKb += record.afterRss - record.beforeRss
-        st.lastDeltaKb = record.afterRss - record.beforeRss
-        st.postCallRssKb = record.afterRss
-        st.lowestPostCallRssKb = minOf(st.lowestPostCallRssKb, record.afterRss)
+        // [fix/audit-b20 / T5-L4] record() is entered from LLMProvider default
+        // methods, and parallel sub-agents (max_parallel=4) can hit the same
+        // Stats at once. ConcurrentHashMap guards the map, not the value's
+        // fields, so the `+=` / min / max sequences lost updates.
+        val deltaKb = record.afterRss - record.beforeRss
         val peakDelta = record.peakDeltaKb()
-        if (peakDelta > st.peakDeltaMaxKb) st.peakDeltaMaxKb = peakDelta
-        if (record.peakRss > st.peakRssMaxKb) st.peakRssMaxKb = record.peakRss
+        synchronized(st) {
+            st.count += 1
+            st.totalDeltaKb += deltaKb
+            st.lastDeltaKb = deltaKb
+            st.postCallRssKb = record.afterRss
+            st.lowestPostCallRssKb = minOf(st.lowestPostCallRssKb, record.afterRss)
+            if (peakDelta > st.peakDeltaMaxKb) st.peakDeltaMaxKb = peakDelta
+            if (record.peakRss > st.peakRssMaxKb) st.peakRssMaxKb = record.peakRss
+        }
 
         Log.i(
             TAG,

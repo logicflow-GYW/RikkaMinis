@@ -385,20 +385,30 @@ fun LogDetailScreen(
     LaunchedEffect(fileName) {
         loading = true
         loadError = null
-        lazyLog = withContext(Dispatchers.IO) {
-            try {
-                val file = File(File(context.filesDir, "logs"), fileName)
-                if (!file.exists()) {
-                    loadError = context.getString(R.string.log_not_found)
-                    null
-                } else {
-                    LazyLogFile.open(file)
+        // [fix/audit-b20 / T6-L3] LazyLogFile.open() indexes the whole file
+        // (200-400ms) and is not interruptible. If this effect is cancelled
+        // while it runs (fileName changed / screen left), withContext throws on
+        // the way out and the handle never reaches lazyLog — so its file
+        // descriptor leaked. Hold it locally and close it on cancellation.
+        var opened: LazyLogFile? = null
+        try {
+            withContext(Dispatchers.IO) {
+                try {
+                    val file = File(File(context.filesDir, "logs"), fileName)
+                    if (!file.exists()) {
+                        loadError = context.getString(R.string.log_not_found)
+                    } else {
+                        opened = LazyLogFile.open(file)
+                    }
+                } catch (e: Exception) {
+                    loadError = context.getString(R.string.log_error_reading, e.message ?: "")
                 }
-            } catch (e: Exception) {
-                loadError = context.getString(R.string.log_error_reading, e.message ?: "")
-                null
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            opened?.close()
+            throw e
         }
+        lazyLog = opened
         loading = false
     }
 
