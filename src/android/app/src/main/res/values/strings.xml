@@ -279,7 +279,7 @@
     <string name="runtime_limits_transient_retries">Transient retries</string>
     <string name="runtime_limits_transient_retries_desc">Auto-retries with 1/2/4/8/16s backoff (default 3)</string>
     <string name="runtime_limits_verify_nudges">Verification nudges</string>
-    <string name="runtime_limits_verify_nudges_desc">Turn-end nudges to verify code edits (default 2)</string>
+    <string name="runtime_limits_verify_nudges_desc">Turn-end nudges to verify code edits (default 0 = off)</string>
     <string name="runtime_limits_generation_wall">Generation hard wall</string>
     <string name="runtime_limits_generation_wall_desc">Minutes for one generation stream (default 30)</string>
     <string name="runtime_limits_first_chunk_direct">First chunk, direct</string>

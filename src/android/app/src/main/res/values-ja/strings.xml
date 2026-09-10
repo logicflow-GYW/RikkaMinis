@@ -140,7 +140,7 @@
     <string name="runtime_limits_transient_retries">一時エラー再試行</string>
     <string name="runtime_limits_transient_retries_desc">自動再試行、バックオフ 1/2/4/8/16 秒（デフォルト 3）</string>
     <string name="runtime_limits_verify_nudges">検証ナッジ</string>
-    <string name="runtime_limits_verify_nudges_desc">ターン終了時にコード編集の検証を促す回数（デフォルト 2）</string>
+    <string name="runtime_limits_verify_nudges_desc">ターン終了時にコード編集の検証を促す回数（デフォルト 0 = オフ）</string>
     <string name="runtime_limits_generation_wall">生成ハードウォール</string>
     <string name="runtime_limits_generation_wall_desc">1生成ストリームの分数上限（デフォルト 30）</string>
     <string name="runtime_limits_first_chunk_direct">初回チャンク・直接</string>

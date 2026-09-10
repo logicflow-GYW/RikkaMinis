@@ -199,7 +199,7 @@ internal class AgentLoopState(
     var lastVerifySeq: Long = 0
 
     /** How many verify nudges have been injected this run (bounded by
-     *  VerificationStopPolicy.MAX_VERIFY_NUDGES). */
+     *  AgentRuntimeLimitsPrefs.verifyNudges(); 0 = guard off). */
     var verifyNudgeAttempts: Int = 0
 
     /**

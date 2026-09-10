@@ -107,7 +107,7 @@ class VerificationStopPolicyTest {
     @Test
     fun `nudge fires for code edits`() {
         val nudge = VerificationStopPolicy.buildNudge(
-            listOf("/tmp/app/Main.kt"), attempts = 0, lastEvidenceDetail = null)
+            listOf("/tmp/app/Main.kt"), attempts = 0, lastEvidenceDetail = null, nudgeLimit = 2)
         assertNotNull(nudge)
         assertTrue(nudge!!.contains("/tmp/app/Main.kt"))
         assertTrue(nudge.contains("verification"))
@@ -116,21 +116,34 @@ class VerificationStopPolicyTest {
     @Test
     fun `prose-only edits never nudge`() {
         assertNull(VerificationStopPolicy.buildNudge(
-            listOf("/var/minis/skills/x/SKILL.md", "README.md"), attempts = 0, lastEvidenceDetail = null))
+            listOf("/var/minis/skills/x/SKILL.md", "README.md"), attempts = 0, lastEvidenceDetail = null,
+            nudgeLimit = 2))
+    }
+
+    // [fix/verify-nudges-default-off] The shipped default is 0 (= guard off),
+    // so every case above pins its own limit explicitly. These two cases are
+    // the ones the default flip actually depends on: 0 must never nudge, and
+    // an exhausted budget must still stop.
+    @Test
+    fun `limit zero never nudges`() {
+        assertNull(VerificationStopPolicy.buildNudge(
+            listOf("/tmp/app/Main.kt"), attempts = 0, lastEvidenceDetail = null, nudgeLimit = 0))
     }
 
     @Test
     fun `attempts exhausted never nudge`() {
         assertNull(VerificationStopPolicy.buildNudge(
             listOf("/tmp/app/Main.kt"),
-            attempts = VerificationStopPolicy.MAX_VERIFY_NUDGES,
-            lastEvidenceDetail = null))
+            attempts = 2,
+            lastEvidenceDetail = null,
+            nudgeLimit = 2))
     }
 
     @Test
     fun `mixed edits list only code paths`() {
         val nudge = VerificationStopPolicy.buildNudge(
-            listOf("README.md", "/src/A.kt", "/src/B.kt"), attempts = 0, lastEvidenceDetail = "test run FAILED (exit 1)")
+            listOf("README.md", "/src/A.kt", "/src/B.kt"), attempts = 0, lastEvidenceDetail = "test run FAILED (exit 1)",
+            nudgeLimit = 2)
         assertNotNull(nudge)
         assertTrue(nudge!!.contains("/src/A.kt"))
         assertFalse(nudge.contains("README.md"))
@@ -140,7 +153,7 @@ class VerificationStopPolicyTest {
     @Test
     fun `long path lists are capped`() {
         val paths = (1..20).map { "/src/File$it.kt" }
-        val nudge = VerificationStopPolicy.buildNudge(paths, attempts = 0, lastEvidenceDetail = null)
+        val nudge = VerificationStopPolicy.buildNudge(paths, attempts = 0, lastEvidenceDetail = null, nudgeLimit = 2)
         assertNotNull(nudge)
         assertTrue(nudge!!.contains("... and 12 more"))
         assertFalse(nudge.contains("File20.kt"))

@@ -140,7 +140,7 @@
     <string name="runtime_limits_transient_retries">Transient-Retries</string>
     <string name="runtime_limits_transient_retries_desc">Auto-Retries mit 1/2/4/8/16s Backoff (Standard 3)</string>
     <string name="runtime_limits_verify_nudges">Verifizierungs-Nudges</string>
-    <string name="runtime_limits_verify_nudges_desc">Nudges am Turn-Ende zur Code-Verifizierung (Standard 2)</string>
+    <string name="runtime_limits_verify_nudges_desc">Nudges am Turn-Ende zur Code-Verifizierung (Standard 0 = aus)</string>
     <string name="runtime_limits_generation_wall">Generations-Wall</string>
     <string name="runtime_limits_generation_wall_desc">Minuten für einen Generierungs-Stream (Standard 30)</string>
     <string name="runtime_limits_first_chunk_direct">First Chunk, direkt</string>

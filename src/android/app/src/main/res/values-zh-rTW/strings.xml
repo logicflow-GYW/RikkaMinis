@@ -1179,7 +1179,7 @@
     <string name="runtime_limits_transient_retries">瞬態重試</string>
     <string name="runtime_limits_transient_retries_desc">自動重試，退避 1/2/4/8/16 秒（預設 3）</string>
     <string name="runtime_limits_verify_nudges">驗證提醒</string>
-    <string name="runtime_limits_verify_nudges_desc">回合結束前提醒驗證程式碼變更（預設 2）</string>
+    <string name="runtime_limits_verify_nudges_desc">回合結束前提醒驗證程式碼變更（預設 0 = 關閉）</string>
     <string name="runtime_limits_generation_wall">生成硬牆</string>
     <string name="runtime_limits_generation_wall_desc">單次生成流的分鐘上限（預設 30）</string>
     <string name="runtime_limits_first_chunk_direct">首包逾時·直連</string>

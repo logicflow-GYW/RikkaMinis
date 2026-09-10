@@ -36,7 +36,11 @@ class AgentRuntimeLimitsPrefsTest {
         assertEquals(2, p.EOF_STUB_DEFAULT)            // MAX_EOF_STUB_CONTINUES
         assertEquals(2, p.DET_EMPTY_DEFAULT)           // DETERMINISTIC_EMPTY_LIMIT
         assertEquals(3, p.TRANSIENT_RETRIES_DEFAULT)   // AUTO_RETRY_DELAYS_SEC.size
-        assertEquals(2, p.VERIFY_NUDGES_DEFAULT)       // VerificationStopPolicy.MAX_VERIFY_NUDGES
+        // [fix/verify-nudges-default-off] No upstream mirror any more: the
+        // guard ships OFF (0), and the old VerificationStopPolicy.MAX_VERIFY_NUDGES
+        // const was deleted precisely so the default can't re-couple to a
+        // policy constant. The cap semantics live in VerificationStopPolicyTest.
+        assertEquals(0, p.VERIFY_NUDGES_DEFAULT)
         // Network / worker consts:
         assertEquals(30, p.GENERATION_TIMEOUT_DEFAULT_MIN) // FirstChunkTimeoutPolicy.GENERATION_TIMEOUT_SEC
         assertEquals(30, p.FIRST_CHUNK_DIRECT_DEFAULT_SEC) // FirstChunkTimeoutPolicy.DIRECT_TIMEOUT_SEC

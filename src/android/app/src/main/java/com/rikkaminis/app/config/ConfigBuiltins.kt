@@ -237,7 +237,7 @@ internal object ConfigBuiltins {
         r.register(PrefsIntField(
             path = "runtime.verifyNudges",
             displayName = "Verification nudges",
-            description = "Max turn-end nudges reminding the agent to verify code edits before finishing. Default 2. 0 disables the guard entirely (unverified edits close silently).",
+            description = "Turn-end nudges reminding the agent to verify code edits before finishing. Default 0 = guard OFF: an unverified edit closes the turn silently, exactly like the pre-guard behavior. Raise it (1-4) to opt into bounded reminders — each one costs an extra model round.",
             prefs = limits, key = L.KEY_VERIFY_NUDGES,
             defaultValue = L.VERIFY_NUDGES_DEFAULT, minValue = L.VERIFY_NUDGES_MIN, maxValue = L.VERIFY_NUDGES_MAX,
         ))

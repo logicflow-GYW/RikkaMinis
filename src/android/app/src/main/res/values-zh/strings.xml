@@ -176,7 +176,7 @@
     <string name="runtime_limits_transient_retries">瞬态重试</string>
     <string name="runtime_limits_transient_retries_desc">自动重试，退避 1/2/4/8/16 秒（默认 3）</string>
     <string name="runtime_limits_verify_nudges">验证提醒</string>
-    <string name="runtime_limits_verify_nudges_desc">回合结束前提醒验证代码改动（默认 2）</string>
+    <string name="runtime_limits_verify_nudges_desc">回合结束前提醒验证代码改动（默认 0 = 关闭）</string>
     <string name="runtime_limits_generation_wall">生成硬墙</string>
     <string name="runtime_limits_generation_wall_desc">单次生成流的分钟上限（默认 30）</string>
     <string name="runtime_limits_first_chunk_direct">首包超时·直连</string>

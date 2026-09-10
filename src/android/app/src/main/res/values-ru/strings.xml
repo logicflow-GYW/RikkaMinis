@@ -179,7 +179,7 @@
     <string name="runtime_limits_transient_retries">Повторы при сбоях</string>
     <string name="runtime_limits_transient_retries_desc">Автоповторы с бэкоффом 1/2/4/8/16 с (по умолчанию 3)</string>
     <string name="runtime_limits_verify_nudges">Напоминания о проверке</string>
-    <string name="runtime_limits_verify_nudges_desc">Напоминаний о проверке правок кода в конце хода (по умолчанию 2)</string>
+    <string name="runtime_limits_verify_nudges_desc">Напоминаний о проверке правок кода в конце хода (по умолчанию 0 = выкл.)</string>
     <string name="runtime_limits_generation_wall">Жёсткий предел генерации</string>
     <string name="runtime_limits_generation_wall_desc">Минут на один поток генерации (по умолчанию 30)</string>
     <string name="runtime_limits_first_chunk_direct">Первый чанк, напрямую</string>

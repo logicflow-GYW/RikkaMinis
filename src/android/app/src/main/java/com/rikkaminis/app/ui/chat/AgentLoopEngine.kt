@@ -1787,22 +1787,29 @@ internal class AgentLoopEngine(
                 // and if the revived turn then succeeds, the banner and the
                 // trace contradict the outcome. "Giving up" must not be
                 // interrupted by the turn-end guard.
+                // [fix/verify-nudges-default-off] Read the live limit once and
+                // hand it to the policy — the log's denominator and the gate
+                // now provably share one read (0 = guard off, nudge is null).
+                val verifyNudgeLimit = com.rikkaminis.app.data.AgentRuntimeLimitsPrefs.verifyNudges()
                 val verifyNudge = if (loopState.terminalErrorSurfaced) null else
                     VerificationStopPolicy.buildNudge(
                         changedPaths = loopState.changedCodePaths.toList(),
                         attempts = loopState.verifyNudgeAttempts,
                         lastEvidenceDetail = loopState.lastVerificationDetail,
+                        nudgeLimit = verifyNudgeLimit,
                     )
                 if (verifyNudge != null) {
                     loopState.verifyNudgeAttempts++
                     // [fix/runtime-limits-audit] The log's denominator reads the
                     // SAME live limit buildNudge just gated on, so the counter
                     // can't claim "2/2" while the cap is actually 3.
+                    // [fix/verify-nudges-default-off] Now literally the same
+                    // value (one read), not a second read of the same cache.
                     AppLogger.warning(
                         TAG_STREAM,
                         "runAgentLoop turn=$turn finish=$turnFinishReason but unverified code edits " +
                             "(${loopState.changedCodePaths.size} path(s)) — injecting verify nudge " +
-                            "${loopState.verifyNudgeAttempts}/${com.rikkaminis.app.data.AgentRuntimeLimitsPrefs.verifyNudges()}",
+                            "${loopState.verifyNudgeAttempts}/$verifyNudgeLimit",
                     )
                     val nudgeMsg = LLMMessage(
                         role = LLMMessage.Role.USER,

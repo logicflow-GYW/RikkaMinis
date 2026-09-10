@@ -140,7 +140,7 @@
     <string name="runtime_limits_transient_retries">일시적 재시도</string>
     <string name="runtime_limits_transient_retries_desc">자동 재시도, 백오프 1/2/4/8/16초(기본 3)</string>
     <string name="runtime_limits_verify_nudges">검증 넛지</string>
-    <string name="runtime_limits_verify_nudges_desc">턴 종료 시 코드 편집 검증 독려(기본 2)</string>
+    <string name="runtime_limits_verify_nudges_desc">턴 종료 시 코드 편집 검증 독려(기본 0 = 끔)</string>
     <string name="runtime_limits_generation_wall">생성 하드월</string>
     <string name="runtime_limits_generation_wall_desc">단일 생성 스트림 분 단위 상한(기본 30)</string>
     <string name="runtime_limits_first_chunk_direct">첫 청크·직접</string>

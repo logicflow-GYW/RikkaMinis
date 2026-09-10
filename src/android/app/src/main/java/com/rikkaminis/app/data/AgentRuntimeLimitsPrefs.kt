@@ -104,7 +104,13 @@ object AgentRuntimeLimitsPrefs {
 
     const val VERIFY_NUDGES_MIN = 0
     const val VERIFY_NUDGES_MAX = 4
-    const val VERIFY_NUDGES_DEFAULT = 2
+    // [fix/verify-nudges-default-off] Shipped default is 0 == the guard is
+    // OFF out of the box: an unverified code edit closes the turn silently
+    // (exactly the pre-guard behavior). Raising it opts into up to N bounded
+    // turn-end reminders. Users who never touched the slider follow this
+    // value (prime reads the default for an absent key); anyone who did gets
+    // their stored value back.
+    const val VERIFY_NUDGES_DEFAULT = 0
 
     // ── Group 4: worker network timeouts (worker-process scoped) ─────────
 

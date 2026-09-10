@@ -51,13 +51,6 @@ object VerificationStopPolicy {
     /** Interpreters that make a temp script runnable verification evidence. */
     private val INTERPRETERS = setOf("python", "python3", "node", "bash", "sh", "ruby", "perl")
 
-    /** Max attempts the engine will nudge — beyond this the model has been
-     *  told twice and insisting would loop. Hermes default = 2.
-     *  [feat/runtime-limits-panel] runtime truth is
-     *  AgentRuntimeLimitsPrefs.verifyNudges() (default 2 == this); const kept
-     *  as the documented default (JVM tests of this pure policy keep it). */
-    const val MAX_VERIFY_NUDGES = 2
-
     /** Max changed paths listed in the nudge text. */
     private const val MAX_PATHS_IN_NUDGE = 8
 
@@ -155,18 +148,24 @@ object VerificationStopPolicy {
     // ── the nudge ──────────────────────────────────────────────────────────
 
     /** Build the synthetic follow-up reminder. Null when the guard should
-     *  not fire (no code edits, all prose, or attempts exhausted). */
+     *  not fire (no code edits, all prose, attempts exhausted, or the limit
+     *  is 0 = guard off).
+     *
+     *  [fix/verify-nudges-default-off] [nudgeLimit] is now an explicit
+     *  parameter instead of an internal read of
+     *  AgentRuntimeLimitsPrefs.verifyNudges(). The old implicit read made
+     *  this "pure" policy silently depend on a process-global mutable cache,
+     *  so flipping the shipped default flipped every test that expected a
+     *  nudge. Callers pass the live pref; tests pin the value they mean. */
     fun buildNudge(
         changedPaths: List<String>,
         attempts: Int,
         lastEvidenceDetail: String?,
+        nudgeLimit: Int,
     ): String? {
         val codePaths = changedPaths.filter { !isNonCodePath(it) }.distinct().sorted()
         if (codePaths.isEmpty()) return null
-        // [feat/runtime-limits-panel] 上限改读 prefs（默认 2）。注意：这是纯 JVM
-        // policy 文件，AgentRuntimeLimitsPrefs 未 prime 时读数即默认值，纯函数
-        // 测试的行为不变。
-        if (attempts >= com.rikkaminis.app.data.AgentRuntimeLimitsPrefs.verifyNudges()) return null
+        if (attempts >= nudgeLimit) return null
 
         val pathsList = codePaths.take(MAX_PATHS_IN_NUDGE).joinToString("\n") { "- $it" } +
             (if (codePaths.size > MAX_PATHS_IN_NUDGE) "\n- ... and ${codePaths.size - MAX_PATHS_IN_NUDGE} more" else "")
