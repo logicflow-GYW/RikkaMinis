@@ -1,6 +1,6 @@
 # rikkaminis-dev-history 按天索引
 
-快速跳转到每日开发日志。共 869 条记录，39 天。
+快速跳转到每日开发日志。共 876 条记录，39 天。
 
 ## 2026-08-03（11 条）
 
@@ -119,7 +119,7 @@
 - `10:24` **RikkaMinis footer 按钮失效 — 真正根因 = dispatch 等 close() 挂起（2026-08-05，commit 599fe97）**
   - 用户复验 5b54408 仍失效（v220000091）。最终根因不是 LaunchedEffect 自取消（那个也修了），而是 **dispatch 顺序**…
 - `10:58` **Cloudflare 小号接入 Minis MCP — 已完成（2026-08-05）**
-  - 用户把 Cloudflare 小号（Account ID ***CF_ACCOUNT_ID***，[EMAIL]…
+  - 用户把 Cloudflare 小号（Account ID ***CF_ACCOUNT_ID***，***USER***@outlook.…
 - `13:46` **ippure.com 广告拦截 — 已完成（2026-08-05）**
   - 用户要求记住 ippure.com（IP 纯净度检测站，VitePress 工具站，无 App，无下载页）并给出拦截其广告的规则。
 - `13:49` **WebToApp 打包 ippure.com 无广告 App — 配置方案（2026-08-05）**
@@ -1817,7 +1817,7 @@
 - `20:27` **全局第二轮审计收口 + HIGH 修复闭环（2026-09-09 晚）**
   - **第二道门核实（reports/FINAL-closure.md）**：10 域 498 文件 / 169,059 行，5 HIGH + 34 MEDIUM …
 
-## 2026-09-10（16 条）
+## 2026-09-10（23 条）
 
 - `00:19` **全局第二轮审计修复进度（2026-09-09 深夜，交接点）**
   - **交接文档**：/var/minis/shared/audit-0909-round2-handoff.md（102 行，含状态锚点/批次表/剩余清单/下一步…
@@ -1851,3 +1851,17 @@
   - # UpdateChecker semver 修复 + 正式版化（2026-09-10，main @ 2c7f58b）
 - `04:09` **最新打包应用全面自检（2026-09-10 04:00-04:20，包 1.0.0-beta.1439）**
   - **测试对象**：com.rikkaminis.app versionName=1.0.0-beta.1439（versionCode 220001439，装于…
+- `07:42` **「RikkaMinis Computer」详情面板输出错位根因（2026-09-10 排查）**
+  - **现象**：shell 输出在工具详情面板里时不时在单词中间断行（"有的错位有的不会"），绿色输出行长度从 3 到 40+ 字符不等，与行宽无关。
+- `08:09` **工具显示两处修复（分支 fix/shell-stream-partial-line @ fb14213b，CI #1445 绿，用户拍板暂不合并）**
+  - **用户两个问题 → 两个根因（都在显示层，模型侧数据是干净的）**
+- `08:11` **压缩提示 UX 修复（分支 fix/compact-divider-ux @ 3da98de1，已推送未合并）**
+  - **用户报的两个问题**：①「已压缩 N 条消息」细线+10sp 灰字体验差 ②提示出现后回答继续长在提示**上方**（直觉应在下方）。
+- `08:26` **两个分支合并前检查 + 合并 main（2026-09-10，main @ 31c8abb9）**
+  - **指令**：检查 fix/shell-stream-partial-line + fix/compact-divider-ux 是否引入 bug，无则合并。
+- `09:18` **feat/port-streaming-backup-and-trace-gate 审计 + 引号 bug 修复（2026-09-10）**
+  - **分支**：另一会话推的流式备份导出（杀 payload-String OOM）+ trace 门禁，f2ac8e06，run #1448 success 1…
+- `09:32` **流式备份分支合并收尾（2026-09-10，main @ e0f32d40）**
+  - **闭环**：审计发现引号 bug → 独立 worktree 修复（e0f32d40）→ 分支 CI #1449 success（head 核对，12m20s…
+- `09:44` **小号线自动同步 + lab 侧同款修复 + 文档三项（2026-09-10）**
+  - **小号线定位（用户澄清）**：`rikkaflow/RikkaMinis` = 上游 main verbatim + 唯一 delta（workflow 注入…

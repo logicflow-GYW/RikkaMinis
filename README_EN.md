@@ -187,12 +187,23 @@ See [docs/DEVELOPMENT_LIFECYCLE.md](docs/DEVELOPMENT_LIFECYCLE.md).
   before Gradle: a four-way field-sync check (data-class fields must be synced
   across Model → Entity → toSnapshot → toProviderConfig, or fields silently
   evaporate), an i18n orphan-key check, an enum-parse safety check (no bare
-  `valueOf`), and a provider process-boundary guard (the app process must
+  `valueOf`), a provider process-boundary guard (the app process must
   never call provider network entry points directly — only `:modelservice`
-  owns them). Any hard failure aborts the build.
+  owns them), and an agent-trace replay eval (replays `AgentTraceRecorder`'s
+  schema 2.0 JSONL against goldens asserting tool sequence, terminal state and
+  forbidden tools — see
+  [docs/stability/trace-schema-v2.md](docs/stability/trace-schema-v2.md)).
+  Any hard failure aborts the build.
 - **iOS sources removed.** `src/ios/` is gone; this tree is Android only.
 - **Automatic releases.** Successful builds publish the APK to the
   `android-latest` release.
+- **Alt line (co-installing builds).** `rikkaflow/RikkaMinis` mirrors this tree
+  with exactly one delta: its build injects
+  `MINIS_APP_ID_OVERRIDE=com.rikkaminis.app.lab`, so its APK **co-exists with the
+  stable app on the same device** (own data dir and process names) — and it stays
+  a buildable copy of the tree while this one is mid-surgery. It follows upstream
+  main automatically (nightly, or on dispatch). See
+  [docs/ALT_ACCOUNT.md](docs/ALT_ACCOUNT.md).
 - **Platform skills shipped in assets.** `semantic-memory`,
   `github-ops`, `cloudflare-fullright-ops` and `skill-creator`
   (with their scripts) are bundled under `app/src/main/assets/skills/`,

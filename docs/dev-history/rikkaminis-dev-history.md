@@ -4,8 +4,8 @@
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
 - 合并范围：2026-08-03 ～ 2026-09-10，共 39 天
-- 条目总数：869（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
-- 总字符数：1018643 / 总行数：16485
+- 条目总数：876（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
+- 总字符数：1027057 / 总行数：16605
 
 ---
 
@@ -16478,6 +16478,126 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 **环境事实**：包名迁移 = 换应用 = 新私有数据目录，沙箱 rootfs 从 APK 重新解压（/var/minis/logs/rootfs-events.log: INSTALL gen=1 @03:58），旧 apk/pip 包全丢（/etc/apk/world 重置为基础包）。重装清单：apk add curl git python3 py3-pip jq file binutils coreutils findutils py3-numpy sqlite + pip install --break-system-packages huggingface_hub。
 
 **未测（用户跳过权限弹窗）**：通知/联系人/照片/日历/定位（定位服务关闭）/剪贴板（需前台）/TTS/ASR/应用 UI 交互。
+
+<!-- 2026-09-10 07:42:17 -->
+## 「RikkaMinis Computer」详情面板输出错位根因（2026-09-10 排查）
+
+
+**现象**：shell 输出在工具详情面板里时不时在单词中间断行（"有的错位有的不会"），绿色输出行长度从 3 到 40+ 字符不等，与行宽无关。
+
+**根因三连（纯显示层，模型侧输出干净）**：
+1. `PersistentShell.kt:321-325` readLoop 把 `scan.beforeMarker` 交给 feedLines；而 `internalScanMarker`(:632-652) 为跨块 marker 检测**扣掉最后 keepLen = markerPattern.length-1 = 26 字符**（`"__MINIS_DONE_" + 8 位 UUID + "_EXIT_"` = 27）→ 每个 read 分块喂进去的文本必然在行中间截断。
+2. `feedLines`(:362-373) 把最后那段不完整行**当完整行回调**（注释自证 "Partial line — still feed it for real-time updates"）→ 下一分块的续行变成新的一行 → 单词中间多出 `\n`。断点位置 = 分块边界 − 26 字符。
+3. `AgentLoopEngine.kt:2357-2363` 对 shell_execute 取 `max(existingContent, result.output 末80行)` **按长度**比较 → 流式内容因多出的 `\n` 总是更长 → 赢 → 详情面板永久保留错位文本。
+
+**实测证据（同会话自证）**：跑 python3 三次 flush 写同一行（应为 90 字符一行）→ 日志 `outputLen=91`（干净）vs `contentLen=93`（面板），差 2 = 2 次假断行。用 keepLen=26 + CRLF 逐字符复算截图（`b12: in_progress No/ne/main: in_progress None/Wed/␣Sep  9 16:43:51 UTC 2026`）与截图完全一致。
+
+**关键区分**：模型拿到的是干净的 `result.output`（outputLen），只有 UI 面板错位 → 不影响 agent 判断。全屏终端（Termux TerminalView）不受影响。
+
+**修复方向**：feedLines 只提交完整行 + 行尾碎片走 partial 通道让显示层"替换最后一行"（保留实时性）；最小止血：shell_execute 结束时一律用 result.output 覆盖流式内容。
+
+<!-- 2026-09-10 08:09:20 -->
+## 工具显示两处修复（分支 fix/shell-stream-partial-line @ fb14213b，CI #1445 绿，用户拍板暂不合并）
+
+
+**用户两个问题 → 两个根因（都在显示层，模型侧数据是干净的）**
+
+1. **详情面板输出单词中间断行**：`internalScanMarker` 每块扣掉最后 26 字符（markerPattern=27）→ `feedLines` 把不完整尾行当完整行回调 → 每块边界插一个假换行；`AgentLoopEngine` 按长度取 `max(流式, result.output)` → 脏流式内容更长 → 永久留在面板。实测 `outputLen=91` vs `contentLen=93`；Kotlin 复刻旧实现复现截图逐字符（`Wed` / `␣Sep  9...`）。
+2. **工具耗时显示接近一分钟但命令 <1s**：`durationMs = Pass3时刻 − startTimeMs`，而 startTimeMs 是模型开始流式输出 tool_use 参数的时刻，Pass 3 在整批执行完才跑 → 每个工具被摊上"模型剩余流式 + 整批执行"。**对照实验**：同一轮 A(4.8ms) + B(sleep 5s) → 日志 END 同一时刻，A 显示 5.44s。
+
+**修复**：新增纯 `sandbox/DisplayLines.kt`（splitDisplayLines + DisplayLineBuffer 替换语义）；`feedLines` 回调改 `(line, isPartial)` 透传 4 文件；`AgentLoopEngine` Pass2 实测每次 `host.executeTool` 耗时存 `execMsById`，Pass3 优先用它。
+
+**验证**：kotlinc 2.1.0 语法门 0 错 + 定向 unresolved 0；生产文件 DisplayLines.kt JVM 16/16 PASS；负向对照复现症状；CI #1445 success（含 testReleaseUnitTest）。**分支未合并、未删除**——用户要求与另一分支一起做合并前检查。交接：/var/minis/shared/shell-stream-partial-line-handoff.md。
+
+**环境**：沙箱已装 openjdk17-jdk（apk，持久）+ kotlinc 2.1.0（/tmp/kotlinc，rootfs 重建会丢，重下 86MB zip 解压即可）。
+
+<!-- 2026-09-10 08:11:01 -->
+## 压缩提示 UX 修复（分支 fix/compact-divider-ux @ 3da98de1，已推送未合并）
+
+
+**用户报的两个问题**：①「已压缩 N 条消息」细线+10sp 灰字体验差 ②提示出现后回答继续长在提示**上方**（直觉应在下方）。
+
+**问题②根因（真 bug）**：`appendSystemInfo` 追加到 `_messages` 末尾；自动压缩 `maybeAutoCompactInLoop`（AgentLoopEngine:290）在流式回合**中**触发 → 提示落到正在生成的 assistant 消息之后 → 回答继续长在提示上方；而冷加载路径 `applyCompactMarkerGraying` 把 divider 插在 anchor 之后（= 流式消息之前）→ 两条路径位置不一致。
+**修法**：`ChatViewModel.flushPendingSysInfo` 改为插到最后一条 in-flight（`isStreaming || isAwaitingModelResponse`）非 system 消息之前；无 in-flight 则仍追加末尾。
+
+**问题①修法**：`FallbackInfoBlock` 从 iOS systemDividerRow 移植的「1dp 细线 + 10sp secondaryText + 14dp ⓘ」改为圆角卡片（`toolCapsuleBg` / 13sp medium / `primaryText` / `heightIn(min=44.dp)` / 整卡 clickable / 右侧 ChevronRight）。影响所有 system 通知（压缩条、slash 通知、fallback 行）。
+
+**顺手修的真 bug**：冷加载路径 `dividerLabel = "$compactedUICount messages compacted"` 硬编码英文 → 改走 `R.string.sysmsg_compacted_count`（7 语言一致）。
+
+**验证**：3 文件括号配平 OK；`/tmp/kotlinc` 语法门无语法错；CI run **1446 in_progress**（head 3da98de1）。
+
+**用户拍板**：暂不合并 —— 与 `fix/shell-stream-partial-line`（CI run **1445 success** @ fb14213b）**一起做合并前检查**后再合并。
+
+**工作树**：`/tmp/rikka-compact`（git worktree，基于 main 10965148）；`/tmp/rikka-merge` 占着 shell 分支。
+
+**产品原则（用户直觉）**：过程类系统提示（压缩/上下文满）必须落在「正在生成的回答」之前 —— 内容要在提示下方继续，而不是在提示上方。
+
+<!-- 2026-09-10 08:26:22 -->
+## 两个分支合并前检查 + 合并 main（2026-09-10，main @ 31c8abb9）
+
+<!-- 2026-09-10 08:30 -->
+
+**指令**：检查 fix/shell-stream-partial-line + fix/compact-divider-ux 是否引入 bug，无则合并。
+
+**审计结论（无 bug，零重叠文件）**：
+- shell 分支（8 文件）：splitDisplayLines/DisplayLineBuffer 纯逻辑正确（CRLF/空行/50 行窗口/partial 替换）；feedLines 跨块携带 partial 保留实时性；DebugRPC 忽略 isPartial 与旧等价；execMsById 并行/顺序两分支都实测 + fallback 旧算法。
+- compact 分支（3 文件）：flushPendingSysInfo 插入 in-flight 之前——`isStreaming=true`/`isAwaitingModelResponse=true` 在 canonical 占位气泡上确认存在（ChatViewModel:1106-1107、AgentLoopEngine:2413）→ 查找有效；system notice 纯内存不走 DB（appendMessage 只有 user/assistant）→ 无 sort_order 副作用；dividerLabel i18n key base+7 语言全在带 %1$d；FallbackInfoBlock 卡片化签名未变、SubcomposeLayout 零残留。
+- **交叉风险**：两分支零重叠文件（sandbox/engine vs UI/ViewModel），rebase 零冲突。
+
+**合并流程**：ff 合并 shell（10965148→fb14213b）→ compact rebase 到新 main（3da98de1→31c8abb9，patch 逐字节一致仅 hash 行异）→ ff 合并 → push main（release CI run 34421165433 in_progress，用户拍板不等）→ 两远端分支 API DELETE 204 → 本地 worktree 清理（/tmp/rikka-merge 主树保留，/tmp/rikka-compact 已删，/tmp/rikka-alt 是别的会话勿动）。
+
+**重要坑（askpass 写法）**：file_write 重建 .git_askpass.sh 时**不能**用无条件双 echo（`echo x-access-token; echo $GITHUB_TOKEN`）——git 对密码 prompt 也取第一行 → 密码变成 "x-access-token" → push 认证失败（fetch 能过因为仓库 public 匿名可读，掩盖错误）。必须用 gh_sync.sh 标准模板：`case "$1" in *Username*) echo "x-access-token" ;; *Password*) echo "$GITHUB_TOKEN" ;; *) echo "" ;; esac`。09-10 04:09 记忆里的简化版描述是错的，以 gh_sync.sh:74-90 为准。
+
+<!-- 2026-09-10 09:18:45 -->
+## feat/port-streaming-backup-and-trace-gate 审计 + 引号 bug 修复（2026-09-10）
+
+
+**分支**：另一会话推的流式备份导出（杀 payload-String OOM）+ trace 门禁，f2ac8e06，run #1448 success 11m57s（正常带宽）。
+
+**审计结论（其余全净）**：UI 三调用点（SAF/快照/WebDAV temp file finally 清理）正确；writeSnapshotStreaming 与旧契约逐行一致；AutoBackupManager 留内存路径合理（chatRepo=null 骨架仅几 MB）；trace_eval_check.py fail-closed；import 侧全 opt*（null 字面量安全，has() 无陷阱用法）。
+
+**真 bug（CI 测不出）**：exportToWriter else 分支 `skeletonJson.opt(key)?.toString()` 对 String 值输出裸词——`{"format":openminis.config.backup,...}` 无引号 = 非法 JSON。org.json 宽容解析 → 应用内 round-trip + JVM 单测全绿（CI 绿 ≠ 产物对）；python json/jq 实测双双拒收。现有测试「parse 后树比较」恰好洗掉引号缺失。
+
+**修复（e0f32d40，已推）**：else 分支 `if (v is String) JSONObject.quote(v)`；新增字节级测试 `top-level string values are emitted quoted`。验证：kotlinc+junit4+org.json 20231013（CI 同版）6/6 绿；负向对照（裸 toString 版）红且报 `expected:<...["openminis...`> 症状精确；括号 299/299；scan 5/5。
+
+**流程坑**：独立 worktree /tmp/rikka-fix-stream（detached @f2ac8e06，避开 /tmp/rikka-merge 的分支占用）；push 用 refspec 直推 fast-forward（f2ac8e06..e0f32d40）；askpass 按 case 模板重建于本会话 workspace。
+
+**待办**：分支 CI 重跑结论（dispatch 204 已触发）→ 用户拍板合并 → 删分支。
+
+<!-- 2026-09-10 09:32:10 -->
+## 流式备份分支合并收尾（2026-09-10，main @ e0f32d40）
+
+
+**闭环**：审计发现引号 bug → 独立 worktree 修复（e0f32d40）→ 分支 CI #1449 success（head 核对，12m20s）→ 用户拍板 → `git push origin e0f32d40:main` 快进合并（31c8abb9..e0f32d40）→ 远端分支 API DELETE 204 → release CI run 34425809944 触发（**用户拍板不等结论**，新会话可查 bridge /status/main）→ 我的 worktree /tmp/rikka-fix-stream 已清理（/tmp/rikka-merge 仍停在已删的 feat 分支上，是原会话的树，未动）。
+
+**本次两轮 CI 耗时**：分支 #1448 11m57s / #1449 12m20s——均在 11~12.5 分钟正常带内。
+
+**待办**：dev-history 重建（本次新增 1 条修复记录）；真机验证流式导出（手动导出/快照/WebDAV 三种备份文件应能被 python json / jq 正常解析）。
+
+**残留**：/tmp/rikka-merge 工作树 HEAD 指向已删远端分支 feat/port-streaming-backup-and-trace-gate——下次用它的会话需先切分支。
+
+<!-- 2026-09-10 09:44:48 -->
+## 小号线自动同步 + lab 侧同款修复 + 文档三项（2026-09-10）
+
+
+**小号线定位（用户澄清）**：`rikkaflow/RikkaMinis` = 上游 main verbatim + 唯一 delta（workflow 注入 `MINIS_APP_ID_OVERRIDE=com.rikkaminis.app.lab`）。两个目的，按重要性：①**同设备与稳定版共存**（各自数据目录/子进程/Shizuku provider/启动器标签，当初做它的原因）②**主号手术中的救援线**（始终有一份能构建能装的副本）。目的②只在它持续跟随主线时成立 → 同步必须自动化。
+
+**根本问题**：GitHub 的 "Sync fork" 按钮只做 fast-forward，小号线带自有 commit → 按钮拒绝 → 每次都要手工 merge。**解法（已落地）**：小号 main 新增 `.github/workflows/sync-fork-main.yml`（每晚 03:17 UTC + 手动派发）：
+- fetch 上游 main；已是祖先 → 幂等结束
+- merge；冲突**只在** build-apk.yml → 取上游版本 + 跑 `scripts/alt/apply_dual_appid_delta.py` 重新合成 delta
+- 其他文件冲突 → abort + 作业红（宁可红不要静默坏合并）
+- 合并后守卫：delta 环境变量行 + appId 注解都必须存在
+- push → 触发小号线自己的 build CI
+
+**delta 脚本关键设计**：锚点用**正则**（`versionNameSuffix=+$GITHUB_RUN_NUMBER` 那行）而非精确行——本地模拟发现「上游编辑锚点行本身」会让精确匹配失败；改为正则 + 只在引号内追加 appId。验证：常规路径逐字节等于原 delta commit（幂等），冲突路径本地模拟（fake upstream/fork 双仓）全通：上游改动保留 + delta 重新合成 + 守卫通过。
+
+**小号同步结果**：workflow 首次运行即成功 → 小号 main `adc41cbd`（merge e0f32d40），delta 在、引号修复在。小号 CI 随后构建。
+
+**lab 侧同款 bug 已修**：`lab-history-archive`（com.openminis.app 旧包名的归档分支）的 ConfigBackup.kt 同样 `opt(key)?.toString()` 裸字符串 → 同款修复 + 字节级测试，本地 6/6 绿，推送 `296f970d` 并派发该分支 CI。
+
+**文档三项**：①README（中/英）+ ARCHITECTURE §10 的 scan 门禁 4→5（补 agent trace 回放评估）②新增 `docs/ALT_ACCOUNT.md`（小号线为什么存在 / 唯一 delta / 同步机制 / 验证方法 / 手工恢复步骤 / 非目标）+ README 中英入口 ③dev-history 重建 869→875 条。
+
+**坑**：独立 worktree 处理三条线（/tmp/rikka-alt-sync 小号 main、/tmp/rikka-lab 归档分支、/tmp/rikka-docs docs 分支）；推小号用 `GIT_ASKPASS=... GITHUB_TOKEN="$GITHUB_TOKEN_FULL_RIGHT"`（askpass 读 $GITHUB_TOKEN，用 env 覆写指向满权限 token）。
 
 ---
 

@@ -192,8 +192,10 @@
 
 ## 10. 质量基础设施
 
-- **scan.sh 四项门禁**（CI 构建前，任一硬失败中止构建）：
-  四层同步 / i18n 孤儿键 / 枚举解析禁裸 valueOf / provider 进程边界。
+- **scan.sh 五项门禁**（CI 构建前，任一硬失败中止构建）：
+  四层同步 / i18n 孤儿键 / 枚举解析禁裸 valueOf / provider 进程边界 /
+  agent trace 回放评估（消费 `AgentTraceRecorder` 的 schema 2.0 JSONL，
+  对 golden 断言工具序列、终态、禁用工具——产出侧与消费侧就此闭环）。
 - **JVM 单测全量先跑**：红 = 红，无静默跳过；沙箱内可用 kotlinc + 桩闭包
   做纯逻辑预验证（真 Gradle 编译裁决以分支 CI 为准）。
 - **发布链路**：分支 → 分支 CI（head_sha 双核对：Cloudflare 桥 + API）→

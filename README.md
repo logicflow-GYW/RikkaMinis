@@ -140,9 +140,17 @@ SHA-256  FC:0C:40:0D:B7:7E:C1:81:A3:35:18:C2:E8:13:6A:AE
   四处同步检查（数据类字段在 Model→Entity→toSnapshot→toProviderConfig 四层
   必须同步，缺一层字段会静默蒸发）、i18n 孤儿键检查、枚举解析安全检查
   （禁裸 `valueOf`）、provider 进程边界守护（app 进程不得直接调 provider 网络
-  入口，只能由 `:modelservice` 持有）。任何一条硬失败都会中止构建。
+  入口，只能由 `:modelservice` 持有）、agent trace 回放评估（回放
+  `AgentTraceRecorder` 的 schema 2.0 JSONL，按 golden 断言工具序列 / 终态 /
+  禁用工具，schema 见 [docs/stability/trace-schema-v2.md](docs/stability/trace-schema-v2.md)）。
+  任何一条硬失败都会中止构建。
 - **iOS 源码已移除。** `src/ios/` 已删除；本树仅限 Android。
 - **自动发布。** 成功构建会把 APK 发布到 `android-latest` release。
+- **小号线（alt 构建）。** `rikkaflow/RikkaMinis` 是同一棵树的一条镜像线，
+  只差一处：构建时注入 `MINIS_APP_ID_OVERRIDE=com.rikkaminis.app.lab`，产物与
+  稳定版**同设备共存**（各自数据目录与进程名），同时也是主号那棵树处于手术中时的
+  可用构建。它跟随上游 main 自动同步（每晚或手动派发）。详见
+  [docs/ALT_ACCOUNT.md](docs/ALT_ACCOUNT.md)。
 - **平台技能打进资产包。** `semantic-memory`、`github-ops`、
   `cloudflare-fullright-ops`、`skill-creator` 四个技能（含脚本）随 APK
   一起打包在 `assets/skills/`，安装即自带，无需手动安装。
