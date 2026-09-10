@@ -4,8 +4,8 @@
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
 - 合并范围：2026-08-03 ～ 2026-09-10，共 39 天
-- 条目总数：876（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
-- 总字符数：1027057 / 总行数：16605
+- 条目总数：882（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
+- 总字符数：1034727 / 总行数：16702
 
 ---
 
@@ -16598,6 +16598,103 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 **文档三项**：①README（中/英）+ ARCHITECTURE §10 的 scan 门禁 4→5（补 agent trace 回放评估）②新增 `docs/ALT_ACCOUNT.md`（小号线为什么存在 / 唯一 delta / 同步机制 / 验证方法 / 手工恢复步骤 / 非目标）+ README 中英入口 ③dev-history 重建 869→875 条。
 
 **坑**：独立 worktree 处理三条线（/tmp/rikka-alt-sync 小号 main、/tmp/rikka-lab 归档分支、/tmp/rikka-docs docs 分支）；推小号用 `GIT_ASKPASS=... GITHUB_TOKEN="$GITHUB_TOKEN_FULL_RIGHT"`（askpass 读 $GITHUB_TOKEN，用 env 覆写指向满权限 token）。
+
+<!-- 2026-09-10 10:02:09 -->
+## 小号线同步闭环验证 + 文档合并（2026-09-10，main @ f1123178）
+
+
+**小号线（rikkaflow/RikkaMinis）三条验证全绿**：
+1. **同步 workflow 首次运行即完成同步**：小号 main → `adc41cbd`（merge 上游 e0f32d40），delta（MINIS_APP_ID_OVERRIDE 行 + appId 注解）与引号修复都在。
+2. **幂等路径**：再次派发 → 日志 `already current with upstream — nothing to do`，且 `Trigger the build for the synced commit` 步骤结论为 **skipped**（门控生效，不白跑 12 分钟构建）。
+3. **同步后构建成功 + 共存身份**：小号 main 构建 success，日志回显 `MINIS_APP_ID_OVERRIDE: com.rikkaminis.app.lab`、`versionCode=220000072 ... appId=com.rikkaminis.app.lab`；小号 release 资产 `RikkaMinis-arm64-v8a.apk`（13.3MB）已刷新。
+
+**发现并修的真问题（重要）**：workflow 用默认 `GITHUB_TOKEN` push 时**不会触发其它 workflow**（防递归）→ 同步完成但小号永远拿不到新 APK（第一次同步就是这样：main 合成并 push 了 adc41cbd，但 build 没有自动跑）。修法：同步 job 加 `actions: write` + 末尾显式 `gh workflow run build-apk.yml --ref main`（workflow_dispatch 是 GITHUB_TOKEN 仍可触发的两个事件之一），并用 `pushed` 输出门控（无变更不派发）。
+
+**lab 归档分支修复**：推送 `296f970d` 后该分支 CI **success**（com.openminis.app 旧包名树编译通过）。
+
+**文档合并**：main `f1123178`（docs 分支 ff 合并后已删）——README 中英 + ARCHITECTURE §10 门禁 4→5、新增 `docs/ALT_ACCOUNT.md`、dev-history 876 条。注意：跨仓引用（小号线仓库的文件）在文档里用完整 URL，避免主仓死链。
+
+**未验证分支（诚实记录）**：`pushed=true → 派发构建` 这条路尚未被真实同步触发过（本轮同步恰好没有新上游变更）——它依赖标准写法（gh workflow run + actions:write），下一次上游 main 前进时自然覆盖。
+
+<!-- 2026-09-10 10:09:02 -->
+## 验证补强：逐字抽取生产代码 + 严格解析器当判据（2026-09-10）
+
+
+**问题**：单测只复刻了发射形状、没跑生产代码（`exportToWriter` 需要 repo 依赖，沙箱编不了整文件）→ 修复的"生产性"证据不足。
+
+**手法（可复用）**：写 `/tmp/verify2/extract_harness.py` —— 用括号配平从 `ConfigBackup.kt` 里**逐字抽出** `{ w, key -> ... }` 块与真实 key 列表，动态生成 `Sections` stub（字段名从块里 `sections.X` 正则扫出）+ 一个 `emit()` 壳，kotlinc 编译后跑出真实文档，**判据用 python json（严格解析器）**而非 org.json（宽容）。
+
+**结果**：
+- 主仓 e0f32d40：480 字符 → python json **接受**（format 带引号、18 键）；修复前 f2ac8e06 → **拒收** `Expecting value: line 1 column 11`（与最初症状同源）
+- lab 296f970d：422 字符 → 接受（15 键，含 readFailures 分支）；lab 修复前 46e7d0e2 → 拒收（同一条错误）
+- 部署版 delta 脚本（小号 main @ 0c943c6 拉回）：对上游 build-apk.yml 跑 → 与**小号线上部署文件逐字节一致** + 幂等 + YAML 合法
+- 冲突模拟（部署版脚本）：上游改动保留 + delta 重合成 + 守卫通过
+- CI 实证：main run 34424940594 与 lab run 34426530711 都真跑 `testReleaseUnitTest`，新测试 `top-level string values are emitted quoted, not as bare words` PASSED
+
+**教训**：「测试复刻了形状」≠「生产代码被验证」——抽取生产源文本执行 + 用严格消费者当判据，是在无法整文件编译时的最强替代。
+
+<!-- 2026-09-10 12:34:12 -->
+## 两分支合并前检查 + 64 字符边界修复 + 合并 main（2026-09-10 下午，main @ a3fbf44）
+
+
+**检查结论**：`fix/mount-detail-name-hint`（挂载编辑页路径提示 + 重名前置拦截）与 `fix/composer-height-parity`（输入框 56dp 对标 rikkahub）**均未引入 bug**。核对要点：①UI 判重与 `store.rename()` 判重逐条一致（排除自身 / ignoreCase / trim / 同数据源 `store.entries` 的 StateFlow）②`entry == null` 保护在判重之前 ③composer 的 decorationBox→Box 替换中 `innerTextField()` 恰调一次、`Box`/`heightIn`/`Alignment` import 齐全、外层 `heightIn(min=25.dp)` 与 56dp 嵌套不冲突、maxLines/keyboardActions 未动 ④`TextFieldDefaults` 死 import 是 main 既有（非本分支引入）。
+
+**扫出并修复的边界（LOW，main 既有、本分支修复未盖全）**：`sanitizeName()` 有 `take(64)` 截断，而 `isValidMountName()` 不查长度 → 65+ 字符名被 UI 放行、store 静默截断；截断后若撞上其它挂载名 → `rename()` 返回 false → **静默失败复发**（正是该分支要修的症状）。修法：`MAX_NAME_LENGTH = 64` 提升为 `MountedFoldersStore` 常量（单一真相），`isValidMountName` 加长度检查（一处覆盖 edit 页 + add sheet 两个入口），`mount_detail_name_invalid` 文案改 `%1$d` 占位符 + 7 语言同步。
+
+**验证手法（可复用）**：逐字抽取生产函数体 → kotlinc harness。python 括号配平抽取 `isValidMountName` + `sanitizeName` + 从源码正则取常量值；**关键坑：抽取的 `sanitizeName` 必须放回 object 内**（它直接引用 companion 常量，放顶层会 unresolved reference）。断言：63/64 接受、65/200 拒绝；交叉不变量「UI 接受者经 store 不被改写」；负向对照（旧实现接受 65 且截断后 == 64 字符名）证明撞名路径真实存在。ALL PASS。
+
+**CI 卡死处理（可复用）**：composer 首个 run #1452 卡在 step 17「Build APK with Gradle」8+ 小时（`updated_at` 停在创建时刻 = 判断挂死的信号）。处理链：`POST /actions/runs/{id}/cancel` → 确认 completed/cancelled → 重新 dispatch。**坑**：`gh_ci_wait.sh` 首次 dispatch 后可能立刻报 `VERDICT ... cancelled`——那是查询时新 run 尚未入列、它拿到了刚取消的旧 run；用 API `runs?branch=` 列表确认新 run 存在，再 `--no-dispatch` 等它（不要重复 dispatch）。
+
+**新发现（未修，待用户拍板）**：`MountedFoldersStore.sanitizeName()` 第 339 行检查的是**真实 NUL 字节（0x00）**，不是换行——git 对象（main）里同样是 0x00，非本分支引入。该检查永不命中（NUL 不可能出现在输入/文件名里），推测原意是 `'\n'`（防换行）但语义不明；副作用是按行工具（grep/sed）把该行显示成断行。
+
+**合并（git-parallel-collaboration skill §2 流程）**：远端 main 未前进（f1123178）→ 本地 main ff ← mount（b960347）→ composer rebase 到新 main（a3fbf44）→ **patch-id 对比证明纯平移**（前后均 8237bd01）→ ff 合并 → `merge-base --is-ancestor` 双验证 → scan 5/5 → push main → release CI **#1455**（34437646975，head a3fbf44，in_progress）→ 远端两分支 API DELETE 204 + 本地删除。
+
+**待真机验证**（android-latest = main @ a3fbf44）：①挂载编辑页提示显示实时路径、输入已有名 → 红字 + 保存禁用、合法改名生效 ②输入框空态行高 48dp→56dp 且文字垂直居中、按钮行贴紧、多行仍长高、回车发送/@ 提及不受影响 ③超长名（65+ 字符）显示 invalid 提示且保存禁用。
+
+<!-- 2026-09-10 12:41:52 -->
+## 遗留清单机制建立 + NUL 项搁置（2026-09-10）
+
+
+用户对 `sanitizeName` 的 NUL 检查拍板「这是个小问题，攒着吧，记下来」。
+
+- 新建 **`/var/minis/shared/backlog.md`** —— 累积式遗留清单（跨会话持久），格式：位置 / 证据 / 影响 / 可选处理 / 搁置时间。处理时从最旧一条开始，逐条向用户确认后再动。
+- 首条 = MountedFoldersStore.kt:339 的 NUL 检查（证据：字节级验证 + git 对象同为 0x00，main 既有；处理选项 A 删除 / B 改 '\n' + UI 同步拒绝）。
+- 意义：以后用户说「攒着」的小问题都往这个文件加，与 memory（时间线日志）分工——backlog 是可一次性批量处理的可检索清单。
+
+<!-- 2026-09-10 13:31:33 -->
+## verify nudge 默认关闭（2026-09-10，main @ 478ae1e）
+
+
+**用户诉求**：把"大模型回答结束后系统塞进去要他检查"的机制做成可选开关。查证结论——**它叫 verify nudge（`VerificationStopPolicy.buildNudge`），早已有可调参数**：设置 → Agent 运行时 → 「验证提醒」滑杆 0~4，MIN=0 即关闭（`attempts >= limit → null`）。用户选 **B：默认值 2 → 0**（出厂默认关，要的人自己开）。
+
+**改动（14 文件 +59/−30，commit 478ae1e）**：
+- `AgentRuntimeLimitsPrefs.VERIFY_NUDGES_DEFAULT` 2 → 0（+ 注释说明出厂=关；未动过滑杆的用户跟随新默认，存过值的保留）
+- **解耦（本次关键）**：`buildNudge(changedPaths, attempts, lastEvidenceDetail, nudgeLimit: Int)` —— 上限改为**显式必填参数**，不再内部读进程级 `AgentRuntimeLimitsPrefs` 缓存；删除废弃镜像常量 `MAX_VERIFY_NUDGES`（AgentLoopState 注释同步）
+- `AgentLoopEngine` 读一次 limit 存局部 `verifyNudgeLimit`，门控与日志分母共用同一读数
+- ConfigBuiltins description + 7 语言 `runtime_limits_verify_nudges_desc` 改为「默认 0 = 关闭」
+
+**为什么解耦是承重的而非装饰（可复用教训）**：纯策略层隐式读全局可变缓存 → 翻 shipped default 会连带翻掉测试。**负向对照实测**：旧代码（隐式读）+ 新默认 0 + 旧测试 = 恰好 3 红（nudge fires / long path lists / mixed edits），与预测逐条一致。**模式：凡"纯 policy/纯函数"内部读全局 prefs，改动其默认值前先把它参数化——否则默认值变更会被隐式耦合放大成测试雪崩，且红得莫名其妙。**
+
+**验证链**：scan gate 5/5 → kotlinc 编译策略+测试 17/17 绿（新增 `limit zero never nudges` 钉住出厂关）→ 负向对照 3 红 → 分支 CI run 34439300573 **success**（12min）→ ff 合并 main a3fbf44..478ae1e → release CI run 34440229092 **success**（head_sha 478ae1e7 核对）→ 远端+本地分支已删、独立 worktree 已清理。
+
+**真机验证清单（android-latest）**：①Agent 运行时滑杆显示 0、副标题「默认 0 = 关闭」②跑改代码文件的任务 → 回合结束**不再**多一轮验证续跑，日志无 `injecting verify nudge` ③滑杆调到 2 → 同任务应出现一轮 Nudge 续跑。
+
+**机制事实（顺带记录）**：verify nudge 仅在①本轮 file_write/file_edit 改了**代码**文件（.md/.txt 等 prose 被 `isNonCodePath` 滤除，写文档不触发）②模型不再发工具调用、要自然结束 ③改动后无更新的通过验证证据 ④未挂失败横幅（`terminalErrorSurfaced` 时不续命）——四条同时成立才触发，且纯策略层只提醒不执行。
+
+<!-- 2026-09-10 14:12:30 -->
+## 挂载页删改名 + composer 回退（2026-09-10，main @ 09f040e）
+
+
+**两件事，分支 fix/mount-drop-rename（2 commit）**：
+
+1. **revert(chat)** 1a0a724：回退 a3fbf44 的 composer 56dp 改动。用户真机用了之后觉得原 M3 DecorationBox 那套（contentPadding 12/7dp、48dp 行、按钮行 10dp padding）更好。revert 后与 a3fbf44^ 逐字节一致。确认线索：用户说"#1453" = fix/composer-height-parity 的 CI run。
+2. **feat(mount)** 09f040e：挂载详情页删「挂载名称」整块（用户拍板 B 方案 = 连改名能力一起砍）。理由：名字即路径标识（/var/minis/mounts/<name>），HeaderCard 已显示名称+路径，字段纯重复；改名会静默失效历史路径且 UI 无法报告。删除：标签+输入框+校验/提示行、MountedFoldersStore.rename()（无调用者）、3 字符串 ×7 语言。改名 = 取消挂载+重新挂载。写权限开关+保存按钮保留（canSave = allowWrite != stored）。
+
+**审计（合并前用户要求）全绿**：残留引用零命中；7 语言 XML parse + i18n_check ALL CLEAN；scan 5/5；kotlinc 语法门零语法错 + 基线对照（旧版 276 噪声错 / 新版 226，少 50 = 删除 UI 行数，无新错误类别）；revert 逐字节一致；import 无孤儿（getValue/setValue 是 by 委托隐式）。
+
+**合并**：分支 CI #1458 success（head 09f040e3，12min）→ refspec 直推 main（478ae1e..09f040e，ff）→ 远端分支 API DELETE 204 → release CI #1459（34444151734）触发，**结论未等**（用户拍板合并后收尾，新会话查 bridge /status/main）→ 本地 worktree /tmp/rikka-ui 已删。
+
+**真机验证清单（用户装 android-latest = main @ 09f040e 的包）**：①挂载详情页无「挂载名称」字段、屏幕只显示一次名称+路径（HeaderCard）②写权限开关+保存按钮仍工作 ③聊天输入框回到旧版（48dp 行、文字靠上、按钮行 10dp）④新增挂载对话框不受影响。
 
 ---
 
