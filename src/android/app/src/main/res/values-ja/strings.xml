@@ -910,6 +910,8 @@
     <string name="mount_detail_browse_files">ファイルを開く</string>
     <string name="mount_detail_browse_files_toast">チャットの @ メンションからこのマウントにアクセスできます。</string>
     <string name="mount_detail_name_invalid">マウント名は空、\'/\' を含む、または \'.\'/\'..\' にできません</string>
+    <string name="mount_detail_name_hint">マウントパス：/var/minis/mounts/%1$s</string>
+    <string name="mount_detail_name_duplicate">同じ名前のマウントがすでに存在します</string>
     <string name="mount_path_unavailable">パスが利用できません</string>
     <string name="mount_add_failed">マウントを追加できませんでした。名前が既に使用済みか無効です。</string>
 

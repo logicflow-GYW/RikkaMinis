@@ -87,7 +87,14 @@ fun MountDetailScreen(
 
     val nameTrimmed = nameText.trim()
     val nameChanged = nameTrimmed != entry.name
-    val nameValid = isValidMountName(nameText)
+    // MountedFoldersStore.rename() rejects a name that collides with another
+    // mount (case-insensitive) and returns false — surfacing it here keeps the
+    // save from silently doing nothing.
+    val nameDuplicate = nameChanged && entries.any {
+        it.id != entry.id && it.name.equals(nameTrimmed, ignoreCase = true)
+    }
+    val nameShapeValid = isValidMountName(nameText)
+    val nameValid = nameShapeValid && !nameDuplicate
     val allowWriteChanged = allowWrite != entry.userAllowWrite
     val hasChanges = nameChanged || allowWriteChanged
     val canSave = hasChanges && (!nameChanged || nameValid)
@@ -141,17 +148,28 @@ fun MountDetailScreen(
                 singleLine = true,
                 isError = nameChanged && !nameValid,
             )
-            if (nameChanged && !nameValid) {
+            if (nameChanged && !nameShapeValid) {
                 Spacer(Modifier.height(4.dp))
                 Text(
                     text = stringResource(R.string.mount_detail_name_invalid),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error,
                 )
-            } else {
+            } else if (nameDuplicate) {
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = stringResource(R.string.mount_add_name_hint),
+                    text = stringResource(R.string.mount_detail_name_duplicate),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            } else {
+                // The add sheet's hint ("this becomes the folder name under
+                // /var/minis/mounts/") reads as creation-time advice and is
+                // wrong on an existing mount — show the path this name maps
+                // to instead, updating as the user types.
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = stringResource(R.string.mount_detail_name_hint, nameTrimmed),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
