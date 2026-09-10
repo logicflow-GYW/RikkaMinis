@@ -1192,9 +1192,6 @@
     <string name="mount_detail_title">编辑挂载</string>
     <string name="mount_detail_browse_files">浏览文件</string>
     <string name="mount_detail_browse_files_toast">在聊天中通过 @ 提及访问此挂载。</string>
-    <string name="mount_detail_name_invalid">挂载名称不能为空，不能包含 \'/\'，也不能是 \'.\' 或 \'..\'，且不超过 %1$d 个字符</string>
-    <string name="mount_detail_name_hint">挂载路径：/var/minis/mounts/%1$s</string>
-    <string name="mount_detail_name_duplicate">已有其它挂载使用该名称</string>
     <string name="mount_path_unavailable">路径不可用</string>
     <string name="mount_add_failed">无法添加挂载，名称可能已被使用或无效。</string>
 

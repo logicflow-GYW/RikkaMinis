@@ -1015,9 +1015,6 @@
     <string name="mount_detail_title">Изменить подключение</string>
     <string name="mount_detail_browse_files">Просмотр файлов</string>
     <string name="mount_detail_browse_files_toast">Доступ к этому подключению через @-упоминания в чате.</string>
-    <string name="mount_detail_name_invalid">Имя подключения не должно быть пустым, содержать \'/\', быть \'.\' либо \'..\' и не должно превышать %1$d символа</string>
-    <string name="mount_detail_name_hint">Путь подключения: /var/minis/mounts/%1$s</string>
-    <string name="mount_detail_name_duplicate">Подключение с таким именем уже существует</string>
     <string name="mount_path_unavailable">Путь недоступен</string>
     <string name="mount_add_failed">Не удалось добавить подключение. Имя может быть занято или некорректно.</string>
     <string name="slash_compact_subtitle">Сжать историю беседы в сводку</string>

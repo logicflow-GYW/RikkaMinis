@@ -180,19 +180,6 @@ class MountedFoldersStore(private val context: Context) {
         true
     }
 
-    suspend fun rename(id: String, newName: String): Boolean = mutex.withLock {
-        val trimmed = sanitizeName(newName).takeIf { it.isNotEmpty() } ?: return@withLock false
-        if (_entries.value.any { it.id != id && it.name.equals(trimmed, ignoreCase = true) }) {
-            return@withLock false
-        }
-        _entries.value = _entries.value.map { e ->
-            if (e.id == id) e.copy(name = trimmed) else e
-        }
-        saveToDisk(_entries.value)
-        onChange?.invoke()
-        true
-    }
-
     suspend fun setUserAllowWrite(id: String, allow: Boolean): Boolean = mutex.withLock {
         var changed = false
         _entries.value = _entries.value.map { e ->

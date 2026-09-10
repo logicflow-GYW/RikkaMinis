@@ -1348,9 +1348,6 @@
     <string name="mount_detail_title">Edit Mount</string>
     <string name="mount_detail_browse_files">Browse Files</string>
     <string name="mount_detail_browse_files_toast">Access this mount from chat @-mentions.</string>
-    <string name="mount_detail_name_invalid">Mount name must not be empty, contain \'/\', be \'.\' or \'..\', or exceed %1$d characters</string>
-    <string name="mount_detail_name_hint">Mount path: /var/minis/mounts/%1$s</string>
-    <string name="mount_detail_name_duplicate">Another mount already uses this name</string>
     <string name="mount_path_unavailable">Path unavailable</string>
     <string name="mount_add_failed">Could not add mount. Name may be taken or invalid.</string>
 
