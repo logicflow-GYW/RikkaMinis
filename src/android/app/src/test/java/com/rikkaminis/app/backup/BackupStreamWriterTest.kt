@@ -84,6 +84,37 @@ class BackupStreamWriterTest {
     }
 
     @Test
+    fun `top-level string values are emitted quoted, not as bare words`() {
+        // [fix-stream-quoting] Regression pin. org.json's lenient parser
+        // accepts {"format":bare.word,...}, so the parse-and-compare tests
+        // above CANNOT catch a missing quote — the tree looks identical after
+        // a lenient parse. Strict parsers (python json, jq,
+        // kotlinx-serialization) reject the document, so a backup whose
+        // "format" string is unquoted is a file only this app can read.
+        // Pin the BYTES: a streamed top-level String must be JSON-quoted.
+        val skeleton = JSONObject().put("format", "openminis.config.backup")
+        val sw = StringWriter()
+        // Same emission shape as ConfigBackup.exportToWriter's frame callback.
+        BackupStreamWriter.writeObjectFrame(
+            sw,
+            listOf("format", "chatTruncated"),
+        ) { w, key ->
+            when (key) {
+                "chatTruncated" -> w.write("null")
+                else -> {
+                    val v = skeleton.opt(key)
+                    if (v is String) w.write(JSONObject.quote(v))
+                    else w.write(v?.toString() ?: "null")
+                }
+            }
+        }
+        assertEquals(
+            "{\"format\":\"openminis.config.backup\",\"chatTruncated\":null}",
+            sw.toString(),
+        )
+    }
+
+    @Test
     fun `null optional sections are written as json null`() {
         val sw = StringWriter()
         BackupStreamWriter.writeObjectFrame(
