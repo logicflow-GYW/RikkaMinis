@@ -909,7 +909,7 @@
     <string name="mount_detail_title">Einbindung bearbeiten</string>
     <string name="mount_detail_browse_files">Dateien durchsuchen</string>
     <string name="mount_detail_browse_files_toast">Zugriff über @-Erwähnungen im Chat.</string>
-    <string name="mount_detail_name_invalid">Der Name darf nicht leer sein, kein \'/\' enthalten und nicht \'.\' oder \'..\' sein</string>
+    <string name="mount_detail_name_invalid">Der Name darf nicht leer sein, kein \'/\' enthalten, nicht \'.\' oder \'..\' sein und höchstens %1$d Zeichen lang sein</string>
     <string name="mount_detail_name_hint">Einbindungspfad: /var/minis/mounts/%1$s</string>
     <string name="mount_detail_name_duplicate">Eine andere Einbindung verwendet diesen Namen bereits</string>
     <string name="mount_path_unavailable">Pfad nicht verfügbar</string>

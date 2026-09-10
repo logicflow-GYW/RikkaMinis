@@ -599,7 +599,7 @@
     <string name="mount_detail_title">編輯掛載</string>
     <string name="mount_detail_browse_files">瀏覽檔案</string>
     <string name="mount_detail_browse_files_toast">在聊天中以 @ 提及存取此掛載。</string>
-    <string name="mount_detail_name_invalid">掛載名稱不可為空、不可含 \'/\'，也不可為 \'.\' 或 \'..\'</string>
+    <string name="mount_detail_name_invalid">掛載名稱不可為空、不可含 \'/\'，也不可為 \'.\' 或 \'..\'，且不超過 %1$d 個字元</string>
     <string name="mount_detail_name_hint">掛載路徑：/var/minis/mounts/%1$s</string>
     <string name="mount_detail_name_duplicate">已有其它掛載使用此名稱</string>
     <string name="mount_path_unavailable">路徑不可用</string>

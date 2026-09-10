@@ -631,6 +631,10 @@ internal fun isValidMountName(raw: String): Boolean {
     val trimmed = raw.trim()
     if (trimmed.isEmpty() || trimmed == "." || trimmed == "..") return false
     if (trimmed.contains('/') || trimmed.contains(' ')) return false
+    // Mirror MountedFoldersStore.sanitizeName(): longer input would be silently
+    // truncated there, and the shortened name can collide with an existing
+    // mount — add()/rename() then fail while the UI reports nothing.
+    if (trimmed.length > MountedFoldersStore.MAX_NAME_LENGTH) return false
     return true
 }
 

@@ -337,11 +337,19 @@ class MountedFoldersStore(private val context: Context) {
         val trimmed = raw.trim()
         if (trimmed == "." || trimmed == "..") return ""
         if (trimmed.contains('/') || trimmed.contains(' ')) return ""
-        return trimmed.take(64)
+        return trimmed.take(MAX_NAME_LENGTH)
     }
 
     companion object {
         const val MAX_MOUNTS = 10
+
+        /**
+         * Upper bound for a mount folder name. [sanitizeName] truncates to
+         * this, so the UI must reject longer input up-front: a name that only
+         * gets shortened here can collide with an existing mount, and
+         * [rename]/[add] then return false while the caller shows no error.
+         */
+        const val MAX_NAME_LENGTH = 64
         private const val TAG = "MountedFolders"
         private const val EXTERNALSTORAGE_AUTHORITY = "com.android.externalstorage.documents"
         private val JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true }

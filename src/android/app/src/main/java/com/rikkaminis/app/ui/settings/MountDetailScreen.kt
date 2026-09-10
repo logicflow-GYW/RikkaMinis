@@ -151,7 +151,10 @@ fun MountDetailScreen(
             if (nameChanged && !nameShapeValid) {
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = stringResource(R.string.mount_detail_name_invalid),
+                    text = stringResource(
+                        R.string.mount_detail_name_invalid,
+                        MountedFoldersStore.MAX_NAME_LENGTH,
+                    ),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error,
                 )
