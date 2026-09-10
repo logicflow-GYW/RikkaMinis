@@ -161,7 +161,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ModalNavigationDrawer
@@ -260,7 +259,6 @@ import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.ArrowCircleDown
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -1521,45 +1519,26 @@ internal fun ChatInputArea(
                             onSend = { performEnterSend() },
                         ),
                         interactionSource = interactionSource,
+                        // [rikkahub-parity] Text row = a 56dp container with
+                        // the typed text vertically centered — Material3's
+                        // TextField ContainerHeight, and what rikkahub's
+                        // composer uses too. The old M3 decoration box sized
+                        // this row from contentPadding (7dp) + one line, so
+                        // the text hugged the top of the card and the rest of
+                        // the row read as dead space. A plain Box also drops
+                        // the decoration box's placeholder / leading /
+                        // trailing slots: we want neither a hint nor the
+                        // fullscreen toggle some composers put there.
                         decorationBox = { innerTextField ->
-                            OutlinedTextFieldDefaults.DecorationBox(
-                                value = inputText,
-                                innerTextField = innerTextField,
-                                enabled = true,
-                                singleLine = false,
-                                visualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
-                                interactionSource = interactionSource,
-                                // Placeholder removed per user request: the
-                                // "Message <SoulName>" hint was dropped so
-                                // the composer starts visually empty. No
-                                // placeholder param = no hint text; the "@
-                                // to mention files" affordance is still
-                                // discoverable by typing "@".
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = Color.Transparent,
-                                    unfocusedBorderColor = Color.Transparent,
-                                    focusedContainerColor = Color.Transparent,
-                                    unfocusedContainerColor = Color.Transparent,
-                                ),
-                                // T7: vertical 10dp → 7dp (≈ −15%) to slim the
-                                // chat composer. Settings TextFields keep
-                                // Material3 default padding — those are
-                                // 1-shot config inputs, not the daily-
-                                // friction surface the user wants tightened.
-                                // T185: 12dp horizontal lines the
-                                // typed text up with the +/slash and
-                                // mic/send icon-button row below
-                                // (Modifier.padding(horizontal = 12.dp)
-                                // there) and the attachment chip row
-                                // (also 12dp). 16dp left an unaligned
-                                // jog where the text started further
-                                // right than every other composer
-                                // element.
-                                contentPadding = PaddingValues(
-                                    horizontal = 12.dp,
-                                    vertical = 7.dp,
-                                ),
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 56.dp)
+                                    .padding(horizontal = 12.dp),
+                                contentAlignment = Alignment.CenterStart,
+                            ) {
+                                innerTextField()
+                            }
                         },
                     )
                 }
@@ -1571,7 +1550,12 @@ internal fun ChatInputArea(
                         // T185: 12dp horizontal lines the +/slash and
                         // mic/send icon-button column up with the
                         // attachment row + textfield + Move-to popup.
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                        // [rikkahub-parity] vertical 10dp → 4dp: the 56dp
+                        // text row above now carries the composer's height,
+                        // and the buttons are 48dp touch targets already —
+                        // the extra 10dp just pushed the card 14dp past the
+                        // reference layout (rikkahub: 4 + 56 + 2 + 48 + 4).
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     // Circular model-picker button — matches the + and send
