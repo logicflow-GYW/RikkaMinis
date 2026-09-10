@@ -1799,12 +1799,32 @@ class ChatViewModel(
         pendingSysInfoPayload = null
         pendingSysInfoFirstId = null
         if (blocks.isEmpty()) return
-        _messages.value = _messages.value + ChatMessage(
+        val list = _messages.value
+        val notice = ChatMessage(
             id = id,
             role = "system",
             content = "",
             toolBlocks = blocks,
         )
+        // [fix/compact-divider-ux] A system notice must never land *below*
+        // an answer that is still growing. The in-loop auto-compact path
+        // ([maybeAutoCompactInLoop]) fires while the trailing assistant
+        // bubble is streaming: appending put "context full" / "N messages
+        // compacted" AFTER that bubble, so the answer kept extending ABOVE
+        // the divider and the divider drifted to the bottom of the
+        // transcript — exactly the "the reply continues above the notice,
+        // it should continue below it" report. Insert before the trailing
+        // in-flight bubble instead, which is also where the cold-reload
+        // path puts the divider (applyCompactMarkerGraying inserts it
+        // after the anchor row, i.e. before the live tail).
+        val inFlightIdx = list.indexOfLast { msg ->
+            msg.role != "system" && (msg.isStreaming || msg.isAwaitingModelResponse)
+        }
+        _messages.value = if (inFlightIdx >= 0) {
+            list.toMutableList().apply { add(inFlightIdx, notice) }
+        } else {
+            list + notice
+        }
     }
 
     /**

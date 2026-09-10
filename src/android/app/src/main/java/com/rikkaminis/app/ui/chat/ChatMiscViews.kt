@@ -512,125 +512,75 @@ private fun BorderedMarkdownTable(
 /**
  * Parse inline markdown (bold, italic, code, strikethrough, links) into AnnotatedString.
  */
-// ─── System Divider Row (iOS: systemDividerRow / compactDividerRow) ──────────
+// ─── System Notice Card (compact divider / slash notices / fallback rows) ────
 //
-// One thin grey rule running edge-to-edge with the small icon + label
-// centered on top of it. Mirrors iOS Divider() inside an HStack — looks
-// the same regardless of label width because the rule is a single Box-z
-// layer, not two `weight(1f)` segments that can fail to render when their
-// parent's measured width is exhausted by the label's intrinsic size.
-//
-// Same treatment iOS uses for compact-summary dividers, slash-command
-// notices, and model-switch fallback notices — no card, no attribution.
+// Every system notice (compact-summary divider, slash-command notice,
+// model-switch fallback) renders as one rounded surface card: leading
+// kind icon, 13sp label, trailing chevron when the row carries a
+// payload. FallbackInfoBlock documents why this replaced the iOS-style
+// hairline (unreadable 10sp text + a 14dp tap target).
 
 @Composable
 internal fun FallbackInfoBlock(block: AssistantBlock, onRevert: (() -> Unit)? = null) {
-    val divider = ChatColors.separator
-    val fg = ChatColors.secondaryText
+    // [fix/compact-divider-ux] This used to be a 1dp hairline with 10sp
+    // secondary-grey text sitting on it (an iOS systemDividerRow port) and
+    // a 14dp info glyph as the only tap target. On Android that reads as a
+    // rendering artefact rather than a notice, and 14dp is far below the
+    // 48dp touch minimum — users never discovered the summary sheet. Now:
+    // a rounded surface card, 13sp medium-weight text in primary colour,
+    // at least 44dp tall, tappable across its whole width whenever it
+    // carries a detail payload.
+    val surface = ChatColors.toolCapsuleBg
+    val fg = ChatColors.primaryText
+    val accent = ChatColors.secondaryText
     val icon = when (block.toolName) {
-        // T84: CloseFullscreen ≈ iOS arrow.down.right.and.arrow.up.left
-        // (two diagonal arrows pointing inward — "fold/collapse" glyph),
-        // closer to the iOS compactDividerRow icon than the vertical
-        // Compress squeeze. Other system rows (legacy compact notices that
-        // pre-date the dedicated compactor) keep the squeeze for backward
-        // visual continuity if any old sessions still hold them.
+        // T84: CloseFullscreen is still the closest built-in glyph to
+        // iOS's arrow.down.right.and.arrow.up.left (fold/collapse).
         "compact" -> Icons.Default.CloseFullscreen
         "memory" -> Icons.Default.Psychology
         "thinking" -> Icons.Default.Lightbulb
         else -> Icons.Default.Info
     }
-    // Mirrors iOS systemDividerRow: HStack { Divider, label, Divider }.
-    // Implemented via SubcomposeLayout so the centered label can be measured
-    // first (intrinsic width), then both flanking rules are sized to fill the
-    // remaining space symmetrically. Earlier `weight(1f)` attempts collapsed
-    // to zero width on this Compose version, so we lay the two rules out
-    // ourselves at known x-coordinates.
-    // Trailing info-circle — only when the block carries a payload (e.g. a
-    // compact summary). Tapping opens a bottom sheet showing the full text.
-    // Mirrors iOS compactDividerRow's info.circle button.
+    // A block carrying a payload (e.g. a compact summary) opens the detail
+    // sheet; tapping anywhere on the card does it, not just the glyph.
     val hasDetail = block.toolArgs.isNotEmpty()
     var showDetail by remember(block.id) { mutableStateOf(false) }
 
-    androidx.compose.ui.layout.SubcomposeLayout(
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            // Mirror iOS: small horizontal inset, modest vertical breathing
-            // room so consecutive rows don't stick together.
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-    ) { constraints ->
-        val totalWidth = constraints.maxWidth
-        val labelGap = 8.dp.roundToPx()
-        val ruleHeight = 1.dp.roundToPx()
-        // Reserve at most 80% for the label so the rules always have meaningful
-        // length, even with long status strings.
-        val labelMax = (totalWidth * 0.80f).toInt().coerceAtLeast(0)
-
-        // 1) Measure the label. Reserve room for the leading kind-icon and
-        // (when present) the trailing info-circle so the middle Text shrinks
-        // first and the info-icon never gets pushed off-screen.
-        val labelPlaceables = subcompose("label") {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = fg,
-                    modifier = Modifier.size(10.dp),
-                )
-                Text(
-                    text = block.content,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = fg,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    // weight(1f, fill=false) lets the text take just what it
-                    // needs but lose space first when the row gets tight,
-                    // so the info-icon stays visible.
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                if (hasDetail) {
-                    Icon(
-                        imageVector = Icons.Default.Info,
-                        contentDescription = stringResource(R.string.chat_show_full_summary),
-                        tint = fg,
-                        modifier = Modifier
-                            .size(14.dp)
-                            .clickable { showDetail = true },
-                    )
-                }
-            }
-        }.map { it.measure(androidx.compose.ui.unit.Constraints(maxWidth = labelMax)) }
-
-        val labelW = labelPlaceables.maxOfOrNull { it.width } ?: 0
-        val labelH = labelPlaceables.maxOfOrNull { it.height } ?: 0
-
-        val sideTotal = (totalWidth - labelW - 2 * labelGap).coerceAtLeast(0)
-        val sideW = sideTotal / 2
-
-        val rules = subcompose("rules") {
-            Box(modifier = Modifier.background(divider).height(1.dp))
-            Box(modifier = Modifier.background(divider).height(1.dp))
-        }.map {
-            it.measure(
-                androidx.compose.ui.unit.Constraints.fixed(
-                    width = sideW,
-                    height = ruleHeight,
-                ),
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(surface)
+            .then(if (hasDetail) Modifier.clickable { showDetail = true } else Modifier)
+            .heightIn(min = 44.dp)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = accent,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            text = block.content,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            color = fg,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (hasDetail) {
+            Spacer(modifier = Modifier.width(8.dp))
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = stringResource(R.string.chat_show_full_summary),
+                tint = accent,
+                modifier = Modifier.size(18.dp),
             )
-        }
-
-        val rowHeight = maxOf(labelH, ruleHeight)
-        layout(totalWidth, rowHeight) {
-            rules.getOrNull(0)?.placeRelative(0, (rowHeight - ruleHeight) / 2)
-            var x = sideW + labelGap
-            for (p in labelPlaceables) {
-                p.placeRelative(x, (rowHeight - p.height) / 2)
-                x += p.width
-            }
-            rules.getOrNull(1)?.placeRelative(totalWidth - sideW, (rowHeight - ruleHeight) / 2)
         }
     }
 

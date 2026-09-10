@@ -1279,7 +1279,11 @@ internal suspend fun ChatViewModel.applyCompactMarkerGraying(
     // appear as their own UI bubble).
     val compactedUICount = (0 until insertIdx.coerceIn(0, grayed.size))
         .count { grayed[it].role != "system" }
-    val dividerLabel = "$compactedUICount messages compacted"
+    // [fix/compact-divider-ux] Was hardcoded English here, so a zh/ja/
+    // de/ko/ru/tw user saw "… messages compacted" after reopening a
+    // session, while the live compact path showed the localised string.
+    // Both paths now go through sysmsg_compacted_count.
+    val dividerLabel = context.getString(R.string.sysmsg_compacted_count, compactedUICount)
     val markerForDivider = healedMarker ?: marker
     val dividerBlock = AssistantBlock(
         id = "compact-divider-${markerForDivider.id}",
