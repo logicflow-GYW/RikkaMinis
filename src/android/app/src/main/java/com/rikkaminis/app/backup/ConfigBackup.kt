@@ -109,12 +109,47 @@ object ConfigBackup {
     )
 
     /**
+     * Everything [export] and [exportToWriter] need, assembled once by
+     * [buildSections].
+     *
+     * [T-backup-streaming-export] Splitting assembly from serialization is
+     * what lets the streaming path reuse the exact same data as the String
+     * path: a 90-day transcript set can reach ~65M chars once stringified,
+     * and building it twice (once to measure the skeleton, once for the
+     * document) was half the peak heap.
+     */
+    internal class ExportSections(
+        val fields: JSONObject,
+        val readFailures: Int,
+        val providers: JSONArray,
+        val thinkingRules: JSONArray,
+        val groups: JSONArray,
+        val envVars: JSONArray,
+        val skills: JSONArray,
+        val memoryFiles: JSONArray,
+        val mcpServers: JSONArray,
+        val artifacts: JSONObject,
+        val chatSessions: List<JSONObject>,
+        val chatMessages: List<JSONObject>,
+        val chatTruncated: JSONObject?,
+    )
+
+    /**
      * Serialize current settings to a backup document.
      *
      * @param includeSecrets when false, API keys and OAuth tokens are stripped.
      *   Defaults to true: a restore that drops every credential leaves the user
      *   retyping keys by hand, which defeats the point of a backup. Callers are
      *   expected to warn before writing the file somewhere shareable.
+     *
+     * [T-backup-streaming-export] This in-memory path is the FALLBACK. The
+     * chat sections alone can reach ~65M chars on a heavy install, and the
+     * document String plus its toString() StringBuilder double the heap
+     * (measured OOM 2026-08-31: the failing allocation was exactly
+     * payload×2 UTF-16 on a 512MB largeHeap). [exportToWriter] streams the
+     * same document without ever building that String and is what the heavy
+     * callers (manual export / WebDAV upload / restore snapshot) use; this
+     * path stays for KB-sized callers that genuinely want a String.
      */
     suspend fun export(
         providerRepo: ProviderRepository,
@@ -128,6 +163,138 @@ object ConfigBackup {
         artifactRoots: List<File>? = null,
         webDavConfig: WebDavConfig? = null,
     ): String {
+        val sections = buildSections(
+            providerRepo, includeSecrets, envVarRepo, skillRepo, memoryRepo,
+            mcpRepo, chatRepo, chatWindowDays, artifactRoots,
+        )
+        val payload = buildPayloadObject(sections, includeSecrets, webDavConfig).toString()
+        // [T-backup-export-size-cap] Enforce the same ceiling on the export
+        // side that import already checks (MAX_PAYLOAD_BYTES). With the byte
+        // budget packing above, chat history alone can no longer blow the
+        // cap — it is trimmed to fit. What remains possible is the non-chat
+        // skeleton itself growing past the cap (pathological skills /
+        // memory files), and for that the hard refusal below stays: it keeps
+        // the failure local and actionable instead of OOMing the import side.
+        if (payload.length > MAX_PAYLOAD_BYTES) {
+            throw IllegalStateException(
+                "Backup too large (${payload.length} chars, max $MAX_PAYLOAD_BYTES)",
+            )
+        }
+        return payload
+    }
+
+    /**
+     * The document as one tree. Single source of truth for the String path and
+     * the streaming skeleton, so the two can never drift on field set/order.
+     */
+    private fun buildPayloadObject(
+        sections: ExportSections,
+        includeSecrets: Boolean,
+        webDavConfig: WebDavConfig?,
+    ): JSONObject = JSONObject().apply {
+        put("format", "openminis.config.backup")
+        put("version", FORMAT_VERSION)
+        put("createdAt", System.currentTimeMillis())
+        put("includesSecrets", includeSecrets)
+        put("fields", sections.fields)
+        put("providers", sections.providers)
+        put("thinkingRules", sections.thinkingRules)
+        put("groups", sections.groups)
+        put("envVars", sections.envVars)
+        put("skills", sections.skills)
+        put("memoryFiles", sections.memoryFiles)
+        put("mcpServers", sections.mcpServers)
+        put("artifacts", sections.artifacts)
+        put("chatSessions", JSONArray(sections.chatSessions))
+        put("chatMessages", JSONArray(sections.chatMessages))
+        sections.chatTruncated?.let { put("chatTruncated", it) }
+        // [T-auto-backup-assets] The WebDAV server config rides the same
+        // secrets gate as provider keys: it contains the server password.
+        // Without secrets we never carry it — a restore that drops every
+        // credential also drops the server it would reconnect to.
+        if (includeSecrets && webDavConfig != null) {
+            put("webdavConfig", JSONObject().apply {
+                put("url", webDavConfig.url)
+                put("username", webDavConfig.username)
+                put("password", webDavConfig.password)
+                put("path", webDavConfig.path)
+            })
+        }
+        if (sections.readFailures > 0) put("readFailures", sections.readFailures)
+    }
+
+    /**
+     * [T-backup-streaming-export] Stream the document to [writer] without ever
+     * materializing it as a String: the non-chat skeleton is stringified once
+     * (~2-4MB even on a heavy install), then the chat arrays are written
+     * element by element. Returns the number of unreadable fields.
+     *
+     * Peak heap is bounded by the largest single element instead of the whole
+     * document, which is what keeps a 90-day export inside a 512MB largeHeap.
+     */
+    suspend fun exportToWriter(
+        providerRepo: ProviderRepository,
+        includeSecrets: Boolean = true,
+        envVarRepo: EnvVarRepository? = null,
+        skillRepo: SkillRepository? = null,
+        memoryRepo: MemoryRepository? = null,
+        mcpRepo: MCPRepository? = null,
+        chatRepo: ChatRepository? = null,
+        chatWindowDays: Int = 90,
+        artifactRoots: List<File>? = null,
+        webDavConfig: WebDavConfig? = null,
+        writer: java.io.Writer,
+    ): Int {
+        // Same assembly as the String path — buildSections is the single
+        // source of truth; only the serialization below differs.
+        val sections = buildSections(
+            providerRepo, includeSecrets, envVarRepo, skillRepo, memoryRepo,
+            mcpRepo, chatRepo, chatWindowDays, artifactRoots,
+        )
+        // The skeleton is the SAME tree the String path builds, minus the chat
+        // arrays: buildPayloadObject is the single source of truth for field
+        // set and order, so the two paths cannot drift. JSONArray(Collection)
+        // copies references only, so dropping the two arrays here costs nothing
+        // and keeps skeletonJson.toString() small.
+        val skeletonJson = buildPayloadObject(sections, includeSecrets, webDavConfig).apply {
+            remove("chatSessions")
+            remove("chatMessages")
+            remove("chatTruncated")
+        }
+        BackupStreamWriter.writeObjectFrame(
+            writer,
+            listOf(
+                "format", "version", "createdAt", "includesSecrets", "fields",
+                "providers", "thinkingRules", "groups", "envVars", "skills",
+                "memoryFiles", "mcpServers", "artifacts", "chatSessions",
+                "chatMessages", "chatTruncated", "webdavConfig", "readFailures",
+            ),
+        ) { w, key ->
+            when (key) {
+                "chatSessions" -> BackupStreamWriter.writeJsonArray(w, sections.chatSessions)
+                "chatMessages" -> BackupStreamWriter.writeJsonArray(w, sections.chatMessages)
+                "chatTruncated" -> {
+                    val tr = sections.chatTruncated
+                    if (tr == null) w.write("null") else w.write(tr.toString())
+                }
+                else -> w.write(skeletonJson.opt(key)?.toString() ?: "null")
+            }
+        }
+        writer.flush()
+        return sections.readFailures
+    }
+
+    private suspend fun buildSections(
+        providerRepo: ProviderRepository,
+        includeSecrets: Boolean = true,
+        envVarRepo: EnvVarRepository? = null,
+        skillRepo: SkillRepository? = null,
+        memoryRepo: MemoryRepository? = null,
+        mcpRepo: MCPRepository? = null,
+        chatRepo: ChatRepository? = null,
+        chatWindowDays: Int = 90,
+        artifactRoots: List<File>? = null,
+    ): ExportSections {
         val registry = ConfigRegistry.get()
 
         val fields = JSONObject()
@@ -393,8 +560,8 @@ object ConfigBackup {
         // 30 days at once when the data is lumpy. Media parts
         // (images/videos/files) are dropped — they dominate the size and point
         // at payloads that will not exist on the target device.
-        val chatSessions = JSONArray()
-        val chatMessages = JSONArray()
+        val chatSessionList = mutableListOf<JSONObject>()
+        val chatMessageList = mutableListOf<JSONObject>()
         var chatTruncated: JSONObject? = null
         if (chatRepo != null && chatWindowDays > 0) {
             // Serialize the non-chat skeleton ONCE to measure its exact
@@ -469,8 +636,8 @@ object ConfigBackup {
                 sanitize = ::sanitizeChatParts,
                 capReasoning = ::capReasoningContent,
             )
-            for (s in packed.sessions) chatSessions.put(s)
-            for (m in packed.messages) chatMessages.put(m)
+            for (s in packed.sessions) chatSessionList.add(s)
+            for (m in packed.messages) chatMessageList.add(m)
 
             if (packed.sessionsDropped > 0 || packed.messagesDropped > 0) {
                 chatTruncated = JSONObject().apply {
@@ -487,51 +654,21 @@ object ConfigBackup {
             }
         }
 
-        val payload = JSONObject().apply {
-            put("format", "openminis.config.backup")
-            put("version", FORMAT_VERSION)
-            put("createdAt", System.currentTimeMillis())
-            put("includesSecrets", includeSecrets)
-            put("fields", fields)
-            put("providers", providers)
-            put("thinkingRules", thinkingRules)
-            put("groups", groups)
-            put("envVars", envVars)
-            put("skills", skills)
-            put("memoryFiles", memoryFiles)
-            put("mcpServers", mcpServers)
-            put("artifacts", artifacts)
-            put("chatSessions", chatSessions)
-            put("chatMessages", chatMessages)
-            chatTruncated?.let { put("chatTruncated", it) }
-            // [T-auto-backup-assets] The WebDAV server config rides the same
-            // secrets gate as provider keys: it contains the server password.
-            // Without secrets we never carry it — a restore that drops every
-            // credential also drops the server it would reconnect to.
-            if (includeSecrets && webDavConfig != null) {
-                put("webdavConfig", JSONObject().apply {
-                    put("url", webDavConfig.url)
-                    put("username", webDavConfig.username)
-                    put("password", webDavConfig.password)
-                    put("path", webDavConfig.path)
-                })
-            }
-            if (readFailures > 0) put("readFailures", readFailures)
-        }.toString()
-
-        // [T-backup-export-size-cap] Enforce the same ceiling on the export
-        // side that import already checks (MAX_PAYLOAD_BYTES). With the byte
-        // budget packing above, chat history alone can no longer blow the
-        // cap — it is trimmed to fit. What remains possible is the non-chat
-        // skeleton itself growing past the cap (pathological skills /
-        // memory files), and for that the hard refusal below stays: it keeps
-        // the failure local and actionable instead of OOMing the import side.
-        if (payload.length > MAX_PAYLOAD_BYTES) {
-            throw IllegalStateException(
-                "Backup too large (${payload.length} chars, max $MAX_PAYLOAD_BYTES)",
-            )
-        }
-        return payload
+        return ExportSections(
+            fields = fields,
+            readFailures = readFailures,
+            providers = providers,
+            thinkingRules = thinkingRules,
+            groups = groups,
+            envVars = envVars,
+            skills = skills,
+            memoryFiles = memoryFiles,
+            mcpServers = mcpServers,
+            artifacts = artifacts,
+            chatSessions = chatSessionList,
+            chatMessages = chatMessageList,
+            chatTruncated = chatTruncated,
+        )
     }
 
     /**
@@ -1353,6 +1490,24 @@ object ConfigBackup {
         dir.mkdirs()
         val file = java.io.File(dir, snapshotFileName())
         file.writeText(payload)
+        listSnapshots(dir).drop(SNAPSHOT_KEEP).forEach { runCatching { it.delete() } }
+        return file
+    }
+
+    /**
+     * [T-backup-streaming-export] Same contract as [writeSnapshot], but the
+     * document is produced straight into the file — the caller never holds
+     * the payload String. Must itself be `suspend`: the writer block awaits
+     * [exportToWriter], which suspends on IO dispatchers, and a non-suspend
+     * helper cannot await it.
+     */
+    suspend fun writeSnapshotStreaming(
+        dir: java.io.File,
+        writerBlock: suspend (java.io.Writer) -> Unit,
+    ): java.io.File {
+        dir.mkdirs()
+        val file = java.io.File(dir, snapshotFileName())
+        file.outputStream().bufferedWriter().use { w -> writerBlock(w) }
         listSnapshots(dir).drop(SNAPSHOT_KEEP).forEach { runCatching { it.delete() } }
         return file
     }

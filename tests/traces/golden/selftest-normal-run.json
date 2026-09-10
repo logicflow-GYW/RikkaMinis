@@ -1,0 +1,21 @@
+{
+  "_comment": "自包含 golden：评估器自测用。合成一条 schema 2.0 正常 run：两次 tool 调用全成功，终态 Succeeded。",
+  "trace_lines": [
+    "{\"type\":\"trace_start\",\"trace_schema_version\":\"2.0\",\"run_id\":\"r-selftest-1\",\"session_id\":\"s-1\",\"provider\":\"test\",\"prompt_preview\":\"selftest\",\"provider_count\":1,\"tool_count\":2}",
+    "{\"type\":\"turn_start\",\"turn\":1}",
+    "{\"type\":\"tool_call\",\"turn\":1,\"tool_id\":\"t1\",\"tool\":\"shell_execute\",\"args\":\"{\\\"command\\\":\\\"ls\\\"}\"}",
+    "{\"type\":\"tool_result\",\"turn\":1,\"tool_id\":\"t1\",\"tool\":\"shell_execute\",\"success\":true,\"duration_ms\":12,\"output\":\"fileA fileB\"}",
+    "{\"type\":\"tool_call\",\"turn\":1,\"tool_id\":\"t2\",\"tool\":\"file_read\",\"args\":\"{\\\"path\\\":\\\"/tmp/x\\\"}\"}",
+    "{\"type\":\"tool_result\",\"turn\":1,\"tool_id\":\"t2\",\"tool\":\"file_read\",\"success\":true,\"duration_ms\":3,\"output\":\"content\"}",
+    "{\"type\":\"turn_end\",\"turn\":1,\"tokens_in\":100,\"tokens_out\":50,\"finish_reason\":\"tool_calls\",\"duration_ms\":800}",
+    "{\"type\":\"state_transition\",\"from\":\"ExecutingTools\",\"to\":\"Finalizing\"}",
+    "{\"type\":\"trace_end\",\"terminal_state\":\"Succeeded\",\"terminal_reason\":\"completed_normally\",\"duration_ms\":1500,\"total_provider_attempts\":1,\"total_tool_calls\":2}"
+  ],
+  "expect": {
+    "tools": ["shell_execute", "file_read"],
+    "terminal_state": "Succeeded",
+    "terminal_reason": "completed_normally",
+    "all_tools_succeed": true,
+    "forbidden_tools": ["spawn_agent", "browser_use"]
+  }
+}

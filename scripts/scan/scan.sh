@@ -17,7 +17,7 @@ echo "╚═══════════════════════�
 echo ""
 
 # --- 1. Four-way sync check ---
-echo "━━━ [1/3] Four-way sync check ━━━"
+echo "━━━ [1/5] Four-way sync check ━━━"
 if python3 scripts/scan/four_way_sync_check.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -30,7 +30,7 @@ fi
 # --- 2. i18n consistency ---
 #   - Orphan keys (in code but not in strings.xml) = HARD FAIL
 #   - Missing translations = WARNING only (known legacy from upstream)
-echo "━━━ [2/3] i18n consistency check ━━━"
+echo "━━━ [2/5] i18n consistency check ━━━"
 python3 -c "
 import re, os, sys
 root = '$ROOT'
@@ -72,7 +72,7 @@ fi
 echo ""
 
 # --- 3. Bare valueOf check (persisted enum safety) ---
-echo "━━━ [3/4] Enum parse safety check ━━━"
+echo "━━━ [3/5] Enum parse safety check ━━━"
 if python3 scripts/scan/enum_parse_safety_check.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -85,8 +85,24 @@ fi
 # --- 4. Provider process-boundary guard (TF-E) ---
 # Mechanical constraint: the app process must never call a provider network
 # entry point directly — only :modelservice (ModelExecutionService) owns them.
-echo "━━━ [4/4] Provider process-boundary guard ━━━"
+echo "━━━ [4/5] Provider process-boundary guard ━━━"
 if python3 scripts/scan/provider_boundary_guard.py "$ROOT"; then
+    PASS=$((PASS + 1))
+    echo ""
+else
+    RC=1
+    FAIL=$((FAIL + 1))
+    echo ""
+fi
+
+# --- 5. Agent trace replay eval (golden assertions on schema 2.0 JSONL) ---
+# Replays recorded/synthetic agent traces against golden expectations:
+# tool sequence, terminal state, forbidden tools, all-succeed. Closes the
+# loop on AgentTraceRecorder output (produce → consume). Inline selftest
+# goldens keep the evaluator itself honest in CI; device traces can be added
+# later under tests/traces/golden/ referencing real .jsonl files.
+echo "━━━ [5/5] Agent trace replay eval ━━━"
+if python3 scripts/scan/trace_eval_check.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
 else

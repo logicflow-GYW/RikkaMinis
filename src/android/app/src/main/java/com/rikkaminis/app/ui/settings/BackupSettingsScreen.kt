@@ -231,20 +231,10 @@ fun BackupSettingsScreen(
         // this restores the same discipline here.
         application.applicationScope.launch {
             try {
-                val payload = withContext(Dispatchers.Default) {
-                    ConfigBackup.export(
-                        providerRepo = providerRepository,
-                        includeSecrets = true,
-                        envVarRepo = envVarRepository,
-                        skillRepo = skillRepository,
-                        memoryRepo = memoryRepository,
-                        mcpRepo = mcpRepository,
-                        chatRepo = chatRepository,
-                        chatWindowDays = chatWindowDays,
-                        artifactRoots = artifactRoots,
-                        webDavConfig = webDavConfig,
-                    )
-                }
+                // [T-backup-streaming-export] Stream the pre-restore snapshot
+                // straight to disk — the in-memory String variant OOMs on a
+                // heavy install (see exportToWriter). writeSnapshotStreaming
+                // keeps the same naming / pruning contract as writeSnapshot.
                 // Keep the safety snapshot LOCAL only. Uploading it to the
                 // WebDAV server on every restore made it look like the restore
                 // was actually performing a backup, and -- worse -- it created a
@@ -256,7 +246,21 @@ fun BackupSettingsScreen(
                 // newest (see ConfigBackup.writeSnapshot) so two restores in
                 // the same minute no longer overwrite the first rollback point.
                 val dir = File(context.filesDir, "backup-snapshots")
-                ConfigBackup.writeSnapshot(dir, payload)
+                ConfigBackup.writeSnapshotStreaming(dir) { w ->
+                    ConfigBackup.exportToWriter(
+                        providerRepo = providerRepository,
+                        includeSecrets = true,
+                        envVarRepo = envVarRepository,
+                        skillRepo = skillRepository,
+                        memoryRepo = memoryRepository,
+                        mcpRepo = mcpRepository,
+                        chatRepo = chatRepository,
+                        chatWindowDays = chatWindowDays,
+                        artifactRoots = artifactRoots,
+                        webDavConfig = webDavConfig,
+                        writer = w,
+                    )
+                }
                 withContext(Dispatchers.Main) {
                     snapshotNote = context.getString(R.string.backup_snapshot_local)
                     refreshSnapshots()
@@ -328,32 +332,35 @@ fun BackupSettingsScreen(
         }
         application.applicationScope.launch {
             try {
-                val payload = withContext(Dispatchers.Default) {
-                    ConfigBackup.export(
-                        providerRepo = providerRepository,
-                        includeSecrets = exportWithSecrets,
-                        envVarRepo = envVarRepository,
-                        skillRepo = skillRepository,
-                        memoryRepo = memoryRepository,
-                        mcpRepo = mcpRepository,
-                        chatRepo = chatRepository,
-                        chatWindowDays = chatWindowDays,
-                        artifactRoots = artifactRoots,
-                        webDavConfig = webDavConfig,
-                    )
-                }
+                // [T-backup-streaming-export] Stream the document straight
+                // into the picked file: on a heavy install the in-memory
+                // String variant OOMs at the final toString (payload×2 UTF-16
+                // on a 512MB heap). readFailures comes back from exportToWriter.
+                var readFailures = 0
                 withContext(Dispatchers.IO) {
                     context.contentResolver.openOutputStream(uri)?.use { out ->
-                        out.write(payload.toByteArray())
+                        java.io.OutputStreamWriter(out, Charsets.UTF_8).use { w ->
+                            readFailures = ConfigBackup.exportToWriter(
+                                providerRepo = providerRepository,
+                                includeSecrets = exportWithSecrets,
+                                envVarRepo = envVarRepository,
+                                skillRepo = skillRepository,
+                                memoryRepo = memoryRepository,
+                                mcpRepo = mcpRepository,
+                                chatRepo = chatRepository,
+                                chatWindowDays = chatWindowDays,
+                                artifactRoots = artifactRoots,
+                                webDavConfig = webDavConfig,
+                                writer = w,
+                            )
+                        }
                     } ?: throw IllegalStateException("no output stream")
                 }
                 withContext(Dispatchers.Main) {
-                    // [T-backup-readfailures] export() counts fields that
+                    // [T-backup-readfailures] exportToWriter counts fields that
                     // failed to serialize (readFailures); surface it so the
                     // user knows the backup may be incomplete.
-                    val failures = runCatching {
-                        org.json.JSONObject(payload).optInt("readFailures", 0)
-                    }.getOrDefault(0)
+                    val failures = readFailures
                     val body = buildString {
                         append(uri.lastPathSegment ?: savedToast)
                         if (failures > 0) {
@@ -695,60 +702,77 @@ fun BackupSettingsScreen(
                 // lands in the tray. The user can leave the screen immediately.
                 application.applicationScope.launch {
                     try {
-                        val payload = withContext(Dispatchers.Default) {
-                            ConfigBackup.export(
-                                providerRepo = providerRepository,
-                                includeSecrets = withSecrets,
-                                envVarRepo = envVarRepository,
-                                skillRepo = skillRepository,
-                                memoryRepo = memoryRepository,
-                                mcpRepo = mcpRepository,
-                                chatRepo = chatRepository,
-                                chatWindowDays = chatWindowDays,
-                                artifactRoots = artifactRoots,
-                                webDavConfig = webDavConfig,
-                            )
-                        }
-                        // Resolve config on Main (it reads SharedPreferences and
-                        // Compose state); bail with an inline error if unset.
-                        val cfg = webDavConfig
-                        if (cfg == null) {
-                            errorMessage = context.getString(R.string.webdav_server_not_configured)
-                            notifier.notifyWorkCompleted(
-                                tag = "webdav-upload",
-                                title = context.getString(R.string.webdav_notify_title_failed),
-                                body = context.getString(R.string.webdav_server_not_configured),
-                            )
-                        } else {
+                        // [T-backup-streaming-export] Stream the document into
+                        // a local temp file first, then PUT the file bytes —
+                        // the in-memory String variant OOMs at the final
+                        // toString on a heavy install (payload×2 UTF-16 on a
+                        // 512MB heap). readFailures comes back directly.
+                        val tempFile = java.io.File(
+                            context.cacheDir,
+                            "webdav-upload-${System.currentTimeMillis()}.json",
+                        )
+                        var readFailures = 0
+                        try {
                             withContext(Dispatchers.IO) {
-                                WebDavSync.backup(
-                                    config = cfg,
-                                    payload = payload,
-                                    client = webDavHttpClient,
-                                )
-                            }
-                            withContext(Dispatchers.Main) {
-                                // [T-backup-readfailures] export() counts
-                                // fields that failed to serialize into the
-                                // payload (readFailures); surface it so the
-                                // user knows the backup may be incomplete.
-                                val failures = runCatching {
-                                    org.json.JSONObject(payload).optInt("readFailures", 0)
-                                }.getOrDefault(0)
-                                val msg = if (failures > 0) {
-                                    context.getString(R.string.webdav_uploaded) +
-                                        "\n" +
-                                        context.getString(R.string.backup_export_incomplete, failures)
-                                } else {
-                                    context.getString(R.string.webdav_uploaded)
+                                java.io.FileOutputStream(tempFile).use { fos ->
+                                    java.io.OutputStreamWriter(fos, Charsets.UTF_8).use { w ->
+                                        readFailures = ConfigBackup.exportToWriter(
+                                            providerRepo = providerRepository,
+                                            includeSecrets = withSecrets,
+                                            envVarRepo = envVarRepository,
+                                            skillRepo = skillRepository,
+                                            memoryRepo = memoryRepository,
+                                            mcpRepo = mcpRepository,
+                                            chatRepo = chatRepository,
+                                            chatWindowDays = chatWindowDays,
+                                            artifactRoots = artifactRoots,
+                                            webDavConfig = webDavConfig,
+                                            writer = w,
+                                        )
+                                    }
                                 }
-                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                            }
+                            // Resolve config on Main (it reads SharedPreferences and
+                            // Compose state); bail with an inline error if unset.
+                            val cfg = webDavConfig
+                            if (cfg == null) {
+                                errorMessage = context.getString(R.string.webdav_server_not_configured)
                                 notifier.notifyWorkCompleted(
                                     tag = "webdav-upload",
-                                    title = context.getString(R.string.webdav_notify_title),
-                                    body = msg,
+                                    title = context.getString(R.string.webdav_notify_title_failed),
+                                    body = context.getString(R.string.webdav_server_not_configured),
                                 )
+                            } else {
+                                withContext(Dispatchers.IO) {
+                                    WebDavSync.backup(
+                                        config = cfg,
+                                        payload = tempFile.readBytes(),
+                                        client = webDavHttpClient,
+                                    )
+                                }
+                                withContext(Dispatchers.Main) {
+                                    // [T-backup-readfailures] exportToWriter counts
+                                    // fields that failed to serialize into the
+                                    // payload (readFailures); surface it so the
+                                    // user knows the backup may be incomplete.
+                                    val failures = readFailures
+                                    val msg = if (failures > 0) {
+                                        context.getString(R.string.webdav_uploaded) +
+                                            "\n" +
+                                            context.getString(R.string.backup_export_incomplete, failures)
+                                    } else {
+                                        context.getString(R.string.webdav_uploaded)
+                                    }
+                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                    notifier.notifyWorkCompleted(
+                                        tag = "webdav-upload",
+                                        title = context.getString(R.string.webdav_notify_title),
+                                        body = msg,
+                                    )
+                                }
                             }
+                        } finally {
+                            runCatching { tempFile.delete() }
                         }
                     } catch (t: Throwable) {
                         withContext(Dispatchers.Main) {

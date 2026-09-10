@@ -43,7 +43,7 @@ object WebDavSync {
      */
     fun backup(
         config: WebDavConfig,
-        payload: String,
+        payload: ByteArray,
         client: OkHttpClient = WebDavClient.defaultClient(),
     ) {
         val dav = WebDavClient(config, client)
@@ -52,8 +52,17 @@ object WebDavSync {
             java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
                 .format(java.util.Date())
         }.json"
-        dav.put(name, payload.toByteArray(Charsets.UTF_8), "application/json")
+        dav.put(name, payload, "application/json")
     }
+
+    /** [T-backup-streaming-export] String overload kept for callers that
+     *  still hold a fully-built document (small sync payloads). Heavy
+     *  callers stream to a temp file and pass the bytes instead. */
+    fun backup(
+        config: WebDavConfig,
+        payload: String,
+        client: OkHttpClient = WebDavClient.defaultClient(),
+    ) = backup(config, payload.toByteArray(Charsets.UTF_8), client)
 
     /**
      * [T-auto-backup-assets] Push an automatic backup under its own

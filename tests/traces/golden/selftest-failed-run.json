@@ -1,0 +1,16 @@
+{
+  "_comment": "自包含 golden：故障场景。tool 失败 + 终态 Failed。断言失败工具的输出片段与终态。",
+  "trace_lines": [
+    "{\"type\":\"trace_start\",\"trace_schema_version\":\"2.0\",\"run_id\":\"r-selftest-2\",\"session_id\":\"s-2\",\"provider\":\"test\",\"prompt_preview\":\"failcase\",\"provider_count\":1,\"tool_count\":1}",
+    "{\"type\":\"turn_start\",\"turn\":1}",
+    "{\"type\":\"tool_call\",\"turn\":1,\"tool_id\":\"t1\",\"tool\":\"shell_execute\",\"args\":\"{\\\"command\\\":\\\"exit 1\\\"}\"}",
+    "{\"type\":\"tool_result\",\"turn\":1,\"tool_id\":\"t1\",\"tool\":\"shell_execute\",\"success\":false,\"duration_ms\":20,\"output\":\"exit code 1\"}",
+    "{\"type\":\"error\",\"turn\":1,\"phase\":\"ExecutingTools\",\"message\":\"tool failed\"}",
+    "{\"type\":\"trace_end\",\"terminal_state\":\"Failed\",\"terminal_reason\":\"budget_exhausted\",\"duration_ms\":900,\"total_tool_calls\":1}"
+  ],
+  "expect": {
+    "tools": ["shell_execute"],
+    "terminal_state": "Failed",
+    "all_tools_succeed": false
+  }
+}
