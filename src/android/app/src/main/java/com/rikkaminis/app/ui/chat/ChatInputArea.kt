@@ -428,18 +428,24 @@ internal fun ChatInputArea(
     val swipeHaptics = androidx.compose.ui.platform.LocalHapticFeedback.current
 
 
-    val performSendOrEnqueue: (String) -> Unit = handler@{ rawText ->
-        // [T2-M2] Fold a pending IME-burst edit into this send and cancel its
-        // 150 ms flush. The burst buffer holds dictation text that has not been
-        // committed to the view model yet: without this the send used the stale
-        // committed value (dictation tail lost) and the flush job then
-        // re-injected the full text into the just-cleared composer (ghost input
-        // → accidental double send).
-        val pendingBurst = imeBurstBuffer
+    val performSendOrEnqueue: () -> Unit = handler@{
+        // [fix/ttfb-thinktag-composer] Cancel the pending IME-burst flush and
+        // read the send text from the field's own TextFieldValue — the
+        // single-writer truth the user actually sees. History: [T2-M2]
+        // started folding the burst buffer in because the send used to read
+        // the committed VM value (dictation tail lost). But the buffer is
+        // only a SNAPSHOT of the last large edit: after its 150 ms flush
+        // committed, any later small edit (typing a prefix, a trailing word,
+        // deletes — either end) updated only the field/VM, and the stale
+        // snapshot silently overwrote everything on send ("my message went
+        // out missing the part I typed"). The field value can never be
+        // staler than the buffer or the VM value: onValueChange writes it
+        // first on every path, and it is exactly what the user reads on
+        // screen.
         imeBurstJob?.cancel()
         imeBurstJob = null
         imeBurstBuffer = null
-        val toSend = if (pendingBurst.isNullOrEmpty()) rawText else pendingBurst
+        val toSend = inputFieldValue.text
         if (viewModel.tryExecuteInputAsSlashCommand(toSend)) {
             viewModel.setInputText("")
             keyboardController?.hide()
@@ -961,7 +967,7 @@ internal fun ChatInputArea(
                                 // matches the send-button tap path which
                                 // already enqueues mid-stream via
                                 // viewModel.sendMessage → enqueuePrompt.
-                                performSendOrEnqueue(viewModel.inputText.value)
+                                performSendOrEnqueue()
                             }
                             sendSwipeProgress = 0f
                         } else if (swipedUp && !hasText && !inputFocused) {
@@ -1271,16 +1277,16 @@ internal fun ChatInputArea(
                     // onSend; this lambda is the single source of
                     // truth for what "press Enter to send" means.
                     val performEnterSend: () -> Boolean = handler@{
-                        // [T2-M2] Fold a pending IME-burst edit in BEFORE the
-                        // guard so both the guard and the sent text match what
-                        // the user sees, and cancel the 150 ms flush so it cannot
-                        // re-inject the text after the send cleared the composer
-                        // (ghost input → double send).
-                        val pendingBurst = imeBurstBuffer
+                        // [fix/ttfb-thinktag-composer] Same contract as
+                        // performSendOrEnqueue (see the full history there):
+                        // cancel the pending burst flush so it cannot
+                        // re-inject text after the send cleared the composer
+                        // (ghost input → double send), and take the send text
+                        // from the field's live value — never the snapshot.
                         imeBurstJob?.cancel()
                         imeBurstJob = null
                         imeBurstBuffer = null
-                        val effectiveInput = if (pendingBurst.isNullOrEmpty()) inputText else pendingBurst
+                        val effectiveInput = inputFieldValue.text
                         if (effectiveInput.isBlank() && attachments.isEmpty()) return@handler false
                         // Intercept slash commands so "/compact" et al.
                         // run locally instead of being sent as a chat
@@ -1406,7 +1412,22 @@ internal fun ChatInputArea(
                                     imeBurstJob = coroutineScope.launch {
                                         delay(150)
                                         val flushed = imeBurstBuffer
-                                        if (flushed != null && flushed != inputText) {
+                                        // [fix/ttfb-thinktag-composer] Always
+                                        // clear the buffer so a stale snapshot
+                                        // can never outlive its flush (the old
+                                        // code left it set, and the send path
+                                        // then preferred the stale snapshot
+                                        // over newer edits). Commit only while
+                                        // the snapshot still matches the
+                                        // field's live text — if newer edits
+                                        // landed during the window (they
+                                        // commit immediately), committing the
+                                        // snapshot would overwrite them.
+                                        imeBurstJob = null
+                                        imeBurstBuffer = null
+                                        if (flushed != null &&
+                                            shouldCommitImeBurst(flushed, inputText, inputFieldValue.text)
+                                        ) {
                                             viewModel.setInputText(flushed)
                                             viewModel.updateSlashMenuState(flushed)
                                             // [fix/voice-ime-mention-scan] Sweep the
@@ -1800,7 +1821,7 @@ internal fun ChatInputArea(
                                     // the list to index 0 with a 100ms
                                     // re-pin to catch the late-mounting
                                     // "thinking" indicator.
-                                    performSendOrEnqueue(inputText)
+                                    performSendOrEnqueue()
                                 },
                             contentAlignment = Alignment.Center,
                         ) {

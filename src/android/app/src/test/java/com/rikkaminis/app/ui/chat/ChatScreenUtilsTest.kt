@@ -221,4 +221,27 @@ class ChatScreenUtilsTest {
     fun `replacement with no net growth is not debounced`() {
         assertFalse(shouldDebounceImeBurst("abcdefgh", "ABCDEFGH"))
     }
+
+    // ── shouldCommitImeBurst ─────────────────────────────────────────
+
+    @Test
+    fun `burst commits while it is still the live field text`() {
+        assertTrue(shouldCommitImeBurst("pasted text", "old", "pasted text"))
+    }
+
+    @Test
+    fun `burst dropped when newer edits landed in the window`() {
+        // User typed a prefix or a trailing word after the burst: the live
+        // text moved on, and the immediate-commit path already delivered it.
+        // Committing the snapshot now would overwrite those edits — the
+        // exact "composer ate my text" bug this predicate exists to prevent.
+        assertFalse(shouldCommitImeBurst("pasted text", "old", "pasted text + tail"))
+        assertFalse(shouldCommitImeBurst("pasted text", "old", "prefix + pasted text"))
+        assertFalse(shouldCommitImeBurst("pasted text", "old", "pasted"))
+    }
+
+    @Test
+    fun `burst dropped when already committed`() {
+        assertFalse(shouldCommitImeBurst("same", "same", "same"))
+    }
 }

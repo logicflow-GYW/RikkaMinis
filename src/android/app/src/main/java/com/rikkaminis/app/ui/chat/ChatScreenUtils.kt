@@ -104,3 +104,24 @@ internal fun shouldDebounceImeBurst(oldText: String, newText: String): Boolean {
     val delta = newText.length - oldText.length
     return delta > IME_BURST_DELTA_THRESHOLD
 }
+
+/**
+ * [fix/ttfb-thinktag-composer] Whether a debounced IME-burst snapshot should
+ * still be committed to the ViewModel when its 150 ms flush fires.
+ *
+ * Commit only while BOTH hold:
+ *  - [snapshot] differs from the committed VM text (otherwise the commit is
+ *    a no-op), and
+ *  - the field's live text still equals the snapshot — newer edits that
+ *    landed during the window (ordinary typing / deletes commit immediately)
+ *    must not be overwritten by the stale snapshot.
+ *
+ * The caller must clear its buffer regardless of the answer: a snapshot that
+ * outlives its flush must never be picked up by a later send (that stale
+ * pickup was the "composer ate my text" bug).
+ */
+internal fun shouldCommitImeBurst(
+    snapshot: String,
+    committedVmText: String,
+    liveUiText: String,
+): Boolean = snapshot != committedVmText && liveUiText == snapshot
