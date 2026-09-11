@@ -16,6 +16,7 @@ import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.provider.ProviderBoundary
 import com.rikkaminis.app.sandbox.offload.FirstChunkTimeoutPolicy
 import com.rikkaminis.app.provider.applyUserAgentOverride
+import com.rikkaminis.app.provider.extractHttpErrorMessage
 import com.rikkaminis.app.provider.safeOptString
 import com.rikkaminis.app.provider.sanitizeToolPairing
 import com.rikkaminis.app.provider.clampOutboundMaxTokens
@@ -2785,14 +2786,7 @@ class OpenAIProvider constructor(
         if (statusCode == 401 || statusCode == 403) return LLMError.InvalidApiKey()
         if (statusCode == 429) return LLMError.RateLimited(retryAfterMs = retryAfterMs)
 
-        val message = try {
-            val json = JSONObject(body)
-            val error = json.optJSONObject("error")
-            val errorMessage = error?.safeOptString("message", "") ?: body
-            "[$statusCode] $errorMessage"
-        } catch (_: Exception) {
-            "HTTP $statusCode: ${body.take(500)}"
-        }
+        val message = "[$statusCode] ${extractHttpErrorMessage(body)}"
 
         val transientCodes = setOf(500, 502, 503, 504, 529)
         if (statusCode in transientCodes) {

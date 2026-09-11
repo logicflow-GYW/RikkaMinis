@@ -18,6 +18,7 @@ import com.rikkaminis.app.data.model.ThinkingLevel
 import com.rikkaminis.app.provider.ImageBudget
 import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.provider.applyUserAgentOverride
+import com.rikkaminis.app.provider.extractHttpErrorMessage
 import com.rikkaminis.app.provider.safeOptString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
@@ -987,13 +988,13 @@ class AnthropicProvider(
         if (statusCode == 429) return LLMError.RateLimited(retryAfterMs = retryAfterMs)
 
         val message = try {
-            val json = JSONObject(body)
-            val error = json.optJSONObject("error")
-            val errorType = error?.safeOptString("type", "") ?: "error"
-            val errorMessage = error?.safeOptString("message", "") ?: body
-            "[$errorType] $errorMessage"
+            val errorType = JSONObject(body).optJSONObject("error")
+                ?.safeOptString("type", "")
+                ?.takeIf { it.isNotBlank() }
+                ?: "error"
+            "[$errorType] ${extractHttpErrorMessage(body)}"
         } catch (_: Exception) {
-            "HTTP $statusCode: ${body.take(500)}"
+            "[error] ${body.take(500)}"
         }
 
         val transientCodes = setOf(500, 502, 503, 504, 529)

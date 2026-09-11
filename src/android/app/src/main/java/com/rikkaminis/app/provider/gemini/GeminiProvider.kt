@@ -15,6 +15,7 @@ import com.rikkaminis.app.data.model.LLMUsage
 import com.rikkaminis.app.data.model.ThinkingLevel
 import com.rikkaminis.app.provider.ImageBudget
 import com.rikkaminis.app.provider.LLMProvider
+import com.rikkaminis.app.provider.extractHttpErrorMessage
 import com.rikkaminis.app.provider.safeOptString
 import com.rikkaminis.app.provider.sanitizeToolPairing
 import com.rikkaminis.app.provider.clampOutboundMaxTokens
@@ -546,7 +547,7 @@ class GeminiProvider(
     private fun mapHttpError(statusCode: Int, body: String, retryAfterMs: Long? = null): LLMError {
         if (statusCode == 401 || statusCode == 403) return LLMError.InvalidApiKey()
         if (statusCode == 429) return LLMError.RateLimited(retryAfterMs = retryAfterMs)
-        val message = "Gemini API error $statusCode: ${body.take(200)}"
+        val message = "Gemini API error $statusCode: ${extractHttpErrorMessage(body, fallbackTake = 200)}"
         val transientCodes = setOf(500, 502, 503, 504, 529)
         if (statusCode in transientCodes) return LLMError.TransientError(message)
         return LLMError.ProviderError(message)
