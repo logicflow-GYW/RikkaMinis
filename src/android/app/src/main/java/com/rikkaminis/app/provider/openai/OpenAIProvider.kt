@@ -107,11 +107,24 @@ class OpenAIProvider constructor(
         /**
          * [T-android-stale-conn-retry-hang] Streaming time-to-first-byte
          * budget: response HEADERS must arrive within this window. Does NOT
-         * bound the SSE body — a flowing stream stays unlimited. This is a REAL
-         * dead-upstream signal: a wedged tunnel never reaches headers at all,
-         * so 30s here is safe (headers arrive fast even for slow generations).
+         * bound the SSE body — a flowing stream stays unlimited. This is the
+         * dead-upstream signal: a wedged tunnel never reaches headers at all.
+         *
+         * [fix/ttfb-thinktag-composer] 2026-09-11: raised 30s → 90s. The 30s
+         * carried the assumption "headers arrive fast even for slow
+         * generations" — measured false for queueing relays/gateways: direct
+         * probing of a relay (api.senseaudio.cn) found 4/8 requests sitting
+         * 42.9–59.3s BEFORE headers (all latency in the upstream queue, not
+         * the body). Killing those at 30s turned ordinary relay queueing into
+         * a forced retry loop (retry → re-queue → killed again), which users
+         * experience as the provider "failing mid-answer". 90s covers the
+         * observed distribution with ~1.5× margin. Trade-off: a genuinely
+         * wedged tunnel now surfaces here 60s later; NetworkMonitor's pool
+         * eviction on network transitions and the retry ladder remain the
+         * first-line recovery, so the dead-tunnel case stays bounded and
+         * self-healing.
          */
-        private const val STREAM_TTFB_TIMEOUT_MS = 30_000L
+        private const val STREAM_TTFB_TIMEOUT_MS = 90_000L
 
         /**
          * First-data-row watchdog budget. A response whose headers arrived but

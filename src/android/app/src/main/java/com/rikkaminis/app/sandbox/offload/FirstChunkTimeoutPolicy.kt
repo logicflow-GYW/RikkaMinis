@@ -20,8 +20,10 @@ package com.rikkaminis.app.sandbox.offload
  *   without weakening the guard's intent.
  *
  * Rules:
- *   - Official/direct routes get the conservative 30s (STREAM_TTFB_TIMEOUT_MS
- *     in OpenAIProvider is also 30s, so the outer guard stays aligned).
+ *   - Official/direct routes get the conservative 30s. (The provider's
+ *     header-phase TTFB watchdog is no longer aligned with this: it was
+ *     raised 30s → 90s on 2026-09-11 [fix/ttfb-thinktag-composer] after
+ *     relays were measured queueing 40-60s BEFORE response headers.)
  *   - Proxy/gateway routes (custom base URL that is NOT an official provider
  *     host, or a loopback/proxy-like host) get 45s — matching the inner
  *     STREAM_FIRST_DATA_TIMEOUT_MS so the outer guard does not cut the inner
@@ -56,9 +58,10 @@ package com.rikkaminis.app.sandbox.offload
  *   backstop**, thinking OR not. The per-route 30/45s budgets remain ONLY as
  *   the budget for non-generation calls (none in production today besides
  *   this stream path) and as a documented fast-hint. Genuine dead-upstream
- *   protection is NOT removed: the provider's TTFB watchdog (30s, no
- *   response *headers*) and the client's worker-liveness beat + death-grace
- *   still surface a genuinely wedged upstream promptly with a *real* signal.
+ *   protection is NOT removed: the provider's TTFB watchdog (90s since
+ *   2026-09-11, no response *headers*) and the client's worker-liveness
+ *   beat + death-grace still surface a genuinely wedged upstream promptly
+ *   with a *real* signal.
  *   The 30-min ceiling is the final backstop that bounds the worst case so a
  *   worker is never held forever.
  */
