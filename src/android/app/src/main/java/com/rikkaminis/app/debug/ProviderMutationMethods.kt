@@ -206,9 +206,16 @@ internal object ProviderMutationMethods {
             ProviderType.xAI -> "https://api.x.ai/v1"
             ProviderType.kimiCode -> "https://api.kimi.com/coding/v1"
         }
+        // [T-provider-key-roulette] Probe with ONE rotated key: the raw
+        // multi-key string would go out verbatim in the header (or padded
+        // into Gemini's ?key= query) and always fail auth — reporting a
+        // perfectly healthy multi-key provider as unreachable.
+        val key = repo.loadApiKey(id)?.let {
+            com.rikkaminis.app.data.KeyRoulette.next(it, instance.id)
+        }
         val probeURL = when (instance.providerType) {
             ProviderType.anthropic -> "$baseURL/v1/models"
-            ProviderType.gemini -> "$baseURL/v1beta/models?key=" + (repo.loadApiKey(id) ?: "")
+            ProviderType.gemini -> "$baseURL/v1beta/models?key=" + (key ?: "")
             ProviderType.openAI -> if (baseURL.endsWith("/v1")) "$baseURL/models" else "$baseURL/v1/models"
             ProviderType.openRouter -> "$baseURL/models"
             // xAI exposes an OpenAI-compatible /models endpoint at the same base.
@@ -222,7 +229,6 @@ internal object ProviderMutationMethods {
             .build()
 
         val builder = okhttp3.Request.Builder().url(probeURL).get()
-        val key = repo.loadApiKey(id)
         when (instance.providerType) {
             ProviderType.anthropic -> if (!key.isNullOrEmpty()) builder.header("x-api-key", key).header("anthropic-version", "2023-06-01")
             ProviderType.openAI -> if (!key.isNullOrEmpty()) builder.header("Authorization", "Bearer $key")

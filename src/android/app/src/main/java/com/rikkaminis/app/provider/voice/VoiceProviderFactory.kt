@@ -1,6 +1,7 @@
 package com.rikkaminis.app.provider.voice
 
 import android.util.Log
+import com.rikkaminis.app.data.KeyRoulette
 import com.rikkaminis.app.data.model.ProviderInstance
 import com.rikkaminis.app.data.model.ProviderType
 
@@ -23,7 +24,14 @@ object VoiceProviderFactory {
 
     private const val TAG = "VoiceFactory"
 
-    fun make(instance: ProviderInstance, apiKey: String?): VoiceProvider? {
+    fun make(instance: ProviderInstance, rawApiKey: String?): VoiceProvider? {
+        // [T-provider-key-roulette] Rotate at the voice choke point too, so no
+        // vendor ever receives the raw multi-key string. A single key comes
+        // back cleaned and verbatim, and Xunfei's "appId;apiKey;apiSecret"
+        // compound is unaffected: rotation only splits on whitespace/commas,
+        // so a user holding several compound credentials separates them with
+        // a comma and gets one complete compound per request.
+        val apiKey = rawApiKey?.let { KeyRoulette.next(it, instance.id) }
         val custom = instance.customBaseURL
         val normalizedBase = (custom ?: "").lowercase()
 
@@ -100,9 +108,15 @@ object VoiceProviderFactory {
      * True when [make] would return a provider for [instance] with [apiKey] —
      * the shadow-voice candidate gate. Pass the real stored key: Xunfei's
      * compound-credential check ("appId;apiKey;apiSecret") depends on it.
+     *
+     * [T-provider-key-roulette] Classifies against the first *cleaned*
+     * candidate and deliberately does NOT consume a rotation draw: this gate
+     * runs while merely listing voice options, and browsing the UI must not
+     * re-order which key the next real request picks. Passing a single-token
+     * value into [make] keeps its own rotation a no-op.
      */
     fun supports(instance: ProviderInstance, apiKey: String?): Boolean =
-        make(instance, apiKey) != null
+        make(instance, apiKey?.let { KeyRoulette.candidates(it).firstOrNull() ?: it }) != null
 
     /**
      * Split a compound credential ("appId;key" / "appId;key;secret") stored as

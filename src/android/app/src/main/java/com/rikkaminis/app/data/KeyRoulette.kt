@@ -9,6 +9,19 @@ import java.util.concurrent.ConcurrentHashMap
  * contains MULTIPLE keys separated by whitespace/commas, each new provider
  * build picks the least-recently-used key; single keys are returned verbatim.
  *
+ * ## Choke-point rule (read this before calling it)
+ * Rotation belongs at the single entry each *subsystem* funnels through, never
+ * at individual call sites — a stored key reaches the network through more
+ * doors than just the chat provider:
+ *  - chat / agent / offload worker → `ProviderFactory.create`
+ *  - model-list fetch (`/v1/models`) → `ModelListProviderRegistry.fetchModels`
+ *  - voice (ASR/TTS) → `VoiceProviderFactory.make`
+ *  - debug connectivity probe → `ProviderMutationMethods` models probe
+ * The 2026-09 history is the reason this list is spelled out: rotation was
+ * "unified" in ProviderFactory, which fixed chat only, and every non-chat door
+ * kept sending `Bearer k1, k2, k3` → 401 (model refresh silently kept the old
+ * list, voice tests failed). Add the door to this list when you add one.
+ *
  * - LRU state persists to `key_roulette.json` under the app cache dir. There
  *   is no time-based expiry: the persisted slice is rebuilt from the
  *   provider's *current* key list on every draw, so a key removed from the
@@ -61,6 +74,12 @@ object KeyRoulette {
             if (maxRestored > drawCounter) drawCounter = maxRestored
         }
     }
+
+    /**
+     * Cleaned, de-duplicated key list for [keys] — the rotation candidates.
+     * A single key yields a one-element list; blank input yields none.
+     */
+    fun candidates(keys: String): List<String> = split(keys)
 
     /**
      * Pick the next key for [providerId] from a possibly multi-key [keys]

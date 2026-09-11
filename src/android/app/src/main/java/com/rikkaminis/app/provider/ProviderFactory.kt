@@ -14,12 +14,16 @@ object ProviderFactory {
      * [context] is retained for call-site compatibility; OAuth (which needed
      * it for encrypted token storage) was removed.
      *
-     * [T-provider-key-roulette] Single choke point for multi-key rotation: the
-     * stored key MAY contain several keys separated by whitespace/commas, and
-     * every caller — main-process direct paths AND the offload worker — builds
-     * its provider through this factory. Rotating here means no call site can
-     * accidentally send the raw multi-key string as a Bearer token. Single
-     * keys pass through verbatim.
+     * [T-provider-key-roulette] Chat-side choke point for multi-key rotation:
+     * the stored key MAY contain several keys separated by whitespace/commas,
+     * and every chat caller — main-process direct paths AND the offload worker
+     * — builds its provider through this factory. Rotating here means no *chat*
+     * call site can accidentally send the raw multi-key string as a Bearer
+     * token; single keys pass through verbatim.
+     *
+     * This is one of several doors a stored key reaches the network through —
+     * model-list fetch, voice and the debug probe each rotate at their own
+     * choke point. See the rule documented on [com.rikkaminis.app.data.KeyRoulette].
      */
     fun create(instance: ProviderInstance, apiKey: String, model: LLMModel, context: Context? = null): LLMProvider {
         // [T-provider-key-roulette] LRU rotation on the provider-instance id.

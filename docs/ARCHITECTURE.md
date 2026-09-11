@@ -148,7 +148,10 @@
   toast + capsule flash）。
 - **思考档位**：OFF/AUTO/LOW/MEDIUM/HIGH/ULTRA/MAX；AUTO 追加 guard；
   自定义 thinking_rules 经序列化跨进程传递；KeyRoulette 多 key 401 修复后
-  单点收口在 ProviderFactory（旋转只此一处）。
+  按「子系统收口」旋转：聊天走 ProviderFactory.create、模型列表走
+  ModelListProviderRegistry.fetchModels、语音走 VoiceProviderFactory.make、
+  debug 探测走 ProviderMutationMethods —— 每个门都有自己的收口点，规则见
+  KeyRoulette KDoc（只收聊天那一处曾导致模型刷新/语音继续发 401）。
 - **标题/压缩子模型**独立解析，不走组路由。
 
 ## 7. 沙箱与原生能力
