@@ -100,6 +100,8 @@ class AnthropicProviderTest {
         server.enqueue(MockResponse().setBody(responseBody))
 
         val response = provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+        assertEquals(100, response.usage?.inputTokens)
+        assertEquals(180, response.usage?.latestContextTokens)
         assertEquals(50, response.usage?.cacheCreationInputTokens)
         assertEquals(30, response.usage?.cacheReadInputTokens)
     }
@@ -122,6 +124,8 @@ class AnthropicProviderTest {
         server.enqueue(MockResponse().setBody(responseBody))
 
         val response = provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+        assertEquals(10, response.usage?.inputTokens)
+        assertEquals(10, response.usage?.latestContextTokens)
         assertNull(response.usage?.cacheCreationInputTokens)
         assertNull(response.usage?.cacheReadInputTokens)
     }
