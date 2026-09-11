@@ -152,6 +152,59 @@ class ThinkTagExtractionTest {
     }
 
     @Test
+    fun `extracts glm think tag variant`() {
+        // [fix/ttfb-thinktag-composer] GLM/llama.cpp-family relays emit
+        // `<think>…</think>` inline in content (measured on real relays:
+        // glm-5.3-flash streams its whole reasoning inline, no rc field).
+        val acc = ScanAccumulator()
+        acc.append("<think>\n38*47 = 38*40 + 38*7</think>\nanswer text")
+        val (visible, thinking) = acc.flush()
+        assertEquals("\nanswer text", visible)
+        assertEquals("\n38*47 = 38*40 + 38*7", thinking)
+    }
+
+    @Test
+    fun `think and thinking variants never shadow each other`() {
+        // `<think>` and `<thinking>` differ at position 6 (`>` vs `i`);
+        // neither is a substring of the other, so both must extract.
+        val acc = ScanAccumulator()
+        acc.append("A <think>x</think> mid <thinking>y</thinking>B")
+        val (visible, thinking) = acc.flush()
+        assertEquals("A  mid B", visible)
+        assertEquals("xy", thinking)
+    }
+
+    @Test
+    fun `think tag split across chunks is extracted`() {
+        val acc = ScanAccumulator()
+        acc.append("<thi")
+        acc.append("nk>plan</think>out")
+        val (visible, thinking) = acc.flush()
+        assertEquals("out", visible)
+        assertEquals("plan", thinking)
+    }
+
+    @Test
+    fun `think tag closes with response altClose`() {
+        val acc = ScanAccumulator()
+        acc.append("<think>secret plan<response>reply")
+        val (visible, thinking) = acc.flush()
+        assertEquals("reply", visible)
+        assertEquals("secret plan", thinking)
+    }
+
+    @Test
+    fun `thinker word does not false-trigger extraction`() {
+        // `<thinker>` contains neither `<think>` nor `<thinking>` — the
+        // position-6 terminator check covers both.
+        val acc = ScanAccumulator()
+        acc.append("A <thinker> is text")
+        val (visible, thinking) = acc.flush()
+        assertEquals("A <thinker> is text", visible)
+        assertEquals("", thinking)
+    }
+
+    @Test
     fun `passes through plain text unchanged`() {
         val acc = ScanAccumulator()
         acc.append("Just regular text with no tags")
@@ -312,6 +365,10 @@ class ThinkTagExtractionTest {
     fun `tag formats list contains all documented variants`() {
         val opens = THINK_TAG_FORMATS.map { it.open }
         assertTrue(opens.contains("<thinking>"))
+        // [fix/ttfb-thinktag-composer] `<think>` (GLM-family relays stream
+        // reasoning inline with this tag) must be present alongside the
+        // DeepSeek-style `<thinking>`.
+        assertTrue(opens.contains("<think>"))
         assertTrue(opens.contains("<reasoning>"))
         assertTrue(opens.contains("[think]"))
         assertTrue(opens.contains("[reasoning]"))

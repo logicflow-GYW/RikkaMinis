@@ -24,6 +24,14 @@ internal data class ThinkTagDef(
  */
 internal val THINK_TAG_FORMATS: List<ThinkTagDef> = listOf(
     ThinkTagDef("<thinking>", "</thinking>", altClose = "<response>"), // DeepSeek R1 style
+    // [fix/ttfb-thinktag-composer] GLM/llama.cpp-family relays emit
+    // `<think>…</think>` inline in the content field (measured: relay
+    // glm-5.3-flash streams its whole reasoning inline, no `reasoning_content`
+    // field — the other half of the "thinking leaked into body" reports).
+    // The `>` terminator keeps it distinct from `<thinking>` under indexOf
+    // matching (neither string is a substring of the other), so both formats
+    // coexist and the earliest-index scan picks the right one.
+    ThinkTagDef("<think>", "</think>", altClose = "<response>"),
     ThinkTagDef("<reasoning>", "</reasoning>", altClose = "<response>"),
     ThinkTagDef("[think]", "[/think]"),
     ThinkTagDef("[reasoning]", "[/reasoning]"),
