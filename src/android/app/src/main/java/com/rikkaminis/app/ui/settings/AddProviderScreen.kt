@@ -320,7 +320,8 @@ private fun ColumnScope.ApiKeyConfigSection(
     }
     SettingsSection(
         header = stringResource(R.string.add_provider_credential),
-        footer = stringResource(R.string.add_provider_your_key_is_stored_securely_in_encrypted),
+        footer = stringResource(R.string.add_provider_your_key_is_stored_securely_in_encrypted) +
+            "\n" + stringResource(R.string.add_provider_multi_key_hint),
     ) {
         SettingsCardBlock {
             RowLabel(text = stringResource(R.string.provider_list_api_key))

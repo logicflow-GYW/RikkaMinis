@@ -15,6 +15,18 @@ class KeyRouletteTest {
     }
 
     @Test
+    fun `duplicated or padded keys collapse to one cleaned token`() {
+        // T-provider-key-roulette: previously "k1, k1" was handed back raw and
+        // would have been sent as a Bearer value ("k1, k1") → auth failure.
+        assertEquals("k1", KeyRoulette.next("k1, k1", "p-dup"))
+        assertEquals("q", KeyRoulette.next("q, q  q", "p-dup2"))
+        // Stray whitespace around a single key is stripped.
+        assertEquals("sk-1", KeyRoulette.next(" sk-1 ", "p-pad"))
+        // Blank input still falls through verbatim (upper layers own the error).
+        assertEquals("   ", KeyRoulette.next("   ", "p-blank"))
+    }
+
+    @Test
     fun `multi key rotates round robin`() {
         val keys = "k1, k2, k3"
         val seen = mutableSetOf<String>()

@@ -167,6 +167,13 @@ private fun ApiKeyStep(
                 singleLine = true,
             )
 
+            Text(
+                text = stringResource(R.string.add_provider_multi_key_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp, start = 4.dp, end = 4.dp).fillMaxWidth(),
+            )
+
             Spacer(Modifier.height(16.dp))
 
             MinisButton(

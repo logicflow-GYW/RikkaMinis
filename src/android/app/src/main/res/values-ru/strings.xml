@@ -789,6 +789,7 @@
     <string name="add_provider_identity">Идентификация</string>
     <string name="add_provider_the_label_is_shown_in_the_provider_list_">Метка отображается в списке провайдеров и в выборе моделей.</string>
     <string name="add_provider_credential">Учётные данные</string>
+    <string name="add_provider_multi_key_hint">Несколько ключей разделяйте пробелами или запятыми — ротация автоматическая (сначала самый старый).</string>
     <string name="add_provider_your_key_is_stored_securely_in_encrypted">Ваш ключ надёжно хранится в зашифрованном хранилище и никогда не покидает устройство.</string>
     <string name="add_provider_endpoint">Эндпоинт</string>
     <string name="add_provider_endpoint_anthropic_hint">Используйте официальный эндпоинт Anthropic как есть. Для сторонних сервисов, совместимых с Anthropic (например, Mimo), базовый URL может требовать суффикс пути, такой как \"/anthropic\" — сверьтесь с документацией провайдера. URL используется без изменений с добавлением \"/v1/messages\".</string>

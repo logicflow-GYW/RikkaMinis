@@ -64,11 +64,18 @@ object KeyRoulette {
 
     /**
      * Pick the next key for [providerId] from a possibly multi-key [keys]
-     * string. Single-key input returns as-is (no state touched).
+     * string. A key string that splits into a single cleaned token (one key,
+     * duplicated tokens like "k1, k1", or stray whitespace) is returned as
+     * that cleaned token; fully blank input falls through verbatim. No state
+     * is touched on these paths.
      */
     fun next(keys: String, providerId: String = ""): String {
         val list = split(keys)
-        if (list.size <= 1) return keys
+        // [T-provider-key-roulette] A list that collapses to one token must
+        // hand back the CLEANED token, not the raw input — sending "k1, k1"
+        // as a Bearer value would fail auth. Empty list (blank input) is left
+        // verbatim for the caller to handle.
+        if (list.size <= 1) return list.firstOrNull() ?: keys
         synchronized(lock) {
             // [T-provider-key-roulette] Monotonic draw counter is the true LRU
             // key — wall-clock ms collides when draws land in the same

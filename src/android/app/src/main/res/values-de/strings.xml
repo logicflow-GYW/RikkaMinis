@@ -692,6 +692,7 @@
     <string name="add_provider_identity">Identität</string>
     <string name="add_provider_the_label_is_shown_in_the_provider_list_">Das Label wird in der Anbieterliste und Modellauswahl angezeigt.</string>
     <string name="add_provider_credential">Anmeldedaten</string>
+    <string name="add_provider_multi_key_hint">Mehrere Schlüssel durch Leerzeichen oder Kommas getrennt eingeben — automatische Rotation (ältester zuerst).</string>
     <string name="add_provider_your_key_is_stored_securely_in_encrypted">Dein Schlüssel wird in einem verschlüsselten Speicher sicher abgelegt und verlässt das Gerät nicht.</string>
     <string name="add_provider_endpoint">Endpunkt</string>
     <string name="add_provider_custom_api_base_optional">Benutzerdefinierte API-Basis (optional)</string>

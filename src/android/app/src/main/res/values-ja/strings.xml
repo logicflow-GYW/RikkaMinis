@@ -692,6 +692,7 @@
     <string name="add_provider_identity">識別情報</string>
     <string name="add_provider_the_label_is_shown_in_the_provider_list_">ラベルはプロバイダーリストとモデルピッカーに表示されます。</string>
     <string name="add_provider_credential">認証情報</string>
+    <string name="add_provider_multi_key_hint">複数のキーは空白またはカンマで区切って入力できます。自動でローテーションされ、最も長く未使用のキーが選ばれます。</string>
     <string name="add_provider_your_key_is_stored_securely_in_encrypted">キーは暗号化ストレージに安全に保存され、デバイスから出ることはありません。</string>
     <string name="add_provider_endpoint">エンドポイント</string>
     <string name="add_provider_custom_api_base_optional">カスタムAPIベース（オプション）</string>

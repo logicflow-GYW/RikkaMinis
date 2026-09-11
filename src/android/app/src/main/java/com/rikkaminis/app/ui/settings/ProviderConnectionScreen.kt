@@ -92,6 +92,7 @@ fun ProviderConnectionScreen(
         // ─── Credential / API Key ───────────────────────────────────
         SettingsSection(
             header = stringResource(R.string.provider_list_api_key),
+            footer = stringResource(R.string.add_provider_multi_key_hint),
         ) {
             SettingsCardBlock {
                 ApiKeyCredentialBlock(

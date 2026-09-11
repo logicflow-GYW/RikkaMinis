@@ -692,6 +692,7 @@
     <string name="add_provider_identity">식별</string>
     <string name="add_provider_the_label_is_shown_in_the_provider_list_">라벨은 제공업체 목록과 모델 선택기에 표시됩니다.</string>
     <string name="add_provider_credential">자격 증명</string>
+    <string name="add_provider_multi_key_hint">여러 키는 공백 또는 쉼표로 구분할 수 있으며, 자동으로 순환 사용됩니다(가장 오래 미사용 키 우선).</string>
     <string name="add_provider_your_key_is_stored_securely_in_encrypted">키는 암호화된 저장소에 안전하게 보관되며 기기를 벗어나지 않습니다.</string>
     <string name="add_provider_endpoint">엔드포인트</string>
     <string name="add_provider_custom_api_base_optional">사용자 정의 API 베이스 (선택 사항)</string>

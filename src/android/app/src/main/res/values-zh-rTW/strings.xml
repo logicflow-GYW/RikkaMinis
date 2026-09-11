@@ -290,6 +290,7 @@
     <string name="add_provider_identity">標識</string>
     <string name="add_provider_the_label_is_shown_in_the_provider_list_">標籤會顯示在供應商列表和模型選擇器裡。</string>
     <string name="add_provider_credential">憑證</string>
+    <string name="add_provider_multi_key_hint">多個金鑰可用空格或逗號分隔，會自動輪換使用（優先最久未用的）。</string>
     <string name="add_provider_your_key_is_stored_securely_in_encrypted">你的金鑰儲存在加密儲存中,不會離開裝置。</string>
     <string name="add_provider_endpoint">端點</string>
     <string name="add_provider_custom_api_base_optional">自定義 API 地址（可選）</string>

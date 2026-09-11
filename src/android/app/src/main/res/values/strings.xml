@@ -962,6 +962,7 @@
     <string name="add_provider_identity">Identity</string>
     <string name="add_provider_the_label_is_shown_in_the_provider_list_">The label is shown in the provider list and model picker.</string>
     <string name="add_provider_credential">Credential</string>
+    <string name="add_provider_multi_key_hint">Separate multiple keys with spaces or commas — they rotate automatically (least recently used first).</string>
     <string name="add_provider_your_key_is_stored_securely_in_encrypted">Your key is stored securely in encrypted storage and never leaves the device.</string>
     <string name="add_provider_endpoint">Endpoint</string>
     <string name="add_provider_endpoint_anthropic_hint">Use the official Anthropic endpoint as-is. For third-party Anthropic-compatible services (e.g. Mimo), the base URL may need a path suffix such as \"/anthropic\" — check your provider\'s docs. The URL is used verbatim with \"/v1/messages\" appended.</string>

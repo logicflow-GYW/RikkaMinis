@@ -817,6 +817,7 @@
     <string name="add_provider_identity">标识</string>
     <string name="add_provider_the_label_is_shown_in_the_provider_list_">标签会显示在服务商列表和模型选择器里。</string>
     <string name="add_provider_credential">凭证</string>
+    <string name="add_provider_multi_key_hint">多个密钥可用空格或逗号分隔，会自动轮换使用（优先最久未用的）。</string>
     <string name="add_provider_your_key_is_stored_securely_in_encrypted">你的密钥保存在加密存储中,不会离开设备。</string>
     <string name="add_provider_endpoint">端点</string>
     <string name="add_provider_custom_api_base_optional">自定义 API 地址（可选）</string>
