@@ -161,7 +161,7 @@ fun LazyListScope.modelEntryPickerItems(
     item("__search__") {
         OutlinedTextField(
             value = searchQuery.value,
-            onValueChange = { searchQuery.value = it },
+            onValueChange = { searchQuery.value = sanitizeSingleLineInput(it) },
             placeholder = { Text(stringResource(searchPlaceholderRes)) },
             singleLine = true,
             shape = RoundedCornerShape(50),

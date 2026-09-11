@@ -47,6 +47,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.rikkaminis.app.MinisApp
 import com.rikkaminis.app.R
+import com.rikkaminis.app.ui.components.sanitizeSingleLineInput
 import com.rikkaminis.app.backup.ConfigBackup
 import com.rikkaminis.app.backup.WebDavBackupItem
 import com.rikkaminis.app.backup.WebDavClient
@@ -1370,7 +1371,7 @@ private fun WebDavConfigDialog(
             ) {
                 OutlinedTextField(
                     value = url,
-                    onValueChange = { url = it },
+                    onValueChange = { url = sanitizeSingleLineInput(it) },
                     label = { Text(stringResource(R.string.webdav_url_label)) },
                     placeholder = {
                         Text(stringResource(R.string.webdav_url_placeholder))
@@ -1380,14 +1381,14 @@ private fun WebDavConfigDialog(
                 )
                 OutlinedTextField(
                     value = username,
-                    onValueChange = { username = it },
+                    onValueChange = { username = sanitizeSingleLineInput(it) },
                     label = { Text(stringResource(R.string.webdav_username_label)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedTextField(
                     value = password,
-                    onValueChange = { password = it },
+                    onValueChange = { password = sanitizeSingleLineInput(it) },
                     label = { Text(stringResource(R.string.webdav_password_label)) },
                     placeholder = {
                         Text(stringResource(R.string.webdav_password_placeholder))
@@ -1398,7 +1399,7 @@ private fun WebDavConfigDialog(
                 )
                 OutlinedTextField(
                     value = path,
-                    onValueChange = { path = it },
+                    onValueChange = { path = sanitizeSingleLineInput(it) },
                     label = { Text(stringResource(R.string.webdav_path_label)) },
                     placeholder = {
                         Text(stringResource(R.string.webdav_path_hint))

@@ -67,6 +67,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.rikkaminis.app.MinisApp
 import com.rikkaminis.app.R
+import com.rikkaminis.app.ui.components.sanitizeSingleLineInput
 import com.rikkaminis.app.data.repository.WebAppShortcutRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -230,7 +231,7 @@ fun AddToHomeSheet(
                 )
                 OutlinedTextField(
                     value = titleText,
-                    onValueChange = { titleText = it },
+                    onValueChange = { titleText = sanitizeSingleLineInput(it) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )

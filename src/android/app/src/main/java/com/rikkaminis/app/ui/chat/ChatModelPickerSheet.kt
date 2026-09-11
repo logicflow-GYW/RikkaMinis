@@ -140,6 +140,7 @@ import com.rikkaminis.app.R
 import com.rikkaminis.app.data.FileMentionIndex
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.ui.components.MinisAlertDialog
+import com.rikkaminis.app.ui.components.sanitizeSingleLineInput
 import com.rikkaminis.app.ui.components.MinisMenu
 import com.rikkaminis.app.ui.components.MinisMenuDivider
 import com.rikkaminis.app.ui.components.providerDotColor
@@ -445,7 +446,7 @@ internal fun ModelPickerSheet(
             // default is 56dp; ~14% drop matches the spec target of ~15%).
             OutlinedTextField(
                 value = searchText,
-                onValueChange = { searchText = it },
+                onValueChange = { searchText = sanitizeSingleLineInput(it) },
                 placeholder = { Text(stringResource(R.string.model_picker_search_placeholder)) },
                 modifier = Modifier
                     .fillMaxWidth()

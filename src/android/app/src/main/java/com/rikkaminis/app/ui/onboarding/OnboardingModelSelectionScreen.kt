@@ -3,6 +3,7 @@ package com.rikkaminis.app.ui.onboarding
 import com.rikkaminis.app.R
 import androidx.compose.ui.res.stringResource
 import com.rikkaminis.app.ui.components.MinisButton
+import com.rikkaminis.app.ui.components.sanitizeSingleLineInput
 import com.rikkaminis.app.ui.components.MinisTextButton
 
 import androidx.compose.foundation.background
@@ -121,7 +122,7 @@ fun OnboardingModelSelectionScreen(
 
             OutlinedTextField(
                 value = searchText,
-                onValueChange = { searchText = it },
+                onValueChange = { searchText = sanitizeSingleLineInput(it) },
                 label = { Text(stringResource(R.string.onboarding_filter_models)) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,

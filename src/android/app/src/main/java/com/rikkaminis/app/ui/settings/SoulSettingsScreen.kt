@@ -38,6 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.rikkaminis.app.R
+import com.rikkaminis.app.ui.components.sanitizeSingleLineInput
 import com.rikkaminis.app.agent.SoulBodyLimitCheck
 import com.rikkaminis.app.agent.SoulBodyUnit
 import com.rikkaminis.app.agent.SoulFile
@@ -149,7 +150,7 @@ fun SoulSettingsScreen(onBack: () -> Unit) {
             Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 OutlinedTextField(
                     value = name,
-                    onValueChange = { name = it },
+                    onValueChange = { name = sanitizeSingleLineInput(it) },
                     label = { Text(stringResource(R.string.soul_field_name)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
@@ -159,7 +160,7 @@ fun SoulSettingsScreen(onBack: () -> Unit) {
                 // locked to ✨; only name / style / lang are editable.
                 OutlinedTextField(
                     value = style,
-                    onValueChange = { style = it },
+                    onValueChange = { style = sanitizeSingleLineInput(it) },
                     label = { Text(stringResource(R.string.soul_field_style)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),

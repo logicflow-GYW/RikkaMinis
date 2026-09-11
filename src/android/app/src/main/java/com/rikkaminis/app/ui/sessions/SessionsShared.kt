@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.sp
 import com.rikkaminis.app.R
 import com.rikkaminis.app.data.db.ChatSessionEntity
 import com.rikkaminis.app.ui.components.MinisTextButton
+import com.rikkaminis.app.ui.components.sanitizeSingleLineInput
 import com.rikkaminis.app.ui.theme.CategoryAccents
 import java.util.Calendar
 import java.util.Date
@@ -254,7 +255,7 @@ internal fun SessionEditSheet(
             // Title field
             OutlinedTextField(
                 value = title,
-                onValueChange = { title = it },
+                onValueChange = { title = sanitizeSingleLineInput(it) },
                 label = { Text(stringResource(R.string.session_title_label)) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,

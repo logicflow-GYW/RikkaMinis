@@ -116,8 +116,22 @@ fun SectionTextField(
         BasicTextField(
             value = fieldValue,
             onValueChange = { newValue ->
-                fieldValue = newValue
-                if (newValue.text != value) onValueChange(newValue.text)
+                // [T-android-singleline-paste-newline] singleLine=true does NOT
+                // strip newlines from PASTED text — they survive in the state,
+                // only line 1 is drawn, and the rest stays invisible (a field
+                // that "looks empty" after deleting visible chars but still
+                // holds "\n"s). Fold them here so a single-line field can never
+                // carry multi-line content. "\n" becomes a space (not deleted)
+                // so multi-token pastes like "k1\nk2" still split into two
+                // keys downstream (KeyRoulette SPLIT = [\s,]+).
+                val clean = if (singleLine) sanitizeSingleLineInput(newValue.text) else newValue.text
+                val v = if (clean != newValue.text) {
+                    newValue.copy(text = clean, selection = TextRange(clean.length))
+                } else {
+                    newValue
+                }
+                fieldValue = v
+                if (v.text != value) onValueChange(v.text)
             },
             modifier = Modifier
                 .fillMaxWidth()
@@ -163,3 +177,23 @@ fun SectionTextField(
         )
     }
 }
+
+/**
+ * [T-android-singleline-paste-newline] Folds CR/LF out of text destined for
+ * a single-line field. Any RUN of line separators ("\r\n", "\n", lone "\r",
+ * blank lines) becomes a single space (NOT deleted) so that pasting a
+ * newline-separated list of tokens (e.g. multiple API keys) still
+ * round-trips into downstream whitespace-splitting consumers like
+ * KeyRoulette, and blank lines in a pasted block do not accumulate spaces.
+ *
+ * Shared with [DialogTextField] — any new single-line input component should
+ * route its onValueChange through this too.
+ */
+private val LINE_SEPARATOR_RUN = Regex("[\\r\\n]+")
+
+internal fun sanitizeSingleLineInput(text: String): String =
+    if (!text.contains('\n') && !text.contains('\r')) {
+        text
+    } else {
+        text.replace(LINE_SEPARATOR_RUN, " ")
+    }

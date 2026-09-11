@@ -44,6 +44,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import com.rikkaminis.app.ui.components.MinisTextButton
+import com.rikkaminis.app.ui.components.sanitizeSingleLineInput
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -98,7 +99,7 @@ fun BrowserHistorySheet(
             // Search bar
             OutlinedTextField(
                 value = searchQuery,
-                onValueChange = { searchQuery = it },
+                onValueChange = { searchQuery = sanitizeSingleLineInput(it) },
                 placeholder = { Text(stringResource(R.string.browser_history_search)) },
                 modifier = Modifier
                     .fillMaxWidth()

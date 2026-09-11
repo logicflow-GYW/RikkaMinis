@@ -79,6 +79,7 @@ import com.rikkaminis.app.browser.BrowserHistoryStore
 import com.rikkaminis.app.browser.BrowserTabPool
 import com.rikkaminis.app.browser.UserAgentProfile
 import com.rikkaminis.app.ui.chat.StandardChatSheet
+import com.rikkaminis.app.ui.components.sanitizeSingleLineInput
 import kotlinx.coroutines.launch
 
 /**
@@ -244,7 +245,7 @@ fun BrowserSheet(
                     Box(modifier = Modifier.weight(1f)) {
                         androidx.compose.foundation.text.BasicTextField(
                             value = urlInput,
-                            onValueChange = { urlInput = it },
+                            onValueChange = { urlInput = sanitizeSingleLineInput(it) },
                             singleLine = true,
                             enabled = !isAgentBusy,
                             textStyle = LocalTextStyle.current.copy(

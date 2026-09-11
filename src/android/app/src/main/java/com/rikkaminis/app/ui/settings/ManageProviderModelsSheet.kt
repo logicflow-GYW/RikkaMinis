@@ -39,6 +39,7 @@ import com.rikkaminis.app.R
 import com.rikkaminis.app.data.model.ModelEntry
 import com.rikkaminis.app.data.repository.ProviderRepository
 import com.rikkaminis.app.logging.AppLogger
+import com.rikkaminis.app.ui.components.sanitizeSingleLineInput
 
 private const val SHEET_TAG = "ManageModelsSheet"
 
@@ -122,7 +123,7 @@ fun ManageProviderModelsSheet(
         // Search field, blank placeholder, clear button when non-empty
         OutlinedTextField(
             value = query,
-            onValueChange = { query = it },
+            onValueChange = { query = sanitizeSingleLineInput(it) },
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 8.dp),

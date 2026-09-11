@@ -28,6 +28,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.rikkaminis.app.R
 import com.rikkaminis.app.ui.components.MinisTextButton
+import com.rikkaminis.app.ui.components.sanitizeSingleLineInput
 import com.rikkaminis.app.data.model.ThinkingLevel
 import com.rikkaminis.app.provider.thinking.ThinkingRule
 import com.rikkaminis.app.provider.thinking.ThinkingResolveContext
@@ -114,7 +115,7 @@ fun ThinkingRuleEditorDialog(
                 // Name
                 OutlinedTextField(
                     value = label,
-                    onValueChange = { label = it },
+                    onValueChange = { label = sanitizeSingleLineInput(it) },
                     label = { Text(stringResource(R.string.thinking_rules_rule_name)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
@@ -136,7 +137,7 @@ fun ThinkingRuleEditorDialog(
                 if (!allModels) {
                     OutlinedTextField(
                         value = pattern,
-                        onValueChange = { pattern = it },
+                        onValueChange = { pattern = sanitizeSingleLineInput(it) },
                         label = { Text(stringResource(R.string.thinking_rules_model_pattern)) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
@@ -191,7 +192,7 @@ fun ThinkingRuleEditorDialog(
                         if (sendOffValue) {
                             OutlinedTextField(
                                 value = offValue,
-                                onValueChange = { offValue = it },
+                                onValueChange = { offValue = sanitizeSingleLineInput(it) },
                                 label = { Text(stringResource(R.string.thinking_rules_off_value)) },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth(),
@@ -201,7 +202,7 @@ fun ThinkingRuleEditorDialog(
                     FormatChoice.BOOLEAN_TOGGLE, FormatChoice.EXTRA_BODY_TOGGLE -> {
                         OutlinedTextField(
                             value = path,
-                            onValueChange = { path = it },
+                            onValueChange = { path = sanitizeSingleLineInput(it) },
                             label = { Text(stringResource(R.string.thinking_rules_field_path)) },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),
@@ -210,14 +211,14 @@ fun ThinkingRuleEditorDialog(
                     FormatChoice.CUSTOM_PATH -> {
                         OutlinedTextField(
                             value = path,
-                            onValueChange = { path = it },
+                            onValueChange = { path = sanitizeSingleLineInput(it) },
                             label = { Text(stringResource(R.string.thinking_rules_dotted_path)) },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),
                         )
                         OutlinedTextField(
                             value = highValue,
-                            onValueChange = { highValue = it },
+                            onValueChange = { highValue = sanitizeSingleLineInput(it) },
                             label = { Text(stringResource(R.string.thinking_rules_value_at_high)) },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),

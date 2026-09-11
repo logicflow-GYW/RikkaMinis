@@ -40,6 +40,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rikkaminis.app.ui.components.MinisTextButton
+import com.rikkaminis.app.ui.components.sanitizeSingleLineInput
 
 /**
  * "历史输入"面板 — 参考 RikkaHub 聊天页右上角（与 New Chat 并排）的消息预览
@@ -95,7 +96,7 @@ fun InputHistorySheet(
             // Search bar
             OutlinedTextField(
                 value = searchQuery,
-                onValueChange = { searchQuery = it },
+                onValueChange = { searchQuery = sanitizeSingleLineInput(it) },
                 placeholder = { Text(stringResource(R.string.input_history_search)) },
                 leadingIcon = {
                     Icon(

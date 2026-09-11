@@ -48,6 +48,7 @@ import com.rikkaminis.app.data.model.ProviderInstance
 import com.rikkaminis.app.data.model.ProviderType
 import com.rikkaminis.app.data.repository.ProviderRepository
 import com.rikkaminis.app.ui.components.MinisButton
+import com.rikkaminis.app.ui.components.sanitizeSingleLineInput
 import kotlinx.coroutines.launch
 import com.rikkaminis.app.ui.components.MinisTextButton
 
@@ -161,7 +162,7 @@ private fun ApiKeyStep(
 
             OutlinedTextField(
                 value = apiKey,
-                onValueChange = { apiKey = it; saved = false },
+                onValueChange = { apiKey = sanitizeSingleLineInput(it); saved = false },
                 label = { Text(stringResource(R.string.onboarding_provider_api_key_label, selectedType.displayName)) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
@@ -262,7 +263,7 @@ private fun ModelSelectionStep(
 
             OutlinedTextField(
                 value = searchText,
-                onValueChange = { searchText = it },
+                onValueChange = { searchText = sanitizeSingleLineInput(it) },
                 label = { Text(stringResource(R.string.onboarding_search_models)) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,

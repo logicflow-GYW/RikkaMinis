@@ -61,6 +61,7 @@ import com.rikkaminis.app.browser.UserAgentProfile
 import com.rikkaminis.app.logging.AppLogger
 import kotlinx.coroutines.launch
 import com.rikkaminis.app.ui.components.MinisTextButton
+import com.rikkaminis.app.ui.components.sanitizeSingleLineInput
 import com.rikkaminis.app.ui.util.bringIntoViewOnFocus
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -349,7 +350,7 @@ fun BrowserSettingsSheet(
             if (allDomains.isNotEmpty()) {
                 OutlinedTextField(
                     value = cookieFilterText,
-                    onValueChange = { cookieFilterText = it },
+                    onValueChange = { cookieFilterText = sanitizeSingleLineInput(it) },
                     label = { Text(stringResource(R.string.browser_settings_filter_by_domain)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),

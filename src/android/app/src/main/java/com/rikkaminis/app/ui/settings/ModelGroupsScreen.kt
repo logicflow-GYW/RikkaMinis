@@ -61,6 +61,7 @@ import com.rikkaminis.app.data.model.RoutingStrategy
 import com.rikkaminis.app.data.repository.ProviderRepository
 import com.rikkaminis.app.R
 import com.rikkaminis.app.ui.components.MinisTextButton
+import com.rikkaminis.app.ui.components.sanitizeSingleLineInput
 import com.rikkaminis.app.ui.components.SectionCard
 import com.rikkaminis.app.ui.components.SectionDesign
 import com.rikkaminis.app.ui.components.SectionFooter
@@ -288,7 +289,7 @@ fun ModelGroupsScreen(
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedTextField(
                         value = newGroupName,
-                        onValueChange = { newGroupName = it },
+                        onValueChange = { newGroupName = sanitizeSingleLineInput(it) },
                         label = { Text(stringResource(R.string.model_groups_group_name)) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),

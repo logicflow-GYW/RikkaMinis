@@ -178,6 +178,12 @@
   isNearBottom，防内容插入顶走视口）。
 - 左滑会话抽屉（历史切换/新建/长按删除）、极简顶栏、输入栏内模型选择器。
 - 设置 15+ 屏；**7+1 语言**（en/zh/zh-rTW/de/ja/ko/ru + 默认）。
+- **单行输入框契约**：`SectionTextField` / `DialogTextField` 的单行模式在
+  `onValueChange` 把粘贴进来的 CR/LF 折叠为单个空格
+  （`sanitizeSingleLineInput`，[T-android-singleline-paste-newline]）——
+  Compose 的 `singleLine=true` 只裁剪**显示**、不清洗**数据**，不折叠时
+  第二行起的粘贴内容会"隐形驻留"（删掉可见字符后字段看起来空了、实际没空）。
+  新增单行输入控件必须走这两个组件（或同一清洗函数）。
 - 无分析 SDK；崩溃报告本地 ACRA（无网络发送器）+ 崩溃频率检测。
 
 ## 9. 本 fork 差异化功能层（fork 后自写，区别于继承复杂度）

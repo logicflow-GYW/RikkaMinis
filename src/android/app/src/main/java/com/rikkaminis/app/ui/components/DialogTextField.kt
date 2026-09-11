@@ -59,7 +59,15 @@ fun DialogTextField(
     val mergedTextStyle = LocalTextStyle.current.merge(textStyle)
     BasicTextField(
         value = value,
-        onValueChange = onValueChange,
+        onValueChange = { newText ->
+            // [T-android-singleline-paste-newline] Same paste-fold as
+            // SectionTextField: singleLine=true only clips the DISPLAY and
+            // stops the keyboard from inserting newlines — newlines from a
+            // PASTE survive in the state invisibly. Fold CR/LF to a space so
+            // a single-line field can never carry (invisible) multi-line
+            // content.
+            onValueChange(if (singleLine) sanitizeSingleLineInput(newText) else newText)
+        },
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 48.dp)
