@@ -1,6 +1,6 @@
 # rikkaminis-dev-history 按天索引
 
-快速跳转到每日开发日志。共 914 条记录，41 天。
+快速跳转到每日开发日志。共 926 条记录，42 天。
 
 ## 2026-08-03（11 条）
 
@@ -1913,7 +1913,7 @@
 - `21:32` **singleline-paste-newline 真机验证通过（2026-09-11 晚）**
   - 用户实测分支构建（= main @ f4b6c4a 同一 commit，等价）：**四项验收点全过，无问题**——①多行粘贴到 API Key/UA/URL 字…
 
-## 2026-09-12（16 条）
+## 2026-09-12（25 条）
 
 - `00:25` **think 泄漏根因实锤：中转站 `<think>` 标签不在解析表（2026-09-11 晚）**
   - - 用户报告"思考泄漏是应用本身的问题"（rikkahub 同站正常）→ 直接 curl 中转站实锤
@@ -1947,3 +1947,30 @@
   - - **坑 3（重要）**：按日期累加 `git log --shortstat` 时，同一天多个 commit 的 `vol[date] = 0` 初始化会把…
 - `11:43` **P0/P1/P2 三件全闭环（main @ fe39a66，2026-09-12）**
   - - **分支 fix/p012-strict-json-reasoning-flag（2 commit：60aeea8 测试 + fe39a66 诊断）→ 沙箱…
+- `12:01` **dev-history 文档更新闭环（2026-09-12，main @ 2d7cd82）**
+  - - **档案**：914 条 / 41 天（原 882/39，+32 条）/ 1,064,626 字符 / 17,116 行；fences 32 even、ou…
+- `15:00` **Fork 生态调查完成（2026-09-12，报告 50.7KB / 723 行）**
+  - **报告**：`/var/minis/mounts/笔记/Fork生态调查报告-2026-09-12.md`（替换 08-11 旧版 `OPENMinisfor…
+- `15:21` **A1 T9 性能基线验证 + 拍板暂缓（2026-09-12 收尾）**
+  - - **验证实证**：从 `05a9d111b2`（rk-JcEvoX clone）提取 4 生产类（Collector 324/Report 274/Trac…
+- `21:19` **参数化第一批施工中：feat/chat-tuning-panel（2026-09-12 晚）**
+  - 用户拍板"全做"（A+B+C+D+E 全部候选参数化），分两批实施。**第一批 A+D 已完成后进入 CI**：
+- `21:50` **「负载均衡像回退模式」调查（2026-09-12 晚，进行中）**
+  - **用户报告**：模型组负载均衡模式「似乎还是回退模式」（同主题第 3 次：08-04 游标修复、09-06 会话级→per-message 修复）。
+- `22:13` **参数化两批全部完成：feat/chat-tuning-panel @ 70a0f5c（2026-09-12 晚）**
+  - **两批 23 个参数已全部实现并推送**（同一分支两个 commit，一次 CI 覆盖）：
+- `22:30` **feat/chat-tuning-panel 合并收尾（main @ 70a0f5c，2026-09-12 晚）**
+  - **审计（合并前用户要求）**：29 文件 +1891/−89 两 commit 全过——①ImageBudget 重构默认 (2000,80) 逐项复刻旧阶梯…
+- `22:55` **chat-tuning-panel 独立审计（main @ 70a0f5c，2026-09-12 深夜）**
+  - **范围**：feat/chat-tuning-panel 两 commit（2d7cd82..70a0f5c，29 文件 +1891/−89），独立复核（非重…
+- `23:28` **shellTimeout 接线 + 滑杆密度修复（分支 fix/tuning-shell-timeout-and-slider-density @ e057d151，2026-09-12 深夜）**
+  - **背景**：审计 main@70a0f5c 发现 F1（shellTimeoutSec 死旋钮）+ F2（30k 刻度滑杆）→ 用户"处理一下吧" → 一条分…
+
+## 2026-09-13（3 条）
+
+- `07:06` **fix/tuning-shell-timeout-and-slider-density 合并收尾（main @ e057d151，2026-09-13 凌晨）**
+  - **合并**：用户"合并吧" → fetch 复核 remote main=70a0f5c（分支基未动，FF-OK）→ askpass case 模板 + re…
+- `07:11` **shellTimeout 修复真机验证（2026-09-13 用户反馈）**
+  - - 验证点 1（Runtime Limits → Shell 超时默认显示 900）✓ 用户确认
+- `07:35` **shellTimeout 撞 60s 实证成功（2026-09-13）**
+  - **实证**：agent 调用不带 timeout 字段跑 `sleep 75` → `[Command timed out after 60s] (exit …

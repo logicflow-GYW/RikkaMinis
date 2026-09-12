@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-12）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-13）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-09-12，共 41 天
-- 条目总数：914（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
-- 总字符数：1064626 / 总行数：17116
+- 合并范围：2026-08-03 ～ 2026-09-13，共 42 天
+- 条目总数：926（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
+- 总字符数：1082347 / 总行数：17342
 
 ---
 
@@ -17109,6 +17109,232 @@ CI 13:15 创建仍在跑（正常带宽 12min），按惯例不等。ARCHITECTUR
 - 沙箱 JVM 环境更新：/tmp/kotlinc（2.1.0）+/tmp/libs/ 新增 kotlinx-serialization-{json,core}-jvm-1.7.3、jackson-{core,databind,annotations}-2.17.2（jar 不自动恢复，rootfs 重建后需重下）
 - 坑 4：kotlinx jsonPrimitive 后的 `jsonArray.size` 是属性不是函数（`.size()` 编译错）
 - 真机验证清单：①T321 日志 grep inconsistency（用产生思考泄漏的中转站对话）②备份导出→python json 解析 ③其余无回归点（纯诊断+测试）
+
+<!-- 2026-09-12 12:01:05 -->
+## dev-history 文档更新闭环（2026-09-12，main @ 2d7cd82）
+
+- **档案**：914 条 / 41 天（原 882/39，+32 条）/ 1,064,626 字符 / 17,116 行；fences 32 even、outOrder 0、头部占位符已填。挂载版（笔记/RikkaMinis开发档案/）与仓库 docs/dev-history/ 双份一致。
+- **剔除标准（用户确认：剔除与应用开发无关的内容）**，is_relevant() 新增三类：①第三方平台账号与 agent 侧工具封装（render 平台账号 / gcli2api / cf 账号体系 / 权益全量探测）②设备硬件诊断（随身 wifi）③竞品与开源项目源码调研（对比报告 / 参考资料研究结果 / 可吸收清单按 / 源码级调研 / 机型兼容 / 关节——各家报告已在 /var/minis/shared/ 独立成文，不重复进档案）。
+- **关键修正（可复用）**：他仓名（rikkahub / biliroamingx）从「标题含即剔」改为「标题含 + 调研语境词（对比/调研/剖析/关节/横向/源码级）或标题以他仓名开头」才剔。宽匹配曾误杀 RikkaMinis 自身的工作条目——本次救回 4 条历史遗漏：08-04 OpenMinis fork 抽屉、08-08 README 补 RikkaHub credit、08-31 输入框宽度对齐 RikkaHub、09-10 挂载编辑页+输入框高度对齐 rikkahub。判定原则：引用他仓做对标参照的条目属于本仓工作，要留。
+- **仓库同步**：docs/dev-history/{README.md, rikkaminis-dev-history.md, -INDEX.md} 3 文件（+513/−29），README 覆盖范围 882 条→914 条。分支 docs/dev-history-0912 @ 2d7cd82 → refspec 直推 ff 合并 main（merge-base = origin/main = fe39a66，未 rebase）→ 远端分支 delete → ls-remote 复核仅剩 main @ 2d7cd82。
+- **零构建成本确认**：build-apk.yml 的 push paths 门控只有 src/android、src/shared、deps、workflow 自身，docs/ 改动不触发 CI——API 查最新 run #1472 head_sha=fe39a66（docs push 前后不变，无新 run）。
+- **坑**：file_write 建的 .git_askpass.sh 权限 -rw-------，git 报 `cannot exec ...: Permission denied`；需 `chmod +x` 后再走 GIT_ASKPASS 直推。
+- **顺手确认**：release CI run #1472（head fe39a66，P0/P1/P2 那条，用户上次拍板不等）结论 **success**。
+- **脱敏**：103 处替换，验证 NONE clean。新增内容无真实凭据字面量（gsk_/rnd_ 均 0 命中；hf_transcribe 是 python 包名误报；api.groq.com 是公开域名），无需扩 SENSITIVE_PATTERNS。
+
+<!-- 2026-09-12 15:00:59 -->
+## Fork 生态调查完成（2026-09-12，报告 50.7KB / 723 行）
+
+
+**报告**：`/var/minis/mounts/笔记/Fork生态调查报告-2026-09-12.md`（替换 08-11 旧版 `OPENMinisfork调查结果.md`）
+
+**用户纠正（重要）**：用户账号只有 `logicflow-GYW`（主）与 `ri***ow`（小号）两个。上一版按"账号仓库群重叠"把 MZHlongchu / wj5403293 / JcEvoX / xu17699120551-boop / w1394847159 判为自有，**全部错误**。RikkaMinis 的 8 个 fork 全是第三方。
+
+**归属判定法修正（可复用）**：
+- 作者字段**不能**判定 fork 归属——第三方搬运历史会保留原作者字段（hjhjd/VCPMinis 里有 130+ 个 logicflow-GYW 提交，含 `rename project to RikkaMinis`、`Android-only tree`、`WebDAV backup`，全是搬运）。作者字段只能识别"哪些提交是本人写的"。
+- 判定"搬运 vs 独立开发"唯一可靠口径 = `git patch-id --stable`。tree hash 比对会把 cherry-pick 到不同基线的纯搬运误判为"带修改"（实测 JcEvoX 报 419 个 tree 不同，patch-id 真独立只有 2 个）。
+- 三层过滤实测缩水：Filterrr 1015→156、JcEvoX 674→2、MZHlongchu 396→1、qq1433161035 197→3。
+
+**patch-id 脚本坑**：
+1. `git log -p | git patch-id` 输出 `<patch-id> <commit-sha>`，**第一列才是 patch-id**。用 `--format="@@%h"` 会让第二列变 40 个 0，解析逻辑全错。必须用默认 format。
+2. pathspec 必须放 `--` 后：`git log -p <revs> -- :!path`。放 rev 后不加 `--` 报 `ambiguous argument`。
+3. 排除 6 个大资源（jieba.dict / tiktoken / xcstrings / lame-3.100 / talloc / package-lock）避免污染。
+
+**★ 最重要发现：T9 性能基线可从 fork 完整取回**
+- `05a9d111b2`（2026-08-15，本人提交）：`diagnostics/` 下 PerfBaselineCollector / PerfBaselineReport / MemoryPressureTracker / SyntheticWorkload + 4 个测试文件（34 个 JVM 纯逻辑测试）+ 6 个合成负载。规范来源 `balance-point-blueprint.md §T9`。
+- 主仓删除链：`c080d506`(08-27) 删 MemoryPressureTracker+SyntheticWorkload → `a16b797b`(09-10, audit-0909-b19 T9-L5) 删 PerfBaselineCollector+Report → `56795faa`(09-10) 删 CI 的 T9 perf gate step（它 cat 的 report 已被删，只能输出 `summary not found`）。
+- 主仓 diagnostics/ 现有 5 文件是另一套：ContentDiag / HangDetector / LaunchCycleBeacon / PerfLongCtx / StreamPerfMonitor。代码中 grep PerfBaseline 0 命中，仅 docs + dev-history。
+- **代码完整活着在 `JcEvoX/RikkaMinis` 和 `Filterrr/RikkaMinis`**，测试纯 JVM 可直接跑，恢复不需重写。
+
+**`610381aaed`**（skills bundle，2026-08-08，+1465/−106，12 文件）：散落 **4 个 fork**（Filterrr/hjhjd/JcEvoX/MZHlongchu）。功能在主仓以演进形态存在——`github-sync-helper`→`github-ops`、`buildIntegrationStatus` 从 ChatViewModel 拆到 `ChatPromptAndTools.kt`、`vector_index.pkl`(1MB) 已移除。**未丢失**。
+
+**RikkaMinis fork 真独立贡献（patch-id 口径）**：Filterrr 156（+23,683 净行，活跃到今天，Antigravity provider+子代理）、hjhjd 141（+21,915，VCPToolBox+ExecPlane，停 28 天）、qq1433161035 3（−90，只改 build-apk.yml 的 proot 子模块填充）。其余 3 个零独立贡献纯镜像，wj5403293/w1394847159 零提交。
+
+**OpenMinis 上游**：511 fork / 461 零提交 / 46 真改动 / 9 个 ahead>0 的 MZHlongchu+其他。PR 14 个 0 合并、issue 179 open 近一周全 0 reaction、贡献者仅 wsvn53(22 commits)、main 38 提交、停滞 10 天（09-02）。46 个真改动里 Kotlin 方向只有 1 个。最高 star：xiki45 7★（system-assist + 独立 LSPosed 模块 `minis-assist-hook`，重定向 HyperOS 手势唤起，命中用户设备）。
+
+**数据/脚本**（/tmp，随会话消失）：`patchid_verify.py`、`uniq_stat.py`、`fa.py`、`om_cmp.py`、`om_commits.py`、`up_pids.json`、`rk_cmp.json`、`om_cmp.json`。clone 目录 rk-up / rk-{Filterrr,hjhjd,JcEvoX,MZH,qq1,xu1,wj} / om-up / om-{leo,Mika,siu,halv,aba,lun,xiki,scx}。
+
+<!-- 2026-09-12 15:21:35 -->
+## A1 T9 性能基线验证 + 拍板暂缓（2026-09-12 收尾）
+
+
+- **验证实证**：从 `05a9d111b2`（rk-JcEvoX clone）提取 4 生产类（Collector 324/Report 274/Tracker 132/Workload 209 行）+ 4 测试类（618 行）；测试在 `src/test/` 源集。沙箱 2 stub（android.os.Debug + AppLogger，主仓有真身）→ kotlinc 一次编译 0 错 → JUnit **36/36 绿**（Collector 11 + Report 9 + Tracker 6 + Workload 10；commit 消息写 34 少报 2）。
+- **裁定**：MemoryPressureTracker 不取回（MemoryPressureGate 同枚举同阈值 600/800MB 超集替代，有消费方）；Collector/Report/Workload 真缺（现役 5 件套全是单路径 logcat 追踪器，无跨次 JSONL + P95 聚合）。恢复成本 = sed 包名 `com.openminis.app`→`com.rikkaminis.app`。
+- **坑**：commit 声明 "All pure JVM" 只对测试成立——Collector/Tracker 生产类各有 1 处 `Debug.getNativeHeapAllocatedSize()`，单测绕过采样路径所以纯 JVM 可跑。
+- **用户拍板**：暂不做（方案 B+）——backlog.md 第 4 节已记录触发条件（下次跨次运行性能归因时取）+ 挂调用点清单 + ⚠️ 裸恢复会被 dead-code sweep 再删。
+- **A1 收益分析结论（用户问"能得到什么"后）**：现役 logcat 系（[StreamPerf]/[Perf][LongCtx]/[T321]）已覆盖单次运行观测 80%；T9 增量仅"持久化 + P95 聚合"，且有更便宜补法（StreamPerfMonitor 汇总行落盘 + awk）。真实成本大头 = 挂 3-5 个 record 调用点 + 零开销契约，非搬代码本身。
+
+<!-- 2026-09-12 21:19:26 -->
+## 参数化第一批施工中：feat/chat-tuning-panel（2026-09-12 晚）
+
+
+用户拍板"全做"（A+B+C+D+E 全部候选参数化），分两批实施。**第一批 A+D 已完成后进入 CI**：
+
+**分支** `feat/chat-tuning-panel` @ 4956e75（基于 main 2d7cd82），17 文件 +342/−32，CI run **#1473**（in_progress，12min 带宽）。
+
+**第一批 7 条参数**（全部旧硬编码值 → 可调）：scrollNearBottomDp 32 / prewarmRowLimit 16 / codePreviewLines 20 / tablePreviewRows 10 / markdownLineHeightSp 24 / inputMaxLines 6 / sendSwipeThresholdDp 120。
+
+**架构决策（可复用）**：
+- 新参数走 **data/ChatTuningPrefs.kt**（专属 prefs 文件 minis_chat_tuning_prefs，ConcurrencyPrefs 模式）——**不走 appearance_prefs**，因为 config 层（ConfigBuiltins）被纪律禁止 import UI 类；data 包是允许的
+- 无 primed cache：consumers 全有 Context（ChatScreen 用 rememberChatTuning 自带 listener；StreamingMarkdown 用 3 个 compositionLocal；ChatInputArea 传参）
+- prewarm 消费点用**直读 prefs**（collect lambda 闭包捕获陈旧问题）
+- RuntimeLimitsScreen 4 组件 private→internal 供跨屏复用
+- D2（composer 高度模式）**降级不做**：不是值类（两种布局切换），上次已拍板 M3 默认更好；A6 修正为**输入框 maxLines=6**（原报告误写 12，那是工具预览条）
+
+**验证已完成**：scan 5/5、i18n ALL CLEAN（21 键×7 语言）、JVM 4/4（android stub 编译 0 错）、括号配平 9/9、ChatTuningScreen 语法门 0 syntax 错。
+
+**坑记录**：file_write 写 9KB 大文件时偶发把 content 变 offload 引用文本（目标文件只写 162B 引用）——**恢复法**：/var/minis/offloads/tools/file_write_*.txt 里有完整副本，cp 回来即可。file_write 失败后避免同轮并行其他调用。
+
+**待办**：CI 绿 → 报告用户 → 拍板合并（ff）→ 第二批 B+C+E（压缩/记忆/图片/浏览器/shell 参数）。
+
+<!-- 2026-09-12 21:50:57 -->
+## 「负载均衡像回退模式」调查（2026-09-12 晚，进行中）
+
+
+**用户报告**：模型组负载均衡模式「似乎还是回退模式」（同主题第 3 次：08-04 游标修复、09-06 会话级→per-message 修复）。
+
+**代码核查结论（main @ 2d7cd82，全链核对）**：
+- per-message 轮转完整存在（09d39651 @ 09-06；经历 FE-5 搬运/TF-D 架构/包名迁移三次重构**逐行核对无损坏**）
+- 链路：sendMessage/drain → rotateForNewTurn → GroupRouter.nextLoadBalanceMember（锚=_activeEntryId，+1 轮转，跳过不可用）→ 切换 provider + persistBinding
+- fallback 落地同步链完好（AgentLoopEngine 1057-1120：setCurrentProvider + setActiveEntryId + recordResult；更精细版：failedEntryId 取 demote 前的）
+- TF-D 架构（:modelservice 进程）下轮转**可穿透**：ProviderExecutionGateway.buildRequest 带 instance+model 快照；key 由 worker 自读 provider_secrets（WorkerKeyFreshness 防陈旧）
+
+**行为矩阵（轮转 vs 不轮转）**：
+- ✅ 轮转：同一会话第 2+ 条消息、drain 的每条排队消息、冷启动/选组解析（按全局 lastUsedEntryId）
+- ❌ 不轮转（设计）：新会话第一条（无 assistant 守卫）、非组绑定、单成员/单可用成员、**同一条消息内 agent 多轮请求（几十个全打一个）**、retry/rerun/resume、标题生成（用组首成员）
+
+**最可能解释「像回退」**：①用户按「请求级」标准观察后台，而设计是「消息级」轮转（agent 一条消息几十请求全一个成员）②组内只有 1 个可用成员 ③撞上不轮转边角。剩「真 bug」待真机复现排除。
+
+**调试探针（标准手法，可复用）**：
+- 轮转成功日志：`Minis.ChatVMRouting: 🔄LB <label> rotate entry=X -> Y model=Z`（tag=ChatVMRouting，I 级，**无条件进 logcat**——AppLogger.log 里 Log.i 在 enabled 检查之前）
+- 每次 LLM 请求模型：`Minis.Thinking: [resolve.in] model=<m>` / `chat stream offload -> :modelservice provider=.. model=..`（tag=ChatVMStream）
+- **坑**：logcat main 缓冲几分钟就被 T321 冲爆（本次实测 main 只剩 1338 行/几分钟；事件/系统缓冲各不同），**必须实时后台抓取**：
+  `nohup sh -c 'logcat -v time | grep --line-buffered -E "Minis[.](ChatVMRouting|ChatVMStream|ChatViewModel|Thinking|OkHttpNetTrace)" | grep -vE "ToolChain|NativeOffload" > /data/local/tmp/lb_watch2.log' &`
+- 注意 tag 位置：ChatVMRouting/ChatVMStream 在主进程（**会换 pid**），Thinking/OkHttpNetTrace 在 :modelservice —— **别用 --pid 过滤**（会漏），用 tag 白名单。
+
+**设备进程结构（TF-D）**：主进程 com.rikkaminis.app（UI+循环）+ :modelservice（LLM 请求实际发出）+ proot 沙箱进程。应用 1.0.0+1471。
+
+**待办**：用户 3 连发实验（目标会话）+ 组设置截图 → 读探针给结论；若确认为「请求级期望 vs 消息级设计」→ 是否做请求级轮转是产品决策（注意跨成员 prompt 缓存/上下文一致性风险）。
+
+<!-- 2026-09-12 22:13:35 -->
+## 参数化两批全部完成：feat/chat-tuning-panel @ 70a0f5c（2026-09-12 晚）
+
+
+**两批 23 个参数已全部实现并推送**（同一分支两个 commit，一次 CI 覆盖）：
+
+**第一批 @ 4956e75（CI #1473 已绿）**：7 条 UI 手感参数（scrollNearBottomDp/32、prewarmRowLimit/16、codePreviewLines/20、tablePreviewRows/10、markdownLineHeightSp/24、inputMaxLines/6、sendSwipeThresholdDp/120）——新建 data/ChatTuningPrefs.kt（专属 prefs 文件）+ ChatTuningScreen（新设置页）+ rememberChatTuning helper。
+
+**第二批 @ 70a0f5c（21 文件 +1065/−57，CI 已触发）**：16 条预算参数扩展进 **AgentRuntimeLimitsPrefs**（复用现有 prime/cache/注册/UI 栈）：
+- Group5 context/memory：autoCompactMinTailTokens(8000)、autoCompactMinIntervalMin(5)、memoryInjectLines(200)、memoryRollupInjectKb(12)、memorySearchLines(60)、memoryLookbackDays(30)
+- Group6 media/tools：imageMaxPerImageMb(5)、imageMaxTotalMb(25)、imageMaxRequestMb(25)、imageMaxEdgePx(2000)、imageJpegQuality(80)、browserNavTimeoutSec(30)、browserDomStableSec(5)、browserScreenshotQuality(80)、shellOutputKb(128)、shellTimeoutSec(600)
+
+**关键技术决策（可复用）**：
+- 第二批用**同一分支追加 commit**（避免两分支在 ConfigBuiltins/strings 上冲突；一次 CI、一次装包、一次合并）
+- ImageBudget 的 LADDER 改为**派生式**：新纯文件 provider/ImageBudgetLadder.kt `ladderFor(maxEdge, quality)`——**整数因子 (num/den) 避免浮点截断**（2000×0.64f 会=1279 而非 1280）；默认 (2000,80) 逐项复刻旧阶梯（JVM 测试钉住）
+- ContextCompactor 调用点（ChatContextWindowExt）显式传 minTailTokens/minIntervalMs
+- 16 条注册进 ConfigBuiltins runtime.*（re-prime 是**文件级**监听，新键零成本自动覆盖）
+- 消费点全部走静态 getter（引擎/worker 进程由 MinisApp.onCreate 在各进程 prime——manifest 两个 worker 进程都会 prime）
+
+**验证**：scan 5/5、i18n ALL CLEAN（1649 键 ×7 语言一致）、沙箱 JVM **10/10**（AgentRuntimeLimitsPrefsTest 6 + ImageBudgetLadderTest 4，用 android stub 编译 0 错）、括号配平 12/12、符号交叉检查 168 引用 0 缺失。
+
+**重要坑（复发3次）**：file_write 大内容偶发把"[CONTEXT OFFLOADED]…"引用文本写进目标文件（9.3KB/2KB/1.7KB 各一次，offload 副本时有时无）。**恢复法优先级**：①cp /var/minis/offloads/tools/file_write_*.txt ②file_edit 修复（把引用文本 old_string 替换为完整内容——**file_edit 从未失败**，最可靠）③重试。
+
+**待办**：CI 绿 → 真机验证（装包后调各项参数看效果）→ 用户拍板合并 ff → release CI。
+
+<!-- 2026-09-12 22:30:52 -->
+## feat/chat-tuning-panel 合并收尾（main @ 70a0f5c，2026-09-12 晚）
+
+<!-- 2026-09-12 22:4x -->
+
+**审计（合并前用户要求）**：29 文件 +1891/−89 两 commit 全过——①ImageBudget 重构默认 (2000,80) 逐项复刻旧阶梯（整数因子无浮点截断，JVM 钉住）②16 新键 Prefs 全配 MIN/MAX/DEFAULT + prime/save 双侧 coerce，秒→ms 用 *1000L 无溢出、shellTimeout 下限 60s ③ContextCompactor.decide 确有 minTailTokens/minIntervalMs 参数且两调用点显式传 ④MemoryRepository lookback/injectLines 循环外一次读齐 ⑤i18n 102 新键 ×7 语言一致 ⑥prewarmRowLimit 在 collect lambda 直读 prefs 防闭包陈旧 ⑦ConfigBuiltins 16 runtime.* + 7 chat.* 注册，min/max 引用 Prefs 常量单一真相。
+
+**合并**：审计全过 → 用户拍板 → merge-base 验证（origin/main 是分支祖先，FF-OK）→ refspec 直推（2d7cd82..70a0f5c，无 force）→ ls-remote 复核 main=70a0f5c → 远端分支 API DELETE 204 → 终验 ls-remote 仅剩 main → 本地 clone + askpass 已清理。
+
+**release CI**：run 34699476512（head 70a0f5c，in_progress）已触发，**用户未要求等待结论**；新会话可查 https://rikka-ci-bridge.***USER***.workers.dev/status/main。
+
+**非阻塞小疵（不修）**：①2 处 KDoc 仍引用已删除的 `ImageBudget.MAX_REQUEST_BYTES`（编译器不管 KDoc 链接）②ConfigBuiltins 里 memoryLookbackDays 描述写 "memory search scans" 而实际是最近日志注入的回看天数。
+
+**待办**：release CI 绿 → 真机验证（重点：调 chat_scroll_near_bottom_dp / inputMaxLines / 图片 MB 上限看即时生效；Settings→Appearance→Chat Tuning 新页 + Settings→Agent 运行时→运行限制新两组滑杆）→ 用户拍板。
+
+<!-- 2026-09-12 22:55:25 -->
+## chat-tuning-panel 独立审计（main @ 70a0f5c，2026-09-12 深夜）
+
+
+**范围**：feat/chat-tuning-panel 两 commit（2d7cd82..70a0f5c，29 文件 +1891/−89），独立复核（非重复前一会话的合并前审计）。
+
+**验证手段（可复用）**：
+- 沙箱 JVM：3 个测试类 14/14 绿（android stub 编译 0 错）；**自写两个对抗探针**：①ladder 全域 1,993,700 组合（64..20000 edge × 1..100 q）单调性/下限全过 ②**内存版 SharedPreferences 假实现**跑 prefs 回流（prime/save/读回/越界 clamp/脏值 clamp/16 键唯一）全过
+- i18n 脚本：57 新键 ×7 语言全一致、209 个 R.string 引用全存在、无重复键
+- value/min/max 配对脚本：33+7 行滑杆常量全部同行配伍（防复制粘贴错配）
+- Save 参数完整性：33 签名参数全部传齐
+- 删除常量残留：全部是注释/测试注释/他处同名常量（NativeOffload/ShareReceiver 各有自己的 MAX_REQUEST_BYTES/MAX_TOTAL_BYTES）
+
+**★ 发现 1（功能，中）：`runtime.shellTimeoutSec` 是死旋钮——端到端无人消费**
+- 消费点只有 `PersistentShell.executeCommand` 的默认参数（timeout = shellTimeoutSec()*1000L）
+- **唯一调用方 ExecutionCoordinator.executeWithShellRetry 永远显式传 timeout**；其上游两条路径也全部显式：agent 路径 `args.optInt("timeout", 900).coerceIn(1,900)*1000`（ChatShellExecution.kt:83/153/188）、debug RPC 路径默认 60（DebugRPCHandler.kt:750）
+- 即滑块 60..1800 改任何值都不影响任何执行；agent 实际默认仍是 900s，且工具侧 clamp ≤900 使 1800 上限永远不可达
+- 非回归（旧 600_000L 字面量同样是死的），但**新面板/注册表暴露了一个不可能生效的控件**，描述"when a call does not pass its own"也不成立（没有这种调用路径）
+- 修法：a) ChatShellExecution 默认值接 pref（`args.optInt("timeout", AgentRuntimeLimitsPrefs.shellTimeoutSec())`，clamp 需同步放宽才能到 1800）；b) 删旋钮；c) 仅修描述。推荐 a 或 b
+
+**★ 发现 2（性能隐患，中）：新增 2000..32000 滑杆 = 29,999 个 step 刻度**
+- LimitsSliderRow 用 steps=(max-min-1)；M3 1.3.2（BOM 2025.09.00 实查 pom 确认）**每个 tick 每帧一次 drawCircle**（源码：SliderDefaults.Track→drawTrack→tickFractions.forEachIndexed { drawTick }），且 snapValueToTick 每次拖动**线性扫描整个 tick 数组**
+- 旧行最大 983 步；新行：autoCompactMinTailTokens=29,999（30×）、imageMaxEdgePx=3,199、shellTimeoutSec=1,739
+- 机制已从源码查实；可见卡顿程度为推断（沙箱无法跑 Compose），需真机拖一下那条滑杆确认
+- 修法：LimitsSliderRow 大跨度时量化（如 span>600 → ~200 槽位，尾 token 以 ~151 步进），顺带改善 UX（1 token 精度无意义）
+
+**次要（不阻塞）**：①ChatScreen.kt:947 注释说 "appearance_prefs listener" 实为 minis_chat_tuning_prefs ②ConfigBuiltins memoryLookbackDays 描述写 "memory search scans" 实为最近日志注入（loadRecentDailyMemoryFragment）③NativeOffload.kt:22 KDoc `[PersistentShell.MAX_OUTPUT_CHARS]` 悬挂链接（常量已删）④Icons.Outlined.Tune 被 Runtime Limits 与 Chat Tuning 两个入口共用
+
+**其他全干净**：ImageBudgetLadder 默认逐项复刻旧阶梯；消费点绑定（ContextCompactor 两调用点显式传参、MemoryRepository 循环外读齐、prewarm 直读防陈旧闭包、browser 3 处 nav 超时+dom fallback+screenshot 质量）；:modelservice 短命进程（quiescent 即自灭，下请求重启）→ 无 worker 陈旧值问题；备份走 ConfigRegistry 注册表 → 新字段自动携带；re-prime 文件级监听自动覆盖新键
+
+**CI**：分支 CI #34698640593 success；release CI #34699476512（main）**success**（14:42 UTC 完成）。远端 main=70a0f5c、仅剩 main 分支。
+
+<!-- 2026-09-12 23:28:41 -->
+## shellTimeout 接线 + 滑杆密度修复（分支 fix/tuning-shell-timeout-and-slider-density @ e057d151，2026-09-12 深夜）
+
+
+**背景**：审计 main@70a0f5c 发现 F1（shellTimeoutSec 死旋钮）+ F2（30k 刻度滑杆）→ 用户"处理一下吧" → 一条分支修完。
+
+**C1 fix(shell) 6706f3ca**：ChatShellExecution 新增 `resolveShellTimeoutSec(hasExplicit, explicitSec, defaultSec=prefs.shellTimeoutSec())`——显式 timeout 保持 1..900 封顶（`optInt("timeout", 900)` 兜底保畸形值行为不变）；未传 → 读 pref（60..1800）。**SHELL_TIMEOUT_DEFAULT_SEC 600→900**（600 是死的 PersistentShell 字面量；真实生效默认一直是 900，保持未触碰安装零行为变化）。测试：新 ShellTimeoutResolutionTest 4 条 + AgentRuntimeLimitsPrefsTest 改钉 900；7 语言 desc 同步 600→900。
+**C2 fix(settings) c39ff168**：RuntimeLimitsScreen 新增 `sliderStepsFor(min,max)`——span≤1024 保持 1 单位步进（覆盖全部旧行，最宽 983）；更大 span 吸附到 ≤64 槽、槽宽取**最小精确除数**（优先 %5 圆整）：2000..32000→500 步进（59 steps）、800..4000→50（63）、60..1800→30（57）；无可用除数（素数）→ 连续滑杆 steps=0。`steps = remember(min,max){...}`。测试：SliderStepsForTest 5 条（含 span 1..40000 全量扫描 invariant）。
+**C3 docs e057d151**：ChatScreen 注释（实为 minis_chat_tuning_prefs）、NativeOffload 悬挂 KDoc `[PersistentShell.MAX_OUTPUT_CHARS]`、ConfigBuiltins memoryLookbackDays 描述（注入≠搜索）。
+
+**验证**：沙箱抽取两函数逐字编译 + 5 测试类 **23/23 绿**；i18n 复检 ALL CLEAN；XML 7/7 parse；无 600 残留。**CI #1476**（手动派发）**success**，9 条新测试日志实证 PASSED，Publish 步骤正确 skipped。
+**坑（复记）**：build-apk.yml 的 push trigger **只挂 main**——特性分支 CI 必须手动 `sh gh_sync.sh gh-actions-dispatch --repo logicflow-GYW/RikkaMinis --workflow build-apk.yml --ref <branch>`（本次先等自动触发空转 ~1 分钟才想起）。
+**待办**：用户真机验证（分支产物 RikkaMinis-apk，run 34701521852；验证点：默认显示 900、调 120 后 sleep 150 应 120s 超时、拖尾 token 滑杆顺滑吸附 500）→ 拍板合并 ff + release。克隆 /tmp/rikka-fix-tune（本会话活跃，勿动）。
+
+## 2026-09-13
+
+<!-- 2026-09-13 07:06:27 -->
+## fix/tuning-shell-timeout-and-slider-density 合并收尾（main @ e057d151，2026-09-13 凌晨）
+
+
+**合并**：用户"合并吧" → fetch 复核 remote main=70a0f5c（分支基未动，FF-OK）→ askpass case 模板 + refspec 直推 `HEAD:main`（70a0f5c3..e057d151，无 force）→ ls-remote 复核 main=e057d151 → 远端分支 API DELETE **204** → 终验 ls-remote 仅剩 main（+PR refs+tag）。
+
+**release CI**：run 34724466873（#1477，head e057d15）23:05:05Z 自动触发（push main 命中 on.push branches:[main]），**用户拍板不等结论**——新会话可查 https://rikka-ci-bridge.***USER***.workers.dev/status/main 或 API。
+
+**待真机验证**（装 android-latest 或 #1477 产物）：①Runtime Limits → Shell 超时显示 **900** ②调 120 → 跑 `sleep 150` 无 timeout 命令 → ~120s 报超时 ③尾 token 滑杆顺滑吸附 500 倍数。克隆 /tmp/rikka-fix-tune 已完成使命（askpass 已建未清理，下会话勿复用该目录做别的事）。
+
+<!-- 2026-09-13 07:11:30 -->
+## shellTimeout 修复真机验证（2026-09-13 用户反馈）
+
+
+- 验证点 1（Runtime Limits → Shell 超时默认显示 900）✓ 用户确认
+- 验证点 3（尾 token 滑杆顺滑吸附 500）✓ 用户确认
+- 验证点 2 变体实证：用户调到 60 → 终端命令 60s 被掐 = 接线生效（死旋钮已活）
+- 用户反馈"偶尔需要辅助"的长任务场景（终端里等输入/看进度），60s 默认偏紧 → 建议调到 300/600；agent 侧长任务可显式传 timeout（1..900 封顶）不动全局
+- 待澄清：被掐命令类型——若是 ssh/sudo 等需用户输入的交互命令，需查终端页超时来源，看交互等待是否该豁免默认超时（用户尚未回复）
+
+<!-- 2026-09-13 07:35:19 -->
+## shellTimeout 撞 60s 实证成功（2026-09-13）
+
+
+**实证**：agent 调用不带 timeout 字段跑 `sleep 75` → `[Command timed out after 60s] (exit code 124)` 60s 整被掐。用户重启应用后 prime 读盘生效。
+
+**重大教训（测试污染）**：前 4 次测试（sleep 120×2/70/90）全完整跑完，**根因是我每次调用都显式带 `timeout: 300/200` 字段**（工具 schema 可选参数，习惯性填了防卡死）→ `args.has("timeout")` 恒真 → 走显式分支，pref 被绕过。**以后测 pref 路径必须确认 JSON 参数里没有 timeout 键**。应用逻辑无 bug：save() 直设缓存 + ConfigBuiltins 监听 re-prime 双保险，保存即生效。
+
+**连带发现**：DebugRPCHandler.kt:750 终端 shell 路径 `optInt("timeout", 60)` **写死 60 不读 pref**——用户"终端"里撞的 60 很可能是这条写死路径，与 pref 无关（用户终端=DebugRPC 需确认，要调需另改）。
+
+**状态**：pref=60 现会掐掉 agent 所有不带 timeout 的长命令 → 已建议用户调回 300/600（覆盖"偶尔需要辅助"场景），长任务由 agent 单条显式传 timeout（1..900 封顶）。
 
 ---
 
