@@ -1239,6 +1239,18 @@ class OpenAIProvider constructor(
                     "OpenAIProvider",
                     "[T321] usage final: $lastUsageJson"
                 )
+                // [T321-reasoning-consistency] Upstream billed reasoning tokens
+                // but the stream carried no reasoning content: the thinking was
+                // either pasted into `content` (relay translation gap) or
+                // dropped. Classifying this used to require grepping logcat and
+                // comparing two log lines by hand; this makes it ONE line.
+                val billedMissing = ReasoningConsistency.missingReasoningContent(lastUsageJson, reasoningLen)
+                if (billedMissing > 0) {
+                    com.rikkaminis.app.logging.AppLogger.warning(
+                        "OpenAIProvider",
+                        "[T321] inconsistency: upstream billed $billedMissing reasoning tokens but the stream carried 0 reasoning content — thinking may be mixed into content or dropped by the relay",
+                    )
+                }
             }
 
             // T321: stream ended — final tally + warning if we never saw a
