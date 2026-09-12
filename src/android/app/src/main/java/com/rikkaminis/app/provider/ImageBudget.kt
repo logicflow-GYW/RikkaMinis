@@ -2,6 +2,7 @@ package com.rikkaminis.app.provider
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import com.rikkaminis.app.logging.AppLogger
 import java.io.ByteArrayOutputStream
 
@@ -18,8 +19,8 @@ import java.io.ByteArrayOutputStream
  *
  *   1. Composer (ChatViewModel.prepareUserAttachments) — runs the user's
  *      brand-new attachments through [compressUnderBudget] so every part is
- *      ≤ MAX_PER_IMAGE_BYTES, then tallies cumulative bytes and drops the
- *      tail with a Snackbar notice once MAX_TOTAL_BYTES is exceeded.
+ *      ≤ [perImageMaxBytes], then tallies cumulative bytes and drops the
+ *      tail with a Snackbar notice once [messageTotalMaxBytes] is exceeded.
  *   2. Provider boundary (AnthropicProvider / OpenAIProvider) — belt and
  *      braces for history image parts that bypass the composer (e.g. tool
  *      results screenshot bytes, restored sessions, retry-after-edit). Each
@@ -30,11 +31,13 @@ import java.io.ByteArrayOutputStream
  * mirroring the iOS finding in commit b830360.
  */
 object ImageBudget {
-    /** Single image bytes ceiling before re-encode kicks in. */
-    const val MAX_PER_IMAGE_BYTES = 5L * 1024 * 1024
+    /** [feat/chat-tuning-panel-b] Single-image ceiling (user-tunable; default 5 MB). */
+    fun perImageMaxBytes(): Long =
+        AgentRuntimeLimitsPrefs.imageMaxPerImageMb().toLong() * 1024 * 1024
 
-    /** Cumulative inline-image bytes per user message. */
-    const val MAX_TOTAL_BYTES = 25L * 1024 * 1024
+    /** [feat/chat-tuning-panel-b] Per-message image total (user-tunable; default 25 MB). */
+    fun messageTotalMaxBytes(): Long =
+        AgentRuntimeLimitsPrefs.imageMaxTotalMb().toLong() * 1024 * 1024
 
     /**
      * Cumulative inline-image bytes across ALL messages in a single
@@ -45,38 +48,36 @@ object ImageBudget {
      * factory.pub / Anthropic gateways to silently return 200 +
      * empty SSE with `finish_reason=stop`. Eldest images are elided
      * to text placeholders first.
+     * [feat/chat-tuning-panel-b] Ceiling is user-tunable (default 25 MB).
      */
-    const val MAX_REQUEST_BYTES = 25L * 1024 * 1024
+    fun requestMaxBytes(): Long =
+        AgentRuntimeLimitsPrefs.imageMaxRequestMb().toLong() * 1024 * 1024
 
-    /** Default re-encode target longest edge in pixels. */
-    const val MAX_EDGE_PX = 2000
+    /** [feat/chat-tuning-panel-b] Re-encode target edge (user-tunable; default 2000). */
+    fun maxEdgePx(): Int = AgentRuntimeLimitsPrefs.imageMaxEdgePx()
 
-    /** Default re-encode JPEG quality (0-100). */
-    const val JPEG_QUALITY = 80
+    /** [feat/chat-tuning-panel-b] Re-encode quality (user-tunable; default 80). */
+    fun jpegQuality(): Int = AgentRuntimeLimitsPrefs.imageJpegQuality()
 
     private const val TAG = "ImageBudget"
 
     /**
      * (maxEdge, quality) candidates the per-image compressor walks until the
-     * output fits under [MAX_PER_IMAGE_BYTES]. Mirrors the iOS ladder from
+     * output fits under [perImageMaxBytes]. Mirrors the iOS ladder from
      * AIChatViewModel.swift compressedImageDataUnderBudget(...).
+     *
+     * [feat/chat-tuning-panel-b] The ladder is now derived from the
+     * user-tunable edge/quality via [ImageBudgetLadder.ladderFor]; at the
+     * default (2000, 80) it reproduces the exact pre-panel ladder
+     * (2000/80 → 1600/75 → … → 640/45, pinned by a JVM test).
      */
-    private val LADDER: List<Pair<Int, Int>> = listOf(
-        2000 to 80,
-        1600 to 75,
-        1280 to 70,
-        1024 to 65,
-        896 to 55,
-        768 to 50,
-        640 to 45,
-    )
 
     /**
      * Re-encode [input] to a JPEG with max longest edge [maxEdge] at JPEG
      * quality [q]. Returns the original bytes on decode/encode failure
      * (caller's existing payload is always safer than dropping the image).
      */
-    fun compressBytes(input: ByteArray, maxEdge: Int = MAX_EDGE_PX, q: Int = JPEG_QUALITY): ByteArray {
+    fun compressBytes(input: ByteArray, maxEdge: Int = maxEdgePx(), q: Int = jpegQuality()): ByteArray {
         if (input.isEmpty()) return input
         return try {
             // Two-pass decode mirroring PhotosOffloadHandler.copyResized — sampled
@@ -125,11 +126,12 @@ object ImageBudget {
      * Re-encodes from the original bytes on each candidate so the JPEG never
      * compounds artifacts.
      */
-    fun compressUnderBudget(input: ByteArray, targetMaxBytes: Long = MAX_PER_IMAGE_BYTES): ByteArray {
+    fun compressUnderBudget(input: ByteArray, targetMaxBytes: Long = perImageMaxBytes()): ByteArray {
         if (input.size <= targetMaxBytes) return input
         var best: ByteArray = input
         var bestSize = input.size
-        for ((edge, q) in LADDER) {
+        // [feat/chat-tuning-panel-b] Ladder derives from the tuned edge/quality.
+        for ((edge, q) in ImageBudgetLadder.ladderFor(maxEdgePx(), jpegQuality())) {
             val candidate = compressBytes(input, edge, q)
             if (candidate.size < bestSize) {
                 best = candidate
@@ -162,7 +164,7 @@ object ImageBudget {
      * Walk [bytesIn] and produce a budgeted output:
      *  - Each oversize part is run through [compressUnderBudget] first.
      *  - Then cumulative bytes are summed; once the running total would
-     *    exceed [MAX_TOTAL_BYTES] the remaining tail is dropped.
+     *    exceed the per-message total cap the remaining tail is dropped.
      */
     fun applyMessageBudget(bytesIn: List<ByteArray>): BudgetResult {
         if (bytesIn.isEmpty()) return BudgetResult(emptyList(), 0, 0, 0L)
@@ -171,12 +173,12 @@ object ImageBudget {
         var dropped = 0
         var running = 0L
         for (part in bytesIn) {
-            val sized = if (part.size.toLong() > MAX_PER_IMAGE_BYTES) {
+            val sized = if (part.size.toLong() > perImageMaxBytes()) {
                 val c = compressUnderBudget(part)
                 if (c.size != part.size) compressed += 1
                 c
             } else part
-            if (running + sized.size.toLong() > MAX_TOTAL_BYTES) {
+            if (running + sized.size.toLong() > messageTotalMaxBytes()) {
                 dropped += 1
                 continue
             }
@@ -253,7 +255,7 @@ object ImageBudget {
      */
     fun planRequestBudget(
         images: List<BudgetImage>,
-        maxBytes: Long = MAX_REQUEST_BYTES,
+        maxBytes: Long = requestMaxBytes(),
     ): RequestBudgetPlan {
         if (images.isEmpty()) {
             return RequestBudgetPlan(emptySet(), emptyMap(), 0L, 0L, 0, 0)
@@ -267,7 +269,7 @@ object ImageBudget {
             val id = ImagePartId.of(img.data)
             // Per-image cap-clamped size — same ceiling
             // `compressUnderBudget` would have produced if invoked.
-            val effectiveSize = minOf(img.data.size.toLong(), MAX_PER_IMAGE_BYTES)
+            val effectiveSize = minOf(img.data.size.toLong(), perImageMaxBytes())
             if (kept + effectiveSize <= maxBytes) {
                 kept += effectiveSize
             } else {

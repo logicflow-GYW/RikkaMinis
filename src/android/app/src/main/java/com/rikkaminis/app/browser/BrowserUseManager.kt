@@ -22,6 +22,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.core.content.FileProvider
+import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import com.rikkaminis.app.sandbox.PRootKernel
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -46,10 +47,11 @@ class BrowserUseManager(
 ) {
     companion object {
         private const val TAG = "BrowserUseManager"
-        private const val NAVIGATION_TIMEOUT_MS = 30_000L
-        private const val SCREENSHOT_QUALITY = 80        // Explicit screenshot action (iOS: 0.8)
+        // [feat/chat-tuning-panel-b] NAVIGATION_TIMEOUT_MS / SCREENSHOT_QUALITY /
+        // DEFAULT_DOM_STABLE_TIMEOUT_MS are now user-tunable via
+        // AgentRuntimeLimitsPrefs (defaults 30 s / 80 / 5 s, matching the
+        // previous literals).
         private const val SNAPSHOT_QUALITY = 70          // Auto-snapshot after visual-change actions (iOS: 0.7)
-        private const val DEFAULT_DOM_STABLE_TIMEOUT_MS = 5_000
 
         /**
          * Cap full_page screenshot stretched viewport at 32768 px. Above this,
@@ -850,7 +852,7 @@ class BrowserUseManager(
             }
             deferred.complete(Unit)
         }
-        handler.postDelayed(timeoutRunnable, NAVIGATION_TIMEOUT_MS)
+        handler.postDelayed(timeoutRunnable, AgentRuntimeLimitsPrefs.browserNavTimeoutSec() * 1000L)
 
         try {
             deferred.await()
@@ -965,7 +967,7 @@ class BrowserUseManager(
         } ?: return BrowserActionResult.error("Failed to capture screenshot")
 
         val out = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, SCREENSHOT_QUALITY, out)
+        bitmap.compress(Bitmap.CompressFormat.JPEG, AgentRuntimeLimitsPrefs.browserScreenshotQuality(), out)
         val jpegBytes = out.toByteArray()
 
         val file = saveBitmapToFile(bitmap, "screenshot")
@@ -1080,7 +1082,7 @@ class BrowserUseManager(
         }
     }
 
-    private fun saveBitmapToFile(bitmap: Bitmap, prefix: String, quality: Int = SCREENSHOT_QUALITY): File {
+    private fun saveBitmapToFile(bitmap: Bitmap, prefix: String, quality: Int = AgentRuntimeLimitsPrefs.browserScreenshotQuality()): File {
         val filename = "${prefix}_${System.currentTimeMillis()}.jpg"
         val file = File(screenshotsDir, filename)
         file.outputStream().use { out ->
@@ -1533,7 +1535,7 @@ class BrowserUseManager(
             }
             deferred.complete(Unit)
         }
-        handler.postDelayed(timeoutRunnable, NAVIGATION_TIMEOUT_MS)
+        handler.postDelayed(timeoutRunnable, AgentRuntimeLimitsPrefs.browserNavTimeoutSec() * 1000L)
         try { deferred.await() } finally { handler.removeCallbacks(timeoutRunnable) }
         _isLoading.value = false
     }
@@ -1564,7 +1566,7 @@ class BrowserUseManager(
             }
             deferred.complete(Unit)
         }
-        handler.postDelayed(timeoutRunnable, NAVIGATION_TIMEOUT_MS)
+        handler.postDelayed(timeoutRunnable, AgentRuntimeLimitsPrefs.browserNavTimeoutSec() * 1000L)
         try { deferred.await() } finally { handler.removeCallbacks(timeoutRunnable) }
         _isLoading.value = false
     }
@@ -1923,7 +1925,7 @@ class BrowserUseManager(
      * timeout elapses. Matches iOS `wait_for_dom_stable`.
      */
     private suspend fun waitForDomStable(timeoutMs: Int?): BrowserActionResult {
-        val budget = (timeoutMs ?: DEFAULT_DOM_STABLE_TIMEOUT_MS).coerceIn(
+        val budget = (timeoutMs ?: AgentRuntimeLimitsPrefs.browserDomStableSec() * 1000).coerceIn(
             MIN_DOM_STABLE_TIMEOUT_MS, MAX_DOM_STABLE_TIMEOUT_MS,
         )
         val pollInterval = 200L

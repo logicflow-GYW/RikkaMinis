@@ -837,7 +837,8 @@ class ChatViewModel(
     /**
      * Request-level image-budget events (T-request-imgsize). Emitted by
      * [applyRequestImageBudget] when the cumulative history image payload
-     * exceeds [ImageBudget.MAX_REQUEST_BYTES] and older images had to be
+     * exceeds the request-level image budget (ImageBudget.requestMaxBytes())
+     * and older images had to be
      * elided to text placeholders. Distinct from [imageBudgetEvent] so the
      * UI Snackbar can show a different message ("older images compacted")
      * and the two events don't race.

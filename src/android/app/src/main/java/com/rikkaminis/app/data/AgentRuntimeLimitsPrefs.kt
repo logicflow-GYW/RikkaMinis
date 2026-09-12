@@ -143,6 +143,97 @@ object AgentRuntimeLimitsPrefs {
     const val QUEUE_ADMISSION_MAX = 12
     const val QUEUE_ADMISSION_DEFAULT = 6
 
+    // ── Group 5: context & memory budget ─────────────────────────────────
+    // [feat/chat-tuning-panel-b] Previously hard-coded in ContextCompactor /
+    // MemoryRepository; the literals become the DEFAULTs below.
+
+    const val KEY_AUTO_COMPACT_MIN_TAIL_TOKENS = "autoCompactMinTailTokens"
+    const val KEY_AUTO_COMPACT_MIN_INTERVAL_MIN = "autoCompactMinIntervalMin"
+    const val KEY_MEMORY_INJECT_LINES = "memoryInjectLines"
+    const val KEY_MEMORY_ROLLUP_INJECT_KB = "memoryRollupInjectKb"
+    const val KEY_MEMORY_SEARCH_LINES = "memorySearchLines"
+    const val KEY_MEMORY_LOOKBACK_DAYS = "memoryLookbackDays"
+
+    const val COMPACT_TAIL_TOKENS_MIN = 2000
+    const val COMPACT_TAIL_TOKENS_MAX = 32000
+    const val COMPACT_TAIL_TOKENS_DEFAULT = 8000
+
+    const val COMPACT_INTERVAL_MIN_MIN = 1
+    const val COMPACT_INTERVAL_MAX_MIN = 60
+    const val COMPACT_INTERVAL_DEFAULT_MIN = 5
+
+    const val MEMORY_INJECT_LINES_MIN = 50
+    const val MEMORY_INJECT_LINES_MAX = 500
+    const val MEMORY_INJECT_LINES_DEFAULT = 200
+
+    const val MEMORY_ROLLUP_KB_MIN = 4
+    const val MEMORY_ROLLUP_KB_MAX = 64
+    const val MEMORY_ROLLUP_KB_DEFAULT = 12
+
+    const val MEMORY_SEARCH_LINES_MIN = 20
+    const val MEMORY_SEARCH_LINES_MAX = 200
+    const val MEMORY_SEARCH_LINES_DEFAULT = 60
+
+    const val MEMORY_LOOKBACK_DAYS_MIN = 7
+    const val MEMORY_LOOKBACK_DAYS_MAX = 180
+    const val MEMORY_LOOKBACK_DAYS_DEFAULT = 30
+
+    // ── Group 6: media & tool budgets ────────────────────────────────────
+    // [feat/chat-tuning-panel-b] Previously hard-coded in ImageBudget /
+    // BrowserUseManager / PersistentShell; the literals become the DEFAULTs.
+
+    const val KEY_IMAGE_MAX_PER_IMAGE_MB = "imageMaxPerImageMb"
+    const val KEY_IMAGE_MAX_TOTAL_MB = "imageMaxTotalMb"
+    const val KEY_IMAGE_MAX_REQUEST_MB = "imageMaxRequestMb"
+    const val KEY_IMAGE_MAX_EDGE_PX = "imageMaxEdgePx"
+    const val KEY_IMAGE_JPEG_QUALITY = "imageJpegQuality"
+
+    const val IMAGE_PER_IMAGE_MB_MIN = 1
+    const val IMAGE_PER_IMAGE_MB_MAX = 20
+    const val IMAGE_PER_IMAGE_MB_DEFAULT = 5
+
+    const val IMAGE_TOTAL_MB_MIN = 5
+    const val IMAGE_TOTAL_MB_MAX = 100
+    const val IMAGE_TOTAL_MB_DEFAULT = 25
+
+    const val IMAGE_REQUEST_MB_MIN = 5
+    const val IMAGE_REQUEST_MB_MAX = 100
+    const val IMAGE_REQUEST_MB_DEFAULT = 25
+
+    const val IMAGE_EDGE_MIN = 800
+    const val IMAGE_EDGE_MAX = 4000
+    const val IMAGE_EDGE_DEFAULT = 2000
+
+    const val IMAGE_QUALITY_MIN = 40
+    const val IMAGE_QUALITY_MAX = 100
+    const val IMAGE_QUALITY_DEFAULT = 80
+
+    const val KEY_BROWSER_NAV_TIMEOUT_SEC = "browserNavTimeoutSec"
+    const val KEY_BROWSER_DOM_STABLE_SEC = "browserDomStableSec"
+    const val KEY_BROWSER_SCREENSHOT_QUALITY = "browserScreenshotQuality"
+    const val KEY_SHELL_OUTPUT_KB = "shellOutputKb"
+    const val KEY_SHELL_TIMEOUT_SEC = "shellTimeoutSec"
+
+    const val BROWSER_NAV_TIMEOUT_MIN_SEC = 10
+    const val BROWSER_NAV_TIMEOUT_MAX_SEC = 120
+    const val BROWSER_NAV_TIMEOUT_DEFAULT_SEC = 30
+
+    const val BROWSER_DOM_STABLE_MIN_SEC = 1
+    const val BROWSER_DOM_STABLE_MAX_SEC = 60
+    const val BROWSER_DOM_STABLE_DEFAULT_SEC = 5
+
+    const val BROWSER_SCREENSHOT_Q_MIN = 40
+    const val BROWSER_SCREENSHOT_Q_MAX = 100
+    const val BROWSER_SCREENSHOT_Q_DEFAULT = 80
+
+    const val SHELL_OUTPUT_KB_MIN = 32
+    const val SHELL_OUTPUT_KB_MAX = 512
+    const val SHELL_OUTPUT_KB_DEFAULT = 128
+
+    const val SHELL_TIMEOUT_MIN_SEC = 60
+    const val SHELL_TIMEOUT_MAX_SEC = 1800
+    const val SHELL_TIMEOUT_DEFAULT_SEC = 600
+
     // ── primed cache ─────────────────────────────────────────────────────
 
     @Volatile private var cachedMaxTurns = TURNS_DEFAULT
@@ -162,6 +253,24 @@ object AgentRuntimeLimitsPrefs {
     @Volatile private var cachedFirstChunkProxySec = FIRST_CHUNK_PROXY_DEFAULT_SEC
     @Volatile private var cachedProviderSlots = PROVIDER_SLOTS_DEFAULT
     @Volatile private var cachedQueueAdmission = QUEUE_ADMISSION_DEFAULT
+
+    // [feat/chat-tuning-panel-b] Group 5 + 6 caches.
+    @Volatile private var cachedCompactTailTokens = COMPACT_TAIL_TOKENS_DEFAULT
+    @Volatile private var cachedCompactIntervalMin = COMPACT_INTERVAL_DEFAULT_MIN
+    @Volatile private var cachedMemoryInjectLines = MEMORY_INJECT_LINES_DEFAULT
+    @Volatile private var cachedMemoryRollupKb = MEMORY_ROLLUP_KB_DEFAULT
+    @Volatile private var cachedMemorySearchLines = MEMORY_SEARCH_LINES_DEFAULT
+    @Volatile private var cachedMemoryLookbackDays = MEMORY_LOOKBACK_DAYS_DEFAULT
+    @Volatile private var cachedImagePerImageMb = IMAGE_PER_IMAGE_MB_DEFAULT
+    @Volatile private var cachedImageTotalMb = IMAGE_TOTAL_MB_DEFAULT
+    @Volatile private var cachedImageRequestMb = IMAGE_REQUEST_MB_DEFAULT
+    @Volatile private var cachedImageEdgePx = IMAGE_EDGE_DEFAULT
+    @Volatile private var cachedImageJpegQuality = IMAGE_QUALITY_DEFAULT
+    @Volatile private var cachedBrowserNavTimeoutSec = BROWSER_NAV_TIMEOUT_DEFAULT_SEC
+    @Volatile private var cachedBrowserDomStableSec = BROWSER_DOM_STABLE_DEFAULT_SEC
+    @Volatile private var cachedBrowserScreenshotQ = BROWSER_SCREENSHOT_Q_DEFAULT
+    @Volatile private var cachedShellOutputKb = SHELL_OUTPUT_KB_DEFAULT
+    @Volatile private var cachedShellTimeoutSec = SHELL_TIMEOUT_DEFAULT_SEC
     @Volatile private var primed = false
 
     private fun prefs(context: Context): SharedPreferences =
@@ -203,6 +312,39 @@ object AgentRuntimeLimitsPrefs {
             .coerceIn(PROVIDER_SLOTS_MIN, PROVIDER_SLOTS_MAX)
         cachedQueueAdmission = p.getInt(KEY_QUEUE_ADMISSION, QUEUE_ADMISSION_DEFAULT)
             .coerceIn(QUEUE_ADMISSION_MIN, QUEUE_ADMISSION_MAX)
+        // [feat/chat-tuning-panel-b] Group 5 + 6.
+        cachedCompactTailTokens = p.getInt(KEY_AUTO_COMPACT_MIN_TAIL_TOKENS, COMPACT_TAIL_TOKENS_DEFAULT)
+            .coerceIn(COMPACT_TAIL_TOKENS_MIN, COMPACT_TAIL_TOKENS_MAX)
+        cachedCompactIntervalMin = p.getInt(KEY_AUTO_COMPACT_MIN_INTERVAL_MIN, COMPACT_INTERVAL_DEFAULT_MIN)
+            .coerceIn(COMPACT_INTERVAL_MIN_MIN, COMPACT_INTERVAL_MAX_MIN)
+        cachedMemoryInjectLines = p.getInt(KEY_MEMORY_INJECT_LINES, MEMORY_INJECT_LINES_DEFAULT)
+            .coerceIn(MEMORY_INJECT_LINES_MIN, MEMORY_INJECT_LINES_MAX)
+        cachedMemoryRollupKb = p.getInt(KEY_MEMORY_ROLLUP_INJECT_KB, MEMORY_ROLLUP_KB_DEFAULT)
+            .coerceIn(MEMORY_ROLLUP_KB_MIN, MEMORY_ROLLUP_KB_MAX)
+        cachedMemorySearchLines = p.getInt(KEY_MEMORY_SEARCH_LINES, MEMORY_SEARCH_LINES_DEFAULT)
+            .coerceIn(MEMORY_SEARCH_LINES_MIN, MEMORY_SEARCH_LINES_MAX)
+        cachedMemoryLookbackDays = p.getInt(KEY_MEMORY_LOOKBACK_DAYS, MEMORY_LOOKBACK_DAYS_DEFAULT)
+            .coerceIn(MEMORY_LOOKBACK_DAYS_MIN, MEMORY_LOOKBACK_DAYS_MAX)
+        cachedImagePerImageMb = p.getInt(KEY_IMAGE_MAX_PER_IMAGE_MB, IMAGE_PER_IMAGE_MB_DEFAULT)
+            .coerceIn(IMAGE_PER_IMAGE_MB_MIN, IMAGE_PER_IMAGE_MB_MAX)
+        cachedImageTotalMb = p.getInt(KEY_IMAGE_MAX_TOTAL_MB, IMAGE_TOTAL_MB_DEFAULT)
+            .coerceIn(IMAGE_TOTAL_MB_MIN, IMAGE_TOTAL_MB_MAX)
+        cachedImageRequestMb = p.getInt(KEY_IMAGE_MAX_REQUEST_MB, IMAGE_REQUEST_MB_DEFAULT)
+            .coerceIn(IMAGE_REQUEST_MB_MIN, IMAGE_REQUEST_MB_MAX)
+        cachedImageEdgePx = p.getInt(KEY_IMAGE_MAX_EDGE_PX, IMAGE_EDGE_DEFAULT)
+            .coerceIn(IMAGE_EDGE_MIN, IMAGE_EDGE_MAX)
+        cachedImageJpegQuality = p.getInt(KEY_IMAGE_JPEG_QUALITY, IMAGE_QUALITY_DEFAULT)
+            .coerceIn(IMAGE_QUALITY_MIN, IMAGE_QUALITY_MAX)
+        cachedBrowserNavTimeoutSec = p.getInt(KEY_BROWSER_NAV_TIMEOUT_SEC, BROWSER_NAV_TIMEOUT_DEFAULT_SEC)
+            .coerceIn(BROWSER_NAV_TIMEOUT_MIN_SEC, BROWSER_NAV_TIMEOUT_MAX_SEC)
+        cachedBrowserDomStableSec = p.getInt(KEY_BROWSER_DOM_STABLE_SEC, BROWSER_DOM_STABLE_DEFAULT_SEC)
+            .coerceIn(BROWSER_DOM_STABLE_MIN_SEC, BROWSER_DOM_STABLE_MAX_SEC)
+        cachedBrowserScreenshotQ = p.getInt(KEY_BROWSER_SCREENSHOT_QUALITY, BROWSER_SCREENSHOT_Q_DEFAULT)
+            .coerceIn(BROWSER_SCREENSHOT_Q_MIN, BROWSER_SCREENSHOT_Q_MAX)
+        cachedShellOutputKb = p.getInt(KEY_SHELL_OUTPUT_KB, SHELL_OUTPUT_KB_DEFAULT)
+            .coerceIn(SHELL_OUTPUT_KB_MIN, SHELL_OUTPUT_KB_MAX)
+        cachedShellTimeoutSec = p.getInt(KEY_SHELL_TIMEOUT_SEC, SHELL_TIMEOUT_DEFAULT_SEC)
+            .coerceIn(SHELL_TIMEOUT_MIN_SEC, SHELL_TIMEOUT_MAX_SEC)
         primed = true
     }
 
@@ -231,6 +373,42 @@ object AgentRuntimeLimitsPrefs {
     fun firstChunkProxySec(): Int = cachedFirstChunkProxySec
     fun providerSlots(): Int = cachedProviderSlots
     fun queueAdmission(): Int = cachedQueueAdmission
+
+    // ── Group 5: context & memory budget [feat/chat-tuning-panel-b] ──────
+    /** Auto-compaction keeps at least this many tail tokens uncompacted. */
+    fun autoCompactMinTailTokens(): Int = cachedCompactTailTokens
+    /** Minimum interval between auto-compactions, in minutes. */
+    fun autoCompactMinIntervalMin(): Int = cachedCompactIntervalMin
+    /** Max daily-log lines injected into the system prompt. */
+    fun memoryInjectLines(): Int = cachedMemoryInjectLines
+    /** Max rollup bytes injected into the system prompt, in KB. */
+    fun memoryRollupInjectKb(): Int = cachedMemoryRollupKb
+    /** Max matches returned by a single memory search. */
+    fun memorySearchLines(): Int = cachedMemorySearchLines
+    /** How far back memory search looks, in days. */
+    fun memoryLookbackDays(): Int = cachedMemoryLookbackDays
+
+    // ── Group 6: media & tool budgets [feat/chat-tuning-panel-b] ─────────
+    /** Per-image byte ceiling before elision, in MB. */
+    fun imageMaxPerImageMb(): Int = cachedImagePerImageMb
+    /** Per-user-message image byte total, in MB. */
+    fun imageMaxTotalMb(): Int = cachedImageTotalMb
+    /** Whole-request image byte ceiling, in MB. */
+    fun imageMaxRequestMb(): Int = cachedImageRequestMb
+    /** Longest edge images are downscaled to, in px. */
+    fun imageMaxEdgePx(): Int = cachedImageEdgePx
+    /** JPEG re-encode quality for images. */
+    fun imageJpegQuality(): Int = cachedImageJpegQuality
+    /** Browser page-load timeout, in seconds. */
+    fun browserNavTimeoutSec(): Int = cachedBrowserNavTimeoutSec
+    /** Browser DOM-stable wait default, in seconds. */
+    fun browserDomStableSec(): Int = cachedBrowserDomStableSec
+    /** Browser screenshot JPEG quality. */
+    fun browserScreenshotQuality(): Int = cachedBrowserScreenshotQ
+    /** Shell output capture ceiling, in KB. */
+    fun shellOutputKb(): Int = cachedShellOutputKb
+    /** Default shell command timeout, in seconds. */
+    fun shellTimeoutSec(): Int = cachedShellTimeoutSec
 
     /**
      * Transient auto-retry delays in seconds, derived from the retry count.
@@ -264,6 +442,23 @@ object AgentRuntimeLimitsPrefs {
         firstChunkProxySec: Int? = null,
         providerSlots: Int? = null,
         queueAdmission: Int? = null,
+        // [feat/chat-tuning-panel-b] Group 5 + 6.
+        autoCompactMinTailTokens: Int? = null,
+        autoCompactMinIntervalMin: Int? = null,
+        memoryInjectLines: Int? = null,
+        memoryRollupInjectKb: Int? = null,
+        memorySearchLines: Int? = null,
+        memoryLookbackDays: Int? = null,
+        imageMaxPerImageMb: Int? = null,
+        imageMaxTotalMb: Int? = null,
+        imageMaxRequestMb: Int? = null,
+        imageMaxEdgePx: Int? = null,
+        imageJpegQuality: Int? = null,
+        browserNavTimeoutSec: Int? = null,
+        browserDomStableSec: Int? = null,
+        browserScreenshotQuality: Int? = null,
+        shellOutputKb: Int? = null,
+        shellTimeoutSec: Int? = null,
     ) {
         val p = prefs(context)
         val e = p.edit()
@@ -319,6 +514,71 @@ object AgentRuntimeLimitsPrefs {
         queueAdmission?.let {
             cachedQueueAdmission = it.coerceIn(QUEUE_ADMISSION_MIN, QUEUE_ADMISSION_MAX)
             e.putInt(KEY_QUEUE_ADMISSION, cachedQueueAdmission)
+        }
+        // [feat/chat-tuning-panel-b] Group 5 + 6.
+        autoCompactMinTailTokens?.let {
+            cachedCompactTailTokens = it.coerceIn(COMPACT_TAIL_TOKENS_MIN, COMPACT_TAIL_TOKENS_MAX)
+            e.putInt(KEY_AUTO_COMPACT_MIN_TAIL_TOKENS, cachedCompactTailTokens)
+        }
+        autoCompactMinIntervalMin?.let {
+            cachedCompactIntervalMin = it.coerceIn(COMPACT_INTERVAL_MIN_MIN, COMPACT_INTERVAL_MAX_MIN)
+            e.putInt(KEY_AUTO_COMPACT_MIN_INTERVAL_MIN, cachedCompactIntervalMin)
+        }
+        memoryInjectLines?.let {
+            cachedMemoryInjectLines = it.coerceIn(MEMORY_INJECT_LINES_MIN, MEMORY_INJECT_LINES_MAX)
+            e.putInt(KEY_MEMORY_INJECT_LINES, cachedMemoryInjectLines)
+        }
+        memoryRollupInjectKb?.let {
+            cachedMemoryRollupKb = it.coerceIn(MEMORY_ROLLUP_KB_MIN, MEMORY_ROLLUP_KB_MAX)
+            e.putInt(KEY_MEMORY_ROLLUP_INJECT_KB, cachedMemoryRollupKb)
+        }
+        memorySearchLines?.let {
+            cachedMemorySearchLines = it.coerceIn(MEMORY_SEARCH_LINES_MIN, MEMORY_SEARCH_LINES_MAX)
+            e.putInt(KEY_MEMORY_SEARCH_LINES, cachedMemorySearchLines)
+        }
+        memoryLookbackDays?.let {
+            cachedMemoryLookbackDays = it.coerceIn(MEMORY_LOOKBACK_DAYS_MIN, MEMORY_LOOKBACK_DAYS_MAX)
+            e.putInt(KEY_MEMORY_LOOKBACK_DAYS, cachedMemoryLookbackDays)
+        }
+        imageMaxPerImageMb?.let {
+            cachedImagePerImageMb = it.coerceIn(IMAGE_PER_IMAGE_MB_MIN, IMAGE_PER_IMAGE_MB_MAX)
+            e.putInt(KEY_IMAGE_MAX_PER_IMAGE_MB, cachedImagePerImageMb)
+        }
+        imageMaxTotalMb?.let {
+            cachedImageTotalMb = it.coerceIn(IMAGE_TOTAL_MB_MIN, IMAGE_TOTAL_MB_MAX)
+            e.putInt(KEY_IMAGE_MAX_TOTAL_MB, cachedImageTotalMb)
+        }
+        imageMaxRequestMb?.let {
+            cachedImageRequestMb = it.coerceIn(IMAGE_REQUEST_MB_MIN, IMAGE_REQUEST_MB_MAX)
+            e.putInt(KEY_IMAGE_MAX_REQUEST_MB, cachedImageRequestMb)
+        }
+        imageMaxEdgePx?.let {
+            cachedImageEdgePx = it.coerceIn(IMAGE_EDGE_MIN, IMAGE_EDGE_MAX)
+            e.putInt(KEY_IMAGE_MAX_EDGE_PX, cachedImageEdgePx)
+        }
+        imageJpegQuality?.let {
+            cachedImageJpegQuality = it.coerceIn(IMAGE_QUALITY_MIN, IMAGE_QUALITY_MAX)
+            e.putInt(KEY_IMAGE_JPEG_QUALITY, cachedImageJpegQuality)
+        }
+        browserNavTimeoutSec?.let {
+            cachedBrowserNavTimeoutSec = it.coerceIn(BROWSER_NAV_TIMEOUT_MIN_SEC, BROWSER_NAV_TIMEOUT_MAX_SEC)
+            e.putInt(KEY_BROWSER_NAV_TIMEOUT_SEC, cachedBrowserNavTimeoutSec)
+        }
+        browserDomStableSec?.let {
+            cachedBrowserDomStableSec = it.coerceIn(BROWSER_DOM_STABLE_MIN_SEC, BROWSER_DOM_STABLE_MAX_SEC)
+            e.putInt(KEY_BROWSER_DOM_STABLE_SEC, cachedBrowserDomStableSec)
+        }
+        browserScreenshotQuality?.let {
+            cachedBrowserScreenshotQ = it.coerceIn(BROWSER_SCREENSHOT_Q_MIN, BROWSER_SCREENSHOT_Q_MAX)
+            e.putInt(KEY_BROWSER_SCREENSHOT_QUALITY, cachedBrowserScreenshotQ)
+        }
+        shellOutputKb?.let {
+            cachedShellOutputKb = it.coerceIn(SHELL_OUTPUT_KB_MIN, SHELL_OUTPUT_KB_MAX)
+            e.putInt(KEY_SHELL_OUTPUT_KB, cachedShellOutputKb)
+        }
+        shellTimeoutSec?.let {
+            cachedShellTimeoutSec = it.coerceIn(SHELL_TIMEOUT_MIN_SEC, SHELL_TIMEOUT_MAX_SEC)
+            e.putInt(KEY_SHELL_TIMEOUT_SEC, cachedShellTimeoutSec)
         }
         e.apply()
     }

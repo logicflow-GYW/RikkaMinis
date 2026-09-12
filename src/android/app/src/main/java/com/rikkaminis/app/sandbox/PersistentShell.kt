@@ -2,6 +2,7 @@ package com.rikkaminis.app.sandbox
 
 import android.content.Context
 import android.util.Log
+import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -48,8 +49,9 @@ class PersistentShell(
 
         // Hard cap on command output before truncation to guard against
         // runaway commands flooding the agent context window and app memory.
-        // Mirrors RikkaHub's WorkspaceShellRunner.MAX_OUTPUT_CHARS.
-        private const val MAX_OUTPUT_CHARS = 128 * 1024
+        // Mirrors RikkaHub's WorkspaceShellRunner.MAX_OUTPUT_CHARS, but
+        // [feat/chat-tuning-panel-b] now user-tunable via
+        // AgentRuntimeLimitsPrefs.shellOutputKb() (default 128 KB).
     }
 
     @Volatile
@@ -400,7 +402,7 @@ class PersistentShell(
      * Delegates to the top-level [internalTruncateOutput] for JVM testability.
      */
     private fun CommandCallback.appendOutput(text: String) {
-        if (internalTruncateOutput(output, text, MAX_OUTPUT_CHARS)) {
+        if (internalTruncateOutput(output, text, AgentRuntimeLimitsPrefs.shellOutputKb() * 1024)) {
             truncated = true
         }
     }
@@ -415,7 +417,8 @@ class PersistentShell(
      */
     suspend fun executeCommand(
         command: String,
-        timeout: Long = 600_000L,
+        // [feat/chat-tuning-panel-b] Default is user-tunable (60..1800 s).
+        timeout: Long = AgentRuntimeLimitsPrefs.shellTimeoutSec() * 1000L,
         /** `(line, isPartial)` — see [CommandCallback.lineCallback]. */
         lineCallback: ((String, Boolean) -> Unit)? = null,
         memoryMonitor: ((Long) -> Unit)? = null,

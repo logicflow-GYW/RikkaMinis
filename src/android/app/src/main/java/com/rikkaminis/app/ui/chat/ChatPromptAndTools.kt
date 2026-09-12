@@ -57,7 +57,7 @@ internal fun ChatViewModel.streamFlushThrottleMs(len: Int): Long = when {
 /**
  * Apply the request-level image-byte budget to a fully-resolved
  * message list before handing it to a provider. Images that don't
- * fit under [ImageBudget.MAX_REQUEST_BYTES] (oldest first) are
+ * fit under the request-level image-byte budget (ImageBudget.requestMaxBytes()) (oldest first) are
  * replaced in-place with a text placeholder that, when the original
  * bytes were offloaded to disk, points the model back to the linux
  * path so it can re-fetch via `read_image` if needed. Images that

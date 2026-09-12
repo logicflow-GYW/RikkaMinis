@@ -1,6 +1,7 @@
 package com.rikkaminis.app.ui.chat
 
 import com.rikkaminis.app.logging.AppLogger
+import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import com.rikkaminis.app.data.ContextPolicy
 import com.rikkaminis.app.conversation.ContextCompactor
 import com.rikkaminis.app.R
@@ -110,6 +111,9 @@ internal fun ChatViewModel.maybeTriggerAutoCompact() {
         tailTokens = tail,
         isCompacting = false, // already gated above
         lastAutoCompactAtMs = lastAutoCompactAtMs,
+        // [feat/chat-tuning-panel-b] User-tunable (defaults: 8000 tokens / 5 min).
+        minTailTokens = AgentRuntimeLimitsPrefs.autoCompactMinTailTokens().toLong(),
+        minIntervalMs = AgentRuntimeLimitsPrefs.autoCompactMinIntervalMin() * 60_000L,
     )
     if (decision != ContextCompactor.Decision.AUTO_COMPACT) {
         // Log at debug-relevant level only when we were actually close —
@@ -164,6 +168,9 @@ internal suspend fun ChatViewModel.maybeAutoCompactInLoop(
         tailTokens = tail,
         isCompacting = false,
         lastAutoCompactAtMs = lastAutoCompactAtMs,
+        // [feat/chat-tuning-panel-b] User-tunable (defaults: 8000 tokens / 5 min).
+        minTailTokens = AgentRuntimeLimitsPrefs.autoCompactMinTailTokens().toLong(),
+        minIntervalMs = AgentRuntimeLimitsPrefs.autoCompactMinIntervalMin() * 60_000L,
     )
     if (decision != ContextCompactor.Decision.AUTO_COMPACT) {
         AppLogger.info(ChatViewModel.TAG, "[AutoCompactLoop] skipped: $decision tokens=$lastContextTokens window=$contextWindow tail=$tail")

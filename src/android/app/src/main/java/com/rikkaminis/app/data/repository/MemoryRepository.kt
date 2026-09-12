@@ -1,6 +1,7 @@
 package com.rikkaminis.app.data.repository
 
 import android.util.Log
+import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -25,7 +26,8 @@ class MemoryRepository(private val memoryDir: File) {
         // memory_rollup tool (see MemoryRollupEngine.ROLLUP_FILE).
         private const val ROLLUP_FILE =
             com.rikkaminis.app.workspace.MemoryRollupEngine.ROLLUP_FILE
-        private const val MAX_INJECT_LINES = 200
+        // [feat/chat-tuning-panel-b] MAX_INJECT_LINES → user-tunable
+        // (AgentRuntimeLimitsPrefs.memoryInjectLines(), default 200).
         // [fix/send-prompt-bloat] Byte ceiling on the MEMORY-ROLLUP.md system-
         // prompt injection. The rollup grows monotonically with every
         // memory_rollup run (it reached 227 KB / ~1.6 K lines on 2026-08-27),
@@ -36,7 +38,8 @@ class MemoryRepository(private val memoryDir: File) {
         // MAX_OUTPUT_BYTES (memory_get). 12 KB ≈ 4 K CJK chars ≈ 4 K tokens;
         // the tail is kept preferentially because rollups append
         // chronologically (newest distilled rules live at the end).
-        private const val MAX_ROLLUP_INJECT_BYTES = 12 * 1024
+        // [feat/chat-tuning-panel-b] MAX_ROLLUP_INJECT_BYTES → user-tunable
+        // (AgentRuntimeLimitsPrefs.memoryRollupInjectKb(), default 12 KB).
         // memory_get full-dump (no keywords): cap at 500 lines — matches iOS
         // `maxTotalLines = 500` in AIChatViewModel+MemoryTools.swift.
         private const val MAX_DUMP_LINES = 500
@@ -44,8 +47,10 @@ class MemoryRepository(private val memoryDir: File) {
         // (timestamp-delimited memory_write blocks); Android's keyword search
         // is line-based with ±2 context windows, so we keep the same algorithm
         // and align on the 60 magnitude as the line budget.
-        private const val MAX_SEARCH_LINES = 60
-        private const val MAX_LOOKBACK_DAYS = 30
+        // [feat/chat-tuning-panel-b] MAX_SEARCH_LINES → user-tunable
+        // (AgentRuntimeLimitsPrefs.memorySearchLines(), default 60).
+        // [feat/chat-tuning-panel-b] MAX_LOOKBACK_DAYS → user-tunable
+        // (AgentRuntimeLimitsPrefs.memoryLookbackDays(), default 30).
         private const val MAX_RECENT_FILES = 3
         // [T-memory-get-truncate-android] Hard byte ceiling on memory_get
         // output. Line caps alone (MAX_DUMP_LINES / MAX_SEARCH_LINES) don't
@@ -186,7 +191,8 @@ class MemoryRepository(private val memoryDir: File) {
         // Two separate caps so a full dump (no keywords) gets enough room to
         // show recent daily logs while keyword searches stay tight enough not
         // to flood agent context.
-        val lineCap = if (keywordList.isEmpty()) MAX_DUMP_LINES else MAX_SEARCH_LINES
+        // [feat/chat-tuning-panel-b] Search cap is user-tunable now.
+        val lineCap = if (keywordList.isEmpty()) MAX_DUMP_LINES else AgentRuntimeLimitsPrefs.memorySearchLines()
 
         for ((label, file) in filesToSearch) {
             if (totalLines >= lineCap || byteCapHit) break
@@ -312,7 +318,8 @@ class MemoryRepository(private val memoryDir: File) {
 
     /**
      * [fix/send-prompt-bloat] Load the MEMORY-ROLLUP.md distilled-rule index
-     * for system-prompt injection, capped at [MAX_ROLLUP_INJECT_BYTES].
+     * for system-prompt injection, capped at the user-tunable rollup byte
+     * ceiling (AgentRuntimeLimitsPrefs.memoryRollupInjectKb, default 12 KB).
      *
      * The rollup is append-ordered (each `memory_rollup` run appends a new
      * "## Rollup <date>" block) so the NEWEST distilled rules live at the END;
@@ -325,13 +332,15 @@ class MemoryRepository(private val memoryDir: File) {
         val content = try { rollupFile.readText() } catch (_: Exception) { return null }
         if (content.isEmpty()) return null
         val bytes = content.toByteArray(Charsets.UTF_8)
-        if (bytes.size <= MAX_ROLLUP_INJECT_BYTES) return content
+        // [feat/chat-tuning-panel-b] Cap is user-tunable (KB → bytes here).
+        val maxRollupInjectBytes = AgentRuntimeLimitsPrefs.memoryRollupInjectKb() * 1024
+        if (bytes.size <= maxRollupInjectBytes) return content
         // Drop the oldest bytes (keep the tail = newest distilled rules) —
         // after advancing the cut point to a valid UTF-8 boundary so a multi-
         // byte code point split in half never decodes into U+FFFD replacement
         // chars at the head of the injected fragment.
-        val headDropped = rollupTailAtBoundary(bytes, bytes.size - MAX_ROLLUP_INJECT_BYTES)
-        return "... (older rollup rules truncated: tail of $MAX_ROLLUP_INJECT_BYTES bytes kept, use memory_get to search)\n" +
+        val headDropped = rollupTailAtBoundary(bytes, bytes.size - maxRollupInjectBytes)
+        return "... (older rollup rules truncated: tail of $maxRollupInjectBytes bytes kept, use memory_get to search)\n" +
             headDropped
     }
 
@@ -373,7 +382,11 @@ class MemoryRepository(private val memoryDir: File) {
         val fragments = mutableListOf<String>()
         var dayOffset = 0
 
-        while (fragments.size < MAX_RECENT_FILES && dayOffset < MAX_LOOKBACK_DAYS) {
+        // [feat/chat-tuning-panel-b] Both knobs read once per call so a
+        // mid-loop change can't make the walk inconsistent.
+        val lookbackDays = AgentRuntimeLimitsPrefs.memoryLookbackDays()
+        val injectLines = AgentRuntimeLimitsPrefs.memoryInjectLines()
+        while (fragments.size < MAX_RECENT_FILES && dayOffset < lookbackDays) {
             val date = Date(now.time - dayOffset.toLong() * 86400_000L)
             val dateStr = dateFmt.format(date)
             val file = File(memoryDir, "$dateStr.md")
@@ -384,15 +397,15 @@ class MemoryRepository(private val memoryDir: File) {
                     val lines = content.lines()
                     // [P1-append] Entries are now appended (newest at bottom).
                     // Reverse so system prompt gets newest-first, matching old prepend.
-                    val preview = lines.takeLast(MAX_INJECT_LINES).reversed().joinToString("\n")
+                    val preview = lines.takeLast(injectLines).reversed().joinToString("\n")
                     val label = when (dayOffset) {
                         0 -> "Today's"
                         1 -> "Yesterday's"
                         else -> dateStr
                     }
                     var entry = "$label daily log ($dateStr.md):\n$preview"
-                    if (lines.size > MAX_INJECT_LINES) {
-                        entry += "\n... (${lines.size - MAX_INJECT_LINES} more lines, use memory_get to search)"
+                    if (lines.size > injectLines) {
+                        entry += "\n... (${lines.size - injectLines} more lines, use memory_get to search)"
                     }
                     fragments.add(entry)
                 }

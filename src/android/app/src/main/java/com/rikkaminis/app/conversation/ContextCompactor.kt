@@ -28,6 +28,10 @@ import com.rikkaminis.app.data.model.LLMMessage
 object ContextCompactor {
 
     /** 两次自动压缩的最小间隔：防同一会话高频压缩风暴。 */
+    // [feat/chat-tuning-panel-b] Defaults below remain the fallback when a
+    // caller doesn't pass the knobs explicitly; ChatContextWindowExt now
+    // supplies the user-tunable values from AgentRuntimeLimitsPrefs.
+    // Keep these literals in sync with the Prefs defaults (8000 / 5 min).
     const val DEFAULT_AUTO_COMPACT_MIN_INTERVAL_MS = 5 * 60 * 1000L
 
     /**

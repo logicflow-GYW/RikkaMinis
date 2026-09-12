@@ -276,6 +276,120 @@ internal object ConfigBuiltins {
             prefs = limits, key = L.KEY_QUEUE_ADMISSION,
             defaultValue = L.QUEUE_ADMISSION_DEFAULT, minValue = L.QUEUE_ADMISSION_MIN, maxValue = L.QUEUE_ADMISSION_MAX,
         ))
+        // ── [feat/chat-tuning-panel-b] Group 5: context & memory budget ──
+        r.register(PrefsIntField(
+            path = "runtime.autoCompactMinTailTokens",
+            displayName = "Auto-compact tail-token floor",
+            description = "Auto-compaction never cuts below this many tail tokens — the newest conversation stays verbatim. Higher = more context kept per compaction, larger requests. Default 8000.",
+            prefs = limits, key = L.KEY_AUTO_COMPACT_MIN_TAIL_TOKENS,
+            defaultValue = L.COMPACT_TAIL_TOKENS_DEFAULT, minValue = L.COMPACT_TAIL_TOKENS_MIN, maxValue = L.COMPACT_TAIL_TOKENS_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.autoCompactMinIntervalMin",
+            displayName = "Auto-compact minimum interval (min)",
+            description = "Minimum minutes between auto-compactions of the same conversation. Default 5.",
+            prefs = limits, key = L.KEY_AUTO_COMPACT_MIN_INTERVAL_MIN,
+            defaultValue = L.COMPACT_INTERVAL_DEFAULT_MIN, minValue = L.COMPACT_INTERVAL_MIN_MIN, maxValue = L.COMPACT_INTERVAL_MAX_MIN,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.memoryInjectLines",
+            displayName = "Memory: daily-log injection lines",
+            description = "Max daily-log lines injected into the system prompt. Default 200.",
+            prefs = limits, key = L.KEY_MEMORY_INJECT_LINES,
+            defaultValue = L.MEMORY_INJECT_LINES_DEFAULT, minValue = L.MEMORY_INJECT_LINES_MIN, maxValue = L.MEMORY_INJECT_LINES_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.memoryRollupInjectKb",
+            displayName = "Memory: rollup injection ceiling (KB)",
+            description = "Byte ceiling for MEMORY-ROLLUP.md content injected into the system prompt; older rules are truncated from the head. Default 12.",
+            prefs = limits, key = L.KEY_MEMORY_ROLLUP_INJECT_KB,
+            defaultValue = L.MEMORY_ROLLUP_KB_DEFAULT, minValue = L.MEMORY_ROLLUP_KB_MIN, maxValue = L.MEMORY_ROLLUP_KB_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.memorySearchLines",
+            displayName = "Memory: search result lines",
+            description = "Max lines a keyword memory search returns. Default 60.",
+            prefs = limits, key = L.KEY_MEMORY_SEARCH_LINES,
+            defaultValue = L.MEMORY_SEARCH_LINES_DEFAULT, minValue = L.MEMORY_SEARCH_LINES_MIN, maxValue = L.MEMORY_SEARCH_LINES_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.memoryLookbackDays",
+            displayName = "Memory: search lookback (days)",
+            description = "How many days back memory search scans for recent daily logs. Default 30.",
+            prefs = limits, key = L.KEY_MEMORY_LOOKBACK_DAYS,
+            defaultValue = L.MEMORY_LOOKBACK_DAYS_DEFAULT, minValue = L.MEMORY_LOOKBACK_DAYS_MIN, maxValue = L.MEMORY_LOOKBACK_DAYS_MAX,
+        ))
+        // ── [feat/chat-tuning-panel-b] Group 6: media & tool budgets ──────
+        r.register(PrefsIntField(
+            path = "runtime.imageMaxPerImageMb",
+            displayName = "Images: per-image ceiling (MB)",
+            description = "Single-image byte ceiling before re-encode kicks in. Default 5.",
+            prefs = limits, key = L.KEY_IMAGE_MAX_PER_IMAGE_MB,
+            defaultValue = L.IMAGE_PER_IMAGE_MB_DEFAULT, minValue = L.IMAGE_PER_IMAGE_MB_MIN, maxValue = L.IMAGE_PER_IMAGE_MB_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.imageMaxTotalMb",
+            displayName = "Images: per-message total (MB)",
+            description = "Cumulative inline-image bytes allowed per user message; the tail is dropped past this. Default 25.",
+            prefs = limits, key = L.KEY_IMAGE_MAX_TOTAL_MB,
+            defaultValue = L.IMAGE_TOTAL_MB_DEFAULT, minValue = L.IMAGE_TOTAL_MB_MIN, maxValue = L.IMAGE_TOTAL_MB_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.imageMaxRequestMb",
+            displayName = "Images: per-request ceiling (MB)",
+            description = "Whole-request image byte ceiling across history; oldest images are elided past this. Default 25.",
+            prefs = limits, key = L.KEY_IMAGE_MAX_REQUEST_MB,
+            defaultValue = L.IMAGE_REQUEST_MB_DEFAULT, minValue = L.IMAGE_REQUEST_MB_MIN, maxValue = L.IMAGE_REQUEST_MB_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.imageMaxEdgePx",
+            displayName = "Images: re-encode max edge (px)",
+            description = "Longest edge images are downscaled to before encoding. Default 2000.",
+            prefs = limits, key = L.KEY_IMAGE_MAX_EDGE_PX,
+            defaultValue = L.IMAGE_EDGE_DEFAULT, minValue = L.IMAGE_EDGE_MIN, maxValue = L.IMAGE_EDGE_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.imageJpegQuality",
+            displayName = "Images: JPEG quality",
+            description = "JPEG re-encode quality (0-100). Default 80.",
+            prefs = limits, key = L.KEY_IMAGE_JPEG_QUALITY,
+            defaultValue = L.IMAGE_QUALITY_DEFAULT, minValue = L.IMAGE_QUALITY_MIN, maxValue = L.IMAGE_QUALITY_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.browserNavTimeoutSec",
+            displayName = "Browser: page-load timeout (s)",
+            description = "How long a browser navigation may run before it fails. Default 30.",
+            prefs = limits, key = L.KEY_BROWSER_NAV_TIMEOUT_SEC,
+            defaultValue = L.BROWSER_NAV_TIMEOUT_DEFAULT_SEC, minValue = L.BROWSER_NAV_TIMEOUT_MIN_SEC, maxValue = L.BROWSER_NAV_TIMEOUT_MAX_SEC,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.browserDomStableSec",
+            displayName = "Browser: DOM-stable wait default (s)",
+            description = "Default wait for the page DOM to settle before reading it, when a call does not pass its own timeout. Default 5.",
+            prefs = limits, key = L.KEY_BROWSER_DOM_STABLE_SEC,
+            defaultValue = L.BROWSER_DOM_STABLE_DEFAULT_SEC, minValue = L.BROWSER_DOM_STABLE_MIN_SEC, maxValue = L.BROWSER_DOM_STABLE_MAX_SEC,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.browserScreenshotQuality",
+            displayName = "Browser: screenshot quality",
+            description = "JPEG quality for browser screenshots (0-100). Default 80.",
+            prefs = limits, key = L.KEY_BROWSER_SCREENSHOT_QUALITY,
+            defaultValue = L.BROWSER_SCREENSHOT_Q_DEFAULT, minValue = L.BROWSER_SCREENSHOT_Q_MIN, maxValue = L.BROWSER_SCREENSHOT_Q_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.shellOutputKb",
+            displayName = "Shell: output capture ceiling (KB)",
+            description = "Max shell output kept per command; the rest is truncated with a marker. Default 128.",
+            prefs = limits, key = L.KEY_SHELL_OUTPUT_KB,
+            defaultValue = L.SHELL_OUTPUT_KB_DEFAULT, minValue = L.SHELL_OUTPUT_KB_MIN, maxValue = L.SHELL_OUTPUT_KB_MAX,
+        ))
+        r.register(PrefsIntField(
+            path = "runtime.shellTimeoutSec",
+            displayName = "Shell: default command timeout (s)",
+            description = "Default timeout for shell commands when a call does not pass its own. Default 600.",
+            prefs = limits, key = L.KEY_SHELL_TIMEOUT_SEC,
+            defaultValue = L.SHELL_TIMEOUT_DEFAULT_SEC, minValue = L.SHELL_TIMEOUT_MIN_SEC, maxValue = L.SHELL_TIMEOUT_MAX_SEC,
+        ))
     }
 
     // -- Master switch surface (read-only via the registry; UI toggles it) --
