@@ -605,6 +605,56 @@ internal fun LimitsSwitchRow(
     }
 }
 
+// [fix/tuning-slider-density] Keep every pre-existing tuning row on its
+// original 1-unit stepping (the widest shipped span is 983), and collapse
+// only wider spans.
+internal const val MAX_FINE_SPAN = 1024
+/** Slot target for wide spans; the actual count is `span / width`. */
+internal const val WIDE_TARGET_SLOTS = 64
+/** Below this many slots a wide span falls back to a continuous slider. */
+internal const val MIN_SLIDE_SLOTS = 16
+
+/**
+ * [fix/tuning-slider-density] Tick count for [Slider]'s `steps` parameter.
+ *
+ * Material3 draws one tick shape per step on EVERY frame of a drag and
+ * linearly scans all of them per pointer move, so `steps = span - 1` on the
+ * widest tuning rows was heavy: the 2000..32000 token row would draw
+ * ~30 000 circles per frame (shipped maximum before this fix: 983 steps,
+ * which stayed affordable).
+ *
+ * Spans up to [MAX_FINE_SPAN] keep exact 1-unit stepping; wider spans snap
+ * to ≈[WIDE_TARGET_SLOTS] slots. The slot width is chosen as the smallest
+ * exact divisor of the span (preferring a round multiple of 5), so dragged
+ * values stay nice: 2000..32000 lands on 500-token steps, 800..4000 on
+ * 50-px steps, 60..1800 on 30-s steps. Spans with no usable divisor fall
+ * back to a continuous slider (0): no ticks, no scan cost.
+ */
+internal fun sliderStepsFor(min: Int, max: Int): Int {
+    val span = max - min
+    if (span <= 1) return 0
+    if (span <= MAX_FINE_SPAN) return span - 1
+    val start = (span + WIDE_TARGET_SLOTS - 1) / WIDE_TARGET_SLOTS
+    // Slots = span / width; requiring MIN_SLIDE_SLOTS slots caps the scan.
+    val scanLimit = span / MIN_SLIDE_SLOTS
+    var width = start
+    var firstDivisor = -1
+    var roundDivisor = -1
+    while (width <= scanLimit) {
+        if (span % width == 0) {
+            if (firstDivisor < 0) firstDivisor = width
+            if (width % 5 == 0) {
+                roundDivisor = width
+                break
+            }
+        }
+        width++
+    }
+    val pick = if (roundDivisor > 0) roundDivisor else firstDivisor
+    if (pick <= 0) return 0
+    return span / pick - 1
+}
+
 /**
  * One slider row: title, optional description (the DETAIL the user asked to
  * keep off the Settings list and INSIDE this page), current value on the
@@ -657,7 +707,7 @@ internal fun LimitsSliderRow(
             value = value.toFloat(),
             onValueChange = { onCommit(it.toInt()) },
             valueRange = min.toFloat()..max.toFloat(),
-            steps = (max - min - 1).coerceAtLeast(0),
+            steps = remember(min, max) { sliderStepsFor(min, max) },
         )
         if (showDivider) {
             Box(
