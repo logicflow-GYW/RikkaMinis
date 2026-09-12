@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-10）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-12）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-09-10，共 39 天
-- 条目总数：882（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
-- 总字符数：1034727 / 总行数：16702
+- 合并范围：2026-08-03 ～ 2026-09-12，共 41 天
+- 条目总数：914（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
+- 总字符数：1064626 / 总行数：17116
 
 ---
 
@@ -204,6 +204,26 @@ GitHub API 未认证限流 60/h，排障时容易耗尽；用 `$GITHUB_TOKEN` �
 - 分支 feat/test-backlog-version-sync 保留（已合并）。
 
 ## 2026-08-04
+
+<!-- 2026-08-04 04:49:13 -->
+## OpenMinis fork — RikkaHub 风格左滑历史对话抽屉（2026-08-04 完成）
+
+
+分支 `feat/chat-history-drawer`（3 个提交 09bb392/80d73af/eb4893d），CI 全绿（30850745470、30851428249）。
+
+### 功能
+ChatScreen 外包 `ModalNavigationDrawer`（左边缘右滑 或 汉堡按钮打开），抽屉 = 精简会话历史列表。汉堡按钮从 onBack 改为开抽屉；系统返回键先关抽屉再 pop 会话。点击会话/New Chat/Settings 导航并关抽屉；当前会话高亮；长按删除（确认对话框，清理走 ChatViewModelStore.release + SessionBadgeStore.clear）。
+
+### 实现要点
+- 新文件 `ui/chat/ChatHistoryDrawer.kt`：直接收集 `ChatRepository.observeSessions()`（同一 Room flow，**不建第二个 SessionListViewModel**，避免重复跑 deleteEmptySessions 清理）。过滤无标题/无预览/未 pin 的 draft 行。`LazyColumn` 必须 `weight(1f)`（否则占满 maxHeight 把 footer 挤出屏）。
+- SessionListScreen 的 `datePeriod/groupSessionsByDate/relativeDate/categoryStyle/DatePeriod/CategoryStyle` 从 private 改 internal 供复用（单一事实源）。
+- `ModalDrawerSheet` 自带 DrawerDefaults.windowInsets，**不要**再手动 statusBarsPadding（会双重内边距，80d73af 修复）。
+- material3 1.4（BOM 2025.09.00）抽屉 API 已稳定，无需 OptIn；material-icons-extended 已依赖，Settings 图标可用。
+- 手势安全：ModalNavigationDrawer 只拦截**左边缘起始**的拖动，不影响聊天内容横向滚动。
+- README "App changes" 已加条目。
+
+### 待办
+- 未合并 main（发布 build 只对 main push 触发）。用户确认后合并即自动发版 android-latest。
 
 <!-- 2026-08-04 05:23:11 -->
 ## OpenMinis fork — UX polish 批量改动（2026-08-04，分支 feat/ux-polish）
@@ -1018,22 +1038,6 @@ CI 绿后按 git 安全约定等用户确认再 ff 合并 main（触发主构建
 - 决定：交付物改为标准 `.md` 文件，内含 mermaid 代码块，由用户导入 GitHub/Obsidian/Notion/VS Code 等自行渲染
 
 （项目本地 clone：/tmp/rikkaminis2，main @ 7b24b24，中文 README 已通读，源码已逐层精读。）
-
-<!-- 2026-08-05 02:23:23 -->
-## RikkaMinis vs OpenMinis 仓库对比报告（2026-08-05）
-
-
-用户要求对比官方 OpenMinis 与自己 fork RikkaMinis，报告已生成：/var/minis/workspace/OpenMinis-vs-RikkaMinis-对比报告.md（中文，9 节）。
-
-### 关键发现（数据均实测）
-- **两仓库提交历史零共有**：RikkaMinis 31 提交 vs OpenMinis 12 提交，merge-base 不存在 → fork 历史被整体 squash 重写，非标准继承。对比只能做树级（git diff 两棵树即可，无需共有祖先）。
-- upstream main = 9cf3a85（v1.10 分支），官方仓库是**只读镜像不接受 PR**（commit 3b9015e 明说）。
-- RikkaMinis 删掉 src/ios/ 全部（~96 万行）+ deps/ish、lame、ffmpeg-patch；保留 android + shared；997 删 / 62 改 / 32 增，1091 文件 +9728/−960310。
-- 上游**无任何 CI workflow**；fork 有 build-apk.yml（NDK r28 源码编 proot → 全量单测 → 签名 → 发布 android-latest）+ sync-upstream.yml。
-- 版本：上游 0.20-preview/20；fork 0.22-preview，CI versionCode=220000000+run。
-- src/android 99 文件与上游不同（79 .kt + 12 .xml）；Kotlin 602→610 文件，53.5万→58万行。
-- fork 独有功能：本地备份 JSON + WebDAV 远程备份、聊天历史抽屉、可定制 … 菜单、草稿持久化、模型组拖拽排序、RootfsUsageScanner 真实占用统计、8 个新 JVM 测试。
-- 同步方式：git rebase upstream/main（勿 merge）+ scripts/sync_official_binaries.sh 刷新 vendored 的 pty_bridge/crash_handler/jieba。
 
 <!-- 2026-08-05 07:48:03 -->
 ## RikkaMinis 功能完整性审计报告（2026-08-05）
@@ -3846,6 +3850,27 @@ PRootKernel.kt / PersistentShell.kt / ShellExecutor.kt / TerminalSession.kt / Sh
 **已推送** GIT_ASKPASS 临时脚本(推完 rm) origin URL 保持纯净。CI workflow_dispatch 已触发（ref=fix/drag-stop-disengage-follow）。
 
 **验证清单**（待装包）：①流式结束翻上历史不拽回 ②FAB跳底仍有效 ③看历史agent后台跑不被拽 ④翻顶发新消息自动跳底。
+
+<!-- 2026-08-08 03:00:37 -->
+## README 补充 RikkaHub credit — 扩写 UI 与交互逻辑来源（2026-08-08）
+
+
+用户提出：README 只把 RikkaHub 归为"交互设计（三个 UI 元素）"，但 UI 与交互逻辑的灵感实际都来自 RikkaHub，应一并 credit。
+
+### 核对（写前核验，用户要求）
+- clone rikkahub/rikkahub 实测：**许可证 = AGPL-3.0**（LICENSE 文件 GNU AGPL v3 / 2007-11-19，与 GitHub API 一致）
+- UI 组件真实存在：`ui/pages/chat/` 下 ChatDrawer.kt（历史抽屉）/ ChatList.kt（消息流）/ ChatPage.kt / ConversationList.kt / HistoryPage.kt
+- ChatList.kt 有 ArrowDown01/ArrowUp01（消息流跟随按钮）import——正是滚动修复参考的"单一跟随源"交互逻辑实物
+- Features 明确 Material You 设计、多 provider、proot workspace，与借鉴方向吻合
+
+### 改动（commit b55c0c0，纯文档，已推 main）
+1. 开头一句：`交互设计（聊天历史抽屉、极简顶栏、精简设置）` → `UI 与交互逻辑，包括聊天历史抽屉、极简顶栏、消息流布局，以及消息流跟随、输入栏聚焦这类交互行为`
+2. 致谢段新增：`**交互参考 — RikkaHub**（AGPL-3.0），为聊天 UI 与交互逻辑提供设计灵感（借鉴灵感，非代码复制）` — 中英文 README 各一次
+
+### 关键点
+- **README.md / README_EN.md 不在 CI 触发路径**（build-apk.yml push paths 仅 src/android/** src/shared/** deps/** .github/workflows/build-apk.yml）→ 纯文档 push **不触发构建**，纠正了此前"会触发"的错误说法
+- RikkaHub 是灵感参考（非代码复制），不改项目许可证（GPL-3.0，AGPL 与 GPL 兼容引用 OK）；不写进 THIRD_PARTY_LICENSES.md（那清单列捆绑的第三方许可证，RikkaHub 未捆绑）
+- 推送用临时 set-url 内嵌 $GITHUB_TOKEN，推完还原纯净 origin URL，token 不落盘
 
 <!-- 2026-08-08 03:17:15 -->
 ## RikkaMinis provider 行内星标改造 — 已合并 main（2026-08-08）
@@ -13589,6 +13614,20 @@ main 从 ea096be 推进到 d49235c（A→B→C→D 四 commit 依次 ff），rel
 
 ## 2026-08-31
 
+<!-- 2026-08-31 00:21:59 -->
+## 输入框宽度对齐 RikkaHub（2026-08-31）
+
+
+用户反馈 RikkaMinis 聊天输入框比 RikkaHub 的窄，要求调成 RikkaHub 的宽度。
+
+根因：RikkaMinis 输入卡片水平内边距是 12dp，而消息列表用的是 16dp gutter——列表和输入框骑在两套不同的"轨道"上，视觉上输入框比聊天内容窄。RikkaHub 的 ChatInput 外层是 `padding(horizontal = 8.dp)`，但其消息列表 `contentPadding = PaddingValues(16.dp)`，输入框本身 `.fillMaxWidth()`，两者都吃 16dp 的列表边距，所以视觉宽度一致。
+
+改法：ChatScreen.kt 里 ChatInputArea 的输入区 Column 外层 `padding(horizontal = 12.dp)` → `16.dp`，与消息列表 16dp 对齐；同时把悬浮的 slash/mention 菜单面板外层 padding 也 12→16，避免它们比输入框宽出 4dp 悬边。
+
+- 分支 fix/composer-width-align-rikkahub → commit 7c6d0a64，1 文件 3 处（+7/-3），CI run 33320349446 success（head_sha 核实一致），ff 合并 main，远端+本地分支已删。
+- 用户拍板：合并后不等 release CI，直接收尾。
+- 可复用：调 UI 对齐问题先对齐"两套边距基准"，找同类元素（popup/panel）一起改，避免只改主体留下悬边不一致。
+
 <!-- 2026-08-31 13:03:22 -->
 ## 吸收开源 Agent 生态三件套之 ①③ 落地（2026-08-31）
 
@@ -16633,6 +16672,20 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 
 **教训**：「测试复刻了形状」≠「生产代码被验证」——抽取生产源文本执行 + 用严格消费者当判据，是在无法整文件编译时的最强替代。
 
+<!-- 2026-09-10 12:03:59 -->
+## 挂载编辑页名称提示修复 + 输入框高度对齐 rikkahub（2026-09-10 下午）
+
+<!-- 2026-09-10 12:10 -->
+**用户拍板**：本会话收尾，验证工序交下个会话。交接文档 /var/minis/shared/composer-mount-ui-fix-handoff.md。
+
+**分支 A fix/mount-detail-name-hint @ 4ce5712（8 文件）**：编辑挂载页「挂载名称」下方提示复用了新增 sheet 的文案（"将作为 /var/minis/mounts/ 下的文件夹名"），对已存在挂载不成立。新增 `mount_detail_name_hint`（"挂载路径：/var/minis/mounts/%1$s" 实时更新）+ 顺手修真 bug：rename() 对重名返回 false 但旧 UI 照常 onBack = 静默失败，新增 `mount_detail_name_duplicate` 前置拦截（7 语言）。CI run 34435058378（派发时 in_progress）。
+
+**分支 B fix/composer-height-parity @ 1f2c249（仅 ChatInputArea.kt）**：用户要输入框高度对标 rikkahub、明确不要其右侧全屏展开小框图标。设备取证：rikkahub 卡片 114dp（文本行 M3 56dp 垂直居中）；RikkaMinis 文本行 a11y 实测 48dp（EditText 节点 132px@2.75），文字被 7dp contentPadding 顶在顶部。改动：删 M3 OutlinedTextFieldDefaults.DecorationBox → 显式 `Box(heightIn(min=56.dp), CenterStart){ innerTextField() }`；按钮行 vertical 10dp→4dp 防卡片膨胀（目标 ≈116dp 对标 114dp）。未加 placeholder/全屏图标。kotlinc 语法门 0 错、scan 5/5。CI run 34435518559。
+
+**取证手法（可复用）**：a11y `ui screenshot`（540px 缩放图）→ `android-shizuku-cli exec cp` 到 Documents/笔记（= /var/minis/mounts/笔记 可见）→ PIL 分带扫描定位卡片/文本行/图标行；a11y `ui dump` 的节点 bounds 是布局真实坐标（EditText 节点、按钮触达目标 48dp）；密度 440 → 2.75px/dp。rikkahub 源码取证：material3 1.3.2 源码 jar（dl.google.com）确认 ContainerHeight=56dp、TextFieldDefaults.MinHeight=56dp。
+
+**M3 版本事实**：BOM 2025.09.00 → material3 1.3.2；OutlinedTextFieldLayout 的 defaultMinSize(56dp) 只在完整 OutlinedTextField 合成里有，直接用 DecorationBox 时行高由 contentPadding+文本推算。
+
 <!-- 2026-09-10 12:34:12 -->
 ## 两分支合并前检查 + 64 字符边界修复 + 合并 main（2026-09-10 下午，main @ a3fbf44）
 
@@ -16695,6 +16748,367 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 **合并**：分支 CI #1458 success（head 09f040e3，12min）→ refspec 直推 main（478ae1e..09f040e，ff）→ 远端分支 API DELETE 204 → release CI #1459（34444151734）触发，**结论未等**（用户拍板合并后收尾，新会话查 bridge /status/main）→ 本地 worktree /tmp/rikka-ui 已删。
 
 **真机验证清单（用户装 android-latest = main @ 09f040e 的包）**：①挂载详情页无「挂载名称」字段、屏幕只显示一次名称+路径（HeaderCard）②写权限开关+保存按钮仍工作 ③聊天输入框回到旧版（48dp 行、文字靠上、按钮行 10dp）④新增挂载对话框不受影响。
+
+<!-- 2026-09-10 15:08:16 -->
+## dev-history 重建 882 条 + 小号同步机制实测通过（2026-09-10 下午收尾，主仓 main @ 68f5715）
+
+
+**① 文档更新**：rebuild_dev_history.py + sanitize → 882 条 / 39 天 / fences 32 even / outOrder 0 → 复制进主仓 docs/dev-history/（+113/−4）→ README 869→882（上次没跟上）→ 分支 docs/dev-history-0910 push → ff 合并 main @ 68f5715 → push（docs/ 不在 build-apk.yml paths 门控内，不触发 CI）→ 远端分支 API DELETE 204 → 本地 clone 已清。挂载笔记版同步更新（/var/minis/mounts/笔记/RikkaMinis开发档案/）。
+
+**② 小号同步机制实测（重点）**：主号 main @ 09f040e（mount 分支合并后），小号 main @ 0c943c6 → 手动派发 sync-fork-main.yml。**坑：gh_sync.sh gh-actions-dispatch 对该 workflow 无输出不生效**（输出为空且 runs 列表无新增），改用裸 curl POST dispatch（HTTP 204）成功。sync run 34447652762 **success** → 小号 main @ **1b117712** = merge commit（parents: 0c943c62 + 09f040e3）→ delta 三要素全保留（MINIS_APP_ID_OVERRIDE 行 / com.rikkaminis.app.lab 注解 / versionNameSuffix 锚点）→ mount 改动实入小号树（MountedFoldersStore.kt rename() 已删除）→ 末尾自动派发构建 **run 34447672017**（head 1b117712ff44，in_progress 用户拍板不等）。
+
+**收尾状态**：小号构建结论未等，新会话可查 API run 34447672017 或小号 release 资产刷新确认；主仓 main 已含 dev-history 更新（68f5715）。
+
+## 2026-09-11
+
+<!-- 2026-09-11 00:44:52 -->
+## Obsidian 式插件系统评估：不做（2026-09-11）
+
+
+用户问「给 RikkaMinis 做 Obsidian 那样的插件系统是否值得」。按一阶门/二阶门评估后拍板**不做**：
+- 一阶门不过：skills + MCP + shell 已覆盖全部扩展需求，插件系统唯一新增 = UI 级集成，而具体用例为零
+- 深层论据：扩展的消费者是 agent 不是人 → 插件形态应是「指令+工具」（SKILL.md+CLI/MCP），不是代码钩子；现有三层就是插件系统，只是不长 Obsidian 的样
+- 二阶门代价：7 层交互边（运行时/API桥接/生命周期/权限/分发/UI/验证）；对照历史——单字段同步都翻车 6 次，插件 API 是几千个永久兼容"字段"；且与激进重构节奏冲突（API 冻结拖累重构自由）
+- 信任模型：Obsidian 插件最坏搞坏笔记，RikkaMinis 插件带 shell+Shizuku 权限最坏搞坏设备
+
+**重提触发条件**（三个同时或其一成熟时）：①出现 skill/MCP 真做不了的具体 UI 级需求 ②有第三方想不 fork 扩展 ③核心 API 长期无破坏性重构。
+**便宜替代**：skill 注册表（浏览/安装/更新/版本化），已在备份设计清单里（"技能排序，待注册表化"）。
+
+<!-- 2026-09-11 09:43:10 -->
+## 2026-09-11 09:43:10
+
+用户对「Provider 多密钥轮换」功能提出两点：①修掉梳理时发现的边界 bug ②该功能无任何 UI 说明，用户自己都不知道存在，要求加上。
+
+**合并**：分支 CI #34550804420 success → ff 直推 main 7cf6caa0（release run 34551727338 in_progress，按惯例未等）→ 远端分支 DELETE 204。
+
+**改动（12 文件 +38/−3，commit 7cf6caa0）**：
+1. **KeyRoulette.next() 边界修复**：`if (list.size <= 1) return list.firstOrNull() ?: keys`（旧版返回原始输入 keys）——去重后单 token（如 "k1, k1"、带空白单 key）现在返回清洗后的 token，空白输入仍透传；干净单 key 逐字节等价。新测试 `duplicated or padded keys collapse to one cleaned token` 钉住，负向对照（旧实现）恰好 1 红：`expected:<k1[]> but was:<k1[, k1]>`。7/7 绿。
+2. **7 语言新文案 add_provider_multi_key_hint**（「多个密钥可用空格或逗号分隔，会自动轮换使用（优先最久未用的）」），三入口：AddProviderScreen 凭证 footer 拼接、ProviderConnectionScreen API Key 区新增 footer、OnboardingScreen 输入框下小字。XML parse + 7 语言 1592 key 集合比对全一致。
+
+**可复用坑**：gh_sync.sh push 用裸 `git push`（simple 模式），当本地分支上游是 origin/main（checkout -b origin/main 创建）时 fatal 128 拒推——用 `GIT_ASKPASS=... git push origin HEAD:<branch>` refspec 直推绕过；dispatch 返回 422 或无输出时先查分支是否真的存在（refspec 推上去后裸 curl POST dispatch 才成功）。
+
+**真机验证清单**（android-latest = main @ 7cf6caa 的包）：①添加 Provider 页凭证区两行说明（加密存储 + 多密钥轮换）②Provider 详情页 API Key 区出现轮换说明 ③Onboarding 输入框下小字 ④填两个相同 key 保存后正常使用（旧版会认证失败）。
+
+<!-- 2026-09-11 10:59:59 -->
+## 三处改动审计：两次已合并 + fix/key-roulette-refresh（全过，分支待合并）
+
+
+**审计结论：三处均无 bug。**
+
+### ① 7cf6caa0（今天合并，多密钥 UI + KeyRoulette 边界）— 干净
+- next() 单 token 路径 `list.firstOrNull() ?: keys` 逻辑正确（空列表透传原始输入）；测试钉住 collapse
+- 7 语言独立验证：XML parse 全过、key 集合 1592 全一致、add_provider_multi_key_hint 7 处全在
+- 三入口 UI（Onboarding 小字 / AddProvider footer 拼接 / ProviderConnection footer）正确
+
+### ② 1a0a7241 + 09f040e3（昨天合并，composer 回退 + 挂载删改名）— 干净
+- revert 逐字节一致（ChatInputArea.kt @ 1a0a7241 == a3fbf44^，diff 0 行）
+- rename() 零调用点、3 字符串（mount_detail_name_invalid/hint/duplicate）×7 locale 零残留
+- isValidMountName 保留给新增 sheet（64 长度镜像检查在）；MountDetailScreen 写权限开关 canSave = allowWrite != entry.userAllowWrite 正确保留；import 无孤儿
+
+### ③ fix/key-roulette-refresh @ 3a988d5f（审计时在跑，现已 CI 绿，**未合并待用户拍板**）
+- **设计**：密钥轮换从"单点收口 ProviderFactory"改为"子系统各收口"四门：chat→ProviderFactory.create、模型列表→ModelListProviderRegistry.fetchModels（LRU 顺序试全部 key，首个非空目录胜出，CancellationException 立即传播，全败重抛最后的错）、语音→VoiceProviderFactory.make、debug 探测→ProviderMutationMethods。KeyRoulette KDoc 写明门清单规则 + ARCHITECTURE 同步
+- **门完整性验证法（可复用）**：find -exec grep 全库 loadApiKey 14 个消费文件逐一追踪 → 全部走四门或纯显示/备份序列化，无漏网（ASR→make、offload→create、聊天四文件→create、QuickTest→make、三设置屏→显示、ProviderRepository:2166→备份 Base64、DebugMethods:88→isNotEmpty、ProvidersCollection→注释）
+- **candidates() 新 API**：split 暴露为 draw-free（supports() 分类不消耗轮换）；make 内旋转对单 token 无状态路径天然 no-op
+- **测试**：Registry 新 9 测（raw 不出门/死 key 穿越/全死各一次/取消传播/单 key 清洗/null 委托/未注册/传输错重试/全败重抛最后错）+ KeyRoulette 新 3 测
+- **CI 真绿核对**：run 34555849022 completed success，head_sha 三方一致（API = 远端分支 = 3a988d5f1606a670b3d48de98b8cd34475b88280）
+- **可 ff 合并**：merge-base = main = 7cf6caa0，无需 rebase
+
+**非阻塞观察（不修）**：① 官方 OpenAI 端点死 key 401 时 fetcher 返回内置 allOpenAI fallback（非空）→ 循环在第一个 key 停住不试后面的；非回归（单 key 时代同行为），custom-base 中转（多密钥主场景）401 → invalidate+空 → 循环正确推进。② 模型列表刷新消耗轮换 draw（共享 per-provider LRU）——设计意图（exercised move to back）。③ Gemini probe ?key= 未 URL 编码拼 query——既有行为，本次从 raw 多 key 变单 key 反而缩小破坏面。
+
+**待用户拍板**：合并 fix/key-roulette-refresh（ff 直推 main → release CI → 删分支）。
+
+<!-- 2026-09-11 11:02:13 -->
+## fix/key-roulette-refresh 合并收尾（main @ 3a988d5f）
+
+
+**合并**：审计三处全过 → 用户拍板 → refspec 直推 ff（7cf6caa0..3a988d5f，无 force）→ 远端 main 用 ls-remote 复核 = 3a988d5f → 远端分支 API DELETE 204（终验 ls-remote 仅剩 main）→ release CI run 34556828343 自动触发（**用户拍板不等结论**，新会话可查 https://rikka-ci-bridge.***USER***.workers.dev/status/main）→ 审计克隆 /tmp/rikka-audit0911 与 askpass 已清理。
+
+**内容**：密钥轮换四门收口（chat/模型列表/语音/debug 探测），KeyRoulette KDoc 门清单规则 + ARCHITECTURE 同步。
+
+**真机验证清单**（android-latest 装包后）：①多密钥中转站刷新模型列表不再 401（旧版列表静默保持旧/空）②语音测试（QuickTestSheet）多密钥提供商可用 ③挂载详情页无「挂载名称」字段、写权限开关+保存正常 ④添加 Provider/详情/Onboarding 三处出现多密钥轮换说明文案。
+
+<!-- 2026-09-11 11:35:27 -->
+## 思考泄漏（thinking leaked into body）成因调查（2026-09-11）
+
+
+用户观察：模型组里混杂各供应商模型，偶发思考内容漏进正文；自测后判断"主要是上游供应商没完善，只对特定供应商的模型出现"。
+
+**应用侧入站解析现状盘点（main @ 3a988d5，OpenAIProvider.kt）**：
+- 独立字段已覆盖：`delta.reasoning_content`（DeepSeek 系）、`delta.reasoning`（ifEmpty 回退，OpenRouter 系）、Responses API `response.reasoning_text.delta` / `reasoning_summary_text.delta`、Mistral 方言（content[] 里 `{"type":"thinking"}`）
+- 内联标签扫描 `ThinkTagScanning.kt` THINK_TAG_FORMATS 6 种：`<thinking>`（altClose `<response>`）、`<reasoning>`、`[think]`、`[reasoning]`、`<Thought>`、`<analysis>`，大小写不敏感、按最早 index 选格式（非目录序）、支持同 buffer 多区间
+- 流末 flush 用 `thinkState.insideTag` 判定 → 未闭合残片归 ThinkingDelta（不发正文），两个出口（[DONE] 与自然结束）都正确
+- **未解析**：`reasoning_details[]`（OpenRouter 新方言）、`thinking_blocks`（Anthropic 兼容层）、`thought_signature` —— 未解析的后果是思考被静默丢弃（看不到思考），不是漏进正文
+
+**结论（分类）**：
+- 真无解：供应商把思考**裸写进 content**（无标记）→ 任何客户端无法从文本区分，启发式剥离会误伤正文，不做
+- 可补：供应商用了不在 6 种内的显式标签 → 零风险扩充（显式标签不会撞散文）
+- 间歇性机制解释：多密钥/中转站环境下，同一模型不同请求路由到不同上游后端，部分上游把 reasoning 混进 content → 表现为"同一模型有时漏有时不漏"
+
+**待用户提供**：一段漏出的原文样本（首尾各几十字）以判定是可补标签还是真无解。
+
+<!-- 2026-09-11 11:38:41 -->
+## 思考泄漏取证：中转站自报 reasoning_tokens 但零 reasoning 字段（2026-09-11，用户一线样本）
+
+
+用户指出"当前这个会话本身就是典型案例"——他通过第三方中转站调用当前模型，且该问题只在这个模型上出现。
+
+**从设备 logcat 抓到的铁证（`android-shizuku-cli exec "logcat -d | grep T321"`）**，同一会话连续两轮：
+- 第 1 轮：`completion_tokens_details.reasoning_tokens = 415`，而 `[T321] stream complete: contentLen=1232 reasoningLen=0`
+- 第 2 轮：`reasoning_tokens = 2599`，`contentLen=6287 reasoningLen=0`
+- 且每个 SSE delta 行都是 `rcLen=0 rLen=0`（`reasoning_content` / `reasoning` 双双为空）
+
+**推论**：上游 usage 自报产生了 reasoning token（模型确实思考了），但应用侧收到的 reasoning 字段全为空 → 中转站在把上游（疑似 Anthropic thinking block）转成 OpenAI 兼容格式时，**没放进 `reasoning_content`/`reasoning`，而是直接拼进了 `content`**（用户看到的泄漏）。应用侧 6 种标签、4 种字段全部抓不到 → 说明它既不用显式标签也不给标准字段，属站方转换层缺陷。
+
+**取证手段备忘**：应用 release 包不可 `run-as`，日志文件（files/logs/minis-*.log）读不到；但 **logcat 可读**（shell 在 log 组），`[T321]` 行含每轮 contentLen/reasoningLen 与 usage 明细，是判断"站方是否分离思考"的现成探针。
+
+**下一步待用户提供**：①一段泄漏原文（判断有无标签，有则可零风险补进 THINK_TAG_FORMATS）②中转站 base_url 域名（不敏感；若是 new-api/one-api 系开源站可查源码定位转换逻辑；**key 不要给**）。
+
+<!-- 2026-09-11 14:47:09 -->
+## Groq 免费档在 RikkaMinis 中不可用的根因（2026-09-11，用户提供 gsk_ key 排查）
+
+用户配 Groq 官方（api.groq.com/openai/v1）+ Qwen/Qwen3.8-27B，问为什么在应用里"出问题"。
+**调查结论：key 有效、模型存在（qwen/qwen3.8-27b，128k ctx/16k out）、协议 100% 兼容**（max_completion_tokens / stream_options.include_usage / temperature / tools+tool_choice / reasoning_effort 全部 200，大小写模型名都接受，思考放 delta.reasoning 字段分离良好，tool_calls id 为短随机串如 qqb9dmqgj、arguments 一次性给全，流末自带 usage）。
+**根本原因 = Groq 免费档（on_demand）ITPM 限额 7000 input tokens/分钟**：实测 2.5k tokens → 200；12k tokens → **HTTP 413 rate_limit_exceeded**「Limit 7000, Requested 11012, upgrade to Dev Tier」。RikkaMinis 是重型 agent 应用（system+11+工具定义+历史，当前会话 prompt 高达 48k tokens），单请求轻松超 7000 → 必然报错；轻量聊天客户端请求小所以能用。响应头：x-ratelimit-limit-tokens 8000（TPM）、limit-requests 1000。
+**解法**：升 Groq Dev Tier（付费）或换平台/模型；免费档只适合轻量短对话。key 已在对话明文出现，建议用户测试完轮换。未保存 key 本身。
+
+<!-- 2026-09-11 20:42:53 -->
+## key-roulette release CI 终态确认（2026-09-11 晚）
+
+<!-- 2026-09-11 21:xx -->
+main @ 3a988d5f 的 release CI run 34556828343 已确认 **success**（bridge /status/main 实测）。至此 fix/key-roulette-refresh 全闭环：分支 CI 绿 → ff 合并 main → release CI 绿 → 远端分支已删。白天日志里"未合并待用户拍板"是审计时点状态，最终态以本条为准。
+
+<!-- 2026-09-11 21:26:29 -->
+## fix/singleline-paste-newline 分支审计：无 bug（2026-09-11）
+
+
+正在跑的分支 = `fix/singleline-paste-newline`（单 commit f4b6c4a 基于 main @ 3a988d5，run 34603318501，19 文件 +188/−28）。用户要求检查是否引入 bug，**审计结论：干净，未动**。
+
+**改动内容**：Compose `singleLine=true` 只裁显示不洗数据 → 粘贴的 CR/LF 隐形驻留。新增 `sanitizeSingleLineInput`（Regex `[\\r\\n]+` 连续 run → 单空格，不删除），注入三处：
+1. `SectionTextField`（TextFieldValue 重载，清洗后 copy text + selection 跳末尾，幂等无死循环，外部 re-seed 路径不受影响）
+2. `DialogTextField`（String 重载，onValueChange 内清洗）
+3. 12 个散点裸 OutlinedTextField/BasicTextField 就地包 sanitize（browser/chat/onboarding/sessions/settings/webapp 全域）
+
+**审计手法（可复用）**：
+- 误伤检查：逐字段确认每个被 sanitize 的字段都是 `singleLine=true`（BrowserHistorySheet/ChatModelPickerSheet/InputHistorySheet 三个搜索框在 diff 上下文看不到，需 sed 原文件确认；InputHistorySheet 的 singleLine 在第 121 行，超出 grep -A 12 窗口）
+- 完备性检查：`find | xargs grep -l "singleLine = true"` 统计发现 12 文件 0 sanitize → 逐一检查发现它们全部走 SectionTextField/DialogTextField 组件（内部已清洗），唯一例外 SectionDropdown 是 `readOnly=true` 只读下拉非缺口
+- 测试实证：逐字抽取生产函数 + 测试文件，kotlinc+junit4 本地 7/7 绿（测试钉生产函数非复刻，同包 internal 可见）
+- KeyRoulette 兼容：`\n`→空格而非删除，下游 SPLIT `[\\s,]+` 分 token 不变（"k1\nk2,\nk3" → k1/k2/k3）
+
+**关键设计点**：空行折叠为单空格（`\n\n` → 一个空格），防 token 粘连（k1\n\nk2 若删空行会变 k1k2）；CRLF 对只出一个空格。
+
+CI 13:15 创建仍在跑（正常带宽 12min），按惯例不等。ARCHITECTURE.md 已同步"单行输入框契约"。真机验证点：粘贴多行文本到 API key/URL 字段应单行可见、清空后字段真空。
+
+<!-- 2026-09-11 21:28:47 -->
+## fix/singleline-paste-newline — 单行输入框粘贴换行折叠（2026-09-11 晚，CI 绿，待拍板合并）
+
+
+**问题**（用户报告）：向输入框粘贴多行文本（如 newapi 的 headers、多行 key），只显示第一行，其余被裁；删掉可见字符后字段看起来空了、实际还残留不可见 `\n`。根因：Compose `singleLine=true` 只裁显示、不清洗数据，粘贴的换行符存活在 state 里。全库输入框无一清洗。
+
+**修复**（f4b6c4a，19 文件 +188/−28）：
+- `sanitizeSingleLineInput`（新增于 SectionTextField.kt）：`[\r\n]+` 连续段折叠为单个空格（空行不累积空格；不删除，保证 "k1\nk2" 仍能按空白拆分为两 key，KeyRoulette SPLIT=[\s,]+）
+- 两个共享组件（SectionTextField / DialogTextField）单行模式 onValueChange 走折叠 → 覆盖 ~40 个调用点
+- 17 个直连 OutlinedTextField/BasicTextField 单行调用点同款收口（WebDAV url/user/pass/path、browser webapp url、cookie filter、thinking-rule 全字段、soul name/style、session title、model-group name、各搜索框等）；视口/超时字段已有 digit filter 跳过
+- 测试 SanitizeSingleLineInputTest 7 条（CRLF→单空格、空行折叠、逐字节直通、header 块单行化、属性检查、key 拆分兼容）
+- ARCHITECTURE §8 补「单行输入框契约」
+
+**验证**：沙箱抽取生产函数逐字执行 7/7 绿；负向对照（直通实现）5 红；scan 门禁 5/5；CI #1464（run 34603318501）success，head_sha=f4b6c4a0 三方一致，CI 日志确认 7 条新测试全 PASSED。
+
+**未做（记录）**：消费端存量脏数据硬化（如 UserAgentOverride 对内嵌 \n 的旧值只 trim 不折叠）未动——避免 provider 层反依赖 ui 层；存量值由用户重存一次修复。
+
+**真机验证清单**：①向 API Key/UA/URL 字段粘贴多行文本 → 整段单行可见、无隐形残留 ②清空后字段确真空（能正常重新输入）③粘贴 "k1\nk2" 多 key → 保存后轮换正常 ④MCP headers 等多行字段行为不变。
+
+**待拍板**：合并 main（ff）→ release CI → 删分支。
+
+<!-- 2026-09-11 21:30:18 -->
+## singleline-paste-newline 合并收尾（main @ f4b6c4a）
+
+
+**合并**：分支 CI #1464 success（head f4b6c4a 三方一致）→ 用户拍板 → refspec 直推 ff（3a988d5..f4b6c4a，无 force）→ ls-remote 复核 main=f4b6c4a → 远端分支 API DELETE 204 → worktree /tmp/rikka-singleline 与本地分支已删（远端仅剩 main）。
+
+**release CI**：run 34604610337（已触发，**用户拍板不等结论**，新会话可查 https://rikka-ci-bridge.***USER***.workers.dev/status/main）。
+
+**真机验证清单**（android-latest = main @ f4b6c4a 的包）：①API Key/UA/URL 字段粘贴多行文本 → 整段单行可见无残留 ②清空后确真空 ③"k1\nk2" 多 key 粘贴保存后轮换正常 ④MCP headers 多行字段行为不变。
+
+<!-- 2026-09-11 21:32:31 -->
+## singleline-paste-newline 真机验证通过（2026-09-11 晚）
+
+
+用户实测分支构建（= main @ f4b6c4a 同一 commit，等价）：**四项验收点全过，无问题**——①多行粘贴到 API Key/UA/URL 字段整段单行可见 ②清空后字段确真空 ③多 key 轮换正常 ④MCP headers 行为不变。修复闭环完成：根因（singleLine 只裁显示不洗数据）→ 收口（两组件 + 17 直连点 + sanitizeSingleLineInput）→ CI 绿 → 合并 main → 真机验证通过。
+
+## 2026-09-12
+
+<!-- 2026-09-12 00:25:10 -->
+## think 泄漏根因实锤：中转站 `<think>` 标签不在解析表（2026-09-11 晚）
+
+- 用户报告"思考泄漏是应用本身的问题"（rikkahub 同站正常）→ 直接 curl 中转站实锤
+- **llmhost.net 实测**：glm-5.3-flash 把思考内联在 content，包裹 `<think>...</think>`（无 reasoning_content/reasoning 字段，全部 delta 空；格式 `<think>\n38*47...\n</think>\n正文`）
+- **rikkahub 对照**：`ThinkTagTransformer` 正则 `\A\s*<think>(...)(</think>|$)` 专门处理 `<think>`
+- **RikkaMinis 缺口**：`THINK_TAG_FORMATS` 6 格式（`<thinking>`/`<reasoning>`/`[think]`/`[reasoning]`/`<Thought>`/`<analysis>`）缺 `<think>` → 泄漏
+- **修复**：ThinkTagScanning.kt 加 `ThinkTagDef("<think>","</think>")` + ThinkTagExtractionTest.kt 测试（含与 `<thinking>` 不互扰、跨 chunk 拆分）
+- 这就是用户观察"rikkahub 好、RikkaMinis 坏"的完整解释链
+
+<!-- 2026-09-12 00:25:17 -->
+## 聊天输入框"吞内容"根因：imeBurstBuffer 残留 stale 快照（2026-09-11 晚）
+
+- 用户报告：发 URL+key 时**前面的描述被吞**（间歇，"有时候"）
+- **根因链**（ChatInputArea.kt，主分支 main @ f4b6c4a）：大增量(>8字符)编辑（粘贴）→ `imeBurstBuffer=快照S` → 150ms flush 到 VM 后 **buffer 未清** → 用户补小编辑（≤8字直通 VM，文本=S'）→ **发送时 `toSend=pendingBurst`（非空优先）→ 发出旧快照 S**（丢 S 之后所有编辑）
+- 触发条件 = "大增量后 + 小编辑 + 发送"，故间歇；用户案例：先贴 URL+key，后补描述
+- 两处发送路径：`performSendOrQueue`(438行) / `performEnterSend`(1279行)，都读 pendingBurst
+- **修复方向**：①flush 后清 buffer（且仅当 UI 真值==快照才 commit，防覆盖窗口内新编辑）②发送取"最新真值"（`inputFieldValue.text` 是 onValueChange 单一写者，比 buffer/inputText 都新）
+- 相关：`shouldDebounceImeBurst`（ChatScreenUtils.kt:103，delta>8 判大增量）
+
+<!-- 2026-09-12 00:25:23 -->
+## senseaudio"系统繁忙"实测 + TTFB 30s 通用缺口（2026-09-11 晚）
+
+- **senseaudio 实测**（api.senseaudio.cn，37 模型聚合站）：8 并发 → 全 HTTP 500 `{"code":"internal","message":"服务繁忙，请稍后再试","ref_code":500000}`；低频正常但响应 0.6~59s 波动
+- **分段计时**：4/8 请求 headers 排队 42.9/47.6/47.9/59.3s（延迟全在 headers 前=服务端排队，非 body 慢）
+- **500"繁忙"已被现有链覆盖**：mapHttpError→TransientError→重试(1/2/4s×3 可配)→fallback。**无需特判**
+- **真正缺口**：`STREAM_TTFB_TIMEOUT_MS=30s`（OpenAIProvider，假设"headers arrive fast"对排队站不成立）→ 误杀→TransientError→重试→再排队→用户感知"频繁中断"
+- **rikkahub 对照**：无 TTFB 看门狗、readTimeout 10min → 不误杀（与其"体验更好"一致）
+- **待用户拍板方案**：TTFB 30s→90s（单常量+注释数据依据），保留看门狗语义（死隧道晚 60s 暴露）
+- **用户警惕"过度工程"**：不做站点特判（文案匹配），只做"修一类问题"的通用修复。判断标准：改动是否为一类场景（排队型站点）解决共性缺口 vs 为单站写死逻辑
+
+<!-- 2026-09-12 00:39:08 -->
+## 三修复打包分支 fix/ttfb-thinktag-composer 推送+CI（2026-09-11 深夜）
+
+- 用户拍板：TTFB 直接调默认值（30s→90s）；think 标签+输入框"照常修，直接打包一起"（一分支三 commit）
+- **分支**：fix/ttfb-thinktag-composer @ e2b8c71（基 f4b6c4a）：
+  1. 18cfaad `fix(provider): widen stream TTFB watchdog to 90s for queueing relays`（OpenAIProvider.kt + FirstChunkTimeoutPolicy 注释同步）
+  2. e93f96a `fix(provider): extract <think> tag variant`（ThinkTagScanning.kt + 测试 6 条）
+  3. e2b8c71 `fix(chat): never send a stale IME-burst snapshot`（ChatInputArea.kt 两发送路径+flush 块、ChatScreenUtils.kt 加 shouldCommitImeBurst、测试）
+- **本地验证**：
+  - think harness 9/9 绿（逐字编译生产 ThinkTagScanning.kt）；负向对照（HEAD 旧表）6 红
+  - utils harness 8/8 绿（字体抽取生产函数编译）；负向对照（旧语义）恰好 2 红（tail/prefix 丢失形态）
+  - scan gate 5/5 绿；ChatInputArea 括号净 -3 对双侧平衡（全部来自删除的 isNullOrEmpty/if 与新增调用）
+- **CI**：分支 push 已推（gh_sync push）→ 手动 dispatch build-apk.yml → run 34623105030 in_progress（bridge 已登记）
+- 待办：CI 绿 → 用户拍板合并 → release CI → 真机验证（清单：①senseaudio glm-5.3-flash 思考进思考区不泄漏 ②粘贴后前后补打字发送不丢失 ③排队时不再误杀）
+- 注：build-apk.yml 只对 main push 触发；分支 CI = 手动 dispatch（gh-actions-dispatch）
+
+<!-- 2026-09-12 01:26:59 -->
+## fix/ttfb-thinktag-composer 合并收尾完成（main @ e1a0b08）
+
+
+- **合并**：refspec 直推 ff（`f4b6c4a..e1a0b08`，无 force）→ ls-remote 复核 main = e1a0b08692ac4cf79eabff2b6c17abc56282fd2f
+- **分支 CI 双绿**：run 34623105030（e2b8c71）success + run 34625935535（e1a0b08）success，head_sha 三方一致
+- **四个 commit**：18cfaad TTFB 90s / e93f96a `<think>` 标签 / e2b8c71 IME-burst stale snapshot / e1a0b08 relay 错误消息提取（上一轮记忆只记到 3 个，第 4 个为新增）
+- **e1a0b08 审计**（新增，过目）：`extractHttpErrorMessage` 链 error.message→error字符串→顶层 message→msg→bounded raw，逻辑正确；测试 8 条覆盖；观察点（非阻塞）：Anthropic catch 分支格式 `[error]` 丢掉 statusCode 前缀
+- **release CI**：run 34627613817 已自动触发（head e1a0b08），用户拍板不等结论 → 可查 https://rikka-ci-bridge.***USER***.workers.dev/status/main
+- **清理**：远端分支 API DELETE 204（远端仅剩 main）；/tmp/rikka-think 已删；msg1-3.txt/a_commit_msg.txt 草稿已清
+- **真机验证清单**（装 android-latest 后）：①glm-5.3-flash 思考进思考区不泄漏 ②输入框前后补字发送不丢 ③排队时不再 no-response 误杀 ④中转站 500 显示可读中文错误而非 raw JSON
+
+<!-- 2026-09-12 02:11:04 -->
+## 最终可吸收清单已收敛入 backlog（2026-09-12）
+
+- 落点：/var/minis/shared/backlog.md 第 2 节（A 待办 2 项 / B 种子 2 项 / C 等窗口 3 项 / D 观察点 2 项 / 明确不吸收存档 12 项）
+- A1 Prompt Cache 对齐上游（OpenMinis，白捡，最先做）；A2 记忆定时 rollup（OmniBot AlarmManager）
+- B1 技能自动归纳（ClawMobile）；B2 虚拟屏幕（Operit）——各做种子验证再投
+- C1 内容变换抽象（rikkahub）；C2 TextFieldState（等窗口）；C3 通道分工具集（Operit）
+- 核心结论：能吸收的非常有限——25 关节对比 + 卡刀淘汰后仅 2 待办 + 2 种子 + 3 等窗口
+
+<!-- 2026-09-12 02:14:01 -->
+## 交接完成：A1 Prompt Cache + A2 定时 rollup → 新会话处理（2026-09-12）
+
+- 交接文档：/var/minis/shared/prompt-cache-rollup-handoff.md（含全部代码坐标/执行步骤/坑位/验证清单）
+- A1 上游坐标：openminis-src/.../provider/anthropic/AnthropicProvider.kt:54-69（ephemeralCacheControl 默认5min/enhanced 1h）、281-309（分块策略：base prompt 无、user tail 带）；统计 ChatDebugMethods.kt:191；本地无 cache_control（只有模型列表缓存）
+- A1 第一步=整体 diff 上游 vs 本地 provider/anthropic 目录防漏其他丢失特性；坑=中转站透传未实测、1024 tokens 门槛、别破坏 9-11~9-12 provider 层成果
+- A2 参考：omnibot-src/.../workspace/memory/WorkspaceMemoryRollupScheduler.kt+Receiver+Service；本地 MemoryRollupTool.kt 归并语义已有只缺调度器；建议服务内定时器（AgentForegroundService）比 AlarmManager 稳
+- 分支纪律：独立分支+CI 绿+用户拍板合并；gh_sync.sh 标准流程；main @ e1a0b08
+
+<!-- 2026-09-12 02:21:12 -->
+## A1 Prompt Cache 调查结论：本地已是上游超集，无需移植（2026-09-12）
+
+<!-- 2026-09-12 -->
+- **交接文档取证有误**：e1a0b08 的 AnthropicProvider.kt 已有完整 cache_control 实现（ephemeralCacheControl + enhancedCache 5min/1h + system 块 + 最后 tool + 最后 2 条 user 消息注入 + extended-cache-ttl beta）。本地 8 文件引用 vs 上游 6，AgentLoopEngine/Host 是本地独有扩展。EnhancedCachePrefs/ChatDebugMethods 与上游逐字节一致
+- 上游独有 = OAuth 支持（isOAuth/ClaudeOAuthManager/Stainless 指纹 headers，v1.13 新特性）——不属于 A1，另立观察
+- **透传实测（关键坑，已过）**：gcli2api Antigravity 通道 claude-sonnet-4-6，带 cache_control 两轮请求 → 第二轮 usage.cache_read_input_tokens=1924 命中（input_tokens=50 fresh）。中转/代理通道可透传 cache_control
+- **顺带发现 bug（Anthropic parseUsage，AnthropicProvider.kt ~L975）**：`freshInput = totalInput - cacheTotal` 双重扣减——Anthropic 协议 input_tokens 本就是 fresh-only（实测 50 vs cache_read 1924 铁证），应 `freshInput = totalInput`；`latestContextTokens = totalInput` 低估上下文（应 + cacheTotal，OpenAI 侧 2076 行注释"full prompt IS the context size"是正确范式）。影响：统计失真 + dynamicMaxTokens 上下文低估。**修复待用户拍板**（改行为，独立分支）
+- 待办：真机验证清单仍有效（T321 看 cache_read、enhancedCache 开关、think 不回归）；llmhost/senseaudio 中转站 key 待用户提供后补测
+
+<!-- 2026-09-12 02:24:48 -->
+## A1/A2 双双归档 + parseUsage bug 进 backlog（2026-09-12 收尾）
+
+<!-- 2026-09-12 -->
+- 用户拍板：A1 parseUsage bug「先攒着」（选 2=backlog），A2 一起调查后一起处理
+- **A2 调查结论**：归并语义层本地已有**三件套**（MemoryRollupTool.kt 74 行 → MemoryRollupRunner.kt 161 行 → MemoryRollupEngine.kt 312 行，幂等/选最大未归并日志/Outcome 枚举/源日志不动），比交接文档说的"只有 Tool"更完整；调度器全库缺失（无 AlarmManager/WorkManager/服务内定时器调用 rollup，调用方只有 agent 工具链 ChatToolExecutors/ChatViewModel/MemoryRepository 暴露目录）。**但按一阶门卡：不需要实现**——RikkaMinis 会话内 agent 无常驻 daemon（AgentForegroundService 仅会话期间活），AlarmManager 被杀需重排，且 MemoryRepository 已有 system-prompt 建议机制（dailyLogSizeSummary/largestDailyLogBytes 注入 prompt 让 agent 判断是否 rollup），无无人值守场景 → 定时器收益≈0。若未来有 cron/定时任务系统再启用
+- 归档落点：backlog.md 第 2 节 A 表（A1=已调查无需实现/A2=已调查不需要）、第 3 条（parseUsage bug：freshInput 双重扣减 + latestContextTokens 低估，修复方案 A 推荐：freshInput=totalInput、latestContextTokens=totalInput+cacheTotal，处理顺序在 NUL 检查之后）；交接文档头部已标 ⚠️ 状态更新
+- 真机验证仍有效（未做）：T321 日志看 cache_read_input_tokens>0、enhancedCache 开关 5min vs 1h、think 不回归
+
+<!-- 2026-09-12 02:45:01 -->
+## parseUsage 双重扣减 bug 已修复合并（main @ 8e98166，2026-09-12）
+
+<!-- 2026-09-12 -->
+- 用户拍板修（backlog 第 3 条），分支 fix/anthropic-parse-usage @ 8e98166
+- **修复**：抽纯函数 `anthropicUsageAccounting(inputTokens, cacheRead, cacheCreate): Pair<Int,Int>`（新文件 provider/AnthropicUsageAccounting.kt，27 行，无 Android/org.json 依赖）→ parseUsage 调用；fresh = input_tokens（Anthropic 本就 fresh-only，实测证据），context = input_tokens + cacheTotal（修复低估）
+- **测试**：新 AnthropicUsageAccountingTest 5 条（含实测截获 50/1924→1974 案例）；AnthropicProviderTest 两条 cache 测试补 inputTokens/latestContextTokens 断言
+- **验证**：沙箱 JVM 5/5 绿（kotlinc 单次编译 + junit）；分支 CI run 34633646709 success head_sha 三方一致；release CI run 34635002236 已触发（用户拍板不等结论）
+- **坑（重要）**：裸 `git push origin 分支:main` 无 GIT_ASKPASS 会认证失败——必须先 export GIT_ASKPASS=/var/minis/workspace/.git_askpass.sh + GIT_TERMINAL_PROMPT=0；本次曾先 push 失败又把远端分支 DELETE 了，靠本地分支还在重新 askpass 推补救成功。**顺序纪律：push 成功复核后再删分支**
+- 收尾：远端分支已删、本地分支已清、backlog 第 3 条标已修复
+- backlog 第 1 条 NUL 检查确认早已修复（sanitizeName 已是 '\n' 检查），用户记忆正确——backlog 剩余实际为 0
+
+<!-- 2026-09-12 09:33:57 -->
+## "三条借鉴"动手核查：两条已有等价实现，零代码改动（2026-09-12）
+
+用户拍板做三条借鉴（skill 预算截短 / effort 降级链 / llm-bug-audit effort 档），开工前按验证优先核查，发现：
+- **skill 清单预算**：SkillRepository.kt 已有 MAX_SKILLS_IN_PROMPT=20 + MAX_SKILL_DESC_LENGTH=200 + three-tier 选择（bundled > 7 天更新 RECENT_SLOTS=10 > useCount）+ hasMore 溢出提示，token 上限 ≈1000-2000 落在 Claude Code 1% 预算内——等价实现，无需改
+- **effort 降级链**：ThinkingRuleResolver.kt L854 `clampEffort`（行走下、否则向上 = codex-rs 降级链等价）+ clampEffortForModel（mimo/agnes 特判）+ catalog 声明集合驱动；OpenRouter/OpenAI-native 分支不做 declared-set clamp 是有意设计（注释写明 pre-refactor 就没有）——已有且更强，无需改
+- **实际改动**：仅 llm-bug-audit SKILL.md 两处标注（阶段 2 派发=recall 广撒网 high effort，阶段 3 核实=precision 严把关 medium effort，对标 Claude Code 子 agent 审查模式）
+- 教训：调研报告发布时未做 RikkaMinis 现状核对，动手时才查——报告第 6 节"可借鉴清单"的 A/B 级条目应先过"现状 grep"再写；/tmp/rikka-merge 是小号 remote 且停在已删分支，新 clone 用 /tmp/rikka-budget（已删）
+
+<!-- 2026-09-12 10:05:49 -->
+## 差距清单收敛完成：D1 攒着，D3/D4/D5 归档不吸收（2026-09-12）
+
+- D1 sanitizeUtf16 → backlog.md 第 2 条（参照 OmniBot AgentTextSanitizer.kt 63 行，宜与下次 provider 改动顺手带上）
+- D3 usage 性能字段 → 归档：已核实 RikkaMinis 无此维度（StreamPerfMonitor 是渲染管线监控 flatten/GC/行数，与 token 速率是两回事），但数据源罕见（仅部分 provider usage 自带 performance 字段），一阶门不过
+- D4 x86_64 ABI → 归档：单 arm64 是省包体决策非缺陷
+- D5 extractJson → 归档：RikkaMinis 走严格 tool_calls JSON 协议无此场景，Operit 有此需求因其靠 prompt 约定
+- 报告差距清单已收敛（无悬置"待核/观察"状态）；机型调研报告：/var/minis/shared/机型兼容与数据处理对比-2026-09-12.md
+
+<!-- 2026-09-12 10:10:50 -->
+## backlog.md 清理（2026-09-12）
+
+- 用户指出 backlog 里大多是已修复/已有对应的死项+编号混乱（两个##2）→ 重写：活项 4 节（sanitizeUtf16 / B 种子 2 / C 等窗口 3 / D 观察 2）+「已关闭存档」表格（7 行，含关闭结论，防未来重复调查）
+- 已关闭存档：NUL ✅、parseUsage ✅（main@8e98166）、A1 prompt cache（超集）、A2 rollup（一阶门不过）、7 应用明确不吸收 14 项、机型调研 D2-D5
+- 活项仅剩 1 个代码项：sanitizeUtf16（其余是种子/等窗口/观察）
+
+<!-- 2026-09-12 10:33:54 -->
+## 开发趋势图 + 统计快照（2026-09-12）
+
+- 图：/var/minis/attachments/rikkaminis-dev-trends.png（6 子图：提交节奏/体量/类型/周主题迁移/近21天主题/日志主题对比）
+- 可复用脚本：/var/minis/shared/rikkaminis-dev-trends-plot.py（前置：`git clone --bare` 到 /tmp/rikka-stats.git；`apk add py3-matplotlib font-noto-cjk py3-fonttools`）
+- **坑 1**：`git log --shortstat --format=@@%ad` 的日期切片是 `line[2:12]`（"@@2026-09-12" 共 12 字符），切错会让所有日期错桶。
+- **坑 2**：matplotlib `addfont` 对 .ttc 只注册第一个 face（Noto Sans CJK JP）。要简体字形须用 fontTools `TTCollection` 把 'Noto Sans CJK SC' face 单独存成 .otf 再 addfont。Alpine 无中文字体，必须 `apk add font-noto-cjk`。
+- **数据快照（main，968 次 non-merge 提交，2026-04-25→09-12，45 个活跃日）**：
+  - 类型：fix 585 (60%) / feat 153 / test 51 / refactor 50 / docs 41 / chore 28
+  - 主题（关键词启发式）：模型与协议 329、界面与交互 237、工程与发布 118、性能与稳定 69、数据与备份 59、其他 51、记忆与技能 37、安全与审计 33、文档与调研 32、设备能力 3
+  - 近 21 天 292 次：fix 202 (69%)、模型与协议 118 (40%)、界面 81；提交峰值 08-13 (66)、08-15 (59)、08-14 (54)
+  - 体量：总改动 151.9 万行/1996 文件，其中 07-25「open-source the Minis app」一个 commit 占 1601 文件/148 万行（约 98%）
+  - 里程碑：07-25 开源导入 → 08-21 OOM/native 隔离 → 09-10 包名迁移 → 09-11 密钥轮换四门
+- 日志主题（近14天 vs 全周期）：工程与发布 248/近、模型与协议 192、界面 74、性能 67、安全审计 65、记忆技能 46；共 949 条标题，20% 未分类（标题是中文长句，关键词命中率上限约 80%）
+
+<!-- 2026-09-12 10:47:45 -->
+## 体量统计 bug 修正 + 洞察层结论（2026-09-12，接续上一条）
+
+- **坑 3（重要）**：按日期累加 `git log --shortstat` 时，同一天多个 commit 的 `vol[date] = 0` 初始化会把当天已累加的值清掉，只剩当天最后一个 commit 的体量（实测 1.52M vs 真实 2.76M，文件数 1996 vs 7339，同比例失真）。必须 `setdefault(date, 0)` 或先判断 key 是否存在。判据：把"按提交逐条累加"和"按日累加"两种口径的总和对比，不等就是有重置。
+- **真实体量**：总 2,757,300 行 / 7,339 文件。两个批量事件占 89%：07-25 `feat: open-source the Minis app` 1,481,313 行/1604 文件；08-02 `feat: Android-only tree` 958,840 行。剔除后 44 个活跃日**中位 4,263 行/日**，近 14 天日均 6,780 / 中位 4,914。均值（28,999）完全不可用。
+- **洞察层数字**（脚本 /var/minis/shared/rikkaminis-dev-insights.py）：
+  - fix:feat 按周：07-27 42% → 08-03 54% → 08-10 61% → 08-17 61% → 08-24 85% → 08-31 51% → 09-07 69%；feat 54 次/周 → 9 次/周
+  - 主题×类型：界面与交互 171 fix 只配 6 test（test/fix 3.5%）= 最高修复量+最薄回归网；安全与审计 fix 29/feat 2（81% fix）= 纯被动整改；工程与发布 test/fix 24% 最好
+  - 修复族复发（跨日期数）：流式/分块 96 次/34 天、备份 101 次/30 天、输入框 78 次/31 天、错误重试 49 次/24 天、思考 40 次/23 天 → 族跨度≈项目全生命周期 = 结构性缺口
+  - 活跃日覆盖率 45/105 天 = 43%
+- 图已加底部「读法」结论条：/var/minis/attachments/rikkaminis-dev-trends.png（280KB）
+
+<!-- 2026-09-12 11:43:26 -->
+## P0/P1/P2 三件全闭环（main @ fe39a66，2026-09-12）
+
+- **分支 fix/p012-strict-json-reasoning-flag（2 commit：60aeea8 测试 + fe39a66 诊断）→ 沙箱 JVM 11/11 绿 → 分支 CI run #1471 success（head 三方一致）→ refspec 直推 ff 合并 main → 远端分支 DELETE 204 → release CI run 34671084010 已触发**
+- **P1（改 1 处）**：新文件 provider/openai/ReasoningConsistency.kt（billedReasoningTokens：OpenAI 嵌套 completion_tokens_details.reasoning_tokens ∨ 顶层 reasoning_tokens/reasoningTokens 取 max；missingReasoningContent：billed>0 且 reasoningLen≤0 → 返回 billed）+ OpenAIProvider 流结束 [T321] usage final 块内打 warning「inconsistency: upstream billed N reasoning tokens but stream carried 0」。2599/415 是 9-12 真机抓包实锤值进测试。
+- **P0（0 生产边）**：新测试 BackupStreamStrictJsonTest 4 条（Jackson 严格解析全帧 + 负向对照裸词必须 REJECT + lenient 仍 ACCEPT 的非对称钉住）+ build.gradle.kts 加 testImplementation jackson-databind:2.17.2
+- **重大实验发现（已进测试注释与依赖注释）**：**kotlinx-serialization-json 的 Json.parseToJsonElement 对裸词值是宽容的**（ACCEPT `{"format":openminis.config.backup}`，解析成 unquoted JsonLiteral）——不能当严格解析器判据！探针实测：裸词 ACCEPT / trailing comma REJECT。python json / jq / **Jackson** 才是真严格。原计划用 kotlinx 判据被实验推翻后换 Jackson。
+- **P2（纯查，报告 /var/minis/shared/安全存量扫描-2026-09-12.md）**：7 面扫描 6 面已覆盖（RC10-17A + audit-0909 整改真实有效）；唯一待确认 = Room FK enforcement（三 Entity 有 foreignKeys 注解但代码无显式 PRAGMA，Room 默认行为待真机实测，建议下次仪器测试带 PRAGMA foreign_keys）
+- 现状确认（防重复调查）：9-10 引号 bug 已修（exportToWriter else 分支 JSONObject.quote）+ BackupStreamWriterTest 字节级 pin 已存在；BackupFieldEvapRoundTripTest（四蒸发字段）已存在
+- 沙箱 JVM 环境更新：/tmp/kotlinc（2.1.0）+/tmp/libs/ 新增 kotlinx-serialization-{json,core}-jvm-1.7.3、jackson-{core,databind,annotations}-2.17.2（jar 不自动恢复，rootfs 重建后需重下）
+- 坑 4：kotlinx jsonPrimitive 后的 `jsonArray.size` 是属性不是函数（`.size()` 编译错）
+- 真机验证清单：①T321 日志 grep inconsistency（用产生思考泄漏的中转站对话）②备份导出→python json 解析 ③其余无回归点（纯诊断+测试）
 
 ---
 

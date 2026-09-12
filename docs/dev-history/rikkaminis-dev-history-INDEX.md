@@ -1,6 +1,6 @@
 # rikkaminis-dev-history 按天索引
 
-快速跳转到每日开发日志。共 882 条记录，39 天。
+快速跳转到每日开发日志。共 914 条记录，41 天。
 
 ## 2026-08-03（11 条）
 
@@ -27,8 +27,10 @@
 - `22:11` **OpenMinis fork — #2/#3/#4 全部完成（2026-08-03 晚，已合并 main e11eb44）**
   - ### #2 测试 backlog 39 → 0 ✅
 
-## 2026-08-04（27 条）
+## 2026-08-04（28 条）
 
+- `04:49` **OpenMinis fork — RikkaHub 风格左滑历史对话抽屉（2026-08-04 完成）**
+  - 分支 `feat/chat-history-drawer`（3 个提交 09bb392/80d73af/eb4893d），CI 全绿（30850745470、3…
 - `05:23` **OpenMinis fork — UX polish 批量改动（2026-08-04，分支 feat/ux-polish）**
   - 分支 `feat/ux-polish`（基于 feat/chat-history-drawer，2 个提交 1c28bf4 + 8c5bd58 文档），CI r…
 - `05:29` **OpenMinis fork — 仓库实况核查（2026-08-04 午后）**
@@ -84,7 +86,7 @@
 - `23:54` **RikkaMinis — 空菜单隐藏三个点按钮（2026-08-04，分支 feat/hide-empty-chat-menu）**
   - 用户反馈：设置 → Appearance → Chat Menu 里把 8 个可定制项全关后，右上角 "..." 菜单为空（点开只剩条件性条目，平时都不显示）→…
 
-## 2026-08-05（31 条）
+## 2026-08-05（30 条）
 
 - `00:04` **RikkaMinis — 空菜单隐藏三点已合并 main（2026-08-04 收尾）**
   - commit 7b24b24 已 ff 合并 main 并推送，主构建 run **30926659989 全绿 success**（head 7b24b24，…
@@ -98,8 +100,6 @@
   - 分支 feat/draft-persistence-ime-storage 新增第 5 个提交 **7468873**（fix(rootfs): use rea…
 - `01:45` **RikkaMinis — Mermaid 无法渲染成 PNG（2026-08-05）**
   - 在 PRoot/iSH 沙箱内，`@mermaid-js/mermaid-cli` 过不了 headless chromium 的 CDP 连接：
-- `02:23` **RikkaMinis vs OpenMinis 仓库对比报告（2026-08-05）**
-  - 用户要求对比官方 OpenMinis 与自己 fork RikkaMinis，报告已生成：/var/minis/workspace/OpenMinis-vs-R…
 - `07:48` **RikkaMinis 功能完整性审计报告（2026-08-05）**
   - 用户判断"没什么可加了，加任何功能收益都<临界值"。我做了完整审计，结论：**判断基本成立**。
 - `08:17` **RikkaMinis — 底部输入工具栏可配置化评估（2026-08-05）**
@@ -311,7 +311,7 @@
 - `22:26` **RikkaMinis 剔除法语文档 values-fr（2026-08-07, commit f94ad2e）**
   - ### 决定与理由
 
-## 2026-08-08（56 条）
+## 2026-08-08（57 条）
 
 - `00:07` **RikkaMinis: 滚动跳动根治 — 单锚点守护重构（2026-08-07，分支 feat/anchor-guard-single-follow）**
   - ### 背景与目标
@@ -349,6 +349,8 @@
   - 分支基于 main 13f00e0，commit 092ae886，CI run 31203129166 success。4 项优化：
 - `02:35` **RikkaMinis 流式结束滚动跳修复 — 分支 fix/drag-stop-disengage-follow (2026-08-08)**
   - 用户报"看着A段内容，震动时刻(输出结束)跳到B段"。日志实锤 anchor-guard 反复 firstIdx=1→scrollToItem(0,0)·11次…
+- `03:00` **README 补充 RikkaHub credit — 扩写 UI 与交互逻辑来源（2026-08-08）**
+  - 用户提出：README 只把 RikkaHub 归为"交互设计（三个 UI 元素）"，但 UI 与交互逻辑的灵感实际都来自 RikkaHub，应一并 credi…
 - `03:17` **RikkaMinis provider 行内星标改造 — 已合并 main（2026-08-08）**
   - 用户反馈:provider 列表"设为常用"要先点三个点(MoreVert)弹菜单再点星号,多余。改为行内直接放星号按钮,点击即切换常用。
 - `09:46` **RikkaMinis main 分支完整合并梳理（2026-08-08）**
@@ -1485,8 +1487,10 @@
 - `15:08` **RikkaMinis 收尾：安全止血 + 开源 + 封存（2026-08-30）**
   - 用户诉求：开发收尾，把开发数据丢云端封存当备份 + 开源开发历史。过程中发现并处理了一个**安全泄露**。
 
-## 2026-08-31（12 条）
+## 2026-08-31（13 条）
 
+- `00:21` **输入框宽度对齐 RikkaHub（2026-08-31）**
+  - 用户反馈 RikkaMinis 聊天输入框比 RikkaHub 的窄，要求调成 RikkaHub 的宽度。
 - `13:03` **吸收开源 Agent 生态三件套之 ①③ 落地（2026-08-31）**
   - 背景：用户给了 Mem0/LangGraph/E2B/Langfuse/LiteLLM 等开源项目清单，评估后拍板吸收三个增量：①记忆时间衰减 ③trace 回…
 - `13:13` **LiteLLM 吸收三件套 A+B+C 合并 main（2026-08-31）**
@@ -1817,7 +1821,7 @@
 - `20:27` **全局第二轮审计收口 + HIGH 修复闭环（2026-09-09 晚）**
   - **第二道门核实（reports/FINAL-closure.md）**：10 域 498 文件 / 169,059 行，5 HIGH + 34 MEDIUM …
 
-## 2026-09-10（29 条）
+## 2026-09-10（31 条）
 
 - `00:19` **全局第二轮审计修复进度（2026-09-09 深夜，交接点）**
   - **交接文档**：/var/minis/shared/audit-0909-round2-handoff.md（102 行，含状态锚点/批次表/剩余清单/下一步…
@@ -1869,6 +1873,8 @@
   - **小号线（rikkaflow/RikkaMinis）三条验证全绿**：
 - `10:09` **验证补强：逐字抽取生产代码 + 严格解析器当判据（2026-09-10）**
   - **问题**：单测只复刻了发射形状、没跑生产代码（`exportToWriter` 需要 repo 依赖，沙箱编不了整文件）→ 修复的"生产性"证据不足。
+- `12:03` **挂载编辑页名称提示修复 + 输入框高度对齐 rikkahub（2026-09-10 下午）**
+  - **用户拍板**：本会话收尾，验证工序交下个会话。交接文档 /var/minis/shared/composer-mount-ui-fix-handoff.md…
 - `12:34` **两分支合并前检查 + 64 字符边界修复 + 合并 main（2026-09-10 下午，main @ a3fbf44）**
   - **检查结论**：`fix/mount-detail-name-hint`（挂载编辑页路径提示 + 重名前置拦截）与 `fix/composer-height-…
 - `12:41` **遗留清单机制建立 + NUL 项搁置（2026-09-10）**
@@ -1877,3 +1883,67 @@
   - **用户诉求**：把"大模型回答结束后系统塞进去要他检查"的机制做成可选开关。查证结论——**它叫 verify nudge（`VerificationStop…
 - `14:12` **挂载页删改名 + composer 回退（2026-09-10，main @ 09f040e）**
   - **两件事，分支 fix/mount-drop-rename（2 commit）**：
+- `15:08` **dev-history 重建 882 条 + 小号同步机制实测通过（2026-09-10 下午收尾，主仓 main @ 68f5715）**
+  - **① 文档更新**：rebuild_dev_history.py + sanitize → 882 条 / 39 天 / fences 32 even / o…
+
+## 2026-09-11（12 条）
+
+- `00:44` **Obsidian 式插件系统评估：不做（2026-09-11）**
+  - 用户问「给 RikkaMinis 做 Obsidian 那样的插件系统是否值得」。按一阶门/二阶门评估后拍板**不做**：
+- `09:43` **2026-09-11 09:43:10**
+  - 用户对「Provider 多密钥轮换」功能提出两点：①修掉梳理时发现的边界 bug ②该功能无任何 UI 说明，用户自己都不知道存在，要求加上。
+- `10:59` **三处改动审计：两次已合并 + fix/key-roulette-refresh（全过，分支待合并）**
+  - **审计结论：三处均无 bug。**
+- `11:02` **fix/key-roulette-refresh 合并收尾（main @ 3a988d5f）**
+  - **合并**：审计三处全过 → 用户拍板 → refspec 直推 ff（7cf6caa0..3a988d5f，无 force）→ 远端 main 用 ls-r…
+- `11:35` **思考泄漏（thinking leaked into body）成因调查（2026-09-11）**
+  - 用户观察：模型组里混杂各供应商模型，偶发思考内容漏进正文；自测后判断"主要是上游供应商没完善，只对特定供应商的模型出现"。
+- `11:38` **思考泄漏取证：中转站自报 reasoning_tokens 但零 reasoning 字段（2026-09-11，用户一线样本）**
+  - 用户指出"当前这个会话本身就是典型案例"——他通过第三方中转站调用当前模型，且该问题只在这个模型上出现。
+- `14:47` **Groq 免费档在 RikkaMinis 中不可用的根因（2026-09-11，用户提供 gsk_ key 排查）**
+  - 用户配 Groq 官方（api.groq.com/openai/v1）+ Qwen/Qwen3.8-27B，问为什么在应用里"出问题"。
+- `20:42` **key-roulette release CI 终态确认（2026-09-11 晚）**
+  - main @ 3a988d5f 的 release CI run 34556828343 已确认 **success**（bridge /status/main…
+- `21:26` **fix/singleline-paste-newline 分支审计：无 bug（2026-09-11）**
+  - 正在跑的分支 = `fix/singleline-paste-newline`（单 commit f4b6c4a 基于 main @ 3a988d5，run 3…
+- `21:28` **fix/singleline-paste-newline — 单行输入框粘贴换行折叠（2026-09-11 晚，CI 绿，待拍板合并）**
+  - **问题**（用户报告）：向输入框粘贴多行文本（如 newapi 的 headers、多行 key），只显示第一行，其余被裁；删掉可见字符后字段看起来空了、实际…
+- `21:30` **singleline-paste-newline 合并收尾（main @ f4b6c4a）**
+  - **合并**：分支 CI #1464 success（head f4b6c4a 三方一致）→ 用户拍板 → refspec 直推 ff（3a988d5..f4b…
+- `21:32` **singleline-paste-newline 真机验证通过（2026-09-11 晚）**
+  - 用户实测分支构建（= main @ f4b6c4a 同一 commit，等价）：**四项验收点全过，无问题**——①多行粘贴到 API Key/UA/URL 字…
+
+## 2026-09-12（16 条）
+
+- `00:25` **think 泄漏根因实锤：中转站 `<think>` 标签不在解析表（2026-09-11 晚）**
+  - - 用户报告"思考泄漏是应用本身的问题"（rikkahub 同站正常）→ 直接 curl 中转站实锤
+- `00:25` **聊天输入框"吞内容"根因：imeBurstBuffer 残留 stale 快照（2026-09-11 晚）**
+  - - 用户报告：发 URL+key 时**前面的描述被吞**（间歇，"有时候"）
+- `00:25` **senseaudio"系统繁忙"实测 + TTFB 30s 通用缺口（2026-09-11 晚）**
+  - - **senseaudio 实测**（api.senseaudio.cn，37 模型聚合站）：8 并发 → 全 HTTP 500 `{"code":"inte…
+- `00:39` **三修复打包分支 fix/ttfb-thinktag-composer 推送+CI（2026-09-11 深夜）**
+  - - 用户拍板：TTFB 直接调默认值（30s→90s）；think 标签+输入框"照常修，直接打包一起"（一分支三 commit）
+- `01:26` **fix/ttfb-thinktag-composer 合并收尾完成（main @ e1a0b08）**
+  - - **合并**：refspec 直推 ff（`f4b6c4a..e1a0b08`，无 force）→ ls-remote 复核 main = e1a0b086…
+- `02:11` **最终可吸收清单已收敛入 backlog（2026-09-12）**
+  - - 落点：/var/minis/shared/backlog.md 第 2 节（A 待办 2 项 / B 种子 2 项 / C 等窗口 3 项 / D 观察点 …
+- `02:14` **交接完成：A1 Prompt Cache + A2 定时 rollup → 新会话处理（2026-09-12）**
+  - - 交接文档：/var/minis/shared/prompt-cache-rollup-handoff.md（含全部代码坐标/执行步骤/坑位/验证清单）
+- `02:21` **A1 Prompt Cache 调查结论：本地已是上游超集，无需移植（2026-09-12）**
+  - - **交接文档取证有误**：e1a0b08 的 AnthropicProvider.kt 已有完整 cache_control 实现（ephemeralCac…
+- `02:24` **A1/A2 双双归档 + parseUsage bug 进 backlog（2026-09-12 收尾）**
+  - - 用户拍板：A1 parseUsage bug「先攒着」（选 2=backlog），A2 一起调查后一起处理
+- `02:45` **parseUsage 双重扣减 bug 已修复合并（main @ 8e98166，2026-09-12）**
+  - - 用户拍板修（backlog 第 3 条），分支 fix/anthropic-parse-usage @ 8e98166
+- `09:33` **"三条借鉴"动手核查：两条已有等价实现，零代码改动（2026-09-12）**
+  - 用户拍板做三条借鉴（skill 预算截短 / effort 降级链 / llm-bug-audit effort 档），开工前按验证优先核查，发现：
+- `10:05` **差距清单收敛完成：D1 攒着，D3/D4/D5 归档不吸收（2026-09-12）**
+  - - D1 sanitizeUtf16 → backlog.md 第 2 条（参照 OmniBot AgentTextSanitizer.kt 63 行，宜与下次…
+- `10:10` **backlog.md 清理（2026-09-12）**
+  - - 用户指出 backlog 里大多是已修复/已有对应的死项+编号混乱（两个##2）→ 重写：活项 4 节（sanitizeUtf16 / B 种子 2 / C…
+- `10:33` **开发趋势图 + 统计快照（2026-09-12）**
+  - - 图：/var/minis/attachments/rikkaminis-dev-trends.png（6 子图：提交节奏/体量/类型/周主题迁移/近21天主…
+- `10:47` **体量统计 bug 修正 + 洞察层结论（2026-09-12，接续上一条）**
+  - - **坑 3（重要）**：按日期累加 `git log --shortstat` 时，同一天多个 commit 的 `vol[date] = 0` 初始化会把…
+- `11:43` **P0/P1/P2 三件全闭环（main @ fe39a66，2026-09-12）**
+  - - **分支 fix/p012-strict-json-reasoning-flag（2 commit：60aeea8 测试 + fe39a66 诊断）→ 沙箱…
