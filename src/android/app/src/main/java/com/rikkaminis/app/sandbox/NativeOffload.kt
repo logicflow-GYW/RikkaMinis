@@ -19,8 +19,9 @@ import kotlin.concurrent.thread
  * limits in [readLEString] bound individual strings but not the aggregate:
  * a hostile or buggy guest could stream thousands of near-1 MiB entries
  * and OOM the host while the arg/env maps grow. Mirrors the shell-output
- * cap precedent ([PersistentShell.MAX_OUTPUT_CHARS]) — real offload
- * requests are a few KB, so 1 MiB is generous headroom.
+ * truncation cap precedent (PersistentShell writes its cap from the tunable
+ * `shellOutputKb` budget) — real offload requests are a few KB, so 1 MiB
+ * is generous headroom.
  */
 internal const val MAX_REQUEST_BYTES = 1024 * 1024  // 1 MiB
 

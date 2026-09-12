@@ -315,7 +315,7 @@ internal object ConfigBuiltins {
         r.register(PrefsIntField(
             path = "runtime.memoryLookbackDays",
             displayName = "Memory: search lookback (days)",
-            description = "How many days back memory search scans for recent daily logs. Default 30.",
+            description = "How many days back recent daily logs are walked for the context injection; memory search itself reads all logs. Default 30.",
             prefs = limits, key = L.KEY_MEMORY_LOOKBACK_DAYS,
             defaultValue = L.MEMORY_LOOKBACK_DAYS_DEFAULT, minValue = L.MEMORY_LOOKBACK_DAYS_MIN, maxValue = L.MEMORY_LOOKBACK_DAYS_MAX,
         ))
@@ -386,7 +386,7 @@ internal object ConfigBuiltins {
         r.register(PrefsIntField(
             path = "runtime.shellTimeoutSec",
             displayName = "Shell: default command timeout (s)",
-            description = "Default timeout for shell commands when a call does not pass its own. Default 600.",
+            description = "Default timeout for shell commands that don't pass their own; explicit per-call values keep their own (max 900 s). Default 900.",
             prefs = limits, key = L.KEY_SHELL_TIMEOUT_SEC,
             defaultValue = L.SHELL_TIMEOUT_DEFAULT_SEC, minValue = L.SHELL_TIMEOUT_MIN_SEC, maxValue = L.SHELL_TIMEOUT_MAX_SEC,
         ))

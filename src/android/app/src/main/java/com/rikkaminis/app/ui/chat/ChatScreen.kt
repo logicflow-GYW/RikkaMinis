@@ -944,7 +944,7 @@ fun ChatScreen(
     // visual definition of "at bottom" lines up with what the user sees.
     // [feat/chat-tuning-panel] Now user-tunable (Settings → Appearance →
     // Chat Tuning); the default is the T128 value (32). The helper registers
-    // its own appearance_prefs listener, so a knob change recomposes here.
+    // its own minis_chat_tuning_prefs listener, so a knob change recomposes here.
     val tuning = rememberChatTuning(context)
     val nearBottomThresholdPx = with(LocalDensity.current) { tuning.scrollNearBottomDp.dp.toPx() }
     // T138 phase 2 v3: ground-truth bottom test via layoutInfo. If
