@@ -353,6 +353,11 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.json:json:20231013")
+    // [T-backup-strict-json] Strict JSON parser for backup-emission tests:
+    // org.json (and kotlinx Json.parseToJsonElement!) accept bare-word values,
+    // so they can never catch malformed emission — Jackson rejects them and
+    // matches what python json / jq do to a real backup file.
+    testImplementation("com.fasterxml.jackson.core:jackson-databind:2.17.2")
     // XmlPullParser implementation for JVM unit tests only; on Android the
     // framework provides org.xmlpull.v1 via android.util.Xml.
     testImplementation("net.sf.kxml:kxml2:2.3.0")
