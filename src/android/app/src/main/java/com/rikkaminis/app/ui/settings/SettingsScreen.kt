@@ -82,6 +82,10 @@ fun SettingsScreen(
     onPermissionsClick: () -> Unit = {},
     onUsageClick: () -> Unit = {},
     onAppearanceClick: () -> Unit = {},
+    // [feat/chat-tuning-panel] entry into the Chat Tuning page (listed right
+    // below Appearance — reading / scrolling / composer knobs). Default
+    // no-op for callers that haven't wired the route yet.
+    onChatTuningClick: () -> Unit = {},
     onLogsClick: () -> Unit = {},
     onBackupClick: () -> Unit = {},
     // T219-2: Mount External Folders entry. Default no-op for any caller
@@ -151,6 +155,15 @@ fun SettingsScreen(
                     title = stringResource(R.string.settings_section_appearance),
                     subtitle = stringResource(R.string.settings_appearance_subtitle),
                     onClick = onAppearanceClick,
+                )
+                // [feat/chat-tuning-panel] Reading / scrolling / composer knobs
+                // that were previously hard-coded.
+                SettingsItem(
+                    icon = Icons.Outlined.Tune,
+                    iconColor = Color(0xFF34C759),
+                    title = stringResource(R.string.chat_tuning_entry),
+                    subtitle = stringResource(R.string.chat_tuning_entry_subtitle),
+                    onClick = onChatTuningClick,
                     showDivider = false,
                 )
             }

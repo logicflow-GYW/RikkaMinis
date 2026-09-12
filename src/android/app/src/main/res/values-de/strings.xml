@@ -1664,4 +1664,26 @@
     <string name="shortcut_camera_chat_long">Chat mit Kamera</string>
     <string name="ok">OK</string>
     <string name="chat_load_older_messages">↑ Ältere Nachrichten laden</string>
+    <!-- [feat/chat-tuning-panel] Chat-Feintuning — Lese-/Scroll-/Eingabe-Parameter. -->
+    <string name="chat_tuning_entry">Chat-Feintuning</string>
+    <string name="chat_tuning_entry_subtitle">Lesen, Scrollen und Eingabegefühl</string>
+    <string name="chat_tuning_title">Chat-Feintuning</string>
+    <string name="chat_tuning_section_reading">LESEN &amp; SCROLLEN</string>
+    <string name="chat_tuning_scroll_threshold">Unten-Haften-Schwelle</string>
+    <string name="chat_tuning_scroll_threshold_desc">Wie nah am Ende (dp) noch als „ganz unten“ gilt — steuert das automatische Mitführen und wann der Nach-unten-Knopf erscheint. Standard 32.</string>
+    <string name="chat_tuning_prewarm">Vorgerenderte Zeilen beim Öffnen</string>
+    <string name="chat_tuning_prewarm_desc">Die neuesten langen Nachrichten werden beim Öffnen eines Chats vorab geparst, damit das erste Bild aus dem Cache kommt. Höher = flüssigeres Öffnen, mehr CPU. Standard 16.</string>
+    <string name="chat_tuning_code_preview">Codeblock-Faltschwelle (Zeilen)</string>
+    <string name="chat_tuning_code_preview_desc">Höhere Codeblöcke starten eingeklappt mit einem „N Zeilen ausklappen“-Knopf. Standard 20.</string>
+    <string name="chat_tuning_table_preview">Tabellen-Faltschwelle (Zeilen)</string>
+    <string name="chat_tuning_table_preview_desc">Höhere Tabellen starten eingeklappt. Standard 10.</string>
+    <string name="chat_tuning_line_height">Markdown-Zeilenhöhe (sp)</string>
+    <string name="chat_tuning_line_height_desc">Zeilenabstand des Nachrichtentexts. Skaliert weiterhin mit der Nachrichten-Schriftgröße. Standard 24.</string>
+    <string name="chat_tuning_reading_footer">Diese Werte waren zuvor fest im Code. Die Standardwerte entsprechen den bisherigen, eine unveränderte Installation verhält sich exakt wie zuvor.</string>
+    <string name="chat_tuning_section_input">EINGABEFELD</string>
+    <string name="chat_tuning_input_max_lines">Maximale Zeilen des Eingabefelds</string>
+    <string name="chat_tuning_input_max_lines_desc">Das Eingabefeld wächst bis zu dieser Zeilenzahl und scrollt danach intern. Standard 6.</string>
+    <string name="chat_tuning_swipe_threshold">Hochwisch-Sendestrecke (dp)</string>
+    <string name="chat_tuning_swipe_threshold_desc">Wie weit man im Eingabefeld nach oben wischen muss, um die Sendegeste auszulösen. Standard 120.</string>
+    <string name="chat_tuning_composer_footer">Betrifft nur das Eingabefeld der App. Sende-Knopf und Enter-Verhalten sind eigene Einstellungen.</string>
 </resources>

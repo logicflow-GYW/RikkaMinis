@@ -1761,4 +1761,26 @@
     <string name="provider_saved_no_api_key">Saved, but no API key was found</string>
     <string name="provider_saved_models_failed">Saved, but fetching the model list failed - check the URL and key</string>
     <string name="provider_saved_models_unreachable">Saved, but models could not be fetched from that address - check the URL</string>
+    <!-- [feat/chat-tuning-panel] Chat Tuning — reading / scrolling / composer knobs. -->
+    <string name="chat_tuning_entry">Chat Tuning</string>
+    <string name="chat_tuning_entry_subtitle">Reading, scrolling and composer feel</string>
+    <string name="chat_tuning_title">Chat Tuning</string>
+    <string name="chat_tuning_section_reading">READING &amp; SCROLLING</string>
+    <string name="chat_tuning_scroll_threshold">Bottom-stick threshold</string>
+    <string name="chat_tuning_scroll_threshold_desc">How close to the bottom (dp) still counts as “at the bottom” — governs auto-follow stickiness and the jump-to-bottom button. Default 32.</string>
+    <string name="chat_tuning_prewarm">Pre-render rows on open</string>
+    <string name="chat_tuning_prewarm_desc">The newest long messages are pre-parsed when a chat opens so the first frame renders from cache. Higher = smoother cold open, more CPU. Default 16.</string>
+    <string name="chat_tuning_code_preview">Code-block fold threshold (lines)</string>
+    <string name="chat_tuning_code_preview_desc">Code blocks taller than this start folded with an “Expand N lines” button. Default 20.</string>
+    <string name="chat_tuning_table_preview">Table fold threshold (rows)</string>
+    <string name="chat_tuning_table_preview_desc">Tables taller than this start folded. Default 10.</string>
+    <string name="chat_tuning_line_height">Markdown line height (sp)</string>
+    <string name="chat_tuning_line_height_desc">Line spacing of message bodies. Still scales with the message font size. Default 24.</string>
+    <string name="chat_tuning_reading_footer">These knobs were previously hard-coded. Defaults match the built-in values, so an untouched install behaves exactly as before.</string>
+    <string name="chat_tuning_section_input">COMPOSER</string>
+    <string name="chat_tuning_input_max_lines">Input box max lines</string>
+    <string name="chat_tuning_input_max_lines_desc">The input box grows up to this many lines before it scrolls internally. Default 6.</string>
+    <string name="chat_tuning_swipe_threshold">Swipe-up-to-send distance (dp)</string>
+    <string name="chat_tuning_swipe_threshold_desc">How far you must swipe up inside the input to arm the send gesture. Default 120.</string>
+    <string name="chat_tuning_composer_footer">Only the in-app composer is affected. The send button and the return-key behaviour are separate settings.</string>
 </resources>

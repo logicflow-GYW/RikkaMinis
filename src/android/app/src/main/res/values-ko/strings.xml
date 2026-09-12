@@ -1663,4 +1663,26 @@
     <string name="shortcut_camera_chat_long">카메라로 채팅</string>
     <string name="ok">확인</string>
     <string name="chat_load_older_messages">↑ 이전 메시지 불러오기</string>
+    <!-- [feat/chat-tuning-panel] 채팅 미세 조정 — 읽기/스크롤/입력 항목. -->
+    <string name="chat_tuning_entry">채팅 미세 조정</string>
+    <string name="chat_tuning_entry_subtitle">읽기, 스크롤, 입력 감촉</string>
+    <string name="chat_tuning_title">채팅 미세 조정</string>
+    <string name="chat_tuning_section_reading">읽기와 스크롤</string>
+    <string name="chat_tuning_scroll_threshold">하단 고정 임계값</string>
+    <string name="chat_tuning_scroll_threshold_desc">하단에서 얼마나 가까워야( dp) “하단”으로 간주할지 — 자동 따라가기 고정과 맨 아래로 버튼의 표시 시점을 결정합니다. 기본 32.</string>
+    <string name="chat_tuning_prewarm">열 때 미리 렌더링할 행 수</string>
+    <string name="chat_tuning_prewarm_desc">채팅을 열 때 최신 긴 메시지를 미리 분석해 첫 프레임을 캐시로 그립니다. 클수록 더 부드럽고 CPU 사용량도 늘어납니다. 기본 16.</string>
+    <string name="chat_tuning_code_preview">코드 블록 접기 임계값(줄)</string>
+    <string name="chat_tuning_code_preview_desc">이 줄 수를 넘는 코드 블록은 접힌 상태로 시작하며 “N줄 펼치기” 버튼이 표시됩니다. 기본 20.</string>
+    <string name="chat_tuning_table_preview">표 접기 임계값(행)</string>
+    <string name="chat_tuning_table_preview_desc">이 행 수를 넘는 표는 접힌 상태로 시작합니다. 기본 10.</string>
+    <string name="chat_tuning_line_height">Markdown 줄 높이(sp)</string>
+    <string name="chat_tuning_line_height_desc">본문의 줄 간격입니다. 메시지 글자 크기에 따라 함께 조정됩니다. 기본 24.</string>
+    <string name="chat_tuning_reading_footer">이 값들은 이전에 코드에 고정되어 있었습니다. 기본값은 내장 값과 같아, 변경하지 않으면 이전과 동일하게 동작합니다.</string>
+    <string name="chat_tuning_section_input">입력창</string>
+    <string name="chat_tuning_input_max_lines">입력창 최대 줄 수</string>
+    <string name="chat_tuning_input_max_lines_desc">입력창은 이 줄 수까지 커지고, 그 이상은 내부에서 스크롤됩니다. 기본 6.</string>
+    <string name="chat_tuning_swipe_threshold">위로 밀어 보내기 거리(dp)</string>
+    <string name="chat_tuning_swipe_threshold_desc">입력창 안에서 위로 얼마나 밀어야 보내기 제스처가 작동하는지. 기본 120.</string>
+    <string name="chat_tuning_composer_footer">앱 내 입력창에만 영향을 줍니다. 전송 버튼과 Enter 키 동작은 별도 설정입니다.</string>
 </resources>

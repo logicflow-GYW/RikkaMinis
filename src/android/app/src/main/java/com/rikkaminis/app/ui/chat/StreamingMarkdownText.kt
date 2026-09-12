@@ -102,6 +102,7 @@ import coil.compose.SubcomposeAsyncImageContent
 import coil.request.ImageRequest
 import com.rikkaminis.app.ui.DisplayBitmapLimits.limitDisplaySize
 import com.rikkaminis.app.sandbox.PRootKernel
+import com.rikkaminis.app.data.ChatTuningPrefs
 import com.rikkaminis.app.ui.theme.ChatColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -213,13 +214,16 @@ private fun currentMdColors(): MdColors {
 
 private val MdCodeLangColor = Color.White.copy(alpha = 0.5f)
 
-/** Code blocks show this many lines before the "Expand N lines" fold kicks in. */
-private const val CODE_PREVIEW_LINES = 20
+/** Code blocks show this many lines before the "Expand N lines" fold kicks in.
+ *  [feat/chat-tuning-panel] User-tunable (Settings → Appearance → Chat Tuning);
+ *  the default (20) is the previously hard-coded value. */
+val LocalCodePreviewLines = compositionLocalOf { ChatTuningPrefs.CODE_PREVIEW_LINES_DEFAULT }
 // 表格折叠阈值：行数（含表头）超过此值折叠。表格行比代码行高（单元格
 // 上下 8dp padding），阈值取 10 更贴合"折叠后仍是一屏内"的直觉。与代码块
 // 折叠同模式（fix/scroll-ux-table-fold-animate）：表格本身保留横向滚动
 // （长列），纵向高度用折叠控制，避免长表格占满整屏把聊天顶走。
-private const val TABLE_PREVIEW_ROWS = 10
+// [feat/chat-tuning-panel] User-tunable; local default = pre-panel literal 10.
+val LocalTablePreviewRows = compositionLocalOf { ChatTuningPrefs.TABLE_PREVIEW_ROWS_DEFAULT }
 
 val LocalMarkdownFontScale = compositionLocalOf { 1f }
 
@@ -254,13 +258,17 @@ val LocalMarkdownImageTapHandler =
 val LocalMarkdownSessionId = compositionLocalOf<String?> { null }
 
 private val BaseFontSizeDefault = 16.sp
-private val BaseLineHeightDefault = 24.sp
+
+/** [feat/chat-tuning-panel] Body line height (sp), user-tunable — the default
+ *  (24) is the previously hard-coded value. Still multiplied by
+ *  [LocalMarkdownFontScale] so it follows the message font-size setting. */
+val LocalMarkdownLineHeightSp = compositionLocalOf { ChatTuningPrefs.MARKDOWN_LINE_HEIGHT_DEFAULT }
 
 private val BaseFontSize: TextUnit
     @Composable get() = BaseFontSizeDefault * LocalMarkdownFontScale.current
 
 private val BaseLineHeight: TextUnit
-    @Composable get() = BaseLineHeightDefault * LocalMarkdownFontScale.current
+    @Composable get() = LocalMarkdownLineHeightSp.current.sp * LocalMarkdownFontScale.current
 
 private val InlineCodeCornerRadius = 6.dp
 
@@ -1057,20 +1065,21 @@ private fun RenderBlock(block: MdBlock) {
                             },
                     )
                 }
-                // Folded code block: show the first CODE_PREVIEW_LINES lines
-                // by default, tap "Expand N lines" for the rest. The previous
-                // nested vertical scroll (400dp cap) inside a horizontal
-                // scroll made the block a 2D scrollable, so diagonal/arced
-                // thumb swipes over it fought the chat list's scroll
-                // direction arbitration — the "must swipe perfectly straight"
-                // feeling. Vertical gestures now flow straight to the chat
-                // LazyColumn; only horizontal scroll (long lines) stays
-                // inside the block.
+                // Folded code block: show the first LocalCodePreviewLines
+                // lines by default, tap "Expand N lines" for the rest. The
+                // previous nested vertical scroll (400dp cap) inside a
+                // horizontal scroll made the block a 2D scrollable, so
+                // diagonal/arced thumb swipes over it fought the chat list's
+                // scroll direction arbitration — the "must swipe perfectly
+                // straight" feeling. Vertical gestures now flow straight to
+                // the chat LazyColumn; only horizontal scroll (long lines)
+                // stays inside the block.
+                val codePreviewLines = LocalCodePreviewLines.current
                 val lineCount = block.code.count { it == '\n' } + 1
-                val collapsed = lineCount > CODE_PREVIEW_LINES
+                val collapsed = lineCount > codePreviewLines
                 var expanded by remember { mutableStateOf(false) }
                 val visibleCode = if (collapsed && !expanded) {
-                    block.code.lineSequence().take(CODE_PREVIEW_LINES).joinToString("\n")
+                    block.code.lineSequence().take(codePreviewLines).joinToString("\n")
                 } else block.code
                 val hScroll = rememberScrollState()
                 Box(
@@ -1090,7 +1099,7 @@ private fun RenderBlock(block: MdBlock) {
                     Text(
                         text = stringResource(
                             if (expanded) R.string.code_collapse else R.string.code_expand,
-                            lineCount - CODE_PREVIEW_LINES,
+                            lineCount - codePreviewLines,
                         ),
                         fontSize = 12.sp,
                         color = colors.link,
@@ -1893,16 +1902,18 @@ private fun RenderTable(block: MdBlock.Table) {
         if (block.headers.isNotEmpty()) add(block.headers)
         addAll(block.rows)
     }
-    // 表格折叠：超过 TABLE_PREVIEW_ROWS 行折叠，只渲染前 N 行（表头天然
-    // 在前 N 行内）+ "展开 N 行"按钮，与代码块折叠同模式。表格本身保留
-    // 横向滚动（长列），纵向高度用折叠控制，避免长表格占满整屏把聊天顶走。
+    // 表格折叠：超过阈值行折叠，只渲染前 N 行（表头天然在前 N 行内）+
+    // "展开 N 行"按钮，与代码块折叠同模式。表格本身保留横向滚动（长列），
+    // 纵向高度用折叠控制，避免长表格占满整屏把聊天顶走。
+    // [feat/chat-tuning-panel] Threshold is user-tunable; local default = 10.
+    val tablePreviewRows = LocalTablePreviewRows.current
     val totalRowCount = allRows.size
-    val tableCollapsed = totalRowCount > TABLE_PREVIEW_ROWS
+    val tableCollapsed = totalRowCount > tablePreviewRows
     // 与代码块折叠同模式：无 key 的 remember，展开状态跨重组保留（用户
     // 手动展开后，后续消息流式进来不把它折回）。
     var tableExpanded by remember { mutableStateOf(false) }
     val visibleRows = if (tableCollapsed && !tableExpanded) {
-        allRows.take(TABLE_PREVIEW_ROWS)
+        allRows.take(tablePreviewRows)
     } else {
         allRows
     }
@@ -2146,7 +2157,7 @@ private fun RenderTable(block: MdBlock.Table) {
             Text(
                 text = stringResource(
                     if (tableExpanded) R.string.code_collapse else R.string.code_expand,
-                    totalRowCount - TABLE_PREVIEW_ROWS,
+                    totalRowCount - tablePreviewRows,
                 ),
                 fontSize = 12.sp,
                 color = colors.link,

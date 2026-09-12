@@ -1688,4 +1688,26 @@
     <string name="provider_saved_no_api_key">已保存，但未读到 API 密钥</string>
     <string name="provider_saved_models_failed">已保存，但模型列表拉取失败，请检查 URL 与密钥</string>
     <string name="provider_saved_models_unreachable">已保存，但无法从该地址拉取模型，请检查 URL</string>
+    <!-- [feat/chat-tuning-panel] 聊天微调 — 阅读/滚动/输入手感参数。 -->
+    <string name="chat_tuning_entry">聊天微调</string>
+    <string name="chat_tuning_entry_subtitle">阅读、滚动与输入手感</string>
+    <string name="chat_tuning_title">聊天微调</string>
+    <string name="chat_tuning_section_reading">阅读与滚动</string>
+    <string name="chat_tuning_scroll_threshold">触底判定阈值</string>
+    <string name="chat_tuning_scroll_threshold_desc">距离底部多近（dp）仍算“在底部”——决定自动跟随的粘性与回到底部按钮的出现时机。默认 32。</string>
+    <string name="chat_tuning_prewarm">打开时预渲染行数</string>
+    <string name="chat_tuning_prewarm_desc">打开会话时，最新的长消息会被预解析，首帧直接走缓存。数值越大冷启动越顺滑，CPU 占用也越高。默认 16。</string>
+    <string name="chat_tuning_code_preview">代码块折叠阈值（行）</string>
+    <string name="chat_tuning_code_preview_desc">超过此行数的代码块默认折叠，显示“展开 N 行”按钮。默认 20。</string>
+    <string name="chat_tuning_table_preview">表格折叠阈值（行）</string>
+    <string name="chat_tuning_table_preview_desc">超过此行数的表格默认折叠。默认 10。</string>
+    <string name="chat_tuning_line_height">Markdown 行高（sp）</string>
+    <string name="chat_tuning_line_height_desc">正文的行间距，仍会随消息字号一起缩放。默认 24。</string>
+    <string name="chat_tuning_reading_footer">这些参数此前写死在代码里。默认值与内置值一致，未调整过时行为与之前完全相同。</string>
+    <string name="chat_tuning_section_input">输入框</string>
+    <string name="chat_tuning_input_max_lines">输入框最大行数</string>
+    <string name="chat_tuning_input_max_lines_desc">输入框最多长到这么多行，再多就在内部滚动。默认 6。</string>
+    <string name="chat_tuning_swipe_threshold">上滑发送距离（dp）</string>
+    <string name="chat_tuning_swipe_threshold_desc">在输入框内上滑多远才触发发送手势。默认 120。</string>
+    <string name="chat_tuning_composer_footer">仅影响应用内输入框；发送按钮与回车键行为是另外的设置项。</string>
 </resources>

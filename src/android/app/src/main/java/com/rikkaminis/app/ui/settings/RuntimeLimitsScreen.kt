@@ -328,10 +328,11 @@ fun RuntimeLimitsScreen(onBack: () -> Unit) {
     }
 }
 
-// ── local building blocks (mirror SettingsScreen's private ones) ─────────
+// ── Shared building blocks (used by RuntimeLimitsScreen AND ChatTuningScreen;
+//    originally mirrored SettingsScreen's private ones) ────────────────────
 
 @Composable
-private fun LimitsSectionCard(title: String, content: @Composable () -> Unit) {
+internal fun LimitsSectionCard(title: String, content: @Composable () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -358,7 +359,7 @@ private fun LimitsSectionCard(title: String, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun LimitsSectionFooter(text: String) {
+internal fun LimitsSectionFooter(text: String) {
     Text(
         text = text,
         style = MaterialTheme.typography.bodySmall,
@@ -369,7 +370,7 @@ private fun LimitsSectionFooter(text: String) {
 }
 
 @Composable
-private fun LimitsSwitchRow(
+internal fun LimitsSwitchRow(
     title: String,
     subtitle: String?,
     checked: Boolean,
@@ -421,7 +422,7 @@ private fun LimitsSwitchRow(
  * page-level Save persists.
  */
 @Composable
-private fun LimitsSliderRow(
+internal fun LimitsSliderRow(
     title: String,
     subtitle: String? = null,
     valueLabel: String? = null,

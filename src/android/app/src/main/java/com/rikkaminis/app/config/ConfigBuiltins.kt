@@ -735,6 +735,107 @@ internal object ConfigBuiltins {
                 defaultValue = true,
             )
         )
+
+        // ── [feat/chat-tuning-panel] Chat Tuning knobs ─────────────────────
+        // Previously hard-coded literals in ChatScreen / StreamingMarkdownText
+        // / ChatInputArea. Defaults equal those literals, so an untouched
+        // install behaves byte-identically. Registered here so `minis-config`
+        // can read/write them and ConfigBackup carries them; the in-app
+        // Chat Tuning panel reads/writes the same prefs file.
+        val chatTuningPrefs = context.getSharedPreferences(
+            com.rikkaminis.app.data.ChatTuningPrefs.PREFS, Context.MODE_PRIVATE
+        )
+        r.register(
+            PrefsIntField(
+                path = "chat.scrollNearBottomDp",
+                displayName = "Chat: bottom-stick threshold (dp)",
+                description = "How close to the bottom still counts as \"at the bottom\" — governs " +
+                    "auto-follow stickiness and when the jump-to-bottom button appears. Default 32.",
+                prefs = chatTuningPrefs,
+                key = com.rikkaminis.app.data.ChatTuningPrefs.KEY_SCROLL_NEAR_BOTTOM_DP,
+                defaultValue = com.rikkaminis.app.data.ChatTuningPrefs.SCROLL_NEAR_BOTTOM_DEFAULT,
+                minValue = com.rikkaminis.app.data.ChatTuningPrefs.SCROLL_NEAR_BOTTOM_MIN,
+                maxValue = com.rikkaminis.app.data.ChatTuningPrefs.SCROLL_NEAR_BOTTOM_MAX,
+            )
+        )
+        r.register(
+            PrefsIntField(
+                path = "chat.prewarmRowLimit",
+                displayName = "Chat: pre-render rows on open",
+                description = "How many newest long messages are block-parsed off-main when a chat " +
+                    "opens, so the first frame renders from cache. Higher = smoother cold open, " +
+                    "more CPU/memory. Default 16.",
+                prefs = chatTuningPrefs,
+                key = com.rikkaminis.app.data.ChatTuningPrefs.KEY_PREWARM_ROW_LIMIT,
+                defaultValue = com.rikkaminis.app.data.ChatTuningPrefs.PREWARM_ROW_LIMIT_DEFAULT,
+                minValue = com.rikkaminis.app.data.ChatTuningPrefs.PREWARM_ROW_LIMIT_MIN,
+                maxValue = com.rikkaminis.app.data.ChatTuningPrefs.PREWARM_ROW_LIMIT_MAX,
+            )
+        )
+        r.register(
+            PrefsIntField(
+                path = "chat.codePreviewLines",
+                displayName = "Chat: code-block fold threshold (lines)",
+                description = "Code blocks taller than this many lines start folded with an " +
+                    "\"Expand N lines\" button. Default 20.",
+                prefs = chatTuningPrefs,
+                key = com.rikkaminis.app.data.ChatTuningPrefs.KEY_CODE_PREVIEW_LINES,
+                defaultValue = com.rikkaminis.app.data.ChatTuningPrefs.CODE_PREVIEW_LINES_DEFAULT,
+                minValue = com.rikkaminis.app.data.ChatTuningPrefs.CODE_PREVIEW_LINES_MIN,
+                maxValue = com.rikkaminis.app.data.ChatTuningPrefs.CODE_PREVIEW_LINES_MAX,
+            )
+        )
+        r.register(
+            PrefsIntField(
+                path = "chat.tablePreviewRows",
+                displayName = "Chat: table fold threshold (rows)",
+                description = "Tables taller than this many rows start folded. Default 10.",
+                prefs = chatTuningPrefs,
+                key = com.rikkaminis.app.data.ChatTuningPrefs.KEY_TABLE_PREVIEW_ROWS,
+                defaultValue = com.rikkaminis.app.data.ChatTuningPrefs.TABLE_PREVIEW_ROWS_DEFAULT,
+                minValue = com.rikkaminis.app.data.ChatTuningPrefs.TABLE_PREVIEW_ROWS_MIN,
+                maxValue = com.rikkaminis.app.data.ChatTuningPrefs.TABLE_PREVIEW_ROWS_MAX,
+            )
+        )
+        r.register(
+            PrefsIntField(
+                path = "chat.markdownLineHeightSp",
+                displayName = "Chat: Markdown line height (sp)",
+                description = "Line spacing for message bodies, in sp at the default font scale " +
+                    "(still follows the message font-size setting). Default 24.",
+                prefs = chatTuningPrefs,
+                key = com.rikkaminis.app.data.ChatTuningPrefs.KEY_MARKDOWN_LINE_HEIGHT_SP,
+                defaultValue = com.rikkaminis.app.data.ChatTuningPrefs.MARKDOWN_LINE_HEIGHT_DEFAULT,
+                minValue = com.rikkaminis.app.data.ChatTuningPrefs.MARKDOWN_LINE_HEIGHT_MIN,
+                maxValue = com.rikkaminis.app.data.ChatTuningPrefs.MARKDOWN_LINE_HEIGHT_MAX,
+            )
+        )
+        r.register(
+            PrefsIntField(
+                path = "chat.inputMaxLines",
+                displayName = "Chat: composer max lines",
+                description = "The input box grows up to this many lines before it scrolls " +
+                    "internally. Default 6.",
+                prefs = chatTuningPrefs,
+                key = com.rikkaminis.app.data.ChatTuningPrefs.KEY_INPUT_MAX_LINES,
+                defaultValue = com.rikkaminis.app.data.ChatTuningPrefs.INPUT_MAX_LINES_DEFAULT,
+                minValue = com.rikkaminis.app.data.ChatTuningPrefs.INPUT_MAX_LINES_MIN,
+                maxValue = com.rikkaminis.app.data.ChatTuningPrefs.INPUT_MAX_LINES_MAX,
+            )
+        )
+        r.register(
+            PrefsIntField(
+                path = "chat.sendSwipeThresholdDp",
+                displayName = "Chat: swipe-up-to-send distance (dp)",
+                description = "How far you must swipe up inside the input to arm the send gesture. " +
+                    "Default 120.",
+                prefs = chatTuningPrefs,
+                key = com.rikkaminis.app.data.ChatTuningPrefs.KEY_SEND_SWIPE_THRESHOLD_DP,
+                defaultValue = com.rikkaminis.app.data.ChatTuningPrefs.SEND_SWIPE_THRESHOLD_DEFAULT,
+                minValue = com.rikkaminis.app.data.ChatTuningPrefs.SEND_SWIPE_THRESHOLD_MIN,
+                maxValue = com.rikkaminis.app.data.ChatTuningPrefs.SEND_SWIPE_THRESHOLD_MAX,
+            )
+        )
     }
 
     /** Mirrors iOS `fontScaleField` — exposes the integer scale level

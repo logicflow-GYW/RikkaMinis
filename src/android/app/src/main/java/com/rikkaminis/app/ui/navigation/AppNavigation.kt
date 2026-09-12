@@ -154,6 +154,8 @@ object Routes {
     const val ENV_VARS = "env_vars"
     /** [feat/runtime-limits-panel] Runtime Limits page (agent runtime knobs). */
     const val RUNTIME_LIMITS = "runtime_limits"
+    /** [feat/chat-tuning-panel] Chat Tuning page (reading / scrolling / composer knobs). */
+    const val CHAT_TUNING = "chat_tuning"
     const val SKILLS = "skills"
     const val SKILL_DETAIL = "skill/{skillId}"
     const val SKILL_FILE = "skill_file/{skillId}/{relativePath}"
@@ -645,6 +647,7 @@ fun AppNavigation(
                 onPermissionsClick = { navController.safeNavigate(Routes.PERMISSIONS) },
                 onUsageClick = { navController.safeNavigate(Routes.USAGE_STATS) },
                 onAppearanceClick = { navController.safeNavigate(Routes.APPEARANCE) },
+                onChatTuningClick = { navController.safeNavigate(Routes.CHAT_TUNING) },
                 onBackgroundClick = { navController.safeNavigate(Routes.BACKGROUND) },
                 onLogsClick = { navController.safeNavigate(Routes.LOGS) },
                 onMountedFoldersClick = { navController.safeNavigate(Routes.MOUNTED_FOLDERS) },
@@ -1066,6 +1069,11 @@ fun AppNavigation(
         }
         composable(Routes.RUNTIME_LIMITS) {
             com.rikkaminis.app.ui.settings.RuntimeLimitsScreen(
+                onBack = { navController.safePopBackStack() },
+            )
+        }
+        composable(Routes.CHAT_TUNING) {
+            com.rikkaminis.app.ui.settings.ChatTuningScreen(
                 onBack = { navController.safePopBackStack() },
             )
         }

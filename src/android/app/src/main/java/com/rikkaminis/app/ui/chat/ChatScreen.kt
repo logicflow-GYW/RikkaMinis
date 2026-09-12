@@ -149,6 +149,8 @@ import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.ui.components.MinisAlertDialog
 import com.rikkaminis.app.ui.components.MinisMenu
 import com.rikkaminis.app.ui.components.MinisMenuDivider
+import com.rikkaminis.app.data.ChatTuningPrefs
+import com.rikkaminis.app.ui.settings.rememberChatTuning
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -940,7 +942,11 @@ fun ChatScreen(
     // really left the bottom — users reported the "Quick to bottom" button
     // appearing too often. 32 dp is roughly half the floating tool-bar height, so the
     // visual definition of "at bottom" lines up with what the user sees.
-    val nearBottomThresholdPx = with(LocalDensity.current) { 32.dp.toPx() }
+    // [feat/chat-tuning-panel] Now user-tunable (Settings → Appearance →
+    // Chat Tuning); the default is the T128 value (32). The helper registers
+    // its own appearance_prefs listener, so a knob change recomposes here.
+    val tuning = rememberChatTuning(context)
+    val nearBottomThresholdPx = with(LocalDensity.current) { tuning.scrollNearBottomDp.dp.toPx() }
     // T138 phase 2 v3: ground-truth bottom test via layoutInfo. If
     // LazyList currently renders the visual-bottom item (data-index 0
     // under reverseLayout) and its bottom edge sits within `threshold`
@@ -1726,6 +1732,9 @@ fun ChatScreen(
     CompositionLocalProvider(
         LocalBrowserTabPool provides viewModel.browserTabPool,
         LocalMarkdownFontScale provides markdownFontScale,
+        LocalCodePreviewLines provides tuning.codePreviewLines,
+        LocalTablePreviewRows provides tuning.tablePreviewRows,
+        LocalMarkdownLineHeightSp provides tuning.markdownLineHeightSp,
         LocalToolPreviewEnabled provides toolPreviewEnabled,
         LocalMarkdownUrlClickHandler provides urlClickHandler,
         LocalMarkdownImageTapHandler provides markdownImageTapHandler,
@@ -3062,7 +3071,12 @@ fun ChatScreen(
                                 // before it — blocking the publish would add
                                 // the parse latency to time-to-first-frame.
                                 if (stream.isEmpty() && rows.isNotEmpty()) {
-                                    val prewarmRowLimit = 16
+                                    // [feat/chat-tuning-panel] Read prefs directly
+                                    // instead of the snapshot state: this collect
+                                    // lambda captured its closure long before, so a
+                                    // knob change must be picked up as a FRESH read
+                                    // on the next cold build, not a stale capture.
+                                    val prewarmRowLimit = ChatTuningPrefs.prewarmRowLimit(context)
                                     val prewarmCharBudget = 96_000
                                     val raws = mutableListOf<String>()
                                     var charSum = 0
@@ -4295,6 +4309,8 @@ fun ChatScreen(
                 onPreviewImageGallery = { items, idx -> previewImageGallery = items to idx },
                 onOpenWebAppSheet = { target -> webAppSheetTarget = target },
                 chatInputFontScale = chatInputFontScale,
+                inputMaxLines = tuning.inputMaxLines,
+                sendSwipeThresholdDp = tuning.sendSwipeThresholdDp,
                 onPickMedia = { mediaPickerLauncher.launch(
                     androidx.activity.result.PickVisualMediaRequest(
                         ActivityResultContracts.PickVisualMedia.ImageAndVideo,

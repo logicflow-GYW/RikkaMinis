@@ -148,6 +148,7 @@ import com.rikkaminis.app.data.FileMentionIndex
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.ui.components.MinisAlertDialog
 import com.rikkaminis.app.ui.components.MinisMenu
+import com.rikkaminis.app.data.ChatTuningPrefs
 import com.rikkaminis.app.ui.components.MinisMenuDivider
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.window.Dialog
@@ -329,6 +330,11 @@ internal fun ChatInputArea(
     focusManager: androidx.compose.ui.focus.FocusManager,
     coroutineScope: kotlinx.coroutines.CoroutineScope,
     inputFocusRequester: androidx.compose.ui.focus.FocusRequester,
+    // [feat/chat-tuning-panel] User-tunable composer knobs (Settings →
+    // Appearance → Chat Tuning). Defaults are the previously hard-coded
+    // values, so callers that don't pass them behave byte-identically.
+    inputMaxLines: Int = ChatTuningPrefs.INPUT_MAX_LINES_DEFAULT,
+    sendSwipeThresholdDp: Int = ChatTuningPrefs.SEND_SWIPE_THRESHOLD_DEFAULT,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val inputText by viewModel.inputText.collectAsState()
@@ -419,7 +425,7 @@ internal fun ChatInputArea(
     // Live fingertip position inside the input bar (px). Hint floats ~60dp
     // above this point so it isn't hidden under the user's thumb.
     var sendSwipeLocation by remember { mutableStateOf(Offset.Zero) }
-    val swipeThresholdPx = with(LocalDensity.current) { 120.dp.toPx() }
+    val swipeThresholdPx = with(LocalDensity.current) { sendSwipeThresholdDp.dp.toPx() }
     // Match iOS: haptic + capsule full-opacity + release-fires-send all
     // engage at this fraction (below 1.0 so user gets earlier confirmation).
     val swipeArmFraction = 0.8f
@@ -1525,7 +1531,7 @@ internal fun ChatInputArea(
                             },
                         textStyle = mergedTextStyle,
                         cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary),
-                        maxLines = 6,
+                        maxLines = inputMaxLines,
                         // [T-android-enter-to-send-broken] When the
                         // user has Return-Key=Send turned on, ask the
                         // IME for the Send action so it (a) shows the

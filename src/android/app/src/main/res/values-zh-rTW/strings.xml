@@ -1665,4 +1665,26 @@
     <string name="provider_saved_no_api_key">已儲存，但未讀到 API 金鑰</string>
     <string name="provider_saved_models_failed">已儲存，但模型清單取得失敗，請檢查 URL 與金鑰</string>
     <string name="provider_saved_models_unreachable">已儲存，但無法從該位址取得模型，請檢查 URL</string>
+    <!-- [feat/chat-tuning-panel] 聊天微調 — 閱讀/捲動/輸入手感參數。 -->
+    <string name="chat_tuning_entry">聊天微調</string>
+    <string name="chat_tuning_entry_subtitle">閱讀、捲動與輸入手感</string>
+    <string name="chat_tuning_title">聊天微調</string>
+    <string name="chat_tuning_section_reading">閱讀與捲動</string>
+    <string name="chat_tuning_scroll_threshold">觸底判定閾值</string>
+    <string name="chat_tuning_scroll_threshold_desc">距離底部多近（dp）仍算「在底部」——決定自動跟隨的黏性與回到底部按鈕的出現時機。預設 32。</string>
+    <string name="chat_tuning_prewarm">開啟時預渲染行數</string>
+    <string name="chat_tuning_prewarm_desc">開啟會話時，最新的長訊息會被預解析，首幀直接走快取。數值越大冷啟動越順暢，CPU 佔用也越高。預設 16。</string>
+    <string name="chat_tuning_code_preview">程式碼區塊摺疊閾值（行）</string>
+    <string name="chat_tuning_code_preview_desc">超過此行數的程式碼區塊預設摺疊，顯示「展開 N 行」按鈕。預設 20。</string>
+    <string name="chat_tuning_table_preview">表格摺疊閾值（行）</string>
+    <string name="chat_tuning_table_preview_desc">超過此行數的表格預設摺疊。預設 10。</string>
+    <string name="chat_tuning_line_height">Markdown 行高（sp）</string>
+    <string name="chat_tuning_line_height_desc">正文的行間距，仍會隨訊息字號一起縮放。預設 24。</string>
+    <string name="chat_tuning_reading_footer">這些參數原本寫死在程式碼中。預設值與內建值一致，未調整過時行為與之前完全相同。</string>
+    <string name="chat_tuning_section_input">輸入框</string>
+    <string name="chat_tuning_input_max_lines">輸入框最大行數</string>
+    <string name="chat_tuning_input_max_lines_desc">輸入框最多長到這麼多行，再多就在內部捲動。預設 6。</string>
+    <string name="chat_tuning_swipe_threshold">上滑傳送距離（dp）</string>
+    <string name="chat_tuning_swipe_threshold_desc">在輸入框內上滑多遠才觸發傳送手勢。預設 120。</string>
+    <string name="chat_tuning_composer_footer">僅影響應用內輸入框；傳送按鈕與 Enter 鍵行為是另外的設定項。</string>
 </resources>

@@ -1618,4 +1618,26 @@
     <string name="chat_stream_degraded_notice">Экономия производительности: упрощенный рендеринг во время потока</string>
     <string name="chat_resume_crash_warning">В прошлый раз приложение зависло во время потоковой передачи. Нажмите еще раз, чтобы все равно продолжить.</string>
     <string name="chat_load_older_messages">↑ Загрузить более старые сообщения</string>
+    <!-- [feat/chat-tuning-panel] Тонкая настройка чата — чтение/прокрутка/ввод. -->
+    <string name="chat_tuning_entry">Тонкая настройка чата</string>
+    <string name="chat_tuning_entry_subtitle">Чтение, прокрутка и ввод</string>
+    <string name="chat_tuning_title">Тонкая настройка чата</string>
+    <string name="chat_tuning_section_reading">ЧТЕНИЕ И ПРОКРУТКА</string>
+    <string name="chat_tuning_scroll_threshold">Порог прилипания к низу</string>
+    <string name="chat_tuning_scroll_threshold_desc">Насколько близко к низу (dp) ещё считается «внизу» — управляет прилипанием автопрокрутки и появлением кнопки «вниз». По умолчанию 32.</string>
+    <string name="chat_tuning_prewarm">Предрендер строк при открытии</string>
+    <string name="chat_tuning_prewarm_desc">При открытии чата последние длинные сообщения разбираются заранее, чтобы первый кадр рисовался из кэша. Больше = плавнее, но выше нагрузка. По умолчанию 16.</string>
+    <string name="chat_tuning_code_preview">Порог сворачивания кода (строк)</string>
+    <string name="chat_tuning_code_preview_desc">Блоки кода выше этого числа строк сворачиваются с кнопкой «развернуть N строк». По умолчанию 20.</string>
+    <string name="chat_tuning_table_preview">Порог сворачивания таблиц (строк)</string>
+    <string name="chat_tuning_table_preview_desc">Таблицы выше этого числа строк сворачиваются. По умолчанию 10.</string>
+    <string name="chat_tuning_line_height">Высота строки Markdown (sp)</string>
+    <string name="chat_tuning_line_height_desc">Межстрочный интервал текста сообщений. По-прежнему масштабируется с размером шрифта сообщений. По умолчанию 24.</string>
+    <string name="chat_tuning_reading_footer">Эти параметры раньше были жёстко зашиты в код. Значения по умолчанию совпадают со встроенными — без изменений поведение прежнее.</string>
+    <string name="chat_tuning_section_input">ПОЛЕ ВВОДА</string>
+    <string name="chat_tuning_input_max_lines">Максимум строк поля ввода</string>
+    <string name="chat_tuning_input_max_lines_desc">Поле ввода растёт до этого числа строк, затем прокручивается внутри. По умолчанию 6.</string>
+    <string name="chat_tuning_swipe_threshold">Дистанция свайпа вверх для отправки (dp)</string>
+    <string name="chat_tuning_swipe_threshold_desc">Как далеко нужно свайпнуть вверх в поле ввода, чтобы сработал жест отправки. По умолчанию 120.</string>
+    <string name="chat_tuning_composer_footer">Влияет только на поле ввода в приложении. Кнопка отправки и поведение Enter — отдельные настройки.</string>
 </resources>

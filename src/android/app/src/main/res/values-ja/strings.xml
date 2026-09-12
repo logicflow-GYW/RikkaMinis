@@ -1663,4 +1663,26 @@
     <string name="shortcut_camera_chat_long">カメラでチャット</string>
     <string name="ok">OK</string>
     <string name="chat_load_older_messages">↑ 古いメッセージを読み込む</string>
+    <!-- [feat/chat-tuning-panel] チャット調整 — 閲覧/スクロール/入力の調整項目。 -->
+    <string name="chat_tuning_entry">チャット調整</string>
+    <string name="chat_tuning_entry_subtitle">閲覧・スクロール・入力の手触り</string>
+    <string name="chat_tuning_title">チャット調整</string>
+    <string name="chat_tuning_section_reading">閲覧とスクロール</string>
+    <string name="chat_tuning_scroll_threshold">最下部判定のしきい値</string>
+    <string name="chat_tuning_scroll_threshold_desc">下端から何 dp 以内を「最下部」とみなすか。自動追従の粘りと「最下部へ」ボタンの表示タイミングを左右します。既定 32。</string>
+    <string name="chat_tuning_prewarm">起動時の先読み行数</string>
+    <string name="chat_tuning_prewarm_desc">チャットを開くとき、最新の長いメッセージを事前解析して初回フレームをキャッシュから描画します。大きいほど快適、CPU 負荷も増えます。既定 16。</string>
+    <string name="chat_tuning_code_preview">コードブロックの折りたたみ（行）</string>
+    <string name="chat_tuning_code_preview_desc">この行数を超えるコードブロックは折りたたまれ、「N 行を展開」ボタンが付きます。既定 20。</string>
+    <string name="chat_tuning_table_preview">テーブルの折りたたみ（行）</string>
+    <string name="chat_tuning_table_preview_desc">この行数を超えるテーブルは折りたたまれます。既定 10。</string>
+    <string name="chat_tuning_line_height">Markdown の行の高さ（sp）</string>
+    <string name="chat_tuning_line_height_desc">本文の行間。メッセージ文字サイズに合わせて拡縮されます。既定 24。</string>
+    <string name="chat_tuning_reading_footer">これらの値は以前コードに固定されていました。既定値は内蔵値と同じため、未変更なら従来どおりの動作です。</string>
+    <string name="chat_tuning_section_input">入力欄</string>
+    <string name="chat_tuning_input_max_lines">入力欄の最大行数</string>
+    <string name="chat_tuning_input_max_lines_desc">入力欄はこの行数まで伸び、それ以上は内部スクロールになります。既定 6。</string>
+    <string name="chat_tuning_swipe_threshold">上スワイプ送信の距離（dp）</string>
+    <string name="chat_tuning_swipe_threshold_desc">入力欄内でどれだけ上にスワイプすると送信ジェスチャが有効になるか。既定 120。</string>
+    <string name="chat_tuning_composer_footer">アプリ内の入力欄のみに影響します。送信ボタンと Enter キーの動作は別の設定です。</string>
 </resources>
