@@ -1818,6 +1818,6 @@
     <string name="runtime_limits_shell_output">Shell: output ceiling (KB)</string>
     <string name="runtime_limits_shell_output_desc">Max shell output kept per command; the rest truncates with a marker. Default 128.</string>
     <string name="runtime_limits_shell_timeout">Shell: default timeout (s)</string>
-    <string name="runtime_limits_shell_timeout_desc">Default timeout for shell commands when a call does not pass its own. Default 600.</string>
+    <string name="runtime_limits_shell_timeout_desc">Default timeout for shell commands when a call does not pass its own; explicit per-call values keep their own (max 900 s). Default 900.</string>
     <string name="runtime_limits_media_footer">Higher image limits let better-quality pictures reach the model at the cost of request size.</string>
 </resources>

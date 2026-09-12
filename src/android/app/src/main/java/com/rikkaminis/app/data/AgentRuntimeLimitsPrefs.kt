@@ -232,7 +232,12 @@ object AgentRuntimeLimitsPrefs {
 
     const val SHELL_TIMEOUT_MIN_SEC = 60
     const val SHELL_TIMEOUT_MAX_SEC = 1800
-    const val SHELL_TIMEOUT_DEFAULT_SEC = 600
+    // [fix/tuning-shell-timeout] 900 keeps the effective pre-panel default:
+    // ChatShellExecution's `optInt("timeout", 900)` is what actually ran for
+    // calls that omit their own timeout (PersistentShell's old 600_000 ms
+    // default parameter was never reached — its only caller passes an
+    // explicit value). The knob now feeds that optInt fallback directly.
+    const val SHELL_TIMEOUT_DEFAULT_SEC = 900
 
     // ── primed cache ─────────────────────────────────────────────────────
 

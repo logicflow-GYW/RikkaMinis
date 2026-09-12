@@ -1675,6 +1675,6 @@
     <string name="runtime_limits_shell_output">Shell: лимит вывода (КБ)</string>
     <string name="runtime_limits_shell_output_desc">Максимум вывода, сохраняемого на команду; остаток обрезается с маркером. По умолчанию 128.</string>
     <string name="runtime_limits_shell_timeout">Shell: тайм-аут по умолчанию (с)</string>
-    <string name="runtime_limits_shell_timeout_desc">Тайм-аут команд shell, когда вызов не передаёт свой. По умолчанию 600.</string>
+    <string name="runtime_limits_shell_timeout_desc">Тайм-аут команд shell, когда вызов не передаёт свой (явные значения сохраняются, максимум 900 с). По умолчанию 900.</string>
     <string name="runtime_limits_media_footer">Более высокие лимиты изображений пропускают лучшее качество к модели — ценой размера запроса.</string>
 </resources>

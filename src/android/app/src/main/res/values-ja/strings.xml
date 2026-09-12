@@ -1720,6 +1720,6 @@
     <string name="runtime_limits_shell_output">シェル：出力上限（KB）</string>
     <string name="runtime_limits_shell_output_desc">1 コマンドで保持する出力上限。超過分はマーカー付きで切り詰めます。既定 128。</string>
     <string name="runtime_limits_shell_timeout">シェル：既定タイムアウト（秒）</string>
-    <string name="runtime_limits_shell_timeout_desc">呼び出し側が独自のタイムアウトを渡さない場合の既定タイムアウト。既定 600。</string>
+    <string name="runtime_limits_shell_timeout_desc">呼び出し側が独自のタイムアウトを渡さない場合の既定タイムアウト（明示指定時はその値、上限 900 秒）。既定 900。</string>
     <string name="runtime_limits_media_footer">画像上限を上げると高画質のままモデルへ届きますが、リクエストが大きくなります。</string>
 </resources>

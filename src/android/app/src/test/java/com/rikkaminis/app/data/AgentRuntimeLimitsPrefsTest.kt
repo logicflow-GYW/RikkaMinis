@@ -150,7 +150,7 @@ class AgentRuntimeLimitsPrefsTest {
         assertEquals(5, p.BROWSER_DOM_STABLE_DEFAULT_SEC)        // BrowserUseManager.DEFAULT_DOM_STABLE_TIMEOUT_MS ÷ 1000
         assertEquals(80, p.BROWSER_SCREENSHOT_Q_DEFAULT)         // BrowserUseManager.SCREENSHOT_QUALITY
         assertEquals(128, p.SHELL_OUTPUT_KB_DEFAULT)             // PersistentShell.MAX_OUTPUT_CHARS ÷ 1024
-        assertEquals(600, p.SHELL_TIMEOUT_DEFAULT_SEC)           // PersistentShell default timeout 600_000 ms ÷ 1000
+        assertEquals(900, p.SHELL_TIMEOUT_DEFAULT_SEC)           // ChatShellExecution effective default (optInt fallback)
     }
 
     @Test

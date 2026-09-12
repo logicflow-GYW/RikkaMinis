@@ -1722,6 +1722,6 @@
     <string name="runtime_limits_shell_output">終端：輸出上限（KB）</string>
     <string name="runtime_limits_shell_output_desc">單條命令保留的輸出上限，超出部分截斷並標記。預設 128。</string>
     <string name="runtime_limits_shell_timeout">終端：預設逾時（秒）</string>
-    <string name="runtime_limits_shell_timeout_desc">呼叫未自帶逾時參數時，shell 命令的預設逾時。預設 600。</string>
+    <string name="runtime_limits_shell_timeout_desc">呼叫未自帶逾時參數時，shell 命令的預設逾時（顯式傳參的呼叫仍用自帶值，上限 900 秒）。預設 900。</string>
     <string name="runtime_limits_media_footer">調高圖片上限可讓更高品質圖片進入模型，代價是請求體積變大。</string>
 </resources>

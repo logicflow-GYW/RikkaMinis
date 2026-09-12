@@ -1721,6 +1721,6 @@
     <string name="runtime_limits_shell_output">Shell: Ausgabe-Obergrenze (KB)</string>
     <string name="runtime_limits_shell_output_desc">Maximale Shell-Ausgabe pro Befehl; der Rest wird mit Markierung gekürzt. Standard 128.</string>
     <string name="runtime_limits_shell_timeout">Shell: Standard-Timeout (s)</string>
-    <string name="runtime_limits_shell_timeout_desc">Standard-Timeout für Shell-Befehle, wenn ein Aufruf keines übergibt. Standard 600.</string>
+    <string name="runtime_limits_shell_timeout_desc">Standard-Timeout für Shell-Befehle, wenn ein Aufruf keines übergibt (explizite Werte bleiben, max. 900 s). Standard 900.</string>
     <string name="runtime_limits_media_footer">Höhere Bildgrenzen bringen bessere Bildqualität zum Modell — auf Kosten größerer Anfragen.</string>
 </resources>

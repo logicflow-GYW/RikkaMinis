@@ -4,6 +4,7 @@ import android.content.Context
 import com.rikkaminis.app.agent.shell.BashismDetector
 import com.rikkaminis.app.agent.shell.BashismReminder
 import com.rikkaminis.app.agent.shell.OnDemandBash
+import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import com.rikkaminis.app.terminal.MinisOpenUrlBroker
 import com.rikkaminis.app.terminal.MinisUrlMarker
 import com.rikkaminis.app.sandbox.DisplayLineBuffer
@@ -58,6 +59,37 @@ internal fun wrapForBash(script: String): String {
 }
 
 /**
+ * [fix/tuning-shell-timeout] Model-facing per-call timeout ceiling, seconds.
+ * Unchanged from the pre-panel behaviour and still what the tool schema
+ * documents ("default: 900").
+ */
+internal const val MAX_TOOL_TIMEOUT_SEC = 900
+
+/**
+ * [fix/tuning-shell-timeout] Resolve the effective shell-command timeout.
+ *
+ *  - a call that carries its own `timeout` keeps the long-standing
+ *    model-facing cap ([MAX_TOOL_TIMEOUT_SEC]) — unchanged;
+ *  - a call that omits it falls back to the user-tunable default
+ *    (Settings → Agent Runtime → Runtime Limits, 60..1800 s).
+ *
+ * Before this fix the knob fed only `PersistentShell.executeCommand`'s
+ * default parameter, which no caller ever relies on (ExecutionCoordinator
+ * always passes an explicit timeout), so the setting was inert end to end.
+ * Top-level + default-arg prefs read so the JVM unit tests can pin both
+ * branches without an Android context.
+ */
+internal fun resolveShellTimeoutSec(
+    hasExplicit: Boolean,
+    explicitSec: Int,
+    defaultSec: Int = AgentRuntimeLimitsPrefs.shellTimeoutSec(),
+): Int = if (hasExplicit) {
+    explicitSec.coerceIn(1, MAX_TOOL_TIMEOUT_SEC)
+} else {
+    defaultSec
+}
+
+/**
  * The shell_execute engine. See the file-level KDoc for the parameterization
  * contract. [onBlockUpdate] receives the raw display content the block
  * should show (streamed + trimmed lines); the caller owns mutating
@@ -80,7 +112,14 @@ internal suspend fun executeShellCommandEngine(
 ): ToolResultShell {
     val args = JSONObject(argsJson)
     var command = args.optString("command", "")
-    val timeoutSec = args.optInt("timeout", 900).coerceIn(1, 900)
+    // [fix/tuning-shell-timeout] Explicit per-call timeout keeps its 900 s
+    // cap; omitted timeouts use the user-tunable default (Runtime Limits).
+    // `optInt(..., MAX_TOOL_TIMEOUT_SEC)` keeps the old fallback for
+    // malformed values ("timeout": "abc" → 900, same as before).
+    val timeoutSec = resolveShellTimeoutSec(
+        hasExplicit = args.has("timeout"),
+        explicitSec = args.optInt("timeout", MAX_TOOL_TIMEOUT_SEC),
+    )
     val delaySec = args.optInt("delay", 0).coerceAtLeast(0)
     val toolTitle = args.optString("tool_title", "shell_execute")
 

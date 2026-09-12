@@ -1745,6 +1745,6 @@
     <string name="runtime_limits_shell_output">终端：输出上限（KB）</string>
     <string name="runtime_limits_shell_output_desc">单条命令保留的输出上限，超出部分截断并标记。默认 128。</string>
     <string name="runtime_limits_shell_timeout">终端：默认超时（秒）</string>
-    <string name="runtime_limits_shell_timeout_desc">调用未自带超时参数时，shell 命令的默认超时。默认 600。</string>
+    <string name="runtime_limits_shell_timeout_desc">调用未自带超时参数时，shell 命令的默认超时（显式传参的调用仍用自带值，上限 900 秒）。默认 900。</string>
     <string name="runtime_limits_media_footer">调高图片上限可让更高质量图片进入模型，代价是请求体积变大。</string>
 </resources>

@@ -1720,6 +1720,6 @@
     <string name="runtime_limits_shell_output">셸: 출력 상한(KB)</string>
     <string name="runtime_limits_shell_output_desc">명령당 유지되는 출력 상한. 초과분은 표시와 함께 잘립니다. 기본 128.</string>
     <string name="runtime_limits_shell_timeout">셸: 기본 시간초과(초)</string>
-    <string name="runtime_limits_shell_timeout_desc">호출이 자체 시간초과를 넘기지 않을 때의 기본 시간초과. 기본 600.</string>
+    <string name="runtime_limits_shell_timeout_desc">호출이 자체 시간초과를 넘기지 않을 때의 기본 시간초과(명시적으로 전달된 값은 그대로, 상한 900초). 기본 900.</string>
     <string name="runtime_limits_media_footer">이미지 상한을 올리면 더 좋은 화질로 모델에 전달되지만 요청이 커집니다.</string>
 </resources>
