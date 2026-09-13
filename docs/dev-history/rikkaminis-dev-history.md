@@ -4,8 +4,8 @@
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
 - 合并范围：2026-08-03 ～ 2026-09-13，共 42 天
-- 条目总数：926（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
-- 总字符数：1082347 / 总行数：17342
+- 条目总数：953（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
+- 总字符数：1122819 / 总行数：17928
 
 ---
 
@@ -17335,6 +17335,592 @@ CI 13:15 创建仍在跑（正常带宽 12min），按惯例不等。ARCHITECTUR
 **连带发现**：DebugRPCHandler.kt:750 终端 shell 路径 `optInt("timeout", 60)` **写死 60 不读 pref**——用户"终端"里撞的 60 很可能是这条写死路径，与 pref 无关（用户终端=DebugRPC 需确认，要调需另改）。
 
 **状态**：pref=60 现会掐掉 agent 所有不带 timeout 的长命令 → 已建议用户调回 300/600（覆盖"偶尔需要辅助"场景），长任务由 agent 单条显式传 timeout（1..900 封顶）。
+
+<!-- 2026-09-13 07:45:51 -->
+## dev-history 文档更新闭环（2026-09-13，main @ 15b3f447）
+
+<!-- 2026-09-13 07:5x -->
+
+- **档案**：926 条 / 42 天（原 914/41，+12 条）/ 1,082,347 字符 / 17,342 行；fences 32 even、outOrder 0。今日新增 3 条（07:06 合并收尾、07:11 真机验证、07:35 撞 60s 实证）。
+- **脱敏**：105 处替换主文件 + 6 处 INDEX，验证 NONE clean。
+- **仓库同步**：docs/dev-history/{README.md, rikkaminis-dev-history.md, -INDEX.md} 3 文件（+260/−7），README 覆盖范围 914→926、41→42 天、截止 09-12→09-13。分支 docs/dev-history-0913 @ 15b3f44 → askpass 直推 ff 合并 main（e057d15..15b3f44，无 force）→ 远端分支 API DELETE 204 → 终验 ls-remote 仅剩 main @ 15b3f447 → 挂载版与云端版 sha256 双份一致。
+- **坑（复记）**：gh_sync.sh clone 子命令在沙箱下 set -e 静默失败（EXIT=128 无输出），直接 `git clone --depth 1` 可绕过；gh_sync.sh push 子命令本身正常（askpass 机制 OK）。
+- 克隆目录 /tmp/rikka-docs-0913（浅克隆，仅 1 commit 深）；askpass 在 /var/minis/workspace/.git_askpass.sh（本会话）。
+
+<!-- 2026-09-13 08:25:53 -->
+## 同类型手机 Agent 生态调查报告完成（2026-09-13）
+
+
+**报告**：`/var/minis/mounts/笔记/同类型手机Agent生态调查报告-2026-09-13.md`（506 行 / 29,435 字符 / 44.5 KB），《Fork生态调查报告-2026-09-12》的姊妹篇。原报告看单仓 fork 层，本篇看整个品类层。
+
+**数据存档（跨会话可复查）**：`/var/minis/shared/eco-census-2026-09-13/`（5.2 MB，83 文件）——`raw/` 26 条查询原始 JSON、`repos/` 53 个仓库元数据 + 10 份 README 摘录、`eco_merged.json`（455 唯一仓库去重）、3 个脚本。
+
+**方法**：28 条 GitHub Search（20+8，`sort=stars`，per_page=30）→ 455 唯一仓库 → 粗筛 419 → 人工确认真相关 ~45 → 深挖 39（每个落盘 JSON）。Search API 限额 30/h，间隔 7s。
+
+**核心发现**：
+- **品类主轴 = OpenClaw（389,528 星 / 81,878 fork / 1,747 watcher / TS / created 2025-11-24）**，派生 zeroclaw（32,776，Rust）、nanoclaw（30,747 / 12,835 fork，容器化卖点）
+- **"Claw" 已成手机 agent 事实标签**：`claw agent android` 返回 87，真相关 15 个全叫 *Claw（mobileClaw/PhoneClaw/ZeroClaw-Android/X-OmniClaw/AppClaw/ClawWatch…），覆盖手机/平板/手表
+- **六层结构**（判定依据：agent 脑子在哪、手在哪）：L0 生态主轴 / L1 运行时移植 / L2 全功能客户端 / L3 远程控制台 / L4 设备作执行环境（VLM）/ L5 入口垂直
+- **L2 排序**（RikkaMinis 所在层）：Operit 7,742 → RikkaHub 7,579 → OpenMinis 4,432 → OmniBot 1,981 → gpt_mobile 1,222 → gpt-assistant-android 901 → SmolChat 893 → ChatGPT-android-app 337 → **RikkaMinis 18**（43 天龄，0.4 星/天，比最快慢约 80 倍）
+- **贡献者集中度**：RikkaHub 51 人但 re-ovo 占 95.5%；Operit 34 人 AAswordman 80.5%（唯一有真第二梯队，第 2 名 109 commits）；OmniBot 12 人 XuYouo 68.6%
+- **PRoot 路线有 4 个存活项目**：RikkaMinis / OpenMinis / OmniBot（Alpine）/ Mobile-Harness（`private userspace PRoot layer` + Online/Offline 双 APK + Android 9+/ARM64）；对立面 openclaw-android 主张 "no proot, no Linux"
+- **官方入场**：google/artemis（3,638 星，2026-08-13 创建，一个月）+ OPPO-Mente-Lab/X-OmniClaw（262 星，arXiv 2605.05765）
+- **L4 全是框架无原生 APK**（mobilerun 9,359 / MobileAgent 9,196 / mobile-mcp 6,661 / agent-device 4,548 / artemis 3,638 / android_world 889 / arbigent 638）→ 明确空位
+- **淘汰率**：39 个重点仓库中 31 个 lastpush ≤100 天，8 个不在（含 1 archived = ZeroClaw-Android 190 天）
+- **品类年龄锚点**：2025-03（3 个，L2 双寡头同月创建）、2026-02（8 个，Claw 命名爆发点）
+
+**工具坑（重要，复发预防）**：
+1. **`file_write` 的 `append=true` 在本环境不生效**——连续 4 次写入同一文件，最终只剩最后一次的内容（43,859 → 12,541 字节，前 3 块全丢），且 `/var/minis/offloads/` 为空无副本可恢复。**对策**：分块写 `/tmp/rpN.md`，再用 `cat /tmp/rp1.md /tmp/rp2.md … > 目标` 合并。**这是本次唯一导致返工的问题。**
+2. `fields=` 参数在 GitHub Search API 无效（被忽略），返回完整对象，结构是 `{"total_count":N,"items":[...]}`——首次汇总报 `string indices must be integers`。
+3. `sort=stars` 会顶起"描述里提到关键词"的仓库（`openclaw` 查询返回 72,433 total，top 混进 132,530 星的无关 cc-switch）→ **Search 结果只能当候选池，不能当排序榜**。
+4. 中文查询 `手机 ai agent` 826KB 响应被 `IncompleteRead` 截断，未重跑（A/F 组已覆盖）。
+
+**校验方法（可复用）**：`/tmp/verify_report.py` 五项检查——code fence 配平 / 非代码区括号配平 / 表格列数一致性 / 脱敏正则 10 条 / 标题层级。报告最终全绿（16 fence EVEN、0 括号不平衡、11 表格 0 列数不一致、脱敏 NONE clean）。
+
+**数据校准流程**：报告写完后用原始 JSON 重算所有年龄/停滞天数，抓到 5 处错误（SeekerClaw 误写 129 天前实际 3 天前、RikkaMinis 44→43 天、openclaw push 日、X-OmniClaw 活跃→论文节奏、淘汰计数 5→8）。**报告写完必须回查原始 JSON，不能只信写入时的记忆。**
+
+<!-- 2026-09-13 09:27:00 -->
+## 生态报告两轮风格改造完成（2026-09-13）
+
+
+**报告**：`/var/minis/mounts/笔记/同类型手机Agent生态调查报告-2026-09-13.md`（511 行 / 45,801 字节）
+
+**第一轮：顾问式 → 情报式**（style1-4.py，88 处）
+- 去第二人称（"你"5 处 → 0）、第一人称（"我"→ 0）、"本篇"→"本报告"（5 处）
+- 去主观评价词：必读/值得读/可抄/该做/不该/不够/警惕/死路/最狠/战场/轻松
+- 去戏剧化标题："技术栈分歧：两条路线在沙箱上正面冲突"→"两条沙箱路线的项目分布"；"为什么这次不用 patch-id"→"Search API 与 patch-id 的适用边界"
+- 结论量化：核心结论 3 条改为带数字（15 个 *Claw 项目 / 3 个 ≥4000 星 / 淘汰率约 20%）
+
+**第二轮：视角去中心化**（dept1-4.py，31 处替换 + 2 个整章重构）—— 用户要求"报告面向大众，不要针对 RikkaMinis 这个项目"
+- **RikkaMinis 提及 55 → 11 处**，剩余全部为客观数据点（层内表格行、谱系描述、路线项目列举）
+- **§4 整章重构**："L2 深挖：RikkaMinis 的真实位置"→"L2 层深度分析"。功能重合度矩阵**删掉 RikkaMinis 列**，改为 5 项目横向覆盖广度矩阵，**口径从"与 RikkaMinis 的重合度"改为"14 项能力明确覆盖数"**（Operit 14 / OpenMinis 13 / OmniBot 10 / Mobile-Harness 7 / RikkaHub 8+3 待核）。⚠️ 口径变了，原"13/14"数字随之更正为 14/14，已在读法里注明口径
+- **§7.3 整章重写**："待办项清单（按证据强度排序）"→"层内空缺与本报告未覆盖的问题"。8 类：层内空缺×5（L4 原生 APK 位 / 无障碍驱动产品化 / 输入法悬浮窗入口 / PRoot 安全披露 / 定时任务概念）、收敛中×2（Rust 共享运行时 / OpenHarmony）、谱系隔离、本报告未做×3（clone 级比对 / 闭源系统 agent / 中文查询）
+- **§7.1 结论 4 整条替换**：原"RikkaMinis 星增速慢 78 倍"→"层内功能广度与星数不相关"（OpenMinis 4,432 星覆盖 13/14 ≈ Operit 7,742 星 14/14，高星未在功能广度形成代差）——新结论更有情报价值
+- §5 "对标项"→"参考项"；"唯一与 RikkaMinis 完全同技术栈"→"路线 B 内唯一已发布正式版本"；§5.5 结论从"若 RikkaMinis 需开放…"→"手机端自动化能力当前主要通过 MCP server 向外提供，非手机内产品形态"
+
+**校验（verify_report.py 全绿）**：fence 16 EVEN / 非代码区括号不平衡 0 / 表格 11 块 0 列数不一致 / 脱敏 NONE clean
+
+**数据存档**：`/var/minis/shared/eco-census-2026-09-13/`（12 个脚本：eco_search / eco_merge / calib_report / verify_report / style1-4 / dept1-4）
+
+**可复用经验**：报告风格改造用 Python 精确替换脚本分 4 批跑，每批打印 OK/MISS，MISS 的必须二次定位原文（本次 3 次 MISS 均因原文与假设不符：全角/直角引号、"43 天"vs"44 天"、`|` 前多写 `**`）。**整章重构不要塞进替换列表**——用 `t.find(start) / t.find(end)` 切片替换更稳。
+
+<!-- 2026-09-13 09:56:00 -->
+## 生态报告第二轮改造：第三方调查员口吻 + 数据刷新（2026-09-13 09:40）
+
+
+**报告**：`/var/minis/mounts/笔记/同类型手机Agent生态调查报告-2026-09-13.md`（514 行 / 47,268 字节）
+**标题改名**：「同类型应用生态调查报告：手机端 AI Agent」→「**移动端 AI Agent 生态调查报告**」（原标题"同类型应用"是相对用户项目说的，第三方不这么表述）
+
+**口吻改造（third_party.py，14 处）**：删掉全部 14 处"原报告"引用框架 + 0 处 T9（内部术语）。用户明确"第三方调查员是**了解** RikkaMinis 的"——所以 RikkaMinis 作为真实案例正常引用（11→12 处），**删的是内部文档引用**（第三方不引用你的私有 fork 报告），fork 层的客观发现保留为本报告自己的结论。
+- 开头"姊妹篇"定位 → 独立报告引言，fork 层降为"补充调查"
+- §1 方法从"原报告用 X / 我用 Y" → "本报告两类互补方法"
+- §4.2 "与原报告对 OpenMinis 的结论重现" → "该现象在 OpenMinis 上同样成立"
+- §5.6 T9 整段重写 → "agent 行为的可验证性"
+- 残留检查：原报告 0 / T9 0 / 你 0 / 我 0 / 本篇 0 / 姊妹篇 0
+
+**★ 发现真实 bug：相对天数全按 UTC 算，用户时区 UTC+8**
+GitHub `pushed_at` 返回 UTC（如 `2026-09-12T17:03:32Z`），直接取 UTC 日期会低估东八区活跃度。该例 SGT = **09-13 01:03 = 今天**，报告写"1 天前"。
+- **9 个仓库 UTC 与 SGT 日期相差一天**，其中 **6 个应为"今天"**：openclaw / zeroclaw / nanoclaw / mobile-mcp / Operit / RikkaMinis
+- 其余 SGT 少一天：OpenMinis 12→11、OmniBot 2→1、codex-mobile 110→109、ZeroClaw-Android 190→189、opendroid 9→8、android_world 4→3、BiBi-Keyboard 3→2、android-agent 31→30
+- 已在 §1.2 新增第 4 条口径坑 + §8.3 局限 10 完整声明 + §0 总览加快照时刻行
+- 沙箱无 tzdata 包，`zoneinfo.ZoneInfo` 报错 → 改用 `dt.timezone(dt.timedelta(hours=8))`（SGT 无夏令时）
+
+**数据刷新（39 仓 core API）**：
+- 星数变 10 个：**artemis 3,638→3,693（+55，1.5 小时内）**、openclaw 389,528→389,532、OpenMinis 4,432→4,435、RikkaHub 7,579→7,581、Operit 7,742→7,743、zeroclaw 32,776→32,778、mobile-mcp 6,661→6,663、nanoclaw 30,747→30,748、happy 23,767→23,768、mobile-use 2,883→2,884
+- fork 变 3 个：openclaw 81,878→81,877、Operit 630→629、RikkaHub 660→661
+- 星/天：OpenMinis 31.4→31.5（其余四舍五入不变）
+- **淘汰率 8/39 = 20.5% 不变**（>100 天：1237/189/165/131/129/114/111/109）
+
+**交叉验证（crosscheck.py，可复用）**：报告 vs JSON 逐仓比对 star + 停滞天数。**教训：260 字符上下文窗口会误抓邻近仓库的数字**（6 处误报：把 artemis 3,693 当 arbigent 的星数、把 Operit2 274 当 Operit 的星数）——命中后必须看原文判定是误报还是真漏改。真漏改 7 处全部修掉，最终全绿。
+
+**校验**：verify_report.py 全绿（16 fence EVEN / 括号 0 不平衡 / 11 表格 0 列数不一致 / 脱敏 NONE clean）
+
+**存档**：`/var/minis/shared/eco-census-2026-09-13/`（18 个脚本，新增 refresh_repos / age_table / third_party / recalib / snapshot_note / crosscheck）
+
+<!-- 2026-09-13 12:39:51 -->
+## 打开历史会话「差一段」第 5 轮取证（真机数据实锤）
+
+- **抓取方法**：后台白名单转储 `/data/local/tmp/rc2.log`（`logcat -b all -v time -s Minis.ScrollSrc:V Minis.Perf:V Minis.JankDiag:V Minis.ChatVMRouting:V Minis.ChatVMStream:V Minis.NativeOffloadServer:V ... *:S > file &`）；普通 logcat 缓冲仅 ~2 分钟（被 Minis.OpenAIProvider 每 chunk 一行刷爆），必须转储。**坑：`pkill -f 'logcat -b all'` 会匹配自身命令行自杀（exit 143），用精确 PID kill**。AppLogger.debug 会进 logcat（`Minis.ScrollSrc` tag，不在 muted 列表）。
+- **实测数据（5 会话）**：打开时**仅 1 次滚动**（INITIAL_OPEN，5/5）→ **0 次补滚**；打开后 0~150ms 内「最新 item」**第二次 compose + 高度 H0→H1 跳变**：最后是短用户消息的会话=无变化（283px 稳定）；中短 assistant=+188px；**重工具流 assistant=+6672px / +12645px（13350→25995，近翻倍）**。滚动发生在首次 compose 之前 → 落位按 H0 算，H1 增长无校正。
+- **关键观察**：b933184f（负载均衡调查会话）最后一条消息正文仅 980 字/32 行，但 item 高度 26k px → **高度主体=工具卡/非文本内容** → 「二段式」大概率发生在工具块侧（延迟展开/补全渲染，待探针钉死）。
+- **用户症状映射**：距离大（一次上滑）✓ 不确定/比例特征（∝最后消息二段式幅度）✓ 可复现 ✓ 重进照差（渲染行为非缓存）✓ 直接停半途（落位后无校正）✓
+- **修复方案（待拍板）**：有界贴底收敛 — 首滚后 ≤1.2s 窗口内，检测「不再贴底(canScrollForward/sentinel 不可见) && 用户未交互」→ 补滚（≤3 次）；用户一碰即本次打开永久停。与第 3 轮 settle 翻车的区别：信号选「距底/可滚性」、不挂会重启的 effect、有交互终止。
+- **实验会话**：4af59f0c（扩展调查，无变化）、0b4802df（+188）、542568e0（+6672）、b933184f（+12645）、e51b3d2c（当前会话，流式属正常）。
+- **悬置**：①第二次 compose 精确触发源（待探针）②修复分支待开③后台转储 PID 待 kill（logcat -b all，shell user）。
+
+<!-- 2026-09-13 12:47:37 -->
+## 打开会话「差一段」修复分支已推送（2026-09-13）
+
+- **分支** `fix/open-catchup-guard` @ `32571f8`（基于 main @ 15b3f447）：3 文件 +210。
+- **实现**：
+  - `ChatFollowController.shouldCatchUpAfterOpen` 纯函数（armed/userEngaged/canScrollForward/isScrollInProgress/rollsUsed/maxRolls 六条件门）。
+  - ChatScreen.kt 4 处接线：①guard 状态（remember(sessionId)×4）②arm：INITIAL_OPEN 首滚后（仅 stream.isEmpty() 时）armEpoch++ ③守卫 effect：LaunchedEffect(listState, armEpoch) + withTimeoutOrNull(1200ms) + snapshotFlow{canScrollForward} → 决策 → tracedScrollToItem("OPEN-CATCHUP", 1_000_000, 0)，≤3 次 ④drag/Resume → openCatchUpUserEngaged=true（永久废止）。
+  - 常量：OPEN_CATCHUP_WINDOW_MS=1200 / OPEN_CATCHUP_MAX_ROLLS=3（ChatScreen.kt 尾部 const 区）。
+- **JVM 测试** 9/9 绿（OpenCatchUpGuardTest.kt，/tmp/kotlinc 2.1.0 直编直跑，沙箱 /tmp/settletest）。
+- **CI**：分支 #1478（run 34738708107）已手动 dispatch；bridge 查 `/status/fix/open-catchup-guard`（raw slash 可用）。
+- **待办**：CI 绿 → 用户拍板合并（ff 直推）→ release CI → 真机验证（①打开长会话即贴底不滑 ②上滑读历史绝不被拽回 ③流式会话行为不变；日志探针：ScrollSrc 「open-catchup roll #N dt=..ms」/「open-catchup done rolls=N」）。
+- clone 目录 /tmp/rikka-settle（浅克隆）；askpass /var/minis/workspace/.git_askpass.sh（本会话）。
+
+<!-- 2026-09-13 13:03:27 -->
+## open-catchup 修复 CI 绿（2026-09-13）
+
+- `fix/open-catchup-guard` @ `32571f8` **三源一致**（本地 HEAD = 远端分支 = run head_sha）→ **CI #1478 success**（run 34738708107，10m43s）。
+- **待用户真机验证**（4 条：①打开长会话即贴底不补滑 ②窗口内立刻上滑不被拽回 ③流式会话照旧 ④日常无变化）→ 拍板 → ff 合并 main → release CI。
+- 用户装包：run 34738708107 的 artifacts。
+
+<!-- 2026-09-13 13:31:50 -->
+## 【交接】打开会话「差一段」v1 已装机验证 → 需 v2（2026-09-13 13:35）
+
+
+**完整交接文档**：`/var/minis/shared/open-catchup-handoff-2026-09-13.md`（14.6KB，含全部背景/证据/代码位置/流程/环境）——**新会话先读它**。
+
+**一句话状态**：v1 修复（分支 `fix/open-catchup-guard` @ `32571f8`，CI #1478 success）已装机，用户反馈**部分有效但有两个问题**：①偶发不到底（实测有会话的内容在**打开后 3 秒**才长高 +4190px，远超 v1 的 1.2s 窗口）②能感觉到**明显的第二次动作**（roll 瞬跳约 4550px）。
+
+**下一步**：v2 方向 = ①治本：让首帧即终态高度（消除 H0→H1 落差，需先锁定"第二次 compose"的触发源）②改善可见性：帧内补偿/跟随式贴底 ③覆盖晚增长：窗口 1.2s→4~5s。
+
+**关键待查**：①"第二次 compose"精确来源（候选：markdown 冷解析预览路径 COLD_PARSE_PREVIEW_CHARS=4000 / prewarm 竞态 / 工具卡懒渲染 / live→frozen 切换）②**未解谜团**：有的打开（13:10:49、13:10:53）**没有 INITIAL_OPEN 首滚日志**，12:34 实验却 5/5 全有 → 疑有"打开路径不触发首滚"的独立 bug。
+
+**环境**：沙箱仓库 `/tmp/rikka-settle`（在 v1 分支）；真机日志 `/data/local/tmp/rc2.log`（转储 PID 19814/25636）；askpass 需在新会话重建（文档 §8 有命令）。
+
+<!-- 2026-09-13 14:04:27 -->
+## 打开会话「差一段」v2：根因锁定 + 修好待真机验证（2026-09-13 14:00）
+
+
+**分支** `fix/open-catchup-guard` @ `daab66b`（v1 `32571f8` + v2 一 commit；基于 main `15b3f447`）
+**CI #1479（run 34741174384）success**，head_sha 三源一致（本地 = 远端 = run）。
+**新测试 11/11 在 CI 里 PASSED**（`ColdOpenPrewarmSourcesTest`，对真实生产类型编译）。沙箱 kotlinc 也 11/11。
+**装机包**：`/var/minis/attachments/RikkaMinis-v2-open-first-frame.apk`（14.0MB，sha256 cfc56f9c22182ee2…）
+—— **已解压 dex 验证包内含新探针字符串**（coldOpen.newestRowWarm / OpenRowWarm / coldPrewarm.done 各 1 次），不是"CI 绿但产物旧"。
+
+**★ 真根因（此前 v1 未找到）**：
+1. `StreamingMarkdownTextBody` 的 `blocks` 初值 `emptyList()`，正文靠离主解析回填 → 冻结行**首帧高度缺正文**，
+   随后才长高（实测 1065→5255、13350→25995px）。
+2. `INITIAL_OPEN` 的 `scrollToItem(1_000_000)`（clamp 到底）按**首帧高度**落位；增长追加在视口下方**不移动视口**
+   → 差一段的差值 ≈ 增长量（`open-catchup roll` firstOff 3074→4545）；v1 的补滚即是用户看到的"第二次动作"。
+3. **死代码实锤**：`AGGREGATE_MESSAGE_ITEMS=true` 后，ChatScreen 冷打开 prewarm 的取源仍是
+   `(item as? AssistantMarkdownBlock)?.rawText`，聚合行是 `AssistantMessageItem` → `raws` 恒空、整个 prewarm 从未跑过
+   （设备日志无任何 `coldPrewarm.done`，`coldOpen summary` 全 `prewarmMs=-1`；且它还在 legacy 分支里，聚合路径 `return@collect` 双重不可达）。
+
+**v2 改动**：新文件 `ChatColdOpenPrewarm.kt`（聚合感知取源 + 上限预算，纯函数）；
+聚合冷构建里**发布前**在同一 off-main job 块解析最新行并缓存（预算 48k/32 段）；
+`StreamingMarkdownTextBody` 首帧从缓存取种子（lock-only peek）+ 冻结分支 putBlocks 落盘；
+v1 补滚窗口 1.2s→2.5s、3→4 次（安全网，期望 rolls=0）。文档 `docs/scroll-follow-simplification.md` 加章节。
+
+**验收探针（rc3.log 转储已重开，PID 12700）**：`coldOpen.newestRowWarm srcs/chars/warmMs`、
+`[Perf][OpenRowWarm] … warm=1|0`、`open-catchup done rolls=N`（应为 0）、`firstItem.placed` 最新行应只有一个 size。
+**未合并**——等用户真机验证拍板。
+
+**顺带解谜**：13:10 时段"没有 INITIAL_OPEN 首滚"的打开属于 **PID 30299（v1 之前的包）**；13:26–13:32 的 v1 包日志里每次打开都有。
+不是独立 bug（旧交接文档的"未解谜团"已闭）。
+**日志坑复记**：`pkill -f 'logcat -b all'` 会匹配自身命令行自杀（exit 143），必须先 `ps | grep -- '[-]b all'` 取 PID 再精确 kill。
+
+<!-- 2026-09-13 14:07:44 -->
+## 打开会话「差一段」v2 已合并 main（2026-09-13 14:05）
+
+
+**用户真机验收："解决的很完美"** → 拍板合并。
+- ff 直推：`15b3f44..daab66b` → main = `daab66b`（本地 = 远端 = 上一轮 CI run 34741174384 head_sha，三源一致）
+- 远端分支 `fix/open-catchup-guard` API DELETE **204**；终验 ls-remote 仅剩 main（+ 另一会话的 fix/adaptive-compact-thresholds，未动）
+- release CI **run 34741909368** 随 main push 自动触发（用户拍板不等结论）
+- 装包：`/var/minis/attachments/RikkaMinis-v2-open-first-frame.apk`（14.0MB，dex 已验内含新探针字符串）
+
+**合并内容 = 2 commit / 7 文件 +779/−15**：`ChatColdOpenPrewarm.kt`(新) + `ColdOpenPrewarmSourcesTest.kt`(新, 11 测试)
++ ChatScreen/StreamingMarkdownText/FollowController + `docs/scroll-follow-simplification.md` 新增「Cold-open landing」章节。
+
+**闭环结论（可复用的排查范式）**：打开会话落位偏差 = 「首帧高度 ≠ 终态高度」+「clamp 落位按首帧算」。
+本次两层根因：①渲染层 `blocks` 空起步（异步回填）②**预热层因改架构变成死代码**（取源 cast 到已被替换的行类型，
+零报错、零日志、静默失效）——和"加字段四处同步漏一处"是同族的静默蒸发。
+方法论教训：**改数据/渲染架构时必须回查所有按旧类型取源的旁路**（预热、缓存、遥测、导出），否则它们全部静默失效。
+修复顺序优先"让首帧即终态"（治本），补滚只留作异步源（图片/公式/媒体）的安全网。
+
+<!-- 2026-09-13 14:22:46 -->
+## 压缩「跟不上新模型」修复已合并 main（2026-09-13，main @ 33aa72d）
+
+
+**用户症状**：新模型反应快、输出多 → 压缩功能效果大打折扣。
+
+**根因（三条，同一假设失效："单轮增量 ≪ 触发线间距"）**：
+1. **绝对差值导致窗口越大压缩越晚**（`ContextPolicy.forContextWindow`）：`W-20K` 在 128K=84%、200K=90%、**1M=98%** → 大窗口模型几乎不触发压缩，只在硬上限处撞墙（发送被阻断）。
+2. **触发带宽是常数 20K，单轮增量可跨过去**：判定每回合一次（用上一轮 usage），40K/回合就能从 OK 直接跳到 EXHAUSTED，`NEEDS_COMPACT` 带被整个跳过 → 压缩永不触发。
+3. **5 分钟防抖 + 压缩同步阻塞**（`awaitAutoCompactIfNeeded` 上限 120s，splitting 最多 8 次 LLM 调用）→ 快模型下压缩本身成瓶颈。
+
+**修复（分支 `fix/adaptive-compact-thresholds`，rebase 到 daab66b 后 ff → main 33aa72d；9 文件 +701/−14）**：
+- **P0 比例线**：大档改为 `min(W-20K, W*85%)` / `min(W-40K, W*75%)` / target 65%。128K 及以下**逐字节不变**（已用旧公式逐值对照 + 全窗口扫描断言"永不更晚"）。
+- **P1 自适应预留**：新 `ContextGrowthTracker`（decay-max 估计，decay 0.6，非均值——要防的是上界）+ `ContextPolicy.reservedForGrowth(reserve, W)` 把三条线整体下移 `3×单轮增量`（上限 W/3，下限 W/2，同移保序）。
+- **一致性**：compact / 预发警告 / offload 全部读同一 `effectiveContextPolicy(W)`（否则压缩会先于它该 slim 的 offload 触发）。
+- **边界堵漏**：`exhaustedOnly` 档（<64K）豁免——那里的 offloadThreshold 同时是硬阻断线，下移会凭空提前阻断发送。
+- **探针**：`[ContextGrowth] +N tokens/turn → estimate=... reserve=...`；`[AutoCompact*]` 行加 compactLine/offloadLine/reserve/growth。
+- 已知自愈局限：tracker 不随会话切换重置，重负载会话的估计会让轻会话提前压缩 ~5 轮（0.6 decay 会消化）。
+
+**验证**：沙箱 kotlinc 2.1.0 + JUnit4 **58/58 绿**（含负向对照：LEGACY 几何在 200K/40K-per-turn 与 1M/120K-per-turn 下确实 OK→EXHAUSTED，修复后均得 AUTO_COMPACT）。
+**CI**：分支 run 34741727399 success（head 0f77046，三源一致）；rebase 后逐字节校验改动未变 → ff 推 main → release CI **run 34742540288**（in_progress，用户拍板不等）。
+**待办**：用户真机日常验证（用户明确：这类改动只能在日常使用中发现）。
+**坑（复记）**：`gh_sync.sh push --branch HEAD:main` 可做 ff 直推；`git push --dry-run` 无 askpass 会报 could not read Username（改用 merge-base --is-ancestor 校验 FF）。
+
+<!-- 2026-09-13 14:32:14 -->
+## 2026-09-13 三笔改动审计收尾（main @ 33aa72d）
+
+
+**范围**：①`32571f8` open-catchup v1 ②`daab66b` v2 首帧贴底 ③`33aa72d` 自适应压缩阈值（原分支 fix/adaptive-compact-thresholds，14:00 由另一会话 rebase 合并 main，分支已删）。
+
+**核心结论：三笔均无阻塞 bug**。已逐链验证：
+- v1/v2：cachedBlocks MISS=null ✓、LRU 2M 封顶 ✓、displayContent 与预热源逐字一致（text 块+legacy 回退双路径）✓、warmSeed 引用相等性早退逻辑 ✓、用户气泡纯 Text 同步渲染（正确跳过）✓、深链 focus 打开不发 InitialOpen 不 arm ✓。用户真机已验"解决的很完美"。
+- 自适应压缩：`effectiveContextPolicy` 单一入口收口全部 4 条决策路径（checkContextBeforeSend/maybeTriggerAutoCompact/maybeAutoCompactInLoop/offloadContextIfNeeded），`forContextWindow` 零直连调用点 ✓；loop 内两调用点均活读 effectiveContextWindowTokens ✓。
+- **疑似跨会话泄漏已排除**：ChatViewModelStore 按 sessionId 每会话独立 ChatViewModel 实例 → tracker 天然会话作用域；`reset()` 生产零调用不是 bug（VM 销毁即重置），KDoc"session switch"措辞略超前。教训：**审会话级状态先查 VM 作用域再定泄漏**。
+
+**遗留两个非阻塞发现（未修，等用户拍板）**：
+1. **open-catchup 守卫盲区（低severity真 bug）**：2.5s 窗口内经 InputHistorySheet 跳转（pendingFocusId）不算"用户介入"（只认 drag/Resume）→ FOCUS-MESSAGE 落定后 canScrollForward=true → 补滚把用户拽回底部。窗口窄（2.5s 内要完成开菜单→选历史→点条目）。修法一行：设 pendingFocusId 时同设 openCatchUpUserEngaged=true，或守卫判 pendingFocusId==null。
+2. swipe 阈值陈旧捕获：ChatInputArea `pointerInput(Unit)` 捕获 swipeThresholdPx 不随调参热更；但调参必经 Settings 导航（销毁重组），实际影响≈0。
+
+**CI**：daab66b release run 34741909368 success；33aa72d release run 34742540288 审计时 in_progress（用户拍板不等）。克隆 /tmp/rikka-audit-0913（audit 用，浅 blob:none）。
+
+<!-- 2026-09-13 14:40:19 -->
+## Legacy 渲染管线残留清单审计（2026-09-13，基线 daab66b）
+
+
+**报告**：`/var/minis/shared/legacy-pipeline-audit-2026-09-13.md`（扫描脚本 /tmp/legacy_scan{,2,3,4}.py）
+
+**结论**：`AGGREGATE_MESSAGE_ITEMS = true`（ChatScreen.kt:4966 编译期常量）后，聚合路径只生产 `UserBubble` + `AssistantMessageItem` 两种行型；其余 **10 种行型 + 整条生成/渲染链已无生产来源，但完整保留在 APK 且仍有 154 个单测覆盖**。
+
+**残留账（生产代码 ≈ 2,614 行）**：
+- RUNTIME-DEAD 文件 4 个 = **1,330 行**：StableChatRowLedger 801 / MarkdownStreamMerge 262 / AppendOnlyMarkdownSegmenter 194 / AudioWaveformView 73（后者零调用点，与聚合无关）
+- legacy 行型类定义 `ChatFlatItems.kt:329-645` 10 类 = 317 行
+- legacy 生成器 `buildFlatChatItems` 771-1093 = 323 行
+- ChatScreen legacy 段 **3181-3340 = 160 行**（`return@collect` 在 3179，之后不可达）
+- ChatScreen legacy 渲染分支 3858-4052 = 296 行
+- 纯 legacy composable `ToolCallRunGroup`（ChatAssistantMessageUI.kt:1035-1210）= 176 行，唯一调用点 3936
+- ChatScreenUtils 的 `isCompacted` legacy 分派 12 行
+
+**★ 彻底死的（连 legacy 生成器都不产生）**：`AssistantText`（类 42 + 渲染 26）+ `AssistantToolUse`（类 58 + 渲染 44）= **170 行零决策成本可删**。
+
+**三个「活死同居」点（事故高发区）**：①ChatFlatItems.kt（活 150 行 / 死 640 行）—— 09-13 cold-open prewarm 死代码事故现场；②ChatScreen.kt（活聚合段 142 行 / 死 456 行）；③ChatAssistantMessageUI.kt（活 AssistantMessageView+ToolCallPill / 死 ToolCallRunGroup 176 行）。
+
+**重要纠正**：`ThinkingBlock` / `FallbackInfoBlock` / `InlineErrorBanner` / `TypingIndicator` / `AssistantHeader` / `ToolCallPill` 是**两路径共享的活 composable**（AssistantMessageView 也调用），死的只是 ChatScreen 里的分支。`mergeStreamingOverlay` 同理是活的。
+
+**测试账**：10 个相关测试文件 / 154 个 @Test（全库 2,703 的 5.7%）；StableChatRowLedgerTest 30 + AppendOnlyMarkdownSegmenterTest 23 全测死文件。
+
+**处置建议（推荐 ②+③）**：②把 legacy 移进 `ui/chat/legacy/` + `@Deprecated` + scan.sh 加「禁止新代码引用 legacy 符号」门禁（不删一行但从结构上堵坑）；③所有「按行型取源」收进 `markdownSourcesForRow` 式单点函数 + 禁止裸 cast。①全删会连 Stage-E fallback 的余地一起去掉，需改写 scroll-follow 文档前提。
+
+<!-- 2026-09-13 14:46:13 -->
+## 待办归档：catch-up 守卫盲区已记入 backlog（2026-09-13）
+
+
+用户拍板"攒着不修"。已写入 `/var/minis/shared/backlog.md` 新增 **#5**：open-catchup 守卫不认 InputHistorySheet 跳转（2.5s 窗口内跳历史会被拽回，极窄窗口）。含位置/影响/一行修法（onSelect 同设 openCatchUpUserEngaged=true，或守卫加 pendingFocusId==null）。swipe 阈值陈旧捕获未记（实际影响≈0，调参必经导航重组）。下次做 scroll-follow/ChatScreen 交互改动时从 backlog 最旧开始逐条带。
+
+<!-- 2026-09-13 15:02:04 -->
+## 性能实测：沙箱重活把 app 进程 RSS 顶到 1GB，触发自有内存门反过来掐工具通道（2026-09-13）
+
+
+**用户提问**：「应用效率和性能是否还能提升」→ 转成设备实测（pid 442 = com.rikkaminis.app）。
+
+**硬数据（本次会话亲测，同一进程）**：
+- 帧：gfxinfo 总 9563 帧 / janky 289（**3.02%**，legacy 15.48%）；p50 13ms、p90 20ms、p95 25ms、p99 53ms；GPU 分位 3ms/8ms（p99）→ 120Hz 屏上实际 ~60-75fps，仅约 1/3 帧落在 8.3ms 预算内。Slow UI thread 202、Slow issue draw 50、Slow bitmap upload 3。
+- 内存：健康基线 **VmRSS 314-338MB**（RssAnon 170 / RssFile 150 / RssShmem 16，Threads 64）；**VmHWM = 1,164,572 kB（1.14GB）**。
+- **★ 复现的尖峰曲线**（1s 采样）：338 → 401 → 575 → 618 → 743 → 769 → 776 → 864 → 942 → 980 → 1,013 → 1,038 → **1,061 MB**，耗时约 20s；触发动作 = 沙箱内 `find src -name '*.kt' -exec grep -c 'fun ' {} +`（749 文件级扫描）。静置 ~1-2 分钟后**完全回落到 338MB**（可回收，非真泄漏）。
+- **后果（同一时段实测 3 次）**：`ExecutionCoordinator` 拒绝工具调用，返回 `[System busy: process memory is critically high (871/905/967MB). Please wait...]`——即 agent 自己的重活把 app 顶过 `MemoryPressureGate.CRITICAL_RSS_MB = 800`，反过来掐自己的 shell 通道。
+
+**机制判定**：
+- 已证实：门读 `/proc/self/status` 的 **VmRSS**（含可回收 RssFile），阈值 ELEVATED 600 / CRITICAL 800（源码注释依据是旧设备健康 RSS 354-400MB；本机实测健康基线只有 314-338MB）。
+- 强推断（未钉死）：PRoot 沙箱宿主就在 app 进程内（442 的子进程名 `libproot.so`、`NativeOffloadServer` 日志也来自 442）→ 沙箱海量元数据 syscall 的翻译/缓冲账记在 app 自己头上。
+- 跨会话影响：**一个进程承载所有会话**，门是进程级的 → 任一会话跑重活，其他会话的工具准入一起被拖 2s 或直接被拒（用户反馈"另一个会话不该受影响"）。
+
+**候选修法（未动手，等用户拍板）**：①门换指标（RssAnon 或 RssAnon+系统 available，配持续 N 秒滞回）②沙箱重活移出 app 进程③门只对"重内存工具"生效（browser/图片），shell 不拒④查清尖峰分配源（OffloadRssProbe 式逐 op 采样）。
+
+**方法论坑（复记）**：grep 模式串会出现在自己命令行里 → logcat 自匹配（本次 `grep 'Minis.StreamPerf'` 把自身命令回显也匹配了），需按 tag 过滤或先写脚本文件再执行。
+
+<!-- 2026-09-13 15:33:55 -->
+## 用户拍板回滚今天全部改动（2026-09-13）
+
+
+用户要求"不要做多余操作，立即回滚到今天改动前"。main 上今天 3 笔（32571f84 open-catchup v1、daab66b8 v2、33aa72d1 自适应压缩——后者已被他人先 revert 为 262f1f9e）。以 revert 提交链撤销剩余两笔（46a33c70 + d6cbe49e），工作树与 15b3f447 逐字节一致，fast-forward 推 main @ d6cbe49e。历史保留可恢复。
+**坑**：gh_sync.sh push `--branch rollback-today:main` 实际没推到 main（autoSetupMerge 报错），需 `git push origin HEAD:refs/heads/main` 显式 refspec。open-catchup v1/v2 的用户验收作废（问题仍在，待后续重新做）。
+
+<!-- 2026-09-13 15:36:29 -->
+## ★ 2026-09-13 实测：app 进程两次 SIGABRT（native OOM），RSS 5.4-6.1GB
+
+
+**证据来源**：`/var/minis/logs/native-crash-*.log`（沙箱内可读，无需 shizuku）
+- `native-crash-2026-09-13T07-07-25Z.log`：SIGABRT(6)，PID 11982，**VmRSS 6,084,016 kB (6.08GB)**，VmPeak 16.5GB，Threads 50
+- `native-crash-2026-09-13T07-15-20Z.log`：SIGABRT(6)，PID 12046，**VmRSS 5,459,776 kB (5.46GB)**，VmPeak 16.6GB，Threads 55
+- 崩溃签名与 ExecutionCoordinator 注释里 2026-08-17/19 的历史崩溃**同型**（"RSS 5.8–6.0GB, VmPeak ~17GB SIGABRT"）→ 属既存泄漏类，不是今天新引入的类型。
+- `/var/minis/logs/stall-2026-09-13.log` 里 15:15:20 有一条 HANG（duration ~3143ms，sample=mid-hang），与第二次崩溃**同一时刻**；HANG 采样显示 main 线程停在 `MessageQueue.nativePollOnce`（空闲）→ 说明"卡住"不是主线程阻塞，而是进程正在死。
+
+**用户症状对照**：打开旧会话卡住、内容全空 → 发一条消息全出现。**推断=进程被 SIGABRT 杀掉后重开，会话视图像是加载完成但行未发布，直到下一次 emission（发消息走增量路径）才全部出现**（未在代码层证实，待查 cold-build 与 incremental-build 两条路径）。
+
+**机制（当前最自洽的解释，已有代码注释背书）**：
+- 泄漏载体 = 进程内 PRoot tracer（ExecutionCoordinator 注释明写 "A long-lived PRoot tracer leaks native memory monotonically"，08-07 实测 6.2-6.9GB）。
+- 现有防线**全是命令之间**的：执行前 VmRSS 门（600/800MB）、native heap 分级降级、每 shell 命令预算 30、idle shell 回收、OffloadRssProbe 的治理钩子（累计 256MB/单次 64MB → 只回收 idle shell）。
+- **缺口 = 没有"命令执行中"的看门狗**：单条重活（编译/测试/全库扫描）自身就能把 RSS 从 0.3GB 推到 1GB+（本次 1s 采样实测 338→1061MB/20s），而门只在命令开始前判一次，跑飞了没人拦 → 直奔 5-6GB Scudo abort。
+- 用户观察印证触发物：改代码无影响、跑测试有影响（大量子进程 + 文件 mmap + syscall 量）。
+
+**本次会话环境注意**：shizuku 服务在用户重启应用后已停（android-shizuku-cli 返回 SERVICE_NOT_RUNNING），设备侧 logcat 读不到了；但 `/var/minis/logs/` 仍在沙箱内可读，是崩溃/卡顿取证的首选来源。
+
+**执行纪律教训**：诊断本身（`grep -rn --include=*.kt` 全库扫描）就是打爆内存的负载 → 自查用**定向 `sed`/`file_read` 单文件**，禁止在 app 会话里跑全库递归扫描。
+
+<!-- 2026-09-13 15:47:07 -->
+## 回滚后 main 终态确认（2026-09-13 晚）
+
+
+API 实查 main = `d6cbe49e`，revert 链已落地：`d6cbe49e`（revert 32571f84 open-catchup v1）← `46a33c70`（revert daab66b v2）← `262f1f9e`（revert 33aa72d 自适应压缩，由另一会话先做）← `15b3f447`（dev-history，今天的还原基线）。
+
+- 回滚后 release CI **run 34745538013 success**（07:44:11Z，branch=main，bridge 实测）。
+- **保留**：e057d151（shellTimeout 接线+滑杆密度，凌晨合并，真机 3 点全验通过）、15b3f447（dev-history 926 条文档）。
+- **作废**：open-catchup v1/v2、自适应压缩——功能改动全撤，open-catchup「差一段」问题回到修复前状态（待后续重做，v2 根因结论仍有效：prewarm 死代码 + blocks 空起步）。
+
+<!-- 2026-09-13 15:50:57 -->
+## ★ 内存飙升的会话级归属：shell 是 per-session 的（2026-09-13 用户对照实验 + 代码核实）
+
+
+**用户对照实验结论**：RSS 飙升只出现在他置顶的那两个会话，本会话（新会话）调用终端完全正常。
+
+**代码核实（/tmp/rikkaminis-src，ExecutionCoordinator.kt）——结构与观察一致**：
+- `PersistentShell: one per sessionId, owns its bind mounts and /bin/sh process`（:30 注释）；`private val shells = ConcurrentHashMap<String, PersistentShell>()`（:173）
+- 每会话一个常驻 PRoot 子进程 + 它自己的一套 session bind mounts（minis-sessions/<id>/{workspace,attachments,offloads,browser}）
+- 泄漏载体（PRoot tracer，单调泄漏，08-07 实测 6.2-6.9GB）就住在该子进程里 → **内存归属天然挂在"哪个会话在用 shell"上**
+- 回收只有三条路：**空闲 10 分钟**（SHELL_IDLE_TIMEOUT_MS，每分钟扫一次 recycleIdleShells）、**单 shell 30 条命令**（MAX_COMMANDS_PER_SHELL）、**内存高水位/分级降级**。**没有"切走会话/会话关闭即回收"**——只有用户点停止走 stopCurrentCommand(sessionId) 才 kill
+- MAX_CONCURRENT_SHELLS=2 是**并发执行上限（Semaphore）**，不是存活 shell 数上限 → shells map 可积累多个常驻 shell
+
+**推论**：那两个置顶会话一直有活动 → 永不 idle 回收 → 泄漏累积；本会话是新 shell，从基线开始。**本会话"没问题"是代龄差异，不是特权**——可反驳预测：本会话连跑 30+ 条重命令后同样会涨。
+
+**两个新硬事实**：
+1. **已进入崩溃循环**：launch-beacon.log 15:05–15:46 共 20 次进程启动；记录在案的 SIGABRT 三次（15:07/15:15/15:31，PID 11982/12046/6647），15:44 那次是 scudo 从 15:44:11 起连续 22 条 "Can't populate more pages for size class N"（分配失败）→ 15:44:41 重启。
+2. **app 数据 34,445 MB（34.4GB）**，设备可用 32.6GB（android-device 实测）。
+
+**待验证实验（给用户）**：①两会话完全静置 11 分钟看 RSS 是否回落（验证 idle 回收是否真生效）②干净会话连跑 30+ 条带子进程命令看是否同样上涨（验证"代龄"假设）。
+**取证缺口**：会话级 shell 大小只在 logcat tag=ExecutionCoordinator（"Shell created with N bind mounts" / "shell idle Ns — recycling" / "PRoot child RSS xMB"）可见，shizuku 停 → 需用户重启 shizuku 或复现时开转储。
+
+<!-- 2026-09-13 15:56:10 -->
+## ★★ 交接：legacy 管线隔离 + backlog 两项（分支未推，本会话终端环境已损坏）
+
+
+**⚠️ 本会话终端不可用**：任何 shell_execute 都会触发 `[System busy: process memory is critically high (982/1022/2283MB)]`。成果全部在磁盘上，**必须由新会话接手完成最后三步**。不要在本会话继续调终端。
+
+### 工作克隆（已存在于磁盘，可直接用）
+- `/tmp/rikka-legacy`（浅克隆 --depth 20，origin = logicflow-GYW/RikkaMinis，main = `33aa72d`）
+- askpass：`/tmp/askpass_legacy.sh`（chmod +x 已做，GIT_ASKPASS 用）
+- 分支：`refactor/legacy-pipeline-isolation`（**未 push**）
+- 本地测试脚手架：`/tmp/utf16test/`（kotlinc 2.1.0 + junit 4.13.2，jar 在 /tmp/libs）
+
+### 三个 commit 的进度
+| # | hash | 内容 | 状态 |
+|---|---|---|---|
+| 1 | `284293c` | refactor(chat): 隔离 runtime-dead legacy 管线 | ✅ 已提交 |
+| 2 | `b432988` | fix(chat): UTF-16 净化 + 历史跳转守卫（backlog #1 #5） | ✅ 已提交 |
+| 3 | — | chore(scan): legacy 门禁接入 | ⏳ **文件已改好但未提交** |
+
+### commit 1（284293c）内容
+- `ui/chat/{StableChatRowLedger,MarkdownStreamMerge,AppendOnlyMarkdownSegmenter,AudioWaveformView}.kt` → `ui/chat/legacy/`（package 改 `com.rikkaminis.app.ui.chat.legacy`）
+- `buildFlatChatItems`（323 行）从 ChatFlatItems.kt（1255→931 行）切出 → 新建 `legacy/LegacyFlatChatBuilder.kt`
+- import 补齐：ChatScreen.kt（+2）、StableChatRowLedger.kt（+5）、6 个测试文件
+- **关键约束（下次别踩）**：Kotlin sealed 子类只能同包不同文件，**不能把 `FlatChatItem` 的 10 个 legacy 子类移出 ChatFlatItems.kt**（否则 `FlatChatItem.X` 引用全崩）。它们只能留原位 + 标记，这是语言约束不是偷懒。
+
+### commit 2（b432988）内容
+- **backlog #5**：`ChatScreen.kt` InputHistorySheet `onSelect` 加一行 `openCatchUpUserEngaged = true`（2.5s 窗口内跳历史不再被补滚拽回）
+- **backlog #1**：新建 `util/Utf16Sanitizer.kt`（internal object，纯函数 `sanitize` + `hasLoneSurrogate`，孤立代理对→U+FFFD，带零分配快路径）
+- 接入 2 处：`ChatViewModel.sendMessage`（参数 text→rawText 重绑定）、`ChatPromptAndTools.kt:651 ChatViewModel.updateAssistantMessage`（参数 content→rawContent 重绑定）；两处调用方均为位置参数，已确认无命名参数调用
+- **不变量（重要设计）**：只净化**发布副本**，绝不改累积缓冲区（turnTextSb/accumulatedText）→ 跨 flush 的代理对下一轮仍能正确配对
+- 测试 `test/util/Utf16SanitizerTest.kt`（13 条）**沙箱 kotlinc 实跑 13/13 绿**
+
+### commit 3 待做（文件已就绪，只需提交）
+已写好的文件（**未 git add**）：
+1. `scripts/scan/legacy_pipeline_guard.py`（新增，已对真实仓库验证：clean ✅；负向对照造 `__NegProbe.kt` 引用 `FlatChatItem.AssistantMarkdownBlock` → 正确报 1 处 ✅）
+2. `ChatColdOpenPrewarm.kt` markdownSourcesForRow（+18 行 legacy-ok 注释块，豁免 3 个 legacy 行型引用）
+
+**还需动手的三小步**：
+- `scripts/scan/scan.sh`：把 `[1/5]`…`[5/5]` 改成 `[1/6]`…`[5/6]`，并追加第 6 项调用 `python3 scripts/scan/legacy_pipeline_guard.py "$ROOT"`（照抄第 4 项 provider_boundary_guard 的 if/else 结构）
+- `scripts/scan/test_scan.py`：加 `test_legacy()`（CLEAN fixture / DIRTY fixture 各一个，参照 test_boundary 写法）+ 把 `legacy_pipeline_guard.py` 加进 `test_real_repo()` 的脚本列表
+- `git add -A && commit` → `GIT_ASKPASS=/tmp/askpass_legacy.sh git push origin refactor/legacy-pipeline-isolation`
+
+### 门禁设计（legacy_pipeline_guard.py 要点）
+- **文件级允许清单**：`ui/chat/legacy/**`、`src/test/**`、ChatFlatItems.kt、ChatScreen.kt、ChatScreenUtils.kt、ChatAssistantMessageUI.kt
+- **行级逃生舱**：`// legacy-ok: <reason>` 注释 → 豁免接下来的连续行直到空行（正因此 strip_comments 必须保留含 legacy-ok 的注释行、把其他注释行替换成 `//` 而不是 ""——否则空行会把豁免状态重置掉，这个坑已踩过并修好）
+- 被禁符号 = legacy 包导出的全部顶层声明（动态扫描，自适应）+ 10 个 legacy 行型（`FlatChatItem.X` 形式）+ `ToolCallRunGroup`
+
+### 推 CI 注意
+- `build-apk.yml` 的 push trigger **只挂 main** → 特性分支必须手动派发：`sh /var/minis/skills/github-ops/scripts/gh_sync.sh gh-actions-dispatch --repo logicflow-GYW/RikkaMinis --workflow build-apk.yml --ref refactor/legacy-pipeline-isolation`
+- 查状态：`https://rikka-ci-bridge.***USER***.workers.dev/status/refactor/legacy-pipeline-isolation`
+- CI 绿 → 用户真机验证 → ff 合并 main → 删分支 → release CI
+
+<!-- 2026-09-13 15:56:23 -->
+## ★ legacy 管线审计：最终形态与可复用教训（2026-09-13 二轮，动手实施后）
+
+
+**审计报告**：`/var/minis/shared/legacy-pipeline-audit-2026-09-13.md`（⚠️ 该文件的「三条处置路线」章节**已滞后**：报告假设 10 个 legacy 行型类可移入 `ui/chat/legacy/`，实际被 Kotlin 语言约束否决，见下。下个会话应据此更新报告。）
+
+### 实际落地形态
+- **已隔离**（`ui/chat/legacy/` 包）：StableChatRowLedger(801) + MarkdownStreamMerge(262) + AppendOnlyMarkdownSegmenter(194) + AudioWaveformView(73) + LegacyFlatChatBuilder(340，含 buildFlatChatItems 323 行) ≈ **1,670 行**
+- **无法移动，只能标记**：10 个 legacy 行型类（ChatFlatItems.kt 内，317 行）+ ChatScreen legacy 段(160 行) + legacy 渲染分支(296 行) + ChatScreenUtils 分派(12 行) + ToolCallRunGroup(176 行)
+- **交付的防护**不是移动本身，而是**门禁**：新代码引用 legacy 符号 = 构建失败
+
+### ★ 关键教训 1：Kotlin sealed 子类的移动边界
+`sealed class FlatChatItem` 的 10 个 legacy 子类**不能**移到另一个包——Kotlin 只允许 sealed 子类在**同模块同包**的其他文件中（1.5+），且必须提到类体外成为顶层类（会破坏全库 `FlatChatItem.X` 引用语法）。**结论：sealed 家族的文件级隔离在 Kotlin 里不成立，只能靠门禁 + 标记。** 这是审计时没料到的语言约束，写方案前应先用「能不能移」反问一次。
+
+### ★ 关键教训 2：门禁脚本的三个坑（都踩过并修好）
+1. **注释清除会吃掉逃生舱**：若把 `// legacy-ok:` 注释行清成 ""，标记就丢了 → 必须**保留**含标记的注释行、把其他注释行替换成 `//`（非空）
+2. **空行重置豁免状态**：块级豁免（标记→空行为止）如果被"被清空的注释行"触发重置，连续多行注释块就会失效 → 这也是第 1 点要求非空的原因
+3. **允许清单要覆盖混合文件**：ChatScreen.kt / ChatFlatItems.kt / ChatAssistantMessageUI.kt 是活死同居文件，整体豁免是折中（下一步可用行区间标记收紧）
+
+### ★ 关键教训 3：跨 chunk 代理对的正确净化姿势
+流式输出不能对**每个 chunk** 净化——一个合法 emoji 的 high/low 代理对可能跨两个 SSE delta，逐 chunk 净化会把两半都替换掉。正确做法：**只净化发布/落库副本，绝不改累积缓冲区**（`turnTextSb`/`accumulatedText` 保持原始），于是跨 flush 的对在下一轮自然拼回。这条不变量要写进函数注释，否则未来有人"顺手"改进累积缓冲区就坏了。
+
+### ★ 关键教训 4：U+FFFD vs DELETE 的取舍
+参考实现（OmniBot AgentTextSanitizer）是**删除**孤立代理对；本次改用 **U+FFFD 替换**。理由：删除会静默缩短文本、掩盖"上游中转站坏了"这个信号（本项目刚吃过"上游 reasoning 泄漏"的取证苦）；U+FFFD 是全栈（`String.getBytes(UTF_8)`）本来就产出的形态。**可复用判据：净化类改动优先"可见地替换"而非"静默地删除"**，除非有性能/长度硬约束。
+
+### ★ 关键教训 5：可移动性测绘的标准三问
+改这种"活死共存"代码前，按顺序问：
+1. **这类能移吗？**（语言约束：sealed/enum/内联类 → 先查规则）
+2. **它依赖谁？**（同包符号 + 扩展成员 + 跨包 import；扩展成员最易漏——普通符号扫描抓不到 `.owningMessageId()`，要单独扫 `^(val|fun) Type.name`）
+3. **谁依赖它？**（真实调用 vs KDoc 提及要分开——本项目里 4 个死文件的"引用者"大多数只是注释里的 KDoc 链接）
+
+<!-- 2026-09-13 16:53:11 -->
+## ★ 内存实验结论 + 发现应用内建 per-command RSS 探针（2026-09-13 16:50-16:53 实测）
+
+
+### 实验：在"曾报内存告警"的会话里连调 36 次终端
+**结果：零次内存拒绝，app RSS 全程 224-250MB。**
+- 负载序列：3 轻命令 → 4 中量（目录遍历/文件读取）→ 3 重量（全库 grep）→ 4 重（kotlinc 编译 + tar 打包 11MB + python 全树遍历 + JVM 跑测试）→ 6 强度（sha256sum 全库 895 文件 + 正则遍历 + 循环 cat 大文件 40×）→ 300MB 沙箱内存分配 + 整树读入 + 单调用 25 命令
+- RSS 序列（36 样本）：235 228 229 230 225 226 227 229 224 224 225 226 228 230 232 234 236 238 239 241 244 244 249 227 229 229 247 228 239 225 245 246 248 250 227 232 → **min 224 / max 250MB**，每次逼近 250MB 就回落到 225-230MB（周期性回收）
+- native 分量稳定 36-39MB；proot 分量稳定 1-2/3-7MB（**无单调泄漏**）
+- 对比：今天崩溃日志里的 VmRSS 是 5.4-6.0GB（`native-crash-2026-09-13T*.log`）→ 相差 20 倍以上
+
+**结论**：告警的根因是**那个 app 进程当时的泄漏累积状态（崩溃循环余波）**，不是"调用终端"这个动作本身。本会话（新进程 PID 19833/20012，用户刚重启过）即便跑满强度也稳定。印证此前的**会话级代龄假设**（泄漏挂在长期持有 shell 的会话上，不挂在新会话）。设备整体 available 也从告警时的 5559MB 回到 6440-6500MB。
+
+### ★ 新发现：`/var/minis/logs/memspike-YYYY-MM-DD.log`（沙箱内可读，无需 shizuku）
+应用**内建的逐命令内存探针**，是排查这类问题的最直接证据源（比 logcat 更省事）。格式：
+
+```
+16:50:02.060 [cmd-end] rss=235MB(+1MB) dur=263ms native=37MB proot=2/7MB LIGHT session=***UUID*** :: <命令文本>
+```
+
+- `rss=NNNMB(±delta)` = app 进程 VmRSS（与内存门 MemoryPressureGate 同源，CRITICAL=800MB）
+- `native=NMB` = native heap 分量；`proot=N/NMB` = PRoot 进/进程内存（**泄漏载体监控点**）
+- `LIGHT/HEAVY` = 命令负载分级；`session=<uuid>` = **按会话归因**（对比不同会话直接看这个）
+- 用法：`grep "session=<id>" ... | grep cmd-end | sed 's/.*rss=\([0-9]*\)MB.*/\1/' | sort -n | sed -n '1p;$p'` 取极值
+
+### 可复用判据
+- 排查"内存飙升"先读 memspike 日志（含分量与会话归因），而不是先怀疑工具/终端
+- 沙箱内 `/proc` **只暴露沙箱进程**（PRoot 视图），读不到宿主 app 的 VmRSS——只能靠 memspike 日志或 native-crash 日志
+- 沙箱进程（Name: `libproot.so`）是**独立 PID**，其内存不计入 app VmRSS
+
+<!-- 2026-09-13 17:02:18 -->
+## ★★ 交接：native OOM 频发 + 冷打开空白（本会话产出，未动手修）
+
+
+**交接文档**：`/var/minis/shared/native-oom-handoff-2026-09-13.md`（10.8KB，含全部硬证据 / 代码位置 / 缺口分析 / 任务书 T1-T5 / 环境纪律）
+**本会话结论**：现有内存防线**全在"命令之间"**（执行前 VmRSS 门 600/800MB、native heap 分级、每 shell 30 命令预算、idle 回收、OffloadRssProbe 治理钩子且只回收 idle shell），**没有"命令执行中"的看门狗** → 单条重活可把 app RSS 从 338MB 推到 1GB+（20 秒内），跑飞了没人拦，直奔 5~6GB Scudo abort（今天 15:07 / 15:15 两次 SIGABRT，RSS 6.08 / 5.46GB，VmPeak 16.5/16.6GB）。
+**本会话未写任何代码**（只做了测量与代码阅读），**但诊断命令本身（全库 grep -rn）就是打爆内存的负载**——新会话严禁在 app 会话里跑全库递归扫描，用定向 sed / file_read。
+
+**新会话第一件事（T1）**：确认设备 14:42 那个包对应哪个 commit（是否含 daab66b cold-open v2 / 33aa72d compact）——本记忆里"今天已 revert 那三笔、main @ d6cbe49e"与设备实际观察到的行为**矛盾**，先弄清这个再谈元凶。
+
+<!-- 2026-09-13 17:09:11 -->
+## ★ 交接：内存探针（memspike）非 shell 路径扩展 —— 分支待装包复现（2026-09-13 17:10）
+
+
+**一句话状态**：诊断分支 `feat/diag-memspike-dualapp` @ `73d741c`（3 commits，已推，工作树干净）已做完并把探针接到**非 shell 路径**；CI **run 34748974970** 已派发（queued @ 09:07:57Z，约 10-12 分钟出包）。**新会话动作：查该 run → 让用户下载 artifact 装包 → 复现 → 读 `/var/minis/logs/memspike-2026-09-13.log`**。
+
+### 分支内容（3 commits）
+1. `ce19529` — `MemorySpikeRecorder`（新）+ `OffloadSocket`（新，socket 名加 uid 支持应用双开）+ ExecutionCoordinator 命令级 ΔRSS + MinisApp 装配/1s 采样循环
+2. `4ea6eec` — 修 proot 维度（`/proc/*/children` 在 Android 常不存在 → 退路扫 PPid；抽出纯函数 `pickChildPids`）
+3. `73d741c` — 探针扩展到非 shell 路径（本次核心）
+
+### ★ 16:54 那次尖峰的实测数据（探针第一次抓到，是本轮最硬的证据）
+```
+16:54:10.149 rss=682MB(+682)  native=408MB  java=94/512MB  proot=2/7MB
+16:54:12.176 rss=1320MB(+306) native=929MB  java=207MB     proot=2/7MB
+16:54:14.185 rss=1762MB(+376) native=1141MB java=280MB     proot=2/7MB ← 峰值
+16:54:16.192 rss=1457MB(+13)  native=48MB                  ← native 骤降
+16:54:21-26  rss=573-575MB 平台（anon 残留 415MB）
+```
+**三条结论（推翻旧假设）**：
+1. **PRoot 子进程全程 7MB 不动** → 「PRoot tracer 单调泄漏」不是本次主因（我今天早些时候也采信过，撤回）
+2. 涨的是 **app 自身 native heap：38MB → 1141MB（30 倍）** + Java heap 94→280MB = 代码注释里写的 **NativeAlloc GC storm** 形态
+3. **整段没有一条 cmd-start/cmd-end** → 触发路径**不在 shell 命令**，是别的路径（请求体构建 / 会话加载 / offload / 渲染）
+
+### 与另一会话 16:53 报告的关系（别搞混）
+那边（session 58db99c9）写了记忆条目「内存实验结论」（在 2026-09-13.md 尾部）：连调 **36 次终端**、RSS 全程 224-250MB 稳定、零拒绝 → 结论「终端动作本身不是触发器 ✓ + 根因是进程泄漏累积/会话代龄 ✗」。
+- 一致的是第一条；**第二条我的数据不支持**（新进程、无 shell 命令、5 秒到 1.76GB，累积解释不了）。
+- 正解：**问"除了终端，谁在分配 1GB native"**。时间点可疑（就在那边写完报告 1 分钟后）。
+
+### 探针能力（日志 `/var/minis/logs/memspike-<date>.log`，沙箱可读）
+| 行 | 覆盖 |
+|---|---|
+| 1s 采样（RSS≥550MB 或单拍 +80MB，尾随 12 拍） | 曲线 + `rss/peak/anon/file/shmem/th/native/java/proot` 分量 |
+| `[cmd-start]/[cmd-end]` | shell 命令级 ΔRSS（ExecutionCoordinator） |
+| `[phase:build-request]` | **ProviderExecutionGateway.buildRequest**（每次 LLM 请求的请求体构建，含 messages/systemChars/tools 计数） |
+| `[phase:load-messages]` | **ChatRepository.loadMessages**（会话历史物化；用新 API `measurePhaseSuspend`） |
+| `[offload]` | NativeOffload handler（android-*/browser/model-use）+ session |
+| `[ui:send]` / `[ui:mount]` | 发送起点（chars/attachments/streaming）与会话挂载 |
+| `[reject-rss]` / `[reject-tier]` | 内存门拒绝时刻的构成 |
+
+### 环境与工具
+- **工作克隆**：`/tmp/rikka-memspike`（分支上，干净）。askpass 由 gh_sync.sh 自建于 `/var/minis/workspace/.git_askpass.sh`
+- **logcat 白名单实时转储（已架）**：`/data/local/tmp/rk_mem.log`，logcat **PID 24626**（`pkill -f 'rk_mem.log'` 会自杀，必须精确 kill PID）；含 ExecutionCoordinator/NativeOffloadServer/OffloadRssProbe/MemoryPressureGate/ActivityManager/Minis.Perf/RootfsManager/libc
+- **沙箱 JVM**：`/tmp/kotlinc` (2.1.0) + `/tmp/libs/junit-4.13.2.jar`；探针测试 **30/30 绿**（含 measurePhase 正常/异常/关闭）
+- **内存门**：`MemoryPressureGate` ELEVATED=600MB / CRITICAL=800MB，读 `/proc/self/status` 的 **VmRSS**；CRITICAL 时**拒绝一切 shell_execute**（连 grep 都不行）→ 我在 1545MB / 2538MB 时被拒过两次
+- 设备侧证据：`/var/minis/logs/native-crash-*.log` 今天 5 条（最新 16:14，VmRSS 6.04GB）
+
+### 下一步（按序）
+1. 确认 run 34748974970 success → 用户下载 artifact 装包
+2. 用户复现（**发消息**最可能，也可以直接在那两个置顶会话操作）→ 让 app 自己走完，别手动杀
+3. 读 memspike 日志：看尖峰前后有没有 `[ui:send]` / `[phase:build-request]` / `[phase:load-messages]` / `[offload]` 行 → **直接指到阶段**
+4. 若都空（说明在渲染帧里），下一招：给 Compose 侧（markdown 解析 / 虚拟列表）加打点，或从 `rk_mem.log` 的 Perf/JankDiag 交叉定位
+
+### 坑（复记）
+- **KDoc 里写 `/proc/*/status` 的 `*/` 会提前闭合注释块** → 后面成员全被吞进注释，报 13 条假 "unresolved reference"；真正原因藏在错误列表末尾的 `Unclosed comment`。写路径通配符要用 `/proc/<pid>/status`
+- **GitHub workflow dispatch 偶发 HTTP 500**（"Failed to run workflow dispatch"），重试即可（本次第 3 次成功）
+- **沙箱 `/proc` 是 PRoot 虚拟视图**，与宿主 pid 不一致 → 子进程枚举类逻辑必须抽纯函数注入测试，不能断言真实 /proc
+- `measurePhaseSuspend` 是为 suspend 场景加的（ChatRepository.loadMessages 等）；非 suspend 用 `measurePhase`
+
+<!-- 2026-09-13 17:26:55 -->
+## 2026-09-13 17:2x 全场状态复核（用户要求"梳理今天 + 还有什么没搞"）
+
+
+**设备当前装包 = memspike 诊断包**（`feat/diag-memspike-dualapp` @ `73d741c`，run 34748974970 success @ 09:20Z）：证据 = 17:24 起 memspike 日志出现 `[ui:mount]`/`[ui:send]`/`[phase:build-request]` 行（只有该包有非 shell 路径探针）。装包后 RSS 172-220MB、native 26-27MB → 健康。
+
+**远端三分支实况（git ls-remote 实查）**：
+- `main` = `d6cbe49e`（回滚态；release CI run 34745538013 success @ 07:44Z）
+- `feat/diag-memspike-dualapp` = `73d741c`（诊断包）
+- **`restore/open-catchup-and-compact-0913` = `3ca019e`**（"Revert the rollback"，15:50:55 创建，相对 main +29/−1480 / 16 文件，CI **run 34746242721 success @ 16:04Z**）**← 今天被回滚的三笔（open-catchup v1 `32571f8` / v2 `daab66b` / 自适应压缩 `33aa72d`）全部恢复到分支上，产物可下，未合并，待用户拍板。**
+
+**半成品（本地，未推）**：`/tmp/rikka-legacy` 分支 `refactor/legacy-pipeline-isolation`——commit1 `284293c`、commit2 `b432988` 已提交；未提交 = `ChatColdOpenPrewarm.kt`(M) + `scripts/scan/legacy_pipeline_guard.py`(??)；仍缺 scan.sh / test_scan.py 三小步。
+⚠️ **坑**：该分支基于 `33aa72d`，而其要改的 `ChatColdOpenPrewarm.kt` 在回滚后的 main 上**已不存在** → 若要 rebase 到 main 必须重新决定 commit3 的落点。
+
+**存储实测**：internal 496.7/464.7/31.9GB（仅剩 31.9GB），**app_data 35,315 MB（35.3GB）**、cache 12.7MB → 未排查，是新的开放风险项。
+
+**崩溃记录（今日 4 条 SIGABRT）**：6.08GB / 5.46GB / 6.04GB / 6.04GB（VmPeak 16.5-16.9GB），崩溃循环 15:05-15:46 共 20 次启动；最后一次启动 17:23:58（更新包）。旧包最后一刻的 `[reject-rss] rssAfter=1545MB` @ 17:01:32。
+
+<!-- 2026-09-13 17:49:40 -->
+## ★ 合并收尾：main = f113039（2026-09-13 17:5x，用户"把该合并的合并一下"）
+
+
+**用户先纠偏**：确认设备上装的诊断包 `73d741c` **基于 `d6cbe49e`（回滚态）**——`git ls-tree` 实查该树**不含** `ChatColdOpenPrewarm.kt` / `ContextGrowthTracker.kt` / 3 个新测试 → **不含今天修好的任何东西**（只有内存探针）。
+
+**两步合并（均 ff，无 force）**：
+1. `restore/open-catchup-and-compact-0913` (`3ca019e`) → main：`d6cbe49..3ca019e`。该分支 = `d6cbe49` + "Revert the rollback" 一 commit，**树与 `33aa72d` 逐字节一致**（`git diff --name-only 3ca019e 33aa72d` = 0）→ 等价于完整恢复 open-catchup v1/v2 + 自适应压缩。CI run 34749656187 success。分支已删。
+2. 新分支 `fix/backlog-1-5` (`f113039`) → main：把当日早先的 `b432988`（UTF-16 净化 + backlog #5 守卫）**cherry-pick 到恢复后的 main 上**（改动 5 文件 +214/−2，**零 legacy 路径**，cherry-pick 无冲突；grep 证明可独立于 legacy 重构）。CI run 34749743453 success。分支已删。
+
+**终态**：远端仅剩 `main = f113039` + `feat/diag-memspike-dualapp = 73d741c`；release CI **#1491（main @ f113039）in progress**。
+
+**沙箱 JVM 复验**：`Utf16SanitizerTest` **13/13 绿**（新 base 上重跑；坑：java 运行需显式加 `/tmp/kotlinc/lib/kotlin-stdlib.jar`，否则 13 条全 `ClassNotFoundException: kotlin.jvm.internal.Intrinsics`）。
+
+**未合并/未完成**：`refactor/legacy-pipeline-isolation`（本地 `/tmp/rikka-legacy`）——commit1（legacy 隔离重构）+ commit3（门禁脚本三小步）未完成，且 commit2 已通过 cherry-pick 进 main，**未来若 rebase 该分支必须 drop `b432988` 免得重复**；commit3 的 wip 已 `git stash`（stash 名 "legacy commit3 wip"）。
+
+**backlog 更新**：#1（UTF-16 净化）与 #5（守卫盲区）标记为 ✅ 已合并，移入存档表。
+
+<!-- 2026-09-13 18:23:49 -->
+## ★ 2026-09-13 收尾终态（main = 6c20459）+ 存储清理 + 探针失效
+
+
+**五次合并全部落在 main（按时序）**：`e057d151`（shellTimeout 接线 + 滑杆密度，凌晨，真机已验）→ `15b3f447`（dev-history 926 条）→ `3ca019e`（恢复被回滚的三笔：open-catchup v1/v2 + 自适应压缩）→ `f113039`（cherry-pick UTF-16 净化 + 历史跳转守卫，backlog #1/#5 关闭）→ **`6c20459`（legacy 隔离重构 + 门禁，CI run 34751024241 success）**。远端只剩 `main` + `feat/diag-memspike-dualapp`（诊断分支，未合并）。
+
+**用户设备状态**：18:01:15 重启（launch-beacon pid 22880）装上 **main @ `f113039` 的正式包** → 证据 = memspike 日志 **17:56 后彻底停写**（正式包无探针），且新证书包不含 legacy 隔离（那笔 18:0x 才合，对使用零影响，无需为此重装）。
+
+**存储清理（用户批准）**：沙箱 `/tmp` 从 **12,260MB → 1,594MB（回收 10.7GB）**，删掉 09-10~09-12 遗留的 40+ 个仓库克隆（mobile-agent-src/refs/om-*/rk-*/operit*/rikkahub-src/openminis-src/rikka-*），保留 kotlinc/libs/rikka-memspike/rikka-legacy/askpass。设备侧：**可用 31.9GB → 38.5GB**。⚠️ 口径修正：`android-device` 的 app_data 是真数（含沙箱/外部区），清理前 **35.3GB → 清理后 24.4GB**；`dumpsys diskstats` 的 7.54GB 只算内部 data 目录。**仍有 ~17GB 差额未定位（shell 读不到，需应用内 设置→存储）**。
+残留：`/tmp/om-{leo,lun,Mika,aba}` 各 ~1MB 删不掉（PRoot 不允许删 `.git/objects/pack`），无影响。
+
+**内存自然实验（用户"干活过程当实验"）**：17:25–17:56 我跑重活（删 10GB、du 全盘、git 操作、scan.sh + python 门禁）→ **RSS 全程 200–271MB，零尖峰、零拒绝**。与 16:54 的 native 38→1141MB 对照，**触发者仍未定位**；探针随正式包消失，要续查必须重装诊断包或把探针合进 main。
+
+**legacy 交付形态**：`a5ce122`（13 文件 +368/−330，`ui/chat/legacy/` 收 1,670 行）+ `6c20459`（`legacy_pipeline_guard.py` 动态符号发现 + 文件允许清单 + `legacy-ok` 逃生舱，接 scan.sh [6/6]）。自测 **19/19**、门禁 **6/6**。⚠️ 语言约束：sealed 子类必须同包，10 个 legacy 行型类**不能**搬走，只能标记。审计报告已补 §8（`shared/legacy-pipeline-audit-2026-09-13.md`，175 行）。
 
 ---
 
