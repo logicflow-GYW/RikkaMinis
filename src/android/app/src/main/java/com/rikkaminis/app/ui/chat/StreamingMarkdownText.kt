@@ -582,17 +582,61 @@ private fun StreamingMarkdownTextBody(
     }
     // [T-android-inline-parse-offmain] Theme snapshot for off-main prewarm.
     val mdColors = currentMdColors()
-    var blocks by remember { mutableStateOf<List<MdBlock>>(emptyList()) }
+    // [fix/open-row-first-frame-final] Warm-cache seed.
+    //
+    // Every markdown body used to start at `blocks = emptyList()` and fill in
+    // when its off-main parse published, so a frozen row's FIRST layout was
+    // 0px tall where its text should be and the row grew a frame (or seconds)
+    // later. On session open that growth lands AFTER the INITIAL_OPEN snap has
+    // resolved against the short first layout: the viewport rests "one screen
+    // short" (device forensics 2026-09-13: newest row 1,065→5,255px and
+    // 13,350→25,995px across opens) and the catch-up correction that fixes it
+    // is a visible 1-13k px jump.
+    //
+    // A cache HIT now renders the FINAL height on the very first frame: the
+    // ChatScreen cold-open path block-parses the newest row BEFORE publishing
+    // the rows (see prewarmMarkdownBlockCaches / newestRowMarkdownSources), and
+    // the frozen branch below deposits every parse it computes — so scroll-back
+    // and close/reopen are HITs too. The peek never computes (lock-only), so a
+    // MISS keeps today's off-main behaviour byte-for-byte.
+    val warmSeed = remember(displayContent) {
+        if (isStreaming) null else MarkdownParseCaches.cachedBlocks(displayContent)
+    }
+    var blocks by remember { mutableStateOf<List<MdBlock>>(warmSeed.orEmpty()) }
     LaunchedEffect(displayContent) {
+        // Seeded from the cache above — this body's first frame is already final.
+        if (warmSeed != null && blocks === warmSeed) {
+            if (!isStreaming && displayContent.length >= COLD_PARSE_OFFMAIN_THRESHOLD_CHARS) {
+                com.rikkaminis.app.logging.AppLogger.debug(
+                    "Perf",
+                    "[Perf][OpenRowWarm] chars=${displayContent.length} " +
+                        "blocks=${warmSeed.size} warm=1",
+                )
+            }
+            return@LaunchedEffect
+        }
         val computed = withContext(Dispatchers.Default) {
             parseMarkdownBlocks(displayContent).also {
                 MarkdownParseCaches.prewarm(it, mdColors)
+                // [fix/open-row-first-frame-final] Deposit frozen parses so the
+                // heat survives close/reopen (the live branch already deposits
+                // at its freeze edge; the frozen branch never did, so every
+                // re-entry re-parsed from scratch).
+                if (!isStreaming && displayContent.length >= COLD_PARSE_OFFMAIN_THRESHOLD_CHARS) {
+                    MarkdownParseCaches.putBlocks(displayContent, it)
+                }
             }
         }
         // If the LE was cancelled while parseMarkdownBlocks was still running
         // (a newer chunk arrived), don't publish stale blocks.
         coroutineContext.ensureActive()
         blocks = computed
+        if (!isStreaming && displayContent.length >= COLD_PARSE_OFFMAIN_THRESHOLD_CHARS) {
+            com.rikkaminis.app.logging.AppLogger.debug(
+                "Perf",
+                "[Perf][OpenRowWarm] chars=${displayContent.length} blocks=${computed.size} warm=0",
+            )
+        }
     }
 
     ShardSubIndexScope {
@@ -962,6 +1006,24 @@ internal fun rememberMarkdownPrewarmer(): (List<String>) -> Unit {
                 MarkdownParseCaches.prewarm(MarkdownParseCaches.blocks(raw), mdColors)
             }
         }
+    }
+}
+
+/**
+ * [fix/open-row-first-frame-final] Block-parse + cache these fragments on the
+ * CALLER's thread — no dispatch, no inline/math prewarm.
+ *
+ * The chat cold-open path calls this from inside the same
+ * `Dispatchers.Default` job that builds the row list, BEFORE the rows are
+ * published, so the newest row's [StreamingMarkdownTextBody] composes as a
+ * cache HIT and the opening snap resolves against the row's FINAL height.
+ * Block splitting is the cheap half of the work (a line scan); the expensive
+ * per-span inline prewarm stays on the async [rememberMarkdownPrewarmer] pass
+ * where it cannot delay the first frame.
+ */
+internal fun prewarmMarkdownBlockCaches(raws: List<String>) {
+    for (raw in raws) {
+        if (raw.isNotEmpty()) MarkdownParseCaches.blocks(raw)
     }
 }
 

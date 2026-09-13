@@ -194,6 +194,15 @@ internal interface AgentLoopHost {
     fun setCanResume(value: Boolean)
     fun bumpFallbackTrigger()
     fun setLastTurnContextTokens(tokens: Int)
+
+    /**
+     * [T-adaptive-compact-reserve] Report the raw turn-to-turn context growth
+     * (tokens) so the host can size the auto-compact reserve to this session's
+     * actual per-turn appetite. Callers must only report a delta between two
+     * live context readings (never `firstReading − 0`), and never a shrink.
+     */
+    fun recordContextGrowth(deltaTokens: Int)
+
     fun setEnhancedCache(enabled: Boolean)
     fun updateCurrentModel(model: com.rikkaminis.app.data.model.LLMModel)
     fun setCurrentProvider(provider: LLMProvider)

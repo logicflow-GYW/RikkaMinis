@@ -27,6 +27,25 @@ internal fun ChatViewModel.reloadSessionFromDb() {
 }
 
 /**
+ * [T-adaptive-compact-window] + [T-adaptive-compact-reserve] The policy that
+ * trigger decisions actually use: tier thresholds for [contextWindow], shifted
+ * earlier by this session's adaptive growth reserve.
+ *
+ * Single entry point on purpose — the compact decision, the pre-send advisory
+ * and the offload pass must all agree on where the lines are, otherwise a
+ * compact can fire before the offload that was supposed to slim the history it
+ * is about to summarise.
+ *
+ * The reserve is 0 until a turn-to-turn delta has been measured (see
+ * [ContextGrowthTracker]), so a cold session behaves exactly as before.
+ */
+internal fun ChatViewModel.effectiveContextPolicy(contextWindow: Int): ContextPolicy =
+    ContextPolicy.forContextWindow(contextWindow).reservedForGrowth(
+        reserveTokens = contextGrowthTracker.reserveTokens(contextWindow),
+        contextWindow = contextWindow,
+    )
+
+/**
  * Consult [ContextPolicy] before sending. Returns true to proceed.
  *
  * [T-context-limit-enforce] Behaviour:
@@ -47,7 +66,7 @@ internal fun ChatViewModel.checkContextBeforeSend(): Boolean {
     // [T-context-window-live-read] Live window (entry re-resolved + group
     // contextLimitTokens folded in) — not the currentModel snapshot.
     val window = effectiveContextWindowTokens() ?: return true
-    val policy = ContextPolicy.forContextWindow(window)
+    val policy = effectiveContextPolicy(window)
     return when (policy.check(tokens, window)) {
         ContextPolicy.CheckResult.OK -> true
         ContextPolicy.CheckResult.NEEDS_COMPACT -> {
@@ -97,7 +116,7 @@ internal fun ChatViewModel.maybeTriggerAutoCompact() {
     if (_isCompacting.value) return // == Decision.COMPACT_IN_FLIGHT
     val window = effectiveContextWindowTokens() ?: return
     if (tokens <= 0 || window <= 0) return // == Decision.OK (no estimate/window)
-    val policy = ContextPolicy.forContextWindow(window)
+    val policy = effectiveContextPolicy(window)
     // EXHAUSTED is already handled by checkContextBeforeSend (send blocked);
     // OK means no pressure. Both are non-AUTO_COMPACT. Only NEEDS_COMPACT
     // can possibly trigger an auto-compact, so only that path walks tail.
@@ -119,7 +138,7 @@ internal fun ChatViewModel.maybeTriggerAutoCompact() {
         // Log at debug-relevant level only when we were actually close —
         // keeps the common OK path from spamming the log.
         if (tokens > 0) {
-            AppLogger.info(ChatViewModel.TAG, "[AutoCompact] skipped: $decision tokens=$tokens window=$window tail=$tail")
+            AppLogger.info(ChatViewModel.TAG, "[AutoCompact] skipped: $decision tokens=$tokens window=$window tail=$tail compactLine=${policy.compactThreshold}")
         }
         return
     }
@@ -128,7 +147,12 @@ internal fun ChatViewModel.maybeTriggerAutoCompact() {
         text = context.getString(R.string.sysmsg_context_full_auto, tokens, window),
         iconKind = "compact",
     )
-    AppLogger.info(ChatViewModel.TAG, "[AutoCompact] triggering (tokens=$tokens window=$window tail=$tail)")
+    AppLogger.info(
+        ChatViewModel.TAG,
+        "[AutoCompact] triggering (tokens=$tokens window=$window tail=$tail " +
+            "compactLine=${policy.compactThreshold} offloadLine=${policy.offloadThreshold} " +
+            "reserve=${contextGrowthTracker.reserveTokens(window)} growth=${contextGrowthTracker.perTurnEstimate}/turn)",
+    )
     compactAll() // fire-and-forget; internally launches on Dispatchers.IO
 }
 
@@ -153,7 +177,7 @@ internal suspend fun ChatViewModel.maybeAutoCompactInLoop(
 ): Boolean {
     if (_isCompacting.value) return false
     if (contextWindow <= 0 || lastContextTokens <= 0) return false
-    val policy = ContextPolicy.forContextWindow(contextWindow)
+    val policy = effectiveContextPolicy(contextWindow)
     // Only fire while we're in the compact band (NEEDS_COMPACT), i.e. BEFORE
     // the hard ceiling forces trimContextHistoryWindow to drop turns verbatim.
     if (policy.check(lastContextTokens, contextWindow) != ContextPolicy.CheckResult.NEEDS_COMPACT) {
@@ -173,7 +197,11 @@ internal suspend fun ChatViewModel.maybeAutoCompactInLoop(
         minIntervalMs = AgentRuntimeLimitsPrefs.autoCompactMinIntervalMin() * 60_000L,
     )
     if (decision != ContextCompactor.Decision.AUTO_COMPACT) {
-        AppLogger.info(ChatViewModel.TAG, "[AutoCompactLoop] skipped: $decision tokens=$lastContextTokens window=$contextWindow tail=$tail")
+        AppLogger.info(
+            ChatViewModel.TAG,
+            "[AutoCompactLoop] skipped: $decision tokens=$lastContextTokens window=$contextWindow tail=$tail " +
+                "compactLine=${policy.compactThreshold}",
+        )
         return false
     }
     lastAutoCompactAtMs = System.currentTimeMillis()
@@ -188,7 +216,12 @@ internal suspend fun ChatViewModel.maybeAutoCompactInLoop(
             iconKind = "compact",
         )
     }
-    AppLogger.info(ChatViewModel.TAG, "[AutoCompactLoop] triggering (tokens=$lastContextTokens window=$contextWindow tail=$tail)")
+    AppLogger.info(
+        ChatViewModel.TAG,
+        "[AutoCompactLoop] triggering (tokens=$lastContextTokens window=$contextWindow tail=$tail " +
+            "compactLine=${policy.compactThreshold} offloadLine=${policy.offloadThreshold} " +
+            "reserve=${contextGrowthTracker.reserveTokens(contextWindow)} growth=${contextGrowthTracker.perTurnEstimate}/turn)",
+    )
     compactAll(allowInStream = true) // fire-and-forget; internally launches on IO
     // Await completion so the next provider call assembles summary + tail.
     awaitAutoCompactIfNeeded()

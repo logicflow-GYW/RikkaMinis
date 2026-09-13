@@ -259,3 +259,41 @@ internal fun shouldReportPlaced(
     if (lastKey != sizeKey) return true
     return nowMs - lastAtMs >= repeatReportGapMs
 }
+
+/**
+ * [fix/history-open-catchup-guard] Should the bounded post-open catch-up
+ * issue a correction scroll right now?
+ *
+ * Real-device forensics (2026-09-13, 5 sessions): the INITIAL_OPEN snap
+ * resolves against the FIRST layout of the newest row, which can still grow
+ * 20%–95% within 9–150ms afterwards (second composition; measured +188px …
+ * +12,645px, e.g. 13,350→25,995px on a tool-heavy final answer). The growth
+ * pushes the bottom away while the viewport stays put — the open lands "one
+ * screen short", proportionally, on every open. This gate is the single
+ * decision the ChatScreen catch-up effect delegates to.
+ *
+ * Rules (all must hold):
+ *  1. armed — the guard is inside its short post-open window;
+ *  2. the user has not engaged (a real drag / Resume revokes it for keeps);
+ *  3. the clamp is RELEASED (canScrollForward == true — the same authoritative
+ *     signal the streaming follow gate uses: false means already flush);
+ *  4. nothing is scrolling right now (never race a mid-flight scroll);
+ *  5. rolls remaining (≤ maxRolls correction snaps per open).
+ *
+ * NOT the retired settle-after-interaction logic (which double-fired and
+ * fought IME): bounded, single-shot per clamp release, user-revocable.
+ * Pure, JVM-testable.
+ */
+internal fun shouldCatchUpAfterOpen(
+    armed: Boolean,
+    userEngaged: Boolean,
+    canScrollForward: Boolean,
+    isScrollInProgress: Boolean,
+    rollsUsed: Int,
+    maxRolls: Int,
+): Boolean {
+    if (!armed || userEngaged) return false
+    if (rollsUsed >= maxRolls) return false
+    if (isScrollInProgress) return false
+    return canScrollForward
+}

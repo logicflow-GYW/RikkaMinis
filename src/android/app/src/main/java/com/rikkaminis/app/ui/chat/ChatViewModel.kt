@@ -31,6 +31,7 @@ import com.rikkaminis.app.data.BPETokenizer
 import com.rikkaminis.app.data.ContextOffload
 import com.rikkaminis.app.data.ContextPolicy
 import com.rikkaminis.app.conversation.ContextCompactor
+import com.rikkaminis.app.conversation.ContextGrowthTracker
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.data.FileMentionIndex
 import com.rikkaminis.app.data.db.CompactMarkerEntity
@@ -916,6 +917,16 @@ class ChatViewModel(
     val lastTurnContextTokens: StateFlow<Int> = _lastTurnContextTokens.asStateFlow()
 
     /**
+     * [T-adaptive-compact-reserve] Per-turn context growth measured from
+     * consecutive API usage readings, fed by the agent loop
+     * ([AgentLoopHost.recordContextGrowth]). Sizes the reserve that shifts the
+     * auto-compact trigger earlier — see [effectiveContextPolicy] and
+     * [ContextGrowthTracker]. Empty (zero reserve) until the first measured
+     * turn, so cold-start behaviour is unchanged.
+     */
+    internal val contextGrowthTracker = ContextGrowthTracker()
+
+    /**
      * Latest compact summary for the current session, loaded from the DB on
      * [loadSession] and re-populated after [compactAll] finishes. When non-null,
      * [effectiveAgentHistory] prepends it as a `<context-summary>` user message
@@ -1207,6 +1218,14 @@ class ChatViewModel(
         override fun setCanResume(value: Boolean) { _canResume.value = value }
         override fun bumpFallbackTrigger() { _fallbackTrigger.value++ }
         override fun setLastTurnContextTokens(tokens: Int) { _lastTurnContextTokens.value = tokens }
+        override fun recordContextGrowth(deltaTokens: Int) {
+            contextGrowthTracker.sample(deltaTokens.toLong())
+            AppLogger.info(
+                TAG,
+                "[ContextGrowth] +$deltaTokens tokens/turn → estimate=${contextGrowthTracker.perTurnEstimate} " +
+                    "samples=${contextGrowthTracker.samples} reserve=${contextGrowthTracker.reserveTokens(effectiveContextWindowTokens() ?: 0)}",
+            )
+        }
         override fun setEnhancedCache(enabled: Boolean) { _enhancedCacheEnabled.value = enabled }
         override fun updateCurrentModel(model: com.rikkaminis.app.data.model.LLMModel) {
             currentModel = model

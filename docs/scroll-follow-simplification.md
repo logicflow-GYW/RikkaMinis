@@ -84,6 +84,51 @@ All three are retained in the SIMPLE_FOLLOW path.
   giant code block), a bottom-anchored viewer's sentinel may briefly leave the
   viewport and the effect nudges it back — the intended follow behavior.
 
+## Cold-open landing (`fix/open-row-first-frame-final`)
+
+Symptom (user-reported 2026-09-13): opening a long history rests "one screen
+short" — the transcript sits a few thousand px above the end and needs one
+swipe to reach the composer — and some opens visibly jump to the bottom a
+moment after the first frame.
+
+Root-cause chain (device forensics, `/data/local/tmp/rc2.log`):
+
+1. Every markdown body starts at `blocks = emptyList()` and fills in from an
+   off-main parse, so a frozen row's FIRST layout is 0px tall where its text
+   belongs and the row grows a frame — or, under a busy default dispatcher,
+   seconds — later. Measured on the newest row: 1,065→5,255px, 13,350→25,995px.
+2. The `INITIAL_OPEN` snap (`scrollToItem(1_000_000)`, clamped to the bottom)
+   resolves against that first, short layout. The later growth appends below
+   the viewport *without moving it*, so the open rests short by exactly the
+   growth (one open's `open-catchup roll` went firstOff 3,074 → 4,545px).
+3. The parallel viewport prewarm meant to prevent this had been **dead since
+   `AGGREGATE_MESSAGE_ITEMS` flipped**: its source extraction was
+   `(item as? FlatChatItem.AssistantMarkdownBlock)?.rawText`, but the aggregate
+   generator emits `AssistantMessageItem`, so `raws` was always empty. No
+   `coldPrewarm.done` line exists in any device log and every `coldOpen
+   summary` reports `prewarmMs=-1`.
+
+Fix — three coordinated pieces:
+
+| Piece | Where | What |
+|---|---|---|
+| Warm source selection | `ChatColdOpenPrewarm.kt` (new) | `markdownSourcesForRow` handles the aggregate row type (and the legacy ones); `collectColdOpenPrewarmSources` walks newest-first under a source cap + character budget |
+| Await-before-publish warm | `ChatScreen.kt`, aggregate cold build | block-parse + cache the NEWEST row's fragments inside the row-build job, before `flatItems` is published, so the snap sees the final height (bounded: 48k chars / 32 fragments) |
+| Synchronous cache seed | `StreamingMarkdownTextBody` | the first frame seeds `blocks` from the parse cache (lock-only peek) so a warm body renders final height immediately; the frozen branch now deposits its parse as well (close/reopen HITs) |
+
+The `[fix/history-open-catchup-guard]` bounded catch-up remains as the safety
+net for height sources that stay asynchronous (math/webview, image decode,
+deferred sub-composition). Window 1.2s → 2.5s, rolls 3 → 4; the expected roll
+count with the fix in place is **zero**.
+
+Verification:
+- `ColdOpenPrewarmSourcesTest` (11 JVM tests) pins the extraction contract and
+  the regression itself (`old inline extraction found nothing in an aggregate
+  row list`).
+- Device probes: `coldOpen.newestRowWarm srcs=… chars=… warmMs=…`,
+  `[Perf][OpenRowWarm] … warm=1|0` per frozen body, and `open-catchup done
+  rolls=N` — N must be 0 on a normal open.
+
 ## Verification
 
 - CI green, `ChatFollowControllerTest` green (the pure reducer is unchanged;

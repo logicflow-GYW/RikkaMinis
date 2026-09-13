@@ -739,6 +739,15 @@ internal class AgentLoopEngine(
                     }
                     is LLMStreamChunk.Usage -> {
                         lastUsage = chunk.usage
+                        // [T-adaptive-compact-reserve] Snapshot BEFORE the update:
+                        // the difference between two consecutive Usage readings is
+                        // exactly one turn's growth (this turn's answer + its tool
+                        // results), which is what the auto-compact reserve must be
+                        // sized against. A `prev` of 0 means this is the run's
+                        // first reading (loopState starts empty), and the delta
+                        // would be the whole context — not a growth step — so it
+                        // is deliberately not reported.
+                        val prevContextTokens = loopState.lastContextTokens
                         // Update context token count for next turn's host.dynamicMaxTokens()
                         // and publish to _lastTurnContextTokens so the ContextPolicy
                         // gate in [host.checkContextBeforeSend] can see the latest pressure
@@ -756,6 +765,9 @@ internal class AgentLoopEngine(
                         }
                         if (loopState.lastContextTokens > 0) {
                             host.setLastTurnContextTokens(loopState.lastContextTokens)
+                            if (prevContextTokens > 0 && loopState.lastContextTokens > prevContextTokens) {
+                                host.recordContextGrowth(loopState.lastContextTokens - prevContextTokens)
+                            }
                         }
                     }
                     is LLMStreamChunk.ReasoningContent -> {

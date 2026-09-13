@@ -56,6 +56,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -1167,6 +1168,14 @@ fun ChatScreen(
     // visible jitter and yank the reader). Tracked by the DragInteraction
     // collector below. Declared BEFORE the consumer effect so it is in scope.
     var isUserDragging by remember { mutableStateOf(false) }
+    // [fix/history-open-catchup-guard] Bounded post-open catch-up state. The
+    // flatten collector arms it (armEpoch++) right after the INITIAL_OPEN
+    // snap; the catch-up effect below consumes it. Any real drag or Resume
+    // sets userEngaged=true, which revokes it for the rest of this open.
+    var openCatchUpArmEpoch by remember(sessionId) { mutableStateOf(0) }
+    var openCatchUpRolls by remember(sessionId) { mutableStateOf(0) }
+    var openCatchUpUserEngaged by remember(sessionId) { mutableStateOf(false) }
+    var openCatchUpArmedAtMs by remember(sessionId) { mutableStateOf(0L) }
     // [bottom-fix] Timestamp of the last drag-stop. Kept for the follow
     // disengage decision below (which still reads the raw list position).
     var lastDragStopMs by remember { mutableStateOf(0L) }
@@ -1275,6 +1284,9 @@ fun ChatScreen(
             when (interaction) {
                 is androidx.compose.foundation.interaction.DragInteraction.Start -> {
                     isUserDragging = true
+                    // [fix/history-open-catchup-guard] A real drag revokes the
+                    // post-open catch-up for the rest of this open.
+                    openCatchUpUserEngaged = true
                     // [forward-stable] A real pointer drag begins — drop any
                     // in-flight bottom request so nothing scrolls mid-gesture.
                     // This also maintains DETACHED/FOLLOWING for the explicit
@@ -1314,6 +1326,44 @@ fun ChatScreen(
                 else -> Unit
             }
         }
+    }
+    // [fix/history-open-catchup-guard] Bounded post-open catch-up. The
+    // INITIAL_OPEN snap lands against the newest row's FIRST layout; its
+    // second composition can still grow that row (measured +20%..+95% within
+    // 9-150ms) and re-release the clamp with nobody correcting — the open
+    // then rests "one screen short". This effect lives for a short window
+    // after each open and snaps back to the bottom whenever the clamp is
+    // released — until the user engages or the budget runs out. Driven by the
+    // same authoritative canScrollForward signal as the streaming follow
+    // gate; never fires mid-gesture / mid-scroll.
+    LaunchedEffect(listState, openCatchUpArmEpoch) {
+        if (openCatchUpArmEpoch == 0) return@LaunchedEffect
+        val armedAtMs = openCatchUpArmedAtMs
+        withTimeoutOrNull(OPEN_CATCHUP_WINDOW_MS) {
+            snapshotFlow { listState.canScrollForward }
+                .distinctUntilChanged()
+                .collect { canFwd ->
+                    val shouldRoll = shouldCatchUpAfterOpen(
+                        armed = true,
+                        userEngaged = openCatchUpUserEngaged,
+                        canScrollForward = canFwd,
+                        isScrollInProgress = listState.isScrollInProgress,
+                        rollsUsed = openCatchUpRolls,
+                        maxRolls = OPEN_CATCHUP_MAX_ROLLS,
+                    )
+                    if (!shouldRoll) return@collect
+                    openCatchUpRolls += 1
+                    AppLogger.debug(
+                        "ScrollSrc",
+                        "open-catchup roll #${openCatchUpRolls} dt=${SystemClock.elapsedRealtime() - armedAtMs}ms firstIdx=${listState.firstVisibleItemIndex} firstOff=${listState.firstVisibleItemScrollOffset}",
+                    )
+                    tracedScrollToItem("OPEN-CATCHUP", 1_000_000, 0)
+                }
+        }
+        AppLogger.debug(
+            "ScrollSrc",
+            "open-catchup done rolls=$openCatchUpRolls dt=${SystemClock.elapsedRealtime() - armedAtMs}ms",
+        )
     }
     // T169 / T170: an IME show/hide animates the LazyColumn's content area,
     // which can briefly register as a synthetic drag-stop and flip
@@ -3009,7 +3059,37 @@ fun ChatScreen(
                                     prevItems == null || prevItems.isEmpty()
                                 ) {
                                     withContext(Dispatchers.Default) {
-                                        buildAggregateChatItems(merged)
+                                        val rows = buildAggregateChatItems(merged)
+                                        // [fix/open-row-first-frame-final] Block-parse
+                                        // + cache the NEWEST row's markdown HERE — same
+                                        // off-main job, still BEFORE the publish below —
+                                        // so the INITIAL_OPEN snap (fired immediately
+                                        // after the publish, before the first layout of
+                                        // these rows) resolves against that row's FINAL
+                                        // height instead of a zero-height first layout
+                                        // that grows a frame later. Without this the
+                                        // opening lands "one screen short" and the
+                                        // catch-up correction is a visible multi-thousand
+                                        // px jump (2026-09-13 device forensics).
+                                        //
+                                        // Same job (not a second dispatch) so the parse
+                                        // cannot queue behind the pool work that the
+                                        // cold open just produced; block splitting is a
+                                        // line scan, the inline prewarm stays async.
+                                        if (stream.isEmpty()) {
+                                            val newest = newestRowMarkdownSources(rows)
+                                            if (newest.isNotEmpty()) {
+                                                val tWarmNs = System.nanoTime()
+                                                prewarmMarkdownBlockCaches(newest)
+                                                com.rikkaminis.app.diagnostics.PerfLongCtx.step(
+                                                    sessionId,
+                                                    "coldOpen.newestRowWarm",
+                                                    "srcs=${newest.size} chars=${newest.sumOf { it.length }} " +
+                                                        "warmMs=${(System.nanoTime() - tWarmNs) / 1_000_000}",
+                                                )
+                                            }
+                                        }
+                                        rows
                                     }
                                 } else {
                                     buildAggregateChatItemsIncremental(prevItems, prevMsgs, merged)
@@ -3017,6 +3097,46 @@ fun ChatScreen(
                                 flatItems = nextItems
                                 aggregateReuse.messages = merged
                                 aggregateReuse.items = nextItems
+                                // [T-android-coldload-offmain-parse] Parallel viewport
+                                // prewarm: inline-warm the newest (viewport-candidate)
+                                // markdown fragments off-main so the first frame's rows
+                                // compose as cache HITs. Deliberately launched in
+                                // PARALLEL with the publish (the block half of the work
+                                // for the newest row is already done above) — blocking
+                                // the publish on the inline pass would add its latency
+                                // to time-to-first-frame.
+                                //
+                                // [fix/open-row-first-frame-final] Aggregate-aware source
+                                // selection: the old `(item as? AssistantMarkdownBlock)`
+                                // cast matched NOTHING once AGGREGATE_MESSAGE_ITEMS flipped
+                                // (rows are AssistantMessageItem now), so this pass never
+                                // ran a single parse — see ChatColdOpenPrewarm.kt.
+                                if (stream.isEmpty() && nextItems.isNotEmpty()) {
+                                    // [feat/chat-tuning-panel] Read prefs directly
+                                    // instead of the snapshot state: this collect
+                                    // lambda captured its closure long before, so a
+                                    // knob change must be picked up as a FRESH read
+                                    // on the next cold build, not a stale capture.
+                                    val prewarmSources = collectColdOpenPrewarmSources(
+                                        rowsNewestFirst = nextItems.asReversed(),
+                                        maxSources = ChatTuningPrefs.prewarmRowLimit(context),
+                                        charBudget = COLD_OPEN_PREWARM_CHAR_BUDGET,
+                                    )
+                                    if (prewarmSources.isNotEmpty()) {
+                                        launch(Dispatchers.Default) {
+                                            val tPrewarmNs = System.nanoTime()
+                                            prewarmMarkdown(prewarmSources)
+                                            val prewarmMs = (System.nanoTime() - tPrewarmNs) / 1_000_000
+                                            lastColdPrewarmMs = prewarmMs
+                                            com.rikkaminis.app.diagnostics.PerfLongCtx.step(
+                                                sessionId,
+                                                "coldPrewarm.done",
+                                                "srcs=${prewarmSources.size} " +
+                                                    "chars=${prewarmSources.sumOf { it.length }} prewarmMs=$prewarmMs",
+                                            )
+                                        }
+                                    }
+                                }
                                 if (!initialBottomScrollFired) {
                                     initialBottomScrollFired = true
                                     if (nextItems.isNotEmpty() &&
@@ -3039,6 +3159,20 @@ fun ChatScreen(
                                         // overflow its sliding-window arithmetic.
                                         AppLogger.debug("ScrollSrc", "scroll-bottom reason=INITIAL_OPEN(first-rows) rows=${nextItems.size}")
                                         listState.scrollToItem(index = 1_000_000, scrollOffset = 0)
+                                        // [fix/history-open-catchup-guard] Arm the
+                                        // bounded open catch-up: the newest row can
+                                        // still grow AFTER this snap (second
+                                        // composition — measured up to +12.6k px
+                                        // within ~150ms), re-releasing the clamp
+                                        // with no correction. Quiet opens only: an
+                                        // open while a stream is active is owned by
+                                        // the streaming follow path.
+                                        if (stream.isEmpty()) {
+                                            openCatchUpRolls = 0
+                                            openCatchUpUserEngaged = false
+                                            openCatchUpArmedAtMs = SystemClock.elapsedRealtime()
+                                            openCatchUpArmEpoch += 1
+                                        }
                                     }
                                     followState = consumeBottomRequest(followState)
                                 }
@@ -3076,26 +3210,22 @@ fun ChatScreen(
                                     // lambda captured its closure long before, so a
                                     // knob change must be picked up as a FRESH read
                                     // on the next cold build, not a stale capture.
-                                    val prewarmRowLimit = ChatTuningPrefs.prewarmRowLimit(context)
-                                    val prewarmCharBudget = 96_000
-                                    val raws = mutableListOf<String>()
-                                    var charSum = 0
-                                    for (item in rows.asReversed()) {
-                                        if (raws.size >= prewarmRowLimit || charSum >= prewarmCharBudget) break
-                                        val raw = (item as? FlatChatItem.AssistantMarkdownBlock)?.rawText ?: continue
-                                        raws.add(raw)
-                                        charSum += raw.length
-                                    }
-                                    if (raws.isNotEmpty()) {
+                                    val prewarmSources = collectColdOpenPrewarmSources(
+                                        rowsNewestFirst = rows.asReversed(),
+                                        maxSources = ChatTuningPrefs.prewarmRowLimit(context),
+                                        charBudget = COLD_OPEN_PREWARM_CHAR_BUDGET,
+                                    )
+                                    if (prewarmSources.isNotEmpty()) {
                                         launch(Dispatchers.Default) {
                                             val tPrewarmNs = System.nanoTime()
-                                            prewarmMarkdown(raws)
+                                            prewarmMarkdown(prewarmSources)
                                             val prewarmMs = (System.nanoTime() - tPrewarmNs) / 1_000_000
                                             lastColdPrewarmMs = prewarmMs
                                             com.rikkaminis.app.diagnostics.PerfLongCtx.step(
                                                 sessionId,
                                                 "coldPrewarm.done",
-                                                "rows=${raws.size} chars=$charSum prewarmMs=$prewarmMs",
+                                                "srcs=${prewarmSources.size} " +
+                                                    "chars=${prewarmSources.sumOf { it.length }} prewarmMs=$prewarmMs",
                                             )
                                         }
                                     }
@@ -4012,6 +4142,9 @@ fun ChatScreen(
                                 // [forward-stable] One pending bottom request;
                                 // the "Minis is thinking" indicator mounts via
                                 // the next StreamRowsChanged revision.
+                                // [fix/history-open-catchup-guard] Resume is a
+                                // user intent — revoke the open catch-up too.
+                                openCatchUpUserEngaged = true
                                 followState = followReducer(followState, FollowEvent.Resume)
                             })
                         }
@@ -4847,6 +4980,22 @@ internal const val AGGREGATE_MESSAGE_ITEMS: Boolean = true
 // FLIPPED TO TRUE — the SIMPLE_FOLLOW effect is now the streaming auto-follow
 // driver (see docs/scroll-follow-simplification.md).
 internal const val SIMPLE_FOLLOW: Boolean = true
+
+// [fix/history-open-catchup-guard] Bounded correction window & roll cap for
+// the post-INITIAL_OPEN catch-up. Device data (2026-09-13): the newest row's
+// second composition lands within 9-150ms of the first place, but the same
+// forensics caught a 3.06s outlier (the row's text blocks published only after
+// the opening burst released the default dispatcher) — 1.2s left that open
+// resting "one screen short" with nobody correcting.
+//
+// [fix/open-row-first-frame-final] The row's markdown is now warm before the
+// publish, so the expected number of rolls is ZERO. This stays as the safety
+// net for the height sources that are still asynchronous (math/webview,
+// image decode, deferred sub-composition); 2.5s covers those without keeping
+// the window open so long that a correction lands after the user has started
+// reading. The user revokes it for the rest of the open with any touch.
+private const val OPEN_CATCHUP_WINDOW_MS = 2_500L
+private const val OPEN_CATCHUP_MAX_ROLLS = 4
 
 // [refactor/split-chatscreen] ChatInputArea composable moved verbatim to
 // ChatInputArea.kt (private -> internal; signature unchanged).
