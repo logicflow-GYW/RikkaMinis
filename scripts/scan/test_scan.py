@@ -213,6 +213,40 @@ def boundary_fixture(dirty=False):
     }
 
 
+def legacy_fixture(dirty=False, escaped=False):
+    """The 2026-09-13 incident class: a live file reaching into the dead
+    pre-aggregate pipeline (cold-open prewarm's always-empty source list)."""
+    legacy = (
+        "package com.rikkaminis.app.ui.chat.legacy\n"
+        "internal class StableChatRowLedger {\n"
+        "    fun record() {}\n"
+        "}\n"
+    )
+    body = "        val ledger: Any? = null\n"
+    if dirty:
+        body = "        StableChatRowLedger().record()\n"
+    elif escaped:
+        body = (
+            "        // legacy-ok: single-point source function for both pipelines\n"
+            "        StableChatRowLedger().record()\n"
+            "\n"
+            "        val unrelated = 1\n"
+        )
+    consumer = (
+        "package com.rikkaminis.app.ui.chat\n"
+        "class ChatViewModel {\n"
+        "    fun send() {\n"
+        "        // StableChatRowLedger mentioned in a comment — comments are skipped\n"
+        + body
+        + "    }\n"
+        "}\n"
+    )
+    return {
+        os.path.join(KOTLIN_PKG, "ui/chat/legacy/StableChatRowLedger.kt"): legacy,
+        os.path.join(KOTLIN_PKG, "ui/chat/ChatViewModel.kt"): consumer,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Cases
 # ─────────────────────────────────────────────────────────────────────────────
@@ -340,6 +374,41 @@ def test_boundary():
     shutil.rmtree(root)
 
 
+def test_legacy():
+    print("━━━ legacy_pipeline_guard ━━━")
+    # Clean — the dead symbol is only mentioned in a comment.
+    root = make_tree(legacy_fixture())
+    code, out = run_scanner("legacy_pipeline_guard.py", root)
+    check(
+        "comment-only mention is legal (exit 0)",
+        code == 0,
+        f"exit={code}\n{out}",
+    )
+    shutil.rmtree(root)
+
+    # Dirty — a live file consumes the runtime-dead symbol (fails silently in
+    # production; must fail loudly here).
+    root = make_tree(legacy_fixture(dirty=True))
+    code, out = run_scanner("legacy_pipeline_guard.py", root)
+    check(
+        "live caller of legacy symbol caught (exit 1)",
+        code == 1 and "ChatViewModel.kt" in out and "StableChatRowLedger" in out,
+        f"exit={code}\n{out}",
+    )
+    shutil.rmtree(root)
+
+    # Escape hatch — `legacy-ok:` justifies the following block (and the
+    # justification must survive comment stripping; a blank line ends it).
+    root = make_tree(legacy_fixture(escaped=True))
+    code, out = run_scanner("legacy_pipeline_guard.py", root)
+    check(
+        "legacy-ok escape hatch exempts the block (exit 0)",
+        code == 0,
+        f"exit={code}\n{out}",
+    )
+    shutil.rmtree(root)
+
+
 def test_real_repo():
     print("━━━ real repo tree (must be clean) ━━━")
     for script in (
@@ -347,6 +416,7 @@ def test_real_repo():
         "i18n_check.py",
         "enum_parse_safety_check.py",
         "provider_boundary_guard.py",
+        "legacy_pipeline_guard.py",
     ):
         code, out = run_scanner(script, REPO_ROOT)
         check(f"{script} on real repo exits 0", code == 0, f"exit={code}\n{out[:2000]}")
@@ -360,6 +430,7 @@ def main():
     test_i18n()
     test_enum_parse()
     test_boundary()
+    test_legacy()
     test_real_repo()
     print("")
     print(f"{'❌ FAILURES: ' + str(FAIL) if FAIL else '✅ ALL ' + str(PASS) + ' CASES PASS'}")

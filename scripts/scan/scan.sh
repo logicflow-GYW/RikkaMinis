@@ -17,7 +17,7 @@ echo "╚═══════════════════════�
 echo ""
 
 # --- 1. Four-way sync check ---
-echo "━━━ [1/5] Four-way sync check ━━━"
+echo "━━━ [1/6] Four-way sync check ━━━"
 if python3 scripts/scan/four_way_sync_check.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -30,7 +30,7 @@ fi
 # --- 2. i18n consistency ---
 #   - Orphan keys (in code but not in strings.xml) = HARD FAIL
 #   - Missing translations = WARNING only (known legacy from upstream)
-echo "━━━ [2/5] i18n consistency check ━━━"
+echo "━━━ [2/6] i18n consistency check ━━━"
 python3 -c "
 import re, os, sys
 root = '$ROOT'
@@ -72,7 +72,7 @@ fi
 echo ""
 
 # --- 3. Bare valueOf check (persisted enum safety) ---
-echo "━━━ [3/5] Enum parse safety check ━━━"
+echo "━━━ [3/6] Enum parse safety check ━━━"
 if python3 scripts/scan/enum_parse_safety_check.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -85,7 +85,7 @@ fi
 # --- 4. Provider process-boundary guard (TF-E) ---
 # Mechanical constraint: the app process must never call a provider network
 # entry point directly — only :modelservice (ModelExecutionService) owns them.
-echo "━━━ [4/5] Provider process-boundary guard ━━━"
+echo "━━━ [4/6] Provider process-boundary guard ━━━"
 if python3 scripts/scan/provider_boundary_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -101,8 +101,25 @@ fi
 # loop on AgentTraceRecorder output (produce → consume). Inline selftest
 # goldens keep the evaluator itself honest in CI; device traces can be added
 # later under tests/traces/golden/ referencing real .jsonl files.
-echo "━━━ [5/5] Agent trace replay eval ━━━"
+echo "━━━ [5/6] Agent trace replay eval ━━━"
 if python3 scripts/scan/trace_eval_check.py "$ROOT"; then
+    PASS=$((PASS + 1))
+    echo ""
+else
+    RC=1
+    FAIL=$((FAIL + 1))
+    echo ""
+fi
+
+# --- 6. Legacy flat-chat pipeline guard (no new references to the dead path) ---
+#   AGGREGATE_MESSAGE_ITEMS = true makes the pre-aggregate pipeline runtime-dead
+#   but it is kept as the Stage-E fallback. Referencing it from a live file is
+#   how the 2026-09-13 cold-open prewarm incident happened: the source list was
+#   always empty and nothing ever failed, logged or warned. New references are a
+#   build failure unless the file is allow-listed or justifies it inline with
+#   `legacy-ok: <reason>`.
+echo "━━━ [6/6] Legacy pipeline guard ━━━"
+if python3 scripts/scan/legacy_pipeline_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
 else
