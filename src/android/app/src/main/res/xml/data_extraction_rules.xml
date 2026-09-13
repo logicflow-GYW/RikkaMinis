@@ -13,6 +13,7 @@
         <exclude domain="file" path="minis-sessions/" />
         <exclude domain="file" path="proot/" />
         <exclude domain="file" path="share_extension/" />
+        <exclude domain="file" path="minis-global/" />
         <exclude domain="file" path="debug_server_token" />
         <exclude domain="cache" path="" />
     </cloud-backup>
@@ -29,6 +30,7 @@
         <exclude domain="file" path="minis-sessions/" />
         <exclude domain="file" path="proot/" />
         <exclude domain="file" path="share_extension/" />
+        <exclude domain="file" path="minis-global/" />
         <exclude domain="file" path="debug_server_token" />
         <exclude domain="cache" path="" />
     </device-transfer>

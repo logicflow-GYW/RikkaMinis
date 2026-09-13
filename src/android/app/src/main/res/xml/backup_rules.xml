@@ -33,6 +33,16 @@
          other apps, no backup value. -->
     <exclude domain="file" path="share_extension/" />
 
+    <!-- [audit-cs0913] Exclude the cross-session global store: memory logs,
+         shared artifacts, and mcp-servers/servers.json. That JSON is written
+         verbatim from the MCP config, so its `headers` / `env` maps commonly
+         carry `Authorization: Bearer …` or vendor API keys — the same class of
+         secret this file already keeps out of backups. Auto Backup's 25MB
+         quota would also be crowded out (and possibly fail the whole backup),
+         while user-level backup already has its own explicit channel
+         (AutoBackupManager → WebDAV / remote dir). -->
+    <exclude domain="file" path="minis-global/" />
+
     <!-- Exclude the debug server token — ephemeral per-install. -->
     <exclude domain="file" path="debug_server_token" />
 

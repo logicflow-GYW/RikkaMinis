@@ -337,7 +337,14 @@
         <!-- Alarm broadcast receiver (also handles BOOT_COMPLETED for re-scheduling) -->
         <receiver
             android:name=".offload.AlarmReceiver"
-            android:exported="true">
+            android:exported="false">
+            <!-- [audit-cs0913] exported=false: BOOT_COMPLETED is a protected
+                 system broadcast, so it reaches this receiver regardless of the
+                 exported flag — the flag only governs OTHER apps. With
+                 exported=true any app could `am broadcast` this component with
+                 an arbitrary EXTRA_ALARM_LABEL (forged notification) and clear
+                 the user's alarm prefs entry via onAlarmFired(). Do not set
+                 this back to true without adding a sender/permission check. -->
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>

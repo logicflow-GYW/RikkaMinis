@@ -107,7 +107,14 @@ class DebugServer(
                 val ss = ServerSocket(port, 10)
                 serverSocket = ss
                 Log.i(TAG, "Debug server listening on port $port (all interfaces)")
-                Log.i(TAG, "Clients must send X-Minis-Token: $authToken")
+                // [audit-cs0913] NEVER log the token value here. This TAG is not
+                // `Minis.*`, so AppLogger's logcat tailer persists it verbatim into
+                // files/logs/ — a file that is one tap from the share sheet
+                // (Settings → Logs). A leaked token is full RPC access, including
+                // debug.shellExecute. Retrieve it out-of-band instead
+                // (`adb shell run-as com.rikkaminis.app cat files/debug_server_token`);
+                // the 401 response repeats that hint for CLI clients.
+                Log.i(TAG, "Clients must present X-Minis-Token (see files/debug_server_token)")
 
                 while (!stopped) {
                     try {

@@ -6,6 +6,7 @@ import android.os.Process
 import android.util.Log
 import com.rikkaminis.app.BuildConfig
 import com.rikkaminis.app.diagnostics.MemorySpikeRecorder
+import com.rikkaminis.app.sandbox.offload.OffloadQueuePolicy
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
@@ -246,6 +247,7 @@ object NativeOffloadServer {
                 // heap. The slot is released on every exit path (success,
                 // decode error, handler throw) so one bad client can't leak
                 // the worker permit.
+                val queueStartNs = System.nanoTime()
                 val acquired = try {
                     workerConcurrency.acquire()
                 } catch (e: InterruptedException) {
@@ -253,8 +255,12 @@ object NativeOffloadServer {
                     runCatching { client.close() }
                     return@thread
                 }
+                // [audit-cs0913] Time spent waiting for a slot — reported by
+                // handleClient (see OffloadQueuePolicy). Pool size is
+                // ConcurrencyPrefs.maxConcurrentSessions() (default 2).
+                val queueMs = (System.nanoTime() - queueStartNs) / 1_000_000
                 try {
-                    handleClient(client)
+                    handleClient(client, queueMs)
                 } catch (e: Exception) {
                     Log.w(TAG, "worker error: ${e.message}", e)
                 } finally {
@@ -265,7 +271,7 @@ object NativeOffloadServer {
         }
     }
 
-    private fun handleClient(client: LocalSocket) {
+    private fun handleClient(client: LocalSocket, queueMs: Long) {
         val input = DataInputStream(client.inputStream)
         val output = DataOutputStream(client.outputStream)
 
@@ -345,6 +351,18 @@ object NativeOffloadServer {
             )
         }
         val elapsedMs = (System.nanoTime() - t0) / 1_000_000
+
+        // [audit-cs0913] Back-pressure report. The worker pool blocks on
+        // Semaphore.acquire() with no timeout, so a saturated pool (or one long
+        // handler) silently stalls later tool calls until the shell-level stall
+        // watchdog kills them 180s later — indistinguishable from a broken tool.
+        // Recorded, NOT enforced: measure first, then decide on a guardrail and
+        // its threshold. See OffloadQueuePolicy.
+        if (OffloadQueuePolicy.shouldReport(queueMs, elapsedMs)) {
+            val detail = OffloadQueuePolicy.describe(name, queueMs, elapsedMs)
+            Log.w(TAG, "offload backpressure: $detail")
+            MemorySpikeRecorder.onEvent("offload-latency", detail)
+        }
 
         val tmpDir = rootfsTmpDir ?: throw IllegalStateException("server not started")
         tmpDir.mkdirs()
