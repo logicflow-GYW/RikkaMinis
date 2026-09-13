@@ -5,6 +5,8 @@ import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.rikkaminis.app.ui.chat.legacy.StableChatRowLedger
+import com.rikkaminis.app.ui.chat.legacy.buildFlatChatItems
 
 /**
  * [render-churn-2] Frozen-completion contract tests for the chat render

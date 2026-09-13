@@ -1,4 +1,4 @@
-package com.rikkaminis.app.ui.chat
+package com.rikkaminis.app.ui.chat.legacy
 
 // [fix/audit-b22 / T2-L3] RUNTIME-DEAD while AGGREGATE_MESSAGE_ITEMS = true
 // (ChatScreen.kt) — same as StableChatRowLedger: the aggregate render path

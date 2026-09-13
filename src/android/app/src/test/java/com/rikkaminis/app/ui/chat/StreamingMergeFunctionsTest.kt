@@ -4,6 +4,9 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.rikkaminis.app.ui.chat.legacy.mergeAgentTextSnapshot
+import com.rikkaminis.app.ui.chat.legacy.mergeLegacyStreamingText
+import com.rikkaminis.app.ui.chat.legacy.shouldIgnoreRegressiveStreamingSnapshot
 
 /**
  * JVM unit tests for the public streaming-merge pure functions in

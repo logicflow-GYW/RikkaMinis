@@ -1,4 +1,4 @@
-package com.rikkaminis.app.ui.chat
+package com.rikkaminis.app.ui.chat.legacy
 
 // [fix/audit-b22 / T2-L3] RUNTIME-DEAD: zero callers anywhere in the app tree
 // (the voice-input waveform that consumed it was removed). Kept only until the

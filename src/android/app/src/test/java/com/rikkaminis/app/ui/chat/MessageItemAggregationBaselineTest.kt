@@ -6,6 +6,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertFalse
 import org.junit.Test
+import com.rikkaminis.app.ui.chat.legacy.buildFlatChatItems
 
 /**
  * JVM regression baseline for the CURRENT "message-level flattening" behavior,

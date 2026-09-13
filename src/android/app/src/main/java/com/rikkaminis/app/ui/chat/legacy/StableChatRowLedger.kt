@@ -1,4 +1,4 @@
-package com.rikkaminis.app.ui.chat
+package com.rikkaminis.app.ui.chat.legacy
 
 // [fix/audit-b22 / T2-L3] RUNTIME-DEAD while AGGREGATE_MESSAGE_ITEMS = true
 // (ChatScreen.kt): the aggregate path returns before every call site of this
@@ -8,6 +8,12 @@ package com.rikkaminis.app.ui.chat
 // here and assume user-visible behaviour changed.
 
 import androidx.annotation.VisibleForTesting
+
+import com.rikkaminis.app.ui.chat.ChatMessage
+import com.rikkaminis.app.ui.chat.FlatChatItem
+import com.rikkaminis.app.ui.chat.ToolBlockStatus
+import com.rikkaminis.app.ui.chat.owningMessageId
+import com.rikkaminis.app.ui.chat.sameBlockRefs
 
 /**
  * Session-lifetime stable row ledger for the chat transcript.

@@ -6,6 +6,8 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.rikkaminis.app.ui.chat.legacy.StableChatRowLedger
+import com.rikkaminis.app.ui.chat.legacy.buildFlatChatItems
 
 /**
  * JVM tests for [StableChatRowLedger] — the session-lifetime stable row list.

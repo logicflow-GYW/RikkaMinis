@@ -152,6 +152,8 @@ import com.rikkaminis.app.ui.components.MinisMenu
 import com.rikkaminis.app.ui.components.MinisMenuDivider
 import com.rikkaminis.app.data.ChatTuningPrefs
 import com.rikkaminis.app.ui.settings.rememberChatTuning
+import com.rikkaminis.app.ui.chat.legacy.StableChatRowLedger
+import com.rikkaminis.app.ui.chat.legacy.buildFlatChatItems
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
