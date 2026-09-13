@@ -4650,6 +4650,14 @@ fun ChatScreen(
             messages = messages,
             onSelect = { messageId ->
                 showInputHistorySheet = false
+                // [backlog #5 / fix/open-catchup-history-jump] Jumping to a prior
+                // input is user engagement, exactly like a drag or Resume. Without
+                // this the bounded open catch-up (armed by INITIAL_OPEN for
+                // OPEN_CATCHUP_WINDOW_MS) only recognised drag/Resume, so a jump
+                // made inside that window left the guard "unengaged" and the
+                // FOCUS-MESSAGE scroll was then yanked back to the bottom by the
+                // catch-up pass. Narrow race, but the fix is one line.
+                openCatchUpUserEngaged = true
                 pendingFocusId = messageId
             },
             onDismiss = { showInputHistorySheet = false },

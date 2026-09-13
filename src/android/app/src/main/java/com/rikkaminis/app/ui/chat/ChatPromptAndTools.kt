@@ -24,6 +24,7 @@ import com.rikkaminis.app.tools.FileWriteTool
 import com.rikkaminis.app.tools.ReadImageTool
 import com.rikkaminis.app.tools.SubagentSkill
 import com.rikkaminis.app.tools.ToolExecutionResult
+import com.rikkaminis.app.util.Utf16Sanitizer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -650,11 +651,17 @@ internal fun ChatViewModel.executeMemoryRollupTool(): ToolExecutionResult {
 
 internal fun ChatViewModel.updateAssistantMessage(
     id: String,
-    content: String,
+    rawContent: String,
     isStreaming: Boolean,
     toolBlocks: List<AssistantBlock>,
     isAwaitingModelResponse: Boolean = false,
 ) {
+    // [backlog #1 / fix/utf16-lone-surrogate] The streaming text boundary.
+    // Sanitize the PUBLISHED copy only — the caller's accumulator
+    // (`turnTextSb` / `accumulatedText`) is deliberately left untouched, so a
+    // surrogate pair straddling two flushes still re-pairs on the next one
+    // instead of being replaced twice.
+    val content = Utf16Sanitizer.sanitize(rawContent)
     // T-streaming-side-channel: during a live turn, write high-frequency
     // fields into [_streamingById] instead of mutating the canonical
     // message list. This keeps the `messages` StateFlow reference stable

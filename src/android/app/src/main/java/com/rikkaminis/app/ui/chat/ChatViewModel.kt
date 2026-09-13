@@ -72,6 +72,7 @@ import com.rikkaminis.app.tools.ToolFailureHook
 import com.rikkaminis.app.offload.OffloadPermissionManager
 import com.rikkaminis.app.service.SessionActivityTracker
 import com.rikkaminis.app.service.SessionConcurrencyManager
+import com.rikkaminis.app.util.Utf16Sanitizer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -2982,7 +2983,13 @@ class ChatViewModel(
     // AgentLoopHost.kt (the engine returns/consumes it); the VM keeps its own
     // alias-free references. The old private nested data class is gone.
 
-    fun sendMessage(text: String) {
+    fun sendMessage(rawText: String) {
+        // [backlog #1 / fix/utf16-lone-surrogate] User input is one of the two
+        // text boundaries into the app (the other is the provider stream): a
+        // clipboard paste can carry an unpaired UTF-16 surrogate, which later
+        // trips strict encoders far away from the source. Sanitize on the way
+        // in and use that value for every downstream path, queue included.
+        val text = Utf16Sanitizer.sanitize(rawText)
         val trimmed = text.trim()
         // While streaming, enqueue instead of silently dropping (iOS: send vs enqueuePrompt).
         if (_isStreaming.value) {
