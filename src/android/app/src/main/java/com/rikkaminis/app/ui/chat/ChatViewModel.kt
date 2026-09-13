@@ -2990,6 +2990,14 @@ class ChatViewModel(
         // trips strict encoders far away from the source. Sanitize on the way
         // in and use that value for every downstream path, queue included.
         val text = Utf16Sanitizer.sanitize(rawText)
+        // [mem-spike-diag] 用户发送是三条高开销路径的起点：会话加载 ->
+        // 上下文构建（phase:build-request）-> 流式渲染。这里只标起点，让日志
+        // 能把「发消息之后」的内存曲线按会话对齐（2026-09-13 16:54 那次尖峰
+        // 全程没有 cmd 记录，就是缺了起点标记才只能靠时间猜）。
+        com.rikkaminis.app.diagnostics.MemorySpikeRecorder.onEvent(
+            "ui:send",
+            "session=$sessionId chars=${text.length} attachments=${_attachments.value.size} streaming=${_isStreaming.value}",
+        )
         val trimmed = text.trim()
         // While streaming, enqueue instead of silently dropping (iOS: send vs enqueuePrompt).
         if (_isStreaming.value) {

@@ -5,6 +5,7 @@ import android.net.LocalSocket
 import android.os.Process
 import android.util.Log
 import com.rikkaminis.app.BuildConfig
+import com.rikkaminis.app.diagnostics.MemorySpikeRecorder
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
@@ -333,6 +334,15 @@ object NativeOffloadServer {
         val rssAfterKb = OffloadRssProbe.rssKb()
         if (handler != null) {
             OffloadRssProbe.record(name, rssBeforeKb, rssAfterKb)
+            // [mem-spike-diag] 同一份归因也写进内存尖峰记录器：offload 工具
+            //（android-* / browser-use / model-use / sessions …）**不走**
+            // ExecutionCoordinator，cmd-start/cmd-end 完全看不到它们 —— 而
+            // 2026-09-13 16:54 那次尖峰（native 38MB→1141MB）恰恰全程无 cmd 记录。
+            val offloadSession = env["MINIS_CHAT_SESSION_ID"] ?: "-"
+            MemorySpikeRecorder.onEvent(
+                "offload",
+                "handler=$name Δ=${(rssAfterKb - rssBeforeKb) / 1024}MB session=$offloadSession",
+            )
         }
         val elapsedMs = (System.nanoTime() - t0) / 1_000_000
 

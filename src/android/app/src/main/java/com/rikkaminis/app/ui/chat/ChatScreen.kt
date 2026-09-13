@@ -481,6 +481,7 @@ fun ChatScreen(
                 com.rikkaminis.app.diagnostics.HangDetector.currentHangCount(tHangDiagAppContext),
         )
         com.rikkaminis.app.diagnostics.PerfLongCtx.step(sessionId, "chatScreen.mount")
+        com.rikkaminis.app.diagnostics.MemorySpikeRecorder.onEvent("ui:mount", "session=$sessionId")
         onDispose {
             println("[T-HANG-DIAG] ChatScreen UNMOUNT session=$sessionId")
             // [audit-0909 T2-H1] compare-and-clear instead of setActiveSession(null):

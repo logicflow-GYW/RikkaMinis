@@ -2,6 +2,7 @@ package com.rikkaminis.app.data.repository
 
 import android.database.sqlite.SQLiteBlobTooBigException
 import android.database.sqlite.SQLiteConstraintException
+import com.rikkaminis.app.diagnostics.MemorySpikeRecorder
 import com.rikkaminis.app.data.db.ChatDao
 import com.rikkaminis.app.data.db.ChatSessionEntity
 import com.rikkaminis.app.data.db.MessageEntity
@@ -265,7 +266,19 @@ class ChatRepository(
      * Existing oversized rows are not migrated; new oversized inserts
      * are prevented by the cap in [appendMessage].
      */
-    suspend fun loadMessages(sessionId: String): List<MessageEntity> {
+    suspend fun loadMessages(sessionId: String): List<MessageEntity> =
+        // [mem-spike-diag] 会话加载是「打开/发消息立刻飙」的头号嫌疑路径：
+        // 318 条消息 + 大量工具输出在这里被物化进内存。包一层阶段打点，
+        // 把 ΔRSS / native heap 前后写进 memspike 日志。
+        MemorySpikeRecorder.measurePhaseSuspend(
+            kind = "phase:load-messages",
+            detail = "session=$sessionId",
+        ) {
+            loadMessagesInner(sessionId)
+        }
+
+    /** [loadMessages] 的实现体（外层只做内存归因打点）。 */
+    private suspend fun loadMessagesInner(sessionId: String): List<MessageEntity> {
         // T-android-crash-safe-mode-v2: defensive guard. ChatViewModel.loadSession
         // is already gated upstream, but loadMessages has other call sites
         // (compaction, fork, regenerate-title, debug menu) that could fire

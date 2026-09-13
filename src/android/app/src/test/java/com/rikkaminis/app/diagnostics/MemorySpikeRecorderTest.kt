@@ -334,6 +334,53 @@ class MemorySpikeRecorderTest {
     }
 
     @Test
+    fun `measurePhase records the delta and returns the block value`() {
+        val written = mutableListOf<String>()
+        MemorySpikeRecorder.sink = { written.add(it) }
+        val readings = ArrayDeque(listOf(300L, 900L))
+        MemorySpikeRecorder.snapshotProvider = { snap(readings.removeFirst(), nativeMb = 10L) }
+
+        val out = MemorySpikeRecorder.measurePhase("phase:test", "detail=1") { "result" }
+
+        assertEquals("result", out)
+        assertEquals(1, written.size)
+        val line = written[0]
+        assertTrue(line.contains("[phase:test]"))
+        assertTrue(line.contains("(+600MB)"))
+        assertTrue(line.contains("detail=1"))
+        assertTrue(line.contains("dur="))
+        assertTrue(line.contains("native=10→10MB"))
+    }
+
+    @Test
+    fun `measurePhase still records when the block throws`() {
+        val written = mutableListOf<String>()
+        MemorySpikeRecorder.sink = { written.add(it) }
+        val readings = ArrayDeque(listOf(300L, 400L))
+        MemorySpikeRecorder.snapshotProvider = { snap(readings.removeFirst()) }
+
+        var threw = false
+        try {
+            MemorySpikeRecorder.measurePhase("phase:boom") { throw IllegalStateException("x") }
+        } catch (t: IllegalStateException) {
+            threw = true
+        }
+
+        assertTrue("异常必须原样抛出", threw)
+        assertEquals("但阶段仍要落盘", 1, written.size)
+        assertTrue(written[0].contains("[phase:boom]"))
+    }
+
+    @Test
+    fun `measurePhase writes nothing when disabled`() {
+        val written = mutableListOf<String>()
+        MemorySpikeRecorder.sink = { written.add(it) }
+        MemorySpikeRecorder.enabled = false
+        assertEquals(7, MemorySpikeRecorder.measurePhase("phase:off") { 7 })
+        assertTrue(written.isEmpty())
+    }
+
+    @Test
     fun `provider failures never propagate`() {
         MemorySpikeRecorder.snapshotProvider = { throw IllegalStateException("boom") }
         MemorySpikeRecorder.childrenProvider = { throw IllegalStateException("boom") }

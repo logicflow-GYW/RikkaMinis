@@ -8,6 +8,7 @@ import com.rikkaminis.app.data.model.LLMResponse
 import com.rikkaminis.app.data.model.LLMStreamChunk
 import com.rikkaminis.app.data.model.ProviderInstance
 import com.rikkaminis.app.data.model.ThinkingLevel
+import com.rikkaminis.app.diagnostics.MemorySpikeRecorder
 import kotlinx.coroutines.flow.Flow
 import org.json.JSONArray
 import org.json.JSONObject
@@ -91,20 +92,25 @@ object ProviderExecutionGateway {
         tools: List<AgentToolDefinition> = emptyList(),
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
         streaming: Boolean = false,
-    ): String = ModelExecutionDispatcher.buildRequestJson(
-        instance = instance,
-        model = model,
-        messages = messages,
-        systemPrompt = systemPrompt,
-        maxTokens = maxTokens,
-        temperature = temperature,
-        imageParts = imageParts,
-        inputJson = inputJson,
-        outputExt = outputExt,
-        tools = tools,
-        thinkingLevel = thinkingLevel,
-        streaming = streaming,
-    )
+    ): String = MemorySpikeRecorder.measurePhase(
+        kind = "phase:build-request",
+        detail = "messages=${messages.size} systemChars=${systemPrompt?.length ?: 0} tools=${tools.size}",
+    ) {
+        ModelExecutionDispatcher.buildRequestJson(
+            instance = instance,
+            model = model,
+            messages = messages,
+            systemPrompt = systemPrompt,
+            maxTokens = maxTokens,
+            temperature = temperature,
+            imageParts = imageParts,
+            inputJson = inputJson,
+            outputExt = outputExt,
+            tools = tools,
+            thinkingLevel = thinkingLevel,
+            streaming = streaming,
+        )
+    }
 
     /**
      * Non-streaming send: dispatch to `:modelservice` and parse the worker's

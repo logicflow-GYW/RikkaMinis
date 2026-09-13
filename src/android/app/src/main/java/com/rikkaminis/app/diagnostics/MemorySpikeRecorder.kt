@@ -203,6 +203,55 @@ object MemorySpikeRecorder {
 
     // ---------- 事件入口（被 ExecutionCoordinator / 门调用） ----------
 
+    /**
+     * 记录一个阶段的进入/退出：ΔRSS + native heap 前后 + 耗时。
+     *
+     * 用于**非 shell 路径**（请求体构建、会话加载、渲染…）——这些路径不经
+     * ExecutionCoordinator，`cmd-start/cmd-end` 看不见它们；而 2026-09-13
+     * 16:54 实测的那次尖峰（native heap 38MB→1141MB / 5 秒，PRoot 子进程
+     * 全程 7MB 不动，且**全程没有一条 cmd 记录**）正发生在这些路径上。
+     */
+    fun <T> measurePhase(kind: String, detail: String = "", block: () -> T): T {
+        if (!enabled) return block()
+        val before = safeSnapshot()
+        val t0 = clock()
+        try {
+            return block()
+        } finally {
+            val after = safeSnapshot()
+            val sb = StringBuilder(160)
+            sb.append("rss=").append(after.rssMb).append("MB(")
+                .append(sign((after.rssKb - before.rssKb) / 1024L)).append("MB)")
+                .append(" native=").append(before.nativeHeapKb / 1024L)
+                .append("→").append(after.nativeHeapKb / 1024L).append("MB")
+                .append(" java=").append(after.javaUsedKb / 1024L).append("MB")
+                .append(" dur=").append(clock() - t0).append("ms")
+            if (detail.isNotEmpty()) sb.append(' ').append(detail)
+            write(formatEvent(clock(), kind, sb.toString()))
+        }
+    }
+
+    /** suspend 版 [measurePhase]（请求发送、DB 加载等都在挂起上下文里）。 */
+    suspend fun <T> measurePhaseSuspend(kind: String, detail: String = "", block: suspend () -> T): T {
+        if (!enabled) return block()
+        val before = safeSnapshot()
+        val t0 = clock()
+        try {
+            return block()
+        } finally {
+            val after = safeSnapshot()
+            val sb = StringBuilder(160)
+            sb.append("rss=").append(after.rssMb).append("MB(")
+                .append(sign((after.rssKb - before.rssKb) / 1024L)).append("MB)")
+                .append(" native=").append(before.nativeHeapKb / 1024L)
+                .append("→").append(after.nativeHeapKb / 1024L).append("MB")
+                .append(" java=").append(after.javaUsedKb / 1024L).append("MB")
+                .append(" dur=").append(clock() - t0).append("ms")
+            if (detail.isNotEmpty()) sb.append(' ').append(detail)
+            write(formatEvent(clock(), kind, sb.toString()))
+        }
+    }
+
     /** 命令开始：记录上下文 + 起始 RSS 行。 */
     fun onCommandStart(sessionId: String, cmdClass: String, command: String) {
         if (!enabled) return
