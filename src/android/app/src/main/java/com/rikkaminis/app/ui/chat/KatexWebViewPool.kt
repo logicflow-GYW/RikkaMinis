@@ -13,6 +13,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.ui.unit.IntSize
+import com.rikkaminis.app.ui.markdown.internalFitCaptureSize
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -209,8 +210,25 @@ internal object KatexWebViewPool {
             // overflow-hidden viewport of exactly (pxW, pxH) physical px.
             val pxW = (w * density).toInt().coerceAtLeast(1)
             val pxH = (h * density).toInt().coerceAtLeast(1)
-            val bitmap = Bitmap.createBitmap(pxW, pxH, Bitmap.Config.ARGB_8888)
+            // [fix/memory-hardening-capture-cap] `w`/`h` are KaTeX's JS-reported
+            // content box — bound the capture before allocating (see
+            // KatexCaptureLimit). Past the cap the bitmap is scaled down and
+            // drawn with canvas.scale so the whole formula still lands, at the
+            // layout size reported above (unchanged).
+            val fit = internalFitCaptureSize(pxW, pxH)
+            if (!fit.ok) {
+                android.util.Log.w(TAG, "snapshot size rejected ${pxW}x$pxH")
+                return null
+            }
+            if (fit.scale < 1f) {
+                android.util.Log.w(
+                    TAG,
+                    "snapshot ${pxW}x$pxH exceeds cap — scaled to ${fit.width}x${fit.height}"
+                )
+            }
+            val bitmap = Bitmap.createBitmap(fit.width, fit.height, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
+            if (fit.scale < 1f) canvas.scale(fit.scale, fit.scale)
             wv.draw(canvas)
             KatexRenderResult(bitmap, IntSize(w, h))
         } catch (e: Throwable) {

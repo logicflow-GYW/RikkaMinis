@@ -197,21 +197,39 @@ fun KaTeXRenderView(
                             val scale = ctx.resources.displayMetrics.density
                             val bitmapW = (width * scale).toInt()
                             val bitmapH = (height * scale).toInt()
+                            // [fix/memory-hardening-capture-cap] The capture size
+                            // comes from KaTeX's JS-reported content box — bound it
+                            // before allocating (see KatexCaptureLimit). A formula
+                            // past the cap is drawn slightly smaller (same layout
+                            // box, softer glyphs) instead of aborting the process.
+                            val fit = internalFitCaptureSize(bitmapW, bitmapH)
+                            if (!fit.ok) {
+                                AppLogger.warning(TAG, "KaTeX capture size rejected ${bitmapW}x$bitmapH · latex=${latex.take(80)}")
+                                renderError = "capture size"
+                                return
+                            }
+                            if (fit.scale < 1f) {
+                                AppLogger.warning(
+                                    TAG,
+                                    "KaTeX capture ${bitmapW}x$bitmapH exceeds cap — scaled to ${fit.width}x${fit.height} · latex=${latex.take(80)}"
+                                )
+                            }
 
                             // Resize WebView to content size, then capture
                             post {
                                 layoutParams = ViewGroup.LayoutParams(bitmapW, bitmapH)
                                 requestLayout()
                                 postDelayed({
-                                    val bitmap = Bitmap.createBitmap(bitmapW, bitmapH, Bitmap.Config.ARGB_8888)
+                                    val bitmap = Bitmap.createBitmap(fit.width, fit.height, Bitmap.Config.ARGB_8888)
                                     val canvas = android.graphics.Canvas(bitmap)
+                                    if (fit.scale < 1f) canvas.scale(fit.scale, fit.scale)
                                     draw(canvas)
                                     KaTeXRendererCache.cache.put(
                                         cacheKey,
                                         KaTeXRendererCache.CacheEntry(
                                             bitmap = bitmap,
-                                            width = bitmapW,
-                                            height = bitmapH,
+                                            width = fit.width,
+                                            height = fit.height,
                                             cssWidth = width,
                                             cssHeight = height,
                                         )
