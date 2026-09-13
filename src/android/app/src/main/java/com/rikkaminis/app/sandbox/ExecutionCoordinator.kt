@@ -559,6 +559,14 @@ object ExecutionCoordinator {
                     )
                     sessionDidTerminate(sessionId)
                     lastShell = null
+                } else if (result.exitCode == STALL_EXIT_CODE) {
+                    // [fix/memory-hardening-stall] The stall guard hard-killed
+                    // the shell at the process level. Drop the dead shell from
+                    // the registry right away instead of leaving a zombie entry
+                    // to be discovered by the next getOrCreateShell.
+                    Log.w(TAG, "[$sessionId] Command stalled and was killed — recycling shell")
+                    sessionDidTerminate(sessionId)
+                    lastShell = null
                 } else if (shellDied && attempt >= MAX_AUTO_RETRIES) {
                     lastShell = null // shell is dead and we're out of retries
                 }
@@ -1005,6 +1013,11 @@ internal fun internalShouldRetryCommand(
     // Keep in sync with ExecutionCoordinator.MAX_AUTO_RETRIES (defaults to 2).
     maxRetries: Int = 2,
 ): Boolean {
+    // [fix/memory-hardening-stall] A stall-killed command already burned its
+    // whole no-progress window; retrying the SAME command would hang again for
+    // the same reason. Hand the error to the agent instead and let it change
+    // approach (see STALL_EXIT_CODE).
+    if (exitCode == STALL_EXIT_CODE) return false
     val shellDied = exitCode == -1 || exitCode == 124 || !shellAlive
     return shellDied && attempt < maxRetries
 }

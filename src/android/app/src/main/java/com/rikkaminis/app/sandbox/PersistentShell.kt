@@ -1,8 +1,10 @@
 package com.rikkaminis.app.sandbox
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
+import com.rikkaminis.app.diagnostics.MemorySpikeRecorder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -124,6 +126,64 @@ class PersistentShell(
     }
 
     /**
+     * [fix/memory-hardening-stall] Snapshot of every process's
+     * `(ppid, utime+stime)` from /proc. One scan serves both the CPU-progress
+     * check and the "which processes belong to the command" walk.
+     */
+    private fun readAllProcStats(): Map<Int, ProcCpu> {
+        val stats = HashMap<Int, ProcCpu>(256)
+        try {
+            File("/proc").listFiles()?.forEach { f ->
+                val p = f.name.toIntOrNull() ?: return@forEach
+                val text = try {
+                    File(f, "stat").readText()
+                } catch (_: Throwable) {
+                    return@forEach
+                }
+                internalParseProcStat(text)?.let { stats[p] = it }
+            }
+        } catch (_: Throwable) {
+            return emptyMap()
+        }
+        return stats
+    }
+
+    /**
+     * [fix/memory-hardening-stall] Sum utime+stime (jiffies) over the live
+     * PRoot tracer and every transitive descendant. PRoot's tracer performs
+     * only the syscall half of a child's work — a busy child (compiler, grep
+     * scan, checksum loop) burns its own CPU — so sampling the tracer alone
+     * would read "no progress" on a perfectly healthy command and trip the
+     * stall guard. Returns 0 when nothing can be read (caller treats 0 as
+     * "unknown", which never counts as progress).
+     */
+    private fun sampleTreeCpuJiffies(): Long {
+        val proc = process ?: return 0L
+        val pid = processPid(proc)
+        if (pid <= 0) return 0L
+        return internalSumTreeCpuJiffies(pid, readAllProcStats())
+    }
+
+    /**
+     * [fix/memory-hardening-stall] Stage-1 interrupt: send [signal] to the
+     * command's own processes (the tracer's grandchildren and deeper), i.e. the
+     * analogue of a terminal's Ctrl-C to the foreground process group. The
+     * persistent shell survives. Returns how many processes were signalled.
+     */
+    private fun signalCommandProcesses(signal: Int): Int {
+        val proc = process ?: return 0
+        val pid = processPid(proc)
+        if (pid <= 0) return 0
+        val targets = internalDescendantPidsAtDepth(pid, readAllProcStats(), minDepth = 2)
+        var sent = 0
+        for (t in targets) {
+            val ok = runCatching { android.os.Process.sendSignal(t, signal) }.isSuccess
+            if (ok) sent++
+        }
+        return sent
+    }
+
+    /**
      * [P2-proot-native-leak] Resolve the PID of a [ProcessBuilder]-spawned
      * child process on Android. `java.lang.Process.pid()` (Java 9+) is NOT
      * on the Android compile classpath, so we read the private `pid` field
@@ -140,6 +200,27 @@ class PersistentShell(
         } catch (_: Throwable) {
             0
         }
+    }
+
+    /**
+     * [fix/memory-hardening-stall] Mutable state for the in-flight stall guard.
+     * All fields are touched from the monitor coroutine only (plus the final
+     * read on the command's own coroutine after it is joined), matching the
+     * single-writer usage of [CommandCallback].
+     */
+    private class StallGuardState(var lastProgressMs: Long) {
+        /** Output length at the previous tick (growth == progress). */
+        var lastOutputLen: Int = 0
+
+        /** Tree CPU jiffies at the previous CPU sample. */
+        var lastCpuJiffies: Long = -1L
+
+        /** When the stage-1 SIGINT was sent (0 = not yet). */
+        var intSentAtMs: Long = 0L
+
+        /** Stage 2 ran: the shell was hard-killed and the result is a stall. */
+        @Volatile
+        var aborted: Boolean = false
     }
 
     private class CommandCallback(
@@ -172,11 +253,15 @@ class PersistentShell(
         // benign no-op (the shell is gone, the command already reported).
         private val completeOnce = java.util.concurrent.atomic.AtomicBoolean(false)
 
-        /** Signal completion, but only the first caller wins. */
-        fun finishOnce(output: String, exitCode: Int, truncated: Boolean) {
+        /** Signal completion, but only the first caller wins. Returns whether
+         *  THIS caller won (used by the stall guard: if the command completed on
+         *  its own, the guard must not kill the shell out from under it). */
+        fun finishOnce(output: String, exitCode: Int, truncated: Boolean): Boolean {
             if (completeOnce.compareAndSet(false, true)) {
                 onComplete?.invoke(output, exitCode, truncated)
+                return true
             }
+            return false
         }
     }
 
@@ -422,6 +507,12 @@ class PersistentShell(
         /** `(line, isPartial)` — see [CommandCallback.lineCallback]. */
         lineCallback: ((String, Boolean) -> Unit)? = null,
         memoryMonitor: ((Long) -> Unit)? = null,
+        /**
+         * [fix/memory-hardening-stall] Abort the command when it shows no
+         * progress (no output AND no CPU in its process tree) for this long.
+         * <= 0 disables the guard. See [STALL_NO_PROGRESS_MS].
+         */
+        stallAfterMs: Long = STALL_NO_PROGRESS_MS,
     ): CommandResult {
         ensureStarted()
 
@@ -457,26 +548,102 @@ class PersistentShell(
         }
 
         return withContext(Dispatchers.IO) {
+            val cb = CommandCallback(marker = marker, lineCallback = lineCallback)
+            // [fix/memory-hardening-stall] Stall-guard state. `lastProgressMs`
+            // advances on ANY output or process-tree CPU movement; a command
+            // that does neither for [stallAfterMs] gets SIGINT, then a hard kill.
+            val stall = StallGuardState(lastProgressMs = SystemClock.elapsedRealtime())
             // [P2-proot-native-leak] In-flight memory monitor: poll the real
             // PRoot child RSS while the command runs and surface it to the
             // coordinator so a crossing of the high-water mark can recycle
             // the shell BEFORE the child OOMs. Cheap — a /proc read per tick.
-            val monitorJob = if (memoryMonitor != null) {
+            // [fix/memory-hardening-stall] The same loop also runs the stall
+            // guard, so a hung command is torn down at the process level
+            // instead of holding the agent's turn until the 900s timeout.
+            val watchEnabled = memoryMonitor != null || stallAfterMs > 0L
+            val monitorJob = if (watchEnabled) {
                 launch {
+                    var tick = 0L
                     while (isActive) {
-                        val rss = nativeRssMB()
-                        if (rss > 0L) memoryMonitor(rss)
                         delay(PROOT_MEM_POLL_MS)
+                        tick++
+                        val now = SystemClock.elapsedRealtime()
+                        if (memoryMonitor != null) {
+                            val rss = nativeRssMB()
+                            if (rss > 0L) memoryMonitor(rss)
+                        }
+                        if (stallAfterMs <= 0L || stall.aborted) continue
+                        // The command already completed on its own (readLoop
+                        // cleared the pending callback) — never signal or kill a
+                        // shell that is simply between commands.
+                        if (pendingCallback !== cb) continue
+                        // Output progress: the callback accumulates every chunk
+                        // (including partials), so a length change is progress.
+                        if (cb.output.length != stall.lastOutputLen) {
+                            stall.lastOutputLen = cb.output.length
+                            stall.lastProgressMs = now
+                        }
+                        // CPU progress, sampled less often (the scan is the
+                        // expensive half; a /proc read per second is not).
+                        if (tick % STALL_CPU_POLL_EVERY_TICKS == 0L) {
+                            val cpu = sampleTreeCpuJiffies()
+                            if (cpu > stall.lastCpuJiffies) {
+                                stall.lastCpuJiffies = cpu
+                                stall.lastProgressMs = now
+                            }
+                        }
+                        if (!internalIsStalled(now, stall.lastProgressMs, stallAfterMs)) continue
+
+                        // Stage 1 — SIGINT the command's own processes (the
+                        // tracer's grandchildren and below), which is what a
+                        // terminal's Ctrl-C does to the foreground process
+                        // group: the command dies, the persistent shell (and its
+                        // cwd/env) survives, and the wrapped command's trailing
+                        // `RET=$?; echo __MINIS_DONE__` still runs.
+                        if (stall.intSentAtMs == 0L) {
+                            stall.intSentAtMs = now
+                            val signalled = runCatching { signalCommandProcesses(SIGNAL_INT) }
+                                .getOrDefault(0)
+                            Log.w(
+                                TAG,
+                                "[$sessionId] command stalled: no output/CPU for ${stallAfterMs}ms " +
+                                    "— SIGINT sent to $signalled command process(es)"
+                            )
+                            MemorySpikeRecorder.onEvent(
+                                "stall:sigint",
+                                "session=$sessionId idle=${now - stall.lastProgressMs}ms targets=$signalled"
+                            )
+                            continue
+                        }
+                        // Stage 2 — it ignored SIGINT. Kill at the process level:
+                        // SIGKILL the PRoot tracer (--kill-on-exit takes the whole
+                        // tree with it) and report a distinct exit code.
+                        if (now - stall.intSentAtMs < STALL_INT_GRACE_MS) continue
+                        Log.w(TAG, "[$sessionId] command ignored SIGINT for ${STALL_INT_GRACE_MS}ms — killing shell")
+                        MemorySpikeRecorder.onEvent(
+                            "stall:kill",
+                            "session=$sessionId idle=${now - stall.lastProgressMs}ms"
+                        )
+                        // Only claim the result (and tear the shell down) if we
+                        // actually won the completion race — if the command
+                        // finished in this same tick, its own result stands and
+                        // the shell stays alive.
+                        val won = cb.finishOnce(
+                            cb.output.toString() + stallMessage(stallAfterMs),
+                            STALL_EXIT_CODE,
+                            cb.truncated,
+                        )
+                        stall.aborted = won
+                        if (won) {
+                            stop()
+                            break
+                        }
                     }
                 }
             } else null
 
             val result: CommandResult? = withTimeoutOrNull(timeout) {
                 suspendCancellableCoroutine { cont ->
-                    val cb = CommandCallback(
-                        marker = marker,
-                        lineCallback = lineCallback,
-                    )
                     cb.onComplete = { output, exitCode, truncated ->
                         if (cont.isActive) {
                             cont.resume(CommandResult(output, exitCode, truncated))
@@ -484,8 +651,21 @@ class PersistentShell(
                     }
                     pendingCallback = cb
 
-                    cont.invokeOnCancellation {
+                    cont.invokeOnCancellation { cause ->
+                        // [fix/memory-hardening-stall] A cancelled command used
+                        // to be left RUNNING inside the PTY (only the callback
+                        // was nulled), so an interrupted long-running tool kept
+                        // burning CPU and its late output polluted the next
+                        // command on this shell. Tear the tracer down instead —
+                        // the same teardown the timeout path already uses.
                         pendingCallback = null
+                        // The timeout path cancels this same continuation: it
+                        // must keep its own semantics (return 124 and let the
+                        // coordinator reclaim the shell), otherwise a timeout
+                        // would masquerade as "shell died" and be auto-retried.
+                        if (cause !is kotlinx.coroutines.TimeoutCancellationException) {
+                            runCatching { stop() }
+                        }
                     }
 
                     try {
@@ -501,6 +681,18 @@ class PersistentShell(
             }
 
             monitorJob?.cancel()
+
+            // [fix/memory-hardening-stall] Report the stall BEFORE the
+            // generation check below: the guard's `stop()` bumps the generation,
+            // and letting that turn the result into a generic -1 would send the
+            // coordinator into an automatic retry of the very command that hung.
+            if (stall.aborted) {
+                return@withContext CommandResult(
+                    result?.output ?: stallMessage(stallAfterMs),
+                    STALL_EXIT_CODE,
+                    result?.truncated ?: false,
+                )
+            }
 
             // [shell-generation-scheduler] The shell was recycled while this
             // command was in flight (memory-monitor recycle, idle sweep, user
@@ -519,6 +711,11 @@ class PersistentShell(
                 // Timeout — cancel pending, but don't kill the shell
                 pendingCallback = null
                 CommandResult("[Command timed out after ${timeout / 1000}s]", 124)
+            } else if (stall.intSentAtMs != 0L && stallAfterMs > 0L && result.exitCode != STALL_EXIT_CODE) {
+                // Stage 1 succeeded: the SIGINT killed the command and the wrapped
+                // trailing lines produced a normal completion. Tell the agent why
+                // its command came back interrupted.
+                result.copy(output = result.output + stallMessage(stallAfterMs))
             } else {
                 result
             }

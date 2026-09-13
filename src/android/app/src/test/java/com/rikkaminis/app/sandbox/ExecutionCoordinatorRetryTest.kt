@@ -152,6 +152,19 @@ class ExecutionCoordinatorRetryTest {
         assertRetry(exitCode = -1, alive = false, attempt = 1, maxRetries = 0, expected = false)
     }
 
+    // ── [fix/memory-hardening-stall] stall-killed commands ────────────
+
+    @Test
+    fun `stall-killed command is never retried even though the shell died`() {
+        // The stall guard hard-kills the shell at the process level, so this
+        // looks exactly like an infra death (-1/124 semantics) — but retrying
+        // would re-run the command that just hung for its whole window.
+        assertRetry(exitCode = STALL_EXIT_CODE, alive = false, attempt = 1, expected = false)
+        assertRetry(exitCode = STALL_EXIT_CODE, alive = false, attempt = 2, expected = false)
+        assertRetry(exitCode = STALL_EXIT_CODE, alive = true, attempt = 1, expected = false)
+        assertRetry(exitCode = STALL_EXIT_CODE, alive = true, attempt = 1, maxRetries = 5, expected = false)
+    }
+
     // ── helper ────────────────────────────────────────────────────────
 
     private fun assertRetry(
