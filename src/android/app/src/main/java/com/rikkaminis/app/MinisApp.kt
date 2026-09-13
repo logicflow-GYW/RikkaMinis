@@ -285,6 +285,20 @@ class MinisApp : Application(), ImageLoaderFactory {
                 while (isActive) {
                     kotlinx.coroutines.delay(com.rikkaminis.app.diagnostics.MemorySpikeRecorder.intervalMs)
                     runCatching { com.rikkaminis.app.diagnostics.MemorySpikeRecorder.sampleOnce(state) }
+                    // [fix/memory-hardening-governor] 采样器只观测，治理器动手：
+                    // 连续 5 拍 RSS≥600MB（且过了 30s 冷却）就把 markdown/KaTeX
+                    // 缓存、idle WebView 页签、idle shell 全部丢掉；没有工具在跑
+                    // 时再补一次同步 GC（同 onTrimMemory 的取舍）。存在的理由：
+                    // onTrimMemory 只在「系统」内存紧张时触发，app 自己涨到 1.7GB
+                    // 而设备还有 6GB 空闲时它永远不来（2026-09-13 16:54 实测）。
+                    runCatching {
+                        com.rikkaminis.app.service.AppMemoryGovernor.tick(
+                            rssMb = com.rikkaminis.app.service.MemoryPressureGate.rssReader(),
+                            nowMs = android.os.SystemClock.elapsedRealtime(),
+                            toolRunning = com.rikkaminis.app.service.SessionActivityTracker
+                                .isToolRunning.value,
+                        )
+                    }
                 }
             }
         } catch (t: Throwable) {
@@ -552,6 +566,34 @@ class MinisApp : Application(), ImageLoaderFactory {
         com.rikkaminis.app.sandbox.OffloadRssProbe.governanceHook = {
             runCatching { ExecutionCoordinator.recycleIdleShells() }
             runCatching { sharedBrowserTabPool.evictIdleTabs() }
+            // [fix/memory-hardening-governor] 治理动作对齐治理器：offload 泄漏
+            // 涨在 app 自身（缓存/映射），只回收 idle shell 治不了「正在跑的
+            // 那个 handler」。丢可重建缓存是安全的（handler 不读 markdown/
+            // KaTeX 缓存），GC 仍留给无工具在跑的时机。
+            runCatching { clearMarkdownParseCachesForMemoryPressure() }
+            runCatching { KatexWebViewPool.clearRenderCacheForMemoryPressure() }
+        }
+
+        // [fix/memory-hardening-governor] 采样器只观测，这里给它「动手」的能力。
+        // 动作与 onTrimMemory(CRITICAL) 完全一致（同一批可重建缓存 + idle 资源），
+        // 区别只在于触发源是 app 自身 RSS 而不是系统内存压力。
+        com.rikkaminis.app.service.AppMemoryGovernor.dropCachesHook = {
+            runCatching { clearMarkdownParseCachesForMemoryPressure() }
+            runCatching { KatexWebViewPool.clearRenderCacheForMemoryPressure() }
+            runCatching { sharedBrowserTabPool.evictIdleTabs() }
+            runCatching { ExecutionCoordinator.recycleIdleShells() }
+        }
+        com.rikkaminis.app.service.AppMemoryGovernor.gcHook = {
+            runCatching { System.gc() }
+        }
+        com.rikkaminis.app.service.AppMemoryGovernor.observer = { action, rssMb ->
+            Log.w("MinisApp", "[memory-governor] $action rss=${rssMb}MB")
+            runCatching {
+                com.rikkaminis.app.diagnostics.MemorySpikeRecorder.onEvent(
+                    "govern:${action.name.lowercase()}",
+                    "rss=${rssMb}MB",
+                )
+            }
         }
 
         // [T-android-session-paused-badge] Per-session badge-state queue
