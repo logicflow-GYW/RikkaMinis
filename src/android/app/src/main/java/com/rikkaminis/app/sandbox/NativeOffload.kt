@@ -2,6 +2,7 @@ package com.rikkaminis.app.sandbox
 
 import android.net.LocalServerSocket
 import android.net.LocalSocket
+import android.os.Process
 import android.util.Log
 import com.rikkaminis.app.BuildConfig
 import java.io.DataInputStream
@@ -102,7 +103,6 @@ fun interface NativeOffloadHandler {
 
 object NativeOffloadServer {
     private const val TAG = "NativeOffloadServer"
-    private const val SOCKET_BASE = "native-offload"
     private const val MAGIC_REQ = 0x46464F4E  // 'N' 'O' 'F' 'F' little-endian
     private const val MAGIC_RSP = 0x52464F4E  // 'N' 'O' 'F' 'R'
     private const val VERSION = 1
@@ -118,13 +118,14 @@ object NativeOffloadServer {
     // (com.rikkaminis.app.lab) and the stable build (com.rikkaminis.app) fight
     // over the same abstract socket name and one of them fails to bind
     // ("failed to bind abstract socket 'native-offload' ... previous process
-    // holding the namespace?") and crashes in MinisApp.onCreate. Keying the
-    // name off BuildConfig.APPLICATION_ID makes each install bind its own
-    // socket. libproot's native_offload extension is fully parameterized over
-    // this name (received via `--native-offload=<name>:<handlers>` in
-    // PRootKernel), so the Kotlin and C sides stay consistent.
-    private val SOCKET_NAME =
-        SOCKET_BASE + "-" + BuildConfig.APPLICATION_ID.replace('.', '_')
+    // holding the namespace?") and crashes in MinisApp.onCreate. libproot's
+    // native_offload extension is fully parameterized over this name
+    // (received via `--native-offload=<name>:<handlers>` in PRootKernel), so
+    // the Kotlin and C sides stay consistent.
+    // [multi-instance] …and per *running instance* (uid): 应用双开 / 多用户
+    // 跑的是同一 applicationId 的不同 uid，只按包名命名会让第二个实例撞名
+    // → bind 全失败 → onCreate 崩溃/重启循环。见 [offloadSocketName]。
+    private val SOCKET_NAME = offloadSocketName(BuildConfig.APPLICATION_ID, Process.myUid())
 
     val socketName: String = SOCKET_NAME
 

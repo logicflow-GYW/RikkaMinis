@@ -268,6 +268,29 @@ class MinisApp : Application(), ImageLoaderFactory {
             Log.w("MinisApp", "NativeCrashHandler install failed: ${t.message}")
         }
 
+        // [mem-spike-diag] 内存尖峰记录器。NativeCrashHandler 只记「崩的那一刻」，
+        // 本记录器补上「一路上怎么涨的」：秒级采样 VmRSS / RssAnon / native heap /
+        // Java heap / **PRoot 子进程聚合 RSS**（区分「涨在 app 自己」还是「涨在
+        // tracer 子进程」），并在每条 shell 命令起止处写 ΔRSS（直接回答「哪条命令
+        // 吃掉多少内存」）。存在理由：MemoryPressureGate 在 RSS ≥ 800MB 时拒绝一切
+        // 工具调用 —— 飙升的那一刻恰好是取证能力归零的时刻，所以必须让进程自己
+        // 落盘。平时（RSS < WATCH_RSS_MB=550）零 IO，落盘位置 files/logs/memspike-<date>.log。
+        try {
+            com.rikkaminis.app.diagnostics.MemorySpikeRecorder.installProductionProviders(
+                logsDir = java.io.File(filesDir, "logs"),
+                nativeHeapBytes = { android.os.Debug.getNativeHeapAllocatedSize() },
+            )
+            applicationScope.launch {
+                val state = com.rikkaminis.app.diagnostics.MemorySpikeRecorder.LoopState()
+                while (isActive) {
+                    kotlinx.coroutines.delay(com.rikkaminis.app.diagnostics.MemorySpikeRecorder.intervalMs)
+                    runCatching { com.rikkaminis.app.diagnostics.MemorySpikeRecorder.sampleOnce(state) }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w("MinisApp", "MemorySpikeRecorder install failed: ${t.message}")
+        }
+
         // T-android-fgs-timeout-crash: chain an UncaughtExceptionHandler
         // ahead of ACRA's so we can intercept
         // android.app.RemoteServiceException$ForegroundServiceDidNotStopInTimeException

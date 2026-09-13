@@ -11,6 +11,7 @@ import com.rikkaminis.app.agent.runtime.RetryOutcome
 import com.rikkaminis.app.agent.runtime.RetryPolicy
 import com.rikkaminis.app.agent.runtime.RetrySafety
 import com.rikkaminis.app.data.repository.EnvVarRepository
+import com.rikkaminis.app.diagnostics.MemorySpikeRecorder
 import com.rikkaminis.app.sandbox.offload.ChatStreamOffloadHandler
 import com.rikkaminis.app.sandbox.offload.ModelExecutionMailbox
 import com.rikkaminis.app.service.MemoryPressureGate
@@ -268,11 +269,20 @@ object ExecutionCoordinator {
         // critical, reject the command with a retryable, structured error instead
         // of letting one more heavy command push the process over the edge.
         val rssBeforeMB = MemoryPressureGate.rssReader()
+        // [mem-spike-diag] 命令级内存归因旁路：记录命令上下文 + 起始 RSS，由
+        // MemorySpikeRecorder 在命令结束时写出 ΔRSS —— 直接回答「哪条命令吃掉
+        // 多少内存」。与准入逻辑完全无关，任何失败静默。
+        val spikeCmdClass = classifyCommand(command)
+        MemorySpikeRecorder.onCommandStart(sessionId, spikeCmdClass.name, command)
         if (MemoryPressureGate.levelFor(rssBeforeMB) == MemoryPressureLevel.CRITICAL) {
             MemoryPressureGate.reclaimAndWait(waitMs = 2_000L)
             val rssAfterMB = MemoryPressureGate.rssReader()
             if (MemoryPressureGate.shouldRejectAfterReclaim(rssAfterMB)) {
                 Log.w(TAG, "[$sessionId] Process RSS ${rssAfterMB}MB still critical after reclaim — rejecting command (rssBefore=${rssBeforeMB}MB)")
+                MemorySpikeRecorder.onEvent(
+                    "reject-rss",
+                    "session=$sessionId rssAfter=${rssAfterMB}MB rssBefore=${rssBeforeMB}MB :: ${MemorySpikeRecorder.previewOf(command, 60)}"
+                )
                 return CommandResult(
                     "[System busy: process memory is critically high (${rssAfterMB}MB). " +
                         "Please wait for the system to settle and retry.]",
@@ -301,6 +311,10 @@ object ExecutionCoordinator {
         val preExecReject = preExecRejectionMessage(preExecPhase, cmdClass, preExecNativeMB, memAvailableMB)
         if (preExecReject != null) {
             Log.w(TAG, "[$sessionId] Phase $preExecPhase: rejecting $cmdClass command (native ${preExecNativeMB}MB, memAvail ${memAvailableMB}MB)")
+            MemorySpikeRecorder.onEvent(
+                "reject-tier",
+                "session=$sessionId phase=$preExecPhase class=$cmdClass native=${preExecNativeMB}MB memAvail=${memAvailableMB}MB"
+            )
             postRecycleMemoryRecovery()
             return CommandResult(preExecReject, -1, 0, true)
         }
@@ -451,9 +465,15 @@ object ExecutionCoordinator {
                 sessionDidTerminate(sessionId)
             }
 
+            // [mem-spike-diag] 命令结束归因：ΔRSS + PRoot 子进程聚合，落盘
+            // memspike-<date>.log。诊断旁路，不影响返回值。
+            MemorySpikeRecorder.onCommandEnd(durationMs, rssBeforeMB * 1024L)
             CommandResult(output = output, exitCode = result.exitCode, durationMs = durationMs, truncated = outputTruncated)
         }
     } finally {
+        // [mem-spike-diag] 兜底配对：异常 / 提前 return 的路径也把命令上下文收尾，
+        // 避免 ΔRSS 归因丢行（幂等，成功路径已收尾时为 no-op）。
+        MemorySpikeRecorder.onCommandEndIfPending(rssBeforeKb = rssBeforeMB * 1024L)
         // [P2-global-concurrency] Release the global concurrency slot.
         // This runs after the per-session mutex is released (the mutex is
         // inside the try block), so the next session waiting on the
