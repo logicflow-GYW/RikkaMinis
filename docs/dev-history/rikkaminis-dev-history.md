@@ -17554,7 +17554,7 @@ v1 补滚窗口 1.2s→2.5s、3→4 次（安全网，期望 rolls=0）。文档
 
 **验证**：沙箱 kotlinc 2.1.0 + JUnit4 **58/58 绿**（含负向对照：LEGACY 几何在 200K/40K-per-turn 与 1M/120K-per-turn 下确实 OK→EXHAUSTED，修复后均得 AUTO_COMPACT）。
 **CI**：分支 run 34741727399 success（head 0f77046，三源一致）；rebase 后逐字节校验改动未变 → ff 推 main → release CI **run 34742540288**（in_progress，用户拍板不等）。
-**待办**：用户真机日常验证（用户明确：这类改动只能在日常使用中发现）。
+**✅ 真机验证通过（2026-09-13 晚，用户确认）**：日常使用中压缩行为符合预期——恢复合并（3ca019e，树与 33aa72d 逐字节一致）后装机实测压缩正常触发，效果如设计。
 **坑（复记）**：`gh_sync.sh push --branch HEAD:main` 可做 ff 直推；`git push --dry-run` 无 askpass 会报 could not read Username（改用 merge-base --is-ancestor 校验 FF）。
 
 <!-- 2026-09-13 14:32:14 -->
