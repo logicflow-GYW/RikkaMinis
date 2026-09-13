@@ -26,7 +26,7 @@ package com.rikkaminis.app.service
  * ## Policy
  *
  * - Trigger only on SUSTAINED elevation ([SUSTAINED_TICKS] consecutive ticks at
- *   or above [SUSTAINED_RSS_MB]) so a single transient read never sheds caches.
+ *   or above [SUSTAINED_ANON_MB]) so a single transient read never sheds caches.
  * - Cooldown ([COOLDOWN_MS]) so the actions cannot run in a tight loop.
  * - While a tool/session is actively executing, drop the caches but skip the
  *   synchronous GC — the same trade-off (and the same reason) as
@@ -39,9 +39,11 @@ package com.rikkaminis.app.service
  */
 object AppMemoryGovernor {
 
-    /** Sustained RSS at/above this acts (== `MemoryPressureGate.ELEVATED_RSS_MB`,
-     *  i.e. we shed caches *before* the gate starts rejecting tool calls). */
-    const val SUSTAINED_RSS_MB = 600L
+    /** Sustained anon at/above this acts. Tied to the gate's soft line
+     *  (`MemoryPressureGate.ELEVATED_ANON_MB`, 450MB of RssAnon) so the two
+     *  layers share one ladder: we shed caches *before* the gate's hard line
+     *  (1200MB anon) starts rejecting tool calls. */
+    val SUSTAINED_ANON_MB: Long get() = MemoryPressureGate.ELEVATED_ANON_MB
 
     /** Consecutive 1s ticks at/above the threshold before acting. */
     const val SUSTAINED_TICKS = 5
@@ -80,9 +82,9 @@ object AppMemoryGovernor {
      * sustained elevation past the cooldown. [nowMs] is a monotonic clock
      * (`SystemClock.elapsedRealtime()` in production) — tests pass their own.
      */
-    fun tick(rssMb: Long, nowMs: Long, toolRunning: Boolean) {
+    fun tick(anonMb: Long, nowMs: Long, toolRunning: Boolean) {
         val decision = internalGovernorTick(
-            rssMb = rssMb,
+            anonMb = anonMb,
             consecutiveHigh = consecutiveHigh,
             lastReclaimAtMs = lastReclaimAtMs,
             nowMs = nowMs,
@@ -92,7 +94,7 @@ object AppMemoryGovernor {
         val action = decision.action
         if (action == Action.NONE) return
         lastReclaimAtMs = nowMs
-        observer(action, rssMb)
+        observer(action, anonMb)
         runCatching { dropCachesHook() }
         if (action == Action.DROP_CACHES_AND_GC) {
             runCatching { gcHook() }
@@ -115,16 +117,16 @@ object AppMemoryGovernor {
  * singleton's state or hooks.
  */
 internal fun internalGovernorTick(
-    rssMb: Long,
+    anonMb: Long,
     consecutiveHigh: Int,
     lastReclaimAtMs: Long,
     nowMs: Long,
     toolRunning: Boolean,
-    thresholdMb: Long = AppMemoryGovernor.SUSTAINED_RSS_MB,
+    thresholdMb: Long = AppMemoryGovernor.SUSTAINED_ANON_MB,
     ticks: Int = AppMemoryGovernor.SUSTAINED_TICKS,
     cooldownMs: Long = AppMemoryGovernor.COOLDOWN_MS,
 ): GovernorDecision {
-    if (rssMb < thresholdMb) return GovernorDecision(0, AppMemoryGovernor.Action.NONE)
+    if (anonMb < thresholdMb) return GovernorDecision(0, AppMemoryGovernor.Action.NONE)
     val next = consecutiveHigh + 1
     if (next < ticks) return GovernorDecision(next, AppMemoryGovernor.Action.NONE)
     // Sustained long enough — but do not re-run the reclaim in a tight loop.

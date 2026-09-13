@@ -37,7 +37,11 @@ object MemorySpikeRecorder {
 
     // ---------- 阈值（诊断参数，非治理阈值） ----------
 
-    /** 进入观察窗口的进程 RSS（MB）。低于 [MemoryPressureGate.ELEVATED_RSS_MB] 留余量。 */
+    /**
+     * 进入观察窗口的进程 RSS（MB）。诊断阈值故意继续用 VmRSS（不是治理口径的
+     * RssAnon）：探针的职责是"抓任何膨胀"，RSS≥550MB 等价于 anon≥400MB 左右，
+     * 且曲线上的 rss/anon 两列都在，口径差异留给读日志的人判断。
+     */
     const val WATCH_RSS_MB = 550L
 
     /** 单拍正增量达到该值 → 判定 BURST（无条件记录）。 */
@@ -201,6 +205,13 @@ object MemorySpikeRecorder {
         sb.append(" th=").append(snap.threads)
         sb.append(" native=").append(snap.nativeHeapKb / 1024L).append("MB")
         sb.append(" java=").append(snap.javaUsedKb / 1024L).append('/').append(snap.javaMaxKb / 1024L).append("MB")
+        // [fix/memory-gate-anon-metric] 残差 anon = anon − native heap − java heap。
+        // 2026-09-13 17:01 拒绝点 anon=1370MB 而 native 只报 406MB → 约 900MB 匿名内存
+        // 无归属（direct buffer / JIT / 其它 mmap 都可能）。没有这列就会把这类膨胀
+        // 一直误判成 native heap，并据此把门调到错误的档位。
+        sb.append(" resid=")
+            .append(((snap.anonKb - snap.nativeHeapKb - snap.javaUsedKb) / 1024L).coerceAtLeast(0L))
+            .append("MB")
         sb.append(" proot=").append(children.size).append('/').append(kidRssMb).append("MB")
         if (cmd != null) {
             sb.append(" | ").append(cmd.cmdClass).append(' ').append(cmd.preview)

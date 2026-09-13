@@ -32,7 +32,7 @@ class AppMemoryGovernorTest {
     @Test
     fun `a healthy reading never acts and resets the counter`() {
         val d = internalGovernorTick(
-            rssMb = 300, consecutiveHigh = 4, lastReclaimAtMs = 0,
+            anonMb = 300, consecutiveHigh = 4, lastReclaimAtMs = 0,
             nowMs = 1_000, toolRunning = false,
         )
         assertEquals(0, d.consecutiveHigh)
@@ -45,7 +45,7 @@ class AppMemoryGovernorTest {
         var actions = 0
         for (tick in 1..4) {
             val d = internalGovernorTick(
-                rssMb = 900, consecutiveHigh = counter, lastReclaimAtMs = 0,
+                anonMb = 900, consecutiveHigh = counter, lastReclaimAtMs = 0,
                 nowMs = tick * 1_000L, toolRunning = false,
             )
             counter = d.consecutiveHigh
@@ -56,7 +56,7 @@ class AppMemoryGovernorTest {
         assertEquals(4, counter)
         assertEquals(0, actions)
         val fifth = internalGovernorTick(
-            rssMb = 900, consecutiveHigh = counter, lastReclaimAtMs = 0,
+            anonMb = 900, consecutiveHigh = counter, lastReclaimAtMs = 0,
             nowMs = 5_000, toolRunning = false,
         )
         assertEquals(AppMemoryGovernor.Action.DROP_CACHES_AND_GC, fifth.action)
@@ -68,12 +68,12 @@ class AppMemoryGovernorTest {
         var counter = 0
         for (tick in 1..4) {
             counter = internalGovernorTick(
-                rssMb = 900, consecutiveHigh = counter, lastReclaimAtMs = 0,
+                anonMb = 900, consecutiveHigh = counter, lastReclaimAtMs = 0,
                 nowMs = tick * 1_000L, toolRunning = false,
             ).consecutiveHigh
         }
         counter = internalGovernorTick(
-            rssMb = 400, consecutiveHigh = counter, lastReclaimAtMs = 0,
+            anonMb = 400, consecutiveHigh = counter, lastReclaimAtMs = 0,
             nowMs = 5_000, toolRunning = false,
         ).consecutiveHigh
         assertEquals(0, counter)
@@ -82,7 +82,7 @@ class AppMemoryGovernorTest {
     @Test
     fun `an in-flight tool drops caches but skips the synchronous gc`() {
         val d = internalGovernorTick(
-            rssMb = 900, consecutiveHigh = AppMemoryGovernor.SUSTAINED_TICKS - 1, lastReclaimAtMs = 0,
+            anonMb = 900, consecutiveHigh = AppMemoryGovernor.SUSTAINED_TICKS - 1, lastReclaimAtMs = 0,
             nowMs = 90_000, toolRunning = true,
         )
         assertEquals(AppMemoryGovernor.Action.DROP_CACHES, d.action)
@@ -91,7 +91,7 @@ class AppMemoryGovernorTest {
     @Test
     fun `the cooldown blocks a second action`() {
         val d = internalGovernorTick(
-            rssMb = 900, consecutiveHigh = AppMemoryGovernor.SUSTAINED_TICKS - 1,
+            anonMb = 900, consecutiveHigh = AppMemoryGovernor.SUSTAINED_TICKS - 1,
             lastReclaimAtMs = 100_000, nowMs = 100_000 + AppMemoryGovernor.COOLDOWN_MS - 1,
             toolRunning = false,
         )
@@ -101,7 +101,7 @@ class AppMemoryGovernorTest {
     @Test
     fun `past the cooldown it acts again`() {
         val d = internalGovernorTick(
-            rssMb = 900, consecutiveHigh = AppMemoryGovernor.SUSTAINED_TICKS - 1,
+            anonMb = 900, consecutiveHigh = AppMemoryGovernor.SUSTAINED_TICKS - 1,
             lastReclaimAtMs = 100_000, nowMs = 100_000 + AppMemoryGovernor.COOLDOWN_MS,
             toolRunning = false,
         )
@@ -122,20 +122,20 @@ class AppMemoryGovernorTest {
         var now = 0L
         repeat(AppMemoryGovernor.SUSTAINED_TICKS.toInt() - 1) {
             now += 1_000
-            AppMemoryGovernor.tick(rssMb = 1_200, nowMs = now, toolRunning = false)
+            AppMemoryGovernor.tick(anonMb = 1_200, nowMs = now, toolRunning = false)
         }
         assertEquals(0, drops)
         assertEquals(0, gcs)
 
         now += 1_000
-        AppMemoryGovernor.tick(rssMb = 1_200, nowMs = now, toolRunning = false)
+        AppMemoryGovernor.tick(anonMb = 1_200, nowMs = now, toolRunning = false)
         assertEquals(1, drops)
         assertEquals(1, gcs)
         assertEquals(listOf(AppMemoryGovernor.Action.DROP_CACHES_AND_GC), seen)
 
         // Immediately re-firing is blocked by the cooldown even though the
         // reading is still high.
-        AppMemoryGovernor.tick(rssMb = 1_200, nowMs = now, toolRunning = false)
+        AppMemoryGovernor.tick(anonMb = 1_200, nowMs = now, toolRunning = false)
         assertEquals(1, drops)
     }
 
@@ -146,7 +146,7 @@ class AppMemoryGovernorTest {
         var now = 0L
         repeat(600) { // ten minutes of healthy 1s ticks
             now += 1_000
-            AppMemoryGovernor.tick(rssMb = 260, nowMs = now, toolRunning = false)
+            AppMemoryGovernor.tick(anonMb = 260, nowMs = now, toolRunning = false)
         }
         assertEquals(0, drops)
     }
@@ -158,7 +158,7 @@ class AppMemoryGovernorTest {
         var now = 0L
         repeat(AppMemoryGovernor.SUSTAINED_TICKS.toInt()) {
             now += 1_000
-            AppMemoryGovernor.tick(rssMb = 1_500, nowMs = now, toolRunning = false)
+            AppMemoryGovernor.tick(anonMb = 1_500, nowMs = now, toolRunning = false)
         }
         assertTrue(true) // reached without throwing
     }

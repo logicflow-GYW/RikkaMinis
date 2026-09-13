@@ -82,7 +82,10 @@ object SessionConcurrencyManager {
      * 在大量 shell/WebView 线程堆积时避免新的 agent loop 立即把 RSS 推向硬门槛。
      */
     suspend fun acquireSlot(sessionId: String) {
-        val pressure = MemoryPressureGate.level()
+        // 准入用瞬时纯分级（确定、可预期）：带滞回的状态机 [MemoryPressureGate.level]
+        // 需要持续采样才能攒满置信拍，准入是一次性调用，用它只会恒返回 NORMAL。
+        val sampled = MemoryPressureGate.anonMb()
+        val pressure = MemoryPressureGate.levelFor(sampled)
         MemoryPressureGate.notify(pressure)
         if (pressure == MemoryPressureLevel.CRITICAL) {
             MemoryPressureGate.reclaimAndWait()

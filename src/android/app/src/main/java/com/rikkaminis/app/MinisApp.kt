@@ -291,9 +291,16 @@ class MinisApp : Application(), ImageLoaderFactory {
                     // 时再补一次同步 GC（同 onTrimMemory 的取舍）。存在的理由：
                     // onTrimMemory 只在「系统」内存紧张时触发，app 自己涨到 1.7GB
                     // 而设备还有 6GB 空闲时它永远不来（2026-09-13 16:54 实测）。
+                    // [fix/memory-gate-anon-metric] 采样拍推进压力门状态机（滞回 +
+                    // 置信拍）：只有持续采样方才能攒满置信计数；档位跃迁会落进探针
+                    // 日志（`gate:soft|hard|normal`），后面用"正常重活穿越频率"复核
+                    // 阈值，而不是继续拍脑袋。
+                    runCatching {
+                        com.rikkaminis.app.service.MemoryPressureGate.sampleAndNotify()
+                    }
                     runCatching {
                         com.rikkaminis.app.service.AppMemoryGovernor.tick(
-                            rssMb = com.rikkaminis.app.service.MemoryPressureGate.rssReader(),
+                            anonMb = com.rikkaminis.app.service.MemoryPressureGate.anonMb(),
                             nowMs = android.os.SystemClock.elapsedRealtime(),
                             toolRunning = com.rikkaminis.app.service.SessionActivityTracker
                                 .isToolRunning.value,
@@ -553,9 +560,21 @@ class MinisApp : Application(), ImageLoaderFactory {
             runCatching { ExecutionCoordinator.recycleIdleShells() }
             runCatching { sharedBrowserTabPool.evictIdleTabs() }
         }
-        MemoryPressureGate.pressureListener = { level, rssMB ->
-            AppLogger.warning("MemoryPressureGate", "level=$level rss=${rssMB}MB — " +
+        MemoryPressureGate.pressureListener = { level, anonMB ->
+            AppLogger.warning("MemoryPressureGate", "level=$level anon=${anonMB}MB " +
+                "rss=${MemoryPressureGate.rssMb()}MB — " +
                 (if (level == MemoryPressureLevel.CRITICAL) "admission throttled (reclaim + 2s wait)" else "admission delayed 500ms"))
+        }
+        // [fix/memory-gate-anon-metric] 档位跃迁落探针日志（含降档）。这是"正常重活
+        // 会不会常穿越梯子"的经验依据——阈值 450/1200 后面靠穿越频率复核，不靠拍脑袋。
+        com.rikkaminis.app.service.tierListener = { from, to, anonMB ->
+            runCatching {
+                com.rikkaminis.app.diagnostics.MemorySpikeRecorder.onEvent(
+                    "gate:${to.name.lowercase()}",
+                    "from=$from anon=${anonMB}MB rss=${MemoryPressureGate.rssMb()}MB",
+                )
+            }
+            Unit
         }
 
         // [offload-rss-governance] 把 OffloadRssProbe 的「观测」接到「治理」：

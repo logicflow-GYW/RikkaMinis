@@ -44,7 +44,7 @@ class SessionConcurrencyManagerTest {
         // [memory-pressure-gate] Pin the gate to NORMAL so existing tests
         // are unaffected by the real /proc/self/status RSS of the CI runner
         // (which could exceed the ELEVATED watermark and add real delays).
-        MemoryPressureGate.rssReader = { 0L }
+        MemoryPressureGate.metricsReader = { MemoryPressureGate.Metrics(0L, 147L) }
         MemoryPressureGate.reclaimHook = {}
         MemoryPressureGate.pressureListener = { _, _ -> }
     }
@@ -285,7 +285,7 @@ class SessionConcurrencyManagerTest {
 
     @Test
     fun `NORMAL pressure admits immediately without reclaim`() = runTest {
-        MemoryPressureGate.rssReader = { 100L }
+        MemoryPressureGate.metricsReader = { MemoryPressureGate.Metrics(100L, 247L) }
         var reclaimed = 0
         MemoryPressureGate.reclaimHook = { reclaimed++ }
 
@@ -296,7 +296,7 @@ class SessionConcurrencyManagerTest {
 
     @Test
     fun `ELEVATED pressure delays admission but does not reclaim`() = runTest {
-        MemoryPressureGate.rssReader = { 700L }
+        MemoryPressureGate.metricsReader = { MemoryPressureGate.Metrics(700L, 847L) }
         var reclaimed = 0
         MemoryPressureGate.reclaimHook = { reclaimed++ }
 
@@ -310,7 +310,7 @@ class SessionConcurrencyManagerTest {
 
     @Test
     fun `CRITICAL pressure triggers reclaim hook before admission`() = runTest {
-        MemoryPressureGate.rssReader = { 900L }
+        MemoryPressureGate.metricsReader = { MemoryPressureGate.Metrics(1300L, 1447L) }
         var reclaimed = 0
         MemoryPressureGate.reclaimHook = { reclaimed++ }
 
@@ -322,7 +322,7 @@ class SessionConcurrencyManagerTest {
 
     @Test
     fun `CRITICAL pressure still admits after reclaim window`() = runTest {
-        MemoryPressureGate.rssReader = { 900L }
+        MemoryPressureGate.metricsReader = { MemoryPressureGate.Metrics(1300L, 1447L) }
         var reclaimed = 0
         MemoryPressureGate.reclaimHook = { reclaimed++ }
 
