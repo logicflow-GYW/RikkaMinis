@@ -159,9 +159,25 @@ object MemorySpikeRecorder {
     fun shouldRotate(currentBytes: Long, maxBytes: Long = MAX_FILE_BYTES): Boolean =
         currentBytes >= maxBytes
 
-    /** 命令预览：压平换行、截断，保证单行可 grep。 */
+    /**
+     * 令牌形状的连续串在落盘前一律打码：命令预览是**唯一**会写进日志的原始
+     * 命令文本，而 shell 命令经常夹带凭据（`curl -H "Authorization: Bearer
+     * gsk_…"`、`--token <40 位>`）。日志随后会被人工与 agent 读取，所以这里
+     * 与 dev-history 脱敏同一条纪律：宁可多打码，不可漏一个。
+     */
+    private val SENSITIVE_RUN = Regex(
+        "(?i)\\b(?:sk-[A-Za-z0-9_\\-]{8,}|gsk_[A-Za-z0-9_\\-]{8,}|" +
+            "ghp_[A-Za-z0-9_\\-]{8,}|github_pat_[A-Za-z0-9_\\-]{8,}|" +
+            "rnd_[A-Za-z0-9]{8,}|hf_[A-Za-z0-9]{8,}|glpat-[A-Za-z0-9_\\-]{8,}|" +
+            "cfat_[A-Za-z0-9_\\-]{8,}|[A-Za-z0-9_\\-]{32,})",
+    )
+
+    /** 命令预览：打码凭据 → 压平换行 → 截断，保证单行可 grep。 */
     fun previewOf(command: String, limit: Int = 120): String {
-        val flat = command.replace('\n', ' ').replace('\r', ' ').trim()
+        val flat = SENSITIVE_RUN.replace(
+            command.replace('\n', ' ').replace('\r', ' ').trim(),
+            "***",
+        )
         return if (flat.length <= limit) flat else flat.take(limit) + "…"
     }
 

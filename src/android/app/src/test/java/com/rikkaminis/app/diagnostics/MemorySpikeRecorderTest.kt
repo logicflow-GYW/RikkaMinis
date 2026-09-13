@@ -195,10 +195,21 @@ class MemorySpikeRecorderTest {
     @Test
     fun `previewOf flattens newlines and truncates`() {
         assertEquals("ls -la /tmp", MemorySpikeRecorder.previewOf("ls -la\n/tmp\n"))
-        val long = "x".repeat(200)
+        val long = "x ".repeat(200) // spaced, so it is not a token-shaped run
         val p = MemorySpikeRecorder.previewOf(long, limit = 10)
         assertEquals(11, p.length) // 10 + 省略号
         assertTrue(p.endsWith("…"))
+    }
+
+    @Test
+    fun `previewOf masks token shaped runs`() {
+        val cmd = "curl -H \"Authorization: Bearer gsk_abcdefghijklmnop\" " +
+            "--token 0123456789abcdef0123456789abcdef /sdcard/x"
+        val out = MemorySpikeRecorder.previewOf(cmd)
+        assertFalse("api key leaked: $out", out.contains("gsk_abcdefghijklmnop"))
+        assertFalse("token leaked: $out", out.contains("0123456789abcdef0123456789abcdef"))
+        assertTrue("nothing masked: $out", out.contains("***"))
+        assertTrue("command context lost: $out", out.contains("curl -H"))
     }
 
     @Test
