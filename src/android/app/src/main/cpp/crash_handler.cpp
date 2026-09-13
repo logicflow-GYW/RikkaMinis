@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <android/log.h>
+#include "crash_report_fields.h"
 
 #define LOG_TAG "MinisCrashHandler"
 
@@ -34,70 +35,49 @@ static volatile sig_atomic_t g_in_handler = 0;
 // Everything here avoids malloc/printf/fopen: only open/read/write/close
 // (async-signal-safe per POSIX) plus manual integer formatting.
 
-// Reads /proc/self/status and copies the value (rest of line) for a
-// requested "Key:" into outbuf. Returns true if the key was found.
-// Async-signal-safe: open/read/close only.
-static bool read_status_field(const char* key, char* outbuf, size_t outsize) {
-    int fd = open("/proc/self/status", O_RDONLY);
-    if (fd < 0) return false;
-    char chunk[1024];
-    size_t keylen = 0;
-    while (key[keylen] != '\0') keylen++;
+// ---- async-signal-safe /proc readers ----
+//
+// One read of /proc/self/status now feeds every field we report (the
+// previous per-key reader opened the file once per field). The parsing
+// itself lives in crash_report_fields.h so the same source lines are
+// host-testable (scripts/native/crash_fields_host_test.sh).
 
-    char pending[128];      // tail of previous chunk (to catch keys split across reads)
-    size_t pending_len = 0;
-    bool found = false;
-
-    ssize_t r;
-    while ((r = read(fd, chunk, sizeof(chunk))) > 0) {
-        // Build a combined buffer: pending tail + this chunk.
-        char scan[sizeof(pending) + sizeof(chunk)];
-        memcpy(scan, pending, pending_len);
-        memcpy(scan + pending_len, chunk, (size_t)r);
-        size_t total = pending_len + (size_t)r;
-
-        size_t i = 0;
-        while (i < total) {
-            // Find line start (after a '\n').
-            size_t line_start = i;
-            // Find line end.
-            size_t line_end = line_start;
-            while (line_end < total && scan[line_end] != '\n') line_end++;
-            size_t line_len = line_end - line_start;
-            if (line_len >= keylen && memcmp(scan + line_start, key, keylen) == 0 &&
-                line_start + keylen < line_end && scan[line_start + keylen] == ':') {
-                // Value begins after key, skip spaces/tabs (status uses ": ").
-                size_t v = line_start + keylen;
-                if (v < line_end && scan[v] == ':') v++;
-                while (v < line_end && (scan[v] == ' ' || scan[v] == '\t')) v++;
-                size_t val_len = line_end - v;
-                if (val_len >= outsize) val_len = outsize - 1;
-                memcpy(outbuf, scan + v, val_len);
-                outbuf[val_len] = '\0';
-                found = true;
-                close(fd);
-                return true;
-            }
-            i = line_end + 1;
-        }
-
-        // Preserve a partial line tail for the next read.
-        // Find last '\n' in scan.
-        size_t last_nl = total;
-        while (last_nl > 0 && scan[last_nl - 1] != '\n') last_nl--;
-        // scan[last_nl .. total) is a partial line; keep up to pending capacity.
-        size_t tail_len = total - last_nl;
-        if (tail_len >= sizeof(pending)) {
-            // Partial line is already longer than our buffer: it cannot be a
-            // short key like "VmRSS:", so drop it — those keys are short.
-            pending_len = 0;
-        } else {
-            memcpy(pending, scan + last_nl, tail_len);
-            pending_len = tail_len;
-        }
+// Reads up to bufsize-1 bytes of a text file into buf (NUL-terminated).
+// Returns the number of bytes read (0 on failure). open/read/close only.
+static size_t read_proc_text(const char* path, char* buf, size_t bufsize) {
+    if (buf == nullptr || bufsize == 0) return 0;
+    buf[0] = '\0';
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    size_t total = 0;
+    while (total + 1 < bufsize) {
+        ssize_t r = read(fd, buf + total, bufsize - 1 - total);
+        if (r <= 0) break;
+        total += (size_t)r;
     }
     close(fd);
-    return found;
+    buf[total] = '\0';
+    return total;
+}
+
+// Counts lines in a /proc file without buffering it (/proc/self/maps can run
+// to hundreds of KB; the handler must not allocate). -1 on failure.
+static long count_proc_lines(const char* path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    char chunk[1024];
+    long lines = 0;
+    bool trailing_nl = true;  // empty file => 0 lines
+    ssize_t r;
+    while ((r = read(fd, chunk, sizeof(chunk))) > 0) {
+        for (ssize_t i = 0; i < r; i++) {
+            if (chunk[i] == '\n') lines++;
+        }
+        trailing_nl = (chunk[r - 1] == '\n');
+    }
+    close(fd);
+    if (!trailing_nl) lines++;
+    return lines;
 }
 
 // Reads /proc/self/cmdline (NUL-separated argv) and joins with spaces.
@@ -182,16 +162,45 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* ctx) {
     char cmdline[256] = {0};
     read_cmdline(cmdline, sizeof(cmdline));
 
+    // One status read feeds every field below. RssAnon/RssFile/RssShmem are
+    // what make the death state readable: on 2026-09-13 the process died at
+    // VmRSS 6.0GB, but a same-day probe run showed the split matters — file
+    // pages sit at a constant ~150MB regardless of pressure, so VmRSS alone
+    // hides how much of the report is actually private anon memory (the part
+    // the memory gate now thresholds on, and the part the kernel cannot
+    // reclaim). static buffers: never grow the crashing thread's stack.
+    static char status_text[4096];
+    read_proc_text("/proc/self/status", status_text, sizeof(status_text));
+
     char vm_rss[32] = {0};
-    read_status_field("VmRSS", vm_rss, sizeof(vm_rss));
-
-    char threads[32] = {0};
-    read_status_field("Threads", threads, sizeof(threads));
-
     char vm_peak[32] = {0};
-    read_status_field("VmPeak", vm_peak, sizeof(vm_peak));
+    char vm_size[32] = {0};
+    char threads[32] = {0};
+    char rss_anon[32] = {0};
+    char rss_file[32] = {0};
+    char rss_shmem[32] = {0};
+    minis_crash::extractField(status_text, "VmRSS", vm_rss, sizeof(vm_rss));
+    minis_crash::extractField(status_text, "VmPeak", vm_peak, sizeof(vm_peak));
+    minis_crash::extractField(status_text, "VmSize", vm_size, sizeof(vm_size));
+    minis_crash::extractField(status_text, "Threads", threads, sizeof(threads));
+    minis_crash::extractField(status_text, "RssAnon", rss_anon, sizeof(rss_anon));
+    minis_crash::extractField(status_text, "RssFile", rss_file, sizeof(rss_file));
+    minis_crash::extractField(status_text, "RssShmem", rss_shmem, sizeof(rss_shmem));
 
-    char buf[1400];
+    // System-wide headroom at the moment of death: was the device tight too,
+    // or did the process die while the phone still had GBs free?
+    static char meminfo_text[2048];
+    char mem_available[32] = {0};
+    if (read_proc_text("/proc/meminfo", meminfo_text, sizeof(meminfo_text)) > 0) {
+        minis_crash::extractField(meminfo_text, "MemAvailable", mem_available,
+                                  sizeof(mem_available));
+    }
+
+    // Mapping count: VMAs are invisible in RSS, yet the same crash had
+    // VmPeak 16.8GB against VmRSS 6.0GB.
+    long map_lines = count_proc_lines("/proc/self/maps");
+
+    char buf[2048];
     int off = 0;
     off += snprintf(buf + off, sizeof(buf) - (size_t)off,
         "=== Minis Native Crash ===\n"
@@ -230,6 +239,34 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* ctx) {
     if (threads[0] != '\0') {
         off += snprintf(buf + off, sizeof(buf) - (size_t)off,
             "Threads: %s\n", threads);
+    }
+    // Private-anon split + address-space pressure. RssAnon is the metric the
+    // memory gate now thresholds on (soft 450MB / hard 1200MB anon); the 1s
+    // probe curve that led to this death lives in
+    // files/logs/memspike-<date>.log (columns anon/resid/native/java/peak).
+    if (rss_anon[0] != '\0') {
+        off += snprintf(buf + off, sizeof(buf) - (size_t)off,
+            "RssAnon: %s kB\n", rss_anon);
+    }
+    if (rss_file[0] != '\0') {
+        off += snprintf(buf + off, sizeof(buf) - (size_t)off,
+            "RssFile: %s kB\n", rss_file);
+    }
+    if (rss_shmem[0] != '\0') {
+        off += snprintf(buf + off, sizeof(buf) - (size_t)off,
+            "RssShmem: %s kB\n", rss_shmem);
+    }
+    if (vm_size[0] != '\0') {
+        off += snprintf(buf + off, sizeof(buf) - (size_t)off,
+            "VmSize: %s kB\n", vm_size);
+    }
+    if (mem_available[0] != '\0') {
+        off += snprintf(buf + off, sizeof(buf) - (size_t)off,
+            "MemAvailable: %s kB\n", mem_available);
+    }
+    if (map_lines >= 0) {
+        off += snprintf(buf + off, sizeof(buf) - (size_t)off,
+            "Maps: %ld entries\n", map_lines);
     }
     off += snprintf(buf + off, sizeof(buf) - (size_t)off,
         "\n"
