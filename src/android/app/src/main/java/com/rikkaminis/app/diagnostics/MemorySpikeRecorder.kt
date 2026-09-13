@@ -52,6 +52,12 @@ object MemorySpikeRecorder {
     /** 子进程聚合每 N 拍刷新一次（枚举子进程比读自身 status 贵）。 */
     const val CHILD_REFRESH_EVERY = 5
 
+    /** 退路扫描 /proc 的条目上限（诊断路径不得自己变成负载）。 */
+    const val SCAN_MAX_ENTRIES = 256
+
+    /** procfs 根（便于测试/移植）。 */
+    private const val PROC_ROOT = "/proc"
+
     /** 单文件上限，超过即轮转到 `*.1`（只保留最近一段）。 */
     const val MAX_FILE_BYTES = 2L * 1024L * 1024L
 
@@ -308,7 +314,7 @@ object MemorySpikeRecorder {
      * 任何失败降级为 0 值快照（诊断路径绝不反噬执行路径）。
      */
     fun readSelfSnapshot(): Snapshot = try {
-        val base = parseStatus(File("/proc/self/status").readText())
+        val base = parseStatus(File("$PROC_ROOT/self/status").readText())
         val rt = Runtime.getRuntime()
         base.copy(
             nativeHeapKb = nativeHeapProvider() / 1024L,
@@ -322,14 +328,18 @@ object MemorySpikeRecorder {
     /**
      * 枚举子进程及其 RSS。
      *
-     * 走 `/proc/self/task/<tid>/children`（内核 CONFIG_PROC_CHILDREN；Android
-     * 默认开启）而不是 `ProcessHandle`（API 33 才有，低版本会 NoClassDefFound）。
-     * 这一步是「泄漏涨在 app 自己还是涨在 PRoot tracer」的判定依据。
+     * 快路径走 `/proc/self/task/<tid>/children`（需要内核 CONFIG_PROC_CHILDREN，
+     * Android 常关）；拿不到时退回**扫描各进程 status 的 PPid 字段** —— android app
+     * 进程可以读同 uid 的进程（libproot 是自身 fork，同 uid）。
+     * 这一步是「泄漏涨在 app 自己还是涨在 PRoot tracer」的判定依据，
+     * 不能用 `ProcessHandle`（API 33 才有，低版本 NoClassDefFound）。
      */
     fun readChildProcs(): List<ChildProc> = try {
-        val out = ArrayList<ChildProc>(4)
-        for (pid in readChildPids()) {
-            val text = File("/proc/$pid/status").readText()
+        val kernelList = readChildPids()
+        val pids = if (kernelList.isNotEmpty()) kernelList else scanChildPids()
+        val out = ArrayList<ChildProc>(pids.size)
+        for (pid in pids) {
+            val text = runCatching { File("$PROC_ROOT/$pid/status").readText() }.getOrNull() ?: continue
             val rss = parseStatus(text).rssKb
             if (rss > 0L) out.add(ChildProc(pid, parseProcName(text), rss))
         }
@@ -341,7 +351,7 @@ object MemorySpikeRecorder {
     /** 读取本进程的直接子进程 pid（/proc/self/task/<tid>/children）。 */
     fun readChildPids(): List<Long> {
         val pids = LinkedHashSet<Long>()
-        val taskDir = File("/proc/self/task")
+        val taskDir = File("$PROC_ROOT/self/task")
         val tids = taskDir.list() ?: return emptyList()
         for (tid in tids) {
             val f = File(taskDir, "$tid/children")
@@ -349,10 +359,59 @@ object MemorySpikeRecorder {
             for (tok in txt.split(' ', '\n')) {
                 tok.trim().toLongOrNull()?.let { pids.add(it) }
             }
-            // 主线程的 children 已覆盖全部子进程；读到就够。
             if (pids.isNotEmpty()) break
         }
         return pids.toList()
+    }
+
+    /** 从 /proc/<pid>/status 文本读 PPid（无此行返回 -1）。 */
+    fun parsePpid(text: String): Long =
+        text.lineSequence().firstOrNull { it.startsWith("PPid:") }
+            ?.substringAfter(":")?.trim()?.toLongOrNull() ?: -1L
+
+    /** 本进程 pid（/proc/self/stat 首字段）。 */
+    fun readSelfPid(): Long? = try {
+        File("$PROC_ROOT/self/stat").readText().substringBefore(' ').trim().toLongOrNull()
+    } catch (t: Throwable) {
+        null
+    }
+
+    /**
+     * 纯函数版子进程挑选：给定 /proc 条目名与文本读取器，挑出 PPid == selfPid
+     * 且 RSS > 0 的条目。抽出来是为了让「发现子进程」这件事可被确定性地单测
+     * （真实 /proc 在 PRoot 沙箱里是被虚拟化的，不能作为断言依据）。
+     */
+    internal fun pickChildPids(
+        entries: List<String>,
+        selfPid: Long,
+        statusReader: (String) -> String?,
+        maxEntries: Int = SCAN_MAX_ENTRIES,
+    ): List<Long> {
+        val out = ArrayList<Long>(4)
+        var seen = 0
+        for (e in entries) {
+            if (seen >= maxEntries) break
+            val pid = e.toLongOrNull() ?: continue
+            seen++
+            val text = statusReader(e) ?: continue
+            if (parsePpid(text) == selfPid && parseStatus(text).rssKb > 0L) out.add(pid)
+        }
+        return out
+    }
+
+    /**
+     * 退路：扫描 /proc 找 PPid == self 的进程。只在快路径拿不到时执行，
+     * 且限制扫描条目上限（诊断路径不得自己变成负载）。
+     */
+    fun scanChildPids(maxEntries: Int = SCAN_MAX_ENTRIES): List<Long> {
+        val self = readSelfPid() ?: return emptyList()
+        val entries = File(PROC_ROOT).list()?.toList() ?: return emptyList()
+        return pickChildPids(
+            entries = entries,
+            selfPid = self,
+            statusReader = { e -> runCatching { File(PROC_ROOT, "$e/status").readText() }.getOrNull() },
+            maxEntries = maxEntries,
+        )
     }
 
     /**

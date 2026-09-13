@@ -3,6 +3,7 @@ package com.rikkaminis.app.diagnostics
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -81,6 +82,62 @@ class MemorySpikeRecorderTest {
     fun `parseProcName reads the Name line`() {
         assertEquals("libproot.so", MemorySpikeRecorder.parseProcName("Name:\tlibproot.so\nVmRSS:\t1200 kB\n"))
         assertEquals("", MemorySpikeRecorder.parseProcName("VmRSS:\t1 kB\n"))
+    }
+
+    @Test
+    fun `parsePpid reads the parent pid and defaults to -1`() {
+        assertEquals(4242L, MemorySpikeRecorder.parsePpid("Name:\tx\nPPid:\t4242\n"))
+        assertEquals(-1L, MemorySpikeRecorder.parsePpid("Name:\tx\n"))
+    }
+
+    @Test
+    fun `child enumeration never throws and self pid is readable on the host JVM`() {
+        // 快路径（内核 children）在 Android 常缺失 → 必须能退回扫描且不抛异常
+        assertNotNull(MemorySpikeRecorder.readChildProcs())
+        assertNotNull(MemorySpikeRecorder.readChildPids())
+        assertNotNull(MemorySpikeRecorder.scanChildPids())
+        // Linux host（沙箱 JVM / CI）应能读到自身 pid
+        val self = MemorySpikeRecorder.readSelfPid()
+        assertTrue("self pid must be readable on Linux", self != null && self > 0L)
+    }
+
+    @Test
+    fun `pickChildPids selects only direct children with a real rss`() {
+        val self = 1000L
+        val readers = mapOf(
+            "1000" to "Name:\tself\nPPid:\t1\nVmRSS:\t50000 kB\n",
+            "1001" to "Name:\tlibproot.so\nPPid:\t1000\nVmRSS:\t3680 kB\n",
+            "1002" to "Name:\tsh\nPPid:\t1000\nVmRSS:\t1200 kB\n",
+            "1003" to "Name:\tother\nPPid:\t42\nVmRSS:\t9000 kB\n",
+            "1004" to "Name:\tgone\nPPid:\t1000\nVmRSS:\t0 kB\n",
+        )
+        val picked = MemorySpikeRecorder.pickChildPids(
+            entries = listOf("1000", "1001", "1002", "1003", "1004", "not-a-pid"),
+            selfPid = self,
+            statusReader = { readers[it] },
+        )
+        assertEquals(listOf(1001L, 1002L), picked)
+    }
+
+    @Test
+    fun `pickChildPids respects the entry cap`() {
+        val picked = MemorySpikeRecorder.pickChildPids(
+            entries = (1..50).map { it.toString() },
+            selfPid = 7L,
+            statusReader = { "Name:\tx\nPPid:\t7\nVmRSS:\t100 kB\n" },
+            maxEntries = 3,
+        )
+        assertEquals(listOf(1L, 2L, 3L), picked)
+    }
+
+    @Test
+    fun `pickChildPids tolerates unreadable entries`() {
+        val picked = MemorySpikeRecorder.pickChildPids(
+            entries = listOf("1", "2", "3"),
+            selfPid = 1L,
+            statusReader = { if (it == "2") null else "Name:\tx\nPPid:\t1\nVmRSS:\t10 kB\n" },
+        )
+        assertEquals(listOf(1L, 3L), picked)
     }
 
     // ---------- 决策 ----------
