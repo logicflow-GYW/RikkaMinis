@@ -33,7 +33,7 @@ package com.rikkaminis.app.ui.chat
  *  - [FlatChatItem.AssistantMessageItem] → its `kind == "text"` block contents
  *    in order (mirrors `AssistantMessageView`); the message-level fallback
  *    content only when the message carries no text block at all.
- *  - [FlatChatItem.AssistantMarkdownBlock] / [FlatChatItem.AssistantText] /
+ *  - [FlatChatItem.AssistantMarkdownBlock] /
  *    [FlatChatItem.AssistantLegacyContent] → their own markdown.
  *  - everything else (user bubbles, headers, thinking, tool pills, typing,
  *    errors, info rows) → empty, they render no markdown body.
@@ -81,7 +81,6 @@ internal fun markdownSourcesForRow(item: FlatChatItem): List<String> = when (ite
     // any future row-type change has exactly one place to update — which is the
     // whole lesson of the 2026-09-13 incident this file was written for.
     is FlatChatItem.AssistantMarkdownBlock -> listOfNotNull(item.rawText.takeIf { it.isNotEmpty() })
-    is FlatChatItem.AssistantText -> listOfNotNull(item.block.content.takeIf { it.isNotEmpty() })
     is FlatChatItem.AssistantLegacyContent -> listOfNotNull(item.content.takeIf { it.isNotEmpty() })
     else -> emptyList()
 }

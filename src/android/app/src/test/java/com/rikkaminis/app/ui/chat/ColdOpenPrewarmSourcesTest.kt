@@ -100,14 +100,6 @@ class ColdOpenPrewarmSourcesTest {
         )
         assertEquals(listOf("fragment body"), markdownSourcesForRow(markdownBlock))
 
-        val textRow = FlatChatItem.AssistantText(
-            messageId = "m1",
-            block = AssistantBlock(id = "b1", kind = "text", content = "text row body"),
-            isStreaming = false,
-            messageMarkdown = "text row body",
-        )
-        assertEquals(listOf("text row body"), markdownSourcesForRow(textRow))
-
         val legacy = FlatChatItem.AssistantLegacyContent(
             messageId = "m1",
             content = "legacy row body",
@@ -121,12 +113,6 @@ class ColdOpenPrewarmSourcesTest {
         val user = FlatChatItem.UserBubble(
             message = ChatMessage(id = "u1", role = "user", content = "hello"),
         )
-        val runningTool = AssistantBlock(
-            id = "t1",
-            kind = "tool_use",
-            content = "{\"name\":\"ls\"}",
-            toolStatus = ToolBlockStatus.RUNNING,
-        )
         val rows = listOf(
             user,
             FlatChatItem.AssistantHeader("m1"),
@@ -136,7 +122,6 @@ class ColdOpenPrewarmSourcesTest {
                 isLast = false,
                 messageIsStreaming = false,
             ),
-            FlatChatItem.AssistantToolUse("m1", runningTool, listOf(runningTool)),
             FlatChatItem.AssistantInfo("m1", AssistantBlock(id = "i1", kind = "info", content = "note")),
             FlatChatItem.AssistantTyping("m1"),
             FlatChatItem.AssistantError("m1", "boom"),

@@ -56,12 +56,6 @@ internal fun buildFlatChatItems(
         return when (item) {
             is FlatChatItem.UserBubble -> FlatChatItem.UserBubble(item.message.copy(id = "${item.message.id}#$n"), item.precededByUser)
             is FlatChatItem.AssistantHeader -> item.copy(messageId = "${item.messageId}#$n")
-            is FlatChatItem.AssistantText -> FlatChatItem.AssistantText(
-                messageId = "${item.messageId}#$n",
-                block = item.block,
-                isStreaming = item.isStreaming,
-                messageMarkdown = item.messageMarkdown,
-            )
             is FlatChatItem.AssistantMarkdownBlock -> FlatChatItem.AssistantMarkdownBlock(
                 messageId = "${item.messageId}#$n",
                 parentBlockId = item.parentBlockId,
@@ -72,7 +66,6 @@ internal fun buildFlatChatItems(
                 messageMarkdown = item.messageMarkdown,
             )
             is FlatChatItem.AssistantThinking -> item.copy(messageId = "${item.messageId}#$n")
-            is FlatChatItem.AssistantToolUse -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantToolRunGroup -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantInfo -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantTyping -> item.copy(messageId = "${item.messageId}#$n")

@@ -3686,7 +3686,6 @@ fun ChatScreen(
                         val tHangDiagLen = remember(item.key) {
                             when (item) {
                                 is FlatChatItem.UserBubble -> item.message.content.length
-                                is FlatChatItem.AssistantText -> item.messageMarkdown.length
                                 else -> 0
                             }
                         }
@@ -3858,32 +3857,6 @@ fun ChatScreen(
                             )
                             } // close UserBubble SideEffect + UserMessageBubble block
                             is FlatChatItem.AssistantHeader -> AssistantHeader()
-                            is FlatChatItem.AssistantText -> BoundsTrackedBlock(
-                                messageId = item.messageId,
-                                slotKey = "text:${item.block.id}",
-                                markdown = item.messageMarkdown,
-                            ) {
-                                // T-android-gc-storm-issue17: collapse oversized frozen
-                                // assistant text before feeding the markdown parser, which
-                                // is the GC-storm hotspot for legacy sessions.
-                                LargeContentGuard(
-                                    content = item.block.content,
-                                    isStreaming = item.isStreaming,
-                                    stableKey = "text:${item.messageId}:${item.block.id}",
-                                ) {
-                                    SideEffect {
-                                        selectionController.rememberMessageMarkdown(item.messageId, item.messageMarkdown)
-                                    }
-                                    StreamingMarkdownText(
-                                        content = item.block.content,
-                                        isStreaming = item.isStreaming,
-                                        shardId = TextShardId(
-                                            messageId = item.messageId,
-                                            shardId = "text:${item.block.id}",
-                                        ),
-                                    )
-                                }
-                            }
                             is FlatChatItem.AssistantMarkdownBlock -> BoundsTrackedBlock(
                                 messageId = item.messageId,
                                 slotKey = "mdblock:${item.parentBlockId}:${item.blockIndex}",
@@ -3964,50 +3937,6 @@ fun ChatScreen(
                                         android.widget.Toast.LENGTH_SHORT,
                                     ).show()
                                 }) else null,
-                            )
-                            is FlatChatItem.AssistantToolUse -> ToolCallPill(
-                                block = item.block,
-                                allToolBlocks = item.allToolBlocks,
-                                onRetry = if (item.isLastCancelled && !isStreaming && !canResume) ({ safeMutate { viewModel.retryLast() } }) else null,
-                                // T14: route per-card stop to the global
-                                // cancelStream(). The button only renders
-                                // when the block is RUNNING/STREAMING — see
-                                // ToolCallPill `isRunning && onStop != null`
-                                // — so passing it unconditionally is safe.
-                                onStop = { viewModel.cancelStream() },
-                                onOpenTerminalWithCommand = onOpenTerminalWithCommand,
-                                // T261: route detail open through ViewModel so
-                                // the sheet is hoisted out of LazyColumn item
-                                // scope (otherwise the sheet snaps shut when
-                                // the pill scrolls off-screen and Compose
-                                // disposes the item).
-                                onOpenDetail = { viewModel.openToolDetail(it) },
-                                // [T-android-rerun-from-tool-block-position]
-                                // Re-run cuts at THIS tool_use block: keep the
-                                // blocks before it in the same turn, drop it +
-                                // everything after, then regenerate. The block
-                                // id (== tool_use id for a tool_use block) is
-                                // the stable anchor. Gated off while streaming
-                                // (mutating an in-flight turn corrupts agent
-                                // state, same rule as Retry on the user bubble).
-                                // safeMutate tears down the selection toolbar
-                                // before the truncation reshuffles the list.
-                                onRerunFromHere = if (!isStreaming) ({
-                                    coroutineScope.launch {
-                                        tracedScrollToItem("RERUN-FROM-TOOL", (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), 0)
-                                    }
-                                    safeMutate { viewModel.rerunFromToolBlock(item.messageId, item.block.id) }
-                                }) else null,
-                                onCopyDetails = {
-                                    val text = formatToolDetailsForClipboard(item.block)
-                                    val cb = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                    cb.setPrimaryClip(android.content.ClipData.newPlainText("tool", text))
-                                    android.widget.Toast.makeText(
-                                        context,
-                                        context.getString(R.string.tool_longpress_copied_toast),
-                                        android.widget.Toast.LENGTH_SHORT,
-                                    ).show()
-                                },
                             )
                             is FlatChatItem.AssistantInfo -> FallbackInfoBlock(
                                 block = item.block,

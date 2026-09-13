@@ -333,8 +333,8 @@ internal fun AssistantHeader() {
  * inner tool_use is drawn as a single [ToolCallPill] (all tools of one turn
  * collapse into ONE LazyColumn row rather than a separate flat item each).
  * The caller supplies per-block actions ─ stop / detail / rerun-from-here /
- * copy / open-terminal ─ mirroring the flat [FlatChatItem.AssistantToolUse]
- * and [FlatChatItem.AssistantToolRunGroup] branches in ChatScreen.kt, but
+ * copy / open-terminal ─ mirroring the flat
+ * [FlatChatItem.AssistantToolRunGroup] branch in ChatScreen.kt, but
  * scoped to the current tool_use block.
  *
  * A `null` return from the provider falls back to the pill's defaults (the

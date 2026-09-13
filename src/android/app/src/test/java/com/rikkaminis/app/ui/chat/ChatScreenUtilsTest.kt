@@ -98,16 +98,6 @@ class ChatScreenUtilsTest {
     }
 
     @Test
-    fun `assistant text grayed when id in map`() {
-        assertTrue(
-            isCompactedItem(
-                FlatChatItem.AssistantText("m_text", block("b1", "text"), isStreaming = false, messageMarkdown = "md"),
-                grayed,
-            ),
-        )
-    }
-
-    @Test
     fun `assistant markdown block grayed when id in map`() {
         assertTrue(
             isCompactedItem(
@@ -130,16 +120,6 @@ class ChatScreenUtilsTest {
         assertTrue(
             isCompactedItem(
                 FlatChatItem.AssistantThinking("m_think", block("b1", "thinking"), isLast = false, messageIsStreaming = false),
-                grayed,
-            ),
-        )
-    }
-
-    @Test
-    fun `assistant tool use grayed when id in map`() {
-        assertTrue(
-            isCompactedItem(
-                FlatChatItem.AssistantToolUse("m_tool", block("b1", "tool_use"), allToolBlocks = emptyList()),
                 grayed,
             ),
         )

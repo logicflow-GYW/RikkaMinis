@@ -27,10 +27,8 @@ internal fun originalMessageId(id: String): String =
 internal fun isCompactedItem(item: FlatChatItem, grayedMap: Map<String, Boolean>): Boolean = when (item) {
     is FlatChatItem.UserBubble -> grayedMap[originalMessageId(item.message.id)] == true
     is FlatChatItem.AssistantHeader -> grayedMap[originalMessageId(item.messageId)] == true
-    is FlatChatItem.AssistantText -> grayedMap[originalMessageId(item.messageId)] == true
     is FlatChatItem.AssistantMarkdownBlock -> grayedMap[originalMessageId(item.messageId)] == true
     is FlatChatItem.AssistantThinking -> grayedMap[originalMessageId(item.messageId)] == true
-    is FlatChatItem.AssistantToolUse -> grayedMap[originalMessageId(item.messageId)] == true
     is FlatChatItem.AssistantToolRunGroup -> grayedMap[originalMessageId(item.messageId)] == true
     is FlatChatItem.AssistantInfo -> false // system rows never grayed
     is FlatChatItem.AssistantTyping -> false

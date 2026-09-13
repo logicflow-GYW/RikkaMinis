@@ -48,8 +48,8 @@ import sys
 # Legacy row classes: no production code path constructs them any more
 # (buildAggregateChatItems emits only UserBubble + AssistantMessageItem).
 LEGACY_ROWS = [
-    "AssistantHeader", "AssistantText", "AssistantMarkdownBlock", "AssistantThinking",
-    "AssistantToolUse", "AssistantToolRunGroup", "AssistantInfo", "AssistantTyping",
+    "AssistantHeader", "AssistantMarkdownBlock", "AssistantThinking",
+    "AssistantToolRunGroup", "AssistantInfo", "AssistantTyping",
     "AssistantError", "AssistantLegacyContent",
 ]
 
