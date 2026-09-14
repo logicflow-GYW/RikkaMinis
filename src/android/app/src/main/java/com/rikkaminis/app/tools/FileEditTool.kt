@@ -1,6 +1,7 @@
 package com.rikkaminis.app.tools
 
 import android.content.Context
+import com.rikkaminis.app.data.OffloadedPayloadGuard
 import com.rikkaminis.app.data.model.AgentToolDefinition
 import com.rikkaminis.app.data.model.AgentToolParam
 import com.rikkaminis.app.sandbox.PRootKernel
@@ -39,6 +40,23 @@ object FileEditTool {
             }
             if (oldString.isEmpty()) {
                 return ToolExecutionResult("Error: 'old_string' is required and cannot be empty", false, toolTitle = toolTitle)
+            }
+
+            // [fix/offload-payload-stub] Belt and braces, same class as the guard
+            // in FileWriteTool. The context-offload arm that used to stub tool
+            // arguments read `input["content"]` — a key file_edit does not have
+            // — so no file_edit payload was ever stubbed in the field (0 of 23
+            // offloaded payloads on 2026-09-14). Checking anyway, because the
+            // damage mode is identical and the arm's key mismatch is exactly the
+            // kind of thing that gets "fixed" later without noticing this.
+            // A fragment has no meaningful recovery path, so a stub is refused.
+            if (OffloadedPayloadGuard.asStub(newString) != null) {
+                return ToolExecutionResult(
+                    "Error: 'new_string' is a [CONTEXT OFFLOADED] stub, not real replacement text. " +
+                        "Refusing to edit $path with a pointer. Re-issue the call with the intended text.",
+                    false,
+                    toolTitle = toolTitle,
+                )
             }
 
             // T219: read-only mount guard — see FileWriteTool for rationale.

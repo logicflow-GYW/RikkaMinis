@@ -1,6 +1,7 @@
 package com.rikkaminis.app.tools
 
 import android.content.Context
+import com.rikkaminis.app.data.OffloadedPayloadGuard
 import com.rikkaminis.app.data.model.AgentToolDefinition
 import com.rikkaminis.app.data.model.AgentToolParam
 import com.rikkaminis.app.sandbox.PRootKernel
@@ -36,6 +37,32 @@ object FileWriteTool {
                 return ToolExecutionResult("Error: 'path' is required", false, toolTitle = toolTitle)
             }
 
+            // [fix/offload-payload-stub] Never write a disk-offload *stub* over
+            // a real file. A stub is a pointer ("…saved to: <path>"), and the
+            // model can end up sending one as `content` after a context offload
+            // replaced its own earlier payload. Observed damage: a 3714-byte
+            // file truncated to the ~150-byte stub while this tool reported
+            // success. Recover the real bytes when the stub still resolves and
+            // the call is an overwrite; otherwise refuse loudly.
+            // See data/OffloadedPayloadGuard.kt and ui/chat.isOffloadEligible.
+            val payload = OffloadedPayloadGuard.decide(content, append) { offloadPath ->
+                runCatching {
+                    PRootKernel.resolveSessionHostPath(sessionId, offloadPath, context)
+                        ?.takeIf { it.isFile }
+                        ?.readText()
+                }.getOrNull()
+            }
+            if (payload is OffloadedPayloadGuard.Action.Refuse) {
+                return ToolExecutionResult(
+                    OffloadedPayloadGuard.refusalMessage(path, payload),
+                    false,
+                    toolTitle = toolTitle,
+                )
+            }
+            val effectiveContent =
+                (payload as? OffloadedPayloadGuard.Action.Heal)?.content ?: content
+            val healedFrom = (payload as? OffloadedPayloadGuard.Action.Heal)?.from
+
             // T219: read-only mount guard. Reject before opening so we don't
             // half-create files inside a Locked external mount and surface a
             // friendly hint pointing the user at Settings. Mirrors iOS
@@ -67,7 +94,7 @@ object FileWriteTool {
                 Charsets.UTF_8.newEncoder()
                     .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
                     .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
-                    .encode(java.nio.CharBuffer.wrap(content))
+                    .encode(java.nio.CharBuffer.wrap(effectiveContent))
             } catch (e: java.nio.charset.CharacterCodingException) {
                 return ToolExecutionResult(
                     "Error: Content contains unpaired surrogates and cannot be encoded as UTF-8",
@@ -88,9 +115,9 @@ object FileWriteTool {
             }
 
             if (append) {
-                file.appendText(content)
+                file.appendText(effectiveContent)
             } else {
-                file.writeText(content)
+                file.writeText(effectiveContent)
             }
 
             val bytes = file.length()
@@ -114,7 +141,21 @@ object FileWriteTool {
                     )
                 }
             }
-            ToolExecutionResult("Wrote to $path ($bytes bytes)", true, toolTitle = toolTitle)
+            val healedNote = healedFrom?.let {
+                // Loud on purpose: the payload we were handed was a stub, and the
+                // bytes actually written came from the offload file. The model
+                // must learn that its own last write payload was not what it
+                // thought it was — silently healing would just move the lie.
+                com.rikkaminis.app.logging.AppLogger.warning(
+                    "FileWrite",
+                    "[fix/offload-payload-stub] 'content' was an offload stub; " +
+                        "recovered ${effectiveContent.length} chars from $it and wrote $path",
+                )
+                " — NOTE: the 'content' argument you sent was a [CONTEXT OFFLOADED] stub, not real " +
+                    "content. The bytes written were recovered from $it. If that is not what you " +
+                    "intended, re-issue the call with the real content."
+            } ?: ""
+            ToolExecutionResult("Wrote to $path ($bytes bytes)$healedNote", true, toolTitle = toolTitle)
         } catch (e: Exception) {
             ToolExecutionResult("Error writing file: ${e.message}", false)
         }
