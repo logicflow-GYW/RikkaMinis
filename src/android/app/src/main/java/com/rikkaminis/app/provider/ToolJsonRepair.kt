@@ -1,6 +1,7 @@
 package com.rikkaminis.app.provider
 
 import com.rikkaminis.app.data.model.AgentToolDefinition
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -59,12 +60,22 @@ object ToolJsonRepair {
             }
         }
 
-        // Strategy 2: type coercion on required fields.
+        // Strategy 2: type coercion on required fields — SCALARS ONLY.
+        //
+        // Number/boolean-for-string is a common, genuinely repairable deviation
+        // (`{"timeout": 30}`). An OBJECT or ARRAY handed to a scalar field is
+        // not: `toString()` turns it into its own JSON text, so
+        // `{"path": {"a": 1}}` becomes the string `{"a": 1}` and travels on as
+        // a path-shaped value that only fails much later, far from the cause.
+        // Leave those untouched so preflight can refuse them outright — see the
+        // structural check in ChatViewModel.preflightValidateToolCallImpl.
+        // [T-preflight-enum-and-type]
         for (field in toolDef.required) {
             if (!args.has(field)) continue
             val raw = args.opt(field) ?: continue
             if (raw is String) continue
             if (raw === JSONObject.NULL) continue
+            if (raw is JSONObject || raw is JSONArray) continue
             val coerced = raw.toString()
             if (coerced.trim().isNotEmpty()) {
                 args.put(field, coerced)

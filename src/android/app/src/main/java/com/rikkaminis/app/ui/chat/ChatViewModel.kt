@@ -97,6 +97,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -127,6 +128,13 @@ class ChatViewModel(
         // when checking for missing required fields. Mirrors iOS
         // AIChatViewModel.preflightNonBlockingFields.
         private val PREFLIGHT_NON_BLOCKING_FIELDS = setOf("tool_title")
+        // [T-preflight-enum-and-type] Types published to the model as JSON
+        // scalars. Every AgentToolParam in the codebase currently declares one of
+        // these (string/integer/boolean). A future container parameter
+        // (array/object) needs the structural check in
+        // preflightValidateToolCallImpl extended — widening this set would let a
+        // container slip through unexamined.
+        private val PREFLIGHT_SCALAR_TYPES = setOf("string", "integer", "number", "boolean")
 
         /**
          * (tool name → field names) where an EMPTY STRING is a semantically
@@ -169,10 +177,13 @@ class ChatViewModel(
          * validator never drifts from the schema published to the model. For
          * string fields we additionally require non-blank content — the model
          * occasionally emits `{"path": ""}` which passes the "key exists" check
-         * but is just as broken as a missing key. We do NOT validate type beyond
-         * string-emptiness here; richer schema checks (enum, regex, integer
-         * range) belong in each tool's own helper because they need tool-specific
-         * context.
+         * but is just as broken as a missing key.
+         *
+         * Also consumes the two schema facts that need no tool-specific context
+         * and were previously published but never read: `enum` membership and
+         * scalar-vs-container shape — see the [T-preflight-enum-and-type] block
+         * below. Constraints that DO need tool context (integer range, regex,
+         * cross-field rules) stay in each tool's own helper, as before.
          *
          * Mirror of iOS preflightValidateToolCall in AIChatViewModel.swift.
          *
@@ -228,6 +239,38 @@ class ChatViewModel(
             }
             if (missing.isNotEmpty()) {
                 return "Tool '$name' is missing required parameter(s): ${missing.joinToString(", ")}."
+            }
+            // [T-preflight-enum-and-type] The schema published to the model has
+            // always carried `type` and `enum` (AgentToolParam.toJson), but this
+            // validator only ever read `required` — so an off-schema payload
+            // reached the tool and was resolved by whatever fallback that tool
+            // happened to have. Two families are worth refusing here:
+            //
+            //  * Enum membership. memory_get's `scope` is the canonical case:
+            //    only `scope == "all"` takes the all-logs branch
+            //    (MemoryRepository), so "ALL" or "al" silently searched dailies
+            //    only while the answer still looked complete.
+            //  * A scalar parameter handed an object/array. ToolJsonRepair used
+            //    to `toString()` those into JSON text; it now leaves them alone
+            //    precisely so this check can refuse them (see Strategy 2 there).
+            //
+            // Deliberately NOT policed: integer/number/boolean spelling. org.json
+            // reports Integer/Long/Double/BigDecimal by parse path, and the
+            // coercion above exists to accept `30` for a string field.
+            for ((field, param) in toolDef.parameters) {
+                if (!args.has(field) || args.isNull(field)) continue
+                val raw = args.opt(field)
+                if (raw is JSONObject || raw is JSONArray) {
+                    if (param.type in PREFLIGHT_SCALAR_TYPES) {
+                        val shape = if (raw is JSONObject) "an object" else "an array"
+                        return "Tool '$name' parameter '$field' expects ${param.type} but received $shape."
+                    }
+                    continue
+                }
+                val allowed = param.enumValues ?: continue
+                if (raw is String && raw !in allowed) {
+                    return "Tool '$name' parameter '$field' must be one of ${allowed.joinToString(", ")} but was '$raw'."
+                }
             }
             return null
         }
