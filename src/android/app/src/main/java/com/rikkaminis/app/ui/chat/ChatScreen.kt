@@ -3205,19 +3205,13 @@ fun ChatScreen(
                                 return@collect
                             }
                             if (flatItems.isEmpty()) {
-                                // [T-android-liveness-census] Was three
-                                // PerfLongCtx breadcrumbs (start/firstBuild/
-                                // highRowCount). This fallback branch has NOT
-                                // been entered since the aggregate pipeline
-                                // landed — 0 hits across the whole 09-13/09-14
-                                // window while its sibling prewarm site in the
-                                // aggregate branch logged 67 times. The census
-                                // records the branch whether or not it stays
-                                // silent, so a dead branch can no longer pass
-                                // for a dead ruler.
-                                com.rikkaminis.app.diagnostics.Liveness.record(
-                                    com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.ROW_COLD_BUILD,
-                                )
+                                // [T-android-liveness-census] This fallback
+                                // branch has NOT been entered since the
+                                // aggregate pipeline landed — 0 hits across
+                                // the whole 09-13/09-14 window while its
+                                // sibling prewarm site in the aggregate branch
+                                // logged 67 times. (Was three PerfLongCtx
+                                // breadcrumbs: start/firstBuild/highRowCount.)
                                 val rows = withContext(Dispatchers.Default) {
                                     // [T-android-flatitems-sublist-cme] Pass a
                                     // SNAPSHOT COPY (msgs.take), not a subList —
@@ -3228,6 +3222,15 @@ fun ChatScreen(
                                     buildFlatChatItems(merged, sessionId)
                                 }
                                 rowLedger.seed(rows, merged.size)
+                                // [T-android-liveness-census] Recorded after
+                                // the build so maxRows carries the real ROW
+                                // count (it replaces the >3000-row alarm, not
+                                // a message count); the census reports this
+                                // branch whether or not it stays silent.
+                                com.rikkaminis.app.diagnostics.Liveness.record(
+                                    com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.ROW_COLD_BUILD,
+                                    rows = rows.size,
+                                )
                                 // [T-android-coldload-offmain-parse] Parallel
                                 // viewport prewarm: block-parse + inline-warm
                                 // the newest (viewport-candidate) markdown
@@ -3285,16 +3288,19 @@ fun ChatScreen(
                                 // from the live-stream tick that precedes it.
                                 if (lightFingerprint(merged) != lastMergedFingerprint) {
                                     if (!rowLedger.isIncrementallyCompatible(merged)) {
-                                        com.rikkaminis.app.diagnostics.Liveness.record(
-                                            com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.ROW_RESEED,
-                                            rows = merged.size,
-                                        )
                                         val tRebuildStart = System.nanoTime()
                                         val rows = withContext(Dispatchers.Default) {
                                             buildFlatChatItems(merged, sessionId)
                                         }
                                         val buildMs = (System.nanoTime() - tRebuildStart) / 1_000_000
                                         rowLedger.seed(rows, merged.size)
+                                        // [T-android-liveness-census] After the
+                                        // rebuild: pass the rebuilt ROW count,
+                                        // not the merged message count.
+                                        com.rikkaminis.app.diagnostics.Liveness.record(
+                                            com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.ROW_RESEED,
+                                            rows = rows.size,
+                                        )
                                         com.rikkaminis.app.diagnostics.PerfLongCtx.step(
                                             sessionId,
                                             "buildFlatChatItems.ledgerReseed",
@@ -3305,7 +3311,18 @@ fun ChatScreen(
                                 }
                                 lastMergedFingerprint = lightFingerprint(merged)
                             }
-                            flatItems = rowLedger.snapshot()
+                            // [T-android-liveness-census] One record per
+                            // legacy tick on the universal publish point — the
+                            // first wiring sat inside the turn-end block, which
+                            // under-counted (one per turn, not per tick) and
+                            // measured the converge path instead of the live
+                            // ledger path this branch is named for.
+                            val publishedRows = rowLedger.snapshot()
+                            com.rikkaminis.app.diagnostics.Liveness.record(
+                                com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.ROW_LEDGER,
+                                rows = publishedRows.size,
+                            )
+                            flatItems = publishedRows
                             // [fix/scroll-follow-simplify] Removed the
                             // prevRowKeys append-only prefix telemetry and the
                             // followReducer(StreamRowsChanged) dispatch. Under
@@ -3359,10 +3376,6 @@ fun ChatScreen(
                                 // not length equality.
                                 rowLedger.reconcile(merged)
                                 rowLedger.reconcileAndVerifyTerminalText(merged)
-                                com.rikkaminis.app.diagnostics.Liveness.record(
-                                    com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.ROW_LEDGER,
-                                    rows = merged.size,
-                                )
                                 flatItems = rowLedger.snapshot()
                             }
                         }
@@ -3540,10 +3553,10 @@ fun ChatScreen(
                 var listRootCoords by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
                 // [Perf][LongCtx] T-android-long-ctx-reentry-perf:
                 // fires once per session when the LazyColumn first reports
-                // a layout. Combined with `buildFlatChatItems.firstBuild`
-                // (above) and `lazyColumn.firstItem.placed` (below) this
-                // tells us whether the bottleneck is row-list build,
-                // initial list measure, or per-row composition.
+                // a layout. Combined with `RenderCensus ROW_COLD_BUILD`
+                // (the row-list build branch) and `lazyColumn.firstItem.placed`
+                // (below) this tells us whether the bottleneck is row-list
+                // build, initial list measure, or per-row composition.
                 val perfFirstLayoutFired = remember(sessionId) { java.util.concurrent.atomic.AtomicBoolean(false) }
                 // [bottom-trigger] Gesture edge-trigger REMOVED — it proved
                 // unreliable on device. Follow is engaged only by explicit

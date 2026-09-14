@@ -21,20 +21,31 @@ internal class RenderPathCensus(
     private val emit: (String) -> Unit,
     private val flushEvery: Int = 50,
 ) {
+    /**
+     * Where each branch is wired TODAY — a branch name must have exactly one
+     * wiring point (the first draft shared names across two renderers, so the
+     * "live" copies sat in code the aggregate pipeline never runs):
+     *  - FROZEN_HIT / FROZEN_MISS / LIVE_PARSE: `StreamingMarkdownTextBody`'s
+     *    LaunchedEffect — the renderer the aggregate pipeline actually runs.
+     *  - LIVE_DEGRADE: `LargeContentGuard`'s streaming over-threshold branch.
+     *  - ROW_*: the legacy row collector; expected to read 0 while
+     *    AGGREGATE_MESSAGE_ITEMS = true — they exist so a quiet zero is
+     *    distinguishable from a dead ruler.
+     */
     enum class Branch {
-        /** Frozen fragment, parse cache HIT — renders synchronously, no parse. */
+        /** Frozen message text, block-cache HIT — seeded synchronously, no parse. */
         FROZEN_HIT,
 
-        /** Frozen fragment, cache MISS — off-main parse (the cold-parse ruler). */
+        /** Frozen message text, cache MISS — one off-main parse on first composition. */
         FROZEN_MISS,
 
-        /** Live streaming tail, off-main parse (the StreamRender ruler). */
+        /** Live streaming text — off-main re-parse on every publish tick. */
         LIVE_PARSE,
 
-        /** Live fragment over the degrade threshold — plain-text tail, no parse. */
+        /** Live text over the degrade threshold — bounded plain-text tail, no parse. */
         LIVE_DEGRADE,
 
-        /** Chat rows: ledger reconcile tick (the live row path). */
+        /** Chat rows: ledger publish tick — recorded on every legacy collector tick. */
         ROW_LEDGER,
 
         /** Chat rows: cold build INSIDE the collector (flatItems was empty). */
@@ -50,6 +61,11 @@ internal class RenderPathCensus(
     private var events = 0
     private var maxRows = 0
 
+    /**
+     * [rows] is the chat-row count this entry produced when known — always a
+     * ROW count (it feeds maxRows, which replaces the >3000-row alarm), never
+     * a message count. Pass the built/published row count, or leave -1.
+     */
     @Synchronized
     fun record(branch: Branch, rows: Int = -1) {
         if (rows > maxRows) maxRows = rows

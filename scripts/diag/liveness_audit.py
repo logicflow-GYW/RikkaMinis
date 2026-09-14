@@ -14,6 +14,8 @@ probes declared in the Kotlin sources.
 
 Reading the output:
   * hit > 0                -> alive.
+  * hit > 0 + PENDING...   -> a pending-install probe just landed in a build:
+                              delete its RARE entry (see below).
   * hit == 0 + "rare/..."  -> declared on a path that needs a scenario which
                               did not occur in this window (see RARE below).
   * hit == 0 otherwise     -> candidate dead ruler: either the branch is
@@ -35,6 +37,12 @@ from collections import Counter
 
 # Declared-but-not-yet-observed probes with a KNOWN reason. Keeping this list
 # here is what stops the next audit from re-litigating them.
+#
+# Entries prefixed "pending-install:" describe probes wired in a build the
+# device has not installed yet. They stay quiet until a hit appears; once one
+# does, the report says to PRUNE the entry — a RARE line that outlives its
+# reason is a dead ruler holding a permission slip, exactly what this audit
+# exists to catch.
 RARE = {
     # (kind, name): reason
     ("step", "loadSession.skipped"): "only fires in crash-loop safe mode",
@@ -44,7 +52,7 @@ RARE = {
     ("cat", "ChatVMRouting"): "load-balance rotation; LB groups disabled",
     ("cat", "StreamRender"): "live-tail parse; covered by RenderCensus",
     ("step", "coldParse.offmain"): "frozen cache miss; covered by RenderCensus",
-    ("step", "reentry.settled"): "added 2026-09-14; not in the installed build yet",
+    ("cat", "RenderCensus"): "pending-install: re-wired to the live renderer (StreamingMarkdownTextBody) in fix/liveness-followups-0914; prune after first hit",
     ("step", "buildFlatChatItems.ledgerReseed"): "needs a non-incrementally-compatible merge",
     ("step", "buildFlatChatItems.progress"): "full rebuild of a 100+ message session",
 }
@@ -121,6 +129,10 @@ def report(kind, decl, obs, dead):
                 else:
                     note = "DEAD? %s" % decl[k][0]
                     dead.append((kind_key(kind), k, decl[k][0]))
+        else:
+            reason = RARE.get((kind_key(kind), k))
+            if reason and reason.startswith("pending-install:"):
+                note = "PENDING-INSTALL probe now alive — prune its RARE entry"
         print("  %-32s hit=%-7d %s" % (k, hit, note))
     print("  declared=%d observed=%d" % (len(decl), sum(1 for k in decl if obs.get(k, 0))))
 

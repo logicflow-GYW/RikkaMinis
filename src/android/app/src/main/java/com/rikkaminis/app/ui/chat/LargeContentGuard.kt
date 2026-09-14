@@ -221,6 +221,13 @@ internal fun LargeContentGuard(
             .renderBreakerActive.collectAsState()
         if (breakerActive || content.length > STREAM_DEGRADE_CHARS) {
             wasDegraded.value = true
+            // [T-android-liveness-census] The live-degrade branch on the path
+            // the aggregate pipeline actually takes — the old wiring sat in
+            // MarkdownBlockBody's legacy per-fragment degrade, which cannot
+            // run while AGGREGATE_MESSAGE_ITEMS is true.
+            com.rikkaminis.app.diagnostics.Liveness.record(
+                com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.LIVE_DEGRADE,
+            )
             // [T-android-content-perf-diag] Log the degrade with a structural
             // fingerprint (once per ~2K growth) so a hang report shows exactly
             // what shape the tail had. Only summarize the tail window we scan.
