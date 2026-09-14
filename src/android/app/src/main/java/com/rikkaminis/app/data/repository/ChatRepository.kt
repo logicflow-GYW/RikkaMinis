@@ -435,28 +435,28 @@ class ChatRepository(
             usageEntryId = usageEntryId,
         )
         val persisted: MessageEntity = try {
-            android.util.Log.i("ChatRepository", "appendMessage: insertMessage enter id=${message.id}")
+            AppLogger.info("ChatRepository", "appendMessage: insertMessage enter id=${message.id}")
             dao.insertMessage(message)
-            android.util.Log.i("ChatRepository", "appendMessage: insertMessage done (${System.currentTimeMillis() - t0}ms)")
+            AppLogger.info("ChatRepository", "appendMessage: insertMessage done (${System.currentTimeMillis() - t0}ms)")
             message
         } catch (e: SQLiteConstraintException) {
             // [RC15] Unique (session_id, sort_order) constraint violated —
             // another concurrent append raced to the same sort_order. Retry
             // with a fresh sort_order from the DB.
             val retrySortOrder = dao.nextSortOrder(sessionId)
-            android.util.Log.i("ChatRepository", "appendMessage: constraint-retry re-order=$retrySortOrder (original=$sortOrder)")
+            AppLogger.info("ChatRepository", "appendMessage: constraint-retry re-order=$retrySortOrder (original=$sortOrder)")
             // NB: keep `.also { }` as this block's last expression — it's the
             // MessageEntity the `persisted` val is initialized from. Logging
-            // AFTER it would make the block's inferred type `Any` (Log.i → Unit).
+            // AFTER it would make the block's inferred type `Any` (AppLogger.info → Unit).
             message.copy(sortOrder = retrySortOrder).also {
                 dao.insertMessage(it)
-                android.util.Log.i("ChatRepository", "appendMessage: insertMessage(retry) done (${System.currentTimeMillis() - t0}ms)")
+                AppLogger.info("ChatRepository", "appendMessage: insertMessage(retry) done (${System.currentTimeMillis() - t0}ms)")
             }
         }
         val preview = extractTextPreview(capped)
-        android.util.Log.i("ChatRepository", "appendMessage: updateLastMessage enter")
+        AppLogger.info("ChatRepository", "appendMessage: updateLastMessage enter")
         dao.updateLastMessage(sessionId, preview, now)
-        android.util.Log.i("ChatRepository", "appendMessage: updateLastMessage done (${System.currentTimeMillis() - t0}ms)")
+        AppLogger.info("ChatRepository", "appendMessage: updateLastMessage done (${System.currentTimeMillis() - t0}ms)")
         return persisted
     }
 
@@ -475,7 +475,7 @@ class ChatRepository(
      * payload yields no preview (avoids overwriting a good preview with null).
      */
     suspend fun updateSessionPreview(sessionId: String, partsJson: String) {
-        android.util.Log.i("ChatRepository", "appendMessage: updateSessionPreview enter session=$sessionId")
+        AppLogger.info("ChatRepository", "updateSessionPreview: enter session=$sessionId")
         val preview = extractTextPreview(partsJson) ?: return
         dao.updateLastMessage(sessionId, preview, System.currentTimeMillis())
     }
