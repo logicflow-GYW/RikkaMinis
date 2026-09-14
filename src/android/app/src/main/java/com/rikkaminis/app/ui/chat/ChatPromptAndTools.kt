@@ -459,7 +459,7 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
  * Tools that are FORBIDDEN for sub-agents never reach this method
  * because [SubagentSkill.buildFilteredTools] excludes them.
  */
-internal fun ChatViewModel.executeSubagentTool(name: String, argsJson: String): ToolExecutionResult = when (name) {
+internal suspend fun ChatViewModel.executeSubagentTool(name: String, argsJson: String): ToolExecutionResult = when (name) {
     FileReadTool.NAME -> FileReadTool.execute(argsJson, activeSessionId, context)
     FileWriteTool.NAME -> FileWriteTool.execute(argsJson, activeSessionId, context).also {
         if (it.success) maybeReloadSkillsForPath(argsJson)
