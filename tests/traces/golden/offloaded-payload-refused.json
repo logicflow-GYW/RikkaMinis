@@ -1,0 +1,11 @@
+{
+  "_comment": "故障 golden：offload 占位符落到写工具载荷位时必须拒绝（静默数据丢失类）。turn 0 模型把上一次调用被 offload 改写成 stub 的 content 原样写回，OffloadedPayloadGuard 拒绝并返回失败结果（这就是修复的证据本身 —— some_tool_failed 断言它），turn 1 用真实内容重发成功。两者合起来：tools 序列两次 + 至少一次失败。回归信号 = 守卫被摘掉后 turn 0 会写成功，some_tool_failed 变红（all_tools_succeed: false 做不到这点：false 是 falsy，断言根本不会跑）。",
+  "trace": "tests/traces/golden/traces/offloaded-payload-refused.jsonl",
+  "expect": {
+    "tools": ["file_write", "file_write"],
+    "terminal_state": "Succeeded",
+    "terminal_reason": "completed_normally",
+    "some_tool_failed": true,
+    "forbidden_tools": ["shell_execute"]
+  }
+}

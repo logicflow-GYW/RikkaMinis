@@ -19,9 +19,14 @@ golden 用例放在 tests/traces/golden/*.json：
       "terminal_state": "Succeeded",             # 可选
       "terminal_reason": "completed_normally",   # 可选
       "all_tools_succeed": true,                 # 可选：所有 tool_result success
+      "some_tool_failed": true,                  # 可选：至少一个 tool_result 失败
       "forbidden_tools": ["browser_use"]         # 可选：不允许出现的 tool
     }
   }
+
+`some_tool_failed` 是故障 golden 的必需断言：守卫/拒绝类修复的证据就是"这次调用失败了"，
+而 `all_tools_succeed: false` 不成立（falsy = 该断言根本没跑），没有它故障类用例只能断言
+工具序列，守卫被摘掉也照样绿。
 
 也支持自包含模式（golden 文件里直接带 "trace_lines" 数组），用于
 门禁自测——CI 无真实设备 trace 时用合成 trace 验证评估器本身。
@@ -112,6 +117,17 @@ def evaluate(events, expect):
                     f"tool {r.get('tool', '?')} (turn {r.get('turn')}) failed: "
                     f"{str(r.get('output', ''))[:120]}"
                 )
+
+    # ── at least one tool failed ──
+    if expect.get("some_tool_failed"):
+        # The failure half of a fault golden. `all_tools_succeed: false` looks
+        # like the natural spelling but silently disables the check (falsy), so
+        # fault cases that need "the guard refused" would assert only the tool
+        # sequence — green even with the guard removed.
+        if not tool_results:
+            failures.append("some_tool_failed: no tool_result events at all")
+        elif all(r.get("success") for r in tool_results):
+            failures.append("some_tool_failed: every tool_result succeeded (a refusal was expected)")
 
     return failures, warnings
 

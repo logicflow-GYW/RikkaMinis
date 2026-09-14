@@ -17,6 +17,7 @@ silent in every future build.
 Usage: python3 scripts/scan/test_scan.py [repo_root]
 Exit:  0 = all scanners pass all cases, 1 = any failure
 """
+import json
 import os
 import shutil
 import subprocess
@@ -409,6 +410,107 @@ def test_legacy():
     shutil.rmtree(root)
 
 
+def test_trace_eval():
+    print("━━━ trace_eval_check ━━━")
+    # The evaluator gates every golden in tests/traces/golden/, including the
+    # fault goldens — a silently broken assertion there would let a removed
+    # guard ship green. Fixtures below are the ground truth for its checks.
+
+    clean_case = {"tools": ["file_write"], "terminal_state": "Succeeded", "all_tools_succeed": True}
+    clean_lines = [
+        {"type": "trace_start"},
+        {"type": "turn_start", "turn": 0},
+        {"type": "tool_call", "turn": 0, "tool": "file_write"},
+        {"type": "tool_result", "turn": 0, "tool": "file_write", "success": True, "output": "ok"},
+        {"type": "trace_end", "terminal_state": "Succeeded", "terminal_reason": "completed_normally"},
+    ]
+    root = make_tree({
+        "tests/traces/golden/case.json": json.dumps({"trace": "tests/traces/golden/traces/t.jsonl", "expect": clean_case}),
+        "tests/traces/golden/traces/t.jsonl": "".join(json.dumps(l) + "\n" for l in clean_lines),
+    })
+    code, out = run_scanner("trace_eval_check.py", root)
+    check("clean golden exits 0", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(root)
+
+    # Dirty A — tool sequence drift (the truncated-call regression shape:
+    # the refused call executed after all, so the sequence grew by one).
+    lines = clean_lines[:2] + [
+        {"type": "tool_call", "turn": 0, "tool": "file_write"},
+        {"type": "tool_result", "turn": 0, "tool": "file_write", "success": False, "output": "invalid JSON"},
+    ] + clean_lines[2:]
+    root = make_tree({
+        "tests/traces/golden/case.json": json.dumps({"trace": "tests/traces/golden/traces/t.jsonl", "expect": clean_case}),
+        "tests/traces/golden/traces/t.jsonl": "".join(json.dumps(l) + "\n" for l in lines),
+    })
+    code, out = run_scanner("trace_eval_check.py", root)
+    check(
+        "tool-sequence drift caught (exit 1)",
+        code == 1 and "tool sequence mismatch" in out,
+        f"exit={code}\n{out}",
+    )
+    shutil.rmtree(root)
+
+    # Dirty B — some_tool_failed not honoured: every result succeeded, i.e. the
+    # offload guard was removed and the stub payload got written.
+    all_ok = clean_lines
+    root = make_tree({
+        "tests/traces/golden/case.json": json.dumps(
+            {"trace": "tests/traces/golden/traces/t.jsonl", "expect": {"some_tool_failed": True}}
+        ),
+        "tests/traces/golden/traces/t.jsonl": "".join(json.dumps(l) + "\n" for l in all_ok),
+    })
+    code, out = run_scanner("trace_eval_check.py", root)
+    check(
+        "some_tool_failed with all-succeeded results caught (exit 1)",
+        code == 1 and "every tool_result succeeded" in out,
+        f"exit={code}\n{out}",
+    )
+    shutil.rmtree(root)
+
+    # ...and the positive direction of the same assertion.
+    with_failure = clean_lines[:-1] + [
+        {"type": "tool_result", "turn": 0, "tool": "file_write", "success": False, "output": "refused"},
+    ] + clean_lines[-1:]
+    root = make_tree({
+        "tests/traces/golden/case.json": json.dumps(
+            {"trace": "tests/traces/golden/traces/t.jsonl", "expect": {"some_tool_failed": True}}
+        ),
+        "tests/traces/golden/traces/t.jsonl": "".join(json.dumps(l) + "\n" for l in with_failure),
+    })
+    code, out = run_scanner("trace_eval_check.py", root)
+    check("some_tool_failed satisfied by a failed result (exit 0)", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(root)
+
+    # Dirty C — run never finalized.
+    no_end = [l for l in clean_lines if l["type"] != "trace_end"]
+    root = make_tree({
+        "tests/traces/golden/case.json": json.dumps({"trace": "tests/traces/golden/traces/t.jsonl", "expect": clean_case}),
+        "tests/traces/golden/traces/t.jsonl": "".join(json.dumps(l) + "\n" for l in no_end),
+    })
+    code, out = run_scanner("trace_eval_check.py", root)
+    check(
+        "missing trace_end caught (exit 1)",
+        code == 1 and "no trace_end event" in out,
+        f"exit={code}\n{out}",
+    )
+    shutil.rmtree(root)
+
+    # Dirty D — golden pointing at a trace that does not exist (a renamed or
+    # never-committed .jsonl must fail loudly, not silently skip).
+    root = make_tree({
+        "tests/traces/golden/case.json": json.dumps(
+            {"trace": "tests/traces/golden/traces/missing.jsonl", "expect": clean_case}
+        )
+    })
+    code, out = run_scanner("trace_eval_check.py", root)
+    check(
+        "missing trace file caught (exit 1)",
+        code == 1 and "trace file missing" in out,
+        f"exit={code}\n{out}",
+    )
+    shutil.rmtree(root)
+
+
 def test_real_repo():
     print("━━━ real repo tree (must be clean) ━━━")
     for script in (
@@ -417,6 +519,7 @@ def test_real_repo():
         "enum_parse_safety_check.py",
         "provider_boundary_guard.py",
         "legacy_pipeline_guard.py",
+        "trace_eval_check.py",
     ):
         code, out = run_scanner(script, REPO_ROOT)
         check(f"{script} on real repo exits 0", code == 0, f"exit={code}\n{out[:2000]}")
@@ -431,6 +534,7 @@ def main():
     test_enum_parse()
     test_boundary()
     test_legacy()
+    test_trace_eval()
     test_real_repo()
     print("")
     print(f"{'❌ FAILURES: ' + str(FAIL) if FAIL else '✅ ALL ' + str(PASS) + ' CASES PASS'}")

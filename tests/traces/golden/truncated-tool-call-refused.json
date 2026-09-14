@@ -1,0 +1,11 @@
+{
+  "_comment": "故障 golden：截断的工具调用必须被拒绝执行。turn 0 的 finish_reason=length 说明模型的 file_write 参数被输出上限切断，TruncatedToolCallPolicy 拒绝它 —— 拒绝发生在 Pass 1 分发循环里，引擎根本到不了 executeToolWithTrace，所以 turn 0 在 trace 里没有任何 tool_call/tool_result 事件，只有 length 收尾。turn 1 模型重新发出完整参数，执行一次后 run 正常结束。回归信号 = tools 序列：守卫被摘掉后那条被截断的调用会真的执行，序列变成 [file_write, file_write]，本用例变红。trace 由生产 AgentTraceRecorder 生成（见 tests/traces/golden/README.md）。",
+  "trace": "tests/traces/golden/traces/truncated-tool-call-refused.jsonl",
+  "expect": {
+    "tools": ["file_write"],
+    "terminal_state": "Succeeded",
+    "terminal_reason": "completed_normally",
+    "all_tools_succeed": true,
+    "forbidden_tools": ["shell_execute", "file_edit"]
+  }
+}
