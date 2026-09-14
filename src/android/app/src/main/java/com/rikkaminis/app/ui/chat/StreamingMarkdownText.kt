@@ -820,6 +820,9 @@ private fun MarkdownBlockBody(
         // many fragments miss at once. Cache HITs (scroll-back, re-entry, prewarmed
         // rows) stay synchronous and flicker-free.
         if (cached != null) {
+            com.rikkaminis.app.diagnostics.Liveness.record(
+                com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.FROZEN_HIT,
+            )
             Column(modifier = modifier) {
                 cached.forEach { RenderBlock(it) }
             }
@@ -828,6 +831,9 @@ private fun MarkdownBlockBody(
         val mdColors = currentMdColors()
         var parsed by remember(rawText) { mutableStateOf<List<MdBlock>?>(null) }
         LaunchedEffect(rawText) {
+            com.rikkaminis.app.diagnostics.Liveness.record(
+                com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.FROZEN_MISS,
+            )
             val tStartNs = System.nanoTime()
             val computed = withContext(Dispatchers.Default) {
                 MarkdownParseCaches.blocks(rawText).also {
@@ -866,6 +872,9 @@ private fun MarkdownBlockBody(
     // the threshold render a bounded plain-text tail instead and do the full
     // parse ONCE when the fragment freezes (isStreaming flips false above).
     if (rawText.length > LIVE_FRAGMENT_DEGRADE_CHARS) {
+        com.rikkaminis.app.diagnostics.Liveness.record(
+            com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.LIVE_DEGRADE,
+        )
         Column(modifier = modifier) {
             Text(
                 text = stringResource(R.string.chat_stream_degraded_notice),
@@ -906,6 +915,9 @@ private fun MarkdownBlockBody(
         // [T-android-stream-render-profile] Time the whole off-main tick
         // (block split + prewarm/incremental inline+math) — this is what the
         // incremental optimization shrinks.
+        com.rikkaminis.app.diagnostics.Liveness.record(
+            com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.LIVE_PARSE,
+        )
         val parseStartNs = System.nanoTime()
         val computed = withContext(Dispatchers.Default) {
             parseMarkdownBlocks(displayContent).also {

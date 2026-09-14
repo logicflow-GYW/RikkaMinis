@@ -3205,11 +3205,18 @@ fun ChatScreen(
                                 return@collect
                             }
                             if (flatItems.isEmpty()) {
-                                val tBuildStart = System.nanoTime()
-                                com.rikkaminis.app.diagnostics.PerfLongCtx.step(
-                                    sessionId,
-                                    "buildFlatChatItems.start",
-                                    "msgCount=${msgs.size}",
+                                // [T-android-liveness-census] Was three
+                                // PerfLongCtx breadcrumbs (start/firstBuild/
+                                // highRowCount). This fallback branch has NOT
+                                // been entered since the aggregate pipeline
+                                // landed — 0 hits across the whole 09-13/09-14
+                                // window while its sibling prewarm site in the
+                                // aggregate branch logged 67 times. The census
+                                // records the branch whether or not it stays
+                                // silent, so a dead branch can no longer pass
+                                // for a dead ruler.
+                                com.rikkaminis.app.diagnostics.Liveness.record(
+                                    com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.ROW_COLD_BUILD,
                                 )
                                 val rows = withContext(Dispatchers.Default) {
                                     // [T-android-flatitems-sublist-cme] Pass a
@@ -3220,7 +3227,6 @@ fun ChatScreen(
                                     // backing list changed mid-build.
                                     buildFlatChatItems(merged, sessionId)
                                 }
-                                val buildMs = (System.nanoTime() - tBuildStart) / 1_000_000
                                 rowLedger.seed(rows, merged.size)
                                 // [T-android-coldload-offmain-parse] Parallel
                                 // viewport prewarm: block-parse + inline-warm
@@ -3256,18 +3262,6 @@ fun ChatScreen(
                                         }
                                     }
                                 }
-                                com.rikkaminis.app.diagnostics.PerfLongCtx.step(
-                                    sessionId,
-                                    "buildFlatChatItems.firstBuild",
-                                    "msgCount=${msgs.size} rowCount=${rows.size} buildMs=$buildMs",
-                                )
-                                if (rows.size > 3000) {
-                                    com.rikkaminis.app.diagnostics.PerfLongCtx.step(
-                                        sessionId,
-                                        "buildFlatChatItems.highRowCount",
-                                        "rowCount=${rows.size} threshold=3000 msgCount=${msgs.size}",
-                                    )
-                                }
                             } else {
                                 // Incremental reconcile, or a full re-seed when
                                 // the message list structure changed.
@@ -3291,6 +3285,10 @@ fun ChatScreen(
                                 // from the live-stream tick that precedes it.
                                 if (lightFingerprint(merged) != lastMergedFingerprint) {
                                     if (!rowLedger.isIncrementallyCompatible(merged)) {
+                                        com.rikkaminis.app.diagnostics.Liveness.record(
+                                            com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.ROW_RESEED,
+                                            rows = merged.size,
+                                        )
                                         val tRebuildStart = System.nanoTime()
                                         val rows = withContext(Dispatchers.Default) {
                                             buildFlatChatItems(merged, sessionId)
@@ -3361,6 +3359,10 @@ fun ChatScreen(
                                 // not length equality.
                                 rowLedger.reconcile(merged)
                                 rowLedger.reconcileAndVerifyTerminalText(merged)
+                                com.rikkaminis.app.diagnostics.Liveness.record(
+                                    com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.ROW_LEDGER,
+                                    rows = merged.size,
+                                )
                                 flatItems = rowLedger.snapshot()
                             }
                         }
