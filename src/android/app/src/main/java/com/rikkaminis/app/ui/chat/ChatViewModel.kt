@@ -1182,8 +1182,10 @@ class ChatViewModel(
             toolBlockMeta: Map<String, AssistantBlock>, modelId: String?, entryId: String?,
         ): String? = this@ChatViewModel.persistAssistantTurn(
             parts, usage, reasoningContent, toolBlockMeta, modelId, entryId)
-        override suspend fun persistToolResultMessage(parts: List<AgentContentPart>): String? =
-            this@ChatViewModel.persistToolResultMessage(parts)
+        override suspend fun persistToolResultMessage(
+            parts: List<AgentContentPart>,
+            transcriptRedactions: Map<String, String>,
+        ): String? = this@ChatViewModel.persistToolResultMessage(parts, transcriptRedactions)
         override suspend fun executeTool(
             name: String, argsJson: String, toolId: String,
             toolBlocks: MutableList<AssistantBlock>, assistantId: String, currentText: String,

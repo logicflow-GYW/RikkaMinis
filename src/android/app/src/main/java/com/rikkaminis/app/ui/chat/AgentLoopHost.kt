@@ -94,7 +94,17 @@ internal interface AgentLoopHost {
         modelId: String? = null,
         entryId: String? = null,
     ): String?
-    suspend fun persistToolResultMessage(parts: List<AgentContentPart>): String?
+    /**
+     * [T-sensitive-transcript] [transcriptRedactions] maps tool-call id to the
+     * text that should REPLACE its result in the persisted conversation. The
+     * caller decides — it is the only place that still has the command line —
+     * and this layer only writes. Empty by default so callers without that
+     * context (the interruption path) keep their previous behaviour.
+     */
+    suspend fun persistToolResultMessage(
+        parts: List<AgentContentPart>,
+        transcriptRedactions: Map<String, String> = emptyMap(),
+    ): String?
 
     // ── tool dispatch ─────────────────────────────────────────────────────
     suspend fun executeTool(

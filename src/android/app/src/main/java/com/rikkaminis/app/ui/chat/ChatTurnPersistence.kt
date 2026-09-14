@@ -77,10 +77,26 @@ internal suspend fun ChatViewModel.persistAssistantTurn(
 
 
 /** Persist tool results as a user-role message (mirrors iOS behavior). */
-internal suspend fun ChatViewModel.persistToolResultMessage(parts: List<AgentContentPart>): String? {
+internal suspend fun ChatViewModel.persistToolResultMessage(
+    parts: List<AgentContentPart>,
+    transcriptRedactions: Map<String, String> = emptyMap(),
+): String? {
     val results = parts.filterIsInstance<AgentContentPart.ToolResult>()
     if (results.isEmpty()) return null
-    val partsJson = buildToolResultPartsJson(results)
+    // [T-sensitive-transcript] Replace the payload of calls whose command line
+    // invoked a redacted helper (android-clipboard / android-speech). Only the
+    // persisted copy changes — [parts] itself, which the running turn keeps
+    // reasoning over, is left alone, so a redaction never costs the model
+    // information it already had. Why the decision cannot be deferred to
+    // backup-export time is documented in [SensitiveCommandPolicy].
+    val persisted = if (transcriptRedactions.isEmpty()) {
+        results
+    } else {
+        results.map { result ->
+            transcriptRedactions[result.id]?.let { result.copy(content = it) } ?: result
+        }
+    }
+    val partsJson = buildToolResultPartsJson(persisted)
     val entity = chatRepository.appendMessage(realSessionId.ifEmpty { sessionId }, "user", partsJson)
     return entity.id
 }

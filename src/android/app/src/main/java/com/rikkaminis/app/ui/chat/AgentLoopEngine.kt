@@ -2080,6 +2080,11 @@ internal class AgentLoopEngine(
 
             // Execute all tool calls
             val resultParts = mutableListOf<AgentContentPart>()
+            // [T-sensitive-transcript] tool-call id -> replacement text for the
+            // PERSISTED copy only. Populated while the call is in flight (the
+            // command line exists nowhere else), consumed by the
+            // persistToolResultMessage call at the end of the turn.
+            val transcriptRedactions = mutableMapOf<String, String>()
 
             // ------------------------------------------------------------------
             // Tool dispatch — split into passes so a batch of read-only tools
@@ -2219,6 +2224,19 @@ internal class AgentLoopEngine(
                         isError = true,
                     ))
                     continue
+                }
+                // [T-sensitive-transcript] Record this call's provenance while
+                // the command line is still in hand — ToolResult carries no
+                // command and the persisted parts JSON never sees one, so
+                // deferring this to backup-export time would leave nothing to
+                // filter on. Placed after the truncation guard on purpose:
+                // a call that will not execute produces an error message, not
+                // a payload worth withholding. See SensitiveCommandPolicy.
+                if (name == "shell_execute") {
+                    val command = if (args.has("command")) args.optString("command") else null
+                    if (SensitiveCommandPolicy.shouldRedactFromTranscript(command)) {
+                        transcriptRedactions[id] = SensitiveCommandPolicy.redactionPlaceholder(command)
+                    }
                 }
                 // [T-android-overlay-tool-title] Pull tool_title uniformly
                 // from args for ALL tools — without this browser_use's
@@ -2564,7 +2582,7 @@ internal class AgentLoopEngine(
 
             // Persist tool results as user-role message (mirrors iOS)
             android.util.Log.i("ChatVMStream", "runAgentLoop turn=$turn persist assistant done (dbId=$assistantDbId), toolResult-begin")
-            val toolResultDbId = host.persistToolResultMessage(resultParts)
+            val toolResultDbId = host.persistToolResultMessage(resultParts, transcriptRedactions)
             android.util.Log.i("ChatVMStream", "runAgentLoop turn=$turn persist-both done (toolDbId=$toolResultDbId)")
 
             // Add tool results to history
