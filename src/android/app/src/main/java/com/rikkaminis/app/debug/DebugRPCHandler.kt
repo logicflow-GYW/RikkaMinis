@@ -787,6 +787,11 @@ class DebugRPCHandler(private val context: Context) {
                 .put("apk_url", r.apkUrl)
                 .put("apk_size", r.apkSizeBytes)
                 .put("changelog", r.changelog)
+                // [fix/update-digest-verify] Echo whatever the publisher
+                // declared so the e2e flow can hand it back to update.download
+                // and so an unverified update is visible as such.
+                .put("publisher_digest", r.publisherDigest?.let { "${it.algorithm}:${it.hex}" } ?: JSONObject.NULL)
+                .put("verified", r.publisherDigestAvailable)
             com.rikkaminis.app.data.UpdateChecker.CheckResult.UpToDate ->
                 JSONObject().put("status", "up_to_date")
             com.rikkaminis.app.data.UpdateChecker.CheckResult.NoReleaseAvailable ->
@@ -806,14 +811,38 @@ class DebugRPCHandler(private val context: Context) {
         val url = params.optString("url").ifEmpty {
             throw RPCException(-32602, "Missing 'url' parameter")
         }
-        return when (val r = com.rikkaminis.app.data.UpdateChecker.download(context, url)) {
+        // [fix/update-digest-verify] Both are optional: a caller that only has
+        // a URL still works, it just lands on the size-only path. Accepts the
+        // raw GitHub shape ("sha256:<hex>") so the value from update.check can
+        // be passed straight through.
+        val expectedSize = params.optLong("size", 0L)
+        val rawDigest = params.optString("digest").ifEmpty { null }
+        val expectedDigest = com.rikkaminis.app.data.parsePublisherDigest(rawDigest)
+        if (rawDigest != null && expectedDigest == null) {
+            throw RPCException(-32602, "Unparseable 'digest' parameter: $rawDigest")
+        }
+        val result = com.rikkaminis.app.data.UpdateChecker.download(
+            context = context,
+            url = url,
+            expectedSize = expectedSize,
+            expectedDigest = expectedDigest,
+        )
+        return when (result) {
             is com.rikkaminis.app.data.UpdateChecker.DownloadResult.Success -> JSONObject()
                 .put("status", "ok")
-                .put("path", r.file.absolutePath)
-                .put("size", r.file.length())
+                .put("path", result.file.absolutePath)
+                .put("size", result.file.length())
+                .put("integrity", result.integrity.name)
+                .put("verified", result.integrity.isVerified)
+            is com.rikkaminis.app.data.UpdateChecker.DownloadResult.IntegrityFailure -> JSONObject()
+                .put("status", "integrity_failed")
+                .put("verdict", result.verdict.name)
+                .put("expected", result.expected ?: JSONObject.NULL)
+                .put("actual", result.actual ?: JSONObject.NULL)
+                .put("message", result.reason)
             is com.rikkaminis.app.data.UpdateChecker.DownloadResult.Error -> JSONObject()
                 .put("status", "error")
-                .put("message", r.message)
+                .put("message", result.message)
         }
     }
 

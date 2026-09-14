@@ -60,7 +60,18 @@ object UpdateChecker {
             val changelog: String,
             val apkUrl: String,
             val apkSizeBytes: Long,
-        ) : CheckResult()
+            /**
+             * Digest the release publisher declared for this asset, or null
+             * when the release carries none (older releases). Callers must
+             * pass it to [download] so the bytes are checked end-to-end, and
+             * surface [publisherDigestAvailable] so an unverified update is
+             * never presented as a verified one.
+             */
+            val publisherDigest: PublisherDigest? = null,
+        ) : CheckResult() {
+            /** False = the update can only be size-checked; say so in the UI. */
+            val publisherDigestAvailable: Boolean get() = publisherDigest != null
+        }
         data object UpToDate : CheckResult()
         // The repo has zero non-draft releases (or 404'd entirely).
         data object NoReleaseAvailable : CheckResult()
@@ -78,8 +89,29 @@ object UpdateChecker {
     }
 
     sealed class DownloadResult {
-        data class Success(val file: File) : DownloadResult()
+        /**
+         * @param integrity how much of the download was actually verified —
+         *   see [DownloadIntegrity]; only [DownloadIntegrity.isVerified] means
+         *   the publisher's declared hash vouched for the bytes.
+         */
+        data class Success(
+            val file: File,
+            val integrity: DownloadIntegrity = DownloadIntegrity.SIZE_ONLY,
+        ) : DownloadResult()
         data class Error(val message: String) : DownloadResult()
+        /**
+         * The bytes did not match what the release declared. The file has
+         * already been deleted and any pending record cleared; the caller
+         * shows [reason] verbatim. Kept separate from [Error] so a corrupt
+         * download is never mistaken for a transient network failure (the
+         * user must not be told to "retry" a file we refused to install).
+         */
+        data class IntegrityFailure(
+            val verdict: DownloadIntegrity,
+            val expected: String?,
+            val actual: String?,
+            val reason: String,
+        ) : DownloadResult()
     }
 
     private val client = OkHttpClient.Builder()
@@ -145,6 +177,7 @@ object UpdateChecker {
                     val isPrerelease: Boolean,
                     val apkUrl: String?,
                     val apkSize: Long,
+                    val apkDigest: PublisherDigest?,
                 )
 
                 val candidates = mutableListOf<ReleaseInfo>()
@@ -167,15 +200,16 @@ object UpdateChecker {
                         AppLogger.info(TAG, "skipping non-version tag=$tag parsed=$parsedVersion")
                         continue
                     }
-                    val (apkUrl, apkSize) = findApkAsset(r.optJSONArray("assets"))
+                    val apkAsset = findApkAsset(r.optJSONArray("assets"))
                     candidates += ReleaseInfo(
                         tagName = tag,
                         versionName = parsedVersion,
                         releaseName = r.optString("name").ifEmpty { tag },
                         changelog = r.optString("body", ""),
                         isPrerelease = r.optBoolean("prerelease", false),
-                        apkUrl = apkUrl,
-                        apkSize = apkSize,
+                        apkUrl = apkAsset?.url,
+                        apkSize = apkAsset?.size ?: 0L,
+                        apkDigest = apkAsset?.digest,
                     )
                 }
                 AppLogger.info(
@@ -223,7 +257,7 @@ object UpdateChecker {
                 if (upgradeCandidate != null) {
                     AppLogger.info(
                         TAG,
-                        "Update available: $localVer → ${upgradeCandidate.versionName} (${upgradeCandidate.tagName})",
+                        "Update available: $localVer → ${upgradeCandidate.versionName} (${upgradeCandidate.tagName}) digest=${upgradeCandidate.apkDigest?.algorithm ?: "none"}",
                     )
                     return@withContext CheckResult.UpdateAvailable(
                         tagName = upgradeCandidate.tagName,
@@ -232,6 +266,7 @@ object UpdateChecker {
                         changelog = upgradeCandidate.changelog,
                         apkUrl = upgradeCandidate.apkUrl!!,
                         apkSizeBytes = upgradeCandidate.apkSize,
+                        publisherDigest = upgradeCandidate.apkDigest,
                     )
                 }
 
@@ -278,19 +313,41 @@ object UpdateChecker {
     /** Public so UI can deep-link users to manual download when GitHub is blocked. */
     const val RELEASES_URL: String = "https://github.com/logicflow-GYW/RikkaMinis/releases"
 
-    /** Returns (downloadUrl, sizeBytes) for the first .apk asset, or (null, 0). */
-    private fun findApkAsset(assets: JSONArray?): Pair<String?, Long> {
-        if (assets == null) return null to 0L
+    /** Returns the first .apk asset's download entry point, or null. */
+    private fun findApkAsset(assets: JSONArray?): ApkAsset? {
+        if (assets == null) return null
         for (i in 0 until assets.length()) {
             val a = assets.optJSONObject(i) ?: continue
             val name = a.optString("name").lowercase()
             if (name.endsWith(".apk")) {
-                val u = a.optString("browser_download_url").ifEmpty { null }
-                if (u != null) return u to a.optLong("size", 0)
+                val u = a.optString("browser_download_url").ifEmpty { null } ?: continue
+                // `digest` was added to the release-assets API in 2025 and is
+                // absent on older releases — parsePublisherDigest returns null
+                // for both "missing" and "malformed", which [download] treats as
+                // "no digest to check" (size-only), never as a failure.
+                val rawDigest = a.optString("digest").ifEmpty { null }
+                val parsed = parsePublisherDigest(rawDigest)
+                if (rawDigest != null && parsed == null) {
+                    AppLogger.warning(TAG, "asset digest unparseable, ignoring: $rawDigest")
+                }
+                if (parsed != null && !parsed.isSupported) {
+                    AppLogger.warning(
+                        TAG,
+                        "asset digest uses unsupported algorithm=${parsed.algorithm}; size-only",
+                    )
+                }
+                return ApkAsset(u, a.optLong("size", 0), parsed)
             }
         }
-        return null to 0L
+        return null
     }
+
+    /** One release asset's download coordinates: url + declared size + declared digest. */
+    private data class ApkAsset(
+        val url: String,
+        val size: Long,
+        val digest: PublisherDigest?,
+    )
 
     // [fix/updatechecker-semver-prerelease] normalizeTag and compareVersions
     // moved to data/VersionCompare.kt (same package, so the call sites in this
@@ -309,6 +366,8 @@ object UpdateChecker {
         context: Context,
         url: String,
         versionName: String? = null,
+        expectedSize: Long = 0L,
+        expectedDigest: PublisherDigest? = null,
         onProgress: (Float) -> Unit = {},
     ): DownloadResult = withContext(Dispatchers.IO) {
         try {
@@ -357,30 +416,92 @@ object UpdateChecker {
                 }
             }
             AppLogger.info(TAG, "Downloaded ${outFile.length()} bytes to ${outFile.absolutePath}")
+            // [fix/update-digest-verify] End-to-end check against what the
+            // release declared. Until this landed the only hash comparison in
+            // the whole flow was the local one [PendingUpdateStore.verify]
+            // re-does at resume time — i.e. it proved the file had not changed
+            // since we wrote it, never that it was the file the publisher
+            // shipped. Failure here deletes the bytes and drops any pending
+            // record (an older record could otherwise point at this path).
+            val actualSize = outFile.length()
+            val sha = runCatching { PendingUpdateStore.sha256(outFile) }
+                .onFailure { AppLogger.warning(TAG, "sha256 compute failed: ${it.message}") }
+                .getOrNull()
+            val integrity = judgeDownloadIntegrity(
+                declared = expectedDigest,
+                expectedSize = expectedSize,
+                actualSize = actualSize,
+                actualSha256 = sha,
+            )
+            if (integrity.isFailure) {
+                val expected = when (integrity) {
+                    DownloadIntegrity.SIZE_MISMATCH -> "$expectedSize bytes"
+                    else -> expectedDigest?.hex ?: "(none)"
+                }
+                val actual = when (integrity) {
+                    DownloadIntegrity.SIZE_MISMATCH -> "$actualSize bytes"
+                    DownloadIntegrity.HASH_FAILED -> "(hash unavailable)"
+                    else -> sha ?: "(none)"
+                }
+                AppLogger.error(
+                    TAG,
+                    "download integrity FAILED verdict=$integrity expected=$expected actual=$actual file=${outFile.name}",
+                )
+                runCatching { outFile.delete() }
+                    .onFailure { AppLogger.warning(TAG, "failed to delete rejected file: ${it.message}") }
+                PendingUpdateStore.clearPending(context)
+                return@withContext DownloadResult.IntegrityFailure(
+                    verdict = integrity,
+                    expected = expected,
+                    actual = actual,
+                    reason = integrityMessage(integrity),
+                )
+            }
+            if (!integrity.isVerified) {
+                // Not silent: an unverified-but-installable download says why.
+                AppLogger.warning(
+                    TAG,
+                    "download accepted UNVERIFIED verdict=$integrity size=$actualSize digestDeclared=${expectedDigest != null}",
+                )
+            }
             // Persist so a subsequent Activity recreate (e.g. after the user
             // returns from "install unknown apps" settings) can resume the
             // install without re-downloading. sha256 computed best-effort;
             // verify() falls back to size-only when null.
-            val sha = runCatching { PendingUpdateStore.sha256(outFile) }
-                .onFailure { AppLogger.warning(TAG, "sha256 compute failed: ${it.message}") }
-                .getOrNull()
             if (versionName != null) {
                 PendingUpdateStore.setPending(
                     context,
                     PendingUpdateStore.PendingUpdate(
                         targetVersionName = versionName,
                         apkPath = outFile.absolutePath,
-                        apkSize = outFile.length(),
+                        apkSize = actualSize,
                         sha256 = sha,
                         downloadedAtMs = System.currentTimeMillis(),
+                        // Carried so a cross-session file swap must match the
+                        // publisher's hash too, not just our own re-hash.
+                        publisherDigest = expectedDigest?.takeIf { it.isSupported }?.hex,
                     ),
                 )
             }
-            DownloadResult.Success(outFile)
+            DownloadResult.Success(outFile, integrity)
         } catch (e: Exception) {
             AppLogger.error(TAG, "download failed: ${e.javaClass.simpleName}: ${e.message}")
             DownloadResult.Error(e.message ?: e.javaClass.simpleName)
         }
+    }
+
+    /** User-facing sentence for a refused download. Kept out of the enum so it stays data. */
+    private fun integrityMessage(verdict: DownloadIntegrity): String = when (verdict) {
+        DownloadIntegrity.DIGEST_MISMATCH ->
+            "Downloaded file does not match the publisher's SHA-256 digest — discarded."
+        DownloadIntegrity.SIZE_MISMATCH ->
+            "Downloaded file size does not match the release asset — discarded."
+        DownloadIntegrity.HASH_FAILED ->
+            "Could not hash the downloaded file to verify it — discarded."
+        DownloadIntegrity.VERIFIED -> "Verified against the publisher's SHA-256 digest."
+        DownloadIntegrity.SIZE_ONLY -> "Checked by size only (release declares no digest)."
+        DownloadIntegrity.UNSUPPORTED_ALGORITHM ->
+            "Checked by size only (release digest uses an unsupported algorithm)."
     }
 
     /**
