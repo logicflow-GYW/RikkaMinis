@@ -61,6 +61,36 @@ class SessionIdAliasesTest {
     }
 
     @Test
+    fun `releasing a session also drops its one-shot report bit`() {
+        // [audit-0914] `reported` used to be append-only: every draft id that
+        // resolved once stayed in memory for the process lifetime (~100 B each).
+        // Tying it to the alias table keeps the set bounded by live sessions.
+        SessionIdAliases.register("__new__abc", "uuid-1")
+        SessionIdAliases.resolve("__new__abc")
+        assertEquals(1, SessionIdAliases.reportedCountForTest())
+
+        SessionIdAliases.unregisterByCanonical("uuid-1")
+        assertEquals(0, SessionIdAliases.reportedCountForTest())
+
+        // Re-registering later reports once more — that is what "one-shot"
+        // means here.
+        SessionIdAliases.register("__new__abc", "uuid-1")
+        assertEquals("uuid-1", SessionIdAliases.resolve("__new__abc"))
+        assertEquals(2, lines.size)
+    }
+
+    @Test
+    fun `report set stays bounded when sessions are never released`() {
+        // Backstop for a caller that registers aliases without a matching
+        // unregister: the set must not grow without bound.
+        repeat(600) { i ->
+            SessionIdAliases.register("__new__d$i", "uuid-$i")
+            SessionIdAliases.resolve("__new__d$i")
+        }
+        assertTrue(SessionIdAliases.reportedCountForTest() <= 512)
+    }
+
+    @Test
     fun `re-register updates the target`() {
         SessionIdAliases.register("__new__abc", "uuid-1")
         SessionIdAliases.register("__new__abc", "uuid-2")

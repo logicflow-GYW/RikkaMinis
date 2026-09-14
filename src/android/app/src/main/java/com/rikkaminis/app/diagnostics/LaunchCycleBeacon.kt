@@ -108,7 +108,7 @@ object LaunchCycleBeacon {
         // crash artefacts (i.e. consecutive bad cycles) — a climbing count is
         // the signature of "recovery keeps re-crashing on the same session".
         if (previousVerdict.startsWith("crash_or_stall")) {
-            val restartCount = countRecentCrashLaunches(previousTail, context)
+            val restartCount = countRecentCrashLaunches(previousTail)
             // [T-android-larky-longsession-followup] Snapshot the count so
             // shouldForceHomeOnLaunch() can gate on it without re-reading
             // the beacon. Cleared by the path above whenever the previous
@@ -132,7 +132,11 @@ object LaunchCycleBeacon {
             lastRestartCount = 0
         }
 
-        appendLine(file, "[$nowIso] launch pid=${android.os.Process.myPid()}")
+        appendLine(
+            file,
+            "[$nowIso] launch pid=${android.os.Process.myPid()} " +
+                "verdict=${previousVerdict.substringBefore(' ')}",
+        )
     }
 
     /**
@@ -142,12 +146,43 @@ object LaunchCycleBeacon {
      * followed by a `clean_exit`. Not exact, but a rising value across
      * launches is what flags a recovery loop.
      */
-    private fun countRecentCrashLaunches(tail: String, context: Context): Int {
+    private fun countRecentCrashLaunches(tail: String): Int {
         val lines = tail.split('\n').filter { it.isNotBlank() }
-        val launches = lines.count { it.contains(" launch ") }
-        val cleanExits = lines.count { it.contains(" clean_exit ") }
-        return (launches - cleanExits).coerceAtLeast(0)
+        // +1 for the cycle being recorded right now: the caller only reaches
+        // this path when the previous verdict was crash_or_stall.
+        return consecutiveCrashLaunches(lines) + 1
     }
+
+    /**
+     * [audit-0914] Length of the consecutive run of crash cycles at the END of
+     * [lines], NOT counting the launch being recorded right now.
+     *
+     * The previous gauge was `launches − clean_exit` over the 16 KB tail. On a
+     * production device that degenerates to "how many times this app has been
+     * started at all", because `clean_exit` is only written from
+     * `Application.onTerminate()` — which Android documents as unreliable and
+     * skips for most processes. Measured on 2026-09-14: 9 `launch` lines, 0
+     * `clean_exit` lines, and the logged restartCount tracked cold starts
+     * exactly (2 → 7), so a single already-recovered 3 s stall in the window
+     * was enough to trip the Safe Start gate on the next launch.
+     *
+     * Each launch line now carries `verdict=<previous cycle's verdict>`, and a
+     * line ends the run when its verdict is anything else — or when it has no
+     * `verdict=` field at all (legacy line ⇒ unknown ⇒ assume recovered, so
+     * upgrading never inherits a phantom crash loop).
+     */
+    internal fun consecutiveCrashLaunches(lines: List<String>): Int {
+        var count = 0
+        for (line in lines.asReversed()) {
+            if (!line.contains(" launch ")) continue
+            val verdict = VERDICT_IN_LINE.find(line)?.groupValues?.get(1) ?: return count
+            if (!verdict.startsWith("crash_or_stall")) return count
+            count++
+        }
+        return count
+    }
+
+    private val VERDICT_IN_LINE = Regex("verdict=(\\S+)")
 
     /**
      * [T-android-perf-logging] Best-effort last-opened session id, read from

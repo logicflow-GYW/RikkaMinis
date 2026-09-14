@@ -27,6 +27,8 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object SessionIdAliases {
     private const val TAG = "ChatVMStore"
+    /** Upper bound for the one-shot report set — see [unregisterByCanonical]. */
+    private const val MAX_REPORTED = 512
 
     private val aliases = ConcurrentHashMap<String, String>()
     private val reported = ConcurrentHashMap.newKeySet<String>()
@@ -40,20 +42,40 @@ object SessionIdAliases {
     }
 
     fun unregisterByCanonical(toId: String) {
+        // [audit-0914] Drop the one-shot report bits along with the alias rows.
+        // `reported` used to be append-only: every draft id that resolved once
+        // stayed in the set for the whole process lifetime, even after its
+        // session was released (~100 B per session ⇒ ~2 MB/year of ordinary
+        // use). `aliases` was already lifecycle-scoped; this brings the dedupe
+        // set in line with it.
+        val dropped = aliases.entries.filter { it.value == toId }.map { it.key }
         aliases.entries.removeAll { it.value == toId }
+        dropped.forEach { reported.remove(it) }
     }
 
     /** Follows at most one hop (draft → canonical); unknown ids pass through. */
     fun resolve(sessionId: String): String {
         val mapped = aliases[sessionId] ?: return sessionId
         val canonical = aliases[mapped] ?: mapped
-        if (canonical != sessionId && reported.add(sessionId)) {
-            val message = "alias resolved $sessionId -> $canonical (diag first-use)"
-            val sink = sinkForTest
-            if (sink != null) sink(TAG, message) else AppLogger.info(TAG, message)
+        if (canonical != sessionId) {
+            val firstUse = reported.add(sessionId)
+            // [audit-0914] Backstop against a caller that registers aliases
+            // without a matching unregister (a store outliving the screen):
+            // one-shot bits that never get cleaned up would still grow without
+            // bound. Clearing costs at most one extra "alias resolved" line per
+            // still-live id.
+            if (reported.size > MAX_REPORTED) reported.clear()
+            if (firstUse) {
+                val message = "alias resolved $sessionId -> $canonical (diag first-use)"
+                val sink = sinkForTest
+                if (sink != null) sink(TAG, message) else AppLogger.info(TAG, message)
+            }
         }
         return canonical
     }
+
+    /** Test seam: size of the one-shot report set. */
+    internal fun reportedCountForTest(): Int = reported.size
 
     internal fun clearForTest() {
         aliases.clear()
