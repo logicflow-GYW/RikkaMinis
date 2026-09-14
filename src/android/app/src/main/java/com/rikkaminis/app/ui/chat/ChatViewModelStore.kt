@@ -3,6 +3,7 @@ package com.rikkaminis.app.ui.chat
 import android.util.Log
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
+import com.rikkaminis.app.logging.AppLogger
 
 /**
  * Process-level cache of ChatViewModels keyed by sessionId. Mirrors iOS
@@ -40,7 +41,7 @@ object ChatViewModelStore {
     fun ownerFor(sessionId: String): ViewModelStoreOwner {
         val key = resolveKey(sessionId)
         val store = stores.getOrPut(key) {
-            Log.d(TAG, "allocate store for $key (total=${stores.size + 1})")
+            AppLogger.info(TAG, "allocate store for $key (total=${stores.size + 1})")
             ViewModelStore()
         }
         return object : ViewModelStoreOwner {
@@ -59,7 +60,7 @@ object ChatViewModelStore {
         aliases.entries.removeAll { it.value == key }
         stores.remove(key)?.let {
             it.clear()
-            Log.d(TAG, "release store for $key (remaining=${stores.size})")
+            AppLogger.info(TAG, "release store for $key (remaining=${stores.size})")
         }
     }
 
@@ -127,7 +128,7 @@ object ChatViewModelStore {
             stores[toSessionId] = store
         }
         aliases[fromSessionId] = toSessionId
-        Log.d(TAG, "rename store $fromSessionId -> $toSessionId (alias kept)")
+        AppLogger.info(TAG, "rename store $fromSessionId -> $toSessionId (alias kept)")
     }
 
     /**

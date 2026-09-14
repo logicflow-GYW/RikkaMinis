@@ -3,6 +3,7 @@ package com.rikkaminis.app.data.repository
 import android.database.sqlite.SQLiteBlobTooBigException
 import android.database.sqlite.SQLiteConstraintException
 import com.rikkaminis.app.diagnostics.MemorySpikeRecorder
+import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.data.db.ChatDao
 import com.rikkaminis.app.data.db.ChatSessionEntity
 import com.rikkaminis.app.data.db.MessageEntity
@@ -401,13 +402,14 @@ class ChatRepository(
     ): MessageEntity {
         // [Diag-appendMessage] Step markers so a hang between tool-END and the
         // next LLM round can be pinned to the exact DAO call that never returns
-        // (nextSortOrder / insertMessage / updateLastMessage). android.util.Log
-        // (TAG=ChatRepository) survives across log buffers; you can also grep
-        // `appendMessage` in -b main to see the progression.
+        // (nextSortOrder / insertMessage / updateLastMessage). [log-observability
+        // 2026-09-14] Promoted to AppLogger so the markers land in the structured
+        // direct channel ([ChatRepository] rows in files/logs/*.log) for on-device
+        // reconstruction; logcat still shows them under `Minis.ChatRepository`.
         val t0 = System.currentTimeMillis()
-        android.util.Log.i("ChatRepository", "appendMessage: enter session=$sessionId role=$role partsLen=${partsJson.length}")
+        AppLogger.info("ChatRepository", "appendMessage: enter session=$sessionId role=$role partsLen=${partsJson.length}")
         val sortOrder = dao.nextSortOrder(sessionId)
-        android.util.Log.i("ChatRepository", "appendMessage: nextSortOrder done sortOrder=$sortOrder (${System.currentTimeMillis() - t0}ms)")
+        AppLogger.info("ChatRepository", "appendMessage: nextSortOrder done sortOrder=$sortOrder (${System.currentTimeMillis() - t0}ms)")
         val now = System.currentTimeMillis()
         // Cap the body so a runaway tool_result (e.g. a 13 MB browser_use
         // dump — Issue #17) cannot land an oversize blob into a Room row

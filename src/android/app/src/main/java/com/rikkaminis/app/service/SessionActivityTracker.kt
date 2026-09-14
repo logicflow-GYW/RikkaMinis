@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.rikkaminis.app.logging.AppLogger
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -334,7 +335,7 @@ object SessionActivityTracker {
         _lastToolName.value = null
         _lastToolTitle.value = null
         _lastToolStatus.value = null
-        Log.d(TAG, "Session activated: $sessionId (total: ${_activeSessions.value.size})")
+        AppLogger.info(TAG, "Session activated: $sessionId (total: ${_activeSessions.value.size})")
 
         if (wasIdle) {
             startServiceIfNeeded()
@@ -353,7 +354,7 @@ object SessionActivityTracker {
         _activeSessions.value = _activeSessions.value - sessionId
         synchronized(streamCancellers) { streamCancellers.remove(sessionId) }
         val wasError = synchronized(pendingErrorFlag) { pendingErrorFlag.remove(sessionId) }
-        Log.d(TAG, "Session deactivated: $sessionId (total: ${_activeSessions.value.size})")
+        AppLogger.info(TAG, "Session deactivated: $sessionId (total: ${_activeSessions.value.size})")
 
         if (_activeSessions.value.isEmpty()) {
             _currentToolStatus.value = "Idle"

@@ -12,6 +12,7 @@ import com.rikkaminis.app.agent.runtime.RetryPolicy
 import com.rikkaminis.app.agent.runtime.RetrySafety
 import com.rikkaminis.app.data.repository.EnvVarRepository
 import com.rikkaminis.app.diagnostics.MemorySpikeRecorder
+import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.sandbox.offload.ChatStreamOffloadHandler
 import com.rikkaminis.app.sandbox.offload.ModelExecutionMailbox
 import com.rikkaminis.app.service.MemoryPressureGate
@@ -633,7 +634,7 @@ object ExecutionCoordinator {
             val shell = PersistentShell(appContext, sessionId, bindMounts)
             shells[sessionId] = shell
             shell.ensureStarted()
-            Log.i(TAG, "[$sessionId] Shell created with ${bindMounts.size} bind mounts")
+            AppLogger.info(TAG, "[$sessionId] Shell created with ${bindMounts.size} bind mounts")
             shell
         }
     }
