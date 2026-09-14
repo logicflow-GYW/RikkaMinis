@@ -359,8 +359,14 @@ internal suspend fun runSubagentLoop(
 /**
  * Mirror of iOS AIChatViewModel post-tool hook: when the agent writes or
  * edits a SKILL.md inside a `/skills/` directory we ask SkillRepository to
- * re-scan disk so the new skill is visible immediately, without waiting
- * for app restart.
+ * re-scan disk so the new skill lands in the repository immediately, without
+ * waiting for app restart.
+ *
+ * NOTE (comment corrected 2026-09-14): the re-scan does NOT make the skill
+ * visible to the running model on the next turn. The system prompt is frozen
+ * per session by `systemPromptForSession()` (see the T-skillscan note in
+ * ChatPromptAndTools.kt), so a skill installed mid-session only reaches the
+ * prompt when the next session starts.
  */
 internal fun maybeReloadSkillsForPath(
     argsJson: String,

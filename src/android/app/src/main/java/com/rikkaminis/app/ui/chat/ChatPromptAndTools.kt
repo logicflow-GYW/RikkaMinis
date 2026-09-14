@@ -1178,9 +1178,17 @@ Environment variables:
     // appended only when non-null; absent fragments leave no separator.
     // T-skillscan: rescan disk before reading the fragment so a skill
     // that an earlier turn dropped via shell `git clone` (which bypasses
-    // the file_write hook below) becomes visible on the very next user
-    // turn instead of "after kill app". Cheap: loadAll is a SQLite
-    // SELECT + listFiles, no network.
+    // the file_write hook below) is picked up by the repository right away —
+    // no "kill app" needed. Cheap: loadAll is a SQLite SELECT + listFiles,
+    // no network.
+    //
+    // Careful: this re-scan does NOT put the new skill in front of the model
+    // on the next turn. The prompt assembled here is frozen per session
+    // (systemPromptForSession; see the Hermes prefix-cache invariant), so a
+    // mid-session install becomes visible only when the next session starts.
+    // Comment corrected 2026-09-14 — it previously claimed "visible on the
+    // very next user turn", which the session-level freeze had already
+    // invalidated.
     skillRepository?.reloadFromDisk()
     val skillFragment = skillRepository?.skillPromptFragment(activeSessionId)
     // [T-mcp-integration-android] Re-read servers.json (the CLI / file
