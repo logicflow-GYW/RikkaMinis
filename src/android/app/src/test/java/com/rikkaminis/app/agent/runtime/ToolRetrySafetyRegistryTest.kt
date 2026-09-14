@@ -25,6 +25,14 @@ class ToolRetrySafetyRegistryTest {
     }
 
     @Test
+    fun `conversation_history defaults to READ_ONLY`() {
+        // [U10] Reads persisted rows, writes nothing: a retry after a transport
+        // failure must be allowed, because refusing it would silently cost the
+        // model the very history the tool was asked for.
+        assertEquals(RetrySafety.READ_ONLY, ToolRetrySafetyRegistry.defaultSafetyFor("conversation_history"))
+    }
+
+    @Test
     fun `file_write file_edit and memory_write default to NON_IDEMPOTENT_WRITE`() {
         assertEquals(RetrySafety.NON_IDEMPOTENT_WRITE, ToolRetrySafetyRegistry.defaultSafetyFor("file_write"))
         assertEquals(RetrySafety.NON_IDEMPOTENT_WRITE, ToolRetrySafetyRegistry.defaultSafetyFor("file_edit"))

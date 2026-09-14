@@ -42,6 +42,11 @@ object AgentTools {
             add(ReadImageTool.definition())
         }
         add(browserUseDefinition())
+        // [U10] conversation_history: read back turns that compaction dropped.
+        // Deliberately NOT gated on memoryEnabled — it reads the live
+        // conversation, not memory files, and the need shows up precisely when
+        // context pressure (compaction) has already cost the model detail.
+        add(conversationHistoryDefinition())
         if (subagentEnabled) {
             // [T7-subagent] spawn_agent: skill = independent sub-agent instance.
             add(SubagentSkill.definition())

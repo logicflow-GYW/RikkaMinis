@@ -1362,6 +1362,7 @@
     <string name="notification_tool_browser">RikkaMinis verwendet Browser</string>
     <string name="notification_tool_read_image">RikkaMinis liest Bild</string>
     <string name="notification_tool_memory">RikkaMinis verwendet Speicher</string>
+    <string name="notification_tool_history">RikkaMinis liest Verlauf</string>
     <string name="notification_tool_search">RikkaMinis verwendet Suche</string>
     <string name="notification_tool_generic">RikkaMinis verwendet %1$s</string>
     <string name="config_confirm_title_one">Änderung bestätigen</string>

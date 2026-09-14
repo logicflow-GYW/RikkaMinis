@@ -1679,6 +1679,7 @@
     <string name="notification_tool_browser">正在使用浏览器</string>
     <string name="notification_tool_read_image">正在读取图片</string>
     <string name="notification_tool_memory">正在使用记忆</string>
+    <string name="notification_tool_history">正在回看对话记录</string>
     <string name="notification_tool_search">正在搜索</string>
     <string name="notification_tool_generic">正在使用 %1$s</string>
     <string name="config_confirm_title_one">确认更改</string>

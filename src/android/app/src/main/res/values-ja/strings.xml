@@ -1369,6 +1369,7 @@
     <string name="notification_tool_browser">RikkaMinis はブラウザを使用中</string>
     <string name="notification_tool_read_image">RikkaMinis は画像を読み取り中</string>
     <string name="notification_tool_memory">RikkaMinis はメモリを使用中</string>
+    <string name="notification_tool_history">RikkaMinis は履歴を参照中</string>
     <string name="notification_tool_search">RikkaMinis は検索中</string>
     <string name="notification_tool_generic">RikkaMinis は %1$s を使用中</string>
     <string name="config_confirm_title_one">変更を確認</string>

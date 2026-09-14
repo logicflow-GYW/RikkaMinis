@@ -1752,6 +1752,7 @@
     <string name="notification_tool_browser">RikkaMinis is using Browser</string>
     <string name="notification_tool_read_image">RikkaMinis is reading Image</string>
     <string name="notification_tool_memory">RikkaMinis is using Memory</string>
+    <string name="notification_tool_history">RikkaMinis is reading History</string>
     <string name="notification_tool_search">RikkaMinis is using Search</string>
     <string name="notification_tool_generic">RikkaMinis is using %1$s</string>
     <string name="config_confirm_title_one">Confirm change</string>

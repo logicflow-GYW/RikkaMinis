@@ -1656,6 +1656,7 @@
     <string name="notification_tool_browser">正在使用瀏覽器</string>
     <string name="notification_tool_read_image">正在讀取圖片</string>
     <string name="notification_tool_memory">正在使用記憶</string>
+    <string name="notification_tool_history">正在回看對話記錄</string>
     <string name="notification_tool_search">正在搜尋</string>
     <string name="notification_tool_generic">正在使用 %1$s</string>
     <string name="config_confirm_title_one">確認變更</string>

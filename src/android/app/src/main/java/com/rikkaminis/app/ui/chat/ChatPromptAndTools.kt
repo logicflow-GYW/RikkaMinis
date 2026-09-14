@@ -305,6 +305,10 @@ internal suspend fun ChatViewModel.executeTool(
             "memory_write" -> executeMemoryWriteTool(argsJson)
             "memory_get" -> executeMemoryGetTool(argsJson)
             "memory_rollup" -> executeMemoryRollupTool()
+            // [U10] conversation_history: reads THIS session's persisted
+            // transcript (session id comes from the ViewModel, never from
+            // arguments) so turns dropped by compaction are still reachable.
+            com.rikkaminis.app.tools.ConversationHistoryContract.NAME -> executeConversationHistoryTool(argsJson)
             // [T7-subagent] spawn_agent: delegate to an independent sub-agent
             // instance running the named skill.
             SubagentSkill.NAME -> executeSpawnAgentTool(argsJson)
@@ -467,6 +471,11 @@ internal fun ChatViewModel.executeSubagentTool(name: String, argsJson: String): 
     "memory_write" -> executeMemoryWriteTool(argsJson)
     "memory_get" -> executeMemoryGetTool(argsJson)
     "memory_rollup" -> executeMemoryRollupTool()
+    // Subagents run inside the same session, so the same transcript is fair
+    // game (read-only, redacted). Kept in sync with the main dispatch switch —
+    // a missing arm here is silent: the tool would work in the main loop and
+    // answer "Unknown or forbidden tool" only inside a subagent.
+    com.rikkaminis.app.tools.ConversationHistoryContract.NAME -> executeConversationHistoryTool(argsJson)
     else -> ToolExecutionResult("Error: Unknown or forbidden tool: $name", false)
 }
 
@@ -636,6 +645,25 @@ internal fun ChatViewModel.executeMemoryGetTool(argsJson: String): ToolExecution
         _memoryToolRecords.value = _memoryToolRecords.value + record
     }
 }
+
+// [U10] conversation_history: the session is bound here — the tool never takes
+// one from arguments, and the DB rows go through the same store the UI reads,
+// so a message the model can see in the transcript is a message the user can
+// scroll back to.
+internal suspend fun ChatViewModel.executeConversationHistoryTool(argsJson: String): ToolExecutionResult =
+    com.rikkaminis.app.tools.executeConversationHistoryTool(
+        argsJson = argsJson,
+        sessionId = activeSessionId,
+        loadRows = { sessionId ->
+            chatRepository.loadMessages(sessionId).mapIndexed { i, m ->
+                com.rikkaminis.app.tools.TranscriptRow(
+                    index = i,
+                    role = m.role,
+                    partsJson = m.partsJson,
+                )
+            }
+        },
+    )
 
 // [T6-rollup] On-demand memory rollup: distills the previous day's daily
 // log into MEMORY-ROLLUP.md. Uses the same memory dir as the repository.

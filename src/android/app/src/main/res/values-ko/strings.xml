@@ -1361,6 +1361,7 @@
     <string name="notification_tool_browser">RikkaMinis가 브라우저 사용 중</string>
     <string name="notification_tool_read_image">RikkaMinis가 이미지 읽는 중</string>
     <string name="notification_tool_memory">RikkaMinis가 메모리 사용 중</string>
+    <string name="notification_tool_history">RikkaMinis가 기록 읽는 중</string>
     <string name="notification_tool_search">RikkaMinis가 검색 중</string>
     <string name="notification_tool_generic">RikkaMinis가 %1$s 사용 중</string>
     <string name="config_confirm_title_one">변경 확인</string>

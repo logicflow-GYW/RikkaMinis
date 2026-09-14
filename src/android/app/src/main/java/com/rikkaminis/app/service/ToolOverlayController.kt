@@ -758,6 +758,7 @@ class ToolOverlayController(private val context: Context) {
         "browser_use" -> "Browser"
         "read_image" -> "Image"
         "memory_write", "memory_get" -> "Memory"
+        "conversation_history" -> "History"
         "web_search" -> "Search"
         else -> toolName
     }

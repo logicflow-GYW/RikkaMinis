@@ -45,6 +45,7 @@ internal fun toolDisplayName(toolName: String): String = when (toolName) {
     "read_image" -> "image viewer"
     "memory_write" -> "memory"
     "memory_get" -> "memory"
+    "conversation_history" -> "history"
     "web_search" -> "search"
     else -> toolName
 }
@@ -57,6 +58,7 @@ internal fun toolTitleLabel(toolName: String): String = when (toolName) {
     "browser_use" -> "RikkaMinis is using Browser"
     "read_image" -> "RikkaMinis is reading Image"
     "memory_write", "memory_get" -> "RikkaMinis is using Memory"
+    "conversation_history" -> "RikkaMinis is reading History"
     "web_search" -> "RikkaMinis is using Search"
     else -> "RikkaMinis is using ${toolDisplayName(toolName)}"
 }

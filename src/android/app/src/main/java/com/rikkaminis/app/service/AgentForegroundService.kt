@@ -718,6 +718,7 @@ class AgentForegroundService : Service() {
         "browser_use" -> getString(R.string.notification_tool_browser)
         "read_image" -> getString(R.string.notification_tool_read_image)
         "memory_write", "memory_get" -> getString(R.string.notification_tool_memory)
+        "conversation_history" -> getString(R.string.notification_tool_history)
         "web_search" -> getString(R.string.notification_tool_search)
         else -> getString(R.string.notification_tool_generic, toolName)
     }
@@ -736,6 +737,7 @@ class AgentForegroundService : Service() {
         "file_write", "file_edit" -> android.R.drawable.ic_menu_edit
         "browser_use" -> android.R.drawable.ic_menu_compass
         "memory_write", "memory_get" -> android.R.drawable.ic_menu_save
+        "conversation_history" -> android.R.drawable.ic_menu_search
         "web_search" -> android.R.drawable.ic_menu_search
         else -> android.R.drawable.ic_menu_manage
     }

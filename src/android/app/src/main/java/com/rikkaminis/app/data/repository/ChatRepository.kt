@@ -568,6 +568,13 @@ class ChatRepository(
                 return if (url != null) cap(cleanPreview("$action $url"))
                 else cap(cleanPreview("browser_use $action"))
             }
+            "conversation_history" -> {
+                // [U10] Show what was looked up: the query, or "reading back" for
+                // a plain tail read. Without this the block title falls back to a
+                // raw "conversation_history" argument dump.
+                val q = str("query")
+                return cap(cleanPreview(if (q != null) "history: $q" else "reading back the conversation"))
+            }
             "memory_write" -> str("content")?.let { return cap(cleanPreview("memory_write: $it")) }
             "memory_get" -> {
                 val arr = input.optJSONArray("keywords")

@@ -1516,6 +1516,7 @@
     <string name="notification_tool_browser">RikkaMinis использует браузер</string>
     <string name="notification_tool_read_image">RikkaMinis читает изображение</string>
     <string name="notification_tool_memory">RikkaMinis использует память</string>
+    <string name="notification_tool_history">RikkaMinis читает историю</string>
     <string name="notification_tool_search">RikkaMinis выполняет поиск</string>
     <string name="notification_tool_generic">RikkaMinis использует %1$s</string>
     <string name="config_confirm_title_one">Подтвердить изменение</string>
