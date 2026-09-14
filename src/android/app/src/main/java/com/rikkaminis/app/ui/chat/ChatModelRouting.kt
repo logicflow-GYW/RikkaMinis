@@ -2,6 +2,7 @@ package com.rikkaminis.app.ui.chat
 
 import android.util.Log
 import androidx.lifecycle.viewModelScope
+import com.rikkaminis.app.agent.runtime.AgentRunEvent
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.provider.ProviderFactory
@@ -128,6 +129,17 @@ internal fun ChatViewModel.switchModelAndRerun(label: String) {
     )
     // ── Phase 1: cancel current stream (light cancel — do NOT kick the
     // queue-drain tail; we restart in place). ──
+    // [audit-0914] Announce the cancel to the run reducer BEFORE the loop
+    // unwinds. The unwinding loop emits RunFinalized from its `finally`, and
+    // without a preceding termination signal the reducer is still in
+    // CALLING_MODEL, so that event is rejected ("T7-D reducer REJECTED …
+    // requires FINALIZING"). Both occurrences in the 2026-09-14 logs sit
+    // immediately after this function. Guarded on a live job: a
+    // UserCancelled against an idle reducer parks it in FINALIZING, which
+    // would then refuse the next RunStarted.
+    if (streamJob?.isActive == true) {
+        traceObserver.t7Reduce(AgentRunEvent.UserCancelled("switch_model"))
+    }
     streamJob?.cancel()
     flushAllStreamingDeltas()
     ExecutionCoordinator.stopCurrentCommand(activeSessionId)
