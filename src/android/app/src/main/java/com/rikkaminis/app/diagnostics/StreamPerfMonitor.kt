@@ -89,7 +89,7 @@ object StreamPerfMonitor {
         val avgUs = if (tickCount > 0) flattenTotalNs / tickCount / 1_000 else 0
         AppLogger.info(
             TAG,
-            "turn sid=$sessionId ticks=$tickCount flattenAvgUs=$avgUs " +
+            "turn sid=${SessionIdAliases.resolve(sessionId)} ticks=$tickCount flattenAvgUs=$avgUs " +
                 "flattenMaxMs=${flattenMaxNs / 1_000_000} frozenHits=$frozenHitTicks/$tickCount " +
                 "rowsLast=${lastFrozenRows + lastLiveRows}(frozen=$lastFrozenRows,live=$lastLiveRows) " +
                 "gcCount=+$gcCountDelta gcFreedMB=+${String.format(java.util.Locale.US, "%.1f", gcFreedDeltaMb)} " +

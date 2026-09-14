@@ -32,6 +32,7 @@ import com.rikkaminis.app.data.ContextOffload
 import com.rikkaminis.app.data.ContextPolicy
 import com.rikkaminis.app.conversation.ContextCompactor
 import com.rikkaminis.app.conversation.ContextGrowthTracker
+import com.rikkaminis.app.diagnostics.SessionIdAliases
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.data.FileMentionIndex
 import com.rikkaminis.app.data.db.CompactMarkerEntity
@@ -2996,7 +2997,7 @@ class ChatViewModel(
         // 全程没有 cmd 记录，就是缺了起点标记才只能靠时间猜）。
         com.rikkaminis.app.diagnostics.MemorySpikeRecorder.onEvent(
             "ui:send",
-            "session=$sessionId chars=${text.length} attachments=${_attachments.value.size} streaming=${_isStreaming.value}",
+            "session=${SessionIdAliases.resolve(sessionId)} chars=${text.length} attachments=${_attachments.value.size} streaming=${_isStreaming.value}",
         )
         val trimmed = text.trim()
         // While streaming, enqueue instead of silently dropping (iOS: send vs enqueuePrompt).

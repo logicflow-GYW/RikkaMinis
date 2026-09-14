@@ -172,7 +172,7 @@ object PerfLongCtx {
         val extraPart = if (extra.isEmpty()) "" else " $extra"
         sinkForTest?.let {
             it(
-                "[Perf][LongCtx] step=$name session=$sessionId elapsedMs=$elapsedMs " +
+                "[Perf][LongCtx] step=$name session=${SessionIdAliases.resolve(sessionId)} elapsedMs=$elapsedMs " +
                     "sinceClickMs=$sinceClickMs$extraPart",
             )
             return
@@ -182,7 +182,7 @@ object PerfLongCtx {
         val nativeHeapMB = Debug.getNativeHeapAllocatedSize() / (1024L * 1024L)
         AppLogger.info(
             CATEGORY,
-            "[Perf][LongCtx] step=$name session=$sessionId elapsedMs=$elapsedMs " +
+            "[Perf][LongCtx] step=$name session=${SessionIdAliases.resolve(sessionId)} elapsedMs=$elapsedMs " +
                 "sinceClickMs=$sinceClickMs javaHeapMB=$javaHeapMB nativeHeapMB=$nativeHeapMB$extraPart",
         )
     }

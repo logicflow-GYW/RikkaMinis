@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.rikkaminis.app.diagnostics.SessionIdAliases
 import com.rikkaminis.app.logging.AppLogger
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -411,7 +412,7 @@ object SessionActivityTracker {
         if (sessionId in _presentSessions.value) return
         val wasIdle = !shouldRunService()
         _presentSessions.value = _presentSessions.value + sessionId
-        Log.d(TAG, "Presence set: $sessionId (present total: ${_presentSessions.value.size})")
+        Log.d(TAG, "Presence set: ${SessionIdAliases.resolve(sessionId)} (present total: ${_presentSessions.value.size})")
         if (wasIdle) {
             startServiceIfNeeded()
         } else {
@@ -428,7 +429,7 @@ object SessionActivityTracker {
     fun setAbsent(sessionId: String) {
         if (sessionId !in _presentSessions.value) return
         _presentSessions.value = _presentSessions.value - sessionId
-        Log.d(TAG, "Presence cleared: $sessionId (present total: ${_presentSessions.value.size})")
+        Log.d(TAG, "Presence cleared: ${SessionIdAliases.resolve(sessionId)} (present total: ${_presentSessions.value.size})")
         if (!shouldRunService()) {
             stopService()
         } else {

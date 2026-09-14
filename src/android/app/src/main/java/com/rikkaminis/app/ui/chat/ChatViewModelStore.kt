@@ -3,6 +3,7 @@ package com.rikkaminis.app.ui.chat
 import android.util.Log
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
+import com.rikkaminis.app.diagnostics.SessionIdAliases
 import com.rikkaminis.app.logging.AppLogger
 
 /**
@@ -58,6 +59,7 @@ object ChatViewModelStore {
     fun release(sessionId: String) {
         val key = resolveKey(sessionId)
         aliases.entries.removeAll { it.value == key }
+        SessionIdAliases.unregisterByCanonical(key)
         stores.remove(key)?.let {
             it.clear()
             AppLogger.info(TAG, "release store for $key (remaining=${stores.size})")
@@ -128,6 +130,7 @@ object ChatViewModelStore {
             stores[toSessionId] = store
         }
         aliases[fromSessionId] = toSessionId
+        SessionIdAliases.register(fromSessionId, toSessionId)
         AppLogger.info(TAG, "rename store $fromSessionId -> $toSessionId (alias kept)")
     }
 

@@ -8,6 +8,7 @@ import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ThinkingLevel
 import com.rikkaminis.app.data.model.RoutingStrategy
+import com.rikkaminis.app.diagnostics.SessionIdAliases
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.sandbox.offload.ProviderExecutionGateway
@@ -757,7 +758,7 @@ internal fun ChatViewModel.loadSession() {
         // block so the EXIT log in `finally` can still read it after
         // an early-return / exception path.
         val tHangDiagStart = System.currentTimeMillis()
-        println("[T-HANG-DIAG] loadSession ENTER session=$sessionId isDraft=$isDraft")
+        println("[T-HANG-DIAG] loadSession ENTER session=${SessionIdAliases.resolve(sessionId)} isDraft=$isDraft")
         com.rikkaminis.app.diagnostics.PerfLongCtx.step(sessionId, "loadSession.enter", "isDraft=$isDraft")
         try {
         val config = providerRepository.config.value
@@ -917,11 +918,11 @@ internal fun ChatViewModel.loadSession() {
         val tHangDiagAfterLoad = tHangDiagBeforeLoad + loaded.loadMs
         val tHangDiagAfterTransform = tHangDiagAfterLoad + loaded.transformMs
         println(
-            "[T-HANG-DIAG] loadMessages session=$sessionId count=${messages.size} " +
+            "[T-HANG-DIAG] loadMessages session=${SessionIdAliases.resolve(sessionId)} count=${messages.size} " +
                 "tookMs=${loaded.loadMs}",
         )
         println(
-            "[T-HANG-DIAG] toChatMessages session=$sessionId tookMs=${loaded.transformMs}",
+            "[T-HANG-DIAG] toChatMessages session=${SessionIdAliases.resolve(sessionId)} tookMs=${loaded.transformMs}",
         )
         // Per-message size sketch + oversize-row scan. Pure diagnostics —
         // does a full second pass over partsJson with several substring
@@ -946,7 +947,7 @@ internal fun ChatViewModel.loadSession() {
                 }
             }
             println(
-                "[T-HANG-DIAG] messages-shape session=$sessionId total=${messages.size} " +
+                "[T-HANG-DIAG] messages-shape session=${SessionIdAliases.resolve(sessionId)} total=${messages.size} " +
                     "totalChars=$totalChars maxChars=$maxChars toolMessages=$withTools " +
                     "attachmentMessages=$withAttachments",
             )
@@ -963,7 +964,7 @@ internal fun ChatViewModel.loadSession() {
             val oversized = messages.filter { it.partsJson.length >= OVERSIZE_THRESHOLD }
             if (oversized.isNotEmpty()) {
                 println(
-                    "[T-HANG-DIAG] oversized-messages session=$sessionId " +
+                    "[T-HANG-DIAG] oversized-messages session=${SessionIdAliases.resolve(sessionId)} " +
                         "count=${oversized.size} threshold=${OVERSIZE_THRESHOLD}",
                 )
                 for (m in oversized) {
@@ -992,7 +993,7 @@ internal fun ChatViewModel.loadSession() {
         agentHistory.addAll(loaded.llmHistory)
         val tHangDiagAfterAgentHistory = System.currentTimeMillis()
         println(
-            "[T-HANG-DIAG] agentHistory rebuilt session=$sessionId tookMs=${tHangDiagAfterAgentHistory - tHangDiagAfterTransform}",
+            "[T-HANG-DIAG] agentHistory rebuilt session=${SessionIdAliases.resolve(sessionId)} tookMs=${tHangDiagAfterAgentHistory - tHangDiagAfterTransform}",
         )
 
         // Restore the most-recent compact summary, if any, so the first
@@ -1086,7 +1087,7 @@ internal fun ChatViewModel.loadSession() {
             // was captured just inside `try` so this covers the whole
             // body the user perceives as "loading".
             println(
-                "[T-HANG-DIAG] loadSession EXIT session=$sessionId " +
+                "[T-HANG-DIAG] loadSession EXIT session=${SessionIdAliases.resolve(sessionId)} " +
                     "totalMs=${System.currentTimeMillis() - tHangDiagStart}",
             )
             com.rikkaminis.app.diagnostics.PerfLongCtx.step(

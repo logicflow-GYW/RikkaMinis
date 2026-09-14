@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.widget.Toast
+import com.rikkaminis.app.diagnostics.SessionIdAliases
 import java.io.File
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.Image
@@ -414,7 +415,7 @@ fun ChatScreen(
             ?: return@LaunchedEffect
         com.rikkaminis.app.logging.AppLogger.info(
             "ChatScreen",
-            "[Share] injecting ${pending.items.size} item(s) into chat session=$sessionId",
+            "[Share] injecting ${pending.items.size} item(s) into chat session=${SessionIdAliases.resolve(sessionId)}",
         )
         val sharedDir = com.rikkaminis.app.share.SharedShareStore.sharedFileDirectory(context)
         for (item in pending.items) {
@@ -477,13 +478,13 @@ fun ChatScreen(
         // and any subsequent hang record. Removable by grepping out
         // `[T-HANG-DIAG]` from this file.
         println(
-            "[T-HANG-DIAG] ChatScreen MOUNT session=$sessionId hangCount=" +
+            "[T-HANG-DIAG] ChatScreen MOUNT session=${SessionIdAliases.resolve(sessionId)} hangCount=" +
                 com.rikkaminis.app.diagnostics.HangDetector.currentHangCount(tHangDiagAppContext),
         )
         com.rikkaminis.app.diagnostics.PerfLongCtx.step(sessionId, "chatScreen.mount")
-        com.rikkaminis.app.diagnostics.MemorySpikeRecorder.onEvent("ui:mount", "session=$sessionId")
+        com.rikkaminis.app.diagnostics.MemorySpikeRecorder.onEvent("ui:mount", "session=${SessionIdAliases.resolve(sessionId)}")
         onDispose {
-            println("[T-HANG-DIAG] ChatScreen UNMOUNT session=$sessionId")
+            println("[T-HANG-DIAG] ChatScreen UNMOUNT session=${SessionIdAliases.resolve(sessionId)}")
             // [audit-0909 T2-H1] compare-and-clear instead of setActiveSession(null):
             // a Chat→Chat navigation mounts the new ChatScreen (which sets the
             // new session) BEFORE this outgoing screen is disposed, so the old
@@ -521,7 +522,7 @@ fun ChatScreen(
         val transfer = ChatViewModelStore.consumePendingTransfer() ?: return@LaunchedEffect
         com.rikkaminis.app.logging.AppLogger.info(
             "ChatScreen",
-            "[MoveTo] draining transfer into session=$sessionId text=${transfer.inputText.length}ch attachments=${transfer.attachments.size}",
+            "[MoveTo] draining transfer into session=${SessionIdAliases.resolve(sessionId)} text=${transfer.inputText.length}ch attachments=${transfer.attachments.size}",
         )
         // Clear any stale unsent attachments on the target session before
         // injecting (mirrors iOS injectPendingTransferIfNeeded).
@@ -3452,7 +3453,7 @@ fun ChatScreen(
                         // at its default anchor rather than guessing.
                         AppLogger.debug(
                             "ChatFocus",
-                            "focus target not found session=$sessionId target=$target rows=${flatItems.size}",
+                            "focus target not found session=${SessionIdAliases.resolve(sessionId)} target=$target rows=${flatItems.size}",
                         )
                         pendingFocusId = null
                         return@LaunchedEffect
@@ -3810,7 +3811,7 @@ fun ChatScreen(
                                                 val maxChars = messages.maxOfOrNull { m -> m.content.length } ?: 0
                                                 AppLogger.info(
                                                     "JankDiag",
-                                                    "[JankDiag] coldOpen summary session=$sessionId msgs=${messages.size} rows=${flatItems.size} " +
+                                                    "[JankDiag] coldOpen summary session=${SessionIdAliases.resolve(sessionId)} msgs=${messages.size} rows=${flatItems.size} " +
                                                         "totalChars=$totalChars maxChars=$maxChars prewarmMs=$lastColdPrewarmMs " +
                                                         "sinceMountMs=${System.currentTimeMillis() - screenMountAtMs} " +
                                                         "hangCount=${com.rikkaminis.app.diagnostics.HangDetector.currentHangCount(context)}",
@@ -3824,7 +3825,7 @@ fun ChatScreen(
                                                         val s = com.rikkaminis.app.diagnostics.ContentDiag.summarize(m.content)
                                                         AppLogger.info(
                                                             "Perf",
-                                                            "[Perf][ContentDiag] session=$sessionId msgIdx=$idx role=${m.role} " +
+                                                            "[Perf][ContentDiag] session=${SessionIdAliases.resolve(sessionId)} msgIdx=$idx role=${m.role} " +
                                                                 "streaming=${m.isStreaming} ${s.asLogFields()}",
                                                         )
                                                     }
