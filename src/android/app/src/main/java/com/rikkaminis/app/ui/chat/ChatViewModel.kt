@@ -2072,6 +2072,18 @@ class ChatViewModel(
     internal var lastAutoCompactAtMs = Long.MIN_VALUE
 
     /**
+     * [T-ctx-offload-escalation] Set by [offloadContextIfNeeded] when a pass
+     * fell well short of its token target — the signature of a long session
+     * whose large tool results have all been offloaded already, leaving only
+     * conversation text the offloader cannot touch. Read (and cleared) by
+     * [maybeAutoCompactInLoop], which then compacts even though the context is
+     * still below the compact line. Single-turn by construction: the consumer
+     * resets it, so a stale flag can never escalate a compact minutes later.
+     */
+    @Volatile
+    internal var offloadUnderDelivered = false
+
+    /**
      * Result of a bounded walk-back. `priorIdx` is the agentHistory index
      * the caller should use as the start of preAnchor; `null` means even
      * the first user turn including anchor would exceed `maxMessages`, so

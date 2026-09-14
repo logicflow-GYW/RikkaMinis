@@ -100,6 +100,11 @@ object ContextCompactor {
         nowMs: Long = System.currentTimeMillis(),
         minIntervalMs: Long = DEFAULT_AUTO_COMPACT_MIN_INTERVAL_MS,
         minTailTokens: Long = DEFAULT_AUTO_COMPACT_MIN_TAIL_TOKENS,
+        // [T-ctx-offload-escalation] True when the caller knows this turn's
+        // offload pass under-delivered and asks to compact below the compact
+        // line. Only bypasses the policy band; the debounce and tail gates
+        // below still apply, and [Decision.EXHAUSTED] still wins.
+        escalatedFromOffload: Boolean = false,
     ): Decision {
         if (isCompacting) return Decision.COMPACT_IN_FLIGHT
         // 无估算值或窗口未知时无从判断——视为 OK（发送入口不因此被自动压缩阻塞）。
@@ -108,7 +113,13 @@ object ContextCompactor {
         // 自动压缩不该在这种状态下动手（需要用户显式 /compact 或新会话）。
         if (estimatedTokens >= contextWindow) return Decision.EXHAUSTED
         // 单一事实源：压缩线只由 ContextPolicy 定义。
-        if (policy.check(estimatedTokens, contextWindow) != ContextPolicy.CheckResult.NEEDS_COMPACT) {
+        // [T-ctx-offload-escalation] 唯一例外：这一轮的 offload 已证明削不动
+        // （候选池耗尽，缺口是 offload 结构上够不到的对话文本），调用方显式
+        // 要求升级——否则上下文会卡在 offload 线与压缩线之间的死区里空转，
+        // 直到自然涨过压缩线。tail/debounce 闸门仍然生效，升级只放宽这一条。
+        if (!escalatedFromOffload &&
+            policy.check(estimatedTokens, contextWindow) != ContextPolicy.CheckResult.NEEDS_COMPACT
+        ) {
             return Decision.OK
         }
         // Guard against Long underflow: `lastAutoCompactAtMs` is

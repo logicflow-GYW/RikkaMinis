@@ -171,6 +171,18 @@ internal fun ChatViewModel.maybeTriggerAutoCompact() {
  *     not a half-compacted history. Returns true iff a compact was started
  *     (caller should await before proceeding).
  */
+/**
+ * [T-ctx-offload-escalation] Reads and clears the one-shot "this turn's offload
+ * could not deliver" flag set by [offloadContextIfNeeded]. Consume-on-read is
+ * what keeps it single-turn — a flag can only ever escalate the compact attempt
+ * that immediately follows the offload pass that raised it.
+ */
+private fun ChatViewModel.consumeOffloadUnderDelivery(): Boolean {
+    val flagged = offloadUnderDelivered
+    offloadUnderDelivered = false
+    return flagged
+}
+
 internal suspend fun ChatViewModel.maybeAutoCompactInLoop(
     contextWindow: Int,
     lastContextTokens: Int,
@@ -180,7 +192,14 @@ internal suspend fun ChatViewModel.maybeAutoCompactInLoop(
     val policy = effectiveContextPolicy(contextWindow)
     // Only fire while we're in the compact band (NEEDS_COMPACT), i.e. BEFORE
     // the hard ceiling forces trimContextHistoryWindow to drop turns verbatim.
-    if (policy.check(lastContextTokens, contextWindow) != ContextPolicy.CheckResult.NEEDS_COMPACT) {
+    val inCompactBand =
+        policy.check(lastContextTokens, contextWindow) == ContextPolicy.CheckResult.NEEDS_COMPACT
+    // [T-ctx-offload-escalation] This turn's offload pass may have proved it can
+    // no longer shrink the context (candidate pool exhausted). Sitting in the
+    // dead band between the offload line and the compact line only lets the
+    // context climb, so escalate now rather than waiting for the compact line.
+    val escalatedFromOffload = consumeOffloadUnderDelivery()
+    if (!inCompactBand && !escalatedFromOffload) {
         return false
     }
     val anchorId = _cachedLatestMarker?.lastCompactedMessageId
@@ -195,6 +214,7 @@ internal suspend fun ChatViewModel.maybeAutoCompactInLoop(
         // [feat/chat-tuning-panel-b] User-tunable (defaults: 8000 tokens / 5 min).
         minTailTokens = AgentRuntimeLimitsPrefs.autoCompactMinTailTokens().toLong(),
         minIntervalMs = AgentRuntimeLimitsPrefs.autoCompactMinIntervalMin() * 60_000L,
+        escalatedFromOffload = escalatedFromOffload && !inCompactBand,
     )
     if (decision != ContextCompactor.Decision.AUTO_COMPACT) {
         AppLogger.info(
@@ -203,6 +223,13 @@ internal suspend fun ChatViewModel.maybeAutoCompactInLoop(
                 "compactLine=${policy.compactThreshold}",
         )
         return false
+    }
+    if (!inCompactBand) {
+        AppLogger.info(
+            ChatViewModel.TAG,
+            "[AutoCompactLoop] escalated below the compact line: this turn's offload under-delivered " +
+                "tokens=$lastContextTokens window=$contextWindow compactLine=${policy.compactThreshold}",
+        )
     }
     lastAutoCompactAtMs = System.currentTimeMillis()
     // [fix/diff-audit-0904-H1] appendSystemInfo is an unlocked

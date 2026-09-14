@@ -32,6 +32,7 @@ class AutoCompactPolicyTest {
         isCompacting: Boolean = false,
         lastAuto: Long = Long.MIN_VALUE,
         now: Long = 1_000_000L,
+        escalated: Boolean = false,
     ) = ContextCompactor.decide(
         estimatedTokens = tokens,
         contextWindow = window,
@@ -40,6 +41,7 @@ class AutoCompactPolicyTest {
         isCompacting = isCompacting,
         lastAutoCompactAtMs = lastAuto,
         nowMs = now,
+        escalatedFromOffload = escalated,
     )
 
     // ── trigger conditions ────────────────────────────────────────────────
@@ -95,6 +97,41 @@ class AutoCompactPolicyTest {
     @Test
     fun `EXHAUSTED at the hard ceiling - never auto compact past the window`() {
         assertEquals(ContextCompactor.Decision.EXHAUSTED, decide(tokens = window))
+    }
+
+    // ── [T-ctx-offload-escalation] escalated compacts ─────────────────────
+
+    @Test
+    fun `escalation compacts below the compact line when offload under-delivered`() {
+        // Long-session dead band: every large tool result already carries a stub,
+        // so the offload pass frees (almost) nothing while the context keeps
+        // climbing toward the compact line. The caller that observed the
+        // shortfall may escalate one turn early instead of idling in the band.
+        assertEquals(ContextCompactor.Decision.OK, decide(tokens = 100_000))
+        assertEquals(
+            ContextCompactor.Decision.AUTO_COMPACT,
+            decide(tokens = 100_000, escalated = true),
+        )
+    }
+
+    @Test
+    fun `escalation still respects the tail gate`() {
+        assertEquals(
+            ContextCompactor.Decision.TAIL_TOO_SMALL,
+            decide(tokens = 100_000, tail = 1_000, escalated = true),
+        )
+    }
+
+    @Test
+    fun `escalation still respects the debounce and the hard ceiling`() {
+        assertEquals(
+            ContextCompactor.Decision.RECENT_AUTO_COMPACT,
+            decide(tokens = 100_000, lastAuto = 999_000L, now = 1_000_000L, escalated = true),
+        )
+        assertEquals(
+            ContextCompactor.Decision.EXHAUSTED,
+            decide(tokens = window, escalated = true),
+        )
     }
 
     @Test

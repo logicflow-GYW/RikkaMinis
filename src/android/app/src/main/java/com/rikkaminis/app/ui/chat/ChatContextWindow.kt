@@ -317,6 +317,19 @@ internal fun ChatViewModel.offloadContextIfNeeded(
         AppLogger.info(ChatViewModel.TAG, "  After:  $currentTokens/$contextWindow ($afterPct%)")
         AppLogger.info(ChatViewModel.TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     }
+
+    // [T-ctx-offload-escalation] Record how much of the target this pass
+    // actually delivered. In a long session the candidate pool runs dry —
+    // every large tool result already carries a stub and what remains is
+    // conversation text the offloader structurally cannot touch — so the pass
+    // frees (almost) nothing, still costs a full scan, and the context keeps
+    // climbing until the much higher compact line is reached. Measured on
+    // 2026-09-14: 35 consecutive triggers freed 0–8.5 k tokens against a
+    // 25–51 k shortfall over 25 minutes; auto-compact eventually fired at 84 %
+    // of the window. The flag lets the loop escalate on the same turn instead
+    // of waiting for that line.
+    val neededTokens = (beforeTokens - targetTokens).coerceAtLeast(0)
+    offloadUnderDelivered = neededTokens > 0 && freedTokens < neededTokens / 2
 }
     /**
      * [T-context-limit-enforce] Hard-cap fallback after offload: if the
