@@ -35,6 +35,26 @@ object PerfLongCtx {
     private val seq = AtomicLong(0)
 
     /**
+     * [diag/reentry-latency-anchor] Test seam, same shape as
+     * MemorySpikeRecorder.sink: when set, emitted lines are handed here and the
+     * O(1) heap reads are skipped. Stays null in production — one field read.
+     */
+    internal var sinkForTest: ((String) -> Unit)? = null
+
+    /** Test seam: drop every per-session map between cases. */
+    internal fun resetForTest() {
+        clickNsBySession.clear()
+        lastNsBySession.clear()
+        rowComposeCount.clear()
+        rowComposeStartNs.clear()
+        rowComposeTypes.clear()
+    }
+
+    /** Test seam: is this session still anchored to a [click]? */
+    internal fun isAnchoredForTest(sessionId: String): Boolean =
+        clickNsBySession.containsKey(sessionId)
+
+    /**
      * Row-compose accumulator for the LazyColumn rentry path. Counts each
      * [FlatChatItem] that enters composition during a reentry; emits a
      * one-line summary when the 10th and 50th rows arrive so a dense
@@ -50,12 +70,25 @@ object PerfLongCtx {
     private val rowComposeTypes = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.ConcurrentHashMap<String, AtomicLong>>()
     private val ROW_MILESTONES = longArrayOf(10, 50, 200)
 
+    /** See [click]: bound the anchor map even when end() is never reached. */
+    private const val MAX_ANCHORED_SESSIONS = 32
+
     /**
      * User tapped the session card. Resets the per-session timeline.
      * Called from the row's gesture handler so we capture the very first
      * timestamp the user is waiting on.
      */
     fun click(sessionId: String) {
+        // [diag/reentry-latency-anchor] Hard cap on anchored sessions. The
+        // normal path reclaims in end() (first frame after the open), but an
+        // aborted navigation — tap B, immediately back to A before B ever
+        // composes — never reaches end(). One Long per abandoned tap is
+        // bounded in practice; the cap makes it bounded by construction, and
+        // 32 is far above the number of sessions anyone opens at once.
+        if (clickNsBySession.size >= MAX_ANCHORED_SESSIONS) {
+            clickNsBySession.clear()
+            lastNsBySession.clear()
+        }
         val now = System.nanoTime()
         clickNsBySession[sessionId] = now
         lastNsBySession[sessionId] = now
@@ -136,10 +169,17 @@ object PerfLongCtx {
         } else {
             -1L
         }
+        val extraPart = if (extra.isEmpty()) "" else " $extra"
+        sinkForTest?.let {
+            it(
+                "[Perf][LongCtx] step=$name session=$sessionId elapsedMs=$elapsedMs " +
+                    "sinceClickMs=$sinceClickMs$extraPart",
+            )
+            return
+        }
         val rt = Runtime.getRuntime()
         val javaHeapMB = (rt.totalMemory() - rt.freeMemory()) / (1024L * 1024L)
         val nativeHeapMB = Debug.getNativeHeapAllocatedSize() / (1024L * 1024L)
-        val extraPart = if (extra.isEmpty()) "" else " $extra"
         AppLogger.info(
             CATEGORY,
             "[Perf][LongCtx] step=$name session=$sessionId elapsedMs=$elapsedMs " +

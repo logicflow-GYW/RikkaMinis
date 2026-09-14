@@ -1891,6 +1891,16 @@ fun ChatScreen(
                     draftSnapshot?.let { com.rikkaminis.app.data.ComposerDraftStore.clearDraft(context, it.id) }
                 },
                 onSessionClick = { id ->
+                    // [diag/reentry-latency-anchor] Start the user-perceived
+                    // clock at the TAP, before the drawer-close coroutine, so
+                    // every later step on this session reports sinceClickMs =
+                    // what the user actually waited. Only for a real switch:
+                    // anchoring on a same-session tap (the drawer just closes)
+                    // would leave a dangling anchor that pollutes that
+                    // session's later steps with a meaningless sinceClickMs.
+                    if (id != sessionId) {
+                        com.rikkaminis.app.diagnostics.PerfLongCtx.click(id)
+                    }
                     if (id == sessionId) {
                         // Current session: just close the drawer, no navigation.
                         historyDrawerScope.launch { historyDrawerState.close() }
@@ -3058,9 +3068,9 @@ fun ChatScreen(
                                 // pair to diff against.
                                 val prevMsgs = aggregateReuse.messages
                                 val prevItems = aggregateReuse.items
-                                val nextItems = if (prevMsgs == null || prevMsgs.isEmpty() ||
+                                val aggregateColdBuild = prevMsgs == null || prevMsgs.isEmpty() ||
                                     prevItems == null || prevItems.isEmpty()
-                                ) {
+                                val nextItems = if (aggregateColdBuild) {
                                     withContext(Dispatchers.Default) {
                                         val rows = buildAggregateChatItems(merged)
                                         // [fix/open-row-first-frame-final] Block-parse
@@ -3100,6 +3110,19 @@ fun ChatScreen(
                                 flatItems = nextItems
                                 aggregateReuse.messages = merged
                                 aggregateReuse.items = nextItems
+                                // [diag/streamperf-revive] The ledger-path
+                                // StreamPerfMonitor.tick further down is unreachable
+                                // while AGGREGATE_MESSAGE_ITEMS is on (this branch
+                                // returns first), so every emitted [StreamPerf]
+                                // summary read ticks=0 — the incremental flatten was
+                                // never measured on the live path. Tick here with the
+                                // same shape so the two paths stay comparable.
+                                com.rikkaminis.app.diagnostics.StreamPerfMonitor.tick(
+                                    flattenNanos = System.nanoTime() - tickStartNs,
+                                    frozenReused = !aggregateColdBuild,
+                                    frozenRows = if (aggregateColdBuild) 0 else (prevItems?.size ?: 0),
+                                    liveRows = nextItems.size,
+                                )
                                 // [T-android-coldload-offmain-parse] Parallel viewport
                                 // prewarm: inline-warm the newest (viewport-candidate)
                                 // markdown fragments off-main so the first frame's rows
@@ -3756,6 +3779,18 @@ fun ChatScreen(
                                             // newest row has laid out.
                                             if (!coldOpenSummaryEmitted) {
                                                 coldOpenSummaryEmitted = true
+                                                // [diag/reentry-latency-anchor] Close the
+                                                // reentry timeline here: this is the first
+                                                // frame whose newest row has laid out, i.e.
+                                                // the moment the user stops waiting. The
+                                                // step carries the real tap→content latency
+                                                // in sinceClickMs, and end() reclaims the
+                                                // per-session maps so a long-lived process
+                                                // cannot keep one entry per opened session.
+                                                com.rikkaminis.app.diagnostics.PerfLongCtx.end(
+                                                    sessionId,
+                                                    "reentry.settled",
+                                                )
                                                 val totalChars = messages.sumOf { m -> m.content.length }
                                                 val maxChars = messages.maxOfOrNull { m -> m.content.length } ?: 0
                                                 AppLogger.info(
