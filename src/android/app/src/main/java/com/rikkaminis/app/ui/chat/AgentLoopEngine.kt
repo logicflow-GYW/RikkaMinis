@@ -2339,7 +2339,9 @@ internal class AgentLoopEngine(
                     // strings.xml refactor in other sessions. Promote to a
                     // localized R.string entry in a follow-up if needed.
                     val uiMessage = "Blocked invalid tool call"
-                    val modelMessage = "Error: Tool call rejected before execution. $preflightError The arguments your client sent were empty or missing required fields — re-issue the call with all required parameters filled in. Do not retry with the same empty arguments."
+                    val modelMessage = "Error: Tool call rejected before execution. $preflightError " +
+                        "Correct the arguments so they match the tool's published schema, then re-issue the call. " +
+                        "Do not retry with the same arguments."
                     val blockIdxPre = loopState.allToolBlocks.indexOfFirst { it.id == id }
                     if (blockIdxPre >= 0) {
                         val elapsedPre = System.currentTimeMillis() - loopState.allToolBlocks[blockIdxPre].startTimeMs

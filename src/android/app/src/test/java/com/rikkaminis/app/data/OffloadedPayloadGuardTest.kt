@@ -84,14 +84,52 @@ class OffloadedPayloadGuardTest {
 
     @Test
     fun `resolvable stub on an overwrite heals from the offload file`() {
+        // The store must hand back exactly the byte count the stub advertises:
+        // that equality is what separates a real stub from a document that
+        // merely looks like one (see the look-alike test below).
+        val realBytes = "package x\n// the real payload".padEnd(3936, '.')
         val action = OffloadedPayloadGuard.decide(realStub, append = false) { path ->
             assertEquals(stubPath, path)
-            "package x\n// the real 3936 bytes"
+            realBytes
         }
         assertTrue(action is OffloadedPayloadGuard.Action.Heal)
         val heal = action as OffloadedPayloadGuard.Action.Heal
-        assertEquals("package x\n// the real 3936 bytes", heal.content)
+        assertEquals(realBytes, heal.content)
         assertEquals(stubPath, heal.from)
+    }
+
+    @Test
+    fun `look-alike document is refused instead of being overwritten`() {
+        // [audit-0914] Anti-overreach for the healing path. Content that opens
+        // with a byte-accurate stub header — a doc quoting a stub, a fixture —
+        // used to be healed, i.e. its body replaced by whatever file the quoted
+        // path resolved to. Recovery returning a different size is the tell, and
+        // the safe direction is refusal (the stub itself must never be written).
+        val lookAlike = "[CONTEXT OFFLOADED] Content (~1103 tokens, 3936 bytes) saved to: " +
+            "/var/minis/offloads/tools/notes.txt\nAnd here is the rest of my document."
+        val action = OffloadedPayloadGuard.decide(lookAlike, append = false) { "unrelated bytes" }
+        assertTrue(action is OffloadedPayloadGuard.Action.Refuse)
+        val refuse = action as OffloadedPayloadGuard.Action.Refuse
+        assertEquals(OffloadedPayloadGuard.RefusalReason.UNRECOVERABLE, refuse.reason)
+        assertEquals("/var/minis/offloads/tools/notes.txt", refuse.offloadPath)
+    }
+
+    @Test
+    fun `stub with a drifted header is refused rather than healed`() {
+        // Prefix-only detection must still refuse: it cannot know the promised
+        // size, and guessing is how content gets silently replaced.
+        var recoverCalls = 0
+        val drifted = "[CONTEXT OFFLOADED] Content (1.1k tokens) stored in some_file.txt"
+        val action = OffloadedPayloadGuard.decide(drifted, append = false) {
+            recoverCalls++
+            "whatever"
+        }
+        assertTrue(action is OffloadedPayloadGuard.Action.Refuse)
+        assertEquals(
+            OffloadedPayloadGuard.RefusalReason.UNRECOVERABLE,
+            (action as OffloadedPayloadGuard.Action.Refuse).reason,
+        )
+        assertEquals(0, recoverCalls)
     }
 
     @Test

@@ -26,8 +26,23 @@ internal object OffloadedPayloadGuard {
 
     private const val SAVED_MARKER = "saved to: "
 
-    /** Where the pointer claims the real bytes live, or null if it does not say. */
-    data class Stub(val offloadPath: String?)
+    /**
+     * The exact shape [ContextOffload.stub] mints. Matching it (rather than
+     * just the prefix) is what tells a real stub apart from a document that
+     * merely quotes one — see [decide]'s byte check.
+     */
+    private val STRICT_STUB = Regex(
+        "^\\[CONTEXT OFFLOADED] Content \\(~(\\d+) tokens, (\\d+) bytes\\) saved to: (\\S+)",
+    )
+
+    /**
+     * @param offloadPath where the pointer claims the real bytes live, or null
+     *   if it does not say.
+     * @param declaredBytes byte count the stub itself advertises. Non-null only
+     *   for the strict shape; a drifted or hand-edited marker yields null, which
+     *   [decide] treats as unhealable.
+     */
+    data class Stub(val offloadPath: String?, val declaredBytes: Int? = null)
 
     /** What a write tool should do with an incoming payload. */
     sealed interface Action {
@@ -57,12 +72,20 @@ internal object OffloadedPayloadGuard {
      *   payload bytes. Prefix-anchored, so a document that merely *mentions*
      *   the marker mid-text is left alone.
      */
-    fun asStub(content: String): Stub? =
-        if (content.startsWith(ContextOffload.OFFLOADED_PREFIX)) {
-            Stub(offloadPathOf(content))
-        } else {
-            null
+    fun asStub(content: String): Stub? {
+        if (!content.startsWith(ContextOffload.OFFLOADED_PREFIX)) return null
+        val strict = STRICT_STUB.find(content)
+        if (strict != null) {
+            return Stub(
+                offloadPath = strict.groupValues[3],
+                declaredBytes = strict.groupValues[2].toIntOrNull(),
+            )
         }
+        // Detection stays anchored on the prefix so a future format tweak can
+        // never silently disable the guard — it just loses the byte count, and
+        // [decide] refuses rather than guessing.
+        return Stub(offloadPathOf(content))
+    }
 
     /**
      * Decide what to do with a write payload.
@@ -83,8 +106,22 @@ internal object OffloadedPayloadGuard {
         if (append) return Action.Refuse(RefusalReason.APPEND_STUB, stub.offloadPath)
         val path = stub.offloadPath
             ?: return Action.Refuse(RefusalReason.UNRECOVERABLE, null)
+        // [audit-0914] Only heal when the bytes we found are the bytes the stub
+        // promised. Without this check a payload that merely *looks* like a stub
+        // — a document quoting one, a fixture, a file whose own text opens with
+        // the marker — would have its content silently replaced by whatever file
+        // the quoted path happens to resolve to. A size mismatch means the path
+        // is not the stub's file (or the marker was not minted by us), so it is
+        // treated as unrecoverable: writing the stub out verbatim is still the
+        // corruption this guard exists to prevent, so refusal is the only safe
+        // direction.
+        val declared = stub.declaredBytes
+            ?: return Action.Refuse(RefusalReason.UNRECOVERABLE, path)
         val bytes = recover(path)
             ?: return Action.Refuse(RefusalReason.UNRECOVERABLE, path)
+        if (bytes.toByteArray(Charsets.UTF_8).size != declared) {
+            return Action.Refuse(RefusalReason.UNRECOVERABLE, path)
+        }
         return Action.Heal(bytes, path)
     }
 
