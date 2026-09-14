@@ -2170,6 +2170,56 @@ internal class AgentLoopEngine(
                     continue
                 }
                 sameTurnFingerprints[dedupeFingerprint] = id
+                // [T-truncated-tool-call-guard] A turn that hit the output
+                // ceiling (finish_reason=length / max_tokens) may have been cut
+                // off WHILE this call's arguments were still streaming. Until
+                // this guard the dispatch path never consulted turnFinishReason
+                // — it is read only inside the `toolCalls.isEmpty()` branch
+                // above — so a prefix payload reached the executor. And
+                // ToolJsonRepair's truncation strategy makes that sharper, not
+                // safer: it deliberately CLOSES a cut-off JSON object, turning
+                // `{"path": "/data/local/tmp/fo` into a syntactically valid,
+                // semantically wrong argument. Refusing costs one re-planned
+                // turn; executing costs an unknown side effect. Same shape as
+                // the dedupe / loop-detector refusals below so that tool_use
+                // and tool_result stay paired for the next request.
+                //
+                // Place it BEFORE ToolJsonRepair: refusing on the raw payload
+                // means the refusal can never depend on a repaired one.
+                //
+                // Accepted residual risk: this branch does NOT charge the
+                // length-wall continuation budget (that counter is only
+                // advanced on the `toolCalls.isEmpty()` side), so a model that
+                // re-issues a call on every ceiling hit is bounded only by
+                // maxTurnsThisRun. Buying that with a new shared counter is not
+                // worth the extra state: the refusal message tells the model to
+                // re-issue with FULL arguments, and executing a prefix argument
+                // is strictly worse than spending turns.
+                val truncatedRefusal = TruncatedToolCallPolicy.rejectionReason(name, turnFinishReason)
+                if (truncatedRefusal != null) {
+                    AppLogger.warning(
+                        TAG_STREAM,
+                        "runAgentLoop turn=$turn truncated tool call REFUSED name=$name id=$id finish=$turnFinishReason",
+                    )
+                    val truncatedIdx = loopState.allToolBlocks.indexOfFirst { it.id == id }
+                    if (truncatedIdx >= 0) {
+                        loopState.allToolBlocks[truncatedIdx] = loopState.allToolBlocks[truncatedIdx].copy(
+                            toolStatus = ToolBlockStatus.FAILED,
+                            content = truncatedRefusal,
+                            durationMs = 0,
+                        )
+                        withContext(Dispatchers.Main) {
+                            host.updateAssistantMessage(loopState.assistantId, loopState.accumulatedText, true, loopState.allToolBlocks)
+                        }
+                    }
+                    resultParts.add(AgentContentPart.ToolResult(
+                        id = id,
+                        name = name,
+                        content = truncatedRefusal,
+                        isError = true,
+                    ))
+                    continue
+                }
                 // [T-android-overlay-tool-title] Pull tool_title uniformly
                 // from args for ALL tools — without this browser_use's
                 // tool_title never reached the overlay (only shell_execute
