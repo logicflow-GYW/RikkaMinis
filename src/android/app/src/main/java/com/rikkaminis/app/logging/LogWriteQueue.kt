@@ -82,7 +82,13 @@ internal class LogWriteQueue(
             dropped.incrementAndGet()
             return
         }
-        // Keep line: make room by evicting the oldest queued item (whatever it is).
+        // Keep line: make room by evicting the oldest queued item (whatever it
+        // is). [T-log-queue-evict-policy] Level-pooled eviction (drop DEBUG
+        // first, then non-keep, then anything) was considered and REJECTED for
+        // now: a correct implementation needs a second pool or an atomic
+        // scan-and-requeue, both racy or O(capacity) per eviction under
+        // concurrent producers. The backlog entry stays as an accepted
+        // tradeoff; revisit only if "backlog ate my ERROR lines" ever bites.
         while (!stopped) {
             val evicted = queue.poll()
             if (evicted == null) {
@@ -94,6 +100,11 @@ internal class LogWriteQueue(
             dropped.incrementAndGet()
             if (queue.offer(item)) return
         }
+        // [T-log-queue-stop-race] stopped flipped mid-eviction: count the loss
+        // so the conservation invariant `delivered + notices == enqueued`
+        // holds even in the stop-race window (the item is neither delivered
+        // nor queued, and the caller never sees it).
+        dropped.incrementAndGet()
     }
 
     /**
