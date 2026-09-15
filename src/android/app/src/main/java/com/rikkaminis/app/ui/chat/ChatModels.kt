@@ -298,3 +298,27 @@ const val CANCELLED_MARKER =
  * by this version.
  */
 internal const val LEGACY_CANCELLED_MARKER = "[cancelled by user]"
+
+/**
+ * [refactor/inflight-predicate] One predicate for "this row belongs to the
+ * live state" — the invariant that previously lived inline at each
+ * rebuild/truncation site and was re-derived there once per incident
+ * (compact graying enumerated it, flushPendingSysInfo re-derived a NARROWER
+ * copy without [isQueued]). From now on: one judgment, called at the
+ * rebuild/truncation sites, not re-derived per incident.
+ *
+ * A live row is any non-system row that is still owned by the current turn:
+ * streaming, queued (user prompt not yet sent), or awaiting its first model
+ * response. System rows (dividers/notices) are never live.
+ */
+internal fun ChatMessage.isLiveRow(): Boolean =
+    role != "system" && (isStreaming || isQueued || isAwaitingModelResponse)
+
+/**
+ * The complement at the settlement boundary: a persisted, non-system row
+ * that no longer belongs to the live state. Compact graying walks to the
+ * last settled row; in-flight rows after the anchor must never inherit the
+ * gray flag.
+ */
+internal fun ChatMessage.isSettledRow(): Boolean =
+    role != "system" && !isLiveRow()

@@ -281,10 +281,13 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
                 // when the anchor has no UI row: force the boundary at the
                 // last settled row so the streaming/queued placeholder and
                 // any already-created follow-ups never inherit the gray flag.
+                // [refactor/inflight-predicate] The "in-flight" judgment is
+                // now ONE predicate ([isSettledRow]) instead of an inline
+                // re-derivation — compact graying and flushPendingSysInfo
+                // used to enumerate the live flags independently (the
+                // narrow copy dropped [isQueued]).
                 if (!passedCutoff) {
-                    val lastSettledIdx = cleaned.indexOfLast { msg ->
-                        msg.role != "system" && !msg.isStreaming && !msg.isQueued && !msg.isAwaitingModelResponse
-                    }
+                    val lastSettledIdx = cleaned.indexOfLast { msg -> msg.isSettledRow() }
                     if (lastSettledIdx >= 0) {
                         cleaned = cleaned.mapIndexed { idx, msg ->
                             if (idx > lastSettledIdx && msg.role != "system" && !msg.isCompactedHistory) {

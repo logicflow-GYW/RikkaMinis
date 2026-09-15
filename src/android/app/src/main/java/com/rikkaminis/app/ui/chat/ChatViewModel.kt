@@ -1884,9 +1884,16 @@ class ChatViewModel(
         // in-flight bubble instead, which is also where the cold-reload
         // path puts the divider (applyCompactMarkerGraying inserts it
         // after the anchor row, i.e. before the live tail).
-        val inFlightIdx = list.indexOfLast { msg ->
-            msg.role != "system" && (msg.isStreaming || msg.isAwaitingModelResponse)
-        }
+        // [refactor/inflight-predicate] One predicate instead of an inline
+        // re-derivation. Behavior fix: the old inline copy enumerated only
+        // (isStreaming || isAwaitingModelResponse) and DROPPED isQueued, so
+        // when the tail was a queued bubble with no in-flight row, the
+        // notice landed AFTER it — contradicting this comment's own intent
+        // ("before the live tail") and the graying boundary's full set.
+        // isLiveRow includes isQueued, so the notice now inserts before a
+        // queued prompt too (it relates to the state the prompt will run
+        // into, and the prompt's run output starts below the divider).
+        val inFlightIdx = list.indexOfLast { msg -> msg.isLiveRow() }
         _messages.value = if (inFlightIdx >= 0) {
             list.toMutableList().apply { add(inFlightIdx, notice) }
         } else {
