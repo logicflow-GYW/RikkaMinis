@@ -68,6 +68,22 @@ fun resolveCompactAnchorIdx(
         // tool work + answer) stays on the ACTIVE side of the divider. Manual
         // compact-before (anchorIdxOverride) is unaffected — an explicit anchor
         // is the user's own choice.
+        //
+        // [audit-0915] SCOPE — stated because the block above describes only
+        // half of it. This walk-back is UNCONDITIONAL on the compact-all path:
+        // it does NOT test whether a run is in flight, so it also applies to a
+        // manual compact of a settled session. Two visible consequences, both
+        // deliberate:
+        //   1. the compacted range ends one turn earlier than before (the
+        //      PREVIOUS answer is compacted along with the rest, the LAST whole
+        //      turn stays active). The instruction is the thing least safe to
+        //      replace with a summary, so this direction is the safer one.
+        //   2. a second compact with no new turn in between resolves to the
+        //      same anchor, so `effectiveStartIdx > anchorIdx` reports
+        //      "already compacted" instead of re-compacting the last prompt.
+        // If in-flight-only scope is ever wanted, gate this block on the run
+        // state at the CALL SITE — never read `_isStreaming` from in here: this
+        // helper is side-effect-free and JVM-tested.
         if (i > 0) {
             var j = i
             while (j > 0) {
