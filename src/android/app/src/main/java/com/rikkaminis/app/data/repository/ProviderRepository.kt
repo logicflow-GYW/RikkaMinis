@@ -839,16 +839,29 @@ class ProviderRepository(private val context: Context) {
 
     // ── [T-android-thinking-rules-phase2] Custom thinking rules ──
 
+    /**
+     * [T-thinking-rules-single-query] One Room roundtrip returns both the
+     * rules and their persisted ids — the UI previously called
+     * [thinkingRules] and [thinkingRuleIds] separately, i.e. the SAME
+     * loadThinkingRules query twice inside two `remember { }` blocks.
+     */
+    fun thinkingRulesWithIds(instanceId: String): Pair<List<ThinkingRule>, List<String>> = runBlocking {
+        runCatching {
+            val rows = providerDao.loadThinkingRules(instanceId)
+            rows.map { ThinkingRuleCoding.toRule(it) } to rows.map { it.id }
+        }.getOrDefault(emptyList<ThinkingRule>() to emptyList())
+    }
+
     /** Load one instance's custom rules from Room, in stored order. */
     fun thinkingRules(instanceId: String): List<ThinkingRule> = runBlocking {
         runCatching { providerDao.loadThinkingRules(instanceId).map { ThinkingRuleCoding.toRule(it) } }
             .getOrDefault(emptyList())
     }
 
-    /** The persisted ids for one instance's custom rules, parallel to [thinkingRules]. */
-    fun thinkingRuleIds(instanceId: String): List<String> = runBlocking {
-        runCatching { providerDao.loadThinkingRules(instanceId).map { it.id } }.getOrDefault(emptyList())
-    }
+    /** [T-thinking-rules-single-query] The standalone [thinkingRuleIds] was
+     *  folded into [thinkingRulesWithIds] — a second `loadThinkingRules`
+     *  query for the same table existed only because the UI wanted ids
+     *  separately. Call [thinkingRulesWithIds] instead. */
 
     /** First model id served by [instanceId], for the resolution-trace sample. Null if none. */
     fun firstModelId(instanceId: String): String? {
@@ -871,6 +884,20 @@ class ProviderRepository(private val context: Context) {
     }
 
     /**
+     * [T-thinking-rules-single-query] Mutation paths pass the rows they just
+     * persisted so the resolver cache is updated WITHOUT a second Room
+     * roundtrip. Null = persistence failed → fall back to a fresh DB query
+     * so the cache never holds stale data.
+     */
+    private fun republishThinkingCache(instanceId: String, rules: List<ThinkingRule>?) {
+        if (rules != null) {
+            ThinkingRuleResolver.setCustomRules(instanceId, rules)
+            return
+        }
+        republishThinkingCache(instanceId)
+    }
+
+    /**
      * Insert or update a custom rule. [id] null ⇒ new rule minted at the TOP of the
      * list (position 0) — a rule overriding a built-in is useless below it; existing
      * rules shift down. A non-null [id] updates in place, preserving position.
@@ -878,6 +905,10 @@ class ProviderRepository(private val context: Context) {
      */
     fun saveThinkingRule(instanceId: String, rule: ThinkingRule, id: String? = null): String = runBlocking {
         val ruleId = id ?: java.util.UUID.randomUUID().toString()
+        // [T-thinking-rules-single-query] Persisted rows are reused for the
+        // resolver cache (republish takes nullable rows — on failure it
+        // falls back to a fresh DB query so the cache never holds stale data).
+        var persistedRules: List<ThinkingRule>? = null
         // [audit-0909 T4-H1] These DAO writes used to be bare. A provider.db
         // that failed to open (e.g. a migration abort on API ≤ 33 — see
         // ProviderDatabase.MIGRATION_9_10) threw an uncaught SQLiteException
@@ -894,43 +925,48 @@ class ProviderRepository(private val context: Context) {
                 existing.add(0, ThinkingRuleCoding.toEntity(rule, ruleId, instanceId, 0))
             }
             val renumbered = existing.mapIndexed { i, e -> e.copy(sortOrder = i) }
+            persistedRules = renumbered.map { ThinkingRuleCoding.toRule(it) }
             providerDao.replaceThinkingRules(instanceId, renumbered)
         }.onFailure { e ->
             android.util.Log.e("ProviderRepo", "[audit-0909] saveThinkingRule persistence failed ($instanceId/$ruleId)", e)
         }
-        republishThinkingCache(instanceId)
+        republishThinkingCache(instanceId, persistedRules)
         ruleId
     }
 
     fun deleteThinkingRule(instanceId: String, id: String) = runBlocking {
         // [audit-0909 T4-H1] same bare-DAO hardening as saveThinkingRule.
+        var persistedRules: List<ThinkingRule>? = null
         runCatching {
             providerDao.deleteThinkingRule(id)
             // Renumber survivors so sort_order stays dense.
             val survivors = providerDao.loadThinkingRules(instanceId)
                 .sortedBy { it.sortOrder }
                 .mapIndexed { i, e -> e.copy(sortOrder = i) }
+            persistedRules = survivors.map { ThinkingRuleCoding.toRule(it) }
             providerDao.replaceThinkingRules(instanceId, survivors)
         }.onFailure { e ->
             android.util.Log.e("ProviderRepo", "[audit-0909] deleteThinkingRule persistence failed ($instanceId/$id)", e)
         }
-        republishThinkingCache(instanceId)
+        republishThinkingCache(instanceId, persistedRules)
     }
 
     /** Reorder an instance's custom rules to match [orderedIds] (a permutation). */
     fun reorderThinkingRules(instanceId: String, orderedIds: List<String>) = runBlocking {
         // [audit-0909 T4-H1] same bare-DAO hardening as saveThinkingRule.
+        var persistedRules: List<ThinkingRule>? = null
         runCatching {
             val byId = providerDao.loadThinkingRules(instanceId).associateBy { it.id }
             val reordered = orderedIds.mapNotNull { byId[it] }
                 .mapIndexed { i, e -> e.copy(sortOrder = i) }
             // Keep any id the caller omitted (defensive against a partial list) appended.
             val omitted = byId.values.filter { it.id !in orderedIds }.map { it }
+            persistedRules = (reordered + omitted).map { ThinkingRuleCoding.toRule(it) }
             providerDao.replaceThinkingRules(instanceId, reordered + omitted)
         }.onFailure { e ->
             android.util.Log.e("ProviderRepo", "[audit-0909] reorderThinkingRules persistence failed ($instanceId)", e)
         }
-        republishThinkingCache(instanceId)
+        republishThinkingCache(instanceId, persistedRules)
     }
 
     // ── [T-auto-backup-assets] Backup/restore of custom thinking rules ──

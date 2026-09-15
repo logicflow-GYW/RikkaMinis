@@ -90,11 +90,12 @@ fun ThinkingRulesSection(
     var defaultsExpanded by remember { mutableStateOf(false) }
     var editorRequest by remember { mutableStateOf<ThinkingRuleEditorRequest?>(null) }
 
-    val customRules = remember(instance.id, reloadKey) { providerRepository.thinkingRules(instance.id) }
-    // The persisted ids parallel the custom rules in stored order (for edit/delete/reorder).
-    val customIds = remember(instance.id, reloadKey) {
-        providerRepository.thinkingRuleIds(instance.id)
+    val customRulesAndIds = remember(instance.id, reloadKey) {
+        providerRepository.thinkingRulesWithIds(instance.id)
     }
+    val customRules = customRulesAndIds.first
+    // The persisted ids parallel the custom rules in stored order (for edit/delete/reorder).
+    val customIds = customRulesAndIds.second
     val builtIns = remember(instance.id, reloadKey) {
         providerRepository.builtInThinkingRulesForDisplay(instance.id)
     }
