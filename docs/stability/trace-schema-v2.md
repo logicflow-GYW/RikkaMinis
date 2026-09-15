@@ -245,6 +245,19 @@
 
 `terminal_reason` 枚举：`completed_normally` / `all_fallbacks_exhausted` / `user_cancelled` / `deadline_reached` / `process_interrupted` / `persistence_failed` / `budget_exhausted` / `internal_error`
 
+> **发射侧完备性（2026-09-15）**：schema 定义了 14 种 run 事件，运行循环实际发射
+> 9 种。`PersistenceFailed` 此前**零发射点**（reducer / state / recovery policy
+> 全链路都处理它，但没人发），导致持久化失败时 trace 与恢复决策层看不到——
+> 同族于"加字段缺同步层"的接线缺口。已在运行路径持久化失败点补上发射，
+> 使"定义-发射-消费"三条边都有主。
+>
+> **终止路径收敛（2026-09-15）**：`runAgentLoop` 的两个 catch
+> （CancellationException → CANCELLED / Exception → FAILED）原先直接发
+> `RunFinalized`，不经 FINALIZING 相位；只有 `user_stop` 和 `switch_model` 两条
+> 取消路径会预发射 `UserCancelled`。其余取消原因与未预期异常会让 reducer 停在
+> CALLING_MODEL/EXECUTING_TOOLS → `RunFinalized` 被拒（warn 日志 + 终态缺失）。
+> 现改为按 terminal 预发射终止事件，reducer 容忍重复。
+
 ## 4. 兼容性规则
 
 1. 解析时先读 `trace_schema_version`。无此字段 → 视为 `"1.0"`。
