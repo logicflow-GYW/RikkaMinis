@@ -251,6 +251,10 @@ internal fun executeMemoryRollupTool(
  *   (production: ProviderExecutionGateway.stream).
  * @param executeSubTool runs one tool call inside the sub-agent's loop
  *   (production: executeSubagentTool — file/memory only, no UI updates).
+ * @param knownToolNames the sub-agent's allowed tool names (production:
+ *   the filtered tool list) — the residue policy resolves a drifted tool
+ *   call against THESE, so a markup-shaped false positive on an unknown
+ *   name is never eaten.
  * @return the final ToolExecutionResult for the main agent.
  */
 internal suspend fun runSubagentLoop(
@@ -261,11 +265,13 @@ internal suspend fun runSubagentLoop(
     systemPrompt: String,
     streamProvider: suspend (messages: List<LLMMessage>) -> kotlinx.coroutines.flow.Flow<LLMStreamChunk>,
     executeSubTool: suspend (name: String, argsJson: String) -> ToolExecutionResult,
+    knownToolNames: List<String>,
     log: (String) -> Unit,
 ): ToolExecutionResult {
     val resultSb = StringBuilder()
     var turns = 0
     var lastText = ""
+    var subResidueNudges = 0
     val history = mutableListOf(LLMMessage(role = LLMMessage.Role.USER, content = query))
 
     try {
@@ -287,7 +293,28 @@ internal suspend fun runSubagentLoop(
                 }
             }
 
-            val text = textSb.toString()
+            // [fix/same-class-cleanup] Same policy as the main loop's
+            // [fix/tool-call-copy-suppress] Fix 1/2 — second consumer. The
+            // reply can carry a RESTATED tool call as plain text (character
+            // drift drops the underscores, so no parser matches). Two things,
+            // both silent before this change:
+            //   1. the copy reached resultSb and the next request (the
+            //      sub-agent's result IS its persisted text — the main agent
+            //      then reads the markup as its own);
+            //   2. when nothing parsed as a call, the break below read as a
+            //      clean completion ("Model finished naturally") while the
+            //      sub-agent's task was unfinished.
+            // Detect on the RAW text (before stripping — a stripped text no
+            // longer carries the marker), strip for the visible/result text,
+            // and refill instead of finishing. Bounded so a markup-shaped
+            // false positive cannot loop forever.
+            val rawText = textSb.toString()
+            val residue = ToolCallResiduePolicy.firstResidue(rawText, knownToolNames)
+            val text = if (residue != null) {
+                ToolCallResiduePolicy.stripResidue(rawText, knownToolNames)
+            } else {
+                rawText
+            }
             lastText = text
             if (text.isNotBlank()) {
                 if (resultSb.isNotEmpty()) resultSb.append('\n')
@@ -295,6 +322,24 @@ internal suspend fun runSubagentLoop(
             }
 
             if (toolCalls.isEmpty()) {
+                if (residue != null && subResidueNudges < ToolCallResiduePolicy.MAX_RESIDUE_REFILL_NUDGES) {
+                    subResidueNudges++
+                    val refill = ToolCallResiduePolicy.refillMessage(residue)
+                    // Same invariant as the main loop's nudges: tool results
+                    // are persisted to history as role=USER messages, so the
+                    // tail here can be user(tool_result) — a blind USER append
+                    // yields two consecutive user roles (Anthropic hard 400 /
+                    // OpenAI silent merge). Bridge first.
+                    ensureRoleAlternationBeforeUserAppend(history)
+                    history.add(LLMMessage(
+                        role = LLMMessage.Role.USER,
+                        content = refill,
+                        contentParts = listOf(AgentContentPart.Text(refill)),
+                    ))
+                    log("[Subagent] turn=$turns tool-call residue in reply text (name=${residue.rawName}) " +
+                        "— refilling $subResidueNudges/${ToolCallResiduePolicy.MAX_RESIDUE_REFILL_NUDGES} instead of finishing")
+                    continue
+                }
                 // Model finished naturally — no more tool calls
                 break
             }

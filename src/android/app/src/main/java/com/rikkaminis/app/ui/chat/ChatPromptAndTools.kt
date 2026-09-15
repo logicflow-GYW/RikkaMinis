@@ -448,6 +448,10 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
             )
         },
         executeSubTool = { name, subArgs -> executeSubagentTool(name, subArgs) },
+        // [fix/same-class-cleanup] The residue policy resolves a drifted
+        // tool call against the sub-agent's OWN allowed tools — the same
+        // filtered list the loop executes against.
+        knownToolNames = subagentTools.map { it.name },
         log = { AppLogger.warning(ChatViewModel.TAG, it) },
     )
 }

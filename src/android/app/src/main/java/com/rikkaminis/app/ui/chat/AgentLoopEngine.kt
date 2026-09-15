@@ -1901,6 +1901,15 @@ internal class AgentLoopEngine(
                         content = verifyNudge,
                         contentParts = listOf(AgentContentPart.Text(verifyNudge)),
                     )
+                    // [fix/same-class-cleanup] Same invariant the entry points
+                    // already enforce ([ensureRoleAlternationBeforeUserAppend]):
+                    // tool results are persisted to history as role=USER
+                    // messages, so the tail here can be user(tool_result) when
+                    // the PREVIOUS turn dispatched tools — a blind USER append
+                    // yields two consecutive user roles (Anthropic hard 400
+                    // `roles must alternate` / OpenAI silent merge that
+                    // swallows the tool_result pairing). Bridge first.
+                    ensureRoleAlternationBeforeUserAppend(host.agentHistory)
                     host.agentHistory.add(nudgeMsg)
                     continue
                 }
@@ -1936,6 +1945,14 @@ internal class AgentLoopEngine(
                             content = refill,
                             contentParts = listOf(AgentContentPart.Text(refill)),
                         )
+                        // [fix/same-class-cleanup] Same role-alternation guard
+                        // as the verify nudge above — the refill's trigger
+                        // (tool-call-shaped markup, nothing parsed) is MOST
+                        // common right after a tool-dispatch turn, when the
+                        // tail is user(tool_result). A blind USER append would
+                        // yield two consecutive user roles (Anthropic hard 400
+                        // / OpenAI silent merge).
+                        ensureRoleAlternationBeforeUserAppend(host.agentHistory)
                         host.agentHistory.add(nudgeMsg)
                         continue
                     }

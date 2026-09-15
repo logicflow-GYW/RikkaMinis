@@ -5,6 +5,7 @@ import com.rikkaminis.app.data.model.LLMStreamChunk
 import com.rikkaminis.app.tools.SubagentSkill
 import com.rikkaminis.app.tools.ToolExecutionResult
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -129,6 +130,7 @@ class ChatToolExecutorsTest {
                     kotlinx.coroutines.flow.flowOf(LLMStreamChunk.Text("answer text"))
                 },
                 executeSubTool = { n, _ -> ToolExecutionResult("out-$n", true) },
+                knownToolNames = listOf("file_read"),
                 log = {},
             )
         }
@@ -160,6 +162,7 @@ class ChatToolExecutorsTest {
                     executed.add(n)
                     ToolExecutionResult("tool output", true)
                 },
+                knownToolNames = listOf("file_read"),
                 log = {},
             )
         }
@@ -168,6 +171,96 @@ class ChatToolExecutorsTest {
         assertTrue(result.output.contains("need tool"))
         assertTrue(result.output.contains("final answer"))
         assertTrue(result.output.contains("completed in 2 turn"))
+    }
+
+    @Test
+    fun `subagent loop strips restated tool-call copy from result text`() {
+        // A reply carrying a RESTATED call markup (character drift drops the
+        // underscores) beside the REAL call: the copy must not reach the
+        // result text, the real call must still execute.
+        val result = kotlinx.coroutines.runBlocking {
+            runSubagentLoop(
+                skillName = "s", query = "q", title = "t", config = config(),
+                systemPrompt = "sys",
+                streamProvider = { messages ->
+                    if (messages.size == 1) {
+                        kotlinx.coroutines.flow.flowOf(
+                            LLMStreamChunk.Text("call <invoke name=\"shellexecute\">x</invoke> now"),
+                            LLMStreamChunk.ToolCallComplete("id1", "file_read", org.json.JSONObject()),
+                        )
+                    } else {
+                        kotlinx.coroutines.flow.flowOf(LLMStreamChunk.Text("done"))
+                    }
+                },
+                executeSubTool = { _, _ -> ToolExecutionResult("out", true) },
+                knownToolNames = listOf("file_read", "shell_execute"),
+                log = {},
+            )
+        }
+        assertTrue(result.success)
+        assertTrue(result.output.contains("done"))
+        assertTrue(result.output.contains("now"))
+        assertFalse(result.output.contains("shellexecute"))
+    }
+
+    @Test
+    fun `subagent loop refills instead of finishing when only a residue turn`() {
+        // A turn whose text is ONLY a restated call and nothing parses:
+        // the loop must hand back with a reminder (bounded) instead of
+        // reading as a clean completion.
+        var streamCalls = 0
+        val lastMessages = mutableListOf<Int>()
+        val result = kotlinx.coroutines.runBlocking {
+            runSubagentLoop(
+                skillName = "s", query = "q", title = "t", config = config(maxTurns = 4),
+                systemPrompt = "sys",
+                streamProvider = { messages ->
+                    streamCalls++
+                    lastMessages.add(messages.size)
+                    if (messages.size == 1) {
+                        kotlinx.coroutines.flow.flowOf(
+                            LLMStreamChunk.Text("<invoke name=\"shellexecute\">fix it</invoke>"),
+                        )
+                    } else {
+                        kotlinx.coroutines.flow.flowOf(LLMStreamChunk.Text("ok, refilled"))
+                    }
+                },
+                executeSubTool = { _, _ -> ToolExecutionResult("x", true) },
+                knownToolNames = listOf("file_read", "shell_execute"),
+                log = {},
+            )
+        }
+        // Turn 1: residue only → refill (2nd request sees history grown past
+        // the initial user message). Turn 2: plain text → natural finish.
+        assertEquals(2, streamCalls)
+        assertEquals(listOf(1, 3), lastMessages)
+        assertTrue(result.output.contains("ok, refilled"))
+    }
+
+    @Test
+    fun `subagent residue false positive on unknown tool name finishes naturally`() {
+        // A markup-shaped tag naming an UNKNOWN tool must NOT be eaten (the
+        // policy refuses to guess) — the loop finishes naturally on turn 1
+        // and the text passes through untouched.
+        var streamCalls = 0
+        val result = kotlinx.coroutines.runBlocking {
+            runSubagentLoop(
+                skillName = "s", query = "q", title = "t", config = config(),
+                systemPrompt = "sys",
+                streamProvider = { _ ->
+                    streamCalls++
+                    kotlinx.coroutines.flow.flowOf(
+                        LLMStreamChunk.Text("the <div name=\"viewport\">widget</div> tag"),
+                    )
+                },
+                executeSubTool = { _, _ -> ToolExecutionResult("x", true) },
+                knownToolNames = listOf("file_read", "shell_execute"),
+                log = {},
+            )
+        }
+        assertTrue(result.success)
+        assertEquals(1, streamCalls)
+        assertTrue(result.output.contains("viewport"))
     }
 
     @Test
@@ -183,6 +276,7 @@ class ChatToolExecutorsTest {
                     )
                 },
                 executeSubTool = { _, _ -> ToolExecutionResult("out", true) },
+                knownToolNames = listOf("file_read"),
                 log = {},
             )
         }
@@ -207,6 +301,7 @@ class ChatToolExecutorsTest {
                     }
                 },
                 executeSubTool = { _, _ -> ToolExecutionResult("x", true) },
+                knownToolNames = listOf("file_read"),
                 log = {},
             )
         }
@@ -223,6 +318,7 @@ class ChatToolExecutorsTest {
                 systemPrompt = "sys",
                 streamProvider = { _ -> kotlinx.coroutines.flow.emptyFlow() },
                 executeSubTool = { _, _ -> ToolExecutionResult("x", true) },
+                knownToolNames = listOf("file_read"),
                 log = {},
             )
         }
