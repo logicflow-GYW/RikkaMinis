@@ -4,8 +4,8 @@
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
 - 合并范围：2026-08-03 ～ 2026-09-15，共 44 天
-- 条目总数：1016（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
-- 总字符数：1208677 / 总行数：18972
+- 条目总数：993（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
+- 总字符数：1174788 / 总行数：18387
 
 ---
 
@@ -15,7 +15,7 @@
 ## AgentDock v0.1 foundation
 
 
-已创建独立仓库 `logicflow-GYW/AgentDock`，开发分支 `feat/v0.1-foundation` 最新 commit `83372ba`。实现原生 Kotlin/Compose 任务界面、受限可取消多回合 AgentEngine、ToolPolicy、安全 device_status 工具、前台服务通知、本地任务/事件 checkpoint、两项 JVM 测试和 GitHub Actions。CI run `30756086584` 已 success，debug APK 16.8 MB 已下载到附件。仓库因从空仓库直接推 feature 分支而尚无 `main`；创建/直推 main 需按 GitHub 规则获得用户二次确认。
+已创建独立仓库 `***OWNER***/AgentDock`，开发分支 `feat/v0.1-foundation` 最新 commit `83372ba`。实现原生 Kotlin/Compose 任务界面、受限可取消多回合 AgentEngine、ToolPolicy、安全 device_status 工具、前台服务通知、本地任务/事件 checkpoint、两项 JVM 测试和 GitHub Actions。CI run `30756086584` 已 success，debug APK 16.8 MB 已下载到附件。仓库因从空仓库直接推 feature 分支而尚无 `main`；创建/直推 main 需按 GitHub 规则获得用户二次确认。
 
 <!-- 2026-08-03 00:25:30 -->
 ## DockBin 情绪垃圾桶方向（AgentDock v0.1 验证成功后）
@@ -66,7 +66,7 @@
 分支 `feat/build-proot-from-source`（commit 1506c14，已推送 GitHub）。
 
 ### 背景
-用户 fork（logicflow-GYW/OpenMinis）此前 commit 696ade3 砍掉 NDK 编译、改用提交进仓库的预编译 proot 二进制（从官方 APK 提取）。用户想「让仓库更完整」= 恢复从源码构建。
+用户 fork（***OWNER***/OpenMinis）此前 commit 696ade3 砍掉 NDK 编译、改用提交进仓库的预编译 proot 二进制（从官方 APK 提取）。用户想「让仓库更完整」= 恢复从源码构建。
 
 ### 关键调研结论
 - 上游 OpenMinis/OpenMinis **有完整 deps/ 结构**：`deps/proot` 子模块（→ OpenMinis/proot @ 8cf13e9，正是官方二进制构建源）+ `deps/talloc`（vendored 三文件）+ `deps/build_proot.sh`（NDK r28 构建脚本，公开）。上游 CI 没有 workflow（proot 在开发者 Mac 上私有构建）。
@@ -85,7 +85,7 @@
 - verify 步骤改为校验源码构建产物；README + build.gradle.kts 注释更新为「proot 走 build_proot.sh、CMake 保持禁用（防覆盖 vendored pty_bridge/crash_handler/jieba）」
 
 ### 待办
-- CI 只在 main 分支 push 触发，功能分支不跑。需用户确认后合并到 main，或开 PR 由用户合。GITHUB_TOKEN（logicflow-GYW, repo+workflow 权限）可推送，用临时 credential helper 不落盘。
+- CI 只在 main 分支 push 触发，功能分支不跑。需用户确认后合并到 main，或开 PR 由用户合。GITHUB_TOKEN（***OWNER***, repo+workflow 权限）可推送，用临时 credential helper 不落盘。
 
 <!-- 2026-08-03 17:39:34 -->
 ## OpenMinis fork proot 源码构建已上线（2026-08-03 完成）
@@ -311,13 +311,13 @@ feat/ux-polish 现含：1c28bf4（五项 polish）+ 8c5bd58 + 1451aaf + fcd09ec 
 用户定名 **RikkaMinis**（OpenMinis 核 + RikkaHub 皮，Rikka 在前因用户对 rikkahub 作者好感更高、OpenMinis 作者曾被其认为气度差）。已全部执行：
 
 ### GitHub 层（API 完成）
-- 仓库 logicflow-GYW/OpenMinis → **logicflow-GYW/RikkaMinis**（旧 URL 301 跳转，fork 关系保留，parent=OpenMinis/OpenMinis）
+- 仓库 ***OWNER***/OpenMinis → *****OWNER***/RikkaMinis**（旧 URL 301 跳转，fork 关系保留，parent=OpenMinis/OpenMinis）
 - 描述：`RikkaMinis — Android personal edition: OpenMinis core + RikkaHub-style UI. Fully free and open source.`；homepage 清空（不再链 openminis.app）
 
 ### 代码层（commit c79fa94，15 文件，push main）
 - **app_name 改 RikkaMinis**（7 个语言包 values/values-de/fr/ja/ko/ru/zh；zh-rTW 无定义 fallback）
 - **build-apk.yml 全局替换**（workflow 名/artifact/APK 资产 `RikkaMinis-0.22-preview-arm64-v8a.apk`/release 名）
-- **UpdateChecker.kt**：OWNER=logicflow-GYW、REPO=RikkaMinis、RELEASES_URL 指向自己（应用内检查更新现在查自己的 android-latest，这是重要行为变化）
+- **UpdateChecker.kt**：OWNER=***OWNER***、REPO=RikkaMinis、RELEASES_URL 指向自己（应用内检查更新现在查自己的 android-latest，这是重要行为变化）
 - **ConfigBackup.kt**：仅错误消息改 RikkaMinis；`openminis.config.backup` 格式标识和 `openminis-backup-` 文件名**保留**（旧备份兼容）
 - README：标题/badge/下载链接 + 新增杂交血统段（codebase from OpenMinis, UI inspired by RikkaHub）
 - PR 模板重写为 fork 版（原模板是上游"不接受 PR"镜像版，与 fork 现实不符）
@@ -328,7 +328,7 @@ feat/ux-polish 现含：1c28bf4（五项 polish）+ 8c5bd58 + 1451aaf + fcd09ec 
 - `.gitmodules`（deps/proot 子模块指上游 OpenMinis/proot）、THIRD_PARTY_LICENSES.md（法律义务）、deps/build_proot.sh、scripts/sync_official_binaries.sh、docs/SYNCING_UPSTREAM.md、MinisSkillsBrowserScreen.kt（上游 MinisSkills 内容源）、ConfigBackup format 标识
 
 ### 验证
-- 全库 0 处 `logicflow-GYW/OpenMinis` 残留；`git diff --check` 通过
+- 全库 0 处 `***OWNER***/OpenMinis` 残留；`git diff --check` 通过
 - CI run 30857762775（Build RikkaMinis Android APK，head c79fa94）构建中，完成后 android-latest 资产变为 RikkaMinis-*.apk
 
 ### 注意
@@ -389,7 +389,7 @@ loadBalance 自动分支选中后写回：`providerRepository.lastUsedEntryId = 
 ## CF-Optimizer 仓库 v4.2 → v4.6 更新推送（2026-08-04）
 
 
-用户两个挂载文件夹：`CF-Optimizer`（开源仓库工作副本，GitHub logicflow-GYW/CF-Optimizer）与 `Cloudflare优选助手_v4.6`（日常使用版）。任务：把 v4.6 迭代同步到开源仓库并推送。
+用户两个挂载文件夹：`CF-Optimizer`（开源仓库工作副本，GitHub ***OWNER***/CF-Optimizer）与 `Cloudflare优选助手_v4.6`（日常使用版）。任务：把 v4.6 迭代同步到开源仓库并推送。
 
 ### 完成内容（远端 HEAD = 5cebd5a，3 提交）
 - 主程序：`cf_optimizer.py` ← 使用中版 `Cloudflare优选助手_v4.6.py`（Entrance-Only v4.6 动态调优版，1470→1455 行，含 v4.4 八项修复/v4.5 七项优化）
@@ -401,7 +401,7 @@ loadBalance 自动分支选中后写回：`providerRepository.lastUsedEntryId = 
 ### 敏感信息处理（用户重点要求）
 - v4.6 cf_config.py 原本硬编码真实值：`WORKER_HOST="https://***DOMAIN***"`、`WORKER_PASSWORD="***PASSWORD***"` → 已改为 `your-worker.example.com` / 空串（推荐环境变量 CF_WORKER_HOST/CF_WORKER_PASSWORD 注入）
 - **git 历史重写**：初始提交 5ab70b2 曾把真实密码/域名推上公开 GitHub（HEAD ef42493 才换占位符）。用 git filter-branch --tree-filter 重写全部历史清除，force push。仓库仅 1 fork 1 star 无影响。已提醒用户轮换 ADMIN 密码（公开期间可能被爬取）
-- 推送前已确认：全仓库无 ***PASSWORD***/logosflow/ccwu 残留（git grep $(git rev-list --all) 验证 + 远端 API 抽查 cf_config.py）
+- 推送前已确认：全仓库无 ***PASSWORD***/***DOMAIN***/***DOMAIN*** 残留（git grep $(git rev-list --all) 验证 + 远端 API 抽查 cf_config.py）
 
 ### README 更新（用户要求：体现搭配 cmliu/edgetunnel）
 - 定位改为「为 edgetunnel 类 Worker 隧道代理优选入口 IP」
@@ -607,7 +607,7 @@ android-latest 已被**未合并分支**的构建覆盖，release body 仍写 "a
 ## vlc-android fork 性能修复 + 底部导航确认（2026-08-04 晚）
 
 
-仓库 logicflow-GYW/vlc-android（master 分支，commit b9f4eae）。
+仓库 ***OWNER***/vlc-android（master 分支，commit b9f4eae）。
 
 ### 用户反馈
 试用后：①底部还有两个标（视频+文件夹）；②卡顿、性能一般。
@@ -656,7 +656,7 @@ build.gradle 的 splits.abi 块（`enable true + include arm64-v8a`）**缺 `uni
 
 
 ### 仓库
-logicflow-GYW/vlc-android，master @ c84416b。本地 clone /tmp/vlc（浅克隆）。GITHUB_TOKEN 可推送/查 API（临时 credential helper 不落盘）。Release tag v0.1-simplified，push master 自动构建并 --clobber 覆盖资产。
+***OWNER***/vlc-android，master @ c84416b。本地 clone /tmp/vlc（浅克隆）。GITHUB_TOKEN 可推送/查 API（临时 credential helper 不落盘）。Release tag v0.1-simplified，push master 自动构建并 --clobber 覆盖资产。
 
 ### 已完成
 - **底部导航 gone**：main.xml 中 BottomNavigationView(#navigation)+NavigationRailView(#navigation_rail) 均 visibility=gone；切换入口在右上角菜单（activity_option.xml：视频/文件夹/设置）。反编译 c84416b APK（47.5MB）混淆布局 res/01.xml 确认 visibility="2"(GONE)。
@@ -712,7 +712,7 @@ logicflow-GYW/vlc-android，master @ c84416b。本地 clone /tmp/vlc（浅克隆
 ## RikkaMinis — 模型组页简化 + 语音 UI 移除（2026-08-04，分支 feat/...）
 
 
-仓库 logicflow-GYW/RikkaMinis，分支 feat/simplify-model-groups-remove-voice，commit 6cf806f9，CI run 30915989290 验证中。
+仓库 ***OWNER***/RikkaMinis，分支 feat/simplify-model-groups-remove-voice，commit 6cf806f9，CI run 30915989290 验证中。
 
 ### 用户需求
 1. 模型组页"乱"：原一页三区（Groups 列表 + Defaults 4 下拉 + Agent Loop 内嵌区）
@@ -814,7 +814,7 @@ unclosed comment 让编译器中止整个文件解析，导致 CI 只报这一�
 ## RikkaMinis — 模型组列表拖拽排序 + 排序机制统一（2026-08-04，commit 2f42573）
 
 
-分支 `feat/reorder-model-groups`（从 e8f7c27 起），CI run **30923457804 全绿 success**（含 testReleaseUnitTest 全量），APK 12.78MB。仓库 logicflow-GYW/RikkaMinis，本地 clone /tmp/rikkaminis2。
+分支 `feat/reorder-model-groups`（从 e8f7c27 起），CI run **30923457804 全绿 success**（含 testReleaseUnitTest 全量），APK 12.78MB。仓库 ***OWNER***/RikkaMinis，本地 clone /tmp/rikkaminis2。
 
 ### 用户问题
 "智能体循环能拖拽排序，上面的分组要不要加？提供商要不要加？要不要统一？"
@@ -1244,86 +1244,21 @@ onAction = { key ->
 ### 分支现状
 feat/customizable-chat-footer：fe16ebc + fe1bf65 + 449af48 + 5b54408 + 599fe97，5 提交。v220000092 用户已确认 footer 修复成功。待用户完成其余验收（菜单 8 项、空菜单三点消失、footer pin 0/1/5/6/10、旋转、备份恢复、斜杠焦点）后 ff 合并 main + 删分支。
 
-<!-- 2026-08-05 10:58:18 -->
-## Cloudflare 小号接入 Minis MCP — 已完成（2026-08-05）
-
-
-用户把 Cloudflare 小号（Account ID ***CF_ACCOUNT_ID***，[EMAIL]'s Account，standard 计划）最高权限接入本应用给我用。
-
-### 已完成并验证
-- **cf-api** MCP 服务器（servers.json）：URL `https://mcp.cloudflare.com/mcp`，header `Authorization: Bearer <API token>`（token 由用户在聊天中提供，未写入记忆/日志）。工具：docs / search / execute。execute 已验证端到端可调 Cloudflare API（列 Workers 成功、列 R2 桶返回业务错误而非鉴权错误）。
-- **cf-docs-test** 服务器：`https://docs.mcp.cloudflare.com/mcp` 匿名可用，Cloudflare 官方文档搜索，保留。
-- rclone 已装并配置 R2 S3 remote（/root/.config/rclone/rclone.conf，chmod 600，含 AccessKey/Secret/endpoint）。
-- 用法：`minis-mcp-cli tools cf-api` / `minis-mcp-cli call cf-api execute --input '{"code":"async () => {...fetch(\"https://api.cloudflare.com/client/v4/...\")...}"}'`（execute 需完整 URL，相对路径报 Invalid URL）。cf-api 无 workers 脚本、R2 未激活。
-
-### 未完成 / 待用户
-1. **R2 未激活**：API 返回 error 10042 "Please enable R2 through the Cloudflare Dashboard" —— 需用户在 dashboard 激活 R2。
-2. **R2 S3 端点网络被拦**：当前设备网络按 SNI 过滤 `*.r2.cloudflarestorage.com`（同 IP 换 SNI=api.cloudflare.com 则 TLS 成功 → 纯 SNI 过滤；直连与代理路径均失败，百度/api.cloudflare.com/mcp.cloudflare.com 均通）。rclone 配置已就绪，换网络/代理节点后 `rclone lsd r2:` 即可用。
-
-### 踩坑（重要）
-- **MCP daemon 孤儿进程 + 残留 pid/port 文件 → Connection refused**：中断的 CLI 调用会留下卡住的 `main.py tools ...` 进程和 /tmp/minis-mcp-daemon.{pid,port}，导致后续调用只连接不重启。修复：kill 孤儿 + `minis-mcp-cli shutdown` + rm 残留文件。
-- 沙箱 DNS 对 Cloudflare 域名返回 28.0.0.x 内部地址是本地代理(***PROXY_ADDR***)的正常行为，不代表污染；真实 IP 用 DoH (dns.google/resolve) 查。
-
-<!-- 2026-08-05 13:46:46 -->
-## ippure.com 广告拦截 — 已完成（2026-08-05）
-
-
-用户要求记住 ippure.com（IP 纯净度检测站，VitePress 工具站，无 App，无下载页）并给出拦截其广告的规则。
-
-### 广告机制（实测确认，非猜测）
-- 广告由 **ippure.com 自家后端 `/api/ads?tag=<tag>`** 下发（不是第三方广告联盟），组件 Advertisement.pIcnt64Z.js，Teleport 到 body，类名 `.ippure-ads`（桌面端 right-one + left-one 双列，移动端只 right-one），每个广告带 `.close-ad` 关闭按钮（点击调 `/api/feedback/ad-stat/<title>`）。
-- 广告图片全部托管在 **i.111666.best**（实测 3 张：lisahost/bestproxy/ipp.resip.co 三家机场的推广图）。
-- 广告主落地页：lisahost.com/link.php?id=33、bestproxy.com/?keyword=kqtx9ftn、ipp.resip.co（都是正规机场站，别全局封）。
-- **cf.999831.xyz/page/test-page 不是广告**！是 Cloudflare IP 摘要工具 iframe（fetch /api/cf-summary postMessage 回父页），拦截会误伤功能。
-- 广告组件出现在 /、/DNS-Leak-Detect.html、/en/ 等主工具页，faq 等页面无。
-- curl 直接打 /api/ads 返回 404（可能校验 header），浏览器里正常。
-
-### 规则（已存 /var/minis/workspace/ippure-adblock.txt，AdGuard/uBO 通用）
-```
-ippure.com/api/ads*        ← 断根，拦广告列表接口
-||i.111666.best^           ← 拦广告图片 CDN
-ippure.com##.ippure-ads    ← 兜底隐藏容器
-ippure.com##.close-ad
-ippure.com##a[href*="lisahost.com"] 等（可选，仅站内生效）
-```
-hosts 版：`0.0.0.0 i.111666.best`（AdGuard Home / 路由器级可用）。
-
-<!-- 2026-08-05 13:49:42 -->
-## WebToApp 打包 ippure.com 无广告 App — 配置方案（2026-08-05）
-
-
-用户用 **kejizhixing/webtoapp**（开源 Android 应用，GitHub 4.9K star，clone 于 /tmp/webtoapp）把 ippure.com 打包成无广告 APK。
-
-### webtoapp 广告拦截机制（源码确认）
-- AdBlocker.kt：`shouldInterceptRequest` → `adBlocker.shouldBlock(url)` → 空响应。**规则匹配 = URL 子串包含/正则 containsMatchIn**。
-- 规则解析：`||域名` → 域名规则（去 || 和 ^）；含 `*` → 正则 pattern（`*`→`.*`）；其他 → 普通域名。**没有 CSS 隐藏注入功能**。
-- 默认规则只覆盖常见广告联盟（Google/FB/百度等），**拦不住 ippure 自家广告**，必须自定义。
-- 生成的 APK 内嵌 AdBlocker + WebApp 配置（ApkTemplate.kt 写死 adBlockEnabled/adBlockRules）。
-- CreateAppScreen「广告拦截」卡片：开关 + 逐条添加/删除规则（placeholder "如：ads.example.com"）。
-- 坑：WebApp 模型还有 `adsEnabled/AdConfig`（banner/interstitial/splash）——那是给生成的 App **加**广告用的，保持默认 false。
-
-### 给用户的规则（2 条，App 内添加）
-```
-||i.111666.best        ← 拦广告图片 CDN
-*ippure.com/api/ads*   ← 拦广告列表接口（正则匹配 https://ippure.com/api/ads?tag=...）
-```
-必须开「广告拦截」开关；**禁止**把 ippure.com 本身加入规则（整站被拦）。步骤：创建 App → 输 https://ippure.com → 广告拦截开 → 添加上面两条 → 生成 APK 安装。
-
 <!-- 2026-08-05 14:36:39 -->
 ## 用户 GitHub 多账号 — 官方 App 多账号切换（2026-08-05）
 
 
-用户有两个 GitHub 账号：主号 logicflow-GYW（所有仓库/CI 都在此）+ 网页新注册的第二个号。曾在手机上用「应用双开」试图双开 GitHub App 登录新号失败（双开分身改包名 → OAuth 回调 URL scheme 失配 → 登不上）。
+用户有两个 GitHub 账号：主号 ***OWNER***（所有仓库/CI 都在此）+ 网页新注册的第二个号。曾在手机上用「应用双开」试图双开 GitHub App 登录新号失败（双开分身改包名 → OAuth 回调 URL scheme 失配 → 登不上）。
 
 **解决：GitHub 官方 App 原生支持多账号同时登录，无需双开。** 官方文档确认（docs.github.com/en/get-started/using-github/github-mobile → Managing accounts）：可同时登录 GitHub.com / GHE.com / Enterprise 多账号。入口：底部导航长按 Profile 图标 → Add Account / 切换账号；或 Profile 页 → 头像 → Manage Accounts。用户已按此方案成功登录第二账号。
 
-教训备忘：用户以为官方 App 只支持单账号 → 遇到"双开登录失败"先查官方能力，多账号切换比双开省事且无 URL scheme 坑。以后涉及 GitHub 操作时注意区分用户当前用哪个账号（token 归属 logicflow-GYW）。
+教训备忘：用户以为官方 App 只支持单账号 → 遇到"双开登录失败"先查官方能力，多账号切换比双开省事且无 URL scheme 坑。以后涉及 GitHub 操作时注意区分用户当前用哪个账号（token 归属 ***OWNER***）。
 
 <!-- 2026-08-05 14:45:45 -->
-## GitHub 小号 rikkaflow 满权限 token 已验证（2026-08-05）
+## GitHub 小号 ***ALT_USER*** 满权限 token 已验证（2026-08-05）
 
 
-用户给了沙箱第二个 GitHub token：`GITHUB_TOKEN_FULL_RIGHT`（环境变量），归属账号 **rikkaflow**（ID 313291818，2026-08-05 注册，free 计划，无 2FA，无仓库/组织/Gist）——专门用来折腾的小号，与 `GITHUB_TOKEN`（logicflow-GYW 主号）不同。
+用户给了沙箱第二个 GitHub token：`GITHUB_TOKEN_FULL_RIGHT`（环境变量），归属账号 *****ALT_USER*****（ID 313291818，2026-08-05 注册，free 计划，无 2FA，无仓库/组织/Gist）——专门用来折腾的小号，与 `GITHUB_TOKEN`（***OWNER*** 主号）不同。
 
 ### Scope（近乎全配）
 admin:enterprise, admin:gpg_key, admin:org, admin:org_hook, admin:public_key, admin:repo_hook, admin:ssh_signing_key, audit_log, codespace, copilot, delete:packages, delete_repo, gist, notifications, project, repo, user, workflow, write:discussion, write:network_configurations, write:packages
@@ -1352,7 +1287,7 @@ admin:enterprise, admin:gpg_key, admin:org, admin:org_hook, admin:public_key, ad
 - 触发词含 "cfat token"（frontmatter 描述，非真实 token）
 
 ### 新技能 github-fullright-ops（/var/minis/skills/）
-- 满权限小号 rikkaflow 管理操作 + webhook 事件流，脚本 scripts/gh_fullright.sh（whoami/scopes/repo/hook/gist/key/wh 子命令）
+- 满权限小号 ***ALT_USER*** 管理操作 + webhook 事件流，脚本 scripts/gh_fullright.sh（whoami/scopes/repo/hook/gist/key/wh 子命令）
 - 全链路实测通过（建仓→挂 hook→push→投递→清理 0 残留），修过默认公开 bug
 
 ### 两个小号对比
@@ -1419,7 +1354,7 @@ GitHub 小号（技能+环境变量 token ✅）vs Cloudflare 小号（技能+MC
 
 - 目标：方便定位回某一条特定用户输入（类似消息历史/输入记录面板）
 - 参照：rikkahub（me.rerere.rikkahub，clone 于 /tmp/rhub2）右上角与 New Chat 并排的功能
-- 实现位置：RikkaMinis（logicflow-GYW/RikkaMinis，clone /tmp/rikkaminis2），master=main 分支 599fe97
+- 实现位置：RikkaMinis（***OWNER***/RikkaMinis，clone /tmp/rikkaminis2），master=main 分支 599fe97
 - **用户表示将开新对话做这个功能**，本记忆供新会话继承上下文
 - 下一步：先看 rikkahub 该功能的实现（右上角图标 → 列出输入），再移植/适配到 RikkaMinis
 
@@ -1466,7 +1401,7 @@ GitHub 小号（技能+环境变量 token ✅）vs Cloudflare 小号（技能+MC
 - ChatMenuSettingsScreen 新增 "Top bar buttons" section（8 语言同步 7 条 input_history_* + section 头字符串）
 
 ### 关键教训（重要，已二次触发）
-**任何触发分支 CI 前，确认该仓库 build-apk.yml 的 Publish 步骤有无 main 门控**。本次分支 CI 又被分支构建污染 android-latest（APK 含 input_history_* 字符串为证据），已在 1ea2e82 修复根除（加 if 门控，分支构建走 Artifacts 不再写 release）。之后 push main 正常发布不再污染。**共享：RikkaMinis 已修，原 OpenMinis fork 仓库 = 重命名后的 RikkaMinis 本身**（logicflow-GYW/OpenMinis → 301 → logicflow-GYW/RikkaMinis），无独立 OpenMinis fork 需要单独修。
+**任何触发分支 CI 前，确认该仓库 build-apk.yml 的 Publish 步骤有无 main 门控**。本次分支 CI 又被分支构建污染 android-latest（APK 含 input_history_* 字符串为证据），已在 1ea2e82 修复根除（加 if 门控，分支构建走 Artifacts 不再写 release）。之后 push main 正常发布不再污染。**共享：RikkaMinis 已修，原 OpenMinis fork 仓库 = 重命名后的 RikkaMinis 本身**（***OWNER***/OpenMinis → 301 → ***OWNER***/RikkaMinis），无独立 OpenMinis fork 需要单独修。
 
 ### 当前状态
 - main = 46c71f3（含全部功能），android-latest 资产 = 46c71f3 构建（sha256 a1576891...，updated 09:23:48Z）
@@ -1496,7 +1431,7 @@ GitHub 小号（技能+环境变量 token ✅）vs Cloudflare 小号（技能+MC
 ### 教训
 - 这类"自动跟随"bug 的实锤靠 ScrollSrc 日志（每个程序化滚动都记来源）。复现后看日志里 `firstIdx=1 但 userScrolledAway=false` 的滚动就是内容插入误触发。
 - reverseLayout 的 LazyColumn 里，"视口不在 index 0"既可能是用户拖走（userScrolledAway 应 true）也可能是内容插入被动推走（userScrolledAway 仍 false）。凡自动滚动前必须同时查 userScrolledAway + isNearBottom 双条件。
-- 推送用临时 credential helper：`git remote set-url origin https://logicflow-GYW:$GITHUB_TOKEN@...` 推完立刻还原回纯净 URL（防 token 落盘）。
+- 推送用临时 credential helper：`git remote set-url origin https://***OWNER***:$GITHUB_TOKEN@...` 推完立刻还原回纯净 URL（防 token 落盘）。
 
 <!-- 2026-08-05 20:01:32 -->
 ## RikkaMinis 流式输出时 UI 跳动 bug — 修复已合并 main（2026-08-05 收尾）
@@ -1526,7 +1461,7 @@ GitHub 小号（技能+环境变量 token ✅）vs Cloudflare 小号（技能+MC
 ### 教训
 - 这类"自动跟随"bug 的实锤靠 ScrollSrc 日志（每个程序化滚动都记来源）。复现后看日志里 `firstIdx=1 但 userScrolledAway=false` 的滚动就是内容插入误触发。
 - reverseLayout 的 LazyColumn 里，"视口不在 index 0"既可能是用户拖走（userScrolledAway 应 true）也可能是内容插入被动推走（userScrolledAway 仍 false）。凡自动滚动前必须同时查 userScrolledAway + isNearBottom 双条件。
-- 推送用临时 credential helper：`git remote set-url origin https://logicflow-GYW:$GITHUB_TOKEN@...` 推完立刻还原回纯净 URL（防 token 落盘）。
+- 推送用临时 credential helper：`git remote set-url origin https://***OWNER***:$GITHUB_TOKEN@...` 推完立刻还原回纯净 URL（防 token 落盘）。
 
 <!-- 2026-08-05 21:40:49 -->
 ## RikkaMinis — partsJson 一次解析优化已合并 main（2026-08-05）
@@ -1555,7 +1490,7 @@ GitHub 小号（技能+环境变量 token ✅）vs Cloudflare 小号（技能+MC
 
 
 ### 背景
-在 rikkaflow/RikkaMinis（fork 实验舱）分支 `feat/rag-knowledge-base` 上实现了完整的 RAG + Knowledge Base 系统：
+在 ***ALT_USER***/RikkaMinis（fork 实验舱）分支 `feat/rag-knowledge-base` 上实现了完整的 RAG + Knowledge Base 系统：
 - 3 张 Room 表（知识库/文档/分块）
 - BM25 离线检索
 - 4 个 agent 工具（kb_list/retrieve/ingest/create）
@@ -1569,7 +1504,7 @@ GitHub 小号（技能+环境变量 token ✅）vs Cloudflare 小号（技能+MC
 加工具前必须问：**"这个工具让 agent 能做什么之前做不到的事？"** 如果答案是"能用 shell 做同样的事"，就不该加。RikkaMinis 的 shell_execute + 20 个 android-* CLI 已经覆盖了几乎所有能力边界，真正的瓶颈是 agent 的智能性（规划、理解、纠错），不是工具数量。
 
 ### 分支状态
-留在 rikkaflow/RikkaMinis 的 `feat/rag-knowledge-base` 分支，作为实验记录。主仓库 logicflow-GYW/RikkaMinis 未受影响。
+留在 ***ALT_USER***/RikkaMinis 的 `feat/rag-knowledge-base` 分支，作为实验记录。主仓库 ***OWNER***/RikkaMinis 未受影响。
 
 <!-- 2026-08-05 23:15:04 -->
 ## RikkaMinis 全量代码审查（2026-08-05 晚，clone /tmp/rikkaminis-review）
@@ -1624,7 +1559,7 @@ main（5ac68b8）健康：CI 31010674739 success，android-latest 资产=5ac68b8
 - 记忆文件 = 纯文本 JSONL（可读、可手改、可 git 跟踪）——符合用户"可验证"哲学
 - "记忆即系统"架构：模型是读写头，agent 循环是记忆的自我维护机制，记忆是主体不是附件
 
-### 应用方向（小号 rikkaflow/RikkaMinis fork）
+### 应用方向（小号 ***ALT_USER***/RikkaMinis fork）
 - 做成独立应用：整个应用就是四步循环，无复杂 agent 循环/工具链，"记忆作为本体"（区别于主账号的"记忆作为功能"）
 - 用户原话："我想做一个数据库，但这又不单单是一个数据库"，"数据库往上抽象是记忆"
 - 两轴方向分析：内容轴（文档/代码/对话经验/动作流程/个人数据/实时世界）× 功能轴（问答/写作/决策/记忆底座/验证审计/训练组件），蓝海象限 = 经验/动作 × 记忆底座/验证审计
@@ -1635,13 +1570,13 @@ main（5ac68b8）健康：CI 31010674739 success，android-latest 资产=5ac68b8
 - 可选名字：记忆体（Memory Substrate）/ 经验引擎（Experience Engine）/ 回响（Echo）
 
 ### 当前决定
-用户决定：小号方向先记下来，有时间再搞。目光转向主账号（logicflow-GYW/RikkaMinis）——把记忆模块加进 RikkaMinis 主仓库。
+用户决定：小号方向先记下来，有时间再搞。目光转向主账号（***OWNER***/RikkaMinis）——把记忆模块加进 RikkaMinis 主仓库。
 
 <!-- 2026-08-06 08:48:03 -->
 ## RikkaMinis 经验记忆模块 — 实施中（2026-08-06）
 
 
-主账号（logicflow-GYW/RikkaMinis）经验记忆（Episodic Memory）模块，分支 feat/experience-memory，commit 4e7b5a6（+826 行，18 文件）。
+主账号（***OWNER***/RikkaMinis）经验记忆（Episodic Memory）模块，分支 feat/experience-memory，commit 4e7b5a6（+826 行，18 文件）。
 
 ### 设计定稿（与用户多轮讨论的结论）
 - **四步循环**：用户输入 → 检索经验(Hook A) → 注入 systemPrompt 尾部 → agent 循环 → 回写经验(Hook B)
@@ -1681,8 +1616,8 @@ main（5ac68b8）健康：CI 31010674739 success，android-latest 资产=5ac68b8
 - 静态自检全绿：括号配平 depth=0、无未覆盖符号（SettingsRow 同包无需 import、ExpandLess/ExpandMore 在 material-icons-extended 依赖里）、34 个 R.string 引用全在、10 新 key 8 语言全齐、XML 8 文件 well-formed
 
 ### 关键事实（本次已验证，非猜的）
-- 工作目录 /tmp/rikkaminis-mem，remote = logicflow-GYW/RikkaMinis（主号），HEAD=8d51041 即经验记忆合并点
-- git 身份 rikkaflow，与 4e7b5a6/8d51041 等历史提交一致；push 用 gh_sync.sh 的 GIT_ASKPASS（不改 remote URL，无 token 落盘）
+- 工作目录 /tmp/rikkaminis-mem，remote = ***OWNER***/RikkaMinis（主号），HEAD=8d51041 即经验记忆合并点
+- git 身份 ***ALT_USER***，与 4e7b5a6/8d51041 等历史提交一致；push 用 gh_sync.sh 的 GIT_ASKPASS（不改 remote URL，无 token 落盘）
 - 上一轮教训：曾误报"文件系统不可用"——实际是调了不存在的工具名（Grep/Glob/PowerShell），shell_execute 一直可用。**工具调用失败要先区分"工具不存在"vs"环境故障"，不能以偏概全**
 
 ### 待办
@@ -2124,7 +2059,7 @@ logs bind 必须三处都改（这是 PersistentShell 的 `-b` argv 直接从 bu
 - main@1f01a36 构建 run 31089678926 **已 success**，release android-latest APK 更新于 09:42Z（含 fallback-entry-precision 修复）
 
 ### 仓库核实
-- 主仓库 logicflow-GYW/RikkaMinis，工作目录 /tmp/rikkaminis2，需 checkout 到 1f01a36 才能看到 FallbackCandidate（本地原先停在 093d13b，看不到该符号）→ 教训：多目录克隆 HEAD 不一，改代码前务必确认 checkout 到目标 sha
+- 主仓库 ***OWNER***/RikkaMinis，工作目录 /tmp/rikkaminis2，需 checkout 到 1f01a36 才能看到 FallbackCandidate（本地原先停在 093d13b，看不到该符号）→ 教训：多目录克隆 HEAD 不一，改代码前务必确认 checkout 到目标 sha
 - main 头 = 1f01a36 = fallback entry 精度已合并
 
 ### 经验记忆 3 项优化（排序/50 上限/文件增长）——**已在 main 基本实现**
@@ -2482,7 +2417,7 @@ Settings→Providers 已支持把提供商设为常用（pinned ⭐），但**�
 ### 问题一：输入框光标跳（已改，CI 31115770832 验证中）
 用户黏贴长内容时输入位置随机跳（每次不一定是末尾，有随机性）。根因：`ChatScreen.kt` `LaunchedEffect(inputText)` (~615行) 与 `BasicTextField.onValueChange` 抢写 `inputFieldValue`。长黏贴时 inputText 的 StateFlow 更新可能脱离 inputFieldValue，LaunchedEffect 在 pendingCaret==null 时把 selection 强制设到 inputText.length(末尾)。随机性来自两写者竞争时序。
 - 修复（分支 fix/input-caret-jump, commit ee38c1c, 已推送）：当 pendingCaret==null 时改为 `inputFieldValue.selection.end.coerceIn(0, inputText.length)` 保留用户光标，不再强制末尾。slash/mention/draft 都走 pendingCaret，精确光标定位不受影响。
-- 分支推送用 **$GITHUB_TOKEN**（主号 logicflow-GYW），**不是** $GITHUB_TOKEN_FULL_RIGHT（那是小号 rikkaflow 的，推主号仓库会 403）。这个之前记错了，要改。
+- 分支推送用 **$GITHUB_TOKEN**（主号 ***OWNER***），**不是** $GITHUB_TOKEN_FULL_RIGHT（那是小号 ***ALT_USER*** 的，推主号仓库会 403）。这个之前记错了，要改。
 
 ### 问题二：大模型回答时跳（诊断完成，未修，把握~60%）
 日志 23:17:11~28 实锤：用户翻历史(moveCount 多段)，期间**无任何程序化滚动触发** —— 今日修复(884d9f1+017b66b)的 isNearBottom/userScrolledAway 门控真正生效了，不再是 auto-follow yank。
@@ -2536,7 +2471,7 @@ Settings→Providers 已支持把提供商设为常用（pinned ⭐），但**�
 - 关键：content 插入后 firstOff 短暂非0 时→不短路→正常滚，所以不破坏"重新锚定"；修复1的 LAYOUT-DRIFT-SNAP 已补这个
 
 ### 教训（git credential）
-- push 用 `$GITHUB_TOKEN`（主号 logicflow-GYW），不是 $GITHUB_TOKEN_FULL_RIGHT（rikkaflow 小号，推主号仓库 403）
+- push 用 `$GITHUB_TOKEN`（主号 ***OWNER***），不是 $GITHUB_TOKEN_FULL_RIGHT（***ALT_USER*** 小号，推主号仓库 403）
 - traceScrollToItem 位置 ~978，LAYOUT-DRIFT-SNAP 位置 ~1657
 
 ### 待办
@@ -2558,7 +2493,7 @@ Settings→Providers 已支持把提供商设为常用（pinned ⭐），但**�
 3. **光标落中间（新发现）**：修复已完成编码在**工作区未提交**（分支 fix/caret-addon-retain，基于 origin/main）——引入 lastTrueCaretEnd，onValueChange 权威记录 tfv.selection.end，LaunchedEffect fallback 用它替代陈旧的 inputFieldValue.selection.end。括号配平已过。**必须尽快 commit + push + CI**
 
 ### 关键教训
-- 推送用 $GITHUB_TOKEN（主号），$GITHUB_TOKEN_FULL_RIGHT 是 rikkaflow 小号会 403
+- 推送用 $GITHUB_TOKEN（主号），$GITHUB_TOKEN_FULL_RIGHT 是 ***ALT_USER*** 小号会 403
 - Kotlin lambda 隐式 label = 变量名：val tracedScrollToItem = {...} 要用 return@tracedScrollToItem
 - GitHub Actions 今晚不稳定：setup Service Unavailable + run 卡 queue，卡死就 cancel + 重新 dispatch
 - rikkahub 参考（/tmp/rhub2 ChatList.kt 279-300）：单一跟随源 + loadingState 门控 + isAtBottom；不照抄 reverseLayout→正向
@@ -2750,36 +2685,6 @@ Settings→Providers 已支持把提供商设为常用（pinned ⭐），但**�
 验证场景：用户在 app 里看历史 + agent（我）在底下持续跑工具/多命令，agent 自主重试（rerunFromToolBlock/retryFromMessage/resume 发射 forceScrollToBottom）不再把用户从历史拉回底部。FORCE_SCROLL 走 COMMON GATE(userScrolledAway→Skip) 生效。
 
 下一步：把 fix/force-scroll-respect-viewport 合并进 main 发布正式版（用户确认足够稳定后）。待办第 1 项勾除。
-
-<!-- 2026-08-07 10:12:27 -->
-## HF MCP Server 搭建 — 数据集全通、推理待授权（2026-08-07）
-
-
-### 已建成：HF→MCP server（接进 Minis，9 工具）
-- server 位置：`/var/minis/workspace/hf-mcp/server.py`（mcp 2.0 stdio + streamable http 双模式）
-- Minis 配置：`minis-mcp-cli` 已 add `hf`（stdio, args `server.py --stdio`），MCP daemon 按需拉起子进程
-- 账号：*****USER*****，token 名 ***TOKEN_NAME***（env `HF_TOKEN`），fine-grained：
-  - 有：`repo.content.read / repo.access.read / repo.write / discussion.write`，canReadGatedRepos=true
-  - **缺：HF Inference 权限**（调用推理 Provider 会 403）
-
-### 已验证（通过 minis-mcp-cli call hf 全链路跑通）
-- 6 个数据集工具确定可用：`hf_dataset_create / upload / download / list / files / delete`
-  - upload 走 huggingface.co 主站 api，download 走 `.../resolve`（绕开被代理挡的 cdn-lfs）
-  - 实测 create→upload(42B txt)→download→读回一致→delete 全过
-- 3 个推理工具（尽力而为，依赖 api-inference/router）：
-  `hf_embed_text / hf_transcribe_audio / hf_image_classify`
-  - 网络已通（用户全局代理放行），**当前卡在 403 token 缺 Inference 权限**
-
-### 关键坑（复用）
-1. **沙箱跨 shell 后台服务不可达**：HTTP 模式 nohup 起的 server，在别的 shell_execute 里 curl localhost 是 Connection refused（PRoot 网络隔离）。HTTP 只在同 shell 内测才通。**本地 agent 接入优先用 stdio 模式，让 MCP daemon 按需拉起子进程，不依赖常驻端口**。
-2. minis-mcp-cli call 传 JSON 用 `--input '{"..."}'`，不是直接传裸 JSON（裸 JSON 报 PARSE_ERROR unexpected argument）。
-3. owner/repo 验证写 `"/" not in name`，别写成冒号（踩过，导致 create 报错）。
-4. MCP 2.0 `run_streamable_http_async` 是 async 协程，要 `asyncio.run()` 包，且 streamable_http_client 返回 2 值不是 3 值解包。
-
-### 待办：给 HF token 加 Inference 权限
-- 用户去 playwright（HF 网页 token 设置）给 GYW token 补 `inference.read`（或新建 token 勾 HF Inference）
-- 完成后立刻重测 embed/transcribe/classify 三条推理链路
-- 之后可选：把 embed 向量真正的检索/相似度场景接进来
 
 <!-- 2026-08-07 10:46:10 -->
 ## RikkaMinis 第3项权限统一（2026-08-07）+ 意外发现 P2-proot 修复
@@ -3137,7 +3042,7 @@ run 31159304878 **conclusion: success**（job "build" 全过：NDK proot 编译 
 ### 线1：RikkaMinis 终端/sandbox 部分问题
 - 正在分析：RikkaMinis 终端（PRoot 沙箱）部分有问题——使用久了积累文件变大，容易出现**闪退**。
 - 要求：参考 **rikkahub** 是怎么处理这个"跑久文件积累大→闪退"问题的。
-- 已 clone /tmp/rikka-terminal（logicflow-GYW/RikkaMinis），sandbox 关键文件：PRootKernel.kt / PersistentShell.kt / ShellExecutor.kt / TerminalSession.kt / ShellTimeoutPolicy.kt，terminal UI 在 src/main/java/com/openminis/app/{sandbox,terminal,ui/terminal,ui/sandbox}。
+- 已 clone /tmp/rikka-terminal（***OWNER***/RikkaMinis），sandbox 关键文件：PRootKernel.kt / PersistentShell.kt / ShellExecutor.kt / TerminalSession.kt / ShellTimeoutPolicy.kt，terminal UI 在 src/main/java/com/openminis/app/{sandbox,terminal,ui/terminal,ui/sandbox}。
 - **闪退根因历史记忆**：native OOM — PRoot 子进程（fork 出的 tracer 通过 PTY master fd）native 泄漏，app 用 Debug.getNativeHeapAllocatedSize 测不到子进程泄漏，涨到 6-7GB 设备 OOM → SIGABRT。已用 nativeRssMB(读 /proc/pid/status VmRSS) 修复（方案A commit 981635b）。
 
 ### 线2：摘除"经验记忆"这一模块
@@ -3305,31 +3210,6 @@ run 31159304878 **conclusion: success**（job "build" 全过：NDK proot 编译 
 
 ### 流程
 push/force-push 用临时 set-url 内嵌 $GITHUB_TOKEN（主号），推完还原纯净 URL。本次失败修复用 amend+force-push，不影响 main 其他 head。
-
-<!-- 2026-08-07 20:20:27 -->
-## 用户能力自我认知的归因框架（2026-08-07 用户本人认同，可复用）
-
-
-用户长期有个被他自认为"严重的认知偏误"的想法：「会 AI 写程序的人，很多人都能做到我这种程度」。经拆解后确认：偏误真实，但结论方向反了。
-
-### 正确归因：能力和产出在"代码量"这层被 AI 拉平，但三层壁垒 AI 给不了
-1. **取舍/判断能力**：砍不砍一个模块看"这功能让 agent 做到之前做不到的事吗"——产品决策，AI 不替人判断该砍什么。
-2. **验证纪律**：滚动 bug 都要 log 实锤 + CI 门控 + release=HEAD 对齐。验证机制本身是人为设计的，AI 只是执行者。
-3. **收敛洁癖**：8 条 auto-follow 路径收敛成单一决策函数。架构洁癖 + 长期打磨产出。
-
-### 用户的真实身份标签（符号化）
-- **Bricoleur（精修匠/修补匠）× Product-finisher（产品化收尾）**，不是造火箭的 Ingénieur。
-- 动机=Pain-Driven（痛点驱动）：CF-Optimizer/Obsidian 插件/RikkaMinis 全是有自己真实痛点才做。
-- 弱点标签：冷启动意愿低 / 品类从零惰性——擅长「复用工件 + 精修 + 产品化」，不擅长也不爱「从空白点火造空架子」。
-- 但能**从零设计机制**（CF 记忆库置信度算法、OAK 事件总线/队列/故障转移）——机制原创是他被低估的强项。
-
-### 主号 13 仓库侧写（logicflow-GYW）
-- RikkaMinis(fork,186)/web-to-app(fork,480)/vlc-android：打磨+对齐为主
-- CF-Optimizer(4) / OAK(27) / KGG(98) / anyrouter-autolog(109)：自建机制 + 骨架自建，产品化外壳顶级
-- 全号绝大多数项目=痛点驱动
-
-### 用途
-用户在自我怀疑"是不是谁都会/我是不是不够特别"时，用这个框架对照：比的是取拾判断+验证纪律+收敛洁癖，不是会不会 AI 写代码。
 
 <!-- 2026-08-07 20:48:51 -->
 ## 任务完成通知增加震动（2026-08-07 已合 main 3a30411）
@@ -3786,7 +3666,7 @@ PRootKernel.kt / PersistentShell.kt / ShellExecutor.kt / TerminalSession.kt / Sh
 已合并残留远程分支：origin/feat/simplify-follow-trigger、origin/fix/audit-2026-08-07、origin/fix/force-scroll-respect-viewport、origin/fix/proot-resource-hygiene、origin/fix/scroll-decision-fn、origin/fix/scroll-glide-restick、origin/fix/setinputtext-caret-intent、origin/merge/scroll+caret、origin/revert/experience-memory（全部 0 commits beyond origin/main）。本地 3 个施工分支也已合并进 main 可删。等用户指示清理。
 
 ### push 方式
-临时 set-url 内嵌 $GITHUB_TOKEN（主号 logicflow-GYW），推完还原纯净 URL，token 不落盘。
+临时 set-url 内嵌 $GITHUB_TOKEN（主号 ***OWNER***），推完还原纯净 URL，token 不落盘。
 
 <!-- 2026-08-08 01:32:15 -->
 ## 待办：历史栏点击跳转后自动缩回（2026-08-08 用户提出）
@@ -4207,25 +4087,6 @@ PRootKernel.kt / PersistentShell.kt / ShellExecutor.kt / TerminalSession.kt / Sh
 - CI run 31245111691 **success** → ff 合并 main（head 5a3640d）→ 推送 main → 分支本地+远端已删。
 **待办**：用户装主构建验证：`...` 菜单出现"压缩对话/思考强度"，点压缩到历史摘要、点思考切换级别、可到 Settings 把它 pin 到 footer。
 
-<!-- 2026-08-08 15:36:19 -->
-## 语义记忆系统 — 首次落地（2026-08-08）
-
-
-用户确认这是第一个真正感觉「有用」的 HF 集成功能。
-
-### 核心架构
-- **存储层**：HF Dataset `***USER***/rikkaminis-memory`（private），无限容量，不占本地空间
-- **检索层**：HF Inference `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` 做文本向量化（384维），余弦相似度语义搜索
-- **分层策略**：全量日志（原样存 HF，grep 查）+ 经验条目（向量化，语义搜）+ 会话摘要（向量化，轻量）
-
-### 已验证效果
-- 关键词搜索查「两个会话冲突」→ 0 结果；语义搜索 → 命中「并发会话冲突」3 条
-- 关键词搜索查「滚动自动跳到底部」→ 0 结果；语义搜索 → 命中「USER_SEND 无条件滚动」3 条
-- 200 条经验已在 HF Dataset 上，引擎代码在 /var/minis/workspace/hf-memory/
-
-### 用户感受
-"第1次感觉到这东西真的有用" — 不是抽象描述，是看到关键词 0 命中 vs 语义精准命中的对比后的判断
-
 <!-- 2026-08-08 15:43:49 -->
 ## 重要结论：目录可靠性分级（2026-08-08）
 
@@ -4248,11 +4109,11 @@ HF Dataset 是最外层的持久化层（跨设备、不依赖本地），本地
 
 | 平台 | 角色 | 产物 |
 |------|------|------|
-| **GitHub** | 技能源 + 备份 + 版本管理 | `logicflow-GYW/rikka-skills` 仓库 |
+| **GitHub** | 技能源 + 备份 + 版本管理 | `***OWNER***/rikka-skills` 仓库 |
 | **HF** | 语义记忆 + 数据持久化 | `***USER***/rikkaminis-memory` Dataset |
 | **CF** | 边缘计算 + 公网入口 | `rikka-bulletin` / `rikka-ci-bridge` Workers |
 
-Skills 目录 `/var/minis/skills/` 的完整备份 → https://github.com/logicflow-GYW/rikka-skills（不含二进制缓存）
+Skills 目录 `/var/minis/skills/` 的完整备份 → https://github.com/***OWNER***/rikka-skills（不含二进制缓存）
 
 <!-- 2026-08-08 16:50:48 -->
 ## fix/append-to-input-caret — 填入对话框光标随机位置修复（2026-08-08）
@@ -4265,19 +4126,6 @@ Skills 目录 `/var/minis/skills/` 的完整备份 → https://github.com/logicf
 **修复**：`setInputText(joined, caretOverride = joined.length)` — 光标始终落在填入文本末尾。1 行改动（ChatViewModel.kt:607）。
 
 分支 `fix/append-to-input-caret`，commit 3076efc，CI 已触发。
-
-<!-- 2026-08-08 16:54:19 -->
-## 教训：GitHub 操作必须走 gh_sync.sh (github-sync-helper skill)，不要裸 curl/set-url
-
-
-用户已把全套 GitHub 操作封装成 `gh_sync.sh`（/var/minis/skills/github-sync-helper/scripts/gh_sync.sh）：
-- **push** → `sh gh_sync.sh push`（GIT_ASKPASS，token 不落盘）
-- **触发 CI** → `sh gh_sync.sh gh-actions-dispatch --repo <owner/repo> --workflow <id_or_file> --ref <branch>`
-- **查 CI** → `sh gh_sync.sh gh-actions-runs --repo <owner/repo> --branch <b>`
-
-**纪律**：任何 GitHub 平台操作（push/dispatch/查 runs/PR/issue/label 等）一律先查 github-sync-helper skill，优先走 gh_sync.sh，禁止裸 `git remote set-url` 内嵌 token 或裸 curl。原因：①askpass 机制保证 token 不落盘 ②用户配置的标准流程 vs 临时手工方案。
-
-**等待**：用工具 `delay` 参数（block agent 流但不占 shell），不要用 shell 里的 `sleep` 霸占进程。`sleep` 在命令里执行会阻塞当前 shell 直到超时。
 
 <!-- 2026-08-08 17:06:34 -->
 ## 三平台基础设施全覆盖 — 盘点与固化（2026-08-08）
@@ -4398,37 +4246,6 @@ Skills 目录 `/var/minis/skills/` 的完整备份 → https://github.com/logicf
 平台集成卡片的筛选条件不能用 `importSource == BUNDLED`——老用户的技能可能是通过 SESSION/FILE 等途径安装的，`installBundledSkills()` 在版本号已 ≥ 捆绑版时会 skip，不改 importSource。
 正确判定：检查技能是否有 `requirements.json` 且 `env` 非空——这才是"平台技能"的可靠信号。
 
-<!-- 2026-08-08 21:57:08 -->
-## Skill 改名：github-sync-helper → github-ops（2026-08-08）
-
-用户指出 `github-sync-helper` 名字不合适——它实际是 GitHub/Git 全套基础操作封装（init/clone/commit/push/PR/issue/label/release/CI 全都有），"sync"只是其中一小块，低估了覆盖面。
-
-改名为 **`github-ops`**（用户选定），改动：
-- 目录 `/var/minis/skills/github-sync-helper/` → `/var/minis/skills/github-ops/`
-- SKILL.md `name:` 字段 + description 触发词（去掉 "sync to upstream" 偏重，改 generic）
-- gh_sync.sh 头部注释（脚本路径 `/var/minis/skills/github-ops/scripts/gh_sync.sh`）
-- github-fullright-ops/SKILL.md 内对它的引用
-- GLOBAL.md 三处路径 + 三平台对照表
-
-脚本验证：在有 git 仓库目录跑 `gh_sync.sh status` → CLEAN，正常。新旧名字在 GLOBAL.md / skills 引用已清零。
-
-**经验教训**：skill 命名要反映"它让 agent 能做什么"，不能只反映触发场景里最常见的那个动作。三个平台对照表统一 `-ops` 后缀风格（github-ops / github-fullright-ops / cloudflare-fullright-ops）。
-
-<!-- 2026-08-08 22:12:38 -->
-## 改名 github-sync-helper → github-ops 已同步主仓库并触发编译（2026-08-08）
-
-
-用户问"改名后需不需要触发编译"——答案是**需要，而且不只是目录名那么简单**。完整改动链：
-
-1. **主仓库 assets 目录**：`src/android/app/src/main/assets/skills/github-sync-helper/` → `github-ops/`（git 自动识别为 rename，SKILL.md/requirements.json/gh_sync.sh 三文件）
-2. **源码硬编码**（关键！）：`ChatViewModel.kt:8376` 的 `platformIds = listOf("semantic-memory", "github-sync-helper", "cloudflare-fullright-ops")`——这是 buildIntegrationStatus() 的功能代码，skill id = slugify(SKILL.md name)，不改就会导致改名后的 skill 永远进不了"内置集成"表格。另改 2 处注释 + SkillRepository.kt 1 处注释
-3. **README.md / README_EN.md**：三平台对照表 + 平台技能引用各 2 处
-4. **版本门控说明**：installBundledSkill 按 assets 目录名遍历安装，只增不删——老设备上残留的 github-sync-helper 不会自动删（同名不同内容时会按 version 判断，但旧 id 新 id 是不同 skill）
-
-commit 350ae94，CI run 31261030720 **success**，已合并进 main（推送后 main 自动触发主构建）。
-
-**经验**：skill 改名不是改一个目录的事，涉及主仓库 3 层——assets（内置 skill 目录 + SKILL.md name）+ 源码（platformIds 等硬编码 skill id 的地方）+ 文档（README）。改 assets 不改源码，改名会静默失效。
-
 <!-- 2026-08-08 22:46:01 -->
 ## RikkaMinis 新图标设计语义
 
@@ -4478,9 +4295,9 @@ TerminalSession 构造：第 5 参数是 Int(scrollback=2000) 不是 IntArray
 3. 其他未发现的接口差异
 
 **快速查错方法**：
-- 浏览器打开 https://github.com/logicflow-GYW/RikkaMinis/actions 看最新 run 的 annotations
-- 或者 `curl` 下载日志：`curl -sL -H "Auth: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/logicflow-GYW/RikkaMinis/actions/jobs/{JOB_ID}/logs" -o log.txt`
-- 获取 JOB_ID：`curl -s -H "Auth: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/logicflow-GYW/RikkaMinis/actions/runs/{RUN_ID}/jobs"`
+- 浏览器打开 https://github.com/***OWNER***/RikkaMinis/actions 看最新 run 的 annotations
+- 或者 `curl` 下载日志：`curl -sL -H "Auth: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/***OWNER***/RikkaMinis/actions/jobs/{JOB_ID}/logs" -o log.txt`
+- 获取 JOB_ID：`curl -s -H "Auth: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/***OWNER***/RikkaMinis/actions/runs/{RUN_ID}/jobs"`
 
 **回退方案**：如果 Termux API 实在调不通，回退到 Layer 2 commit（39c62e8）—— heredoc + 截断独立于 Termux，本身就有价值。2249 行旧代码还在。
 
@@ -4488,7 +4305,7 @@ TerminalSession 构造：第 5 参数是 Int(scrollback=2000) 不是 IntArray
 
 - RikkaHub 的 WorkspaceTerminalViewClient 继承了 **比 JitPack 0.118.0 更多的方法**（RikkaHub 用的是自己编译的版本或不同 artifact），不能完全照抄
 - `TerminalEmulator.mScreen` 是 private，必须用 `getScreen()` 公开方法
-- 工作目录：/tmp/rikkaminis-full（logicflow-GYW/RikkaMinis）
+- 工作目录：/tmp/rikkaminis-full（***OWNER***/RikkaMinis）
 - 分支：feat/termux-terminal-engine
 - 推送用 gh_sync.sh：`sh /var/minis/skills/github-ops/scripts/gh_sync.sh push --branch feat/termux-terminal-engine`
 
@@ -4937,7 +4754,7 @@ APK：单分支构建产物（未合并 main，无 release 资产）。待用户
 
 - **上游开源**：2026-07-25 OpenMinis/OpenMinis（原作者 Ethan Wang）`d9d4d5b feat: open-source the Minis app` 开源。
 - **fork 起点（建仓+构建配置期）**：07-31 记忆开始（最早日志 2026-07-31，是方法论笔记）；08-01 记录 "OpenMinis fork 构建环境配置"（CI workflow + 签名密钥 + 第一次构建）。此阶段 = 让仓库能构建，不改应用功能。
-- **fork 第一个 commit**：08-02 01:42 `696ade3`（CI 跳过 NDK），随后 02-05 多点构建/发布配置（作者 Minis CI / logicflow-GYW）。
+- **fork 第一个 commit**：08-02 01:42 `696ade3`（CI 跳过 NDK），随后 02-05 多点构建/发布配置（作者 Minis CI / ***OWNER***）。
 - **真正开始改应用功能**：**2026-08-02 11:35** `70f590e feat(chat): [P0-0] focus a message on open`——第一个实际功能改动，作者从 CI 账号变成 "Minis Agent"（即当时的 agent 在改）。此后每天持续（备份/模型/滚动/终端/图标/三平台集成 等）。
 - 结论：fork 于 08-01~02，**真正动手改应用 = 08-02 上午 11:35 起**，历时约一周（到 08-09 main 已在 b786366/e39499a，12 分支全合并）。
 
@@ -4977,18 +4794,6 @@ APK：单分支构建产物（未合并 main，无 release 资产）。待用户
 
 ## 2026-08-10
 
-<!-- 2026-08-10 01:42:52 -->
-## 创建 meta-session-protocol skill（2026-08-10 深夜）
-
-
-将"元协作协议"从 GLOBAL.md 知识固化为独立 skill。这是一个极特殊的 skill——**纯协议、无脚本、Tier 0、零配置**。它不执行任何具体任务，而是定义"当用户进入自指模式时 agent 如何切换协作姿态"。
-
-**GLOBAL.md vs Skill 的分工**：
-- GLOBAL.md：保留元协作协议的**知识**（认知指纹、特征、交付标准）——每次会话注入的上下文
-- Skill：承载元会话的**行为**（触发条件 + 模式切换 + 行为指南）——可分发/备份/跨实例的独立模块
-
-**做成 skill 的核心价值**：**分发和备份**——这是一个可携带的协议，可随备份导出/导入，可 git 到仓库版本管理，可复制到任何 RikkaMinis 实例。
-
 <!-- 2026-08-10 09:29:19 -->
 ## feat/attach-menu-visibility-order 完成（2026-08-10）
 
@@ -5009,22 +4814,6 @@ APK：单分支构建产物（未合并 main，无 release 资产）。待用户
 - 配置注册进 ConfigBuiltins，minis-config + 备份 round-trip
 - 测试扩展：attach order/visibility roundtrip、domain isolation、model picker roundtrip
 - 多语言：6 语言文件补全 4 条新字符串
-
-<!-- 2026-08-10 11:00:35 -->
-## 元会话：把"自我开发能力"抽离成通用模块（2026-08-10）
-
-
-用户观察到 RikkaMinis 有"开发完善自身"的能力，但缺少用户意图驱动，问能否抽离成通用模块让其他应用也具备。分析结论（用户尚未表态，待后续）：
-
-**能力解剖**：自我开发 = ①自访问（代码/记忆/配置可读）②自修改管道（编辑→分支→CI→构建→安装→观察）③自验证（CI+用户真机反馈）④经验层（memory/skills 改变未来行为）。两条修改通道：改 app 代码（环境，用户意图驱动）vs 改 memory/skills（指令，agent 部分自主）。
-
-**关键观点**：用户意图不是缺口而是适应度函数/方向盘——没有它自我改进就成了无方向变异；朝自己目标改进的系统不再是工具而是另一个 agent。"缺"是安全阀。
-
-**可抽离四层**：①自描述接口（describeSelf）②变更管道（applyPatch+测试门控+回滚，本质=AI 驱动的 CI/CD）③缺口检测（intent-adjacent：CI 红/文档漂移/重复 bug 模式）——可抽离；④意图/估值——不可抽离，属于用户的 (问题域)。
-
-**已有先例证据**：skills 系统就是"能力抽离成可分发模块"的实例（SKILL.md 语言 + scripts 运行时 + requirements.json 验证），github-ops/semantic-memory/meta-session-protocol 都是。本次抽离是更高一层（能力的元能力），机制相同。
-
-**递归观察**：用户问"能不能解剖你成模块"=对我做归因框架式解剖（同 08-07 对自己、meta-session-protocol 对协作）。问题本身实例化了他的 (问题域)→(语言+运行时+验证框架) 模式。开放问题：抽离产物保留"意图接口"还是只做"缺口警报器"——这个选择定义"自发育 vs 自主"的边界。
 
 <!-- 2026-08-10 11:10:43 -->
 ## 图标自动跟随系统主题修复 + 通知横幅精简（2026-08-10）
@@ -5052,46 +4841,6 @@ APK：单分支构建产物（未合并 main，无 release 资产）。待用户
 ### 当前 main 状态
 - main@ef732e0，主构建 run 31351448705 success。本地+远端 fix 分支已删。
 
-<!-- 2026-08-10 11:32:39 -->
-## ✅ selfmod 自修改模块原型完成（2026-08-10）
-
-
-用户诉求（修正后）：把"根据用户意图修改自身的能力"从 RikkaMinis 抽成通用模块，任何应用+这个模块=具备同样的自我修改能力。意图是输入不抽离，抽离的是"意图→补丁→应用→自测→生效/回滚"整圈机制。
-
-**产物**：`/var/minis/workspace/selfmod/`（selfmod.py 模块本体 ~200 行 + host_real.py 真实文件宿主 + demo_app.py 待办应用宿主 + README）
-
-**核心技术**：
-- 4 个宿主钩子（describe/apply/test/commit）→ 宿主只需接 4 个钩子即获得自修改能力
-- 补丁协议 4 形态：行号+行内子串（最稳）> 行号+整行 > search/replace（空白归一化）> 全文重写
-- 安全防线：唯一性纪律（search 须恰好命中1次）、受保护文件（防改测试骗门控）、越界防护、自动回滚、**基线差分**（对比原件基线"不引入新不平衡"而非"必须全平衡"——真实代码常带存量问题，门控不能假阳性）
-
-**真实运行结果**：对 9900 行真实 Kotlin 文件（/tmp/ChatScreen.mixed.kt）改了模型徽标颜色 0xFF34C759→0xFF7C4DFF，绿色 3→2 处、紫罗兰 0→1 处，结构与基线一致，committed ✓。演示中 3 次失败全部被门控正确拦截（search 不唯一/行号错/改坏结构），零损失。
-
-**踩坑**：①minis-model-use 不加 --output 时结果回 stdout（JSON {"text": ...}），不是写文件 ②模型整行替换易错，行内子串形态才稳 ③原件括号本身不平衡（2145 vs 2146），门控必须基线差分否则永远假阳性 ④/proc 沙箱里 .mixed.kt 是半成品文件。
-
-**待办/开放**：用户尚未表态是否把这个固化成 skill 或继续扩展（如接 RikkaMinis 本体仓库、做成 gradle 库、接 CI 真门控）。
-
-<!-- 2026-08-10 13:37:20 -->
-## ✅ selfmod 自我修改闭环闭合 — "selfmod 改 selfmod"（2026-08-10 晚间）
-
-
-**用户点评 & 我重构**：用户先要求"围绕它设计方案"（五方案：GitHub Action/Sidecar/SDK/控制平面/协议优先），但随后用框架检验把项目打回："selfmod 这个项目本身经受不住框架检验"——对 RikkaMinis 冗余（shell/CI/git 全有）、对其他应用是假设需求（普通应用没 LLM 内核）、**自己不能自我改进**（结构性矛盾）。唯一通过框架的路径：**让 selfmod 改 selfmod**——把自我开发能力缩到最小对象，研究"能改自己的系统怎么保证改了还好"。
-
-**执行与结果**（全部真实跑通）：
-- test_selfmod.py：8 个测试（核心机制钉死——受保护文件、唯一性、越界、回滚、基线差分、Result 契约）
-- host_selfmod.py：自指宿主（selfmod 的 describe/apply/test/commit 都指向自己）
-- **两次成功自我修改已提交 git**：581ea30（在 apply_intent 加 acceptance 验收断言支持）+ 272ef3a（修 Result 契约：`return False,'acceptance_fail'` → `r.stage='acceptance_fail'; r.ok=False; return r`）
-- **三次失败全部被门控拦截**（LLM 幻觉行号如"行42"实际在 137、幻觉 `import selfmod` 实际不存在、引号嵌套坏 Python）→ verify 校验 → 自动回滚 → 零破坏
-- 8 测试保持全绿，import 正常，工作区脏文件不影响
-
-**框架检验结论**：闭环闭合即通过检验——"可自我改进"由两次真实自我修改证明，"可验证"由门控拦截 3 次错误补丁证明，"边界明确"从"通用模块"收敛为"只改自己的一件事情"。
-
-**关键认知（递归）**：这整个项目就是用户框架的实例——selfmod = 语言（补丁协议），验证 = 运行时（门控），git 历史 = 验证框架（审计）。
-
-**踩坑**：LLM 生成补丁时的行号幻觉极常见（verify 必须每次带锚点）；模型会尝试"补丁里带测试修改"（test_selfmod.py 受保护文件拦截）；new_sub 里含换行/引号嵌套极易坏 Python 语法。
-
-**待办**：用户尚未表态是否收尾（推远端、固化 skill、写总 README 或砍掉）。
-
 <!-- 2026-08-10 13:55:51 -->
 ## Circuit 正式定名 + 交接归档（2026-08-10 收尾）
 
@@ -5101,7 +4850,7 @@ APK：单分支构建产物（未合并 main，无 release 资产）。待用户
 2. 框架检验（被用户打回 → 重新定位为"自指闭环"）
 3. 自我修改证明（Circuit 改 Circuit 两次成功，三次错误被门控拦截）
 4. 正式命名（Circuit — 回路）
-5. 仓库创建（rikkaflow/Circuit）、改名、推送
+5. 仓库创建（***ALT_USER***/Circuit）、改名、推送
 6. 交接文档（/var/minis/workspace/shared/circuit-handover.md）
 
 **核心认知**：自我修改不是能力，是风险。Circuit 不放大能力，它管理风险。验证门控 = 这个项目真正的产物。
@@ -5178,7 +4927,7 @@ APK：单分支构建产物（未合并 main，无 release 资产）。待用户
 
 用户问上游"接近400个分支"都是谁改了什么。查证：上游 OpenMinis/OpenMinis 仅 2 分支（main=9cf3a855fe + v1.10），387 个是 fork。全量比对 main HEAD 后：**只有 17 个 fork 真改过代码，370 个全是空 fork**。
 重点：
-- 用户 fork（logicflow-GYW/RikkaMinis）是全网唯一 10★/6 fork 的，唯一产品级 Android 改造+CI 发布
+- 用户 fork（***OWNER***/RikkaMinis）是全网唯一 10★/6 fork 的，唯一产品级 Android 改造+CI 发布
 - 同方向 Android 深度 fork：**MikasaAckerrman/OpenMinis**（63 commits，+11K 行，108 Kotlin 文件，13 角色多智能体图系统，自带 APK workflow）——最值得围观
 - 其他：leoyb1010/LeoPhoneAgent（92 commits 改品牌 iOS）、abab1125（删 iOS 留 Android + 写小说工具）、555cute/OpenMinis-Dev（Binance 量化版）、yangyunzhao（OpenAI 设备码登录 + 中文维护文档）、koonin（iOS 保活/Apple Music + Android ProviderRepository 重构）、landsspacesss（llama.cpp iOS 原型）、WildenChen（SoulNest 外部后端）、hokching（只加 CI workflow）
 - 参考脚本：/tmp/forkdiff.py（比对 fork vs 上游 main HEAD 找出真改动者）+ /tmp/forkfiles.py（文件级 diff 汇总）
@@ -5387,52 +5136,6 @@ CI success（run 31448661275）、ff 合并 main、push 后分叉已删。
 - **B 层孤儿回收横幅**：进存储页自动扫描显示可回收空间，确认回收后释放 ✅
 - **A 层断根**：删除对话后，workspace 文件随 DB 行一起消失，不再残留成孤儿 ✅
 
-<!-- 2026-08-12 13:59:30 -->
-## OmniBot 调研（2026-08-12）—— 同类型更复杂项目借鉴
-
-
-**背景**：用户看到 github.com/omnimind-ai/OmniBot（OpenOmniBot 开源版），认为与本应用（RikkaMinis）同类型但复杂得多，要求调研可借鉴点。
-
-**repo 概况**：1590 文件 / 28.6 万行代码。模块：app(Kotlin 7.6万行) + ui(Flutter 17.8万行) + baselib(共享核心) + assists(状态机任务) + uikit + ReTerminal(终端) + webchat(React WebUI)。中文团队项目，README 中英双语。
-
-**核心架构（可借鉴度排序）**：
-1. **工具并发白名单 + 贪婪保序分批**（AgentToolConcurrencyPolicy.kt）：PARALLEL_SAFE 白名单（file_read/list/search/stat、context_query、memory_search/load、skills_list/read）+ browser_use 细粒度按 action 分类（get_text/screenshot 可并行，navigate/click 串行）+ handler 可覆写（ToolHandlerConcurrencyHint）。默认 SERIAL_BARRIER 保守，只信显式白名单。
-2. **工具定义自动装饰**（AgentToolDefinitions.decorateToolDefinition）：给所有工具参数 schema 自动注入必填 `tool_title` 字段（4-12 字中文标题），且工具描述支持中英双语本地化 + `{{OMNIBOT_TERMINAL_DISTRIBUTION}}` 变量替换（终端发行版名动态注入）。
-3. **上下文压缩引擎**（AgentConversationContextCompactor）：128K 阈值触发 → 单独 LLM 调用生成 compaction 摘要（有严格的 MUST PRESERVE 提示词：路径/URL/UUID 原文保留等）→ 摘要替代旧消息 → promptTokenThreshold 可持久化到会话。压缩请求走独立模型 scene.dispatch.model。
-4. **记忆分层 + 索引**（LongTermMemoryIndex）：长期记忆物理布局保持 MEMORY.md 一行一条，slug = SHA-1(text)前8位 + 标题片段，稳定寻址。system prompt 只注入标题列表（summaryForPrompt，80 条 × 120 字符），LLM 按需 memory_load(slug)。TurnMemoryLoadTracker 防同轮重复加载。MemoryRetrievalPipeline.prefetchRelevant 带 1.5s 硬超时（不阻塞 LLM 流）。
-5. **失败学习自动化钩子**（SelfImprovingSkillFailureHook）：工具失败自动记录到 skills/self-improving-agent/data/ERRORS.md（结构化 block：摘要/错误/上下文/建议修复/元数据），自动注入 guidance + 相关历史 hint，指导 LLM 用 memory_write_daily 沉淀规则。lessons 可被记忆检索召回。这是把 GLOBAL.md 里"自改进"做成了程序化管线。
-6. **子代理系统**（SubagentDispatcher + SubagentProfile）：真实并发子 agent（Semaphore 限流 1-6），每个子 agent 独立 AgentOrchestrator + 过滤后的工具目录（SubagentToolCatalogView）+ 独立轮数/输出 token 预算（默认 12 轮/4096 tokens）。FORBIDDEN 硬禁（subagent_dispatch 防递归、terminal_execute/android_privileged 防越权）。4 个内建 profile：general/explorer/memory-curator/planner。父取消经 structured concurrency 传播。
-7. **记忆 rollup**（WorkspaceMemoryRollupScheduler）：AlarmManager 精确闹钟定时执行"日记忆归并"（每日 rollup），exact alarm 不可用降级 inexact。Android 上比 WorkManager 可靠。
-8. **MCP 内置服务端**（McpServerManager）：应用内 kTor HTTP server 暴露 /mcp JSON-RPC 端点 + token 加密存储（TokenVault AES 派生密钥）+ LAN 请求白名单（isLanRequest）+ file download 端点。工具系统可扩展为 MCP server。
-9. **浏览器风控**（BrowserRiskControl）：恶意/挑战检测（Cloudflare/captcha/rate-limit/搜索厂盾），按 action 节流（navigate 550ms、click 180ms 等 + 搜索站点加成 900ms）+ jitter。模型看到机器特征前先被风控识别。
-10. **系统提示词双段 skills 注入**：已安装 skills 索引段（id/name/path/capabilities/描述，截断 160 字符）+ 本轮命中 skills 正文段（promptSummary 1200 字符截断）。只用命中技能的正文，不浪费 token。
-
-**技术选型差异（不必学）**：Flutter UI（对比 Compose）、Gson 而非 kotlinx.serialization、MMKV 而非 Room 外的存储、自研 terminal 复用 ReTerminal。中文工具描述 + 双语本地化是它的一大特性。
-
-**关键洞察**：它的"复杂"不是 UI 功能的堆砌，而是 agent 运行时（understand→decide→execute→reflect 全闭环）的三层保障：预算（轮数/token）、并发（白名单/串行屏障）、学习（失败钩子→ERRORS.md→记忆沉淀）。这些机制对单一 RikkaMinis 同样可移植。
-
-<!-- 2026-08-12 14:46:41 -->
-## OmniBot 交互折叠设计调研（2026-08-12）—— 用户点名的关键借鉴点
-
-
-用户用 RikkaMinis 时发现"运行中不停跳出各种东西"，而 OmniBot 折叠得很好，让我去看。这是用户在 OmniBot 里的第二贵重点。
-
-**OmniBot 的设计核心——「AgentRun」回合作为一等公民**（ui/lib/features/home/pages/chat/widgets/）：
-- `agent_run_group_message.dart`：一次 agent 回合 = 一个 `AgentRunTimelineGroup`，整轮所有工具卡片聚合成一个折叠组。
-- `agent_run_header.dart`：折叠头 __关键语义 `_effectiveExpanded => group.isRunning || expanded`__ = **运行中强制展开（看进展），完成后自动收敛成一行摘要头（"已处理 Xs" + 折叠箭头），点击才展开完整工具序列**。加 AnimationController 260ms 展开/收起 + 透明度/上浮动画。
-- `utils/agent_run_timeline.dart`：模型层把"可见消息" vs "过程卡片"分离（visibleMessages/processMessages）；工具卡片通过 `agentRunParentTaskId(message)` 归到 parent task；running 从 in-flight task ids 实时派生（非持久化 flag）；"已派发未产出"的回合只插一个 run header，不叠 processing 行。
-- `chat_tool_activity_strip.dart`：可选底部悬浮工具活动条（照片预览条 + `_kToolActivityDrawerMaxHeight` 展开抽屉），与聊天主体分离。
-
-**RikkaMinis 现状（对比）**：
-- ChatViewModel 每条 assistant 消息 parts 拍平成多个独立 FlatChatItem（text/tool/thinking 各独立），LazyColumn 里工具块逐个平铺（"Flatten each message into multiple LazyColumn items" ChatScreen.kt:2849）。
-- 每个工具 = 独立 `ToolCallPill`（ChatAssistantMessageUI.kt:604 胶囊：图标+标题+时长+状态+点击详情 sheet+rerun-from-block+copy）。
-- **thinking 已有流式展开+完成自动折叠**（ThinkingBlock，T-android-thinking-auto-collapse 注解）—— 正是 OmniBot 想法的现有先例，机制可复用！
-- 工具块无折叠：一轮复杂 agent 任务弹几十个胶囊占满屏幕。
-
-**借鉴方向**：把"同一 assistant 消息的所有 ToolCallPill"聚合为一个可折叠组，复用 ThinkingBlock 的"流式展开/完成折叠/手动接管"机制 + OmniBot 的 `isRunning || userExpanded` 折叠语义 + 260ms 动画。工具组头显示：总工具数 + 总耗时 + 最后一个工具摘要。已完成回合自动折叠成一行，流式时展开。
-
-**尚未实施（待用户确认方案再动，用户还在看 UI 对比）**。
-
 <!-- 2026-08-12 15:10:50 -->
 ## 多任务并行推进模式（2026-08-12 用户决策）
 
@@ -5478,7 +5181,7 @@ CI success（run 31448661275）、ff 合并 main、push 后分叉已删。
 **使用方式**：新对话直接 `file_read /var/minis/shared/omniBot-borrowing-tasks.md` 领任务。
 
 <!-- 2026-08-12 15:51:00 -->
-## 2026-08-12 15:51:00
+## T3 失败学习自动化钩子完成（feat/failure-auto-log → main 667f17d）
 
 
 **改动**：
@@ -5545,19 +5248,9 @@ CI success（run 31448661275）、ff 合并 main、push 后分叉已删。
 - data/repository/: 4 个文件 ✅
 
 ### 套餐信息
-- 2.5 元无限量套餐，调用 deepseekv4flash0731（临时密钥 / api.***.yunshuzhilian.asia）
+- 2.5 元无限量套餐，调用 deepseekv4flash0731（临时密钥 / ***.yunshuzhilian.asia）
 - 到期时间：2026-08-13 15:00
 - 备用：商汤科技 deepseek-v4-flash（免费，速率限制）
-
-<!-- 2026-08-13 01:27:34 -->
-## CF 代理升级至最新版 edgetunnel
-
-
-- Pages 项目 `gyw` 升级至 edgetunnel v2.1.20260811144522（XHTTP 优化版）
-- 新建 Worker `gyw-proxy`（***USER***.workers.dev）部署同样版本，workers.dev 子域名已启用
-- KV 绑定：GYW（d4c2551929044b509d60bbb7b4edc9b4）
-- 环境变量：ADMIN=***PASSWORD***, UUID=***UUID***, BEST_SUB=1
-- Pages 同步更新，***DOMAIN*** 自定义域名继续生效
 
 <!-- 2026-08-13 01:47:08 -->
 ## AI 批量生成测试的教训（2026-08-13）
@@ -5580,41 +5273,8 @@ CI success（run 31448661275）、ff 合并 main、push 后分叉已删。
 - 多通道模型：临时密钥（无限量）、商汤科技（deepseek/glm-5.2/sensenova 系列）
 - 生成的测试文件在 git 历史里（fix/shell-auto-retry 分支的早期 commit），需要时可找回修复
 
-<!-- 2026-08-13 02:15:36 -->
-## CF 三账户代理部署记录（更新用 playbook）
-
-
-### 账户清单
-
-| 账户 | 邮箱 | Account ID | 域名 | 子域名 | ADMIN | UUID |
-|------|------|-----------|------|--------|-------|------|
-| 副账户 | [EMAIL] | ***CF_ACCOUNT_ID*** | ***DOMAIN*** | ***USER*** | ***PASSWORD*** | ***UUID*** |
-| 主账户 | [EMAIL] | 69e1689bf65739b6fac07d17343e8b72 | ***DOMAIN*** | g001121w-69e | ***PASSWORD*** | ***UUID*** |
-| 第三账户 | [EMAIL] | ***CF_ACCOUNT_ID*** | ***DOMAIN*** | ***USER***-503 | ***PASSWORD*** | ***UUID*** |
-
-### 三账户通用配置
-- 项目: cmliu/edgetunnel（最新版，公式：`_worker.js`）
-- 协议: VLESS + XHTTP (stream-one + obfs padding)
-- KV 绑定名: `KV`
-- 各账户 KV 命名空间 ID：
-  - 副账户: d4c2551929044b509d60bbb7b4edc9b4（名 GYW）
-  - 主账户: 527a4833e67540a4b00ffc191faaaada（名 TV）
-  - 第三账户: aed3315f45e847c1b8ce3e9b4aacfa88（名 GYW-3）
-
-### 更新步骤
-1. 获取最新 `_worker.js`（从 cmliu/edgetunnel 的 GitHub 下载 zip 或者 release）
-2. 对每个账户执行：
-   - `PUT /accounts/{id}/workers/scripts/gyw-proxy` 上传新脚本（KV + env 绑定保持）
-   - 验证：`GET /version?uuid=...` 返回新版号
-3. 如果需要迁移域名：
-   - 先删 Pages 域名绑定（`DELETE .../pages/projects/{name}/domains/{domain}`）
-   - 删 Pages 项目（`DELETE .../pages/projects/{name}`）
-   - 加 Worker custom domain（`PUT .../workers/domains`）
-   - 如果 DNS 记录残留，提示用户去 dashboard 删 A/CNAME 记录
-4. 验证：`curl https://{domain}/version?uuid=...` → 200 + 新版号
-
 <!-- 2026-08-13 03:30:00 -->
-## 2026-08-13 03:30:00
+## 任务 B：核心文件补测试 ✅ 完成（2026-08-13）
 
 
 - 分支 fix/core-file-tests → rebase 到 main（f76e5d1）后合并推送，分支已删（本地+远端）
@@ -5777,7 +5437,7 @@ CI success（run 31448661275）、ff 合并 main、push 后分叉已删。
 
 - 远端 `test/clean-generated`（1492f21，AI 测试教训产物）已删除
 - **踩坑**：git push HTTPS 协议 TLS 握手失败（代理阻断），但 GitHub REST API 通道正常（HTTP 200）
-- **解法**：直接 `curl -X DELETE -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/logicflow-GYW/RikkaMinis/git/refs/heads/test/clean-generated` → 204，验证 404
+- **解法**：直接 `curl -X DELETE -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/***OWNER***/RikkaMinis/git/refs/heads/test/clean-generated` → 204，验证 404
 - 教训：TLS 挂时优先走 REST API（delete ref endpoint），不需要本地仓库也能删分支
 
 <!-- 2026-08-13 06:41:07 -->
@@ -5925,33 +5585,6 @@ RikkaMinis 已有 `coalesceMarkdownFragments()`（fragment 级合并），但原
 - 纯函数，无 Android 依赖，可 JVM 测试
 - 不要修改 `coalesceMarkdownFragments` 的现有逻辑——两者在不同层工作
 - 原始文本层合并是防倒退/重叠，fragment 层合并不是重复
-
-<!-- 2026-08-13 08:49:06 -->
-## OmniBot 源码对比结论（2026-08-13）
-
-
-### 对照基础
-- OmniBot：多模块（app/assists/baselib/uikit/ReTerminal/ui），~104K Kotlin + 180K Dart Flutter UI
-- RikkaMinis：单模块，~150K Kotlin Compose UI
-
-### 已实现，RikkaMinis 不比 OmniBot 差
-- **上下文压缩**：`ContextCompactor` 的 `COMPACT_SUMMARY_SYSTEM_PROMPT` 用过去时、强调"不是待办清单"、MUST PRESERVE 路径/UUID——比 OmniBot 更考究
-- **流式文本 fragment 合并**：`coalesceMarkdownFragments` 在 fragment 层工作，Compose 架构优势
-- **工作区记忆嵌入搜索**：semantic-memory（HF Dataset + embeddings），比 OmniBot 的 MMKV + OkHttp 方案更轻量
-- **工具并发策略**：已有 `ToolConcurrencyPolicy`
-- **测试**：60 测试文件 vs OmniBot 70 Kotlin + 82 Dart，规模相当
-
-### 真实差距（值得移植）
-1. **浏览器风险挑战检测 + throttle 控制**（`BrowserRiskControl`，~155 行纯函数 + 测试）——见任务 A
-2. **流式文本原始层合并保护**（`mergeAgentTextSnapshot`，~45 行纯函数）——见任务 B
-
-### 不推荐移植的（按用户框架"真正做不到"评估）
-- 工具 Handler 模式（纯架构，不改变 agent 能力）
-- 工具定义 i18n（中文用户，不影响使用）
-- press_key/go_back（可用 execute_js 替代）
-- UX 细节移植（Flutter → Compose，不改变 agent 能力）
-- 工作区记忆去重（"更好"不是"做不到"）
-- 工具并发策略按 action 粒度（效率优化，不是必要性）
 
 <!-- 2026-08-13 08:53:16 -->
 ## 任务 A：BrowserRiskControl 移植完成（2026-08-13）
@@ -6118,7 +5751,7 @@ RikkaMinis 已有 `coalesceMarkdownFragments()`（fragment 级合并），但原
 用户另一台设备日志显示进入聊天页面时有"卡住"感觉。根因分析：
 
 **核心问题：Room schema hash 不匹配导致每次冷启动走 JSON fallback 路径**
-- Expected: `af06b202cab9de1d3522989c8d446ea8`, Found: `cc4e8c79b29f0e528c61a697f145e612`
+- Expected: `***HEX32***`, Found: `***HEX32***`
 - 3 次 DAO instanceCount 失败 → 3 次 JSON 反序列化 (870KB) → 1 次 JSON→DB 导入，耗时约 1.5s
 
 **叠加因素**：
@@ -6163,8 +5796,8 @@ RikkaMinis 已有 `coalesceMarkdownFragments()`（fragment 级合并），但原
 
 
 ### 实验设定
-- 仓库：rikkaflow/Circuit（私有，Python 自修改最小核心）
-- LLM：deepseek-v4-flash via 临时密钥（api.***.yunshuzhilian.asia，无限额度，5 并发）
+- 仓库：***ALT_USER***/Circuit（私有，Python 自修改最小核心）
+- LLM：deepseek-v4-flash via 临时密钥（***.yunshuzhilian.asia，无限额度，5 并发）
 - 并发纪律：密钥 5 并发，agent 占 1，Circuit Semaphore(4)
 - 目标：跑几小时看 Circuit 能自我演化成什么样，顺带压力测试
 
@@ -6352,7 +5985,7 @@ RikkaMinis 已有 `coalesceMarkdownFragments()`（fragment 级合并），但原
 7. BUG 1 修复（c1118d3/e7faa2c）本身逻辑正常（extractTar normalize + isTarget），**不是根因**；根因是资产文件本身是占位
 
 **那边（有 shell）的行动清单**：
-1. `git clone https://github.com/logicflow-GYW/RikkaMinis` → `od -A x -t x1z src/android/app/src/main/assets/alpine-minirootfs.tar | head -5` 确认占位
+1. `git clone https://github.com/***OWNER***/RikkaMinis` → `od -A x -t x1z src/android/app/src/main/assets/alpine-minirootfs.tar | head -5` 确认占位
 2. `git log --all --follow --oneline -- src/android/app/src/main/assets/alpine-minirootfs.tar` 找最后一次真实 tar 的 commit
 3. 下载最近 release APK → `unzip -p app-release.apk assets/alpine-minirootfs.tar | head -c 64 | od -x` 验证 APK 内 tar 是否也是占位
 4. 找到真实 tar 来源（历史 commit 或上游 OpenMinis/OpenMinis raw）→ 恢复文件 → push → 触发新主构建 CI（推 main 自动跑 build-apk.yml）
@@ -6701,7 +6334,7 @@ restore OK (54) ... final health STILL missing 5  ← 死循环
 **CI 状态**：A/B/C 分支各自 CI 全绿；main 6823ca4 release 构建 #31720574220 queued（最终 ground truth）。等绿后用户装 APK 真机验证：浏览器设置文案中文化、工具缩略图/状态色主题自适应、后台时浏览器快照不轮询。
 
 <!-- 2026-08-14 00:37:18 -->
-## 2026-08-14 00:37:18
+## 最终确认：main 6823ca4 release 构建 31720574220 success（2026-08-13
 
 **最终确认**：main 6823ca4 release 构建 #31720574220 **success**（2026-08-13 16:2x）。三修复分支（A i18n / B 主题色 / C 生命周期）全部合并 main 并过最终构建。真机验证待用户装新 APK：①浏览器设置文案中文化 ②工具缩略图/状态色在 dark 模式用 iOS 深色变体（success 30D158 / error FF453A）③后台时浏览器快照轮询暂停（repeatOnLifecycle(STARTED)）。另有其他会话的 fix/backup-* 分支（sync-secrets-gate / export-size-cap / chat-idempotent / restore-credentials）在并行施工备份模块方案。
 
@@ -6934,7 +6567,7 @@ OAuth 移除验证基本闭环。剩余可验证项（非阻塞）：备份 no-c
 
 **踩坑（可复用）**：
 - **共享工作树风险再犯**：git commit 时 HEAD 被另一会话切回 main，提交落错分支（[main cce2a10]）。修复：`git branch -f feat/run-group-thinking cce2a10` + `git checkout feat/run-group-thinking` + `git branch -f main origin/main`，零损失。commit 前必须先确认 `git branch --show-current`
-- **删远端分支的 token 权限**：GITHUB_TOKEN_FULL_RIGHT（rikkaflow 小号）对主号仓库 logicflow-GYW/RikkaMinis **无 delete ref 权限**（API 返回 404，GitHub 对无权操作隐藏为 404）；必须用主号 GITHUB_TOKEN（gh_sync.sh 同款）→ DELETE 204。判断方法：先 `git branch -r` 或 API 列分支确认，再选对 token
+- **删远端分支的 token 权限**：GITHUB_TOKEN_FULL_RIGHT（***ALT_USER*** 小号）对主号仓库 ***OWNER***/RikkaMinis **无 delete ref 权限**（API 返回 404，GitHub 对无权操作隐藏为 404）；必须用主号 GITHUB_TOKEN（gh_sync.sh 同款）→ DELETE 204。判断方法：先 `git branch -r` 或 API 列分支确认，再选对 token
 - **gh_sync.sh delete-branches --keep 是全量删除**（除 keep 外所有本地+远端分支），多会话并行时禁用，用 API 精准删单分支
 
 **流程**：scan.sh 3/3 绿 → gh_sync.sh push --branch → gh-actions-dispatch build-apk.yml → CI run 31766278140 success → ff 合并 main → push main（触发 release 构建 31766820302 进行中）→ API 删远端分支（204 确认）+ 本地 -D。
@@ -6942,7 +6575,7 @@ OAuth 移除验证基本闭环。剩余可验证项（非阻塞）：备份 no-c
 **遗留**：真机验证清单见交接文档 §5（10 项，重点：thinking-only 回合组卡片、混合回合组、单个工具进组、完成态最后一步摘要、运行中展开/完成收起、思考关闭不显示）。
 
 <!-- 2026-08-14 11:28:59 -->
-## 2026-08-14 11:28:59
+## 会话收尾（2026-08-14 03:4x）：任务 D 已闭环，用户确认不再等待 release 构建。main = c
 
 **会话收尾**（2026-08-14 03:4x）：任务 D 已闭环，用户确认不再等待 release 构建。main = cce2a10，远端仅 main 分支（feat/run-group-thinking 已删）。release 构建 run 31766820302 在后台跑，用户装新 APK 后按交接文档 §5 真机验证（10 项清单）。后续滚动体验任务由 D 承接完毕，本会话结束。
 
@@ -7355,7 +6988,7 @@ A 类（消息序列结构错误）全部完成，main = **0cfff69**，main rele
 **现象**：只有 A 类对话框（模型组，成员 fallback 切换）没有 Deep Thinking 折叠框，思考变普通正文；B/C/D 正常。
 
 **根因（日志实锤）**：
-- 模型组路由到 one-api 中转站（cn2.***.llmhost.net / api.***.kukuit.com，响应头 x-oneapi-request-id）
+- 模型组路由到 one-api 中转站（***.llmhost.net / ***.kukuit.com，响应头 x-oneapi-request-id）
 - 中转站把 reasoning 合并进 content 字段（官方两者互斥，日志 contentLen=4 rcLen=1~6 同时有值 = 双写/合并）
 - OpenAIProvider.kt L574 `hasThinkTags = isDashScope || model.id.contains("qwen")` → deepseek 非 qwen → false
 - L886-900 else 分支逐 chunk `text.contains("<think>")` 动态启用，标签切开/变体/无标签 → 失败 → Text 发出
@@ -7436,22 +7069,22 @@ A 类（消息序列结构错误）全部完成，main = **0cfff69**，main rele
 
 **实锤日志时间线**（23:26:25-27）：
 ```
-← HTTP 429 error body: {"error":{"message":"rpm exhausted","type":"quota_exceeded_error","code":"8"}}  ← 商汤 token.***.sensenova.cn
+← HTTP 429 error body: {"error":{"message":"rpm exhausted","type":"quota_exceeded_error","code":"8"}}  ← 商汤 ***.sensenova.cn
 🔀 Rate limited on deepseek-v4-flash, switching to deepseek-v4-flash (realModelChange=false)  ← 切到 KUAPI
-callFailed err=A:stream was reset: CANCEL  ← KUAPI api.***.kukuit.com HTTP/2 流重置
+callFailed err=A:stream was reset: CANCEL  ← KUAPI ***.kukuit.com HTTP/2 流重置
 Agent loop error (all fallbacks exhausted)
 ```
 
 **根因链条**：
-1. 商汤中转站（token.***.sensenova.cn）对 deepseek-v4-flash 有 **RPM（每分钟请求数）配额**（code=8, quota_exceeded_error），且 429 响应**不带 Retry-After header**（headerKeys 无此键）→ 客户端冷却只能用默认 60s
+1. 商汤中转站（***.sensenova.cn）对 deepseek-v4-flash 有 **RPM（每分钟请求数）配额**（code=8, quota_exceeded_error），且 429 响应**不带 Retry-After header**（headerKeys 无此键）→ 客户端冷却只能用默认 60s
 2. RikkaMinis 使用模式高频：agent loop 每 turn 一个 chat/completions 请求 + TitleGen 标题生成每消息一个请求（`provider=p model=deepseek-v4-flash`，同一 provider）+ 失败自动重试 3 次 → 一分钟内 10-20 请求很常见 → RPM 必爆
 3. 429 → GroupRouter 把商汤标记 Cooling(60s) → fallback 链只剰 KUAPI 一个成员
 4. KUAPI 也不稳定（HTTP/2 stream reset: CANCEL，NetworkError 按设计不记录健康状态不熔断）→ 全灭
 5. 用户重试 → 60s 冷却结束商汤又被选中 → 再爆 → 循环 = "频繁到不正常"
 
 **模型组「施工队」配置**（fallback_strategy=always）：
-- 商汤科技/deepseek-v4-flash（787bbc48, token.***.sensenova.cn）
-- KUAPI/deepseek-v4-flash（f6516c2b, api.***.kukuit.com）
+- 商汤科技/deepseek-v4-flash（787bbc48, ***.sensenova.cn）
+- KUAPI/deepseek-v4-flash（f6516c2b, ***.kukuit.com）
 → 只有 2 个成员且都是 deepseek-v4-flash，无多元化兜底
 
 **客户端逻辑本身正确**：buildFallbackProviders（ChatViewModel:4188）→ fallbackOrder + isUsable 过滤冷却成员 ✓；429 → Cooling(60s) ✓（GroupRouter.kt:165）；NetworkError 不熔断是设计决策（用户侧网络抖动不churn全组）✓
@@ -8785,7 +8418,7 @@ T7 正在另一个对话框施工（主链接入，ChatViewModel.kt）。以下�
 ## 临时密钥窗口补核心文件测试（2026-08-15 深夜）
 
 
-用临时密钥（api.***.yunshuzhilian.asia，deepseek-v4-flash 无限额度）的剩余窗口，给 4 个核心大文件补纯函数测试：
+用临时密钥（***.yunshuzhilian.asia，deepseek-v4-flash 无限额度）的剩余窗口，给 4 个核心大文件补纯函数测试：
 
 **分支 feat/core-file-tests-2 → main 681bb18**（CI 绿，已合并）
 
@@ -8820,7 +8453,7 @@ T7 正在另一个对话框施工（主链接入，ChatViewModel.kt）。以下�
 1. 重写 `/var/minis/workspace/rebuild_dev_history.py`（parse_entries 切块算法 + 全局时间正序排序 + 按天分组 + 头部统计 + INDEX 生成）
 2. 重建：08-03 → 08-16 共 14 天 428 条目（剔除非 RikkaMinis 内容：rikkahub 等其他仓库/元讨论）
 3. **修复重复标题 bug**：parse_entries 切 body 时从 anchor+1 开始会把 `## 标题` 行一起吞进 body，format 时标题出现两次——非末尾条目和末尾条目都要跳过 `## ` 标题行
-4. 脱敏：`/var/minis/workspace/sanitize_dev_history.py` 44 处替换——邮箱→[EMAIL]（9）、API 端点（api.***.yunshuzhilian.asia / token.***.sensenova.cn / api.***.kukuit.com / cn2.***.llmhost.net）→ 打码域名（10）、CF Account ID→***CF_ACCOUNT_ID***（5）、UUID→***UUID***（4）、个人域名 ***DOMAIN***.*→***DOMAIN***（3）、代理地址 ***PROXY_ADDR***→***PROXY_ADDR***（1）、疑似密码→***PASSWORD***（6）、HF dataset/worker 命名空间 ***USER***→***USER***（6）
+4. 脱敏：`/var/minis/workspace/sanitize_dev_history.py` 44 处替换——邮箱→[EMAIL]（9）、API 端点（***.yunshuzhilian.asia / ***.sensenova.cn / ***.kukuit.com / ***.llmhost.net）→ 打码域名（10）、CF Account ID→***CF_ACCOUNT_ID***（5）、UUID→***UUID***（4）、个人域名 ***DOMAIN***.*→***DOMAIN***（3）、代理地址 ***PROXY_ADDR***→***PROXY_ADDR***（1）、疑似密码→***PASSWORD***（6）、HF dataset/worker 命名空间 ***USER***→***USER***（6）
 5. 头部统计字段更新为实际值（434484 字符 / 8320 行）；INDEX 同步重建；自检：围栏配平 / 乱序 0 / 428 时间戳（05:32:52×5、05:54:55×6 是 T1-T9 批量派发条目的正常重复）
 
 **可复用**：两个脚本保存在 workspace（rebuild_dev_history.py + sanitize_dev_history.py），下次更新直接跑 rebuild → sanitize → 更新头部统计。
@@ -8981,27 +8614,6 @@ commit `1d1ac2290efa` 编译失败（CI run 31951519857），根因：动态预�
 
 **结论**：main 现在同时具备动态预算（放行大任务）+ 迭代 GC 回收（app native 堆真正回收）。覆盖 ~95% 日常内存场景，情况③（reset 后只涨不收）已专项修复。
 
-<!-- 2026-08-17 00:17:49 -->
-## 把 dev-history 更新做成 skill（dev-history-sync，2026-08-17）
-
-
-用户要求把"重建/更新 rikkaminis-dev-history.md"做成可复用技能（脚本在新会话 workspace 会被清空，每次要重建）。
-
-**新建 skill**：`/var/minis/skills/dev-history-sync/`
-- `SKILL.md`（触发：用户要求更新 dev-history / 开发日志合并导出 / 把每日 memory 归档进笔记）
-- `scripts/rebuild_dev_history.py`（解析 memory daily log → 全局时间正序 → 按天分组 → 重建 + INDEX + 头部统计）
-- `scripts/sanitize_dev_history.py`（脱敏：email/API端点/CF Account ID/UUID/个人域名/代理IP/密码/HF-worker 命名空间/字面量 token 形状）
-
-**关键健壮性改进**：mount 目录未被挂载时（新会话可能没有 `笔记` mount），rebuild 自动 fallback 到 `/var/minis/workspace/` 并打印警告，不 crash。目标路径可用 argv[1] 覆盖。
-
-**调用顺序**：rebuild → sanitize → 一致性自检（围栏配平 / ts 数=头部条目数 / outOrder=0）。脚本纯 python3 无外部依赖。
-
-**解析器核心规则**（勿丢）：可解析锚点 `<!-- YYYY-MM-DD HH:MM:SS -->` 开新条目；不可解析锚点（`<!-- ... 02:3x -->`）是条目体内内部时间戳非新条目；正文界=上一个可解析锚点之后到下个可解析锚点前，跳过标题行；回溯用 while 跳过不可解析锚点。去重按（ts,title）。
-
-**已知正常现象**：重复时间戳（如 05:32:52 ×5）是 T1-T9 批量派发条目的正常重复，非 bug。
-
-输出 fallback 位置每次跑会后留在 workspace，需用户在挂载可用时再跑一次写入笔记，或把 fallback 文件拷过去。
-
 <!-- 2026-08-17 01:37:12 -->
 ## 打断后"旧工具一直转/thinking 残留"修复施工中（2026-08-17）
 
@@ -9107,7 +8719,7 @@ else if (last.isStreaming) last = last.copy(isStreaming=false) ...
 
 **关键勿删错**：`common/skeleton/msg_feed_top.dart`（骨架屏组件）被黑名单/关注/搜索页面用，必须保留；`getUnreadDynamic()` 动态未读必须保留。
 
-**DLNA 刀 CI 状态**：当时查 `rikkaflow/PiliPlus` actions run `31982618893` in_progress 未确认，新会话需重验 commit 1&2 编译。
+**DLNA 刀 CI 状态**：当时查 `***ALT_USER***/PiliPlus` actions run `31982618893` in_progress 未确认，新会话需重验 commit 1&2 编译。
 
 **内存教训**：长任务别在一个会话连续跑大量重工具调用，中间留空档让 App GC 回 native 堆；native 堆持续涨要主动提醒切会话。该 fix（1a70bc0 多轮GC + 4c21e38 动态预算）不能根治 :modelservice sendMessage 回退路径的 DirectByteBuffer 累积。
 
@@ -9628,19 +9240,19 @@ ThinkingBlock（ChatAssistantMessageUI.kt:1105）：
 <!-- 2026-08-18 09:01:55 -->
 ## 断流定性重大进展（2026-08-18 09:01，provider 层排除网络断流）
 
-- **provider 层 100% 无断流**：扫描 ms2.log 全部 llmhost.net + token.***.sensenova.cn 请求，每个都有 `responseBodyEnd bytes=<完整>` → `canceled`（canceled 是 OkHttp 正常结束标记）+ `finish_reason` + `stream complete`。没有任何"delta 中途截断/没有 finish_reason"的孤请求。
+- **provider 层 100% 无断流**：扫描 ms2.log 全部 llmhost.net + ***.sensenova.cn 请求，每个都有 `responseBodyEnd bytes=<完整>` → `canceled`（canceled 是 OkHttp 正常结束标记）+ `finish_reason` + `stream complete`。没有任何"delta 中途截断/没有 finish_reason"的孤请求。
 - 结论：网络/代理/服务端都没问题。回答"中途停"发生在**应用渲染/收集管线下游**（modelservice 发回主进程后 → ChatViewModel/StreamRender 渲染环节）。
-- 现象佐证：08:58-09:01 大量 agent 多工具回合请求（并行 call），有 22s/12s 长请求。message 数涨到 79+，bodyLen 318KB~760KB，cached_tokens 最高 222K（token.***.sensenova.cn）+ 128K（llmhost.net）。请求体极大。
+- 现象佐证：08:58-09:01 大量 agent 多工具回合请求（并行 call），有 22s/12s 长请求。message 数涨到 79+，bodyLen 318KB~760KB，cached_tokens 最高 222K（***.sensenova.cn）+ 128K（llmhost.net）。请求体极大。
 - 下一步：查主进程侧 /var/minis/logs/minis-2026-08-18.log 的 StreamRender/ChatViewModel 是否有渲染中断；或从 UI 侧确认数据是否收到但没显示。
 
 <!-- 2026-08-18 09:03:18 -->
 ## 断流诊断第2次复现（2026-08-18 09:03）——provider 层铁证健康
 
-- 扫描全部 ms2.log：每个 provider 请求（llmhost.net + token.***.sensenova.cn）都在 modelservice 侧完整收尾——`stream done` + `finish_reason` + `stream complete` + `responseBodyEnd bytes完整` + `canceled`(正常标记)。**无任何 error line / jsonl error / 无 delta中途截断**。→ 网络/代理/服务端/ModelExecService 收集全部排除。
+- 扫描全部 ms2.log：每个 provider 请求（llmhost.net + ***.sensenova.cn）都在 modelservice 侧完整收尾——`stream done` + `finish_reason` + `stream complete` + `responseBodyEnd bytes完整` + `canceled`(正常标记)。**无任何 error line / jsonl error / 无 delta中途截断**。→ 网络/代理/服务端/ModelExecService 收集全部排除。
 - 主进程日志（minis-2026-08-18.log）同样无渲染异常，StreamRender 正常。
 - 矛盾：模型/provider/中转收集全健康，但用户明确看到"回答中途停"。
 - 盲点A：用户第一次报告断流(08:56前)发生在 ms2 采集器启动(08:56:46)之前，未被采到。
-- 盲点B：ms2 里 08:58-09:03 大部分活动是我这个 agent 诊断会话的工具回合（token.***.sensenova.cn 大历史请求也是我），用户会话(9f3fcaac 走 llmhost)的那次 1min retry 其实也正常完成。
+- 盲点B：ms2 里 08:58-09:03 大部分活动是我这个 agent 诊断会话的工具回合（***.sensenova.cn 大历史请求也是我），用户会话(9f3fcaac 走 llmhost)的那次 1min retry 其实也正常完成。
 - 系统里 08:51 有 `getExtractedText/setComposingText on inactive InputConnection` 输入法 WARN；08:51:46 `ShizukuBackend polling fallback (SDK bug)`。
 - 待定位层：UI 渲染层（markdown/streaming fade/长文本）或 agent 回合链中断，或纯粹时间错位。
 
@@ -9690,7 +9302,7 @@ ThinkingBlock（ChatAssistantMessageUI.kt:1105）：
 ### 流程（分支隔离纪律）
 - 分支：fix/memory-gate-thresholds（基于 main）
 - 改 → 单测同步 → 分支 CI → 绿 → ff 合并 main → main release CI → 下载 APK 给用户真机验证
-- 仓库 /tmp/rikka-src，remote origin logicflow-GYW/RikkaMinis，push/CI 走 gh_sync.sh（askpass）
+- 仓库 /tmp/rikka-src，remote origin ***OWNER***/RikkaMinis，push/CI 走 gh_sync.sh（askpass）
 - 目标 APK：release android-latest；之前 Publish 遇过 GitHub API 503（Build/Verify 绿只有 Publish 挂 → 重跑 main release CI 即可）
 
 ### 真机验证预期
@@ -9886,7 +9498,7 @@ commit 9f2636f 已 push 远端（SHA 一致），分支 CI run 32088579831 in_pr
 用户约定：以后派发整改任务，**只需发编号**（RC1~RC6）。分会话 agent 收到编号后，到下面对应条目领取完整执行指令，并自查「通用纪律」。总控在本会话收口。
 
 ### 通用纪律（每个 RC 都遵守）
-1. 仓库 `/tmp/rikka-src`，remote origin = logicflow-GYW/RikkaMinis，基线 main@500c5fa。
+1. 仓库 `/tmp/rikka-src`，remote origin = ***OWNER***/RikkaMinis，基线 main@500c5fa。
 2. `git checkout -b <分支名>`（基于 main），在分支改，绝不碰 main、不合并 main、不删分支。
 3. 改完本地静态自检 → commit → 推分支 → 触发分支 CI → 确认 CI 绿（Build+Verify success）。
 4. push/CI 走 `sh /var/minis/skills/github-ops/scripts/gh_sync.sh`（askpass）；push 静默失败则 `export GIT_ASKPASS=/var/minis/workspace/.git_askpass.sh` 再直接 git push，成功后 `git ls-remote` 验远端 SHA。
@@ -10312,7 +9924,7 @@ RC7/10/11/12/13/14/15/16/17A 全部合并 main，release CI 全绿，分支全�
 - 触发频率：几秒输入一次？长文本？还是偶发？
 - 能否复现：清空输入框重新输入、切换会话后输入。
 
-**VCPMinis 是真实存在的 fork**（hjhjd/VCPMinis，logicflow-GYW/RikkaMinis 的 fork 列表里有）——我一开始基于"记忆里没有"误判为幻觉是错的，教训：判断 fork 存不存在要查 GitHub forks API，不能只看本地记忆。
+**VCPMinis 是真实存在的 fork**（hjhjd/VCPMinis，***OWNER***/RikkaMinis 的 fork 列表里有）——我一开始基于"记忆里没有"误判为幻觉是错的，教训：判断 fork 存不存在要查 GitHub forks API，不能只看本地记忆。
 
 ## 2026-08-20
 
@@ -10599,7 +10211,7 @@ step 3 迁 socket 是**不可逆切换**：一旦 toolservice bind "native-offlo
 **本次会话环境提示**：沙箱在会话中途被重置（/root/t2/repo 丢失、git/curl 都被清空），重新 clone 到 /tmp/rb 继续。教训：跨会话交接时不要依赖上一次会话的克隆目录/已装工具，先 `which git` + 干净 clone 核实。
 
 <!-- 2026-08-20 22:52:00 -->
-## 2026-08-20 22:52:00
+## thinking 级别无效 + 工具卡"正在调用"卡死修复（2026-08-20 收尾）
 
 
 **任务文件**：`/var/minis/shared/task-thinking-level-and-ui-stuck.md`
@@ -10835,7 +10447,7 @@ CI 第一次跑失败（两个编译错误）已修，第二次 CI run 324786559
 
 
 **⚠️ 共享工作树事故（重要协作教训）**：/tmp/rb 是共享工作树，会话 A（Phase 2 fix/modelservice-terminal-protocol）中途 checkout 切走了分支，导致会话 B 的工作树里混入 A 的未提交改动（ModelExecutionService.kt/Mailbox.kt/Lifecycle.kt）。会话 B 的改动（ExecutionCoordinator/PersistentShell/测试）与 A 零重叠，但**无法在共享树继续**。
-**解法**：`git clone /tmp/rb /tmp/rb-b` 本地 clone（秒级、硬链接对象），在独立目录操作自己的分支；clone 后 origin 指向本地路径 /tmp/rb，需 `gh_sync set-remote-url` 改回 https://github.com/logicflow-GYW/RikkaMinis.git 才能 push 到 GitHub。**教训：多会话共享工作树时，若发现 branch 被切走，立即本地 clone 隔离，不要在原树折腾；clone 后必改 remote。**
+**解法**：`git clone /tmp/rb /tmp/rb-b` 本地 clone（秒级、硬链接对象），在独立目录操作自己的分支；clone 后 origin 指向本地路径 /tmp/rb，需 `gh_sync set-remote-url` 改回 https://github.com/***OWNER***/RikkaMinis.git 才能 push 到 GitHub。**教训：多会话共享工作树时，若发现 branch 被切走，立即本地 clone 隔离，不要在原树折腾；clone 后必改 remote。**
 
 **Phase 4 改动（commit 60bee55）**：
 - ① child RSS 绝对兜底：新常量 CHILD_RSS_ABSOLUTE_CAP_MB=512MB；childRssHighWaterMarkMB 动态线 clamp 到 512（原 1024/1536 全砍）；isChildRssOverAbsoluteCap 纯函数接入 in-flight（优先检查）和 post-exec。
@@ -10846,7 +10458,7 @@ CI 第一次跑失败（两个编译错误）已修，第二次 CI run 324786559
 **测试**：ProotChildRssCapTest(6) + OutcomeKnownMappingTest(11) + ResidualProcessPpidTest(10) + 更新 ExecutionCoordinatorSchedulerTest 的 child-rss 断言（1024/1536→512 clamp）。
 **注意**：旧测试断言 childRssHighWaterMarkMB(2048)=1024、(4096)=1536，改 clamp 后全变 512，必须同步更新否则 CI 红。
 
-**坑**：BusyBox grep 不支持 --include= 参数；git clone 丢 user.name/email 配置需重设（logicflow-GYW / [EMAIL]）。
+**坑**：BusyBox grep 不支持 --include= 参数；git clone 丢 user.name/email 配置需重设（***OWNER*** / [EMAIL]）。
 
 分支 CI：run 已 dispatch，待查。
 
@@ -11010,11 +10622,11 @@ CI 第一次跑失败（两个编译错误）已修，第二次 CI run 324786559
 **已修复（环境级重建）**：
 1. `gh`（github-cli）缺失 → code-workbench setup.sh 补装 13 工具全绿（ripgrep/fd/ast-grep/ctags/ruff/black/patch/tree-sitter/gh 等）
 2. semantic-memory：huggingface_hub + numpy 缺失 → pip/apk 补装；search/status 恢复正常（200 条索引在，HF token 有效）；build 全量重建放后台跑（远程嵌入慢，120s 不够）
-3. git 全局身份丢失 → 恢复 logicflow-GYW / [EMAIL]
+3. git 全局身份丢失 → 恢复 ***OWNER*** / [EMAIL]
 
 **环境变量（沙箱 shell 里有值，但应用内 envvars 丢失，需用户点链接补回）**：
-- 丢：CF_ACCOUNT_ID（=***CF_ACCOUNT_ID***，[EMAIL]'s Account）、CF_ACCOUNT_EMAIL（=[EMAIL]）、GH_ALT_USER（=rikkaflow）、GH_ALT_UID（=313291818）
-- 在：GITHUB_TOKEN（logicflow-GYW 主号 repo+workflow，gh auth OK）、GITHUB_TOKEN_FULL_RIGHT（rikkaflow 小号 id 313291818，free 无2FA）、CF_API_TOKEN（workers/zones 端点 200 OK）、HF_TOKEN（whoami 通）、SENSENOVA_API_KEY
+- 丢：CF_ACCOUNT_ID（=***CF_ACCOUNT_ID***，***USER***@outlook.com's Account）、CF_ACCOUNT_EMAIL（=***USER***@outlook.com）、GH_ALT_USER（=***ALT_USER***）、GH_ALT_UID（=313291818）
+- 在：GITHUB_TOKEN（***OWNER*** 主号 repo+workflow，gh auth OK）、GITHUB_TOKEN_FULL_RIGHT（***ALT_USER*** 小号 id 313291818，free 无2FA）、CF_API_TOKEN（workers/zones 端点 200 OK）、HF_TOKEN（whoami 通）、SENSENOVA_API_KEY
 - 注：minis-config 无法直接写 envvars 值（设计防泄密），只能用户点 Settings→Environments 预填深链确认
 
 **验证通过（未坏）**：全部 17 技能 SKILL.md 完好；self-improving-agent 数据（ERR 571 行/LRN 383 行）完好，minis_auto_log.sh 正常；github-ops gh_sync.sh 冒烟通；gh_fullright.sh 在（需 GH_ALT_USER 环境变量）；cloudflare 用 curl 直连 token 有效；占位符类技能（task-dispatch/evidence-discipline 等）零依赖随时可用
@@ -11055,9 +10667,9 @@ CI 第一次跑失败（两个编译错误）已修，第二次 CI run 324786559
 ## 小号/大号应用共存前置工作（dual-appid）
 
 <!-- 2026-08-22 -->
-用户决策：接下来改动集中在小号（rikkaflow fork）做实验，需要大小号编的应用能共存（同设备并排诊断，互不覆盖）。大号 logicflow-GYW/RikkaMinis 保稳定不动。
+用户决策：接下来改动集中在小号（***ALT_USER*** fork）做实验，需要大小号编的应用能共存（同设备并排诊断，互不覆盖）。大号 ***OWNER***/RikkaMinis 保稳定不动。
 
-**fork链**：OpenMinis/OpenMinis(根) → logicflow-GYW/RikkaMinis(大号) → rikkaflow/RikkaMinis(小号)。小号 fork 当前干净同步大号（main tip=e00ccaa）。
+**fork链**：OpenMinis/OpenMinis(根) → ***OWNER***/RikkaMinis(大号) → ***ALT_USER***/RikkaMinis(小号)。小号 fork 当前干净同步大号（main tip=e00ccaa）。
 
 **已完成**（在小号 fork 建分支 `chore/dual-appid`，commit faa918f，已 push）：
 - `src/android/app/build.gradle.kts`：加 `MINIS_APP_ID_OVERRIDE` 环境变量开关。未设→applicationId 保持 `com.openminis.app`（大号行为不变）；设为 e.g. `com.openminis.app.lab` → applicationId、派生子进程名(<appId>:modelservice等)、Shizuku provider(<appId>.shizuku)、默认桌面 label(RikkaMinis (Lab)) 全部跟随。
@@ -11096,7 +10708,7 @@ CI 第一次跑失败（两个编译错误）已修，第二次 CI run 324786559
 **用户确认已装 lab APK（com.openminis.app.lab），安装后正常运行，无闪退。** dual-appid 前置工作核心验证通过：大号 com.openminis.app + 小号 com.openminis.app.lab 可在同一设备**共存并排运行，互不覆盖**。
 
 **本次会话产物 & 待办（供新会话接手）**：
-- 分支 `chore/dual-appid`（小号 fork rikkaflow/RikkaMinis），tip commit **5672ca3**
+- 分支 `chore/dual-appid`（小号 fork ***ALT_USER***/RikkaMinis），tip commit **5672ca3**
 - 已有改动链：
   - `faa918f` build.gradle.kts：MINIS_APP_ID_OVERRIDE applicationId 注入 + resValue(app_name/package_name) + shortcuts.xml targetPackage 解耦
   - `02349bd` build-apk.yml：Inject build version 步加 MINIS_APP_ID_OVERRIDE=com.openminis.app.lab（小号 CI 默认产 lab 包）
@@ -11113,8 +10725,8 @@ CI 第一次跑失败（两个编译错误）已修，第二次 CI run 324786559
 用户明确拍板：**dual-appid 的改动（应用共存实验）留在小号实验分支 `chore/dual-appid` 的"进度"态即可，不要合并进小号 main。**
 
 背景链：
-- 大号 logicflow-GYW/RikkaMinis = 稳定版，main 保稳定不动（当前回滚 #985 代码）
-- 小号 rikkaflow/RikkaMinis = 实验田；小号 main 也保持其原有的干净状态，不并入 dual-appid 实验改动
+- 大号 ***OWNER***/RikkaMinis = 稳定版，main 保稳定不动（当前回滚 #985 代码）
+- 小号 ***ALT_USER***/RikkaMinis = 实验田；小号 main 也保持其原有的干净状态，不并入 dual-appid 实验改动
 - dual-appid 实验（com.openminis.app.lab 共存包）以分支演进，tip commit `5672ca3`，lab 包已在真机验证正常运行
 
 **后续开发纪律**：
@@ -11130,7 +10742,7 @@ CI 第一次跑失败（两个编译错误）已修，第二次 CI run 324786559
 
 用户当前明确决策链（2026-08-22 晚，本会话对齐）：
 1. 大号 main 已回滚 #985（75a2aed/e00ccaa），回滚目标是「内存隔离 v2」那套做法（idle-reap + :browserservice 迁出 + 三 bridge），不是放弃内存治理。
-2. 用户要在小号（rikkaflow/RikkaMinis 实验田）上「彻底解决内存飙升」。
+2. 用户要在小号（***ALT_USER***/RikkaMinis 实验田）上「彻底解决内存飙升」。
 3. 经对齐确认：当初认为能彻底解决的方案 = **D-1 迁进程**（native_offload socket 迁移 + 隔离 handler 到短命进程），但它的前提是 **D-4b 未完成验证**（真机长时并发聊天压测，用 [provider-rss] 打点看聊天直连 provider 路径 RSS 是否单调涨）。D-4b 被搁置至今没做完。
 4. 用户拍板：**按我建议先补 D-4b 验证**，用证据决定是否重启 D-1 完整版，不盲目直接冲完整迁进程（那是 v2 翻车老路）。
 
@@ -11151,7 +10763,7 @@ CI 第一次跑失败（两个编译错误）已修，第二次 CI run 324786559
 <!-- 2026-08-22 18:20:02 -->
 ## 小号内存治理方案提案（2026-08-22）
 
-审计 rikkaflow/RikkaMinis `chore/dual-appid` tip 5672ca3 后，建议不恢复完整内存隔离 v2，也不直接迁 browser/toolservice；先做 D-4b 取证，再施工 Provider-only D-1：所有生产 LLM/provider 调用统一进入 :modelservice，删除主进程 fallback，恢复 mailbox/cancel ACK/原子结果/worker PID/自杀协议；大媒体改文件引用；provider worker 并发先限 1，主进程禁止创建 LLMProvider。当前 modelservice 只是优先通道，compaction/title/subagent/QuickTest/model-use 等仍有主进程直连，stopSelf 也不等于进程死亡。方案文档：/var/minis/workspace/小号内存飙升根治方案-Provider-Worker-Hard-Boundary.md。此为待用户拍板的方案，不是已实施结论。
+审计 ***ALT_USER***/RikkaMinis `chore/dual-appid` tip 5672ca3 后，建议不恢复完整内存隔离 v2，也不直接迁 browser/toolservice；先做 D-4b 取证，再施工 Provider-only D-1：所有生产 LLM/provider 调用统一进入 :modelservice，删除主进程 fallback，恢复 mailbox/cancel ACK/原子结果/worker PID/自杀协议；大媒体改文件引用；provider worker 并发先限 1，主进程禁止创建 LLMProvider。当前 modelservice 只是优先通道，compaction/title/subagent/QuickTest/model-use 等仍有主进程直连，stopSelf 也不等于进程死亡。方案文档：/var/minis/workspace/小号内存飙升根治方案-Provider-Worker-Hard-Boundary.md。此为待用户拍板的方案，不是已实施结论。
 
 <!-- 2026-08-22 18:38:54 -->
 ## 小号内存治理：任务已派发（2026-08-22 晚）
@@ -11427,7 +11039,7 @@ proc on /proc type proc (rw,relatime,gid=3009,hidepid=invisible)
 
 用户拍板：对小号 lab 包 `com.openminis.app.lab`（beta.41 = tip a6b2665，分支 fix/modelservice-before-dispatch-notify）做「找 bug + 压力测试」的多会话并行任务。攻击面全部 5 条。
 
-已 clone 小号 rikkaflow/RikkaMinis 到 /tmp/RikkaMinis-lab，核实 tip=a6b2665。五条攻击面按代码路径隔离拆成 5 个并行会话（无文件冲突）：A agent 多轮流式+worker 生命周期 / B 终端 sandbox / C 存储备份配置同步 / D 浏览器 bridge / E 记忆压缩宏子代理失败钩子。
+已 clone 小号 ***ALT_USER***/RikkaMinis 到 /tmp/RikkaMinis-lab，核实 tip=a6b2665。五条攻击面按代码路径隔离拆成 5 个并行会话（无文件冲突）：A agent 多轮流式+worker 生命周期 / B 终端 sandbox / C 存储备份配置同步 / D 浏览器 bridge / E 记忆压缩宏子代理失败钩子。
 
 派发产物在 /var/minis/shared/bug-hunt-pressure/：TASKBOARD.md（冲突矩阵+开局指令+观测清单）+ taskfiles/session-task-A~E.md。开局指令格式：`读这个文件并立刻执行，不要停，不要问我任何问题：/var/minis/shared/bug-hunt-pressure/taskfiles/session-task-N.md`。
 
@@ -11587,7 +11199,7 @@ proc on /proc type proc (rw,relatime,gid=3009,hidepid=invisible)
 <!-- 2026-08-23 15:36:51 -->
 ## 修复 03：get_text 超长文本截断标记
 
-在小号 rikkaflow/RikkaMinis 基线 a6b2665 上创建并推送分支 `fix/browser-gettext-truncate-flag`，commit `6da1df1`。BrowserUseJS get_text 上限改为 900*1024 字符并返回 fullLength/truncated；BrowserUseManager 取消二次 10K 截断并显示截断提示；BrowserActionResult 与 BrowserUseOffloadHandler 透传截断元数据；新增 JVM 测试 BrowserUseTextTruncationTest。独立 clone `/tmp/fix03-repo`。本地 Gradle 测试因无 Android SDK 被阻断，静态验证通过；分支 CI 已触发，run 32625933380 in_progress。
+在小号 ***ALT_USER***/RikkaMinis 基线 a6b2665 上创建并推送分支 `fix/browser-gettext-truncate-flag`，commit `6da1df1`。BrowserUseJS get_text 上限改为 900*1024 字符并返回 fullLength/truncated；BrowserUseManager 取消二次 10K 截断并显示截断提示；BrowserActionResult 与 BrowserUseOffloadHandler 透传截断元数据；新增 JVM 测试 BrowserUseTextTruncationTest。独立 clone `/tmp/fix03-repo`。本地 Gradle 测试因无 Android SDK 被阻断，静态验证通过；分支 CI 已触发，run 32625933380 in_progress。
 
 <!-- 2026-08-23 15:47:53 -->
 ## 修复 04 已推送
@@ -11597,10 +11209,10 @@ proc on /proc type proc (rw,relatime,gid=3009,hidepid=invisible)
 <!-- 2026-08-23 15:49:01 -->
 ## 修复 11 完成
 
-在小号 rikkaflow/RikkaMinis 基线 a6b2665 上独立 clone `/tmp/fix11-repo`，分支 `fix/memory-rollup-largest-log` 提交并推送 commit `722e831`。采用方案 A：MemoryRollupRunner.runOnce(dateStr: String? = null) 默认选择未蒸馏、含可蒸馏条目的最大旧日志，支持显式日期；更新 MemoryRollupTool/ChatViewModel 提示；新增最大旧日志、幂等跳过、空日志不修改源文件测试。Gradle JVM 测试因沙箱无 Android SDK 被阻断，git diff --check 静态验证通过。
+在小号 ***ALT_USER***/RikkaMinis 基线 a6b2665 上独立 clone `/tmp/fix11-repo`，分支 `fix/memory-rollup-largest-log` 提交并推送 commit `722e831`。采用方案 A：MemoryRollupRunner.runOnce(dateStr: String? = null) 默认选择未蒸馏、含可蒸馏条目的最大旧日志，支持显式日期；更新 MemoryRollupTool/ChatViewModel 提示；新增最大旧日志、幂等跳过、空日志不修改源文件测试。Gradle JVM 测试因沙箱无 Android SDK 被阻断，git diff --check 静态验证通过。
 
 <!-- 2026-08-23 15:56:01 -->
-## 2026-08-23 15:56:01
+## 修复 03 分支 CI run 32625933380 已完成并成功，head_sha=6da1df1，与推送 comm
 
 修复 03 分支 CI run 32625933380 已完成并成功，head_sha=6da1df1，与推送 commit 一致；分支验证闭环完成，仍未合并 main。
 
@@ -11672,7 +11284,7 @@ proc on /proc type proc (rw,relatime,gid=3009,hidepid=invisible)
 
 用户拍板「把小号成果合并进入主号」，按建议整体 fast-forward，闭环完成：
 
-- **合并方式**：主号 logicflow-GYW/RikkaMinis main 从 e00ccaa **fast-forward** 到 **dc18d450**（纯 ff，零冲突，主号无独有提交）。小号 main 本身未动（仍 3576528，保留实验田）。
+- **合并方式**：主号 ***OWNER***/RikkaMinis main 从 e00ccaa **fast-forward** 到 **dc18d450**（纯 ff，零冲突，主号无独有提交）。小号 main 本身未动（仍 3576528，保留实验田）。
 - **dc18d450 = 小号全部成果（3576528）+ 1 个 workflow 调整 commit**：
   - 小号 39 个成果 commit：dual-appid 共存开关（3）+ TF-A~J 系列（provider-rss 观测 / 可靠 worker 生命周期 / 文件 payload / ProviderExecutionGateway 网关 / ProviderBoundary 进程域守卫 / run-dir 所有权 / stream-ack liveness / process-identity liveness / SSE 看门狗）+ 5 bug-hunt 修复 + browser toolresult guard。
   - **额外 commit「ci: main-account release keeps stable identity」**：把小号 workflow 里 `MINIS_APP_ID_OVERRIDE=com.openminis.app.lab` 移除，主号 CI 恢复出 stable 包 `com.openminis.app`（不再出 lab 包）。dual-appid 的 build.gradle.kts 开关保留（默认不设环境变量=byte-for-byte stable 行为，无害）。
@@ -11680,7 +11292,7 @@ proc on /proc type proc (rw,relatime,gid=3009,hidepid=invisible)
 - **真机验证留给用户**：主号出的是 stable `com.openminis.app` 包，需用户装最新 beta 验证。此次合入的代码此前已在小号 lab 包真机验证过（beta.41/50/52 等），但主号 stable 包需重装确认。
 
 **过程要点**：
-- 用主号 token（GITHUB_TOKEN=logicflow-GYW）裸 push refspec 推送；GITHUB_TOKEN_FULL_RIGHT 是小号 rikkaflow。
+- 用主号 token（GITHUB_TOKEN=***OWNER***）裸 push refspec 推送；GITHUB_TOKEN_FULL_RIGHT 是小号 ***ALT_USER***。
 - 主号 main **未受保护**（protected:false），可直接 push。
 - 撤 dual-appid workflow 那行时用 file_edit 精确替换（注意版本号拼写 MINIS_VERSION_NAME_SUFFIX）。
 - 查 CI 用 curl + python；/actions/runs/{id} 需完整 repo 前缀路径。
@@ -11828,9 +11440,9 @@ proc on /proc type proc (rw,relatime,gid=3009,hidepid=invisible)
 
 **测试**：新 ToolCallDedupeTest.kt 6 用例（同参去重指纹相等/tool_title 不影响/不同参数不去重/不同工具不去重/键序无关/忽略键与 ToolLoopDetector 一致/首个 id 胜出解析合约）+ ChatViewModelSanitizeTest 追加 1 用例（占位含 "Do not blindly re-issue"）。**本地 JVM 18/18 全绿**（kotlinc 1.9.24 + junit4 + orgjson jar，用 /tmp/tooldup-jvm/ 副本，AppLogger 桩 + Log 替换等适配）。
 
-**验证**：分支 CI run **32685877387 success**（head_sha=73400d6 已核实 = 无并发竞态假绿）。分支已推主号 origin + 小号 rikkaflow（镜像）。**未合并 main**（等收口决策）。
+**验证**：分支 CI run **32685877387 success**（head_sha=73400d6 已核实 = 无并发竞态假绿）。分支已推主号 origin + 小号 ***ALT_USER***（镜像）。**未合并 main**（等收口决策）。
 
-**可复用踩坑**：① kotlin-stdlib 必须进运行 classpath（JVM 跑 Kotlin 测试）② JUnitCore 用全限定类名 ③抽取纯函数到独立文件时，测试文件里若有同名函数引用（sanitizeAgentHistoryMessages 由 impl 改名），需要测试内 wrapper 委托 ④删除函数时 python 按边界注释定位，注意别留下孤立 `}`（花括号配平检查抓到 1 处）⑤小号 remote（rikkaflow）push 需要 GIT_ASKPASS 传 GITHUB_TOKEN_FULL_RIGHT（gh_sync.sh push --remote small 因 push.default 提示静默失败，用显式 askpass 脚本成功）。
+**可复用踩坑**：① kotlin-stdlib 必须进运行 classpath（JVM 跑 Kotlin 测试）② JUnitCore 用全限定类名 ③抽取纯函数到独立文件时，测试文件里若有同名函数引用（sanitizeAgentHistoryMessages 由 impl 改名），需要测试内 wrapper 委托 ④删除函数时 python 按边界注释定位，注意别留下孤立 `}`（花括号配平检查抓到 1 处）⑤小号 remote（***ALT_USER***）push 需要 GIT_ASKPASS 传 GITHUB_TOKEN_FULL_RIGHT（gh_sync.sh push --remote small 因 push.default 提示静默失败，用显式 askpass 脚本成功）。
 
 <!-- 2026-08-24 11:42:27 -->
 ## 首块超时修复 release CI 全绿 + 收口（2026-08-24）
@@ -11928,7 +11540,7 @@ release CI run **32686587661 success**，head_sha=62d3db4a 已核实一致（防
 
 <!-- 2026-08-24 16:0x -->
 
-**分支**：`fix/sanitize-firstchunk-cleanup`（主号 logicflow-GYW/RikkaMinis，基于 0b90cf0），commit `c78bcca`，分支 CI run **32702069207 success**（head_sha 核实一致）。**未合并 main**（纪律：等用户拍板）。
+**分支**：`fix/sanitize-firstchunk-cleanup`（主号 ***OWNER***/RikkaMinis，基于 0b90cf0），commit `c78bcca`，分支 CI run **32702069207 success**（head_sha 核实一致）。**未合并 main**（纪律：等用户拍板）。
 
 **三项修复**（FIX-B 任务书，报告 /var/minis/shared/recent-fix-audit/reports/FIX-B-report.md）：
 1. **SanitizeAgentHistory.kt println→Log.w**：采用任务书方案 2（注入 logger）——`sanitizeAgentHistoryMessagesImpl(messages, log: (String)->Unit = {})`，生产壳 `ChatViewModel.kt:11937` 委托时传 `{ Log.w("ChatViewModel", it) }`。保住纯 JVM 可测性 + 恢复 logcat TAG。
@@ -12030,14 +11642,14 @@ CI 轮询工具 gh_ci_wait.sh 已实测端到端可用（见当天另一条记�
 报告：/var/minis/shared/model-delete-bug-diagnosis.md。未改代码，等用户拍板。
 
 <!-- 2026-08-24 18:48:31 -->
-## 2026-08-24 18:48:31
+## 更新：手动添加大模型删不掉 bug 已派发修复任务，任务文件 = 自包含（背景+3方案+步骤+验收），路径 /var/m
 
 更新：手动添加大模型删不掉 bug 已派发修复任务，任务文件 = 自包含（背景+3方案+步骤+验收），路径 `/var/minis/shared/model-delete-bug-diagnosis.md`（即之前的诊断报告已并入任务文件）。推荐方案 1（replaceEntries 继承 isCustom，ProviderRepository.kt L988 `isCustom = prior?.isCustom ?: false`）+ 方案 2（ProviderDetailScreen 长按删除对所有可见条目开放）。基线 main @ 6ea8c1b，分支建议 `fix/model-delete-custom-identity`。沙箱复现镜像 /tmp/repro-modeldel/Repro.kt 已跑通。等用户新开对话领任务。
 
 <!-- 2026-08-24 19:27:48 -->
 ## 模型删除 bug 修复施工完成（2026-08-24 晚）
 
-任务：`/var/minis/shared/model-delete-bug-diagnosis.md`（手动添加的模型删不掉）。分支 `fix/model-delete-custom-identity` @ `85e7b29`（主号 logicflow-GYW/RikkaMinis，基于 6ea8c1b），分支 CI **run #1032（id 32719571576）success，head_sha=85e7b29f8cec744089c1638a69d26095bf2b3d06 已核实**（防假绿）。**未合并 main**（纪律等拍板）。
+任务：`/var/minis/shared/model-delete-bug-diagnosis.md`（手动添加的模型删不掉）。分支 `fix/model-delete-custom-identity` @ `85e7b29`（主号 ***OWNER***/RikkaMinis，基于 6ea8c1b），分支 CI **run #1032（id 32719571576）success，head_sha=85e7b29f8cec744089c1638a69d26095bf2b3d06 已核实**（防假绿）。**未合并 main**（纪律等拍板）。
 方案 1+2：
 1. `ProviderRepository.kt` replaceEntries L988 `isCustom = prior?.isCustom ?: false`（刷新不再抹掉手动模型自定义身份）——resolved 变量名已确认。
 2. `ProviderDetailScreen.kt` 两处长按门控 `onLongClick = { entryToDelete = entry }` 对所有可见条目开放（依据 [T-provider-no-static-seed] 删除后不重建）。旧 T143 注释同步更新。
@@ -12147,6 +11759,26 @@ CI 轮询工具 gh_ci_wait.sh 已实测端到端可用（见当天另一条记�
 
 用户拍板合并。`fix/memory-file-lazy-render` 已通过 ff 合并并推送主号 main：`5f92949→62a3a7d`。严格只改 MemoryDetailScreens.kt；分支 CI run 32823975327 success，head_sha 已核对；main 已推送并核对远端同 commit，分支本地+远端已删，工作树干净。按用户要求未等待合并后的 release CI。
 
+<!-- 2026-08-25 19:47:13 -->
+## rikkahub 流畅性吸收 — 施工方案已产出
+
+调研（rikkahub@3ebda54 vs RikkaMinis main@62a3a7d）落地成施工方案：/var/minis/shared/rikkahub-smoothness-absorption/施工方案.md。
+
+核心结论（rank）：
+1. **item 粒度重归 MessageNode 级**（一条消息 6-7 个 FlatChatItem → 一节一卡），是滚动物复杂化的结构性根因，最大收益。
+2. @Stable/@Immutable 数据类纪律（让 strong-skipping 生效）。
+3. 滚动跟随回归简单显式（anchor-guard 是历史补丁，结构稳定后可删）。
+4. 只警示不截断 + 虚拟化优先。
+
+施工分 4 阶段（每阶段独立分支+CI+ff+删分支，逐 commit 收口）：
+- 阶段0 固化 key序列契约测试（回归基线）
+- 阶段1 FlatChatItem 加 aggregateMessages 开关，默认关零回归
+- 阶段2 单item内部虚拟化难点（长文本保留 AppendOnlyMarkdownSegmenter 平移进 item；折叠用 AnimatedVisibility 不组合）
+- 阶段3 @Stable 纪律
+- 阶段4 滚动跟随简化（依赖阶段1-3先落地）
+
+关键判断：① 是根、② 催化剂、③ 是①的自然结果，跳过①直接做③=继续叠补丁（历史已翻车4轮）。效果是结构性长期收益不是立竿见影。
+
 <!-- 2026-08-25 19:53:57 -->
 ## 首块超时掐断思考模型 bug 已修复合并 main（3eb1785，2026-08-25）
 
@@ -12177,6 +11809,38 @@ CI 轮询工具 gh_ci_wait.sh 已实测端到端可用（见当天另一条记�
 
 **待办**：用户装 release APK 真机验证长思考模型不再被 45s/6min 掐断。
 
+<!-- 2026-08-25 20:22:46 -->
+## rikkahub 流畅性吸收 — 施工方案已产出并派发就绪（2026-08-25）
+
+
+用户拍板要「具体可直接施工的方案」。调研（rikkahub@3ebda54 vs RikkaMinis main@62a3a7d）落地成 5 任务派发包，目录 `/var/minis/shared/rikkahub-smoothness-absorption/`：
+
+- README.md（总览+效果预期）、dispatch-board.md（冲突矩阵+合并顺序+开局指令）
+- session-task-A.md 基线测试固化（只碰 test/）— 分支 fix/chat-render-baseline-tests
+- session-task-B.md @Stable/@Immutable 纪律（只碰 ChatModels.kt+文档，禁碰 ChatFlatItems.kt）— fix/chat-stable-discipline
+- session-task-C.md 聚合 Item 生成器（加 AssistantMessageItem + buildAggregateChatItems + AGGREGATE_MESSAGE_ITEMS 开关默认 false）— fix/message-node-item-generator
+- session-task-D.md 聚合渲染器（复用 ChatAssistantMessageUI.kt 的 AssistantMessageView，补 onStop/onOpenDetail/onRerunFromHere/onOpenTerminalWithCommand 回调，翻开关）— fix/message-node-item-renderer
+- session-task-E.md 滚动跟随简化（SIMPLE_FOLLOW 开关→删 anchor-guard 死区/prevRowKeys 前缀校验，保留 isAtBottom/safeBottomScrollIndex/wasScrolledIntoHistory）— fix/scroll-follow-simplify
+
+合并顺序：A、B 并行 → C→D 串行 → E 最后。核心判断：① item 粒度重归 MessageNode 级是结构性根因（最大收益）② @Stable 纪律 ③ 结构稳定后滚动回归简单显式。效果是「把片段级拍平欠的复杂度税还回去」，非性能翻倍魔术。
+
+关键代码位置已核实：AssistantMessageView（ChatAssistantMessageUI.kt:328）已是完整单消息渲染器，可直接复用；buildFlatChatItems 签名含 fromIndex/seedKeys/skipTextBlocks；FlatChatItem 各子类手写 cheap-equals；ChatFollowController 是纯 reducer 可测。
+<!-- 2026-08-25 20:0x -->
+
+<!-- 2026-08-25 20:49:29 -->
+## rikkahub 流畅性吸收 · 会话 B @Stable/@Immutable 纪律 — 完成（分支未合 main）
+
+<!-- 2026-08-25 -->
+任务：`/var/minis/shared/rikkahub-smoothness-absorption/session-task-B.md`，分支 `fix/chat-stable-discipline`（主号 ***OWNER***，基于 main 3eb1785），commit `c1925b3299a060aeefe695dff3bc6fca1e18862a`。**分支 CI run 32848265288 success，head_sha 已核实一致**。未合并 main（等用户拍板）。
+
+**审计结论（ChatModels.kt 5 个 data class）**：StreamingDelta/ChatMessage/QueuedPrompt/AssistantBlock 已 @Immutable，仅 **SlashCommand 缺注解** → 补 @Immutable（唯一改动，+1 行注解级）。全字段 val + 全稳定类型（List/Uri/枚举/ImageVector 均稳定），**零「存疑」字段、零不稳定字段**。ChatMessage/AssistantBlock 的派生 getter（isInternalBridge/isText）为纯函数派生，不破坏 @Immutable。
+
+**为何 ChatFlatItems.kt 不用动**：其所有子类已全 @Immutable + 手写 cheap-equals（比廉价稳定身份），已达「稳定不可变+strong-skipping 生效」理想态；且是 C/D 阶段主战场避免冲突。审计文档写入 `docs/chat-stable-audit.md`。
+
+**收尾**：本地施工分支已删，工作树干净在 main；远端分支保留待拍板。
+
+**协作顺序提醒**（来自本次派发包）：A、B 并行 → C→D 串行 → E 最后。B 只碰 ChatModels.kt+docs，与其他会话零文件冲突。
+
 <!-- 2026-08-25 21:06:40 -->
 ## 会话 A 完成：消息级聚合回归基线测试（fix/chat-render-baseline-tests）
 
@@ -12192,8 +11856,27 @@ CI 轮询工具 gh_ci_wait.sh 已实测端到端可用（见当天另一条记�
 
 交付报告：/var/minis/shared/rikkahub-smoothness-absorption/reports/session-A-report.md；派发板已标 A 完成。
 
+<!-- 2026-08-25 21:30:04 -->
+## rikkahub 流畅性吸收 · 会话 C 聚合 Item 生成器完成（分支未合 main）
+
+<!-- 2026-08-25 21:28 -->
+
+任务：`/var/minis/shared/rikkahub-smoothness-absorption/session-task-C.md`，分支 `fix/message-node-item-generator`（主号 ***OWNER***，基于 main 3eb1785）。commit `685c59277063877a953d5a0364ef6bfb5b487524`，分支 CI **run #1060 success，head_sha 已核实一致**。未合并 main（等用户拍板）。
+
+**改动（4 文件 +317 行，零删除=零行为回归）**：
+1. `ChatFlatItems.kt`：密封类新增 `FlatChatItem.AssistantMessageItem`（messageId/message/messageMarkdown；手写 cheap-equals——冻结消息同 instance→skip、流式新 instance→重组，绝不 char-by-char）；新增 `buildAggregateChatItems(messages)`（1 消息=1 item；user→UserBubble 对齐 precededByUser 回看；assistant→AssistantMessageItem，messageMarkdown 拼接对齐 buildFlatChatItems 的 joinedMarkdown；跳过 isInternalBridge）。
+2. `ChatScreen.kt`：顶层 `internal const val AGGREGATE_MESSAGE_ITEMS=false`；flatten collect 内 `val merged=...` 后加 `if(AGGREGATE_MESSAGE_ITEMS){ flatItems=withContext(Default){buildAggregateChatItems(merged)}; return@collect }`——else 现有 ledger 路径**一字未改**。渲染 when 加 AssistantMessageItem 分支（走复用 AssistantMessageView，阶段 D 前置就绪）。
+3. `ChatScreenUtils.kt` isCompactedItem 加分支（灰度同其他 assistant row）。
+4. 测试 `AggregateChatItemGeneratorTest.kt`（10 用例，JVM 全绿）。
+
+**两处 CI 返工**（可复用）：
+- 初始首版只改了 3 处，漏了**密封类的 4 个 exhaustive when**（`owningMessageId` / `buildFlatChatItems` 的 dedupe / ChatScreen 渲染 when / `isCompactedItem`）→ `compileReleaseKotlin` 报 4 个 "'when' expression must be exhaustive"。给 sealed class 加子类 = 必须扫全仓所有 `is FlatChatItem.X` 引用点（项目惯例：sealed 加子类必改所有 when）。
+- JVM shadow 里 `internal` 跨编译单元不可见（test 单独编译单元）→ shadow 文件改 public。sh：凡是要跨单独编译单元访问的 sealed/顶层函数，shadow 必须 public。
+
+**验证**：沙箱 JVM（kotlinc 2.0.20 + JUnitCore）10/10 绿（真实生产 buildAggregateChatItems + AssistantMessageItem 逻辑用 shadow ChatModels/chatshadow 复刻，含忠实 bridge 文本 list）。开关默认 false 现有拍平产出 byte-for-byte 一致，现有测试零挂。
+
 <!-- 2026-08-25 21:54:53 -->
-## 2026-08-25 21:54:53
+## 任务：合并 rikkahub 流畅性吸收 A/B/C 三分支到 main。基线 main 3eb1785，三分支各一 c
 
 任务：合并 rikkahub 流畅性吸收 A/B/C 三分支到 main。基线 main 3eb1785，三分支各一 commit 文件零重叠：A=0881981（测试基线）、B=c1925b3（SlashCommand @Immutable+审计文档）、C=685c592（聚合生成器，开关默认 false）。A 直接 ff 基底；B、C cherry-pick 重放 → af5425b / 2863f60。main release run #1061 success，head=2863f60d6818e50bbec7ff1e438bd0f9d044d487 核实一致。三分支远端已删。派发板 + FINAL-closure-A-B-C.md 已更新。
 
@@ -12229,6 +11912,21 @@ D（聚合渲染器）现在可开工；E 等 D 合 main 后做。
 - 无明显 OOM/lmkd kill/ANR 记录；events buffer 里只有 am_cpu 提到 lmkd（正常调度），无 am_low_memory/am_proc_died。
 
 值得注意：主进程 EGL mtrack 达 41MB（图形驱动 surface 内存），是除 Native Heap 外最大单块，符合「内存飙升」疑似图形/渲染相关。待后续若再飙升，对比此基线。
+
+<!-- 2026-08-25 22:36:55 -->
+## rikkahub 平滑吸收 · D 任务开工准备完成（2026-08-25）
+
+
+用户确认 A/B/C 已解决，为 D（聚合 Item 渲染器 + 翻转开关，`fix/message-node-item-renderer`）做准备了。**main tip = 2863f60（C 的 commit）**，前置核实全过：
+
+- `AssistantMessageItem`（ChatFlatItems.kt 定义 + ChatScreen/ChatScreenUtils 引用）、`buildAggregateChatItems`、`AGGREGATE_MESSAGE_ITEMS` 开关（**ChatScreen.kt L6074 当前 = false**）都已在 main。
+- C 已加 `AssistantMessageItem` 渲染**占位分支**（ChatScreen.kt L3918-3931）：裸 `AssistantMessageView(message=item.message)` 零回调，D 需替换为任务书模板（BoundsTrackedBlock + 带回调）。
+- `AssistantMessageView` 签名在 **ChatAssistantMessageUI.kt L328**，当前只接 `onRetry`。内部已渲染 Header/Thinking(gate)/FallbackInfo(info)/StreamingMarkdownText(text+LargeContentGuard)/ToolCallPill(tool_use 零回调)/TypingIndicator/legacy fallback/InlineErrorBanner。`ToolCallPill`(L662)/`ToolCallRunGroup`(L914) 都支持 onRetry/onStop/onOpenTerminalWithCommand/onOpenDetail/onRerunFromHere/onCopyDetails 六大回调——D 主体=给 AssistantMessageView 加参数透传。
+- 只改 ChatScreen.kt + ChatAssistantMessageUI.kt，不碰 ChatFlatItems/ChatModels/ChatFollowController。
+
+准备文档：`/var/minis/shared/rikkahub-smoothness-absorption/reports/D-open-session-prep.md`（含全部源码坐标 + 11 项核对表 + 回调清单）。派发板 D 已标「✅ 已就绪可开工，下一任务本会话」。
+
+D 会话开工命令：`读这个文件并立刻执行：/var/minis/shared/rikkahub-smoothness-absorption/session-task-D.md`，独立 clone `/tmp/agg-renderer-repo`（勿复用 /tmp/agg-renderer-prep 只读准备仓库）。
 
 <!-- 2026-08-25 22:40:25 -->
 ## 终端命令触发主进程 RSS 单调泄漏（2026-08-25 22:40 现场抓到）
@@ -12362,47 +12060,24 @@ D 分支（fix/message-node-item-renderer @ 0e07ac4）已 **ff 合并 main** 并
 
 **待真机验证**：用户装新包观察流式跟随是否平滑（不再"跳"）。
 
-<!-- 2026-08-26 00:38:48 -->
-## 沙箱回退后工具恢复（2026-08-26）
+<!-- 2026-08-26 00:13:40 -->
+## rikkahub 流畅性吸收 — A/B/C/D/E 全部完成并合入 main（2026-08-25 búi 收口）
 
 
-**背景**：沙箱被改坏，回退到上一版本，导致系统级命令行工具大量丢失、workspace/shared 目录被清空。skills 和 memory 完整保留。
+5 阶段全部合入 main（当前 main = `4829e67`），收口会话独立核实（拉取 origin/main + Actions API 交叉核对 head_sha，非转述）：
 
-**已恢复核心命令行工具**（全部 via apk add，Alpine 3.21 aarch64）：
-- 版本控制：git 2.47.3 + git-lfs、github-cli(gh) 2.63.0、openssh-client
-- Python：python3 3.12.14、pip 24.3.1、numpy、pandas
-- 网络：curl、wget、ca-certificates、jq
-- JVM：openjdk17（java 17.0.18 + javac）
-- Node：node 22.23.2、npm 10.9.1
-- 代码工作台：ripgrep、fd、ast-grep、ctags、patch、black、tree-sitter-cli、ruff（pip 装，需要 --break-system-packages 绕过 PEP 668）
+- A 基线测试固化 `0881981`（branch CI #32849987317 success）
+- B @Stable 纪律 `af5425b`（纯注解+文档）
+- C 聚合生成器 `2863f60`（main release #32854486760 success）
+- D 聚合渲染器 `0e07ac4`（main release #32861824275 success）
+- E 滚动跟随简化 `4829e67`（main release **#32868580853 success**，head 核实一致）
 
-**gh 认证**：GITHUB_TOKEN 自动加载，logicflow-GYW 主号登录正常（repo+workflow scope）。
+代码现状（grep 核实）：`AGGREGATE_MESSAGE_ITEMS=true` 已是主路径（ChatScreen.kt L3101；聚合路径 flatten早期return、ledger/segmenter unreachable L3213）；`SIMPLE_FOLLOW` 于 L1571 启用（anchor-guard 死区+前缀校验已移除，L1564-1570）。五远端分支全删。
 
-**待用户确认是否恢复**：
-1. kotlinc（沙箱跑 Kotlin/JVM 单测，从 GitHub release 下载，非 apk）
-2. semantic-memory 的 sentence-transformers（pip 装，需 HF_TOKEN/modelscope 网络）
-3. workspace/shared 里的开发资产（任务文件、派发板、交付报告、仓库克隆）—— 已被清空，无法直接找回，需重建
+**剩余**：真机验证 pending（代码层 Verified、真机 Assumed）。装新包按 dispatch-board.md 真机清单观察：折叠态长工具消息滑动、流式无跳顶抖动残留、发消息/读历史不误触发守卫、ScrollInvariant 零 prefix_ok=false、冷启动长会话 row 组合耗时下降（对照 PerfLongCtx）。
 
-**踩坑**：code-workbench-tools setup.sh 的 ruff 安装因 PEP 668（externally-managed-environment）失败，且 `set -e` 导致整个脚本执行中断，后续 apk 安装没跑。需给 ruff 安装加 `--break-system-packages`，或先手装 apk 工具再运行。
-
-<!-- 2026-08-26 00:42:32 -->
-## 沙箱工具恢复完成（2026-08-26，续）— 全链路验证通过
-
-
-**已完整恢复并端到端验证**（全部可运行）：
-- 版本控制/CI：git 2.47.3 + git-lfs、gh 2.63.0（GITHUB_TOKEN 自动加载，logicflow-GYW 主号验证通过 repo+workflow scope）、openssh-client
-- Python：3.12.14 + pip + numpy + pandas；ruff 0.16.4（pip --break-system-packages）
-- JVM 单测链路：**openjdk17 + kotlinc 2.0.20（/opt/bin/kotlinc-2.0.20）**，依赖 jar 在 /opt/jvm-libs/（junit 4.13.2 / hamcrest 1.3 / kotlinx-coroutines-core+jvm 1.9.0 / kotlinx-coroutines-test 1.9.0 / kotlinx-serialization-json 1.7.3 / org.json json-20240303）。端到端验证：编译 + JUnit 2 tests 全绿 ✅
-- Node 22.23.2 / npm 10.9.1
-- 网络：curl / wget / ca-certificates / jq
-- 代码工作台（code-workbench）：rg / fd / ast-grep / ctags / patch / black / tree-sitter-cli 全就绪
-- android-* CLI（15 个）+ skills（19 个）+ memory 日志：完整保留未受影响
-
-**JVM 验证踩坑**：kotlin.test.assertEquals 在 sandbox 里 unresolved，改用 `org.junit.Assert.assertEquals`（org.junit v4 桩 vs kotlin-test-junit 解析问题），单条验证即通。kotlin-test-junit.jar 存在但 assertEquals 仍无法通过 kotlinc 解析——直接用 org.junit.Assert 最干净。
-
-**未恢复（待用户决定）**：workspace/shared 里的开发资产（任务文件/派发板/交付报告/仓库克隆/工具脚本，被清空无法找回，需要则重建）；sentence-transformers（semantic-memory 本地模型，大且非核心）。
-
-**环境备注**：Alpine 3.21 aarch64，apk 镜像用阿里云源（mirrors.aliyun.com），一切从 /var/minis 之外干净重建。
+**可复用**：① 开关默认关+独立分支=零回归地基 ② flatten 拍平是滚动复杂化根因，聚合到消息级后 ledger/segmenter/anchor-guard 自然失效（unreachable），无需手动拆 ③ 收口=独立拉取+API 核对头 sha+ls-remote 确认分支清理，不依赖转述。交付物 reports/FINAL-closure.md + dispatch-board.md。
+<!-- 2026-08-25 23:3x -->
 
 <!-- 2026-08-26 00:47:44 -->
 ## 会话 F：打开历史对话默认回顶部 — 施工+阻塞(2026-08-26)
@@ -12419,7 +12094,7 @@ D 分支（fix/message-node-item-renderer @ 0e07ac4）已 **ff 合并 main** 并
 **⚠️ 阻塞：用户给了两个 sha 要求调整基底，均无法在原定位**：
 - `83808197405f84eb5e767c384b9706d35848e3bc05cdab88a34512a66a037a90`：用户说"整合了这一版本的那个是有问题的，别整合进去，计划回滚"。
 - `84dd6ab049b083d2d17bca1f4b93126cf3805e75d40370756bb10a8e6859b513`：用户说"以这一版本为基底"。
-GitHub API(commits 端点 http=500)确认两个 sha 在 logicflow-GYW/RikkaMinis 和 logicflow-GYW/rikkahub **都不存在**，git fetch origin <sha> 也命不中。当前 origin/main=de13ed1(fix(sandbox): cap PRoot tracer VRAS)。
+GitHub API(commits 端点 http=500)确认两个 sha 在 ***OWNER***/RikkaMinis 和 ***OWNER***/rikkahub **都不存在**，git fetch origin <sha> 也命不中。当前 origin/main=de13ed1(fix(sandbox): cap PRoot tracer VRAS)。
 待用户澄清：这两个 sha 到底指什么(哪一个仓库/分支，或是否本地未推送 commit/APK hash/rootfs 升级版本)。已暂缓：不主动合 main，等用户澄清基底。
 
 沙箱回退重建：apt 系 openjdk17 + 手动装 /tmp/kotlinc-dist/kotlinc 2.1.0(GitHub release) + /tmp/jdeps/{junit-4.13.2,hamcrest-core-1.3}.jar(Maven)。编译+跑单测命令：kotlinc -cp junit:hamcrest -d out 全部源文件一次传入；java -cp out:junit:hamcrest:kotlin-stdlib org.junit.runner.JUnitCore <测试类全限定名>。scan: bash scripts/scan/scan.sh。clone 仓库要新建路径(/tmp/hf2/repo)，PRoot rm 删不掉旧 .git 会报 Operation not permitted。
@@ -12431,7 +12106,7 @@ GitHub API(commits 端点 http=500)确认两个 sha 在 logicflow-GYW/RikkaMinis
 **背景**：我（本会话）之前做的「限 PRoot 地址空间 RLIMIT_AS=4GB」修复（commit `de13ed18`）翻车——4GB 压太狠导致 PRoot tracer 起不来，所有终端/shell 瘫痪（用户 B 情况变成更严重的全局不可用）。用户已删 app 回退上一版。
 
 **已执行**：
-1. 主号 `logicflow-GYW/RikkaMinis` main **force-push 从 de13ed18 回退到 `4829e67c`**（= release run #1069 的正常版本 = rikkahub SIMPLE_FOLLOW stage E）。核实：`ProotAddressSpaceLimiter.kt` 已 404 不存在，`PersistentShell.kt` 里 `ulimit -v` wrapper 命中 0 次——sandbox 翻车改动彻底清除干净。
+1. 主号 `***OWNER***/RikkaMinis` main **force-push 从 de13ed18 回退到 `4829e67c`**（= release run #1069 的正常版本 = rikkahub SIMPLE_FOLLOW stage E）。核实：`ProotAddressSpaceLimiter.kt` 已 404 不存在，`PersistentShell.kt` 里 `ulimit -v` wrapper 命中 0 次——sandbox 翻车改动彻底清除干净。
 2. 主号远端只留 `main` + `fix/history-open-at-bottom`（另一会话的分支）。
 
 **⚠️ 待协调（另一会话依赖此信息）**：分支 `fix/history-open-at-bottom`（另一会话，改 chat 文件：ChatFollowController/ChatScreen/ChatFollowControllerTest，做「打开历史对话默认回底部」）是**基于翻车版 de13ed18 建的分支**，其提交链 = `de13ed18`（我的翻车）+ `9f41a4b`（它的改动）。相对新 main(4829e67c) 是 `ahead_by=2, behind_by=0`。**它合并前必须先 rebase 到 4829e67c 并丢掉 de13ed18**（只保留 9f41a4b）。因两会话文件零重叠（它改 chat，我改 sandbox），rebase 零冲突。
@@ -13270,7 +12945,7 @@ APK 已下载：/var/minis/attachments/RikkaMinis-stop-send-lag-4f8245e.apk（14
 
 **合并**：与 fix/voice-ime-mention-scan（831020d，只改 ChatScreen.kt，基于同 main@4f8245e，CI run #33076304606 绿）一起合并。我的分支 rebase 到 voice-ime 后 ff 合并，main=9e3374c，release CI run #33080397691 success（head=9e3374c 核实一致）。两远端分支已删。APK 已下载：/var/minis/attachments/RikkaMinis-9e3374c.apk（14178963 B，sha256 c474affd...）。
 
-**坑（可复用）**：/tmp/rikkaminis-vsz 是 VSZ 诊断遗留 clone，origin 指向小号 rikkaflow（非主号 logicflow-GYW）且 HEAD 落后（4829e67 vs 主号 4f8245e）——**施工/合并前必须核对 origin remote + ls-remote 主号 main**，用干净独立 clone（本次 /tmp/rikka-provider-live-edit）。另外合并两个同基分支：先 ff 第一个，第二个 rebase 再 ff；rebase 不改内容只改父 commit 时无需重跑分支 CI（内容 diff 验证为空），但 push main 后必须等 release CI 验证最终组合。
+**坑（可复用）**：/tmp/rikkaminis-vsz 是 VSZ 诊断遗留 clone，origin 指向小号 ***ALT_USER***（非主号 ***OWNER***）且 HEAD 落后（4829e67 vs 主号 4f8245e）——**施工/合并前必须核对 origin remote + ls-remote 主号 main**，用干净独立 clone（本次 /tmp/rikka-provider-live-edit）。另外合并两个同基分支：先 ff 第一个，第二个 rebase 再 ff；rebase 不改内容只改父 commit 时无需重跑分支 CI（内容 diff 验证为空），但 push main 后必须等 release CI 验证最终组合。
 
 **真机待验证**：装新包 → 打开某会话 → 设置里改 provider 的 custom base URL → 回会话直接发消息，应命中新地址（logcat 可见 🔀RESOLVE route fields changed 日志）；无需重启。
 
@@ -13462,33 +13137,6 @@ APK 已下载：/var/minis/attachments/RikkaMinis-stop-send-lag-4f8245e.apk（14
 
 **CI/合并**：分支 fix/langswitch-recreate-gate（439c6c2）CI 绿 → ff 合并 main → release CI run 33167523807 success → 远端 204 + 本地分支已删。APK 用户已装并实测问题解决。
 
-<!-- 2026-08-28 23:23:22 -->
-## 行业方案调研任务（2026-08-28，用户发起）
-
-
-任务：搜索 RikkaMinis 面对的各种问题的解决方案，与行业主流/成熟方案对比，找出可优化点。
-
-已完成调研的资料源：
-1. **Compose LazyColumn 性能最佳实践**（Google AI Overview + ProAndroidDev/Medium/Android Developers）：key/contentType/@Immutable @Stable/derivedStateOf/lambda 缓存/重处理移出 composable/Baseline Profiles
-2. **OpenMinis 深度架构解析**（dashen-tech.com 2026-08-22，3900+ stars）：PRoot+iSH 沙箱、技能系统、BYOM、原生卸载（FFmpeg/cppjieba/KaTeX）、与云端 agent 对比
-3. **Anthropic 官方上下文工程**（effective-context-engineering-for-ai-agents）：context rot、compaction（工具结果清理是最轻量形态）、结构化 note-taking、sub-agent 架构、JIT context 检索（Claude Code 的 CLAUDE.md + grep/glob 模式）
-4. **MCP 官方安全最佳实践**（modelcontextprotocol.io/docs/2026-07-28/tutorials/security/security_best_practices）：confused deputy、token passthrough 禁令、SSRF（OAuth 元数据 URL 需 HTTPS + 禁私有 IP）
-5. **AI 记忆系统对比**（tokrepo.com/zh/ai-memory）：mem0（向量语义记忆）/Zep（会话摘要+混合检索）/Letta（MemGPT 分页记忆 OS）/Graphiti（时序知识图谱）三大路线
-6. **Claude Code 五层架构**（chenguangliang.com）：MCP/Skills/Agent/Subagents/Agent Teams 分层、subagent memory: project 持久记忆（MEMORY.md 前 200 行）、Explore 用 Haiku 省 token
-7. **AIOPE 竞品**（github.com/XNet-NGO/aiope）：48 工具、140 轮循环、多 agent DAG、on-device RAG（SQLite 向量）、WorkManager 定时任务、动态原生 UI 渲染、Go 远程 daemon
-8. **Android 后台任务**：WorkManager + FGS 是长任务标准
-
-RikkaMinis 代码实证（/tmp/rikkaminis-vsz，main@4829e67 或更新）：
-- 449 个 Kotlin 文件；ChatViewModel.kt 12088 行、ChatScreen.kt 6191 行、StreamingMarkdownText.kt 3754 行（巨石文件）
-- @Stable/@Immutable 标注仅 26 处（6 文件），derivedStateOf 36 处，contentType 35 处，collectAsState 163 处
-- WorkManager 使用 0（长任务靠 FGS/自研 scope）
-- 记忆系统：7 文件有 embedding 相关（语义记忆 skill），无 mem0 式自动事实抽取
-- 无 subagent 架构（spawn_agent 存在但无隔离上下文子代理体系）
-- i18n：7 语言，zh-rTW 925 行 vs values 1579 行（仍有较大差距，不过 08-28 已补齐到 1482 key）
-- 多设备同步：已有 SyncMerge（Lamport 版本钟 + 墓碑）
-
-待产出：完整对比报告，指出优化方向。
-
 ## 2026-08-29
 
 <!-- 2026-08-29 22:29:40 -->
@@ -13602,10 +13250,10 @@ main 从 ea096be 推进到 d49235c（A→B→C→D 四 commit 依次 ff），rel
 
 ### 开源（公开主仓库）
 - `docs/dev-history/`：已脱敏的 `rikkaminis-dev-history.md`（1.2MB/700条/28天）+ INDEX + README。
-- 修正了 sanitize_dev_history.py 的脱敏遗漏：裸 ***USER***、***DOMAIN***、无端口代理 IP、漂移代理 IP（***PROXY_ADDR***/***PROXY_ADDR***）、token 名 GYW。交叉验证残留 0。
+- 修正了 sanitize_dev_history.py 的脱敏遗漏：裸 ***USER***、***DOMAIN***、无端口代理 IP、漂移代理 IP（***PROXY_ADDR***/***PROXY_ADDR***）、token 名 ***ID***。交叉验证残留 0。
 
 ### 封存（私有仓库）
-- 新建 `logicflow-GYW/rikkaminis-archive`（private），放原始 memory/shared/skills/workspace（未脱敏，2.3MB）。剔除了运行期缓存 .traces/.learnings 和 vector_index.pkl。
+- 新建 `***OWNER***/rikkaminis-archive`（private），放原始 memory/shared/skills/workspace（未脱敏，2.3MB）。剔除了运行期缓存 .traces/.learnings 和 vector_index.pkl。
 
 ### 可复用
 - git-filter-repo 用 `--invert-paths --path <文件>` 抹历史，`git rev-list --objects --all | grep` 验证 0 残留；改写前先 `git clone --mirror` 做回滚网。
@@ -13904,8 +13552,8 @@ B 方案 d76354d 的 AND 语义是负优化：真实消息经 jieba 切成 5-10 
 
 
 ### 仓库架构决策
-- **主号 logicflow-GYW/RikkaMinis = 稳定发布线**（applicationId `com.openminis.app`），已回滚到 `7c6d0a64`（去掉 08-31 之后 14 个提交，因 forward-stable 重构引入的 place-storm 空转卡死）。
-- **小号 rikkaflow/RikkaMinis = 开发线**（applicationId `com.openminis.app.lab`，dual-appid 共存），main 已 force 同步到主号最新 c3701cc5 的 lab 身份版（commit 25de982c）。两台设备可共存安装，便于边用稳定版边诊断实验版。
+- **主号 ***OWNER***/RikkaMinis = 稳定发布线**（applicationId `com.openminis.app`），已回滚到 `7c6d0a64`（去掉 08-31 之后 14 个提交，因 forward-stable 重构引入的 place-storm 空转卡死）。
+- **小号 ***ALT_USER***/RikkaMinis = 开发线**（applicationId `com.openminis.app.lab`，dual-appid 共存），main 已 force 同步到主号最新 c3701cc5 的 lab 身份版（commit 25de982c）。两台设备可共存安装，便于边用稳定版边诊断实验版。
 - 小号 fork 分叉前的 80 个实验提交已归档到 `archive/alt-experiments-20260825` 分支（安全网）。
 - **汇入机制 = fork PR 小步汇入**，不是"攒够了一次性 cherry-pick"。主号只接受已验证成熟的东西。
 
@@ -13985,7 +13633,7 @@ B 方案 d76354d 的 AND 语义是负优化：真实消息经 jieba 切成 5-10 
 - **主号回滚点 7c6d0a64 里仍带着 place-storm 根因**：`SIMPLE_FOLLOW=true`（ChatScreen.kt:4859）由 8/25 的 9bccf735 引入，早于回滚点；回滚只去掉了 8/31 之后的 v1 探测器放大器（57d73229），但**钳位空转循环本身（无 shouldRequestFollowScroll 守卫）还在主号**。所以汇入 70f927d1 是给主号补守卫，不是"带回 bug"。
 - 小号领先主号的提交里，**只有 70f927d1 适用于主号**：ea1bb028（MemoryFactsTest 日期 flake）依赖 facts 功能（主号回滚点后才有，主号无 MemoryFactsTest.kt）；c7d2dfb5/25de982c 是诊断/dual-appid，不进主号。
 
-### 汇入操作（主号 logicflow-GYW/RikkaMinis）
+### 汇入操作（主号 ***OWNER***/RikkaMinis）
 - cherry-pick 70f927d1 → 主号 commit 91498d74（3 文件 +99 行：ChatFollowController.kt 加纯函数 shouldRequestFollowScroll + ChatScreen.kt 接线守卫 + FollowClampLoopGuardTest 3 用例）
 - 分支 CI run 33486465665 success（head_sha=91498d74 核实）
 - ff 合并 main 7c6d0a64→91498d74，release CI run 33487944926 success（head_sha 一致）
@@ -14045,8 +13693,8 @@ B 方案 d76354d 的 AND 语义是负优化：真实消息经 jieba 切成 5-10 
 
 
 ### 仓库现状
-- **主号逻辑库 `logicflow-GYW/RikkaMinis`** = 稳定发布线，main @ 65b8a749，versionCode 220001214（beta.1214），applicationId `com.openminis.app`
-- **小号 `rikkaflow`** = 开发线（lab 身份 `com.openminis.app.lab`，dual-appid 共存），含 70f927d（place-storm 钳位守卫修复），待浸泡期 7 天成熟后 fork PR 小步汇入主号
+- **主号逻辑库 `***OWNER***/RikkaMinis`** = 稳定发布线，main @ 65b8a749，versionCode 220001214（beta.1214），applicationId `com.openminis.app`
+- **小号 `***ALT_USER***`** = 开发线（lab 身份 `com.openminis.app.lab`，dual-appid 共存），含 70f927d（place-storm 钳位守卫修复），待浸泡期 7 天成熟后 fork PR 小步汇入主号
 - main 分支 437+ 条（全分支共 1640 条），起始 2026-04-25
 
 ### 代码规模
@@ -14142,9 +13790,6 @@ B 方案 d76354d 的 AND 语义是负优化：真实消息经 jieba 切成 5-10 
 
 **可复用教训**：①「写侧序列化、读侧没接」是跨进程协议缺口的高发形态，audit 时要对每个 buildRequestJson 写的键在 Service 两侧（executeRun/executeStreamingRun）各核一遍是否都读回。② 死方言（有读者无生产者）比死代码更隐蔽——grep 键名只有一处命中且是 opt* 读取时必查生产者。③ 计数器声明为 val 但语义该累加的，几乎必是"日志假象"。
 
-<!-- 2026-09-02 12:16:26 -->
-## 2026-09-02 12:16:26
-
 <!-- 2026-09-02 12:26:45 -->
 ## Bug-Hunt 四会话审计收口（2026-09-02）
 
@@ -14162,7 +13807,7 @@ B 方案 d76354d 的 AND 语义是负优化：真实消息经 jieba 切成 5-10 
 **方法论**：①便宜模型（deepseek-v4-flash-0731，基元律动）+ 完整工具（grep/read）+ 规则库 + 祈使句任务书 = 有效审计（HIGH 误报率 1/11）；盲切喂块（无工具）= 2/2 误报。**工具调用是关键差异，模型便宜不等于审计廉价。**②校准实验（把已修复 bug 的修复前代码喂给模型）是验证"能不能扫出真 bug"的 cheap 决定性证据。③第二道门（独立核实）不可省。
 
 <!-- 2026-09-02 12:27:06 -->
-## 2026-09-02 12:27:06
+## session2 执行层审计完成（rikka-bug-hunt）
 
 
 **可复用教训**：①「写侧序列化、读侧没接」是跨进程协议缺口的高发形态，audit 时要对每个 buildRequestJson 写的键在 Service 两侧（executeRun/executeStreamingRun）各核一遍是否都读回。② 死方言（有读者无生产者）比死代码更隐蔽——grep 键名只有一处命中且是 opt* 读取时必查生产者。③ 计数器声明为 val 但语义该累加的，几乎必是"日志假象"。
@@ -14182,21 +13827,6 @@ B 方案 d76354d 的 AND 语义是负优化：真实消息经 jieba 切成 5-10 
 审计 /tmp/rikka（@de2dca7d）6 文件（ChatViewModel 12338 / ModelExecutionService 1458 / ModelExecutionDispatcher 421 / ModelUseOffloadHandler 1889 / ShizukuOffloadHandler 1226 / OpenAIProvider 3081），报告：`/var/minis/shared/rikka-bug-hunt/reports/session2-exec.md`。High 5 / Medium 3 / Low 3。
 
 ## session2 执行层审计完成（rikka-bug-hunt）
-
-<!-- 2026-09-02 13:09:41 -->
-## 2026-09-02 13:09:41
-
-
-## llm-bug-audit skill 固化（2026-09-02）
-新 skill：`/var/minis/skills/llm-bug-audit/SKILL.md`（v1.0.0）。把 2026-09-02 bug-hunt 的完整方法沉淀为五阶段流程：免费 grep 探针 → 校准实验（把已修复 bug 的修复前代码喂便宜模型，抓不到就不铺开）→ N 会话任务书派发（带工具 agent + A–H 规则库 + 三纪律）→ 独立核实第二道门（嵌套归属必须括号深度机械分析，retryAttempt 误报教训）→ 分支修复闭环。
-
-**固化决策**：规则库 + 校准实验 + 审计型任务书变体 + 第二道门纪律进 skill；盲切喂块脚本（audit_batch.py v1）不进——那是被证明错误的形态（2/2 误报），留着诱导偷懒。skill 里写明触发词：扫 bug / 批量代码审查 / bug 提效 / 便宜额度找 bug / "像上次那样多会话扫代码"。
-
-**成本实测已入 skill**：校准实验 0.0008 元；四会话审计 17 大文件 <2 元；全库 8.7MB 约 12 元；约 0.2 元/实锤 HIGH。
-
-**边界声明**：只扫已知形状（规则库有历史原型的模式），未知未知靠浸泡期；读代码 ≠ 行为验证，修复仍需真机；9% 误报率是本次实测，换模型/项目须重跑校准。
-
-（同日 bug-hunt 战果：HIGH 11 报出 10 实锤，10 修复合并 main @ d46d0447，四轮 CI 全绿，release CI 触发中）
 
 <!-- 2026-09-02 14:41:45 -->
 ## FE-5 ChatViewModel 拆分第一批完成（2026-09-02，commit 8f0d64dc 合并 main）
@@ -14746,7 +14376,7 @@ main release CI 33826045117 触发中，未等结果（改动纯资源+divider�
 ## thinking-rules-port 分支待合并（2026-09-04，CI f7865b2b run 33873927997 success）
 
 <!-- 2026-09-04 21:35:12 -->
-## 2026-09-04 21:35:12
+## thinking-rules-port 分支待合并（2026-09-04，CI f7865b2b run 33873927997 success）
 
 
 用户开 bug-audit 会话处理该分支的 bug hunt；本会话收尾，未做 ff 合并 main。
@@ -14859,7 +14489,7 @@ D3 修复闭环：nested 分支补 `clampEffortForModel(wireEffort(ctx.level), l
 - 教训复用：gh_sync.sh push 只认 `--branch`，传 `--repo` 会被忽略导致静默不推；删远端分支用 `push --branch :<name>`（askpass 机制）
 
 <!-- 2026-09-05 16:46:11 -->
-## 2026-09-05 16:46:11
+## 用户报"最近经常遇到沙盒重置、kotlinc 等工具不见了"。调查结论（三源验证：文件时间戳 + 日志 + 语义记忆）：
 
 用户报"最近经常遇到沙盒重置、kotlinc 等工具不见了"。调查结论（三源验证：文件时间戳 + 日志 + 语义记忆）：
 
@@ -14877,7 +14507,7 @@ D3 修复闭环：nested 分支补 `clampEffortForModel(wireEffort(ctx.level), l
 **附带发现**：手机存储 97% 满（462G 只剩 13G，df / 实测）——rootfs quota 20G 之内没问题，但手机整体快满，用户可留意。
 
 <!-- 2026-09-05 17:26:03 -->
-## 2026-09-05 17:26:03
+## A+B+C 三项按用户拍板"直接干"全部落地:
 
 A+B+C 三项按用户拍板"直接干"全部落地:
 
@@ -14948,7 +14578,7 @@ A+B+C 三项按用户拍板"直接干"全部落地:
 ## 知识图谱种子数据灌入完成（2026-09-06，续）
 
 
-- **10 实体 + 11 关系**已写入 MCP 知识图谱：RikkaMinis/OpenMinis/logicflow-GYW/rikkaflow/***USER***/rikka-ci-bridge/semantic_memory/knowledge_graph_mcp/gh_sync.sh/Redmi_Note_12_Turbo
+- **10 实体 + 11 关系**已写入 MCP 知识图谱：RikkaMinis/OpenMinis/***OWNER***/***ALT_USER***/***USER***/rikka-ci-bridge/semantic_memory/knowledge_graph_mcp/gh_sync.sh/Redmi_Note_12_Turbo
 - **数据文件位置**：/root/.npm/_npx/<hash>/node_modules/@modelcontextprotocol/server-memory/dist/memory.jsonl（npx 缓存，易失，hash 每次装可能变，勿硬编码）
 - **备份+恢复闭环已实测**：
   - 备份：`python3 /var/minis/shared/knowledge-graph-backup/restore_knowledge_graph.py --backup`（62 条记录 = 11 实体+40 观测+11 关系）
@@ -15024,7 +14654,7 @@ A+B+C 三项按用户拍板"直接干"全部落地:
 ## 主号→小号全量同步（2026-09-06 13:40，merge 350843f）
 
 
-**背景**：用户要求"把主号的成果与小号同步"。主号 logicflow-GYW/RikkaMinis main @ 5ebff693（09-05），小号 rikkaflow/RikkaMinis main @ 70f927d1（09-01）。merge-base = 7c6d0a64（09-01 回滚点）。主号领先 70 提交，小号领先 18 提交（分叉）。
+**背景**：用户要求"把主号的成果与小号同步"。主号 ***OWNER***/RikkaMinis main @ 5ebff693（09-05），小号 ***ALT_USER***/RikkaMinis main @ 70f927d1（09-01）。merge-base = 7c6d0a64（09-01 回滚点）。主号领先 70 提交，小号领先 18 提交（分叉）。
 
 **执行方式**：本地 git 三路 merge（不用覆盖式同步）
 - 网络坑：HTTPS clone/tarball 经代理中断（early EOF/SSL 截断）。解法：`--depth 75` 浅克隆 + `git config http.version=HTTP/1.1` + `GIT_HTTP_LOW_SPEED_LIMIT/TIME` 生效；tarball 走 `github.com/<owner>/archive/refs/heads/main.tar.gz` 一次成功（codeload 会被限流截断）
@@ -15062,7 +14692,7 @@ A+B+C 三项按用户拍板"直接干"全部落地:
 
 <!-- 2026-09-06 15:55 -->
 
-**用户报障**：买的 API key（商汤 token.***.sensenova.cn），思考档开到"超高"报错、中低档正常；且按指引添加的自定义规则（CustomPath reasoning_effort=xhigh）保存成功但聊天仍 400。
+**用户报障**：买的 API key（商汤 ***.sensenova.cn），思考档开到"超高"报错、中低档正常；且按指引添加的自定义规则（CustomPath reasoning_effort=xhigh）保存成功但聊天仍 400。
 
 **双 bug 实锤（日志+实测钉死）**：
 1. **档位枚举 400**：商汤网关流式接口严格枚举 reasoning_effort ∈ {low, medium, high, xhigh, none}，**无 max**（实测：非流式接受 max，流式 400 "field ReasoningEffort invalid"）。而应用内置 deepseek-v4-relay 规则把 HIGH 及以上全映射成 "max"（deepSeekV4Effort）→ 高/超高/最大/极限全 400。同网关 glm-5.2/deepseek-v4-pro 不严格（实测 max/xhigh 都过），只有 deepseek-v4-flash 严格。
@@ -15071,7 +14701,7 @@ A+B+C 三项按用户拍板"直接干"全部落地:
 **修复（分支 fix/worker-thinking-rules-cache @ 6b95929，7 文件 +310，已 ff 合并 main）**：
 1. `ModelExecutionDispatcher.buildRequestJson` 序列化 `thinking_rules`（ThinkingRuleCoding.encodeRuleJson 新函数）
 2. `ModelExecutionService` 流式+非流式两路径在 ProviderFactory.create 前调 `restoreThinkingRules(req)` → `ThinkingRuleResolver.restoreCustomRulesFromJson`
-3. OpenAIProvider host 表加 `token.***.sensenova.cn`/`api.sensenova.cn` 分支：ON 档一律 xhigh（网关最强合法档），OFF 发实测可关闭思考的 `reasoning_effort:"none"`，AUTO/supportsReasoning=false 跳过
+3. OpenAIProvider host 表加 `***.sensenova.cn`/`***.sensenova.cn` 分支：ON 档一律 xhigh（网关最强合法档），OFF 发实测可关闭思考的 `reasoning_effort:"none"`，AUTO/supportsReasoning=false 跳过
 4. 测试：WorkerThinkingRulesRestoreTest(5) + ModelExecutionDispatcherTest(+1)，沙箱 JVM 15/15 绿
 
 **沙箱 JVM 编译经验（复用）**：/tmp/jvmtc/compile.sh 单次编译闭包；桩需同名包（androidx.room/kotlinx.serialization/androidx.compose.runtime/android.content/android.app/android.os/android.util/android.net/android.content.pm）；SharedPreferences 桩要全接口（getAll/getStringSet/float/contains/listener）；Context 要 filesDir+applicationInfo+getDataDir+getSharedPreferences；Context.applicationInfo 属性与 getApplicationInfo() 有 JVM 签名冲突（@JvmName 规避）；ModelExecutionService 用轻量 stub 类（real 文件 Android Service 依赖太重）；NetworkMonitor/AppLogger/OpenAIProvider/ProviderFactory 依赖太深裁出闭包；Index 注解用 vararg。jar 清单：junit/hamcrest/org.json/kotlin-stdlib/coroutines-1.9.0/okhttp/okio + 新下 kotlinx-serialization-core/json-jvm-1.6.3（其实用桩替代了，没用到）。
@@ -15088,7 +14718,7 @@ A+B+C 三项按用户拍板"直接干"全部落地:
 
 **执行方式**：本地三路 merge（alt/main 350843f + 主号 6b95929，merge-base=5ebff69），ort 策略零冲突全自动合并。merge commit **9047a8ef9a874ffca464cc2e735612d2c62ac9e6**（parents: 350843f + 6b95929）。修复点 5/5 验证落位（encodeRuleJson/thinking_rules 序列化/restoreThinkingRules×3/sensenova host×4/新测试 WorkerThinkingRulesRestoreTest 5 用例）。
 
-**推送**：GIT_ASKPASS + GITHUB_TOKEN_FULL_RIGHT 推 https://github.com/rikkaflow/RikkaMinis.git alt-sync-0906:main，350843f7..9047a8ef。远端 fetch 确认 HEAD=9047a8ef。
+**推送**：GIT_ASKPASS + GITHUB_TOKEN_FULL_RIGHT 推 https://github.com/***ALT_USER***/RikkaMinis.git alt-sync-0906:main，350843f7..9047a8ef。远端 fetch 确认 HEAD=9047a8ef。
 
 **CI**：run #66 自动触发，head_sha=9047a8ef 核对一致，in_progress（elapsed 110s 时超时退出），**结论未确认**（用户拍板不等）。
 
@@ -15097,7 +14727,7 @@ A+B+C 三项按用户拍板"直接干"全部落地:
 **可复用**：gh_ci_wait.sh 对已自动触发的 run 有幂等检测（"idempotent: active run #66 already targets main@..." 自动复用不重复 dispatch）；上次小号 Build APK 343/338 号 run 被 cancel 因为 push 自动触发+手动 dispatch 双 run。
 
 <!-- 2026-09-06 16:22:03 -->
-## 2026-09-06 16:22:03
+## 用户报"模型组负载均衡不生效，后台看不到其他模型被使用"。代码级核查（main @ 6b95929）：功能生效，但语义是
 
 用户报"模型组负载均衡不生效，后台看不到其他模型被使用"。代码级核查（main @ 6b95929）：功能生效，但语义是**会话级轮转**不是请求级。GroupRouter.select 的 loadBalance 分支 = `usable[(stickyIdx+1) % size]`（锚点 providerRepository.lastUsedEntryId，SharedPreferences 全局持久）；轮转只在「新会话解析」时发生：draft loadSession / 用户选组（ChatModelRouting.selectGroup）。会话一旦绑定，binding JSON 写入 lastEntryId（ensureSession），之后 restoreFromBinding 走 preferredEntryId 优先 → 永久粘住该成员，同一会话/重开旧会话都不再轮转。健康回写（429 熔断/5xx/401）已在 AgentLoopEngine 1001-1124 接线。UI footer 文案其实是准确的（"将会话分摊到组内的各个模型"）。验证法：连开 3 个全新会话各发一条消息，顶部模型名应轮转；若不动才是 bug。另：标题/压缩子模型 resolveTitleSubEntry 不走 GroupRouter，永远用第一个成员。
 
@@ -15112,10 +14742,10 @@ A+B+C 三项按用户拍板"直接干"全部落地:
 <!-- 2026-09-06 17:30:51 -->
 ## 小号同步 CI 遗留闭环确认（2026-09-06 晚）
 
-小号 rikkaflow/RikkaMinis main @ 9047a8ef（merge 6b95929）的 CI run 34020741695 **success**（head_sha=9047a8ef 核对一致）；主号 main @ 6b95929 的 release CI run 34020323169 **success**。9/6 全部同步/发布闭环完成：主号 6b95929（thinking rules worker restore + sensenova effort clamp）→ 小号 9047a8ef，两条线都是绿。
+小号 ***ALT_USER***/RikkaMinis main @ 9047a8ef（merge 6b95929）的 CI run 34020741695 **success**（head_sha=9047a8ef 核对一致）；主号 main @ 6b95929 的 release CI run 34020323169 **success**。9/6 全部同步/发布闭环完成：主号 6b95929（thinking rules worker restore + sensenova effort clamp）→ 小号 9047a8ef，两条线都是绿。
 
 <!-- 2026-09-06 18:16:04 -->
-## 2026-09-06 18:16:04
+## 负载均衡请求级改造 + 停止按钮竞态修复全链路闭环（main @ cd32795，分支 CI run 340260822
 
 负载均衡请求级改造 + 停止按钮竞态修复全链路闭环（main @ cd32795，分支 CI run 34026082245 head_sha 核对一致后 ff 合并，release CI 34026796848 in_progress 用户拍板不等，本地+远端分支已删）。
 
@@ -15261,10 +14891,10 @@ main @ 1150e05f（tier-1 harness 四改动 + EOF 断流静默停修复，双分�
 - **流程修正（重要教训）**：文档更新**不需要触发构建**——build-apk.yml push 有 paths 过滤（src/android/** src/shared/** deps/** workflow），docs/** 不触发。本次先误 dispatch 了分支 CI（run 34043330389）后取消，直接 ff 合并 main 推送，验证无新 run 触发。**以后纯文档改动：分支 → 合并 main → push 即可，不 dispatch CI**
 - 3 文件 +477/−7（README.md 统计 33天/758→35天/794 + 两个 md）
 
-**小号 rikkaflow main @ 151574d6**（merge: sync main 7d928fa3 09-06 full day into alt）：
+**小号 ***ALT_USER*** main @ 151574d6**（merge: sync main 7d928fa3 09-06 full day into alt）：
 - 同步缺口 = 主号 6b95929..7d928fa3 全部 10 提交（09d39651 负载均衡、cd327953 stop 竞态、d7ee353e hermes harness、1150e05f EOF、e8500bb8/82735b14 stream-error、b8e8dda7/f311aa99 content_filter、54a836ae verification_stop、7d928fa3 文档）
 - 三路 merge（parents: 9047a8ef + 7d928fa3，merge-base 5ebff693）零冲突，38 文件 +2808/−80
-- **坑**：/tmp/rikka-git 的 alt remote 配置已丢失（上次会话残留），需 `git remote add alt https://github.com/rikkaflow/RikkaMinis.git` 重加
+- **坑**：/tmp/rikka-git 的 alt remote 配置已丢失（上次会话残留），需 `git remote add alt https://github.com/***ALT_USER***/RikkaMinis.git` 重加
 - **坑（权限）**：gh_sync.sh push 到小号必须 `GITHUB_TOKEN="$GITHUB_TOKEN_FULL_RIGHT"` 前置覆盖，否则 permission denied（默认用主号 GITHUB_TOKEN）
 - push main 自动触发小号 CI run 34043648647（in_progress 未等完，用户拍板：过了单测即无问题）；远端 alt-sync-0906 分支已删，本地分支已删，alt remote 已移除
 
@@ -15769,23 +15399,6 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 
 ## 2026-09-08
 
-<!-- 2026-09-08 09:33:11 -->
-## 三账号 gyw-proxy (edgetunnel) 更新完成（2026-09-08）
-
-
-用户上传 edgetunnel-main zip（Version 2026-09-04 16:24:13）到 attachments，要求更新三个 CF 账号上的 gyw-proxy。三个账号：
-- 账号1 [EMAIL]（CF_API_TOKEN，account ***CF_ACCOUNT_ID***）→ gyw-proxy @ ***DOMAIN***（另有 rikka-bulletin/rikka-ci-bridge 未动）
-- 账号2 [EMAIL]（CF_API_TOKEN_1）→ gyw-proxy @ ***DOMAIN***
-- 账号3 [EMAIL]（CF_API_TOKEN_2）→ gyw-proxy @ ***DOMAIN***
-
-全部从 2026-08-11 版更新到 2026-09-04 版，bindings 逐账号保留（ADMIN 密码各异、KV namespace 各异、UUID/BEST_SUB/ED 有无不同），compat date 不变。探活：三个域名 200 + server: cloudflare + nginx 伪装页 = 正常。
-
-**坑（可复用）**：
-1. **CF_ACCOUNT_ID 环境变量值是无效的**（47 位 hex，API 404；正确值 ***CF_ACCOUNT_ID*** 在 GLOBAL.md 里）。本次用 GLOBAL.md 已知 ID 绕过。已提醒用户修正环境变量。CF_ACCOUNT_ID_1/_2 是有效的。
-2. **module worker 上传必须**：script part 的 Content-Type 用 `application/javascript+module`（用 application/javascript 会被按 classic 解析报 "Unexpected token 'export'"）；part 名 = main_module 文件名；metadata 用 curl `-F "metadata=<file;type=application/json"`（@file 会带 filename 属性可能干扰解析）。metadata 含 main_module/compatibility_date/bindings/usage_model。
-3. 更新脚本 /tmp/update_gyw_proxy.py（/tmp 不跨重建，需时重写；三账号循环，从 settings API 读 bindings 再 PUT 保留）。
-4. workers.dev 子域查询（/subdomain）返回无 subdomain 字段——这些 worker 用自定义域名，查 /workers/domains 拿 hostname。
-
 <!-- 2026-09-08 13:05:10 -->
 ## 环境变量分组 + Sheet 修复（2026-09-08，分支 fix/envvar-flatten-usage-sheets @ 85698cd，已交接未合并）
 
@@ -15839,7 +15452,7 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 
 用户要求"文档与事实不相符的部分更新一下，readme 也是，致谢缺了一些，还有三平台的之类的"。已完成：
 
-**dev-history 重建**：829 条 / 37 天（823→829，新增 09-08 全部 4 条：三账号 gyw-proxy 更新、env-var 分组+Sheet 修复、审计修复合并、补强验证），fences=32 even / ts=829 / outOrder=0，sanitize 95 处替换干净。分支 docs/dev-history-0908 两 commit → ff 合并 main → push（纯文档不触发 CI）→ 删分支。
+**dev-history 重建**：829 条 / 37 天（823→829，新增 09-08 全部 4 条：三账号 ***WORKER*** 更新、env-var 分组+Sheet 修复、审计修复合并、补强验证），fences=32 even / ts=829 / outOrder=0，sanitize 95 处替换干净。分支 docs/dev-history-0908 两 commit → ff 合并 main → push（纯文档不触发 CI）→ 删分支。
 
 **README.md + README_EN.md 致谢**：
 - 补 **Operit**（AAswordman，LGPL-3.0）——浏览器三件（console/network/file_upload）+ CI 脚本自测 + 语义混合评分（09-07 吸收，README 一直缺）
@@ -15945,7 +15558,7 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 ## 2026-09-09
 
 <!-- 2026-09-09 00:04:53 -->
-## 2026-09-09 00:04:53
+## Agent 循环预算统一调高（2026-09-09）
 
 
 用户嫌之前预算调太低、容易撞墙，统一调高（minis-config set-batch 一次确认生效）：
@@ -15953,7 +15566,7 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 - 注意：回合上限预算在 run 启动时固定，新消息才吃到新值；撞墙=暂停可恢复非杀任务。回退路径 Settings → Logs → Config Changes。
 
 <!-- 2026-09-09 00:05:51 -->
-## 2026-09-09 00:05:51
+## Agent 循环预算统一调高（2026-09-09）
 
 
 **用户指令**：事实使用中发现多端自动同步无法发挥作用、多数时候是负作用，砍掉。
@@ -15965,7 +15578,7 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 ## Agent 循环预算统一调高（2026-09-09）
 
 <!-- 2026-09-09 00:29:04 -->
-## 2026-09-09 00:29:04
+## 多端同步砍除合并收尾（main @ c91f632）
 
 
 用户澄清"调默认值"指**程序源码默认**（下载安装包里写死的），非运行时配置（运行时那批 256/120 也改了，双管齐下）。
@@ -15987,7 +15600,7 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 ## 多端自动同步功能砍除（2026-09-08 晚，分支 feat/remove-multidevice-sync）
 
 <!-- 2026-09-09 08:29:33 -->
-## 2026-09-09 08:29:33
+## 程序默认预算调高合并 main（2026-09-09，main @ 2a184cd）
 
 
 用户问"fork 的又有一个开始改了"。查 forks API（sort=newest）确认：**Filterrr/RikkaMinis** 在深度自研（ahead 946 / behind 965，diverged；08-21 fork，持续 merge 上游：08-29/09-05/09-08 都有 merge）；wj5403293/RikkaMinis 只是同步上游（hash 与上游一致）；JcEvoX/Filterrr 等其余 fork 无活动。
@@ -15998,7 +15611,7 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 ## 程序默认预算调高合并 main（2026-09-09，main @ 2a184cd）
 
 <!-- 2026-09-09 12:31:44 -->
-## 2026-09-09 12:31:44
+## fork 动态：Filterrr/RikkaMinis 深度自研（2026-09-09 用户问询）
 
 
 **用户两诉求**：①右滑弹出的会话 token 用量抽屉（TokenUsageSheet）数据不实时（尤其"总循环次数"）②Agent Runtime 预算上限调大：回合/Provider/工具/Shell 最大 500/512→**1000**、deadline 最大 120→**360 分钟（6h）**，默认值 256/120 不变。
@@ -16010,7 +15623,7 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 ## fork 动态：Filterrr/RikkaMinis 深度自研（2026-09-09 用户问询）
 
 <!-- 2026-09-09 12:46:58 -->
-## 2026-09-09 12:46:58
+## Token 用量实时 + 预算上限 1000/6h（2026-09-09，分支 fix/runtime-limits-ux @ ec1e5d8，未合并）
 
 
 **流程**：分支 CI run 34310631679 **success**（head_sha=ec1e5d8 API 双核对）→ 全量审计（diff 3 文件 +18/−12）**无 bug** → ff 合并 main @ ec1e5d8 → push（release CI run 34311730005 触发，**用户拍板不等结论**，新会话可查 bridge /status/main）→ 本地+远端分支已删（204）。dev-history 未重建（用户拍板直接收尾，留待后续）。
@@ -16025,7 +15638,7 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 ## Token 用量实时 + 预算上限 1000/6h（2026-09-09，分支 fix/runtime-limits-ux @ ec1e5d8，未合并）
 
 <!-- 2026-09-09 13:10:44 -->
-## 2026-09-09 13:10:44
+## runtime-limits-ux 审计无 bug + 合并收尾（main @ ec1e5d8）
 
 
 **来源**：上一轮 runtime-limits-ux 审计顺带发现的既有 LOW（非最近 5 次引入）——BackupSettingsScreen importLauncher（SAF activity-result 回调，主线程）直接 readText，含 artifact zip 的 15-35MB 备份导入冻结 UI 数百 ms。用户拍板修。
@@ -16036,7 +15649,7 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 ## runtime-limits-ux 审计无 bug + 合并收尾（main @ ec1e5d8）
 
 <!-- 2026-09-09 13:57:18 -->
-## 2026-09-09 13:57:18
+## 手动导入主线程 readText 修复合并收尾（main @ 40ea387）
 
 
 用户要求对整个程序再做一次全局系统性抓 bug，**不开子代理，手动分配会话**。已产出完整材料在 /var/minis/shared/global-bug-audit-0909/：
@@ -16126,7 +15739,7 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 
 **产出**：/var/minis/shared/global-bug-audit-0909/reports/session-T5.md。扫描 34 文件/10512 行：HIGH 0 / MEDIUM 4 / LOW 7。
 
-**任务书前提错误（可复用）**：T5 任务书要求审计 AntigravityProvider/LoginManager/OAuthStore——这三个文件是 **Filterrr fork** 的代码，不在 logicflow-GYW 主线快照。主线只有 AntigravityModelsApi.kt（自述 scaffolding，全库零消费者）。派发材料与 fork 动态记忆混淆了。
+**任务书前提错误（可复用）**：T5 任务书要求审计 AntigravityProvider/LoginManager/OAuthStore——这三个文件是 **Filterrr fork** 的代码，不在 ***OWNER*** 主线快照。主线只有 AntigravityModelsApi.kt（自述 scaffolding，全库零消费者）。派发材料与 fork 动态记忆混淆了。
 
 **MEDIUM 4**：
 - M1 Xunfei TTS WebSocket 无 pingInterval → OkHttp WS 不受 readTimeout 约束（沙箱 OkHttp 4.12 对照实验实锤：无 ping 20s 不触发 onFailure，pingInterval(2s) 后 2s 触发）→ synthesize 永久挂起，QuickTestSheet 无 withTimeout
@@ -16421,7 +16034,7 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 **教训（重要，可复用）**：**灰度化 ASCII 只能自检几何形状，不能判断配色/对比度**——我据它说"当前图标浅灰底压浅灰形状、对比度极低"，实际是白底+浅蓝+中等暗度线条，灰阶跨度 128。颜色信息在灰度化里被丢掉了（浅蓝和浅灰无法区分）。判断观感要用 RGB 直方图/主色统计，或直接看图。
 
 <!-- 2026-09-10 03:34:53 -->
-## 2026-09-10 03:34:53
+## 第三轮复查完成：B1-B22 + token + 包名重构，无 bug（2026-09-10 深夜）
 
 # 第三轮复查完成：B1-B22 + token + 包名重构，无 bug（2026-09-10 深夜）
 
@@ -16450,7 +16063,7 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 5. 单会话审 129 文件的可行性路径：免费机械探针先行（rename 归一化配平 + 残留 grep + 断言套件重跑）→ 语义 diff 按域分批读 → 每个依赖控制流前提的修复对照原文核实。全程 ~40 次工具调用，无需派发。
 
 <!-- 2026-09-10 03:51:55 -->
-## 2026-09-10 03:51:55
+## 语法门 grep 大小写坑 + 括号配平检查（2026-09-10）
 
 # 语法门 grep 大小写坑 + 括号配平检查（2026-09-10）
 
@@ -16470,7 +16083,7 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 **流程**：amend 修复（保持原提交完整）→ force push（GIT_ASKPASS 环境变量 + --force，gh_sync.sh push 无 force 选项）→ 重新 dispatch。concurrency by ref 会取消旧 run，所以改 workflow 后重推只需等最后一轮。
 
 <!-- 2026-09-10 04:09:25 -->
-## 2026-09-10 04:09:25
+## 关键发现（推翻了我自己的前提）
 
 # UpdateChecker semver 修复 + 正式版化（2026-09-10，main @ 2c7f58b）
 
@@ -16619,7 +16232,7 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 ## 小号线自动同步 + lab 侧同款修复 + 文档三项（2026-09-10）
 
 
-**小号线定位（用户澄清）**：`rikkaflow/RikkaMinis` = 上游 main verbatim + 唯一 delta（workflow 注入 `MINIS_APP_ID_OVERRIDE=com.rikkaminis.app.lab`）。两个目的，按重要性：①**同设备与稳定版共存**（各自数据目录/子进程/Shizuku provider/启动器标签，当初做它的原因）②**主号手术中的救援线**（始终有一份能构建能装的副本）。目的②只在它持续跟随主线时成立 → 同步必须自动化。
+**小号线定位（用户澄清）**：`***ALT_USER***/RikkaMinis` = 上游 main verbatim + 唯一 delta（workflow 注入 `MINIS_APP_ID_OVERRIDE=com.rikkaminis.app.lab`）。两个目的，按重要性：①**同设备与稳定版共存**（各自数据目录/子进程/Shizuku provider/启动器标签，当初做它的原因）②**主号手术中的救援线**（始终有一份能构建能装的副本）。目的②只在它持续跟随主线时成立 → 同步必须自动化。
 
 **根本问题**：GitHub 的 "Sync fork" 按钮只做 fast-forward，小号线带自有 commit → 按钮拒绝 → 每次都要手工 merge。**解法（已落地）**：小号 main 新增 `.github/workflows/sync-fork-main.yml`（每晚 03:17 UTC + 手动派发）：
 - fetch 上游 main；已是祖先 → 幂等结束
@@ -16642,7 +16255,7 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 ## 小号线同步闭环验证 + 文档合并（2026-09-10，main @ f1123178）
 
 
-**小号线（rikkaflow/RikkaMinis）三条验证全绿**：
+**小号线（***ALT_USER***/RikkaMinis）三条验证全绿**：
 1. **同步 workflow 首次运行即完成同步**：小号 main → `adc41cbd`（merge 上游 e0f32d40），delta（MINIS_APP_ID_OVERRIDE 行 + appId 注解）与引号修复都在。
 2. **幂等路径**：再次派发 → 日志 `already current with upstream — nothing to do`，且 `Trigger the build for the synced commit` 步骤结论为 **skipped**（门控生效，不白跑 12 分钟构建）。
 3. **同步后构建成功 + 共存身份**：小号 main 构建 success，日志回显 `MINIS_APP_ID_OVERRIDE: com.rikkaminis.app.lab`、`versionCode=220000072 ... appId=com.rikkaminis.app.lab`；小号 release 资产 `RikkaMinis-arm64-v8a.apk`（13.3MB）已刷新。
@@ -16775,7 +16388,7 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 **便宜替代**：skill 注册表（浏览/安装/更新/版本化），已在备份设计清单里（"技能排序，待注册表化"）。
 
 <!-- 2026-09-11 09:43:10 -->
-## 2026-09-11 09:43:10
+## 用户对「Provider 多密钥轮换」功能提出两点：①修掉梳理时发现的边界 bug ②该功能无任何 UI 说明，用户自己
 
 用户对「Provider 多密钥轮换」功能提出两点：①修掉梳理时发现的边界 bug ②该功能无任何 UI 说明，用户自己都不知道存在，要求加上。
 
@@ -16996,15 +16609,6 @@ CI 13:15 创建仍在跑（正常带宽 12min），按惯例不等。ARCHITECTUR
 - **清理**：远端分支 API DELETE 204（远端仅剩 main）；/tmp/rikka-think 已删；msg1-3.txt/a_commit_msg.txt 草稿已清
 - **真机验证清单**（装 android-latest 后）：①glm-5.3-flash 思考进思考区不泄漏 ②输入框前后补字发送不丢 ③排队时不再 no-response 误杀 ④中转站 500 显示可读中文错误而非 raw JSON
 
-<!-- 2026-09-12 02:11:04 -->
-## 最终可吸收清单已收敛入 backlog（2026-09-12）
-
-- 落点：/var/minis/shared/backlog.md 第 2 节（A 待办 2 项 / B 种子 2 项 / C 等窗口 3 项 / D 观察点 2 项 / 明确不吸收存档 12 项）
-- A1 Prompt Cache 对齐上游（OpenMinis，白捡，最先做）；A2 记忆定时 rollup（OmniBot AlarmManager）
-- B1 技能自动归纳（ClawMobile）；B2 虚拟屏幕（Operit）——各做种子验证再投
-- C1 内容变换抽象（rikkahub）；C2 TextFieldState（等窗口）；C3 通道分工具集（Operit）
-- 核心结论：能吸收的非常有限——25 关节对比 + 卡刀淘汰后仅 2 待办 + 2 种子 + 3 等窗口
-
 <!-- 2026-09-12 02:14:01 -->
 ## 交接完成：A1 Prompt Cache + A2 定时 rollup → 新会话处理（2026-09-12）
 
@@ -17044,15 +16648,6 @@ CI 13:15 创建仍在跑（正常带宽 12min），按惯例不等。ARCHITECTUR
 - **坑（重要）**：裸 `git push origin 分支:main` 无 GIT_ASKPASS 会认证失败——必须先 export GIT_ASKPASS=/var/minis/workspace/.git_askpass.sh + GIT_TERMINAL_PROMPT=0；本次曾先 push 失败又把远端分支 DELETE 了，靠本地分支还在重新 askpass 推补救成功。**顺序纪律：push 成功复核后再删分支**
 - 收尾：远端分支已删、本地分支已清、backlog 第 3 条标已修复
 - backlog 第 1 条 NUL 检查确认早已修复（sanitizeName 已是 '\n' 检查），用户记忆正确——backlog 剩余实际为 0
-
-<!-- 2026-09-12 09:33:57 -->
-## "三条借鉴"动手核查：两条已有等价实现，零代码改动（2026-09-12）
-
-用户拍板做三条借鉴（skill 预算截短 / effort 降级链 / llm-bug-audit effort 档），开工前按验证优先核查，发现：
-- **skill 清单预算**：SkillRepository.kt 已有 MAX_SKILLS_IN_PROMPT=20 + MAX_SKILL_DESC_LENGTH=200 + three-tier 选择（bundled > 7 天更新 RECENT_SLOTS=10 > useCount）+ hasMore 溢出提示，token 上限 ≈1000-2000 落在 Claude Code 1% 预算内——等价实现，无需改
-- **effort 降级链**：ThinkingRuleResolver.kt L854 `clampEffort`（行走下、否则向上 = codex-rs 降级链等价）+ clampEffortForModel（mimo/agnes 特判）+ catalog 声明集合驱动；OpenRouter/OpenAI-native 分支不做 declared-set clamp 是有意设计（注释写明 pre-refactor 就没有）——已有且更强，无需改
-- **实际改动**：仅 llm-bug-audit SKILL.md 两处标注（阶段 2 派发=recall 广撒网 high effort，阶段 3 核实=precision 严把关 medium effort，对标 Claude Code 子 agent 审查模式）
-- 教训：调研报告发布时未做 RikkaMinis 现状核对，动手时才查——报告第 6 节"可借鉴清单"的 A/B 级条目应先过"现状 grep"再写；/tmp/rikka-merge 是小号 remote 且停在已删分支，新 clone 用 /tmp/rikka-budget（已删）
 
 <!-- 2026-09-12 10:05:49 -->
 ## 差距清单收敛完成：D1 攒着，D3/D4/D5 归档不吸收（2026-09-12）
@@ -17121,38 +16716,6 @@ CI 13:15 创建仍在跑（正常带宽 12min），按惯例不等。ARCHITECTUR
 - **坑**：file_write 建的 .git_askpass.sh 权限 -rw-------，git 报 `cannot exec ...: Permission denied`；需 `chmod +x` 后再走 GIT_ASKPASS 直推。
 - **顺手确认**：release CI run #1472（head fe39a66，P0/P1/P2 那条，用户上次拍板不等）结论 **success**。
 - **脱敏**：103 处替换，验证 NONE clean。新增内容无真实凭据字面量（gsk_/rnd_ 均 0 命中；hf_transcribe 是 python 包名误报；api.groq.com 是公开域名），无需扩 SENSITIVE_PATTERNS。
-
-<!-- 2026-09-12 15:00:59 -->
-## Fork 生态调查完成（2026-09-12，报告 50.7KB / 723 行）
-
-
-**报告**：`/var/minis/mounts/笔记/Fork生态调查报告-2026-09-12.md`（替换 08-11 旧版 `OPENMinisfork调查结果.md`）
-
-**用户纠正（重要）**：用户账号只有 `logicflow-GYW`（主）与 `ri***ow`（小号）两个。上一版按"账号仓库群重叠"把 MZHlongchu / wj5403293 / JcEvoX / xu17699120551-boop / w1394847159 判为自有，**全部错误**。RikkaMinis 的 8 个 fork 全是第三方。
-
-**归属判定法修正（可复用）**：
-- 作者字段**不能**判定 fork 归属——第三方搬运历史会保留原作者字段（hjhjd/VCPMinis 里有 130+ 个 logicflow-GYW 提交，含 `rename project to RikkaMinis`、`Android-only tree`、`WebDAV backup`，全是搬运）。作者字段只能识别"哪些提交是本人写的"。
-- 判定"搬运 vs 独立开发"唯一可靠口径 = `git patch-id --stable`。tree hash 比对会把 cherry-pick 到不同基线的纯搬运误判为"带修改"（实测 JcEvoX 报 419 个 tree 不同，patch-id 真独立只有 2 个）。
-- 三层过滤实测缩水：Filterrr 1015→156、JcEvoX 674→2、MZHlongchu 396→1、qq1433161035 197→3。
-
-**patch-id 脚本坑**：
-1. `git log -p | git patch-id` 输出 `<patch-id> <commit-sha>`，**第一列才是 patch-id**。用 `--format="@@%h"` 会让第二列变 40 个 0，解析逻辑全错。必须用默认 format。
-2. pathspec 必须放 `--` 后：`git log -p <revs> -- :!path`。放 rev 后不加 `--` 报 `ambiguous argument`。
-3. 排除 6 个大资源（jieba.dict / tiktoken / xcstrings / lame-3.100 / talloc / package-lock）避免污染。
-
-**★ 最重要发现：T9 性能基线可从 fork 完整取回**
-- `05a9d111b2`（2026-08-15，本人提交）：`diagnostics/` 下 PerfBaselineCollector / PerfBaselineReport / MemoryPressureTracker / SyntheticWorkload + 4 个测试文件（34 个 JVM 纯逻辑测试）+ 6 个合成负载。规范来源 `balance-point-blueprint.md §T9`。
-- 主仓删除链：`c080d506`(08-27) 删 MemoryPressureTracker+SyntheticWorkload → `a16b797b`(09-10, audit-0909-b19 T9-L5) 删 PerfBaselineCollector+Report → `56795faa`(09-10) 删 CI 的 T9 perf gate step（它 cat 的 report 已被删，只能输出 `summary not found`）。
-- 主仓 diagnostics/ 现有 5 文件是另一套：ContentDiag / HangDetector / LaunchCycleBeacon / PerfLongCtx / StreamPerfMonitor。代码中 grep PerfBaseline 0 命中，仅 docs + dev-history。
-- **代码完整活着在 `JcEvoX/RikkaMinis` 和 `Filterrr/RikkaMinis`**，测试纯 JVM 可直接跑，恢复不需重写。
-
-**`610381aaed`**（skills bundle，2026-08-08，+1465/−106，12 文件）：散落 **4 个 fork**（Filterrr/hjhjd/JcEvoX/MZHlongchu）。功能在主仓以演进形态存在——`github-sync-helper`→`github-ops`、`buildIntegrationStatus` 从 ChatViewModel 拆到 `ChatPromptAndTools.kt`、`vector_index.pkl`(1MB) 已移除。**未丢失**。
-
-**RikkaMinis fork 真独立贡献（patch-id 口径）**：Filterrr 156（+23,683 净行，活跃到今天，Antigravity provider+子代理）、hjhjd 141（+21,915，VCPToolBox+ExecPlane，停 28 天）、qq1433161035 3（−90，只改 build-apk.yml 的 proot 子模块填充）。其余 3 个零独立贡献纯镜像，wj5403293/w1394847159 零提交。
-
-**OpenMinis 上游**：511 fork / 461 零提交 / 46 真改动 / 9 个 ahead>0 的 MZHlongchu+其他。PR 14 个 0 合并、issue 179 open 近一周全 0 reaction、贡献者仅 wsvn53(22 commits)、main 38 提交、停滞 10 天（09-02）。46 个真改动里 Kotlin 方向只有 1 个。最高 star：xiki45 7★（system-assist + 独立 LSPosed 模块 `minis-assist-hook`，重定向 HyperOS 手势唤起，命中用户设备）。
-
-**数据/脚本**（/tmp，随会话消失）：`patchid_verify.py`、`uniq_stat.py`、`fa.py`、`om_cmp.py`、`om_commits.py`、`up_pids.json`、`rk_cmp.json`、`om_cmp.json`。clone 目录 rk-up / rk-{Filterrr,hjhjd,JcEvoX,MZH,qq1,xu1,wj} / om-up / om-{leo,Mika,siu,halv,aba,lun,xiki,scx}。
 
 <!-- 2026-09-12 15:21:35 -->
 ## A1 T9 性能基线验证 + 拍板暂缓（2026-09-12 收尾）
@@ -17299,7 +16862,7 @@ CI 13:15 创建仍在跑（正常带宽 12min），按惯例不等。ARCHITECTUR
 **C3 docs e057d151**：ChatScreen 注释（实为 minis_chat_tuning_prefs）、NativeOffload 悬挂 KDoc `[PersistentShell.MAX_OUTPUT_CHARS]`、ConfigBuiltins memoryLookbackDays 描述（注入≠搜索）。
 
 **验证**：沙箱抽取两函数逐字编译 + 5 测试类 **23/23 绿**；i18n 复检 ALL CLEAN；XML 7/7 parse；无 600 残留。**CI #1476**（手动派发）**success**，9 条新测试日志实证 PASSED，Publish 步骤正确 skipped。
-**坑（复记）**：build-apk.yml 的 push trigger **只挂 main**——特性分支 CI 必须手动 `sh gh_sync.sh gh-actions-dispatch --repo logicflow-GYW/RikkaMinis --workflow build-apk.yml --ref <branch>`（本次先等自动触发空转 ~1 分钟才想起）。
+**坑（复记）**：build-apk.yml 的 push trigger **只挂 main**——特性分支 CI 必须手动 `sh gh_sync.sh gh-actions-dispatch --repo ***OWNER***/RikkaMinis --workflow build-apk.yml --ref <branch>`（本次先等自动触发空转 ~1 分钟才想起）。
 **待办**：用户真机验证（分支产物 RikkaMinis-apk，run 34701521852；验证点：默认显示 900、调 120 后 sleep 150 应 120s 超时、拖尾 token 滑杆顺滑吸附 500）→ 拍板合并 ff + release。克隆 /tmp/rikka-fix-tune（本会话活跃，勿动）。
 
 ## 2026-09-13
@@ -17346,96 +16909,6 @@ CI 13:15 创建仍在跑（正常带宽 12min），按惯例不等。ARCHITECTUR
 - **仓库同步**：docs/dev-history/{README.md, rikkaminis-dev-history.md, -INDEX.md} 3 文件（+260/−7），README 覆盖范围 914→926、41→42 天、截止 09-12→09-13。分支 docs/dev-history-0913 @ 15b3f44 → askpass 直推 ff 合并 main（e057d15..15b3f44，无 force）→ 远端分支 API DELETE 204 → 终验 ls-remote 仅剩 main @ 15b3f447 → 挂载版与云端版 sha256 双份一致。
 - **坑（复记）**：gh_sync.sh clone 子命令在沙箱下 set -e 静默失败（EXIT=128 无输出），直接 `git clone --depth 1` 可绕过；gh_sync.sh push 子命令本身正常（askpass 机制 OK）。
 - 克隆目录 /tmp/rikka-docs-0913（浅克隆，仅 1 commit 深）；askpass 在 /var/minis/workspace/.git_askpass.sh（本会话）。
-
-<!-- 2026-09-13 08:25:53 -->
-## 同类型手机 Agent 生态调查报告完成（2026-09-13）
-
-
-**报告**：`/var/minis/mounts/笔记/同类型手机Agent生态调查报告-2026-09-13.md`（506 行 / 29,435 字符 / 44.5 KB），《Fork生态调查报告-2026-09-12》的姊妹篇。原报告看单仓 fork 层，本篇看整个品类层。
-
-**数据存档（跨会话可复查）**：`/var/minis/shared/eco-census-2026-09-13/`（5.2 MB，83 文件）——`raw/` 26 条查询原始 JSON、`repos/` 53 个仓库元数据 + 10 份 README 摘录、`eco_merged.json`（455 唯一仓库去重）、3 个脚本。
-
-**方法**：28 条 GitHub Search（20+8，`sort=stars`，per_page=30）→ 455 唯一仓库 → 粗筛 419 → 人工确认真相关 ~45 → 深挖 39（每个落盘 JSON）。Search API 限额 30/h，间隔 7s。
-
-**核心发现**：
-- **品类主轴 = OpenClaw（389,528 星 / 81,878 fork / 1,747 watcher / TS / created 2025-11-24）**，派生 zeroclaw（32,776，Rust）、nanoclaw（30,747 / 12,835 fork，容器化卖点）
-- **"Claw" 已成手机 agent 事实标签**：`claw agent android` 返回 87，真相关 15 个全叫 *Claw（mobileClaw/PhoneClaw/ZeroClaw-Android/X-OmniClaw/AppClaw/ClawWatch…），覆盖手机/平板/手表
-- **六层结构**（判定依据：agent 脑子在哪、手在哪）：L0 生态主轴 / L1 运行时移植 / L2 全功能客户端 / L3 远程控制台 / L4 设备作执行环境（VLM）/ L5 入口垂直
-- **L2 排序**（RikkaMinis 所在层）：Operit 7,742 → RikkaHub 7,579 → OpenMinis 4,432 → OmniBot 1,981 → gpt_mobile 1,222 → gpt-assistant-android 901 → SmolChat 893 → ChatGPT-android-app 337 → **RikkaMinis 18**（43 天龄，0.4 星/天，比最快慢约 80 倍）
-- **贡献者集中度**：RikkaHub 51 人但 re-ovo 占 95.5%；Operit 34 人 AAswordman 80.5%（唯一有真第二梯队，第 2 名 109 commits）；OmniBot 12 人 XuYouo 68.6%
-- **PRoot 路线有 4 个存活项目**：RikkaMinis / OpenMinis / OmniBot（Alpine）/ Mobile-Harness（`private userspace PRoot layer` + Online/Offline 双 APK + Android 9+/ARM64）；对立面 openclaw-android 主张 "no proot, no Linux"
-- **官方入场**：google/artemis（3,638 星，2026-08-13 创建，一个月）+ OPPO-Mente-Lab/X-OmniClaw（262 星，arXiv 2605.05765）
-- **L4 全是框架无原生 APK**（mobilerun 9,359 / MobileAgent 9,196 / mobile-mcp 6,661 / agent-device 4,548 / artemis 3,638 / android_world 889 / arbigent 638）→ 明确空位
-- **淘汰率**：39 个重点仓库中 31 个 lastpush ≤100 天，8 个不在（含 1 archived = ZeroClaw-Android 190 天）
-- **品类年龄锚点**：2025-03（3 个，L2 双寡头同月创建）、2026-02（8 个，Claw 命名爆发点）
-
-**工具坑（重要，复发预防）**：
-1. **`file_write` 的 `append=true` 在本环境不生效**——连续 4 次写入同一文件，最终只剩最后一次的内容（43,859 → 12,541 字节，前 3 块全丢），且 `/var/minis/offloads/` 为空无副本可恢复。**对策**：分块写 `/tmp/rpN.md`，再用 `cat /tmp/rp1.md /tmp/rp2.md … > 目标` 合并。**这是本次唯一导致返工的问题。**
-2. `fields=` 参数在 GitHub Search API 无效（被忽略），返回完整对象，结构是 `{"total_count":N,"items":[...]}`——首次汇总报 `string indices must be integers`。
-3. `sort=stars` 会顶起"描述里提到关键词"的仓库（`openclaw` 查询返回 72,433 total，top 混进 132,530 星的无关 cc-switch）→ **Search 结果只能当候选池，不能当排序榜**。
-4. 中文查询 `手机 ai agent` 826KB 响应被 `IncompleteRead` 截断，未重跑（A/F 组已覆盖）。
-
-**校验方法（可复用）**：`/tmp/verify_report.py` 五项检查——code fence 配平 / 非代码区括号配平 / 表格列数一致性 / 脱敏正则 10 条 / 标题层级。报告最终全绿（16 fence EVEN、0 括号不平衡、11 表格 0 列数不一致、脱敏 NONE clean）。
-
-**数据校准流程**：报告写完后用原始 JSON 重算所有年龄/停滞天数，抓到 5 处错误（SeekerClaw 误写 129 天前实际 3 天前、RikkaMinis 44→43 天、openclaw push 日、X-OmniClaw 活跃→论文节奏、淘汰计数 5→8）。**报告写完必须回查原始 JSON，不能只信写入时的记忆。**
-
-<!-- 2026-09-13 09:27:00 -->
-## 生态报告两轮风格改造完成（2026-09-13）
-
-
-**报告**：`/var/minis/mounts/笔记/同类型手机Agent生态调查报告-2026-09-13.md`（511 行 / 45,801 字节）
-
-**第一轮：顾问式 → 情报式**（style1-4.py，88 处）
-- 去第二人称（"你"5 处 → 0）、第一人称（"我"→ 0）、"本篇"→"本报告"（5 处）
-- 去主观评价词：必读/值得读/可抄/该做/不该/不够/警惕/死路/最狠/战场/轻松
-- 去戏剧化标题："技术栈分歧：两条路线在沙箱上正面冲突"→"两条沙箱路线的项目分布"；"为什么这次不用 patch-id"→"Search API 与 patch-id 的适用边界"
-- 结论量化：核心结论 3 条改为带数字（15 个 *Claw 项目 / 3 个 ≥4000 星 / 淘汰率约 20%）
-
-**第二轮：视角去中心化**（dept1-4.py，31 处替换 + 2 个整章重构）—— 用户要求"报告面向大众，不要针对 RikkaMinis 这个项目"
-- **RikkaMinis 提及 55 → 11 处**，剩余全部为客观数据点（层内表格行、谱系描述、路线项目列举）
-- **§4 整章重构**："L2 深挖：RikkaMinis 的真实位置"→"L2 层深度分析"。功能重合度矩阵**删掉 RikkaMinis 列**，改为 5 项目横向覆盖广度矩阵，**口径从"与 RikkaMinis 的重合度"改为"14 项能力明确覆盖数"**（Operit 14 / OpenMinis 13 / OmniBot 10 / Mobile-Harness 7 / RikkaHub 8+3 待核）。⚠️ 口径变了，原"13/14"数字随之更正为 14/14，已在读法里注明口径
-- **§7.3 整章重写**："待办项清单（按证据强度排序）"→"层内空缺与本报告未覆盖的问题"。8 类：层内空缺×5（L4 原生 APK 位 / 无障碍驱动产品化 / 输入法悬浮窗入口 / PRoot 安全披露 / 定时任务概念）、收敛中×2（Rust 共享运行时 / OpenHarmony）、谱系隔离、本报告未做×3（clone 级比对 / 闭源系统 agent / 中文查询）
-- **§7.1 结论 4 整条替换**：原"RikkaMinis 星增速慢 78 倍"→"层内功能广度与星数不相关"（OpenMinis 4,432 星覆盖 13/14 ≈ Operit 7,742 星 14/14，高星未在功能广度形成代差）——新结论更有情报价值
-- §5 "对标项"→"参考项"；"唯一与 RikkaMinis 完全同技术栈"→"路线 B 内唯一已发布正式版本"；§5.5 结论从"若 RikkaMinis 需开放…"→"手机端自动化能力当前主要通过 MCP server 向外提供，非手机内产品形态"
-
-**校验（verify_report.py 全绿）**：fence 16 EVEN / 非代码区括号不平衡 0 / 表格 11 块 0 列数不一致 / 脱敏 NONE clean
-
-**数据存档**：`/var/minis/shared/eco-census-2026-09-13/`（12 个脚本：eco_search / eco_merge / calib_report / verify_report / style1-4 / dept1-4）
-
-**可复用经验**：报告风格改造用 Python 精确替换脚本分 4 批跑，每批打印 OK/MISS，MISS 的必须二次定位原文（本次 3 次 MISS 均因原文与假设不符：全角/直角引号、"43 天"vs"44 天"、`|` 前多写 `**`）。**整章重构不要塞进替换列表**——用 `t.find(start) / t.find(end)` 切片替换更稳。
-
-<!-- 2026-09-13 09:56:00 -->
-## 生态报告第二轮改造：第三方调查员口吻 + 数据刷新（2026-09-13 09:40）
-
-
-**报告**：`/var/minis/mounts/笔记/同类型手机Agent生态调查报告-2026-09-13.md`（514 行 / 47,268 字节）
-**标题改名**：「同类型应用生态调查报告：手机端 AI Agent」→「**移动端 AI Agent 生态调查报告**」（原标题"同类型应用"是相对用户项目说的，第三方不这么表述）
-
-**口吻改造（third_party.py，14 处）**：删掉全部 14 处"原报告"引用框架 + 0 处 T9（内部术语）。用户明确"第三方调查员是**了解** RikkaMinis 的"——所以 RikkaMinis 作为真实案例正常引用（11→12 处），**删的是内部文档引用**（第三方不引用你的私有 fork 报告），fork 层的客观发现保留为本报告自己的结论。
-- 开头"姊妹篇"定位 → 独立报告引言，fork 层降为"补充调查"
-- §1 方法从"原报告用 X / 我用 Y" → "本报告两类互补方法"
-- §4.2 "与原报告对 OpenMinis 的结论重现" → "该现象在 OpenMinis 上同样成立"
-- §5.6 T9 整段重写 → "agent 行为的可验证性"
-- 残留检查：原报告 0 / T9 0 / 你 0 / 我 0 / 本篇 0 / 姊妹篇 0
-
-**★ 发现真实 bug：相对天数全按 UTC 算，用户时区 UTC+8**
-GitHub `pushed_at` 返回 UTC（如 `2026-09-12T17:03:32Z`），直接取 UTC 日期会低估东八区活跃度。该例 SGT = **09-13 01:03 = 今天**，报告写"1 天前"。
-- **9 个仓库 UTC 与 SGT 日期相差一天**，其中 **6 个应为"今天"**：openclaw / zeroclaw / nanoclaw / mobile-mcp / Operit / RikkaMinis
-- 其余 SGT 少一天：OpenMinis 12→11、OmniBot 2→1、codex-mobile 110→109、ZeroClaw-Android 190→189、opendroid 9→8、android_world 4→3、BiBi-Keyboard 3→2、android-agent 31→30
-- 已在 §1.2 新增第 4 条口径坑 + §8.3 局限 10 完整声明 + §0 总览加快照时刻行
-- 沙箱无 tzdata 包，`zoneinfo.ZoneInfo` 报错 → 改用 `dt.timezone(dt.timedelta(hours=8))`（SGT 无夏令时）
-
-**数据刷新（39 仓 core API）**：
-- 星数变 10 个：**artemis 3,638→3,693（+55，1.5 小时内）**、openclaw 389,528→389,532、OpenMinis 4,432→4,435、RikkaHub 7,579→7,581、Operit 7,742→7,743、zeroclaw 32,776→32,778、mobile-mcp 6,661→6,663、nanoclaw 30,747→30,748、happy 23,767→23,768、mobile-use 2,883→2,884
-- fork 变 3 个：openclaw 81,878→81,877、Operit 630→629、RikkaHub 660→661
-- 星/天：OpenMinis 31.4→31.5（其余四舍五入不变）
-- **淘汰率 8/39 = 20.5% 不变**（>100 天：1237/189/165/131/129/114/111/109）
-
-**交叉验证（crosscheck.py，可复用）**：报告 vs JSON 逐仓比对 star + 停滞天数。**教训：260 字符上下文窗口会误抓邻近仓库的数字**（6 处误报：把 artemis 3,693 当 arbigent 的星数、把 Operit2 274 当 Operit 的星数）——命中后必须看原文判定是误报还是真漏改。真漏改 7 处全部修掉，最终全绿。
-
-**校验**：verify_report.py 全绿（16 fence EVEN / 括号 0 不平衡 / 11 表格 0 列数不一致 / 脱敏 NONE clean）
-
-**存档**：`/var/minis/shared/eco-census-2026-09-13/`（18 个脚本，新增 refresh_repos / age_table / third_party / recalib / snapshot_note / crosscheck）
 
 <!-- 2026-09-13 12:39:51 -->
 ## 打开历史会话「差一段」第 5 轮取证（真机数据实锤）
@@ -17696,7 +17169,7 @@ API 实查 main = `d6cbe49e`，revert 链已落地：`d6cbe49e`（revert 32571f8
 **⚠️ 本会话终端不可用**：任何 shell_execute 都会触发 `[System busy: process memory is critically high (982/1022/2283MB)]`。成果全部在磁盘上，**必须由新会话接手完成最后三步**。不要在本会话继续调终端。
 
 ### 工作克隆（已存在于磁盘，可直接用）
-- `/tmp/rikka-legacy`（浅克隆 --depth 20，origin = logicflow-GYW/RikkaMinis，main = `33aa72d`）
+- `/tmp/rikka-legacy`（浅克隆 --depth 20，origin = ***OWNER***/RikkaMinis，main = `33aa72d`）
 - askpass：`/tmp/askpass_legacy.sh`（chmod +x 已做，GIT_ASKPASS 用）
 - 分支：`refactor/legacy-pipeline-isolation`（**未 push**）
 - 本地测试脚手架：`/tmp/utf16test/`（kotlinc 2.1.0 + junit 4.13.2，jar 在 /tmp/libs）
@@ -17737,7 +17210,7 @@ API 实查 main = `d6cbe49e`，revert 链已落地：`d6cbe49e`（revert 32571f8
 - 被禁符号 = legacy 包导出的全部顶层声明（动态扫描，自适应）+ 10 个 legacy 行型（`FlatChatItem.X` 形式）+ `ToolCallRunGroup`
 
 ### 推 CI 注意
-- `build-apk.yml` 的 push trigger **只挂 main** → 特性分支必须手动派发：`sh /var/minis/skills/github-ops/scripts/gh_sync.sh gh-actions-dispatch --repo logicflow-GYW/RikkaMinis --workflow build-apk.yml --ref refactor/legacy-pipeline-isolation`
+- `build-apk.yml` 的 push trigger **只挂 main** → 特性分支必须手动派发：`sh /var/minis/skills/github-ops/scripts/gh_sync.sh gh-actions-dispatch --repo ***OWNER***/RikkaMinis --workflow build-apk.yml --ref refactor/legacy-pipeline-isolation`
 - 查状态：`https://rikka-ci-bridge.***USER***.workers.dev/status/refactor/legacy-pipeline-isolation`
 - CI 绿 → 用户真机验证 → ff 合并 main → 删分支 → release CI
 
@@ -18159,7 +17632,7 @@ API 实查 main = `d6cbe49e`，revert 链已落地：`d6cbe49e`（revert 32571f8
 - **"6 个 handler 零超时"是机械判定失误**：抽查发现 `waitForInit(timeoutMs)` / `latch.await(timeoutSec)` 这类带 deadline 的循环不含 "timeout" 字样。教训：关键词命中≠语义存在，机械统计必须抽样反证。
 - 复记：`sed|cat -A|sed` 管道**吃掉整行**（`else { null }` 的 null 丢了，差点报出假的编译错误 bug）→ 核实代码用 `python repr` 或 file_read。
 
-**★ 基础设施修正（重要）**：**`rikka-ci-bridge` 只跟踪 main，不跟踪特性分支**（查 `status/fix%2F...` 返回 `{"error":"not found"}`，而 main 正常）。**查分支 CI 必须用 GitHub API**：`curl -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/logicflow-GYW/RikkaMinis/actions/runs?branch=<b>&per_page=3"`。
+**★ 基础设施修正（重要）**：**`rikka-ci-bridge` 只跟踪 main，不跟踪特性分支**（查 `status/fix%2F...` 返回 `{"error":"not found"}`，而 main 正常）。**查分支 CI 必须用 GitHub API**：`curl -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/***OWNER***/RikkaMinis/actions/runs?branch=<b>&per_page=3"`。
 
 **真机验证清单（用户装包后）**：①闹钟/定时通知仍能触发（`android-alarm`，F3 唯一有行为面的改动，虽理论零风险）②可选 `adb shell bmgr backupnow com.rikkaminis.app` 看备份是否正常 ③F4 观测无感，正常用，出现长任务/排队时 `logs/` 会有 `offload backpressure:` 行 ④F1 仅 debug 构建，release 无影响。
 
@@ -18223,29 +17696,6 @@ API 实查 main = `d6cbe49e`，revert 链已落地：`d6cbe49e`（revert 32571f8
 4. **release CI run 1505 success** ✓
 
 审计报告 `/var/minis/shared/app-completeness-audit-2026-09-13.md` 已更新：§二 结论（3 真缺陷已修 + 1 结构缺口仅加观测 + 2 条自纠）、§七 改为「处理状态」含真机验证表、§八 新增「本轮扫描自身的失误」（F5 假阳性、"6 handler 零超时"机械判定、`sed|cat -A` 吃行）。
-
-<!-- 2026-09-14 08:34:07 -->
-## 代码归属统计完成：上游 51% / 自写 49%（Kotlin，main @ d3873c0）
-
-
-**基线 = fork 点**：`OpenMinis/OpenMinis@3b9015e2`（2026-07-25，454 kt 文件 / 154,146 行）。验证方式：首个自建提交（6e941ee4, 08-02）与该点只差 13 文件 / 52 行。上游 tip = 4ef2900（09-02）**不是** HEAD 的祖先 → 用户从未合并上游 07-25 之后的提交（两条平行线；上游自己长到 208,324 行 / +54k）。
-
-**现在**：767 kt 文件 / 218,979 行（+42%）。
-
-**两种独立口径互相印证**：
-- **逐行 diff 口径**（+rename 检测）：上游原样保留 **103,430 行 = 47.2%**；新增 **115,549 行**；删除 50,579 行 → 总改写 ~16.6 万行、净增 6.5 万行。
-- **blame 口径**（谁最后写了这行）：上游作者 `Open Minis <[EMAIL]>` = **111,738 行 = 51.0%**；自写 107,378 = 49.0%。
-
-**分目录（blame 口径）**：生产 src/main 173,358 行（上游 61.4% / 自写 38.6%）；单元测试 src/test 43,231 行（**上游仅 9.1%** / 自写 90.9%）；仪器测试 2,527 行（54.1%/45.9%）。
-**文件层面**：391 个文件 100% 自写（83,935 行）；376 个混合；**0 个文件一行未碰**（包名重命名 com.openminis.app→com.rikkaminis.app 让每个存活文件至少改一行 package）。上游 454 文件里 350 个改名存活、104 个被删（41,725 行上游代码移除）。
-**最大改动文件**：ChatScreen.kt 2711/4941、AgentLoopEngine.kt 2677（全新）、ChatInputArea.kt 1884（全新）、ChatPromptAndTools.kt 1857（全新）、ModelExecutionService.kt 1751（全新）；**几乎原样**：MinisTextKitSelection.kt 1/1152、VoiceProviderVendors.kt 1/723、DebugInspectorMethods.kt、HangDetector.kt。
-
-**★ 可复用方法（关键坑）**：
-1. **必须完整克隆**（`git clone --no-tags`，1064 提交 / 163MB）——浅克隆的 blame 会把边界之上全部错误归属。
-2. **作者名归属要逐个核实身份**：作者字段会骗人。本次 `Minis <minis@local>`（472 行）和 `GitHub <[EMAIL]>` 其实是用户自己的马甲，第一版误算成上游；`RikkaMinis*`/`ri*****ow`/各 Agent·CI 身份全是自写。判定法：`git log --format='%an <%ae>' | sort | uniq -c` + 抽查提交日期。
-3. **grep '^author ' 管道坑**：blame 流被 grep 判为 binary 时会打 `Binary file (standard input) matches`，但本次实测计数仍完整（总行数与 wc -l 一致）——仍建议核对总数。
-4. 速度：`git blame --line-porcelain` 767 文件全量仅 **48s**（PRoot 下可接受），无需并行。
-5. 报告图：`/var/minis/attachments/rikka-code-attribution.png`（Noto Sans CJK SC 可用，matplotlib 3.9.3）。
 
 <!-- 2026-09-14 09:07:19 -->
 ## 度量存活度审计（代码声明 × 日志实测）—— 新方法 + 首批发现（2026-09-14，main @ a82f425a）
@@ -18399,19 +17849,6 @@ commit `2dc6e0d4`（6 文件 +392/−18，分支 diag/liveness-batch）打包三
 ④ census 4 点照旧（RenderCensus first= / frozen_hit/live_parse 非零 / row_* 为 0）
 ⑤ 日志体积：ToolInputDelta 碎片行消失后，日均行数应显著回落（预期 -59%）
 
-<!-- 2026-09-14 12:14:55 -->
-## 2026-09-14 日志治理的「层不对称」——为什么 8 行感觉值钱（用户元会话）
-
-
-用户观察：今天的日志治理改动工程量小（门控 + 骨架事件升直写 + stream timing），但感觉意义价值不对称地大。问「改完之后应用的样貌变成什么样子」。
-
-**给出的分析框架（可复用）**：
-1. **行数计价器失灵**：工程量单位是「改了多少行」，价值单位是「改变了谁的能力边界」。这批改动落在**观察层而非功能层**——不改变应用能做什么，改变应用能被谁看懂。
-2. **观测 vs 归因**：改前只有观测（有数据），改后才有归因（数据能回答「为什么」）。日志之前是碎屑海（13 万行里 7.6 万行 = 59% 零信息碎片），骨架主链只在 logcat 通道、直写通道 0 条；改后主链必落盘，一个会话全链可单文件顺序重建，慢请求可分解为 attempt 级首 token/完成。
-3. **三个观察者三个样子**：对用户几乎不变（收益全在其盲区）；对 agent 质变（从扒碎屑到读链）；对下一次迭代从「改完不知动了什么」到「有据可查」（保留窗口 5→10 天，主链检索 13 万→1.6 万行）。
-4. **一般形式**：所有作用于观察层/度量层/验证层的改动都呈此不对称——它们不改变「能做什么」，改变「能知道什么」；而「能知道」是「能改进」的前置条件，故价值是给之后每次迭代垫高信息地板（非线性和）。
-5. **真源（推测）**：这次修改让应用第一次能**讲出自己刚才经历了什么**。此前「应用怎么了」只有一个出口 = 用户说给 agent 听（用户当传感器）；现在一部分应用能自述。多出的讲述权 = agent 从外部依赖里赎回的自治。呼应 GLOBAL.md 的「验证优先于能力」「harness 需 ground truth」。
-
 <!-- 2026-09-14 12:46:34 -->
 ## 2026-09-14 文档刷新闭环：main = 582de2ed（docs: refresh architecture/philosophy + add observability design doc）
 
@@ -18491,84 +17928,6 @@ commit `2dc6e0d4`（6 文件 +392/−18，分支 diag/liveness-batch）打包三
 ④ 窗口内 rename 的场景应同时有 `rename store A -> B (alias kept)` + `alias resolved A -> B (diag first-use)`
 对照基线：本次任务窗口（12:14-12:47）里 `__new__577217c7` 出现 1181+ 行，修复后同类场景应只剩合法草稿期那几条。
 
-<!-- 2026-09-14 14:25:09 -->
-## 用户问"我与这个应用各时期的关系变化能否在数据中体现"（2026-09-14 元会话）——四层量化分析
-
-
-**分析口径**：46 天记忆日志（07-31~09-14，1.8MB）+ 186 条会话记录（09-01~09-14，会话说 DB 只留 ~2 周）+ 1059 条 commit。
-
-**四层痕迹**：
-1. **用户开場白形态**（125 条真实会话，剔 61 条派发/无头）：元问题会话 09-01~09-07 = 3 条（0.43/天，均深 29.3 msg）；09-10~09-11 = 8 条（均深 37.9）；09-13~09-14 = 7 条（均深 199.1，含 266/354/462 msg 深谈）。即元问题不单变多，且从"问完就走"变成"一次问出长篇"。
-2. **协作模式**：61 条派发/无头会话集中 09-02~09-09（bug audit 潮，每波 8-12 并行）；09-12 后归零（多会话派发停，回单线深谈）。
-3. **造物类型**：1059 commit 中 `feats` **全期为 0**（从不加功能，只修复/加固——此项目本质是"把已有系统做扎实"）；docs commit 09-w2 爬到全期最高（14/周）；diag 类型 09-14 首现成簇（5 条）；周 commit 总量 196→315→196→127→115→110（量降质升）。
-4. **agent 建模用户的时刻**（日志内）：08-05 首现《用户的核心思维方式：验证优先于能力》→ 08-10《元协作协议提取》→ 08-11「用户认知模式第 4 个实例（提示词系统→Obsidian→Circuit→RikkaMinis）」→ 09-14「三个观察者三个样子」。观察对象：任务 → 用户 → 协作 → 认知结构 → 关注者的可见性。
-
-**分期（四层叠加）**：建造（07-31~08-08）→ 雕琢+审计（08-09~08-28，commit 峰值 315/周、报告文档 17-22/天、首次多会话并行 08-12）→ 收缩（08-29~09-08，commit 降，09-07 一天 5 条"梳理应用现状"）→ 自指（09-09~09-14，META 爆发 + 深谈 + 文档转观测层）。
-
-**产物**：图表 /var/minis/attachments/relations_47d.png（4 子图：日 commit/日日志体量/周 commit 类型/14 天会话类别）。
-**工具备忘**：pyplot 字体验证——`rcParams['font.family']=['sans-serif']` 是类别名，具体字族进 `rcParams['font.sans-serif']`；但'Noto Sans CJK SC' 不在 pyplot 字族注册表内→findfont 失败（未解决），中文标签图改为英文标签保全。
-
-<!-- 2026-09-14 15:38:35 -->
-## Eta 专项调查报告完成（2026-09-14）
-
-
-**报告**：`/var/minis/mounts/笔记/Eta专项调查报告-2026-09-14.md`（678 行 / 58.8 KB / 9 章 37 节 / 115 表格行 / 37 处原文引用）
-**数据存档**：`/var/minis/shared/eta-investigation-2026-09-14/`（16 个原始 JSON + README + 3 份 docs + fetch.py）
-**主报告**：`/var/minis/mounts/笔记/同类型手机Agent生态调查报告-2026-09-13.md`（514 行）—— 本篇是它的单仓深挖补充
-
-**核心发现（10 项对主报告的扩展）**：
-1. **可核验漏收**：Eta 在主报告 455 仓库数据集（`/var/minis/shared/eco-census-2026-09-13/eco_merged.json`）中 **0 命中**（检索 Eta/Mangi 均为 0）。成因三点：中文描述 + topics 是 ROM/Hook 生态词（lsposed-module/coloros/hyperos）+ 前身是纯 Xposed 模块（fork 描述保留了三代项目描述可考证）
-2. **第三条技术路线 C（越过沙盒）** 有首个存活实证，且是 C+B 叠合（hook 包做入口与结果回传 + PRoot 做执行层，共用一个 Runtime）
-3. **运行时设计中心是 Pi（104,843 星）不是 OpenClaw** —— 两个独立证据：Eta README 致谢 + issue #73 外部用户主动引 Pi 的扩展模型
-4. **PolyForm Noncommercial（非 OSI，禁止再分发）** 扭曲 fork/star 语义 → 主报告 §4.2 的贡献者集中度方法在此项目上需换口径
-5. 新增 3 个指标维度：Release 下载量（10,682 = 星数 7.6 倍）、作者画像、fork 描述作为历史记录
-
-**最有价值的单项**：§5.1 验证边界披露四层范式（源码回归 → 构建+单测 → 已验证真机 → 未覆盖清单+真机待验清单），以及 v3.0.1 的一句"**由 GPT-6 Astra 云适配，尚未经过真机验证**"。与用户「验证优先于能力」完全同构。
-
-**已独立核验**：README 的 2025-12 豆包/微信事件 **成立**，6+ 家媒体（新浪科技/财新/财联社/每日经济新闻/第一财经/凤凰澎湃/证券时报）。补充事实：事件日 12-02，声明日 12-03，设备 **努比亚 nubia M153**，财联社标题确认"遭微信、银行等 App 集体预警"；每日经济新闻定性"AI 助手冲击现有应用生态的**首次公开博弈**"。**仅 README 单一来源**的两项：淘宝人机验证、豆包限制刷激励/金融/游戏（已在报告标注 ⚠）
-
-**方法坑（新，可复用）**：
-- **stargazers 端点 404**：`/repos/.../stargazers?per_page=100` + `Accept: application/vnd.github.v3.star+json` 返回 404；用 openclaw 做对照查询同样 404 → **是 token 范围问题（需 public_repo，当前 token 仅 repo,workflow），不是仓库问题**。因此无星标时间序列，星增速只能用均值近似
-- **`git/ref/tags` 返回 404** = 仓库无 tag（不是错误）
-- **`counts/commits` 返回 404** = 需 stats:read scope → 用 commits 分页取全量
-- **file_write 报的 bytes 是字符数不是字节数**（UTF-8 中文 3 字节）：报 10307 → 实际 wc -c 差 3 倍量级。核验一律 wc -c
-- **报告分块写入纪律**：8 次 file_write（首块 + 7 次 append），每块 2.5–10 KB，全部正常无 offload 占位（终检 grep "CONTEXT_OFFLOADED" = 0）。经验：分块 <10 KB 可靠，与之前 >4 KB 偶发 offload 的记忆一致，本次未复现
-- **阶段划分要重算不要估算**：手写的 S1=11个/S3=7个版本错误（实际 10/6），下载量占比也写错（"S4 占 41%"实际 23%，峰值是 S3 24.5%）→ 脚本核算后修正。教训：任何"X 阶段占 Y%"的表述必须脚本核算
-- **字符串切片坑**：`tag[2:5]` 对 "v2.1.0" 取到 ".1." 而非 "2.1"（[1:4] 才对）→ 阶段归类全跑错到 S5，sum 校验才发现
-- **file_edit 大段替换会失败**：本次用 python 脚本 `assert s.count(a)==1` 逐条替换 + 打印 OK/FAIL，比 file_edit 可靠（有一次 file_edit 的 old_string 与文件实际内容有不可见差异导致整批回滚）
-
-**关键数据（已逐条核算）**：1,402 星/133 fork/3 关注；170 天龄（created 2026-03-27 00:07:24 SGT）；322 commits/1 人/主作者 100%；1.9 commits/天（首末提交跨度 170 天）；8.3 星/天（同年龄段 OmniBot 11.1 可比）；30 releases/10,682 下载/7.6 倍；571 个 .kt/4,463 KB（main 389 个 3,471 KB + test 182 个 992 KB，体积比 22.2%、文件数比 46.8%）；minSdk 34/targetSdk 36；社区 health 42%；0 PR；1 workflow
-
-**阶段下载量分布（脚本核算，合计 10,682）**：S1 v1.x 10版/2,164/20.3%（90 天）→ S2 v2.0 2版/1,379/12.9%（8 天）→ S3 v2.1-2.5 6版/2,612/**24.5%**（12 天，峰值）→ S4 v2.6 7版/2,454/23.0%（16 天）→ S5 v3.x 5版/2,073/19.4%（12 天）。**S3+S4+S5 用 40 天换 66.9%**。峰值阶段卖的是"能力纵深/本机数据"不是"自己的入口"
-
-**未解**：`pushed_at`（09-14 09:50 SGT）与 HEAD commit `c15de97bd30f` committer 时间（09-12 20:14:55 SGT）差 **37 小时**，单分支无 tag 无开放 PR，原因未查明 —— 已在报告 §6.7 与 §8.3 局限 9 记录，会影响任何用 pushed_at 判活跃度的统计口径（主报告 §0/§8.3 局限 10 也依赖该字段）
-
-**首提交早于仓库创建 7 小时 23 分**（首提交 03-26 16:44 SGT，创建 03-27 00:07:24 SGT）→ fork 迁移痕迹，与 fork 描述保留三代项目文本互相印证
-
-<!-- 2026-09-14 16:13:55 -->
-## 生态报告 Eta 扩展已合并（2026-09-14）
-
-
-**产物**：`/var/minis/mounts/笔记/移动端AI-Agent生态调查报告-2026-09-14.md`（818 行 / 85,914 字节），由 `同类型手机Agent生态调查报告-2026-09-13.md`（514 行 / 47,268 字节，**原版保留未动**）复制后逐段合并。合并脚本 /tmp/merge1.py ~ merge11.py，全部 `fails: none`。
-
-**合并范围（13 处修改 + 6 个新节）**：
-- 结构改 3 处：§4.3 由两条路线扩为三条（路线 C 越过沙盒 + C/B 叠合）、§2.5 新节 Pi 双中心（104,843 星）、§3.3 L2 表补入 Eta 第 5 名 + 排名顺延 6-9
-- 新节 6 个：§2.5（Pi）、§5.6（Eta 验证边界披露范式，六项对照表）、§6.4（2025-12 平台风控事件核验表）、§6.5（作者画像 / 路线 C 门槛）、§6.6（30 release 阶段分布 + fork 衍生形态）、§7.4（十项扩展清单）
-- 表格扩列：§4.1 功能矩阵新增 Eta 列（14 行全覆盖）+ 矩阵外三项能力单列表（避免分母变 17）；§4.2 贡献者表补 Eta 行
-- 结论扩容：§7.1 由四条扩为六条（新增关键词口径漏收已确认、许可证改变指标语义）
-- 局限扩容：§8.3 由 10 条扩为 14 条（新增 11 stargazers 404、12 pushed_at/HEAD 差 37h + 单测未独立执行、13 非 OSI 许可使 fork 数失效、14 事件两项子声明单一来源）；局限 1/3/9 就地修订
-- §5 标题 5→6 个参考项，arbigent 5.6→5.7
-
-**终检全部通过**：17 表格 0 列数不一致、20 围栏配平、46 章节 20 处 § 引用 0 悬空、局限 1-14 连续、`CONTEXT_` 占位 0、旧口径关键词（五个工程参考/四条事实性结论/两条沙箱路线/5 个仓库/§7.5/180 天/7.8 星）全 0 命中。
-
-**★ 可复用排查手法**：Markdown 列表粘连检测——ins_after 插入列表项时**必须在插入串首加 `\n`**，否则会和锚点尾部粘成一行（本次 §4.1 读法就粘了一次）。检测脚本要点：①先用 `^\s*(?:-\s+\*\*|\d+\.\s+\*\*)` 排除行首合法项 ②再用 `(?<=[\u4e00-\u9fff。，）！？」』】])(?:-\s+\*\*|\d+\.\s+\*\*)` 匹配粘连。**不要用 grep 的 `\d+\.` 类模式**——`[^\s|]` lookbehind 会匹配数字自身中段，产生大量假阳性（本次 5 条全假）。
-
-**★ 插入方向坑**：ins_after(anchor, new) 是「anchor + new」，若目标是把新节放在某章节之前（如 §2.5 要放在 `## 3.` 之前），必须用 replace(anchor, new+anchor) 即 ins_before，用错方向会把节插到章节末尾。本次 merge2.py 第一次写错导致 E5 报 count 异常，改写 ins_before 后通过。
-
-**★ Python 字符串坑**：中文正文里混入 ASCII 双引号（如 `"设备使用/可见度"`）在双引号定界的字符串里会 SyntaxError；统一改用「」或『』。三引号字符串内部单个 ASCII 双引号安全，但**连续三个会提前闭合**（`**。"""` 这种形态要警惕）。
-
-**★ file_edit 字节数再次误报**：编辑 /tmp/merge7.py 后报 4572 字节，实际 wc -c 为 8176。核验一律 wc -c。
-
 <!-- 2026-09-14 16:16:12 -->
 ## 09-14 晚：截断工具调用守卫落地（fix/truncated-tool-call-guard @ fbc50cdd，CI run 1517）+ Eta 调研两条修正
 
@@ -18584,7 +17943,7 @@ commit `2dc6e0d4`（6 文件 +392/−18，分支 diag/liveness-batch）打包三
 **待办**：CI 1517 绿 → 用户拍板 ff 合并。下一步候选（按"少 bug"排序）：A3 参数校验升级（与守卫同域）> A1 敏感脱敏（权衡待拍板：全量替换 vs 只备份侧 vs 只 clipboard/speech 高危类）> B2 能力合同表 > skill 索引冻结（低成本）。
 
 <!-- 2026-09-14 16:20:53 -->
-## 2026-09-14 16:20:53
+## 背景：用户要求分析新包（1.0.0+1516，会话 ID 别名修复）运行 13:45-16:14 的日志找 bug。
 
 **背景**：用户要求分析新包（1.0.0+1516，会话 ID 别名修复）运行 13:45-16:14 的日志找 bug。
 
@@ -18693,32 +18052,6 @@ commit `2dc6e0d4`（6 文件 +392/−18，分支 diag/liveness-batch）打包三
 
 **工具坑**：`cat` 直接输出也可能吃行——OffloadedPayloadGuard.asStub 的 `else { null }` 在 cat 输出里 null 行消失，差点误报编译错。核实代码一律 python repr。
 
-<!-- 2026-09-14 19:41:51 -->
-## 09-14 第三轮：缺口专属检索完成（报告 819→1014 行，86,205→113,202 字节）
-
-
-**★ 挂载盘写入坑（本次新发现，优先记住）**：`/var/minis/mounts/` 下的文件，shell `cat >> file` **不持久化**——命令返回成功、wc 显示文件变大了，但重读文件内容并没有（同一次 shell 调用内的 wc 会读到追加结果，跨调用的 python 读不到）。**file_edit / file_write 正常**，但大段追加必须用 **Python `io.open(p,'a',encoding='utf-8')` + `f.flush()` + `os.fsync(f.fileno())`**。本次 §9 全章（约 11,900 字符）就是这样分 5 块追加的，全部生效。
-
-**★ file_write 报的 bytes 是字符数不是字节数**：中文内容 1,414 chars = 2,593 UTF-8 字节。核验一律 `wc -c` 或 python `len(s.encode())`。
-
-**★ file_edit 的失败形态**：一次 file_edit 返回「2 replacement(s)」但目标段落实际未变（其余 5 次成功）。**遇到疑似未生效就 grep 关键词确认**，不要信工具返回码。改用 python `s.count(old)==1` 断言 + `s.replace` 最稳，本次 9 条修正全走这条路（apply_fixes.py）。
-
-### 第三轮的核心产出（23 条缺口专属查询 → 311 唯一仓 / 51 在集合内 / **260 集合外新增**）
-
-**两个断言被证伪、一个被量化、一个拆两半**：
-
-1. **「L4 层 0 个原生 APK 产品」不成立** → 改为**规模化空缺**：原生 APK 存在（private-agent 322★ / AutoGLM-TERMUX 202★ / ad-skipper 124★ / MobileAgent-Android 52★ / closepaw 25★）但全部 ≤322 星，研究侧 Python 框架 9,196 / 1,882 / 1,415 星。纯视觉驱动的原生 APK 有 2 个（MobileAgent-Android「screenshot, plan, act, reflect」、closepaw）；**ad-skipper 是本生态唯一把 VLM grounding 落到端侧并写出延迟预算的实现**（L1 无障碍节点 <10ms → L2 ML Kit OCR ~100ms → L3a YOLO11n/ncnn Vulkan 20-300ms → L3b 端侧 llama.cpp VLM 2-4s，命中即短路）。
-2. **「路线 C 仅 Eta 一家存活」不成立** → **路线 C 2 个 + 新增路线 D（Shizuku 特权限）**：`niki914/zafiro` 164★、**README 自报 58,000 行 Kotlin**、前身仓 `Xposed-Modules-Repo/com.niki914.zafiro` 创建于 2025-06-26（**早于 Eta 9.3 个月**）、最近 5 个 release 1,896 次下载（v6-1.0.1 单独 1,052 = 星数 6.4 倍）。主执行路径 Shizuku（root 可选）、执行环境是**内置 native Shell + Python 3 而非 PRoot rootfs**、越过沙盒形态是**语音助手接管**（LSPosed，唤醒 Breeno/小爱但实际回答者是自己 Agent；OPPO/OnePlus/Realme 支持，**小米标注 no longer maintained**——与 Eta 有小米超级小爱形成对照）。**路线 B 存活数 4→7**（and-code 71★ 日本語 README + Google Antigravity CLI、Lyra-Code 43★ 双执行路径 + Gitee、deepseek-harness-mobile 23★ **本生态工程深度最高的 PRoot 实现**：内嵌 80MB rootfs、engine 与 agent 共享同一 proot、vendored npm + integrity-pinned lockfile、manifest 驱动 rootfs 热更新可回滚、linker64 exec-reroute + _Unwind_Resume patch）。
-3. **「端侧 SLM 协同不足」拆两半**：端侧推理原生层比预期活跃（maid 2,683★ / local-llms-on-android 413★ / OlliteRT 341★ / iris_android 292★ / AndroLLM 145★）；但 `model router small language model android` **total=0** → 端云路由能力确实缺失。**最重大单项**：`Helldez/BigMoeOnEdge` 561★，**MoE 专家从闪存按需流式读取、常驻部分留内存，12GB 手机上无损跑远大于 RAM 的模型**（DeepSeek V4 Flash 0.94 tok/s、Qwen3.8-Flash-Next 3.48 tok/s，权重发布当天即可跑早于上游）；构建在 llama.cpp 公开 API 上，新架构=注册表一行。原话「The more of a model that is there to be consulted rather than held, the less it matters that it does not fit」——**这条改变的是"端侧只能跑 SLM"的边界条件**。
-4. **G2 量化**：三条风控查询（risk control / anti-detect / hyperos hook）**全部 total=0** → 无项目把风控退让作为可检索产品语言。但 AutoGLM-TERMUX 有免责声明、zafiro 有 Permission Management（每条命令每段代码用户可控）→ **应精化为"缺面向平台风控的退让，但已有面向用户的可审计授权治理"，两个不同方向的缺口**。
-5. **G6 由 2 家增至 4 家**：Mobile-Harness + Eta + **Lyra-Code**（「PRoot uses the Android host kernel, so it is not a VM, root access, or a security boundary」）+ **deepseek-harness-mobile**（供应链 + 数据边界 + 同源页留在 WebView）。披露密度 2/41 → 4/60+，仍低但**孤例已打破**；第二家与第一家原样复述同一技术事实，说明认知在品类内传播。
-
-**★ 方法层最重要发现**：漏收轴方向相反的两类成因。Eta 漏收因「中文描述 + ROM 生态词」；本轮 260 个漏收因**「形态词（phone-use/gui/automation/accessibility）vs 技术栈词（android/agent/llm）」轴错位**。→ 正确修补是**词表按轴显式分组**（品类轴/形态轴/生态轴/栈轴/分发轴），不是再补几个词。**§7.1 结论 6 因此获得更强版本：漏收可以按轴系统性发生。**
-
-**未解观察**：`HusSuuuu/HusxGLM`（36★ 原生 VLM GUI agent）已 **404 删除**——L4 层仓库存活本身不稳定，无法判断是否与平台风控相关。
-
-**存档**：`/var/minis/shared/eco-gap-round2-2026-09-14/`（4 脚本 + 23 raw 查询 JSON + 23 深挖仓 JSON）。报告：`/var/minis/mounts/笔记/移动端AI-Agent生态调查报告-2026-09-14.md`。校验：24 表格 0 列数不一致、20 代码围栏偶数、11 个二级标题。
-
 <!-- 2026-09-14 20:05:06 -->
 ## 09-14 夜：运行日志审计 → 6 项修复已合并 main = ad71828c（release CI #1526 已触发，用户拍板不等）
 
@@ -18739,18 +18072,6 @@ commit `2dc6e0d4`（6 文件 +392/−18，分支 diag/liveness-batch）打包三
 
 **★ 工具环境坑（新）**：①**新 clone 无 git 身份** → `git commit` 报 "Author identity unknown"，需仓库级 `git config user.name/user.email`。②`cp -r` 复制仓库会撞 PRoot 的 `.git/objects/**.l2s.tmp_obj_*` 符号链接循环 → 用 `git clone`。③`sh gh_sync.sh push --branch "br:main"` 可直接 FF 合并（refspec 透传）。
 **★ 镜像 harness 配方（复用）**：写 `MirrorStubs.kt` 提供 `object ContextOffload { const val OFFLOADED_PREFIX = "[CONTEXT OFFLOADED]" }` → **逐字** cp 生产文件 + 真实测试文件 → kotlinc 编译 → JUnitCore 跑；对依赖 android 的类用 python 抽取纯函数 + 常量包进同名 object（本次 20/20 绿）。**先跑镜像能抓到测试自身的错**（我把 legacy 行放在尾部导致断言反了，harness 抓出）。
-
-<!-- 2026-09-14 20:15:53 -->
-## 09-14 晚：生态报告未吸收清单完成（/var/minis/shared/eco-gap-round3-2026-09-14.md）
-
-
-**★ file_write 分块纪律作废（重要）**：offload 载荷 bug 已修（`79d57d69` 停止对 tool-call 载荷 offload + `d7aef2f6` 只在字节与标记匹配时才 Heal）。本次 5.7KB 中文内容**单次 append 一次成功、0 占位符**。旧记忆「>4KB 必分块 / 必须 printf」过时，用户也明确说"不需要这么分开了"。
-
-**产出**：`/var/minis/shared/eco-gap-round3-2026-09-14.md`（235 行/30KB）：13 项已吸收对照 + 11 项未吸收（U1-U11）+ Eta 残余 + 风控退让 + 报告两处修正。
-
-**未吸收 Top（按性价比）**：U1 更新包 digest 端到端校验（UpdateChecker 只自算自比，GitHub assets[].digest 未用；release 自认"任何人可重签"）> U11b 真实故障 trace 固化成 golden（现在只有 2 个合成用例）> U10 conversation_history > U7 胶囊暂停/接管（代码注释明说不做 cancel affordance）> U2 手机作 MCP server（DebugRPCHandler 已有 20 个等价 RPC，能力面 80%）> U6 agent 级定时任务（grep WorkManager=0）。
-
-**已吸收反证（避免重复立项）**：`KeyRoulette.kt` = 密钥池已做（单关键词 grep 差点误报缺口——判不存在必须 ls data/ 交叉）；`agent/runtime/AgentRunReducer + AgentRecoveryPolicy` = Eta B4 已做；rootfs 是**随包 asset + apk-offline**（报告"现场拉取"表述错误，已修正）；a11y 双腿/胶囊/会话隔离/授权治理/循环检测/trace 门禁全部已有。
 
 <!-- 2026-09-14 20:20:50 -->
 ## 09-14 深夜：交接文档已写（HANDOFF-absorb-2026-09-14）
@@ -18884,7 +18205,7 @@ commit `2dc6e0d4`（6 文件 +392/−18，分支 diag/liveness-batch）打包三
 - **两个 LOW 留档**：enqueue keep-line 循环 stop 竞态窗口丢行不计数；STDOUT keep=true 会逐出排队 ERROR（有意取舍）。
 
 <!-- 2026-09-15 12:07:27 -->
-## 2026-09-15 12:07:27
+## 热路径同类扫描（用户问"还有没有"）：新发现 §11 ThinkingRulesSection UI 直接 runBlo
 
 **热路径同类扫描（用户问"还有没有"）**：新发现 **§11 ThinkingRulesSection UI 直接 runBlocking Room**（4 个 remember 块组合期 4 次 DB 读——thinkingRules/thinkingRuleIds 同一查询查两次；3 个 mutation 回调 UI 线程 runBlocking 全量重写 + republishThinkingCache 二次查询，每次 mutation 2 roundtrip）。量级比 saveConfig 小一档（5-30ms，无感冻结），攒 backlog 不修。其余排除：ConfigBridge 跑 offload worker、ui/chat runBlocking 是冻结块一次性小输入、EncryptedSharedPreferences getString 有明文缓存。另记注释漂移：ProviderDetailScreen:123 说 saveApiKey 用 .apply()，实际是 commit()。
 **两个日志 LOW 已进 backlog §10**（enqueue stop 竞态窗口 / STDOUT keep 逐出 ERROR），§11 也已落盘（backlog 现 11 节 + 存档表，13892 字符，grep 独立核实）。
@@ -18946,16 +18267,6 @@ commit `2dc6e0d4`（6 文件 +392/−18，分支 diag/liveness-batch）打包三
 - **合并**：FF `16e619..183a01e` → main；远端分支 DELETE 204。main release CI run 34933713598（in_progress 时验证结束，结论未确认）。
 - 用户验证第 1 点（流式 markdown 不再降级）通过。
 
-<!-- 2026-09-15 13:43:19 -->
-## 用户取向：成果要被看见，作者不想被看见（2026-09-15）
-
-
-- 原话："成果它确实有被看见的价值，但是我希望我藏起来……我是把它分开的，成果是成果，我是我。"他自己觉得这矛盾、奇怪。
-- 我的解读（待后续验证，不是定论）：这不是矛盾，是**两种可见性被同一批平台捆绑**——事实/产物可见 vs 人格/社交可见。他是"规定型作者"（定语言+运行时+验证框架，产物由运行时生成），不像"表达型作者"那样作品=自我延伸，所以作品可见≠人可见。
-- 他已经在按"对谁可见"分层：dev-history 档案、daily log、生态调查报告只给一个读者（他/agent）；公网上只留 APK 和源码。即定向可见，不是不可见。
-- 推测"不想被看见"躲的是**回应义务**（被提问、被期待维护承诺、被要求解释），不是评价。
-- 平台约束：GitHub 没有"只暴露产物、不暴露作者"的一等公民形态 → 所以 public（接受被跟随）/private（切断跟随）都被迫二选一。他要的第三条路是"产物出口"通道：release-only 仓库 / 化名身份 / 私有实验台 + 独立出口。
-
 <!-- 2026-09-15 13:51:51 -->
 ## 09-15 下午：第二轮日志审计（新包 183a01ed 上线后）— 1 个 LOW 进 backlog §13
 
@@ -18966,6 +18277,110 @@ commit `2dc6e0d4`（6 文件 +392/−18，分支 diag/liveness-batch）打包三
 - HyperOS 平台噪音记档：ActivityThread deliverResultsIfNeeded NPE（×2）、ContentCatcherManager、FrameEvents。
 <!-- 2026-09-15 14:0x -->
 
+<!-- 2026-09-15 14:47:25 -->
+## 09-15 下午：markdown 解析器死循环修复闭环（#196 类行挂死，用户报大文件加载不出来）
+
+- **HIGH 真 bug**：`parseMarkdownBlocks` 死循环——标题分支要求 `#` 后有空格，段落循环停条件是裸 `startsWith("#")` → `#196 @sha`、`#!/bin/sh`、`#include`、`#hashtag` 两边都不接，段落循环首行 break 且零行收集，`i` 永不前进，100% CPU 死转，消息/文件预览永不渲染。用户打开 1.8MB dev-history 档案（满是 `#196 …` 行）触发。
+- **定位手法（复用）**：日志异常窗口（无命令无流式的 anon 350MB 尖峰 16s）→ 抽解析器进 JVM harness 用真实文件复现 → 按行区间二分（每行区间独立 JVM + watchdog + 栈转储）→ 锁定 2735 行 → 最小样本确认。
+- **修法**：抽 `isAtxHeading()` 为两侧共判（同 isBlockquoteLine 型；裸 `#`/`###` 为空标题）+ 主循环进度守卫（`if (i == loopStart) i++`，未来判定漂移只退化成杂散块）+ 4 回归测试（带 5s withTimeout——解析器每 64 行 ensureActive，死循环可被取消，CI 不会挂死）。**反向对照：4 测试对旧代码 4/4 超时失败**。
+- **修后**：真实档案 512KB 预览路径 ~310ms/2643 块，全文件 1.2M 字符 131ms；`# Heading` 行为不变。**main = ad7c9e3f**，分支 CI 1544 + main release CI 1545，远端分支已删。
+- **同批日志发现（记档未修）**：①`No package ID 1d found for resource ID 0x1d81e24d` ×3，全在会话切换瞬间，紧邻 `Ignoring popBackStack to destination 495051341`（所有路由 hashCode 没匹配上，来源未钉死）；②日志放大：`step=lazyColumn.firstItem.compose` 一回合 1054 行（占日志 14%）、appendMessage 每条 4-5 行，半小时 1MB；③`Method exceeds compiler instruction limit: 26512 in Z2.M.v` ×6+（热方法永不 AOT，需解 mapping）。
+- **操作面教训**：askpass 脚本对 Username/Password 两个提示都回同一串 → `fatal: Authentication failed` 但 `| tail -3` 管道吃掉退出码报 success=true。
+- **教训**：JVM harness 里复现"永不完成"要先把输出 flush 进文件再跑（tail 管道看不到中间输出，白等 5 分钟两轮）；卡死类 bug 用行区间二分 + watchdog 栈转储最快。
+
+<!-- 2026-09-15 14:49:51 -->
+## 09-15 下午：死循环修复后日志窗口分析（14:47–14:49，数据干净但复测未做）
+
+- 修复后 minis 侧 W/E = 0（仅平台噪音 WindowOnBackDispatcher ×2）。
+- 14:48 冷重启 pid 24468 verdict=first_launch，RSS 280→170→255MB 正常轨迹，修复前同窗口 350MB anon 尖峰（死循环 CPU 烧的）零复现。
+- RenderCensus：live_parse=0 / live_degrade=0 / frozen 命中，流式 markdown 无降级。
+- **验证缺口**：新会话没人打开 1.8MB dev-history 档案（#196 类行密集触发场景）——真机复测还没发生。且设备仍装 +1542，死循环修复在 +1545 里；main release CI run 34938435962（14:46 触发）当时还在构建中。
+- 平台噪音记档（不立项）：RenderInspector DequeueBuffer timeout count=1 avg=20ms。
+
+<!-- 2026-09-15 15:54:57 -->
+## 09-15 下午：日志审计（五连杀窗口）— 零应用 bug，防线全过
+
+<!-- 2026-09-15 15:5x -->
+
+- **事件**：15:19/15:22/15:36/15:38/15:39 五次 silent_kill，全部落在 CF 优选跑测窗口（500 TCP 并发跑在 app cgroup 内 → HyperOS 整组回收）。应用 RSS 健康（211-290MB），非 Java 堆问题。
+- **防线验证全过**：verdict=silent_kill 不计 crash → 无 force-home（0 次）✓；HangDetector 零假阳性（对照修复前同场景 3 假 hang+TRIPPED）✓；reconcileInterruptedSessions 9 interrupted 正确 ✓；重启后 rootfs/offload 干净初始化 ✓。
+- **两个观察项（记档不立项）**：①silent_kill 风暴无观测面（连杀 5 次不进任何计数器，设计上对但"跑重工具被连杀"不可见）；②in-flight 命令随进程死亡时该 turn tool call 无 stallMessage/错误回填（app 已死无法写），收敛靠 reconcile，下轮确认 UI 呈现。
+- **教训**：在应用 shell 里跑大并发网络任务（优选 500 并发）会触发系统杀整组——重任务要么保持前台要么接受杀-恢复循环。
+
+<!-- 2026-09-15 16:20:33 -->
+## 09-15 傍晚：输入变异轴（fuzz）首轮跑通 — 块解析器输入空间已覆盖，零新 bug
+
+<!-- 2026-09-15 16:1x -->
+
+- **harness**：/tmp/fuzz-md/（FuzzDriver.kt + Diag.kt + Bisect.kt + MinRepro.kt + Stub.kt[looksLikeMath/findInlineMathClose] + Stub2.kt[android.util.Log no-op]），生产 MarkdownBlockModel.kt 逐字编译，kotlinc + coroutines jvm jar，watchdog withTimeout。
+- **用例设计**：真实语料（1.48MB dev-history + 09-13/09-14 记忆日志 + GLOBAL.md）× {全量、41 步截断前缀（>300KB 截到 300KB）、25 条 hostile 行注入（#196/#!/bin/sh/$$x/超长行/BOM/嵌套围栏）、头/¼/中/¾/尾 5 落点全文件注入}。两轮共 721 用例 **0 fail**。
+- **★ 最大教训（版本核对复发）**：/tmp/rikkaminis-src 是**旧克隆不含 #196 修复**，对它 fuzz 报"全挂"是假警报——我差点当成新 bug 立项。**对源码 fuzz/审计前必须先验证工作树含最新 main 修复**（同装包对账 versionCode 三源取二：git log -1 + 关键符号 grep isAtxHeading）。
+- **诊断手法（复用）**：行区间二分（Bisect.kt，200→20→2 行粒度，每区间独立 watchdog）→ 2 行最小样本 → 变体矩阵。对旧解析器 2 分钟锁定 `### CI␤#196` 两行最小复现，全部变体全挂——反向证明 fuzz 有牙齿。
+- **截断扫描体积教训**：1.8MB 语料 × 41 截断 = 41 次全量解析，15 分钟跑不完；>300KB 截到 300KB 后 4 语料 412 用例 ~4 分钟。
+- **结论**：块解析器输入轴已覆盖（#196 修复对 27 类 hostile 行 + 截断边界全部免疫）；未见新 bug。下一步轴候选：parseInline（StreamingMarkdownText 3031 行，需更多 stub）、会话状态机、reducer 矩阵。
+
+<!-- 2026-09-15 16:30:48 -->
+## 09-15 晚：轴 2（行内层纯函数 fuzz）收口 — 186/0 绿，重大抽取纪律抓漏
+
+<!-- 2026-09-15 16:3x -->
+
+- **范围**：StreamingMarkdownText 行内层 5 个纯函数（safeInlineSplitOffset / findInlineCodeClose / inlineMathSizeEm / collectInlineMathLatex / isTablePipeArtifact），真实语料 × {20 截断、34 类 hostile 行内片段（**/~~/[/](![("`/\\frac 3 连发）、10 linkcut）= 186 用例 **0 fail**。
+- **★ 本轮最大发现（抽取纪律，比 fuzz 结果值钱）**：我第一版 `safeInlineSplitOffset`/`inlineMathSizeEm` **只看函数头就自己补循环体/公式** → diff 验证实锤语义不同（原文 `](` 要求 inLabel 开、`~~` 先于 `**`、charWidthEm=0.95f coerceIn(1.5,22)、heightEm 1.7/3.2/4.5）→ **186 绿是测假函数，作废**。同轮第二个坑：不变量断言用了自己 stub 版的阈值（1.65/2.6）→ 对真版全 fail 假警报。
+- **正确配方（复用）**：**行锚定抽取**（sig 行到列 0 的 `}`，不用花括号配平——字符串里的 `\\begin{` 会配错）+ 抽完 strip-compare 五函数全 MATCH + **断言阈值从原文抄**。
+- ** harness**：/tmp/fuzz-md/InlineFuzz.kt + InlinePure.kt（verbatim）+ Stub.kt（looksLikeMath/findInlineMathClose/isTablePipeArtifact/KATEX_INLINE_TAG_PREFIX）。
+- **生产含义**：行内层 5 个纯函数在真实语料+hostile 变异下不变量全过（splitOffset 不越界/负值、codeClose 语义、sizeEm 宽高域、collectLatex 数量合理）——**未见新 bug**；行内层这根轴上已有的防御（T208-4 尺寸启发式、T-latex-inline 重排）是结实的。
+- 轴 3 候选：reducer 状态机矩阵（AgentRunReducer 状态×事件完备性，取消/收尾类 bug 躲藏处）。
+
+<!-- 2026-09-15 16:36:46 -->
+## 09-15 晚：轴 3（reducer 状态机矩阵 + 随机序列 fuzz）收口 — 零 bug，零违规
+
+<!-- 2026-09-15 17:0x -->
+
+- **harness**：/tmp/fuzz-md/ReducerMatrix.kt + ReducerFuzz.kt，生产 AgentRunReducer.kt + AgentRunState.kt 逐字编译（零改动）。
+- **矩阵审计（12 状态 × 18 事件）**：全部 12 状态可达终态（无 stuck state / 死锁）；FALLING_BACK→EXHAUSTED→FINALIZE 与 FINALIZING 容忍路径均通；仅 2 个静默格 = 终态幂等 finalize（注释明写"终态保持，不重复产生终态"），by-design 非 bug。
+- **随机序列 fuzz（5000 批 × 4 不变量）**：0 违规。I1 终态唯一性（终态后 ACCEPT 不换相）/ I2 persistenceFailed 禁止 SUCCEEDED / I3 无 stuck 状态 / I4 决定性（reduceAll 两次同结果）。
+- **矩阵签名坑**：RunFinalized 签名是 (terminal: AgentTerminal, reason: AgentTerminalReason?)，不是 (runId, Boolean)——写 harness 前先看签名。
+- **三轴总收口（输入变异轴 sweep）**：轴 1 块解析器 721/0、轴 2 行内层 186/0（真版函数）、轴 3 reducer 5000 批/0 违规——**解析器+状态机的输入/转移空间均已覆盖，零新 bug**。结论：这批真 bug 不在纯逻辑层，下一批在跨层接线/异步时序（纯逻辑测不到的地方）。最大教训沉淀：抽函数必须行锚定逐字抽（自己补循环体=测假函数）、断言阈值从原文抄。
+
+<!-- 2026-09-15 16:56:27 -->
+## 09-15 晚：轴 4/5/6 收口（事件接线/决策层/资源生命周期）
+
+<!-- 2026-09-15 17:3x -->
+
+- **轴 4 事件接线**：运行循环实际发射 9 种事件；**PersistenceFailed 零发射点**（§14 已攒 backlog）。
+- **轴 5 meta 发现（重要）**：**AgentRunReducer 唯一生产调用方是 ChatAgentTraceObserver.t7Reduce（旁路验证，不改生产行为），AgentRecoveryPolicy 生产调用方为零** → 轴 3 测的是观测层不是决策层；真实 run 状态由 AgentLoopEngine loop mechanics + ChatErrorHandling 直接管理。§14 从 HIGH 降级 LOW。t7Reduce 对 reducer 拒绝不静默（写 warn，日志里 2 条 REJECTED 是正确行为）。若将来把状态机接成决策层，PersistenceFailed 必须同步补发射点。
+- **轴 6 资源生命周期**：探针 v2（花括号配平收 object/companion 作用域，56 个声明）→ 20 个无 clear/remove 的候选逐个人工核对，**全为假阳性**（函数局部构建器/data class 属性）——单例可变集合层面无新泄漏（SessionIdAliases.reported 修复后干净）。
+- **探针配方（复用）**：decl 正则 + object/companion 花括号配平 span + 同 object 内 evict 正则；表达式单行 object 无 `{` 要跳过；结果必须人工抽样反证（20 候选全是假阳性=机械判定的教训又验一次）。
+- **六轴总账**：解析器 721/0、行内层 186/0、状态机 5000 批/0、事件接线 1 真 finding（§14）、决策层 meta、生命周期干净。**真发现全在接线边界，纯逻辑层零新 bug**。下一条轴候选：真实 loop mechanics（AgentLoopEngine 内联状态 + ChatErrorHandling）的时序/收敛——生产决策路径，最贵 bug 类的真正躲藏处，但文件大（2000+ 行）需分段。
+
+<!-- 2026-09-15 17:06:07 -->
+## 09-15 晚：轴 7 收口（loop mechanics 时序审计）— §15 发现 + 七轴 sweep 全部完成
+
+<!-- 2026-09-15 17:4x -->
+
+- **§15（真发现，旁路层）**：runAgentLoop 两个 catch（2751 CancellationException→t7EndRun(CANCELLED) / 2768 Exception→t7EndRun(FAILED)）直接 t7Reduce(RunFinalized)，不经 FINALIZING。唯一预发射 UserCancelled 的是 user_stop/switch_model；其余取消原因与未预期异常 → reducer 状态停 CALLING_MODEL → REJECTED（今天日志 13:41:20 该 warn 就是这条）。4 用例 JVM 实锤（cancel-mid-provider/exception-mid-tools REJECTED；user_stop 对照通；修法形态通）。影响限旁路层（lease 释放仍执行、无跨 run 污染）。修法 ~5 行（t7EndRun 按 terminal 预发射终止事件，reducer 容忍重复）。已攒 backlog §15。
+- **ChatErrorHandling 116 行审计干净**（batch 7 已覆盖）；t7EndRun lease 释放与 acquire 配对正确。
+- **七轴 sweep 总结**：解析器 721/0、行内层 186/0、状态机 5000 批/0、事件接线 §14、决策层 meta（reducer=旁路层）、生命周期干净、loop 时序 §15。**纯逻辑层零新 bug；真发现全在接线/时序边界，且都因 reducer 是旁路层而降级**。生产决策路径（AgentLoopEngine 内联状态）的真机验证是唯一无法在沙箱替代的部分。
+- 纪律沉淀：收敛路径审计法 = catch 块枚举 × "终态前状态是否到位"逐个对 + JVM 序列复现（对照+修法形态四用例）。
+
+<!-- 2026-09-15 18:04:08 -->
+## 09-15 晚：backlog §13/§14/§15 打包修复闭环（用户拍板合并）— main = 03ceed5f
+
+- **分支** `fix/backlog-131415-0915` @ 03ceed5f（3 文件 +64/−8）→ 分支 CI 34953012745 success → 真机验证通过 → FF 合并 `ad7c9e3..03ceed5` → 远端分支 DELETE → main release CI 34955824847（head 与已验 APK 同 commit，无需重装）。
+- **§15 运行时验证实锤**：用户在思考中直接打断（CALLING_MODEL 阶段取消）→ 日志 17:59:59 `send runAgentLoop CANCELLED`，**REJECTED warn 0 条**（旧包同场景 17:46:21 switch_model 取消产生 REJECTED）→ terminate-before-finalize 修法在生产路径生效。打断后零 W/E、零残留，会话收敛干净。
+- **§13**：E 级假故障 0 条 ✓；短路 D 行未观察到 = 磁盘缓存有内容 fallback 未被调用（本身是正确路径的旁证）。
+- **§14**：PersistenceFailed 发射无法主动触发（需 DB 写失败），仅代码级验证（APK dex 命中 `assistantTurn: `/`toolResult: ` 字面量）。
+- **操作教训（复记）**：①命令里 `sleep 240` 踩 stall guard（180s 窗口杀进程树）——等待必须用工具 delay 参数；②file_edit 精确匹配需含 `null` 返回行（old_string 漏行会 not found）；③验证 APK 内注释标记无效（注释不进 dex）——必须用真实字符串字面量（如 `run end`、`assistantTurn: `）验证。
+- **验证手法（复用）**：日志自指污染过滤——我自己 grep 命令的回显（ToolCallComplete args / [LOGCAT]）会命中搜索关键词，一律 `grep -vE 'shell_execute|ToolCallComplete|LOGCAT'` 排除后再计数。
+
+<!-- 2026-09-15 18:05:00 -->
+## 09-15 晚：+1545 死循环修复真机复测通过（收口）
+
+
+- 用户装包实测大文件（dev-history 档案）不挂 → markdown 解析器死循环修复（ad7c9e3f）真机验证通过，§14/§15 之外的最后验证缺口关闭。
+- **版本对账**：设备实际 = versionCode 220001546 = 分支 `fix/backlog-131415-0915` @ `03ceed5f`（另一会话打包 §13/§14/§15 批次），比用户说的 +1545 新一版；ad7c9e3f 是其直系祖先，修复包含 ✓。
+- main release CI 1547 @ 03ceed5f 构建中——与设备装的同 head，出包后无需重装。
+
 ---
 
-*本文件由 memory daily logs 自动重建（脚本保存在 skill: dev-history-sync/scripts/），重建时剔除与 RikkaMinis 开发无关的内容（其他仓库/项目/元讨论）及敏感信息（账户标识/凭据已脱敏）。*
+*本文件由 memory daily logs 自动重建（脚本保存在 skill: dev-history-sync/scripts/），重建时剔除与 RikkaMinis 应用开发无关的内容（其他仓库/平台账号工具链/网络代理/元讨论/生态调研）及敏感信息（账户标识/凭据已脱敏）。*
