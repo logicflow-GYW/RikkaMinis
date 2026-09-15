@@ -152,4 +152,32 @@ class EnvVarRedactorTest {
             EnvVarPrivacyStore.setEnabled(wasEnabled)
         }
     }
+
+    // ── [T-envvar-redactor-testable-tail] the repository-wired tail, as a pure fn ──
+
+    @Test
+    fun `redactWithReminder appends the system reminder when a value was masked`() {
+        val (out, hits) = EnvVarRedactor.redactWithReminder(
+            "curl -H \"Authorization: Bearer sk-1234567890abcdef\"",
+            listOf("sk-1234567890abcdef"),
+        )
+        assertTrue(out.contains(EnvVarRedactor.SYSTEM_REMINDER))
+        assertTrue(out.contains("sk**"))  // first2 kept, middle masked
+        assertFalse(out.contains("sk-1234567890abcdef"))
+        assertEquals(1, hits)
+    }
+
+    @Test
+    fun `redactWithReminder adds no reminder when nothing matched`() {
+        val (out, hits) = EnvVarRedactor.redactWithReminder("clean output", listOf("sk-1234567890abcdef"))
+        assertEquals("clean output", out)
+        assertFalse(out.contains(EnvVarRedactor.SYSTEM_REMINDER))
+        assertEquals(0, hits)
+    }
+
+    @Test
+    fun `redactWithReminder reminder goes after the masked body`() {
+        val (out, _) = EnvVarRedactor.redactWithReminder("value: sk-1234567890abcdef", listOf("sk-1234567890abcdef"))
+        assertTrue(out.endsWith(EnvVarRedactor.SYSTEM_REMINDER))
+    }
 }

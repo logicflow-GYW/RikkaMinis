@@ -63,7 +63,10 @@ object ConversationHistoryContract {
 
 /** One persisted message, reduced to what the transcript needs. */
 data class TranscriptRow(
-    /** Stable 0-based position in the conversation, as reported to the model. */
+    /** Stable DB `sort_order` of the message, as reported to the model.
+     *  [T-tools-history-cursor-stable] NOT the list position: a mid-conversation
+     *  deletion shifts positions but never sort_order, so cursors persisted in
+     *  the model's next turn stay valid across reads. */
     val index: Int,
     /** `user` / `assistant` / anything the DB holds. */
     val role: String,

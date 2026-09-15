@@ -81,6 +81,18 @@ object EnvVarRedactor {
         val repo = envVarRepository ?: return output to 0
         val values = repo.allAsDict().values.filter { it.isNotEmpty() }
         if (values.isEmpty()) return output to 0
+        return redactWithReminder(output, values)
+    }
+
+    /**
+     * [T-envvar-redactor-testable-tail] The repository-wired tail of
+     * [redactIfEnabled] as a pure function: redact, then append the system
+     * reminder exactly when at least one value produced a replacement.
+     * Extracted so the "mask + reminder suffix" branch (previously only
+     * reachable with an Android-backed repository, i.e. on-device only) is
+     * pinned by JVM tests instead of being a silent coverage gap.
+     */
+    internal fun redactWithReminder(output: String, values: List<String>): Pair<String, Int> {
         val (masked, hits) = redact(output, values)
         if (hits == 0) return masked to 0
         return (masked + "\n\n" + SYSTEM_REMINDER) to hits

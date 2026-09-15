@@ -655,9 +655,16 @@ internal suspend fun ChatViewModel.executeConversationHistoryTool(argsJson: Stri
         argsJson = argsJson,
         sessionId = activeSessionId,
         loadRows = { sessionId ->
-            chatRepository.loadMessages(sessionId).mapIndexed { i, m ->
+            chatRepository.loadMessages(sessionId).map { m ->
                 com.rikkaminis.app.tools.TranscriptRow(
-                    index = i,
+                    // [T-tools-history-cursor-stable] Use the DB sort_order, not
+                    // the list position: the loader reads ORDER BY sort_order ASC,
+                    // so mapIndexed and sort_order coincide on a fresh read — but
+                    // a message deleted mid-conversation between two tool calls
+                    // shifts every later list position while sort_order values of
+                    // the surviving rows never move. Cursors are persisted in the
+                    // model's next turn, so index MUST be stable across reads.
+                    index = m.sortOrder,
                     role = m.role,
                     partsJson = m.partsJson,
                 )
