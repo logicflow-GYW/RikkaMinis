@@ -2710,6 +2710,20 @@ class ChatViewModel(
                             _messages.value = cur.subList(0, ai).toList() + trimmed
                         }
                     }
+                    // [fix/same-class-cleanup] Same re-attach as
+                    // retryFromMessage and the loadSession tail: this
+                    // truncation rewound past queued bubbles (they sit at the
+                    // tail), but their _promptQueue entries survive — the
+                    // bubble vanishes from the UI while the queue keeps it
+                    // (invisible, not withdrawable, fires on the next drain).
+                    // Re-attach so a queued prompt the rerun swept past stays
+                    // visible and cancellable.
+                    val droppedQueued = _promptQueue.value.filter { q ->
+                        _messages.value.none { it.queuedPromptId == q.id }
+                    }
+                    if (droppedQueued.isNotEmpty()) {
+                        _messages.value = _messages.value + droppedQueued.map { queuedPromptBubble(it) }
+                    }
                 }
                 val keptIds = _messages.value.mapTo(mutableSetOf()) { it.id }
                 retainStreamFlushStates(keptIds)
@@ -2795,6 +2809,20 @@ class ChatViewModel(
             } else m
         }
         _messages.value = retainedHead
+        // [fix/same-class-cleanup] The truncation above rewound past queued
+        // bubbles too (they sit at the tail of _messages), but their
+        // _promptQueue entries SURVIVE — the bubble vanishes from the UI
+        // while the queue keeps it: invisible, not withdrawable (the
+        // withdraw button lives on the bubble), and it fires later when the
+        // drain runs. Mirror the reload path's re-attach
+        // (loadSession tail) so a queued prompt the rewind swept past stays
+        // visible and cancellable — same fix, another entry point.
+        val droppedQueued = _promptQueue.value.filter { q ->
+            _messages.value.none { it.queuedPromptId == q.id }
+        }
+        if (droppedQueued.isNotEmpty()) {
+            _messages.value = _messages.value + droppedQueued.map { queuedPromptBubble(it) }
+        }
         // T-streaming-side-channel: scrub stream deltas pointing at
         // messages we just truncated so they can't resurface later.
         val keptIds = retainedHead.mapTo(mutableSetOf()) { it.id }

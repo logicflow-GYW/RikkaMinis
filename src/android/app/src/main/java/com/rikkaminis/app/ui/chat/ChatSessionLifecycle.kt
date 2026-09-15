@@ -1041,6 +1041,21 @@ internal fun ChatViewModel.loadSession() {
         // after switching sessions.
         _streamingById.value = emptyMap()
 
+        // [fix/same-class-cleanup] The rebuild above is the ROOT of the
+        // queued-bubble drop (queued prompts are UI-only — they never
+        // persist), so the re-attach lives HERE rather than in the
+        // reloadSessionFromDb wrapper: every loadSession caller (init,
+        // safe-mode-cleared retry, revertCompact's reload, and any future
+        // one) inherits it. At init/retry the queue is empty (fresh VM), so
+        // this is a no-op there. Mirrors the reload wrapper's re-attach,
+        // which this supersedes.
+        val droppedQueued = _promptQueue.value.filter { q ->
+            _messages.value.none { it.queuedPromptId == q.id }
+        }
+        if (droppedQueued.isNotEmpty()) {
+            _messages.value = _messages.value + droppedQueued.map { queuedPromptBubble(it) }
+        }
+
         // Cold-start interrupt detection: an agent loop that was killed by
         // the OS (or app force-quit) leaves agentHistory in one of three
         // tell-tale shapes. Detecting any of them lets the user tap

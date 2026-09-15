@@ -23,21 +23,13 @@ import kotlinx.coroutines.withContext
  */
 internal fun ChatViewModel.reloadSessionFromDb() {
     if (realSessionId.isEmpty() && sessionId.isEmpty()) return
+    // [fix/same-class-cleanup] The queued-bubble re-attach that used to live
+    // here moved into loadSession's tail — the rebuild is the ROOT of the
+    // drop, so the fix belongs at the root: every loadSession caller now
+    // inherits it (init, safe-mode-cleared retry, this wrapper, and any
+    // future one). This wrapper stays as the named entry for the revert
+    // path's comment history.
     loadSession()
-    // [fix/compact-revert-drops-queued] loadSession rebuilds the message list
-    // from the DB — queued prompts are UI-only (isQueued bubbles are never
-    // persisted), so a reload during the queued window (e.g. revertCompact →
-    // reloadSessionFromDb while a run is queued) silently drops them: the
-    // user's instruction vanishes, and when the queue later drains it
-    // re-persists AFTER the work rows that were persisted meanwhile, so the
-    // instruction renders BELOW the run's output ("the reply continues above
-    // my message"). Re-attach any queued bubble the rebuild dropped.
-    val droppedQueues = _promptQueue.value.filter { q ->
-        _messages.value.none { it.queuedPromptId == q.id }
-    }
-    if (droppedQueues.isNotEmpty()) {
-        _messages.value = _messages.value + droppedQueues.map { queuedPromptBubble(it) }
-    }
 }
 
 /**
