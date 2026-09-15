@@ -1,6 +1,6 @@
 # rikkaminis-dev-history 按天索引
 
-快速跳转到每日开发日志。共 1003 条记录，43 天。
+快速跳转到每日开发日志。共 1016 条记录，44 天。
 
 ## 2026-08-03（11 条）
 
@@ -2055,7 +2055,7 @@
 - `23:54` **★ 2026-09-13 分支修复真机验证完成（全项通过）—— 待用户拍板合并**
   - **包确认**：设备 versionName `1.0.0+1504`、versionCode `220001503→220001504`（`ShortcutS…
 
-## 2026-09-14（37 条）
+## 2026-09-14（38 条）
 
 - `00:04` **★ 2026-09-13 分支 fix/completeness-followups-0913 已 ff 合并 main = `a330ce2f`**
   - **用户拍板**："既然如此那就合并吧"（真机验证 4/4 通过后）。
@@ -2131,3 +2131,32 @@
   - **范围**：46fb3d2（update digest 校验）/ 0f07a8b（故障 golden）/ 954983e（注释修正）/ da8cbc3（con…
 - `22:20` **09-14 深夜：审计 3 个 LOW 已攒入 backlog §7-9（用户拍板"攒着"）**
   - `/var/minis/shared/backlog.md` 新增三节（带位置/影响/可选处理/触发条件）：
+- `22:27` **09-14 深夜：dev-history 档案同步到 09-14（1003 条）+ sanitize 脚本固化头部刷新**
+  - **档案**：953 → **1003 条** / 43 天 / 1,196,897 字符 / 18,828 行；fences 36 even、anchors=…
+
+## 2026-09-15（12 条）
+
+- `11:29` **09-15 深夜：日志修复 CI 闭环 + 热路径同类排查（ProviderRepository 实锤）+ 装错包对账**
+  - **日志分支闭环**：fix/applogger-async-writer @ 28f051b（rebase 到含 CI 修复的 main 95df092）→ …
+- `11:57` **09-15 深夜续：日志分支合并 main + ProviderRepository 热路径修复闭环**
+  - **日志分支收口**：fix/applogger-async-writer @ 28f051b → 用户拍板"先合并"→ FF 合并 main（28f051b）…
+- `12:04` **09-15 中午：今日改动审计（main @ 31e8f76）— 零 Bug**
+  - - 3 commit：95df092（CI tools 包）/ 28f051b（AppLogger 异步写 + LogWriteQueue）/ 31e8f76（…
+- `12:07` **2026-09-15 12:07:27**
+  - **热路径同类扫描（用户问"还有没有"）**：新发现 **§11 ThinkingRulesSection UI 直接 runBlocking Room**（4…
+- `12:09` **09-15 下午：热路径扩展扫描（第二轮，新轴）— 新增 §12 观察项**
+  - - 新轴：Room 全表 / O(n²) / fsync / Compose 大对象 emit / OkHttp 客户端 / 启动路径 / memspike 写…
+- `12:33` **09-15 中午：backlog 打包修复分支 CI 绿，等用户装 +1540 拍板**
+  - - **分支** `fix/backlog-small-batch-0915` @ `16e619c6`（3 commits）：`2c8403af`（§7 翻页…
+- `13:00` **09-15 中午：backlog 打包分支闭环 —— main = 16e619c6，release CI 1541 success**
+  - - **真机验证（三源）**：设备 1.0.0+1540 = CI 1540 = APK manifest；①设置页 Thinking Rules 用户已验；②…
+- `13:06` **09-15 下午：日志审计实锤 HangDetector 后台冻结假阳性（HIGH）**
+  - - **证据**：今日 379 HANG 样本，长挂起（42-176s）mid-hang 栈全部停在 `nativePollOnce`（空闲）+ 前后台日志精确…
+- `13:29` **09-15 下午：HangDetector 前台门控修复闭环（分支 CI 1542 绿，待真机验证拍板）**
+  - - **分支** `fix/hangdetector-foreground-gate` @ `183a01ed`（1 文件 +136/−20）：新增 `Back…
+- `13:41` **09-15 下午：HangDetector 前台门控真机验证通过，FF 合并 main = 183a01ed**
+  - - **真机验证（三源）**：我按 HOME 切后台 5 分钟（13:34-13:39），进程整冻（零日志零 tick）→ 解冻后心跳 454ms 落地 → 无…
+- `13:43` **用户取向：成果要被看见，作者不想被看见（2026-09-15）**
+  - - 原话："成果它确实有被看见的价值，但是我希望我藏起来……我是把它分开的，成果是成果，我是我。"他自己觉得这矛盾、奇怪。
+- `13:51` **09-15 下午：第二轮日志审计（新包 183a01ed 上线后）— 1 个 LOW 进 backlog §13**
+  - - **新包表现验证（三源）**：13:41 后 W/HangDetector=0、TRIPPED=0、forcehome 全日志 0 → 前台门控 + lau…

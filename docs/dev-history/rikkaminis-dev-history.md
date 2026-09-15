@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-14）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-15）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-09-14，共 43 天
-- 条目总数：1003（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
-- 总字符数：1196897 / 总行数：18828
+- 合并范围：2026-08-03 ～ 2026-09-15，共 44 天
+- 条目总数：1016（按时间戳正序排序，已剔除与 RikkaMinis 开发无关的条目）
+- 总字符数：1208677 / 总行数：18972
 
 ---
 
@@ -18821,6 +18821,150 @@ commit `2dc6e0d4`（6 文件 +392/−18，分支 diag/liveness-batch）打包三
 另附记（不立项）：UpdateChecker.download 的唯一调用方 DebugRPCHandler 在 release 被 R8 移除 → publisher digest 校验在 release 暂无人到达，落在正确层，未来 UI 接上即继承。
 
 **核实手法**：file_edit 返回 "1 replacement(s)" 后用 python 独立数关键词（sort_order/H5/redactIfEnabled 各 3+）确认真落盘 —— 不复用工具返回码（记忆里那条纪律）。
+
+<!-- 2026-09-14 22:27:21 -->
+## 09-14 深夜：dev-history 档案同步到 09-14（1003 条）+ sanitize 脚本固化头部刷新
+
+<!-- 2026-09-14 23:0x -->
+
+**档案**：953 → **1003 条** / 43 天 / 1,196,897 字符 / 18,828 行；fences 36 even、anchors=outOrder=0、脱敏 113 处 + INDEX 6 处、Remaining NONE clean。挂载版（笔记/RikkaMinis开发档案/）与仓库 docs/dev-history/ 双份一致。
+
+**仓库闭环**：分支 `docs/dev-history-0914` @ `4488ac8`（3 文件 +1012/−9）→ 推分支 → 本地 FF → `gh_sync.sh push-main --yes`（**注意：push-main 需 --yes 确认**，否则报 "dangerous operation"）→ main=4488ac8 → API DELETE 204 → 远端仅剩 main。docs push 未触发新 CI run（最新仍 1531，paths 门控有效）。
+
+**★ sanitize 脚本新增头部统计刷新段（已固化，无条件执行保幂等）**：旧流程 rebuild 写头部统计（1197425）→ 脱敏替换长串后实际变 1196897，头部漂移 528 字符且脚本 docstring 自称"then update header stats"却没代码。现在 sanitize 末尾无条件从盘上重算 chars/lines 并重写 `- 总字符数：X / 总行数：Y` 行 + `os.fsync` 落盘。
+
+**README 两处更新**：覆盖范围 09-13（42 天 953 条）→ 09-14（43 天 1003 条）；删过时说明「脱敏只作用于主文件，INDEX 需单独处理」（脚本已自动同规则处理 INDEX，且新说明补了头部重算能力）。
+
+**工具坑**：①裸 `git push origin --delete` 无 askpass 报 "could not read Username" → 删远端分支必须 API + Bearer token（DELETE 204）；②`file_edit` 报的 bytes 是字符数不是字节数（README 1011 bytes 报 591），核实一律重读文件；③`python3 hasattr(f,'flus')` 拼错测出 False——本意 flush，别信拼错的探针。
+
+## 2026-09-15
+
+<!-- 2026-09-15 11:29:20 -->
+## 09-15 深夜：日志修复 CI 闭环 + 热路径同类排查（ProviderRepository 实锤）+ 装错包对账
+
+<!-- 2026-09-15 -->
+
+**日志分支闭环**：fix/applogger-async-writer @ 28f051b（rebase 到含 CI 修复的 main 95df092）→ CI run **1536 success**（SDK 修复生效）→ APK artifact 已取回验证（dex strings 命中 "log lines dropped (write backlog)"）→ 放 /var/minis/attachments/RikkaMinis-1536.apk。**未合并，等用户装 +1536 真机确认后拍板**。
+
+**装错包对账（重要手法）**：用户说"装了分支包感觉好多了"，但 shizuku `dumpsys package` 实测版本 = **1.0.0+1533 = CI 修复分支的构建（不含日志改动）**——改善不能归因本修复（可能重启效应/09-14 修复）。判据：versionCode = 220000000 + run_number，versionName 1.0.0+<run_number>。教训：真机验证先对版本号三源取二。
+
+**CI 环境修复（已合并 main = 95df092，run 1533 绿）**：09-15 当天 runner 镜像更新，Google 下架弃用的 `tools` 包 → android-actions/setup-android@v4 默认 `packages: 'tools platform-tools'` 死在 "Failed to find package 'tools'"（licenses 其实全接受了）。修法：workflow 显式 `packages: 'platform-tools'`。出处 upstream issue #537。重跑同 run 无效（attempt 2 同镜像）。
+
+**★ 热路径同类排查（用户问"还有没有"，报告 /var/minis/shared/hotpath-audit-2026-09-15.md）**：
+- **实锤：ProviderRepository 配置保存路径** — 10+ 个 mutator = `synchronized(configLock) + runBlocking { persistToDbAndMirror }`，内部无 withContext（逐行核实）：813KB JSON 序列化 15-45ms + prefs commit() fsync + Room 全量同步 35-113ms **全程调用者线程**；三处 UI onClick 直调已核实（ManageProviderModelsSheet:168 隐藏开关 / ModelEntryDetailScreen:157 Save / ModelGroupDetailScreen:405 costTier）。设备日志 22 次真实调用、单次 60-160ms、**09-15 00:04 有 7 连发（1.8s）**。修法待拍板：①UI 调用点包 IO ②saveConfig 内部移线程。
+- **排除 11 项**（各写者/锁逐个核）：HangDetector 30s 心跳、LLMRequestLog/DebugScreenshotRing debug-only、RenderPathCensus 纳秒级、ChatViewModelStore 会话切换、SessionActivityTracker 纯内存、AutoBackup runAsync、RootfsEventLog 低频、prefs commit 仅 3 处、NativeOffload 锁生命周期级、appendMessage Room suspend 正确、ChatStreamDelta flush 事件驱动。
+- **顺手发现：TextSegmenter/JiebaEngine/SystemSegmentEngine 零生产调用者**（只有自述+instrumented 测试引用，CI 仍为它建 jieba native lib）→ 疑似未接线（GH#68 同族）待用户判断。
+
+<!-- 2026-09-15 11:57:35 -->
+## 09-15 深夜续：日志分支合并 main + ProviderRepository 热路径修复闭环
+
+<!-- 2026-09-15 12:0x -->
+
+**日志分支收口**：fix/applogger-async-writer @ 28f051b → 用户拍板"先合并"→ FF 合并 main（28f051b）→ 远端分支 DELETE 204 → main release CI **1537 success**（含日志修复的 release 已发布）。
+
+**ProviderRepository 热路径修复（已合并 main = 31e8f76，分支 CI run 1538 绿）**：
+- **修法定为治本方案②**（改 saveConfig 一处，所有 10+ 调用点自动受益，未来新调用点不复发）：
+  - 调用者线程只留**纯内存 canonical 化**（`config.toSnapshot(json).toProviderConfig(json)`，~1-5ms，无盘）+ StateFlow emit（UI 立即反映）
+  - 序列化+DB+commit（813KB，60-160ms）丢到**单线程 persistExecutor**（提交序保序、不重叠、daemon）
+- **关键设计依据**：`toSnapshot` 是纯函数（不改写 config，已逐行核）→ canonical 化可同步廉价完成；mutator 全部在 saveConfig 后只做 cache 失效不改 config（逐个核实 609/682/709/772/802/1256/1283/1292/1308）→ 异步序列化无竞争
+- **接受的取舍（commit 里写明）**：盘写落盘比原来晚 ~50-160ms（崩溃窗口丢最后一次改动）；DB+mirror 仍单 job 写，json_sync_hash 降级检测不变量不变
+- revision 注释（T273）曾被我精简掉，已补回——防后来者误删
+
+**待办**：装 main 新 release（含两修复）真机验证：①开日志长对话流式 ②设置页点隐藏开关/Save 应无冻结 ③ProviderPerf 日志仍在（观察）。
+
+**手法沉淀**：FF 合并用 `gh_sync.sh push --branch "branch:main"`；force-push 需 `--force-with-lease=refs/heads/<b>:<old_sha>`（单分支 fetch 只写 FETCH_HEAD 不更新 remote-tracking）；`runBlocking { suspend }` 在 executor 线程是合法模式（只阻塞该线程）。
+
+<!-- 2026-09-15 12:04:46 -->
+## 09-15 中午：今日改动审计（main @ 31e8f76）— 零 Bug
+
+- 3 commit：95df092（CI tools 包）/ 28f051b（AppLogger 异步写 + LogWriteQueue）/ 31e8f76（ProviderRepository persist 移后台线程）。
+- **逐项核实全过**：①异步序列化竞争不成立——24 处 saveConfig 全走 mutationSnapshot 私有副本，ProviderInstance 全标量 / LLMModel 列表只读 / memberEntryIds+顶层列表有副本；②AppLogger 锁顺序无反向路径（writeQueuedLine 只拿 writerLock），无死锁；③dropped 单计数器守恒成立。
+- **独立验证**：LogWriteQueue+Test 生产文件逐字编译 → 9/9 绿（/tmp/audit15，kotlinc 需先 sed 删掉复制来的 package 行再加——本次先加后删搞反了一次）。
+- **CI**：run 1534/1537 success，1538（provider 分支）绿，main run 1539（head 31e8f76）in_progress，等出包真机装。
+- **两个 LOW 留档**：enqueue keep-line 循环 stop 竞态窗口丢行不计数；STDOUT keep=true 会逐出排队 ERROR（有意取舍）。
+
+<!-- 2026-09-15 12:07:27 -->
+## 2026-09-15 12:07:27
+
+**热路径同类扫描（用户问"还有没有"）**：新发现 **§11 ThinkingRulesSection UI 直接 runBlocking Room**（4 个 remember 块组合期 4 次 DB 读——thinkingRules/thinkingRuleIds 同一查询查两次；3 个 mutation 回调 UI 线程 runBlocking 全量重写 + republishThinkingCache 二次查询，每次 mutation 2 roundtrip）。量级比 saveConfig 小一档（5-30ms，无感冻结），攒 backlog 不修。其余排除：ConfigBridge 跑 offload worker、ui/chat runBlocking 是冻结块一次性小输入、EncryptedSharedPreferences getString 有明文缓存。另记注释漂移：ProviderDetailScreen:123 说 saveApiKey 用 .apply()，实际是 commit()。
+**两个日志 LOW 已进 backlog §10**（enqueue stop 竞态窗口 / STDOUT keep 逐出 ERROR），§11 也已落盘（backlog 现 11 节 + 存档表，13892 字符，grep 独立核实）。
+
+<!-- 2026-09-15 12:09:51 -->
+## 09-15 下午：热路径扩展扫描（第二轮，新轴）— 新增 §12 观察项
+
+- 新轴：Room 全表 / O(n²) / fsync / Compose 大对象 emit / OkHttp 客户端 / 启动路径 / memspike 写入。
+- **新发现 §12（攒 backlog）**：大配置单 StateFlow——15 个设置页 collectAsState 订阅整个 813KB ProviderConfig，任何 mutation revision+1 整体 emit → 可见页重组 + 重跑组合期 filter（10 处 O(1200)）。当前无感（单页可见 ms 级），配置涨数倍再做（拆 StateFlow / derivedStateOf select）。
+- **查过干净**：OkHttp client 全部对象级单例（5 个静态，无 per-request 重建）；启动路径 #753 已修（异步 loadConfig + configLoaded 标志）；ChatFlatItems 已有增量重建；memspike onEvent 10 处全部阈值门控（appendText 低频）；memspike/rootfs 日志无每行 fsync；sha/序列化都在 persist 线程（今日已修）。
+- backlog 现 12 节 + 存档表，15003 字符。
+
+<!-- 2026-09-15 12:33:46 -->
+## 09-15 中午：backlog 打包修复分支 CI 绿，等用户装 +1540 拍板
+
+- **分支** `fix/backlog-small-batch-0915` @ `16e619c6`（3 commits）：`2c8403af`（§7 翻页 cursor 改 sort_order + §9 redactWithReminder 抽纯函数+3 测试）/ `593729a0`（§10① stop 竞态补计数；§10② 分级逐出**拒绝**——分池/原子 requeue 都有竞争风险，取舍写注释）/ `16e619c6`（§11 thinkingRulesWithIds 单查询 + 删零调用 thinkingRuleIds + republish 可空回落复用 rows）。
+- **验证**：镜像单测 LogWriteQueue 9/9 + EnvVarRedactor 16/16（/tmp/audit15bt，stub EnvVarRepository/EnvVarPrivacyStore）；六文件语法门 0；**APK 已验**：manifest 二进制 versionCode=220001540（run 1540）、旧 220001538 不在、dex 中 thinkingRuleIds 消失。APK 在 /var/minis/attachments/RikkaMinis-1540.apk。
+- **CI**：run 1540 success（分支 CI 需 dispatch——push 门控在 main，老坑复记）。
+- **backlog 已更新**：§1/§5 压存档，§7/§9/§10①/§11 标已修，§10② 标接受取舍；现 9 节 + 存档表。
+- **待用户**：装 +1540 真机验证（Thinking Rules 设置页进出/增删排序正常、会话工具回看正常）→ 拍板 FF 合并 main。
+
+<!-- 2026-09-15 13:00:46 -->
+## 09-15 中午：backlog 打包分支闭环 —— main = 16e619c6，release CI 1541 success
+
+- **真机验证（三源）**：设备 1.0.0+1540 = CI 1540 = APK manifest；①设置页 Thinking Rules 用户已验；②conversation_history 我亲自调用验证（小页读取 + cursor 跟进 228→232→234 无重复无跳条，sort_order 索引稳定，233→235 条会话正常翻页）。
+- **合并**：FF `31e8f760..16e619c6` → main；远端分支 DELETE 204（fix/backlog-small-batch-0915 + 顺手清残留 fix/ci-sdk-tools-package）；**远端仅剩 main**。
+- **release CI run 1541 success**（head 16e619c6 三方一致）——与用户已装的 +1540 同 head，内容一致，无需重装。
+- **新手法（复记）**：gh_sync.sh push 传 `branch:main` refspec 失败（"src refspec branch does not match any"，冒号被某层吃掉）→ 可靠路径 = 手写 /tmp/git_askpass.sh（Username→x-access-token, Password→$GITHUB_TOKEN）+ `GIT_ASKPASS=... git push origin <b>:main`。分支 CI 需手动 dispatch（push 门控在 main）。
+- 本批 backlog 收口：§7/§9/§10①/§11 已修合并，§10② 接受取舍，§1/§5 压存档；backlog 现 9 节全带触发条件。
+
+<!-- 2026-09-15 13:06:51 -->
+## 09-15 下午：日志审计实锤 HangDetector 后台冻结假阳性（HIGH）
+
+<!-- 2026-09-15 13:1x -->
+
+- **证据**：今日 379 HANG 样本，长挂起（42-176s）mid-hang 栈全部停在 `nativePollOnce`（空闲）+ 前后台日志精确对齐（13:00:46 fg=false → 13:02-13:03 假 hang → 13:03:26 resume）+ 今日 render breaker 被 `count=2` 误 TRIPPED 7+ 次（11:17/11:20/11:50/12:34/13:02/01:55）→ markdown 被无端降级成纯文本。
+- **根因**：`HangDetector.kt` 心跳 watch 无前台门控；HyperOS 冻结后台进程 → 主 Looper 停摆 → 3s 心跳 miss → 假 hang 进持久化 counter（survive restart，start() 还 seed breaker）。launch breaker（≥3 强制 home）同被波及。报告：/var/minis/shared/hang-false-positive-audit-2026-09-15.md。
+- **判定手法（复用）**：stall 样本栈停在 pollOnce ≠ 业务帧 = 假挂起；再拿 AgentForegroundService `fg=` 行与 hang 窗口对时间轴，两个真源交叉。
+- 次要：relaunch 时 `No package ID 44`（低频记档）；launch-beacon verdict 修复已验证生效。
+
+<!-- 2026-09-15 13:29:53 -->
+## 09-15 下午：HangDetector 前台门控修复闭环（分支 CI 1542 绿，待真机验证拍板）
+
+<!-- 2026-09-15 13:3x -->
+
+- **分支** `fix/hangdetector-foreground-gate` @ `183a01ed`（1 文件 +136/−20）：新增 `BackgroundFreezePolicy` 纯函数决策表（IDLE/HANG/BG_FREEZE 三相）+ `isAppForegroundSafe()`（读 MinisApp @Volatile 前台计数，fail-open=前台）。后台静默只记 log 不计数不采样；回前台仍静默才升级为真 hang。HANG episode 语义不变（count once / 反复采样 / post-recovery 快照格式不动）。
+- **验证**：镜像测试 BackgroundFreezePolicyTest **10/10 绿**（含真机序列场景 bg42s→bg6s→resume 64s→counted once）；生产文件语法门错误集合与基线 **diff 完全一致**（11 条全为 Context/Log unresolved 级联，无新增）。
+- **CI**：run 1542 success（head 183a01ed 三方一致）。**APK 已验**：dex 命中 "background freeze, not counted as hang"，manifest 二进制 versionName=1.0.0+1542（UTF-16LE）。APK 在 /var/minis/attachments/RikkaMinis-1542.apk。
+- **手法（复用）**：AXML 版本号要按 UTF-16LE 搜；artifact 列表 404 时用 runs/per_page=3 拿数据库 run id 再查 actions/artifacts。
+- **待用户**：装 +1542，后台切走再回来（触发一次后台冻结），确认流式 markdown 不再被无端降级（logs/ 应出现 "background freeze, not counted as hang" 行且无 render breaker TRIPPED）→ 拍板 FF 合并 main。
+
+<!-- 2026-09-15 13:41:02 -->
+## 09-15 下午：HangDetector 前台门控真机验证通过，FF 合并 main = 183a01ed
+
+<!-- 2026-09-15 13:4x -->
+
+- **真机验证（三源）**：我按 HOME 切后台 5 分钟（13:34-13:39），进程整冻（零日志零 tick）→ 解冻后心跳 454ms 落地 → 无 hang detected、无 breaker TRIPPED、stall log 379 不变。对照修复前 13:02 同场景（后台 1 分钟）= 3 假 hang + TRIPPED。
+- **手法（复用）**：自己触发后台冻结 = shizuku `input keyevent KEYCODE_HOME` + delay 等 + `am start` 拉回；整进程冻结时 watchdog 也冻，解冻瞬间心跳先落地 → 不进 gate（gate log 行只在"watchdog 活、主线程冻"的部分冻结形态写）。两种冻结形态都不产生假 hang。
+- **合并**：FF `16e619..183a01e` → main；远端分支 DELETE 204。main release CI run 34933713598（in_progress 时验证结束，结论未确认）。
+- 用户验证第 1 点（流式 markdown 不再降级）通过。
+
+<!-- 2026-09-15 13:43:19 -->
+## 用户取向：成果要被看见，作者不想被看见（2026-09-15）
+
+
+- 原话："成果它确实有被看见的价值，但是我希望我藏起来……我是把它分开的，成果是成果，我是我。"他自己觉得这矛盾、奇怪。
+- 我的解读（待后续验证，不是定论）：这不是矛盾，是**两种可见性被同一批平台捆绑**——事实/产物可见 vs 人格/社交可见。他是"规定型作者"（定语言+运行时+验证框架，产物由运行时生成），不像"表达型作者"那样作品=自我延伸，所以作品可见≠人可见。
+- 他已经在按"对谁可见"分层：dev-history 档案、daily log、生态调查报告只给一个读者（他/agent）；公网上只留 APK 和源码。即定向可见，不是不可见。
+- 推测"不想被看见"躲的是**回应义务**（被提问、被期待维护承诺、被要求解释），不是评价。
+- 平台约束：GitHub 没有"只暴露产物、不暴露作者"的一等公民形态 → 所以 public（接受被跟随）/private（切断跟随）都被迫二选一。他要的第三条路是"产物出口"通道：release-only 仓库 / 化名身份 / 私有实验台 + 独立出口。
+
+<!-- 2026-09-15 13:51:51 -->
+## 09-15 下午：第二轮日志审计（新包 183a01ed 上线后）— 1 个 LOW 进 backlog §13
+
+- **新包表现验证（三源）**：13:41 后 W/HangDetector=0、TRIPPED=0、forcehome 全日志 0 → 前台门控 + launch verdict 修复在野生环境生效。ToolPreflight BLOCKED（12:18:25 模型漏传 command 参数）正确拒绝并喂回，下一 turn 正常带 command → preflight 改进消息生效。
+- **backlog §13（新 LOW）**：ModelsDevApi loadBundledRegistry（:390-404）bundled asset 已刻意移除但每次调用仍 Log.e —— 00:04 冷启动 1.4s 内 E 级同错误 21 条（7 个调用方：6 provider ModelsApi + ModelUseManager，磁盘缓存空时每次冷启动都刷）。纯噪音且误导审计（本次一度当真故障追查）。触发条件：下次动 ModelsDevApi / 日志噪音清理。
+- **11:15:20 T7-D reducer REJECTED "RunFinalized requires FINALIZING (current=FALLING_BACK)"**：同族于 TF-H（ProviderAttemptOutcome FATAL→FINALIZING / FallbackExhausted→FINALIZING 已在 main），当前源码两条收尾路径都已修；事件发生在旧包（pid 8538）。触发条件：新包上再出现才立项。
+- 同日 11:15 deepseek-v4-flash "Invalid API key" 重试 3 次耗尽 → 用户可见错误（一次-off，疑 provider key 配置）。
+- HyperOS 平台噪音记档：ActivityThread deliverResultsIfNeeded NPE（×2）、ContentCatcherManager、FrameEvents。
+<!-- 2026-09-15 14:0x -->
 
 ---
 
