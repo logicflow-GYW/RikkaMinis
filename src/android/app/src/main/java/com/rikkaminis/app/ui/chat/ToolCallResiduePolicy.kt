@@ -47,6 +47,28 @@ object ToolCallResiduePolicy {
     private val MAX_CONTAIN_DIF = 2
 
     /**
+     * DeepSeek's native tool-call envelope marker. A `<｜DSML｜ ...>` span is
+     * the provider's own call serialization that reached the transcript as
+     * text — it is NEVER ordinary prose or a model talking ABOUT markup (that
+     * is what code fences are for), so it is treated as a residue even when
+     * the parameter names inside do not resolve to a known tool. Unlike the
+     * name-resolution rule, this shape cannot false-positive on ordinary
+     * content: no legitimate text carries this marker.
+     */
+    private val DSML_MARKER = "｜DSML｜"
+
+    /**
+     * Longest span (characters) a DSML envelope may cover. The envelope only
+     * carries protocol + arguments — the model's prose lives OUTSIDE it — so
+     * eating the whole envelope is safe and this bound is far looser than
+     * [MAX_RESIDUE_SPAN].
+     */
+    private val DSML_MAX_SPAN = 20_000
+
+    /** Fallback name for a DSML envelope whose invoke name never resolves. */
+    const val DSML_FALLBACK_NAME = "DSML tool call"
+
+    /**
      * How many refill nudges one run may spend on a tool call that reached the
      * transcript as text. Bounded so a markup-shaped false positive cannot loop
      * forever; after the limy the run falls through to the normal break.
@@ -140,6 +162,21 @@ object ToolCallResiduePolicy {
                     if (sugested != null) {
                         return Residue(rawName, sugested, i, spanEnd(text, i, tag, gt))
                     }
+                }
+                // Provider-native call envelope (DeepSeek DSML). The parameter
+                // names inside usually do NOT resolve (`command`, `tool_title`
+                // are the envelope's own attribute names, not tool names), so
+                // the resolution rule above passes them through. The marker
+                // itself is unambiguous — no legitimate text carries it — so
+                // the envelope is treated as a residue regardless.
+                if (tag.contains(DSML_MARKER)) {
+                    val name = dsmlInvokeName(text, i, gt)
+                    return Residue(
+                        name ?: DSML_FALLBACK_NAME,
+                        name?.let { neareastToolName(it, knownToolNames) },
+                        i,
+                        dsmlSpanEnd(text, i, gt),
+                    )
                 }
             }
             i = gt + 1
@@ -294,5 +331,54 @@ object ToolCallResiduePolicy {
         }
         if (i <= 0) return null
         return subString(tag, 0, i).trim()
+    }
+
+    /**
+     * The invoke name carried INSIDE a DSML envelope, or null. Scans forward
+     * from the envelope's opening tag for the first `<｜DSML｜ invoke` tag and
+     * reads its name value. The envelope in the wild opens with
+     * `<｜DSML｜ invokes>` and the call follows inside, so the name is usually
+     * a tag or two past the first marker hit.
+     */
+    private fun dsmlInvokeName(text: String, from: Int, gt: Int): String? {
+        val lim = if (text.length < from + DSML_MAX_SPAN) text.length else from + DSML_MAX_SPAN
+        var at = indexOfString(text, DSML_MARKER + " invoke", gt + 1, lim)
+        if (at < 0) at = indexOfString(text, DSML_MARKER, gt + 1, lim)
+        while (at >= 0) {
+            val close = indexOfString(text, ">", at + DSML_MARKER.length, lim)
+            if (close < 0) return null
+            val tag = subString(text, at + DSML_MARKER.length, close)
+            val name = nameValueOf(tag)
+            if (name != null) return name
+            at = indexOfString(text, DSML_MARKER, close + 1, lim)
+        }
+        return null
+    }
+
+    /**
+     * End of a DSML envelope span: past the matching `</｜DSML｜ calls>` when
+     * one is found within [DSML_MAX_SPAN], else past the nearest `</｜DSML｜`
+     * closer, else just past the opening tag (fail-open).
+     */
+    private fun dsmlSpanEnd(text: String, start: Int, gt: Int): Int {
+        val lim = if (text.length < start + DSML_MAX_SPAN) text.length else start + DSML_MAX_SPAN
+        val calls = indexOfString(text, "</" + DSML_MARKER + " calls>", gt + 1, lim)
+        if (calls >= 0) {
+            val lineEnd = indexOfString(text, ">", calls, lim)
+            if (lineEnd >= 0) return lineEnd + 1
+        }
+        var at = indexOfString(text, "</" + DSML_MARKER, gt + 1, lim)
+        var last = -1
+        while (at >= 0) {
+            last = at
+            val lineEnd = indexOfString(text, ">", at, lim)
+            if (lineEnd < 0) break
+            at = indexOfString(text, "</" + DSML_MARKER, lineEnd + 1, lim)
+        }
+        if (last >= 0) {
+            val lineEnd = indexOfString(text, ">", last, lim)
+            if (lineEnd >= 0) return lineEnd + 1
+        }
+        return gt + 1
     }
 }

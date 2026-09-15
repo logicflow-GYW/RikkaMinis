@@ -96,4 +96,63 @@ class ToolCallResiduePolicyTest {
         assertTrue(msg.contains("<system-reminder>"))
         assertTrue(msg.contains("shellexecute"))
     }
+
+    // ── DSML envelope (2026-09-16 recurrence, user device on latest build) ──
+
+    /** The user's actual 2026-09-16 leak, verbatim (minus the shell output). */
+    private fun dsmlLeak() =
+        "<｜DSML｜ parameter name=\"command\" string=\"command2\" string=\"true\">ls -la /var/minis/logs/" +
+            "</｜DSML｜ parameter>\n" +
+            "<｜DSML｜ parameter name=\"tool_title\" string=\"true\">check logs</｜DSML｜ parameter>\n" +
+            "</｜DSML｜ invoke>\n" +
+            "</｜DSML｜ calls>"
+
+    @Test
+    fun `dsml envelope with unresolvable param names is a resique`() {
+        val text = "Some prose.\n" + dsmlLeak()
+        assertTrue(ToolCallResiduePolicy.hasResidue(text, TOOLS))
+        val r = ToolCallResiduePolicy.firstResidue(text, TOOLS)
+        assertTrue(r != null)
+        assertTrue(r!!.rawName == ToolCallResiduePolicy.DSML_FALLBACK_NAME)
+    }
+
+    @Test
+    fun `dsml envelope invokes tag with a known tool name resolves`() {
+        val text = "<｜DSML｜ invokes>\n<｜DSML｜ invoke name=\"shell_execute\">\n" +
+            "<｜DSML｜ parameter name=\"command\">ls</｜DSML｜ parameter>\n" +
+            "</｜DSML｜ invoke>\n</｜DSML｜ invokes>"
+        val r = ToolCallResiduePolicy.firstResidue(text, TOOLS)
+        assertTrue(r != null)
+        assertEquals("shell_execute", r!!.rawName)
+    }
+
+    @Test
+    fun `strip removes the whole dsml envelope and keeps surrounding prose`() {
+        val text = "before\n" + dsmlLeak() + "\nafter"
+        val out = ToolCallResiduePolicy.stripResidue(text, TOOLS)
+        assertTrue(!out.contains("｜DSML｜"))
+        assertEquals("before\n\nafter", out)
+    }
+
+    @Test
+    fun `dsml envelope inside a code fence passes through untouched`() {
+        val text = "```\n" + dsmlLeak() + "\n```"
+        assertTrue(!ToolCallResiduePolicy.hasResidue(text, TOOLS))
+    }
+
+    @Test
+    fun `dsml envelope without any closer removes only the opening tag (fail-open)`() {
+        val text = "before <｜DSML｜ invoke name=\"shell_execute\"> after"
+        val out = ToolCallResiduePolicy.stripResidue(text, TOOLS)
+        assertTrue(!out.contains("｜DSML｜"))
+    }
+
+    @Test
+    fun `dsml refill names the fallback when nothing resolves`() {
+        val r = ToolCallResiduePolicy.firstResidue(dsmlLeak(), TOOLS)
+        assertTrue(r != null)
+        val msg = ToolCallResiduePolicy.refillMessage(r!!)
+        assertTrue(msg.contains("<system-reminder>"))
+        assertTrue(msg.contains("tool CALL"))
+    }
 }
