@@ -4,8 +4,8 @@
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
 - 合并范围：2026-08-03 ～ 2026-09-15，共 44 天
-- 条目总数：993（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
-- 总字符数：1174786 / 总行数：18387
+- 条目总数：995（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
+- 总字符数：1177081 / 总行数：18415
 
 ---
 
@@ -10458,7 +10458,7 @@ CI 第一次跑失败（两个编译错误）已修，第二次 CI run 324786559
 **测试**：ProotChildRssCapTest(6) + OutcomeKnownMappingTest(11) + ResidualProcessPpidTest(10) + 更新 ExecutionCoordinatorSchedulerTest 的 child-rss 断言（1024/1536→512 clamp）。
 **注意**：旧测试断言 childRssHighWaterMarkMB(2048)=1024、(4096)=1536，改 clamp 后全变 512，必须同步更新否则 CI 红。
 
-**坑**：BusyBox grep 不支持 --include= 参数；git clone 丢 user.name/email 配置需重设（***OWNER*** / [EMAIL]）。
+**坑**：BusyBox grep 不支持 --include= 参数；git clone 丢 user.name/email 配置需重设（***OWNER*** / ***OWNER***@users.noreply.github.com）。
 
 分支 CI：run 已 dispatch，待查。
 
@@ -10622,7 +10622,7 @@ CI 第一次跑失败（两个编译错误）已修，第二次 CI run 324786559
 **已修复（环境级重建）**：
 1. `gh`（github-cli）缺失 → code-workbench setup.sh 补装 13 工具全绿（ripgrep/fd/ast-grep/ctags/ruff/black/patch/tree-sitter/gh 等）
 2. semantic-memory：huggingface_hub + numpy 缺失 → pip/apk 补装；search/status 恢复正常（200 条索引在，HF token 有效）；build 全量重建放后台跑（远程嵌入慢，120s 不够）
-3. git 全局身份丢失 → 恢复 ***OWNER*** / [EMAIL]
+3. git 全局身份丢失 → 恢复 ***OWNER*** / ***OWNER***@users.noreply.github.com
 
 **环境变量（沙箱 shell 里有值，但应用内 envvars 丢失，需用户点链接补回）**：
 - 丢：CF_ACCOUNT_ID（=***CF_ACCOUNT_ID***，***USER***@outlook.com's Account）、CF_ACCOUNT_EMAIL（=***USER***@outlook.com）、GH_ALT_USER（=***ALT_USER***）、GH_ALT_UID（=313291818）
@@ -13826,8 +13826,6 @@ B 方案 d76354d 的 AND 语义是负优化：真实消息经 jieba 切成 5-10 
 
 审计 /tmp/rikka（@de2dca7d）6 文件（ChatViewModel 12338 / ModelExecutionService 1458 / ModelExecutionDispatcher 421 / ModelUseOffloadHandler 1889 / ShizukuOffloadHandler 1226 / OpenAIProvider 3081），报告：`/var/minis/shared/rikka-bug-hunt/reports/session2-exec.md`。High 5 / Medium 3 / Low 3。
 
-## session2 执行层审计完成（rikka-bug-hunt）
-
 <!-- 2026-09-02 14:41:45 -->
 ## FE-5 ChatViewModel 拆分第一批完成（2026-09-02，commit 8f0d64dc 合并 main）
 
@@ -15575,8 +15573,6 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 **验证**：scan gate 4/4；WebDAV JVM 25/25（含 put 409-retry 路径，直接钉住简化后的 put）；8 文件 kotlinc 联编零"已删参数"错误；ConfigBackup+ProviderRepository 双文件联编 mergeImportInstanceJSON 调用点零 arity 错误；XML 解析 7 语言无损（正则删行曾吞相邻换行造成同行拼接，已修复；backup_section_local 小语种缺失是 HEAD 既有状态非误删）。
 **坑**：①python 正则 `\s*<string...` 前缀会吞上一行换行导致两行合并——删 strings 行用整行精确模式并跑 XML parse 验证；②kotlinc 单文件编译错误格式是 `file:line:col: error:`（不是 `^e: `），`^e: ` grep 会漏报；③grep "error" 过滤 unresolved 噪声时会把层级联错误（iterator ambiguous/cannot infer）混入，要专查 "no value passed/too many arguments/has no parameter" 这三类 arity 指纹。
 
-## Agent 循环预算统一调高（2026-09-09）
-
 <!-- 2026-09-09 00:29:04 -->
 ## 多端同步砍除合并收尾（main @ c91f632）
 
@@ -15587,7 +15583,6 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 **坑**：BusyBox grep -r 递归在 PRoot 下异常（静默无输出），用 find -exec grep 替代；main 分支被 /tmp/rikka-env 主工作树占用时其他 worktree 不能 checkout，用 `git push origin <fix>:main` refspec 直推。
 **遗留**：T7 注释族里还有演进历史叙述（64→128 依据），保留为历史记录未删。
 
-## 多端同步砍除合并收尾（main @ c91f632）
 <!-- 2026-09-09 00:2x -->
 
 **闭环**：分支 CI run 34247728500 **success**（head eb32fb7 核对，API+bridge 双源一致）→ 用户拍板合并 → ff 合并 main @ c91f632（两 commit：eb32fb7 代码删除 + c91f632 文档）→ push main 触发 release CI run **34249249438**（head c91f632，in_progress **结论未等**，用户拍板收尾，新会话可查 bridge /status/main）→ 本地+远端分支已删（API DELETE 204）。
@@ -15608,8 +15603,6 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 **观察**：工程卫生一般（ci2.zip、.trae-html-share-packages 垃圾进库、Revert 噪声），Trae AI IDE 辅助开发痕迹；OAuth secret 是公开内置凭证非泄露。潜在深挖方向：Antigravity 实现审计（对比 GeminiProvider 差异、OAuth 刷新坑）。
 **最近动作（09-08，用户注意到的）**：新增 Antigravity (Google Cloud Code) provider——从上游 OpenMinis iOS 移植真实现（AntigravityProvider.kt 550 行走 v1internal:generateContent + AntigravityLoginManager 176 行 + AntigravityOAuthStore 332 行）；应用内 OAuth（Google 公开 installed-client：CLIENT_ID 1071006060591-tmhssin2h21lcre235vtolojh4g403ep，loopback 51121 回调，token 存 apiKey slot 透明刷新）；6 commit 含 4 轮修复（编译/OAuth 作用域/模型目录过滤/thinkingConfig Budget 0）。
 
-## 程序默认预算调高合并 main（2026-09-09，main @ 2a184cd）
-
 <!-- 2026-09-09 12:31:44 -->
 ## fork 动态：Filterrr/RikkaMinis 深度自研（2026-09-09 用户问询）
 
@@ -15619,8 +15612,6 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 **验证**：Prefs JVM 4/4 绿（/tmp/rikka-limits-jvm.sh，桩全量集合）；TokenUsageSheet 是 Compose 沙箱编不了靠 CI。
 **坑**：gh_sync gh-actions-runs 对分支返回空（API 直查需 token）；`source gh_sync.sh env` 会跑出 talloc 噪音别用——查状态用 ci-bridge 零 token 最稳。
 **状态**：分支 CI run 34310631679 in_progress（结论未等，用户拍板收尾）。交接文档 /var/minis/shared/runtime-limits-ux-handoff.md（含真机验证清单：滑杆最右 1000/360、抽屉打开期间总循环次数每秒涨、agent 停后静止）。新会话开场：bridge /status/fix/runtime-limits-ux → 绿则 ff 合并 main → release CI → 真机验证 → 删分支 → dev-history。
-
-## fork 动态：Filterrr/RikkaMinis 深度自研（2026-09-09 用户问询）
 
 <!-- 2026-09-09 12:46:58 -->
 ## Token 用量实时 + 预算上限 1000/6h（2026-09-09，分支 fix/runtime-limits-ux @ ec1e5d8，未合并）
@@ -15635,8 +15626,6 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 
 **顺带发现（既有 LOW，非最近 5 次引入，未修，待用户拍板）**：BackupSettingsScreen **手动导入路径**（importLauncher activity-result 回调，421 行）`contentResolver.openInputStream(uri)?.bufferedReader()?.readText()` 在主线程——与 568d87a 修过的 snapshot 恢复对话框同族（主线程 IO），含 artifact zip 的 15-35MB 备份导入会冻结 UI 数百 ms。修复方案与 568d87a 同构（scope.launch + withContext(IO)），6 行改动。若要修需新分支+CI。
 
-## Token 用量实时 + 预算上限 1000/6h（2026-09-09，分支 fix/runtime-limits-ux @ ec1e5d8，未合并）
-
 <!-- 2026-09-09 13:10:44 -->
 ## runtime-limits-ux 审计无 bug + 合并收尾（main @ ec1e5d8）
 
@@ -15645,8 +15634,6 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 **修复**：分支 fix/backup-import-off-main，1 commit（40ea387，1 文件 +41/−31）：整个回调体包 `scope.launch`（rememberCoroutineScope，113 行），readText 链进 `withContext(Dispatchers.IO)`；sizeBytes 元数据 query 保持内联（廉价调用）；errorMessage 在 Main-dispatcher scope 上写；restoreWithSnapshot 不动（自身 applicationScope + 状态写回 Main）。与 568d87a snapshot 对话框修法完全同构。
 **流程**：分支 CI run 34312992326 **success**（head_sha=40ea387 API 核对）→ ff 合并 main @ 40ea387 → push（release CI 触发，**用户拍板不等**，新会话可查 bridge /status/main）→ 本地+远端分支已删（204）。dev-history 仍留待后续。
 **设计注**：scope 取消语义（SAF 返回后立刻导航离开 → 读取协程被取消 → 静默中止）与 568d87a 同款，可接受；恢复本体走 applicationScope 防导航离开中断。
-
-## runtime-limits-ux 审计无 bug + 合并收尾（main @ ec1e5d8）
 
 <!-- 2026-09-09 13:57:18 -->
 ## 手动导入主线程 readText 修复合并收尾（main @ 40ea387）
@@ -15663,8 +15650,6 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 **分域（498 文件 169,215 行全覆盖零重叠）**：T1 chat-exec 45f/17.8K（最高价值）；T2 chat-ui 47f/27.8K；T3 sandbox-offload 69f/25K；T4 data-backup 75f/17K；T5 provider 34f/10.5K（Antigravity 09-08 新代码最大风险源）；T6 settings-config 61f/22.7K；T7 browser-webapp 29f/9.6K；T8 runtime 72f/15.4K；T9 debug-diag 21f/8.6K（含 MinisApp/MainActivity 壳）；T10 ui-other 45f/14.7K。合并建议：T5+T7、T9+T10 安全（域文件互斥）。
 
 **坑（可复用）**：①gh_sync.sh 必须先处于 git 仓库内才能 clone，否则直接报 "not inside a git repo"——裸 git clone + GIT_ASKPASS 更直接 ②codeload tarball 走代理 SSL EOF（errno 56），必须 curl --noproxy '*'（GLOBAL.md 已知代理坑的又一实例）③python glob 模板 f'...T{n}...' 中 n 本身含 'T' 前缀 → 文件名双 T（TT1），模板别写死前缀 ④域名清单生成文件名与任务书 glob 模板不一致会 FileNotFound——生成与消费用同一键。
-
-## 手动导入主线程 readText 修复合并收尾（main @ 40ea387）
 
 <!-- 2026-09-09 17:44:08 -->
 ## T10 ui-other 域审计完成（全局第二轮）
@@ -16089,7 +16074,6 @@ StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMer
 
 **用户指令链**：①"顺便改吧"（指我上次报告的 `compareVersions` 让 `1.0.0-beta` 排在 `1.0.0` 之上）②"这一版应该已经可以说是正式版了，这方面的问题一起处理"③注意到 CI warning `T9 perf gate summary not found` 问是否要处理④"构建完就合并，直接收尾，不用等"。
 
-## 关键发现（推翻了我自己的前提）
 
 - **quirk 在产品路径不可达**：`UpdateChecker` 的三条比较路径（`check()` candidates、`resumablePendingFile`、`localVer`）**全部先过 `normalizeTag`**，它把 `-beta` 后缀剥掉（`indexOf('-')` 截断），所以 `compareVersions` 收到的两端永远是纯数字版本串。`setPending` 的 KDoc 自证 "targetVersionName is a normalized version"。→ 修它属于**函数正确性**（未来调用者不踩坑），不是修产品 bug。
 - **真 bug 是 tag 名污染版本比较**：滚动下载 tag `android-latest` 经 normalizeTag → `"android"`，**字母 > 数字**，所以 `compareVersions("android","1.0.0") > 0` → 更新检查**永远提示有更新**。影响面 = 仅 `DebugRPCHandler`（debug RPC；UI 无更新检查入口，已核实）。修法：candidates 过滤掉归一化后不以数字开头的 tag。
@@ -18380,6 +18364,50 @@ commit `2dc6e0d4`（6 文件 +392/−18，分支 diag/liveness-batch）打包三
 - 用户装包实测大文件（dev-history 档案）不挂 → markdown 解析器死循环修复（ad7c9e3f）真机验证通过，§14/§15 之外的最后验证缺口关闭。
 - **版本对账**：设备实际 = versionCode 220001546 = 分支 `fix/backlog-131415-0915` @ `03ceed5f`（另一会话打包 §13/§14/§15 批次），比用户说的 +1545 新一版；ad7c9e3f 是其直系祖先，修复包含 ✓。
 - main release CI 1547 @ 03ceed5f 构建中——与设备装的同 head，出包后无需重装。
+
+<!-- 2026-09-15 18:45:49 -->
+## 09-15 晚：dev-history 档案重建加固 + 脚本脱敏能力审计 + 公开历史暴露面
+
+
+**★ 最重要发现（需用户决策）**：`docs/dev-history/` 在 **public 仓库**，且 raw.githubusercontent.com **无 token 可读**（实测 200）。这意味着脱敏不是"内部整理"，是**公开发布前的最后一道门**。已推送的旧提交里存在**无法用新提交消除**的暴露：
+- `***OWNER***`（主号）74 处、小号名 39 处、CF KV 命名空间 ID ×3、`com.***.***.` 包名、`***DOMAIN***` 域名、`***USER***` HF 用户名
+- 分布：`3ea6bf52`(09-15)、`0da07a10`(08-30 首次引入)、`6e6b8220`(09-08)、`0e87ba54`
+- 仓库 19 star / 8 fork（fork 会保留旧对象）
+- 缓解已做：新提交 `92731b4c` 清空当前 HEAD 的所有探针命中
+
+**脚本脱敏能力审计（夹具法，25 项探针）**：v1（旧版）在夹具上 **18/25 未覆盖**——github_pat_/rnd_/gsk_/AKIA/AIza/xoxb/glpat/npm_/JWT/PRIVATE KEY/未登记 hex32/未登记代理 IP/半截邮箱/内网 IP/手机号/passwd= 全漏。v1 只覆盖"已登记字面量"，对**未来新增**的泄露形态几乎无防御。
+
+**v2 加固（已装到 skill）**：三层规则 = EXACT（已知字面量）/ SHAPE（格式正则，真正的安全网）/ CONTEXT（provider 子域掩码保留公开域）。关键设计：
+- **校验探针必须独立于替换规则**——否则规则失效会同时让检测失效（自证循环）。PROBES 手写，不从 ALL_RULES 派生。
+- 32 位 hex 掩码、40 位 commit hash 与 64 位 sha256 **故意保留**（公开 git 历史，掩掉就毁档案价值）；`127.0.0.1` 同理不掩。
+- 幂等（占位符由任何规则都不匹配的字符构成）。
+
+**重建脚本 v2 两处修正**：
+1. **过滤改按轴分组**（其他仓库/CF代理优选/平台账号工具链/元会话认知/生态调研），72 条剔除。旧版是扁平词表——扁平表是"整类不可见"的成因（历史已犯过：词表按轴分组那条教训）。
+2. **标题解析三个回退**（锚点后 → 条目正文内 → 锚点前）。旧版对"无标题锚点"直接拿时间戳当标题，导致同内容重复入库（v1 有 1016 条，其中约 23 条是这种重复）。修后 993 条。
+3. 匹配**仅限标题**——正文匹配会误杀真实工作（"会话 ID 别名裂缝修复"正文提了 gh_sync.sh 就被删）。
+4. 其他仓库轴带守卫：repo 名开头 or 有调研动词才剔。"输入框宽度对齐 RikkaHub"（我们改的）保留，"rikkahub 流式尾部丢失分析"（分析它）剔除。**OpenMinis 不剔**（是本应用直接上游，fork 差异记录属于本应用历史）。
+
+**档案现状**：993 条 / 44 天 / 1,174,786 字符 / 18,386 行；fences 32 even、anchors=header、outOrder=0；独立探针 NONE clean。
+
+**docs 同步（main = `730a7ae1`）**：`observability.md` 补日志异步写入（LogWriteQueue，生产者只 enqueue）+ HangDiag 前台门控（BackgroundFreezePolicy，fail-open）；`trace-schema-v2.md` 补发射侧完备性（PersistenceFailed 零发射点）+ 终止路径收敛（两 catch 不走 FINALIZING）。scan 门禁 7/7。远端仅剩 main。
+
+**教训（可复用）**：审计"脱敏脚本够不够完善"**不能只读脚本**——要用夹具构造未登记的泄露形态（token 前缀、JWT、私钥、未登记 ID）跑一遍，看命中率。v1 读起来很完整，实测 18/25 漏。
+
+<!-- 2026-09-15 18:45:58 -->
+## 09-15 晚：公开历史泄露的清理选项（待用户拍板）
+
+
+**问题**：`docs/dev-history/` 在 public 仓库，旧提交（`0da07a10` 08-30 起）含主号名 74 处、小号名 39 处、CF KV 命名空间 ID ×3、`com.***.***.` 包名、`***DOMAIN***` 域名、`***USER***` HF 用户名。新提交清不掉旧对象，仓库有 8 个 fork（保留旧对象）。
+
+**三条路径（未执行，等用户决定）**：
+1. **不做**：接受已公开的历史。理由——这些标识（主号 GitHub 用户名）**本来就在公开仓库 URL 里**（`github.com/***OWNER***/RikkaMinis`），KV 命名空间 ID 单独不可利用（需 CF token）。代价最低，收益也最低。
+2. **`git filter-repo` 重写历史 + 强推**：彻底但会改所有 commit hash、破坏 8 个 fork 的同步、需要所有 clone 重新拉取。对个人项目副作用大于收益。
+3. **删除 `docs/dev-history/` 出公开仓库**（保留本地挂载版），历史仍在但停止继续发布。这是**止损**方案，但历史对象依然可查。
+
+**我的判断**：如果用户在意的是"作者身份不被关联"（他的原话"成果是成果，我是我"），那真正的问题**不是档案，是仓库本身以主号命名**——档案只是把已在 URL 里的名字重复了 74 次。清理档案治不了根。真要分层，得是仓库级动作（如把小号仓库作为公开出口）。
+
+**已确认可低成本做的**：本地挂载版与仓库版同规则脱敏；今后重建会自动清（v2 脚本已覆盖所有这些形态）。
 
 ---
 
