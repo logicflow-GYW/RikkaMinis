@@ -391,15 +391,30 @@ object ModelsDevApi {
     // feat/remove-models-dev-asset).  This function is kept for backwards compatibility
     // with old builds that still have the asset; it will always return null at runtime.
     // enrich now relies solely on the network cache (disk → in-memory).
+    // [T-bundled-fallback-shortcircuit] The asset is gone by design, so every
+    // call used to throw + log at ERROR level (observed: 21 E-lines in 1.4s at
+    // cold start with an empty disk cache - 7 callers hit this fallback each).
+    // Remember the first miss and short-circuit; downgrade the miss log to
+    // DEBUG so an unexpected failure still shows up without polluting the log
+    // as a fake fault. [backlog item 13]
+    @Volatile
+    private var bundledAssetAbsent = false
+
     private fun loadBundledRegistry(): Map<String, ProviderEntry>? {
+        if (bundledAssetAbsent) return null
         val ctx = appContext ?: return null
         return try {
             val jsonStr = ctx.assets.open("models-dev-api.json").bufferedReader().readText()
             val parsed = parseRegistry(jsonStr)
             Log.d(TAG, "Loaded bundled models.dev registry: ${parsed?.size ?: 0} providers")
             parsed
+        } catch (e: java.io.FileNotFoundException) {
+            // Expected: asset removed by design (see block comment above).
+            bundledAssetAbsent = true
+            Log.d(TAG, "bundled models-dev-api.json absent (removed by design) - short-circuiting fallback")
+            null
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load bundled models-dev-api.json: ${e.message}")
+            Log.d(TAG, "Failed to load bundled models-dev-api.json: ${e.message}")
             null
         }
     }

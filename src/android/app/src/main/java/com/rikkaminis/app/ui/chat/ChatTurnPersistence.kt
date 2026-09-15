@@ -9,6 +9,7 @@ package com.rikkaminis.app.ui.chat
 // repository / state-flow members, only their file location changed. No
 // logic change.
 
+import com.rikkaminis.app.agent.runtime.AgentRunEvent
 import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMUsage
@@ -66,12 +67,26 @@ internal suspend fun ChatViewModel.persistAssistantTurn(
     if (parts.isEmpty()) return null
     val partsJson = buildAssistantPartsJson(parts, toolBlockMeta)
     val tokenJson = usage?.let { buildUsageJson(it) }
-    val entity = chatRepository.appendMessage(
-        realSessionId.ifEmpty { sessionId }, "assistant", partsJson, tokenJson,
-        reasoningContent = reasoningContent,
-        usageModelId = modelId,
-        usageEntryId = entryId,
-)
+    // [T-persistence-failed] Emission point for the state machine's
+    // PersistenceFailed event [backlog item 14]: the reducer / recovery policy
+    // handle it (any running state -> FINALIZING + SUCCEEDED forbidden), but
+    // nothing ever emitted it - the protection was dead code. Emit before
+    // rethrowing so the existing error path is unchanged.
+    val entity = try {
+        chatRepository.appendMessage(
+            realSessionId.ifEmpty { sessionId }, "assistant", partsJson, tokenJson,
+            reasoningContent = reasoningContent,
+            usageModelId = modelId,
+            usageEntryId = entryId,
+    )
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        traceObserver.t7Reduce(
+            AgentRunEvent.PersistenceFailed("assistantTurn: ${e.message?.take(120)}")
+        )
+        throw e
+    }
     return entity.id
 }
 
@@ -97,7 +112,16 @@ internal suspend fun ChatViewModel.persistToolResultMessage(
         }
     }
     val partsJson = buildToolResultPartsJson(persisted)
-    val entity = chatRepository.appendMessage(realSessionId.ifEmpty { sessionId }, "user", partsJson)
+    val entity = try {
+        chatRepository.appendMessage(realSessionId.ifEmpty { sessionId }, "user", partsJson)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        traceObserver.t7Reduce(
+            AgentRunEvent.PersistenceFailed("toolResult: ${e.message?.take(120)}")
+        )
+        throw e
+    }
     return entity.id
 }
 
