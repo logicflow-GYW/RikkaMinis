@@ -50,7 +50,20 @@ internal class LogcatTailer(private val sink: (String) -> Unit) {
             val pid = android.os.Process.myPid().toString()
             val pb = ProcessBuilder(
                 "logcat", "-v", "time", "-T", "1", "--pid=$pid",
-                "View:S", "ViewRootImpl:S", "BLASTBufferQueue_Java:S", "*:V",
+                "View:S", "ViewRootImpl:S", "BLASTBufferQueue_Java:S",
+                // [T-android-log-noise-2] extend the 2025-08 measurement above
+                // with tags measured on 2026-09-14/15 logs (~70% of remaining
+                // tail lines): codec/input/VRI admin noise that never aids
+                // app diagnosis. System.out/err are dropped at the source —
+                // every stdout line is already captured by LineCapturingStream
+                // (the tailer saw an echo and wrote a duplicate [LOGCAT] line).
+                // Extend this list from real logs only, never speculatively.
+                "System.out:S", "System.err:S",
+                "MIUIInput:S", "CCodec:S", "CCodecConfig:S",
+                "CCodecBufferChannel:S", "MediaCodec:S",
+                "ReflectedParamUpdater:S", "ViewRootImplStubImpl:S",
+                "VRI[MainActivity]:S",
+                "*:V",
             ).redirectErrorStream(true)
             val p = pb.start()
             process = p

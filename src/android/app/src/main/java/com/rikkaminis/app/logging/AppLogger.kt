@@ -55,8 +55,23 @@ object AppLogger {
 
     private var logDir: File? = null
     private var currentDate: String = ""
+
+    // [T-android-log-async-writer] The writer state (writer/currentDate) is
+    // guarded by writerLock — NOT the AppLogger object monitor. Two reasons:
+    //  1. stopCapture() holds the object monitor while flushAndStop() joins
+    //     the drain thread; if the drain thread needed the object monitor to
+    //     write a line, the join would deadlock until its timeout on every
+    //     toggle-off.
+    //  2. The whole getWriter+println+close span must be one critical section,
+    //     otherwise clearLogs()/stopCapture() could close the writer between
+    //     getWriter() returning it and println() using it, silently dropping
+    //     that line.
+    private val writerLock = Any()
     private var writer: PrintWriter? = null
-    private var enabled: Boolean = false
+
+    // Read from every producer thread (log()/writeFileLine/writeLogcatLine)
+    // and swapped by setEnabled() on the settings thread.
+    @Volatile private var enabled: Boolean = false
 
     // Saved references to the JVM's original stdout/stderr. Captured on the
     // first startCapture() so stopCapture() can restore them — without this we
@@ -71,6 +86,12 @@ object AppLogger {
     // directly. Without this only stdout/stderr (println, stack traces) end
     // up in the file, which is < 1% of the actual log volume on Android.
     private var logcatTailer: LogcatTailer? = null
+
+    // [T-android-log-async-writer] Hot-path producers (UI thread, tailer
+    // reader, Default workers) enqueue here instead of taking the writer
+    // lock. The drain thread owns the file; see LogWriteQueue for the
+    // bound/drop contract. @Volatile: swapped by startCapture/stopCapture.
+    @Volatile private var writeQueue: LogWriteQueue? = null
 
     /**
      * Initialize the logger with app context. Call once from Application.onCreate().
@@ -117,6 +138,12 @@ object AppLogger {
         if (originalErr == null) originalErr = System.err
         System.setOut(PrintStream(LineCapturingStream(originalOut!!, "STDOUT"), true))
         System.setErr(PrintStream(LineCapturingStream(originalErr!!, "STDERR"), true))
+        // [T-android-log-async-writer] Start the async writer BEFORE anything
+        // can produce a line — from here on every producer only enqueues.
+        writeQueue = LogWriteQueue(
+            sink = { date, line -> writeQueuedLine(date, line) },
+            notice = { n -> writeDropNotice(n) },
+        ).also { it.start() }
         // Spawn the logcat tail before emitting the session-start marker so
         // the marker itself shows up in the captured stream as a sanity check.
         logcatTailer = LogcatTailer { line -> writeLogcatLine(line) }.also { it.start() }
@@ -131,14 +158,26 @@ object AppLogger {
         originalErr?.let { System.setErr(it) }
         logcatTailer?.stop()
         logcatTailer = null
+        // [T-android-log-async-writer] Drain + stop the writer BEFORE closing
+        // the file so toggling logging off loses nothing already enqueued.
+        // (writeQueuedLine deliberately ignores `enabled` — by the time this
+        // runs, setEnabled() has already flipped it to false, and these lines
+        // were produced while logging was still on.)
+        writeQueue?.flushAndStop(2_000)
+        writeQueue = null
         captureActive = false
         // Close the daily writer so any buffered bytes are flushed; getWriter()
-        // will reopen on the next file write.
-        try {
-            writer?.close()
-        } catch (_: Exception) {}
-        writer = null
-        currentDate = ""
+        // will reopen on the next file write. writerLock (not the object
+        // monitor) — the drain thread above has already exited, and this must
+        // not contend with anything still holding the object monitor.
+        synchronized(writerLock) {
+            try {
+                writer?.close()
+            } catch (_: Exception) {
+            }
+            writer = null
+            currentDate = ""
+        }
     }
 
     /**
@@ -157,14 +196,15 @@ object AppLogger {
         if (slashIdx >= 0 && parenIdx > slashIdx) {
             val tag = rawLine.substring(slashIdx + 1, parenIdx).trim()
             if (tag.startsWith("Minis.") || tag == "AppLogger") return
+            // [T-android-log-dedupe] System.out/err lines arrive here only as
+            // the echo of our own stdout forwarding — LineCapturingStream has
+            // already written them as `[STDOUT]`/`[STDERR]` lines. Keeping the
+            // echo wrote every stdout line to the file twice (measured
+            // 2026-09-15: 2624/6814 tail lines were System.out duplicates).
+            if (tag == "System.out" || tag == "System.err") return
         }
-        try {
-            val today = todayStamp()
-            val w = getWriter(today)
-            w.println("[LOGCAT] $rawLine")
-        } catch (_: Exception) {
-            // Swallow — must not feed back into logcat or we loop forever.
-        }
+        // [T-android-log-async-writer] Enqueue only — the drain thread writes.
+        writeQueue?.enqueue(todayStamp(), "[LOGCAT] $rawLine", keep = false)
     }
 
     /**
@@ -223,20 +263,15 @@ object AppLogger {
     }
 
     /**
-     * Append a captured stdout/stderr line to today's log file. Catches all
-     * I/O failures so a flaky filesystem can't crash the app's stdout.
+     * Append a captured stdout/stderr line to today's log file. The line is
+     * enqueued and written by the drain thread — this must stay allocation-
+     * light and lock-free, it runs on whatever thread printed to stdout.
      */
-    @Synchronized
     private fun writeFileLine(channel: String, line: String) {
         if (!enabled) return
-        try {
-            val today = todayStamp()
-            val timestamp = timeStamp()
-            val w = getWriter(today)
-            w.println("[$timestamp] [$channel] $line")
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to write captured line: ${e.message}")
-        }
+        // Timestamps are taken HERE (producer thread) so a lagging drain
+        // thread cannot skew the recorded time.
+        writeQueue?.enqueue(todayStamp(), "[${timeStamp()}] [$channel] $line", keep = true)
     }
 
     /**
@@ -272,10 +307,8 @@ object AppLogger {
     }
 
     private fun log(level: String, category: String, message: String) {
-        val today = todayStamp()
-        val timestamp = timeStamp()
-
-        // Also output to logcat
+        // Also output to logcat (unchanged — adb debugging still sees
+        // everything, and Minis.* lines are filtered out of the file capture).
         val logcatTag = "Minis.$category"
         when (level) {
             "ERROR" -> Log.e(logcatTag, message)
@@ -284,26 +317,65 @@ object AppLogger {
             else -> Log.i(logcatTag, message)
         }
 
-        // Write to file (only if enabled)
+        // Write to file (only if enabled). Timestamps are taken here so the
+        // recorded time is the call time, not the drain time.
         if (!enabled) return
-        try {
-            val w = getWriter(today)
-            w.println("[$timestamp] [$level] [$category] $message")
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to write log: ${e.message}")
+        writeQueue?.enqueue(
+            todayStamp(),
+            "[${timeStamp()}] [$level] [$category] $message",
+            // DEBUG is droppable under backlog; INFO/WARN/ERROR always keep.
+            keep = level != "DEBUG",
+        )
+    }
+
+    /**
+     * Open (or reuse) the daily writer for [date]. Callers on the write path
+     * invoke this INSIDE `synchronized(writerLock)` so the returned writer
+     * cannot be closed before the caller finishes writing — see [writerLock].
+     */
+    private fun getWriter(date: String): PrintWriter {
+        synchronized(writerLock) {
+            if (date != currentDate || writer == null) {
+                writer?.close()
+                val dir = logDir ?: throw IllegalStateException("AppLogger not initialized")
+                val file = File(dir, "minis-$date.log")
+                writer = PrintWriter(FileWriter(file, true))
+                currentDate = date
+            }
+            return writer!!
         }
     }
 
-    @Synchronized
-    private fun getWriter(date: String): PrintWriter {
-        if (date != currentDate || writer == null) {
-            writer?.close()
-            val dir = logDir ?: throw IllegalStateException("AppLogger not initialized")
-            val file = File(dir, "minis-$date.log")
-            writer = PrintWriter(FileWriter(file, true))
-            currentDate = date
+    /**
+     * [T-android-log-async-writer] Drain-side sink — the only place that
+     * touches [writer] on the write path. Runs on the LogWriteQueue drain
+     * thread (or briefly on the caller of flushAndStop). Deliberately does
+     * NOT check [enabled]: by the time flushAndStop drains, setEnabled() has
+     * already flipped it off, and those lines were produced while it was on.
+     */
+    private fun writeQueuedLine(date: String, line: String) {
+        try {
+            synchronized(writerLock) {
+                getWriter(date).println(line)
+            }
+        } catch (_: Exception) {
+            // Must not feed back into the logger.
         }
-        return writer!!
+    }
+
+    /**
+     * Backlog notice — the queue dropped [n] lines because the disk could not
+     * keep up. Emitted at most once per backlog episode (see LogWriteQueue).
+     */
+    private fun writeDropNotice(n: Long) {
+        try {
+            synchronized(writerLock) {
+                getWriter(todayStamp()).println(
+                    "[${timeStamp()}] [WARN] [AppLogger] $n log lines dropped (write backlog)",
+                )
+            }
+        } catch (_: Exception) {
+        }
     }
 
     /**
@@ -417,16 +489,21 @@ object AppLogger {
      */
     @Synchronized
     fun clearLogs() {
-        logDir?.listFiles()?.forEach { it.delete() }
-        // [T-logging-zombie-fd-android] The open writer still references the
-        // just-deleted file; a FileWriter on an unlinked inode keeps writing to
-        // the zombie file (invisible on disk) until currentDate changes or the
-        // writer is nulled. Drop it and reset currentDate so the next
-        // getWriter() reopens a fresh minis-<date>.log on the following write.
-        // @Synchronized shares getWriter()'s monitor so this can't race a write.
-        writer?.close()
-        writer = null
-        currentDate = ""
+        // [T-logging-zombie-fd-android] Close the writer BEFORE deleting: a
+        // FileWriter on an unlinked inode would keep writing to the zombie
+        // file (invisible on disk) until currentDate changes. Ordering close
+        // first makes the zombie window impossible instead of just short.
+        // [T-android-log-async-writer] writerLock shares the write path's
+        // critical section so a drain-thread println can't interleave.
+        synchronized(writerLock) {
+            try {
+                writer?.close()
+            } catch (_: Exception) {
+            }
+            writer = null
+            currentDate = ""
+            logDir?.listFiles()?.forEach { it.delete() }
+        }
     }
 
     /**
