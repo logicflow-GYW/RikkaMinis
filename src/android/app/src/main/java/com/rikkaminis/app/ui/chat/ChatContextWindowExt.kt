@@ -24,6 +24,42 @@ import kotlinx.coroutines.withContext
 internal fun ChatViewModel.reloadSessionFromDb() {
     if (realSessionId.isEmpty() && sessionId.isEmpty()) return
     loadSession()
+    // [fix/compact-revert-drops-queued] loadSession rebuilds the message list
+    // from the DB — queued prompts are UI-only (isQueued bubbles are never
+    // persisted), so a reload during the queued window (e.g. revertCompact →
+    // reloadSessionFromDb while a run is queued) silently drops them: the
+    // user's instruction vanishes, and when the queue later drains it
+    // re-persists AFTER the work rows that were persisted meanwhile, so the
+    // instruction renders BELOW the run's output ("the reply continues above
+    // my message"). Re-attach any queued bubble the rebuild dropped.
+    val droppedQueues = _promptQueue.value.filter { q ->
+        _messages.value.none { it.queuedPromptId == q.id }
+    }
+    if (droppedQueues.isNotEmpty()) {
+        _messages.value = _messages.value + droppedQueues.map { queuedPromptBubble(it) }
+    }
+}
+
+/**
+ * Build the UI-only queued bubble for a [QueuedPrompt]. Single source of
+ * truth for the queued-bubble shape — enqueuePrompt and the reload
+ * re-attach path both render through this so the two can't drift.
+ */
+internal fun queuedPromptBubble(prompt: QueuedPrompt): ChatMessage {
+    val pendingAttachments = prompt.attachments
+    val attachmentNames = pendingAttachments.map { it.fileName }
+    val imageUris = pendingAttachments.filter { it.isImage }.map { it.uri }
+    val attachmentUris = pendingAttachments.filterNot { it.isImage }.map { it.uri }
+    return ChatMessage(
+        id = "queued_msg_${prompt.id}",
+        role = "user",
+        content = prompt.text,
+        imageUris = imageUris,
+        attachmentNames = attachmentNames,
+        attachmentUris = attachmentUris,
+        isQueued = true,
+        queuedPromptId = prompt.id,
+    )
 }
 
 /**

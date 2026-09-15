@@ -58,6 +58,40 @@ fun resolveCompactAnchorIdx(
                     history[i].dbMessageId.isNullOrEmpty())
             ) i -= 1
         }
+        // [fix/compact-keep-instruction-active] The USER prompt we just landed
+        // on may be the CURRENT turn's driving instruction (run in progress, or
+        // a just-sent message with no answer yet). Anchoring ON it puts the
+        // instruction inside the compacted range: the summary replaces it, the
+        // model loses the instruction (the "swallowed instruction" report), and
+        // the run continues on the summary alone. Walk back past the trailing
+        // block of user-text prompts so the whole current turn (instruction +
+        // tool work + answer) stays on the ACTIVE side of the divider. Manual
+        // compact-before (anchorIdxOverride) is unaffected — an explicit anchor
+        // is the user's own choice.
+        if (i > 0) {
+            var j = i
+            while (j > 0) {
+                val prev = history[j - 1]
+                if (prev.role != LLMMessage.Role.USER ||
+                    prev.contentParts.all { p -> p is AgentContentPart.ToolResult } ||
+                    prev.dbMessageId.isNullOrEmpty()
+                ) break
+                j -= 1
+            }
+            if (j > 0) {
+                var k = j - 1
+                while (k >= 0 && history[k].dbMessageId.isNullOrEmpty()) k -= 1
+                i = k // may end at -1 when nothing persisted precedes → caller aborts
+            }
+        } else if (i == 0 &&
+            history[0].role == LLMMessage.Role.USER &&
+            history[0].contentParts.any { p -> p !is AgentContentPart.ToolResult } &&
+            history.drop(1).none { it.role == LLMMessage.Role.ASSISTANT }
+        ) {
+            // Sole unanswered user prompt and nothing anchored before it —
+            // compacting [0..0] would swallow the only instruction. Abort.
+            return -1
+        }
         i
     }
 }

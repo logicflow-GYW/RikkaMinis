@@ -2950,20 +2950,11 @@ class ChatViewModel(
         )
         _promptQueue.value = _promptQueue.value + prompt
 
-        val attachmentNames = pendingAttachments.map { it.fileName }
-        val imageUris = pendingAttachments.filter { it.isImage }.map { it.uri }
-        val attachmentUris = pendingAttachments.filterNot { it.isImage }.map { it.uri }
-        val chatMsg = ChatMessage(
-            id = "queued_msg_${prompt.id}",
-            role = "user",
-            content = trimmed,
-            imageUris = imageUris,
-            attachmentNames = attachmentNames,
-            attachmentUris = attachmentUris,
-            isQueued = true,
-            queuedPromptId = prompt.id,
-        )
-        _messages.value = _messages.value + chatMsg
+        // [fix/compact-revert-drops-queued] Bubble shape extracted to
+        // queuedPromptBubble() — the reload re-attach path
+        // (reloadSessionFromDb) renders through the same builder so the
+        // two can't drift.
+        _messages.value = _messages.value + queuedPromptBubble(prompt)
         clearAttachments()
         Log.i(TAG, "Enqueued prompt (${trimmed.length}ch, ${pendingAttachments.size} attachments), queue=${_promptQueue.value.size}")
     }
