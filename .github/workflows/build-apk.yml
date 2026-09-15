@@ -59,6 +59,14 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
+        with:
+          # [T-ci-sdk-tools-deprecation] The action's default is
+          # `tools platform-tools`, but Google stopped serving the deprecated
+          # `tools` package on 2026-09-15 — sdkmanager now exits with
+          # "Warning: Failed to find package 'tools'" (measured: CI run #1532,
+          # 2026-09-15; upstream issue android-actions/setup-android#537).
+          # We never needed `tools`; request only what the build uses.
+          packages: 'platform-tools'
 
       # Build the proot sandbox engine from source: deps/proot (submodule) +
       # deps/build_proot.sh + vendored deps/talloc. Needs NDK r28; the runner
