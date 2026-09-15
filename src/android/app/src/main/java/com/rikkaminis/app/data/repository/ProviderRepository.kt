@@ -261,6 +261,17 @@ class ProviderRepository(private val context: Context) {
      */
     private val configLock = Any()
 
+    /**
+     * [T-android-provider-offmain-persist] Single-thread executor for the
+     * serialize + DB + commit span (see [saveConfig]). One thread = persist
+     * jobs land in submission (mutation) order and never overlap; daemon so
+     * it can never block JVM exit.
+     */
+    private val persistExecutor =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "ProviderConfig-Persist").apply { isDaemon = true }
+        }
+
     private fun loadConfig(): ProviderConfig = runBlocking { loadConfigSuspending() }
 
     /**
@@ -502,36 +513,38 @@ class ProviderRepository(private val context: Context) {
         // mirror keeps older app builds able to read current config on
         // downgrade; the DB is the new authoritative store on this build.
         //
-        // Serialize + persist + emit under [configLock] so we never serialize
-        // a list that another writer is mutating. The fresh `.copy(…toMutableList())`
-        // wrapper alone is not enough: data-class structural equals walks the
-        // inner Lists and `prev` (already mutated in place by replaceEntries /
-        // addEntry / removeEntry) compares equal to `next` → MutableStateFlow
-        // suppresses the emission. T273 bumps `revision` so equals always
-        // returns false and 18+ collectAsState callers see the new value.
+        // [T-android-provider-offmain-persist] The serialize + DB + commit
+        // span measured 60-160ms on device (ProviderPerf: 813KB mirror,
+        // serialize 15-45ms + db 35-113ms + prefs commit fsync) and this
+        // function runs on the CALLER's thread — UI click handlers included
+        // (model visibility toggle, entry Save, group costTier), so every
+        // settings action froze the UI for that span while holding
+        // configLock. Now only the pure in-memory canonicalization +
+        // emission stay on the caller; the disk work moves to a
+        // single-thread persist executor:
+        //  - ordering: submissions run in mutation order, so a rapid burst
+        //    of writes lands on disk in the same order;
+        //  - snapshot safety: `config` is the mutator's private
+        //    mutationSnapshot and is not mutated after saveConfig returns
+        //    (verified across all mutators — only cache invalidations
+        //    follow), so serializing it off-lock cannot race a writer;
+        //  - durability tradeoff: the disk write lands ~50-160ms after the
+        //    mutation instead of before saveConfig returns — a crash in
+        //    that window loses the last change. DB + mirror are still
+        //    written by one job, so the json_sync_hash downgrade-detection
+        //    invariant is unchanged.
         synchronized(configLock) {
-            // persistToDbAndMirror returns the canonicalized config (entries'
-            // uuid in composite "{instanceId}/{modelId}" form). Emit that so
-            // subsequent in-memory reads — which compare entry.id by string
-            // equality (e.g. group.memberEntryIds.contains(it.id)) — use one
-            // consistent id shape rather than mixing legacy random uuids and
-            // composite keys.
-            //
-            // Catch persistence failures so callers stay fire-and-forget
-            // (matches the legacy `apply()` contract — pre-Room saveConfig
-            // never threw). DB write fails are rare in practice (disk full,
-            // SQLite corruption, transaction deadlock) but uncaught they'd
-            // crash whichever UI handler triggered the mutation. Still
-            // emit the in-memory state so the UI reflects the user's
-            // intent even when the disk write didn't land; the next
-            // successful save resyncs everything.
+            // Canonicalize synchronously — a pure in-memory round-trip over
+            // ~1200 entries (idMap build + entity map + reverse map), no
+            // disk and no 813KB mirror serialization — so the emission keeps
+            // the consistent composite-id shape without waiting for the
+            // persist job.
             val canonical = try {
-                runBlocking { persistToDbAndMirror(config) }
+                config.toSnapshot(json).toProviderConfig(json)
             } catch (e: Exception) {
-                android.util.Log.e(
+                android.util.Log.w(
                     "ProviderRepo",
-                    "[ProviderStore] saveConfig persistence failed; emitting in-memory only: ${e.message}",
-                    e,
+                    "[ProviderStore] canonicalize failed; emitting raw config: ${e.message}",
                 )
                 config
             }
@@ -541,8 +554,27 @@ class ProviderRepository(private val context: Context) {
                 modelGroups = canonical.modelGroups.toMutableList(),
                 agentLoopModelEntryIds = canonical.agentLoopModelEntryIds.toMutableList(),
                 agentLoopGroupIds = canonical.agentLoopGroupIds.toMutableList(),
+                // T273: structural equals walks the inner Lists and `prev`
+                // (already mutated in place by the mutator) compares equal to
+                // `next` → StateFlow would suppress the emission. Bumping
+                // revision makes equals always false so 18+ collectAsState
+                // callers see the new value.
                 revision = config.revision + 1,
             )
+            persistExecutor.execute {
+                try {
+                    runBlocking { persistToDbAndMirror(config) }
+                } catch (e: Exception) {
+                    // In-memory state is already emitted; the next successful
+                    // save resyncs mirror + DB (same contract as the old
+                    // catch path — fire-and-forget callers never see this).
+                    android.util.Log.e(
+                        "ProviderRepo",
+                        "[ProviderStore] async persist failed; DB+mirror stale until next save: ${e.message}",
+                        e,
+                    )
+                }
+            }
         }
     }
 
