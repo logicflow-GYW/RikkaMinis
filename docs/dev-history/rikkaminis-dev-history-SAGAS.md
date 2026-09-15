@@ -10,9 +10,9 @@
 - 覆盖范围：2026-08-03 ～ 2026-09-15，共 44 天
 - 条目总数：995（源文件：rikkaminis-dev-history.md）
 - 主题数：23
-- 未归入任何主题：118 条（11%，列在文末）
-- 归入 ≥4 个主题（说明规则偏松）：54 条
-- 标 `↳` 的条目是**推断归属**：标题里没有主题词（「X 完成 / X 收尾」这类收尾条目，主题词在**上一条**里），由「12 小时内最近一条有主题的条目」继承而来，共 27 条。
+- 未归入任何主题：65 条（6%，列在文末）
+- 归入 ≥4 个主题（说明规则偏松）：55 条
+- 标 `↳` 的条目是**推断归属**：标题里没有主题词（「X 完成 / X 收尾」这类收尾条目，主题词在**上一条**里），由「12 小时内最近一条有主题的条目」继承而来，共 80 条。
 
 ### 怎么读
 
@@ -27,27 +27,27 @@
 
 | # | 主题 | 条数 | 跨度 | 状态 |
 |---|------|------|------|------|
-| 1 | 滚动跟随 / 流式跳动 | 62 | 08-05 ～ 09-13 | 观察中 |
+| 1 | 滚动跟随 / 流式跳动 | 64 | 08-05 ～ 09-13 | 观察中 |
 | 2 | 输入框 / 键盘 / 粘贴 | 24 | 08-04 ～ 09-12 | 已闭环 |
-| 3 | native 内存 / OOM / 崩溃 | 95 | 08-03 ～ 09-14 | 持续跟踪 |
-| 4 | 沙箱 / rootfs / PRoot / 终端 | 80 | 08-03 ～ 09-14 | 稳定 |
-| 5 | 流式回答中断 / 恢复 / 取消 | 89 | 08-03 ～ 09-15 | 已闭环 |
+| 3 | native 内存 / OOM / 崩溃 | 101 | 08-03 ～ 09-14 | 持续跟踪 |
+| 4 | 沙箱 / rootfs / PRoot / 终端 | 88 | 08-03 ～ 09-14 | 稳定 |
+| 5 | 流式回答中断 / 恢复 / 取消 | 97 | 08-03 ～ 09-15 | 已闭环 |
 | 6 | 思考 / 推理泄漏 | 39 | 08-08 ～ 09-15 | 已闭环 |
-| 7 | 上下文压缩 / 记忆 / 预算 | 80 | 08-06 ～ 09-14 | 稳定 |
-| 8 | Provider / 模型组 / 负载均衡 | 97 | 08-04 ～ 09-15 | 已闭环 |
-| 9 | 备份 / 多端同步 | 90 | 08-03 ～ 09-14 | 收敛 |
+| 7 | 上下文压缩 / 记忆 / 预算 | 86 | 08-06 ～ 09-14 | 稳定 |
+| 8 | Provider / 模型组 / 负载均衡 | 103 | 08-04 ～ 09-15 | 已闭环 |
+| 9 | 备份 / 多端同步 | 94 | 08-03 ～ 09-14 | 收敛 |
 | 10 | 渲染性能 / Markdown / 长会话卡顿 | 76 | 08-05 ～ 09-15 | 已闭环 + 持续加固 |
-| 11 | 审计 / 整改（多轮） | 164 | 08-03 ～ 09-15 | 常态机制 |
-| 12 | 多会话并行协作 / 派发 / 交接 | 147 | 08-04 ～ 09-15 | 成熟 |
-| 13 | CI / 构建 / 发布流水线 | 128 | 08-03 ～ 09-15 | 稳定 |
-| 14 | 开发档案 / 记忆 / 工具链 | 66 | 08-03 ～ 09-15 | 常态维护 |
-| 15 | 会话 / 导航 / 抽屉交互 | 59 | 08-03 ～ 09-15 | 已闭环 |
-| 16 | 平台适配 / 通知 / 图标 / 权限 | 60 | 08-03 ～ 09-14 | 部分放弃 |
+| 11 | 审计 / 整改（多轮） | 174 | 08-03 ～ 09-15 | 常态机制 |
+| 12 | 多会话并行协作 / 派发 / 交接 | 158 | 08-04 ～ 09-15 | 成熟 |
+| 13 | CI / 构建 / 发布流水线 | 135 | 08-03 ～ 09-15 | 稳定 |
+| 14 | 开发档案 / 记忆 / 工具链 | 71 | 08-03 ～ 09-15 | 常态维护 |
+| 15 | 会话 / 导航 / 抽屉交互 | 61 | 08-03 ～ 09-15 | 已闭环 |
+| 16 | 平台适配 / 通知 / 图标 / 权限 | 62 | 08-03 ～ 09-14 | 部分放弃 |
 | 17 | 国际化 / 文案 / 本地化 | 22 | 08-04 ～ 08-28 | 已闭环 |
-| 18 | 上游 / 生态吸收 / 开源 | 51 | 08-03 ～ 09-12 | 常态 |
-| 19 | UI 组件 / 设置页 / 交互微调 | 67 | 08-04 ～ 09-11 | 持续 |
-| 20 | Token 用量 / 成本统计 | 44 | 08-05 ～ 09-14 | 已闭环 |
-| 21 | 人格 / Soul / 提示词 / 技能体系 | 38 | 08-04 ～ 09-15 | 稳定 |
+| 18 | 上游 / 生态吸收 / 开源 | 52 | 08-03 ～ 09-12 | 常态 |
+| 19 | UI 组件 / 设置页 / 交互微调 | 68 | 08-04 ～ 09-11 | 持续 |
+| 20 | Token 用量 / 成本统计 | 48 | 08-05 ～ 09-14 | 已闭环 |
+| 21 | 人格 / Soul / 提示词 / 技能体系 | 40 | 08-04 ～ 09-15 | 稳定 |
 | 22 | 语音 / 多模态输入 | 13 | 08-03 ～ 09-13 | 低优先级维护 |
 | 23 | 被否掉的方向（决策记录） | 34 | 08-04 ～ 09-15 | 持续累积 |
 
@@ -55,7 +55,7 @@
 
 ## 1. 滚动跟随 / 流式跳动
 
-**跨度** 2026-08-05 ～ 2026-09-13 · **62 条** · **状态** 观察中（09-13 第 5 轮已合并 main；真机复测窗口内未再复发）
+**跨度** 2026-08-05 ～ 2026-09-13 · **64 条** · **状态** 观察中（09-13 第 5 轮已合并 main；真机复测窗口内未再复发）
 
 **叙事**：08-05 流式输出 UI 跳动 → 08-07 定位 USER_SEND 无条件滚动漏网、触底触发器重构 → 08-08 单锚点守护重构 → 08-15/16 animateContentSize 冲突 + 跳顶死区 → 08-25~27 rikkahub 流畅性吸收 E、历史对话回底部连翻两轮 → 09-01 place-storm 钳位 → 09-13 打开会话「差一段」第 5 轮。**39 天里至少 5 次「以为修好了」**，最终收敛为「单锚点守护 + 显式跟随条件 + 回底部 catch-up」。
 
@@ -63,12 +63,14 @@
 |------|------|------|
 | 08-05 19:48 | RikkaMinis 流式输出时 UI 跳动 bug — 定位+修复（2026-08-05） | 用户报：AI 工作时(Ui)界面偶尔跳动，读某段时突然跳到另一段。用户提供了 minis-2026-08-05.log（5k 行，含 ScrollSrc + ScrollFAB2 日志）。 |
 | 08-05 20:01 | RikkaMinis 流式输出时 UI 跳动 bug — 修复已合并 main（2026-08-05 收尾） | 用户报：AI 工作时 Ui 界面偶尔跳动，读某段时突然跳到另一段。用户提供了 minis-2026-08-05.log（5073 行，含 ScrollSrc + ScrollFAB2 日志）。 |
+| 08-05 21:40 | ↳ RikkaMinis — partsJson 一次解析优化已合并 main（2026-08-05） | 分支 feat/reduce-partsjson-parsing → main（5ac68b8），CI run 31010674739 success。 |
 | 08-05 23:15 | RikkaMinis 全量代码审查（2026-08-05 晚，clone /tmp/rikkaminis-review） | 结论 |
 | 08-06 10:15 | RikkaMinis — 经验记忆详情 dialog 滚动修复（2026-08-06，commit 5d20e49） | 用户报：经验详情 dialog 里长 reply 内容"下面还有但滑不动"。真机验证后修复。 |
 | 08-06 10:15 | RikkaMinis — 经验记忆详情 dialog 滚动修复详情（2026-08-06，commit 5d20e49，feat/episode-viewer） | 分支 feat/episode-viewer 第二个提交 5d20e49（前一个 b25a806），CI run 31065068027。 |
 | 08-06 10:36 | RikkaMinis 经验记忆滚动修复合并 — 编译失败与修复（2026-08-06 下午） | 事件 |
 | 08-06 20:35 | RikkaMinis auto-follow 又跳 — 漏网路径 LE(messages.size)（2026-08-06 复现定位） | 用户报告：auto-follow 的"跳"在高速调用大模型期间又出现（之前 884d9f1 修过）。 |
 | 08-06 20:45 | ↳ RikkaMinis 今日收尾确认（2026-08-06 22:45） | 已合并 main（两个 bug 修复全部完成） |
+| 08-06 21:09 | ↳ 收尾对齐 — 最终状态确认（2026-08-06 续） | main 当前状态 = 08531ea |
 | 08-06 23:28 | RikkaMinis — 输入框光标跳修复 + 大模型回答跳诊断（2026-08-06 晚） | 问题一：输入框光标跳（已改，CI 31115770832 验证中） |
 | 08-06 23:38 | RikkaMinis — 输入框光标跳 修复完成并合并 main（2026-08-06 晚 收口） | 状态 |
 | 08-06 23:44 | RikkaMinis — 大模型回答时跳 修复完成（分支 fix/agent-anchor-retain，验证中） | 状态 |
@@ -159,7 +161,7 @@
 
 ## 3. native 内存 / OOM / 崩溃
 
-**跨度** 2026-08-03 ～ 2026-09-14 · **95 条** · **状态** 持续跟踪（09-13 三件套已合并；SOFT 450 / HARD 1200 阈值待 1–2 周真实数据复核）
+**跨度** 2026-08-03 ～ 2026-09-14 · **101 条** · **状态** 持续跟踪（09-13 三件套已合并；SOFT 450 / HARD 1200 阈值待 1–2 周真实数据复核）
 
 **叙事**：08-09 Scudo OOM → 08-15 早三次 OOM → 08-17 native offload 泄漏实证 → 08-20~22 进程隔离五 Phase + 小号 TF-A..TF-J 十连修 → 08-25/26 「RSS 单调泄漏」被沙箱实测**推翻**（是 PRoot VSZ reserve 不是泄漏）→ 09-13 两次 SIGABRT / RSS 5.4–6.1GB，口径从 VmRSS 换 **RssAnon**（61% 信号是可回收页）+ 崩溃态取证 → 09-15 HangDetector 后台冻结假阳性。**这是全档案最长的 saga，也是唯一「调查被自己的实测推翻」的一条。**
 
@@ -182,6 +184,7 @@
 | 08-09 13:09 | 供应商详情页闪退根因 + 修复（2026-08-09 13:02 崩溃） | 用户报 13:02 闪退（crash-2026-08-09_13-02-25.log + _13-02-31.log，连环崩：10286 → 17619 → 17979 重启）。ACRA 捕获 IllegalStateE… |
 | 08-09 17:47 | 2026-08-09 收尾总结 | 重大改动：终端引擎替换（feat/termux-terminal-engine）— 自研 2249 行 → Termux 0.118.0，6 轮修复后合并 main。 |
 | 08-09 18:36 | 备份并发 OOM 修复（fix/backup-concurrency-oom，已合并 main） | 用户问题：先点云端备份（进行中）再点本地备份 → 本地 OOM：Failed to allocate 150994952 bytes, 512MB heap。备份体积 ~70MB。 |
+| 08-09 22:21 | ↳ RikkaMinis 开发项目收尾归档（2026-08-09 深夜） | 三件事全部完成，画句号： |
 | 08-13 04:49 | 任务 5：BrowserTabPool 低内存释放 ✅ 完成并合并到 main (c371506) | 改动内容 |
 | 08-13 11:47 | 本机日志崩溃分析（2026-08-13）— native 内存泄漏 SIGABRT | 用户上传本机日志（11065行）+ native-crash 文件。分析结论： |
 | 08-15 08:30 | 08-15 早上 com.openminis.app OOM 崩溃分析（3 次，08:25-08:27） | 现象 |
@@ -189,6 +192,7 @@
 | 08-15 08:51 | Memory-pressure-gate 施工中（fix/memory-pressure-gate，2026-08-15 上午） | 来源：08:25-08:27 三次 OOM（pthread_create 1MB 栈失败 = native 内存耗尽）。现有 ExecutionCoordinator P2-app-native-oom 只监控 Debu… |
 | 08-15 09:03 | Memory-pressure-gate 完成 — 已合并 main（1c4bd45，2026-08-15 上午） | 改动（commit 1c4bd45，5 文件 +321，全在 service/ + MinisApp 下）： |
 | 08-15 09:39 | T9 性能基线完成 — 已合并 main（05a9d111，2026-08-15） | 任务：RikkaMinis 平衡点施工 T9 — 性能观测、基线与门禁（Phase 1-2：指标插桩 + 合成 workload + 报告工具）。 |
+| 08-15 09:58 | ↳ T6 Trace 扩展完成 — 已合并 main（8ad067a，2026-08-15） | 任务：RikkaMinis 平衡点施工 T6 — Trace 扩展为预算和终态证据。 |
 | 08-16 09:38 | 审计修复合并 main 完成（2fcc96c） | fix/audit-p0-security-boundaries（14 文件 +328/-64）已 ff 合并 main（681bb18→2fcc96c），分支 CI run 31919378138 绿；main rel… |
 | 08-17 00:11 | ✅ 两件内存任务全部闭环（2026-08-17，环境恢复后） | 前一个会话 native 堆泄漏到 5.5GB 被锁死，但用户重启/新版本后环境恢复，本会话可以直接执行——确认修复生效（shell 正常、git/python3/curl/token 齐全、可用内存 5.6GB）。 |
 | 08-17 22:17 | 🔴 本次会话疑似是 native 堆失控的元凶（2026-08-17 深夜） | 现象：用户在 21:57 和稍后又遭遇两次应用闪退，native crash 日志： |
@@ -205,6 +209,7 @@
 | 08-20 13:55 | Phase 1 骨架捞回 + 任务清单定稿（2026-08-20 会话收口） | 挖回丢失的 Phase 1 基石：15ba1ae(OffloadHandlerCatalog) + b31bb65(ToolExecutionService) 原本悬在已删的 fix/native-rss-tool-gu… |
 | 08-20 14:32 | P-1 压测闭环：三大负载 RSS 全部受控，未复现 6GB 泄漏（2026-08-20） | 用户选「方案二」（沙箱并发派发负载），我用 shizuku 从沙箱读手机 logcat 完成定向压测。关键结论： |
 | 08-20 16:40 | bug-hunt 2026-08-19 最终收口（2026-08-20 16:40） | 6GB native OOM 事故完成「止血 → 定位 → 并发上限放宽验证」三阶段闭环，全部收口。 |
+| 08-20 17:11 | ↳ 并发会话上限放开（2026-08-20 收尾） | 用户要求把并发会话上限「彻底放开」，不要最高只能是 4。理由是应用已足够稳定。 |
 | 08-21 12:07 | 2026-08-21 崩溃修复 + 偶发丢消息搁置 | 已修复并合并（main a1bc4bb） |
 | 08-21 16:03 | native OOM「进程隔离 + 自动划卡片」修复闭环（2026-08-21） | 背景：用户报内存仍会飙到"拒绝运行指令/工具"，但能靠后台划卡片恢复。用户决定改，参考了工业界三方案（多进程用完即弃 / AVF 微虚拟机 / 端云分离），确认只有「多进程用完即弃」可行（AVF 需 Pixel+厂商签名… |
 | 08-21 19:44 | 原生内存隔离施工开始（Phase 0：bounded admission） | 用户要求彻底解决内存飙升，给出 v2 方案（/var/minis/workspace/rikkaminis-native-memory-isolation-plan-v2.md），用户确认施工。 |
@@ -219,6 +224,8 @@
 | 08-22 18:38 | 小号内存治理：任务已派发（2026-08-22 晚） | 方案文档已从 workspace 备份到笔记文件夹（/var/minis/mounts/笔记/RikkaMinis开发档案/小号内存飙升根治方案-Provider-Worker-Hard-Boundary.md，sha2… |
 | 08-22 19:26 | TF-A provider-rss v2 观测打点完成（会话 A，2026-08-22 收尾） | 分支 diag/provider-rss-v2（基于 chore/dual-appid 5672ca3，tip c8ff0a4），分支 CI run 32569593961 全绿（单测 full suite + scan… |
 | 08-22 21:31 | 小号内存治理：五分支全部完成，已收口（2026-08-22 晚） | TF-A/B/C/D/E 五分支真实完成并独立核实（非仅转述）：A diag/provider-rss-v2 c8ff0a4 (run 32569593961) / B fix/modelservice-terminal… |
+| 08-22 21:54 | ↳ 真机日志推翻 worker 协议闭环（2026-08-22 晚） | TF-E APK 真机日志发现 P0：:modelservice PID 30053 因 ModelExecutionService.finishRequest() 写 state.json 时 run 目录已被主进程删… |
+| 08-22 22:58 | ↳ TF-F modelservice run-dir 所有权 P0 修复完成（会话 F，2026-08-22 晚） | P0 根因：TF-E APK 真机 crash（:modelservice PID 30053 state.json ENOENT）——ChatStreamOffloadHandler.finally 在 result.… |
 | 08-22 23:56 | [会话 G 交接] TF-F 后 modelservice worker 仍被 SIGKILL——根因与施工方案（2026-08-22 深夜） | 用户最新证据：附件 minis-2026-08-22__3_.log（23:00-23:01，主进程 PID 14059）。lab 包 1.0.0-beta.28（TF-F 4967a9a）聊天仍失败：23:00:18/… |
 | 08-23 11:05 | TF-I modelservice 串行/探针修复完成（处理 TF-H 三个 P0） | 分支 fix/modelservice-before-dispatch-notify（基于 TF-H e9bec97），单 commit f8b0a6a。分支 CI run 32613813748 全绿（head_sha… |
 | 08-25 22:36 | 刷新应用后的内存快照（2026-08-25 22:35） | 用户刷新应用（关后台、清进程）后恢复正常，但抓到了刷新后未完全稳定时的快照： |
@@ -260,10 +267,11 @@
 | 09-13 22:13 | ★ 2026-09-13 H3 收尾：两分支已 ff 合并 main = `d3873c0`（release CI 用户拍板不等） | 合并顺序按 ② 基于 ① 的设计执行，两步均 ff、零 rebase：c508896..f5253be（① 口径）→ f5253be..d3873c0（② 崩溃态取证）；远端分支 fix/memory-gate-anon… |
 | 09-13 22:49 | ★ 2026-09-13 环节完善度横向扫描（main @ d3873c0e）：1 结构缺口 + 3 真缺陷 + 1 注释漂移 | 扫描轴刻意换过：历史 T1–T10 全域审计（5 HIGH+34 MED+54 LOW 已收口）是「按功能域找 bug」；本次是同构组件一致性 + 审计清单之外横切面。手段：5 个静态探针（scan1–5 在 /var/… |
 | 09-14 09:07 | 度量存活度审计（代码声明 × 日志实测）—— 新方法 + 首批发现（2026-09-14，main @ a82f425a） | 任务：用户提出"度量死了应该是一类问题，用积累的日志交叉验证：哪些是代码上说有、日志里没有的"。做了系统化审计。 |
+| 09-14 09:43 | ↳ 处置批次打包完成并合并：main = `2dc6e0d4`（2026-09-14） | 用户确认负载均衡已关闭 → ChatVMRouting=0 属预期（该行无条件打印，0 即"没轮转过"），从待查清单移除。 |
 
 ## 4. 沙箱 / rootfs / PRoot / 终端
 
-**跨度** 2026-08-03 ～ 2026-09-14 · **80 条** · **状态** 稳定（09-05 rootfs 事件日志 + apk 自动恢复已上线）
+**跨度** 2026-08-03 ～ 2026-09-14 · **88 条** · **状态** 稳定（09-05 rootfs 事件日志 + apk 自动恢复已上线）
 
 **叙事**：08-03 proot 源码构建（loader 必须独立打包）→ 08-09 终端死屏根治 + 反复开关 OOM → 08-13 PRoot 文件 IO 幽灵层 + apk 包持久化方案 3 + rootfs 占位 tar → 09-05 「沙箱重置、工具不见」三源取证（**不是重置，是 per-session 设计**）→ 09-13 apk 残留进程占锁误诊为「源慢」。**教训密度最高的一条**：沙箱里几乎每个「环境坏了」最后都归到「你误诊了现象」。
 
@@ -301,6 +309,9 @@
 | 08-09 08:00 | feat/termux-terminal-engine 合并进 main（2026-08-09） | 合并 commit：521431b（Merge branch 'main' into feat/termux-terminal-engine） |
 | 08-13 04:19 | 任务 4：RootfsManager 完整性校验 — 完成 | 分支 fix/rootfs-integrity-check → main（merge commit 1312155） |
 | 08-13 09:23 | P0 终端层补测试 — 完成 ✅ | 分支 fix/sandbox-layer-tests → main 77e789f（CI run 31657029853 success） |
+| 08-13 09:59 | ↳ P2 核心文件补测试 — 完成 ✅ | 分支 fix/core-file-tests → main dc8e673（CI run 31658922502 success，中间 2 次失败后修复） |
+| 08-13 10:13 | ↳ 收尾检查完成（2026-08-13） | main 最新 CI（run 31659431581, dc8e673-d）完成，success，02:09 发布 APK beta.535（versionCode 220000535）到 android-latest … |
+| 08-13 10:30 | ↳ 阶段性总结已归档（2026-08-13） | 文件：/var/minis/workspace/phase-summary-2026-08-13.md |
 | 08-13 16:13 | PRoot 沙箱文件 IO 幽灵层教训（2026-08-13 终端修复期间发现） | 现象：同一文件，不同进程读到不同内容，且各自稳定： |
 | 08-13 16:23 | 终端三方案交接（2026-08-13，用户要求重开对话） | 交接文档：/var/minis/workspace/handover-terminal-fixes-2026-08-13.md |
 | 08-13 16:53 | 终端三方案收尾（2026-08-13 续，新会话接管完成） | 交接文档：/var/minis/attachments/uploads/handover-terminal-fixes-2026-08-13.md（新会话已读取并完成全部任务） |
@@ -308,6 +319,7 @@
 | 08-13 18:47 | rootfs 占位 tar 重大发现（2026-08-13 晚，跨设备交接必读） | 当前设备状态：alpine-rootfs 已被重置且重装只写出 98.30 kB（rootfs 管理页显示），终端 proot 报 '/bin/sh' not found，我的 shell_execute 全部 [She… |
 | 08-13 19:17 | rootfs 占位 bug 根因修正——extractTar 对 `./` 目录条目的 isEmpty break 回归 | 根因：BUG 1 修复（c1118d3, 8/13）加了 while (fullName.startsWith("./")) fullName = removePrefix("./") normalize 逻辑，但没考虑… |
 | 08-13 19:42 | 验证 2 闭环通过（2026-08-13 19:55） | 验证 2（破坏 busybox/sh/ld-musl → 断网 → 强杀重开 → 自动恢复）全部通过： |
+| 08-13 20:57 | ↳ 模型隔离进程真机验证闭环通过（2026-08-13 晚） | 用户要求真机验证"模型隔离进程"（feat/model-exec-service, cfd0172）—— 验证全部通过 ✅ |
 | 08-13 21:26 | 【BUG 调查】rootfs 周期性重建清空 apk 包 + bash 不恢复（2026-08-13 晚） | 现象：会话中途 curl/python3/bash 全部消失，apk add 重装后约 30 分钟又丢。 |
 | 08-13 21:34 | 【交接·方案3】apk 包持久化 — bug 因果链 + 方案设计（2026-08-13 21:40） | 任务一句话：把"用户通过 apk 安装的包"做成可恢复快照——apk 装包清单持久化到 host 侧（app 私有目录），rootfs 被 reset/全量重建后按清单自动重装。修掉"强停/杀应用 → 重开 → root… |
 | 08-13 21:34 | 【交接·方案3】代码位置 + 开发纪律 + 开工指引（2026-08-13 21:40） | 相关代码与已知约束（新会话需拉代码确认） |
@@ -319,6 +331,9 @@
 | 08-13 23:31 | 【真机验证】验证 3（手动 reset）通过 —— 方案3 彻底闭环（2026-08-13 深夜） | 用户手动 reset rootfs → 全量重建 → restoreApkWorld 自动恢复 59 包 + bash 就位 ✅（apk list --installed \| wc -l = 59，which bash … |
 | 08-15 16:21 | T4-B 修复完成 — 已合并 main（571bfe4，2026-08-15 晚） | 用户现象延续：main c14d29f #751 红（冲突标记 + F09/F14 失败）→ 修复分支 fix/t4b-clean-conflicts fc376ae #752 仍红（实际全 12 个测试都挂）。 |
 | 08-15 16:29 | ↳ T7 状态确认：已全部完成（main 571bfe4） | 领取 T7 任务后全面检查代码状态，确认 T7-A/B/C/D 四阶段全部已在 main 中实现： |
+| 08-15 17:27 | ↳ T7-RealRuntimePort 完成 — 已合并 main（83abd79，2026-08-15） | 分支：stability/T7-real-runtime-port（已删） |
+| 08-15 17:43 | ↳ 剩余可分派任务（2026-08-15 下午更新） | 代码层面全部完成（T0-T9 + T4-B 真实适配已合并 main 83abd79a，release CI 绿）。 |
+| 08-15 18:03 | ↳ T10 最终验收执行完成（2026-08-15 下午） | H 层验证：本地重建 JVM 沙箱环境，RealRuntimePortAcceptanceTest 2 轮 17/17 ✅，RealAgentAdapterAcceptanceTest 2 轮 14/14 ✅，合计 62… |
 | 08-20 08:08 | native-OOM Phase 1 侦查推进（2026-08-20 会话二） | 接手 fix/native-rss-tool-guard 分支施工。工作树 /tmp/rikka-diag 干净，HEAD=b31bb65，领先 origin/main（ce760f9）5 commits。分支 CI 全… |
 | 08-21 21:02 | Phase 4 fix/proot-child-memory-guard 施工（会话 B，2026-08-21 晚） | ⚠️ 共享工作树事故（重要协作教训）：/tmp/rb 是共享工作树，会话 A（Phase 2 fix/modelservice-terminal-protocol）中途 checkout 切走了分支，导致会话 B 的工作… |
 | 08-22 12:54 | RikkaMinis 官方对比自述文档完成（2026-08-22） | 生成了 /var/minis/workspace/RikkaMinis-官方对比自述.md，把 fork 相对官方 OpenMinis 的全部差异按三类归档： |
@@ -333,6 +348,7 @@
 | 08-31 14:43 | LiteLLM 成本层 V2：JSON 价格表 + 用户可编辑价格（2026-08-31，commit fbe888e7） | 用户反馈 Usage 页看不到「预估费用」→ 根因：价格目录是硬编码 Kotlin map，只覆盖 40 个内置模型，中转站模型（deepseek-v4-pro-0813 之类）不在任何公共价格表里，按「未知→null→… |
 | 09-02 11:14 | session4 浏览器/沙箱层审计完成（rikka-bug-hunt） | 审计 /tmp/rikka 的 browser/ 全目录 + ExecutionCoordinator.kt + RootfsManager.kt，报告：/var/minis/shared/rikka-bug-hunt/… |
 | 09-02 20:53 | FE-5 route C ③ CI 红修复 + 沙箱重建（2026-09-02 晚） | CI run 33629407247 失败原因（交接文档预言的「引擎没过真实 Android 编译链」）：全是编译错误—— |
+| 09-02 23:17 | ↳ FE-5 第四/五批合并拆分（2026-09-02 晚，commit 9a3949f） | 用户拍板：后面几批合并一起拆，拆完做系统性 bug 扫描（llm-bug-audit），不必逐批保真。先彻底解决「拆」再扫 bug。 |
 | 09-05 16:46 | 用户报"最近经常遇到沙盒重置、kotlinc 等工具不见了"。调查结论（三源验证：文件时间戳 + 日志 + 语义记忆）： | 用户报"最近经常遇到沙盒重置、kotlinc 等工具不见了"。调查结论（三源验证：文件时间戳 + 日志 + 语义记忆）： |
 | 09-05 17:33 | feat/rootfs-event-log 收尾闭环（2026-09-05 17:5x） | 产出：main @ 5ebff693（12bfbbaf ff 合并）。分支→main 全链路干净。 |
 | 09-05 22:11 | rootfs-event-log 真机验证确认（2026-09-05 用户补记） | 用户确认 main @ 5ebff693（rootfs 事件日志）真机早已测试通过：装新 APK 后手动 reset，沙箱 cat /var/minis/logs/rootfs-events.log 可见 MANUAL_… |
@@ -352,7 +368,7 @@
 
 ## 5. 流式回答中断 / 恢复 / 取消
 
-**跨度** 2026-08-03 ～ 2026-09-15 · **89 条** · **状态** 已闭环（09-07 收口，含停止按钮竞态 + 多会话真并发真机验证）
+**跨度** 2026-08-03 ～ 2026-09-15 · **97 条** · **状态** 已闭环（09-07 收口，含停止按钮竞态 + 多会话真并发真机验证）
 
 **叙事**：08-18 「回答频繁断掉」诊断链（provider 层铁证健康）→ 08-24 首块超时 30000ms + retry 分类不对称 → 09-06 一天内连收四种形态：EOF 静默停、stream error 手动重试、content_filter→fallback、finish_reason=network_error 伪正常结束 → 09-07 预算墙第 4 形态 + provider-exec-concurrency。**「同一个用户现象 = 五种不同根因」的教科书案例**，每条都靠日志实证拆开。
 
@@ -362,15 +378,21 @@
 | 08-05 10:01 | RikkaMinis 底部工具条 — 真机发现 footer 按钮失效，根因 = LaunchedEffect 自取消（2026-08-05） | 用户真机验收发现：历史抽屉 footer 里 Token 用量 / 设置两个按钮（默认唯一两个）点击无反应。 |
 | 08-05 23:15 | RikkaMinis 全量代码审查（2026-08-05 晚，clone /tmp/rikkaminis-review） | 结论 |
 | 08-11 00:58 | 吸收上游 fork 的降级三件套 — 实际只做了一件（feat/fix/length-wall-continue） | 用户按自己的标准（①shell/框架做不到的事 ②可验证 ③框架>功能）审查 17 个真改动 fork 的功能： |
+| 08-11 01:29 | ↳ RikkaMinis 开发项目最终定档收尾（2026-08-11） | 给已有的《RikkaMinis-项目收尾总览.md》追加了"再补续——最终定档"章节（08-10 是"后记"，08-11 是真正句号）。定档内容： |
 | 08-12 02:05 | 文字渲染空白 bug 根因定位 + 修复完成（2026-08-12） | 用户一手现象：大模型高速流式回答时，偶发文字块空白；滑出屏幕再滑回，文字正常。 |
 | 08-13 04:29 | 任务3：NativeOffload 大请求流控 ✅ | 分支: fix/native-offload-size-limit → main 05e7398（CI success） |
 | 08-13 06:19 | 任务 D：删残留分支 ✅ 完成（2026-08-13） | 远端 test/clean-generated（1492f21，AI 测试教训产物）已删除 |
+| 08-13 06:41 | ↳ 任务 A：webapp-hidden TODO 评估 — 完成（2026-08-13） | 评估结论：功能完整可用，非半成品。6 处 TODO 全是 false && 或 ENABLED = false 守卫。 |
+| 08-13 06:59 | ↳ 任务 B：核心文件补测试 ✅ 完成（2026-08-13） |  |
 | 08-14 20:36 | ⚠️ GitHub workflow_dispatch 并发竞态（2026-08-14 D 类会话实测） | 现象：dispatch 自己的分支 CI（ref=fix/err-family-provider-defense），run 的 API head_branch/head_sha 显示正确（fix/err-family-p… |
 | 08-15 05:32 | T3 派发指令 — 副作用重试策略 | 你负责 RikkaMinis 平衡点施工 T3 — 工具与 shell 的副作用重试策略。 |
 | 08-15 05:32 | T4-A 派发指令 — 故障注入 Harness | 你负责 RikkaMinis 平衡点施工 T4-A — 故障注入 Harness（fakes + 场景协议 + 独立 runner）。 |
 | 08-15 06:11 | T3 副作用重试策略完成 — CI 绿（1cb366c，2026-08-15） | 分支：stability/T3-retry-side-effects |
 | 08-15 16:21 | T4-B 修复完成 — 已合并 main（571bfe4，2026-08-15 晚） | 用户现象延续：main c14d29f #751 红（冲突标记 + F09/F14 失败）→ 修复分支 fix/t4b-clean-conflicts fc376ae #752 仍红（实际全 12 个测试都挂）。 |
 | 08-15 16:29 | ↳ T7 状态确认：已全部完成（main 571bfe4） | 领取 T7 任务后全面检查代码状态，确认 T7-A/B/C/D 四阶段全部已在 main 中实现： |
+| 08-15 17:27 | ↳ T7-RealRuntimePort 完成 — 已合并 main（83abd79，2026-08-15） | 分支：stability/T7-real-runtime-port（已删） |
+| 08-15 17:43 | ↳ 剩余可分派任务（2026-08-15 下午更新） | 代码层面全部完成（T0-T9 + T4-B 真实适配已合并 main 83abd79a，release CI 绿）。 |
+| 08-15 18:03 | ↳ T10 最终验收执行完成（2026-08-15 下午） | H 层验证：本地重建 JVM 沙箱环境，RealRuntimePortAcceptanceTest 2 轮 17/17 ✅，RealAgentAdapterAcceptanceTest 2 轮 14/14 ✅，合计 62… |
 | 08-16 22:01 | 打断 bug 根因确诊 + 修复合并 main（665dfac，2026-08-16 下午） | 用户现象：流式回答期间发消息打断 → ①旧 turn 卡"正在思考"虚线框（实际已停）②新发消息显示为虚线框永不变化（"被吞"）③退出重进正常。重进正常 = 重新 seed 全量 build 后一切正确。 |
 | 08-17 01:37 | 打断后"旧工具一直转/thinking 残留"修复施工中（2026-08-17） | 用户复现的 bug 根因已定位：流式/工具回合中发新消息，旧 assistant 实际状态已收敛到终态（tool SUCCESS/FAILED/CANCELLED、isStreaming=false），但 StableC… |
 | 08-17 02:16 | 打断后"thinking 残留"/"tool 停但 thinking 还在"根因排查（2026-08-17 续） | 用户反馈：账本修复（fix/ledger-status-sync 已合 main faa1905）真机验证"tool 停了但 thinking 还在"。 |
@@ -394,12 +416,14 @@
 | 08-20 23:19 | thinking 级别无效 + 工具卡"正在调用"卡死修复（2026-08-20 收尾） |  |
 | 08-21 12:07 | 2026-08-21 崩溃修复 + 偶发丢消息搁置 | 已修复并合并（main a1bc4bb） |
 | 08-21 14:09 | 工具调用"持续运转无结果"+发消息后自动恢复 诊断（2026-08-21） | 现象：agent 执行工具调用（shell_execute grep 等）时，UI 卡在"正在调用"持续运转却没结果；用户发一条新消息后，界面自动"刷新"恢复。 |
+| 08-21 14:38 | ↳ 工具卡住诊断埋点落地闭环（2026-08-21 下午） | 背景：用户报"工具调用持续运转无结果，发消息后自动刷新恢复"。日志实证（minis-2026-08-21.log）：turn=13 工具全部 SUCCESS 后 87 秒无下一轮 REQ，StreamPerf turnS… |
 | 08-21 19:44 | 原生内存隔离施工开始（Phase 0：bounded admission） | 用户要求彻底解决内存飙升，给出 v2 方案（/var/minis/workspace/rikkaminis-native-memory-isolation-plan-v2.md），用户确认施工。 |
 | 08-21 22:01 | Phase 2 modelservice 可靠 worker 生命周期 完成（会话 A，2026-08-21 收尾） | 闭环：分支 fix/modelservice-terminal-protocol → 分支 CI 绿（run 32487240396，head_sha=f1f04b0 核实）→ rebase 最新 main（2d2ffb… |
 | 08-23 12:01 | TF-J modelservice「dead before any output」竞态修复完成（2026-08-23） | 用户两版真机日志（__2_.log / __3_.log）驱动。TF-I 后仍复现：agent 多轮工具调用触发连续 stream offload，worker pid=3592/startTicks 恒定（进程没被系统… |
 | 08-23 14:39 | 会话 D 完成：浏览器（browser_use / bridge）压测（2026-08-23） | 基线 a6b2665。报告：/var/minis/shared/bug-hunt-pressure/reports/session-D-report.md。实测路径：内置 browser_use → minis-brow… |
 | 08-23 15:36 | 修复 03：get_text 超长文本截断标记 | 在小号 ALT_USER/RikkaMinis 基线 a6b2665 上创建并推送分支 fix/browser-gettext-truncate-flag，commit 6da1df1。BrowserUseJS get_… |
 | 08-23 19:56 | 双交互缺陷分析与修复方案（2026-08-23，主号 main dc18d45） | 问题一：手动终止回答后 · 立即再发 → 上一条"思考中"残留 |
+| 08-23 20:51 | ↳ 双交互缺陷修复已合入 main（2026-08-23） | bc7cc13: ProviderRepository.saveApiKey/deleteApiKey 从 SharedPreferences .apply() 改 .commit()，避免保存后立即发送时 models… |
 | 08-24 10:52 | 首块超时「provider produced no first chunk within 30000ms」调查 + 委托派发（2026-08-24） | 测试/证据：真机日志 08-24 该错误 90 次（07:42 后集中），08-22/08-23 = 0 次真实运行；涉及 deepseek-v4-flash/gpt-5.6-luna/deepseek-v4-pro，走… |
 | 08-24 11:26 | 首块超时调查（会话 1）= 发现 retry 分类不对称 bug + 路由感知超时（2026-08-24） | 结论：30s 守卫本身没错（防 live worker 误判 DEAD 是 TF-I/TF-J 正确设计），但主进程 retry 分类有确凿不对称 bug——first_chunk_timeout 抛 ModelStre… |
 | 08-24 11:29 | 首块超时修复已合入主号 main（2026-08-24，会话 1 汇报后用户拍板） | 合并状态：分支 diag/first-chunk-timeout commit 62d3db4 已推送并 ff 合并主号 main（a09206a→62d3db4），main 已推送。release CI run 326… |
@@ -498,7 +522,7 @@
 
 ## 7. 上下文压缩 / 记忆 / 预算
 
-**跨度** 2026-08-06 ～ 2026-09-14 · **80 条** · **状态** 稳定（09-12 差距清单收敛：D1 攒着、D3/D4/D5 归档不吸收）
+**跨度** 2026-08-06 ～ 2026-09-14 · **86 条** · **状态** 稳定（09-12 差距清单收敛：D1 攒着、D3/D4/D5 归档不吸收）
 
 **叙事**：08-05 RAG v1 实验 → 08-06 经验记忆模块（实施→审查→修复→**08-07 整体摘除**）→ 08-12 上下文压缩引擎 T5 → 08-14 切片无清洗 + summary 注入 tool_result（400 报错）→ 08-16 动态预算 → 08-18 上下文窗口来源治理 → 08-31 memory facts + 语义索引 → 09-12 A1 Prompt Cache 调查（**结论：本地已是上游超集，无需移植**）。一条「先做、再摘、再重做」的螺旋线。
 
@@ -528,17 +552,21 @@
 | 08-08 01:01 | 统筹合并待办清单（2026-08-08，记忆模块已就绪） | 当前四个相关分支状态 |
 | 08-08 01:12 | RikkaMinis 提供商管理优化施工 — Phase 1+2 完成（2026-08-08 凌晨） | 分支 |
 | 08-08 01:27 | 统筹合并完成 — provider/memory/token 三分支合 main + CI 修复（2026-08-08） | 背景 |
+| 08-08 01:48 | ↳ 未合并分支已全部合并到 main（2026-08-08） | feat/logging-module-optimize (092ae88) — 日志模块优化：降低 flush 节奏、修日志读取 OOM、容量上限、i18n crash 区块 → ff 合并 main |
 | 08-08 09:46 | RikkaMinis main 分支完整合并梳理（2026-08-08） | 远程状态 |
 | 08-08 15:07 | ✅ compact/thinking 从斜杠提到顶层菜单 — 已合并 main（2026-08-08） | 分支 feat/menu-compact-thinking @5a3640d（13 文件 +152/-54）： |
 | 08-09 15:33 | 模型组上下文限制硬生效 — feat/context-limit-enforce（CI run 31301106282 success） | 用户问题：设模型组 contextLimitTokens=128K，Token Usage 面板 Context Used 仍超 128K（能到 200K+）。 |
 | 08-12 15:13 | 并行任务清单已建立（2026-08-12）—— 多会话协作模式 | 用户要求把 OmniBot 借鉴点变成待办清单，多开对话各自领任务并行开发。清单文件： |
+| 08-12 15:51 | ↳ T3 失败学习自动化钩子完成（feat/failure-auto-log → main 667f17d） | 改动： |
 | 08-12 15:54 | T5 上下文压缩引擎完成（feat/context-compactor → main bbf8ab1，CI 绿） | 改动：新文件 conversation/ContextCompactor.kt（纯逻辑决策引擎）+ ChatViewModel 挂载 + 单测。 |
 | 08-12 15:55 | ↳ T3 失败学习自动化钩子完成（feat/failure-auto-log → main 667f17d） | 2026-08-13 |
+| 08-13 03:30 | ↳ 任务 B：核心文件补测试 ✅ 完成（2026-08-13） | 分支 fix/core-file-tests → rebase 到 main（f76e5d1）后合并推送，分支已删（本地+远端） |
 | 08-14 12:43 | rikkaminis-dev-history.md 从记忆重建（2026-08-14 12:4x） | 用户发现笔记挂载目录 笔记/RikkaMinis开发档案/rikkaminis-dev-history.md（应用修改的日志合并导出）"被改出问题"（原文：被应用改动出了毛病；检查发现 2 处时间戳乱序，用户决定不走修复… |
 | 08-14 18:49 | 400 "tool must be a response to preceding tool_calls" 根因 + 修复（fix/compact-slice-tool-pairing，2026-08-14） | 用户报告：长对话出现 Provider error:[400] Messages with role 'tool' must be a response to a preceding message with 'tool… |
 | 08-14 18:58 | 400 切片 bug 修复已合并 main + 真机验证通过（2026-08-14） | 用户真机验证：下载最新 release APK 后测试，问题解决。 |
 | 08-14 20:04 | 修复 v1 切片无清洗 + summary 注入 tool_result（fix/compact-slice-sanitize-v1-summary-toolresult → main 1cdb660，2026-08-14） | 背景：用户问"400 tool must be response to preceding tool_calls 是否还有其他同类错误"，对消息构造管线做全量审计，发现 4 个盲区，修了核心 2 个。 |
 | 08-15 00:34 | 模块核心假设分析完成（2026-08-15） | 基于 RikkaMinis 源码（~146K 行 Kotlin，31 子包，405 文件）反推了 16 个模块的核心假设，报告已写入 /var/minis/workspace/rikkaminis-core-assump… |
+| 08-15 05:27 | ↳ T0 基线契约完成：已合并 main（e6f2be32，2026-08-15） | 任务：RikkaMinis 平衡点施工蓝图 T0（冻结基线契约，不改生产代码）。 |
 | 08-15 08:51 | Memory-pressure-gate 施工中（fix/memory-pressure-gate，2026-08-15 上午） | 来源：08:25-08:27 三次 OOM（pthread_create 1MB 栈失败 = native 内存耗尽）。现有 ExecutionCoordinator P2-app-native-oom 只监控 Debu… |
 | 08-15 09:03 | Memory-pressure-gate 完成 — 已合并 main（1c4bd45，2026-08-15 上午） | 改动（commit 1c4bd45，5 文件 +321，全在 service/ + MinisApp 下）： |
 | 08-15 19:50 | 决策：不做"自动接力方案（无感分卷）"（2026-08-15） | 用户提出"自动接力/无感分卷"（长会话触碰阈值 → 自动总结 → 切新会话 Part 2 带 summary 满血启动）后，自己收敛到"不要做"。评估确认其直觉正确： |
@@ -566,6 +594,7 @@
 | 08-31 21:36 | facts 查询标点假命中修复 + 双分支合并（2026-08-31 晚） | 背景：用户要验证"facts 检索是否起效果"（本地事实库根据输入匹配→注入提示词那条链路，不是 HF 语义索引）。用用户 5 句真实输入回测（jieba 模拟生产分词链路），发现 7/10 命中、top1 基本对，但暴… |
 | 09-01 16:54 | place-storm 钳位修复汇入主号收口（2026-09-01） | 用户拍板：小号 70f927d1 的 SIMPLE_FOLLOW 钳位守卫修复已在 lab 真机验证（日志 minis-2026-09-01__3_.log 全绿），汇入主号。 |
 | 09-03 01:08 | FE-5 第五批第一簇完成 + 第二簇交接（2026-09-03） | 进度：ChatViewModel 12338 → 6499（累计 −5839，约 47%）。目标 3500-4000，还差 ~2500-3000。 |
+| 09-03 07:28 | ↳ FE-5 第五批第二簇完成（2026-09-03） | 交付：分支 refactor/fe5-batch6-cluster2，commit 9b8a0a03 + 8c451f7f + 5236b8bd，CI run 33694126769 success，ff 合并 main… |
 | 09-04 00:19 | 三问题修复收尾（2026-09-03 晚，全部合并 main @ 73925e9） | 用户提出三个问题，全部完成并验证： |
 | 09-05 16:46 | 用户报"最近经常遇到沙盒重置、kotlinc 等工具不见了"。调查结论（三源验证：文件时间戳 + 日志 + 语义记忆）： | 用户报"最近经常遇到沙盒重置、kotlinc 等工具不见了"。调查结论（三源验证：文件时间戳 + 日志 + 语义记忆）： |
 | 09-06 09:51 | MCP 记忆增强盘点结论 + server-memory 配置完成（2026-09-06） | 用户问三个主流记忆 MCP 哪个能用上。盘点结论： |
@@ -580,6 +609,7 @@
 | 09-07 01:54 | provider-exec-concurrency + 预算墙修复合并 main（2026-09-07 凌晨，main @ 303d375f） | 全链路：分支 feat/provider-exec-concurrency 四提交（1e20e04b 预算墙+slot池 → 8eeaccba 队列可见性 → 644a36df JDK Semaphore 修复 → 30… |
 | 09-08 15:32 | 备份设计定调：资产 vs 副产品（用户拍板的产品哲学） | 用户纠正我的框架："这是智能体应用不是聊天应用，聊天记录里 90% 是 AI 工作过程数据，聊天记录反而是最不重要的。"由此定调自动备份设计： |
 | 09-10 08:11 | 压缩提示 UX 修复（分支 fix/compact-divider-ux @ 3da98de1，已推送未合并） | 用户报的两个问题：①「已压缩 N 条消息」细线+10sp 灰字体验差 ②提示出现后回答继续长在提示上方（直觉应在下方）。 |
+| 09-10 08:26 | ↳ 两个分支合并前检查 + 合并 main（2026-09-10，main @ 31c8abb9） | 指令：检查 fix/shell-stream-partial-line + fix/compact-divider-ux 是否引入 bug，无则合并。 |
 | 09-13 14:22 | 压缩「跟不上新模型」修复已合并 main（2026-09-13，main @ 33aa72d） | 用户症状：新模型反应快、输出多 → 压缩功能效果大打折扣。 |
 | 09-13 19:59 | 内存防线缺口审计（main @ 82c7925，报告 shared/memory-defense-gap-audit-2026-09-13.md） | 最重要更新：交接文档"无执行中看门狗"已过时——daab66b（随 09-13 restore 回归 main）已带 in-flight 监控（PersistentShell 1s 轮询 → midCommandRecy… |
 | 09-13 20:46 | 内存加固三件套实现完成（分支 fix/memory-hardening-rss-stall，3 commits，CI #1498 success） | commits：a641e27 KaTeX 位图上限（H1）→ 45ce0c8 app 自身压力治理器（H2）→ c508896 挂死处置（用户追加要求）。沙箱 JVM 56/56 绿、仓库门禁 6/6、CI #1498… |
@@ -587,7 +617,7 @@
 
 ## 8. Provider / 模型组 / 负载均衡
 
-**跨度** 2026-08-04 ～ 2026-09-15 · **97 条** · **状态** 已闭环（09-12 收尾；负载均衡语义已在代码级核实为「生效但语义与用户预期不同」）
+**跨度** 2026-08-04 ～ 2026-09-15 · **103 条** · **状态** 已闭环（09-12 收尾；负载均衡语义已在代码级核实为「生效但语义与用户预期不同」）
 
 **叙事**：08-04 loadBalance 轮转游标不前进 → 08-08 模型组 recovery 策略 → 08-14 模型组策略重构 P1–P4 + 思考折叠（中转站）→ 08-15 模型切换无缝（cancel+restart）→ 09-04 思考字段决策键（tokenrhythm 报错）→ 09-06 负载均衡请求级改造 → 09-11 多密钥轮换 + Groq 免费档不可用 → 09-12 「负载均衡像回退模式」**第二次**被报（08-04 同款问题）。**同一现象两次立项**，说明第一次的修法没解释清语义。
 
@@ -613,6 +643,7 @@
 | 08-08 00:59 | 记忆模块 5 项优化完成（2026-08-08，分支 fix/memory-module-optimize） | 施工内容（commit fe501f3 in fix/memory-module-optimize，已 push 远端） |
 | 08-08 01:12 | RikkaMinis 提供商管理优化施工 — Phase 1+2 完成（2026-08-08 凌晨） | 分支 |
 | 08-08 01:27 | 统筹合并完成 — provider/memory/token 三分支合 main + CI 修复（2026-08-08） | 背景 |
+| 08-08 01:48 | ↳ 未合并分支已全部合并到 main（2026-08-08） | feat/logging-module-optimize (092ae88) — 日志模块优化：降低 flush 节奏、修日志读取 OOM、容量上限、i18n crash 区块 → ff 合并 main |
 | 08-08 03:17 | RikkaMinis provider 行内星标改造 — 已合并 main（2026-08-08） | 用户反馈:provider 列表"设为常用"要先点三个点(MoreVert)弹菜单再点星号,多余。改为行内直接放星号按钮,点击即切换常用。 |
 | 08-08 11:46 | RikkaMinis 模型组 recovery 策略（2026-08-08） | 用户痛点：免费 key（500 次/5h，商汤）RPM 低，撞 429 后 fallback 到付费 key 焊死（persist binding），免费 key 限流窗口重置后也不会回去 |
 | 08-08 11:47 | ↳ RikkaMinis 性能优化 — 方案1完成，方案2研判调整（2026-08-08） | 方案1（@Immutable）已完成并推送：分支 perf/immutable-chat-models，commit 19e9448 + 6fd0482。给 ChatModels.kt（ChatMessage/Strea… |
@@ -637,6 +668,7 @@
 | 08-14 17:19 | 网络错误自动切换 + 错误不留痕（feat/fallback-network-error → 施工中，2026-08-14） | 任务来源：用户报两个问题：①deepseek-v4-flash: stream was reset: CANC...（OkHttp HTTP/2 StreamResetException → NetworkError）太… |
 | 08-14 17:52 | 模型组策略系统重构设计文档（2026-08-14） | 用户对模型组功能做元反思（目的/策略/是否有用/程序是否支持），经代码核查发现：recovery 维度是死脚手架（rateLimitCooldowns map 从未读写、RATE_LIMIT_COOLDOWN_DEFAU… |
 | 08-14 18:13 | fallback 切换提示改为顶部 Snackbar（feat/fallback-snackbar → main 327110a，2026-08-14） | 用户反馈（真机验证 e992221 后）："已切换至 xxx" 的 fallback info 块被停在那里（作为消息块永久留在聊天流里）——用户想要的是：从对话框上面弹出横杠提示，几秒后自动退掉，不留痕迹。 |
+| 08-14 18:26 | ↳ 全量验证通过（2026-08-14 用户确认） | 用户装 327110a release APK 后真机验证通过： |
 | 08-14 19:13 | 模型组策略重构 P1-P4 全量施工（2026-08-14 晚，多分支并行） | 背景：设计文档 /var/minis/shared/model-group-strategy-redesign.md 落成后，另一会话先合了 P1（GroupRouter 抽取 = 596adc2，抽取但未接线）。本会话… |
 | 08-14 19:37 | 模型组策略重构 P1-P4 全部合并 main（2026-08-14，main = 18f6e95） | 最终状态：P1（596adc2 另一会话）+ P2（49a38e7）+ P3（caf0828）+ P4（18f6e95）全部 ff 合并 main 并推送。远端仅 main 分支。release 构建 run 31796… |
 | 08-14 20:08 | D 类（provider 层防御纵深）施工中 — fix/err-family-provider-defense（2026-08-14 20:1x） | 任务来源：用户分派"你负责 d 类"，审计文档 /var/minis/shared/request-construction-error-audit.md 的 D 类 = provider 层序列化前最后防线。 |
@@ -669,6 +701,10 @@
 | 08-31 16:57 | 砍除 USD 成本估算 + 修复 facts 空时间戳（2026-08-31，commit b4e166fb） | 背景：用户真机验证「Usage 页费用显示有的有、有的没有」。定位：价格目录 model_prices.json（44 键）只解析到 1148 个实际 model_id 中的 75 个，其余 1073 个中转站/代理模型… |
 | 08-31 17:17 | 第二轮开源清单评估：12 项目裁定，A/B/C 待拍板 | 用户给了第二份 Agent 生态开源清单（Mem0/Zep/Chroma/LangGraph/AutoGen/CrewAI/E2B/Composio/Open Interpreter/Langfuse/Phoenix/L… |
 | 09-03 14:54 | FE-5 bug-audit session4（provider 域）完成（2026-09-03） | 审计 29 文件 / 9108 行（provider + providers 域），报告 /var/minis/shared/fe5-bug-audit/reports/session4.md。High 0 / Medi… |
+| 09-03 15:19 | ↳ FE-5 bug-audit session2（ui 除 chat 域）完成（2026-09-03） | 审计 89 文件清单（约 33284 行）+ 全 ui 域 grep 探针（172 文件 / 76305 行）。报告 /var/minis/shared/fe5-bug-audit/reports/session2.md… |
+| 09-03 15:55 | ↳ FE-5 bug-audit session7（杂项域）完成（2026-09-03） | 审计 93 文件 / ~23686 行（backup/config/debug/speech/diagnostics/webapp/crash/share/mcp/deeplink 等）。报告 /var/minis/sh… |
+| 09-03 16:56 | ↳ FE-5 bug-audit session1（Chat 核心域）完成（2026-09-03） | 审计 83 文件 / 43033 行（chat 域全量）。报告 /var/minis/shared/fe5-bug-audit/reports/session1.md。High 2 / Medium 0 / Low 1。 |
+| 09-03 17:02 | ↳ FE-5 bug-audit session3（sandbox+offload 域）完成（2026-09-03） | 审计 66 文件 / 24146 行（sandbox/ + offload/ 全量）。报告 /var/minis/shared/fe5-bug-audit/reports/session3.md。High 0 / Med… |
 | 09-05 15:11 | 摘除 provider knobs + 连接测试两个功能（已合并 main @ 0103d96f） | 用户判定昨天 6584aca5 引入的「高级自定义（custom headers/body）」和「测试连接」两个功能"极度不成熟，增加复杂度/维护成本，还有问题"，决定精准摘除（非 git 回滚——那会连带干掉 thin… |
 | 09-06 16:22 | 用户报"模型组负载均衡不生效，后台看不到其他模型被使用"。代码级核查（main @ 6b95929）：功能生效，但语义是 | 用户报"模型组负载均衡不生效，后台看不到其他模型被使用"。代码级核查（main @ 6b95929）：功能生效，但语义是会话级轮转不是请求级。GroupRouter.select 的 loadBalance 分支 = u… |
 | 09-06 18:16 | 负载均衡请求级改造 + 停止按钮竞态修复全链路闭环（main @ cd32795，分支 CI run 340260822 | 负载均衡请求级改造 + 停止按钮竞态修复全链路闭环（main @ cd32795，分支 CI run 34026082245 head_sha 核对一致后 ff 合并，release CI 34026796848 in_… |
@@ -693,7 +729,7 @@
 
 ## 9. 备份 / 多端同步
 
-**跨度** 2026-08-03 ～ 2026-09-14 · **90 条** · **状态** 收敛（多端同步已砍除，自动备份按「资产」语义保留）
+**跨度** 2026-08-03 ～ 2026-09-14 · **94 条** · **状态** 收敛（多端同步已砍除，自动备份按「资产」语义保留）
 
 **叙事**：08-04 WebDAV 备份把 main 编译弄坏 + 导入去重 → 08-09 备份并发 OOM → 08-10 多端自动同步 → 08-11 流量审计（用户发现方案欠考虑）→ 降本 + 合并守卫 → 08-13 备份模块审计 7 项 → 08-28 方案 C 重构 → 09-08 **产品哲学定调：资产 vs 副产品** + 自动备份 A+B + auto/ 目录分离 → 09-09 多端同步砍除。**从「做」到「砍」只用了一个月，中间靠一次流量审计转弯。**
 
@@ -715,6 +751,7 @@
 | 08-08 09:46 | RikkaMinis main 分支完整合并梳理（2026-08-08） | 远程状态 |
 | 08-08 20:36 | 三平台集成文档化 — README 补全（2026-08-08） | 用户指出"三大平台纳入"是一次重大升级，不是小修小补，README 必须写清楚，否则以后自己都会忘、别人也看不懂。 |
 | 08-09 18:36 | 备份并发 OOM 修复（fix/backup-concurrency-oom，已合并 main） | 用户问题：先点云端备份（进行中）再点本地备份 → 本地 OOM：Failed to allocate 150994952 bytes, 512MB heap。备份体积 ~70MB。 |
+| 08-09 22:21 | ↳ RikkaMinis 开发项目收尾归档（2026-08-09 深夜） | 三件事全部完成，画句号： |
 | 08-10 16:16 | 多端自动同步功能完成（feat/multi-device-sync → main 7c73343） | 为 RikkaMinis 加了"多端自动同步"，在用户两台设备（手机+平板）间同步轻量配置。核心设计：对齐现有备份机制而非新增第二套。 |
 | 08-11 08:14 | 多端自动同步流量审计（用户发现方案欠考虑） | 用户指出 MultiDeviceSync 方案在坚果云免费版下会撞流量限制。查证结论： |
 | 08-11 08:33 | 多端同步精细化方案定稿（2026-08-11，分支 fix/sync-hide-prune） | 用户决策三项：①改动3（段级时间戳合并）拆下轮 ②overrides 留存用"抽出来重拉后恢复"(ii) ③TTL 闲置清理而非刷新后清。 |
@@ -763,6 +800,9 @@
 | 09-06 17:30 | 小号同步 CI 遗留闭环确认（2026-09-06 晚） | 小号 ALT_USER/RikkaMinis main @ 9047a8ef（merge 6b95929）的 CI run 34020741695 success（head_sha=9047a8ef 核对一致）；主号 m… |
 | 09-06 23:58 | dev-history 0906 同步 + 主号→小号全量同步（2026-09-06 深夜） | 主号 main @ 7d928fa3（docs(dev-history): sync archive to 2026-09-06, 794 entries / 35 days）： |
 | 09-07 08:33 | ARCHITECTURE.md + dev-history 0907 同步（2026-09-07，main @ 3356a4cd） | 用户要求「做架构全貌文档 + 更新仓库文档」已闭环： |
+| 09-07 10:52 | ↳ ChatScreen 拆分批次 1 合并 main（2026-09-07，main @ cf8d8a93） | 用户要求拆分四个超大文件（ChatScreen 6439 / ChatViewModel 3782 / StreamingMarkdownText 3754 / OpenAIProvider 3174），评估后按四批推进… |
+| 09-07 11:23 | ↳ ChatScreen 拆分批次 2 合并 main（2026-09-07，main @ 16c20c08） | StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMerge.kt（256 行，流式合并纯函数，零 Compose 依赖）+ MarkdownBlock… |
+| 09-07 12:03 | ↳ ChatScreen 四文件拆分批次 3+4 合并 main（2026-09-07，main @ 29a20a47） | 用户拍板批次 3+4 合一个分支做。全部四批拆分完成。 |
 | 09-07 15:14 | 文档更新 + Hermes 借鉴登记 + 小号同步（2026-09-07，main @ 5e81aa1a / alt @ 3e8dc9e6） | 任务：用户要求更新文档 + 同步小号，并把"这次新借鉴的东西"在文档做登记。 |
 | 09-07 16:08 | fix/worker-reasoning-content-roundtrip 合并 main（2026-09-07，main @ 742bf77e） | 用户报告：模型组里 danfeng 供应商 deepseek-v4-flash/pro 报 Provider error:[400] The 'reasoning_content' in the thinking mod… |
 | 09-07 22:48 | 文档更新 + 小号同步（2026-09-07 晚二次，main @ fce2ccc8 / alt @ 46e7d0e2） | 任务：用户再次要求更新主号文档 + 同步小号（15:14 已做过一轮，此为 15:14 之后的增量）。 |
@@ -877,7 +917,7 @@
 
 ## 11. 审计 / 整改（多轮）
 
-**跨度** 2026-08-03 ～ 2026-09-15 · **164 条** · **状态** 常态机制（已固化为 security-audit-checklist / four-way-sync-check 等 skill）
+**跨度** 2026-08-03 ～ 2026-09-15 · **174 条** · **状态** 常态机制（已固化为 security-audit-checklist / four-way-sync-check 等 skill）
 
 **叙事**：08-05 首次全量代码审查 → 08-16 系统性审计 → 08-18 RC1–RC17 两轮整改（多会话并行）→ 08-26/27 模块审计批 → 09-02 bug-hunt 四会话 → 09-04 diff 驱动定向审计 → 09-09 全局第二轮 T1–T12 → 09-13 完善度横向扫描 → 09-14 度量存活度 → 09-15 七轴 sweep。**审计是本项目最稳定的工程节奏**：每次改动后必有一次独立审计，且审计本身产出纪律（skill）。
 
@@ -943,21 +983,26 @@
 | 08-18 20:30 | 交叉验证 + 僵尸分支清理（2026-08-18 深夜） | 交叉验证结论（git merge-base --is-ancestor 逐一确认）： |
 | 08-18 20:48 | RC10 完成（2026-08-18，独立会话） | 深链 minis://session/<sid>/<path> 路径穿越整改闭环，CI 绿（run 32137371990 success），未合并 main、未删分支（等总控 ff）。 |
 | 08-18 21:03 | RC10 深链路径穿越整改闭环（2026-08-18 深夜） | 分支 fix/audit-rc10-deeplink-traversal，commit 8efef27，CI 绿（run 32137371990 success），已 ff 合并 main a4369d3 → 8efef… |
+| 08-18 21:23 | ↳ FE-4 纯函数扫尾(层次1)合并 main 2026-08-18 | FE-4 第三波(层次1扫尾)合并 main 8efef27 → 2231857,release CI 绿(run 32140809865),分支已删。 |
 | 08-18 22:01 | RC15 — sort_order 唯一索引整改完成（2026-08-18，独立会话） | 分支 fix/audit-rc15-sort-order-unique，commit 988dfac，CI run 32144384034 success（build 25 steps 全绿，Publish skippe… |
 | 08-18 22:17 | RC15 — sort_order 唯一索引整改完成（2026-08-18，独立会话） | 分支 fix/audit-rc15-sort-order-unique，commit 988dfac，CI run 32144384034 success（build 25 steps 全绿，Publish skippe… |
 | 08-20 16:40 | bug-hunt 2026-08-19 最终收口（2026-08-20 16:40） | 6GB native OOM 事故完成「止血 → 定位 → 并发上限放宽验证」三阶段闭环，全部收口。 |
+| 08-20 17:11 | ↳ 并发会话上限放开（2026-08-20 收尾） | 用户要求把并发会话上限「彻底放开」，不要最高只能是 4。理由是应用已足够稳定。 |
 | 08-21 23:01 | 内存隔离 v2 五 Phase 代码审计发现（2026-08-21 独立会话审计 main 332f30e） | 用户要我审计已合并 main 的原生内存隔离 v2 施工（Phase 0-5 全在，release CI run 32492787202 success）。方案文档 workspace 被重置丢了，靠 shared/na… |
 | 08-22 19:08 | TF-C 大对象序列化审计完成（2026-08-22 晚） | 分支 fix/modelservice-file-payload-audit（基于 chore/dual-appid 5672ca3），CI run 32568646560 绿（head f20335e，build jo… |
+| 08-22 19:21 | ↳ TF-B 可靠 worker 生命周期完成（会话 B，2026-08-22） | 分支 fix/modelservice-terminal-protocol（基于 chore/dual-appid 5672ca3，tip f879e9d），分支 CI run 32569478673 全绿（+795/-… |
 | 08-23 14:29 | 会话 A（bug-hunt-pressure / session-task-A）中途结束：用户判定意义不大 | 用户明确取消会话 A 的「agent 多轮流式 + worker 生命周期压测」任务，理由：这部分日常使用几乎都会遇到，有问题他能立刻感知，压力测试意义不大。 |
 | 08-23 14:47 | 会话收敛：bug-hunt-pressure 收口完成（2026-08-23 晚） | 5 条攻击面全跑完，beta.41（a6b2665）心跳修复未复现假死（logcat 678 万行 0 命中 worker died/proc_missing/DIED/beat_stale）。挖出 4 个确凿 P0 +… |
 | 08-23 14:49 | 修复任务派发就绪（bug-hunt 收敛后，2026-08-23） | 对 beta.41（a6b2665）压测出的 P0/P1，已把修复拆成 5 个可并行会话，产物在 /var/minis/shared/bug-hunt-pressure/： |
 | 08-23 17:43 | bug-hunt 五修复真机验证通过（2026-08-23 收口完成） | 用户装 beta.50（versionCode 220000050 = main 15ca95c，run 32629219062 绿）后真机验证： |
+| 08-23 18:53 | ↳ browser get_text 大文本 ANR 修复真机验证通过（2026-08-23 晚） | 用户装 beta.52（versionCode 220000052 = main 3576528，run 32634077568 绿）后验证： |
 | 08-24 07:49 | ChatScreen 显示/发送链路审计（2026-08-24，main 0e68209） | 用户报两现象：①大模型显示文本偶尔有问题 ②对话框变大后输入+发送变卡。全链路审计（ChatScreen/ChatViewModel/ChatFlatItems/StableChatRowLedger/AppendOnl… |
 | 08-24 13:40 | 近期修改审计派发（2026-08-24） | 审计范围 a6b2665..0b90cf0（约 30 commits，2 天改动）。初筛发现 1 个确凿问题（SanitizeAgentHistory.kt println 替代 Log.w）+ 3 个灰色区域。已派发 … |
 | 08-24 14:20 | 会话 2 审计完成：工具去重 commit 0b90cf0（2026-08-24） | 审计 /var/minis/shared/recent-fix-audit/reports/report-dedupe.md。结论：无 P0/P1 功能 bug，去重逻辑闭环正确。3 处 🟡 + 1 处日志回归： |
 | 08-24 14:21 | 会话 4：bug-fix 批量审计完成（2026-08-24） | 对 15ca95c octopus merge 的 5 个修复 commit 逐项审计（只读，只读，零冲突）： |
 | 08-24 14:31 | 渲染管线审计（会话 1）发现 P1：turn-end verify 收敛守卫失效 + 测试假绿（2026-08-24） | 审计范围 bee7cc3 + a09206a（渲染管线）。报告 /var/minis/shared/recent-fix-audit/reports/report-render.md。 |
 | 08-24 14:38 | 审计收口：4 会话报告已收齐，施工方案已定（2026-08-24） | 4 个审计会话全部完成，结论：仅 1 个 P1 必修（渲染管线 reconcileAndVerifyTerminalText 收敛守卫失效——settled 后同长重写时 segmenter absorbDivergen… |
+| 08-24 15:51 | ↳ FIX-B 施工完成：低风险收尾修复（2026-08-24） | 分支：fix/sanitize-firstchunk-cleanup（主号 OWNER/RikkaMinis，基于 0b90cf0），commit c78bcca，分支 CI run 32702069207 succes… |
 | 08-24 16:06 | 审计→修复→合并 全闭环完成（2026-08-24） | 4 会话审计收口后拆 2 个施工会话，均已合并 main： |
 | 08-25 22:45 | ⚠️ 记忆更正：D 任务已完成（此前误标）— 2026-08-25 交叉验证 | 更正：此前记忆「D 任务开工准备完成、D 可开工」是错的。用户第一手指出「D 做完了」，交叉验证（git ls-remote + 分支 + CI API）确凿证实： |
 | 08-25 22:50 | 终端 RSS 泄漏 — 源码定位审计结论（2026-08-25 深夜） | 审计范围：/tmp/RikkaMinis（main tip 2f3498f）的 NativeOffload.kt / ExecutionCoordinator.kt / PersistentShell.kt / Offl… |
@@ -992,9 +1037,13 @@
 | 09-06 17:15 | Hermes Agent（Nous Research）吸收分析（2026-09-06） | 源码 /tmp/hermes/hermes-agent-main（20.6 万行 Python），报告 /var/minis/shared/hermes-agent-absorb-analysis.md。 |
 | 09-07 03:35 | 两日改动审计闭环（2026-09-07 凌晨，main @ 2c32d726） | 范围：09-06/09-07 共 13 提交 47 文件 +3521/−131（并发/流恢复/content-filter/验证守卫/hermes guards/负载均衡/claim epoch/worker 规则）逐行… |
 | 09-07 08:33 | ARCHITECTURE.md + dev-history 0907 同步（2026-09-07，main @ 3356a4cd） | 用户要求「做架构全貌文档 + 更新仓库文档」已闭环： |
+| 09-07 10:52 | ↳ ChatScreen 拆分批次 1 合并 main（2026-09-07，main @ cf8d8a93） | 用户要求拆分四个超大文件（ChatScreen 6439 / ChatViewModel 3782 / StreamingMarkdownText 3754 / OpenAIProvider 3174），评估后按四批推进… |
+| 09-07 11:23 | ↳ ChatScreen 拆分批次 2 合并 main（2026-09-07，main @ 16c20c08） | StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMerge.kt（256 行，流式合并纯函数，零 Compose 依赖）+ MarkdownBlock… |
+| 09-07 12:03 | ↳ ChatScreen 四文件拆分批次 3+4 合并 main（2026-09-07，main @ 29a20a47） | 用户拍板批次 3+4 合一个分支做。全部四批拆分完成。 |
 | 09-07 14:25 | Runtime Limits 审计修复合并 main（2026-09-07，main @ 90ec25e） | 用户要求复查 runtime-limits 三提交（d908e90/4f52adb/059aa66）+ 拆分批次。审计实锤 4 个问题，全修，分支 fix/runtime-limits-audit 单提交 90ec25e… |
 | 09-07 21:54 | 规则体系对照复杂度五纪律的复查（2026-09-07，待拍板 2 条） | 用户贴来一段复杂度管理五纪律（地板之上不增一克/边要收费/纠缠最小化/机制可压缩/整体保持可读），问我们的规则体系是否需要吸收。复查结论： |
 | 09-07 21:55 | 双分支预合并审计 + 2 bug 修复 + 合并 main（2026-09-07 深夜，main @ 784c4065） | 任务：用户要求检查云端刚跑完的两个分支 CI（fix/render-progress-channel 61e6822 / fix/browser-filechooser-gesture 70bf2bc1），有 bug 就… |
+| 09-07 22:30 | ↳ 最新包真机验证闭环（2026-09-07 深夜，1.0.0-beta.1372 @ main 784c4065） | 用户确认刚装的最新包（beta.1372，22:06 安装，release CI 34129869414 success）双分支功能全部闭环： |
 | 09-08 13:40 | 环境变量分组分支审计+修复合并 main（2026-09-08，main @ fa87964） | 任务：用户要求审计 fix/envvar-flatten-usage-sheets（4 commit）有 bug 修完再合并。 |
 | 09-08 17:27 | 自动备份 A+B 审计修复 + 合并 main（2026-09-08，main @ 568d87a） | 流程：新会话开场查交接文档 + 分支 CI（run 34205678023 f8a2372 已 success）→ 本地全量审计（17 文件 1108 行）→ 发现 2 真 bug 修复 → 分支 CI run 3420… |
 | 09-08 19:23 | auto/ 目录分离分支审计+合并 main（2026-09-08，main @ 6e6b822） | 用户指令：检查分支 feat/backup-auto-remote-dir（3c155f6）是否引入 bug，有则修、无则合并。新会话流程：交接文档 → 本地审计 → CI 结论。 |
@@ -1032,6 +1081,7 @@
 | 09-13 23:23 | ★ 2026-09-13 完善度扫描收尾：打包修复分支 CI 绿，待真机验证 + 拍板合并 | 分支 fix/completeness-followups-0913 @ a330ce2f（基于 main d3873c0e，7 文件 +143/−4），CI run 34764642145 success（步骤 3 门… |
 | 09-14 00:07 | 2026-09-13 完善度修复全链路闭环完成（release CI 已确认 success） | 用户说"触发了就不用等了"，但查证发现 release CI run 1505 已经是 completed success（head a330ce2f）——全链路闭环： |
 | 09-14 09:07 | 度量存活度审计（代码声明 × 日志实测）—— 新方法 + 首批发现（2026-09-14，main @ a82f425a） | 任务：用户提出"度量死了应该是一类问题，用积累的日志交叉验证：哪些是代码上说有、日志里没有的"。做了系统化审计。 |
+| 09-14 09:43 | ↳ 处置批次打包完成并合并：main = `2dc6e0d4`（2026-09-14） | 用户确认负载均衡已关闭 → ChatVMRouting=0 属预期（该行无条件打印，0 即"没轮转过"），从待查清单移除。 |
 | 09-14 09:52 | 09-14 两个 diag 提交独立审计：干净，4 个 LOW（main @ 2dc6e0d4） | 范围：a82f425a（reentry 锚点 + stream tick 复活）+ 2dc6e0d4（RenderCensus 尺子 + 删 3 死埋点），共 9 文件。 |
 | 09-14 12:46 | 2026-09-14 文档刷新闭环：main = 582de2ed（docs: refresh architecture/philosophy + add observability design doc） | 范围（3 文件，+239/−24，docs-only 分支 docs/refresh-0914 → ff 直推 main → 远端分支已删，终验仅剩 main；docs/ 不在 CI paths 过滤内 → 不触发构建）… |
 | 09-14 18:47 | 09-14 晚：今日 10 commit 独立审计 — 无 HIGH/MED，3 个 LOW | 范围：a82f425/2dc6e0d/5862020/fe99158/fa2ec1e/1362496（diag 批）+ fbc50cd（截断守卫）/27265bb（preflight 校验）/a383f8c（敏感转录）/… |
@@ -1050,7 +1100,7 @@
 
 ## 12. 多会话并行协作 / 派发 / 交接
 
-**跨度** 2026-08-04 ～ 2026-09-15 · **147 条** · **状态** 成熟（skill: task-dispatch / git-parallel-collaboration / rikkaminis-dev-methodology）
+**跨度** 2026-08-04 ～ 2026-09-15 · **158 条** · **状态** 成熟（skill: task-dispatch / git-parallel-collaboration / rikkaminis-dev-methodology）
 
 **叙事**：08-07 多对话框并发操作同一 worktree 翻车（native OOM 修复）→ 08-12 多任务并行推进模式确立 → 08-15 T1–T10 十会话派发（平衡点施工）→ 08-18 RC 整改凭编号领取 → 08-22 小号 TF-A..TF-J → 08-23 bug-hunt 五会话 → 09-13 两条纪律固化：**每会话独立 clone 绝不共享 .git** + **两分支同基各一 commit 时第二个必须 rebase**。
 
@@ -1076,6 +1126,7 @@
 | 08-10 13:55 | Circuit 正式定名 + 交接归档（2026-08-10 收尾） | 从 RikkaMinis 抽取的"自我修改能力"最小核心，走完全程： |
 | 08-12 15:10 | 多任务并行推进模式（2026-08-12 用户决策） | 用户批评"逐个等 CI 太慢"，要求任务分解、独立分支并行推进。工作方式： |
 | 08-12 15:13 | 并行任务清单已建立（2026-08-12）—— 多会话协作模式 | 用户要求把 OmniBot 借鉴点变成待办清单，多开对话各自领任务并行开发。清单文件： |
+| 08-12 15:51 | ↳ T3 失败学习自动化钩子完成（feat/failure-auto-log → main 667f17d） | 改动： |
 | 08-13 03:52 | 可并行分配的 Bug 修复任务清单（2026-08-13，待多会话并行执行） | 来源：套餐全库分析 + 健康度热力图筛选出的可定位 bug（非架构重构）。每个任务独立分支、独立会话执行，互不依赖。 |
 | 08-13 08:48 | 并行任务 A：浏览器风险挑战检测 + throttle 控制 | 背景 |
 | 08-13 08:48 | 并行任务 B：流式文本原始层合并保护 | 背景 |
@@ -1107,6 +1158,7 @@
 | 08-15 10:21 | ↳ T10 验收准备完成 — 验收矩阵已交付（2026-08-15 下午） | 任务 3（可并行清单）完成：纯文档任务，未改代码、未跑测试。 |
 | 08-15 10:25 | 可并行任务状态更新（2026-08-15 下午） | 任务 1（C 类组件渲染测试）已在 08-12 合并 main（7e64fc5f），派发文件过时，无需施工。 |
 | 08-15 10:36 | ↳ 任务4完成：boot /bin/sh 误报修复 — 已合并 main（7af5a08，2026-08-15） | 任务来源：可并行任务清单 #4（/var/minis/shared/boot-sh-fix-dispatch.md）。 |
+| 08-15 11:04 | ↳ T7-A 完成：观察模式 trace 接入 — 已合并 main（4dd9557，2026-08-15） | T7-A：只接 trace 和观察模式，不改变任何 retry/fallback/UI 行为 |
 | 08-15 15:20 | T4-B 修复交接（2026-08-15 凌晨） | main 当前状态：c14d29f（#751 FAILED）——冲突标记残留导致编译失败，F09/F14 测试失败。 |
 | 08-15 20:30 | 修复：流式回答内容"跳动"（ToolCallRunGroup animateContentSize 冲突）（2026-08-15 晚） | 用户现象：大模型回答期间，渲染内容"跳动一下"（可复现）。 |
 | 08-16 22:42 | fix/memory-dynamic-budget 编译失败任务交接 | commit 1d1ac2290efa 编译失败（CI run 31951519857），根因：动态预算常量定义在 object ExecutionCoordinator 内部作为 private const val，但… |
@@ -1131,26 +1183,33 @@
 | 08-20 15:32 | 任务状态收口：D-3 已合并 + 任务清单已更新（2026-08-20 15:35） | main 现在是 d8d9f0a（含 D-3 provider-rss 打点，release CI 绿 run 32343017398）。 |
 | 08-20 15:39 | D-4b 领任务启动（2026-08-20） | 领 D-4b（长时并发聊天压测，定位 6GB 泄漏真凶）： |
 | 08-20 16:40 | bug-hunt 2026-08-19 最终收口（2026-08-20 16:40） | 6GB native OOM 事故完成「止血 → 定位 → 并发上限放宽验证」三阶段闭环，全部收口。 |
+| 08-20 17:11 | ↳ 并发会话上限放开（2026-08-20 收尾） | 用户要求把并发会话上限「彻底放开」，不要最高只能是 4。理由是应用已足够稳定。 |
 | 08-21 20:46 | 内存隔离 Phase 0+1 闭环 + 并行派发（2026-08-21 晚） | Phase 0 fix/offload-bounded-admission → main fa28549：固定 ThreadPoolExecutor 替换 per-connection thread+Semaphore（… |
 | 08-21 22:19 | Phase 3 browserservice 中途交接（2026-08-21，用户倾向新会话接手） | 分支 feat/browser-agent-process tip 332f30e，已基于最新 main 0a43b5c（含 Phase 2+4），本地干净仓库在 /tmp/rb-c（新 clone 专属，/tmp/rb… |
+| 08-21 22:34 | ↳ Phase 3 browserservice 合并闭环完成（2026-08-21，会话 C 收尾） | 分支 feat/browser-agent-process tip 332f30e（基于 main 0a43b5c，8 commits）重跑分支 CI：run 32491582998 success，head_sha=3… |
 | 08-22 16:48 | [dual-appid] lab 包闪退根因修复（native-offload abstract socket 冲突） | 继续 dual-appid 前置工作。小号 lab APK（applicationId=com.openminis.app.lab，已生效）安装后闪退，logcat -b crash 抓到 P0根因： |
 | 08-22 17:19 | [小号内存治理] 交接：用户决定在小号补 D-4b 验证（聊天 provider-rss 泄漏判定） | 用户当前明确决策链（2026-08-22 晚，本会话对齐）： |
 | 08-22 18:38 | 小号内存治理：任务已派发（2026-08-22 晚） | 方案文档已从 workspace 备份到笔记文件夹（/var/minis/mounts/笔记/RikkaMinis开发档案/小号内存飙升根治方案-Provider-Worker-Hard-Boundary.md，sha2… |
 | 08-22 21:31 | 小号内存治理：五分支全部完成，已收口（2026-08-22 晚） | TF-A/B/C/D/E 五分支真实完成并独立核实（非仅转述）：A diag/provider-rss-v2 c8ff0a4 (run 32569593961) / B fix/modelservice-terminal… |
+| 08-22 21:54 | ↳ 真机日志推翻 worker 协议闭环（2026-08-22 晚） | TF-E APK 真机日志发现 P0：:modelservice PID 30053 因 ModelExecutionService.finishRequest() 写 state.json 时 run 目录已被主进程删… |
+| 08-22 22:58 | ↳ TF-F modelservice run-dir 所有权 P0 修复完成（会话 F，2026-08-22 晚） | P0 根因：TF-E APK 真机 crash（:modelservice PID 30053 state.json ENOENT）——ChatStreamOffloadHandler.finally 在 result.… |
 | 08-22 23:56 | [会话 G 交接] TF-F 后 modelservice worker 仍被 SIGKILL——根因与施工方案（2026-08-22 深夜） | 用户最新证据：附件 minis-2026-08-22__3_.log（23:00-23:01，主进程 PID 14059）。lab 包 1.0.0-beta.28（TF-F 4967a9a）聊天仍失败：23:00:18/… |
 | 08-23 01:30 | [会话 G 交接] TF-G worker SIGKILL P0 修复完成（2026-08-23 凌晨） | 分支 fix/modelservice-worker-ack-liveness（基于 TF-F 4967a9a），tip 6c0bb32，CI run 32586641059 全绿（22 step 全 success，h… |
+| 08-23 05:17 | ↳ TF-G 真机复测推翻协议闭环 | 用户提供 2026-08-23 真机日志，已安装确认是 TF-G beta.33（6c0bb32），但 9 次 modelservice 流均在约 5 秒客户端 grace 后报 DIED_AFTER_READY_NO_… |
 | 08-23 13:37 | Bug Hunt + 压力测试 多会话派发（2026-08-23） | 用户拍板：对小号 lab 包 com.openminis.app.lab（beta.41 = tip a6b2665，分支 fix/modelservice-before-dispatch-notify）做「找 bug … |
 | 08-23 14:26 | 会话 E 完成：记忆/压缩/宏/子代理/失败钩子 压测（2026-08-23） | 方法：沙箱装 OpenJDK17 + kotlinc 1.9.24，直接编译 app 自身纯逻辑源码（MemoryRollupEngine/ToolFailureHook/ContextCompactor/MemoryR… |
 | 08-23 14:47 | 会话收敛：bug-hunt-pressure 收口完成（2026-08-23 晚） | 5 条攻击面全跑完，beta.41（a6b2665）心跳修复未复现假死（logcat 678 万行 0 命中 worker died/proc_missing/DIED/beat_stale）。挖出 4 个确凿 P0 +… |
 | 08-23 14:49 | 修复任务派发就绪（bug-hunt 收敛后，2026-08-23） | 对 beta.41（a6b2665）压测出的 P0/P1，已把修复拆成 5 个可并行会话，产物在 /var/minis/shared/bug-hunt-pressure/： |
 | 08-23 16:44 | 修复收口完成（2026-08-23 晚）— 5/5 修复分支 CI 全绿 | 基于 a6b2665 的 5 条修复分支全部完成并推送小号远端，分支 CI 全绿（head_sha 与 tip 逐一核实）： |
 | 08-23 17:43 | bug-hunt 五修复真机验证通过（2026-08-23 收口完成） | 用户装 beta.50（versionCode 220000050 = main 15ca95c，run 32629219062 绿）后真机验证： |
+| 08-23 18:53 | ↳ browser get_text 大文本 ANR 修复真机验证通过（2026-08-23 晚） | 用户装 beta.52（versionCode 220000052 = main 3576528，run 32634077568 绿）后验证： |
 | 08-24 08:00 | ChatScreen 渲染修复方案已定稿并派发（2026-08-24） | 方案文件：/var/minis/shared/chat-render-composer-audit/fix-plan.md（定稿）+ FIX-TASK.md（任务书）。 |
 | 08-24 10:52 | 首块超时「provider produced no first chunk within 30000ms」调查 + 委托派发（2026-08-24） | 测试/证据：真机日志 08-24 该错误 90 次（07:42 后集中），08-22/08-23 = 0 次真实运行；涉及 deepseek-v4-flash/gpt-5.6-luna/deepseek-v4-pro，走… |
 | 08-24 11:42 | 首块超时修复 release CI 全绿 + 收口（2026-08-24） | release CI run 32686587661 success，head_sha=62d3db4a 已核实一致（防假绿）。远端分支 diag/first-chunk-timeout 已删除。闭环完成：调查 → 修复… |
 | 08-24 11:57 | 工具去重修复已合入主号 main：release CI 全绿 + 收口（2026-08-24） | 合并状态：用户拍板「没问题就汇聚到主号」→ 分支 fix/tool-call-dedupe rebase 到最新 main（62d3db4，首块超时修复已合入）→ 新 commit 0b90cf0 → ff 合并 mai… |
 | 08-24 13:40 | 近期修改审计派发（2026-08-24） | 审计范围 a6b2665..0b90cf0（约 30 commits，2 天改动）。初筛发现 1 个确凿问题（SanitizeAgentHistory.kt println 替代 Log.w）+ 3 个灰色区域。已派发 … |
 | 08-24 14:38 | 审计收口：4 会话报告已收齐，施工方案已定（2026-08-24） | 4 个审计会话全部完成，结论：仅 1 个 P1 必修（渲染管线 reconcileAndVerifyTerminalText 收敛守卫失效——settled 后同长重写时 segmenter absorbDivergen… |
+| 08-24 15:51 | ↳ FIX-B 施工完成：低风险收尾修复（2026-08-24） | 分支：fix/sanitize-firstchunk-cleanup（主号 OWNER/RikkaMinis，基于 0b90cf0），commit c78bcca，分支 CI run 32702069207 succes… |
 | 08-24 18:01 | 思考模式修复已合并 main + CI 工具化收口（2026-08-24 晚） | 思考模式重开入口修复（commit 6ea8c1b）已 ff 合并主号 main（108c5a2→6ea8c1b）并推送。改动：ChatScreen.kt + ChatThinkingBadgeUI.kt，徽章显示条件从… |
 | 08-24 18:48 | 更新：手动添加大模型删不掉 bug 已派发修复任务，任务文件 = 自包含（背景+3方案+步骤+验收），路径 /var/m | 更新：手动添加大模型删不掉 bug 已派发修复任务，任务文件 = 自包含（背景+3方案+步骤+验收），路径 /var/minis/shared/model-delete-bug-diagnosis.md（即之前的诊断报告… |
 | 08-25 09:00 | Token 用量统计优化 A+B 已派发（2026-08-25） | 用户拍板方案 A（归属正确性）+ B（聚合性能+体验），已写好两份自包含任务书派发： |
@@ -1169,8 +1228,10 @@
 | 09-01 16:54 | place-storm 钳位修复汇入主号收口（2026-09-01） | 用户拍板：小号 70f927d1 的 SIMPLE_FOLLOW 钳位守卫修复已在 lab 真机验证（日志 minis-2026-09-01__3_.log 全绿），汇入主号。 |
 | 09-02 12:26 | Bug-Hunt 四会话审计收口（2026-09-02） | 四会话并行审计 /tmp/rikka @ de2dca7d：HIGH 11 报出 / 10 实锤 1 误报，MEDIUM ~15 实锤。收口报告：/var/minis/shared/rikka-bug-hunt/repo… |
 | 09-02 16:39 | FE-5 第二批拆分完成 + 第三批交接（2026-09-02） | 第二批（route B 工具执行层）已合并 main b38a186f：ChatViewModel 11899→11528（-371）。两个新文件： |
+| 09-02 19:01 | ↳ FE-5 第三批 route C 前两步完成（2026-09-02，commit f297481 合并 main） | 交付：ChatViewModel 11528→11037（-491）。两个新文件 + 1 提升类： |
 | 09-02 20:24 | FE-5 route C ③ 完成待 CI + 第四批交接（2026-09-02 晚） | route C ③（AgentLoopEngine 主体搬迁）已完成编码，commit be7d3a5，分支 refactor/fe5-route-c-agentloop-engine2，CI run 336294072… |
 | 09-03 01:08 | FE-5 第五批第一簇完成 + 第二簇交接（2026-09-03） | 进度：ChatViewModel 12338 → 6499（累计 −5839，约 47%）。目标 3500-4000，还差 ~2500-3000。 |
+| 09-03 07:28 | ↳ FE-5 第五批第二簇完成（2026-09-03） | 交付：分支 refactor/fe5-batch6-cluster2，commit 9b8a0a03 + 8c451f7f + 5236b8bd，CI run 33694126769 success，ff 合并 main… |
 | 09-03 10:06 | FE-5 第三簇交接前状态快照（2026-09-03 会话收尾） | main @ f8e3b6b（本地=远端一致，工作树干净）。release CI 33706046499 触发中（f8e3b6b 的完整验证）。 |
 | 09-03 19:34 | FE-5 bug-audit 全库扫描 + 修复收口（2026-09-03） | 全库 678 文件 / 199,705 行 / 9.2MB，7 域并行审计（deepseek-v4-flash-0731 带工具 + R 类拆分规则库）。报出 High 7 / Medium 19 / Low 13 = … |
 | 09-04 00:19 | subagent 跨会话派发功能验证（2026-09-04） | 验证了 HEAD 813eaf6 的 subagent 跨会话派发功能（eaa3a10 引入，SessionsOffloadHandler + SubagentPrefs + minis-sessions-cli sen… |
@@ -1206,7 +1267,7 @@
 
 ## 13. CI / 构建 / 发布流水线
 
-**跨度** 2026-08-03 ～ 2026-09-15 · **128 条** · **状态** 稳定（Publish 步骤已加 `if: refs/heads/main` 门控）
+**跨度** 2026-08-03 ～ 2026-09-15 · **135 条** · **状态** 稳定（Publish 步骤已加 `if: refs/heads/main` 门控）
 
 **叙事**：08-04 main 编译被 WebDAV 提交弄坏（连红 4 个 run）→ 08-05 android-latest 被分支构建污染 → workflow 门控修复 → 08-17 **CI 缓存恢复旧 native .so**（Tier 0 真 bug）→ 08-24 gh_ci_wait.sh 工具化 + 重复构建幂等守卫 → 09-10 语法门 grep 大小写坑 → 09-14 workflow_dispatch 并发竞态。**「CI 绿 ≠ 逻辑对」这条纪律就是从这条 saga 长出来的。**
 
@@ -1239,9 +1300,11 @@
 | 08-08 00:10 | 关键坑：Kotlin 前向引用导致 compileReleaseKotlin FAILED（CI 单测组合步骤误报） | 现象 |
 | 08-08 00:35 | 终端沙盒修复施工 — CI 编译通过（2026-08-08） | 在分支 fix/sandbox-audit-2026-08-08（commit 5d0faeb，基于 b45a68a）完成 4+1 项沙盒修复，push 后 dispatch CI run 31197544235，编译成… |
 | 08-08 01:27 | 统筹合并完成 — provider/memory/token 三分支合 main + CI 修复（2026-08-08） | 背景 |
+| 08-08 01:48 | ↳ 未合并分支已全部合并到 main（2026-08-08） | feat/logging-module-optimize (092ae88) — 日志模块优化：降低 flush 节奏、修日志读取 OOM、容量上限、i18n crash 区块 → ff 合并 main |
 | 08-08 10:08 | promote-draft-on-new-chat 分支已推送，CI 构建中 | 分支 feat/chat-promote-draft-on-new-chat 已推送（commit 82b15c8），CI run 31234268332（workflow_dispatch，in_progress） |
 | 08-08 10:15 | 输入模块优化：hasText 统一 + T217-2 composition 门控（2026-08-08） | 分支 fix/input-composer-hastext-composition（基于 main 0d968d4，commit 38d84fd），CI run 31234234221 success。 |
 | 08-08 10:37 | 任务完成提示音 — feat/completion-sound 已推送 CI 绿 | 分支：feat/completion-sound（commit c8f49e8，基于 main 82b15c8，未被并发会话改动冲突） |
+| 08-08 10:50 | ↳ 三个待合并分支已全部合并 main（2026-08-08） | 合并时 main 基线：82b15c8（promote-draft） |
 | 08-08 11:28 | 灵动岛焦点通知测试 — CI 已绿，待用户装包验证（2026-08-08） | 分支 feat/focus-notification-dev-test（commit d256c64），CI run 31236760448 success |
 | 08-08 11:52 | 移除冗余关闭/返回按钮 — 已提交推送，CI 验证中（2026-08-08） | 分支 feat/remove-redundant-close-buttons（commit 8e4bf92，基于 feat/recovery-strategy HEAD 9874a4f） |
 | 08-08 11:59 | ↳ 四个待合并分支已全部合并 main（2026-08-08，HEAD b000e31） | 合并方式：feat/recovery-strategy(9874a4f)、feat/remove-redundant-close-buttons(8e4bf92) 线性 ff；perf/immutable-chat-mo… |
@@ -1255,6 +1318,7 @@
 | 08-12 12:37 | 会话存储回收功能完成（feat/session-storage-reclamation → main bfd621c，CI 双绿） | 用户报本地设置存储页看到工具类对话体积接近 200MB，与备份 OOM（ConfigBackup.export 打包会话内容）同源——会话目录无约束累积、无自动回收。 |
 | 08-12 15:54 | T5 上下文压缩引擎完成（feat/context-compactor → main bbf8ab1，CI 绿） | 改动：新文件 conversation/ContextCompactor.kt（纯逻辑决策引擎）+ ChatViewModel 挂载 + 单测。 |
 | 08-12 15:55 | ↳ T3 失败学习自动化钩子完成（feat/failure-auto-log → main 667f17d） | 2026-08-13 |
+| 08-13 03:30 | ↳ 任务 B：核心文件补测试 ✅ 完成（2026-08-13） | 分支 fix/core-file-tests → rebase 到 main（f76e5d1）后合并推送，分支已删（本地+远端） |
 | 08-13 12:13 | Circuit 自进化实验（2026-08-13 11:06-12:13，无限额度临时密钥） | 实验设定 |
 | 08-13 14:27 | 核心大文件纯函数测试补全完成（2026-08-13） | 补了 ChatViewModel（11245行）、BrowserUseManager（1726行）、ProviderRepository（2400行）三个大文件中的纯函数测试。 |
 | 08-14 00:37 | 最终确认：main 6823ca4 release 构建 31720574220 success（2026-08-13 | 最终确认：main 6823ca4 release 构建 #31720574220 success（2026-08-13 16:2x）。三修复分支（A i18n / B 主题色 / C 生命周期）全部合并 main 并过… |
@@ -1272,10 +1336,12 @@
 | 08-16 23:48 | 任务一 release 绿 + 任务二实现提交（2026-08-16 晚） | 任务一（合并 fix/memory-dynamic-budget）全面闭环： |
 | 08-17 08:08 | 打断残留修复终极根因：prune 抢先 + rowsTouched 门控 + thinking 折叠信号（2026-08-17 系统性收口） | 用户关键观察（扭转方向，价值极高）：切对话再切回 → 残留消失 → 证明 canonical 数据从头到尾正确，问题纯在"已发布行未刷新 UI"。用户最后拍板：不追求"消失"，而是 UX——打断后的旧回合应呈现"已停止"… |
 | 08-17 13:30 | CI 坑：`cache: gradle` 恢复旧 native .so（Tier 0 抓到的真 bug，2026-08-17） | 症状：改了 crash_handler.cpp（加 Process/VmRSS/VmPeak/Threads 字段 + nativeTriggerAbort 测试入口），CI 两次绿（run 828/331），但下载下来… |
+| 08-17 14:42 | ↳ ✅ crash-handler Tier 0 修复完整闭环（2026-08-17 下午） | 背景：用户真机装 APK 点 Trigger Native Crash 后崩溃日志显示旧格式（Time: 行、无 Process/VmRSS）——CI 绿但 .so 是旧的。 |
 | 08-17 16:02 | 方向A实施进展：Step2调度层完成 + CI绿（2026-08-17 下午） | 分支 feat/chat-stream-modelservice（本地 /tmp/rikka-membudget-merge），f0c90a4 CI run 32007476884 绿。 |
 | 08-17 16:39 | 方向A Step3+4 实施：主聊天切流已 CI 绿，Step4 已提交未 push（2026-08-17） | 分支 feat/chat-stream-modelservice（/tmp/rikka-membudget-merge）渐进推进： |
 | 08-17 16:45 | ↳ 方向A Step4 进展补充：重复 import 修复已提交未完全确认 push（2026-08-17 17:0x） | Step4 首跑 CI（61c7f16, run 32011476823）失败，根因：ExecutionCoordinator.kt L15/L16 重复 import ModelExecutionService → C… |
 | 08-17 17:00 | 方向A Step4 已合并 main（a51d1a8, release CI 待触） | Step4 压力回收（kill+restart :modelservice）修复重复 import 后 commit a51d1a8 → CI run 32011856601 success → ff 合并 main（8… |
+| 08-17 17:31 | ↳ 方向A Step5 真机验证通过 — 全链路闭环（2026-08-17） | 用户真机验证通过：此前 native 堆 5GB 锁死的那个老会话，装新 APK（main a51d1a8）后继续推进，不再卡死、变平稳。这直接证明方向A切流（Step3 主聊天流式 → :modelservice）+ … |
 | 08-20 11:21 | T1 trim 语义修正 CI 绿 + 拓扑澄清（2026-08-20） | 分支 fix/trim-memory-semantics（1954bac）CI run 32325951490 success。 |
 | 08-20 11:33 | ↳ T1 合并 main 闭环（2026-08-20） | 方案 B（用户拍板：打点 + trim 一次 ff 一起进）。 |
 | 08-22 01:47 | 2026-08-22 对话崩溃排查 + main 回滚 #985 + release 说明（会话收尾） | 用户决策：最新版（Phase 0-4 内存隔离 + :modelservice/:toolservice/:browserservice 三进程 + bridge）反复出问题，用户拍板回滚 main 到 #985（75a… |
@@ -1299,6 +1365,7 @@
 | 08-27 18:23 | 会话任务 H 第四轮方案 B 施工完成（2026-08-27，commit a67e7fe，CI run #1127 success） | 背景：历史对话「打开定位到底部」第四轮（55b85b1，sessionLoaded 门控）用户真机反馈「先到底部又被拽走」。本会话核实出确定性缺陷：sessionLoaded 在 loadSession finally … |
 | 09-02 20:24 | FE-5 route C ③ 完成待 CI + 第四批交接（2026-09-02 晚） | route C ③（AgentLoopEngine 主体搬迁）已完成编码，commit be7d3a5，分支 refactor/fe5-route-c-agentloop-engine2，CI run 336294072… |
 | 09-02 20:53 | FE-5 route C ③ CI 红修复 + 沙箱重建（2026-09-02 晚） | CI run 33629407247 失败原因（交接文档预言的「引擎没过真实 Android 编译链」）：全是编译错误—— |
+| 09-02 23:17 | ↳ FE-5 第四/五批合并拆分（2026-09-02 晚，commit 9a3949f） | 用户拍板：后面几批合并一起拆，拆完做系统性 bug 扫描（llm-bug-audit），不必逐批保真。先彻底解决「拆」再扫 bug。 |
 | 09-04 21:29 | thinking-rules-port 分支待合并（2026-09-04，CI f7865b2b run 33873927997 success） |  |
 | 09-04 21:35 | thinking-rules-port 分支待合并（2026-09-04，CI f7865b2b run 33873927997 success） | 用户开 bug-audit 会话处理该分支的 bug hunt；本会话收尾，未做 ff 合并 main。 |
 | 09-06 14:02 | 小号同步 CI 闭环确认（2026-09-06 13:55） | 主号→小号 merge 350843f 的 CI success（run 34014575216，head_sha=350843f 核对一致）： |
@@ -1310,6 +1377,7 @@
 | 09-10 03:51 | 语法门 grep 大小写坑 + 括号配平检查（2026-09-10） | 语法门 grep 大小写坑 + 括号配平检查（2026-09-10） |
 | 09-10 08:09 | 工具显示两处修复（分支 fix/shell-stream-partial-line @ fb14213b，CI #1445 绿，用户拍板暂不合并） | 用户两个问题 → 两个根因（都在显示层，模型侧数据是干净的） |
 | 09-10 08:11 | 压缩提示 UX 修复（分支 fix/compact-divider-ux @ 3da98de1，已推送未合并） | 用户报的两个问题：①「已压缩 N 条消息」细线+10sp 灰字体验差 ②提示出现后回答继续长在提示上方（直觉应在下方）。 |
+| 09-10 08:26 | ↳ 两个分支合并前检查 + 合并 main（2026-09-10，main @ 31c8abb9） | 指令：检查 fix/shell-stream-partial-line + fix/compact-divider-ux 是否引入 bug，无则合并。 |
 | 09-11 20:42 | key-roulette release CI 终态确认（2026-09-11 晚） | main @ 3a988d5f 的 release CI run 34556828343 已确认 success（bridge /status/main 实测）。至此 fix/key-roulette-refresh 全… |
 | 09-11 21:28 | fix/singleline-paste-newline — 单行输入框粘贴换行折叠（2026-09-11 晚，CI 绿，待拍板合并） | 问题（用户报告）：向输入框粘贴多行文本（如 newapi 的 headers、多行 key），只显示第一行，其余被裁；删掉可见字符后字段看起来空了、实际还残留不可见 \n。根因：Compose singleLine=tr… |
 | 09-11 21:30 | ↳ singleline-paste-newline 合并收尾（main @ f4b6c4a） | 合并：分支 CI #1464 success（head f4b6c4a 三方一致）→ 用户拍板 → refspec 直推 ff（3a988d5..f4b6c4a，无 force）→ ls-remote 复核 main=f… |
@@ -1343,7 +1411,7 @@
 
 ## 14. 开发档案 / 记忆 / 工具链
 
-**跨度** 2026-08-03 ～ 2026-09-15 · **66 条** · **状态** 常态维护（skill: dev-history-sync，每次 dev 会话收尾同步）
+**跨度** 2026-08-03 ～ 2026-09-15 · **71 条** · **状态** 常态维护（skill: dev-history-sync，每次 dev 会话收尾同步）
 
 **叙事**：08-06 经验记忆引擎概念 → 08-08 三平台技能架构固化 → 08-14 档案首次从记忆重建 → 08-16/24/09-04/05/07/08/10/12/13/14 反复重建（**每次重建都在修解析器或脱敏规则**）→ 09-06 知识图谱 + MCP memory → 09-14 日志「可消费性」诊断 → 09-15 sanitize 头部刷新固化。**档案本身是被反复施工的产物，不是一次性导出。**
 
@@ -1358,6 +1426,8 @@
 | 08-08 16:01 | 三平台技能架构（2026-08-08） | 三个平台各司其职，技能统一备份在 GitHub： |
 | 08-08 17:06 | 三平台基础设施全覆盖 — 盘点与固化（2026-08-08） | 用户批评：GitHub、CF、HF 三个平台都配了基础设施，一个出问题其他两个必然也有同样问题（没先查 skill 裸调 API）。 |
 | 08-08 18:55 | 合并 feat/bundled-platform-skills → main，修复"内置集成显示需配置"（2026-08-08） | 背景：用户问"内置集成为什么显示需配置"。排查发现： |
+| 08-08 19:11 | ↳ 集成状态诊断日志 — feat/integration-status-diagnostics（2026-08-08） | 背景：用户反映"内置集成显示需配置"，但新会话显示"完整 tier 2"——同一个运行时代码，结果不同。经排查（源码里只有动态 buildIntegrationStatus，无静态模板；日志干净无 keystore/读取… |
+| 08-08 19:19 | ↳ ✅ feat/integration-status-diagnostics 已合并 main（2026-08-08） | run #279 success → ff 合并 main（48fd1aa→13f0ee7）→ 推送 main（gh_sync.sh push-main）→ 分支本地+远端已删 |
 | 08-08 20:36 | 三平台集成文档化 — README 补全（2026-08-08） | 用户指出"三大平台纳入"是一次重大升级，不是小修小补，README 必须写清楚，否则以后自己都会忘、别人也看不懂。 |
 | 08-08 21:28 | 教训：平台技能判定不能用 importSource | 平台集成卡片的筛选条件不能用 importSource == BUNDLED——老用户的技能可能是通过 SESSION/FILE 等途径安装的，installBundledSkills() 在版本号已 ≥ 捆绑版时会 s… |
 | 08-08 22:46 | RikkaMinis 新图标设计语义 | 用户希望手机端智能体应用图标表达：控制论在应然与实然间搭桥、系统机制相互作用、GEB 怪圈，以及从上游 fork 后“边使用边开发、边开发边使用”的本地开发→云端编译→循环迭代。视觉压缩原则：不堆叠概念，不用机器人/脑/… |
@@ -1393,6 +1463,9 @@
 | 09-06 19:40 | 会话交接（2026-09-06 晚）→ 交接文档 /var/minis/shared/hermes-tier1-handoff.md | main @ 1150e05f（tier-1 harness 四改动 + EOF 断流静默停修复，双分支 CI 绿 ff 合并）。main release CI run 34030771852 结论未等——新会话开场先查… |
 | 09-06 23:58 | dev-history 0906 同步 + 主号→小号全量同步（2026-09-06 深夜） | 主号 main @ 7d928fa3（docs(dev-history): sync archive to 2026-09-06, 794 entries / 35 days）： |
 | 09-07 08:33 | ARCHITECTURE.md + dev-history 0907 同步（2026-09-07，main @ 3356a4cd） | 用户要求「做架构全貌文档 + 更新仓库文档」已闭环： |
+| 09-07 10:52 | ↳ ChatScreen 拆分批次 1 合并 main（2026-09-07，main @ cf8d8a93） | 用户要求拆分四个超大文件（ChatScreen 6439 / ChatViewModel 3782 / StreamingMarkdownText 3754 / OpenAIProvider 3174），评估后按四批推进… |
+| 09-07 11:23 | ↳ ChatScreen 拆分批次 2 合并 main（2026-09-07，main @ 16c20c08） | StreamingMarkdownText.kt 3755 → 3017 行，两个新文件：MarkdownStreamMerge.kt（256 行，流式合并纯函数，零 Compose 依赖）+ MarkdownBlock… |
+| 09-07 12:03 | ↳ ChatScreen 四文件拆分批次 3+4 合并 main（2026-09-07，main @ 29a20a47） | 用户拍板批次 3+4 合一个分支做。全部四批拆分完成。 |
 | 09-08 14:00 | 文档同步：dev-history + README 致谢更新（2026-09-08，main @ ec39da7） | 用户要求"文档与事实不相符的部分更新一下，readme 也是，致谢缺了一些，还有三平台的之类的"。已完成： |
 | 09-09 18:50 | T7 browser+webapp+mcp 域审计完成（1 HIGH / 3 MEDIUM / 5 LOW） | 报告：/var/minis/shared/global-bug-audit-0909/reports/session-T7.md。扫描 29 文件/9647 行。 |
 | 09-10 15:08 | dev-history 重建 882 条 + 小号同步机制实测通过（2026-09-10 下午收尾，主仓 main @ 68f5715） | ① 文档更新：rebuild_dev_history.py + sanitize → 882 条 / 39 天 / fences 32 even / outOrder 0 → 复制进主仓 docs/dev-history… |
@@ -1418,7 +1491,7 @@
 
 ## 15. 会话 / 导航 / 抽屉交互
 
-**跨度** 2026-08-03 ～ 2026-09-15 · **59 条** · **状态** 已闭环（09-01 后未再复现）
+**跨度** 2026-08-03 ～ 2026-09-15 · **61 条** · **状态** 已闭环（09-01 后未再复现）
 
 **叙事**：08-03 空对话残留 → 08-04 左滑历史抽屉 + 新建对话弹窗 → 08-06 系统返回不进 SESSION_LIST + 双击返回 → 08-07 重启后进列表页而非新会话 → 08-18 RC10 深链路径穿越 → 09-01 launch-resume 导航修复 → 09-13 冷打开空白。**「打开应用后我在哪」这个问题被修了 6 次**，每次都是不同的入口（返回键 / 重启 / 深链 / 冷启）。
 
@@ -1456,6 +1529,7 @@
 | 08-12 12:42 | 会话存储回收功能真机验证通过（2026-08-12 用户确认） | Clear（留文字删文件）：存储页逐会话清空后，体积释放，对话历史条目和内容不变，符合预期 ✅ |
 | 08-12 15:54 | T5 上下文压缩引擎完成（feat/context-compactor → main bbf8ab1，CI 绿） | 改动：新文件 conversation/ContextCompactor.kt（纯逻辑决策引擎）+ ChatViewModel 挂载 + 单测。 |
 | 08-12 15:55 | ↳ T3 失败学习自动化钩子完成（feat/failure-auto-log → main 667f17d） | 2026-08-13 |
+| 08-13 03:30 | ↳ 任务 B：核心文件补测试 ✅ 完成（2026-08-13） | 分支 fix/core-file-tests → rebase 到 main（f76e5d1）后合并推送，分支已删（本地+远端） |
 | 08-13 11:33 | 冷启动卡顿分析（2026-08-13 用户日志） | 用户另一台设备日志显示进入聊天页面时有"卡住"感觉。根因分析： |
 | 08-13 21:26 | 【BUG 调查】rootfs 周期性重建清空 apk 包 + bash 不恢复（2026-08-13 晚） | 现象：会话中途 curl/python3/bash 全部消失，apk add 重装后约 30 分钟又丢。 |
 | 08-13 21:34 | 【交接·方案3】apk 包持久化 — bug 因果链 + 方案设计（2026-08-13 21:40） | 任务一句话：把"用户通过 apk 安装的包"做成可恢复快照——apk 装包清单持久化到 host 侧（app 私有目录），rootfs 被 reset/全量重建后按清单自动重装。修掉"强停/杀应用 → 重开 → root… |
@@ -1463,6 +1537,7 @@
 | 08-18 16:04 | RC1 minis:// 路径解析规范化完成（2026-08-18） | 分支 fix/audit-rc1-path-normalize，commit 0bf4574，CI run 32113515882 success（build job 25 steps 全绿）。 |
 | 08-18 20:48 | RC10 完成（2026-08-18，独立会话） | 深链 minis://session/<sid>/<path> 路径穿越整改闭环，CI 绿（run 32137371990 success），未合并 main、未删分支（等总控 ff）。 |
 | 08-18 21:03 | RC10 深链路径穿越整改闭环（2026-08-18 深夜） | 分支 fix/audit-rc10-deeplink-traversal，commit 8efef27，CI 绿（run 32137371990 success），已 ff 合并 main a4369d3 → 8efef… |
+| 08-18 21:23 | ↳ FE-4 纯函数扫尾(层次1)合并 main 2026-08-18 | FE-4 第三波(层次1扫尾)合并 main 8efef27 → 2231857,release CI 绿(run 32140809865),分支已删。 |
 | 08-20 15:39 | D-4b 领任务启动（2026-08-20） | 领 D-4b（长时并发聊天压测，定位 6GB 泄漏真凶）： |
 | 08-23 16:44 | 修复收口完成（2026-08-23 晚）— 5/5 修复分支 CI 全绿 | 基于 a6b2665 的 5 条修复分支全部完成并推送小号远端，分支 CI 全绿（head_sha 与 tip 逐一核实）： |
 | 08-26 00:47 | 会话 F：打开历史对话默认回顶部 — 施工+阻塞(2026-08-26) | 任务：修复「冷打开历史会话默认落在顶部而非底部」。根因(代码实证)：消息级聚合(AGGREGATE_MESSAGE_ITEMS=true)+SIMPLE_FOLLOW 改造后，InitialOpen 消费端在 LazyC… |
@@ -1486,7 +1561,7 @@
 
 ## 16. 平台适配 / 通知 / 图标 / 权限
 
-**跨度** 2026-08-03 ～ 2026-09-14 · **60 条** · **状态** 部分放弃（灵动岛需申请小米白名单；其余已闭环）
+**跨度** 2026-08-03 ～ 2026-09-14 · **62 条** · **状态** 部分放弃（灵动岛需申请小米白名单；其余已闭环）
 
 **叙事**：08-05 小米灵动岛适配 → **卡平台白名单，已废弃回滚** → 08-07 通知震动被 MIUI 掐死 → 改直驱 Vibrator → 08-08 灵动岛焦点通知**再次砍掉** → 08-10 图标跟随系统主题 → 08-22 双 appid 共存 → 09-10 包名迁移 com.openminis.app → com.rikkaminis.app → 09-13 图标极简重设计**放弃并全部回滚** → 09-15 HangDetector 前台门控（HyperOS 冻结后台）。**平台层是本项目「努力最多、成功最少」的一层。**
 
@@ -1524,6 +1599,8 @@
 | 08-22 18:20 | 小号内存治理方案提案（2026-08-22） | 审计 ALT_USER/RikkaMinis chore/dual-appid tip 5672ca3 后，建议不恢复完整内存隔离 v2，也不直接迁 browser/toolservice；先做 D-4b 取证，再施工 … |
 | 08-22 18:38 | 小号内存治理：任务已派发（2026-08-22 晚） | 方案文档已从 workspace 备份到笔记文件夹（/var/minis/mounts/笔记/RikkaMinis开发档案/小号内存飙升根治方案-Provider-Worker-Hard-Boundary.md，sha2… |
 | 08-22 21:31 | 小号内存治理：五分支全部完成，已收口（2026-08-22 晚） | TF-A/B/C/D/E 五分支真实完成并独立核实（非仅转述）：A diag/provider-rss-v2 c8ff0a4 (run 32569593961) / B fix/modelservice-terminal… |
+| 08-22 21:54 | ↳ 真机日志推翻 worker 协议闭环（2026-08-22 晚） | TF-E APK 真机日志发现 P0：:modelservice PID 30053 因 ModelExecutionService.finishRequest() 写 state.json 时 run 目录已被主进程删… |
+| 08-22 22:58 | ↳ TF-F modelservice run-dir 所有权 P0 修复完成（会话 F，2026-08-22 晚） | P0 根因：TF-E APK 真机 crash（:modelservice PID 30053 state.json ENOENT）——ChatStreamOffloadHandler.finally 在 result.… |
 | 08-23 13:28 | TF-J2 根因确证：/proc hidepid=invisible 导致假死，心跳修复完成（2026-08-23） | 决定性根因（设备实测坐实，不是代码 bug）：用户最新真机日志 minis-2026-08-23__4_.log + android-shizuku-cli exec 'mount \| grep " /proc "' 确… |
 | 08-23 14:29 | 会话 C 进行中（2026-08-23）：存储/备份/配置同步压力测试 | 执行环境：真机 Redmi marble (Android 15, SDK 35)，com.openminis.app.lab beta.41/versionCode 220000041 已装。android-shizu… |
 | 08-23 14:29 | 会话 A（bug-hunt-pressure / session-task-A）中途结束：用户判定意义不大 | 用户明确取消会话 A 的「agent 多轮流式 + worker 生命周期压测」任务，理由：这部分日常使用几乎都会遇到，有问题他能立刻感知，压力测试意义不大。 |
@@ -1586,7 +1663,7 @@
 
 ## 18. 上游 / 生态吸收 / 开源
 
-**跨度** 2026-08-03 ～ 2026-09-12 · **51 条** · **状态** 常态（每轮吸收都有「不做」清单，比「做」清单更重要）
+**跨度** 2026-08-03 ～ 2026-09-12 · **52 条** · **状态** 常态（每轮吸收都有「不做」清单，比「做」清单更重要）
 
 **叙事**：08-03 OpenMinis fork 起步 → 08-04 改名 RikkaMinis（OpenMinis 核 + RikkaHub 皮）→ 08-11 上游降级三件套 → 08-25 rikkahub 流畅性吸收 A–E → 08-31 LiteLLM 成本层 + facts → 09-06 Hermes Tier-1 harness → 09-07 Operit 吸收三件 → 09-12 差距清单收敛（D3/D4/D5 归档不吸收）→ 09-14/15 生态调查报告。**「吸收」有明确门槛：只吸收能接进现有边的东西，接不进的归档。**
 
@@ -1611,6 +1688,7 @@
 | 08-08 03:00 | README 补充 RikkaHub credit — 扩写 UI 与交互逻辑来源（2026-08-08） | 用户提出：README 只把 RikkaHub 归为"交互设计（三个 UI 元素）"，但 UI 与交互逻辑的灵感实际都来自 RikkaHub，应一并 credit。 |
 | 08-11 00:16 | 上游 fork 网络侦查（2026-08-11） | 用户问上游"接近400个分支"都是谁改了什么。查证：上游 OpenMinis/OpenMinis 仅 2 分支（main=9cf3a855fe + v1.10），387 个是 fork。全量比对 main HEAD 后：… |
 | 08-11 00:58 | 吸收上游 fork 的降级三件套 — 实际只做了一件（feat/fix/length-wall-continue） | 用户按自己的标准（①shell/框架做不到的事 ②可验证 ③框架>功能）审查 17 个真改动 fork 的功能： |
+| 08-11 01:29 | ↳ RikkaMinis 开发项目最终定档收尾（2026-08-11） | 给已有的《RikkaMinis-项目收尾总览.md》追加了"再补续——最终定档"章节（08-10 是"后记"，08-11 是真正句号）。定档内容： |
 | 08-13 08:53 | 任务 A：BrowserRiskControl 移植完成（2026-08-13） | 从 OmniBot 上游移植了浏览器风险挑战检测 + throttle 控制到 RikkaMinis。 |
 | 08-15 08:30 | 08-15 早上 com.openminis.app OOM 崩溃分析（3 次，08:25-08:27） | 现象 |
 | 08-22 12:54 | RikkaMinis 官方对比自述文档完成（2026-08-22） | 生成了 /var/minis/workspace/RikkaMinis-官方对比自述.md，把 fork 相对官方 OpenMinis 的全部差异按三类归档： |
@@ -1646,7 +1724,7 @@
 
 ## 19. UI 组件 / 设置页 / 交互微调
 
-**跨度** 2026-08-04 ～ 2026-09-11 · **67 条** · **状态** 持续（09-12 参数化面板已合并 main）
+**跨度** 2026-08-04 ～ 2026-09-11 · **68 条** · **状态** 持续（09-12 参数化面板已合并 main）
 
 **叙事**：贯穿全程的「小改动流」：08-04 设置页去箭头 + Chat Menu 三项 + 模型组拖拽排序 → 08-05 底部工具条可配置化（含 footer 按钮失效两轮定位）→ 08-08 移除冗余返回按钮 → 08-09 提供商详情页 v2 重构 → 08-14 聊天体验微调 + 回合组折叠 → 09-12 chat-tuning-panel 参数化。**这类改动单看都不重要，但它们占了档案的相当比例——产品的手感就是这么磨出来的。**
 
@@ -1702,6 +1780,7 @@
 | 08-14 11:11 | ↳ A+B 已合入 main 3c95878（2026-08-14 上午，更新） | A（表格折叠）+ B（工具行动画）分支 fix/scroll-ux-table-fold-animate 已合入 main（3c95878），分支已删（远端 204 + 本地 -D） |
 | 08-14 11:35 | 未验证清单汇总（2026-08-14，等 cce2a10 release 一起验证） | 用户要求"把还没验证的都整理出来，一起验证"。清单文件：/var/minis/shared/verification-checklist-2026-08-14.md（29 项 + 参考）。 |
 | 08-14 11:39 | 全量验证通过（2026-08-14 用户确认） | 用户装 cce2a10 release APK 后，验证清单 29 项全部通过： |
+| 08-14 12:11 | ↳ 回合组默认折叠 + 移到回答上方 — 全链闭环（2026-08-14，main = 4ad1533） | 分支 feat/run-group-manual-collapse CI 绿（run 31767903822 success）→ ff 合并 main → push main（4ad1533）→ release 构建 r… |
 | 08-14 19:37 | 模型组策略重构 P1-P4 全部合并 main（2026-08-14，main = 18f6e95） | 最终状态：P1（596adc2 另一会话）+ P2（49a38e7）+ P3（caf0828）+ P4（18f6e95）全部 ff 合并 main 并推送。远端仅 main 分支。release 构建 run 31796… |
 | 08-15 10:21 | 可并行清单任务 1（C 类组件渲染测试）= 已完成项，无需施工（2026-08-15 上午） | 核查结论：任务 C 的交付物 08-13 就已合并 main，派发清单状态未同步导致被重复派发。 |
 | 08-15 10:21 | ↳ T10 验收准备完成 — 验收矩阵已交付（2026-08-15 下午） | 任务 3（可并行清单）完成：纯文档任务，未改代码、未跑测试。 |
@@ -1722,7 +1801,7 @@
 
 ## 20. Token 用量 / 成本统计
 
-**跨度** 2026-08-05 ～ 2026-09-14 · **44 条** · **状态** 已闭环（09-09 实时用量 + 预算上限；09-12 parseUsage 修复合并）
+**跨度** 2026-08-05 ～ 2026-09-14 · **48 条** · **状态** 已闭环（09-09 实时用量 + 预算上限；09-12 parseUsage 修复合并）
 
 **叙事**：08-06 TokenUsageSheet 补缓存命中率 → 08-08 双重扣减 + Gemini cache 修复 → 08-25 用量统计优化 A+B → 08-31 LiteLLM 成本层 V2（JSON 价格表 + 用户可编辑）→ **09-12 parseUsage 双重扣减再次出现**（同族复发）。
 
@@ -1736,6 +1815,7 @@
 | 08-06 00:16 | TokenUsageSheet 补上缓存命中率（2026-08-06） | 用户发现 Settings → Usage Stats 有缓存命中率，但对话中 ⋮ → Token Usage 底部 sheet 没有。 |
 | 08-08 01:01 | Token 用量修复施工完成（2026-08-08，分支 fix/token-usage-double-count-and-gemini-cache） | 施工内容（commit e89edd3，2 文件 +16/-6，已推远程 + CI 已触发） |
 | 08-08 01:27 | 统筹合并完成 — provider/memory/token 三分支合 main + CI 修复（2026-08-08） | 背景 |
+| 08-08 01:48 | ↳ 未合并分支已全部合并到 main（2026-08-08） | feat/logging-module-optimize (092ae88) — 日志模块优化：降低 flush 节奏、修日志读取 OOM、容量上限、i18n crash 区块 → ff 合并 main |
 | 08-08 09:46 | RikkaMinis main 分支完整合并梳理（2026-08-08） | 远程状态 |
 | 08-13 04:17 | 任务 2 完成：OAuth Token 存储安全检查（fix/oauth-secure-storage） | 审计结论：OAuth token 存储已是加密的，无需修改加密方案。 所有 token 存储路径均使用 EncryptedPrefsFactory.safeCreate() → EncryptedSharedPrefer… |
 | 08-15 05:54 | T6 派发指令 — Trace 扩展为预算和终态证据 | 你负责 RikkaMinis 平衡点施工 T6 — Trace 扩展为预算和终态证据。 |
@@ -1744,6 +1824,7 @@
 | 08-18 01:56 | 上下文窗口来源治理 + 组为准 + iOS-parity 上下文已满弹窗(fix/context-window-sources) | 用户痛点(A + C): |
 | 08-25 09:00 | Token 用量统计优化 A+B 已派发（2026-08-25） | 用户拍板方案 A（归属正确性）+ B（聚合性能+体验），已写好两份自包含任务书派发： |
 | 08-25 11:15 | Token 用量统计优化 A+B 已完成合并 main（2026-08-25） | 最终 main = cccc235（基线 85e7b29），release CI run 32803462449 success（head_sha 核实一致）。两个分支已删。 |
+| 08-25 11:30 | ↳ fix/shell-cancel-uncaught-exception 已合并 main（2026-08-25） | 修 shell_execute/browser_use 工具执行吞掉 CancellationException 导致 UI 永久转圈的 bug。 |
 | 08-27 15:26 | tokenrhythm.studio deepseek-v4 思考模式打不开 — 根因定位（2026-08-27） | 用户现象：tokenrhythm.studio 这个中转（key sk_tr_...，OpenAI 兼容 /v1/chat/completions + Anthropic /v1/messages）配的 deepseek… |
 | 08-27 16:19 | tokenrhythm deepseek-v4 思考模式修复已合并 main（2026-08-27 收尾） | 修复提交：cb434c5 fix(provider): route third-party deepseek-v4 relays through standard reasoning_effort（已 ff 合并 mai… |
 | 08-31 13:13 | LiteLLM 吸收三件套 A+B+C 合并 main（2026-08-31） | 背景：用户调研 BerriAI/litellm（57.6k stars 开源 AI 网关），让我评估「能不能整合进 RikkaMinis」。结论：网关层（多租户/虚拟密钥/Redis/Terraform）对单用户 And… |
@@ -1751,6 +1832,7 @@
 | 08-31 16:57 | 砍除 USD 成本估算 + 修复 facts 空时间戳（2026-08-31，commit b4e166fb） | 背景：用户真机验证「Usage 页费用显示有的有、有的没有」。定位：价格目录 model_prices.json（44 键）只解析到 1148 个实际 model_id 中的 75 个，其余 1073 个中转站/代理模型… |
 | 08-31 23:03 | 备份超限修复：字节预算线性裁剪（2026-08-31 晚，commit 93773448 合并 main） | 问题：用户手动全量备份报 Backup too large (72658077 chars, max 67108864)——72MB 顶爆 64MB 上限，导出直接 throw，全有或全无。用户用「聊天窗口=0」验证成功… |
 | 09-03 10:56 | FE-5 第五批第四簇（slash/token）完成（2026-09-03） | 进度：ChatViewModel 4334 → 4065（−269，累计 FE-5 −8273，约 67%）。目标 3500-4000，还差 ~65-565 行。 |
+| 09-03 12:11 | ↳ FE-5 第五批全部拆完（2026-09-03 会话收尾） | 终态：ChatViewModel 4334 → 3581（本会话第四/五/六簇 −753，累计 FE-5 −8757，约 71%）。已进入目标区间 3500-4000。 |
 | 09-04 13:17 | 思考字段决策键根治（tokenrhythm qwen 报错，2026-09-04） | 用户场景：tokenrhythm.studio + qwen3.8-max，开思考就报错（低档也报错），关思考没事。RikkaHub 不报错。 |
 | 09-06 12:09 | 知识图谱全量灌入完成 + LLM 切换到 tokenrhythm（2026-09-06 中午） | 图谱现在：3627 实体 / 4739 关系（从今天早上的 185/153 爆发式增长，覆盖 2026-07-31 ~ 09-06 全部 798 条日志），备份 20318 条记录。 |
 | 09-06 17:15 | Hermes Agent（Nous Research）吸收分析（2026-09-06） | 源码 /tmp/hermes/hermes-agent-main（20.6 万行 Python），报告 /var/minis/shared/hermes-agent-absorb-analysis.md。 |
@@ -1771,11 +1853,12 @@
 | 09-12 02:24 | A1/A2 双双归档 + parseUsage bug 进 backlog（2026-09-12 收尾） | 用户拍板：A1 parseUsage bug「先攒着」（选 2=backlog），A2 一起调查后一起处理 |
 | 09-12 02:45 | parseUsage 双重扣减 bug 已修复合并（main @ 8e98166，2026-09-12） | 用户拍板修（backlog 第 3 条），分支 fix/anthropic-parse-usage @ 8e98166 |
 | 09-12 22:13 | 参数化两批全部完成：feat/chat-tuning-panel @ 70a0f5c（2026-09-12 晚） | 两批 23 个参数已全部实现并推送（同一分支两个 commit，一次 CI 覆盖）： |
+| 09-12 22:30 | ↳ feat/chat-tuning-panel 合并收尾（main @ 70a0f5c，2026-09-12 晚） | 审计（合并前用户要求）：29 文件 +1891/−89 两 commit 全过——①ImageBudget 重构默认 (2000,80) 逐项复刻旧阶梯（整数因子无浮点截断，JVM 钉住）②16 新键 Prefs 全配 … |
 | 09-14 16:16 | 09-14 晚：截断工具调用守卫落地（fix/truncated-tool-call-guard @ fbc50cdd，CI run 1517）+ Eta 调研两条修正 | 改动（3 文件 +217 行，零删除，未合并待拍板）：①新建 ui/chat/TruncatedToolCallPolicy.kt（74 行纯函数：7 个截断 finish reason 别名 length/max_ou… |
 
 ## 21. 人格 / Soul / 提示词 / 技能体系
 
-**跨度** 2026-08-04 ～ 2026-09-15 · **38 条** · **状态** 稳定（技能体系已固化为 12+ 个 skill，跨会话持久）
+**跨度** 2026-08-04 ～ 2026-09-15 · **40 条** · **状态** 稳定（技能体系已固化为 12+ 个 skill，跨会话持久）
 
 **叙事**：08-07 soul.lang 接线 → 08-08 三平台技能架构 + 内置集成显示修复 → 08-09 Soul 默认人格名对齐 → 08-18 RC 整改含技能模块 → 08-26 人格(Soul)模块审计加固 + 技能/权限模块审计 → 08-29/09-04 subagent 跨会话派发 → 09-07 规则体系对照复杂度五纪律。**「给 agent 定语言 + 定运行时 + 定验证框架」这条主线在应用内的投影。**
 
@@ -1791,6 +1874,8 @@
 | 08-07 19:13 | RikkaMinis: 砍 rootfs 备份/恢复 + soul.lang 接线（2026-08-07 已发版） | 用户要求合并编译发版，5 文件改动已合 main a37c537，CI run 31172667557 全绿，release android-latest 资产已更新（11:12Z）。 |
 | 08-08 16:01 | 三平台技能架构（2026-08-08） | 三个平台各司其职，技能统一备份在 GitHub： |
 | 08-08 18:55 | 合并 feat/bundled-platform-skills → main，修复"内置集成显示需配置"（2026-08-08） | 背景：用户问"内置集成为什么显示需配置"。排查发现： |
+| 08-08 19:11 | ↳ 集成状态诊断日志 — feat/integration-status-diagnostics（2026-08-08） | 背景：用户反映"内置集成显示需配置"，但新会话显示"完整 tier 2"——同一个运行时代码，结果不同。经排查（源码里只有动态 buildIntegrationStatus，无静态模板；日志干净无 keystore/读取… |
+| 08-08 19:19 | ↳ ✅ feat/integration-status-diagnostics 已合并 main（2026-08-08） | run #279 success → ff 合并 main（48fd1aa→13f0ee7）→ 推送 main（gh_sync.sh push-main）→ 分支本地+远端已删 |
 | 08-08 20:36 | 三平台集成文档化 — README 补全（2026-08-08） | 用户指出"三大平台纳入"是一次重大升级，不是小修小补，README 必须写清楚，否则以后自己都会忘、别人也看不懂。 |
 | 08-08 21:28 | 教训：平台技能判定不能用 importSource | 平台集成卡片的筛选条件不能用 importSource == BUNDLED——老用户的技能可能是通过 SESSION/FILE 等途径安装的，installBundledSkills() 在版本号已 ≥ 捆绑版时会 s… |
 | 08-09 10:52 | RikkaMinis 系统提示词大小实测（2026-08-09） | 从源码 ChatViewModel.buildSystemPrompt() 逐段重建 + 用户实时数据测量： |
@@ -1898,79 +1983,41 @@
 | 08-03 00:25 | DockBin 情绪垃圾桶方向（AgentDock v0.1 验证成功后） |
 | 08-03 14:38 | Peezy API Key |
 | 08-04 13:30 | RikkaMinis — 恢复丢失的 UI 改动（2026-08-04） |
-| 08-05 21:40 | RikkaMinis — partsJson 一次解析优化已合并 main（2026-08-05） |
 | 08-05 22:09 | RAG v1 知识库实验 — 经验教训（2026-08-05） |
-| 08-06 21:09 | 收尾对齐 — 最终状态确认（2026-08-06 续） |
 | 08-08 01:32 | 待办：历史栏点击跳转后自动缩回（2026-08-08 用户提出） |
 | 08-08 01:39 | 历史栏点击后自动缩回 — 修复已提交（2026-08-08） |
-| 08-08 01:48 | 未合并分支已全部合并到 main（2026-08-08） |
 | 08-08 01:50 | RikkaMinis 日志模块优化施工完成 — 分支 feat/logging-module-optimize（2026-08-08） |
-| 08-08 10:50 | 三个待合并分支已全部合并 main（2026-08-08） |
 | 08-08 15:43 | 重要结论：目录可靠性分级（2026-08-08） |
-| 08-08 19:11 | 集成状态诊断日志 — feat/integration-status-diagnostics（2026-08-08） |
-| 08-08 19:19 | ✅ feat/integration-status-diagnostics 已合并 main（2026-08-08） |
 | 08-09 02:40 | GitHub API header 名教训（2026-08-09） |
 | 08-09 10:50 | 用户消息优先抢占 agent 任务 — feat/user-message-preempts-agent 已合并（2026-08-09） |
 | 08-09 17:54 | 日志排查（2026-08-09 用户报"去看日志出问题了"） |
 | 08-09 18:22 | RikkaMinis 开发起点时间线（查证 2026-08-09） |
-| 08-09 22:21 | RikkaMinis 开发项目收尾归档（2026-08-09 深夜） |
 | 08-10 14:42 | README 致谢/许可证段主语错误修复（2026-08-10） |
 | 08-10 23:51 | 版本号体系 0.22-preview → 1.0.0（feat/version-1.0.0 → main e240ef2） |
-| 08-11 01:29 | RikkaMinis 开发项目最终定档收尾（2026-08-11） |
-| 08-12 15:51 | T3 失败学习自动化钩子完成（feat/failure-auto-log → main 667f17d） |
 | 08-13 00:58 | 套餐批量生成测试成果（2026-08-12/13） |
 | 08-13 01:47 | AI 批量生成测试的教训（2026-08-13） |
-| 08-13 03:30 | 任务 B：核心文件补测试 ✅ 完成（2026-08-13） |
-| 08-13 06:41 | 任务 A：webapp-hidden TODO 评估 — 完成（2026-08-13） |
-| 08-13 06:59 | 任务 B：核心文件补测试 ✅ 完成（2026-08-13） |
-| 08-13 09:59 | P2 核心文件补测试 — 完成 ✅ |
-| 08-13 10:13 | 收尾检查完成（2026-08-13） |
-| 08-13 10:30 | 阶段性总结已归档（2026-08-13） |
-| 08-13 20:57 | 模型隔离进程真机验证闭环通过（2026-08-13 晚） |
 | 08-13 22:26 | 【方案3 验证】每次 boot 全量重建的真相 — verifyIntegrity size 检查误判动态文件（2026-08-13 22:2x） |
 | 08-13 22:48 | 【方案3 收尾】已 ff 合并 main（5e97324）+ 另一个会话施工 Bug 3（2026-08-13 23:0x） |
 | 08-13 23:35 | 修正：断网验证（验证 2）用户实际已测过（2026-08-13 深夜） |
 | 08-14 11:48 | 回合组默认折叠 + 移到回答上方（feat/run-group-manual-collapse → 4ad1533，2026-08-14） |
-| 08-14 12:11 | 回合组默认折叠 + 移到回答上方 — 全链闭环（2026-08-14，main = 4ad1533） |
-| 08-14 18:26 | 全量验证通过（2026-08-14 用户确认） |
 | 08-15 01:12 | RikkaMinis 平衡点施工蓝图（2026-08-15） |
-| 08-15 05:27 | T0 基线契约完成：已合并 main（e6f2be32，2026-08-15） |
 | 08-15 05:59 | T5 AgentRunReducer 施工中（2026-08-15） |
 | 08-15 09:14 | T9 性能基线完成 — 分支 stability/T9-performance-baseline（0883fda4，2026-08-15） |
-| 08-15 09:58 | T6 Trace 扩展完成 — 已合并 main（8ad067a，2026-08-15） |
 | 08-15 10:50 | T4-B 准备完成 — adapter 接口+骨架+映射+验收清单 已合并 main（b877a8f，2026-08-15） |
-| 08-15 11:04 | T7-A 完成：观察模式 trace 接入 — 已合并 main（4dd9557，2026-08-15） |
-| 08-15 17:27 | T7-RealRuntimePort 完成 — 已合并 main（83abd79，2026-08-15） |
-| 08-15 17:43 | 剩余可分派任务（2026-08-15 下午更新） |
-| 08-15 18:03 | T10 最终验收执行完成（2026-08-15 下午） |
 | 08-15 18:45 | T10 最终验收 — 代码层已闭合，待真机验证（2026-08-15 晚） |
 | 08-15 19:01 | T10 最终验收完全通过（2026-08-15 晚） |
 | 08-16 05:17 | 临时密钥窗口补核心文件测试（2026-08-15 深夜） |
-| 08-17 14:42 | ✅ crash-handler Tier 0 修复完整闭环（2026-08-17 下午） |
-| 08-17 17:31 | 方向A Step5 真机验证通过 — 全链路闭环（2026-08-17） |
 | 08-18 08:53 | 大模型回答频繁断掉诊断进行中（2026-08-18 08:47+，用户主诉"大模型回答频繁断掉"） |
 | 08-18 14:10 | 协作方式偏好 |
 | 08-18 18:21 | RikkaMinis 前端 FE 拆分施工 — 阶段性认知（2026-08-18） |
-| 08-18 21:23 | FE-4 纯函数扫尾(层次1)合并 main 2026-08-18 |
 | 08-20 16:33 | 会话1 offload 工具类压测结果（2026-08-20） |
-| 08-20 17:11 | 并发会话上限放开（2026-08-20 收尾） |
-| 08-21 14:38 | 工具卡住诊断埋点落地闭环（2026-08-21 下午） |
 | 08-21 18:09 | idle-reap 误杀流式回归修复（2026-08-21 补充） |
 | 08-21 20:23 | Phase 1 :toolservice socket owner 施工中 |
-| 08-21 22:34 | Phase 3 browserservice 合并闭环完成（2026-08-21，会话 C 收尾） |
 | 08-21 23:41 | fix/bridge-large-payload 合并 main（2026-08-21 晚，P0 bridge 修复闭环） |
 | 08-21 23:42 | fix/bridge-large-payload 合并 main（2026-08-21 晚，P0 bridge 修复闭环） |
 | 08-22 13:17 | RikkaMinis 第三方视角自述文档（含诚实缺陷节）（2026-08-22） |
-| 08-22 19:21 | TF-B 可靠 worker 生命周期完成（会话 B，2026-08-22） |
-| 08-22 21:54 | 真机日志推翻 worker 协议闭环（2026-08-22 晚） |
-| 08-22 22:58 | TF-F modelservice run-dir 所有权 P0 修复完成（会话 F，2026-08-22 晚） |
-| 08-23 05:17 | TF-G 真机复测推翻协议闭环 |
 | 08-23 18:46 | 新 P0 发现+修复：browser get_text 超长文本导致 ANR（2026-08-23 晚） |
-| 08-23 18:53 | browser get_text 大文本 ANR 修复真机验证通过（2026-08-23 晚） |
-| 08-23 20:51 | 双交互缺陷修复已合入 main（2026-08-23） |
-| 08-24 15:51 | FIX-B 施工完成：低风险收尾修复（2026-08-24） |
 | 08-24 18:46 | Bug 诊断：手动添加的大模型「删不掉」（2026-08-24） |
-| 08-25 11:30 | fix/shell-cancel-uncaught-exception 已合并 main（2026-08-25） |
 | 08-26 01:15 | 会话 F 收尾：fix/history-open-at-bottom 已合入 main 8484a49（2026-08-26） |
 | 08-29 22:29 | 会话任务 A：WorkerKeyFreshness 时钟回拨修复完成（2026-08-29） |
 | 08-29 22:39 | 会话任务 B：appendSystemInfo 合并节流完成（2026-08-29） |
@@ -1978,37 +2025,22 @@
 | 08-29 23:34 | 会话任务 C：readAppendedChunks 统一到 BoundedLineReader 完成并已合并 main（2026-08-29） |
 | 08-30 00:21 | 会话任务 D：safeEnum 跨版本兜底收紧完成并已合并 main（2026-08-29 深夜） |
 | 09-02 14:41 | FE-5 ChatViewModel 拆分第一批完成（2026-09-02，commit 8f0d64dc 合并 main） |
-| 09-02 19:01 | FE-5 第三批 route C 前两步完成（2026-09-02，commit f297481 合并 main） |
-| 09-02 23:17 | FE-5 第四/五批合并拆分（2026-09-02 晚，commit 9a3949f） |
-| 09-03 07:28 | FE-5 第五批第二簇完成（2026-09-03） |
 | 09-03 09:46 | FE-5 第三簇拆分会话——流程纠偏记录（2026-09-03） |
-| 09-03 12:11 | FE-5 第五批全部拆完（2026-09-03 会话收尾） |
-| 09-03 15:19 | FE-5 bug-audit session2（ui 除 chat 域）完成（2026-09-03） |
-| 09-03 15:55 | FE-5 bug-audit session7（杂项域）完成（2026-09-03） |
-| 09-03 16:56 | FE-5 bug-audit session1（Chat 核心域）完成（2026-09-03） |
-| 09-03 17:02 | FE-5 bug-audit session3（sandbox+offload 域）完成（2026-09-03） |
 | 09-07 08:15 | RikkaMinis 全貌梳理请求（2026-09-07） |
-| 09-07 10:52 | ChatScreen 拆分批次 1 合并 main（2026-09-07，main @ cf8d8a93） |
-| 09-07 11:23 | ChatScreen 拆分批次 2 合并 main（2026-09-07，main @ 16c20c08） |
-| 09-07 12:03 | ChatScreen 四文件拆分批次 3+4 合并 main（2026-09-07，main @ 29a20a47） |
 | 09-07 20:19 | 浏览器三件真机验证（2026-09-07，新装 android-latest = main @ fa92a3e） |
 | 09-07 22:04 | 规则升级已拍板落地（2026-09-07 晚，用户批准两条） |
-| 09-07 22:30 | 最新包真机验证闭环（2026-09-07 深夜，1.0.0-beta.1372 @ main 784c4065） |
 | 09-07 23:31 | 复杂度量化度量（2026-09-07，回答"复杂度涨了多少/是不是错觉"） |
 | 09-08 13:45 | env-var group 修复的补强验证（真实文件 JVM 驱动测试） |
 | 09-10 01:03 | B13 批次验证证据（2026-09-10，含一条新发现的既有 quirk） |
 | 09-10 01:07 | 结构断言套件 assert_changes.py（B12–B16，可复用） |
 | 09-10 04:09 | 关键发现（推翻了我自己的前提） |
-| 09-10 08:26 | 两个分支合并前检查 + 合并 main（2026-09-10，main @ 31c8abb9） |
 | 09-10 13:31 | verify nudge 默认关闭（2026-09-10，main @ 478ae1e） |
 | 09-11 14:47 | Groq 免费档在 RikkaMinis 中不可用的根因（2026-09-11，用户提供 gsk_ key 排查） |
 | 09-12 10:33 | 开发趋势图 + 统计快照（2026-09-12） |
 | 09-12 10:47 | 体量统计 bug 修正 + 洞察层结论（2026-09-12，接续上一条） |
-| 09-12 22:30 | feat/chat-tuning-panel 合并收尾（main @ 70a0f5c，2026-09-12 晚） |
 | 09-12 23:28 | shellTimeout 接线 + 滑杆密度修复（分支 fix/tuning-shell-timeout-and-slider-density @ e057d151，2026-09-12 深夜） |
 | 09-13 07:06 | fix/tuning-shell-timeout-and-slider-density 合并收尾（main @ e057d151，2026-09-13 凌晨） |
 | 09-13 07:11 | shellTimeout 修复真机验证（2026-09-13 用户反馈） |
 | 09-13 07:35 | shellTimeout 撞 60s 实证成功（2026-09-13） |
 | 09-14 00:04 | ★ 2026-09-13 分支 fix/completeness-followups-0913 已 ff 合并 main = `a330ce2f` |
-| 09-14 09:43 | 处置批次打包完成并合并：main = `2dc6e0d4`（2026-09-14） |
 | 09-14 16:20 | 背景：用户要求分析新包（1.0.0+1516，会话 ID 别名修复）运行 13:45-16:14 的日志找 bug。 |
