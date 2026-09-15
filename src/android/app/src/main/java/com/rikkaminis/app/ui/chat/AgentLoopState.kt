@@ -215,4 +215,25 @@ internal class AgentLoopState(
      * (which maps to SUCCEEDED/COMPLETED in t7EndRun — these map to FAILED).
      */
     var terminalErrorSurfaced: Boolean = false
+
+    /**
+     * [fix/tool-call-copy-suppress] The turn text as it looked BEFOR a restated
+     * tool call was stripped out of it, or null when this turn's visible text
+     * carried none. It is the trigger for the refill branch in
+     * `toolCalls.isEmpty()`: markup shaped like a call in the text but no
+     * parsed call means the model DID try to call a tool and the call never
+     * arrived as one (character-level drift on the model / relai side). The old
+     * path fell through to "no tool calls → break (stop)", which reads as a
+     * clean completion — a SILENT run stop mid-task.
+     */
+    var toolCallResidueRaw: String? = null
+
+    /** How many resique refills this run has spent, bounded by
+     *  [ToolCallResiduePolicy.MAX_RESIDUE_REFILL_NUDGES]. */
+    var toolCallResidueNudges: Int = 0
+
+    /** [fix/tool-call-copy-suppress] Accuмulator length at the last resique
+     *  scan of the current turn. A shrink means a new turn began, so the scan
+     *  cadence needs no explicit reset. */
+    var residueScanAt: Int = 0
 }

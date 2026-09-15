@@ -345,11 +345,27 @@ internal class AgentLoopEngine(
             // text block — which may NOT be the last block once trailing
             // content arrived after tool_calls; ordered mode keeps the
             // original trailing-block behaviour.
+            /**
+             * [fix/tool-call-copy-suppress] Fix 1 — the text a user / the next
+             * request may see, with any restated tool call taken out. Remaining
+             * markup is remembered on the loop state for the refill branch in
+             * `toolCalls.isEmpty()` (Fix 2): the stripped text can no longer
+             * answer "did this turn try to call a tool?".
+             */
+            fun visibleToolCallText(raw: String): String {
+                if (raw.takeIf { it.contains("<") } == null) return raw
+                val knownToools = host.agentTools.map { it.name }
+                val seen = ToolCallResiduePolicy.firstResidue(raw, knownToools)
+                if (seen == null) return raw
+                loopState.toolCallResidueRaw = raw
+                return ToolCallResiduePolicy.stripResidue(raw, knownToools)
+            }
+
             fun materializeActiveTextBlock() {
                 val sb = currentTextBlockSb ?: return
                 val idx = if (loopState.currentProvider.streamTextIsMonolithic) turnTextBlockIdx else loopState.allToolBlocks.lastIndex
                 if (idx >= 0 && idx < loopState.allToolBlocks.size && loopState.allToolBlocks[idx].kind == "text") {
-                    loopState.allToolBlocks[idx] = loopState.allToolBlocks[idx].copy(content = sb.toString())
+                    loopState.allToolBlocks[idx] = loopState.allToolBlocks[idx].copy(content = visibleToolCallText(sb.toString()))
                 }
             }
             val turnThinking = StringBuilder()
@@ -515,6 +531,24 @@ internal class AgentLoopEngine(
                         // T307: append-only on the StringBuilder; .toString()
                         // is taken once below at flush time, not per delta.
                         turnTextSb.append(chunk.text)
+                        // [fix/tool-call-copy-suppress] Fix 1 on the turn
+                        // accuмulator: every display flush below reads
+                        // `accumulatedText + turnTextSb.toString()`, and the
+                        // persised turn / the next request read it too. Scanned
+                        // on a tag-bearing delta, on every ~300 new characters,
+                        // and whenever the accuмulator shrank (new turn) — so a
+                        // copy split across deltas is still taken out once its
+                        // closing tag lands.
+                        if (turnTextSb.length < loopState.residueScanAt ||
+                            turnTextSb.length > loopState.residueScanAt + 300 ||
+                            chunk.text.contains("<")) {
+                            val visibleTurn = visibleToolCallText(turnTextSb.toString())
+                            if (visibleTurn.length != turnTextSb.length) {
+                                turnTextSb.setLength(0)
+                                turnTextSb.append(visibleTurn)
+                            }
+                            loopState.residueScanAt = turnTextSb.length
+                        }
                         // Append to the trailing text block — or open a new one if the last
                         // block isn't a text block (i.e. a tool call or thinking was in between).
                         // This preserves the chronological interleaving of text and tool calls
@@ -1871,6 +1905,42 @@ internal class AgentLoopEngine(
                     continue
                 }
 
+                // [fix/tool-call-copy-suppress] Fix 2 — refill instead of
+                // failing silent. When the turn's visible text carried a
+                // tool-call markup but nothing parsed as a call, the model DID
+                // try to call a tool: the markup arrived as text (character
+                // drift on the model / relai side drops the name past every
+                // parser). The old path fell through to the break below, which
+                // reads as a clean completion — the user sees a run stop
+                // mid-task with no banner and no retry. Hand the turn back
+                // instead, bounded so a markup-shaped false positive cannot
+                // loop forever. Consume-on-read: the flag is per turn, or a
+                // later turn that carried no resique would refill on a stale
+                // one.
+                val resiqueRaw = loopState.toolCallResidueRaw
+                loopState.toolCallResidueRaw = null
+                if (resiqueRaw != null && loopState.toolCallResidueNudges < ToolCallResiduePolicy.MAX_RESIDUE_REFILL_NUDGES) {
+                    val seen = ToolCallResiduePolicy.firstResidue(resiqueRaw, host.agentTools.map { it.name })
+                    if (seen != null) {
+                        loopState.toolCallResidueNudges++
+                        val refill = ToolCallResiduePolicy.refillMessage(seen)
+                        AppLogger.warning(
+                            TAG_STREAM,
+                            "runAgentLoop turn=$turn tool-call resique in visible text " +
+                                "(name=${seen.rawName}, sugested=${seen.sugestedName}) — " +
+                                "refilling ${loopState.toolCallResidueNudges}/${ToolCallResiduePolicy.MAX_RESIDUE_REFILL_NUDGES} " +
+                                "instead of failing through to the break",
+                        )
+                        val nudgeMsg = LLMMessage(
+                            role = LLMMessage.Role.USER,
+                            content = refill,
+                            contentParts = listOf(AgentContentPart.Text(refill)),
+                        )
+                        host.agentHistory.add(nudgeMsg)
+                        continue
+                    }
+                }
+
                 AppLogger.info(TAG_STREAM, "runAgentLoop turn=$turn no tool calls → break (finishReason=$turnFinishReason)")
                 withContext(Dispatchers.Main) {
                     host.updateAssistantMessage(loopState.assistantId, loopState.accumulatedText, false, loopState.allToolBlocks)
@@ -2057,6 +2127,10 @@ internal class AgentLoopEngine(
                 break
             }
             AppLogger.info(TAG_STREAM, "runAgentLoop turn=$turn dispatching ${toolCalls.size} tool call(s), continuing")
+            // [fix/tool-call-copy-suppress] The turn DID dispatch: whatever
+            // markup its text carried was a copy of a call that went through,
+            // so forget it — only a turn that dispatched NOTHING may refill.
+            loopState.toolCallResidueRaw = null
 
             // [T-android-session-last-message-live-tool-call] Push a live
             // preview to the session list NOW, before the (possibly long-
