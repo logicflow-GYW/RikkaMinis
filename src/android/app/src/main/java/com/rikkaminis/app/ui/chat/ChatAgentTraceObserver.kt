@@ -6,6 +6,7 @@ import com.rikkaminis.app.agent.runtime.AgentRunPhase
 import com.rikkaminis.app.agent.runtime.AgentRunReducer
 import com.rikkaminis.app.agent.runtime.AgentRunState
 import com.rikkaminis.app.agent.runtime.AgentRunTransition
+import com.rikkaminis.app.agent.runtime.traceName
 import com.rikkaminis.app.agent.runtime.AgentTerminal
 import com.rikkaminis.app.agent.runtime.AgentTerminalReason
 import com.rikkaminis.app.agent.runtime.BudgetDecision
@@ -125,7 +126,7 @@ internal class ChatAgentTraceObserver(
             is AgentRunTransition.Rejected -> {
                 warn(
                     "ChatVMStream",
-                    "T7-D reducer REJECTED ${event::class.simpleName}: ${r.rejection.message}",
+                    "T7-D reducer REJECTED ${event.traceName()}: ${r.rejection.message}",
                 )
             }
         }

@@ -930,11 +930,16 @@ internal class AgentLoopEngine(
                     // and was misclassified as FATAL: no same-model retry, no fallback
                     // (unless strategy=always). With a proxy route whose first chunk
                     // legitimately takes 20-60s, every 30s guard hit surfaced as a hard
-                    // user-visible error. Both 0-chunk types are equally safe to retry.
-                    val workerDiedZeroChunk =
-                        ((actual is com.rikkaminis.app.sandbox.offload.ModelWorkerDiedException) ||
-                            (actual is com.rikkaminis.app.sandbox.offload.ModelStreamErrorException)) &&
-                        (actual as? com.rikkaminis.app.sandbox.offload.ModelExecutionStreamException)?.hadChunks == false
+                    // user-visible error. Both 0-chunk types are equally safe to retry —
+                    // **as long as the worker did not classify the failure itself**.
+                    // §17 [fix/permanent-4xx-retried-as-transient]: that condition used
+                    // to be missing, so a permanent `[400] model not found` (worker
+                    // stamps kind=provider; hadChunks=false because the relay rejects
+                    // before any chunk) was retried 3x on the same member — 1+2+4s
+                    // of dead wait before a fallback that always succeeded. The
+                    // judgement now lives in one place (decideStreamFailure): a stamped
+                    // kind speaks for itself, and the 0-chunk heuristic only covers
+                    // UNSTAMPED failures (legacy worker / real worker death / timeout).
                     // [fix/stream-error-silent-recovery] A mid-stream failure
                     // (hadChunks=true) used to fall through to the fatal path:
                     // the worker→client error line carried no type info, so the
@@ -948,16 +953,23 @@ internal class AgentLoopEngine(
                     // retries (rate-limit / bad-key members can't self-heal).
                     // Null kind (legacy worker) → FATAL, byte-identical to the
                     // old behavior.
-                    val streamErrorAction =
-                        (actual as? com.rikkaminis.app.sandbox.offload.ModelStreamErrorException)
-                            ?.let { ChatStreamErrorPolicy.classify(it.kind) }
-                    val streamErrorAutoRetry = streamErrorAction == ChatStreamErrorPolicy.Action.AUTO_RETRY
-                    val streamErrorFallbackNow =
-                        streamErrorAction == ChatStreamErrorPolicy.Action.FALLBACK_NOW
+                    // §17: one entry point decides recovery for a failure that
+                    // crossed the worker boundary (worker death / worker-reported
+                    // stream error). It reads the stamped kind when there is one,
+                    // and only falls back to the 0-chunk heuristic when there is not.
+                    val streamFailure =
+                        (actual as? com.rikkaminis.app.sandbox.offload.ModelExecutionStreamException)
+                            ?.let {
+                                ChatStreamErrorPolicy.decideStreamFailure(
+                                    hasChunks = it.hadChunks,
+                                    kind = (it as? com.rikkaminis.app.sandbox.offload.ModelStreamErrorException)?.kind,
+                                )
+                            }
+                    val streamErrorAutoRetry = streamFailure?.isTransient == true
+                    val streamErrorFallbackNow = streamFailure?.fallbackNow == true
                     val isTransient = actual is com.rikkaminis.app.data.model.LLMError.NetworkError ||
                         actual is com.rikkaminis.app.data.model.LLMError.TransientError ||
                         is5xx ||
-                        workerDiedZeroChunk ||
                         streamErrorAutoRetry
                     // [T-fallback-retry-original] Restored original behavior: all members
                     // (including fallback chain members) get bounded retries on transient
@@ -971,7 +983,12 @@ internal class AgentLoopEngine(
                         val delaySec = retryDelays[retryAttempt]
                         retryAttempt += 1
                         val errDesc = actual.message ?: actual.javaClass.simpleName
-                        Log.w("ChatViewModel", "🔁 Transient error on ${loopState.currentProvider.model.displayName}, retry $retryAttempt/${retryDelays.size} in ${delaySec}s: $errDesc")
+                        // §17: which judgement fired rides along in the log — a
+                        // misclassification must be settle-able from the log alone,
+                        // not re-derived from source (that re-derivation is exactly what
+                        // this backlog item cost).
+                        val retryBasis = streamFailure?.basis ?: "llm-error:${actual.javaClass.simpleName}"
+                        Log.w("ChatViewModel", "🔁 Transient error on ${loopState.currentProvider.model.displayName}, retry $retryAttempt/${retryDelays.size} in ${delaySec}s: $errDesc [$retryBasis]")
                         // T7-A: 观察 —— provider 瞬态失败（T5 ProviderAttemptFinished(TRANSIENT_FAILURE)）
                         traceObserver.t7State(ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL), ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.RETRYING), "ProviderAttemptFinished(TRANSIENT_FAILURE)")
                         // T7-D: 旁路验证 —— provider 瞬态失败
