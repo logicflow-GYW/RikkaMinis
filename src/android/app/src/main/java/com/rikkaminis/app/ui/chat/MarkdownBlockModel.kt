@@ -90,6 +90,28 @@ private fun isBlockquoteLine(trimmed: String): Boolean {
 }
 
 /**
+ * An ATX heading is a `#`…`######` run followed by a space, or a bare run
+ * (`#`, `###` — empty heading). Everything else that starts with `#` is
+ * prose and must stay prose on BOTH sides of the gate: the heading branch
+ * renders it, the paragraph loop uses this same predicate to decide whether
+ * to stop collecting.
+ *
+ * That agreement is load-bearing. When the paragraph loop instead used a bare
+ * `t.startsWith("#")`, a `#`-prefixed non-heading line (`#196 @sha …`,
+ * `#!/bin/sh`, `#include`, `#hashtag`) broke the loop on its FIRST line with
+ * nothing collected, so `i` never advanced and [parseMarkdownBlocks] spun
+ * forever at 100 % CPU — the message/preview never rendered. Repro 2026-09-15:
+ * opening the 1.8 MB dev-history archive in the file preview (it contains
+ * `#196 @68250c1 …`).
+ */
+private fun isAtxHeading(trimmed: String): Boolean {
+    if (!trimmed.startsWith("#")) return false
+    val hashes = trimmed.indexOfFirst { it != '#' }
+    if (hashes < 0) return true // "#", "###" — heading with empty text
+    return trimmed[hashes] == ' '
+}
+
+/**
  * Split a paragraph's raw text at inline `![alt](url)` occurrences, extracting
  * video/audio references into standalone MdBlock.Video/Audio blocks. Image
  * references stay inline (Compose doesn't render inline bitmap attachments in
@@ -245,6 +267,7 @@ internal suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
             sinceLastCheck = 0
         }
         sinceLastCheck++
+        val loopStart = i
         val line = lines[i]
         val trimmed = line.trimStart()
 
@@ -322,7 +345,7 @@ internal suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
             }
 
             // Heading
-            trimmed.startsWith("#") && (trimmed.length == 1 || trimmed[trimmed.indexOfFirst { it != '#' }.coerceAtLeast(0)] == ' ') -> {
+            isAtxHeading(trimmed) -> {
                 val level = trimmed.takeWhile { it == '#' }.length.coerceAtMost(6)
                 val text = trimmed.drop(level).trimStart()
                 blocks.add(MdBlock.Heading(line, level, text))
@@ -455,7 +478,7 @@ internal suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
                 while (i < lines.size) {
                     val l = lines[i]
                     val t = l.trimStart()
-                    if (t.isEmpty() || t.startsWith("#") || t.startsWith("```") ||
+                    if (t.isEmpty() || isAtxHeading(t) || t.startsWith("```") ||
                         isBlockquoteLine(t) || t.matches(thematicBreakRegex) ||
                         t.matches(bulletListItemRegex) || t.matches(numberedListItemRegex) ||
                         t.matches(standaloneImageLineRegex) ||
@@ -492,6 +515,15 @@ internal suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
                 }
             }
         }
+        // Progress guard: every branch in the `when` above must advance `i`.
+        // The paragraph branch is the only one that can legitimately collect
+        // nothing (it `break`s immediately when the line belongs to another
+        // block type) — and when that happened because a predicate up there
+        // disagreed with the branch that rejected the line, this loop spun
+        // forever with `i` frozen. Forcing one line of progress turns any
+        // future predicate drift into "one stray block" instead of a hung
+        // renderer.
+        if (i == loopStart) i++
     }
     return blocks
 }
