@@ -167,6 +167,22 @@ else
     echo ""
 fi
 
+# --- 9. Room migration chain (schema integrity) ---
+#   Chain completeness for the hand-written Room migrations: a version gap, a
+#   non-contiguous step, or a migration DECLARED in the builder but never
+#   wired. The last one compiles and runs — it just never executes, so a
+#   fresh install and an upgraded install end up with different schemas and
+#   nothing fails until a user hits the missing column.
+echo "━━━ [9/9] Room migration chain ━━━"
+if python3 scripts/scan/room_migration_check.py "$ROOT"; then
+    PASS=$((PASS + 1))
+    echo ""
+else
+    RC=1
+    FAIL=$((FAIL + 1))
+    echo ""
+fi
+
 # --- Summary ---
 echo ""
 echo "╔══════════════════════════════════════════════════╗"

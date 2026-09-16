@@ -393,7 +393,16 @@ object ExecutionCoordinator {
             val truncated = TerminalSanitizer.truncateIfNeeded(sanitized)
             // Combine host-side and shell-side truncation flags
             val outputTruncated = result.truncated || truncated != sanitized
-            val output = if (result.exitCode != 0 && result.exitCode != 124) {
+            // [audit-0916d] TIMEOUT_EXIT_CODE, not a bare 124: the value was
+            // named once (producer → retry predicate → reclaim predicate) and
+            // this was the one site left spelling it out — exactly the drift
+            // the constant exists to prevent.
+            // A timeout is deliberately the ONE failure with no
+            // "(exit code: N)" trailer: the shell already wrote its own
+            // "[Command timed out after Ns]" line, and 124 is now the only code
+            // that reaches the agent as a result (no retry) — the trailer would
+            // say it twice. Do NOT "fix" that into including 124.
+            val output = if (result.exitCode != 0 && result.exitCode != TIMEOUT_EXIT_CODE) {
                 "$truncated\n(exit code: ${result.exitCode})"
             } else {
                 truncated

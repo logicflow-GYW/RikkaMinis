@@ -56,8 +56,15 @@ ALLOWED_FILES = {
     "com/rikkaminis/app/provider/anthropic/AnthropicProvider.kt",   # LLMRequestLog
     "com/rikkaminis/app/provider/openai/OpenAIProvider.kt",         # LLMRequestLog
     "com/rikkaminis/app/sandbox/offload/SessionsOffloadHandler.kt", # ChatMutationMethods
-    "com/rikkaminis/app/ui/chat/ChatViewModel.kt",                  # comment-only (kept for safety)
 }
+
+# [audit-0916d] A `comment-only` entry used to sit here for ChatViewModel.kt.
+# It was redundant: comment text is stripped by BLOCK_COMMENT_RE before the
+# scan, so a mention inside `/* … */` never reaches TARGET_RE (verified by
+# removing the entry — the source scan still exits 0). Kepping it weakens the
+# gate instead: the whole 5k-line file became an unaudited surface. If a REAL
+# ChatViewModel call site ever appears, the scan must fail and the site be
+# audited — that is the point of the allow-list.
 
 ESCAPE_RE = re.compile(r"debug-ok\s*:")
 BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
@@ -111,18 +118,50 @@ def scan_source(root):
     return violations
 
 
+def dex_entries(names):
+    """Entry names the guard reads as the artifact's dex code.
+
+    Pure (takes a name list) so the selector AND the fail-closed verdict below
+    are testable without building a zip. Matched by BASENAME so a nested
+    `dex/classes.dex` still counts; a renamed or absent dex yields [] — and []
+    is a VIOLATION, not a pass (see [apk_verdict]).
+    """
+    out = []
+    for n in names:
+        base = os.path.basename(n)
+        if base == "classes.dex" or (base.startswith("classes") and base.endswith(".dex")):
+            out.append(n)
+    return out
+
+
+def apk_verdict(present, dex_count):
+    """Verdict for the apk mode: 0 = clean, 1 = violation.
+
+    [audit-0916d] Fail CLOSED on zero dex entries. Without this, a layout
+    change (dex renamed, or the artifact truncated) made the gate print
+    "markers absent" exit 0 without having scanned a single byte — a gate that
+    cannot fail is not a gate. Verified: a zip carrying no `classes*.dex` used
+    to pass.
+    """
+    if dex_count == 0:
+        return 1
+    if present:
+        return 1
+    return 0
+
+
 def scan_apk(apk_path):
-    """Return the list of debug markers present in the APK's dex files."""
+    """Return (debug markers present, dex entries scanned) for the APK."""
     present = []
+    dex_count = 0
     with zipfile.ZipFile(apk_path) as zf:
-        for name in zf.namelist():
-            if not (name == "classes.dex" or (name.startswith("classes") and name.endswith(".dex"))):
-                continue
+        for name in dex_entries(zf.namelist()):
+            dex_count += 1
             data = zf.read(name)
             for marker in APK_MARKERS:
                 if marker.encode() in data:
                     present.append(f"{name}: {marker}")
-    return present
+    return present, dex_count
 
 
 def self_test():
@@ -157,6 +196,27 @@ def self_test():
 
     # reverse control: the marker list itself must be non-trivial
     ok &= check("apk marker list non-empty", len(APK_MARKERS) >= 3)
+
+    # --- apk mode: dex selector + fail-closed verdict (reverse control) ---
+    # [audit-0916d] A zip with no `classes*.dex` used to print 'markers absent'
+    # and exit 0 — the gate could not fail. These pin both halves.
+    real_layout = ["classes.dex", "resours/foo.bin", "lib/aarch64/libx.so"]
+    ok &= check(
+        "apk selector finds the real layout's dex",
+        dex_entries(real_layout) == ["classes.dex"],
+        str(dex_entries(real_layout)),
+    )
+    ok &= check(
+        "apk selector finds a nested dex",
+        dex_entries(["dex/classes2.dex"]) == ["dex/classes2.dex"],
+    )
+    ok &= check(
+        "apk selector ignores an artifact with no dex",
+        dex_entries(["resours/foo.bin"]) == [],
+    )
+    ok &= check("apk verdict: ZERO dex entries is a VIOLATION (fail closed)", apk_verdict([], 0) == 1)
+    ok &= check("apk verdict: markers present is a violation", apk_verdict(["classes.dex: DebugServer"], 1) == 1)
+    ok &= check("apk verdict: clean dex passes", apk_verdict([], 1) == 0)
     return 0 if ok else 1
 
 
@@ -188,17 +248,23 @@ def main():
         return self_test()
     if args[0] == "apk" or (len(args) == 1 and _is_apk_arg(args[0])):
         apk = args[1] if len(args) >= 2 else args[0]
-        present = scan_apk(apk)
-        if present:
-            print("❌ Debug-leak guard (apk): DEBUG-ONLY code found in the release APK!")
-            print("   A -keep rule, minify disable, or new BuildConfig.DEBUG-less entry")
-            print("   shipped debug code. The debug JSON-RPC server (127.0.0.1:5321) is")
-            print("   token-free — this must not reach users.")
-            for x in present:
-                print("     " + x)
+        present, dex_count = scan_apk(apk)
+        if apk_verdict(present, dex_count) == 0:
+            print(f"✅ Debug-leak guard (apk): {len(APK_MARKERS)} debug markers absent from {dex_count} dex entries")
+            return 0
+        if dex_count == 0:
+            print("❌ Debug-leak guard (apk): NO dex entries found in the artifact — nothing was scanned!")
+            print("   The gate fails CLOSED: a renamed / nested dex, or a truncated artifact,")
+            print("   must not read as 'markers absent'. Check the build output layout, then")
+            print("   extend dex_entries() if the change is intentional.")
             return 1
-        print(f"✅ Debug-leak guard (apk): {len(APK_MARKERS)} debug markers absent from dex")
-        return 0
+        print("❌ Debug-leak guard (apk): DEBUG-ONLY code found in the release APK!")
+        print("   A -keep rule, minify disable, or new BuildConfig.DEBUG-less entry")
+        print("   shipped debug code. The debug JSON-RPC server (127.0.0.1:5321) is")
+        print("   token-free — this must not reach users.")
+        for x in present:
+            print("     " + x)
+        return 1
     root = os.path.abspath(args[0])
     v = scan_source(root)
     if v:

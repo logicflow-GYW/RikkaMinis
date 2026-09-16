@@ -227,7 +227,7 @@ object AgentRunReducer {
                 else -> rejected(
                     state, event,
                     AgentRunRejectionReason.TERMINAL_STATE_IMMUTABLE,
-                    "terminal state $phase cannot accept ${event::class.simpleName}",
+                    "terminal state $phase cannot accept ${event.traceName()}",
                 )
             }
         }
@@ -241,7 +241,7 @@ object AgentRunReducer {
                 else -> rejected(
                     state, event,
                     AgentRunRejectionReason.RUN_NOT_STARTED,
-                    "run not started; ${event::class.simpleName} requires RunStarted first",
+                    "run not started; ${event.traceName()} requires RunStarted first",
                 )
             }
         }
@@ -469,7 +469,7 @@ object AgentRunReducer {
         rejected(
             state, event,
             AgentRunRejectionReason.INVALID_PHASE_FOR_EVENT,
-            "${event::class.simpleName} invalid in phase=$actual (expected $expected)",
+            "${event.traceName()} invalid in phase=$actual (expected $expected)",
         )
 
     private fun finalizeFrom(state: AgentRunState, event: AgentRunEvent.RunFinalized): AgentRunTransition {
