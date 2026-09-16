@@ -671,30 +671,74 @@ internal suspend fun ChatViewModel.generateCompactSummary(conversationText: Stri
     // TF-D: compaction runs through :modelservice via the gateway — the main
     // process never calls provider.sendMessage. A remote failure (typed)
     // throws so the splitter can halve the input and retry.
-    return when (val r = ProviderExecutionGateway.send(
-        context = context,
-        instance = instance,
-        model = provider.model,
-        messages = listOf(
-            LLMMessage(role = LLMMessage.Role.USER, content = userMessage)
-        ),
-        systemPrompt = compactSummarySystemPrompt,
-        maxTokens = maxOut,
-        // Mirror iOS AIChatViewModel.swift:12926 — null lets the
-        // provider/model use its default. gpt-5.x family rejects any
-        // temperature != 1 with HTTP 400, and Android
-        // OpenAIProvider.buildRequestBody omits the field entirely when
-        // temperature is null.
-        temperature = null,
-        imageParts = emptyList(),
-        tools = emptyList(),
-        thinkingLevel = ThinkingLevel.OFF,
-    )) {
+    //
+    // [fix/compact-model-fallback] A RemoteFailure/Unavailable on the ACTIVE
+    // member no longer fails the whole compact: the group's healthy fallback
+    // candidates get ONE pass each via the same gateway (the group router
+    // already ordered them cheapest-first and filtered cooling/dead members).
+    // CancellationException is not a result type — it propagates as before,
+    // so a user cancel never degrades into a fallback retry. All-fallbacks-
+    // failed throws the same typed exceptions the splitter expects, so the
+    // halving path is untouched. Fallback outcomes are NOT recorded into the
+    // group router: a compaction failure says nothing about the member's
+    // chat-traffic health, and recording would demote a healthy member.
+    suspend fun sendVia(p: LLMProvider): ProviderExecutionGateway.SendResult =
+        ProviderExecutionGateway.send(
+            context = context,
+            instance = p.instanceContext,
+            model = p.model,
+            messages = listOf(
+                LLMMessage(role = LLMMessage.Role.USER, content = userMessage)
+            ),
+            systemPrompt = compactSummarySystemPrompt,
+            maxTokens = maxOut,
+            // Mirror iOS AIChatViewModel.swift:12926 — null lets the
+            // provider/model use its default. gpt-5.x family rejects any
+            // temperature != 1 with HTTP 400, and Android
+            // OpenAIProvider.buildRequestBody omits the field entirely when
+            // temperature is null.
+            temperature = null,
+            imageParts = emptyList(),
+            tools = emptyList(),
+            thinkingLevel = ThinkingLevel.OFF,
+        )
+    return when (val r = sendVia(provider)) {
         is ProviderExecutionGateway.SendResult.Success -> r.response.text
-        is ProviderExecutionGateway.SendResult.RemoteFailure ->
-            throw IllegalStateException("compaction failed (${r.code}): ${r.message}")
-        is ProviderExecutionGateway.SendResult.Unavailable ->
-            throw IllegalStateException("compaction unavailable: ${r.reason}")
+        is ProviderExecutionGateway.SendResult.RemoteFailure,
+        is ProviderExecutionGateway.SendResult.Unavailable -> {
+            val fallbacks = buildFallbackProviders(provider)
+            AppLogger.info(
+                ChatViewModel.TAG,
+                "[Compact] summary failed on active member ($r) — trying ${fallbacks.size} fallback candidate(s)",
+            )
+            var lastFailure: Exception = IllegalStateException("compaction failed")
+            for (candidate in fallbacks) {
+                when (val fr = sendVia(candidate.provider)) {
+                    is ProviderExecutionGateway.SendResult.Success -> {
+                        AppLogger.info(
+                            ChatViewModel.TAG,
+                            "[Compact] summary fallback SUCCESS entry=${candidate.entryId} " +
+                                "model=${candidate.provider.model.displayName}",
+                        )
+                        return fr.response.text
+                    }
+                    else -> {
+                        AppLogger.info(
+                            ChatViewModel.TAG,
+                            "[Compact] summary fallback failed entry=${candidate.entryId}: $fr",
+                        )
+                        lastFailure = when (fr) {
+                            is ProviderExecutionGateway.SendResult.RemoteFailure ->
+                                IllegalStateException("compaction failed (${fr.code}): ${fr.message}")
+                            is ProviderExecutionGateway.SendResult.Unavailable ->
+                                IllegalStateException("compaction unavailable: ${fr.reason}")
+                            else -> lastFailure
+                        }
+                    }
+                }
+            }
+            throw lastFailure
+        }
     }
 }
 

@@ -1323,6 +1323,7 @@
     <string name="rootfs_insufficient_space">容量不足: 約 %1$d MB 必要ですが、利用可能なのは %2$d MB のみです。ストレージを空けて再試行してください。</string>
 
     <!-- Fix: minis:// リンク対象のファイルが消えた場合の表記、および外部 scheme 遮断の文言。 -->
+    <string name="chat_link_path_invalid">このリンクは無効なパスを指しています。</string>
     <string name="chat_link_file_missing">このファイルは利用できなくなりました。</string>
     <string name="webpreview_blocked_scheme">外部アプリへのリンクをブロックしました。</string>
     <string name="thinking_rules_section">思考ルール</string>

@@ -1315,6 +1315,7 @@
     <string name="rootfs_insufficient_space">공간 부족: 약 %1$d MB 필요, 사용 가능 %2$d MB뿐입니다. 저장 공간을 확보한 후 다시 시도하세요.</string>
 
     <!-- Fix: minis:// 링크 대상 파일이 사라졌을 때 안내 및 외부 scheme 차단 문구. -->
+    <string name="chat_link_path_invalid">이 링크는 잘못된 경로를 가리킵니다.</string>
     <string name="chat_link_file_missing">이 파일은 더 이상 사용할 수 없습니다.</string>
     <string name="webpreview_blocked_scheme">외부 앱으로 연결되는 링크를 차단했습니다.</string>
     <string name="thinking_rules_section">사고 규칙</string>

@@ -1470,6 +1470,7 @@
     <string name="rootfs_insufficient_space">Недостаточно места: нужно около %1$d МБ, доступно только %2$d МБ. Освободите хранилище и повторите попытку.</string>
 
     <!-- Fix: уведомления о недоступных файлах minis:// и о блокировке внешних scheme. -->
+    <string name="chat_link_path_invalid">Эта ссылка указывает на недопустимый путь.</string>
     <string name="chat_link_file_missing">Этот файл больше недоступен.</string>
     <string name="webpreview_blocked_scheme">Ссылка на внешнее приложение заблокирована.</string>
     <string name="thinking_rules_section">Правила размышления</string>

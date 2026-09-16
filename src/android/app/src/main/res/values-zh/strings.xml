@@ -1633,6 +1633,7 @@
     <string name="rootfs_insufficient_space">空间不足：需要约 %1$d MB，可用仅 %2$d MB。请清理存储后重试。</string>
 
     <!-- Fix: minis:// 链接失效/文件已清理时的提示，以及本地化的外部 scheme 拦截文案。 -->
+    <string name="chat_link_path_invalid">此链接指向的路径无效。</string>
     <string name="chat_link_file_missing">此文件已不可用。</string>
     <string name="webpreview_blocked_scheme">已拦截指向外部应用的链接。</string>
     <string name="thinking_rules_section">思考规则</string>

@@ -24,9 +24,17 @@ sealed class ChatLinkAction {
     data class ExternalApp(val url: String) : ChatLinkAction()
     data class Web(val url: String) : ChatLinkAction()
     /** A minis:// resource link that no longer resolves to an on-disk
-     *  file (cleaned up, or a cross-session path that went stale). */
-    data class MissingFile(val url: String) : ChatLinkAction()
+     *  file. [reason] distinguishes "the URL was malformed in the first
+     *  place (dot-segment escape, rejected by the path guard)" from
+     *  "the file existed once but is gone (cleaned up / cross-session
+     *  stale)". Only ILLEGAL_PATH is determinable at resolve time —
+     *  cleaned-up vs stale both surface as a missing file, so we do NOT
+     *  guess between them (refuse-instead-of-guess). */
+    data class MissingFile(val url: String, val reason: ChatLinkMissingReason) : ChatLinkAction()
 }
+
+/** Top-level: pure classification lives in ChatLinkMissingReason.kt (JVM-pure). */
+typealias MissingFileReason = ChatLinkMissingReason
 
 object ChatLinkResolver {
 
@@ -64,7 +72,7 @@ object ChatLinkResolver {
         // to the external-scheme branch — otherwise the app's own minis://
         // links get misreported as "Blocked link to external app (minis)".
         if (scheme == "minis") {
-            return ChatLinkAction.MissingFile(trimmed)
+            return ChatLinkAction.MissingFile(trimmed, chatLinkMissingReason(trimmed))
         }
 
         // T136: intent://, mailto:, tel:, geo:, market: etc. need a system
@@ -120,6 +128,15 @@ object ChatLinkResolver {
             else -> null
         }
     }
+
+    /**
+     * Pure reason determination for an unresolvable minis:// link — the
+     * implementation lives in ChatLinkMissingReason.kt (JVM-pure, testable
+     * without Robolectric). This member keeps the resolver as the single
+     * funnel for link reason queries.
+     */
+    internal fun missingFileReason(rawUrl: String): ChatLinkMissingReason =
+        chatLinkMissingReason(rawUrl)
 
     /** Fire a system intent so MainActivity's BROWSABLE filter picks the deep link up. */
     fun dispatchDeepLink(context: Context, originalUrl: String) {

@@ -1694,7 +1694,13 @@ fun ChatScreen(
                 is ChatLinkAction.MissingFile ->
                     android.widget.Toast.makeText(
                         context,
-                        context.getString(R.string.chat_link_file_missing),
+                        context.getString(
+                            if (action.reason == ChatLinkResolver.MissingFileReason.ILLEGAL_PATH) {
+                                R.string.chat_link_path_invalid
+                            } else {
+                                R.string.chat_link_file_missing
+                            },
+                        ),
                         android.widget.Toast.LENGTH_SHORT,
                     ).show()
                 is ChatLinkAction.Web -> previewUrl = action.url

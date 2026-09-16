@@ -106,6 +106,24 @@ internal fun isOffloadEligible(part: AgentContentPart): Boolean = when (part) {
     is AgentContentPart.Text -> false
 }
 
+/**
+ * [fix/offload-protected-tools] Tools whose output must NEVER be offloaded —
+ * parity with OpenCode's compaction `PRUNE_PROTECTED_TOOLS = ["skill"]`.
+ * These tools' results are reference material the agent is expected to keep
+ * consulting verbatim; stubbing them swaps knowledge for a pointer and the
+ * only recovery is another tool call (a full turn of latency + tokens).
+ *
+ * ponytail: name-list protection, not a per-tool capability axis |
+ * 天花板: a tool whose output is huge AND disposable would waste window
+ * space by staying in context | 升级触发: a session where memory lookups
+ * dominate the context budget → make the list configurable per tool.
+ */
+internal val OFFLOAD_PROTECTED_TOOLS = setOf("memory_get")
+
+/** Pure check: is this ToolResult protected from offload/prune by tool name? */
+internal fun isProtectedToolResult(toolName: String?): Boolean =
+    toolName != null && toolName in OFFLOAD_PROTECTED_TOOLS
+
     /**
      * Walk [agentHistory], identify large tool outputs in the older
      * (non-protected) message range, and offload the highest-token ones to
@@ -180,6 +198,9 @@ internal fun ChatViewModel.offloadContextIfNeeded(
     val candidates = mutableListOf<OffloadCandidate>()
     var skippedAlreadyOffloaded = 0
     var skippedTooSmall = 0
+    // [fix/offload-protected-tools] Counted separately from `too small`:
+    // protected tool results are excluded by *name*, not by size.
+    var skippedProtected = 0
     // [fix/offload-payload-stub] Counted separately from `too small`: these are
     // tool-call payloads, which are excluded by *kind*, not by size.
     var skippedPayloadParts = 0
@@ -191,6 +212,13 @@ internal fun ChatViewModel.offloadContextIfNeeded(
                 is AgentContentPart.ToolResult -> {
                     if (part.content.startsWith(ContextOffload.OFFLOADED_PREFIX)) {
                         skippedAlreadyOffloaded++
+                        continue
+                    }
+                    // [fix/offload-protected-tools] Protected tool results are
+                    // never offload candidates, regardless of size — counted
+                    // separately so the reason is greppable in logs.
+                    if (isProtectedToolResult(part.name)) {
+                        skippedProtected++
                         continue
                     }
                     if (!isOffloadEligible(part)) {
@@ -228,7 +256,7 @@ internal fun ChatViewModel.offloadContextIfNeeded(
     candidates.sortByDescending { it.tokens }
     val totalCandidateTokens = candidates.sumOf { it.tokens }
     AppLogger.info(ChatViewModel.TAG, "  Candidates: ${candidates.size} parts (~$totalCandidateTokens tokens total)")
-    AppLogger.info(ChatViewModel.TAG, "  Skipped: $skippedAlreadyOffloaded already offloaded, $skippedTooSmall too small, $skippedPayloadParts tool-call payloads (never offloaded)")
+    AppLogger.info(ChatViewModel.TAG, "  Skipped: $skippedAlreadyOffloaded already offloaded, $skippedTooSmall too small, $skippedPayloadParts tool-call payloads (never offloaded), $skippedProtected protected tool results")
 
     var offloadedCount = 0
     var freedTokens = 0

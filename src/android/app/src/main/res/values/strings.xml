@@ -1706,6 +1706,7 @@
 
     <!-- Fix: minis:// link fragments that went stale / cleaned-up files, and
          a properly localized external-scheme guard message. -->
+    <string name="chat_link_path_invalid">This link points to an invalid path.</string>
     <string name="chat_link_file_missing">This file is no longer available.</string>
     <string name="webpreview_blocked_scheme">Blocked link to external app.</string>
     <string name="thinking_rules_section">Thinking Rules</string>

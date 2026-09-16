@@ -1610,6 +1610,7 @@
     </plurals>
 
     <!-- Fix: minis:// 連結失效/檔案已清理時的提示，以及本地化的外部 scheme 攔截文案。 -->
+    <string name="chat_link_path_invalid">此連結指向的路徑無效。</string>
     <string name="chat_link_file_missing">此檔案已不可用。</string>
     <string name="webpreview_blocked_scheme">已攔截指向外部應用的連結。</string>
     <string name="thinking_rules_section">思考規則</string>
