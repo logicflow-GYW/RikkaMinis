@@ -710,7 +710,7 @@ class PersistentShell(
             if (result == null) {
                 // Timeout — cancel pending, but don't kill the shell
                 pendingCallback = null
-                CommandResult("[Command timed out after ${timeout / 1000}s]", 124)
+                CommandResult("[Command timed out after ${timeout / 1000}s]", TIMEOUT_EXIT_CODE)
             } else if (stall.intSentAtMs != 0L && stallAfterMs > 0L && result.exitCode != STALL_EXIT_CODE) {
                 // Stage 1 succeeded: the SIGINT killed the command and the wrapped
                 // trailing lines produced a normal completion. Tell the agent why

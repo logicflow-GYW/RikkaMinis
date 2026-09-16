@@ -93,6 +93,32 @@ internal fun cookieString(raw: Map<String, Any?>, vararg aliases: String): Strin
     }
 
 /**
+ * (was BrowserUseManager.navigate / .loadURL inline)
+ * Prefix a bare host with `https://` while leaving URLs that already carry a
+ * scheme alone.
+ *
+ * [audit-0916] The inline spelling was `if (!contains("://")) "https://$it"`,
+ * which mangles every scheme-less URL: `about:blank` became
+ * `https://about:blank` and was then rejected by Chromium ("Refusing to load
+ * for invalid virtual URL: https://about:blank/") after burning the full
+ * navigation timeout — while `navigate` still reported success. Same for
+ * `data:` / `file:` / `javascript:` inputs.
+ *
+ * A scheme is `<alpha><alnum+.-+>*:` per RFC 3986 — matching it (rather than
+ * looking for `://`) is what keeps opaque schemes like `about:blank` and
+ * `data:text/html,…` intact. The `host:port` form has the same shape, though,
+ * so the scheme must be followed by something that is not a digit: `8080` is a
+ * port, while `blank` in `about:blank` is a scheme body.
+ */
+internal fun normalizeBrowserUrl(raw: String): String {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return trimmed
+    val scheme = Regex("^[A-Za-z][A-Za-z0-9+.\\-]*:($|[^0-9])")
+    if (scheme.containsMatchIn(trimmed)) return trimmed
+    return "https://$trimmed"
+}
+
+/**
  * (was BrowserUseManager.cookieBool)
  * Read a cookie value as Boolean. Tolerates JSON bool, 0/1, and
  * stringified "true"/"false"/"1"/"yes".

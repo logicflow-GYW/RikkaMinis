@@ -816,8 +816,10 @@ class BrowserUseManager(
     private suspend fun navigate(urlString: String?): BrowserActionResult {
         if (urlString.isNullOrEmpty()) return BrowserActionResult.error("Missing 'url' parameter")
 
-        var normalized = urlString
-        if (!normalized.contains("://")) normalized = "https://$normalized"
+        // [audit-0916] Scheme-aware normalization — see normalizeBrowserUrl.
+        // The previous `contains("://")` test turned `about:blank` into
+        // `https://about:blank`, which Chromium refuses to load.
+        val normalized = normalizeBrowserUrl(urlString)
 
         val deferred = CompletableDeferred<Unit>()
         navigationDeferred = deferred
@@ -1572,8 +1574,11 @@ class BrowserUseManager(
     }
 
     fun loadURL(urlString: String) {
-        var normalized = urlString
-        if (!normalized.contains("://")) normalized = "https://$normalized"
+        // [audit-0916] Same scheme-aware normalization as navigate() — see
+        // normalizeBrowserUrl. Keep the two sites in sync: callers pass both
+        // user-typed hostnames and already-normalized URLs, and an opaque
+        // scheme (`about:blank`) must survive either way.
+        val normalized = normalizeBrowserUrl(urlString)
         _isLoading.value = true
         webView.loadUrl(normalized)
     }

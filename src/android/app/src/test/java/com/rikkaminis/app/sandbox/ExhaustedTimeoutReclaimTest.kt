@@ -38,9 +38,10 @@ class ExhaustedTimeoutReclaimTest {
         // Timeout must reclaim even when retries remain — the caller invokes
         // this decision ONLY on the no-retry path, so independence from the
         // attempt counter is what makes the invariant unconditional.
-        // attempt=1 is the FIRST attempt: retry IS allowed (1 < maxRetries=2),
-        // and the reclaim decision STILL fires unconditionally on timeout.
-        assertTrue(internalShouldRetryCommand(124, shellAlive = true, attempt = 1))
+        // [audit-0916] Since a timeout is never retried, the no-retry path IS
+        // the only path a 124 ever takes: shouldRetryCommand is false on the
+        // FIRST attempt too, so the reclaim decision is reached immediately.
+        assertFalse(internalShouldRetryCommand(124, shellAlive = true, attempt = 1))
         assertTrue(internalShouldReclaimOnExhaustedTimeout(124))
         assertFalse(internalShouldRetryCommand(124, shellAlive = true, attempt = 2))
         assertTrue(internalShouldReclaimOnExhaustedTimeout(124))

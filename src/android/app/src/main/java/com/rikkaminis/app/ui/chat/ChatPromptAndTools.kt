@@ -24,6 +24,7 @@ import com.rikkaminis.app.tools.FileWriteTool
 import com.rikkaminis.app.tools.ReadImageTool
 import com.rikkaminis.app.tools.SubagentSkill
 import com.rikkaminis.app.tools.ToolExecutionResult
+import com.rikkaminis.app.tools.UnknownToolMessage
 import com.rikkaminis.app.util.Utf16Sanitizer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -312,7 +313,15 @@ internal suspend fun ChatViewModel.executeTool(
             // [T7-subagent] spawn_agent: delegate to an independent sub-agent
             // instance running the named skill.
             SubagentSkill.NAME -> executeSpawnAgentTool(argsJson)
-            else -> ToolExecutionResult("Unknown tool: $name", false)
+            // [audit-0916] A bare rejection names nothing the model can correct
+            // towards; hand it the real tool names instead (see
+            // UnknownToolMessage for the log that motivated this). toolTitle is
+            // filled so the block/log line isn't empty for an unknown tool.
+            else -> ToolExecutionResult(
+                UnknownToolMessage.message(name, agentTools.map { it.name }),
+                false,
+                toolTitle = toolTitle,
+            )
         }
     } finally {
         // T7-B: 无条件释放 tool slot —— 覆盖成功、普通异常、CancellationException
@@ -447,7 +456,11 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
                 thinkingLevel = ThinkingLevel.OFF,
             )
         },
-        executeSubTool = { name, subArgs -> executeSubagentTool(name, subArgs) },
+        // [audit-0916] The sub-agent's own filtered list is passed in so a
+        // rejected name is answered with the names this level may use.
+        executeSubTool = { name, subArgs ->
+            executeSubagentTool(name, subArgs, subagentTools.map { it.name })
+        },
         // [fix/same-class-cleanup] The residue policy resolves a drifted
         // tool call against the sub-agent's OWN allowed tools — the same
         // filtered list the loop executes against.
@@ -463,7 +476,13 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
  * Tools that are FORBIDDEN for sub-agents never reach this method
  * because [SubagentSkill.buildFilteredTools] excludes them.
  */
-internal suspend fun ChatViewModel.executeSubagentTool(name: String, argsJson: String): ToolExecutionResult = when (name) {
+internal suspend fun ChatViewModel.executeSubagentTool(
+    name: String,
+    argsJson: String,
+    // [audit-0916] Names this sub-agent may call - used to answer an unknown
+    // (or forbidden) tool with the real options instead of a bare rejection.
+    allowedToolNames: List<String>,
+): ToolExecutionResult = when (name) {
     FileReadTool.NAME -> FileReadTool.execute(argsJson, activeSessionId, context)
     FileWriteTool.NAME -> FileWriteTool.execute(argsJson, activeSessionId, context).also {
         if (it.success) maybeReloadSkillsForPath(argsJson)
@@ -480,7 +499,12 @@ internal suspend fun ChatViewModel.executeSubagentTool(name: String, argsJson: S
     // a missing arm here is silent: the tool would work in the main loop and
     // answer "Unknown or forbidden tool" only inside a subagent.
     com.rikkaminis.app.tools.ConversationHistoryContract.NAME -> executeConversationHistoryTool(argsJson)
-    else -> ToolExecutionResult("Error: Unknown or forbidden tool: $name", false)
+    // [audit-0916] List the names this sub-agent may actually use; a bare
+    // rejection gives the model no way back (see UnknownToolMessage).
+    else -> ToolExecutionResult(
+        UnknownToolMessage.message(name, allowedToolNames, forbidden = true),
+        false,
+    )
 }
 
 /**

@@ -36,9 +36,21 @@ internal const val SIGNAL_INT = 2
 internal const val STALL_CPU_POLL_EVERY_TICKS = 5L
 
 /**
+ * Exit code reported when the command outran its `timeout` window —
+ * `withTimeoutOrNull` cancels the coroutine while the command keeps running in
+ * the PTY, so the coordinator must still reclaim the shell (see
+ * [internalShouldReclaimOnExhaustedTimeout]).
+ *
+ * [audit-0916] Named because the value was spelled as a bare `124` in four
+ * places (producer, retry predicate, reclaim predicate, failure classifier).
+ * The retry predicate no longer retries it — see [internalShouldRetryCommand].
+ */
+internal const val TIMEOUT_EXIT_CODE = 124
+
+/**
  * Exit code reported for a command the stall guard had to kill. Distinct from
- * 124 (timeout) and -1 (shell died) so [internalShouldRetryCommand] never
- * auto-retries it — a retry would just hang again for the same reason.
+ * [TIMEOUT_EXIT_CODE] (timeout) and -1 (shell died) so [internalShouldRetryCommand]
+ * never auto-retries it — a retry would just hang again for the same reason.
  */
 internal const val STALL_EXIT_CODE = 125
 

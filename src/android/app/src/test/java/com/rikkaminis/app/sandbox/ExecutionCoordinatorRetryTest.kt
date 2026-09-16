@@ -12,11 +12,13 @@ import org.junit.Test
  *
  * The retry logic answers: "should the command be re-run on a rebuilt shell?"
  * Retry is triggered when the shell process died mid-command (exitCode == -1
- * from PersistentShell.readLoop, exitCode == 124 for timeout, or the process
- * is no longer alive), AND we have not exhausted the retry budget.
+ * from PersistentShell.readLoop, or the process is no longer alive), AND we
+ * have not exhausted the retry budget.
  *
- * Note: exitCode == 124 is treated as a shell death because timeout can leave
- * zombie processes in the PRoot tracer — rebuilding the shell is safer.
+ * [audit-0916] exitCode == 124 (timeout) is deliberately NOT retried — see
+ * [internalShouldRetryCommand]. A timeout already consumed the command's whole
+ * window; the shell is still reclaimed (ExhaustedTimeoutReclaimTest) but the
+ * command is not re-run.
  */
 class ExecutionCoordinatorRetryTest {
 
@@ -68,16 +70,25 @@ class ExecutionCoordinatorRetryTest {
         assertRetry(exitCode = -1, alive = false, attempt = 3, expected = false)
     }
 
-    // ── should retry: timeout ─────────────────────────────────────────
+    // ── should NOT retry: timeout (124) ───────────────────────────────
+    //
+    // [audit-0916] These three cases previously asserted the opposite. A
+    // timeout means the command burned its entire window, so re-running it
+    // repeats the same expensive work (and, for a non-idempotent command, its
+    // side effects) while the agent is told nothing. Reclaiming the shell is
+    // still required and is covered unconditionally by
+    // internalShouldReclaimOnExhaustedTimeout (see ExhaustedTimeoutReclaimTest).
 
     @Test
-    fun `should retry timeout exit code 124 on first attempt`() {
-        assertRetry(exitCode = 124, alive = true, attempt = 1, expected = true)
+    fun `should not retry timeout exit code 124 on first attempt`() {
+        assertRetry(exitCode = 124, alive = true, attempt = 1, expected = false)
     }
 
     @Test
-    fun `should retry timeout exit code 124 with dead shell on first attempt`() {
-        assertRetry(exitCode = 124, alive = false, attempt = 1, expected = true)
+    fun `should not retry timeout exit code 124 even with a dead shell`() {
+        // The timeout guard is checked BEFORE the shell-alive check, so a
+        // timeout is never re-run regardless of what the shell reports.
+        assertRetry(exitCode = 124, alive = false, attempt = 1, expected = false)
     }
 
     @Test

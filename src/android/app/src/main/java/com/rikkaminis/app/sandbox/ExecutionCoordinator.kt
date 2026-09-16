@@ -546,24 +546,36 @@ object ExecutionCoordinator {
                 },
             )
 
-            // Shell died or timed out — rebuild once and retry.
-            // Timeout (124) can leave zombie processes in the PRoot tracer;
-            // rebuilding the shell is safer than leaving a dead shell around.
-            val shellDied = result.exitCode == -1 || result.exitCode == 124 || !shell.isAlive
+            // [audit-0916] Two distinct needs used to be conflated here:
+            //   - reclaim the SHELL when a command died or timed out (a
+            //     timeout's command keeps running in the PTY) — required;
+            //   - re-run the COMMAND — only legitimate for an infra death.
+            // shouldRetryCommand() now decides the second (timeout and
+            // stall-kill return false); the no-retry branch below reclaims the
+            // shell for those. `shellDied` here is only used to null out a
+            // dead shell reference on the exhausted path.
+            val shellDied = result.exitCode == -1 || !shell.isAlive
             if (!shouldRetryCommand(result.exitCode, shell.isAlive, attempt)) {
-                // [audit-RC7] Timeout must ALWAYS reclaim the shell, even on
-                // the final attempt. withTimeoutOrNull only cancels the
-                // coroutine — the command keeps running inside the PTY with
-                // pendingCallback already nulled, so its late output (and the
-                // stale __MINIS_DONE_<marker>__ line) would be scanned into
-                // the NEXT command's output on this shell. Killing the shell
-                // here guarantees the invariant: exitCode==124 ⇒ no orphan
-                // command, no cross-command output pollution.
+                // [audit-RC7] Timeout must ALWAYS reclaim the shell. With
+                // withTimeoutOrNull only cancelling the coroutine, the command
+                // keeps running inside the PTY with pendingCallback already
+                // nulled, so its late output (and the stale
+                // __MINIS_DONE_<marker>__ line) would be scanned into the
+                // NEXT command's output on this shell. Killing the shell here
+                // guarantees the invariant: exitCode==124 ⇒ no orphan command,
+                // no cross-command output pollution.
+                //
+                // [audit-0916] This is now the ONLY thing a timeout does —
+                // shouldRetryCommand() returns false for 124 on every attempt,
+                // so the branch fires on attempt 1 as well and the agent gets
+                // the timeout error immediately instead of after a silent
+                // re-run of the same command.
                 if (internalShouldReclaimOnExhaustedTimeout(result.exitCode)) {
                     Log.w(
                         TAG,
-                        "[$sessionId] Command timed out with retries exhausted — " +
-                            "reclaiming shell to kill the orphaned command"
+                        "[$sessionId] Command timed out — reclaiming shell to kill the " +
+                            "orphaned command and reporting the timeout to the agent " +
+                            "(no re-run)"
                     )
                     sessionDidTerminate(sessionId)
                     lastShell = null
@@ -584,7 +596,7 @@ object ExecutionCoordinator {
             Log.w(
                 TAG,
                 "[$sessionId] Shell died mid-command (exit=${result.exitCode}, alive=${shell.isAlive}) " +
-                    "— rebuilding and retrying (attempt $attempt/2)"
+                    "— rebuilding and retrying (attempt $attempt/$MAX_AUTO_RETRIES)"
             )
             sessionDidTerminate(sessionId)
         }
@@ -1005,10 +1017,31 @@ object ExecutionCoordinator {
 /**
  * [P3-shell-auto-retry] Pure decision: should the command be re-run on a
  * rebuilt shell? True only when the shell process died mid-command —
- * HyperOS silent_kill, PRoot tracer OOM, idle-recycle race — or the
- * command timed out (124, which can leave zombie processes in the PRoot
- * tracer), AND we haven't exhausted [maxRetries]. A normal non-zero
- * exit (script error) or a live shell never triggers a retry.
+ * HyperOS silent_kill, PRoot tracer OOM, idle-recycle race — AND we haven't
+ * exhausted [maxRetries]. A normal non-zero exit (script error), a live
+ * shell, a timeout, and a stall-kill never trigger a retry.
+ *
+ * [audit-0916] Timeout (124) was previously lumped in with "shell died"
+ * because it "can leave zombie processes in the PRoot tracer". Those are two
+ * different needs and only the second one is real:
+ *
+ *   - reclaiming the SHELL (kill the orphaned command so its late output
+ *     can't be scanned into the next command) — genuinely required, and
+ *     already handled unconditionally by
+ *     [internalShouldReclaimOnExhaustedTimeout], which runs on the no-retry
+ *     path;
+ *   - re-running the COMMAND — not required, and actively harmful. A timeout
+ *     means the command burned its entire window, so the retry re-runs the
+ *     same expensive work (measured: a 600s `java -jar` harness re-ran for
+ *     another 600s until the user hit stop) and, for a non-idempotent command
+ *     (git push / CI dispatch / append), repeats its side effects while the
+ *     agent is told nothing — it sees one result and cannot know it ran twice.
+ *
+ * This is the same reasoning the stall guard already encodes: "retrying the
+ * SAME command would hang again for the same reason" (see STALL_EXIT_CODE).
+ * Timeout is that same shape. It also matches the repo's side-effect-aware
+ * policy ([com.rikkaminis.app.agent.runtime.RetryPolicy]: UNKNOWN + TIMEOUT →
+ * OutcomeUnknown, i.e. never transparently re-run).
  *
  * Extracted as a top-level function so it can be JVM-tested without loading
  * the [ExecutionCoordinator] object (which depends on `android.content.Context`
@@ -1026,7 +1059,15 @@ internal fun internalShouldRetryCommand(
     // the same reason. Hand the error to the agent instead and let it change
     // approach (see STALL_EXIT_CODE).
     if (exitCode == STALL_EXIT_CODE) return false
-    val shellDied = exitCode == -1 || exitCode == 124 || !shellAlive
+    // [audit-0916] Same shape as the stall guard above: a timeout burned the
+    // command's whole window. The caller's no-retry path reclaims the shell
+    // (killing the orphaned command) via
+    // [internalShouldReclaimOnExhaustedTimeout], so the PTY-pollution hazard
+    // this used to guard against is still covered — without re-running the
+    // command. Guarded explicitly (not via `!shellAlive`) so a timeout is
+    // never retried even if the shell happens to report dead.
+    if (exitCode == TIMEOUT_EXIT_CODE) return false
+    val shellDied = exitCode == -1 || !shellAlive
     return shellDied && attempt < maxRetries
 }
 
@@ -1044,7 +1085,7 @@ internal fun internalShouldRetryCommand(
  * Other death kinds (-1 / dead shell) leave nothing running in the PTY;
  * the pre-existing dead-shell path already handles those without this.
  */
-internal fun internalShouldReclaimOnExhaustedTimeout(exitCode: Int): Boolean = exitCode == 124
+internal fun internalShouldReclaimOnExhaustedTimeout(exitCode: Int): Boolean = exitCode == TIMEOUT_EXIT_CODE
 
 // ──────────────────────────────────────────────────────────────────────────
 // [T3-retry-side-effects] Side-effect-aware retry policy — pure functions
@@ -1062,7 +1103,7 @@ internal fun internalShouldReclaimOnExhaustedTimeout(exitCode: Int): Boolean = e
  *
  * Order matters:
  * - `exitCode == -1`   → SHELL_DIED (readLoop saw the process exit);
- * - `exitCode == 124`  → TIMEOUT (may have left zombies);
+ * - `exitCode == TIMEOUT_EXIT_CODE` → TIMEOUT (may have left zombies);
  * - truncated + alive  → OUTPUT_TRUNCATED — the command RAN, its side
  *   effects happened, only the output was cut. Must never be misread as
  *   "command did not execute";
@@ -1076,7 +1117,7 @@ internal fun internalClassifyShellFailure(
     truncated: Boolean,
 ): CommandFailureKind? = when {
     exitCode == -1 -> CommandFailureKind.SHELL_DIED
-    exitCode == 124 -> CommandFailureKind.TIMEOUT
+    exitCode == TIMEOUT_EXIT_CODE -> CommandFailureKind.TIMEOUT
     // Alive + non-zero exit: the command RAN and failed (script error,
     // command not found…). Checked before truncation so a failed command
     // with truncated output is not misread as a mere truncation.

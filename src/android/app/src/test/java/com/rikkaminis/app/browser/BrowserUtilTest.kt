@@ -256,4 +256,43 @@ class BrowserUtilTest {
     @Test fun `cookieNumber alias matching`() {
         assertEquals(100.0, cookieNumber(mapOf("expirationDate" to 100.0), "expires", "expirationDate")!!, 0.001)
     }
+
+    // ── normalizeBrowserUrl ────────────────────────────────────────────────
+    //
+    // [audit-0916] Regression guard for the defect seen in the 2026-09-16 log:
+    // `about:blank` was rewritten to `https://about:blank`, Chromium refused it
+    // ("Refusing to load for invalid virtual URL") and the full navigation
+    // timeout was burned on a URL that was never loadable.
+
+    @Test fun `normalizeBrowserUrl keeps opaque schemes intact`() {
+        assertEquals("about:blank", normalizeBrowserUrl("about:blank"))
+        assertEquals("data:text/html,<b>x</b>", normalizeBrowserUrl("data:text/html,<b>x</b>"))
+        assertEquals("file:/data/local/x.html", normalizeBrowserUrl("file:/data/local/x.html"))
+        assertEquals("javascript:void(0)", normalizeBrowserUrl("javascript:void(0)"))
+        assertEquals("mailto:a@b.c", normalizeBrowserUrl("mailto:a@b.c"))
+        assertEquals("intent://x#Intent;end", normalizeBrowserUrl("intent://x#Intent;end"))
+        assertEquals("minis://workspace/a.html", normalizeBrowserUrl("minis://workspace/a.html"))
+    }
+
+    @Test fun `normalizeBrowserUrl prefixes only bare hosts`() {
+        assertEquals("https://example.com", normalizeBrowserUrl("example.com"))
+        assertEquals("https://example.com/a/b?c=1", normalizeBrowserUrl("example.com/a/b?c=1"))
+        assertEquals("https://127.0.0.1:8080/x", normalizeBrowserUrl("127.0.0.1:8080/x"))
+        assertEquals("https://localhost:8080", normalizeBrowserUrl("localhost:8080"))
+    }
+
+    @Test fun `normalizeBrowserUrl leaves full URLs alone`() {
+        assertEquals("http://x.com", normalizeBrowserUrl("http://x.com"))
+        assertEquals("https://x.com/a", normalizeBrowserUrl("https://x.com/a"))
+        // Idempotent: re-normalizing a normalized URL changes nothing, which
+        // matters because navigate() and loadURL() both call it.
+        assertEquals("https://x.com", normalizeBrowserUrl(normalizeBrowserUrl("x.com")))
+    }
+
+    @Test fun `normalizeBrowserUrl trims and passes blanks`() {
+        assertEquals("https://example.com", normalizeBrowserUrl("  example.com  "))
+        assertEquals("about:blank", normalizeBrowserUrl("  about:blank  "))
+        assertEquals("", normalizeBrowserUrl(""))
+        assertEquals("", normalizeBrowserUrl("   "))
+    }
 }
