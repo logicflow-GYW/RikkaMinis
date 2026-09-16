@@ -91,23 +91,30 @@ class SessionSlotControllerTest {
         val start = CountDownLatch(1)
         val done = CountDownLatch(threads)
         val maxObserved = AtomicInteger(0)
-        val activeNow = AtomicInteger(0)
         val duplicates = AtomicInteger(0)
         val runSeq = AtomicInteger(0)
 
+        // [slot-test-race] 测量工具必须是控制器自身的快照，不能是线程本地计数器。
+        // 旧写法（activeNow.incrementAndGet → updateMax → release → decrementAndGet）
+        // 在"槽位交接"窗口双重计数：释放者 A 调 c.release() → 控制器在同一把锁内
+        // 移除 A 并提升 waiter W → W 的测试线程观察到 isActive(W)=true 立刻
+        // incrementAndGet，而 A 要等 release 返回后才 decrementAndGet ——
+        // maxObserved 因此读到 capacity+1（CI 实证 max=6, capacity=5），但控制器
+        // 的 activeRunIds.size 从未越过容量（remove+promote 在同一 synchronized
+        // 区间内，观察者不可能看到超容量瞬间）。快照采样直接测真不变量：
+        // 控制器任何瞬间都不可能有超过 capacity 个 active，100 线程锤出上千次
+        // 采样足以抓住真实的提升越界。
         repeat(threads) {
             thread(name = "slot-t$it") {
                 val runId = "r${runSeq.getAndIncrement()}"
                 start.await()
                 when (val outcome = c.acquire(runId)) {
                     is Acquired -> {
-                        val now = activeNow.incrementAndGet()
-                        updateMax(maxObserved, now)
+                        updateMax(maxObserved, c.snapshot().activeCount)
                         c.release(runId)
-                        activeNow.decrementAndGet()
                     }
                     is Queued -> {
-                        // 等待被提升（轮询，不用 sleep）；提升后计数持有再释放
+                        // 等待被提升（轮询，不用 sleep）；提升后采样持有再释放
                         var becameActive = false
                         while (!c.isActive(runId)) {
                             if (c.isWaiting(runId)) {
@@ -119,10 +126,8 @@ class SessionSlotControllerTest {
                         }
                         if (c.isActive(runId)) {
                             becameActive = true
-                            val now = activeNow.incrementAndGet()
-                            updateMax(maxObserved, now)
+                            updateMax(maxObserved, c.snapshot().activeCount)
                             c.release(runId)
-                            activeNow.decrementAndGet()
                         }
                         assertTrue("queued run $runId never promoted", becameActive)
                     }
@@ -147,10 +152,11 @@ class SessionSlotControllerTest {
         val start = CountDownLatch(1)
         val done = CountDownLatch(2)
         val maxObserved = AtomicInteger(0)
-        val activeNow = AtomicInteger(0)
         val runSeq = AtomicInteger(0)
 
-        // 两个线程：一个持续 acquire→release，一个也持续 acquire→release，互相交错
+        // [slot-test-race] 同 100 并发测试：测量工具用控制器快照，不用线程本地
+        // 计数器（交接窗口双重计数）。本测试 2 线程 < capacity 3 不会排队，所以
+        // 旧写法恰好没炸过——这是潜伏的，不是对的。
         repeat(2) {
             thread(name = "interleave-$it") {
                 start.await()
@@ -158,20 +164,16 @@ class SessionSlotControllerTest {
                     val runId = "i${runSeq.getAndIncrement()}"
                     when (val outcome = c.acquire(runId)) {
                         is Acquired -> {
-                            val now = activeNow.incrementAndGet()
-                            updateMax(maxObserved, now)
+                            updateMax(maxObserved, c.snapshot().activeCount)
                             c.release(runId)
-                            activeNow.decrementAndGet()
                         }
                         is Queued -> {
                             while (!c.isActive(runId)) {
                                 if (c.isWaiting(runId)) Thread.yield() else break
                             }
                             if (c.isActive(runId)) {
-                                val now = activeNow.incrementAndGet()
-                                updateMax(maxObserved, now)
+                                updateMax(maxObserved, c.snapshot().activeCount)
                                 c.release(runId)
-                                activeNow.decrementAndGet()
                             }
                         }
                         is Duplicate -> throw AssertionError("duplicate runId $runId")
