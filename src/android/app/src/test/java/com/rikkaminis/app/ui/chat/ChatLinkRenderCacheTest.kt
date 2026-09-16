@@ -21,7 +21,7 @@ class ChatLinkRenderCacheTest {
 
     @Test
     fun `resolves via the injected resolver`() {
-        val r = CountingResolver(ChatLinkAction.MissingFile("minis://shared/x.txt"))
+        val r = CountingResolver(ChatLinkAction.MissingFile("minis://shared/x.txt", ChatLinkMissingReason.FILE_MISSING))
         val cache = ChatLinkRenderCache(r::resolve)
         assertSame(r.action, cache.resolve("minis://shared/x.txt", "s1"))
     }
@@ -38,7 +38,7 @@ class ChatLinkRenderCacheTest {
 
     @Test
     fun `different sessionId is a different key`() {
-        val r = CountingResolver(ChatLinkAction.MissingFile("m"))
+        val r = CountingResolver(ChatLinkAction.MissingFile("m", ChatLinkMissingReason.FILE_MISSING))
         val cache = ChatLinkRenderCache(r::resolve)
         cache.resolve("u", "s1")
         cache.resolve("u", "s2")
