@@ -182,8 +182,16 @@ class BrowserUseManager(
      */
     var onBlobDownloadData: ((data: ByteArray, filename: String, mimeType: String?) -> Unit)? = null
 
-    /** Deferred for awaiting navigation completion. */
-    private var navigationDeferred: CompletableDeferred<Unit>? = null
+    /**
+     * Deferred for awaiting navigation completion.
+     *
+     * [audit-0916b] Carries a [NavigationResult], not a bare `Unit`. Every
+     * completion path (onPageFinished / main-frame onReceivedError / the
+     * timeout runnable / handing the URL to another app) stamps which of those
+     * actually happened, because the old `Unit` made them indistinguishable and
+     * navigate() answered `success = true` for all of them (§20b).
+     */
+    private var navigationDeferred: CompletableDeferred<NavigationResult>? = null
 
     /** Screenshots directory. */
     private val screenshotsDir: File by lazy {
@@ -481,13 +489,23 @@ class BrowserUseManager(
                     if (urlStr != null) {
                         GoogleAuthRouter.openInCustomTab(view.context, urlStr)
                     }
+                    // Main frame only: a subframe routed away does not end the
+                    // page-load we are waiting on.
+                    if (request.isForMainFrame) completeNavigationExternally(urlStr)
                     return true
                 }
                 // T134: route intent://, market://, tel:, mailto:, … out
                 // of the WebView so they reach the matching app instead of
                 // surfacing as ERR_UNKNOWN_URL_SCHEME.
-                return com.rikkaminis.app.ui.browser.BrowserExternalSchemeHandler
+                val handled = com.rikkaminis.app.ui.browser.BrowserExternalSchemeHandler
                     .handle(view.context, request.url)
+                // [audit-0916b] Both branches above cancel the in-WebView
+                // navigation, so no page-load callback will ever fire for it. A
+                // pending navigate() wait would otherwise sit until the
+                // navigation timeout and then report the wrong thing (before
+                // this fix: a plain success).
+                if (handled && request.isForMainFrame) completeNavigationExternally(urlStr)
+                return handled
             }
 
             override fun onPageFinished(view: WebView, url: String?) {
@@ -496,7 +514,11 @@ class BrowserUseManager(
                 _pageTitle.value = view.title ?: ""
                 _canGoBack.value = view.canGoBack()
                 _canGoForward.value = view.canGoForward()
-                navigationDeferred?.complete(Unit)
+                // [audit-0916b] LOADED — this is the only path that means "the
+                // page finished loading". A main-frame onReceivedError has
+                // already completed (and cleared) the same deferred, so the
+                // error page's own onPageFinished is a no-op here.
+                navigationDeferred?.complete(NavigationResult(NavigationOutcome.LOADED))
                 navigationDeferred = null
                 // Record in browser history
                 val histUrl = url ?: ""
@@ -524,7 +546,19 @@ class BrowserUseManager(
                 if (request.isForMainFrame) {
                     _isLoading.value = false
                     Log.e(TAG, "Navigation error: ${error.description}")
-                    navigationDeferred?.complete(Unit)
+                    // [audit-0916b] FAILED — completed here rather than waiting
+                    // for the WebView's own error page to fire onPageFinished,
+                    // so the awaiter learns immediately (and, when the load was
+                    // refused outright, at all). The metadata appended to the
+                    // result is read from the live WebView, so the title may
+                    // still be the previous page's — the text says plainly that
+                    // the page did not load, which is the point.
+                    navigationDeferred?.complete(
+                        NavigationResult(
+                            NavigationOutcome.FAILED,
+                            errorDescription = error.description?.toString(),
+                        )
+                    )
                     navigationDeferred = null
                 }
             }
@@ -768,7 +802,16 @@ class BrowserUseManager(
         }
 
         // Auto-capture screenshot after visual-change actions
-        if (result.success && BrowserAction.visualChangeActions.contains(input.action)) {
+        //
+        // [audit-0916b] NAVIGATE is exempt from the success gate: it always
+        // produced a snapshot before (a failed navigation used to be reported as
+        // success), and "what is on screen right now" is precisely what the
+        // agent needs to judge a navigation that did not confirm — the error
+        // text deliberately allows for a page that is merely still loading.
+        // Every other action keeps the original success-only gate.
+        if ((result.success || input.action == BrowserAction.NAVIGATE) &&
+            BrowserAction.visualChangeActions.contains(input.action)
+        ) {
             result = attachSnapshot(result)
         }
 
@@ -821,7 +864,7 @@ class BrowserUseManager(
         // `https://about:blank`, which Chromium refuses to load.
         val normalized = normalizeBrowserUrl(urlString)
 
-        val deferred = CompletableDeferred<Unit>()
+        val deferred = CompletableDeferred<NavigationResult>()
         navigationDeferred = deferred
         _isLoading.value = true
 
@@ -836,6 +879,7 @@ class BrowserUseManager(
         }
 
         // Wait with timeout
+        val navTimeoutSec = AgentRuntimeLimitsPrefs.browserNavTimeoutSec()
         val handler = Handler(Looper.getMainLooper())
         val timeoutRunnable = Runnable {
             // [audit-0909 T7-H1] Complete UNCONDITIONALLY. navigationDeferred
@@ -852,11 +896,13 @@ class BrowserUseManager(
                 _isLoading.value = false
                 navigationDeferred = null
             }
-            deferred.complete(Unit)
+            // [audit-0916b] TIMED_OUT, not a bare Unit: nothing reported that
+            // the page finished loading, so the caller must not answer success.
+            deferred.complete(NavigationResult(NavigationOutcome.TIMED_OUT))
         }
-        handler.postDelayed(timeoutRunnable, AgentRuntimeLimitsPrefs.browserNavTimeoutSec() * 1000L)
+        handler.postDelayed(timeoutRunnable, navTimeoutSec * 1000L)
 
-        try {
+        val navResult = try {
             deferred.await()
         } finally {
             handler.removeCallbacks(timeoutRunnable)
@@ -865,12 +911,60 @@ class BrowserUseManager(
         _currentURL.value = _currentURL.value.ifEmpty { normalized }
         _isLoading.value = false
 
-        val meta = navigationMetadata()
-        return BrowserActionResult(text = meta)
+        // [audit-0916b] LOADED keeps the historical URL source byte-for-byte.
+        // See navigationReportedUrl.
+        val reportedUrl = navigationReportedUrl(
+            outcome = navResult.outcome,
+            currentUrl = _currentURL.value,
+            requestedUrl = normalized,
+        )
+
+        // [audit-0916b] Report what actually happened instead of the constant
+        // "Navigated to $url" / success=true. §20b: a URL Chromium refuses to
+        // load ("Refusing to load for invalid virtual URL: https://about:blank/",
+        // 2026-09-16 10:40:55) fires neither onPageFinished nor onReceivedError,
+        // so it burned the whole navigation timeout and was then reported as a
+        // successful navigation (10:41:26, success=true output=Navigated to
+        // about:blank) — the agent believed it was on a page that never loaded.
+        val report = navigationReport(
+            outcome = navResult.outcome,
+            url = reportedUrl,
+            details = navigationDetails(),
+            errorDescription = navResult.errorDescription,
+            routedTarget = navResult.routedTarget,
+            timeoutSec = navTimeoutSec,
+        )
+        return BrowserActionResult(text = report.text, success = report.success)
     }
 
-    private suspend fun navigationMetadata(): String {
-        val url = _currentURL.value
+    /**
+     * [audit-0916b] A navigation was handed to another app rather than loaded in
+     * the WebView (Google auth → Chrome Custom Tab; tel:/mailto:/intent:/… →
+     * the system handler). No page-load callback will ever arrive for it, so any
+     * pending navigation wait is completed here — as
+     * [NavigationOutcome.ROUTED_EXTERNALLY], which reports success (the tool
+     * call did what was asked) while stating that the in-app page did not
+     * change, instead of hanging until the timeout and then claiming a
+     * navigation that never happened.
+     */
+    private fun completeNavigationExternally(target: String?) {
+        val deferred = navigationDeferred ?: return
+        navigationDeferred = null
+        _isLoading.value = false
+        deferred.complete(
+            NavigationResult(NavigationOutcome.ROUTED_EXTERNALLY, routedTarget = target)
+        )
+    }
+
+    /**
+     * [audit-0916b] The page metadata block that follows the outcome line:
+     * title / viewport / page size / scroll position, each read from the live
+     * WebView. Split out of [navigationMetadata] so the outcome line and the
+     * metadata cannot disagree — [navigationMetadata] used to hardcode its own
+     * "Navigated to $url" header, which would have duplicated (or worse,
+     * contradicted) the error line now prepended for a failed navigation.
+     */
+    private suspend fun navigationDetails(): String {
         val title = _pageTitle.value
         // Read the viewport directly from the page (`window.innerWidth/Height`)
         // so a session or global viewport override shows the actual layout
@@ -900,7 +994,6 @@ class BrowserUseManager(
         val effectiveVpH = if (vpH > 0) vpH else fallback.second
 
         return buildString {
-            appendLine("Navigated to $url")
             if (title.isNotEmpty()) appendLine("  Title: $title")
             appendLine("  Viewport: ${effectiveVpW}x$effectiveVpH")
             if (pageW > 0 || pageH > 0) appendLine("  Page size: ${pageW}x$pageH")
@@ -1510,7 +1603,12 @@ class BrowserUseManager(
      * viewport-change callers still get a deterministic page refresh.
      */
     suspend fun reloadAndWait() {
-        val deferred = CompletableDeferred<Unit>()
+        // [audit-0916b] Typed like navigate()'s. These two are internal
+        // best-effort refreshes (viewport change / fresh-tab init) and
+        // deliberately ignore the outcome — a failed reload must not break
+        // set_viewport — but they must still complete with a real
+        // NavigationResult so the shared callbacks stay type-correct.
+        val deferred = CompletableDeferred<NavigationResult>()
         navigationDeferred = deferred
         _isLoading.value = true
         val url = _currentURL.value
@@ -1535,7 +1633,7 @@ class BrowserUseManager(
                 _isLoading.value = false
                 navigationDeferred = null
             }
-            deferred.complete(Unit)
+            deferred.complete(NavigationResult(NavigationOutcome.TIMED_OUT))
         }
         handler.postDelayed(timeoutRunnable, AgentRuntimeLimitsPrefs.browserNavTimeoutSec() * 1000L)
         try { deferred.await() } finally { handler.removeCallbacks(timeoutRunnable) }
@@ -1553,7 +1651,12 @@ class BrowserUseManager(
      * `document.body` populated. Must be called on the main thread.
      */
     suspend fun loadBlankPage() {
-        val deferred = CompletableDeferred<Unit>()
+        // [audit-0916b] Typed like navigate()'s. These two are internal
+        // best-effort refreshes (viewport change / fresh-tab init) and
+        // deliberately ignore the outcome — a failed reload must not break
+        // set_viewport — but they must still complete with a real
+        // NavigationResult so the shared callbacks stay type-correct.
+        val deferred = CompletableDeferred<NavigationResult>()
         navigationDeferred = deferred
         _isLoading.value = true
         webView.loadDataWithBaseURL(null, BLANK_PAGE_HTML, "text/html", "utf-8", null)
@@ -1566,7 +1669,7 @@ class BrowserUseManager(
                 _isLoading.value = false
                 navigationDeferred = null
             }
-            deferred.complete(Unit)
+            deferred.complete(NavigationResult(NavigationOutcome.TIMED_OUT))
         }
         handler.postDelayed(timeoutRunnable, AgentRuntimeLimitsPrefs.browserNavTimeoutSec() * 1000L)
         try { deferred.await() } finally { handler.removeCallbacks(timeoutRunnable) }

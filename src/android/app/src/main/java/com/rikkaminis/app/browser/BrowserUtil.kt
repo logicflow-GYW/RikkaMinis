@@ -119,6 +119,103 @@ internal fun normalizeBrowserUrl(raw: String): String {
 }
 
 /**
+ * [audit-0916b] How an awaited navigation ended.
+ *
+ * (was implicit in `BrowserUseManager.navigationDeferred`, which completed with
+ * a bare `Unit` on *any* of onPageFinished / onReceivedError / timeout, leaving
+ * the caller no way to tell those apart.)
+ */
+internal enum class NavigationOutcome { LOADED, FAILED, TIMED_OUT, ROUTED_EXTERNALLY }
+
+/**
+ * [audit-0916b] What a completed navigation wait carries back to its awaiter.
+ *
+ * @param errorDescription WebView's description for a main-frame failure.
+ * @param routedTarget the URL handed to another app instead of being loaded.
+ */
+internal data class NavigationResult(
+    val outcome: NavigationOutcome,
+    val errorDescription: String? = null,
+    val routedTarget: String? = null,
+)
+
+/** [audit-0916b] A navigation's tool-result text and the success flag it must carry. */
+internal data class NavigationReport(val text: String, val success: Boolean)
+
+/**
+ * [audit-0916b] Build the tool result for an awaited navigation.
+ *
+ * The defect this exists to prevent (§20b): `navigationDeferred` completed with
+ * `Unit` for onPageFinished, onReceivedError and timeout alike, so `navigate()`
+ * unconditionally answered `success = true` / `"Navigated to <url>"`. A load
+ * Chromium refuses outright — `Refusing to load for invalid virtual URL:
+ * https://about:blank/`, 2026-09-16 10:40:55 — fires *neither* callback, so it
+ * surfaced as a success after burning the entire navigation timeout
+ * (10:41:26, `success=true output=Navigated to about:blank`): the agent believed
+ * it was on a page that had never loaded. Same lie for a main-frame
+ * `onReceivedError`, which is immediately followed by `onPageFinished` for the
+ * WebView's own error page.
+ *
+ * [details] carries the title / viewport / scroll lines and is appended in every
+ * branch, so the agent still sees what the WebView is actually showing.
+ * [LOADED] keeps the historical text byte-for-byte.
+ */
+internal fun navigationReport(
+    outcome: NavigationOutcome,
+    url: String,
+    details: String,
+    errorDescription: String? = null,
+    routedTarget: String? = null,
+    timeoutSec: Int = 0,
+): NavigationReport = when (outcome) {
+    NavigationOutcome.LOADED ->
+        NavigationReport("Navigated to $url\n$details", true)
+
+    // [audit-0916b] The scheme was handed to another app (Chrome Custom Tab for
+    // Google auth, the system handler for tel:/mailto:/intent:/…). The in-app
+    // page deliberately does not change, and no page-load event will ever
+    // arrive — the old code waited out the full timeout and then claimed to
+    // have navigated. The routing itself did succeed, so this stays success.
+    NavigationOutcome.ROUTED_EXTERNALLY ->
+        NavigationReport(
+            "Handed to another app by the system: ${routedTarget ?: url}" +
+                " — the in-app page did not change.\n$details",
+            true,
+        )
+
+    NavigationOutcome.FAILED ->
+        NavigationReport(
+            "Error: navigation to $url failed" +
+                (errorDescription?.takeIf { it.isNotBlank() }?.let { " — $it" } ?: "") +
+                ". The page did not load (the WebView is showing its own error page).\n$details",
+            false,
+        )
+
+    NavigationOutcome.TIMED_OUT ->
+        NavigationReport(
+            "Error: navigation to $url did not complete" +
+                (if (timeoutSec > 0) " within ${timeoutSec}s" else "") +
+                " — the page never reported that it finished loading. It may be " +
+                "blank, refused, unreachable, or still loading.\n$details",
+            false,
+        )
+}
+
+/**
+ * [audit-0916b] Which URL a navigation result should name.
+ *
+ * A successful load is reported by where the page *ended up* (redirects
+ * included) — the historical behavior. A failed or timed-out load must name the
+ * URL that was *requested*: the live "current URL" still points at the previous
+ * page, so echoing it would blame a URL that was never even attempted.
+ */
+internal fun navigationReportedUrl(
+    outcome: NavigationOutcome,
+    currentUrl: String,
+    requestedUrl: String,
+): String = if (outcome == NavigationOutcome.LOADED) currentUrl else requestedUrl
+
+/**
  * (was BrowserUseManager.cookieBool)
  * Read a cookie value as Boolean. Tolerates JSON bool, 0/1, and
  * stringified "true"/"false"/"1"/"yes".
