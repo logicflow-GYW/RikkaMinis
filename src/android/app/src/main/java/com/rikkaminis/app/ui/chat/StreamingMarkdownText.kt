@@ -365,6 +365,30 @@ private fun MdText(
     // every animation frame. When no ranges are active overlay() returns the
     // base text unchanged.
     val effectiveText = fadeController?.overlay(text, color) ?: text
+    // [23c-2] Render-time resolve: style minis:// links whose target file no
+    // longer exists as grey / no-underline (disabled), instead of a clickable
+    // blue that only surfaces a Toast after the tap. Resolution goes through
+    // the session-scoped cache (LocalMarkdownLinkRenderResolver) — null in
+    // non-chat contexts, which keep rendering links as before.
+    val linkRenderResolver = LocalMarkdownLinkRenderResolver.current
+    val missingLinkRanges = remember(text, linkRenderResolver) {
+        if (linkRenderResolver == null) emptyList<IntRange>()
+        else text.getStringAnnotations("url", 0, text.length)
+            .distinctBy { it.item }
+            .mapNotNull { ann ->
+                if (linkRenderResolver.resolve(ann.item) is ChatLinkAction.MissingFile) {
+                    ann.start until ann.end
+                } else null
+            }
+    }
+    val missingLinkStyle = SpanStyle(
+        color = currentMdColors().link.copy(alpha = 0.4f),
+        textDecoration = TextDecoration.None,
+    )
+    val resolvedText = if (missingLinkRanges.isEmpty()) effectiveText else buildAnnotatedString {
+        append(effectiveText)
+        for (r in missingLinkRanges) addStyle(missingLinkStyle, r.first, r.last + 1)
+    }
     val tapModifier = if (hasUrlAnnotation || hasInlineCodeAnnotation) {
         Modifier.pointerInput(text) {
             detectTapGestures { pos ->
@@ -392,7 +416,7 @@ private fun MdText(
         }
     } else Modifier
     Text(
-        text = effectiveText,
+        text = resolvedText,
         fontSize = fontSize,
         lineHeight = lineHeight,
         fontWeight = fontWeight,

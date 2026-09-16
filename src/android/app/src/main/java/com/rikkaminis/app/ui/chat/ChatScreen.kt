@@ -1650,6 +1650,18 @@ fun ChatScreen(
     // T-pwa-2: long-press on an HTML attachment chip opens the
     // "Add to Home Screen" sheet for that attachment.
     var webAppSheetTarget by remember { mutableStateOf<InputAttachment?>(null) }
+    // [23c-2] Render-time link resolution cache — markdown text blocks query
+    // this during composition to grey out missing-file links without re-walking
+    // the filesystem on every recomposition. Cleared when the message list
+    // grows (see LaunchedEffect above).
+    val linkRenderCache = remember(viewModel) {
+        ChatLinkRenderCache { url, sid -> ChatLinkResolver.resolve(url, sid, context) }
+    }
+    // [23c-2] Invalidate the render-time link-resolution cache whenever a
+    // message lands — tool-driven file changes can accompany it, so a stale
+    // "missing file" verdict must not survive into the next turn. Keyed on
+    // size only: content-delta emissions keep the size (and the cache).
+    LaunchedEffect(messages.size) { linkRenderCache.clear() }
     val urlClickHandler = remember<(String) -> Unit>(viewModel) {
         { url ->
             // Pass the current session id so `minis://attachments/...` resolves
@@ -1797,6 +1809,12 @@ fun ChatScreen(
         LocalMarkdownLineHeightSp provides tuning.markdownLineHeightSp,
         LocalToolPreviewEnabled provides toolPreviewEnabled,
         LocalMarkdownUrlClickHandler provides urlClickHandler,
+        // [23c-2] Render-time link checks for markdown text blocks, backed by
+        // the session-scoped cache above (reads viewModel.currentSessionId
+        // live so the cache key follows the owning chat).
+        LocalMarkdownLinkRenderResolver provides { url ->
+            linkRenderCache.resolve(url, viewModel.currentSessionId)
+        },
         LocalMarkdownImageTapHandler provides markdownImageTapHandler,
         // Route markdown media resolution through this chat's session so
         // minis://attachments/* lookups don't rely on the global bindMounts
