@@ -1695,7 +1695,7 @@ fun ChatScreen(
                     android.widget.Toast.makeText(
                         context,
                         context.getString(
-                            if (action.reason == ChatLinkResolver.MissingFileReason.ILLEGAL_PATH) {
+                            if (action.reason == ChatLinkMissingReason.ILLEGAL_PATH) {
                                 R.string.chat_link_path_invalid
                             } else {
                                 R.string.chat_link_file_missing

@@ -682,10 +682,16 @@ internal suspend fun ChatViewModel.generateCompactSummary(conversationText: Stri
     // halving path is untouched. Fallback outcomes are NOT recorded into the
     // group router: a compaction failure says nothing about the member's
     // chat-traffic health, and recording would demote a healthy member.
-    suspend fun sendVia(p: LLMProvider): ProviderExecutionGateway.SendResult =
-        ProviderExecutionGateway.send(
+    suspend fun sendVia(p: LLMProvider): ProviderExecutionGateway.SendResult {
+        // A fallback candidate without an instance context is skipped, not
+        // fatal — the chain continues to the next candidate.
+        val inst = p.instanceContext
+            ?: return ProviderExecutionGateway.SendResult.Unavailable(
+                "no instance context for ${p.model.displayName}"
+            )
+        return ProviderExecutionGateway.send(
             context = context,
-            instance = p.instanceContext,
+            instance = inst,
             model = p.model,
             messages = listOf(
                 LLMMessage(role = LLMMessage.Role.USER, content = userMessage)
