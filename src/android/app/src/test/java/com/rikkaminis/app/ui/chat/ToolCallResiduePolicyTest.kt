@@ -155,4 +155,45 @@ class ToolCallResiduePolicyTest {
         assertTrue(msg.contains("<system-reminder>"))
         assertTrue(msg.contains("tool CALL"))
     }
+
+    // ── [audit-0916] scan cost ────────────────────────────────
+
+    /** Code-heavy text with generics — the app's most common output shape. */
+    private fun codeHeavy(nChars: Int): String {
+        val line = "val result: List<Map<String, Int>> = processor.execute<Bar, Baz>(input, cfg) // generic\n"
+        val sb = StringBuilder()
+        while (sb.length < nChars) sb.append(line)
+        return sb.toString()
+    }
+
+    @Test
+    fun `a 30k code-heavy scan stays far under the regression gate`() {
+        // [audit-0916] The previous spelling of the internals (a
+        // takeLast().take(1) tail copy per character read + a code-region
+        // rewalk of the whole prefix per tag) took 19.6 s for this input on the
+        // JVM harness — and the streaming path runs one scan per `<`-carrying
+        // delta, so every code-heavy reply stalled for minutes of CPU. Direct
+        // indexing + a carried backtick run put it in single-digit
+        // milliseconds; the 2 s gate is ~50 × the expected cost, so it fails on
+        // a return of the old shape and not on a slow runner.
+        val text = codeHeavy(30_000)
+        val t0 = System.nanoTime()
+        assertTrue(!ToolCallResiduePolicy.hasResidue(text, TOOLS))
+        assertEquals(text, ToolCallResiduePolicy.stripResidue(text, TOOLS))
+        val ms = (System.nanoTime() - t0) / 1e6
+        assertTrue("a 30k code-heavy scan took ${ms} ms — the quadratic shape is back", ms < 2_000)
+    }
+
+    @Test
+    fun `a resique at the tail of a big code text is still found and stripped`() {
+        // Correctness at scale: the single-pass rewrite must still find a call
+        // restatement sitting after 30k chars of generics.
+        val text = codeHeavy(30_000) + "\n" + resique("shell_execute")
+        val r = ToolCallResiduePolicy.firstResidue(text, TOOLS)
+        assertTrue(r != null)
+        assertEquals("shell_execute", r!!.rawName)
+        val stripped = ToolCallResiduePolicy.stripResidue(text, TOOLS)
+        assertTrue(!stripped.contains("invoke"))
+        assertTrue(stripped.contains("generic"))
+    }
 }

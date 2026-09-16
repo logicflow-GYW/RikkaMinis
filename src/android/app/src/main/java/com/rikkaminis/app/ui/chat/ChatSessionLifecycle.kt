@@ -256,46 +256,11 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
                 //      the anchor, so the walk flips passedCutoff at the
                 //      last settled row even when the anchor row itself
                 //      has no UI representation (tool-result carrier).
-                val cutoffId: String = lastCompactedDbId
-                var passedCutoff = false   // anchor is guaranteed non-null in v2
-                var cleaned = _messages.value
-                    .filterNot { msg ->
-                        // Drop prior compact-divider rows; appendSystemInfo
-                        // below will re-add the new one.
-                        msg.role == "system" &&
-                            msg.toolBlocks.firstOrNull()?.toolName == "compact"
-                    }
-                    .map { msg ->
-                        if (msg.role == "system") msg
-                        else if (passedCutoff) msg
-                        else {
-                            val grayed = if (msg.isCompactedHistory) msg
-                                else msg.copy(isCompactedHistory = true)
-                            if (msg.id == cutoffId || msg.sourceDbIds.contains(cutoffId)) {
-                                passedCutoff = true
-                            }
-                            grayed
-                        }
-                    }
-                // In-flight bubbles (current turn) sit after the anchor even
-                // when the anchor has no UI row: force the boundary at the
-                // last settled row so the streaming/queued placeholder and
-                // any already-created follow-ups never inherit the gray flag.
-                // [refactor/inflight-predicate] The "in-flight" judgment is
-                // now ONE predicate ([isSettledRow]) instead of an inline
-                // re-derivation — compact graying and flushPendingSysInfo
-                // used to enumerate the live flags independently (the
-                // narrow copy dropped [isQueued]).
-                if (!passedCutoff) {
-                    val lastSettledIdx = cleaned.indexOfLast { msg -> msg.isSettledRow() }
-                    if (lastSettledIdx >= 0) {
-                        cleaned = cleaned.mapIndexed { idx, msg ->
-                            if (idx > lastSettledIdx && msg.role != "system" && !msg.isCompactedHistory) {
-                                msg.copy(isCompactedHistory = false)
-                            } else msg
-                        }
-                    }
-                }
+                // [audit-0916] The greying walk + tail repair moved into
+                // [applyCompactGreyedRange] (ChatModels.kt) so the boundary
+                // rules are JVM-testable — see that function's doc for the
+                // no-op repair this replaces.
+                val cleaned = applyCompactGreyedRange(_messages.value, lastCompactedDbId)
                 // T84: count UI bubbles in this pass's compacted range.
                 // Filters: role != system (dividers/notices don't count).
                 // Range: everything up to and including the cutoff row,

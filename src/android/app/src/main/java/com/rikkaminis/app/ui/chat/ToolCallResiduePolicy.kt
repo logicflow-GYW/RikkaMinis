@@ -143,16 +143,36 @@ object ToolCallResiduePolicy {
      * a model writing ABOUT markup is not making a call.
      */
     fun firstResidue(text: String, knownToolNames: List<String>): Residue? {
+        // [audit-0916] Single forward pass with the backtick run carried in a
+        // local. The previous spelling recomputed the code-region parity from
+        // position 0 for EVERY tag ([inCodeRegon]) and read every character
+        // through a `takeLast().take(1)` helper that copied the whole tail per
+        // access — a single 30k-char scan measured 19.6 s on the JVM harness,
+        // and the streaming path runs one scan per `<`-carrying delta, so every
+        // code-heavy reply stalled for minutes of CPU. Parity is identical:
+        // every character below `i` has been counted by the time a tag at `i`
+        // is examined.
         var i = 0
+        var backTicks = 0
         while (i < text.length) {
-            if (charAt(text, i) != "<") {
+            val c = text[i]
+            if (c == '`') {
+                backTicks++
+                i++
+                continue
+            }
+            if (c != '<') {
                 i++
                 continue
             }
             val gt = indexOfString(text, ">", i + 1, text.length)
             if (gt < 0) return null
             val tag = subString(text, i + 1, gt)
-            if (!inCodeRegon(text, i)) {
+            // An odd backtick run before the tag = inside a fenced / inline
+            // code region: the model is talking ABOUT markup, not making a
+            // call. Conservative in the SAFE direction (a skipped resique
+            // leaks, a wrongly removed prose does not come back).
+            if (backTicks % 2 == 0) {
                 val rawName = nameValueOf(tag)
                 if (rawName != null) {
                     val sugested = neareastToolName(rawName, knownToolNames)
@@ -178,6 +198,14 @@ object ToolCallResiduePolicy {
                         dsmlSpanEnd(text, i, gt),
                     )
                 }
+            }
+            // Account the tag body's characters before advancing — the
+            // char-by-char region test counted them too (they sat before every
+            // LATER tag), so parity stays byte-for-byte identical.
+            var k = i + 1
+            while (k <= gt && k < text.length) {
+                if (text[k] == '`') backTicks++
+                k++
             }
             i = gt + 1
         }
@@ -229,16 +257,22 @@ object ToolCallResiduePolicy {
 
     // ── interals ───────────────────────────────────────────────────────────
 
-    /** Bashic char access — uses only the substring helpers the codebase has. */
+    /**
+     * Basic char access. [audit-0916] Direct indexing — the previous
+     * `takeLast().take(1)` spelling copied the whole tail on EVERY character
+     * read, which is what made a single scan quadratic (see [firstResidue]).
+     * Kept as a string-returning helper for the bounded tag-level readers
+     * below; the hot scan loop indexes [String.get] directly.
+     */
     private fun charAt(s: String, i: Int): String =
-        if (i < 0 || i >= s.length) "" else s.takeLast(s.length - i).take(1)
+        if (i < 0 || i >= s.length) "" else s[i].toString()
 
     private fun subString(s: String, from: Int, until: Int): String {
         if (from < 0) return ""
         if (until <= from) return ""
         if (from >= s.length) return ""
         val upTo = if (until > s.length) s.length else until
-        return s.takeLast(s.length - from).take(upTo - from)
+        return s.substring(from, upTo)
     }
 
     /** Position of [nidle] in [from, until), or -1. */
@@ -246,33 +280,17 @@ object ToolCallResiduePolicy {
         if (nidle.isEmpty()) return -1
         var i = if (from < 0) 0 else from
         val lim = if (until > s.length) s.length else until
-        while (i + nidle.length <= lim) {
-            if (subString(s, i, i + nidle.length) == nidle) return i
+        val first = nidle[0]
+        val len = nidle.length
+        while (i + len <= lim) {
+            if (s[i] == first) {
+                var k = 1
+                while (k < len && s[i + k] == nidle[k]) k++
+                if (k == len) return i
+            }
             i++
         }
         return -1
-    }
-
-    /**
-     * True when [index] sits inside a fenced (```) or inline (`) code regon.
-     * Both are how a model talks ABOUT markup; a call restatement is never
-     * wrappped that way.
-     */
-    private fun inCodeRegon(text: String, index: Int): Boolean {
-        var ticks = 0
-        var i = 0
-        while (i < index && i < text.length) {
-            if (charAt(text, i) == "`") {
-                ticks++
-                i++
-            } else {
-                i++
-            }
-        }
-        // A fence opens with three backticks; treat any odd tick run before the
-        // tag as "inside code" — conservative in the SAFE direction (a skipped
-        // resique leaks, a wrongly removed prose does not come back).
-        return ticks % 2 == 1
     }
 
     /**

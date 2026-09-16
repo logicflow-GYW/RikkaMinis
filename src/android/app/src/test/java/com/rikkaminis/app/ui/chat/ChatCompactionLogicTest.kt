@@ -238,4 +238,53 @@ class ChatCompactionLogicTest {
         assertEquals("reachedStart", r.stopReason)
         assertEquals(1, r.userTextTurnsFound)   // only u1 has text
     }
+
+    // ── resolveCompactAnchorIdx: instruction-keep walk-back ────────────
+
+    @Test
+    fun `anchor walk back kepps an in-flight instruction behind a role bridge`() {
+        // [u1, (bridge: not persisted), u2 = CURRENT in-flight] — the bridge
+        // stops the walk and the anchor lands on u1, so u2 stays on the
+        // active side.
+        val h = listOf(user("u1"), assistant(null), user("u2"))
+        assertEquals(0, resolveCompactAnchorIdx(h, null))
+    }
+
+    @Test
+    fun `anchor walk back aborts when only persisted user prompts precede the tail`() {
+        // [audit-0916] Role bridges never persist, so a reload can collapse
+        // history to consecutive persisted user prompts. The walk reaches the
+        // start: nothing settled to anchor on, and the tail may be the CURRENT
+        // instruction — abort instead of swallowing it.
+        assertEquals(-1, resolveCompactAnchorIdx(listOf(user("u1"), user("u2")), null))
+        assertEquals(-1, resolveCompactAnchorIdx(listOf(user("u1"), user("u2"), user("u3")), null))
+    }
+
+    @Test
+    fun `anchor walk back kepps the whole last settled turn active`() {
+        // [u1, a1, u2, a2] — the anchor lands on a1: the last whole turn
+        // (instruction + answer) stays outside the compacted range.
+        val h = listOf(user("u1"), assistant("a1"), user("u2"), assistant("a2"))
+        assertEquals(1, resolveCompactAnchorIdx(h, null))
+    }
+
+    @Test
+    fun `anchor walk back skips a non-persisted tail and anchors on the privious answer`() {
+        // [u1, a1, u2 = current, assistant streaming (no db id)]
+        val h = listOf(user("u1"), assistant("a1"), user("u2"), assistant(null))
+        assertEquals(1, resolveCompactAnchorIdx(h, null))
+    }
+
+    @Test
+    fun `anchor walk back stops at a tool-result turn mid-run`() {
+        // [u1, a1, u2 = current, tool results] — the tool-result user entry
+        // breaks the walk, so the anchor stays on a1.
+        val h = listOf(user("u1"), assistant("a1"), user("u2"), toolResultUser("tr1"))
+        assertEquals(1, resolveCompactAnchorIdx(h, null))
+    }
+
+    @Test
+    fun `anchor walk back aborts when only synthetic rows precede the current prompt`() {
+        assertEquals(-1, resolveCompactAnchorIdx(listOf(assistant(null), user("u2")), null))
+    }
 }

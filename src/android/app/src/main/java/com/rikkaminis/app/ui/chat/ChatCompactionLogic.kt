@@ -98,6 +98,17 @@ fun resolveCompactAnchorIdx(
                 var k = j - 1
                 while (k >= 0 && history[k].dbMessageId.isNullOrEmpty()) k -= 1
                 i = k // may end at -1 when nothing persisted precedes → caller aborts
+            } else {
+                // [audit-0916] The walk reached the very start: every entry
+                // before the tail is a persisted user-text prompt with no
+                // assistant reply in between. A role bridge does not persist,
+                // so a reload that collapses bridges produces exactly this
+                // shape — and the tail prompt may be the CURRENT instruction,
+                // still unanswered. Nothing settled exists to anchor on, and
+                // anchoring on the tail would swallow the instruction (the
+                // failure this walk-back exists to prevent). Abort, mirroring
+                // the sole-prompt branch below.
+                return -1
             }
         } else if (i == 0 &&
             history[0].role == LLMMessage.Role.USER &&
