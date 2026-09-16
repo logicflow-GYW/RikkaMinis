@@ -372,6 +372,26 @@ internal fun applyCompactGreyedRange(messages: List<ChatMessage>, cutoffId: Stri
                 grayed
             }
         }
+    // [audit-0916-fix] When the walk DID flip on a SETTLED row, that row's UI
+    // index is authoritative: everything at or before it is inside the
+    // compacted range and must stay greyed. The settled / instruction
+    // heuristics below are only sound when the anchor has NO greyable UI row
+    // (the tool-result-carrier case) — applied unconditionally they un-grey
+    // in-range rows: a session whose anchor IS the last settled user prompt
+    // (the one-turn session, where the walk-back cannot move earlier, and the
+    // manual compact-before path) rendered the folded instruction at full
+    // opacity while the divider still counted it as compacted.
+    val anchorUiIdx = cleaned.indexOfLast { it.id == cutoffId || it.sourceDbIds.contains(cutoffId) }
+    if (anchorUiIdx >= 0 && !cleaned[anchorUiIdx].isLiveRow()) {
+        return cleaned.mapIndexed { idx, msg ->
+            if (idx > anchorUiIdx && msg.role != "system" && msg.isCompactedHistory) {
+                msg.copy(isCompactedHistory = false)
+            } else msg
+        }
+    }
+    // Either no UI row carries the anchor, or the flipping row is itself
+    // in-flight (a merged row carrying the union of sourceDbIds): fall back to
+    // the settled / instruction boundaries.
     val lastSettledIdx = cleaned.indexOfLast { msg -> msg.isSettledRow() }
     // The last SETTLED user prompt — the current instruction. A queued prompt
     // further down the list must not shadow it: the instruction itself is

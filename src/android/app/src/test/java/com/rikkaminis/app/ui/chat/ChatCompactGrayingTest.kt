@@ -104,6 +104,43 @@ class ChatCompactGrayingTest {
         assertTrue(out[1].isCompactedHistory)
     }
 
+    // ── [audit-0916-fix] the repair must not un-grey IN-RANGE rows ──
+
+    @Test
+    fun `a one-turn session keeps its only prompt greyed`() {
+        // The walk-back cannot move earlier than the sole user prompt, so the
+        // anchor IS that prompt. The unconditional repair used to treat
+        // "at-or-after the last settled user prompt" as active and rendered
+        // the folded instruction at full opacity while the divider still
+        // counted it as compacted.
+        val h = listOf(row("u1"), row("a1", "assistant"))
+        val out = applyCompactGreyedRange(h, "u1")
+        assertTrue("the folded instruction must stay greyed", out[0].isCompactedHistory)
+        assertFalse("the kept answer stays clear", out[1].isCompactedHistory)
+    }
+
+    @Test
+    fun `an anchor below the last prompt never un-greys the rows it folded`() {
+        // compactBefore(anchor = last assistant row): everything up to and
+        // including the anchor is inside the compacted range.
+        val h = listOf(row("u1"), row("a1", "assistant"), row("u2"), row("a2", "assistant"))
+        val out = applyCompactGreyedRange(h, "a2")
+        assertTrue(out[0].isCompactedHistory)
+        assertTrue(out[1].isCompactedHistory)
+        assertTrue("the folded instruction must stay greyed", out[2].isCompactedHistory)
+        assertTrue("the folded answer must stay greyed", out[3].isCompactedHistory)
+    }
+
+    @Test
+    fun `a settled anchor still clears the tail that follows it`() {
+        val h = listOf(row("u1"), row("a1", "assistant"), row("u2"), row("a2", "assistant"))
+        val out = applyCompactGreyedRange(h, "a1")
+        assertTrue(out[0].isCompactedHistory)
+        assertTrue(out[1].isCompactedHistory)
+        assertFalse(out[2].isCompactedHistory)
+        assertFalse(out[3].isCompactedHistory)
+    }
+
     // ── invariants ─────────────────────────────────────────────
 
     @Test
