@@ -1655,7 +1655,7 @@ fun ChatScreen(
     // the filesystem on every recomposition. Cleared when the message list
     // grows (see LaunchedEffect above).
     val linkRenderCache = remember(viewModel) {
-        ChatLinkRenderCache { url, sid -> ChatLinkResolver.resolve(url, sid, context) }
+        ChatLinkRenderCache(resolveFn = { url, sid -> ChatLinkResolver.resolve(url, sid, context) })
     }
     // [23c-2] Invalidate the render-time link-resolution cache whenever a
     // message lands — tool-driven file changes can accompany it, so a stale
