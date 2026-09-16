@@ -708,6 +708,7 @@ internal suspend fun ChatViewModel.generateCompactSummary(conversationText: Stri
             tools = emptyList(),
             thinkingLevel = ThinkingLevel.OFF,
         )
+    }
     return when (val r = sendVia(provider)) {
         is ProviderExecutionGateway.SendResult.Success -> r.response.text
         is ProviderExecutionGateway.SendResult.RemoteFailure,
