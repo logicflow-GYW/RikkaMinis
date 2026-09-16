@@ -376,7 +376,7 @@ private fun MdText(
         else text.getStringAnnotations("url", 0, text.length)
             .distinctBy { it.item }
             .mapNotNull { ann ->
-                if (linkRenderResolver.resolve(ann.item) is ChatLinkAction.MissingFile) {
+                if (linkRenderResolver(ann.item) is ChatLinkAction.MissingFile) {
                     ann.start until ann.end
                 } else null
             }
