@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-15）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-16）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-09-15，共 44 天
-- 条目总数：995（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
-- 总字符数：1177081 / 总行数：18415
+- 合并范围：2026-08-03 ～ 2026-09-16，共 45 天
+- 条目总数：1019（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
+- 总字符数：1211143 / 总行数：18812
 
 ---
 
@@ -18408,6 +18408,403 @@ commit `2dc6e0d4`（6 文件 +392/−18，分支 diag/liveness-batch）打包三
 **我的判断**：如果用户在意的是"作者身份不被关联"（他的原话"成果是成果，我是我"），那真正的问题**不是档案，是仓库本身以主号命名**——档案只是把已在 URL 里的名字重复了 74 次。清理档案治不了根。真要分层，得是仓库级动作（如把小号仓库作为公开出口）。
 
 **已确认可低成本做的**：本地挂载版与仓库版同规则脱敏；今后重建会自动清（v2 脚本已覆盖所有这些形态）。
+
+<!-- 2026-09-15 18:52:40 -->
+## 09-15 深夜：dev-history 脚本补回归测试 + 抓到标题重复真 bug
+
+
+**用户拍板**：公开历史泄露选**方案 1（不做）**——接受已公开的旧提交，不重写历史、不移动目录。理由（我的判断，用户认可）：这些标识（主号名）本来就在公开仓库 URL 里，KV 命名空间 ID 单独不可利用。**今后重建自动清（v2 规则已覆盖全部形态）**。
+
+**★ 补了回归测试（这是本轮真正的收获）**：
+- `scripts/test_sanitize.py`：35 个敏感形态 + 3 个必须保留项（commit hash/sha256/127.0.0.1），隔离夹具跑安装版脚本，再用**独立探针**复扫。同时断言**不过度脱敏**（掩掉 commit hash 就毁档案价值）。
+- `scripts/test_rebuild.py`：合成语料 → 真脚本，断言每条 keep/drop 判定 + 标题解析 + 结构不变量。
+- **为此给 rebuild 加了 `DEV_HISTORY_MEMORY_DIR` 环境变量覆盖**——原先 MEMORY_DIR 硬编码，过滤规则**根本没法测**。这是可测试性缺陷，不是小改动。
+
+**★ 测试抓出真 bug（标题重复）**：memory 里"锚点后无 `## `"的条目，脚本从正文里提取标题后**没把那一行从 body 移除** → 标题出现两次。已修（`skip_line` 剔除）。真档案 993 → 995 条（另 2 条是本会话新写的 memory）。
+
+**★ 反向对照（两次都做了，测试有牙齿）**：
+1. 回退 `skip_line` 修复 → `test_rebuild.py` 在 heading-less 用例上变红 ✓
+2. 关掉 `DEV_HISTORY_MEMORY_DIR` 覆盖 → 测试整体失败（证明它真在测隔离数据，不是误测真实语料）✓
+
+**★ 重要教训（Privacy mode 会掩码输出，导致误判）**：我一度"看到"文件里是 `ri*****ow`（打码形），据此造了假用例。实际那是 **Privacy mode 掩了我的 grep 输出**，文件里是明文、被规则正常替换了。**核实字面量时用只输出布尔/哈希的探针**（`probe_safe.py`：`sha256(候选字面量)[:10] + count`），不要看回显的字符串本身。
+
+**main = `348ae3f6`**（docs/dev-history 995 条 + README 更新）；远端仅剩 main。公网无 token 复核：两份文件全 CLEAN。
+
+<!-- 2026-09-15 19:00:04 -->
+## 09-15 晚：dev-history 主题索引（SAGAS）落地 —— main = 5363177
+
+
+用户贴了一份外部评审（"你的档案是一条河，不是一张图"），认为有道理。核实后**同意诊断，并直接实施**。
+
+**诊断成立之处**：档案 995 条按日期排列，跨天主题（如「滚动跳动」13 个时间点横跨 39 天）只能靠读者大脑串联。缺的是**主题轴**。
+
+**做法（关键决策）**：不是手写一份索引文档，而是写**可重生成的生成器** `skills/dev-history-sync/scripts/build_sagas.py`（+ SKILL.md 流程更新）。理由：手写索引一周就腐烂；规则+稳定散文=数据，重跑自动纳入新条目。
+
+**匹配模型（三轮迭代调出来的，复用价值高）**：
+1. 标题命中 3 分 / 正文命中 1 分 / 累计 ≥3 归入 —— 正文里 `main`/`分支`/`合并` 是样板噪音，必须让标题单词命中就够
+2. 元主题（CI/审计/协作/档案/上游/决策）加 `title_only=True` —— 否则几乎每条都被样板词拉进来（首版 CI 命中 300+/995）
+3. **收尾继承**：memory 写日志时「X 完成/X 收尾」标题里没有主题词（词在上一条里），关键词永远够不到 → 12h 内最近一条有主题的条目继承归属，表格标 `↳` 区分推断与实配（27 条）
+
+**结果**：995 条 → 23 主题，孤儿 118 条（11%，文末列出=下一轮主题发现候选），≥4 主题 54 条。`--report` 是发现面（per-saga 计数 + 过松 + 孤儿）。
+
+**★ 未采用的方案（记下理由，避免下次重走）**：HF 语义嵌入（paraphrase-multilingual-MiniLM-L12-v2，实测 5 次调用 9.13s、batch 9 条 OK、384 维可用）。放弃理由：**非确定性**（重跑聚类会变）+ 阈值难论证 + 不可审计。档案维护者（用户）本来就知道主题，规则+显式孤儿表是更好的工程选择。
+
+**闭环**：脚本 → 生成 → `sanitize_dev_history.py` 脱敏（独立探针 Remaining NONE）→ 仓库 docs/（README 三轴说明 + SAGAS）→ 分支推送 → **本地 FF** → `gh_sync.sh push-main --yes` → 远端分支 API DELETE 204 → 远端仅剩 main。**三源一致 5363177**。docs 变更未触发 CI（paths 门控正常）。挂载笔记 + 仓库 docs + /var/minis/shared/ 三份同源。
+
+**★ 校验坑**：表格一致性检查器被 `\|` 转义竖线误报（4 行），要先 `l.replace("\\|","")` 再数 pipe——否则会把正确输出判成 4 个坏表。
+
+<!-- 2026-09-15 19:06:58 -->
+## 09-15 晚：SAGAS 主题索引固化进 skill（v2.1.0）—— main = 5c9ff85
+
+
+用户问「有没有固化下来，以后可能还会用」→ 核查后发现**三个真实缺口**并全部补上。
+
+**缺口 1（最重要的固化遗漏）**：`test_sagas.py` 写了但 **SKILL.md 的测试段完全没提它**——只列了 test_sanitize / test_rebuild。新会话读 SKILL.md 根本不知道有第三个测试，等于没固化。
+
+**缺口 2**：没有「如何维护 saga 表」的流程（SAGAS 是脚本里唯一手工维护的部分，加主题的正常路径没写）。
+
+**缺口 3（运行时真缺口，被验证抓到）**：`build_sagas.py` ①空档案/无锚点文件 → `IndexError: list index out of range` 裸 traceback；②路径不存在 → `FileNotFoundError` 裸 traceback；③没有 `--help`。新会话撞上会浪费一轮。
+
+**补的东西**：
+- SKILL.md：description 加触发词（主题索引/SAGAS/saga/问某问题历史）；测试段补第三个测试 + **单位陷阱专门小节**；加「维护 saga 表」5 步流程；加「模式复用」（规则+散文=数据 / title_only 逃生门 / 显示残余三项设计决定，含**为什么拒绝语义嵌入**的理由）；版本 2.0.0 → 2.1.0
+- build_sagas.py：加 `--help`、缺文件/空档案干净报错（exit 2 无 traceback）、`sys.exit(main())`
+- test_sagas.py：从 24 项 → **30 项**（新增 6 项覆盖错误路径：缺文件 exit 2 / 无 traceback / 空档案 exit 2 / 无 traceback / --help exit 0 / usage 输出）
+
+**验证**：三测试从 `/` 目录全 PASS；**端到端模拟新会话**（只按 SKILL.md 的 Workflow 逐条跑）全通：rebuild → sanitize(NONE) → build_sagas → sanitize(NONE)。frontmatter YAML 合法、5 个触发词全在。
+
+**顺手修**：①仓库 README 里孤儿率 11% 是修复前写的，实为 6%（995 中 65）→ 已修并推送；②workspace/saga/ 的临时副本已过期 → 同步，避免未来会话改错文件。
+
+**★ 可复用教训（写进 SKILL.md 了）**：**生成的文档「看起来对」不是证据**。这个脚本族的失败模式是**静默遗漏**而不是崩溃——所以每个单位契约都要在测试里有显式负例。
+
+**★ 又一个教训**：写完测试 ≠ 固化。测试存在但文档不提，等于新会话看不见。**固化的判据是「新会话只读 SKILL.md 能否复现全套」，不是「文件在磁盘上」。**
+
+<!-- 2026-09-15 19:31:27 -->
+## assets/ 里两个未引用文件（badge-android.svg "Get the APK on GitHub" 徽
+
+- assets/ 里两个未引用文件（badge-android.svg "Get the APK on GitHub" 徽章 + screenshots.png 3512×1200 截图拼图）全库 0 引用（README 徽章用 shields.io 外链）→ 用户确认无用，分支 chore/remove-unused-assets @ e9dd834 删除。**纯 assets 变更不触发 build-apk.yml CI（paths 门控排除）**，直接 FF 合并 main（e9dd834）→ 远端分支 API DELETE 204 → raw screenshots.png 404 验证移除生效。
+
+<!-- 2026-09-15 21:56:16 -->
+## 09-15 晚：HF 语义记忆重建 + MCP 知识图谱重建（09-06 套件随 rootfs 全丢）
+
+- **HF**：semantic_memory.py build 732→**1070 条**（索引 5.8MB，已上传 dataset ***USER***/rikkaminis-memory），搜索验证命中正常。
+- **MCP**：09-06 建的知识图谱套件（sync_kg.py / restore_knowledge_graph.py / 备份 memory.jsonl 758 条 / 使用文档）**随 rootfs 重建全丢**，live 图也空。已重建：10 实体 + 11 关系种子（从 GLOBAL.md 事实手工构造）→ 备份脚本重写 `shared/knowledge-graph-backup/kg_backup.py`（v2.0.0，--backup / 无参恢复，live 路径 glob 自动探测）。备份 21 行落 shared 层。
+- **★ 教训（minis-mcp-cli 解析层级）**：cli 输出结构是 `{"server","tool","result":{"content","structuredContent"}}`——**structuredContent 在 result 里面**，写 `json.load().get('structuredContent')` 取顶层永远得空 dict → 我误判"写入后读不到自己写的数据"折腾三轮。复用：调 MCP 后解析一律 `r['result']['structuredContent']`。
+- **未重建**：sync_kg.py 的 LLM 增量提炼同步器（deepseek-v4-flash 日志→实体）。数据面已覆盖（语义记忆 1070 条 + 图谱种子），LLM 提炼按需再做。
+
+<!-- 2026-09-15 21:57:58 -->
+## 09-15 夜：工具调用"复述副本"漏进聊天气泡 + 导致 run 停（模型专属现象，用户实锤）
+
+
+**现象（用户原话）**：工具调用以**文本**形式漏在自己的消息/气泡里；"连续两个调用，后面一个成功、前面一个不成功 → 不会停也不会打断"（反之：最后/唯一那个调用没被解析 → run 直接停在 `finishReason=stop`）。
+
+**实锤证据（minis-2026-09-15.log，会话 c31dd8d2）**：
+- `24464 [ChatVMStream] [T-android-tool-splits-reply-fix] post-tool_calls content delta merged into pre-tool text block (model=deepseek-v4.1-flash)` ← **app 自己的工作区名字直接把模型写进日志**：这是该模型专属处理（回复被切在调用前后）。
+- `23967 runAgentLoop turn=9 no tool calls → break (finishReason=stop)` 同时 DB 里那条 assistant 消息正文就是一条调用 markup → 调用**没被当作调用解析** → 循环认为"零调用"→ break。
+- `24467 runAgentLoop turn=0 dispatching 1 tool call(s), continuing`（对照：解析到就继续）
+- 泄漏副本的标识符**丢了底划线**：`node_modules→nodemodules`、`--max_chars→--maxchars`、`shell_execute→shellexecute`；且 tool_title 是**改写过**的（真调用 "再确认图谱数据文件与 memory" → 泄漏副本 "确认图谱数据文件是否还在"）→ 不是字节拷贝，是**模型的复述/草稿版**。
+- 同一条 assistant 消息内出现**两份同一调用**（DB：c781fa3d，两份间隔空行）→ 一次回复里调用被复述了一次。
+**自查旁证**：本轮我自己的输出也反复出现同类字符级错（`Ecxeption`/`encodings`/`enumberate`/`most_comon`→真名 `most_common`），即该 provider 上这款模型确实有这个层面的不稳。
+
+**结论**：不是记忆系统的泄漏（此前"知识图谱/HF"是错方向）；是**模型回复里除真调用外还带一份复述副本**，app 只吃掉真调用、复述副本按文本留在气泡（"漏出来"），而 app 的模型专属合并只"并入 pre-tool 文本块"、不删除副本；当最后/唯一那个调用无法解析 → 循环 break（"打断"）。
+**可复用教训**：用户说"某个提供商某些模型特有"时，先 greps 日志里**带 model= 的 app 侧处理行**——app 自己会把模型名写进它为你做的特殊处理，这是最快的归因指纹。
+**未决**：副本是模型自身发的，还是中转站转换层塞的（需落盘一次 raw stream 才能判定）。
+
+<!-- 2026-09-15 22:44:12 -->
+## 09-15 夜：两支改动的归类排查（一类还是两类）+ 同病扫描
+
+<!-- 2026-09-15 23:xx -->
+
+**对象**：`fix/compact-swallows-queued-instruction` @ decafa9a（CI 1549 **success**）、`fix/tool-call-copy-suppress` @ 7c1dddad（CI 1550 in_progress）。共 4 个症状（每支 2 个）。
+
+**判定：一类**。根 = **一个不完备的派生快照被当作真相源，且缺「我判定不了」这一态 → 静默走错分支**。
+- A1 压缩锚点：proxy=「最后一条 persisted USER 文本 prompt」当区间右边界；真相=它是否仍是**正在跑**的指令。
+- A2 重载：proxy=「DB 行」当会话全部状态；真相=内存里的排队气泡（UI-only、从不落盘）。
+- B1 副本：proxy=「解析出的调用列表 + 合并臂」当模型说了什么；真相=原始回复文本。
+- B2 收尾：proxy=「toolCalls.isEmpty()」当模型收尾；真相=是否真没在调工具。
+- 三条共同特征：差异全在**跨层边界**（内存↔DB / 活↔已定型 / 原始文本↔解析结构）；后果**全静默**（无报错/无横幅/无重试）；修法同一味**补第三态 + 宁拒不猜**（B 引 TruncatedToolCallPolicy 的 "refuse instead of guess"，A 的 return -1 同味）。
+
+**★ 该类有前科 5 处（判据：已知不变量但未系统化，所以每条新路径重现一次）**：ChatViewModel:1890 flushPendingSysInfo（通知不得落在还在长的回答下）、ChatSessionLifecycle:254-300（compact 灰化边界显式枚举 in-flight 行）、ContentFilterFinishPolicy、TruncatedToolCallPolicy、OpenAIProvider:1220-1235（流中途截断排空累加器）。
+
+**别处同病（实查）**：
+- **retryFromMessage（ChatViewModel:2789-2797）**：截断 `_messages` 到 index+1，只清被重试那一条的队列条目（:2792）→ 队列里其它排队气泡被截出 UI 但留在 `_promptQueue`（不可见不可撤回，drain 时又冒出）。**与 A2 是同一对变量、同一病、另一个入口**。
+- **rerunFromToolBlock（ChatViewModel:2690-2710）**：同样 subList 截断、零队列处理。同一病。
+- **修的位置非根层**：A2 修在包装函数 reloadSessionFromDb（ChatContextWindowExt:24），重建本体在 loadSession（ChatSessionLifecycle:1021）；loadSession 有三个调用点（init:2136 / safe-mode 清除重试:2178 / reloadSessionFromDb:26），只覆盖第三个。
+- **★ 子代理循环 runSubagentLoop（ChatToolExecutors.kt:297-300）**：逐字同形的 `if (toolCalls.isEmpty()) { break }`「Model finished naturally」，**TCS 分支只补了主循环** → 子代理撞上残留/未解析就是静默收尾，且残留副本会被拼进 resultSb 当子代理结论返回。缺口集中在子代理（主循环 1393/1638/1648 的第三态已覆盖）。
+
+**两支各自引入的风险**：
+- A ①新回走逻辑**无条件**执行（不测 in-flight）→ 手动的 compact-all 也变行为（区间止于再上一条，上一条回答被灰）；提交消息只声明了 in-flight 场景。②锚点回移的直接副作用：`effectiveStartIdx > anchorIdx` 守卫会给出「已经压缩过了」提示（上一条回答已成锚点）。③`queuedPromptBubble` 抽取经逐字核对无 refactor 漂移（content=prompt.text=trimmed，attachments 同源）✓。
+- B ①**refill 追加 USER 消息无角色交替守卫**（紧接 verify nudge 之后）→ 触发场景常见于「刚派发过工具」之后，彼时 history 尾是 user(tool_result) → 连续两条 user → Anthropic 硬 400 / OpenAI 静默合并。`ensureRoleAlternationBeforeUserAppend` 只服务入口点；`sanitizeAgentHistory` 只修 tool_use/tool_result 配对、不修连续 user。**紧邻的 verify nudge 同形**（非本分支新造的类，但 refill 概率更高）。②扫描节奏：`chunk.text.contains("<")` 触发全量扫描，而 firstResidue 是手写字符循环、charAt 用 takeLast().take(1)（**逐字符分配**）→ 本 app 最常见的输出就是含大量 `<` 的代码/载荷 → O(n²) 分配在流路径上（本仓最怕 GC storm/Main 卡顿）。
+
+**建议**：①A2 搬进 loadSession 尾（根层）+ 把 retry/rerun 的队列一致性一并补（同一修法三处）；②B 的 ToolCallResiduePolicy + 第三态用到子代理循环（同策略第二消费方）；③refill 前补角色交替；④把「in-flight 行不得当 settled」抽成显式谓词（isInFlight + 在三处重建/截断路径调用），把它从「每次重现一次」变成「一个判据」。
+
+<!-- 2026-09-15 23:51:00 -->
+## 09-16 凌晨：四线全部收口 — main = 10e4652（同族收口 + isInFlight 谓词不变量）
+
+<!-- 2026-09-16 -->
+
+**收口链（全部 FF、远端仅剩 main）**：
+1. `fix/compact-swallows-queued-instruction`（A2 压缩/重载）→ main
+2. `fix/tool-call-copy-suppress`（B 副本泄漏/静默收尾）→ main（7c1dddad）
+3. `fix/same-class-cleanup-0915` @ 90328d8 → main（CI 1554 绿）：子代理循环第三态（ToolCallResiduePolicy 第二消费方，knownToolNames 参数 + raw 文本检测 + refill 代替静默收尾）+ AgentLoopEngine 两处 nudge（verify/refill）角色交替守卫 + 4 个新 JVM 测试 + 排队气泡一致性收到根层（loadSession 尾 / retryFromMessage / rerunFromToolBlock 三处走 queuedPromptBubble）
+4. `refactor/inflight-predicate` @ 10e4652 → main（CI 1555 绿）：isLiveRow/isSettledRow 谓词（ChatModels）+ compact 灰化接 isSettledRow + flushPendingSysInfo 接 isLiveRow 并**补回它漏的 isQueued**（行为修正：尾部是排队气泡时通知曾落在提示后面）
+
+**并行推进手法（用户拍板"不等，直接同步推进下一个"）**：谓词分支**叠在未合并的同族分支之上**（同批文件避免必然冲突；基分支合并后它是直系后代可直接 FF）。两 CI 并行（1554/1555）零阻塞。
+
+**不统一的理由（记下避免重走）**：lightFingerprint 枚举 live flags 但是渲染指纹（另一不变量）；ChatQueueInterruption 用 isAwaitingModelResponse 单值（reset 语义）；排队气泡并回路径匹配 queuedPromptId（dropped-bubble 关注点）。谓词统一只在条件集真一致处。
+
+**测试写法教训**：给 ToolCallResiduePolicy 写测试输入必须用策略真正识别的 markup 形状（`<invoke name="shellexecute">`，rawName 经 neareastToolName 解析到已知工具才触发）——纯文本 "call shellexecute now" 不含 `<` 永远不触发，首版测试 thus 无效，读策略检测逻辑后修正。
+
+**真机验证点（装新包后）**：① 让子代理跑一次会撞残留的查询，看 [Subagent] refill 日志行；② 排队后 revert/重试，排队气泡应保留；③ compact 期间通知落点应在排队气泡之前。
+
+## 2026-09-16
+
+<!-- 2026-09-16 00:23:41 -->
+## 09-16 凌晨：日志审计（09-15 窗口）— 23 次 silent_kill churn + 400 重试 + 混淆类名
+
+- **复用工具**：/var/minis/workspace/logaudit/{analyze,probe,deaths}.py（格式归一化 / 定向过滤 / 按 pid 分组看死亡上下文）。日志文件只剩 18:05 后窗口（重启丢前段）。
+- **★ 最大发现：app 6h 被静默杀 23 次**（24 launch / 23 silent_kill），多次启动后 ~15s 即死；时间点与 agent 重 shell 活（SAGAS/HF 重建/push）重合 → PRoot 沙箱挂在 app 进程组，agent 工作负载计入 app cgroup。app 自身 rss 峰值 382MB（< 450 门槛），非自身内存问题。结构性，缓解 = agent 重活限流。
+- **★ 400 被当 transient 重试（症状已钉机制未钉）**：deepseek [400] 模型未找到 / [400] multimodal not supported 各重试 3×（~7s）才 fallback。Java 实测 main 的 is5xx 正则对这两个 detail 不命中 → 按代码不该重试。候选机制：worker 侧 ChatStreamErrorPolicyKind.of() 的 cause chain 里 IOException 抢在 ProviderError 前 → kind=network → AUTO_RETRY。钉法 = isTransient 判定加日志或落盘 raw stream。附带：「模型未找到」= relay 上没这模型，配置问题。
+- **★ 确定一行修：reducer REJECTED 打印 R8 混淆单字母类名**（"REJECTED b: b invalid"）—— ChatAgentTraceObserver.kt:128 用 event::class.simpleName，release 下不可读。修法 = 显式 kind 映射。
+- 信号：孤儿 tool_use placeholder 注入 6 次/晚（kill during tool + 副本解析失败）；glm-5.3-flash 空 turn（reasoning 827 无正文，诊断行按设计工作）；日志行偶发截断 = kill 打断写盘。
+- 平台噪音可消项：manifest `android:enableOnBackInvokedCallback="true"`（predictive back，586 条告警）。
+- 工具坑：`git log -S` 在 depth-30 浅克隆上只报最旧可用 commit，不能用来定位引入时间；`git fetch --depth 1 origin <sha>` 报 "couldn't find remote ref" 但对象可能已到手（git show 仍可用）；api.github.com DNS 偶发超时，git 协议更稳。
+
+<!-- 2026-09-16 00:27:19 -->
+## 09-16 凌晨：日志审计三发现攒入 backlog §16-§18（用户拍板"攒着"）
+
+- §16 REJECTED 打印 R8 混淆类名（LOW 一行修，ChatAgentTraceObserver.kt:128）
+- §17 永久 400 被当 transient 重试（MED，症状已钉机制未钉，钉法 = isTransient 加判定日志）
+- §18 app 被 HyperOS 静默杀 churn 的缓解（结构性，限流层未定边界）
+- backlog 现存开项：§6/§8/§12 搁置观察 + B1/B2/C1-C3/T9 种子窗口 + §10② 接受取舍 + §16-18 新攒。
+
+<!-- 2026-09-16 01:02:22 -->
+## DSML 封套残留（第三次撞同族，已修，main = 711b6dd）：DeepSeek 原生 <｜DSML｜ invo
+
+- **DSML 封套残留（第三次撞同族，已修，main = 711b6dd）**：DeepSeek 原生 `<｜DSML｜ invoke/parameter/calls>` 封套整段漏成正文。判据确认：现有 ToolCallResiduePolicy 按设计只认「name 值解析到已知工具」，而封套的属性名（command/tool_title/timeout）解析不到任何工具 → refuse instead of guess → 原样放行。Python 复刻判定 5 标签全 null 实锤。
+- **修法（形状规则，非名字规则）**：`｜DSML｜` 标记本身即残留（任何合法文本都不含它，无误伤风险，区别于 HTML name="viewport"），不看 name 解析；strip 整个封套（span 至 `</｜DSML｜ calls>`，DSML_MAX_SPAN=20000）；refill 时封套内 invoke name 解析得到则报工具名，否则 fallback `DSML_FALLBACK_NAME`。代码围栏内封套照旧放行（inCodeRegon 不变）。
+- **验证**：JVM harness /tmp/dsml-harness 19/19（12 旧 + 6 新 DSML + 用户第二段真实泄漏 verbatim 用例）；用户两段真实泄漏都接住。
+- **消费方零改动**：三处（AgentLoopEngine visibleToolCallText/refill、ChatToolExecutors 子代理）全走 firstResidue，策略层一处修全覆盖。
+- **用户真机装最新版仍漏** = 判据域外的形态（封套属性名不解析），不是用户装错包。装 CI 1560 出的包后才生效。
+- 复用：第二段泄漏的 `timeout` 参数说明中转/模型侧在用 DSML 序列化参数带类型标注（string="false"）——未来解析 DSML 封套为真调用（而非只 strip）是更深一层的候选。
+
+<!-- 2026-09-16 01:26:24 -->
+## 09-16 凌晨：backlog A 类两条修完并合并 main = d5ce767（§16 + §17）
+
+
+**分支 `backlog-A`** → cherry-pick 到 711b6dd 之上 → **d5ce767**（4 生产 + 2 测试文件，+270/-14）。
+
+**§16 已修**：新增 `AgentRunEvent.traceName()`（`agent/runtime/AgentRunReducer.kt`，与封印类同文件）用一个穷尽 `when` 命名 16 个事件；observer 改打 `event.traceName()`（原来 `event::class.simpleName` 在 release 被 R8 混淆成单字母 b/i/o）。测试 `AgentRunEventTraceNameTest` 2/2 绿； `agent/runtime` 整包 kotlinc 编译零错 = when 穷尽成立。
+
+**§17 已修且机制代码级钉死**：真机制 = worker 把 ProviderError 的 message 原样写进 error line（`ModelExecutionService.kt:1289`，errKind=`of(t)`=provider）→ 主进程包成 **0-chunk 的 `ModelStreamErrorException(hadChunks=false, kind="provider")`** → 引擎 `workerDiedZeroChunk` 判据**只看 0-chunk、完全不看 kind** → isTransient 判真 → 同模型白重试 3 次（1+2+4s）。修法 = 判定收口到 `ChatStreamErrorPolicy.decideStreamFailure(hasChunks, kind)`：**盖章 kind 说了算**（provider/rate_limited/invalid_key 立即 group fallback），0-chunk 启发式只覆盖**未盖章**失败（legacy worker / worker 真死 / 首块超时）→ 旧路径逐字不变。重试日志加 `[basis]`。测试 18/18（10 新）+ 反向对照（禁用 kind 分支）恰好 7 条盖章断言变红。
+
+**★ 可复用教训（本次新踩）**：
+- **浅克隆（depth 40）上 `git rebase` 会把 base commit 也当待重放** → 与远端同族提交撞冲突（"could not apply \<base sha\>"）。正确手法：**`git checkout -b <tmp> <origin/main>` + `git cherry-pick <my-sha>`** —— 等价于 rebase 且不碰 graft 边界。
+- **浅克隆上 `git show <sha>` 把整棵树显示成 diff**（998 文件，因 graft 把该 commit 当 root）→ 不能拿它侦察"远端新 commit 改了哪些文件"。
+- `git merge --fast-forward` **不是合法选项**（正确是 `--ff-only`）；本地 main 落后时用 **`git reset --hard origin/main`** 再 `git merge <branch>` 最稳（浅克隆下直接 merge 会报 "unrelated histories"）。
+- **手写近乎同形的长类名（DeadlineReached / PersistenceFailed 类）不要靠眼睛核对** —— 从源码正则抽取名字再程序化写回（本次靠这招确认 16 个事件名零差错）；`file_edit` 传参时也极易把 old/new 写成同一串（视觉几乎一样）→ 用 python `s.count(old)==1` 断言 + `replace` 更稳。
+- harness 脚本别把 `rm -rf $H` 指向脚本自身所在目录（会把正在跑的脚本删掉）。
+- kotlinc 单次编译含 JUnit 测试需 `-classpath /tmp/libs/junit-4.13.2.jar:/tmp/libs/hamcrest-core-1.3.jar`，否则 `Test`/`assertEquals` 全报未解析；harness 脚本 /tmp/bl-a-run.sh，镜像测试 18/18。
+
+**过程链条**：分支 CI #1559（f6a3581）success → 发现远端 main 前进到 711b6dd → cherry-pick 成新分支 bl-a-rb（d5ce767）→ 分支 CI #1561 success（组合态）→ ff 合并 main → push-main `711b6dd..d5ce767` → 远端两特性分支 API DELETE 204，**远端仅剩 main**。release CI #1562 触发。
+
+<!-- 2026-09-16 08:00:34 -->
+## 09-16 早：§18 归因实证 + 用户拍板「记纪律不立项」（beacon 观测桩上线）
+
+
+**★ 归因实证（新证据，之前只有时间相关）**：沙箱 `/proc/self/cgroup` 的组路径 = `0::/uid_11618/pid_19313`，而 `pid_19313` 在沙箱 `/proc` 里 `No such file` → 那是宿主侧 app 进程的 pid，且正是 `launch-beacon.log` 最后一条 launch 的 pid（09-16T00:03:08）。**结论：agent 在沙箱里跑的每一个重活都记在 app 的账上**（cpu / cpuset / blkio 三层，且 `cpu:/foreground`）。app 侧摘不出自己（沙箱是它自己 spawn 的 proot）→ **唯一能动的层是 agent 自己**。
+
+**自然实验**：09-15 19:08–09-16 00:03（HF 1070 条 embedding 重建 + 全库 grep + 多次 push，长驻重负载）= 23 次 kill；00:03 之后近 8 小时（git clone / CI 轮询 / kotlinc 编译 + JVM / curl，全是短促负载）= **0 次**。区别在负载形状，不在活量。
+
+**处置（用户拍板「就按照这个来吧」）**：不立项，落三条负载纪律进 GLOBAL.md（① 重活串行化；② 重活分块 + `nice`；③ 长驻重活等用户开门）+ 观测桩。
+
+**观测桩**：源 `/var/minis/shared/agent-load.sh` → 装 `/usr/local/bin/agent-load`（rootfs 重建后从 shared 重 cp）；`agent-load <start|end|note> <act>` 写 `/var/minis/logs/agent-load.md`，与 `launch-beacon.log` 同时区、可直接 join。已跑通 + 跨调用持久化验证。
+
+**★ 工具坑（本次新踩）**：
+- BusyBox 的 `python3` **既没有 `time.stamp` 也没有 `time.straftime`** —— 正确是 **`time.strftime`**（报错时会给提示 "Did you mean: 'strftime'?"）。这是本环境独有的拼写变体。
+- `/var/minis/logs/` 是挂载目录，**shell `>>` 不持久化**（与 `/var/minis/mounts/` 同坑）→ 桩用 python `io.open + flush + os.fsync` 写盘；已验证跨调用可读。
+
+**§18 关闭条件**（写进 backlog 与 GLOBAL.md）：遵守纪律观察 3 天，若 kill 仍 ≥ 每天 3 次 → 才重新立项（那时才谈进程组）。
+
+<!-- 2026-09-16 08:58:20 -->
+## 09-16 上午：26 commit 组合审计（d5ce767）— 1 HIGH + 1 MED，其余干净
+
+
+**★ HIGH（昨天 7c1dddad 引入，未上真机所以还没炸）**：ToolCallResiduePolicy 流路径性能回归。实测（生产源码逐字编译，JVM harness /tmp/audit16-h）：firstResidue 单次扫描 5k=196ms / 15k=2.8s / 30k=19.6s，缩放近**三次方**——根因：`charAt` 用 `takeLast().take(1)`（每次字符访问 = O(n) 尾部拷贝）+ `inCodeRegon` 每个标签从 0 重走。接线更糟：`chunk.text.contains("<")` 触发**每个含 `<` 的 delta 全量重扫累积文本**（代码输出里 `<` 无处不在），跑在 Dispatchers.IO → 流可见停摆 + 分钟级 CPU 记在 app cgroup（§18 刚确诊的 kill 账）。CI 没抓到因为单测全是小字符串。修法：扫描内部改真索引（Kotlin 原生 `text[i]`）+ 奇偶一次前缀算 → 单次 O(n) 零分配，行为零变化，现有 18+6 测试全绿即可。09-15 夜审计点过名但没量化随批发布了。
+**★ MED-LOW（82c4a60c 的残余形态）**：resolveCompactAnchorIdx 实锤缺口——`[u1(persisted), u2(persisted unanswered)]`（refill 桥不落盘 + 重载坍缩形成）→ j-walk 走到 0 但**无 abort** → anchor=u2，当前指令被吞（正是该 commit 要修的 bug 换个形态）。修法 3 行：j==0 时 return -1（镜像 sole-prompt abort）。且**锚点回移零测试覆盖**（ChatCompactionLogicTest 最后改动早于该 commit）。同 harness 验证了 7 个正确边界（bridge 保护/settled/纯合成 abort/唯一未答 abort/tool-result 尾等）。
+**核过没问题**：§16/§17 接线（null kind → legacy 0-chunk 路径逐字保留、fallbackNow 消费点 :1107、[basis] 进日志）；refill nudge 在渲染层 + ChatRepository 两级都有 stripSystemReminders（不进 UI/会话预览）；DSML 判定靠 marker 本身 + span 20k 上限 + 围栏放行；子代理第三态 + 角色桥；isLiveRow 谓词（flushPendingSysInfo 补 isQueued 是行为改进）；排队气泡三入口同一判据。
+**★ harness 坑（本环境独有）**：全量 jar 里残留旧 `HarnessKt` 会在 classpath 上**打赢**新编译的单文件 jar → 必须 `-cp HarnessMain.jar:harness.jar`（新 jar 在前）。kotlinc 单文件对大 jar 编译 ~1min 可接受。首次全量编译需把 LLMUsage.kt + kotlinx-serialization 两个 jar 加进 -cp。
+
+<!-- 2026-09-16 12:03:13 -->
+## 09-16 午：日志审计（09-16 窗口）— 3 项新发现，首要 = 超时 124 被当 shell 死亡盲重跑
+
+
+**判据来源**：/var/minis/logs/minis-2026-09-16.log（7.7MB）+ memspike-2026-09-16.log（app 自带 rss/phase 探针）+ launch-beacon.log。设备 1.0.0+1562（= d5ce767，§16/§17 已在机上；§17 本窗口无重试事件，真机验证仍缺口）。
+
+**★ 新发现 §19（HIGH 候选）：exit=124 超时被归为「shell 已死」→ 命令被透明重跑**
+- 代码：`ExecutionCoordinator.kt:1030` `internalShouldRetryCommand` 里 `val shellDied = exitCode == -1 || exitCode == 124 || !shellAlive`；`:586` 打 "Shell died mid-command (exit=124, alive=true)"（自相矛盾文案）。
+- 今天 3 次实证（全部 session ef88fae9）：08:26:01 / 08:43:56 / 08:51:53，全 exit=124 alive=true。09-15：0 次。
+- 最完整一例：08:16:01 命令 `nice java -jar harness.jar`（app timeot=600）→ 600s 到点 124 → **静默重跑同一 10 分钟重活** → 08:35:22 用户按停（"Shell stopped by user"）中断。第二例：08:39:56 `nice timeout 240 java ...`（timeot=300）→ 内层 timeut 240 返 124 → 重跑 240s → 08:47:57 "retries exhausted → reclaim"。
+- **代价**：①重活跑两遍（正落在 §18 的 app cgroup 账上）；②非幂等命令的作用副作用被重复（git push / CI dispatch / append）；③agent 只看到一个结果、不知重跑过（P3 docstring 自承 "the agent sees a single successful result"）。
+- **与仓内自相矛盾**：`RetryPolicy.decideRetry`（T3-retry-side-effects）明写 UNKNOWN + TIMEOUT → `OutcomeUnknown`「系统无法证明安全性：不透明重跑」；T3 文件自承「production wiring 在 T7」= 策略已建未接线；legacy 路径在真机上跑。且与 stall 修复自身的理由同形（stall 注释原话「retrying would re-run the command that just hung for its whole window」——124 具同一性质）。
+- **判据混淆点**：需「重建 shell 收尾僵尸」≠ 需「重跑命令」；124 收尾已由 `internalShouldReclaimOnExhaustedTimeout(124)` 路径覆盖。
+- **修法（3 行）**：谓词去掉 `|| exitCode == 124` → 124 落进现有 reclaim 分支（shell 被杀、孤儿命令收尾、agent 拿到真错）。`ExecutionCoordinatorRetryTest` 3 条 124 断言意图翻转；`ExhaustedTimeoutReclaimTest:43` 需同步。测试是「有意断言」的 → 属设计挑战不属疏漏，需用户拍板。
+- 附带小项：未知工具的结果块 `title=` 恒空；命令名里可残留标记（`shell_execute</arg_value>`）。
+
+**★ 新发现 §20（观察，MED）：browser 首次导航 136MB native rss → 其后 14 分发 5 次 silent_kill**
+- app 自带探针 `BrowserRssProbe`：`10:41:26 action=navigate Δ=139864kB before=243MB after=380MB cum=136MB(×1)`。
+- 同一调用：navigate 到 `about:blank` 被 Chromium 拒（"Refusing to load for invalid virtual URL: https://about:blank/"）+ "Navigation timed out for https://about:blank"，但工具结果 `success=true "Navigated to about:blank"`（proxy 当真相：报「已导航」不报「页面没载成/被拒」）。
+- 之后 kill：10:33:31 / 10:34:00 / 10:44:37 / 10:45:41 / 10:47:45（今天共 6 次）；重启后 mount 只到 164–240MB 就被杀（远低于 450MB 门），且该窗口 agent 只跑 100–400ms 轻命令 → **§18「agent 重活计入 app cgroup」不是这轮 kill 的唯一/主要驱动**。因果未证（须受控实验：新进程重复浏览器导航看 kill）。
+- §18 关闭条件「≥3 次/天」今天第 1 天即已达标 → 观察窗口需提前结论或改框架。
+
+**★ 新发现 §21（LOW，模型侧）：glm-5.3-flash 会话 8 次「未知工具」垃圾名（10:25–10:42，session ef88fae9）**
+- 名字实例：`<tool_call><tool_call>bash<tool_call>command`、`bash`、`shell`、`shell_command`、`bash_shell`、`bash_action</arg_key><arg_value>ls /tmp/...`、`shell_execute</arg_value>`（后两者带标记残留）。
+- `arg_key`/`arg_value`/`tool_call` 全库 grep（src/skills/shared/memory）= **0 命中** → 非 app 产物，模型自造外来格式；`tools=11` 已声明（`tools=0` 行全是 messages=1 的标题生成请求，设计如此）。
+- app 行为正确面：每次可拒绝、可看见（"Unknown tool: X"，非静默）。代价：420k 字符上下文上白烧 8 个 round-trip。
+- 候选杠杆：unknown-tool 一次性纠错 nudge（列出真工具名）比「名字里剥标记再匹配」安全（后者是 guess，且违反仓内 refuse-instead-of-guess 取态）。
+
+**非本项目（平台内部，记录不清）**：`E/FrameEvents: addRelease: Did not find frame.` 935 次（09-15 357）、`DecorViewStubImpl` 反射 cast 告警——源不在本仓（grep 0 命中），来自 Miui 框架内部包。
+
+**工具/环境备注**：`/var/minis/workspace/` 会话内私有（本会话写的 killcorr.py / retryctx.py 下次会话不存）；`memspike-<date>.log` 是 app 自带 rss/phase 观测探针，做负载归因最好用（比 grep 主日志快得多）。
+
+<!-- 2026-09-16 12:03:39 -->
+## 09-16 午：两个 audit0916 分支合并 main（main = 1863e4d2）
+
+
+- 远端原有两分支：`fix/audit0916-scan-cost-and-anchor-gap` @ 1ce9d8a（CI run 35047155917 success）与 `fix/audit0916-graying-anchor-boundary` @ 1863e4d（CI run 35052892771 success）。
+- **★ 拓扑关键点**：`merge-base(b1,b2)` = b2 的 tip → **b1 是 b2 的直系后代**（b1 = b2 的 3 commit + 1 个新 commit）。所以两支之间零冲突，一次 FF 合并即覆盖两支。
+- 内容审阅：b2 = 7 文件 +358/−72（ToolCallResiduePolicy 单趟扫描换代：真索引 + 奇偶一次前缀算，替代 takeLast().take(1) 逐字符尾拷贝 + 每标签从 0 重走；ChatModels.applyCompactGreyedRange 抽函数；ChatCompactionLogic j==0 → return -1 abort；ChatSessionLifecycle 改为委托）+ 测试 +226。b1 = +57（anchorUiIdx 权威边界：锚点有已定型可灰 UI 行时以它为止，不再无条件用 settled/instruction 启发式）+ 3 测试。
+- 收口：`gh_sync.sh push --branch "mg:main"` → FF `d5ce767..1863e4d` → 远端 main = 1863e4d2 → 存 release CI run 35053863461（in_progress，用户拍板不等）。
+- **★ 新踩 API 坑（删远端分支）**：正确端点是 `DELETE /repos/<owner>/<repo>/git/refs/heads/<branch>` → 204；写成 `/repos/<owner>/<repo>/refs/heads/<branch>` 报 **404**（不是权限问题，是路径少了 `git/`）。重复删报 422 `Reference does not exist`。
+
+<!-- 2026-09-16 13:12:05 -->
+## 09-16 午后：audit-0916 批次（§19/§20/§21）修完推送分支，CI 跑中（交接已写）
+
+
+- 分支 `fix/audit0916-timeout-retry-and-browser` @ **4aa2e76**（11 文件 +340/−46，基 main 1863e4d），CI run 35057861211（最后看 in_progress）。
+- 三修：①§19 超时 124 不再重跑（显式 `TIMEOUT_EXIT_CODE` 守卫 + 落进既有 reclaim 分支，删自相矛盾日志）；②§20 `normalizeBrowserUrl` 纯函数（scheme 正则 + 端口消歧义），navigate/loadURL 两处同步；③§21 `UnknownToolMessage`（拒仍拒 + 列真名 + 回声名字夹紧，主/subagent 双接）。
+- 验证全绿：超时 harness 11/11 + 反向对照恰好 2 条变红；仓内 RetryTest 22/22、ReclaimTest 4/4、BrowserUtilTest 57/57、新 UnknownToolMessageTest 7/7；scan 7/7 + i18n CLEAN；括号配平 9 文件一致。
+- 交接：`/var/minis/shared/HANDOFF-audit0916-timeout-browser.md`（含剩余步骤：查 CI → FF 合并 → push-main --yes → 删分支）。
+- 留档未修：§20b 导航超时仍报 success（触发=动 navigationDeferred 时）；浏览器 +136MB rss/kill 相关性未证（观察）。
+- **§18 证据更新**：今天的 kill 不在 agent 重活窗口内（10:33-10:45 窗口 agent 只跑 100-400ms 轻命令）→ §18 归因不覆盖全部 kill 形态；关闭条件第 1 天即达标，观察窗口该改框架。
+
+**新踩坑**：①`subprocess.run` 该绑定要 list/整数 bufsize，shell 活用 `sh -c`；②`String.startsWith`（非 startswith）；③表达式体成员（无 `{`）按括号配平抽取会把下一个声明吞进来。
+
+<!-- 2026-09-16 13:14:52 -->
+## 09-16 午后：audit0916 批次（§19/§20/§21）收口 — main = 4aa2e76
+
+
+- 分支 CI 35057861211 success → FF 合并 main（1863e4d..4aa2e76，11 文件 +340/−46）→ push-main OK → 远端分支 API DELETE 204 → 本地分支删 → release CI run 35058672183（in_progress，用户惯例不等）。
+- **★ 新踩坑（本会话）**：在分支上直接 `git reset --hard origin/main` 会把**当前分支指针**重置掉（分支 tip 4aa2e76 被覆盖，merge 报 "Already up to date" 假象）——reset 前必须先 `git checkout main`；对象没丢，`git reset --hard <旧tip>` 可恢复。
+- 验证全绿（引用交接，未重跑）：超时 harness 11/11 + 反向对照 2 条变红；仓内 RetryTest 22/22、Reclaim 4/4、BrowserUtil 57/57、UnknownToolMessage 7/7；scan 7/7、i18n CLEAN。
+- 留档未修：§20b 导航超时仍报 success=true、BrowserRssProbe +136MB 因果未证、§18 归因不覆盖全部 kill 形态。
+
+<!-- 2026-09-16 13:34:25 -->
+## 09-16 午后：GitHub 热榜 Top5 实测审阅 — 意外挖出 semantic-memory 真 bug
+
+
+报告：`/var/minis/shared/gh-hotlist-2026-09-w2-review.md`（13KB）。方法：API 拉元数据 + 拉源码/规则原文，不看宣传语，凡「能否为我所用」判断都跑实测。
+
+**★ 最高价值发现（与 5 个仓库无关，由它们引出）**：`semantic-memory` 的 SKILL.md:59 约定「相似度 > 0.35 视为相关」，但 `print_search_results` 打印的是 **hybrid 分**，而 hybrid = cosine×recency×λ_cov + S_title + S_rev。**阈值作用在错误的量上**：
+- 实测 1070 条语料：无衰减纯 cos 中位 0.196/最大 0.517；衰减后语义分中位 0.068/最大 0.370 → **语义信号被压掉 66%**
+- 语料年龄分布：**747/1070（70%）超 14 天**，444 条超 30 天；30 天前条目需 cos=1.16 才能单独越 0.35 = **数学上不可能**
+- 反向：S_title 封顶 +0.45 > 阈值 0.35 → **标题命中 3 词、cos=0 也能通过**。实测 Top1 即假阳性（cos 仅 0.209，标题含"沙箱/环境/工具"），而真最相似条目（cos=0.517）掉到 hybrid 榜第 286 名
+- 后果：老条目系统性漏检 + 关键词噪音系统性混入，且**静默**（输出只有一个数字，看不出构成）
+- 修法：print 同时输出真实 cos；SKILL.md 改为「按 cos 判断相关性、按 hybrid 排序，背离时以 cos 为准」。仅动输出格式+文档，无回归风险。**已报用户，待拍板**
+
+**五仓库判定**：ponytail（139.6k★，真，规则文件仅 2.5KB，benchmark 可信因作者被批评后重做并主动披露自身污染 bug：plugin 的 SessionStart hook 对 baseline 臂也触发）；teamai-cli（4.6k★，工程扎实，**与用户系统同构度最高**）；context-mode（23.1k★，真但 ELv2 许可 + 已实现同类机制，仅参考）；marketingskills（50.5k★，内容无用但 evals.json 断言范式值得抄）；**ruflo（72.6k★，证伪，建议不碰）**。
+
+**ruflo 证伪依据**：核心子系统 issue「reasoningBank/vectorBackend **report enabled:true but never activate**」，且 #3288 的关闭 PR #3323 **只让降级状态可观测、明确未修根因**，#2296 另记 7 个 null controller；其他 issue：版本号撒谎（报 3.41.2 实跑 3.33.0）、`fabricates reward=1`、MoE gate loss「computed but never applied」。**这是可观测性与实际行为脱节 = 用户最在意的静默失效模式**，不是普通 bug。965 open issue。
+
+**可复用教训**：
+- **阈值必须随量纲归一化**：teamai-cli 的 `src/recall.ts` 有长注释踩过同款坑（"hardcoded absolute cutoff **silently drifts**"），解法 = `max(baseline × ratio, absolute_floor)` + query 长度归一化（÷√token数）。这是任何写死绝对阈值的正确形状。
+- **「拒绝语义嵌入」是工程结论不是偏好**：teamai 独立到达同一结论（设计文档写明「关键词+Intl.Segmenter，**无嵌入成本**，V1 足够」+ Reflect 层 DEFERRED），佐证用户 SAGAS 那次决策（非确定性/阈值难论证/不可审计）。
+- **ponytail-debt 手法**：grep 出所有 `ponytail:` 标记收成债务账，**专门标记「没写升级触发条件」的行**为「会静默腐烂的那些」。与用户 backlog 的「触发条件」字段同设计，但多了机械扫描 + 只挑无触发条件项的动作。
+- **ponytail 安全轴单点结论**：`safe-path` 任务（不可信文件名拼基准目录）—— 七字提示词写 6 行、4 次里 1 次被 `../../` 逃逸；ponytail 写 ~9.5 行、4/4 安全，**多出的 3 行就是路径穿越校验**。「写更少」无判断力则砍掉的正是守卫。
+- **marketingskills 的 evals.json**：每技能带结构化断言，prompt 故意口语化，断言第一条就是「Triggers on casual phrasing」= **把触发鲁棒性也当可验证项**。用户 skill 的触发条件目前零验证（09-15 skill 索引冻结排查即此类实例）。
+- **context-mode 的 Think in Code**：别把 LLM 当数据处理器，当代码生成器（47×Read=700KB → 1×脚本=3.6KB）。用户其实一直在做，但它提升成显式强制，值得写成纪律。
+
+<!-- 2026-09-16 13:57:53 -->
+## 09-16 下午：semantic-memory 修复收口（main = 735eadb）+ 第二批热榜审阅
+
+
+**修复已闭环**（用户拍板"打包一起"）：时间衰减从「乘性侵蚀」改为「加性助推」+ 输出真实 cos + SKILL.md 约定改为按 cos 判定。分支 `fix/semantic-memory-scoring-0916` @ 735eadb → FF 合并 main（4aa2e76..735eadb，2 文件 +168/−23）→ 远端分支随 refspec 消失 → release CI run 35061560031（in_progress，用户惯例不等）。与另一会话（fix/audit0916b-nav-outcome，改 BrowserUtil/BrowserUseManager）零文件重叠，独立 clone `/tmp/rikka-sm-fix` 未共享工作树。
+
+**实测验证**（1070 条 / 24 查询 / 8 标注查询）：top-5 年龄中位 3→23 天（语料基线 27）、真实 cos 中位 0.403→0.446、cos<0.35 假阳性 30%→12%、手工 recall@5 10/17→9/17（1 条在噪声内）。随机对照 0/17 证明标注集有牙齿。
+
+**关键方法教训（可复用）**：
+1. **「cos 排名最好」是同义反复**——ground truth 用 cos 定义，再测"纯 cos 排名"必然满分。第一轮诊断就是这样差点得出错误结论（撤回）。**非循环判据**：①top-5 年龄中位 vs 语料基线（不依赖相关性定义）②cos<阈值占比 ③随机对照 ④标题特征手工标注。
+2. **逐项分解定位主因**：leave-one-out 显示时间衰减是主犯（关掉它排名 116→8.8），关键词是辅助（关掉反而 181.5，在补偿衰减的伤）。不要先入为主认定"关键词是问题"。
+3. **方案对比要三指标联判**：年龄偏置 + cos 质量 + 手工召回。单指标会选错（S2 召回最高但年龄仍偏 7 天；S3 三项最均衡：加性 +0.1 助推）。
+4. **修法选加性而非下限**：max(rw,0.7) 仍乘性（仍侵蚀 30%）；+0.1 加性彻底解耦语义与衰减，且实测 cos 最高（0.446）、假阳性最低（12%）。
+5. **file_edit 自引入 bug 实例**：`results = [(s, sim, e) for s, _sim, _i, e in ...]`——解包改名 `_sim` 但元组里还写 `sim`（外层循环残留 = 最后一条的 cos），所有结果同值。**spy 监控 cosine 调用（1070 次 883 个不同值）+ 直接调 hybrid_score 对比才定位**。教训：解包改名时元组元素必须同步改；验证输出时"常量值"是强信号（不可能 5 条 cos 完全相同）。
+6. **recall_test.py 内联复刻公式 ≠ 测生产代码**——复刻的还是旧公式。验证必须直接 import 生产函数调用。
+
+**第二批热榜判定**：needle（11.1k★，14MB 端侧工具调用模型，**confidence-gated 第三态 = §20b 修法参考**；tool retrieval / bounded-memory 是同类设计；端侧路由是种子候选，触发=无网瘫痪案例≥2）；semantica（12.9k★，"embeddings 缺结构"论断**直接佐证本次修复**，"溯源是结构副产品"=trace 体系重构方向参考）；unsloth（手机训不了，不适用）；public-apis（agent 本来就能 curl，跳过）；awesome-dsh-plugin（不可用但=分发轴强信号：agent 专属包管理器 `plugin add` 一月内 1700+ 插件）。
+
+**发现（未修）**：仓库捆绑的 semantic-memory 落后运行时两版（v1.0.1 无 hybrid 打分，本次同步到 v1.2.0 已闭环）；**vector_index.pkl（5.8MB）不在仓库 assets 里** = fresh install 后搜索直接报"索引不存在"，必须先 build（需 HF_TOKEN）——与 requirements.json 把搜索定为 Tier 0 矛盾。属设计决定（不打包大文件），未动。
+
+<!-- 2026-09-16 14:05:11 -->
+## 09-16 傍晚：热榜吸收攒进 backlog §22（用户拍板"攒着"）+ CI flake 处置
+
+
+**用户拍板**：该吸收的不实施，攒着。已写进 `/var/minis/shared/backlog.md` §22（33KB，file_write append 成功）：
+- **22a ponytail skill**（优先级 1）：七级阶梯+永不砍清单；收益=两道门审计核实面积减半（批次 diff 中位 300 行 → −54%）；触发=下个功能批次开工；验证=批次 diff 对照
+- **22b evals.json**（优先级 2）：skill 触发验证；09-15 索引冻结排查花一整轮=收益锚点；触发=下次动 skill-creator 模板；试点 sandbox-jvm-testing/kotlin-compile-gotchas/task-dispatch
+- **22c debt 扫描**（优先级 3）：`ponytail:` 注释+grep 收账，专标无触发条件行；§20b 即实例（audit 事后碰上 vs backlog 等着触发）；与 22a 同批
+- 种子：needle 端侧路由（触发=无网瘫痪案例≥2）、semantica 溯源结构（触发=trace 门禁重构）；teamai 阈值归一化**已吃完**（735eadb 即落地形态）
+- 设计决定待拍板：vector_index.pkl 不打包（fresh install 罕见）
+
+**CI 处置**：失败的 run 35061290024 是**另一会话分支** `fix/audit0916b-nav-outcome`（§20b browser 修复）的 workflow_dispatch——3045 测试仅 1 失败：`SessionSlotControllerTest > 100 concurrent acquires never exceed capacity`（max=6 超容量）= **并发时序 flake**，与两边改动都无关（我的是纯 assets，它的是 browser 两文件）。我的 main run 35061560031（735eadb）还在跑，大概率撞同一 flake，出结果后重跑即可。
+
+**虚惊教训（重要）**：a76c21d 曾被我误判"我的 push 覆盖了它"——用 `merge-base --is-ancestor` 判"不可达"就下结论差点闹成事故。**核实 run 归属必须看 `head_branch`+`event`**：a76c21d 是分支 dispatch 的 head，从未上 main（我的 FF push 4aa2e76..735eadb 干净）。教训：判断"是否覆盖了别人的提交"三步走：①看 run 的 head_branch/event ②远端 main log ③再看 merge-base——单看 merge-base 会把"分支未合并"误判成"被覆盖"。
+
+<!-- 2026-09-16 14:21:16 -->
+## 09-16 傍晚：§20b 导航结果修复收口 — main = e940148（release CI 35063273119，用户拍板不等）
+
+
+**分支 `fix/audit0916b-nav-outcome`（2 commit）→ cherry-pick 到新 main 735eadb 之上（另一会话推了 skills commit，零重叠）→ push tmp-merge:main → 远端 main = e940148 → 特性分支 API DELETE 204 → 本地仅剩 main。**
+
+**修复内容（§20b）**：`navigationDeferred` 改带 `NavigationResult(NavigationOutcome)`：LOADED / FAILED（带 WebView 描述）/ TIMED_OUT / ROUTED_EXTERNALLY。纯映射抽到 BrowserUtil `navigationReport` + `navigationReportedUrl`（JVM 可测）；`navigationDetails()` 从 metadata 拆出（原 metadata 硬编码自己的 "Navigated to" 头，会与错误行矛盾——**自查抓到的坑**）。成功文本对已完成加载逐字保留；外部路由（tel:/mailto:/Google auth）即时完成不再烧满 30s 超时。
+- 实锤时间线：navigate 10:40:54.948 → Chromium 拒 10:40:55.234 → 工具结果 10:41:26.213（整 30s 超时烧完仍报 success）。
+- 两个刻意取舍：①失败/超时 navigate 报 success=false（与仓内 waitForDomStable 同形）→ FAILED 徽章 + 失败钩子；②navigate 保留自动截图不看 success（`execute()` 里加 `|| action == NAVIGATE` 豁免——否则「已失败的导航丢了它一直有的截图」是超范围行为变化）。
+- 验证：NavReportTest 18/18 + 反向对照 10/18 变红（LOADED 路径 6 条该绿）+ 既有 BrowserUtilTest 57/57 + 合并 75/75 + scan 7/7 + 语法门 0 + 括号增量 0。
+
+**★ CI 挂在无关测试（已修）**：run 1570 败在 `SessionSlotControllerTest > 100 concurrent acquires never exceed capacity`（max=6 > capacity=5）——**控制器无 bug**（release=remove+promote 同一把锁内，观察者不可能看到超容量瞬间），**是测试测量工具的竞态**：thread-local `activeNow` 计数器在槽位交接窗口双重计数（释放者 release() 返回后才 decrement，被提升者观察到 isActive 就 increment）。修法 = 测不变量用 `c.snapshot().activeCount`（控制器任何瞬间 ≤ capacity，千次采样抓真越界）；interleave 测试同形潜伏（2 线程 < 3 不排队所以没炸过）一并修。本地 21/21 + 20 次压力复跑 0 失败。教训：**并发测试的 max 观测别用测试自己的计数器，用被测对象自身的快照**。
+
+**★ dispatch 坑**：`gh_sync.sh gh-actions-dispatch` 返回 204 但没建 run（连续两次）——直接 curl POST dispatches + 等 45s 才出现。204 ≠ run 已创建。
+
+**留档观察（未动）**：BrowserRssProbe 首次导航 +136MB rss 与 5 次 silent_kill 同时区（因果未证）；§18 关闭条件第 1 天达标且 kill 不全在 agent 重活窗口（归因框架待改）。
+
+<!-- 2026-09-16 14:45:30 -->
+## 09-16 傍晚：§22 热榜吸收三项落地（22a 阶梯 skill / 22b evals / 22c 债务扫描）
+
+
+**用户拍板同批**：`vector_index.pkl` **不打包**（backlog §22「设计决定」已改为已拍板 + 触发重估条件 + 附带待办：下次动仓库 `requirements.json` 时补一行「首次使用需 build（需 HF_TOKEN）」，改掉 Tier 0 矛盾）。
+
+**22a — change-ladder skill 已建**（`/var/minis/skills/change-ladder/SKILL.md`，101 行）：七级阶梯（每级附本仓可执行查法：一阶门 / `find|xargs grep` / 标准库 / 平台原生 / apk search / 一行 / 最小实现）+ 永不砍清单 6 类（原四项 + 本仓两项：跨层完整性 / 终止路径）+ 根因纪律（grep all callers）+ `ponytail:` 三段式注释约定 + 与一阶门/二阶门/分支隔离/evidence-discipline 的关系表 + 收尾自检 6 问 + 验证指标（批次 diff 行数）。**显式说明阶梯跑在「先理解问题」之后、不替代理解**。生效时机 = **下个会话**（skill 名+description 进系统提示是会话级冻结）。
+
+**22b — evals 已落地**（`skill-creator/scripts/check_evals.py`，396 行）：格式 = 每 skill 一个 `evals.json`（prompt 故意口语化，第一条断言固定是触发检查）。检查器三用：`static`（格式 + 「」触发词覆盖 + 口语脱轨例 + 负例；`--strict` 未覆盖也错）、`run <skill>`（行为版：真调 minis-model-use，比对 expect_triger）、`--self-test`（夹具 + 反向对照 + 纯函数断言）。skill-creator 升 **v2.1.0** 加 evals 节（要求新 skill 从创建就带）。
+**试点 4 个 skill、20 条断言、行为版 20/20 PASS**（含 4 负例）。
+
+**★ 22b 抓到的真发现**：`sandbox-jvm-testing` 与 `kotlin-compile-gotchas` **触发条件重叠**（`unresolved reference` 双向声明 → 真实场景双触发）→ 已收紧沙箱侧 description（改「kotlin_module 元数据被覆盖导致顶层函数 unresolved」+ 显式指向对方 skill）；**收紧后同一 prompt 的行为版判定当场翻转**（触发→不触发）= 行为验证有牙齿的直接证据。这类问题以前要花一整轮排查（09-15 skill 索引冻结），现在 5 秒。
+
+**22c — 债务扫描器已落地**（`change-ladder/scripts/scan_debt.py`，263 行）：`code`（只认注释上下文里的标记 → 排除 description/标题/检测代码的自指污染；源码内 `'pony'+'tail:'` 拼接避开自命中）、`notes`（按 `## ` 分段查触发条件；豁免双判据 = 标题声明类 或 正文「✅ 已修」）、`--self-test`（夹具 + 反向对照）。backlog 头部加格式约定两行。
+实测：backlog 21 段 → **0 no-触发条件**（豁免 11）、skills → **0 no-trigger**。
+
+**★ python3 工具坑（本环境，写脚本必知）**：①`sys.print` **不存在** → 用内建 `print`；②`sys.argv[0]` 是脚本名（写 `_args()` 判 `.py` 后缀更稳）；③可用：`os.walk`（返回 (root, dirs, files)）/ `os.path.join` / `os.path.isdir` / `os.path.isfile` / `os.mkdir` / `os.remove` / `os.system` / `sys.exit(rc)`；④字符串是 `strip`（不是 strop）；⑤json 用标准 `loads/dumps`。
+
+**本轮新增交互边（二阶门记录）**：①skill 列表注入 1 条（下会话生效，零代码改动）②check_evals `run` 的模型调用边（每次真调，20 条 ≈ 20 次调用）③scan_debt 零运行时边（纯离线脚本）。
+
+**验证**：两脚本 `--self-test` 全绿（各含反向对照）；`check_evals static` = 24 skill / 覆盖 4 / 错误 0；行为版 4 skill 20/20。
+
+<!-- 2026-09-16 14:49:06 -->
+## 09-16 傍晚（续）：GLOBAL.md 加两条纪律（用户拍板「写进去吧」）
+
+
+- 新增 **「## 改动阶梯纪律（写代码前的默认工作流）」**（现 27–34 行）与 **「## Skill 触发验证纪律（新增/改 skill 时）」**（36–39 行），插在「分支隔离纪律」之前——顺序即语义：阶梯在前（写多少）、分支在后（在哪写）。
+- 阶梯纪律含：七级阶梯（逐级附本仓查法）+ 先理解问题 + 「停在第 N 级」可复核产出 + 永不砍清单 6 类 + 改 bug 根因纪律 + `ponytail:` 三段式注释 + 收益验证（批次 diff 行数 / 审计面积 ∝ diff）。触发验证纪律含 evals 格式要求 + static/run 两入口 + 「改 description 后必跑行为版」。
+- GLOBAL.md 现 **219 行 / 22069 字节**。
+- **注意（避免未来会话困惑）**：`scan_debt.py notes` 的「每条必须带触发条件」约定**只适用于 backlog（活项清单）**；GLOBAL.md 是纪律/事实类条目，天然没有升级触发条件，不适用该扫描（跑了会报一堆 no-触发条件，属误用）。
 
 ---
 
