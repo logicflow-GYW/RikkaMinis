@@ -104,10 +104,42 @@ class WebDavClient(
 
     // ── Path building ─────────────────────────────────────────────────────
 
+    /**
+     * Transport security: HTTP Basic auth puts credentials on the wire in
+     * cleartext unless TLS protects them, and the backup payload can carry
+     * every provider API key when the user opts in — so this is the last
+     * gate before credentials leave the device. Non-https servers are allowed
+     * ONLY for loopback / private-network hosts (dev servers, LAN NAS);
+     * a public `http://` endpoint is REFUSED instead of guessed at, with the
+     * reason in the message (surfaced to the user via WebDavException →
+     * webDavErrorMessage's IOException branch).
+     */
+    internal fun isLoopbackOrPrivateHost(host: String): Boolean {
+        val h = host.lowercase()
+        if (h == "localhost" || h.endsWith(".localhost") || h.startsWith("127.")) return true
+        if (h.startsWith("10.")) return true
+        if (h.startsWith("192.168.")) return true
+        // 172.16.0.0/12
+        if (h.startsWith("172.")) {
+            val second = h.removePrefix("172.").substringBefore('.').toIntOrNull()
+            if (second != null && second in 16..31) return true
+        }
+        return false
+    }
+
     /** `url` + configured `path` + any extra segments, each URL-encoded. */
     fun buildUrl(vararg segments: String): HttpUrl {
         val base = config.url.trim().toHttpUrlOrNull()
             ?: throw WebDavException("Invalid server URL: ${config.url}", -1)
+        if (!base.isHttps && !isLoopbackOrPrivateHost(base.host)) {
+            throw WebDavException(
+                "Refusing to send credentials over plain HTTP to ${base.host}: " +
+                    "WebDAV uses HTTP Basic auth, so non-HTTPS servers are only allowed " +
+                    "for loopback or private hosts (localhost, 127.x, 10.x, 172.16-31.x, " +
+                    "192.168.x). Use an https:// server URL.",
+                -1,
+            )
+        }
         val builder = base.newBuilder()
         val parts = mutableListOf<String>()
         config.path.trim('/').takeIf { it.isNotEmpty() }?.let { parts.add(it) }

@@ -360,4 +360,63 @@ class WebDavClientTest {
         assertEquals("{\"formatVersion\":1}", json)
         assertEquals("/dav/RikkaMinis_backups/rikkaminis-backup-1.json", server.takeRequest().path)
     }
+
+    // ── Transport security (plain-HTTP refusal) ───────────────────────────
+
+    private fun clientFor(url: String): WebDavClient =
+        WebDavClient(config.copy(url = url), client)
+
+    @Test
+    fun `plain http to a public host is refused`() {
+        val d = clientFor("http://example.com/dav")
+        try {
+            d.buildUrl()
+            fail("expected WebDavException for plain HTTP to a public host")
+        } catch (e: WebDavException) {
+            assertEquals(-1, e.statusCode)
+            assertTrue("message should name the host: ${e.message}", e.message!!.contains("example.com"))
+            assertTrue("message should say HTTPS: ${e.message}", e.message!!.contains("https"))
+        }
+    }
+
+    @Test
+    fun `https to a public host builds the url`() {
+        val url = clientFor("https://example.com/dav").buildUrl()
+        assertTrue("expected https url: $url", url.isHttps)
+        assertTrue(url.toString().startsWith("https://example.com/"))
+    }
+
+    @Test
+    fun `plain http to loopback and private hosts is allowed`() {
+        // MockWebServer itself runs on 127.0.0.1, so every existing test in
+        // this class already depends on the loopback escape.
+        for (url in listOf(
+            "http://127.0.0.1:5240/dav",
+            "http://localhost:5240/dav",
+            "http://192.168.1.20:5240/dav",
+            "http://10.0.0.5:5240/dav",
+            "http://172.16.3.9:5240/dav",
+            "http://172.31.255.1:5240/dav",
+        )) {
+            val built = clientFor(url).buildUrl()
+            assertTrue("expected loopback/private url to build: $url", built.toString().startsWith("http://"))
+        }
+    }
+
+    @Test
+    fun `private-host detection boundaries`() {
+        val f = { h: String -> WebDavClient(config, client).isLoopbackOrPrivateHost(h) }
+        assertTrue(f("localhost"))
+        assertTrue(f("127.0.0.1"))
+        assertTrue(f("10.1.2.3"))
+        assertTrue(f("192.168.0.1"))
+        assertTrue(f("172.16.0.1"))
+        assertTrue(f("172.31.9.9"))
+        // Just outside the private ranges must NOT be allowed
+        assertTrue(!f("172.32.0.1"))
+        assertTrue(!f("172.15.0.1"))
+        assertTrue(!f("11.0.0.1"))
+        assertTrue(!f("193.168.0.1"))
+        assertTrue(!f("example.com"))
+    }
 }

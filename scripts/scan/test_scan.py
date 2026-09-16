@@ -410,6 +410,61 @@ def test_legacy():
     shutil.rmtree(root)
 
 
+def test_debug_leak():
+    print("━━━ debug_leak_guard (source mode) ━━━")
+    debug_cls = (
+        "package com.rikkaminis.app.debug\n"
+        "class DebugServer\n"
+    )
+    # Clean — the debug class is allow-listed (MinisApp) / comment-only.
+    clean = {
+        os.path.join(KOTLIN_PKG, "debug/DebugServer.kt"): debug_cls,
+        os.path.join(KOTLIN_PKG, "MinisApp.kt"):
+            "if (BuildConfig.DEBUG) { com.rikkaminis.app.debug.DebugServer(this).start() }\n",
+        os.path.join(KOTLIN_PKG, "Other.kt"):
+            "// mentions com.rikkaminis.app.debug.DebugServer in a comment only\n",
+    }
+    root = make_tree(clean)
+    code, out = run_scanner("debug_leak_guard.py", root)
+    check("allow-listed call site + comment-only mention is legal (exit 0)", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(root)
+
+    # Dirty — a NEW unaudited file touches debug code (the M1 failure class:
+    # ships the token-free loopback debug server into release with no other
+    # gate noticing).
+    dirty = dict(clean)
+    dirty[os.path.join(KOTLIN_PKG, "SomeNewFile.kt")] = (
+        "val x = com.rikkaminis.app.debug.DebugServer()\n"
+    )
+    root = make_tree(dirty)
+    code, out = run_scanner("debug_leak_guard.py", root)
+    check(
+        "unaudited debug-package call site caught (exit 1)",
+        code == 1 and "SomeNewFile.kt" in out,
+        f"exit={code}\n{out}",
+    )
+    shutil.rmtree(root)
+
+    # Escape hatch — `debug-ok:` justifies the reference.
+    escaped = dict(clean)
+    escaped[os.path.join(KOTLIN_PKG, "SomeNewFile.kt")] = (
+        "// debug-ok: audited single-point entry, guarded at the caller\n"
+        "val x = com.rikkaminis.app.debug.DebugServer()\n"
+    )
+    root = make_tree(escaped)
+    code, out = run_scanner("debug_leak_guard.py", root)
+    check("debug-ok escape hatch exempts the reference (exit 0)", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(root)
+
+def test_room_migration():
+    print("━━━ room_migration_check ━━━")
+    code, out = run_scanner("room_migration_check.py", "--self-test")
+    check(
+        "self-test fixtures pass (unwired + non-contiguous caught, clean passes)",
+        code == 0,
+        f"exit={code}\n{out}",
+    )
+
 def test_trace_eval():
     print("━━━ trace_eval_check ━━━")
     # The evaluator gates every golden in tests/traces/golden/, including the
@@ -534,6 +589,8 @@ def main():
     test_enum_parse()
     test_boundary()
     test_legacy()
+    test_debug_leak()
+    test_room_migration()
     test_trace_eval()
     test_real_repo()
     print("")

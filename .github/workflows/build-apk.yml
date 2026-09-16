@@ -328,6 +328,14 @@ jobs:
           fi
           echo "libproot.so matches the source-built binary."
 
+          # Debug-code release hygiene: debug/ lives in src/main, so the APK
+          # must NOT contain any debug-only marker string. This is the exact
+          # property that matters — a -keep rule, a minify disable, or a new
+          # BuildConfig.DEBUG-less entry point would ship the token-free
+          # loopback debug JSON-RPC (127.0.0.1:5321) to users with no other
+          # gate noticing. Verified on the BUILT artifact, not the source.
+          python3 scripts/scan/debug_leak_guard.py apk "$APK"
+
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v7
         with:

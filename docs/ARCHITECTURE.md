@@ -20,6 +20,7 @@
 | fork 日期 | 2026-08-01（上游恰好同日停止推送，fork 即接管） |
 | UI 灵感 | RikkaHub（左滑会话抽屉、极简顶栏、消息流布局；借鉴灵感非代码） |
 | 平台 | Android-only（上游 iOS 树与第三方 C 源码已删除） |
+| iOS 残留引用 | 源码/注释中约 1,400 处 iOS/bundle 相关引用是**有意保留的协议契约**，见下节 |
 | 提交构成 | 全仓 1067 commits ≈ 上游 12 + fork 后自写 ~1055（8/1 起 44 天） |
 | Android 代码量 | fork 基线 413 文件 ≈ 146.7K 行 → 当前 515 文件 ≈ 173.5K 行（**净 +102 文件 / +26.8K 行**，另有大量修改） |
 | 测试代码量 | 242 文件 ≈ 43.4K 行；测试/主源码比 **25.0%**（fork 基线 9.5%） |
@@ -58,6 +59,24 @@
 - **`:toolservice`**：工具执行服务（与沙箱解耦的辅助执行面）。
 - **主进程**：UI + 智能体编排（AgentLoopEngine 状态机）+ 沙箱宿主 + 数据层。
 - 静态扫描门禁守护这条边界：**app 进程代码不得直调 provider 网络入口**。
+
+### 2.1.1 为什么 Android-only 树里保留约 1,400 处 iOS 引用
+
+上游是双平台的，本 fork 删除了 iOS 树与第三方 C 源码，但**保留了 iOS 兼容的
+序列化契约**。这些引用分两类，删掉任何一类都会破坏数据互通：
+
+1. **协议契约（必须保留）**：`ProviderRepository` 的备份/导出序列化
+   （modalityBitfield、"so iOS can faithfully restore it"）、`MCPOAuthConfig`
+   的字段镜像（"Mirrors iOS MCPOAuthConfig"）、`ProviderDatabase` 的 iOS
+   互操作位。私有仓的 iOS 线与 Android 线消费同一份备份/配置格式——删掉
+   这些字段，小号线产出的备份在 iOS 侧无法恢复。
+2. **历史注释（无害噪音）**：`build.gradle.kts` 的 copyBashismRules 注释
+   （"iOS references the same files as bundle resources"）等。保留它们是因为
+   与私有仓的注释同源，删除会造成公私注释漂移。
+
+**判别方法**：注释里出现 "so iOS can faithfully restore" / "Mirrors iOS" /
+"iOS readers" 的是协议契约；只在讲文件来源的是历史注释。纯 Android 读者
+可以把它们当作"私有仓 iOS 线存在的证据"读。
 
 ## 3. 包结构地图（com.rikkaminis.app）
 
