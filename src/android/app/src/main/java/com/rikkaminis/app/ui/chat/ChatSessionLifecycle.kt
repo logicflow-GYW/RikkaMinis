@@ -238,7 +238,7 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
                 // [fix/diff-audit-0904-F2] The cutoff row match must cover
                 // the LIVE-session id dialect, not just the cold-rebuild
                 // one. Cold rebuild (loadSession) sets ChatMessage.id =
-                // entity.id (the DB id), so `msg.id == cutoffId` hits.
+                // entity.id (the DB id), so the id match in applyCompactGreyedRange hits.
                 // A live in-loop compact runs while the current turn's
                 // bubbles still carry runtime ids (`assistant_<ts>` for
                 // the streaming assistant row; tool-result carriers have
@@ -265,7 +265,7 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
                 // Filters: role != system (dividers/notices don't count).
                 // Range: everything up to and including the cutoff row,
                 // since the kept-tail starts immediately after.
-                // Falls back to "all non-system" when cutoffId is null
+                // Falls back to "all non-system" when the anchor id is null
                 // (compact-everything path), matching iOS dividerInsertIdx
                 // == messages.count behavior.
                 //
@@ -276,7 +276,7 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
                 // even though `toCompact.size` was nonzero. The divider's
                 // count should reflect the size of THIS pass's range, not
                 // the delta of newly-grayed rows.
-                val cutoffIdx = cleaned.indexOfLast { it.id == cutoffId || it.sourceDbIds.contains(cutoffId) }
+                val cutoffIdx = cleaned.indexOfLast { it.id == lastCompactedDbId || it.sourceDbIds.contains(lastCompactedDbId) }
                 val compactedUICount = if (cutoffIdx < 0) {
                     cleaned.count { it.role != "system" }
                 } else {
