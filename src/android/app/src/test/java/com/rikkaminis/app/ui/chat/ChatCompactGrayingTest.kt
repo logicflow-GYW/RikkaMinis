@@ -35,7 +35,6 @@ class ChatCompactGrayingTest {
         toolBlocks = if (toolName != null) {
             listOf(AssistantBlock(id = "$id-block", kind = "tool_use", toolName = toolName))
         } else emptyList(),
-        isInternalBridge = false,
     )
 
     // ── the flip ───────────────────────────────────────────────
