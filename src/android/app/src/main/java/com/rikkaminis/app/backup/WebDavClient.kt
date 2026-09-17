@@ -148,9 +148,26 @@ class WebDavClient(
         }
         for (part in parts) {
             for (segment in part.split('/')) {
-                // addPathSegment percent-encodes each segment, so a malicious
-                // or accidental ".." or "/" inside user input stays a literal
-                // path segment instead of escaping the backup directory.
+                // [audit-0917] addPathSegment percent-encodes '/', but it does
+                // NOT neutralise dot segments: HttpUrl.Builder resolves a
+                // segment that is exactly "." or ".." and pops the previous
+                // path element. Measured against okhttp 4.12.0 — base
+                // https://h/dav/ + ".." + "escape.json" builds
+                // https://h/dav/escape.json, so a config- or caller-supplied
+                // path could climb out of the backup directory.
+                //
+                // Re-encoding is NOT a fix: addPathSegment("%2E%2E") writes
+                // "%252E%252E" (the server sees a literal "%2E%2E" directory)
+                // and addEncodedPathSegment("..") is resolved exactly like the
+                // decoded form. Refuse instead of guessing — a dot segment in
+                // a backup path is never a legitimate request.
+                if (segment == "." || segment == "..") {
+                    throw WebDavException(
+                        "Refusing a path segment that resolves outside the backup " +
+                            "directory: \"$segment\" in \"$part\"",
+                        -1,
+                    )
+                }
                 builder.addPathSegment(segment)
             }
         }

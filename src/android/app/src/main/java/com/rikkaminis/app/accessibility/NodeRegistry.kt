@@ -22,7 +22,16 @@ class NodeRegistry {
 
     fun put(node: AccessibilityNodeInfo): String {
         evictExpired()
-        val id = nextId()
+        // [audit-0917] nextId() wraps at 2^20 (0xFFFFF) — after 1,048,576
+        // allocations in one service lifetime a recycled id would overwrite a
+        // LIVE entry, so `tap node <id>` could hit a node from a stale tree.
+        // Loop until an unused id is found; the probe is cheap and the wrap
+        // only matters on very long-running services.
+        var id = nextId()
+        var guard = 0
+        while (map.containsKey(id) && guard++ < 64) {
+            id = nextId()
+        }
         map[id] = Entry(node, System.currentTimeMillis())
         return id
     }

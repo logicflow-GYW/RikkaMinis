@@ -486,6 +486,11 @@ object UpdateChecker {
             DownloadResult.Success(outFile, integrity)
         } catch (e: Exception) {
             AppLogger.error(TAG, "download failed: ${e.javaClass.simpleName}: ${e.message}")
+            // [audit-0917] Drop the partial file on the exception path too. The
+            // integrity-failure path already deletes it; leaving a truncated
+            // APK behind meant a later install could consume half a binary.
+            runCatching { outFile.delete() }
+                .onFailure { AppLogger.warning(TAG, "failed to delete partial download: ${it.message}") }
             DownloadResult.Error(e.message ?: e.javaClass.simpleName)
         }
     }

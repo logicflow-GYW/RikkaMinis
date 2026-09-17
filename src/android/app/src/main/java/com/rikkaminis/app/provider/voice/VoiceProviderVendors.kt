@@ -222,7 +222,11 @@ class DoubaoVoiceProvider(providerId: String, apiKey: String?) :
     // v3 ASR response: { "result": { "text": "..." }, "audio_info": { duration } }
     override fun parseVoiceInputResponse(data: ByteArray, request: VoiceInputRequest): VoiceInputResponse {
         val json = runCatching { JSONObject(String(data, Charsets.UTF_8)) }.getOrNull()
+        // [audit-0917] takeIf{isNotEmpty}: optString returns "" for a missing or
+        // empty key, so `?: throw` never fired and an empty transcript was
+        // returned as a successful result. Same shape as the Xunfei parser.
         val text = json?.optJSONObject("result")?.optString("text")
+            ?.takeIf { it.isNotEmpty() }
             ?: throw VoiceProviderException.Parse("Unexpected Doubao v3 ASR response format")
         val durationMs = json.optJSONObject("audio_info")?.optDouble("duration")
             ?.takeIf { !it.isNaN() }
@@ -576,6 +580,9 @@ class DeepgramVoiceProvider(providerId: String, baseURL: String, apiKey: String?
     }
 
     override fun parseVoiceInputResponse(data: ByteArray, request: VoiceInputRequest): VoiceInputResponse {
+        // [audit-0917] takeIf{isNotEmpty}: optString yields "" for a missing /
+        // empty transcript, so the `?: throw` was dead and an empty result was
+        // reported as a successful transcription.
         val transcript = runCatching { JSONObject(String(data, Charsets.UTF_8)) }.getOrNull()
             ?.optJSONObject("results")
             ?.optJSONArray("channels")
@@ -583,6 +590,7 @@ class DeepgramVoiceProvider(providerId: String, baseURL: String, apiKey: String?
             ?.optJSONArray("alternatives")
             ?.optJSONObject(0)
             ?.optString("transcript")
+            ?.takeIf { it.isNotEmpty() }
             ?: throw VoiceProviderException.Parse("Unexpected Deepgram ASR response")
         return VoiceInputResponse(text = transcript, language = request.language)
     }

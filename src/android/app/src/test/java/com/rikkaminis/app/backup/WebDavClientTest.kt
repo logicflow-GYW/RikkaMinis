@@ -176,6 +176,33 @@ class WebDavClientTest {
         assertTrue(url.encodedPath.endsWith("rikkaminis-backup-1.json"))
     }
 
+    @Test
+    fun `buildUrl refuses dot segments instead of resolving them`() {
+        // [audit-0917] HttpUrl.Builder resolves a segment that is exactly
+        // "." or ".." and pops the previous path element. Measured against
+        // okhttp 4.12.0: base https://h/dav/ + ".." + "escape.json" used to
+        // build https://h/dav/escape.json — a config path could climb out of
+        // the backup directory. Re-encoding is not a fix (addPathSegment
+        // writes "%252E%252E"; addEncodedPathSegment("..") resolves anyway),
+        // so the request is refused.
+        val d = clientFor("https://example.com/dav")
+        for (bad in listOf("..", ".", "../../etc/passwd", "sub/../..")) {
+            try {
+                d.buildUrl(bad)
+                fail("expected WebDavException for traversal segment \"$bad\"")
+            } catch (e: WebDavException) {
+                assertTrue(
+                    "message should name the offending segment: ${e.message}",
+                    e.message!!.contains("outside the backup directory"),
+                )
+            }
+        }
+        // A segment that merely CONTAINS dots is legitimate and untouched.
+        val normal = d.buildUrl("a..b.json")
+        assertTrue("ordinary dotted name must build: $normal", normal.encodedPath.endsWith("a..b.json"))
+        assertEquals("/dav/RikkaMinis_backups/a..b.json", normal.encodedPath)
+    }
+
     // ── Upload ─────────────────────────────────────────────────────────────
 
     @Test
