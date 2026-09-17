@@ -65,9 +65,13 @@ object MCPOAuthStore {
         val file = File(bridgeDir(context), "$server.secret")
         if (!file.exists()) return null
         val secret = runCatching { file.readText().trim() }.getOrNull()
-        if (!secret.isNullOrEmpty()) {
-            setClientSecret(context, server, secret)
-        }
+        // [audit-0917] Delete only after the secret actually landed in the
+        // encrypted store. The old unconditional delete threw away the file on
+        // a transient read error or a blank write, contradicting this method's
+        // own "a failed import leaves the file in place for the next attempt"
+        // contract — and the secret is unrecoverable once gone.
+        if (secret.isNullOrEmpty()) return null
+        setClientSecret(context, server, secret)
         runCatching { file.delete() }
         return secret
     }
@@ -175,6 +179,9 @@ object MCPOAuthStore {
             }
             AppLogger.info(TAG, "materialized OAuth bridge for '$server'")
         } catch (t: Throwable) {
+            // [audit-0917] tmp holds live bearer tokens — never leave it behind
+            // on a failure (e.g. the rename fallback's readText/writeText threw).
+            runCatching { File(bridgeDir(context), "$server.json.tmp").delete() }
             AppLogger.warning(TAG, "failed to materialize OAuth bridge for '$server': ${t.message}")
         }
     }

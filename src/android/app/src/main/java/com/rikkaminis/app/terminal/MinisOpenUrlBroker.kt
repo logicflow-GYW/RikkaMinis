@@ -39,6 +39,10 @@ object MinisOpenUrlBroker {
 
     fun offer(uriString: String) {
         val parsed = runCatching { Uri.parse(uriString) }.getOrNull() ?: return
+        // [audit-0917] Same scheme gate as offer(Uri) — the string entry point
+        // already refused unsupported schemes; the Uri overload accepted
+        // anything a caller handed it (e.g. a file:// or javascript: payload
+        // routed straight into the WebView preview).
         if (!isSupportedScheme(parsed.scheme)) return
         _pendingUrl.value = parsed
     }

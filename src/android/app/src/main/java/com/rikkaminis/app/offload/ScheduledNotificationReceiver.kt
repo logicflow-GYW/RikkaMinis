@@ -32,17 +32,16 @@ class ScheduledNotificationReceiver : BroadcastReceiver() {
     }
 
     override fun onReceive(context: Context, intent: Intent) {
-        val id = intent.getStringExtra(EXTRA_ID) ?: "unknown"
+        val id = intent.getStringExtra(EXTRA_ID) ?: run {
+            // [audit-0917] Without an id there is nothing to remove — the old
+            // "unknown" fallback was passed to remove() and could delete an
+            // unrelated entry that happened to be keyed "unknown".
+            AppLogger.warning(TAG, "scheduled notification fired without EXTRA_ID — ignored")
+            return
+        }
         val title = intent.getStringExtra(EXTRA_TITLE) ?: "RikkaMinis"
         val body = intent.getStringExtra(EXTRA_BODY) ?: ""
         AppLogger.debug(TAG, "scheduled notification fired: id=$id title='$title'")
-
-        // Drop the prefs entry so `pending` no longer surfaces it.
-        try {
-            ScheduledNotificationStore(context).remove(id)
-        } catch (e: Throwable) {
-            AppLogger.warning(TAG, "remove($id) failed: ${e.message}")
-        }
 
         val notifId = id.hashCode() and 0x7FFFFFFF
         val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
@@ -66,6 +65,15 @@ class ScheduledNotificationReceiver : BroadcastReceiver() {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE)
                 as android.app.NotificationManager
             nm.notify(notifId, notification)
+            // [audit-0917] Drop the pending record only AFTER the notification
+            // was actually posted. Removing first meant a SecurityException
+            // (POST_NOTIFICATIONS revoked) or process death in between lost the
+            // notification with no pending record left to retry from.
+            try {
+                ScheduledNotificationStore(context).remove(id)
+            } catch (e: Throwable) {
+                AppLogger.warning(TAG, "remove($id) failed: ${e.message}")
+            }
         } catch (e: SecurityException) {
             AppLogger.error(TAG, "post denied — POST_NOTIFICATIONS missing: ${e.message}")
         }

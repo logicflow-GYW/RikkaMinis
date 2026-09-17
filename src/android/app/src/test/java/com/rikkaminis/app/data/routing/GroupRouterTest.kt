@@ -410,6 +410,17 @@ class GroupRouterTest {
         assertEquals("c", router.nextLoadBalanceMember(g, "a", "c", listOf(member("a"), member("b"), member("c"))))
     }
 
+    @Test fun perMessage_pendingPickWinsOverDemotedAnchor() {
+        val router = routerWithClock()
+        val g = lbGroup("a", "b", "c")
+        // Current member "a" is cooling (anchor unusable) AND the user picked
+        // "c". The pick must still win: the demoted-anchor fallback exists to
+        // avoid resending into a known-failing member, not to discard an
+        // explicit choice of a *different*, healthy one.
+        router.recordResult("a", com.rikkaminis.app.data.routing.RouteOutcome.RateLimited(retryAfterMs = 60_000L))
+        assertEquals("c", router.nextLoadBalanceMember(g, "a", "c", listOf(member("a"), member("b"), member("c"))))
+    }
+
     @Test fun perMessage_pendingPickIgnoredWhenUnusable() {
         val router = routerWithClock()
         val g = lbGroup("a", "b", "c")

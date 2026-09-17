@@ -97,15 +97,19 @@ class GroupRouter(
         if (members.size <= 1) return null
         val usable = members.filter { isUsable(it.id) }
         if (usable.isEmpty()) return null
+        // [audit-0917] The one-shot user pick is checked FIRST. It used to sit
+        // behind the `currentIdx < 0` early return, so whenever the current
+        // member was demoted/absent the explicit pick was silently discarded
+        // and the turn went to an arbitrary usable member — the opposite of the
+        // KDoc's "wins when still usable".
+        if (pendingEntryId != null && usable.any { it.id == pendingEntryId }) {
+            return pendingEntryId
+        }
         // Current member missing from the group or demoted (cooling /
         // circuit-open / dead) → jump to the first usable member instead of
         // sending into a member we already know is failing.
         val currentIdx = usable.indexOfFirst { it.id == currentEntryId }
         if (currentIdx < 0) return usable.first().id
-        // One-shot user pick for this turn (still usable, still a member).
-        if (pendingEntryId != null && usable.any { it.id == pendingEntryId }) {
-            return pendingEntryId
-        }
         return usable[(currentIdx + 1) % usable.size].id
     }
 
