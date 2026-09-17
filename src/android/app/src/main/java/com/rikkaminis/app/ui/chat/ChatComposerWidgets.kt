@@ -736,11 +736,17 @@ internal fun FloatingToolStatusBar(
     var currentIndex by remember { mutableStateOf(toolBlocks.lastIndex.coerceAtLeast(0)) }
     val lastIndex = toolBlocks.lastIndex
     LaunchedEffect(lastIndex) {
-        val block = toolBlocks.getOrNull(currentIndex)
-        val isCurrentActive = block?.toolStatus == ToolBlockStatus.RUNNING ||
-            block?.toolStatus == ToolBlockStatus.STREAMING ||
-            block?.toolStatus == ToolBlockStatus.PENDING
-        if (!isCurrentActive) currentIndex = lastIndex.coerceAtLeast(0)
+        // [fix/audit0917-b8] Follow the newest block ONLY while it is actually
+        // running. The old check was on the *currently shown* block, so a user
+        // who paged back to a finished tool got yanked forward again on every
+        // new tool call — contradicting the T261 note right below ("the user
+        // may have paged via the chevrons"). Paging is now respected once the
+        // newest block settles, and a genuinely live tool still auto-follows.
+        val newest = toolBlocks.getOrNull(lastIndex)
+        val newestActive = newest?.toolStatus == ToolBlockStatus.RUNNING ||
+            newest?.toolStatus == ToolBlockStatus.STREAMING ||
+            newest?.toolStatus == ToolBlockStatus.PENDING
+        if (newestActive) currentIndex = lastIndex.coerceAtLeast(0)
     }
     val block = toolBlocks.getOrNull(currentIndex) ?: return
     // T261: sheet is hoisted to ChatScreen top-level; this bar only emits

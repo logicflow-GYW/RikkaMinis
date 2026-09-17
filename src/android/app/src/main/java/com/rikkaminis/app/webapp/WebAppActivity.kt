@@ -442,40 +442,46 @@ class WebAppActivity : ComponentActivity() {
      * surface narrow and matches LogManagementScreen's pattern.
      */
     private fun openInExternalBrowser(context: android.content.Context, file: File) {
-        val uri = stagedShareUri(context, file) ?: run {
-            Toast.makeText(context, R.string.webapp_no_browser_app, Toast.LENGTH_SHORT).show()
-            return
-        }
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "text/html")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        try {
-            context.startActivity(intent)
-        } catch (e: ActivityNotFoundException) {
-            AppLogger.warning(logTag, "No browser app for WebApp preview: ${e.message}")
-            Toast.makeText(context, R.string.webapp_no_browser_app, Toast.LENGTH_SHORT).show()
+        // [fix/audit0917-b8] stagedShareUri copies the file; do it off the main
+        // thread (see its KDoc) and only build/start the Intent back on Main.
+        lifecycleScope.launch {
+            val uri = stagedShareUri(context, file) ?: run {
+                Toast.makeText(context, R.string.webapp_no_browser_app, Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "text/html")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            try {
+                context.startActivity(intent)
+            } catch (e: ActivityNotFoundException) {
+                AppLogger.warning(logTag, "No browser app for WebApp preview: ${e.message}")
+                Toast.makeText(context, R.string.webapp_no_browser_app, Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
     private fun shareWebAppFile(context: android.content.Context, file: File) {
-        val uri = stagedShareUri(context, file) ?: run {
-            Toast.makeText(context, R.string.webapp_no_browser_app, Toast.LENGTH_SHORT).show()
-            return
-        }
-        val send = Intent(Intent.ACTION_SEND).apply {
-            type = "text/html"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        val chooser = Intent.createChooser(
-            send,
-            context.getString(R.string.webapp_share_chooser_title),
-        ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
-        try {
-            context.startActivity(chooser)
-        } catch (e: ActivityNotFoundException) {
-            AppLogger.warning(logTag, "Share chooser failed: ${e.message}")
+        lifecycleScope.launch {
+            val uri = stagedShareUri(context, file) ?: run {
+                Toast.makeText(context, R.string.webapp_no_browser_app, Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "text/html"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val chooser = Intent.createChooser(
+                send,
+                context.getString(R.string.webapp_share_chooser_title),
+            ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+            try {
+                context.startActivity(chooser)
+            } catch (e: ActivityNotFoundException) {
+                AppLogger.warning(logTag, "Share chooser failed: ${e.message}")
+            }
         }
     }
 
@@ -483,13 +489,17 @@ class WebAppActivity : ComponentActivity() {
      * Copy [file] into `cacheDir/share/` and return a FileProvider Uri for
      * it. Returns null on IO failure. The staged file overwrites any prior
      * copy with the same name — share/ accumulates one entry per WebApp.
+     *
+     * [fix/audit0917-b8] Suspends and copies on [Dispatchers.IO]: the caller is
+     * a toolbar click handler on the main thread, and a large page (bundled
+     * asset / big HTML) made `copyTo` a visible main-thread stall.
      */
-    private fun stagedShareUri(context: android.content.Context, file: File): Uri? {
+    private suspend fun stagedShareUri(context: android.content.Context, file: File): Uri? {
         return try {
             val shareDir = File(context.cacheDir, "share").apply { mkdirs() }
             val stem = file.nameWithoutExtension.ifBlank { "webapp" }
             val staged = File(shareDir, "$stem.html")
-            file.copyTo(staged, overwrite = true)
+            withContext(Dispatchers.IO) { file.copyTo(staged, overwrite = true) }
             FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.fileprovider",

@@ -29,26 +29,7 @@ private data class OffloadCandidate(
     val toolName: String,
 )
 
-internal fun ChatViewModel.estimateContextTokens(): Int {
-    var totalChars = 0
-    var imageTokens = 0
-    for (msg in agentHistory) {
-        for (part in msg.contentParts) {
-            when (part) {
-                is AgentContentPart.Text -> totalChars += part.text.length
-                is AgentContentPart.ToolUse -> totalChars += part.input.toString().length
-                is AgentContentPart.ToolResult -> {
-                    totalChars += part.content.length
-                    part.imageData?.let { imageTokens += BPETokenizer.countImageTokens(it) }
-                }
-                is AgentContentPart.ImageData -> {
-                    imageTokens += BPETokenizer.countImageTokens(part.data)
-                }
-            }
-        }
-    }
-    return (totalChars / 3.5).toInt() + imageTokens
-}
+internal fun ChatViewModel.estimateContextTokens(): Int = estimateHistoryTokens(agentHistory)
 
     /**
      * Approximate token count for a single agent content part. Used to rank
@@ -429,24 +410,7 @@ internal fun ChatViewModel.trimContextHistoryWindow(
         iconKind = "compact",
 )
 }
-internal fun ChatViewModel.estimateContextHistoryTokens(): Int {
-    var totalChars = 0
-    var imageTokens = 0
-    for (msg in agentHistory) {
-        for (part in msg.contentParts) {
-            when (part) {
-                is AgentContentPart.Text -> totalChars += part.text.length
-                is AgentContentPart.ToolUse -> totalChars += part.input.toString().length
-                is AgentContentPart.ToolResult -> {
-                    totalChars += part.content.length
-                    part.imageData?.let { imageTokens += BPETokenizer.countImageTokens(it) }
-                }
-                is AgentContentPart.ImageData -> imageTokens += BPETokenizer.countImageTokens(part.data)
-            }
-        }
-    }
-    return (totalChars / 3.5).toInt() + imageTokens
-}
+internal fun ChatViewModel.estimateContextHistoryTokens(): Int = estimateHistoryTokens(agentHistory)
 
 internal fun ChatViewModel.estimateHistoryTokens(messages: List<LLMMessage>): Int {
     var totalChars = 0

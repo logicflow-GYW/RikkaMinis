@@ -50,6 +50,7 @@ import androidx.compose.ui.res.stringResource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.rikkaminis.app.MinisApp
 import com.rikkaminis.app.data.model.ProviderInstance
 import com.rikkaminis.app.data.repository.ProviderRepository
 import com.rikkaminis.app.R
@@ -101,7 +102,16 @@ fun ProviderListScreen(
         // the activity-result callback thread (Main); a multi-MB provider bundle
         // froze the UI for hundreds of ms to seconds. Do the work on IO and post
         // the Toasts back to Main.
-        importScope.launch {
+        //
+        // [fix/audit0917-b8] Run it on the APPLICATION scope, not
+        // rememberCoroutineScope: the repository is app-scoped and the writes
+        // are already committed by the time a screen-scoped coroutine would be
+        // cancelled, so backing out of the provider list mid-import left a
+        // partially imported bundle with no summary toast. Fall back to the
+        // composable scope if the cast ever fails, so the work still happens.
+        val importRunner = (context.applicationContext as? MinisApp)?.applicationScope
+            ?: importScope
+        importRunner.launch {
             withContext(Dispatchers.IO) {
                 val mime = context.contentResolver.getType(uri).orEmpty()
                 val name = ProviderImportZip.queryDisplayName(context, uri).orEmpty()
@@ -124,16 +134,25 @@ fun ProviderListScreen(
                             },
                         )
                     } else {
-                        val jsonStr = context.contentResolver.openInputStream(uri)?.bufferedReader()?.readText()
-                        if (jsonStr != null) {
-                            val label = providerRepository.importInstanceJSON(jsonStr)
-                            if (label != null) {
-                                val toastMsg = context.getString(R.string.provider_import_success, label)
-                                importToastHandler.post { Toast.makeText(context, toastMsg, Toast.LENGTH_SHORT).show() }
-                            } else {
-                                val msg = context.getString(R.string.provider_import_invalid_file)
-                                importToastHandler.post { Toast.makeText(context, msg, Toast.LENGTH_SHORT).show() }
-                            }
+                        // [fix/audit0917-b8] openInputStream returning null is a
+                        // real I/O failure (revoked grant, provider gone), and
+                        // the old `if (jsonStr != null)` fell through it with no
+                        // toast at all — the user picked a file and nothing
+                        // happened. Report it like any other read error.
+                        val jsonStr = context.contentResolver.openInputStream(uri)
+                            ?.bufferedReader()?.use { it.readText() }
+                        if (jsonStr == null) {
+                            val msg = context.getString(R.string.provider_import_read_error)
+                            importToastHandler.post { Toast.makeText(context, msg, Toast.LENGTH_SHORT).show() }
+                            return@withContext
+                        }
+                        val label = providerRepository.importInstanceJSON(jsonStr)
+                        if (label != null) {
+                            val toastMsg = context.getString(R.string.provider_import_success, label)
+                            importToastHandler.post { Toast.makeText(context, toastMsg, Toast.LENGTH_SHORT).show() }
+                        } else {
+                            val msg = context.getString(R.string.provider_import_invalid_file)
+                            importToastHandler.post { Toast.makeText(context, msg, Toast.LENGTH_SHORT).show() }
                         }
                     }
                 } catch (e: Exception) {

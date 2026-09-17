@@ -1,8 +1,10 @@
 package com.rikkaminis.app.ui.navigation
 
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.currentStateFlow
 import androidx.navigation.NavController
 import androidx.navigation.NavOptionsBuilder
+import kotlinx.coroutines.flow.first
 
 /**
  * Wrapper around `NavController.navigate` that drops the call when the
@@ -34,6 +36,30 @@ fun NavController.safeNavigate(
 ) {
     if (currentBackStackEntry?.lifecycle?.currentState != Lifecycle.State.RESUMED) return
     if (builder != null) navigate(route, builder) else navigate(route)
+}
+
+/**
+ * [fix/audit0917-b8] [safeNavigate] for callers that legitimately run BEFORE
+ * the current destination reaches RESUMED — a `LaunchedEffect` that fires on
+ * the NavHost's first composition pass, where the start entry is still STARTED.
+ *
+ * `safeNavigate` exists to defang the back-then-tap race (a source destination
+ * mid-tear-down), not to gate startup dispatch. Using it there dropped the
+ * navigation silently — the AppNavigation deep-link handler shipped with
+ * exactly that bug: every `minis://…` cold-start deep link (terminal, session,
+ * settings screen, env-var create, permissions) was swallowed, so the app
+ * opened on the default destination instead of the requested one. The T314
+ * comment on the launch-session dispatcher documents the same failure for the
+ * same reason and works around it by calling `navigate` directly.
+ *
+ * Suspends until the entry is RESUMED, then performs the *guarded* navigate —
+ * so the teardown protection `safeNavigate` was chosen for is preserved. No
+ * timeout: the effect is keyed on the deep link and dies with the composable.
+ */
+suspend fun NavController.awaitResumed() {
+    val entry = currentBackStackEntry ?: return
+    if (entry.lifecycle.currentState == Lifecycle.State.RESUMED) return
+    entry.lifecycle.currentStateFlow.first { it == Lifecycle.State.RESUMED }
 }
 
 fun NavController.safePopBackStack(): Boolean {

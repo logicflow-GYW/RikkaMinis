@@ -1,5 +1,6 @@
 package com.rikkaminis.app.webapp
 
+import com.rikkaminis.app.sandbox.PRootKernel
 import java.io.File
 
 /**
@@ -44,7 +45,11 @@ object WebAppIconExtractor {
                 ?: continue
             // Skip data URIs and absolute URLs — out of scope for the stub.
             if (href.startsWith("data:") || href.contains("://")) continue
-            val candidate = File(parent, href.trimStart('/'))
+            // [fix/audit0917-b8] The href comes from HTML that may have been
+            // shared into the app by any other app, so `../../etc/passwd` must
+            // not escape the page's own directory. Reuse the kernel's existing
+            // canonicalize + prefix guard instead of hand-rolling a check.
+            val candidate = PRootKernel.safeResolveWithin(parent, href) ?: continue
             if (candidate.exists() && candidate.isFile) {
                 return IconCandidate(candidate.absolutePath)
             }

@@ -118,6 +118,16 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
         appendSystemInfo(context.getString(R.string.sysmsg_compact_budget_exhausted), "compact")
         return
     }
+    // [fix/audit0917-b8] Stamp the auto-compact retry gate HERE — at the last
+    // point before real work starts — instead of in the two callers, which
+    // stamped it *before* invoking compactAll. Those callers stamped even when
+    // compactAll returned early (stream in flight / no persisted anchor /
+    // already compacted / nothing to compact / budget exhausted), so a
+    // pre-flight abort left the gate closed for the whole minIntervalMs window
+    // with nothing compacted: auto-compaction silently went quiet. Stamping
+    // here (not on success) still keeps the anti-thrash interval for genuine
+    // failures — repeated provider errors must not re-hammer the model.
+    lastAutoCompactAtMs = System.currentTimeMillis()
     traceObserver.t7State(
         traceObserver.t7ObservedPhase ?: ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS),
         ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.COMPACTING),

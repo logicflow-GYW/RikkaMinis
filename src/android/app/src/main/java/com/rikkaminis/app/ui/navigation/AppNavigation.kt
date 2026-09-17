@@ -286,6 +286,16 @@ fun AppNavigation(
 
     // Handle initial deep link after composition
     LaunchedEffect(initialDeepLink) {
+        // [fix/audit0917-b8] Wait for the start destination to reach RESUMED
+        // before dispatching. This effect fires on the NavHost's first
+        // composition pass, when the start entry is still STARTED — and
+        // safeNavigate (the obvious choice, and the one this code used) drops
+        // every call in that window, so ALL cold-start deep links were
+        // silently swallowed: `minis://terminal`, `minis://session/<id>`,
+        // settings routes, env-var create, permissions. Each branch below
+        // still uses the guarded navigate; we just stop racing the lifecycle.
+        // (Same failure + same reason the T314 dispatcher below documents.)
+        navController.awaitResumed()
         when (initialDeepLink) {
             is DeepLinkAction.OpenTerminal -> {
                 navController.safeNavigate(Routes.terminal(initialDeepLink.initCommand))

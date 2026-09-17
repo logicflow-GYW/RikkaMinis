@@ -170,7 +170,6 @@ internal fun ChatViewModel.maybeTriggerAutoCompact() {
         }
         return
     }
-    lastAutoCompactAtMs = System.currentTimeMillis()
     appendSystemInfo(
         text = context.getString(R.string.sysmsg_context_full_auto, tokens, window),
         iconKind = "compact",
@@ -259,7 +258,9 @@ internal suspend fun ChatViewModel.maybeAutoCompactInLoop(
                 "tokens=$lastContextTokens window=$contextWindow compactLine=${policy.compactThreshold}",
         )
     }
-    lastAutoCompactAtMs = System.currentTimeMillis()
+    // [fix/audit0917-b8] No stamp here — compactAll stamps the retry gate at
+    // the point the compact actually starts, so a pre-flight abort no longer
+    // disables auto-compaction for the whole minIntervalMs window.
     // [fix/diff-audit-0904-H1] appendSystemInfo is an unlocked
     // read-modify-write over _messages + 5 pendingSysInfo* vars; its KDoc
     // contract is "runs on Main". This extension is called from the agent

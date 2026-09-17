@@ -359,6 +359,12 @@ private fun TestContent(run: QuickTestRun) {
 private fun AudioReplyContent(data: ByteArray) {
     val context = LocalContext.current
     var isPlaying by remember { mutableStateOf(false) }
+    // [fix/audit0917-b8] Gate the play button on the clip actually being on
+    // disk. The write happens in the LaunchedEffect below (IO); a tap before it
+    // finished called setDataSource on a missing file, which fails into the
+    // onFailure log — i.e. the button silently did nothing, with no way for the
+    // user to tell a slow write from a dead control.
+    var isReady by remember(data) { mutableStateOf(false) }
     val player = remember { android.media.MediaPlayer() }
     val file = remember(data) {
         java.io.File(context.cacheDir, "quicktest-audio-${data.hashCode()}.bin")
@@ -384,6 +390,7 @@ private fun AudioReplyContent(data: ByteArray) {
     // half-written file.
     androidx.compose.runtime.LaunchedEffect(file) {
         withContext(Dispatchers.IO) { runCatching { file.writeBytes(data) } }
+        isReady = true
         play()
     }
     androidx.compose.runtime.DisposableEffect(Unit) {
@@ -394,7 +401,9 @@ private fun AudioReplyContent(data: ByteArray) {
     }
 
     Row(verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = { if (!isPlaying) play() }) {
+        // [fix/audit0917-b8] Disabled until the clip has been written (see
+        // isReady above) — a tap during the write used to be a silent no-op.
+        IconButton(onClick = { if (!isPlaying && isReady) play() }, enabled = isReady) {
             Icon(
                 if (isPlaying) Icons.Outlined.GraphicEq else Icons.Filled.PlayArrow,
                 contentDescription = stringResource(

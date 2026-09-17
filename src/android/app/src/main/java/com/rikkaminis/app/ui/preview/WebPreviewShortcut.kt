@@ -50,6 +50,22 @@ object WebPreviewShortcut {
             AppLogger.warning(TAG, "pin: empty path in $url")
             return
         }
+        // [fix/audit0917-b8] Two degenerate inputs the old checks let through:
+        //  - `file:///var/minis` (no resource) produced resourcePath = "/", so
+        //    the deep link became `minis://session/<sid>/` — a directory, which
+        //    the preview layer cannot open.
+        //  - A sessionId containing `/`, `#` or `?` was interpolated straight
+        //    into the URI path, so it could restructure the deep link (extra
+        //    path segments, a truncated path, or an injected query param).
+        // Both now refuse with a log line instead of pinning a broken shortcut.
+        if (absPath.trimEnd('/') == "/var/minis") {
+            AppLogger.warning(TAG, "pin: refusing directory-level path $absPath")
+            return
+        }
+        if (sessionId.any { it == '/' || it == '#' || it == '?' || it == '%' }) {
+            AppLogger.warning(TAG, "pin: refusing sessionId with URI-reserved chars: ${sessionId.take(40)}")
+            return
+        }
         // file:///var/minis/browser/snake.html → /browser/snake.html
         val resourcePath = absPath.removePrefix("/var/minis").let {
             if (it.startsWith("/")) it else "/$it"

@@ -742,12 +742,19 @@ private fun MCPFormTab(
                 // [T-android-mcp-oauth] Store the client secret in the encrypted
                 // store (keyed by server id) — it never goes into servers.json.
                 // Cleared when the OAuth section is emptied.
-                if (isUrlTransport) {
-                    com.rikkaminis.app.mcp.oauth.MCPOAuthStore.setClientSecret(
-                        context, server.id,
-                        if (server.oauth != null) oauthClientSecret.trim().ifBlank { null } else null,
-                    )
-                }
+                // [fix/audit0917-b8] Unconditional, not gated on isUrlTransport:
+                // a server switched from HTTP/SSE to STDIO used to keep its
+                // encrypted client secret forever (the STDIO form never shows
+                // the OAuth section, so nothing could ever clear it). Passing
+                // null on the STDIO path removes the entry.
+                com.rikkaminis.app.mcp.oauth.MCPOAuthStore.setClientSecret(
+                    context, server.id,
+                    if (isUrlTransport && server.oauth != null) {
+                        oauthClientSecret.trim().ifBlank { null }
+                    } else {
+                        null
+                    },
+                )
                 if (isEdit) mcpRepository.update(server) else mcpRepository.add(server)
                 onDone()
             }) { Text(stringResource(R.string.mcp_form_save)) }
