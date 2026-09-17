@@ -1863,6 +1863,7 @@ private fun RenderMdVideo(block: MdBlock.Video) {
 
 @Composable
 private fun RenderMdAudio(block: MdBlock.Audio) {
+    val context = LocalContext.current
     val colors = currentMdColors()
     val sessionId = LocalMarkdownSessionId.current
     val file = rememberMdMediaFile(block.url, sessionId)
