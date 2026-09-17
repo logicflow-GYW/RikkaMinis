@@ -215,10 +215,24 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
                 lastCompactedMessageId = lastCompactedDbId,
                 version = 2,
             )
-            runCatching { chatRepository.dao.insertCompactMarker(marker) }
+            // [audit-0917] Only publish the in-memory compact state when the
+            // marker actually persisted. The DB write was best-effort (logged
+            // and ignored) while _compactSummary/_cachedLatestMarker were set
+            // unconditionally — so a failed insert showed a compacted session
+            // that silently reverted (dividers gone, full history replayed)
+            // after the next reload. Now the failure is surfaced and the
+            // in-memory boundary is not advertised as durable.
+            val markerSaved = runCatching { chatRepository.dao.insertCompactMarker(marker) }
                 .onFailure {
                     Log.w(ChatViewModel.TAG, "Failed to persist compact marker: ${it.message}")
                 }
+                .isSuccess
+            if (!markerSaved) {
+                AppLogger.warning(
+                    ChatViewModel.TAG_STREAM,
+                    "compact marker not persisted; keeping the summary in memory only",
+                )
+            }
             _compactSummary.value = summary
             // Keep the marker in memory so effectiveAgentHistory() can
             // resolve the boundary on the very next outgoing turn.

@@ -157,6 +157,10 @@ object HangDetector {
 
     private const val PREFS_NAME = "hang_detector_prefs"
     private const val KEY_HANG_COUNT = "hang_count"
+
+    /** [audit-0917] Serialises the read-modify-write of the hang counter
+     *  between markHealthyTick (main thread) and recordHang (watchdog). */
+    private val hangCounterLock = Any()
     private const val KEY_LAST_HANG_AT = "last_hang_at_ms"
 
     private const val STALL_LOG_DIR = "logs"
@@ -235,13 +239,22 @@ object HangDetector {
     fun markHealthyTick() {
         val ctx = appContext ?: return
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        // [audit-0917] Read + reset under one lock. markHealthyTick is called
+        // from the main thread (ChatScreen) while recordHang does a concurrent
+        // read-modify-write of the same keys from the watchdog thread; without
+        // mutual exclusion a reset landing between recordHang's read and write
+        // was lost, and a hang recorded during the tick could be zeroed out.
+        // Cheap on the hot path: the count check stays outside the lock.
         if (prefs.getInt(KEY_HANG_COUNT, 0) == 0) return
         val lastHangAt = prefs.getLong(KEY_LAST_HANG_AT, 0L)
         if (lastHangAt > 0 && System.currentTimeMillis() - lastHangAt < RESET_AFTER_QUIET_MS) return
-        prefs.edit()
-            .putInt(KEY_HANG_COUNT, 0)
-            .putLong(KEY_LAST_HANG_AT, 0L)
-            .apply()
+        synchronized(hangCounterLock) {
+            if (prefs.getInt(KEY_HANG_COUNT, 0) == 0) return
+            prefs.edit()
+                .putInt(KEY_HANG_COUNT, 0)
+                .putLong(KEY_LAST_HANG_AT, 0L)
+                .apply()
+        }
         // [T-android-render-breaker] Healthy again — restore full rendering.
         _renderBreakerActive.value = false
         Log.i(TAG, "hang count reset after quiet period")
@@ -441,11 +454,16 @@ object HangDetector {
         writeStallSample("mid-hang", durationMs, escalation = 0)
 
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val newCount = prefs.getInt(KEY_HANG_COUNT, 0) + 1
-        prefs.edit()
-            .putInt(KEY_HANG_COUNT, newCount)
-            .putLong(KEY_LAST_HANG_AT, System.currentTimeMillis())
-            .apply()
+        // [audit-0917] Same lock as markHealthyTick's reset — this is the other
+        // half of the read-modify-write pair.
+        val newCount = synchronized(hangCounterLock) {
+            val n = prefs.getInt(KEY_HANG_COUNT, 0) + 1
+            prefs.edit()
+                .putInt(KEY_HANG_COUNT, n)
+                .putLong(KEY_LAST_HANG_AT, System.currentTimeMillis())
+                .apply()
+            n
+        }
         // [T-android-render-breaker] Trip the render degrade one hang BEFORE
         // the system would ANR-kill us (baseline showed death between #2/#3).
         if (newCount >= RENDER_DEGRADE_HANG_COUNT && !_renderBreakerActive.value) {

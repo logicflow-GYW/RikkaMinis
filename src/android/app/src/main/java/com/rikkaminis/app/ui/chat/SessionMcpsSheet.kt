@@ -19,6 +19,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -51,12 +52,27 @@ fun SessionMcpsSheet(
     // re-derives when the live server list arrives. A keyless remember{} seeds
     // once from a possibly-empty first-composition list and then never re-runs,
     // leaving every toggle stuck at its default (the review's stale-override race).
-    val overrides = remember(servers) {
-        mutableStateMapOf<String, Boolean>().apply {
-            for (server in servers) {
-                put(server.id, mcpRepository.isEnabledForSession(server.id, sessionId))
+    //
+    // [audit-0917] Re-seed by MERGING, not by rebuilding: the previous
+    // `remember(servers) { mutableStateMapOf(...) }` threw the whole map away
+    // whenever the servers StateFlow emitted (any unrelated repo update), so a
+    // toggle the user had just flipped reverted to the stored value until the
+    // write landed — and if the emission arrived between flip and write, the
+    // switch visibly snapped back. Existing keys are now preserved; only newly
+    // appearing servers get seeded.
+    val overrides = remember {
+        mutableStateMapOf<String, Boolean>()
+    }
+    LaunchedEffect(servers) {
+        for (server in servers) {
+            if (server.id !in overrides) {
+                overrides[server.id] = mcpRepository.isEnabledForSession(server.id, sessionId)
             }
         }
+        // Drop entries for servers that no longer exist so a later re-add
+        // doesn't resurrect a stale toggle.
+        val live = servers.mapTo(HashSet()) { it.id }
+        overrides.keys.retainAll(live)
     }
 
     StandardChatSheet(

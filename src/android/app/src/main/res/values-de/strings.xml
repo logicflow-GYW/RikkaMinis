@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">RikkaMinis</string>
+    <string name="onboarding_default_group_name">Standardmodelle</string>
     <string name="new_chat">Neuer Chat</string>
     <string name="settings">Einstellungen</string>
     <string name="providers">KI-Anbieter</string>

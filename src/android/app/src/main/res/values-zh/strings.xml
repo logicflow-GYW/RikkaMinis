@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">RikkaMinis</string>
+    <string name="onboarding_default_group_name">默认模型</string>
     <string name="new_chat">新对话</string>
     <string name="settings">设置</string>
     <string name="providers">AI 服务商</string>

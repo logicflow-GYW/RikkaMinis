@@ -19,13 +19,22 @@ import androidx.core.net.toUri
  *   [openExternalUrl] which dispatches a normal system Intent.
  *
  * The root [InAppBrowserHost] provides this and renders the sheet when invoked.
- * If a screen reads the ambient outside a host (e.g. during tests), the default
- * implementation falls back to the external Intent so nothing silently no-ops.
+ * A screen read outside a host (e.g. a bare preview/test) gets the default
+ * below, which cannot dispatch an Intent — a CompositionLocal default has no
+ * Context — so it logs instead of pretending to have opened anything.
+ * [audit-0917] The KDoc previously claimed this fallback opened the external
+ * Intent, which the default lambda could never do; the mismatch made a missing
+ * host look like a working one.
  */
 val LocalInAppBrowserLauncher = compositionLocalOf<(String) -> Unit> {
-    // Fallback: if no host is installed above, bail to an external intent so
-    // links at least open somewhere. Hosts must override this.
-    { _ -> }
+    // Fallback: no host above us. Nothing can be opened from here (no Context),
+    // so make the no-op observable rather than silent.
+    { url ->
+        android.util.Log.w(
+            "InAppBrowserLauncher",
+            "no InAppBrowserHost above; link dropped: $url",
+        )
+    }
 }
 
 /**

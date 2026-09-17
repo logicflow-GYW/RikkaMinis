@@ -1000,6 +1000,7 @@
 
     <!-- i18n-rtw-backfill -->
     <string name="app_name">RikkaMinis</string>
+    <string name="onboarding_default_group_name">預設模型</string>
     <string name="new_chat">新對話</string>
     <string name="settings">設定</string>
     <string name="providers">AI 服務商</string>

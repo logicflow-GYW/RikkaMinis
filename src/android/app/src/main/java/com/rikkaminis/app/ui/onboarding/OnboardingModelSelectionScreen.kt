@@ -64,6 +64,9 @@ fun OnboardingModelSelectionScreen(
     providerRepository: ProviderRepository,
     onBack: () -> Unit,
 ) {
+    // [audit-0917] Resolved in the composable so the persisted group name is
+    // localised (see the note at the ModelGroup construction below).
+    val defaultGroupName = stringResource(R.string.onboarding_default_group_name)
     val config by providerRepository.config.collectAsState()
     val selected = remember { mutableStateListOf<String>() }
     var searchText by remember { mutableStateOf("") }
@@ -221,7 +224,11 @@ fun OnboardingModelSelectionScreen(
             MinisButton(
                 onClick = {
                     if (selected.isNotEmpty()) {
-                        val group = ModelGroup(name = "Default Models")
+                        // [audit-0917] stringResource, not a hardcoded literal:
+                        // this name is PERSISTED as the group title, so every
+                        // non-English user saw an English group name in the
+                        // model-group list forever after onboarding.
+                        val group = ModelGroup(name = defaultGroupName)
                         group.memberEntryIds.addAll(selected)
                         providerRepository.addGroup(group)
                         if (config.defaultPrimaryGroupId == null) {

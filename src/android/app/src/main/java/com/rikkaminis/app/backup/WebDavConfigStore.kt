@@ -19,7 +19,14 @@ class WebDavConfigStore(context: Context) {
 
     /** The configured server, or null when never saved. */
     fun load(): WebDavConfig? {
-        val url = prefs.getString(KEY_URL, null) ?: return null
+        // [audit-0917] Treat a blank stored URL as "never configured". save()
+        // persists config.url.trim(), so a cleared field writes ""; load()
+        // only tested for a MISSING key, so it returned a non-null
+        // WebDavConfig with an empty url and every caller believed WebDAV was
+        // configured — the sync then failed at request time with a confusing
+        // URL error instead of falling back to "not configured".
+        val url = prefs.getString(KEY_URL, null)?.trim().orEmpty()
+        if (url.isEmpty()) return null
         return WebDavConfig(
             url = url,
             username = prefs.getString(KEY_USERNAME, "").orEmpty(),

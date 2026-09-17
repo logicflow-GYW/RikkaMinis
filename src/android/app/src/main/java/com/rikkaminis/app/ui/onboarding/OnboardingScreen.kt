@@ -225,6 +225,9 @@ private fun ModelSelectionStep(
     providerRepository: ProviderRepository,
     onComplete: () -> Unit,
 ) {
+    // [audit-0917] Resolved in the composable so the persisted group name is
+    // localised (see the note at the ModelGroup construction below).
+    val defaultGroupName = stringResource(R.string.onboarding_default_group_name)
     val config by providerRepository.config.collectAsState()
     val selected = remember { mutableStateListOf<String>() } // entry UUIDs
     var searchText by remember { mutableStateOf("") }
@@ -352,7 +355,9 @@ private fun ModelSelectionStep(
                     onClick = {
                         // Create default model group from selections
                         if (selected.isNotEmpty()) {
-                            val group = ModelGroup(name = "Default Models")
+                            // [audit-0917] Same as OnboardingModelSelectionScreen:
+                            // the literal was persisted as the group title.
+                            val group = ModelGroup(name = defaultGroupName)
                             group.memberEntryIds.addAll(selected)
                             providerRepository.addGroup(group)
                             if (config.defaultPrimaryGroupId == null) {

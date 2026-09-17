@@ -168,7 +168,16 @@ object BrowserExternalSchemeHandler {
                 Toast.LENGTH_SHORT,
             ).show()
         } catch (e: Exception) {
+            // [audit-0917] Give the user the same feedback as the
+            // ActivityNotFound branch. The generic catch only logged, so a
+            // SecurityException / non-exported-activity rejection looked like a
+            // dead link — the tap produced nothing at all.
             AppLogger.warning(TAG, "ACTION_VIEW failed for $uri: ${e.message}")
+            Toast.makeText(
+                context,
+                "Could not open this link.",
+                Toast.LENGTH_SHORT,
+            ).show()
         }
         return true
     }

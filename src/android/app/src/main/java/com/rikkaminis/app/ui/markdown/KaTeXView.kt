@@ -268,6 +268,15 @@ fun KaTeXRenderView(
             // a live WebView + renderer process handle behind (no destroy()
             // anywhere in this file), accumulating for the life of the app.
             onRelease = { wv ->
+                // [audit-0917] Cancel the pending capture callback BEFORE
+                // destroying. The capture runs 100ms after the resize post, and
+                // it calls draw(canvas) on this WebView — if the view left the
+                // composition in that window (renderedBitmap already replaced
+                // it, or the row scrolled away), destroy() had run and the
+                // callback drew into a destroyed WebView. removeCallbacks(null)
+                // drops everything queued on this view, which is safe here:
+                // nothing else schedules work on it.
+                wv.removeCallbacks(null)
                 wv.stopLoading()
                 wv.destroy()
             },

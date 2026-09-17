@@ -451,8 +451,14 @@ internal fun openExternalFromSheet(context: android.content.Context, url: String
     AppLogger.info("WebPreviewSheet", "open external: $url")
     val intent = if (url.startsWith("file://")) {
         runCatching {
+            // [audit-0917] Use the path as-is: Uri.parse(...).path is ALREADY
+            // percent-decoded, so the extra URLDecoder.decode() was a second
+            // decode — a filename containing '%' or '+' (e.g. "report%20v2.pdf"
+            // arriving as "%2520", or any literal "+") was corrupted, the
+            // resulting File did not exist, and the sheet silently fell through
+            // to the generic branch instead of previewing the file.
             val raw = Uri.parse(url).path ?: return@runCatching null
-            val file = java.io.File(java.net.URLDecoder.decode(raw, "UTF-8"))
+            val file = java.io.File(raw)
             if (!file.exists()) return@runCatching null
             val authority = context.packageName + ".fileprovider"
             val contentUri = androidx.core.content.FileProvider.getUriForFile(

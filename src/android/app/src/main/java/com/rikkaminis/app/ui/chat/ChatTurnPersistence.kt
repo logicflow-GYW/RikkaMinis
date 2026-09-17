@@ -360,14 +360,21 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
         try {
             SessionConcurrencyManager.acquireSlot(activeSessionId)
             AppLogger.debug(ChatViewModel.TAG_STREAM, "$label streamJob slot acquired")
-            SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
-            val activeFallbackStrategy = run {
-                val groupId = _selectedGroupId.value
-                groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
-                    ?: com.rikkaminis.app.data.model.FallbackStrategy.default
-            }
-            val fallbackProviders = buildFallbackProviders(launchedProvider)
+            // [audit-0917] Everything between acquireSlot and the releaseSlot
+            // finally must live INSIDE the guarded region. setActive and
+            // buildFallbackProviders used to sit between the outer try and the
+            // inner try, so an exception from either (tracker callback
+            // registration, provider-config read) skipped releaseSlot and the
+            // session's concurrency slot was never returned — the next send for
+            // that session then queued forever behind a phantom holder.
             try {
+                SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+                val activeFallbackStrategy = run {
+                    val groupId = _selectedGroupId.value
+                    groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
+                        ?: com.rikkaminis.app.data.model.FallbackStrategy.default
+                }
+                val fallbackProviders = buildFallbackProviders(launchedProvider)
                 AppLogger.info(ChatViewModel.TAG_STREAM, "$label runAgentLoop CALL")
                 runAgentLoop(
                     provider = launchedProvider,

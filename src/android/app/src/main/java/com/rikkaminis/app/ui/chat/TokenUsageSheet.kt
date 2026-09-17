@@ -53,15 +53,26 @@ fun TokenUsageSheet(
     onDismiss: () -> Unit,
 ) {
     var stats by remember { mutableStateOf<SessionTokenStats?>(null) }
-    val contextWindow = remember { viewModel.currentModelContextWindow }
-    val contextWindowSource = remember { viewModel.currentModelContextWindowSource }
-    val groupLimit = remember { viewModel.currentGroupContextLimit }
-    val maxOutput = remember { viewModel.currentModelMaxOutputTokens }
-    val thinking = remember { viewModel.thinkingInfo() }
+    // [audit-0917] These were remember{} with no keys, so they were captured
+    // once at composition while `stats` refreshes every second. Switching
+    // model/group while the sheet is open left the context-window, group
+    // limit, max-output and thinking rows showing the PREVIOUS model's
+    // numbers — the sheet's whole purpose is to explain the current model's
+    // budget. Refreshed alongside stats now.
+    var contextWindow by remember { mutableStateOf(viewModel.currentModelContextWindow) }
+    var contextWindowSource by remember { mutableStateOf(viewModel.currentModelContextWindowSource) }
+    var groupLimit by remember { mutableStateOf(viewModel.currentGroupContextLimit) }
+    var maxOutput by remember { mutableStateOf(viewModel.currentModelMaxOutputTokens) }
+    var thinking by remember { mutableStateOf(viewModel.thinkingInfo()) }
 
     LaunchedEffect(Unit) {
         while (true) {
             stats = viewModel.loadSessionTokenStats()
+            contextWindow = viewModel.currentModelContextWindow
+            contextWindowSource = viewModel.currentModelContextWindowSource
+            groupLimit = viewModel.currentGroupContextLimit
+            maxOutput = viewModel.currentModelMaxOutputTokens
+            thinking = viewModel.thinkingInfo()
             delay(1000L)
         }
     }
