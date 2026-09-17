@@ -25,13 +25,19 @@ object FileWriteTool {
     )
 
     fun execute(argsJson: String, sessionId: String, context: Context): ToolExecutionResult {
+        // [fix/audit-0917-b9] Resolve the title BEFORE the try: it used to be
+        // a try-scoped val, so the catch arm had no title to report (the
+        // compiler rejected the reference outright — CI 35198111318). A
+        // malformed argsJson falls back to NAME, which is what optString's
+        // default did anyway.
+        val toolTitle = runCatching { JSONObject(argsJson).optString("tool_title", NAME) }
+            .getOrDefault(NAME)
         return try {
             val args = JSONObject(argsJson)
             val path = args.optString("path", "")
             val content = args.optString("content", "")
             val append = args.optBoolean("append", false)
             val createDirs = args.optBoolean("create_dirs", false)
-            val toolTitle = args.optString("tool_title", NAME)
 
             if (path.isBlank()) {
                 return ToolExecutionResult("Error: 'path' is required", false, toolTitle = toolTitle)
