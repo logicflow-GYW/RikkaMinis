@@ -370,6 +370,10 @@ object UpdateChecker {
         expectedDigest: PublisherDigest? = null,
         onProgress: (Float) -> Unit = {},
     ): DownloadResult = withContext(Dispatchers.IO) {
+        // [audit-0917] Declared outside try so the catch path can delete a
+        // partial file — a truncated APK left on disk could later be consumed
+        // by the installer as a valid update.
+        var partialFile: File? = null
         try {
             // Stage under filesDir (NOT cacheDir) so the OS doesn't evict
             // the APK mid-flow while the user is in system Settings granting
@@ -384,6 +388,7 @@ object UpdateChecker {
                 ?.let { "minis-$it.apk" }
                 ?: DOWNLOAD_FILENAME
             val outFile = File(outDir, safeName)
+            partialFile = outFile
             // A previous, possibly-aborted download could leave a stale APK
             // behind that the installer would happily try to consume. Wipe it.
             if (outFile.exists()) outFile.delete()
@@ -489,8 +494,10 @@ object UpdateChecker {
             // [audit-0917] Drop the partial file on the exception path too. The
             // integrity-failure path already deletes it; leaving a truncated
             // APK behind meant a later install could consume half a binary.
-            runCatching { outFile.delete() }
-                .onFailure { AppLogger.warning(TAG, "failed to delete partial download: ${it.message}") }
+            partialFile?.let { f ->
+                runCatching { f.delete() }
+                    .onFailure { AppLogger.warning(TAG, "failed to delete partial download: ${it.message}") }
+            }
             DownloadResult.Error(e.message ?: e.javaClass.simpleName)
         }
     }
