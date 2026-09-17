@@ -463,6 +463,18 @@ object AppLogger {
         return if (file.exists()) file.readText() else null
     }
 
+    /**
+     * Result of a bounded segment read — [content] holds at most [bytesRead]
+     * bytes starting at the requested offset, and [truncated] tells the caller
+     * whether more data remains past the end of [content].
+     */
+    data class LogSegment(
+        val totalSize: Long,
+        val content: String,
+        val bytesRead: Int,
+        val truncated: Boolean,
+    )
+
     fun readLogSegment(filename: String, offset: Int, limit: Int): LogSegment? {
         // [audit-0917] Same traversal guard as readLog — this overload takes a
         // caller-supplied name too.

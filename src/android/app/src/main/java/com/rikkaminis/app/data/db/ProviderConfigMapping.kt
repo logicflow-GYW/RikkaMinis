@@ -1,5 +1,6 @@
 package com.rikkaminis.app.data.db
 
+import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.data.model.FallbackStrategy
 import com.rikkaminis.app.data.model.ImageEndpointMode
 import com.rikkaminis.app.data.model.LLMModel
@@ -193,6 +194,8 @@ fun ProviderConfig.toSnapshot(
  * field is set to the composite-key id stored in DB — so once we round-trip,
  * group/agentLoop refs in the mirror JSON also point at the composite shape.
  */
+private const val TAG = "ProviderConfigMapping"
+
 fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig {
     val instances = this.instances.map { row ->
         ProviderInstance(
@@ -229,10 +232,30 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
         )
     }.toMutableList()
 
-    val entries = this.entries.map { row ->
-        val baseModel = jsonForBlobs.decodeFromString(LLMModel.serializer(), row.baseModelJson)
+    val entries = this.entries.mapNotNull { row ->
+        // [audit-0917] Guard the two JSON blob decodes the same way the enum
+        // parses above are guarded. A malformed baseModelJson/overridesJson
+        // (truncated write, hand-edited mirror, forward-compat field) threw out
+        // of the whole toProviderConfig, which failed the entire DB load — one
+        // bad row wiped every provider and group from the UI. Skip the bad row
+        // and keep the rest.
+        val baseModel = runCatching {
+            jsonForBlobs.decodeFromString(LLMModel.serializer(), row.baseModelJson)
+        }.onFailure {
+            AppLogger.warning(
+                TAG,
+                "skipping model entry ${row.id}: baseModelJson undecodable (${it.message})",
+            )
+        }.getOrNull() ?: return@mapNotNull null
         val overrides = row.overridesJson?.let {
-            jsonForBlobs.decodeFromString(ModelOverrides.serializer(), it)
+            runCatching { jsonForBlobs.decodeFromString(ModelOverrides.serializer(), it) }
+                .onFailure { e ->
+                    AppLogger.warning(
+                        TAG,
+                        "model entry ${row.id}: overridesJson undecodable, using defaults (${e.message})",
+                    )
+                }
+                .getOrNull()
         } ?: ModelOverrides()
         ModelEntry(
             providerInstanceId = row.providerInstanceId,
@@ -251,9 +274,16 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
         ModelGroup(
             id = row.id,
             name = row.name,
-            memberEntryIds = jsonForBlobs
-                .decodeFromString(stringListSerializer, row.memberEntryIdsJson)
-                .toMutableList(),
+            // [audit-0917] Same guard as the entry blobs above — a malformed
+            // member list must not abort the whole provider load.
+            memberEntryIds = runCatching {
+                jsonForBlobs.decodeFromString(stringListSerializer, row.memberEntryIdsJson)
+            }.onFailure {
+                AppLogger.warning(
+                    TAG,
+                    "group ${row.id}: memberEntryIdsJson undecodable, treating as empty (${it.message})",
+                )
+            }.getOrNull()?.toMutableList() ?: mutableListOf(),
             // [T-android-enum-safe-parse] Safe parse — same rationale as the
             // ThinkingLevel.decoded() note below: an unknown strategy name
             // from a NEWER build must not throw and blow up the whole DB load.

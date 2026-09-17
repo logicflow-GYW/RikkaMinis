@@ -1370,6 +1370,13 @@ class BrowserUseManager(
             } else {
                 BrowserActionResult(text = raw)
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // [audit-0917] Cancellation must propagate. The generic catch below
+            // swallowed CancellationException and turned a cancelled run into a
+            // "JavaScript error" result — the caller then treated an aborted
+            // tool call as a completed one. Still release the registry slot.
+            finishAsyncJsRequest()
+            throw e
         } catch (e: Exception) {
             finishAsyncJsRequest()
             BrowserActionResult.error("JavaScript error: ${e.message}")
@@ -1488,8 +1495,14 @@ class BrowserUseManager(
         withContext(Dispatchers.Main) {
             webView.evaluateJavascript(wrapped, null)
         }
-        val raw = withTimeoutOrNull(60_000L) { deferred.await() }
-        finishAsyncJsRequest()
+        // [audit-0917] try/finally so the registry slot is released even when
+        // the await is cancelled or times out. Previously a cancellation
+        // between begin and finish leaked the entry (and its deferred).
+        val raw = try {
+            withTimeoutOrNull(60_000L) { deferred.await() }
+        } finally {
+            finishAsyncJsRequest()
+        }
         return raw
     }
 
@@ -1497,6 +1510,14 @@ class BrowserUseManager(
 
     /** Set user agent from UI settings (public, non-result). */
     fun setUserAgent(profile: UserAgentProfile, customUA: String? = null) {
+        // [audit-0917] WebView.settings / reload() are main-thread-only, and
+        // this is a public entry point. Every current caller happens to be on
+        // the main thread, but the failure mode (CalledFromWrongThreadException)
+        // is remote from here — hop when needed instead of trusting callers.
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { setUserAgent(profile, customUA) }
+            return
+        }
         currentProfile = profile
         val ua = if (profile == UserAgentProfile.CUSTOM && !customUA.isNullOrEmpty()) customUA
             else profile.userAgentString

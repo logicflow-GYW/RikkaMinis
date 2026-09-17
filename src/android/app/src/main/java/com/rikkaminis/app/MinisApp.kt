@@ -628,12 +628,19 @@ class MinisApp : Application(), ImageLoaderFactory {
         // message tail is the durable source of truth — scan it off-main and
         // reconcile. Runs after init() so it merges with the restored queues.
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-            val interrupted = runCatching { chatRepository.interruptedSessionIds() }.getOrElse { emptySet() }
-            // Exclude any session that is already actively streaming (defensive;
-            // at cold start this is empty, but keeps the rule "active ⇒ never
-            // paused" uniform with the foreground reconcile path).
-            val active = SessionActivityTracker.activeSessions.value
-            com.rikkaminis.app.service.SessionBadgeStore.reconcileInterruptedSessions(interrupted - active)
+            // [audit-0917] Same guard as the foreground path: this scope uses
+            // the default handler, so an unguarded badge-store failure here
+            // crashed the app at cold start.
+            runCatching {
+                val interrupted = runCatching { chatRepository.interruptedSessionIds() }.getOrElse { emptySet() }
+                // Exclude any session that is already actively streaming (defensive;
+                // at cold start this is empty, but keeps the rule "active ⇒ never
+                // paused" uniform with the foreground reconcile path).
+                val active = SessionActivityTracker.activeSessions.value
+                com.rikkaminis.app.service.SessionBadgeStore.reconcileInterruptedSessions(interrupted - active)
+            }.onFailure {
+                android.util.Log.w("MinisApp", "cold-start badge reconcile failed: ${it.message}")
+            }
         }
 
         // T180-bg-notif: background-settings + task-completion notifier.
