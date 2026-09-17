@@ -13,6 +13,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -102,11 +103,15 @@ fun SectionTextField(
     var fieldValue by remember {
         mutableStateOf(TextFieldValue(value, TextRange(value.length)))
     }
-    if (fieldValue.text != value) {
-        // External value changed (parent assigned a fresh string).
-        // Re-seed with cursor at end — matches the legacy String
-        // overload's behavior on the same transition.
-        fieldValue = TextFieldValue(value, TextRange(value.length))
+    // [audit-0917] Re-seed AFTER composition (LaunchedEffect), not during it:
+    // writing snapshot state during composition is a Compose anti-pattern.
+    LaunchedEffect(value) {
+        if (fieldValue.text != value) {
+            // External value changed (parent assigned a fresh string).
+            // Re-seed with cursor at end — matches the legacy String
+            // overload's behavior on the same transition.
+            fieldValue = TextFieldValue(value, TextRange(value.length))
+        }
     }
     Surface(
         color = SectionDesign.cardColor(),

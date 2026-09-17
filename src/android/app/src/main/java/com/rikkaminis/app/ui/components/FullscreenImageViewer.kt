@@ -380,14 +380,25 @@ internal fun ImageActionButton(
 
 // ── Image loading helpers ──────────────────────────────────────────────────────
 
+// [audit-0917] One loader for the process: a per-call ImageLoader(context)
+// spun up its own executor and was never shut down - it leaked threads on
+// every Copy/Share/Save. Coil's ImageLoader is meant to be a singleton.
+@Volatile
+private var sharedImageLoader: ImageLoader? = null
+
 internal suspend fun loadBitmap(context: Context, model: Any): Bitmap? =
     withContext(Dispatchers.IO) {
         try {
-            val loader = ImageLoader(context)
+            val loader = sharedImageLoader
+                ?: ImageLoader(context.applicationContext).also { sharedImageLoader = it }
             val req = ImageRequest.Builder(context).data(model).allowHardware(false).build()
             val result = loader.execute(req)
             (result as? SuccessResult)?.drawable?.toBitmap()
         } catch (e: Exception) {
+            // [audit-0917] CancellationException must propagate: swallowing it
+            // turned a cancelled load into a silent null and broke structured
+            // concurrency.
+            if (e is kotlinx.coroutines.CancellationException) throw e
             null
         }
     }
@@ -508,11 +519,18 @@ internal suspend fun saveToGallery(context: Context, bitmap: Bitmap): Boolean =
                 }
                 val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
                     ?: return@withContext false
-                stream = context.contentResolver.openOutputStream(uri)
-                stream?.use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                values.clear()
-                values.put(MediaStore.Images.Media.IS_PENDING, 0)
-                context.contentResolver.update(uri, values, null, null)
+                try {
+                    stream = context.contentResolver.openOutputStream(uri)
+                    stream?.use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                    values.clear()
+                    values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    context.contentResolver.update(uri, values, null, null)
+                } catch (e: Exception) {
+                    // [audit-0917] Delete the orphaned IS_PENDING=1 row: the old
+                    // catch returned false and left a pending entry in the gallery.
+                    context.contentResolver.delete(uri, null, null)
+                    throw e
+                }
             } else {
                 @Suppress("DEPRECATION")
                 val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
