@@ -60,6 +60,16 @@ class ShareReceiverActivity : ComponentActivity() {
         fun resetStagedBytes() {
             totalStagedBytes.set(0L)
         }
+
+        /**
+         * Debit the cumulative counter when staged files are deleted outside
+         * [SharedShareStore.cleanSharedFiles] (e.g. the provider-import path).
+         * Clamped at 0 — over-counting would falsely trip [MAX_TOTAL_BYTES]
+         * and reject legitimate shares while nothing is on disk.
+         */
+        fun debitStagedBytes(bytes: Long) {
+            totalStagedBytes.addAndGet(-bytes).coerceAtLeast(0L)
+        }
     }
 
     // T-n01-andmenu-l10n: pre-Tiramisu locale override (see MainActivity).
@@ -107,19 +117,23 @@ class ShareReceiverActivity : ComponentActivity() {
      * that isn't a provider-import candidate.
      */
     private fun finishWithAttachmentFlow(items: List<PendingShare.Item>) {
+        var saved = false
         try {
             if (items.isNotEmpty()) {
                 SharedShareStore.savePendingShare(
                     this,
                     PendingShare(items, System.currentTimeMillis()),
                 )
+                saved = true
             } else {
                 AppLogger.info(TAG, "no shareable items extracted")
             }
         } catch (e: Throwable) {
             AppLogger.error(TAG, "savePendingShare failed: ${e.message}")
         }
-        launchMainActivity()
+        // shared_content=true only when the pending share actually persisted —
+        // otherwise MainActivity runs the ShareCoordinator lookup for nothing.
+        launchMainActivity(withSharedContent = saved)
         finish()
     }
 
@@ -168,8 +182,18 @@ class ShareReceiverActivity : ComponentActivity() {
             .setTitle(getString(com.rikkaminis.app.R.string.share_provider_json_title))
             .setMessage(getString(com.rikkaminis.app.R.string.share_provider_json_message))
             .setPositiveButton(getString(com.rikkaminis.app.R.string.share_provider_json_import)) { _, _ ->
-                importProviderJson(json)
-                finish()
+                if (importProviderJson(json)) {
+                    // Imported: the staged JSON has served its purpose. Drop it
+                    // (and debit the cumulative byte counter) so the file doesn't
+                    // linger in share_extension/ forever — cleanSharedFiles only
+                    // runs on the pending-share consumption path.
+                    discardStagedAttachments(items)
+                    finish()
+                } else {
+                    // Import failed — fall through to the attachment flow so the
+                    // user doesn't lose the file (same promise as dismiss/back).
+                    finishWithAttachmentFlow(items)
+                }
             }
             .setNegativeButton(getString(com.rikkaminis.app.R.string.share_provider_json_attach)) { _, _ ->
                 finishWithAttachmentFlow(items)
@@ -182,21 +206,39 @@ class ShareReceiverActivity : ComponentActivity() {
             .show()
     }
 
-    /** Run the existing provider-import logic and toast the outcome. */
-    private fun importProviderJson(json: String) {
+    /** Run the existing provider-import logic and toast the outcome. Returns true on success. */
+    private fun importProviderJson(json: String): Boolean {
         val repo = (applicationContext as? com.rikkaminis.app.MinisApp)?.providerRepository
         if (repo == null) {
             AppLogger.warning(TAG, "providerRepository unavailable; cannot import")
             toast(getString(com.rikkaminis.app.R.string.share_provider_json_import_failed))
-            return
+            return false
         }
         val label = repo.importInstanceJSON(json)
         if (label != null) {
             AppLogger.info(TAG, "imported provider \"$label\" from shared JSON")
             toast(getString(com.rikkaminis.app.R.string.share_provider_json_imported, label))
-        } else {
-            AppLogger.warning(TAG, "importInstanceJSON returned null")
-            toast(getString(com.rikkaminis.app.R.string.share_provider_json_import_failed))
+            return true
+        }
+        AppLogger.warning(TAG, "importInstanceJSON returned null")
+        toast(getString(com.rikkaminis.app.R.string.share_provider_json_import_failed))
+        return false
+    }
+
+    /**
+     * Delete the staged files backing [items] and debit the cumulative byte
+     * counter. Used when the staged set has been consumed without going through
+     * [SharedShareStore.cleanSharedFiles] (the provider-import path).
+     */
+    private fun discardStagedAttachments(items: List<PendingShare.Item>) {
+        val dir = SharedShareStore.sharedFileDirectory(this)
+        for (item in items) {
+            if (item.kind != PendingShare.Item.Kind.ATTACHMENT) continue
+            val f = File(dir, item.value)
+            val len = f.length()
+            if (runCatching { f.delete() }.getOrDefault(false) && len > 0) {
+                debitStagedBytes(len)
+            }
         }
     }
 
@@ -321,10 +363,10 @@ class ShareReceiverActivity : ComponentActivity() {
 
     private fun shortId(): String = UUID.randomUUID().toString().take(8)
 
-    private fun launchMainActivity() {
+    private fun launchMainActivity(withSharedContent: Boolean) {
         val mainIntent = Intent(this, Class.forName("com.rikkaminis.app.MainActivity")).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            putExtra("shared_content", true)
+            if (withSharedContent) putExtra("shared_content", true)
         }
         startActivity(mainIntent)
     }

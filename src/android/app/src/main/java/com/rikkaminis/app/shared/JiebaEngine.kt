@@ -26,6 +26,15 @@ internal class JiebaEngine(context: Context) {
     @Volatile
     private var initialized = false
 
+    /**
+     * Latched once [ensureInitialized] has definitively failed (missing asset,
+     * I/O error, native load failure). Without it every [segment] call re-runs
+     * [extractDictionaries] + [nativeInit] — a failure that is deterministic per
+     * process, so the retries are pure waste on the hot segmentation path.
+     */
+    @Volatile
+    private var initFailed = false
+
     /** True once the native dictionaries have loaded successfully. */
     val isReady: Boolean get() = initialized
 
@@ -37,14 +46,19 @@ internal class JiebaEngine(context: Context) {
     @Synchronized
     fun ensureInitialized(): Boolean {
         if (initialized) return true
+        // ponytail: 失败闩进程内永久，不做退避重试 | 天花板: 首次失败后即使环境恢复（如用户释放空间）本进程也不再尝试 Jieba，路由到系统引擎 | 升级触发: 若出现"释放空间后分词质量仍不恢复"的反馈，改为按次数的退避
+        if (initFailed) return false
         return try {
             val dictDir = extractDictionaries()
             initialized = nativeInit(dictDir.absolutePath)
+            if (!initialized) initFailed = true
             initialized
         } catch (t: Throwable) {
-            // Missing asset, I/O error, or native load failure — leave
-            // initialized=false so the facade routes to the system engine.
+            // Missing asset, I/O error, or native load failure — latch so the
+            // facade routes to the system engine without re-extracting the
+            // dictionaries on every segment call.
             android.util.Log.e(TAG, "Jieba init failed", t)
+            initFailed = true
             false
         }
     }

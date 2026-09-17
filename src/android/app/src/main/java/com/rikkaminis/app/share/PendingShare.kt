@@ -34,7 +34,10 @@ data class PendingShare(val items: List<Item>, val timestampMs: Long) {
             val arr = json.optJSONArray("items") ?: return null
             val items = mutableListOf<Item>()
             for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
+                // optJSONObject instead of getJSONObject: a malformed element
+                // (non-object) must be skipped, not abort the whole share —
+                // loadPendingShare catches and drops everything otherwise.
+                val o = arr.optJSONObject(i) ?: continue
                 val kindStr = o.optString("kind", "")
                 if (kindStr.isEmpty()) continue
                 val kind = Item.Kind.entries.firstOrNull { it.wire == kindStr } ?: continue
