@@ -79,6 +79,12 @@ fun ChatViewModel.selectEntry(entryId: String) {
     // Apply the new model's state + persisted binding. This runs in BOTH
     // the idle and the streaming cases (the streaming case additionally
     // cancels + restarts the loop on this provider via switchModelAndRerun).
+    // [audit-0917] Resolve the provider BEFORE mutating any field: if
+    // ProviderFactory.create throws (bad key / dead endpoint), the old order
+    // left the model fields already flipped while currentProvider was still the
+    // previous one - a UI/provider split state. Doing the throwing call first
+    // means a failure leaves the whole selection untouched.
+    val newProvider = ProviderFactory.create(instance, apiKey, entry.model, context)
     currentModel = entry.model
     _modelName.value = entry.model.displayName
     _providerName.value = instance.label.ifEmpty { entry.model.provider }
@@ -87,7 +93,7 @@ fun ChatViewModel.selectEntry(entryId: String) {
     _activeEntryId.value = entry.id
     // [T-provider-key-roulette] Rotation happens inside ProviderFactory.create —
     // no call site touches the stored key directly.
-    currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context)
+    currentProvider = newProvider
     persistBinding("""{"type":"entry","entryId":"$entryId"}""")
     // [T-per-message-load-balance] Leaving the group for a direct entry pick
     // invalidates any pending in-group member override.
@@ -171,9 +177,9 @@ internal fun ChatViewModel.switchModelAndRerun(label: String) {
             // starts from committed context only (defense in depth against
             // any partial tool_result / assistant rows the cancelled loop
             // may have persisted).
+            val remaining = chatRepository.loadMessages(sid)
             agentHistory.clear()
             toolLoopDetector.reset()
-            val remaining = chatRepository.loadMessages(sid)
             for (entity in remaining) agentHistory.add(entity.toLLMMessage())
             // Drop stream-flush side-channel state for messages the rollback
             // removed, so no stale delta can resurrect on a kept bubble
@@ -184,7 +190,14 @@ internal fun ChatViewModel.switchModelAndRerun(label: String) {
                 _streamingById.value = _streamingById.value.filterKeys { it in keptIds }
             }
         } catch (e: Exception) {
+            // [audit-0917] Fail-closed: the re-sync half-applied (the DB trim
+            // and/or the history rebuild may be partial). Restarting the loop on a
+            // half-synced history would silently answer the CURRENT user message
+            // with wrong or empty context - surface the failure and leave the turn
+            // unanswered instead of guessing.
             Log.w(ChatViewModel.TAG, "switchModelAndRerun: DB re-sync failed: ${e.message}")
+            _error.value = "Model switch failed: ${e.message}"
+            return@launch
         }
         // Restart the loop on the switched provider (mirrors retryFromMessage).
         _error.value = null

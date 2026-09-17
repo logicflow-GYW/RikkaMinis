@@ -39,16 +39,6 @@ internal suspend fun ChatViewModel.truncateBeforeEdit(messageId: String) {
     val index = messages.indexOfFirst { it.id == messageId }
     if (index < 0) return
 
-    val deletedMessages = messages.subList(index, messages.size).toList()
-    val kept = messages.subList(0, index)
-    _messages.value = kept
-    if (_streamingById.value.isNotEmpty()) {
-        val keptIds = kept.mapTo(mutableSetOf()) { it.id }
-        retainStreamFlushStates(keptIds)
-        _streamingById.value = _streamingById.value.filterKeys { it in keptIds }
-    }
-    revokeMemoryWritesInDeletedMessages(deletedMessages)
-
     val sid = realSessionId.takeIf { it.isNotEmpty() } ?: sessionId
     // Visible-user index of the *edited* message — count user turns
     // strictly before `index`, which is the 0-based ordinal of the
@@ -91,9 +81,32 @@ internal suspend fun ChatViewModel.truncateBeforeEdit(messageId: String) {
             }
         }
     }
-    if (cutoffSortOrder >= 0) {
-        chatRepository.deleteMessagesAfter(sid, cutoffSortOrder)
+    // [audit-0917] Fail-closed: if the DB row for the edited turn cannot be
+    // resolved (the visible-user count runs past the persisted rows), STOP
+    // before mutating the UI. The previous order truncated _messages anyway and
+    // then rebuilt agentHistory from the UNMODIFIED DB, so the model kept
+    // receiving the very turns the user had just rewound past - a silent
+    // UI/history divergence. Refusing leaves the conversation intact; the send
+    // path then appends the edited text as a normal new turn (it is logged).
+    if (cutoffSortOrder < 0) {
+        AppLogger.warning(
+            ChatViewModel.TAG_STREAM,
+            "truncateBeforeEdit: no DB cutoff row for the edited turn - UI and history left untouched",
+        )
+        return
     }
+
+    val deletedMessages = messages.subList(index, messages.size).toList()
+    val kept = messages.subList(0, index)
+    _messages.value = kept
+    if (_streamingById.value.isNotEmpty()) {
+        val keptIds = kept.mapTo(mutableSetOf()) { it.id }
+        retainStreamFlushStates(keptIds)
+        _streamingById.value = _streamingById.value.filterKeys { it in keptIds }
+    }
+    revokeMemoryWritesInDeletedMessages(deletedMessages)
+
+    chatRepository.deleteMessagesAfter(sid, cutoffSortOrder)
     agentHistory.clear()
     toolLoopDetector.reset()
     val remaining = chatRepository.loadMessages(sid)
@@ -126,9 +139,6 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     // its placeholders and never re-appends, so it didn't dupe; this mid-
     // loop inject path appends a fresh bubble, so the placeholders must go.
     val queuedIds = queued.map { it.id }.toSet()
-    val msgsAfterUnqueue = _messages.value.filterNot { m ->
-        m.queuedPromptId != null && queuedIds.contains(m.queuedPromptId)
-    }
 
     // Build the combined user message from all queued prompts.
     val sid = ensureSession()
@@ -160,6 +170,13 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
             ChatViewModel.TAG_STREAM,
             "injectQueuedPromptsAsNewTurn: ${queued.size} queued prompt(s) produced no content, skipping",
         )
+        // [audit-0917] The queue was already emptied above, so the queued
+        // placeholder bubbles must go too - otherwise they stay on screen
+        // as dashed rows with no queue entry behind them: never drained,
+        // never withdrawable (the withdraw button lives on the bubble).
+        withContext(Dispatchers.Main) {
+            removeQueuedPlaceholders(queuedIds)
+        }
         return null
     }
 
@@ -203,7 +220,11 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     val newAssistantId = "assistant_${System.currentTimeMillis()}"
     withContext(Dispatchers.Main) {
         // (a) + (b) one emit: build the post-finalize list.
-        _messages.value = msgsAfterUnqueue
+        // [audit-0917] Re-filter from the CURRENT _messages: the old snapshot was
+        // captured before the suspending ensureSession()/prepareUserAttachments()
+        // calls, so a message appended in that window (another send, streaming
+        // writes) was silently overwritten by this assignment.
+        removeQueuedPlaceholders(queuedIds)
         updateAssistantMessage(
             finishedAssistantId,
             finishedAccumulatedText,
@@ -649,5 +670,20 @@ internal fun ChatViewModel.handleUserCancelledCleanup() {
         // Already committed (tool cancel path above handled or prior turn
         // wrote an assistant row). Still allow resume.
         _canResume.value = true
+    }
+}
+
+
+/**
+ * [audit-0917] Drop the queued placeholder bubbles (id="queued_msg_...") for
+ * queuedIds from the UI list. Single funnel for the two paths that un-queue
+ * prompts: the mid-loop inject (which then appends a fresh combined bubble, so
+ * keeping the placeholders would render the same text twice) and the
+ * empty-content early return (where leaving them behind produced bubbles with
+ * no queue entry behind them - never drained, never withdrawable).
+ */
+internal fun ChatViewModel.removeQueuedPlaceholders(queuedIds: Set<String>) {
+    _messages.value = _messages.value.filterNot { m ->
+        m.queuedPromptId != null && queuedIds.contains(m.queuedPromptId)
     }
 }
