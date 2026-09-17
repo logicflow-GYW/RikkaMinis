@@ -29,6 +29,48 @@ import java.io.Writer
 internal object BackupStreamWriter {
 
     /**
+     * [audit-0917] Writer decorator enforcing the import-side size ceiling.
+     *
+     * `export()` refuses a payload over [ConfigBackup.MAX_PAYLOAD_BYTES], but
+     * the streaming path wrote whatever it was given — so a pathological
+     * skeleton (huge skills / memory files; chat is already budget-trimmed)
+     * produced a backup file that `import()` then hard-rejects. The failure
+     * has to be local and actionable at export time, exactly like the String
+     * path, instead of surfacing much later as "this backup can't be restored".
+     */
+    internal class CapEnforcingWriter(
+        private val delegate: Writer,
+        private val maxChars: Int,
+    ) : Writer() {
+        private var written = 0
+
+        override fun write(cbuf: CharArray, off: Int, len: Int) {
+            val next = written + len
+            if (next > maxChars) {
+                throw IllegalStateException(
+                    "Backup too large (${next}+ chars, max $maxChars)",
+                )
+            }
+            written = next
+            delegate.write(cbuf, off, len)
+        }
+
+        override fun flush() = delegate.flush()
+
+        override fun close() = delegate.close()
+    }
+
+    /**
+     * Frame keys the streaming writer must emit but that are absent from
+     * [presentKeys] (the skeleton built by buildPayloadObject). Returns the
+     * keys buildPayloadObject produced that the hardcoded frame list would
+     * silently drop — adding a section there without adding it here used to
+     * lose that section in streaming exports only.
+     */
+    fun missingFrameKeys(frameKeys: List<String>, presentKeys: Collection<String>): List<String> =
+        presentKeys.filter { it !in frameKeys }
+
+    /**
      * Emits `{"k":v,...}` with proper leading `{`/trailing `}` and `,`
      * separators, calling [emitValue] once per entry. Pure control of the
      * object framing; each value is written by the caller so a huge value

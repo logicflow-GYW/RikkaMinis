@@ -261,14 +261,28 @@ object ConfigBackup {
             remove("chatMessages")
             remove("chatTruncated")
         }
+        // [audit-0917] The frame key list below is hardcoded while
+        // buildPayloadObject is the single source of truth for the field set —
+        // a section added there but not here silently vanished from streaming
+        // exports only. Assert the two agree before emitting anything.
+        val frameKeys = listOf(
+            "format", "version", "createdAt", "includesSecrets", "fields",
+            "providers", "thinkingRules", "groups", "envVars", "skills",
+            "memoryFiles", "mcpServers", "artifacts", "chatSessions",
+            "chatMessages", "chatTruncated", "webdavConfig", "readFailures",
+        )
+        val dropped = BackupStreamWriter.missingFrameKeys(frameKeys, skeletonJson.keys().asSequence().toList())
+        check(dropped.isEmpty()) {
+            "exportToWriter frame list is missing ${dropped.size} section(s): $dropped — " +
+                "add them to frameKeys and to the emitValue branches"
+        }
+        // [audit-0917] Same ceiling the String path enforces and import()
+        // checks, applied while streaming so an oversize document fails here
+        // (actionable) instead of producing an unrestorable backup file.
+        val capped = BackupStreamWriter.CapEnforcingWriter(writer, MAX_PAYLOAD_BYTES)
         BackupStreamWriter.writeObjectFrame(
-            writer,
-            listOf(
-                "format", "version", "createdAt", "includesSecrets", "fields",
-                "providers", "thinkingRules", "groups", "envVars", "skills",
-                "memoryFiles", "mcpServers", "artifacts", "chatSessions",
-                "chatMessages", "chatTruncated", "webdavConfig", "readFailures",
-            ),
+            capped,
+            frameKeys,
         ) { w, key ->
             when (key) {
                 "chatSessions" -> BackupStreamWriter.writeJsonArray(w, sections.chatSessions)

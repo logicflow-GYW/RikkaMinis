@@ -4,6 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import java.io.StringWriter
 
@@ -167,5 +168,61 @@ class BackupStreamWriterTest {
         BackupStreamWriter.writeJsonArray(sw, listOf(tricky))
         val reparsed = JSONArray(sw.toString()).getJSONObject(0)
         assertEquals(tricky.getString("partsJson"), reparsed.getString("partsJson"))
+    }
+
+    // ── audit-0917: size cap + frame-key guard ────────────────────────────
+
+    @Test
+    fun `cap writer passes through documents under the limit`() {
+        val sw = StringWriter()
+        val capped = BackupStreamWriter.CapEnforcingWriter(sw, maxChars = 1024)
+        BackupStreamWriter.writeObjectFrame(capped, listOf("a", "b")) { w, key ->
+            w.write(JSONObject.quote("v-$key"))
+        }
+        assertEquals("""{"a":"v-a","b":"v-b"}""", sw.toString())
+    }
+
+    @Test
+    fun `cap writer fails closed once the limit is crossed`() {
+        val sw = StringWriter()
+        val capped = BackupStreamWriter.CapEnforcingWriter(sw, maxChars = 8)
+        // The failure must surface at export time (actionable) rather than
+        // producing a backup file import() will later hard-reject.
+        try {
+            BackupStreamWriter.writeObjectFrame(capped, listOf("key")) { w, _ ->
+                w.write(JSONObject.quote("a value longer than the cap"))
+            }
+            fail("expected IllegalStateException for an oversize document")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message!!.contains("Backup too large"))
+        }
+    }
+
+    @Test
+    fun `cap writer counts cumulatively across writes`() {
+        val sw = StringWriter()
+        val capped = BackupStreamWriter.CapEnforcingWriter(sw, maxChars = 10)
+        capped.write("12345")
+        // 5 + 6 > 10 — the second write must trip even though it is small.
+        try {
+            capped.write("678901")
+            fail("expected IllegalStateException on the cumulative overflow")
+        } catch (_: IllegalStateException) {
+        }
+    }
+
+    @Test
+    fun `missingFrameKeys reports sections the hardcoded list would drop`() {
+        val frame = listOf("format", "version", "providers")
+        // Skeleton grew a section the frame list never learned about —
+        // that is exactly the silent streaming-only omission.
+        assertEquals(
+            listOf("newSection"),
+            BackupStreamWriter.missingFrameKeys(frame, listOf("format", "providers", "newSection")),
+        )
+        assertEquals(
+            emptyList<String>(),
+            BackupStreamWriter.missingFrameKeys(frame, listOf("format", "providers")),
+        )
     }
 }
