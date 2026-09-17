@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-17）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-18）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-09-17，共 46 天
-- 条目总数：1045（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
-- 总字符数：1246220 / 总行数：19271
+- 合并范围：2026-08-03 ～ 2026-09-18，共 47 天
+- 条目总数：1055（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
+- 总字符数：1256636 / 总行数：19413
 
 ---
 
@@ -19264,6 +19264,148 @@ commit `2dc6e0d4`（6 文件 +392/−18，分支 diag/liveness-batch）打包三
 **可复用：单文件改动的本地门做法** —— syncheck 对 Android 文件必报一堆 `cannot infer type for this parameter`（suspendCancellableCoroutine 缺依赖），别据此判断；正确做法是 `git show HEAD:<path> > /tmp/base_x.kt` 对**改动前版本**跑同一门，比较「去掉文件路径与行号后的错误类型直方图」是否 IDENTICAL。
 
 **真机验证说明**：该缺陷只在"A 超时返回 + B 恰好同时装槽"的极窄窗口触发，无法主动构造 → 不安排真机验证（无 UI 可感路径），代码级 + CI 双证。
+
+<!-- 2026-09-17 17:21:23 -->
+## main = 709be37（docs/dev-history-0917 直达 main，docs 变更不触发 buil
+
+- main = 709be37（docs/dev-history-0917 直达 main，docs 变更不触发 build CI）
+- 挂载版：1045 条 / 46 天 / 1,246,415 字符 / 19,270 行；fences 32 even、anchors=header=1045、outOrder=0；脱敏 main 205 + INDEX 25，独立探针 Remaining NONE；SAGAS 23 sagas / orphans 68 / multi4 58。
+- 三份同源：挂载 笔记/RikkaMinis开发档案/ 三件套 + 仓库 docs/dev-history/。git clone 后 commit 需先配 user.name/email（fresh clone 无署名）。
+
+<!-- 2026-09-17 18:13:22 -->
+## 09-17 傍晚：存储页转圈 + markdown 列表误渲染双修复 → main = 40a58c94
+
+
+**用户报告两件事，都实锤**：
+1. **存储页转圈久**：`StorageManagementScreen` 每次进入 `LaunchedEffect(Unit) { reload() }` 全量重扫零缓存。规模实测（沙箱侧同树）：rootfs ~12.5 万条目，其中 **/tmp 一个目录 100812 个文件**（历次会话 clone/harness/.native-offload 残留，占 80%）。**用户观察的"间隔短就顺畅、间隔久就慢"= 内核 page cache 冷热**（app 每次干的活一样，快慢只来自页缓存）——这不是 app 内缓存的强证据。
+2. **"4 分钟没扫完" 被渲染成 "4.  分钟没扫完"**：`MarkdownParser.kt:204` 有序列表正则 `[.)\s]` 把**空白**当合法标记分隔符 → 段落开头 "4 " 被吃成 item #4，`MarkdownText:363` 渲染 `"${startNumber+index}."` + 8dp → 正好是用户所见。同类：`3.14 是 π` 被拆成 item "14 是 π"（`\s*` 允许零空格）。证据四方对齐（我方原文 / 用户所见 / 解析 / 渲染）。
+
+**修复（分支 fix/md-list-regex-and-storage-swr，2 commit rebase 后 = 40a58c94）**：
+- MarkdownParser 三处同步（204/209/253）：marker 收紧为 `[.)]` + 后强制 `\s+(.*)` 或行尾，`(?:\s+(.*))?` 兼容空项；注释更新。
+- JVM 回归测试 12/12（/tmp/jvmtest-md，stub BuildConfig+Log；**kotlinc 编译必须 -cp junit jar——skill §2 老坑又复发**）。
+- StorageManagementScreen 加 `StorageSnapshotCache`（@Volatile object，进程生命周期）+ SWR 语义：有缓存 → 立即渲染旧值（不转圈）+ 后台重扫替换；首次仍骨架。ponytail 三段注释已打。
+- **砍掉**（改动阶梯）：media 树两趟遍历合并（media 不大，SWR 后无感知）、sessionSubdirSizes 换 Os.lstat（破坏 JVM 可测性，违背原设计）。
+
+**CI 链**：分支 CI #1627 绿 → FF 遇远端 main 前进（另一会话 docs 709be379）→ rebase 后重跑 **#1628 绿**（纪律：rebase=换树旧绿不算）→ 推新分支名 `-rb`（gh_sync.sh 不支持 force）→ FF main = **40a58c94** → 远端两分支 DELETE 204 → release CI #35209010115 自动触发（用户惯例不等）。**裸 `git push origin main` 无凭证失败**（could not read Username）——push main 一律走 gh_sync.sh push-main。
+
+**/tmp 清理（用户拍板"打包一起修"含此项）**：白名单保留 14 项（RikkaMinis/kotlinc/libs/jvmtest-md/wdlibs/stubs/hsperfdata_root/mcp-daemon.pid+port/askpass 两脚本/commit-msg/jansi+lock）+ 其余全删。**7.2GB → 328M，条目 929 → 14，递归文件 100812 → 4526（−95%）**。`.native-offload-*` 143 个全是死进程残留（当前 pid 14191 的一个都没有才敢删）。预期存储页冷扫量 −80%。
+
+**待用户真机验证**：装 release 新包后 ①设置→存储 二次进入应秒开（首次仍转圈）②我发的以"数字+空格"开头的段落不再变列表。
+
+<!-- 2026-09-17 20:18:47 -->
+## 09-17 收尾：全天工程量统计（用户问"为什么感觉工程量大"时的硬数据）
+
+
+**main 交付量（SGT 09:41→17:55）**：33 提交 / 147 unique 文件（全仓 ~524 文件的 28%）/ +3031 −577 行；CI 今天 43 轮构建（29 绿 / 9 红 / 5 取消，红均为审计批次中间错，全修后绿）。
+
+**量大的结构拆解（三点）**：①一次性还债——215 条审计条目是隔夜三模型扫描（576 单元 ×3 + 双向反驳 576×2 ≈ 2600 次调用）的产出，今天集中消化；②多会话接力损耗——一个审计会话压缩故障瘫痪，接手方处理未推送 commit + 未提交文件 + rebase 撞别会话推送；③闭环仪式——每批次 分支→CI→rebase→FF→release，平均每小时 ~5 次构建。
+
+**其他产出**：/tmp 清理 7.2GB→328M（100812→4526 文件）；dev-history 1045 条；新工具 localgate.py（本地编译门，局部符号 unresolved=必真错）、reconcile/synbase/extract 等；main 终态 40a58c94，release CI #35209010115 绿。
+
+**待真机验证（用户）**：①设置→存储 二次进入秒开 ②"数字+空格"开头段落不再变列表。
+
+<!-- 2026-09-17 20:28:24 -->
+## 09-17 晚：用户已装新包 + 今晚 launch-beacon 数据判读
+
+
+- **用户装了新包**：设备 versionCode=220001628 / versionName=1.0.0+1628，lastUpdateTime=2026-09-17 18:15:09（= 傍晚 CI #1628 构建，与 main 40a58c94 同树，即今天全部修复的版本）。用户的真机验证窗口已开：①存储页二次进入秒开 ②"数字+空格"开头段落渲染。
+- **今晚 18:15-20:12 launch-beacon**：10 launch / 9 silent_kill。形态判读：18:15 密集段（90 秒内 4 次）= 覆盖安装动作的正常痕迹（lastUpdateTime 18:15:09 精确吻合）；18:23 起的单发（间隔 8-34 分钟）= 用户使用新包 + 后台回收。**不在 agent 重活窗口**（agent 下午起无重活）→ §18 判定日 09-19 的输入之一（"归因不能只记在 agent 头上"进一步成立）。
+- 附带观察：reconcileInterruptedSessions 反复报 "13 interrupted"（当晚多次），未核实是否正常（reconcile 语义待查）。
+- 教训：诊断"churn"前先查 lastUpdateTime——安装动作本身会产生密集 launch/kill 记录，不先排除会把装机误读成异常。
+
+<!-- 2026-09-17 21:01:29 -->
+## 09-17 深夜：★"双胞胎解析器"——聊天列表误渲染的真正根因与修复（main = 14ca90e3）
+
+
+**事件**：用户真机复现"4.  分钟"（昨晚 40a58c94 记的"已修"无效）→ 追查发现 app 有**两套 markdown 解析器**：
+- **聊天渲染路径** = `StreamingMarkdownText` → `MarkdownBlockModel.kt`（ui/chat，自有 block parser + 私有正则）
+- `ui/markdown/MarkdownParser.kt`（+`MarkdownText.kt`）= 只有技能页等在用
+- 昨晚的"列表正则收紧"打在了后者 = **打偏**。两套 bug 同款同形（'[.)\s]' 家族正则 + 相似渲染形态），故"四方对齐"对到了错的双胞胎。**教训：修 bug 前必须 grep 调用点指认消费方，别凭文件名/形态相似下刀。**
+
+**聊天路径根因**：`MarkdownBlockModel.kt:76` `numberedListItemRegex = ^\d+[.)\s]+.*` 把"4 "（数字+空格）当 item marker → item #4 内容"分钟…"；渲染串 `"${startNum}.  "`（StreamingMarkdownText.kt:1261）→ **用户所见"4.  分钟"逐字符吻合**。
+
+**修复（14ca90e3，分支 fix/chat-numbered-list-regex）**：三正则收紧 `^\d{1,2}[.)](?:\s+.*)?$` / `^(\d{1,2})[.)]` / `^\d{1,2}[.)](?:\s+|$)`（与 MarkdownParser 语义对齐）；新增 repo 内测试 `MarkdownBlockModelNumberedListTest`（9 用例，打在聊天真正用的解析器上）。
+
+**验证数字**：新代码 9/9 绿；**旧代码同套测试 7/9 红**（反向对照）；CI #1630 全绿（含全量单测）→ FF main = 14ca90e3 → release #1631 push 触发。
+
+**沙箱 JVM 预演配方更新**（MarkdownBlockModel.kt）：stubs（Log/BuildConfig）+ `/tmp/libs/kotlinx-coroutines-core-jvm-1.8.1.jar` + MathHelpersStub（`findInlineMathClose`/`looksLikeMath` 定义在 StreamingMarkdownText.kt，Compile 需 stub）。
+
+**待办尾巴**：①聊天路径"缩进 bullet 被吞为 continuation"疑似与 b9 修过的 MarkdownParser 同款（未修，待评估）；②远端尚有别会话分支 feat/jvm-tests-audit0917（a436f31f）未清理；③用户装包验证（历史消息样本行应变正常）；④release #1631 完成后 Releases 页有新包。
+
+<!-- 2026-09-17 21:04:02 -->
+## 09-17 深夜收口：聊天列表误渲染修复真机验证通过（main = 14ca90e3）
+
+
+- **用户装机 1.0.0+1630**（lastUpdateTime 21:02:03，= CI #1630 artifact / 14ca90e3 树）后确认：样本行显示为普通段落，符合预期 → "双胞胎解析器"修复实锤生效。验证数字链完整：新代码 9/9 绿 → 旧代码同测试 7/9 红（反向对照）→ CI #1630 全绿 → 真机通过。四层闭环全部打开。
+- release #1631（main push 触发）在构建中，完成后 Releases 页有正式包（同树，可选装）。
+- 遗留尾巴（未动）：①聊天路径"缩进 bullet 被吞为 continuation"疑似与 b9 在 MarkdownParser 上修过的同款（待评估）；②远端 feat/jvm-tests-audit0917（a436f31f）为别会话分支，未清理。
+
+<!-- 2026-09-17 21:51:53 -->
+## 09-17 晚：第二类 bug 测试缺口对账 + 4 个测试补齐 → main = 0c6ff4d7（#1636 绿）
+
+<!-- 2026-09-17 22:00 -->
+
+**覆盖对账（用户记忆"当初都有吧"不成立）**：今日 33 修复提交 / 131 src 文件中，有测试引用仅 48；零测试 83（其中 ~40 是 Compose/Activity 本就该裸奔，真正该测 ~15）。**脚本教训**：coverage_check.py 按 basename 匹配漏报（`ChatCompactionLogic` vs `ChatCompactionLogicTest` 不同名）——对账工具的"covered 判定"本身要手动抽查。
+
+**★ 修好的验证链是 /tmp 假固化**：MarkdownParser 12 例回归测试只活在会话私有 /tmp/jvmtest-md，CI 从未重放过。4 个测试文件已搬进仓库 src/test（28/28 本地绿 → CI #1635 #1636 全绿）：
+- `MarkdownParserNumberedListTest`（40a58c94 的 12 例，verbatim 搬入）
+- `PendingShareTest`（a6ae80d1，6 例：round-trip / malformed 元素 skip 不 fatal / 未知 kind 跳过 / 空值 null）
+- `SanitizeAgentHistoryUserNeighborTest`（d2ab73a0，5 例：纯文本 USER 邻居 merge 不插、ASSISTANT 邻居仍插、bridge 尾部追加）
+- `ContextTooLargeErrorTest`（d2ab73a0，5 例：max_tokens 输出参数错误**不**触发减半重试）
+
+**跳过不测（该测的边界）**：OffloadPermissionManager / HangDetector / CrashFrequencyDetector / JiebaEngine / ChatQueueInterruption——Android 重依赖，真机+CI 即验证面。ProviderConfigMapping 已有 SafeParseTest 覆盖。
+
+**流程坑（老配方照抄仍有效）**：FF 遇远端 main 前进（14ca90e3 别会话）→ rebase → **换树旧绿不算**，重跑 CI #1635 绿再 FF；gh_sync push 不支持 force → 改本地分支名 `-rb` 重推；删分支走 `gh_sync.sh delete-branches --keep main --yes`（裸 curl DELETE 401）；CI wait 用 `gh_ci_wait.sh --expect <sha>`。并发 dispatch 被用户取消时同分支两个 run 会一起 cancelled——re-trigger 前先列 run 列表别信"之前触发过"。
+
+**测试断言教训（沙箱 JVM 抓的）**：①LLMMessage 纯文本在 `.content` 字段不在 contentParts（`filterIsInstance<Text>().first()` 会 NoSuchElementException）；②ensureRoleAlternationBeforeUserAppend 是**尾部追加**不是中间插入（断言 history[2] 不是 history[1]）。修断言两次，28/28 绿。
+
+**编译配方（复用）**：/tmp/jvmaudit/stub（Room 注解含 companion CASCADE + ShadowDbEntities + SanitizeWrapper）+ /tmp/jvmtest-md/stubs（BuildConfig/Log）+ LLMUsage.kt + kotlinx-serialization-core jar 进 -cp。kotlinc 必须全路径（不在 PATH）。
+
+## 2026-09-18
+
+<!-- 2026-09-18 00:00:17 -->
+## 09-17 深夜：诊断「完全退出后回到上次会话」——ce4ccb91 深链修复的副作用
+
+
+**现象**：用户设置 Launch Session = NewChat（日志 [LaunchSession] mode=NewChat 实锤），后台恢复走新会话 ✓，但**完全退出后冷启动 → 打开上次所在会话** ✗。
+
+**根因链（三源）**：
+1. `MainActivity.kt:239-261`：冷启动（savedInstanceState == null）时从 `PREF_CRASH_RECOVERY / last_chat_session_id` 取上次会话 id（该值由 nav backstack 每次进 chat 路由写入，从不清理）；`:349-353` 合成 `DeepLinkAction.OpenSession` 当 initialDeepLink。
+2. `AppNavigation.kt:379-381`：launch-mode dispatcher 开头 `if (hasDeepLink) return@LaunchedEffect` → **冷启动的设置派发被整个跳过**（mode=NewChat 被静默忽略）。
+3. `SafeNavigate.kt:38` safeNavigate 非 RESUMED 直接 return —— **在 ce4ccb91（09-17 15:30，audit b9）之前**，这个合成深链在首帧（start entry 仍 STARTED）被吞掉 → 冷启动停在 startDestination = `__new__` draft chat（= 用户过去看到的"新会话"）。ce4ccb91 加了 `awaitResumed()`（AppNavigation.kt:288-298）修 minis:// 冷启动深链，**同时把这个内部合成深链也激活了** → 行为反转。
+
+**日志证据**（minis-2026-09-17.log）：23:51:45.084 verdict=silent_kill → .446 MOUNT `__new__378f52e0` → .582 MOUNT `3d11436a`（旧会话）；18:15:29 同形态。PREF 存 draft id 时表现为"看起来正常"（21:02:07 只 MOUNT __new__）。
+
+**建议修法（未开工）**：MainActivity 的 PREF 回退加门 —— 仅 `KEY_LAUNCH_SESSION ∈ {0 Auto, 1 LastSession}` 时恢复；2 NewChat / 3 SafeStart → null（交回 dispatcher）。
+**次生缺陷**：HangDetector / LaunchCycleBeacon 的 force-home 门在 dispatcher 内，被 hasDeepLink 绕过 → 冷启动恢复路径上只有 CrashFrequencyDetector 门生效（门放错层，同族不一致）。
+**不可用判据**：launch-beacon 全天 21 行全是 silent_kill（真机 onTerminate 不调用）→ 「用户主动退出 vs 后台被杀」无法用 beacon 区分。
+
+<!-- 2026-09-18 00:27:39 -->
+## 09-17 深夜修复：冷启动恢复覆盖 Launch Session 设置（main = bd55749b，#1637 绿 / #1638 release）
+
+
+**改动（分支 fix/coldstart-restore-gate，3 文件 +137−3）**：
+1. 新增 `ui/navigation/LaunchSessionPolicy.kt`：`LaunchSessionMode`(0/1/2/3) + `coldStartRestoreAllowed(mode)` 纯函数（白名单 Auto/LastSession；NewChat/SafeStart/未知值一律不恢复）。
+2. `MainActivity.kt`：进程级 lastSessionId 回退加门 —— 仅 Auto/LastSession 使用；NewChat/SafeStart 交回 AppNavigation 派发（落到新 draft）。
+3. 同处把三个 force-home 门统一（CrashFrequencyDetector + HangDetector + LaunchCycleBeacon）——后两者原先只在 dispatcher 里，被 `hasDeepLink` 跳过 → 冷启动恢复路径上从未生效。
+
+**验证链**：`LaunchSessionPolicyTest` 6/6 本地绿（kotlinc+JUnit4，纯 Kotlin 无 Android 依赖）；**反向对照**（把函数改成无条件 true）→ NewChat/SafeStart/unknown 3/6 红；MainActivity 语法门 grep "Expecting|syntax" 0 命中；分支 CI **#1637 success** → FF main = **bd55749b**（origin/main 未前进，无需 rebase）→ release **#1638** 自动触发（用户惯例不等）。
+
+**工具坑（新）**：`gh_sync.sh delete-branches --keep main --yes` **只删本地** —— 当前分支就是要删的分支时 `git branch -D` 静默失败（脚本吞错），且远端删除依赖 remote-tracking ref，实测没生效。切回 main 后仍不行 → 最终用 API `DELETE /repos/.../git/refs/heads/<b>` + `Authorization: Bearer $GITHUB_TOKEN` → **204**。远端现仅剩 main。
+
+**待真机验证（用户）**：①设置=New Chat 时完全退出（划掉任务）后重开 → 新会话 ②聊天里"4 分钟…"类段落仍是普通段落 ③翻工具块不再被拽回最新。
+
+**报告里尚未处理的其余风险点**：压缩错误分类移除 "max_tokens"（潜在漏判上下文溢出）、媒体首帧多一跳、WebPreviewShortcut 静默拒绝无 toast、备份 64MB fail-closed（当前 10.6MB 不触及）。
+
+<!-- 2026-09-18 00:29:39 -->
+## 09-17 深夜收口：冷启动恢复修复真机验证通过（main = bd55749b）
+
+
+**用户真机验证通过**：装的是分支构建（CI #1637 artifact，bd55749b 树）解压出的 APK，完全退出后重开 → 新会话，符合预期。四层闭环全部打开：新代码 6/6 绿 → 反向对照 3/6 红 → 分支 CI #1637 绿 → 真机通过。
+
+**release #1638（main push 触发）仍在构建中**，完成后 Releases 页有正式包（同树，可选装）。
+
+**遗留（未处理，用户未点名）**：压缩错误分类移除 "max_tokens"（潜在漏判上下文溢出）、媒体首帧多一跳、WebPreviewShortcut 静默拒绝无 toast、备份 64MB fail-closed（10.6MB 不触及）、门放错层已修（三个 force-home 门已统一）。
 
 ---
 
