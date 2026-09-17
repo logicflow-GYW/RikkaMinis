@@ -36,6 +36,7 @@ import com.rikkaminis.app.deeplink.DeepLinkHandler
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.service.SessionActivityTracker
 import com.rikkaminis.app.ui.navigation.AppNavigation
+import com.rikkaminis.app.ui.navigation.coldStartRestoreAllowed
 import com.rikkaminis.app.ui.navigation.Routes
 import com.rikkaminis.app.ui.navigation.safeNavigate
 import com.rikkaminis.app.ui.settings.KEY_FONT_APP_BASE
@@ -252,14 +253,39 @@ class MainActivity : ComponentActivity() {
             // bundle carries no session id, and falling back to the stale
             // KEY_LAST_CHAT_SESSION_ID would yank them from Settings back into
             // the previous chat.
+            //
+            // [fix/coldstart-restore-vs-launch-mode] On a true cold start the
+            // restore is ALSO gated on the Launch Session preference. We cannot
+            // tell "the user closed the app" from "the system killed it" — the
+            // beacon reports silent_kill for both, because onTerminate never
+            // runs on a real device — so an unconditional restore overrode the
+            // preference outright: with New Chat / Safe Start selected the app
+            // still opened the previous conversation. The synthesised OpenSession
+            // deep link makes AppNavigation skip its launch-mode dispatch
+            // entirely (hasDeepLink), so this is the only place the preference
+            // can still be honoured. Auto / Last Session keep the restore; every
+            // other mode hands the decision back to the dispatcher.
             ?: if (savedInstanceState == null) {
-                getSharedPreferences(PREF_CRASH_RECOVERY, MODE_PRIVATE)
-                    .getString(KEY_LAST_CHAT_SESSION_ID, null)
+                val launchMode = getAppearancePrefs(this).getInt(KEY_LAUNCH_SESSION, 0)
+                if (coldStartRestoreAllowed(launchMode)) {
+                    getSharedPreferences(PREF_CRASH_RECOVERY, MODE_PRIVATE)
+                        .getString(KEY_LAST_CHAT_SESSION_ID, null)
+                } else {
+                    null
+                }
             } else {
                 null
             }
             ?.takeUnless {
-                com.rikkaminis.app.crash.CrashFrequencyDetector.shouldForceHomeOnLaunch(this)
+                // [fix/coldstart-restore-vs-launch-mode] All three force-home
+                // breakers, not just the crash-frequency one. The other two are
+                // evaluated inside AppNavigation's launch-mode dispatcher, which
+                // the synthesised restore deep link skips (hasDeepLink) — so on
+                // precisely the path they exist to protect (re-entering the chat
+                // that was hanging / killing the process) they never ran.
+                com.rikkaminis.app.crash.CrashFrequencyDetector.shouldForceHomeOnLaunch(this) ||
+                    com.rikkaminis.app.diagnostics.HangDetector.shouldForceHomeOnLaunch(this) ||
+                    com.rikkaminis.app.diagnostics.LaunchCycleBeacon.shouldForceHomeOnLaunch()
             }
 
         settingsLauncher = registerForActivityResult(
