@@ -337,15 +337,25 @@ class SkillRepository(private val context: Context) {
      * so long-lived installs don't drift into multi-thousand-read territory.
      */
     fun recordSkillUse(skillId: String) {
-        val current = _skills.value.find { it.id == skillId } ?: return
-        val bumped = current.copy(useCount = current.useCount + 1.0)
-        db.execSQL(
-            "UPDATE skills SET use_count = use_count + 1 WHERE id=?",
-            arrayOf<Any>(skillId)
-        )
-        var next = _skills.value.map { if (it.id == skillId) bumped else it }
-        if (bumped.useCount > NORMALIZE_THRESHOLD) {
-            next = normalizeUseCounts(next)
+        // [audit-0917] The in-memory mirror must be updated under the same lock
+        // as `add`: the DB write below is an atomic SQL increment, but the
+        // StateFlow update is a read-modify-write over `_skills.value`. Two
+        // concurrent calls (parallel tool executions on Dispatchers.IO) both
+        // read the pre-bump snapshot → both write useCount+1 → memory drifts
+        // one behind the DB, and normalizeUseCounts later persists a value
+        // derived from that stale snapshot.
+        val next = synchronized(addLock) {
+            val current = _skills.value.find { it.id == skillId } ?: return
+            val bumped = current.copy(useCount = current.useCount + 1.0)
+            db.execSQL(
+                "UPDATE skills SET use_count = use_count + 1 WHERE id=?",
+                arrayOf<Any>(skillId)
+            )
+            var mapped = _skills.value.map { if (it.id == skillId) bumped else it }
+            if (bumped.useCount > NORMALIZE_THRESHOLD) {
+                mapped = normalizeUseCounts(mapped)
+            }
+            mapped
         }
         _skills.value = next
     }

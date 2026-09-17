@@ -809,6 +809,16 @@ class ChatRepository(
      * each. Distinct from [extractTextPreview] / [cleanPreview] above —
      * those collapse markdown for a 100-char single-line preview, while
      * this preserves the full text the offload caller wants to inspect.
+     *
+     * Precedence when a message mixes part kinds (only the first
+     * non-empty tier is returned, so a message carrying both mediaRef
+     * and toolUse yields "[Image]" — deliberate, since the consumers are
+     * previews and a user-visible transcript where the typed text or the
+     * media marker is the more useful signal than the tool list):
+     *   1. text blocks (joined)
+     *   2. "[Image]" when any mediaRef exists
+     *   3. tool names / tool_title when any toolUse exists
+     *   4. "[Tool result: …]" summaries when any toolResult exists
      */
     private fun extractTextForOffload(partsJson: String): String {
         return try {
