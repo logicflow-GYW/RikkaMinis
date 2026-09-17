@@ -47,7 +47,12 @@ object ArtifactBackupScope {
     data class Selection(
         val files: List<SelectedFile>,
         val totalBytes: Long,
-        /** Count of files skipped because they exceeded [MAX_FILE_BYTES]. */
+        /** Count of files skipped as oversized: over [MAX_FILE_BYTES], or
+         *  skipped because the archive budget was exhausted. The two reasons
+         *  are deliberately conflated - the backup manifest only reports a
+         *  total, not a per-reason split (ponytail: merged counter | ceiling:
+         *  a user debugging why an artifact is missing needs the reason |
+         *  upgrade trigger: someone surfaces per-reason counts in the UI). */
         val oversizedSkipped: Int,
         /** Count of non-text files skipped by the extension allow-list. */
         val nonTextSkipped: Int,
@@ -66,8 +71,14 @@ object ArtifactBackupScope {
         var nonText = 0
         if (!sharedRoot.isDirectory) return Selection(files, 0, 0, 0)
 
+        // [audit-0917] Guard symlink cycles: a link pointing at an ancestor
+        // would otherwise recurse forever (File.isDirectory follows links)
+        // and blow the stack. canonicalPath dedupes .. and absolute prefixes,
+        // so the first visit wins and any revisit is skipped.
+        val visited = HashSet<String>()
         fun walk(dir: File, prefix: String) {
-            val children = dir.listFiles() ?: return
+            val canon = try { dir.canonicalPath } catch (_: Exception) { return }
+            if (!visited.add(canon)) return
             for (child in children.sortedBy { it.name }) {
                 if (child.isDirectory) {
                     // Only the shared root has environment payloads; nested

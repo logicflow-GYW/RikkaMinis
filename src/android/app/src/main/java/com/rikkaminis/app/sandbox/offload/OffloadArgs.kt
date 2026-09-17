@@ -67,5 +67,14 @@ internal class OffloadArgs(argv: List<String>, booleanFlags: Set<String> = empty
     fun getLong(vararg names: String): Long? = get(*names)?.toLongOrNull()
     fun getDouble(vararg names: String): Double? = get(*names)?.toDoubleOrNull()
     fun getBool(vararg names: String): Boolean? =
-        get(*names)?.lowercase()?.let { it == "true" || it == "1" || it == "yes" }
+        get(*names)?.lowercase()?.let {
+            when (it) {
+                "true", "1", "yes" -> true
+                "false", "0", "no" -> false
+                // [audit-0917] Refuse instead of guess: an unrecognized value
+                // returns null so the caller's ?: default applies, instead of
+                // silently reading garbage as false.
+                else -> null
+            }
+        }
 }
