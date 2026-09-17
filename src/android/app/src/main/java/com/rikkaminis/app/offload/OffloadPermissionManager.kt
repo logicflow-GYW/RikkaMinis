@@ -179,13 +179,19 @@ object OffloadPermissionManager {
         }
         if (timed == null) {
             // Timed out — clear the pending request so the UI doesn't fire a
-            // stale permission dialog later. [fix/audit0917-b8] Guarded: if a
-            // newer caller has already installed its own continuation, the
-            // slot belongs to it now and clearing would kill its dialog.
+            // stale permission dialog later. [fix/audit0917-b8] Guarded, and
+            // the continuation slot is cleared in the SAME branch: a newer
+            // caller may have installed its own continuation after this one
+            // timed out, and an unconditional clear would kill its waiter —
+            // the user's "allow" answer would then be swallowed by the
+            // take-then-clear in respondToAndroidPermission. For the normal
+            // timeout path invokeOnCancellation has already cleared the slot
+            // (so this branch is idempotent); this guard only matters in the
+            // stale-timeout window, where the slot now belongs to someone else.
             if (androidPermissionContinuation == null) {
                 _pendingAndroidPermission.value = null
+                androidPermissionContinuation = null
             }
-            androidPermissionContinuation = null
             return AndroidPermissionResult.TIMEOUT
         }
         return timed
