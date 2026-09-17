@@ -186,7 +186,9 @@ fun BackupSettingsScreen(
     // with no way to roll back. Now listed here and restorable via the same
     // restoreWithSnapshot path used for WebDAV.
     val snapshotDir = remember { File(context.filesDir, "backup-snapshots") }
-    var snapshotFiles by remember { mutableStateOf(ConfigBackup.listSnapshots(snapshotDir)) }
+    // [audit-0917] No disk IO in composition: start empty and let the
+    // LaunchedEffect below populate the list on the IO dispatcher.
+    var snapshotFiles by remember { mutableStateOf<List<java.io.File>>(emptyList()) }
     var snapshotRestoreTarget by remember { mutableStateOf<File?>(null) }
 
     // Refresh the snapshot list on entry (and after restore writes a new one).
@@ -195,7 +197,11 @@ fun BackupSettingsScreen(
     }
 
     val refreshSnapshots: () -> Unit = {
-        snapshotFiles = ConfigBackup.listSnapshots(snapshotDir)
+        // [audit-0917] listSnapshots reads the dir - off the Main thread
+        // like the entry refresh above.
+        scope.launch {
+            snapshotFiles = withContext(Dispatchers.IO) { ConfigBackup.listSnapshots(snapshotDir) }
+        }
     }
 
     val savedToast = stringResource(R.string.backup_saved)
@@ -369,7 +375,10 @@ fun BackupSettingsScreen(
                             append(context.getString(R.string.backup_export_incomplete, failures))
                         }
                     }
-                    Toast.makeText(context, savedToast, Toast.LENGTH_SHORT).show()
+                    // [audit-0917] Show the body (it carries the incomplete-backup
+                    // warning when fields failed to serialize), not just the
+                    // success string.
+                    Toast.makeText(context, body, Toast.LENGTH_SHORT).show()
                     notifier.notifyWorkCompleted(
                         tag = "local-export",
                         title = context.getString(R.string.backup_saved),

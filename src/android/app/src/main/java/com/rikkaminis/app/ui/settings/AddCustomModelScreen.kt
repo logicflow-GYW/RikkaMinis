@@ -9,6 +9,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -39,7 +40,8 @@ fun AddCustomModelScreen(
     val instance = providerRepository.instance(instanceId)
 
     if (instance == null) {
-        onBack()
+        // [audit-0917] Navigate AFTER composition (see ModelGroupDetailScreen).
+        LaunchedEffect(Unit) { onBack() }
         return
     }
 

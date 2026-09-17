@@ -36,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -102,7 +103,10 @@ fun BackgroundSettingsScreen(onBack: () -> Unit) {
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
-    LaunchedEffect(lifecycleOwner) {
+    // [audit-0917] DisposableEffect, not LaunchedEffect: the observer was
+    // registered on every (re)entry and never removed - it outlived the screen
+    // and pinned its context.
+    DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 ignoringOptimizations =
@@ -113,6 +117,7 @@ fun BackgroundSettingsScreen(onBack: () -> Unit) {
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     val vendor = remember { PowerOptimizationManager.Vendor.current() }

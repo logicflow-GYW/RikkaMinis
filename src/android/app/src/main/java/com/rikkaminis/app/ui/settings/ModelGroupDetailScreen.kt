@@ -45,6 +45,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -59,6 +60,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.graphics.Color
+import com.rikkaminis.app.data.model.ModelGroup
 import com.rikkaminis.app.data.model.DEFAULT_GROUP_CONTEXT_LIMIT_TOKENS
 import com.rikkaminis.app.data.model.FallbackStrategy
 import com.rikkaminis.app.data.model.RoutingStrategy
@@ -96,20 +98,30 @@ fun ModelGroupDetailScreen(
 ) {
     val config by providerRepository.config.collectAsState()
     val group = config.modelGroups.find { it.id == groupId }
+
     var showDeleteDialog by remember { mutableStateOf(false) }
 
     if (group == null) {
-        onBack()
+        // [audit-0917] Navigate AFTER composition: onBack() during composition is a
+        // Compose anti-pattern and re-fires on every recomposition of this branch.
+        LaunchedEffect(Unit) { onBack() }
         return
     }
 
-    var name by remember { mutableStateOf(group.name) }
+    // [audit-0917] Resolve the LATEST persisted group at write time: `group` is
+    // the composition-time snapshot, so two writes in quick succession (name
+    // then strategy, before the config flow recomposes) each used the stale
+    // copy and silently overwrote the first write.
+    val persistedGroup: ModelGroup = group
+    fun currentGroup(): ModelGroup = config.modelGroups.find { it.id == groupId } ?: persistedGroup
+
+    var name by remember(group.id) { mutableStateOf(group.name) }
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     val nameSavedMsg = stringResource(R.string.model_group_name_saved)
-    var strategy by remember { mutableStateOf(group.strategy) }
-    var fallbackStrategy by remember { mutableStateOf(group.fallbackStrategy) }
+    var strategy by remember(group.id) { mutableStateOf(group.strategy) }
+    var fallbackStrategy by remember(group.id) { mutableStateOf(group.fallbackStrategy) }
     // T312: Session Defaults — keyed on group.id so navigating to another
     // group via NavBackStack rebuilds these from the new group's persisted
     // values. Using `group` as key would also re-fire on every config
@@ -138,7 +150,7 @@ fun ModelGroupDetailScreen(
         memberIds = memberIds.toMutableList().apply {
             add(toIdx, removeAt(fromIdx))
         }
-        providerRepository.updateGroup(group.copy(memberEntryIds = memberIds.toMutableList()))
+        providerRepository.updateGroup(currentGroup().copy(memberEntryIds = memberIds.toMutableList()))
     }
 
     Scaffold(
@@ -179,7 +191,7 @@ fun ModelGroupDetailScreen(
                             keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
                             fieldModifier = Modifier.onFocusChanged { focusState ->
                                 if (!focusState.isFocused && name.isNotBlank() && name != group.name) {
-                                    providerRepository.updateGroup(group.copy(name = name))
+                                    providerRepository.updateGroup(currentGroup().copy(name = name))
                                     coroutineScope.launch {
                                         snackbarHostState.showSnackbar(nameSavedMsg)
                                     }
@@ -205,7 +217,7 @@ fun ModelGroupDetailScreen(
                         selected = strategy == RoutingStrategy.fallback,
                         onSelect = {
                             strategy = RoutingStrategy.fallback
-                            providerRepository.updateGroup(group.copy(strategy = RoutingStrategy.fallback))
+                            providerRepository.updateGroup(currentGroup().copy(strategy = RoutingStrategy.fallback))
                         },
                     )
                     SettingsChoiceRow(
@@ -213,7 +225,7 @@ fun ModelGroupDetailScreen(
                         selected = strategy == RoutingStrategy.loadBalance,
                         onSelect = {
                             strategy = RoutingStrategy.loadBalance
-                            providerRepository.updateGroup(group.copy(strategy = RoutingStrategy.loadBalance))
+                            providerRepository.updateGroup(currentGroup().copy(strategy = RoutingStrategy.loadBalance))
                         },
                     )
                     SettingsChoiceRow(
@@ -221,7 +233,7 @@ fun ModelGroupDetailScreen(
                         selected = strategy == RoutingStrategy.cheapestFirst,
                         onSelect = {
                             strategy = RoutingStrategy.cheapestFirst
-                            providerRepository.updateGroup(group.copy(strategy = RoutingStrategy.cheapestFirst))
+                            providerRepository.updateGroup(currentGroup().copy(strategy = RoutingStrategy.cheapestFirst))
                         },
                         showDivider = false,
                     )
@@ -243,7 +255,7 @@ fun ModelGroupDetailScreen(
                             selected = fallbackStrategy == FallbackStrategy.default,
                             onSelect = {
                                 fallbackStrategy = FallbackStrategy.default
-                                providerRepository.updateGroup(group.copy(fallbackStrategy = FallbackStrategy.default))
+                                providerRepository.updateGroup(currentGroup().copy(fallbackStrategy = FallbackStrategy.default))
                             },
                         )
                         SettingsChoiceRow(
@@ -251,7 +263,7 @@ fun ModelGroupDetailScreen(
                             selected = fallbackStrategy == FallbackStrategy.always,
                             onSelect = {
                                 fallbackStrategy = FallbackStrategy.always
-                                providerRepository.updateGroup(group.copy(fallbackStrategy = FallbackStrategy.always))
+                                providerRepository.updateGroup(currentGroup().copy(fallbackStrategy = FallbackStrategy.always))
                             },
                             showDivider = false,
                         )
@@ -325,7 +337,7 @@ fun ModelGroupDetailScreen(
                                     IconButton(onClick = {
                                         val newIds = memberIds.toMutableList().apply { remove(entryId) }
                                         memberIds = newIds
-                                        providerRepository.updateGroup(group.copy(memberEntryIds = newIds.toMutableList()))
+                                        providerRepository.updateGroup(currentGroup().copy(memberEntryIds = newIds.toMutableList()))
                                     }) {
                                         Icon(
                                             imageVector = Icons.Default.Delete,
@@ -439,7 +451,7 @@ fun ModelGroupDetailScreen(
                             val newLevel = if (on) ThinkingLevel.MEDIUM else null
                             defaultThinkingLevel = newLevel
                             providerRepository.updateGroup(
-                                group.copy(defaultThinkingLevel = newLevel)
+                                currentGroup().copy(defaultThinkingLevel = newLevel)
                             )
                         },
                         icon = Icons.Default.Psychology,
@@ -516,7 +528,7 @@ fun ModelGroupDetailScreen(
                                         onClick = {
                                             defaultThinkingLevel = level
                                             providerRepository.updateGroup(
-                                                group.copy(defaultThinkingLevel = level)
+                                                currentGroup().copy(defaultThinkingLevel = level)
                                             )
                                         },
                                         shape = SegmentedButtonDefaults.itemShape(
@@ -549,7 +561,7 @@ fun ModelGroupDetailScreen(
                                     ?: DEFAULT_GROUP_CONTEXT_LIMIT_TOKENS
                                 contextLimitTokens = restored
                                 providerRepository.updateGroup(
-                                    group.copy(
+                                    currentGroup().copy(
                                         contextLimitTokens = restored,
                                         lastContextLimitTokens = restored,
                                     )
@@ -561,7 +573,7 @@ fun ModelGroupDetailScreen(
                                 val stash = contextLimitTokens
                                 contextLimitTokens = null
                                 providerRepository.updateGroup(
-                                    group.copy(
+                                    currentGroup().copy(
                                         contextLimitTokens = null,
                                         lastContextLimitTokens = stash
                                             ?: group.lastContextLimitTokens,
@@ -581,7 +593,7 @@ fun ModelGroupDetailScreen(
                             onValueChange = { newTokens ->
                                 contextLimitTokens = newTokens
                                 providerRepository.updateGroup(
-                                    group.copy(
+                                    currentGroup().copy(
                                         contextLimitTokens = newTokens,
                                         lastContextLimitTokens = newTokens,
                                     )
@@ -637,7 +649,7 @@ fun ModelGroupDetailScreen(
                     onClick = {
                         val newIds = memberIds.toMutableList().apply { remove(removingId) }
                         memberIds = newIds
-                        providerRepository.updateGroup(group.copy(memberEntryIds = newIds.toMutableList()))
+                        providerRepository.updateGroup(currentGroup().copy(memberEntryIds = newIds.toMutableList()))
                         entryToRemove = null
                     },
                 ) {
