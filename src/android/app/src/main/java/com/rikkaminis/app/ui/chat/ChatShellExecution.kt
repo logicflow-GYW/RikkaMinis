@@ -143,14 +143,21 @@ internal suspend fun executeShellCommandEngine(
     // churns at 1Hz. The trailing onProgressUpdate("") clears the pill
     // badge; the message block itself is never touched by the countdown.
     if (delaySec > 0) {
-        for (remaining in delaySec downTo 1) {
-            val mm = remaining / 60
-            val ss = remaining % 60
-            val countdown = if (mm > 0) String.format("%d:%02d", mm, ss) else "${ss}s"
-            onProgressUpdate("⏳ Waiting $countdown before executing...")
-            kotlinx.coroutines.delay(1000)
+        try {
+            for (remaining in delaySec downTo 1) {
+                val mm = remaining / 60
+                val ss = remaining % 60
+                val countdown = if (mm > 0) String.format("%d:%02d", mm, ss) else "${ss}s"
+                onProgressUpdate("⏳ Waiting $countdown before executing...")
+                kotlinx.coroutines.delay(1000)
+            }
+        } finally {
+            // [audit-0917] Clear the pill badge in a finally: the countdown
+            // delay throws CancellationException on user cancel, which used to
+            // skip the trailing clear and leave "⏳ Waiting 0:07…" stuck on the
+            // tool pill of an already-cancelled run.
+            onProgressUpdate("")
         }
-        onProgressUpdate("")
     }
 
     // [T-bash-on-demand] Detect busybox-ash-incompatible bash syntax and,
@@ -186,27 +193,33 @@ internal suspend fun executeShellCommandEngine(
         }
     }
 
+    // [audit-0917] Hoisted so the bash self-heal re-run below reuses the SAME
+    // line callback. The retry used to call ExecutionCoordinator.execute with
+    // no lineCallback, so the UI block never received the retry's streamed
+    // output and the displayed content diverged from the final result.
+    val shellLineCallback: (String, Boolean) -> Unit = lc@{ rawLine, isPartial ->
+        // Strip any OSC MinisOpenURL markers emitted by
+        // /usr/local/bin/minis-open and forward the captured
+        // URLs to the broker so the chat screen can present the
+        // in-app preview. Lines that were *entirely* a marker
+        // (nothing visible afterwards) are dropped so the tool
+        // output doesn't grow blank rows.
+        val (cleanedLine, capturedUrls) = MinisUrlMarker.extract(rawLine)
+        for (raw in capturedUrls) MinisOpenUrlBroker.offer(raw)
+        if (cleanedLine.isEmpty() && rawLine.isNotEmpty()) return@lc
+
+        // Streaming display: accumulate into this tool's window and
+        // push the trimmed last-50-lines each time. `isPartial` marks an
+        // unterminated read-chunk tail — it overwrites the previous
+        // fragment instead of starting a new line.
+        streamedLinesForDisplay(rawLine, toolKey, isPartial)?.let { onBlockUpdate(it) }
+    }
+
     var result = ExecutionCoordinator.execute(
         sessionId = dispatchSessionId,
         command = command,
         timeout = timeoutSec * 1000L,
-        lineCallback = lc@{ rawLine, isPartial ->
-            // Strip any OSC MinisOpenURL markers emitted by
-            // /usr/local/bin/minis-open and forward the captured
-            // URLs to the broker so the chat screen can present the
-            // in-app preview. Lines that were *entirely* a marker
-            // (nothing visible afterwards) are dropped so the tool
-            // output doesn't grow blank rows.
-            val (cleanedLine, capturedUrls) = MinisUrlMarker.extract(rawLine)
-            for (raw in capturedUrls) MinisOpenUrlBroker.offer(raw)
-            if (cleanedLine.isEmpty() && rawLine.isNotEmpty()) return@lc
-
-            // Streaming display: accumulate into this tool's window and
-            // push the trimmed last-50-lines each time. `isPartial` marks an
-            // unterminated read-chunk tail — it overwrites the previous
-            // fragment instead of starting a new line.
-            streamedLinesForDisplay(rawLine, toolKey, isPartial)?.let { onBlockUpdate(it) }
-        },
+        lineCallback = shellLineCallback,
     )
 
     // [T-bash-on-demand] M5 self-heal: our bash wrapper returns sentinel
@@ -224,7 +237,13 @@ internal suspend fun executeShellCommandEngine(
         val healed = OnDemandBash.ensureBash(context, executor)
         command = if (healed is OnDemandBash.Outcome.Available) wrapForBash(bashScript!!) else bashScript!!
         result = ExecutionCoordinator.execute(
-            sessionId = dispatchSessionId, command = command, timeout = timeoutSec * 1000L)
+            sessionId = dispatchSessionId,
+            command = command,
+            timeout = timeoutSec * 1000L,
+            // [audit-0917] Same callback as the initial run — the retry's output
+            // must reach the UI block too.
+            lineCallback = shellLineCallback,
+        )
     }
 
     // Also scrub markers from the aggregated one-shot output and

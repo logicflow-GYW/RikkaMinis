@@ -25,9 +25,13 @@ suspend fun ChatViewModel.loadSessionEntity(): com.rikkaminis.app.data.db.ChatSe
  *  without waiting for a session reload. */
 fun ChatViewModel.updateTitleAndCategory(title: String, category: String?) {
     val sid = realSessionId.ifEmpty { return }
+    // [audit-0917] Persist the SAME value that is shown locally. The DB used to
+    // get the raw (possibly blank) title while the pill displayed the "New
+    // Chat" fallback — a blank title survived a reload as an empty row label.
+    val effective = title.ifBlank { "New Chat" }
     viewModelScope.launch {
-        chatRepository.updateSessionTitleAndCategory(sid, title, category)
-        _sessionTitle.value = title.ifBlank { "New Chat" }
+        chatRepository.updateSessionTitleAndCategory(sid, effective, category)
+        _sessionTitle.value = effective
         _sessionCategory.value = category
     }
 }
@@ -173,7 +177,18 @@ private fun ChatViewModel.migrateDraftResources(fromDraft: String, toReal: Strin
             }
         }
     }
-    runCatching { draftBase.deleteRecursively() }
+    // [audit-0917] Only drop the draft tree when nothing failed to migrate.
+    // The old unconditional deleteRecursively() destroyed exactly the files
+    // whose move had just failed — the user's attachment was logged as
+    // "failed to move" and then deleted anyway.
+    val leftover = runCatching { draftBase.walkTopDown().any { it.isFile } }.getOrDefault(true)
+    if (!leftover) {
+        runCatching { draftBase.deleteRecursively() }
+    } else {
+        android.util.Log.w(
+            "ChatViewModel",
+            "migrateDraftResources: keeping ${draftBase.absolutePath} — un-migrated file(s) remain")
+    }
 
     // Also rename the BrowserTabPool saved-state file (filesDir/browser_tabs/<sid>.json).
     // Otherwise the pool will load empty state on the next re-entry and the
@@ -188,6 +203,12 @@ private fun ChatViewModel.migrateDraftResources(fromDraft: String, toReal: Strin
                     draftTabs.copyTo(realTabs, overwrite = false)
                     draftTabs.delete()
                 }
+            } else {
+                // [audit-0917] The real tab file already exists, so the draft
+                // file was left behind forever — a stale __new__* entry in
+                // browser_tabs that nothing ever prunes. The real file wins
+                // (it is the live session's state); drop the draft copy.
+                draftTabs.delete()
             }
         }
     }

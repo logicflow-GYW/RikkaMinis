@@ -444,7 +444,18 @@ internal object ChatMutationMethods {
             val bytes = try {
                 android.util.Base64.decode(data, android.util.Base64.NO_WRAP)
             } catch (_: Exception) { null } ?: continue
-            val file = File(cacheDir, "${System.currentTimeMillis()}-$name")
+            // [audit-0917] Sanitize the RPC-supplied name before it reaches the
+            // filesystem: a name carrying '/' or '..' escaped rpc-attachments
+            // and could clobber arbitrary cache files. The display name stays
+            // in `name`; only the on-disk basename is sanitized.
+            val safeName = sanitizeAttachmentName(name)
+            // [audit-0917] Uniqueness must not rest on System.currentTimeMillis()
+            // alone: two attachments decoded in the same millisecond with the
+            // same name resolved to one File and the second write silently
+            // overwrote the first. A per-call counter + nanoTime suffix keeps
+            // the names deterministic per call while making collisions
+            // impossible inside the loop.
+            val file = File(cacheDir, "${System.currentTimeMillis()}-${System.nanoTime()}-$i-$safeName")
             file.outputStream().use { it.write(bytes) }
             // Use FileProvider so the URI is consumable by Android components
             // (matches what the document/image pickers hand back to the app).
@@ -461,6 +472,21 @@ internal object ChatMutationMethods {
             out.add(InputAttachment(fileName = name, uri = uri, mimeType = mime, kind = kind))
         }
         return out
+    }
+
+    /**
+     * [audit-0917] Reduce an RPC-supplied attachment name to a safe basename.
+     * Strips any directory component (`../x`, `a/b`), rejects `.`/`..`, and
+     * drops characters that are illegal or risky in a filename. Falls back to
+     * "attachment" so the caller always gets a non-empty basename.
+     */
+    private fun sanitizeAttachmentName(raw: String): String {
+        val base = raw.substringAfterLast('/').substringAfterLast('\\')
+        val cleaned = base
+            .map { c -> if (c.isLetterOrDigit() || c in "-._ " || c.code > 127) c else '_' }
+            .joinToString("")
+            .trim()
+        return cleaned.takeIf { it.isNotEmpty() && it != "." && it != ".." } ?: "attachment"
     }
 
     /**

@@ -1295,6 +1295,15 @@ class ChatViewModel(
     @Volatile
     internal var _browserTabPoolRef: BrowserTabPool? = null
 
+    /**
+     * [audit-0917] Unsubscribe handle for the safe-mode-cleared listener.
+     * CrashFrequencyDetector holds listeners in a process-lifetime singleton,
+     * so registering without keeping the returned unsubscribe lambda pinned the
+     * whole ChatViewModel (and its repositories / browser pool) for the life of
+     * the process — one leak per chat screen the user opened.
+     */
+    private var safeModeClearedUnsubscribe: (() -> Unit)? = null
+
     /** Browser tab pool for browser_use tool. Lazily created on first access. */
     val browserTabPool: BrowserTabPool by lazy {
         BrowserTabPool(context).also {
@@ -2191,6 +2200,9 @@ class ChatViewModel(
                         }
                 }
             }
+            // [audit-0917] Pin the unsubscribe lambda so onCleared() can drop
+            // the registration — otherwise the singleton keeps this VM alive.
+            .also { safeModeClearedUnsubscribe = it }
         // Re-resolve provider when config changes (models may load async)
         viewModelScope.launch {
             // T306: wait for loadSession to finish BEFORE observing config.
@@ -3438,8 +3450,22 @@ class ChatViewModel(
 
     fun cancelStream() {
         AppLogger.info(TAG_STREAM, "cancelStream invoked _isStreaming=false (sid=$activeSessionId)")
+        val epochAtCancel = streamEpoch
         streamJob?.cancel()
-        _isStreaming.value = false
+        // [audit-0917] Guard the flag with the same epoch discipline every
+        // other clear site uses (rerunFromToolBlock / retry / resume finally
+        // blocks all compare sendEpoch == streamingClaimEpoch). An
+        // unconditional assignment could clear the flag of a turn that had
+        // already claimed streaming in the meantime — a stale cancel landing
+        // after the new claim but before the new job is established.
+        if (streamEpoch == epochAtCancel) {
+            _isStreaming.value = false
+        } else {
+            AppLogger.info(
+                TAG_STREAM,
+                "cancelStream _isStreaming=false SKIPPED (superseded; epoch=$epochAtCancel now=$streamEpoch)",
+            )
+        }
         // T7-A: 观察 —— 用户取消（T5 UserCancelled 语义，进入收尾）
         traceObserver.t7State(
             traceObserver.t7ObservedPhase ?: ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL),
@@ -3614,6 +3640,11 @@ class ChatViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        // [audit-0917] Drop the safe-mode listener registration: the singleton
+        // holds it for the process lifetime, so without this the whole VM
+        // (repositories, browser pool) leaked per opened chat screen.
+        safeModeClearedUnsubscribe?.invoke()
+        safeModeClearedUnsubscribe = null
         // [T-chat-sysinfo-coalesce] Flush any pending coalesce window so the
         // last system notice isn't lost when the ViewModel is destroyed.
         flushPendingSysInfo()
