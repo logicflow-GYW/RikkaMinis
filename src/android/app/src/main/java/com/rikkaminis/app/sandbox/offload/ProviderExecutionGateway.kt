@@ -182,7 +182,10 @@ object ProviderExecutionGateway {
                         .firstOrNull { it.value == m.optString("type", "") }
                         ?: com.rikkaminis.app.data.model.LLMMediaAttachment.MediaType.IMAGE,
                     mimeType = m.optString("mime_type", "application/octet-stream"),
-                    data = java.util.Base64.getDecoder().decode(b64),
+                    // [audit-0917] Malformed base64 -> skip the attachment, not an
+                    // untyped IllegalArgumentException out of the typed-failure path.
+                    data = runCatching { java.util.Base64.getDecoder().decode(b64) }.getOrNull()
+                        ?: return@mapNotNull null,
                 )
             }
         }

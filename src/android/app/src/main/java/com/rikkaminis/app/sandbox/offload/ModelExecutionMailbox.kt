@@ -121,7 +121,14 @@ object ModelExecutionMailbox {
                 put("unacked", unacked)
                 put("at", System.currentTimeMillis())
             }
-            File(dir, FILE_STATE).writeText(obj.toString())
+            // [audit-0917] tmp+rename (mirrors touchLivenessBeat) so a
+            // concurrent readState never reads a torn JSON file mid-write.
+            val f = File(dir, FILE_STATE)
+            val tmp = File(dir, "$FILE_STATE.tmp")
+            tmp.writeText(obj.toString())
+            if (!tmp.renameTo(f)) {
+                f.writeText(obj.toString())
+            }
             true
         }.getOrElse {
             android.util.Log.w(ModelExecutionRunDir.TAG, "writeState failed (${dir.name}): ${it.message}")
@@ -135,5 +142,13 @@ object ModelExecutionMailbox {
 
     /** Read the worker's persisted lifecycle-state NAME (ACTIVE / STOPPING / …), or null. */
     fun readStateName(dir: File): String? =
-        readState(dir)?.let { runCatching { JSONObject(it).optString("state", null) }.getOrNull() }
+        readState(dir)?.let { raw ->
+            runCatching {
+                // [audit-0917] optString returns the literal "null" when the key
+                // holds JSONObject.NULL - guard with isNull so the caller's null
+                // (state unknown) survives instead of becoming the string "null".
+                val obj = JSONObject(raw)
+                if (obj.isNull("state")) null else obj.optString("state")
+            }.getOrNull()
+        }
 }

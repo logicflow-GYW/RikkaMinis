@@ -186,7 +186,16 @@ class ModelUseOffloadHandler(
         }
 
         // System prompt: --system takes precedence over --system-file
-        val explicitSystem = args.get("system") ?: args.get("system-file")?.let { readLinuxPath(it, request.sessionId) }
+        // [audit-0917] A --system-file that cannot be read is an explicit error,
+        // not a silent system-prompt drop (mirrors the --input branch below).
+        val sysFile = args.get("system-file")?.let { readLinuxPath(it, request.sessionId) }
+        if (args.get("system-file") != null && sysFile == null) {
+            return NativeOffloadResult(
+                2,
+                "minis-model-use run: cannot read --system-file '${args.get("system-file")}'\n",
+            )
+        }
+        val explicitSystem = args.get("system") ?: sysFile
 
         // Parse input messages: --input <path> | stdin
         val inputText = when {

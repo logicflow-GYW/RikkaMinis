@@ -46,6 +46,11 @@ import java.util.concurrent.TimeUnit
  */
 class LocationOffloadHandler(private val context: Context) : NativeOffloadHandler {
 
+    // [audit-0917] One executor for the handler's lifetime: the per-call
+    // newSingleThreadExecutor() was never shut down and leaked a thread on
+    // every requestFreshLocation attempt.
+    private val callbackExecutor = Executors.newSingleThreadExecutor()
+
     override fun handle(request: NativeOffloadRequest): NativeOffloadResult {
         val args = OffloadArgs(request.argv.drop(1))
         // [T-location-default-current-android] Help only on explicit
@@ -244,7 +249,7 @@ class LocationOffloadHandler(private val context: Context) : NativeOffloadHandle
                     lm.getCurrentLocation(
                         provider,
                         cancel,
-                        Executors.newSingleThreadExecutor(),
+                        callbackExecutor,
                     ) { loc ->
                         holder[0] = loc
                         latch.countDown()
