@@ -1,10 +1,12 @@
 package com.rikkaminis.app.ui.navigation
 
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.currentStateFlow
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.navigation.NavController
 import androidx.navigation.NavOptionsBuilder
-import kotlinx.coroutines.flow.first
+import kotlin.coroutines.resume
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 /**
  * Wrapper around `NavController.navigate` that drops the call when the
@@ -55,11 +57,32 @@ fun NavController.safeNavigate(
  * Suspends until the entry is RESUMED, then performs the *guarded* navigate —
  * so the teardown protection `safeNavigate` was chosen for is preserved. No
  * timeout: the effect is keyed on the deep link and dies with the composable.
+ *
+ * [fix/audit-0917-b9] Waits on the observer callback, not on
+ * `Lifecycle.currentStateFlow` — the flow extension does not resolve against
+ * this project's lifecycle-runtime-ktx (compileReleaseKotlin:
+ * "Unresolved reference 'currentStateFlow'"), and addObserver is the API the
+ * androidx samples actually use for "run once when RESUMED". ON_DESTROY also
+ * releases the waiter: navigating away must not strand the effect.
  */
 suspend fun NavController.awaitResumed() {
     val entry = currentBackStackEntry ?: return
     if (entry.lifecycle.currentState == Lifecycle.State.RESUMED) return
-    entry.lifecycle.currentStateFlow.first { it == Lifecycle.State.RESUMED }
+    val lifecycle = entry.lifecycle
+    suspendCancellableCoroutine { cont ->
+        val observer = object : LifecycleEventObserver {
+            override fun onStateChanged(source: LifecycleOwner, event: Lifecycle.Event) {
+                if (event != Lifecycle.Event.ON_RESUME && event != Lifecycle.Event.ON_DESTROY) return
+                lifecycle.removeObserver(this)
+                // Resume either way: the guarded navigate inside the caller
+                // re-checks the stack, so a destroyed entry drops the
+                // navigation instead of throwing.
+                if (cont.isActive) cont.resume(Unit)
+            }
+        }
+        lifecycle.addObserver(observer)
+        cont.invokeOnCancellation { lifecycle.removeObserver(observer) }
+    }
 }
 
 fun NavController.safePopBackStack(): Boolean {
