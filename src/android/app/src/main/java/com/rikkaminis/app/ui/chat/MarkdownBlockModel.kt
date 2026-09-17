@@ -73,9 +73,16 @@ private val taskListItemRegex = Regex("^[-*+]\\s+\\[[ xX]\\]\\s+.*")
 private val taskListPrefixRegex = Regex("^[-*+]\\s+\\[[ xX]\\]\\s+")
 private val bulletListItemRegex = Regex("^[-*+]\\s+.*")
 private val bulletListPrefixRegex = Regex("^[-*+]\\s+")
-private val numberedListItemRegex = Regex("^\\d+[.)\\s]+.*")
-private val numberedListStartRegex = Regex("^(\\d+)")
-private val numberedListPrefixRegex = Regex("^\\d+[.)\\s]+")
+// Marker must be real punctuation (`.`/`)`): a bare number + space is prose.
+// Without this, a paragraph opening like "4 分钟没扫完…" became ordered-list
+// item #4 and rendered as "4.  分钟没扫完" (user report 2026-09-17; chat
+// messages flow through THIS parser — StreamingMarkdownText — while the
+// look-alike regexes in ui/markdown/MarkdownParser.kt serve other screens).
+// \d{1,2} keeps "2020 年…" safe; whitespace-or-EOL after the marker keeps
+// "3.14 是 π" / "1.5倍速" prose. Keep both parsers aligned.
+private val numberedListItemRegex = Regex("^\\d{1,2}[.)](?:\\s+.*)?$")
+private val numberedListStartRegex = Regex("^(\\d{1,2})[.)]")
+private val numberedListPrefixRegex = Regex("^\\d{1,2}[.)](?:\\s+|$)")
 
 /**
  * A blockquote line must be `>` followed by a space, a tab, or end of line.
