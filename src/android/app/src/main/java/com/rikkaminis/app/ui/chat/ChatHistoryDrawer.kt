@@ -299,11 +299,26 @@ private val drawerIoScope =
         kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
     )
 
+private const val TAG = "ChatHistoryDrawer"
+
 private fun deleteSessionAndCleanup(chatRepository: ChatRepository, id: String) {
     drawerIoScope.launch {
-        chatRepository.deleteSession(id)
-        ChatViewModelStore.release(id)
-        com.rikkaminis.app.service.SessionBadgeStore.clear(id)
+        // [fix/audit-0917-b9] release()/clear() used to run only AFTER
+        // deleteSession returned; an exception there (IO error, row already
+        // gone) skipped them, leaking the ChatViewModel and a stale badge for
+        // a session that no longer exists. finally keeps the cleanup
+        // unconditional. ChatViewModelStore.release touches Compose state and
+        // must run on Main — hop back like ChatViewModel.deleteSession does.
+        try {
+            chatRepository.deleteSession(id)
+        } catch (t: Throwable) {
+            android.util.Log.w(TAG, "deleteSession($id) failed — releasing resources anyway", t)
+        } finally {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                ChatViewModelStore.release(id)
+            }
+            com.rikkaminis.app.service.SessionBadgeStore.clear(id)
+        }
     }
 }
 

@@ -1020,8 +1020,14 @@ internal fun ToolDetailSheet(
                         }
                         val keywords = toolArgsObj.optString("keywords", "")
                             .ifEmpty { extractPartialJsonString("keywords", block.toolArgs) ?: "" }
-                        val prefix = if (keywords.isNotEmpty() && block.toolName == "memory_get")
-                            "Keywords: $keywords\n\n" else ""
+                        // [fix/audit-0917-b9] keywords arrive from tool args
+                        // with no length cap; a multi-KB argument built a
+                        // multi-KB prefix laid out on the main thread. Cap at
+                        // 160 chars — the full argument stays in the trace and
+                        // in the copied text.
+                        val keywordsHead = keywords.take(160)
+                        val prefix = if (keywordsHead.isNotEmpty() && block.toolName == "memory_get")
+                            "Keywords: $keywordsHead\n\n" else ""
                         EditorCard(
                             title = block.toolName,
                             icon = Icons.Default.Psychology,

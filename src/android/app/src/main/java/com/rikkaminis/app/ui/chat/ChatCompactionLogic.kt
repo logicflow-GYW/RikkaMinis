@@ -199,9 +199,15 @@ fun buildConversationTextForSummary(history: List<LLMMessage>): String = buildSt
  */
 fun isContextTooLargeError(error: Throwable): Boolean {
     val desc = (error.message ?: error.toString()).lowercase()
+    // [fix/audit-0917-b9] "max_tokens" was dropped: it appears in OUTPUT
+    // parameter errors ("max_tokens must be at most N") which halving the
+    // input does NOT fix — classifying them here sent the retry loop into
+    // repeated non-converging halvings. True input-overflow texts are all
+    // covered by the remaining substrings (context window / context length /
+    // too many tokens / prompt is too long / …). Deliberate deviation from
+    // the iOS implementation this was mirrored from.
     return desc.contains("too many tokens") ||
         desc.contains("context length") ||
-        desc.contains("max_tokens") ||
         desc.contains("content is too long") ||
         desc.contains("exceeds the model") ||
         desc.contains("request too large") ||

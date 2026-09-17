@@ -178,7 +178,14 @@ object MarkdownParser {
                     items.add(parseListItem(content))
                     i++
                     // Collect continuation lines (indented)
-                    while (i < lines.size && lines[i].startsWith("  ") && !Regex("^\\s{0,3}[-*+]\\s").matches(lines[i])) {
+                    // [fix/audit-0917-b9] `.matches()` requires the WHOLE
+                    // string to match "bullet marker + whitespace" — it only
+                    // fired for a bare "- " with nothing after it, so an
+                    // indented "- item" (a real new list item) matched the
+                    // startsWith("  ") test and was swallowed as a
+                    // continuation of the previous bullet's content.
+                    // containsMatchIn tests the prefix the regex reads.
+                    while (i < lines.size && lines[i].startsWith("  ") && !Regex("^\\s{0,3}[-*+]\\s").containsMatchIn(lines[i])) {
                         items[items.lastIndex] = items.last().copy(
                             content = items.last().content + "\n" + lines[i].trimStart()
                         )

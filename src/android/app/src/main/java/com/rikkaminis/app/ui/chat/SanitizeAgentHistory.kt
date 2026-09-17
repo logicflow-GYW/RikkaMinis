@@ -60,8 +60,14 @@ internal fun sanitizeAgentHistoryMessagesImpl(
         }
         log("sanitize: injecting ${placeholders.size} placeholder tool_result(s) after history[$i]")
 
-        if (next != null && next.role == LLMMessage.Role.USER &&
-            next.contentParts.any { it is AgentContentPart.ToolResult }) {
+        // [fix/audit-0917-b9] Merging used to require next to ALREADY carry a
+        // ToolResult; a plain-text USER neighbour (interrupted assistant turn)
+        // fell through to the insert branch, producing
+        // [assistant(tool_use), user(placeholders), user(original text)] —
+        // two consecutive USER messages (Anthropic hard 400, OpenAI silent
+        // merge). Any USER message can legally carry a tool_result block, so
+        // every USER neighbour merges; only ASSISTANT neighbours insert.
+        if (next != null && next.role == LLMMessage.Role.USER) {
             // Append missing results to the existing user message
             messages[i + 1] = next.copy(
                 contentParts = next.contentParts + placeholders
