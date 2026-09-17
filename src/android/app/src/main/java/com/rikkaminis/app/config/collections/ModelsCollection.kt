@@ -339,13 +339,20 @@ class ModelsCollection(
             },
             writer = { v ->
                 val arr = (v as? ConfigValue.Arr)?.value ?: throw ConfigError.TypeMismatch("array")
-                val names = arr.mapNotNull { (it as? ConfigValue.Str)?.value }
-                if (names.isEmpty()) {
+                // [fix/audit-0917-b9] Empty array is the documented "clear"
+                // sentinel; a NON-string entry is malformed input and must not
+                // silently read as "clear" (the old mapNotNull dropped every
+                // non-string element and fell into the empty branch, wiping
+                // the override on behalf of a typo). Refuse instead of
+                // guessing — same flavour as the other writer gates.
+                if (arr.isEmpty()) {
                     mutate(id) { e ->
                         e.copy(overrides = e.overrides.copy(inputModalities = null, outputModalities = null))
                     }
                     return@ClosureField
                 }
+                val names = arr.map { (it as? ConfigValue.Str)?.value
+                    ?: throw ConfigError.TypeMismatch("array entries must be strings") }
                 val (inputs, outputs) = decodeModalitiesOverride(names)
                 mutate(id) { e ->
                     e.copy(

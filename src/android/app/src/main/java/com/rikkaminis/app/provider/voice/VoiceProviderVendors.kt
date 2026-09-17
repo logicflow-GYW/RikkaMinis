@@ -135,8 +135,8 @@ class MiniMaxVoiceProvider(providerId: String, baseURL: String, apiKey: String?)
 
 // -- Doubao / Volcano (TTS + ASR, X-Api-Key auth, distinct formats) -----------
 
-class DoubaoVoiceProvider(providerId: String, apiKey: String?) :
-    VoiceProvider(providerId, "https://openspeech.bytedance.com", apiKey) {
+class DoubaoVoiceProvider(providerId: String, baseUrl: String, apiKey: String?) :
+    VoiceProvider(providerId, baseUrl, apiKey) {
 
     override fun applyVoiceAuth(builder: Request.Builder) {
         val key = apiKey?.takeIf { it.isNotEmpty() } ?: return

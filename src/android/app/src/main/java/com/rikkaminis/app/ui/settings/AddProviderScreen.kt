@@ -432,7 +432,21 @@ private fun ColumnScope.ApiKeyConfigSection(
             // forceRefresh=true bypasses the 7-day ProviderModelsCache so a brand-new provider
             // re-validates its URL+key immediately instead of reusing a stale cached result
             // and leaving the model list empty until the next daily auto-refresh.
-            (appContext as? MinisApp)?.applicationScope?.launch {
+            // [fix/audit-0917-b9] The old `(appContext as? MinisApp)?...`
+            // silently did nothing when the cast failed or the scope was
+            // null: the provider got saved but its model list never
+            // refreshed, with no signal anywhere. The cast cannot fail in
+            // production (MinisApp IS the Application), so this is
+            // refuse-instead-of-guess — surface it loudly instead of
+            // skipping the refresh without a trace.
+            val appScope = appContext as? MinisApp
+            if (appScope == null) {
+                android.util.Log.w(
+                    "AddProviderScreen",
+                    "appContext is ${appContext::class.java.name}, not MinisApp — " +
+                        "post-save model refresh skipped for ${instance.id}",
+                )
+            } else appScope.applicationScope.launch {
                 val result = providerRepository.refreshModels(instance, forceRefresh = true)
                 if (result != ModelRefreshResult.SUCCESS_API) {
                     // [fix/audit-b22 / T6-L6] These three were hardcoded Chinese

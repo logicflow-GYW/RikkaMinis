@@ -195,7 +195,12 @@ object ThinkingRuleCoding {
     /** Mirror of [toRule] over the request-JSON shape. Defensive: bad rows degrade to "no opinion" rules. */
     fun decodeRuleJson(o: JSONObject): ThinkingRule? {
         val label = o.optString("label", "")
-        if (label.isEmpty()) return null
+        // [fix/audit-0917-b9] No emptiness gate: [toRule] (the Room path)
+        // accepts any label, so rejecting an empty one here made the
+        // round-trip lossy — encodeRuleJson writes label as-is, and a rule
+        // with an empty label would silently vanish after one worker pass
+        // (the cross-process handoff drops what the DB path keeps).
+        // Unlabelled rules are legitimate (the UI falls back to the kind).
         val scope = when (o.optString("scopeKind", "allModels")) {
             "modelPattern" -> ThinkingRule.Scope.ModelPattern(o.optString("scopePattern", "*"))
             else -> ThinkingRule.Scope.AllModels

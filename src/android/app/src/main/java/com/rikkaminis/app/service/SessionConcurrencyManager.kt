@@ -202,6 +202,12 @@ object SessionConcurrencyManager {
         }
     }
 
+    /** 该 session 是否还有其他仍在等待的 waiter（PROMOTED 的已计入 running）。 */
+    private fun hasOtherWaiting(sessionId: String, except: PendingRun?): Boolean =
+        pending.values.any {
+            it !== except && it.sessionId == sessionId && it.state != PendingRun.State.PROMOTED
+        }
+
     /** 将 [runId] 对应的 waiter 提升为 active 并恢复其协程（在锁外 resume，避免死锁）。 */
     private fun promote(runId: String) {
         var toResume: CancellableContinuation<Unit>? = null
@@ -209,7 +215,12 @@ object SessionConcurrencyManager {
             val p = pending[runId] ?: return
             if (p.state == PendingRun.State.PROMOTED) return // 只提升一次
             p.state = PendingRun.State.PROMOTED
-            _suspendedSessions.value = _suspendedSessions.value - p.sessionId
+            // [fix/audit-0917-b9] 仅在“本 session 没有别的 waiter 还在等”时清挂起标记：
+            // 同一会话并发两次发送时两个 run 共用一个 sessionId，提升第一个就清标记，
+            // 会让仍在排队的第二个在 UI 上不再显示“等待中”。PROMOTED 的不算（已进 running）。
+            if (!hasOtherWaiting(p.sessionId, p)) {
+                _suspendedSessions.value = _suspendedSessions.value - p.sessionId
+            }
             _runningSessions.value = _runningSessions.value + p.sessionId
             activeRunIdsBySession.getOrPut(p.sessionId) { ArrayDeque() }.addLast(runId)
             if (p.continuation != null) {
@@ -232,7 +243,11 @@ object SessionConcurrencyManager {
             val p = pending[runId] ?: return
             if (p.state == PendingRun.State.PROMOTED) return // 已提升，忽略过期取消
             pending.remove(runId)
-            _suspendedSessions.value = _suspendedSessions.value - p.sessionId
+            // [fix/audit-0917-b9] 同 promote：还有别的 waiter 在等就保留标记，
+            // 否则取消一个排队项会让另一个仍在排队的 run 失去“等待中”显示。
+            if (!hasOtherWaiting(p.sessionId, null)) {
+                _suspendedSessions.value = _suspendedSessions.value - p.sessionId
+            }
             controller.cancel(runId)
         }
     }
@@ -243,7 +258,9 @@ object SessionConcurrencyManager {
             val p = pending[runId] ?: return
             if (p.state == PendingRun.State.PROMOTED) return // resume 已发出，等待收敛
             pending.remove(runId)
-            _suspendedSessions.value = _suspendedSessions.value - p.sessionId
+            if (!hasOtherWaiting(p.sessionId, null)) {
+                _suspendedSessions.value = _suspendedSessions.value - p.sessionId
+            }
             controller.cancel(runId)
         }
     }

@@ -63,7 +63,16 @@ class ContextGrowthTracker(
      */
     fun reserveTokens(contextWindow: Int): Int {
         if (samples <= 0 || perTurnEstimate <= 0 || contextWindow <= 0) return 0
-        val raw = perTurnEstimate * reserveTurns
+        // [fix/audit-0917-b9] Saturate the multiplication: a corrupted huge
+        // sample would overflow Long and produce a NEGATIVE reserve that
+        // minOf picks over the cap — delaying compaction instead of capping
+        // it. reserveTurns is a small constant, so this is only reachable
+        // with corrupted input; refuse-instead-of-guess keeps the error from
+        // becoming a wrong action. reserveTurns <= 0 keeps its old zero
+        // behaviour (an explicit zero/negative tuning is not our concern).
+        val raw = if (reserveTurns <= 0) 0L
+        else if (perTurnEstimate > Long.MAX_VALUE / reserveTurns) Long.MAX_VALUE
+        else perTurnEstimate * reserveTurns
         val cap = (contextWindow / MAX_RESERVE_WINDOW_FRACTION).toLong()
         return minOf(raw, cap).toInt()
     }

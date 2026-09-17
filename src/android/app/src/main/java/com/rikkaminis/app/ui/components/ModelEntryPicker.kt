@@ -246,7 +246,15 @@ fun LazyListScope.modelEntryPickerItems(
                             RoundedCornerShape(12.dp),
                         )
                         .clip(RoundedCornerShape(12.dp))
-                        .clickable { onToggleSelection(firstEntry.id) }
+                        // [fix/audit-0917-b9] The collapsed row is what the
+                        // user taps to see the group ("first model + N
+                        // models"); it used to toggle the FIRST entry's
+                        // selection instead, so a tap to look around silently
+                        // (de)selected a model that wasn't even shown. Now it
+                        // expands, exactly like the header chevron.
+                        .clickable {
+                            collapsedInstanceIds.value = collapsedInstanceIds.value - instance.id
+                        }
                         .padding(horizontal = 16.dp, vertical = 13.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {

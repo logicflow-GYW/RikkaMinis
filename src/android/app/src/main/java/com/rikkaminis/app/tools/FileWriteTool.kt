@@ -157,7 +157,11 @@ object FileWriteTool {
             } ?: ""
             ToolExecutionResult("Wrote to $path ($bytes bytes)$healedNote", true, toolTitle = toolTitle)
         } catch (e: Exception) {
-            ToolExecutionResult("Error writing file: ${e.message}", false)
+            // [fix/audit-0917-b9] toolTitle — every other return path (L37,
+            // L59, L75, L85, L102, L158) passes it, so an exception after
+            // parsing lost the tool title and the offload summary / UI showed
+            // a bare failure row.
+            ToolExecutionResult("Error writing file: ${e.message}", false, toolTitle = toolTitle)
         }
     }
 }

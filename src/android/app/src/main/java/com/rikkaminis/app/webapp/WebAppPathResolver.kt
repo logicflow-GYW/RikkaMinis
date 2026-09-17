@@ -47,9 +47,14 @@ object WebAppPathResolver {
      */
     fun inferScope(hostFile: File): Triple<String, String?, String>? {
         val hostAbs = hostFile.absolutePath
-        // Longest host-prefix wins, mirroring resolveHostPath's longest-key match.
+        // [fix/audit-0917-b9] Sort by LINUX-key length, not host length:
+        // resolveHostPath matches on the longest linux prefix, and a short
+        // linux key can be bound to a long host mount — sorting by host
+        // length let that pair win and produced a too-short linuxPath for a
+        // file that also lives under a longer linux key. Same ordering both
+        // directions keeps this mirror of resolveHostPath faithful.
         val sorted = com.rikkaminis.app.sandbox.PRootKernel
-            .bindMounts.entries.sortedByDescending { it.value.length }
+            .bindMounts.entries.sortedByDescending { it.key.length }
         for ((linuxPrefix, hostBase) in sorted) {
             val baseNorm = hostBase.trimEnd('/')
             if (hostAbs == baseNorm || hostAbs.startsWith("$baseNorm/")) {

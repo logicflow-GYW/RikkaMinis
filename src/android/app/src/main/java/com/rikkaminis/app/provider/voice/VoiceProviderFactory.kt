@@ -52,12 +52,27 @@ object VoiceProviderFactory {
                     // Doubao / Volcano v3: single API Key (new console).
                     normalizedBase.contains("openspeech.bytedance") || normalizedBase.contains("volcano") -> {
                         Log.i(TAG, "Doubao voice provider: base=$normalizedBase keyLen=${apiKey?.length ?: -1}")
-                        DoubaoVoiceProvider(instance.id, apiKey)
+                        // [fix/audit-0917-b9] Pass the user's base through:
+                        // reaching this branch REQUIRES a customBaseURL that
+                        // contains the vendor token, and Volcano exposes
+                        // per-region hosts — dropping it silently pinned
+                        // every user to the global openspeech.bytedance.com.
+                        DoubaoVoiceProvider(
+                            instance.id,
+                            custom ?: "https://openspeech.bytedance.com",
+                            apiKey,
+                        )
                     }
                     // iFlytek / Xunfei: the API-key field carries "appId;apiKey;apiSecret".
                     normalizedBase.contains("xfyun") -> {
                         val p = splitCompound(apiKey)
-                        if (p.size >= 3) XunfeiVoiceProvider(instance.id, p[0], p[1], p[2]) else null
+                        if (p.size >= 3) XunfeiVoiceProvider(instance.id, p[0], p[1], p[2]) else {
+                            // [fix/audit-0917-b9] Was a bare null: the user saw
+                            // "voice input unavailable" with nothing anywhere
+                            // explaining that the compound key was malformed.
+                            Log.w(TAG, "Xunfei voice provider: key field split into ${p.size} part(s), need appId;apiKey;apiSecret")
+                            null
+                        }
                     }
                     normalizedBase.contains("xiaomimimo") ->
                         MimoVoiceProvider(instance.id, custom ?: "https://api.xiaomimimo.com", apiKey)
