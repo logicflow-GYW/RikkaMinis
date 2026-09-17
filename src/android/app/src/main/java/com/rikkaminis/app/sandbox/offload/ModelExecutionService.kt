@@ -920,7 +920,7 @@ class ModelExecutionService : Service() {
                 // Apply image passthrough extras from inputJson (mirrors
                 // ModelUseOffloadHandler.tryImageGenerationRoute's passthrough
                 // injection).
-                applyImagePassthrough(openAI, inputJson)
+                applyImagePassthrough(openAI, inputJson, callWarnings)
                 try {
                     val imgResult = runBlocking {
                         openAI.generateImage(prompt, genConfig.n, genConfig.size, genConfig.quality)
@@ -1582,12 +1582,40 @@ class ModelExecutionService : Service() {
         return result
     }
 
+    /**
+     * [fix/audit0917-b8] Header values are JSON strings — the same dialect the
+     * in-process path (`ModelUseOffloadHandler.parseExtraHeaders`) documents
+     * and enforces. The worker path used to be silently *lax* (`optString`
+     * stringified numbers, and the image route dropped non-strings with no
+     * trace), so a typo'd header looked like it had been sent. Both routes now
+     * drop + warn identically.
+     */
+    private fun jsonTypeName(v: Any?): String = when (v) {
+        null, JSONObject.NULL -> "null"
+        is String -> "string"
+        is Boolean -> "bool"
+        is Number -> "number"
+        is JSONArray -> "array"
+        is JSONObject -> "object"
+        else -> v.javaClass.simpleName
+    }
+
     private fun parseExtraHeaders(inputJson: String, warnings: MutableList<String>): Map<String, String> {
         val obj = try { val t = inputJson.trim(); if (t.startsWith("{")) JSONObject(t) else null }
         catch (_: Exception) { null } ?: return emptyMap()
         val eh = obj.optJSONObject("extra_headers") ?: return emptyMap()
         val result = linkedMapOf<String, String>()
-        for (key in eh.keys()) result[key] = eh.optString(key, "")
+        for (key in eh.keys()) {
+            val v = eh.opt(key)
+            if (v is String) {
+                result[key] = v
+            } else {
+                warnings.add(
+                    "extra_headers.$key value is not a string (actual type: ${jsonTypeName(v)}) — " +
+                        "this header was ignored. Header values must be JSON strings.",
+                )
+            }
+        }
         return result
     }
 
@@ -1632,6 +1660,7 @@ class ModelExecutionService : Service() {
     private fun applyImagePassthrough(
         openAI: com.rikkaminis.app.provider.openai.OpenAIProvider,
         inputJson: String,
+        warnings: MutableList<String>,
     ) {
         val obj = try { val t = inputJson.trim(); if (t.startsWith("{")) JSONObject(t) else null }
         catch (_: Exception) { null } ?: return
@@ -1657,7 +1686,18 @@ class ModelExecutionService : Service() {
         obj.optJSONObject("extra_headers")?.let { eh ->
             for (key in eh.keys()) {
                 val v = eh.opt(key)
-                if (v is String) headers[key] = v
+                if (v is String) {
+                    headers[key] = v
+                } else {
+                    // [fix/audit0917-b8] Same dialect + same visibility as the
+                    // in-process path; the old `if (v is String)` dropped
+                    // these without a trace, so a non-string header looked
+                    // like it had been sent.
+                    warnings.add(
+                        "extra_headers.$key value is not a string (actual type: ${jsonTypeName(v)}) — " +
+                            "this header was ignored. Header values must be JSON strings.",
+                    )
+                }
             }
         }
         if (headers.isNotEmpty()) openAI.imageExtraHeaders = headers

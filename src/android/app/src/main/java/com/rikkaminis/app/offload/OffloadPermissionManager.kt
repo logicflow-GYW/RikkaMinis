@@ -123,7 +123,10 @@ object OffloadPermissionManager {
     private val _pendingRequest = MutableStateFlow<PermissionRequest?>(null)
     val pendingRequest: StateFlow<PermissionRequest?> = _pendingRequest.asStateFlow()
 
-    private var pendingContinuation: kotlin.coroutines.Continuation<Response>? = null
+    // [fix/audit0917-b8] Written by the UI thread (respond*), read by
+    // native-offload worker threads (the suspend callers) — @Volatile so a
+    // response is never missed on a different core.
+    @Volatile private var pendingContinuation: kotlin.coroutines.Continuation<Response>? = null
 
     // ── Android system runtime permission request (for location etc.) ──────────
 
@@ -141,7 +144,7 @@ object OffloadPermissionManager {
     private val _pendingAndroidPermission = MutableStateFlow<AndroidPermissionRequest?>(null)
     val pendingAndroidPermission: StateFlow<AndroidPermissionRequest?> = _pendingAndroidPermission.asStateFlow()
 
-    private var androidPermissionContinuation: kotlin.coroutines.Continuation<AndroidPermissionResult>? = null
+    @Volatile private var androidPermissionContinuation: kotlin.coroutines.Continuation<AndroidPermissionResult>? = null
 
     /**
      * Ask the UI layer to drive the system runtime-permission flow for the
@@ -162,16 +165,26 @@ object OffloadPermissionManager {
             suspendCancellableCoroutine<AndroidPermissionResult> { cont ->
                 androidPermissionContinuation = cont
                 _pendingAndroidPermission.value = AndroidPermissionRequest(permissions)
+                // [fix/audit0917-b8] Identity guard: a newer caller may have
+                // installed its own continuation after this one timed out, and
+                // an unconditional clear would cancel the *active* request's
+                // dialog (its waiter then blocks to its own timeout).
                 cont.invokeOnCancellation {
-                    _pendingAndroidPermission.value = null
-                    androidPermissionContinuation = null
+                    if (androidPermissionContinuation === cont) {
+                        _pendingAndroidPermission.value = null
+                        androidPermissionContinuation = null
+                    }
                 }
             }
         }
         if (timed == null) {
             // Timed out — clear the pending request so the UI doesn't fire a
-            // stale permission dialog later.
-            _pendingAndroidPermission.value = null
+            // stale permission dialog later. [fix/audit0917-b8] Guarded: if a
+            // newer caller has already installed its own continuation, the
+            // slot belongs to it now and clearing would kill its dialog.
+            if (androidPermissionContinuation == null) {
+                _pendingAndroidPermission.value = null
+            }
             androidPermissionContinuation = null
             return AndroidPermissionResult.TIMEOUT
         }
@@ -180,9 +193,14 @@ object OffloadPermissionManager {
 
     /** Called from UI after the system permission dialog returns. */
     fun respondToAndroidPermission(result: AndroidPermissionResult) {
-        _pendingAndroidPermission.value = null
-        androidPermissionContinuation?.resume(result)
+        // [fix/audit0917-b8] Take-then-clear: only the continuation we took
+        // gets resumed, so a late response can never resume a newer waiter
+        // that has since taken the slot. Resuming an already-cancelled
+        // continuation is a no-op in kotlinx.coroutines, so no runCatching.
+        val cont = androidPermissionContinuation ?: return
         androidPermissionContinuation = null
+        _pendingAndroidPermission.value = null
+        cont.resume(result)
     }
 
     /** Overload kept for callers that only have a granted/denied bool. */
@@ -225,7 +243,7 @@ object OffloadPermissionManager {
     private val _pendingSettingsGate = MutableStateFlow<SettingsGateRequest?>(null)
     val pendingSettingsGate: StateFlow<SettingsGateRequest?> = _pendingSettingsGate.asStateFlow()
 
-    private var settingsGateContinuation: kotlin.coroutines.Continuation<SettingsGateDecision>? = null
+    @Volatile private var settingsGateContinuation: kotlin.coroutines.Continuation<SettingsGateDecision>? = null
 
     /**
      * Show an in-app dialog explaining why a settings trip is needed, then
@@ -235,7 +253,10 @@ object OffloadPermissionManager {
      * Returns:
      *  - [AndroidPermissionResult.GRANTED] if [check] succeeds within the
      *    polling window.
-     *  - [AndroidPermissionResult.DENIED] if the user cancels the dialog.
+     *  - [AndroidPermissionResult.DENIED] if the user cancels the dialog, or
+     *    if the dialog itself is never answered within
+     *    [SETTINGS_GATE_TIMEOUT_MS] ([fix/audit0917-b8] — phase 1 used to wait
+     *    forever, hanging a native-offload worker thread).
      *  - [AndroidPermissionResult.TIMEOUT] if the user accepts but doesn't
      *    complete the grant within the window.
      */
@@ -243,14 +264,24 @@ object OffloadPermissionManager {
         request: SettingsGateRequest,
         check: () -> Boolean,
     ): AndroidPermissionResult {
-        val decision = suspendCancellableCoroutine<SettingsGateDecision> { cont ->
-            settingsGateContinuation = cont
-            _pendingSettingsGate.value = request
-            cont.invokeOnCancellation {
-                _pendingSettingsGate.value = null
-                settingsGateContinuation = null
+        // [fix/audit0917-b8] Phase 1 now has the same timeout discipline as
+        // phase 2 (and as requestAndroidPermission): if the UI never calls
+        // respondToSettingsGate (dialog swallowed by a state glitch, activity
+        // gone), the caller used to block forever on a native-offload worker
+        // thread. Timed-out/cancelled phase 1 == DENIED, never a hang.
+        val decision = withTimeoutOrNull(SETTINGS_GATE_TIMEOUT_MS) {
+            suspendCancellableCoroutine<SettingsGateDecision> { cont ->
+                settingsGateContinuation = cont
+                _pendingSettingsGate.value = request
+                // Identity guard — only clear the slot if it is still ours.
+                cont.invokeOnCancellation {
+                    if (settingsGateContinuation === cont) {
+                        _pendingSettingsGate.value = null
+                        settingsGateContinuation = null
+                    }
+                }
             }
-        }
+        } ?: return AndroidPermissionResult.DENIED
         if (decision == SettingsGateDecision.CANCEL) return AndroidPermissionResult.DENIED
 
         val granted = withTimeoutOrNull(SETTINGS_GATE_TIMEOUT_MS) {
@@ -289,9 +320,11 @@ object OffloadPermissionManager {
 
     /** Called from UI after the in-app "go to settings" dialog closes. */
     fun respondToSettingsGate(decision: SettingsGateDecision) {
-        _pendingSettingsGate.value = null
-        settingsGateContinuation?.resume(decision)
+        // [fix/audit0917-b8] Take-then-clear (see respondToAndroidPermission).
+        val cont = settingsGateContinuation ?: return
         settingsGateContinuation = null
+        _pendingSettingsGate.value = null
+        cont.resume(decision)
     }
 
     /**
@@ -384,8 +417,15 @@ object OffloadPermissionManager {
                             sessionId = sessionId,
                         )
                         cont.invokeOnCancellation {
-                            _pendingRequest.value = null
-                            pendingContinuation = null
+                            // [fix/audit0917-b8] Identity guard — a newer
+                            // checkPermission caller may have already taken
+                            // the slot; clearing it unconditionally would
+                            // leave its dialog showing with no waiter behind
+                            // it.
+                            if (pendingContinuation === cont) {
+                                _pendingRequest.value = null
+                                pendingContinuation = null
+                            }
                         }
                     }
                 }
@@ -415,9 +455,15 @@ object OffloadPermissionManager {
 
     /** Called from UI when user responds to the permission dialog. */
     fun respondToRequest(response: Response) {
-        _pendingRequest.value = null
-        pendingContinuation?.resume(response)
+        // [fix/audit0917-b8] Take-then-clear. The old order resumed the
+        // *current* slot after a bare null-out, so a response arriving after
+        // the waiter timed out could resume a stale continuation (or, worse,
+        // a newer waiter's) — IllegalStateException territory. Taking the
+        // reference first makes the pair atomic from the UI's point of view.
+        val cont = pendingContinuation ?: return
         pendingContinuation = null
+        _pendingRequest.value = null
+        cont.resume(response)
     }
 
     /** Clear session grants AND denials (call when a session ends). */

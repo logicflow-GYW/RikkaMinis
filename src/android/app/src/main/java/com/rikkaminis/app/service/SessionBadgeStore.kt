@@ -140,14 +140,30 @@ object SessionBadgeStore {
     private fun loadFromDisk(p: SharedPreferences): Map<String, List<SessionBadgeState>> {
         val raw = runCatching { p.getString(KEY, null) }.getOrNull() ?: return emptyMap()
         if (raw.isBlank()) return emptyMap()
-        return raw.split(';').mapNotNull { entry ->
+        // [fix/audit0917-b8] Unknown state names are still dropped (there is no
+        // forward-compat slot in an enum-keyed map), but no longer *silently*:
+        // a downgrade that meets a newer state now leaves a log line instead of
+        // evaporating. [audit-0917 REFUTED as a defect: every consumer
+        // (reconcileInterruptedSessions / push) recomputes the badge from the
+        // message tail at launch, so a dropped token self-heals; the only
+        // reserved-but-unproduced value is ICLOUD_SYNCING.]
+        val dropped = mutableListOf<String>()
+        val loaded = raw.split(';').mapNotNull { entry ->
             val eq = entry.indexOf('=')
             if (eq <= 0 || eq == entry.lastIndex) return@mapNotNull null
             val id = entry.substring(0, eq)
             val q = entry.substring(eq + 1)
                 .split(',')
-                .mapNotNull { name -> runCatching { SessionBadgeState.valueOf(name) }.getOrNull() }
+                .mapNotNull { name ->
+                    runCatching { SessionBadgeState.valueOf(name) }
+                        .onFailure { dropped.add(name) }
+                        .getOrNull()
+                }
             if (q.isEmpty()) null else id to q
         }.toMap()
+        if (dropped.isNotEmpty()) {
+            Log.w(TAG, "loadFromDisk: dropped unknown badge state(s): ${dropped.distinct().joinToString(",")}")
+        }
+        return loaded
     }
 }

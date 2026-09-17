@@ -114,6 +114,20 @@ object KeyRoulette {
     private fun stateFile(): File? = cacheDir?.let { File(it, FILE_NAME) }
 
     private fun persistLocked(providerId: String, list: List<String>) {
+        // [fix/audit0917-b8] Prune the in-memory map for this provider before
+        // writing the slice. The old comment was only true of the *file*: a key
+        // removed from the stored key string kept its `lastUsed` entry in
+        // memory forever (unbounded map growth over a long session, and the
+        // stale stamp would be resurrected if the user pasted the key back).
+        // Called under [lock], and the map is concurrent, so a snapshot of the
+        // keys is enough.
+        val prefix = "$providerId|"
+        val keep = list.toHashSet()
+        for (existing in lastUsed.keys.toList()) {
+            if (existing.startsWith(prefix) && existing.removePrefix(prefix) !in keep) {
+                lastUsed.remove(existing)
+            }
+        }
         val f = stateFile() ?: return
         runCatching {
             // Rewrite only the current provider's slice; other providers' state

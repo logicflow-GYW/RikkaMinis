@@ -50,6 +50,15 @@ object ShizukuManager {
     private val _snapshot = MutableStateFlow(Snapshot(State.NOT_INSTALLED))
     val snapshot: StateFlow<Snapshot> = _snapshot.asStateFlow()
 
+    /**
+     * [fix/audit0917-b8] `@Synchronized`: the old body was a check-then-act on
+     * [initialized] — two concurrent callers (Application.onCreate + a
+     * settings screen entry) could both pass the guard and each construct a
+     * [ShizukuBackend], leaving the second one's listeners registered while
+     * `backend` pointed at the first. Idempotent by contract, so serialising
+     * is enough; a double init now returns immediately.
+     */
+    @Synchronized
     fun init(app: Application) {
         if (initialized) return
         initialized = true

@@ -240,6 +240,14 @@ object SessionActivityTracker {
     private val streamCancellers = mutableMapOf<String, () -> Unit>()
 
     /**
+     * [fix/audit0917-b8] Guards the read-modify-write of [_activeSessions]
+     * plus the `wasActive` decision in [setActive] / [setInactive]. Kept
+     * separate from the `streamCancellers` / `pendingErrorFlag` monitors so
+     * the completion-listener fan-out below stays outside any lock.
+     */
+    private val activeSessionsLock = Any()
+
+    /**
      * T180-bg-notif: per-session "task is finishing — was it cancelled?"
      * flag, set by [setInactive]'s callers via [setInactiveError] when
      * the streamJob unwinds because of an error (vs a clean completion).
@@ -322,8 +330,15 @@ object SessionActivityTracker {
      * action can fan out to every running session.
      */
     fun setActive(sessionId: String, onStop: (() -> Unit)? = null) {
-        val wasIdle = !shouldRunService()
-        _activeSessions.value = _activeSessions.value + sessionId
+        // [fix/audit0917-b8] Same lock as setInactive — activation and
+        // deactivation of the same session can arrive from different threads
+        // (stream job vs. UI teardown); a concurrent pair used to be able to
+        // leave the id removed while the service had already been started.
+        val wasIdle = synchronized(activeSessionsLock) {
+            val was = !shouldRunService()
+            _activeSessions.value = _activeSessions.value + sessionId
+            was
+        }
         if (onStop != null) {
             synchronized(streamCancellers) { streamCancellers[sessionId] = onStop }
         }
@@ -351,8 +366,17 @@ object SessionActivityTracker {
      * chat.
      */
     fun setInactive(sessionId: String) {
-        val wasActive = sessionId in _activeSessions.value
-        _activeSessions.value = _activeSessions.value - sessionId
+        // [fix/audit0917-b8] Claim the transition atomically. The old body read
+        // `wasActive` and then removed the id in two separate steps, so two
+        // concurrent setInactive(sameId) calls could both observe true and
+        // invoke completionListener twice (double "run completed" notification).
+        // Membership check + removal now happen under one lock; only the caller
+        // that actually removed the id is the transition owner.
+        val wasActive = synchronized(activeSessionsLock) {
+            val was = sessionId in _activeSessions.value
+            _activeSessions.value = _activeSessions.value - sessionId
+            was
+        }
         synchronized(streamCancellers) { streamCancellers.remove(sessionId) }
         val wasError = synchronized(pendingErrorFlag) { pendingErrorFlag.remove(sessionId) }
         AppLogger.info(TAG, "Session deactivated: $sessionId (total: ${_activeSessions.value.size})")

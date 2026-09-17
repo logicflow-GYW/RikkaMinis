@@ -95,6 +95,8 @@ class ConfigOffloadHandler(private val context: Context) : NativeOffloadHandler 
                 "  set-batch                    Read JSON array of {path,value_json} from\n" +
                 "                               stdin. One confirm dialog for the batch.\n" +
                 "                               Each item may use the .append/.remove suffix.\n" +
+                "                               On Android pass it as an argument or with\n" +
+                "                               --file (see `set`), since there is no stdin.\n" +
                 "\n" +
                 "FLAGS:\n" +
                 "  --caption <text>             Caption shown above the confirm dialog.\n" +
@@ -271,11 +273,26 @@ class ConfigOffloadHandler(private val context: Context) : NativeOffloadHandler 
         // stdin pipe on the native_offload protocol. Support either:
         //   set-batch <json-array>      (shell can pass literal)
         //   set-batch --batch <json>    (env-friendly form)
+        //   set-batch --file <path>     (shell-escaping-proof form)
         // The shape is the same as iOS stdin: array of
         // {path, value_json}.
-        val raw = args.positional.getOrNull(1) ?: args.get("batch") ?: return errorResult(
+        //
+        // [fix/audit0917-b8] `--file` was the one write path missing it: a
+        // batch whose values contain quotes / backslashes / newlines / $ /
+        // backticks gets mangled by busybox ash before this handler sees it,
+        // exactly like `set`/`add` did (issue #36). Same fix, same reason.
+        val fileArg = args.get("file")
+        val raw = if (fileArg != null) {
+            readLinuxPath(fileArg, request.sessionId) ?: return errorResult(
+                args, EXIT_INVALID_ARGS, "INVALID_ARGS",
+                "--file: could not read batch from '$fileArg'."
+            )
+        } else {
+            args.positional.getOrNull(1) ?: args.get("batch")
+        } ?: return errorResult(
             args, EXIT_INVALID_ARGS, "INVALID_ARGS",
-            "set-batch expects a JSON array argument with elements {\"path\":..., \"value_json\":...}."
+            "set-batch expects a JSON array argument with elements {\"path\":..., \"value_json\":...} " +
+                "(or use: set-batch --file <path-to-batch-json>)."
         )
         val parsed = try {
             JSONArray(raw)

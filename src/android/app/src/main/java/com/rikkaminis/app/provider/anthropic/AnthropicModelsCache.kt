@@ -46,7 +46,16 @@ internal object AnthropicModelsCache {
     fun save(context: Context, credential: String, models: List<LLMModel>) {
         val file = keyFile(context, credential)
         runCatching {
-            file.writeText(json.encodeToString(CacheEntry(models, System.currentTimeMillis())))
+            // [fix/audit0917-b8] tmp + rename — same reason as
+            // ProviderModelsCache.save: a torn in-place write is silently
+            // discarded by load()'s runCatching, so the cache would look
+            // permanently empty until the TTL path is bypassed.
+            val tmp = File(file.parentFile, "${file.name}.tmp")
+            tmp.writeText(json.encodeToString(CacheEntry(models, System.currentTimeMillis())))
+            if (!tmp.renameTo(file)) {
+                file.writeText(tmp.readText())
+                tmp.delete()
+            }
         }
     }
 

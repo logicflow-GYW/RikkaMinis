@@ -93,7 +93,17 @@ object ToolJsonRepair {
             val candidate = keys.firstOrNull { key ->
                 key !in schemaFields && levenshteinAtMostOne(key, field)
             } ?: continue
-            args.put(field, args.opt(candidate))
+            val moved = args.opt(candidate)
+            // [fix/audit0917-b8] Strategy 2 has already run, so a scalar moved
+            // here used to arrive UNCOERCED — `{"tmeout": 30}` produced a
+            // Number in a string field, while `{"timeout": 30}` produced "30"
+            // via type-coerce. Apply the same rule, and the same
+            // object/array carve-out (leave it for preflight to refuse).
+            // `JSONObject.NULL` (or a missing key) moves verbatim — never as the
+            // literal string "null".
+            if (moved is JSONObject || moved is JSONArray) continue
+            val value = if (moved == null || moved === JSONObject.NULL || moved is String) moved else moved.toString()
+            args.put(field, value)
             args.remove(candidate)
             repairs.add("fuzzy:$candidate->$field")
         }

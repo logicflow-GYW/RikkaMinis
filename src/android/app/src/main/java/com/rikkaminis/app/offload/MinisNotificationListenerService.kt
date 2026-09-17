@@ -39,7 +39,12 @@ class MinisNotificationListenerService : NotificationListenerService() {
         // registers a latch keyed by (package, id) here so it can block
         // until the listener has actually observed its own post.
         val key = postKey(sbn.packageName, sbn.id)
-        postedLatches.remove(key)?.countDown()
+        // [fix/audit0917-b8] Signal, don't evict: the holder is removed by the
+        // last waiter leaving (see awaitPosted). Evicting here used to drop a
+        // latch that a *second* concurrent waiter was still blocked on, so a
+        // post landing after that eviction left the second waiter to time out
+        // even though the notification had arrived.
+        postedLatches[key]?.latch?.countDown()
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {}
@@ -50,8 +55,16 @@ class MinisNotificationListenerService : NotificationListenerService() {
         @Volatile private var connected: Boolean = false
         @Volatile private var instance: MinisNotificationListenerService? = null
 
-        /** Latches awaiting a specific (package, id) post. */
-        private val postedLatches = ConcurrentHashMap<String, CountDownLatch>()
+        /** Latches awaiting a specific (package, id) post.
+         *  [fix/audit0917-b8] Value is a holder with a waiter count so
+         *  concurrent waiters for the same key share one latch and only the
+         *  last one leaving removes the entry — the old code removed on post
+         *  and on first exit, stranding the other waiters. */
+        private class PostWaiter(val latch: CountDownLatch) {
+            val waiters = java.util.concurrent.atomic.AtomicInteger(0)
+        }
+
+        private val postedLatches = ConcurrentHashMap<String, PostWaiter>()
 
         private fun postKey(pkg: String, id: Int): String = "$pkg#$id"
 
@@ -73,27 +86,38 @@ class MinisNotificationListenerService : NotificationListenerService() {
             // Already there? `activeNotifications` is a snapshot of what the
             // system has fanned out to us, so a hit here means the post has
             // already propagated and no waiting is needed.
-            try {
-                if (svc.activeNotifications.any { it.packageName == pkg && it.id == id }) {
-                    return true
-                }
-            } catch (_: SecurityException) {
-                // Listener bound but not yet authorized — fall through to wait.
-            }
+            if (hasPosted(svc, pkg, id)) return true
             val key = postKey(pkg, id)
-            val latch = postedLatches.computeIfAbsent(key) { CountDownLatch(1) }
-            // Re-check after registering the latch — closes the race where the
-            // post lands between our snapshot read and the latch insertion.
+            val waiter = postedLatches.computeIfAbsent(key) { PostWaiter(CountDownLatch(1)) }
+            waiter.waiters.incrementAndGet()
             try {
-                if (svc.activeNotifications.any { it.packageName == pkg && it.id == id }) {
-                    postedLatches.remove(key)
-                    return true
+                // Re-check after registering the latch — closes the race where
+                // the post lands between our snapshot read and the insertion.
+                if (hasPosted(svc, pkg, id)) return true
+                val ok = waiter.latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+                if (!ok) AppLogger.warning(TAG, "awaitPosted($key) timed out after ${timeoutMs}ms")
+                return ok
+            } finally {
+                // Only the last waiter leaving retires the entry; an already
+                // signalled latch stays visible to a waiter that arrives late
+                // within the same window (it will observe `activeNotifications`
+                // or the counted-down latch instead of timing out).
+                if (waiter.waiters.decrementAndGet() == 0) {
+                    postedLatches.remove(key, waiter)
                 }
-            } catch (_: SecurityException) {}
-            val ok = latch.await(timeoutMs, TimeUnit.MILLISECONDS)
-            postedLatches.remove(key)
-            if (!ok) AppLogger.warning(TAG, "awaitPosted($key) timed out after ${timeoutMs}ms")
-            return ok
+            }
+        }
+
+        /** `activeNotifications` guarded against the not-yet-authorized case. */
+        private fun hasPosted(
+            svc: MinisNotificationListenerService,
+            pkg: String,
+            id: Int,
+        ): Boolean = try {
+            svc.activeNotifications.any { it.packageName == pkg && it.id == id }
+        } catch (_: SecurityException) {
+            // Listener bound but not yet authorized — fall through to wait.
+            false
         }
 
         /**

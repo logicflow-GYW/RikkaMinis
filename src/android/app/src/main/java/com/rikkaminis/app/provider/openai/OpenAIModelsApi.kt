@@ -7,7 +7,11 @@ import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.provider.ModelsDevApi
 import com.rikkaminis.app.provider.ProviderModelsCache
 import com.rikkaminis.app.provider.applyUserAgentOverride
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -54,7 +58,27 @@ object OpenAIModelsApi {
             .applyUserAgentOverride(customUserAgent)
             .build()
 
-        val response = client.newCall(request).execute()
+        // [fix/audit0917-b8] Call cancellation is now wired into the request:
+        // `execute()` is blocking and has no cancellation hook, so a cancelled
+        // fetchModels (user leaves the screen / switches provider) used to run
+        // to completion — including `cache.save` — and hold an OkHttp thread.
+        // The completion hook cancels the Call, which makes `execute()` throw
+        // immediately; the catch below asks the coroutine whether *it* is still
+        // alive and only falls back if it is.
+        val call = client.newCall(request)
+        val response = try {
+            currentCoroutineContext().job.invokeOnCompletion { cause ->
+                if (cause is CancellationException) call.cancel()
+            }
+            call.execute()
+        } catch (_: Throwable) {
+            // OkHttp reports a cancelled Call as IOException("Canceled"), not
+            // CancellationException — so translate: if *our* job is gone,
+            // rethrow as cancellation (the caller must unwind, not fall back),
+            // otherwise treat it as an ordinary fetch failure.
+            currentCoroutineContext().ensureActive()
+            return@withContext fallback
+        }
         // [fix/audit-s4m1] try/finally guarantees close across every early
         // return@withContext below (body-null, !isSuccessful, empty data,
         // parse throw). Previously a successful models-list fetch leaked a

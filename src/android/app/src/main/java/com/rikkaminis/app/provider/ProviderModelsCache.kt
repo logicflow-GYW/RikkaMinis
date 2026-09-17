@@ -49,12 +49,40 @@ internal class ProviderModelsCache(
     fun save(context: Context, cacheKey: String, models: List<LLMModel>) {
         val file = keyFile(context, cacheKey)
         runCatching {
-            file.writeText(JSON.encodeToString(Entry(models, System.currentTimeMillis())))
+            // [fix/audit0917-b8] tmp + rename (the repo's atomic-write idiom,
+            // see RootfsEventLog.writeBootId / MCPOAuthStore). writeText
+            // truncates in place, so a mid-write process death left a torn
+            // .json that load() silently discards via runCatching — forcing a
+            // network refetch that looks like "the cache never worked".
+            val tmp = File(file.parentFile, "${file.name}.tmp")
+            tmp.writeText(JSON.encodeToString(Entry(models, System.currentTimeMillis())))
+            if (!tmp.renameTo(file)) {
+                // rename can fail across a bind-mount boundary; fall back to a
+                // direct write so the cache is still populated.
+                file.writeText(tmp.readText())
+                tmp.delete()
+            }
         }
     }
 
     fun invalidate(context: Context, cacheKey: String) {
         runCatching { keyFile(context, cacheKey).delete() }
+        // [fix/audit0917-b8] Also sweep orphans. Files are named by a hash of
+        // the credential + baseURL, so rotating a key (or editing the baseURL)
+        // left the previous file behind forever — `load` is only ever called
+        // with the *current* key, and the TTL check lives on the read path, so
+        // nothing ever deleted them. `invalidate` is the one place we already
+        // know the cache for this provider is suspect, and it runs on the
+        // failure path (rare), so one directory listing is cheap. The OS also
+        // reclaims cacheDir under pressure — this just stops unbounded growth
+        // in the meantime.
+        runCatching {
+            val dir = cacheDir(context)
+            val cutoff = System.currentTimeMillis() - ttlMs
+            dir.listFiles()?.forEach { f ->
+                if (f.name.endsWith(".json") && f.lastModified() < cutoff) f.delete()
+            }
+        }
     }
 
     companion object {

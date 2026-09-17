@@ -82,4 +82,32 @@ class ToolJsonRepairTest {
         assertTrue("expected no coercion, got: $repairs", repairs.isEmpty())
         assertTrue("path must stay an array", args.opt("path") is JSONArray)
     }
+
+    // ── [fix/audit0917-b8] Strategy 3 (fuzzy field move) applies the SAME
+    // scalar rule — it used to move a raw Number into a string field while the
+    // correctly-spelled key got coerced, so the repair depended on a typo.
+
+    @Test
+    fun `a fuzzy-matched number is coerced like its correctly-spelled twin`() {
+        val args = JSONObject("""{"pth":30,"old_string":"x","new_string":"y"}""")
+        val repairs = repair(args)
+        assertEquals("30", args.optString("path"))
+        assertTrue("got: $repairs", repairs.contains("fuzzy:pth->path"))
+    }
+
+    @Test
+    fun `a fuzzy-matched container is not moved at all`() {
+        val args = JSONObject("""{"pth":{"a":1},"old_string":"x","new_string":"y"}""")
+        val repairs = repair(args)
+        assertTrue("expected no move, got: $repairs", repairs.isEmpty())
+        assertTrue("path must stay absent", !args.has("path"))
+    }
+
+    @Test
+    fun `a fuzzy-matched JSON null moves verbatim, not as the string null`() {
+        val args = JSONObject("""{"pth":null,"old_string":"x","new_string":"y"}""")
+        val repairs = repair(args)
+        assertTrue("got: $repairs", repairs.contains("fuzzy:pth->path"))
+        assertEquals(JSONObject.NULL, args.opt("path"))
+    }
 }
