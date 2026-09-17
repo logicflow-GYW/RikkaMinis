@@ -50,8 +50,20 @@ object PRootKernel {
     /** Custom environment variables injected into every proot command. */
     val customEnvironment: MutableMap<String, String> = mutableMapOf()
 
-    /** Bind mounts: Linux path -> host filesystem path. */
-    val bindMounts: MutableMap<String, String> = linkedMapOf()
+    /**
+     * Bind mounts: Linux path -> host filesystem path.
+     *
+     * [audit-0917] ConcurrentHashMap, not linkedMapOf(): writers
+     * (addBindMount / registerGlobalBindMounts / applyMountedFoldersSnapshot,
+     * driven by launch + mount CRUD) race readers that iterate the map while
+     * building a proot command line (buildProotCommand / buildTermuxArgs).
+     * A plain LinkedHashMap threw ConcurrentModificationException out of
+     * whichever shell_execute happened to be starting. Iteration order is
+     * irrelevant — `proot -b` is order-independent. The reconcile sequence in
+     * [applyMountedFoldersSnapshot] is still not atomic, but it is idempotent
+     * and re-run on every mount change, so a torn snapshot converges.
+     */
+    val bindMounts: MutableMap<String, String> = java.util.concurrent.ConcurrentHashMap()
 
     /**
      * Initialize the PRoot environment: install rootfs and proot binary.
@@ -670,8 +682,12 @@ object PRootKernel {
         cmd.add("-w")
         cmd.add("/root")
 
-        // User bind mounts
-        for ((linuxPath, hostPath) in bindMounts) {
+        // User bind mounts.
+        // [audit-0917] Iterate a snapshot: addBindMount / applyMountedFoldersSnapshot
+        // (launch + mount CRUD) mutate this LinkedHashMap from other threads, and a
+        // concurrent put during iteration would throw ConcurrentModificationException
+        // out of buildProotCommand, killing an unrelated shell_execute.
+        for ((linuxPath, hostPath) in bindMounts.entries.toList()) {
             cmd.add("-b")
             cmd.add("$hostPath:$linuxPath")
             // Log external-folder binds specifically — these are the ones that

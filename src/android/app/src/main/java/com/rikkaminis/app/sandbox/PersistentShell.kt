@@ -62,6 +62,15 @@ class PersistentShell(
     @Volatile
     private var stdinWriter: BufferedWriter? = null
 
+    /**
+     * [audit-0917] Serializes raw writes to [stdinWriter]. A command write
+     * ([executeCommand]) and an env broadcast ([applyEnvironment], e.g. a
+     * proxy/TZ change) can run concurrently on Dispatchers.IO; interleaved
+     * bytes at the PTY boundary would splice an `export` line into the middle
+     * of a wrapped command body and corrupt it.
+     */
+    private val writerLock = Any()
+
     private val isStarting = AtomicBoolean(false)
 
     /** Pending command callback — only one command at a time. */
@@ -411,6 +420,12 @@ class PersistentShell(
                 if (n < 0) break
                 val text = String(buffer, 0, n, StandardCharsets.UTF_8)
 
+                // [audit-0917] Only the CURRENT process's reader may consume
+                // output: stop() + restart leaves this thread draining a dead
+                // PTY, and its late bytes would otherwise be scanned into the
+                // new shell's pending command (marker mismatch → wrong result).
+                if (process !== p) break
+
                 val cb = pendingCallback
                 if (cb != null) {
                     val scan = internalScanMarker(tail, text, cb.marker)
@@ -449,9 +464,18 @@ class PersistentShell(
             pendingCallback = null
         }
 
-        process = null
-        stdinWriter = null
-        Log.i(TAG, "Persistent shell process exited")
+        // [audit-0917] Guard against the stop()-then-restart race: if `process`
+        // no longer points at OUR process, a newer shell already took over the
+        // fields — nulling them here would strip the live shell's writer and
+        // make the next executeCommand report "[Shell not running]" against a
+        // perfectly healthy process.
+        if (process === p) {
+            process = null
+            stdinWriter = null
+            Log.i(TAG, "Persistent shell process exited")
+        } else {
+            Log.d(TAG, "Reader loop for a superseded process ended")
+        }
     }
 
     /**
@@ -669,8 +693,12 @@ class PersistentShell(
                     }
 
                     try {
-                        writer.write(wrappedCommand)
-                        writer.flush()
+                        // [audit-0917] Under writerLock: see its KDoc — an env
+                        // broadcast must not interleave with the command body.
+                        synchronized(writerLock) {
+                            writer.write(wrappedCommand)
+                            writer.flush()
+                        }
                     } catch (e: Exception) {
                         pendingCallback = null
                         if (cont.isActive) {
@@ -744,15 +772,20 @@ class PersistentShell(
         val writer = stdinWriter ?: return
         withContext(Dispatchers.IO) {
             try {
-                for (key in previousKeys - envVars.keys) {
-                    writer.write("unset $key\n")
+                // [audit-0917] One atomic block: the unset+export sequence must
+                // reach the PTY intact (see writerLock), otherwise a half-applied
+                // snapshot can leave the shell with a mix of old and new vars.
+                synchronized(writerLock) {
+                    for (key in previousKeys - envVars.keys) {
+                        writer.write("unset $key\n")
+                    }
+                    for ((key, value) in envVars) {
+                        // Escape single quotes in values
+                        val escaped = value.replace("'", "'\\''")
+                        writer.write("export $key='$escaped'\n")
+                    }
+                    writer.flush()
                 }
-                for ((key, value) in envVars) {
-                    // Escape single quotes in values
-                    val escaped = value.replace("'", "'\\''")
-                    writer.write("export $key='$escaped'\n")
-                }
-                writer.flush()
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to apply env vars: ${e.message}")
             }
