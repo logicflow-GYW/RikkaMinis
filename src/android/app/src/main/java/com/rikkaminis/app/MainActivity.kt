@@ -642,7 +642,18 @@ class MainActivity : ComponentActivity() {
                     action.resourcePath,
                     action.title,
                 )
-                nav.navigate(Routes.chat(action.sessionId))
+                // [audit-0917] Mirror the OpenSession branch above. Without the
+                // popUpTo/launchSingleTop options this pushed a SECOND copy of
+                // the same chat route onto the stack, so Back walked through
+                // duplicate entries before leaving the chat.
+                nav.navigate(Routes.chat(action.sessionId)) {
+                    popUpTo(nav.graph.startDestinationId) {
+                        inclusive = true
+                        saveState = true
+                    }
+                    launchSingleTop = true
+                    restoreState = true
+                }
             }
             // App-icon quick actions (mirrors iOS QuickActionRouter). All
             // both open a fresh draft chat; camera additionally seeds

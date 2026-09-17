@@ -1073,9 +1073,15 @@ internal object ConfigBuiltins {
         r.register(GroupsCollection(providerRepo))
         r.register(EnvVarsCollection(envVarRepo))
 
-        val isoFormatter = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
-            timeZone = TimeZone.getTimeZone("UTC")
-        }
+        // [audit-0917] DateTimeFormatter, matching EnvVarsCollection — this
+        // instance is captured by the `envvars` reader closure, so it outlives
+        // the registration call and is used whenever the config reader runs
+        // (possibly from different threads for concurrent RPC calls). The
+        // duplicate ISO pattern here was also drifting from the collection's.
+        val isoFormatter: java.time.format.DateTimeFormatter =
+            java.time.format.DateTimeFormatter
+                .ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
+                .withZone(java.time.ZoneOffset.UTC)
 
         // Aggregate read-only summary so `minis-config get providers`
         // returns a useful list of configured instances. Credentials
@@ -1157,7 +1163,7 @@ internal object ConfigBuiltins {
                                 linkedMapOf(
                                     "key" to ConfigValue.Str(e.key),
                                     "note" to ConfigValue.Str(e.note),
-                                    "created_at" to ConfigValue.Str(isoFormatter.format(Date(e.createdAt))),
+                                    "created_at" to ConfigValue.Str(isoFormatter.format(java.time.Instant.ofEpochMilli(e.createdAt))),
                                 )
                             )
                         }
