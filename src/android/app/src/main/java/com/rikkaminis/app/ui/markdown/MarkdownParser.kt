@@ -196,17 +196,21 @@ object MarkdownParser {
                 continue
             }
 
-            // Numbered list. Marker digits are capped at 2 so a paragraph
-            // starting with a year or big number ("2020. 年的…") isn't
-            // misparsed as ordered-list item #2020 (user report). Real lists
-            // rarely exceed 99 items; CommonMark itself caps markers at 9
-            // digits, we deliberately go tighter.
-            val numMatch = Regex("^\\s{0,3}(\\d{1,2})[.)\\s]\\s*(.*)$").find(line)
+            // Numbered list. Marker requires a real punctuation (. or )):
+            // CommonMark accepts only `1.` / `1)` — a bare "4 " before a
+            // word must NOT become list item #4, else a paragraph opening
+            // like "4 分钟没扫完" renders as "4. 分钟没扫完" (user report).
+            // Also requires whitespace (or end of line) AFTER the marker so
+            // "3.14 是 π" isn't split into item "14 是 π". Digits stay
+            // capped at 2 so a year/big-number paragraph ("2020 年…") is
+            // never misparsed (user report); CommonMark caps at 9, we
+            // deliberately go tighter.
+            val numMatch = Regex("^\\s{0,3}(\\d{1,2})[.)](?:\\s+(.*))?$").find(line)
             if (numMatch != null) {
                 val startNum = numMatch.groupValues[1].toIntOrNull() ?: 1
                 val items = mutableListOf<ListItem>()
                 while (i < lines.size) {
-                    val nm = Regex("^\\s{0,3}(\\d{1,2})[.)\\s]\\s*(.*)$").find(lines[i])
+                    val nm = Regex("^\\s{0,3}(\\d{1,2})[.)](?:\\s+(.*))?$").find(lines[i])
                     if (nm == null) break
                     items.add(ListItem(nm.groupValues[2]))
                     i++
@@ -250,7 +254,7 @@ object MarkdownParser {
                     pl.trimStart().startsWith("# ") || pl.trimStart().startsWith("> ") ||
                     Regex("^\\s{0,3}[-*+]\\s+").containsMatchIn(pl) ||
                     // Keep in sync with the numbered-list marker above (≤2 digits).
-                    Regex("^\\s{0,3}\\d{1,2}[.)\\s]\\s").containsMatchIn(pl) ||
+                    Regex("^\\s{0,3}\\d{1,2}[.)](?:\\s|$)").containsMatchIn(pl) ||
                     pl.matches(Regex("^\\s{0,3}([-*_])\\s*\\1\\s*\\1(\\s*\\1)*\\s*$")) ||
                     standaloneImageRegex.containsMatchIn(pl)
                 ) break

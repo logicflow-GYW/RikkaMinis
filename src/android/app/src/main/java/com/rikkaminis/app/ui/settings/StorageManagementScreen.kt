@@ -68,6 +68,25 @@ private data class SessionStorageInfo(
     val totalSize: Long get() = sessionDirSize + mediaSize
 }
 
+/** Immutable snapshot of one full Storage-page scan, kept across
+ *  composable re-entries (process lifetime) so re-visits render instantly. */
+private data class StorageSnapshot(
+    val shellSize: Long,
+    val shellBreakdown: List<com.rikkaminis.app.sandbox.RootfsUsageScanner.Entry>,
+    val dbSize: Long,
+    val sessionCount: Int,
+    val sessions: List<SessionStorageInfo>,
+    val orphanInfo: SessionFileStore.ReclaimReport?,
+)
+
+/** Process-lifetime holder for the latest [StorageSnapshot]. SWR cache:
+ *  no age gate — re-entry always renders the last scan immediately and a
+ *  background rescan replaces it. Only a first visit this process misses. */
+private object StorageSnapshotCache {
+    @Volatile
+    var snapshot: StorageSnapshot? = null
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StorageManagementScreen(
@@ -98,12 +117,32 @@ fun StorageManagementScreen(
 
     fun reload() {
         scope.launch {
-            // Reset state so a re-entry / manual reload shows a fresh skeleton.
-            isSizingSessions = true
-            sessions = emptyList()
-            // [B] fresh scan every reload so the banner reflects reality.
-            isScanningOrphans = true
-            orphanInfo = null
+            // [SWR] Render the last known snapshot immediately if we have one
+            // (any age — the background rescan below replaces it within a
+            // few seconds), so re-entering Storage never stares at a spinner
+            // while ~125k rootfs entries are re-lstat'ed cold (page-cache
+            // retry aside). First visit this process still shows the skeleton.
+            // ponytail: no visible "refreshing…" indicator | 天花板: shown
+            // values can be one full rescan old for a few seconds | 升级触发:
+            // user reports confusion over momentarily-stale sizes.
+            val cached = StorageSnapshotCache.snapshot
+            if (cached != null) {
+                shellSize = cached.shellSize
+                shellBreakdown = cached.shellBreakdown
+                dbSize = cached.dbSize
+                sessionCount = cached.sessionCount
+                sessions = cached.sessions
+                orphanInfo = cached.orphanInfo
+                isSizingSessions = false
+                isScanningOrphans = false
+            } else {
+                // Reset state so a first entry / fresh scan shows a skeleton.
+                isSizingSessions = true
+                sessions = emptyList()
+                // [B] fresh scan every reload so the banner reflects reality.
+                isScanningOrphans = true
+                orphanInfo = null
+            }
             withContext(Dispatchers.IO) {
                 // [rootfs-usage-v1] Real on-disk footprint (lstat + st_blocks,
                 // no symlink following, hardlink dedupe). The old recursive
@@ -159,6 +198,16 @@ fun StorageManagementScreen(
                         }
                     }.awaitAll()
                 }.sortedByDescending { it.totalSize }
+
+                // Cache the fresh scan so the next re-entry renders instantly.
+                StorageSnapshotCache.snapshot = StorageSnapshot(
+                    shellSize = shellSize,
+                    shellBreakdown = shellBreakdown,
+                    dbSize = dbSize,
+                    sessionCount = sessionCount,
+                    sessions = sessions,
+                    orphanInfo = orphanInfo,
+                )
             }
             isScanningOrphans = false
             isSizingSessions = false
