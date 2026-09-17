@@ -2475,10 +2475,11 @@ class ProviderRepository(private val context: Context) {
      *   - models are upserted by baseModel.id: models the existing instance
      *     lacks are added, models it already has are reused as-is (the local
      *     overrides / customizations win);
-     *   - credentials (apiKey / OAuth / base URL) are deliberately NOT
-     *     touched — an instance that already exists on this device is presumed
-     *     to be the one in use, and silently swapping its key or endpoint on
-     *     restore would be worse than a duplicate label.
+     *   - credentials (apiKey / OAuth / base URL) ARE written onto the
+     *     existing instance via [importInstanceCredentials] — a restore is a
+     *     restore. (An earlier revision of this doc claimed they were
+     *     deliberately NOT touched; that was stale — the code has always
+     *     written them.)
      *
      * @param srcEntryIds the backup-layer `_entryIds` annotation, positionally
      *   paired with the `models` array (same append order — visible and hidden
