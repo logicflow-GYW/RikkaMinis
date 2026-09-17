@@ -203,6 +203,17 @@ class TerminalSession(private val context: Context) {
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed to start Termux PTY session", t)
                 _outputBytes.emit("Error: ${t.message}\r\n".toByteArray())
+                // [audit-0917] Kill and release a PTY that was already assigned
+                // before the failure. The exception can come from the cd-write
+                // or the delay above, i.e. AFTER termuxSession was set — the
+                // old handler only flipped the state, orphaning a live shell
+                // process that nothing would ever reap.
+                termuxSession?.let { s ->
+                    termuxSession = null
+                    runCatching { killTermuxProcessTree(s) }
+                        .onFailure { Log.w(TAG, "cleanup after start failure: ${it.message}") }
+                }
+                liveSessions.removeAll { it.get() === this || it.get() == null }
                 _state.value = State.STOPPED
             }
         }
@@ -536,7 +547,15 @@ class TerminalSession(private val context: Context) {
             changedSession: com.termux.terminal.TerminalSession,
         ) {
             Log.i(TAG, "Termux session finished (exit=${changedSession.exitStatus})")
-            _state.value = State.STOPPED
+            // [audit-0917] Mirror stop()'s bookkeeping. A natural exit (user
+            // types `exit`, the process dies) only flipped the state, leaving
+            // `termuxSession` and the liveSessions entry pointing at a dead
+            // session — later attach()/sendInput() calls then targeted a
+            // finished process instead of starting a fresh one.
+            startGeneration.incrementAndGet()
+            termuxSession = null
+            if (_state.value != State.STOPPED) _state.value = State.STOPPED
+            liveSessions.removeAll { it.get() === this || it.get() == null }
         }
         override fun onBell(session: com.termux.terminal.TerminalSession) {}
         override fun onColorsChanged(changedSession: com.termux.terminal.TerminalSession) {}

@@ -72,17 +72,47 @@ object RootfsEventLog {
      * persist it on every successful install; a changed value between two
      * reads proves the rootfs was wiped and re-extracted in between.
      */
-    fun readBootId(rootfsDir: File): Long = try {
-        File(rootfsDir, BOOT_ID_NAME).readText().trim().toLongOrNull() ?: 0L
-    } catch (_: Throwable) {
-        0L
+    fun readBootId(rootfsDir: File): Long {
+        // [audit-0917] Distinguish "never written" from "written but unreadable".
+        // 0 is a legitimate id, so the old single fallback let a torn file
+        // masquerade as a pristine rootfs — the caller then believed no install
+        // had happened. BOOT_ID_CORRUPT (-1) means "present but unreadable",
+        // which callers treat as "assume a wipe happened".
+        return try {
+            val f = File(rootfsDir, BOOT_ID_NAME)
+            if (!f.exists()) {
+                0L
+            } else {
+                val raw = f.readText().trim()
+                raw.toLongOrNull() ?: BOOT_ID_CORRUPT
+            }
+        } catch (_: Throwable) {
+            BOOT_ID_CORRUPT
+        }
     }
 
     /** Persist the boot id after a successful install; never throws. */
     fun writeBootId(rootfsDir: File, id: Long) {
         try {
-            File(rootfsDir, BOOT_ID_NAME).writeText(id.toString())
+            // [audit-0917] Write to a temp file and rename. writeText truncates
+            // in place, so a crash mid-write left a torn file that readBootId
+            // mapped to 0 — indistinguishable from "never written", which is
+            // exactly the state the durability guarantee is supposed to rule
+            // out. rename() is atomic on the same filesystem.
+            val target = File(rootfsDir, BOOT_ID_NAME)
+            val tmp = File(rootfsDir, "$BOOT_ID_NAME.tmp")
+            tmp.writeText(id.toString())
+            if (!tmp.renameTo(target)) {
+                // Fall back to a direct write; the tmp file is still removed.
+                target.writeText(id.toString())
+                tmp.delete()
+            }
         } catch (_: Throwable) {
+            // Diagnostics must never break the operation being observed.
         }
     }
+
+    // [audit-0917] Sentinel for "present but unreadable". Declared on the
+    // object itself — a standalone `object` cannot host a companion object.
+    const val BOOT_ID_CORRUPT = -1L
 }

@@ -2,6 +2,7 @@ package com.rikkaminis.app.data.storage
 
 import android.content.Context
 import com.rikkaminis.app.data.model.MediaRef
+import com.rikkaminis.app.logging.AppLogger
 import java.io.File
 import java.io.InputStream
 import java.text.SimpleDateFormat
@@ -10,6 +11,8 @@ import java.util.Locale
 import java.util.UUID
 
 class MediaStore(context: Context) {
+
+    private val TAG = "MediaStore"
 
     val mediaBaseDir: File = File(context.filesDir, "media")
 
@@ -29,7 +32,16 @@ class MediaStore(context: Context) {
         val relativePath = "$dateDir/$sessionId/$id.$ext"
         val file = File(mediaBaseDir, relativePath)
         file.parentFile?.mkdirs()
-        file.writeBytes(data)
+        // [audit-0917] Clean up a partial file when the write fails, exactly as
+        // saveMediaStreamed does. An unguarded writeBytes left a truncated
+        // attachment on disk after a disk-full / OOM failure, and nothing ever
+        // prunes it — the reference was never returned, so no caller could.
+        try {
+            file.writeBytes(data)
+        } catch (t: Throwable) {
+            runCatching { file.delete() }
+            throw t
+        }
         return MediaRef(
             id = id,
             relativePath = relativePath,
@@ -84,11 +96,25 @@ class MediaStore(context: Context) {
     }
 
     fun deleteSessionMedia(sessionId: String) {
-        mediaBaseDir.walkTopDown().forEach { dir ->
-            if (dir.isDirectory && dir.name == sessionId) {
-                dir.deleteRecursively()
+        if (sessionId.isBlank()) return
+        // [audit-0917] Only delete a directory that really is this session's
+        // media folder — i.e. <base>/<yyyy>/<MM>/<dd>/<sessionId> — instead of
+        // any directory anywhere under the base whose name happens to match.
+        // The old walk also ignored deleteRecursively()'s false return, so a
+        // failed delete (or a name collision in an unrelated branch) was
+        // invisible. Failures are now logged.
+        mediaBaseDir.walkTopDown()
+            .filter { dir ->
+                dir.isDirectory &&
+                    dir.name == sessionId &&
+                    dir.parentFile?.parentFile?.parentFile?.parentFile == mediaBaseDir
             }
-        }
+            .forEach { dir ->
+                val deleted = runCatching { dir.deleteRecursively() }.getOrDefault(false)
+                if (!deleted) {
+                    AppLogger.warning(TAG, "deleteSessionMedia: could not delete ${dir.path}")
+                }
+            }
     }
 
     private fun extensionFor(mimeType: String): String {

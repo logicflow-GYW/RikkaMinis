@@ -32,17 +32,38 @@ object MinisConfigPermissionStore {
     /** Hot-path read used by the offload bridge before any work. */
     val isEnabled: Boolean get() = _enabled.value
 
+    // [audit-0917] A toggle that arrives before init() must not be lost. The
+    // old setEnabled only wrote through `prefs?` — null before init — while
+    // still updating _enabled, so the in-memory and persisted values diverged
+    // and the next process start silently reverted the user's choice. Queue the
+    // value and apply it during init.
+    private var pendingValue: Boolean? = null
+
     /** Call once early — typically from MinisApp.onCreate. Idempotent. */
     fun init(context: Context) {
         if (prefs != null) return
         val p = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         prefs = p
-        _enabled.value = if (p.contains(KEY)) p.getBoolean(KEY, DEFAULT_ENABLED) else DEFAULT_ENABLED
+        val queued = pendingValue
+        if (queued != null) {
+            // A toggle landed first; it is the user's latest intent.
+            p.edit().putBoolean(KEY, queued).apply()
+            _enabled.value = queued
+            pendingValue = null
+        } else {
+            _enabled.value = if (p.contains(KEY)) p.getBoolean(KEY, DEFAULT_ENABLED) else DEFAULT_ENABLED
+        }
     }
 
     /** UI toggle. Persists eagerly. */
     fun setEnabled(value: Boolean) {
-        prefs?.edit()?.putBoolean(KEY, value)?.apply()
+        val p = prefs
+        if (p == null) {
+            // Not initialised yet — remember the intent and persist on init.
+            pendingValue = value
+        } else {
+            p.edit().putBoolean(KEY, value).apply()
+        }
         _enabled.value = value
     }
 }

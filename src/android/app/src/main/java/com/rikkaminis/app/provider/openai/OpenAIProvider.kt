@@ -715,6 +715,11 @@ class OpenAIProvider constructor(
             )
         }
 
+        // [audit-0917] No explicit charset: Android's platform default is
+        // always UTF-8 (Chrome/ART both fix file.encoding=UTF-8; verified), and
+        // SSE payloads are UTF-8 by spec. Left as-is deliberately — switching
+        // to body.charStream() would change byte handling for the raw stream
+        // paths without fixing anything observable.
         val reader = BufferedReader(InputStreamReader(response.body!!.byteStream()))
 
         // Chat Completions: tool calls are streamed as deltas keyed by index.
@@ -1643,8 +1648,13 @@ class OpenAIProvider constructor(
         // [T-relay-host-adaptation] Mistral does NOT support stream_options
         // (mirrors RikkaHub — it 400s on include_usage); OpenRouter uses its own
         // usage fields. Only emit include_usage on hosts that accept it.
-        val host = basePath.toHttpUrlOrNull()?.host ?: ""
-        if (stream && !isOpenRouter && host != "api.mistral.ai") {
+        //
+        // [audit-0917] Use [isMistral], not an exact-host comparison. The old
+        // `host != "api.mistral.ai"` only matched the apex host while isMistral
+        // matches any *mistral.ai host (and a relay path), so a Mistral
+        // deployment on a subdomain or a custom base still received
+        // include_usage and 400'd — the two Mistral predicates now agree.
+        if (stream && !isOpenRouter && !isMistral) {
             body.put("stream_options", JSONObject().put("include_usage", true))
         }
 

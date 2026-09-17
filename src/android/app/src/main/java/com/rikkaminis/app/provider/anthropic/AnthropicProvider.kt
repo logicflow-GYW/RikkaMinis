@@ -227,6 +227,11 @@ class AnthropicProvider(
             )
         }
 
+        // [audit-0917] No explicit charset: Android's platform default is
+        // always UTF-8 (Chrome/ART both fix file.encoding=UTF-8; verified), and
+        // SSE payloads are UTF-8 by spec. Left as-is deliberately — switching
+        // to body.charStream() would change byte handling for the raw stream
+        // paths without fixing anything observable.
         val reader = BufferedReader(InputStreamReader(response.body!!.byteStream()))
         // Track current tool_use block being streamed
         var currentToolId: String? = null

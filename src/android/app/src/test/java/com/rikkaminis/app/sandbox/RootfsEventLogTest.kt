@@ -77,6 +77,8 @@ class RootfsEventLogTest {
         val notADir = tmp.newFile("blocker")
         RootfsEventLog.logEvent(notADir, "INSTALL", "should not throw")
         RootfsEventLog.writeBootId(notADir, 7L)
+        // The boot-id file genuinely does not exist under a non-directory path,
+        // so 0 ("never written") is the honest answer here.
         assertEquals(0L, RootfsEventLog.readBootId(notADir))
     }
 
@@ -88,8 +90,24 @@ class RootfsEventLogTest {
         assertEquals(0L, RootfsEventLog.readBootId(rootfs))
         RootfsEventLog.writeBootId(rootfs, 42L)
         assertEquals(42L, RootfsEventLog.readBootId(rootfs))
-        // Garbage content must not throw — falls back to 0.
+        // [audit-0917] Garbage content must not throw, and must NOT be
+        // reported as 0: a torn write has to be distinguishable from "no
+        // install ever happened".
         File(rootfs, "rootfs-boot-id").writeText("not-a-number")
-        assertEquals(0L, RootfsEventLog.readBootId(rootfs))
+        assertEquals(RootfsEventLog.BOOT_ID_CORRUPT, RootfsEventLog.readBootId(rootfs))
+    }
+
+    @Test
+    fun bootId_writeIsAtomic_andLeavesNoTempFile() {
+        // [audit-0917] writeBootId writes a temp file and renames, so a reader
+        // never observes a torn value and no .tmp is left behind.
+        val rootfs = tmp.newFolder("rootfs-atomic")
+        RootfsEventLog.writeBootId(rootfs, 7L)
+        assertEquals(7L, RootfsEventLog.readBootId(rootfs))
+        val leftovers = rootfs.listFiles()?.map { it.name }?.filter { it.endsWith(".tmp") }.orEmpty()
+        assertTrue("no .tmp should remain: $leftovers", leftovers.isEmpty())
+        // A second write must overwrite cleanly.
+        RootfsEventLog.writeBootId(rootfs, 8L)
+        assertEquals(8L, RootfsEventLog.readBootId(rootfs))
     }
 }
