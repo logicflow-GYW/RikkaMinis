@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-16）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-17）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-09-16，共 45 天
-- 条目总数：1019（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
-- 总字符数：1211143 / 总行数：18812
+- 合并范围：2026-08-03 ～ 2026-09-17，共 46 天
+- 条目总数：1045（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
+- 总字符数：1246220 / 总行数：19271
 
 ---
 
@@ -18805,6 +18805,465 @@ commit `2dc6e0d4`（6 文件 +392/−18，分支 diag/liveness-batch）打包三
 - 阶梯纪律含：七级阶梯（逐级附本仓查法）+ 先理解问题 + 「停在第 N 级」可复核产出 + 永不砍清单 6 类 + 改 bug 根因纪律 + `ponytail:` 三段式注释 + 收益验证（批次 diff 行数 / 审计面积 ∝ diff）。触发验证纪律含 evals 格式要求 + static/run 两入口 + 「改 description 后必跑行为版」。
 - GLOBAL.md 现 **219 行 / 22069 字节**。
 - **注意（避免未来会话困惑）**：`scan_debt.py notes` 的「每条必须带触发条件」约定**只适用于 backlog（活项清单）**；GLOBAL.md 是纪律/事实类条目，天然没有升级触发条件，不适用该扫描（跑了会报一堆 no-触发条件，属误用）。
+
+<!-- 2026-09-16 14:58:03 -->
+## 09-16 晚：dev-history 档案更新到 09-16（挂载版 + 仓库 docs 双份同源）
+
+
+- 挂载版：1019 条 / 45 天 / 1,211,143 字符 / 18,811 行；fences 32 even、anchors=header=1019、outOrder=0；脱敏 229 处（main 204 + INDEX 25），独立探针 Remaining NONE；SAGAS 23 sagas / orphans 66 / multi4 57。
+- 仓库闭环：fresh clone /tmp/rh-sync → 分支 docs/dev-history-0916 @ 0a1a2f9（3 文件 +535/−39）→ `gh_sync.sh push --branch docs/dev-history-0916:main` 一次 FF 直达 main（远端 main = 0a1a2f9，基于 e940148）→ 本地分支删。refspec push 只建 main，远端无残留分支。docs 变更未触发 CI（paths 门控）。
+- ★ 工具坑：沙箱无 ssh 二进制 → git clone 不能走 SSH，直接 HTTPS 克隆（无需凭证，公开仓）。
+
+<!-- 2026-09-16 15:08:26 -->
+## 09-16 晚：§20b 导航结果真机验证通过（e940148 验证缺口全关）
+
+
+- 实测：navigate http://127.0.0.1:1/ → success=false + `Navigation error: net::ERR_UNSAFE_PORT` + block status→FAILED，失败即时完成（~0.5s，对比修复前烧满 30s 报假 success）；失败导航自动截图保留（设计取舍确认）。
+- 已知边界（非 bug）：不存在域名经用户代理返回 400 错误页 → WebView 判「加载成」→ 报 success；HTTP 层有响应即真加载，与代理环境特性同族。
+- 至此 +1573 包（e940148）修复点真机全核过：导航三态 ✓、并发测试快照 ✓（CI 绿）、§19 超时不重跑 ✓（CI 绿）、大文件 markdown 预览 ✓（用户确认第 1 个没问题）。
+
+<!-- 2026-09-16 15:43:37 -->
+## 09-16 晚：RikkaMinis 源码第三方独立调查报告（笔记/）
+
+<!-- 2026-09-16 15:45 -->
+
+**产出**：`/var/minis/mounts/笔记/RikkaMinis源码独立调查报告-2026-09-16.md`（676 行 / 48,735 字节 / 18 节 / fences 32 even / 157 表格行）。对象 = 新鲜 clone `https://github.com/***OWNER***/RikkaMinis` @ main `0a1a2f9`（1120 commits，/tmp/investigate）。三方证据源 = 源码 + APK/dex 实物 + 当日日志，标注【实测】/【自述】区分。
+
+**方法可复用点**：
+- **自述当假设清单用**：把 ARCHITECTURE.md 的 8 项关键数字逐条复测（测试比 25.0%→实测 26.2%、main 文件 515→524、ChatScreen 5.0K→4992、handler 20→20、DB v12/v10→一致、scan 门禁→exit 0）。全在 2% 内对上 = 文档在被维护的直接证据。
+- **三源对齐案例**：browser ERR_UNSAFE_PORT（源码 BrowserUseManager 2413 行 → 日志 success=false + block status→FAILED + 明确"page did not load" → 文档 §5.3 收敛策略）= 唯一做到完整证据链的一例，也是"失败被当成功"失效模式的反例。
+- **dex 实锤手法**：解包最新 release APK（/tmp/apk15, 14MB）grep 字符串 → DebugServer / DebugMethodRegistry / DebugOffloadHandler / minis-debug **全 ABSENT** = R8 移除机制实测生效；12 个 token 前缀 grep 命中全是脱敏正则字面量（上下文为 `"sk-[A-Za-z0-9_\\-]{8,}|gsk_...|ghp_..."`）= 无硬编码凭据。
+
+**核心发现（0 HIGH / 3 MED / 6 LOW）**：
+- M1 = **release 调试隔离依赖 R8 而非 src/debug 源集**（debug/ 12 文件在 src/main，只靠 `if (BuildConfig.DEBUG)` + minify；同一段 build.gradle.kts 里 assets 却用了 src/debug 源集 → 两种强度并存）；且 proguard-rules.pro 仅 2 行 0 keep、lint.checkReleaseBuilds=false → **无任何 CI 门禁守护这条边界** = 沉默失效型。
+- M2 = WebDAV `Credentials.basic` 无 https 强制（客户端 + UI 都无 scheme 校验）。
+- M3 = `data/db` 零测试而承担 26 次手写 Room 迁移。
+- ★ **进程边界精确化**：门禁只禁 `provider.sendMessage/streamMessage` 两个符号；OkHttpClient 在主进程 17 个包直接使用（WebDAV/MCP OAuth/日志/调试）→ 是"聊天流量隔离"不是"网络隔离"，文档措辞"唯一持证进程"需限定。
+- ★ **自纠一处误判**：按目录算覆盖把 provider 子包（anthropic/gemini/xai/openrouter/voice/antigravity）判成零测试 → 实际测试放在父包路径。**教训：覆盖指标必须按被测符号核对，不能按目录**。
+
+**★ 门禁有自己的测试**（scripts/scan/test_scan.py）= 本调查认为性价比最高的单项投入，多数项目的 scan 脚本零测试。
+
+**★ 作者分布（不回显邮箱，privacy mode 会掩码）**：fork 期 1108 提交 / 45 活跃日 / 日均 24.6 / 最密单日 69（08-13）；31 个 name 54 个 email 但聚合后是 1 个人类账号 + 多个 agent/CI 署名（24% 机器署名）→ bus factor = 1，且 README 自认"个人 fork 主要为自用"。
+
+**★ 挂载盘写入再确认**：file_write append 三段写入 /var/minis/mounts/笔记/ 全部成功持久化（与 09-14 记忆一致：file_write/file_edit 正常，shell `cat >>` 不持久）。长报告用 3 次 file_write（首次 14.7KB / 追加 28.9KB / 追加 48.7KB）——单次超 ~15KB 会撞模型输出上限截断（本轮第一次调用因此被拒）。
+
+**★ 工具坑**：HF 语义搜索端点 500（router.huggingface.co feature-extraction）→ 本轮语义记忆不可用，改走 memory_get 关键词。
+
+<!-- 2026-09-16 16:36:41 -->
+## 09-16 晚：报告修复轮收口 — main = 116a23d5（M1/M2/M3/L3 已修）
+
+<!-- 2026-09-16 17:20 -->
+
+**闭环**：分支 `fix/audit0916c-release-boundary-and-webdav-tls` @ 116a23d5（8 文件 +657/−7）→ 分支 CI 35073346367 success → FF 合并 main → 远端分支 DELETE 204 → 本地仅剩 main → release CI 35074637139（in_progress，用户惯例不等）。
+
+**修法（停在最小编装配点）**：
+- **M1 = 产物门 + 源码门，不移源集**。报告原建议（debug/ 移 src/debug）实施第一步即证伪：`BuildConfig.DEBUG` 是运行时守卫，Kotlin 不在编译期剥常量引用，src/main 调用点必须可解析，移源集会让 release 编译失败。实际：`scripts/scan/debug_leak_guard.py`（source 模式 = debug 包引用须在 allowlist 或带 `debug-ok:` 逃生口，镜像 legacy_pipeline_guard 范式；apk 模式 = release dex 不得含 6 个 debug 标记）挂进 scan.sh [8/9] + build-apk.yml 既有 "Verify APK contents" 步骤（零新增 CI 步骤）。apk 模式实测最新 release 产物全 ABSENT。
+- **M2 = 收口在 `buildUrl()`**（全部 WebDAV 操作的单漏斗）：非 https 公网 host 拒（`WebDavException`，消息经既有 webDavErrorMessage IOException 分支到用户，零 i18n 改动）；loopback/内网豁免（localhost/127./10./192.168./172.16-31.，MockWebServer 不受影响）。4 个新 JVM 测试。
+- **M3 = 链完整性门**：`scripts/scan/room_migration_check.py`（漏版本/非连续步/声明未接线→CI 失败）+ scan.sh [9/9]。**实体列覆盖检查显式不做**——exportSchema=false → 树内无 v1 schema 历史，源码级检查只产 20+ 假阳性（比没有检查更糟）；正确落点 androidTest MigrationTestHelper（docstring 已记）。
+- **L3**：ARCHITECTURE §2.1.1 iOS 引用判别规则。
+
+**验证链**：scan.sh 9/9 绿；test_scan.py **30/30**（含 7 新例）；WebDAV 反向对照 = 7 个 XML 解析失败在**未改动的 HEAD 基线上同样出现**（沙箱 kxml2 产物，非回归）——22 测试 4 新全过；两扫描器 --self-test 全绿（含反向对照）。
+
+**★ 报告两处误报是靠"动手改"抓出来的（可复用教训）**：L2（"注释引用私有仓无说明"）与 L5（"manifest 权限无注释"）grep 到引用后没读上下文——实施前重读才发现 build.gradle.kts:12-17 与 manifest:63-78 **早已有完整说明**。审计"无 X"类断言必须读注释块原文，不能只 grep 关键词。报告已把 L2/L5 撤回 + 加 §15 修复轮。
+
+**★ shell 提交消息坑（复发）**：commit message 含反引号（`` `debug-ok:` ``）会被 ash 当命令替换执行（报 "debug-ok:: not found" 且**静默吞掉词**，commit 照样创建）→ 提交消息一律写文件 + `git commit -F file`，amend 修复（a9b93157 → 116a23d5）。
+
+**JVM harness 配方（WebDAV 族复用）**：依赖 = junit-4.13.2 + hamcrest-core-1.3 + okhttp-4.12.0 + okio-jvm-3.6.0 + mockwebserver-4.12.0 + kxml2-2.3.0 + xmlpull-1.1.3.1（/tmp/wdlibs，已下齐）；kxml2 4KB jar 有 WARN "Failed requirement" 但只是 jarfs 读告警；**编译在 compile 阶段抓 unresolved junit（classpath 漏 junit jar），运行前必须先确认 compile.log 无 error**（`head` 管道会吞 exit code——exit=0 是 head 的）。
+
+**报告现状**：694 行 / 53KB / §15 修复轮已加 / L2/L5 撤回。
+
+<!-- 2026-09-16 16:48:34 -->
+## 产出 /var/minis/mounts/笔记/三家终端执行型项目对比RikkaMinis-2026-09-16.md（
+
+- 产出 `/var/minis/mounts/笔记/三家终端执行型项目对比RikkaMinis-2026-09-16.md`（7 关节 × 4 代码库，file:line 级）。方法：fresh clone 四仓（OI 竟已转型 Rust codex fork；aider 150 py；opencode 2724 ts）+ 逐关节 grep 对齐。
+- **核心发现**：本应用最贵 bug 类（零工具调用残留 / ToolUse 被 offload / 队列气泡截断）在三家全不存在——是「自定义通道 + 双份状态」架构的固有税，防御三件套是必要成本。
+- **可吸收 Top**：opencode retry.ts 的 retry-after header 感知（RetryPolicy 现只固定退避）> opencode compaction 的 per-tool prune 白名单 > codex RecoverTurnRequest 显式 turn 恢复协议（高成本留档）> codex compact_model_fallback。
+- 同构度：OpenCode > OI > Aider（opencode 在 retry/compaction/offload/权限四关节与本应用独立收敛到同设计）。密钥脱敏仅本应用（命令级 SensitiveCommandPolicy 四家唯一）+ opencode（provider 侧）。
+
+<!-- 2026-09-16 16:54:33 -->
+## ★ minis:// 链接坑（用户实测点不了，已纠正）
+
+- `minis://shared/../mounts/...` 无效：minis:// 只认固定前缀（attachments/workspace/shared/offloads/browser），mounts/ 不在映射，`../` 不解析；且中文文件名必须 percent-encode。
+- 约定：挂载盘（/var/minis/mounts/）文件不直接给 minis:// 链接——要么 `minis-open <绝对路径>` 预览，要么 cp 到 /var/minis/shared/ 用 ASCII 文件名再给 `minis://shared/<name>`。
+- 给链接前自查两条件：前缀在标准映射内 + 文件名纯 ASCII。用户原话："点不了的就不要给，给了就应该要能点得了"。
+
+<!-- 2026-09-16 16:56:24 -->
+## minis:// 链接机制化（从"每次提醒"升级为机械守卫）
+
+- **单一漏斗**：`python3 /var/minis/shared/minis_link.py <绝对路径>` 产链接（挂载盘/中文名自动 cp 到 shared + sha1 短名，幂等覆盖；不存在文件 exit 1 不产 URL）。**给 minis:// 链接一律经此脚本，禁止手拼**。
+- `--check <url>`：发前机械校验（前缀映射 + 目标存在），五用例实测全过。
+- 根因（app 侧 minis:// 不支持 mounts/、中文须 percent-encode）改不了，机制只能落在 agent 侧：产链接单点来源 + 校验门。
+- 中文文件名 → sha1 前 8 位（确定性但不可读）；升级触发 = 用户觉得认不出是负担。
+
+<!-- 2026-09-16 17:43:09 -->
+## 批次 23 收口：分支 feat/batch23-absorb（3 commit，13 文件 +252/−28 基 ma
+
+- 批次 23 收口：分支 feat/batch23-absorb（3 commit，13 文件 +252/−28 基 main 116a23d5）→ CI run 1578 success → FF 合并 main = 2991338 → 远端分支 DELETE 204 → release CI 自动触发（用户惯例不等）。
+- **23a 压缩降级**：generateCompactSummary 的 RemoteFailure/Unavailable → buildFallbackProviders 健康候选各试一次（Cancelled 穿透；降级不记 group health 防误降健康成员；[Compact] 日志可观测）。
+- **23b 受保护工具 offload**：OFFLOAD_PROTECTED_TOOLS=["memory_get"]（ponytail 三段注释）+ isProtectedToolResult 纯函数 + offload 汇总日志加 skippedProtected。
+- **23c-1 MissingFile reason**：ChatLinkMissingReason.kt 纯文件（enum ILLEGAL_PATH/FILE_MISSING + chatLinkMissingReason）+ MissingFile 带 reason + ChatScreen Toast 分流 + 7 语言 chat_link_path_invalid；JVM 9/9 + 反向对照 5 条变红。
+- **CI 抓了两轮编译错（教训）**：①typealias 是文件顶层不是 object 成员 → ChatScreen 引用改 ChatLinkMissingReason 直连；②instanceContext 可空 → sendVia 无 instance 候选回 Unavailable 跳过而非传可空；③**表达式体改块体时少闭合花括号 → kspReleaseKotlin "Expecting '}'" at EOF**——本地括号增量对照基线（0,0）过了但那是 vs origin/main 而第一次提交已含错——本地语法门没跑是漏检。
+
+<!-- 2026-09-16 18:17:49 -->
+## 09-16 晚：23c-2 渲染期 resolve + 灰链收口 — main = 3df7977e（release CI 35084162878，用户拍板不等）
+
+<!-- 2026-09-16 -->
+**改动**：`ChatLinkRenderCache`（LRU 256，键 (url,sessionId)，resolveFn 注入 → JVM 可测）+ `LocalMarkdownLinkRenderResolver` CompositionLocal + MdText 渲染期 resolve，MissingFile 链接渲染灰链/无下划线（α0.4 link 色 + TextDecoration.None 叠加样式，后加样式覆盖前者）；非聊天上下文（resolver null）照旧。ChatScreen `LaunchedEffect(messages.size)` 清缓存（content-delta 不清）。tap 路径未动：灰链仍路由 MissingFile→Toast（兜底）。
+
+**验证**：镜像 JVM 6/6（缓存逻辑：memoize/session 键/clear/LRU 驱逐/access 刷新）；分支 CI 两次失败定位两次修复后 35082485929 success → FF 合并 → 另一会话已推 batch23（29913382）→ rebase 自动合并（与 23c-1 ChatLinkMissingReason 零冲突）→ 测试同步 MissingFile reason 参数 → main = 3df7977e，release CI in_progress。
+
+**★ 两次编译失败（都可在本地镜像抓住，CI 才烧的）**：
+1. 函数类型只有 `invoke()` 没有 `.resolve` 成员——`linkRenderResolver.resolve(x)` Unresolved reference。
+2. **trailing lambda 绑定到最后一个位置参数**：`ChatLinkRenderCache { url, sid -> ... }` 试图当 maxEntries（Int），报 "No value passed for parameter 'resolveFn'" → 具名参数 `resolveFn = {...}` 修复。
+**★ 合并时 23c-1（另一会话）已给 MissingFile 加 reason 参数 → 测试同步；镜像 stub 的 python replace 把 enum 插进了 sealed class 内部导致 unresolved——替换后必须 grep 验证插入位置，且编译失败时旧 out 目录跑的是旧产物假绿（rm -rf out 再编）。**
+**坑**：gh_sync.sh push 不支持 force；amend 后强推不可行 → 用 `git reset --soft HEAD@{1}` 撤 amend 改走正常 commit。
+
+<!-- 2026-09-16 19:04:50 -->
+## 09-16 晚：audit-0916d 收口 —— main = 551ed6b9（两处 CI 门缺陷修复）
+
+
+**审计发现（今天 15 提交逐个走查，运行时改动零真 bug，缺陷全在新 CI 门自己身上）**：
+- ①`scan.sh` 编号已到 [x/9] 但**第 9 道门从未插入** —— `room_migration_check.py` 只被 test_scan 跑 `--self-test`，真检查从不在 CI 跑（commit 消息与编号都声明了）。实跑真模式 exit 0 可用（AppDatabase v12/11、ProviderDatabase v10/9），缺的只是一行接线。
+- ②`debug_leak_guard` apk 模式 **fail-open**（实测）：无 `classes*.dex` 的 zip → `markers absent` exit 0，一个字节没扫。缺文件是 fail-loud（exit 1）✓。
+- ③白名单 `ChatViewModel.kt` 条目冗余（提及在块注释里，`BLOCK_COMMENT_RE` 已剥；实测删后 source 模式仍 exit 0），却把 5k 行文件整体退出门面。
+- ④§16 半措施：外层行改了 `traceName()`，但 `r.rejection.message` 由 AgentRunReducer **三处**构造仍用 `event::class.simpleName` → R8 下同一行半可读半单字母。
+- ⑤`ExecutionCoordinator:396` 剩最后一处裸 124（命名常量的漂移面）。
+
+**修法**：`dex_entries`（纯选择器，按 basename 认嵌套 dex）+ `apk_verdict`（**0 条目 → 违例，fail-closed**，成功行报条目数）+ 自测加 6 例；白名单删条目；三处拒绝消息改 `traceName()`；裸 124 换 `TIMEOUT_EXIT_CODE`（附"别把 124 并进 exit-code trailer"注释）。
+
+**验证**：scan.sh **9/9（第 9 道真跑起来了）**、test_scan 30/30、守卫 `--self-test` 9/9、真 release APK 报 `1 dex entries`、两 .kt 语法门 0。
+
+**流程（可复用）**：分支 `fix/audit0916d-gate-wiring` @3c583d8a（基 29913382）→ CI #1584 success → **远端 main 被另一会话推了 4 提交（23c-2 缺文件链接灰化，零文件重叠）→ 必须 rebase** → 551ed6b9 → **CI 重跑 #1585 success** → FF main → delete-branches（顺带清掉陈旧 tracking ref，无害）→ 远端仅剩 main → release CI 35088297666（用户惯例不等）。
+**★ 纪律**：FF 前分支 CI 必须跑在 **rebase 后**的提交上 —— FF 意味着 main 的树就是分支的树，rebase = 换树 = 旧绿不算（本次是同基分叉的教科书实例）。
+
+**残留（不在本批）**：`ChatViewModel:1398`、`MarkdownBlockModel:368`、`MarkdownParser:220`、`MarkdownText:118` 四处仍 `::class.simpleName`（debug 级日志，另一子系统）；受保护工具 offload 仍零测试（`isProtectedToolResult("memory_get")` 值得一条 JVM 断言）。提交署名 = `RikkaMinis Agent`（仓内已有混合署名惯例）。
+
+<!-- 2026-09-16 19:21:32 -->
+## 09-16 晚：共享区 + backlog 双重归档（用户拍板 A「搬」；两处同病：只进不出）
+
+
+**触发**：用户直觉「backlog 已经很长」「共享文档有点乱」→ 量化证实，且是同一个病：**条目只进不出 + 没有判定时点**。
+
+**backlog 实测**（45.9 KB / 319 行 / 23 节）：已关闭 9 节 = 22.5 KB（**49%**）· 观察中 1（§18）· 活项 13。三处结构病：①**文件自己的约定没执行**（头部写「已关闭压缩存档于文末」，但存档标题卡在第 104 行，下面又混进新活项 → 文首读不出还剩什么）②**节号撞车**（§23 ×2 = 同一批次的规划稿 + 执行记录稿，两个会话各写一份）③**观察中无判定日** → 旧条目永不退出（最隐蔽的膨胀源，不是新增条目）。
+
+**处理**（脚本 `/tmp/tidy_backlog.py`，先备份 → 按节标题前缀移除 8 个 ✅ 节 + 旧稿 §23 + 错位存档标题 → §22 内 22a/22b/22c 压成三行指针 → 文末统一存档区一行一条 → 头部加状态标记说明）：**45.9 KB → 21.6 KB（−54%）**、319 → 187 行、14 节、`scan_debt.py notes` **0 no-触发条件**。
+另：§18 补**判定日 09-19** + 三条显式判定动作（含「若不落在 agent 重活窗口 → 归因框架要改」）；§22 标题 ✅→🔄（防未来会话跳过内含的留档触发项）。
+
+**shared 实测**（顶层 49 文件 + 11 目录 / 27 MB / 949 文件）：体量主头不在顶层 —— `global-bug-audit-0909` 独占 14 MB，四个陈年目录 = 26 MB。
+**实锤脏机制**：同一份东西**三份** —— 挂载原件 = `shared/5df46617.md` = `comparison-vs-opencode-aider-oi-2026-09-16.md`（sha256 全 `1dcdf6ce02…` / 16044 B）；成因 = `minis_link.py` 漏斗「挂载盘/中文名 → cp + sha1 短名」**跨名不查重**（改进候选：按内容 sha256 查重）。
+
+**处理**：40 个一次性产物 → `archive/2026-09/`；7 个 dump 目录 → `tar.gz`（**先核验「包内项数 ≥ 原文件数」再删源**，26 MB → 5.5 MB）；删 2 份同内容副本；重写 `README.md`（常驻入口表 + 「谁引用它」+ 归约 + 归档清单 + 已知脏成因 + 旧链接行为）。结果 **27 MB → 6.4 MB**、949 → **61 文件**、顶层 → **12 条目**。
+
+**可复用教训**：
+1. **给共享区做归档不能用「手写搬移名单」** —— 第一版 README 里我手打的文件名有拼错（`comparisen`/`legazy`/`backup` 等），脚本改用「保留白名单 + 其余全搬」的机械式才免翻车。**判据 = 是否被脚本 / skill / GLOBAL.md 按路径引用**（是 → 顶层；否 → 归档区）。
+2. **压缩目录必须先核验包内项数再删源**（源删了才发现包坏 = 不可恢复）。
+3. **活项清单的最大膨胀源不是新增，是「无判定时点的 🔄/搁置条目永不退出」** —— 今后每加一个观察中条目必须同时写判定日与判定动作。
+4. 中间态取舍：搬走 = 历史消息里的旧 `minis://shared/<旧名>` 会显示明确的 MissingFile 原因（资源在 `archive/2026-09/<旧名>`），不是静默空白 —— 用户拍板选 A（搬）。
+
+<!-- 2026-09-16 19:24:40 -->
+## 09-16 晚：minis_link.py 加「跨名查重」（漏斗改进，用户拍板"做吧"）
+
+
+**病**：漏斗只按**同名**幂等 → 同一内容换个名字就各存一份（今天实测三份：挂载原件 = `5df46617.md` = `comparison-vs-…md`，sha256 全同）。
+
+**修法**：cp 前先按**内容 sha256** 在 `/var/minis/shared` 全目录（含 `archive/YYYY-MM/`，跳过 `*.tar.gz`）找逐字节相同者 → 有则**复用它、不造新副本**；优先 ASCII 名副本（链接可读），同条件下优先浅路径（顶层胜过归档区）。新增 `file_digest()` / `find_identical_copy()`；stderr NOTE 区分 `reused` / `copied`，行为可观测。脚本 4211 → **5758 字节**。
+
+**验证矩阵 7 条全过**：①无参 → usage rc=2 ②直连（shared 内 ASCII）→ 直出 URL ③**复用**（挂载原件命中归档副本，sha256 `1dcdf6ce02…`，零新副本）④**复用偏好**（顶层 `README.md` 胜过归档同名内容）⑤复制路径（新内容 → sha1 名 `bf5f6993.md`）⑥`--check` OK ⑦不存在文件 → exit 1 不产 URL。测试件已清，共享区仍 **61 文件**。
+
+**注意（给未来会话）**：链接指向 `minis://shared/archive/2026-09/<name>` 是**合法**的（前缀在映射内），但归档区的文件日后若再搬动，该链接即失效 —— 复用优先浅路径正是为了减少这种链接。
+
+<!-- 2026-09-16 21:27:36 -->
+## 09-16 夜：全库 LLM 扫描 + 管线压力测试（用户拍板「扫描仓库 + 用满额度 + 压力测试」）
+
+
+**靶**：RikkaMinis @ main `551ed6b`（fresh clone /tmp/RikkaMinis，1129 commits）。产出：报告 `/var/minis/mounts/笔记/RikkaMinis源码扫描与压力测试-2026-09-16.md`（160 行 / 11.4 KB）+ 共享区四件（`audit-0916e-{report,findings,verify-context,rules}`）。
+
+**★ 管线（自建，可复用）** `/var/minis/workspace/audit/`：
+- `mkunits.py <src-root> <out> [max-lines]` —— .kt 按 800 行切块（801 文件 → 576 单元）
+- `gc_aud.py <units> <out-dir> [conc] [model]` —— 单元 → payload(system=规则库, user=源码切片) → curl POST 免费池 → 报告落盘；**幂等跳过已完成**；并发 3
+- `verify.py <findings> <out> [span]` —— **预核实**：每条发现自动抓 `file:line` ±N 行上下文，供人工判真伪（把"逐条 grep"压缩成"一次读 50 条"）
+- `rules.md` —— 规则库 = 本仓历史 bug 形状（A 时序/B 资源/C 状态机/D 协议/E 边界/F 跨层/G 协程/H Android）+ 三纪律（先读全文件 / 每个怀疑必须 grep 证 / **注释记录的设计取舍不是 bug**）
+- **校准手法（★ 下次必做）**：先用**已知真 bug 的修复前代码**喂管线（本次 `git show 79d57d69^:…ChatContextWindow.kt`）——模型在不知修复史的前提下准确定位到真缺陷行 → 证明管线有牙、规则库探针有效，才铺全量。
+
+**★ 压力测试三条实测约束（本轮主产出之一）**：
+1. **沙箱后台进程不保活** —— `nohup … &` 起的管线进程约 12 分钟后消失（`ps` 无），而 app 自身未重启（pid 恒定）。**改为前台分批（≤60 单元/≤900s）后 282 单元零中断** ✓ 结论：长驻后台重活不可靠 `&`，要么前台分批，要么接受中断点续跑（幂等跳过已在脚本里）。
+2. **免费池凭据有限** —— 跑到约 280 单元（≈5M tokens 级）后返回 `{"error":"当前无可用凭证"}`，之后每单元 17-18s 稳定失败。**不是无限量**（与用户"额度用不完"的印象相反，那说的是另一条通道）。
+3. **app 的 minis-model-use 长上下文受限** —— 27 KB 输入稳定 `Invalid API key`（3/3 复跑），同一输入在 19:35 曾成功 → 是**时间/额度相关**，不是并发（降到 2 仍失败）、不是管线 bug；另一实例报 `Rate limited`。短请求全程正常。
+- 附带：免费池对**填充式内容**（重复字符）返回 `content-blocked` → 尺寸阶梯实验必须用真实代码内容。
+
+**★ 第二道门有牙（149 条抽 14 条深挖 → 7 真 7 伪）**：伪报共性 = 模型只读局部片段就下结论，未查调用侧与防御注释。典型伪报：`probeDeathEvidence MISSING`（作者已用心跳文件替代 /proc，注释详述）、`"done" 哨兵覆盖 stopReason`（消费侧 `isDone` 在 `decode` 之前早退 → 分支不可达）、`BoundedLineReader 活锁`（`MAX_POLL_READ_BYTES = 1 MiB > 256 KiB` 守卫可达）、`iOS 权限"755"十进制`（`toIntOrNull(8)` 的 8 就是 radix）、`awaitWorkerExit 早判`（terminal marker 正是 worker 最后一次写）。**→ 教训：模型报的"可疑"必须过调用侧 + 读注释块；反之，模型在"具体+局部"类问题上命中率很高。**
+
+**★ 核实的真缺陷 7 条（详证见报告）**：
+- 【MED 可达】`ChatRepository.appendMessage` 无 null 守卫 → 会话列表预览被工具结果清空（四环证据链；**同文件 `updateSessionPreview` 有 `?: return` 守卫且注释明写该风险** → 遗漏确凿）
+- 【MED 可达】`MinisAccessibilityService` 的 `hwBuffer.close()` 不在 finally（`wrapHardwareBuffer` 抛异常即泄漏）
+- 【MED 可达·用户可感】`tapText` 丢弃 `performAction` 布尔与 `tapXYRaw` 返回，**无条件 `return ok`**（同文件另两处直接 `return tapXYRaw(...)` 让错误传播 → 不一致）
+- 【MED·缺服务端确认】`VoiceProviderVendors` 的 `authB64` 未 URL 编码（**同串里 `date` 编了码 → 不对称即证据**）
+- 【真·当前不可达】`MinisDocumentsProvider.deleteDocument("")` 可删根（`READ_ONLY_TOP` 只含 memory/skills；provider 未注册 Manifest → 休眠地雷，与文件内 `[audit-P3]` 待办同族）
+- 【LOW】`GroupsCollection` 非法 thinking token → `thinkingLevelFromToken` 返 null → **静默清空覆盖**而非拒绝
+- 【LOW·系统性】6 个 handler 同形：`--help`（无位置参数）返回 **exit 2**（全局约定，但对 agent 不友好）
+
+**教训（工具层，本轮踩到）**：我在这个 provider 上有**字符级拼写不稳**（`encodings`/`json.dup`/`Semaphore`/`catch` 等）→ **写脚本前先用探针钉死 API 名**（`python3 -c "print([n for n in dir(mod)])"`），别靠记忆拼写；同理 **offload 输出也会呈现字符失真**，据此下拼写结论会翻车。
+
+## 2026-09-17
+
+<!-- 2026-09-17 09:00:48 -->
+## 完成状态
+
+# 09-17 凌晨：三模型 576 单元扫描 + 双向反驳收口
+
+- **三份扫描全部 576/576**：s2-flash（senseaudio）/ glm-5.3-flash（senseaudio）/ deepseek-v4.1-flash（前 325 走 senseaudio、后 251 走 mmu 应用内 deepseek-v4-flash）
+- 双向反驳（rebut.py）576/576 × 2 完成：glm 核 s2f（101 CONFIRMED / 78 REFUTED / 43 UNCERTAIN）、s2f 核 glm（327 CONFIRMED）
+- **工具链全部在 /var/minis/workspace/audit/**：gc_aud.py（多后端：curl / mmu / CFG curl-config）、rebut.py、verify.py、reextract.py
+
+## 模型对比核心数据
+- **glm-5.3-flash（0.8/2.8 元/M）性价比完胜**：发现密度 1.95 条/份（s2f 0.76，2.6×）、无发现率 34%（s2f 64%）、覆盖 385 文件（s2f 179，2.15×），且覆盖 s2f 的 92%
+- glm 是思考模型（reasoning_tokens 占 max_tokens），4000 上限会截断正文 → MAXTOK 需 12000+
+- deepseek-v4.1-flash 思考更重（4000 全被 reasoning 吃光，content 空）→ 必须 32000
+
+## 通道历史（教训密集）
+1. **senseaudio（2.4 元密钥）账户被冻结**（`计费账户已被冻结` 400901）——3 模型 + 双向反驳 ≈ 2300 次调用 ≈ 90-100 元跑光。用户"怕花不完"反向解除
+2. **mmu（应用内 deepseek-v4-flash）三个坑**（全部已修进 gc_aud.py）：
+   - ①模型是 agent 型：不传 `tool_choice:"none"` 会输出 `<｜｜DSML｜｜ invoke` 伪标签想调工具 → 非纯文本
+   - ②`--output` 文件是**纯文本**（无 JSON 包装）→ extract 必须按纯文本读（BEND=="mmu" 分支）
+   - ③路径必须绝对（相对路径 can't open）；BEND 等 env 必须模块级读（worker 线程上下文 getenv 不可靠）
+3. **x5m5x 中转站**（用户提供的免费福利）：模型列表丰富（claude-fable-5/opus-5/glm-5.3/gpt-5.6/6-astra），用户嫌延迟慢，配置在 `.x5.cfg`（600 权限 curl-config，key 不落环境变量）——备用
+4. **修 bug 先 5 个探针**（用户拍板）：挑未完成单元到 units-probe.txt 跑，确认 5/5 ok 再上量——这个流程避免了再烧一轮废
+
+## ds 高质量发现样本（待第二道门核实）
+- C5：PREF_CRASH_RECOVERY 在 nav collector 写入但 sid==null 不清 → 崩溃后恢复 stale session
+- B2：crashSaveLauncher 失败分支置 null pendingCrashZip 但临时 zip 文件不删 → 磁盘泄漏
+- E4：AlertDialog per collect emission 无 dismissal guard → 对话框无限堆叠
+- C4：onDestroy 取消协程但 FLAG_KEEP_SCREEN_ON 不清
+
+## 下一步（未完）
+- 用 mmu deepseek 跑第三道门反驳（rebut.py gc-glm2 → re-glm-by-ds）
+- 三方逐单元并排 → 写最终报告（含与日志交叉的结论：日志只覆盖 ChatVMStream/Tool 域，内部符号 0 命中因 R8 剥离）
+- s2f 独有 220 文件的发现是"仅 glm+ds"对照的输入
+
+<!-- 2026-09-17 09:08:16 -->
+## 聚合方法
+
+# 09-17：审计函数聚合结果 — 无单点杠杆（重要结论）
+
+`/var/minis/workspace/audit/cluster.py`：读 rebut 目录的 CONFIRMED 行 → 从 units-main.txt 映射 tag→源文件 → 从源码向上找最近 `fun` 声明 → 按 (文件, 函数) 聚合。输出 cluster-report.md。
+
+## 结果
+- **215 条 CONFIRMED / 172 个函数** — 中位数 **1 条/函数**（长尾分布）
+- 唯一半热点：`ChatViewModel` 类 7 条（跨 ChatQueueInterruption/ChatSessionEntryExt/ChatModelRouting 三个扩展文件）
+- 文件级最多 4 条（ShareReceiverActivity、FullscreenImageViewer）
+- HIGH 分布：97 个函数 HIGH=0、64 个 HIGH=1、**仅 5 个函数 HIGH=3**、6 个 HIGH=2
+- 20 条函数定位失败（行号/路径不匹配，影响小）
+
+## 结论（反直觉但重要）
+**这个库的缺陷是分布式的** —— 同一错误模式散在上百个函数，不是集中在几个烂函数。所以：
+1. **逐函数修不省时间**（172 处 ≈ 215 条）
+2. **真杠杆在模式级**：D8/C3/A8 三类（758 条原始）同属"静默失败"族 → 值钱的是**改判定模式**（写这类代码时强制"判定不了"支路）
+3. **低垂果实**：HIGH×3 的 5 个函数 + ChatViewModel 7 条 ≈ 12 条，一轮分支可做完
+
+## 交付物
+- 报告：`/var/minis/mounts/笔记/三模型审计对比报告-2026-09-17.md`（七节，含类别分布 + 聚合结论）
+- 聚合明细：`/var/minis/workspace/audit/cluster-report.md`
+
+<!-- 2026-09-17 09:11:16 -->
+## 09-17：审计交接文档已就绪（新会话处理 215 条 CONFIRMED）
+
+# 09-17：审计交接文档已就绪（新会话处理 215 条 CONFIRMED）
+
+- **HANDOFF**：`/var/minis/shared/HANDOFF-audit-fix-2026-09-17.md`（自包含：数据位置/格式/批次计划/流程纪律/开工指令）
+- **数据**：`/var/minis/shared/audit-0917/`（14MB / 2889 文件）
+  - 三份扫描成品各 577（gc-sense/gc-glm2/gc-ds）、两份反驳明细各 576（re-sense-by-glm / re-glm-by-s2f）、工具三支（gc_aud.py/rebut.py/cluster.py）、units-main.txt、cluster-report.md、cluster-dirs.md
+  - 清理过程：104MB（含 .out.json）→ 58MB → **14MB**（再删 .in.json 源码副本，可从源码树重建）
+- **批次计划**：低垂果实 12 条（HIGH×3 的 5 函数 + ChatViewModel 7 条）→ ui/components(12) → app/tools(10) → app/backup(9) → app/offload(8) → app/sandbox(8) → data/repository(6) → app/share(6) → 长尾合并
+- **纪律**：分支隔离 / 动手前先读源码核条目真实性（reason 是结论不是证据）/ 改动阶梯 / CI 绿才合 / ponytail 三段注释
+- **开工指令**（复制粘贴给新会话）：`读这个文件并立刻执行：/var/minis/shared/HANDOFF-audit-fix-2026-09-17.md`
+- 完整报告：`/var/minis/mounts/笔记/三模型审计对比报告-2026-09-17.md`（七节）
+
+<!-- 2026-09-17 10:23:21 -->
+## 09-17：审计存量缺陷处理（215 条）批次 1-3 已推 CI
+
+# 09-17：审计存量缺陷处理（215 条）批次 1-3 已推 CI
+
+- HANDOFF：`/var/minis/shared/HANDOFF-audit-fix-2026-09-17.md`；数据 `/var/minis/shared/audit-0917/`
+- **新工具**：`python3 /var/minis/shared/audit-0917/extract.py {list|sum|file <basename>|fun <f> <fn>|dir <substr>}` — 从反驳明细按 (源文件,函数) 聚合 CONFIRMED 条目（复现 215/172 精确一致）
+- **main = a2d5e2d7**（batch1 已合并，CI success）；batch2+3 stacked 在 `fix/audit0917-tools` @ 372fd754，CI dispatched
+- batch2 CI 失败一次：`ArtifactBackupScope.kt:82 Unresolved reference 'children'` —— 行段 splice 时把 `val children = dir.listFiles() ?: return` 一并替换掉了。**教训：行段替换前必须枚举被替换段里的每一行，逐行确认新块包含或显式丢弃**
+- 已修 9 文件：ChatQueueInterruption(3: 编辑截断 fail-closed 重排/空内容早退清占位泡/陈旧快照改实时过滤+抽 removeQueuedPlaceholders)、ChatModelRouting(2: selectEntry 先建 provider 再改字段；switchModelAndRerun load-before-clear + 失败 abort)、ArtifactBackupScope(符号链接环守卫+计数混淆 ponytail 注释)、OffloadArgs(getBool 拒猜)、SkillsManagementScreen(粘贴导入/重扫下主线程+捕获异常)、FileReadTool(max_length 下界+header 报截断+catch 带 toolTitle)、FileEditTool/ReadImageTool(catch 带 toolTitle；ReadImage 错误路径回收 bitmap)、AgentTraceRecorder(空 lease_token 即 gap)、MemoryRollupTool(删不可达 doc)、UnknownToolMessage(空名回退占位)
+- **REFUTED（已核源码未改）**：OffloadArgs 负值/裸 flag（文档化设计、无负值消费者）；updateFromURL 无 try/catch（内部自捕获返 Failure）；AgentTraceRecorder traceStart 不重置 terminalWritten（无生产调用方，beginRun 每轮重开）；drainQueuedPrompts break 丢队列（队列已整体取出，错误已上报）
+- **编辑手法（本会话验证有效）**：行号定位 + python 拼接脚本，标识符从既有源码行派生（不重打拼写）；structural assert 失败会防呆；括号计数基线本身可能不平衡（字符串含括号），只看 delta 是否平衡
+
+<!-- 2026-09-17 12:34:57 -->
+## 09-17 续：审计修复推进（新会话接手，另一会话模型故障）
+
+
+**状态**：main = `55d38484`（4 提交 FF 合并，CI 35181007403 success）；第二批 `fix/audit0917-high2` @ `b66c21bc` CI 已触发。
+
+**salvage 发现**：另一会话的 `fix/audit0917-doc` 分支**从未推到远端**（本地 clone 有 28b80576，远端查无）→ cherry-pick 到新分支（7708dc1a，与远端 doc 分支字节一致，已核对）。
+
+**本会话已修（合并进 main）**：
+- share 批：PendingShare.fromJson 畸形元素（getJSONObject→optJSONObject）、save 失败仍带 shared_content、provider 导入后 staged 文件孤儿+字节计数（新增 debitStagedBytes）、JiebaEngine 失败闩（initFailed + ponytail 三段注释）
+- repository 批：recordSkillUse 内存镜像竞态（挪进 addLock）、extractTextForOffload 优先级文档化
+- sandbox 批：**PersistentShell.readLoop 双守卫**（`process !== p` 即 break；EOF 只在 `process === p` 时置 null——旧 reader 会抹掉新 shell 的 stdinWriter）、**writerLock**（executeCommand 与 applyEnvironment 并发写同一 PTY OutputStream 会交错）、PRootKernel.bindMounts 改 ConcurrentHashMap + buildProotCommand 迭代快照
+
+**第二批（待 CI）**：MinisOpenUrlBroker.offer(Uri) 补 scheme 门、MCPOAuthStore 读取失败不再删密钥文件 + 失败清 tmp（含 bearer token）、GroupRouter pending pick 优先于降级回退（+JVM 测试）、ScheduledNotificationReceiver 先 notify 再 remove + 缺 id 早退
+
+**剩余**：约 145 条 / 102 文件（HIGH ~50）。下一步候选：ConfigBackup exportToWriter 无 MAX_PAYLOAD_BYTES 门（与 export() 不对称）、VoiceProviderVendors.parseVoiceInputResponse(3)、ChatSessionEntryExt/ChatViewModel(4+2)、OpenAIProvider.buildRequestBody(2)。
+
+**核实方法有效**：逐条读源码 + 查调用方，本会话 8 条真缺陷 / 7 条驳回（驳回率 ~47%，含已修项与设计取舍）。
+
+<!-- 2026-09-17 14:22:52 -->
+## 09-17 下午：审计存量缺陷批次 1-7 收口 — main = e657335f
+
+
+**成果**：215 条 CONFIRMED → **已处理 155 条 / 92 文件**，剩余 60 条（HIGH 4 / MED 32 / 其他 24）。10 个提交 FF 合并，CI 全绿，远端仅剩 main。
+
+**收口链路**：分支 `fix/audit0917-backup` → `fix/audit0917-chat`（stacked）→ 每次 CI 绿后提交下一批 → 最终 FF main = e657335f → 远端分支 API DELETE 204（`gh_sync.sh` 无删分支封装，用 curl DELETE refs/heads）。
+
+**剩余清单**：`/var/minis/shared/audit-0917/remaining.txt`（119 行，含 文件::函数(行) + reason 摘要）；HANDOFF 已更新进度段 + 工具表 + 教训段。
+
+**本会话修的代表性缺陷**（按类）：
+- **路径穿越**：WebDavClient.buildUrl —— okhttp `addPathSegment("..")` **会弹出上一段**（实测 okhttp 4.12.0：`/dav/` + `..` + `escape.json` → `/dav/escape.json`），旧注释声称"stays literal"是错的；再编码无效（`%2E%2E` → `%252E%252E`，`addEncodedPathSegment("..")` 同样被解析）→ 改 fail-closed 拒绝。AppLogger.readLog 同族（caller 传文件名 → `../..` 可读任意文件）→ 抽 `resolveLogFile` 守卫。
+- **共享 SimpleDateFormat 竞态 5 处**：ChatFormattingUtils / EnvVarsCollection / CrashFileReporter / HangDetector×2 / ConfigBuiltins → 全换 java.time.DateTimeFormatter（minSdk 26 原生可用）。
+- **静默失败族**：ChatTurnPartsJson 分隔符按 loop index（跳过空名首元素 → `[,{...}]` 畸形 JSON，补 4 条测试）；ProviderConfigMapping JSON 解码无保护（畸形 blob 炸掉整次 DB 加载）；Doubao/Deepgram ASR `optString` 返回 "" 使 `?: throw` 死代码（空转写当成功）；RootfsEventLog boot id 撕裂写 → 原子写 + `BOOT_ID_CORRUPT` 哨兵。
+- **资源泄漏**：ChatTurnPersistence slot 释放未覆盖 setActive/buildFallbackProviders；TerminalSession onSessionFinished 不清引用（死会话留在 liveSessions）；KaTeXView postDelayed 未取消（对已 destroy 的 WebView draw）；DebugScreenshotRing recycle 不在 finally。
+
+**★ 三次编译错全在本地可拦（本会话核心教训）**：
+1. **行段替换吞掉相邻定义**（两次：`LogSegment` data class、`outFile` 绑定）→ 教训：替换前枚举被替换段每一行 + `git diff --numstat` 看删除行数
+2. **`val`→`var` 丢 smart-cast**（委托属性）→ 局部快照
+3. **lambda 内 `this` ≠ 外层类** → `this@Outer`
+4. `object` 内不能有 `companion object`；表达式体函数不能 `return`
+
+**新工具**：`sh /tmp/syncheck.sh [文件...]`（本地语法门，无参=查工作区改动 .kt）—— **已实测有牙**（故意注入括号错被抓）；已归档到 `shared/audit-0917/syncheck.sh`。推送前先跑它。
+
+**JVM 真跑配方**（已两次验证有效）：`CP=/tmp/libs/junit-4.13.2.jar:/tmp/libs/hamcrest-core-1.3.jar:/tmp/kotlinc/lib/kotlin-stdlib.jar`；kotlinc -cp → JUnitCore；org.json 用 `/tmp/libs/json-20231013.jar`；Android 依赖用 stub 对象替代。RootfsEventLog 8/8、OffloadOutput 逻辑 9 例全过。
+
+**驳回的误报**（读源码后确认，非缺陷）：ChatLinkResolver minis:// 穿越（PRootKernel.safeResolveWithin 已守卫）、FileBrowserScreen `if (false && isHtml)`（有意关闭，注释在上一行）、ProviderFactory "缺 KeyRoulette"（create() 里已应用，只是尾部有孤儿 KDoc）、SSE reader 隐式字符集（平台默认恒 UTF-8，已加注释说明而非改行为）。
+
+<!-- 2026-09-17 14:26:30 -->
+## 09-17：审计交接包完成（新会话可直接接手剩余 58 条）
+
+
+**main = `e657335f`**，远端仅剩 main，CI 绿。交接物全部在 `/var/minis/shared/audit-0917/`（14MB）。
+
+### 交接包三件套（新会话只读 HANDOFF 即可开工）
+
+1. **`/var/minis/shared/HANDOFF-audit-fix-2026-09-17.md`**（122 行，自包含）
+   - 进度段（155/215 已处理，剩 58）+ 模块分布表 + 建议批次
+   - 工具表（4 个工具含路径与用途）
+   - 教训段（本会话踩的 5 类编译错 + 拦截方式）
+   - ⚠️ 误报警示段（HIGH 4 条里 3 条已核实为误报）
+2. **`remaining-plan.md`**（16KB）—— 58 条按模块分组 + 严重度排序 + 误报标注
+3. **三个工具**：`plan.py`（生成计划，修了 extract.py 的字段错位）/ `check_drift.py`（行号漂移自检）/ `syncheck.sh`（本地语法门）
+
+### 交接准备中发现的真问题（值得记）
+
+**★ 交接物最脆的一环是行号漂移**：审计发生在 `a2d5e2d7` 之前，本会话修了 92 个文件 → 未修文件的行号可能偏移。写了 `check_drift.py` 实测：**58 条中 OK=47 / DRIFT=11 / NOTFOUND=0**。11 条 DRIFT 里：
+- 3 条是 `L-1`（审计时就没定位到行，模型只给了文件级描述）
+- 8 条是行号偏移或 reason 引用的标识符不在窗口内
+→ 已在 HANDOFF 写明「DRIFT 条目按 reason 关键字搜文件定位，别信行号」。
+
+**★ extract.py 的字段错位（本轮发现）**：`rows()` 把 reason 里的 `[HIGH]` 方括号前缀当成 `conf` 字段，导致 `conf` 列混入描述文本、严重度丢失。`plan.py` 用正则从 conf+reason 里统一提 severity 修正。
+
+**★ 误报核实纪律再验证**：HIGH 4 条里 3 条是误报（ChatLinkResolver 穿越 / FileBrowserScreen 死代码 / ProviderFactory 缺 choke point），全部靠**读源码上下文**驳回，模型结论不能当证据。
+
+**★ 源码树易失的处理**：`/tmp/RikkaMinis` 会被清 → HANDOFF 已写明 clone 命令，且实测 clone 后 `plan.py` / `check_drift.py` 的路径假设成立（`src/android/app/src/main/java/com/rikkaminis/`）。`syncheck.sh` 依赖 `/tmp/kotlinc`，脚本头已注明重建要求。
+
+<!-- 2026-09-17 15:52:58 -->
+## 09-17 下午续：接手瘫痪会话的工作树（b7/b8 批次收口）
+
+
+**背景**：另一个会话在做审计剩余 58 条（HANDOFF-audit-fix-2026-09-17.md），因对话压缩故障瘫痪，无法交接。本会话直接接手它的 /tmp/RikkaMinis 工作树。
+
+**接手时状态**（关键：先只读盘点再动手）：
+- 本地 main = ce4ccb91（已 commit 未推）+ 5 文件未提交改动（b8 批次）
+- origin/main = b758ddaa
+
+**验证手法（可复用）**：`syncheck.sh` 对 Compose/Android 文件**噪声极大**（单文件编译缺依赖 → 222 条 "cannot infer type" + "overrides nothing"）。**不要靠它判断**，改用**基线对照**：`/tmp/synbase.sh` —— 把 HEAD 版与工作区版分别编译，比较**去掉 unresolved reference 后的错误直方图**，IDENTICAL 才算没引入真错。这次结果 IDENTICAL，但注意它只证明"没引入新错"，**不证明改动的语义正确**（语义仍需读源码 + 核 API 存在性）。
+
+**b8 批次内容**（6 条）：ProviderSpeechRecognitionEngine(degraded @Volatile + all-skipped 错误分类) / AgentLoopEngine(residue refill 补 terminalErrorSurfaced 门) / ChatScreen(htmlPreviewHolder DisposableEffect —— 真 HIGH) / ImageGalleryViewer(LaunchedEffect 替代 composition 期 onDismiss + saveToAlbum 改 applicationScope) / WebViewHolder(destroy 幂等 AtomicBoolean 闩锁，支撑 DisposableEffect 与 dismiss 回调双触发)。
+
+**结果**：整理两处（去冗余全限定名、合并重复 KDoc）→ 提交 0e90b6c3 → push-main（ce4ccb91 + 0e90b6c3 一起推）→ 远端 main = 0e90b6c3，CI 触发。
+
+**对账结果**：58 条 = 3 误报 + 30 已触及 + **25 待处理**（工具：/tmp/reconcile.py，从 remaining-plan.md 提取条目并与 git 触及文件求差）。
+
+<!-- 2026-09-17 16:09:10 -->
+## 09-17 下午续 2：b9/b10 完成，两轮 CI 失败教训
+
+
+**b9（ui/chat 9 条：6 修 3 驳）** 分支 fix/audit0917-chatbatch：
+- 修：ChatCompactionLogic(删 "max_tokens" 子串——输出参数错被误判上下文过大导致重试不收敛，注明偏离 iOS 镜像) / ChatHistoryDrawer(deleteSession 异常会跳过 VM release+badge clear → try/catch/finally，VM release 回 Main) / SanitizeAgentHistory(合并条件放宽为任何 USER 邻居——原条件漏纯文本 user 时插入新消息造成连续 user，Anthropic 硬 400) / StreamingMarkdownText(媒体解析 remember 同步 IO → 抽 rememberMdMediaFile = produceState+IO，图片/video/audio 三处统一) / ChatToolDetailUI(keywords take(160)) / MarkdownParser(bullet 续行守卫 .matches() 整串匹配失效 → containsMatchIn，实锤：缩进 "- item" 被吞成 continuation)
+- 驳：ChatStreamToolHelpers(contains 保守方向对) / ChatInputArea(150ms burst 窗口无外部写机会 + shouldCommitImeBurst 已防呆) / StreamingMarkdownText warmSeed key(加 isStreaming 无行为收益，blocks===warmSeed 恒 false)
+
+**b10（16 条：10 修 6 驳）**：
+- 修：ContextGrowthTracker(乘法饱和防溢出成负 reserve) / FileWriteTool(catch 补 toolTitle) / ModelsCollection(非字符串数组抛 TypeMismatch 而非静默清空) / VoiceProviderFactory+DoubaoVoiceProvider(构造加 baseUrl 传 custom——进分支必有 custom，丢 base 钉死全局域名) / Xunfei 复合 key 失败加日志 / ThinkingRuleCoding(decodeRuleJson 删空 label 拒绝——toRule 接受则往返丢规则) / SessionConcurrencyManager(hasOtherWaiting 谓词：同 session 多 waiter 时不清 suspended 标记，promote/cancelWaiter/cleanupIfStillWaiting 三处) / ModelEntryPicker(折叠行点击改展开，不再切换首个隐藏模型) / AddProviderScreen(刷新 scope null 改为大声 Log) / WebAppPathResolver(排序按 linux key 长度与 resolveHostPath 对齐)
+- 驳：AgentRecoveryPolicy(证据类型无构造点 T7 未接线) / BackgroundTaskNotifier(外层 catch Throwable 已兜底) / McpPkce(reason 仅 "96" 无断言) / MinisMarkdownTextToolbar(同步无挂起点) / BrowserWebView(mount 无条件重设 listener) / ConfigValue(reason 自我否定)
+
+**★ 两轮 CI 失败教训（重要）**：
+1. **接手别会话提交要先过 CI 概念**：ce4ccb91 遗留 SafeNavigate `import androidx.lifecycle.currentStateFlow` unresolved（lifecycle-runtime-ktx 2.8.7 解析不到）→ 用 LifecycleEventObserver 实现 awaitResumed，注意 onStateChanged 签名参数是 **LifecycleOwner 不是 Lifecycle**。
+2. **synbase 基线对照的盲区**：非 unresolved 直方图过滤会把"删局部变量导致 unresolved reference"这类真错掩盖（unresolved 'context' 被 grep -v 滤掉）！教训：**做"删除声明"类改动后，必须按函数体边界 grep 该符号的所有引用**，且范围要覆盖整个函数（我 awk 截在 1900 行，漏了 audio 剩余函数体的 openMdMediaExternally(context,...)）。CI 抓出 StreamingMarkdownText 1927:55。修复 commit 481290d7。
+3. 分支 CI 两轮失败均未合并前抓到（main 红色由 b8 推送造成 → 分支 CI 修复后 FF 覆盖）。
+
+<!-- 2026-09-17 16:19:49 -->
+## 09-17 下午续 3：三轮 CI 失败与「本地门盲区」的根治（重要方法论）
+
+
+**三轮 CI 失败全在本地可拦，全因"把真错当噪声"**：
+1. `SafeNavigate.kt` `import androidx.lifecycle.currentStateFlow` unresolved（ce4ccb91 遗留）—— 接手别会话提交时未做整树验证。
+2. `StreamingMarkdownText` 删了 `val context`，但 RenderMdAudio 函数体**后半段**（1927 行）仍在用 → 我 grep 检查的 awk 范围截在 1900 行。**教训：删除声明后检查引用，范围必须覆盖整个函数体（用函数边界扫描，不用行号区间）**。
+3. `FileWriteTool` 的 catch 引用 try 内局部 `toolTitle` → 作用域错。
+
+**★ 根本教训（方法论）**：`synbase.sh` 的"基线对照"把 **unresolved reference 整类过滤掉**，而这两轮的真错**恰好都以 unresolved 形式出现**（我新增/删除的局部符号）。过滤掉的正是判据本身 → 方法失效。
+
+**★ 根治工具：`/var/minis/shared/audit-0917/localgate.py`**（本会话新写，已验证有效）
+原理：对 `git diff --name-only origin/main` 的全部 .kt 跑一次 kotlinc，抓 `unresolved reference 'X'`，然后**只保留"本文件内声明过 X"的报错**——局部符号绝不可能因缺依赖而 unresolved，所以这类必是真错。两个关键细节：
+- Kotlin 实际输出是**小写** `unresolved reference`（我第一版正则用大写 `Unresolved` → 命中 0，误判为"全部干净"）。
+- 必须排除**成员访问**（报错位置前一个非空白字符是 `.`）与 import 路径，否则 `firstEntry.model`、`androidx.navigation.NavController` 这类"上游类型未解析的级联"会刷屏误报。
+- 修正后剩余项只剩**类型名**（AnnotatedString/LazyListScope/NavController/ColumnScope，作声明类型或扩展接收者）→ 全是缺类库噪声，判定通过。
+**用法**：`python3 /var/minis/shared/audit-0917/localgate.py` → 退出码 1 表示有真错候选（含 file:line:col）。
+**定位**：synbase 做"改动是否引入新错误类别"的粗筛，localgate 做"名字解析"的精筛，两者互补。
+
+<!-- 2026-09-17 16:43:22 -->
+## 09-17 晚：审计 58 条全部收口 — main = 8fbb9d2e（release CI 同 SHA）
+
+
+**收口链路**：分支 fix/audit0917-chatbatch（6 提交，5 轮 CI：3 编译错 @ nav-currentStateFlow / 坏删 context / toolTitle 作用域 + 1 单测契约 @ decodeRuleJson 空 label；全修后第 5 轮绿）→ FF main → 删远端两分支（chatbatch + 瘫痪会话遗留的 fix/audit0917-b9）→ release CI 自动触发（与验证 SHA 同一 commit 必绿）。
+
+**58 条最终**：3 误报 + 30 先前覆盖 + b9 9 + b10 16 = 全部完成。HANDOFF 已追加密收口记录。
+
+**跨会话关键知识（本会话实证）**：
+1. **接手别会话半成品的前置**：先 `git status` + `git log --oneline -5 origin/main` + 查 CI（rikka-ci-bridge）—— 瘫痪会话可能留下已提交未推送/未验证的 commit（ce4ccb91 就是：本地 commit 好了但 CI 没跑，一推就红）。
+2. **「删变量/改名」类改动完成后**：按**函数边界**（不是行号区间）grep 全函数体的引用；我的 awk 截在 1900 行漏了 1927 行的使用。
+3. **pending 断言 vs 测试冲突时**：测试是契约。decodeRuleJson 案例证明"读 reason 得出的对称性论点"不敌已钉死的测试——必须先查业务路径是否会产生该输入（ThinkingRuleEditor.isValid 强制 label 非空 = 空 label 只可能损坏）。
+4. localgate.py（shared/audit-0917/）是本地最强编译门：局部符号 unresolved = 必真错。
+
+<!-- 2026-09-17 16:58:07 -->
+## 09-17 收口后复查：今日 30 提交（审查结论 + 1 个真缺陷）
+
+
+**对象**：main 8fbb9d2e vs 昨日 c6f06d8b（30 提交 / 143 文件 / +2371−532）。报告：`/var/minis/mounts/笔记/今日改动复查报告-2026-09-17.md`
+
+**★ 找到 1 个真缺陷（同批次漏网，注释与代码矛盾）**：`OffloadPermissionManager.requestAndroidPermission` TIMEOUT 分支（~:199）给 dialog 加了 identity guard，**却仍无条件 `androidPermissionContinuation = null`** → 新 caller 的 waiter 槽被旧超时路径杀掉 → 用户点「允许」被 `respondToAndroidPermission` 的 `?: return` 吞掉（静默失败，有超时兜底）。同批次另两处（requestPermission:425 / requestSettingsGate:278）均干净 → 唯一不一致点。修复=一行（把清空并进 `if (androidPermissionContinuation == null)`）。
+
+**★ 新方法论（可复用）："同批次守卫一致性扫描"** —— 当一轮修复把某个模式（identity guard / fail-closed / take-then-clear）应用到 N 处时，逐处列出并对比，**漏改的那处会以"注释声称正确、相邻代码相反"的形式暴露**。本次就是靠读注释 + 紧邻代码对照抓到的（注释写 "clearing would kill its dialog"，下一行就在清它的 continuation）。
+
+**次要问题 3 条（不改也可）**：①MinisOpenUrlBroker 注释写反（加 gate 的是 String 重载；Uri 重载仍裸但无生产调用者）②RootfsEventLog.readBootId **无生产消费者**（BOOT_ID_CORRUPT 哨兵仅测试用，注释声称的 callers 不存在）③ChatHistoryDrawer finally 内挂起 withContext(Main)（取消时 release 被跳过，进程级 scope 实际低风险）。
+
+**localgate 的判据缺陷（重要，下次直接用 v2）**：命中 180+ 项里**全是噪声**，根因 = `local_decl` 正则把**扩展函数接收者**当成"本文件声明"（`fun Request.Builder.applyKeyAuth()` 里的 `fun Request` 命中 `\bfun\s+Request\b`）。判据必须先排除 `fun X.` 形式与 lambda 参数名（it/value/key），否则最有效的门反而误报最多。**更硬的证据仍是 CI 同 SHA 绿**（分支 CI + main push 双跑同 workflow 含全量 testReleaseUnitTest）。
+
+**验证过无问题的重点**：GroupRouter pending pick / SessionConcurrencyManager.hasOtherWaiting 三处 / SanitizeAgentHistory 合并放宽 / ChatQueueInterruption fail-closed 重排 + 实时过滤 / StreamingMarkdownText produceState / PersistentShell 双守卫+writerLock / HangDetector 锁 / NotificationListener 计数 latch / ChatShellExecution retry 复用 lineCallback / ChatTurnPartsJson emitted / ContextGrowthTracker 饱和 / ProviderConfigMapping 容错 / MCPOAuthStore 保留密钥 / 路径守卫族。**SimpleDateFormat 无同族残留**（剩余均函数内局部新建）。
+
+**CI 事实**：main 曾在 0e90b6c3 红 ~50 分钟（#1619，#1615→#1624 之间），已由后续提交覆盖；8fbb9d2e 双绿（#1623 分支 + #1624 main push success 08:55）。
+
+<!-- 2026-09-17 17:15:07 -->
+## 09-17 收口：OffloadPermissionManager 超时守卫修复 → main = fcfaf515
+
+
+**修复**：`requestAndroidPermission` TIMEOUT 分支的 `androidPermissionContinuation = null` 从「无条件」改为与 dialog 清空**同一个 `if (androidPermissionContinuation == null)` 守卫内**，并把注释改成说明"正常超时路径 invokeOnCancellation 已清槽 → 该分支幂等；守卫只在陈旧超时窗口生效，此时槽属于别人"。语义零变化（正常路径行为不变），只堵住新 waiter 被旧超时路径杀掉 → 用户「允许」被 `respondToAndroidPermission` 的 `?: return` 吞掉的静默失败。
+
+**流程（标准闭环，全程 ~25 分钟）**：分支 `fix/permission-timeout-guard` @ fcfaf515 → 基线对照语法门（改动前后错误直方图 IDENTICAL）→ 分支 CI **#1625 success** → FF main → 远端分支 DELETE 204 → 本地主树只剩 main → release CI #1626 自动触发（用户明示"触发之后就不用等了"）。
+
+**可复用：单文件改动的本地门做法** —— syncheck 对 Android 文件必报一堆 `cannot infer type for this parameter`（suspendCancellableCoroutine 缺依赖），别据此判断；正确做法是 `git show HEAD:<path> > /tmp/base_x.kt` 对**改动前版本**跑同一门，比较「去掉文件路径与行号后的错误类型直方图」是否 IDENTICAL。
+
+**真机验证说明**：该缺陷只在"A 超时返回 + B 恰好同时装槽"的极窄窗口触发，无法主动构造 → 不安排真机验证（无 UI 可感路径），代码级 + CI 双证。
 
 ---
 
