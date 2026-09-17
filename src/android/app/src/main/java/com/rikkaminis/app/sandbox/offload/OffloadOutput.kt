@@ -69,10 +69,16 @@ internal object OffloadOutput {
 
     /** iOS envelope: `{ok:true, data: ...}` or `{ok:false, error: ...}`.
      *  We accept either field independently — older / partial envelopes
-     *  may carry just `data` or just `error`. */
+     *  may carry just `data` or just `error`.
+     *
+     *  [audit-0917] An explicit JSON null comes back as the JSONObject.NULL
+     *  sentinel, not as Kotlin null, so `?: obj` above did not fall back and
+     *  serialize() emitted the literal text "null". Map the sentinel to null
+     *  here so a null payload keeps the envelope-less body.
+     */
     private fun extractEnvelopeField(obj: JSONObject): Any? {
-        if (obj.has("error")) return obj.opt("error")
-        if (obj.has("data")) return obj.opt("data")
+        if (obj.has("error")) return obj.opt("error").takeUnless { it === JSONObject.NULL }
+        if (obj.has("data")) return obj.opt("data").takeUnless { it === JSONObject.NULL }
         return null
     }
 
@@ -93,6 +99,11 @@ internal object OffloadOutput {
             is JSONObject -> if (compact) payload.toString() else payload.toString(2)
             is JSONArray  -> if (compact) payload.toString() else payload.toString(2)
             is String     -> payload
+            // [audit-0917] JSONObject.NULL is what opt() returns for an explicit
+            // JSON null, and it is not a String, so it used to fall through to
+            // payload.toString() and emit the four-character text "null" — a
+            // downstream reader saw a literal "null" string instead of nothing.
+            JSONObject.NULL -> ""
             else          -> payload.toString()
         }
     } catch (e: Exception) {

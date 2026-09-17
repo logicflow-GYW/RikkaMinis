@@ -64,7 +64,14 @@ internal class LogWriteQueue(
     }
 
     fun start() {
-        started = true
+        // [audit-0917] Guard against a second call: thread.start() on an
+        // already-started Thread throws IllegalThreadStateException, and
+        // `started` was assigned but never read. Callers (AppLogger.init on a
+        // re-init, tests) could trip this.
+        synchronized(this) {
+            if (started) return
+            started = true
+        }
         thread.start()
     }
 

@@ -117,13 +117,26 @@ object ConfigConfirmationGate {
     /** UI callback: user tapped "Apply" with the post-toggle item state. */
     fun userApprove(items: List<PendingConfigChangeItem>) {
         val current = _pending.value ?: return
-        scope.launch { resolve(current.id, ConfirmOutcome.Approved(items)) }
+        scope.launch {
+            // [audit-0917] resolve() can find nothing to resume if the 120s
+            // timeout won the race between this read and the coroutine running
+            // — the tap was then dropped with no trace at all. Surface it.
+            val delivered = resolve(current.id, ConfirmOutcome.Approved(items))
+            if (!delivered) {
+                AppLogger.info(TAG, "approval for ${current.id} arrived after resolution; ignored")
+            }
+        }
     }
 
     /** UI callback: user tapped Cancel. */
     fun userReject() {
         val current = _pending.value ?: return
-        scope.launch { resolve(current.id, ConfirmOutcome.Rejected) }
+        scope.launch {
+            val delivered = resolve(current.id, ConfirmOutcome.Rejected)
+            if (!delivered) {
+                AppLogger.info(TAG, "rejection for ${current.id} arrived after resolution; ignored")
+            }
+        }
     }
 
     private suspend fun timeout(id: String) {
@@ -132,7 +145,15 @@ object ConfigConfirmationGate {
         resolve(id, ConfirmOutcome.TimedOut)
     }
 
-    private suspend fun resolve(id: String, outcome: ConfirmOutcome) {
+    /**
+     * Deliver [outcome] to whoever is awaiting [id].
+     *
+     * @return true when a continuation was actually resumed. false means the
+     *   request had already been resolved (the 120s timeout usually won) and
+     *   this outcome was discarded — callers log it instead of losing the fact
+     *   silently. [audit-0917]
+     */
+    private suspend fun resolve(id: String, outcome: ConfirmOutcome): Boolean {
         val cont: Continuation<ConfirmOutcome>?
         val advance: Boolean
         var advancedTo: PendingConfigChange? = null
@@ -153,6 +174,7 @@ object ConfigConfirmationGate {
         // needs a background nudge if the user is away.
         advancedTo?.let { notifyIfBackgrounded(it) }
         cont?.resume(outcome)
+        return cont != null
     }
 
     /**

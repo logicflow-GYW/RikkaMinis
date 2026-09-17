@@ -213,7 +213,7 @@ class TerminalSession(private val context: Context) {
                     runCatching { killTermuxProcessTree(s) }
                         .onFailure { Log.w(TAG, "cleanup after start failure: ${it.message}") }
                 }
-                liveSessions.removeAll { it.get() === this || it.get() == null }
+                liveSessions.removeAll { it.get() === this@TerminalSession || it.get() == null }
                 _state.value = State.STOPPED
             }
         }
@@ -555,7 +555,7 @@ class TerminalSession(private val context: Context) {
             startGeneration.incrementAndGet()
             termuxSession = null
             if (_state.value != State.STOPPED) _state.value = State.STOPPED
-            liveSessions.removeAll { it.get() === this || it.get() == null }
+            liveSessions.removeAll { it.get() === this@TerminalSession || it.get() == null }
         }
         override fun onBell(session: com.termux.terminal.TerminalSession) {}
         override fun onColorsChanged(changedSession: com.termux.terminal.TerminalSession) {}

@@ -397,7 +397,16 @@ lang: "auto"
         target.parentFile?.mkdirs()
         val text = SoulMDParser.serialize(file)
         val tmp = File(target.parentFile, "${target.name}.tmp")
-        tmp.writeText(text)
+        // [audit-0917] Delete the temp file if the write itself fails. The old
+        // code only cleaned up on a rename failure, so a throwing writeText
+        // (disk full, permission) left a stale <name>.tmp that no other path
+        // ever removes.
+        try {
+            tmp.writeText(text)
+        } catch (t: Throwable) {
+            runCatching { tmp.delete() }
+            throw t
+        }
         if (!tmp.renameTo(target)) {
             // Fallback: copy + delete tmp on filesystems that reject
             // cross-inode rename (shouldn't apply inside filesDir, but
