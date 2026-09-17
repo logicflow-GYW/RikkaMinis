@@ -165,8 +165,13 @@ fun ManageProviderModelsSheet(
                         visible = !entry.isHidden,
                         onClick = { onModelEntryClick(entry.uuid) },
                         onToggle = {
-                            providerRepository.updateEntry(entry.copy(isHidden = !entry.isHidden))
-                            AppLogger.info(SHEET_TAG, "Toggled ${entry.model.displayName} hidden=${entry.isHidden}")
+                            val updated = entry.copy(isHidden = !entry.isHidden)
+                            providerRepository.updateEntry(updated)
+                            // [audit-0917] Log the NEW state. It logged
+                            // `entry.isHidden` (the pre-toggle value), so every
+                            // "Toggled X hidden=" line reported the opposite of
+                            // what was just written.
+                            AppLogger.info(SHEET_TAG, "Toggled ${updated.model.displayName} hidden=${updated.isHidden}")
                         },
                     )
                     if (index < filtered.lastIndex) {

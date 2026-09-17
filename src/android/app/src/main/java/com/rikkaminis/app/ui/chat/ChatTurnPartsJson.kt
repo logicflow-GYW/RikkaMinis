@@ -30,16 +30,24 @@ internal fun buildAssistantTurnPartsJson(
     toolBlockMeta: Map<String, AssistantBlock>,
 ): String = buildString {
     append("[")
-    parts.forEachIndexed { index, part ->
-        if (index > 0) append(",")
+    // [audit-0917] Track what was actually emitted instead of using the loop
+    // index. A skipped part (blank-name ToolUse) left the separator decision
+    // for the NEXT part already taken: if part 0 was skipped, part 1 emitted
+    // a leading comma → "[,{...}]", and a skipped tail part left a trailing
+    // comma. Both are malformed JSON that the persistence reader then fails
+    // to parse.
+    var emitted = 0
+    parts.forEach { part ->
         when (part) {
             is AgentContentPart.Text -> {
+                if (emitted++ > 0) append(",")
                 append("""{"type":"text","value":${escapeJson(part.text)}}""")
             }
             is AgentContentPart.ToolUse -> {
                 // Skip tool_use with blank name — upstream bug guard.
                 val name = part.name
-                if (name.isBlank()) return@forEachIndexed
+                if (name.isBlank()) return@forEach
+                if (emitted++ > 0) append(",")
                 val inputStr = part.input.toString()
                 val meta = toolBlockMeta[part.id]
                 val desc = meta?.toolTitle ?: ""

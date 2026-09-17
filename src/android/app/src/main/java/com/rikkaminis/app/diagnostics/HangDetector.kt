@@ -161,8 +161,16 @@ object HangDetector {
 
     private const val STALL_LOG_DIR = "logs"
     private const val STALL_LOG_PREFIX = "stall-"
-    private val DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-    private val TIMESTAMP_FORMAT = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    // [audit-0917] Immutable formatters. These are read from the watchdog
+    // thread (writeStallSample) while the main thread may be formatting the
+    // same instances — a shared SimpleDateFormat is not thread-safe and can
+    // emit a garbled stamp exactly when the diagnostic matters.
+    private val DATE_FORMAT: java.time.format.DateTimeFormatter =
+        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.US)
+            .withZone(java.time.ZoneId.systemDefault())
+    private val TIMESTAMP_FORMAT: java.time.format.DateTimeFormatter =
+        java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss.SSS", Locale.US)
+            .withZone(java.time.ZoneId.systemDefault())
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val started = AtomicBoolean(false)
@@ -391,8 +399,9 @@ object HangDetector {
         } catch (t: Throwable) {
             arrayOf<StackTraceElement>()
         }
-        val ts = TIMESTAMP_FORMAT.format(Date())
-        val date = DATE_FORMAT.format(Date())
+        val now = java.time.Instant.now()
+        val ts = TIMESTAMP_FORMAT.format(now)
+        val date = DATE_FORMAT.format(now)
         val builder = StringBuilder()
         builder.append(
             "===== HANG @ $ts (duration ~${durationMs}ms) sample=$label escalation=$escalation =====\n",

@@ -24,18 +24,27 @@ object DeviceIdentity {
 
     @Volatile private var cached: String? = null
 
+    // [audit-0917] Guards the check-then-act below. Two concurrent first calls
+    // (e.g. a background RPC landing while the UI initialises) both saw
+    // cached == null, both found no stored id, and both wrote a fresh UUID —
+    // the device then reported two identities depending on which call won.
+    private val lock = Any()
+
     fun deviceId(context: Context): String {
         cached?.let { return it }
-        val prefs = encryptedPrefs(context)
-        val existing = prefs.getString(KEY_DEVICE_ID, null)
-        if (existing != null) {
-            cached = existing
-            return existing
+        synchronized(lock) {
+            cached?.let { return it }
+            val prefs = encryptedPrefs(context)
+            val existing = prefs.getString(KEY_DEVICE_ID, null)
+            if (existing != null) {
+                cached = existing
+                return existing
+            }
+            val fresh = UUID.randomUUID().toString()
+            prefs.edit().putString(KEY_DEVICE_ID, fresh).apply()
+            cached = fresh
+            return fresh
         }
-        val fresh = UUID.randomUUID().toString()
-        prefs.edit().putString(KEY_DEVICE_ID, fresh).apply()
-        cached = fresh
-        return fresh
     }
 
     /** "Pixel 8 Pro · A3F7" — last four chars of [deviceId] uppercased. */

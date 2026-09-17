@@ -916,6 +916,18 @@ object CrashFrequencyDetector {
         val readable = files.filter { it.exists() && it.length() > 0 }
         if (readable.isEmpty()) return null
         val shareDir = File(ctx.cacheDir, "share").apply { mkdirs() }
+        // [audit-0917] Prune older archives before writing a new one. The zip
+        // lives in cacheDir (so the OS may reclaim it), but the chooser needs
+        // the file to survive the handoff and nothing else deletes these —
+        // repeated shares accumulated minis-logs-*.zip without bound until the
+        // cache was trimmed. Keep only the newest.
+        runCatching {
+            shareDir.listFiles()
+                ?.filter { it.isFile && it.name.startsWith("minis-logs-") && it.name.endsWith(".zip") }
+                ?.sortedByDescending { it.lastModified() }
+                ?.drop(1)
+                ?.forEach { it.delete() }
+        }.onFailure { android.util.Log.w(TAG, "stale zip prune failed: ${it.message}") }
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
         val zipFile = File(shareDir, "minis-logs-$stamp.zip")
         ZipOutputStream(FileOutputStream(zipFile).buffered()).use { zout ->

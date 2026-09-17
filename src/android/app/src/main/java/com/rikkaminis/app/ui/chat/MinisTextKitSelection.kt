@@ -509,13 +509,17 @@ class SelectionController {
         val (first, last) = ordered
         val firstShard = shards[first.shard] ?: return null
         val lastShard = shards[last.shard] ?: return null
+        // [audit-0917] Guard an empty layout. `length - 1` is -1 there, and
+        // coerceIn(0, -1) throws IllegalArgumentException ("Cannot coerce value
+        // to range") — handleAnchor guards the same case, this path did not.
+        val firstLen = firstShard.textLayoutResult.layoutInput.text.length
+        val lastLen = lastShard.textLayoutResult.layoutInput.text.length
+        if (firstLen == 0 || lastLen == 0) return null
         val firstBox = firstShard.textLayoutResult.getBoundingBox(
-            first.charOffset.coerceIn(0, firstShard.textLayoutResult.layoutInput.text.length - 1)
-                .coerceAtLeast(0)
+            first.charOffset.coerceIn(0, firstLen - 1),
         )
         val lastBox = lastShard.textLayoutResult.getBoundingBox(
-            last.charOffset.coerceIn(0, lastShard.textLayoutResult.layoutInput.text.length - 1)
-                .coerceAtLeast(0)
+            last.charOffset.coerceIn(0, lastLen - 1),
         )
         val topLeft = firstShard.positionInWindow() + Offset(firstBox.left, firstBox.top)
         val bottomRight = lastShard.positionInWindow() + Offset(lastBox.right, lastBox.bottom)

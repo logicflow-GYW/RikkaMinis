@@ -13,6 +13,7 @@ import org.json.JSONObject
 
 object GeminiModelsApi {
     private const val DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta"
+    private const val TAG = "GeminiModelsApi"
 
     /**
      * [fix/audit-b22 / T5-L6] Mirror GeminiProvider's base handling: the base
@@ -72,7 +73,16 @@ object GeminiModelsApi {
 
         // [T-android-default-ua] brand outbound /v1beta/models request.
         builder.applyUserAgentOverride(null)
-        val response = client.newCall(builder.build()).execute()
+        // [audit-0917] execute() moved INSIDE the try. It was outside, so an
+        // IOException (offline, DNS failure, TLS reset — the common case for a
+        // model-list refresh) propagated out of fetchModels instead of
+        // returning the built-in fallback the way every HTTP error path does.
+        val response = try {
+            client.newCall(builder.build()).execute()
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "models fetch failed, using builtin list: ${e.message}")
+            return@withContext LLMModel.allGemini
+        }
         try {
             val body = response.body?.string() ?: return@withContext LLMModel.allGemini
 

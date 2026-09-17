@@ -28,7 +28,7 @@ class CrashFileSender : ReportSender {
 
     override fun send(context: Context, errorContent: CrashReportData) {
         val dir = File(context.filesDir, "logs").also { it.mkdirs() }
-        val stamp = STAMP_FMT.format(Date())
+        val stamp = STAMP_FMT.format(java.time.Instant.now())
         val out = File(dir, "crash-$stamp.log")
 
         val body = buildString {
@@ -57,7 +57,13 @@ class CrashFileSender : ReportSender {
         // Match LogManagementScreen's expected naming so the row sorts
         // alongside the daily minis-YYYY-MM-DD.log files (which AppLogger
         // sorts by `name` descending — newest first).
-        private val STAMP_FMT = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US)
+        // [audit-0917] Immutable DateTimeFormatter: this sender runs on the
+        // dedicated :acra process and ACRA may report from several threads at
+        // once — a shared SimpleDateFormat could emit a garbled stamp.
+        private val STAMP_FMT: java.time.format.DateTimeFormatter =
+            java.time.format.DateTimeFormatter
+                .ofPattern("yyyy-MM-dd_HH-mm-ss", Locale.US)
+                .withZone(java.time.ZoneId.systemDefault())
     }
 }
 

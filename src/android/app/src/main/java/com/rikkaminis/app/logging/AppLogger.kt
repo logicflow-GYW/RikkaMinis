@@ -433,36 +433,40 @@ object AppLogger {
     }
 
     /**
-     * Read content of a specific log file.
+     * [audit-0917] Resolve a caller-supplied log filename inside [logDir].
+     * Returns null when the name is not a plain basename or the canonical
+     * result escapes the log directory — File(dir, name) otherwise resolves
+     * "../.." and turns a log read into arbitrary file disclosure.
      */
-    fun readLog(filename: String): String? {
+    private fun resolveLogFile(filename: String): File? {
         val dir = logDir ?: return null
-        val file = File(dir, filename)
-        return if (file.exists()) file.readText() else null
+        val name = File(filename).name
+        if (name != filename || name.isEmpty() || name == "." || name == "..") {
+            android.util.Log.w(TAG, "refused a non-basename log name: \"$filename\"")
+            return null
+        }
+        val file = File(dir, name)
+        val root = runCatching { dir.canonicalFile }.getOrNull() ?: return null
+        val canonical = runCatching { file.canonicalFile }.getOrNull() ?: return null
+        if (canonical.parentFile != root) {
+            android.util.Log.w(TAG, "refused an out-of-dir log path: ${canonical.path}")
+            return null
+        }
+        return file
     }
 
     /**
-     * Result of a bounded segment read — [content] holds at most [bytesRead]
-     * bytes starting at the requested offset, and [truncated] tells the caller
-     * whether more data remains past the end of [content].
+     * Read content of a specific log file.
      */
-    data class LogSegment(
-        val totalSize: Long,
-        val content: String,
-        val bytesRead: Int,
-        val truncated: Boolean,
-    )
+    fun readLog(filename: String): String? {
+        val file = resolveLogFile(filename) ?: return null
+        return if (file.exists()) file.readText() else null
+    }
 
-    /**
-     * Read a segment of a log file without loading the entire file into
-     * memory. [offset] is a byte offset into the file, [limit] the max bytes
-     * to return. Uses [java.io.RandomAccessFile] opened per call — the
-     * descriptor is released on return, so repeated reads from an agent
-     * paging through a large log cannot leak FDs or OOM the process.
-     */
     fun readLogSegment(filename: String, offset: Int, limit: Int): LogSegment? {
-        val dir = logDir ?: return null
-        val file = File(dir, filename)
+        // [audit-0917] Same traversal guard as readLog — this overload takes a
+        // caller-supplied name too.
+        val file = resolveLogFile(filename) ?: return null
         if (!file.exists()) return null
         return try {
             java.io.RandomAccessFile(file, "r").use { raf ->

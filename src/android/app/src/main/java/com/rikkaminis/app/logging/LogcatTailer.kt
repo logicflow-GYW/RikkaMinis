@@ -82,6 +82,15 @@ internal class LogcatTailer(private val sink: (String) -> Unit) {
                     // Reader closed by stop() or process exited
                 } finally {
                     try { reader.close() } catch (_: Throwable) {}
+                    // [audit-0917] Clear the fields when the READER ends on its
+                    // own (logcat died / process exited), not only in stop().
+                    // Without this, `process` stayed non-null and start()'s
+                    // guard made the tailer permanently un-restartable after a
+                    // natural exit.
+                    if (!stopping) {
+                        process = null
+                        thread = null
+                    }
                 }
             }, "LogcatTailer").apply {
                 isDaemon = true

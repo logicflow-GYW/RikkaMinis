@@ -251,8 +251,14 @@ object MarkdownClipboard {
         // Strikethrough ~~x~~
         work = Regex("~~(.+?)~~").replace(work, "<del>$1</del>")
         // Restore code spans (and HTML-escape their inside)
+        // [audit-0917] getOrNull, not codes[i]: the placeholder is the literal
+        // "CODE<n>CODE", so pasted text that happens to contain "CODE0CODE"
+        // (or any CODE<n>CODE) matched here and threw IndexOutOfBoundsException
+        // / substituted the wrong span. Out-of-range matches are left verbatim.
         work = Regex("$codePlaceholder(\\d+)$codePlaceholder").replace(work) { m ->
-            "<code>${escapeHtml(codes[m.groupValues[1].toInt()])}</code>"
+            val idx = m.groupValues[1].toIntOrNull()
+            val code = idx?.let { codes.getOrNull(it) }
+            if (code == null) m.value else "<code>${escapeHtml(code)}</code>"
         }
         return work
     }

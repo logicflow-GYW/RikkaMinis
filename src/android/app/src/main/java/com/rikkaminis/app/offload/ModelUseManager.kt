@@ -65,8 +65,13 @@ object ModelUseManager {
         val outputs = enrichedModel.outputModalities.orEmpty()
         // Fallback when neither models.dev nor pattern inference populated them —
         // every LLM supports text in/out.
-        val inputSet = if (inputs.isEmpty() && outputs.isEmpty()) listOf("text") else inputs
-        val outputSet = if (inputs.isEmpty() && outputs.isEmpty()) listOf("text") else outputs
+        // [audit-0917] Evaluate the two sides independently. The joint
+        // `inputs.isEmpty() && outputs.isEmpty()` condition meant a model with
+        // outputModalities=["text"] but no input modalities kept inputSet empty
+        // — the entry then advertised no *_input modality at all, so the UI
+        // treated a normal text model as unusable for input.
+        val inputSet = inputs.ifEmpty { listOf("text") }
+        val outputSet = outputs.ifEmpty { listOf("text") }
         if ("text" in inputSet) modalities.put("text_input")
         if ("text" in outputSet) modalities.put("text_output")
         if ("image" in inputSet) modalities.put("image_input")

@@ -156,7 +156,15 @@ object ThinkingRuleResolver {
      */
     @Synchronized
     fun restoreCustomRulesFromJson(instanceId: String, field: JSONArray?): Int {
-        if (instanceId.isBlank() || field == null) return 0
+        if (instanceId.isBlank()) return 0
+        // [audit-0917] A null field must still CLEAR the entry. Returning early
+        // left any previously restored rules in customRulesCache for this
+        // instanceId, and this cache lives for the process lifetime — so a
+        // later run with no custom rules silently kept applying the old ones.
+        if (field == null) {
+            setCustomRules(instanceId, emptyList())
+            return 0
+        }
         val rules = (0 until field.length()).mapNotNull { i ->
             val o = field.optJSONObject(i) ?: return@mapNotNull null
             ThinkingRuleCoding.decodeRuleJson(o)

@@ -714,9 +714,19 @@ class MinisApp : Application(), ImageLoaderFactory {
                 // a mid-loop running session is never flagged.
                 if (wasBackgrounded) {
                     kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-                        val interrupted = runCatching { chatRepository.interruptedSessionIds() }.getOrElse { emptySet() }
-                        val active = SessionActivityTracker.activeSessions.value
-                        com.rikkaminis.app.service.SessionBadgeStore.reconcileInterruptedSessions(interrupted - active)
+                        // [audit-0917] Wrap the reconcile call itself. The two
+                        // reads above are guarded, but the badge-store write was
+                        // not — and this scope is a bare CoroutineScope with the
+                        // default handler, so a failure crashed the app on a
+                        // foreground transition (badge store IO on a corrupt
+                        // prefs file, etc.). A missed badge must never be fatal.
+                        runCatching {
+                            val interrupted = runCatching { chatRepository.interruptedSessionIds() }.getOrElse { emptySet() }
+                            val active = SessionActivityTracker.activeSessions.value
+                            com.rikkaminis.app.service.SessionBadgeStore.reconcileInterruptedSessions(interrupted - active)
+                        }.onFailure {
+                            android.util.Log.w("MinisApp", "foreground badge reconcile failed: ${it.message}")
+                        }
                     }
                 }
             }

@@ -12,11 +12,18 @@ import java.util.Locale
  * these from the same package.
  */
 
-internal val stepTimestampFormatter: SimpleDateFormat =
-    SimpleDateFormat("HH:mm:ss", Locale.US)
+// [audit-0917] DateTimeFormatter, not a shared SimpleDateFormat: minSdk is 26
+// so java.time is available natively, and SimpleDateFormat carries mutable
+// calendar state — this formatter is a top-level val used from both Compose
+// composition and tool-execution coroutines, where a concurrent format() call
+// could interleave and emit a garbled timestamp.
+internal val stepTimestampFormatter: java.time.format.DateTimeFormatter =
+    java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss", Locale.US)
 
 internal fun formatStepTimestamp(epochMs: Long): String =
-    stepTimestampFormatter.format(Date(epochMs))
+    java.time.Instant.ofEpochMilli(epochMs)
+        .atZone(java.time.ZoneId.systemDefault())
+        .format(stepTimestampFormatter)
 
 internal fun formatStepDuration(seconds: Long, stillRunning: Boolean): String {
     val safe = seconds.coerceAtLeast(0L)

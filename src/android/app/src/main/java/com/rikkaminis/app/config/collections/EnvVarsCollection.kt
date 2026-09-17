@@ -38,9 +38,14 @@ class EnvVarsCollection(
     override val risk: ConfigRisk get() = ConfigRisk.SENSITIVE
     override val addPayloadSchema: ConfigSchema get() = ConfigSchema.Json
 
-    private val isoFormatter = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
-        timeZone = TimeZone.getTimeZone("UTC")
-    }
+    // [audit-0917] DateTimeFormatter (immutable, thread-safe) instead of a
+    // shared SimpleDateFormat instance — this collection is read from config
+    // snapshots on arbitrary threads, and SimpleDateFormat's mutable calendar
+    // makes concurrent format() calls interleave.
+    private val isoFormatter: java.time.format.DateTimeFormatter =
+        java.time.format.DateTimeFormatter
+            .ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
+            .withZone(java.time.ZoneOffset.UTC)
 
     override fun childIds(): List<String> = repo.entries.value.map { it.key }
 
@@ -81,7 +86,9 @@ class EnvVarsCollection(
             reader = {
                 val e = repo.entries.value.firstOrNull { it.key == key }
                 if (e == null) ConfigValue.Null
-                else ConfigValue.Str(isoFormatter.format(Date(e.createdAt)))
+                else ConfigValue.Str(
+                    isoFormatter.format(java.time.Instant.ofEpochMilli(e.createdAt)),
+                )
             },
         )
 

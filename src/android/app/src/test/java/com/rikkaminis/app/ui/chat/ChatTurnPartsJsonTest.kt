@@ -72,6 +72,44 @@ class ChatTurnPartsJsonTest {
     }
 
     @Test
+    fun `blank-name toolUse FIRST does not leave a leading comma`() {
+        // [audit-0917] The separator used to key off the loop index, so a
+        // skipped part 0 left part 1 emitting a leading comma → "[,{...}]",
+        // which parsePartsJson cannot read. The blank name is an upstream
+        // bug guard, so this input is reachable.
+        val parts = listOf(
+            AgentContentPart.ToolUse(id = "t0", name = "", input = JSONObject()),
+            AgentContentPart.Text("after"),
+        )
+        val json = buildAssistantTurnPartsJson(parts, emptyMap())
+        assertFalse("must not emit a leading comma: $json", json.contains("[,"))
+        val parsed = parsePartsJson(json)
+        assertEquals(1, parsed.size)
+        assertTrue(parsed[0] is ParsedPart.Text)
+    }
+
+    @Test
+    fun `blank-name toolUse LAST does not leave a trailing comma`() {
+        val parts = listOf(
+            AgentContentPart.Text("before"),
+            AgentContentPart.ToolUse(id = "t9", name = "", input = JSONObject()),
+        )
+        val json = buildAssistantTurnPartsJson(parts, emptyMap())
+        assertFalse("must not emit a trailing comma: $json", json.contains(",]"))
+        assertEquals(1, parsePartsJson(json).size)
+    }
+
+    @Test
+    fun `all parts blank-name yields an empty array`() {
+        val parts = listOf(
+            AgentContentPart.ToolUse(id = "t0", name = "", input = JSONObject()),
+            AgentContentPart.ToolUse(id = "t1", name = "   ", input = JSONObject()),
+        )
+        val json = buildAssistantTurnPartsJson(parts, emptyMap())
+        assertEquals("[]", json)
+    }
+
+    @Test
     fun `text-only variant emits no toolUse`() {
         val json = buildTextOnlyAssistantPartsJson(
             listOf(AgentContentPart.Text("partial"), AgentContentPart.Text("<system-reminder>stopped</system-reminder>")),

@@ -57,8 +57,15 @@ object DebugScreenshotRing {
     suspend fun capture(activity: Activity, label: String, scale: Float): Entry {
         val bitmap = withContext(Dispatchers.Main) { captureBitmap(activity, scale) }
         val baos = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.PNG, 100, baos)
-        bitmap.recycle()
+        // [audit-0917] recycle in a finally: compress() can throw
+        // (IllegalStateException on a recycled/immutable bitmap, OOM on a big
+        // PNG) and the throw skipped the recycle — every failed capture leaked
+        // the full-size bitmap until GC.
+        try {
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, baos)
+        } finally {
+            bitmap.recycle()
+        }
         val entry = Entry(
             id = nextId.getAndIncrement(),
             label = label,

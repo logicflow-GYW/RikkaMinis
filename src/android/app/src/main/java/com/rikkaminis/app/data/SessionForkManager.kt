@@ -94,16 +94,28 @@ class SessionForkManager(
         // (id + sortOrder), so no re-query is needed. Aligns iOS e8ac8b82.
         val oldToNewId = HashMap<String, String>()
         val oldToNewSort = HashMap<String, Int>()
-        for (msg in messages) {
-            val newMsg = chatRepository.appendMessage(
-                sessionId = new.id,
-                role = msg.role,
-                partsJson = msg.partsJson,
-                tokenUsage = msg.tokenUsage,
-                reasoningContent = msg.reasoningContent,
-            )
-            oldToNewId[msg.id] = newMsg.id
-            oldToNewSort[msg.id] = newMsg.sortOrder
+        // [audit-0917] Delete the half-built copy if any append fails. The
+        // session row was already created above, so an exception mid-loop (DB
+        // full, constraint violation, cancellation) left a "(Copy)" session
+        // holding a truncated prefix of the original — indistinguishable from
+        // a real duplicate, and nothing else ever cleans it up.
+        try {
+            for (msg in messages) {
+                val newMsg = chatRepository.appendMessage(
+                    sessionId = new.id,
+                    role = msg.role,
+                    partsJson = msg.partsJson,
+                    tokenUsage = msg.tokenUsage,
+                    reasoningContent = msg.reasoningContent,
+                )
+                oldToNewId[msg.id] = newMsg.id
+                oldToNewSort[msg.id] = newMsg.sortOrder
+            }
+        } catch (t: Throwable) {
+            AppLogger.warning(TAG, "duplicateSession: copy failed, removing ${new.id}: ${t.message}")
+            runCatching { chatRepository.deleteSession(new.id) }
+                .onFailure { AppLogger.warning(TAG, "duplicateSession: cleanup failed: ${it.message}") }
+            throw t
         }
 
         // [T-session-duplicate-compact-marker-android] Copy compact markers
