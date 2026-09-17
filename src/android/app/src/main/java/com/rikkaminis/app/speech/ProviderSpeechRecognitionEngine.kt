@@ -60,6 +60,12 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
     private var transcribeJob: Job? = null
     private val recording = AtomicBoolean(false)
     private val cancelled = AtomicBoolean(false)
+    // [fix/audit0917-b8] @Volatile: written by the engine's IO coroutine
+    // (markDegraded is invoked from the transcription failure path), read from
+    // whichever thread evaluates `isAvailable` (the UI decides whether to show
+    // the voice button). A plain Boolean gave no visibility guarantee, so a
+    // degraded engine could keep reporting available.
+    @Volatile
     private var degraded = false
 
     /**
@@ -185,11 +191,19 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                     ?.let { i -> candidates.drop(i) + candidates.take(i) }
                     ?: candidates
                 var lastError: Exception? = null
+                // [fix/audit0917-b8] Track how many candidates were skipped
+                // (no provider / unresolvable key) separately from failures:
+                // when EVERY candidate was skipped, lastError stayed null and
+                // the user got the generic "All voice-input candidates failed"
+                // with kind=UNKNOWN, which reads like a provider outage. A
+                // skip means nothing was even attempted, so say so.
+                var skipped = 0
                 for ((instance, entry) in ordered) {
                     if (cancelled.get()) return@launch
                     val provider = VoiceProviderFactory.make(instance, repo.loadApiKey(instance.id))
                     if (provider == null) {
                         Log.w(TAG, "candidate ${instance.label} cannot serve voice input — skipping")
+                        skipped++
                         continue
                     }
                     try {
@@ -222,6 +236,18 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                 }
                 if (!cancelled.get()) {
                     val e = lastError
+                    // [fix/audit0917-b8] All-skipped is a configuration problem,
+                    // not a provider failure — report it as such instead of
+                    // letting it fall through to "All voice-input candidates
+                    // failed" with kind=UNKNOWN.
+                    if (e == null && skipped > 0) {
+                        listener.onError(
+                            RecognitionError.UNKNOWN,
+                            "No usable voice-input provider: all $skipped candidate(s) were skipped " +
+                                "(missing provider implementation or API key).",
+                        )
+                        return@launch
+                    }
                     val kind = when {
                         e is VoiceProviderException.Auth -> RecognitionError.PERMISSION_DENIED
                         e is java.io.IOException -> RecognitionError.NETWORK

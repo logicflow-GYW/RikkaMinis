@@ -334,11 +334,23 @@ class WebViewHolder(
     }
 
     /**
+     * [fix/audit0917-b8] Latches the first `destroy()` so later calls are
+     * no-ops. Callers now include a Compose `DisposableEffect(onDispose)` in
+     * addition to the user-initiated dismiss callback, and BOTH fire on a
+     * normal dismissal — without the latch the second pass would run
+     * stopLoading/loadUrl/destroy on an already-destroyed WebView (undefined
+     * behaviour, and the `catch (Throwable)` below would swallow the symptom
+     * into a warning line).
+     */
+    private val destroyed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
      * Final teardown. Call when the preview path is fully closed (sheet
      * dismissed AND fullscreen popped) so the WebView's renderer process
      * doesn't linger. Safe to call multiple times.
      */
     fun destroy() {
+        if (!destroyed.compareAndSet(false, true)) return
         try {
             detach()
             webView.stopLoading()

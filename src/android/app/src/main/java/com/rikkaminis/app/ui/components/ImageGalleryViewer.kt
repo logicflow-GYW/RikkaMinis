@@ -31,6 +31,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -93,16 +94,27 @@ fun ImageGalleryViewer(
 ) {
     if (items.isEmpty()) {
         // Defensive: don't render an empty pager — just dismiss.
-        DisposableEffect(Unit) {
-            onDismiss()
-            onDispose { }
-        }
+        // [fix/audit0917-b8] LaunchedEffect, not DisposableEffect: onDismiss
+        // flips the caller's state (`previewUrl = null`-style), and running that
+        // synchronously in a DisposableEffect executes it during the
+        // composition/apply phase — mutating state that the enclosing
+        // composition is still reading. LaunchedEffect posts it to the
+        // composition's coroutine, after the frame settles.
+        LaunchedEffect(Unit) { onDismiss() }
         return
     }
 
     val context = LocalContext.current
     val view = LocalView.current
-    val scope = rememberCoroutineScope()
+    // [fix/audit0917-b8] Application scope, not rememberCoroutineScope: the
+    // Save-to-album write (loadBitmap + MediaStore insert) was tied to the
+    // composable, so dismissing the dialog mid-save cancelled the coroutine —
+    // the MediaStore row could be half-written with no result toast, and the
+    // `finally { saving = false }` never mattered because the composable was
+    // gone. The work is idempotent and self-contained, so it belongs to the
+    // app, not the screen.
+    val scope = (context.applicationContext as? com.rikkaminis.app.MinisApp)?.applicationScope
+        ?: rememberCoroutineScope()
 
     // Hide system bars on entry, restore on exit. Same pattern as the
     // single-image FullscreenImageViewer — see its comment block (T169)

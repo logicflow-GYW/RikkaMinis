@@ -4866,6 +4866,17 @@ fun ChatScreen(
             htmlPreviewFallbackTitle = ""
             htmlPreviewFullscreen = false
         }
+        // [fix/audit0917-b8] The holder was destroyed ONLY by the user-initiated
+        // dismiss callback, so any teardown that skips it — navigating away from
+        // chat, process-level recomposition of the host — left a live WebView
+        // (plus its WebViewHolder's page state) attached to the Activity.
+        // DisposableEffect runs its onDispose when the holder is replaced or the
+        // host leaves composition; destroy() is idempotent, so the normal
+        // dismiss path is unaffected. Keyed on the holder instance: swapping
+        // previews disposes the previous one.
+        DisposableEffect(holder) {
+            onDispose { holder.destroy() }
+        }
         if (htmlPreviewFullscreen) {
             com.rikkaminis.app.ui.preview.WebPreviewFullscreenScreen(
                 holder = holder,

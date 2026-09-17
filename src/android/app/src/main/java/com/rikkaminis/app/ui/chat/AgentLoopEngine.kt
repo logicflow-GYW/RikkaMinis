@@ -1945,7 +1945,19 @@ internal class AgentLoopEngine(
                 // one.
                 val resiqueRaw = loopState.toolCallResidueRaw
                 loopState.toolCallResidueRaw = null
-                if (resiqueRaw != null && loopState.toolCallResidueNudges < ToolCallResiduePolicy.MAX_RESIDUE_REFILL_NUDGES) {
+                if (resiqueRaw != null && loopState.toolCallResidueNudges < ToolCallResiduePolicy.MAX_RESIDUE_REFILL_NUDGES &&
+                    // [fix/audit0917-b8] Same gate as the verify nudge above, for
+                    // the same reason: a terminal error means the user has
+                    // ALREADY been told the run failed (length wall /
+                    // deterministic-empty / repetition abort / EOF stub).
+                    // `continue` here would revive that run, and a revived turn
+                    // that then succeeds leaves the banner and the trace
+                    // contradicting the outcome. The refill's own trigger is
+                    // markup-shaped text with nothing parsed, which is exactly
+                    // what those terminal states produce — so this path is the
+                    // LIKELIEST to fire after a terminal error, not the least.
+                    !loopState.terminalErrorSurfaced
+                ) {
                     val seen = ToolCallResiduePolicy.firstResidue(resiqueRaw, host.agentTools.map { it.name })
                     if (seen != null) {
                         loopState.toolCallResidueNudges++
