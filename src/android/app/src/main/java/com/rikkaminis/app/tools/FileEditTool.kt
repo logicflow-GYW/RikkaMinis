@@ -121,7 +121,7 @@ object FileEditTool {
                 true, toolTitle = toolTitle
             )
         } catch (e: Exception) {
-            ToolExecutionResult("Error editing file: ${e.message}", false)
+            ToolExecutionResult("Error editing file: ${e.message}", false, toolTitle = NAME)
         }
     }
 }

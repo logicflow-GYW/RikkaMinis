@@ -59,7 +59,10 @@ object UnknownToolMessage {
         availableTools: List<String>,
         forbidden: Boolean = false,
     ): String {
-        val name = clampsName(rawName)
+        // [audit-0917] A name made only of control chars clamps to empty and the
+        // rejection named nothing - the exact failure this message exists to
+        // avoid. Fall back to a placeholder so it stays actionable.
+        val name = clampsName(rawName).ifEmpty { "(unreadable name)" }
         val head = if (forbidden) "Error: Unknown or forbidden tool: $name" else "Unknown tool: $name"
         val names = availableTools.filter { it.isNotEmpty() }.sorted()
         if (!names.isNotEmpty()) return "$head."

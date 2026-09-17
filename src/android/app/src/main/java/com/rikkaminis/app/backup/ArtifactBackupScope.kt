@@ -79,6 +79,7 @@ object ArtifactBackupScope {
         fun walk(dir: File, prefix: String) {
             val canon = try { dir.canonicalPath } catch (_: Exception) { return }
             if (!visited.add(canon)) return
+            val children = dir.listFiles() ?: return
             for (child in children.sortedBy { it.name }) {
                 if (child.isDirectory) {
                     // Only the shared root has environment payloads; nested

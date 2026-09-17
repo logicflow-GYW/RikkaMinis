@@ -67,29 +67,38 @@ object ReadImageTool {
                 ?: return ToolExecutionResult("Error: Cannot decode image: $path", false, toolTitle = toolTitle)
 
             val maxEdge = 2000
-            val scaled = if (original.width > maxEdge || original.height > maxEdge) {
-                val scale = maxEdge.toFloat() / maxOf(original.width, original.height)
-                val w = (original.width * scale).toInt()
-                val h = (original.height * scale).toInt()
-                Bitmap.createScaledBitmap(original, w, h, true)
-            } else {
-                original
+            var scaled: Bitmap? = null
+            val width: Int
+            val height: Int
+            val imageBytes: ByteArray
+            try {
+                val s = if (original.width > maxEdge || original.height > maxEdge) {
+                    val scale = maxEdge.toFloat() / maxOf(original.width, original.height)
+                    val w = (original.width * scale).toInt()
+                    val h = (original.height * scale).toInt()
+                    Bitmap.createScaledBitmap(original, w, h, true)
+                } else {
+                    original
+                }
+                scaled = s
+                val out = ByteArrayOutputStream()
+                s.compress(Bitmap.CompressFormat.JPEG, 85, out)
+                imageBytes = out.toByteArray()
+                // [fix/audit-s6h1] original.recycle() ran BEFORE reading
+                // original.width/height for the metadata string — reading a
+                // recycled Bitmap throws IllegalStateException, so every
+                // successfully-decoded image failed with "Can't call getWidth()
+                // on a recycled bitmap". Cache the dimensions first, then recycle.
+                width = original.width
+                height = original.height
+            } finally {
+                // [audit-0917] Recycle on the error path too: a throw between the
+                // decode and the old explicit recycles used to leak both bitmaps
+                // until GC (native memory). recycle() is idempotent, so the
+                // success path is unchanged.
+                scaled?.let { if (it !== original) it.recycle() }
+                original.recycle()
             }
-
-            val out = ByteArrayOutputStream()
-            scaled.compress(Bitmap.CompressFormat.JPEG, 85, out)
-            val imageBytes = out.toByteArray()
-
-            if (scaled !== original) scaled.recycle()
-            // [fix/audit-s6h1] original.recycle() ran BEFORE reading
-            // original.width/height for the metadata string — reading a
-            // recycled Bitmap throws IllegalStateException, so every
-            // successfully-decoded image failed with "Can't call getWidth()
-            // on a recycled bitmap". Cache the dimensions first, then recycle.
-            val width = original.width
-            val height = original.height
-            original.recycle()
-
             val metadata = "[$path | ${width}x${height} | ${file.length()} bytes]"
             ToolExecutionResult(
                 output = metadata,

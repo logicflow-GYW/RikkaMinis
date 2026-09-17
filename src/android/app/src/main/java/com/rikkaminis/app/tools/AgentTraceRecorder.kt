@@ -254,6 +254,13 @@ class AgentTraceRecorder(
             // lease 平衡检查：每个 acquire 的 lease_token 必须有对应 release（或终态声明 leases_remaining=0）
             acquires.forEach { a ->
                 val lease = a.optString("lease_token")
+                // [audit-0917] An acquire with no lease_token is itself a gap:
+                // comparing optStrings made an empty token match any release
+                // that also lacked one, silently passing the audit.
+                if (lease.isEmpty()) {
+                    gaps += "resource acquire missing lease_token"
+                    return@forEach
+                }
                 val rel = releases.any { r -> r.optString("lease_token") == lease }
                 if (!rel) gaps += "lease $lease acquired but never released"
             }

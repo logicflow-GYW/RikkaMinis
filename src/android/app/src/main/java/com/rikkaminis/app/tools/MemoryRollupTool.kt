@@ -8,9 +8,11 @@ import java.io.File
  * classifies entries into stable rules (conventions / decisions / lessons),
  * and appends them to MEMORY-ROLLUP.md. The source log is never modified.
  *
- * Idempotent: a date already rolled up is skipped. An optional date can be
- * passed to target one specific daily log; the default chooses the largest
- * eligible old log so missed dates remain reachable.
+ * Idempotent: a date already rolled up is skipped. The default chooses the
+ * largest eligible old log so missed dates remain reachable.
+ *
+ * [audit-0917] The old "an optional date can be passed" claim was unreachable:
+ * the tool definition exposes no parameters and execute() takes no date.
  */
 object MemoryRollupTool {
 

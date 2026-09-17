@@ -45,7 +45,7 @@ object FileReadTool {
             // full file size so it can paginate with offset/lines if needed.
             // iOS mirrors this cap in AIChatViewModel.executeFileRead.
             val MAX_LENGTH_HARD_CAP = 80_000
-            val maxLength = args.optInt("max_length", 15000).coerceAtMost(MAX_LENGTH_HARD_CAP)
+            val maxLength = args.optInt("max_length", 15000).coerceIn(1, MAX_LENGTH_HARD_CAP)
             val direction = args.optString("direction", "head")
 
             if (path.isBlank()) {
@@ -115,14 +115,19 @@ object FileReadTool {
             val showEnd = showStart + selectedLines.size - 1
 
             var content = selectedLines.joinToString("\n")
-            if (content.length > maxLength) {
+            val truncated = content.length > maxLength
+            if (truncated) {
                 content = content.take(maxLength) + "\n... (truncated)"
             }
 
-            val header = "[$path | $size bytes | $totalLines lines | showing $showStart-$showEnd of $totalLines]"
+            val header = "[$path | $size bytes | $totalLines lines | showing $showStart-$showEnd of $totalLines" +
+                // [audit-0917] Tell the agent the range was cut mid-way: the old header
+                // kept claiming "showing X-Y" even when only the capped chars
+                // survived, so a paginating agent silently saw partial content.
+                (if (truncated) " | content truncated by the max_length cap" else "") + "]"
             ToolExecutionResult("$header\n$content", true, toolTitle = toolTitle)
         } catch (e: Exception) {
-            ToolExecutionResult("Error reading file: ${e.message}", false)
+            ToolExecutionResult("Error reading file: ${e.message}", false, toolTitle = NAME)
         }
     }
 }
