@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Needed by the "Publish to Releases" step to create/update a GitHub Release
     # and upload the APK asset. Everything else here only reads the repo.
     permissions:
