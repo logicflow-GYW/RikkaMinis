@@ -4,8 +4,8 @@
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
 - 合并范围：2026-08-03 ～ 2026-09-18，共 47 天
-- 条目总数：1055（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
-- 总字符数：1256636 / 总行数：19413
+- 条目总数：1057（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
+- 总字符数：1258066 / 总行数：19431
 
 ---
 
@@ -19406,6 +19406,24 @@ commit `2dc6e0d4`（6 文件 +392/−18，分支 diag/liveness-batch）打包三
 **release #1638（main push 触发）仍在构建中**，完成后 Releases 页有正式包（同树，可选装）。
 
 **遗留（未处理，用户未点名）**：压缩错误分类移除 "max_tokens"（潜在漏判上下文溢出）、媒体首帧多一跳、WebPreviewShortcut 静默拒绝无 toast、备份 64MB fail-closed（10.6MB 不触及）、门放错层已修（三个 force-home 门已统一）。
+
+<!-- 2026-09-18 10:14:38 -->
+## 09-18：两分支盯 CI + 审查 + 合并收口 — main = ec52ba58
+
+- 用户点名盯的两个编译分支：`fix/indented-bullet-continuation`（34d19003）与 `feat/skill-md-file-render`（6dd662e5），均基 ab1a3203。
+- 审查结论（趁 CI 跑时做完）：两分支均无问题。bullet 分支 = MarkdownBlockModel 两处加 `!t.matches(listItemRegex)` 守卫，缩进 marker 落 else 成新 item，3 新测试；skill 分支 = SkillFileViewer 对非 SKILL.md 的 .md 用共享 MarkdownText 渲染（SKILL.md 保持原文），签名/ import/ isSkillMd 均核对通过。
+- 本地 JVM 预验：分支版 MarkdownBlockModel + 测试编译 0 error，JUnitCore **12/12 绿**（9 旧 + 3 新）。
+- 合并：bullet 绿 → FF main = 34d19003（push-main --yes，新脚本要 --yes 确认）；skill 绿 → main 已前进 → rebase 到 34d19003 = ec52ba58 → refspec push skillrb:main → 远端两分支 DELETE 204，远端仅剩 main。release CI 自动触发（未等）。
+- 工具坑：gh_sync.sh push-main 无参时要求 `--yes` 确认（dangerous operation 门）。
+
+<!-- 2026-09-18 10:55:22 -->
+## 09-18：钉住 CI runner ubuntu-24.04 — main = 6f2cef22
+
+- 用户报告 GitHub Actions 提示：ubuntu-latest 将于 2026-10-19 迁移至 Ubuntu 26（runner-images#14748），问是否需要解决。
+- 判断：不紧急（还有一个月，之前 CI 零变化）；但值得钉住——工具链虽全钉死版本（JDK17 temurin / NDK r28 / gradle wrapper，native 脚本宿主只需 curl/tar/make），26 断的风险低但非零；钉 24.04 把"环境静默漂移"变成显式升级决定。
+- 修复：三个 workflow（build-apk / scan-gate / sync-upstream）runs-on 改 ubuntu-24.04，分支 ci/pin-ubuntu-24 = 6f2cef22 → workflow_dispatch 触发（workflow-only 改动不匹配任何 push/PR 路径门，不 dispatch 不会跑 CI）→ CI 绿 → FF main = 6f2cef22，远端分支 DELETE 204。
+- 升级到 26 留作日后显式验证的步骤（改回 ubuntu-latest 或 ubuntu-26 跑一次绿即可）。
+- 顺带：release #1638（ec52ba58）已完成 success。
 
 ---
 
