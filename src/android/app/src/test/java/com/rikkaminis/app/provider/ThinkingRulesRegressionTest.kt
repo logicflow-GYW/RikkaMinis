@@ -1,5 +1,6 @@
 package com.rikkaminis.app.provider
 
+import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ThinkingLevel
@@ -803,6 +804,129 @@ class ThinkingRulesRegressionTest {
             ThinkingLevel.OFF,
             model("gpt-4o", supportsReasoning = false, reasoningEffortValues = listOf("high", "max"))
                 .catalogMaxThinkingLevel,
+        )
+    }
+
+    // ======================== REASONING ECHO (the vendor's multi-turn requirement)
+
+    /**
+     * [T-deepseek-v4-thinking-echo] The 2026-09-18 field report, pinned end to end.
+     *
+     * `deepseek-v4-flash` behind an OpenAI-compatible relay (agentrouter.org — not one
+     * of the vendor dialects above, so the resolver applies): turn 1 produced a tool
+     * call, and the very next request was rejected with
+     * `[400] The content[].thinking in the thinking mode must be passed back to the API`.
+     * The relay fronts DeepSeek's Anthropic-compatible endpoint, which thinks BY DEFAULT:
+     * the local level cannot turn that off, so the tool-call turn must carry the echo
+     * field even when the client asked for no thinking at all.
+     *
+     * Field presence is the requirement, not the value — DeepSeek's own OpenAI surface
+     * emits `reasoning_content: ""` on non-thinking turns, and the community fix for the
+     * same 400 is to append an empty value. Hence the placeholder assertion below, with
+     * a captured value taking precedence when there is one.
+     */
+    private fun historyWithToolCall(reasoning: String? = null): List<LLMMessage> = listOf(
+        LLMMessage(LLMMessage.Role.USER, "run the echo command"),
+        LLMMessage(
+            role = LLMMessage.Role.ASSISTANT,
+            content = "running it",
+            contentParts = listOf(
+                AgentContentPart.Text("running it"),
+                AgentContentPart.ToolUse(
+                    id = "call_1",
+                    name = "shell_execute",
+                    input = JSONObject().put("command", "echo hi"),
+                ),
+            ),
+        ).copy(reasoningContent = reasoning),
+        // Production shape for a tool result: role USER with ToolResult parts
+        // (AgentLoopEngine adds exactly this message after a tool call).
+        LLMMessage(
+            role = LLMMessage.Role.USER,
+            content = "",
+            contentParts = listOf(
+                AgentContentPart.ToolResult(id = "call_1", name = "shell_execute", content = "hi"),
+            ),
+        ),
+        LLMMessage(LLMMessage.Role.USER, "now summarise"),
+    )
+
+    /** The serialized assistant message carrying the tool call, or null. */
+    private fun toolCallMessage(body: JSONObject): JSONObject? {
+        val msgs = body.optJSONArray("messages") ?: return null
+        for (i in 0 until msgs.length()) {
+            val m = msgs.getJSONObject(i)
+            if (m.optString("role") == "assistant" && m.has("tool_calls")) return m
+        }
+        return null
+    }
+
+    @Test
+    fun `deepseek-v4 tool-call turn echoes an empty placeholder even with thinking OFF`() {
+        for (level in listOf(ThinkingLevel.OFF, ThinkingLevel.AUTO)) {
+            val body = capture(
+                model = model("deepseek-v4-flash"),
+                level = level,
+                basePath = server.url("/agentrouter.org/v1").toString().trimEnd('/'),
+                history = historyWithToolCall(),
+            )
+            val assistant = toolCallMessage(body)
+                ?: error("history lost its tool-call turn: $body")
+            assertTrue(
+                "level=$level must still carry reasoning_content (DeepSeek V4 rejects a " +
+                    "tool-call turn without it): $assistant",
+                assistant.has("reasoning_content"),
+            )
+            assertEquals("level=$level", "", assistant.getString("reasoning_content"))
+        }
+    }
+
+    @Test
+    fun `deepseek-v4 tool-call turn prefers the captured reasoning`() {
+        val body = capture(
+            model = model("deepseek-v4-flash"),
+            level = ThinkingLevel.OFF,
+            basePath = server.url("/agentrouter.org/v1").toString().trimEnd('/'),
+            history = historyWithToolCall(reasoning = "I will call the shell tool"),
+        )
+        assertEquals(
+            "captured reasoning round-trips verbatim",
+            "I will call the shell tool",
+            toolCallMessage(body)?.getString("reasoning_content"),
+        )
+    }
+
+    /**
+     * Blast radius: the fix is keyed on the MODEL (a deepseek-v4 id), so every other
+     * model keeps the legacy decision — including the deliberate AUTO/placeholder
+     * suppression on non-tool turns.
+     */
+    @Test
+    fun `other models and non-tool turns keep the legacy omission`() {
+        val otherModel = capture(
+            model = model("glm-5.3-flash"),
+            level = ThinkingLevel.OFF,
+            basePath = server.url("/agentrouter.org/v1").toString().trimEnd('/'),
+            history = historyWithToolCall(),
+        )
+        assertFalse(
+            "an id with no echo rule must stay untouched: $otherModel",
+            toolCallMessage(otherModel)?.has("reasoning_content") ?: false,
+        )
+
+        val nonToolTurn = capture(
+            model = model("deepseek-v4-flash"),
+            level = ThinkingLevel.OFF,
+            basePath = server.url("/agentrouter.org/v1").toString().trimEnd('/'),
+            history = listOf(
+                LLMMessage(LLMMessage.Role.USER, "first question"),
+                LLMMessage(LLMMessage.Role.ASSISTANT, "first answer"),
+                LLMMessage(LLMMessage.Role.USER, "second question"),
+            ),
+        )
+        assertFalse(
+            "AFTER_TOOL_USE_ONLY must not add the field to plain assistant turns: $nonToolTurn",
+            anyMessageHasKey(nonToolTurn, "reasoning_content"),
         )
     }
 }

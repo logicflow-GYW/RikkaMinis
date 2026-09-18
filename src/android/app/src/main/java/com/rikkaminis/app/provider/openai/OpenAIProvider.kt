@@ -21,6 +21,8 @@ import com.rikkaminis.app.provider.safeOptString
 import com.rikkaminis.app.provider.sanitizeToolPairing
 import com.rikkaminis.app.provider.clampOutboundMaxTokens
 import com.rikkaminis.app.provider.clampOutboundTemperature
+import com.rikkaminis.app.provider.thinking.ReasoningEchoDecider
+import com.rikkaminis.app.provider.thinking.ReasoningEchoPolicy
 import com.rikkaminis.app.provider.thinking.ThinkingResolveContext
 import com.rikkaminis.app.provider.thinking.ThinkingRuleResolver
 import kotlinx.coroutines.CancellationException
@@ -1671,8 +1673,11 @@ class OpenAIProvider constructor(
         // request-parameter half of that fix was never ported, so an enabled
         // thinking level still put `reasoning_effort` on the wire to
         // api.mistral.ai.
+        // [T-deepseek-v4-thinking-echo] The matched rule's reasoning-echo requirement,
+        // filled in by injectThinkingParams below and consumed by the message loop.
+        var echoPolicy: ReasoningEchoPolicy? = null
         if (!isMistral) {
-            injectThinkingParams(body, thinkingLevel, maxTokens)
+            echoPolicy = injectThinkingParams(body, thinkingLevel, maxTokens)
         }
 
         // Tools
@@ -1730,6 +1735,29 @@ class OpenAIProvider constructor(
         // there; non-reasoning models gate this off via includeReasoning=false.
         val placeholderAllowed = includeReasoning && thinkingLevel != ThinkingLevel.AUTO
 
+        // [T-deepseek-v4-thinking-echo] The rule table's declared requirement wins over
+        // the local-level gates above. `*deepseek-v4*` declares AFTER_TOOL_USE_ONLY
+        // because the vendor (and any relay fronting its Anthropic-compatible endpoint)
+        // REJECTS a tool-call turn that arrives without the thinking field, regardless
+        // of what the client asked for locally — see ReasoningEchoDecider's header for
+        // the 2026-09-18 field report and the empty-placeholder rationale.
+        fun echoAction(msg: LLMMessage, hasToolCalls: Boolean): ReasoningEchoDecider.Action =
+            ReasoningEchoDecider.decide(
+                policy = echoPolicy,
+                hasToolCalls = hasToolCalls,
+                captured = msg.reasoningContent,
+                legacyGate = echoReasoning,
+                legacyPlaceholder = placeholderAllowed,
+            )
+
+        fun putEcho(obj: JSONObject, action: ReasoningEchoDecider.Action, captured: String?) {
+            when (action) {
+                ReasoningEchoDecider.Action.OMIT -> {}
+                ReasoningEchoDecider.Action.CAPTURED -> obj.put("reasoning_content", captured ?: "")
+                ReasoningEchoDecider.Action.PLACEHOLDER -> obj.put("reasoning_content", "")
+            }
+        }
+
         val lastUserIndex = sanitizedMessages.indexOfLast { it.role == LLMMessage.Role.USER }
         for ((index, msg) in sanitizedMessages.withIndex()) {
             if (msg.contentParts.isNotEmpty()) {
@@ -1739,33 +1767,22 @@ class OpenAIProvider constructor(
                     msg.role == LLMMessage.Role.ASSISTANT -> {
                         val obj = JSONObject()
                         obj.put("role", "assistant")
-                        if (echoReasoning) {
-                            val rc = msg.reasoningContent
-                            if (rc != null) {
-                                // Round-trip exactly what the server emitted,
-                                // including empty strings. DeepSeek V4 emits
-                                // `reasoning_content: ""` on non-thinking turns
-                                // and accepts the same shape on input — the empty
-                                // value is the field-presence guarantee that
-                                // prevents 400s once thinking is on.
-                                obj.put("reasoning_content", rc)
-                            } else if (placeholderAllowed) {
-                                // No captured reasoning for this turn (e.g. fallback
-                                // to a non-thinking model, or message persisted before
-                                // thinking was enabled). Send "" rather than a synthetic
-                                // marker: prior placeholders ("[no prior reasoning]",
-                                // T249; single space, T257) were in-context-learned by
-                                // DeepSeek V4 and echoed back as the model's own
-                                // reasoning. Empty string satisfies the field-presence
-                                // check with no learnable pattern.
-                                obj.put("reasoning_content", "")
-                            }
-                        }
+                        val toolUseParts = msg.contentParts.filterIsInstance<AgentContentPart.ToolUse>()
+                        // Reasoning echo — see ReasoningEchoDecider. Round-trip exactly
+                        // what the server emitted (including ""): DeepSeek V4 emits
+                        // `reasoning_content: ""` on non-thinking turns and accepts the
+                        // same shape on input, and the empty value is the field-presence
+                        // guarantee that prevents 400s once thinking is on. When the
+                        // matched rule DEMANDS the field on a tool-call turn we still send
+                        // "" rather than a synthetic marker: prior placeholders
+                        // ("[no prior reasoning]", T249; single space, T257) were
+                        // in-context-learned by DeepSeek V4 and echoed back as the
+                        // model's own reasoning.
+                        putEcho(obj, echoAction(msg, toolUseParts.isNotEmpty()), msg.reasoningContent)
                         val textParts = msg.contentParts.filterIsInstance<AgentContentPart.Text>()
                         if (textParts.isNotEmpty()) {
                             obj.put("content", textParts.joinToString("") { it.text })
                         }
-                        val toolUseParts = msg.contentParts.filterIsInstance<AgentContentPart.ToolUse>()
                         if (toolUseParts.isNotEmpty()) {
                             val toolCallsArr = JSONArray()
                             for (tu in toolUseParts) {
@@ -1863,18 +1880,12 @@ class OpenAIProvider constructor(
                 val obj = JSONObject()
                 obj.put("role", msg.role.value)
 
-                if (echoReasoning && msg.role == LLMMessage.Role.ASSISTANT) {
-                    val rc = msg.reasoningContent
-                    if (rc != null) {
-                        // Round-trip exactly what the server emitted (including "").
-                        // See structured-content branch above for the full rationale.
-                        obj.put("reasoning_content", rc)
-                    } else if (placeholderAllowed) {
-                        // No captured reasoning — empty string satisfies the field-
-                        // presence check without giving DeepSeek V4 a learnable
-                        // marker to imitate (T249 / T257 history).
-                        obj.put("reasoning_content", "")
-                    }
+                if (msg.role == LLMMessage.Role.ASSISTANT) {
+                    // Plain-text history rows can never carry tool_calls (a tool-call
+                    // turn always has contentParts), so the turn shape is `false` and
+                    // the rule's AFTER_TOOL_USE_ONLY branch falls back to the legacy
+                    // decision — unchanged wire output for every non-tool turn.
+                    putEcho(obj, echoAction(msg, hasToolCalls = false), msg.reasoningContent)
                 }
 
                 val attachTopLevelImages =
@@ -2156,7 +2167,11 @@ class OpenAIProvider constructor(
         return true
     }
 
-    private fun injectThinkingParams(body: JSONObject, level: ThinkingLevel, maxTokens: Int) {
+    private fun injectThinkingParams(
+        body: JSONObject,
+        level: ThinkingLevel,
+        maxTokens: Int,
+    ): ReasoningEchoPolicy? {
         // [T-android-thinking-level-arch] `level` is already clamped to the model
         // ceiling by LLMProvider.streamMessage/sendMessage — do NOT re-clamp.
         val lid = model.id.lowercase()
@@ -2176,88 +2191,11 @@ class OpenAIProvider constructor(
         // AUTO.isEnabled == true, so picking Auto silently forced thinking ON on
         // every listed host. The sensenova branch already returns early for
         // AUTO; these six predate AUTO and never followed the semantics.
-        if (level == ThinkingLevel.AUTO) return
-        when (host) {
-            "api.siliconflow.cn" -> {
-                // SiliconFlow: enable_thinking is honored only by an allowlist.
-                if (model.id in SILICONFLOW_THINKING_MODELS) {
-                    body.put("enable_thinking", level.isEnabled)
-                }
-                return
-            }
-
-            "api.moonshot.cn" -> {
-                body.put("thinking", JSONObject().apply {
-                    put("type", if (level.isEnabled) "enabled" else "disabled")
-                    // K2.6: thinking.keep defaults to null (drop history thinking);
-                    // must be "all" for retention-style thinking when enabled.
-                    if (level.isEnabled && lid.contains("k2.6")) put("keep", "all")
-                })
-                return
-            }
-
-            "api.xiaomimimo.com", "token-plan-cn.xiaomimimo.com" -> {
-                body.put("thinking", JSONObject().apply {
-                    put("type", if (level.isEnabled) "enabled" else "disabled")
-                })
-                return
-            }
-
-            "chat.intern-ai.org.cn" -> {
-                body.put("thinking_mode", level.isEnabled)
-                return
-            }
-
-            "open.bigmodel.cn" -> {
-                body.put("thinking", JSONObject().apply {
-                    put("type", if (level.isEnabled) "enabled" else "disabled")
-                })
-                return
-            }
-
-            "aiping.cn" -> {
-                body.put("enable_thinking", level.isEnabled)
-                return
-            }
-
-            // [T-sensenova-effort-enum] Sensenova's OpenAI-compat gateway
-            // (token.sensenova.cn / api.sensenova.cn) validates reasoning_effort
-            // against a STRICT {low, medium, high, xhigh, none} enum on the streaming
-            // path and rejects "max" with
-            //   400 field ReasoningEffort invalid, should be one of: low, medium, high, xhigh, none
-            // while deepseek-v4's built-in relay rule (and the generic wireEffort map)
-            // emit "max" for every tier above HIGH. Measured live 2026-09-06:
-            // non-streaming accepted max, streaming 400'd it — so the clamp applies
-            // unconditionally. deepseek-v4-flash was the observed victim; the same
-            // shape protects glm-5.2 / kimi-k3 / sensenova-* ids on this host.
-            "token.sensenova.cn", "api.sensenova.cn" -> {
-                if (level == ThinkingLevel.AUTO) return
-                if (model.supportsReasoning == false) return
-                if (!level.isEnabled) {
-                    // Measured live: `reasoning_effort:"none"` is accepted and really
-                    // stops the reasoning stream; enable_thinking is honoured but does
-                    // NOT suppress reasoning_content on deepseek-v4-flash.
-                    body.put("reasoning_effort", "none")
-                    return
-                }
-                // ON: clamp the tier onto the gateway's enum. HIGH and above all land
-                // on xhigh — the strongest tier the endpoint accepts.
-                body.put("reasoning_effort", "xhigh")
-                return
-            }
-        }
-
-        // [T-android-thinking-rules-phase2] Everything below the host table is now
-        // delegated to ThinkingRuleResolver — a declarative, first-match-wins rule
-        // registry (built-in vendor rules + user-authored custom rules) that replaced
-        // the old if-return chain. The resolver reproduces the pre-refactor wire shapes
-        // branch for branch (OpenRouter nested reasoning, qwen dual-send vs relay
-        // root-only, deepseek-v4 official sibling vs relay top-level, unified-gateway
-        // reasoning_effort, self-reasoning family skip, generic fallback) and adds the
-        // user-editable escape hatch (ThinkingWireFormat.CustomPath). The `when(host)`
-        // table above stays OUTSIDE the registry: it encodes host-exact relay dialects
-        // measured live (RikkaHub absorption) that a model-pattern scope cannot express,
-        // and every known relay host short-circuits before the resolver runs.
+        // [T-deepseek-v4-thinking-echo] Resolve the ctx (and the echo requirement the
+        // rules declare for this model) BEFORE the relay-host table: the host branches
+        // return early, and the vendor's echo demand is a property of the MODEL, not of
+        // whichever dialect we end up speaking. Everything here is a pure read of the
+        // model descriptor — no body mutation, so ordering against the table is free.
         val ctx = ThinkingResolveContext(
             modelId = model.id,
             instanceId = thinkingRuleInstanceId,
@@ -2274,6 +2212,90 @@ class OpenAIProvider constructor(
             isOfficialDeepSeek = isOfficialDeepSeek,
             offEffort = explicitOffEffort(),
         )
+        val echo = ThinkingRuleResolver.echoPolicyFor(ctx)
+
+        if (level == ThinkingLevel.AUTO) return echo
+        when (host) {
+            "api.siliconflow.cn" -> {
+                // SiliconFlow: enable_thinking is honored only by an allowlist.
+                if (model.id in SILICONFLOW_THINKING_MODELS) {
+                    body.put("enable_thinking", level.isEnabled)
+                }
+                return echo
+            }
+
+            "api.moonshot.cn" -> {
+                body.put("thinking", JSONObject().apply {
+                    put("type", if (level.isEnabled) "enabled" else "disabled")
+                    // K2.6: thinking.keep defaults to null (drop history thinking);
+                    // must be "all" for retention-style thinking when enabled.
+                    if (level.isEnabled && lid.contains("k2.6")) put("keep", "all")
+                })
+                return echo
+            }
+
+            "api.xiaomimimo.com", "token-plan-cn.xiaomimimo.com" -> {
+                body.put("thinking", JSONObject().apply {
+                    put("type", if (level.isEnabled) "enabled" else "disabled")
+                })
+                return echo
+            }
+
+            "chat.intern-ai.org.cn" -> {
+                body.put("thinking_mode", level.isEnabled)
+                return echo
+            }
+
+            "open.bigmodel.cn" -> {
+                body.put("thinking", JSONObject().apply {
+                    put("type", if (level.isEnabled) "enabled" else "disabled")
+                })
+                return echo
+            }
+
+            "aiping.cn" -> {
+                body.put("enable_thinking", level.isEnabled)
+                return echo
+            }
+
+            // [T-sensenova-effort-enum] Sensenova's OpenAI-compat gateway
+            // (token.sensenova.cn / api.sensenova.cn) validates reasoning_effort
+            // against a STRICT {low, medium, high, xhigh, none} enum on the streaming
+            // path and rejects "max" with
+            //   400 field ReasoningEffort invalid, should be one of: low, medium, high, xhigh, none
+            // while deepseek-v4's built-in relay rule (and the generic wireEffort map)
+            // emit "max" for every tier above HIGH. Measured live 2026-09-06:
+            // non-streaming accepted max, streaming 400'd it — so the clamp applies
+            // unconditionally. deepseek-v4-flash was the observed victim; the same
+            // shape protects glm-5.2 / kimi-k3 / sensenova-* ids on this host.
+            "token.sensenova.cn", "api.sensenova.cn" -> {
+                if (level == ThinkingLevel.AUTO) return echo
+                if (model.supportsReasoning == false) return echo
+                if (!level.isEnabled) {
+                    // Measured live: `reasoning_effort:"none"` is accepted and really
+                    // stops the reasoning stream; enable_thinking is honoured but does
+                    // NOT suppress reasoning_content on deepseek-v4-flash.
+                    body.put("reasoning_effort", "none")
+                    return echo
+                }
+                // ON: clamp the tier onto the gateway's enum. HIGH and above all land
+                // on xhigh — the strongest tier the endpoint accepts.
+                body.put("reasoning_effort", "xhigh")
+                return echo
+            }
+        }
+
+        // [T-android-thinking-rules-phase2] Everything below the host table is now
+        // delegated to ThinkingRuleResolver — a declarative, first-match-wins rule
+        // registry (built-in vendor rules + user-authored custom rules) that replaced
+        // the old if-return chain. The resolver reproduces the pre-refactor wire shapes
+        // branch for branch (OpenRouter nested reasoning, qwen dual-send vs relay
+        // root-only, deepseek-v4 official sibling vs relay top-level, unified-gateway
+        // reasoning_effort, self-reasoning family skip, generic fallback) and adds the
+        // user-editable escape hatch (ThinkingWireFormat.CustomPath). The `when(host)`
+        // table above stays OUTSIDE the registry: it encodes host-exact relay dialects
+        // measured live (RikkaHub absorption) that a model-pattern scope cannot express,
+        // and every known relay host short-circuits before the resolver runs.
         val trace = ThinkingRuleResolver.apply(body, ctx)
         // [T-thinking-rules-observability] Which rule actually won must be inspectable,
         // or a rule layer just replaces one hidden variable with a more complicated one.
@@ -2297,6 +2319,11 @@ class OpenAIProvider constructor(
             "Thinking",
             "[resolve] model=${model.id} level=${level.name} ${trace.logLine}",
         )
+        // [T-deepseek-v4-thinking-echo] `echo` is the requirement the matched rule
+        // declares for this model, computed above the host table so every early return
+        // (AUTO, relay dialects) still carries it. Null = no opinion → the builder's
+        // legacy gates decide, byte-identical to the pre-fix output.
+        return echo
     }
 
     /**

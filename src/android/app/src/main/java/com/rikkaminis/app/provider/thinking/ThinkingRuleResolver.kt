@@ -77,6 +77,22 @@ data class ThinkingResolveTrace(
     val emittedKeys: List<String>,
     val clampedFrom: String? = null,
     val clampedTo: String? = null,
+    /**
+     * [T-deepseek-v4-thinking-echo] The matched rule's reasoning-echo requirement,
+     * carried out of resolution so the REQUEST BUILDER can honour it.
+     *
+     * Before this field the policy was inert metadata: the rule table declared
+     * `AFTER_TOOL_USE_ONLY` for `*deepseek-v4*` (DeepSeek's documented multi-turn
+     * requirement) but nothing ever read it — the OpenAI provider still decided the
+     * echo with the legacy `includeReasoning` gate, which is keyed on the LOCAL
+     * thinking level. On a relay whose upstream (DeepSeek V4 via its
+     * Anthropic-compatible endpoint) is in thinking mode by default, a tool-call turn
+     * with no `reasoning_content` is rejected:
+     *   `[400] The content[].thinking in the thinking mode must be passed back to the
+     *    API` (field report 2026-09-18, agentrouter.org / deepseek-v4-flash).
+     * Null = the rule expressed no echo opinion → keep legacy behaviour.
+     */
+    val reasoningEcho: ReasoningEchoPolicy? = null,
 ) {
     /** One-line form for `AppLogger("Thinking")`. */
     val logLine: String
@@ -363,8 +379,7 @@ object ThinkingRuleResolver {
         // are prepended above the built-ins, so a custom rule can override a vendor
         // default by matching first — but never remove a built-in. An empty custom
         // list makes `rules` == `builtInRules(ctx)`, byte-identical to Phase 1.
-        val rules = customRulesFor(ctx.instanceId) + builtInRules(ctx)
-        val winner = rules.firstOrNull { it.scope.matches(ctx.modelId) }
+        val winner = resolveWinner(ctx)
             ?: return ThinkingResolveTrace(
                 matchedRuleLabel = "none",
                 matchedRuleKind = ThinkingRule.Kind.PROVIDER_TYPE_DEFAULT,
@@ -389,8 +404,49 @@ object ThinkingRuleResolver {
             emittedKeys = emitted.toList(),
             clampedFrom = clamp.first,
             clampedTo = clamp.second,
+            reasoningEcho = winner.reasoningEcho,
         )
     }
+
+    /**
+     * First-match-wins winner for this context, or null when nothing matches.
+     * [T-android-thinking-rules-phase2] User-authored custom rules (stored order) are
+     * prepended above the built-ins, so a custom rule can override a vendor default by
+     * matching first — but never remove a built-in. An empty custom list makes the
+     * result byte-identical to Phase 1.
+     */
+    private fun resolveWinner(ctx: ThinkingResolveContext): ThinkingRule? =
+        (customRulesFor(ctx.instanceId) + builtInRules(ctx))
+            .firstOrNull { it.scope.matches(ctx.modelId) }
+
+    /**
+     * [T-deepseek-v4-thinking-echo] The reasoning-echo requirement this context's rules
+     * declare, INDEPENDENT of the local thinking level, of the provider's host
+     * short-circuits, and of which wire dialect happens to win.
+     *
+     * Two reasons it cannot be read off the trace instead:
+     *  • `apply()` returns before matching when the level is AUTO (AUTO means "send no
+     *    thinking control"), and the provider's relay-host table returns before the
+     *    resolver runs at all — yet the vendor's demand does not shrink because we asked
+     *    for less. A relay fronting DeepSeek V4 thinks by default, so an AUTO/OFF request
+     *    still has to carry the echo on tool-call turns (2026-09-18 field report:
+     *    `[400] The content[].thinking in the thinking mode must be passed back to the API`).
+     *  • the echo is a property of the MODEL, while the winning rule is chosen for its
+     *    WIRE DIALECT. A unified gateway (Ark / Azure / Venice / OpenRouter) claims every
+     *    model with its own `reasoning_effort` rule, which legitimately shadows the
+     *    deepseek-v4 relay rule for the wire shape — but a deepseek-v4 id behind such a
+     *    gateway still talks to the same vendor and still owes the same echo. So the scan
+     *    takes the first matching rule that EXPRESSES an opinion on the echo, not the
+     *    first matching rule period. Custom rules stay in front (same precedence as
+     *    resolution), so a user can still turn the echo off with a NEVER rule.
+     *
+     * Cost: one extra list build per request (a pure function of the context). Kept pure
+     * and public so the truth table stays JVM-testable.
+     */
+    fun echoPolicyFor(ctx: ThinkingResolveContext): ReasoningEchoPolicy? =
+        (customRulesFor(ctx.instanceId) + builtInRules(ctx))
+            .firstOrNull { it.reasoningEcho != null && it.scope.matches(ctx.modelId) }
+            ?.reasoningEcho
 
     /**
      * Write the fields for one wire format. Each branch reproduces the corresponding

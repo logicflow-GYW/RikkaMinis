@@ -116,10 +116,19 @@ data class ThinkingRule(
 /**
  * How captured reasoning is echoed back on assistant history turns.
  *
- * PHASE 1: declared but not yet enforced through the resolver — the live behaviour still
- * lives in the provider's message flattening. Modelled here because the send-side and
- * echo-side are two halves of ONE vendor contract, and splitting them is exactly what let
- * GH OpenMinis#22 be fixed on the OpenAI path while #70 stayed broken on the Anthropic path.
+ * ENFORCED as of [T-deepseek-v4-thinking-echo]: the resolver carries the matched rule's
+ * policy out in `ThinkingResolveTrace.reasoningEcho` / `ThinkingRuleResolver.echoPolicyFor`,
+ * and the OpenAI builder turns it into a wire action through `ReasoningEchoDecider`.
+ * Before that this was inert metadata — declared for `*deepseek-v4*` but never read, which
+ * is how the OpenAI path kept deciding the echo from the LOCAL thinking level while #70
+ * (Anthropic) and this class of 400 stayed open. Modelled on the rule because the send-side
+ * and echo-side are two halves of ONE vendor contract, and splitting them is exactly what
+ * let GH OpenMinis#22 be fixed on the OpenAI path while #70 stayed broken on the Anthropic path.
+ *
+ * The Anthropic side still gates on `interleavedReasoningField` (AnthropicProvider) — this
+ * policy is consumed by the OpenAI/completions path, whose field spelling is fixed to
+ * `reasoning_content` (asserted by ReasoningEchoDeciderTest so a rule edit cannot silently
+ * desynchronise the two).
  */
 data class ReasoningEchoPolicy(
     /**

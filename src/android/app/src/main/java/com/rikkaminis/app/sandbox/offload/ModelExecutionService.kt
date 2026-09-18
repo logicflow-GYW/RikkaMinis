@@ -796,6 +796,14 @@ class ModelExecutionService : Service() {
             inputModalities = jsonStrList(req.optJSONArray("input_modalities")),
             outputModalities = jsonStrList(req.optJSONArray("output_modalities")),
             contextWindow = req.optInt("context_window", 0).takeIf { it > 0 },
+            // [T-worker-reasoning-metadata] Present only when the dispatcher had a
+            // value; absent keeps the pre-fix "unknown" semantics (null), which is what
+            // a model with no catalog entry gets. Echo-gate inputs — see the
+            // write-side comment in ModelExecutionDispatcher.
+            supportsReasoning =
+                if (req.has("supports_reasoning")) req.getBoolean("supports_reasoning") else null,
+            interleavedReasoningField =
+                req.optString("interleaved_reasoning_field", "").ifEmpty { null },
         )
 
         // ── Reconstruct messages ──
@@ -1077,6 +1085,14 @@ class ModelExecutionService : Service() {
                 inputModalities = jsonStrList(req.optJSONArray("input_modalities")),
                 outputModalities = jsonStrList(req.optJSONArray("output_modalities")),
                 contextWindow = req.optInt("context_window", 0).takeIf { it > 0 },
+                // [T-worker-reasoning-metadata] Present only when the dispatcher had a
+                // value; absent keeps the pre-fix "unknown" semantics (null), which is what
+                // a model with no catalog entry gets. Echo-gate inputs — see the
+                // write-side comment in ModelExecutionDispatcher.
+                supportsReasoning =
+                    if (req.has("supports_reasoning")) req.getBoolean("supports_reasoning") else null,
+                interleavedReasoningField =
+                    req.optString("interleaved_reasoning_field", "").ifEmpty { null },
             )
 
             // ── Reconstruct messages ──
