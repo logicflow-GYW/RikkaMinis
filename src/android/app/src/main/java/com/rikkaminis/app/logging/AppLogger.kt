@@ -115,7 +115,14 @@ object AppLogger {
      * automatically begins capturing stdout/stderr — mirrors iOS
      * `LoggingManager.startIfEnabled()`.
      */
+    // [T-log-single-writer] Resolved once per process at init: null in the main
+    // process, "<tag>" elsewhere — every daily log file this process writes
+    // (main + debug channels) carries the suffix, so no file ever has two
+    // writers.
+    private var processSuffix: String? = null
+
     fun init(context: Context) {
+        processSuffix = processLogSuffix(readOwnCmdline(), context.packageName)
         logDir = File(context.filesDir, LOG_DIR).also { it.mkdirs() }
         enabled = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
             .getBoolean(KEY_ENABLED, false)
@@ -409,7 +416,7 @@ object AppLogger {
             if (date != currentDate || writer == null) {
                 writer?.close()
                 val dir = logDir ?: throw IllegalStateException("AppLogger not initialized")
-                val file = File(dir, "minis-$date.log")
+                val file = File(dir, channelFileName("minis", date, processSuffix))
                 writer = PrintWriter(FileWriter(file, true))
                 currentDate = date
             }
@@ -459,7 +466,7 @@ object AppLogger {
             } catch (_: Exception) {
             }
             val dir = logDir ?: throw IllegalStateException("AppLogger not initialized")
-            debugWriter = PrintWriter(FileWriter(File(dir, "debug-$date.log"), true))
+            debugWriter = PrintWriter(FileWriter(File(dir, channelFileName("debug", date, processSuffix)), true))
             debugDate = date
             debugBytesWritten = 0
         }
@@ -479,8 +486,9 @@ object AppLogger {
         }
         val dir = logDir
         if (dir != null) {
-            val file = File(dir, "debug-$date.log")
-            val rolled = File(dir, "debug-$date.1.log")
+            val base = channelFileName("debug", date, processSuffix)
+            val file = File(dir, base)
+            val rolled = File(dir, base.substringBeforeLast(".log") + ".1.log")
             if (rolled.exists()) rolled.delete()
             if (!file.renameTo(rolled)) file.delete()
         }
@@ -665,7 +673,9 @@ object AppLogger {
         val now = System.currentTimeMillis()
         val ageCutoff = now - MAX_AGE_DAYS * 24L * 60 * 60 * 1000
         val today = dateStampFor(now)
-        val todayFileName = "minis-$today.log"
+        // Covers the main file AND per-process variants (minis-<date>.modelservice.log)
+        // — a worker file being written right now must not be size-pruned.
+        val todayPrefix = "minis-$today"
 
         // Phase 1: time-based — delete files older than MAX_AGE_DAYS.
         logDir?.listFiles()?.forEach { file ->
@@ -682,7 +692,7 @@ object AppLogger {
         if (total <= MAX_TOTAL_SIZE_BYTES) return
 
         val candidates = dir.listFiles()
-            ?.filter { it.name != todayFileName }
+            ?.filter { !it.name.startsWith(todayPrefix) }
             ?.sortedBy { it.lastModified() } // oldest first
             ?: return
 
