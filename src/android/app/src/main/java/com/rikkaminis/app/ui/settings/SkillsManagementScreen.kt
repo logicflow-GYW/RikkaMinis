@@ -1224,6 +1224,14 @@ fun SkillFileViewerScreen(
                 textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
             )
         } else {
+            // Render markdown sibling files (references/, docs/) with the
+            // shared renderer; SKILL.md stays raw because its frontmatter
+            // (--- / name: / version:) would be distorted by markdown
+            // parsing, and it is the agent-facing contract where what you
+            // see should equal what the agent reads. Editing remains raw
+            // for every file type.
+            val renderAsMarkdown =
+                relativePath.endsWith(".md", ignoreCase = true) && !isSkillMd
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
@@ -1231,11 +1239,19 @@ fun SkillFileViewerScreen(
                     .padding(horizontal = 16.dp),
             ) {
                 item {
-                    Text(
-                        initialContent,
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
+                    if (renderAsMarkdown) {
+                        MarkdownText(
+                            markdown = initialContent,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    } else {
+                        Text(
+                            initialContent,
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
                 }
             }
         }
