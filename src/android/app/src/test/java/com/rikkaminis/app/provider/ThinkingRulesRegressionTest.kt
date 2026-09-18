@@ -863,28 +863,42 @@ class ThinkingRulesRegressionTest {
 
     @Test
     fun `deepseek-v4 tool-call turn echoes an empty placeholder even with thinking OFF`() {
-        for (level in listOf(ThinkingLevel.OFF, ThinkingLevel.AUTO)) {
-            val body = capture(
-                model = model("deepseek-v4-flash"),
-                level = level,
-                basePath = server.url("/agentrouter.org/v1").toString().trimEnd('/'),
-                history = historyWithToolCall(),
-            )
-            val assistant = toolCallMessage(body)
-                ?: error("history lost its tool-call turn: $body")
-            assertTrue(
-                "level=$level must still carry reasoning_content (DeepSeek V4 rejects a " +
-                    "tool-call turn without it): $assistant",
-                assistant.has("reasoning_content"),
-            )
-            assertEquals("level=$level", "", assistant.getString("reasoning_content"))
+        // The relay shape: the provider's /v1/models surface carries no reasoning flag,
+        // so `supportsReasoning` is null — which is ALSO what the worker used to force
+        // on every offloaded stream (the IPC gap fixed in this same commit). With
+        // (null, OFF) and (null, AUTO) the LEGACY gate produces no field at all, so only
+        // the rule wiring under test can satisfy these assertions. (true, *) is included
+        // because the legacy gate already handled the always-reasoning case — the fix
+        // must not regress it.
+        for (supportsReasoning in listOf<Boolean?>(null, true)) {
+            for (level in listOf(ThinkingLevel.OFF, ThinkingLevel.AUTO)) {
+                val body = capture(
+                    model = model("deepseek-v4-flash", supportsReasoning = supportsReasoning),
+                    level = level,
+                    basePath = server.url("/agentrouter.org/v1").toString().trimEnd('/'),
+                    history = historyWithToolCall(),
+                )
+                val assistant = toolCallMessage(body)
+                    ?: error("history lost its tool-call turn: $body")
+                assertTrue(
+                    "supportsReasoning=$supportsReasoning level=$level must carry " +
+                        "reasoning_content (DeepSeek V4 rejects a tool-call turn without " +
+                        "it): $assistant",
+                    assistant.has("reasoning_content"),
+                )
+                assertEquals(
+                    "supportsReasoning=$supportsReasoning level=$level",
+                    "",
+                    assistant.getString("reasoning_content"),
+                )
+            }
         }
     }
 
     @Test
     fun `deepseek-v4 tool-call turn prefers the captured reasoning`() {
         val body = capture(
-            model = model("deepseek-v4-flash"),
+            model = model("deepseek-v4-flash", supportsReasoning = null),
             level = ThinkingLevel.OFF,
             basePath = server.url("/agentrouter.org/v1").toString().trimEnd('/'),
             history = historyWithToolCall(reasoning = "I will call the shell tool"),
@@ -897,14 +911,14 @@ class ThinkingRulesRegressionTest {
     }
 
     /**
-     * Blast radius: the fix is keyed on the MODEL (a deepseek-v4 id), so every other
+     * Blast radius: the fix is keyed on the MODEL (the deepseek-v4 id), so every other
      * model keeps the legacy decision — including the deliberate AUTO/placeholder
      * suppression on non-tool turns.
      */
     @Test
     fun `other models and non-tool turns keep the legacy omission`() {
         val otherModel = capture(
-            model = model("glm-5.3-flash"),
+            model = model("glm-5.3-flash", supportsReasoning = null),
             level = ThinkingLevel.OFF,
             basePath = server.url("/agentrouter.org/v1").toString().trimEnd('/'),
             history = historyWithToolCall(),
@@ -915,8 +929,8 @@ class ThinkingRulesRegressionTest {
         )
 
         val nonToolTurn = capture(
-            model = model("deepseek-v4-flash"),
-            level = ThinkingLevel.OFF,
+            model = model("deepseek-v4-flash", supportsReasoning = null),
+            level = ThinkingLevel.AUTO,
             basePath = server.url("/agentrouter.org/v1").toString().trimEnd('/'),
             history = listOf(
                 LLMMessage(LLMMessage.Role.USER, "first question"),
@@ -925,7 +939,8 @@ class ThinkingRulesRegressionTest {
             ),
         )
         assertFalse(
-            "AFTER_TOOL_USE_ONLY must not add the field to plain assistant turns: $nonToolTurn",
+            "AFTER_TOOL_USE_ONLY must not add the field to plain assistant turns, and " +
+                "AUTO must keep suppressing the placeholder worthlessly there: $nonToolTurn",
             anyMessageHasKey(nonToolTurn, "reasoning_content"),
         )
     }
