@@ -465,6 +465,29 @@ def test_room_migration():
         f"exit={code}\n{out}",
     )
 
+def test_process_logging():
+    print("━━━ process_logging_gate ━━━")
+    code, out = run_scanner("process_logging_gate.py", "--self-test")
+    check(
+        "self-test fixtures pass (unwired process caught, wired/escaped pass)",
+        code == 0,
+        f"exit={code}\n{out}",
+    )
+    # Real-tree shape: a process declared with the escape comment ABOVE the
+    # tag (XML forbids comments inside a start tag) must still pass.
+    root = make_tree({
+        "src/android/app/src/main/AndroidManifest.xml": (
+            "<manifest>\n"
+            "  <!-- logging-ok: dormant, no request path -->\n"
+            '  <service android:process=":sleepyservice" />\n'
+            "</manifest>\n"
+        ),
+    })
+    code, out = run_scanner("process_logging_gate.py", root)
+    check("escape comment above the tag passes (exit 0)", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(root)
+
+
 def test_trace_eval():
     print("━━━ trace_eval_check ━━━")
     # The evaluator gates every golden in tests/traces/golden/, including the
@@ -591,6 +614,7 @@ def main():
     test_legacy()
     test_debug_leak()
     test_room_migration()
+    test_process_logging()
     test_trace_eval()
     test_real_repo()
     print("")

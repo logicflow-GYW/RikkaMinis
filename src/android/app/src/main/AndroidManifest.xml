@@ -328,7 +328,11 @@
 
         <!-- [native-oom Phase 1] Isolated process for native_offload socket
              server + handler registry. Keeps the heavy per-tool native/mmap
-             load out of the main process. See ToolExecutionService. -->
+             load out of the main process. See ToolExecutionService.
+             logging-ok: dormant — the :toolservice branch in MinisApp.onCreate
+             returns early and no request path is dispatched to this process
+             yet; wire AppLogger.init here when it starts serving work. Guarded
+             by scripts/scan/process_logging_gate.py. -->
         <service
             android:name=".service.ToolExecutionService"
             android:process=":toolservice"

@@ -92,6 +92,11 @@ fun LogManagementScreen(
         // grouped together as one "crash" list so the user sees one
         // chronological stream regardless of which side trapped the fault.
         // 100 of each is far past any reasonable inspection horizon.
+        // ponytail: 列表只列 minis-/crash-/native-crash- 三类；debug-<date>.log
+        // 与 error-snapshot-*.log（T-logging-full-coverage 新增通道）在磁盘上
+        // 但不在此页可见，要看需走文件管理或调试 RPC。| 天花板: 用户想在设置
+        // 里直接翻 debug/快照文件时失效。| 升级触发: 用户提出"设置里看不到
+        // debug 日志"，或需要新增分区标题（要动 7+1 语言文件）。
         val (daily, crash, total) = withContext(Dispatchers.IO) {
             val d = AppLogger.listLogFileMetas(prefix = "minis-", limit = 100)
             val cJ = AppLogger.listLogFileMetas(prefix = "crash-", limit = 100)

@@ -42,6 +42,8 @@ object AppLogger {
     // caller as a crash.
     private val dateFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.US)
     private val timestampFormat = DateTimeFormatter.ofPattern("HH:mm:ss.SSS", Locale.US)
+    // [T-logging-full-coverage] Error-snapshot file names: error-snapshot-<stamp>.log
+    private val errorSnapshotFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd-HHmmss", Locale.US)
 
     private fun todayStamp(): String = LocalDate.now().format(dateFormat)
 
@@ -68,6 +70,20 @@ object AppLogger {
     //     that line.
     private val writerLock = Any()
     private var writer: PrintWriter? = null
+
+    // [T-logging-full-coverage] Debug-channel writer state, same lock/guard
+    // contract as the daily writer. The debug file holds EVERY DEBUG line the
+    // app produces (including the previously-muted high-volume categories) so
+    // a provider failure can be diagnosed after the fact. Bounded by
+    // DEBUG_MAX_BYTES per day via rename-to-".1" rotation — bounded at 2×cap.
+    private const val DEBUG_MAX_BYTES = 5L * 1024 * 1024
+    private var debugWriter: PrintWriter? = null
+    private var debugDate: String = ""
+    private var debugBytesWritten: Long = 0
+
+    // [T-logging-full-coverage] Recent-lines ring for error snapshots.
+    // @Volatile: swapped by startCapture/stopCapture like writeQueue.
+    @Volatile private var ring: LogRingBuffer? = null
 
     // Read from every producer thread (log()/writeFileLine/writeLogcatLine)
     // and swapped by setEnabled() on the settings thread.
@@ -147,6 +163,8 @@ object AppLogger {
         // Spawn the logcat tail before emitting the session-start marker so
         // the marker itself shows up in the captured stream as a sanity check.
         logcatTailer = LogcatTailer { line -> writeLogcatLine(line) }.also { it.start() }
+        // [T-logging-full-coverage] Error-snapshot ring — fresh per session.
+        ring = LogRingBuffer()
         captureActive = true
         info("AppLogger", "Logging session started — capturing stdout/stderr + logcat tail")
     }
@@ -165,6 +183,7 @@ object AppLogger {
         // were produced while logging was still on.)
         writeQueue?.flushAndStop(2_000)
         writeQueue = null
+        ring = null
         captureActive = false
         // Close the daily writer so any buffered bytes are flushed; getWriter()
         // will reopen on the next file write. writerLock (not the object
@@ -177,6 +196,13 @@ object AppLogger {
             }
             writer = null
             currentDate = ""
+            try {
+                debugWriter?.close()
+            } catch (_: Exception) {
+            }
+            debugWriter = null
+            debugDate = ""
+            debugBytesWritten = 0
         }
     }
 
@@ -293,17 +319,38 @@ object AppLogger {
 
     fun error(category: String, message: String) {
         log("ERROR", category, message)
+        dumpErrorSnapshot()
     }
 
     /**
-     * Categories whose DEBUG logs we silently drop. Useful for high-volume
-     * categories that fire on every scroll frame / token (e.g. the chat
-     * scroll-follow path under tag "ChatScrollFollow") — gating at the
-     * caller would require touching dozens of sites; gating here keeps the
-     * Log.d + file-write cost off the hot path. The string formatting at
-     * each caller still pays for itself (we can't fix that without lambdas)
-     * but `Log.d → liblog → LogcatTailer → file write` is more expensive
-     * than the string build alone.
+     * [T-logging-full-coverage] Error-scene snapshot: on every ERROR episode
+     * (deduped by LogRingBuffer.SNAPSHOT_MIN_INTERVAL_MS), write the ring of
+     * the most recent delivered lines — all channels, all levels — to
+     * `error-snapshot-<timestamp>.log`. Every error carries its own scene, so
+     * "what did the app log right before the 400?" no longer requires
+     * watching the 64KiB kernel logcat ring live.
+     */
+    private fun dumpErrorSnapshot() {
+        val buffer = ring ?: return
+        if (!buffer.shouldSnapshot(System.currentTimeMillis())) return
+        val dir = logDir ?: return
+        val stamp = java.time.LocalDateTime.now().format(errorSnapshotFormat)
+        try {
+            val file = File(dir, "error-snapshot-$stamp.log")
+            file.writeText(buffer.content().joinToString(separator = "\n") + "\n")
+        } catch (_: Exception) {
+            // Snapshot must never take the logger down.
+        }
+    }
+
+    /**
+     * Categories whose DEBUG lines skip the logcat emission (previously:
+     * silently dropped everywhere). [T-logging-full-coverage] They now still
+     * reach the `debug-<date>.log` file — the mute only suppresses the
+     * `Log.d → liblog → LogcatTailer` hop, keeping logcat traffic bounded for
+     * per-frame/per-token categories while the file channel captures them.
+     * Gating at the caller would require touching dozens of sites; gating
+     * here keeps the routing single-source.
      */
     // [T-worker-log-capture] "OpenAIProvider" executes in the :modelservice
     // worker, and its DEBUG diagnostics are per-SSE-delta counters
@@ -317,8 +364,17 @@ object AppLogger {
     private val mutedDebugCategories = setOf("ChatScrollFollow", "OpenAIProvider")
 
     fun debug(category: String, message: String) {
-        if (category in mutedDebugCategories) return
-        log("DEBUG", category, message)
+        // [T-logging-full-coverage] Every DEBUG line reaches the debug file;
+        // muted categories only skip the logcat emission (hot-path cost).
+        if (category !in mutedDebugCategories) {
+            Log.d("Minis.$category", message)
+        }
+        if (!enabled) return
+        writeQueue?.enqueue(
+            todayStamp(),
+            "[${timeStamp()}] [DEBUG] [$category] $message",
+            keep = false,
+        )
     }
 
     private fun log(level: String, category: String, message: String) {
@@ -369,13 +425,67 @@ object AppLogger {
      * already flipped it off, and those lines were produced while it was on.
      */
     private fun writeQueuedLine(date: String, line: String) {
+        // [T-logging-full-coverage] Record into the error-snapshot ring FIRST
+        // (single drain-thread producer, cheap append) — every delivered line
+        // across all channels lands here.
+        ring?.append(line)
         try {
-            synchronized(writerLock) {
-                getWriter(date).println(line)
+            when (logChannelFor(line)) {
+                LogChannel.DEBUG -> synchronized(writerLock) {
+                    val w = getDebugWriter(date)
+                    w.println(line)
+                    debugBytesWritten += line.length + 1
+                    if (debugBytesWritten > DEBUG_MAX_BYTES) {
+                        rotateDebugFile(date)
+                    }
+                }
+                LogChannel.MAIN -> synchronized(writerLock) {
+                    getWriter(date).println(line)
+                }
             }
         } catch (_: Exception) {
             // Must not feed back into the logger.
         }
+    }
+
+    /**
+     * Open (or reuse) the debug-channel writer for [date], inside
+     * `synchronized(writerLock)` like [getWriter].
+     */
+    private fun getDebugWriter(date: String): PrintWriter {
+        if (date != debugDate || debugWriter == null) {
+            try {
+                debugWriter?.close()
+            } catch (_: Exception) {
+            }
+            val dir = logDir ?: throw IllegalStateException("AppLogger not initialized")
+            debugWriter = PrintWriter(FileWriter(File(dir, "debug-$date.log"), true))
+            debugDate = date
+            debugBytesWritten = 0
+        }
+        return debugWriter!!
+    }
+
+    /**
+     * [T-logging-full-coverage] Debug-file rotation: the current debug file
+     * exceeded DEBUG_MAX_BYTES → rename it to `debug-<date>.1.log` (deleting
+     * a previous roll) and reopen fresh. Called INSIDE writerLock from the
+     * write path; the next write reopens the writer. Bounded at 2×cap per day.
+     */
+    private fun rotateDebugFile(date: String) {
+        try {
+            debugWriter?.close()
+        } catch (_: Exception) {
+        }
+        val dir = logDir
+        if (dir != null) {
+            val file = File(dir, "debug-$date.log")
+            val rolled = File(dir, "debug-$date.1.log")
+            if (rolled.exists()) rolled.delete()
+            if (!file.renameTo(rolled)) file.delete()
+        }
+        debugWriter = null
+        debugBytesWritten = 0
     }
 
     /**
@@ -533,6 +643,13 @@ object AppLogger {
             }
             writer = null
             currentDate = ""
+            try {
+                debugWriter?.close()
+            } catch (_: Exception) {
+            }
+            debugWriter = null
+            debugDate = ""
+            debugBytesWritten = 0
             logDir?.listFiles()?.forEach { it.delete() }
         }
     }
