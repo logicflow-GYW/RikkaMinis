@@ -1,6 +1,6 @@
 # rikkaminis-dev-history 按天索引
 
-快速跳转到每日开发日志。共 1057 条记录，47 天。
+快速跳转到每日开发日志。共 1069 条记录，47 天。
 
 ## 2026-08-03（11 条）
 
@@ -2240,7 +2240,7 @@
 - `21:51` **09-17 晚：第二类 bug 测试缺口对账 + 4 个测试补齐 → main = 0c6ff4d7（#1636 绿）**
   - **覆盖对账（用户记忆"当初都有吧"不成立）**：今日 33 修复提交 / 131 src 文件中，有测试引用仅 48；零测试 83（其中 ~40 是 Comp…
 
-## 2026-09-18（5 条）
+## 2026-09-18（17 条）
 
 - `00:00` **09-17 深夜：诊断「完全退出后回到上次会话」——ce4ccb91 深链修复的副作用**
   - **现象**：用户设置 Launch Session = NewChat（日志 [LaunchSession] mode=NewChat 实锤），后台恢复走新会…
@@ -2252,3 +2252,26 @@
   - - 用户点名盯的两个编译分支：`fix/indented-bullet-continuation`（34d19003）与 `feat/skill-md-file…
 - `10:55` **09-18：钉住 CI runner ubuntu-24.04 — main = 6f2cef22**
   - - 用户报告 GitHub Actions 提示：ubuntu-latest 将于 2026-10-19 迁移至 Ubuntu 26（runner-images…
+- `11:20` **09-18：dev-history 档案更新到 09-18（挂载版 + 仓库 docs 双份同源）**
+- `11:44` **09-18：dev-history 档案更新到 09-18（挂载版 + 仓库 docs 双份同源）**
+  - - 挂载版：1057 条 / 46 天 / 1,258,261 字符 / 19,430 行；fences 32 even、anchors=header=1057…
+- `12:01` **09-18：1 号满权限小号（alarmedvine）接入收口 —— 含 gh_fullright.sh 两个老 bug 修复**
+  - - **新账号**：环境变量 `GITHUB_TOKEN_FULL_RIGHT_1` = GitHub 1 号小号 **alarmedvine**（ID 210…
+- `12:32` **09-18：诊断「[400] The content[].thinking in the thinking mode must be passed back to the API」**
+  - **现象**：今天 4-5 次（11:43:34 / 11:43:47 / 11:50:30 / 11:57:34 / 11:59:16），全部 session…
+- `13:13` **09-18：修复 DeepSeek V4 思考回传 400（分支 fix/deepseek-thinking-echo @ f6ab4eb2）**
+  - **改动（9 文件 +700/−70）**：
+- `14:05` **09-18：DeepSeek V4 思考回传 400 追查（未解决，已按用户决定搁置）+ 分支合并 main**
+  - **结论先行**：装了修复版（1.0.0+1646 / cfa48ec9）后仍复现 → 修复不够。用户判定该故障**有随机性**，决定暂不继续修，仅合并分支。
+- `14:12` **09-18：deepseek-thinking-echo 分支独立审查通过**
+  - - main = aff89798（c82bbf3e fix + aff89798 test）已推送，CI #35313387036 in_progress（用…
+- `14:34` **09-18：worker 日志落盘缺口修复 → main = d09f3adf（用户拍板「做吧」）**
+  - **★ 根因（三源对齐）**：`MinisApp.onCreate` 在 `:modelservice` 进程早退（防重绑 PRoot/DB/socket 的正…
+- `14:40` **09-18：evals 欠账补齐第一轮（覆盖 6→10/24，行为版 24/24）**
+  - - **触发**：用户看 karpathy skill 对照后问"技能到底优化到什么程度"→ 量化出 18/24 skill 无 evals，用户拍板补。
+- `15:20` **09-18 晚：日志全量覆盖改造收口 → main = cdd2817（CI #1651 绿 → FF main → release #35318635393 自动触发，用户惯例「触发后不用等」）**
+  - **用户命题**：日志是应用的基础设施，应能全量反映运行 → 先量化缺口，再按缺口逐条修。
+- `15:33` **09-18 晚：查清「T321 的 500」——顺便揪出潜伏的 ack 协议缺陷（日志改造首日战果）**
+  - **触发**：15:22 用户装新包（cdd2817）后，`error-snapshot-2026-09-18-152205.log` 显示 T321 请求 5…
+- `16:17` **09-18 晚：双修复开工收口 → main = 1fb74fd0（两个分支各自 CI 绿 → FF → 远端只剩 main）**
+  - **修复 A（a3183aa1）：ack 竞速** —— `ModelExecutionRunDir.workerDrained()` 共享判据（只认 work…

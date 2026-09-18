@@ -4,8 +4,8 @@
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
 - 合并范围：2026-08-03 ～ 2026-09-18，共 47 天
-- 条目总数：1057（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
-- 总字符数：1258066 / 总行数：19431
+- 条目总数：1069（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
+- 总字符数：1274730 / 总行数：19602
 
 ---
 
@@ -19424,6 +19424,177 @@ commit `2dc6e0d4`（6 文件 +392/−18，分支 diag/liveness-batch）打包三
 - 修复：三个 workflow（build-apk / scan-gate / sync-upstream）runs-on 改 ubuntu-24.04，分支 ci/pin-ubuntu-24 = 6f2cef22 → workflow_dispatch 触发（workflow-only 改动不匹配任何 push/PR 路径门，不 dispatch 不会跑 CI）→ CI 绿 → FF main = 6f2cef22，远端分支 DELETE 204。
 - 升级到 26 留作日后显式验证的步骤（改回 ubuntu-latest 或 ubuntu-26 跑一次绿即可）。
 - 顺带：release #1638（ec52ba58）已完成 success。
+
+<!-- 2026-09-18 11:20:00 -->
+## 09-18：dev-history 档案更新到 09-18（挂载版 + 仓库 docs 双份同源）
+
+<!-- 2026-09-18 11:44:13 -->
+## 09-18：dev-history 档案更新到 09-18（挂载版 + 仓库 docs 双份同源）
+
+- 挂载版：1057 条 / 46 天 / 1,258,261 字符 / 19,430 行；fences 32 even、anchors=header=1057、outOrder=0；脱敏 main + INDEX + SAGAS 三份独立探针全部 NONE；SAGAS 23 sagas / orphans 69 / multi4 60。
+- main = 938f8f1（docs/dev-history-0918 直达 main，docs 变更不触发 build CI），克隆已清理，本地/远端均无残留分支。
+
+<!-- 2026-09-18 12:01:17 -->
+## 09-18：1 号满权限小号（alarmedvine）接入收口 —— 含 gh_fullright.sh 两个老 bug 修复
+
+
+- **新账号**：环境变量 `GITHUB_TOKEN_FULL_RIGHT_1` = GitHub 1 号小号 **alarmedvine**（ID 210298370，2025-05-05 注册，free，**有 2FA**，21 个全量 scope 与 ***ALT_USER*** 相同）。电商购入，用户称"开源社区号"；主邮箱 [EMAIL]（与 CF 1 号同前缀）。
+- **卖家残留已清**：`repo-cdt7xqi4` / `repo-eqxfqpva` 两个空 repo（LICENSE+空 README，作者 [EMAIL]，2026-08-28 创建）删除，账号现 0 repo / 0 gist / 0 key / 0 hook。
+- **★ 修复两个同款老 bug（"卡住"现象根因）**：`gist-create` / `key-add` 里 `curl -d @-` 想接 python 的 stdout 但没接上（python 输出去了终端，curl 读脚本 stdin）→ agent 非交互环境**永久阻塞**（复现：60s 超时强杀 rc=124；用户报"感觉卡住"）。改法：`PAYLOAD=$(python3 ...)` 先落变量再 `-d "$PAYLOAD"`；全库扫描无同款残留。
+- **脚本升级**：`gh_fullright.sh` 加 `GH_ACCT` 开关（默认 0 号 ***ALT_USER***；`GH_ACCT=1` 切 alarmedvine）；以 1 号做 git 操作 = `GITHUB_TOKEN="$GITHUB_TOKEN_FULL_RIGHT_1" sh gh_sync.sh ...`（实测 push 通过）。新增 `scripts/acceptance.sh` 一键验收（建仓→push→hook+真实投递→gist→key→清理→0 残留，1 号全流程复跑通过）。
+- **skill 升 1.1.0**：文档双账号化 + 新增 evals.json（5 用例；行为版 5/5 PASS，含口语脱轨正例与日常 git 负例）。
+
+<!-- 2026-09-18 12:32:21 -->
+## 09-18：诊断「[400] The content[].thinking in the thinking mode must be passed back to the API」
+
+
+**现象**：今天 4-5 次（11:43:34 / 11:43:47 / 11:50:30 / 11:57:34 / 11:59:16），全部 session 2f5dae85、全部 model=deepseek-v4-flash（OpenAI 型实例，走 agentrouter.org 这类 Go 中继）；昨天 0 次。每次都在「tool-call 回合 persist-both done → chat stream offload → ~3s 后 400」，retry / group failover 同错（历史不变）。
+
+**机制**：报错文本是 DeepSeek V4 **Anthropic 兼容端点**的错误（`content[].thinking`），说明中继把我们的 OpenAI 请求翻译成 Anthropic 形状转发。DeepSeek V4 一旦处于 thinking 模式，多轮/工具调用历史必须把上一回合的 thinking 原样回传，否则 400（OpenAI 形状里就是 `reasoning_content`；社区 patch 经验：**空串也能满足字段存在性检查**）。agentrouter 是 Go 中继（报错含 `GeneralOpenAIRequest` 与 request id），`api.deepseek.com` 官方入口也需显式关闭。
+
+**代码层两个真缺口**：
+1. `ThinkingRuleResolver.kt:320` 为 `*deepseek-v4*` 声明了 `ReasoningEchoPolicy("reasoning_content", AFTER_TOOL_USE_ONLY)`，但**没有任何 provider 读它**（grep 全仓：只有编码/DB 往返，无消费者）→ 声明的要求是死元数据；真正生效的是 `OpenAIProvider.kt:1713` 的旧门 `includeReasoning = (thinkingLevel.isEnabled || model.supportsReasoning==true) && …`。
+2. **跨进程元数据缺失（同族老病）**：`ModelExecutionDispatcher` 只传 thinking_level + 自定义规则；`ModelExecutionService.kt:792/1073` 构造的 LLMModel 只有 id/displayName/provider/两个 modalities/contextWindow → **supportsReasoning 与 interleavedReasoningField 在 worker 里恒为 null**。于是：OpenAI 路径的 "modelAlwaysReasons" 回退永不生效；Anthropic 路径的 `shouldEchoInterleavedThinking()`（要求 interleavedReasoningField != null）在 worker（= 实际发请求的进程）里**永不成立** → issue #70 的修复在 offload 路径上是死的。
+3. 两个刻意行为与上游要求冲突：thinking=OFF 时完全不回传；thinking=AUTO 时**刻意不发 "" 占位**（T-thinking-auto-level）→ tool-call 回合一个字段都不带 → 400。
+
+**复现不可能（重要，下次别再白跑）**：`minis-model-use` 的标准通道在 `ModelUseOffloadHandler.kt:1759` 只构造 `LLMMessage(role, content, audioParts)` —— **不传 tool_calls、不传 reasoning_content**；passthrough 被进程边界守卫拒绝（"provider sendMessage/streamMessage must run only in :modelservice"）。所以 CLI 探测永远看不到这类 400，不能据此说"没问题"。
+
+**不改代码的绕法**：①别在已有会话里从别的模型切到 deepseek-v4-*（换模型开新会话）；②该模型思考档用具体档（HIGH 等）而非 Auto/Off——具体档会发 `reasoning_content` 字段（无内容时发空串），空串即过；③改用官方 DeepSeek 入口或商汤实例（实测同一段历史不要求回传）。
+
+<!-- 2026-09-18 13:13:22 -->
+## 09-18：修复 DeepSeek V4 思考回传 400（分支 fix/deepseek-thinking-echo @ f6ab4eb2）
+
+
+**改动（9 文件 +700/−70）**：
+1. `ThinkingRuleResolver`：新增 `echoPolicyFor(ctx)` —— 扫「第一个**对 echo 有意见**的匹配规则」，而不是碰巧胜出的那条（echo 是**模型**属性，胜出规则是按**线路方言**选的，Unified Gateway 的 AllModels 规则会遮住 deepseek 规则）；`ThinkingResolveTrace.reasoningEcho` 携带策略。原 `winner` 匹配抽成私有 `resolveWinner`（apply 复用，避免漂移）。
+2. 新 `ReasoningEchoDecider`（纯函数）：policy × 是否有 tool_calls × captured × legacy 两门 → OMIT/CAPTURED/PLACEHOLDER。null 策略 = 旧行为逐字节一致；NEVER（Mistral 闭 schema）压倒一切。
+3. `OpenAIProvider`：`injectThinkingParams` 返回 echo 策略，**ctx 前移到 relay-host 表之前**（否则 AUTO 与各家方言的 early return 会丢掉策略）；两条消息分支共用一个 `putEcho`。工具调用回合从此**无论本地档位**都带 `reasoning_content`（有值发值，无值发空串）。
+4. IPC：`supportsReasoning` / `interleavedReasoningField` 过 `:modelservice`（此前 worker 里两者恒 null → always-reasoning 回退失效、GH#70 的 interleaved echo 在真正发请求的进程里永不触发）。
+   - ponytail 债务注释：`reasoningEffortValues` / `declaresNoEffortTiers` 仍不过 IPC（升级触发 = offloaded 流上出现 effort 不支持的 400）。
+
+**测试**：纯 JVM 新 16 例（ReasoningEchoDeciderTest 10 + ThinkingEchoPolicyResolveTest 6）**沙箱 16/16 绿**（kotlinc + /tmp/libs jars，stub: Compose@Stable、Room 注解 vararg Index）；端到端 3 例加进 `ThinkingRulesRegressionTest`（MockWebServer 驱动真 provider，断言序列化 body：tool-call 回合 OFF/AUTO 都带空串、captured 优先生效、glm/非工具回合保持不发）——只能由 CI 跑。
+
+**复现教训（写进 skill 候选）**：`minis-model-use` 标准通道构造 `LLMMessage(role, content, audioParts)`，**丢 tool_calls 与 reasoning_content**；passthrough 被进程边界守卫拒 → 用 CLI 探测这类「历史形状相关」的 provider bug 永远测不出来。
+
+<!-- 2026-09-18 14:05:51 -->
+## 09-18：DeepSeek V4 思考回传 400 追查（未解决，已按用户决定搁置）+ 分支合并 main
+
+
+**结论先行**：装了修复版（1.0.0+1646 / cfa48ec9）后仍复现 → 修复不够。用户判定该故障**有随机性**，决定暂不继续修，仅合并分支。
+
+**★ 权威证据（litellm `_fill_reasoning_content`，llms/deepseek/chat/transformation.py）**：
+- 规则原文："DeepSeek thinking mode requires `reasoning_content` to be passed back on **every assistant message**"（不止工具回合）。
+- 判据是 `not msg.get("reasoning_content")` → **空串是 falsy = 按缺失处理**；兜底 `patched["reasoning_content"] = " "`（注释：API 能接受的**最小**值）。
+- → 我们发的 `""` 占位**等于没发**；若要真修，得换成非空占位（单空格）且覆盖每条 assistant 消息。副作用：单空格可能被模型当作自身思考回显（本仓 T257 曾因此回退）。
+
+**★ 无法复现（重要，别再白跑）**：agentrouter.org 用用户给的 key 打了 **36+ 次**（norc / 空串 / 真值 × 流式 / 非流式 × 单轮 / 多轮 / 无 content 字段 × effort 档位；另加 Anthropic `/v1/messages` 端点 + thinking 无回传形状）→ **全部 200，一次不 400**。故报错的中继**不是**该 key 能到的上游；app 侧同 key 走 `minis-model-use` 探针同样不 400。故障有随机性（同会话 turn 0/1/2 成功、turn 3 失败）。
+
+**★★ 运维级发现：worker 进程日志此前完全不可见**
+- app 日志文件（/var/minis/logs/minis-*.log）由 `LogcatTailer` 用 `logcat --pid=<主进程pid>` 抓取 → **:modelservice worker 的日志永远不进文件**。
+- 用 Shizuku 读全量 logcat：`android-shizuku-cli exec "logcat -d -v time | grep -E 'Minis.OpenAIProvider'"`。provider 日志 tag = `Minis.OpenAIProvider`，含 `[T321] → REQ url=<域名> model=<id> stream= messages=N tools=N temp= maxTokens= hasSystem= bodyLen=N`、`[T321] ← RSP status=... x-request-id=...`、非 2xx 时 `[T321] ← HTTP <code> error body: <全文>`。
+- 注意：main 环形缓冲**仅 64 KiB**（`logcat -d -g` 可查），高 verbose 时（流式 SSE 每 delta 一行）几分钟即滚掉 → 现场诊断必须「快速轮询抓取」（nohup 循环 logcat -d + grep，落盘到 /var/minis/shared/），不能事后翻。
+- 还看到：出错会话是 **143k token 级长上下文**（`[T321] usage final: prompt_tokens=143209`）。
+
+**合并**：分支 `fix/deepseek-thinking-echo`（2 commit，9 文件 +715/−70）→ rebase 到 938f8f1b → 分支 CI **#1647 success**（aff89798）→ **FF main = aff89798** → 远端两分支 DELETE 204，远端仅剩 main → release CI 自动触发（未等）。
+
+<!-- 2026-09-18 14:12:57 -->
+## 09-18：deepseek-thinking-echo 分支独立审查通过
+
+<!-- 2026-09-18 -->
+- main = aff89798（c82bbf3e fix + aff89798 test）已推送，CI #35313387036 in_progress（用户拍板不等）。
+- 代码审查结论：逻辑自洽，无新 bug。核对点：①`ReasoningEchoDecider` 真值表（null policy 逐字节旧行为、NEVER 压倒一切）②provider 两条消息分支共用 `putEcho`/`echoAction`，工具回合带 echo、非工具回合 legacy ③`echoPolicyFor` 在 ctx 前移后 relay-host early return 仍携带策略 ④worker IPC 两个元数据字段 read/write 对称（`has()` 门 + optString ifEmpty→null）。
+- JVM 复验：沙箱 16/16 绿（ReasoningEchoDeciderTest 10 + ThinkingEchoPolicyResolveTest 6）。**复用配方**：编译集 = thinking 包 5 文件（Decider/Rule/Resolver/Coding/WireFormat）+ ThinkingLevelStub（真实枚举在 ProviderConfig.kt：OFF..MAX,ULTRA,AUTO + isEnabled）+ RuleEntityStub（Room 注解须 `import androidx.room.*`，Entity 字段可空性按真实 Entity 对齐：wireFormatJson/scopePattern 均可空）+ RoomAnnotations stub + json/kotlinx jars。
+
+<!-- 2026-09-18 14:34:05 -->
+## 09-18：worker 日志落盘缺口修复 → main = d09f3adf（用户拍板「做吧」）
+
+
+**★ 根因（三源对齐）**：`MinisApp.onCreate` 在 `:modelservice` 进程早退（防重绑 PRoot/DB/socket 的正确设计，line ~202），因此 **`AppLogger.init` 从不在 worker 里跑** → `logDir == null`，worker 里所有 `AppLogger.info("OpenAIProvider", "[T321] …")` 文件一行不写；同时主进程 `LogcatTailer` 用 `logcat --pid=<主进程>` → worker 的 `android.util.Log` 行也不进文件。**两头都不落** = 9 次 400 零痕迹的完整解释。证据：文件里 `[ChatVMStream]`（主进程）3103 行，`] [OpenAIProvider]`（worker）**0 行**。
+
+**修复（d09f3adf，2 文件 +35/−1，CI #1649 绿 → FF main，远端分支已删）**：
+1. `MinisApp`：`:modelservice` 分支加 `AppLogger.init(this)`（仍跳过重子系统；init 只做 logs 目录 + prefs + prune + 绑 worker 自己 pid 的 tailer）。`:toolservice` 分支保持休眠（该进程目前不承接请求）。
+2. `AppLogger.mutedDebugCategories` += "OpenAIProvider" —— 该类别 DEBUG 是逐 SSE delta 计数器（一流式响应数千行）；REQ/RSP/error 是 INFO 仍保留（那才是诊断行）。
+3. `writeLogcatLine` 丢 `RAW SSE:` 行（worker `ToolChain[Provider]` 每 chunk 一条完整 payload）。
+4. ponytail：worker + main 双进程 O_APPEND 同一日志文件（行级交错风险）| 升级触发 = 日志出现 garbled 行。
+
+**验证**：基线对照语法门（MinisApp.kt + AppLogger.kt 改动前后错误直方图 IDENTICAL，剩余全为缺 Android 依赖噪声）；CI 全量单测绿。**待真机验证（用户）**：装新包后，deepseek-v4-* 会话再出 400 时，日志文件里应直接出现 `[..] [INFO] [OpenAIProvider] [T321] → REQ url=…` 与 `← HTTP <code> error body: …` —— 那时才能确定真正的中继与畸形点，再决定 400 本体怎么修。
+
+<!-- 2026-09-18 14:40:56 -->
+## 09-18：evals 欠账补齐第一轮（覆盖 6→10/24，行为版 24/24）
+
+<!-- 2026-09-18 16:30 -->
+- **触发**：用户看 karpathy skill 对照后问"技能到底优化到什么程度"→ 量化出 18/24 skill 无 evals，用户拍板补。
+- **新写 5 个 evals.json**：evidence-discipline / git-parallel-collaboration / github-ops / four-way-sync-check / dev-history-sync（各 4-5 例：触发检查断言 + 脱轨正例 + 负例）。
+- **静态检查（check_evals.py static --strict）**：10/24 覆盖（OK），剩 14 无 evals（ERR 1 仅因 --strict；约定上旧 skill 可逐步补）。
+- **行为版（agentrouter-1/deepseek-v4-flash，5 skill 串行）**：24/24 PASS。
+- **★ eval 自身翻车一例**：evidence-discipline #4 原写"估工作量"当脱轨正例 → 行为版 FAIL = **估工作量不在该 skill 触发面上，是 eval 写宽了不是模型错了**；换成"结论站不住脚帮我核一核"后 5/5。教训：脱轨正例必须贴着 description 语义边缘选，不能随便找一句"感觉沾边"的话。
+- **行为版运行时坑**：check_evals.py 默认模型 danfeng/deepseek-v4-flash 默认解析到 agentrouter-1，5 连发撞限频全 None（exit=2/FAIL 假象）→ **必须逐 skill 串行跑 + 失败先用 `minis-model-use run` 单探针验实例**（商汤实例本轮 Rate limited，agentrouter 通）。
+- 剩余 14 无 evals：android-ci-release-ops / android-native-leak-diagnosis / cf-memory-optimizer / cloudflare-fullright-ops / code-workbench-tools / gcli2api-free-llm / llm-bug-audit / meta-session-protocol / rikkaminis-dev-methodology / room-sqlite-migration / security-audit-checklist / self-improving-agent / semantic-memory / skill-creator。
+
+<!-- 2026-09-18 15:20:10 -->
+## 09-18 晚：日志全量覆盖改造收口 → main = cdd2817（CI #1651 绿 → FF main → release #35318635393 自动触发，用户惯例「触发后不用等」）
+
+
+**用户命题**：日志是应用的基础设施，应能全量反映运行 → 先量化缺口，再按缺口逐条修。
+
+**原缺口量化（改前实测）**：`AppLogger.info/warn/error` 624 调用点（落文件）vs `android.util.Log.*` 739 调用点（其中 DEBUG 119，靠 LogcatTailer 间接落）；三条结构性缺口 = ①进程缺口（09-18 已修 d09f3adf：worker 不跑 init + tailer 只绑主进程 pid）②时间缺口（64KiB 内核 logcat 环形缓冲，高频 DEBUG 几分钟滚掉 → 只能现场轮询）③系统边界 0 覆盖（被杀原因/用户手势/agent 命令，靠 launch-beacon / agent-load 旁路账本）。
+
+**本轮改动（1 commit，10 文件 +187/−22）**：
+1. **DEBUG 通道分流**：新增纯函数 `logChannelFor(line)`（`ui/logging/LogChannel.kt`）——看**第二个**方括号 token（`[time] [LEVEL] [category]`），DEBUG → `debug-<date>.log`，其余（INFO/WARN/ERROR/STDOUT/STDERR/LOGCAT/无法解析）→ MAIN。producers 仍零解析（写在 drain 侧 sink）。`mutedDebugCategories`（ChatScrollFollow / OpenAIProvider 的逐 SSE delta 计数）语义改写：**只压 logcat 发射，不再压文件**——每 token 一行的诊断数据现在落 debug 文件。`debug-<date>.log` 超 5MB 时 rename 成 `.1` 旋转（每天上限 2×cap）。
+2. **错误现场快照**：`LogRingBuffer`（500 行、全通道全级、纯内存）→ 每个 ERROR 触发写出 `error-snapshot-<stamp>.log`，30s 窗口去重（错误风暴不刷文件）。排障不再依赖「恰好抓住 64KiB 内核缓冲的现场」。
+3. **CI 进程覆盖门** `scripts/scan/process_logging_gate.py`（scan.sh [10/10]，编号 [x/9]→[x/10]，test_scan +2 用例）：每个 `android:process` 声明必须有显式 init 决定（在 `PROCESSES_WITH_LOGGING`，或声明上方 `logging-ok:` 注释）。**门当场抓到真缺口**：`:toolservice` 是未声明未记日志的进程（确实休眠：MinisApp 分支早退、无请求派发）→ Manifest 补 `logging-ok: dormant …` 说明。XML 不许注释落在标签属性中间 → 逃生口扫描改为「**声明行向上 12 行**窗口内找 `logging-ok:`」。
+
+**自己的测试当场抓到两个真 bug（可复用）**：①`logChannelFor` 第一版解析**第一个**方括号（那是时间戳）→ DEBUG 全部误判为 MAIN（测试 4 红）；②`LogRingBuffer.lastSnapshotAt` 用 `Long.MIN_VALUE` 初始化 → `now - last` **溢成负数** → 第一次快照被自己静默吞掉（`clear()` 同款复发）→ 改为 `-SNAPSHOT_MIN_INTERVAL_MS - 1`。**教训：哨兵初值用 MIN_VALUE 参与减法 = 溢出陷阱；"第一次调用就生效"的行为必须被测试钉住。**
+
+**验证链**：沙箱 JVM 11/11（LogChannelTest 6 + LogRingBufferTest 5，kotlinc + /tmp/libs junit/hamcrest）→ `scan.sh 10/10` + `test_scan.py 32/32` → 改动前/后括号基线对照（AppLogger parens 1 vs base 1，无新增失衡）→ 分支 CI **#1651 success**（head 核对 cdd2817）→ FF main → 本地/远端分支清（远端 DELETE 204，API 查 refs 只剩 main）→ release CI 自动触发（用户：不等）。
+
+**刻意留的债（ponytail 注释已打）**：LogManagementScreen 只列 `minis-`/`crash-`/`native-crash-` 三类前缀，**debug- 与 error-snapshot- 文件在磁盘上但设置页看不到**（要看走文件管理 / debug RPC）。天花板：用户想在设置里翻 debug/快照文件时失效；升级触发：用户提出「设置里看不到 debug 日志」，或需要新增分区标题（要动 7+1 语言文件）。
+
+<!-- 2026-09-18 15:33:08 -->
+## 09-18 晚：查清「T321 的 500」——顺便揪出潜伏的 ack 协议缺陷（日志改造首日战果）
+
+
+**触发**：15:22 用户装新包（cdd2817）后，`error-snapshot-2026-09-18-152205.log` 显示 T321 请求 500。用户点破："你就是那个中转站提供的那个"——T321 = 本会话自己。
+
+**一、500 本体（两次：15:22:05.554 / 15:22:53.871）**
+- 全部 session `20ef481f`，model deepseek-v4-flash，url agentrouter.org（oneapi 中转，header `X-Oneapi-Request-Id`）
+- error body：`{"error":{"message":"Upstream rejected the request as invalid (request id: 2026091815220373.../...15225237...)","type":"invalid_request_error","code":"invalid_request_error"}}` —— **上游把 invalid_request 包成 HTTP 500**
+- 两次都是 500 后 ~1.3s 自动重发**完全相同的 body**（118503 B）→ 第二次 200。→ **上游间歇性故障，非我方请求内容问题**
+- 用户感知：首轮回复延迟 ~4-6s（15:22:02 请求 → 15:22:10 重试成功 → 15:22:11 出工具调用）；第二次 ~1.3s，无感
+
+**二、"是我"的证据链**：15:22:01.788 `ChatVMStore rename __new__11edefb6 -> 20ef481f`；15:22:02.038 `appendMessage role=user partsLen=42`（= "总结一下今天都干了什么事情？" 14 字 ×3B）；请求特征 `messages=2 tools=11 bodyLen=118503`（tools=11 = 本 agent 的工具数；118KB = 巨型 system prompt）。
+
+**三、日志改造首日即出首秀与首战**：两个快照都是 **worker 侧 LogRingBuffer** 写的（d09f3adf+cdd2817 生效）；快照1=25 行（冷启动 3s，缓冲浅），快照2=500 行/56KB（主体现为 SSE delta，DEBUG 分流后入缓冲）。
+
+**★四、揪出系统性协议缺陷：client.ack 43 次只成功 1 次**
+- 实测：`client ack timeout` 42 条 / `client ack seen` **1** 条 / `late client ack` 2 / `kept as orphan` 2 / `controlled drain stale` 41 —— 每 run 恰 1 次 timeout，38/38 run 都有
+- 设计意图（`ModelExecutionService.kt:1340-1380` 注释原文）：ack 让 worker 尽早收尾，**避免"pinning the process for up to 45s"**
+- 断裂环：`ChatStreamOffloadHandler.kt:437-455` `awaitWorkerExit()` 的 `gone = !beat.isFile || beatStale || clientAckPresent` —— **client 把"自己刚写的 ack 文件"当成"worker 已停"的证据** → 立即 `deleteRecursively()`（415 行）→ worker 以 100ms 轮询（`ACK_POLL_MS`）与删除**竞速**，成功率 1/43
+- 连带：worker 的 terminal 被刻意推迟到 ack barrier 之后才写（`Service:1356` 注释）→ 目录已删 → `protocol_violation=run_dir_missing`（每 run 1 次）
+- 每 run 副产品：心跳 ENOENT ×7-8（`touchLivenessBeat failed`，2s 间隔，293 条/天）、run_dir_missing ×1、self-reap skipped ×1
+- 常量：`ACK_POLL_MS=100` / `STREAM_CLIENT_ACK_TIMEOUT_MS=15000` / `STREAM_DRAIN_GRACE_MS=30000` / `WORKER_EXIT_WAIT_MS=6000`
+- 影响：用户无感（数据不丢、generation 门防误杀），但收尾效率 = 设计目标的 1/43；pendingAckTokens 释放路径待核（潜在泄漏）
+- **建议最小修法（未动手）**：把 `clientAckPresent(dir)` 从 `awaitWorkerExit` 的 `gone` 条件移除（它是我方握手，非对端已停证据）→ 顺序变为 ack → worker 见 → terminal → client 见 → 删目录
+
+**★五、日志自身新问题（今天改动引入）**：main+worker 双写入者 → 28 条乱序（main 批量 flush 滞后 worker 4-24s）+ 1 条有损混血行；09-17 为 0 条，09-18 全在 15:22 后。**今天的 ponytail 债务"升级触发 = 日志出现 garbled 行"已命中**。修法候选：worker 日志文件名分流（最小）。
+
+**方法论**：可见性 ≠ 现象新出现（09-17 关键词全 0 是"worker 日志不落盘"，非"没发生"）；判"设计意图 vs 实测背离"必须读注释原文 + 计数对比（42:1）。
+
+<!-- 2026-09-18 16:17:48 -->
+## 09-18 晚：双修复开工收口 → main = 1fb74fd0（两个分支各自 CI 绿 → FF → 远端只剩 main）
+
+
+**修复 A（a3183aa1）：ack 竞速** —— `ModelExecutionRunDir.workerDrained()` 共享判据（只认 worker 自有证据：terminal，或 result+beat silent；**明确排除 client.ack**——它是 client 写的，不能证明对端已停）。`awaitWorkerExit` 与 `reapSafe` 都委托它（非流式路径本来正确，reapSafe 改为委托消除漂移源）。修正发现：`done` 里的 **裸 result.json** 也是"提前删"的来源（worker 在等 ack 时 result 已写）——只删 clientAckPresent 不够，必须给 result 加 beat-silent 门（与非流式语义对齐）。测试 `WorkerDrainedEvidenceTest` 9/9 + 反向对照（恢复旧 clientAckPresent 项 → 锚点红）。
+**修复 B（1fb74fd0）：日志单写者** —— `LogFileName.kt` 纯函数（channelFileName/processLogSuffix/readOwnCmdline，JVM 8/8）；AppLogger.init 从 `/proc/self/cmdline` 解析进程 tag（minSdk 26，不能用 API 28 getProcessName），worker 写 `minis-<date>.modelsservice.log` / `debug-<date>.modelservice.log`，main 保留历史名；旋转与 prune 的 today 保护改 `startsWith("minis-$today")`（否则 worker 当天文件会被自己 size-prune）。设置页 `minis-` 前缀过滤天然匹配变体，零 i18n 改动。
+
+**验证链**：A：JVM 9/9（RunDir+Mailbox+Lifecycle+StreamException 闭包 + Log stub + json jar）→ 反向对照 1 红 → 分支 CI 35321068181 绿 → FF main → 远端分支 DELETE 204。B：JVM 8/8 → rebase 到 a3183aa1（rebase=换树，重跑）→ CI 35322248052 绿 → FF main = 1fb74fd0 → 远端仅剩 main。**注意：分支 push 不自动触发 CI，必须 gh-actions-dispatch**（本次忘了，等了才发现）。
+
+**坑（新）**：kotlinc 反引号函数名不能含 `..`（"strips the last .log segment" 报 illegal characters）。
+
+**待真机验证（用户装 release 新包后）**：
+1. ack 翻转：跑几轮 agent 会话后 `client ack seen` 应从 1/43 变成接近每 run 1 条；`client ack timeout` / `protocol_violation=run_dir_missing` / 心跳 ENOENT 应归零。
+2. 日志分流：`/var/minis/logs/` 应出现 `minis-<date>.modelservice.log`；主文件不再有 OpenAIProvider 行（全在 -modelservice 文件）；乱序/混血行消失（可用 awk 时间倒序检测验证=0）。
+3. worker 日志仍在设置页可见（`minis-` 前缀过滤匹配变体）。
 
 ---
 
