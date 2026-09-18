@@ -189,6 +189,12 @@ object AppLogger {
      */
     private fun writeLogcatLine(rawLine: String) {
         if (!enabled) return
+        // [T-worker-log-noise] The worker's ToolChain[Provider] debug tag
+        // emits one RAW SSE line per streaming chunk carrying the FULL
+        // payload — thousands per response. It never aids diagnosis (the
+        // parsed counters land in the [T321] SSE delta debug lines, which are
+        // muted at the category level), so drop it at the file boundary.
+        if (rawLine.contains("RAW SSE:")) return
         // logcat -v time format: "MM-DD HH:MM:SS.mmm L/Tag(pid): message"
         // Extract the tag to filter our own output.
         val slashIdx = rawLine.indexOf('/')
@@ -299,7 +305,16 @@ object AppLogger {
      * but `Log.d → liblog → LogcatTailer → file write` is more expensive
      * than the string build alone.
      */
-    private val mutedDebugCategories = setOf("ChatScrollFollow")
+    // [T-worker-log-capture] "OpenAIProvider" executes in the :modelservice
+    // worker, and its DEBUG diagnostics are per-SSE-delta counters
+    // ([T321] SSE delta: … / [T321] SSE responses type=…) — one line per
+    // streaming token, i.e. thousands per response once the worker's capture
+    // is on (see MinisApp's [T-worker-log-capture]). INFO/WARN/ERROR from the
+    // same category — [T321] → REQ url=…, ← RSP status=…, ← HTTP <code>
+    // error body: … — still flow, and those are the lines that diagnose a
+    // provider failure. Extend this list from real logs only, never
+    // speculatively.
+    private val mutedDebugCategories = setOf("ChatScrollFollow", "OpenAIProvider")
 
     fun debug(category: String, message: String) {
         if (category in mutedDebugCategories) return

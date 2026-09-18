@@ -210,6 +210,25 @@ class MinisApp : Application(), ImageLoaderFactory {
             // would silently ignore on ALL offloaded runs (chat streaming,
             // title-gen, compaction all go through this process).
             com.rikkaminis.app.data.AgentRuntimeLimitsPrefs.prime(this)
+            // [T-worker-log-capture] The worker is where every chat request
+            // actually executes, but until now its logs reached NEITHER sink:
+            // this early-return skipped AppLogger.init (logDir stayed null →
+            // every AppLogger.info in OpenAIProvider wrote nothing to the
+            // file), and the main process's LogcatTailer filters by
+            // --pid=<main> so the worker's android.util.Log lines never
+            // landed there either. The 2026-09-18 DeepSeek thinking-replay
+            // 400s left zero request/response traces for exactly this
+            // reason. init() here is light: logs dir + prefs read + prune +
+            // a tailer bound to the worker's own pid (the heavy subsystems
+            // this early-return exists to avoid are still skipped). The
+            // :toolservice branch below stays dormant until that process
+            // actually hosts requests.
+            // ponytail: worker + main both append to the same daily log file
+            // (O_APPEND, line-granular, separate writeQueues) | 天花板: a long
+            // line split across two writes can interleave with the other
+            // process's line | 升级触发: garbled/interleaved lines observed in
+            // the daily log
+            AppLogger.init(this)
             return
         }
 
