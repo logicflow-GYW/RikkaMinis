@@ -430,16 +430,13 @@ object ModelExecutionDispatcher {
         return safe
     }
 
-    /** True when THIS run dir's worker is provably done writing / reaped. */
-    private fun reapSafe(dir: File): Boolean {
-        // Worker's LAST durable marker — once present, it will self-reap.
-        if (ModelExecutionRunDir.terminalPresent(dir)) return true
-        // result committed by a worker that has stopped beating.
-        val result = File(dir, ModelExecutionMailbox.FILE_RESULT).exists()
-        val beatFile = File(dir, ModelExecutionRunDir.FILE_LIVENESS_BEAT)
-        val beatGoneOrStale = !beatFile.isFile || ModelExecutionRunDir.beatStale(dir)
-        return result && beatGoneOrStale
-    }
+    /** True when THIS run dir's worker is provably done writing / reaped.
+     *  Delegates to the shared [ModelExecutionRunDir.workerDrained] so the
+     *  streaming and non-streaming paths cannot drift apart again — the drift
+     *  between these two definitions is exactly what produced the
+     *  TF-G-ack-evidence bug (the streaming copy accepted client.ack and
+     *  bare result.json as "worker gone"; this one never did). */
+    private fun reapSafe(dir: File): Boolean = ModelExecutionRunDir.workerDrained(dir)
 
     /**
      * [T-stale-apikey-worker-cache] True when the worker for this run dir is

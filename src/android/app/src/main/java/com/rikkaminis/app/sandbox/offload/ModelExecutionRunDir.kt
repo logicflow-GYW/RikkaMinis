@@ -378,6 +378,33 @@ object ModelExecutionRunDir {
     fun clientAckPresent(dir: File): Boolean = File(dir, ModelExecutionMailbox.FILE_CLIENT_ACK).exists()
 
     /**
+     * [TF-G-ack-evidence] Worker-drained evidence: true when the CLIENT may
+     * safely delete this run dir. Every term is derived from WORKER-owned
+     * artifacts, never from our own handshake files:
+     *
+     *  - `terminal.json` — the worker's LAST durable write (healthy finish);
+     *  - `result.json` + a silent heartbeat — payload committed, then the
+     *    worker stopped beating (crash tolerance; the exact rule the
+     *    non-streaming Dispatcher has always used as `reapSafe`).
+     *
+     * `client.ack` is DELIBERATELY excluded. It is written BY THE CLIENT, so it
+     * can never testify about the worker; including it (as the streaming path
+     * did) made the client delete the run dir milliseconds after its own ack
+     * write — before the worker's 100ms ack poll could observe it. The worker
+     * then burned its full 15s ack timeout in the barrier and blew up writing
+     * terminal into the deleted dir. Measured on device 2026-09-18: 42/43 runs
+     * hit `client ack timeout` + `protocol_violation=run_dir_missing`, only
+     * 1/43 reported `client ack seen` — i.e. the 45s pinning window TF-G set
+     * out to remove was hit on essentially every request.
+     */
+    fun workerDrained(dir: File): Boolean {
+        if (terminalPresent(dir)) return true
+        val beatFile = File(dir, FILE_LIVENESS_BEAT)
+        val beatGoneOrStale = !beatFile.isFile || beatStale(dir)
+        return File(dir, ModelExecutionMailbox.FILE_RESULT).exists() && beatGoneOrStale
+    }
+
+    /**
      * TF-G P0-3: pure classification of WHY a worker appears dead, from the
      * per-run evidence the client holds. Pure so it is JVM-testable across the
      * full ready/pid/terminal/result/hadChunks matrix. The caller only invokes

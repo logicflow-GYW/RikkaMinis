@@ -422,11 +422,21 @@ object ChatStreamOffloadHandler {
     }
 
     /**
-     * [TF-J2] Bounded wait for this run's worker to stop beating (its liveness
-     * heartbeat file `liveness.beat` going stale). Returns true as soon as the
-     * beat is confirmed absent-or-stale — the worker has stopped, so the run
-     * dir is safe to delete. On a healthy finish the worker stops beating and
-     * writes terminal; on a crash the beat simply goes silent.
+     * [TF-J2] Bounded wait until this run's worker has DRAINED the run dir —
+     * see [ModelExecutionRunDir.workerDrained]. On a healthy finish the worker
+     * reads our ack, writes terminal and stops beating; on a crash the beat
+     * simply goes silent. Either way the decision rests on WORKER-owned
+     * evidence only.
+     *
+     * [TF-G-ack-evidence] This used to also accept `client.ack` — and, worse,
+     * bare `result.json` while the beat was still fresh — as "worker gone".
+     * Both fire the moment the client has finished consuming, which is BEFORE
+     * the worker has polled our ack: the dir was deleted under a live worker
+     * still sitting in its 15s ack barrier, which then tripped
+     * `protocol_violation=run_dir_missing` when writing terminal. The wait now
+     * matches the non-streaming path's rule, so the TF-G intent (worker reads
+     * the ack promptly and self-reaps instead of pinning the process for 45s)
+     * can actually happen.
      *
      * NOTE: the old /proc-based probeLiveness is unreliable here because /proc
      * is hidepid=invisible on this device (an app process can only see itself),
@@ -438,24 +448,10 @@ object ChatStreamOffloadHandler {
     private suspend fun awaitWorkerExit(dir: File, runId: String?, timeoutMs: Long): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            val beatFile = File(dir, ModelExecutionRunDir.FILE_LIVENESS_BEAT)
-            val gone = !beatFile.isFile ||
-                ModelExecutionRunDir.beatStale(dir) ||
-                ModelExecutionRunDir.clientAckPresent(dir)
-            // A terminal marker is the worker's LAST durable write; once present
-            // the worker is done writing and will self-reap. clientAckPresent is
-            // our own handshake confirming we consumed the output.
-            val done = ModelExecutionRunDir.terminalPresent(dir) ||
-                File(dir, ModelExecutionMailbox.FILE_RESULT).exists()
-            if (done || gone) return true
+            if (ModelExecutionRunDir.workerDrained(dir)) return true
             delay(WORKER_EXIT_POLL_MS)
         }
-        val beatFileFinal = File(dir, ModelExecutionRunDir.FILE_LIVENESS_BEAT)
-        return !beatFileFinal.isFile ||
-            ModelExecutionRunDir.beatStale(dir) ||
-            ModelExecutionRunDir.clientAckPresent(dir) ||
-            ModelExecutionRunDir.terminalPresent(dir) ||
-            File(dir, ModelExecutionMailbox.FILE_RESULT).exists()
+        return ModelExecutionRunDir.workerDrained(dir)
     }
 
     /**
