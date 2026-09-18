@@ -434,8 +434,16 @@ internal suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
                     val indent = l.length - t.length
                     if (t.isEmpty()) { i++; continue }
                     if (!t.matches(bulletListItemRegex) && indent <= baseIndent) break
-                    if (indent > baseIndent) {
-                        // Continuation or nested — append to last item
+                    if (indent > baseIndent && !t.matches(bulletListItemRegex)) {
+                        // Continuation (indented prose) — append to last item.
+                        // [fix/indented-bullet-continuation] An indented line that is
+                        // itself a bullet marker (`  - item`) is a REAL
+                        // new item, not a continuation: the old branch swallowed it
+                        // into the previous item's text, leaving the raw "- " marker
+                        // visible in the body. Same guard as ui/markdown/
+                        // MarkdownParser.kt (fix/audit-0917-b9), which also excludes
+                        // ONLY bullet markers (an indented numbered line stays a
+                        // continuation there too); keep the two parsers in sync.
                         if (items.isNotEmpty()) {
                             val last = items.last()
                             items[items.lastIndex] = last.copy(text = last.text + "\n" + t)
@@ -462,7 +470,11 @@ internal suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
                     val indent = l.length - t.length
                     if (t.isEmpty()) { i++; continue }
                     if (!t.matches(numberedListItemRegex) && indent <= baseIndent) break
-                    if (indent > baseIndent) {
+                    if (indent > baseIndent && !t.matches(numberedListItemRegex)) {
+                        // Same guard as the unordered-list branch above (see
+                        // fix/indented-bullet-continuation): an indented line that is
+                        // itself a numbered marker (`  2. item`) is a real new item,
+                        // not continuation text.
                         if (items.isNotEmpty()) {
                             val last = items.last()
                             items[items.lastIndex] = last.copy(text = last.text + "\n" + t)

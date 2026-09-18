@@ -58,6 +58,34 @@ class MarkdownBlockModelNumberedListTest {
         assertTrue(parse("2020 年之后情况不同。")[0] is MdBlock.Paragraph)
     }
 
+    // ── fix/indented-bullet-continuation ────────────────────────────────────
+    // An indented line that is itself a list marker is a REAL new item, not
+    // a continuation: the old branch swallowed it into the previous item's
+    // text, leaving the raw "- " marker visible in the body. Mirrors the
+    // guard in ui/markdown/MarkdownParser.kt (fix/audit-0917-b9).
+
+    @Test fun `indented bullet becomes a new item not continuation`() {
+        val blocks = parse("- 顶层\n  - 子项\n- 另一条")
+        assertEquals(1, blocks.size)
+        val list = blocks[0] as MdBlock.UnorderedList
+        assertEquals(listOf("顶层", "子项", "另一条"), list.items.map { it.text })
+    }
+
+    @Test fun `indented numbered line inside bullet list stays a continuation`() {
+        // Twin parity: MarkdownParser's guard also excludes ONLY bullet
+        // markers, so an indented numbered line inside a bullet list is a
+        // continuation there too.
+        val blocks = parse("- 顶层\n  2. 子项")
+        val list = blocks[0] as MdBlock.UnorderedList
+        assertEquals(listOf("顶层\n2. 子项"), list.items.map { it.text })
+    }
+
+    @Test fun `indented prose is still a continuation`() {
+        val blocks = parse("- 第一行\n  续行内容\n- 第二条")
+        val list = blocks[0] as MdBlock.UnorderedList
+        assertEquals(listOf("第一行\n续行内容", "第二条"), list.items.map { it.text })
+    }
+
     @Test fun `real ordered list keeps parsing`() {
         val blocks = parse("1. 第一项\n2. 第二项")
         assertEquals(1, blocks.size)
