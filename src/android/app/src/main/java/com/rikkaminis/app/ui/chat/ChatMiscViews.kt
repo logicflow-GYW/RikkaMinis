@@ -278,6 +278,18 @@ import com.rikkaminis.app.ui.components.MinisTextButton
 
 // ─── Bordered Markdown Table (iOS style: bordered cells with grid lines) ─────
 
+/**
+ * [fix/render-ui F-257] RUNTIME-DEAD while `AGGREGATE_MESSAGE_ITEMS` is true.
+ * Its only caller is [MarkdownBlockBody]'s legacy fragment path, which itself
+ * is reachable only from `FlatChatItem.AssistantMarkdownBlock` rows — a row
+ * type no production code constructs any more. Kept as part of the Stage-E
+ * legacy fallback (`scripts/scan/legacy_pipeline_guard.py` guards the
+ * boundary); the live table renderer lives in the aggregate pipeline.
+ *
+ * Note this file's `parseInlineMarkdown` (below) is a *third* inline parser
+ * with 3 branches, vs 11 in `StreamingMarkdownText`'s — it exists only to
+ * serve this table.
+ */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun BorderedMarkdownTable(
@@ -467,6 +479,11 @@ private fun BorderedMarkdownTable(
                             val androidBitmap = imageBitmap.asAndroidBitmap()
                             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                                 val shareDir = java.io.File(context.cacheDir, "share").apply { mkdirs() }
+                                // [fix/render-ui F-273] Nothing used to delete the
+                                // table_*.png blobs this path writes. pruneShareDir is
+                                // the only name-agnostic pruner for cache/share/ (24h
+                                // TTL), so run it before adding another one.
+                                com.rikkaminis.app.ui.components.pruneShareDir(shareDir)
                                 val outFile = java.io.File(shareDir, "table_${System.currentTimeMillis()}.png")
                                 outFile.outputStream().use {
                                     androidBitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)

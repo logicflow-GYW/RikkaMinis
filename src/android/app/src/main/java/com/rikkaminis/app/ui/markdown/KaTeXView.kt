@@ -1,6 +1,7 @@
 package com.rikkaminis.app.ui.markdown
 
 import com.rikkaminis.app.R
+import com.rikkaminis.app.ui.theme.ChatColors
 import androidx.compose.ui.res.stringResource
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
@@ -10,7 +11,6 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -69,8 +69,8 @@ object KaTeXRendererCache {
             (value.bitmap.byteCount / 1024).coerceAtLeast(1)
     }
 
-    fun cacheKey(latex: String, displayMode: Boolean): String =
-        (if (displayMode) "D:" else "I:") + latex
+    fun cacheKey(latex: String, displayMode: Boolean, isDark: Boolean = false): String =
+        (if (displayMode) "D:" else "I:") + (if (isDark) "k:" else "l:") + latex
 }
 
 /**
@@ -104,10 +104,17 @@ fun KaTeXRenderView(
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
-    val isDark = isSystemInDarkTheme()
+    // [fix/render-ui F-256] ChatColors.isDark follows the in-app theme override
+    // (Settings -> theme_mode); isSystemInDarkTheme() only tracks the system
+    // setting, so a forced-light app on a dark system rendered formulas with
+    // #fff glyphs on the light body background (invisible).
+    val isDark = ChatColors.isDark
     val fontSize = 16f
-    val cacheKey = remember(latex, displayMode) {
-        KaTeXRendererCache.cacheKey(latex, displayMode)
+    // [fix/render-ui F-256] The key must include isDark: without it the cache
+    // serves a bitmap rendered for the *other* theme after a theme flip.
+    // KatexWebViewPool.cacheKey already keys on isDark — same reasoning.
+    val cacheKey = remember(latex, displayMode, isDark) {
+        KaTeXRendererCache.cacheKey(latex, displayMode, isDark)
     }
 
     // Check cache first

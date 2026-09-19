@@ -3,6 +3,8 @@ package com.rikkaminis.app.ui.sandbox
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.rikkaminis.app.R
+import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.sandbox.RootfsInstallState
 import com.rikkaminis.app.sandbox.RootfsManager
 import kotlinx.coroutines.Job
@@ -35,7 +37,7 @@ class RootfsManagementViewModel : ViewModel() {
      * text into [_uiState]. Cancelled on completion so we don't leak a job
      * across multiple install() calls.
      */
-    private fun observeInstallProgress(manager: RootfsManager) {
+    private fun observeInstallProgress(manager: RootfsManager, ctx: android.content.Context) {
         progressJob?.cancel()
         progressJob = viewModelScope.launch {
             manager.installState.collect { state ->
@@ -43,31 +45,39 @@ class RootfsManagementViewModel : ViewModel() {
                     is RootfsInstallState.Idle -> Unit
                     is RootfsInstallState.Preparing ->
                         _uiState.value = _uiState.value.copy(
-                            statusMessage = "Preparing rootfs…",
+                            statusMessage = ctx.getString(R.string.rootfs_msg_preparing),
                             installProgress = 0f,
                         )
                     is RootfsInstallState.Extracting ->
                         _uiState.value = _uiState.value.copy(
-                            statusMessage = "Extracting rootfs… ${(state.progress * 100).toInt()}%",
+                            statusMessage = ctx.getString(R.string.rootfs_msg_extracting, (state.progress * 100).toInt()),
                             installProgress = state.progress,
                         )
                     is RootfsInstallState.Finalizing ->
                         _uiState.value = _uiState.value.copy(
-                            statusMessage = "Finalizing…",
+                            statusMessage = ctx.getString(R.string.rootfs_msg_finalizing),
                             installProgress = 1f,
                         )
                     is RootfsInstallState.Installed,
                     is RootfsInstallState.Failed -> {
+                        // [fix/render-ui F-277] No `progressJob?.cancel()` here.
+                        // Cancelling the job that is currently running this
+                        // collector from inside `collect {}` is self-cancellation:
+                        // it made "who re-subscribes on the next install()"
+                        // depend on how far this emission got before the
+                        // cancellation landed. The terminal state is reached
+                        // exactly once per install, so the job simply ends on
+                        // its own — and `observeInstallProgress` cancels any
+                        // previous job before starting a new one.
                         _uiState.value = _uiState.value.copy(installProgress = null)
-                        progressJob?.cancel()
                     }
                 }
             }
         }
     }
 
-    fun refresh(context: Context) {
-        val manager = RootfsManager.getInstance(context)
+    fun refresh(ctx: Context) {
+        val manager = RootfsManager.getInstance(ctx)
 
         _uiState.value = _uiState.value.copy(
             isInstalled = manager.isInstalled,
@@ -84,47 +94,50 @@ class RootfsManagementViewModel : ViewModel() {
         }
     }
 
-    fun install(context: Context) {
+    fun install(ctx: Context) {
         _uiState.value = _uiState.value.copy(
             isProcessing = true,
-            statusMessage = "Installing rootfs...",
+            statusMessage = ctx.getString(R.string.rootfs_msg_installing),
             resultMessage = null,
             installProgress = 0f,
         )
 
-        val manager = RootfsManager.getInstance(context)
-        observeInstallProgress(manager)
+        val manager = RootfsManager.getInstance(ctx)
+        observeInstallProgress(manager, ctx)
         viewModelScope.launch {
             try {
                 manager.installIfNeeded()
                 _uiState.value = _uiState.value.copy(
                     isProcessing = false,
                     lastOperationSuccess = true,
-                    resultMessage = "Rootfs installed successfully",
+                    resultMessage = ctx.getString(R.string.rootfs_msg_installed),
                     installProgress = null,
                 )
-                refresh(context)
+                refresh(ctx)
             } catch (e: Exception) {
+                // [fix/render-ui F-277] The raw exception used to be rendered as
+                // the user-facing result line. It now goes to the log only.
+                AppLogger.error("RootfsManagement", "install failed: ${e.message}")
                 _uiState.value = _uiState.value.copy(
                     isProcessing = false,
                     lastOperationSuccess = false,
-                    resultMessage = "Installation failed: ${e.message}",
+                    resultMessage = ctx.getString(R.string.rootfs_msg_install_failed),
                     installProgress = null,
                 )
             }
         }
     }
 
-    fun resetRootfs(context: Context) {
+    fun resetRootfs(ctx: Context) {
         _uiState.value = _uiState.value.copy(
             isProcessing = true,
-            statusMessage = "Resetting rootfs...",
+            statusMessage = ctx.getString(R.string.rootfs_msg_resetting),
             resultMessage = null,
             installProgress = 0f,
         )
 
-        val manager = RootfsManager.getInstance(context)
-        observeInstallProgress(manager)
+        val manager = RootfsManager.getInstance(ctx)
+        observeInstallProgress(manager, ctx)
         viewModelScope.launch {
             try {
                 manager.reset()
@@ -132,15 +145,16 @@ class RootfsManagementViewModel : ViewModel() {
                 _uiState.value = _uiState.value.copy(
                     isProcessing = false,
                     lastOperationSuccess = true,
-                    resultMessage = "Rootfs reset complete",
+                    resultMessage = ctx.getString(R.string.rootfs_msg_reset_complete),
                     installProgress = null,
                 )
-                refresh(context)
+                refresh(ctx)
             } catch (e: Exception) {
+                AppLogger.error("RootfsManagement", "reset failed: ${e.message}")
                 _uiState.value = _uiState.value.copy(
                     isProcessing = false,
                     lastOperationSuccess = false,
-                    resultMessage = "Reset failed: ${e.message}",
+                    resultMessage = ctx.getString(R.string.rootfs_msg_reset_failed),
                     installProgress = null,
                 )
             }
@@ -154,20 +168,20 @@ class RootfsManagementViewModel : ViewModel() {
      * reset when apk itself is unusable. The terminal falls back to /bin/sh
      * independently if repair still leaves bash broken.
      */
-    fun repairRootfs(context: Context) {
-        val manager = RootfsManager.getInstance(context)
+    fun repairRootfs(ctx: Context) {
+        val manager = RootfsManager.getInstance(ctx)
         val initial = manager.verifyIntegrity()
         if (initial.healthy) {
             _uiState.value = _uiState.value.copy(
                 lastOperationSuccess = true,
-                resultMessage = "Rootfs is healthy — no repair needed",
+                resultMessage = ctx.getString(R.string.rootfs_msg_healthy),
             )
             return
         }
 
         _uiState.value = _uiState.value.copy(
             isProcessing = true,
-            statusMessage = "Repairing rootfs…",
+            statusMessage = ctx.getString(R.string.rootfs_msg_repairing),
             resultMessage = null,
             installProgress = 0f,
         )
@@ -179,18 +193,19 @@ class RootfsManagementViewModel : ViewModel() {
                     isProcessing = false,
                     lastOperationSuccess = repaired,
                     resultMessage = if (repaired) {
-                        "Rootfs repaired — missing files restored"
+                        ctx.getString(R.string.rootfs_msg_repaired)
                     } else {
-                        "Repair failed — still missing: ${after.missing.joinToString(", ")}"
+                        ctx.getString(R.string.rootfs_msg_repair_missing, after.missing.joinToString(", "))
                     },
                     installProgress = null,
                 )
-                refresh(context)
+                refresh(ctx)
             } catch (e: Exception) {
+                AppLogger.error("RootfsManagement", "repair failed: ${e.message}")
                 _uiState.value = _uiState.value.copy(
                     isProcessing = false,
                     lastOperationSuccess = false,
-                    resultMessage = "Repair failed: ${e.message}",
+                    resultMessage = ctx.getString(R.string.rootfs_msg_repair_failed),
                     installProgress = null,
                 )
             }

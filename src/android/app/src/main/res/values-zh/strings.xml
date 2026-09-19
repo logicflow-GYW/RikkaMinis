@@ -1752,4 +1752,24 @@
     <string name="runtime_limits_shell_timeout">终端：默认超时（秒）</string>
     <string name="runtime_limits_shell_timeout_desc">调用未自带超时参数时，shell 命令的默认超时（显式传参的调用仍用自带值，上限 900 秒）。默认 900。</string>
     <string name="runtime_limits_media_footer">调高图片上限可让更高质量图片进入模型，代价是请求体积变大。</string>
+
+    <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that
+         were previously hardcoded in ViewModels / handlers. -->
+    <string name="rootfs_msg_preparing">正在准备 rootfs…</string>
+    <string name="rootfs_msg_extracting">正在解压 rootfs…%1$d%%</string>
+    <string name="rootfs_msg_finalizing">正在完成…</string>
+    <string name="rootfs_msg_installing">正在安装 rootfs…</string>
+    <string name="rootfs_msg_installed">rootfs 安装成功</string>
+    <string name="rootfs_msg_install_failed">安装失败，详情见日志。</string>
+    <string name="rootfs_msg_resetting">正在重置 rootfs…</string>
+    <string name="rootfs_msg_reset_complete">rootfs 重置完成</string>
+    <string name="rootfs_msg_reset_failed">重置失败，详情见日志。</string>
+    <string name="rootfs_msg_healthy">rootfs 状态正常，无需修复</string>
+    <string name="rootfs_msg_repairing">正在修复 rootfs…</string>
+    <string name="rootfs_msg_repaired">rootfs 已修复，缺失文件已恢复</string>
+    <string name="rootfs_msg_repair_failed">修复失败，详情见日志。</string>
+    <string name="rootfs_msg_repair_missing">修复失败，仍缺失：%1$s</string>
+    <string name="browser_no_app_for_link">没有可打开此链接的应用。</string>
+    <string name="browser_could_not_open_link">无法打开此链接。</string>
+    <string name="filepreview_pdf_render_failed_fallback">PDF 渲染失败</string>
 </resources>
