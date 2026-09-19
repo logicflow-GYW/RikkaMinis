@@ -99,6 +99,8 @@
     <string name="settings_skills_subtitle">AI エージェントのスキルと指示を管理</string>
     <string name="settings_memory">記憶</string>
     <string name="settings_memory_subtitle">セッションをまたいで保持される永続的な知識</string>
+    <string name="settings_terminal">ターミナル</string>
+    <string name="settings_terminal_subtitle">サンドボックスシェルを開く</string>
     <string name="settings_env_vars">環境変数</string>
     <string name="settings_env_vars_subtitle">サンドボックスに注入される変数</string>
 
@@ -1510,6 +1512,8 @@
     <string name="provider_detail_custom_user_agent">カスタムUser-Agent</string>
     <string name="provider_detail_custom_user_agent_placeholder">デフォルトを使用する場合は空白のまま</string>
     <string name="add_provider_endpoint_anthropic_hint">公式のAnthropicエンドポイントをそのまま使用します。サードパーティのAnthropic互換サービス（例：Mimo）の場合、ベースURLに「\"/anthropic\"」などのパス接尾辞が必要な場合があります。プロバイダーのドキュメントを確認してください。URLはそのまま使用され、「\"/v1/messages\"」が追加されます。</string>
+    <string name="add_provider_endpoint_hint">空欄の場合は既定のエンドポイントを使用します。「/v1」は自動的に付加されるため、ベースホストのみを入力してください。</string>
+    <string name="add_provider_endpoint_gemini_hint">空欄の場合は Google の既定のエンドポイントを使用します。バージョンパスを含む完全なベース URL を入力してください。</string>
     <string name="modeldetail_video_output">動画出力</string>
     <string name="quicktest_title">クイックテスト</string>
     <string name="quicktest_button">クイックテスト</string>

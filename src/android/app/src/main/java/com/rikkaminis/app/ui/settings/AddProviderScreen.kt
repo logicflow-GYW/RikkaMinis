@@ -360,12 +360,16 @@ private fun ColumnScope.ApiKeyConfigSection(
         // on the Anthropic endpoint footer so this can be discovered
         // without scraping issue threads. Default Anthropic + other
         // provider types keep their original footer copy.
+        //
+        // [FIX-6 / F-244] All three branches go through stringResource — the
+        // gemini / else branches used to be hard-coded English, which stayed
+        // English in all 7 translated locales.
         val baseUrlFooter = if (providerType == ProviderType.gemini) {
-            "Leave empty to use the default Google endpoint. Enter the full base URL including version path."
+            stringResource(R.string.add_provider_endpoint_gemini_hint)
         } else if (providerType == ProviderType.anthropic) {
             stringResource(R.string.add_provider_endpoint_anthropic_hint)
         } else {
-            "Leave empty to use the default endpoint. \"/v1\" is appended automatically — enter the base host only."
+            stringResource(R.string.add_provider_endpoint_hint)
         }
         SettingsSection(
             header = stringResource(R.string.add_provider_endpoint),
@@ -388,9 +392,12 @@ private fun ColumnScope.ApiKeyConfigSection(
         SettingsSection(
             header = stringResource(R.string.provider_detail_api_format),
             footer = if (useResponsesAPI) {
-                "Uses /v1/responses endpoint format. Required for some Responses-API-only services."
+                // [FIX-6 / F-244] Was hard-coded English; the identical copy
+                // already existed as a resource (used by
+                // ProviderConnectionScreen) so no new string was needed.
+                stringResource(R.string.provider_detail_api_format_responses_footer)
             } else {
-                "Standard /v1/chat/completions format. Compatible with most OpenAI-compatible services."
+                stringResource(R.string.provider_detail_api_format_chat_footer)
             },
         ) {
             SettingsCardBlock {

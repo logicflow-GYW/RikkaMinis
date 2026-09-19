@@ -135,6 +135,8 @@
     <string name="soul_restore_confirm_body">当前修改将被覆盖为默认人格文件。该模板可作为出发点，随时可再次修改。</string>
     <string name="soul_save_error_title">保存失败</string>
     <string name="soul_injection_error">这看起来像是对模型的指令而不是人格引导。SOUL.md 中不允许出现「忽略之前的指令」之类的内容——请只写真正的性格、语气和行为描述。</string>
+    <string name="settings_terminal">终端</string>
+    <string name="settings_terminal_subtitle">打开沙箱 Shell</string>
     <string name="settings_env_vars">环境变量</string>
     <string name="settings_env_vars_subtitle">注入到沙箱内的变量</string>
 
@@ -1533,6 +1535,8 @@
     <string name="filebrowser_hide_hidden">隐藏隐藏文件</string>
     <string name="filebrowser_sort_by">排序方式</string>
     <string name="add_provider_endpoint_anthropic_hint">按原样使用官方 Anthropic 端点。对于第三方 Anthropic 兼容服务（如 Mimo），基础 URL 可能需要路径后缀，如 "/anthropic" — 请查阅提供商文档。URL 会被原样使用并追加 "/v1/messages"。</string>
+    <string name="add_provider_endpoint_hint">留空则使用默认端点。会自动追加 “/v1” —— 只需填写基础主机地址。</string>
+    <string name="add_provider_endpoint_gemini_hint">留空则使用 Google 默认端点。请填写包含版本路径的完整基础 URL。</string>
     <string name="modeldetail_video_output">视频输出</string>
     <string name="model_group_no_usable_models_badge">无可用模型</string>
     <string name="voice_system_recognition_online">系统识别（在线）</string>

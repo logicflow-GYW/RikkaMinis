@@ -99,6 +99,8 @@
     <string name="settings_skills_subtitle">AI 에이전트의 스킬과 지침 관리</string>
     <string name="settings_memory">메모리</string>
     <string name="settings_memory_subtitle">세션 간에 유지되는 영구적 지식</string>
+    <string name="settings_terminal">터미널</string>
+    <string name="settings_terminal_subtitle">샌드박스 셸 열기</string>
     <string name="settings_env_vars">환경 변수</string>
     <string name="settings_env_vars_subtitle">샌드박스에 주입되는 변수</string>
 
@@ -1502,6 +1504,8 @@
     <string name="provider_detail_custom_user_agent">사용자 지정 User-Agent</string>
     <string name="provider_detail_custom_user_agent_placeholder">기본값을 사용하려면 비워 두세요</string>
     <string name="add_provider_endpoint_anthropic_hint">공식 Anthropic 엔드포인트를 그대로 사용하세요. 타사 Anthropic 호환 서비스(예: Mimo)의 경우 기본 URL에 \"/anthropic\" 같은 경로 접미사가 필요할 수 있습니다. 제공자의 문서를 확인하세요. URL은 \"/v1/messages\"가 추가된 상태로 그대로 사용됩니다.</string>
+    <string name="add_provider_endpoint_hint">비워 두면 기본 엔드포인트를 사용합니다. “/v1”이 자동으로 추가되므로 베이스 호스트만 입력하세요.</string>
+    <string name="add_provider_endpoint_gemini_hint">비워 두면 Google 기본 엔드포인트를 사용합니다. 버전 경로를 포함한 전체 베이스 URL을 입력하세요.</string>
     <string name="modeldetail_video_output">비디오 출력</string>
     <string name="quicktest_title">빠른 테스트</string>
     <string name="quicktest_button">빠른 테스트</string>

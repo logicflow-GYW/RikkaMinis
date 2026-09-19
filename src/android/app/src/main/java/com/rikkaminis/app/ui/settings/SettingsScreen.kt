@@ -24,6 +24,7 @@ import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.Backup
 import androidx.compose.material.icons.outlined.BatteryFull
+import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Extension
@@ -203,8 +204,21 @@ fun SettingsScreen(
                     subtitle = stringResource(R.string.settings_mcp_subtitle),
                     onClick = onMcpClick,
                 )
+                // [FIX-6 / F-245] Terminal row restored. `onTerminalClick` was
+                // declared and passed by AppNavigation (→ Routes.terminal())
+                // but never rendered, so the Settings entry had silently
+                // vanished while the navigation layer kept wiring it. The row
+                // uses its own icon (was reusing Icons.Outlined.Terminal for
+                // Environment Variables, which masked the missing entry).
                 SettingsItem(
                     icon = Icons.Outlined.Terminal,
+                    iconColor = Color(0xFF8E8E93),
+                    title = stringResource(R.string.settings_terminal),
+                    subtitle = stringResource(R.string.settings_terminal_subtitle),
+                    onClick = onTerminalClick,
+                )
+                SettingsItem(
+                    icon = Icons.Outlined.Code,
                     iconColor = ChatColors.success,
                     title = stringResource(R.string.settings_env_vars),
                     subtitle = stringResource(R.string.settings_env_vars_subtitle),

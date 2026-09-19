@@ -397,14 +397,8 @@ private fun levelColor(level: OffloadPermissionManager.PermissionLevel): Color =
     OffloadPermissionManager.PermissionLevel.NOT_ALLOWED -> MaterialTheme.colorScheme.error
 }
 
-private fun isA11yServiceEnabled(context: Context): Boolean {
-    val expected = "${context.packageName}/${MinisAccessibilityService::class.java.name}"
-    val enabled = Settings.Secure.getString(
-        context.contentResolver,
-        Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
-    ) ?: return false
-    return enabled.split(':').any { it.equals(expected, ignoreCase = true) }
-}
+private fun isA11yServiceEnabled(context: Context): Boolean =
+    com.rikkaminis.app.accessibility.A11yState.isServiceEnabled(context)
 
 private fun openAccessibilitySettings(context: Context) {
     try {

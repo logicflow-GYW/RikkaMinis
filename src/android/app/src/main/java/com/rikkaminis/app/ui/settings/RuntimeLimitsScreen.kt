@@ -1,5 +1,7 @@
 package com.rikkaminis.app.ui.settings
 
+import android.content.Context
+import android.content.SharedPreferences
 import com.rikkaminis.app.R
 
 import androidx.compose.foundation.background
@@ -16,6 +18,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -113,6 +116,75 @@ fun RuntimeLimitsScreen(onBack: () -> Unit) {
     var browserScreenshotQuality by remember { mutableStateOf(AgentRuntimeLimitsPrefs.browserScreenshotQuality()) }
     var shellOutputKb by remember { mutableStateOf(AgentRuntimeLimitsPrefs.shellOutputKb()) }
     var shellTimeoutSec by remember { mutableStateOf(AgentRuntimeLimitsPrefs.shellTimeoutSec()) }
+
+    // [FIX-6 / F-241] Re-read every snapshot when the backing prefs change
+    // OUTSIDE this screen — `minis-config set runtime.*` (ConfigBuiltins
+    // registers all of these), a backup-restore, or the agent. Without this
+    // the `remember{}` snapshot is stale forever (see the identical rationale
+    // in AppearanceScreen's [T-backup-import-refresh] listener).
+    //
+    // This screen is the one where staleness is DATA-DESTRUCTIVE rather than
+    // cosmetic: Save writes back all ~34 knobs in one shot, so the sequence
+    // "open page (old values) → change one slider → Save" silently rolls every
+    // other field back to the values captured at open time — and
+    // AgentRuntimeLimitsPrefs' write path refreshes its cache, so the rollback
+    // takes effect at runtime immediately.
+    //
+    // Deliberately NOT a shared abstraction: the three other screens that need
+    // the same treatment each read a different prefs file with a different
+    // shape (see FIX-6 REPORT.md), and a generic helper would have to own all
+    // of their key lists to be worth its weight.
+    DisposableEffect(context) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+            subagentEnabled = SubagentPrefs.isEnabled(context)
+            maxSessions = ConcurrencyPrefs.maxConcurrentSessions()
+            maxTurns = AgentRuntimeLimitsPrefs.maxTurns()
+            maxProviderAttempts = AgentRuntimeLimitsPrefs.maxProviderAttempts()
+            maxToolCalls = AgentRuntimeLimitsPrefs.maxToolCalls()
+            maxShellCommands = AgentRuntimeLimitsPrefs.maxShellCommands()
+            maxCompactionCalls = AgentRuntimeLimitsPrefs.maxCompactionCalls()
+            maxConcurrentTools = AgentRuntimeLimitsPrefs.maxConcurrentTools()
+            runDeadlineMin = AgentRuntimeLimitsPrefs.runDeadlineMinutes()
+            lengthWallContinues = AgentRuntimeLimitsPrefs.lengthWallContinues()
+            eofStubContinues = AgentRuntimeLimitsPrefs.eofStubContinues()
+            deterministicEmptyLimit = AgentRuntimeLimitsPrefs.deterministicEmptyLimit()
+            transientRetries = AgentRuntimeLimitsPrefs.transientRetries()
+            verifyNudges = AgentRuntimeLimitsPrefs.verifyNudges()
+            generationTimeoutMin = AgentRuntimeLimitsPrefs.generationTimeoutMinutes()
+            firstChunkDirectSec = AgentRuntimeLimitsPrefs.firstChunkDirectSec()
+            firstChunkProxySec = AgentRuntimeLimitsPrefs.firstChunkProxySec()
+            providerSlots = AgentRuntimeLimitsPrefs.providerSlots()
+            queueAdmission = AgentRuntimeLimitsPrefs.queueAdmission()
+            autoCompactMinTailTokens = AgentRuntimeLimitsPrefs.autoCompactMinTailTokens()
+            autoCompactMinIntervalMin = AgentRuntimeLimitsPrefs.autoCompactMinIntervalMin()
+            memoryInjectLines = AgentRuntimeLimitsPrefs.memoryInjectLines()
+            memoryRollupInjectKb = AgentRuntimeLimitsPrefs.memoryRollupInjectKb()
+            memorySearchLines = AgentRuntimeLimitsPrefs.memorySearchLines()
+            memoryLookbackDays = AgentRuntimeLimitsPrefs.memoryLookbackDays()
+            imageMaxPerImageMb = AgentRuntimeLimitsPrefs.imageMaxPerImageMb()
+            imageMaxTotalMb = AgentRuntimeLimitsPrefs.imageMaxTotalMb()
+            imageMaxRequestMb = AgentRuntimeLimitsPrefs.imageMaxRequestMb()
+            imageMaxEdgePx = AgentRuntimeLimitsPrefs.imageMaxEdgePx()
+            imageJpegQuality = AgentRuntimeLimitsPrefs.imageJpegQuality()
+            browserNavTimeoutSec = AgentRuntimeLimitsPrefs.browserNavTimeoutSec()
+            browserDomStableSec = AgentRuntimeLimitsPrefs.browserDomStableSec()
+            browserScreenshotQuality = AgentRuntimeLimitsPrefs.browserScreenshotQuality()
+            shellOutputKb = AgentRuntimeLimitsPrefs.shellOutputKb()
+            shellTimeoutSec = AgentRuntimeLimitsPrefs.shellTimeoutSec()
+        }
+        val app = context.applicationContext
+        val limitsPrefs = app.getSharedPreferences(AgentRuntimeLimitsPrefs.PREFS, Context.MODE_PRIVATE)
+        val concurrencyPrefs = app.getSharedPreferences(ConcurrencyPrefs.PREFS, Context.MODE_PRIVATE)
+        val subagentPrefs = app.getSharedPreferences(SubagentPrefs.PREFS, Context.MODE_PRIVATE)
+        limitsPrefs.registerOnSharedPreferenceChangeListener(listener)
+        concurrencyPrefs.registerOnSharedPreferenceChangeListener(listener)
+        subagentPrefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose {
+            limitsPrefs.unregisterOnSharedPreferenceChangeListener(listener)
+            concurrencyPrefs.unregisterOnSharedPreferenceChangeListener(listener)
+            subagentPrefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
+    }
 
     SettingsScaffold(
         title = stringResource(R.string.runtime_limits_title),

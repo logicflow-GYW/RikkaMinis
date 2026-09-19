@@ -1005,26 +1005,39 @@ internal object ConfigBuiltins {
     // -- Background --
 
     private fun registerBackground(r: ConfigRegistry, context: Context) {
-        val prefs = context.getSharedPreferences("background_settings", Context.MODE_PRIVATE)
-        r.register(
-            PrefsBoolField(
-                path = "background.enhanced",
-                displayName = "Enhanced background execution",
-                description = "Keep agent tasks running when the app is backgrounded.",
-                prefs = prefs,
-                key = "enhanced_background_execution",
-                defaultValue = false,
-                risk = ConfigRisk.SENSITIVE,
-            )
+        // [FIX-6 / F-238 + F-240] Keys come from BackgroundSettingsRepository —
+        // the single source of truth for this prefs file. The registry used to
+        // re-type the key strings here and they had drifted: it wrote
+        // `background_notifications_enabled` / `enhanced_background_execution`
+        // while every reader in the app used `taskNotificationsEnabled` (and no
+        // reader at all used the second one), so `minis-config set
+        // background.notifications false` was silently a no-op and the
+        // completion notification kept firing.
+        //
+        // [T-android-config-feature-unavailable] `background.enhanced`
+        // ("Enhanced background execution" / "Keep agent tasks running when the
+        // app is backgrounded") was removed 2026-09-20 — Android has no such
+        // feature: nothing in the app reads that key and AgentForegroundService's
+        // lifetime is driven by SessionActivityTracker, not by a pref. The
+        // registration was a leftover mirror of iOS's screen name
+        // (`EnhancedBackgroundSettingsView`), so it only served to let
+        // minis-config / a backup-restore write a key that does nothing.
+        // Tombstone left deliberately (same pattern as the Live Updates note
+        // below) so the field isn't re-added by a future iOS-mirroring pass.
+        val prefs = context.getSharedPreferences(
+            com.rikkaminis.app.data.repository.BackgroundSettingsRepository.PREFS_NAME,
+            Context.MODE_PRIVATE,
         )
         r.register(
             PrefsBoolField(
                 path = "background.notifications",
                 displayName = "Background notifications",
-                description = "Post a system notification when long-running tasks complete.",
+                description = "Post a system notification when long-running tasks complete. Same switch as Settings → Background → Task Notifications.",
                 prefs = prefs,
-                key = "background_notifications_enabled",
-                defaultValue = true,
+                key = com.rikkaminis.app.data.repository.BackgroundSettingsRepository
+                    .KEY_TASK_NOTIFICATIONS,
+                defaultValue = com.rikkaminis.app.data.repository.BackgroundSettingsRepository
+                    .DEFAULT_TASK_NOTIFICATIONS,
             )
         )
         // [T-android-config-feature-unavailable] Live Updates / "dynamic

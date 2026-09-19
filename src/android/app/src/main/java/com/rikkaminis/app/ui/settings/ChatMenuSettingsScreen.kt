@@ -23,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
@@ -106,6 +107,24 @@ fun ChatMenuSettingsScreen(
     var dragOffset by remember { mutableFloatStateOf(0f) }
     // Tick to trigger Switch state re-read on external prefs changes
     var prefsTick by remember { mutableStateOf(0) }
+
+    // [FIX-6 / F-241] Bump the tick when `appearance_prefs` is written OUTSIDE
+    // this screen — `minis-config set appearance.topBar.inputHistory …` /
+    // `appearance.composer.modelPickerButton …` (both registered in
+    // ConfigBuiltins) or a backup-restore. `prefsTick` already exists as the
+    // recomposition trigger for the in-screen switches; without a listener it
+    // never moved for external writes, so the switches kept rendering the
+    // values read at first composition.
+    DisposableEffect(context) {
+        val prefs = context.applicationContext
+            .getSharedPreferences(ChatMenuPrefs.PREFS, android.content.Context.MODE_PRIVATE)
+        val listener =
+            android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+                if (key != null && key.startsWith("chatMenu.")) prefsTick++
+            }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
 
     fun commitMenuOrder(newOrder: List<String>) {
         menuOrder = newOrder

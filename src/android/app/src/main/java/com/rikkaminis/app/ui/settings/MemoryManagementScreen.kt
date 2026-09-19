@@ -36,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,6 +53,15 @@ import com.rikkaminis.app.data.repository.MemoryRepository
 import com.rikkaminis.app.ui.components.MemoryFileEditorContent
 import java.util.Date
 import kotlinx.coroutines.launch
+
+/**
+ * [FIX-6 / F-224] Reserved file name that lives in the memory directory but is
+ * NOT a user-manageable daily log. Mirrors the filter in
+ * `MemoryRepository.listAllFiles()` (the data-layer owner of the same rule) —
+ * this copy is the UI-side guard so a future listing change can't silently
+ * re-arm the delete button on the user's persona file.
+ */
+private const val SOUL_FILE_NAME = "SOUL.md"
 
 /**
  * Settings-level memory file management.
@@ -82,6 +92,30 @@ fun MemoryManagementScreen(
     // and updates the local state mirror.
     var globalMemoryOn by remember {
         mutableStateOf(com.rikkaminis.app.data.MemoryGlobalPrefs.isGlobalEnabled(context))
+    }
+
+    // [FIX-6 / F-241] Re-read the snapshot when `memory.global.enabled` is
+    // written OUTSIDE this screen — `minis-config set memory.enabled …`
+    // (ConfigBuiltins registers the same prefs+key) or a backup-restore.
+    // Without it the Switch keeps rendering the value captured at open time.
+    DisposableEffect(context) {
+        // Literals rather than MemoryGlobalPrefs.PREFS / .KEY_GLOBAL_ENABLED
+        // because both are private and that file is outside this batch's
+        // ownership (see FIX-6 REPORT.md — flagging it as the single-source
+        // follow-up). ConfigBuiltins already spells the same pair literally in
+        // its registerMemory(), so this matches the existing convention.
+        val prefs = context.applicationContext.getSharedPreferences(
+            "minis_memory_prefs",
+            android.content.Context.MODE_PRIVATE,
+        )
+        val listener =
+            android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+                if (key == "memory.global.enabled") {
+                    globalMemoryOn = com.rikkaminis.app.data.MemoryGlobalPrefs.isGlobalEnabled(context)
+                }
+            }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
 
     LaunchedEffect(Unit) {
@@ -138,7 +172,18 @@ fun MemoryManagementScreen(
                     MemoryFileRow(
                         file = file,
                         onClick = { onFileClick(file.name, file.isGlobal) },
-                        onDelete = if (!file.isGlobal) { { deleteFileName = file.name } } else null,
+                        // [FIX-6 / F-224] SOUL.md lives in this same directory
+                        // (SoulStore.fileLocation) but is NOT a daily log: it
+                        // holds the user's persona, and deleting it makes
+                        // SoulStore.ensureExists re-seed DEFAULT_CONTENT on the
+                        // next launch — a silent reset with no undo. The
+                        // repository now excludes it from listAllFiles() too;
+                        // this is the belt-and-braces guard on the UI side.
+                        onDelete = if (!file.isGlobal && file.name != SOUL_FILE_NAME) {
+                            { deleteFileName = file.name }
+                        } else {
+                            null
+                        },
                     )
                     if (index < visibleFiles.size - 1) {
                         HorizontalDivider(

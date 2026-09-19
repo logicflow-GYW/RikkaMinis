@@ -239,6 +239,8 @@
     <string name="soul_restore_confirm_body">Your current changes will be overwritten with the default personality file. The original is provided as a starting point and can be re-edited at any time.</string>
     <string name="soul_save_error_title">Couldn\'t save</string>
     <string name="soul_injection_error">This looks like an instruction to the model rather than personality guidance. Phrases like \"ignore previous instructions\" aren\'t allowed in SOUL.md — keep it to genuine character, tone, and behavior.</string>
+    <string name="settings_terminal">Terminal</string>
+    <string name="settings_terminal_subtitle">Open the sandbox shell</string>
     <string name="settings_env_vars">Environment Variables</string>
     <string name="settings_env_vars_subtitle">Variables injected into the sandbox</string>
     <string name="settings_max_concurrent">Concurrent Sessions</string>
@@ -969,6 +971,8 @@
     <string name="add_provider_your_key_is_stored_securely_in_encrypted">Your key is stored securely in encrypted storage and never leaves the device.</string>
     <string name="add_provider_endpoint">Endpoint</string>
     <string name="add_provider_endpoint_anthropic_hint">Use the official Anthropic endpoint as-is. For third-party Anthropic-compatible services (e.g. Mimo), the base URL may need a path suffix such as \"/anthropic\" — check your provider\'s docs. The URL is used verbatim with \"/v1/messages\" appended.</string>
+    <string name="add_provider_endpoint_hint">Leave empty to use the default endpoint. \"/v1\" is appended automatically — enter the base host only.</string>
+    <string name="add_provider_endpoint_gemini_hint">Leave empty to use the default Google endpoint. Enter the full base URL including version path.</string>
     <string name="add_provider_custom_api_base_optional">Custom API Base (Optional)</string>
     <string name="add_provider_authentication">Authentication</string>
     <string name="add_provider_sign_in_succeeded_the_token_is_stored_in">Sign-in succeeded. The token is stored in encrypted storage. Tap Save to add the provider.</string>

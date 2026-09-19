@@ -139,6 +139,8 @@
     <string name="soul_restore_confirm_body">Ваши текущие изменения будут перезаписаны стандартным файлом личности. Оригинал служит отправной точкой, и его можно отредактировать заново в любой момент.</string>
     <string name="soul_save_error_title">Не удалось сохранить</string>
     <string name="soul_injection_error">Похоже, это инструкция для модели, а не описание личности. Фразы вроде «ignore previous instructions» недопустимы в SOUL.md — описывайте только характер, тон и поведение.</string>
+    <string name="settings_terminal">Терминал</string>
+    <string name="settings_terminal_subtitle">Открыть оболочку песочницы</string>
     <string name="settings_env_vars">Переменные окружения</string>
     <string name="settings_env_vars_subtitle">Переменные, добавляемые в Песочницу</string>
 
@@ -796,6 +798,8 @@
     <string name="add_provider_your_key_is_stored_securely_in_encrypted">Ваш ключ надёжно хранится в зашифрованном хранилище и никогда не покидает устройство.</string>
     <string name="add_provider_endpoint">Эндпоинт</string>
     <string name="add_provider_endpoint_anthropic_hint">Используйте официальный эндпоинт Anthropic как есть. Для сторонних сервисов, совместимых с Anthropic (например, Mimo), базовый URL может требовать суффикс пути, такой как \"/anthropic\" — сверьтесь с документацией провайдера. URL используется без изменений с добавлением \"/v1/messages\".</string>
+    <string name="add_provider_endpoint_hint">Оставьте пустым, чтобы использовать эндпоинт по умолчанию. «/v1» добавляется автоматически — укажите только базовый хост.</string>
+    <string name="add_provider_endpoint_gemini_hint">Оставьте пустым, чтобы использовать стандартный эндпоинт Google. Укажите полный базовый URL, включая путь версии.</string>
     <string name="add_provider_custom_api_base_optional">Свой базовый URL API (необязательно)</string>
     <string name="add_provider_authentication">Аутентификация</string>
     <string name="add_provider_sign_in_succeeded_the_token_is_stored_in">Вход выполнен успешно. Токен сохранён в зашифрованном хранилище. Нажмите «Сохранить», чтобы добавить провайдера.</string>

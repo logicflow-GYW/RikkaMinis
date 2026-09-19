@@ -1137,6 +1137,8 @@
     <string name="soul_restore_confirm_body">當前修改將被覆蓋為預設人格檔案。該模板可作為出發點，隨時可再次修改。</string>
     <string name="soul_save_error_title">儲存失敗</string>
     <string name="soul_injection_error">這看起來像是對模型的指令而不是人格引導。SOUL.md 中不允許出現「忽略之前的指令」之類的內容——請只寫真正的性格、語氣和行為描述。</string>
+    <string name="settings_terminal">終端機</string>
+    <string name="settings_terminal_subtitle">開啟沙箱 Shell</string>
     <string name="settings_env_vars">環境變數</string>
     <string name="settings_env_vars_subtitle">注入到沙箱內的變數</string>
     <string name="settings_max_concurrent">併發會話數</string>
@@ -1492,6 +1494,8 @@
     <string name="provider_detail_custom_user_agent">自定義 User-Agent</string>
     <string name="provider_detail_custom_user_agent_placeholder">留空使用預設值</string>
     <string name="add_provider_endpoint_anthropic_hint">按原樣使用官方 Anthropic 端點。對於第三方 Anthropic 相容服務（如 Mimo），基礎 URL 可能需要路徑字尾，如 "/anthropic" — 請查閱提供商文件。URL 會被原樣使用並追加 "/v1/messages"。</string>
+    <string name="add_provider_endpoint_hint">留空則使用預設端點。會自動附加 “/v1” —— 只需填寫基礎主機位址。</string>
+    <string name="add_provider_endpoint_gemini_hint">留空則使用 Google 預設端點。請填寫包含版本路徑的完整基礎 URL。</string>
     <string name="modeldetail_video_output">影片輸出</string>
     <string name="model_group_detail_session_defaults">會話預設值</string>
     <string name="model_group_detail_session_defaults_footer">繫結到此分組的新會話將自動應用。</string>

@@ -21,6 +21,27 @@ class BackgroundSettingsRepository(context: Context) {
     private val prefs: SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
+    /**
+     * [FIX-6 / F-240] Single source of truth for this prefs file + its keys.
+     *
+     * `ConfigBuiltins.registerBackground` registers fields against this same
+     * file, so the registry (minis-config, in-app backup) and this repository
+     * must name the keys identically. They previously did not: the registry
+     * wrote `background_notifications_enabled` / `enhanced_background_execution`
+     * while every reader in the app used the keys below — so a `minis-config
+     * set background.notifications false` landed in a key nobody reads and the
+     * notification kept firing (audit F-238/F-239/F-240). Exposing the keys
+     * here lets the registry reference them instead of re-typing strings.
+     */
+    companion object {
+        const val PREFS_NAME = "background_settings"
+        const val KEY_TASK_NOTIFICATIONS = "taskNotificationsEnabled"
+        const val DEFAULT_TASK_NOTIFICATIONS = true
+        const val KEY_BG_OVERLAY_ENABLED = "backgroundOverlayEnabled"
+        const val KEY_BG_OVERLAY_X = "backgroundOverlayX"
+        const val KEY_BG_OVERLAY_Y = "backgroundOverlayY"
+    }
+
     private val _taskNotificationsEnabled =
         MutableStateFlow(prefs.getBoolean(KEY_TASK_NOTIFICATIONS, DEFAULT_TASK_NOTIFICATIONS))
 
@@ -65,12 +86,31 @@ class BackgroundSettingsRepository(context: Context) {
         prefs.edit().putInt(KEY_BG_OVERLAY_X, x).putInt(KEY_BG_OVERLAY_Y, y).apply()
     }
 
-    companion object {
-        private const val PREFS_NAME = "background_settings"
-        private const val KEY_TASK_NOTIFICATIONS = "taskNotificationsEnabled"
-        private const val DEFAULT_TASK_NOTIFICATIONS = true
-        private const val KEY_BG_OVERLAY_ENABLED = "backgroundOverlayEnabled"
-        private const val KEY_BG_OVERLAY_X = "backgroundOverlayX"
-        private const val KEY_BG_OVERLAY_Y = "backgroundOverlayY"
+    /**
+     * [FIX-6 / F-239 refresh layer] Keep the StateFlows in sync when the prefs
+     * file is written *outside* this repository — `minis-config set
+     * background.notifications …` and a backup-restore both write the raw key.
+     * Without this, each StateFlow kept its construction-time value and every
+     * consumer (`BackgroundTaskNotifier`, `ConfigConfirmNotifier`, the
+     * Settings switch) kept serving the stale boolean until process restart.
+     *
+     * Registered on the application-context-scoped SharedPreferences instance,
+     * which lives as long as the process, so there is nothing to unregister
+     * (mirrors AgentRuntimeLimitsPrefs' re-prime listener in ConfigBuiltins).
+     */
+    private val prefsListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            when (key) {
+                KEY_TASK_NOTIFICATIONS ->
+                    _taskNotificationsEnabled.value =
+                        prefs.getBoolean(KEY_TASK_NOTIFICATIONS, DEFAULT_TASK_NOTIFICATIONS)
+                KEY_BG_OVERLAY_ENABLED ->
+                    _backgroundOverlayEnabled.value =
+                        prefs.getBoolean(KEY_BG_OVERLAY_ENABLED, false)
+            }
+        }
+
+    init {
+        prefs.registerOnSharedPreferenceChangeListener(prefsListener)
     }
 }

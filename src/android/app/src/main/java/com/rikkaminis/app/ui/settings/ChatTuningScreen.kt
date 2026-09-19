@@ -48,6 +48,31 @@ fun ChatTuningScreen(onBack: () -> Unit) {
     var inputMaxLines by remember { mutableStateOf(ChatTuningPrefs.inputMaxLines(context)) }
     var sendSwipeThresholdDp by remember { mutableStateOf(ChatTuningPrefs.sendSwipeThresholdDp(context)) }
 
+    // [FIX-6 / F-241] Re-read the snapshots when the prefs file changes
+    // OUTSIDE this screen (`minis-config set chat.*`, backup-restore, the
+    // agent). Same rationale as AppearanceScreen's [T-backup-import-refresh]
+    // listener; without it Save would write back the values captured at open
+    // time. The `rememberChatTuning` helper below covers the chat screen's
+    // read path — this covers the panel's own edit buffer.
+    DisposableEffect(context) {
+        val prefs = context.applicationContext
+            .getSharedPreferences(ChatTuningPrefs.PREFS, android.content.Context.MODE_PRIVATE)
+        val listener =
+            android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+                if (key in ChatTuningPrefs.ALL_KEYS) {
+                    scrollNearBottomDp = ChatTuningPrefs.scrollNearBottomDp(context)
+                    prewarmRowLimit = ChatTuningPrefs.prewarmRowLimit(context)
+                    codePreviewLines = ChatTuningPrefs.codePreviewLines(context)
+                    tablePreviewRows = ChatTuningPrefs.tablePreviewRows(context)
+                    markdownLineHeightSp = ChatTuningPrefs.markdownLineHeightSp(context)
+                    inputMaxLines = ChatTuningPrefs.inputMaxLines(context)
+                    sendSwipeThresholdDp = ChatTuningPrefs.sendSwipeThresholdDp(context)
+                }
+            }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+
     SettingsScaffold(
         title = stringResource(R.string.chat_tuning_title),
         onBack = onBack,

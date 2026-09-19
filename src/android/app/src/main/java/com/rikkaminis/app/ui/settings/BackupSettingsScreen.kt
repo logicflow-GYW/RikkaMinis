@@ -871,17 +871,26 @@ fun BackupSettingsScreen(
                                 val json = withContext(Dispatchers.IO) {
                                     WebDavSync.restore(cfg, item, webDavHttpClient)
                                 }
-                                showRemoteList = false
-                                restoreWithSnapshot(json)
+                                // [FIX-6 / F-242] applicationScope runs on
+                                // Dispatchers.IO — every Compose state write in
+                                // this block must hop back to Main, exactly like
+                                // the sibling paths in this file (see
+                                // restoreWithSnapshot's [fix-audit-p1-1] note).
+                                withContext(Dispatchers.Main) {
+                                    showRemoteList = false
+                                    restoreWithSnapshot(json)
+                                }
                             } catch (t: Throwable) {
-                                errorMessage = webDavErrorMessage(context, t)
+                                withContext(Dispatchers.Main) {
+                                    errorMessage = webDavErrorMessage(context, t)
+                                }
                                 notifier.notifyWorkCompleted(
                                     tag = "webdav-restore",
                                     title = context.getString(R.string.webdav_notify_title_failed),
                                     body = webDavErrorMessage(context, t),
                                 )
                             } finally {
-                                remoteLoading = false
+                                withContext(Dispatchers.Main) { remoteLoading = false }
                             }
                         }
                     }
@@ -919,17 +928,24 @@ fun BackupSettingsScreen(
                                 val json = withContext(Dispatchers.IO) {
                                     WebDavSync.restoreAuto(cfg, entry, webDavHttpClient)
                                 }
-                                autoRemoteOpen = false
-                                restoreWithSnapshot(json)
+                                // [FIX-6 / F-242] Same Main-hop discipline as
+                                // the manual sheet above — this twin site was
+                                // missed by the same batch of fixes.
+                                withContext(Dispatchers.Main) {
+                                    autoRemoteOpen = false
+                                    restoreWithSnapshot(json)
+                                }
                             } catch (t: Throwable) {
-                                errorMessage = webDavErrorMessage(context, t)
+                                withContext(Dispatchers.Main) {
+                                    errorMessage = webDavErrorMessage(context, t)
+                                }
                                 notifier.notifyWorkCompleted(
                                     tag = "webdav-restore",
                                     title = context.getString(R.string.webdav_notify_title_failed),
                                     body = webDavErrorMessage(context, t),
                                 )
                             } finally {
-                                autoRemoteLoading = false
+                                withContext(Dispatchers.Main) { autoRemoteLoading = false }
                             }
                         }
                     }

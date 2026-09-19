@@ -99,6 +99,8 @@
     <string name="settings_skills_subtitle">Skills und Anweisungen des KI-Agents verwalten</string>
     <string name="settings_memory">Gedächtnis</string>
     <string name="settings_memory_subtitle">Sitzungsübergreifend persistentes Wissen</string>
+    <string name="settings_terminal">Terminal</string>
+    <string name="settings_terminal_subtitle">Sandbox-Shell öffnen</string>
     <string name="settings_env_vars">Umgebungsvariablen</string>
     <string name="settings_env_vars_subtitle">In die Sandbox eingespeiste Variablen</string>
 
@@ -1503,6 +1505,8 @@
     <string name="provider_detail_custom_user_agent">Benutzerdefinierter User-Agent</string>
     <string name="provider_detail_custom_user_agent_placeholder">Für Standardwert leer lassen</string>
     <string name="add_provider_endpoint_anthropic_hint">Verwenden Sie den offiziellen Anthropic-Endpunkt unverändert. Für Drittanbieter-Dienste, die mit Anthropic kompatibel sind (z. B. Mimo), muss die Basis-URL möglicherweise einen Pfadzusatz wie \"/anthropic\" enthalten – prüfen Sie die Dokumentation Ihres Anbieters. Die URL wird unverändert mit \"/v1/messages\" verwendet.</string>
+    <string name="add_provider_endpoint_hint">Leer lassen, um den Standard-Endpunkt zu verwenden. \"/v1\" wird automatisch angehängt – geben Sie nur den Basis-Host ein.</string>
+    <string name="add_provider_endpoint_gemini_hint">Leer lassen, um den Standard-Google-Endpunkt zu verwenden. Geben Sie die vollständige Basis-URL einschließlich Versionspfad ein.</string>
     <string name="modeldetail_video_output">Videoausgabe</string>
     <string name="quicktest_title">Schnelltest</string>
     <string name="quicktest_button">Schnelltest</string>
