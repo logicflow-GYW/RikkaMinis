@@ -2,6 +2,7 @@ package com.rikkaminis.app.offload
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.rikkaminis.app.logging.AppLogger
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -17,6 +18,8 @@ import kotlin.coroutines.resume
  * Mirrors iOS OffloadPermissionManager behavior.
  */
 object OffloadPermissionManager {
+
+    private const val TAG = "OffloadPermission"
 
     enum class PermissionLevel {
         BYPASS,      // Always allowed
@@ -108,7 +111,14 @@ object OffloadPermissionManager {
      *  "Allow in this session" dialog response. Cleared when the
      *  hosting session ends (or process death — see
      *  OFFLOAD_GLOBAL_SESSION_ID for offload-CLI-backed tools, which
-     *  share one process-lifetime slot). */
+     *  share one process-lifetime slot).
+     *
+     *  [audit-0919 F-282] The "cleared when the session ends" half of that
+     *  contract is now actually wired: [clearSessionGrants] is called from
+     *  `ChatViewModel.onCleared()` (chat screen teardown) for both the active
+     *  and the pre-rename session id. Before that it had zero production
+     *  callers, so grants/denials survived for the whole process and leaked
+     *  from one session into any later session that reused the id. */
     // [T3-M5] Read/written by the offload worker threads AND the UI; a plain
     // mutableMapOf could corrupt or lose grants while a permission sheet was
     // open. Keys use ConcurrentHashMap; values use newKeySet() so the sets
@@ -151,6 +161,23 @@ object OffloadPermissionManager {
     @Volatile private var androidPermissionContinuation: kotlin.coroutines.Continuation<AndroidPermissionResult>? = null
 
     /**
+     * [audit-0919 F-284] Guards the check-then-install step of the three
+     * round-trip slots ([androidPermissionContinuation], [pendingContinuation],
+     * [settingsGateContinuation]). `@Volatile` alone makes the fields visible
+     * but not the compound "is it free?" test atomic, which is what two
+     * concurrent offload workers need.
+     */
+    private val slotLock = Any()
+
+    /**
+     * [audit-0919 F-282] Upper bound on the number of chat sessions whose
+     * ASK_ONCE grants/denials stay resident. Chat sessions are user-created and
+     * effectively unbounded over a long-lived process; 64 is far above any
+     * realistic concurrent count and keeps the maps at a few KB.
+     */
+    private const val MAX_TRACKED_SESSIONS = 64
+
+    /**
      * Ask the UI layer to drive the system runtime-permission flow for the
      * given permissions. The UI is responsible for:
      *
@@ -165,6 +192,20 @@ object OffloadPermissionManager {
      * elapses.
      */
     suspend fun requestAndroidPermission(permissions: List<String>): AndroidPermissionResult {
+        // [audit-0919 F-284] One system dialog at a time. A second concurrent
+        // caller must NOT overwrite the first one's continuation (see
+        // [claimSlot]); it gets an immediate TIMEOUT, which callers already
+        // treat as "not granted, fall back to the settings gate".
+        synchronized(slotLock) {
+            if (!claimSlot(androidPermissionContinuation)) {
+                AppLogger.warning(
+                    TAG,
+                    "requestAndroidPermission($permissions) rejected — another system permission " +
+                        "dialog is already in flight",
+                )
+                return AndroidPermissionResult.TIMEOUT
+            }
+        }
         val timed = withTimeoutOrNull(SYSTEM_DIALOG_TIMEOUT_MS) {
             suspendCancellableCoroutine<AndroidPermissionResult> { cont ->
                 androidPermissionContinuation = cont
@@ -274,6 +315,16 @@ object OffloadPermissionManager {
         request: SettingsGateRequest,
         check: () -> Boolean,
     ): AndroidPermissionResult {
+        // [audit-0919 F-284] One settings gate at a time — see [claimSlot].
+        synchronized(slotLock) {
+            if (!claimSlot(settingsGateContinuation)) {
+                AppLogger.warning(
+                    TAG,
+                    "requestSettingsGate(${request.id}) rejected — another settings gate is already in flight",
+                )
+                return AndroidPermissionResult.DENIED
+            }
+        }
         // [fix/audit0917-b8] Phase 1 now has the same timeout discipline as
         // phase 2 (and as requestAndroidPermission): if the UI never calls
         // respondToSettingsGate (dialog swallowed by a state glitch, activity
@@ -410,13 +461,28 @@ object OffloadPermissionManager {
                 // before any grants check or dialog so the agent can't
                 // spam the user.
                 val denials = sessionDenials.computeIfAbsent(sessionId) { java.util.concurrent.ConcurrentHashMap.newKeySet() }
+                pruneSessionMapsIfNeeded()
                 if (toolName in denials) return false
 
                 val grants = sessionGrants.computeIfAbsent(sessionId) { java.util.concurrent.ConcurrentHashMap.newKeySet() }
+                pruneSessionMapsIfNeeded()
                 if (toolName in grants) return true
 
                 // Show dialog and wait for response.
                 val info = toolRegistry.find { it.toolName == toolName }
+                // [audit-0919 F-284] One ASK_ONCE dialog at a time — see
+                // [claimSlot]. A concurrent second caller used to overwrite the
+                // first one's continuation, so the first waiter blocked the full
+                // 120 s and reported "denied" even after the user tapped Allow.
+                synchronized(slotLock) {
+                    if (!claimSlot(pendingContinuation)) {
+                        AppLogger.warning(
+                            TAG,
+                            "checkPermission($toolName) rejected — another permission dialog is already in flight",
+                        )
+                        return false
+                    }
+                }
                 val response = withTimeoutOrNull(SYSTEM_DIALOG_TIMEOUT_MS) {
                     suspendCancellableCoroutine<Response> { cont ->
                         pendingContinuation = cont
@@ -481,4 +547,49 @@ object OffloadPermissionManager {
         sessionGrants.remove(sessionId)
         sessionDenials.remove(sessionId)
     }
+
+    /**
+     * [audit-0919 F-282] Backstop for the case where a caller never reaches
+     * [clearSessionGrants] (process killed mid-session, a session id that only
+     * ever existed in a native-offload worker, etc.). Without it the two maps
+     * grow with session count for the process lifetime.
+     *
+     * Eviction drops whole sessions, oldest-inserted first — deliberately NOT a
+     * per-tool LRU: forgetting half of one session's grants would be a worse
+     * (and harder to reason about) state than forgetting an old session
+     * entirely, and both maps are only read on the ASK_ONCE path where a miss
+     * means "ask again", never "silently allow".
+     */
+    private fun pruneSessionMapsIfNeeded() {
+        synchronized(slotLock) {
+            while (sessionGrants.size > MAX_TRACKED_SESSIONS) {
+                val oldest = sessionGrants.keys.firstOrNull() ?: break
+                sessionGrants.remove(oldest)
+                AppLogger.warning(TAG, "evicted session grants for $oldest (> $MAX_TRACKED_SESSIONS sessions)")
+            }
+            while (sessionDenials.size > MAX_TRACKED_SESSIONS) {
+                val oldest = sessionDenials.keys.firstOrNull() ?: break
+                sessionDenials.remove(oldest)
+            }
+        }
+    }
+
+    /**
+     * [audit-0919 F-284] Claim one of the three UI round-trip slots.
+     *
+     * Each slot is a single continuation, and the callers are native-offload
+     * worker threads (pool sized by ConcurrencyPrefs.maxConcurrentSessions(),
+     * default 2) plus the interactive terminal — so two permission requests can
+     * genuinely be in flight at once. The previous code assigned the slot
+     * unconditionally, so the second caller overwrote the first one's
+     * continuation: the first waiter then blocked to its full
+     * SYSTEM_DIALOG_TIMEOUT_MS (120 s) and reported TIMEOUT even though the
+     * user answered its dialog. The existing identity guards only covered "a
+     * new caller arrives after the old one timed out", never "two callers in
+     * flight together".
+     *
+     * @param current the continuation currently holding the slot (null = free)
+     * @return true when the slot was free and is now owned by the caller
+     */
+    private fun claimSlot(current: Any?): Boolean = current == null
 }

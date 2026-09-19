@@ -187,21 +187,37 @@ class PersistentShellTest {
 
     @Test
     fun `truncateOutput handles unicode text`() {
+        // [audit-0919 F-215] Budget is BYTES: 你好世界 = 12 UTF-8 bytes, so a
+        // 6-byte budget fits exactly one 3-byte char.
         val sb = StringBuilder()
-        assertTrue(internalTruncateOutput(sb, "你好世界", 2))
-        assertEquals("你好", sb.toString())
+        assertTrue(internalTruncateOutput(sb, "你好世界", 6))
+        assertEquals("你", sb.toString())
     }
 
     @Test
     fun `truncateOutput handles emoji correctly`() {
-        // Each emoji is multiple bytes (🔥 is 4 bytes in UTF-8) but
-        // StringBuilder.length() counts chars, not bytes. In Kotlin/JVM
-        // String.length() returns the number of UTF-16 code units.
-        // Emoji outside BMP (🔥) is 2 chars (surrogate pair), so "🔥🔥" = 4 chars
+        // 🔥 is 4 UTF-8 bytes (and a surrogate pair in UTF-16). An 8-byte
+        // budget fits exactly two of them — and must not split the pair.
         val sb = StringBuilder()
-        assertTrue(internalTruncateOutput(sb, "🔥🔥🔥", 4))
-        // Should append exactly 4 chars = 2 fire emoji
+        assertTrue(internalTruncateOutput(sb, "🔥🔥🔥", 8))
         assertEquals("🔥🔥", sb.toString())
+    }
+
+    @Test
+    fun `truncateOutput never splits a surrogate pair`() {
+        val sb = StringBuilder()
+        // 5-byte budget: the first emoji needs 4, the second would need 8.
+        assertTrue(internalTruncateOutput(sb, "🔥🔥", 5))
+        assertEquals("🔥", sb.toString())
+        assertEquals(4, TerminalSanitizer.utf8Length(sb.toString()))
+    }
+
+    @Test
+    fun `truncateOutput counts ascii as one byte per char`() {
+        val sb = StringBuilder()
+        assertFalse(internalTruncateOutput(sb, "hello", 5))
+        assertTrue(internalTruncateOutput(sb, "x", 5))
+        assertEquals("hello", sb.toString())
     }
 
     @Test

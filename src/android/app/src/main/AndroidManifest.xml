@@ -338,7 +338,7 @@
             android:process=":toolservice"
             android:exported="false" />
 
-        <!-- Alarm broadcast receiver (also handles BOOT_COMPLETED for re-scheduling) -->
+        <!-- Alarm broadcast receiver (also handles BOOT_COMPLETED) -->
         <receiver
             android:name=".offload.AlarmReceiver"
             android:exported="false">
@@ -349,6 +349,12 @@
                  an arbitrary EXTRA_ALARM_LABEL (forged notification) and clear
                  the user's alarm prefs entry via onAlarmFired(). Do not set
                  this back to true without adding a sender/permission check. -->
+            <!-- [audit-0919 F-279] BOOT_COMPLETED is only a liveness ping. The
+                 old comment claimed it "handles re-scheduling"; Android's
+                 AlarmManager drops every alarm on reboot and this repo has no
+                 reschedule implementation, and since T266/T268 alarm scheduling
+                 belongs to the system Clock app (which re-arms its own alarms).
+                 See AlarmReceiver.onReceive. -->
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>

@@ -51,8 +51,8 @@ class TerminalSanitizerInstrumentedTest {
     fun truncateHandlesLargeOutput() {
         val large = "x".repeat(100_000)
         val result = TerminalSanitizer.truncateIfNeeded(large)
-        assertTrue("Should be truncated", result.length < 100_000)
-        assertTrue("Should have omission marker", result.contains("characters omitted"))
+        assertTrue("Should be truncated", TerminalSanitizer.utf8Length(result) < 100_000)
+        assertTrue("Should have omission marker", result.contains("bytes omitted"))
     }
 
     @Test

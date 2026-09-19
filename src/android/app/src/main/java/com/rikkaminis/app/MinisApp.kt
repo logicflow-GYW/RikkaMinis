@@ -33,7 +33,6 @@ import com.rikkaminis.app.network.NetworkMonitor
 import com.rikkaminis.app.offload.OffloadPermissionManager
 import com.rikkaminis.app.provider.ModelsDevApi
 import com.rikkaminis.app.sandbox.ExecutionCoordinator
-import com.rikkaminis.app.sandbox.MountedFolderCoordinator
 import com.rikkaminis.app.sandbox.NativeOffloadServer
 import com.rikkaminis.app.sandbox.PRootKernel
 import com.rikkaminis.app.sandbox.RootfsManager
@@ -885,7 +884,7 @@ class MinisApp : Application(), ImageLoaderFactory {
     }
 
     /**
-     * T268: replay any pre-T266 internal alarm/timer entries from
+     * [audit-0919 F-280] T268: replay any pre-T266 internal alarm/timer entries from
      * minis_alarms_prefs through SET_ALARM / SET_TIMER, then clear the
      * prefs blob so subsequent launches no-op. Past-dated entries are
      * dropped (the OS never re-fires them anyway). Idempotent: if the
@@ -894,10 +893,16 @@ class MinisApp : Application(), ImageLoaderFactory {
      * Silent migration rather than an in-app dialog — Application has no
      * Activity context to host one, and the user-visible outcome (alarms
      * reappear in their Clock app) is what they want regardless of any
-     * prompt. AlarmOffloadManager's PendingIntents are left in place; the
-     * OS will fire them once more if scheduled, but T268 also clears the
-     * prefs blob that AlarmOffloadHandler previously read, so list/cancel
-     * commands will no longer surface them.
+     * prompt.
+     *
+     * [audit-0919 F-280] The old closing sentence ("AlarmOffloadManager's
+     * PendingIntents are left in place; the OS will fire them once more if
+     * scheduled") is no longer accurate: AlarmOffloadManager's scheduling half
+     * was deleted in this batch (zero production callers — see that class's
+     * KDoc), and this function clears the prefs blob unconditionally, so
+     * nothing can schedule a new internal alarm. A PendingIntent left behind by
+     * an *older build* can still fire once, which is why AlarmReceiver keeps
+     * its onAlarmFired cleanup path.
      */
     /**
      * [native-oom Phase 1] True when the current process is the isolated

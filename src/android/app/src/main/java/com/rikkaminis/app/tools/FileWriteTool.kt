@@ -74,6 +74,10 @@ object FileWriteTool {
             // friendly hint pointing the user at Settings. Mirrors iOS
             // MountedFolderCoordinator.isLinuxPathUnderReadOnlyMount used by
             // AIChatViewModel.fileWrite (AIChatViewModel.swift:8333-8341).
+            // [audit-0919 F-214] PRootKernel.isLinuxPathUnderReadOnlyMount is
+            // the ONLY live implementation — the sandbox/MountedFolderCoordinator
+            // duplicate was deleted (zero callers, and its ReadOnlyMountException
+            // was never caught anywhere).
             if (PRootKernel.isLinuxPathUnderReadOnlyMount(path)) {
                 return ToolExecutionResult(
                     "Error: $path is inside a read-only mounted folder and cannot be modified. " +

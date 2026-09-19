@@ -3660,6 +3660,19 @@ class ChatViewModel(
         // processes are freed when the ViewModel goes away.
         _browserTabPoolRef?.dispose()
         _browserTabPoolRef = null
+        // [audit-0919 F-282] Release this chat session's ASK_ONCE grants and
+        // denials. OffloadPermissionManager's KDoc promises both maps are
+        // "cleared when the hosting session ends" / "cleared with the session",
+        // but clearSessionGrants had zero production callers — so a session's
+        // "Allow in this session" leaked into every later session that reused
+        // the id, and the map grew with session count. onCleared is the VM
+        // teardown (leaving the chat screen), which is exactly the boundary the
+        // KDoc describes. Both ids are released because a draft rename may have
+        // left grants under either.
+        OffloadPermissionManager.clearSessionGrants(activeSessionId)
+        if (activeSessionId != sessionId) {
+            OffloadPermissionManager.clearSessionGrants(sessionId)
+        }
     }
 
     /**
