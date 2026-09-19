@@ -166,15 +166,24 @@ open class VoiceProvider(
     /** Parse the ASR response. Default: OpenAI JSON, falling back to plain text. */
     open fun parseVoiceInputResponse(data: ByteArray, request: VoiceInputRequest): VoiceInputResponse {
         val text = String(data, Charsets.UTF_8)
-        runCatching {
-            val obj = JSONObject(text)
-            if (obj.has("text")) {
-                return VoiceInputResponse(
-                    text = obj.getString("text"),
-                    language = obj.optString("language").takeIf { it.isNotBlank() },
-                    durationSeconds = if (obj.has("duration")) obj.optDouble("duration") else null,
-                )
-            }
+        val obj = runCatching { JSONObject(text) }.getOrNull()
+        if (obj != null && obj.has("text")) {
+            // [audit-0917 F-203] The empty-transcript guard the three vendor
+            // parsers carry (Xunfei/Doubao/Deepgram, 442e6d0) was missing here —
+            // the base class every OpenAI-compatible endpoint falls back to.
+            // `optString` yields "" for a missing or empty key, so the old
+            // `has("text")` gate returned text="" and the consumer
+            // (ProviderSpeechRecognitionEngine) mapped a malformed response to
+            // NO_MATCH ("heard nothing") instead of surfacing a protocol error.
+            // NOTE: the raw-text fallback below is deliberately left as-is — a
+            // non-JSON body is a different, already-handled shape.
+            val transcript = obj.optString("text").takeIf { it.isNotEmpty() }
+                ?: throw VoiceProviderException.Parse("Empty ASR transcript in JSON response")
+            return VoiceInputResponse(
+                text = transcript,
+                language = obj.optString("language").takeIf { it.isNotBlank() },
+                durationSeconds = if (obj.has("duration")) obj.optDouble("duration") else null,
+            )
         }
         // Some compatible endpoints return raw text.
         if (text.isNotEmpty()) return VoiceInputResponse(text = text)

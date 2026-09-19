@@ -478,7 +478,20 @@ object ThinkingRuleResolver {
                 // xiaomi/mimo-v2.5, so the raw tier really does reach such a
                 // backend. No declared-set clamp (the pre-refactor branch had
                 // none).
-                if (!ctx.level.isEnabled) return null to null
+                //
+                // [audit-0917 F-201] A RULE-declared offValue now wins over the
+                // omit. The built-in openrouter rule passes offValue = null, so
+                // the documented OpenRouter behaviour above is untouched — only a
+                // user rule that explicitly pins an off tier gets it. Fixing only
+                // the ReasoningEffort sibling would have re-created the
+                // same-batch-misses-a-sibling shape this audit keeps finding: the
+                // editor offers this input for BOTH formats (ThinkingRuleEditor
+                // `sendOffValue` row) and the summary renders both.
+                if (!ctx.level.isEnabled) {
+                    val tier = format.offValue ?: return null to null
+                    body.put("reasoning", JSONObject().put("effort", tier))
+                    return tier to tier
+                }
                 val effort = clampEffortForModel(wireEffort(ctx.level), lid)
                 body.put("reasoning", JSONObject().put("effort", effort))
                 effort to effort
@@ -495,7 +508,17 @@ object ThinkingRuleResolver {
                     // explicitOffEffort allowlist bases (official OpenAI / Volcano Ark).
                     // [T-thinking-off-explicit] explicitOffEffort() is the allowlist;
                     // null means "omit the field" (vendor default).
-                    if (offEffort == null) return null to null
+                    //
+                    // [audit-0917 F-201] The RULE's own offValue now participates. It
+                    // used to be write-only for this format: the editor persists it,
+                    // the rule summary renders `· off = none`, and every branch below
+                    // keyed on ctx.offEffort alone — so the list said "off = none"
+                    // while the wire either sent the allowlist value or sent nothing.
+                    // Precedence is rule-then-allowlist because the rule is the more
+                    // specific, user-authored statement; every BUILT-IN rule passes
+                    // offValue = null, so built-in behaviour is unchanged.
+                    val ruleOff = format.offValue
+                    if (ruleOff == null && offEffort == null) return null to null
                     // MiMo/Agnes are exempt as defense in depth (iOS ff60c818 +
                     // c5efeb1e): their backends validate reasoning_effort against a
                     // STRICT low/medium/high enum and reject the whole request on
@@ -504,31 +527,33 @@ object ThinkingRuleResolver {
                     if (lid.contains("mimo") || lid.contains("agnes")) return null to null
                     when {
                         isOpenAINative -> {
-                            body.put("reasoning_effort", offEffort)
-                            return offEffort to offEffort
+                            // No declared-set clamp here (the pre-refactor chain never
+                            // clamped this branch), so the rule value is always taken.
+                            val tier = ruleOff ?: offEffort!!
+                            body.put("reasoning_effort", tier)
+                            return tier to tier
                         }
                         isSelfReasoningFamily -> {
                             // Native self-reasoning families: only the unified-effort
                             // gateways (Ark/Azure) understand an off tier for them —
                             // OR a declared set that explicitly names it (upstream
                             // 22647505, the inverse of the silent-skip bug).
-                            if (ctx.usesUnifiedReasoningEffort ||
-                                ctx.declaredEffortValues?.contains(offEffort) == true
-                            ) {
-                                body.put("reasoning_effort", offEffort)
-                                return offEffort to offEffort
-                            }
-                            return null to null
+                            val tier = pickOffTier(ruleOff, offEffort) { v ->
+                                ctx.usesUnifiedReasoningEffort ||
+                                    ctx.declaredEffortValues?.contains(v) == true
+                            } ?: return null to null
+                            body.put("reasoning_effort", tier)
+                            return tier to tier
                         }
                         ctx.supportsReasoning != false -> {
                             // A declared set that does NOT contain the off tier blocks
                             // emission — the backend validates the enum strictly
                             // (upstream 22647505).
-                            if (ctx.declaredEffortValues?.contains(offEffort) != false) {
-                                body.put("reasoning_effort", offEffort)
-                                return offEffort to offEffort
-                            }
-                            return null to null
+                            val tier = pickOffTier(ruleOff, offEffort) { v ->
+                                ctx.declaredEffortValues?.contains(v) != false
+                            } ?: return null to null
+                            body.put("reasoning_effort", tier)
+                            return tier to tier
                         }
                         else -> return null to null
                     }
@@ -733,6 +758,26 @@ object ThinkingRuleResolver {
                 error("ThinkingWireFormat $format is not emitted on the OpenAI path in Phase 1")
             }
         }
+    }
+
+    /**
+     * [audit-0917 F-201] Choose the OFF tier for the two `reasoning_effort` formats.
+     *
+     * The RULE's `offValue` is tried first, then the caller's allowlist value
+     * ([ThinkingResolveContext.offEffort]). A candidate only wins when [accepts] says
+     * the backend will not reject it, so the declared-set guard (upstream 22647505)
+     * still blocks a value the model does not advertise — the rule does not get to
+     * bypass a strict enum. Returns null when neither candidate is acceptable, which
+     * the caller turns into "omit the field" (the vendor default).
+     */
+    private inline fun pickOffTier(
+        ruleOff: String?,
+        ctxOff: String?,
+        accepts: (String) -> Boolean,
+    ): String? {
+        if (ruleOff != null && accepts(ruleOff)) return ruleOff
+        if (ctxOff != null && accepts(ctxOff)) return ctxOff
+        return null
     }
 
     /**

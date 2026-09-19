@@ -168,6 +168,14 @@ object ThinkingRuleCoding {
             wireFormat = decodeWireFormat(e.wireFormatJson),
             reasoningEcho = decodeEcho(e.reasoningEchoJson),
             label = e.label,
+            // [audit-0917 F-199] The persisted UUID must come back out. Without
+            // this the CUSTOM rule reached [ThinkingRule.stableId] with id == "",
+            // so it fabricated `builtin:<label>:…` for a user rule — exactly the
+            // collision the stableId KDoc says it prevents (two distinct custom
+            // rules with the same label/scope collapsed to one key). The id
+            // column was already being written by [toEntity]; only the read side
+            // dropped it.
+            id = e.id,
         )
     }
 
@@ -181,6 +189,11 @@ object ThinkingRuleCoding {
      */
     fun encodeRuleJson(rule: ThinkingRule): JSONObject = JSONObject().apply {
         put("label", rule.label)
+        // [audit-0917 F-199] Carry the persisted UUID across the process
+        // boundary too. [decodeRuleJson] is the mirror of [toRule]; dropping the
+        // id on BOTH read paths made a CUSTOM rule fabricate a `builtin:` id —
+        // see the note in [toRule].
+        if (rule.id.isNotEmpty()) put("id", rule.id)
         when (val s = rule.scope) {
             is ThinkingRule.Scope.AllModels -> put("scopeKind", "allModels")
             is ThinkingRule.Scope.ModelPattern -> {
@@ -213,6 +226,9 @@ object ThinkingRuleCoding {
             wireFormat = decodeWireFormat(o.optString("wireFormatJson", "").ifEmpty { null }),
             reasoningEcho = decodeEcho(o.optString("reasoningEchoJson", "").ifEmpty { null }),
             label = label,
+            // [audit-0917 F-199] Mirror of the write side above; absent keeps the
+            // pre-fix empty id for payloads produced by an older build.
+            id = o.optString("id", ""),
         )
     }
 }
