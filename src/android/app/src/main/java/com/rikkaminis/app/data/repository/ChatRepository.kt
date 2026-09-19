@@ -169,7 +169,19 @@ class ChatRepository(
         dao.updatePinnedAt(sessionId, if (pinned) now else null, now)
     }
 
-    suspend fun deleteSession(id: String) {
+    /**
+     * Delete a session: DB rows first, then the on-disk files.
+     *
+     * [F-225/F-236] Returns the on-disk [SessionFileStore.DeleteResult] so the
+     * caller can tell a clean delete from a partial one. The result used to be
+     * dropped on the floor here, which made `DeleteResult.fullyDeleted` a dead
+     * property with zero readers anywhere in the tree: when a file was held
+     * open or a mount was read-only, `deleteRecursively()` failed silently and
+     * the user saw a session disappear from the list while its bytes stayed on
+     * disk. A null [sessionFiles] (unit-test construction only) reports
+     * `null` — "nothing was reclaimed and we can't tell you more".
+     */
+    suspend fun deleteSession(id: String): SessionFileStore.DeleteResult? {
         dao.deleteMessages(id)
         dao.deleteSession(id)
         // [A: session file reclamation] Dropping the DB rows previously leaked
@@ -188,9 +200,21 @@ class ChatRepository(
                 "ChatRepository",
                 "deleteSession: sessionFiles is null, skipping on-disk reclamation for $id",
             )
-            return
+            return null
         }
-        store.deleteSessionFiles(id)
+        val result = store.deleteSessionFiles(id)
+        if (!result.fullyDeleted) {
+            // [F-225] The storage page already re-measures after a failed delete
+            // so the user sees the truth there; the session-delete path had no
+            // such signal. Log it so the residue is at least observable.
+            AppLogger.warning(
+                "ChatRepository",
+                "deleteSession($id): partial on-disk reclamation " +
+                    "(sessionDeleted=${result.sessionDeleted}, mediaDeleted=${result.mediaDeleted})" +
+                    " — bytes may still be on disk",
+            )
+        }
+        return result
     }
 
     /**
@@ -364,8 +388,9 @@ class ChatRepository(
         )
     }
 
-    suspend fun deleteMessagesAfter(sessionId: String, keepCount: Int) =
-        dao.deleteMessagesAfter(sessionId, keepCount)
+    // [F-234] `fromSortOrder` = delete boundary (inclusive), NOT a row count.
+    suspend fun deleteMessagesAfter(sessionId: String, fromSortOrder: Int) =
+        dao.deleteMessagesAfter(sessionId, fromSortOrder)
 
     /**
      * Rewrite a single message row's parts_json in place. Used by
@@ -399,6 +424,10 @@ class ChatRepository(
         // Optional with defaults so legacy call sites are untouched.
         usageModelId: String? = null,
         usageEntryId: String? = null,
+        // [F-233] Terminal error sticker. Callers that copy a message row
+        // (SessionForkManager.duplicateSession) must carry this through, or the
+        // copy loses the error state that ChatTranscriptRebuild reads.
+        errorInfo: String? = null,
     ): MessageEntity {
         // [Diag-appendMessage] Step markers so a hang between tool-END and the
         // next LLM round can be pinned to the exact DAO call that never returns
@@ -417,10 +446,23 @@ class ChatRepository(
         // the row in the same parts_json shape (text part) so downstream
         // parsers — UI rendering and JSON-array consumers in DAO/search
         // — never break on the truncated payload.
-        val capped = if (partsJson.length > MAX_MESSAGE_PARTS_JSON_LENGTH) {
+        //
+        // [F-226] The budget is BYTES, not chars: CursorWindow's ceiling is a
+        // byte ceiling, and the previous `partsJson.length` comparison let a
+        // CJK/emoji payload reach ~3-4× the intended size (measured: 1.5 MB
+        // for CJK, 2.0 MB for 4-byte emoji against a 500 KB nominal cap) —
+        // exactly the SQLiteBlobTooBigException this guard exists to prevent.
+        val capped = if (partsJson.toByteArray(Charsets.UTF_8).size > MAX_MESSAGE_PARTS_JSON_BYTES) {
             buildTruncatedPartsJson(partsJson)
         } else {
             partsJson
+        }
+        val cappedReasoning = reasoningContent?.let { rc ->
+            if (rc.toByteArray(Charsets.UTF_8).size > MAX_MESSAGE_PARTS_JSON_BYTES) {
+                buildTruncatedText(rc)
+            } else {
+                rc
+            }
         }
         val message = MessageEntity(
             id = UUID.randomUUID().toString(),
@@ -430,9 +472,10 @@ class ChatRepository(
             createdAt = now,
             tokenUsage = tokenUsage,
             sortOrder = sortOrder,
-            reasoningContent = reasoningContent,
+            reasoningContent = cappedReasoning,
             usageModelId = usageModelId,
             usageEntryId = usageEntryId,
+            errorInfo = errorInfo,
         )
         val persisted: MessageEntity = try {
             AppLogger.info("ChatRepository", "appendMessage: insertMessage enter id=${message.id}")
@@ -930,26 +973,82 @@ class ChatRepository(
         private const val LOAD_PAGE_SIZE = 200
 
         // Issue #17 — hard cap on a single message's parts_json. 500_000
-        // chars ≈ 500 KB ASCII (worst case ~2 MB UTF-8 for 4-byte runs;
-        // still small enough that any single resulting row fits inside
-        // a single CursorWindow). New oversize payloads (browser_use
-        // dumps, paste-bomb tool_results) are truncated at insert time
-        // and replaced with a single text part carrying a marker, so
-        // they remain JSON-parseable downstream.
-        internal const val MAX_MESSAGE_PARTS_JSON_LENGTH = 500_000
+        // BYTES (not chars — [F-226]): a payload truncated to this many
+        // UTF-8 bytes plus the JSON wrapper stays comfortably inside a
+        // single 2 MB CursorWindow, which is a byte ceiling. The previous
+        // char-based comparison let CJK/emoji payloads reach 3-4× this
+        // figure and hit the exact CursorWindow failure it guarded against.
+        internal const val MAX_MESSAGE_PARTS_JSON_BYTES = 500_000
+
+        /**
+         * [F-226] Take the longest prefix of [text] whose UTF-8 encoding is at
+         * most [maxBytes], never splitting a surrogate pair (a lone surrogate
+         * would encode as U+FFFD and corrupt the tail).
+         */
+        internal fun takeByUtf8Bytes(text: String, maxBytes: Int): String {
+            if (text.isEmpty() || maxBytes <= 0) return ""
+            // Fast path: whole string already fits (avoids the scan for the
+            // overwhelmingly common small-payload case).
+            if (text.toByteArray(Charsets.UTF_8).size <= maxBytes) return text
+            var bytes = 0
+            var i = 0
+            while (i < text.length) {
+                val c = text[i]
+                val charBytes = when {
+                    c.code < 0x80 -> 1
+                    c.code < 0x800 -> 2
+                    Character.isHighSurrogate(c) && i + 1 < text.length -> 4
+                    else -> 3
+                }
+                if (bytes + charBytes > maxBytes) break
+                bytes += charBytes
+                i += if (charBytes == 4) 2 else 1
+            }
+            return text.substring(0, i)
+        }
+
+        /** [F-226] The user-visible truncation notice appended to a capped payload. */
+        private fun truncationMarker(original: String): String =
+            "\n\n[Content truncated at " +
+                "${MAX_MESSAGE_PARTS_JSON_BYTES / 1000} KB — original length " +
+                "${original.length} chars]"
+
+        /** [F-226] Byte-budgeted truncation of a plain string field (reasoning). */
+        internal fun buildTruncatedText(original: String): String {
+            val marker = truncationMarker(original)
+            val keep = takeByUtf8Bytes(original, MAX_MESSAGE_PARTS_JSON_BYTES - marker.toByteArray(Charsets.UTF_8).size)
+            return keep + marker
+        }
 
         internal fun buildTruncatedPartsJson(original: String): String {
-            val keep = original.take(MAX_MESSAGE_PARTS_JSON_LENGTH)
-            val marker = "\n\n[Content truncated at " +
-                "${MAX_MESSAGE_PARTS_JSON_LENGTH / 1000} KB — original length " +
-                "${original.length} chars]"
-            val combined = keep + marker
-            // Wrap in a single text part so JSONArray parsers (preview
-            // extractor, search, exporter) see a well-formed payload.
-            val textObj = org.json.JSONObject()
-                .put("type", "text")
-                .put("value", combined)
-            return org.json.JSONArray().put(textObj).toString()
+            val marker = truncationMarker(original)
+
+            fun wrap(text: String): String =
+                org.json.JSONArray()
+                    .put(org.json.JSONObject().put("type", "text").put("value", text))
+                    .toString()
+
+            // The wrapper is measured rather than estimated: JSON escaping of
+            // the kept prefix (`"` → `\"`, `\n` → `\n`, …) can inflate the
+            // output beyond the input budget, so start from the wrapper+marker
+            // overhead and shrink until the *encoded* payload actually fits.
+            val overhead = wrap(marker).toByteArray(Charsets.UTF_8).size
+            var budget = MAX_MESSAGE_PARTS_JSON_BYTES - overhead
+            var out = wrap(marker)
+            var guard = 0
+            while (budget > 0 && guard < 16) {
+                out = wrap(takeByUtf8Bytes(original, budget) + marker)
+                val size = out.toByteArray(Charsets.UTF_8).size
+                if (size <= MAX_MESSAGE_PARTS_JSON_BYTES) break
+                budget -= (size - MAX_MESSAGE_PARTS_JSON_BYTES)
+                guard++
+            }
+            if (out.toByteArray(Charsets.UTF_8).size > MAX_MESSAGE_PARTS_JSON_BYTES) {
+                // Pathological input (every char escapes): fall back to the
+                // marker alone, which is always well under the budget.
+                out = wrap(marker)
+            }
+            return out
         }
     }
 }

@@ -135,27 +135,70 @@ class MCPRepository(private val context: Context) {
 
     // -- Load / Save (servers.json is the source of truth) --
 
-    /** Re-read `servers.json` from disk and re-publish [servers]. */
+    /**
+     * Re-read `servers.json` from disk and re-publish [servers].
+     *
+     * [F-227] A file that exists but cannot be read or parsed is NOT treated as
+     * "zero servers". The old code returned an empty list for every failure mode
+     * (`readText` threw, invalid JSON, missing `mcpServers` key) and `load()`
+     * published that over the in-memory state — so a single truncated write (or
+     * a hand-edit typo) emptied the list, and the next [save] from any caller
+     * wrote the empty list back to disk permanently. Unreadable now means
+     * "keep what we have and leave the file alone"; only a genuinely absent or
+     * empty file yields an empty list. Compare ProviderRepository, which
+     * deliberately keeps its DB rows when the mirror is unreadable.
+     */
     fun load() {
-        _servers.value = readServersFile()
+        val parsed = readServersFile()
+        if (parsed == null) {
+            Log.w(TAG, "servers.json unreadable — keeping ${_servers.value.size} in-memory server(s)")
+            return
+        }
+        _servers.value = parsed.servers
+        // [F-227] The createdAt back-fill used to run *inside* the reader, so a
+        // read could silently mutate the file. Doing it here — after a
+        // successful parse, and only as an explicit follow-up — keeps the
+        // reader side-effect free (and unreachable from a failed parse).
+        if (parsed.needsPersist) save(parsed.servers)
     }
 
     /** Alias matching SkillRepository.reloadFromDisk() so callers read symmetrically. */
     fun reloadFromDisk() = load()
 
-    private fun readServersFile(): List<MCPServerConfig> {
+    /**
+     * Result of parsing `servers.json`.
+     *
+     * @param servers parsed servers, newest-first
+     * @param needsPersist true when entries lacked `createdAt` and were given
+     *   stable stamps that should be written back once
+     */
+    private data class ReadResult(
+        val servers: List<MCPServerConfig>,
+        val needsPersist: Boolean,
+    )
+
+    /**
+     * @return the parsed servers, or `null` when the file exists but could not
+     *   be read/parsed (the caller must NOT overwrite its state in that case).
+     *   An absent or blank file is a legitimate empty list. Pure read — never
+     *   writes (see [load] for the createdAt back-fill).
+     */
+    private fun readServersFile(): ReadResult? {
         val file = serversFile
-        if (!file.exists()) return emptyList()
+        if (!file.exists()) return ReadResult(emptyList(), needsPersist = false)
         val text = try { file.readText() } catch (e: Exception) {
             Log.w(TAG, "Failed to read servers.json: ${e.message}")
-            return emptyList()
+            return null
         }
-        if (text.isBlank()) return emptyList()
+        if (text.isBlank()) return ReadResult(emptyList(), needsPersist = false)
         val root = try { JSONObject(text) } catch (e: Exception) {
             Log.w(TAG, "servers.json is not valid JSON: ${e.message}")
-            return emptyList()
+            return null
         }
-        val obj = root.optJSONObject("mcpServers") ?: return emptyList()
+        val obj = root.optJSONObject("mcpServers") ?: run {
+            Log.w(TAG, "servers.json has no mcpServers object")
+            return null
+        }
         val out = mutableListOf<MCPServerConfig>()
         // [T-mcp-review-fixes-android] FIX 2: createdAt must be a STABLE recency
         // signal. Entries written by the CLI / JSON-import have no createdAt; we
@@ -181,11 +224,7 @@ class MCPRepository(private val context: Context) {
             idx++
         }
         val sorted = out.sortedByDescending { it.createdAt }
-        // Persist the freshly-assigned createdAt values once so subsequent reads
-        // are stable. Pass the list explicitly — _servers.value isn't updated
-        // until load() returns this.
-        if (needsPersist) save(sorted)
-        return sorted
+        return ReadResult(sorted, needsPersist)
     }
 
     /** Write [list] (defaults to current [servers]) to servers.json in mcpServers format. */
@@ -197,7 +236,17 @@ class MCPRepository(private val context: Context) {
         }
         val root = JSONObject().put("mcpServers", mcpServers)
         try {
-            serversFile.writeText(root.toString(2))
+            // [F-227] Write to a sibling temp file and rename over the target so
+            // a process death / storage-full mid-write can never leave a
+            // truncated servers.json behind — a truncated file used to parse as
+            // "zero servers" and then got persisted as the truth.
+            val tmp = File(mcpDir, "servers.json.tmp")
+            tmp.writeText(root.toString(2))
+            if (!tmp.renameTo(serversFile)) {
+                // Some filesystems refuse rename onto an existing path.
+                serversFile.writeText(root.toString(2))
+                tmp.delete()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to write servers.json: ${e.message}")
         }

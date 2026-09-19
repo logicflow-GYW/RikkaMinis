@@ -56,6 +56,80 @@ class SkillRepository(private val context: Context) {
          *  before the next export sweeps it. 24h matches iOS — long enough that
          *  any Save-to-Files / AirDrop / upload consumer has finished. */
         private const val EXPORT_TTL_MS = 24L * 3600 * 1000
+
+        /**
+         * [F-223] Rebuild a SKILL.md, preserving every frontmatter key that isn't
+         * one of the three managed ones. Pure string work (no Android deps) so it is
+         * covered by JVM tests — the same split
+         * [SubagentSkill.extractFrontmatterBlock] uses.
+         *
+         * Managed keys are replaced in place (keeping their position and any sibling
+         * keys); unmanaged keys are carried through verbatim. When [existing] has no
+         * frontmatter, a fresh 3-key block is emitted — identical to the pre-fix
+         * behaviour for that case.
+         */
+        internal fun mergeFrontmatter(
+            existing: String?,
+            name: String,
+            description: String,
+            version: String,
+            body: String,
+        ): String {
+            val raw = existing?.trimStart().orEmpty()
+            val src = raw.lines()
+            var frontmatterEnd = -1
+            if (raw.startsWith("---") && src.isNotEmpty()) {
+                for (i in 1 until src.size) {
+                    if (src[i].trim() == "---") {
+                        frontmatterEnd = i
+                        break
+                    }
+                }
+            }
+            // No frontmatter to preserve: emit the canonical 3-key block.
+            if (frontmatterEnd < 0) {
+                return buildString {
+                    appendLine("---")
+                    appendLine("name: $name")
+                    appendLine("description: $description")
+                    appendLine("version: $version")
+                    appendLine("---")
+                    append(body)
+                }
+            }
+            // Walk the frontmatter, swapping the managed keys in place and
+            // passing every other line (comments, subagent, max_turns,
+            // allowed_tools, ...) through verbatim.
+            val managed = mapOf(
+                "name" to name,
+                "description" to description,
+                "version" to version,
+            )
+            val seen = mutableSetOf<String>()
+            val fm = mutableListOf<String>()
+            for (i in 0 until frontmatterEnd) {
+                val line = src[i]
+                val colon = line.indexOf(':')
+                val key = if (colon > 0) line.substring(0, colon).trim().lowercase() else null
+                val newValue = if (key != null) managed[key] else null
+                if (key != null && newValue != null) {
+                    fm.add("$key: $newValue")
+                    seen.add(key)
+                } else {
+                    fm.add(line)
+                }
+            }
+            // Managed keys absent from the original block still need to exist.
+            for ((key, value) in managed) {
+                if (key !in seen) fm.add("$key: $value")
+            }
+            return buildString {
+                appendLine("---")
+                for (line in fm) appendLine(line)
+                appendLine("---")
+                append(body)
+            }
+        }
     }
 
     private val httpClient = OkHttpClient.Builder()
@@ -1499,15 +1573,24 @@ class SkillRepository(private val context: Context) {
     private fun writeSkillMd(skill: Skill) {
         val dir = File(skillsDir, skill.id)
         dir.mkdirs()
-        val content = buildString {
-            appendLine("---")
-            appendLine("name: ${skill.name}")
-            appendLine("description: ${skill.description}")
-            appendLine("version: ${skill.version}")
-            appendLine("---")
-            append(skill.body)
-        }
-        File(dir, "SKILL.md").writeText(content)
+        val file = File(dir, "SKILL.md")
+        // [F-223] Merge into the existing frontmatter instead of regenerating a
+        // 3-key block. `parseSkillMd` only extracts name/description/version, so
+        // the old rebuild silently dropped every frontmatter-only key —
+        // `subagent: true`, `max_turns`, `allowed_tools` — on ANY landing
+        // (add / update / import-overwrite / bundled upgrade). Since
+        // SubagentSkill.parseSubagentConfig reads those keys off disk, one
+        // rename via the skills UI made the skill vanish from the spawn_agent
+        // list. Preserving the original block keeps unknown keys intact.
+        val existing = runCatching { file.readText() }.getOrNull()
+        val content = mergeFrontmatter(
+            existing = existing,
+            name = skill.name,
+            description = skill.description,
+            version = skill.version,
+            body = skill.body,
+        )
+        file.writeText(content)
     }
 
     private fun readSkillMdBody(id: String): String {

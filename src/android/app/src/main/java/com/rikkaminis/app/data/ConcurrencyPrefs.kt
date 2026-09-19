@@ -12,9 +12,8 @@ import android.content.SharedPreferences
  * configurable + observable so the user can run with 2 for a while, read the
  * slot occupancy, then evaluate widening to 3.
  *
- * Mirrors the FastModePrefs pattern: [prime] captures the application context
- * once at app startup (MinisApp.onCreate) and warms a volatile cache; the
- * context-free [maxConcurrentSessions] is then safe to call from any layer
+ * Mirrors the FastModePrefs pattern: [prime] warms a volatile cache from
+ * persisted state once at app startup (MinisApp.onCreate); the context-free [maxConcurrentSessions] is then safe to call from any layer
  * (sandbox singletons etc.) that has no Context. The value is read once at
  * prime time and held until the next process start, so a change applies the
  * next time the app process launches — safe, no runtime slot resizing.

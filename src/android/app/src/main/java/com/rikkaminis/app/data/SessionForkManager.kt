@@ -107,6 +107,15 @@ class SessionForkManager(
                     partsJson = msg.partsJson,
                     tokenUsage = msg.tokenUsage,
                     reasoningContent = msg.reasoningContent,
+                    // [F-233] appendMessage accepts 7 business fields; this copy
+                    // used to pass only 4, silently dropping the usage
+                    // attribution and the terminal error sticker. Consequence:
+                    // the branch session's usage records fell back to the
+                    // session's *current* model (wrong attribution), and
+                    // ChatTranscriptRebuild's error sticker vanished in the copy.
+                    usageModelId = msg.usageModelId,
+                    usageEntryId = msg.usageEntryId,
+                    errorInfo = msg.errorInfo,
                 )
                 oldToNewId[msg.id] = newMsg.id
                 oldToNewSort[msg.id] = newMsg.sortOrder

@@ -138,8 +138,13 @@ interface ChatDao {
     @Query("DELETE FROM messages WHERE session_id = :sessionId")
     suspend fun deleteMessages(sessionId: String)
 
-    @Query("DELETE FROM messages WHERE session_id = :sessionId AND sort_order >= :keepCount")
-    suspend fun deleteMessagesAfter(sessionId: String, keepCount: Int)
+    // [F-234] The bound is a sort_order BOUNDARY, not a count of rows to keep:
+    // every row with sort_order >= fromSortOrder is deleted, including the row
+    // AT fromSortOrder. The old name (`keepCount`) invited the opposite reading
+    // — "keep this many rows" — which would silently delete the wrong range.
+    // All 6 production call sites already pass sort_order semantics.
+    @Query("DELETE FROM messages WHERE session_id = :sessionId AND sort_order >= :fromSortOrder")
+    suspend fun deleteMessagesAfter(sessionId: String, fromSortOrder: Int)
 
     @Query("SELECT COUNT(*) FROM messages")
     suspend fun totalMessageCount(): Int

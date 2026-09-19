@@ -1264,6 +1264,15 @@ class ProviderRepository(private val context: Context) {
                 isHidden = prior?.isHidden ?: true,
                 uuid = prior?.id ?: java.util.UUID.randomUUID().toString(),
                 userModifiedAt = prior?.userModifiedAt,
+                // [F-222] costTier is user-authored metadata (set from the
+                // group member sheet) and MUST survive a model refresh — it is
+                // the sole sort key for RoutingStrategy.cheapestFirst
+                // (GroupRouter: `costTier ?: Int.MAX_VALUE`). Dropping it here
+                // demoted every entry to "most expensive" after one Refresh,
+                // silently inverting cheapest-first routing. Same family as
+                // the four-way sync (model/entity/toSnapshot/toProviderConfig)
+                // — this hand-written constructor is the 5th landing point.
+                costTier = prior?.costTier,
             )
         }
 
