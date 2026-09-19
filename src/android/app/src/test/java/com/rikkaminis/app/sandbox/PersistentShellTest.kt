@@ -188,10 +188,11 @@ class PersistentShellTest {
     @Test
     fun `truncateOutput handles unicode text`() {
         // [audit-0919 F-215] Budget is BYTES: 你好世界 = 12 UTF-8 bytes, so a
-        // 6-byte budget fits exactly one 3-byte char.
+        // 6-byte budget fits exactly two 3-byte chars.
         val sb = StringBuilder()
         assertTrue(internalTruncateOutput(sb, "你好世界", 6))
-        assertEquals("你", sb.toString())
+        assertEquals("你好", sb.toString())
+        assertEquals(6, TerminalSanitizer.utf8Length(sb.toString()))
     }
 
     @Test
