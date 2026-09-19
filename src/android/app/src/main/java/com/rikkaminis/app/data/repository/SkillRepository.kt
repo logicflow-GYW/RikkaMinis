@@ -2,6 +2,7 @@ package com.rikkaminis.app.data.repository
 
 import android.content.Context
 import com.rikkaminis.app.tools.SkillInfo
+import com.rikkaminis.app.tools.SubagentSkill
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.net.Uri
@@ -106,6 +107,14 @@ class SkillRepository(private val context: Context) {
         val installedAt: Long = System.currentTimeMillis(),
         val updatedAt: Long = System.currentTimeMillis(),
         override val body: String = "",
+        /**
+         * [fix/subagent-frontmatter] Frontmatter block of the on-disk SKILL.md
+         * (`---` … `---` included). [body] is frontmatter-stripped by
+         * [parseSkillMd], so frontmatter-only fields — `subagent: true`,
+         * `max_turns`, `allowed_tools` — must ride on this field or
+         * SubagentSkill can never see them. Populated by [loadAll] from disk.
+         */
+        override val frontmatter: String = "",
         /** Original GitHub URL when importSource is URL (null otherwise). */
         val sourceURL: String? = null,
         /** Cumulative read count of this skill's SKILL.md; normalized to 0–100 after exceeding 1000. */
@@ -1377,6 +1386,11 @@ class SkillRepository(private val context: Context) {
         while (cursor.moveToNext()) {
             val id = cursor.getString(cursor.getColumnIndexOrThrow("id"))
             val body = readSkillMdBody(id)
+            // [fix/subagent-frontmatter] Frontmatter-only fields (subagent:
+            // true, max_turns, allowed_tools) never reach `body` — parseSkillMd
+            // strips the block — so read it separately for consumers that
+            // re-inspect frontmatter (SubagentSkill.parseSubagentConfig).
+            val frontmatter = readSkillMdFrontmatter(id)
             val sourceUrlIdx = cursor.getColumnIndex("source_url")
             val useCountIdx = cursor.getColumnIndex("use_count")
             var description = cursor.getString(cursor.getColumnIndexOrThrow("description"))
@@ -1413,6 +1427,7 @@ class SkillRepository(private val context: Context) {
                 installedAt = cursor.getLong(cursor.getColumnIndexOrThrow("installed_at")),
                 updatedAt = cursor.getLong(cursor.getColumnIndexOrThrow("updated_at")),
                 body = body,
+                frontmatter = frontmatter,
                 sourceURL = if (sourceUrlIdx >= 0 && !cursor.isNull(sourceUrlIdx)) cursor.getString(sourceUrlIdx) else null,
                 useCount = if (useCountIdx >= 0) cursor.getDouble(useCountIdx) else 0.0,
             ))
@@ -1500,6 +1515,21 @@ class SkillRepository(private val context: Context) {
         if (!file.exists()) return ""
         val parsed = parseSkillMd(file.readText())
         return parsed?.body ?: ""
+    }
+
+    /**
+     * [fix/subagent-frontmatter] Raw frontmatter block of the on-disk SKILL.md
+     * (`---` … `---` inclusive), or "" when the file has no frontmatter.
+     * The extraction itself lives in [SubagentSkill] so the part that used to
+     * break silently — frontmatter never reaching the parser — is covered by
+     * JVM unit tests; this class needs Android's Context/SQLite and can't be
+     * unit-tested directly.
+     */
+    private fun readSkillMdFrontmatter(id: String): String {
+        val file = File(skillsDir, "$id/SKILL.md")
+        if (!file.exists()) return ""
+        val raw = runCatching { file.readText() }.getOrNull() ?: return ""
+        return SubagentSkill.extractFrontmatterBlock(raw)
     }
 
     data class ParsedSkill(

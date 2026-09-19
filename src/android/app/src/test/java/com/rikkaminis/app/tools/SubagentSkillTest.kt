@@ -13,14 +13,28 @@ class SubagentSkillTest {
     /**
      * Minimal skill representation for test purposes.
      * Implements [SkillInfo] so it can be passed to SubagentSkill methods.
+     *
+     * [body] + [frontmatter] mirror the production shape: SkillRepository
+     * stores the markdown body with frontmatter STRIPPED and keeps the block
+     * separately, which is exactly the split that used to break sub-agent
+     * detection. Callers that only have raw markdown keep passing it as [body]
+     * (see `makeSkill`), which is why the fallback matters.
      */
     private data class TestSkill(
         override val name: String = "test-skill",
         override val description: String = "A test skill",
         override val body: String = "",
+        override val frontmatter: String = "",
     ) : SkillInfo
 
     private fun makeSkill(body: String) = TestSkill(body = body)
+
+    /** Raw-markdown skill: frontmatter rides inside [body], as in the old shape. */
+    private fun makeRawSkill(markdown: String) = TestSkill(body = markdown)
+
+    /** Production shape: frontmatter stripped out of [body] into its own field. */
+    private fun makeProductionSkill(body: String, frontmatter: String) =
+        TestSkill(body = body, frontmatter = frontmatter)
 
     private fun makeTool(name: String) = AgentToolDefinition(
         name = name,
@@ -235,5 +249,104 @@ class SubagentSkillTest {
     fun `system prompt returns raw body when no frontmatter`() {
         val skill = makeSkill("Plain instructions without frontmatter.")
         assertEquals("Plain instructions without frontmatter.", SubagentSkill.buildSystemPrompt(skill))
+    }
+
+    // ── frontmatter hand-off (production shape) ──────────────────────────
+
+    /**
+     * Regression for the dead-feature bug: a production Skill's `body` has the
+     * frontmatter stripped by SkillRepository.parseSkillMd, and the block lives
+     * on `frontmatter`. Parsing `body` alone made isSubagent permanently false,
+     * so every `spawn_agent` call was answered with "add `subagent: true`" —
+     * an instruction no installed skill could satisfy.
+     */
+    @Test
+    fun `frontmatter field alone marks a skill as subagent`() {
+        val skill = makeProductionSkill(
+            body = "You are a probe. Report what you see.",
+            frontmatter = """
+                ---
+                name: probe
+                description: probe
+                subagent: true
+                max_turns: 5
+                allowed_tools: [file_write]
+                ---
+                """.trimIndent(),
+        )
+        val config = SubagentSkill.parseSubagentConfig(skill)
+        assertTrue(config.isSubagent)
+        assertEquals(5, config.maxTurns)
+        assertEquals(setOf("file_write"), config.allowedTools)
+    }
+
+    @Test
+    fun `stripped body with no frontmatter is not a subagent`() {
+        val skill = makeProductionSkill(body = "Plain instructions.", frontmatter = "")
+        assertFalse(SubagentSkill.parseSubagentConfig(skill).isSubagent)
+    }
+
+    @Test
+    fun `frontmatter field wins when body also carries a block`() {
+        // `frontmatter` is the authoritative on-disk block; a leftover block in
+        // `body` must not override it.
+        val skill = TestSkill(
+            body = "---\nsubagent: true\n---\nBody text",
+            frontmatter = "---\nsubagent: false\n---",
+        )
+        assertFalse(SubagentSkill.parseSubagentConfig(skill).isSubagent)
+    }
+
+    @Test
+    fun `extractFrontmatterBlock keeps delimiters and stops at the close marker`() {
+        val raw = "---\nname: a\nsubagent: true\n---\nBody\n---\nnot frontmatter"
+        assertEquals(
+            "---\nname: a\nsubagent: true\n---",
+            SubagentSkill.extractFrontmatterBlock(raw),
+        )
+    }
+
+    @Test
+    fun `extractFrontmatterBlock is empty for body-only content`() {
+        assertEquals("", SubagentSkill.extractFrontmatterBlock("plain body\nsecond line"))
+    }
+
+    @Test
+    fun `extractFrontmatterBlock is empty when the block never closes`() {
+        assertEquals("", SubagentSkill.extractFrontmatterBlock("---\nname: a\nsubagent: true"))
+    }
+
+    // ── context fragments ────────────────────────────────────────────────
+
+    @Test
+    fun `system prompt appends context fragments after the instructions in caller order`() {
+        val skill = makeSkill("You are a probe.")
+        val prompt = SubagentSkill.buildSystemPrompt(
+            skill,
+            listOf(
+                "Skills:\n  <skill>alpha</skill>",
+                "Global memory (GLOBAL.md — read-only):\nUser prefers Chinese.",
+            ),
+        )
+        assertEquals(
+            "You are a probe.\n\n" +
+                "Skills:\n  <skill>alpha</skill>\n\n" +
+                "Global memory (GLOBAL.md — read-only):\nUser prefers Chinese.",
+            prompt,
+        )
+    }
+
+    @Test
+    fun `system prompt skips blank and whitespace-only fragments`() {
+        val skill = makeSkill("You are a probe.")
+        val prompt = SubagentSkill.buildSystemPrompt(skill, listOf("", "   ", "kept", "\n"))
+        assertEquals("You are a probe.\n\nkept", prompt)
+    }
+
+    @Test
+    fun `system prompt without fragments is byte-identical to the skill body`() {
+        val skill = makeSkill("You are a probe.")
+        assertEquals("You are a probe.", SubagentSkill.buildSystemPrompt(skill))
+        assertEquals("You are a probe.", SubagentSkill.buildSystemPrompt(skill, emptyList()))
     }
 }

@@ -88,7 +88,22 @@ internal object HeadlessChatRunner {
             val resolvedModel = modelId
                 ?: app.providerRepository.allVisibleEntries().firstOrNull()?.baseModel?.id
                 ?: "unknown"
-            val s = app.chatRepository.createSession(modelId = resolvedModel, title = null)
+            // [fix/headless-thinking-default] A headless session used to be
+            // created with thinkingOverride = null → the fresh VM's default
+            // (OFF), silently downgrading the level the user configured for
+            // the group they dispatch with (this install: "max" → OFF). The
+            // in-app path folds the bound group's defaultThinkingLevel into
+            // the row at insert time (T312 applyGroupSessionDefaults +
+            // createSession(thinkingLevel = …)); do the same here so a
+            // dispatched session reasons at the user's configured default.
+            val defaultThinking = app.providerRepository.defaultPrimaryGroupId
+                ?.let { app.providerRepository.group(it) }
+                ?.defaultThinkingLevel
+            val s = app.chatRepository.createSession(
+                modelId = resolvedModel,
+                title = null,
+                thinkingLevel = defaultThinking?.name,
+            )
             // Mark source so the UI session list shows it came from RPC.
             app.chatRepository.dao.updateSource(s.id, "debug")
             s.id

@@ -405,9 +405,20 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
     // 2. Parse subagent config
     val config = SubagentSkill.parseSubagentConfig(skill)
     if (!config.isSubagent) {
+        // Answer with the skills that ARE sub-agents instead of a bare
+        // rejection — same "give the model a way back" rule as
+        // UnknownToolMessage. An empty list is itself the useful signal.
+        val candidates = repo.skills.value
+            .filter { SubagentSkill.parseSubagentConfig(it).isSubagent }
+            .map { it.name }
+        val hint = if (candidates.isEmpty()) {
+            "No installed skill declares `subagent: true` yet."
+        } else {
+            "Sub-agent-capable skills: ${candidates.joinToString(", ")}."
+        }
         return ToolExecutionResult(
             "Error: Skill '$skillName' is not a sub-agent skill. " +
-                "Add `subagent: true` to its SKILL.md frontmatter to enable sub-agent mode.",
+                "Add `subagent: true` to its SKILL.md frontmatter to enable sub-agent mode. $hint",
             false, toolTitle = title,
         )
     }
@@ -422,7 +433,27 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
     }
 
     // 4. Build system prompt + history
-    val systemPrompt = SubagentSkill.buildSystemPrompt(skill)
+    // [fix/subagent-context] A sub-agent used to get the bare skill body — no
+    // skills disclosure, no memory — while the cross-session `send` path
+    // (which reuses the main prompt) had both, so delegated work answered as
+    // if the user had no conventions and no history. Give the sub-agent the
+    // same standing context the main loop injects, minus what only describes
+    // the MAIN agent's surface: the identity/persona block, the tool-
+    // convention text (the sub-agent's tool set is filtered — no shell, no
+    // browser, no spawn), and the integration / MCP disclosures (reached
+    // through shell only). Memory fragments stay behind the session's memory
+    // toggle, mirroring the tool gate: memory off ⇒ neither tools nor
+    // fragments, so the sub-agent can't be handed context it can't act on.
+    val memoryOn = _memoryEnabled.value
+    val subagentContext = buildList {
+        skillRepository?.skillPromptFragment(activeSessionId)?.let(::add)
+        if (memoryOn) {
+            memoryRepository?.loadGlobalMemoryFragment()?.let(::add)
+            memoryRepository?.loadRecentDailyMemoryFragment()?.let(::add)
+            memoryRepository?.loadRollupFragment()?.let(::add)
+        }
+    }
+    val systemPrompt = SubagentSkill.buildSystemPrompt(skill, subagentContext)
     val provider = currentProvider ?: return ToolExecutionResult(
         "Error: No active provider available", false, toolTitle = title,
     )
@@ -453,7 +484,12 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
                 maxTokens = config.maxOutputTokens,
                 temperature = null,
                 tools = subagentTools,
-                thinkingLevel = ThinkingLevel.OFF,
+                // [fix/subagent-thinking] Was hardcoded OFF — a session
+                // configured for thinking (group default, e.g. "max") spawned
+                // sub-agents that reasoned at none. Inherit the dispatching
+                // session's level, same "no silent downgrade on a dispatch
+                // path" rule as the `send` fix in HeadlessChatRunner.
+                thinkingLevel = _thinkingLevel.value,
             )
         },
         // [audit-0916] The sub-agent's own filtered list is passed in so a

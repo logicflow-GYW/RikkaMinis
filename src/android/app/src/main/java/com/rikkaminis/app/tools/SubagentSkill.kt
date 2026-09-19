@@ -13,6 +13,18 @@ interface SkillInfo {
     val name: String
     val description: String
     val body: String
+
+    /**
+     * The skill's SKILL.md frontmatter block (`---` delimiters included), or
+     * "" when the source had none.
+     *
+     * [body] is frontmatter-STRIPPED — `SkillRepository.parseSkillMd()` drops
+     * the block before anything is stored — so every frontmatter field other
+     * than the three managed ones (name / description / version) is reachable
+     * only through this property. Defaulting to "" keeps test stubs and
+     * raw-markdown callers working: [parseSubagentConfig] falls back to [body].
+     */
+    val frontmatter: String get() = ""
 }
 
 /**
@@ -65,7 +77,9 @@ object SubagentSkill {
             "and budget. The sub-agent runs independently and returns its final " +
             "result. Use this to delegate complex sub-tasks to a focused agent. " +
             "The skill must be defined with `subagent: true` in its SKILL.md " +
-            "frontmatter and must already be installed and enabled. " +
+            "frontmatter and must already be installed and enabled; an error " +
+            "reply lists the skills that are. Find candidates by searching " +
+            "/var/minis/skills/*/SKILL.md for `subagent: true`. " +
             "Recursive spawn_agent is forbidden.",
         parameters = mapOf(
             "tool_title" to AgentToolParam(
@@ -88,8 +102,9 @@ object SubagentSkill {
     // ── Config parsing ───────────────────────────────────────────────────
 
     /**
-     * Parse sub-agent configuration from the skill's body (SKILL.md content).
-     * Recognises YAML frontmatter fields:
+     * Parse sub-agent configuration from a skill's frontmatter (see
+     * [SkillInfo.frontmatter]; falls back to [SkillInfo.body] for callers that
+     * only hold raw markdown). Recognises YAML frontmatter fields:
      *   subagent: true
      *   max_turns: 12
      *   max_output_tokens: 4096
@@ -99,20 +114,23 @@ object SubagentSkill {
      * `subagent: true` in the frontmatter — existing skills are unaffected.
      */
     fun parseSubagentConfig(skill: SkillInfo): SubagentConfig {
-        val body = skill.body
-        if (body.isBlank()) return SubagentConfig()
+        // [fix/subagent-frontmatter] Parse the FRONTMATTER block, not `body`.
+        // SkillRepository stores `body` with the frontmatter already stripped
+        // (parseSkillMd), so a production Skill's `body` never contains
+        // `subagent:` — reading it made isSubagent permanently false and the
+        // whole spawn_agent path unreachable ("add `subagent: true`" was an
+        // instruction no skill could satisfy). Falling back to `body` keeps
+        // the pure-function contract for callers that only hold raw markdown
+        // (unit tests, future import paths).
+        val source = skill.frontmatter.ifBlank { skill.body }
+        if (source.isBlank()) return SubagentConfig()
 
-        // Extract frontmatter between --- markers
-        val lines = body.lines()
-        if (lines.size < 2 || !lines[0].trim().startsWith("---")) return SubagentConfig()
-
-        val endIdx = lines.subList(1, lines.size)
-            .indexOfFirst { it.trim().startsWith("---") }
-            .takeIf { it >= 0 }
-            ?.plus(1)
-        if (endIdx == null) return SubagentConfig()
-
-        val frontmatter = lines.subList(1, endIdx)
+        // Extract the frontmatter block, then drop both `---` delimiters.
+        val block = extractFrontmatterBlock(source)
+        if (block.isBlank()) return SubagentConfig()
+        val blockLines = block.lines()
+        if (blockLines.size < 3) return SubagentConfig()
+        val frontmatter = blockLines.subList(1, blockLines.size - 1)
         var isSubagent = false
         var maxTurns = DEFAULT_MAX_TURNS
         var maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS
@@ -179,11 +197,38 @@ object SubagentSkill {
     }
 
     /**
-     * Build the system prompt for a sub-agent from the skill body.
-     * Strips frontmatter, returns the raw body text.
+     * Build the system prompt for a sub-agent: the skill's own instructions
+     * plus any standing context fragments the caller injects.
+     *
+     * [contextFragments] is the sub-agent's share of the context the main
+     * loop puts in ITS system prompt — the skills disclosure and, when memory
+     * is on for the session, the global / daily / rollup memory fragments.
+     * Empty or blank fragments are skipped, and an empty list produces exactly
+     * the pre-change output (skill body only), so existing callers and tests
+     * are unaffected.
+     *
+     * Fragments are appended in the caller's order after a single blank line.
+     * The prompt is rebuilt on every spawn, so a stable shape keeps provider
+     * prefix caching useful across a sub-agent's turns.
+     */
+    fun buildSystemPrompt(skill: SkillInfo, contextFragments: List<String> = emptyList()): String {
+        val instructions = skillInstructions(skill)
+        val extras = contextFragments.map { it.trim() }.filter { it.isNotEmpty() }
+        if (extras.isEmpty()) return instructions
+        return buildString {
+            append(instructions)
+            for (extra in extras) {
+                append("\n\n")
+                append(extra)
+            }
+        }
+    }
+
+    /**
+     * Strip frontmatter from the skill body and return the instruction text.
      * Falls back to the skill description when the body is only frontmatter.
      */
-    fun buildSystemPrompt(skill: SkillInfo): String {
+    private fun skillInstructions(skill: SkillInfo): String {
         val body = skill.body
         if (body.isBlank()) return skill.description
 
@@ -206,6 +251,25 @@ object SubagentSkill {
             }
         }
         return body
+    }
+
+    /**
+     * The frontmatter block of a SKILL.md document (`---` … `---` inclusive),
+     * or "" when the document has no leading frontmatter / no closing marker.
+     *
+     * Pure string work on purpose: `SkillRepository` (Android-dependent, not
+     * JVM-unit-testable) is the production source of the block, and this is
+     * the one piece of that hand-off that silently broke before — keeping the
+     * extraction here puts it under JVM tests.
+     */
+    fun extractFrontmatterBlock(raw: String): String {
+        if (raw.isBlank()) return ""
+        val lines = raw.trimStart().lines()
+        if (lines.isEmpty() || !lines[0].trim().startsWith("---")) return ""
+        for (i in 1 until lines.size) {
+            if (lines[i].trim() == "---") return lines.subList(0, i + 1).joinToString("\n")
+        }
+        return ""
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
