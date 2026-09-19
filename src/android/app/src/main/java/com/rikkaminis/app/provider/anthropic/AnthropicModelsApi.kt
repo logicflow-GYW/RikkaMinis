@@ -1,5 +1,7 @@
 package com.rikkaminis.app.provider.anthropic
 
+import com.rikkaminis.app.provider.executeOrCancel
+
 import android.content.Context
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.provider.ModelsDevApi
@@ -89,7 +91,12 @@ object AnthropicModelsApi {
             android.util.Log.d("AnthropicModels", "Fetching models (level=$idx): ${request.url.scheme}://${request.url.host}${request.url.encodedPath} headerKeys=${request.headers.names()} authPresent=${request.headers["Authorization"] != null}")
 
             val response: Response = try {
-                client.newCall(request).execute()
+                // [FIX-1 / F-209] Cancellable execute — see provider/CallCancellation.kt.
+                // Matters most here: this is a per-level fallback loop, so an
+                // uncancellable fetch stacked its cost once per candidate base.
+                client.newCall(request).executeOrCancel()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 android.util.Log.e("AnthropicModels", "Fetch error (level=$idx): ${e.message}")
                 continue

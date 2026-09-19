@@ -1,5 +1,7 @@
 package com.rikkaminis.app.provider.gemini
 
+import com.rikkaminis.app.provider.executeOrCancel
+
 import android.content.Context
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.provider.ModelsDevApi
@@ -59,6 +61,12 @@ object GeminiModelsApi {
         cloudCodeFallback: Boolean = false,
         context: Context? = null,
         forceRefresh: Boolean = false,
+        // [FIX-1 / F-196] True when this instance authenticates with OAuth. The
+        // documented 403 fallback belongs to exactly that case (a Cloud Code
+        // Assist token without the generative-language scope); an API-key 403
+        // means the key was rejected, and answering it with the static catalog
+        // hides that from the user.
+        oauthCredential: Boolean = false,
     ): List<LLMModel> = withContext(Dispatchers.IO) {
         if (cloudCodeFallback) return@withContext LLMModel.allGemini
 
@@ -78,7 +86,12 @@ object GeminiModelsApi {
         // model-list refresh) propagated out of fetchModels instead of
         // returning the built-in fallback the way every HTTP error path does.
         val response = try {
-            client.newCall(builder.build()).execute()
+            // [FIX-1 / F-209] Cancellable execute — see provider/CallCancellation.kt.
+            client.newCall(builder.build()).executeOrCancel()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // A cancelled fetch must unwind, not masquerade as a network error
+            // and hand back the builtin list.
+            throw e
         } catch (e: Exception) {
             android.util.Log.w(TAG, "models fetch failed, using builtin list: ${e.message}")
             return@withContext LLMModel.allGemini
@@ -87,8 +100,28 @@ object GeminiModelsApi {
             val body = response.body?.string() ?: return@withContext LLMModel.allGemini
 
             if (!response.isSuccessful) {
-                if (context != null && (response.code == 401 || response.code == 403)) {
-                    cache.invalidate(context, cacheKey)
+                // [FIX-1 / F-196] 401/403 is an AUTH answer, not "this endpoint
+                // does not do model lists". Returning the builtin catalog for it
+                // made a revoked key, a WAF block or a regional denial look like
+                // a successful refresh whose result happened to be the static
+                // list — the user got no signal and the UI reported success. The
+                // 403 fallback exists for one specific case: an OAuth token that
+                // carries no generative-language scope (Cloud Code Assist), where
+                // the builtin list is genuinely the best answer. Restrict it to
+                // that case and let an api-key 401/403 surface as a failure.
+                if (response.code == 401 || response.code == 403) {
+                    if (context != null) cache.invalidate(context, cacheKey)
+                    if (oauthCredential) {
+                        // The documented case: OAuth without the
+                        // generative-language scope. Builtin list is the best
+                        // available answer, matching iOS.
+                        return@withContext LLMModel.allGemini
+                    }
+                    android.util.Log.w(
+                        TAG,
+                        "models fetch auth failure code=${response.code} — not falling back to builtin list: ${body.take(300)}",
+                    )
+                    return@withContext emptyList()
                 }
                 return@withContext LLMModel.allGemini
             }

@@ -7,11 +7,9 @@ import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.provider.ModelsDevApi
 import com.rikkaminis.app.provider.ProviderModelsCache
 import com.rikkaminis.app.provider.applyUserAgentOverride
+import com.rikkaminis.app.provider.executeOrCancel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -65,18 +63,19 @@ object OpenAIModelsApi {
         // The completion hook cancels the Call, which makes `execute()` throw
         // immediately; the catch below asks the coroutine whether *it* is still
         // alive and only falls back if it is.
+        //
+        // [FIX-1 / F-209] This was the ORIGINAL of that idiom and the only
+        // place it lived; four sibling fetchers kept the bare execute(). The
+        // hook now lives in provider/CallCancellation.kt and every fetcher —
+        // including this one — calls it, so there is one implementation instead
+        // of five copies of which one was correct.
         val call = client.newCall(request)
         val response = try {
-            currentCoroutineContext().job.invokeOnCompletion { cause ->
-                if (cause is CancellationException) call.cancel()
-            }
-            call.execute()
+            call.executeOrCancel()
+        } catch (e: CancellationException) {
+            // The caller must unwind, not fall back.
+            throw e
         } catch (_: Throwable) {
-            // OkHttp reports a cancelled Call as IOException("Canceled"), not
-            // CancellationException — so translate: if *our* job is gone,
-            // rethrow as cancellation (the caller must unwind, not fall back),
-            // otherwise treat it as an ordinary fetch failure.
-            currentCoroutineContext().ensureActive()
             return@withContext fallback
         }
         // [fix/audit-s4m1] try/finally guarantees close across every early

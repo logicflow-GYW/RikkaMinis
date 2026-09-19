@@ -55,5 +55,12 @@ internal fun ChatViewModel.streamChatTurnOffloaded(
         imageParts = imageParts,
         tools = tools,
         thinkingLevel = thinkingLevel,
+        // [FIX-1 / F-191] The Enhanced Cache toggle used to be stamped onto the
+        // provider object in AgentLoopEngine, but this path rebuilds its
+        // provider inside :modelservice — the stamped object never sent a
+        // request. Read the toggle from the ViewModel (this extension runs on
+        // it) and carry it across the boundary instead, so the worker can stamp
+        // the provider that actually talks to the API.
+        enhancedCache = enhancedCacheEnabled.value,
     )
 }

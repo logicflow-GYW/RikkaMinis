@@ -108,6 +108,18 @@ class OpenAIProvider constructor(
 
     companion object {
         /**
+         * [FIX-1 / F-186] Ceiling for a generated-image download we initiate
+         * ourselves (the `url` branch of parseImageGenerationsResult). The
+         * b64 branch is bounded by the response body; this one is not, so we
+         * pick the number. 16 MiB comfortably covers a 4096x4096 PNG from any
+         * current image model while staying well inside a phone's per-process
+         * heap budget — and, like ArtifactBackupScope.MAX_FILE_BYTES, an
+         * over-limit payload is skipped with a log line rather than truncated,
+         * because a truncated image is worse than a missing one.
+         */
+        private const val MAX_GENERATED_IMAGE_BYTES = 16L * 1024 * 1024
+
+        /**
          * [T-android-stale-conn-retry-hang] Streaming time-to-first-byte
          * budget: response HEADERS must arrive within this window. Does NOT
          * bound the SSE body — a flowing stream stays unlimited. This is the
@@ -385,6 +397,26 @@ class OpenAIProvider constructor(
     /** Detect OpenRouter base URL. */
     private val isOpenRouter: Boolean = basePath.contains("openrouter.ai")
 
+    /**
+     * [FIX-1 / F-183] Whether this endpoint uses OpenAI's renamed
+     * `max_completion_tokens` field instead of the classic `max_tokens`.
+     *
+     * Whitelist, not a default. The rename shipped with the reasoning-model
+     * generation and is honoured by OpenAI's own API; every other OpenAI-shaped
+     * server — including the gateways that track OpenAI closely — still
+     * implements the Chat-Completions schema where the field is `max_tokens`.
+     * Getting this backwards produces a 400 that says nothing about which field
+     * was wrong, so the safe default is the field name that has been accepted
+     * for years.
+     *
+     * Deliberately ONE host. openrouter.ai is NOT here even though it is a
+     * first-class gateway: the previous code sent it `max_tokens` and there is
+     * no evidence it rejects that, so adding it would be an unforced behaviour
+     * change. Add a host only with a reason (a documented rename or an observed
+     * rejection of `max_tokens`), never by inference from the provider name.
+     */
+    private val usesMaxCompletionTokens: Boolean = basePath.contains("api.openai.com")
+
     /** Detect DashScope (Alibaba Qwen) base URL. */
     private val isDashScope: Boolean = basePath.contains("dashscope")
 
@@ -570,7 +602,7 @@ class OpenAIProvider constructor(
         val body = if (usesChatCompletionsAPI) {
             buildRequestBody(messages, systemPrompt, maxTokens, stream = true, temperature = temperature, imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel)
         } else {
-            buildResponsesAPIBody(messages, systemPrompt, maxTokens, stream = true, tools = tools, thinkingLevel = thinkingLevel)
+            buildResponsesAPIBody(messages, systemPrompt, maxTokens, stream = true, temperature = temperature, tools = tools, thinkingLevel = thinkingLevel)
         }
         // T302: serialize the request body exactly once. Pre-T302 we called
         // body.toString() three times per request (debug log + OAuth byte
@@ -1577,7 +1609,32 @@ class OpenAIProvider constructor(
                         // skipped it and leaked the connection instead of
                         // returning it to the pool.
                         client.newCall(dlReq).execute().use { dlResp ->
-                            val dlBytes = dlResp.body?.bytes()
+                            // [FIX-1 / F-186] This is the only place we issue a
+                            // SECOND, self-initiated download on behalf of a
+                            // provider response, so the size ceiling has to be
+                            // ours. `body?.bytes()` read the whole thing into
+                            // memory with no bound at all — a relay that
+                            // answered an images request with a large (or
+                            // deliberately unbounded) payload could OOM the
+                            // process. Same practice as
+                            // ArtifactBackupScope.MAX_FILE_BYTES: declare the
+                            // ceiling, skip and log when exceeded.
+                            val declaredLen = dlResp.body?.contentLength() ?: -1L
+                            if (declaredLen > MAX_GENERATED_IMAGE_BYTES) {
+                                com.rikkaminis.app.logging.AppLogger.warning(
+                                    "OpenAIProvider",
+                                    "[ModelUseRoute] image download skipped: declared ${declaredLen}B exceeds ${MAX_GENERATED_IMAGE_BYTES}B",
+                                )
+                                continue
+                            }
+                            // contentLength is -1 for chunked responses, so the
+                            // declared check alone is not enough: read at most
+                            // ceiling+1 bytes and treat an overflow as too big.
+                            val dlBytes = dlResp.body?.source()?.let { src ->
+                                val limit = MAX_GENERATED_IMAGE_BYTES + 1
+                                val read = src.readByteArray(limit)
+                                if (read.size > MAX_GENERATED_IMAGE_BYTES) null else read
+                            }
                             val ctMime = dlResp.header("Content-Type")
                             if (dlBytes != null && dlBytes.isNotEmpty()) {
                                 val mime = hintMime ?: ctMime ?: detectImageMime(dlBytes)
@@ -1632,10 +1689,27 @@ class OpenAIProvider constructor(
         // Defense-in-depth clamp (see AnthropicProvider): upstream
         // dynamicMaxTokens() is in range; guard out-of-band callers.
         val safeMaxTokens = clampOutboundMaxTokens(maxTokens, effectiveMaxOutputTokens(model))
-        if (isOpenRouter) {
-            body.put("max_tokens", safeMaxTokens)
-        } else {
+        // [FIX-1 / F-183] The old split was `isOpenRouter ? max_tokens :
+        // max_completion_tokens` — i.e. everything that is NOT openrouter.ai got
+        // `max_completion_tokens`, including every third-party relay. On this
+        // device that meant 100% of traffic: the observed endpoints were
+        // llmhost.net / api.senseaudio.cn / agentrouter.org / token.sensenova.cn,
+        // none of which is openrouter.ai. `max_completion_tokens` is an
+        // OpenAI-first-party rename; relays that proxy the classic
+        // Chat-Completions schema frequently reject it, and the failure mode is
+        // a 400 whose cause is invisible in the request log (the log line at
+        // :609 already reads BOTH names, which is itself evidence the repo has
+        // met this ambiguity before).
+        //
+        // Inverted to a whitelist: only hosts known to accept the new name get
+        // it, everything else keeps the field name that has been in every
+        // OpenAI-compatible schema since 2023. `max_tokens` is still accepted by
+        // api.openai.com for non-reasoning models, so the blast radius of being
+        // wrong here is the smallest of the two directions.
+        if (usesMaxCompletionTokens) {
             body.put("max_completion_tokens", safeMaxTokens)
+        } else {
+            body.put("max_tokens", safeMaxTokens)
         }
         body.put("stream", stream)
 
@@ -2377,7 +2451,14 @@ class OpenAIProvider constructor(
         return when {
             b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47 -> "image/png"
             b[0] == 0xFF && b[1] == 0xD8 -> "image/jpeg"
-            b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46 -> "image/webp" // RIFF (WebP)
+            // [FIX-1 / F-185] RIFF is a CONTAINER, not an image format: WAV and
+            // AVI share the same 4-byte header. WebP is `RIFF????WEBP`, so the
+            // `WEBP` fourcc at offset 8 is the discriminating bytes. Before this,
+            // any non-image RIFF payload (a relay answering with
+            // application/octet-stream was the entry point) was labelled
+            // image/webp and handed to the model as an image.
+            b.size >= 12 && b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46 &&
+                b[8] == 0x57 && b[9] == 0x45 && b[10] == 0x42 && b[11] == 0x50 -> "image/webp"
             b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46 -> "image/gif"
             else -> "image/png"
         }
@@ -2394,6 +2475,11 @@ class OpenAIProvider constructor(
         systemPrompt: String?,
         maxTokens: Int,
         stream: Boolean,
+        // [FIX-1 / F-182] Same sampling knob the Chat-Completions builder takes.
+        // The two branches of rawStreamMessage() are alternatives for the SAME
+        // turn, so a user-set temperature must not depend on which API flavour
+        // the instance is configured for.
+        temperature: Double? = null,
         tools: List<AgentToolDefinition> = emptyList(),
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
     ): JSONObject {
@@ -2435,6 +2521,26 @@ class OpenAIProvider constructor(
         // strictly behind isCodexOAuth. OpenAI's first-party Responses API
         // also accepts the field, so we keep it on for OAuth (Codex) only —
         // the encrypted reasoning content is what lets the ChatGPT backend
+        // carry reasoning context ACROSS turns instead of re-deriving it.
+        //
+        // [FIX-1 / F-184] The sentence above used to stop mid-clause and no
+        // code followed it: `put("include", …)` had ZERO occurrences in this file
+        // and `isCodexOAuth` — the symbol the comment claimed to gate on — has
+        // no definition anywhere in the repo (iOS is not vendored here). So the
+        // field was never requested on any path, while the block above it
+        // (prompt_cache_key) showed the path WAS being optimised deliberately.
+        //
+        // Android has no OAuth login flow of its own, so the iOS
+        // `isCodexOAuth` predicate maps to the credential type: a Codex OAuth
+        // instance is exactly `credentialType == oauth` on an OpenAI instance.
+        // Same predicate ModelUseOffloadHandler:1048 already uses to exclude
+        // oauth instances. apiKey instances (including third-party Responses
+        // relays, which is what the 400 note above is about) stay untouched.
+        if (instanceContext?.credentialType ==
+            com.rikkaminis.app.data.model.ProviderCredential.oauth
+        ) {
+            body.put("include", JSONArray().put("reasoning.encrypted_content"))
+        }
         // Thinking level → Responses API `reasoning.effort`. Mirrors iOS
         // OpenAIAgentProvider.swift:327-338. Pre-T119 this was hardcoded to
         // "low" regardless of the user's setting, so toggling Thinking
@@ -2504,6 +2610,17 @@ class OpenAIProvider constructor(
         val safeMaxTokens = clampOutboundMaxTokens(maxTokens, effectiveMaxOutputTokens(model))
         if (safeMaxTokens > 0) {
             body.put("max_output_tokens", safeMaxTokens)
+        }
+
+        // [FIX-1 / F-182] Responses API uses the SAME sampling field name and
+        // range as Chat Completions, and the same "self-reasoning families
+        // reject/ignore it" rule applies — so this mirrors buildRequestBody
+        // (:1646) exactly rather than inventing a second policy. Before this,
+        // the Responses branch of rawStreamMessage() silently dropped whatever
+        // temperature the user configured, so `minis-model-use --temperature`
+        // was a no-op on every useResponsesAPI / forceResponsesAPI instance.
+        if (temperature != null && isModelAllowTemperature(model.id)) {
+            body.put("temperature", clampOutboundTemperature(temperature))
         }
 
         // [T-codex-fast-mode] Fast tier injection (mirrors iOS fb671083 +

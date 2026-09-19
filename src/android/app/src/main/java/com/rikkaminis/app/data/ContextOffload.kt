@@ -49,9 +49,41 @@ object ContextOffload {
      * for the on-disk filename. Anthropic IDs are `toolu_01…` (constant
      * 8-char prefix), so the trailing 12 chars are still distinguishing.
      * Mirrors iOS `shortToolId(_:)`.
+     *
+     * [FIX-1 / F-232] The id is MODEL-CONTROLLED — it round-trips through the
+     * provider and comes back in the tool_use block — so "take the last 12
+     * chars" was an unbounded write of attacker-influenced text into a file
+     * name. A trailing `../../x` produced `<sid>/x.txt`, i.e. a real escape
+     * from `offloads/tools/`. The old `sanitize()` only replaced `/`, which
+     * does not touch `..` at all (and `..` needs no slash to traverse once
+     * joined). Restrict the suffix to a filename-safe alphabet — the same
+     * allow-list shape `sanitizeToolId` uses for the wire.
      */
-    private fun shortToolId(toolId: String): String =
-        if (toolId.length <= 12) toolId else toolId.takeLast(12)
+    private fun shortToolId(toolId: String): String {
+        val safe = toolId.filter { it.isLetterOrDigit() || it in "_-" }
+        return if (safe.length <= 12) safe else safe.takeLast(12)
+    }
+
+    /**
+     * [FIX-1 / F-232] Defence in depth behind [shortToolId]: canonicalize the
+     * resolved path and refuse anything that escaped [dir]. The allow-list
+     * above should already make this unreachable, which is exactly why it is
+     * cheap to keep — the sanitizer is the guard that can be weakened by a
+     * later edit, this is the one that cannot.
+     */
+    private fun resolveInside(dir: File, fileName: String): File? {
+        val file = File(dir, fileName)
+        val canonicalDir = dir.canonicalFile
+        val canonicalFile = file.canonicalFile
+        return if (canonicalFile.path == canonicalDir.path ||
+            canonicalFile.path.startsWith(canonicalDir.path + File.separator)
+        ) {
+            canonicalFile
+        } else {
+            AppLogger.warning(TAG, "refusing offload path escaping tools dir: $fileName")
+            null
+        }
+    }
 
     private fun sanitize(name: String): String =
         name.ifEmpty { "tool" }.replace('/', '_')
@@ -72,7 +104,8 @@ object ContextOffload {
     ): String {
         val dir = ensureToolsDir(context, sessionId)
         val fileName = "${sanitize(toolName)}_${shortToolId(toolId)}.$ext"
-        val file = File(dir, fileName)
+        // [FIX-1 / F-232] Resolve through the containment guard before writing.
+        val file = resolveInside(dir, fileName) ?: return ""
         return try {
             file.writeText(content)
             "$LINUX_OFFLOADS_DIR/tools/$fileName"
@@ -104,7 +137,8 @@ object ContextOffload {
         }
         val dir = ensureToolsDir(context, sessionId)
         val fileName = "image_${shortToolId(toolId)}.$ext"
-        val file = File(dir, fileName)
+        // [FIX-1 / F-232] Resolve through the containment guard before writing.
+        val file = resolveInside(dir, fileName) ?: return ""
         return try {
             file.writeBytes(bytes)
             "$LINUX_OFFLOADS_DIR/tools/$fileName"

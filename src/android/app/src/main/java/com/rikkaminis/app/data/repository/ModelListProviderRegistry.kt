@@ -54,18 +54,21 @@ object ModelListProviderRegistry {
         apiKey: String?,
         thirdParty: Boolean,
         forceRefresh: Boolean = false,
+        // [FIX-1 / F-208] Application context, forwarded to the fetcher so its
+        // disk cache is reachable. See the note on [ModelListProvider.fetchModels].
+        context: android.content.Context? = null,
     ): List<LLMModel> {
         val provider = synchronized(providers) { providers[instance.providerType] } ?: return emptyList()
         // No credential at all: keep delegating so each fetcher applies its
         // own null handling (all of them return empty today).
-        if (apiKey == null) return provider.fetchModels(null, instance, thirdParty, forceRefresh)
+        if (apiKey == null) return provider.fetchModels(null, instance, thirdParty, forceRefresh, context)
 
         val attempts = maxOf(1, KeyRoulette.candidates(apiKey).size)
         var lastError: Throwable? = null
         repeat(attempts) {
             val key = KeyRoulette.next(apiKey, instance.id)
             try {
-                val models = provider.fetchModels(key, instance, thirdParty, forceRefresh)
+                val models = provider.fetchModels(key, instance, thirdParty, forceRefresh, context)
                 if (models.isNotEmpty()) return models
             } catch (e: CancellationException) {
                 // Never swallow cancellation — the probe loop must stay

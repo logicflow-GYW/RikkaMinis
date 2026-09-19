@@ -1,5 +1,7 @@
 package com.rikkaminis.app.provider.openrouter
 
+import com.rikkaminis.app.provider.executeOrCancel
+
 import android.content.Context
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.normalizeModalities
@@ -47,7 +49,8 @@ object OpenRouterModelsApi {
             .applyUserAgentOverride(null)
             .build()
 
-        val response = client.newCall(request).execute()
+        // [FIX-1 / F-209] Cancellable execute — see provider/CallCancellation.kt.
+        val response = client.newCall(request).executeOrCancel()
         try {
             val body = response.body?.string() ?: return@withContext emptyList()
 

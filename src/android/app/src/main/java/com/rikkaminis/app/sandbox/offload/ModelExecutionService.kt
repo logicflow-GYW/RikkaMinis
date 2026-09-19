@@ -182,6 +182,20 @@ class ModelExecutionService : Service() {
         // LRU state from the main process's persisted file so rotation continues
         // across the process boundary instead of restarting from key #1.
         com.rikkaminis.app.data.KeyRoulette.init(cacheDir)
+        // [FIX-1 / F-207] Model-directory enrichment was a no-op in THIS
+        // process. ModelsDevApi.init() runs only on the main-process path
+        // (MinisApp:460), while every chat request is built here — and
+        // appContext is the guard on both loadBundledRegistry and
+        // getCacheFile, so with it null the registry could never be loaded.
+        // The consequence is not cosmetic: OpenAIProvider reads
+        // `model.reasoningEffortValues` / `declaresNoEffortTiers` to decide
+        // which effort tiers the vendor accepts, so in the worker both were
+        // always null and ThinkingRuleResolver lost its declaration basis.
+        // On-device evidence: 4,616 `[Thinking] [resolve.in] ... declared=null`
+        // lines in minis-*.modelservice.log vs 2 in the main process.
+        // init() only stores applicationContext — none of the heavy subsystems
+        // the :modelservice early-return exists to avoid.
+        com.rikkaminis.app.provider.ModelsDevApi.init(applicationContext)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -804,6 +818,13 @@ class ModelExecutionService : Service() {
                 if (req.has("supports_reasoning")) req.getBoolean("supports_reasoning") else null,
             interleavedReasoningField =
                 req.optString("interleaved_reasoning_field", "").ifEmpty { null },
+            // [FIX-1 / F-198] Mirror of the write side in
+            // ModelExecutionDispatcher — see the long note there. Absent key
+            // keeps the "catalog never said" null semantics.
+            reasoningEffortValues = req.optJSONArray("reasoning_effort_values")
+                ?.let { arr -> (0 until arr.length()).mapNotNull { arr.optString(it, "").ifEmpty { null } } },
+            declaresNoEffortTiers =
+                if (req.has("declares_no_effort_tiers")) req.getBoolean("declares_no_effort_tiers") else null,
         )
 
         // ── Reconstruct messages ──
@@ -890,6 +911,11 @@ class ModelExecutionService : Service() {
         val provider = com.rikkaminis.app.provider.ProviderFactory.create(
             instance = instance, apiKey = apiKey, model = model, context = this,
         )
+        // [FIX-1 / F-191] Same cross-process stamp as the streaming path above.
+        if (req.optBoolean("enhanced_cache", false)) {
+            (provider as? com.rikkaminis.app.provider.anthropic.AnthropicProvider)
+                ?.enhancedCache = true
+        }
 
         // ── Passthrough extras ──
         val inputJson = req.optString("input_json", "")
@@ -1093,6 +1119,13 @@ class ModelExecutionService : Service() {
                     if (req.has("supports_reasoning")) req.getBoolean("supports_reasoning") else null,
                 interleavedReasoningField =
                     req.optString("interleaved_reasoning_field", "").ifEmpty { null },
+                // [FIX-1 / F-198] Mirror of the write side in
+                // ModelExecutionDispatcher — see the long note there. Absent key
+                // keeps the "catalog never said" null semantics.
+                reasoningEffortValues = req.optJSONArray("reasoning_effort_values")
+                    ?.let { arr -> (0 until arr.length()).mapNotNull { arr.optString(it, "").ifEmpty { null } } },
+                declaresNoEffortTiers =
+                    if (req.has("declares_no_effort_tiers")) req.getBoolean("declares_no_effort_tiers") else null,
             )
 
             // ── Reconstruct messages ──
@@ -1196,6 +1229,19 @@ class ModelExecutionService : Service() {
             // ── Provider ──
             @Suppress("UNCHECKED_CAST")
             val provider = com.rikkaminis.app.provider.ProviderFactory.create(instance, apiKey, model, this)
+            // [FIX-1 / F-191] Stamp the Enhanced Cache toggle onto the provider
+            // that actually sends the request. Previously this stamp lived only
+            // in AgentLoopEngine, on the MAIN-process provider object — which
+            // never performs the call, because this path always offloads. So
+            // `ephemeralCacheControl()` always took the 5-minute branch and the
+            // `extended-cache-ttl-2025-04-11` beta header was never sent, while
+            // the UI showed the toggle as on with no log and no warning.
+            // Non-Anthropic providers ignore the cast (same as the main-process
+            // site did).
+            if (req.optBoolean("enhanced_cache", false)) {
+                (provider as? com.rikkaminis.app.provider.anthropic.AnthropicProvider)
+                    ?.enhancedCache = true
+            }
             ModelExecutionRunLog.log(dir, android.os.Process.myPid(), ModelExecutionRunLog.Phase.PROVIDER_BUILT, "provider=${instance.providerType}", runId = runIdOf(dir))
             kotlinx.coroutines.runBlocking {
                 // [worker-first-chunk-guard] Wrap provider streaming in a bounded

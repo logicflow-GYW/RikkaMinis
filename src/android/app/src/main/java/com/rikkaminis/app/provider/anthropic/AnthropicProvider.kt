@@ -244,6 +244,17 @@ class AnthropicProvider(
         // retried instead of silently saved as complete.
         var contentChars = 0
         var sawClearFinish = false
+        // [FIX-1 / F-190] The Messages protocol splits usage across two events:
+        // `message_start` carries the FULL accounting (input_tokens,
+        // cache_read_input_tokens, cache_creation_input_tokens) and
+        // `message_delta` carries only the output-side counters. Emitting both
+        // as standalone Usage chunks let the engine's `lastUsage = chunk.usage`
+        // overwrite the complete one with the partial one, so every turn landed
+        // in the DB with inputTokens = 0 and latestContextTokens = 0 — which in
+        // turn made `contextNearFull` permanently false. Remember the start
+        // usage and merge field-wise on the terminal event so the last chunk
+        // the engine sees is always the complete picture.
+        var startUsage: LLMUsage? = null
 
         // A response may send headers and then never send the first SSE event
         // when a proxy tunnel is wedged. Bound that body stall like OpenAI.
@@ -272,7 +283,9 @@ class AnthropicProvider(
                     "message_start" -> {
                         send(LLMStreamChunk.Started)
                         event.optJSONObject("message")?.optJSONObject("usage")?.let { usage ->
-                            send(LLMStreamChunk.Usage(parseUsage(usage)))
+                            val parsed = parseUsage(usage)
+                            startUsage = parsed
+                            send(LLMStreamChunk.Usage(parsed))
                         }
                     }
                     "content_block_start" -> {
@@ -328,7 +341,22 @@ class AnthropicProvider(
                     }
                     "message_delta" -> {
                         event.optJSONObject("usage")?.let { usage ->
-                            send(LLMStreamChunk.Usage(parseUsage(usage)))
+                            val delta = parseUsage(usage)
+                            // [FIX-1 / F-190] Field-wise merge instead of a blind
+                            // overwrite: message_delta only knows the output side,
+                            // so any input-side counter it reports as 0 means
+                            // "not restated here", not "zero". Keep the
+                            // message_start values for those fields.
+                            val merged = startUsage?.let { start ->
+                                delta.copy(
+                                    inputTokens = if (delta.inputTokens != 0) delta.inputTokens else start.inputTokens,
+                                    cacheReadInputTokens = delta.cacheReadInputTokens ?: start.cacheReadInputTokens,
+                                    cacheCreationInputTokens = delta.cacheCreationInputTokens ?: start.cacheCreationInputTokens,
+                                    latestContextTokens = if (delta.latestContextTokens != 0) delta.latestContextTokens else start.latestContextTokens,
+                                )
+                            } ?: delta
+                            startUsage = merged
+                            send(LLMStreamChunk.Usage(merged))
                         }
                         val stopReason = event.optJSONObject("delta")
                             ?.safeOptString("stop_reason", "")?.ifEmpty { null }
@@ -337,6 +365,30 @@ class AnthropicProvider(
                         // a redundant truncated Finished.
                         sawClearFinish = true
                         send(LLMStreamChunk.Finished(stopReason))
+                    }
+                    // [FIX-1 / F-195] The Messages streaming protocol carries a
+                    // mid-stream `error` event (rate limit, overloaded, invalid
+                    // request discovered after 200 OK). This `when` had no
+                    // branch for it, so the event was silently dropped: the
+                    // stream then hit EOF, `!sawClearFinish && contentChars > 0`
+                    // below reclassified it as a TRUNCATION, and the engine
+                    // started an EOF-continuation retry of a request the server
+                    // had already refused. The user saw "the model kept writing"
+                    // while the real cause (with its request_id) was never read.
+                    // Mirrors OpenAIProvider's inline-error branch (:1070-1076),
+                    // which does exactly this throw.
+                    "error" -> {
+                        val errType = event.optJSONObject("error")
+                            ?.safeOptString("type", "")
+                            ?.takeIf { it.isNotBlank() }
+                        android.util.Log.e(
+                            "AnthropicProvider",
+                            "Stream error event: ${event.toString().take(500)}",
+                        )
+                        throw mapHttpError(
+                            if (errType == "overloaded_error") 529 else 400,
+                            event.toString(),
+                        )
                     }
                 }
             }
@@ -975,8 +1027,23 @@ class AnthropicProvider(
     }
 
     private fun parseUsage(json: JSONObject): LLMUsage {
-        val cacheRead = json.optInt("cache_read_input_tokens").takeIf { it > 0 }
-        val cacheCreate = json.optInt("cache_creation_input_tokens").takeIf { it > 0 }
+        // [FIX-1 / F-197a] `.takeIf { it > 0 }` collapsed two different facts
+        // into one: "the server said 0" and "the server did not send the
+        // field". Both became null, and buildUsageJson (ChatTurnPartsJson:92)
+        // coalesces null to 0 — so after a round trip through the DB, "this
+        // turn read nothing from cache" was indistinguishable from "this
+        // provider does not report cache reads". That matters for the cache
+        // panel: an unreported field should be shown as unknown, not as a real
+        // zero.
+        //
+        // Presence (`has`) is the discriminator, not the value: a genuine 0
+        // from a caching provider still serializes as 0, which is correct.
+        val cacheRead = if (json.has("cache_read_input_tokens")) {
+            json.optInt("cache_read_input_tokens", 0)
+        } else null
+        val cacheCreate = if (json.has("cache_creation_input_tokens")) {
+            json.optInt("cache_creation_input_tokens", 0)
+        } else null
         // Anthropic input_tokens is fresh-only (cache metered separately), so
         // fresh input = input_tokens as-is and context = input + cache. See
         // anthropicUsageAccounting for the verified semantics.
