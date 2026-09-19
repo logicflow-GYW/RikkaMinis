@@ -1104,9 +1104,24 @@ internal fun ChatViewModel.loadSession() {
 
         // Rebuild agentHistory from persisted messages.
         // Pre-built off-Main inside the withContext(Dispatchers.IO) block
-        // above to avoid re-parsing partsJson on the UI thread. Safe to
-        // bulk-addAll here because loadSession runs once at init before
-        // any sender writes into agentHistory.
+        // above to avoid re-parsing partsJson on the UI thread.
+        //
+        // [audit-0920] `clear()` is load-bearing: loadSession() is NOT
+        // once-per-VM. `revertCompact()` (ChatViewModel, reached from the
+        // "Revert Compact" button on the compact divider in ChatScreen) and
+        // the safe-mode-cleared retry both call it again on the SAME VM, and
+        // neither the `_sessionLoaded` latch (set in this function's `finally`,
+        // awaited exactly once at init) nor anything else gates re-entry. The
+        // old comment claimed "loadSession runs once at init" — that has been
+        // false since revertCompact landed. Without this clear the second pass
+        // appended the whole persisted history on top of the existing one:
+        // `_messages` is REPLACE-semantics so the UI looked right, but every
+        // subsequent request carried the history twice (duplicate user turns +
+        // doubled token estimate, which can trip offload/compact early). The
+        // other five rebuild sites in this package (ChatModelRouting,
+        // ChatQueueInterruption, ChatViewModel x2, ChatContextWindow's trim)
+        // already pair clear()+addAll.
+        agentHistory.clear()
         agentHistory.addAll(loaded.llmHistory)
         val tHangDiagAfterAgentHistory = System.currentTimeMillis()
         println(

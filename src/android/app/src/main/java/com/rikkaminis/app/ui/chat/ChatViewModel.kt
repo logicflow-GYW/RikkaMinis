@@ -513,8 +513,22 @@ class ChatViewModel(
     internal val _streamingById = MutableStateFlow<Map<String, StreamingDelta>>(emptyMap())
     val streamingById: StateFlow<Map<String, StreamingDelta>> = _streamingById.asStateFlow()
 
-    /** 单调递增回合纪元：每开一个新回合 +1，旧回合晚到 delta 由渲染层按 epoch 忽略。 */
-    internal var streamEpoch = 0L
+    /**
+     * 单调递增回合纪元：每开一个新回合 +1，旧回合晚到 delta 由渲染层按 epoch 忽略。
+     *
+     * [audit-0920] `@Volatile` is load-bearing, not decorative: 4 of the 7
+     * bump sites run inside `viewModelScope.launch(Dispatchers.IO)`
+     * (ChatModelRouting, ChatQueueInterruption, the send path and the resume
+     * path in this file) while every read site is on Main
+     * (`ChatScreen`'s `currentStreamEpoch()` for [mergeStreamingOverlay] and
+     * the slash-token stats). Without it the Main thread can keep observing
+     * the pre-bump value after a worker-thread turn has already started, and
+     * `mergeStreamingOverlay`'s `delta.epoch != currentEpoch` gate then drops
+     * the NEW turn's own deltas wholesale — the row never renders.
+     * [streamingClaimEpoch] next to it carries the same annotation for the
+     * same reason.
+     */
+    @Volatile internal var streamEpoch = 0L
 
     /**
      * [feat/hermes-tier1] Session-scoped system prompt freeze (Hermes prompt
@@ -617,7 +631,26 @@ class ChatViewModel(
         var pendingBlocks: List<AssistantBlock> = emptyList()
         var pendingAwaiting: Boolean = false
     }
-    internal val streamFlushStates = HashMap<String, StreamFlushState>()
+    /**
+     * [T-android-stream-flush-dualpath] Per-message streaming-flush state.
+     *
+     * [audit-0920] `ConcurrentHashMap`, not `HashMap`. Verified access split:
+     *   - written by the streaming-flush path via `getOrPut` in
+     *     `ChatPromptAndTools` (updateAssistantMessage, publishStreamingDelta,
+     *     flushPendingStreamingOnResume);
+     *   - pruned by [retainStreamFlushStates] — three of its four call sites
+     *     sit on `Dispatchers.IO`: `ChatModelRouting`'s rollback launch,
+     *     `rerunFromToolBlock`'s launch (the one that also rebuilds
+     *     agentHistory) and `truncateBeforeEdit`, reached from the send path's
+     *     IO launch. The fourth (`retryFromMessage`) runs on Main.
+     * So a writer on Main and a pruner on IO can hold this map at once, and a plain `HashMap`
+     * can corrupt its bucket table on a concurrent resize (lost entries /
+     * spin). A torn read here surfaces as a message whose trailing flush was
+     * dropped — a turn that never renders its final text. The
+     * `StreamFlushState` VALUES stay confined to the flush coroutines, so the
+     * container is the only shared structure that needed the swap.
+     */
+    internal val streamFlushStates = java.util.concurrent.ConcurrentHashMap<String, StreamFlushState>()
 
     /**
      * [T-android-stream-flush-review] Cancel a message's pending trailing flush
@@ -3301,19 +3334,32 @@ class ChatViewModel(
                     // Acquire concurrency slot (suspends if at max)
                     SessionConcurrencyManager.acquireSlot(activeSessionId)
                     AppLogger.debug(TAG_STREAM, "send streamJob slot acquired")
-                    SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
-
-                    // Resolve the active group's fallback strategy
-                    val activeFallbackStrategy = run {
-                        val groupId = _selectedGroupId.value
-                        groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
-                            ?: com.rikkaminis.app.data.model.FallbackStrategy.default
-                    }
-
-                    // Build full fallback provider list upfront (mirrors iOS triedEntries approach)
-                    val fallbackProviders = buildFallbackProviders(provider)
 
                     try {
+                        // [audit-0920] setActive + buildFallbackProviders live
+                        // INSIDE this guarded region so the `finally` below is
+                        // the one that returns the concurrency slot. They used
+                        // to sit between the outer try and this one: a non-CE
+                        // throw from either (tracker callback registration, a
+                        // provider-config read) skipped releaseSlot entirely,
+                        // and with `maxConcurrent` defaulting to 2 the session
+                        // then queued forever behind a phantom holder. The
+                        // exception also escaped the coroutine (no
+                        // CoroutineExceptionHandler in the tree) and killed the
+                        // process instead of showing the error banner. Same
+                        // shape as the [audit-0917] fix in ChatTurnPersistence.
+                        SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+
+                        // Resolve the active group's fallback strategy
+                        val activeFallbackStrategy = run {
+                            val groupId = _selectedGroupId.value
+                            groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
+                                ?: com.rikkaminis.app.data.model.FallbackStrategy.default
+                        }
+
+                        // Build full fallback provider list upfront (mirrors iOS triedEntries approach)
+                        val fallbackProviders = buildFallbackProviders(provider)
+
                         AppLogger.info(TAG_STREAM, "send runAgentLoop CALL")
                         runAgentLoop(
                             provider = provider,
@@ -3576,15 +3622,23 @@ class ChatViewModel(
                 try {
                     SessionConcurrencyManager.acquireSlot(activeSessionId)
                     AppLogger.debug(TAG_STREAM, "resume streamJob slot acquired")
-                    SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
-                    val activeFallbackStrategy = run {
-                        val groupId = _selectedGroupId.value
-                        groupId?.let {
-                            providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy
-                        } ?: com.rikkaminis.app.data.model.FallbackStrategy.default
-                    }
-                    val fallbackProviders = buildFallbackProviders(provider)
+
                     try {
+                        // [audit-0920] Guarded region widened — same fix and
+                        // same rationale as the send path above (and the
+                        // [audit-0917] template in ChatTurnPersistence):
+                        // setActive / strategy / fallback-build must be inside
+                        // the try that owns the releaseSlot finally, or a
+                        // non-CE throw from any of them leaks the concurrency
+                        // slot and escapes the coroutine.
+                        SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+                        val activeFallbackStrategy = run {
+                            val groupId = _selectedGroupId.value
+                            groupId?.let {
+                                providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy
+                            } ?: com.rikkaminis.app.data.model.FallbackStrategy.default
+                        }
+                        val fallbackProviders = buildFallbackProviders(provider)
                         AppLogger.info(TAG_STREAM, "resume runAgentLoop CALL")
                         runAgentLoop(
                             provider = provider,
