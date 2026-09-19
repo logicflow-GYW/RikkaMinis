@@ -153,6 +153,134 @@ internal fun LLMMessage.isPersistedUserPrompt(): Boolean =
     role == LLMMessage.Role.USER && !isToolResultOnly() && !dbMessageId.isNullOrEmpty()
 
 /**
+ * [compact-budget-anchor] Verbatim tail (estimated tokens) kept outside the
+ * summary when a compact has no new complete user turn to anchor on —
+ * see [resolveBudgetAnchorIdx].
+ *
+ * Same order of magnitude as
+ * [com.rikkaminis.app.conversation.ContextCompactor.DEFAULT_AUTO_COMPACT_MIN_TAIL_TOKENS]
+ * (8k, "the tail must have grown this much for a compact to be worth it") —
+ * a kept tail of ~2× that leaves room for the next few tool rounds before
+ * another compact is worth attempting, while still letting the summary
+ * actually remove something. ponytail: absolute, not window-relative |
+ * 天花板: on a small-window model (32k) a 20k kept tail eats most of the
+ * budget and the compact buys little | 升级触发: a 32k/64k-window model shows
+ * auto-compact firing repeatedly with no context drop.
+ */
+internal const val COMPACT_BUDGET_TAIL_KEEP_TOKENS = 20_000L
+
+/**
+ * [compact-budget-anchor] Budget for the verbatim pre-anchor slice in
+ * [com.rikkaminis.app.ui.chat.effectiveAgentHistory] — see
+ * [clampSliceStartByBudget].
+ *
+ * The slice exists as a warm-up (recent turns the model can read verbatim),
+ * so it is deliberately smaller than the compact tail budget: it is re-sent
+ * on top of the summary on every request, and anything expensive in it
+ * defeats the point of compacting. Sized to comfortably hold the intended
+ * 3 user-text turns of ordinary chat (which never reach this cap) while
+ * cutting off a tool-heavy stretch.
+ */
+internal const val PRE_ANCHOR_MAX_TOKENS = 12_000L
+
+/**
+ * Budget-based anchor for the compact-all path.
+ *
+ * [resolveCompactAnchorIdx] anchors on a *turn* boundary — the last message
+ * that still belongs to a complete, persisted user turn. That is right for a
+ * chat, but a long agent run is **one** user turn: hundreds of tool rounds
+ * under a single prompt. There the turn boundary is always message 0,
+ * [resolveCompactStartIdx] then returns `anchor + 1 > anchor`, and every
+ * auto-compact early-returns "already compacted" while the history (and the
+ * re-injected summary) keeps growing — the "it keeps compacting at the first
+ * message and nothing changes" report.
+ *
+ * This walks back from the tail instead: keep [keepTailTokens] worth of
+ * estimated tokens verbatim as the active region, and fold everything before
+ * it into the summary.
+ *
+ * Boundary safety — two ways an anchor can produce a rejected request:
+ *  - the folded range must not end on a message whose tool result sits
+ *    *after* it, which would leave a lone `tool_result` in the kept region
+ *    (provider: "tool must be a response to preceding tool_calls");
+ *  - the marker can only anchor on an id that exists in the DB, so an
+ *    entry without a persisted id is not a valid anchor.
+ * Both cases step the candidate back rather than accept it.
+ *
+ * @param startIdx first foldable index (the previous marker's anchor + 1) —
+ *   never fold earlier than this, the summary already covers it.
+ * @return the fold anchor, or -1 when the budget already covers everything
+ *   from [startIdx] onward (nothing to fold).
+ */
+internal fun resolveBudgetAnchorIdx(
+    history: List<LLMMessage>,
+    startIdx: Int,
+    keepTailTokens: Long,
+    estimate: (LLMMessage) -> Long,
+): Int {
+    if (startIdx < 0 || startIdx >= history.size) return -1
+    // Grow the kept tail from the newest message backwards while it fits the
+    // budget; `activeStart` ends up on the oldest message we keep verbatim.
+    var activeStart = history.size
+    var acc = 0L
+    while (activeStart - 1 >= startIdx) {
+        val tokens = estimate(history[activeStart - 1])
+        if (acc + tokens > keepTailTokens) break
+        acc += tokens
+        activeStart -= 1
+    }
+    var cand = activeStart - 1
+    // Don't fold up to a message whose tool result would stay in the kept
+    // region (history[cand + 1] is that result).
+    while (cand >= startIdx && cand + 1 < history.size && history[cand + 1].isToolResultOnly()) {
+        cand -= 1
+    }
+    // The marker anchors on a persisted id only.
+    while (cand >= startIdx && history[cand].dbMessageId.isNullOrEmpty()) {
+        cand -= 1
+    }
+    return if (cand >= startIdx) cand else -1
+}
+
+/**
+ * Budget clamp for the verbatim pre-anchor slice of
+ * [com.rikkaminis.app.ui.chat.effectiveAgentHistory].
+ *
+ * [walkBackUserTurnsBounded] sizes that slice by *user turns* (N = 3, capped
+ * at 100 messages). In a single-prompt tool loop there is only one user-text
+ * turn, so the walk-back runs to the start of the history and the slice
+ * becomes the entire compacted region — the summary saves nothing, because
+ * everything it summarises is re-sent verbatim right in front of it.
+ *
+ * Trims the slice start forward until the estimated sum fits [maxTokens],
+ * keeping the newest messages, and never leaves the slice opening on a lone
+ * `tool_result` (its paired `tool_use` would fall outside the slice).
+ *
+ * @return the new slice start, always >= [startIdx]; may exceed [anchorIdx]
+ *   when nothing fits, which the caller already treats as an empty
+ *   pre-anchor region.
+ */
+internal fun clampSliceStartByBudget(
+    history: List<LLMMessage>,
+    startIdx: Int,
+    anchorIdx: Int,
+    maxTokens: Long,
+    estimate: (LLMMessage) -> Long,
+): Int {
+    if (startIdx > anchorIdx) return startIdx
+    var s = anchorIdx + 1
+    var acc = 0L
+    while (s - 1 >= startIdx) {
+        val tokens = estimate(history[s - 1])
+        if (acc + tokens > maxTokens) break
+        acc += tokens
+        s -= 1
+    }
+    while (s <= anchorIdx && history[s].isToolResultOnly()) s += 1
+    return s
+}
+
+/**
  * Resolves the compact range's starting index (inclusive) from the previous
  * compact marker.
  *

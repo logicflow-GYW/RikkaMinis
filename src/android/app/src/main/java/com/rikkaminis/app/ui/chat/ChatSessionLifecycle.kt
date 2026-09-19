@@ -1,6 +1,7 @@
 package com.rikkaminis.app.ui.chat
 
 import android.util.Log
+import com.rikkaminis.app.conversation.ContextCompactor
 import com.rikkaminis.app.data.db.CompactMarkerEntity
 import com.rikkaminis.app.data.db.MessageEntity
 import com.rikkaminis.app.data.model.AgentContentPart
@@ -92,7 +93,7 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
     // 644-657 "walk back through agentHistory looking for dbMessageId
     // AND allRaw.contains" — split across two phases to honor suspend
     // boundaries.
-    val anchorIdx: Int = resolveCompactAnchorIdx(history, anchorIdxOverride)
+    var anchorIdx: Int = resolveCompactAnchorIdx(history, anchorIdxOverride)
     if (anchorIdx < 0) {
         // [fix/compact-anchor-resolution] This return posted a user-visible
         // notice but wrote nothing to the log, which is why "it keeps trying
@@ -112,20 +113,48 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
     // (v2/v1 boundary resolution delegated to resolveCompactStartIdx).
     val effectiveStartIdx: Int = resolveCompactStartIdx(history, _cachedLatestMarker)
     if (effectiveStartIdx > anchorIdx) {
-        // [fix/compact-anchor-resolution] Same silent-early-return problem:
-        // this is the branch a *stuck* anchor lands in on every single turn
-        // (start = prevAnchor + 1 > anchor means "the range is already
-        // folded"), so it is the one that most needs a log line.
-        AppLogger.info(
-            ChatViewModel.TAG,
-            "[Compact] aborted: already compacted (start=$effectiveStartIdx > anchor=$anchorIdx " +
-                "anchorId=${history[anchorIdx].dbMessageId?.take(8)} " +
-                "prevAnchor=${_cachedLatestMarker?.lastCompactedMessageId?.take(8)} " +
-                "prevVersion=${_cachedLatestMarker?.version} historySize=${history.size} " +
-                "summaryChars=${_compactSummary.value?.length ?: 0})",
-        )
-        appendSystemInfo(context.getString(R.string.sysmsg_compact_already_done), "compact")
-        return
+        // [compact-budget-anchor] "No new complete user turn" is the *normal*
+        // state of a long agent run (one prompt, hundreds of tool rounds):
+        // the turn boundary stays pinned on the first message, start =
+        // prevAnchor + 1 > anchor, and every auto-compact would early-return
+        // here forever while the history (plus the re-injected summary) keeps
+        // growing. Fall back to a budget-based segment anchor instead of
+        // giving up. Skipped when the caller pinned an explicit index (manual
+        // `/compact <n>`, tests) — an override means "use exactly this".
+        val budgetAnchor = if (anchorIdxOverride == null) {
+            resolveBudgetAnchorIdx(
+                history = history,
+                startIdx = effectiveStartIdx,
+                keepTailTokens = COMPACT_BUDGET_TAIL_KEEP_TOKENS,
+                estimate = { ContextCompactor.estimateMessageTokens(it) },
+            )
+        } else {
+            -1
+        }
+        if (budgetAnchor >= effectiveStartIdx) {
+            AppLogger.info(
+                ChatViewModel.TAG,
+                "[Compact] budget anchor engaged (no new user turn to fold): " +
+                    "anchor=$anchorIdx → $budgetAnchor start=$effectiveStartIdx " +
+                    "historySize=${history.size} keepTail≈$COMPACT_BUDGET_TAIL_KEEP_TOKENS tokens",
+            )
+            anchorIdx = budgetAnchor
+        } else {
+            // [fix/compact-anchor-resolution] Same silent-early-return problem:
+            // this is the branch a *stuck* anchor lands in on every single turn
+            // (start = prevAnchor + 1 > anchor means "the range is already
+            // folded"), so it is the one that most needs a log line.
+            AppLogger.info(
+                ChatViewModel.TAG,
+                "[Compact] aborted: already compacted (start=$effectiveStartIdx > anchor=$anchorIdx " +
+                    "anchorId=${history[anchorIdx].dbMessageId?.take(8)} " +
+                    "prevAnchor=${_cachedLatestMarker?.lastCompactedMessageId?.take(8)} " +
+                    "prevVersion=${_cachedLatestMarker?.version} historySize=${history.size} " +
+                    "summaryChars=${_compactSummary.value?.length ?: 0} budgetAnchor=$budgetAnchor)",
+            )
+            appendSystemInfo(context.getString(R.string.sysmsg_compact_already_done), "compact")
+            return
+        }
     }
     val toCompact = history.subList(effectiveStartIdx, anchorIdx + 1)
     if (toCompact.isEmpty()) {
@@ -463,6 +492,25 @@ internal fun ChatViewModel.effectiveAgentHistory(): List<LLMMessage> {
         }
         if (priorIdx != (walkBack.priorIdx ?: (anchorIdx + 1))) {
             AppLogger.info(ChatViewModel.TAG, "[CompactDiag] eAH v2 boundary guard: priorIdx=${walkBack.priorIdx} → $priorIdx (included paired tool_use)")
+        }
+
+        // [compact-budget-anchor] Budget clamp. The walk-back above sizes this
+        // slice by user-text turns (N = 3, ≤ 100 messages) — right for a chat,
+        // useless in a single-prompt tool loop, where the one user turn sits at
+        // the top of the history and the slice swallows the whole compacted
+        // region. The summary then saves nothing: everything it summarises is
+        // re-sent verbatim right in front of it. Clamp the slice to a token
+        // budget, keeping the newest messages.
+        val clampedPriorIdx = clampSliceStartByBudget(
+            history = agentHistory,
+            startIdx = priorIdx,
+            anchorIdx = anchorIdx,
+            maxTokens = PRE_ANCHOR_MAX_TOKENS,
+            estimate = { ContextCompactor.estimateMessageTokens(it) },
+        )
+        if (clampedPriorIdx != priorIdx) {
+            AppLogger.info(ChatViewModel.TAG, "[CompactDiag] eAH v2 preAnchor clamp: priorIdx=$priorIdx → $clampedPriorIdx (budget=$PRE_ANCHOR_MAX_TOKENS tokens)")
+            priorIdx = clampedPriorIdx
         }
 
         // PRE-ANCHOR PRUNE (tool-heavy session fix):
