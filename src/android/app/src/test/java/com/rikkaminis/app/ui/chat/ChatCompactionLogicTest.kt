@@ -105,6 +105,73 @@ class ChatCompactionLogicTest {
         assertEquals(-1, resolveCompactAnchorIdx(h, null))
     }
 
+    // ── [fix/compact-anchor-resolution] plain-text user prompts ─
+    //
+    // Every helper above builds a message WITH a Text part, which is exactly
+    // why the empty-parts case went unnoticed: production user messages are
+    // built as `LLMMessage(role = USER, content = <typed text>)` with
+    // contentParts EMPTY (ChatSessionLifecycle send path). Kotlin's `all {}`
+    // is vacuously true on an empty list, so the anchor walk-back classified
+    // every typed prompt as a tool-result carrier and skipped it — collapsing
+    // the anchor onto message 0 (or -1) and freezing every later compact in
+    // the "already compacted" early return.
+
+    @Test
+    fun `isToolResultOnly is false for an empty part list`() {
+        assertFalse(
+            LLMMessage(role = LLMMessage.Role.USER, content = "hi").isToolResultOnly(),
+        )
+        assertTrue(toolResultUser("tr1").isToolResultOnly())
+    }
+
+    @Test
+    fun `plain text prompt is anchored on instead of skipped`() {
+        fun plain(id: String) =
+            LLMMessage(role = LLMMessage.Role.USER, content = "a typed prompt", dbMessageId = id)
+        val h = listOf(
+            plain("u1"),
+            assistant("a1"),
+            plain("u2"),
+            assistant("a2"),
+        )
+        // Before the fix u2 was skipped → anchor 0. Now the newest plain prompt
+        // is the boundary and keep-instruction-active backs off one turn → 1.
+        assertEquals(1, resolveCompactAnchorIdx(h, null))
+    }
+
+    @Test
+    fun `all plain text history no longer aborts with minus one`() {
+        val h = listOf(
+            LLMMessage(role = LLMMessage.Role.USER, content = "prompt", dbMessageId = "u1"),
+            assistant("a1"),
+        )
+        // Before the fix every candidate was skipped → -1 and compactAll
+        // reported "no persisted messages yet" on a perfectly healthy session.
+        assertEquals(0, resolveCompactAnchorIdx(h, null))
+    }
+
+    @Test
+    fun `second compact with no new user turn folds nothing`() {
+        // Minimal machine reproduction of the reported symptom: a long tool
+        // loop under a single prompt. The anchor resolves to message 0, the
+        // marker records it, and the next pass starts at anchor + 1 → empty
+        // range → "already compacted", every turn, while the summary is still
+        // re-injected. The anchor-predicate fix does NOT change this shape
+        // (there is no second user turn to anchor on) — it needs a
+        // budget-based fallback anchor, tracked separately.
+        val h = mutableListOf(
+            LLMMessage(role = LLMMessage.Role.USER, content = "prompt", dbMessageId = "u0"),
+        )
+        for (k in 1..4) {
+            h += assistant("a$k")
+            h += toolResultUser("r$k")
+        }
+        val anchor = resolveCompactAnchorIdx(h, null)
+        assertEquals(0, anchor)
+        val start = resolveCompactStartIdx(h, marker(version = 2, lastCompacted = h[anchor].dbMessageId))
+        assertTrue("expected an empty range after the marker", start > anchor)
+    }
+
     // ── resolveCompactStartIdx ─────────────────────────────────
 
     @Test

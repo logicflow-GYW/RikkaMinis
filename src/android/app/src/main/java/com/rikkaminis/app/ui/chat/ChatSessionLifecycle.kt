@@ -94,6 +94,16 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
     // boundaries.
     val anchorIdx: Int = resolveCompactAnchorIdx(history, anchorIdxOverride)
     if (anchorIdx < 0) {
+        // [fix/compact-anchor-resolution] This return posted a user-visible
+        // notice but wrote nothing to the log, which is why "it keeps trying
+        // to compact and nothing happens" had no diagnosable trace. Say which
+        // history size / override produced the failure.
+        AppLogger.info(
+            ChatViewModel.TAG,
+            "[Compact] aborted: no persisted anchor (anchorIdx=-1 historySize=${history.size} " +
+                "anchorOverride=$anchorIdxOverride firstId=${history.firstOrNull()?.dbMessageId?.take(8)} " +
+                "lastId=${history.lastOrNull()?.dbMessageId?.take(8)})",
+        )
         appendSystemInfo(context.getString(R.string.sysmsg_compact_no_persisted), "compact")
         return
     }
@@ -102,11 +112,27 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
     // (v2/v1 boundary resolution delegated to resolveCompactStartIdx).
     val effectiveStartIdx: Int = resolveCompactStartIdx(history, _cachedLatestMarker)
     if (effectiveStartIdx > anchorIdx) {
+        // [fix/compact-anchor-resolution] Same silent-early-return problem:
+        // this is the branch a *stuck* anchor lands in on every single turn
+        // (start = prevAnchor + 1 > anchor means "the range is already
+        // folded"), so it is the one that most needs a log line.
+        AppLogger.info(
+            ChatViewModel.TAG,
+            "[Compact] aborted: already compacted (start=$effectiveStartIdx > anchor=$anchorIdx " +
+                "anchorId=${history[anchorIdx].dbMessageId?.take(8)} " +
+                "prevAnchor=${_cachedLatestMarker?.lastCompactedMessageId?.take(8)} " +
+                "prevVersion=${_cachedLatestMarker?.version} historySize=${history.size} " +
+                "summaryChars=${_compactSummary.value?.length ?: 0})",
+        )
         appendSystemInfo(context.getString(R.string.sysmsg_compact_already_done), "compact")
         return
     }
     val toCompact = history.subList(effectiveStartIdx, anchorIdx + 1)
     if (toCompact.isEmpty()) {
+        AppLogger.info(
+            ChatViewModel.TAG,
+            "[Compact] aborted: empty range (start=$effectiveStartIdx anchor=$anchorIdx)",
+        )
         appendSystemInfo(context.getString(R.string.sysmsg_compact_nothing), "compact")
         return
     }

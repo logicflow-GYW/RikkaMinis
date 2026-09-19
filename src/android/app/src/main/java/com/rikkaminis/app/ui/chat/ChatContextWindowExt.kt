@@ -195,8 +195,10 @@ internal fun ChatViewModel.maybeTriggerAutoCompact() {
  *   - Triggers `compactAll(allowInStream = true)` so the in-stream guard
  *     doesn't abort it at a turn boundary.
  *   - AWAITS completion (bounded) so the next provider call sees the summary,
- *     not a half-compacted history. Returns true iff a compact was started
- *     (caller should await before proceeding).
+ *     not a half-compacted history. Returns true iff the compact **actually
+ *     folded something** (anchor or summary changed) — false means nothing
+ *     shrank, so the caller must keep its fallback hard trim enabled this
+ *     turn. See the return-site comment.
  */
 /**
  * [T-ctx-offload-escalation] Reads and clears the one-shot "this turn's offload
@@ -278,10 +280,33 @@ internal suspend fun ChatViewModel.maybeAutoCompactInLoop(
             "compactLine=${policy.compactThreshold} offloadLine=${policy.offloadThreshold} " +
             "reserve=${contextGrowthTracker.reserveTokens(contextWindow)} growth=${contextGrowthTracker.perTurnEstimate}/turn)",
     )
+    val markerBefore = _cachedLatestMarker?.lastCompactedMessageId
+    val summaryBefore = _compactSummary.value
     compactAll(allowInStream = true) // fire-and-forget; internally launches on IO
     // Await completion so the next provider call assembles summary + tail.
     awaitAutoCompactIfNeeded()
-    return true
+    // [fix/compact-anchor-resolution] Report whether the compact ACTUALLY
+    // folded something, not whether we merely asked for one. The caller
+    // (AgentLoopEngine) skips the hard trim whenever this returns true, on the
+    // theory that the just-written marker will project summary+tail on the
+    // next request. That theory only holds if the compact folded a range —
+    // when it early-returns ("already compacted" with a stuck anchor, no
+    // persisted anchor, empty range, budget exhausted) the history is
+    // untouched, lastContextTokens stays stale, and skipping the trim makes
+    // the context grow on every turn with no fallback left. A successful
+    // compact always writes a fresh marker (new anchor id) and/or a new
+    // summary, so comparing those two is a sufficient "did it fold" signal.
+    val folded = _cachedLatestMarker?.lastCompactedMessageId != markerBefore ||
+        _compactSummary.value != summaryBefore
+    if (!folded) {
+        AppLogger.warning(
+            ChatViewModel.TAG,
+            "[AutoCompactLoop] compact attempted but folded nothing " +
+                "(anchor=${markerBefore?.take(8) ?: "nil"} summaryChars=${summaryBefore?.length ?: 0} " +
+                "historySize=${agentHistory.size}) — keeping the hard trim enabled this turn",
+        )
+    }
+    return folded
 }
 
 /**

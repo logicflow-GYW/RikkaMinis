@@ -53,10 +53,7 @@ fun resolveCompactAnchorIdx(
         // (tool work + the final answer) stays in the active, un-grayed region.
         // Skip pure tool-result entries (role=USER but contentParts all ToolResult).
         if (i > 0) {
-            while (i >= 0 && (history[i].role != LLMMessage.Role.USER ||
-                    history[i].contentParts.all { p -> p is AgentContentPart.ToolResult } ||
-                    history[i].dbMessageId.isNullOrEmpty())
-            ) i -= 1
+            while (i >= 0 && !history[i].isPersistedUserPrompt()) i -= 1
         }
         // [fix/compact-keep-instruction-active] The USER prompt we just landed
         // on may be the CURRENT turn's driving instruction (run in progress, or
@@ -86,14 +83,7 @@ fun resolveCompactAnchorIdx(
         // helper is side-effect-free and JVM-tested.
         if (i > 0) {
             var j = i
-            while (j > 0) {
-                val prev = history[j - 1]
-                if (prev.role != LLMMessage.Role.USER ||
-                    prev.contentParts.all { p -> p is AgentContentPart.ToolResult } ||
-                    prev.dbMessageId.isNullOrEmpty()
-                ) break
-                j -= 1
-            }
+            while (j > 0 && history[j - 1].isPersistedUserPrompt()) j -= 1
             if (j > 0) {
                 var k = j - 1
                 while (k >= 0 && history[k].dbMessageId.isNullOrEmpty()) k -= 1
@@ -122,6 +112,45 @@ fun resolveCompactAnchorIdx(
         i
     }
 }
+
+/**
+ * True when [this] carries at least one content part and every part is a
+ * tool result — i.e. the message is a tool-result carrier, not a prompt.
+ *
+ * Note the explicit `isNotEmpty()`: Kotlin's `all {}` is **vacuously true**
+ * on an empty list, so the un-guarded form misclassifies every plain-text
+ * user message (`content` set, `contentParts` empty) as a tool-result
+ * carrier. See [isPersistedUserPrompt].
+ */
+internal fun LLMMessage.isToolResultOnly(): Boolean =
+    contentParts.isNotEmpty() && contentParts.all { it is AgentContentPart.ToolResult }
+
+/**
+ * True when [this] is a persisted USER turn a compaction may anchor on: a
+ * real user prompt (not a tool-result carrier) with a DB row behind it.
+ *
+ * [fix/compact-anchor-resolution] The anchor walk-back in
+ * [resolveCompactAnchorIdx] used to test `contentParts.all { it is ToolResult }`
+ * inline. On an empty `contentParts` that is vacuously true, so **every
+ * plain-text user message was skipped as if it were a tool result**, and the
+ * anchor walked past them onto the first entry that happens to carry a Text
+ * part — or off the front of the history (-1). Two production symptoms:
+ *
+ *  - the compacted range collapsed to `[0..0]` (one message), so the summary
+ *    was pure add-on while the history kept growing;
+ *  - once the anchor pinned index 0, `resolveCompactStartIdx` returned
+ *    `anchor + 1 > anchor`, so every later auto-compact took the
+ *    "already compacted" early return — the log showed
+ *    `compactAll() invoked` and nothing else, every turn, forever
+ *    (the reported "it keeps compacting at the first message and nothing
+ *    changes"). The divider that was visible on screen anchored on
+ *    message 0 for the same reason.
+ *
+ * One named predicate now backs both walk-back loops in
+ * [resolveCompactAnchorIdx] so the two cannot drift apart again.
+ */
+internal fun LLMMessage.isPersistedUserPrompt(): Boolean =
+    role == LLMMessage.Role.USER && !isToolResultOnly() && !dbMessageId.isNullOrEmpty()
 
 /**
  * Resolves the compact range's starting index (inclusive) from the previous

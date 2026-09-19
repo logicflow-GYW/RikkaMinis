@@ -305,6 +305,15 @@ internal class AgentLoopEngine(
                 // is actually sent, and the next turn's Usage chunk refreshes
                 // lastContextTokens so a genuinely over-budget history still
                 // trims on the next iteration.
+                // [fix/compact-anchor-resolution] `compacted` now means the
+                // compact ACTUALLY folded a range (see
+                // ChatContextWindowExt.maybeAutoCompactInLoop) — not merely that
+                // one was requested. A compact that early-returns
+                // ("already compacted" / no anchor / empty range) leaves the
+                // history untouched, so the reasoning above (skip the trim to
+                // keep the marker's anchor alive) does not apply: nothing is
+                // preserving anything, and skipping the trim would let the
+                // context grow on every turn with no fallback left.
                 if (!compacted) {
                     host.trimContextHistoryWindow(
                         contextWindow = window,
