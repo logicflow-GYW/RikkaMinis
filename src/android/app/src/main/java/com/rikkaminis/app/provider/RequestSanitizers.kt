@@ -69,7 +69,6 @@ fun clampOutboundTemperature(value: Double, max: Double = 2.0): Double =
  */
 fun sanitizeToolPairing(
     messages: List<LLMMessage>,
-    log: (String) -> Unit = {},
     // [FIX-1 / F-211] Drop messages that stripping left completely empty.
     //
     // This was documented as deliberate ("callers apply it themselves") and
@@ -86,6 +85,12 @@ fun sanitizeToolPairing(
     // and a test pins that behaviour. Opt out there rather than opt in
     // everywhere, so a fifth call site cannot inherit the hole.
     dropEmpty: Boolean = true,
+    // MUST stay last: three production call sites pass the logger as a
+    // TRAILING LAMBDA, and a trailing lambda binds to the final parameter
+    // whatever its type is. Putting dropEmpty after this one silently
+    // retargeted those lambdas at a Boolean (CI compileReleaseKotlin caught it:
+    // "actual type is kotlin.Function1<...>, but kotlin.Boolean was expected").
+    log: (String) -> Unit = {},
 ): List<LLMMessage> {
     val result = ArrayList<LLMMessage>(messages.size)
     // Tool-use ids from the most recent assistant message that are still

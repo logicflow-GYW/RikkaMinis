@@ -47,6 +47,7 @@ import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okhttp3.ResponseBody
 import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -1625,20 +1626,36 @@ class OpenAIProvider constructor(
                                     "OpenAIProvider",
                                     "[ModelUseRoute] image download skipped: declared ${declaredLen}B exceeds ${MAX_GENERATED_IMAGE_BYTES}B",
                                 )
-                                continue
-                            }
-                            // contentLength is -1 for chunked responses, so the
-                            // declared check alone is not enough: read at most
-                            // ceiling+1 bytes and treat an overflow as too big.
-                            val dlBytes = dlResp.body?.source()?.let { src ->
-                                val limit = MAX_GENERATED_IMAGE_BYTES + 1
-                                val read = src.readByteArray(limit)
-                                if (read.size > MAX_GENERATED_IMAGE_BYTES) null else read
-                            }
-                            val ctMime = dlResp.header("Content-Type")
-                            if (dlBytes != null && dlBytes.isNotEmpty()) {
-                                val mime = hintMime ?: ctMime ?: detectImageMime(dlBytes)
-                                attachments.add(LLMMediaAttachment(LLMMediaAttachment.MediaType.IMAGE, mime, dlBytes))
+                                // NOTE: this must NOT be a `continue` — the
+                                // enclosing `use { }` is an INLINE lambda and
+                                // `break`/`continue` across inline lambdas needs
+                                // Kotlin 2.2 (CI: "The feature break continue in
+                                // inline lambdas is only available since
+                                // language version 2.2"). Falling through with
+                                // dlBytes == null has exactly the same effect:
+                                // the attachment is not added.
+                            } else {
+                                // contentLength is -1 for chunked responses, so
+                                // the declared check alone is not enough: stream
+                                // through a bounded buffer and abort as soon as
+                                // the ceiling is crossed.
+                                //
+                                // NOT `source.readByteArray(n)`: that call reads
+                                // EXACTLY n bytes and throws EOFException when the
+                                // body is shorter, so it would have rejected every
+                                // image smaller than the ceiling — i.e. all of
+                                // them.
+                                val dlBytes = readBodyBounded(dlResp.body, MAX_GENERATED_IMAGE_BYTES)
+                                val ctMime = dlResp.header("Content-Type")
+                                if (dlBytes != null && dlBytes.isNotEmpty()) {
+                                    val mime = hintMime ?: ctMime ?: detectImageMime(dlBytes)
+                                    attachments.add(LLMMediaAttachment(LLMMediaAttachment.MediaType.IMAGE, mime, dlBytes))
+                                } else if (dlBytes == null) {
+                                    com.rikkaminis.app.logging.AppLogger.warning(
+                                        "OpenAIProvider",
+                                        "[ModelUseRoute] image download skipped: body exceeds ${MAX_GENERATED_IMAGE_BYTES}B",
+                                    )
+                                }
                             }
                         }
                     } catch (e: Exception) {
@@ -2445,6 +2462,35 @@ class OpenAIProvider constructor(
      * instruction. The <prompt> is the latest user text — plain string content
      * or the concatenated text parts of the last user message.
      */
+    /**
+     * [FIX-1 / F-186] Read at most [limit] bytes from [body]; null means "over
+     * the ceiling". Streams in chunks so a hostile/unbounded body is never
+     * materialised in full.
+     *
+     * Deliberately NOT `source.readByteArray(limit)`: that helper reads
+     * EXACTLY `limit` bytes and throws [java.io.EOFException] when the stream
+     * is shorter — so using it here would have rejected every image smaller
+     * than the ceiling, which is all of them.
+     */
+    private fun readBodyBounded(body: ResponseBody?, limit: Long): ByteArray? {
+        if (body == null) return null
+        val declared = body.contentLength()
+        if (declared > limit) return null
+        val out = java.io.ByteArrayOutputStream(if (declared > 0) declared.toInt() else 8 * 1024)
+        body.byteStream().use { input ->
+            val buf = ByteArray(16 * 1024)
+            var total = 0L
+            while (true) {
+                val n = input.read(buf)
+                if (n <= 0) break
+                total += n
+                if (total > limit) return null
+                out.write(buf, 0, n)
+            }
+        }
+        return out.toByteArray()
+    }
+
     private fun detectImageMime(data: ByteArray): String {
         if (data.size < 4) return "image/png"
         val b = data.map { it.toInt() and 0xFF }
