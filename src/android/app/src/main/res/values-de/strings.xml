@@ -346,6 +346,8 @@
     <string name="perm_tool_clipboard">Zwischenablage</string>
     <string name="perm_tool_contacts">Kontakte</string>
     <string name="perm_tool_photos">Fotos</string>
+    <string name="perm_tool_notification">Benachrichtigungen</string>
+    <string name="perm_tool_speech_recognition">Spracherkennung</string>
     <string name="skill_title">Fähigkeiten</string>
     <string name="skill_add">Skill hinzufügen</string>
     <string name="skill_section_installed">Installiert</string>

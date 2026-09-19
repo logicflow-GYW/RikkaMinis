@@ -346,6 +346,8 @@
     <string name="perm_tool_clipboard">クリップボード</string>
     <string name="perm_tool_contacts">連絡先</string>
     <string name="perm_tool_photos">写真</string>
+    <string name="perm_tool_notification">通知</string>
+    <string name="perm_tool_speech_recognition">音声認識</string>
     <string name="skill_title">スキル</string>
     <string name="skill_add">Skill を追加</string>
     <string name="skill_section_installed">インストール済み</string>

@@ -67,6 +67,10 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
             return NativeOffloadResult(if (args.positional.isEmpty()) 2 else 0, HELP)
         }
 
+        // T330: tri-state agent gate before any work. [audit-0919 F-51]
+        // `transcribe` captures microphone audio — a PII surface.
+        OffloadGate.enforce("speech_recognition", "android-speech", args, request)?.let { return it }
+
         return try {
             when (val sub = args.positional[0]) {
                 "status" -> cmdStatus(args)

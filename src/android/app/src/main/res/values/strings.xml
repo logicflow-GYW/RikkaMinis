@@ -701,6 +701,8 @@
     <string name="perm_tool_clipboard">Clipboard</string>
     <string name="perm_tool_contacts">Contacts</string>
     <string name="perm_tool_photos">Photos</string>
+    <string name="perm_tool_notification">Notifications</string>
+    <string name="perm_tool_speech_recognition">Speech Recognition</string>
 
     <!-- T322: Shizuku permission walkthrough -->
     <string name="shizuku_title">Shizuku</string>

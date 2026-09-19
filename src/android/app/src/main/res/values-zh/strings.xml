@@ -395,6 +395,8 @@
     <string name="perm_tool_clipboard">剪贴板</string>
     <string name="perm_tool_contacts">通讯录</string>
     <string name="perm_tool_photos">照片</string>
+    <string name="perm_tool_notification">通知</string>
+    <string name="perm_tool_speech_recognition">语音识别</string>
 
     <!-- T322: Shizuku 权限引导 -->
     <string name="shizuku_title">Shizuku</string>

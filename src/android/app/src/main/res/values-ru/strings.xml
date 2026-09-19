@@ -553,6 +553,8 @@
     <string name="perm_tool_clipboard">Буфер обмена</string>
     <string name="perm_tool_contacts">Контакты</string>
     <string name="perm_tool_photos">Фото</string>
+    <string name="perm_tool_notification">Уведомления</string>
+    <string name="perm_tool_speech_recognition">Распознавание речи</string>
     <string name="shizuku_title">Shizuku</string>
     <string name="shizuku_settings_subtitle">Привилегированное управление Android через Shizuku или AXManager</string>
     <string name="shizuku_status_header">Статус</string>

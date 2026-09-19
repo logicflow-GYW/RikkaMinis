@@ -74,6 +74,10 @@ class NotificationOffloadHandler(private val context: Context) : NativeOffloadHa
             return NativeOffloadResult(0, HELP)
         }
 
+        // T330: tri-state agent gate before any work. [audit-0919 F-41]
+        // `list` reads notification title/body text — a PII surface.
+        OffloadGate.enforce("notification", "android-notification", args, request)?.let { return it }
+
         return try {
             when (val sub = args.positional.firstOrNull() ?: "list") {
                 "send", "schedule" -> handleSend(args)

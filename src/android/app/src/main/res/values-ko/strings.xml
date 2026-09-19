@@ -346,6 +346,8 @@
     <string name="perm_tool_clipboard">클립보드</string>
     <string name="perm_tool_contacts">연락처</string>
     <string name="perm_tool_photos">사진</string>
+    <string name="perm_tool_notification">알림</string>
+    <string name="perm_tool_speech_recognition">음성 인식</string>
     <string name="skill_title">스킬</string>
     <string name="skill_add">Skill 추가</string>
     <string name="skill_section_installed">설치됨</string>

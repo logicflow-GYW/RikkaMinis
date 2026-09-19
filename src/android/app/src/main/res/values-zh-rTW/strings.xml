@@ -1314,6 +1314,8 @@
     <string name="perm_tool_clipboard">剪貼簿</string>
     <string name="perm_tool_contacts">通訊錄</string>
     <string name="perm_tool_photos">照片</string>
+    <string name="perm_tool_notification">通知</string>
+    <string name="perm_tool_speech_recognition">語音辨識</string>
     <string name="shizuku_title">Shizuku</string>
     <string name="shizuku_settings_subtitle">透過 Shizuku 或 AXManager 呼叫 Android 高權限 API</string>
     <string name="shizuku_status_header">狀態</string>

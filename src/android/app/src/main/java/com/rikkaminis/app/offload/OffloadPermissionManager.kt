@@ -72,14 +72,18 @@ object OffloadPermissionManager {
         ToolPermissionInfo("clipboard", "Clipboard", PermissionCategory.PRIVACY, PermissionLevel.BYPASS),
         ToolPermissionInfo("contacts", "Contacts", PermissionCategory.PRIVACY, PermissionLevel.BYPASS),
         ToolPermissionInfo("photos", "Photos", PermissionCategory.PRIVACY, PermissionLevel.BYPASS),
+        // [audit-0919 F-41/F-51] Reclassified from SYSTEM/MEDIA: reading
+        // notification title/body text and capturing microphone audio are
+        // personal-data surfaces, so their rows must stay visible (and
+        // closable) in Settings. Default level stays BYPASS — visibility only.
+        ToolPermissionInfo("notification", "Notifications", PermissionCategory.PRIVACY, PermissionLevel.BYPASS),
+        ToolPermissionInfo("speech_recognition", "Speech Recognition", PermissionCategory.PRIVACY, PermissionLevel.BYPASS),
         // Media — no personal data, hidden from Settings.
         ToolPermissionInfo("speak", "Text-to-Speech", PermissionCategory.MEDIA, PermissionLevel.BYPASS, showInSettings = false),
         ToolPermissionInfo("media_player", "Media Player", PermissionCategory.MEDIA, PermissionLevel.BYPASS, showInSettings = false),
-        ToolPermissionInfo("speech_recognition", "Speech Recognition", PermissionCategory.MEDIA, PermissionLevel.BYPASS, showInSettings = false),
         // System — no personal data, hidden from Settings.
         ToolPermissionInfo("alarm", "Alarms & Timers", PermissionCategory.SYSTEM, PermissionLevel.BYPASS, showInSettings = false),
         ToolPermissionInfo("weather", "Weather", PermissionCategory.SYSTEM, PermissionLevel.BYPASS, showInSettings = false),
-        ToolPermissionInfo("notification", "Notifications", PermissionCategory.SYSTEM, PermissionLevel.BYPASS, showInSettings = false),
         ToolPermissionInfo("device_info", "Device Info", PermissionCategory.SYSTEM, PermissionLevel.BYPASS, showInSettings = false),
         // T330: integrations — opt-in by default. These tools can drive
         // other apps and read on-screen content, so the safer posture is
