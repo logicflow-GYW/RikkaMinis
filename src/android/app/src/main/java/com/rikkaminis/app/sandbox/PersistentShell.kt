@@ -506,9 +506,16 @@ class PersistentShell(
     }
 
     /**
-     * Append [text] to [output], capping at [maxChars]. Returns `true` when
-     * truncation occurred (the append was clipped or skipped entirely).
-     * Delegates to the top-level [internalTruncateOutput] for JVM testability.
+     * Append [text] to [output], capping at [maxBytes] UTF-8 bytes. Returns
+     * `true` when truncation occurred (the append was clipped or skipped
+     * entirely). Delegates to the top-level [internalTruncateOutput] for JVM
+     * testability.
+     *
+     * [audit-0919 F-215] The ceiling comes from the user's `shellOutputKb`
+     * knob (KB → bytes) and is enforced in BYTES — the same unit the knob is
+     * named in and the same one [TerminalSanitizer.truncateIfNeeded] applies
+     * afterwards. Counting `String.length` here made a 128 KB setting hold
+     * 384 KB of CJK.
      */
     private fun CommandCallback.appendOutput(text: String) {
         if (internalTruncateOutput(output, text, AgentRuntimeLimitsPrefs.shellOutputKb() * 1024)) {
@@ -852,11 +859,21 @@ internal fun internalParseMinisExitCode(text: String, marker: String): Int {
  * Extracted as a top-level function so it can be JVM-tested without loading
  * [PersistentShell] (which depends on `android.content.Context`).
  */
-internal fun internalTruncateOutput(output: StringBuilder, text: String, maxChars: Int): Boolean {
-    val remaining = maxChars - output.length
+/**
+ * Append [text] to [output] as long as the running total stays within
+ * [maxBytes] UTF-8 BYTES ([audit-0919 F-215]: the budget is a KB knob, so the
+ * unit has to be bytes — see [TerminalSanitizer.utf8Length]). Returns true when
+ * the append was clipped or skipped.
+ *
+ * A chunk that would cross the ceiling is truncated at the last code-point
+ * boundary that fits, so the buffer can never end on a lone surrogate.
+ */
+internal fun internalTruncateOutput(output: StringBuilder, text: String, maxBytes: Int): Boolean {
+    val remaining = maxBytes - TerminalSanitizer.utf8Length(output.toString())
     if (remaining <= 0) return true
-    if (text.length > remaining) {
-        output.append(text, 0, remaining)
+    val fitted = TerminalSanitizer.byteSafePrefixLength(text, remaining)
+    if (fitted < text.length) {
+        output.append(text, 0, fitted)
         return true
     }
     output.append(text)

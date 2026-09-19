@@ -389,6 +389,14 @@ object PRootKernel {
      * and [FileEditTool] to short-circuit before touching disk; mirrors
      * iOS `MountedFolderCoordinator.isLinuxPathUnderReadOnlyMount`.
      *
+     * [audit-0919 F-214] T219-3's Android landing spot is THIS method, not the
+     * former `sandbox/MountedFolderCoordinator.kt` — that file was a zero-caller
+     * duplicate (its `requireWritable` / `bindMountSpecs` / `ReadOnlyMountException`
+     * had no production reference anywhere) and has been deleted. Do not
+     * reintroduce a coordinator object here: the read-only guard the write tools
+     * actually call is this one, and [applyMountedFoldersSnapshot] is what feeds
+     * `proot -b`.
+     *
      * The shell can technically still write through a PRoot bind because
      * `-b` has no read-only modifier — that's why the mount-detail screen
      * uses honest "Locked / Unlocked" wording. Defense-in-depth via a
@@ -434,10 +442,9 @@ object PRootKernel {
      *     (e.g. another app's `Android/data/<pkg>` under strict scoped
      *     storage).
      *
-     * Workers A's later `MountedFolderCoordinator` will likely hoist
-     * this exact algorithm into the data layer with a `resolvedHostPath`
-     * cache field on `MountedFoldersStore.Entry`. Kept inline here so
-     * T219-3 can ship before A finishes.
+     * Workers A's later data-layer hoist landed as the `resolvedHostPath`
+     * cache field on `MountedFoldersStore.Entry`; this method still
+     * resolves on demand for entries whose cache is cold.
      */
     private fun resolveTreeUriToHostPath(treeUriString: String, context: Context): String? = try {
         val treeUri = Uri.parse(treeUriString)
@@ -970,8 +977,9 @@ object PRootKernel {
      * T219-4: install /usr/local/bin/ wrappers for the common file-writing
      * commands so a write whose target is under an effectively-read-only mount
      * fails loudly in the shell (mirrors how iOS `MountedFolderCoordinator`
-     * throws `ReadOnlyMountError` before touching disk), instead of the write
-     * silently no-op'ing on ROMs that shadow blocked writes.
+     * throws `ReadOnlyMountError` before touching disk — the Android in-app
+     * equivalent of that guard is [isLinuxPathUnderReadOnlyMount], see F-214),
+     * instead of the write silently no-op'ing on ROMs that shadow blocked writes.
      *
      * The list of read-only linux prefixes is written to a config file the
      * wrappers source at run time, so re-mounting / toggling writability just

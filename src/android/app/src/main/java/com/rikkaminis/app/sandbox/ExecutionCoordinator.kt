@@ -390,7 +390,16 @@ object ExecutionCoordinator {
 
             val durationMs = System.currentTimeMillis() - startTime
             val sanitized = TerminalSanitizer.sanitize(result.output)
-            val truncated = TerminalSanitizer.truncateIfNeeded(sanitized)
+            // [audit-0919 F-215] Host-side cap must honour the SAME knob the
+            // shell-side buffer uses (PersistentShell.appendOutput →
+            // AgentRuntimeLimitsPrefs.shellOutputKb() * 1024) and count BYTES.
+            // It used to take truncateIfNeeded's default (50 000) and compare
+            // it against String.length, so the user's ceiling was ignored on
+            // this path entirely and was 3× its declared value for CJK.
+            val truncated = TerminalSanitizer.truncateIfNeeded(
+                sanitized,
+                com.rikkaminis.app.data.AgentRuntimeLimitsPrefs.shellOutputKb() * 1024,
+            )
             // Combine host-side and shell-side truncation flags
             val outputTruncated = result.truncated || truncated != sanitized
             // [audit-0916d] TIMEOUT_EXIT_CODE, not a bare 124: the value was
@@ -976,8 +985,17 @@ object ExecutionCoordinator {
             lastActiveMs.clear()
             // [fix/audit-s4l2] see above: clear the per-session mutexes too.
             mutexes.clear()
-            @Suppress("DEPRECATION")
-            ShellExecutor.destroyCurrent()
+            // [audit-0919 F-217] No ShellExecutor.destroyCurrent() here. It was
+            // a silent no-op: its only effect is `currentProcess?.let { … }`,
+            // and `currentProcess` is assigned exclusively inside
+            // ShellExecutor.execute(), which has zero production callers (the
+            // agent path is ExecutionCoordinator → PersistentShell). The real
+            // teardown is the `shells.values.forEach { it.stop() }` + clears
+            // directly above. The call was removed rather than kept as a
+            // "belt and braces" line that reads like it does something.
+            // ponytail: ShellExecutor 整体仍是生产死码（只有 androidTest 引用）
+            //   | 天花板: 该类的 execute() 永远走不到，其超时/取消语义无人验证
+            //   | 升级触发: 有人想复用 ShellExecutor.execute()，或需要为它补测试
         }
     }
 

@@ -157,17 +157,17 @@ class TerminalSanitizerTest {
         // Should contain tail (last 50 chars of C's)
         assertTrue(result.endsWith("C".repeat(50)))
         // Should contain omission marker
-        assertTrue(result.contains("[... 50 characters omitted ...]"))
+        assertTrue(result.contains("[... 50 bytes omitted ...]"))
     }
 
     @Test
-    fun `truncateIfNeeded with default 50000 char limit`() {
-        val short = "a".repeat(49_999)
+    fun `truncateIfNeeded with default cap`() {
+        val short = "a".repeat(TerminalSanitizer.DEFAULT_OUTPUT_CAP_BYTES - 1)
         assertSame(short, TerminalSanitizer.truncateIfNeeded(short))
 
         val long = "x".repeat(60_000)
         val result = TerminalSanitizer.truncateIfNeeded(long)
-        assertTrue(result.contains("[... 10000 characters omitted ...]"))
+        assertTrue(result.contains("[... 10000 bytes omitted ...]"))
         assertTrue(result.length < 60_000)
     }
 
@@ -175,7 +175,52 @@ class TerminalSanitizerTest {
     fun `truncateIfNeeded omitted count is accurate`() {
         val input = "x".repeat(200)
         val result = TerminalSanitizer.truncateIfNeeded(input, 100)
-        assertTrue(result.contains("[... 100 characters omitted ...]"))
+        assertTrue(result.contains("[... 100 bytes omitted ...]"))
+    }
+
+    // [audit-0919 F-215] Budget is BYTES, so non-ASCII output is cut earlier
+    // than the same character count of ASCII would be.
+    @Test
+    fun `truncateIfNeeded counts utf8 bytes not chars`() {
+        // 100 CJK chars = 300 UTF-8 bytes. A 150-byte budget keeps 50 chars
+        // each side (150/2 = 75 bytes → 25 chars per side).
+        val input = "中".repeat(100)
+        val result = TerminalSanitizer.truncateIfNeeded(input, 150)
+        val omitted = 300 - 75 - 75
+        assertTrue(result.contains("[... $omitted bytes omitted ...]"))
+        assertEquals(75, TerminalSanitizer.utf8Length(result.substringBefore("\n\n")))
+    }
+
+    @Test
+    fun `truncateIfNeeded never splits a surrogate pair`() {
+        val input = "🔥".repeat(50) // 200 bytes
+        val result = TerminalSanitizer.truncateIfNeeded(input, 9)
+        // Head budget 4 bytes = one emoji; tail budget 4 bytes = one emoji.
+        assertTrue(result.startsWith("🔥"))
+        assertTrue(result.endsWith("🔥"))
+        assertFalse(result.contains("\uFFFD"))
+    }
+
+    @Test
+    fun `utf8Length matches toByteArray for mixed text`() {
+        val s = "abc你好🔥\n\t"
+        assertEquals(s.toByteArray(Charsets.UTF_8).size, TerminalSanitizer.utf8Length(s))
+    }
+
+    @Test
+    fun `byteSafePrefixLength and suffixStart are consistent`() {
+        val s = "a你🔥b"
+        // 1 + 3 + 4 + 1 = 9 bytes
+        assertEquals(9, TerminalSanitizer.utf8Length(s))
+        assertEquals(2, TerminalSanitizer.byteSafePrefixLength(s, 4)) // "a你" = 4 bytes
+        assertEquals(1, TerminalSanitizer.byteSafePrefixLength(s, 3)) // "a" = 1 byte
+        assertEquals(0, TerminalSanitizer.byteSafePrefixLength(s, 0))
+        assertEquals(s.length, TerminalSanitizer.byteSafePrefixLength(s, 100))
+        // suffix: last 1 byte = "b"; last 5 bytes = "🔥b" (index 2); a 4-byte
+        // budget would have to split the emoji → falls back to just "b".
+        assertEquals(s.length - 1, TerminalSanitizer.byteSafeSuffixStart(s, 1))
+        assertEquals(2, TerminalSanitizer.byteSafeSuffixStart(s, 5))
+        assertEquals(s.length - 1, TerminalSanitizer.byteSafeSuffixStart(s, 4))
     }
 
     // ==================== Edge cases ====================

@@ -173,6 +173,17 @@ object NativeOffloadServer {
     @Synchronized
     fun start(rootfsDir: File) {
         rootfsTmpDir = File(rootfsDir, "tmp")
+        // [audit-0919 F-216] Idempotency guard FIRST. The semaphore rebuild used
+        // to sit above this line, so every repeat call swapped in a fresh
+        // Semaphore while permits already acquired on the old instance stayed
+        // acquired on an object nobody reads any more — the
+        // MAX_CONCURRENT_WORKERS ceiling was momentarily unenforced and the
+        // in-flight workers' releases went to the discarded instance. start()
+        // has two production callers (MinisApp.kt onCreate and
+        // PRootKernel.boot) and the MinisApp one does not go through the boot
+        // idempotency path, so a second entry in the same process is reachable.
+        if (serverSocket != null) return
+
         // [D-2] size the offload worker cap from the shared ConcurrencyPrefs
         // knob (runs after ConcurrencyPrefs.prime in MinisApp.onCreate), kept
         // aligned with the shell coordinator + session slot cap.
@@ -180,7 +191,6 @@ object NativeOffloadServer {
             com.rikkaminis.app.data.ConcurrencyPrefs.maxConcurrentSessions(),
             true,
         )
-        if (serverSocket != null) return
 
         // T287-followup: bind with bounded retry. Linux abstract sockets are
         // freed by the kernel only after the owning process is fully reaped —

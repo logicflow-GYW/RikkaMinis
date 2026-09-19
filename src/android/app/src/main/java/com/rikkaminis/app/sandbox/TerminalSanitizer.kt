@@ -6,6 +6,15 @@ package com.rikkaminis.app.sandbox
  */
 object TerminalSanitizer {
 
+    /**
+     * [audit-0919 F-215] Fallback output ceiling for callers that do not pass
+     * the user's `shellOutputKb` knob. Kept at the historical 50 000 figure
+     * (now interpreted as BYTES, so ~50 KB of ASCII / ~16.6 K CJK chars —
+     * slightly smaller than the old char-based 50 000 for non-ASCII, which is
+     * the point: the old value silently permitted 3× that in UTF-8).
+     */
+    const val DEFAULT_OUTPUT_CAP_BYTES = 50_000
+
     // Matches ANSI/VT escape sequences:
     //   ESC [ ... final_byte (CSI sequences)
     //   ESC ] ... ST (OSC sequences terminated by BEL or ESC\)
@@ -49,16 +58,33 @@ object TerminalSanitizer {
     }
 
     /**
-     * Truncate output if it exceeds maxChars, keeping head and tail.
+     * Truncate output so its UTF-8 encoding fits [maxBytes], keeping head and
+     * tail.
+     *
+     * [audit-0919 F-215] Accounting is in BYTES, not chars. The budget this
+     * receives is `AgentRuntimeLimitsPrefs.shellOutputKb() * 1024` (a KB knob,
+     * default 128 KB), and the same knob is what caps the shell-side buffer in
+     * [PersistentShell] — so the unit has to be the one the knob is named in.
+     * Measuring `String.length` made the effective ceiling 3× the declared one
+     * for CJK (each char is 3 UTF-8 bytes) and 4× for astral-plane emoji.
+     *
+     * Cuts always land on a code-point boundary so a surrogate pair is never
+     * split into a lone surrogate (which would corrupt the string when it is
+     * re-encoded by the prompt builder / JSON serializer downstream).
      */
-    fun truncateIfNeeded(output: String, maxChars: Int = 50_000): String {
-        if (output.length <= maxChars) return output
+    fun truncateIfNeeded(output: String, maxBytes: Int = DEFAULT_OUTPUT_CAP_BYTES): String {
+        val totalBytes = utf8Length(output)
+        if (totalBytes <= maxBytes) return output
 
-        val keepEach = maxChars / 2
-        val head = output.substring(0, keepEach)
-        val tail = output.substring(output.length - keepEach)
-        val omitted = output.length - maxChars
-        return "$head\n\n[... $omitted characters omitted ...]\n\n$tail"
+        val keepEach = maxBytes / 2
+        val headEnd = byteSafePrefixLength(output, keepEach)
+        val tailStart = byteSafeSuffixStart(output, keepEach)
+        if (tailStart <= headEnd) return output.substring(0, headEnd)
+
+        val head = output.substring(0, headEnd)
+        val tail = output.substring(tailStart)
+        val omittedBytes = totalBytes - utf8Length(head) - utf8Length(tail)
+        return "$head\n\n[... $omittedBytes bytes omitted ...]\n\n$tail"
     }
 
     /**
@@ -105,5 +131,79 @@ object TerminalSanitizer {
             }
         }
         return buffer.toString()
+    }
+
+    // ── UTF-8 byte accounting ([audit-0919 F-215]) ───────────────────────
+    //
+    // `String.toByteArray().size` would be the obvious implementation, but the
+    // truncation path runs on every command result and allocating a full
+    // UTF-16→UTF-8 copy of the output just to measure it doubles peak memory
+    // for the largest strings the app handles. These walk code points instead
+    // (O(n) time, O(1) allocation) and give the exact same numbers.
+
+    /** UTF-8 encoded length of [s], in bytes. */
+    internal fun utf8Length(s: String): Int {
+        var bytes = 0
+        var i = 0
+        while (i < s.length) {
+            val cp = s.codePointAt(i)
+            bytes += when {
+                cp < 0x80 -> 1
+                cp < 0x800 -> 2
+                cp < 0x10000 -> 3
+                else -> 4
+            }
+            i += Character.charCount(cp)
+        }
+        return bytes
+    }
+
+    /**
+     * Largest index into [s] such that `s.substring(0, index)` is at most
+     * [maxBytes] UTF-8 bytes, never splitting a surrogate pair.
+     */
+    internal fun byteSafePrefixLength(s: String, maxBytes: Int): Int {
+        if (maxBytes <= 0) return 0
+        var bytes = 0
+        var i = 0
+        while (i < s.length) {
+            val cp = s.codePointAt(i)
+            val w = when {
+                cp < 0x80 -> 1
+                cp < 0x800 -> 2
+                cp < 0x10000 -> 3
+                else -> 4
+            }
+            if (bytes + w > maxBytes) return i
+            bytes += w
+            i += Character.charCount(cp)
+        }
+        return s.length
+    }
+
+    /**
+     * Smallest index into [s] such that `s.substring(index)` is at most
+     * [maxBytes] UTF-8 bytes, never starting on a low surrogate.
+     */
+    internal fun byteSafeSuffixStart(s: String, maxBytes: Int): Int {
+        if (maxBytes <= 0) return s.length
+        var bytes = 0
+        var i = s.length
+        while (i > 0) {
+            val start = if (i >= 2 && Character.isLowSurrogate(s[i - 1]) &&
+                Character.isHighSurrogate(s[i - 2])
+            ) i - 2 else i - 1
+            val cp = s.codePointAt(start)
+            val w = when {
+                cp < 0x80 -> 1
+                cp < 0x800 -> 2
+                cp < 0x10000 -> 3
+                else -> 4
+            }
+            if (bytes + w > maxBytes) return i
+            bytes += w
+            i = start
+        }
+        return 0
     }
 }
