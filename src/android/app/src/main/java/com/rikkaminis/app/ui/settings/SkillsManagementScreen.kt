@@ -936,6 +936,11 @@ fun SkillDetailScreen(
             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
             title = { Text(stringResource(R.string.skill_detail_edit_name_title)) },
             text = {
+                // ime-ok: host is an AlertDialog (independent Window,
+                // decorFitsSystemWindows=true -> SOFT_INPUT_ADJUST_UNSPECIFIED),
+                // so the platform pans/resizes to keep this single-line field
+                // visible; the bare Scaffold's missing IME inset does not apply.
+                // Not user-reported; re-verify on device before changing.
                 DialogTextField(
                     value = editName,
                     onValueChange = { editName = it },

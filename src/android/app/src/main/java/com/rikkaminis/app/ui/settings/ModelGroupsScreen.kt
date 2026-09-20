@@ -287,6 +287,11 @@ fun ModelGroupsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(modifier = Modifier.height(12.dp))
+                    // ime-ok: host is an AlertDialog (independent Window,
+                    // decorFitsSystemWindows=true -> SOFT_INPUT_ADJUST_UNSPECIFIED),
+                    // so the platform pans/resizes to keep this single-line field
+                    // visible; the bare Scaffold's missing IME inset does not apply.
+                    // Not user-reported; re-verify on device before changing.
                     OutlinedTextField(
                         value = newGroupName,
                         onValueChange = { newGroupName = sanitizeSingleLineInput(it) },
