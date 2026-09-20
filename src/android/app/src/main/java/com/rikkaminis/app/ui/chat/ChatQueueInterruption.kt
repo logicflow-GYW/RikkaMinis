@@ -71,9 +71,12 @@ internal suspend fun ChatViewModel.truncateBeforeEdit(messageId: String) {
             } catch (_: Exception) { true }
             if (hasText) {
                 if (visibleUserCount == visibleUserIndex) {
-                    // ChatDao.deleteMessagesAfter is `sort_order >= keepCount`
-                    // → passing this row's sortOrder deletes IT and everything
-                    // after, which is exactly what edit semantics want.
+                    // ChatDao.deleteMessagesAfter is `sort_order >= <bound>` —
+                    // the parameter is the DELETE-FROM boundary, NOT a
+                    // "how many to keep" count (its name reads like a count and
+                    // that is exactly what F-234 flagged). → passing this row's
+                    // sortOrder deletes IT and everything after, which is exactly
+                    // what edit semantics want.
                     cutoffSortOrder = entity.sortOrder
                     break
                 }
