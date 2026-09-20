@@ -39,7 +39,9 @@ import java.io.InputStreamReader
 import java.io.IOException
 import com.rikkaminis.app.sandbox.offload.FirstChunkTimeoutPolicy
 import java.util.concurrent.TimeUnit
+import com.rikkaminis.app.provider.causeChainSummary
 import com.rikkaminis.app.provider.failOnSilentEmptyCompletion
+import com.rikkaminis.app.provider.asConsumerSideCancellation
 
 class GeminiProvider(
     private val apiKey: String,
@@ -276,7 +278,20 @@ class GeminiProvider(
                 send(LLMStreamChunk.Finished(lastFinishReason ?: "end_turn"))
             }
         } catch (e: Exception) {
-            cancel("Stream error", mapError(e))
+            // [F-177] same defect as OpenAIProvider: a cause-less
+            // CancellationException here means the consumer asked us to stop
+            // (user tapped stop), not that the stream broke. Classifying it as
+            // a stream error made a cancel look like a provider failure.
+            val consumerCancel = e.asConsumerSideCancellation()
+            if (consumerCancel != null) {
+                com.rikkaminis.app.logging.AppLogger.info(
+                    "GeminiProvider",
+                    "[F-177] stream cancelled by consumer: ${e.causeChainSummary()}",
+                )
+                cancel(consumerCancel)
+            } else {
+                cancel("Stream error", mapError(e))
+            }
         } finally {
             reader.close()
             response.close()

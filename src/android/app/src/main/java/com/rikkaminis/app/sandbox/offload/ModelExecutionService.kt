@@ -1493,8 +1493,34 @@ class ModelExecutionService : Service() {
         }.apply { isDaemon = true }.start()
     }
 
-    /** Thrown when the main process asks us to cancel an in-flight stream. */
-    private class ModelExecutionCancelledException : java.lang.RuntimeException("cancelled")
+    /**
+     * Thrown when the main process asks us to cancel an in-flight stream.
+     *
+     * [F-177] Extends `CancellationException`, not `RuntimeException`.
+     *
+     * This exception is thrown from the worker's COLLECTOR body (:1280/:1301)
+     * while the provider's `callbackFlow` producer is running on that same
+     * dispatcher, so the producer's `catch` sees the kotlinx wrapper
+     * `CancellationException: Channel was consumed, consumer had failed` with
+     * this exception in `cause`. As a plain RuntimeException that wrapper is
+     * indistinguishable from a genuine mid-stream failure, and the provider
+     * logged a *user cancel* as `stream parse exception` (12–25×/day = 57% of
+     * a day's ERROR lines) and classified it as `LLMError.Unknown`.
+     *
+     * Typing it as a CancellationException makes the intent explicit at the
+     * type level, so the provider can tell "the consumer asked us to stop" from
+     * "the stream broke" (measured in exp_f177o: without this change the
+     * provider-side classification alone cannot fire, because the wrapper's
+     * `cause` is non-null).
+     *
+     * Safety: this is thrown inside the worker's own `runBlocking` and caught
+     * there, and the worker is not a child of any coroutine that this would
+     * cancel — measured in exp_f177h/exp_f177n: the enclosing job stays active
+     * (`isActive=true`, suspending calls and nested launches keep working), and
+     * `t is ModelExecutionCancelledException` at :1334 still matches, so the
+     * `cancelled` flag / cancel-ack contract is unchanged.
+     */
+    private class ModelExecutionCancelledException : kotlinx.coroutines.CancellationException("cancelled")
 
     private fun parseContentParts(o: JSONObject): List<com.rikkaminis.app.data.model.AgentContentPart> {
         val parts = mutableListOf<com.rikkaminis.app.data.model.AgentContentPart>()
