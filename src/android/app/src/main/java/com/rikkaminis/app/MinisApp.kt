@@ -903,7 +903,19 @@ class MinisApp : Application(), ImageLoaderFactory {
      * nothing can schedule a new internal alarm. A PendingIntent left behind by
      * an *older build* can still fire once, which is why AlarmReceiver keeps
      * its onAlarmFired cleanup path.
+     *
+     * [audit-0919 F-176] "Past-dated entries are dropped" is now true for every
+     * past entry (see the guard in the loop) — previously it only held for
+     * past timers and past one-shots.
      */
+    private fun daysForRepeatMode(repeatMode: String): IntArray? = when (repeatMode) {
+        // Calendar.DAY_OF_WEEK constants: SUNDAY=1 … SATURDAY=7.
+        // DAILY replays as all seven days; WEEKDAYS as Mon-Fri.
+        "DAILY" -> intArrayOf(1, 2, 3, 4, 5, 6, 7)
+        "WEEKDAYS" -> intArrayOf(2, 3, 4, 5, 6)
+        else -> null  // ONCE / unknown — no repeat to preserve.
+    }
+
     /**
      * [native-oom Phase 1] True when the current process is the isolated
      * `:toolservice` process (see [ToolExecutionService]). Used by [onCreate]
@@ -963,14 +975,28 @@ class MinisApp : Application(), ImageLoaderFactory {
         for (i in 0 until arr.length()) {
             val entry = arr.optJSONObject(i) ?: continue
             val triggerAt = entry.optLong("triggerAtMs", 0L)
-            if (triggerAt in 1L..now && entry.optString("type") == "timer") {
-                skipped++; continue  // Past timer — nothing to recover.
-            }
-            if (triggerAt in 1L..now && entry.optString("repeatMode", "ONCE") == "ONCE") {
-                skipped++; continue  // Past one-shot alarm.
+            val isTimer = entry.optString("type") == "timer"
+            val repeatMode = entry.optString("repeatMode", "ONCE")
+            // [audit-0919 F-176] "Past-dated entries are dropped" must hold for
+            // EVERY past entry, not just one-shots. The old two-branch guard
+            // only skipped (a) past timers and (b) past entries whose
+            // repeatMode was exactly "ONCE", so a past DAILY / WEEKDAYS alarm
+            // fell through and was rebuilt as a one-shot via ACTION_SET_ALARM —
+            // the opposite of what this KDoc promised, and it silently dropped
+            // the repeat semantics (only HOUR/MINUTES survive, no EXTRA_DAYS).
+            // A malformed entry with no triggerAtMs at all (optLong default 0)
+            // matched neither branch either, becoming a 00:00 alarm.
+            //
+            // One guard now covers all three cases. Rebuilding a past *repeating*
+            // alarm is not a "recovery" — the user's Clock app already owns that
+            // schedule (T266 moved scheduling there), and a fresh one-shot at the
+            // same wall-clock time is strictly worse than dropping it.
+            val isPast = triggerAt in 1L..now
+            if (isPast || triggerAt <= 0L) {
+                skipped++; continue
             }
             val migrationOk = runCatching {
-                if (entry.optString("type") == "timer") {
+                if (isTimer) {
                     val secs = entry.optInt("durationSec", -1)
                     val remaining = ((triggerAt - now) / 1000L).toInt()
                     if (remaining <= 0 && secs <= 0) return@runCatching false
@@ -988,6 +1014,14 @@ class MinisApp : Application(), ImageLoaderFactory {
                         putExtra(android.provider.AlarmClock.EXTRA_MINUTES, entry.optInt("minute", 0))
                         putExtra(android.provider.AlarmClock.EXTRA_MESSAGE, entry.optString("label", "Alarm"))
                         putExtra(android.provider.AlarmClock.EXTRA_SKIP_UI, true)
+                        // [audit-0919 F-176] Preserve repeat semantics for the
+                        // entries we DO replay. Without EXTRA_DAYS a DAILY /
+                        // WEEKDAYS ghost comes back as a one-shot that never
+                        // repeats — a silent downgrade the user only notices
+                        // when the alarm doesn't fire tomorrow.
+                        daysForRepeatMode(repeatMode)?.let {
+                            putExtra(android.provider.AlarmClock.EXTRA_DAYS, it)
+                        }
                         addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
                     startActivity(intent)

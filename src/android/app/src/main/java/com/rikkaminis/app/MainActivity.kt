@@ -237,7 +237,7 @@ class MainActivity : ComponentActivity() {
         // own launch-mode resolution; gating restoredChatSessionId here
         // covers the path where saved-state would override the
         // launch-mode dispatch entirely.
-        restoredChatSessionId = savedInstanceState?.getString(KEY_CURRENT_CHAT_SESSION_ID)
+        restoredChatSessionId = (savedInstanceState?.getString(KEY_CURRENT_CHAT_SESSION_ID)
             // [P3-crash-recovery] If the saved-state bundle is empty (native
             // SIGABRT doesn't write one), fall back to the process-level
             // last-session file written on every chat-route change. Either way,
@@ -276,6 +276,22 @@ class MainActivity : ComponentActivity() {
             } else {
                 null
             }
+            )
+            // [audit-0919 F-285] The closing paren above is load-bearing.
+            // Kotlin parses `a ?: if (c) { x } else { y }?.takeUnless { ... }`
+            // as `a ?: if (c) { x } else { y?.takeUnless { ... } }` — the safe
+            // call binds to the innermost `else` block only, so in the shape
+            // this code used before, the force-home guard was dead on BOTH
+            // paths it exists to protect:
+            //   - saved-state path (`a` non-null): elvis short-circuits,
+            //     takeUnless never runs, so a chat that just crashed the
+            //     process is reopened anyway, bypassing all three breakers;
+            //   - cold-start path: the fallback lives in the `if` branch while
+            //     the guard sat in the `else` branch, so it never applied.
+            // Verified with a JVM harness against the exact production shape
+            // (exp_a: old shape returns "S1" where the parenthesised shape
+            // returns null). Parentheses are the entire fix — no behaviour
+            // change on paths where the guard was already reachable.
             ?.takeUnless {
                 // [fix/coldstart-restore-vs-launch-mode] All three force-home
                 // breakers, not just the crash-frequency one. The other two are
@@ -583,8 +599,26 @@ class MainActivity : ComponentActivity() {
      * to bias OOM through.
      */
     override fun onDestroy() {
-        currentChatSessionId?.let { SessionActivityTracker.setAbsent(it) }
-        currentChatSessionId = null
+        // [audit-0919 F-286] Do NOT release presence on a configuration change.
+        // Activity recreation (rotate / language switch / font-scale change)
+        // runs onDestroy → onCreate back-to-back, and this release used to
+        // happen in the gap: setAbsent(sid) drops _presentSessions to empty,
+        // shouldRunService() goes false, and stopService() schedules a
+        // 500 ms-debounced teardown (SessionActivityTracker.IDLE_STOP_DELAY_MS).
+        // If the new instance's nav collector hasn't re-registered presence
+        // within that window the FG service stops and restarts — which is
+        // exactly the Android 16 startForeground race the tracker's own
+        // comments warn about, on a path the user triggers by rotating the
+        // phone. MinisApp's foreground counter explicitly handles this case
+        // ("balances out around configuration changes"); presence must too.
+        //
+        // isChangingConfigurations is true on the instance being destroyed,
+        // which is the one running this code — unlike the onCreate note in
+        // this file (where the NEW instance always reads false).
+        if (!isChangingConfigurations) {
+            currentChatSessionId?.let { SessionActivityTracker.setAbsent(it) }
+            currentChatSessionId = null
+        }
         super.onDestroy()
     }
 
