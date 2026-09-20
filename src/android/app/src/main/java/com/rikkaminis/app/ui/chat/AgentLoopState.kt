@@ -99,6 +99,27 @@ internal class AgentLoopState(
     var lastFlushedLen: Int = 0
     val pendingChunkSb: StringBuilder = StringBuilder()
 
+    /**
+     * [T-android-thinking-delta-main-thread-throttle] Separate throttle clock for
+     * the reasoning ("thinking") delta branch.
+     *
+     * WHY THIS EXISTS: the ThinkingDelta branch used to call
+     * `withContext(Dispatchers.Main) { host.updateAssistantMessage(...) }` on
+     * EVERY delta with no gate at all, while its sibling Text branch is gated by
+     * [lastUiUpdateMs] + `textDeltaThrottleMs`. Measured on device (2026-09-20):
+     * 91.8% of all SSE deltas are thinking-only (59,403 of 64,744), peaking at
+     * 1,052 deltas/s and 14,258 deltas in a single turn — i.e. ~1,000 main-Looper
+     * posts per second, each of which also ran an O(accumulated-text)
+     * `Utf16Sanitizer.sanitize()` inside `updateAssistantMessage` BEFORE that
+     * function's own throttle gate. Main thread measured at 59.8% of one core
+     * with `Number Slow UI thread: 1811`, which is the input-box lag.
+     *
+     * Deliberately a SEPARATE clock from [lastUiUpdateMs]: the two branches
+     * interleave (thinking → text → thinking on a continuation turn), and sharing
+     * one clock would let a thinking flush starve the first text delta.
+     */
+    var lastThinkingUiUpdateMs: Long = 0L
+
     /** T256 tier 2: per-tool-kind input-delta gates (1Hz file tools / 5Hz other). */
     var lastFileToolInputMs: Long = 0L
     var lastOtherToolInputMs: Long = 0L

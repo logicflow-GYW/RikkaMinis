@@ -47,6 +47,14 @@ class AgentLoopStateTest {
         assertEquals(0, s.pendingChunkSb.length)
         assertEquals(0L, s.lastFileToolInputMs)
         assertEquals(0L, s.lastOtherToolInputMs)
+        // [T-android-thinking-delta-main-thread-throttle] The thinking branch's
+        // own throttle clock. Must start at 0 (not a sentinel): the first
+        // thinking delta of a turn compares `System.currentTimeMillis() - 0`
+        // against the throttle tier, which always passes — so the block is
+        // created on the first delta exactly as before the throttle was added.
+        // A `Long.MIN_VALUE` sentinel here would overflow that subtraction
+        // (the exact trap logged for LogRingBuffer.lastSnapshotAt).
+        assertEquals(0L, s.lastThinkingUiUpdateMs)
     }
 
     @Test fun `defaults — one-shot guards false and counters zero`() {
