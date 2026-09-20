@@ -188,7 +188,7 @@ class MemoryRepositoryTest {
         File(memoryDir, SoulStore.FILE_NAME).writeText("## persona\nunique-soul-marker\n")
 
         val repo = MemoryRepository(memoryDir)
-        val result = repo.getMemory()
+        val result = repo.getMemory("", "daily")
 
         assertFalse(
             "SOUL.md must not be searched as a daily log",
@@ -203,7 +203,7 @@ class MemoryRepositoryTest {
         File(memoryDir, SoulStore.FILE_NAME).writeText("## persona\nunique-soul-marker\n")
 
         val repo = MemoryRepository(memoryDir)
-        val result = repo.getMemory()
+        val result = repo.getMemory("", "daily")
 
         assertFalse(result.contains("unique-soul-marker"))
     }
