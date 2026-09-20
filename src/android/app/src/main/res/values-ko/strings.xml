@@ -99,8 +99,6 @@
     <string name="settings_skills_subtitle">AI 에이전트의 스킬과 지침 관리</string>
     <string name="settings_memory">메모리</string>
     <string name="settings_memory_subtitle">세션 간에 유지되는 영구적 지식</string>
-    <string name="settings_terminal">터미널</string>
-    <string name="settings_terminal_subtitle">샌드박스 셸 열기</string>
     <string name="settings_env_vars">환경 변수</string>
     <string name="settings_env_vars_subtitle">샌드박스에 주입되는 변수</string>
 

@@ -650,7 +650,6 @@ fun AppNavigation(
                 onEnvVarsClick = { navController.safeNavigate(Routes.ENV_VARS) },
                 onRuntimeLimitsClick = { navController.safeNavigate(Routes.RUNTIME_LIMITS) },
                 onSkillsClick = { navController.safeNavigate(Routes.SKILLS) },
-                onTerminalClick = { navController.safeNavigate(Routes.terminal()) },
                 onMemoryClick = { navController.safeNavigate(Routes.MEMORY) },
                 onMcpClick = { navController.safeNavigate(Routes.MCP) },
                 onSoulClick = { navController.safeNavigate(Routes.SOUL) },

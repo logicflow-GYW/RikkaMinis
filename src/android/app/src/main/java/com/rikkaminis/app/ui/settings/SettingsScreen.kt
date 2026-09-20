@@ -36,7 +36,6 @@ import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
-import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -71,7 +70,6 @@ fun SettingsScreen(
     // [feat/runtime-limits-panel] entry into the Runtime Limits page.
     onRuntimeLimitsClick: () -> Unit = {},
     onSkillsClick: () -> Unit = {},
-    onTerminalClick: () -> Unit = {},
     onMemoryClick: () -> Unit = {},
     // [T-mcp-integration-android] MCP Integrations page, listed directly below
     // Memory. Default no-op for callers that haven't wired the route yet.
@@ -204,19 +202,15 @@ fun SettingsScreen(
                     subtitle = stringResource(R.string.settings_mcp_subtitle),
                     onClick = onMcpClick,
                 )
-                // [FIX-6 / F-245] Terminal row restored. `onTerminalClick` was
-                // declared and passed by AppNavigation (→ Routes.terminal())
-                // but never rendered, so the Settings entry had silently
-                // vanished while the navigation layer kept wiring it. The row
-                // uses its own icon (was reusing Icons.Outlined.Terminal for
-                // Environment Variables, which masked the missing entry).
-                SettingsItem(
-                    icon = Icons.Outlined.Terminal,
-                    iconColor = Color(0xFF8E8E93),
-                    title = stringResource(R.string.settings_terminal),
-                    subtitle = stringResource(R.string.settings_terminal_subtitle),
-                    onClick = onTerminalClick,
-                )
+                // [T-hide-settings-terminal-row] The Terminal row is
+                // intentionally NOT rendered here. The sandbox shell is a
+                // chat-scoped tool, so its single entry point lives in
+                // Appearance → Chat Menu (top-right "..." menu / history
+                // drawer footer), where the action carries the live session
+                // id. A settings-level row could only open a session-less
+                // shell — same destination, strictly less context, one more
+                // place to keep in sync. `Routes.terminal()` and the
+                // minis://open_terminal deep link are unaffected.
                 SettingsItem(
                     icon = Icons.Outlined.Code,
                     iconColor = ChatColors.success,
