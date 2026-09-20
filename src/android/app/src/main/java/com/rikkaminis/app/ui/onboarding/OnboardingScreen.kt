@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -117,6 +118,11 @@ private fun ApiKeyStep(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                // [T-android-ime-occlusion-0920] Bare Scaffold = systemBars
+                // only; edge-to-edge + adjustResize no longer resizes the
+                // window for the keyboard, so the API-key field below would
+                // be covered by the IME.
+                .imePadding()
                 .padding(24.dp),
         ) {
             Text(
@@ -249,6 +255,9 @@ private fun ModelSelectionStep(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                // [T-android-ime-occlusion-0920] Bare Scaffold = systemBars
+                // only — see the API-key step above for the full rationale.
+                .imePadding()
                 .padding(horizontal = 16.dp),
         ) {
             Spacer(Modifier.height(16.dp))

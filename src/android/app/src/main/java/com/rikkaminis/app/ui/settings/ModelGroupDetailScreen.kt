@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -174,7 +175,12 @@ fun ModelGroupDetailScreen(
             state = lazyListState,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding),
+                .padding(padding)
+                // [T-android-ime-occlusion-0920] Bare Scaffold = systemBars
+                // only; the group-name field near the top would otherwise be
+                // covered by the keyboard (and the list could not scroll it
+                // clear) under edge-to-edge + adjustResize.
+                .imePadding(),
         ) {
             // ── Name section ──────────────────────────────────────────
             item {

@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -114,6 +115,11 @@ fun OnboardingModelSelectionScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                // [T-android-ime-occlusion-0920] Bare Scaffold consumes
+                // systemBars only, not the IME; edge-to-edge + adjustResize
+                // means the keyboard would otherwise cover the search field /
+                // list instead of resizing the page.
+                .imePadding()
                 .padding(horizontal = 16.dp),
         ) {
             Text(
