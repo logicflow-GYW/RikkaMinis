@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -373,6 +374,14 @@ fun MemoryFileEditScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                // [T-android-ime-occlusion-0920] Bare Scaffold does NOT consume
+                // WindowInsets.ime (contentWindowInsets = systemBars only), and
+                // edge-to-edge + adjustResize no longer resizes the window for
+                // the keyboard. Without this the full-height BasicTextField's
+                // own "scroll caret into view" logic scrolls the caret behind
+                // the IME. Host-layer fix — do NOT push this into the leaf
+                // editor (it would double up inside ModalBottomSheet).
+                .imePadding()
                 .padding(horizontal = 16.dp),
         ) {
             Spacer(modifier = Modifier.height(8.dp))
