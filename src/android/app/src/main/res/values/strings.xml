@@ -239,8 +239,6 @@
     <string name="soul_restore_confirm_body">Your current changes will be overwritten with the default personality file. The original is provided as a starting point and can be re-edited at any time.</string>
     <string name="soul_save_error_title">Couldn\'t save</string>
     <string name="soul_injection_error">This looks like an instruction to the model rather than personality guidance. Phrases like \"ignore previous instructions\" aren\'t allowed in SOUL.md — keep it to genuine character, tone, and behavior.</string>
-    <string name="settings_terminal">Terminal</string>
-    <string name="settings_terminal_subtitle">Open the sandbox shell</string>
     <string name="settings_env_vars">Environment Variables</string>
     <string name="settings_env_vars_subtitle">Variables injected into the sandbox</string>
     <string name="settings_max_concurrent">Concurrent Sessions</string>

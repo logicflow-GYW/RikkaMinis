@@ -135,8 +135,6 @@
     <string name="soul_restore_confirm_body">当前修改将被覆盖为默认人格文件。该模板可作为出发点，随时可再次修改。</string>
     <string name="soul_save_error_title">保存失败</string>
     <string name="soul_injection_error">这看起来像是对模型的指令而不是人格引导。SOUL.md 中不允许出现「忽略之前的指令」之类的内容——请只写真正的性格、语气和行为描述。</string>
-    <string name="settings_terminal">终端</string>
-    <string name="settings_terminal_subtitle">打开沙箱 Shell</string>
     <string name="settings_env_vars">环境变量</string>
     <string name="settings_env_vars_subtitle">注入到沙箱内的变量</string>
 

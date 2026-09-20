@@ -99,8 +99,6 @@
     <string name="settings_skills_subtitle">Skills und Anweisungen des KI-Agents verwalten</string>
     <string name="settings_memory">Gedächtnis</string>
     <string name="settings_memory_subtitle">Sitzungsübergreifend persistentes Wissen</string>
-    <string name="settings_terminal">Terminal</string>
-    <string name="settings_terminal_subtitle">Sandbox-Shell öffnen</string>
     <string name="settings_env_vars">Umgebungsvariablen</string>
     <string name="settings_env_vars_subtitle">In die Sandbox eingespeiste Variablen</string>
 

@@ -99,8 +99,6 @@
     <string name="settings_skills_subtitle">AI エージェントのスキルと指示を管理</string>
     <string name="settings_memory">記憶</string>
     <string name="settings_memory_subtitle">セッションをまたいで保持される永続的な知識</string>
-    <string name="settings_terminal">ターミナル</string>
-    <string name="settings_terminal_subtitle">サンドボックスシェルを開く</string>
     <string name="settings_env_vars">環境変数</string>
     <string name="settings_env_vars_subtitle">サンドボックスに注入される変数</string>
 
