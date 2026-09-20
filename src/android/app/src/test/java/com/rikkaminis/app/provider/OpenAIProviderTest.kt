@@ -217,6 +217,43 @@ class OpenAIProviderTest {
 
     @Test
     fun `sendMessage uses max_completion_tokens for OpenAI`() = runBlocking {
+        // [FIX-1 / F-183] The field name is chosen by a HOST WHITELIST now, not
+        // by "anything that is not openrouter.ai". MockWebServer's basePath is
+        // http://localhost:<port> — neither openrouter.ai nor api.openai.com —
+        // so the shared `provider` from setUp() lands in the third-party-relay
+        // branch and correctly gets `max_tokens`. This test's name says "for
+        // OpenAI", so it has to actually name the host: pointing the basePath at
+        // the mock server under an /api.openai.com/ path is the same idiom
+        // ThinkingRulesRegressionTest already uses for /mistral.ai/v1.
+        val openAiProvider = OpenAIProvider(
+            apiKey = "test-key",
+            model = LLMModel.gpt4oMini,
+            basePath = server.url("/api.openai.com/v1").toString().trimEnd('/'),
+        )
+        server.enqueue(
+            MockResponse()
+                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"}}]}"""))
+                .setHeader("Content-Type", "text/event-stream")
+        )
+
+        openAiProvider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "test")), null, 2048)
+
+        val request = server.takeRequest()
+        val body = JSONObject(request.body.readUtf8())
+        assertEquals(2048, body.getInt("max_completion_tokens"))
+        assertTrue(!body.has("max_tokens"))
+    }
+
+    @Test
+    fun `sendMessage keeps max_tokens for third-party relays`() = runBlocking {
+        // [FIX-1 / F-183] Companion to the test above. Before the fix the split
+        // was `isOpenRouter ? max_tokens : max_completion_tokens`, so every
+        // relay that was not openrouter.ai got OpenAI's renamed field — on this
+        // device that was 100% of traffic (llmhost.net / api.senseaudio.cn /
+        // agentrouter.org / token.sensenova.cn). `max_tokens` is the name every
+        // OpenAI-compatible schema has accepted since 2023, so it is the safe
+        // side of the ambiguity. localhost (the shared `provider`) stands in for
+        // "some relay we have no reason to whitelist".
         server.enqueue(
             MockResponse()
                 .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"}}]}"""))
@@ -227,8 +264,8 @@ class OpenAIProviderTest {
 
         val request = server.takeRequest()
         val body = JSONObject(request.body.readUtf8())
-        assertEquals(2048, body.getInt("max_completion_tokens"))
-        assertTrue(!body.has("max_tokens"))
+        assertEquals(2048, body.getInt("max_tokens"))
+        assertTrue(!body.has("max_completion_tokens"))
     }
 
     @Test
