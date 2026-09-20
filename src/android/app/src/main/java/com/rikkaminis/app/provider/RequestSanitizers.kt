@@ -69,27 +69,6 @@ fun clampOutboundTemperature(value: Double, max: Double = 2.0): Double =
  */
 fun sanitizeToolPairing(
     messages: List<LLMMessage>,
-    // [FIX-1 / F-211] Drop messages that stripping left completely empty.
-    //
-    // This was documented as deliberate ("callers apply it themselves") and
-    // then applied by exactly ONE of the four production call sites
-    // (AnthropicProvider:547). OpenAIProvider's two call sites passed no
-    // filter, so when an assistant turn's only content was a tool_use whose
-    // result had been stripped, the legacy serializer emitted
-    // {"role":"assistant","content":""} — a shape OpenAI rejects, i.e. the
-    // sanitizer created the 400 it exists to prevent.
-    //
-    // Default true because "send an empty message" is not a thing any
-    // OpenAI-shaped API accepts; Gemini is the one caller that must keep them,
-    // because its serializer turns "" into " " (a valid prefill / empty turn)
-    // and a test pins that behaviour. Opt out there rather than opt in
-    // everywhere, so a fifth call site cannot inherit the hole.
-    dropEmpty: Boolean = true,
-    // MUST stay last: three production call sites pass the logger as a
-    // TRAILING LAMBDA, and a trailing lambda binds to the final parameter
-    // whatever its type is. Putting dropEmpty after this one silently
-    // retargeted those lambdas at a Boolean (CI compileReleaseKotlin caught it:
-    // "actual type is kotlin.Function1<...>, but kotlin.Boolean was expected").
     log: (String) -> Unit = {},
 ): List<LLMMessage> {
     val result = ArrayList<LLMMessage>(messages.size)
@@ -152,16 +131,20 @@ fun sanitizeToolPairing(
         }
     }
 
-    // Drop messages that became empty (only orphan tool parts). Kept messages
-    // still have either non-empty contentParts or a non-empty `content`
-    // string (string-only messages never had parts to strip in the first
-    // place).
+    // Messages that became empty (only orphan tool parts were stripped) are
+    // returned as-is. Kept messages still have either non-empty contentParts
+    // or a non-empty `content` string (string-only messages never had parts
+    // to strip in the first place).
     //
-    // [FIX-1 / F-211] Applied here by default so every caller gets it; the
-    // Gemini adapter opts out via dropEmpty=false (its serializer replaces ""
-    // with " ", which is a valid empty turn there). AnthropicProvider still
-    // applies its own filter afterwards — harmless, and left in place so this
-    // change cannot regress that path.
-    if (!dropEmpty) return result
-    return result.filter { m -> m.contentParts.isNotEmpty() || m.content.isNotEmpty() }
+    // Note: this filter is intentionally NOT in the sanitizer — callers apply
+    // it themselves because GeminiProvider has a test that sends
+    // pristine-empty messages (empty USER text) which must NOT be dropped
+    // (Gemini's serializer replaces "" with " ").
+    //
+    // [FIX-1 / F-211] "callers apply it themselves" was true for exactly ONE
+    // of the four production call sites (AnthropicProvider). The two
+    // OpenAIProvider call sites now apply it too — see the note there. Kept at
+    // the call sites rather than defaulted here, so this documented contract
+    // (and the test that pins it) stays intact.
+    return result
 }

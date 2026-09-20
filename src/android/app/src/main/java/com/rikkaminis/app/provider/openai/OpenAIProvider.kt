@@ -1701,6 +1701,20 @@ class OpenAIProvider constructor(
         val sanitizedMessages = sanitizeToolPairing(messages) { detail ->
             android.util.Log.i("OpenAIProvider", detail)
         }
+            // [FIX-1 / F-211] Drop messages the sanitizer emptied (only orphan
+            // tool parts get stripped). An empty `content` is a shape OpenAI
+            // rejects, so without this filter the sanitizer manufactures the
+            // very 400 it exists to prevent.
+            //
+            // AnthropicProvider has always had this filter; the two OpenAI call
+            // sites did not — i.e. 1 of 4 production callers had it, while the
+            // sanitizer's KDoc said "callers apply it themselves".
+            //
+            // Kept at the CALL SITE rather than turned into a sanitizer default:
+            // empty-dropping is provider policy, not pairing policy. Gemini's
+            // serializer turns "" into " " (a valid empty turn) and
+            // RequestSanitizersTest pins that the sanitizer itself keeps them.
+            .filter { m -> m.contentParts.isNotEmpty() || m.content.isNotEmpty() }
         val body = JSONObject()
         body.put("model", model.id)
         // Defense-in-depth clamp (see AnthropicProvider): upstream
@@ -2544,6 +2558,9 @@ class OpenAIProvider constructor(
         val sanitizedMessages = sanitizeToolPairing(messages) { detail ->
             android.util.Log.i("OpenAIProvider", detail)
         }
+            // [FIX-1 / F-211] Same filter as the legacy serializer path above —
+            // see the note there for why this lives at the call site.
+            .filter { m -> m.contentParts.isNotEmpty() || m.content.isNotEmpty() }
         val body = JSONObject()
         body.put("model", model.id)
         body.put("stream", stream)

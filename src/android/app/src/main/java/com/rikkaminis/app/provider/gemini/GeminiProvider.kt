@@ -301,15 +301,13 @@ class GeminiProvider(
         // Defense-in-depth: strip orphan tool_use/tool_result pairing before
         // serialization. Gemini rejects a `functionCall` with no following
         // `functionResponse` (and vice versa) with a deterministic 400.
-        val sanitizedMessages = sanitizeToolPairing(
-            messages,
-            log = { detail -> android.util.Log.i("GeminiProvider", detail) },
-            // [FIX-1 / F-211] Gemini is the one caller that must NOT drop
-            // messages the sanitizer emptied: the serializer below replaces ""
-            // with " ", and an empty USER text is a legitimate (pinned by test)
-            // payload here.
-            dropEmpty = false,
-        )
+        // [FIX-1 / F-211] Unlike the OpenAI-shaped call sites, Gemini must NOT
+        // drop messages the sanitizer emptied: the serializer below replaces ""
+        // with " ", and an empty USER text is a legitimate (pinned by test)
+        // payload here.
+        val sanitizedMessages = sanitizeToolPairing(messages) { detail ->
+            android.util.Log.i("GeminiProvider", detail)
+        }
 
         val contents = JSONArray()
         val lastUserIndex = sanitizedMessages.indexOfLast { it.role == LLMMessage.Role.USER }
