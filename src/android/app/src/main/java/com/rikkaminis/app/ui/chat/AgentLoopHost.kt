@@ -48,6 +48,18 @@ internal interface AgentLoopHost {
     fun effectiveAgentHistory(): List<LLMMessage>
     fun applyRequestImageBudget(messages: List<LLMMessage>): List<LLMMessage>
     fun checkContextBeforeSend(): Boolean
+    /**
+     * [fix/context-exhausted-loop] Side-effect-free form of the same verdict
+     * [checkContextBeforeSend] acts on: is the context at/over the hard window
+     * ceiling? The send entry *blocks* on it (dialog + stashed draft), which is
+     * the wrong shape for the agent loop — a loop cannot stash a draft, and
+     * blocking a turn that might still succeed would kill working runs. The
+     * loop uses this only where failure is proven (an empty length-wall turn).
+     *
+     * Shares one implementation with [checkContextBeforeSend] so the two
+     * landing points can never drift apart again.
+     */
+    fun isContextExhausted(): Boolean
     fun offloadContextIfNeeded(contextWindow: Int, lastContextTokens: Int, force: Boolean = false)
     fun trimContextHistoryWindow(contextWindow: Int, lastContextTokens: Int)
     /**

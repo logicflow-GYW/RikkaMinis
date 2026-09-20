@@ -73,6 +73,13 @@ object ContextCompactor {
          * 已到/超过硬窗口上限。自动压缩在这种状态下不应动手——EXHAUSTED 的
          * 阻断与手动处理在发送入口（checkContextBeforeSend）已存在。这里兜底，
          * 防止任何绕过滤音路径误触发自动压缩。
+         *
+         * [fix/context-exhausted-loop] 上面那句原先只对发送入口成立：agent loop
+         * 内部的 `continue` 重试不经过 checkContextBeforeSend，所以
+         * 「skipped: EXHAUSTED」之后照样发出请求（2026-09-20 生产日志连续三次）。
+         * 现在 loop 侧也读同一个裁决（[AgentLoopHost.isContextExhausted]，与
+         * checkContextBeforeSend 共享 ChatViewModel.contextPressure 实现），
+         * 该声明对两个落点都为真。
          */
         EXHAUSTED,
     }
@@ -111,6 +118,8 @@ object ContextCompactor {
         if (estimatedTokens <= 0 || contextWindow <= 0) return Decision.OK
         // 硬上限兜底：此刻 sendMessage 入口的 checkContextBeforeSend 已阻断发送，
         // 自动压缩不该在这种状态下动手（需要用户显式 /compact 或新会话）。
+        // [fix/context-exhausted-loop] 「已阻断」现在对 agent loop 的重试路径
+        // 也成立——见 Decision.EXHAUSTED 的 KDoc。
         if (estimatedTokens >= contextWindow) return Decision.EXHAUSTED
         // 单一事实源：压缩线只由 ContextPolicy 定义。
         // [T-ctx-offload-escalation] 唯一例外：这一轮的 offload 已证明削不动

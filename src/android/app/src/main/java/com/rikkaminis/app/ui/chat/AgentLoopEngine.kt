@@ -1744,7 +1744,25 @@ internal class AgentLoopEngine(
                         } else {
                             loopState.deterministicEmptyStreak = 0
                         }
-                        if (loopState.lengthWallEmptyHits < 3) {
+                        // [fix/context-exhausted-loop] A retry only pays for
+                        // itself when the next request could produce
+                        // DIFFERENT output. At/over the hard window ceiling
+                        // the per-request output budget is pinned at
+                        // MIN_MAX_TOKENS no matter how many times we ask
+                        // (remaining = window − input is negative and
+                        // dynamicMaxTokens floors it at the minimum), so each
+                        // retry re-bills the whole input for the same empty
+                        // result — the same reasoning the usageProvesEmpty
+                        // fast-exit above already applies, one level up.
+                        // Field evidence 2026-09-20 (build 27eced19):
+                        // input=405694 vs window=200000, three consecutive
+                        // empty length-wall turns 40s apart (reasoningLen
+                        // 1940 → 3477 → 3916, body empty), each preceded by
+                        // `[AutoCompactLoop] skipped: EXHAUSTED` and each
+                        // followed by a fresh `chat stream offload ->
+                        // :modelservice`. 2m33s of "thinking" for an error.
+                        val contextExhausted = host.isContextExhausted()
+                        if (shouldRetryEmptyLengthWall(loopState.lengthWallEmptyHits, contextExhausted)) {
                             // T9: log the wasted empty-length iteration
                             traceObserver.agentTraceRecorder.turnEnd(
                                 turn = turn,
@@ -1755,11 +1773,20 @@ internal class AgentLoopEngine(
                             )
                             AppLogger.warning(
                                 TAG_STREAM,
-                                "runAgentLoop turn=$turn finish=length with empty output (wall hit $loopState.lengthWallEmptyHits/3), continuing",
+                                "runAgentLoop turn=$turn finish=length with empty output (wall hit $loopState.lengthWallEmptyHits/${LENGTH_WALL_EMPTY_MAX_HITS}), continuing",
                             )
                             continue
                         }
-                        AppLogger.warning(TAG_STREAM, "runAgentLoop turn=$turn finish=length ×3 empty output — giving up")
+                        if (contextExhausted) {
+                            AppLogger.warning(
+                                TAG_STREAM,
+                                "runAgentLoop turn=$turn finish=length with empty output — NOT retrying: " +
+                                    "context is at/over the window ceiling, so the retry would re-bill the " +
+                                    "same input for the same empty result (wall hit $loopState.lengthWallEmptyHits/${LENGTH_WALL_EMPTY_MAX_HITS})",
+                            )
+                        } else {
+                            AppLogger.warning(TAG_STREAM, "runAgentLoop turn=$turn finish=length ×${LENGTH_WALL_EMPTY_MAX_HITS} empty output — giving up")
+                        }
                         // length is NOT a clean finish, so the empty-turn hint
                         // below (gated on finishedCleanly) won't fire — surface
                         // a visible error explicitly so the user isn't left
