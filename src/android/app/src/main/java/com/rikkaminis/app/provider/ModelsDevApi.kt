@@ -32,6 +32,16 @@ object ModelsDevApi {
         "OpenAI" to listOf("openai"),
         "OpenRouter" to listOf("openrouter"),
         "Antigravity" to emptyList(), // Custom proxy, no public models.dev entry
+        // [FIX-1 / F-212] These two families were missing, so their 14 models
+        // fell through to the all-providers scan below and were enriched from
+        // whichever relay happened to declare the same bare id first
+        // (models.dev is ordered by document, and a relay's numbers win:
+        // grok-4.5 came back with aihubmix's 1,000,000 context instead of
+        // xai's 500,000; kimi-k3 got a 5-tier effort ladder including
+        // `minimal` from greenpt instead of moonshotai's 3). Key names are the
+        // models.dev provider ids, same shape as the entries above.
+        "xAI" to listOf("xai"),
+        "Kimi" to listOf("moonshotai", "moonshotai-cn"),
     )
 
     private var cachedRegistry: Map<String, ProviderEntry>? = null
@@ -100,7 +110,13 @@ object ModelsDevApi {
             return applyDevData(model, devModel)
         }
 
-        // Fallback: scan all providers for the model ID
+        // Fallback: scan all providers for the model ID.
+        // [FIX-1 / F-212] Prefer the entry whose registry key matches this
+        // model's own provider before the order-dependent scan (see the same
+        // note in enrichModels).
+        registry[model.provider.lowercase()]?.models?.get(model.id)?.let { devModel ->
+            return applyDevData(model, devModel)
+        }
         for ((_, prov) in registry) {
             val devModel = prov.models[model.id] ?: continue
             return applyDevData(model, devModel)
@@ -116,6 +132,16 @@ object ModelsDevApi {
             for (key in keys) {
                 val prov = registry[key] ?: continue
                 val devModel = prov.models[model.id] ?: continue
+                return@map applyDevData(model, devModel)
+            }
+            // [FIX-1 / F-212] The scan below is the last resort and it is NOT
+            // provider-aware: a relay declaring the same bare id wins on
+            // document order alone. Prefer an entry whose registry key matches
+            // the model's own provider name first, so an unmapped family (or a
+            // user's custom provider) still gets the authoritative row when one
+            // exists — the unconditional scan stays as the final fallback so no
+            // lookup that used to succeed can start failing.
+            registry[model.provider.lowercase()]?.models?.get(model.id)?.let { devModel ->
                 return@map applyDevData(model, devModel)
             }
             for ((_, prov) in registry) {
@@ -227,6 +253,22 @@ object ModelsDevApi {
             return bundled
         }
 
+        // [FIX-1 / F-206] Chicken-and-egg deadlock: the ONLY writer of the disk
+        // cache is refreshFromNetwork(), and its ONLY caller is
+        // scheduleBackgroundRefresh() — which every branch above calls EXCEPT
+        // this last one. So with no in-memory entry, no disk cache and no
+        // bundled asset (the asset was removed by design — loadBundledRegistry
+        // short-circuits on FileNotFound and logs exactly that), the registry
+        // stayed null FOREVER: enrichModel/enrichModels returned the model
+        // untouched on every cold start, silently dropping contextWindow,
+        // maxOutputTokens, reasoning capability, modalities,
+        // interleavedReasoningField and the effort tiers. Observed on device:
+        // three cold starts, three "bundled ... absent" lines, and zero
+        // "Background-refreshed models.dev" / "Failed to fetch" lines ever.
+        // Kick the refresh here so the NEXT call has a disk cache to read. The
+        // @Synchronized on this function is safe: refreshFromNetwork() runs on
+        // its own thread and never re-enters loadRegistry().
+        scheduleBackgroundRefresh()
         return null
     }
 

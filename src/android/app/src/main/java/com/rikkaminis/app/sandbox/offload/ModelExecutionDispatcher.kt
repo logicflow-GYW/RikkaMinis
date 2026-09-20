@@ -67,6 +67,12 @@ object ModelExecutionDispatcher {
         tools: List<AgentToolDefinition> = emptyList(),
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
         streaming: Boolean = false,
+        // [FIX-1 / F-191] Enhanced Cache is an instance-level request flag, not
+        // a provider-construction flag: the worker builds its own provider
+        // through ProviderFactory (whose enhancedCache defaults to false), so a
+        // toggle stamped on the main-process provider object never reached the
+        // wire. Carried as an explicit payload key instead.
+        enhancedCache: Boolean = false,
     ): String {
         return JSONObject().apply {
             put("instance_id", instance.id)
@@ -98,6 +104,23 @@ object ModelExecutionDispatcher {
             // Same cross-process class as the custom-rule transport below.
             model.supportsReasoning?.let { put("supports_reasoning", it) }
             model.interleavedReasoningField?.let { put("interleaved_reasoning_field", it) }
+            // [FIX-1 / F-198] Same cross-process class as the two descriptors
+            // above, and the same omission: these two declarative effort fields
+            // were produced by ModelsDevApi and consumed by OpenAIProvider
+            // (declaredEffortValues feeds ThinkingResolveContext), but never
+            // crossed the boundary. The worker rebuilt LLMModel with both null,
+            // so the SAME model got a different reasoning_effort depending on
+            // which process built the request — measured: glm-5.2 MEDIUM sent
+            // {"reasoning_effort":"high"} from main and {} from the worker,
+            // while grok-build-0.1 HIGH did the exact opposite. Since the
+            // offloaded path is the chat path, the guard the xAI fix added
+            // could never fire on a real turn.
+            // Present-only semantics match supports_reasoning: absent means
+            // "catalog has never said", which is what a model with no entry
+            // gets.
+            model.reasoningEffortValues?.takeIf { it.isNotEmpty() }
+                ?.let { put("reasoning_effort_values", JSONArray(it)) }
+            model.declaresNoEffortTiers?.let { put("declares_no_effort_tiers", it) }
             model.inputModalities.orEmpty().let { if (it.isNotEmpty()) put("input_modalities", JSONArray(it)) }
             model.outputModalities.orEmpty().let { if (it.isNotEmpty()) put("output_modalities", JSONArray(it)) }
             model.contextWindow?.let { put("context_window", it) }
@@ -226,6 +249,10 @@ object ModelExecutionDispatcher {
             }
             if (thinkingLevel != ThinkingLevel.OFF) put("thinking_level", thinkingLevel.name)
             if (streaming) put("streaming", true)
+            // [FIX-1 / F-191] Present-only: an off toggle stays absent so the
+            // payload is byte-identical to pre-fix for every user who never
+            // enabled it.
+            if (enhancedCache) put("enhanced_cache", true)
             // [T-worker-thinking-rules-restore] The worker process never touches
             // ProviderRepository, so the resolver's custom-rule cache is empty there —
             // user-authored rules were silently ignored on EVERY offloaded path (chat

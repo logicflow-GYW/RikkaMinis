@@ -88,9 +88,15 @@ internal fun buildTextOnlyAssistantPartsJson(parts: List<AgentContentPart>): Str
  * Serialize [LLMUsage] into the compact token-usage JSON persisted alongside
  * a turn row (persistAssistantTurn). Nulls are coalesced to 0 to keep the
  * wire shape stable across providers that omit cache fields.
+ *
+ * [FIX-1 / F-197a] That coalescing is why the producers now distinguish
+ * "reported 0" from "not reported": the numeric fields stay 0 for
+ * compatibility, and the boolean `hasCacheRead` / `hasCacheCreation` carry the
+ * distinction the numbers cannot. Readers that only want a total are
+ * unaffected; readers that want to say "unknown" can.
  */
 internal fun buildUsageJson(usage: LLMUsage): String =
-    """{"inputTokens":${usage.inputTokens},"outputTokens":${usage.outputTokens},"cacheCreationTokens":${usage.cacheCreationInputTokens ?: 0},"cacheReadTokens":${usage.cacheReadInputTokens ?: 0},"latestContextTokens":${usage.latestContextTokens}}"""
+    """{"inputTokens":${usage.inputTokens},"outputTokens":${usage.outputTokens},"cacheCreationTokens":${usage.cacheCreationInputTokens ?: 0},"cacheReadTokens":${usage.cacheReadInputTokens ?: 0},"latestContextTokens":${usage.latestContextTokens},"hasCacheRead":${usage.cacheReadInputTokens != null},"hasCacheCreation":${usage.cacheCreationInputTokens != null}}"""
 
 /**
  * Serialize a list of tool results into the user-role parts_json persisted by

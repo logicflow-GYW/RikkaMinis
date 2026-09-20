@@ -62,5 +62,14 @@ internal object AnthropicModelsCache {
     /** Drop the cache file for [credential]. Used on auth failure to avoid stale data. */
     fun invalidate(context: Context, credential: String) {
         runCatching { keyFile(context, credential).delete() }
+        // [FIX-1 / F-210] Same orphan sweep as ProviderModelsCache — the two
+        // classes are independent implementations of one on-disk cache, and
+        // fix/audit0917-b8 only landed the atomic-write half here. Files are
+        // keyed by SHA-256(credential), so a rotated key or a refreshed OAuth
+        // token left the previous file behind forever: load() is only ever
+        // called with the current credential and the TTL check is on the read
+        // path. Delegating to the shared function instead of re-implementing
+        // it is what stops the third drift.
+        com.rikkaminis.app.provider.sweepOrphanCacheFiles(cacheDir(context), TTL_MS)
     }
 }

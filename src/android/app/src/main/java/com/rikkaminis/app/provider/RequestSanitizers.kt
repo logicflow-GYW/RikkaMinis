@@ -131,13 +131,20 @@ fun sanitizeToolPairing(
         }
     }
 
-    // Drop messages that became empty (only orphan tool parts). Kept messages
-    // still have either non-empty contentParts or a non-empty `content`
-    // string (string-only messages never had parts to strip in the first
-    // place).
-    // Note: this filter is intentionally NOT in the sanitizer — callers
-    // (AnthropicProvider) apply it themselves because GeminiProvider has a
-    // test that sends pristine-empty messages (empty USER text) which must
-    // NOT be dropped (Gemini's serializer replaces "" with " ").
+    // Messages that became empty (only orphan tool parts were stripped) are
+    // returned as-is. Kept messages still have either non-empty contentParts
+    // or a non-empty `content` string (string-only messages never had parts
+    // to strip in the first place).
+    //
+    // Note: this filter is intentionally NOT in the sanitizer — callers apply
+    // it themselves because GeminiProvider has a test that sends
+    // pristine-empty messages (empty USER text) which must NOT be dropped
+    // (Gemini's serializer replaces "" with " ").
+    //
+    // [FIX-1 / F-211] "callers apply it themselves" was true for exactly ONE
+    // of the four production call sites (AnthropicProvider). The two
+    // OpenAIProvider call sites now apply it too — see the note there. Kept at
+    // the call sites rather than defaulted here, so this documented contract
+    // (and the test that pins it) stays intact.
     return result
 }

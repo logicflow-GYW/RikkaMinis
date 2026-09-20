@@ -1,5 +1,7 @@
 package com.rikkaminis.app.provider
 
+import android.content.Context
+
 import com.rikkaminis.app.provider.KimiConstants
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ProviderInstance
@@ -30,11 +32,16 @@ private object AnthropicModelListAdapter : ModelListProvider {
         instance: ProviderInstance,
         thirdParty: Boolean,
         forceRefresh: Boolean,   // no cache — accepted for interface, ignored
+        context: Context?,
     ): List<LLMModel> {
         if (apiKey == null) return emptyList()
         return AnthropicModelsApi.fetchModels(
             apiKey,
             instance.effectiveBaseURL,
+            // [FIX-1 / F-208] Context was never forwarded, so
+            // AnthropicModelsCache was unreachable from production.
+            context = context,
+            forceRefresh = forceRefresh,
             // [T-provider-custom-user-agent] models-list UA override.
             customUserAgent = instance.customUserAgent,
         )
@@ -47,10 +54,20 @@ private object GeminiModelListAdapter : ModelListProvider {
         instance: ProviderInstance,
         thirdParty: Boolean,
         forceRefresh: Boolean,   // no cache — accepted for interface, ignored
+        context: Context?,
     ): List<LLMModel> {
         if (apiKey == null) return emptyList()
         // [fix/audit-b22 / T5-L6] Same as the Anthropic/OpenAI adapters above.
-        return GeminiModelsApi.fetchModels(apiKey, instance.effectiveBaseURL)
+        // [FIX-1 / F-208] Context forwarded — see the Anthropic adapter note.
+        return GeminiModelsApi.fetchModels(
+            apiKey,
+            instance.effectiveBaseURL,
+            context = context,
+            forceRefresh = forceRefresh,
+            // [FIX-1 / F-196] The 403→builtin fallback is an OAuth-only case.
+            oauthCredential = instance.credentialType ==
+                com.rikkaminis.app.data.model.ProviderCredential.oauth,
+        )
     }
 }
 
@@ -60,12 +77,16 @@ private object OpenAIModelListAdapter : ModelListProvider {
         instance: ProviderInstance,
         thirdParty: Boolean,
         forceRefresh: Boolean,
+        context: Context?,
     ): List<LLMModel> {
         if (apiKey == null) return emptyList()
         val baseURL = instance.effectiveBaseURL
         return OpenAIModelsApi.fetchModels(
             apiKey,
             baseURL,
+            // [FIX-1 / F-208] Without this the 7-day cache (and the
+            // forceRefresh bypass it exists to serve) never ran at all.
+            context = context,
             // [T-provider-custom-user-agent] models-list UA override.
             customUserAgent = instance.customUserAgent,
             // Bypass the 7-day ProviderModelsCache so a freshly-added custom
@@ -81,9 +102,15 @@ private object OpenRouterModelListAdapter : ModelListProvider {
         instance: ProviderInstance,
         thirdParty: Boolean,
         forceRefresh: Boolean,   // no cache — accepted for interface, ignored
+        context: Context?,
     ): List<LLMModel> {
         if (apiKey == null) return emptyList()
-        return OpenRouterModelsApi.fetchModels(apiKey)
+        // [FIX-1 / F-208] Context forwarded — see the Anthropic adapter note.
+        return OpenRouterModelsApi.fetchModels(
+            apiKey,
+            context = context,
+            forceRefresh = forceRefresh,
+        )
     }
 }
 
@@ -93,6 +120,7 @@ private object XAIModelListAdapter : ModelListProvider {
         instance: ProviderInstance,
         thirdParty: Boolean,
         forceRefresh: Boolean,   // no cache — accepted for interface, ignored
+        context: Context?,       // no cache — accepted for interface, ignored
     ): List<LLMModel> {
         // xAI: the model list is static (no /v1/models gating call needed —
         // XAIModelsApi exposes the spec-mandated set).
@@ -106,6 +134,7 @@ private object KimiModelListAdapter : ModelListProvider {
         instance: ProviderInstance,
         thirdParty: Boolean,
         forceRefresh: Boolean,
+        context: Context?,
     ): List<LLMModel> {
         // [T-kimi-oauth] Kimi Code: the OAuth token CAN call the models
         // endpoint — real fetch from GET /coding/v1/models. The upstream
@@ -116,6 +145,8 @@ private object KimiModelListAdapter : ModelListProvider {
         return OpenAIModelsApi.fetchModels(
             apiKey,
             baseURL,
+            // [FIX-1 / F-208] Context forwarded — see the Anthropic adapter note.
+            context = context,
             customUserAgent = instance.customUserAgent,
             forceRefresh = forceRefresh,
         )

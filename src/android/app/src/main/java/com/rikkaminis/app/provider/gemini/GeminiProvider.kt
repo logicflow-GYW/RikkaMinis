@@ -52,6 +52,23 @@ class GeminiProvider(
     // continueContent / partial model turn is natively supported.
     override val supportsPrefill: Boolean get() = true
 
+    /**
+     * [FIX-1 / F-194] The request path is built as
+     * `$basePath/models/<id>:generateContent`, so a base that already carries an
+     * API-version segment produces `.../v1/v1beta/models/...` = 404. The models
+     * LIST api has always collapsed this (GeminiModelsApi:29 strips
+     * `/v1beta` and `/v1` with a comment saying exactly that relays do paste
+     * either), but the request side never did — so a user who pasted a working
+     * relay base into the models field got a green model list and a 404 on
+     * every message. Same normalization, applied where the URL is actually
+     * assembled.
+     */
+    private fun normalizedBasePath(): String {
+        var p = basePath
+        while (p.endsWith("/")) p = p.dropLast(1)
+        return p.removeSuffix("/v1beta").removeSuffix("/v1")
+    }
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(FirstChunkTimeoutPolicy.decideGenerationTimeoutSec(null).toLong(), TimeUnit.SECONDS)
@@ -71,7 +88,7 @@ class GeminiProvider(
         thinkingLevel: ThinkingLevel,
     ): LLMResponse = withContext(Dispatchers.IO) {
         val body = buildRequestBody(messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel)
-        val url = "$basePath/models/${model.id}:generateContent?key=$apiKey"
+        val url = "${normalizedBasePath()}/models/${model.id}:generateContent?key=$apiKey"
         val request = Request.Builder()
             .url(url)
             .post(body.toString().toRequestBody("application/json".toMediaType()))
@@ -124,7 +141,7 @@ class GeminiProvider(
         thinkingLevel: ThinkingLevel,
     ): Flow<LLMStreamChunk> = callbackFlow {
         val body = buildRequestBody(messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel)
-        val url = "$basePath/models/${model.id}:streamGenerateContent?alt=sse&key=$apiKey"
+        val url = "${normalizedBasePath()}/models/${model.id}:streamGenerateContent?alt=sse&key=$apiKey"
         val request = Request.Builder()
             .url(url)
             .post(body.toString().toRequestBody("application/json".toMediaType()))
@@ -284,6 +301,10 @@ class GeminiProvider(
         // Defense-in-depth: strip orphan tool_use/tool_result pairing before
         // serialization. Gemini rejects a `functionCall` with no following
         // `functionResponse` (and vice versa) with a deterministic 400.
+        // [FIX-1 / F-211] Unlike the OpenAI-shaped call sites, Gemini must NOT
+        // drop messages the sanitizer emptied: the serializer below replaces ""
+        // with " ", and an empty USER text is a legitimate (pinned by test)
+        // payload here.
         val sanitizedMessages = sanitizeToolPairing(messages) { detail ->
             android.util.Log.i("GeminiProvider", detail)
         }
@@ -323,6 +344,25 @@ class GeminiProvider(
                             if (part.isError) responseContent.put("error", true)
                             responseObj.put("response", responseContent)
                             parts.put(JSONObject().put("functionResponse", responseObj))
+                            // [FIX-1 / F-192] `read_image` returns its bytes as a
+                            // ToolResult imageData part, NOT as an ImageData part
+                            // (ReadImageTool emits AgentContentPart.ToolResult with
+                            // imageData set). The ImageData branch below has a
+                            // backstop for exactly this payload; this branch had
+                            // none, so every image the model read back through a
+                            // tool call was dropped before it reached Gemini — on
+                            // the provider whose whole tool story is inline data.
+                            // Emitted as a sibling inlineData part, which is how
+                            // Gemini's functionResponse images are expressed.
+                            part.imageData?.let { img ->
+                                val safeBytes = ImageBudget.compressUnderBudget(img)
+                                val declaredMime = part.imageMimeType ?: "image/png"
+                                val safeMime = if (safeBytes === img) declaredMime else "image/jpeg"
+                                parts.put(JSONObject().put("inlineData", JSONObject().apply {
+                                    put("mimeType", safeMime)
+                                    put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
+                                }))
+                            }
                         }
                         is AgentContentPart.ImageData -> {
                             // T5-L1: same provider-boundary backstop as
@@ -540,9 +580,21 @@ class GeminiProvider(
         val totalInput = usage.optInt("promptTokenCount", 0)
         val cacheRead = usage.optInt("cachedContentTokenCount").takeIf { it > 0 }
         val freshInput = (totalInput - (cacheRead ?: 0)).coerceAtLeast(0)
+        // [FIX-1 / F-197b] Gemini reports thinking tokens SEPARATELY from
+        // candidatesTokenCount (totalTokenCount = prompt + candidates +
+        // thoughts). Nothing in the repo read `thoughtsTokenCount` (0 hits
+        // before this change), so on every thinking-enabled turn the billed
+        // output side was understated: the usage panel showed less than the
+        // model produced, and the auto-compact reserve — which is derived from
+        // observed output growth — systematically under-reserved.
+        // Folded into outputTokens rather than added as a new field because
+        // that is what "output" means for billing on this API; adding a field
+        // would have needed the four-way sync (model/entity/toSnapshot/reader)
+        // for a number no consumer distinguishes today.
+        val thoughts = usage.optInt("thoughtsTokenCount", 0)
         return LLMUsage(
             inputTokens = freshInput,
-            outputTokens = usage.optInt("candidatesTokenCount", 0),
+            outputTokens = usage.optInt("candidatesTokenCount", 0) + thoughts,
             cacheCreationInputTokens = null,
             cacheReadInputTokens = cacheRead,
             latestContextTokens = totalInput,

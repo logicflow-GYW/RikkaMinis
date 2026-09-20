@@ -42,6 +42,11 @@ class ModelListProviderRegistryTest {
             instance: ProviderInstance,
             thirdParty: Boolean,
             forceRefresh: Boolean,
+            // [FIX-1 / F-208] The interface gained a context param so the
+            // fetchers' context-scoped disk caches are reachable. Overrides
+            // must restate it; these fakes ignore it on purpose (they assert
+            // key-roulette behaviour, not caching).
+            context: android.content.Context?,
         ): List<LLMModel> {
             seen += apiKey
             return if (apiKey != null && apiKey in alive) {
@@ -59,6 +64,11 @@ class ModelListProviderRegistryTest {
             instance: ProviderInstance,
             thirdParty: Boolean,
             forceRefresh: Boolean,
+            // [FIX-1 / F-208] The interface gained a context param so the
+            // fetchers' context-scoped disk caches are reachable. Overrides
+            // must restate it; these fakes ignore it on purpose (they assert
+            // key-roulette behaviour, not caching).
+            context: android.content.Context?,
         ): List<LLMModel> {
             seen += apiKey
             val k = apiKey ?: return emptyList()
@@ -74,6 +84,11 @@ class ModelListProviderRegistryTest {
             instance: ProviderInstance,
             thirdParty: Boolean,
             forceRefresh: Boolean,
+            // [FIX-1 / F-208] The interface gained a context param so the
+            // fetchers' context-scoped disk caches are reachable. Overrides
+            // must restate it; these fakes ignore it on purpose (they assert
+            // key-roulette behaviour, not caching).
+            context: android.content.Context?,
         ): List<LLMModel> {
             calls++
             throw CancellationException("cancelled")

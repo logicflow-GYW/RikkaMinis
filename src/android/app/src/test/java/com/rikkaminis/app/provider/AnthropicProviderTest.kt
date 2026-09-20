@@ -107,7 +107,16 @@ class AnthropicProviderTest {
     }
 
     @Test
-    fun `sendMessage returns null cache tokens when zero`() = runBlocking {
+    fun `sendMessage keeps a reported zero cache count as zero`() = runBlocking {
+        // [FIX-1 / F-197a] This test used to be named "returns null cache tokens
+        // when zero" and asserted null for a server that explicitly reported 0.
+        // That is the defect the fix removes: `.takeIf { it > 0 }` collapsed
+        // "the server said 0" and "the server never sent the field" into the
+        // same null, and buildUsageJson then coalesced null back to 0 — so after
+        // a DB round trip the two facts were indistinguishable. Presence is now
+        // the discriminator, so an explicit 0 stays a real 0 and the serialized
+        // turn carries hasCacheRead=true ("this provider does report cache
+        // reads; this turn had none").
         val responseBody = """
         {
             "content": [{"type": "text", "text": "ok"}],
@@ -117,6 +126,31 @@ class AnthropicProviderTest {
                 "output_tokens": 5,
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0
+            }
+        }
+        """.trimIndent()
+
+        server.enqueue(MockResponse().setBody(responseBody))
+
+        val response = provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+        assertEquals(10, response.usage?.inputTokens)
+        assertEquals(10, response.usage?.latestContextTokens)
+        assertEquals(0, response.usage?.cacheCreationInputTokens)
+        assertEquals(0, response.usage?.cacheReadInputTokens)
+    }
+
+    @Test
+    fun `sendMessage leaves cache tokens null when the field is absent`() = runBlocking {
+        // [FIX-1 / F-197a] Companion: an ABSENT field is now the only thing that
+        // produces null. This is the half the old test could not distinguish
+        // from the explicit-zero case above.
+        val responseBody = """
+        {
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5
             }
         }
         """.trimIndent()

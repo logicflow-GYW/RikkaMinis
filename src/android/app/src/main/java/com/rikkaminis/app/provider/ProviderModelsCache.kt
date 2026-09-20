@@ -76,17 +76,38 @@ internal class ProviderModelsCache(
         // failure path (rare), so one directory listing is cheap. The OS also
         // reclaims cacheDir under pressure — this just stops unbounded growth
         // in the meantime.
-        runCatching {
-            val dir = cacheDir(context)
-            val cutoff = System.currentTimeMillis() - ttlMs
-            dir.listFiles()?.forEach { f ->
-                if (f.name.endsWith(".json") && f.lastModified() < cutoff) f.delete()
-            }
-        }
+        //
+        // [FIX-1 / F-210] The sweep itself moved to sweepOrphanCacheFiles() so
+        // AnthropicModelsCache — the twin implementation of this class — can
+        // share it. That twin got the atomic-write half of fix/audit0917-b8 but
+        // not this half, which is exactly the "same semantics, two call sites,
+        // one fixed" shape this repo keeps re-finding. One shared function
+        // means a third drift is not expressible.
+        sweepOrphanCacheFiles(cacheDir(context), ttlMs)
     }
 
     companion object {
         const val DEFAULT_TTL_MS = 7L * 24 * 3600 * 1000
         private val JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    }
+}
+
+/**
+ * [FIX-1 / F-210] Delete cache files in [dir] that are older than [ttlMs].
+ *
+ * Shared by [ProviderModelsCache] and `AnthropicModelsCache` — the two
+ * independent implementations of the same on-disk model cache. Credential-
+ * keyed file names mean a rotated key or edited baseURL leaves the previous
+ * file behind forever (`load` is only ever called with the *current* key and
+ * the TTL check lives on the read path), so the sweep is what bounds growth.
+ * Kept as a top-level function rather than a method so the second caller does
+ * not have to depend on the first class's constructor.
+ */
+internal fun sweepOrphanCacheFiles(dir: File, ttlMs: Long) {
+    runCatching {
+        val cutoff = System.currentTimeMillis() - ttlMs
+        dir.listFiles()?.forEach { f ->
+            if (f.name.endsWith(".json") && f.lastModified() < cutoff) f.delete()
+        }
     }
 }

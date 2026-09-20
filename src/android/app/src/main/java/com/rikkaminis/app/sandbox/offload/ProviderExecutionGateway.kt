@@ -92,6 +92,8 @@ object ProviderExecutionGateway {
         tools: List<AgentToolDefinition> = emptyList(),
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
         streaming: Boolean = false,
+        // [FIX-1 / F-191] Cross-process instance flags. See buildRequestJson.
+        enhancedCache: Boolean = false,
     ): String = MemorySpikeRecorder.measurePhase(
         kind = "phase:build-request",
         detail = "messages=${messages.size} systemChars=${systemPrompt?.length ?: 0} tools=${tools.size}",
@@ -109,6 +111,7 @@ object ProviderExecutionGateway {
             tools = tools,
             thinkingLevel = thinkingLevel,
             streaming = streaming,
+            enhancedCache = enhancedCache,
         )
     }
 
@@ -226,6 +229,7 @@ object ProviderExecutionGateway {
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
         inputJson: String = "",
         outputExt: String? = null,
+        enhancedCache: Boolean = false,
     ): Flow<LLMStreamChunk> {
         val requestJson = buildRequest(
             instance = instance,
@@ -240,6 +244,7 @@ object ProviderExecutionGateway {
             tools = tools,
             thinkingLevel = thinkingLevel,
             streaming = true,
+            enhancedCache = enhancedCache,
         )
         return ChatStreamOffloadHandler.stream(context, requestJson, thinkingLevel.isEnabled)
     }

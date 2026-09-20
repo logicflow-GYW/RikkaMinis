@@ -1,5 +1,7 @@
 package com.rikkaminis.app.provider.antigravity
 
+import com.rikkaminis.app.provider.executeOrCancel
+
 import android.content.Context
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.provider.ModelsDevApi
@@ -62,7 +64,10 @@ object AntigravityModelsApi {
             .build()
 
         val response = try {
-            client.newCall(request).execute()
+            // [FIX-1 / F-209] Cancellable execute — see provider/CallCancellation.kt.
+            client.newCall(request).executeOrCancel()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (_: Exception) {
             return@withContext emptyList()
         }
