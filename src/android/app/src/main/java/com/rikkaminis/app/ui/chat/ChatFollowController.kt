@@ -137,6 +137,10 @@ fun consumeBottomRequest(state: FollowState): FollowState =
  * makes the "scroll exactly once / never yank a dragging reader / never
  * scroll when a focus target owns position" contract JVM-testable.
  *
+ * [fix/fab-explicit-bottom] "…never scroll when a focus target owns position"
+ * has exactly one exception: a request the USER raised deliberately (FAB_DOWN)
+ * outranks the focus target — see the rule list on [decideBottomScroll].
+ *
  * NOTE: [BottomRequestReason.INITIAL_OPEN] no longer flows through this gate.
  * Its scroll-to-bottom is handled by the flatten collector at the data source
  * (the single place where the real item list first becomes non-empty — see
@@ -152,11 +156,31 @@ enum class BottomScrollAction {
 
 /**
  * Decision rules (mirror the consumer effect exactly):
- *  1. A focus target owns position → never scroll to bottom (consume).
+ *  1. A focus target owns position → never scroll to bottom (consume),
+ *     EXCEPT for an explicitly raised [BottomRequestReason.FAB_DOWN].
  *  2. FOLLOWING + no in-flight scroll + no user drag + sentinel off-screen:
  *       rows present → scroll; rows absent → safe consume.
  *  3. Anything else (not following, mid-scroll, dragging, sentinel already
  *     visible) → consume without scrolling (no re-fire, no yank).
+ *
+ * [fix/fab-explicit-bottom] [reason] is the request under decision — the same
+ * value the consumer logs and keys its effect on — and it is the ONLY basis
+ * for rule 1's exemption (no focus/composer proxy flags). Real-device
+ * forensics (2026-09-20): every FAB tap that day (5 of them) was logged as
+ * `request-bottom skipped (…) reason=FAB_DOWN`, i.e. the tap silently did
+ * nothing; because the FAB is the only way back to the bottom once follow has
+ * disengaged, such a session had no recovery path left. The focus gate exists
+ * to stop AUTOMATIC scrolls (SEND / RESUME / RETRY / STREAM_PROGRESS) from
+ * yanking a reader who owns position; a deliberate tap is not a yank, so it wins.
+ *
+ * [reason] may be null when a caller has no request in hand; that means
+ * "unknown" and keeps the legacy behaviour (the focus gate applies).
+ *
+ * ponytail: 豁免只认 reason==FAB_DOWN 这一条显式通道，未建模「composer 焦点」
+ * 真值（调用点传的 focusTarget 其实是 focus-jump 目标 pendingFocusId）| 天花板:
+ * 将来新增其它显式回底动作（双击/手势等）时需各自在此加豁免分支，枚举与分支
+ * 线性膨胀 | 升级触发: 真机再出现「显式动作被吞」日志（reason=<显式动作>
+ * 且 request-bottom skipped）。
  */
 internal fun decideBottomScroll(
     sentinelVisible: Boolean,
@@ -165,8 +189,10 @@ internal fun decideBottomScroll(
     isScrollInProgress: Boolean,
     isUserDragging: Boolean,
     focusTarget: Boolean,
+    reason: BottomRequestReason?,
 ): BottomScrollAction {
-    if (focusTarget) return BottomScrollAction.SKIP_AND_CONSUME
+    val explicitUserIntent = reason == BottomRequestReason.FAB_DOWN
+    if (focusTarget && !explicitUserIntent) return BottomScrollAction.SKIP_AND_CONSUME
     val shouldScroll = isFollowing &&
         !isScrollInProgress &&
         !isUserDragging &&

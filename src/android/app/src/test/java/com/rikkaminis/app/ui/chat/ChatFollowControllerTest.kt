@@ -178,6 +178,10 @@ class ChatFollowControllerTest {
         isScrollInProgress: Boolean = false,
         isUserDragging: Boolean = false,
         focusTarget: Boolean = false,
+        // Default = an AUTOMATIC reason: every case below that predates
+        // [fix/fab-explicit-bottom] pins the legacy behaviour, which the gate
+        // keeps for non-explicit requests.
+        reason: BottomRequestReason? = BottomRequestReason.SEND,
     ) = decideBottomScroll(
         sentinelVisible = sentinelVisible,
         hasRows = hasRows,
@@ -185,6 +189,7 @@ class ChatFollowControllerTest {
         isScrollInProgress = isScrollInProgress,
         isUserDragging = isUserDragging,
         focusTarget = focusTarget,
+        reason = reason,
     )
 
     @Test fun `data ready and following and not dragging scrolls to bottom`() {
@@ -199,8 +204,66 @@ class ChatFollowControllerTest {
         assertEquals(BottomScrollAction.SKIP_AND_CONSUME, decide(isScrollInProgress = true))
     }
 
-    @Test fun `focus target never scrolls to bottom`() {
+    @Test fun `focus target gates automatic requests`() {
         assertEquals(BottomScrollAction.SKIP_AND_CONSUME, decide(focusTarget = true))
+        for (reason in listOf(
+            BottomRequestReason.SEND,
+            BottomRequestReason.RESUME,
+            BottomRequestReason.RETRY,
+            BottomRequestReason.STREAM_PROGRESS,
+            BottomRequestReason.INITIAL_OPEN,
+            null, // caller supplied no reason → "unknown" → legacy gating
+        )) {
+            assertEquals(
+                "reason=$reason must stay gated by the focus rule",
+                BottomScrollAction.SKIP_AND_CONSUME,
+                decide(focusTarget = true, reason = reason),
+            )
+        }
+    }
+
+    // ── fix/fab-explicit-bottom: explicit tap outranks the focus target ──────
+
+    @Test fun `explicit fab tap scrolls to bottom despite a focus target`() {
+        // The on-device regression: 5/5 FAB taps logged
+        // "request-bottom skipped (…) reason=FAB_DOWN" while the composer held
+        // position, leaving no way back to the newest message.
+        assertEquals(
+            BottomScrollAction.SCROLL_TO_BOTTOM,
+            decide(focusTarget = true, reason = BottomRequestReason.FAB_DOWN),
+        )
+    }
+
+    @Test fun `explicit fab tap still scrolls with no focus target`() {
+        assertEquals(
+            BottomScrollAction.SCROLL_TO_BOTTOM,
+            decide(focusTarget = false, reason = BottomRequestReason.FAB_DOWN),
+        )
+    }
+
+    @Test fun `explicit fab exemption does not weaken any other gate condition`() {
+        // Only the focus rule is exempted; drag / in-flight scroll / sentinel /
+        // not-following / empty layout keep consuming without a scroll.
+        assertEquals(
+            BottomScrollAction.SKIP_AND_CONSUME,
+            decide(focusTarget = true, reason = BottomRequestReason.FAB_DOWN, isUserDragging = true),
+        )
+        assertEquals(
+            BottomScrollAction.SKIP_AND_CONSUME,
+            decide(focusTarget = true, reason = BottomRequestReason.FAB_DOWN, isScrollInProgress = true),
+        )
+        assertEquals(
+            BottomScrollAction.SKIP_AND_CONSUME,
+            decide(focusTarget = true, reason = BottomRequestReason.FAB_DOWN, sentinelVisible = true),
+        )
+        assertEquals(
+            BottomScrollAction.SKIP_AND_CONSUME,
+            decide(focusTarget = true, reason = BottomRequestReason.FAB_DOWN, isFollowing = false),
+        )
+        assertEquals(
+            BottomScrollAction.SKIP_AND_CONSUME,
+            decide(focusTarget = true, reason = BottomRequestReason.FAB_DOWN, hasRows = false),
+        )
     }
 
     @Test fun `sentinel already visible consumes without a scroll`() {

@@ -1239,6 +1239,11 @@ fun ChatScreen(
                 isScrollInProgress = listState.isScrollInProgress,
                 isUserDragging = isUserDragging,
                 focusTarget = pendingFocusId != null,
+                // [fix/fab-explicit-bottom] Forward the request itself: the
+                // gate exempts an explicit FAB tap from the focus rule (a
+                // deliberate "return to newest" is not a yank); auto reasons
+                // (SEND / RESUME / RETRY / STREAM_PROGRESS) stay gated.
+                reason = reason,
             )
         ) {
             BottomScrollAction.SCROLL_TO_BOTTOM -> {
