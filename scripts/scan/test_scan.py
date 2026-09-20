@@ -589,6 +589,57 @@ def test_trace_eval():
     shutil.rmtree(root)
 
 
+def test_extra_days_container():
+    print("━━━ extra_days_container_guard ━━━")
+    # Ground truth: the guard must accept arrayListOf and reject BOTH wrong
+    # containers -- int[] and Kotlin's listOf() (java.util.Arrays$ArrayList).
+    # The defect it catches is silent: the framework turns the ClassCastException
+    # into a null and the alarm replays as a one-shot.
+    good = make_tree({
+        "src/MinisApp.kt": (
+            "class M {\n"
+            "    private fun daysForRepeatMode(r: String): ArrayList<Int>? =\n"
+            "        when (r) { \"DAILY\" -> arrayListOf(1, 2, 3, 4, 5, 6, 7); else -> null }\n"
+            "    fun f() { daysForRepeatMode(\"DAILY\")?.let {\n"
+            "        putExtra(android.provider.AlarmClock.EXTRA_DAYS, it) } }\n"
+            "}\n"
+        ),
+        "src/Handler.kt": (
+            "class H {\n"
+            "    fun g(m: Int) { when (m) {\n"
+            "        1 -> putExtra(AlarmClock.EXTRA_DAYS, arrayListOf(1, 2))\n"
+            "        else -> putExtra(AlarmClock.EXTRA_DAYS, arrayListOf(1, 2))\n"
+            "    } }\n"
+            "}\n"
+        ),
+    })
+    code, out = run_scanner("extra_days_container_guard.py", good)
+    check("ArrayList writers pass (exit 0)", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(good)
+
+    for label, ret, value in (
+        ("int[]", "IntArray?", "intArrayOf(1, 2, 3, 4, 5, 6, 7)"),
+        ("listOf", "List<Int>?", "listOf(1, 2, 3, 4, 5, 6, 7)"),
+    ):
+        bad = make_tree({
+            "src/MinisApp.kt": (
+                "class M {\n"
+                f"    private fun daysForRepeatMode(r: String): {ret} =\n"
+                f"        when (r) {{ \"DAILY\" -> {value}; else -> null }}\n"
+                "    fun f() { daysForRepeatMode(\"DAILY\")?.let {\n"
+                "        putExtra(android.provider.AlarmClock.EXTRA_DAYS, it) } }\n"
+                "}\n"
+            ),
+            "src/Handler.kt": (
+                "class H {\n"
+                "    fun g() { putExtra(AlarmClock.EXTRA_DAYS, arrayListOf(1, 2)) }\n"
+                "}\n"
+            ),
+        })
+        code, out = run_scanner("extra_days_container_guard.py", bad)
+        check(f"{label} writer is caught (exit 1)", code == 1, f"exit={code}\n{out}")
+        shutil.rmtree(bad)
+
 def test_real_repo():
     print("━━━ real repo tree (must be clean) ━━━")
     for script in (
@@ -598,6 +649,7 @@ def test_real_repo():
         "provider_boundary_guard.py",
         "legacy_pipeline_guard.py",
         "trace_eval_check.py",
+        "extra_days_container_guard.py",
     ):
         code, out = run_scanner(script, REPO_ROOT)
         check(f"{script} on real repo exits 0", code == 0, f"exit={code}\n{out[:2000]}")
@@ -616,6 +668,7 @@ def main():
     test_room_migration()
     test_process_logging()
     test_trace_eval()
+    test_extra_days_container()
     test_real_repo()
     print("")
     print(f"{'❌ FAILURES: ' + str(FAIL) if FAIL else '✅ ALL ' + str(PASS) + ' CASES PASS'}")

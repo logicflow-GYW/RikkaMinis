@@ -884,35 +884,33 @@ class MinisApp : Application(), ImageLoaderFactory {
     }
 
     /**
-     * [audit-0919 F-280] T268: replay any pre-T266 internal alarm/timer entries from
-     * minis_alarms_prefs through SET_ALARM / SET_TIMER, then clear the
-     * prefs blob so subsequent launches no-op. Past-dated entries are
-     * dropped (the OS never re-fires them anyway). Idempotent: if the
-     * blob is missing or empty the function returns immediately.
+     * [audit-0919 F-176] Weekday list for [android.provider.AlarmClock.EXTRA_DAYS],
+     * or null when there is no repeat to preserve (ONCE / unknown).
      *
-     * Silent migration rather than an in-app dialog — Application has no
-     * Activity context to host one, and the user-visible outcome (alarms
-     * reappear in their Clock app) is what they want regardless of any
-     * prompt.
-     *
-     * [audit-0919 F-280] The old closing sentence ("AlarmOffloadManager's
-     * PendingIntents are left in place; the OS will fire them once more if
-     * scheduled") is no longer accurate: AlarmOffloadManager's scheduling half
-     * was deleted in this batch (zero production callers — see that class's
-     * KDoc), and this function clears the prefs blob unconditionally, so
-     * nothing can schedule a new internal alarm. A PendingIntent left behind by
-     * an *older build* can still fire once, which is why AlarmReceiver keeps
-     * its onAlarmFired cleanup path.
-     *
-     * [audit-0919 F-176] "Past-dated entries are dropped" is now true for every
-     * past entry (see the guard in the loop) — previously it only held for
-     * past timers and past one-shots.
+     * [fix/extra-days-container] The concrete container type is load-bearing,
+     * not cosmetic. `AlarmClock.EXTRA_DAYS` is specified as an
+     * `ArrayList<Integer>` ("The value is an ArrayList&lt;Integer&gt;"), and a
+     * strict consumer reads it with `getIntegerArrayListExtra` →
+     * `BaseBundle.getArrayList(key, Integer.class)` → `getValue(key,
+     * ArrayList.class, Integer.class)` → `ArrayList.class.cast(object)`.
+     * A `ClassCastException` there is caught, typeWarned and turned into
+     * **null** — not an error the caller can see — so the alarm silently
+     * replays as a one-shot: precisely the downgrade this replay path exists
+     * to avoid. Two wrong containers both end in that null:
+     *   - `IntArray` (what this function used to return) parcels as `int[]`;
+     *   - `listOf(...)` returns `java.util.Arrays$ArrayList`, which is not a
+     *     `java.util.ArrayList` either — only `arrayListOf(...)` is.
+     * Note `Intent.putExtra` has no `ArrayList` overload, so the value binds
+     * to `putExtra(String, Serializable)`; that still lands the ArrayList in
+     * the Bundle unchanged, which is exactly what the reader casts to.
+     * [AlarmOffloadHandler] (the other ACTION_SET_ALARM writer in this repo)
+     * passes an `ArrayList` for the same reason — the two must agree.
      */
-    private fun daysForRepeatMode(repeatMode: String): IntArray? = when (repeatMode) {
+    private fun daysForRepeatMode(repeatMode: String): ArrayList<Int>? = when (repeatMode) {
         // Calendar.DAY_OF_WEEK constants: SUNDAY=1 … SATURDAY=7.
         // DAILY replays as all seven days; WEEKDAYS as Mon-Fri.
-        "DAILY" -> intArrayOf(1, 2, 3, 4, 5, 6, 7)
-        "WEEKDAYS" -> intArrayOf(2, 3, 4, 5, 6)
+        "DAILY" -> arrayListOf(1, 2, 3, 4, 5, 6, 7)
+        "WEEKDAYS" -> arrayListOf(2, 3, 4, 5, 6)
         else -> null  // ONCE / unknown — no repeat to preserve.
     }
 
@@ -960,6 +958,36 @@ class MinisApp : Application(), ImageLoaderFactory {
         }
     }
 
+    /**
+     * [audit-0919 F-280] T268: replay any pre-T266 internal alarm/timer entries from
+     * minis_alarms_prefs through SET_ALARM / SET_TIMER, then clear the
+     * prefs blob so subsequent launches no-op. Past-dated entries are
+     * dropped (the OS never re-fires them anyway). Idempotent: if the
+     * blob is missing or empty the function returns immediately.
+     *
+     * Silent migration rather than an in-app dialog — Application has no
+     * Activity context to host one, and the user-visible outcome (alarms
+     * reappear in their Clock app) is what they want regardless of any
+     * prompt.
+     *
+     * [audit-0919 F-280] The old closing sentence ("AlarmOffloadManager's
+     * PendingIntents are left in place; the OS will fire them once more if
+     * scheduled") is no longer accurate: AlarmOffloadManager's scheduling half
+     * was deleted in this batch (zero production callers — see that class's
+     * KDoc), and this function clears the prefs blob unconditionally, so
+     * nothing can schedule a new internal alarm. A PendingIntent left behind by
+     * an *older build* can still fire once, which is why AlarmReceiver keeps
+     * its onAlarmFired cleanup path.
+     *
+     * [audit-0919 F-176] "Past-dated entries are dropped" is now true for every
+     * past entry (see the guard in the loop) — previously it only held for
+     * past timers and past one-shots.
+     *
+     * [fix/extra-days-container] This KDoc previously sat above
+     * [daysForRepeatMode] (a function it does not describe) after an earlier
+     * insertion landed between the two; it is back on the function it
+     * documents.
+     */
     private fun migrateGhostAlarms() {
         val prefs = getSharedPreferences("minis_alarms_prefs", Context.MODE_PRIVATE)
         val raw = prefs.getString("alarms_json", null) ?: return
