@@ -36,6 +36,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.Connection
@@ -1366,7 +1367,25 @@ class OpenAIProvider constructor(
             // next stream always starts clean.
             thinkState.reset()
         }
-    }
+        // [fix/provider-stream-flowon] The flow body above is SYNCHRONOUS: it
+        // blocks inside call.execute() and then inside reader.readLine(). Left
+        // on the collector's context it occupies that thread for the entire
+        // stream, and every timer scheduled on the same dispatcher starves —
+        // including this flow's own TTFB/first-data watchdogs. That was
+        // invisible while the collector was a thread pool (pre-offload main
+        // process); 01cfcc0e (2026-08-22, TF-D) moved the only collector into
+        // the :modelservice worker's `runBlocking { ... }`, which has no
+        // dispatcher of its own, so the body now owns the worker thread and
+        // all three guards (TTFB, first-data, worker first-chunk timeout)
+        // became unreachable — 2026-09-20: a 1.6MB request sat 272s with no
+        // byte back and nothing fired.
+        //
+        // flowOn moves ONLY the producer (this flow body + its launched
+        // watchdogs) to the IO pool; the collector stays where it was. It also
+        // relocates awaitClose to the IO pool — its body is just call.cancel()
+        // + response.close() + thinkState.reset() (a local object created
+        // inside this flow), all thread-agnostic, so that is safe.
+    }.flowOn(Dispatchers.IO)
 
     // MARK: - Raw Passthrough [T-android-model-use-passthrough-mode]
 

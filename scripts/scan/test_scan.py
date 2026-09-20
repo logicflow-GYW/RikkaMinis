@@ -827,6 +827,107 @@ def test_ime_inset():
     check("ime-unreachable escape hatch passes (exit 0)", code == 0, f"exit={code}\n{out}")
     shutil.rmtree(un_esc)
 
+def test_stream_flow_dispatch():
+    print("━━━ stream_flow_dispatch_guard ━━━")
+    # Ground truth: a callbackFlow whose body blocks must carry a flowOn, or the
+    # producer runs on the COLLECTOR's dispatcher and starves every timer on it
+    # — including the flow's own watchdogs. The 2026-09-20 hang: the
+    # :modelservice collector is `runBlocking` (no dispatcher), so the TTFB
+    # watchdog, the first-data watchdog and the worker's outer timeout all
+    # became unreachable at once and a 1.6MB request sat 272s with no byte back.
+    good = make_tree({
+        KOTLIN_PKG + "/provider/Good.kt": (
+            "fun goodStream(): Flow<Int> = callbackFlow<Int> {\n"
+            "    val reader = BufferedReader(InputStreamReader(resp.body!!.byteStream()))\n"
+            "    val call = client.newCall(req)\n"
+            "    val resp = call.execute()\n"
+            "    while (reader.readLine() != null) { }\n"
+            "    awaitClose { call.cancel() }\n"
+            "}.flowOn(Dispatchers.IO)\n"
+        ),
+        # 链上还有别的 operator，flowOn 不在第一个位置 —— 也算放行
+        KOTLIN_PKG + "/provider/Chained.kt": (
+            "fun chainedStream(): Flow<String> = channelFlow<Int> {\n"
+            "    Thread.sleep(1)\n"
+            "}.flowOn(Dispatchers.IO).map { it.toString() }\n"
+        ),
+        # 体内没有阻塞调用 ⇒ 不归本门管
+        KOTLIN_PKG + "/provider/NonBlocking.kt": (
+            "fun pureStream(): Flow<Int> = callbackFlow<Int> {\n"
+            "    trySend(1)\n"
+            "    awaitClose { }\n"
+            "}\n"
+        ),
+    })
+    code, out = run_scanner("stream_flow_dispatch_guard.py", good)
+    check("dispatched / non-blocking flows pass (exit 0)", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(good)
+
+    # 负例：体内阻塞且链上无 flowOn ⇒ 必须翻红
+    bad = make_tree({
+        KOTLIN_PKG + "/provider/Bad.kt": (
+            "fun badStream(): Flow<Int> = callbackFlow<Int> {\n"
+            "    val call = client.newCall(req)\n"
+            "    val resp = call.execute()\n"
+            "    while (reader.readLine() != null) { }\n"
+            "    awaitClose { call.cancel() }\n"
+            "}\n"
+        ),
+    })
+    code, out = run_scanner("stream_flow_dispatch_guard.py", bad)
+    check("blocking cold flow without flowOn is caught (exit 1)", code == 1, f"exit={code}\n{out}")
+    shutil.rmtree(bad)
+
+    # flowOn(Dispatchers.Main) 只是把阻塞搬到 UI 线程，同样要翻红
+    main_disp = make_tree({
+        KOTLIN_PKG + "/provider/MainDisp.kt": (
+            "fun mainStream(): Flow<Int> = callbackFlow<Int> {\n"
+            "    val resp = call.execute()\n"
+            "    awaitClose { }\n"
+            "}.flowOn(Dispatchers.Main)\n"
+        ),
+    })
+    code, out = run_scanner("stream_flow_dispatch_guard.py", main_disp)
+    check("flowOn(Dispatchers.Main) is still a violation (exit 1)", code == 1, f"exit={code}\n{out}")
+    shutil.rmtree(main_disp)
+
+    # ★ 回归守卫：注释里的花括号/关键字不得干扰作用域配平。
+    # 首版判据在这里翻车 —— 我加的解释性注释里写了 `// runBlocking { ... }`，
+    # 行注释未掩码 ⇒ 花括号计数失衡 ⇒ match_brace 冲过真正的 } 一路吞掉文件后半段，
+    # 反向对照时多报 11 处无关命中（含注释自身）。这个 fixture 把该 bug 钉死。
+    comment_braces = make_tree({
+        KOTLIN_PKG + "/provider/CommentBrace.kt": (
+            "fun commented(): Flow<Int> = callbackFlow<Int> {\n"
+            "    // the collector's `runBlocking { ... }` has no dispatcher\n"
+            "    // see https://example.com/docs/flow {not a brace}\n"
+            "    val resp = call.execute()\n"
+            "    awaitClose { }\n"
+            "}.flowOn(Dispatchers.IO)\n"
+            "\n"
+            "fun unrelated(): Int {\n"
+            "    val s = \"https://example.com/a//b\"\n"
+            "    return 1\n"
+            "}\n"
+        ),
+    })
+    code, out = run_scanner("stream_flow_dispatch_guard.py", comment_braces)
+    check("comment/string braces do not break scoping (exit 0)", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(comment_braces)
+
+    # 逃生口：带 stream-ok 说明的必须放行
+    escaped = make_tree({
+        KOTLIN_PKG + "/provider/Esc.kt": (
+            "fun escStream(): Flow<Int> = callbackFlow<Int> {\n"
+            "    // stream-ok: body runs on a dedicated single-thread executor\n"
+            "    val resp = call.execute()\n"
+            "    awaitClose { }\n"
+            "}\n"
+        ),
+    })
+    code, out = run_scanner("stream_flow_dispatch_guard.py", escaped)
+    check("stream-ok escape hatch passes (exit 0)", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(escaped)
+
 
 def test_real_repo():
     print("━━━ real repo tree (must be clean) ━━━")
@@ -840,6 +941,7 @@ def test_real_repo():
         "extra_days_container_guard.py",
         "stale_closure_guard.py",
         "ime_inset_guard.py",
+        "stream_flow_dispatch_guard.py",
     ):
         code, out = run_scanner(script, REPO_ROOT)
         check(f"{script} on real repo exits 0", code == 0, f"exit={code}\n{out[:2000]}")
@@ -861,6 +963,7 @@ def main():
     test_extra_days_container()
     test_stale_closure()
     test_ime_inset()
+    test_stream_flow_dispatch()
     test_real_repo()
     print("")
     print(f"{'❌ FAILURES: ' + str(FAIL) if FAIL else '✅ ALL ' + str(PASS) + ' CASES PASS'}")
