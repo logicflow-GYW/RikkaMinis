@@ -1187,8 +1187,11 @@ fun ChatScreen(
     // [forward-stable] Session open: one initial bottom request, unless the
     // open targets a specific message (focus-message owns the scroll then).
     LaunchedEffect(sessionId) {
+        // [diag/render-attribution] T3: one-shot liveness marker so a silent
+        // probe is distinguishable from a dead one in the log.
+        com.rikkaminis.app.diagnostics.RenderAttributionDiag.markProbeLive()
         if (pendingFocusId == null) {
-            followState = followReducer(followState, FollowEvent.InitialOpen)
+            followState = dispatchFollow(sessionId, followState, FollowEvent.InitialOpen, listState, isUserDragging, isStreaming)
         }
     }
 
@@ -1257,6 +1260,23 @@ fun ChatScreen(
 
             BottomScrollAction.SKIP_AND_CONSUME -> {
                 AppLogger.debug("ScrollSrc", "request-bottom skipped (focus/draft/drag/not-following) reason=$reason revision=${followState.rowRevision}")
+                // [diag/render-attribution] T3-Q3: name the gate that ate an
+                // EXPLICIT request (e.g. the user's FAB tap while a queued
+                // focus target was pending). decideBottomScroll returns a
+                // single SKIP verdict, so the inputs are logged to tell
+                // focus / drag / not-following apart after the fact (T1's
+                // focus-rule fix is verified against this line).
+                com.rikkaminis.app.diagnostics.RenderAttributionDiag.recordFollowDecline(
+                    sessionId = sessionId,
+                    reason = "bottom-request-skip",
+                    isStreaming = isStreaming,
+                    isScrollInProgress = listState.isScrollInProgress,
+                    isUserDragging = isUserDragging,
+                    sentinelVisible = sentinelVisible,
+                    totalItems = listState.layoutInfo.totalItemsCount,
+                    canScrollForward = listState.canScrollForward,
+                    focusPending = pendingFocusId != null,
+                )
             }
         }
 
@@ -1300,7 +1320,7 @@ fun ChatScreen(
                     // in-flight bottom request so nothing scrolls mid-gesture.
                     // This also maintains DETACHED/FOLLOWING for the explicit
                     // intent consumer above.
-                    followState = followReducer(followState, FollowEvent.UserDragStart)
+                    followState = dispatchFollow(sessionId, followState, FollowEvent.UserDragStart, listState, isUserDragging, isStreaming)
                 }
                 is androidx.compose.foundation.interaction.DragInteraction.Stop -> {
                     isUserDragging = false
@@ -1326,7 +1346,7 @@ fun ChatScreen(
                     // [forward-stable] Drag end flips the mode: sentinel in
                     // view → follow; scrolled away → detach (nothing may yank).
                     // Maintains the mode for the explicit-intent consumer above.
-                    followState = followReducer(followState, FollowEvent.UserDragEnd(atBottom = stoppedAtBottom))
+                    followState = dispatchFollow(sessionId, followState, FollowEvent.UserDragEnd(atBottom = stoppedAtBottom), listState, isUserDragging, isStreaming)
                 }
                 is androidx.compose.foundation.interaction.DragInteraction.Cancel -> {
                     isUserDragging = false
@@ -1389,7 +1409,7 @@ fun ChatScreen(
         // actually at the bottom — keep the follow state in sync (drag-stop
         // position verdicts cover the animation window).
         if (!followState.isFollowing && isNearBottom.value) {
-            followState = followReducer(followState, FollowEvent.UserDragEnd(atBottom = true))
+            followState = dispatchFollow(sessionId, followState, FollowEvent.UserDragEnd(atBottom = true), listState, isUserDragging, isStreaming)
         }
     }
     // [T-android-tool-autoscroll] Start-of-turn edge from ViewModel: resume() /
@@ -1408,7 +1428,24 @@ fun ChatScreen(
             // consumer effect gates on sentinel + gesture. DETACHED is never
             // yanked by an automatic re-run.
             if (followState.isFollowing) {
-                followState = followReducer(followState, FollowEvent.StreamRowsChanged)
+                followState = dispatchFollow(sessionId, followState, FollowEvent.StreamRowsChanged, listState, isUserDragging, isStreaming)
+            } else {
+                // [diag/render-attribution] T3-Q3: this collector silently
+                // drops the resume/retry/rerun scroll signal while DETACHED.
+                // Record it so the post-mortem can tell "follow was off when
+                // the continuation arrived" apart from "follow was on and the
+                // effect still did nothing".
+                com.rikkaminis.app.diagnostics.RenderAttributionDiag.recordFollowDecline(
+                    sessionId = sessionId,
+                    reason = "forceScroll-detached",
+                    isStreaming = isStreaming,
+                    isScrollInProgress = listState.isScrollInProgress,
+                    isUserDragging = isUserDragging,
+                    sentinelVisible = isBottomSentinelVisible(listState.layoutInfo),
+                    totalItems = listState.layoutInfo.totalItemsCount,
+                    canScrollForward = listState.canScrollForward,
+                    focusPending = pendingFocusId != null,
+                )
             }
         }
     }
@@ -1448,23 +1485,48 @@ fun ChatScreen(
         LaunchedEffect(listState, isStreaming) {
             snapshotFlow { listState.layoutInfo.visibleItemsInfo }
                 .collect { vis ->
-                    if (listState.isScrollInProgress) return@collect
-                    if (!isStreaming) return@collect
-                    if (isUserDragging) return@collect
-                    if (!followState.isFollowing) return@collect
+                    // [diag/render-attribution] T3-Q3: the gate ORDER below is
+                    // the production contract, unchanged — the only addition
+                    // is that the refusal path now reports WHICH gate stopped
+                    // it (>=1s per reason via RenderAttributionDiag), so "the
+                    // effect ran but the list never moved" is answerable from
+                    // the log instead of by re-reading this block.
                     val total = listState.layoutInfo.totalItemsCount
-                    if (total == 0) return@collect
-                    // [fix/place-storm-follow-clamp-loop] Clamp guard: the
-                    // sentinel being visible + content flush against the
-                    // bottom (canScrollForward == false) means any
-                    // requestScrollToItem is UNREACHABLE — the list clamps it
-                    // right back, visibleItemsInfo re-emits, and the loop
-                    // re-requests: a self-sustaining 60Hz measure storm that
-                    // lasted the whole streaming turn (PlaceStorm dumps,
-                    // minis-2026-09-01__2_.log). Only nudge when the clamp
-                    // was actually released (new content grew the list).
-                    if (!shouldRequestFollowScroll(listState.canScrollForward)) return@collect
                     val scrollIdx = bottomScrollTarget(total)
+                    val declinedGate = when {
+                        listState.isScrollInProgress -> "scroll-in-progress"
+                        !isStreaming -> "not-streaming"
+                        isUserDragging -> "user-dragging"
+                        !followState.isFollowing -> "not-following"
+                        total == 0 -> "empty-list"
+                        // [fix/place-storm-follow-clamp-loop] Clamp guard: the
+                        // sentinel being visible + content flush against the
+                        // bottom (canScrollForward == false) means any
+                        // requestScrollToItem is UNREACHABLE — the list clamps
+                        // it right back, visibleItemsInfo re-emits, and the
+                        // loop re-requests: a self-sustaining 60Hz measure
+                        // storm that lasted the whole streaming turn
+                        // (PlaceStorm dumps, minis-2026-09-01__2_.log). Only
+                        // nudge when the clamp was actually released (new
+                        // content grew the list).
+                        !shouldRequestFollowScroll(listState.canScrollForward) -> "clamp-not-released"
+                        scrollIdx == null -> "no-target"
+                        else -> null
+                    }
+                    if (declinedGate != null) {
+                        com.rikkaminis.app.diagnostics.RenderAttributionDiag.recordFollowDecline(
+                            sessionId = sessionId,
+                            reason = declinedGate,
+                            isStreaming = isStreaming,
+                            isScrollInProgress = listState.isScrollInProgress,
+                            isUserDragging = isUserDragging,
+                            sentinelVisible = isBottomSentinelVisible(listState.layoutInfo),
+                            totalItems = total,
+                            canScrollForward = listState.canScrollForward,
+                            focusPending = pendingFocusId != null,
+                        )
+                        return@collect
+                    }
                     if (scrollIdx != null) {
                         listState.requestScrollToItem(scrollIdx)
                     }
@@ -3541,9 +3603,32 @@ fun ChatScreen(
                         // (before measure); onPlaced fires after layout.
                         if (item == flatItems.lastOrNull()) {
                             androidx.compose.runtime.SideEffect {
+                                // [diag/render-attribution] T3-Q1: attribute
+                                // the row this line is about — which
+                                // FlatChatItem type, which message (8-char
+                                // prefix), how many content chars and
+                                // whether the item itself is the live
+                                // streaming tail. The extra string is built
+                                // HERE, in the same place the line was
+                                // already being built, so no new per-frame
+                                // cost class is added; the per-type census
+                                // (below) stays allocation-free.
+                                val diagType = flatItemDiagType(item)
+                                val diagChars = flatItemDiagChars(item)
+                                val diagStreaming = flatItemDiagStreaming(item)
                                 com.rikkaminis.app.diagnostics.PerfLongCtx.step(
                                     sessionId,
                                     "lazyColumn.firstItem.compose",
+                                    "type=${diagType.label}" +
+                                        " msg=${item.owningMessageId().take(8)}" +
+                                        " chars=$diagChars" +
+                                        " streaming=$diagStreaming",
+                                )
+                                com.rikkaminis.app.diagnostics.RenderAttributionDiag.recordNewestCompose(
+                                    sessionId = sessionId,
+                                    type = diagType,
+                                    streaming = diagStreaming,
+                                    chars = diagChars,
                                 )
                             }
                         }
@@ -3976,7 +4061,7 @@ fun ChatScreen(
                                 // [fix/history-open-catchup-guard] Resume is a
                                 // user intent — revoke the open catch-up too.
                                 openCatchUpUserEngaged = true
-                                followState = followReducer(followState, FollowEvent.Resume)
+                                followState = dispatchFollow(sessionId, followState, FollowEvent.Resume, listState, isUserDragging, isStreaming)
                             })
                         }
                     }
@@ -4207,7 +4292,7 @@ fun ChatScreen(
                             // the explicit "return to newest / resume follow"
                             // gesture. [forward-stable] Exactly one pending
                             // bottom request — no settle second call.
-                            followState = followReducer(followState, FollowEvent.FabDown)
+                            followState = dispatchFollow(sessionId, followState, FollowEvent.FabDown, listState, isUserDragging, isStreaming)
                         },
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
@@ -4266,7 +4351,7 @@ fun ChatScreen(
                 chatActions = chatActions,
                 isStreaming = isStreaming,
                 isNearBottom = isNearBottom,
-                onFollowEvent = { followState = followReducer(followState, it) },
+                onFollowEvent = { followState = dispatchFollow(sessionId, followState, it, listState, isUserDragging, isStreaming) },
                 onMoveToSession = onMoveToSession,
                 onOpenModelPicker = { showModelPicker = true },
                 onPreviewAttachment = onPreviewAttachment,
@@ -4856,3 +4941,97 @@ private const val OPEN_CATCHUP_MAX_ROLLS = 4
 
 // [refactor/split-chatscreen] ChatInputArea composable moved verbatim to
 // ChatInputArea.kt (private -> internal; signature unchanged).
+
+// ═══════════════════════════════════════════════════════════════════════
+// [diag/render-attribution] T3 diagnostics — REMOVE ME when the two
+// regressions are fixed (see the T3 report §removal).
+//
+// Q1 helpers: the item→bucket mapping lives here (not in the diagnostics
+// package) so the diagnostics layer stays free of UI types. Both the
+// enriched `[Perf][LongCtx] step=lazyColumn.firstItem.compose` line and the
+// per-type census read these; the `when` is exhaustive over the sealed
+// FlatChatItem, so a NEW subtype breaks the build here instead of silently
+// falling into a bucket.
+// ═══════════════════════════════════════════════════════════════════════
+
+private typealias ComposeType = com.rikkaminis.app.diagnostics.RenderAttributionDiag.ItemType
+
+private fun flatItemDiagType(item: FlatChatItem): ComposeType = when (item) {
+    is FlatChatItem.UserBubble -> ComposeType.USER
+    is FlatChatItem.AssistantHeader -> ComposeType.HEADER
+    is FlatChatItem.AssistantMarkdownBlock -> ComposeType.MDBLOCK
+    is FlatChatItem.AssistantThinking -> ComposeType.THINKING
+    is FlatChatItem.AssistantToolRunGroup -> ComposeType.TOOLRUN
+    is FlatChatItem.AssistantInfo -> ComposeType.INFO
+    is FlatChatItem.AssistantTyping -> ComposeType.TYPING
+    is FlatChatItem.AssistantError -> ComposeType.ERROR
+    is FlatChatItem.AssistantMessageItem -> ComposeType.MSGITEM
+    is FlatChatItem.AssistantLegacyContent -> ComposeType.LEGACY
+}
+
+/** Cheap content-length proxy for the attributed row — never walks chars. */
+private fun flatItemDiagChars(item: FlatChatItem): Int = when (item) {
+    is FlatChatItem.UserBubble -> item.message.content.length
+    is FlatChatItem.AssistantMarkdownBlock -> item.rawText.length
+    is FlatChatItem.AssistantLegacyContent -> item.content.length
+    is FlatChatItem.AssistantMessageItem -> item.message.content.length
+    is FlatChatItem.AssistantThinking -> item.block.content.length
+    is FlatChatItem.AssistantInfo -> item.block.content.length
+    is FlatChatItem.AssistantToolRunGroup -> item.tools.sumOf { it.toolArgs.length }
+    is FlatChatItem.AssistantError -> item.error.length
+    is FlatChatItem.AssistantHeader, is FlatChatItem.AssistantTyping -> -1
+}
+
+/** The item's own streaming flag where one exists (the row renderers branch on it). */
+private fun flatItemDiagStreaming(item: FlatChatItem): Boolean = when (item) {
+    is FlatChatItem.AssistantMarkdownBlock -> item.isStreaming
+    is FlatChatItem.AssistantLegacyContent -> item.isStreaming
+    is FlatChatItem.AssistantMessageItem -> item.message.isStreaming
+    is FlatChatItem.AssistantThinking -> item.messageIsStreaming && item.isLastBlockOverall
+    else -> false
+}
+
+private fun followEventLabel(event: FollowEvent): String = when (event) {
+    is FollowEvent.InitialOpen -> "InitialOpen"
+    is FollowEvent.UserDragStart -> "UserDragStart"
+    is FollowEvent.UserDragEnd -> "UserDragEnd(atBottom=${event.atBottom})"
+    is FollowEvent.StreamRowsChanged -> "StreamRowsChanged"
+    is FollowEvent.Send -> "Send"
+    is FollowEvent.Resume -> "Resume"
+    is FollowEvent.Retry -> "Retry"
+    is FollowEvent.FabDown -> "FabDown"
+    is FollowEvent.ImeViewportChanged -> "ImeViewportChanged"
+}
+
+/**
+ * [diag/render-attribution] T3-Q2: the single funnel every `followReducer`
+ * dispatch in this file goes through. It delegates to the untouched reducer
+ * (ChatFollowController is owned by T1) and reports the transition plus the
+ * live gate inputs to [com.rikkaminis.app.diagnostics.RenderAttributionDiag],
+ * which always logs a mode flip and coalesces no-op dispatches to >=1s.
+ * The return value is exactly `followReducer(current, event)`.
+ */
+private fun dispatchFollow(
+    sessionId: String,
+    current: FollowState,
+    event: FollowEvent,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    isUserDragging: Boolean,
+    isStreaming: Boolean,
+): FollowState {
+    val next = followReducer(current, event)
+    com.rikkaminis.app.diagnostics.RenderAttributionDiag.recordFollowDispatch(
+        sessionId = sessionId,
+        event = followEventLabel(event),
+        modeBefore = current.mode.name,
+        modeAfter = next.mode.name,
+        isStreaming = isStreaming,
+        isScrollInProgress = listState.isScrollInProgress,
+        isUserDragging = isUserDragging,
+        sentinelVisible = isBottomSentinelVisible(listState.layoutInfo),
+        totalItems = listState.layoutInfo.totalItemsCount,
+        canScrollForward = listState.canScrollForward,
+    )
+    return next
+}
+
