@@ -74,6 +74,52 @@ internal fun ChatViewModel.effectiveContextPolicy(contextWindow: Int): ContextPo
     )
 
 /**
+ * [fix/context-exhausted-loop] A context-pressure reading: the tokens the
+ * provider last reported, the live window they are measured against, and the
+ * resulting [ContextPolicy] verdict.
+ */
+internal data class ContextPressure(
+    val tokens: Int,
+    val window: Int,
+    val result: ContextPolicy.CheckResult,
+)
+
+/**
+ * [fix/context-exhausted-loop] The single source of truth for "how much
+ * pressure is the context under right now". Returns null when there is no
+ * reading yet (first call of a run) or the window is unknown — callers treat
+ * that as "no pressure".
+ *
+ * Why this exists: the EXHAUSTED verdict used to be computed inline inside
+ * [checkContextBeforeSend], which only the send entry calls. The agent loop's
+ * own turns never consulted it, so [ContextCompactor]'s KDoc claim that
+ * "EXHAUSTED blocking lives at the send entry" described the entry and was
+ * simply false for the loop — the 2026-09-20 field log shows
+ * `[AutoCompactLoop] skipped: EXHAUSTED` immediately followed by a fresh
+ * `chat stream offload -> :modelservice` request, three times in a row.
+ * Both landing points now read this one function, so they cannot drift.
+ */
+internal fun ChatViewModel.contextPressure(): ContextPressure? {
+    val tokens = _lastTurnContextTokens.value
+    if (tokens <= 0) return null
+    // [T-context-window-live-read] Live window (entry re-resolved + group
+    // contextLimitTokens folded in) — not the currentModel snapshot.
+    val window = effectiveContextWindowTokens() ?: return null
+    return ContextPressure(tokens, window, effectiveContextPolicy(window).check(tokens, window))
+}
+
+/**
+ * [fix/context-exhausted-loop] Side-effect-free EXHAUSTED query for the agent
+ * loop — no `appendSystemInfo`, no blocking, just the verdict. The send entry
+ * needs the blocking + dialog shape ([checkContextBeforeSend]); the loop
+ * cannot stash a draft, so it only needs to know whether a retry is provably
+ * futile. Shares [contextPressure] with the entry so the two agree by
+ * construction.
+ */
+internal fun ChatViewModel.isContextExhausted(): Boolean =
+    contextPressure()?.result == ContextPolicy.CheckResult.EXHAUSTED
+
+/**
  * Consult [ContextPolicy] before sending. Returns true to proceed.
  *
  * [T-context-limit-enforce] Behaviour:
@@ -89,17 +135,12 @@ internal fun ChatViewModel.effectiveContextPolicy(contextWindow: Int): ContextPo
  * The user resolves EXHAUSTED via explicit `/compact` or a new chat.
  */
 internal fun ChatViewModel.checkContextBeforeSend(): Boolean {
-    val tokens = _lastTurnContextTokens.value
-    if (tokens <= 0) return true
-    // [T-context-window-live-read] Live window (entry re-resolved + group
-    // contextLimitTokens folded in) — not the currentModel snapshot.
-    val window = effectiveContextWindowTokens() ?: return true
-    val policy = effectiveContextPolicy(window)
-    return when (policy.check(tokens, window)) {
+    val pressure = contextPressure() ?: return true
+    return when (pressure.result) {
         ContextPolicy.CheckResult.OK -> true
         ContextPolicy.CheckResult.NEEDS_COMPACT -> {
             appendSystemInfo(
-                text = context.getString(R.string.sysmsg_context_full_hint, tokens, window),
+                text = context.getString(R.string.sysmsg_context_full_hint, pressure.tokens, pressure.window),
                 iconKind = "compact",
             )
             true

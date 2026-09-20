@@ -235,3 +235,46 @@ fun isRepetitionDominated(text: String): Boolean {
     }
     return false
 }
+
+/** Legacy ceiling on the empty length-wall retry budget (was the inline `3`). */
+const val LENGTH_WALL_EMPTY_MAX_HITS = 3
+
+/**
+ * [fix/context-exhausted-loop] Whether an empty `finish_reason="length"` turn
+ * may be retried, or whether the retry is a provably identical wall.
+ *
+ * The retry's premise (see the branch this gates) is that "a fresh turn
+ * re-reads history and may shape a new answer". That premise needs budget: a
+ * retry is only worth its billed input if the next request could produce
+ * *different* output. When the context is at/over the hard window ceiling the
+ * per-request output budget is pinned at
+ * [ChatViewModel.MIN_MAX_TOKENS] however many times we ask
+ * (`remaining = window − input` is negative, and `dynamicMaxTokens` floors it
+ * at the minimum), so the retry re-bills the whole input for the same empty
+ * result — exactly the class the `usageProvesEmpty` fast-exit in the same
+ * branch already refuses to pay for.
+ *
+ * Field evidence (2026-09-20, build `27eced19`): input=405694 vs
+ * window=200000 (203%), budget pinned at 1024, three consecutive empty
+ * length-wall turns 40s apart (reasoningLen 1940 → 3477 → 3916, body empty),
+ * each preceded by `[AutoCompactLoop] skipped: EXHAUSTED` and each followed by
+ * a fresh `chat stream offload -> :modelservice`. The run ended 2m33s later on
+ * the third hit with `×3 empty output — giving up`. The user saw "转了很
+ * 久，最后弹一个错误".
+ *
+ * Deliberately NOT a turn-entry gate: over-window requests DO sometimes
+ * succeed (the same day's log shows turn 4 dispatching tool calls at 404463
+ * tokens), so blocking every turn at the ceiling would kill working runs. The
+ * gate fires only where failure is *proven* — an empty length-wall turn.
+ *
+ * @param hits consecutive empty length-wall hits, INCLUDING this one.
+ * @param contextExhausted whether the context is at/over the hard window
+ *   ceiling (`AgentLoopHost.isContextExhausted()` — the same verdict the send
+ *   entry's `checkContextBeforeSend` uses, so the two landing points agree).
+ * @param maxHits legacy ceiling on the retry budget.
+ */
+fun shouldRetryEmptyLengthWall(
+    hits: Int,
+    contextExhausted: Boolean,
+    maxHits: Int = LENGTH_WALL_EMPTY_MAX_HITS,
+): Boolean = hits < maxHits && !contextExhausted

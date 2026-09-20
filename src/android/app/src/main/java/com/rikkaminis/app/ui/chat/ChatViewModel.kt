@@ -1177,6 +1177,7 @@ class ChatViewModel(
         override fun applyRequestImageBudget(messages: List<LLMMessage>): List<LLMMessage> =
             this@ChatViewModel.applyRequestImageBudget(messages)
         override fun checkContextBeforeSend(): Boolean = this@ChatViewModel.checkContextBeforeSend()
+        override fun isContextExhausted(): Boolean = this@ChatViewModel.isContextExhausted()
         override fun offloadContextIfNeeded(contextWindow: Int, lastContextTokens: Int, force: Boolean) =
             this@ChatViewModel.offloadContextIfNeeded(contextWindow, lastContextTokens, force)
         override fun trimContextHistoryWindow(contextWindow: Int, lastContextTokens: Int) =
