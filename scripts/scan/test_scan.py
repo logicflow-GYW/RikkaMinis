@@ -701,6 +701,133 @@ def test_stale_closure():
     check("stale-ok escape hatch passes (exit 0)", code == 0, f"exit={code}\n{out}")
     shutil.rmtree(escaped)
 
+def test_ime_inset():
+    print("━━━ ime_inset_guard ━━━")
+    # Ground truth: a text field hosted by a bare Scaffold with no imePadding is
+    # invisible behind the keyboard (edge-to-edge + adjustResize = the window is
+    # NOT resized for the IME). The guard must flag that, accept the fixed shape,
+    # and honour both escape hatches. Two false negatives found while building
+    # this guard are pinned here so they cannot regress:
+    #   - a trailing-lambda `Scaffold { }` (no parens) must count as a host;
+    #   - a `"*/*"` string literal must not swallow the rest of the file.
+    good = make_tree({
+        KOTLIN_PKG + "/ui/Good.kt": (
+            "@Composable\n"
+            "private fun Good() {\n"
+            "    Scaffold { padding ->\n"
+            "        Column(Modifier.fillMaxSize().padding(padding).imePadding()) {\n"
+            "            OutlinedTextField(value = \"\", onValueChange = {})\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+        ),
+        # 保护宿主（SettingsScaffold）⇒ 不在判据内
+        KOTLIN_PKG + "/ui/Protected.kt": (
+            "@Composable\n"
+            "private fun Protected() {\n"
+            "    SettingsScaffold(title = \"x\") {\n"
+            "        OutlinedTextField(value = \"\", onValueChange = {})\n"
+            "    }\n"
+            "}\n"
+        ),
+        # 没有文本输入点的裸 Scaffold ⇒ 不该报
+        KOTLIN_PKG + "/ui/NoField.kt": (
+            "@Composable\n"
+            "private fun NoField() {\n"
+            "    Scaffold { padding -> Text(\"hi\") }\n"
+            "}\n"
+        ),
+    })
+    code, out = run_scanner("ime_inset_guard.py", good)
+    check("fixed + protected + fieldless pass (exit 0)", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(good)
+
+    bad = make_tree({
+        KOTLIN_PKG + "/ui/Bad.kt": (
+            "@Composable\n"
+            "private fun Bad() {\n"
+            "    Scaffold { padding ->\n"
+            "        Column(Modifier.fillMaxSize().padding(padding)) {\n"
+            "            OutlinedTextField(value = \"\", onValueChange = {})\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+        ),
+    })
+    code, out = run_scanner("ime_inset_guard.py", bad)
+    check("bare Scaffold + field, no imePadding is caught (exit 1)", code == 1, f"exit={code}\n{out}")
+    shutil.rmtree(bad)
+
+    # 假阴性回归 1：`Scaffold {` 尾随 lambda 形态必须被识别为宿主
+    trailing = make_tree({
+        KOTLIN_PKG + "/ui/Trailing.kt": (
+            "@Composable\n"
+            "private fun Trailing() {\n"
+            "    Scaffold { padding ->\n"
+            "        OutlinedTextField(value = \"\", onValueChange = {})\n"
+            "    }\n"
+            "}\n"
+        ),
+    })
+    code, out = run_scanner("ime_inset_guard.py", trailing)
+    check("trailing-lambda `Scaffold {` counts as host (exit 1)", code == 1, f"exit={code}\n{out}")
+    shutil.rmtree(trailing)
+
+    # 假阴性回归 2：文件中的 "*/*" 字符串不得吞掉后续代码
+    star = make_tree({
+        KOTLIN_PKG + "/ui/Star.kt": (
+            "@Composable\n"
+            "private fun Star() {\n"
+            "    val launcher = remember { \"\" }\n"
+            "    Button(onClick = { launcher.launch(\"*/*\") }) { Text(\"pick\") }\n"
+            "}\n"
+            "\n"
+            "@Composable\n"
+            "private fun Later() {\n"
+            "    Scaffold { padding ->\n"
+            "        OutlinedTextField(value = \"\", onValueChange = {})\n"
+            "    }\n"
+            "}\n"
+        ),
+    })
+    code, out = run_scanner("ime_inset_guard.py", star)
+    check("\"*/*\" literal does not swallow later functions (exit 1)", code == 1, f"exit={code}\n{out}")
+    shutil.rmtree(star)
+
+    # 逃生口 1：ime-ok
+    ok_esc = make_tree({
+        KOTLIN_PKG + "/ui/OkEsc.kt": (
+            "@Composable\n"
+            "private fun OkEsc() {\n"
+            "    Scaffold { padding ->\n"
+            "        AlertDialog(onDismissRequest = {}) {\n"
+            "            // ime-ok: independent Window, platform pans to the field\n"
+            "            OutlinedTextField(value = \"\", onValueChange = {})\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+        ),
+    })
+    code, out = run_scanner("ime_inset_guard.py", ok_esc)
+    check("ime-ok escape hatch passes (exit 0)", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(ok_esc)
+
+    # 逃生口 2：ime-unreachable
+    un_esc = make_tree({
+        KOTLIN_PKG + "/ui/UnEsc.kt": (
+            "@Composable\n"
+            "private fun UnEsc() {\n"
+            "    Scaffold { padding -> Text(\"list\") }\n"
+            "    // ime-unreachable: the field lives in the sheet branch below\n"
+            "    Sheet { OutlinedTextField(value = \"\", onValueChange = {}) }\n"
+            "}\n"
+        ),
+    })
+    code, out = run_scanner("ime_inset_guard.py", un_esc)
+    check("ime-unreachable escape hatch passes (exit 0)", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(un_esc)
+
+
 def test_real_repo():
     print("━━━ real repo tree (must be clean) ━━━")
     for script in (
@@ -712,6 +839,7 @@ def test_real_repo():
         "trace_eval_check.py",
         "extra_days_container_guard.py",
         "stale_closure_guard.py",
+        "ime_inset_guard.py",
     ):
         code, out = run_scanner(script, REPO_ROOT)
         check(f"{script} on real repo exits 0", code == 0, f"exit={code}\n{out[:2000]}")
@@ -732,6 +860,7 @@ def main():
     test_trace_eval()
     test_extra_days_container()
     test_stale_closure()
+    test_ime_inset()
     test_real_repo()
     print("")
     print(f"{'❌ FAILURES: ' + str(FAIL) if FAIL else '✅ ALL ' + str(PASS) + ' CASES PASS'}")
