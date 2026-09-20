@@ -325,8 +325,12 @@ object AppLogger {
     }
 
     fun error(category: String, message: String) {
-        log("ERROR", category, message)
-        dumpErrorSnapshot()
+        // [F-169] The formatted line is built ONCE here and handed to the
+        // snapshot: log() only enqueues it, and the drain thread records it in
+        // the ring later — a dump that read the ring alone raced that drain and
+        // shipped a scene missing the one line it exists to explain.
+        val line = log("ERROR", category, message)
+        dumpErrorSnapshot(line)
     }
 
     /**
@@ -336,15 +340,21 @@ object AppLogger {
      * `error-snapshot-<timestamp>.log`. Every error carries its own scene, so
      * "what did the app log right before the 400?" no longer requires
      * watching the 64KiB kernel logcat ring live.
+     *
+     * [F-169] [triggerLine] is the ERROR line that caused this dump. It is
+     * composed into the snapshot when the drain thread has not recorded it
+     * yet, so the trigger is always present. Purely a composition step — the
+     * ring itself is untouched (see [LogRingBuffer.contentIncluding]), so the
+     * drain thread remains its single writer and no line is duplicated.
      */
-    private fun dumpErrorSnapshot() {
+    private fun dumpErrorSnapshot(triggerLine: String? = null) {
         val buffer = ring ?: return
         if (!buffer.shouldSnapshot(System.currentTimeMillis())) return
         val dir = logDir ?: return
         val stamp = java.time.LocalDateTime.now().format(errorSnapshotFormat)
         try {
             val file = File(dir, "error-snapshot-$stamp.log")
-            file.writeText(buffer.content().joinToString(separator = "\n") + "\n")
+            file.writeText(buffer.contentIncluding(triggerLine).joinToString(separator = "\n") + "\n")
         } catch (_: Exception) {
             // Snapshot must never take the logger down.
         }
@@ -384,7 +394,13 @@ object AppLogger {
         )
     }
 
-    private fun log(level: String, category: String, message: String) {
+    /**
+     * Format, emit to logcat and enqueue one line. Returns the exact formatted
+     * line that was enqueued (empty when logging is disabled) so a caller that
+     * needs the line itself — [error] handing its trigger line to the snapshot
+     * — reuses this one formatting/timestamp instead of rebuilding it.
+     */
+    private fun log(level: String, category: String, message: String): String {
         // Also output to logcat (unchanged — adb debugging still sees
         // everything, and Minis.* lines are filtered out of the file capture).
         val logcatTag = "Minis.$category"
@@ -397,13 +413,15 @@ object AppLogger {
 
         // Write to file (only if enabled). Timestamps are taken here so the
         // recorded time is the call time, not the drain time.
-        if (!enabled) return
+        if (!enabled) return ""
+        val line = "[${timeStamp()}] [$level] [$category] $message"
         writeQueue?.enqueue(
             todayStamp(),
-            "[${timeStamp()}] [$level] [$category] $message",
+            line,
             // DEBUG is droppable under backlog; INFO/WARN/ERROR always keep.
             keep = level != "DEBUG",
         )
+        return line
     }
 
     /**

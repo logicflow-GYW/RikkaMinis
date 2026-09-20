@@ -49,4 +49,40 @@ class LogRingBufferTest {
         assertEquals(emptyList<String>(), b.content())
         assertTrue(b.shouldSnapshot(5_000))
     }
+
+    // ── [F-169] contentIncluding: the trigger line of an ERROR is enqueued by
+    // the caller but recorded by the drain thread, so the dump composes it in.
+
+    @Test
+    fun `contentIncluding appends the trigger line last`() {
+        val b = LogRingBuffer()
+        b.append("ctx-1")
+        assertEquals(listOf("ctx-1", "boom"), b.contentIncluding("boom"))
+    }
+
+    @Test
+    fun `contentIncluding does not duplicate a line the drain already recorded`() {
+        val b = LogRingBuffer()
+        b.append("ctx-1")
+        b.append("boom")
+        assertEquals(listOf("ctx-1", "boom"), b.contentIncluding("boom"))
+    }
+
+    @Test
+    fun `contentIncluding ignores null and empty triggers`() {
+        val b = LogRingBuffer()
+        b.append("ctx-1")
+        assertEquals(listOf("ctx-1"), b.contentIncluding(null))
+        assertEquals(listOf("ctx-1"), b.contentIncluding(""))
+    }
+
+    @Test
+    fun `contentIncluding leaves the ring itself untouched`() {
+        // The drain thread must stay the ring's single writer: recording here
+        // would race it into a duplicate that every later snapshot shows.
+        val b = LogRingBuffer()
+        b.append("ctx-1")
+        b.contentIncluding("boom")
+        assertEquals(listOf("ctx-1"), b.content())
+    }
 }

@@ -46,6 +46,29 @@ internal class LogRingBuffer(private val capacity: Int = DEFAULT_CAPACITY) {
     fun content(): List<String> = lines.toList()
 
     /**
+     * [F-169] Snapshot content (oldest first) guaranteed to end with [line]
+     * when it is not already recorded.
+     *
+     * The trigger line of an ERROR is enqueued by the caller thread but only
+     * recorded by the drain thread, so a dump that reads [content] directly
+     * races the drain and can miss the one line the snapshot exists to
+     * explain. Composing the snapshot here — under the same lock as the read —
+     * makes the scene complete without waiting on, or blocking, the drain.
+     *
+     * Deliberately does NOT record into the ring: the drain thread will
+     * deliver this same line moments later, and mutating the ring here would
+     * race it into a duplicate entry that every later snapshot would show.
+     * The membership check keeps the composed file duplicate-free when the
+     * drain won the race and already recorded it.
+     */
+    @Synchronized
+    fun contentIncluding(line: String?): List<String> {
+        val snapshot = lines.toList()
+        if (line.isNullOrEmpty() || line in snapshot) return snapshot
+        return snapshot + line
+    }
+
+    /**
      * Whether an error-triggered snapshot should be written now. Dedup by
      * [SNAPSHOT_MIN_INTERVAL_MS]; the caller MUST call [markSnapshot] when it
      * actually writes the file (after a true return) — a false return must
