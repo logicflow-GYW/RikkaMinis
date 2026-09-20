@@ -1731,4 +1731,24 @@
     <string name="runtime_limits_shell_timeout">シェル：既定タイムアウト（秒）</string>
     <string name="runtime_limits_shell_timeout_desc">呼び出し側が独自のタイムアウトを渡さない場合の既定タイムアウト（明示指定時はその値、上限 900 秒）。既定 900。</string>
     <string name="runtime_limits_media_footer">画像上限を上げると高画質のままモデルへ届きますが、リクエストが大きくなります。</string>
+
+    <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that
+         were previously hardcoded in ViewModels / handlers. -->
+    <string name="rootfs_msg_preparing">rootfs を準備しています…</string>
+    <string name="rootfs_msg_extracting">rootfs を展開しています…%1$d%%</string>
+    <string name="rootfs_msg_finalizing">仕上げ中…</string>
+    <string name="rootfs_msg_installing">rootfs をインストールしています…</string>
+    <string name="rootfs_msg_installed">rootfs のインストールに成功しました</string>
+    <string name="rootfs_msg_install_failed">インストールに失敗しました。詳細はログを確認してください。</string>
+    <string name="rootfs_msg_resetting">rootfs をリセットしています…</string>
+    <string name="rootfs_msg_reset_complete">rootfs のリセットが完了しました</string>
+    <string name="rootfs_msg_reset_failed">リセットに失敗しました。詳細はログを確認してください。</string>
+    <string name="rootfs_msg_healthy">rootfs は正常です — 修復は不要です</string>
+    <string name="rootfs_msg_repairing">rootfs を修復しています…</string>
+    <string name="rootfs_msg_repaired">rootfs を修復しました — 欠落ファイルを復元しました</string>
+    <string name="rootfs_msg_repair_failed">修復に失敗しました。詳細はログを確認してください。</string>
+    <string name="rootfs_msg_repair_missing">修復に失敗しました — 依然として欠落: %1$s</string>
+    <string name="browser_no_app_for_link">このリンクを開けるアプリがありません。</string>
+    <string name="browser_could_not_open_link">このリンクを開けませんでした。</string>
+    <string name="filepreview_pdf_render_failed_fallback">PDF の描画に失敗しました</string>
 </resources>

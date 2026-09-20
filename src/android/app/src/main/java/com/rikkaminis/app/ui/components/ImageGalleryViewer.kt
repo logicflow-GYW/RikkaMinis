@@ -58,7 +58,9 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import coil.compose.AsyncImage
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * One image in an [ImageGalleryViewer]. [model] is anything Coil's
@@ -121,7 +123,11 @@ fun ImageGalleryViewer(
     // for why we don't touch decorFitsSystemWindows on the activity
     // window.
     DisposableEffect(Unit) {
-        val window = (view.context as? android.app.Activity)?.window
+        // [fix/render-ui F-271] Was `(view.context as? android.app.Activity)?.window`,
+        // which is always null here: `view` is the *dialog's* AndroidComposeView
+        // and the dialog's context chain is ContextThemeWrapper(ContextThemeWrapper(…)),
+        // never an Activity. The walker below is the working form.
+        val window = findDialogWindow(view)
         val controller = window?.let { WindowInsetsControllerCompat(it, view) }
         val prevLightStatus = controller?.isAppearanceLightStatusBars
         val prevLightNav = controller?.isAppearanceLightNavigationBars
@@ -161,9 +167,17 @@ fun ImageGalleryViewer(
         ),
     ) {
         // Apply immersive flags to the dialog's own window too.
-        val dialogContainer = LocalView.current.parent as? android.view.ViewGroup
-        DisposableEffect(dialogContainer) {
-            val win = dialogContainer?.let { findDialogWindowForGallery(it) }
+        // [fix/render-ui F-271] `LocalView.current` is the dialog's own
+        // AndroidComposeView; its parent IS the `DialogLayout`
+        // (AbstractComposeView + DialogWindowProvider) whose `window` is the
+        // dialog's PhoneWindow. The previous code passed `LocalView.current.parent`
+        // to a walker that itself started at `root.parent` — stepping over the
+        // only node that could ever match — and matched on `ctx is Activity`,
+        // which the dialog chain (ContextThemeWrapper(ContextThemeWrapper(…)))
+        // never contains. Both made this block a silent no-op.
+        val dialogView = LocalView.current
+        DisposableEffect(dialogView) {
+            val win = findDialogWindow(dialogView)
             win?.let { w ->
                 w.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
                 WindowCompat.setDecorFitsSystemWindows(w, false)
@@ -325,7 +339,16 @@ fun ImageGalleryViewer(
                                                 saveToGallery(context, bmp) -> savedToAlbumMsg
                                                 else -> saveFailedMsg
                                             }
-                                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                            // [fix/render-ui F-270] `scope` is MinisApp.applicationScope
+                                            // (SupervisorJob + Dispatchers.IO — no Looper). Toast.makeText
+                                            // calls Looper.myLooper() and throws
+                                            // "Can't toast on a thread that has not called Looper.prepare()"
+                                            // when it is null, so this toast crashed the process on every
+                                            // Save-to-album tap. Hop to Main, like every toast in
+                                            // FullscreenImageViewer's copyBitmapToClipboard/shareImage.
+                                            withContext(Dispatchers.Main) {
+                                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                            }
                                         } finally {
                                             saving = false
                                         }
@@ -400,18 +423,28 @@ private fun GalleryPage(
 }
 
 /**
- * Same shape as the FullscreenImageViewer.findDialogWindow walker —
- * duplicated here (private in the other file) to avoid making it a
- * public utility before we know which other components need it.
+ * [fix/render-ui F-271] Find the hosting `Window` of a Compose `Dialog`.
+ *
+ * Compose renders dialog content inside an internal `DialogLayout`
+ * (`AbstractComposeView`, `DialogWindowProvider`) which is the *direct parent*
+ * of `LocalView.current`, and whose `window` is the dialog's PhoneWindow.
+ *
+ * Two things this walker must NOT do, both of which the previous version did:
+ *  1. Match on `ctx is android.app.Activity`. AOSP `Dialog.java` wraps the
+ *     caller's context in one or two `ContextThemeWrapper`s, so the dialog's
+ *     view chain contains no Activity context at all — the predicate can never
+ *     hit (verified by `exp_c4_a.kt`: `treeA_ctxwalker_null=true`).
+ *  2. Start at `root.parent`. When the caller already passes the node *above*
+ *     the provider, skipping one more level steps over the only match.
+ *
+ * Mirrors `InlineMediaPlayer.findDialogWindow` / `WebPreviewBottomSheet` /
+ * `WebPreviewFullscreenScreen` — the three copies that got it right.
  */
-private fun findDialogWindowForGallery(root: android.view.ViewGroup): android.view.Window? {
-    var p: android.view.ViewParent? = root.parent
+private fun findDialogWindow(view: android.view.View): android.view.Window? {
+    var p: android.view.ViewParent? = view.parent
     while (p != null) {
-        if (p is android.view.View) {
-            val ctx = p.context
-            if (ctx is android.app.Activity) return ctx.window
-        }
-        p = (p as? android.view.View)?.parent
+        if (p is androidx.compose.ui.window.DialogWindowProvider) return p.window
+        p = p.parent
     }
     return null
 }

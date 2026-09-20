@@ -147,9 +147,11 @@ object BrowserExternalSchemeHandler {
             }
         }
 
+        // [fix/render-ui F-276] Was a hardcoded English literal; the sibling
+        // branch in handle() already used R.string.webpreview_blocked_scheme.
         Toast.makeText(
             context,
-            "No app available to open this link.",
+            context.getString(R.string.browser_no_app_for_link),
             Toast.LENGTH_SHORT,
         ).show()
         return true
@@ -164,7 +166,7 @@ object BrowserExternalSchemeHandler {
         } catch (_: ActivityNotFoundException) {
             Toast.makeText(
                 context,
-                "No app available to open this link.",
+                context.getString(R.string.browser_no_app_for_link),
                 Toast.LENGTH_SHORT,
             ).show()
         } catch (e: Exception) {
@@ -175,7 +177,7 @@ object BrowserExternalSchemeHandler {
             AppLogger.warning(TAG, "ACTION_VIEW failed for $uri: ${e.message}")
             Toast.makeText(
                 context,
-                "Could not open this link.",
+                context.getString(R.string.browser_could_not_open_link),
                 Toast.LENGTH_SHORT,
             ).show()
         }

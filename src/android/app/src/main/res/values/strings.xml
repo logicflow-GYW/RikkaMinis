@@ -1829,4 +1829,24 @@
     <string name="runtime_limits_shell_timeout">Shell: default timeout (s)</string>
     <string name="runtime_limits_shell_timeout_desc">Default timeout for shell commands when a call does not pass its own; explicit per-call values keep their own (max 900 s). Default 900.</string>
     <string name="runtime_limits_media_footer">Higher image limits let better-quality pictures reach the model at the cost of request size.</string>
+
+    <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that
+         were previously hardcoded in ViewModels / handlers. -->
+    <string name="rootfs_msg_preparing">Preparing rootfs…</string>
+    <string name="rootfs_msg_extracting">Extracting rootfs… %1$d%%</string>
+    <string name="rootfs_msg_finalizing">Finalizing…</string>
+    <string name="rootfs_msg_installing">Installing rootfs…</string>
+    <string name="rootfs_msg_installed">Rootfs installed successfully</string>
+    <string name="rootfs_msg_install_failed">Installation failed. See the log for details.</string>
+    <string name="rootfs_msg_resetting">Resetting rootfs…</string>
+    <string name="rootfs_msg_reset_complete">Rootfs reset complete</string>
+    <string name="rootfs_msg_reset_failed">Reset failed. See the log for details.</string>
+    <string name="rootfs_msg_healthy">Rootfs is healthy — no repair needed</string>
+    <string name="rootfs_msg_repairing">Repairing rootfs…</string>
+    <string name="rootfs_msg_repaired">Rootfs repaired — missing files restored</string>
+    <string name="rootfs_msg_repair_failed">Repair failed. See the log for details.</string>
+    <string name="rootfs_msg_repair_missing">Repair failed — still missing: %1$s</string>
+    <string name="browser_no_app_for_link">No app available to open this link.</string>
+    <string name="browser_could_not_open_link">Could not open this link.</string>
+    <string name="filepreview_pdf_render_failed_fallback">Failed to render PDF</string>
 </resources>

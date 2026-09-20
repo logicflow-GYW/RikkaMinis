@@ -1686,4 +1686,24 @@
     <string name="runtime_limits_shell_timeout">Shell: тайм-аут по умолчанию (с)</string>
     <string name="runtime_limits_shell_timeout_desc">Тайм-аут команд shell, когда вызов не передаёт свой (явные значения сохраняются, максимум 900 с). По умолчанию 900.</string>
     <string name="runtime_limits_media_footer">Более высокие лимиты изображений пропускают лучшее качество к модели — ценой размера запроса.</string>
+
+    <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that
+         were previously hardcoded in ViewModels / handlers. -->
+    <string name="rootfs_msg_preparing">Подготовка rootfs…</string>
+    <string name="rootfs_msg_extracting">Распаковка rootfs… %1$d%%</string>
+    <string name="rootfs_msg_finalizing">Завершение…</string>
+    <string name="rootfs_msg_installing">Установка rootfs…</string>
+    <string name="rootfs_msg_installed">rootfs успешно установлен</string>
+    <string name="rootfs_msg_install_failed">Установка не удалась. Подробности в журнале.</string>
+    <string name="rootfs_msg_resetting">Сброс rootfs…</string>
+    <string name="rootfs_msg_reset_complete">Сброс rootfs завершён</string>
+    <string name="rootfs_msg_reset_failed">Сброс не удался. Подробности в журнале.</string>
+    <string name="rootfs_msg_healthy">rootfs в порядке — восстановление не требуется</string>
+    <string name="rootfs_msg_repairing">Восстановление rootfs…</string>
+    <string name="rootfs_msg_repaired">rootfs восстановлен — отсутствующие файлы возвращены</string>
+    <string name="rootfs_msg_repair_failed">Восстановление не удалось. Подробности в журнале.</string>
+    <string name="rootfs_msg_repair_missing">Восстановление не удалось — по-прежнему отсутствует: %1$s</string>
+    <string name="browser_no_app_for_link">Нет приложения для открытия этой ссылки.</string>
+    <string name="browser_could_not_open_link">Не удалось открыть эту ссылку.</string>
+    <string name="filepreview_pdf_render_failed_fallback">Не удалось отобразить PDF</string>
 </resources>

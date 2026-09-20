@@ -14,7 +14,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.appendInlineContent
@@ -592,7 +591,15 @@ private fun StreamingMarkdownTextBody(
     // suspend-safe and frees the runtime to drop intermediate values when the
     // collector falls behind. When streaming ends, emit the final value
     // unconditionally so we don't render a stale half-block.
-    val displayContent by produceState(initialValue = content, content, isStreaming) {
+    //
+    // [fix/render-ui F-255] The key list used to be `(content, isStreaming)`.
+    // produceState's keys are LaunchedEffect keys: every content change
+    // cancelled the producer coroutine that was sitting in `delay(...)` and
+    // restarted it, so the throttle never throttled — measured 50× on the
+    // replay harness (100 chunks ⇒ 100 renders vs 2 with a content-free key,
+    // `exp_c2_throttle.kt`). Content is already observed through
+    // `snapshotFlow { content }`, so it does not belong in the key.
+    val displayContent by produceState(initialValue = content, isStreaming) {
         if (!isStreaming) {
             value = content
             return@produceState
@@ -791,6 +798,17 @@ fun MarkdownDocument(
  * recomputed. When true (the trailing live fragment), the parse is
  * re-run on every content tick, mirroring the original
  * StreamingMarkdownText behavior.
+ *
+ * [fix/render-ui F-257] RUNTIME-DEAD while `AGGREGATE_MESSAGE_ITEMS` is true
+ * (`ChatScreen.kt`): its only call site sits in the
+ * `is FlatChatItem.AssistantMarkdownBlock ->` branch, and no production code
+ * constructs that row type any more (`buildAggregateChatItems` emits only
+ * UserBubble + AssistantMessageItem). The legacy chain is kept deliberately as
+ * the Stage-E fallback — `scripts/scan/legacy_pipeline_guard.py` fails the
+ * build if anything outside the allow-list reaches for it. Do not "fix"
+ * throttling / caching inside this chain: changes here are unobservable until
+ * the aggregate flag is flipped back. The live renderer is
+ * [StreamingMarkdownTextBody].
  */
 @Composable
 fun MarkdownBlock(
@@ -1480,7 +1498,12 @@ private fun rememberKatexInlineContent(
 @Composable
 private fun RenderInlineMath(latex: String, fontSize: TextUnit) {
     val context = LocalContext.current
-    val isDark = isSystemInDarkTheme()
+    // [fix/render-ui F-256] ChatColors.isDark follows the in-app theme
+    // override (Settings -> theme_mode); isSystemInDarkTheme() only tracks the
+    // system setting, so a user who forces light mode on a dark system got
+    // white KaTeX glyphs on the light body background. Same fix as
+    // ChatToolDetailUI.kt's T126-fix.
+    val isDark = ChatColors.isDark
     // T208-5: pass the sp value as CSS px so the rendered glyph height
     // matches the surrounding body text. KaTeX's HTML sets
     // `el.style.fontSize = fontSize + 'px'` and the WebView viewport runs
@@ -1547,7 +1570,9 @@ private fun RenderInlineMath(latex: String, fontSize: TextUnit) {
 @Composable
 private fun RenderMathDisplay(latex: String) {
     val context = LocalContext.current
-    val isDark = isSystemInDarkTheme()
+    // [fix/render-ui F-256] See RenderInlineMath: use the in-app palette, not
+    // the system setting.
+    val isDark = ChatColors.isDark
     // T208-5: render at sp.value (CSS px = dp) so glyph height matches the
     // surrounding 16-sp body text. See RenderInlineMath comment for the
     // full reasoning.
@@ -2090,6 +2115,11 @@ private fun RenderTable(block: MdBlock.Table) {
                             val androidBitmap = imageBitmap.asAndroidBitmap()
                             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                                 val shareDir = java.io.File(context.cacheDir, "share").apply { mkdirs() }
+                                // [fix/render-ui F-273] Nothing used to delete the
+                                // table_*.png blobs this path writes. pruneShareDir is
+                                // the only name-agnostic pruner for cache/share/ (24h
+                                // TTL), so run it before adding another one.
+                                com.rikkaminis.app.ui.components.pruneShareDir(shareDir)
                                 val outFile = java.io.File(shareDir, "table_${System.currentTimeMillis()}.png")
                                 outFile.outputStream().use {
                                     androidBitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)

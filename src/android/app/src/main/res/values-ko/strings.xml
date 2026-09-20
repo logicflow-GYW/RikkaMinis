@@ -1731,4 +1731,24 @@
     <string name="runtime_limits_shell_timeout">셸: 기본 시간초과(초)</string>
     <string name="runtime_limits_shell_timeout_desc">호출이 자체 시간초과를 넘기지 않을 때의 기본 시간초과(명시적으로 전달된 값은 그대로, 상한 900초). 기본 900.</string>
     <string name="runtime_limits_media_footer">이미지 상한을 올리면 더 좋은 화질로 모델에 전달되지만 요청이 커집니다.</string>
+
+    <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that
+         were previously hardcoded in ViewModels / handlers. -->
+    <string name="rootfs_msg_preparing">rootfs 준비 중…</string>
+    <string name="rootfs_msg_extracting">rootfs 압축 해제 중…%1$d%%</string>
+    <string name="rootfs_msg_finalizing">마무리 중…</string>
+    <string name="rootfs_msg_installing">rootfs 설치 중…</string>
+    <string name="rootfs_msg_installed">rootfs 설치 완료</string>
+    <string name="rootfs_msg_install_failed">설치에 실패했습니다. 자세한 내용은 로그를 확인하세요.</string>
+    <string name="rootfs_msg_resetting">rootfs 재설정 중…</string>
+    <string name="rootfs_msg_reset_complete">rootfs 재설정 완료</string>
+    <string name="rootfs_msg_reset_failed">재설정에 실패했습니다. 자세한 내용은 로그를 확인하세요.</string>
+    <string name="rootfs_msg_healthy">rootfs 상태가 정상입니다 — 복구가 필요하지 않습니다</string>
+    <string name="rootfs_msg_repairing">rootfs 복구 중…</string>
+    <string name="rootfs_msg_repaired">rootfs 복구 완료 — 누락된 파일을 복원했습니다</string>
+    <string name="rootfs_msg_repair_failed">복구에 실패했습니다. 자세한 내용은 로그를 확인하세요.</string>
+    <string name="rootfs_msg_repair_missing">복구 실패 — 여전히 누락: %1$s</string>
+    <string name="browser_no_app_for_link">이 링크를 열 수 있는 앱이 없습니다.</string>
+    <string name="browser_could_not_open_link">이 링크를 열 수 없습니다.</string>
+    <string name="filepreview_pdf_render_failed_fallback">PDF 렌더링 실패</string>
 </resources>

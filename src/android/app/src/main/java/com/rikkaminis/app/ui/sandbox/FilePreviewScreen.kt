@@ -260,6 +260,9 @@ fun FilePreviewScreen(
 
 @Composable
 private fun TextPreview(item: FileItem) {
+    // [fix/render-ui F-276] Error fallbacks below are user-visible; resolve
+    // them through resources like the rest of this screen.
+    val context = androidx.compose.ui.platform.LocalContext.current
     var content by remember { mutableStateOf<String?>(null) }
     var truncated by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -271,7 +274,7 @@ private fun TextPreview(item: FileItem) {
                 content = decodeUtf8Capped(bytes)
                 truncated = bytes.size > MAX_TEXT_PREVIEW_BYTES
             } catch (e: Exception) {
-                error = e.message ?: "Failed to read file"
+                error = e.message ?: context.getString(R.string.filepreview_file_read_error)
             }
         }
     }
@@ -338,6 +341,9 @@ private fun TextPreview(item: FileItem) {
 
 @Composable
 private fun MarkdownPreview(item: FileItem) {
+    // [fix/render-ui F-276] Error fallbacks below are user-visible; resolve
+    // them through resources like the rest of this screen.
+    val context = androidx.compose.ui.platform.LocalContext.current
     var content by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
@@ -347,7 +353,7 @@ private fun MarkdownPreview(item: FileItem) {
                 val bytes = item.file.readBytes()
                 content = decodeUtf8Capped(bytes)
             } catch (e: Exception) {
-                error = e.message ?: "Failed to read file"
+                error = e.message ?: context.getString(R.string.filepreview_file_read_error)
                 AppLogger.warning("FilePreview", "markdown read failed for ${item.name}: ${e.message}")
             }
         }
@@ -402,6 +408,15 @@ private fun HtmlPreview(item: FileItem) {
                 val targetUrl = "file://${item.file.absolutePath}"
                 post { loadUrl(targetUrl) }
             }
+        },
+        // [fix/render-ui F-274] This WebView had no release path: every preview
+        // of an HTML file left a live renderer process handle behind, and the
+        // queued `post { loadUrl }` could still fire after the composable left.
+        // Same three-call teardown as KaTeXView.kt's T10-M1 fix.
+        onRelease = { wv ->
+            wv.removeCallbacks(null)
+            wv.stopLoading()
+            wv.destroy()
         },
     )
 }
@@ -485,7 +500,7 @@ private fun PdfPreview(item: FileItem) {
                 pageCount = renderer.open(item.file, width)
             } catch (e: Exception) {
                 AppLogger.warning("FilePreview", "PdfRenderer failed for ${item.name}: ${e.message}")
-                error = e.message ?: "Failed to render PDF"
+                error = e.message ?: context.getString(R.string.filepreview_pdf_render_failed_fallback)
             }
         }
     }
@@ -664,6 +679,9 @@ private fun PdfOpenExternalFallback(item: FileItem, reason: String) {
 
 @Composable
 private fun CsvPreview(item: FileItem) {
+    // [fix/render-ui F-276] Error fallbacks below are user-visible; resolve
+    // them through resources like the rest of this screen.
+    val context = androidx.compose.ui.platform.LocalContext.current
     var rows by remember(item.file) { mutableStateOf<List<List<String>>?>(null) }
     var truncated by remember(item.file) { mutableStateOf(false) }
     var error by remember(item.file) { mutableStateOf<String?>(null) }
@@ -684,7 +702,7 @@ private fun CsvPreview(item: FileItem) {
                 }
                 rows = parsed
             } catch (e: Exception) {
-                error = e.message ?: "Failed to parse CSV"
+                error = e.message ?: context.getString(R.string.filepreview_csv_parse_error)
             }
         }
     }
@@ -758,6 +776,9 @@ private fun parseCsvLine(line: String, sep: Char): List<String> {
 
 @Composable
 private fun JsonPreview(item: FileItem) {
+    // [fix/render-ui F-276] Error fallbacks below are user-visible; resolve
+    // them through resources like the rest of this screen.
+    val context = androidx.compose.ui.platform.LocalContext.current
     var pretty by remember(item.file) { mutableStateOf<String?>(null) }
     var truncated by remember(item.file) { mutableStateOf(false) }
     var error by remember(item.file) { mutableStateOf<String?>(null) }
@@ -776,7 +797,7 @@ private fun JsonPreview(item: FileItem) {
                     }
                 } catch (_: Exception) { raw }
             } catch (e: Exception) {
-                error = e.message ?: "Failed to read file"
+                error = e.message ?: context.getString(R.string.filepreview_file_read_error)
             }
         }
     }
@@ -826,6 +847,9 @@ private fun JsonPreview(item: FileItem) {
 
 @Composable
 private fun ArchivePreview(item: FileItem) {
+    // [fix/render-ui F-276] Error fallbacks below are user-visible; resolve
+    // them through resources like the rest of this screen.
+    val context = androidx.compose.ui.platform.LocalContext.current
     data class Entry(val name: String, val size: Long, val isDir: Boolean)
     var entries by remember(item.file) { mutableStateOf<List<Entry>?>(null) }
     var error by remember(item.file) { mutableStateOf<String?>(null) }
@@ -844,7 +868,7 @@ private fun ArchivePreview(item: FileItem) {
                 }
                 entries = out.sortedBy { it.name }
             } catch (e: Exception) {
-                error = e.message ?: "Failed to read archive"
+                error = e.message ?: context.getString(R.string.filepreview_archive_read_error)
             }
         }
     }
@@ -1099,13 +1123,28 @@ private fun shareFile(context: Context, item: FileItem) {
  * through `loadUrl`.
  */
 private fun printFile(context: Context, item: FileItem, preRenderedHtml: String?) {
+    // [fix/render-ui F-274] The previous body kept a `var holder: WebView?`
+    // local to "keep webView reachable across the async page load" and cleared
+    // it in `onPageFinished`. Local-variable assignments do not create GC roots
+    // (the compiler even needed `@Suppress("UNUSED_VALUE")` because nothing ever
+    // read it), so the guarantee was fictional and `destroy` appeared 0 times in
+    // this file — every print leaked a WebView + renderer process handle.
+    //
+    // A *field* does create a GC root, so `printWebView` below is the real
+    // version of that intent. It is deliberately NOT destroyed in
+    // `onPageFinished` and NOT destroyed by the next print either:
+    // `createPrintDocumentAdapter` hands the framework an adapter that reads
+    // this WebView lazily for as long as the job is spooling, and nothing tells
+    // us when that ends. Destroying on the success path (or on the next call)
+    // would silently produce blank printouts whenever a job outlives its call.
+    // The single slot bounds the retention to one view — see the ponytail note
+    // on the field.
     try {
         val webView = WebView(context).apply {
             settings.javaScriptEnabled = false
             settings.allowFileAccess = true
         }
-        // Keep a reference alive until the print job is dispatched.
-        var holder: WebView? = webView
+        printWebView = webView
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String) {
                 val printManager =
@@ -1117,7 +1156,21 @@ private fun printFile(context: Context, item: FileItem, preRenderedHtml: String?
                     adapter,
                     PrintAttributes.Builder().build(),
                 )
-                holder = null
+                // Deliberately no release here — see the note above.
+            }
+
+            override fun onReceivedError(
+                view: WebView,
+                request: android.webkit.WebResourceRequest,
+                error: android.webkit.WebResourceError,
+            ) {
+                // Without this the failure path never ran onPageFinished, so the
+                // view was never released at all.
+                AppLogger.warning(
+                    "FilePreview",
+                    "print page load failed for ${item.name}: ${error.description}",
+                )
+                releasePrintWebView(view)
             }
         }
         if (preRenderedHtml == null) {
@@ -1125,14 +1178,45 @@ private fun printFile(context: Context, item: FileItem, preRenderedHtml: String?
         } else {
             webView.loadDataWithBaseURL(null, preRenderedHtml, "text/html", "utf-8", null)
         }
-        // Silence the unused-assignment warning while documenting intent: the
-        // holder keeps `webView` reachable across the async page load.
-        @Suppress("UNUSED_VALUE")
-        holder = webView
     } catch (e: Exception) {
         AppLogger.warning("FilePreview", "print failed for ${item.name}: ${e.message}")
         Toast.makeText(context, context.getString(R.string.file_print_failed_toast, e.message ?: ""), Toast.LENGTH_SHORT).show()
     }
+}
+
+/**
+ * [fix/render-ui F-274] The one live reference to the print WebView. Being a
+ * field (not a local) is what makes it an actual GC root; see the note in
+ * [printFile] for why it outlives `onPageFinished`.
+ *
+ * ponytail: 单槽，成功路径不销毁 | 天花板: 打印期间保留 1 个 WebView；连续打印
+ * 时旧实例会被新实例覆盖（不累积，但旧的渲染器要到 GC 才回收）| 升级触发:
+ * PrintManager 提供作业完成回调，或出现「打印相关 WebView 驻留」的内存报告。
+ */
+private var printWebView: WebView? = null
+
+/**
+ * [fix/render-ui F-274] Drop the reference and tear the renderer down. Called
+ * on a load failure, and at the start of the next print. `destroy()` on an
+ * already-destroyed WebView is a no-op, and the identity check makes a stale
+ * callback from a superseded view safe.
+ */
+private fun releasePrintWebView() {
+    val view = printWebView ?: return
+    printWebView = null
+    runCatching {
+        view.stopLoading()
+        view.destroy()
+    }
+}
+
+/**
+ * [fix/render-ui F-274] Release [view] only if it is still the current one, so
+ * a late `onReceivedError` from a superseded print cannot tear down the view a
+ * newer print is using.
+ */
+private fun releasePrintWebView(view: WebView) {
+    if (printWebView === view) releasePrintWebView()
 }
 
 /**
