@@ -2,6 +2,7 @@ package com.rikkaminis.app.ui.chat
 
 import android.util.Log
 import com.rikkaminis.app.conversation.ContextCompactor
+import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import com.rikkaminis.app.data.db.CompactMarkerEntity
 import com.rikkaminis.app.data.db.MessageEntity
 import com.rikkaminis.app.data.model.AgentContentPart
@@ -121,11 +122,19 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
         // growing. Fall back to a budget-based segment anchor instead of
         // giving up. Skipped when the caller pinned an explicit index (manual
         // `/compact <n>`, tests) — an override means "use exactly this".
+        // [compact-budget-anchor] Derive the kept-tail budget from the SAME
+        // user-tunable threshold the trigger gate uses, so the two can never
+        // cross (see [compactBudgetTailKeepTokens]). Hard-coding it re-opened
+        // the dead zone whenever the user raised the setting. Hoisted out of
+        // the branch below because the "engaged" log line reports it.
+        val keepTail = compactBudgetTailKeepTokens(
+            AgentRuntimeLimitsPrefs.autoCompactMinTailTokens().toLong(),
+        )
         val budgetAnchor = if (anchorIdxOverride == null) {
             resolveBudgetAnchorIdx(
                 history = history,
                 startIdx = effectiveStartIdx,
-                keepTailTokens = COMPACT_BUDGET_TAIL_KEEP_TOKENS,
+                keepTailTokens = keepTail,
                 estimate = { ContextCompactor.estimateMessageTokens(it) },
             )
         } else {
@@ -136,7 +145,7 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
                 ChatViewModel.TAG,
                 "[Compact] budget anchor engaged (no new user turn to fold): " +
                     "anchor=$anchorIdx → $budgetAnchor start=$effectiveStartIdx " +
-                    "historySize=${history.size} keepTail≈$COMPACT_BUDGET_TAIL_KEEP_TOKENS tokens",
+                    "historySize=${history.size} keepTail≈$keepTail tokens",
             )
             anchorIdx = budgetAnchor
         } else {

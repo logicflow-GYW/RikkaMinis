@@ -232,6 +232,72 @@ class ChatCompactionLogicTest {
         assertEquals(-1, resolveBudgetAnchorIdx(h, startIdx = 0, keepTailTokens = 1_000_000L, estimate = flatEstimate))
     }
 
+    // ── [compact-budget-anchor] keep/trigger threshold ordering ─────
+    //
+    // The budget anchor's "nothing to fold" test and ContextCompactor.decide's
+    // "the tail grew enough" test are two gates over the SAME region, so their
+    // thresholds must be ordered. When keepTail >= minTail a dead zone opens
+    // where the loop asks for a compact every turn and the anchor refuses every
+    // time (2026-09-20: 61 consecutive no-op compacts, tail in [10510, 17275]
+    // against a hard-coded 20_000 keep budget).
+
+    @Test
+    fun `kept tail budget stays strictly below the trigger threshold`() {
+        // The invariant that closes the dead zone, checked across the whole
+        // user-tunable range (AgentRuntimeLimitsPrefs.COMPACT_TAIL_TOKENS_*).
+        for (minTail in 1L..40_000L step 500L) {
+            val keep = compactBudgetTailKeepTokens(minTail)
+            assertTrue(
+                "keep=$keep must stay below minTail=$minTail (dead zone otherwise)",
+                keep < minTail,
+            )
+        }
+    }
+
+    @Test
+    fun `kept tail budget is monotonic and proportional`() {
+        // Monotonic: a larger trigger threshold must never shrink the budget.
+        assertTrue(compactBudgetTailKeepTokens(20_000L) > compactBudgetTailKeepTokens(8_000L))
+        // Proportional: 0.8 × the threshold, so the retained tail leaves ~20%
+        // of headroom before the next compact is admitted.
+        assertEquals(6_400L, compactBudgetTailKeepTokens(8_000L))
+        assertEquals(16_000L, compactBudgetTailKeepTokens(20_000L))
+        assertEquals(25_600L, compactBudgetTailKeepTokens(32_000L))
+    }
+
+    @Test
+    fun `kept tail budget degrades safely for degenerate thresholds`() {
+        // Non-positive threshold: no verbatim tail is reserved.
+        assertEquals(0L, compactBudgetTailKeepTokens(0L))
+        assertEquals(0L, compactBudgetTailKeepTokens(-5L))
+        // A threshold of 1 floors to 0 — still strictly below, so the
+        // invariant survives the degenerate end of the range.
+        assertEquals(0L, compactBudgetTailKeepTokens(1L))
+    }
+
+    @Test
+    fun `dead zone case folds again once the kept budget tracks the threshold`() {
+        // Reproduction of the production shape: one prompt, 9 tool rounds,
+        // 18k tokens of active tail. Under the old hard-coded 20_000 keep
+        // budget the anchor refused (-1) while the trigger gate admitted the
+        // compact -> the 2026-09-20 no-op compact loop.
+        val h = toolLoopSession(rounds = 9)
+        val start = resolveCompactStartIdx(h, marker(version = 2, lastCompacted = "u0"))
+        val tail = (start until h.size).sumOf { flatEstimate(h[it]) }
+        val minTail = 8_000L
+        val keep = compactBudgetTailKeepTokens(minTail)
+
+        assertEquals(18_000L, tail)
+        assertTrue("tail=$tail must be below the old hard-coded budget", tail < 20_000L)
+        assertTrue("tail=$tail must be above the trigger threshold", tail >= minTail)
+
+        val oldKeep = resolveBudgetAnchorIdx(h, startIdx = start, keepTailTokens = 20_000L, estimate = flatEstimate)
+        assertEquals("old hard-coded budget reproduces the dead zone", -1, oldKeep)
+
+        val newKeep = resolveBudgetAnchorIdx(h, startIdx = start, keepTailTokens = keep, estimate = flatEstimate)
+        assertTrue("derived budget folds the same history", newKeep >= start)
+    }
+
     // ── [compact-budget-anchor] read-side pre-anchor clamp ─────
 
     @Test
