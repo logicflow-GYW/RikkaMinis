@@ -122,14 +122,15 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
         // growing. Fall back to a budget-based segment anchor instead of
         // giving up. Skipped when the caller pinned an explicit index (manual
         // `/compact <n>`, tests) — an override means "use exactly this".
+        // [compact-budget-anchor] Derive the kept-tail budget from the SAME
+        // user-tunable threshold the trigger gate uses, so the two can never
+        // cross (see [compactBudgetTailKeepTokens]). Hard-coding it re-opened
+        // the dead zone whenever the user raised the setting. Hoisted out of
+        // the branch below because the "engaged" log line reports it.
+        val keepTail = compactBudgetTailKeepTokens(
+            AgentRuntimeLimitsPrefs.autoCompactMinTailTokens().toLong(),
+        )
         val budgetAnchor = if (anchorIdxOverride == null) {
-            // [compact-budget-anchor] Derive the kept-tail budget from the
-            // SAME user-tunable threshold the trigger gate uses, so the two
-            // can never cross (see [compactBudgetTailKeepTokens]). Hard-coding
-            // it re-opened the dead zone whenever the user raised the setting.
-            val keepTail = compactBudgetTailKeepTokens(
-                AgentRuntimeLimitsPrefs.autoCompactMinTailTokens().toLong(),
-            )
             resolveBudgetAnchorIdx(
                 history = history,
                 startIdx = effectiveStartIdx,
