@@ -38,6 +38,27 @@ package com.rikkaminis.app.provider.thinking
  */
 object ReasoningEchoDecider {
 
+    /** OpenAI-compatible default spelling of the echoed reasoning field. */
+    const val DEFAULT_FIELD_NAME: String = "reasoning_content"
+
+    /**
+     * [audit-0917 F-200] The wire SPELLING the echoed field must use.
+     *
+     * [ReasoningEchoPolicy.fieldName] was write-only: it was declared, persisted,
+     * encoded, decoded and resolved, but the request builder hardcoded
+     * `"reasoning_content"` in both `put` sites — so a rule asking for the
+     * `reasoning` spelling (the policy's own KDoc names
+     * `reasoning_content` / `reasoning` / `reasoning_text` as "the three spellings
+     * observed in the wild, sometimes three different ones on one gateway",
+     * GH OpenMinis#171) produced a request carrying the wrong key. The rule was
+     * reachable end-to-end through backup import/export.
+     *
+     * Kept here, next to the decision, so the "what to send" and "under which
+     * name" halves cannot drift apart again.
+     */
+    fun fieldNameFor(policy: ReasoningEchoPolicy?): String =
+        policy?.fieldName?.takeIf { it.isNotBlank() } ?: DEFAULT_FIELD_NAME
+
     /** What the caller should put on the wire for one assistant message. */
     enum class Action {
         /** Write the captured reasoning verbatim (including `""`). */

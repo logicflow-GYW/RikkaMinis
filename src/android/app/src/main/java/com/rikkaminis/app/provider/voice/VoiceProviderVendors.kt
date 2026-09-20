@@ -3,6 +3,7 @@ package com.rikkaminis.app.provider.voice
 import android.util.Base64
 import android.util.Log
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -249,6 +250,21 @@ class XunfeiVoiceProvider(
 
     companion object {
         private const val DEFAULT_TTS_VOICE = "xiaoyan"
+
+        /**
+         * [audit-0917 F-202] Absolute ceiling for one synthesize() call.
+         *
+         * The `pingInterval(20s)` added in [VoiceProvider] proves a DEAD tunnel
+         * eventually fails (verified against a silent server), but it does not
+         * bound a peer that keeps the socket healthy while never sending the
+         * in-band `data.status == 2` terminator — and the consumer
+         * (QuickTestSheet's test-clip step) has no `withTimeout` of its own, so
+         * the UI would sit on "testing…" indefinitely. 120s matches the HTTP
+         * read/write timeouts on the shared client (a full TTS round trip is
+         * bounded by the same expectation), and is deliberately generous:
+         * long texts at 16 kHz PCM are the slow case, not the failure case.
+         */
+        private const val TTS_TIMEOUT_MS = 120_000L
     }
 
     // Xunfei authenticates via a signed URL, not a header.
@@ -341,55 +357,98 @@ class XunfeiVoiceProvider(
             .put("data", JSONObject().put("status", 2).put("text", textB64))
             .toString()
 
-        return suspendCancellableCoroutine { cont ->
-            val pcm = ByteArrayOutputStream()
-            val wsRequest = Request.Builder().url(signedUrl).build()
-            val socket = httpClient.newWebSocket(
-                wsRequest,
-                object : WebSocketListener() {
-                    override fun onOpen(webSocket: WebSocket, response: Response) {
-                        webSocket.send(payload)
-                    }
+        // [audit-0917 F-202] Absolute ceiling (see TTS_TIMEOUT_MS). suspendCancellableCoroutine
+        // alone only ends on cancellation, an in-band terminator, a peer close
+        // (handled in onClosing) or a transport failure — a peer that holds the
+        // socket healthy while never terminating had no escape at all.
+        val result = withTimeoutOrNull(TTS_TIMEOUT_MS) {
+            suspendCancellableCoroutine { cont ->
+                val pcm = ByteArrayOutputStream()
+                val wsRequest = Request.Builder().url(signedUrl).build()
+                val socket = httpClient.newWebSocket(
+                    wsRequest,
+                    object : WebSocketListener() {
+                        override fun onOpen(webSocket: WebSocket, response: Response) {
+                            webSocket.send(payload)
+                        }
 
-                    override fun onMessage(webSocket: WebSocket, text: String) {
-                        val json = runCatching { JSONObject(text) }.getOrNull() ?: return
-                        val code = json.optInt("code", 0)
-                        if (code != 0) {
-                            webSocket.cancel()
-                            if (cont.isActive) {
-                                cont.resumeWithException(
-                                    VoiceProviderException.Parse(
-                                        "Xunfei TTS error code $code: ${json.optString("message")}",
-                                    ),
-                                )
+                        override fun onMessage(webSocket: WebSocket, text: String) {
+                            val json = runCatching { JSONObject(text) }.getOrNull() ?: return
+                            val code = json.optInt("code", 0)
+                            if (code != 0) {
+                                webSocket.cancel()
+                                if (cont.isActive) {
+                                    cont.resumeWithException(
+                                        VoiceProviderException.Parse(
+                                            "Xunfei TTS error code $code: ${json.optString("message")}",
+                                        ),
+                                    )
+                                }
+                                return
                             }
-                            return
+                            val dataObj = json.optJSONObject("data") ?: return
+                            dataObj.optString("audio").takeIf { it.isNotEmpty() }?.let { b64 ->
+                                runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
+                                    ?.let(pcm::write)
+                            }
+                            if (dataObj.optInt("status", 0) == 2) {   // last frame
+                                webSocket.close(1000, null)
+                                if (cont.isActive) {
+                                    val bytes = pcm.toByteArray()
+                                    if (bytes.isEmpty()) {
+                                        cont.resumeWithException(VoiceProviderException.Parse("Xunfei TTS empty audio"))
+                                    } else {
+                                        cont.resume(wrapPcm16InWav(bytes, sampleRate = 16000))
+                                    }
+                                }
+                            }
                         }
-                        val dataObj = json.optJSONObject("data") ?: return
-                        dataObj.optString("audio").takeIf { it.isNotEmpty() }?.let { b64 ->
-                            runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
-                                ?.let(pcm::write)
-                        }
-                        if (dataObj.optInt("status", 0) == 2) {   // last frame
-                            webSocket.close(1000, null)
+
+                        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                            // [audit-0917 F-202] A PEER-initiated graceful close arrives
+                            // here, not on `onClosed`: OkHttp only calls `onClosed` when
+                            // the app already enqueued its own close
+                            // (RealWebSocket.onReadClose requires
+                            // `enqueuedClose && messageAndCloseQueue.isEmpty()`).
+                            //
+                            // Before this override the listener had only onOpen /
+                            // onMessage / onFailure, so a compliant server that closed
+                            // the socket after its last frame — or any proxy /
+                            // keepalive that closed it — left `cont` suspended
+                            // forever: synthesize() never returned and QuickTestSheet
+                            // (which has no withTimeout on this step) sat on
+                            // "testing…" permanently. Measured with real OkHttp 4.12.0
+                            // in wave2-a3/exp_a3/ws: prod-shape TIMEOUT vs this shape
+                            // RESUMED. Note the naive fix — calling ws.close() here and
+                            // waiting for onClosed — was ALSO measured TIMEOUT; only
+                            // resuming here works, so do not "improve" it into an echo.
+                            //
+                            // Frames received before the close are kept: a server may
+                            // legitimately send the audio and then close without ever
+                            // sending the in-band `data.status == 2` terminator.
                             if (cont.isActive) {
                                 val bytes = pcm.toByteArray()
                                 if (bytes.isEmpty()) {
-                                    cont.resumeWithException(VoiceProviderException.Parse("Xunfei TTS empty audio"))
+                                    cont.resumeWithException(
+                                        VoiceProviderException.Parse(
+                                            "Xunfei TTS closed before returning audio (code=$code)",
+                                        ),
+                                    )
                                 } else {
                                     cont.resume(wrapPcm16InWav(bytes, sampleRate = 16000))
                                 }
                             }
                         }
-                    }
 
-                    override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                        if (cont.isActive) cont.resumeWithException(t)
-                    }
-                },
-            )
-            cont.invokeOnCancellation { socket.cancel() }
+                        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                            if (cont.isActive) cont.resumeWithException(t)
+                        }
+                    },
+                )
+                cont.invokeOnCancellation { socket.cancel() }
+            }
         }
+        return result ?: throw VoiceProviderException.Parse("Xunfei TTS timed out after ${TTS_TIMEOUT_MS}ms")
     }
 
     // HMAC-SHA256 URL signature -----------------------------------------------
@@ -674,10 +733,15 @@ class MimoVoiceProvider(providerId: String, baseURL: String, apiKey: String?) :
 
         val data = executeRequest(builder.build())
         val json = runCatching { JSONObject(String(data, Charsets.UTF_8)) }.getOrNull()
+        // [audit-0917 F-203] Same guard as the three vendor parsers fixed in
+        // 442e6d0: `optString` returns "" for a missing/empty key, so the bare
+        // `?: throw` was dead and a malformed envelope came back as a
+        // SUCCESSFUL empty transcription (consumer maps "" to NO_MATCH).
         val text = json?.optJSONArray("choices")
             ?.optJSONObject(0)
             ?.optJSONObject("message")
             ?.optString("content")
+            ?.takeIf { it.isNotEmpty() }
             ?: throw VoiceProviderException.Parse("Unexpected MiMo ASR response format")
         val seconds = json.optJSONObject("usage")?.optDouble("seconds")?.takeIf { !it.isNaN() }
         return VoiceInputResponse(text = text, durationSeconds = seconds)

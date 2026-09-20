@@ -1751,10 +1751,18 @@ class OpenAIProvider constructor(
             )
 
         fun putEcho(obj: JSONObject, action: ReasoningEchoDecider.Action, captured: String?) {
+            // [audit-0917 F-200] The echoed field's SPELLING comes from the matched
+            // rule, not from this literal. `ReasoningEchoPolicy.fieldName` was
+            // declared/persisted/encoded/decoded/resolved end-to-end but never
+            // read, so a rule that asked for the `reasoning` spelling (GH
+            // OpenMinis#171: the same gateway has served three spellings) still
+            // got `reasoning_content` on the wire. Default is unchanged, so
+            // every existing rule behaves exactly as before.
+            val key = ReasoningEchoDecider.fieldNameFor(echoPolicy)
             when (action) {
                 ReasoningEchoDecider.Action.OMIT -> {}
-                ReasoningEchoDecider.Action.CAPTURED -> obj.put("reasoning_content", captured ?: "")
-                ReasoningEchoDecider.Action.PLACEHOLDER -> obj.put("reasoning_content", "")
+                ReasoningEchoDecider.Action.CAPTURED -> obj.put(key, captured ?: "")
+                ReasoningEchoDecider.Action.PLACEHOLDER -> obj.put(key, "")
             }
         }
 
