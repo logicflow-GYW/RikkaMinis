@@ -61,7 +61,7 @@ import kotlinx.coroutines.launch
  * this copy is the UI-side guard so a future listing change can't silently
  * re-arm the delete button on the user's persona file.
  */
-private const val SOUL_FILE_NAME = "SOUL.md"
+private const val SOUL_FILE_NAME = com.rikkaminis.app.agent.SoulStore.FILE_NAME
 
 /**
  * Settings-level memory file management.

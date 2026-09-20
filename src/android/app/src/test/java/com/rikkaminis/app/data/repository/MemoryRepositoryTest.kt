@@ -1,5 +1,6 @@
 package com.rikkaminis.app.data.repository
 
+import com.rikkaminis.app.agent.SoulStore
 import com.rikkaminis.app.workspace.MemoryRollupEngine
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -147,5 +148,91 @@ class MemoryRepositoryTest {
         val capped = repo.loadRollupFragment()
         assertNotNull(capped)
         assertFalse("UTF-8 boundary must not produce U+FFFD", capped!!.contains('\uFFFD'))
+    }
+
+    // -- [FIX-6 / F-224] persona-file (SOUL.md) guards -------------------
+    //
+    // SOUL.md lives in this same directory (SoulStore.fileLocation →
+    // <filesDir>/minis-global/memory/SOUL.md) and holds the user's persona.
+    // Before the fix it was listed as a daily log, so the settings screen
+    // offered a working Delete button next to it; deleting it made
+    // SoulStore.ensureExists re-seed DEFAULT_CONTENT on the next launch — a
+    // silent persona reset with no prompt, no backup and no undo.
+    //
+    // These tests reference the real SoulStore.FILE_NAME (the single source of
+    // truth), so they stay honest if the filename ever changes.
+
+    @Test
+    fun listAllFiles_excludesSoulFile() {
+        memoryDir.mkdirs()
+        File(memoryDir, "GLOBAL.md").writeText("## global\npersistent prefs\n")
+        File(memoryDir, "2026-08-25.md").writeText("<!-- 2026-08-25 10:00:00 -->\n## entry\ncontent\n")
+        File(memoryDir, SoulStore.FILE_NAME).writeText("---\nname: RikkaMinis\n---\npersona body\n")
+
+        val repo = MemoryRepository(memoryDir)
+        val names = repo.listAllFiles().map { it.name }
+
+        assertFalse(
+            "SOUL.md must not appear in the daily-log list (it would offer a Delete button)",
+            names.contains(SoulStore.FILE_NAME),
+        )
+        // Control arm: the fix must not over-filter — real logs still show up.
+        assertTrue("daily log must still be listed", names.contains("2026-08-25.md"))
+        assertTrue("GLOBAL.md must still be listed", names.contains("GLOBAL.md"))
+    }
+
+    @Test
+    fun getMemory_excludesSoulFile_fromSearch() {
+        memoryDir.mkdirs()
+        File(memoryDir, "2026-08-25.md").writeText("<!-- 2026-08-25 10:00:00 -->\n## entry\nunique-log-marker\n")
+        File(memoryDir, SoulStore.FILE_NAME).writeText("## persona\nunique-soul-marker\n")
+
+        val repo = MemoryRepository(memoryDir)
+        val result = repo.getMemory()
+
+        assertFalse(
+            "SOUL.md must not be searched as a daily log",
+            result.contains("unique-soul-marker"),
+        )
+        assertTrue("real daily logs must still be searched", result.contains("unique-log-marker"))
+    }
+
+    @Test
+    fun getMemory_fullDump_excludesSoulFile() {
+        memoryDir.mkdirs()
+        File(memoryDir, SoulStore.FILE_NAME).writeText("## persona\nunique-soul-marker\n")
+
+        val repo = MemoryRepository(memoryDir)
+        val result = repo.getMemory()
+
+        assertFalse(result.contains("unique-soul-marker"))
+    }
+
+    @Test
+    fun deleteFile_refusesSoulFile() {
+        memoryDir.mkdirs()
+        val soul = File(memoryDir, SoulStore.FILE_NAME)
+        soul.writeText("---\nname: RikkaMinis\n---\npersona body\n")
+
+        val repo = MemoryRepository(memoryDir)
+        val deleted = repo.deleteFile(SoulStore.FILE_NAME)
+
+        assertFalse("deleteFile must refuse the persona file", deleted)
+        assertTrue("SOUL.md must survive the delete attempt", soul.exists())
+    }
+
+    @Test
+    fun deleteFile_stillDeletesDailyLog() {
+        // Control arm for the guard above: it must refuse SOUL.md specifically,
+        // not silently break deletion of ordinary logs.
+        memoryDir.mkdirs()
+        val log = File(memoryDir, "2026-08-25.md")
+        log.writeText("<!-- 2026-08-25 10:00:00 -->\n## entry\ncontent\n")
+
+        val repo = MemoryRepository(memoryDir)
+        val deleted = repo.deleteFile("2026-08-25.md")
+
+        assertTrue("ordinary daily logs must still be deletable", deleted)
+        assertFalse("the daily log file must be gone", log.exists())
     }
 }

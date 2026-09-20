@@ -26,6 +26,13 @@ class MemoryRepository(private val memoryDir: File) {
         // memory_rollup tool (see MemoryRollupEngine.ROLLUP_FILE).
         private const val ROLLUP_FILE =
             com.rikkaminis.app.workspace.MemoryRollupEngine.ROLLUP_FILE
+        // [FIX-6 / F-224] Persona file, also living in this directory
+        // (SoulStore.fileLocation → <filesDir>/minis-global/memory/SOUL.md).
+        // Like ROLLUP_FILE it is NOT a user-editable daily log: it must stay
+        // out of the settings list and out of memory_get, and deleteFile must
+        // refuse it. Single-sourced from SoulStore rather than re-spelled, for
+        // the same reason ROLLUP_FILE above references MemoryRollupEngine.
+        private const val SOUL_FILE = com.rikkaminis.app.agent.SoulStore.FILE_NAME
         // [feat/chat-tuning-panel-b] MAX_INJECT_LINES → user-tunable
         // (AgentRuntimeLimitsPrefs.memoryInjectLines(), default 200).
         // [fix/send-prompt-bloat] Byte ceiling on the MEMORY-ROLLUP.md system-
@@ -162,8 +169,15 @@ class MemoryRepository(private val memoryDir: File) {
         // Daily logs sorted descending. Exclude the rollup product file — its
         // content is a distillation of the daily logs, so searching it would
         // duplicate every entry and waste the search line/byte budget.
+        // [FIX-6 / F-224] SOUL.md is excluded for the same reason (and to keep
+        // the persona file out of memory_get's surface entirely).
         val dailyFiles = memoryDir.listFiles()
-            ?.filter { it.extension == "md" && it.name != GLOBAL_FILE && it.name != ROLLUP_FILE }
+            ?.filter {
+                it.extension == "md" &&
+                    it.name != GLOBAL_FILE &&
+                    it.name != ROLLUP_FILE &&
+                    it.name != SOUL_FILE
+            }
             ?.sortedByDescending { it.name }
             ?: emptyList()
 
@@ -454,8 +468,22 @@ class MemoryRepository(private val memoryDir: File) {
         // it's an auto-generated distilled index owned by memory_rollup, not a
         // user-editable log; listing it here would let the user delete/edit it
         // and break the rollup idempotency anchor.
+        //
+        // [FIX-6 / F-224] SOUL.md is excluded for the same reason, one step
+        // further: it lives in this directory (SoulStore.fileLocation =
+        // <filesDir>/minis-global/memory/SOUL.md) and holds the user's
+        // persona. Listing it as a daily log put a working Delete button next
+        // to it, and deleting it made SoulStore.ensureExists re-seed
+        // DEFAULT_CONTENT on the next launch — a silent persona reset with no
+        // prompt, no backup and no undo. GLOBAL.md is already special-cased
+        // above (isGlobal=true, no delete); SOUL.md is simply not a log.
         val dailyFiles = memoryDir.listFiles()
-            ?.filter { it.extension == "md" && it.name != GLOBAL_FILE && it.name != ROLLUP_FILE }
+            ?.filter {
+                it.extension == "md" &&
+                    it.name != GLOBAL_FILE &&
+                    it.name != ROLLUP_FILE &&
+                    it.name != SOUL_FILE
+            }
             ?.sortedByDescending { it.name }
             ?: emptyList()
 
@@ -494,6 +522,9 @@ class MemoryRepository(private val memoryDir: File) {
 
     fun deleteFile(name: String): Boolean {
         if (name == GLOBAL_FILE) return false // Cannot delete GLOBAL.md
+        // [FIX-6 / F-224] Same guard for the persona file: it is not a daily
+        // log, and deleting it re-seeds the default content on next launch.
+        if (name == SOUL_FILE) return false
         return File(memoryDir, name).delete()
     }
 

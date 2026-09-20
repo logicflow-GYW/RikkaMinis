@@ -215,7 +215,14 @@ data class SoulBodyCount(
 object SoulStore {
 
     private const val TAG = "SoulStore"
-    private const val FILE_NAME = "SOUL.md"
+    // [FIX-6 / F-224] Public so the two other components that must recognise
+    // the persona file can reference this single declaration instead of
+    // re-spelling "SOUL.md": MemoryRepository (keeps it out of the daily-log
+    // list, out of memory_get, and refuses to delete it) and
+    // MemoryManagementScreen (hides the Delete button). Mirrors the existing
+    // `MemoryRollupEngine.ROLLUP_FILE` precedent — two copies of a path
+    // literal is exactly how the sibling key-name drift bug (F-239) started.
+    const val FILE_NAME = "SOUL.md"
     private const val MEMORY_SUBDIR = "minis-global/memory"
 
     fun fileLocation(context: Context): File =
