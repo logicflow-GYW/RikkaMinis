@@ -28,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -410,7 +411,14 @@ class AnthropicProvider(
         }
         channel.close()
         awaitClose()
-    }
+        // [fix/provider-stream-flowon] Same starvation as OpenAIProvider: the
+        // body blocks in call.execute() + reader.readLine(), and the only
+        // collector (ModelExecutionService, :modelservice) runs it under
+        // `runBlocking` — so the producer owned the worker thread and both
+        // in-flow watchdogs (TTFB 30s / first-data) could never fire. flowOn
+        // relocates only the producer + awaitClose to the IO pool; awaitClose
+        // here is empty, so nothing thread-sensitive moves.
+    }.flowOn(Dispatchers.IO)
 
     /**
      * Build the `system` field as a JSON array of content blocks.
