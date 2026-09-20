@@ -116,6 +116,63 @@ internal class AgentLoopEngine(
         return e
     }
 
+    /**
+     * [T-android-thinking-delta-main-thread-throttle] Flush a throttled thinking
+     * tail so the reasoning block is never left frozen mid-sentence.
+     *
+     * WHY: the ThinkingDelta branch now skips its UI push while inside the
+     * `textDeltaThrottleMs` window. The next flush would normally come from a
+     * later thinking delta, but the stream can transition away from thinking at
+     * any moment (text starts, a tool call starts, or the stream just ends). In
+     * those cases no further thinking delta arrives, so without this the block
+     * would keep the content it had at the last tick and the user would watch a
+     * truncated reasoning panel for the rest of the turn.
+     *
+     * This mirrors the existing T154 pre-tool-use flush for text ("first push the
+     * latest accumulated text *unthrottled* so the text block freezes at its
+     * complete value").
+     *
+     * Cheap: `block.content` is compared by reference first, so a turn whose
+     * thinking block was already up to date costs one field read.
+     */
+    private suspend fun flushThinkingTailIfPending(
+        loopState: AgentLoopState,
+        turn: Int,
+        turnThinking: StringBuilder,
+        turnTextSb: StringBuilder,
+    ) {
+        if (turnThinking.isEmpty()) return
+        val latest = turnThinking.toString()
+        val thinkIdx = loopState.allToolBlocks.indexOfFirst { it.kind == "thinking" && it.id == "thinking_$turn" }
+        if (thinkIdx >= 0 && loopState.allToolBlocks[thinkIdx].content == latest) return
+        if (thinkIdx < 0) {
+            // No block yet: the whole thinking phase fit inside one throttle
+            // window, so no delta ever published. Create it here rather than
+            // bailing out — otherwise a short reasoning phase would render no
+            // panel at all (a regression vs the pre-throttle behaviour, where
+            // the first delta always published because lastThinkingUiUpdateMs
+            // is reset to 0 and System.currentTimeMillis() is far larger than
+            // any throttle tier).
+            loopState.allToolBlocks.add(AssistantBlock(
+                id = "thinking_$turn",
+                kind = "thinking",
+                content = latest,
+                toolTitle = "Thinking",
+            ))
+        } else {
+            loopState.allToolBlocks[thinkIdx] = loopState.allToolBlocks[thinkIdx].copy(content = latest)
+        }
+        loopState.lastThinkingUiUpdateMs = System.currentTimeMillis()
+        withContext(Dispatchers.Main) {
+            host.updateAssistantMessage(
+                loopState.assistantId,
+                loopState.accumulatedText + turnTextSb.toString(),
+                true,
+                loopState.allToolBlocks,
+            )
+        }
+    }
+
     /** Verbatim lift of ChatViewModel.runAgentLoop entry (FE-5 route C step 3). */
     internal suspend fun runAgentLoop(
         provider: LLMProvider,
@@ -506,6 +563,28 @@ internal class AgentLoopEngine(
                 when (chunk) {
                     is LLMStreamChunk.ThinkingDelta -> {
                         turnThinking.append(chunk.text)
+                        // [T-android-thinking-delta-main-thread-throttle] Gate the
+                        // UI push here, on the engine side, BEFORE any O(n) work —
+                        // exactly like the sibling Text branch below does with
+                        // textDeltaThrottleMs.
+                        //
+                        // Previously this branch had no gate at all, so every
+                        // thinking delta (91.8% of all deltas; up to 1,052/s and
+                        // 14,258 per turn on device) posted to the main Looper and
+                        // ran an O(accumulated-text) Utf16Sanitizer.sanitize()
+                        // inside updateAssistantMessage — before that function's
+                        // own throttle gate could reject it. Main thread measured
+                        // at 59.8% of one core => input-box lag.
+                        val thinkNowMs = System.currentTimeMillis()
+                        if (thinkNowMs - loopState.lastThinkingUiUpdateMs <
+                            textDeltaThrottleMs(turnThinking.length)
+                        ) {
+                            // Skipped: the block content stays in `turnThinking`
+                            // (append-only), and the throttle tail is flushed by
+                            // the Text / ToolUseStart / stream-end paths below.
+                            return@collect
+                        }
+                        loopState.lastThinkingUiUpdateMs = thinkNowMs
                         // Update thinking block in UI
                         val thinkIdx = loopState.allToolBlocks.indexOfFirst { it.kind == "thinking" && it.id == "thinking_$turn" }
                         if (thinkIdx < 0) {
@@ -528,6 +607,10 @@ internal class AgentLoopEngine(
                         if (thinkIdx >= 0 && loopState.allToolBlocks[thinkIdx].toolStatus != ToolBlockStatus.SUCCESS) {
                             loopState.allToolBlocks[thinkIdx] = loopState.allToolBlocks[thinkIdx].copy(toolStatus = ToolBlockStatus.SUCCESS)
                         }
+                        // [T-android-thinking-delta-main-thread-throttle] The
+                        // thinking phase is over — drain any tail the throttle
+                        // skipped so the reasoning panel shows the full text.
+                        flushThinkingTailIfPending(loopState, turn, turnThinking, turnTextSb)
                         // T307: append-only on the StringBuilder; .toString()
                         // is taken once below at flush time, not per delta.
                         turnTextSb.append(chunk.text)
@@ -654,6 +737,10 @@ internal class AgentLoopEngine(
                         if (thinkIdx >= 0 && loopState.allToolBlocks[thinkIdx].toolStatus != ToolBlockStatus.SUCCESS) {
                             loopState.allToolBlocks[thinkIdx] = loopState.allToolBlocks[thinkIdx].copy(toolStatus = ToolBlockStatus.SUCCESS)
                         }
+                        // [T-android-thinking-delta-main-thread-throttle] Same as
+                        // the Text branch: the thinking phase ends here, so drain
+                        // the throttled tail before the tool block is appended.
+                        flushThinkingTailIfPending(loopState, turn, turnThinking, turnTextSb)
                         // T154: when the last few text deltas landed inside the 50ms throttle
                         // window, the UI hadn't yet been pushed with the trailing text — and
                         // adding the tool_use block before that push freezes the preceding
@@ -891,11 +978,20 @@ internal class AgentLoopEngine(
                             host.updateAssistantMessage(loopState.assistantId, loopState.accumulatedText + turnSnap, true, loopState.allToolBlocks)
                         }
                     }
+                    // [T-android-thinking-delta-main-thread-throttle] A stream can
+                    // end while still in the thinking phase (reasoning-only turn,
+                    // or the user stopped it mid-thought). Drain the throttled
+                    // thinking tail so the persisted reasoning matches what the
+                    // model actually produced. Unconditional: the pending-text
+                    // flush above is keyed on pendingChunkSb, which is empty on a
+                    // pure-thinking turn.
+                    flushThinkingTailIfPending(loopState, turn, turnThinking, turnTextSb)
                     // T256: reset throttle bookkeeping for the next turn so the
                     // first delta of the next assistant message fires immediately
                     // rather than coalescing against this turn's stale baseline.
                     loopState.lastFlushedLen = 0
                     loopState.lastUiUpdateMs = 0L
+                    loopState.lastThinkingUiUpdateMs = 0L
                     loopState.lastFileToolInputMs = 0L
                     loopState.lastOtherToolInputMs = 0L
                     collectDone = true
@@ -1067,6 +1163,7 @@ internal class AgentLoopEngine(
                         loopState.pendingChunkSb.setLength(0)
                         loopState.lastUiUpdateMs = 0L
                         loopState.lastFlushedLen = 0
+                        loopState.lastThinkingUiUpdateMs = 0L
                         loopState.lastFileToolInputMs = 0L
                         loopState.lastOtherToolInputMs = 0L
                         // T7-A: 观察 —— 决定重试（T5 RetryRequested：RETRYING → CALLING_MODEL）
