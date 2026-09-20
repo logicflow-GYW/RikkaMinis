@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-18）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-20）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-09-18，共 47 天
-- 条目总数：1069（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
-- 总字符数：1274730 / 总行数：19602
+- 合并范围：2026-08-03 ～ 2026-09-20，共 49 天
+- 条目总数：1137（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
+- 总字符数：1444721 / 总行数：21067
 
 ---
 
@@ -19595,6 +19595,1471 @@ commit `2dc6e0d4`（6 文件 +392/−18，分支 diag/liveness-batch）打包三
 1. ack 翻转：跑几轮 agent 会话后 `client ack seen` 应从 1/43 变成接近每 run 1 条；`client ack timeout` / `protocol_violation=run_dir_missing` / 心跳 ENOENT 应归零。
 2. 日志分流：`/var/minis/logs/` 应出现 `minis-<date>.modelservice.log`；主文件不再有 OpenAIProvider 行（全在 -modelservice 文件）；乱序/混血行消失（可用 awk 时间倒序检测验证=0）。
 3. worker 日志仍在设置页可见（`minis-` 前缀过滤匹配变体）。
+
+<!-- 2026-09-18 16:23:48 -->
+## 09-18 晚：dev-history 档案更新到 09-18（挂载版 + 仓库 docs 双份同源）
+
+- 挂载版：1069 条 / 62 天 / 1,274,940 字符 / 19,601 行；fences 32 even、anchors=header=1069、outOrder=0；脱敏 main + INDEX + SAGAS 三份独立探针全部 NONE；SAGAS 23 sagas / orphans 71 / multi4 60。
+<!-- 2026-09-18 22:30 -->
+- main = c6d8d63（docs/dev-history-0918 直达 main，docs 变更不触发 build CI），克隆已清理，本地/远端均无残留分支。
+
+<!-- 2026-09-18 18:13:39 -->
+## 09-18：Termux×RikkaMinis「连接收益」分析（实测 5 轮探针，未铺任何线）
+
+
+**结论**：候选收益里只有两条过一阶门——①长驻进程（沙箱结构性做不到：shell_execute 隔离、nohup 后台 ~12 分钟被清、无调度器能唤醒 agent）②重活移出 app 进程组（§18 cgroup 证据 + 09-13 RSS 1GB 内存门）。其余（包管理/硬件 API/互调命令）均与现状重叠。本质是「承载分离」不是「能力扩充」。**gate 实验 = 90 分钟 Termux 保活**，未做。
+
+**桥实测（关键）**：
+- agent→Termux ①SSH：路通未铺（8022 未监听、沙箱无 ssh 客户端可 apk add）②RUN_COMMAND intent：**死** —— framework 层 `Permission Denial ... uid=2000 requires com.termux.permission.RUN_COMMAND`（服务声明 permission=，normal 权限无法事后授予）→ 需改 app manifest，且 fire-and-forget 拿不到 stdout，不值 ③共享目录信箱：可行（Termux LEGACY_STORAGE allow + WRITE 已授；沙箱需新挂载目录，现只有"笔记"）。
+- Termux→agent：**全堵**。ShareReceiverActivity（SEND text/*）= 存 PendingShare → MainActivity → 输入框草稿，需用户点发送；deeplink 只开 UI。→ Termux 不能自主唤醒 agent，长驻产物消费者只能「下次说话的我/用户/外部」。
+- 设备现状：Termux 0.118.3（2025-10-06 装）、boot+widget 插件、电池白名单三项全齐、~5 天前活跃、现在没跑；Termux:API/Tasker 未装。
+- app=com.rikkaminis.app uid 11618（=沙箱 cgroup 的 uid_11618）；MANAGE_EXTERNAL allow；"笔记"挂载属主 uid 10222=MediaProvider（FUSE）。
+
+**若铺线**：首选 SSH + 委派判据（">15 分钟/跨 turn 存活/纯 CPU 重"才送），不碰 app 本体。优先实验：①保活 90min ②kotlinc 沙箱 vs Termux 计时 + 观察 app 是否被杀。
+
+<!-- 2026-09-18 18:31:30 -->
+## 09-18 深夜：Termux↔RikkaMinis 打通（termux-dock MCP 桥）+ 三组实测数字
+
+
+**怎么发现的**：探测本机监听端口时发现 `127.0.0.1:8000` 回 `termux-dock MCP is running` —— 用户 Termux 里**早就跑着一个 MCP 服务**（pm2 + watchdog 托管：`termux-mcp` / `termux-mcp-watchdog`，源码疑为 `$HOME/server.py`）。
+
+**卡点（重要）**：termux-dock 只说**老式 SSE 传输**（GET /sse 拿 endpoint → POST /messages?session_id=…）；而应用的 MCP 客户端（`/usr/local/lib/minis-mcp-cli/`）只实现 **stdio 与 streamable-HTTP**（单次 POST 拿回复）。用 `--url http://127.0.0.1:8000/sse` 注册会**挂死**（POST 到 SSE 事件通道，永远等不到响应体）→ **禁止用 url 形式注册它**。
+
+**解法**：`/var/minis/shared/termux-bridge/mcp_stdio_sse_bridge.py`（stdio↔SSE 桥，~120 行，纯 stdlib，按需被 daemon 拉起、无常驻依赖）。注册：
+`minis-mcp-cli add --name termux-dock --command python3 --args /var/minis/shared/termux-bridge/mcp_stdio_sse_bridge.py`
+验证：`ping → ok 17ms`；8 个工具：**run_command / read_file / write_file / run_python_code / termux_notify / github_sync / cf_api_deploy / hf_hub_upload**。
+
+**实测数字（沙箱 PRoot vs Termux 原生，同机同负载）**：CPU 哈希 245MB ≈ **1.0x**；创建 1500 小文件 **7.8x**；删除 1500 文件 **10x** → **PRoot 税只在 syscall/文件系统**，CPU 无差。
+**后台运行姿势**：裸 `nohup … &` 会被 termux-dock 连坐杀掉（日志都不生成）；`setsid bash -c '…' &` 或 `pm2 start … --interpreter bash` 可活满（8/8 行验证）。`run_command` 单次调用受**客户端 300s 上限**，更长活必须 setsid/pm2 + 事后 `read_file`。
+**§18 验证**：Termux 里造 1.2GB 内存分配 + 4 核 burn 共 60s → app `com.rikkaminis.app` PSS 181→129MB、**pid 全程未变**（对比沙箱重活历史：RSS 顶到 1GB、窗口内被杀 23 次）→「重活移出 app 进程组」成立。
+
+**其它**：SSH 路线（`/var/minis/shared/termux-bridge/tm.sh` + 用户侧 sshd 启动块）已备但**未用**——用户贴了块但 8022 未监听（原因未查，MCP 路线已取代它）。设备内存 11.4GB，Termux nproc=6。实验残留已清理（pm2 minis-bench / ~/bench.py / tmjobs 等）。
+
+<!-- 2026-09-18 18:37:43 -->
+## 09-18 深夜：PRoot 慢 8-10x 的机制与实测（syscall 税）
+
+
+**机制**：沙箱被 app 自带的 `libproot.so` 用 ptrace 跟踪（沙箱内 `/proc/self/status` 实测 `TracerPid=13403`、`Seccomp=2`）。**seccomp 过滤=2** 意味着只有"关心"的 syscall 才被拦（路径类），所以纯 CPU 活零成本。凡碰路径的 syscall 都要：内核停住 → 追踪进程读寄存器 → 把路径字节 POKEDATA 改写成宿主真实路径 → 放行 → 再停一次处理返回值（stat/readlink/getdents 要重写）。目录遍历是逐项重写。
+
+**实测（同机同负载）**：空闲 4s 追踪器 CPU **+0.00s**；沙箱 4000 文件（open/close+unlink）追踪器税 **2.15s**（进程自身 CPU 远小于墙钟）→ **≈215µs/次被拦 syscall**（原生 0.5-1µs，差 2-3 个数量级）；纯 CPU 哈希 245MB 税 0、两边 1.0x；**并行度**：4 进程×750 文件，沙箱只快 **1.49x**（理想 4x），Termux **3.3x** → 追踪器是并行瓶颈。**固定启动税**：一次 `minis-mcp-cli` 调用 = 追踪器 +1.07s（它 import 上千文件），而 `python3 -c pass` 只 +0.02s → **税 ∝ 触碰的文件数**。
+
+**结论（可复用）**：倍数由负载的 **syscall 密度** 决定——纯 CPU 1.0x / 文件密集 8-18x / 中间按比例。谁付钱：追踪器是 app 的子进程（app 的 native lib），**这笔 CPU 记在 app 账上** → §18 的机制解释（沙箱重活拖垮 app，不是 app 在干活，是它的 proot 替沙箱交税）。app 侧已有 `native_offload`（日志可见 android-shizuku-cli 被甩出 PRoot 原生跑）= 第三条路候选。
+**测量坑（两处，都是我自己造成的）**：①我在 Termux 起的 4 个 `yes` 负载没杀，烧着 4/6 核 → 后续 Termux 墙钟从干净的 **0.135s 涨到 0.67s**，**不是设备噪声，是我污染了测量环境**（已 pkill，教训：跑基准前后都要清负载源，先查 loadavg/进程再归因）；②别用 `android-shizuku-cli exec "grep TracerPid /proc/self/status"` 量沙箱——那量的是设备 shell，必须直接在沙箱里跑。报告时优先用**追踪器 CPU + 并行加速比**这类稳定量。
+
+<!-- 2026-09-18 18:43:46 -->
+## 09-18 深夜：查清 native_offload 的判定条件（结论：不适合当重活加速器）
+
+
+**判定链**：`execve` 的 **basename ∈ 编译期常量名单**（`sandbox/OffloadHandlerCatalog.kt`，19 项）→ libproot 的 C 扩展截获 → abstract unix socket（名字带 applicationId 防双开）→ app `:toolservice` 进程执行同名 handler → 输出写 /tmp 的 `.native-offload-<pid>-<seq>`（RAM-backed，LRU 清理）→ guest `cat` 回读。guest 侧"命令"是 **17 字节 `#!/bin/sh\nexit 0` 占位符**（本体为空，纯标记物）。
+
+**名单（19）**：android-alarm/calendar/clipboard/contacts/device/location/notification/open/photos/player/speak/speech/weather/a11y-cli + minis-model-use/minis-config/minis-browser-use/minis-sessions-cli/android-shizuku-cli（+DEBUG-only `minis-debug`）。
+
+**匹配规则实测**（沙箱里三组对照）：① `/tmp/android-shizuku-cli`（同名异目录）**照样被截获** → 按 basename 匹配；② `/usr/local/bin/zz-not-a-tool`（同目录异名）**不被截获**（静默退出 0）。上游 fork `OpenMinis/proot` 的 C 源不可达（API 元数据 404，非公开），规则由实测 + Kotlin 侧推断。
+
+**为什么不能当通用重活出口**：① 设计动机是**能力**（19 个都必须跑 Android 宿主侧才成立），绕开 PRoot 税只是副作用；② handler 跑在 app 自己的 `:toolservice` → **账仍记 app 头上的同一 cgroup**，§18 不改善；`MAX_CONCURRENT_WORKERS = 2` + RSS 探针 + RAM-backed tmpfile = 按"工具调用"体量设计；③ **路径空间不同**（宿主身份、非 chroot），通用 exec 要双向路径翻译；④ 名单编译期常量，agent 无法运行时扩展。
+
+**四个执行面的身份对照（重要心智模型）**：沙箱=app uid 11618（rootfs，交 syscall 税，账记 app）；native_offload handler=app uid（:toolservice，设备路径，无 PRoot 税，账仍记 app）；`android-shizuku-cli exec`=**shell uid 2000**（设备路径 + /data/local/tmp，账在 Shizuku 侧）；**Termux=u0_a916（自己的完整 Linux，账完全隔离）** → 只有 Termux 同时满足"完整工具链 + 离开 app 账本"。
+
+**副产品**：调查用的 Termux 浅克隆 `~/rk-probe`（48MB）已按用户要求删除（测试脚本 `~/.minis-bench` 一并清）；但方法有效——**git clone 在原生侧秒级完成**，以后找代码走「克隆 + 原生 grep」。GitHub 代码搜索 API 对本仓**完全失效**（连 `proot` 都 0 命中）→ 别信 code search。
+
+## 2026-09-19
+
+<!-- 2026-09-19 00:25:51 -->
+## 09-19：小号 fork 同步断线 4 天修复（***ALT_USER***，非代码仓改动，直接 API 操作）
+
+<!-- 2026-09-19 -->
+
+- **情况**：***ALT_USER***/RikkaMinis 的每晚同步 workflow（sync-fork-main.yml）09-15 起连续 4 天 failure，fork main 停在 09-14，lab 救援线过期。
+- **根因**：push 用默认 GITHUB_TOKEN，**永远没有 workflows 权限**（GitHub 拒收改 `.github/workflows/*` 的提交）；上游 09-15/16/18 各改了 build-apk.yml → 每次 merge 提交都含 workflow 文件 → 每次被拒。09-14 前能过纯属上游恰好没动该文件。
+- **★ 踩坑（重要）**：给 workflow `permissions` 加 `workflows: write` 会 **422 被拒**（"Unexpected value 'workflows'"）——该权限不在 GITHUB_TOKEN 可授予清单，别再试；push 带 workflow 文件改动只能走 PAT。
+- **修法**：小号满权限 token 经 NaCl sealed box 加密写入仓库 secret `SYNC_PUSH_TOKEN`（API PUT actions/secrets，需 repo public key + pynacl，已装）；checkout 加 `token: ${{ secrets.SYNC_PUSH_TOKEN }}`。推送 cf30dfca → 派发验证：同步 success，fork main = 24d4b0e3（merge 上游 c6d8d63），build 自动触发。
+- **工具链**：pynacl 已 pip 装（rootfs 重建后需重装）；沙箱建 Actions secret 的配方 = GET actions/secrets/public-key → SealedBox(pub).encrypt(os.environb[TOKEN_VAR]) → base64 → PUT。
+
+<!-- 2026-09-19 01:36:23 -->
+## 09-19 凌晨：deepseek 400 重查（无法复现，定性为中继渠道天气）+ §18 判定日结论（归因翻转）
+
+
+**400 重查（agentrouter，用户给的 Kilo-Code key，探针 /tmp/ar_probe*.py）**：
+- 47/47 全 200：echo ""/空格/x/省略 × 工具回合/多轮/10 轮深历史 × 2KB→333KB 体积 × effort 档位 × content=null/""。**请求侧形状复现失败**。
+- **结构性发现**：响应 id 两种格式（`msg_*` vs 裸 UUID）= agentrouter 的 deepseek-v4-flash 后面 **≥2 个上游渠道**（抽签/故障转移）。`content[].thinking must be passed back` 是 GLM 系方言 → 有渠道是 GLM 系翻译层。
+- **时间相关性（关键）**：app 400 呈爆发窗（21:13-21:15、00:14-00:17，此后 0 次）；同窗口内 **12 秒间隔同形状一 200 一 400**（21:14:04/21:14:16）；同分钟 senseaudio 中继同报 500 "Upstream rejected"。跨中继同时故障 → 共享上游（DeepSeek 官方）抖动时，中继 failover 到 GLM 系渠道 → 400 方言。**定性：中继/上游侧天气事件，非我方 body**。aff89798 echo 逻辑维持不动。
+- **遗留行动（待用户拍板，未做）**：OpenAIProvider 加一行 INFO 日志记首个 SSE chunk 的响应 id 前缀（msg_/uuid）→ 下次 400 爆发时能当场把失败归到哪个渠道。一行改动、无行为变化、落 debug/log 文件。
+- key 临时放 /tmp/.arkey（探针从文件读，未进命令日志/memspike）。
+
+**§18 判定日（09-19，判定动作已执行）**：
+- beacon（09-18 16:37 起）：09-18 **23 kill** + 09-19 凌晨 3 kill，≥3/天达标 → 按预设该重立项。
+- **但 join（/tmp/join18.py，beacon×memspike）翻案**：26 kill 中仅 3 次落在 agent 命令窗口（18:06/18:08/18:48，中负载 331MB+e2b curl）；23 次发生时 agent 已沉默 2.5min-2.7h（20:14-20:58 八连杀期间 agent 沉默 1-2h）。**kill 不全落在 agent 窗口 → 按预设判定动作：归因框架要改**（不能只记 agent 头上）。
+- 新证据：① app 在 Doze 白名单（dumpsys deviceidle whitelist: user,com.rikkaminis.app,11618）；② 内存压力是系统级：01:24:22 `am_mem_factor:[3,0]`（CRITICAL）→ 3 个 :modelservice died + 全系统进程被扫（当时 agent 只有轻 curl）；③ agent-load.md 空账（纪律没被执行）→ 已用 memspike [cmd-start] 行代打。
+- 观测基础设施限制：events 环形缓冲仅 ~10 分钟（am_cpu 刷屏），历史 kill 无内核侧记录可回捞；厂商 events 通道只给 pid/oom_score/总内存。
+- **建议后续**：memspike 已有 [cmd-start] 行，beacon join 可常态化（脚本留存 /tmp/join18.py，重bilt 后需重写）；用户侧可查 省电策略→具体行为（"清理后台"设置）；真凶待查 = 01:24 CRITICAL 压力源（系统级，含中继大 body/多进程并存的叠加）。
+
+**探针配方（复用）**：urllib 走沙箱代理 env 与 app 同路；SSE 解析须跳过非 dict 行；finish=max_tokens 常见（max_tokens 300 太小）；两渠道判别 = 首个 data: chunk 的 id 前缀。
+
+<!-- 2026-09-19 01:44:41 -->
+## 09-19：in-app 更新 UI 判死（用户拍板"多余"，一阶门复核不过，写入 backlog 附记）
+
+
+用户主动提出不愿加 in-app 更新（设置页辟空间不值得）。agent 复核同意：一阶门不过（所有步骤手动可达，只省 4-5 次交互→2 次）；本 app 唯一用户=构建者（看 CI 拿包，无外部用户）；成本边清单 = UI 状态机 + i18n×8 + REQUEST_INSTALL_PACKAGES 授权边（appops 实测未授）+ R8 剥除失效 + 安装交接只能真机验。**重启条件**：外部用户出现 / 版本错装咬人≥2 次 / 装机频率真痛。便宜替代（rikka-ci-bridge /latest + 书签）同样等触发。UpdateChecker.download 内部的 digest 校验保留。全文见 /var/minis/shared/backlog.md 附记。
+
+<!-- 2026-09-19 09:31:32 -->
+## 09-19：offload 模型执行链路全量源码精读（压力测试会话，产出文档+图+13 项发现）
+
+
+用户要求不开代理、本对话内完成"看源码→写精确文档+mermaid 图→顺便查 bug"的压力测试。对象选了 sandbox/offload 模型执行链路（约 6000 行，main=c6d8d63f），逐行读完：RunDir/Mailbox/ChatStreamJsonl/ChatStreamOffloadHandler/ModelExecutionService(1807 行)/Dispatcher/Lifecycle/OrphanReaper/BoundedLineReader/WorkerKeyFreshness/FirstChunkTimeoutPolicy/Gateway/RunLog + 接线（MinisApp 三进程分支、ExecutionCoordinator reclaim、ChatStreamErrorPolicy、取消点 ChatModelRouting）。
+
+**产出**：/var/minis/workspace/rikkaminis-offload-audit.md（55KB，逐判断精读+评语+13 项发现）+ rikkaminis-offload-flow.md（4 张 mermaid 图，kroki 被 CF 403，改用 mermaid.ink 全部通过+PNG 目检）+ flow-diagram-2/3.png。
+
+**最重要 3 个发现（未修，待用户拍板）**：
+- **F-11**：worker 三条自杀盲区——controlledDrain 的 late-ack 出口（"finalizer 会 reap"但 finalizer 已跑完）、dir-gone 出口（"general sweep 会处理"但 worker 进程内无 sweep）、finishRequestLocked 的 dirMissing 分支被 terminal 守卫自锁 → ack 异常路径上 worker 带 native 堆永不自灭，靠 LMK 兜底（§18 的高频 kill 掩盖了它）。修法：两出口持锁复核静默后直接 selfReap。
+- **F-3**：心跳文件从未落地的 worker 死，流式 death 判断永不触发（"无 beat=启动中"），退化到 5min idle-stall 且抛 kind=null=FATAL——同种死法因"2s 定时器是否成功写过一次文件"而在可重试/硬横幅之间翻转。修法：run dir 创建超 60s 仍无 beat 文件→判死；stall 抛点补 KIND_TRANSIENT。
+- **F-1**：Gemini 流式媒体附件（GeminiProvider:238 必发 MediaAttachment）→ b64 单行 >256KiB（512KiB 图即触发）被 BoundedLineReader 当 OversizedLine 静默跳过（仅 Log.w）——流式丢图且与 PayloadSizePolicy 声称的 512KiB inline 上限矛盾（该上限在本链路无执行点，F-4）。
+
+**次级**：F-10 排队循环不读 cancel 文件（取消延迟=完整排队时长，3 行修）；F-5 流 finally 的 catch(_Exception) 吞 CancellationException（取消可伪造成 timeout 异常）；F-2a worker 首 chunk 超时 error line 不带 kind→FATAL 而等价 worker 崩溃可重试；F-14 executeRun/executeStreamingRun 180 行字段重建镜像（four-way-sync 第五处隐形面）。
+
+**同族对照结论**：09-18 ack 竞速的"我方文件冒充对端状态"形状已根治（workerDrained 共享+委托到位）；残留的是同族变体"证据缺失被当有利判定"（F-3/F-11）。
+
+**方法论**：mermaid 校验配方 = mermaid.ink/svg/{urlsafe_b64}，POST kroki 会撞 CF 403/1010；edge label 里不能有花括号+引号组合。文档结构："每图配发现索引表"可复用。
+
+<!-- 2026-09-19 09:34:53 -->
+## 09-19 补：精读覆盖率实测数字（更正上一条的"约 6000 行"估计值）
+
+
+用户追问"你确定看完了吗"后实测：
+- **全仓 Kotlin 818 文件 / 230,082 行**（`src/` 全量）；`com.rikkaminis.app` 179,638 行 / 531 文件
+- 本次**逐行精读 4,935 行（17 个文件全文）** + 约 600 行定点抽读 ≈ **全仓 2.4%**
+- `sandbox/offload` 包 16,627 行 → 覆盖 33%；**未读 11,700 行全是其它工具链路**（ModelUse 1902 / Shizuku 1226 / Accessibility 1118 / Photos 1008 / Calendar 766 / Notification 579 / BrowserUse 522 / …）
+- 完全未触及：ui/ 84,124、data/ 15,815、provider/ 11,197 及余下 15 个包 + 全部测试源集（≈169,000 行）
+- 抽读比例：ExecutionCoordinator 1374 行读 1 个函数；MinisApp 1096 行读 85 行；PayloadSizePolicy 106 行读 40 行
+
+**口径教训（写进习惯）**：范围声明必须写**实测行数**而不是估计值（"约 6000" 实际 4,935+600）；报告必须写明"未读区域未做系统排查，不能推断无同类问题"。审计报告的可信度 = 覆盖率的诚实度。文档已按此更正范围段。
+
+<!-- 2026-09-19 09:45:11 -->
+## 09-19 第二轮：工具 handler 群精读（offload 第二个消费面）→ 新报告 + 5 项发现
+
+
+用户"继续推"后，按上轮承诺推进第二个消费面（guest CLI → abstract socket → `:toolservice` → handler）。
+
+**产出**：/var/minis/workspace/rikkaminis-handlers-audit.md（24KB）+ rikkaminis-handlers-flow.md（4 张 mermaid，全部通过 mermaid.ink 校验 + 2 张 PNG 目检）+ handler-diagram-2/4.png。
+
+**本轮读全（≈2,750 行）**：NativeOffload.kt 403（帧协议/并发模型/tmpfile 交接）、OffloadTmpFileLedger 80、OffloadHandlerCatalog 63、OffloadGate 71、OffloadArgs 80、OffloadOutput 113、OffloadQueuePolicy 36、**ModelUseOffloadHandler 1902（全文）**；Notification 读 ~350/579；OffloadPermissionManager 抽 100；其余 18 个 handler（8,693 行）只做 grep 级扫描 + 头文档。
+
+**★ 本轮关键发现**：
+- **F-16【B】SimpleDateFormat 并发共享两处**：PhotosOffloadHandler:57 实例字段 dateFormat（用点 160/433/885/886/940）+ SessionsOffloadHandler:371 companion 静态 DATE_FMT。并发模型已坐实（NativeOffloadServer 每连接一线程、Semaphore 默认 2、handler 单实例共享）。**同族复发实证**：仓库日志曾记"SimpleDateFormat 无同族残留（剩余均函数内局部新建）"——那次只扫主 app，offload handler 漏网。修法 <10 行（DateTimeFormatter）。
+- **F-17【D】权限 registry 14 条中 7 条无执行点**：speak/media_player/speech_recognition/alarm/weather/notification/device_info 的级别无任何代码读取（唯一入口是 debug RPC，showInSettings=false）。附带隐私分类反常：notification（读状态栏通知内容）归 SYSTEM 且无门，photos 反而有门。
+- **F-23【D】minis-model-use 图像路由在 `:toolservice` 进程内直发 HTTP**：ProviderFactory.create(:283) + runBlocking generateImage(:1132/1150)；聊天链路已按 TF-D 消灭进程内调用 → 两条模型路径隔离标准不一致。且注释漂移三处（379-381 说"回落进程内"、444 日志"falling back in-process"、462-465 明说"no silent in-process fallback"互相矛盾）。
+- **F-18【D】输出侧无字节上限**：输入有 1MiB Budget，输出 writeText 无限制且落 RAM-backed tmpfs，ledger 只限文件数(4)。
+- 其他：F-19 协议无错误帧（异常=静默 socket close）；F-24 退出码 77 是事实标准非共享常量（7 个 handler 硬编码）；F-25 formatBody 未接 → ModelUse/BrowserUse/Config/Sessions 上 --compact/-q 无效（T54 债务）。
+
+**退出码既有约定（本轮梳理）**：0 成功 / 1 handler 未捕获异常（框架兜底）/ 2 用法错 / 77 环境前置未满足（事实标准）/ 126 权限门拒绝（OffloadGate）/ 127 无 handler。
+
+**横向结论（结构性收获）**：两个消费面都是"高质量底子 + 单点遗漏"，漏的都是**横切那一层**——"每个实现都要接的一根线"（权限门、formatBody）或"声明的策略没有执行点"（registry、PayloadSizePolicy）。**可复用姿势：这个仓库最高效的审计法不是读逻辑，而是"枚举声明面 → 找执行点"**。
+
+**未读风险（下一步建议顺序）**：ShizukuOffloadHandler 1226（特权 exec 面）、AccessibilityOffloadHandler 1118（UI 操控面）、PhotosOffloadHandler 1008（PII 删除面）——本轮覆盖最薄但风险最高。累计覆盖率 ≈8,900/230,082 ≈ 3.9%。
+
+<!-- 2026-09-19 09:52:41 -->
+## 09-19：offload 审计交接包落盘（第 3 棒待接力）+ 一条重要教训
+
+
+**用户指令**：「准备交接，进行接力」。产出跨会话交接包 → `/var/minis/shared/offload-audit-0919/`（**关键前提**：`/var/minis/workspace` 是会话私有，交接必须先归档到 `shared/`）。
+
+**包内容**：INDEX.md + HANDOFF-offload-3rd.md（任务书 16.6KB）+ reports/（两份报告）+ diagrams/（两份 mermaid 源 + 4 PNG）+ **三个可执行脚本**：
+- `verify_findings.sh` —— 复核 8 组证据点（F-16/17/18/19/23/24/25 + F-4），退出码 0 = 报告与代码一致（已实测）
+- `scan_handlers.sh` —— 21 handler × 6 维扫描 + 格式化器共享检查 + 声明面对账（已实测）
+- `check_handoff_refs.sh` —— **交接文件自检**：验证文档里每个 `文件:行号` 引用落点非空（已实测）
+
+**锚点 main = c6d8d63f，只读审计，仓库 0 改动。** 下一步任务（第 3 棒）= 逐行走查 ShizukuOffloadHandler(1226，特权 exec) / AccessibilityOffloadHandler(1118，UI 操控) / PhotosOffloadHandler(1008，PII 删除)，每个答 7 问（权限边界/命令构造/破坏性操作确认/资源释放/并发共享/退出码/阻塞超时），编号从 F-26 起。
+
+**★ 本轮最重要的教训（写复核脚本的动作当场抓到我自己 4 处错误）**：
+1. F-25 范围写宽（Config/Sessions 其实已接 formatBody）；
+2. "全包无同步原语"不准（流客户端有 1 个 @Volatile，用法正确）；
+3. 退出码判据用朴素 `grep '77'` → 误中 WMO 天气码 77 + iOS commit hash `5dcff277`；正解 `NativeOffloadResult(77`；
+4. §4.3 表格 formatBody 列**手抄**错（Photos 写 1、实际 25；Calendar 1/15、Contacts 1/14…）。
+→ **可复用纪律**：①结论必须配"可执行判据"，别配"我读过"；②表格/计数**一律脚本生成后粘贴，禁止手抄**；③判据要窄（宽判据 = 假阳性温床）；④文档里的行号引用要机器核（`check_handoff_refs.sh` 这个形状）；⑤写复核脚本不是额外开销——它是唯一的第二来源。
+
+**方法论沉淀**：本仓库最有效的审计姿势 = **「枚举声明面 → 找执行点」**（registry 14 条 / PayloadSizePolicy 3 个上限 / formatBody 入口 / 退出码表，全是同一道题：声明了但没人执行）。累计覆盖 ≈8,900/230,082 行 ≈ 3.9%。
+
+<!-- 2026-09-19 10:05:49 -->
+## 09-19：offload 审计第 3 棒完成（Shizuku/A11y/Photos 逐行走查 → F-26…F-40，只读）
+
+
+**任务**：读交接书 `/var/minis/shared/offload-audit-0919/HANDOFF-offload-3rd.md` 并执行第 3 棒——逐行走查三个高风险 handler（函数体未读），按 7 问清单逐条回答，产出第 3 份报告 + mermaid 图 + F-26 起编号。**锚点 main = c6d8d63f，仓库 0 改动**（脚本断言）。
+
+**逐行读完**：ShizukuOffloadHandler 1226 + AccessibilityOffloadHandler 1118 + PhotosOffloadHandler 1008 = **3352 行**；底座 ShizukuManager 144 / ShizukuBackend.runProcess 45 / OffloadArgs 80 / OffloadGate 71 / NodeRegistry 66 / MinisAccessibilityService 264 ≈ 669 → **本棒 ≈4,021 行**。累计覆盖 ≈12,921/230,082 ≈ **5.6%**。md5：Shizuku dfa733a9 / A11y 922eea9d / Photos e9539790。
+
+**★ 结论三句**：①三个文件**没有 F-16 级别的确定性 bug**（argv 数组直达 `Shizuku.newProcess`、Cursor 全 `use{}`、并发原语齐、`delete` 有 `--confirm`）；②15 条里**只有 F-27 是可复现功能 bug**；③七问里最弱 = **Q3 破坏性确认门**（同仓两套标准）。
+
+**发现（F-26…F-40，3 × B? / 9 × D / 3 × O，合计可修 ≈70 行）**：
+- **F-27【B?】** `exec` 把 `:912 rest.joinToString(" ")` 拼串 → 文档化的 `--timeout-ms`（及 `--compact`）**泄漏进被执行的 shell 命令**。⚠️ 修法陷阱：**不能**改成 `args.positional.joinToString` —— OffloadArgs 会把 `-l`/`-f` 短选项吞成 flag，那样丢透传参数；只能剔已知长选项。
+- **F-28【D】** Shizuku **8 个不可逆入口零 `--confirm`**（uninstall/clear/`rm -rf`/remove-user/settings delete/settings put/appops set/force-stop），Photos 反而有 → 同仓两种标准。`file rm` 还不校验路径范围（`file rm / -r` 可过）。**需用户拍板**（设计决策）。
+- **F-26【D】** 退出码 126 **三义**：OffloadGate:69(enforce) / ShizukuManager:116(未就绪) / allow 派拒绝却是 1；exec 还直通未声明的 124/143。
+- **F-32【B?】** `dialog dismiss` **不校验对话框存在**（同文件 :882 dialogDetect 有识别能力却未被复用），全屏文本等值匹配任意可点节点，`--confirm` 候选含"允许"。
+- **F-35【B?】** 视频 `export --size thumb` 静默降级为原样复制，且**文件名 `.mp4.jpg` / format:"jpeg" / 字节是 mp4** 三者互相矛盾。
+- **F-33【D】** 超时上限**只加在 eventWatch 一处**（`coerceAtMost(120_000L)` ×1），`wait*` 三处无上限（读 4 处 / 封顶 1 处）。
+- **F-34/F-36【D】** 截图 inline base64 无上限（F-18 具体触发点）+ `a11y_screenshots/` 与 `photos-export/` **全仓无清理器**（各只 1 文件引用）→ 磁盘/tmpfs 无界增长。
+- **F-37【D】** `import` 异常路径**遗留 `IS_PENDING=1` 僵尸行**（catch 不回滚已插入 uri；全文件 `contentResolver.delete` 仅 1 处）。
+- **F-29/F-30/F-31/F-38【D/O】** 参数级"声明面 vs 执行点"：`--block` 实际执行 `set_bubbles`；`display set`/`network restrict` 空参静默 ok；`--replace` 死分支；权限面缺 `READ_MEDIA_VIDEO`（本机因 All Files Access 不可复现）。
+- **F-39【O】** **F-16 同族收窄到 2 处**（Photos:57 实例字段 + Sessions:371 companion），三文件其余零残留、A11y 共享状态全并发类型 → 修法范围锁定、<10 行。
+
+**★ 可复用姿势（本轮复现）**：`枚举声明面 → 找执行点` 同样适用于**参数级**（F-29/30/31/38 共 5 条，占 1/3）。**下一棒建议**：Contacts(332，"参考实现"本身从未逐行走查) → Notification(579，PII + F-17 张力点) → Location/Calendar。
+
+**★ 自我纠错（写复核脚本第二次当场抓到我）**：F-33 判据初版写"`args.getLong("timeout")` **3** 处" → `verify_findings_3rd.sh` 第 1 次运行当场 **[FAIL]**（实测 4 处，漏了 eventWatch:817 自身）→ 结论措辞随之从"wait* 三处无上限"改为"读 4 处 / 封顶 1 处"。另：初读 `displaySet` 把 `var ok = true` 误记 `false`（会导致相反结论），靠"写结论前回读源码原文"纠正；表格里手抄了 2 处行号，改成脚本 `grep -n` 实测后缀。**结论：复核脚本是唯一的第二来源，不是额外开销。**
+
+**产出（跨会话共享目录）**：`/var/minis/shared/offload-audit-0919/`
+- `reports/rikkaminis-shizuku-a11y-photos-audit.md`（42 KB，482 行，§0 覆盖声明 → §8 交接）
+- `diagrams/rikkaminis-handlers-3rd-flow.md`（**5 张 mermaid，全部过 mermaid.ink 渲染校验**）+ `handler3-diagram-1/2.png`
+- `verify_findings_3rd.sh`（**44 项窄判据，exit 0**，每条发现 2–4 条独立判据；行号漂移不影响判定）
+- `gen_tables_3rd.sh`（TABLE-1…6 生成器，杜绝手抄）、`check_diagrams_3rd.sh/.py`（渲染校验）
+- `HANDOFF-offload-3rd.md` §3 台账已追加密第 3 棒表 + **勘误一条**（"126 不在 handler 源码里"只说对一半）；`INDEX.md` 已更新（接手四步 + 进度 5.6%）
+
+**QA 全绿**：check_handoff_refs.sh（含新增引用 ShizukuManager.kt:116 / OffloadGate.kt:69）· verify_findings_3rd.sh · verify_findings.sh（1/2 棒）· gen_tables_3rd.sh · check_diagrams_3rd.sh 全部 exit 0；工作区 0 改动。agent-load start/end 已记（§18 纪律）。
+
+<!-- 2026-09-19 10:18:00 -->
+## 09-19：offload 审计第 4 棒完成（Contacts/Notification/Location + ★勘误 E-1 进程模型）
+
+
+**任务**：接第 3 棒继续推进。本棒 = `ContactsOffloadHandler`(332，"参考实现") + `NotificationOffloadHandler`(579，PII) + `LocationOffloadHandler`(450) 逐行走查 × 7 问 + 底座（OffloadPermissionManager 480 / ScheduledNotificationStore 85 / ScheduledNotificationReceiver 81 / ToolExecutionService 60 / MinisApp 定点段）。**锚点 c6d8d63f，仓库 0 改动**。
+
+**★★ 勘误 E-1（推翻前三棒包的进程模型，最重要产出）**：前三棒（含我自己第 3 棒 §1 图）都写 `guest → socket → :toolservice → handler`，**是错的**。事实：**handler / OffloadGate / 权限状态 / 通知 store 全跑在主进程**，`:toolservice` 是**休眠进程**（无请求派发）。三源均为仓库自述：① `service/ToolExecutionService.kt:34-45` "does **NOT** yet bind the socket `NativeOffloadServer`（**the main process still owns it**）… Step 3 moves socket ownership here"；② `MinisApp.kt:235-241` "**right now nothing spawns this process**"；③ `AndroidManifest.xml` `logging-ok: dormant`；结构证据 `NativeOffloadServer.start` 在 main 路径 :568（:toolservice 分支 :243 已 return）。**影响**：任何"因为跨进程所以…"的推理在本包当前状态下不成立（第 2 棒 F-23 措辞需重读）；且这条勘误**解锁 F-47**。
+
+**★ F-41【D·优先修，3 行】`android-notification` 读全量通知正文却零 agent 门 + 设置页隐藏**：`grep -c OffloadGate` = 0；全仓调用门的文件 = **恰好 7 个**，无中心化门；PII 物证 = `handleList` 读 `extras.getCharSequence("android.title"/"android.text"/"android.bigText"/"android.subText")`（:512-517，注意是用**字面 key** 而非 EXTRA_* 常量）。**根因是分类错误**：注册表 `:82` 把 notification 归 `SYSTEM`（语义"无个人数据、不进设置页"，`:51` 注释说这套分类 mirrors iOS），而 photos（看自己的照片）归 PRIVACY 且有门。后果：用户**没有 UI 可以关它**，同意面只剩系统级 Notification Access（一次性授予后永不再问）。修法 = 注册表改 PRIVACY（默认级别仍 BYPASS，**不改默认体验**，只让用户能看见能关）+ handler 补一行 `OffloadGate.enforce`。
+
+**★ 注册表规律（本棒核心洞察）**：14 条 = **有门 7 + 无门 7，完全互补**，分界线 = `category ∈ {PRIVACY, INTEGRATIONS}` → **门的有无不是"逐条接线遗漏"，而是分类决定**。故 MEDIA 里的 `speech_recognition`（**录音**）同属这条系统性缺口，下一棒应按 F-41 口径一并评估。
+
+**其余发现（F-42…F-50）**：
+- **F-42【B?】** `contacts search --max N <q>` 把 **N 当查询词**（`args.firstOrNull { !it.startsWith("-") }` 吞 flag 值）→ 静默错误结果；`get/delete` 用 `firstOrNull()` 反而安全。
+- **F-43【D】** `contacts delete` 无 `--confirm`，而其 help 自称 "PERMANENT — cascades all raw rows" → 同仓**三标准**（photos 有 / contacts 无 / shizuku 8 处无）。
+- **F-44【D】** 用法校验排在索权之后（门 42 → 索权 47 → 分发 50）→ `android-contacts bogus` 也会先弹系统权限框（触发条件：权限未授予时）。
+- **F-45【D】** `geocode --lat 999` → 误报"**设备缺 geocoder 后端**"（误导性归因，真因是缺范围校验）。
+- **F-46【D】** 超时无上限家族 +1（`location current --timeout`）→ 家族共 **4 处**（唯一封顶 = A11y eventWatch）。
+- **F-47【D 前瞻】** 迁移就绪性：Step 3 后三条**进程内结构**会静默失效 —— ① 权限对话框 StateFlow（UI 观察点在主进程）→ ASK_ONCE 退化为 120s 超时静默拒绝；② `OffloadPermissionManager.prefs` lateinit，`init` 只在 `MinisApp:796`（主进程）→ getLevel 抛异常 → 被 F-19 机制放大成"工具莫名失败"；③ `ScheduledNotificationStore`（MODE_PRIVATE）写方/读方跨进程 → 缓存不一致。
+- **F-48/F-49/F-50【O】** `channelCreated` companion 可变静态（幂等竞态；建议"静态可变一律 AtomicBoolean/by lazy"）· Contacts 三份重复 projection（:150/:176/:206）+ 位置索引耦合（getLong(0)/getString(1)/getInt(2)）· Location 进程级单线程 executor（audit-0917 泄漏修复的副作用：回调串行）。
+
+**★ 元结论**：**"参考实现"靠不住** —— `Contacts` 被交接书当范式用，自己却有 2 处缺陷（F-42/F-43）。"被当作范式"≠"已验证"。
+
+**★ 自我纠错（脚本第 3 次当场抓到我，本轮 5 处，全部在"判据怎么写"而非"结论对不对"）**：① 断言"调用门的文件=8"（实测 7，OffloadGate 不自引用）；② 断言 list 读 `EXTRA_TEXT`（实为字面 key）；③ 断言 `getString(0)`（实为 getLong(0)）；④ F-44 用嵌套 awk 正则被转义吃掉 → 改 `grep -n|cut|数值比较`；⑤ 替换文本时把 `LW` 放到 `LE` 之前 → `[ "" -lt "50" ]` 恒假。**并新增一条工具纪律**：表格生成器要带**自对账**——`gen_tables_4th.sh` 的"注册表必须提取出 14 条"当场抓出我的正则 `[a-z_]*` 漏掉含**数字**的 `a11y_cli`（总数 13≠14 才暴露）。
+
+**产出**：`/var/minis/shared/offload-audit-0919/` + `reports/rikkaminis-contacts-notification-location-audit.md`(32 KB) · `diagrams/rikkaminis-handlers-4th-flow.md`(5 图，含**进程模型勘误图**，全部过 mermaid.ink) + `handler4-diagram-1/2.png` · `verify_findings_4th.sh`(**43 项判据 exit 0**) · `gen_tables_4th.sh`(带自对账) · `check_diagrams_4th.sh`；HANDOFF 已插 **E-1 勘误块** + 第 4 棒台账；第 3 棒图文件已加勘误注；INDEX 更新。
+**最终 QA 8/8 全绿**（三个 verify + 两个 gen_tables + check_handoff_refs + 两个 check_diagrams）。
+**累计**：4 棒 ≈ **15,138 / 230,082 行 ≈ 6.6%**，发现 **25 条**（F-1…F-50）+ 勘误 1 条，可修代码量累计 ≈ 95 行。
+**下一棒**：Calendar(766) → Alarm(443) → Speech+Speak(738，MEDIA 同族按 F-41 口径) → 补查 ScheduledNotificationStore.sweepExpired 是否有条目上限。
+
+<!-- 2026-09-19 10:24:45 -->
+## 09-19：offload 审计第 5 棒交接包封包完成（新会话入口 = HANDOFF-offload-5th.md）
+
+
+**用户指令**：「准备交接，下一对话再继续推进」。产出跨会话交接包 → `/var/minis/shared/offload-audit-0919/`（1.6M，**入口 = `HANDOFF-offload-5th.md`**，202 行）。
+
+**开局指令（复制给新会话）**：`读这个文件并立刻执行：/var/minis/shared/offload-audit-0919/HANDOFF-offload-5th.md`
+**新会话三步**：① `sh bootstrap.sh` ② `sh verify_all.sh`（当前实测 **11/11 ✅**）③ 全绿即开工。
+
+**交接包为此新增的 5 件（都是为了"新会话能自证"）**：
+- **`bootstrap.sh`** —— 自举：**浅克隆 38M**（实测远小于全量 206M）→ 锚点 `c6d8d63f` 校验 → 关键文件行数指纹 → 工作区干净度 → main 是否前进 → 从 shared 重装 `agent-load` 观测桩。**实测新克隆 + 现有全量树双跑判据都绿**（证明包可从零复现）。
+- **`verify_all.sh`** —— 一键 QA（自举 + 3 个 verify + 3 个生成器 + 交接自检×2 + 图渲染×2 + scan_handlers = **11 项**），逐项 ✅/❌ + 失败自动打尾 4 行日志。
+- **`LEDGER-INDEX.md`**（`gen_ledger_index.py/.sh` 生成，禁手抄）—— 全量台账 F-1…F-47 条 + 级别分布 + **语义重复检测**。
+- **`HANDOFF-offload-5th.md`** —— 第 5 棒任务书：E-1 勘误 / 任务（Calendar 766 → Alarm 443 → Speech+Speak 738 + `sweepExpired` 上限补查）/ **新增产出要求 = 权限分类重评估表（14 行，MEDIA 三条尤其 `speech_recognition`=录音）** / 7 问 / 环境 / **待修清单按 A 可施工·B 需拍板·C 需真机·D 前瞻分组** / 纪律 / 配方 / 回报格式。
+- **脚本通用化**：`verify_findings_3rd/4th.sh`、`gen_tables_3rd/4th.sh` 现在都接受**仓库路径参数**（默认 /tmp/RikkaMinis）→ 可指向任意克隆。
+
+**★ 交接准备期间自查抓出 4 处自己的错误（都已修）**：
+1. **"累计 25 条发现"是错的** → 脚本对账：**台账 47 条 / 去重后 46 条**（B=3 · B?=8 · D=28 · O=8）。INDEX + 第 4 棒报告已更正。
+2. **F-48 与第 2 棒 F-20 是同一条**（同一行 `NotificationOffloadHandler.kt:548` 的 `channelCreated`）→ 我在第 4 棒重复记录。已被"台账语义重复检测"抓出，报告已标注"本棒净新增 9 条"，并写进纪律「**写发现前先查台账**」。
+3. **锚点判据用 `--short` 会假红**：浅克隆 7 位（c6d8d63）vs 全量 8 位（c6d8d63f）→ 改用 `git rev-parse HEAD | cut -c1-8`。**这是只在"新会话从零克隆"时才暴露的 bug**，正好被新克隆双跑测出来。
+4. 台账生成器自身两个 bug：反引号被 shell 执行、重复检测把正文里的交叉引用（F-34 行内提 F-18）当重复 → 改为只认**行首编号 + 第 2 列**。
+
+**四棒累计**：覆盖 ≈ **15,138 / 230,082 行 ≈ 6.6%** · 台账 47 条/去重 46 条 · 勘误 1 条（E-1 进程模型） · 可修代码量 ≈ 95 行 · 最重要一条 = **F-41**（notification 读全量通知正文却零门 + 设置页隐藏，3 行修法）。
+**状态**：只读审计，仓库 0 改动，锚点 main `c6d8d63f`。
+
+<!-- 2026-09-19 10:48:59 -->
+## 09-19：offload 审计第 5 棒完成（Calendar/Alarm/Speech+Speak → F-51…F-68 + 勘误 E-2 + 权限分类重评估表）
+
+
+**产出**（`/var/minis/shared/offload-audit-0919/`）：报告 `reports/rikkaminis-calendar-alarm-speech-audit.md`(31KB) · `diagrams/rikkaminis-handlers-5th-flow.md`(5 图，全过渲染校验，+2 PNG) · `verify_findings_5th.sh`(**85 项判据 exit 0**) · `gen_tables_5th.sh`(6 项自对账) + `embed_tables_5th.py` · **`HANDOFF-offload-6th.md`**(下一棒入口，含新增产出要求=**可施工性核查表**) · INDEX/LEDGER-INDEX/HANDOFF-3rd(台账) 已更新 · `verify_all.sh` 扩到 **15 项全绿**。
+**锚点 c6d8d63f，仓库 0 改动**。逐行 3,122 行 → 累计 ≈ **18,260 / 230,082 ≈ 7.9%**；台账 **65 条/去重 64**（B=3·B?=10·D=44·O=9）+ 勘误 2 条；可修累计 ≈150 行。
+
+**★ 最重要一条 F-51【D·3 行】`android-speech transcribe` = 开麦克风录音，却归 MEDIA**（零 agent 门 + 设置页 `showInSettings=false`）→ 与上棒 F-41（notification 读全量正文）**同源：分类错误，不是接线遗漏**。修法 = 注册表改 PRIVACY（默认仍 BYPASS，不改体验）+ 补 1 行门。
+**★ 权限分类重评估结论（任务书交付物，14 行表+逐行探针）**：PRIVACY 5 条**无过宽**；INTEGRATIONS 2 条 NOT_ALLOWED **正确**；**MEDIA 里 speech_recognition 错**；SYSTEM 里 notification 错、`device_info`/`weather` **正确且是反例**（零设备标识符 / 不读设备定位）、alarm 建议提高可见性。"门的有无 = category"相关性成立（7 门 = 5+2），**破的是它的前提**。
+**其余 17 条**：F-52 Calendar 六子命令"先索权后校验"（F-44 家族+6）· F-53 `parseDate` 宽松解析静默滚日期 · F-54【B?】`--all-day` 只换 TZ **标签**不换瞬间（注释声称 UTC 午夜未实现）· F-55 insertReminder 吞异常仍报成功 · F-56 delete 无 `--confirm`（确认门第三例）· F-57 Speech `--duration` 无上界（F-46+1，**任务书猜的 Alarm 实测 0 处**）· F-58 识别失败仍 exit 0（同文件三套标准）· F-59 languages 超时不可区分 · F-60 `--voice` 被自动探测覆盖仍报请求值 · F-61 voices 探针 200ms 空结果当成功 · F-62 `isInitialized` 非 @Volatile 被 worker 轮询 · F-63【B?】Alarm `cancel` 实为 `open`（静默降级+KDoc 漂移）· F-64 parseDuration Int 溢出（50000d→290 天）· F-65 死代码 ×2 · F-66 通知 store **无条数上限 + 无锁 RMW**（任务书补查项，答案=无上限）· F-67 device storage 全树 walk 无缓存 · F-68 MEDIA 非法参数静默回退（F-30 家族+2）。
+
+**勘误 E-2**（任务书两处前提不成立）：Alarm **已无 PendingIntent/AlarmManager**（T266/T268 后纯 Intent 派发，代码行=0，仅注释提及）+ **零等待** → **"任务书里的'很可能'是假设，不是证据"**。
+
+**★ 本轮方法论增量（都是判据/生成器自己的错，被脚本当场抓出）**：
+1. **BRE 陷阱**：`grep '\[B\?\]'` 的 `\?` 是「可选」算子 → `[B?]` 退化成 `[B]`，B? 行计数从 2 变 18。级别/字面量匹配一律 `grep -F`。
+2. **判据写宽 = 假红**：`PendingIntent` 判据命中的是**注释**（改"排除注释行后 = 0"反而更强）；awk `/start/,/end/` 跨函数重开区间吞进 193 行 → 改函数名锚定 + **反空断言守卫**（`grep -c DTSTART >= 1`，否则区间失配会**真空为真**）。
+3. **生成器自对账要含"每行断言都成立"**（不只条数）：`gen_tables_5th.sh` 6 项里加了"14 行分类探针失败数 = 0"，当场抓出 `gate_of` 路径拼错 → `[ "" -gt 0 ]` → `sh: out of range`。
+4. **`sh -x` 追脚本自身错误**：那行 out of range 混在表格输出里几乎不可见。
+5. **台账标题硬编码区间**（`F-1 … F-50`）在追加 18 条后静默过期 → 改为从数据推导（`gen_ledger_index.py` 已修）。
+
+<!-- 2026-09-19 11:14:14 -->
+## 09-19：offload 审计第 6 棒完成（Notification 全文 + BrowserUse/Config/Sessions + 权限页 → F-69…F-82 + 勘误 E-3/E-4/E-5 + A 类边清单）
+
+
+**状态**：只读审计，仓库 0 改动，锚点 main `c6d8d63f`。
+**覆盖**：本棒逐行 **3,058 行 / 12 文件**（+≈190 定点抽读）；累计 **21,318 / 230,082 ≈ 9.2%**；台账 **79 条 / 去重 78**（B=3·B?=11·D=52·O=11+2 历史其他）；可修累计 ≈**210 行**。
+
+**产出**（`/var/minis/shared/offload-audit-0919/`）：报告 `reports/rikkaminis-notification-browseruse-config-sessions-audit.md`(456 行/55.7KB) · `diagrams/rikkaminis-handlers-6th-flow.md`(6 图全过 mermaid.ink +2 PNG) · **`verify_findings_6th.sh`(62 项判据 exit 0)** · **`gen_tables_6th.sh`(10 项自对账)** + `embed_tables_6th.py` · **`jvm6/`（真源码 JVM 实验，F-70/F-72 硬证据，含复现说明）** · **`a-list-edges-6th.data`（A 类 35 行边清单）** · `HANDOFF-offload-7th.md`（下一棒 = 首个写代码棒：5 个修补批次）· INDEX/LEDGER-INDEX/HANDOFF-3rd 已更新 · `verify_all.sh` 扩到 **20 项全绿**。
+
+**★ 最重要三条**：①**F-70【B】**`--after` 非法值（`abc`/`1.5`/`-5`/缺值）**静默回退成"立即发送"**——真源码 JVM 实测（`-5` 更隐蔽：被 `OffloadArgs` 当短选项）；且 `--after must be positive` 守卫**存在但到不了**。②**F-69/F-74【B?/D】**通知"已发布"的三重证据缺失：全文件仅 1 处 `areNotificationsEnabled`（在 `handleSettings` 报 `can_post`），**发送路径 0 处**；`awaitPosted` 失败只进日志不进输出；receiver 侧 `notify` 不抛异常 ≠ 已发布 → 关掉应用通知时**通知没了 + pending 记录也没了 = 零痕迹**。③**F-76【D】**退出码无共享常量：Config `EXIT_INVALID_ARGS=1` 而 **17/21 handler 文件用 2**（Config 里 `NativeOffloadResult(2` 一次都没有），124/125 仅此一家。
+**其余 11 条**：F-71 `--id` 复用无去重→幽灵 pending · F-72 `parseIso` 宽松+吞尾部垃圾（F-53 家族+1）· F-73 `schedule` 索权早于 `--after` 校验（F-44/F-52 家族+1）· F-75 `cancel --all`=`nm.cancelAll()` 越界抹掉 `minis_config_confirm` 待确认 nudge→可致 exit 124（同仓 `BackgroundTaskNotifier:323` 注释自证 + 给出按 channel 过滤的修法先例）· F-77 声明面落后（sessions 错误枚举漏 `send` + **系统提示词只列 `send|clear|list`**）· F-78 browser-use 非法数值静默丢弃（`--tab-id abc`→静默改用当前标签页）· F-79 权限页 `remember` 无 key → **Reset All 后 chip 不刷新** · F-80 `/var/minis/browser/` 第二个无界写面（6 文件提、清理点 0）· F-81 权限页 1 Hz 轮询 `Settings.Secure` · F-82 **`minis-config get` 读路径无 master-switch 检查**（同文件另两个只读命令都有，需拍板）。
+
+**★ 勘误三条（修正前几棒）**：**E-3** F-25 措辞收窄——`BrowserUse` 的 `--compact/-q` **确实生效**（自研 envelope），真失效只有 `ModelUse`；**E-4** `isLenient=false` **拦不住尾部垃圾**（JVM 实测 `...T15:00:00junk` 仍解析成功）→ F-53/F-72 修法必须"非宽松 + `ParsePosition` 全消费校验"；**E-5** F-41/F-51 的量被低估：3 行/2 文件 → **18 行/9 文件**（漏算门调用者名单 + **14 行 i18n**：`toolTitleRes` 只映射 7 个 toolName，`notification`/`speech_recognition` 落空 → 必须往 **7 个 strings.xml** 各加 1 key）。
+
+**★ 方法论增量（本轮判据再次当场抓出我自己 7 处错）**：①**判据要窄到"断言的那条路径"**——"文件里出现过"≠"该路径用了"（F-69 首版写 0 次，实测 1 次在 `handleSettings`；收窄成 `sed -n '/handleSend/,/scheduleDeferred/p' | grep -c` 才成立）；②**"0 命中"必须逐条看命中来源**（F-70 首版判"无报错串"，实测命中守卫 → 结论反而更强："不是没写校验，是校验在绕过路径之外"）；③**期望值必须来自一次实测**，不许从上一棒口径外推（3/19/5 实测 4/17/6）；④`grep -nF -- "$p"`（以 `-` 开头的 pattern 必须加 `--`，否则整条判据静默返回空）；⑤Ash 无 `bc`，求和用 `$(( ))` 循环；⑥**数据文件的分隔符不能出现在字段内容里**（ponytail 三段里的 `|` 让字段数断言当场抓到）；⑦`[a-z_]*` 漏含数字的 `a11y_cli`（第 4 棒同款复发 → 一律 `[a-z0-9_]*`）。
+**★ 可复用姿势确认**：**"真源码 JVM 实验"是纯逻辑 handler 的最强判据**——`OffloadArgs.kt` 只依赖 `OffloadOutput.OUTPUT_FLAGS`，桩掉即可用真解析器跑 argv 场景（`jvm6/` 已随包归档，含复现命令）；把"待验的判定式"用真代码复算，比读码推断强一个量级。
+
+**下一棒（HANDOFF-offload-7th.md）**：**首个写代码棒**——P1 隐私面收口（F-41/F-51，18 行/9 文件）→ P2 notification 三连（F-69…F-75）→ P3 退出码表（F-76）→ P4 家族批量（F-44/F-52/F-68/F-78/F-53 + 确认门规格）→ P5 清理类。纪律：分支隔离 + 能本地 JVM 就先本地 + 分支 CI + FF main + **修完改判据期望值（不删判据）**。
+
+<!-- 2026-09-19 11:18:15 -->
+## 09-19：offload 审计第 6 棒交接包封包完成（入口 = HANDOFF-offload-7th.md，**下一棒起转为写代码棒**）
+
+
+**封包自检（模拟新会话开工）**：`sh bootstrap.sh`（复用 /tmp/RikkaMinis，锚点 c6d8d63f，工作区 0 改动，5 个关键文件行数指纹 ✅）→ `sh verify_all.sh` **20/20 ✅**（"包自洽，可以开工"）。
+
+**入口 = `/var/minis/shared/offload-audit-0919/HANDOFF-offload-7th.md`**（168 行）· 开局指令：`读这个文件并立刻执行：/var/minis/shared/offload-audit-0919/HANDOFF-offload-7th.md`
+
+**第 7 棒（首个写代码棒）任务书要点**：
+- **5 个修补批次**：P1 隐私面收口（F-41/F-51，18 行/9 文件，必须单独一批）→ P2 notification 三连（F-69…F-75）→ P3 退出码共享常量（F-76）→ P4 家族批量（F-44/F-52·F-68/F-78·F-53·确认门 F-56/F-43/F-28）→ P5 清理类（F-34/F-36/F-80·F-65·F-67·F-79）。
+- **每批闭环**：分支隔离 → 能本地 JVM 就先本地（jvm6 配方）→ 语法门基线对照 → `gh_sync.sh push` → **手动 dispatch build-apk.yml**（分支 push 不触发）→ CI 绿 → FF main → 删分支 → release 自动触发（不用等）→ 写 `FIXLOG-<批次>.md` + 回标台账 sha。
+- **修完改判据期望值、不删判据**（判据 = 回归测试；P1 会把"调用门文件数 7"变成 8/9，P2 会把 store 三条反向）。
+- **CI 事实（本轮实测）**：`build-apk.yml` 仅 push to main + dispatch（paths 限定 src/android、src/shared、deps）；`scan-gate.yml` 仅 pull_request（只跑静态扫描，无 Gradle）；`sync-upstream.yml` 定时。
+- **警告**：本包自举的 /tmp/RikkaMinis 是**浅克隆**，只够跑只读判据 → 写代码要按 `rikkaminis-dev-methodology` 重新 clone。
+- 相关 skill 索引已写进任务书 §4：rikkaminis-dev-methodology / git-parallel-collaboration / change-ladder / sandbox-jvm-testing / evidence-discipline。
+
+**包内容**：7.0M / 58 文件 = 6 份报告 + 6 份图（全过渲染校验）+ 6 个 verify 脚本（300+ 判据）+ 6 个表生成器 + `jvm6/`（真源码实验）+ `a-list-edges-6th.data`（A 类 35 行边清单）+ `bootstrap.sh`/`verify_all.sh`/`gen_ledger_index.sh` + 三份 HANDOFF（3rd=台账正文 / 6th=留档 / **7th=当前入口**）+ INDEX/LEDGER-INDEX。
+
+<!-- 2026-09-19 11:57:10 -->
+## 09-19：offload 审计**路线改判**——下一棒 = 继续推进扫描（不是修代码）+ 锚点机制升级（ANCHOR.md 单一来源）
+
+
+**用户指正**：「那个任务（= 我写的第 7 棒修补批次任务书）已经在另外一个会话做了，并且已经几乎处理完了；**扫描还需要继续推进，需要的是继续推进扫描的**」。
+→ 我原来的排序有一处真实风险，被这个指正点中：**P4 是"家族批量"修法，而靶心还有 ≈3,400 行没读**——家族成员没见完就批量修 = 准备修两遍。且各棒发现数无衰减（10/11/15/10/18/14），不是"扫到没得扫"。
+
+**远端实况（本轮 API 实查，非推测）**：`main = c6d8d63f`（未前进）· 分支 `fix/audit6-p1-privacy-surface @ fbb0867`（= 任务书里的 **P1 隐私面批次**，另一会话在途）· CI #1657 in_progress / #1656-#1652 completed success。
+
+**本轮产出（`/var/minis/shared/offload-audit-0919/`）**：
+1. **`ANCHOR.md`（新增）** —— 锚点**单一来源** + **重锚（re-anchor）流程** + 已知在途事件表。
+   - 动机：判据脚本以前**硬编码** `c6d8d63f`，一旦 main 前进（修补批次合并）**全部判据集体变红**；那不是退化，是锚点漂了。现在 5 个 `verify_findings*.sh` 都从 `ANCHOR.md` 读锚点 → 改锚点只改一个文件。
+   - **重锚流程（本轮的真正增量）**：main 前进 → `sh bootstrap.sh`（会提示已前进）→ `sh verify_all.sh` 记录**哪些判据红了**（这一步是资产）→ **逐条判定每个红项**：①预期翻转（哪个批次改的 → 改期望值 + 注释 `# <新锚点> 起，P1 落地后 7→9`）②**真实退化 → 写进报告 §错误记录**（本包最有价值的产出，不许悄悄放绿）③无法判定 → 保持红并标"待人工"。写完再 `sh bootstrap.sh --accept-anchor <新sha>`。
+2. `bootstrap.sh` 接入 ANCHOR.md + 新增 `--accept-anchor <sha>` 子模式。
+3. `HANDOFF-offload-7th.md` **重写为"继续推进扫描：补完靶心"**：任务 = **≈3,400 行 / 10 文件**（ModelUse 1902 全文 + Debug 341 + Weather 309 + Clipboard 246 + Device 155 + Open 141 + Player 91 + ProviderExecSlotPolicy 81 + OsCompat 47 + PayloadSizePolicy 剩余 66）；新增交付要求 = **家族封闭表**（8 家族 × 全部已知成员 × 是否封闭；**封闭判据必须可执行**——"成员全落在已读文件集内 + 一条全仓 grep 判据证明无其它成员"）；**这张表就是"何时算扫完 / 何时切换去修"的开关**。纪律强调：**本棒只读，只记不修**。
+4. INDEX 更新（进度表增设"另一会话：P1 在途"行）· `verify_all.sh` **20/20 全绿**。
+
+**可复用结论**：
+- **"扫完"的三口径**：①靶心（`sandbox/offload` 16,627 行）→ 还差 1 棒 ≈3,400 行到 100% ②Ring 2（handler 下游依赖包 speech/browser/config/service/agent/tools/debug ≈27k）→ 6–8 棒 ③全仓（230,082 行）→ **70+ 棒，从来不是计划**；`ui/` 84k 该换方法（按用户可见行为 + 跨层字段抽样），不适用逐行走查。
+- **锚点即资产**：审计包一旦跨越"修补落地"的时点，**没有锚点机制就会自我欺骗**（把预期翻转当退化，或反过来把退化改绿）。ANCHOR.md + "红项逐条判定"是防这一条的机制化手段。
+- 多会话并行时：**读到的树 ≠ 别人的工作树**。`git log -1 --oneline` + 报告写明"基于哪个 sha"是最低成本的对齐。
+
+<!-- 2026-09-19 12:55:18 -->
+## 状态：✅ 第 7 棒完成 · 锚点 c6d8d63f（= origin/main）· 只读，仓库 0 改动 · QA 2
+
+**状态**：✅ 第 7 棒完成 · 锚点 `c6d8d63f`（= origin/main）· 只读，仓库 0 改动 · QA **23/23 全绿**
+**覆盖**：逐行 **14 文件 / 3,769 行**（10 靶心 + 4 补读）→ **靶心 `sandbox/offload` 44/44 = 100% 逐行走查（未读=0）**；累计 **25,087 / 230,082 ≈ 10.9%**；台账 **91 条/去重 90**（B=3·B?=12·D=60·O=14）+ 勘误 8 条；可修累计 ≈250 行。
+**产出**（`/var/minis/shared/offload-audit-0919/`）：报告 `reports/rikkaminis-modeluse-debug-misc-audit.md`（TABLE-1～7 全嵌入）· `diagrams/rikkaminis-handlers-7th-flow.md`（5 图全过渲染 + 5 PNG）· `verify_findings_7th.sh`（**91 项判据 exit 0**，含 3 条漂移断言）· `gen_tables_7th.sh`（17 项自对账）· `embed_tables_7th.py` · `closure_scan.py` / `static_var_scan.py` / `coverage_scan.py` / `gen_pngs_7th.py` · **`jvm7/`（真源码 JVM 实验）** · `HANDOFF-offload-8th.md`（下一棒入口）· INDEX/ANCHOR/HANDOFF-3rd §三/verify_all(23 项)/LEDGER-INDEX 已更新。
+**★ 最重要三条发现**：①**F-83** 共享解析器把 `--key <负值>` 当短选项 → 负参数三形态蒸发（jvm7 实测），`android-weather` 文档化位置形式无法表达负坐标（南半球/西半球全不可达），根因 1 行、与 F-70/F-78 同源；②**F-84** `PayloadSizePolicy`+`BytesFileRef`+`RunFileGuard` 三件套**声明齐、测试绿、接线零**——唯一真实生效上界是 `BoundedLineReader:31` 重复写死的 256KiB；元结论：**测试证明「逻辑对」，不证明「被调用」**；③**F-92** 工具调用入口 `Semaphore.acquire()` 无超时（池=2 静默排队）。
+**★ 锚点漂移事件（本棒最大环境增量，已机制化）**：扫描期间工作树被并行会话推进（c6d8d63f→99783703，含 P1），同日稍后又退回 main。处置：**5 个判据脚本全部锚点显式化**（横切计数从锚点提交 `git grep … c6d8d63f` 读，工作树值只记录不参与断言）；门文件断言改**容忍两个已知漂移态**（7=锚点/9=含 P1）——共享 /tmp 树上硬编码单一工作树期望值必然过期。
+**★ 本轮方法论增量**：①**期望值必须来自本棒实测**——判据收口中 16 处"写自记忆"的错误全部靠「实测→改判据」纠正；②argv 约定碰撞：coverage_scan（包路径）被 gen_tables（仓库路径）import 时撞 argv → import 前冲刷 `sys.argv`；③判据失败几乎从不出在「结论对不对」，出在「判据怎么写」（构造形态全覆盖：位置/具名参数、var/val、注释 vs 代码）。
+**下一棒**：`HANDOFF-offload-8th.md`——**没有「继续扫」选项了**，二选一：①转修补批次（推荐，先修 F-83 共享层 1 行 + F-84 拍板）；②换方法扫 Ring 2（≈27k 行，按用户可见行为抽样不逐行）。
+<!-- 2026-09-19 12:56 -->
+
+<!-- 2026-09-19 12:57:37 -->
+## 09-19：云端两分支审查 + 合并进 main = 99783703（P1 隐私面 + 子代理上下文）
+
+
+**用户指令**：检查云端两个分支有没有引入问题，没问题就合并，合并触发后不用管。
+
+**远端实况（本轮实测）**：`main = c6d8d63f` · `fix/audit6-p1-privacy-surface @ fbb08672`（P1 隐私面，11 文件 +30/−2）· `fix/subagent-context-and-frontmatter @ a23df43b`（5 文件 +281/−23）。两分支同基 c6d8d63f，**文件交集 = 0**。
+
+**审查结论：两个分支都干净，无回归。**
+- P1：`OffloadGate.enforce(toolName, displayName, args, request)` 签名/作用域匹配（help 早退在门之前 = 保留免权限帮助）；notification/speech_recognition 从 SYSTEM/MEDIA 改 PRIVACY + `showInSettings` 默认 true → 设置页可见可关、默认仍 BYPASS（不改体验）；`toolTitleRes` 补 2 映射；**7 个 strings.xml（values/de/ja/ko/ru/zh/zh-rTW）全加 2 key**（审计 E-5 预言的 7 文件 i18n 齐活）；`i18n_check.py` 无孤儿。
+- subagent：`SkillInfo.frontmatter` 接口默认实现（stub 不破）；`SkillRepository.loadAll()` 的 frontmatter 与 body **同源同读磁盘**（readSkillMdFrontmatter + readSkillMdBody）不混 DB；`HeadlessChatRunner` 走 `defaultThinkingLevel.name` 写入，读回侧 `ThinkingLevel.valueOf(name)`（ChatSessionLifecycle:852）→ **编码闭环一致**；主/子 prompt 片段顺序一致（skill → global → daily → rollup，integration/MCP 刻意不给）；`_thinkingLevel.value` 继承取代硬编码 OFF。
+- 扫描门 `scan.sh` **10/10 全绿**（在合并树上跑）。
+
+**合并方法（可复用）**：无文件交集 → 本地 `git cherry-pick a23df43` 到 fbb0867 之上得到 `review/combined`（无冲突），**单轮 CI 验证并集树**（run 35421191680 success，含全量单测 + APK）→ ff main → `push-main --yes` → 删两个 fix 分支 + API DELETE `review/combined`。校验手法：`git diff --stat a23df43 combined -- <sub files>` 与 `fbb0867 combined -- <p1 files>` 均空 = 合并树是两改动的精确并集。
+
+**两个残留缺口（不阻塞，非回归；留给后续一行修）**：`SkillRepository.add()`（:165）与 `loadAll()` 自动发现路径（:1469）构造 `Skill` 时**未填 frontmatter** → 新导入/新发现的 skill 在**同一轮内** spawn 会报"不是 subagent"（下一轮 reloadFromDisk 后自愈）。修法：两处补 `frontmatter = SubagentSkill.extractFrontmatterBlock(raw)`。
+
+**审计包影响（告知项，未动）**：`/var/minis/shared/offload-audit-0919/` 有 3 处判据因 P1 落地**预期翻红**——`verify_findings_4th.sh` F-41"handler 内门调用数=0"与"全仓仅 7 个文件调用门"（现 9）、`verify_findings_5th.sh` F-51 同款。按 ANCHOR 流程需重锚 + 改期望值（不删判据）。`/tmp/RikkaMinis` 的 main 已 ff 到 99783703（bootstrap.sh 会自行切回锚点，属设计内）。
+
+**终态**：main = `99783703`，远端仅剩 main，main push CI #35422606541 在跑（含 Publish to Releases），未等。
+
+<!-- 2026-09-19 13:51:30 -->
+## 09-19：offload 审计第 8 棒完成（Ring 2 第一段 = config/tools/debug/browser/speech 抽样 → F-95…F-97）
+
+
+**用户指令（本棒方向性）**：「继续扫」「扫完之后，再统一进行其他的处理」→ **修补全部推后，资源投在把 Ring 2 扫完**。
+
+**★ 锚点机制升级（本棒最大环境增量）**：开工实测 **P1 隐私面批次已合并 main**（`fbb08672`，门文件全仓/包内均 7→9）+ subagent 修复（`99783703`）→ main 由 `c6d8d63f` 前进。处置：**不重锚**（第 1–7 棒历史结论合法锚定历史树），改**双基线** —— `ANCHOR.md` 保 `ANCHOR: c6d8d63f` + 新增「第 8 棒扫描基线 `99783703`」节。两处具体修法：①`verify_findings_7th.sh` 的「origin/main == 锚点」断言按**预期翻转**改写为「锚点仍是 origin/main 的**祖先**（守护"历史未被 force-push 改写"）+ 记录前进值」；②**把硬编码 `AGREV` 改为从 ANCHOR.md 直读**（注释自称"单一来源"实际硬编码 → 与 ANCHOR.md 不一致时会产生"既不跟锚点也不跟工作树"的第三态，本棒开工即撞上：`AGREV=99783703` 而 ANCHOR.md=`c6d8d63f` → F-25 翻红）。
+
+**★ 最重要三条**：①**F-95【B】**三 collection 的 `add()` 一律 `as? X)?.value ?: 默认值`（Providers 11 处），**同字段** `write()` 一律 `?: throw ConfigError.TypeMismatch`（各 6–8 处）。`ConfigValue.fromJsonAny` 三条静默路径（`is String→Str` / `is Long` 超 Int 范围→`Double` / `else→Null`）使「键存在但类型不符」与「未提供」无法区分。**jvm8 真源码 JVM 实测四场景**（`"8000"` / `9999999999` / `"true"` / `"a,b"` → 全 null）→ 现实触发 = **AI 把数字写成字符串**；后果含**语义反转**（`context_window = null` 上游语义 = 不设上限，而用户想设 8000）。②**F-96【D】**`debug.ls`/sessions-ls 的 `maxDepth` **无 clamp**（`:295` 默认 3 / `:320` 默认 4），而同文件 `:870` 有 `coerceIn(1,200)`（同参数三处两种待遇）→ `{"path":"/","maxDepth":100000}` 全深度遍历（debug-only + token 故 D）。③**F-97【O】**`BROWSER_READ_ACTIONS` 注释称 "plus the other purely-read actions"，但 diagnostics 三件套（`GET_CONSOLE_MESSAGES`/`GET_NETWORK_REQUESTS`，自述 absorbed from Operit）未入白名单 → 只少并行。
+**观察 O-1（非缺陷）**：`DebugServer` 监听**全接口**（`ServerSocket(port,10)`，LAN 可达）+ 三门齐备（`BuildConfig.DEBUG` @MinisApp:867 / token 鉴权含 loopback / token 不落日志）+ debug-only 直通入口（`minisConfig.exec` 带 `skipConfirmation=true`、`shizuku.exec`、`sessions.exec`）→ 判为**设计项**，建议 KDoc 补一句全接口监听声明。
+**勘误 E-9**：**F-82 措辞收窄** —— `ConfigBridge.readFieldRaw` **内部有** master-switch 检查（读路径受控，ConfigBridge 全文 3 处 `isEnabled`）；真实情况是 `ConfigOffloadHandler` 三层里 `list-topics`/`topic-help` 各有早退、`handleGet` 靠下层兜底 → 改述为「写法不一致」，级别仍 D。
+
+**★ 元结论（可复用）**：**Ring 2 = 内部实现层，缺陷密度显著低于 handler 边界层** —— 本棒精读 ≈3,800 行 → 3 条（含 1 条 O 级）；对照前 7 棒平均 3,769 行 → 15 条（**差 5–7 倍**）→ **审计资源应随密度重分配，而非平均用力**。另：筛子 S3/S4 共 **29 处命中，核实后 0 缺陷**（全是有意设计的回退/清理，or 确认门在上层）。
+
+**★ 方法论增量**：①**筛子只定位、结论必回读**（29 命中 0 缺陷）；②**期望值必须当轮实测**（判据首版 6 类失败全因"按记忆写模式/数值"）；③**BRE 陷阱第二次复发** —— GNU grep 的 `\(` 是**分组**、`\?` 是**可选量词**（`[B\?]` 退化同款）→ **判据一律 `grep -F`**；④**真源码 JVM 实验仍是纯逻辑最强判据**（F-95 四场景表，成本 = 单文件 + 1 jar + 10 行 main）。
+
+**★ 并行会话风险实测**：本包目录与 `/tmp/RikkaMinis` 均**跨会话共享** —— `verify_findings*.sh` 五个文件曾在**同一秒（13:13:33）**被批量写入；`AGREV` 曾在 8 分钟内被改。处置：产出一律 `*_8th` 命名；改共享文件（INDEX/ANCHOR/verify_all）前先读再写。
+**★ 排查手法（可复用）**：`verify_all.sh` 第 1 步跑 `bootstrap.sh` → **会把工作树切回锚点**（回答"HEAD 怎么自己变了"）；`file_edit` 返回的字节数**不是文件大小**（别据此判断损坏，用 `wc -c` 复核）。
+
+**产出**（`/var/minis/shared/offload-audit-0919/`）：报告 `reports/rikkaminis-ring2-8th-audit.md`(18KB) · **`verify_findings_8th.sh`（52 项判据 exit 0）** · 图 `diagrams/rikkaminis-ring2-8th-flow.md`（**4 图全过 mermaid.ink 渲染校验**）· **`rink2_scan.py`（S1–S6 六类横切筛子，可复用）** · **`jvm8/`（真源码 JVM 实验 = F-95 硬证据 + README 复现）** · `check_diagrams_8th.sh` · **`HANDOFF-offload-9th.md`**（下一棒入口，含用户"继续扫"指令 + P1–P5 剩余清单）· INDEX/ANCHOR/LEDGER-INDEX/HANDOFF-3rd(台账) 已更新 · `verify_all.sh` 扩到 **27 项**。
+
+**覆盖**：筛子全量 **88 文件 / 27,003 行**（Ring 2 全景 = speech 1649 + browser 5611 + config 4963 + service 3459 + agent 2922 + tools 2792 + debug 5607）+ 精读抽查 **≈3,800 行（14%）**；**剩余 ≈23,200 行 → 第 9 棒**（P1 = `browser/BrowserUseManager`+`BrowserTabPool` 3,944 行；P2 = `debug/*Methods.kt` ≈2,600）。台账 **94 条/去重 93**（B=4·B?=12·D=61·O=15）+ 勘误 **9** 条。
+**状态**：✅ 第 8 棒完成 · 只读，仓库 **0 改动** · QA **27/27 全绿**
+
+<!-- 2026-09-19 14:32:23 -->
+## 09-19：offload 审计第 9 棒完成（Ring 2 / P1 = `browser` 包 → F-98…F-104）
+
+
+**状态**：✅ 第 9 棒完成 · 只读，仓库 **0 改动** · QA `verify_all.sh` **32/32 全绿** · 判据 `verify_findings_9th.sh` **73/73** · 生成器自对账 16 项
+**覆盖**：`browser/` 包 **12/12 文件逐行走查 = 5,611 行** + `debug/BrowserDebugMethods`(179) = **5,790 行** + 跨包取证 ≈600 行（NativeOffload 线程模型 / BrowserUseOffloadHandler / ToolConcurrencyPolicy / PRootKernel / **上游 AOSP·Chromium 源码**）。Ring 2 累计逐行走查 **9,590 / 27,003 = 35.5%**，剩余 ≈17,413 行。
+**产出**（`/var/minis/shared/offload-audit-0919/`）：报告 `reports/rikkaminis-ring2-9th-browser-audit.md`(28KB) · `verify_findings_9th.sh`(73 项) · `gen_tables_9th.py/.sh`(自对账 16) + `embed_tables_9th.py` · `diagrams/rikkaminis-ring2-9th-flow.md`(4 图全过 mermaid.ink) · `check_diagrams_9th.sh` · **`jvm9/`（Exp-A 真源码 / Exp-B 最小复现 + README 复现配方与实测数字）** · `HANDOFF-offload-10th.md` · 台账/INDEX/ANCHOR/verify_all(27→32 项) 已更新 · LEDGER-INDEX **101 条/去重 100**（B=4·B?=13·D=65·O=17）。
+
+**★ 最重要三条**：①**F-100【B?】tab 池满时 `window.open`/`target=_blank` 静默作废** —— `handleNewWindow` 满池早退（`:1023-1025`，只有 Log.w）**永不执行 `:1047 resultMsg.sendToTarget()`**，而 `onCreateWindow`（Manager `:726`）**恒返回 true**（`onNewWindow != null`）→ 违反 AOSP javadoc 契约（返回 true 就必须发送）→ 页面侧弹窗永久悬空；`setSupportMultipleWindows(true)` 使所有 `_blank` 走此路径、`MAX_TABS=3` 而 agent 连续 tab-less navigate 会扇出建 tab ⇒ **池满=常态**，agent 只见 `clicked: true` 且 URL 未变、零错误。对照面 `newTab :966` / `acquireTab` 都有显式错误 ⇒ **同仓三标准**。
+②**F-98【D】`Tab.inUse` 被 offload worker 线程写，而 KDoc 原文声称 "Runs on the Main dispatcher"** —— `runAcquiredAction` 的 `finally`（`:769-795`）**无 dispatcher 切换**，隐式分支 `:826 tab.inUse = true` 是同步写（在 launch 之前）；写方线程三源确证：`NativeOffload.kt:201 thread(name="native-offload-accept")` → `:328 handler.handle()` → `BrowserUseOffloadHandler.kt:95 runBlocking{}`；三个读点（`acquireTab` 扇出判定 / `evictIdleTabs` / `onTrimMemory`）**全在 Main** → 非原子 check-then-act 可致同一 WebView 被并发驱动、或 busy tab 被销毁（正是 `fix/audit-s4h2` 守护的不变量）。**同族第 2 例**（第 5 棒 F-62）。
+③**F-101【O】`BrowserRssProbe.record()` 并发丢更新（真源码 JVM 实测）** —— `computeIfAbsent` + `st.count += 1`（`:63`）非原子；**未改一字的真源码**跑 8 线程 × 20k：单线程 160,000 ✅ / 并发 **153,540（丢 6,460 = 4.04%）**、cum 156MB→129MB。同族：`OffloadRssProbe`、`ProviderRssProbe` 同款。
+
+**其余 4 条**：**F-99【D】**`saveState()` 也从 worker 线程调（`savedURLs` 普通 HashMap 跨线程 + 同一 JSON 双 `writeText`，非原子替换 → 会话 tab URL/视口可能「凭空重置」）· **F-102【D】**JS 抛异常 → `success=true` 且正文是**字面量 `null`**（哨兵 `:1723 result ?: "null"` 喂进 `:1742`/`:1761` 的失败分支；触发=非法 CSS 选择器，因 click/get_text/scroll 的 JS **无 try/catch**；对照 `getBackbone` 报 error、`executeJS` 走 reject ⇒ 三标准，与第 6 棒 F-78 同族）· **F-103【D】**`evaluateJavascript` **无超时**（同文件三条 await 只有它无界：navTimeoutSec / executeJS 30s / awaitPromiseJs 60s）+ `destroy() :2404` 不收敛在飞 deferred → tab 被销毁时永久挂起；**in-app 路径（`ChatToolExecutors:104`）无任何兜底** · **F-104【O】**`downloadJobs[id]=job` 与协程体自清理竞速（JVM 最小复现：2 万次残留 **3,191 = 16%**，`CoroutineStart.LAZY` 对照 **0**）。
+**观察 O-2**：`BrowserDebugMethods.pageInfo :66` 不检查 `res.success`（同文件其余 **4** 处都 `if (!res.success) throw RPCException(-32000,…)`）。**勘误 E-10**：第 8 棒把 `downloadJobs` 判为「有清理」不完整 —— 清理存在但**有竞态洞**。
+**7 条负面结果（已核实非缺陷，防止重复投入）**：`resultMsg` 恒非空（Chromium `WebViewContentsClientAdapter:322-328` 每次都构造 transport ⇒ 防御写法是死代码）· `minis://` 路径穿越被 `safeResolveWithin` 拒 · `BrowserHistoryStore.save()` 无锁但唯一写方在 Main（仅留锁纪律例外）· `viewTree` maxDepth 不构成 F-96 同类（受真实树深度约束）· `ChatDebugMethods` 的 limit/offset **已 clamp 干净** · `getBackbone` maxDepth 无实害 · `createTab`/`acquireTab` 满池错误面正确。
+
+**★ 元结论（修正第 8 棒口径）**：第 8 棒的「Ring 2 密度显著低于 handler 层」**只在 config/tools/speech 这半边成立**；`browser` 这种**含并发状态机的包**，≈3,800 行投入 → 7 条发现（含 1 条 B?），密度回到前 7 棒水位 ⇒ **含状态机的包按「状态-线程矩阵」开工，不按横切筛子**。
+**★ 方法论增量（可复用）**：①**状态-线程矩阵**（`状态/写点/线程/读点/跨线程?`）比筛子更适合并发包，本棒 4 条发现出自它；②**「防御性写法」必须回上游源码确认死活** —— 一条 `curl <googlesource>/...?format=TEXT | base64 -d` 就定案（本棒两条相反结论都出自此，无需设备）；③「**同文件两种待遇**」是最高产判据形态（本棒 4 条全是：满池三标准 / 同一失败三标准 / 三条 await 只有一条无界 / 5:1）；④**真源码 JVM 实验的边界要写进 README**（`BrowserRssProbe` 只有 `android.util.Log` 一个依赖 → 可真源码；`BrowserTabPool` 依赖 Context/WebView → 只能最小复现，**不许当同等级证据**）。
+**★ 环境口径订正**：Ring 2 行数请用 `git grep -c -e '^' <rev> -- <pkg>/ | awk -F: '{s+=$NF} END{print s}'`（基线 27,003，复现第 8 棒数字）；`cat *.kt | grep -c ''` 会**少算**（无尾换行文件与下一个文件首行合并，本仓少算 11 行）。任务书里 `debug/*Methods.kt` = 2,595 是**估计值**，实测 **2,235**。
+**下一棒**：`HANDOFF-offload-10th.md` —— **P4 提前**：`agent/runtime/AgentRecoveryPolicy`(256) + `AgentRunReducer`(517) + `SoulStore`(615) ≈1,400 行（与 F-98/F-99 同型的第 2 类 bug 高产区）；次选 P2 剩余 `debug/*Methods` 2,056 行。
+
+<!-- 2026-09-19 15:15:21 -->
+## 09-19：offload 审计第 10 棒完成（Ring 2 / P4 = `agent/` 运行时 + `SoulStore` → F-105…F-115）
+
+
+**状态**：✅ 第 10 棒完成 · 只读，仓库 **0 改动** · QA `verify_all.sh` **38/38** · 判据 `verify_findings_10th.sh` **99/99** · 生成器自对账 **40 项**
+**锚点**：历史 `c6d8d63f` · 扫描基线 `99783703`
+
+**覆盖**：三靶心逐行走查 `AgentRunReducer`(517) + `SoulStore`(615) + `AgentRecoveryPolicy`(**257**，非 256 —— 无尾换行，`wc -l` 少算) = **1,389 行** + 生产唯一接线点 `ChatAgentTraceObserver`(512) = **1,901 行**；跨包取证 ≈3,000 行。Ring 2 累计 **11,491 / 27,003 = 42.6%**，剩余 ≈15,512。
+
+**产出**（`/var/minis/shared/offload-audit-0919/`）：报告 `reports/rikkaminis-agent-runtime-soul-audit.md`(36KB) · `verify_findings_10th.sh`(99 项) · `gen_tables_10th.py/.sh`(自对账 40) + `embed_tables_10th.py` · `diagrams/rikkaminis-agent-runtime-10th-flow.md`(4 图全过 mermaid.ink) + `check_diagrams_10th.sh` · **`jvm10/`（五组真源码实验 + `run_all.sh` 一键复现 + `prod-log-evidence.txt` / `trace-evidence.txt`）** · `HANDOFF-offload-11th.md` · 台账/INDEX/verify_all(→38) 已更新。
+
+**★ 最重要三条**：
+①**F-105【B?】T3 副作用感知重试决策层零接线** —— 生产在 shell 死亡时按 `!shellAlive` **裸重跑同一命令**（`ExecutionCoordinator:567 !shouldRetryCommand` → `:161`），契约 §6 明令「正确结果不是重跑，而是 OutcomeUnknown」，且 §6 现状盘点自己承认"没有副作用等级概念"；契约实现 `internalDecideShellRetry`(`:1155`) + `RetryPolicy.decideRetry` + `ToolRetrySafetyRegistry`(66) 全在、全有测试、**生产引用 = 0**，`outcomeKnown` 全仓 1 处 = 声明。讽刺点：`RetryPolicyTest.kt:259` 分节标题自称 "end-to-end wiring"，唯一调用者就是测试。
+②**F-106【D】T7 reducer 无 run 归属校验** —— `AgentRunState.runId`（`:239`）**只写不读**，事件除 `RunStarted` 全不带 runId ⇒ 跨 run 迟到事件污染新 run。**生产日志实证**（`minis-2026-09-18.log:15101`，本机唯一一条 REJECTED）：`compactAll invoked streaming=true`(18:59:21) → `cancelStream`(18:59:36) → `runAgentLoop ENTER`(18:59:39) → `CompactionFinished invalid in phase=CALLING_MODEL`(18:59:41)。真源码 JVM **逐字复现**；更坏变体：迟到 `CompactionStarted` 被接受（新 run 静默进 COMPACTING，**0 告警**）、迟到 `UserCancelled`+`RunFinalized` 提前置终态（后续全 REJECTED）。修法 ≈12 行（事件带 runId + 丢弃）。
+③**F-107【D】outcome-unknown 证据链三处断链** —— `CommandResult.outcomeKnown` 零写零读 · 生产 `ToolFinished` 恒 `resultKnown=true`（`ChatPromptAndTools:349` 字面量）· `AgentRuntimePort` 无生产实现 ⇒ reducer 的 `SUCCEED_WITH_UNKNOWN_TOOL` 门与契约不变量 7 **在生产无执行点**；测试侧却恰好造 `resultKnown=false`（`ScenarioRuntimePort:121,126`）= 「测试证明逻辑对，不证明被调用」同族第 2 例。
+
+**其余 8 条**：**F-108【D】**T8 恢复引擎零接线 + `terminalReason` 非决策输入（真源码：**7 个终态原因同结论**，含 `USER_CANCELLED` → `SafeToResume`）；生产重启只有 `SessionBadgeStore` PAUSED 徽标 · **F-109【D】**SOUL.md frontmatter 取值未清洗换行 → 伪造相邻字段（真源码：`style="x\nname: Evil"` → 读回 `name=Evil\"`）· **F-110【O】**trace 的 `state_transition` 不可重建（15 个 `t7State` 调用点 9 处 `from` 硬编码；449 条 transition 里进入 `CallingModel` 只有 1 条，而 `ProviderAttemptFinished(SUCCESS)` 记了 149 条）· **F-111【O】**`t7Reduce` 跨线程 RMW 无锁（IO 池 × Main；加宽窗口实测 2×20000 → 记下 8,622）· **F-112【O】**SOUL.md 双写面无互斥（A1 **确定性**丢失；A2 覆盖 ≈3.0k/10,000；A3 串行 0）· **F-113【O】**`appliedCount` = `transitions.size`（名实不符，测试钉 4/5/5）· **F-114【O】**`SoulMetadata.emoji` 四处注释两套说法，实现按"丢弃"· **F-115【O】**reducer SUCCEEDED 不查 `started>finished`（真源码 ACCEPTED，当前无生产可达路径）+ 规则 6 覆盖规则 7。
+**观察 O-3**：`harness/` 是平行实现（8 文件 ≈2,200 行），`AgentRuntimePort` 无生产实现 → F01–F14 绿场景验的是注入行为。**勘误 E-11**：09-17 把「AgentRecoveryPolicy 无构造点」记为驳、理由「T7 未接线」**不成立**（T7 已在生产运行），真缺口是「T7 不构造 T8 证据」。**勘误 E-12**：`wc -l` 与 `splitlines` 口径差（无尾换行文件）。
+**6 条负面结果**：escape/unescape 单行取值 3000 随机 **0 失败** · body 往返 0/7 失败 · `SessionMemorySheet` 绕过写面校验**不是**缺陷（读侧兜底） · 5 处 `from` 字面量只影响 trace 不影响 reducer · SUCCEEDED-with-outstanding 无生产可达路径 · UI 计数器复用 `countBody` 无第二份分类器。
+
+**★ 方法论增量**：①**状态-线程矩阵的「读点」列要允许填「无读点」**——本棒 3 条最重要发现的唯一来源，「死字段/未接线」比「跨线程」更高产；②**生产日志是跨 run 污染的最强判据**（一条 REJECTED 的前后 8 行给出完整时间线，比读代码快一个量级；日志要连前后文一起固化进包）；③**真源码 JVM 边界比想象宽**（只桩 `android.content.Context` 6 行 + `AppLogger`，`SoulStore` 615 行含 StateFlow 全真源码跑起来）；④**UI 约束 ≠ 写入侧约束**（`singleLine` 输入框挡不住 minis-config 的换行 ⇒ 判据必须落在共享序列化函数上）。
+**★ 元结论（第三次修正密度口径）**：含状态机的包再分两类 —— ①**有生产写方**的（browser：矩阵直接产出并发缺陷）②**旁路/未接线**的（agent runtime：矩阵产出**接线缺口**，因为读点根本不存在）。对第 ② 类，"内部逻辑逐行读"边际收益极低（11 条主张只有 2 条落在逻辑本身），**收益全在接缝**。
+**下一棒**：`HANDOFF-offload-11th.md` —— P1 = `agent/` 剩余 ≈1,533 行（`ToolLoopDetector` 418 / `AgentExecutionBudget` 301 / `RetryPolicy` 112 …）；P2 = `debug/`（`*Methods` 实测 2,235 + 主干 ≈3,357）。
+
+<!-- 2026-09-19 15:55:31 -->
+## 09-19：offload 审计第 11 棒完成（Ring 2 第四段 = `agent/` 剩余 + `debug/` 抽样 → F-116…F-123）
+
+
+**产出**（`/var/minis/shared/offload-audit-0919/`）：报告 `reports/rikkaminis-agent-shell-debug-audit.md`(23KB) · `verify_findings_11th.sh`(**98/98**) · `gen_tables_11th.py/.sh`(自对账 **38** 项 / 外壳 14 项) + `embed_tables_11th.py` · `diagrams/rikkaminis-agent-shell-debug-11th-flow.md`(4 图全过 mermaid.ink) + `check_diagrams_11th.sh` · **`jvm11/`（真源码 3 组 + 复刻 1 组 + `run_all.sh` 一键复现 + `probe_heredoc.py` + `out-*.txt`）** · `HANDOFF-offload-12th.md` · 台账/INDEX/LEDGER-INDEX(120 条/去重 119)/verify_all(**44/44 全绿**) 已更新。
+
+**覆盖**：`agent/` 剩余 **1,533 行 / 9 文件**（ToolLoopDetector 418 · AgentExecutionBudget 301 · AgentRunState 180 · BashismDetector 171 · OnDemandBash 149 · RetryPolicy 112 · RetrySafety 81 · ToolRetrySafetyRegistry 66 · BashismReminder 55）+ `debug/` 抽样 **869 行 / 3 文件**（HeadlessChatRunner 575 · LLMRequestLog 173 · DebugScreenshotRing 121）+ 跨包取证 ≈1,200 行 ⇒ **`agent/` 包 100% 走完**；Ring 2 累计 **13,893 / 27,003 = 51.4%**。
+
+**★ 最重要三条**：①**F-118【D】工具槽 lease 三处不一致 → `maxConcurrentTools` 是空旋钮**：生产 `:269` acquire 返回值被丢弃 / `:270` 无论是否授予都记 trace acquire / `:328` finally 无条件 release；真源码 JVM（Exp-C）：max=4 时 8 并发批真实并发 **8** 而 budget 报 4，**先释放「被拒者」后 active=0 而 4 个合法持有者仍在跑**；被拒者释放后第 6 个拿到 Allowed（真实并发 5）⇒ 一旦接上强制就会放行超额工具。②**F-121【D】heredoc 判定把非 heredoc 的 `<<` 当 heredoc 起始 → 其后全部行不被扫描**（`$((1 << 4))` / `awk 1<<3` / `echo "a<<b"` / `# a << b` / `grep 'x<<y'`，无 delim 行时**吞到 EOF**）⇒ `needsBash=false` → 静默跑 busybox sh 且无提示；真源码 JVM 六探针 0 命中（官方向量自检 **58/58** 证明装置忠实）+ 修复候选（复刻，保真 58/58、官方向量回归 **0**、6/6 探针恢复）。③**F-116【D】`global_circuit_breaker` 结构性不可达 + 拦截非粘性**：连续计数要求「同工具+同参数」，而窗口(30)=阈值(30) ⇒ 窗口内混入任意别的工具调用就永远凑不满；实测 单工具 200 次首拦第 **31** 次、此后每 31 次一次（executed **194/200**）、两/三工具交替 600/900 次 **blocked=0**。
+
+**其余 5 条**：**F-117【D】**`check()` 的 WARNING 零消费（唯一调用点只看 CRITICAL，实测丢弃 184 次）· **F-119【D】**T2 child 三方法 + token 维度零接线（`runSubagentLoop` 用 `SubagentSkillConfig.maxTurns` 自成一套，契约 §5 对 subagent 无执行点）· **F-120【O】**两处文档漂移（budget 文件头"不改变任何生产行为"过期；`fix_tool_loop_detection.md` 全仓不存在）· **F-122【D】**`HeadlessChatRunner.prompt` 未送出也报 `Completed`（sendMessage 三条早退都不翻 `isStreaming`，已算出的 `started` 落入空分支 ⇒ e2e 假绿）· **F-123【D】**凭据去敏头名单不覆盖生产实际 header（名单 3 项 vs 实测 6 项，**Azure 的 `api-key` 明文回传**；两处 `redactSecrets` 逐字复制、都没用已有的 `EnvVarRedactor`）。
+**观察 O-4…O-7**：DebugScreenshotRing 取消/PixelCopy 失败路径不回收 bitmap 且无超时 · HeadlessChatRunner 的 VM 缓存无淘汰 · ChatViewModel 7 参构造两处重复 · `DIMENSION_CONCURRENT_TOOLS`/`ESTIMATED_TOKENS` 从不经 `t7ConsumeAndTrace`（分支不可达）。
+**8 条负面结果**：参数 clamp 齐（timeoutSec/scale）· `last` 有 `takeIf { it > 0 }` · 预算不变量成立 · **`t7BudgetStopReason` 不跨 run 污染（我自己的假设，读源码驳回）** · detector 单线程假设成立 · `warningBuckets` 有天然上界 · `uiPrompt` 不产生第二个 VM · 截图环/LLM 日志均有上限。
+**勘误 E-13**：第 10 棒任务书把 `AgentExecutionBudget` 整体归入「声明 vs 接线」同族 —— 实测 T2 的 5 个主维度**是接线的**，零接线只有 child 三方法 + token 维度。
+
+**★ 方法论增量**：①**官方 conformance 向量当实验装置自检**（真源码 vs 复刻行集合逐条比，58/58 → 复刻保真性有硬数字）②**修复候选必须过官方向量回归门**（回归 0 才可声称可用）③**生产实测枚举 > 读码推断**（F-123 靠「枚举生产所有带 key/token/auth/secret 的 header 名」当场暴露）④**假设要先记账、被驳回也留痕**（本轮 2 条假设被源码/clamp 驳回，写进负面结果防下一棒重投）⑤**判据脚本的 helper 参数顺序写反会当场假红 22 项** —— `g/ga` 是 (pattern, path)，且仓外文件不能用 `git grep`。
+**★ 元结论（第三次修正）**：选靶心判据改为「**契约文档 + 测试覆盖 + 真源码可跑**三件套」——本棒 2,402 行产出 8 条、且全部有真源码 JVM 或可执行枚举判据（超过第 10 棒 1,389 行里可机器复算的那部分）。
+
+**下一棒**：`HANDOFF-offload-12th.md` —— P1 = `debug/` 主干（`DebugRPCHandler` 1,224 / `DebugMethodRegistry` 892 / `ChatMutationMethods` 539 / `ProviderMutationMethods` 608）；P2 = `debug/` 其余（`DebugInspectorMethods` 369 / `ProviderDebugMethods` 259 / `ChatDebugMethods` 281）。
+
+<!-- 2026-09-19 16:29:16 -->
+## 09-19：offload 审计第 12 棒完成（Ring 2 第五段 = `debug/` 包 12/12 文件 5,592 行全部走完 → F-124…F-133）
+
+
+**下一棒**：`HANDOFF-offload-13th.md` —— **P1 = `config/` 包（4,963 行）**（剩余最大 + 「用户可见入口 = 机器入口」三方同写一份配置 ⇒ 同族三标准富集）；P2 = `service/`(3,459)；P3 = `tools/`(2,792) / `speech/`(1,649)。Ring 2 累计 **18,437 / 27,003 ≈ 68.3%**，剩余 ≈8,566。
+
+**★ 元结论（第四次修正）**：**「机器可读的自我描述」是最高产的对撞面** —— `rpc.discover`（`DebugMethodRegistry`）把「事实」写成了可解析结构 ⇒ 声明 vs 实现**可以机械枚举**，不需要读全文。本棒 TABLE-2 机械提取 167 条 `(方法, 参数, 声明默认值)` × handler 的 `optXxx("名", <字面量>)`，**唯一不一致项**就是 F-125。凡遇同构结构（注册表/清单/schema/词表）优先找这种对撞面。
+
+**★ 方法论增量（6 条）**：①**真源码片段装置的第三种形态** —— 第 10/11 棒是「复刻 + 官方向量自检」，本棒 `jvm12/extract.py` **按行号切片**生成 `gen/Frags.kt`，片段**就是生产文本**，保真性由 `out-D-fidelity.txt` 的 `FIDELITY_LINES = 29/29` 给出 ⇒ **能切片就别复刻**；②**可移植证据 vs 平台限定证据必须分层标注** —— Exp-A 的**整数位**（`DebugRPCHandler:972-975` 四行纯运算）任何运行时都一样，而**文件位**依赖 `java.io.File`：沙箱 OpenJDK 上 `setReadable(false, ownerOnly=true)`/`setWritable(false, ownerOnly=true)` 实测是**空操作**（`jvm12/out-A-probe-fileapi.txt`），**不许**当真机（ART）结论；③**下游 clamp 必须人工登记否则假红** —— TABLE-3 只扫 handler 体，`debug.logs.read`（兜底 `AppLogger.readLogSegment:619`）与 `debug.highlight`（兜底 `DebugInspectorMethods.highlight:91`）都是「handler 没钳但下游有」；④**工具坑**：`git grep` 不支持 `--include`（rc≠0）⇒ 用 `grep -rn --include=*.kt`；`$(grep -c X f || echo 0)` 无匹配时得 `"0\n0"` ⇒ 用 `n=$(grep -c …); n=${n:-0}`；mermaid 节点标签里的 `\"` 会让 mermaid.ink 回 **400**（改单引号即过）；⑤**首版判据 11 项假红全部是「期望值按记忆写」**（如 `catch (e: Exception)` 全文件 3 次），结论本身没错 ⇒ **改期望值，不删判据**；⑥`wc -l` 与 `splitlines` 口径差在无尾换行文件上再现（沿用第 10 棒 E-12 纪律）。
+
+**9 条负面结果**：注册表 × dispatch **77/77 完全一致**（含 4 个 DEBUG-only，两边同受 `BuildConfig.DEBUG` 约束）· `debug.logs.read` limit/offset 下游 clamp 兜底 · `debug.highlight.duration` callee 有 `coerceIn(100L,10_000L)` · `imageEndpointMode` 非法值走 `-32602`（正确面 = F-126 对照组）· `provider.import` 按 label 查回**不会查错**（`importInstanceJSON` 已做 label 去重）· `OPTIONS` 早退在鉴权前但只回 204 无 CORS 头 · Content-Length 用 UTF-8 而 PrintWriter 用默认字符集（Android 默认即 UTF-8）· `snapshot` 三个读写点全在 `runOnMain`（无竞态）· DEBUG-only 门 release 不可绕。
+
+**勘误 E-14**：任务书 §1 让对照 `docs/stability/runtime-contract.md` §8 + §9/§10（debug/health 面）—— 实测该文档只有 **§1–§9、无 debug/health 章节**；debug 面上游契约实际在 **`docs/specs/debug-server-api.md`（1,824 行）**，本棒改以它为对照对象。**观察 O-11**：§8 的「没有 budget consume/refuse、state transition、resource acquire/release、terminal reason」5 项**全被实现推翻**（`AgentTraceRecorder.kt:53-56`），但 §9 已声明锚点 `9672e09e` ⇒ 属时点快照不记缺陷。
+
+**★ 最重要三条**：①**F-124【D】`chat.session.delete` 在 IO 线程 release `ChatViewModelStore`** —— `DebugServer` 连接处理跑在 `CoroutineScope(Dispatchers.IO)`（`:44`）+ `runBlocking{rpcHandler.handle}`（`:265`），`ChatMutationMethods:412` 径直调 `release()`，这是**三处调用点里唯一没有 Main hop 的一处**（另两处 `ChatHistoryDrawer:318`/`ChatViewModel:3700` 都 `withContext(Main)`，前者注释原文 "release touches Compose state and **must run on Main**"）；后果链：`release → ViewModelStore.clear()`（androidx 标 @MainThread）`→ onCleared:3641 → _browserTabPoolRef?.dispose():3661 → BrowserTabPool.dispose:1226 → destroyTab:1234 → tab.manager.destroy():1217`（WebView 要求创建线程），而 `dispose` 只把 `unregisterComponentCallbacks` 包了 `runCatching`（`:1229`）⇒ 首个抛出后**剩余 tab 不销毁 / `_tabs` 不清空:1238 / `saveState` 不执行:1240**，异常冒泡到 `catch(e: Exception)` ⇒ **会话已删但 RPC 回 -32000**（部分成功报失败）。②**F-127【D】`DebugServer` 的 `Content-Length` 无上界 → `CharArray(Int.MAX_VALUE)` 逃出 `catch (Exception)`** —— `:250` 只判 `<= 0`、`:256` 直接分配、`:246` `catch (e: Exception)`；真源码片段 Exp-B 实测 `OUTCOME = escaped_as_OutOfMemoryError`、`OOM_IS_EXCEPTION = false`、4 MiB 对照 `allocated_ok`；`scope.launch:120` 无 `CoroutineExceptionHandler` ⇒ 无人接。同包对照面：`handleReadFile` 的 `limit` 正是为同一理由加固的（`[fix/audit-s7l2]` 注释原文提到 token 鉴权客户端可传 `Int.MAX_VALUE`）= **同一威胁模型、同一批加固漏掉的那一处**。③**F-129【D】`debug.writeFile` 的 `mode`：文档说 octal，实现只在带前导 `0` 时才按八进制解析** —— `:972` `if (modeStr.startsWith("0")) toInt(8) else toInt(10)`；Exp-A（`ModeBitsFrag` = `:972-975`）实测 `"0755"`→493 意图一致 / `"755"`→**755(十进制)**→(R✗W✓X✗) / `"777"`→(R✓W✗X✗) **与意图完全相反** / `"0o644"`/`"u+x"`/`"09"`/`""`/`"abc"` 解析抛异常被 `runCatching:971` 吞掉 ⇒ **静默不应用、响应仍 ok:true**；三处 `setXxx(bit, ownerOnly=**true**)`(:975-977) ⇒ group/other 位永远不动，注册表示例的 `"0644"` 拿不到 0o644。
+
+**其余 6 条**：**F-125【D】**`seedBuiltInModels` 注册表与契约都声明 default=`true`、实现 `optBoolean(..., false)`（`:90` 注释自证 legacy opt-in）⇒ rpc.discover 客户端建实例得到空模型表 · **F-126【D】**`provider.groups.*` 策略未知值**静默降级**（`parseStrategy("loadbalace")`/`("roundRobin")`（**契约文档自己的示例词**）→ fallback；`parseFallback("limited")`（契约声明的默认值词）→ default 而实现无此分支、输出侧写枚举名 `"default"`），同文件 `providerType`/`credentialType`/`imageEndpointMode` 非法值一律 `-32602` ⇒ 同族三标准；`groupsUpdate` 一个拼错值会把既有 `loadBalance` 组**静默改成 fallback** · **F-128【D】**`chat.uiPrompt` 三重静默成功（不校验 session 存在 / 全空白 prompt 被 `sendMessage` 首段早退 / `ok:true` 无条件），与第 11 棒 **F-122 同根因、入口不同** ⇒ 应修在 `sendMessage` 层 · **F-133【D】**`debug.update.download` 的 `size`/`digest` 参数与 `integrity*` 返回全未进注册表（`PendingUpdateStore:185-190` 真在比对 `publisherDigest` ⇒ 非死代码；`update.check` 的 `publisher_digest` 也没写进它的 returns ⇒ 官方 e2e 流程在 rpc.discover 里两端都不可见） · **F-130【O】**`debug.viewTree` 注册表说 "Array of root nodes"、实现单根时返回对象（Android 恒单根） · **F-131【O】**`DebugInspectorMethods.snapshot` 是静态强引用表（`NodeRef.S` 持 `SemanticsNode` 强引用，只在下次 viewTree/search 清空，无 lifecycle 钩子） · **F-132【O】**`captureActivityScreenshot` 失败分支丢弃已申请的 bitmap 且本函数内 `recycle()` 出现 0 次（第 11 棒 O-4 同根因第 2 例 ⇒ 共享 helper）。
+
+**覆盖**：逐行走查 `debug/` 主干 **3,263 行 / 4 文件**（DebugRPCHandler 1224 · DebugMethodRegistry 892 · ChatMutationMethods 539 · ProviderMutationMethods 608）+ P2 **1,281 行 / 4 文件**（DebugServer 372 · DebugInspectorMethods 369 · ChatDebugMethods 281 · ProviderDebugMethods 259）⇒ **`debug/` 包 12/12 文件 / 5,592 行全部走完**。台账 **130 条 / 去重 129**（B=4 · B?=14 · D=83(+1 架构) · O=27(+1 确定性)，脚本抽取）；可修累计 ≈280 行。
+
+**产出**（`/var/minis/shared/offload-audit-0919/`）：报告 `reports/rikkaminis-debug-rpc-12th-audit.md`(33KB) · **`verify_findings_12th.sh`（86/86）** · `gen_tables_12th.py/.sh`(自对账 **49** 项 / 外壳 **17** 项) + `embed_tables_12th.py` · `diagrams/rikkaminis-debug-rpc-12th-flow.md`(4 图全过 mermaid.ink) + `check_diagrams_12th.sh` · **`jvm12/`（`extract.py` 行号切片 + 真源码片段 3 组 + `probe_fileapi.kt` + `run_all.sh` 一键复现 + `out-*.txt`，保真 29/29）** · `HANDOFF-offload-13th.md` · 台账/INDEX/LEDGER-INDEX/verify_all(**50/50 全绿**) 已更新。
+
+**状态**：✅ 第 12 棒完成 · 只读，仓库 **0 改动**（HEAD = `c6d8d63f` = 锚点）· QA `verify_all.sh` **50/50** · 判据 **86/86** · 生成器自对账 **49/49**
+
+<!-- 2026-09-19 17:30:52 -->
+## 09-19：offload 审计第 13 棒完成（Ring 2 第六段 = `config/` 包 4,963 行 / 20 文件全部走完 → F-134…F-140）
+
+
+**锚点**：`c6d8d63f`（= origin/main，未前进）· **扫描基线** `99783703`
+**状态**：✅ 第 13 棒完成 · 只读，仓库 **0 改动** · QA `verify_all.sh` **56/56** · 判据 `verify_findings_13th.sh` **69/69** · 生成器自对账 **29/29** · 图 **4/4** 过 mermaid.ink
+
+**本棒主题**：**「用户可见入口 = 机器入口」三方同写一份配置**（用户设置页 / `minis-config` CLI / DEBUG RPC 写同一 registry）—— 7 条发现全部落在**三方之间或声明与实现之间**。
+
+**产出**（`/var/minis/shared/offload-audit-0919/`）：报告 `reports/rikkaminis-config-package-audit.md` · **`verify_findings_13th.sh`（69/69）** · `gen_tables_13th.py/.sh`（自对账 **29/29**）+ `embed_tables_13th.py` · `tables_13th.md`（8 表）· `diagrams/rikkaminis-config-13th-flow.md` + `check_diagrams_13th.sh`（4 图）· **`jvm13/`（4 组实验 + `extract.py` 逐行切片 + `run_all.sh` 一键复现 + `deadstr_probe.py` + `out-*.txt`，保真 22/22）** · `HANDOFF-offload-14th.md` · 台账/LEDGER-INDEX(140 条/去重 139)/INDEX/verify_all(**56/56**) 已更新。
+
+**7 条发现**：**F-134【D】★ prefs 监听器被 `WeakHashMap` 弱持有 ⇒ runtime 35 字段/34 个 `@Volatile` 缓存「写了不生效」原样回来** —— `ConfigBuiltins.kt:145-156` 注册匿名捕获 lambda 后**无人强引用**；AOSP `SharedPreferencesImpl.java:111-112` 是 `WeakHashMap`（URL+sha256+行号固化）⇒ GC 后回调静默消失且不重注册；同仓 5 处（MainActivity:410/ChatActionState:30/ChatScreen:1562/AppearanceScreen:202/ChatTuningScreen:186）全部 `val` 持有 + onDispose 注销，**ConfigBuiltins:152 是全仓唯一不持有的**；**Exp-B 三组实测：A 生产姿势 fired=0 / B 强引用 1 / C 不捕获单例 1**（C 组解释为何简化测试会假绿） · **F-135【D】★ 配置变更审计面整体不存在，却由 4 类声明共同承诺**：代理工具描述（`ChatPromptAndTools:1229`「logged to a revertable audit (1000-entry rolling log)」+「Settings → Logs → Config Changes」）、用户可见权限文案（8 语言，`strings.xml:695` → `OffloadPermissionScreen:84`）、KDoc ×4（`old_value` 列 / `auditList` / `verb="revert"`）、i18n 资源 **26×8=182 条** `logs_config_*`；实现面全空（无表无列 · `auditList` 仅 KDoc 自称 · `logs_config` 在 .kt 中 0 引用 · `revertable` 生产读点 0 · "revert" 动词死分支） · **F-136【D】
+
+<!-- 2026-09-19 17:31:02 -->
+## （接上条）F-136【D】i18n 门只查一个方向 —— scripts/scan/i18n_check.py Phas
+
+（接上条）**F-136【D】i18n 门只查一个方向** —— `scripts/scan/i18n_check.py` Phase 1 自述 "Orphan keys (code references but no definition)"，只查「引用→定义」，**反向 0 检查**（且把业界 orphan 语义反着叫）；本棒补写只读探针 `jvm13/deadstr_probe.py` 实测 **DEFINED 1,654 / 死键 201（12%）**，其中 **25 条**就是 F-135 家族 ⇒ 门按设计看不见它；修法 ~10 行（Phase 1b + 存量白名单） · **F-137【D】写批次没有「部分应用」状态** —— 注释原文「we abort the batch」而代码 `continue`，且 `applied` 非空时 `earlyError` 被丢弃 ⇒ 行级失败被 `ok:true` 掩盖；用户逐行取消勾选走同一条 `continue` ⇒ 与第 12 棒 **F-124**（已写入却回 ok:false）构成**同一信封两个方向都错** · **F-138【D】`add` 载荷静默容错 vs `set` 报错** —— `GroupsCollection.kt:66/:70` `?: 默认值` vs `:146/:166` `throw InvalidValue`；**Exp-C 实测（真源码切片，保真 22/22）：ADD_ILLEGAL_SILENT_ROUTING = 7 / FALLBACK = 4，SET 全部 REJECT**；**F-126 家族第 2、3 例** ⇒ 应修在共享层 · **F-139【D】`debug.minisConfig.exec set` 绕过 master switch**（`performWriteBatch` 体内 `isEnabled` 0 次，`writeFields`/`readFieldRaw` 有）⇒ 关掉 minis-config 后 `exec get` 拒、`exec set` 照写；F-82 家族第 3 例 · **F-140【D】`--help` 写「124 confirmation timed out (30 s)」而实现 `TIMEOUT_MS = 120_000`**（同类 KDoc 自述「the OLD 30s window」）。
+
+**观察 3 条**：**O-12（latent）**确认门 `queue` 从不驱逐已解析项 —— 我原假设「幽灵对话框」，**Exp-A（真源码 + 自制 Main shim + 前台观察者）把它证伪**（`DEAD_DIALOGS = 0` 两变体一致：死线按入队序递增、前排必在自己死线上先解析 ⇒ 同一批回调里自清）；补丁变体（2 行 `queue.removeAll`）已备无回归，**触发条件**＝超时变 per-request／对话框打开就延长／任何让排队项死线早于前排的改动 · **O-13** 全队列同时到点会级联顶出 ~7 ms（后台闪一条无效通知）· **O-14** `readField` 的 `total` 语义随模式变化（不构成缺陷，记以防重投）。
+
+**8 条负面结果**：runtime 界与设置页**共用同一批常量**（不会互相越界，与 F-95 家族相反）· 密钥面干净（HiddenField 一律 permission_denied；`applied[].old/new` 一律 masked；`.append` 走 redactingSecrets）· **`ConfigValue.Obj` 封的是 `Map` 而非 `JSONObject`**（缺键返回 null 不抛异常 ⇒ `add` 的「name required」路径可达；我第一次装置误传 JSONObject 才出现假象 —— 装置错不是源码错）· 76 path 零重复 · 分页 clamp [1,100] 自洽 · `session.thinkingLevel` null→off 与 `ChatSessionLifecycle:853` 一致 · 字体档位 -2..3 同一张表 · `writeFields` 无 Main-only writer（不构成 F-124 同族）。
+
+**★ 方法论增量（6 条）**
+
+<!-- 2026-09-19 17:31:12 -->
+## （接上条）★ 方法论增量（6 条）：①实验证伪自己的假设是最高产产出形态 —— 「幽灵对话框」假设带了完整装置后被推翻，
+
+（接上条）**★ 方法论增量（6 条）**：①**实验证伪自己的假设是最高产产出形态** —— 「幽灵对话框」假设带了完整装置后被推翻，换回一条**隐式不变量**的表述（附"何时会变成真缺陷"的触发条件），比假缺陷值钱；**先造装置后下结论，结论与预期不符时改结论不改装置**。②**纯 JVM 能跑硬编码 `Dispatchers.Main` 的真源码** —— `Dispatchers.Main` 由 ServiceLoader 解析 ⇒ 写 `JvmMainDispatcher.java`（`javap` 确认 `MainDispatcherFactory` 接口形状、javac 绕过 Kotlin `internal`）+ `META-INF/services` 文件 + 单线程 executor（＝Android 主线程语义），**不改一行生产代码**就能跑确认门这类状态机（`jvm13/run_all.sh` 已固化三段式：javac → service 文件 → java -cp）。③**上游原文当 ground truth**：`curl <googlesource>?format=TEXT | base64 -d` + sha256 + 行号 ⇒「复刻」升级为证据。④**「同文件两种待遇」本棒中 3 处**（listener 强/弱引用 5:1 · add 静默 vs set 抛错 · master switch 两入口两待遇）＝最高产判据形态，手法＝**枚举同一函数/字段的所有调用点逐点比对**。⑤**门也有盲区且常与命名反向绑定** —— `i18n_check.py` 把「定义未引用」叫 orphan 却只查反方向；凡「XX 门全绿」都要问**它查的是哪个方向**。⑥**反向探针便宜可复用**（`deadstr_probe.py` ~40 行 → 201/1,654 的量，把印象变数字）。
+
+**★ 判据写法坑再现 3 类（第 12 棒纪律的又一次验证）**：`register` ⊂ `unregister` 子串误命中（TABLE-3 首版 11 → 实测 8）· `sed` 切片漏传文件参数（静默返回空 → 假红）· `occurrences` vs **行数**口径差（`isEnabled` 4 vs 3）；**改期望值与写法、不删判据**，最终 69/69 全绿。
+
+**下一棒**：`HANDOFF-offload-14th.md` —— **P1 = `service/`（3,459 行，Ring 2 最后一段）**，按"含状态机优先、状态-线程矩阵（读点允许填『无读点』）"开工；P2 = `tools/`(2,792)/`speech/`(1,649) 剩余抽样；`ui/` 不逐行走查。Ring 2 累计 **23,398 / 27,003 ≈ 86.6%**，剩余 ≈3,605。
+
+<!-- 2026-09-19 18:02:53 -->
+## 09-19 晚：上下文压缩"空转"根因定位（用户报告：第 1 条消息处不断压缩但无效果）
+
+
+**现象（生产日志实证）**：auto-compact 每 10-20s 触发一次，`compactAll() invoked` 之后**无任何后续日志**（既无 divider 也无 failed）；`[CompactDiag] eAH v2 slice: priorIdx=0 **anchorIdx=0** agentHistory.size=165→191 → preAnchor=1 postAnchor=164→190 summaryChars=1665(恒定)`。
+
+**根因链（两处 + 两个加重项）**：
+1. **锚点解析退化**：`ChatCompactionLogic.resolveCompactAnchorIdx`（compactAll 路径）末尾 walk-back 用 `history[i].contentParts.all { p -> p is ToolResult }` 判"是否 tool-result 载体" —— **空 contentParts 的纯文本用户消息被 vacuous-truth 误判为 tool_result**（空集合 `all{}` = true）⇒ 所有纯文本用户消息被跳过 ⇒ 锚点穿到最前（anchor=0）或直接 -1（`sysmsg_compact_no_persisted` abort）。同文件 `walkBackUserTurnsBounded` 用的是另一套口径（`content.isNotBlank() || parts.any{Text}`）⇒ **同文件两种待遇**。
+2. **可压范围恒空**：anchor=0 ⇒ `resolveCompactStartIdx(prevMarker anchor=0)` = 1 > anchor ⇒ 走 `effectiveStartIdx > anchorIdx` 分支 ⇒ **ALREADY_COMPACTED 早退，且该分支不打 AppLogger**（诊断盲区：用户看到提示、日志看不到原因）。首压时 toCompact=[0..0]=1 条（divider 日志 `history entries: 1`）。
+3. **eAH 投影净增**：anchor=0 ⇒ preAnchor=1 + summary(1665 chars) + postAnchor=164+ ⇒ **发给模型的比压缩前更多**，token 不降反升（178k→193k/200k）。
+4. **兜底被禁用**：`AgentLoopEngine:314` `if (!compacted) trimContextHistoryWindow(...) else "skipping hard trim"` —— 把"触发了 compact"当"折叠成功"，空转时也跳过硬裁剪 ⇒ 双重失效。
+
+**真源码 JVM 实测**（`/var/minis/shared/compact-anchor-diag-0919/`，run.sh 一键复现，锚点 c6d8d63f）：
+- 形状 A1（首条用户消息 content-only，parts 空）→ `anchor=-1` ⇒ ABORT（零工作）
+- 形状 A2/A3（首条含 Text part）→ 首压 `anchor=0 start=0` 压 1 条；**二压 `start=1 > anchor=0` ⇒ ALREADY_COMPACTED 空转**；eAH 送出 1+summary+164 = 165 条（= 全量）
+- **对照组（中间插第 2 条 user-text）同样退化到 anchor=0**（因 content-only 消息被跳过）⇒ bug 不限于单 user turn 会话
+
+**日志时间线（本机 09-19）**：09:33 anchor=86 post=4（健康）→ 之后大量 anchor=0 post=266/490（退化）→ 偶发 anchor=376 post=12（健康，markerId 7ff55a43）⇒ **间歇性退化，一旦 anchor 落到 0 就锁死**（start=anchor+1 恒大于 anchor）。
+
+**修法候选（未动手）**：F1 锚点判定与 walkBack 同口径（1 行，修 vacuous-truth 误判）；F2 空转分支补 AppLogger（诊断）；F3 长 agent 循环（无第二 user-text 边界）需要按消息数/token 预算的 fallback 锚点（行为设计，需拍板）；F4 `!compacted` 判据应改为"压缩真的收缩了上下文"（安全网）。
+
+<!-- 2026-09-19 18:12:02 -->
+## 09-19：offload 审计第 14 棒完成（Ring 2 第七段 = `service/` 包 11 文件 3,459 行全部走完 → F-141…F-152）
+
+
+**主题**：`service/` = 「进程级用户可见面」（前台服务常驻通知 / 悬浮胶囊 / 内存门 / 会话并发槽）。7 条 D 级发现里 **6 条落在「同一决策的两套实现」或「声明 vs 实现」**。
+
+**状态**：✅ 第 14 棒完成 · 只读，仓库 **0 改动**（HEAD = `c6d8d63f` = 锚点）· 包闸门 `verify_all.sh` **62/62** · 判据 `verify_findings_14th.sh` **83/83** · 表生成器自对账 **60/60** · 图 **4/4** 过 mermaid.ink · LEDGER-INDEX **154 条 / 去重 153**（B=4 · B?=14 · D=97 · O=35）。
+
+**★ 7 条 D**：① **F-141 后台期间前台服务通知整体冻结** —— `SessionActivityTracker.updateService()`(:602-613)/`startServiceIfNeeded()` 在 `!isAppForeground` 时**无条件 return**，而 updateService 自己的 KDoc(:604-608) 原文承认「更新已在运行的 FG 服务是安全的，只有从后台启动已死服务才会和 kill 竞速」⇒ 切走后通知的工具名/状态/计时冻结，而胶囊（overlay 实时流）继续更新 ⇒ 两个用户可见面显示不同工具（通知唯一重建路径只有 `onStartCommand`/`onTaskRemoved`）。② **F-142 governor 的 GC 取舍只读 `isToolRunning`** ⇒ 纯流式（LLM 生成中）做**同步 GC**，而同一取舍在 `MinisApp.onTrimMemory` 用 `activeSessions || isToolRunning`，且两处注释都自述要一致（采样器注释「同 onTrimMemory 的取舍」）—— **jvm14 Exp-C 实测分歧状态恰好 1 个（纯流式）**。③ **F-143 胶囊工具标签硬编码英文**（`ToolOverlayController.toolDisplayLabel` 10 条字面量），通知侧已走 `R.string.notification_tool_*`（**7 个 values\*/strings.xml**，含 zh）；上游那次修复注释即 `[fix/audit-b22 / T8-L4]`「mixed-language notification title」⇒ 同族修复漏一处；同一胶囊里完成词已本地化、工具名是英文。④ **F-144 关闭按钮触控区 14dp**，注释自称「tap area widened by padding」而该块内无 `setPadding`（全文件仅 1 处、在 :280 文本区）；未命中按钮的点击落到容器 → 未拖动 → `onTap()` ⇒ **想关闭反而跳进聊天**（无障碍属永不砍清单）。⑤ **F-145 升档成功后置信计数不复位** ⇒ 连续第二次升档只需 1 拍（S2 第 3 拍就上 CRITICAL，而 KDoc 承诺「连续 CONFIRM_TICKS=2 拍越线」）；1 行修复候选 `TierStep(target, 0)` 在补丁变体里把 S2 推回第 4 拍且 **S1/S4/S5 拍号不变（回归 0）**。⑥ **F-146 START_STICKY 重启路径**用「0 会话/Idle」起前台服务且**无 stopSelf 路径**（`stopSelf()` 4 处：3 调用 + 1
+
+<!-- 2026-09-19 18:12:19 -->
+## （接上条 09-19 第 14 棒）⑦ F-147 isAppForeground 是普通 var（SessionAct
+
+（接上条 09-19 第 14 棒）⑦ **F-147 `isAppForeground` 是普通 `var`**（`SessionActivityTracker.kt:201`）：写于 Main（MinisApp 生命周期），读于 **IO**（`streamJob = launch(Dispatchers.IO)` → setActive/updateToolStatus → startServiceIfNeeded/updateService）⇒ 无 happens-before，陈旧 `true` 会让后台仍尝试 `startForegroundService`（正是该标志存在要避免的 T-MIUI-FGS-race）。F-98/F-99 同族。
+
+**5 条 O**：F-148 `lastNotifiedLevel` 双写方（1s 采样器 + 任意会话协程的 acquireSlot）非原子 RMW · F-149 `lingerJob` 零赋值点（4 处引用全
+
+<!-- 2026-09-19 19:04:48 -->
+## 09-19 晚：压缩修复第二棒 —— 长工具循环的预算锚点（写侧+读侧）→ main = afa404bf
+
+
+**背景**：第一棒（796307ec，F1/F2/F4）修好了锚点判定 + 诊断 + 硬裁剪兜底，但「一句指令 + 几百轮工具调用」会话只有**一个用户轮次**，而整套压缩逻辑按「用户轮次」计价 ⇒ 两侧同时退化。
+
+**读侧（本次新发现，比写侧更隐蔽）**：`effectiveAgentHistory` 的 preAnchor 按「锚点前 N=3 个**用户文本轮次**」取（上限 100 条消息）。单轮会话里那个轮次就在历史开头 ⇒ **无论锚点在哪，preAnchor 都把整个折叠区原样拉回来**，摘要省下的内容前面又全发一遍。生产日志实证：anchor=86 的会话 `preAnchorRaw=87`（= 0..86 全取）。写侧修好后若不修读侧，压缩等于白做。
+
+**本次改动（afa404bf，3 文件 +271/−18）**：
+- **写侧 `resolveBudgetAnchorIdx`**（ChatCompactionLogic）：当轮次锚点已无增量（`effectiveStartIdx > anchorIdx`）且调用方未显式指定索引时，从尾部按预算保留 `COMPACT_BUDGET_TAIL_KEEP_TOKENS = 20_000` 的活动区，其余折叠。边界安全两条：①折叠区末尾不能留下孤儿 tool_result（`history[cand+1]` 是 tool_result 载体时后退）②锚点必须有持久化 dbMessageId。
+- **读侧 `clampSliceStartByBudget`**：preAnchor 收进 `PRE_ANCHOR_MAX_TOKENS = 12_000`，保留最新消息；不收在孤儿 tool_result 上（往后收，因为其 tool_use 也在切片外）。健康会话（3 轮次本就在预算内）不受影响。
+- 参数取值理由：20k ≈ 2× `DEFAULT_AUTO_COMPACT_MIN_TAIL_TOKENS`(8k)；12k 是 warm-up 原文，故意小于 tail 预算（它每轮都叠在摘要之上重发）。两处均打 ponytail 三段注释（天花板 = 32k 小窗口模型）。
+
+**新增日志**：`[Compact] budget anchor engaged (no new user turn to fold): anchor=X → Y` · `[CompactDiag] eAH v2 preAnchor clamp: priorIdx=X → Y (budget=12000 tokens)`。
+
+**验证链**：6 例新单测（真源码 JVM，共 36 例全绿）→ scan.sh 10/10 → 分支 CI #35438509556 绿 → ff main = afa404bf → release CI 自动触发 → 远端分支已删（仅剩 main）。**待真机验证（用户）**：装新包 + 开新会话，长工具循环下应看到 `budget anchor engaged` + `preAnchor clamp` + 上下文 token 真下降。
+
+**仍未解决 / 已知边界**：①截断的 tool_result 内容（>1000 字符 prune）策略未动 ②摘要覆盖的是「工具轮的原始输出」，模型可能丢失细节（设计取舍，非 bug）③小窗口模型（32k）下 20k tail 预算占比偏高（已打 ponytail 注释标注升级触发）。
+
+<!-- 2026-09-19 19:20:36 -->
+## 09-19：offload 审计第 15 棒完成（Ring 2 第八段 = `tools/` 14 文件 2,792 行 + `speech/` 7 文件 1,649 行 → F-153…F-160）· **Ring 2 至此 27,003 行 / 88 文件全部走完**
+
+
+**状态**：✅ 只读，仓库 **0 改动**（HEAD = `c6d8d63f` = 锚点，`git status --porcelain` 空）· 包闸门 `verify_all.sh` **67/67** · 判据 `verify_findings_15th.sh` **73/73** · 生成器自对账 **6 表** · 图 **4/4** 过 mermaid.ink · 台账 **168 条 / 去重 167**（B=4 · B?=15 · D=104 · O=39+4 · 架构 1+1）
+
+**主题**：**「同一语义的两个落点，只修了一个」** —— 7 条 D 里 **4 条**是这种形态（同文件另一函数 / 同一批修复的另一个文件 / 同一张表的另一份副本），第 14 棒的"同一决策的两套实现"至此坐实为**可机械枚举的判据形态**。
+
+**★ 7 条 D**：① **F-153 工具失败行标题被原始工具 id 覆盖** —— `FileReadTool.kt:130`/`FileEditTool.kt:124` 的 catch 写 `toolTitle = NAME`（`"file_read"`），而**同一批修复**里 `FileWriteTool` 已 hoist（注释留 `CI 35198111318`）、`ReadImageTool.kt:114` 干脆省略 ⇒ 同批漏两处；后果是**覆盖**不是缺失：`AgentLoopEngine.kt:2655` `result.toolTitle.ifEmpty { existing }` 只在空串时保留，非空的 snake_case id 把 `friendlyToolTitle`/模型标题顶掉（UI `ChatAssistantMessageUI.kt:930`）。全仓 `toolTitle = NAME` 恰 2 处。② **F-154 `terminalLeaseCleanup` 保留空 token 通配** —— 同文件 `auditEvidenceGaps:257-261` 有 `[audit-0917]` 守卫（注释原文：空 token 的 acquire 会匹配同样缺 token 的 release，静默放过审计），`:284` 仍是裸 `optString == optString`。**真源码 JVM Exp-A**：同批事件 `A2: terminalLeaseCleanup=true / auditEvidenceGaps=[resource acquire missing lease_token]` = 两函数结论相反。③ **F-155 `endRun(leasesRemaining = 0)` 是生产字面量** ⇒ `terminalLeaseCleanup:279` 第一句 `if (leases >= 0) return leases == 0` 短路，**任何生产 trace 都判 clean**；Exp-A `A3 prod-shape`（acquire `slot-7` 从未 release）→ true（错）/ `A3-control`（同事件仅删该键）→ false（对）⇒ 判定完全由那个常量键决定。④ **F-156 `write()` 在 `writeLock` 外构建事件行** ⇒ 事件被盖上下一个 run 的 `run_id`（`buildLine` 内先 `clock()` 再读非 `@Volatile` 的 `activeRunId`）；同文件 `:689` 就是锁内构建的正确写法；**Exp-C 真源码 + 补丁变体**：unpatched `run_id=run-B` / patched `run_id=run-A`（`PATCH_APPLIED_LINES=4`）。⑤ **F-157 `speech/` 识别链零生产入口（1,000+ 行不可达）但冷启动仍付账** —— 包外引用**仅 3 处**（`MinisApp.kt:824` init / `SpeakOffloadHandler` 只用 TTS / `shared/TextSegmenter.kt:60` KDoc 引用的 `speech.VocabularyFilter` **全仓不存在**）；`VoiceTextSanitizer` 168 行**全仓 0 引用**（却留测试）；`appendText/flush` → `SpeechSentenceSplitter` 传递性死链；代价 = init 构造两引擎 + `refreshAvailability()`（`queryIntentServices` binder）。⑥ **F-158 采集循环把负错误码与 0 同待遇** —— `if (n <= 0) continue` 而 `AudioRecord.read()` 负值是错误码（-3/-2/-6/-1）⇒ `pcm` 不增长 ⇒ 退出条件永不成立、满速空转、`finally`（含 release）永不执行 ⇒ 后续 start 撞 "capture is already in flight"；**Exp-D 复刻**：-6/-3/-2/-1/0 全部 `NON_TERMINATING`，对照组 `exited after 4 iterations`。⑦ **F-159 `tools/` 零引用存量**（机械枚举）—— tools/ `API_DECLS=237 DEAD=35 NO_EXTERNAL_REF=98`：同表第三份死副本（`memoryWriteOpenAIDefinition`/`memoryGetOpenAIDefinition`/`MemoryRollupTool.openAIDefinition` 全仓各 1 行）、`ToolConcurrencyPolicy.partitionToolCalls` 生产调用 0（差并行度不差正确性）、trace 审计 API 只有测试在读（`sinkFailureCount` KDoc 声称 T7 用它做降级日志，T7 读点 0 = F-110 同型）。
+**★ 1 条 B?**：**F-160 `shutdown()` 的「仍可复用」声明为假** —— KDoc 原文 "may still be re-used afterwards (a fresh start launches new jobs on the cancelled scope)" 而实现 `scope.cancel()`；**Exp-E 真 kotlinx 1.8.1**：取消后 launch 体**永不执行**（`ran=false`；对照 fresh scope `ran=true`）⇒ 复用＝静默 no-op。今天不可达（`shutdown()` 无调用点）。
+**6 条 O**：O-17 引擎句柄二次解析（stop/cancel/selectLocale 重解析 `currentEngine()`，可能落到从未启动的引擎）+ 状态机无看门狗（永久 `FINISHING`，按钮永久失效且无报错）· O-18 `traceStart()`（1.0）不重置终态去重窗口而 `beginRun()`（2.0）会（Exp-B：`trace_end=1` vs `=2`）· O-19 `ConversationHistoryTool` 同文件两种数值策略（`intArg` 静默截断 `1.7` vs `cursor` 显式拒绝）· O-20 `ToolConcurrencyPolicy` KDoc 自相矛盾（`memory_get` 列白名单 vs 自述故意排除）· O-21 `MemoryTools` 用消息前缀判成功（`startsWith("Memory saved")`，文案一改就翻成失败→重试→重复条目）· O-22 下线 UI 注释残渣。
+**10 条负面结果（N-1…N-10，防重复投入）**：`ToolFailureHook` 不是死码（`ChatPromptAndTools.kt:358` 真调用）· `partitionToolCalls` 无人调用不影响正确性 · `FileWriteTool`/`ReadImageTool` 标题形状正确（对照组）· `redactSecrets` 的 `"$1$2***"` 有效（Kotlin 不把 `$1` 当模板）· 分页预算允许超出一行是有意 · `toolTitle` 默认空串不是问题（UI 有 `ifEmpty` 兜底）· 采集循环的 60s 上限/`finally` 释放/cancel 后不回调均正常 · TTS 计数协议自洽 · `SystemSpeechRecognitionEngine.stop()` 不推进 `sessionToken`（无"停止后终态被丢"）· speech 包 `fetchSupportedLocales`/有序广播/setLanguage 降级均无误。
+
+**★ 方法论增量（可复用，4 条）**：①**用注入的 `clock()` lambda 当"闸门"，把竞态做成确定性实验** —— F-156 的"锁外读 run_id"本是不可复现的时序，把 clock 换成可控 lambda（`buildLine` 先调它再读 activeRunId）后变成 `unpatched=run-B / patched=run-A` 的确定性对照；**补丁变体由脚本生成并断言命中行数**（`PATCH_APPLIED_LINES=4` + `PATCH_VERIFY: lock_wrap=1 class_renamed=1`），源码一改即 abort，杜绝"补丁没打上"的假对照。②**零引用扫描器的三个口径要点**：注释行必须排除（KDoc 里的 `[auditEvidenceGaps]` 链接会污染计数）；区分"本文件内引用"与"全树引用"（只算后者会把 private 助手全判死）；**必须覆盖 `companion object` 成员**（缩进 ≤8 那一层，v2 漏掉导致 trace 审计 API 没被列出）。③**复刻实验必须把"可终止性"做成可测量的量** —— 复刻采集循环时加迭代上限并把"上限命中"写成 `NON_TERMINATING`，否则挂死的是 harness 而不是被观测的循环。④**图校验的抽取别用 `csplit`** —— csplit 切出 5 块（含 1 个碎片）导致 4 张好图被全判 400；改用 Python 正则逐块抽取（`check_mermaid_blocks.py` 已固化）后 4/4 全 200。**判据期望值一律当轮实测**：本棒 5 处按记忆写的期望当场翻红（`buildLine(` 形态、`toolTitle = NAME` 归属、`memoryWriteOpenAIDefinition` 引用数、`partitionToolCalls` 调用形态、`ReadImageTool` catch 文案），一律改期望值 + 记理由，不删判据。
+
+**产出**（`/var/minis/shared/offload-audit-0919/`）：报告 `reports/rikkaminis-p1-tools-speech-audit.md` · **`verify_findings_15th.sh`（73/73）** · `gen_tables_15th.py/.sh`（自对账 6 项）+ `embed_tables_15th.py` · `tables_15th.md`（6 表）· **`jvm15/`（5 组实验：真源码 A/B/C + 复刻 D + 真 kotlinx E + `patch_variant.sh` + `run_all.sh` + 4 份 out）** · `diagrams/rikkaminis-p1-15th-flow.md` + `check_diagrams_15th.sh` + `check_mermaid_blocks.py` · `scan_titles.py` · `zero_ref_scan3.py` · `HANDOFF-offload-16th.md` · 台账/LEDGER-INDEX(168)/INDEX/ANCHOR(新增「Ring 2 收尾」节)/verify_all(**67/67**) 已更新。
+
+**下一棒**：`HANDOFF-offload-16th.md` —— P1 = `backup/`(3,132)+`diagnostics/`(1,923)+`logging/`(1,161)+`crash/`(1,083) ≈7,300 行（可观测性/备份恢复组，是 `four-way-sync-check` 与 `security-audit-checklist` 两个 skill 的靶心）；P2 = 小包扫尾 ≈4,400 行；P3 = 修复批次桶 A–D（**待用户放行**）。Ring 2 剩余 = **0**；`ui/`(84,174) 与 `sandbox/`(23,754) 不逐行走查。
+
+<!-- 2026-09-19 19:59:38 -->
+## 09-19：offload 审计第 16 棒完成（P1 = `backup/` + `diagnostics/` + `logging/` + `crash/` → F-161…F-169）
+
+
+**状态**：✅ 只读，仓库 **0 改动**（HEAD = `c6d8d63f` = 锚点，`git status --porcelain` 空）· 判据 `verify_findings_16th.sh` **90/90** · 总闸门 `verify_all.sh` **72/72**（新增 5 项）· 表自对账 **6 表 / 26 文件 / 7,299 行** · 图 **4/4** 过 mermaid.ink · 台账 **177 条 / 去重 176**（B=4 · B?=15 · D=109+1架构 · O=43+4latent）。
+
+**覆盖**：`backup/`(9/3,132) · `diagnostics/`(8/1,923) · `logging/`(6/1,161) · `crash/`(3/1,083) = **26 文件 7,299 行逐行走查 100%**（口径 `git grep -c -e '^'`）+ 跨包取证（MinisApp 生命周期 / MainActivity 闸门 / ChatViewModel 登记点 / ExecutionCoordinator 工具线程 / FileBrowserViewModel）。
+
+**★ 本棒主题：「边界单位」+「声明的可达性」**。9 条里 4 条是"同一语义两个落点待遇不同"（出口 vs 入口 ×2、同函数两条 early-return、同批修复只改一处），2 条是"声明的机制/消费者不可达"，3 条文档实现漂移。
+
+**4 条 D 级**：①**F-161 备份预算「字节名 / 字符实」** —— `MAX_PAYLOAD_BYTES` 64 MiB 贯穿四层但每层比的是 `String.length`（`:178` 报错文案自己写成 `"…chars, max …BYTES"`、`:282` 形参 `maxChars`、`:662` 字节值填进 `budgetTotalChars`、`:773` 导入同款、`:544` 字段 `budgetBytes`、KDoc 自称 byte-budget）；**Exp-A 真源码**：CJK `ratio=1.606` → 生产预算实际 **106 MB > 64 MiB**（`超出=YES`），ASCII `1.003`（no）⇒ 中文会话超声明 58%，`CapEnforcingWriter` 的"宁可本地失败"永不触发。②**F-162 归档出口按解压后计预算、入口只卡压缩包** —— 出口 `MAX_FILE_BYTES`4Mi + `MAX_ARCHIVE_BYTES`12Mi 都是解压后；入口只检压缩包 20Mi，`extractZipByPrefix` 逐块 inflate **无上限**（函数体切片 `MAX_` 出现 0 次，判据自动断言）⇒ zip bomb；该路径 KDoc 自述是"不可信输入"的防御层。③**F-163 `LogWriteQueue` 守恒不变量只数一半** —— `:85 if (stopped) return` 静默不计数，而 `:107/:110/:116` 三处 `dropped.incrementAndGet()` 都计数（`:110-114` 注释原文即"…holds even in the stop-race window"）；**Exp-B 真源码**：`attempts=20000 accounted=5401 uncounted=14599 invariant=false`。④**F-164 共享 `SimpleDateFormat` 存量：同批修复只覆盖 2/5** —— `MemorySpikeRecorder.kt:122`（object 级）由采样协程（`MinisApp.kt:298-306`）与工具线程（`ExecutionCoordinator.kt:284/290/322`、`ChatRepository.kt:274`）共用；**Exp-C 复刻+对照**：4 线程×20 万 → `mismatches=29482`（3.7% 时间戳是别人的值），对照 `0`；另有 3 处同类（PhotosOffloadHandler:57 / SessionsOffloadHandler:371 companion / FileBrowserViewModel:134-136×4），而 AppLogger(`[T8-M2]`)/HangDetector(`[audit-0917]`) 已改不可变。
+
+**5 条 O**：**F-165 safe-mode「解除后重试」监听器任何时刻都不存在监听者**（唯一登记点 ChatViewModel:2192 在 composition 路径；`_safeMode=true` 只由 checkAtLaunch:160 设且该分支使 MainActivity 走"只弹窗 finish"闸门 :190-202 ⇒ ChatViewModel 永不构造；`:291` 单向闩锁 + 双条件闸门让"重试 init"无从落地）· **F-166 `MinisApp:765` 的对话框中继点永远看不到数据**（pendingShareFiles 只在 safe-mode 分支赋值 :282，该分支使 onCreate 提前 return，lifecycle 注册在 return 之后）· **F-167 `pruneOldLogs` 今天保护只覆盖 `minis-` 前缀**（`:678`，`startsWith(todayPrefix)` 全文件 1 处；今天在写的 `debug-<date>.log`/`stall-<date>.log` 仍是 size-prune 候选，而 KDoc :34 与注释都称"today 一律排除"；同文件 `T-logging-zombie-fd-android` 注释自述删在写文件的后果）· **F-168 LogRingBuffer KDoc 指向不存在的 `[markSnapshot]`**（全仓定义 0 次）· **F-169 错误快照可能不含触发行**（error() 先异步入队再同步 dump，快照 KDoc 自称"most recent delivered lines"）。
+
+**观察 6 条**：O-23 `ArtifactArchiver.kt:96` 前缀守卫缺 `File.separator`（兄弟目录形态可通过，当前条目名过滤使其不可达=加固）· O-24 `WebDavClient.isLoopbackOrPrivateHost` 不覆盖 169.254/IPv6（方向**更严**非放开）· O-25 `MemorySpikeRecorder:120-121` `started`/`sampleIndex` 普通 var 跨线程（F-147 家族，弱语义）· O-26 `notice` 回调由排空线程调用（回调内再走 AppLogger 会重入）· O-27 CrashFileReporter 的"与 minis-*.log 一起排序"声明与实际字母序不符 · O-28 `ContentDiag` 用 `markers/2` 估 `$$` 块数（奇数报 0）。
+
+**负面结果 8 条（N-11…N-18）**：`ConfigValue.SECRET_KEYS`(config/ConfigValue.kt, 3 项) 与 `ConfigBackup.SECRET_PROVIDER_KEYS` **完全一致**（对照第 12 棒 F-123 反例）· 导入侧 Base64→字节换算正确 `(len/4)*3` · `BackupStreamWriter` frame key 漂移有门（`missingFrameKeys`）· WebDavClient dot-segment 守卫完整 · `pruneAutoBackups` 候选过滤与保留数自洽不误删手工件 · `ArtifactBackupScope` symlink 环守卫 + writeEntries 缺文件跳过（注释在案）· HangDetector 计数器锁已修 + CrashFrequencyDetector 24h 抑制/窗口语义自洽 · `PerfLongCtx` `MAX_ANCHORED_SESSIONS=32` 有实际淘汰。
+
+**★ 方法论增量 5 条**：①**"单位"是跨层缺陷的富矿** —— 常量名/字段名当"声明"，它出现的每一行当"实现"，逐行比对单位（`length` vs `toByteArray().size`、压缩 vs 解压）；能在真源码量化就别停在静态。②**`git grep -n <rev> --` 行形是 `<rev>:<path>:<line>:<content>`** —— `split(":",2)[0]` 拿到的是**修订号**，会把包内引用算成包外（TABLE-6 首版 869 行异常量级暴露）⇒ 机械枚举先打印几行原始输出确认格式。③**"同批修复漏网"仍是最便宜的 D 级形态**（一条 grep + 一个对照臂实验 = "已修 2 / 未修 4" + 3.7% 错值率）。④**可达性论证写成链**（置位点唯一 → 分支提前 return → 唯一消费者在 composition 路径 → 单向闩锁），判据机械断言链的每个端点。⑤**复刻实验必须标"平台替换"并与对照臂成对**。
+
+**工具坑（新增，写进下一棒任务书）**：mermaid **菱形节点定界符必须配对**（`{...]` 让该块 400 而同文件其它块 200，只报单块失败；修法=改矩形）· mermaid.ink 的 **403/429 是限流、400 才是语法错**（批量校验前 `delay`，两类分开归类）· 判据期望值当轮实测（本棒 5 处按记忆写的期望当场翻红：`dropped.incrementAndGet()` 实际 3 次、`SimpleDateFormat(` 在 FileBrowserViewModel 4 次、`estimatedBytes` 在 ConfigBackup 而非 ArtifactArchiver、`ConfigValue.kt` 在 `config/` 而非 `data/model/`、`SECRET_KEYS` 是 `setOf(...)` 形状）；**另有一处 sed 批量替换误伤第 15 棒的同类断言**（`grep -qF '包外引用（唯一入口枚举）'` 被一并改成带逗号版本）⇒ 改共享脚本的断言串后必须重跑总闸门。
+
+**产出**（`/var/minis/shared/offload-audit-0919/`）：报告 `reports/rikkaminis-p2-backup-diag-audit.md`(29KB，6 表已嵌入) · **`verify_findings_16th.sh`（90/90）** · `gen_tables_16th.py/.sh`（6 表 + SELFCHECK 自对账）+ `embed_tables_16th.py` · **`jvm16/`（Exp-A/B 真源码 + Exp-C 复刻对照 + `extract.sh` 真源码抽取打印 sha256 + `run_all.sh` 一键复现 + `out-{A,B,C}.txt`）** · `diagrams/rikkaminis-p2-16th-flow.md` + `check_diagrams_16th.sh`（4 图过 mermaid.ink，`check_diagrams_16th.out` 含 RESULT=OK）· `HANDOFF-offload-17th.md` · 台账/ANCHOR/INDEX/LEDGER-INDEX/verify_all 已更新。
+
+**下一棒**：`HANDOFF-offload-17th.md` —— **P1 = 小包扫尾** `webapp/`1,359 + `share/`876 + `mcp/`757 + `notification/`528 + `workspace/`475 + `deeplink/`363 ≈4,358 行；P2 = `accessibility/`+`conversation/`+`util/`+`providers/`+`network/`+`power/`+`terminal/`+`i18n/`+根文件 ≈3,528 行；P3 = 修复批次桶 A–E（`logging/` 4 条 / `MemorySpikeRecorder` / `backup/` 2 条 / `crash/` 2 条 / 全仓格式化器，等用户放行）。`ui/`(84,174) 与 `sandbox/`(23,754) 仍不逐行走查。
+
+<!-- 2026-09-19 21:14:18 -->
+## 09-19：offload 审计第 17 棒完成（小包扫尾 + app 根文件 + `shared/` = 40 文件 / 8,275 行 → F-170…F-176 · O-29…O-43）
+
+
+**下一棒**：`HANDOFF-offload-18th.md` —— **P1 = `provider/` 11,202 行**（唯一带**生产日志活体证据**的未扫区域：当天 14× `stream parse exception: CancellationException: Channel was consumed, consumer had failed`，签名 `events=65/66 contentLen=0 reasoningLen≈208-243`，时序=首个 `reasoning_content` delta 后约 300ms → 解析异常 → 该次调用 cancel；两份 `error-snapshot-2026-09-19-{190514,201750}.log` 末行都是它）+ P2 = `data/` 15,849 行 + P3 = 修复批次桶 A–F（待用户放行）。`ui/`(84,174) 与 `sandbox/`(23,754) 仍不逐行走查。**全仓 @99783703 共 179,847 行，逐行走查 ≈67,239 行（37.4%）**。
+
+**产出**（`/var/minis/shared/offload-audit-0919/`）：报告 `reports/rikkaminis-p3-smallpkgs-root-audit.md`(40KB，6 表嵌入) · **`verify_findings_17th.sh`（PASS=121 / FAIL=0）** · `gen_tables_17th.py` + `gen_tables_17th.sh`（自对账 `files=40 lines=8275 t2_mismatch=3 t3_missing=4 t4_shared=3/13 t6_rows=22`）+ `embed_tables_17th.py` · **`jvm17/`（Exp-A 机械枚举 · Exp-B 复刻估算口径 · Exp-C 真源码 `OAuthCallbackServer` 楔住臂 vs 对照臂 · `extract.sh` 抽真源码打 sha256 · `run_all.sh` 一键复现 · `out-A/B/C.txt`）** · `diagrams/rikkaminis-p3-17th-flow.md`（4 图，`check_diagrams_17th.out` = `RESULT=OK blocks=4 fence=8`） · `gen_ledger_17th.py`（台账小节**机械生成**，禁手抄） · `HANDOFF-offload-18th.md` · **总闸门 `verify_all.sh` 77/0**（新增 5 项）· LEDGER-INDEX **199 条 / 去重 198**（B?4 · B3 · D113 · O58）· INDEX/ANCHOR 已更新。
+
+**★ 7 条 D（F-170…F-176）**：①**F-170 备份规则里的加密存储名单 3/5 对不上真实文件名** —— 规则排 `env_var_encrypted`/`mcp_oauth`/`device_identity`，实际是 `env_var_values`(EnvVarRepository:25)/`mcp_oauth_secrets`(MCPOAuthStore:20)/`minis_device_identity`(DeviceIdentity:22)，三处 XML（backup + data_extraction 两块）⇒ 密文进云备份+换机传输，恢复后首次访问 `AEADBadTagException` 走**凭据丢失**降级（正是清单想避的）。②**F-171 分享接收两个落点待遇相反** —— `copyUriToStaging` 有 4 项（`MAX_FILE_BYTES`/`MAX_TOTAL_BYTES`/`totalStagedBytes.addAndGet`/`deadline`），文本落盘分支**4 项全 0**（机械切片计数）；且 30s `deadline` 只在两次 `input.read()` 之间检查（阻塞读时永不触发）。③**F-172 暂存文件在「已缓冲未消费」窗口无清理路径** —— `cleanSharedFiles` 3 个调用点全需 buffer 存在，而 buffer 写入时 prefs 已清 ⇒ 30s TTL 内进程死亡 = **无主产物**；且 `totalStagedBytes` 是进程级而 KDoc 自称「matching the lifecycle of SharedShareStore's dirty staging files」⇒ 重启后残留对累计预算不可见。④**F-173 OAuth 回调服务器无读超时 + 不校验路径** —— `setSoTimeout` 全文件 0 处 ⇒ 一个只发半行请求的本机连接即楔住 accept 循环（Exp-C 真源码：CONTROL=200+onCode / WEDGED=TIMEOUT 3000ms+onCode 空）。⑤**F-174 token 估算 `chars/4` 对 CJK 低估 ≈4 倍** —— `CHARS_PER_TOKEN=4`，消费点是 `ui/chat/ChatContextWindowExt`(:153/:233) 的压缩判定（Exp-B：CJK `chars/estimate=4.09`）⇒ 与第 16 棒 F-161 同族（单位口径）。⑥**F-175 连接池驱逐只覆盖 3/13 个 OkHttp 客户端** —— 13 个构造点仅 3 处接 `sharedLLMConnectionPool`，未覆盖的恰是长连/大流量：`provider/voice/VoiceProvider`、`backup/WebDavClient`、`mcp/oauth`、`UpdateChecker`、`SkillRepository`。⑦**F-176 幽灵闹钟迁移** —— KDoc「Past-dated entries are dropped」而跳过条件只有 ①`TIME_*` 且过 ②任意类型且过**且 `repeatMode=="ONCE"`** ⇒ 过期 DAILY/WEEKDAYS 被 `ACTION_SET_ALARM` 重建成一次闹钟（只带 HOUR/MINUTE，**重复语义丢失**），`triggerAtMs=0` 畸形条目变 00:00 闹钟；本机日志无该迁移行 ⇒ 未触发。
+
+**15 条 O（O-29…O-43）**：`_plain_fallback` 明文回退声明（实现是内存兜底 + 两处 KDoc 自相矛盾）· `offer(uri: Uri)` 无 scheme 门（注释声称同门，方向写反）· `MinisDocumentsProvider` root 文档 create/delete/rename 无门（KDoc 称只读 + **manifest 未注册** ⇒ latent）· `NetworkMonitor.start(client)` 形参零生产调用 ⇒ "registered client" 驱逐路径永不执行 · NetworkMonitor 只看 INTERNET 不看 VALIDATED · `BackgroundTaskNotifier` SoundPool 无 release · `captureScreenshot` 超时路径迟到位图无人回收（F-132 同族第 2 例）· `MemoryRollupEngine.dedupeEntries` 的 `seenKeys` 死变量 + 同标题行级合并有损 · 「超阈值自动 rollup」无实现（唯一调用者=memory_rollup 工具）· `WebAppActivity` 只拦顶层导航不拦子资源/JS 外联 · WebApp 图标链只写不读（`iconCachePath` 唯一赋值是 null、`webapp_icons/` 目录无人创建、`iconRef` 零读取、`takePersistableUriPermission` 全仓 0 处）· **`data/MountedFoldersStore.kt` 含裸 NUL 字节 ⇒ 系统 grep 判二进制只回 `binary file matches` 无行号** · `ChatExporter` 三处（`estimatedBytes` 实为字符数 + Progress 单例残留 + cacheDir zip 累积）· `PowerOptimizationManager` 两处 pre-M 死分支（一处 KDoc 与代码语义相反：KDoc 说 always false、代码 `return true`）+ `requestBatteryOptimizationExemption` 无 perm 检查 · `TextSegmenter:27` 构造期 `JiebaEngine` 的 `loadLibrary` 不在 try 内（KDoc 承诺的降级不覆盖 .so 缺失）。
+
+**8 条负面结果（N-19…N-26）**：DocumentsProvider 不可达成立（实测）· 手势分发在 offload 专用 worker 线程 → 阻塞调用线程安全 · `MCPOAuthConfig.fromJson` 无空分支缺陷（**我第一遍的「空 if 分支」是 shell 渲染吞掉单独 `null` 行造成的假象**，`MainActivity:274/277` 同款）· BackgroundTaskNotifier 删的是 legacy 渠道 id · 共享池确实接线（是覆盖不全不是没接）· 加密存储无绕过 `safeCreate` 的创建点 · share/PendingShare + Utf16Sanitizer + ContextGrowthTracker + shared 分词三件套逻辑自洽 · 系统广播接收器不受 API 34 导出约束。
+
+**★ 本棒主题：`跨文件声明的三处对不上`** —— 同一份清单/生命周期/口径被抄几遍，只对上一部分（3/5 · 4 项 vs 0 项 · 3/13），**且三处的注释都声称已覆盖**。第 16 棒的「同一语义两个落点」至此在跨文件尺度坐实。
+
+**★ 方法论增量 5 条**：①**跨文件声明是下一层矿脉**（先找「同一份清单被抄了几遍」再逐处比对，一次收 3 条 D）②**判据必须落成 `grep -n` 可断言的形式**，不能信任一次渲染的文本（本棒两次差点报假缺陷，根因=shell 输出吞短行）③**KDoc 出现 "matching the lifecycle of …" 时优先验证它**④**修复覆盖面积要机械统计而非读修复注释**（枚举同构落点逐点标覆盖/未覆盖）⑤**生产日志当实验第三条腿**（反证 F-176 未触发，并顺带发现 `provider/` 侧活体异常，直接给出下一棒 P1）。
+
+**工具坑（写进下一棒任务书）**：**shell 输出吞短行**（单独 `null` 行看不见 → 假「空分支」）· **`git grep -l <rev>` 路径带 `99783703:` 前缀**，直接拼 `git show "$REV:$path"` 静默拿空串（TABLE-4 首版把 13 个客户端全判成「默认池」）· **含裸 NUL 的源文件**系统 grep 判二进制（无行号）、`git grep -n` 正常 · 判据 19 处假红全部是「期望值按记忆写」（`cleanSharedFiles()` 带括号 = 0、`seenLines` 不存在、`SoundPool` 是 8 不是 3、`OPTSTRING("repeatMode","ONCE")=="ONCE"` 形态、report 措辞），**一律改期望值不删判据** · mermaid.ink 单跑复现即恢复（403/429 限流会被总闸门误判成红，复跑即绿）。
+
+**★ 勘误 E-15（就地降级第 16 棒 F-169）**：F-169（错误快照可能不含触发行）**降级为 O 级 latent** —— 本机两份真实快照（均 ~10.5 KB 触顶）**末行都是触发的 ERROR 行**，实测未复现；保留「`error()` 先异步入队再同步 dump」的机制与触发条件（排空线程被占住 / 快照触顶截断）。
+
+**状态**：✅ 只读，仓库 **0 改动**（HEAD = `c6d8d63f` = 锚点，`git status --porcelain` 空）· 判据 `verify_findings_17th.sh` **121/121** · 总闸门 `verify_all.sh` **77/77** · 表自对账 **6 表 / 40 文件 / 8,275 行** · 图 4/4 过 mermaid.ink（`RESULT=OK blocks=4 fence=8`）· 台账 **199 条 / 去重 198**。
+
+<!-- 2026-09-19 21:25:45 -->
+## 09-19：审计口径变更为「全量覆盖」（用户：「都扫一遍吧」）+ 第 18 棒第一部分 → F-177
+
+
+**口径变更（重要，此前各棒的「不逐行走查」豁免一律作废）**：`ui/`(84,174) 与 `sandbox/` 剩余**纳入逐行走查**。
+全仓 @99783703 = **179,847 行 / 531 文件**，已走查 ≈**67,239 行（37.4%）**，剩余 **112,608 行**（≈14 棒 @8k/棒）。
+
+**剩余构成与顺序**：`provider/` 11,202（39 文件，进行中）→ `data/` 15,849（71 文件）→ `ui/` 84,174（194 文件，拆 4–5 棒：
+`chat` 48,327 · `settings` 18,653 · `sandbox` 3,681 · `components` 3,616 · `browser` 2,062 · `markdown` 1,993 ·
+`preview` 1,470 · `navigation` 1,445 · 其余小包 ≈3,700）→ `sandbox/` 剩余 → 修复批次桶 A–F（待放行）。
+口径外：`src/test/` 48,117 行（全仓 .kt 230,491 行 / 818 文件）。
+
+**第 18 棒第一部分完成 → F-177【D】「用户取消被记账成流解析错误」**（活体证据链闭合，四处）：
+①`ChatStreamOffloadHandler.kt:362` 未见终态即 `ModelExecutionMailbox.writeCancel(...)` →
+②`ModelExecutionService.kt:1031` collector 首句 `if (cancelFile.exists()) throw ModelExecutionCancelledException()` →
+③`:1451` `private class ModelExecutionCancelledException : java.lang.RuntimeException("cancelled")`（**非 CE**）→
+④`OpenAIProvider.kt:1280-1288` `catch (e: Exception)` 只记 `e.javaClass.simpleName: e.message`（**`e.cause` 全文 0 次**）
++ `cancel("Stream error", mapError(e))` ⇒ `mapError:2851` 落到 `LLMError.Unknown`。
+现象：当日 **14×** ERROR `stream parse exception: CancellationException: Channel was consumed, consumer had failed`
+（`events=65/66 contentLen=0 reasoningLen≈208-243`，稳定签名 = 取消总落在思考阶段），两份 error 快照末行都是它。
+
+**★ 实验（`jvm18/`，真 kotlinx-coroutines-core-jvm-1.8.1，`run_all.sh` 带断言）** 钉死 kotlinx 语义：
+- **A2/A3** 下游 collector 抛非 CE ⇒ 生产者（channelFlow 内 `send`）看到 `CancellationException: Channel was consumed,
+  consumer had failed`，**cause = 真异常**（与生产日志逐字一致 ⇒ 生产那次是「消费者抛异常」而非取消）
+- **A5** 真取消（job.cancel）⇒ 生产者看到 `JobCancellationException: Job was cancelled`（cause=null）— **另一种消息**，
+  这条对照臂是判据核心：**生产那条 ≠ 取消**
+- A1 `consume{}` / A4 `consumeAsFlow` 路径原异常直接冒泡（排除）
+- 消息出处已核：`ChannelsKt__Channels_commonKt.class` 的 `consume{}` finally 分支
+**★ 方法论增量**：**「异常消息的产者」要先钉死再断言** —— 同一条日志文案可能是「真错」也可能是「包装」，用真依赖跑 5 组场景
+（含取消对照臂）就能把「这是取消还是消费者失败」变成机械结论；比读代码猜快一个量级。
+**对照面（同包已有正确姿势）**：`provider/openai/OpenAIModelsApi.kt:71` `if (cause is CancellationException) call.cancel()`
++ `:76` 注释解释为何要翻译 ⇒ 「同一语义两个待遇」在 provider/ 同样成立（第 15/16/17 棒同族第 4 例）。
+**未确证（标 latent，不夸大）**：客户端自己写了 cancel 文件，UI 是否把这次收敛成「已停止」而非「出错」——本棒未取到证据。
+
+**产出**：`reports/rikkaminis-provider-18th-audit.md`（第一部分，含时间线旁证与修法候选）· `jvm18/{exp_a.kt,run_all.sh,out-A.txt}` ·
+`HANDOFF-offload-18th.md`（§1 改写为全量覆盖计划）· `ANCHOR.md` / `INDEX.md` 口径与 F-177 已回填。
+**状态**：只读，仓库 **0 改动**（HEAD = `c6d8d63f`）；本棒余下 = `provider/` 其余 38 文件 ≈9,700 行 + 出包闸门（表/判据/图/台账）。
+
+<!-- 2026-09-19 21:41:15 -->
+## 09-19：第 18 棒完成（`provider/` 第一轮）→ F-177 / F-178 / F-179（3 D）+ O-44…O-46（3 O）
+
+
+**F-177【D】★「取消」被记账成「流解析错误」（当日 14×，真因被丢弃 + 归类错）** —— 链条四处：
+`ChatStreamOffloadHandler.kt:362`（未见终态即 `writeCancel`）→ `ModelExecutionService.kt:1031`（worker collector 抛
+`ModelExecutionCancelledException`）→ `:1451` `private class … : java.lang.RuntimeException("cancelled")`（**非 CE**，
+故落进 kotlinx 包装分支）→ `OpenAIProvider.kt:1280-1288` `catch (e: Exception)` 只记 `e.message`（**`e.cause` 全文 0 次**）
++ `cancel("Stream error", mapError(e))` → `LLMError.Unknown`。**三家 provider 同款 3/3**（anthropic/gemini 连日志都没有）。
+
+**F-178【D】★ `Custom User-Agent` 对 4/6 类 provider 静默无效** —— `applyUserAgentOverride(customUserAgent)` 4 处
+（OpenAI×3 + AnthropicModelsApi）vs `(null)` 4 处（Gemini×3 + OpenRouterModelsApi）；`customUserAgent` 在 `provider/gemini/`、
+`provider/openrouter/` 各 **0 次**；`ProviderFactory` 只有 2 处传参（anthropic/openAI）⇒ gemini / openRouter / xAI /
+kimiCode(chat) 填了没用、无提示；配置层（`ProvidersCollection.kt:62` 装配 / `:324` 定义）**无类型过滤**，KDoc 却自称
+"Each provider/models-api request builder calls this"。
+
+**F-179【D·latent】`ProviderBoundary` 声明 fail-closed、实现 fail-open** —— KDoc "which we refuse (fail closed rather than leak)"
+vs 实现 `if (processName == null) return null`；`runCatching { Application.getProcessName() }.getOrNull()` 让"Android 侧异常"
+与"JVM 单测"归成同一个 null、无法区分。
+
+**负面结果 6 条（N-19…N-24，本族「同批漏一处」不成立）**：`sanitizeToolPairing` 4 调用点 / `clampOutboundMaxTokens` 4 /
+`clampOutboundTemperature` 3（三家齐）· 密钥日志只记 header 名 + `authPresent` 布尔（F-123 家族在 provider/ 无第 3 例）·
+`response.body!!` 三处都在 `!isSuccessful` 之后 · Anthropic 工具流 4 处 `!!` 全在守卫内 · provider/ 内无自造重试循环 ·
+思考档位三家齐、未二次钳制。**观察 3 条**：O-44 `levenshteinAtMostOne` 长串分支无条件 return true（当前不可达）·
+O-45 `ProviderModelsCache` 孤儿清理只在 invalidate 时跑 · O-46 两个 adapter 接受但忽略 `customUserAgent`（与 F-178 同源）。
+
+**★ 方法论/工具坑（写进 HANDOFF-19 §2）**：**`git grep` 默认 BRE，pattern 里 `\(` 是「分组」不是字面括号** ——
+`'applyUserAgentOverride\(null\)'` 静默 0 命中，首版判据 7 项假红；**裸括号写即可**，只有 `|` 才需 `\|`。
+另：`git grep -c` 会把**定义行**算进调用点计数（`sanitizeToolPairing(` 计 5 = 4 调用 + 1 声明），判据注释里写明口径。
+
+**覆盖（诚实口径）**：机械枚举全包 39 文件 / 11,202 行（六族：UA · 清洗/钳制 · 密钥日志 · `!!` · 重试 · 思考档位）+
+12 个中小文件逐行走查 1,092 行（`LLMProvider` 265 / `ToolJsonRepair` 157 / `RequestSanitizers` 143 / `ModelListProviderAdapters` 136 /
+`ProviderModelsCache` 92 / `ProviderBoundary` 88 / `UserAgentOverride` 69 / `ReasoningConsistency` 50 / `HttpErrorExtraction` 38 /
+`AnthropicUsageAccounting` 29 / `JsonExt` 17 / `KimiConstants` 8）+ 三家流式/工具路径定点精读 ≈600 行。
+**未逐行走查 ≈8,300 行**（`OpenAIProvider` 其余 2,600 / `AnthropicProvider` 900 / `GeminiProvider` 530 / `thinking/` 1,556 /
+`voice/` 1,265 / `ModelsDevApi`+`ImageBudget`+`ProviderRssProbe`+`OkHttpNetTraceListener` 1,470）→ 第 19 棒 P1。
+
+**闸门**：`verify_findings_18th.sh` **39/39**（当轮实测全部期望值）· `jvm18/run_all.sh` 断言绿 · 包闸门 `verify_all.sh` **82/82**
+（新增 5 项：18 棒判据 / 报告 / jvm18 / HANDOFF-19 / ledger18）· 台账 **205 条 / 去重 204**（B=4 · B?=15 · D=119+1架构 · O=61+4latent）。
+**产出**：`reports/rikkaminis-provider-18th-audit.md`（§0–§7，含 §1.6 家族表与 §7 覆盖口径）· `ledger18.json` ·
+`jvm18/{exp_a.kt,run_all.sh,out-A.txt}` · `HANDOFF-offload-19th.md`（含 BRE 坑与 P1–P4 计划）· ANCHOR/INDEX/主台账/LEDGER-INDEX 已回填。
+**仓库 0 改动**（HEAD = `c6d8d63f` = 锚点）。**待补**：第 18 棒的 `gen_tables_18th.py` + `check_diagrams_18th.sh`（随第 19 棒 P1 扫完补齐）。
+
+<!-- 2026-09-19 22:05:17 -->
+## 09-19：第 19 棒中途（`provider/` 网络与预算面）→ F-180（D）+ O-47 + N-26 + **勘误 E-18（撤回 O-44）**
+
+
+**★ 勘误 E-18（重要，方法论级）**：第 18 棒我写进台账的 **O-44 我误判了** —— 声称 `ToolJsonRepair.levenshteinAtMostOne`（`:124-155`）
+尾部 `return true`「未校验短串是否被消耗完」。**复刻 + 穷举对拍**（`jvm18/levin_bruteforce.py`，α={a,b}、长度 ≤6，**16,129 组**）
+**差异 0**：循环不变量 `i−j ∈ {0,1}` ⇒ 退出时必有 `j == shorter.length`（否则与 `i ≤ j+1 < shorter.length+1 == longer.length` 矛盾）。
+⇒ **纪律升级：静态读码得出的「未校验 / 不可达 / 无条件返回」结论，必须构造反例或穷举对拍之后才能入账**。
+（成因追溯：本会话工具输出 > ~2–3KB 会被 offload 出上下文，我对该文件的"读码"实际是凭印象重建 ⇒ 已把这条写进 HANDOFF-19 §7.1 工具约束。）
+
+**F-180【D】请求级图片预算低估（`ImageBudget`）** —— `planRequestBudget:272` 用 `minOf(img.data.size, perImageMaxBytes())` 计价，
+假设「超单图上限的图必然被压回限内」；而 `compressUnderBudget`（`:129-160`）KDoc 自述是**尽力而为**（"Returns the smallest encoding
+produced when no candidate fits — never returns null because \"send something\" beats \"fail the request\""，阶梯走完仍超时自己打
+`exhausted ladder … (target=…B)`），`compressBytes` 失败时 `return input`（原样，可能远超限额）⇒ **少算**超出部分，而 `droppedIds`
+是"该 elide 谁"的唯一依据（消费点 `ui/chat/ChatPromptAndTools.kt:113/124/147-163`）⇒ 该丢的没丢 ⇒ 落回本文件 KDoc `:42-52`
+自述要防的**上游 200 + 空 SSE（finish_reason=stop）静默截断**。**同族对照**：`applyMessageBudget:176-186` 累加实测 `sized.size` ✓
+⇒ **同文件两种计价口径**（"同批修复漏一处"形态第 N 例）。
+
+**O-47【O】占位文案写死 25MB** —— `elidedImagePlaceholder:304-309` 两条分支硬编码 "…fit 25MB request budget…"（2 处），
+而真实上限是用户可调的 `AgentRuntimeLimitsPrefs.imageMaxRequestMb()`（`requestMaxBytes():53`）⇒ 用户调成 5MB 后模型仍被告知 25MB，
+据此决定是否 `read_image` 重取。**N-26（负结果）**：`ImageBudgetLadder` 整数比常量 × 2000 = 2000/1600/1280/1024/896/768/640、
+`QUALITY_DROPS` 叠加 80 = 80/75/70/65/55/50/45 ⇒ 与 `:10` 声明**逐项一致**（算术对照）。
+
+**闸门**：`verify_findings_19th.sh` **17/17**（首版 2 项假红：`return input` 实测 4 次非 1、`plan.droppedIds` 实测 2 处非 3 —— 改期望值不删判据）·
+包闸门 `verify_all.sh` **84/84**（jvm18 项从"1 份输出"改"2 份"：加了 out-D.txt）· 台账 **206 条 / 去重 205**（D=120 · O=61）。
+**产出**：报告 `reports/rikkaminis-provider-18th-audit.md` 新增 §7（第 19 棒增量）+ §7.1（工具约束）+ §8（覆盖口径）· `ledger19.json` ·
+`verify_findings_19th.sh` · `jvm18/{levin_bruteforce.py,out-D.txt}` · ANCHOR/INDEX/HANDOFF-19/主台账/LEDGER-INDEX 已回填。仓库 **0 改动**。
+
+**仍剩 ≈7,400 行（第 20 棒 P1）**：`OpenAIProvider` 其余 2,600 · `AnthropicProvider` 900 · `GeminiProvider` 530 · `thinking/` 1,556
+（先读 09-18 `deepseek-thinking-echo` 分支改动清单，只补未覆盖）· `voice/` 1,265 · `ProviderRssProbe` 367 · `ModelsDevApi` 480
+· `OkHttpNetTraceListener`（**不在 provider/**，路径待定）。
+
+<!-- 2026-09-19 22:38:24 -->
+## 09-19 晚：offload 审计转「并发派发」模式 —— WAVE-2 四线并行（第 21 棒）
+
+
+**背景**：用户要求提速（"效率太慢，开拓会话并发同步推进"），并授权"不要问，直接扫、推完"。主会话转为**派发者 + 收口者**。
+
+**机制**：`minis-sessions-cli send --prompt <任务书路径> --async`（子代理开关已开，实测可用；返回 session_id + status=Running）。
+**派发**：4 条线，各自独立 clone（`/tmp/rk-aN/`）+ 独立产出目录（`/var/minis/shared/offload-audit-0919/wave2-aN/`）+ **互斥编号区间**（防撞核心）：
+
+| 线 | 范围 | 编号区间 | session_id 前缀 |
+|---|---|---|---|
+| A1 | `OpenAIProvider` 其余 ≈2,600 | F-182…189 / O-50…59 / N-31…39 | d3563ad3 |
+| A2 | `anthropic/`+`gemini/` 其余 ≈1,400 + antigravity/xai/kimi | F-190…197 / O-60…69 / N-40…48 | 7ad5a784 |
+| A3 | `thinking/` 1,556 + `voice/` 1,150 | F-198…205 / O-70…79 / N-49…57 | d1b66320 |
+| A4 | 其余全部（`ModelsDevApi` 480 + 子目录 provider + 根文件） | F-206…213 / O-80…89 / N-58…66 | 746e4b6b |
+
+**任务书**：`tasks/A1-openai.md` … `A4-misc.md`（每份含：独立 clone 步骤 / 基线 rev `99783703` / **工具约束（输出 >2–3KB 会被 offload ⇒ ≤70 行/次）** / `git grep` BRE 坑 / 「静态读码结论必须穷举对拍」纪律 / 已知发现清单（防重复）/ 编号区间 / 产出格式 / 回报格式）。
+**记录**：`WAVE2-DISPATCH.md`（派发台账 + 防撞设计 + 收口流程）。
+**收口（主会话）**：读各线 report 摘要 + 抽查判据 → 合并主台账 → `gen_ledger_index.sh` → 更新 ANCHOR/INDEX/HANDOFF → 记"第 21 棒（并发 4 线）完成"。**并发防撞三件套：编号区间互斥 / 产出目录互斥 / 工作区隔离**（不共享 .git）。
+**同轮杂项**：闸门 `verify_all.sh` 已给 14 处图校验加「重试一次」（mermaid.ink 限流会让批量校验随机假红；403/429=限流、400=语法错）· 第 20 棒判据 27/27 · 闸门 86/86 · 台账 209 条（合并并发线后预计 210+）。
+
+## 2026-09-20
+
+<!-- 2026-09-20 00:56:26 -->
+## 09-20 凌晨：offload 审计并发线 A1 完成（`provider/openai/` 5 文件 3,559 行 · 第 21 棒）
+
+
+**产出**：`/var/minis/shared/offload-audit-0919/wave2-a1/` —— `report.md`(35KB) · `ledger-a1.json`(**21 条**：D=3 · O=18，其中负结果 N- 9 条) · **`verify_a1.sh` PASS=50/FAIL=0** · `probe_counts.sh/.txt`（期望值实测探针）· `evidence-prod-400s.md`（**生产日志取证快照**）· `exp_a1/`（真源码复刻 + 对照臂，`run_all.sh` ALL GREEN）。仓库 **0 改动**（HEAD = `c6d8d63f`，基线 `99783703`）。
+
+**3 条 D 级**：①**F-182 Responses 路径丢弃 `temperature`** —— `:569-573` 同函数两分支，chat 传 `temperature=`、responses 不传且签名无形参，函数体 2392-2702 内 `temperature` 出现 **0** 次；对照臂 chat 有 `body.put("temperature", clampOutboundTemperature(...))`；`ModelExecutionService` 有 2 处 `temperature = temperature,` ⇒ 排除「调用方永远传 null」。②**F-184 Responses body 从不发 `include:["reasoning.encrypted_content"]`** —— `put("include"` **0 次**；`isCodexOAuth` 全包出现 **1 次且就是那条注释** ⇒ 符号全仓不存在；注释块在 "lets the ChatGPT backend" 处**断句未闭合**（代码被整块删、注释头留下的指纹）。③**F-185 `detectImageMime` WebP 分支只匹配 RIFF** —— 实验：wav/avi 两个非图片 RIFF 容器被判 `image/webp`（2/2），对照臂 png/jpeg/gif 全对；**诚实标注：真 WebP 碰巧通过，可观测面是「非图片 RIFF 误判」而非「WebP 漏判」**。
+
+**主动降级 2 条（刻意，不是遗漏）**：F-183（`max_tokens` 只按 `isOpenRouter` 二选一，四个中继全走 `max_completion_tokens`；但**无该字段 400 实例** ⇒ 降 O）· N-40（09-19 有 **3 次** `content[].thinking must be passed back` 400，疑 09-18 `c82bbf3` 未修全；但 ①echo 字段 `reasoning_content` 与报错字段 `content[].thinking` 是**两个协议**、②无法确认 `+1656` 是否 ≥ `c82bbf3`、③故障有随机性 ⇒ 标「证据不足的调查项」，给三条取证步骤）。
+
+**新观察**：O-52（`OkHttpNetTraceListener` **每调用 ≈18.3 行日志**，当日 **76,192 行**，是 provider 自身 3.4 倍）· O-56（**请求体不入日志**，`→ REQ` 只记 `bodyLen`，而错误路径记完整 body ⇒ 出站不记入站记、方向反了，追 N-40 时**亲身卡在这里**）· O-53（`UserAgentOverride` KDoc 要求 OAuth 传 `defaultUserAgent = null`，实现里 **0 次**，且 `codex_cli_rs`/`claude-cli` 全包各 2 次**全在注释里**）· O-51（`capResponsesId` 纯前缀截断 vs `capChatToolCallId` 哈希派生；全局去重只覆盖 chat 路径）· O-50（「64」是 UTF-16 单元，CJK 下 utf8 可达 3×，**只量化不断言**）。
+
+**★ 工具坑（第 18 棒 `\(` 坑的第二次发作，已升级为硬规则）**：**判据脚本里所有 pattern 默认 `-F`**。`git grep` 默认 BRE，`b[0] == 0x52` 这类源码片段在 BRE 下**静默 0 命中**（不报错、伪装成「代码里没有」）；本棒首版判据 **41 项全红**，根因还有第二个：**`git grep -c <rev> -- <path>` 输出 `rev:path:count`，不能直接当计数**，必须 `| awk -F: '{s+=$NF} END{print s+0}'` 求和。
+
+**★ 新方法论 3 条**：①**「全仓计数 = 1，且那 1 处就是注释」是「声明 vs 实现相反」的最强判据形态**（无需读上下文即可断言符号不存在）。②**「注释块未闭合」是「代码被整块删除、注释头被留下」的指纹**，可做成扫描器。③**复刻实验必须含「应该失败」的输入** —— F-185 若只复刻会看到「真 WebP 也判对了」，加上 wav/avi 对照臂缺陷才现形。
+
+**★ 生产日志两条新陷阱**：①**日志里的「命中」可能是 agent 自己的 grep 命令回显**（logcat 抓走 `D/ToolChain[Provider]: → ToolCallComplete args={"command":"…grep -h 'HTTP 400 error body'…"}`）→ 统计生产错误必须锚定**行首时间戳 + 级别 + tag** 完整形态（`grep -cE '^\[[0-9:.]+\] \[ERROR\] \[OpenAIProvider\].*HTTP 400'`），裸 `grep -c` 会得 6 而非真实 4。这是「shell 吞短行」的**镜像陷阱**：前者漏看，这里多看。②**日志会轮转** —— 开工时可读的 135 万行 09-19 日志，收尾时已被清理；**取证必须当场落盘到自己的产出目录**（本棒侥幸靠工具 offload 文件保住证据）。
+
+**给收口会话**：修法优先级 F-184 → F-185 → F-182 → O-52 → **O-56（是 N-40 排障的前置条件）** → O-51 → N-40 取证 → 其余 backlog。
+
+<!-- 2026-09-20 00:57:23 -->
+## 09-20 凌晨：offload 审计 WAVE-2 线 B3 完成（`data/` 除 `repository/`，60 文件 / 8,744 行）
+
+
+**状态**：只读，仓库 **0 改动**（HEAD = `99783703`）· 判据 `verify_b3.sh` **85/85** · 台账 27 条（F-230…237 · O-110…119 · N-85…93）· 独立 clone `/tmp/rk-b3/`。
+
+**★ 最重要三条（都可被外部复核）**：
+- **F-230** `data/BPETokenizer.kt:16-17` 声明 "within ±15% of real cl100k_base counts"，实现 `max(1, cp/3)`（`:106`）。**下载官方 `cl100k_base.tiktoken`（1.6MB）+ tiktoken 0.14.0 对拍 11 组**：最大误差 **69.8%**；规模扫描 zh×1000 **−64.8%**、en×1000 **+93.9%**，**误差不随规模收敛**（系统性口径偏差）。连带：`loadVocabularyFromAssets` 全仓零调用 + 全仓无任何 `*.tiktoken` 资产 ⇒ 高保真路径从未走通。
+- **F-231** `ui/chat/ChatContextWindow.kt:310-311` offload 循环用**候选尺度**（`BPETokenizer` ÷3）减**预算尺度**（`:431` ÷3.5）。隔离实验比值 **1.1648/1.1676** vs 理论 `3.5/3=1.1667` ⇒ 记账快 1.1667 倍 ⇒ 循环在真实预算仍高出目标 **≈16.7%** 时停止。与"offload 严格早于 compact 线"承诺方向相反。第 17 棒 F-174（压缩侧 ÷4）是本棒发现的**第三把尺** —— 同一子系统三个不同除数（÷3 / ÷3.5 / ÷4）。
+- **F-232** `data/ContextOffload.kt:53-57/74/78` 文件名由模型可控 id 拼成，`sanitize` 只 `replace('/')`、`shortToolId` 原样返回尾 12 字符。**真实落盘复现**：toolId 尾部含 `../` 时写到 `<sid>/x.txt`（tools/ 之外）。且返回路径 `"$LINUX_OFFLOADS_DIR/tools/$fileName"` 是硬编码拼接（`:78`/`:112`）⇒ 越界时模型 `file_read` 会 ENOENT 而 stub 声称"已保存"。可达性 latent（`sanitizeToolId` 只在 Anthropic 出站调用）。
+
+**其余 D 级 5 条**：F-233 `duplicateSession` 只复制 4 字段（丢 `usageModelId`/`usageEntryId`/`errorInfo`，`appendMessage` 签名有 7 个）· F-234 `ChatDao.deleteMessagesAfter(keepCount)` 参数名与 SQL `>= keepCount` 语义相反（6 个调用点全传 sortOrder，注释自己点破）· F-235 `FastModePrefs.appContext` 只写不读（`ConcurrencyPrefs` KDoc 自称 "Mirrors the FastModePrefs pattern" ⇒ 缺陷会一起复制）· F-236 `DeleteResult.fullyDeleted` 死属性（会话删除路径丢弃返回值且无重测量；存储页靠 `[Bug 4]` 重测量兜底 ⇒ 口径已收窄）· F-237 `GroupRouter.health` 是 `mutableMapOf`（插入序）却注释称 FIFO，写入用 `[]` 对已存在键赋值 ⇒ 反复删同一个 key、表实际无界。
+
+**★ 方法论增量（4 条，可复用）**：
+1. **"同一子系统的三个换算口径"是可机械枚举的缺陷形态** —— 判据 `grep -n '/ 3\|/ 3.5\|/ 4' <子系统>` 一行出表；对比**相邻两个函数的返回值语义**比 grep 常量名更容易抓到"两把尺相减"。
+2. **精度声明必须用真参考实现对拍** —— 下载官方词表 + 11 组样本 < 5 分钟；关键判据是**误差是否随规模收敛**（收敛=噪声，不收敛=系统性口径偏差）。
+3. **"越界写"必须真落盘复现，`normpath` 判断不够** —— 实验必须打印"实际落盘路径"+"是否在目标目录内"两行；第一版只用 `normpath` 会漏掉目录残留与 `<sid>/` 与 `<sid>/offloads/` 两种逃逸深度。
+4. **声明 vs 实现的判据：先数"读取次数"再下结论** —— F-235/F-236/O-117/O-118 四条同型（声明的机制无消费者）。注意 `git grep -c` **会把定义行与注释行算进去**（本棒 5 处期望值当场翻红：`sanitizeToolId` 5≠3、`deleteMessagesAfter` 12≠9、`appContext` 90≠2），一律改期望值 + 注释记理由，不删判据。
+
+**★ 纪律再验证（本轮亲历两次）**：
+- **shell 输出吞短行仍是头号假缺陷来源** —— 转写 `parseRetryAfterMs` 时丢了 `catch` 块里的单独 `null` 行，kotlinc 当场报 `return type mismatch: expected 'kotlin.Long?', actual 'kotlin.Any'`，差点把一处**正确的**代码记成缺陷。逐字核对原文后确认为负面结果（N-85）。**凡"静态读码得出未校验/不可达/类型不符"的结论，必须回到原文逐行核对（`awk` 带行号边界标记）后才能入账。**
+- **编号区间是并发防撞核心，必须开工前从任务书抄下** —— 我误用了别线的区间（F-206…213），产出写完后才发现任务书指定 `F-230…237`，被迫回头做全局编号映射（写脚本一次正则替换，避免链式二次替换）。**教训：任务书的"编号区间"要在第一次写台账前就核对。**
+
+**产出**（`/var/minis/shared/offload-audit-0919/wave2-b3/`）：`report.md`（6 节，含覆盖表）· `ledger-b3.json`（27 条，已 `json.load` 校验）· `verify_b3.sh`（85/85）· `coverage_b3.txt`（60 文件逐行枚举）· `exp_b3_tokenizer.py/.out`（真 tiktoken 对拍）· `exp_b3_offload_accounting.py/.out`（记账对拍 + 隔离实验）· `exp_b3_offload_path.py/.out` + `exp_b3_offload_path2.py/.out`（静态 + 真实落盘）· `jvm/{RetryAfterProbe.kt,.out,bytecheck.py}` · `run_all.sh`（一键复现，`--skip-setup` 可用）· `scanb3.py`（族扫描器，cwd 改本线工作区）。
+
+<!-- 2026-09-20 01:47:15 -->
+## 09-20 凌晨：offload 审计 WAVE-2 并发线 A4 完成（`provider/` 杂项 + `ModelsDevApi`）
+
+
+**产出**（`/var/minis/shared/offload-audit-0919/wave2-a4/`）：`report.md`(34.9KB) · `ledger-a4.json` · `ledger-section.md`（可直接并入主台账的格式，含 `### 第 21 棒` 标题）· `verify_a4.sh` **46/46** · `exp_a4.py` **37/37** · `exp_a4_h.py`（F-212 穷举对拍 `divergent=8`）。覆盖 **26 文件 / 3,733 行逐行走查 100%**（覆盖表加总实测一致）。仓库 **0 改动**（HEAD `afa404b`，基线 `99783703`）。
+
+**7 条 D**：**F-206** `ModelsDevApi` 网络刷新在「无磁盘缓存」时永不启动（鸡生蛋死锁：缓存唯一写者 `saveDiskCache` ← `refreshFromNetwork` ← `scheduleBackgroundRefresh`，而 5 条 loadRegistry 分支里全落空那条直接 `return null`）⇒ 冷启动后注册表永久为空；**F-207** 同一 enrichment 对 `:modelservice` worker 恒 no-op（早退块内无 `ModelsDevApi.init`）⇒ 思考档位在真正发请求的进程里丢失（当日 `declared=null` **4,615 条全在 worker 日志** vs 主进程 123 条）；**F-208** 模型列表磁盘缓存全族不可达（接口层丢 `Context`，12 处 adapter 调用全传默认 null，5 个实现都备好了 `context` 形参却没人传）；**F-209** `execute()` 取消钩子同批只补 1/5；**F-210** 孪生缓存两处修复只落 `ProviderModelsCache` 一侧；**F-211** `RequestSanitizers` Pass 3 声明 vs 实现（3 个调用方只 1 个接了）；**F-212** `providerKeyMap` 缺 xAI/Kimi ⇒ 8/14 模型 enrichment 撞中转商条目（`grok-4.5` ctx 被报 1,000,000 而 xAI 官方 500,000）。
+
+**★ 方法论增量**：①**「鸡生蛋」定位法** = 枚举缓存文件唯一写者 → 枚举写者唯一调用者（两步 `git grep` 钉死闭环，比读代码猜快一个量级）②**接口层丢参数 = 全族不可达**：`grep -c <Param> <接口文件> == 0` 且 adapter 同样 0，比逐个读实现快 ③**修 commit 自述范围 vs 全族机械枚举数 = 漏改数**（F-209/F-210 的探针）④**「映射表缺键 → fallback 兜底」是最隐蔽的静默错误面**：兜底能返回结果所以不报错不留日志，只能靠「枚举映射表键数 vs 枚举消费方族数」+ 上游对拍抓 ⑤跨源对拍必须**显式标注平台假设**（本次依赖 org.json 保序）并写清假设不成立时结论往哪个方向偏。
+
+**★ 生产日志判据的坑（本轮踩到）**：`grep 'Background-refreshed models.dev' minis-*.log` 命中 8 条，逐条看原文**全是我自己的 `ToolCallComplete ... args=` 回显** —— 真实产品日志 0 条。**纪律：日志判据必须 `grep -v 'args=\|ToolCallComplete\|cmd-start'` 排除自身回显，否则把「我搜过」误读成「产品打印过」**。
+
+**判据假红 6 处全为「期望值按记忆写」**（`scheduleBackgroundRefresh` 4 vs 3 含声明、`reasoningEffortValues` 2 vs 1、`sha-256` 2 vs 1、`minOf` 2 vs 1、裸 `OkHttpClient()` 5 vs 4、`anthropicUsageAccounting` 是顶层函数非 object）—— 一律改期望值不删判据。
+
+**F-209 精度修正**：OkHttp 4.12.0 Builder 默认 connect/read/write 超时**均 10s**（`javap` 实测 `sipush 10000`），不是「无限期」——报告措辞已改。
+
+<!-- 2026-09-20 01:52:12 -->
+## 09-20：offload 审计 WAVE-2 · B4 线完成（`ui/settings/` 42 文件 / 18,653 行）
+
+
+**交付**（`/var/minis/shared/offload-audit-0919/wave2-b4/`）：`report.md`(25.8KB, 7 章, 含 42 文件覆盖表) · `verify_b4.sh` **55/55 绿** · `ledger-b4.json` **27 条**（D=8 · O=10 · N=9）· `coverage-b4.tsv`(42 行/18,653 行) · 8 个实验脚本 + 6 份 out。仓库 **0 改动**（HEAD=9978370）。
+
+**编号**：F-238…245 / O-120…129 / N-94…102（严格落在派发区间内）。
+
+**本棒主题：设置页的三层清单对不上**（注册层 × 消费层 × 刷新层），8 条 D 级：
+- **F-238/F-239/F-240 background 死键三连**：`ConfigBuiltins.kt:1011/1026` 注册的 `enhanced_background_execution` / `background_notifications_enabled` **全仓 0 读者**（计数 1 = 仅注册处），生产读的是 `BackgroundSettingsRepository` 自有键 `taskNotificationsEnabled`（同 prefs 文件两套键名）。`ConfigBackup` 走 `registry.allVisibleFieldPaths()` ⇒ 死键进备份跨设备恢复。**同族第 3 次**（T311 已修 → F-238 → F-239/240）。
+- **F-241 刷新 listener 只覆盖 2/7 屏**（最严重）：写侧 `ConfigBuiltins.kt:152` 只给 `limits` 注册重 prime；读侧 7 屏快照 registry 可写 prefs，仅 `AppearanceScreen:202` / `ChatTuningScreen:186`(helper) 有 listener。`RuntimeLimitsScreen` **35 快照 + 44 registry 键 + Save 全量写回**（`:470-500` 一次 `AgentRuntimeLimitsPrefs.save(...)` 20+ 参数）⇒ 「打开→改一个→保存」静默回滚其余 34 字段，且写侧刷缓存 ⇒ **立即对运行时生效**。是数据破坏不是显示问题。
+- **F-242 IO 写 Compose state 漏 2/6**：`BackupSettingsScreen` 6 处 `applicationScope.launch`（=Dispatchers.IO），`:239/:340/:548/:713` 各带 3-5 次 `withContext(Main)`（`:233-237` 有 `[fix-audit-p1-1]` 注释），`:869/:917` **Main hop=0**（同一条 WebDAV 路径的两个孪生分支）。探针 `exp_b4_iostate.py` 用**括号深度**判定，实测 2/6。
+- **F-243 a11y 检测逐字复制两份 + 都不看总开关**：`OffloadPermissionScreen.kt:401-407` 与 `SystemPermissionsScreen.kt:149-155` diff=same；`ACCESSIBILITY_ENABLED` 全仓 **0 引用** ⇒ 关总开关后两屏仍报「已启用」。
+- **F-244 stringResource 只抽 1/3**：`AddProviderScreen.kt:363-369` 三分支只 anthropic 走资源，gemini/else 硬编码（7 语言文件下永久英文）。
+- **F-245 `onTerminalClick` 死参数**：19 个回调里 18 个出现 2 次，唯它 1 次（仅声明）；`AppNavigation.kt:653` 仍在传；`Icons.Outlined.Terminal` 被 `onEnvVarsClick` 复用**掩盖入口消失**。
+
+**方法论增量**：①「注册层 × 消费层 × 刷新层」三层清单求交集 = 静默失效点的机械定位法（本棒 3 条 D 都出自这里）；②死键判定**必须展开常量链**（探针 v1 只扫字面量，把 `topBar.inputHistory`/`composer.modelPickerButton` 误判为死键 → N-99）；③**括号深度判定「是否在 withContext(Main) 子块内」**可机械区分「真漏」与「具名实参误报」（v1 把 `webDavConfig = webDavConfig` 当赋值，5/6 假红 → 加 named-arg 排除后 2/6 精准）；④判据期望值 14 处按记忆写当场翻红，**一律改期望值不删判据**（55/55 收尾）。
+
+<!-- 2026-09-20 02:06:43 -->
+## 09-20 凌晨：offload 审计第 21 棒 · 并发线 A2 完成（provider/anthropic + provider/gemini）
+
+
+**范围**：`AnthropicProvider`(1023) + `GeminiProvider`(566) + `AnthropicModelsApi`(224) + `GeminiModelsApi`(127) + `AnthropicModelsCache`(66) = **2006 行逐行 100%**。基线 rev `99783703`，独立 clone `/tmp/rk-a2/`。仓库 **0 改动**。
+**产出**：`/var/minis/shared/offload-audit-0919/wave2-a2/` — `report.md`(27KB) · `ledger-a2.json`(27 条) · `verify_a2.sh`(**58/58 绿**) · `exp_a2.py`(**16/16 绿**) · `out-a2.txt`。
+**编号**：F-190…197（8）· O-60…69（10）· N-40…48（9）。
+
+**★ 本线主题：跨进程字段与跨协议口径** —— 8 条 F 里 3 条是「同一语义在 A 落点接通、B 落点漏掉，且两处同链」：
+- **F-191**（最重）`Enhanced Cache` 开关在唯一聊天路径上**完全失效**：载荷 47 键无 `enhanced*`、worker 用 `ProviderFactory.create` 新建（默认 false）、`ChatStreamTurnExt.kt:46` 只传 instanceContext+model（"no in-process fallback exists by design"）⇒ `extended-cache-ttl` beta 头一次不发、无日志。同族：F-178/knobs H1。
+- **F-190** Anthropic 流式用量被**第二次** Usage 覆盖（`message_start` 全量 vs `message_delta` 只带 output 侧）⇒ 每轮落库 `inputTokens`/`latestContextTokens` **恒 0**，`:2054` contextNearFull 永假。纯函数对拍：`{1500,13500}` → `{0,0}`。
+- **F-193** 「输出上限」判据退化：同包 `TruncatedToolCallPolicy` 有 7 词表（KDoc 承认 Anthropic 发 snake_case `max_tokens`），但引擎另两处仍裸 `== "length"`（`:1676` 长度墙续写 / `:1391` seam-dedup）⇒ Anthropic/Gemini 在 `max_tokens` 处截断时**不续写也不报错 = 静默半截答案**。修法 2 行。
+- **F-194** Gemini base 不归一化：models API 侧有 `removeSuffix("/v1")`（注释自述防 `.../v1/v1beta/models`），Provider 侧 `:74/:127` 原样拼 ⇒ 填 `/v1beta` 的实例请求打到 `/v1beta/v1/models/...` = 404。
+- **F-192** Gemini `ToolResult` 丢图片（同文件 `ImageData` 分支有回退，注释还自称 "same backstop as OpenAI/Anthropic"）。切片判据：`imageData` Anthropic=3 / Gemini=**0**。
+- **F-195** Anthropic 流内 `error` 事件无分支（when 只 5 类）⇒ 真因被丢，EOF 被误判成截断走续写。OpenAI `:1070-1076` 有对照。
+- **F-196** `GeminiModelsApi` 403 全量 fallback 掩盖鉴权失败 + **三个 provider 的 7 天模型缓存全是死代码**（`context` 参数生产调用点 0 处；`OpenAIModelsApiForceRefreshTest` 原文已钉死该事实）。
+- **F-197** 用量字段：Anthropic `takeIf{it>0}` 抹掉 null 语义；Gemini `thoughtsTokenCount` 全仓 **0 引用** ⇒ 思考 token 系统性不计。
+
+**O 级 10 条**亮点：`O-61` Gemini **每帧**发 Usage（500 帧=500 行 JSONL）· `O-63` `decode` 的 `"done"` 分支不可达（handler 先 `isDone` 就 return）· `O-64` `thoughtSignature` 全仓 **0 赋值点**且落库硬编码 null（声明机制不存在）· `O-67` 同文件两种取值口径（`getJSONObject` 抛异常整流失败 vs `optJSONObject` 跳过）· `O-69` `redactSecrets` 词表不含独立 `key`（Gemini 密钥正是 `?key=` 形态，URL 侧已覆盖、body 侧未覆盖）。
+
+**N 级 9 条**（防重复投入）：`ephemeralCacheControl` 声明成立（3 字面量全走它）· `parseClaudeVersion` 穷举 7 例全对 · 三家 429 都带 Retry-After · `sanitizeToolPairing` 无漏 · `body!!` 三家全在守卫后 · 两家用量口径**语义相反但都对** · watchdog 不泄漏 · Gemini `execute()` 已在 try 内 · `parentPath` 自洽。
+
+**方法论增量**：①**判据期望值必须当轮实测** —— 本轮 6 处修正（2 处装置 bug：注释污染计数 / 结束标记用了不存在的标识符；4 处期望值按记忆写错），**一律改期望值不删判据**，且必须在判据旁写明口径（`import` 行算不算、切片含不含子类型）。②**「声明字段全仓 0 赋值点」是廉价高价值探针**（`thoughtSignature`、`cloudCodeFallback`、`lastFailureBody`、`thoughtsTokenCount` 四个同类一次收齐）。③**同文件内的口径不一致比跨文件更可信**（O-67 的 `getJSONObject` vs `optJSONObject` 三处对照，无需跨包取证）。
+
+<!-- 2026-09-20 02:07:09 -->
+## 09-20 第 21 棒 · 并发线 B2 完成（`data/repository/` 11 文件 / 7,101 行）
+
+
+**产出**：`/var/minis/shared/offload-audit-0919/wave2-b2/` —— `report.md`（含覆盖表）· `ledger-b2.json`（25 条：D=6 · O=10 · N=9）· `verify_b2.sh`（**70/70 绿**）· `exp_b2.py`（三缺陷复现）· `exp_b2_fourway.py`（四处同步机械对拍）。仓库 **0 改动**（HEAD=99783703，独立 clone `/tmp/rk-b2/`）。
+
+**本棒主题：四处同步全绿，但落点有第 5 个。** 三个数据类（ProviderInstance/ModelEntry/ModelGroup）在 Model 层 ⊆ Entity 列 ⊆ toSnapshot ⊆ toProviderConfig 逐字段机械对拍**全部对齐**（差异仅 JSON blob 列名与派生列 sortOrder）⇒ 字段真正蒸发的地方不是映射函数，是**手写构造器**。
+
+**6 条 D**：
+- **F-222 `costTier` 在 `replaceEntries` 蒸发（`ProviderRepository.kt:1242-1267`）** —— 构造块从 prior 带前 5 字段（overrides/isCustom/isHidden/uuid/userModifiedAt），**唯独漏 costTier**（该块内 0 次）。同字段在备份导出(:2165)/导入(:2457)/Room 映射(2 处)**都带了** ⇒ 5 落点漏 1。消费点 `GroupRouter.kt:58/151` 用 `costTier ?: Int.MAX_VALUE` ⇒ 一次模型刷新后 cheapestFirst 排序依据整体丢失。**四处同步家族第 6 例**。
+- **F-223 `writeSkillMd` 丢 frontmatter-only 字段（`SkillRepository.kt:1499-1511`）** —— 只写 name/description/version 三键，ParsedSkill 只有 4 字段 ⇒ 6 个落点任一次落盘都把 `subagent: true` / `max_turns` / `allowed_tools` 抹掉。`update()` 由「改技能名」UI 直接触达（`SkillsManagementScreen.kt:949`）⇒ **改名一次该技能就从 spawn_agent 列表静默消失**。真机恰好有 1 个此类技能。
+- **F-224 `SOUL.md` 被当每日日志列出且可删** —— 与 GLOBAL.md 同目录（`SoulStore.kt:219` = `MinisApp.kt:435`），但 `listAllFiles:457-459` 只排除 GLOBAL/ROLLUP；`deleteFile:496` 守卫也只挡 GLOBAL ⇒ 删除后 `ensureExists` 用 DEFAULT_CONTENT 重播种，**用户人格静默重置**。
+- **F-225 `deleteSession` 丢弃 DeleteResult（`ChatRepository.kt:193`）** —— `SessionFileStore` 的 KDoc 明写该 wrapper 唯一理由就是报真实成败，但只有存储页用了（`StorageManagementScreen.kt:546`），会话删除仍裸调用 ⇒ 文件占用/只读挂载时用户以为删干净。
+- **F-226 消息封顶 chars 当 bytes（`:420` / 常量 500_000 / 文案自称 KB）** —— 实测 CJK 1.5MB（占 2MiB 预算 72%）、4B emoji 2.0MB（95%）⇒ 中文会话仍能顶到 CursorWindow 天花板，正是该上限要防的 SQLiteBlobTooBigException。**同族＝第 16 棒 F-161**。另 `reasoningContent` 同路径零上限。
+- **F-227 MCP `servers.json` 解析失败静默清空全部服务器** —— `return emptyList()`（4 处）→ `load():140` 覆盖内存 → 任何 `save()` 把空列表写回盘；无 tmp+rename（0 处）且读路径带写副作用（`:187`）⇒ 损坏态立即固化。**对照：provider 侧有 DB 兜底不清库（N-77）**。
+
+**O 10 条**：O-100 rescanFromDisk 不刷 frontmatter · O-101 `deleteMessagesAfter(keepCount)` 实为 sort_order 门槛 · O-102 KeyRoulette 非原子写 · O-103 注入整段反转致条目内行序倒置 · O-104 Memory 文件 API 无 canonical 守卫 · O-105 sanitizeValue 静默剥离非 ASCII · O-106 导出内嵌 base64 非加密密钥且无警示 · O-107 writeMemory KDoc 与实现相反 · O-108 `_skills.value` 11 处读改写仅 2 处持锁 · O-109 MCP update() 返回值被 UI 忽略。
+
+**N 9 条**：四处同步对拍全绿 · provider 镜像不可读保留 DB · commit() 与 hash 同步落盘 · skill 路径守卫完整（canonicalPath 5 + maxExpanded 5）· resolveSkillFile 判据无漂移 · MCP 往返保真 · appendMessage .also{} 末表达式 · KeyRoulette 单 key 清理 + LRU 剪枝 · ModelListProviderRegistry 错误重抛/取消不吞。
+
+**判据坑（写进下一棒任务书）**：首版 7 处假红 + 二版 3 处假红，**全部是期望值按记忆写**（`= prior?.` 实 5 非 7、`2 MB` 实 4 非 1、`return emptyList()` 该段实 4 非 1、`git grep -l | wc -l` 与 `-c` 口径不同）。纪律重申：**期望值先跑一次取实际值再写死，改期望值不删判据**。
+
+<!-- 2026-09-20 02:08:08 -->
+## 09-20：offload 审计第 21 棒 · 并发线 C4 完成（`ui/` 其余全部 52 文件 / 17,194 行）
+
+
+**范围**：`ui/components` `sandbox` `browser` `markdown` `preview` `navigation` `media` `onboarding` `terminal` `theme` `sessions` `util` + `ui/` 根文件（`ui/settings/` 改派 B4，未扫）。基线 rev `99783703`。**只读，仓库 0 改动**。
+
+**产出**（`/var/minis/shared/offload-audit-0919/wave2-c4/`）：`report.md`(37KB) · `ledger-c4.json`(27 条) · **`verify_c4.sh` 73/73 绿** · `exp_c4_a.kt`+`out_c4_a.txt` · `exp_c4_b.py`/`exp_c4_b2.py`+3 份 out · `files_c4.txt`(52 行覆盖表) · `cov_table.md`。
+
+**发现：D 8 条（F-270…277）· O 10 条（O-160…169）· N 9 条（N-130…138）**
+
+**★ F-270（最重要）**：`ImageGalleryViewer.kt:116` 把 scope 取成 `MinisApp.applicationScope`（`MinisApp.kt:79` = `SupervisorJob() + Dispatchers.IO`，**无 Looper**），`:328` 在该线程直接 `Toast.makeText(...)` ⇒ 按 AOSP `Toast.java:170-190/506-508`（`makeText` → `looper=null` → `checkNotNull(Looper.myLooper(), "Can't toast…")`）**必抛 NPE 崩溃**。`exp_c4_b2.py` 对全仓 531 文件做词法级判定，**全仓唯一 1 条**。同族对照：同一行代码的 Share 按钮走 `shareImage`（每个 Toast 都包 `withContext(Main)`）→ 安全；Save 按钮裸露 → 崩。修法：`:328` 包 `withContext(Dispatchers.Main)`。
+
+**★ F-271**：「找对话框窗口」**6 份复制体，3 份谓词错、其中 2 份还叠加起点错位** ⇒ 对话框沉浸式设置（`FLAG_LAYOUT_NO_LIMITS`/`setDecorFitsSystemWindows(false)`/透明栏/`hide(systemBars())`）**全部空转**。`FullscreenImageViewer.kt:550,572` + `ImageGalleryViewer.kt:407` 用 `ctx is Activity`（**永不命中**：Compose `DialogLayout` 的 context 是 `ContextThemeWrapper(ContextThemeWrapper(...))`，AOSP `Dialog.java:191-204` + Compose `AndroidDialog.android.kt:245,451`）；且 `:163-165` / `:164-166` 传的是 `LocalView.current.parent`（= DialogLayout 本身）而 walker 又从 `root.parent` 起步 ⇒ **即便换正确谓词仍 null**。对照 `WebPreviewBottomSheet:430`/`WebPreviewFullscreenScreen:352`/`InlineMediaPlayer:654` 三处用 `DialogWindowProvider` 谓词 + `view.parent` 起点 = 正确。`exp_c4_a.kt` 用真事实搭树验证：`sites_dead=3 sites_alive=3`。
+
+**★ F-272**：`FullscreenImageViewer`（`:88`）**零引用死代码**，但其 5 个符号（`loadBitmap`/`copyBitmapToClipboard`/`shareImage`/`saveToGallery`/`ImageActionButton`）**全部只被 `ImageGalleryViewer` 使用** ⇒ 正确的写法躺在不可达处，唯一在跑的那份把两处丢了。F-270/F-271 因此是**同一结构性缺陷的两面**。
+
+**其余 D**：F-273（`cache/share` **8 写入方 vs 3 套互不知情清理**，两个表格转图路径无清理，通用 `pruneShareDir` 困在死代码里）· F-274（`FilePreviewScreen.kt:1101-1136 printFile` 的 `holder` 局部变量「保活」**对 GC 无效**，注释自认需 `@Suppress("UNUSED_VALUE")`；函数内 `destroy` **0 次**；同包 `KaTeXView.kt:270-282` 有正确 `onRelease` 三件套）· F-275（`RootfsManagementViewModel` **14 条硬编码英文**，该文件 `R.string` **0 次**，而 `RootfsManagementScreen` 21 次）· F-276（`BrowserExternalSchemeHandler` 3 条硬编码 Toast，同文件另一分支却走 `R.string.webpreview_blocked_scheme`）· F-277（异常原文当用户文案）。
+
+**★ 本棒主题：「同一语义的多份复制体，只有一部分是对的 —— 而错的那部分恰好是唯一在跑的那个」**（F-271/272/273/274 四条同形）。这是第 15/16/17 棒「同批修复漏一处」的**升级版**：漏掉的那处不但没修，还是**唯一活着的那处**。
+
+**判据首轮 7 处假红，全部「期望值按记忆写」，一律改期望值+记理由、未删判据**：`withContext(Main)` 实测 5 非 3 · 注释跨行（`Same pattern as the` / `single-image FullscreenImageViewer` 分两行）· `loadBitmap` 是 `internal suspend fun` 非 `internal fun` · `grep -c 'holder'` 把注释行也算（4 非 3）· `self` 守卫 `runAllTests`+`runTest` **各一份**（2 非 1）· **新工具坑**：`git grep -c <rev> -- <path>` 输出形如 `<rev>:<path>:<count>`（**`-c` 与 `-n` 行形不同**，`-c` 无 line 段），`cut -d: -f1` 静默拿到 rev ⇒ 两条判据因此假红（第 17 棒记过的 `git grep -n` 行形坑的**同族新变体**）。
+
+**方法论增量**：①**「复制体互相背书」是复查盲区** —— 三份实现互相在注释里引用为「正确姿势」，其中两份是坏的；注释的存在**降低**了被复查的概率。②**校准实验必须能区分正确姿势** —— `exp_c4_b2.py` 全仓扫出 8 条，其中 7 条在 `ui/settings/ProviderListScreen.kt` 且被 `Handler(mainLooper)` 包住（证明判据不是「凡 IO 内 Toast 都报」）。③**「谓词对 + 起点错」是独立缺陷** —— 只换谓词不够，起点错位单独验证（`treeA_providerwalkerFromParent_null=true`）。④**外部源码当第一源**：Compose 1.9.0 / material3 1.4.0 的 **sources jar 可从 Google Maven 直接下载**（`dl.google.com/dl/android/maven2/.../<a>-sources.jar`），AOSP 用 `android.googlesource.com/...?format=TEXT` + base64 ⇒ 「视图树形状」「异常类型」这类问题不必猜。
+
+<!-- 2026-09-20 02:26:21 -->
+## 09-20 凌晨：offload 审计第 21 棒 **并发线 A3** 完成（`provider/thinking/` + `provider/voice/`）
+
+
+**产出**：`/var/minis/shared/offload-audit-0919/wave2-a3/`（`report.md` + `ledger-a3.json` + `verify_a3.sh` + `exp_a3/`）。
+**状态**：只读，仓库 0 改动（HEAD = `afa404b`，`git status --porcelain` 空）；判据 **79/79 绿**；实验 **25 项 Kotlin + 4 臂 OkHttp 全绿**。
+**覆盖**：2,821 行 / 9 文件 = 100%（thinking 1,556 + voice 1,265，口径 `git grep -c -e '^' <rev> --`）。
+
+**5 条 D**：
+- **F-198** ★ `reasoningEffortValues` / `declaresNoEffortTiers` **不过进程边界**（dispatcher 0 put、worker 0 读，而同批的 `supports_reasoning` 两侧都在）⇒ 同一模型主进程发 `{"reasoning_effort":"high"}`、worker 发 `{}`；xAI `grok-build-0.1` 的 400 防护在所有 offload 路径失效（offload 是聊天主路径）。`c82bbf3` 的 `ponytail:` 债务注释**只在提交信息里，代码里 0 处** ⇒ `scan_debt.py` 挑不出来。**F-178 同族第 2 例**。
+- **F-199** `toRule` **丢 persisted UUID**（`toEntity` 收、`toRule` 不传、`encodeRuleJson` 无 id 键）⇒ `stableId` 对 CUSTOM 规则伪造 `builtin:…`，两条不同规则碰撞；而 `stableId` **全树只有它自己的声明 1 处引用** = 防线建在无人用的属性上。
+- **F-200** `ReasoningEchoPolicy.fieldName` **只写**（声明/编码/解码 3 处，decider 0、provider 0、`putEcho` 硬编码 `reasoning_content` 2 处）——而它的 KDoc 自己点名"一个网关上三种拼写"是**已观测**现场。
+- **F-201** 规则 `offValue` 对两种 `reasoning_effort` 格式**无效**（`format.offValue` 全 resolver 只 1 处读取，且在 `CustomPath` 分支）⇒ 列表摘要渲染 `· off = none` 而请求什么都不发。
+- **F-202** ★ 讯飞 TTS WS **无优雅关闭完成路径**（`onClosing`/`onClosed` 在 `provider/voice/` 各 0 处）⇒ 对端发关闭帧后 `synthesize()` 永不返回。**真 OkHttp 4.12.0 四臂**：`prod-shape` TIMEOUT / `app-initiated` RESUMED / **`echo-in-onClosing`（最直觉的修法）也 TIMEOUT** / `resume-in-closing` RESUMED。顺带钉死 OkHttp 契约：`onClosed` 只在 **App 自己已 enqueue close** 时才回调。
+- **F-203** 5 个 ASR 解析器，空转写守卫**只修了 2 个**（`442e6d0` 修 Doubao+Deepgram，Xunfei 本来有）——基类 `:286-300` 与 MiMo `:676-684` 的 `?: throw` 仍是死码。
+
+**10 条 O**：O-70 能力默认 true+工厂兜底返回裸基类 / O-71 `NoAudioData` 零构造 / O-72 MiMo `API_MODELS` 分支不可达 / O-73 复合凭据段数过多时静默截断 / O-74 `httpClient` 单例无传输分流口 / O-75 `composedUrlString` 版本段去重前提 / O-76 Azure SSML 属性未转义引号 / O-77 预览用造出来的 id / O-78 `previewJson` catch 不清缓存 / O-79 `decodeEcho` 未知 timing 升格为最强策略（与 `decodeWireFormat` 的降级相反）。
+**9 条 N**：N-49 decider **72 格穷举**与 KDoc 逐格一致 / N-50 codec **13 case 往返 + tag 集两侧相同** / N-51 两道超时防线真实存在 / N-52 凭据零落日志 / N-53 规则请求-JSON 通道对称 / N-54 档位钳制只一处（F-111 家族不成立）/ N-55 AUTO 短路语义正确 / N-56 编解码降级全域 / N-57 trace 读写对称。
+
+**★ 主题（可机械化的判据形态）**：5 条 D 里 **4 条同形** —— **「配置项/声明存在、通路存在、消费点不存在」**。检查法：对每个"配置型"字段枚举**写入点 vs 读取点**，只写不读 ⇒ 立即入账（一条 grep 抓 4 条）。
+
+**工具坑（新）**：`git grep -c <rev> -- path` 输出是 **`rev:path:count`** ⇒ 聚合必须取 `$3`（取 `$2` 拿到路径字符串）。本轮 12 处判据假红里 8 处是这个。另：`grep -c 'X ='` 会把 `== null` 数进去，判据写 `= [^=]`；"凭据是否进日志"要写**危险形态**（`apiKey}` 插值），不能写 `Log.*apiKey`。
+**实验台配方（可复用）**：thinking/ 5 文件**零 Android 依赖**，只需 2 个 stub（`ThinkingLevel` 枚举、`ProviderThinkingRuleEntity` 去注解）+ `json-20231013.jar` ⇒ kotlinc 直编直跑，`run_a3.sh` 一键复现并打印真源码 sha256。
+
+<!-- 2026-09-20 02:55:34 -->
+## 09-20 凌晨：offload 审计第 21 棒 **并发线 C1** 完成（`ui/chat/` 核心状态机与持久化）
+
+
+**范围**：`ChatScreen.kt` 5027 + `ChatViewModel.kt` 3843 + `ChatSessionLifecycle.kt` 1557 + `ChatTurnPersistence.kt` 454 + `ChatContextWindow.kt` 482 + `ChatHistoryDrawer.kt` 461 = **11,824 行 / 6 文件**。基线 rev `99783703`，仓库 **0 改动**（`git status --porcelain` 空）。工作区 `/tmp/rk-c1/RikkaMinis`（独立 clone，不共享 .git）。
+
+**产出**（`/var/minis/shared/offload-audit-0919/wave2-c1/`）：`report.md`(21KB) · `ledger-c1.json`(12.7KB) · `verify_c1.sh`（**49/49 绿**）· `run_all.sh`（一键复现）· 5 个结构实验脚本 + `jvm-c1/ExpSlotLeak.kt`（真 kotlinx 1.8.1 三臂对照）。
+
+**★ 本棒主题：「同批修复只落在 1/N 处」在并发/取消面上的复现。**
+
+**5 条 D（F-246…F-250）**：
+① **F-246【D】★ 槽位守卫同批修复只落 1/5** —— 5 条 `streamJob` 里 `[audit-0917]`（commit `0dfbec3`）只把 `setActive`/`buildFallbackProviders` 挪进守卫 try **1 处**（`ChatTurnPersistence.kt:371`，注释为证），另 **4 处**原样（`ChatViewModel.kt:3304` send / `:3579` resume / `ChatRetryOps.kt:98` / `ChatQueueInterruption.kt:482`）⇒ 非 CE 异常（FGS 启动被拒 / encryptedPrefs 读取失败）跳过唯一 `releaseSlot`（`SessionConcurrencyManager.kt:164` 无兜底回收，`maxConcurrent` 默认 **2**）**且异常逃逸**（全仓 `CoroutineExceptionHandler` **0 处**，经 `MinisApp.kt:348` 全局 handler 落到 ACRA = 进程崩溃，本该显示错误横幅）。**JVM 三臂对照**：ARM-A（生产形状）`releasedSlot=false` + `uncaught=IllegalStateException` / ARM-B（+CEH）槽位仍漏 / ARM-C（移入守卫区）`releasedSlot=true`。
+② **F-247【D】`streamEpoch` 缺 `@Volatile`**（`ChatViewModel.kt:517` 裸声明，同族 `streamingClaimEpoch:590` 有）—— 7 写点中 4 个在 `launch(Dispatchers.IO)` 内，5 读点全在 Main ⇒ `mergeStreamingOverlay` 的 epoch 门把**新回合自己的 delta 整段丢弃**。
+③ **F-248【D】★ `loadSession()` 无重入门 ⇒ `agentHistory` 重复追加** —— `ChatSessionLifecycle.kt:1036 addAll` 前无 `clear`（同函数 `agentHistory.clear` 计数 **0**，全仓另 5 个重建点都是 clear+重建）；两处注释自称的幂等性均不成立（`_sessionLoaded` 全仓仅 1 置位 + 1 次 `await`）。可达：`ChatScreen.kt:4025/4089` Revert Compact 按钮 → `revertCompact():1990` → `reloadSessionFromDb()` → `loadSession()`。UI 侧 `_messages` 是替换语义（不翻倍），只有 `agentHistory` 翻倍 ⇒ 重复发送 + token 估算翻倍误触发 compact。
+④ **F-249【D】`streamFlushStates` 是普通 HashMap 却被 IO 与 Main 并发访问** —— 3 个 `retain*` 调用点在 IO launch 内（`ChatModelRouting.kt:188` / `ChatViewModel.kt:2748` / `ChatQueueInterruption.kt:104`），写侧 `getOrPut` 在 Main。同包对照：`streamingClaimEpoch` 用 `@Volatile`、`ChatViewModelStore` 用 `@Synchronized` ⇒ 不是全局风格问题。
+⑤ **F-250【D】`ChatScreen` 三处吞 `CancellationException` 后继续导航**（`1909-1912`/`1938-1941`/`1954-1957`，均在 `historyDrawerScope.launch` 内）。
+
+**10 条 O（O-130…O-139）**：`pendingTransfer` 单槽覆盖 · **KDoc 与实现顺序相反**（`:577` 称 "`streamEpoch++` then `_isStreaming=true`"，实测 7 处全是 `_isStreaming` 在前，send 路径相隔 23 行）· `deleteSession`/`deleteSessionRowOnly` 无 `@Transaction`（全仓 `@Transaction` 仅 `ProviderConfigDao` 3 处）· `cleanupIfEmptyOnExit` 检查与删除非原子 · **5 处注释引用已不存在的 `SessionListViewModel`** · `drawerIoScope` 进程级无 cancel 点 · **F-124 收窄**（3 个 release 调用点已修 2，仅 `debug/ChatMutationMethods.kt:406-412` 未修）· `setUiVisible(true)` 同步 flush 同一张 map · 三个 `LaunchedEffect(Unit)` 收 `MutableSharedFlow(extraBufferCapacity=1~4)` 无 replay 首帧丢事件 · `cleanupIfEmptyOnExit` 的 `catch(Throwable)` 只记日志致 VM 泄漏。
+
+**9 条 N（N-103…N-111）**：drawer 删除的 `finally+Main hop` 是正确形态 · `:3700` 有 hop · ChatScreen 仅 2 处 `!!` 且在守卫后 · `clearChat` 先 cancelStream · sanitize 是**注入占位**非删消息 · `awaitAutoCompactIfNeeded` 有 deadline · `ChatViewModelStore` `@Synchronized` · `SessionBadgeStore.mutate` synchronized+不可变 · `SessionActivityTracker` 已原子化。
+
+**★ 方法论增量 2 条**：
+1. **结构判定类实验必须有「已知答案的对照臂」** —— `exp_c1_trace.py` 的 `innermost()` 首版对「try 体与 `try {` 同缩进」的文件返回错误候选，一度给出 **5/5 全 GUARDED 的假绿**；改为**纯花括号配对 + 线性扫描**（`exp_c1_slot.py`）并以 `ChatTurnPersistence.kt` 已修点做阳性对照后才可信。⇒ 缩进启发式在 Kotlin（Allman/同缩进风格混用）上不可靠。
+2. **判据串里的反引号在双引号内会被 shell 当命令替换** ⇒ 恒 0 命中（本棒 1 处假红根因）。另首轮 4 处假红全是「期望值按记忆写」（`loadSession()` 实际 4、`historyDrawerScope.launch` 实际 8、`SANITIZE_PLACEHOLDER` 实际 2、`AUTO_COMPACT_MAX_WAIT_MS` 实际 2），一律改期望值不删判据。
+
+<!-- 2026-09-20 02:59:49 -->
+## 09-20：第 21 棒 WAVE-2 并发审计 → 交接包就绪（给新调度中枢）
+
+
+**用户决定**：本会话不再等 C1/C2/D1 收尾，直接**交接**——新会话当调度中枢，本会话提供背景信息。
+
+**交接产物**：`/var/minis/shared/offload-audit-0919/HANDOFF-offload-21st-TO-DISPATCHER.md`（156 行 / 8.8KB，8 章自包含）—— 现状 / 4 步首要任务 / 关键事实速查 / 目录地图 / 待处理问题 / 编号水位表 / 三条铁律 / 下一棒预告。配套脚本：`collect_check.py`（收口检查，兼容各线命名差异）· `coverage_audit2.py`（全仓覆盖率机械核验）。
+
+**★ 本棒最重要发现：覆盖率必须机械算，不能凭"派了几条线"** —— 用户问"跑完就全扫完了吧？"，我写 `coverage_audit2.py` 把 531 个 .kt 逐个归属认领方，结果：**97.7% 已认领，真缺口 = `app/offload/` 顶层包 12 文件 / 2,291 行**（占 1.3%）。注意这**不是**已扫完的 `sandbox/offload/`（44 文件），是另一个包；历史 18 份报告里它只被"定点抽读"，`CalendarManager`/`ModelUseManager` **0 次出现**。判据：**"出现在报告里" ≠ "逐行走查"**。已派 D1 线补漏（session `15508693`，编号 F-278…285 / O-170…179 / N-139…147）。
+
+**★ 两条工具坑（都造成过假象）**：
+1. **判据脚本必须在 clone 仓库根目录跑** —— 脚本内 `git show <REV>:<path>` 依赖 cwd。我一开始在错误目录跑，A2 报 **44 FAIL**（全 `actual=0`），到 `/tmp/rk-a2/RikkaMinis` 复跑实为 **58/58 全绿**。A1 脚本内还硬编码 `cd /tmp/rk-a1/RikkaMinis`（clone 已清）→ `ln -sfn /tmp/rk-a3/RikkaMinis /tmp/rk-a1/RikkaMinis` 后实为 **53/53**（比 report 自报的 50 还多）。
+2. **收口检查要脚本化** —— 人工 `ls` 会漏：C3 的 report 命名是 `report-c3.md` 而非 `report.md`，我一度误判它未完成。
+
+**核准的判据水位（正确 cwd 下全绿）**：A1 53/53 · A2 58/58 · A3 79/79 · A4 46/46 · B1 51/51 · B2 70/70 · B3 85/85 · B4 55/55 · C3 14/14 · C4 73/73 · **包闸门 `verify_all.sh` 86/86**。
+
+**★ 发现的唯一编号冲突**：`N-40` 被 A1 和 A2 同时占用（A1 任务书区间是 N-31…39，越界了）。合并时 A1 的改 N-39b，A2 的保留。12 线 203 个编号只撞 1 处 = 编号区间互斥设计有效。
+
+**实时状态（02:58 实测）**：10 线已齐（A1–A4 / B1–B4 / C1 / C3 / C4）· **C1 已 02:53 落盘**（report 21KB + ledger + verify）· **C2 仍空**（只有 scan20.py，需重派）· **D1 在跑**（已有 probe.sh + exp_d1/）。
+
+**关键坐标**：基线 rev `99783703` · 锚点 `c6d8d63f` · 全仓 531 文件 / 179,847 行 · 主台账水位 209 条（到 F-181）· wave2 新增 202 条待合并 · 已用最大号 F-277 / O-169 / N-138 · 仓库 **0 改动**（全部只读）。
+
+<!-- 2026-09-20 03:07:27 -->
+## 09-20 第 21 棒 · 并发线 D1 完成（`app/offload/` 顶层包 12 文件 / 2,291 行）
+
+
+**范围**：`src/android/app/src/main/java/com/rikkaminis/app/offload/`（**顶层包**，非已扫完的 `sandbox/offload/`）。基线 rev `99783703`，独立 clone `/tmp/rk-d1/`。**只读，仓库 0 改动**。覆盖 **2,291/2,291 = 100%**（判据断言合计一致）。
+
+**发现：D 7（F-278…284）· O 10（O-170…179）· N 9（N-139…147）= 26 条**。判据 `verify_d1.sh` **84/84 绿**（期望值全部当轮实测，见 `probe.sh`）。
+
+**★ 本棒主题：「退役做了一半」——调度退了，接收端与账本没退**（F-279/280/281 同形）。T266/T268 把闹钟调度从 Minis 内部迁到系统 Clock 后：写入侧删了、读取/清理侧留在原地。机械判据形态 = `grep -c '<符号>' == 1`（那 1 处就是它自己的声明）。这是第 15/16/17 棒「同批修复漏一处」的**对偶形态**——漏的不是修复，是**删除**。
+
+- **F-280** `AlarmOffloadManager` 336 行：`scheduleAlarm`/`scheduleTimer`/`cancelAlarm(`/`cancelAllAlarms` 全仓计数均 **1（仅声明）**、构造点 1（`AlarmReceiver:40` 只调 `onAlarmFired`）⇒ 调度/列出/取消/通知渠道全不可达；`MinisApp.kt:897` 仍宣称其 PendingIntents 在役。
+- **F-281** `CalendarManager` 全仓计数 **1**（仅自身声明）= 133 行死码；其 `getPrimaryCalendarId`(IS_PRIMARY=1 取首个) 与活的 `CalendarOffloadHandler.resolveCalendarId`（三级回退，注释点名「IS_PRIMARY=1 on a com.google account」）口径不一 ⇒ **正确的写法躺在不可达处**（F-272 家族第 2 例）。
+- **F-279** `AlarmReceiver:22-24` 注释断言「BOOT_COMPLETED keeps the receiver resident so the AlarmManager re-fires the persisted alarms」——全仓 `fun .*[Rr]eschedul` **= 0**，该分支内 `AlarmManager` **0** 次，只有一行 info ⇒ 机制不存在（注释误导源）。
+- **F-282** ★ `clearSessionGrants` 全仓 **2**（声明 + KDoc 引用）⇒ ASK_ONCE 的 `sessionGrants`/`sessionDenials` 两个 map **无任何清理路径**，与 KDoc 直接相反（`:107-111`「Cleared when the hosting session ends」/`:118-123`「Cleared with the session」）⇒ 会话 A 的「Allow/Deny in this session」永久粘滞到会话 B（**权限泄漏 + 误拒**，正是 T340 引入 `MINIS_CHAT_SESSION_ID` 想防的），且随会话数无界增长。
+- **F-283** ★ 第 17 棒 F-66 **核实未修**：`ScheduledNotificationStore` 类内 `Synchronized` **0**、`prefs.edit().putString` 整串写回 3 处、上限常量 0。**Exp-A 复刻**（真源码搬运 + 真 `org.json`，SharedPreferences→无锁 Map）：4 线程×25 次 add 连跑 5 次存活 20/26/29/32/37（丢 63%-80%），**串行对照 100/100 零丢失**，5000 条 73,891 字节无截断。**本棒新增可达性链**：handler 的 `store` 是实例字段（`NotificationOffloadHandler:55`）、`handle()` 跑在 `NativeOffloadServer` worker 池（`NativeOffload.kt:242`，池大小=`maxConcurrentSessions()` 默认 **2**）⇒ 两个并发 schedule 即触发。**后果放大**：`store.add` 在 `am.setExactAndAllowWhileIdle` **之后**（:291 vs :276）⇒ 被丢的条目闹钟已挂上但账本没有 ⇒ `pending` 列不出、`cancel --id` 找不到 ⇒ **用户无法取消，只能等它响**。
+- **F-284** 三个权限往返槽（`:151`/`:133`/`:256`）都是单 `@Volatile` 变量 + 无条件 `= cont`（各 1）；现有 identity guard（`=== cont` 3 处）只覆盖「超时后的新 caller」，**不覆盖两个 caller 同时在飞**；offload 是 2 worker 并发 ⇒ 先到者等满 120s 拿 TIMEOUT。
+- **F-278**（D·latent）`AlarmReceiver` 先发通知（:76）后清账本（:40）且失败只 warning ⇒ 与 `ScheduledNotificationReceiver:64-79`（notify 成功后才 remove，带 `[audit-0917]` 理由）**同语义两套顺序**。
+- **O 级亮点**：O-170 `onCompletion` 只改状态不 release/remove（回调块内 release=0）· O-171 `WeatherManager` 用 `android.util.Log`（全包唯一，其余 6 文件 29 处 AppLogger）⇒ worker 进程里该行**不进日志文件** · O-172 退出码 126 三义（权限拒/Shizuku 未授权/未就绪）· O-173 `showInSettings=false` 的 5 个工具**实际不可配置**（设置页 filter 全仓 1 处、Debug 侧 setLevel 0 处）· O-176 断开监听器时不 countDown 待等 latch · O-178 `WeatherManager.client` 是全仓第 18 个 OkHttp 构造点，不接 `sharedLLMConnectionPool`（`connectionPool(` 4 = 1 定义 + 3 接池）。
+- **★ N-139 是本棒方法论要点（证伪候选缺陷）**：静态读码看 `awaitPosted`（检查 hasPosted → computeIfAbsent → 检查 → await）会判成「注册窗口内 countDown 丢失 ⇒ 满超时」竞态。**Exp-B 用闸门把 T2 停在检查 1 与注册之间、此间触发 onNotificationPosted（键不存在 ⇒ countDown 丢失）再放行 ⇒ RACE result=true elapsed_ms=5，未超时**——因为注册后的**检查 2**（`:96` 重检）覆盖了该窗口。**静态结论必须对拍后才入账**的又一实例（本仓第 2 例，前有 O-44 被撤回）。
+- **N-147 PII 面阴性**：通知 title/body 只进 `nm.notify` 与返回 JSON；本包 AppLogger 调用（29 处）只记 id/布尔/计数 ⇒ **F-123 家族在本包不成立**，日历条目/位置/通知正文零落盘日志。
+- **备份面附注（未编号）**：本包 4 个 prefs（`minis_alarms_prefs`/`minis_scheduled_notifications`/`offload_permissions`/`offload_permissions_asked`）**均不在** `backup_rules.xml` 与 `data_extraction_rules.xml` 排除表（各 0 命中）⇒ 闹钟标签、待发通知 title/body、权限策略随 Auto Backup 上云/换机。
+
+**工具坑（新，写给下一棒）**：① `git fetch --depth 400 origin main` 后 **HEAD 落在 main 顶端**（本次 `afa404b`），必须显式 `git checkout 99783703` 才是基线——否则 `git show <rev>:<path>` 读基线、而不带 rev 的 `git grep -c` 读 main，口径不一致会造出假缺陷。② **复刻实验里的竞态数字不能写死**：Exp-A 五次跑出 20/26/29/32/37，判据必须断言**下界**（`lost>=50`）而非单次数值（首版写死 32 当场翻红）。③ `git grep -c 'cancelAlarm'` 会把 `cancelAlarmFor` 数进去（4 非 1），**符号要带左括号** `cancelAlarm(`。④ `grep -c 'MAX_'` 会命中 `Long.MAX_VALUE`，上限判据要写 `MAX_ENTRIES\|maxEntries\|coerceAtMost`。⑤ 判据脚本内联 `$( ... )` 里带双引号的 pattern 会被 shell 拆行（首版语法错），改用转义 `\$` 或无引号形式。
+
+**产出**（`/var/minis/shared/offload-audit-0919/wave2-d1/`）：`report.md`(21KB) · `ledger-d1.json`(26 条，D=7/O=10/N=9) · `verify_d1.sh`(**84/84 绿**，两处 cwd 复跑一致) · `probe.sh`+`probe-out.txt`（期望值实测） · `exp_d1/`（`ExpA.java`/`ExpB.java` + `out-A.txt`/`out-B.txt` + `run_all.sh`，真源码 + 真 org.json）。
+
+<!-- 2026-09-20 03:26:49 -->
+## 09-20：offload 审计 WAVE-2 并发线 C2 完成（`ui/chat/` 渲染与文本组件）
+
+
+**身份**：第 21 棒并发线 C2（只读，仓库 **0 改动**，HEAD = `99783703` / 锚点 `c6d8d63f`）。
+**产出**：`/var/minis/shared/offload-audit-0919/wave2-c2/` — `report.md`(25KB) · `ledger-c2.json` · **`verify_c2.sh`（PASS=72 / FAIL=0）** · `exp_c2_throttle.kt`+`out-A.txt` · `exp_c2_aggregate.py`+`out-B.txt`
+**覆盖**：24 文件 / 16,895 行（目标 17 文件 14,384 行逐行走查 100% + 跨包取证 7 文件 2,511 行）。
+**编号**：F-254…F-257（4 D）· O-140…O-149（10 O）· N-112…N-120（9 负面）。
+
+**★ 本棒主题：「同一个开关的两侧，只有一侧在活路径上」**（同族第 N 例：同语义两落点只修一处）
+- **F-254【D】** `AGGREGATE_MESSAGE_ITEMS = true`（`ChatScreen.kt:4992` 编译期常量，`build.gradle.kts` 无覆盖）⇒ `if (AGGREGATE_MESSAGE_ITEMS) {`(:3077) 配平闭合 **:3231**、块内唯一 `return@collect`(:3230) 无条件早退 ⇒ **:3232-:3407 共 176 行静态死码**。死区里躺着 `lightFingerprint` 唯一读写点(:3314/:3337) 与 `reconcileAndVerifyTerminalText`(:3403) 的**唯一生产调用点**——而 `ChatFlatItems.kt:644-649` KDoc 明确承诺该函数关闭「同长度改写 AAAA→BBBB」盲区 ⇒ **生产无补偿**。作者已在 :3140/:3354 注释承认 unreachable，但 `ChatScreen.kt` **零 `ponytail:` 标记**。
+- **F-255【D】** `produceState(initialValue = content, content, isStreaming)`（SMT:595）—— key 含被节流数据本身 ⇒ `LaunchedEffect(key)` 每次内容变化 cancel 掉正在 `delay` 的 producer ⇒ 节流器零效果。**同文件 :926-933 孪生站点已修**（注释原文 "never throttled at all"）。**实验 `exp_c2_throttle.kt`（真 kotlinx-coroutines 1.8.1）**：A 现状 renders=100 / B 对照 renders=2 ⇒ **50×**。
+- **F-256【D】** KaTeX 主题取 `isSystemInDarkTheme()`（SMT:1483/:1550、KaTeXView:107），而正文取应用内 `LocalChatPalette` ⇒ 用户强制浅色时公式白字白底。**同仓 `ChatToolDetailUI.kt:602-603` 早有 T126-fix 注释**写明 "ChatPalette.isDark follows the in-app theme override, isSystemInDarkTheme() doesn't"。
+- **F-257【D】** legacy 渲染链整体运行时死码：`MarkdownBlock`(SMT:796) 唯一调用在 `is FlatChatItem.AssistantMarkdownBlock ->`(ChatScreen:3936) 分支，而该行类型 5 个构造点全在死区 ⇒ `MarkdownBlockBody` 链 + `BorderedMarkdownTable`(248 行) + `parseInlineMarkdown`（**第三套行内解析器**，3 分支 vs SMT parseInline 11 分支）一并死。作者自述 "RUNTIME-DEAD while AGGREGATE_MESSAGE_ITEMS is true"。
+
+**O 级**：O-140 `MarkdownClipboard.kt:227` 裸 NUL 字节（`"\x00CODE\x00"`）⇒ 系统 grep 判二进制无行号（**O-40 `data/MountedFoldersStore.kt` 家族第 2 例**，全仓仅此 2 文件含 NUL）· O-141 `KaTeXRendererCache`(64MB) 无内存压力回收（对照 `clearRenderCacheForMemoryPressure()` 全仓 4 处只 evict 另一个）· O-142 `TextShard.rawMarkdown`/`renderedToRawOffset` 恒 null · O-143 富文本 `<ol>` 不带 `start=`（同文件纯文本路径 :87 却用了捕获组）· O-144 两处在 composition 体算 UTF-8 字节数（:612/:1543，无 remember）· O-145 全仓零 `onRenderProcessGone` ⇒ WebView 崩溃后每次 render 付 4s 超时 · O-146 `KatexWebViewPool` 无 destroy/重置 · O-147 节流档位梯子复制两份（VM/UI）· O-148 legacy 两文件零外部引用 · O-149 ChatScreen 零 ponytail 标记。
+
+**★ 方法论增量 6 条（可复用）**：
+1. **「常量开关」是死码审计最高性价比入口** —— 三步：①常量值 + 查 `build.gradle.kts` 是否可覆盖 ②`if (X) {` 的**配平闭合行号**（逐字符括号扫描，不能靠缩进）③块内是否**无条件** return（`awk` 扫 `return@|continue@|break@` 计数 + 位置）。
+2. **`produceState(initialValue, key…)` 的 key 是节流器天敌** —— key 含被节流数据 ⇒ `LaunchedEffect(key)` cancel 正在 `delay` 的 producer。识别信号：key 列表里出现 `collect`/`delay` 所操作的变量。
+3. **「孪生站点」判据要机械对拍** —— 先 grep 语义标记（`isSystemInDarkTheme()` / `streamingThrottleFor` / `reconcileAndVerifyTerminalText`），再逐个判「是否在活路径」，最后用同仓已有正确姿势做对照臂。
+4. **单行 grep 匹配跨行 KDoc 必然假红** —— 本棒 2 条判据因 KDoc 折行与反引号翻红 ⇒ 取跨行断点前片段或改 `grep -A`。
+5. **子串匹配污染调用点计数** —— `grep 'MarkdownBlock('` 实测 8（含 `AssistantMarkdownBlock(`）⇒ 必须 `grep -E '(^|[^A-Za-z_])MarkdownBlock\('`；同理 `AssistantMarkdownBlock(` 6 处含 1 处 class 声明。
+6. **实验对照臂必须有明确期望方向** —— F-255 复刻里 A 期望 `>= N`、B 期望 `< N`，两个 `check()` 同时断言，避免「都跑完就算通过」的假绿。
+
+**判据纪律实证**：首轮 `PASS=67 / FAIL=5`，5 条 FAIL **全部**是断言口径问题（跨行 KDoc ×2、assets 路径未走 `git show` ×1、子串误配 ×2），**一律改期望值/模式、不删判据**，脚本内逐条注明「口径修正」理由。
+
+<!-- 2026-09-20 04:36:08 -->
+## 09-20：FIX-5 批次（data 层修复）完成 — 8 修 / 1 证伪 / 2 越界
+
+
+**分支** `fix/data-layer` @ `4cde346`（基线 `afa404b`）· 9 文件 + 2 测试 / +640 −70 · 判据 **43/43** · JVM **16/16** · 产出 `/var/minis/shared/offload-audit-0919/fix-out/fix5/`
+
+**★ 本棒最重要：F-237 判定为假阳性并撤回（对照组实测证伪）**
+原判「`GroupRouter.health` 是插入序 `mutableMapOf`，对已存在键赋值不改插入位置 ⇒ 反复失败的条目永驻首位 ⇒ 淘汰每次都删同一个 key ⇒ 表无界增长」。我按原判改了 access-order + 删手工淘汰，**对照组（旧实现）10/10 全绿**，直接探测旧实现：`cap=256 maxObservedSize=256 bounded=true`。
+**根因**：`LinkedHashMap.remove(k)` 后再 `put` 同一 key **会追加到尾部**，所以"sticky 永驻首位"的前提不成立——淘汰是**轮转**的。注释与容器类型不符是真的，行为有界也是真的。
+⇒ **方法论**：「容器语义确凿」≠「行为后果确凿」。凡结论依赖「X 永远停在某位置」这类**不变量假设**，必须构造对照组跑一遍；`remove+put` 会重置位置这类 Java 集合细节是高频陷阱。
+
+**8 项已修**：F-222 `replaceEntries` 补 `costTier = prior?.costTier`（cheapestFirst 排序依据不再被一次刷新抹掉）· F-223 `writeSkillMd` 改**合并** frontmatter（保留 `subagent`/`max_turns`/`allowed_tools`，否则改一次技能名该技能就从 spawn_agent 列表消失）· F-225/236 `deleteSession` 返回并消费 `DeleteResult` · F-226 `parts_json` 上限改**字节**判定 + `takeByUtf8Bytes`（不劈代理对）+ reasoning 一并封顶 · F-227 `servers.json` 不可解析⇒保留内存状态 + 原子写(tmp+rename) + 读路径去副作用 · F-230 分词启发式改字符类加权**并修正 KDoc 虚假的 "within ±15%" 声明** · F-233 `duplicateSession` 补齐 3 字段 · F-234 `deleteSession`…`fromSortOrder` 语义化改名。
+
+**2 项越界未修（重要）**：任务书表格列了 F-232/F-224，但**两份文件正文里没有这两条**（正文只有 11 条），且 `fix-ownership.json` 判给 FIX-1（F-232, ContextOffload.kt）/FIX-6（F-224, SoulStore.kt），两份任务书也各自认领。⇒ 按批次边界不越界；F-232 是安全敏感项（模型可控 id 拼文件名 ⇒ 路径穿越），建议优先。
+
+**★ 我自己的实现 bug 被测试抓到**：`buildTruncatedPartsJson` 首版只按原始字节算预算，忽略 **JSON 转义会放大输出**（`"`→`\"`、换行→`\n`）⇒ 实测超限。改为**实测 wrapper 尺寸 + 迭代收敛**（上限 16 次，兜底 marker-only）。教训：字节预算类实现，凡输出要经过一层编码/转义，必须按**最终编码后**的尺寸校验，不能按输入算。
+
+**★ 判据口径（首轮 9 红全是期望值）**：F-226-1 6→9（常量名在注释/助手也出现）· F-226-3 2→3（循环内兜底再校验）· F-234-1 2→4 · F-234-2 0→1（唯一残留是解释性注释，改判据为「不再作形参/绑定」）· F-234-3 2→3 · F-235-4 3→5 · F-227-5 1→0（写法是 `if (parsed.needsPersist)`，pattern 少前缀）· F-230-4 0→1（新 KDoc **引用**旧值作对照）· F-225-4 1→3（`return result` 另有两处，限定到函数体）。**一律改期望值不删判据**。
+
+**★ 可复用配方：把生产 companion object 抽出来跑 JVM 测试**
+`SkillRepository`/`ChatRepository` 依赖 Android `Context`/`SQLite` 无法直接 JVM 测 ⇒ 把**纯逻辑放进 companion object**，测试脚本用 Python 按括号配平**抽取原文**、dedent 后套进 `class X { companion object { … } }` 桩编译。被测的是生产逻辑本身而非复刻。同仓既有先例：`MCPRepository.deriveFallbackName`、`SubagentSkill.extractFrontmatterBlock`。
+配套：**对照组必须能红** —— F-226 基线 chars 实现跑同套测试得 3 红，证明判据有区分度而非空转。
+
+**F-230 实测（tiktoken cl100k_base, 18 样本）**：旧 `cp/3` 最大误差 **80%**（中文**低估 3 倍**，EN 高估 53-80%）；新字符类加权 `0.28·字母+0.35·数字+0.5·标点+0.2·空白+1.0·非ASCII` 最大 **59%**、CJK 偏置消除（低估样本 11/18→8/18）。**结论：无字符类启发式能达 ±15%**（base64/压缩 JSON 不可由字符计数预测）⇒ 改的是**声明**不只是实现。
+
+**未做（需他批）**：F-225 的 UI Toast 提示未加 —— `ChatHistoryDrawer.kt` 不在本批持有清单（属 FIX-3），且需新增 `R.string`（要同步 7+1 语言文件）。
+
+<!-- 2026-09-20 04:50:02 -->
+## 09-20：FIX-5 收口 —— 已合并 main = `4cde346`
+
+
+**流程**：分支 `fix/data-layer`（基线 `afa404b`）→ 判据 43/43 + JVM 16/16 → push → dispatch CI **#1666 success**（核对 `head_sha=4cde346` 确为本提交）→ main 未前移 ⇒ `HEAD:main` FF → **main = `4cde346`** → 远端分支 DELETE 204。
+
+**注意**：远端尚有他线分支在飞（`fix/provider-layer` / `fix/chat-state-machine` / `fix/render-ui-layer` / `fix/approot-offload`）——FIX-1/3/4/7 各线的产出，本批未触碰它们的文件，合并顺序上无冲突。
+
+**产出归档** `/var/minis/shared/offload-audit-0919/fix-out/fix5/`：`REPORT.md` · `verify_fix5.py`(43 判据) · `check_cost_tier_carry.py`(F-222 机械守卫) · `verify_fix5.out` · `jvm/`（2 个测试类 + F-237 对照组源码）。
+
+**验证纪律两条（本批实证）**：
+1. **CI 绿必须核对 `head_sha`** —— 用 `curl -H "Authorization: Bearer $GITHUB_TOKEN" .../actions/runs/<id>` 取 `head_sha` 与本地 `git rev-parse HEAD` 逐字符比对，不能只看 bridge 的 `conclusion: success`。本次 bridge 只回 `name/branch/status/conclusion/html_url`，**不含 sha**，所以必须额外查一次 API。
+2. **「改动已进 main」的验证要用正确路径** —— 我首轮用 `data/$f` 拼路径导致 4 项误报 0（`repository/` 是 `data/` 子目录，不是同级）。用 `git show origin/main:<完整路径>` 复验后 6/6 命中。误报 0 与真缺陷长得一样，凡"验证结果全 0"先怀疑自己的路径/口径。
+
+<!-- 2026-09-20 05:03:55 -->
+## 09-20：offload 审计修复批次 FIX-4-render-ui 完成（渲染/UI 组件层）
+
+
+**产出**：`/var/minis/shared/offload-audit-0919/fix-out/fix4/` —— `REPORT.md` · `FIXED-F-255/256/257/262/270…277.md`（12 份，各含 git diff 片段 + 改前/改后行为）· **`verify.sh`（PASS=65 / FAIL=0）** · `syntax_gate.sh` · `ci.txt`（两轮 CI 记录）· `exp/`（2 个独立实验 + 实测输出）· `patches/`（2 份跨批补丁文档）。
+
+**分支** `fix/render-ui-layer` @ `7d60359`（基线 `afa404b`）· 15 files / +427 −400 · 工作区 0 未提交 · CI **success**（run 35468343462）· 远端已推送 · **未合并 main、未删分支**（按任务书由调度中枢统一做）。
+
+**12 条处置**：11 改 + 1 出补丁（F-262 落点全在批外）。
+
+**★ F-270 崩溃级（本批最重要）**：`ImageGalleryViewer.kt` 的「保存到相册」Toast 跑在 `MinisApp.applicationScope`（`SupervisorJob + Dispatchers.IO`，**无 Looper**）⇒ `Toast.makeText` 必抛 `Can't toast on a thread that has not called Looper.prepare()` = 每次点击必崩。修法：包 `withContext(Dispatchers.Main)`。同文件 Share 按钮走 `shareImage`（每个 Toast 都 hop Main）⇒ 安全 —— **同排按钮，一个安全一个崩，差别只在有没有 hop**。
+
+**★ F-271**：对话框窗口查找器 6 份复制体里 3 份谓词错（`ctx is Activity` —— Compose `Dialog` 的 context 链是 `ContextThemeWrapper(ContextThemeWrapper(…))`，**永不命中**）、2 份叠加起点错位（`root.parent` 跨过唯一可命中节点）⇒ 沉浸式设置**全部空转**。改 `DialogWindowProvider` + `view.parent`（与 `InlineMediaPlayer` / `WebPreviewBottomSheet` 三处正确姿势同形）。
+
+**★ F-272**：`FullscreenImageViewer` composable **零引用死代码**，但其 5 个 helper 全被活的 `ImageGalleryViewer` 使用 ⇒ **正确写法躺在不可达处**，唯一在跑的那份把 F-270/F-271 两处都丢了。**删掉死副本才是根治**（留着「参考实现」，下次照抄 bug 第三次复发）。
+
+**其余**：F-255 `produceState` key 含被节流数据 ⇒ 每次内容变化 cancel 正在 `delay` 的 producer（实验 100 chunks：100 renders → 8）· F-256 KaTeX 取 `isSystemInDarkTheme()` 而非 `ChatColors.isDark`（强制浅色时公式白字白底），**并把 `isDark` 纳入缓存 key**（否则主题翻转后继续读另一主题的位图）· F-273 清理器 `private`→`internal` + 表格转图两落点接上 · F-274 `printFile` 的 `var holder` 局部变量**不是 GC root**（保活是虚构的）· F-275/276/277 硬编码英文与异常原文外泄 → `R.string`（17 key × 7 语言）。
+
+**★ 三条可复用教训**：
+1. **种类对照式语法门对基线里已存在的错误种类是盲的** —— 沙箱语法门 8/8 全绿，CI 首轮仍红（`Unresolved reference 'ctx'`：`observeInstallProgress` 自己没有 context 参数）。`Unresolved reference` 在基线里也大量存在（缺依赖），被归为「已知种类」漏过。**它只能证明「没引入新形态」，不能证明「新代码是对的」——编译不可省。**
+2. **审计建议与真实约束冲突时以约束为准** —— F-274 审计建议「照抄 KaTeXView 的 onRelease 三件套」，但 `createPrintDocumentAdapter` 的 adapter 会在**打印作业 spooling 期间惰性读取 WebView**，在 `onPageFinished` destroy 会让打印**静默变空白页**。最终只在失败路径销毁 + `ponytail:` 注明天花板与升级触发。
+3. **判据首轮 16 条假红全是口径问题，一律改判据形态不删判据** —— 注释里引用了被判据搜索的符号（`Toast.makeText` 计数 2）、子串污染（`fun MarkdownBlock` 命中 `MarkdownBlockBody`）、同一符号被另一处正当使用（`progressJob?.cancel()` 剩 2，其中 `:41` 是合法重订阅守卫）、期望值按记忆写（`R.string` 实测 14 我写 17）、`git grep HEAD` 读的是提交树而非工作区（未提交时读到旧版本）。
+
+<!-- 2026-09-20 05:11:10 -->
+## 09-20：FIX-7 批次修复完成（`app/offload` 顶层包 + sandbox 根文件，11 条 D）→ main = `2bbe60a`
+
+
+**任务书**：`/var/minis/shared/offload-audit-0919/fix-tasks/FIX-7-approot-offload.md`（11 条 D，来源线 B1 + D1）
+**产出**：`/var/minis/shared/offload-audit-0919/fix-out/fix7/` — `report.md` · **`verify.sh`（PASS=58 / FAIL=0）** · `jvm7/`（run_all.sh 七阶段 + 改前反向对照）
+
+**处置**：8 条改代码 · 2 条删死码（带溯源注记搬家）· 1 条纯注释纠错。改动 18 文件 / +548 −548。
+
+**三条核心（同族形态 = 机制存在、消费点不在活路径上）**：
+- **F-283** ★ `ScheduledNotificationStore` 全部写路径无互斥（read-modify-write 整串 JSON）；owner handler 跑在 `NativeOffloadServer` worker 池（默认 2 并发）⇒ 两次并发 schedule 即触发。**后果放大**：`am.setExactAndAllowWhileIdle` 在 `store.add` **之前**（:276 vs :291）⇒ 被丢条目 = 闹钟会响但 `pending` 列不出、`cancel --id` 找不到（用户只能等它响）。**ExpA 实测**：改前 4 线程×25 次丢 76/100（跑 5 次剩 20/26/29/32/37 ⇒ 判据必须断言**下界**）；改后 9/9 绿。修法：全部写路径 `synchronized(lock)` + 1000 条软上限（**只 sweep 过期，绝不删活跃条目** —— 删了就制造同一不可取消状态）。
+- **F-284** ★ 三个权限往返槽都是单 `@Volatile` + 无条件赋值；已有 identity guard（`=== cont`）只覆盖「超时后的新 caller」，**不覆盖两个 caller 同时在飞**。**ExpF284（真 kotlinx 1.8.1）**：baseline 先到者 `A_result=null`（用户点了 Allow 却拿到 120s 超时）/ patched `A_result=ALLOW` ⇒ `patched_true_baseline_false=true`。修法：`claimSlot` 占用门 + `slotLock`。
+- **F-215** ★ 输出上限「KB 名 / 字符实」：`shellOutputKb` 是 KB 旋钮（默认 128），但 shell 侧与 host 侧都比 `String.length`，且 **host 侧根本不传旋钮**（吃默认 50 000 字符）。**ExpF215**：CJK 正文实际 393 216 B = 预算 **3.00×**，emoji 2.00×。修法：两条路径统一 UTF-8 字节计价（`utf8Length` 走码点，O(1) 分配）+ 统一走旋钮 + `byteSafePrefixLength`/`byteSafeSuffixStart` 保证不劈开代理对。
+
+**其余**：F-280 `AlarmOffloadManager` 336→120 行（删 9 个零调用方法，保留 `onAlarmFired` + 通知渠道）· F-281 删 `CalendarManager.kt` 133 行零引用死码（活的三级回退在 `CalendarOffloadHandler` 内）· F-214 删 `MountedFolderCoordinator.kt` 零调用副本 + 把 T219-3 溯源注记搬到 `PRootKernel` 真实现处 · F-216 `NativeOffload.start` 幂等守卫提到 semaphore 重建**之前**（否则旧实例上已获取的 permit 永不释放，并发天花板瞬时失效）· F-217 删 `ShellExecutor.destroyCurrent()` 静默 no-op · F-278 `AlarmReceiver` 改 post-then-cleanup（失败升级 error）· F-279 删「BOOT_COMPLETED 会让 AlarmManager 重发已持久化闹钟」的错误断言。
+
+**★ 方法论增量（可复用）**：
+1. **判据首轮 7 条假红，全部是口径问题，无一是代码错** —— 四种形态：①期望值按记忆写（`synchronized` 写 5 实 4、`resolveCalendarId` 写 2 实 3）②**子串污染**（`ShellExecutor.destroyCurrent` 命中我自己写的说明注释 ⇒ 必须 `grep -v ':[[:space:]]*//'`）③**函数边界用 `awk '/fun x/,/^    }/'` 会漏**（嵌套块使 `^    }` 提前命中 ⇒ 改 `NR>=A && NR<=B` 行号区间）④`grep -c 'workerConcurrency = ...Semaphore'` 命中**字段初始值**而非 `start()` 内的重建（⇒ 必须 `awk '/fun start/{f=1} f&&...'` 限定函数体）。
+2. **沙箱台的覆盖盲区会直接变成 CI 红**：`internalTruncateOutput` 只被 CI 覆盖（`PersistentShell.kt` 依赖 Android 编不进沙箱），我第一轮漏了它 —— CI 挂的那一条正好是它。**修法**：`extract_internal_truncate.sh` 用 awk 从真源码抽出顶层函数 + 打印源文件 sha256，配 9 例 JVM 测试。**这个「抽取 + 指纹」模式可复用于任何"依赖 Android 的顶层纯函数"**。
+3. **反向对照必须跑**：F-283 的 3 红、F-215 的 4 红、F-284 的 `baseline=false` —— 只有正向绿的测试无法区分「修好了」和「测了个恒真命题」。
+4. **删死码要查完整引用面**：删 `CalendarManager` 后全仓（含注释）必须 0；跨平台同名文件（`MountedFolderCoordinator` 的 iOS 侧）**不能删**，注释里的引用要保留并标注。
+5. **`gh_sync.sh push` 不带 `--force`**，rebase 后必须手动用它的 askpass：`export GIT_ASKPASS=/var/minis/workspace/.git_askpass.sh; export GIT_TERMINAL_PROMPT=0; git push --force-with-lease=refs/heads/<br>:<旧远端head> origin <br>`。**裸用 `--force-with-lease` 会因本地 remote-tracking ref 过期报 `stale info`** ⇒ 先 `git fetch origin <br>:refs/remotes/origin/<br>` 建立引用，再用**显式 lease**。
+
+**验证链**：首轮 CI #1665 failure（只挂 1 条 = 我算错期望值，6 字节放 2 个汉字我写了 1）→ 修 + 补盲区 → #35467863305 success → main 前进到 `4cde346`（FIX-5 批次）→ **rebase 无冲突** → rebase 后**重跑判据 57/57 + 实验台全绿**（rebase = 换树，旧绿不可复用）→ #35468798976 success → FF 合并 main = `2bbe60a` → 删分支 → 收口后判据 **PASS=58 / FAIL=0**。
+
+**ponytail 留债**：①`ShellExecutor` 整体仍是生产死码（只有 androidTest 引用）②`AlarmOffloadManager` + `AlarmReceiver` 只服务 pre-T266 残留 PendingIntent（升级触发：连续两版本无 `no matching prefs entry` 日志）③1000 条上限不删条目（刻意的，删了会制造 F-283 同款状态）④未修的相邻发现：4 个 prefs 均不在 backup/data_extraction 排除表（闹钟标签/通知正文/权限策略随 Auto Backup 上云）· `WeatherManager` 用 `android.util.Log`（全包唯一）· 退出码 126 三义 · `showInSettings=false` 的 5 个工具实际不可配置。
+
+<!-- 2026-09-20 05:35:56 -->
+## 09-20：修复批次 FIX-2-thinking-voice 完成（6 条，分支已推 + CI 绿）
+
+
+**批次**：FIX-2-thinking-voice · 分支 `fix/thinking-voice-layer` · commit `0012517` · 基线 `afa404b`
+**CI**：#1678 Build RikkaMinis Android APK **success** — https://github.com/***OWNER***/RikkaMinis/actions/runs/35470051761
+**产出**：`/var/minis/shared/offload-audit-0919/fix-out/fix2/`（REPORT.md 15KB · verify_fix2.sh · exp-FIX-2.kt · exp/ 完整实验台 · fix2.patch · ci.txt）
+
+**已改 6 条**（全部同形：声明存在、通路存在、消费点不存在）：
+- F-199 `ThinkingRuleCoding.kt` ×3 —— toRule/encode/decode 丢持久化 UUID ⇒ stableId 伪造 `builtin:…` 碰撞
+- F-200 `ReasoningEchoDecider.fieldNameFor` + `OpenAIProvider.putEcho` —— 规则要的拼写上不了线
+- F-201 `ThinkingRuleResolver.pickOffTier` —— 规则 offValue 对两种格式无效；两分支同批修（编辑器共用入口）；内置规则透传 ctx.offEffort（4 处）不变
+- F-202 `VoiceProviderVendors.kt` —— onClosing 收敛 + withTimeoutOrNull(120s) 兜底；**echo-in-onClosing 实测无效已注释钉死**
+- F-203 `VoiceProvider.kt` + `VoiceProviderVendors.kt` —— 空转写守卫补 2/5 缺口（optString 对缺失/空键都返回 ""）
+- F-198 已由 FIX-1 `bd68c66` 落地，本批只验证（判据报 SKIP）
+
+**验证**：判据 35 PASS / 0 FAIL / 2 SKIP（基线 rev 对照 10 PASS / 25 FAIL）· JVM 实验 31/31 · 修前对照臂 17 PASS / 14 FAIL（14 条精确对应 6 条修复）
+
+**★ 方法论增量（可复用）**：
+1. **`git grep <rev> -- <path>` 读的是那个 rev 的已提交内容，不是工作区** —— 判据全用它 ⇒ 22/28 条 actual=0 的**假红**。判据默认读工作区（GNU grep 直接读文件），需历史 rev 时显式 `git show <REV>:<path>`。
+2. **`grep -c 'takeIf { it.isNotEmpty() }'` 里的 `.` 在 BRE 下匹配任意字符** ⇒ 实测 17 而非 4。带 `.`/`{`/`}` 的 pattern 一律 `grep -F`。
+3. **真实路径实验 > 复刻**：`XunfeiVoiceProvider.synthesize()` 自己构造 `wss://` URL，用 **`ProxySelector.setDefault` + HTTP CONNECT 隧道**把它导到本地 TLS 服务器（证书 SAN = 原 host，**TLS 主机名校验真实执行**）。先试 `/etc/hosts` + `:443` 失败（沙箱非 root，绑不上特权端口）⇒ 代理是正解。
+4. **修前对照臂必须从基线 rev 抽源码重跑同断言** —— 本批 14 条 FAIL 精确对应 6 条修复，这才是判据有效性的硬证据（`run_before.sh`）。
+5. **分段运行**（`run_parts.sh`，每段独立 JVM）：一个卡住的 arm 不拖住整轮。真踩到——HTTP 服务器用 `BufferedReader` 读 header 后再读 body，而 body 已被 reader 吞进缓冲 ⇒ 阻塞到 soTimeout。
+6. **首轮 6 条判据 FAIL 全是期望值/口径问题，一律改期望值不删判据**：withTimeoutOrNull 实为 2（import+使用）· pickOffTier 实为 3（1 定义+2 调用，第三分支走 `ruleOff ?: offEffort!!` 直取）· 内置规则是 `ReasoningEffort(ctx.offEffort)` 透传 4 处而非字面 null 6 处 · 注释标记是 F-199 不是 F-20 · F-198 未到应 SKIP 不应 FAIL。
+7. **跨批兼容性可机械验证**：`git apply --check <other-batch.patch>` 打到对方工作树，干净通过 = 无冲突（本批与 FIX-1 在 `OpenAIProvider.kt` 改动区间不相邻）。
+
+<!-- 2026-09-20 08:37:17 -->
+## 09-20：修复批 FIX-3-chat-state 完成（chat 状态机与并发 · 7 条 + 跨批补丁 4 处）
+
+
+**分支** `fix/chat-state-machine` · **基线** `afa404b`（父提交已核）· **commit** `3b3c474` + `9dfe54f` · **CI #1670 → #1682 两次均 success** · **diff** 8 文件 / +272 −316（净 −44）· **判据** `verify.sh` PASS=35 FAIL=0。
+
+**本批 7 条**：F-246 槽位守卫补齐另 4 处（刻意不加外层 catch —— 守卫加宽后异常落进已有内层 catch，横幅照常显示，额外 catch 是多余面）· F-247 `streamEpoch` 补 `@Volatile` · F-248 `loadSession()` 补 `agentHistory.clear()`（**重新判定过**：afa404b 虽大改 loadSession，缺陷仍在）· F-249 `streamFlushStates` → `ConcurrentHashMap` · F-250 三处导航移入 `finally` · F-254 删 174 行死码 + 常量 + 失效 noop 节流 · F-231 抽出共享助手统一两侧 token 尺度。
+
+**跨批补丁 4 处**（按 `FIX-WAVE-DISPATCH.md` §2.1 路由表，落点是本批独占文件）：
+- F-193 后半 `AgentLoopEngine:1400/:1685` → `isTruncatedFinish()` 词表。**独立核实**：该符号在**基线 afa404b:57 已存在**（不是 FIX-1 分支独有）⇒ 不依赖 FIX-1 先合并，自洽可编译。
+- F-190 后半 `AgentLoopEngine:819` → usage 字段级合并。**独立核实 4 项前提**：`lastUsage` 在 turn 循环内（:228 for / :391 var，缩进 12 vs 8 ⇒ 合并不跨回合串味）· 两段式发射真实（AnthropicProvider:275 message_start / :331 message_delta）· 0 语义成立（`anthropicUsageAccounting` = `inputTokens to (inputTokens+cacheTotal)`）· `LLMUsage` 恰 5 字段构造无遗漏。
+- F-262 `ChatPromptAndTools:248` → `optString("tool_title", "")`；第二处 :383 形态不同（变量名 `title` + 故意非空）按补丁建议保留。
+- F-234 `ChatQueueInterruption:74` 仅注释。
+
+**★ 方法论增量 3 条（可复用）**：
+1. **跨批补丁落笔前必须先核「依赖符号是否在我的基线上」** —— 补丁作者说"本批已落"不等于真的在。`git show <my_base>:<path> | grep 'fun <sym>'` 一条命令就能判定；若符号不在基线，落了就编译不过（且本地语法门会把它藏在满屏 `unresolved reference` 里）。
+2. **kotlinc 单文件编译只能按「错误类型差集」判定，不能按总数** —— 沙箱无 Android SDK，必然满屏 `unresolved reference`。本次 `AgentLoopEngine` base=1033 / curr=1042（+9），逐类型 `comm -13` 比对后**新增类型为空集**：+9 全是 `unresolved reference 'usage'`，因为单文件路径没有 `LLMStreamChunk` 类型定义，我新增的 5 处 `chunk.usage.X` 各多报一条。补上真实 `LLMUsage.kt` + `LLMStreamChunk.kt` 后**两侧均归 0**。⇒ 差集为空 + 补依赖后归零 = 双证。
+3. **注释里不要写「另一个批次即将做的改名」** —— 我第一版写「F-234 renamed it to `fromSortOrder`」，但 FIX-5 分支**尚未推送**（`git ls-remote` 无 `fix/data-layer`），把未落地的改名写进注释会随合并顺序变化而腐烂。改为描述**缺陷本身**（"its name reads like a count"），与 FIX-5 是否改名、何时合并都无关。
+
+**产出**：`/var/minis/shared/offload-audit-0919/fix-out/fix3/` — `REPORT.md` · `RETURN.md`（按派发总纲回报格式）· `FIXED-F-246-254.md` · `FIXED-CROSS-BATCH-4.md` · `ledger-fix3.json` · `ci.txt` · `verify.{sh,py}` · `syntax-gate.sh` · `brace.py`（语法门与配平脚本已归档，供后续批次复用）。
+
+**未做的验证（诚实口径）**：未跑真机、未跑 Android 单测（沙箱无 SDK，ChatScreen 依赖 Compose）⇒ 行为层结论（F-246 槽位、F-250 导航、F-254 重组、跨批 4 处）**未经真机确认**；F-249/F-250 结论基于 git grep 实测的调用点与调度上下文，不是运行时观测。
+
+**越界未动（登记给中枢）**：F-262 补丁的 #2–#8 落点（`ChatShellExecution.kt:124` / `ChatToolExecutors.kt:106` / `tools/File*Tool.kt` / `tools/MemoryTools.kt×2`）不在本批独占清单 · `StreamingMarkdownText.kt:636` 仍引用已删常量（归 FIX-4）· `ChatHistoryDrawer.kt` 的 F-225 UI 提示需新增 R.string + 7+1 语言文件，不在本次范围。
+
+<!-- 2026-09-20 08:48:20 -->
+## 09-20：FIX-6 修复批完成并合入 main（设置/配置 9 条 + F-224 数据层收尾）
+
+
+**最终 main** = `b67558d`。两个阶段：
+
+**阶段一 `3ba0a8e`（FIX-6 批，8 条）**：F-238 删死键 `background.enhanced`（Android 无此功能）· F-239 键名漂移（注册写 `background_notifications_enabled`，读者用 `taskNotificationsEnabled`）· F-240 补 StateFlow 刷新层（`minis-config` 写入后消费方一直用旧值）· **F-241** ★ `RuntimeLimitsScreen` Save 一次写回 35 个参数，快照过期时「打开→改一个→保存」**静默回滚其余 34 个字段**，补 4 屏 listener（35/35 机械核对）· F-242 两处孪生点在 IO 线程写 Compose state（补 6 处 Main hop）· F-243 两份逐字节相同的无障碍检测**都漏系统总开关** `ACCESSIBILITY_ENABLED`（全仓原 0 命中）⇒ 抽 `A11yState.kt` · F-244 4 处硬编码英文 · F-245 `onTerminalClick` 死参数（设置页终端入口消失，图标被环境变量行复用掩盖）。
+
+**阶段二 `53ff797`+`b67558d`（F-224 数据层）**：见下。
+
+### ★ 两条可复用方法论
+
+1. **跨批补丁的「归属」假设会随并行批次合入而失效 —— 交付前必须重新核对。**
+   F-224 数据层按任务书的文件独占边界拆给 FIX-5（`MemoryRepository.kt`）。新克隆独立复验发现：FIX-5 **已合入却从未碰过该文件**（0 改动），其余 4 条并行分支同样 0 改动 ⇒ 补丁**没有归属者**，不收尾就永久停在坏状态。**拆分时成立的边界，交付时必须重核。**
+
+2. **验证装置必须编译「即将提交的那个文件」，不能另写副本。**
+   CI #1683 红的根因不是笔误：沙箱里编译的是我另写的 `MemoryRepositorySoulGuardTest.kt`（恰好带了参数、能编译），提交的却是并入既有文件的版本（调用 `getMemory()` 漏了 2 个必填参数）⇒ **验证的文件 ≠ 提交的文件**。装置已改为直接编译仓库里的 `MemoryRepositoryTest.kt` 本身。这是 evidence-discipline「三源取二」在装置层的具体形态。
+
+### 顺带消除的同族隐患
+
+拆分时补丁在 `MemoryRepository` 留了本地字面量 `SOUL_FILE = "SOUL.md"`，UI 侧另有 `SOUL_FILE_NAME = "SOUL.md"` ⇒ **两份路径字符串副本，正是本批刚修的 F-239（键名漂移）的成因**。改为两处都引用 `SoulStore.FILE_NAME`（该常量由 private 提升为 public，镜像同仓 `MemoryRollupEngine.ROLLUP_FILE` 先例）。
+
+### 验证水位
+
+判据 **37/37**（对未改动的 main 为 31/37，6 红 = 新增项）· JVM **14/14**（真源码+桩，桩/真源码 FILE_NAME 逐字一致由脚本守卫）· 反向对照臂还原守卫后 **14 跑 4 红**（2 条对照臂保持绿 = 守卫未过度扩张）· 编译门「错误**种类**集合」4 文件全 SAME KINDS · CI 步骤 15 全量单测 + 步骤 16 插桩编译门 success · 干净克隆（`--depth 200`，`afa404b` 可达）复验 37/37。
+
+### 工具坑（新）
+
+- **浅克隆 `--depth 3` 会让「相对基线」断言静默返回空**：判据里 `git show afa404b:<file>` 抛异常 ⇒ 期望值拿到空串 ⇒ 假红。复验要用 `--depth 200` 或先确认基线 rev 可达。
+- **沙箱逐文件 kotlinc 的 `unresolved reference '<跨包符号>'` 是装置噪声**：基线本就对 `MemoryRollupEngine` 报同类，新增 `SoulStore` 引用产生的同属一类 ⇒ 编译门要按**错误种类集合**（折叠标识符与计数）比对，不能按消息文本 diff，否则把「新增 5 个测试方法导致 assertX 计数上升」误判成回归。
+- **`git push --force-with-lease` 需要先 `git fetch` 对应 ref**，否则报 `stale info`；`gh_sync.sh` 无 force 子命令，rebase 后推分支要复用它的 askpass（`/var/minis/workspace/.git_askpass.sh`）+ 显式 `--force-with-lease=<ref>:<expected-sha>`，不要绕开 askpass 内嵌 token。
+
+**产物**：`/var/minis/shared/offload-audit-0919/fix-out/fix6/`（`REPORT.md` · `REPORT-F224-followup.md` · `ledger-fix6.json` · `verify.sh` 37/37 · `jvm/run.sh`（fixed/baseline 双模式 + 2 条内建守卫）· `jvm/SoulStore.stub.kt` · `errkinds-soul.sh` · `FIXED-F-*.md` · `ci.txt`）
+
+**待真机验证**：通知开关真生效 · 无障碍状态显示 · 终端入口 · 改一个设置保存后其余不回滚 · 记忆列表不出现 SOUL.md 且删除按钮不显示。
+
+<!-- 2026-09-20 09:21:05 -->
+## 09-20：FIX-WAVE 修复批次并行 → 统一合并收口（第 22 棒，main = `6a10661`）
+
+
+**起点**：读 `HANDOFF-offload-21st-TO-DISPATCHER.md`（第 21 棒交接包），用户追加背景「云端 main 已被推进」，要求「核实聚合信息 → 分配任务 → 各自分支 → 统一合并」。
+
+**★ 云端 main 推进的核实结论（16 个锚点符号 base vs head 计数对拍）：零发现被修掉**，但产生三类影响——①行号漂移（`ChatSessionLifecycle.kt` 1557→1631，F-248 锚点 :1036→**:1110**；F-250 1909→**:1911**）②F-248 需重判（main 大改 `loadSession` +74 行）③新增 **427 行**未审计代码。**纪律：任务书必须给「实测锚点」，台账行号只当线索。**
+
+**批次划分的核心创新：文件独占（single-writer）** —— 比第 21 棒的「编号区间互斥」更硬。做法：①按文件连通分量聚类 77 条 F 发现 ②人工裁定跨批文件的唯一 owner（`OWNER_OVERRIDE` 表）③非 owner 批次的发现**降级为「产出补丁片段」**，由 owner 落笔。结果：**7 批 / 77 条，实际合并零冲突**。
+
+**合并前三道门（中枢独立执行，不信自报）**：
+1. **冲突预检** —— 机械对比文件清单找出 3 处重叠（`ChatViewModel.kt` + 7×`strings.xml` + `OpenAIProvider.kt`），但**实际试合并才是权威判据**：4 分支单独合 + 按序全合**全部无冲突**（9 处 auto-merge 自动解决）。**「文件重叠 ≠ 文本冲突」**。
+2. **合并分支 CI** —— 推 `merge/fix-wave` → success（53 文件 / +1729 −842）。
+3. **合并后判据复跑（★ 本棒最有价值环节）** —— 各批只在自身分支验过。复跑暴露 **7 个 FAIL**，逐条人工核实后确认**全部是判据口径问题、零真缺陷**：①F-211 `dropEmpty` 判据找参数，实现是**在调用点加 filter** ②F-186 判据找 `contentLength`，实现是 `readBodyBounded()` **流式限流**（比判据更强）③F-282 判据行号过期（找 :3710，实际 **:3720-3728**，调用点真实存在）④一条是**元判据**（"分支已合并删除"在合并后必然翻红）。**教训：「复跑 FAIL」本身不能直接判定为缺陷——必须逐条核实；但复跑环节必须做。**
+
+**处置结果**：已修 **71** · 部分修 **3** · 刻意不做 **2** · **撤回 1** = 77 条全部有结论。
+- **两条高质量「不做」**：F-257（不删 legacy 渲染链——`scripts/scan/legacy_pipeline_guard.py` 证明是有意保留）· F-274（不在 `onPageFinished` destroy WebView——打印 spooling 期间会惰性读取）。
+- **一条高质量「撤回」**：**F-237 被 FIX-5 证伪**（做对照组 10/10 绿 ⇒ 旧实现其实有界）。**对照组是撤回缺陷的唯一依据**。
+
+**工具坑（新）**：①`git fetch --depth N origin main` 后 **HEAD 落在 main 顶端**，必须显式 `git checkout <base>` ②合并前必须 `git config user.email/user.name`（否则 `git merge` 静默失败，报 "Committer identity unknown"，且 `--abort` 后冲突列表为空，极易误判为「无冲突但合并失败」）③`gh_sync.sh` 的 askpass 是**运行时生成**到 `/var/minis/workspace/.git_askpass.sh`（脚本内没有静态文件），自己写 `GIT_ASKPASS` 路径会 `No such file`；删分支用 `gh_sync.sh delete-branches --keep main --yes` ④**分支 fetch 后远端分支可能不在本地 remote-tracking 里**（我第一次 `git branch -r` 只见 main，误判 4 分支已删/丢失），必须 `git fetch origin 'refs/heads/*:refs/remotes/origin/*'`。
+
+**产出**：`FIX-WAVE-DISPATCH.md`（派发台账）· `FIX-DISPOSITION.md`（77 条逐条处置）· `FIX-REPORT.md`（收口报告）· `merged-wave2.json`（13 线 304 条合并台账）· `fix-ownership.json` · `fix-tasks/`（7 份任务书 + 7 份发现详情）· `fix-out/fix{1..7}/` · 脚本 `merge_wave2.py` / `plan_batches.py` / `plan_ownership.py` / `gen_disposition.py`。
+
+**最终**：main = **`6a10661`** · release CI **success** · 远端仅剩 main · 10 个分支 commit 全在 main 祖先链 · 各分支改动零丢失。
+
+<!-- 2026-09-20 09:22:58 -->
+## 09-20：近两日（09-19~09-20）改动独立核查 —— 结论「未引入问题」
+
+
+**核查对象**：`afa404b`（09-19 18:50）→ `6a10661`（09-20 08:51），22 commit / 96 文件 / +3417 −1512。
+其中 4 个 merge commit（`168f8e4`→`b5e10bb`→`7020dfc`→`6a10661`）是本次最高风险点——合并结果当时**尚未验证**。
+
+**验证链（全部独立复现，非读报告）**：
+1. **CI 独立核对**：run `35480497521` `conclusion=success`，`head_sha=6a10661` 与本地 `git rev-parse HEAD` **逐字符一致**；23 步全 success，含步骤 15「Run unit tests (full suite)」+ 步骤 16「Compile instrumented tests」+ 步骤 18 APK 构建。
+2. **本地跑 CI 扫描门**：`sh scripts/scan/scan.sh` → **10 passed / 0 failed**（含 legacy_pipeline_guard / four_way_sync / i18n / room_migration / process_logging）。
+3. **扫描器自测**：`python3 scripts/scan/test_scan.py` → **ALL 32 CASES PASS**。
+4. **merge 丢改动检测**（自写脚本，按分支真实 tip 比对每一处新增行是否存活到 HEAD）：8 个批次 **0 处真丢失**。仅 3 处「丢失」经核实全是**故意的后续修正**——`SOUL_FILE_NAME` 改引用 `SoulStore.FILE_NAME`（F-239 单一来源）· `assertTrue("你好")` 改 `assertEquals("你好")`（F-215 字节预算修正）· `repo.getMemory()` 补 2 参数（F-224 签名）。
+5. **语法/结构**：剥离字符串与注释后括号配平 **0 文件不匹配**；无冲突标记残留。
+6. **资源完整性**：7 语言 strings.xml **1677 key 全一致**；**1675 个 key 的占位符跨语言零不一致**（merge 最常见的静默破坏）；新增 21 key 7 语言齐全；无重复定义。
+7. **悬空引用**：删除的 `CalendarManager`/`MountedFolderCoordinator`/`FullscreenImageViewer`(composable)/`ReadOnlyMountException`/`AGGREGATE_MESSAGE_ITEMS` 等，全仓**零代码引用**，残留全是墓碑注释。
+8. **跨批次共改文件**（ChatViewModel 被 4 批共改）逐项核验 FIX-3 的 F-246/247/248/249/250 全部存活；F-248 实际落在 `ChatSessionLifecycle.kt:1124`（非 ChatViewModel，我的首轮 grep 位置猜错）。
+9. **删除 config key 的兼容性**：`ConfigRegistry:47` 对未知 key 返回 null ⇒ 旧备份含 `background.enhanced` 时**安全降级不崩**。
+
+**结论**：**未发现引入的问题**。CI 全绿（已核对 sha）+ 扫描门本地独立复现 10/10 + 扫描器自测 32/32 + merge 零丢改动 + 资源零漂移。
+
+**诚实边界（未经真机验证的部分）**：
+- CI 绿 ≠ 行为对。以下**只能真机确认**：通知开关真生效（F-238/239/240 三层打通）· 无障碍状态显示（F-243 新增总开关判定，行为比旧实现更严格）· 终端入口（F-245 死参数复活）· RuntimeLimitsScreen「改一个保存其余不回滚」（F-241，35 参数）· 记忆列表不出现 SOUL.md（F-224）。
+- 合并后未跑真机、沙箱无 Android SDK ⇒ 所有 UI 行为结论未经运行时观测。
+
+**方法论沉淀（可复用）**：
+- **「merge 丢改动」可机械检测**：对每批次取 `git diff BASE <branch-tip> -- <file>` 的新增行集合 A，与 `git diff BASE HEAD -- <file>` 的新增行集合 B 求差；`A - B` 非空即疑似丢失。**关键前提**：必须用**分支真实 tip**（merge 的第二父），不能用批次中间 commit，否则「后续提交故意改写」会被误判成丢失（我首轮就因此报了 3 个假阳性）。
+- **写脚本时警惕变量跨循环泄漏**：我的 import 检查器用 `src` 变量名与内层循环冲突，导致 FQN 判定永远用上一个文件的内容 ⇒ 报出 9 个假「未导入」。**判据报错时先怀疑装置**。
+- **剥离字符串/注释再判括号配平**：`tr -cd '{'` 会被 Kotlin 字符串模板（`"${x}"`）误报，10 个假阳性 vs 精确剥离后的 0。
+
+<!-- 2026-09-20 10:03:12 -->
+## 09-20：FIX-8-approot 补扫 —— 两文件 1,820 行真缺口，抓出 3 条 D（main = `541fbb2`）
+
+
+**起点**：第 22 棒收口报告里登记的「`MinisApp.kt` + `MainActivity.kt` = 1,815 行从未逐行走查」。用户直接说「那你这里直接把他们补上」。
+
+**范围**：`MinisApp.kt`(1,101) + `MainActivity.kt`(719) = **1,820 行**逐行走查 100% + 跨文件取证（AppLogger/LogFileName、SessionActivityTracker、AppNavigation、AlarmOffloadHandler、ConfigBuiltins）。
+
+### ★ F-285（最重要）：运算符优先级让 force-home 三断路器全是死码
+Kotlin 把 `a ?: if (c) { x } else { y }?.takeUnless { guard }` 解析为 `a ?: if (c) { x } else { y?.takeUnless { guard } }` —— **安全调用只绑最内层 else 块**。生产代码正是此形 ⇒ 守卫在两条本该保护的路径上全是死码：①有 saved-state 时 elvis 短路、takeUnless 永不执行 ②冷启动时 fallback 在 if 分支、守卫在 else 分支。后果：**刚崩溃过的会话照样被重开**，绕过全部三个安全闸门。而 `AppNavigation.kt:378` 因 `hasDeepLink` 跳过 launch-mode 分发 —— 这里就是三断路器**唯一**可能生效处，恰恰失效。**修法只有 2 行**（显式括号包住整个 elvis）。
+
+### F-286：onDestroy 无配置变更守卫 ⇒ 旋转/切语言瞬间掉 FG 服务
+`onDestroy` 无条件 `setAbsent` ⇒ 配置变更的 onDestroy→onCreate 缝隙里 presence 归零 → `shouldRunService()` false → `scheduleIdleStop()` 挂 500ms 防抖拆除 → 新实例未及时重登记就**停服再启**，与 Android 16 `ForegroundServiceDidNotStartInTimeException` 竞态同源。**对照**：MinisApp 的前台计数器本就显式处理配置变更（注释原文 "balances out around configuration changes"），presence 缺同款。**修法**：`if (!isChangingConfigurations)`（该标志在被销毁实例上为 true —— 与同文件 onCreate 处说明相反，注释已写明）。
+
+### F-176（第 17 棒发现，首次修复）：幽灵闹钟迁移声明与实现不符
+KDoc 称 "Past-dated entries are dropped"，实际跳过条件只覆盖过去的 timer 与 `repeatMode=="ONCE"` ⇒ 过去的 DAILY/WEEKDAYS **被重建成一次性闹钟**（重复语义静默丢失，未传 EXTRA_DAYS）、缺 `triggerAtMs` 的畸形条目**变成 00:00 闹钟**。实验 3/5 违反 KDoc。修法：单守卫覆盖「任何已过期条目」+「triggerAtMs<=0」；仍重放者补 `EXTRA_DAYS`（`daysForRepeatMode()`：DAILY→7 天，WEEKDAYS→周一至周五）。重新判定理由：**重建过去的「重复」闹钟不是 recovery**（T266 已把调度权交给系统时钟 App），同 wall-clock 的一次性闹钟严格劣于丢弃。
+
+**顺带修正**：FIX-7 给 `migrateGhostAlarms` 补的 KDoc 被插到 `isToolServiceProcess` 上方形成**孤儿注释块**（全仓孤儿 KDoc 检测 0→1），已归位。
+
+### ★ 装置自身的两个 bug（本轮最有价值的教训）
+1. **抽取脚本截断守卫块** —— 首版把 block 截到 `?.takeUnless {` **之前**，生成函数里根本没有守卫 ⇒ 实验必然失败，看起来却像「修复没生效」，**差点据此回退一个正确的修复**。教训：**实验失败时先怀疑装置。**
+2. **子串匹配命中注释** —— F-285 的说明注释里有反引号包裹的 `` `… else { y }?.takeUnless { … }` `` 字面量，`tail.index("?.takeUnless {")` 命中**注释里那句**，把表达式从注释中间截断（同一轮造出 2 条假 FAIL）。改**行级正则** `^[ \t]*\?\.takeUnless \{` 后正确。这正是本包反复记录的「判据被注释/子串污染」坑，这次栽在装置自己身上。
+两个 bug 都已写成脚本注释 + 自检断言（`extract.py` 的 6 项装置自检）。
+
+### 验证链（正反双向）
+`jvm8/run_all.sh` → **groups_pass=6 / groups_fail=0**：①抽取装置自检 6/6 ②F-285 正向（**逐行抽取真实生产源码**）6/6 ③**F-285 反向对照**（脚本去括号还原旧形状）**精确翻红 1 条**（saved-state 路径）④源码形状机械核验 9/9 ⑤F-176 新旧对照（新 12/12、旧 2/2 暴露）⑥F-285 手工双臂 10/10 ⑦F-176 原始复现 3/5 违反。**CI run 35482187654 success，head_sha=541fbb24 与本地 HEAD 逐字符一致。**
+
+**改动**：2 文件 / +77 −9。**最小改法**：F-285 全程只 2 行 —— 首版我重排了缩进 diff 膨胀到 116 行，按改动阶梯纪律回退重做。
+
+**诚实边界**：未跑真机（沙箱无 Android SDK）；三条修复的行为层结论均未运行时观测；F-285/286 的 JVM 实验用符号替身，验证的是**表达式求值形状**而非三个断路器内部逻辑；F-176 是一次性迁移路径，本机日志无记录 ⇒ **未在生产触发过**。待真机验证：①崩溃后重启应落 Home ②旋转/切语言 FG 服务不应闪断 ③旧安装升级后时钟 App 不应凭空多出一次性闹钟。
+
+**最终**：main = **`541fbb2`** · release CI 已自动触发（run 35482852372，按用户惯例不等）· 远端仅剩 main。
+
+<!-- 2026-09-20 10:24:28 -->
+## 09-20：「最近两天改动」二轮核查（541fbb2）→ 抓出 2 条：EXTRA_DAYS 容器类型 + KDoc 挂错
+
+
+**范围**：09-19 00:00 → 541fbb2 = 26 commits，分三段：段 A（09-19 四个 commit `c6d8d63f..afa404bf`，**今早 09:22 的核查从 afa404bf 起，这段被漏了**）· 段 B（FIX-8 `6a10661..541fbb2`，今早核查后合入，未核查）· 中间段（FIX-WAVE，今早已核查，本次只抽查）。
+
+**★ 发现 1（D 级）：F-176 的 EXTRA_DAYS 用 IntArray 传，官方约定 ArrayList<Integer>**
+- `MinisApp.daysForRepeatMode` 返回 `IntArray`，`putExtra(AlarmClock.EXTRA_DAYS, it)` 落 Bundle 的 int[]
+- 三源证据：①AOSP AlarmClock.java KDoc 原文 "The value is an ArrayList<Integer>" ②**本仓 `AlarmOffloadHandler.kt:141-160` 同为 ACTION_SET_ALARM 路径，用的就是 `arrayListOf(Calendar.SUNDAY,…)` 且注释明写 "EXTRA_DAYS expects ArrayList<Int>"** —— 同一语义两个落点一个对一个错（本仓同族形态第 N 例）③LineageOS DeskClock `HandleApiCalls.getDaysFromIntent` 先 `getIntegerArrayListExtra` 为 null 才兜底 `getIntArrayExtra`（:549 注释 "API says to use an ArrayList<Integer> but we allow int[] too"）—— 兜底是宽容实现，Google Clock / **小米时钟（用户设备 HyperOS）闭源未证**
+- 后果：F-176 承诺 "Preserve repeat semantics" 的重放条目在小米时钟上可能仍降级 one-shot —— 修复核心价值在部分消费方上=0。触发面窄（一次性迁移 + persisted 有未来 repeating alarm）
+- 修法：`daysForRepeatMode` 改返回 `List<Int>`/ArrayList，复刻 AlarmOffloadHandler 写法；数值本身是对的（DAILY=[1..7]、WEEKDAYS=[2..6] 与 Calendar 常量一致）
+
+**发现 2（O 级）：migrateGhostAlarms 的 KDoc 挂在 daysForRepeatMode 头上**
+- 当前 541fbb2：KDoc（887-909，内容全描述 migrateGhostAlarms）紧跟 `daysForRepeatMode`(911)；`migrateGhostAlarms`(963) 无 KDoc
+- 基线 6a10661：该 KDoc 原本插在 isToolServiceProcess 上方（FIX-7 孤儿）→ FIX-8 只是在其后追加 F-176 段落 + 插入新函数，**孤儿从挂 A 变成挂 B，从未归位**。记忆/报告声称「已归位」与实现不符（孤儿检测器只查「KDoc 后无声明」，查不出「挂错人」）
+- 修法：KDoc 挪到 migrateGhostAlarms(963) 正上方
+
+**通过项（全部独立验证）**：CI #1690（541fbb2@main）completed success · 本地 scan.sh 10/10 · 8 语言 key 集合逐一对拍全一致（`grep -c` 报 ru 1675 vs 1674 是**行数口径假阳性**——某文件一行含两个标签；`sort -u` 唯一 key=1675 两边 comm 为空）· 段 A 走查：OffloadGate.enforce 7 处形态统一、resolveBudgetAnchorIdx 两守卫方向正确（回退 cand=扩大保留区吞配对；失败保守返回 -1）、maybeAutoCompactInLoop 的 folded 判定充分（budget 路径新 anchor 必 ≠ 旧 anchor）、frontmatter 字段无需 DB 持久化（每次磁盘读）· 段 B 三处修复形状正确（F-285 括号包整个 elvis、F-286 isChangingConfigurations 在被销毁实例上为 true、F-176 isPast||triggerAt<=0 单守卫覆盖三形态）
+
+**诚实边界**：真机行为一贯未验证；EXTRA_DAYS 在小米时钟上的实际解析行为未证（闭源），判定基于文档约定 + LineageOS 证据 + 本仓先例三方。
+
+**工具坑**：今早核查记录「7 语言 1677 key 全一致」与本次实测唯一 key 1675 有数字差——口径不同（可能数了 `<string` 而非唯一 name），关键结论「全一致」两次都成立；记录数字要带口径。
+
+<!-- 2026-09-20 10:54:45 -->
+## 09-20：真机验证清单 agent 侧独立验证（42/42 + 反向臂 34 红）
+
+
+**用户指令**：T2-3（输出上限字节口径）"这是代码的问题，别测了"、另一条"在另外一个地方修了" → 只做**不需要设备 UI** 的条目。
+
+**结论**：未发现新缺陷。**修复树 42/42 PASS · 反向对照臂（afa404b）34 FAIL**，逐条精确对应修复点。
+
+**已独立验证 11 条**（其余需点屏幕）：
+- **T2-2/T3-2** SOUL.md 不出现/不可删 → **真源码 JVM 行为测试 12/12**（`MemoryRepository` 只依赖 `File`+`Log`+两个常量 ⇒ 可打桩纯 JVM 编译；反向臂 3 红：基线 SOUL 列在列表且**真被删掉**）
+- **T1-3** 改一个保存其余不回滚 → **字段奇偶机械比对：33 旋钮全 parity**。关键口径：save() 左侧是**参数名**、右侧才是局部变量名，按左值比对会报 3 个假不匹配；`context` 是位置参数
+- **T1-4** 无障碍总开关 → `A11yState` 单一实现读 `ACCESSIBILITY_ENABLED`；**反向臂全仓 0 命中**（坐实 F-243）
+- **T2-4/T2-5/T1-1/T1-2/T1-5/T2-1/T3-1/T3-3** 均通过，反向臂逐条翻红
+- **T3-7 i18n**：7 语言 × **1675 key 全一致** · **占位符零漂移** · 新增 21 key 六语言**全翻译**（唯一 "copied" 是德语 `settings_terminal`，Terminal 本就是德语词）
+
+**★ 发现 1 处同族漏点（非本次回归，影响可忽略）**：`MemoryRepository.dailyLogSizes():102` 过滤 GLOBAL+ROLLUP 但**漏 SOUL**，而同文件另两处（:174 getMemory / :480 listAllFiles）都有。唯一消费者 `largestDailyLogBytes()` 仅用于"是否建议 rollup"，SOUL 几百字节不影响判定。F-224 修 2 处漏第 3 处。
+
+**★ 机制发现（记录未改，用户说在别处修）**：`ConfigBuiltins:152` 用**匿名 lambda** 注册 SharedPreferences 监听器、**无字段持有**。Android `SharedPreferencesImpl` 用 `WeakHashMap<Listener,Object>` 存 ⇒ 可被 GC 静默回收。**JVM 复刻实验**（真 WeakHashMap + 真 GC）：arm A 匿名 lambda → GC 后 **live listeners=0 静默停发**；arm B 具名字段持有 → **存活继续触发**。对照：同批修的 `BackgroundSettingsRepository:101` 正是 `private val prefsListener =` 正确写法。**这解释了 T2-3 实测"旋钮设 32/512 都无效、截断恒在 131072"**。
+
+**★ 装置纪律（本轮又踩 4 次假红，全是口径问题）**：
+① `Toast.makeText` count=2 —— 第 2 处在**注释**里（修复自己的说明文字）
+② `isSystemInDarkTheme` "仍存在" —— 同上
+③ i18n key 数 1674 vs 1675 —— `grep -c` 按**行**计，跨行 `<string>` 少算 1
+④ listener 注册数 6≠3 —— `unregisterOn...` **包含** `registerOn...` 子串
+⇒ **判据报错先怀疑装置**。已固化 `probe.py`（注释感知探测：剥离 `//` 与块注释后再匹配）。
+
+**产物** `/var/minis/shared/verify-0920/`：`REPORT.md` · `verify_0920_agent.sh`（**双模式**：默认验修复树，`BASE_REV=<rev>` 验基线）· `probe.py` · `t13_field_parity.py` · `t22_real_source_test.kt` + 被测源码 sha256 · `gc_listener_hazard_test.kt` · `out-fixed.txt`(42/42) · `out-base.txt`(8/34)
+
+**待真机（agent 不可替代）**：T1-1 实际点击 · T1-3 跨屏操作 · T1-4 系统开关切换 · T2-4 肉眼观察公式色 · T2-5 主观流畅度 · T3-4/5/6/8 回归 · T1-5 token 用量对比。
+
+**环境**：kotlinc 在 `/tmp/kotlinc`（不在 PATH，rootfs 重建后需重装）；沙箱 JVM 实验配方可复用（真源码 + 最小桩 + 反向对照臂 + `-include-runtime` 单 jar）。
+
+<!-- 2026-09-20 11:01:39 -->
+## 09-20：EXTRA_DAYS 容器类型修复完成 → main = `d11a4c1b`（CI #1691 绿 → FF → 远端仅 main）
+
+
+**修复内容**（1 commit / 4 文件 / +237 −35）：
+- `daysForRepeatMode` → `ArrayList<Int>?` + `arrayListOf(...)`
+- `migrateGhostAlarms` 的 F-280 KDoc 归位（从挂 `daysForRepeatMode` 头上回到正主）
+- 新增扫描门 **[11/11] `extra_days_container_guard.py`** + 4 条自测用例（32→36）
+
+**★ 过程中发现的第二层坑（比原缺陷更深）**：
+1. `Intent.putExtra` **没有 `ArrayList` 重载** —— 传 `arrayListOf` 会绑到 `putExtra(String, Serializable)`。这不影响正确性（Bundle 里仍是 ArrayList，正是消费方 cast 的目标），但推翻了「用 ArrayList 走类型化重载」的直觉。
+2. **`listOf()` 也是错的** —— 它返回 `java.util.Arrays$ArrayList`，而 `BaseBundle.getArrayList` 是 `ArrayList.class.cast(object)`，同样 CCE→null。**只有 `arrayListOf()` 落在 `java.util.ArrayList`**。这个坑差点让我写出「看起来对但同样静默失效」的修复。
+3. 机制链完整版：`getIntegerArrayListExtra` → `BaseBundle.getArrayList(key, Integer.class)` → `getValue(key, ArrayList.class, Integer.class)` → `getValueAt` 里 `clazz.cast(object)` → catch CCE → `typeWarning` → **返回 null**（不抛异常）。消费方看到 null = 无重复 = 降级 one-shot。
+
+**验证链（正反双向）**：
+- JVM 实验 **10/10**：真源码抽取（`extract.py` 行级抽取 + 括号配平 + 三项断言防漂移，打印源文件 sha256）；arm A 生产源码读回非 null；**arm B `int[]` 读回 null（缺陷复现）**；**arm C `listOf()` 读回 null（第二层坑复现）**；arm D `arrayListOf` 是 `java.util.ArrayList`
+- 静态判据 **12/12**
+- 扫描门 **11/11**、扫描器自测 **36/36**
+- **守卫反向对照双红**：还原 `IntArray` → 报错 exit 1；还原 `listOf()` → 报错 exit 1
+- CI #1691 head_sha `d11a4c1b` 与本地逐字符一致，success
+
+**★ 装置自身的两个 bug（本轮教训，再次印证「实验失败先怀疑装置」）**：
+1. `ckc` 用 `wc -l` 数 `grep -c` 的输出 —— `grep -c` 打印的就是计数，过 `wc -l` 后恒为 1 ⇒ 3 条判据假红/假绿。手工逐条核实才发现（实测三条判据本身都正确）。
+2. 守卫首版把 MinisApp 的写入点判为 `unknown` 却不报错 —— **「无法判定就放行」正是它要防的失效模式**。改为追踪 `fn(x)?.let { putExtra(k, it) }` 形态到函数返回类型，且判定失败即 FAIL。
+
+**方法论沉淀**：跨层「容器/单位」类缺陷（第 16 棒 F-161 字节口径、F-174 token 口径、本次容器类型）有共同特征 —— **框架把类型不匹配吞成 null，不抛异常**，所以编译/测试/CI 三绿照样漏。判据形态：找「同一语义的两个落点」逐处比对（本次 = MinisApp vs AlarmOffloadHandler，本仓同族第 N 例），并把比对机械化为扫描门。
+
+**ponytail 留债**：守卫硬要求 ≥2 个 EXTRA_DAYS 写入者，若未来删掉 AlarmOffloadHandler 需重新指向（脚本内已写明该提示）。
+
+**待真机验证**：旧安装升级后，persisted 的未来 DAILY/WEEKDAYS 闹钟重放进时钟 App 后**应保持重复**（此前会变一次性）。
+
+<!-- 2026-09-20 13:56:58 -->
+## 09-20 下午：云端三分支核查 → 合并 2 个（main = `9c4ccfb8`），**扣下 T2**（证据：改在 runtime-dead 链上）
+
+
+**三个分支同基 `d11a4c1b`，三次 merge 全部 ort 自动、零冲突**（fab 与 diag 共改 `ChatScreen.kt` 相邻区域也不冲突）——「文件重叠 ≠ 文本冲突」再次成立。
+
+### 已合并（main = `9c4ccfb8`，CI run 35492412124 success，head_sha 逐字符一致）
+- `fix/fab-explicit-bottom`（26f36f4e）：真实修复。`decideBottomScroll` 新增 `reason` 形参，规则 1 对 `FAB_DOWN` 豁免（焦点闸门只该拦自动滚动，不该吞显式点击）。真机日志坐实当天 5/5 次 FAB 点击被记成 `request-bottom skipped reason=FAB_DOWN`。
+- `diag/render-attribution`（31973df2）：纯诊断（`RenderAttributionDiag.kt` 298 行 + ChatScreen 探针），自带 `REMOVE ME`；SIMPLE_FOLLOW 早退门重构为 `declinedGate` when 分支，逐门语义等价（只多了一次 layoutInfo 读）。**注意它把 8 处 `followReducer(...)` 收成 `dispatchFollow(...)`，移除诊断时要一并还原。**
+
+### 扣下 `fix/streaming-degrade-live-text`（f2f0cade，未合）
+**它改的 `AssistantMarkdownBlock` 在真机上从不被构造**，四条独立证据：
+1. **本仓自带禁令**：`StreamingMarkdownText.kt` 的 `[fix/render-ui F-257] RUNTIME-DEAD` 头写明「no production code constructs that row type anymore（`buildAggregateChatItems` 只发 UserBubble + AssistantMessageItem）… **Do not "fix" throttling / caching inside this chain: changes here are unobservable until the aggregate flag is flipped back**」。
+2. **真机全量普查**：`[RenderCensus]` 当天全部窗口 `row_ledger=0 row_cold_build=0 row_reseed=0 maxRows=0`（flat/ledger 行收集器一次都没跑）。
+3. **改动本身不可达**：新字段 `isLastTextBlockOfMessage` 默认值 = 旧字段，且**没有任何生产调用点传它**（只有新测试传）；commit 自述「the two runtime-dead legacy builders keep compiling and behaving byte-identically」。
+4. **前提本身不成立**：两个 flat 生产者本来就传文本语义的 isLast*（`LegacyFlatChatBuilder:208/270/282` 的 `isLastText`、`StableChatRowLedger:750` 的 `isLastTextBlock`）。
+
+**★ 任务书 T2 里的两处假证据（又一次印证「先怀疑装置」）**：
+- 引「本仓代码自己承认：`ChatAssistantMessageUI.kt:3794` 注释…」——**该文件只有 1514 行，行号不存在**；引文全仓 0 命中。
+- 引 `[Perf][ContentDiag] … streaming=false chars=8014` 当「活体流式块被判非流式」——**那是冷启动汇总**（`ChatScreen.kt:3671` 在 coldOpen 时遍历 messages 打印 `m.isStreaming`），冷启动时本就没有消息在流式。
+
+**真实机制指向（下一步该打哪）**：活体文本块的流式判定在 **`ChatAssistantMessageUI.kt` 的 `AssistantMessageView`**：`streaming = message.isStreaming && index == lastTextBlockIndex` —— **本来就是「最后一个文本块」语义**，所以真凶不在这个判据，而在 `message.isStreaming` 是否为真（`mergeStreamingOverlay` 的 epoch 过滤/键不匹配会让流式尾巴退回 isStreaming=false → 走冻结全量重渲染）。另一条线索：8014 字符块 < `LARGE_MESSAGE_THRESHOLD_CHARS=32000` 时每 tick 全量重解析渲染（`frozen_hit=0 / frozen_miss≈48-50` 是 cache MISS 不是 hit），而 `live_degrade=0` ⇒ 8k 降级闸在活体路径同样没生效（但原因与 T2 假设的不同）。
+
+### 本轮验证臂（不信自报）
+- 本地独立复跑：`scan.sh` **11/11**、`test_scan.py` **36/36**。
+- JVM 真源码编译 `ChatFollowController.kt + ChatFollowControllerTest.kt`：**正向 27/27**；**反向对照臂**（把规则 1 还原成 `if (focusTarget) return SKIP_AND_CONSUME`）⇒ **恰好 1 红、正是新 FAB 用例**（判据非空洞）。
+- 合并分支 CI 绿后才 FF main；远端现在只剩 `main` + 被扣下的 `fix/streaming-degrade-live-text`。
+
+<!-- 2026-09-20 13:58:18 -->
+## 09-20 收尾：`fix/streaming-degrade-live-text` 已按用户决定删除（远端 + 本地）
+
+
+用户拍板「既然如此，那就把它去掉吧」——**无效修复不留枝**。至此远端只剩 `main = 9c4ccfb8`（fab 修复 + diag 探针），三分支全部收口。
+
+- **内容未丢**：commit `f2f0cade` 在我本地克隆 `/tmp/rk-merge` 的对象库里仍可取回（`git log -1 f2f0cade` 正常），GitHub 侧 dangling 也保留一段时间；真要从零重做，改动内容已完整抄在本日期日志的前一条里（ChatFlatItems 加 `isLastTextBlockOfMessage` 默认回落到 `isLastBlockOfMessage`）。
+- **纪律沉淀**：这是本轮「核查门」第一次**拦下**一个带绿灯 CI + 完整单测 + 完整 commit message 的分支。拦住它的不是测试，是三条链外证据：①本仓自带的 `RUNTIME-DEAD / Do not fix here` 禁令 ②真机 `[RenderCensus] row_*=0` 全量普查 ③「新参数无任何生产调用点传参」的机械检查。**CI 绿 + 测试绿 ≠ 改在活的代码上**——判断「这个改动有没有落点」要独立于测试结论去查生产者/消费者，这一条值得进下次的核查清单。
+- 下一步（未开工）：按 `message.isStreaming` 是否为真去找活体回归根因，用刚合入的 `RenderAttributionDiag` Q1 在真机上取 `byType=…:streaming=n` 证据。
+
+<!-- 2026-09-20 14:03:10 -->
+## 09-20：用户拍板「修复门」规则 → 写入 GLOBAL.md
+
+
+用户反思近两天修 bug 走火入魔（FIX-WAVE 77 条修 71 = 92% 动手率的"存在即修"；装置规模与影响面脱钩——为未触发过的 EXTRA_DAYS 迁移路径建 JVM 实验+扫描门；用户报告的渲染/卡顿回归排在 latent 修复之后）。共同定了「修复门」纪律并**写入全局记忆**（GLOBAL.md 新增节，位于「改动阶梯纪律」之前，与一阶门/二阶门构成决策门家族）。
+
+核心判据：修它 = 有人（或即将有人）会碰到它，不是因为它是错的。P0 必修（数据/凭据/崩溃/核心功能/用户报告，全套装置，插队首）· P1 排期（可感知降级，最小装置，攒批）· P2 登记不修（latent/窄触发/清理，backlog+升级触发条件）· P3 永不动。三纪律：半径（只修触发路径，同族默认登记）/ 装置比例（∝影响面）/ 排序（用户报告永远插队首）。Agent 约定：审计发现只登记不自动修；动手前给用户 P 级判定 + 触发证据；台账加"触发证据"列。
+
+落地：先跑一两轮实战检验，有效再固化（change-ladder 第 0 级或独立 skill）。**即日起所有后续修复默认过这道门。**
 
 ---
 

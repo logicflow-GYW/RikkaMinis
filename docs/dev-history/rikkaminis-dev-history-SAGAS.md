@@ -3,16 +3,16 @@
 > **这是档案的「主题视角」**。同一批条目，换一根轴来读：
 > - `rikkaminis-dev-history.md` — 时间轴（这天发生了什么）
 > - `rikkaminis-dev-history-INDEX.md` — 按天索引（快速跳转）
-> - **本文件** — 主题轴（这件事的完整历史，跨 44 天）
+> - **本文件** — 主题轴（这件事的完整历史，跨 49 天）
 >
 > 由 `skills/dev-history-sync/scripts/build_sagas.py` 从档案自动生成，可重复执行。
 
-- 覆盖范围：2026-08-03 ～ 2026-09-18，共 47 天
-- 条目总数：1069（源文件：rikkaminis-dev-history.md）
+- 覆盖范围：2026-08-03 ～ 2026-09-20，共 49 天
+- 条目总数：1137（源文件：rikkaminis-dev-history.md）
 - 主题数：23
-- 未归入任何主题：71 条（6%，列在文末）
-- 归入 ≥4 个主题（说明规则偏松）：60 条
-- 标 `↳` 的条目是**推断归属**：标题里没有主题词（「X 完成 / X 收尾」这类收尾条目，主题词在**上一条**里），由「12 小时内最近一条有主题的条目」继承而来，共 82 条。
+- 未归入任何主题：76 条（6%，列在文末）
+- 归入 ≥4 个主题（说明规则偏松）：66 条
+- 标 `↳` 的条目是**推断归属**：标题里没有主题词（「X 完成 / X 收尾」这类收尾条目，主题词在**上一条**里），由「12 小时内最近一条有主题的条目」继承而来，共 84 条。
 
 ### 怎么读
 
@@ -27,35 +27,35 @@
 
 | # | 主题 | 条数 | 跨度 | 状态 |
 |---|------|------|------|------|
-| 1 | 滚动跟随 / 流式跳动 | 64 | 08-05 ～ 09-13 | 观察中 |
+| 1 | 滚动跟随 / 流式跳动 | 67 | 08-05 ～ 09-19 | 观察中 |
 | 2 | 输入框 / 键盘 / 粘贴 | 24 | 08-04 ～ 09-12 | 已闭环 |
-| 3 | native 内存 / OOM / 崩溃 | 104 | 08-03 ～ 09-17 | 持续跟踪 |
-| 4 | 沙箱 / rootfs / PRoot / 终端 | 94 | 08-03 ～ 09-17 | 稳定 |
-| 5 | 流式回答中断 / 恢复 / 取消 | 100 | 08-03 ～ 09-16 | 已闭环 |
-| 6 | 思考 / 推理泄漏 | 43 | 08-08 ～ 09-18 | 已闭环 |
-| 7 | 上下文压缩 / 记忆 / 预算 | 92 | 08-06 ～ 09-16 | 稳定 |
-| 8 | Provider / 模型组 / 负载均衡 | 104 | 08-04 ～ 09-15 | 已闭环 |
-| 9 | 备份 / 多端同步 | 96 | 08-03 ～ 09-18 | 收敛 |
-| 10 | 渲染性能 / Markdown / 长会话卡顿 | 82 | 08-05 ～ 09-17 | 已闭环 + 持续加固 |
-| 11 | 审计 / 整改（多轮） | 189 | 08-03 ～ 09-17 | 常态机制 |
-| 12 | 多会话并行协作 / 派发 / 交接 | 180 | 08-04 ～ 09-18 | 成熟 |
-| 13 | CI / 构建 / 发布流水线 | 149 | 08-03 ～ 09-18 | 稳定 |
-| 14 | 开发档案 / 记忆 / 工具链 | 85 | 08-03 ～ 09-18 | 常态维护 |
-| 15 | 会话 / 导航 / 抽屉交互 | 71 | 08-03 ～ 09-18 | 已闭环 |
-| 16 | 平台适配 / 通知 / 图标 / 权限 | 63 | 08-03 ～ 09-18 | 部分放弃 |
-| 17 | 国际化 / 文案 / 本地化 | 22 | 08-04 ～ 08-28 | 已闭环 |
-| 18 | 上游 / 生态吸收 / 开源 | 55 | 08-03 ～ 09-16 | 常态 |
-| 19 | UI 组件 / 设置页 / 交互微调 | 74 | 08-04 ～ 09-17 | 持续 |
-| 20 | Token 用量 / 成本统计 | 48 | 08-05 ～ 09-14 | 已闭环 |
-| 21 | 人格 / Soul / 提示词 / 技能体系 | 48 | 08-04 ～ 09-17 | 稳定 |
-| 22 | 语音 / 多模态输入 | 13 | 08-03 ～ 09-13 | 低优先级维护 |
-| 23 | 被否掉的方向（决策记录） | 35 | 08-04 ～ 09-18 | 持续累积 |
+| 3 | native 内存 / OOM / 崩溃 | 107 | 08-03 ～ 09-20 | 持续跟踪 |
+| 4 | 沙箱 / rootfs / PRoot / 终端 | 101 | 08-03 ～ 09-20 | 稳定 |
+| 5 | 流式回答中断 / 恢复 / 取消 | 106 | 08-03 ～ 09-20 | 已闭环 |
+| 6 | 思考 / 推理泄漏 | 49 | 08-08 ～ 09-20 | 已闭环 |
+| 7 | 上下文压缩 / 记忆 / 预算 | 97 | 08-06 ～ 09-19 | 稳定 |
+| 8 | Provider / 模型组 / 负载均衡 | 112 | 08-04 ～ 09-20 | 已闭环 |
+| 9 | 备份 / 多端同步 | 101 | 08-03 ～ 09-20 | 收敛 |
+| 10 | 渲染性能 / Markdown / 长会话卡顿 | 89 | 08-05 ～ 09-20 | 已闭环 + 持续加固 |
+| 11 | 审计 / 整改（多轮） | 220 | 08-03 ～ 09-20 | 常态机制 |
+| 12 | 多会话并行协作 / 派发 / 交接 | 188 | 08-04 ～ 09-20 | 成熟 |
+| 13 | CI / 构建 / 发布流水线 | 152 | 08-03 ～ 09-20 | 稳定 |
+| 14 | 开发档案 / 记忆 / 工具链 | 88 | 08-03 ～ 09-19 | 常态维护 |
+| 15 | 会话 / 导航 / 抽屉交互 | 76 | 08-03 ～ 09-20 | 已闭环 |
+| 16 | 平台适配 / 通知 / 图标 / 权限 | 71 | 08-03 ～ 09-20 | 部分放弃 |
+| 17 | 国际化 / 文案 / 本地化 | 25 | 08-04 ～ 09-19 | 已闭环 |
+| 18 | 上游 / 生态吸收 / 开源 | 56 | 08-03 ～ 09-19 | 常态 |
+| 19 | UI 组件 / 设置页 / 交互微调 | 80 | 08-04 ～ 09-20 | 持续 |
+| 20 | Token 用量 / 成本统计 | 52 | 08-05 ～ 09-20 | 已闭环 |
+| 21 | 人格 / Soul / 提示词 / 技能体系 | 54 | 08-04 ～ 09-20 | 稳定 |
+| 22 | 语音 / 多模态输入 | 19 | 08-03 ～ 09-20 | 低优先级维护 |
+| 23 | 被否掉的方向（决策记录） | 36 | 08-04 ～ 09-19 | 持续累积 |
 
 ---
 
 ## 1. 滚动跟随 / 流式跳动
 
-**跨度** 2026-08-05 ～ 2026-09-13 · **64 条** · **状态** 观察中（09-13 第 5 轮已合并 main；真机复测窗口内未再复发）
+**跨度** 2026-08-05 ～ 2026-09-19 · **67 条** · **状态** 观察中（09-13 第 5 轮已合并 main；真机复测窗口内未再复发）
 
 **叙事**：08-05 流式输出 UI 跳动 → 08-07 定位 USER_SEND 无条件滚动漏网、触底触发器重构 → 08-08 单锚点守护重构 → 08-15/16 animateContentSize 冲突 + 跳顶死区 → 08-25~27 rikkahub 流畅性吸收 E、历史对话回底部连翻两轮 → 09-01 place-storm 钳位 → 09-13 打开会话「差一段」第 5 轮。**39 天里至少 5 次「以为修好了」**，最终收敛为「单锚点守护 + 显式跟随条件 + 回底部 catch-up」。
 
@@ -125,6 +125,9 @@
 | 09-13 13:31 | 【交接】打开会话「差一段」v1 已装机验证 → 需 v2（2026-09-13 13:35） | 完整交接文档：/var/minis/shared/open-catchup-handoff-2026-09-13.md（14.6KB，含全部背景/证据/代码位置/流程/环境）——新会话先读它。 |
 | 09-13 14:04 | 打开会话「差一段」v2：根因锁定 + 修好待真机验证（2026-09-13 14:00） | 分支 fix/open-catchup-guard @ daab66b（v1 32571f8 + v2 一 commit；基于 main 15b3f447） |
 | 09-13 14:07 | 打开会话「差一段」v2 已合并 main（2026-09-13 14:05） | 用户真机验收："解决的很完美" → 拍板合并。 |
+| 09-19 11:57 | 09-19：offload 审计**路线改判**——下一棒 = 继续推进扫描（不是修代码）+ 锚点机制升级（ANCHOR.md 单一来源） | 用户指正：「那个任务（= 我写的第 7 棒修补批次任务书）已经在另外一个会话做了，并且已经几乎处理完了；扫描还需要继续推进，需要的是继续推进扫描的」。 |
+| 09-19 12:55 | 状态：✅ 第 7 棒完成 · 锚点 c6d8d63f（= origin/main）· 只读，仓库 0 改动 · QA 2 | 状态：✅ 第 7 棒完成 · 锚点 c6d8d63f（= origin/main）· 只读，仓库 0 改动 · QA 23/23 全绿 |
+| 09-19 19:04 | 09-19 晚：压缩修复第二棒 —— 长工具循环的预算锚点（写侧+读侧）→ main = afa404bf | 背景：第一棒（796307ec，F1/F2/F4）修好了锚点判定 + 诊断 + 硬裁剪兜底，但「一句指令 + 几百轮工具调用」会话只有一个用户轮次，而整套压缩逻辑按「用户轮次」计价 ⇒ 两侧同时退化。 |
 
 ## 2. 输入框 / 键盘 / 粘贴
 
@@ -161,7 +164,7 @@
 
 ## 3. native 内存 / OOM / 崩溃
 
-**跨度** 2026-08-03 ～ 2026-09-17 · **104 条** · **状态** 持续跟踪（09-13 三件套已合并；SOFT 450 / HARD 1200 阈值待 1–2 周真实数据复核）
+**跨度** 2026-08-03 ～ 2026-09-20 · **107 条** · **状态** 持续跟踪（09-13 三件套已合并；SOFT 450 / HARD 1200 阈值待 1–2 周真实数据复核）
 
 **叙事**：08-09 Scudo OOM → 08-15 早三次 OOM → 08-17 native offload 泄漏实证 → 08-20~22 进程隔离五 Phase + 小号 TF-A..TF-J 十连修 → 08-25/26 「RSS 单调泄漏」被沙箱实测**推翻**（是 PRoot VSZ reserve 不是泄漏）→ 09-13 两次 SIGABRT / RSS 5.4–6.1GB，口径从 VmRSS 换 **RssAnon**（61% 信号是可回收页）+ 崩溃态取证 → 09-15 HangDetector 后台冻结假阳性。**这是全档案最长的 saga，也是唯一「调查被自己的实测推翻」的一条。**
 
@@ -271,10 +274,13 @@
 | 09-16 12:03 | 09-16 午：日志审计（09-16 窗口）— 3 项新发现，首要 = 超时 124 被当 shell 死亡盲重跑 | 判据来源：/var/minis/logs/minis-2026-09-16.log（7.7MB）+ memspike-2026-09-16.log（app 自带 rss/phase 探针）+ launch-beacon.… |
 | 09-16 12:03 | ↳ 09-16 午：两个 audit0916 分支合并 main（main = 1863e4d2） | 远端原有两分支：fix/audit0916-scan-cost-and-anchor-gap @ 1ce9d8a（CI run 35047155917 success）与 fix/audit0916-graying-an… |
 | 09-17 09:00 | 完成状态 | 09-17 凌晨：三模型 576 单元扫描 + 双向反驳收口 |
+| 09-18 18:13 | 09-18：Termux×RikkaMinis「连接收益」分析（实测 5 轮探针，未铺任何线） | 结论：候选收益里只有两条过一阶门——①长驻进程（沙箱结构性做不到：shell_execute 隔离、nohup 后台 ~12 分钟被清、无调度器能唤醒 agent）②重活移出 app 进程组（§18 cgroup 证据 … |
+| 09-19 01:36 | 09-19 凌晨：deepseek 400 重查（无法复现，定性为中继渠道天气）+ §18 判定日结论（归因翻转） | 400 重查（agentrouter，用户给的 Kilo-Code key，探针 /tmp/ar_probe.py）： |
+| 09-20 03:26 | 09-20：offload 审计 WAVE-2 并发线 C2 完成（`ui/chat/` 渲染与文本组件） | 身份：第 21 棒并发线 C2（只读，仓库 0 改动，HEAD = 99783703 / 锚点 c6d8d63f）。 |
 
 ## 4. 沙箱 / rootfs / PRoot / 终端
 
-**跨度** 2026-08-03 ～ 2026-09-17 · **94 条** · **状态** 稳定（09-05 rootfs 事件日志 + apk 自动恢复已上线）
+**跨度** 2026-08-03 ～ 2026-09-20 · **101 条** · **状态** 稳定（09-05 rootfs 事件日志 + apk 自动恢复已上线）
 
 **叙事**：08-03 proot 源码构建（loader 必须独立打包）→ 08-09 终端死屏根治 + 反复开关 OOM → 08-13 PRoot 文件 IO 幽灵层 + apk 包持久化方案 3 + rootfs 占位 tar → 09-05 「沙箱重置、工具不见」三源取证（**不是重置，是 per-session 设计**）→ 09-13 apk 残留进程占锁误诊为「源慢」。**教训密度最高的一条**：沙箱里几乎每个「环境坏了」最后都归到「你误诊了现象」。
 
@@ -374,10 +380,17 @@
 | 09-17 14:22 | 09-17 下午：审计存量缺陷批次 1-7 收口 — main = e657335f | 成果：215 条 CONFIRMED → 已处理 155 条 / 92 文件，剩余 60 条（HIGH 4 / MED 32 / 其他 24）。10 个提交 FF 合并，CI 全绿，远端仅剩 main。 |
 | 09-17 18:13 | 09-17 傍晚：存储页转圈 + markdown 列表误渲染双修复 → main = 40a58c94 | 用户报告两件事，都实锤： |
 | 09-17 20:18 | ↳ 09-17 收尾：全天工程量统计（用户问"为什么感觉工程量大"时的硬数据） | main 交付量（SGT 09:41→17:55）：33 提交 / 147 unique 文件（全仓 ~524 文件的 28%）/ +3031 −577 行；CI 今天 43 轮构建（29 绿 / 9 红 / 5 取消，… |
+| 09-18 18:13 | 09-18：Termux×RikkaMinis「连接收益」分析（实测 5 轮探针，未铺任何线） | 结论：候选收益里只有两条过一阶门——①长驻进程（沙箱结构性做不到：shell_execute 隔离、nohup 后台 ~12 分钟被清、无调度器能唤醒 agent）②重活移出 app 进程组（§18 cgroup 证据 … |
+| 09-18 18:31 | 09-18 深夜：Termux↔RikkaMinis 打通（termux-dock MCP 桥）+ 三组实测数字 | 怎么发现的：探测本机监听端口时发现 127.0.0.1:8000 回 termux-dock MCP is running —— 用户 Termux 里早就跑着一个 MCP 服务（pm2 + watchdog 托管：te… |
+| 09-18 18:37 | 09-18 深夜：PRoot 慢 8-10x 的机制与实测（syscall 税） | 机制：沙箱被 app 自带的 libproot.so 用 ptrace 跟踪（沙箱内 /proc/self/status 实测 TracerPid=13403、Seccomp=2）。seccomp 过滤=2 意味着只有"… |
+| 09-18 18:43 | 09-18 深夜：查清 native_offload 的判定条件（结论：不适合当重活加速器） | 判定链：execve 的 basename ∈ 编译期常量名单（sandbox/OffloadHandlerCatalog.kt，19 项）→ libproot 的 C 扩展截获 → abstract unix sock… |
+| 09-20 08:48 | 09-20：FIX-6 修复批完成并合入 main（设置/配置 9 条 + F-224 数据层收尾） | 最终 main = b67558d。两个阶段： |
+| 09-20 10:03 | 09-20：FIX-8-approot 补扫 —— 两文件 1,820 行真缺口，抓出 3 条 D（main = `541fbb2`） | 起点：第 22 棒收口报告里登记的「MinisApp.kt + MainActivity.kt = 1,815 行从未逐行走查」。用户直接说「那你这里直接把他们补上」。 |
+| 09-20 10:54 | 09-20：真机验证清单 agent 侧独立验证（42/42 + 反向臂 34 红） | 用户指令：T2-3（输出上限字节口径）"这是代码的问题，别测了"、另一条"在另外一个地方修了" → 只做不需要设备 UI 的条目。 |
 
 ## 5. 流式回答中断 / 恢复 / 取消
 
-**跨度** 2026-08-03 ～ 2026-09-16 · **100 条** · **状态** 已闭环（09-07 收口，含停止按钮竞态 + 多会话真并发真机验证）
+**跨度** 2026-08-03 ～ 2026-09-20 · **106 条** · **状态** 已闭环（09-07 收口，含停止按钮竞态 + 多会话真并发真机验证）
 
 **叙事**：08-18 「回答频繁断掉」诊断链（provider 层铁证健康）→ 08-24 首块超时 30000ms + retry 分类不对称 → 09-06 一天内连收四种形态：EOF 静默停、stream error 手动重试、content_filter→fallback、finish_reason=network_error 伪正常结束 → 09-07 预算墙第 4 形态 + provider-exec-concurrency。**「同一个用户现象 = 五种不同根因」的教科书案例**，每条都靠日志实证拆开。
 
@@ -483,10 +496,16 @@
 | 09-15 22:44 | 09-15 夜：两支改动的归类排查（一类还是两类）+ 同病扫描 | 对象：fix/compact-swallows-queued-instruction @ decafa9a（CI 1549 success）、fix/tool-call-copy-suppress @ 7c1dddad（… |
 | 09-16 00:23 | 09-16 凌晨：日志审计（09-15 窗口）— 23 次 silent_kill churn + 400 重试 + 混淆类名 | 复用工具：/var/minis/workspace/logaudit/{analyze,probe,deaths}.py（格式归一化 / 定向过滤 / 按 pid 分组看死亡上下文）。日志文件只剩 18:05 后窗口（重… |
 | 09-16 01:02 | DSML 封套残留（第三次撞同族，已修，main = 711b6dd）：DeepSeek 原生 <｜DSML｜ invo | DSML 封套残留（第三次撞同族，已修，main = 711b6dd）：DeepSeek 原生 <｜DSML｜ invoke/parameter/calls> 封套整段漏成正文。判据确认：现有 ToolCallResid… |
+| 09-19 09:31 | 09-19：offload 模型执行链路全量源码精读（压力测试会话，产出文档+图+13 项发现） | 用户要求不开代理、本对话内完成"看源码→写精确文档+mermaid 图→顺便查 bug"的压力测试。对象选了 sandbox/offload 模型执行链路（约 6000 行，main=c6d8d63f），逐行读完：Run… |
+| 09-19 14:32 | 09-19：offload 审计第 9 棒完成（Ring 2 / P1 = `browser` 包 → F-98…F-104） | 状态：✅ 第 9 棒完成 · 只读，仓库 0 改动 · QA verify_all.sh 32/32 全绿 · 判据 verify_findings_9th.sh 73/73 · 生成器自对账 16 项 |
+| 09-19 19:20 | 09-19：offload 审计第 15 棒完成（Ring 2 第八段 = `tools/` 14 文件 2,792 行 + `speech/` 7 文件 1,649 行 → F-153…F-160）· **Ring 2 至此 27,003 行 / 88 文件全部走完** | 状态：✅ 只读，仓库 0 改动（HEAD = c6d8d63f = 锚点，git status --porcelain 空）· 包闸门 verify_all.sh 67/67 · 判据 verify_findings_1… |
+| 09-19 21:41 | 09-19：第 18 棒完成（`provider/` 第一轮）→ F-177 / F-178 / F-179（3 D）+ O-44…O-46（3 O） | F-177【D】★「取消」被记账成「流解析错误」（当日 14×，真因被丢弃 + 归类错） —— 链条四处： |
+| 09-20 03:07 | 09-20 第 21 棒 · 并发线 D1 完成（`app/offload/` 顶层包 12 文件 / 2,291 行） | 范围：src/android/app/src/main/java/com/rikkaminis/app/offload/（顶层包，非已扫完的 sandbox/offload/）。基线 rev 99783703，独立 cl… |
+| 09-20 05:11 | 09-20：FIX-7 批次修复完成（`app/offload` 顶层包 + sandbox 根文件，11 条 D）→ main = `2bbe60a` | 任务书：/var/minis/shared/offload-audit-0919/fix-tasks/FIX-7-approot-offload.md（11 条 D，来源线 B1 + D1） |
 
 ## 6. 思考 / 推理泄漏
 
-**跨度** 2026-08-08 ～ 2026-09-18 · **43 条** · **状态** 已闭环（09-12 打包合并；同类新方言需重新进表）
+**跨度** 2026-08-08 ～ 2026-09-20 · **49 条** · **状态** 已闭环（09-12 打包合并；同类新方言需重新进表）
 
 **叙事**：08-14 思考折叠框缺失（模型组中转站场景）→ 08-18 「思考跑进正文」+ 断流诊断 → 08-20 thinking 级别无效 → 09-04 thinking-rules-port + 思考字段决策键 → 09-05 thinking-gap-close（审计出 2 HIGH）→ 09-11/12 **think 泄漏实锤：中转站 `<think>` 标签不在解析表**。核心难点：泄漏来自**上游 provider 的方言差异**，不是我们自己的解析 bug。
 
@@ -535,10 +554,16 @@
 | 09-18 13:13 | 09-18：修复 DeepSeek V4 思考回传 400（分支 fix/deepseek-thinking-echo @ f6ab4eb2） | 改动（9 文件 +700/−70）： |
 | 09-18 14:05 | 09-18：DeepSeek V4 思考回传 400 追查（未解决，已按用户决定搁置）+ 分支合并 main | 结论先行：装了修复版（1.0.0+1646 / cfa48ec9）后仍复现 → 修复不够。用户判定该故障有随机性，决定暂不继续修，仅合并分支。 |
 | 09-18 14:12 | 09-18：deepseek-thinking-echo 分支独立审查通过 | main = aff89798（c82bbf3e fix + aff89798 test）已推送，CI #35313387036 in_progress（用户拍板不等）。 |
+| 09-19 21:41 | 09-19：第 18 棒完成（`provider/` 第一轮）→ F-177 / F-178 / F-179（3 D）+ O-44…O-46（3 O） | F-177【D】★「取消」被记账成「流解析错误」（当日 14×，真因被丢弃 + 归类错） —— 链条四处： |
+| 09-20 00:56 | 09-20 凌晨：offload 审计并发线 A1 完成（`provider/openai/` 5 文件 3,559 行 · 第 21 棒） | 产出：/var/minis/shared/offload-audit-0919/wave2-a1/ —— report.md(35KB) · ledger-a1.json(21 条：D=3 · O=18，其中负结果 N-… |
+| 09-20 01:47 | 09-20 凌晨：offload 审计 WAVE-2 并发线 A4 完成（`provider/` 杂项 + `ModelsDevApi`） | 产出（/var/minis/shared/offload-audit-0919/wave2-a4/）：report.md(34.9KB) · ledger-a4.json · ledger-section.md（可直接并… |
+| 09-20 02:26 | 09-20 凌晨：offload 审计第 21 棒 **并发线 A3** 完成（`provider/thinking/` + `provider/voice/`） | 产出：/var/minis/shared/offload-audit-0919/wave2-a3/（report.md + ledger-a3.json + verify_a3.sh + exp_a3/）。 |
+| 09-20 05:35 | 09-20：修复批次 FIX-2-thinking-voice 完成（6 条，分支已推 + CI 绿） | 批次：FIX-2-thinking-voice · 分支 fix/thinking-voice-layer · commit 0012517 · 基线 afa404b |
+| 09-20 08:37 | ↳ 09-20：修复批 FIX-3-chat-state 完成（chat 状态机与并发 · 7 条 + 跨批补丁 4 处） | 分支 fix/chat-state-machine · 基线 afa404b（父提交已核）· commit 3b3c474 + 9dfe54f · CI #1670 → #1682 两次均 success · diff … |
 
 ## 7. 上下文压缩 / 记忆 / 预算
 
-**跨度** 2026-08-06 ～ 2026-09-16 · **92 条** · **状态** 稳定（09-12 差距清单收敛：D1 攒着、D3/D4/D5 归档不吸收）
+**跨度** 2026-08-06 ～ 2026-09-19 · **97 条** · **状态** 稳定（09-12 差距清单收敛：D1 攒着、D3/D4/D5 归档不吸收）
 
 **叙事**：08-05 RAG v1 实验 → 08-06 经验记忆模块（实施→审查→修复→**08-07 整体摘除**）→ 08-12 上下文压缩引擎 T5 → 08-14 切片无清洗 + summary 注入 tool_result（400 报错）→ 08-16 动态预算 → 08-18 上下文窗口来源治理 → 08-31 memory facts + 语义索引 → 09-12 A1 Prompt Cache 调查（**结论：本地已是上游超集，无需移植**）。一条「先做、再摘、再重做」的螺旋线。
 
@@ -636,10 +661,15 @@
 | 09-16 13:57 | 09-16 下午：semantic-memory 修复收口（main = 735eadb）+ 第二批热榜审阅 | 修复已闭环（用户拍板"打包一起"）：时间衰减从「乘性侵蚀」改为「加性助推」+ 输出真实 cos + SKILL.md 约定改为按 cos 判定。分支 fix/semantic-memory-scoring-0916 @ … |
 | 09-16 17:43 | 批次 23 收口：分支 feat/batch23-absorb（3 commit，13 文件 +252/−28 基 ma | 批次 23 收口：分支 feat/batch23-absorb（3 commit，13 文件 +252/−28 基 main 116a23d5）→ CI run 1578 success → FF 合并 main = 2… |
 | 09-16 21:27 | 09-16 夜：全库 LLM 扫描 + 管线压力测试（用户拍板「扫描仓库 + 用满额度 + 压力测试」） | 靶：RikkaMinis @ main 551ed6b（fresh clone /tmp/RikkaMinis，1129 commits）。产出：报告 /var/minis/mounts/笔记/RikkaMinis源码扫… |
+| 09-19 16:29 | 09-19：offload 审计第 12 棒完成（Ring 2 第五段 = `debug/` 包 12/12 文件 5,592 行全部走完 → F-124…F-133） | 下一棒：HANDOFF-offload-13th.md —— P1 = config/ 包（4,963 行）（剩余最大 + 「用户可见入口 = 机器入口」三方同写一份配置 ⇒ 同族三标准富集）；P2 = service/… |
+| 09-19 18:02 | 09-19 晚：上下文压缩"空转"根因定位（用户报告：第 1 条消息处不断压缩但无效果） | 现象（生产日志实证）：auto-compact 每 10-20s 触发一次，compactAll() invoked 之后无任何后续日志（既无 divider 也无 failed）；[CompactDiag] eAH v… |
+| 09-19 19:04 | 09-19 晚：压缩修复第二棒 —— 长工具循环的预算锚点（写侧+读侧）→ main = afa404bf | 背景：第一棒（796307ec，F1/F2/F4）修好了锚点判定 + 诊断 + 硬裁剪兜底，但「一句指令 + 几百轮工具调用」会话只有一个用户轮次，而整套压缩逻辑按「用户轮次」计价 ⇒ 两侧同时退化。 |
+| 09-19 19:59 | 09-19：offload 审计第 16 棒完成（P1 = `backup/` + `diagnostics/` + `logging/` + `crash/` → F-161…F-169） | 状态：✅ 只读，仓库 0 改动（HEAD = c6d8d63f = 锚点，git status --porcelain 空）· 判据 verify_findings_16th.sh 90/90 · 总闸门 verify_… |
+| 09-19 21:14 | 09-19：offload 审计第 17 棒完成（小包扫尾 + app 根文件 + `shared/` = 40 文件 / 8,275 行 → F-170…F-176 · O-29…O-43） | 下一棒：HANDOFF-offload-18th.md —— P1 = provider/ 11,202 行（唯一带生产日志活体证据的未扫区域：当天 14× stream parse exception: Cancell… |
 
 ## 8. Provider / 模型组 / 负载均衡
 
-**跨度** 2026-08-04 ～ 2026-09-15 · **104 条** · **状态** 已闭环（09-12 收尾；负载均衡语义已在代码级核实为「生效但语义与用户预期不同」）
+**跨度** 2026-08-04 ～ 2026-09-20 · **112 条** · **状态** 已闭环（09-12 收尾；负载均衡语义已在代码级核实为「生效但语义与用户预期不同」）
 
 **叙事**：08-04 loadBalance 轮转游标不前进 → 08-08 模型组 recovery 策略 → 08-14 模型组策略重构 P1–P4 + 思考折叠（中转站）→ 08-15 模型切换无缝（cancel+restart）→ 09-04 思考字段决策键（tokenrhythm 报错）→ 09-06 负载均衡请求级改造 → 09-11 多密钥轮换 + Groq 免费档不可用 → 09-12 「负载均衡像回退模式」**第二次**被报（08-04 同款问题）。**同一现象两次立项**，说明第一次的修法没解释清语义。
 
@@ -749,10 +779,18 @@
 | 09-15 11:29 | 09-15 深夜：日志修复 CI 闭环 + 热路径同类排查（ProviderRepository 实锤）+ 装错包对账 | 日志分支闭环：fix/applogger-async-writer @ 28f051b（rebase 到含 CI 修复的 main 95df092）→ CI run 1536 success（SDK 修复生效）→ APK… |
 | 09-15 11:57 | 09-15 深夜续：日志分支合并 main + ProviderRepository 热路径修复闭环 | 日志分支收口：fix/applogger-async-writer @ 28f051b → 用户拍板"先合并"→ FF 合并 main（28f051b）→ 远端分支 DELETE 204 → main release C… |
 | 09-15 21:57 | 09-15 夜：工具调用"复述副本"漏进聊天气泡 + 导致 run 停（模型专属现象，用户实锤） | 现象（用户原话）：工具调用以文本形式漏在自己的消息/气泡里；"连续两个调用，后面一个成功、前面一个不成功 → 不会停也不会打断"（反之：最后/唯一那个调用没被解析 → run 直接停在 finishReason=stop… |
+| 09-19 16:29 | 09-19：offload 审计第 12 棒完成（Ring 2 第五段 = `debug/` 包 12/12 文件 5,592 行全部走完 → F-124…F-133） | 下一棒：HANDOFF-offload-13th.md —— P1 = config/ 包（4,963 行）（剩余最大 + 「用户可见入口 = 机器入口」三方同写一份配置 ⇒ 同族三标准富集）；P2 = service/… |
+| 09-19 21:14 | 09-19：offload 审计第 17 棒完成（小包扫尾 + app 根文件 + `shared/` = 40 文件 / 8,275 行 → F-170…F-176 · O-29…O-43） | 下一棒：HANDOFF-offload-18th.md —— P1 = provider/ 11,202 行（唯一带生产日志活体证据的未扫区域：当天 14× stream parse exception: Cancell… |
+| 09-19 21:41 | 09-19：第 18 棒完成（`provider/` 第一轮）→ F-177 / F-178 / F-179（3 D）+ O-44…O-46（3 O） | F-177【D】★「取消」被记账成「流解析错误」（当日 14×，真因被丢弃 + 归类错） —— 链条四处： |
+| 09-19 22:05 | 09-19：第 19 棒中途（`provider/` 网络与预算面）→ F-180（D）+ O-47 + N-26 + **勘误 E-18（撤回 O-44）** | ★ 勘误 E-18（重要，方法论级）：第 18 棒我写进台账的 O-44 我误判了 —— 声称 ToolJsonRepair.levenshteinAtMostOne（:124-155） |
+| 09-20 00:56 | 09-20 凌晨：offload 审计并发线 A1 完成（`provider/openai/` 5 文件 3,559 行 · 第 21 棒） | 产出：/var/minis/shared/offload-audit-0919/wave2-a1/ —— report.md(35KB) · ledger-a1.json(21 条：D=3 · O=18，其中负结果 N-… |
+| 09-20 01:47 | 09-20 凌晨：offload 审计 WAVE-2 并发线 A4 完成（`provider/` 杂项 + `ModelsDevApi`） | 产出（/var/minis/shared/offload-audit-0919/wave2-a4/）：report.md(34.9KB) · ledger-a4.json · ledger-section.md（可直接并… |
+| 09-20 02:06 | 09-20 凌晨：offload 审计第 21 棒 · 并发线 A2 完成（provider/anthropic + provider/gemini） | 范围：AnthropicProvider(1023) + GeminiProvider(566) + AnthropicModelsApi(224) + GeminiModelsApi(127) + AnthropicM… |
+| 09-20 02:26 | 09-20 凌晨：offload 审计第 21 棒 **并发线 A3** 完成（`provider/thinking/` + `provider/voice/`） | 产出：/var/minis/shared/offload-audit-0919/wave2-a3/（report.md + ledger-a3.json + verify_a3.sh + exp_a3/）。 |
 
 ## 9. 备份 / 多端同步
 
-**跨度** 2026-08-03 ～ 2026-09-18 · **96 条** · **状态** 收敛（多端同步已砍除，自动备份按「资产」语义保留）
+**跨度** 2026-08-03 ～ 2026-09-20 · **101 条** · **状态** 收敛（多端同步已砍除，自动备份按「资产」语义保留）
 
 **叙事**：08-04 WebDAV 备份把 main 编译弄坏 + 导入去重 → 08-09 备份并发 OOM → 08-10 多端自动同步 → 08-11 流量审计（用户发现方案欠考虑）→ 降本 + 合并守卫 → 08-13 备份模块审计 7 项 → 08-28 方案 C 重构 → 09-08 **产品哲学定调：资产 vs 副产品** + 自动备份 A+B + auto/ 目录分离 → 09-09 多端同步砍除。**从「做」到「砍」只用了一个月，中间靠一次流量审计转弯。**
 
@@ -854,10 +892,15 @@
 | 09-14 22:27 | 09-14 深夜：dev-history 档案同步到 09-14（1003 条）+ sanitize 脚本固化头部刷新 | 档案：953 → 1003 条 / 43 天 / 1,196,897 字符 / 18,828 行；fences 36 even、anchors=outOrder=0、脱敏 113 处 + INDEX 6 处、Remain… |
 | 09-15 21:56 | 09-15 晚：HF 语义记忆重建 + MCP 知识图谱重建（09-06 套件随 rootfs 全丢） | HF：semantic_memory.py build 732→1070 条（索引 5.8MB，已上传 dataset USER/rikkaminis-memory），搜索验证命中正常。 |
 | 09-18 00:27 | 09-17 深夜修复：冷启动恢复覆盖 Launch Session 设置（main = bd55749b，#1637 绿 / #1638 release） | 改动（分支 fix/coldstart-restore-gate，3 文件 +137−3）： |
+| 09-19 00:25 | 09-19：小号 fork 同步断线 4 天修复（***ALT_USER***，非代码仓改动，直接 API 操作） | 情况：ALT_USER/RikkaMinis 的每晚同步 workflow（sync-fork-main.yml）09-15 起连续 4 天 failure，fork main 停在 09-14，lab 救援线过期。 |
+| 09-19 19:59 | 09-19：offload 审计第 16 棒完成（P1 = `backup/` + `diagnostics/` + `logging/` + `crash/` → F-161…F-169） | 状态：✅ 只读，仓库 0 改动（HEAD = c6d8d63f = 锚点，git status --porcelain 空）· 判据 verify_findings_16th.sh 90/90 · 总闸门 verify_… |
+| 09-19 21:14 | 09-19：offload 审计第 17 棒完成（小包扫尾 + app 根文件 + `shared/` = 40 文件 / 8,275 行 → F-170…F-176 · O-29…O-43） | 下一棒：HANDOFF-offload-18th.md —— P1 = provider/ 11,202 行（唯一带生产日志活体证据的未扫区域：当天 14× stream parse exception: Cancell… |
+| 09-20 02:07 | 09-20 第 21 棒 · 并发线 B2 完成（`data/repository/` 11 文件 / 7,101 行） | 产出：/var/minis/shared/offload-audit-0919/wave2-b2/ —— report.md（含覆盖表）· ledger-b2.json（25 条：D=6 · O=10 · N=9）· v… |
+| 09-20 09:22 | 09-20：近两日（09-19~09-20）改动独立核查 —— 结论「未引入问题」 | 核查对象：afa404b（09-19 18:50）→ 6a10661（09-20 08:51），22 commit / 96 文件 / +3417 −1512。 |
 
 ## 10. 渲染性能 / Markdown / 长会话卡顿
 
-**跨度** 2026-08-05 ～ 2026-09-17 · **82 条** · **状态** 已闭环 + 持续加固（09-15 七轴 sweep：纯逻辑层零新 bug，真发现全在接线/时序边界）
+**跨度** 2026-08-05 ～ 2026-09-20 · **89 条** · **状态** 已闭环 + 持续加固（09-15 七轴 sweep：纯逻辑层零新 bug，真发现全在接线/时序边界）
 
 **叙事**：08-12 文字渲染空白 → 08-20 工具卡「正在调用」+ CPU 80% → 08-21 长会话流式渲染 CPU 满载 → 08-25 rikkahub 流畅性吸收 A–E（消息级聚合 + @Stable/@Immutable 纪律）→ 08-26 聚合路径复制失效 → 09-14 census 接错渲染器（7 分支全死）→ 09-15 markdown 解析器死循环（`#196` 类行挂死，**用户报「大文件加载不出来」**）→ 七轴 fuzz sweep。
 
@@ -945,10 +988,17 @@
 | 09-17 20:18 | ↳ 09-17 收尾：全天工程量统计（用户问"为什么感觉工程量大"时的硬数据） | main 交付量（SGT 09:41→17:55）：33 提交 / 147 unique 文件（全仓 ~524 文件的 28%）/ +3031 −577 行；CI 今天 43 轮构建（29 绿 / 9 红 / 5 取消，… |
 | 09-17 21:01 | 09-17 深夜：★"双胞胎解析器"——聊天列表误渲染的真正根因与修复（main = 14ca90e3） | 事件：用户真机复现"4. 分钟"（昨晚 40a58c94 记的"已修"无效）→ 追查发现 app 有两套 markdown 解析器： |
 | 09-17 21:04 | 09-17 深夜收口：聊天列表误渲染修复真机验证通过（main = 14ca90e3） | 用户装机 1.0.0+1630（lastUpdateTime 21:02:03，= CI #1630 artifact / 14ca90e3 树）后确认：样本行显示为普通段落，符合预期 → "双胞胎解析器"修复实锤生效。… |
+| 09-19 21:14 | 09-19：offload 审计第 17 棒完成（小包扫尾 + app 根文件 + `shared/` = 40 文件 / 8,275 行 → F-170…F-176 · O-29…O-43） | 下一棒：HANDOFF-offload-18th.md —— P1 = provider/ 11,202 行（唯一带生产日志活体证据的未扫区域：当天 14× stream parse exception: Cancell… |
+| 09-20 02:26 | 09-20 凌晨：offload 审计第 21 棒 **并发线 A3** 完成（`provider/thinking/` + `provider/voice/`） | 产出：/var/minis/shared/offload-audit-0919/wave2-a3/（report.md + ledger-a3.json + verify_a3.sh + exp_a3/）。 |
+| 09-20 03:26 | 09-20：offload 审计 WAVE-2 并发线 C2 完成（`ui/chat/` 渲染与文本组件） | 身份：第 21 棒并发线 C2（只读，仓库 0 改动，HEAD = 99783703 / 锚点 c6d8d63f）。 |
+| 09-20 05:03 | 09-20：offload 审计修复批次 FIX-4-render-ui 完成（渲染/UI 组件层） | 产出：/var/minis/shared/offload-audit-0919/fix-out/fix4/ —— REPORT.md · FIXED-F-255/256/257/262/270…277.md（12 份，各… |
+| 09-20 09:21 | 09-20：FIX-WAVE 修复批次并行 → 统一合并收口（第 22 棒，main = `6a10661`） | 起点：读 HANDOFF-offload-21st-TO-DISPATCHER.md（第 21 棒交接包），用户追加背景「云端 main 已被推进」，要求「核实聚合信息 → 分配任务 → 各自分支 → 统一合并」。 |
+| 09-20 13:56 | 09-20 下午：云端三分支核查 → 合并 2 个（main = `9c4ccfb8`），**扣下 T2**（证据：改在 runtime-dead 链上） | 三个分支同基 d11a4c1b，三次 merge 全部 ort 自动、零冲突（fab 与 diag 共改 ChatScreen.kt 相邻区域也不冲突）——「文件重叠 ≠ 文本冲突」再次成立。 |
+| 09-20 13:58 | ↳ 09-20 收尾：`fix/streaming-degrade-live-text` 已按用户决定删除（远端 + 本地） | 用户拍板「既然如此，那就把它去掉吧」——无效修复不留枝。至此远端只剩 main = 9c4ccfb8（fab 修复 + diag 探针），三分支全部收口。 |
 
 ## 11. 审计 / 整改（多轮）
 
-**跨度** 2026-08-03 ～ 2026-09-17 · **189 条** · **状态** 常态机制（已固化为 security-audit-checklist / four-way-sync-check 等 skill）
+**跨度** 2026-08-03 ～ 2026-09-20 · **220 条** · **状态** 常态机制（已固化为 security-audit-checklist / four-way-sync-check 等 skill）
 
 **叙事**：08-05 首次全量代码审查 → 08-16 系统性审计 → 08-18 RC1–RC17 两轮整改（多会话并行）→ 08-26/27 模块审计批 → 09-02 bug-hunt 四会话 → 09-04 diff 驱动定向审计 → 09-09 全局第二轮 T1–T12 → 09-13 完善度横向扫描 → 09-14 度量存活度 → 09-15 七轴 sweep。**审计是本项目最稳定的工程节奏**：每次改动后必有一次独立审计，且审计本身产出纪律（skill）。
 
@@ -1143,10 +1193,41 @@
 | 09-17 14:26 | 09-17：审计交接包完成（新会话可直接接手剩余 58 条） | main = e657335f，远端仅剩 main，CI 绿。交接物全部在 /var/minis/shared/audit-0917/（14MB）。 |
 | 09-17 16:43 | 09-17 晚：审计 58 条全部收口 — main = 8fbb9d2e（release CI 同 SHA） | 收口链路：分支 fix/audit0917-chatbatch（6 提交，5 轮 CI：3 编译错 @ nav-currentStateFlow / 坏删 context / toolTitle 作用域 + 1 单测契约… |
 | 09-17 16:58 | 09-17 收口后复查：今日 30 提交（审查结论 + 1 个真缺陷） | 对象：main 8fbb9d2e vs 昨日 c6f06d8b（30 提交 / 143 文件 / +2371−532）。报告：/var/minis/mounts/笔记/今日改动复查报告-2026-09-17.md |
+| 09-19 09:52 | 09-19：offload 审计交接包落盘（第 3 棒待接力）+ 一条重要教训 | 用户指令：「准备交接，进行接力」。产出跨会话交接包 → /var/minis/shared/offload-audit-0919/（关键前提：/var/minis/workspace 是会话私有，交接必须先归档到 sha… |
+| 09-19 10:05 | 09-19：offload 审计第 3 棒完成（Shizuku/A11y/Photos 逐行走查 → F-26…F-40，只读） | 任务：读交接书 /var/minis/shared/offload-audit-0919/HANDOFF-offload-3rd.md 并执行第 3 棒——逐行走查三个高风险 handler（函数体未读），按 7 问清单… |
+| 09-19 10:18 | 09-19：offload 审计第 4 棒完成（Contacts/Notification/Location + ★勘误 E-1 进程模型） | 任务：接第 3 棒继续推进。本棒 = ContactsOffloadHandler(332，"参考实现") + NotificationOffloadHandler(579，PII) + LocationOffloadH… |
+| 09-19 10:24 | 09-19：offload 审计第 5 棒交接包封包完成（新会话入口 = HANDOFF-offload-5th.md） | 用户指令：「准备交接，下一对话再继续推进」。产出跨会话交接包 → /var/minis/shared/offload-audit-0919/（1.6M，入口 = HANDOFF-offload-5th.md，202 行）… |
+| 09-19 10:48 | 09-19：offload 审计第 5 棒完成（Calendar/Alarm/Speech+Speak → F-51…F-68 + 勘误 E-2 + 权限分类重评估表） | 产出（/var/minis/shared/offload-audit-0919/）：报告 reports/rikkaminis-calendar-alarm-speech-audit.md(31KB) · diagram… |
+| 09-19 11:14 | 09-19：offload 审计第 6 棒完成（Notification 全文 + BrowserUse/Config/Sessions + 权限页 → F-69…F-82 + 勘误 E-3/E-4/E-5 + A 类边清单） | 状态：只读审计，仓库 0 改动，锚点 main c6d8d63f。 |
+| 09-19 11:18 | 09-19：offload 审计第 6 棒交接包封包完成（入口 = HANDOFF-offload-7th.md，**下一棒起转为写代码棒**） | 封包自检（模拟新会话开工）：sh bootstrap.sh（复用 /tmp/RikkaMinis，锚点 c6d8d63f，工作区 0 改动，5 个关键文件行数指纹 ✅）→ sh verify_all.sh 20/20 ✅… |
+| 09-19 11:57 | 09-19：offload 审计**路线改判**——下一棒 = 继续推进扫描（不是修代码）+ 锚点机制升级（ANCHOR.md 单一来源） | 用户指正：「那个任务（= 我写的第 7 棒修补批次任务书）已经在另外一个会话做了，并且已经几乎处理完了；扫描还需要继续推进，需要的是继续推进扫描的」。 |
+| 09-19 13:51 | 09-19：offload 审计第 8 棒完成（Ring 2 第一段 = config/tools/debug/browser/speech 抽样 → F-95…F-97） | 用户指令（本棒方向性）：「继续扫」「扫完之后，再统一进行其他的处理」→ 修补全部推后，资源投在把 Ring 2 扫完。 |
+| 09-19 14:32 | 09-19：offload 审计第 9 棒完成（Ring 2 / P1 = `browser` 包 → F-98…F-104） | 状态：✅ 第 9 棒完成 · 只读，仓库 0 改动 · QA verify_all.sh 32/32 全绿 · 判据 verify_findings_9th.sh 73/73 · 生成器自对账 16 项 |
+| 09-19 15:15 | 09-19：offload 审计第 10 棒完成（Ring 2 / P4 = `agent/` 运行时 + `SoulStore` → F-105…F-115） | 状态：✅ 第 10 棒完成 · 只读，仓库 0 改动 · QA verify_all.sh 38/38 · 判据 verify_findings_10th.sh 99/99 · 生成器自对账 40 项 |
+| 09-19 15:55 | 09-19：offload 审计第 11 棒完成（Ring 2 第四段 = `agent/` 剩余 + `debug/` 抽样 → F-116…F-123） | 产出（/var/minis/shared/offload-audit-0919/）：报告 reports/rikkaminis-agent-shell-debug-audit.md(23KB) · verify_find… |
+| 09-19 16:29 | 09-19：offload 审计第 12 棒完成（Ring 2 第五段 = `debug/` 包 12/12 文件 5,592 行全部走完 → F-124…F-133） | 下一棒：HANDOFF-offload-13th.md —— P1 = config/ 包（4,963 行）（剩余最大 + 「用户可见入口 = 机器入口」三方同写一份配置 ⇒ 同族三标准富集）；P2 = service/… |
+| 09-19 17:30 | 09-19：offload 审计第 13 棒完成（Ring 2 第六段 = `config/` 包 4,963 行 / 20 文件全部走完 → F-134…F-140） | 锚点：c6d8d63f（= origin/main，未前进）· 扫描基线 99783703 |
+| 09-19 18:12 | 09-19：offload 审计第 14 棒完成（Ring 2 第七段 = `service/` 包 11 文件 3,459 行全部走完 → F-141…F-152） | 主题：service/ = 「进程级用户可见面」（前台服务常驻通知 / 悬浮胶囊 / 内存门 / 会话并发槽）。7 条 D 级发现里 6 条落在「同一决策的两套实现」或「声明 vs 实现」。 |
+| 09-19 19:20 | 09-19：offload 审计第 15 棒完成（Ring 2 第八段 = `tools/` 14 文件 2,792 行 + `speech/` 7 文件 1,649 行 → F-153…F-160）· **Ring 2 至此 27,003 行 / 88 文件全部走完** | 状态：✅ 只读，仓库 0 改动（HEAD = c6d8d63f = 锚点，git status --porcelain 空）· 包闸门 verify_all.sh 67/67 · 判据 verify_findings_1… |
+| 09-19 19:59 | 09-19：offload 审计第 16 棒完成（P1 = `backup/` + `diagnostics/` + `logging/` + `crash/` → F-161…F-169） | 状态：✅ 只读，仓库 0 改动（HEAD = c6d8d63f = 锚点，git status --porcelain 空）· 判据 verify_findings_16th.sh 90/90 · 总闸门 verify_… |
+| 09-19 21:14 | 09-19：offload 审计第 17 棒完成（小包扫尾 + app 根文件 + `shared/` = 40 文件 / 8,275 行 → F-170…F-176 · O-29…O-43） | 下一棒：HANDOFF-offload-18th.md —— P1 = provider/ 11,202 行（唯一带生产日志活体证据的未扫区域：当天 14× stream parse exception: Cancell… |
+| 09-19 21:25 | 09-19：审计口径变更为「全量覆盖」（用户：「都扫一遍吧」）+ 第 18 棒第一部分 → F-177 | 口径变更（重要，此前各棒的「不逐行走查」豁免一律作废）：ui/(84,174) 与 sandbox/ 剩余纳入逐行走查。 |
+| 09-19 22:38 | 09-19 晚：offload 审计转「并发派发」模式 —— WAVE-2 四线并行（第 21 棒） | 背景：用户要求提速（"效率太慢，开拓会话并发同步推进"），并授权"不要问，直接扫、推完"。主会话转为派发者 + 收口者。 |
+| 09-20 00:56 | 09-20 凌晨：offload 审计并发线 A1 完成（`provider/openai/` 5 文件 3,559 行 · 第 21 棒） | 产出：/var/minis/shared/offload-audit-0919/wave2-a1/ —— report.md(35KB) · ledger-a1.json(21 条：D=3 · O=18，其中负结果 N-… |
+| 09-20 00:57 | 09-20 凌晨：offload 审计 WAVE-2 线 B3 完成（`data/` 除 `repository/`，60 文件 / 8,744 行） | 状态：只读，仓库 0 改动（HEAD = 99783703）· 判据 verify_b3.sh 85/85 · 台账 27 条（F-230…237 · O-110…119 · N-85…93）· 独立 clone /tm… |
+| 09-20 01:47 | 09-20 凌晨：offload 审计 WAVE-2 并发线 A4 完成（`provider/` 杂项 + `ModelsDevApi`） | 产出（/var/minis/shared/offload-audit-0919/wave2-a4/）：report.md(34.9KB) · ledger-a4.json · ledger-section.md（可直接并… |
+| 09-20 01:52 | 09-20：offload 审计 WAVE-2 · B4 线完成（`ui/settings/` 42 文件 / 18,653 行） | 交付（/var/minis/shared/offload-audit-0919/wave2-b4/）：report.md(25.8KB, 7 章, 含 42 文件覆盖表) · verify_b4.sh 55/55 绿 ·… |
+| 09-20 02:06 | 09-20 凌晨：offload 审计第 21 棒 · 并发线 A2 完成（provider/anthropic + provider/gemini） | 范围：AnthropicProvider(1023) + GeminiProvider(566) + AnthropicModelsApi(224) + GeminiModelsApi(127) + AnthropicM… |
+| 09-20 02:08 | 09-20：offload 审计第 21 棒 · 并发线 C4 完成（`ui/` 其余全部 52 文件 / 17,194 行） | 范围：ui/components sandbox browser markdown preview navigation media onboarding terminal theme sessions util + u… |
+| 09-20 02:26 | 09-20 凌晨：offload 审计第 21 棒 **并发线 A3** 完成（`provider/thinking/` + `provider/voice/`） | 产出：/var/minis/shared/offload-audit-0919/wave2-a3/（report.md + ledger-a3.json + verify_a3.sh + exp_a3/）。 |
+| 09-20 02:55 | 09-20 凌晨：offload 审计第 21 棒 **并发线 C1** 完成（`ui/chat/` 核心状态机与持久化） | 范围：ChatScreen.kt 5027 + ChatViewModel.kt 3843 + ChatSessionLifecycle.kt 1557 + ChatTurnPersistence.kt 454 + Ch… |
+| 09-20 02:59 | 09-20：第 21 棒 WAVE-2 并发审计 → 交接包就绪（给新调度中枢） | 用户决定：本会话不再等 C1/C2/D1 收尾，直接交接——新会话当调度中枢，本会话提供背景信息。 |
+| 09-20 03:26 | 09-20：offload 审计 WAVE-2 并发线 C2 完成（`ui/chat/` 渲染与文本组件） | 身份：第 21 棒并发线 C2（只读，仓库 0 改动，HEAD = 99783703 / 锚点 c6d8d63f）。 |
+| 09-20 05:03 | 09-20：offload 审计修复批次 FIX-4-render-ui 完成（渲染/UI 组件层） | 产出：/var/minis/shared/offload-audit-0919/fix-out/fix4/ —— REPORT.md · FIXED-F-255/256/257/262/270…277.md（12 份，各… |
 
 ## 12. 多会话并行协作 / 派发 / 交接
 
-**跨度** 2026-08-04 ～ 2026-09-18 · **180 条** · **状态** 成熟（skill: task-dispatch / git-parallel-collaboration / rikkaminis-dev-methodology）
+**跨度** 2026-08-04 ～ 2026-09-20 · **188 条** · **状态** 成熟（skill: task-dispatch / git-parallel-collaboration / rikkaminis-dev-methodology）
 
 **叙事**：08-07 多对话框并发操作同一 worktree 翻车（native OOM 修复）→ 08-12 多任务并行推进模式确立 → 08-15 T1–T10 十会话派发（平衡点施工）→ 08-18 RC 整改凭编号领取 → 08-22 小号 TF-A..TF-J → 08-23 bug-hunt 五会话 → 09-13 两条纪律固化：**每会话独立 clone 绝不共享 .git** + **两分支同基各一 commit 时第二个必须 rebase**。
 
@@ -1332,10 +1413,18 @@
 | 09-18 12:01 | 09-18：1 号满权限小号（alarmedvine）接入收口 —— 含 gh_fullright.sh 两个老 bug 修复 | 新账号：环境变量 GITHUB_TOKEN_FULL_RIGHT_1 = GitHub 1 号小号 alarmedvine（ID 210298370，2025-05-05 注册，free，有 2FA，21 个全量 sco… |
 | 09-18 15:20 | 09-18 晚：日志全量覆盖改造收口 → main = cdd2817（CI #1651 绿 → FF main → release #35318635393 自动触发，用户惯例「触发后不用等」） | 用户命题：日志是应用的基础设施，应能全量反映运行 → 先量化缺口，再按缺口逐条修。 |
 | 09-18 16:17 | 09-18 晚：双修复开工收口 → main = 1fb74fd0（两个分支各自 CI 绿 → FF → 远端只剩 main） | 修复 A（a3183aa1）：ack 竞速 —— ModelExecutionRunDir.workerDrained() 共享判据（只认 worker 自有证据：terminal，或 result+beat silen… |
+| 09-19 09:52 | 09-19：offload 审计交接包落盘（第 3 棒待接力）+ 一条重要教训 | 用户指令：「准备交接，进行接力」。产出跨会话交接包 → /var/minis/shared/offload-audit-0919/（关键前提：/var/minis/workspace 是会话私有，交接必须先归档到 sha… |
+| 09-19 10:24 | 09-19：offload 审计第 5 棒交接包封包完成（新会话入口 = HANDOFF-offload-5th.md） | 用户指令：「准备交接，下一对话再继续推进」。产出跨会话交接包 → /var/minis/shared/offload-audit-0919/（1.6M，入口 = HANDOFF-offload-5th.md，202 行）… |
+| 09-19 11:18 | 09-19：offload 审计第 6 棒交接包封包完成（入口 = HANDOFF-offload-7th.md，**下一棒起转为写代码棒**） | 封包自检（模拟新会话开工）：sh bootstrap.sh（复用 /tmp/RikkaMinis，锚点 c6d8d63f，工作区 0 改动，5 个关键文件行数指纹 ✅）→ sh verify_all.sh 20/20 ✅… |
+| 09-19 12:57 | 09-19：云端两分支审查 + 合并进 main = 99783703（P1 隐私面 + 子代理上下文） | 用户指令：检查云端两个分支有没有引入问题，没问题就合并，合并触发后不用管。 |
+| 09-19 22:38 | 09-19 晚：offload 审计转「并发派发」模式 —— WAVE-2 四线并行（第 21 棒） | 背景：用户要求提速（"效率太慢，开拓会话并发同步推进"），并授权"不要问，直接扫、推完"。主会话转为派发者 + 收口者。 |
+| 09-20 02:59 | 09-20：第 21 棒 WAVE-2 并发审计 → 交接包就绪（给新调度中枢） | 用户决定：本会话不再等 C1/C2/D1 收尾，直接交接——新会话当调度中枢，本会话提供背景信息。 |
+| 09-20 04:50 | 09-20：FIX-5 收口 —— 已合并 main = `4cde346` | 流程：分支 fix/data-layer（基线 afa404b）→ 判据 43/43 + JVM 16/16 → push → dispatch CI #1666 success（核对 head_sha=4cde346 … |
+| 09-20 09:21 | 09-20：FIX-WAVE 修复批次并行 → 统一合并收口（第 22 棒，main = `6a10661`） | 起点：读 HANDOFF-offload-21st-TO-DISPATCHER.md（第 21 棒交接包），用户追加背景「云端 main 已被推进」，要求「核实聚合信息 → 分配任务 → 各自分支 → 统一合并」。 |
 
 ## 13. CI / 构建 / 发布流水线
 
-**跨度** 2026-08-03 ～ 2026-09-18 · **149 条** · **状态** 稳定（Publish 步骤已加 `if: refs/heads/main` 门控）
+**跨度** 2026-08-03 ～ 2026-09-20 · **152 条** · **状态** 稳定（Publish 步骤已加 `if: refs/heads/main` 门控）
 
 **叙事**：08-04 main 编译被 WebDAV 提交弄坏（连红 4 个 run）→ 08-05 android-latest 被分支构建污染 → workflow 门控修复 → 08-17 **CI 缓存恢复旧 native .so**（Tier 0 真 bug）→ 08-24 gh_ci_wait.sh 工具化 + 重复构建幂等守卫 → 09-10 语法门 grep 大小写坑 → 09-14 workflow_dispatch 并发竞态。**「CI 绿 ≠ 逻辑对」这条纪律就是从这条 saga 长出来的。**
 
@@ -1490,10 +1579,13 @@
 | 09-18 10:55 | 09-18：钉住 CI runner ubuntu-24.04 — main = 6f2cef22 | 用户报告 GitHub Actions 提示：ubuntu-latest 将于 2026-10-19 迁移至 Ubuntu 26（runner-images#14748），问是否需要解决。 |
 | 09-18 15:20 | 09-18 晚：日志全量覆盖改造收口 → main = cdd2817（CI #1651 绿 → FF main → release #35318635393 自动触发，用户惯例「触发后不用等」） | 用户命题：日志是应用的基础设施，应能全量反映运行 → 先量化缺口，再按缺口逐条修。 |
 | 09-18 16:17 | 09-18 晚：双修复开工收口 → main = 1fb74fd0（两个分支各自 CI 绿 → FF → 远端只剩 main） | 修复 A（a3183aa1）：ack 竞速 —— ModelExecutionRunDir.workerDrained() 共享判据（只认 worker 自有证据：terminal，或 result+beat silen… |
+| 09-20 05:35 | 09-20：修复批次 FIX-2-thinking-voice 完成（6 条，分支已推 + CI 绿） | 批次：FIX-2-thinking-voice · 分支 fix/thinking-voice-layer · commit 0012517 · 基线 afa404b |
+| 09-20 08:37 | ↳ 09-20：修复批 FIX-3-chat-state 完成（chat 状态机与并发 · 7 条 + 跨批补丁 4 处） | 分支 fix/chat-state-machine · 基线 afa404b（父提交已核）· commit 3b3c474 + 9dfe54f · CI #1670 → #1682 两次均 success · diff … |
+| 09-20 11:01 | 09-20：EXTRA_DAYS 容器类型修复完成 → main = `d11a4c1b`（CI #1691 绿 → FF → 远端仅 main） | 修复内容（1 commit / 4 文件 / +237 −35）： |
 
 ## 14. 开发档案 / 记忆 / 工具链
 
-**跨度** 2026-08-03 ～ 2026-09-18 · **85 条** · **状态** 常态维护（skill: dev-history-sync，每次 dev 会话收尾同步）
+**跨度** 2026-08-03 ～ 2026-09-19 · **88 条** · **状态** 常态维护（skill: dev-history-sync，每次 dev 会话收尾同步）
 
 **叙事**：08-06 经验记忆引擎概念 → 08-08 三平台技能架构固化 → 08-14 档案首次从记忆重建 → 08-16/24/09-04/05/07/08/10/12/13/14 反复重建（**每次重建都在修解析器或脱敏规则**）→ 09-06 知识图谱 + MCP memory → 09-14 日志「可消费性」诊断 → 09-15 sanitize 头部刷新固化。**档案本身是被反复施工的产物，不是一次性导出。**
 
@@ -1584,10 +1676,13 @@
 | 09-17 17:21 | main = 709be37（docs/dev-history-0917 直达 main，docs 变更不触发 buil | main = 709be37（docs/dev-history-0917 直达 main，docs 变更不触发 build CI） |
 | 09-18 11:20 | 09-18：dev-history 档案更新到 09-18（挂载版 + 仓库 docs 双份同源） |  |
 | 09-18 11:44 | 09-18：dev-history 档案更新到 09-18（挂载版 + 仓库 docs 双份同源） | 挂载版：1057 条 / 46 天 / 1,258,261 字符 / 19,430 行；fences 32 even、anchors=header=1057、outOrder=0；脱敏 main + INDEX + SA… |
+| 09-18 16:23 | 09-18 晚：dev-history 档案更新到 09-18（挂载版 + 仓库 docs 双份同源） | 挂载版：1069 条 / 62 天 / 1,274,940 字符 / 19,601 行；fences 32 even、anchors=header=1069、outOrder=0；脱敏 main + INDEX + SA… |
+| 09-18 18:31 | 09-18 深夜：Termux↔RikkaMinis 打通（termux-dock MCP 桥）+ 三组实测数字 | 怎么发现的：探测本机监听端口时发现 127.0.0.1:8000 回 termux-dock MCP is running —— 用户 Termux 里早就跑着一个 MCP 服务（pm2 + watchdog 托管：te… |
+| 09-19 01:44 | 09-19：in-app 更新 UI 判死（用户拍板"多余"，一阶门复核不过，写入 backlog 附记） | 用户主动提出不愿加 in-app 更新（设置页辟空间不值得）。agent 复核同意：一阶门不过（所有步骤手动可达，只省 4-5 次交互→2 次）；本 app 唯一用户=构建者（看 CI 拿包，无外部用户）；成本边清单 =… |
 
 ## 15. 会话 / 导航 / 抽屉交互
 
-**跨度** 2026-08-03 ～ 2026-09-18 · **71 条** · **状态** 已闭环（09-01 后未再复现）
+**跨度** 2026-08-03 ～ 2026-09-20 · **76 条** · **状态** 已闭环（09-01 后未再复现）
 
 **叙事**：08-03 空对话残留 → 08-04 左滑历史抽屉 + 新建对话弹窗 → 08-06 系统返回不进 SESSION_LIST + 双击返回 → 08-07 重启后进列表页而非新会话 → 08-18 RC10 深链路径穿越 → 09-01 launch-resume 导航修复 → 09-13 冷打开空白。**「打开应用后我在哪」这个问题被修了 6 次**，每次都是不同的入口（返回键 / 重启 / 深链 / 冷启）。
 
@@ -1664,10 +1759,15 @@
 | 09-18 00:27 | 09-17 深夜修复：冷启动恢复覆盖 Launch Session 设置（main = bd55749b，#1637 绿 / #1638 release） | 改动（分支 fix/coldstart-restore-gate，3 文件 +137−3）： |
 | 09-18 00:29 | 09-17 深夜收口：冷启动恢复修复真机验证通过（main = bd55749b） | 用户真机验证通过：装的是分支构建（CI #1637 artifact，bd55749b 树）解压出的 APK，完全退出后重开 → 新会话，符合预期。四层闭环全部打开：新代码 6/6 绿 → 反向对照 3/6 红 → 分支… |
 | 09-18 15:33 | 09-18 晚：查清「T321 的 500」——顺便揪出潜伏的 ack 协议缺陷（日志改造首日战果） | 触发：15:22 用户装新包（cdd2817）后，error-snapshot-2026-09-18-152205.log 显示 T321 请求 500。用户点破："你就是那个中转站提供的那个"——T321 = 本会话自… |
+| 09-19 14:32 | 09-19：offload 审计第 9 棒完成（Ring 2 / P1 = `browser` 包 → F-98…F-104） | 状态：✅ 第 9 棒完成 · 只读，仓库 0 改动 · QA verify_all.sh 32/32 全绿 · 判据 verify_findings_9th.sh 73/73 · 生成器自对账 16 项 |
+| 09-19 19:20 | 09-19：offload 审计第 15 棒完成（Ring 2 第八段 = `tools/` 14 文件 2,792 行 + `speech/` 7 文件 1,649 行 → F-153…F-160）· **Ring 2 至此 27,003 行 / 88 文件全部走完** | 状态：✅ 只读，仓库 0 改动（HEAD = c6d8d63f = 锚点，git status --porcelain 空）· 包闸门 verify_all.sh 67/67 · 判据 verify_findings_1… |
+| 09-20 01:47 | 09-20 凌晨：offload 审计 WAVE-2 并发线 A4 完成（`provider/` 杂项 + `ModelsDevApi`） | 产出（/var/minis/shared/offload-audit-0919/wave2-a4/）：report.md(34.9KB) · ledger-a4.json · ledger-section.md（可直接并… |
+| 09-20 02:55 | 09-20 凌晨：offload 审计第 21 棒 **并发线 C1** 完成（`ui/chat/` 核心状态机与持久化） | 范围：ChatScreen.kt 5027 + ChatViewModel.kt 3843 + ChatSessionLifecycle.kt 1557 + ChatTurnPersistence.kt 454 + Ch… |
+| 09-20 10:03 | 09-20：FIX-8-approot 补扫 —— 两文件 1,820 行真缺口，抓出 3 条 D（main = `541fbb2`） | 起点：第 22 棒收口报告里登记的「MinisApp.kt + MainActivity.kt = 1,815 行从未逐行走查」。用户直接说「那你这里直接把他们补上」。 |
 
 ## 16. 平台适配 / 通知 / 图标 / 权限
 
-**跨度** 2026-08-03 ～ 2026-09-18 · **63 条** · **状态** 部分放弃（灵动岛需申请小米白名单；其余已闭环）
+**跨度** 2026-08-03 ～ 2026-09-20 · **71 条** · **状态** 部分放弃（灵动岛需申请小米白名单；其余已闭环）
 
 **叙事**：08-05 小米灵动岛适配 → **卡平台白名单，已废弃回滚** → 08-07 通知震动被 MIUI 掐死 → 改直驱 Vibrator → 08-08 灵动岛焦点通知**再次砍掉** → 08-10 图标跟随系统主题 → 08-22 双 appid 共存 → 09-10 包名迁移 com.openminis.app → com.rikkaminis.app → 09-13 图标极简重设计**放弃并全部回滚** → 09-15 HangDetector 前台门控（HyperOS 冻结后台）。**平台层是本项目「努力最多、成功最少」的一层。**
 
@@ -1736,10 +1836,18 @@
 | 09-13 21:06 | 应用图标极简重设计 —— 已放弃并全部回滚（2026-09-13 晚） | 结果：用户看过 A/B/C 三个候选（白底双色 / 深蓝底白+青 / 白底单色，均为"两莫比乌斯环互锁成圆"的扁平重绘）后判定都不行，决定保留原图标，并说"暂时不改了"。 |
 | 09-14 18:32 | 09-14 夜：HANDOFF-B2 量化结论（前提被推翻）+ 待办 2 已存在 | B2 的第一步（先量化）做完了，结论是「不做」。 |
 | 09-18 12:01 | 09-18：1 号满权限小号（alarmedvine）接入收口 —— 含 gh_fullright.sh 两个老 bug 修复 | 新账号：环境变量 GITHUB_TOKEN_FULL_RIGHT_1 = GitHub 1 号小号 alarmedvine（ID 210298370，2025-05-05 注册，free，有 2FA，21 个全量 sco… |
+| 09-19 00:25 | 09-19：小号 fork 同步断线 4 天修复（***ALT_USER***，非代码仓改动，直接 API 操作） | 情况：ALT_USER/RikkaMinis 的每晚同步 workflow（sync-fork-main.yml）09-15 起连续 4 天 failure，fork main 停在 09-14，lab 救援线过期。 |
+| 09-19 09:45 | 09-19 第二轮：工具 handler 群精读（offload 第二个消费面）→ 新报告 + 5 项发现 | 用户"继续推"后，按上轮承诺推进第二个消费面（guest CLI → abstract socket → :toolservice → handler）。 |
+| 09-19 10:05 | 09-19：offload 审计第 3 棒完成（Shizuku/A11y/Photos 逐行走查 → F-26…F-40，只读） | 任务：读交接书 /var/minis/shared/offload-audit-0919/HANDOFF-offload-3rd.md 并执行第 3 棒——逐行走查三个高风险 handler（函数体未读），按 7 问清单… |
+| 09-19 10:18 | 09-19：offload 审计第 4 棒完成（Contacts/Notification/Location + ★勘误 E-1 进程模型） | 任务：接第 3 棒继续推进。本棒 = ContactsOffloadHandler(332，"参考实现") + NotificationOffloadHandler(579，PII) + LocationOffloadH… |
+| 09-19 10:48 | 09-19：offload 审计第 5 棒完成（Calendar/Alarm/Speech+Speak → F-51…F-68 + 勘误 E-2 + 权限分类重评估表） | 产出（/var/minis/shared/offload-audit-0919/）：报告 reports/rikkaminis-calendar-alarm-speech-audit.md(31KB) · diagram… |
+| 09-19 11:14 | 09-19：offload 审计第 6 棒完成（Notification 全文 + BrowserUse/Config/Sessions + 权限页 → F-69…F-82 + 勘误 E-3/E-4/E-5 + A 类边清单） | 状态：只读审计，仓库 0 改动，锚点 main c6d8d63f。 |
+| 09-20 03:07 | 09-20 第 21 棒 · 并发线 D1 完成（`app/offload/` 顶层包 12 文件 / 2,291 行） | 范围：src/android/app/src/main/java/com/rikkaminis/app/offload/（顶层包，非已扫完的 sandbox/offload/）。基线 rev 99783703，独立 cl… |
+| 09-20 08:48 | 09-20：FIX-6 修复批完成并合入 main（设置/配置 9 条 + F-224 数据层收尾） | 最终 main = b67558d。两个阶段： |
 
 ## 17. 国际化 / 文案 / 本地化
 
-**跨度** 2026-08-04 ～ 2026-08-28 · **22 条** · **状态** 已闭环（08-28 全量 i18n 改造合并 main）
+**跨度** 2026-08-04 ～ 2026-09-19 · **25 条** · **状态** 已闭环（08-28 全量 i18n 改造合并 main）
 
 **叙事**：08-07 剔除法语文档 values-fr → 08-28 收尾加固三任务（ChatViewModel i18n + chat 组件 + 外围 i18n）→ **语言切换跳回聊天 bug**（两轮：一次误判，一次最终根因）→ 09-15 七语言字符串同步纪律（搬运大段代码后必须对照 strings.xml 清干净）。
 
@@ -1767,10 +1875,13 @@
 | 08-28 09:00 | 收尾加固整体闭环（2026-08-28 08:56，main=1cd58b9） | D（繁中补齐）合并完成：branch fix/i18n-zh-rtw-complete → 1cd58b9，仅碰 values-zh-rTW/strings.xml（+562 行，869→1482 key 全量补齐）。r… |
 | 08-28 16:03 | 语言切换跳回聊天 bug 修复已合 main（2026-08-28，main=155aad0） | 分支：fix/lang-switch-nav-jump → 155aad0，分支 CI run 33151747788 success → ff 合并 main（75377e3..155aad0）→ release CI… |
 | 08-28 19:50 | 语言切换跳回聊天 bug 最终根因 + 修复（2026-08-28，main=439c6c2，真机验证通过） | 第一轮（155aad0）用错 API，用户真机复现仍跳。第二轮（439c6c2）真正修复，用户实测「问题解决」。 |
+| 09-19 17:30 | 09-19：offload 审计第 13 棒完成（Ring 2 第六段 = `config/` 包 4,963 行 / 20 文件全部走完 → F-134…F-140） | 锚点：c6d8d63f（= origin/main，未前进）· 扫描基线 99783703 |
+| 09-19 17:31 | （接上条）F-136【D】i18n 门只查一个方向 —— scripts/scan/i18n_check.py Phas | （接上条）F-136【D】i18n 门只查一个方向 —— scripts/scan/i18n_check.py Phase 1 自述 "Orphan keys (code references but no defini… |
+| 09-19 18:12 | 09-19：offload 审计第 14 棒完成（Ring 2 第七段 = `service/` 包 11 文件 3,459 行全部走完 → F-141…F-152） | 主题：service/ = 「进程级用户可见面」（前台服务常驻通知 / 悬浮胶囊 / 内存门 / 会话并发槽）。7 条 D 级发现里 6 条落在「同一决策的两套实现」或「声明 vs 实现」。 |
 
 ## 18. 上游 / 生态吸收 / 开源
 
-**跨度** 2026-08-03 ～ 2026-09-16 · **55 条** · **状态** 常态（每轮吸收都有「不做」清单，比「做」清单更重要）
+**跨度** 2026-08-03 ～ 2026-09-19 · **56 条** · **状态** 常态（每轮吸收都有「不做」清单，比「做」清单更重要）
 
 **叙事**：08-03 OpenMinis fork 起步 → 08-04 改名 RikkaMinis（OpenMinis 核 + RikkaHub 皮）→ 08-11 上游降级三件套 → 08-25 rikkahub 流畅性吸收 A–E → 08-31 LiteLLM 成本层 + facts → 09-06 Hermes Tier-1 harness → 09-07 Operit 吸收三件 → 09-12 差距清单收敛（D3/D4/D5 归档不吸收）→ 09-14/15 生态调查报告。**「吸收」有明确门槛：只吸收能接进现有边的东西，接不进的归档。**
 
@@ -1831,10 +1942,11 @@
 | 09-16 14:05 | 09-16 傍晚：热榜吸收攒进 backlog §22（用户拍板"攒着"）+ CI flake 处置 | 用户拍板：该吸收的不实施，攒着。已写进 /var/minis/shared/backlog.md §22（33KB，file_write append 成功）： |
 | 09-16 14:45 | 09-16 傍晚：§22 热榜吸收三项落地（22a 阶梯 skill / 22b evals / 22c 债务扫描） | 用户拍板同批：vector_index.pkl 不打包（backlog §22「设计决定」已改为已拍板 + 触发重估条件 + 附带待办：下次动仓库 requirements.json 时补一行「首次使用需 build（需… |
 | 09-16 16:48 | 产出 /var/minis/mounts/笔记/三家终端执行型项目对比RikkaMinis-2026-09-16.md（ | 产出 /var/minis/mounts/笔记/三家终端执行型项目对比RikkaMinis-2026-09-16.md（7 关节 × 4 代码库，file:line 级）。方法：fresh clone 四仓（OI 竟已转… |
+| 09-19 00:25 | 09-19：小号 fork 同步断线 4 天修复（***ALT_USER***，非代码仓改动，直接 API 操作） | 情况：ALT_USER/RikkaMinis 的每晚同步 workflow（sync-fork-main.yml）09-15 起连续 4 天 failure，fork main 停在 09-14，lab 救援线过期。 |
 
 ## 19. UI 组件 / 设置页 / 交互微调
 
-**跨度** 2026-08-04 ～ 2026-09-17 · **74 条** · **状态** 持续（09-12 参数化面板已合并 main）
+**跨度** 2026-08-04 ～ 2026-09-20 · **80 条** · **状态** 持续（09-12 参数化面板已合并 main）
 
 **叙事**：贯穿全程的「小改动流」：08-04 设置页去箭头 + Chat Menu 三项 + 模型组拖拽排序 → 08-05 底部工具条可配置化（含 footer 按钮失效两轮定位）→ 08-08 移除冗余返回按钮 → 08-09 提供商详情页 v2 重构 → 08-14 聊天体验微调 + 回合组折叠 → 09-12 chat-tuning-panel 参数化。**这类改动单看都不重要，但它们占了档案的相当比例——产品的手感就是这么磨出来的。**
 
@@ -1914,10 +2026,16 @@
 | 09-17 20:18 | ↳ 09-17 收尾：全天工程量统计（用户问"为什么感觉工程量大"时的硬数据） | main 交付量（SGT 09:41→17:55）：33 提交 / 147 unique 文件（全仓 ~524 文件的 28%）/ +3031 −577 行；CI 今天 43 轮构建（29 绿 / 9 红 / 5 取消，… |
 | 09-17 21:01 | 09-17 深夜：★"双胞胎解析器"——聊天列表误渲染的真正根因与修复（main = 14ca90e3） | 事件：用户真机复现"4. 分钟"（昨晚 40a58c94 记的"已修"无效）→ 追查发现 app 有两套 markdown 解析器： |
 | 09-17 21:04 | 09-17 深夜收口：聊天列表误渲染修复真机验证通过（main = 14ca90e3） | 用户装机 1.0.0+1630（lastUpdateTime 21:02:03，= CI #1630 artifact / 14ca90e3 树）后确认：样本行显示为普通段落，符合预期 → "双胞胎解析器"修复实锤生效。… |
+| 09-19 19:59 | 09-19：offload 审计第 16 棒完成（P1 = `backup/` + `diagnostics/` + `logging/` + `crash/` → F-161…F-169） | 状态：✅ 只读，仓库 0 改动（HEAD = c6d8d63f = 锚点，git status --porcelain 空）· 判据 verify_findings_16th.sh 90/90 · 总闸门 verify_… |
+| 09-20 01:52 | 09-20：offload 审计 WAVE-2 · B4 线完成（`ui/settings/` 42 文件 / 18,653 行） | 交付（/var/minis/shared/offload-audit-0919/wave2-b4/）：report.md(25.8KB, 7 章, 含 42 文件覆盖表) · verify_b4.sh 55/55 绿 ·… |
+| 09-20 02:07 | 09-20 第 21 棒 · 并发线 B2 完成（`data/repository/` 11 文件 / 7,101 行） | 产出：/var/minis/shared/offload-audit-0919/wave2-b2/ —— report.md（含覆盖表）· ledger-b2.json（25 条：D=6 · O=10 · N=9）· v… |
+| 09-20 03:26 | 09-20：offload 审计 WAVE-2 并发线 C2 完成（`ui/chat/` 渲染与文本组件） | 身份：第 21 棒并发线 C2（只读，仓库 0 改动，HEAD = 99783703 / 锚点 c6d8d63f）。 |
+| 09-20 05:03 | 09-20：offload 审计修复批次 FIX-4-render-ui 完成（渲染/UI 组件层） | 产出：/var/minis/shared/offload-audit-0919/fix-out/fix4/ —— REPORT.md · FIXED-F-255/256/257/262/270…277.md（12 份，各… |
+| 09-20 08:48 | 09-20：FIX-6 修复批完成并合入 main（设置/配置 9 条 + F-224 数据层收尾） | 最终 main = b67558d。两个阶段： |
 
 ## 20. Token 用量 / 成本统计
 
-**跨度** 2026-08-05 ～ 2026-09-14 · **48 条** · **状态** 已闭环（09-09 实时用量 + 预算上限；09-12 parseUsage 修复合并）
+**跨度** 2026-08-05 ～ 2026-09-20 · **52 条** · **状态** 已闭环（09-09 实时用量 + 预算上限；09-12 parseUsage 修复合并）
 
 **叙事**：08-06 TokenUsageSheet 补缓存命中率 → 08-08 双重扣减 + Gemini cache 修复 → 08-25 用量统计优化 A+B → 08-31 LiteLLM 成本层 V2（JSON 价格表 + 用户可编辑）→ **09-12 parseUsage 双重扣减再次出现**（同族复发）。
 
@@ -1971,10 +2089,14 @@
 | 09-12 22:13 | 参数化两批全部完成：feat/chat-tuning-panel @ 70a0f5c（2026-09-12 晚） | 两批 23 个参数已全部实现并推送（同一分支两个 commit，一次 CI 覆盖）： |
 | 09-12 22:30 | ↳ feat/chat-tuning-panel 合并收尾（main @ 70a0f5c，2026-09-12 晚） | 审计（合并前用户要求）：29 文件 +1891/−89 两 commit 全过——①ImageBudget 重构默认 (2000,80) 逐项复刻旧阶梯（整数因子无浮点截断，JVM 钉住）②16 新键 Prefs 全配 … |
 | 09-14 16:16 | 09-14 晚：截断工具调用守卫落地（fix/truncated-tool-call-guard @ fbc50cdd，CI run 1517）+ Eta 调研两条修正 | 改动（3 文件 +217 行，零删除，未合并待拍板）：①新建 ui/chat/TruncatedToolCallPolicy.kt（74 行纯函数：7 个截断 finish reason 别名 length/max_ou… |
+| 09-19 19:04 | 09-19 晚：压缩修复第二棒 —— 长工具循环的预算锚点（写侧+读侧）→ main = afa404bf | 背景：第一棒（796307ec，F1/F2/F4）修好了锚点判定 + 诊断 + 硬裁剪兜底，但「一句指令 + 几百轮工具调用」会话只有一个用户轮次，而整套压缩逻辑按「用户轮次」计价 ⇒ 两侧同时退化。 |
+| 09-19 22:05 | 09-19：第 19 棒中途（`provider/` 网络与预算面）→ F-180（D）+ O-47 + N-26 + **勘误 E-18（撤回 O-44）** | ★ 勘误 E-18（重要，方法论级）：第 18 棒我写进台账的 O-44 我误判了 —— 声称 ToolJsonRepair.levenshteinAtMostOne（:124-155） |
+| 09-20 00:57 | 09-20 凌晨：offload 审计 WAVE-2 线 B3 完成（`data/` 除 `repository/`，60 文件 / 8,744 行） | 状态：只读，仓库 0 改动（HEAD = 99783703）· 判据 verify_b3.sh 85/85 · 台账 27 条（F-230…237 · O-110…119 · N-85…93）· 独立 clone /tm… |
+| 09-20 02:06 | 09-20 凌晨：offload 审计第 21 棒 · 并发线 A2 完成（provider/anthropic + provider/gemini） | 范围：AnthropicProvider(1023) + GeminiProvider(566) + AnthropicModelsApi(224) + GeminiModelsApi(127) + AnthropicM… |
 
 ## 21. 人格 / Soul / 提示词 / 技能体系
 
-**跨度** 2026-08-04 ～ 2026-09-17 · **48 条** · **状态** 稳定（技能体系已固化为 12+ 个 skill，跨会话持久）
+**跨度** 2026-08-04 ～ 2026-09-20 · **54 条** · **状态** 稳定（技能体系已固化为 12+ 个 skill，跨会话持久）
 
 **叙事**：08-07 soul.lang 接线 → 08-08 三平台技能架构 + 内置集成显示修复 → 08-09 Soul 默认人格名对齐 → 08-18 RC 整改含技能模块 → 08-26 人格(Soul)模块审计加固 + 技能/权限模块审计 → 08-29/09-04 subagent 跨会话派发 → 09-07 规则体系对照复杂度五纪律。**「给 agent 定语言 + 定运行时 + 定验证框架」这条主线在应用内的投影。**
 
@@ -2028,10 +2150,16 @@
 | 09-16 14:49 | 09-16 傍晚（续）：GLOBAL.md 加两条纪律（用户拍板「写进去吧」） | 新增 「## 改动阶梯纪律（写代码前的默认工作流）」（现 27–34 行）与 「## Skill 触发验证纪律（新增/改 skill 时）」（36–39 行），插在「分支隔离纪律」之前——顺序即语义：阶梯在前（写多少）、… |
 | 09-17 18:13 | 09-17 傍晚：存储页转圈 + markdown 列表误渲染双修复 → main = 40a58c94 | 用户报告两件事，都实锤： |
 | 09-17 20:18 | ↳ 09-17 收尾：全天工程量统计（用户问"为什么感觉工程量大"时的硬数据） | main 交付量（SGT 09:41→17:55）：33 提交 / 147 unique 文件（全仓 ~524 文件的 28%）/ +3031 −577 行；CI 今天 43 轮构建（29 绿 / 9 红 / 5 取消，… |
+| 09-18 18:31 | 09-18 深夜：Termux↔RikkaMinis 打通（termux-dock MCP 桥）+ 三组实测数字 | 怎么发现的：探测本机监听端口时发现 127.0.0.1:8000 回 termux-dock MCP is running —— 用户 Termux 里早就跑着一个 MCP 服务（pm2 + watchdog 托管：te… |
+| 09-19 11:14 | 09-19：offload 审计第 6 棒完成（Notification 全文 + BrowserUse/Config/Sessions + 权限页 → F-69…F-82 + 勘误 E-3/E-4/E-5 + A 类边清单） | 状态：只读审计，仓库 0 改动，锚点 main c6d8d63f。 |
+| 09-19 12:57 | 09-19：云端两分支审查 + 合并进 main = 99783703（P1 隐私面 + 子代理上下文） | 用户指令：检查云端两个分支有没有引入问题，没问题就合并，合并触发后不用管。 |
+| 09-19 15:15 | 09-19：offload 审计第 10 棒完成（Ring 2 / P4 = `agent/` 运行时 + `SoulStore` → F-105…F-115） | 状态：✅ 第 10 棒完成 · 只读，仓库 0 改动 · QA verify_all.sh 38/38 · 判据 verify_findings_10th.sh 99/99 · 生成器自对账 40 项 |
+| 09-20 02:07 | 09-20 第 21 棒 · 并发线 B2 完成（`data/repository/` 11 文件 / 7,101 行） | 产出：/var/minis/shared/offload-audit-0919/wave2-b2/ —— report.md（含覆盖表）· ledger-b2.json（25 条：D=6 · O=10 · N=9）· v… |
+| 09-20 04:36 | 09-20：FIX-5 批次（data 层修复）完成 — 8 修 / 1 证伪 / 2 越界 | 分支 fix/data-layer @ 4cde346（基线 afa404b）· 9 文件 + 2 测试 / +640 −70 · 判据 43/43 · JVM 16/16 · 产出 /var/minis/shared/… |
 
 ## 22. 语音 / 多模态输入
 
-**跨度** 2026-08-03 ～ 2026-09-13 · **13 条** · **状态** 低优先级维护（语音输入可用，未再重点投入）
+**跨度** 2026-08-03 ～ 2026-09-20 · **19 条** · **状态** 低优先级维护（语音输入可用，未再重点投入）
 
 **叙事**：08-04 语音 UI 移除 → 08-06 语音功能清理（合并 main）→ 08-27 语音输入顺滑度修复 + voice-ime 合并 → 09-12 senseaudio「系统繁忙」实测 + TTFB 30s 通用缺口。**两次「移除」后又两次「修回来」**——语音这条线反复横跳，最终落在「保留但降低优先级」。
 
@@ -2050,10 +2178,16 @@
 | 09-10 01:00 | 第二轮审计修复：MEDIUM 清零 + LOW 批次（2026-09-10 凌晨） | main 状态：main @ d66fea1（B11 ff2455b + B12 d66fea1 已 ff 合并；B11 release CI 34377683652 success，B12 release CI 343… |
 | 09-13 21:06 | 应用图标极简重设计 —— 已放弃并全部回滚（2026-09-13 晚） | 结果：用户看过 A/B/C 三个候选（白底双色 / 深蓝底白+青 / 白底单色，均为"两莫比乌斯环互锁成圆"的扁平重绘）后判定都不行，决定保留原图标，并说"暂时不改了"。 |
 | 09-13 22:49 | ★ 2026-09-13 环节完善度横向扫描（main @ d3873c0e）：1 结构缺口 + 3 真缺陷 + 1 注释漂移 | 扫描轴刻意换过：历史 T1–T10 全域审计（5 HIGH+34 MED+54 LOW 已收口）是「按功能域找 bug」；本次是同构组件一致性 + 审计清单之外横切面。手段：5 个静态探针（scan1–5 在 /var/… |
+| 09-19 10:48 | 09-19：offload 审计第 5 棒完成（Calendar/Alarm/Speech+Speak → F-51…F-68 + 勘误 E-2 + 权限分类重评估表） | 产出（/var/minis/shared/offload-audit-0919/）：报告 reports/rikkaminis-calendar-alarm-speech-audit.md(31KB) · diagram… |
+| 09-19 13:51 | 09-19：offload 审计第 8 棒完成（Ring 2 第一段 = config/tools/debug/browser/speech 抽样 → F-95…F-97） | 用户指令（本棒方向性）：「继续扫」「扫完之后，再统一进行其他的处理」→ 修补全部推后，资源投在把 Ring 2 扫完。 |
+| 09-19 19:20 | 09-19：offload 审计第 15 棒完成（Ring 2 第八段 = `tools/` 14 文件 2,792 行 + `speech/` 7 文件 1,649 行 → F-153…F-160）· **Ring 2 至此 27,003 行 / 88 文件全部走完** | 状态：✅ 只读，仓库 0 改动（HEAD = c6d8d63f = 锚点，git status --porcelain 空）· 包闸门 verify_all.sh 67/67 · 判据 verify_findings_1… |
+| 09-20 02:26 | 09-20 凌晨：offload 审计第 21 棒 **并发线 A3** 完成（`provider/thinking/` + `provider/voice/`） | 产出：/var/minis/shared/offload-audit-0919/wave2-a3/（report.md + ledger-a3.json + verify_a3.sh + exp_a3/）。 |
+| 09-20 05:35 | 09-20：修复批次 FIX-2-thinking-voice 完成（6 条，分支已推 + CI 绿） | 批次：FIX-2-thinking-voice · 分支 fix/thinking-voice-layer · commit 0012517 · 基线 afa404b |
+| 09-20 08:37 | ↳ 09-20：修复批 FIX-3-chat-state 完成（chat 状态机与并发 · 7 条 + 跨批补丁 4 处） | 分支 fix/chat-state-machine · 基线 afa404b（父提交已核）· commit 3b3c474 + 9dfe54f · CI #1670 → #1682 两次均 success · diff … |
 
 ## 23. 被否掉的方向（决策记录）
 
-**跨度** 2026-08-04 ～ 2026-09-18 · **35 条** · **状态** 持续累积（每条否决都带触发条件，可被未来重新打开）
+**跨度** 2026-08-04 ～ 2026-09-19 · **36 条** · **状态** 持续累积（每条否决都带触发条件，可被未来重新打开）
 
 **叙事**：08-07 多智能体协作 → **否掉** / 08-07 经验记忆模块 → **摘除** / 08-08 聊天模式 → **不加** / 08-08 灵动岛 → **砍掉** / 08-15 自动接力方案 → **不做** / 09-05 provider knobs + 连接测试 → **摘除** / 09-11 Obsidian 式插件系统 → **不做** / 09-13 图标重设计 → **放弃并回滚** / 09-14 U7 胶囊暂停 → **撤回（带触发条件）** / 09-14 U1..U11 中 8 项 → **归档不吸收**。**这份清单和「做了什么」同等重要**：它记录了边界是怎么被划出来的。
 
@@ -2094,6 +2228,7 @@
 | 09-14 21:31 | 09-14 夜：U7 撤回（带触发条件）+ T4 conversation_history 完成（分支 CI 已绿） | U7 胶囊——撤回，不是"待做"（依据代码而非偏好）： |
 | 09-15 16:56 | 09-15 晚：轴 4/5/6 收口（事件接线/决策层/资源生命周期） | 轴 4 事件接线：运行循环实际发射 9 种事件；PersistenceFailed 零发射点（§14 已攒 backlog）。 |
 | 09-18 14:05 | 09-18：DeepSeek V4 思考回传 400 追查（未解决，已按用户决定搁置）+ 分支合并 main | 结论先行：装了修复版（1.0.0+1646 / cfa48ec9）后仍复现 → 修复不够。用户判定该故障有随机性，决定暂不继续修，仅合并分支。 |
+| 09-19 22:05 | 09-19：第 19 棒中途（`provider/` 网络与预算面）→ F-180（D）+ O-47 + N-26 + **勘误 E-18（撤回 O-44）** | ★ 勘误 E-18（重要，方法论级）：第 18 棒我写进台账的 O-44 我误判了 —— 声称 ToolJsonRepair.levenshteinAtMostOne（:124-155） |
 
 ---
 
@@ -2175,3 +2310,8 @@
 | 09-17 21:51 | 09-17 晚：第二类 bug 测试缺口对账 + 4 个测试补齐 → main = 0c6ff4d7（#1636 绿） |
 | 09-18 14:34 | 09-18：worker 日志落盘缺口修复 → main = d09f3adf（用户拍板「做吧」） |
 | 09-18 14:40 | 09-18：evals 欠账补齐第一轮（覆盖 6→10/24，行为版 24/24） |
+| 09-19 09:34 | 09-19 补：精读覆盖率实测数字（更正上一条的"约 6000 行"估计值） |
+| 09-19 17:31 | （接上条）★ 方法论增量（6 条）：①实验证伪自己的假设是最高产产出形态 —— 「幽灵对话框」假设带了完整装置后被推翻， |
+| 09-19 18:12 | （接上条 09-19 第 14 棒）⑦ F-147 isAppForeground 是普通 var（SessionAct |
+| 09-20 10:24 | 09-20：「最近两天改动」二轮核查（541fbb2）→ 抓出 2 条：EXTRA_DAYS 容器类型 + KDoc 挂错 |
+| 09-20 14:03 | 09-20：用户拍板「修复门」规则 → 写入 GLOBAL.md |
