@@ -38,8 +38,12 @@ import kotlinx.coroutines.withContext
 // The thin delegating shells (walkBackUserTurnsBounded / buildChatMessages /
 // buildLlmMessages / findModelEntry) stay in ChatViewModel.
 
-internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStream: Boolean = false) {
-    AppLogger.info(ChatViewModel.TAG, "[Compact] compactAll() invoked streaming=${_isStreaming.value} compacting=${_isCompacting.value} historySize=${agentHistory.size} anchorOverride=$anchorIdxOverride allowInStream=$allowInStream")
+internal fun ChatViewModel.compactAll(
+    anchorIdxOverride: Int? = null,
+    allowInStream: Boolean = false,
+    silent: Boolean = false,
+) {
+    AppLogger.info(ChatViewModel.TAG, "[Compact] compactAll() invoked streaming=${_isStreaming.value} compacting=${_isCompacting.value} historySize=${agentHistory.size} anchorOverride=$anchorIdxOverride allowInStream=$allowInStream silent=$silent")
     // [T-auto-compact-in-loop] allowInStream relaxes the in-stream guard for
     // the agent-loop turn boundary: the loop has finished the previous turn's
     // collect (no pending streaming delta) and awaits this compact before the
@@ -48,27 +52,31 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
     // compact) keep the strict guard via the default false.
     if (_isStreaming.value && !allowInStream) {
         AppLogger.info(ChatViewModel.TAG, "[Compact] aborted: stream in progress")
-        appendSystemInfo(
-            text = context.getString(R.string.sysmsg_compact_busy_turn),
-            iconKind = "compact",
-        )
+        if (!silent) {
+            appendSystemInfo(
+                text = context.getString(R.string.sysmsg_compact_busy_turn),
+                iconKind = "compact",
+            )
+        }
         return
     }
     if (_isCompacting.value) {
         AppLogger.info(ChatViewModel.TAG, "[Compact] aborted: another compact already in flight")
-        appendSystemInfo(
-            text = context.getString(R.string.sysmsg_compact_busy),
-            iconKind = "compact",
-        )
+        if (!silent) {
+            appendSystemInfo(
+                text = context.getString(R.string.sysmsg_compact_busy),
+                iconKind = "compact",
+            )
+        }
         return
     }
     val provider = currentProvider ?: run {
-        appendSystemInfo(context.getString(R.string.sysmsg_compact_no_provider), "compact")
+        if (!silent) appendSystemInfo(context.getString(R.string.sysmsg_compact_no_provider), "compact")
         return
     }
     val history = agentHistory.toList()
     if (history.isEmpty()) {
-        appendSystemInfo(context.getString(R.string.sysmsg_compact_empty_session), "compact")
+        if (!silent) appendSystemInfo(context.getString(R.string.sysmsg_compact_empty_session), "compact")
         return
     }
     // ─── v2 unified anchor model ───────────────────────────────────
@@ -161,7 +169,7 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
                     "prevVersion=${_cachedLatestMarker?.version} historySize=${history.size} " +
                     "summaryChars=${_compactSummary.value?.length ?: 0} budgetAnchor=$budgetAnchor)",
             )
-            appendSystemInfo(context.getString(R.string.sysmsg_compact_already_done), "compact")
+            if (!silent) appendSystemInfo(context.getString(R.string.sysmsg_compact_already_done), "compact")
             return
         }
     }
@@ -171,7 +179,7 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
             ChatViewModel.TAG,
             "[Compact] aborted: empty range (start=$effectiveStartIdx anchor=$anchorIdx)",
         )
-        appendSystemInfo(context.getString(R.string.sysmsg_compact_nothing), "compact")
+        if (!silent) appendSystemInfo(context.getString(R.string.sysmsg_compact_nothing), "compact")
         return
     }
     _isCompacting.value = true
@@ -370,13 +378,36 @@ internal fun ChatViewModel.compactAll(anchorIdxOverride: Int? = null, allowInStr
                 } else {
                     cleaned.take(cutoffIdx + 1).count { it.role != "system" }
                 }
-                _messages.value = cleaned
-                AppLogger.info(ChatViewModel.TAG, "[Compact] divider: $compactedUICount UI bubbles compacted (history entries: ${toCompact.size})")
-                appendSystemInfo(
-                    text = context.getString(R.string.sysmsg_compacted_count, compactedUICount),
-                    iconKind = "compact",
-                    payload = summary,
-                )
+                // [fix/silent-auto-compact] AUTO compacts are silent: the UI
+                // is left exactly as-is (no divider card, no graying) because
+                // compaction is an agent-side context-management detail the
+                // user neither triggered nor needs to see. The user-reported
+                // symptom was the opposite: during a long agent run the
+                // divider landed at the transcript TAIL (the in-loop compact
+                // fires at a turn boundary where no row is "live", so
+                // flushPendingSysInfo's in-flight anchor missed) and the
+                // running answer kept growing ABOVE it. Manual /compact and
+                // compact-before still show the divider — there the user
+                // asked for it and needs the confirmation + Revert affordance.
+                if (silent) {
+                    // Strip divider cards + stale graying. See
+                    // [neutralizeCompactArtifacts] for why this is a shared
+                    // pure function rather than an inline expression.
+                    _messages.value = neutralizeCompactArtifacts(_messages.value)
+                    AppLogger.info(
+                        ChatViewModel.TAG,
+                        "[Compact] silent auto-compact: $compactedUICount UI bubbles folded " +
+                            "(history entries: ${toCompact.size}); no divider, no graying",
+                    )
+                } else {
+                    _messages.value = cleaned
+                    AppLogger.info(ChatViewModel.TAG, "[Compact] divider: $compactedUICount UI bubbles compacted (history entries: ${toCompact.size})")
+                    appendSystemInfo(
+                        text = context.getString(R.string.sysmsg_compacted_count, compactedUICount),
+                        iconKind = "compact",
+                        payload = summary,
+                    )
+                }
             }
             compactSucceeded = true
         } catch (e: CancellationException) {
@@ -1311,15 +1342,15 @@ internal suspend fun ChatViewModel.applyCompactMarkerGraying(
 
     // ─── Resolve insertIdx ────────────────────────────────────────
     //
-    // insertIdx semantics: messages[0 until insertIdx] become grayed
-    // (isCompactedHistory=true); the divider sits at insertIdx;
-    // messages[insertIdx..] stay active.
+    // [fix/silent-auto-compact] This resolution no longer drives any
+    // rendering — graying and the divider row are both gone. What it still
+    // does is decide whether the marker RESOLVED against the loaded rows, and
+    // the branch that fails is the one that runs the createdAt self-heal
+    // (rewriting an orphaned marker as v2 and persisting it). That heal is
+    // what keeps effectiveAgentHistory() working after messages are deleted
+    // or restored from a backup, so the walk stays.
     //
-    // Special value -1 → "unresolved": skip the rewrite below and
-    // return the messages untouched with no divider (the marker is
-    // effectively invisible until the user reverts or self-heals).
-    // Used when even createdAt fallback fails — better to show no
-    // divider than to incorrectly gray live messages.
+    // Special value -1 → "unresolved": no heal candidate either.
     var insertIdx = -1
     var healedMarker: com.rikkaminis.app.data.db.CompactMarkerEntity? = null
 
@@ -1414,50 +1445,27 @@ internal suspend fun ChatViewModel.applyCompactMarkerGraying(
         _compactSummary.value = healedMarker.summary
     }
 
-    // ─── Apply graying ────────────────────────────────────────────
-    val grayed: List<ChatMessage> = if (insertIdx <= 0) {
-        // No graying — either explicit no-gray branch or boundary at
-        // index 0 (nothing to gray).
-        messages
-    } else {
-        messages.mapIndexed { idx, msg ->
-            if (idx >= insertIdx) msg
-            else if (msg.role == "system") msg
-            else if (msg.isCompactedHistory) msg
-            else msg.copy(isCompactedHistory = true)
-        }
-    }
-
-    // ─── Insert divider row ───────────────────────────────────────
-    // T126-marker: match iOS `"\(insertIdx) messages compacted"`
-    // (AIChatViewModel.swift:3432). Count = number of UI bubbles
-    // above the divider, not marker.compactedCount (which counts raw
-    // agentHistory entries — tool_use/tool_result pairs that never
-    // appear as their own UI bubble).
-    val compactedUICount = (0 until insertIdx.coerceIn(0, grayed.size))
-        .count { grayed[it].role != "system" }
-    // [fix/compact-divider-ux] Was hardcoded English here, so a zh/ja/
-    // de/ko/ru/tw user saw "… messages compacted" after reopening a
-    // session, while the live compact path showed the localised string.
-    // Both paths now go through sysmsg_compacted_count.
-    val dividerLabel = context.getString(R.string.sysmsg_compacted_count, compactedUICount)
-    val markerForDivider = healedMarker ?: marker
-    val dividerBlock = AssistantBlock(
-        id = "compact-divider-${markerForDivider.id}",
-        kind = "info",
-        content = dividerLabel,
-        toolName = "compact",
-        toolArgs = markerForDivider.summary,
+    // ─── Apply graying + divider ──────────────────────────────────
+    // [fix/silent-auto-compact] Neither is applied any more. The marker is
+    // an agent-side context boundary; dimming the rows it covers told the
+    // user "something happened here" without telling them anything
+    // actionable, and the divider card was the visible artefact they
+    // objected to. A card that only appeared after a cold reload (but not
+    // during the live session) would be a worse surprise than one shown
+    // consistently, so the reload path drops it too.
+    //
+    // `insertIdx` is still resolved above on purpose: the self-heal branch
+    // repairs an orphaned marker (rewriting it as v2 + persisting), which
+    // keeps effectiveAgentHistory() — the thing that actually matters —
+    // working after messages are deleted or restored from a backup.
+    // "Revert Compact" now lives in the message long-press menu, so it no
+    // longer depends on the divider row existing.
+    AppLogger.info(
+        ChatViewModel.TAG,
+        "[Compact] marker restore: boundaryIdx=$insertIdx healed=${healedMarker != null} " +
+            "v=${(healedMarker ?: marker).version} — no graying, no divider (silent)",
     )
-    val dividerMsg = ChatMessage(
-        id = "compact-divider-msg-${markerForDivider.id}",
-        role = "system",
-        content = "",
-        toolBlocks = listOf(dividerBlock),
-    )
-    val withDivider = grayed.toMutableList()
-    withDivider.add(insertIdx.coerceIn(0, withDivider.size), dividerMsg)
-    return withDivider
+    return messages
 }
 
 /**

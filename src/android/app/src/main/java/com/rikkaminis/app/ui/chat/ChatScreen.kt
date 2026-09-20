@@ -240,6 +240,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material.icons.filled.Undo
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
@@ -601,6 +602,15 @@ fun ChatScreen(
     // the composable so both the menu gate and the footer availability filter
     // (footerSpecs below) read the same live value.
     val menuMemoryEnabled by viewModel.memoryEnabled.collectAsState()
+    // [fix/silent-auto-compact] Hoisted here (not read inside the menu's
+    // conditional block) because Compose requires state reads to be
+    // unconditional across recompositions — reading them inside the
+    // `if (compactSummary != null)` branch would make the read set depend on
+    // the branch outcome. `compactSummary` is non-null exactly when a compact
+    // marker is cached, which is what gates the "Revert Compact" menu entry
+    // that replaced the (now suppressed) divider card.
+    val menuCompactSummary by viewModel.compactSummary.collectAsState()
+    val menuCompacting by viewModel.isCompacting.collectAsState()
 
     // [bottom-toolbar-customizable] Single dispatch point shared by the "..."
     // menu and the history-drawer footer. Each action resolves to exactly one
@@ -2782,6 +2792,33 @@ fun ChatScreen(
                                             checked = fastModeOn,
                                             onCheckedChange = { viewModel.setFastModeEnabled(it) },
                                         )
+                                    },
+                                )
+                            }
+                            // [fix/silent-auto-compact] "Revert Compact" moved
+                            // here from the divider card, which auto-compact no
+                            // longer renders (the card was the visible artefact
+                            // the user objected to during long agent runs).
+                            // Deliberately NOT part of the ChatMenuPrefs pool:
+                            // it is conditional on a marker existing, exactly
+                            // like the Enhanced Cache / Fast Mode toggles above
+                            // — adding it to the pool would mean a config
+                            // registry entry, a settings row and 8 language
+                            // files for an item that is hidden most of the
+                            // time anyway. Hidden unless a marker exists
+                            // (compactSummary is non-null exactly when one is
+                            // cached), so it can never present a no-op.
+                            if (menuCompactSummary != null) {
+                                MinisMenuDivider()
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.chat_revert_compact)) },
+                                    onClick = {
+                                        showChatMenu = false
+                                        viewModel.revertCompact()
+                                    },
+                                    enabled = !menuCompacting,
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Undo, contentDescription = null)
                                     },
                                 )
                             }

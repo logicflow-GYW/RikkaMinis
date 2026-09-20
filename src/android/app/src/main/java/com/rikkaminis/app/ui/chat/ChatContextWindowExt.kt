@@ -211,17 +211,20 @@ internal fun ChatViewModel.maybeTriggerAutoCompact() {
         }
         return
     }
-    appendSystemInfo(
-        text = context.getString(R.string.sysmsg_context_full_auto, tokens, window),
-        iconKind = "compact",
-    )
+    // [fix/silent-auto-compact] No "context is getting full" notice either.
+    // It announced an internal event the user cannot act on (the compact
+    // fires on its own) and landed mid-answer during long runs. The log line
+    // below keeps the diagnostic trace.
     AppLogger.info(
         ChatViewModel.TAG,
         "[AutoCompact] triggering (tokens=$tokens window=$window tail=$tail " +
             "compactLine=${policy.compactThreshold} offloadLine=${policy.offloadThreshold} " +
             "reserve=${contextGrowthTracker.reserveTokens(window)} growth=${contextGrowthTracker.perTurnEstimate}/turn)",
     )
-    compactAll() // fire-and-forget; internally launches on Dispatchers.IO
+    // [fix/silent-auto-compact] Silent: an auto-compact is agent-side
+    // context management, not a user-facing event. No divider card, no
+    // graying — the transcript must look untouched.
+    compactAll(silent = true) // fire-and-forget; internally launches on Dispatchers.IO
 }
 
 /**
@@ -323,7 +326,11 @@ internal suspend fun ChatViewModel.maybeAutoCompactInLoop(
     )
     val markerBefore = _cachedLatestMarker?.lastCompactedMessageId
     val summaryBefore = _compactSummary.value
-    compactAll(allowInStream = true) // fire-and-forget; internally launches on IO
+    // [fix/silent-auto-compact] Silent — see maybeTriggerAutoCompact. The
+    // in-loop path is the one that fires mid-answer during long agent runs,
+    // which is exactly where a divider card was most disruptive (it landed at
+    // the transcript tail and the running answer kept growing above it).
+    compactAll(allowInStream = true, silent = true) // fire-and-forget; internally launches on IO
     // Await completion so the next provider call assembles summary + tail.
     awaitAutoCompactIfNeeded()
     // [fix/compact-anchor-resolution] Report whether the compact ACTUALLY

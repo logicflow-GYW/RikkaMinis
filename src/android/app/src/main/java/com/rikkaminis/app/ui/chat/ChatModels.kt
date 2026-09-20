@@ -408,3 +408,36 @@ internal fun applyCompactGreyedRange(messages: List<ChatMessage>, cutoffId: Stri
     }
     return cleaned
 }
+
+/**
+ * [fix/silent-auto-compact] Strip every compact artefact from the transcript.
+ *
+ * Auto-compaction is agent-side context management, not a user-facing event:
+ * the marker it writes still drives `effectiveAgentHistory()`, but nothing
+ * about the fold should be visible. This removes
+ *
+ *  - the divider card rows (`role == "system"` carrying `toolName ==
+ *    "compact"`), which during a long agent run landed at the transcript TAIL
+ *    — the in-loop compact fires at a turn boundary where no row is "live", so
+ *    `flushPendingSysInfo`'s in-flight anchor missed and fell back to
+ *    appending — leaving the running answer growing ABOVE the card; and
+ *  - the `isCompactedHistory` fade flags, including any a previous MANUAL
+ *    compact set: the marker just moved forward, so the old boundary no
+ *    longer describes what is actually folded.
+ *
+ * Every OTHER system row is preserved. Context-full notices, hard-trim
+ * notices and error banners are separate features that must keep surfacing —
+ * a blanket "drop all system rows" would silently delete them.
+ *
+ * Pure so the boundary rules are JVM-testable (same pattern as
+ * [applyCompactGreyedRange]); the live path calls it with `_messages.value`.
+ */
+internal fun neutralizeCompactArtifacts(messages: List<ChatMessage>): List<ChatMessage> =
+    messages
+        .filterNot { msg ->
+            msg.role == "system" &&
+                msg.toolBlocks.firstOrNull()?.toolName == "compact"
+        }
+        .map { msg ->
+            if (msg.isCompactedHistory) msg.copy(isCompactedHistory = false) else msg
+        }
