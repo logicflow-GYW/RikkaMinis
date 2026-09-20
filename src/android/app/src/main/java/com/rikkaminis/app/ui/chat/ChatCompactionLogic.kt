@@ -153,21 +153,61 @@ internal fun LLMMessage.isPersistedUserPrompt(): Boolean =
     role == LLMMessage.Role.USER && !isToolResultOnly() && !dbMessageId.isNullOrEmpty()
 
 /**
+ * [compact-budget-anchor] Ratio applied to the user-tunable compact-tail
+ * threshold to derive [compactBudgetTailKeepTokens].
+ *
+ * Why a ratio and not a constant: the budget anchor's "nothing to fold" test
+ * and [com.rikkaminis.app.conversation.ContextCompactor.decide]'s "the tail
+ * grew enough to be worth folding" test are two gates over the *same* region,
+ * so their thresholds must be ordered. `decide` admits a compact at
+ * `tail >= minTailTokens`, while the anchor returns -1 while
+ * `tail <= keepTailTokens`. Whenever `keepTailTokens >= minTailTokens` there
+ * is a band (`[minTailTokens, keepTailTokens]`) where the loop asks for a
+ * compact on every turn and the anchor refuses every time — the compact folds
+ * nothing, the caller keeps the hard trim enabled, and the context grows
+ * unbounded. Measured on 2026-09-20: 61 consecutive no-op compacts across two
+ * sessions, all with `tail` in [10510, 17275] and `keepTailTokens` = 20_000
+ * (`[compact-budget-anchor] dead zone`).
+ *
+ * Keeping the ratio strictly below 1 makes the two gates disjoint, so a
+ * compact that fires can always fold something, and the retained tail
+ * (`0.8 × minTail`) leaves the remaining 20% of growth before the next
+ * compact is admitted — the "room for the next few tool rounds" the original
+ * comment intended, now an explicit invariant instead of an accident of the
+ * -1 return.
+ *
+ * Not 1.0: at exactly 1.0 the tail left after a fold equals the admit
+ * threshold, so the very next turn re-fires (verified — `keepTail == minTail`
+ * thrashes on every tunable setting).
+ */
+internal const val COMPACT_BUDGET_TAIL_KEEP_RATIO = 0.8
+
+/**
  * [compact-budget-anchor] Verbatim tail (estimated tokens) kept outside the
  * summary when a compact has no new complete user turn to anchor on —
  * see [resolveBudgetAnchorIdx].
  *
- * Same order of magnitude as
- * [com.rikkaminis.app.conversation.ContextCompactor.DEFAULT_AUTO_COMPACT_MIN_TAIL_TOKENS]
- * (8k, "the tail must have grown this much for a compact to be worth it") —
- * a kept tail of ~2× that leaves room for the next few tool rounds before
- * another compact is worth attempting, while still letting the summary
- * actually remove something. ponytail: absolute, not window-relative |
- * 天花板: on a small-window model (32k) a 20k kept tail eats most of the
- * budget and the compact buys little | 升级触发: a 32k/64k-window model shows
- * auto-compact firing repeatedly with no context drop.
+ * Derived from the caller's *effective* `minTailTokens` so the two gates can
+ * never drift: the threshold is user-tunable (2000..32000, see
+ * `AgentRuntimeLimitsPrefs.COMPACT_TAIL_TOKENS_*`), so a hard-coded keep
+ * budget would silently re-open the dead zone as soon as the user raises the
+ * setting above it. Invariant enforced by construction here:
+ * `result < minTailTokens` for every `minTailTokens > 0`.
+ *
+ * ponytail: absolute fraction of minTail, not window-relative |
+ * 天花板: on a small-window model (32k) a tail of `0.8 × minTail` can still
+ * eat a large share of the budget and the compact buys little | 升级触发:
+ * a 32k/64k-window model shows auto-compact firing repeatedly with no
+ * context drop.
  */
-internal const val COMPACT_BUDGET_TAIL_KEEP_TOKENS = 20_000L
+internal fun compactBudgetTailKeepTokens(minTailTokens: Long): Long =
+    if (minTailTokens <= 0L) 0L
+    // floor(ratio × minTail) < minTail for every minTail >= 1 (0.8·n < n), so
+    // the invariant holds by construction — do NOT clamp the result up to 1,
+    // which would make keep == minTail at a threshold of 1 and re-open the
+    // dead zone. A threshold that small is unreachable in practice (the
+    // tunable floor is 2000) but the invariant is total here on purpose.
+    else (minTailTokens * COMPACT_BUDGET_TAIL_KEEP_RATIO).toLong()
 
 /**
  * [compact-budget-anchor] Budget for the verbatim pre-anchor slice in
