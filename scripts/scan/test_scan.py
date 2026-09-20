@@ -640,6 +640,67 @@ def test_extra_days_container():
         check(f"{label} writer is caught (exit 1)", code == 1, f"exit={code}\n{out}")
         shutil.rmtree(bad)
 
+def test_stale_closure():
+    print("━━━ stale_closure_guard ━━━")
+    # Ground truth: the guard must accept rememberUpdatedState and reject a
+    # long-lived produceState whose closure reads a plain parameter while that
+    # parameter is NOT in the key list. The defect it catches is silent: the
+    # producer is never restarted, `snapshotFlow { plainParam }` observes
+    # nothing, and the UI freezes at the first composed frame (2026-09-20).
+    good = make_tree({
+        KOTLIN_PKG + "/ui/Good.kt": (
+            "@Composable\n"
+            "private fun Good(content: String, isStreaming: Boolean) {\n"
+            "    val latestContent by rememberUpdatedState(content)\n"
+            "    val d by produceState(initialValue = content, isStreaming) {\n"
+            "        snapshotFlow { latestContent }.collect { value = it }\n"
+            "    }\n"
+            "}\n"
+        ),
+        # key 里含 content ⇒ 每次变化都重启闭包 ⇒ 安全
+        KOTLIN_PKG + "/ui/Keyed.kt": (
+            "@Composable\n"
+            "private fun Keyed(content: String) {\n"
+            "    val d by produceState(initialValue = content, content) {\n"
+            "        snapshotFlow { content }.collect { value = it }\n"
+            "    }\n"
+            "}\n"
+        ),
+    })
+    code, out = run_scanner("stale_closure_guard.py", good)
+    check("rememberUpdatedState + keyed param pass (exit 0)", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(good)
+
+    bad = make_tree({
+        KOTLIN_PKG + "/ui/Bad.kt": (
+            "@Composable\n"
+            "private fun Bad(content: String, isStreaming: Boolean) {\n"
+            "    val d by produceState(initialValue = content, isStreaming) {\n"
+            "        snapshotFlow { content }.collect { value = it }\n"
+            "    }\n"
+            "}\n"
+        ),
+    })
+    code, out = run_scanner("stale_closure_guard.py", bad)
+    check("plain param without rememberUpdatedState is caught (exit 1)", code == 1, f"exit={code}\n{out}")
+    shutil.rmtree(bad)
+
+    # 逃生口：带 stale-ok 说明的必须放行
+    escaped = make_tree({
+        KOTLIN_PKG + "/ui/Esc.kt": (
+            "@Composable\n"
+            "private fun Esc(content: String) {\n"
+            "    // stale-ok: content is immutable for the lifetime of this effect\n"
+            "    val d by produceState(initialValue = content) {\n"
+            "        snapshotFlow { content }.collect { value = it }\n"
+            "    }\n"
+            "}\n"
+        ),
+    })
+    code, out = run_scanner("stale_closure_guard.py", escaped)
+    check("stale-ok escape hatch passes (exit 0)", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(escaped)
+
 def test_real_repo():
     print("━━━ real repo tree (must be clean) ━━━")
     for script in (
@@ -650,6 +711,7 @@ def test_real_repo():
         "legacy_pipeline_guard.py",
         "trace_eval_check.py",
         "extra_days_container_guard.py",
+        "stale_closure_guard.py",
     ):
         code, out = run_scanner(script, REPO_ROOT)
         check(f"{script} on real repo exits 0", code == 0, f"exit={code}\n{out[:2000]}")
@@ -669,6 +731,7 @@ def main():
     test_process_logging()
     test_trace_eval()
     test_extra_days_container()
+    test_stale_closure()
     test_real_repo()
     print("")
     print(f"{'❌ FAILURES: ' + str(FAIL) if FAIL else '✅ ALL ' + str(PASS) + ' CASES PASS'}")

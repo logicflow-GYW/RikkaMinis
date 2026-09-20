@@ -59,6 +59,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -597,14 +598,40 @@ private fun StreamingMarkdownTextBody(
     // cancelled the producer coroutine that was sitting in `delay(...)` and
     // restarted it, so the throttle never throttled — measured 50× on the
     // replay harness (100 chunks ⇒ 100 renders vs 2 with a content-free key,
-    // `exp_c2_throttle.kt`). Content is already observed through
-    // `snapshotFlow { content }`, so it does not belong in the key.
+    // `exp_c2_throttle.kt`).
+    //
+    // NOTE: the conclusion drawn at the time — "content is already observed
+    // through `snapshotFlow { content }`, so it does not belong in the key" —
+    // was WRONG. `snapshotFlow { content }` over a plain parameter observes
+    // nothing at all. That inference is exactly what caused the follow-up
+    // regression described in the next paragraph.
+    //
+    // [fix/f255-live-text-observable] That fix was necessary but NOT
+    // sufficient, and it introduced a regression: `content` is a plain
+    // `String` parameter, NOT a State. With the key reduced to
+    // `isStreaming` alone, `remember(isStreaming)` stops rebuilding the
+    // producer closure for the whole turn, so the closure keeps the
+    // `content` value captured when it was created — and
+    // `snapshotFlow { content }` reads a plain value, i.e. it registers NO
+    // snapshot dependency and therefore emits exactly ONCE. Net effect: the
+    // live tail froze at whatever text existed when the row first composed.
+    // Field symptom: the first few characters render, the rest never
+    // appears, and leaving/re-entering the session shows the whole answer
+    // (the `!isStreaming` branch below assigns the then-current `content`
+    // directly). Verified on a real Compose runtime (real Recomposer +
+    // BroadcastFrameClock + kotlinx-coroutines 1.8.1), three arms over the
+    // verbatim extracted block: pre-fix 320→650 chars, current main
+    // 320→320 (frozen), with `rememberUpdatedState` 320→518.
+    // `rememberUpdatedState` hands the closure a STABLE State object whose
+    // `.value` tracks every recomposition, so the throttle still holds (the
+    // producer is not restarted) while the content stays observable again.
+    val latestContent by rememberUpdatedState(content)
     val displayContent by produceState(initialValue = content, isStreaming) {
         if (!isStreaming) {
-            value = content
+            value = latestContent
             return@produceState
         }
-        snapshotFlow { content }
+        snapshotFlow { latestContent }
             .conflate()
             .collect { latest ->
                 value = latest
