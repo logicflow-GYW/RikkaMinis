@@ -816,7 +816,24 @@ internal class AgentLoopEngine(
                         }
                     }
                     is LLMStreamChunk.Usage -> {
-                        lastUsage = chunk.usage
+                        // [FIX-1 / F-190] Anthropic sends a COMPLETE usage on
+                        // message_start and a PARTIAL one (output side only) on
+                        // message_delta. Unconditional assignment let the partial
+                        // one overwrite the complete one, so inputTokens /
+                        // latestContextTokens landed as 0 every turn — which made
+                        // contextNearFull permanently false (see usedCtx below) and
+                        // the empty-reply hint always take the generic branch.
+                        // Field-wise merge: a zero from the later chunk means
+                        // "not reported", not "reported as zero".
+                        lastUsage = lastUsage?.let { prev ->
+                            LLMUsage(
+                                inputTokens = if (chunk.usage.inputTokens != 0) chunk.usage.inputTokens else prev.inputTokens,
+                                outputTokens = chunk.usage.outputTokens,
+                                cacheCreationInputTokens = chunk.usage.cacheCreationInputTokens ?: prev.cacheCreationInputTokens,
+                                cacheReadInputTokens = chunk.usage.cacheReadInputTokens ?: prev.cacheReadInputTokens,
+                                latestContextTokens = if (chunk.usage.latestContextTokens != 0) chunk.usage.latestContextTokens else prev.latestContextTokens,
+                            )
+                        } ?: chunk.usage
                         // [T-adaptive-compact-reserve] Snapshot BEFORE the update:
                         // the difference between two consecutive Usage readings is
                         // exactly one turn's growth (this turn's answer + its tool
@@ -1397,7 +1414,7 @@ internal class AgentLoopEngine(
             // where head-overlap trimming would be wrong.
             loopState.lastTurnWasLengthWall = when {
                 turnTextRaw.isEmpty() -> false
-                turnFinishReason == "length" -> true
+                TruncatedToolCallPolicy.isTruncatedFinish(turnFinishReason) -> true
                 turnFinishReason == null -> loopState.lastTurnWasLengthWall
                 else -> false // stop / end_turn / tool-call turns: clean boundary
             }
@@ -1682,7 +1699,7 @@ internal class AgentLoopEngine(
                 // (observed in the field: "task just stops mid-stage; raising
                 // the context limit makes it continue again" — which only
                 // pushed the wall further out, it did not fix the break).
-                if (turnFinishReason == "length") {
+                if (TruncatedToolCallPolicy.isTruncatedFinish(turnFinishReason)) {
                     if (turnText.isEmpty()) {
                         // Empty + length: the model burned the whole budget
                         // producing nothing usable. Give it up to 3 tries (a

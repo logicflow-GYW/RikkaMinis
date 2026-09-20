@@ -1902,14 +1902,25 @@ fun ChatScreen(
                     // coroutine and kills an in-flight close() animation —
                     // leaving the drawer visually open during the switch. So
                     // wait for the drawer to finish closing (suspend), then
-                    // navigate. Catch CancellationException in case the user
-                    // re-opens the drawer mid-animation; navigation should
-                    // still proceed (their intent was to switch).
+                    // navigate.
+                    //
+                    // [audit-0920] The navigation runs in `finally`, NOT after
+                    // the try/catch. `historyDrawerScope` is the screen's
+                    // composition scope (ChatScreen:1833), so a cancelled
+                    // close() means the screen is being torn down — and the
+                    // old `catch (CancellationException) {}` swallowed that
+                    // cancellation and fell through to onOpenSession anyway.
+                    // Resuming a cancelled coroutine just to start another
+                    // suspend call is the documented footgun; the user's
+                    // intent (switch session) is what has to survive, so it
+                    // belongs on the path that runs for every outcome.
                     historyDrawerScope.launch {
                         try {
                             historyDrawerState.close()
-                        } catch (_: kotlinx.coroutines.CancellationException) {}
-                        draftSnapshot?.let { if (it.id != sessionId) onOpenSession(it.id) }
+                        } catch (_: kotlinx.coroutines.CancellationException) {
+                        } finally {
+                            draftSnapshot?.let { if (it.id != sessionId) onOpenSession(it.id) }
+                        }
                     }
                 },
                 onDiscardDraft = {
@@ -1934,11 +1945,15 @@ fun ChatScreen(
                         // drawer first and only navigate after it settles.
                         // Navigating synchronously cancels the close() coroutine
                         // (screen leaves composition) and the drawer stays open.
+                        // [audit-0920] Navigation in `finally` — see onOpenDraft
+                        // above: a cancelled close() must not eat the tap.
                         historyDrawerScope.launch {
                             try {
                                 historyDrawerState.close()
-                            } catch (_: kotlinx.coroutines.CancellationException) {}
-                            onOpenSession(id)
+                            } catch (_: kotlinx.coroutines.CancellationException) {
+                            } finally {
+                                onOpenSession(id)
+                            }
                         }
                     }
                 },
@@ -1950,11 +1965,15 @@ fun ChatScreen(
                     viewModel.promoteDraftIfNeeded()
                     // [history-drawer-auto-close] Same ordering: close first,
                     // navigate after the animation settles.
+                    // [audit-0920] Navigation in `finally` — see onOpenDraft:
+                    // a cancelled close() must not eat the tap.
                     historyDrawerScope.launch {
                         try {
                             historyDrawerState.close()
-                        } catch (_: kotlinx.coroutines.CancellationException) {}
-                        onNewChat()
+                        } catch (_: kotlinx.coroutines.CancellationException) {
+                        } finally {
+                            onNewChat()
+                        }
                     }
                 },
                 // [bottom-toolbar-customizable] Footer: resolved action list +
@@ -2931,23 +2950,6 @@ fun ChatScreen(
                         var items: List<FlatChatItem>? = null
                     }
                 }
-                // [forward-stable] Session-lifetime stable row ledger. Owns the
-                // row list once seeded: cold open builds canonically, then every
-                // tick is an incremental reconcile with prefix-stable keys.
-                val rowLedger = remember(sessionId) {
-                    StableChatRowLedger(
-                        onDivergence = { messageId, blockId, count, snippet ->
-                            // [fix/stream-segmenter-duplication] Real-device breadcrumb
-                            // for the segmenter divergence path — the former source of
-                            // token-level duplication. Any non-zero count during normal
-                            // streaming is worth surfacing while we validate the rewrite.
-                            AppLogger.warning(
-                                "SegmenterDivergence",
-                                "msg=$messageId block=$blockId count=$count snippet=[$snippet]",
-                            )
-                        },
-                    )
-                }
                 // [T-android-coldload-offmain-parse] Composition-snapshot
                 // prewarmer (captures the markdown palette) used by the
                 // flatten effect below to warm the parse caches for the
@@ -3009,19 +3011,6 @@ fun ChatScreen(
                     // Throttle (unchanged): conflate() + sample(80) keeps UI
                     // publication at ~12fps regardless of token rate.
                     var streamWasActive = false
-                    // [fix/long-session-flatten-storm] Content-noop detection:
-                    // the merged list from the LAST collect tick, used to skip
-                    // the incremental reconcile when the underlying data is
-                    // byte-identical (stream drained, side-channel stable).
-                    // Data-class `==` covers every rendering-relevant field
-                    // (content, toolBlocks incl. all toolStatus, isStreaming,
-                    // error, queued, ...), so a matched fingerprint is a true
-                    // "nothing to do" — skipping avoids re-running segmenters
-                    // (full markdown re-split of the accumulated text) and
-                    // re-building non-text rows on every 80ms tick during a
-                    // long tool execution. Resets to null on each effect
-                    // restart (session switch / messages key change).
-                    var lastMergedFingerprint: List<Any?>? = null
                     // [fix/history-open-at-bottom-04] The INITIAL_OPEN
                     // scroll-to-bottom is owned by THIS collector, not the
                     // bottom-scroll consumer effect. Rationale: the consumer
@@ -3055,26 +3044,28 @@ fun ChatScreen(
                                 streamWasActive = true
                                 com.rikkaminis.app.diagnostics.StreamPerfMonitor.turnStart(sessionId)
                             }
-                            // ── [forward-stable] StableChatRowLedger path ──
-                            // The ledger owns the row list once seeded: cold
-                            // open builds canonically (off-main, with the
-                            // viewport prewarm), every later tick is an
-                            // incremental reconcile — new messages append at
-                            // the tail, the active turn's text is
-                            // segmenter-managed (mdslot keys, live tail only),
-                            // and published keys are prefix-stable. Structural
-                            // list changes (load-older, deletion, compaction)
-                            // invalidate the append-only contract and force a
-                            // full re-seed via isIncrementallyCompatible().
+                            // [audit-0920] This collector now has exactly ONE
+                            // pipeline. The [forward-stable]
+                            // StableChatRowLedger path that used to sit below
+                            // was made unreachable when the aggregate path was
+                            // promoted to main and this branch started
+                            // early-returning; its 174 lines, the
+                            // lightFingerprint throttle and the ledger
+                            // instance were deleted rather than kept behind a
+                            // compile-time `true`. See
+                            // `legacy/LegacyFlatChatBuilder.kt` — that file
+                            // keeps its own RUNTIME-DEAD header, so the ledger
+                            // stays deletable on its own schedule (its unit
+                            // tests are the last consumer).
                             val merged = mergeStreamingOverlay(msgs, stream, viewModel.currentStreamEpoch())
                             // [fix/message-node-item-generator] Message-level
-                            // aggregate path (default OFF). When enabled, the
-                            // whole merged list is built once into one item
-                            // per message — no ledger / segmenter. Stage D
-                            // flips this on once the shared AssistantMessageView
-                            // renders AssistantMessageItem. Early-return keeps
-                            // the ledger path below exactly as it was.
-                            if (AGGREGATE_MESSAGE_ITEMS) {
+                            // aggregate path: the whole merged list is built
+                            // once into one item per message — no ledger, no
+                            // segmenter. `run { }` is a plain scope block, not
+                            // a condition; the early-return at its tail is
+                            // what used to keep the flat path below from
+                            // running (that path is gone).
+                            run {
                                 // [fix/long-session-aggregate-storm] Incremental
                                 // rebuild. A pause/cancel drains the side-channel
                                 // into `_messages` (ONLY the live tail message
@@ -3135,13 +3126,14 @@ fun ChatScreen(
                                 flatItems = nextItems
                                 aggregateReuse.messages = merged
                                 aggregateReuse.items = nextItems
-                                // [diag/streamperf-revive] The ledger-path
-                                // StreamPerfMonitor.tick further down is unreachable
-                                // while AGGREGATE_MESSAGE_ITEMS is on (this branch
-                                // returns first), so every emitted [StreamPerf]
-                                // summary read ticks=0 — the incremental flatten was
-                                // never measured on the live path. Tick here with the
-                                // same shape so the two paths stay comparable.
+                                // [diag/streamperf-revive] This is now the only
+                                // StreamPerfMonitor.tick site: the ledger-path
+                                // tick that used to sit further down was
+                                // unreachable (this branch returns first) and
+                                // was deleted with the rest of that branch, so
+                                // every emitted [StreamPerf] summary used to
+                                // read ticks=0 — the incremental flatten was
+                                // never measured on the live path.
                                 com.rikkaminis.app.diagnostics.StreamPerfMonitor.tick(
                                     flattenNanos = System.nanoTime() - tickStartNs,
                                     frozenReused = !aggregateColdBuild,
@@ -3159,9 +3151,10 @@ fun ChatScreen(
                                 //
                                 // [fix/open-row-first-frame-final] Aggregate-aware source
                                 // selection: the old `(item as? AssistantMarkdownBlock)`
-                                // cast matched NOTHING once AGGREGATE_MESSAGE_ITEMS flipped
-                                // (rows are AssistantMessageItem now), so this pass never
-                                // ran a single parse — see ChatColdOpenPrewarm.kt.
+                                // cast matched NOTHING once the aggregate pipeline became
+                                // the main path (rows are AssistantMessageItem now), so
+                                // this pass never ran a single parse — see
+                                // ChatColdOpenPrewarm.kt.
                                 if (stream.isEmpty() && nextItems.isNotEmpty()) {
                                     // [feat/chat-tuning-panel] Read prefs directly
                                     // instead of the snapshot state: this collect
@@ -3228,180 +3221,6 @@ fun ChatScreen(
                                     followState = consumeBottomRequest(followState)
                                 }
                                 return@collect
-                            }
-                            if (flatItems.isEmpty()) {
-                                // [T-android-liveness-census] This fallback
-                                // branch has NOT been entered since the
-                                // aggregate pipeline landed — 0 hits across
-                                // the whole 09-13/09-14 window while its
-                                // sibling prewarm site in the aggregate branch
-                                // logged 67 times. (Was three PerfLongCtx
-                                // breadcrumbs: start/firstBuild/highRowCount.)
-                                val rows = withContext(Dispatchers.Default) {
-                                    // [T-android-flatitems-sublist-cme] Pass a
-                                    // SNAPSHOT COPY (msgs.take), not a subList —
-                                    // a subList is a live VIEW sharing the
-                                    // parent's modCount and threw
-                                    // ConcurrentModificationException when the
-                                    // backing list changed mid-build.
-                                    buildFlatChatItems(merged, sessionId)
-                                }
-                                rowLedger.seed(rows, merged.size)
-                                // [T-android-liveness-census] Recorded after
-                                // the build so maxRows carries the real ROW
-                                // count (it replaces the >3000-row alarm, not
-                                // a message count); the census reports this
-                                // branch whether or not it stays silent.
-                                com.rikkaminis.app.diagnostics.Liveness.record(
-                                    com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.ROW_COLD_BUILD,
-                                    rows = rows.size,
-                                )
-                                // [T-android-coldload-offmain-parse] Parallel
-                                // viewport prewarm: block-parse + inline-warm
-                                // the newest (viewport-candidate) markdown
-                                // fragments off-main so the first frame's rows
-                                // compose as cache HITs. Deliberately launched
-                                // in PARALLEL with the flatItems publish, not
-                                // before it — blocking the publish would add
-                                // the parse latency to time-to-first-frame.
-                                if (stream.isEmpty() && rows.isNotEmpty()) {
-                                    // [feat/chat-tuning-panel] Read prefs directly
-                                    // instead of the snapshot state: this collect
-                                    // lambda captured its closure long before, so a
-                                    // knob change must be picked up as a FRESH read
-                                    // on the next cold build, not a stale capture.
-                                    val prewarmSources = collectColdOpenPrewarmSources(
-                                        rowsNewestFirst = rows.asReversed(),
-                                        maxSources = ChatTuningPrefs.prewarmRowLimit(context),
-                                        charBudget = COLD_OPEN_PREWARM_CHAR_BUDGET,
-                                    )
-                                    if (prewarmSources.isNotEmpty()) {
-                                        launch(Dispatchers.Default) {
-                                            val tPrewarmNs = System.nanoTime()
-                                            prewarmMarkdown(prewarmSources)
-                                            val prewarmMs = (System.nanoTime() - tPrewarmNs) / 1_000_000
-                                            lastColdPrewarmMs = prewarmMs
-                                            com.rikkaminis.app.diagnostics.PerfLongCtx.step(
-                                                sessionId,
-                                                "coldPrewarm.done",
-                                                "srcs=${prewarmSources.size} " +
-                                                    "chars=${prewarmSources.sumOf { it.length }} prewarmMs=$prewarmMs",
-                                            )
-                                        }
-                                    }
-                                }
-                            } else {
-                                // Incremental reconcile, or a full re-seed when
-                                // the message list structure changed.
-                                // [fix/long-session-flatten-storm] Content-noop
-                                // skip: when `merged` is byte-identical to the
-                                // previous tick (streaming drained and the
-                                // side-channel is stable — e.g. the whole time
-                                // the agent loop is blocked on a long tool
-                                // execution), reconcile would only re-run each
-                                // AppendOnlyMarkdownSegmenter (a full
-                                // re-split of the accumulated 10k+ char answer)
-                                // and re-build the same non-text rows, producing
-                                // identical rows. Skip it entirely — the
-                                // fingerprint is the full data-class-equal
-                                // list, so no field change can be missed
-                                // (it covers content, toolBlocks with all
-                                // toolStatus, isStreaming, error, queued, ...).
-                                // The turn-end tick is NOT skipped: it drains
-                                // the side-channel into merged (final terminal
-                                // tool states + complete text), so it differs
-                                // from the live-stream tick that precedes it.
-                                if (lightFingerprint(merged) != lastMergedFingerprint) {
-                                    if (!rowLedger.isIncrementallyCompatible(merged)) {
-                                        val tRebuildStart = System.nanoTime()
-                                        val rows = withContext(Dispatchers.Default) {
-                                            buildFlatChatItems(merged, sessionId)
-                                        }
-                                        val buildMs = (System.nanoTime() - tRebuildStart) / 1_000_000
-                                        rowLedger.seed(rows, merged.size)
-                                        // [T-android-liveness-census] After the
-                                        // rebuild: pass the rebuilt ROW count,
-                                        // not the merged message count.
-                                        com.rikkaminis.app.diagnostics.Liveness.record(
-                                            com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.ROW_RESEED,
-                                            rows = rows.size,
-                                        )
-                                        com.rikkaminis.app.diagnostics.PerfLongCtx.step(
-                                            sessionId,
-                                            "buildFlatChatItems.ledgerReseed",
-                                            "msgCount=${msgs.size} rowCount=${rows.size} buildMs=$buildMs",
-                                        )
-                                    }
-                                    rowLedger.reconcile(merged)
-                                }
-                                lastMergedFingerprint = lightFingerprint(merged)
-                            }
-                            // [T-android-liveness-census] One record per
-                            // legacy tick on the universal publish point — the
-                            // first wiring sat inside the turn-end block, which
-                            // under-counted (one per turn, not per tick) and
-                            // measured the converge path instead of the live
-                            // ledger path this branch is named for.
-                            val publishedRows = rowLedger.snapshot()
-                            com.rikkaminis.app.diagnostics.Liveness.record(
-                                com.rikkaminis.app.diagnostics.RenderPathCensus.Branch.ROW_LEDGER,
-                                rows = publishedRows.size,
-                            )
-                            flatItems = publishedRows
-                            // [fix/scroll-follow-simplify] Removed the
-                            // prevRowKeys append-only prefix telemetry and the
-                            // followReducer(StreamRowsChanged) dispatch. Under
-                            // AGGREGATE_MESSAGE_ITEMS this code is unreachable
-                            // (the aggregate branch early-returns above), and
-                            // under SIMPLE_FOLLOW the dedicated
-                            // `isStreaming && isAtBottom → requestScrollToItem`
-                            // effect is the single follow driver — the reducer
-                            // neither scrolls nor needs a data-revision poke.
-                            com.rikkaminis.app.diagnostics.StreamPerfMonitor.tick(
-                                flattenNanos = System.nanoTime() - tickStartNs,
-                                frozenReused = true,
-                                frozenRows = 0,
-                                liveRows = flatItems.size,
-                            )
-                            if (stream.isEmpty() && streamWasActive) {
-                                streamWasActive = false
-                                com.rikkaminis.app.diagnostics.StreamPerfMonitor.turnEnd()
-                                // [fix/chat-render-turnend-settle] Turn end no
-                                // longer forces a full canonical rebuild +
-                                // ledger re-seed. The side-channel drains the
-                                // delta into `_messages` as a single emit, so
-                                // this tick's `merged` already carries the
-                                // terminal tool states and complete text; the
-                                // incremental reconcile converges it in place:
-                                // textual rows are settled by their
-                                // AppendOnlyMarkdownSegmenter
-                                // (streamEnded=true — settle only, keys stay
-                                // mdslot:..., no re-split), RUNNING tool group
-                                // pills flip to their terminal state, and the
-                                // typing indicator retires. Published keys are
-                                // prefix-stable, so the LazyColumn slots are
-                                // updated in place with zero churn — this is
-                                // what kills the "list jumps / re-draws at
-                                // answer end" artifact and the per-turn
-                                // segmenter reset that made every finished
-                                // turn re-render from scratch.
-                                //
-                                // Convergence guard for the
-                                // AssistantMarkdownBlock cheap-equals blind
-                                // spot: `equals` only compares rawText LENGTH
-                                // (ChatFlatItems.kt), so a same-length
-                                // content rewrite between the last streaming
-                                // tick and the terminal snapshot would be
-                                // invisible to LazyColumn's skip decision and
-                                // the stale text would stay rendered.
-                                // reconcileAndVerifyTerminalText re-derives
-                                // each segmenter's slots from the canonical
-                                // terminal text and force-publishes any slot
-                                // whose content differs — content equality,
-                                // not length equality.
-                                rowLedger.reconcile(merged)
-                                rowLedger.reconcileAndVerifyTerminalText(merged)
-                                flatItems = rowLedger.snapshot()
                             }
                         }
                     } finally {
@@ -4058,9 +3877,9 @@ fun ChatScreen(
                                 }
                             }
                             is FlatChatItem.AssistantMessageItem -> {
-                                // [fix/message-node-item-renderer] Stage D —
-                                // aggregate message row, now the MAIN path
-                                // (AGGREGATE_MESSAGE_ITEMS=true). A whole
+                                // [fix/message-node-item-renderer] Aggregate
+                                // message row — the ONLY assistant row type.
+                                // A whole
                                 // assistant message is ONE LazyColumn item,
                                 // rendered by the reused AssistantMessageView
                                 // (thinking / text / tool_use in original
@@ -4981,18 +4800,25 @@ fun ChatScreen(
 // ResumeBanner / SwipeToSendHint moved verbatim to ChatMiscViews.kt.
 // Sun May 24 11:01:25 CST 2026
 
-// [fix/message-node-item-renderer] Message-level aggregate pipeline switch.
-// STAGE D FLIPPED TO TRUE — the aggregate path is now the MAIN path: the
-// flatten collect emits one aggregated item per ChatMessage
-// (buildAggregateChatItems) — no ledger, no segmenter. ChatScreen renders the
-// resulting AssistantMessageItem via the reused
+// [fix/message-node-item-renderer] Message-level aggregate pipeline.
+// The aggregate path is the ONLY path: the flatten collect emits one aggregated
+// item per ChatMessage (buildAggregateChatItems) — no ledger, no segmenter.
+// ChatScreen renders the resulting AssistantMessageItem via the reused
 // ChatAssistantMessageUI.AssistantMessageView, with per-tool pill actions
 // (stop/detail/rerun/copy/open-terminal) wired for parity with the old flat
 // AssistantToolUse / AssistantToolRunGroup branches.
-internal const val AGGREGATE_MESSAGE_ITEMS: Boolean = true
+//
+// [audit-0920] The former `AGGREGATE_MESSAGE_ITEMS` compile-time constant is
+// gone. It was hard-wired `true` with no buildConfigField / variant override
+// (build.gradle.kts: 0 hits), so every `if (AGGREGATE_MESSAGE_ITEMS)` was a
+// constant condition: the ledger branch under it was 174 lines of static dead
+// code, including the ONLY production call site of
+// StableChatRowLedger.reconcileAndVerifyTerminalText. Removing the constant
+// also removes the illusion that flipping it is a supported switch — flipping
+// it would have needed the deleted branch back.
 
 // [fix/scroll-follow-simplify] RikkaHub-style simple explicit follow.
-// Stage E: with AGGREGATE_MESSAGE_ITEMS=true the flatten collect emits one
+// Stage E: the flatten collect emits one
 // item per ChatMessage (buildAggregateChatItems) and early-returns BEFORE the
 // prevRowKeys prefix check and the followReducer(StreamRowsChanged) dispatch —
 // so the fragment-churn the old guard stack was built to damp is GONE, and the

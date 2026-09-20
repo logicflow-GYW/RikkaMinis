@@ -95,14 +95,24 @@ internal fun ChatViewModel.retryLast() {
                 try {
                     SessionConcurrencyManager.acquireSlot(activeSessionId)
                     AppLogger.debug(ChatViewModel.TAG_STREAM, "retryLast streamJob slot acquired")
-                    SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
-                    val activeFallbackStrategy = run {
-                        val groupId = _selectedGroupId.value
-                        groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
-                            ?: com.rikkaminis.app.data.model.FallbackStrategy.default
-                    }
-                    val fallbackProviders = buildFallbackProviders(provider)
+
                     try {
+                        // [audit-0920] Guarded region widened — same fix as the
+                        // send/resume paths and the [audit-0917] template in
+                        // ChatTurnPersistence: setActive / strategy /
+                        // fallback-build belong INSIDE the try that owns the
+                        // releaseSlot finally. Outside it, a non-CE throw from
+                        // any of them leaks the session's concurrency slot
+                        // (maxConcurrent default 2 ⇒ the session queues forever
+                        // behind a phantom holder) and escapes the coroutine
+                        // instead of surfacing the error banner.
+                        SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+                        val activeFallbackStrategy = run {
+                            val groupId = _selectedGroupId.value
+                            groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
+                                ?: com.rikkaminis.app.data.model.FallbackStrategy.default
+                        }
+                        val fallbackProviders = buildFallbackProviders(provider)
                         AppLogger.info(ChatViewModel.TAG_STREAM, "retryLast runAgentLoop CALL")
                         runAgentLoop(
                             provider = provider,

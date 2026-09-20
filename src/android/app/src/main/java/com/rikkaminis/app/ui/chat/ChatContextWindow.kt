@@ -31,20 +31,42 @@ private data class OffloadCandidate(
 
 internal fun ChatViewModel.estimateContextTokens(): Int = estimateHistoryTokens(agentHistory)
 
-    /**
-     * Approximate token count for a single agent content part. Used to rank
-     * offload candidates by size. Matches iOS `BPETokenizer.countPartTokens`
-     * — text uses BPE, images use the grid-cell heuristic.
-     */
-internal fun ChatViewModel.countPartTokens(part: AgentContentPart): Int = when (part) {
-    is AgentContentPart.Text -> BPETokenizer.countTokens(part.text)
-    is AgentContentPart.ToolUse -> BPETokenizer.countTokens(part.input.toString())
-    is AgentContentPart.ToolResult -> {
-        BPETokenizer.countTokens(part.content) +
-            (part.imageData?.let { BPETokenizer.countImageTokens(it) } ?: 0)
-    }
-    is AgentContentPart.ImageData -> BPETokenizer.countImageTokens(part.data)
+/**
+ * [audit-0920] Single source of truth for the char-based token scale.
+ *
+ * These two helpers are the ONLY place the "how many tokens is this part"
+ * conversion is defined. They exist because the same conversion used to be
+ * written twice with different divisors — the budget side
+ * ([estimateHistoryTokens]) divides by 3.5, while the offload candidate
+ * ranking ([countPartTokens]) divided by 3. The offload loop starts
+ * `currentTokens` from the budget scale and then subtracts candidate-scale
+ * values, so it believed it had freed ~1.167× more than it had (3.5/3) and
+ * stopped while the real budget was still ~17% above target — the opposite of
+ * "offload fires strictly before the compact line". Both sides now read the
+ * same divisor through these helpers.
+ */
+private fun partCharContribution(part: AgentContentPart): Int = when (part) {
+    is AgentContentPart.Text -> part.text.length
+    is AgentContentPart.ToolUse -> part.input.toString().length
+    is AgentContentPart.ToolResult -> part.content.length
+    is AgentContentPart.ImageData -> 0
 }
+
+/** Image-token half of the same scale (grid-cell heuristic, not char-based). */
+private fun partImageContribution(part: AgentContentPart): Int = when (part) {
+    is AgentContentPart.ToolResult -> part.imageData?.let { BPETokenizer.countImageTokens(it) } ?: 0
+    is AgentContentPart.ImageData -> BPETokenizer.countImageTokens(part.data)
+    else -> 0
+}
+
+/**
+ * Approximate token count for a single agent content part. Used to rank
+ * offload candidates by size. Shares [partCharContribution] /
+ * [partImageContribution] with [estimateHistoryTokens] so the two scales can
+ * never drift apart again.
+ */
+internal fun ChatViewModel.countPartTokens(part: AgentContentPart): Int =
+    (partCharContribution(part) / 3.5).toInt() + partImageContribution(part)
 
 /**
  * [fix/offload-payload-stub] Whether [part] may be replaced, in the history
@@ -417,15 +439,11 @@ internal fun ChatViewModel.estimateHistoryTokens(messages: List<LLMMessage>): In
     var imageTokens = 0
     for (msg in messages) {
         for (part in msg.contentParts) {
-            when (part) {
-                is AgentContentPart.Text -> totalChars += part.text.length
-                is AgentContentPart.ToolUse -> totalChars += part.input.toString().length
-                is AgentContentPart.ToolResult -> {
-                    totalChars += part.content.length
-                    part.imageData?.let { imageTokens += BPETokenizer.countImageTokens(it) }
-                }
-                is AgentContentPart.ImageData -> imageTokens += BPETokenizer.countImageTokens(part.data)
-            }
+            // [audit-0920] Same helpers as [countPartTokens] — the offload loop
+            // mixes this scale with the candidate scale, so the two MUST use
+            // one conversion (see the KDoc on those helpers).
+            totalChars += partCharContribution(part)
+            imageTokens += partImageContribution(part)
         }
     }
     return (totalChars / 3.5).toInt() + imageTokens

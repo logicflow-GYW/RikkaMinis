@@ -71,9 +71,12 @@ internal suspend fun ChatViewModel.truncateBeforeEdit(messageId: String) {
             } catch (_: Exception) { true }
             if (hasText) {
                 if (visibleUserCount == visibleUserIndex) {
-                    // ChatDao.deleteMessagesAfter is `sort_order >= keepCount`
-                    // → passing this row's sortOrder deletes IT and everything
-                    // after, which is exactly what edit semantics want.
+                    // ChatDao.deleteMessagesAfter is `sort_order >= <bound>` —
+                    // the parameter is the DELETE-FROM boundary, NOT a
+                    // "how many to keep" count (its name reads like a count and
+                    // that is exactly what F-234 flagged). → passing this row's
+                    // sortOrder deletes IT and everything after, which is exactly
+                    // what edit semantics want.
                     cutoffSortOrder = entity.sortOrder
                     break
                 }
@@ -479,14 +482,21 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
             try {
                 SessionConcurrencyManager.acquireSlot(activeSessionId)
                 AppLogger.debug(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob slot acquired")
-                SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
 
-                val activeFallbackStrategy = run {
-                    val groupId = _selectedGroupId.value
-                    groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
-                        ?: com.rikkaminis.app.data.model.FallbackStrategy.default
-                }
                 try {
+                    // [audit-0920] Guarded region widened — same fix as the
+                    // send/resume/retry paths: setActive (tracker callback
+                    // registration) and the strategy read must sit inside the
+                    // try that owns the releaseSlot finally. Outside it, a
+                    // non-CE throw leaks the concurrency slot and escapes the
+                    // coroutine.
+                    SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+
+                    val activeFallbackStrategy = run {
+                        val groupId = _selectedGroupId.value
+                        groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
+                            ?: com.rikkaminis.app.data.model.FallbackStrategy.default
+                    }
                     AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel drainQueuedPrompts CALL")
                     drainQueuedPrompts(
                         provider = provider,

@@ -245,7 +245,13 @@ internal suspend fun ChatViewModel.executeTool(
     // dead since these tools have no native ChatViewModel executor
     // — they always fall through to shell_execute or the offload
     // bridge, which is now where checkPermission runs.
-    val toolTitle = try { JSONObject(argsJson).optString("tool_title", name) } catch (_: Exception) { name }
+    // [audit-0920][F-262] Default to "" rather than `name`: the consumer at
+    // AgentLoopEngine's tool-result merge is `result.toolTitle.ifEmpty { existing }`,
+    // so a non-empty raw id ("file_read") OVERWRITES the friendly title
+    // ("Read File") that was set when the tool call completed. Empty means
+    // "the model didn't name this call", and the UI layers fall back to the
+    // block's own toolName on their own (`toolTitle.ifEmpty { toolName }`).
+    val toolTitle = try { JSONObject(argsJson).optString("tool_title", "") } catch (_: Exception) { "" }
 
     // T9: record tool call event
     val etStartMs = System.currentTimeMillis()
