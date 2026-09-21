@@ -142,6 +142,31 @@ object ExecutionCoordinator {
     // Sweep cadence for idle shell recycling (public for MinisApp sweeper).
     const val IDLE_SWEEP_INTERVAL_MS = 60 * 1000L              // 1 min
 
+    /**
+     * [P2-guest-tmp-reclaim] Guest-rootfs temp dirs the sweeper may prune,
+     * relative to `RootfsManager.rootfsDir`.
+     */
+    private val GUEST_TMP_DIRS = listOf("tmp", "var/tmp")
+
+    /**
+     * [P2-guest-tmp-reclaim] Minimum age before the guest-rootfs temp sweeper
+     * may delete an entry.
+     *
+     * WHY age at all: the neighbouring orphan reaper
+     * ([com.rikkaminis.app.sandbox.offload.ModelExecutionOrphanReaper]) uses
+     * the same "age before delete" shape for the same reason — never touch a
+     * producer that may still be running.
+     *
+     * WHY 60 min and not 10: this sweep is already gated on no shell being
+     * BUSY (see [cleanupProotTmp]), so nothing is writing at sweep time; the
+     * age gate is the second line of defence, covering a guest process that
+     * outlived its shell (a detached grandchild, an `apk` still unpacking).
+     * One hour is far longer than any single command the agent runs
+     * interactively, and everything older still gets reclaimed on the next
+     * sweep.
+     */
+    private const val GUEST_TMP_MAX_AGE_MS = 60 * 60 * 1000L   // 1 h
+
     // [P3-shell-auto-retry] At most 2 attempts total (original + 1 retry)
     // before a command is reported as failed. Guards against infinite retry
     // loops.
@@ -929,11 +954,25 @@ object ExecutionCoordinator {
      *
      * Only runs when NO shell is mid-command, to avoid racing an in-flight
      * command's temp files (they get reaped on the next sweep).
+     *
+     * [P2-guest-tmp-reclaim] The guest half was previously documented here but
+     * NOT implemented: only the host `cache/proot-tmp` cache was swept, while
+     * guest `/tmp` + `/var/tmp` (host side: `filesDir/alpine-rootfs/tmp` and
+     * `.../alpine-rootfs/var/tmp`, reached by PRoot's `-r <rootfs>` with no
+     * bind mount over them — verified from [PRootKernel.buildProotCommand]'s
+     * argv, which binds only /dev, /proc, /sys and the /var/minis subdir maps)
+     * accumulated without bound. See the GUEST_TMP_MAX_AGE_MS constant for the
+     * age-gated plan and the measured evidence for the threshold.
      */
     fun cleanupProotTmp() {
-        // Skip entirely if any shell is alive and possibly executing — safest
-        // and sufficient given the sweeper runs every minute.
-        if (shells.values.any { it.isAlive }) return
+        // [P2-guest-tmp-reclaim] Gate on isBusy, not isAlive. A shell that is
+        // merely ALIVE (the normal state — agent shells are persistent, idle
+        // between turns) never writes anything, so the old isAlive gate meant
+        // this sweeper effectively never ran during an active session; that is
+        // how the guest temp dirs grew for weeks in the first place. A shell
+        // with a command MID-FLIGHT is exactly the case the gate exists for, so
+        // that is what we keep. Same predicate the idle reaper uses at :908.
+        if (shells.values.any { it.isBusy }) return
         if (!::appContext.isInitialized) return
         val ctx = appContext
         val tmpDir = PRootKernel.getProotTmpDir(ctx)
@@ -948,6 +987,20 @@ object ExecutionCoordinator {
         } catch (t: Throwable) {
             Log.w(TAG, "cleanupProotTmp failed: ${t.message}")
         }
+        // [P2-guest-tmp-reclaim] Guest-rootfs half of the same sweep.
+        try {
+            val rootfsDir = RootfsManager.getInstance(ctx).rootfsDir
+            var guestRemoved = 0L
+            for (relative in GUEST_TMP_DIRS) {
+                val guestTmp = File(rootfsDir, relative)
+                guestRemoved += sweepGuestTmpDir(guestTmp, GUEST_TMP_MAX_AGE_MS)
+            }
+            if (guestRemoved > 0) {
+                Log.i(TAG, "cleanupProotTmp: cleared $guestRemoved aged entries from guest tmp")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "cleanupProotTmp (guest tmp) failed: ${t.message}")
+        }
         // TF-G P1-2: opportunistic orphan run-dir reaper (same low cadence as
         // the tmp sweeper). Removes only terminal + worker-dead + aged model-
         // exec run dirs that the stream/dispatch finally left behind (crashed
@@ -959,6 +1012,44 @@ object ExecutionCoordinator {
                 Log.i(TAG, "orphan model-exec reaper: reclaimed $reaped run dir(s)")
             }
         }
+    }
+
+    /**
+     * [P2-guest-tmp-reclaim] Recursive, age-gated sweep of one guest temp dir
+     * (host-side path). Returns how many top-level entries were removed.
+     *
+     * Deletion rules (each one has a reason, none is decoration):
+     *  - the directory itself is never deleted — it is part of the rootfs;
+     *  - an entry younger than [maxAgeMs] is never touched (see
+     *    [GUEST_TMP_MAX_AGE_MS] for why the age gate sits on top of isBusy);
+     *  - a symlink is removed as a LINK ([java.nio.file.Files.deleteIfExists],
+     *    which never follows), because `File.deleteRecursively()` lists through
+     *    the link and would delete the TARGET's contents — an aged `tmp/x ->
+     *    /` symlink must not become "wipe the rootfs";
+     *  - an aged directory is removed whole; only if that fails do we descend,
+     *    re-applying the same gate at each level (so the count reflects real
+     *    deletions rather than double-counting a child of a deleted parent).
+     */
+    private fun sweepGuestTmpDir(dir: File, maxAgeMs: Long): Long {
+        if (!dir.isDirectory) return 0L
+        val now = System.currentTimeMillis()
+        val children = runCatching { dir.listFiles() }.getOrNull() ?: return 0L
+        var removed = 0L
+        for (child in children) {
+            val symlink = runCatching { java.nio.file.Files.isSymbolicLink(child.toPath()) }
+                .getOrDefault(false)
+            if (!internalGuestTmpIsAged(child.lastModified(), now, maxAgeMs)) continue
+            val ok = runCatching {
+                if (symlink) java.nio.file.Files.deleteIfExists(child.toPath())
+                else child.deleteRecursively()
+            }.getOrDefault(false)
+            if (ok) {
+                removed++
+            } else if (internalGuestTmpShouldDescend(child.isDirectory, symlink)) {
+                removed += sweepGuestTmpDir(child, maxAgeMs)
+            }
+        }
+        return removed
     }
 
     /**
