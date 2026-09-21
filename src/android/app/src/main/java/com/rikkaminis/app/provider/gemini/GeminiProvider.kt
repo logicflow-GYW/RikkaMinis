@@ -43,6 +43,9 @@ import java.util.concurrent.TimeUnit
 import com.rikkaminis.app.provider.causeChainSummary
 import com.rikkaminis.app.provider.failOnSilentEmptyCompletion
 import com.rikkaminis.app.provider.asConsumerSideCancellation
+import com.rikkaminis.app.provider.StreamTimeouts
+import com.rikkaminis.app.provider.VISION_UNSUPPORTED_PLACEHOLDER
+import com.rikkaminis.app.provider.visionPlaceholder
 
 class GeminiProvider(
     private val apiKey: String,
@@ -157,9 +160,15 @@ class GeminiProvider(
         val ttfbTimedOut = java.util.concurrent.atomic.AtomicBoolean(false)
         val headersArrived = java.util.concurrent.atomic.AtomicBoolean(false)
         val ttfbWatchdog = launch {
-            delay(30_000L)
+            delay(StreamTimeouts.TTFB_TIMEOUT_MS)
             if (!headersArrived.get()) {
                 ttfbTimedOut.set(true)
+                // [§24b] Log parity with OpenAIProvider — a TTFB kill without a
+                // line here is invisible in production logs.
+                com.rikkaminis.app.logging.AppLogger.warning(
+                    "GeminiProvider",
+                    "[T-android-stale-conn-retry-hang] no response headers after ${StreamTimeouts.TTFB_TIMEOUT_MS / 1000}s — cancelling call (stale pooled connection?)",
+                )
                 call.cancel()
             }
         }
@@ -167,7 +176,9 @@ class GeminiProvider(
             call.execute()
         } catch (e: IOException) {
             if (ttfbTimedOut.get()) {
-                throw LLMError.TransientError("no response from Gemini after 30s — check network/proxy")
+                throw LLMError.TransientError(
+                    "no response from Gemini after ${StreamTimeouts.TTFB_TIMEOUT_MS / 1000}s — check network/proxy"
+                )
             }
             throw e
         } finally {
@@ -333,6 +344,10 @@ class GeminiProvider(
         }
 
         val contents = JSONArray()
+        // [§27a] Same predicate as OpenAIProvider.buildRequestBody (verbatim).
+        // Gemini answers 400 when an image part reaches a text-only model, so
+        // image parts are downgraded to a text placeholder below.
+        val supportsImages = "image" in (model.inputModalities ?: emptyList())
         val lastUserIndex = sanitizedMessages.indexOfLast { it.role == LLMMessage.Role.USER }
         for ((index, msg) in sanitizedMessages.withIndex()) {
             val role = if (msg.role == LLMMessage.Role.USER) "user" else "model"
@@ -378,27 +393,40 @@ class GeminiProvider(
                             // Emitted as a sibling inlineData part, which is how
                             // Gemini's functionResponse images are expressed.
                             part.imageData?.let { img ->
-                                val safeBytes = ImageBudget.compressUnderBudget(img)
-                                val declaredMime = part.imageMimeType ?: "image/png"
-                                val safeMime = if (safeBytes === img) declaredMime else "image/jpeg"
+                                val visionText = visionPlaceholder(supportsImages, VISION_UNSUPPORTED_PLACEHOLDER)
+                                if (visionText != null) {
+                                    // [§27a] Non-vision model — text placeholder
+                                    // instead of an inlineData part.
+                                    parts.put(JSONObject().put("text", visionText))
+                                } else {
+                                    val safeBytes = ImageBudget.compressUnderBudget(img)
+                                    val declaredMime = part.imageMimeType ?: "image/png"
+                                    val safeMime = if (safeBytes === img) declaredMime else "image/jpeg"
+                                    parts.put(JSONObject().put("inlineData", JSONObject().apply {
+                                        put("mimeType", safeMime)
+                                        put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
+                                    }))
+                                }
+                            }
+                        }
+                        is AgentContentPart.ImageData -> {
+                            val visionText = visionPlaceholder(supportsImages, VISION_UNSUPPORTED_PLACEHOLDER)
+                            if (visionText != null) {
+                                // [§27a] Non-vision model — text placeholder.
+                                parts.put(JSONObject().put("text", visionText))
+                            } else {
+                                // T5-L1: same provider-boundary backstop as
+                                // OpenAI/Anthropic — re-encode oversize history
+                                // images (restored sessions, cross-device imports)
+                                // before base64-inlining, so a >5MB part can't push
+                                // the request past Gemini's inline-data cap.
+                                val safeBytes = ImageBudget.compressUnderBudget(part.data)
+                                val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
                                 parts.put(JSONObject().put("inlineData", JSONObject().apply {
                                     put("mimeType", safeMime)
                                     put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
                                 }))
                             }
-                        }
-                        is AgentContentPart.ImageData -> {
-                            // T5-L1: same provider-boundary backstop as
-                            // OpenAI/Anthropic — re-encode oversize history
-                            // images (restored sessions, cross-device imports)
-                            // before base64-inlining, so a >5MB part can't push
-                            // the request past Gemini's inline-data cap.
-                            val safeBytes = ImageBudget.compressUnderBudget(part.data)
-                            val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
-                            parts.put(JSONObject().put("inlineData", JSONObject().apply {
-                                put("mimeType", safeMime)
-                                put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
-                            }))
                         }
                     }
                 }
@@ -406,13 +434,20 @@ class GeminiProvider(
                 // Legacy: plain text with optional images
                 if (index == lastUserIndex && imageParts.isNotEmpty()) {
                     for (part in imageParts) {
-                        // T5-L1: same backstop as the contentParts branch above.
-                        val safeBytes = ImageBudget.compressUnderBudget(part.data)
-                        val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
-                        val inlineData = JSONObject()
-                        inlineData.put("mimeType", safeMime)
-                        inlineData.put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
-                        parts.put(JSONObject().put("inlineData", inlineData))
+                        val visionText = visionPlaceholder(supportsImages, VISION_UNSUPPORTED_PLACEHOLDER)
+                        if (visionText != null) {
+                            // [§27a] Non-vision model — text placeholder, mirrors
+                            // the contentParts branch above.
+                            parts.put(JSONObject().put("text", visionText))
+                        } else {
+                            // T5-L1: same backstop as the contentParts branch above.
+                            val safeBytes = ImageBudget.compressUnderBudget(part.data)
+                            val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
+                            val inlineData = JSONObject()
+                            inlineData.put("mimeType", safeMime)
+                            inlineData.put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
+                            parts.put(JSONObject().put("inlineData", inlineData))
+                        }
                     }
                 }
                 val legacyText = msg.content.ifEmpty { " " }
