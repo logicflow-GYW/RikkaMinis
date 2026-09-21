@@ -405,6 +405,8 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
                 // worker reported while queued must not leak into the
                 // next run's typing indicator.
                 resetQueueWaitingAhead()
+                // [fix/zero-chunk-cancel] Same rationale for the network-wait clock.
+                resetAwaitingResponseSince()
                 // [T-android-overlay-reply-status-34599] Surface
                 // the assistant's most recent reply text to the
                 // overlay BEFORE setInactive so the post-completion

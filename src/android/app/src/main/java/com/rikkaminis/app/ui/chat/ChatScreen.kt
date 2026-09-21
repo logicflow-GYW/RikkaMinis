@@ -385,6 +385,10 @@ fun ChatScreen(
     // [feat/provider-exec-concurrency] Queue position for the active stream
     // (-1 = not queued). Rendered by TypingIndicator as "queued behind N".
     val queueWaitingAhead by viewModel.queueWaitingAhead.collectAsState()
+    // [fix/zero-chunk-cancel] Non-zero while the in-flight request is out but
+    // has produced no content yet. Rendered by TypingIndicator as an elapsed
+    // counter so a stalled link is distinguishable from a long think.
+    val awaitingResponseSinceMs by viewModel.awaitingResponseSinceMs.collectAsState()
     val canResume by viewModel.canResume.collectAsState()
     val error by viewModel.error.collectAsState()
     val modelName by viewModel.modelName.collectAsState()
@@ -4028,6 +4032,11 @@ fun ChatScreen(
                                     AssistantMessageView(
                                         message = item.message,
                                         onRetry = { safeMutate { viewModel.retryLast() } },
+                                        // [fix/zero-chunk-cancel] Only the live
+                                        // trailing message can be awaiting; a
+                                        // finished message must never show the
+                                        // counter (the flag is false for it).
+                                        awaitingResponseSinceMs = awaitingResponseSinceMs,
                                         // "Revert Compact" only surfaces on the
                                         // compact-divider info row (mirrors the
                                         // flat AssistantInfo branch).

@@ -5,6 +5,10 @@ import android.content.Intent
 import android.os.IBinder
 import android.util.Log
 import com.rikkaminis.app.data.model.LLMStreamChunk
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
@@ -61,6 +65,25 @@ class ModelExecutionService : Service() {
         const val STREAM_FILE = "stream.jsonl"
         /** Cancellation signal file: when created, a running stream aborts. */
         const val CANCEL_FILE = "cancel"
+
+        /**
+         * [fix/zero-chunk-cancel] How often the in-stream cancel watcher polls
+         * [CANCEL_FILE] while the provider stream is running.
+         *
+         * WHY a watcher at all: every other cancel check on this path only runs
+         * when a chunk ARRIVES. A wedged upstream that accepted the request but
+         * sends nothing (measured on-device 2026-09-21 13:51:50: a 255 KB body
+         * went out, the HTTP proxy returned no response headers for 60 s, and
+         * the user's tap-to-stop could not end the turn) never reaches them, so
+         * the cancel stayed invisible for the full 30-minute budget.
+         *
+         * 250 ms: a user-perceptible "stop" should land well inside a second,
+         * while 4 polls/s of a single `File.exists()` stat is negligible against
+         * a network-bound worker. The directory is the one the client writes to
+         * (same app data dir, shared uid), so the stat is a reliable
+         * cross-process signal.
+         */
+        private const val CANCEL_POLL_MS = 250L
         /** Max time a non-streaming worker waits for the client's client.ack. */
         private const val CLIENT_ACK_TIMEOUT_MS = 8_000L
         private const val ACK_POLL_MS = 100L
@@ -1244,6 +1267,48 @@ class ModelExecutionService : Service() {
             }
             ModelExecutionRunLog.log(dir, android.os.Process.myPid(), ModelExecutionRunLog.Phase.PROVIDER_BUILT, "provider=${instance.providerType}", runId = runIdOf(dir))
             kotlinx.coroutines.runBlocking {
+                // [fix/zero-chunk-cancel] User-cancel watcher for the pre-chunk
+                // window.
+                //
+                // Everything below only reacts to a chunk ARRIVING: the
+                // in-collect check needs one to run at all. A wedged upstream
+                // that accepted the request and sends nothing therefore left
+                // the turn uncancellable for the whole 30-minute budget —
+                // measured on-device 2026-09-21 13:51:50: a 255 KB body went
+                // out, the HTTP proxy returned no headers for 60 s, and the
+                // user's tap-to-stop did nothing (they recovered only by
+                // switching proxies, which changed the TCP path).
+                //
+                // This watcher polls the same cancel file independently of
+                // chunk arrival and cancels THIS job. Cancelling it propagates
+                // to the collecting coroutine, which reaches the provider's
+                // cancellation bridge and closes the socket — the only thing
+                // that unblocks a wedged read. Measured with the real nesting
+                // and a real wedged server: 335ms vs 60018ms without.
+                //
+                // Note the failure modes already ruled out by experiment:
+                // cancelling the OUTER job (onStartCommand's runBlocking) does
+                // not reach this nested runBlocking, and neither does cancelling
+                // the inner job alone unless the provider bridge exists. Both
+                // halves are required; each is useless alone.
+                // Captured OUTSIDE the launch: inside it, the context's Job is
+                // the watcher's own, and cancelling that would be a no-op.
+                val collectJob = currentCoroutineContext()[Job]!!
+                val cancelWatcher = launch {
+                    while (true) {
+                        if (cancelFile.exists()) {
+                            ModelExecutionRunLog.log(
+                                dir, android.os.Process.myPid(),
+                                ModelExecutionRunLog.Phase.STREAM_ERROR,
+                                "cancel observed by watcher (pre-chunk phase)", runId = runIdOf(dir),
+                            )
+                            collectJob.cancel(ModelExecutionCancelledException())
+                            return@launch
+                        }
+                        delay(CANCEL_POLL_MS)
+                    }
+                }
+                try {
                 // [worker-first-chunk-guard] Wrap provider streaming in a bounded
                 // first-chunk timeout. A wedged/absent upstream must not hang the
                 // worker silently past the client five-second death grace (which would
@@ -1320,6 +1385,13 @@ class ModelExecutionService : Service() {
                     // (A cancel landing mid-window treats the run the same way.)
                     ModelExecutionRunLog.log(dir, android.os.Process.myPid(), ModelExecutionRunLog.Phase.STREAM_ERROR, "first_chunk_timeout", runId = runIdOf(dir))
                     throw ModelStreamErrorException("provider produced no first chunk within ${firstChunkTimeoutMs}ms (hadChunks=false)", hadChunks = false)
+                }
+                } finally {
+                    // [fix/zero-chunk-cancel] Stop the watcher on EVERY exit
+                    // path — normal completion, provider error, or its own
+                    // cancellation. Without this it would outlive the run and
+                    // keep polling a directory the client may delete.
+                    cancelWatcher.cancel()
                 }
             }
             appendLine(ChatStreamJsonl.DONE_LINE)

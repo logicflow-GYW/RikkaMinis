@@ -18,8 +18,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -30,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.rikkaminis.app.R
 import com.rikkaminis.app.ui.theme.ChatColors
+import kotlinx.coroutines.delay
 
 // [T-android-split-chat] Self-contained "thinking / streaming" dot indicators
 // extracted verbatim from ChatScreen.kt. `internal` so the chat package can
@@ -88,7 +93,7 @@ internal fun StreamingDotsText() {
 // ─── Typing Indicator (three dots pulsing) ────────────────────────────────────
 
 @Composable
-internal fun TypingIndicator(queueWaitingAhead: Int = -1) {
+internal fun TypingIndicator(queueWaitingAhead: Int = -1, awaitingNetworkSinceMs: Long = 0L) {
     val infiniteTransition = rememberInfiniteTransition(label = "typing")
     // Live Soul name → "<custom name> is thinking…" when the user renamed
     // the assistant in Soul settings. SoulStore.cachedMetadata is a StateFlow
@@ -105,6 +110,28 @@ internal fun TypingIndicator(queueWaitingAhead: Int = -1) {
     // could not tell during the serialized-mutex era.
     val queued = queueWaitingAhead > 0
 
+    // [fix/zero-chunk-cancel] The second "not really thinking" state. The
+    // queue case above distinguishes "you are queued" from "the model is slow";
+    // this one distinguishes "the request is out and the network has gone
+    // quiet" from "the model is thinking". On-device 2026-09-21 the two were
+    // indistinguishable: a wedged proxy held a 255 KB request for 60 s and the
+    // UI showed the same three dots the whole time, so the user could not tell
+    // a stall from a long think (they discovered it only by switching proxies).
+    //
+    // Clock ticks only while the message is actually in the awaiting state, so
+    // a finished message renders nothing extra and there is no background wake.
+    // Starts counting at the first frame the awaiting flag is seen, which is
+    // the moment the request was dispatched.
+    var elapsedSec by remember(awaitingNetworkSinceMs) { mutableStateOf(0L) }
+    LaunchedEffect(awaitingNetworkSinceMs) {
+        if (awaitingNetworkSinceMs <= 0L) { elapsedSec = 0L; return@LaunchedEffect }
+        while (true) {
+            elapsedSec = (System.currentTimeMillis() - awaitingNetworkSinceMs) / 1000L
+            delay(1000L)
+        }
+    }
+    val waitingNetwork = awaitingNetworkSinceMs > 0L
+
     Row(
         modifier = Modifier.padding(top = 2.dp, bottom = 8.dp),
         verticalAlignment = Alignment.Bottom,
@@ -112,6 +139,8 @@ internal fun TypingIndicator(queueWaitingAhead: Int = -1) {
         Text(
             text = if (queued) {
                 stringResource(R.string.chat_queued_indicator, queueWaitingAhead)
+            } else if (waitingNetwork) {
+                stringResource(R.string.chat_waiting_network, elapsedSec)
             } else {
                 stringResource(R.string.chat_typing_indicator, soulName)
             },

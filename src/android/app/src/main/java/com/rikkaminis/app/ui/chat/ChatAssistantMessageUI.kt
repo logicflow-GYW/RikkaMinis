@@ -404,6 +404,10 @@ internal fun AssistantMessageView(
     // Stage D: "Revert Compact" action for an info block whose toolName is
     // "compact" — mirrors the flat AssistantInfo branch in ChatScreen.kt.
     onRevert: (() -> Unit)? = null,
+    // [fix/zero-chunk-cancel] Non-zero while the request is out with no content
+    // yet; drives the TypingIndicator elapsed counter. Default 0 keeps every
+    // other caller (previews, legacy paths) rendering the plain indicator.
+    awaitingResponseSinceMs: Long = 0L,
 ) {
     Column(
         modifier = Modifier
@@ -508,7 +512,13 @@ internal fun AssistantMessageView(
         // Typing indicator when streaming with no content yet (info-only blocks don't count)
         val hasRealBlocks = message.toolBlocks.any { it.kind != "info" }
         if (message.isStreaming && message.content.isEmpty() && !hasRealBlocks) {
-            TypingIndicator()
+            // [fix/zero-chunk-cancel] Pass the wait clock only for a message
+            // that is itself awaiting; a finished message keeps the plain
+            // indicator (and in practice never reaches this branch).
+            TypingIndicator(
+                awaitingNetworkSinceMs =
+                    if (message.isAwaitingModelResponse) awaitingResponseSinceMs else 0L,
+            )
         }
 
         // Legacy fallback: render message.content when no text blocks exist (old sessions).
