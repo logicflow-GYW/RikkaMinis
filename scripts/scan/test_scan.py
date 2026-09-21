@@ -1038,6 +1038,87 @@ object Esc {
 """)
     code, out = run_scanner("prefs_listener_holder_guard.py", esc)
     check("prefs-listener-ok escape hatch passes (exit 0)", code == 0, f"exit={code}\n{out}")
+
+    # Regression fixtures for the scope-classification bug found 2026-09-21.
+    # The guard fused `@Composable` + `fun` across the newline into one token,
+    # `\bfun\b` stopped matching, and the function body was classified as a
+    # class -- so every local `val listener` inside it looked like a field and
+    # reported `held`. Four real sites (ChatScreen, AppearanceScreen,
+    # ChatMenuSettingsScreen, MemoryManagementScreen) got that false pass, and
+    # deleting their actual holder still passed. These fixtures are the ground
+    # truth: both shapes MUST fail when unheld.
+    for label, sig in (
+        ("annotated multi-line signature",
+         "@Composable\nfun Screen(\n    prefs: SharedPreferences,\n    context: Context,\n) {"),
+        ("annotated single-line signature",
+         "@Composable\nfun Screen(prefs: SharedPreferences, context: Context) {"),
+        ("unannotated multi-line signature",
+         "fun reg(\n    prefs: SharedPreferences,\n) {"),
+    ):
+        d = os.path.join(tmp, "shape_" + label.replace(" ", "_"))
+        os.makedirs(d)
+        with open(os.path.join(d, "Shape.kt"), "w") as f:
+            f.write(f"""
+import android.content.SharedPreferences
+object Shape {{
+    {sig}
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener {{ _, _ -> refresh() }}
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+    }}
+    private fun refresh() {{}}
+}}
+""")
+        code, out = run_scanner("prefs_listener_holder_guard.py", d)
+        check(f"unheld local with {label} fails (exit != 0)", code != 0, f"exit={code}\n{out}")
+
+    # And the DisposableEffect shape these four sites actually use MUST pass --
+    # otherwise the fixtures above could be satisfied by a guard that just
+    # reports everything as unheld.
+    disp = os.path.join(tmp, "dispose_shape")
+    os.makedirs(disp)
+    with open(os.path.join(disp, "Disp.kt"), "w") as f:
+        f.write("""
+import android.content.SharedPreferences
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+@Composable
+fun rememberThing(
+    context: Context,
+) {
+    val prefs = ChatMenuPrefs.prefs(context)
+    DisposableEffect(prefs) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> refresh() }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+}
+""")
+    code, out = run_scanner("prefs_listener_holder_guard.py", disp)
+    check("onDispose-held listener in annotated multi-line fn passes (exit 0)",
+          code == 0, f"exit={code}\n{out}")
+
+    # Mutation: remove the onDispose holder -> must now FAIL. This is the exact
+    # edit that used to stay green.
+    mut = os.path.join(tmp, "dispose_mutated")
+    os.makedirs(mut)
+    with open(os.path.join(mut, "Mut.kt"), "w") as f:
+        f.write("""
+import android.content.SharedPreferences
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+@Composable
+fun rememberThing(
+    context: Context,
+) {
+    val prefs = ChatMenuPrefs.prefs(context)
+    DisposableEffect(prefs) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> refresh() }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+    }
+}
+""")
+    code, out = run_scanner("prefs_listener_holder_guard.py", mut)
+    check("removing the onDispose holder fails (exit != 0)", code != 0, f"exit={code}\n{out}")
     shutil.rmtree(tmp)
 
 def test_real_repo():

@@ -95,23 +95,61 @@ def field_declarations(text: str) -> set:
     that is never stored elsewhere is exactly as collectable as an inline lambda
     -- that is the second hazard this guard must catch. An earlier version
     treated every `val`/`var` as a field, so `val l = ...; register(l)` passed.
+
+    Two separate buffers, because the two jobs need different lifetimes:
+
+      * `pending` resets at every line break and feeds the declaration regex --
+        a `val`/`var` declaration never spans lines in this codebase.
+      * `head` resets only at a top-level `{`/`}`/`;` and classifies the scope a
+        `{` opens. It MUST span lines, and it must receive a separator at each
+        line break.
+
+    Both of those `head` requirements are load-bearing, and both were violated:
+
+      1. `head` used to reset at every newline. A multi-line parameter list puts
+         the `{` on its own line, so it saw only `) ` and classified the body as
+         a class.
+      2. Even with (1) fixed, `head` was concatenated without a separator, so an
+         annotation on its own line fused with the keyword: `@Composable\nfun`
+         became `@Composablefun`, `\bfun\b` could not match, and the body was
+         classified as a class again.
+
+    Either way, every local `val listener` inside such a function was recorded as
+    a *field*, so the guard reported `held` for four real sites (ChatScreen,
+    AppearanceScreen, ChatMenuSettingsScreen, MemoryManagementScreen) whose only
+    holder is a sibling `onDispose` -- and deleting that `onDispose` still
+    passed. `paren` is tracked for the same reason: a brace nested in parentheses
+    is a lambda argument (e.g. a default `= {}`), not a new statement head.
+    Regression fixtures live in `test_scan.py`.
     """
     clean = _strip_comments_and_strings(text)
     fields = set()
     stack = []          # each entry: "fun" | "class" | "other"
-    pending = ""
-    line_no = 1
+    pending = ""        # since the last line break -- for declaration detection
+    head = ""           # since the last TOP-LEVEL brace/semicolon -- scope classification
+    paren = 0           # () nesting depth, so a default lambda `= {}` can't reset head
     decl_re = re.compile(r"(?:^|[;{}])\s*(?:@\w+\s+)*(?:private\s+|internal\s+|public\s+|"
                          r"protected\s+|open\s+|override\s+|lateinit\s+|const\s+|@\w+\s+)*"
                          r"(val|var)\s+(\w+)")
 
     for ch in clean:
         if ch == "\n":
-            line_no += 1
             pending = ""
+            # `head` spans lines, so it needs a separator here. Without one the
+            # annotation and the keyword fuse into a single token --
+            # `@Composable\nfun` became `@Composablefun`, `\bfun\b` could not
+            # match, and the function body was classified as a class. That is
+            # what mislabelled the four real `DisposableEffect` sites.
+            head += " "
+            continue
+        if ch == "(" or ch == ")":
+            paren += 1 if ch == "(" else -1
+            if paren < 0:
+                paren = 0
+            pending += ch
+            head += ch
             continue
         if ch == "{":
-            head = pending
             if re.search(r"\bfun\b", head):
                 stack.append("fun")
             elif re.search(r"\b(class|object|interface)\b", head):
@@ -119,16 +157,27 @@ def field_declarations(text: str) -> set:
             else:
                 stack.append("other")
             pending = ""
+            # A brace nested inside parentheses is a lambda argument (e.g. a
+            # parameter default `= {}`), NOT a new statement head -- clearing
+            # `head` there would erase the `fun` of a multi-line signature and
+            # misclassify the whole function body as a class.
+            if paren == 0:
+                head = ""
             continue
         if ch == "}":
             if stack:
                 stack.pop()
             pending = ""
+            if paren == 0:
+                head = ""
             continue
         if ch == ";":
             pending = ""
+            if paren == 0:
+                head = ""
             continue
         pending += ch
+        head += ch
         # A declaration only counts as a field when no function body encloses it.
         m = decl_re.search(pending)
         if m and "fun" not in stack:
