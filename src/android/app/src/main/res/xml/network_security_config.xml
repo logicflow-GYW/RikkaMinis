@@ -7,6 +7,13 @@
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
+            <!-- [GH#258] Also trust user-installed CAs. Same posture as the
+                 cleartext decision above: the user supplies the endpoint (and
+                 with it the proxy/MITM box doing the TLS inspection), so the
+                 trust decision is theirs to make. Without this, a user running
+                 their own TLS-terminating proxy sees certificate errors on an
+                 app that already permits cleartext to the same host. -->
+            <certificates src="user" />
         </trust-anchors>
     </base-config>
     <!-- Pre-T354 entry kept for explicitness; the base-config above already

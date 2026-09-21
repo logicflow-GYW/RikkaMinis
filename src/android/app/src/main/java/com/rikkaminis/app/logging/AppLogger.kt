@@ -42,7 +42,7 @@ object AppLogger {
     // caller as a crash.
     private val dateFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.US)
     private val timestampFormat = DateTimeFormatter.ofPattern("HH:mm:ss.SSS", Locale.US)
-    // [T-logging-full-coverage] Error-snapshot file names: error-snapshot-<stamp>.log
+    // [T-logging-full-coverage] Error-snapshot file names: error-snapshot-<stamp>-<pid>.log
     private val errorSnapshotFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd-HHmmss", Locale.US)
 
     private fun todayStamp(): String = LocalDate.now().format(dateFormat)
@@ -337,7 +337,7 @@ object AppLogger {
      * [T-logging-full-coverage] Error-scene snapshot: on every ERROR episode
      * (deduped by LogRingBuffer.SNAPSHOT_MIN_INTERVAL_MS), write the ring of
      * the most recent delivered lines — all channels, all levels — to
-     * `error-snapshot-<timestamp>.log`. Every error carries its own scene, so
+     * `error-snapshot-<timestamp>-<pid>.log`. Every error carries its own scene, so
      * "what did the app log right before the 400?" no longer requires
      * watching the 64KiB kernel logcat ring live.
      *
@@ -353,7 +353,17 @@ object AppLogger {
         val dir = logDir ?: return
         val stamp = java.time.LocalDateTime.now().format(errorSnapshotFormat)
         try {
-            val file = File(dir, "error-snapshot-$stamp.log")
+            // §26 The stamp is second-granular, and the app process plus the
+            // :modelservice worker both log into this directory — measured on
+            // device: 31 of 46 snapshots contained >= 2 pids, and the later
+            // write silently overwrote the earlier one (a snapshot named
+            // 183246 held no `429` while the worker recorded an HTTP 429 at
+            // 18:32:46.007). Appending the pid keeps both scenes. Suffix (not
+            // prefix) so every name-parsing site — which matches the
+            // `error-snapshot-` prefix and treats `.log` as the extension —
+            // stays correct; see listLogFiles / listLogFileMetas /
+            // pruneOldLogs / ErrorSnapshotOrderingTest.
+            val file = File(dir, "error-snapshot-$stamp-${android.os.Process.myPid()}.log")
             file.writeText(buffer.contentIncluding(triggerLine).joinToString(separator = "\n") + "\n")
         } catch (_: Exception) {
             // Snapshot must never take the logger down.
