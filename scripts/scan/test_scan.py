@@ -1140,6 +1140,89 @@ def test_real_repo():
         check(f"{script} on real repo exits 0", code == 0, f"exit={code}\n{out[:2000]}")
 
 
+def xproc_fixture(model_body=None, dispatcher_puts=None, comment_comma=False):
+    """Minimal repo tree for xproc_boundary_check."""
+    B = "src/android/app/src/main/java/com/rikkaminis/app/"
+    if model_body is None:
+        model_body = (
+            "    val id: String,\n"
+            "    val maxOutputTokens: Int? = null,\n"
+        )
+    if comment_comma:
+        # The real shape that broke an earlier version: a comma inside a comment
+        # split the field list mid-way and dropped every later field.
+        model_body = (
+            "    val id: String,\n"
+            "    // Some relay gateways, however, do not honour this.\n"
+            "    val maxOutputTokens: Int? = null,\n"
+        )
+    if dispatcher_puts is None:
+        dispatcher_puts = (
+            '        put("model_id", model.id)\n'
+            '        model.maxOutputTokens?.let { put("max_output_tokens", it) }\n'
+        )
+    # ProviderInstance is always part of the boundary; write its key so the
+    # fixture is internally consistent (otherwise the guard correctly reports it).
+    fixed_puts = '        put("instance_id", instance.id)\n'
+    return {
+        B + "data/model/LLMModel.kt":
+            "package com.rikkaminis.app.data.model\n\n"
+            "data class LLMModel(\n" + model_body + ")\n",
+        B + "data/model/ProviderConfig.kt":
+            "package com.rikkaminis.app.data.model\n\n"
+            "data class ProviderInstance(\n    val id: String,\n)\n",
+        B + "sandbox/offload/ModelExecutionDispatcher.kt":
+            "package com.rikkaminis.app.sandbox.offload\n\n"
+            "class ModelExecutionDispatcher {\n"
+            "    fun build(model: LLMModel, instance: ProviderInstance) {\n"
+            "        val bundle = Bundle()\n"
+            "        bundle.apply {\n" + fixed_puts + dispatcher_puts + "        }\n"
+            "    }\n}\n",
+        B + "sandbox/offload/ModelExecutionService.kt":
+            "package com.rikkaminis.app.sandbox.offload\n\n"
+            "class ModelExecutionService {\n"
+            '    fun read(b: Bundle) { val id = b.getString("model_id")\n'
+            '        val m = b.getInt("max_output_tokens")\n'
+            '        val i = b.getString("instance_id") }\n}\n',
+    }
+
+
+def test_xproc_boundary():
+    print("━━━ xproc_boundary_check ━━━")
+    # Clean — every boundary field is written by the dispatcher.
+    root = make_tree(xproc_fixture())
+    code, out = run_scanner("xproc_boundary_check.py", root)
+    check("clean fixture exits 0", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(root)
+
+    # Dirty — the exact P0 shape: maxOutputTokens never written.
+    root = make_tree(xproc_fixture(dispatcher_puts='        put("model_id", model.id)\n'))
+    code, out = run_scanner("xproc_boundary_check.py", root)
+    check(
+        "unwritten field caught (exit 1, MISSING maxOutputTokens)",
+        code == 1 and "maxOutputTokens" in out and "MISSING" in out,
+        f"exit={code}\n{out}",
+    )
+    shutil.rmtree(root)
+
+    # Regression: a comma inside a comment must NOT truncate the field list.
+    root = make_tree(xproc_fixture(comment_comma=True,
+                                   dispatcher_puts='        put("model_id", model.id)\n'))
+    code, out = run_scanner("xproc_boundary_check.py", root)
+    check(
+        "comment comma does not truncate field list (maxOutputTokens still seen)",
+        code == 1 and "maxOutputTokens" in out,
+        f"exit={code}\n{out}",
+    )
+    shutil.rmtree(root)
+
+    # Bare put() inside apply{} must be recognised (no leading dot).
+    root = make_tree(xproc_fixture())
+    code, out = run_scanner("xproc_boundary_check.py", root)
+    check("bare put() inside apply{} recognised", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(root)
+
+
 def main():
     print("╔══════════════════════════════════════════════════╗")
     print("║  Scan Self-Test (fixture ground truth)          ║")
@@ -1158,6 +1241,7 @@ def main():
     test_ime_inset()
     test_stream_flow_dispatch()
     test_prefs_listener_holder()
+    test_xproc_boundary()
     test_real_repo()
     print("")
     print(f"{'❌ FAILURES: ' + str(FAIL) if FAIL else '✅ ALL ' + str(PASS) + ' CASES PASS'}")
