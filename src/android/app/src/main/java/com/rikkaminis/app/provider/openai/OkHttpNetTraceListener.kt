@@ -272,6 +272,15 @@ internal fun supportsPrefillForOpenAIBase(basePath: String, isAzure: Boolean): B
  *     the old predicate read the base, not the model. See the experiment note in
  *     `OpenAIProvider.explicitOffEffort`.
  *
+ * [unifiedEffortGateway] exempts the veto, mirroring the rule layer's
+ * `usesUnifiedReasoningEffort || declared.contains(v)` predicate
+ * (ThinkingRuleResolver). A unified gateway (Ark / Azure / Venice) re-exposes
+ * third-party models behind ONE surface whose off tier is the GATEWAY's, not the
+ * hosted model's — so the catalog's declared set describes the model's native
+ * endpoint and does not govern what this surface accepts. Applying the veto here
+ * would silently drop Ark's documented `minimal` (caught by the golden snapshot:
+ * `deepseek-v4-unified/OFF` went from `{reasoning_effort:"minimal"}` to `{}`).
+ *
  * `declaredEffortValues == null` means "the catalog never heard of this model" —
  * NOT "declares nothing" (that is the separate `declaresNoEffortTiers` flag), so
  * it stays permissive. Treating unknown as a veto would silently re-disable the
@@ -282,6 +291,7 @@ internal fun explicitOffEffortFor(
     isAzure: Boolean,
     modelId: String,
     declaredEffortValues: List<String>?,
+    unifiedEffortGateway: Boolean = false,
 ): String? {
     if (isAzure) return null
     val base = basePath.lowercase()
@@ -296,6 +306,10 @@ internal fun explicitOffEffortFor(
             } else null
         }
     } ?: return null
-    if (declaredEffortValues != null && !declaredEffortValues.contains(candidate)) return null
+    if (!unifiedEffortGateway &&
+        declaredEffortValues != null && !declaredEffortValues.contains(candidate)
+    ) {
+        return null
+    }
     return candidate
 }

@@ -28,7 +28,8 @@ class OpenAIExplicitOffEffortTest {
         modelId: String = "gpt-5.1",
         declared: List<String>? = null,
         isAzure: Boolean = false,
-    ) = explicitOffEffortFor(basePath, isAzure, modelId, declared)
+        unified: Boolean = false,
+    ) = explicitOffEffortFor(basePath, isAzure, modelId, declared, unified)
 
     // ---------------------------------------------------------------- allowlist
 
@@ -101,5 +102,32 @@ class OpenAIExplicitOffEffortTest {
         // Empty is a positive statement ("the catalog lists no tiers"), unlike
         // null. `declaresNoEffortTiers` carries the same shape elsewhere.
         assertNull(off(official, declared = emptyList()))
+    }
+
+    // ------------------------------------------------- unified-gateway exemption
+
+    /**
+     * The veto must NOT reach a unified gateway. Ark/Azure/Venice re-expose
+     * third-party models behind one surface whose off tier is the GATEWAY's, so
+     * the hosted model's catalog entry describes its native endpoint instead.
+     * Mirrors the rule layer's `usesUnifiedReasoningEffort || declared.contains(v)`.
+     *
+     * Regression this pins: the golden snapshot showed `deepseek-v4-unified/OFF`
+     * moving from `{reasoning_effort:"minimal"}` to `{}` when the veto was applied
+     * unconditionally — Ark silently lost its documented off tier.
+     */
+    @Test
+    fun `unified gateway keeps its off tier even when the hosted model does not declare it`() {
+        assertEquals(
+            "minimal",
+            off(ark, modelId = "deepseek-v4-pro", declared = listOf("high", "max"), unified = true),
+        )
+    }
+
+    @Test
+    fun `a non-unified base with the same model and declared set still omits`() {
+        // The control arm for the exemption: same model, same declared set, but a
+        // plain relay (unified = false) must still be vetoed.
+        assertNull(off(relay, modelId = "deepseek-v4-pro", declared = listOf("high", "max")))
     }
 }

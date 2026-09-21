@@ -541,6 +541,7 @@ class OpenAIProvider constructor(
             isAzure = isAzure,
             modelId = model.id,
             declaredEffortValues = model.reasoningEffortValues,
+            unifiedEffortGateway = usesUnifiedReasoningEffort,
         )
 
     /**
