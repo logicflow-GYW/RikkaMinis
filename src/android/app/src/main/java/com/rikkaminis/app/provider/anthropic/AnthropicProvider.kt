@@ -44,6 +44,9 @@ import java.util.concurrent.TimeUnit
 import com.rikkaminis.app.provider.causeChainSummary
 import com.rikkaminis.app.provider.failOnSilentEmptyCompletion
 import com.rikkaminis.app.provider.asConsumerSideCancellation
+import com.rikkaminis.app.provider.StreamTimeouts
+import com.rikkaminis.app.provider.VISION_UNSUPPORTED_PLACEHOLDER
+import com.rikkaminis.app.provider.visionPlaceholder
 
 class AnthropicProvider(
     private val apiKey: String,
@@ -169,9 +172,17 @@ class AnthropicProvider(
         val ttfbTimedOut = java.util.concurrent.atomic.AtomicBoolean(false)
         val headersArrived = java.util.concurrent.atomic.AtomicBoolean(false)
         val ttfbWatchdog = launch {
-            delay(30_000L)
+            delay(StreamTimeouts.TTFB_TIMEOUT_MS)
             if (!headersArrived.get()) {
                 ttfbTimedOut.set(true)
+                // [§24b] Log parity with OpenAIProvider: without this line a
+                // TTFB kill leaves no trace, so the watchdog is unobservable
+                // in production logs (which is how the 30s/90s divergence
+                // between providers stayed invisible).
+                com.rikkaminis.app.logging.AppLogger.warning(
+                    "AnthropicProvider",
+                    "[T-android-stale-conn-retry-hang] no response headers after ${StreamTimeouts.TTFB_TIMEOUT_MS / 1000}s — cancelling call (stale pooled connection?)",
+                )
                 call.cancel()
             }
         }
@@ -179,7 +190,9 @@ class AnthropicProvider(
             call.execute()
         } catch (e: IOException) {
             if (ttfbTimedOut.get()) {
-                throw LLMError.TransientError("no response from Anthropic after 30s — check network/proxy")
+                throw LLMError.TransientError(
+                    "no response from Anthropic after ${StreamTimeouts.TTFB_TIMEOUT_MS / 1000}s — check network/proxy"
+                )
             }
             throw e
         } finally {
@@ -631,6 +644,12 @@ class AnthropicProvider(
         // [T-android-anthropic-thinking-echo] (issue #70) Compute once — the
         // gate depends only on the model + endpoint, not the message.
         val echoThinking = shouldEchoInterleavedThinking()
+        // [§27a] Compute once — same predicate as OpenAIProvider.buildRequestBody
+        // (verbatim): a model that does not declare "image" in inputModalities
+        // cannot be sent an image block, so image parts are downgraded to a
+        // text placeholder below instead of letting the upstream answer 400
+        // `unknown variant image`.
+        val supportsImages = "image" in (model.inputModalities ?: emptyList())
         val messagesArray = JSONArray()
         for ((index, msg) in messages.withIndex()) {
             val obj = JSONObject()
@@ -680,21 +699,32 @@ class AnthropicProvider(
                                 put("text", part.content)
                             })
                             if (part.imageData != null && part.imageMimeType != null) {
-                                // T-imgsize: belt-and-braces — history tool-result
-                                // screenshots can be raw 12-megapixel PNGs that
-                                // never went through the composer's budget pass.
-                                // Re-encode in-place if a single part already blows
-                                // the per-image cap so we don't 413 on replay.
-                                val safeBytes = ImageBudget.compressUnderBudget(part.imageData)
-                                val safeMime = if (safeBytes === part.imageData) part.imageMimeType else "image/jpeg"
-                                resultContent.put(JSONObject().apply {
-                                    put("type", "image")
-                                    put("source", JSONObject().apply {
-                                        put("type", "base64")
-                                        put("media_type", safeMime)
-                                        put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
+                                val visionText = visionPlaceholder(supportsImages, VISION_UNSUPPORTED_PLACEHOLDER)
+                                if (visionText != null) {
+                                    // [§27a] Non-vision model — a tool-result image
+                                    // block would be rejected upstream. Downgrade to
+                                    // text, same literal as OpenAIProvider.
+                                    resultContent.put(JSONObject().apply {
+                                        put("type", "text")
+                                        put("text", visionText)
                                     })
-                                })
+                                } else {
+                                    // T-imgsize: belt-and-braces — history tool-result
+                                    // screenshots can be raw 12-megapixel PNGs that
+                                    // never went through the composer's budget pass.
+                                    // Re-encode in-place if a single part already blows
+                                    // the per-image cap so we don't 413 on replay.
+                                    val safeBytes = ImageBudget.compressUnderBudget(part.imageData)
+                                    val safeMime = if (safeBytes === part.imageData) part.imageMimeType else "image/jpeg"
+                                    resultContent.put(JSONObject().apply {
+                                        put("type", "image")
+                                        put("source", JSONObject().apply {
+                                            put("type", "base64")
+                                            put("media_type", safeMime)
+                                            put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
+                                        })
+                                    })
+                                }
                             }
                             contentArray.put(JSONObject().apply {
                                 put("type", "tool_result")
@@ -704,10 +734,54 @@ class AnthropicProvider(
                             })
                         }
                         is AgentContentPart.ImageData -> {
-                            // T-imgsize: provider-boundary backstop for history
-                            // image bytes that bypassed the composer budget
-                            // (restored sessions, retry-after-edit, agent-emitted
-                            // ImageData). Composer already capped fresh sends.
+                            val visionText = visionPlaceholder(supportsImages, VISION_UNSUPPORTED_PLACEHOLDER)
+                            if (visionText != null) {
+                                // [§27a] Non-vision model — placeholder instead of
+                                // an image block the upstream would 400 on.
+                                contentArray.put(JSONObject().apply {
+                                    put("type", "text")
+                                    put("text", visionText)
+                                })
+                            } else {
+                                // T-imgsize: provider-boundary backstop for history
+                                // image bytes that bypassed the composer budget
+                                // (restored sessions, retry-after-edit, agent-emitted
+                                // ImageData). Composer already capped fresh sends.
+                                val safeBytes = ImageBudget.compressUnderBudget(part.data)
+                                val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
+                                contentArray.put(JSONObject().apply {
+                                    put("type", "image")
+                                    put("source", JSONObject().apply {
+                                        put("type", "base64")
+                                        put("media_type", safeMime)
+                                        put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
+                                    })
+                                })
+                            }
+                        }
+                    }
+                }
+                obj.put("content", contentArray)
+            } else {
+                val isLastUser = msg.role == LLMMessage.Role.USER &&
+                    index == messages.indexOfLast { it.role == LLMMessage.Role.USER }
+                if (isLastUser && imageParts.isNotEmpty()) {
+                    val contentArray = JSONArray()
+                    for (part in imageParts) {
+                        val visionText = visionPlaceholder(supportsImages, VISION_UNSUPPORTED_PLACEHOLDER)
+                        if (visionText != null) {
+                            // [§27a] Non-vision model — placeholder, mirrors the
+                            // contentParts branch above.
+                            contentArray.put(JSONObject().apply {
+                                put("type", "text")
+                                put("text", visionText)
+                            })
+                        } else {
+                            // T-imgsize: backstop for the legacy ImagePart path used
+                            // when contentParts is empty (older user-message shape
+                            // pre-T132). Composer already runs ImageBudget but this
+                            // arm is also reached on session restore where
+                            // contentParts may not be populated.
                             val safeBytes = ImageBudget.compressUnderBudget(part.data)
                             val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
                             contentArray.put(JSONObject().apply {
@@ -719,30 +793,6 @@ class AnthropicProvider(
                                 })
                             })
                         }
-                    }
-                }
-                obj.put("content", contentArray)
-            } else {
-                val isLastUser = msg.role == LLMMessage.Role.USER &&
-                    index == messages.indexOfLast { it.role == LLMMessage.Role.USER }
-                if (isLastUser && imageParts.isNotEmpty()) {
-                    val contentArray = JSONArray()
-                    for (part in imageParts) {
-                        // T-imgsize: backstop for the legacy ImagePart path used
-                        // when contentParts is empty (older user-message shape
-                        // pre-T132). Composer already runs ImageBudget but this
-                        // arm is also reached on session restore where
-                        // contentParts may not be populated.
-                        val safeBytes = ImageBudget.compressUnderBudget(part.data)
-                        val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
-                        contentArray.put(JSONObject().apply {
-                            put("type", "image")
-                            put("source", JSONObject().apply {
-                                put("type", "base64")
-                                put("media_type", safeMime)
-                                put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
-                            })
-                        })
                     }
                     contentArray.put(JSONObject().apply {
                         put("type", "text")

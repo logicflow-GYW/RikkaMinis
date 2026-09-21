@@ -23,6 +23,8 @@ import com.rikkaminis.app.provider.safeOptString
 import com.rikkaminis.app.provider.sanitizeToolPairing
 import com.rikkaminis.app.provider.clampOutboundMaxTokens
 import com.rikkaminis.app.provider.clampOutboundTemperature
+import com.rikkaminis.app.provider.StreamTimeouts
+import com.rikkaminis.app.provider.VISION_UNSUPPORTED_PLACEHOLDER
 import com.rikkaminis.app.provider.openai.explicitOffEffortFor
 import com.rikkaminis.app.provider.thinking.ReasoningEchoDecider
 import com.rikkaminis.app.provider.thinking.ReasoningEchoPolicy
@@ -145,7 +147,7 @@ class OpenAIProvider constructor(
          * first-line recovery, so the dead-tunnel case stays bounded and
          * self-healing.
          */
-        private const val STREAM_TTFB_TIMEOUT_MS = 90_000L
+        private const val STREAM_TTFB_TIMEOUT_MS = StreamTimeouts.TTFB_TIMEOUT_MS
 
         /**
          * First-data-row watchdog budget. A response whose headers arrived but
@@ -2107,7 +2109,7 @@ class OpenAIProvider constructor(
                                                 // — emit text placeholder (iOS-parity literal).
                                                 contentArray.put(JSONObject().apply {
                                                     put("type", "text")
-                                                    put("text", "[Image attached but this model does not support vision input]")
+                                                    put("text", VISION_UNSUPPORTED_PLACEHOLDER)
                                                 })
                                             }
                                         }
@@ -2162,7 +2164,7 @@ class OpenAIProvider constructor(
                                 // emit text placeholder (iOS-parity literal).
                                 contentArray.put(JSONObject().apply {
                                     put("type", "text")
-                                    put("text", "[Image attached but this model does not support vision input]")
+                                    put("text", VISION_UNSUPPORTED_PLACEHOLDER)
                                 })
                             }
                         }
@@ -2955,7 +2957,7 @@ class OpenAIProvider constructor(
                                             // branch above at line 1038).
                                             contentArray.put(JSONObject().apply {
                                                 put("type", "input_text")
-                                                put("text", "[Image attached but this model does not support vision input]")
+                                                put("text", VISION_UNSUPPORTED_PLACEHOLDER)
                                             })
                                         }
                                     }
