@@ -1248,6 +1248,28 @@ internal fun ChatViewModel.loadSession() {
         //   Case C: last entry is user with the synthetic "Continue"
         //           reminder text — text-cancel handler committed it
         //           but [resume] never re-entered the agent loop.
+        //
+        // [S5-resume-guard] Why this predicate deliberately does NOT also
+        // check "was the last tool result known?" (audit finding §27c(2)):
+        //
+        // The two questions live on different layers. This one is
+        // "session-level: is there a valid starting point for the next API
+        // call?", and the answer is yes whenever the shape holds — no tool is
+        // re-executed here (Case A appends nothing — see [resume] — the
+        // Continue reminder is only emitted when history ends with the
+        // ASSISTANT). The OutcomeUnknown concern quoted at
+        // ExecutionCoordinator.internalShouldRetryCommand belongs to
+        // "command-level: should the SAME command be re-sent?" — a different
+        // decision, made before this one ever runs.
+        //
+        // The "result may be unknown" warning is already carried to the model
+        // inside the tool_result CONTENT, on every path that can produce an
+        // interrupted tail: the timeout line written by PersistentShell, the
+        // cancellation reminder in ChatModels.CANCELLED_MARKER, and
+        // SANITIZE_PLACEHOLDER_RESULT_CONTENT for a tool_use whose result
+        // never landed. The model therefore does not resume from a silently
+        // false premise — so adding a second check here would duplicate a
+        // warning rather than supply a missing one.
         val lastEntry = agentHistory.lastOrNull()
         if (lastEntry != null && !_isStreaming.value) {
             val isInterrupted = when (lastEntry.role) {
