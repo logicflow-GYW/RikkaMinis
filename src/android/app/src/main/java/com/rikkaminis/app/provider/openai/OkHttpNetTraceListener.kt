@@ -268,8 +268,8 @@ internal fun supportsPrefillForOpenAIBase(basePath: String, isAzure: Boolean): B
  *  2. DECLARED SET (what the model says it accepts) — a veto. Emitting a tier the
  *     catalog does not list gets the whole request rejected (400), which is what
  *     GH#377 reported. The base URL cannot answer this question: the same model
- *     behind an official-looking base still declared `[low..max]`, and the old
- *     predicate read the base, not the model. See the experiment note in
+ *     behind an official-looking base still declared `low..max` (no `none`), and
+ *     the old predicate read the base, not the model. See the experiment note in
  *     `OpenAIProvider.explicitOffEffort`.
  *
  * `declaredEffortValues == null` means "the catalog never heard of this model" —
