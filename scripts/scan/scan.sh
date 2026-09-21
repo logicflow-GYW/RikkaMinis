@@ -17,7 +17,7 @@ echo "╚═══════════════════════�
 echo ""
 
 # --- 1. Four-way sync check ---
-echo "━━━ [1/14] Four-way sync check ━━━"
+echo "━━━ [1/15] Four-way sync check ━━━"
 if python3 scripts/scan/four_way_sync_check.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -30,7 +30,7 @@ fi
 # --- 2. i18n consistency ---
 #   - Orphan keys (in code but not in strings.xml) = HARD FAIL
 #   - Missing translations = WARNING only (known legacy from upstream)
-echo "━━━ [2/14] i18n consistency check ━━━"
+echo "━━━ [2/15] i18n consistency check ━━━"
 python3 -c "
 import re, os, sys
 root = '$ROOT'
@@ -72,7 +72,7 @@ fi
 echo ""
 
 # --- 3. Bare valueOf check (persisted enum safety) ---
-echo "━━━ [3/14] Enum parse safety check ━━━"
+echo "━━━ [3/15] Enum parse safety check ━━━"
 if python3 scripts/scan/enum_parse_safety_check.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -85,7 +85,7 @@ fi
 # --- 4. Provider process-boundary guard (TF-E) ---
 # Mechanical constraint: the app process must never call a provider network
 # entry point directly — only :modelservice (ModelExecutionService) owns them.
-echo "━━━ [4/14] Provider process-boundary guard ━━━"
+echo "━━━ [4/15] Provider process-boundary guard ━━━"
 if python3 scripts/scan/provider_boundary_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -101,7 +101,7 @@ fi
 # loop on AgentTraceRecorder output (produce → consume). Inline selftest
 # goldens keep the evaluator itself honest in CI; device traces can be added
 # later under tests/traces/golden/ referencing real .jsonl files.
-echo "━━━ [5/14] Agent trace replay eval ━━━"
+echo "━━━ [5/15] Agent trace replay eval ━━━"
 if python3 scripts/scan/trace_eval_check.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -118,7 +118,7 @@ fi
 #   always empty and nothing ever failed, logged or warned. New references are a
 #   build failure unless the file is allow-listed or justifies it inline with
 #   `legacy-ok: <reason>`.
-echo "━━━ [6/14] Legacy pipeline guard ━━━"
+echo "━━━ [6/15] Legacy pipeline guard ━━━"
 if python3 scripts/scan/legacy_pipeline_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -135,7 +135,7 @@ fi
 #   would ship unverified — the same header source is compiled by the host
 #   compiler and asserted against fixture /proc text. Skipped (not failed) on
 #   machines without a host C++ compiler.
-echo "━━━ [7/14] Native crash-field host test ━━━"
+echo "━━━ [7/15] Native crash-field host test ━━━"
 if sh "$ROOT/scripts/native/crash_fields_host_test.sh" > /tmp/minis_crash_fields_host_test.log 2>&1; then
     tail -n 2 /tmp/minis_crash_fields_host_test.log
     PASS=$((PASS + 1))
@@ -157,7 +157,7 @@ fi
 #   outside the audited allow-list is the silent path by which debug code
 #   (token-free loopback JSON-RPC on 127.0.0.1:5321) reaches release. The apk
 #   mode (below, in build-apk.yml) verifies the artifact itself.
-echo "━━━ [8/14] Debug-code release boundary (source) ━━━"
+echo "━━━ [8/15] Debug-code release boundary (source) ━━━"
 if python3 scripts/scan/debug_leak_guard.py source "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -173,7 +173,7 @@ fi
 #   wired. The last one compiles and runs — it just never executes, so a
 #   fresh install and an upgraded install end up with different schemas and
 #   nothing fails until a user hits the missing column.
-echo "━━━ [9/14] Room migration chain ━━━"
+echo "━━━ [9/15] Room migration chain ━━━"
 if python3 scripts/scan/room_migration_check.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -188,7 +188,7 @@ fi
 #   decision (wire init in that process's Application branch, or justify with
 #   `logging-ok:`). The 2026-09-18 incident: :modelservice never ran init, so
 #   the LLM-request process logged zero lines — 9 provider 400s, no trace.
-echo "━━━ [10/14] Process-logging coverage ━━━"
+echo "━━━ [10/15] Process-logging coverage ━━━"
 if python3 scripts/scan/process_logging_gate.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -204,7 +204,7 @@ fi
 #   so an int[] (or Kotlin's listOf()) makes a repeating alarm silently replay
 #   as a one-shot. No crash, no failing test, no user-visible log. The repo has
 #   two ACTION_SET_ALARM writers and they drifted apart once already.
-echo "━━━ [11/14] AlarmClock EXTRA_DAYS container type ━━━"
+echo "━━━ [11/15] AlarmClock EXTRA_DAYS container type ━━━"
 if python3 scripts/scan/extra_days_container_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -223,7 +223,7 @@ fi
 #   streaming text froze at the first composed frame (user saw the first two
 #   characters of an answer until they re-entered the session). Nothing
 #   crashed, no test failed. Fix is always `rememberUpdatedState`.
-echo "━━━ [12/14] Stale-closure guard ━━━"
+echo "━━━ [12/15] Stale-closure guard ━━━"
 if python3 scripts/scan/stale_closure_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -242,7 +242,7 @@ fi
 #   test, no log. User-reported 2026-09-20 (skill + memory editors) after the
 #   same family had been patched piecemeal 4+ times (BrowserSettingsSheet /
 #   MCPIntegrations GH#44 / EnvironmentVariables / SettingsComponents T183).
-echo "━━━ [13/14] IME-inset guard ━━━"
+echo "━━━ [13/15] IME-inset guard ━━━"
 if python3 scripts/scan/ime_inset_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -263,8 +263,27 @@ fi
 #   unreachable at once. 2026-09-20: a 1.6MB request sat 272s with no byte back.
 #   No test can catch this (it would have to wait 30 real minutes), so it has
 #   to be a static judgement.
-echo "━━━ [14/14] Stream-flow dispatch guard ━━━"
+echo "━━━ [14/15] Stream-flow dispatch guard ━━━"
 if python3 scripts/scan/stream_flow_dispatch_guard.py "$ROOT"; then
+    PASS=$((PASS + 1))
+    echo ""
+else
+    RC=1
+    FAIL=$((FAIL + 1))
+    echo ""
+fi
+
+# --- 15. Prefs change-listener holder guard (WeakHashMap collection) ---
+#   AOSP SharedPreferencesImpl keeps listeners in a WeakHashMap whose value is a
+#   sentinel that does NOT reference the key. A listener passed as a bare lambda
+#   argument therefore has no strong reference: the GC collects it and the
+#   callback silently stops firing, never re-registered. F-134: this was live in
+#   ConfigBuiltins, so `minis-config set runtime.shellOutputKb 512` returned
+#   ok:true while every reader kept serving the primed default (128 KB) until
+#   process restart. Unobservable at runtime (no exception, no log), so it has
+#   to be a static judgement.
+echo "━━━ [15/15] Prefs listener holder guard ━━━"
+if python3 scripts/scan/prefs_listener_holder_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
 else

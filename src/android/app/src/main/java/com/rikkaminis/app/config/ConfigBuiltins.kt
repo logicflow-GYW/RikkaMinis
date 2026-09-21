@@ -1,6 +1,7 @@
 package com.rikkaminis.app.config
 
 import android.content.Context
+import android.content.SharedPreferences
 import com.rikkaminis.app.config.collections.EnvVarsCollection
 import com.rikkaminis.app.config.collections.GroupsCollection
 import com.rikkaminis.app.config.collections.ModelsCollection
@@ -27,6 +28,24 @@ import java.util.TimeZone
  * `ConfigRegistry+Builtins.swift`.
  */
 internal object ConfigBuiltins {
+
+    /**
+     * [F-134] Strong holder for the runtime-limits change listener.
+     *
+     * AOSP `SharedPreferencesImpl` keeps its listeners in a
+     * `WeakHashMap<OnSharedPreferenceChangeListener, Object>` whose value is a
+     * static sentinel that does NOT reference the key. A listener created as a
+     * bare lambda *argument* therefore has no strong reference anywhere: the
+     * registering frame returns, the GC collects it, and the callback silently
+     * stops firing — it is never re-registered. That is exactly the "changed
+     * but takes effect never" bug the registration exists to prevent, so the
+     * listener has to be held by a field. This object lives for the process, so
+     * the reference is permanent by construction; the captured context is the
+     * application context (also process-scoped, so no leak).
+     *
+     * Guard: `scripts/scan/prefs_listener_holder_guard.py`.
+     */
+    @Volatile private var runtimeLimitsListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
 
     /**
      * [T8-2] Dependency-injected registration. The config layer must not
@@ -149,13 +168,18 @@ internal object ConfigBuiltins {
         // Re-prime on any write to this file: cheap (17 getInts), immediate,
         // and preserves the run-consistency semantics (runs snapshot at
         // runAgentLoop entry, so an in-flight run still keeps its budget).
-        limits.registerOnSharedPreferenceChangeListener { _, _ ->
-            com.rikkaminis.app.data.AgentRuntimeLimitsPrefs.prime(
-                // The listener callback holds a strong ref to `limits`, whose
-                // owning Context is the application context — safe.
-                context.applicationContext,
-            )
+        //
+        // [F-134] The listener is stored in `runtimeLimitsListener`, NOT passed
+        // as a bare lambda: SharedPreferencesImpl holds listeners weakly, so an
+        // unheld lambda is collected by the GC and the callback silently stops
+        // firing (see the field's KDoc). Registration is idempotent per
+        // (prefs, listener) pair, so re-entering registerInto is harmless.
+        val appCtx = context.applicationContext
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+            com.rikkaminis.app.data.AgentRuntimeLimitsPrefs.prime(appCtx)
         }
+        runtimeLimitsListener = listener
+        limits.registerOnSharedPreferenceChangeListener(listener)
         val L = com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
         r.register(PrefsIntField(
             path = "runtime.maxTurns",

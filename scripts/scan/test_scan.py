@@ -929,6 +929,117 @@ def test_stream_flow_dispatch():
     shutil.rmtree(escaped)
 
 
+def test_prefs_listener_holder():
+    print("━━━ prefs_listener_holder_guard ━━━")
+    tmp = tempfile.mkdtemp()
+    good = os.path.join(tmp, "good")
+    os.makedirs(good)
+
+    # Positive: named field holder (the F-240 shape).
+    with open(os.path.join(good, "Good.kt"), "w") as f:
+        f.write("""
+import android.content.SharedPreferences
+class Good(private val prefs: SharedPreferences) {
+    private val prefsListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> refresh() }
+    init { prefs.registerOnSharedPreferenceChangeListener(prefsListener) }
+    private fun refresh() {}
+}
+""")
+    code, out = run_scanner("prefs_listener_holder_guard.py", good)
+    check("named field holder passes (exit 0)", code == 0, f"exit={code}\n{out}")
+
+    # Negative A: the exact hazard -- trailing-lambda call (NO parentheses).
+    # This is the shape that shipped in ConfigBuiltins.kt:152, and the shape an
+    # earlier version of this guard silently skipped.
+    bad = os.path.join(tmp, "bad")
+    os.makedirs(bad)
+    with open(os.path.join(bad, "Bad.kt"), "w") as f:
+        f.write("""
+import android.content.SharedPreferences
+object Bad {
+    fun reg(prefs: SharedPreferences) {
+        prefs.registerOnSharedPreferenceChangeListener { _, _ -> refresh() }
+    }
+    private fun refresh() {}
+}
+""")
+    code, out = run_scanner("prefs_listener_holder_guard.py", bad)
+    check("trailing-lambda inline hazard fails (exit != 0)", code != 0, f"exit={code}\n{out}")
+    check("hazard is reported as INLINE", "INLINE" in out, out[:400])
+
+    # Negative B: parenthesised anonymous-listener argument, also unheld.
+    bad2 = os.path.join(tmp, "bad2")
+    os.makedirs(bad2)
+    with open(os.path.join(bad2, "Bad2.kt"), "w") as f:
+        f.write("""
+import android.content.SharedPreferences
+object Bad2 {
+    fun reg(prefs: SharedPreferences) {
+        prefs.registerOnSharedPreferenceChangeListener(
+            SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> refresh() })
+    }
+    private fun refresh() {}
+}
+""")
+    code, out = run_scanner("prefs_listener_holder_guard.py", bad2)
+    check("parenthesised anonymous listener fails (exit != 0)", code != 0, f"exit={code}\n{out}")
+
+    # Negative C: named local that is never stored anywhere -- looks held to a
+    # naive reader, but nothing keeps it alive past the frame.
+    bad3 = os.path.join(tmp, "bad3")
+    os.makedirs(bad3)
+    with open(os.path.join(bad3, "Bad3.kt"), "w") as f:
+        f.write("""
+import android.content.SharedPreferences
+object Bad3 {
+    fun reg(prefs: SharedPreferences) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> refresh() }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+    }
+    private fun refresh() {}
+}
+""")
+    code, out = run_scanner("prefs_listener_holder_guard.py", bad3)
+    check("unheld named local fails (exit != 0)", code != 0, f"exit={code}\n{out}")
+
+    # Positive: named local that IS stored into a field.
+    good2 = os.path.join(tmp, "good2")
+    os.makedirs(good2)
+    with open(os.path.join(good2, "Good2.kt"), "w") as f:
+        f.write("""
+import android.content.SharedPreferences
+object Good2 {
+    @Volatile private var listener: SharedPreferences.OnSharedPreferenceChangeListener? = null
+    fun reg(prefs: SharedPreferences) {
+        val l = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> refresh() }
+        listener = l
+        prefs.registerOnSharedPreferenceChangeListener(l)
+    }
+    private fun refresh() {}
+}
+""")
+    code, out = run_scanner("prefs_listener_holder_guard.py", good2)
+    check("local stored into a field passes (exit 0)", code == 0, f"exit={code}\n{out}")
+
+    # Escape hatch.
+    esc = os.path.join(tmp, "esc")
+    os.makedirs(esc)
+    with open(os.path.join(esc, "Esc.kt"), "w") as f:
+        f.write("""
+import android.content.SharedPreferences
+object Esc {
+    fun reg(prefs: SharedPreferences) {
+        // prefs-listener-ok: held by the caller for the screen's lifetime
+        prefs.registerOnSharedPreferenceChangeListener { _, _ -> refresh() }
+    }
+    private fun refresh() {}
+}
+""")
+    code, out = run_scanner("prefs_listener_holder_guard.py", esc)
+    check("prefs-listener-ok escape hatch passes (exit 0)", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(tmp)
+
 def test_real_repo():
     print("━━━ real repo tree (must be clean) ━━━")
     for script in (
@@ -942,6 +1053,7 @@ def test_real_repo():
         "stale_closure_guard.py",
         "ime_inset_guard.py",
         "stream_flow_dispatch_guard.py",
+        "prefs_listener_holder_guard.py",
     ):
         code, out = run_scanner(script, REPO_ROOT)
         check(f"{script} on real repo exits 0", code == 0, f"exit={code}\n{out[:2000]}")
@@ -964,6 +1076,7 @@ def main():
     test_stale_closure()
     test_ime_inset()
     test_stream_flow_dispatch()
+    test_prefs_listener_holder()
     test_real_repo()
     print("")
     print(f"{'❌ FAILURES: ' + str(FAIL) if FAIL else '✅ ALL ' + str(PASS) + ' CASES PASS'}")
