@@ -21,12 +21,6 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
@@ -38,8 +32,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.rikkaminis.app.R
 import com.rikkaminis.app.data.repository.MemoryRepository
-import com.rikkaminis.app.ui.theme.ChatColors
+import com.rikkaminis.app.ui.components.MemoryFileViewerContent
 import com.rikkaminis.app.ui.components.MinisTextButton
+import com.rikkaminis.app.ui.theme.ChatColors
 
 /**
  * Stateless detail body composables used by [SessionMemorySheet] when a row
@@ -68,7 +63,6 @@ fun MemoryFileViewerBody(
     showSavedToast: Boolean,
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
-        val scrollState = rememberScrollState()
         if (isEditing) {
             BasicTextField(
                 value = editedContent,
@@ -84,117 +78,21 @@ fun MemoryFileViewerBody(
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
             )
         } else {
-            SelectionContainer(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(scrollState)
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-            ) {
-                LazyRevealMemoryTextBody(initialContent = initialContent, scrollState = scrollState)
-            }
+            // [T-android-memory-file-jank] Was SelectionContainer +
+            // verticalScroll + LazyRevealMemoryTextBody, which joined every
+            // revealed chunk into ONE Text. That only deferred the cliff: the
+            // window grows +200 lines (~40KB) per reveal, so 2-3 reveals put
+            // the single Text back over the ~100KB threshold where each frame
+            // costs 150-250ms. MemoryFileViewerContent virtualizes instead, so
+            // only on-screen chunks are ever measured.
+            MemoryFileViewerContent(
+                text = initialContent,
+                emptyText = stringResource(R.string.memory_file_empty),
+            )
         }
 
         if (showSavedToast) SavedToast(modifier = Modifier.align(Alignment.BottomCenter))
     }
-}
-
-// ---------------------------------------------------------------------------
-// Lazy reveal for read-only memory file viewing.
-//
-// [T-android-memory-lazy-render] Memory files (GLOBAL.md / daily logs) are
-// plain monospace text of up to ~140K chars. Laying out the whole file in a
-// single Text inside a verticalScroll Column measures+composes everything on
-// first frame, which janks opening the detail view. Here we chunk by lines and
-// reveal a bounded window: the visible prefix is joined into ONE Text so the
-// non-virtualizing verticalScroll only ever lays out what's been revealed.
-// This mirrors ChatToolDetailUI's LazyRevealToolText (same thresholds) without
-// sharing code across files.
-// ---------------------------------------------------------------------------
-
-private const val MEM_LAZY_CHUNK_LINES = 40
-private const val MEM_LAZY_INITIAL_CHUNKS = 5            // ~200 lines
-private const val MEM_LAZY_BATCH_CHUNKS = 5              // +200 lines per reveal
-private const val MEM_LAZY_INITIAL_BYTE_CAP = 10 * 1024 // clamp first window to ~10KB
-
-/** Split [text] into ordered 40-line chunks. Each chunk keeps its interior
- *  newlines; joining the revealed chunks with "\\n" preserves the original
- *  plain-text prefix, including a trailing newline when one is present. */
-private fun memoryChunkByLines(text: String): List<String> {
-    if (text.isEmpty()) return emptyList()
-    val lines = text.split("\n")
-    val out = ArrayList<String>((lines.size / MEM_LAZY_CHUNK_LINES) + 1)
-    var i = 0
-    while (i < lines.size) {
-        val end = minOf(i + MEM_LAZY_CHUNK_LINES, lines.size)
-        out.add(lines.subList(i, end).joinToString("\n"))
-        i = end
-    }
-    return out
-}
-
-/** Initial reveal count: up to [MEM_LAZY_INITIAL_CHUNKS], further clamped so
- *  the first window stays under [MEM_LAZY_INITIAL_BYTE_CAP] (covers a few very
- *  long lines that fit in < 5 chunks but exceed 10KB). */
-private fun memoryInitialRevealChunks(chunks: List<String>): Int {
-    if (chunks.isEmpty()) return 0
-    var count = 0
-    var bytes = 0
-    for (chunk in chunks.take(MEM_LAZY_INITIAL_CHUNKS)) {
-        bytes += chunk.toByteArray(Charsets.UTF_8).size
-        count++
-        if (bytes >= MEM_LAZY_INITIAL_BYTE_CAP) break
-    }
-    return count.coerceAtLeast(1)
-}
-
-/**
- * Renders the read-only memory text with incremental reveal. The revealed
- * prefix is joined into ONE [Text] (see doc above for why), scaled to the
- * viewer's 12sp/18sp monospace style. Grows the window when the user scrolls
- * near the bottom of the currently-revealed content; scrollState is owned by
- * the caller and both the verticalScroll and this component observe it.
- */
-@Composable
-private fun LazyRevealMemoryTextBody(
-    initialContent: String,
-    scrollState: androidx.compose.foundation.ScrollState,
-    modifier: Modifier = Modifier,
-) {
-    val chunks = remember(initialContent) { memoryChunkByLines(initialContent) }
-    // Reset the reveal window whenever the underlying text changes.
-    var revealed by remember(initialContent) { mutableStateOf(memoryInitialRevealChunks(chunks)) }
-    val total = chunks.size
-    val shownText = remember(initialContent, revealed) {
-        if (total == 0) {
-            "(empty)"
-        } else {
-            chunks.take(revealed.coerceIn(1, total)).joinToString("\n")
-        }
-    }
-
-    // Auto-grow the window when the user scrolls within ~600px of the bottom of
-    // the currently-revealed content. derivedStateOf keeps the predicate from
-    // recomposing on every scroll pixel; it only flips at the threshold.
-    val nearBottom by remember {
-        derivedStateOf {
-            val max = scrollState.maxValue
-            max > 0 && max != Int.MAX_VALUE && scrollState.value >= max - 600
-        }
-    }
-    LaunchedEffect(nearBottom, revealed, total) {
-        if (nearBottom && revealed < total) {
-            revealed = (revealed + MEM_LAZY_BATCH_CHUNKS).coerceAtMost(total)
-        }
-    }
-
-    Text(
-        text = shownText,
-        fontSize = 12.sp,
-        fontFamily = FontFamily.Monospace,
-        color = ChatColors.primaryText,
-        lineHeight = 18.sp,
-        modifier = modifier,
-    )
 }
 
 @Composable

@@ -25,6 +25,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -52,6 +53,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import com.rikkaminis.app.data.repository.MemoryRepository
 import com.rikkaminis.app.ui.components.MemoryFileEditorContent
+import com.rikkaminis.app.ui.components.MemoryFileViewerContent
 import java.util.Date
 import kotlinx.coroutines.launch
 
@@ -67,7 +69,8 @@ private const val SOUL_FILE_NAME = com.rikkaminis.app.agent.SoulStore.FILE_NAME
 /**
  * Settings-level memory file management.
  * Lists GLOBAL.md + daily logs in grouped card style.
- * Tapping a file navigates to a full-page editor.
+ * Tapping a file navigates to a full-page viewer (read-only by default,
+ * with an Edit action to switch into the text editor).
  * GLOBAL.md cannot be deleted.
  * Mirrors iOS MemoryManagementView.
  */
@@ -304,17 +307,29 @@ private fun MemoryFileRow(
 
 
 /**
- * Full-page memory file editor, matching iOS MemoryFileEditView.
- * Monospaced text. The Save button stays ALWAYS visible.
+ * Full-page memory file viewer/editor, matching iOS MemoryFileEditView.
+ * Monospaced text.
  *
- * [T-global-memory-save-always-visible] Previously the Save action was
- * gated on a `hasChanges` flag that only flipped true inside the field's
- * onValueChange. Programmatic content changes (paste, IME commit, state
- * restore) don't always route through onValueChange, so Save could fail
- * to appear after a paste until the user typed another key — the exact
- * symptom reported on iOS/macOS (XIN msg 41384). Keeping Save permanently
- * visible removes the dependency entirely; saveFile is idempotent so a
- * no-op Save on unchanged content is harmless.
+ * [T-android-memory-file-jank] Opens READ-ONLY by default; the user taps Edit
+ * to switch to the text field. This is the fix for the reported jank: memory
+ * files grow past 200KB, and the editor path handed the whole string to one
+ * text field, which Compose re-measures in full on every scroll frame
+ * (measured: 60KB -> 26ms/frame, 110KB -> 200ms/frame with the rendered-frame
+ * count collapsing ~6x). The read-only path renders a virtualized LazyColumn
+ * ([MemoryFileViewerContent]) so cost is O(viewport) instead of O(file).
+ *
+ * Opening read-only is also the honest default for these files: GLOBAL.md is
+ * read-mostly, and daily logs are written by the agent, so "browse then
+ * optionally edit" matches how the file is actually used.
+ *
+ * [T-global-memory-save-always-visible] Once editing, the Save button stays
+ * ALWAYS visible. Previously Save was gated on a `hasChanges` flag that only
+ * flipped true inside the field's onValueChange. Programmatic content changes
+ * (paste, IME commit, state restore) don't always route through onValueChange,
+ * so Save could fail to appear after a paste until the user typed another key
+ * — the exact symptom reported on iOS/macOS (XIN msg 41384). Keeping Save
+ * permanently visible removes the dependency entirely; saveFile is idempotent
+ * so a no-op Save on unchanged content is harmless.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -326,6 +341,8 @@ fun MemoryFileEditScreen(
 ) {
     var content by remember { mutableStateOf("") }
     var saveError by remember { mutableStateOf<String?>(null) }
+    // [T-android-memory-file-jank] false = virtualized read-only viewer.
+    var isEditing by remember(fileName) { mutableStateOf(false) }
     val context = LocalContext.current
     // [T-memory-save-toast-feedback] Confirm Save actually committed by
     // flashing a toast — previously the Save tap silently closed nothing,
@@ -349,22 +366,35 @@ fun MemoryFileEditScreen(
                     }
                 },
                 actions = {
-                    // [T-global-memory-save-always-visible] Always render Save —
-                    // no hasChanges gate (see KDoc above).
-                    MinisTextButton(onClick = {
-                        try {
-                            memoryRepository.saveFile(fileName, content)
-                            saveError = null
-                            android.widget.Toast.makeText(
-                                context,
-                                savedToastText,
-                                android.widget.Toast.LENGTH_SHORT,
-                            ).show()
-                        } catch (e: Exception) {
-                            saveError = e.message
+                    // [T-android-memory-file-jank] Edit <-> Save swap. In
+                    // read-only mode we show the pencil; while editing we show
+                    // Save (always visible — see the KDoc note above).
+                    if (!isEditing) {
+                        IconButton(onClick = { isEditing = true }) {
+                            Icon(
+                                Icons.Default.Edit,
+                                contentDescription = stringResource(R.string.memory_action_edit),
+                            )
                         }
-                    }) {
-                        Text(stringResource(R.string.common_save))
+                    } else {
+                        // [T-global-memory-save-always-visible] Always render Save —
+                        // no hasChanges gate (see KDoc above).
+                        MinisTextButton(onClick = {
+                            try {
+                                memoryRepository.saveFile(fileName, content)
+                                saveError = null
+                                android.widget.Toast.makeText(
+                                    context,
+                                    savedToastText,
+                                    android.widget.Toast.LENGTH_SHORT,
+                                ).show()
+                                isEditing = false
+                            } catch (e: Exception) {
+                                saveError = e.message
+                            }
+                        }) {
+                            Text(stringResource(R.string.common_save))
+                        }
                     }
                 },
             )
@@ -386,14 +416,28 @@ fun MemoryFileEditScreen(
         ) {
             Spacer(modifier = Modifier.height(8.dp))
 
-            // [P3-shared-editor] Shared monospace editor, also used by
-            // SessionMemorySheet auto-file detail.
-            MemoryFileEditorContent(
-                value = content,
-                onValueChange = { content = it },
-                errorMessage = saveError,
-                modifier = Modifier.weight(1f),
-            )
+            // [T-android-memory-file-jank] Read-only mode renders the
+            // virtualized viewer; edit mode keeps the shared monospace editor.
+            // The IME padding above stays on the host Column so the caret
+            // scroll-into-view inside the editor behaves as before.
+            if (isEditing) {
+                // [P3-shared-editor] Shared monospace editor, also used by
+                // SessionMemorySheet auto-file detail.
+                MemoryFileEditorContent(
+                    value = content,
+                    onValueChange = { content = it },
+                    errorMessage = saveError,
+                    modifier = Modifier.weight(1f),
+                )
+            } else {
+                // No emptyText here: `content` is "" for the first frame until
+                // the LaunchedEffect readFile lands, so an empty-state label
+                // would flash "Empty" on every open of a non-empty file.
+                MemoryFileViewerContent(
+                    text = content,
+                    modifier = Modifier.weight(1f),
+                )
+            }
 
             // Footer text
             if (isGlobal) {
