@@ -818,6 +818,23 @@ class ChatViewModel(
     val queueWaitingAhead: StateFlow<Int> = _queueWaitingAhead.asStateFlow()
 
     /**
+     * [fix/zero-chunk-cancel] When the in-flight request last went out to the
+     * provider, or 0 when nothing is awaiting a response.
+     *
+     * Distinguishes "the model is thinking" from "the request is out and the
+     * network has gone quiet" — the two states the user could not tell apart on
+     * 2026-09-21, when a wedged proxy held a 255 KB request for 60 s while the
+     * UI showed the same three dots throughout (they found out only by
+     * switching proxies). TypingIndicator renders an elapsed-seconds counter
+     * from this while it is non-zero.
+     *
+     * Set at dispatch and cleared on the first content chunk, so the counter
+     * only ever describes a real network wait — never a finished message.
+     */
+    internal val _awaitingResponseSinceMs = MutableStateFlow(0L)
+    val awaitingResponseSinceMs: StateFlow<Long> = _awaitingResponseSinceMs.asStateFlow()
+
+    /**
      * [audit-0907 B2] Reset the queue-position state. Every streamJob entry
      * point's finally calls this (send / retryLast / resume /
      * runRerunStreamTail / resumeQueueAfterCancel) — the field itself stays
@@ -825,6 +842,15 @@ class ChatViewModel(
      */
     internal fun resetQueueWaitingAhead() {
         _queueWaitingAhead.value = -1
+    }
+
+    /**
+     * [fix/zero-chunk-cancel] Mirror of [resetQueueWaitingAhead] for the
+     * network-wait clock. Called from the same streamJob finally sites so the
+     * counter cannot outlive the turn it describes.
+     */
+    internal fun resetAwaitingResponseSince() {
+        _awaitingResponseSinceMs.value = 0L
     }
 
     val isStreaming: StateFlow<Boolean> = _isStreaming.asStateFlow()
@@ -1198,6 +1224,11 @@ class ChatViewModel(
                     isAwaitingModelResponse = true,
                     thinkingLevel = thinkingLevel,
                 )
+                // [fix/zero-chunk-cancel] Start the network-wait clock at
+                // dispatch: from here until the first content chunk the only
+                // thing that can happen is a network wait, which is exactly
+                // what the elapsed counter is meant to describe.
+                _awaitingResponseSinceMs.value = System.currentTimeMillis()
             }
         }
         override fun updateAssistantMessage(
@@ -3389,6 +3420,8 @@ class ChatViewModel(
                         // state — the run is over, whatever it showed must not
                         // leak into the next one.
                         resetQueueWaitingAhead()
+                        // [fix/zero-chunk-cancel] Same rationale for the network-wait clock.
+                        resetAwaitingResponseSince()
                         // [T-android-overlay-reply-status-34599] Surface
                         // the assistant's most recent reply text to the
                         // overlay BEFORE setInactive so the post-completion
@@ -3665,6 +3698,8 @@ class ChatViewModel(
                         // worker reported while queued must not leak into the
                         // next run's typing indicator.
                         resetQueueWaitingAhead()
+                        // [fix/zero-chunk-cancel] Same rationale for the network-wait clock.
+                        resetAwaitingResponseSince()
                         // [T-android-overlay-reply-status-34599] Surface
                         // the assistant's most recent reply text to the
                         // overlay BEFORE setInactive so the post-completion
