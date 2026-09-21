@@ -337,10 +337,58 @@ interface ChatDao {
     """)
     suspend fun loadMessagesPage(sessionId: String, offset: Int, limit: Int): List<MessageEntity>
 
+    /**
+     * [T-android-sessions-cli-messages-daterange] GH#200. Date-filtered
+     * variant of [loadMessagesPage]. `--start` / `--end` were documented in
+     * the CLI help and honoured by `list` / `search`, but `messages` parsed
+     * neither and silently returned the whole session — which reads as "the
+     * filter worked and matched everything".
+     *
+     * Both bounds are inclusive and independently optional: a NULL bound
+     * means "unbounded on that side", so one query serves all four
+     * combinations instead of four hand-written ones. Ordering matches
+     * [loadMessagesPage] exactly, so a filtered page and an unfiltered page
+     * agree on relative order.
+     */
+    @Query("""
+        SELECT * FROM messages
+        WHERE session_id = :sessionId
+          AND (:startMs IS NULL OR created_at >= :startMs)
+          AND (:endMs IS NULL OR created_at <= :endMs)
+        ORDER BY sort_order ASC, created_at ASC
+        LIMIT :limit OFFSET :offset
+    """)
+    suspend fun loadMessagesPageInRange(
+        sessionId: String,
+        offset: Int,
+        limit: Int,
+        startMs: Long?,
+        endMs: Long?,
+    ): List<MessageEntity>
+
     /** Used by `minis-sessions-cli messages` to surface the total count
      *  alongside the paginated slice so callers can compute `hasMore`. */
     @Query("SELECT COUNT(*) FROM messages WHERE session_id = :sessionId")
     suspend fun messageCountForSession(sessionId: String): Int
+
+    /**
+     * [T-android-sessions-cli-messages-daterange] Count under the SAME range
+     * as [loadMessagesPageInRange]. Pairing the unfiltered count with a
+     * filtered page would make `total` describe the whole session while the
+     * slice covers only the matches, so `hasMore` would lie — the specific
+     * trap called out in the iOS fix this mirrors.
+     */
+    @Query("""
+        SELECT COUNT(*) FROM messages
+        WHERE session_id = :sessionId
+          AND (:startMs IS NULL OR created_at >= :startMs)
+          AND (:endMs IS NULL OR created_at <= :endMs)
+    """)
+    suspend fun messageCountForSessionInRange(
+        sessionId: String,
+        startMs: Long?,
+        endMs: Long?,
+    ): Int
 
     /**
      * [P0-1-drawer-title-visibility] Message counts per session, keyed by
