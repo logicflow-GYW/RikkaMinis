@@ -181,7 +181,11 @@ fun MountedFoldersScreen(
                                     ),
                                 )
                             } else {
-                                pickerLauncher.launch(null)
+                                // [GH#93] Never launch(null): on some ROMs that
+                                // opens at the shared-storage ROOT, where the
+                                // picker greys out "Use this folder" and offers
+                                // no way back up. See initialPickerUri().
+                                pickerLauncher.launch(initialPickerUri())
                             }
                         },
                         enabled = !isAtCapacity,
@@ -662,3 +666,34 @@ private fun sanitize(raw: String): String {
     val cleaned = raw.trim().replace('/', '-').replace(' ', '_')
     return cleaned.ifEmpty { "mount" }
 }
+
+/**
+ * [GH#93] Where the system folder picker should open.
+ *
+ * Returning null (the old behaviour) lets the picker choose, and on some ROMs
+ * that is the shared-storage ROOT — the one place Android refuses to grant
+ * (blocked since Android 11, alongside Android/data and Android/obb). The user
+ * lands on a greyed-out "Use this folder" with no parent left to go back to,
+ * which is exactly what #93 reported.
+ *
+ * `Documents` is chosen because it satisfies all three constraints at once:
+ *  • NOT on Android's blocked list, so it is actually selectable;
+ *  • always present on a real device (a non-existent initial URI is silently
+ *    ignored, which would drop the user back at the broken default);
+ *  • one level below the root, so the breadcrumb still lets them navigate
+ *    anywhere else — this positions the user without deciding for them.
+ *
+ * Media dirs (DCIM/Pictures/Music/Movies) were rejected as too narrow in
+ * meaning, and Download as more "transient scratch" than the long-lived folder
+ * a mount implies.
+ *
+ * `runCatching` because buildDocumentUri throws on a malformed docId; a null
+ * return simply falls back to the picker's own default, i.e. the pre-#93
+ * behaviour rather than a crash.
+ */
+private fun initialPickerUri(): Uri? = runCatching {
+    DocumentsContract.buildDocumentUri(
+        "com.android.externalstorage.documents",
+        "primary:Documents",
+    )
+}.getOrNull()
