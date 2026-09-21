@@ -297,7 +297,7 @@ import com.rikkaminis.app.ui.components.MinisTextButton
  * "starts with the query" is a much stronger intent signal than "contains
  * the query as one word of a long hyphenated name".
  */
-private data class MatchRank(val tier: Int, val position: Int) : Comparable<MatchRank> {
+internal data class MatchRank(val tier: Int, val position: Int) : Comparable<MatchRank> {
     override fun compareTo(other: MatchRank): Int {
         if (tier != other.tier) return tier - other.tier
         // Same rung: the earlier the match starts, the more relevant.
@@ -305,14 +305,14 @@ private data class MatchRank(val tier: Int, val position: Int) : Comparable<Matc
     }
 }
 
-private const val TIER_EXACT = 4
-private const val TIER_PREFIX = 3
-private const val TIER_WORD_PREFIX = 2
-private const val TIER_SUBSTRING = 1
-private const val TIER_SCATTERED = 0
+internal const val TIER_EXACT = 4
+internal const val TIER_PREFIX = 3
+internal const val TIER_WORD_PREFIX = 2
+internal const val TIER_SUBSTRING = 1
+internal const val TIER_SCATTERED = 0
 
 /** Characters that make the following char the start of a word. */
-private const val WORD_SEPARATORS = "-_/.:"
+internal const val WORD_SEPARATORS = "-_/.:"
 
 /**
  * Score [text] against [query], or null when it does not match at all.
@@ -327,7 +327,7 @@ private const val WORD_SEPARATORS = "-_/.:"
  * *accept/reject* decision (substring, else all query chars in order); the
  * tier ladder is this repo's own addition.
  */
-private fun matchScore(text: String, query: String): MatchRank? {
+internal fun matchScore(text: String, query: String): MatchRank? {
     if (query.isEmpty()) return null
     val t = text.lowercase()
     val q = query.lowercase()
@@ -364,7 +364,7 @@ private fun matchScore(text: String, query: String): MatchRank? {
  * Cost: O(n log n) per list (one rank per item, then one sort), versus the
  * O(n) filter it replaces. Lists here are one provider's models (tens).
  */
-private fun <T> rankMatches(items: List<T>, query: String, textOf: (T) -> List<String>): List<T> =
+internal fun <T> rankMatches(items: List<T>, query: String, textOf: (T) -> List<String>): List<T> =
     items
         .mapNotNull { item ->
             val rank = textOf(item).mapNotNull { matchScore(it, query) }.maxOrNull()
