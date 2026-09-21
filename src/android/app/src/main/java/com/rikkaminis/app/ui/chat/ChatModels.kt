@@ -357,8 +357,13 @@ internal fun applyCompactGreyedRange(messages: List<ChatMessage>, cutoffId: Stri
         .filterNot { msg ->
             // Drop prior compact-divider rows; appendSystemInfo re-adds the
             // new one.
-            msg.role == "system" &&
-                msg.toolBlocks.firstOrNull()?.toolName == "compact"
+            // [fix/silent-auto-compact] Was an inline `toolName == "compact"`
+            // test, which also matched the hard-trim / context-full /
+            // compact-failure notices that share that iconKind — so a manual
+            // compact silently deleted a "context reached the limit" notice
+            // the user had just been shown. Delegates to the shared predicate
+            // so the two paths that filter this list can never drift apart.
+            msg.isCompactDividerRow()
         }
         .map { msg ->
             if (msg.role == "system") msg
@@ -416,28 +421,57 @@ internal fun applyCompactGreyedRange(messages: List<ChatMessage>, cutoffId: Stri
  * the marker it writes still drives `effectiveAgentHistory()`, but nothing
  * about the fold should be visible. This removes
  *
- *  - the divider card rows (`role == "system"` carrying `toolName ==
- *    "compact"`), which during a long agent run landed at the transcript TAIL
- *    — the in-loop compact fires at a turn boundary where no row is "live", so
- *    `flushPendingSysInfo`'s in-flight anchor missed and fell back to
- *    appending — leaving the running answer growing ABOVE the card; and
+ *  - the divider card row, which during a long agent run landed at the
+ *    transcript TAIL — the in-loop compact fires at a turn boundary where no
+ *    row is "live", so `flushPendingSysInfo`'s in-flight anchor missed and
+ *    fell back to appending — leaving the running answer growing ABOVE the
+ *    card; and
  *  - the `isCompactedHistory` fade flags, including any a previous MANUAL
  *    compact set: the marker just moved forward, so the old boundary no
  *    longer describes what is actually folded.
  *
- * Every OTHER system row is preserved. Context-full notices, hard-trim
- * notices and error banners are separate features that must keep surfacing —
- * a blanket "drop all system rows" would silently delete them.
+ * Every OTHER system row is preserved — and that constraint is what makes the
+ * divider predicate non-obvious. `appendSystemInfo` sets `toolName = iconKind`
+ * (ChatViewModel.kt:1871), and `iconKind = "compact"` is shared by THREE
+ * features that must keep surfacing: the hard-trim notice
+ * (ChatContextWindow.kt:430), the context-full notice
+ * (ChatContextWindowExt.kt:316) and the compact-failure banner
+ * (ChatSessionLifecycle.kt:418). Matching on `toolName` alone therefore
+ * deleted all three along with the card — the KDoc above promised the
+ * opposite until this was fixed.
+ *
+ * The divider is the only one of the four that carries a summary PAYLOAD
+ * (`appendSystemInfo(..., payload = summary)` at ChatSessionLifecycle.kt:408
+ * is the sole production caller that passes one; `toolArgs = payload.orEmpty()`
+ * at ChatViewModel.kt:1875). Requiring a non-empty `toolArgs` separates the
+ * card from the notices exactly.
+ *
+ * ponytail: divider identified by "compact row WITH payload" rather than a
+ * dedicated iconKind | 天花板: a future `iconKind = "compact"` notice that
+ * passes a payload would be stripped with the card | 升级触发: a third
+ * production `appendSystemInfo(..., "compact", payload = ...)` call site
+ * appears, or a notice is reported missing after an auto-compact.
  *
  * Pure so the boundary rules are JVM-testable (same pattern as
  * [applyCompactGreyedRange]); the live path calls it with `_messages.value`.
  */
 internal fun neutralizeCompactArtifacts(messages: List<ChatMessage>): List<ChatMessage> =
     messages
-        .filterNot { msg ->
-            msg.role == "system" &&
-                msg.toolBlocks.firstOrNull()?.toolName == "compact"
-        }
+        .filterNot { msg -> msg.isCompactDividerRow() }
         .map { msg ->
             if (msg.isCompactedHistory) msg.copy(isCompactedHistory = false) else msg
         }
+
+/**
+ * [fix/silent-auto-compact] True for the compact DIVIDER CARD row — and only
+ * for it. See [neutralizeCompactArtifacts] for why the payload is the
+ * discriminator rather than `toolName` alone.
+ *
+ * Shared with the tests so the production predicate cannot drift away from
+ * the one under assertion.
+ */
+internal fun ChatMessage.isCompactDividerRow(): Boolean {
+    if (role != "system") return false
+    val block = toolBlocks.firstOrNull() ?: return false
+    return block.toolName == "compact" && block.toolArgs.isNotEmpty()
+}

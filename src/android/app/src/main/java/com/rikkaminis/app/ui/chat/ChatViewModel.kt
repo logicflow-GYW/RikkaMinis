@@ -2058,11 +2058,12 @@ class ChatViewModel(
             // Drop any stale compact-divider system rows first; the reload
             // path will re-insert one only if the new latest marker calls
             // for it.
+            // [fix/silent-auto-compact] Shares the divider predicate with the
+            // compact path (see [isCompactDividerRow]) — the inline copy here
+            // matched the hard-trim / context-full / failure notices too, so
+            // reverting a compact also wiped an unrelated notice.
             withContext(Dispatchers.Main) {
-                _messages.value = _messages.value.filterNot { msg ->
-                    msg.role == "system" &&
-                        msg.toolBlocks.firstOrNull()?.toolName == "compact"
-                }
+                _messages.value = _messages.value.filterNot { it.isCompactDividerRow() }
             }
 
             // Reload session messages — the existing path runs Phase 2.5

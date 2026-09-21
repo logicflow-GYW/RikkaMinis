@@ -21,6 +21,18 @@ import org.junit.Test
  *     MANUAL compact had dimmed. A silent pass that left stale flags would
  *     leave the transcript half-dimmed forever (the marker moved forward, so
  *     the old boundary no longer describes what is folded).
+ *
+ * [fix/silent-auto-compact-notice-leak] The fixtures here must be built from
+ * PRODUCTION shapes, and the first version was not. `appendSystemInfo` sets
+ * `toolName = iconKind` (ChatViewModel.kt:1871), and the hard-trim notice
+ * (ChatContextWindow.kt:430), the context-full notice
+ * (ChatContextWindowExt.kt:316) and the failure banner
+ * (ChatSessionLifecycle.kt:418) all pass `iconKind = "compact"` — the SAME
+ * value the divider uses. The old fixture gave the trim notice
+ * `toolName = "trim"`, a value no production call site ever produces, so the
+ * test stayed green while the real notice was being deleted with the card.
+ * `row(toolName = ...)` below is therefore only ever called with the literal
+ * values the app actually emits.
  */
 class SilentCompactTest {
 
@@ -29,15 +41,25 @@ class SilentCompactTest {
         role: String = "user",
         isCompactedHistory: Boolean = false,
         toolName: String? = null,
+        payload: String = "",
     ): ChatMessage = ChatMessage(
         id = id,
         role = role,
         content = "body of $id",
         isCompactedHistory = isCompactedHistory,
         toolBlocks = if (toolName != null) {
-            listOf(AssistantBlock(id = "$id-block", kind = "info", toolName = toolName))
+            listOf(AssistantBlock(id = "$id-block", kind = "info", toolName = toolName, toolArgs = payload))
         } else emptyList(),
     )
+
+    /** The divider card: `iconKind = "compact"` + the summary payload. */
+    private fun divider(id: String) = row(id, role = "system", toolName = "compact", payload = "SUMMARY")
+
+    /**
+     * A notice sharing the divider's iconKind but carrying no payload —
+     * the shape of the hard-trim / context-full / failure rows.
+     */
+    private fun compactNotice(id: String) = row(id, role = "system", toolName = "compact")
 
     private fun neutralize(messages: List<ChatMessage>) = neutralizeCompactArtifacts(messages)
 
@@ -47,26 +69,41 @@ class SilentCompactTest {
     fun `every compact divider is dropped`() {
         val h = listOf(
             row("u1"),
-            row("d1", role = "system", toolName = "compact"),
+            divider("d1"),
             row("a1", role = "assistant"),
-            row("d2", role = "system", toolName = "compact"),
+            divider("d2"),
         )
         val out = neutralize(h)
         assertEquals(listOf("u1", "a1"), out.map { it.id })
     }
 
     @Test
+    fun `a compact notice without a payload survives the strip`() {
+        // [fix/silent-auto-compact-notice-leak] This is the case the first
+        // fixture missed: a system row whose toolName IS "compact" (as the
+        // hard-trim / context-full notices are) but which is not the card.
+        // Dropping it silently deleted a "context reached the limit" notice.
+        val h = listOf(
+            row("u1"),
+            compactNotice("trim"),
+            divider("d1"),
+            row("u2"),
+        )
+        val out = neutralize(h)
+        assertEquals(listOf("u1", "trim", "u2"), out.map { it.id })
+    }
+
+    @Test
     fun `other system rows survive the strip`() {
-        // A context-full notice and a trim notice are NOT compact dividers —
-        // stripping them would silently delete unrelated features.
         val h = listOf(
             row("u1"),
             row("notice", role = "system", toolName = "info"),
-            row("trim", role = "system", toolName = "trim"),
-            row("d1", role = "system", toolName = "compact"),
+            row("memory", role = "system", toolName = "memory"),
+            row("thinking", role = "system", toolName = "thinking"),
+            divider("d1"),
         )
         val out = neutralize(h)
-        assertEquals(listOf("u1", "notice", "trim"), out.map { it.id })
+        assertEquals(listOf("u1", "notice", "memory", "thinking"), out.map { it.id })
     }
 
     @Test
@@ -76,6 +113,15 @@ class SilentCompactTest {
         val h = listOf(row("u1"), row("empty", role = "system"))
         val out = neutralize(h)
         assertEquals(listOf("u1", "empty"), out.map { it.id })
+    }
+
+    @Test
+    fun `a divider row keeps its payload so the detail sheet is reachable`() {
+        // The divider is identified BY its payload; assert the two are still
+        // paired so a future refactor cannot make every row look like a card.
+        assertTrue(divider("d1").isCompactDividerRow())
+        assertFalse(compactNotice("n1").isCompactDividerRow())
+        assertFalse(row("u1").isCompactDividerRow())
     }
 
     // ── graying cleared ────────────────────────────────────────────
@@ -95,7 +141,7 @@ class SilentCompactTest {
     fun `content of every surviving row is preserved`() {
         val h = listOf(
             row("u1", isCompactedHistory = true),
-            row("d1", role = "system", toolName = "compact"),
+            divider("d1"),
             row("a1", role = "assistant"),
         )
         val out = neutralize(h)
@@ -115,14 +161,15 @@ class SilentCompactTest {
     fun `relative order of surviving rows is unchanged`() {
         val h = listOf(
             row("u1"),
-            row("d1", role = "system", toolName = "compact"),
+            divider("d1"),
             row("u2"),
-            row("d2", role = "system", toolName = "compact"),
+            compactNotice("n1"),
+            divider("d2"),
             row("u3"),
             row("a1", role = "assistant"),
         )
         val out = neutralize(h)
-        assertEquals(listOf("u1", "u2", "u3", "a1"), out.map { it.id })
+        assertEquals(listOf("u1", "u2", "n1", "u3", "a1"), out.map { it.id })
     }
 
     @Test

@@ -24,6 +24,7 @@ class ChatCompactGrayingTest {
         isQueued: Boolean = false,
         sourceDbIds: List<String> = emptyList(),
         toolName: String? = null,
+        payload: String = "",
     ): ChatMessage = ChatMessage(
         id = id,
         role = role,
@@ -33,7 +34,7 @@ class ChatCompactGrayingTest {
         isQueued = isQueued,
         sourceDbIds = sourceDbIds,
         toolBlocks = if (toolName != null) {
-            listOf(AssistantBlock(id = "$id-block", kind = "tool_use", toolName = toolName))
+            listOf(AssistantBlock(id = "$id-block", kind = "tool_use", toolName = toolName, toolArgs = payload))
         } else emptyList(),
     )
 
@@ -146,7 +147,11 @@ class ChatCompactGrayingTest {
     @Test
     fun `system rows are never greyed and prior dividers are dropped`() {
         val h = listOf(
-            row("div", "system", toolName = "compact"), // a prior divider: dropped
+            // [fix/silent-auto-compact-notice-leak] The payload is what
+            // distinguishes a divider from a notice sharing its iconKind —
+            // see isCompactDividerRow. A fixture without one is not a
+            // production shape.
+            row("div", "system", toolName = "compact", payload = "SUMMARY"), // a prior divider: dropped
             row("notice", "system"),                          // kept, never greyed
             row("u1"),
             row("a1", "assistant"),
@@ -161,6 +166,25 @@ class ChatCompactGrayingTest {
         assertTrue(out[2].isCompactedHistory)
         assertFalse("the kept tail stays clear", out[3].isCompactedHistory)
         assertFalse(out[4].isCompactedHistory)
+    }
+
+    @Test
+    fun `a notice sharing the divider iconKind is not dropped with it`() {
+        // [fix/silent-auto-compact-notice-leak] The hard-trim / context-full /
+        // failure notices are `appendSystemInfo(..., iconKind = "compact")`
+        // rows — the SAME toolName as the divider. The old inline predicate
+        // matched on toolName alone and deleted them along with the card, so a
+        // manual compact silently swallowed a "context reached the limit"
+        // notice the user had just been shown. Only the divider carries a
+        // summary payload.
+        val h = listOf(
+            row("trim", "system", toolName = "compact"),                       // notice: kept
+            row("div", "system", toolName = "compact", payload = "SUMMARY"),   // divider: dropped
+            row("u1"),
+            row("a1", "assistant"),
+        )
+        val out = applyCompactGreyedRange(h, "a1")
+        assertEquals(listOf("trim", "u1", "a1"), out.map { it.id })
     }
 
     @Test

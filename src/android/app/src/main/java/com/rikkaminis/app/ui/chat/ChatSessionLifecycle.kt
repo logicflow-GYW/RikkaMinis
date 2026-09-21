@@ -114,7 +114,13 @@ internal fun ChatViewModel.compactAll(
                 "anchorOverride=$anchorIdxOverride firstId=${history.firstOrNull()?.dbMessageId?.take(8)} " +
                 "lastId=${history.lastOrNull()?.dbMessageId?.take(8)})",
         )
-        appendSystemInfo(context.getString(R.string.sysmsg_compact_no_persisted), "compact")
+        // [fix/silent-auto-compact] Gated like the other "nothing to do"
+        // aborts (already-compacted / empty range / busy). The commit that
+        // introduced the silent contract lists this branch among them, but
+        // the gate was never added — and unlike the others it is the branch a
+        // STUCK anchor lands in on every turn, so the in-loop path posted a
+        // "no persisted anchor" card mid-answer on each auto-compact attempt.
+        if (!silent) appendSystemInfo(context.getString(R.string.sysmsg_compact_no_persisted), "compact")
         return
     }
 

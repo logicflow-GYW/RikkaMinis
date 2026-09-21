@@ -6,8 +6,6 @@ import com.rikkaminis.app.data.ContextPolicy
 import com.rikkaminis.app.conversation.ContextCompactor
 import com.rikkaminis.app.R
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 // [FE-5 batch 8] Context management cluster (reloadSessionFromDb /
 // checkContextBeforeSend / maybeTriggerAutoCompact / awaitAutoCompactIfNeeded)
@@ -304,20 +302,17 @@ internal suspend fun ChatViewModel.maybeAutoCompactInLoop(
                 "tokens=$lastContextTokens window=$contextWindow compactLine=${policy.compactThreshold}",
         )
     }
-    // [fix/audit0917-b8] No stamp here — compactAll stamps the retry gate at
-    // the point the compact actually starts, so a pre-flight abort no longer
-    // disables auto-compaction for the whole minIntervalMs window.
-    // [fix/diff-audit-0904-H1] appendSystemInfo is an unlocked
-    // read-modify-write over _messages + 5 pendingSysInfo* vars; its KDoc
-    // contract is "runs on Main". This extension is called from the agent
-    // loop, which runs on Dispatchers.IO — hop to Main for the UI write
-    // instead of racing the coalesce-flush job.
-    withContext(Dispatchers.Main) {
-        appendSystemInfo(
-            text = context.getString(R.string.sysmsg_context_full_auto, lastContextTokens, contextWindow),
-            iconKind = "compact",
-        )
-    }
+    // [fix/silent-auto-compact] No "context is getting full" notice on this
+    // path either — see maybeTriggerAutoCompact for the rationale. The
+    // commit that introduced the silent contract removed it from the SEND
+    // path only, which left the in-loop path — the one that fires mid-answer
+    // during long agent runs, i.e. the exact case the change is about —
+    // still posting it. Worse, on the abort branches of compactAll
+    // (already-compacted / empty range) `neutralizeCompactArtifacts` never
+    // runs, so the notice could not be swept up afterwards even in principle:
+    // `appendSystemInfo` only queues the block into the 200 ms coalesce
+    // buffer, so it is not in `_messages` when the silent pass reads it. The
+    // log line below keeps the diagnostic trace.
     AppLogger.info(
         ChatViewModel.TAG,
         "[AutoCompactLoop] triggering (tokens=$lastContextTokens window=$contextWindow tail=$tail " +
