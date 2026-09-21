@@ -104,7 +104,19 @@ class AppendMessageSortOrderRetryTest {
         override suspend fun runSessionsMetaQuery(query: androidx.sqlite.db.SupportSQLiteQuery): List<SessionMetaRow> = emptyList()
         override suspend fun runMessageSearchQuery(query: androidx.sqlite.db.SupportSQLiteQuery): List<MessageSearchRow> = emptyList()
         override suspend fun loadMessagesPage(sessionId: String, offset: Int, limit: Int): List<MessageEntity> = emptyList()
+        override suspend fun loadMessagesPageInRange(
+            sessionId: String,
+            offset: Int,
+            limit: Int,
+            startMs: Long?,
+            endMs: Long?,
+        ): List<MessageEntity> = error("loadMessagesPageInRange is not stubbed in this test")
         override suspend fun messageCountForSession(sessionId: String): Int = 0
+        override suspend fun messageCountForSessionInRange(
+            sessionId: String,
+            startMs: Long?,
+            endMs: Long?,
+        ): Int = error("messageCountForSessionInRange is not stubbed in this test")
         override fun messageCountsPerSession(): Flow<Map<String, Int>> = flowOf(emptyMap())
         override suspend fun deleteEmptySessions(activeIds: List<String>, staleBefore: Long): Int = 0
     }

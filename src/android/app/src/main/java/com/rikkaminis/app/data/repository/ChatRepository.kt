@@ -817,8 +817,18 @@ class ChatRepository(
         // documented 600; `minis-sessions-cli messages --full` passes
         // MESSAGE_TEXT_MAX_FULL (50000) so exports aren't silently gutted.
         maxChars: Int = MESSAGE_TEXT_MAX,
+        // [T-android-sessions-cli-messages-daterange] GH#200. Inclusive,
+        // independently optional created_at bounds; null = unbounded on that
+        // side, so existing callers keep the previous behaviour untouched
+        // (they don't pass these, and the two-arg fast path is taken).
+        startMs: Long? = null,
+        endMs: Long? = null,
     ): List<MessagePageItem> {
-        val rows = dao.loadMessagesPage(sessionId, offset, limit)
+        val rows = if (startMs == null && endMs == null) {
+            dao.loadMessagesPage(sessionId, offset, limit)
+        } else {
+            dao.loadMessagesPageInRange(sessionId, offset, limit, startMs, endMs)
+        }
         return rows.mapNotNull { e ->
             val text = extractTextForOffload(e.partsJson)
             if (text.isBlank()) return@mapNotNull null
@@ -832,6 +842,21 @@ class ChatRepository(
     }
 
     suspend fun messageCount(sessionId: String): Int = dao.messageCountForSession(sessionId)
+
+    /**
+     * [T-android-sessions-cli-messages-daterange] Count under the same
+     * optional range [loadMessagePage] filters by, so the `total` a caller
+     * reports and the slice it returned always describe the same set.
+     *
+     * The null/null fast path keeps the pre-existing query (and its plan)
+     * for callers that pass no range, mirroring [loadMessagePage].
+     */
+    suspend fun messageCountInRange(sessionId: String, startMs: Long?, endMs: Long?): Int =
+        if (startMs == null && endMs == null) {
+            dao.messageCountForSession(sessionId)
+        } else {
+            dao.messageCountForSessionInRange(sessionId, startMs, endMs)
+        }
 
     /**
      * Paginated raw [MessageEntity] page — used by [com.rikkaminis.app.share.ChatExporter]

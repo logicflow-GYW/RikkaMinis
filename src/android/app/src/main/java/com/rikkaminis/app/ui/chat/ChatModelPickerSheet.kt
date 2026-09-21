@@ -274,23 +274,106 @@ import com.rikkaminis.app.ui.browser.BrowserSheet
 import com.rikkaminis.app.ui.theme.ChatColors
 import com.rikkaminis.app.ui.components.MinisTextButton
 
+// ── [S3-model-picker-rank] begin — pure ranking helpers ──────────────────
+// Extracted verbatim by the JVM harness (scripts/tests), so everything
+// between these two markers must stay Android-free and dependency-free
+// (String/List only). Do not import anything here.
+
 /**
- * Fuzzy match: substring first, then all query chars appear in order.
- * Matches iOS SessionModelPicker.fuzzyMatch.
+ * How closely [text] matches [query]. Higher [tier] = stronger match;
+ * [position] is where the match starts (earlier wins ties within a tier).
+ *
+ * Ladder (GH#272 — the picker used to be a pure boolean filter, so
+ * `gpt-4o` and `my-custom-gpt-wrapper` ranked equal and the list order was
+ * whatever the config happened to be in):
+ *
+ *   4 exact          query == text
+ *   3 prefix         text starts with query
+ *   2 word prefix    match starts right after a separator (- _ / . : space)
+ *   1 substring      plain containment
+ *   0 scattered      every query char appears in order, no contiguous run
+ *
+ * The two top rungs are deliberately separate from [TIER_WORD_PREFIX]:
+ * "starts with the query" is a much stronger intent signal than "contains
+ * the query as one word of a long hyphenated name".
  */
-private fun fuzzyMatch(text: String, query: String): Boolean {
-    if (query.isEmpty()) return true
-    val q = query.lowercase()
-    val t = text.lowercase()
-    if (t.contains(q)) return true
-    var idx = 0
-    for (ch in q) {
-        val found = t.indexOf(ch, idx)
-        if (found < 0) return false
-        idx = found + 1
+internal data class MatchRank(val tier: Int, val position: Int) : Comparable<MatchRank> {
+    override fun compareTo(other: MatchRank): Int {
+        if (tier != other.tier) return tier - other.tier
+        // Same rung: the earlier the match starts, the more relevant.
+        return other.position - position
     }
-    return true
 }
+
+internal const val TIER_EXACT = 4
+internal const val TIER_PREFIX = 3
+internal const val TIER_WORD_PREFIX = 2
+internal const val TIER_SUBSTRING = 1
+internal const val TIER_SCATTERED = 0
+
+/** Characters that make the following char the start of a word. */
+internal const val WORD_SEPARATORS = "-_/.:"
+
+/**
+ * Score [text] against [query], or null when it does not match at all.
+ *
+ * A blank query returns null rather than "matches everything": both call
+ * sites below branch on `searchText.isEmpty()` and take the unfiltered
+ * path, so a blank query never reaches here — returning null makes a
+ * future caller that forgets the branch fail loudly (empty list) instead
+ * of silently ranking every row at tier 4.
+ *
+ * Case-insensitive. Matches iOS SessionModelPicker.fuzzyMatch on the
+ * *accept/reject* decision (substring, else all query chars in order); the
+ * tier ladder is this repo's own addition.
+ */
+internal fun matchScore(text: String, query: String): MatchRank? {
+    if (query.isEmpty()) return null
+    val t = text.lowercase()
+    val q = query.lowercase()
+    if (t == q) return MatchRank(TIER_EXACT, 0)
+    val idx = t.indexOf(q)
+    if (idx == 0) return MatchRank(TIER_PREFIX, 0)
+    if (idx > 0) {
+        val prev = t[idx - 1]
+        val tier =
+            if (prev.isWhitespace() || prev in WORD_SEPARATORS) TIER_WORD_PREFIX
+            else TIER_SUBSTRING
+        return MatchRank(tier, idx)
+    }
+    var cursor = 0
+    for (ch in q) {
+        val found = t.indexOf(ch, cursor)
+        if (found < 0) return null
+        cursor = found + 1
+    }
+    return MatchRank(TIER_SCATTERED, 0)
+}
+
+/**
+ * Filter + rank [items] in one pass: keeps only matches, best first.
+ *
+ * [textOf] returns every string an item should be matched against (e.g.
+ * display name *and* model id); an item takes its best rank across them.
+ *
+ * Stability matters here and is load-bearing: `sortedWith` is a stable
+ * sort, so equal ranks keep their incoming order — which is how the
+ * pinned / non-pinned split and the configured provider order survive a
+ * search. Do not swap in an unstable sort.
+ *
+ * Cost: O(n log n) per list (one rank per item, then one sort), versus the
+ * O(n) filter it replaces. Lists here are one provider's models (tens).
+ */
+internal fun <T> rankMatches(items: List<T>, query: String, textOf: (T) -> List<String>): List<T> =
+    items
+        .mapNotNull { item ->
+            val rank = textOf(item).mapNotNull { matchScore(it, query) }.maxOrNull()
+            rank?.let { item to it }
+        }
+        .sortedWith(compareByDescending { it.second })
+        .map { it.first }
+
+// ── [S3-model-picker-rank] end ───────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -332,12 +415,12 @@ internal fun ModelPickerSheet(
         mutableStateOf(allInstanceIds)
     }
 
-    // Filtered groups
+    // Filtered groups — [S3-model-picker-rank] ranked, not just filtered.
     val filteredGroups = remember(groups, searchText) {
         if (searchText.isEmpty()) groups
         else {
             val t0 = System.nanoTime()
-            val result = groups.filter { fuzzyMatch(it.name, searchText) }
+            val result = rankMatches(groups, searchText) { listOf(it.name) }
             val ms = (System.nanoTime() - t0) / 1_000_000.0
             AppLogger.info("ModelPicker", "[ModelPicker] filter groups: ${result.size}/${groups.size}, ${"%.1f".format(ms)}ms")
             result
@@ -362,8 +445,11 @@ internal fun ModelPickerSheet(
                     it.providerInstanceId == instance.id && !it.isHidden
                 }
                 val filtered = if (searchText.isEmpty()) entries
-                else entries.filter {
-                    fuzzyMatch(it.model.displayName, searchText) || fuzzyMatch(it.model.id, searchText)
+                else rankMatches(entries, searchText) {
+                    // Rank on display name and id, keeping the best of the
+                    // two (a query hitting the id still beats a scattered
+                    // hit on the display name).
+                    listOf(it.model.displayName, it.model.id)
                 }
                 val pms = (System.nanoTime() - pt) / 1_000_000.0
                 if (filtered.isNotEmpty()) {

@@ -177,6 +177,13 @@ class SessionsOffloadHandler(
         // matter what the caller passed, gutting transcript exports.
         val full = args.hasFlag("full")
         val maxChars = if (full) ChatRepository.MESSAGE_TEXT_MAX_FULL else ChatRepository.MESSAGE_TEXT_MAX
+        // [T-android-sessions-cli-messages-daterange] GH#200. HELP_TEXT
+        // documents --start / --end and `list` / `search` honour them, but
+        // `messages` parsed neither — the CLI accepted the flags and silently
+        // returned the whole session, which reads as "the filter worked and
+        // matched everything".
+        val startMs = parseDate(args.get("start"))
+        val endMs = parseEndDate(args.get("end"))
 
         val (page, total) = runBlocking {
             // Single coroutine block so the two reads see a consistent
@@ -185,7 +192,12 @@ class SessionsOffloadHandler(
             // returned (e.g. another session interleaving inserts mid-
             // call). Room serializes via the suspending dispatcher so
             // these run sequentially in the same coroutine.
-            repo.loadMessagePage(sessionId, offset, limit, maxChars) to repo.messageCount(sessionId)
+            // Both reads take the SAME date range on purpose: an unfiltered
+            // count next to a filtered page would make `total` describe the
+            // whole session while the slice covers only the matches, so
+            // `hasMore` would lie.
+            repo.loadMessagePage(sessionId, offset, limit, maxChars, startMs, endMs) to
+                repo.messageCountInRange(sessionId, startMs, endMs)
         }
 
         val msgs = JSONArray()
@@ -413,7 +425,8 @@ OUTPUT (messages):
   Each message includes: message_id, role, created_at, text (up to 600 chars
   by default; up to 50000 with --full). Messages longer than the cap carry
   "truncated": true. Response also includes: session_id, offset, limit, full,
-  max_chars, total (total message count).
+  max_chars, total (message count under the same --start/--end range as the
+  returned slice, so hasMore = offset + count < total is always truthful).
 
 WORKFLOW:
   1. Use 'list' or 'list --keywords <topic>' to find relevant sessions
