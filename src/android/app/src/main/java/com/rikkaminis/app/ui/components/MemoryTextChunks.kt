@@ -19,8 +19,16 @@ package com.rikkaminis.app.ui.components
  *
  * [chunkText] keeps the exact character stream: joining the returned chunks with
  * "\n" reproduces [text] byte-for-byte. That property is asserted in
- * `MemoryTextChunksTest` because the viewer joins chunks with "\n" and any
- * drift would silently corrupt displayed content.
+ * `MemoryTextChunksTest`; it is what proves no character was added, dropped or
+ * reordered at a chunk boundary.
+ *
+ * Note the viewer does NOT actually join the chunks — it renders one item per
+ * chunk, and vertical stacking supplies the line break. The "\n" in the join is
+ * the round-trip *test*'s reconstruction of the original stream, not something
+ * the render path re-inserts. (An earlier version prefixed "\n" to every chunk
+ * after the first, which rendered one blank line per boundary and duplicated
+ * into cross-chunk clipboard copies — SelectionManager already appends '\n'
+ * between selectables.)
  */
 
 /** Lines per chunk before the byte cap is consulted. ~1 screen of 18sp text. */

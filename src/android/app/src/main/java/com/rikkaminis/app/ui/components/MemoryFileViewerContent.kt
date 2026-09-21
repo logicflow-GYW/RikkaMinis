@@ -88,11 +88,17 @@ public fun MemoryFileViewerContent(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
         ) {
-            itemsIndexed(chunks) { index, chunk ->
-                // The join in [chunkText] consumes the newline between lines, so
-                // each chunk after the first needs its separator restored.
-                val body = if (index == 0) chunk else "\n$chunk"
-                Text(text = body, style = textStyle)
+            itemsIndexed(chunks) { _, chunk ->
+                // No separator prefix. [chunkText]'s chunks only need the "\n"
+                // re-inserted when they are joined back into ONE string; here
+                // each chunk is its own LazyColumn item, and vertical stacking
+                // already provides the line break. Prefixing "\n" would render
+                // one extra blank line per chunk boundary (measured: 54 extra
+                // lines on a 204KB daily log) — and because SelectionManager
+                // appends '\n' between selectables itself (SelectionManager
+                // .getSelectedText), a cross-chunk copy would carry the blank
+                // line into the clipboard too.
+                Text(text = chunk, style = textStyle)
             }
         }
     }
