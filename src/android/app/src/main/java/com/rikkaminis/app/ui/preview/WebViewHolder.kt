@@ -6,7 +6,6 @@ import android.graphics.Bitmap
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -14,6 +13,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.webkit.WebViewAssetLoader
+import com.rikkaminis.app.browser.SafeWebViewClient
 import com.rikkaminis.app.logging.AppLogger
 import java.io.File
 
@@ -46,6 +46,16 @@ class WebViewHolder(
     var desktopMode by mutableStateOf(false)
         private set
     var pageFavicon by mutableStateOf<Bitmap?>(null)
+        private set
+    /**
+     * [GH#341] Set when the WebView's renderer process dies. The app survives
+     * (that is [SafeWebViewClient]'s contract), but [webView] is unusable from
+     * then on, and this holder has no way to rebuild itself — it owns exactly
+     * one WebView instance and its [assetLoader] is bound to the initial URL.
+     * Hosts should read this flag and surface the failure instead of showing a
+     * permanently blank preview.
+     */
+    var rendererGone by mutableStateOf(false)
         private set
 
     private var mobileUserAgent: String = ""
@@ -122,7 +132,29 @@ class WebViewHolder(
             setAcceptCookie(true)
             setAcceptThirdPartyCookies(wv, true)
         }
-        webViewClient = object : WebViewClient() {
+        webViewClient = object : SafeWebViewClient() {
+            /**
+             * [GH#341] Renderer died. [assetLoader] is bound to this holder's
+             * initial URL, so recovery is not a matter of re-running a load —
+             * the holder has no construction path for a replacement instance.
+             * Flag it for the host and stop pretending the page is live.
+             */
+            override fun onRendererGone(view: WebView?) {
+                rendererGone = true
+                isLoading = false
+                // Deliberately NOT destroying the instance: `webView` is a val
+                // on this holder and hosts keep calling into it (reload,
+                // desktop-mode toggle, detach). A destroyed WebView throws on
+                // every one of those, which is worse than an inert one — the
+                // holder's own [destroy] stays the single teardown path.
+                //
+                // ponytail: 只置标志，不重建 holder | 天花板: 该预览永久空白，
+                // 重新打开预览才会拿到新 holder（rememberWebViewHolder 以 url 为
+                // key）| 升级触发: 真机日志出现 renderer gone 且用户在预览里看到
+                // 空白却无法通过重开恢复，届时给 holder 加"重建 webView 实例"的
+                // 工厂（需要把 assetLoader 的构建抽成函数）。
+            }
+
             override fun shouldInterceptRequest(
                 view: WebView,
                 request: WebResourceRequest,

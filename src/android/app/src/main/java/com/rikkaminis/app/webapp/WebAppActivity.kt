@@ -10,7 +10,6 @@ import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -49,6 +48,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -68,6 +68,7 @@ import androidx.webkit.WebViewAssetLoader
 import com.rikkaminis.app.MainActivity
 import com.rikkaminis.app.MinisApp
 import com.rikkaminis.app.R
+import com.rikkaminis.app.browser.SafeWebViewClient
 import com.rikkaminis.app.logging.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -97,6 +98,14 @@ class WebAppActivity : ComponentActivity() {
 
     private val logTag = "WebAppActivity"
     private var webViewRef: WebView? = null
+    /**
+     * [GH#341] Counts renderer deaths for the WebView owned by this Activity.
+     * `loadHtml` (which builds the WebViewClient) runs on the Activity, while
+     * the Compose host is the only place that can rebuild the instance — this
+     * mutable state is the hand-off between them. The host collects it as a
+     * `key`, so an increment discards the dead WebView and reloads the page.
+     */
+    private var rendererEpoch by androidx.compose.runtime.mutableIntStateOf(0)
     private var resolvedFile: File? = null
     private var isFullscreen: Boolean = false
 
@@ -277,6 +286,10 @@ class WebAppActivity : ComponentActivity() {
         // so the auto-hide timer restarts on every tap.
         var interactionTick by remember { mutableStateOf(0) }
         var webViewState by remember { mutableStateOf<WebView?>(null) }
+        // [GH#341] `rendererEpoch` is the Activity-owned counter below; reading
+        // it here makes this composition a subscriber, so an increment (the
+        // renderer died) discards the dead WebView via the `key` and rebuilds
+        // it — a WebApp has nothing to lose by reloading.
 
         LaunchedEffect(toolbarVisible, interactionTick) {
             if (toolbarVisible) {
@@ -286,6 +299,10 @@ class WebAppActivity : ComponentActivity() {
         }
 
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+            // [GH#341] `key` so a dead renderer is actually replaced: bumping
+            // rendererEpoch below discards this AndroidView and re-runs the
+            // factory with a fresh WebView.
+            key(rendererEpoch) {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
@@ -331,6 +348,7 @@ class WebAppActivity : ComponentActivity() {
                     wv.destroy()
                 },
             )
+            }
 
             // Top inset spacer reserves room when system bars are visible so
             // the toolbar doesn't sit under the status bar.
@@ -536,7 +554,26 @@ class WebAppActivity : ComponentActivity() {
             )
             .build()
 
-        webView.webViewClient = object : WebViewClient() {
+        webView.webViewClient = object : SafeWebViewClient() {
+            /**
+             * [GH#341] Renderer died. Clear the refs (so [onDestroy] and the
+             * toolbar's reload/share actions never touch a dead instance) and
+             * bump the host's epoch so the WebView is rebuilt and the page
+             * reloaded — a WebApp has nothing to lose by reloading.
+             */
+            override fun onRendererGone(view: WebView?) {
+                if (webViewRef === view) webViewRef = null
+                // This Activity owns the WebView but not the recovery: the
+                // Compose host rebuilds it off the epoch below. The dead
+                // instance still has to go, though — nothing else will
+                // (overriding this hook replaced the base teardown).
+                destroyDeadWebView(view)
+                // The renderer died in the Activity-owned WebView, but the
+                // Compose host owns the instance and is the only place that can
+                // rebuild it — hand the signal over via a state flag.
+                rendererEpoch += 1
+            }
+
             override fun shouldInterceptRequest(
                 view: WebView,
                 request: WebResourceRequest,

@@ -11,8 +11,8 @@ import android.util.LruCache
 import android.webkit.JavascriptInterface
 import android.webkit.WebSettings
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.compose.ui.unit.IntSize
+import com.rikkaminis.app.browser.SafeWebViewClient
 import com.rikkaminis.app.ui.markdown.internalFitCaptureSize
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.Mutex
@@ -179,11 +179,42 @@ internal object KatexWebViewPool {
                     current.deferred.complete(Triple(w, h, err))
                 }
             }, "AndroidBridge")
-            webViewClient = object : WebViewClient() {
+            webViewClient = object : SafeWebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
                     isReady = true
                     readyDeferred?.complete(Unit)
+                }
+
+                /**
+                 * [GH#341] The shared offscreen renderer died. Every formula
+                 * currently waiting on [readyDeferred] / [pending] would
+                 * otherwise block until [RENDER_TIMEOUT_MS] and then report a
+                 * generic "timeout" — indistinguishable from a slow render.
+                 * Complete them now with a message that names the real cause.
+                 *
+                 * The pool slot is also cleared so the next [render] rebuilds
+                 * the WebView instead of reusing a dead instance.
+                 */
+                override fun onRendererGone(view: WebView?) {
+                    isReady = false
+                    readyDeferred?.complete(Unit)
+                    readyDeferred = null
+                    val current = pending
+                    pending = null
+                    current?.deferred?.complete(
+                        Triple(0, 0, "renderer process was killed by the system"),
+                    )
+                    if (webView === view) webView = null
+                    // Overriding this hook replaces the base implementation, so
+                    // the dead instance has to be discarded here: a WebView whose
+                    // renderer is gone still holds a renderer handle slot.
+                    destroyDeadWebView(view)
+                    // ponytail: 只失效池槽，不主动重建 | 天花板: 下一次 render()
+                    // 会走 ensureWebView 重建（`webView == null` 即触发），所以
+                    // 重建是惰性的——在下次渲染前，公式显示占位符 | 升级触发:
+                    // 真机日志连续出现 "renderer process was killed by the
+                    // system" 且伴随可见的公式空白期，届时在此处预热重建。
                 }
             }
             loadUrl(ASSET_HTML)

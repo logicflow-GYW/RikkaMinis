@@ -15,7 +15,6 @@ import android.print.PrintManager
 import android.util.LruCache
 import android.webkit.MimeTypeMap
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -60,6 +59,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -78,6 +78,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
+import com.rikkaminis.app.browser.SafeWebViewClient
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.ui.components.rememberIosBounceOverscrollEffect
 import com.rikkaminis.app.ui.markdown.MarkdownText
@@ -387,6 +388,12 @@ private fun MarkdownPreview(item: FileItem) {
 
 @Composable
 private fun HtmlPreview(item: FileItem) {
+    // [GH#341] Bumped when the renderer dies, so `key` below discards the dead
+    // WebView and re-runs the factory with a fresh one. Without this the
+    // preview would be permanently blank after a renderer kill (the app itself
+    // survives, which is the point of SafeWebViewClient).
+    var rendererEpoch by remember(item.file) { mutableStateOf(0) }
+    key(rendererEpoch) {
     AndroidView(
         modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
@@ -404,7 +411,16 @@ private fun HtmlPreview(item: FileItem) {
                 // viewport units.
                 settings.useWideViewPort = true
                 settings.loadWithOverviewMode = true
-                webViewClient = WebViewClient()
+                webViewClient = object : SafeWebViewClient() {
+                    /**
+                     * [GH#341] Renderer died: rebuild through the `key` above.
+                     * The dead instance is destroyed by this AndroidView's
+                     * `onRelease` as the key change drops it.
+                     */
+                    override fun onRendererGone(view: WebView?) {
+                        rendererEpoch += 1
+                    }
+                }
                 val targetUrl = "file://${item.file.absolutePath}"
                 post { loadUrl(targetUrl) }
             }
@@ -419,6 +435,7 @@ private fun HtmlPreview(item: FileItem) {
             wv.destroy()
         },
     )
+    }
 }
 
 // ==================== Audio Preview ====================
@@ -1145,7 +1162,21 @@ private fun printFile(context: Context, item: FileItem, preRenderedHtml: String?
             settings.allowFileAccess = true
         }
         printWebView = webView
-        webView.webViewClient = object : WebViewClient() {
+        webView.webViewClient = object : SafeWebViewClient() {
+            /**
+             * [GH#341] Renderer died mid-print. The print job cannot proceed —
+             * `createPrintDocumentAdapter` reads this WebView lazily while
+             * spooling — so release the single slot here. [releasePrintWebView]
+             * (identity-checked) leaves a newer print's view alone.
+             */
+            override fun onRendererGone(view: WebView?) {
+                AppLogger.warning("FilePreview", "print renderer gone for ${item.name}")
+                // `view` is nullable in the callback signature; the overload
+                // takes a non-null WebView because its identity check is the
+                // whole point.
+                if (view != null) releasePrintWebView(view)
+            }
+
             override fun onPageFinished(view: WebView, url: String) {
                 val printManager =
                     context.getSystemService(Context.PRINT_SERVICE) as PrintManager

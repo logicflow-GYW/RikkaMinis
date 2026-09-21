@@ -20,8 +20,8 @@ import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.core.content.FileProvider
+import com.rikkaminis.app.browser.SafeWebViewClient
 import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import com.rikkaminis.app.sandbox.PRootKernel
 import kotlinx.coroutines.CompletableDeferred
@@ -475,7 +475,42 @@ class BrowserUseManager(
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebViewClient() {
-        webView.webViewClient = object : WebViewClient() {
+        webView.webViewClient = object : SafeWebViewClient() {
+            /**
+             * [GH#341] The renderer for this tab died. The app must not abort
+             * (that is [SafeWebViewClient]'s job), but this WebView instance is
+             * gone for good, so a pending `navigate()` wait has to learn about
+             * it — otherwise the caller sits until the navigation timeout and
+             * then reports `TIMED_OUT`, blaming the network for a dead
+             * renderer. Complete it as [NavigationOutcome.FAILED] with a
+             * description that says what actually happened.
+             */
+            override fun onRendererGone(view: WebView?) {
+                _isLoading.value = false
+                Log.e(TAG, "renderer gone — failing pending navigation")
+                navigationDeferred?.complete(
+                    NavigationResult(
+                        NavigationOutcome.FAILED,
+                        errorDescription = "WebView renderer process was killed by the system",
+                    )
+                )
+                navigationDeferred = null
+                // Deliberately NOT destroying the instance here (unlike the
+                // rebuild-by-key hosts): this tab is still in BrowserTabPool's
+                // list and the pool keeps handing the same WebView to the next
+                // navigate()/screenshot call. Destroying it would turn "this
+                // tab is blank" into "every later call on this tab throws",
+                // which is worse than an inert instance. The handle slot is
+                // released when the tab is closed or the pool is disposed.
+                //
+                // ponytail: 只收敛等待者，不重建 tab | 天花板: 该 tab 的 WebView
+                // 永久空白，后续 navigate()/screenshot 全部失效，需用户手动关掉
+                // 再开一个 tab | 升级触发: 真机日志出现
+                // "renderer gone — failing pending navigation" 后用户仍频繁遇到
+                // 浏览器 tab 空白（说明手动重开不可接受），届时在此处接入
+                // BrowserTabPool 的 tab 淘汰 + 重建。
+            }
+
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 request: WebResourceRequest,
@@ -2423,7 +2458,7 @@ class BrowserUseManager(
             // Android SDK bindings expose webViewClient/webChromeClient as
             // non-null types (API 26+), so "= null" won't compile.
             webView.webChromeClient = object : android.webkit.WebChromeClient() {}
-            webView.webViewClient = object : android.webkit.WebViewClient() {}
+            webView.webViewClient = object : SafeWebViewClient() {}
             webView.destroy()
         } catch (e: Exception) {
             Log.w(TAG, "destroy() error: ${e.message}")

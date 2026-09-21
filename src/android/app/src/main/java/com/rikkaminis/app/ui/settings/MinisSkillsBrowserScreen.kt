@@ -1,6 +1,7 @@
 package com.rikkaminis.app.ui.settings
 
 import com.rikkaminis.app.R
+import com.rikkaminis.app.browser.SafeWebViewClient
 import com.rikkaminis.app.ui.components.MinisTextButton
 
 import android.annotation.SuppressLint
@@ -9,7 +10,6 @@ import android.graphics.Bitmap
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -41,6 +41,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -78,6 +79,11 @@ fun MinisSkillsBrowserScreen(
     var hudState by remember { mutableStateOf(HudState.HIDDEN) }
     var hudMessage by remember { mutableStateOf("") }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    // [GH#341] Bumped when the renderer dies so `key` discards the dead WebView
+    // and the factory builds a fresh one. The screen is a thin browser around
+    // the page, so a full reload is the correct recovery (unlike the pool /
+    // holder cases, where rebuilding costs real work).
+    var rendererEpoch by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
 
     // System back / gesture: walk WebView history first, leave the screen
@@ -140,6 +146,10 @@ fun MinisSkillsBrowserScreen(
                 .padding(padding),
         ) {
             // WebView
+            // [GH#341] `key` so a dead renderer is actually replaced: bumping
+            // rendererEpoch below discards this AndroidView and re-runs the
+            // factory with a fresh WebView.
+            key(rendererEpoch) {
             AndroidView(
                 factory = { context ->
                     WebView(context).apply {
@@ -147,7 +157,25 @@ fun MinisSkillsBrowserScreen(
                         settings.domStorageEnabled = true
                         settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36"
 
-                        webViewClient = object : WebViewClient() {
+                        webViewClient = object : SafeWebViewClient() {
+                            /**
+                             * [GH#341] Renderer died. Rebuild the WebView and
+                             * reload — this screen has no unsaved state worth
+                             * preserving, so a fresh page load is the whole
+                             * recovery. Clearing the ref first keeps
+                             * [handleBack] from calling into a dead instance.
+                             */
+                            override fun onRendererGone(view: WebView?) {
+                                if (webViewRef === view) webViewRef = null
+                                // No `onRelease` on this AndroidView, so nothing
+                                // else will tear the dead instance down — and a
+                                // WebView whose renderer is gone still holds a
+                                // renderer handle slot until GC. Do it here,
+                                // then rebuild.
+                                destroyDeadWebView(view)
+                                rendererEpoch += 1
+                            }
+
                             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                 url?.let { currentUrl = it }
                             }
@@ -185,6 +213,7 @@ fun MinisSkillsBrowserScreen(
                 },
                 modifier = Modifier.fillMaxSize(),
             )
+            }
 
             // HUD overlay at bottom
             AnimatedVisibility(

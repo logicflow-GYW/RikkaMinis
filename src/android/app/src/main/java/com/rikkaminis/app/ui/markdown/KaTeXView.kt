@@ -1,6 +1,7 @@
 package com.rikkaminis.app.ui.markdown
 
 import com.rikkaminis.app.R
+import com.rikkaminis.app.browser.SafeWebViewClient
 import com.rikkaminis.app.ui.theme.ChatColors
 import androidx.compose.ui.res.stringResource
 import android.annotation.SuppressLint
@@ -9,7 +10,6 @@ import android.util.LruCache
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,6 +23,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -140,6 +141,11 @@ fun KaTeXRenderView(
     var renderedCssWidth by remember(cacheKey) { mutableStateOf(0) }
     var renderedCssHeight by remember(cacheKey) { mutableStateOf(0) }
     var renderError by remember(cacheKey) { mutableStateOf<String?>(null) }
+    // [GH#341] Bumped when the offscreen renderer dies. Used as a `key` around
+    // the AndroidView below so Compose discards the dead WebView and runs the
+    // factory again — a fresh renderer — instead of reusing an instance whose
+    // Chromium process no longer exists.
+    var rendererEpoch by remember(cacheKey) { mutableStateOf(0) }
 
     if (renderedBitmap != null) {
         Image(
@@ -170,123 +176,150 @@ fun KaTeXRenderView(
         )
 
         // Render with offscreen WebView
-        AndroidView(
-            factory = { ctx ->
-                WebView(ctx).apply {
-                    layoutParams = ViewGroup.LayoutParams(1, 1)
-                    settings.javaScriptEnabled = true
-                    settings.allowFileAccess = true
-                    // T208 Layer A: keep WebView text-zoom at 100% regardless
-                    // of the user's accessibility font-size setting. Without
-                    // this, the bitmap KaTeX renders is multiplied by the
-                    // system font scale, but our bridge reports the
-                    // pre-scale CSS dimensions — Image then displays the
-                    // (over-rendered) bitmap inside an undersized box and
-                    // ContentScale.Fit makes the formula appear physically
-                    // larger than the surrounding 16sp text.
-                    settings.textZoom = 100
-                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
+        // [GH#341] `key` so a dead renderer actually gets replaced: bumping
+        // rendererEpoch discards this AndroidView and re-runs the factory with
+        // a fresh WebView, instead of reusing an instance whose Chromium
+        // process is gone (every call on such an instance is undefined).
+        key(rendererEpoch) {
+            AndroidView(
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        layoutParams = ViewGroup.LayoutParams(1, 1)
+                        settings.javaScriptEnabled = true
+                        settings.allowFileAccess = true
+                        // T208 Layer A: keep WebView text-zoom at 100% regardless
+                        // of the user's accessibility font-size setting. Without
+                        // this, the bitmap KaTeX renders is multiplied by the
+                        // system font scale, but our bridge reports the
+                        // pre-scale CSS dimensions — Image then displays the
+                        // (over-rendered) bitmap inside an undersized box and
+                        // ContentScale.Fit makes the formula appear physically
+                        // larger than the surrounding 16sp text.
+                        settings.textZoom = 100
+                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
 
-                    addJavascriptInterface(object {
-                        @JavascriptInterface
-                        fun onRendered(width: Int, height: Int, error: String) {
-                            if (error.isNotEmpty()) {
-                                AppLogger.warning(TAG, "KaTeX render failed: $error · latex=${latex.take(80)}")
-                                renderError = error
-                                return
+                        addJavascriptInterface(object {
+                            @JavascriptInterface
+                            fun onRendered(width: Int, height: Int, error: String) {
+                                if (error.isNotEmpty()) {
+                                    AppLogger.warning(TAG, "KaTeX render failed: $error · latex=${latex.take(80)}")
+                                    renderError = error
+                                    return
+                                }
+                                if (width <= 0 || height <= 0) {
+                                    AppLogger.warning(TAG, "KaTeX render produced zero dimensions · latex=${latex.take(80)}")
+                                    renderError = "zero dimensions"
+                                    return
+                                }
+                                // Scale for device density
+                                val scale = ctx.resources.displayMetrics.density
+                                val bitmapW = (width * scale).toInt()
+                                val bitmapH = (height * scale).toInt()
+                                // [fix/memory-hardening-capture-cap] The capture size
+                                // comes from KaTeX's JS-reported content box — bound it
+                                // before allocating (see KatexCaptureLimit). A formula
+                                // past the cap is drawn slightly smaller (same layout
+                                // box, softer glyphs) instead of aborting the process.
+                                val fit = internalFitCaptureSize(bitmapW, bitmapH)
+                                if (!fit.ok) {
+                                    AppLogger.warning(TAG, "KaTeX capture size rejected ${bitmapW}x$bitmapH · latex=${latex.take(80)}")
+                                    renderError = "capture size"
+                                    return
+                                }
+                                if (fit.scale < 1f) {
+                                    AppLogger.warning(
+                                        TAG,
+                                        "KaTeX capture ${bitmapW}x$bitmapH exceeds cap — scaled to ${fit.width}x${fit.height} · latex=${latex.take(80)}"
+                                    )
+                                }
+
+                                // Resize WebView to content size, then capture
+                                post {
+                                    layoutParams = ViewGroup.LayoutParams(bitmapW, bitmapH)
+                                    requestLayout()
+                                    postDelayed({
+                                        val bitmap = Bitmap.createBitmap(fit.width, fit.height, Bitmap.Config.ARGB_8888)
+                                        val canvas = android.graphics.Canvas(bitmap)
+                                        if (fit.scale < 1f) canvas.scale(fit.scale, fit.scale)
+                                        draw(canvas)
+                                        KaTeXRendererCache.cache.put(
+                                            cacheKey,
+                                            KaTeXRendererCache.CacheEntry(
+                                                bitmap = bitmap,
+                                                width = fit.width,
+                                                height = fit.height,
+                                                cssWidth = width,
+                                                cssHeight = height,
+                                            )
+                                        )
+                                        renderedCssWidth = width
+                                        renderedCssHeight = height
+                                        renderedBitmap = bitmap
+                                    }, 100)
+                                }
                             }
-                            if (width <= 0 || height <= 0) {
-                                AppLogger.warning(TAG, "KaTeX render produced zero dimensions · latex=${latex.take(80)}")
-                                renderError = "zero dimensions"
-                                return
+                        }, "AndroidBridge")
+
+                        webViewClient = object : SafeWebViewClient() {
+                            /**
+                             * [GH#341] The offscreen renderer died. Two things
+                             * matter here:
+                             *
+                             * 1. Never leave the placeholder spinning forever —
+                             *    that branch has no timeout, so a dead renderer
+                             *    used to mean a formula that stayed a blank box
+                             *    for the lifetime of the message. Fail over to the
+                             *    raw-LaTeX fallback, which is what the user sees
+                             *    when rendering is impossible anyway.
+                             * 2. Bump [rendererEpoch] so the `key` below throws
+                             *    this WebView away and builds a fresh one, letting
+                             *    a later recomposition render normally again. The
+                             *    AndroidView's own `onRelease` destroys the dead
+                             *    instance as the key change drops it.
+                             */
+                            override fun onRendererGone(view: WebView?) {
+                                renderError = "renderer gone"
+                                rendererEpoch += 1
                             }
-                            // Scale for device density
-                            val scale = ctx.resources.displayMetrics.density
-                            val bitmapW = (width * scale).toInt()
-                            val bitmapH = (height * scale).toInt()
-                            // [fix/memory-hardening-capture-cap] The capture size
-                            // comes from KaTeX's JS-reported content box — bound it
-                            // before allocating (see KatexCaptureLimit). A formula
-                            // past the cap is drawn slightly smaller (same layout
-                            // box, softer glyphs) instead of aborting the process.
-                            val fit = internalFitCaptureSize(bitmapW, bitmapH)
-                            if (!fit.ok) {
-                                AppLogger.warning(TAG, "KaTeX capture size rejected ${bitmapW}x$bitmapH · latex=${latex.take(80)}")
-                                renderError = "capture size"
-                                return
-                            }
-                            if (fit.scale < 1f) {
-                                AppLogger.warning(
-                                    TAG,
-                                    "KaTeX capture ${bitmapW}x$bitmapH exceeds cap — scaled to ${fit.width}x${fit.height} · latex=${latex.take(80)}"
+
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                super.onPageFinished(view, url)
+                                val escapedLatex = latex
+                                    .replace("\\", "\\\\")
+                                    .replace("'", "\\'")
+                                    .replace("\n", "\\n")
+                                    .replace("\r", "")
+                                evaluateJavascript(
+                                    "renderMath('$escapedLatex', $displayMode, $fontSize, $isDark)",
+                                    null
                                 )
                             }
-
-                            // Resize WebView to content size, then capture
-                            post {
-                                layoutParams = ViewGroup.LayoutParams(bitmapW, bitmapH)
-                                requestLayout()
-                                postDelayed({
-                                    val bitmap = Bitmap.createBitmap(fit.width, fit.height, Bitmap.Config.ARGB_8888)
-                                    val canvas = android.graphics.Canvas(bitmap)
-                                    if (fit.scale < 1f) canvas.scale(fit.scale, fit.scale)
-                                    draw(canvas)
-                                    KaTeXRendererCache.cache.put(
-                                        cacheKey,
-                                        KaTeXRendererCache.CacheEntry(
-                                            bitmap = bitmap,
-                                            width = fit.width,
-                                            height = fit.height,
-                                            cssWidth = width,
-                                            cssHeight = height,
-                                        )
-                                    )
-                                    renderedCssWidth = width
-                                    renderedCssHeight = height
-                                    renderedBitmap = bitmap
-                                }, 100)
-                            }
                         }
-                    }, "AndroidBridge")
 
-                    webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            super.onPageFinished(view, url)
-                            val escapedLatex = latex
-                                .replace("\\", "\\\\")
-                                .replace("'", "\\'")
-                                .replace("\n", "\\n")
-                                .replace("\r", "")
-                            evaluateJavascript(
-                                "renderMath('$escapedLatex', $displayMode, $fontSize, $isDark)",
-                                null
-                            )
-                        }
+                        loadUrl("file:///android_asset/katex/katex-render.html")
                     }
-
-                    loadUrl("file:///android_asset/katex/katex-render.html")
-                }
-            },
-            modifier = Modifier.height(0.dp), // Hidden
-            // [audit-0909 T10-M1] Destroy the offscreen renderer when this
-            // AndroidView leaves the composition — which happens on the very
-            // first successful render, when `renderedBitmap != null` replaces
-            // it with an Image. Without onRelease every uncached formula left
-            // a live WebView + renderer process handle behind (no destroy()
-            // anywhere in this file), accumulating for the life of the app.
-            onRelease = { wv ->
-                // [audit-0917] Cancel the pending capture callback BEFORE
-                // destroying. The capture runs 100ms after the resize post, and
-                // it calls draw(canvas) on this WebView — if the view left the
-                // composition in that window (renderedBitmap already replaced
-                // it, or the row scrolled away), destroy() had run and the
-                // callback drew into a destroyed WebView. removeCallbacks(null)
-                // drops everything queued on this view, which is safe here:
-                // nothing else schedules work on it.
-                wv.removeCallbacks(null)
-                wv.stopLoading()
-                wv.destroy()
-            },
-        )
+                },
+                modifier = Modifier.height(0.dp), // Hidden
+                // [audit-0909 T10-M1] Destroy the offscreen renderer when this
+                // AndroidView leaves the composition — which happens on the very
+                // first successful render, when `renderedBitmap != null` replaces
+                // it with an Image. Without onRelease every uncached formula left
+                // a live WebView + renderer process handle behind (no destroy()
+                // anywhere in this file), accumulating for the life of the app.
+                onRelease = { wv ->
+                    // [audit-0917] Cancel the pending capture callback BEFORE
+                    // destroying. The capture runs 100ms after the resize post, and
+                    // it calls draw(canvas) on this WebView — if the view left the
+                    // composition in that window (renderedBitmap already replaced
+                    // it, or the row scrolled away), destroy() had run and the
+                    // callback drew into a destroyed WebView. removeCallbacks(null)
+                    // drops everything queued on this view, which is safe here:
+                    // nothing else schedules work on it.
+                    wv.removeCallbacks(null)
+                    wv.stopLoading()
+                    wv.destroy()
+                },
+            )
+        }
     }
 }
