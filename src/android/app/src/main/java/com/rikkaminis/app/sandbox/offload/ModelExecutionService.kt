@@ -1516,10 +1516,9 @@ class ModelExecutionService : Service() {
         Thread {
             try {
                 while (System.currentTimeMillis() < deadline) {
-                    // Late client ack during the grace: release the token and
-                    // stop — the normal locked finalizer will reap.
+                    // Late client ack during the grace: stop — the normal
+                    // locked finalizer will reap. (Token released by finally.)
                     if (ModelExecutionRunDir.clientAckPresent(dir)) {
-                        runId?.let { releaseAckToken(it) }
                         Log.i(TAG, "late client ack — controlled drain cancelled")
                         return@Thread
                     }
@@ -1529,12 +1528,41 @@ class ModelExecutionService : Service() {
                 // genuinely idle; do NOT kill a new request or an un-acked run.
                 var reaped = false
                 synchronized(lifecycleLock) {
+                    // [S4-ack-token-leak] THE token release for this drain, and
+                    // it MUST be the first statement here — every branch below
+                    // early-returns, and the pending-work check at the bottom
+                    // reads this very map. The old code released AFTER the stale
+                    // check, so a stale drain leaked its token permanently:
+                    // `pendingAckTokens` then only grew, `isQuiescent()` (which
+                    // requires unacked == 0) could never hold again, and the
+                    // worker outlived every request it served. Measured on
+                    // device 2026-09-21: pid 20731 alive 3h54m across 1492
+                    // requests with pendingAck pinned at 9-11, against 310
+                    // sibling pids that each died after one request; the same
+                    // window logged 14x `controlled drain stale` (11 of them in
+                    // 20731) and 4x `controlled drain aborted: active/queued/
+                    // pending work present` — the aborts being drains of LATER
+                    // runs poisoned by the leaked token of an earlier one.
+                    //
+                    // Unconditional is correct, and matches the author's own
+                    // ordering: the pre-existing release point was already
+                    // BEFORE the terminal-absent branch, so "keep worker alive
+                    // when the stream was cut before any result" never depended
+                    // on this token — that branch only means "do not self-reap
+                    // from THIS thread". The token's sole job is to block a
+                    // quiescence snapshot taken while this run is still
+                    // outstanding, and `finishRequestLocked` — which already ran
+                    // immediately after the ack barrier — was that snapshot.
+                    runId?.let { releaseAckToken(it) }
                     // A newer request may have arrived; our drain window is stale.
                     if (requestGeneration.get() != genAtSchedule) {
-                        Log.w(TAG, "controlled drain stale (gen ${requestGeneration.get()} != $genAtSchedule) — leaving to new request")
+                        Log.w(
+                            TAG,
+                            "controlled drain stale (gen ${requestGeneration.get()} != $genAtSchedule) " +
+                                "— released ack token for runId=$runId, leaving to new request",
+                        )
                         return@synchronized
                     }
-                    runId?.let { releaseAckToken(it) }
                     // If the run dir is gone, nothing more to write; only the
                     // general sweep may reap it.
                     if (!dir.isDirectory) return@synchronized
@@ -1561,7 +1589,19 @@ class ModelExecutionService : Service() {
                     reaped = true
                 }
                 if (reaped) return@Thread
-            } catch (_: Throwable) {}
+            } catch (_: Throwable) {
+                // Swallowed by design (best-effort drain) — the finally below
+                // still has to release the token.
+            } finally {
+                // Belt-and-braces: the primary release is the first statement
+                // inside the lock above. This covers the paths that never reach
+                // it (an InterruptedException inside the grace loop, or any
+                // throw before `synchronized`), which the bare `catch` would
+                // otherwise turn into another permanent leak. Idempotent:
+                // releaseAckToken is a map remove, so on the normal path this is
+                // a no-op.
+                runId?.let { releaseAckToken(it) }
+            }
         }.apply { isDaemon = true }.start()
     }
 
