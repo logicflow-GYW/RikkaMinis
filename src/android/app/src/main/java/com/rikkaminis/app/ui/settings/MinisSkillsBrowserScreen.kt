@@ -167,6 +167,12 @@ fun MinisSkillsBrowserScreen(
                              */
                             override fun onRendererGone(view: WebView?) {
                                 if (webViewRef === view) webViewRef = null
+                                // No `onRelease` on this AndroidView, so nothing
+                                // else will tear the dead instance down — and a
+                                // WebView whose renderer is gone still holds a
+                                // renderer handle slot until GC. Do it here,
+                                // then rebuild.
+                                destroyDeadWebView(view)
                                 rendererEpoch += 1
                             }
 

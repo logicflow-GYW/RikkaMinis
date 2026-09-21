@@ -206,6 +206,10 @@ internal object KatexWebViewPool {
                         Triple(0, 0, "renderer process was killed by the system"),
                     )
                     if (webView === view) webView = null
+                    // Overriding this hook replaces the base implementation, so
+                    // the dead instance has to be discarded here: a WebView whose
+                    // renderer is gone still holds a renderer handle slot.
+                    destroyDeadWebView(view)
                     // ponytail: 只失效池槽，不主动重建 | 天花板: 下一次 render()
                     // 会走 ensureWebView 重建（`webView == null` 即触发），所以
                     // 重建是惰性的——在下次渲染前，公式显示占位符 | 升级触发:

@@ -412,6 +412,11 @@ private fun HtmlPreview(item: FileItem) {
                 settings.useWideViewPort = true
                 settings.loadWithOverviewMode = true
                 webViewClient = object : SafeWebViewClient() {
+                    /**
+                     * [GH#341] Renderer died: rebuild through the `key` above.
+                     * The dead instance is destroyed by this AndroidView's
+                     * `onRelease` as the key change drops it.
+                     */
                     override fun onRendererGone(view: WebView?) {
                         rendererEpoch += 1
                     }

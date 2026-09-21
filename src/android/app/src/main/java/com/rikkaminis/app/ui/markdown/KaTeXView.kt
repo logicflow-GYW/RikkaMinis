@@ -273,7 +273,9 @@ fun KaTeXRenderView(
                              *    when rendering is impossible anyway.
                              * 2. Bump [rendererEpoch] so the `key` below throws
                              *    this WebView away and builds a fresh one, letting
-                             *    a later recomposition render normally again.
+                             *    a later recomposition render normally again. The
+                             *    AndroidView's own `onRelease` destroys the dead
+                             *    instance as the key change drops it.
                              */
                             override fun onRendererGone(view: WebView?) {
                                 renderError = "renderer gone"

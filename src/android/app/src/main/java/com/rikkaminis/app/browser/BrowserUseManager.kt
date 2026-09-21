@@ -495,6 +495,14 @@ class BrowserUseManager(
                     )
                 )
                 navigationDeferred = null
+                // Deliberately NOT destroying the instance here (unlike the
+                // rebuild-by-key hosts): this tab is still in BrowserTabPool's
+                // list and the pool keeps handing the same WebView to the next
+                // navigate()/screenshot call. Destroying it would turn "this
+                // tab is blank" into "every later call on this tab throws",
+                // which is worse than an inert instance. The handle slot is
+                // released when the tab is closed or the pool is disposed.
+                //
                 // ponytail: 只收敛等待者，不重建 tab | 天花板: 该 tab 的 WebView
                 // 永久空白，后续 navigate()/screenshot 全部失效，需用户手动关掉
                 // 再开一个 tab | 升级触发: 真机日志出现

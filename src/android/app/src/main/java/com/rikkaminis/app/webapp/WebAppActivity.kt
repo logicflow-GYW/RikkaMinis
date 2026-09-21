@@ -563,6 +563,11 @@ class WebAppActivity : ComponentActivity() {
              */
             override fun onRendererGone(view: WebView?) {
                 if (webViewRef === view) webViewRef = null
+                // This Activity owns the WebView but not the recovery: the
+                // Compose host rebuilds it off the epoch below. The dead
+                // instance still has to go, though — nothing else will
+                // (overriding this hook replaced the base teardown).
+                destroyDeadWebView(view)
                 // The renderer died in the Activity-owned WebView, but the
                 // Compose host owns the instance and is the only place that can
                 // rebuild it — hand the signal over via a state flag.

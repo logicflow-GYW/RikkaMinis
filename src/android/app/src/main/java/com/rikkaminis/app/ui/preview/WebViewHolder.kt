@@ -142,6 +142,12 @@ class WebViewHolder(
             override fun onRendererGone(view: WebView?) {
                 rendererGone = true
                 isLoading = false
+                // Deliberately NOT destroying the instance: `webView` is a val
+                // on this holder and hosts keep calling into it (reload,
+                // desktop-mode toggle, detach). A destroyed WebView throws on
+                // every one of those, which is worse than an inert one — the
+                // holder's own [destroy] stays the single teardown path.
+                //
                 // ponytail: 只置标志，不重建 holder | 天花板: 该预览永久空白，
                 // 重新打开预览才会拿到新 holder（rememberWebViewHolder 以 url 为
                 // key）| 升级触发: 真机日志出现 renderer gone 且用户在预览里看到
