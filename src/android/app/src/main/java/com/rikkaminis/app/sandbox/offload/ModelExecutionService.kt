@@ -833,6 +833,12 @@ class ModelExecutionService : Service() {
             inputModalities = jsonStrList(req.optJSONArray("input_modalities")),
             outputModalities = jsonStrList(req.optJSONArray("output_modalities")),
             contextWindow = req.optInt("context_window", 0).takeIf { it > 0 },
+            // [P0-worker-max-output-tokens] Mirror of the write side in
+            // ModelExecutionDispatcher — see the note there. Absent key keeps the
+            // "no declared ceiling" semantics (null), which is what
+            // effectiveMaxOutputTokens turns into the provider default.
+            maxOutputTokens =
+                if (req.has("max_output_tokens")) req.getInt("max_output_tokens") else null,
             // [T-worker-reasoning-metadata] Present only when the dispatcher had a
             // value; absent keeps the pre-fix "unknown" semantics (null), which is what
             // a model with no catalog entry gets. Echo-gate inputs — see the
@@ -1134,6 +1140,12 @@ class ModelExecutionService : Service() {
                 inputModalities = jsonStrList(req.optJSONArray("input_modalities")),
                 outputModalities = jsonStrList(req.optJSONArray("output_modalities")),
                 contextWindow = req.optInt("context_window", 0).takeIf { it > 0 },
+                // [P0-worker-max-output-tokens] Mirror of the write side in
+                // ModelExecutionDispatcher — see the note there. Absent key keeps the
+                // "no declared ceiling" semantics (null), which is what
+                // effectiveMaxOutputTokens turns into the provider default.
+                maxOutputTokens =
+                    if (req.has("max_output_tokens")) req.getInt("max_output_tokens") else null,
                 // [T-worker-reasoning-metadata] Present only when the dispatcher had a
                 // value; absent keeps the pre-fix "unknown" semantics (null), which is what
                 // a model with no catalog entry gets. Echo-gate inputs — see the

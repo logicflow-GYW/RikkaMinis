@@ -49,6 +49,12 @@ class ModelExecutionDispatcherTest {
         inputModalities = listOf("text", "image"),
         outputModalities = listOf("text"),
         contextWindow = 65536,
+        // [P0-worker-max-output-tokens] Must be SET here. The P0 this guards
+        // against (maxOutputTokens never serialized) escaped every existing test
+        // precisely because this sample left it null: the field-list assertions
+        // below are hand-written, so a field the sample does not populate is a
+        // field no assertion can miss.
+        maxOutputTokens = 128_000,
     )
 
     private fun sampleMessages() = listOf(
@@ -105,6 +111,31 @@ class ModelExecutionDispatcherTest {
         assertEquals(listOf("text", "image"), json.getJSONArray("input_modalities").toList())
         assertEquals(listOf("text"), json.getJSONArray("output_modalities").toList())
         assertEquals(65536, json.getInt("context_window"))
+        // [P0-worker-max-output-tokens] The user's reply ceiling must survive the
+        // process boundary. Without this key the worker rebuilds LLMModel with
+        // maxOutputTokens == null, effectiveMaxOutputTokens() falls back to
+        // LLMProvider.defaultMaxOutputTokens (16_384 for OpenAI-family), and every
+        // offloaded request is clamped below what the chosen model allows.
+        assertEquals(128_000, json.getInt("max_output_tokens"))
+    }
+
+    @Test
+    fun `absent maxOutputTokens stays absent instead of defaulting`() {
+        // Present-only semantics: a model with no declared ceiling must NOT gain
+        // one at the boundary, otherwise the worker would clamp where the host
+        // would not.
+        val json = JSONObject(ModelExecutionDispatcher.buildRequestJson(
+            instance = sampleInstance(),
+            model = sampleModel().copy(maxOutputTokens = null),
+            messages = emptyList(),
+            systemPrompt = null,
+            maxTokens = 4096,
+            temperature = null,
+            imageParts = emptyList(),
+            inputJson = "",
+            outputExt = null,
+        ))
+        assertFalse(json.has("max_output_tokens"))
     }
 
     @Test

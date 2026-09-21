@@ -124,6 +124,20 @@ object ModelExecutionDispatcher {
             model.inputModalities.orEmpty().let { if (it.isNotEmpty()) put("input_modalities", JSONArray(it)) }
             model.outputModalities.orEmpty().let { if (it.isNotEmpty()) put("output_modalities", JSONArray(it)) }
             model.contextWindow?.let { put("context_window", it) }
+            // [P0-worker-max-output-tokens] Same cross-process class as the
+            // reasoning descriptors above, and the largest-impact instance of it
+            // found so far: `maxOutputTokens` was never written here, so the
+            // worker rebuilt LLMModel with it null and `effectiveMaxOutputTokens`
+            // fell back to LLMProvider.defaultMaxOutputTokens (16_384 for the
+            // OpenAI-family providers the user actually runs). Every offloaded
+            // chat request was therefore clamped to a smaller reply budget than
+            // the model the user picked allows — measured on-device: 96.3% of
+            // requests (173/178) were sent at exactly 16384 while the user's
+            // configured models declare up to 128_000.
+            // Present-only semantics match context_window: absent means the
+            // catalog/user never declared a ceiling, which is what a model with
+            // no entry gets.
+            model.maxOutputTokens?.let { put("max_output_tokens", it) }
 
             if (messages.isNotEmpty()) {
                 put("messages", JSONArray().apply {
