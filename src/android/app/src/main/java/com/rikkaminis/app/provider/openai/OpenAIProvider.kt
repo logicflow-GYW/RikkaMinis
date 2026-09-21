@@ -29,6 +29,7 @@ import com.rikkaminis.app.provider.thinking.ThinkingResolveContext
 import com.rikkaminis.app.provider.thinking.ThinkingRuleResolver
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -682,6 +683,45 @@ class OpenAIProvider constructor(
                     "[T-android-stale-conn-retry-hang] no response headers after ${STREAM_TTFB_TIMEOUT_MS / 1000}s — cancelling call (stale pooled connection?)",
                 )
                 call.cancel()
+            }
+        }
+        // [fix/zero-chunk-cancel] Cancellation BRIDGE, registered BEFORE the
+        // first blocking call (call.execute() below, then reader.readLine()).
+        //
+        // On a wedged upstream (accepted the request, sent nothing) the read
+        // loop blocks inside readLine(). A blocking read is NOT interruptible
+        // by coroutine cancellation — measured with a real wedged server:
+        // cancelling the outer job, the inner job, a wrapping coroutineScope,
+        // and a withTimeoutOrNull each still ran the full 60s budget, while
+        // call.cancel() stopped it in 324ms.
+        //
+        // `awaitClose { call.cancel() }` cannot cover that window: it is
+        // registered only AFTER the loop exits, so a wedged read never reaches
+        // it. This child coroutine is registered first, so cancelling the
+        // producer scope reaches it even while the parent body is stuck — its
+        // `finally` then closes the socket and unblocks the read.
+        //
+        // Measured with the real nesting (outer runBlocking -> inner
+        // runBlocking -> callbackFlow + flowOn(IO)): 335ms with the bridge vs
+        // 60018ms without, user cancel at 300ms.
+        //
+        // Pairs with the worker's cancel watcher (ModelExecutionService),
+        // which cancels the collecting job when the user's cancel file
+        // appears — that is what reaches this bridge.
+        // Set once the stream body has been fully consumed, so the bridge can
+        // tell "we finished normally" from "we are being cancelled".
+        val streamCompleted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val cancelBridge = launch {
+            try {
+                awaitCancellation()
+            } finally {
+                // Only tear the socket down when we are being CANCELLED. On a
+                // normal completion the body is already fully consumed and
+                // OkHttp may return the connection to the pool — cancelling
+                // then would throw away a reusable connection for no reason.
+                if (!streamCompleted.get()) {
+                    try { call.cancel() } catch (_: Exception) {}
+                }
             }
         }
         val response = try {
@@ -1348,41 +1388,16 @@ class OpenAIProvider constructor(
         } finally {
             reader.close()
             response.close()
+            // [fix/zero-chunk-cancel] The body was fully read (or failed) — mark
+            // it so the cancellation bridge does not tear down a connection
+            // OkHttp could otherwise return to the pool.
+            streamCompleted.set(true)
             // [T-thinking-fold-leak] Always drop the per-stream tag state on
             // every exit (normal, error, cancellation) so a half-open tag can
             // never leak into the next stream served by this provider instance.
             thinkState.reset()
         }
-        // [fix/zero-chunk-cancel] Cancellation BRIDGE, registered BEFORE the
-        // first blocking call.
-        //
-        // The read loop below blocks inside reader.readLine() on a wedged
-        // upstream (accepted the request, sent nothing). A blocking read is
-        // NOT interruptible by coroutine cancellation — measured with a real
-        // wedged server: cancelling the outer job, the inner job, a wrapping
-        // coroutineScope, and a withTimeoutOrNull each still ran the full
-        // 60s budget, while call.cancel() stopped it in 324ms.
-        //
-        // `awaitClose { call.cancel() }` cannot cover that window: it is
-        // registered only AFTER the loop exits, so a wedged read never reaches
-        // it. This child coroutine is registered first, so cancelling the
-        // producer scope reaches it even while the parent body is stuck — its
-        // `finally` then closes the socket and unblocks the read.
-        //
-        // Measured with the real nesting (outer runBlocking -> inner
-        // runBlocking -> callbackFlow + flowOn(IO)): 335ms with the bridge vs
-        // 60018ms without, user cancel at 300ms.
-        //
-        // Pairs with the worker's cancel watcher (ModelExecutionService),
-        // which cancels the collecting job when the user's cancel file
-        // appears — that is what reaches this bridge.
-        launch {
-            try {
-                kotlinx.coroutines.awaitCancellation()
-            } finally {
-                try { call.cancel() } catch (_: Exception) {}
-            }
-        }
+        cancelBridge.cancel()
         channel.close()
         // T171: when the coroutine is cancelled (user tapped stop), the
         // reader loop above is suspended inside the OkHttp source — only

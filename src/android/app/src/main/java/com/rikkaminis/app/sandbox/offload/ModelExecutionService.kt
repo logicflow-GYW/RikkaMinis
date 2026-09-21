@@ -1293,19 +1293,19 @@ class ModelExecutionService : Service() {
                 // halves are required; each is useless alone.
                 // Captured OUTSIDE the launch: inside it, the context's Job is
                 // the watcher's own, and cancelling that would be a no-op.
-                val collectJob = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]!!
-                val cancelWatcher = kotlinx.coroutines.launch {
+                val collectJob = currentCoroutineContext()[Job]!!
+                val cancelWatcher = launch {
                     while (true) {
                         if (cancelFile.exists()) {
                             ModelExecutionRunLog.log(
                                 dir, android.os.Process.myPid(),
-                                ModelExecutionRunLog.STREAM_ERROR,
+                                ModelExecutionRunLog.Phase.STREAM_ERROR,
                                 "cancel observed by watcher (pre-chunk phase)", runId = runIdOf(dir),
                             )
                             collectJob.cancel(ModelExecutionCancelledException())
                             return@launch
                         }
-                        kotlinx.coroutines.delay(CANCEL_POLL_MS)
+                        delay(CANCEL_POLL_MS)
                     }
                 }
                 try {
