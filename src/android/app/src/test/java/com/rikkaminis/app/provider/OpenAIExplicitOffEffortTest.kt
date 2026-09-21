@@ -11,7 +11,7 @@ import org.junit.Test
  * same shape as [OpenAIPrefillSupportTest].
  *
  * The regression this file exists for: the predicate used to read ONLY the base
- * URL. A model whose catalog entry declares `[low..max]` (no `none`) still got
+ * URL. A model whose catalog entry declares `low..max` (no `none`) still got
  * `effort:"none"` on an official-looking base and the backend rejected the whole
  * request with a 400. The relay case below is the CONTROL ARM — same model, same
  * declared set, different base — and it is what proves the decision was reading
@@ -72,7 +72,7 @@ class OpenAIExplicitOffEffortTest {
     @Test
     fun `official base omits none when the model does not declare it`() {
         assertNull(
-            "a model declaring [low..max] must not be handed effort=none (400)",
+            "a model declaring low..max must not be handed effort=none (400)",
             off(official, modelId = "gpt-6-astra", declared = listOf("low", "medium", "high", "xhigh", "max")),
         )
     }
