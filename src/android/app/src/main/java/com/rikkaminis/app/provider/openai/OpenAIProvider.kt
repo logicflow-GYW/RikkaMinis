@@ -23,6 +23,7 @@ import com.rikkaminis.app.provider.safeOptString
 import com.rikkaminis.app.provider.sanitizeToolPairing
 import com.rikkaminis.app.provider.clampOutboundMaxTokens
 import com.rikkaminis.app.provider.clampOutboundTemperature
+import com.rikkaminis.app.provider.openai.explicitOffEffortFor
 import com.rikkaminis.app.provider.thinking.ReasoningEchoDecider
 import com.rikkaminis.app.provider.thinking.ReasoningEchoPolicy
 import com.rikkaminis.app.provider.thinking.ThinkingResolveContext
@@ -511,19 +512,36 @@ class OpenAIProvider constructor(
      * vendor's own default. Azure stays omission too: its off tier is
      * model-dependent ('none' on gpt-5.1+, 'minimal' on original gpt-5,
      * unsupported on o1/o3), so an explicit value risks a 400.
+     *
+     * [GH#377] The allowlist answers "which VENDOR do we trust to document an
+     * off tier", but the value is only accepted if the MODEL declares it. Those
+     * are two different questions, and the base alone cannot answer the second:
+     * a gateway serving a model whose catalog entry declares `[low…max]` (no
+     * `none`) still got `effort:"none"` from us whenever its base looked like
+     * official OpenAI — the backend then rejects the whole request with 400.
+     * A JVM experiment over the real source pair confirmed the shape: the SAME
+     * model with `declared=[low..max]` sent `none` on `api.openai.com` (400) and
+     * omitted the field on a relay (accepted) — i.e. the decision was driven by
+     * the base URL rather than by what the model said it accepts. That relay arm
+     * is the control: it proves the model's own capability is not what the old
+     * predicate was reading.
+     *
+     * So the declared set is now a veto: an explicit off tier is emitted ONLY
+     * when `reasoningEffortValues` is non-null AND contains it. `null` (the
+     * catalog never heard of this model) stays permissive on purpose — it means
+     * "unknown", not "declares nothing"; the latter is the separate
+     * [com.rikkaminis.app.data.model.LLMModel.declaresNoEffortTiers] flag, and
+     * treating unknown as a veto would silently re-disable the explicit-off
+     * behaviour on every model the catalog does not cover (i.e. the exact
+     * pre-#377 behaviour for the whole allowlist).
      */
-    private fun explicitOffEffort(): String? {
-        if (isAzure) return null
-        val base = basePath.lowercase()
-        if (base.startsWith("https://api.openai.com")) return "none"
-        val lid = model.id.lowercase()
-        if (base.contains("volces") || base.contains("ark.") ||
-            lid.contains("seed-") || lid.contains("doubao")
-        ) {
-            return "minimal"
-        }
-        return null
-    }
+    private fun explicitOffEffort(): String? =
+        explicitOffEffortFor(
+            basePath = basePath,
+            isAzure = isAzure,
+            modelId = model.id,
+            declaredEffortValues = model.reasoningEffortValues,
+        )
 
     /**
      * Non-streaming entry point. Some providers (e.g. GPT-5.x via certain

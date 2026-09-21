@@ -254,3 +254,48 @@ internal fun supportsPrefillForOpenAIBase(basePath: String, isAzure: Boolean): B
                 b.contains("ark.") ||
                 b.contains("api.deepseek.com")
         }
+
+/**
+ * [GH#377] Pure decision: the wire value for "thinking OFF", or null to omit the
+ * field. Extracted from `OpenAIProvider.explicitOffEffort()` so the boundary is
+ * JVM-testable without a MockWebServer — same shape as the prefill predicate
+ * above.
+ *
+ * Two independent questions, two independent predicates:
+ *  1. ALLOWLIST (which vendor documents an off tier) — official OpenAI → "none",
+ *     Volcano Ark → "minimal", everyone else → omit. Azure omits: its off tier is
+ *     model-dependent, so an explicit value risks a 400.
+ *  2. DECLARED SET (what the model says it accepts) — a veto. Emitting a tier the
+ *     catalog does not list gets the whole request rejected (400), which is what
+ *     GH#377 reported. The base URL cannot answer this question: the same model
+ *     behind an official-looking base still declared `[low..max]`, and the old
+ *     predicate read the base, not the model. See the experiment note in
+ *     `OpenAIProvider.explicitOffEffort`.
+ *
+ * `declaredEffortValues == null` means "the catalog never heard of this model" —
+ * NOT "declares nothing" (that is the separate `declaresNoEffortTiers` flag), so
+ * it stays permissive. Treating unknown as a veto would silently re-disable the
+ * explicit-off behaviour for every uncovered model, i.e. revert #377's fix.
+ */
+internal fun explicitOffEffortFor(
+    basePath: String,
+    isAzure: Boolean,
+    modelId: String,
+    declaredEffortValues: List<String>?,
+): String? {
+    if (isAzure) return null
+    val base = basePath.lowercase()
+    val candidate = when {
+        base.startsWith("https://api.openai.com") -> "none"
+        else -> {
+            val lid = modelId.lowercase()
+            if (base.contains("volces") || base.contains("ark.") ||
+                lid.contains("seed-") || lid.contains("doubao")
+            ) {
+                "minimal"
+            } else null
+        }
+    } ?: return null
+    if (declaredEffortValues != null && !declaredEffortValues.contains(candidate)) return null
+    return candidate
+}
