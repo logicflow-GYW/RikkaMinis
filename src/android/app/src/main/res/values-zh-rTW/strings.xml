@@ -148,6 +148,7 @@
     <string name="sessionlist_browser_settings">瀏覽器設定</string>
     <string name="sessionlist_pin">置頂</string>
     <string name="sessionlist_unpin">取消置頂</string>
+    <string name="sessionlist_badge_paused">已暫停</string>
     <string name="sessionlist_export">匯出</string>
     <string name="sessionlist_export_json">JSON</string>
     <string name="sessionlist_export_plain">純文字</string>

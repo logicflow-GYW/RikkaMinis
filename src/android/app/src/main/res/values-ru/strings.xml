@@ -340,6 +340,7 @@
     <string name="sessionlist_browser_settings">Настройки браузера</string>
     <string name="sessionlist_pin">Закрепить</string>
     <string name="sessionlist_unpin">Открепить</string>
+    <string name="sessionlist_badge_paused">Приостановлено</string>
     <string name="sessionlist_export">Экспорт</string>
     <string name="sessionlist_export_json">JSON</string>
     <string name="sessionlist_export_plain">Обычный текст</string>

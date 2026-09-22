@@ -574,6 +574,7 @@
     <string name="sessionlist_browser_settings">브라우저 설정</string>
     <string name="sessionlist_pin">고정</string>
     <string name="sessionlist_unpin">고정 해제</string>
+    <string name="sessionlist_badge_paused">일시 중지</string>
     <string name="sessionlist_export">내보내기</string>
     <string name="sessionlist_export_json">JSON</string>
     <string name="sessionlist_export_plain">일반 텍스트</string>
