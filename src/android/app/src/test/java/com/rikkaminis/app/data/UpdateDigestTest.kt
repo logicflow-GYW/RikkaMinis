@@ -13,8 +13,9 @@ import org.junit.Test
  * it wrote), so a download that did not match the published asset installed
  * without complaint.
  *
- * Two groups: parsing (what counts as a digest we can check) and judging
- * (which verdicts may install).
+ * Three groups: parsing (what counts as a digest we can check), judging
+ * (which verdicts may install), and resume (when a pending record may answer
+ * a download request without the network).
  */
 class UpdateDigestTest {
 
@@ -241,5 +242,80 @@ class UpdateDigestTest {
             DownloadIntegrity.DIGEST_MISMATCH,
             judgeDownloadIntegrity(d, 14077427L, 14077427L, other64),
         )
+    }
+
+    // ── judgeResumePending ──────────────────────────────────────────────
+
+    @Test
+    fun `declared digest matching the recorded publisher digest resumes verified`() {
+        val declared = parsePublisherDigest("sha256:$hex64")!!
+        assertEquals(
+            DownloadIntegrity.VERIFIED,
+            judgeResumePending(hex64, other64, 14_000_000L, declared, 14_000_000L),
+        )
+    }
+
+    @Test
+    fun `declared digest matching our own re-hash resumes verified`() {
+        // Record written by a download where the publisher declared no digest
+        // but our sha256 was computed — the bytes still hash to what the
+        // caller now declares, so the pending file IS the requested asset.
+        val declared = parsePublisherDigest("sha256:$hex64")!!
+        assertEquals(
+            DownloadIntegrity.VERIFIED,
+            judgeResumePending(null, hex64, 14_000_000L, declared, 14_000_000L),
+        )
+    }
+
+    @Test
+    fun `digest correlation is case-insensitive`() {
+        // parsePublisherDigest lowercases its own side, so the recorded hex
+        // is the one carrying mixed case here — ignoreCase is what matches it.
+        val declared = parsePublisherDigest("sha256:$hex64")!!
+        assertEquals(
+            DownloadIntegrity.VERIFIED,
+            judgeResumePending(hex64.uppercase(), null, 1L, declared, 0L),
+        )
+        assertEquals(
+            DownloadIntegrity.VERIFIED,
+            judgeResumePending(null, hex64.uppercase(), 1L, declared, 0L),
+        )
+    }
+
+    @Test
+    fun `declared digest that matches nothing refuses to resume`() {
+        val declared = parsePublisherDigest("sha256:$hex64")!!
+        assertNull(judgeResumePending(other64, null, 14_000_000L, declared, 14_000_000L))
+        // Declared sha256 but the record carries no hashes at all: the bytes
+        // were never checked against it — download afresh instead.
+        assertNull(judgeResumePending(null, null, 14_000_000L, declared, 14_000_000L))
+        // A different-size record with a matching digest would still resume
+        // (digest decides alone, as in judgeDownloadIntegrity).
+        assertEquals(
+            DownloadIntegrity.VERIFIED,
+            judgeResumePending(hex64, null, 1L, declared, 14_000_000L),
+        )
+    }
+
+    @Test
+    fun `unsupported declared algorithm degrades to the size rule`() {
+        val sha512 = parsePublisherDigest("sha512:$hex64")!!
+        assertTrue(!sha512.isSupported)
+        assertEquals(
+            DownloadIntegrity.SIZE_ONLY,
+            judgeResumePending(hex64, null, 14_000_000L, sha512, 14_000_000L),
+        )
+        assertNull(judgeResumePending(hex64, null, 14_000_000L, sha512, 99L))
+    }
+
+    @Test
+    fun `without a declared digest only a size match resumes`() {
+        assertEquals(
+            DownloadIntegrity.SIZE_ONLY,
+            judgeResumePending(null, null, 14_000_000L, null, 14_000_000L),
+        )
+        assertNull(judgeResumePending(null, null, 14_000_000L, null, 99L))
+        // Size unknown on the request side — nothing to correlate with.
+        assertNull(judgeResumePending(hex64, hex64, 14_000_000L, null, 0L))
     }
 }

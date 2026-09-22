@@ -834,6 +834,11 @@ class DebugRPCHandler(private val context: Context) {
                 .put("size", result.file.length())
                 .put("integrity", result.integrity.name)
                 .put("verified", result.integrity.isVerified)
+                // [fix/update-pending-resume] True when a persisted pending
+                // record satisfied this request and the network was skipped —
+                // lets the e2e flow assert the resume half-loop actually
+                // closed. New additive field; fresh downloads report false.
+                .put("resumed", result.resumed)
             is com.rikkaminis.app.data.UpdateChecker.DownloadResult.IntegrityFailure -> JSONObject()
                 .put("status", "integrity_failed")
                 .put("verdict", result.verdict.name)

@@ -93,10 +93,15 @@ object UpdateChecker {
          * @param integrity how much of the download was actually verified —
          *   see [DownloadIntegrity]; only [DownloadIntegrity.isVerified] means
          *   the publisher's declared hash vouched for the bytes.
+         * @param resumed true when the file came from a previously-persisted
+         *   pending record ([fix/update-pending-resume]) instead of the
+         *   network. Purely informational — callers treat resumed and
+         *   freshly-downloaded successes identically.
          */
         data class Success(
             val file: File,
             val integrity: DownloadIntegrity = DownloadIntegrity.SIZE_ONLY,
+            val resumed: Boolean = false,
         ) : DownloadResult()
         data class Error(val message: String) : DownloadResult()
         /**
@@ -370,6 +375,33 @@ object UpdateChecker {
         expectedDigest: PublisherDigest? = null,
         onProgress: (Float) -> Unit = {},
     ): DownloadResult = withContext(Dispatchers.IO) {
+        // [fix/update-pending-resume] Resume half-loop: a pending APK from a
+        // previous download that survived process death is still on disk and
+        // intact — skip the network entirely and hand it back. The pending
+        // store does not record the request URL, so the request must
+        // correlate with the record first ([judgeResumePending]); anything
+        // uncorrelated falls through to a fresh download below.
+        resumablePending(context)?.let { pending ->
+            val integrity = judgeResumePending(
+                recordedPublisherDigest = pending.publisherDigest,
+                recordedSha256 = pending.sha256,
+                recordedSize = pending.apkSize,
+                declared = expectedDigest,
+                expectedSize = expectedSize,
+            )
+            if (integrity != null) {
+                AppLogger.info(
+                    TAG,
+                    "resume pending download version=${pending.targetVersionName} " +
+                        "size=${pending.apkSize} integrity=$integrity (skipped network)",
+                )
+                return@withContext DownloadResult.Success(
+                    File(pending.apkPath),
+                    integrity,
+                    resumed = true,
+                )
+            }
+        }
         // [audit-0917] Declared outside try so the catch path can delete a
         // partial file — a truncated APK left on disk could later be consumed
         // by the installer as a valid update.
@@ -558,7 +590,18 @@ object UpdateChecker {
      * the pending record is cleared so the UI falls through to a fresh
      * download.
      */
-    fun resumablePendingFile(context: Context): File? {
+    fun resumablePendingFile(context: Context): File? =
+        resumablePending(context)?.let { File(it.apkPath) }
+
+    /**
+     * Same gates as [resumablePendingFile] (freshness → version → integrity)
+     * but returns the full persisted record instead of just the file, so the
+     * [download] resume short-circuit can correlate the incoming request with
+     * what was recorded before skipping the network. When this returns
+     * non-null, [PendingUpdateStore.verify] has already validated the file at
+     * [PendingUpdateStore.PendingUpdate.apkPath].
+     */
+    private fun resumablePending(context: Context): PendingUpdateStore.PendingUpdate? {
         val pending = PendingUpdateStore.getPending(context) ?: return null
         // Only resume if the persisted target is still newer than the running
         // build — protects against the case where the user updated by some
@@ -571,13 +614,12 @@ object UpdateChecker {
             PendingUpdateStore.clearPending(context)
             return null
         }
-        val file = PendingUpdateStore.verify(pending)
-        if (file == null) {
+        if (PendingUpdateStore.verify(pending) == null) {
             AppLogger.info(TAG, "pending APK failed integrity; clearing")
             PendingUpdateStore.clearPending(context)
             return null
         }
-        return file
+        return pending
     }
 
     fun installApk(context: Context, apk: File): Boolean {

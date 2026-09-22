@@ -154,3 +154,55 @@ fun judgeDownloadIntegrity(
     if (expectedSize > 0 && actualSize != expectedSize) return DownloadIntegrity.SIZE_MISMATCH
     return DownloadIntegrity.SIZE_ONLY
 }
+
+
+/**
+ * Decides whether a download request may be satisfied by an already-verified
+ * pending record instead of the network ([fix/update-pending-resume]). The
+ * pending store does not record the request URL, so correlation uses the keys
+ * the record does have — the same signals [judgeDownloadIntegrity] weighs for
+ * fresh downloads, applied to what [PendingUpdateStore.verify] already
+ * re-hashed:
+ *
+ *  1. A supported declared digest decides alone: it must match the recorded
+ *     publisher digest (or our own re-hash of the bytes when the publisher
+ *     declared none at download time). No match → null, the caller downloads
+ *     afresh and the full digest judgement applies there. This is stricter
+ *     than re-using a size match: a declared sha256 we cannot confirm must
+ *     not be answered with bytes we never checked against it.
+ *  2. Without a usable declared digest, the declared asset size must match
+ *     the recorded size — the same standard the size-only download path
+ *     accepts under.
+ *  3. Neither signal correlates → null. Never hand back a different release
+ *     as "success".
+ *
+ * Extracted as a pure function (same reason [judgeDownloadIntegrity] lives
+ * here) so the resume/redo decision is unit-testable on the JVM.
+ *
+ * @param recordedPublisherDigest publisher hex persisted with the pending record, or null
+ * @param recordedSha256 our own re-hash persisted with the record, or null
+ * @param recordedSize byte count persisted with the record
+ * @param declared digest the current request declared, or null when none
+ * @param expectedSize asset size the current request declared (0 = unknown)
+ * @return the verdict to report when resuming, or null to download afresh
+ */
+fun judgeResumePending(
+    recordedPublisherDigest: String?,
+    recordedSha256: String?,
+    recordedSize: Long,
+    declared: PublisherDigest?,
+    expectedSize: Long,
+): DownloadIntegrity? {
+    val declaredSha = declared?.takeIf { it.isSupported }
+    if (declaredSha != null) {
+        val matches =
+            recordedPublisherDigest?.equals(declaredSha.hex, ignoreCase = true) == true ||
+                recordedSha256?.equals(declaredSha.hex, ignoreCase = true) == true
+        return if (matches) DownloadIntegrity.VERIFIED else null
+    }
+    return if (expectedSize > 0 && recordedSize == expectedSize) {
+        DownloadIntegrity.SIZE_ONLY
+    } else {
+        null
+    }
+}
