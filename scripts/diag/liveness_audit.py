@@ -52,10 +52,23 @@ RARE = {
     ("cat", "ChatVMRouting"): "load-balance rotation; LB groups disabled",
     ("cat", "StreamRender"): "live-tail parse; covered by RenderCensus",
     ("step", "coldParse.offmain"): "frozen cache miss; covered by RenderCensus",
-    ("cat", "RenderCensus"): "pending-install: re-wired to the live renderer (StreamingMarkdownTextBody) in fix/liveness-followups-0914; prune after first hit",
-    ("step", "buildFlatChatItems.ledgerReseed"): "needs a non-incrementally-compatible merge",
+    # ("cat", "RenderCensus") pruned 2026-09-22: the pending-install entry was
+    # wired in fix/liveness-followups-0914 and produced its FIRST hits in the
+    # 09-22 window (hit=12) — the audit itself flagged "prune its RARE entry"
+    # and this is that prune. This is the documented lifecycle working end to
+    # end: wire → first hit → audit says prune → entry removed.
     ("step", "buildFlatChatItems.progress"): "full rebuild of a 100+ message session",
 }
+# Removed 2026-09-22: ("step", "buildFlatChatItems.ledgerReseed") — the probe
+# no longer exists anywhere in main source (the ledger reseed path was deleted
+# with the flat-row pipeline). A RARE entry that outlives its probe is a dead
+# ruler holding a permission slip; liveness_static_guard now fails on exactly
+# this shape, so a stale entry can never quietly rot here again.
+
+
+# Module-level so liveness_static_guard can inject a drifted pattern in its
+# DIRTY-C self-test (proving the completeness check actually fires).
+DECLARED_CAT_PAT = re.compile(r"AppLogger\.(?:info|warning|error|debug)\(\s*([^,]+?)\s*,")
 
 
 def declared(src):
@@ -78,7 +91,12 @@ def declared(src):
 
     for p in files:
         t = open(p, errors="replace").read()
-        for m in re.finditer(r"AppLogger\.(?:info|warning|error)\(\s*([^,]+?)\s*,", t):
+        # `debug` MUST be enumerated: every AppLogger.debug call sinks to the
+        # debug-<date>.log channel (see observed()), so a debug probe missing
+        # from this list is invisible to the census BY CONSTRUCTION. The
+        # liveness_static_guard CI gate fails if a public AppLogger log method
+        # is added without extending this alternation.
+        for m in DECLARED_CAT_PAT.finditer(t):
             cats.setdefault(res(m.group(1)), []).append(where(p, t, m.start()))
         for m in re.finditer(r"\bLog\.[diwev]\(\s*([^,]+?)\s*,", t):
             tags.setdefault(res(m.group(1)), []).append(where(p, t, m.start()))
@@ -91,7 +109,16 @@ def declared(src):
 
 def observed(logs):
     cats, tags, steps, events = Counter(), Counter(), Counter(), Counter()
-    for f in sorted(glob.glob(os.path.join(logs, "minis-*.log"))):
+    # Two lessons from the 09-21 evidence pipeline (D2/D3), applied here:
+    #  - the debug channel (`debug-*.log`) holds EVERY DEBUG line the app
+    #    produces — skipping it permanently hides the muted categories;
+    #  - rotated files (`*.log.1`) exist whenever a daily file crosses its
+    #    size cap — a `*.log`-only glob reads "0 hits" on exactly the days
+    #    with the most activity.
+    main_logs = []
+    for pat in ("minis-*.log", "minis-*.log.*", "debug-*.log", "debug-*.log.*"):
+        main_logs.extend(glob.glob(os.path.join(logs, pat)))
+    for f in sorted(set(main_logs)):
         for l in open(f, errors="replace"):
             if l.startswith("[LOGCAT]"):
                 m = re.match(r"\[LOGCAT\] \d\d-\d\d [\d:.]+ \w/([^(\s]+)\(", l)
@@ -104,7 +131,8 @@ def observed(logs):
                 m2 = re.search(r"step=([\w.]+)", l)
                 if m2:
                     steps[m2.group(1)] += 1
-    for f in sorted(glob.glob(os.path.join(logs, "memspike-*.log"))):
+    for f in sorted(set(glob.glob(os.path.join(logs, "memspike-*.log")) +
+                        glob.glob(os.path.join(logs, "memspike-*.log.*")))):
         for l in open(f, errors="replace"):
             # MemorySpikeRecorder writes a THIRD shape: `HH:MM:SS.mmm [event] k=v ...`
             # (the bracketed name is the event, not a category).

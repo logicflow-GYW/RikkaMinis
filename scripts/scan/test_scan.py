@@ -1121,6 +1121,18 @@ fun rememberThing(
     check("removing the onDispose holder fails (exit != 0)", code != 0, f"exit={code}\n{out}")
     shutil.rmtree(tmp)
 
+def test_liveness_static():
+    print("━━━ liveness_static_guard ━━━")
+    # Self-test fixtures (clean + the A/B/C violation classes).
+    code, out = run_scanner("liveness_static_guard.py", "--self-test")
+    check(
+        "self-test fixtures pass (clean tree passes; A/B/C all caught)",
+        code == 0,
+        f"exit={code}\n{out}",
+    )
+    # Real-repo coverage comes from the test_real_repo() scanner list.
+
+
 def test_real_repo():
     print("━━━ real repo tree (must be clean) ━━━")
     for script in (
@@ -1136,6 +1148,7 @@ def test_real_repo():
         "stream_flow_dispatch_guard.py",
         "prefs_listener_holder_guard.py",
         "thinking_wiring_guard.py",
+        "liveness_static_guard.py",
     ):
         code, out = run_scanner(script, REPO_ROOT)
         check(f"{script} on real repo exits 0", code == 0, f"exit={code}\n{out[:2000]}")
@@ -1340,6 +1353,7 @@ def main():
     test_prefs_listener_holder()
     test_xproc_boundary()
     test_thinking_wiring()
+    test_liveness_static()
     test_real_repo()
     print("")
     print(f"{'❌ FAILURES: ' + str(FAIL) if FAIL else '✅ ALL ' + str(PASS) + ' CASES PASS'}")
