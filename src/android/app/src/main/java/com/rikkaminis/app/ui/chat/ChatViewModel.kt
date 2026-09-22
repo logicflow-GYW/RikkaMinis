@@ -1565,6 +1565,22 @@ class ChatViewModel(
         .stateIn(viewModelScope, SharingStarted.Eagerly, ThinkingLevel.OFF)
 
     /**
+     * [T-thinking-effective-level] Observable form of the RAW stored choice —
+     * what the user last picked, BEFORE the model's capability and ceiling are
+     * folded in.
+     *
+     * The picker needs both this and [thinkingLevel], and they are NOT
+     * interchangeable: [thinkingLevel] (effective) drives the capsule
+     * highlight, this one drives the orange "your setting is capped here"
+     * up-arrow. Wiring the cue to the effective value makes `isCappedBy`
+     * trivially false — the cue vanishes with no error anywhere (it was
+     * reachable in 15 of the 64 (ceiling, choice) combinations on main, and 0
+     * on a build that fed it the effective flow). Each consumer must read its
+     * own source.
+     */
+    val requestedThinkingLevel: StateFlow<ThinkingLevel> = _thinkingLevel.asStateFlow()
+
+    /**
      * [T-android-enhanced-cache] Enhanced Cache (1-hour Anthropic cache TTL)
      * toggle. Per-VM memory state, NOT persisted — mirrors iOS
      * `AIChatViewModel.enhancedCacheEnabled`. When true, the active turn's

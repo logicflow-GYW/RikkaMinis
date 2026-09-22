@@ -525,7 +525,17 @@ internal fun ChatInputArea(
             ) { viewModel.filteredSlashCommands() }
 
             if (showSlashMenu && filteredSlashCommands.isNotEmpty()) {
-                val thinkingLevelState by viewModel.thinkingLevel.collectAsState()
+                val effectiveThinkingLevelState by viewModel.thinkingLevel.collectAsState()
+                // [T-thinking-effective-level] The two are DIFFERENT values and
+                // must not be swapped. `effectiveThinkingLevelState` (above) is
+                // what this turn actually sends; `requestedThinkingLevelState`
+                // is the user's raw stored choice. The picker needs one for its
+                // highlight and the other for its up-arrow — feeding the
+                // effective value to BOTH silently kills the up-arrow (the
+                // isCappedBy test becomes trivially false; it matched 15 of the
+                // 64 (ceiling, choice) combinations before that wiring error and
+                // 0 after, with no error, log or failing test).
+                val requestedThinkingLevelState by viewModel.requestedThinkingLevel.collectAsState()
                 val thinkingSupported = viewModel.currentModelSupportsReasoning
                 val memoryOnState by viewModel.memoryEnabled.collectAsState()
                 androidx.compose.ui.window.Popup(
@@ -608,7 +618,7 @@ internal fun ChatInputArea(
                                 )
                             }
                             val isThinking = cmd.id == "thinking"
-                            val isThinkingActive = isThinking && thinkingLevelState.isEnabled && thinkingSupported
+                            val isThinkingActive = isThinking && effectiveThinkingLevelState.isEnabled && thinkingSupported
                             val titleColor = if (isThinkingActive) ChatColors.sendButton else ChatColors.primaryText
                             val subtitleColor = if (isThinking && !thinkingSupported) {
                                 ChatColors.secondaryText
@@ -645,7 +655,7 @@ internal fun ChatInputArea(
                                             }
                                         } else if (thinkingSupported) {
                                             it.clickable {
-                                                val newLevel = if (thinkingLevelState.isEnabled) ThinkingLevel.OFF else ThinkingLevel.MEDIUM
+                                                val newLevel = if (effectiveThinkingLevelState.isEnabled) ThinkingLevel.OFF else ThinkingLevel.MEDIUM
                                                 viewModel.setThinkingLevel(newLevel)
                                             }
                                         } else it
@@ -705,7 +715,16 @@ internal fun ChatInputArea(
                                         // for both is what made a capped level
                                         // render with nothing selected.
                                         current = viewModel.effectiveThinkingLevel,
-                                        requested = thinkingLevelState,
+                                        // [T-thinking-effective-level] The RAW
+                                        // stored choice — NOT effectiveThinkingLevelState,
+                                        // which is now the EFFECTIVE level (see
+                                        // ChatViewModel.thinkingLevel). Feeding
+                                        // the effective value here makes the
+                                        // up-arrow's `isCappedBy` test
+                                        // trivially false, silently deleting the
+                                        // cue that explains "your Max is capped
+                                        // at High by this model".
+                                        requested = requestedThinkingLevelState,
                                         // [T-android-thinking-level-arch] Only
                                         // offer tiers the bound model supports.
                                         availableLevels = viewModel.availableThinkingLevels,

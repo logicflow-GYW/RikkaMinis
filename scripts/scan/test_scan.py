@@ -1135,6 +1135,7 @@ def test_real_repo():
         "ime_inset_guard.py",
         "stream_flow_dispatch_guard.py",
         "prefs_listener_holder_guard.py",
+        "thinking_wiring_guard.py",
     ):
         code, out = run_scanner(script, REPO_ROOT)
         check(f"{script} on real repo exits 0", code == 0, f"exit={code}\n{out[:2000]}")
@@ -1223,6 +1224,102 @@ def test_xproc_boundary():
     shutil.rmtree(root)
 
 
+def thinking_wiring_fixture(requested_arg="requestedThinkingLevelState",
+                            requested_binding="val requestedThinkingLevelState by viewModel.requestedThinkingLevel.collectAsState()",
+                            current_arg="viewModel.effectiveThinkingLevel",
+                            clamp_arg="requested", tap_arg="requested",
+                            escape=False):
+    """Minimal tree for thinking_wiring_guard: one picker call + its body."""
+    pkg = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/"
+    esc = " // thinking-wiring-ok: fixture" if escape else ""
+    caller = (
+        "package com.rikkaminis.app.ui.chat\n"
+        "class ChatInputArea {\n"
+        "    fun row(viewModel: ChatViewModel) {\n"
+        f"        {requested_binding}\n"
+        "        ThinkingLevelPicker(\n"
+        f"            current = {current_arg},\n"
+        f"            requested = {requested_arg},{esc}\n"
+        "            availableLevels = viewModel.availableThinkingLevels,\n"
+        "            onSelect = { },\n"
+        "        )\n"
+        "    }\n"
+        "}\n"
+    )
+    body = (
+        "package com.rikkaminis.app.ui.chat\n"
+        "internal fun ThinkingLevelPicker(\n"
+        "    current: ThinkingLevel,\n"
+        "    requested: ThinkingLevel,\n"
+        "    availableLevels: List<ThinkingLevel>,\n"
+        "    onSelect: (ThinkingLevel) -> Unit,\n"
+        ") {\n"
+        "    val maxAvailable = availableLevels.lastOrNull { it != ThinkingLevel.OFF }\n"
+        f"    val isClamped = maxAvailable != null && isCappedBy({clamp_arg}, maxAvailable)\n"
+        "    availableLevels.forEach { level ->\n"
+        f"        onSelect(thinkingTapTarget(level, {tap_arg}))\n"
+        "    }\n"
+        "}\n"
+    )
+    return {pkg + "ChatInputArea.kt": caller, pkg + "ChatComposerWidgets.kt": body}
+
+def test_thinking_wiring():
+    print("━━━ thinking_wiring_guard ━━━")
+    # Clean.
+    root = make_tree(thinking_wiring_fixture())
+    code, out = run_scanner("thinking_wiring_guard.py", root)
+    check("clean fixture exits 0", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(root)
+
+    # The real 2026-09-22 defect: `requested` fed the effective level. The
+    # caller's local is renamed so a spelling-based check would miss it —
+    # provenance must follow the `val` binding.
+    root = make_tree(thinking_wiring_fixture(
+        requested_arg="effectiveThinkingLevelState",
+        requested_binding="val effectiveThinkingLevelState by viewModel.thinkingLevel.collectAsState()",
+    ))
+    code, out = run_scanner("thinking_wiring_guard.py", root)
+    check(
+        "requested <- effective flow caught through a rename",
+        code == 1 and "EFFECTIVE level" in out,
+        f"exit={code}\n{out}",
+    )
+    shutil.rmtree(root)
+
+    # `current` collapsed to the raw choice.
+    root = make_tree(thinking_wiring_fixture(current_arg="requestedThinkingLevelState"))
+    code, out = run_scanner("thinking_wiring_guard.py", root)
+    check("current <- raw choice caught", code == 1 and "current" in out, f"exit={code}\n{out}")
+    shutil.rmtree(root)
+
+    # Clamp predicate and tap rule must both key off `requested`.
+    root = make_tree(thinking_wiring_fixture(clamp_arg="current"))
+    code, out = run_scanner("thinking_wiring_guard.py", root)
+    check("isCappedBy(current, ...) caught", code == 1 and "isCappedBy" in out, f"exit={code}\n{out}")
+    shutil.rmtree(root)
+
+    root = make_tree(thinking_wiring_fixture(tap_arg="current"))
+    code, out = run_scanner("thinking_wiring_guard.py", root)
+    check("tap keyed off current caught", code == 1 and "thinkingTapTarget" in out, f"exit={code}\n{out}")
+    shutil.rmtree(root)
+
+    # Escape hatch clears it.
+    root = make_tree(thinking_wiring_fixture(
+        requested_arg="effectiveThinkingLevelState",
+        requested_binding="val effectiveThinkingLevelState by viewModel.thinkingLevel.collectAsState()",
+        escape=True,
+    ))
+    code, out = run_scanner("thinking_wiring_guard.py", root)
+    check("escape hatch clears the finding", code == 0, f"exit={code}\n{out}")
+    shutil.rmtree(root)
+
+    # Rot guard: a tree with no picker call must FAIL, not silently pass.
+    root = make_tree({"src/android/app/src/main/java/com/rikkaminis/app/Empty.kt":
+                      "package com.rikkaminis.app\n"})
+    code, out = run_scanner("thinking_wiring_guard.py", root)
+    check("missing picker call fails instead of passing silently", code == 1, f"exit={code}\n{out}")
+    shutil.rmtree(root)
+
 def main():
     print("╔══════════════════════════════════════════════════╗")
     print("║  Scan Self-Test (fixture ground truth)          ║")
@@ -1242,6 +1339,7 @@ def main():
     test_stream_flow_dispatch()
     test_prefs_listener_holder()
     test_xproc_boundary()
+    test_thinking_wiring()
     test_real_repo()
     print("")
     print(f"{'❌ FAILURES: ' + str(FAIL) if FAIL else '✅ ALL ' + str(PASS) + ' CASES PASS'}")

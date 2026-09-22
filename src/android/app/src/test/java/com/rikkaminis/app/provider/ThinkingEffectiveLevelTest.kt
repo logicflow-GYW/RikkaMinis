@@ -230,6 +230,89 @@ class ThinkingEffectiveLevelTest {
         }
     }
 
+    // ── thinkingTapTarget (drives what a capsule tap DOES) ───────────────
+
+    @Test
+    fun `tap rule - the stored choice toggles off, any other capsule selects`() {
+        for (requested in all) {
+            for (level in all) {
+                val expected = if (level == requested) ThinkingLevel.OFF else level
+                assertEquals(
+                    "level=$level requested=$requested",
+                    expected,
+                    thinkingTapTarget(level, requested),
+                )
+            }
+        }
+    }
+
+    /**
+     * The reported symptom, as an assertion. Stored MAX, the bound model caps
+     * at HIGH → the picker draws the orange up-arrow on HIGH. Tapping HIGH asks
+     * for "this model's maximum" and MUST select HIGH. Keying the tap off the
+     * HIGHLIGHT (the branch's first attempt) sent it to OFF instead — the user
+     * asked for the highest reachable tier and got thinking switched off.
+     */
+    @Test
+    fun `regression - tapping the capped ceiling selects it instead of turning thinking off`() {
+        val stored = ThinkingLevel.MAX
+        val ceiling = ThinkingLevel.HIGH
+        val current = effectiveThinkingLevel(stored, supportsReasoning = true, ceiling)
+        val maxAvail = availableLevels(ceiling).last { it != ThinkingLevel.AUTO }
+
+        // Preconditions of the clamped state the picker renders.
+        assertEquals("highlight", ThinkingLevel.HIGH, current)
+        assertEquals("orange capsule", ThinkingLevel.HIGH, maxAvail)
+        assertTrue("cue shown", isCappedBy(stored, maxAvail))
+
+        // The bug: the highlighted capsule is not the stored choice, so a tap
+        // must NOT be read as "toggle off".
+        assertEquals("tap selects the ceiling", ThinkingLevel.HIGH, thinkingTapTarget(maxAvail, stored))
+        assertFalse("and not OFF", thinkingTapTarget(maxAvail, stored) == ThinkingLevel.OFF)
+    }
+
+    /** OFF must stay reachable from the picker even when the choice is capped. */
+    @Test
+    fun `OFF is reachable by a second tap after resolving a clamp`() {
+        val stored = ThinkingLevel.MAX
+        val ceiling = ThinkingLevel.HIGH
+        val maxAvail = availableLevels(ceiling).last { it != ThinkingLevel.AUTO }
+
+        val firstTap = thinkingTapTarget(maxAvail, stored)          // -> HIGH
+        assertEquals(ThinkingLevel.HIGH, firstTap)
+        // setThinkingLevel stores it verbatim (it is at the ceiling), so the
+        // stored choice is now HIGH and a second tap reaches OFF.
+        val secondTap = thinkingTapTarget(firstTap, firstTap)
+        assertEquals(ThinkingLevel.OFF, secondTap)
+    }
+
+    /**
+     * The unclamped convention is untouched: with `current == requested`, the
+     * old `isHighlighted` rule and the new `requested` rule agree. This is why
+     * the fix cannot change behaviour for the common case.
+     */
+    @Test
+    fun `unclamped states behave identically under both tap rules`() {
+        for (ceiling in all) {
+            for (stored in all) {
+                val current = effectiveThinkingLevel(stored, supportsReasoning = true, ceiling)
+                if (current != stored) continue   // clamped — rules deliberately differ
+                val maxAvail = availableLevels(ceiling).lastOrNull { it != ThinkingLevel.AUTO }
+                val clamped = maxAvail != null && isCappedBy(stored, maxAvail)
+                if (clamped) continue
+                for (level in availableLevels(ceiling)) {
+                    val highlighted = level == current
+                    val oldRule = if (highlighted) ThinkingLevel.OFF else level
+                    assertEquals(
+                        "ceiling=$ceiling stored=$stored level=$level",
+                        oldRule,
+                        thinkingTapTarget(level, stored),
+                    )
+                }
+            }
+        }
+    }
+
     /** Mirrors ChatViewModel.availableThinkingLevels. */
     private fun availableLevels(ceiling: ThinkingLevel): List<ThinkingLevel> =
         all.filter {

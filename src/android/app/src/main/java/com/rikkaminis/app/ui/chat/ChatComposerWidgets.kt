@@ -929,11 +929,16 @@ internal fun ThinkingLevelPicker(
      */
     current: ThinkingLevel,
     /**
-     * [T-thinking-effective-level] The RAW stored choice, used only to decide
+     * [T-thinking-effective-level] The RAW stored choice, used to decide BOTH
      * whether to draw the orange up-arrow ("your setting is higher, this model
-     * caps here"). It cannot be derived from [current]: in this composable's
-     * domain `current == min(requested, ceiling)`, so it is never above the
-     * ceiling and the cue would never appear.
+     * caps here") AND what a tap on a capsule means.
+     *
+     * It cannot be derived from [current]: in this composable's domain
+     * `current == min(requested, ceiling)`, so it is never above the ceiling
+     * and the cue would never appear. That is not hypothetical — wiring this
+     * parameter to the effective flow left the cue reachable in 0 of the 64
+     * (ceiling, choice) combinations (it is 15 on the pre-fix code), with no
+     * error, log or failed test anywhere.
      */
     requested: ThinkingLevel,
     // [T-android-thinking-level-arch] Levels the CURRENT model actually supports
@@ -973,6 +978,20 @@ internal fun ThinkingLevelPicker(
             val isExactMatch = level == current
             val isClampedHighlight = isClamped && level == maxAvailable
             val isHighlighted = isExactMatch || isClampedHighlight
+            // [T-thinking-effective-level] Tap semantics are keyed off the RAW
+            // choice, NOT the highlight. When the user's stored level is capped,
+            // the orange up-arrow capsule is the model's ceiling — it is NOT the
+            // user's setting, so tapping it must SELECT that tier ("use this
+            // model's maximum"), which is what the arrow invites. Keying the tap
+            // off `isHighlighted` instead sent that tap to OFF: the user asked
+            // for the highest available tier and got thinking turned off — the
+            // exact reported symptom ("调到最高，但会出现关了的情况").
+            // With `requested`, the "tap your current level to switch it off"
+            // convention is preserved whenever nothing is clamped (there
+            // `current == requested`), and OFF stays reachable by tapping the
+            // just-selected capsule a second time (plus the OFF row in
+            // ThinkingLevelSheet). The rule itself lives in thinkingTapTarget
+            // (provider layer) so it is JVM-testable.
             val bg = when {
                 // [T-android-thinking-picker-ui] Clamped tier → orange; normal
                 // selection → blue (ChatColors.thinking, the theme-adaptive
@@ -991,10 +1010,16 @@ internal fun ThinkingLevelPicker(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .background(bg)
-                    // [T-android-thinking-level-arch] Tapping the already-
-                    // highlighted capsule toggles thinking OFF (covers both exact
-                    // and clamped highlight); otherwise selects the tapped level.
-                    .clickable { onSelect(if (isHighlighted) ThinkingLevel.OFF else level) }
+                    // [T-android-thinking-level-arch] Tapping the capsule that
+                    // IS the stored choice toggles thinking OFF; any other
+                    // capsule selects it. The rule is a pure function in the
+                    // provider layer so the whole (level × requested) space is
+                    // JVM-testable — see thinkingTapTarget.
+                    .clickable {
+                        onSelect(
+                            com.rikkaminis.app.provider.thinkingTapTarget(level, requested),
+                        )
+                    }
                     .padding(horizontal = 6.dp, vertical = 4.dp),
             ) {
                 Text(

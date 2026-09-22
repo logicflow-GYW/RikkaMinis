@@ -166,3 +166,26 @@ fun effectiveThinkingLevel(
  */
 fun isCappedBy(requested: ThinkingLevel, ceiling: ThinkingLevel): Boolean =
     requested.isEnabled && requested != ThinkingLevel.AUTO && requested.rank > ceiling.rank
+
+/**
+ * [T-thinking-effective-level] What tapping a picker capsule must DO.
+ *
+ * The picker's convention is "tap the capsule that is already your setting to
+ * switch thinking off; tap any other capsule to select it". That convention
+ * has to be keyed off the RAW stored choice, not the highlight:
+ *
+ *  • Unclamped (`requested == current == level`) — the highlighted capsule is
+ *    the user's own setting, so a tap turns thinking off. Unchanged.
+ *  • Clamped — the orange up-arrow capsule is the MODEL'S CEILING, not the
+ *    user's setting. The arrow invites "use this model's maximum", so a tap
+ *    must SELECT it. Keying off the highlight sent that tap to OFF instead:
+ *    the user asked for the highest reachable tier and got thinking disabled —
+ *    the reported symptom ("调到最高，但会出现关了的情况").
+ *
+ * OFF stays reachable: tap the just-selected capsule again, or use the OFF row
+ * in ThinkingLevelSheet. Pure function so the whole (level × requested) space
+ * is JVM-testable — the tap rule lives inside a @Composable, which the sandbox
+ * cannot compile.
+ */
+fun thinkingTapTarget(level: ThinkingLevel, requested: ThinkingLevel): ThinkingLevel =
+    if (level == requested) ThinkingLevel.OFF else level
