@@ -462,6 +462,7 @@
     <string name="sessionlist_browser_settings">Browser Settings</string>
     <string name="sessionlist_pin">Pin</string>
     <string name="sessionlist_unpin">Unpin</string>
+    <string name="sessionlist_badge_paused">Paused</string>
     <string name="sessionlist_export">Export</string>
     <string name="sessionlist_export_json">JSON</string>
     <string name="sessionlist_export_plain">Plain Text</string>

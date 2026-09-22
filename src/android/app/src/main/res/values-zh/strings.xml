@@ -673,6 +673,7 @@
     <string name="sessionlist_browser_settings">浏览器设置</string>
     <string name="sessionlist_pin">置顶</string>
     <string name="sessionlist_unpin">取消置顶</string>
+    <string name="sessionlist_badge_paused">已暂停</string>
     <string name="sessionlist_export">导出</string>
     <string name="sessionlist_export_json">JSON</string>
     <string name="sessionlist_export_plain">纯文本</string>

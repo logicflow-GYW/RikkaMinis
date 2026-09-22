@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.HorizontalDivider
@@ -49,6 +50,7 @@ import com.rikkaminis.app.config.ChatActionSpec
 import com.rikkaminis.app.data.db.ChatSessionEntity
 import com.rikkaminis.app.data.repository.ChatRepository
 import com.rikkaminis.app.service.SessionActivityTracker
+import com.rikkaminis.app.service.SessionBadgeStore
 import com.rikkaminis.app.ui.components.MinisAlertDialog
 import com.rikkaminis.app.ui.sessions.DatePeriod
 import com.rikkaminis.app.ui.sessions.categoryStyle
@@ -378,6 +380,14 @@ private fun DrawerSessionRow(
     val timeText = remember(session.updatedAt, ctx) { relativeDate(ctx, session.updatedAt) }
     val activeSessions by SessionActivityTracker.activeSessions.collectAsState()
     val isActive = session.id in activeSessions
+    val badges by SessionBadgeStore.byId.collectAsState()
+    // [T1-badge-render] Restore the PAUSED consumer lost with the stock
+    // SessionListScreen (5faf9411): the badge queue's head decides the icon
+    // overlay. PAUSED wins over the running dot — the two are logically
+    // exclusive (a paused session is not active), and interruption is the
+    // state the user must notice first.
+    val badgePaused =
+        badges[session.id]?.firstOrNull() == SessionBadgeStore.SessionBadgeState.PAUSED
 
     Row(
         modifier = Modifier
@@ -405,7 +415,19 @@ private fun DrawerSessionRow(
                 tint = style.color,
                 modifier = Modifier.size(17.dp),
             )
-            if (isActive) {
+            if (badgePaused) {
+                // Semantic badge (unlike the decorative isActive dot below):
+                // interruption must be perceivable without vision, so it gets a
+                // real contentDescription instead of null.
+                Icon(
+                    imageVector = Icons.Filled.Pause,
+                    contentDescription = stringResource(R.string.sessionlist_badge_paused),
+                    tint = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier
+                        .size(10.dp)
+                        .align(Alignment.BottomEnd),
+                )
+            } else if (isActive) {
                 Box(
                     modifier = Modifier
                         .size(7.dp)
@@ -413,6 +435,9 @@ private fun DrawerSessionRow(
                         .align(Alignment.BottomEnd),
                 )
             }
+            // ponytail: 只渲染 PAUSED（当前唯一产出态），ICLOUD_SYNCING 作 head 时回落为无标记
+            // 天花板: 第二个产出态上线后列表静默看不到它
+            // 升级触发: 写侧出现 push(.., SessionBadgeState.ICLOUD_SYNCING)（grep 即知）
         }
 
         Column(modifier = Modifier.weight(1f)) {

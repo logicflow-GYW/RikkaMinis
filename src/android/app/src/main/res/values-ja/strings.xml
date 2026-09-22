@@ -574,6 +574,7 @@
     <string name="sessionlist_browser_settings">ブラウザ設定</string>
     <string name="sessionlist_pin">ピン留め</string>
     <string name="sessionlist_unpin">ピンを外す</string>
+    <string name="sessionlist_badge_paused">一時停止</string>
     <string name="sessionlist_export">エクスポート</string>
     <string name="sessionlist_export_json">JSON</string>
     <string name="sessionlist_export_plain">プレーンテキスト</string>
