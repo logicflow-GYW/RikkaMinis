@@ -3126,7 +3126,11 @@ class OpenAIProvider constructor(
         val params = JSONObject().apply {
             put("type", "object")
             put("properties", props)
-            if (required.isNotEmpty()) put("required", JSONArray(required))
+            // [fix/tool-schema-required-empty-array] Same rationale as
+            // AgentToolDefinition.toOpenAIJson: strict validators (agentrouter,
+            // 2026-09-22) 400 a missing `required` as `null is not of type
+            // "array"`. Always present; empty list → [].
+            put("required", JSONArray(required))
         }
         return JSONObject().apply {
             put("type", "function")

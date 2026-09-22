@@ -129,4 +129,41 @@ class ToolSchemaValidationTest {
         assertNull(validate("shell_execute", """{"command":"ls","timeout":"30"}"""))
         assertNull(validate("shell_execute", """{"command":"ls","timeout":30}"""))
     }
+
+    // ── [fix/tool-schema-required-empty-array] wire shape ──
+
+    @Test
+    fun `parameter-less tool still emits an empty required array on the wire`() {
+        // 2026-09-22 field report: agentrouter.org's strict schema validator
+        // 400s a schema whose `required` key is MISSING — it resolves the key
+        // to null internally, then validates null against "array":
+        //   Invalid schema for function 'memory_rollup': null is not of type "array"
+        // memory_rollup is the only parameter-less tool, which is why every
+        // other tool passed the same gateway. The empty array must be explicit.
+        val rollup = AgentToolDefinition(
+            name = "memory_rollup",
+            description = "Distill stable rules from old daily logs.",
+            parameters = emptyMap(),
+        )
+        val schema = rollup.toOpenAIJson()
+            .getJSONObject("function")
+            .getJSONObject("parameters")
+        assertTrue(
+            "parameters.required must exist and be an array — got: $schema",
+            schema.has("required") && schema.get("required") is org.json.JSONArray,
+        )
+        assertTrue(
+            "required must be empty for a parameter-less tool",
+            schema.getJSONArray("required").length() == 0,
+        )
+    }
+
+    @Test
+    fun `required array lists the declared mandatory parameters`() {
+        val schema = memoryGet.toOpenAIJson()
+            .getJSONObject("function")
+            .getJSONObject("parameters")
+        val req = schema.getJSONArray("required")
+        assertTrue("got: $req", req.length() == 1 && req.getString(0) == "query")
+    }
 }
