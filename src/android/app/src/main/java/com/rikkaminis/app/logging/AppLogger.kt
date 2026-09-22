@@ -703,7 +703,7 @@ object AppLogger {
         val today = dateStampFor(now)
         // Covers the main file AND per-process variants (minis-<date>.modelservice.log)
         // — a worker file being written right now must not be size-pruned.
-        val todayPrefix = "minis-$today"
+        // (The debug-<date> family is protected via todayPrefixes below.)
 
         // Phase 1: time-based — delete files older than MAX_AGE_DAYS.
         logDir?.listFiles()?.forEach { file ->
@@ -713,21 +713,37 @@ object AppLogger {
         }
 
         // Phase 2: size-based — if total still exceeds cap, delete oldest
-        // non-today files until under threshold. Today's file is protected
-        // because it's the actively-written log.
+        // non-protected files until under threshold. Selection (and the
+        // reasons a file is protected) lives in LogPrunePolicy — pure JVM,
+        // unit-tested; this site only executes the deletions and reports a
+        // deferral (never silently wrong: D8).
         val dir = logDir ?: return
         var total = dir.listFiles()?.sumOf { it.length() } ?: 0L
         if (total <= MAX_TOTAL_SIZE_BYTES) return
 
-        val candidates = dir.listFiles()
-            ?.filter { !it.name.startsWith(todayPrefix) }
-            ?.sortedBy { it.lastModified() } // oldest first
-            ?: return
+        val allFiles = dir.listFiles()?.toList() ?: return
+        val candidates = LogPrunePolicy.sizePruneCandidates(
+            allFiles, now, listOf("minis-$today", "debug-$today"),
+        )
 
         for (file in candidates) {
             if (total <= MAX_TOTAL_SIZE_BYTES) break
             total -= file.length()
             file.delete()
+        }
+
+        if (total > MAX_TOTAL_SIZE_BYTES) {
+            val protectedBytes = allFiles.sumOf { it.length() } -
+                candidates.sumOf { it.length() }
+            // One line, only on deferral: the cap is exceeded but every
+            // candidate is protected. Say WHY instead of shrinking silently.
+            Log.w(
+                "AppLogger",
+                "size prune deferred: cap exceeded by ~${total / (1024L * 1024)}MB, " +
+                    "${allFiles.size - candidates.size} file(s) " +
+                    "(~${protectedBytes / (1024L * 1024)}MB) protected " +
+                    "(today / evidence / <${LogPrunePolicy.RECENT_GRACE_MS / 60000}min grace)",
+            )
         }
     }
 }
