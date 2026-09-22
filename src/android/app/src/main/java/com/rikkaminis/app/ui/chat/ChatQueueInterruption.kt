@@ -265,7 +265,10 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
             content = "",
             isStreaming = true,
             isAwaitingModelResponse = true,
-            thinkingLevel = _thinkingLevel.value,
+            // [T-thinking-effective-level] Snapshot the EFFECTIVE level — this
+            // value drives whether the Deep Thinking block renders for the
+            // turn, so it must match what the request actually carried.
+            thinkingLevel = effectiveThinkingLevel,
         )
         _messages.value = _messages.value + queuedUserMsg + nextAssistantMsg
         // Note: ChatScreen's `lastUserAppendMs` (the trailing-row

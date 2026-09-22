@@ -118,3 +118,51 @@ val LLMModel.selectableThinkingLevels: List<ThinkingLevel>
  */
 val ModelEntry.effectiveMaxThinkingLevel: ThinkingLevel
     get() = overrides.maxThinkingLevel ?: model.catalogMaxThinkingLevel
+
+/**
+ * [T-thinking-effective-level] The level that will ACTUALLY be sent for the
+ * current turn, given (requested level, model capability, ceiling).
+ *
+ * This is the single source of truth the UI must read. Before it existed, three
+ * layers answered "what level is in force?" independently and could disagree:
+ *   • the navbar badge read the RAW user choice;
+ *   • AgentLoopEngine applied `if (supportsReasoning) choice else OFF`;
+ *   • the provider layer additionally clamped to the model ceiling.
+ * A group rotation onto a non-reasoning member therefore produced a badge
+ * claiming "High" while the wire carried OFF, a level sheet with no row
+ * ticked, and a picker whose taps were silently swallowed — a split state the
+ * user reads as "it turned itself off". Deriving every consumer from one
+ * expression makes that disagreement unrepresentable.
+ *
+ * Pure function on purpose: no Android, no provider, no state — so the whole
+ * (requested × supportsReasoning × ceiling) space is JVM-testable.
+ */
+fun effectiveThinkingLevel(
+    requested: ThinkingLevel,
+    supportsReasoning: Boolean,
+    ceiling: ThinkingLevel,
+): ThinkingLevel {
+    // A model that cannot reason has no meaningful effort field: the request
+    // is sent with thinking OFF regardless of what the user picked. Mirrors
+    // the guard AgentLoopEngine used to apply at its call site.
+    if (!supportsReasoning) return ThinkingLevel.OFF
+    // AUTO expresses no intensity and is never clamped — its appended rank
+    // (8) is an artifact of the append-only enum rule, not an intensity.
+    if (requested == ThinkingLevel.AUTO) return requested
+    return if (requested.rank > ceiling.rank) ceiling else requested
+}
+
+/**
+ * [T-thinking-effective-level] Whether the user's stored choice is being
+ * silently capped by the current model. The picker draws its orange
+ * up-arrow cue from this.
+ *
+ * AUTO never counts as capped: it expresses "let the vendor decide" and its
+ * appended rank (8) is an artifact of the append-only enum rule, not an
+ * intensity. Reading it as "above the ceiling" made AUTO and a real tier
+ * highlight simultaneously (two selected-looking capsules).
+ *
+ * OFF likewise: it is a switch, not an intensity below the ceiling.
+ */
+fun isCappedBy(requested: ThinkingLevel, ceiling: ThinkingLevel): Boolean =
+    requested.isEnabled && requested != ThinkingLevel.AUTO && requested.rank > ceiling.rank

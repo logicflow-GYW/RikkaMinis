@@ -42,8 +42,11 @@ data class ThinkingInfo(
 fun ChatViewModel.thinkingInfo(): ThinkingInfo? {
     val model = currentModel ?: return null
     val supported = model.supportsReasoning != false
-    val level = _thinkingLevel.value
-    val enabled = supported && level.isEnabled
+    // [T-thinking-effective-level] Report what is actually in force, not the
+    // raw stored choice — otherwise the Token Usage sheet shows "High" for a
+    // turn that went out with thinking OFF.
+    val level = effectiveThinkingLevel
+    val enabled = level.isEnabled
     val levelText = if (enabled) level.displayName else "—"
     return ThinkingInfo(supported, enabled, levelText)
 }
@@ -210,6 +213,9 @@ internal fun ChatViewModel.toggleThinking() {
         return
     }
     val newLevel = if (_thinkingLevel.value.isEnabled) ThinkingLevel.OFF else ThinkingLevel.MEDIUM
+    // [T-thinking-effective-level] Same B3 arming as setThinkingLevel: this is
+    // an explicit user act, so a later group re-selection must not undo it.
+    thinkingLevelUserSet = true
     _thinkingLevel.value = newLevel
     persistThinkingOverride(newLevel)
     appendSystemInfo(
@@ -224,7 +230,18 @@ internal fun ChatViewModel.toggleThinking() {
  * ignored when the current model doesn't support reasoning.
  */
 fun ChatViewModel.setThinkingLevel(level: ThinkingLevel) {
-    if (!currentModelSupportsReasoning) return
+    // [T-thinking-effective-level] Refuse on a non-reasoning model, but SAY SO.
+    // The bare `return` here was a silent no-op: the level sheet stayed open
+    // with nothing ticked and taps did nothing, which the user reads as a
+    // broken control. toggleThinking() already surfaces this exact string —
+    // reuse it rather than inventing a second wording.
+    if (!currentModelSupportsReasoning) {
+        appendSystemInfo(
+            text = context.getString(R.string.sysmsg_thinking_unsupported),
+            iconKind = "thinking",
+        )
+        return
+    }
     // [T-android-thinking-level-arch] Double-safety clamp: the composer UI
     // already filters to availableThinkingLevels, but never fully trust the
     // caller — cap to the current model's ceiling so a stale/over-range
@@ -232,6 +249,10 @@ fun ChatViewModel.setThinkingLevel(level: ThinkingLevel) {
     // [T-thinking-auto-level] AUTO is exempt: vendor-default, not an intensity.
     val ceiling = currentModelMaxThinkingLevel
     val clamped = if (level == ThinkingLevel.AUTO || level.rank <= ceiling.rank) level else ceiling
+    // [T-thinking-effective-level] Mark BEFORE the equality early-return: even
+    // re-picking the level already in force is an explicit user act, and must
+    // arm the B3 guard against a later group re-selection.
+    thinkingLevelUserSet = true
     if (_thinkingLevel.value == clamped) return
     _thinkingLevel.value = clamped
     persistThinkingOverride(clamped)

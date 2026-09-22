@@ -696,7 +696,16 @@ internal fun ChatInputArea(
                                 }
                                 if (isThinking && thinkingSupported) {
                                     ThinkingLevelPicker(
-                                        current = thinkingLevelState,
+                                        // [T-thinking-effective-level] Two
+                                        // distinct values: `current` drives the
+                                        // highlight (= what's in force this
+                                        // turn), `requested` drives the orange
+                                        // up-arrow (= the user's raw choice
+                                        // being capped). Passing the raw choice
+                                        // for both is what made a capped level
+                                        // render with nothing selected.
+                                        current = viewModel.effectiveThinkingLevel,
+                                        requested = thinkingLevelState,
                                         // [T-android-thinking-level-arch] Only
                                         // offer tiers the bound model supports.
                                         availableLevels = viewModel.availableThinkingLevels,

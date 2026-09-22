@@ -495,7 +495,11 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
                 // sub-agents that reasoned at none. Inherit the dispatching
                 // session's level, same "no silent downgrade on a dispatch
                 // path" rule as the `send` fix in HeadlessChatRunner.
-                thinkingLevel = _thinkingLevel.value,
+                // [T-thinking-effective-level] Read the EFFECTIVE level: a
+                // sub-agent must inherit what this turn actually sends, not a
+                // stored choice the current model can't honour (e.g. after a
+                // group rotation onto a non-reasoning member).
+                thinkingLevel = effectiveThinkingLevel,
             )
         },
         // [audit-0916] The sub-agent's own filtered list is passed in so a

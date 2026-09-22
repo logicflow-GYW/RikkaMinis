@@ -1301,9 +1301,8 @@ class ChatViewModel(
         }
         override val toolLoopDetector: ToolLoopDetector get() = this@ChatViewModel.toolLoopDetector
         override val groupRouter: com.rikkaminis.app.data.routing.GroupRouter get() = this@ChatViewModel.groupRouter
-        override val thinkingLevel: ThinkingLevel get() = _thinkingLevel.value
+        override val thinkingLevel: ThinkingLevel get() = this@ChatViewModel.effectiveThinkingLevel
         override val isStreaming: Boolean get() = _isStreaming.value
-        override val currentModelSupportsReasoning: Boolean get() = this@ChatViewModel.currentModelSupportsReasoning
         override val enhancedCacheEnabled: Boolean get() = _enhancedCacheEnabled.value
         override val autoRetryAttempt: Int get() = _autoRetryAttempt.value
         override val autoRetryCountdown: Int get() = _autoRetryCountdown.value
@@ -1511,7 +1510,59 @@ class ChatViewModel(
     val memoryEnabled: StateFlow<Boolean> = _memoryEnabled.asStateFlow()
 
     internal val _thinkingLevel = MutableStateFlow(ThinkingLevel.OFF)
-    val thinkingLevel: StateFlow<ThinkingLevel> = _thinkingLevel.asStateFlow()
+
+    /**
+     * [T-thinking-effective-level] True once the USER (not a group default) has
+     * expressed a thinking-level opinion for this VM's session. Guards
+     * [applyGroupSessionDefaults] from clobbering a manual choice when the user
+     * re-selects a group — see the B3 note there.
+     *
+     * Seeded from the persisted override on session load: a value already in
+     * the DB is treated as an explicit choice and is never overwritten by a
+     * group default.
+     *
+     * ponytail: in-memory only, no new DB column | 天花板: a group default that
+     * was itself persisted to the DB reads back as "user-set" on cold start, so
+     * a later change to the group's default no longer reaches that session |
+     * 升级触发: a user reports "I changed the group default but this old chat
+     * didn't pick it up" — then add a `thinking_override_source` column
+     * (user|group) via a Room migration and seed this flag from it.
+     */
+    internal var thinkingLevelUserSet: Boolean = false
+
+    /**
+     * [T-thinking-effective-level] The level the UI must DISPLAY — i.e. what
+     * will actually go on the wire this turn, not what the user once picked.
+     *
+     * Reading the raw [_thinkingLevel] here was the root of a user-visible
+     * split: a group rotation onto a non-reasoning member left the badge
+     * claiming "High" while AgentLoopEngine sent OFF, the level sheet showed
+     * no ticked row, and every tap was silently swallowed. All three now
+     * derive from this one expression, so they cannot disagree.
+     *
+     * Recomputed on every read (cheap: a few StateFlow `.value` reads), which
+     * is what makes it track group rotation / model switch without extra
+     * invalidation plumbing.
+     */
+    val effectiveThinkingLevel: ThinkingLevel
+        get() = com.rikkaminis.app.provider.effectiveThinkingLevel(
+            requested = _thinkingLevel.value,
+            supportsReasoning = currentModelSupportsReasoning,
+            ceiling = currentModelMaxThinkingLevel,
+        )
+
+    /**
+     * [T-thinking-effective-level] Observable form of [effectiveThinkingLevel]
+     * for Compose. Re-emits whenever any input to the rule changes: the user's
+     * choice, the active entry (group rotation / model switch), or the
+     * repository config (a model's declared tiers edited in Settings).
+     */
+    val thinkingLevel: StateFlow<ThinkingLevel> = combine(
+        _thinkingLevel,
+        _activeEntryId,
+        providerRepository.config,
+    ) { _, _, _ -> effectiveThinkingLevel }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, ThinkingLevel.OFF)
 
     /**
      * [T-android-enhanced-cache] Enhanced Cache (1-hour Anthropic cache TTL)

@@ -198,10 +198,17 @@ internal interface AgentLoopHost {
     // ── routing / retry bookkeeping ───────────────────────────────────────
     val toolLoopDetector: ToolLoopDetector
     val groupRouter: com.rikkaminis.app.data.routing.GroupRouter
+
+    /**
+     * [T-thinking-effective-level] The level this turn will ACTUALLY send —
+     * already folded through `supportsReasoning` and the model ceiling by the
+     * host. Callers pass it straight to the provider; they must NOT re-apply
+     * either guard, or the two layers can drift apart again (that drift is
+     * what made the navbar badge claim "High" while the wire carried OFF).
+     */
     val thinkingLevel: ThinkingLevel
     val isStreaming: Boolean
     val enhancedCacheEnabled: Boolean
-    val currentModelSupportsReasoning: Boolean
     val autoRetryAttempt: Int
     val autoRetryCountdown: Int
     val activeEntryId: String?

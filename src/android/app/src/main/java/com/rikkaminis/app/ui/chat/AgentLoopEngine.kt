@@ -21,7 +21,6 @@ import com.rikkaminis.app.agent.runtime.ProviderAttemptOutcome
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMStreamChunk
 import com.rikkaminis.app.data.model.LLMUsage
-import com.rikkaminis.app.data.model.ThinkingLevel
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.tools.AgentTraceRecorder
@@ -577,7 +576,14 @@ internal class AgentLoopEngine(
                         temperature = null,
                         imageParts = emptyList(),
                         tools = host.agentTools,
-                        thinkingLevel = if (host.currentModelSupportsReasoning) host.thinkingLevel else ThinkingLevel.OFF,
+                        // [T-thinking-effective-level] host.thinkingLevel is
+                        // already the EFFECTIVE level (supportsReasoning + ceiling
+                        // folded in by the host), so no guard belongs here. The
+                        // old `if (host.currentModelSupportsReasoning) … else OFF`
+                        // was a SECOND, independent answer to the same question —
+                        // and the one that let the navbar badge disagree with the
+                        // wire. One expression, one answer.
+                        thinkingLevel = host.thinkingLevel,
                     ).collect { chunk ->
                 // [stream-timing 2026-09-14] one-shot marks: Started (server
                 // accepted the request) and the first user-visible content chunk.

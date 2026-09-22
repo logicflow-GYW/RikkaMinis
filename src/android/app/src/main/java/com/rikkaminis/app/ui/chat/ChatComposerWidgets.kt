@@ -920,7 +920,22 @@ internal fun FloatingToolStatusBar(
  */
 @Composable
 internal fun ThinkingLevelPicker(
+    /**
+     * [T-thinking-effective-level] The level actually in force for this turn
+     * (supportsReasoning + ceiling already folded in) — this is what gets a
+     * capsule highlight. Passing the RAW stored choice here was the bug: after
+     * a group rotation onto a model with a lower ceiling, the raw choice wasn't
+     * in `availableLevels` at all, so the row rendered with nothing selected.
+     */
     current: ThinkingLevel,
+    /**
+     * [T-thinking-effective-level] The RAW stored choice, used only to decide
+     * whether to draw the orange up-arrow ("your setting is higher, this model
+     * caps here"). It cannot be derived from [current]: in this composable's
+     * domain `current == min(requested, ceiling)`, so it is never above the
+     * ceiling and the cue would never appear.
+     */
+    requested: ThinkingLevel,
     // [T-android-thinking-level-arch] Levels the CURRENT model actually supports
     // (OFF + everything up to its effectiveMaxThinkingLevel). Passed in so the
     // picker only ever offers reachable tiers; the row scrolls horizontally so
@@ -930,15 +945,19 @@ internal fun ThinkingLevelPicker(
 ) {
     val context = LocalContext.current
     val scrollState = rememberScrollState()
-    // [T-android-thinking-level-arch] Clamped state: the stored level is higher
-    // than what the current model can reach (e.g. ULTRA persisted, then the user
-    // switched to DeepSeek which caps at XHIGH). `current` then isn't in
-    // availableLevels, so no capsule would match `level == current` and the row
-    // would look entirely unselected — as if thinking were off. Mirror iOS
+    // [T-android-thinking-level-arch] Clamped state: the user's stored level is
+    // higher than what the current model can reach (e.g. ULTRA persisted, then
+    // the user switched to DeepSeek which caps at XHIGH). Mirror iOS
     // (fb349342): highlight the highest available capsule in orange with an
     // up-arrow, signalling "your setting is higher, this model caps here".
+    //
+    // [T-thinking-effective-level] The predicate lives in the provider layer so
+    // the JVM tests can cover the whole (requested × ceiling) space. It excludes
+    // AUTO — AUTO expresses "let the vendor decide" and is never an intensity,
+    // so its appended rank (8) must not be read as "above the ceiling".
     val maxAvailable = availableLevels.lastOrNull { it != ThinkingLevel.OFF && it != ThinkingLevel.AUTO }
-    val isClamped = current.isEnabled && maxAvailable != null && current.rank > maxAvailable.rank
+    val isClamped = maxAvailable != null &&
+        com.rikkaminis.app.provider.isCappedBy(requested, maxAvailable)
     val clampOrange = Color(0xFFFF9500)
     Row(
         modifier = Modifier
