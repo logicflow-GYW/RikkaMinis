@@ -46,7 +46,13 @@ object OpenAIModelsApi {
         val cacheKey = (baseURL ?: "") + "|" + apiKey
         val ctx = context
         if (shouldConsultCache(ctx != null, forceRefresh) && ctx != null) {
-            cache.load(ctx, cacheKey)?.let { return@withContext it }
+            // [T-sensenova-effort-enum] A cache entry written before the gateway-truth
+            // override existed would still carry models.dev's under-declared tier set
+            // and cap the picker, so the correction is re-applied on the cache path too
+            // (it is a no-op for every host we have no measurement for).
+            cache.load(ctx, cacheKey)?.let {
+                return@withContext ModelsDevApi.applyGatewayEffortTruth(it, baseURL)
+            }
         }
         val url = buildURL(baseURL)
         val request = Request.Builder()
@@ -146,7 +152,13 @@ object OpenAIModelsApi {
                     )
                 }
                 if (parsed.isEmpty()) return@withContext fallback
-                ModelsDevApi.enrichModels(parsed)
+                // [T-sensenova-effort-enum] For endpoints whose real reasoning_effort
+                // enum is measured (see GatewayEffortTruth), the measurement outranks
+                // what models.dev declares for these ids — it under-declares every one
+                // of them, which silently capped the picker below the tiers the gateway
+                // accepts. Host-scoped, so other providers' same-named models are
+                // untouched.
+                ModelsDevApi.applyGatewayEffortTruth(ModelsDevApi.enrichModels(parsed), url)
             } catch (_: Exception) {
                 return@withContext fallback
             }
