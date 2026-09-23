@@ -84,6 +84,17 @@ object EffortTierLearner {
      */
     val KNOWN_TIERS = setOf("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto")
 
+    /**
+     * 锚点与列表之间可能夹着的连接词（`one of the following values: ...`）。
+     * 只收这类功能词，不做"允许跳过 N 个任意词"的宽松匹配——那会重新打开
+     * `one of a high traffic month` 这类散文误学。
+     */
+    private val LIST_FILLERS = setOf(
+        "the", "following", "these", "values", "value", "options", "option",
+        "allowed", "permitted", "supported", "acceptable", "valid", "possible",
+        "one", "or", "and",
+    )
+
     @Volatile private var target: File? = null
 
     @Volatile private var snapshot: Pair<Long, Map<String, JSONObject>>? = null
@@ -110,41 +121,67 @@ object EffortTierLearner {
     /**
      * 从一段错误文案里抽出档位集合。
      *
-     * 两个前置条件，任一不满足就返回 null（宁可没学到，不可学错）：
+     * 三道前置条件，任一不满足就返回 null（宁可没学到，不可学错）：
      *  1. 文案里提到 `effort` 或 `reasoning`——把 "must be one of" 用在别的字段上
      *     （比如 `max_tokens must be one of ...`）时不会误学；
-     *  2. 出现 `one of` 且其后至少有一个白名单档位词。
+     *  2. 存在一个 `one of` 锚点，且**紧贴其后的列表**里出现白名单档位词；
+     *  3. 列表在第一个既不是档位词也不是连接词（[LIST_FILLERS]）的词处结束。
+     *
+     * 「贴着锚点的列表」而不是「同一段文案里恰好也有档位词」是这里的关键：`low` /
+     * `high` / `none` / `max` 都是普通英文单词，散文里同样会出现——
+     * `...upgrade is one of the recommended steps; a high traffic month...`
+     * 这样的句子按旧口径会学出一个 `[high, medium]`，然后把该 host+model 钉死 30 天
+     * （少档位、静默降级）。误学的代价是用户可见的，漏学一次没有任何代价，所以按
+     * 要求列表形状从严。同理，文案里可能有多个 `one of`（前置无关子句），逐个锚点
+     * 试过去、取第一个成形的列表，而不是只看第一个锚点。
      *
      * 去重、保序。
      */
     fun enumFromText(text: String): List<String>? {
         val lower = text.lowercase()
         if (lower.indexOf("effort") < 0 && lower.indexOf("reasoning") < 0) return null
-        val idx = lower.indexOf(ONE_OF)
-        if (idx < 0) return null
-        val window = lower.substring(
-            idx + ONE_OF.length,
-            minOf(lower.length, idx + ONE_OF.length + SCAN_WINDOW),
-        )
+        var from = 0
+        while (true) {
+            val idx = lower.indexOf(ONE_OF, from)
+            if (idx < 0) return null
+            val tiers = tiersAfterAnchor(lower, idx + ONE_OF.length)
+            if (tiers.isNotEmpty()) return tiers
+            from = idx + ONE_OF.length
+        }
+    }
+
+    /**
+     * 读 [start] 之后那个贴着锚点的档位列表：跳过非字母字符与 [LIST_FILLERS]，
+     * 收档位词，遇到第一个别的词就停。扫描上限 [SCAN_WINDOW]，所以远处同款词
+     * 不会被算进来。
+     */
+    private fun tiersAfterAnchor(lower: String, start: Int): List<String> {
+        val end = minOf(lower.length, start + SCAN_WINDOW)
         val out = ArrayList<String>()
-        var start = -1
-        for (i in window.indices) {
-            val word = window[i] in 'a'..'z'
-            if (word && start < 0) {
-                start = i
+        var i = start
+        while (i < end) {
+            // A JSON-escaped control character ("\n low") would otherwise present its
+            // escape letter ("n") as a word that ends the list before it starts — the
+            // SSE hook passes `event.toString()`, which escapes newlines that way.
+            if (lower[i] == '\\') {
+                i += 2
                 continue
             }
-            if (!word && start >= 0) {
-                val w = window.substring(start, i)
-                if (w in KNOWN_TIERS && w !in out) out.add(w)
-                start = -1
+            if (lower[i] !in 'a'..'z') {
+                i++
+                continue
             }
+            var j = i
+            while (j < end && lower[j] in 'a'..'z') j++
+            val word = lower.substring(i, j)
+            when {
+                word in KNOWN_TIERS -> if (word !in out) out.add(word)
+                word in LIST_FILLERS -> Unit
+                else -> return out
+            }
+            i = j
         }
-        if (start >= 0) {
-            val w = window.substring(start)
-            if (w in KNOWN_TIERS && w !in out) out.add(w)
-        }
-        return out.takeIf { it.isNotEmpty() }
+        return out
     }
 
     /** 从一次请求体里取 model 字段（学的是 host+model 维度的事实）。 */
@@ -157,8 +194,8 @@ object EffortTierLearner {
     // ── 存储 ────────────────────────────────────────────────────────────────────
 
     /**
-     * 从一次失败请求里学。**返回学到了什么**（null = 这次没有可学的信息），
-     * 调用方用它决定要不要打日志。
+     * 从一次失败请求里学。**返回学到了什么**（null = 这次没有可学的信息）；
+     * 学到时的日志在 [write] 内打出，调用方不必（也不）用返回值判断。
      */
     fun record(host: String, requestBody: String, errorBody: String): List<String>? {
         val tiers = enumFromText(errorBody) ?: return null

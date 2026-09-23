@@ -96,6 +96,49 @@ class EffortTierLearnerTest {
         assertEquals(listOf("low", "none"), EffortTierLearner.enumFromText(body))
     }
 
+    @Test
+    fun `rejects prose that merely contains tier words near a one-of clause`() {
+        // `low`/`high`/`medium`/`none`/`max` are ordinary English words. Without the
+        // list-shape requirement this sentence was learned as [high, medium], which
+        // pins the host+model to a two-tier ceiling for the whole TTL — a silent
+        // downgrade with no 400 left to explain it.
+        val body = """{"error":"reasoning_effort is required for this model. Upgrade is one of """ +
+            """the recommended steps; a high traffic month can also produce this, medium load too."}"""
+        assertNull(EffortTierLearner.enumFromText(body))
+    }
+
+    @Test
+    fun `stops the list at the first word that is not a tier or a connector`() {
+        // A second clause about the same field must not be folded into the first —
+        // otherwise the learned ceiling silently becomes the union of two enums.
+        val body = "effort must be one of: low, medium; temperature must be one of: high"
+        assertEquals(listOf("low", "medium"), EffortTierLearner.enumFromText(body))
+    }
+
+    @Test
+    fun `learns from the enum clause when an unrelated one-of clause comes first`() {
+        // Anchoring on the FIRST "one of" alone discards the answer whenever the body
+        // leads with some other field's enum; each anchor is tried in turn.
+        val body = """{"error":"stream must be one of true,false. reasoning_effort must be """ +
+            """one of: low, medium, high"}"""
+        assertEquals(listOf("low", "medium", "high"), EffortTierLearner.enumFromText(body))
+    }
+
+    @Test
+    fun `accepts a quoted and bracketed list`() {
+        val body = """reasoning_effort must be one of: ["low", "medium", "high"]"""
+        assertEquals(listOf("low", "medium", "high"), EffortTierLearner.enumFromText(body))
+    }
+
+    @Test
+    fun `accepts a list whose line breaks arrive as JSON escapes`() {
+        // The SSE hook records `event.toString()`, which turns a newline inside the
+        // gateway's message into a literal backslash-n. Read as text, that escape
+        // letter would otherwise look like a word and end the list before it starts.
+        val body = """{"error":{"message":"reasoning_effort must be one of:\n low,\n high"}}"""
+        assertEquals(listOf("low", "high"), EffortTierLearner.enumFromText(body))
+    }
+
     // ── modelIdFrom ──────────────────────────────────────────────────────────────
 
     @Test
