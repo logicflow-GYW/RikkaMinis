@@ -514,6 +514,7 @@
     <!-- Composer placeholder. %1$s is the Soul-customized assistant name (default "RikkaMinis"). The parenthetical is an inline hint reminding the user that typing '@' opens the file-mention picker. T-android-placeholder-single-line collapses the prior two-row (title + hint) layout into a single line, matching iOS 19e1d61f. -->
     <string name="chat_input_placeholder">Message %1$s (@ to mention files)</string>
     <string name="chat_attachment_limit">Only the first %1$d items were attached.</string>
+    <string name="chat_image_no_vision_hint">This model can\'t view images natively - the file stays available to agent tools.</string>
     <string name="browser_takeover">Takeover</string>
     <string name="browser_settings_done">Done</string>
     <string name="browser_settings_user_agent">User Agent</string>

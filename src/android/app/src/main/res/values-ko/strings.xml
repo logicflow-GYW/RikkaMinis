@@ -1236,6 +1236,7 @@
     <string name="provider_import_invalid_file">Invalid provider configuration file</string>
     <string name="provider_import_read_error">Failed to read file</string>
     <string name="chat_attachment_limit">Only the first %1$d items were attached.</string>
+    <string name="chat_image_no_vision_hint">이 모델은 이미지를 기본으로 표시할 수 없습니다 - 파일은 에이전트 도구에서 계속 사용할 수 있습니다.</string>
     <string name="session_edit_title">Edit Session</string>
     <string name="session_new_chat_default">New Chat</string>
     <string name="browser_ua_default">기본 (UA 자동)</string>

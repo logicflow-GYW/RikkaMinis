@@ -1244,6 +1244,7 @@
     <string name="provider_import_invalid_file">Invalid provider configuration file</string>
     <string name="provider_import_read_error">Failed to read file</string>
     <string name="chat_attachment_limit">Only the first %1$d items were attached.</string>
+    <string name="chat_image_no_vision_hint">このモデルは画像をネイティブに表示できません - ファイルはエージェントツールから利用可能です。</string>
     <string name="session_edit_title">Edit Session</string>
     <string name="session_new_chat_default">New Chat</string>
     <string name="browser_ua_default">デフォルト（UA で自動）</string>

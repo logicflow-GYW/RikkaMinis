@@ -723,17 +723,32 @@ class RootfsManager private constructor(private val context: Context) {
             return@withContext true
         }
         Log.i(TAG, "[ApkWorld] retrying ${args.size} previously-failed package(s)")
-        var allOk = true
-        val stillFailed = mutableListOf<String>()
-        for (arg in args) {
-            val code = runApkAddInGuest(listOf(arg))
-            if (code == 0) {
-                Log.i(TAG, "[ApkWorld] retry OK: $arg")
-            } else {
-                allOk = false
-                stillFailed.add(arg)
+        val stillFailed = runRetryRound(args)
+        if (stillFailed.size == args.size) {
+            // §29: EVERY package failed against the current source — the
+            // source itself is the likely culprit (retrying the same list
+            // against the same repos can never succeed). Walk untried
+            // mirrors (switch config + retry per switch); only persist the
+            // failed list after all candidates are exhausted.
+            Log.w(TAG, "[ApkWorld] every package failed - suspecting the current source, trying mirror fallback")
+            // ponytail: sandbox→ui 直调（分层捷径，PRootKernel.applyAllActiveMirrors 同款先例） | 天花板: 镜像逻辑如果长出第二消费方就该下沉到 sandbox 层 | 升级触发: 镜像选择逻辑被非 UI 调用方第二次引用
+            val fallbackOk = com.rikkaminis.app.ui.sandbox.MirrorSpeedTestViewModel
+                .retryApkWorldWithMirrorFallback(context) {
+                    runRetryRound(args).isEmpty()
+                }
+            if (fallbackOk) {
+                try { apkWorldFailedFile.delete() } catch (_: Exception) {}
+                Log.i(TAG, "[ApkWorld] retry fully succeeded (mirror fallback)")
+                RootfsEventLog.logEvent(
+                    eventLogsDir,
+                    RootfsEventLog.Events.APKWORLD_RETRY,
+                    "ok=${args.size} failed=0",
+                )
+                return@withContext true
             }
+            Log.w(TAG, "[ApkWorld] mirror fallback exhausted - ${stillFailed.size} package(s) still failing")
         }
+        val allOk = stillFailed.isEmpty()
         if (stillFailed.isEmpty()) {
             try { apkWorldFailedFile.delete() } catch (_: Exception) {}
             Log.i(TAG, "[ApkWorld] retry fully succeeded")
@@ -752,6 +767,25 @@ class RootfsManager private constructor(private val context: Context) {
             )
         }
         allOk
+    }
+
+    /**
+     * One per-package retry round against the CURRENT source. Returns the
+     * args that still fail. Extracted from [retryFailedApkWorld] so the
+     * §29 mirror fallback can rerun the whole round after switching the
+     * source without duplicating the loop.
+     */
+    private suspend fun runRetryRound(args: List<String>): List<String> {
+        val stillFailed = mutableListOf<String>()
+        for (arg in args) {
+            val code = runApkAddInGuest(listOf(arg))
+            if (code == 0) {
+                Log.i(TAG, "[ApkWorld] retry OK: $arg")
+            } else {
+                stillFailed.add(arg)
+            }
+        }
+        return stillFailed
     }
 
     /** Persist a failed `name=version` list for the next boot's retry. */

@@ -1767,6 +1767,15 @@ class ChatViewModel(
     val currentModelSupportsReasoning: Boolean
         get() = currentModel?.supportsReasoning != false
 
+    // §27a: does the currently-bound model actually consume images on the
+    // wire? The providers gate the same predicate ("image" in
+    // inputModalities) — an image part sent to a model that declares no
+    // image input is downgraded to a text placeholder at the provider layer.
+    // Lenient default (allow) when the model is unknown: never block on a
+    // missing declaration.
+    val currentModelSupportsImages: Boolean
+        get() = currentModel?.inputModalities?.any { it.equals("image", ignoreCase = true) } ?: true
+
     /**
      * [T-android-thinking-level-arch] The thinking ceiling the currently-bound
      * model actually supports. Prefers the active ModelEntry's
