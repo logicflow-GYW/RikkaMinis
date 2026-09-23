@@ -1498,7 +1498,7 @@
     <string name="thinking_rules_off_value">Значение при выключении (например, none, minimal)</string>
     <string name="thinking_rules_field_path">Путь к полю</string>
     <string name="thinking_rules_dotted_path">Путь через точку</string>
-    <string name="thinking_rules_value_at_high">Значение для High</string>
+    <string name="thinking_rules_value_at_level">Значение для %1$s</string>
     <string name="thinking_rules_request_preview">Предпросмотр запроса</string>
     <string name="thinking_fmt_omit_title">Ничего не отправлять</string>
     <string name="thinking_fmt_omit_desc">Не отправлять поле размышления вообще. Для эндпоинтов, которые отклоняют неизвестный ключ.</string>

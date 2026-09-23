@@ -1734,7 +1734,7 @@
     <string name="thinking_rules_off_value">Off value (e.g. none, minimal)</string>
     <string name="thinking_rules_field_path">Field path</string>
     <string name="thinking_rules_dotted_path">Dotted path</string>
-    <string name="thinking_rules_value_at_high">Value at High</string>
+    <string name="thinking_rules_value_at_level">Value at %1$s</string>
     <string name="thinking_rules_request_preview">Request preview</string>
     <string name="thinking_fmt_omit_title">Send nothing</string>
     <string name="thinking_fmt_omit_desc">Send no thinking field at all. Use for endpoints that reject an unknown key.</string>

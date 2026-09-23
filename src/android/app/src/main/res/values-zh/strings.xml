@@ -1661,7 +1661,7 @@
     <string name="thinking_rules_off_value">关闭值（例如 none、minimal）</string>
     <string name="thinking_rules_field_path">字段路径</string>
     <string name="thinking_rules_dotted_path">点分路径</string>
-    <string name="thinking_rules_value_at_high">High 档的值</string>
+    <string name="thinking_rules_value_at_level">%1$s 档的值</string>
     <string name="thinking_rules_request_preview">请求预览</string>
     <string name="thinking_fmt_omit_title">不发送任何字段</string>
     <string name="thinking_fmt_omit_desc">完全不发送思考字段。用于会拒绝未知键的端点。</string>
