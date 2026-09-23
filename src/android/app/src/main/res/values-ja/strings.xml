@@ -1349,7 +1349,7 @@
     <string name="thinking_rules_off_value">オフのときの値（例：none、minimal）</string>
     <string name="thinking_rules_field_path">フィールドパス</string>
     <string name="thinking_rules_dotted_path">ドット区切りのパス</string>
-    <string name="thinking_rules_value_at_high">High のときの値</string>
+    <string name="thinking_rules_value_at_level">%1$s のときの値</string>
     <string name="thinking_rules_request_preview">リクエストのプレビュー</string>
     <string name="thinking_fmt_omit_title">何も送信しない</string>
     <string name="thinking_fmt_omit_desc">思考フィールドを一切送信しません。未知のキーを拒否するエンドポイント向けです。</string>

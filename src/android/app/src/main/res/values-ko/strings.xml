@@ -1341,7 +1341,7 @@
     <string name="thinking_rules_off_value">꺼짐일 때의 값(예: none, minimal)</string>
     <string name="thinking_rules_field_path">필드 경로</string>
     <string name="thinking_rules_dotted_path">점으로 구분한 경로</string>
-    <string name="thinking_rules_value_at_high">High일 때의 값</string>
+    <string name="thinking_rules_value_at_level">%1$s일 때의 값</string>
     <string name="thinking_rules_request_preview">요청 미리보기</string>
     <string name="thinking_fmt_omit_title">아무것도 보내지 않기</string>
     <string name="thinking_fmt_omit_desc">사고 필드를 전혀 보내지 않습니다. 알 수 없는 키를 거부하는 엔드포인트에 사용하세요.</string>

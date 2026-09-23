@@ -94,9 +94,13 @@ object GatewayEffortTruth {
 
     /**
      * The wire value for an ENABLED [level] on a gateway whose strict enum this object
-     * describes. Precedence: measurement (ground truth) > declared set (what the catalog
-     * says, possibly under-declared) > [SENSENOVA_FALLBACK_TIERS] (never a value the
-     * gateway is known to reject).
+     * describes. Precedence:
+     *
+     *  1. [EffortTierLearner.learned] — the gateway said it out loud on a previous 400.
+     *     One-hand truth, freshest, and the only source that ever updates itself.
+     *  2. [tiersFor] — the static measurement table (what we probed by hand).
+     *  3. [declaredTiers] — the catalog's opinion, possibly under-declared.
+     *  4. [SENSENOVA_FALLBACK_TIERS] — never a value the gateway is known to reject.
      *
      * Extracted from the provider's host-table branch so the decision is testable: the
      * branch runs behind a base-URL host match, which a MockWebServer-backed test cannot
@@ -111,7 +115,8 @@ object GatewayEffortTruth {
         level: ThinkingLevel,
         declaredTiers: List<String>?,
     ): String {
-        val tiers = tiersFor(host, modelId)
+        val tiers = EffortTierLearner.learned(host, modelId)
+            ?: tiersFor(host, modelId)
             ?: declaredTiers?.takeIf { it.isNotEmpty() }
             ?: SENSENOVA_FALLBACK_TIERS
         return ThinkingEffortLadder.clampEffort(ThinkingEffortLadder.wireEffort(level), tiers)

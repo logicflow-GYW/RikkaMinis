@@ -70,9 +70,7 @@ fun ThinkingRuleEditorDialog(
     var sendOffValue by remember { mutableStateOf(formatOffValue(seed.wireFormat) != null) }
     var offValue by remember { mutableStateOf(formatOffValue(seed.wireFormat) ?: "") }
     var path by remember { mutableStateOf(formatPath(seed.wireFormat) ?: "") }
-    var highValue by remember {
-        mutableStateOf((seed.wireFormat as? ThinkingWireFormat.CustomPath)?.values?.get(ThinkingLevel.HIGH) ?: "")
-    }
+    var customValues by remember { mutableStateOf(customEditableValues(seed.wireFormat)) }
     var formatMenuOpen by remember { mutableStateOf(false) }
 
     fun buildWireFormat(): ThinkingWireFormat = when (choice) {
@@ -85,7 +83,9 @@ fun ThinkingRuleEditorDialog(
         FormatChoice.QWEN_DUAL -> ThinkingWireFormat.QwenDual
         FormatChoice.CUSTOM_PATH -> ThinkingWireFormat.CustomPath(
             path = path,
-            values = if (highValue.isNotBlank()) mapOf(ThinkingLevel.HIGH to highValue) else emptyMap(),
+            // Blanks stay out of the map: an absent tier means "no opinion" for that
+            // tier, which the resolver treats differently from "send the HIGH value".
+            values = customValues.filterValues { it.isNotBlank() },
             offValue = if (sendOffValue) offValue.ifBlank { null } else null,
         )
     }
@@ -216,13 +216,24 @@ fun ThinkingRuleEditorDialog(
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),
                         )
-                        OutlinedTextField(
-                            value = highValue,
-                            onValueChange = { highValue = sanitizeSingleLineInput(it) },
-                            label = { Text(stringResource(R.string.thinking_rules_value_at_high)) },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
+                        CUSTOM_VALUE_TIERS.forEach { tier ->
+                            OutlinedTextField(
+                                value = customValues[tier] ?: "",
+                                onValueChange = {
+                                    customValues = customValues + (tier to sanitizeSingleLineInput(it))
+                                },
+                                label = {
+                                    Text(
+                                        stringResource(
+                                            R.string.thinking_rules_value_at_level,
+                                            stringResource(CUSTOM_VALUE_TIER_LABELS[tier]!!).toString(),
+                                        ),
+                                    )
+                                },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
                     }
                     else -> {}
                 }
@@ -293,7 +304,47 @@ private fun formatPath(fmt: ThinkingWireFormat?): String? = when (fmt) {
     else -> null
 }
 
-/** Live preview: run the real resolver with this rule at HIGH against a sample body. */
+// Tiers offered a per-tier custom value, in ladder order. OFF is expressed through
+// the rule's offValue instead and AUTO expresses no effort opinion at all, so neither
+// is offered here — the resolver only reads these for an actually-enabled level.
+private val CUSTOM_VALUE_TIERS = listOf(
+    ThinkingLevel.LOW,
+    ThinkingLevel.MEDIUM,
+    ThinkingLevel.HIGH,
+    ThinkingLevel.XHIGH,
+    ThinkingLevel.MAX,
+    ThinkingLevel.ULTRA,
+)
+
+private val CUSTOM_VALUE_TIER_LABELS = mapOf(
+    ThinkingLevel.LOW to R.string.thinking_level_low,
+    ThinkingLevel.MEDIUM to R.string.thinking_level_medium,
+    ThinkingLevel.HIGH to R.string.thinking_level_high,
+    ThinkingLevel.XHIGH to R.string.thinking_level_xhigh,
+    ThinkingLevel.MAX to R.string.thinking_level_max,
+    ThinkingLevel.ULTRA to R.string.thinking_level_ultra,
+)
+
+private fun customEditableValues(fmt: ThinkingWireFormat?): Map<ThinkingLevel, String> =
+    CUSTOM_VALUE_TIERS.associateWith {
+        (fmt as? ThinkingWireFormat.CustomPath)?.values?.get(it) ?: ""
+    }
+
+/**
+ * The preview resolves exactly one tier. Prefer the first tier the rule actually
+ * configures so the JSON shown matches what the user typed — before this it was
+ * pinned to HIGH, so a rule that only set XHIGH or MAX looked like it did nothing.
+ */
+private fun firstCustomTier(fmt: ThinkingWireFormat?): ThinkingLevel =
+    CUSTOM_VALUE_TIERS.firstOrNull { level ->
+        fmt is ThinkingWireFormat.CustomPath && !fmt.values[level].isNullOrBlank()
+    } ?: ThinkingLevel.HIGH
+
+/**
+ * Live preview: resolve the rule against a sample body and show the JSON it would
+ * produce. Only one tier can be rendered at a time, so [firstCustomTier] picks the
+ * tier the rule actually configures.
+ */
 private fun previewJson(rule: ThinkingRule): String {
     return try {
         val body = JSONObject()
@@ -306,7 +357,7 @@ private fun previewJson(rule: ThinkingRule): String {
             supportsReasoning = true,
             declaredEffortValues = null,
             declaresNoEffortTiers = false,
-            level = ThinkingLevel.HIGH,
+            level = firstCustomTier(rule.wireFormat),
             maxTokens = 4096,
             isOpenRouter = false,
             usesUnifiedReasoningEffort = false,
@@ -345,7 +396,12 @@ fun wireFormatSummary(fmt: ThinkingWireFormat?): String = when (fmt) {
     is ThinkingWireFormat.GeminiThinkingLevel -> "thinkingLevel"
     is ThinkingWireFormat.BooleanToggle -> "boolean toggle · ${fmt.path}"
     is ThinkingWireFormat.ExtraBodyToggle -> "extra_body toggle · ${fmt.path}"
-    is ThinkingWireFormat.CustomPath -> "custom path · ${fmt.path}"
+    is ThinkingWireFormat.CustomPath -> {
+        val vals = fmt.values
+            .map { (k, v) -> "${k.name.lowercase()}=$v" }
+            .joinToString(", ")
+        "custom path · ${fmt.path}" + if (vals.isEmpty()) "" else " · $vals"
+    }
 }
 
 /** "sample-model → rule #N "label"" — the resolution trace shown under the section. */

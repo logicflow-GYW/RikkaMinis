@@ -1638,7 +1638,7 @@
     <string name="thinking_rules_off_value">關閉值（例如 none、minimal）</string>
     <string name="thinking_rules_field_path">欄位路徑</string>
     <string name="thinking_rules_dotted_path">點分路徑</string>
-    <string name="thinking_rules_value_at_high">High 檔的值</string>
+    <string name="thinking_rules_value_at_level">%1$s 檔的值</string>
     <string name="thinking_rules_request_preview">請求預覽</string>
     <string name="thinking_fmt_omit_title">不傳送任何欄位</string>
     <string name="thinking_fmt_omit_desc">完全不傳送思考欄位。用於會拒絕未知鍵的端點。</string>

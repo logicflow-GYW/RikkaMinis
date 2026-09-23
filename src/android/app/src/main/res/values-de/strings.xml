@@ -1342,7 +1342,7 @@
     <string name="thinking_rules_off_value">Wert bei „aus“ (z. B. none, minimal)</string>
     <string name="thinking_rules_field_path">Feldpfad</string>
     <string name="thinking_rules_dotted_path">Punktnotation</string>
-    <string name="thinking_rules_value_at_high">Wert bei High</string>
+    <string name="thinking_rules_value_at_level">Wert bei %1$s</string>
     <string name="thinking_rules_request_preview">Vorschau der Anfrage</string>
     <string name="thinking_fmt_omit_title">Nichts senden</string>
     <string name="thinking_fmt_omit_desc">Es wird überhaupt kein Denkfeld gesendet. Für Endpunkte, die einen unbekannten Schlüssel ablehnen.</string>
