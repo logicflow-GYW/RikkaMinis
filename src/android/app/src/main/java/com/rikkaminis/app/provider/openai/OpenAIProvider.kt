@@ -26,6 +26,7 @@ import com.rikkaminis.app.provider.clampOutboundTemperature
 import com.rikkaminis.app.provider.StreamTimeouts
 import com.rikkaminis.app.provider.VISION_UNSUPPORTED_PLACEHOLDER
 import com.rikkaminis.app.provider.openai.explicitOffEffortFor
+import com.rikkaminis.app.provider.thinking.GatewayEffortTruth
 import com.rikkaminis.app.provider.thinking.ReasoningEchoDecider
 import com.rikkaminis.app.provider.thinking.ReasoningEchoPolicy
 import com.rikkaminis.app.provider.thinking.ThinkingResolveContext
