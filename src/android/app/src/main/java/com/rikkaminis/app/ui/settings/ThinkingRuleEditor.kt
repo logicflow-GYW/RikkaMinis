@@ -335,7 +335,7 @@ private fun customEditableValues(fmt: ThinkingWireFormat?): Map<ThinkingLevel, S
  * configures so the JSON shown matches what the user typed — before this it was
  * pinned to HIGH, so a rule that only set XHIGH or MAX looked like it did nothing.
  */
-private fun firstCustomTier(fmt: ThinkingWireFormat): ThinkingLevel =
+private fun firstCustomTier(fmt: ThinkingWireFormat?): ThinkingLevel =
     CUSTOM_VALUE_TIERS.firstOrNull { level ->
         fmt is ThinkingWireFormat.CustomPath && !fmt.values[level].isNullOrBlank()
     } ?: ThinkingLevel.HIGH
