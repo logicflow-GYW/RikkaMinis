@@ -189,6 +189,13 @@ object MirrorSpeedTestViewModel {
     private const val TAG = "MirrorSpeedTest"
     private const val PREFS = "mirror_settings"
 
+    // §29: mirror-fallback switch cap. Alpine has 9 non-official candidates;
+    // each switch triggers a full apk retry round with real network
+    // timeouts, so the boot path must not walk all of them in one boot.
+    // The tried list persists across boots, so the next boot continues
+    // from where this one stopped.
+    private const val APK_MIRROR_FALLBACK_MAX_SWITCHES = 4
+
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
@@ -453,6 +460,59 @@ object MirrorSpeedTestViewModel {
                 Log.i(TAG, "Auto mirror detection applied")
             }
         }
+    }
+
+    /**
+     * §29: APK-world retry with automatic mirror switching. Runs
+     * [attemptOnce] (a full retry round against the CURRENT source); when
+     * it fails, switches to the next not-yet-tried non-official ALPINE
+     * mirror, re-applies the mirror config, and retries. State machine:
+     *   - tried mirror ids persist under "apkRetry.triedMirrorIds" so a
+     *     bad source cannot loop forever across boots;
+     *   - stops when every non-official source has been tried or
+     *     [APK_MIRROR_FALLBACK_MAX_SWITCHES] switches have run (each round
+     *     carries real network timeouts — the boot path must not walk all
+     *     nine candidates in one boot);
+     *   - the tried list clears on success so a later failure starts fresh;
+     *     returning false KEEPS the list so the next boot continues from
+     *     where this one left off.
+     * The switched mirror is persisted as the user selection (persist +
+     * applyMirror), so a source that actually works becomes the standing
+     * choice — that is the self-healing intent.
+     */
+    suspend fun retryApkWorldWithMirrorFallback(
+        context: Context,
+        attemptOnce: suspend () -> Boolean,
+    ): Boolean {
+        ensureLoaded(context)
+        var ok = attemptOnce()
+        if (ok) return true
+        val p = prefs(context)
+        val triedKey = "apkRetry.triedMirrorIds"
+        val tried = (p.getStringSet(triedKey, emptySet()) ?: emptySet()).toMutableSet()
+        var switches = 0
+        while (switches < APK_MIRROR_FALLBACK_MAX_SWITCHES) {
+            val currentId = selectedMirror(MirrorCategory.ALPINE)?.id
+            val next = MirrorCatalog.mirrors(MirrorCategory.ALPINE).firstOrNull {
+                !it.isOfficial && it.id != currentId && it.id !in tried
+            } ?: break // every non-official source already tried — stop instead of looping
+            tried.add(next.id)
+            switches++
+            p.edit().putStringSet(triedKey, tried).apply()
+            selectedMirrorId[MirrorCategory.ALPINE] = next.id
+            useCustomMirror[MirrorCategory.ALPINE] = true
+            persist(context, MirrorCategory.ALPINE)
+            applyMirror(context, MirrorCategory.ALPINE)
+            Log.i(TAG, "APK mirror fallback: switched to ${next.name} (switch $switches/${APK_MIRROR_FALLBACK_MAX_SWITCHES})")
+            ok = attemptOnce()
+            if (ok) {
+                p.edit().remove(triedKey).apply()
+                Log.i(TAG, "APK mirror fallback succeeded with ${next.name}")
+                return true
+            }
+        }
+        Log.w(TAG, "APK mirror fallback exhausted after $switches switch(es); tried list kept for next boot")
+        return false
     }
 
     fun selectedMirror(category: MirrorCategory): MirrorEntry? {

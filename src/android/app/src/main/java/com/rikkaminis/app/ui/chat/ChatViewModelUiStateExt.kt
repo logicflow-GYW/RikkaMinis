@@ -122,6 +122,20 @@ internal fun ChatViewModel.dismissMemorySheet() {
 }
 
 internal fun ChatViewModel.addAttachment(attachment: InputAttachment) {
+    // §27a: image attachments to a non-vision model still land here —
+    // deliberately NOT blocked. The provider gate (StreamTimeouts
+    // .visionPlaceholder) downgrades the image part to a text placeholder on
+    // the wire, AND the prompt builder mirrors the full-res file into the
+    // uploads dir so agent shell tools (read_image / cat) can still read it.
+    // Blocking the attach would kill that tool path. The user just gets a
+    // hint that the model won't see the picture natively.
+    if (attachment.isImage && !currentModelSupportsImages) {
+        android.widget.Toast.makeText(
+            context.applicationContext,
+            context.getString(com.rikkaminis.app.R.string.chat_image_no_vision_hint),
+            android.widget.Toast.LENGTH_SHORT,
+        ).show()
+    }
     _attachments.value = _attachments.value + attachment
 }
 

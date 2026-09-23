@@ -720,6 +720,7 @@
     <string name="chat_waiting_network">等待响应中 — %1$d 秒</string>
     <string name="chat_input_placeholder">发消息给 %1$s（@ 提及文件）</string>
     <string name="chat_attachment_limit">仅附加了前 %1$d 个项目。</string>
+    <string name="chat_image_no_vision_hint">当前模型无法直接查看图片——文件仍可供代理工具读取。</string>
     <string name="browser_takeover">接管</string>
     <string name="browser_settings_done">完成</string>
     <string name="browser_settings_user_agent">用户代理</string>
