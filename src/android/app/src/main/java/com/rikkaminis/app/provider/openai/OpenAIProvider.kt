@@ -819,6 +819,12 @@ class OpenAIProvider constructor(
                     )
                 )
             }
+            // [T-android-effort-self-learn] The gateway's 400 body often spells out the
+            // exact effort enum it accepts — the cheapest one-hand truth we will ever get.
+            // No probe request, and a gateway changing its enum does not need a release
+            // from us to be absorbed. Learning nothing is not an error: record() returns
+            // null and throws nothing.
+            EffortTierLearner.record(request.url.host, bodyStr, errorBody)
             throw mapHttpError(
                 response.code,
                 errorBody,
@@ -1192,6 +1198,10 @@ class OpenAIProvider constructor(
                     if (inlineError != null) {
                         val code = inlineError.optInt("code", 0)
                         val msg = inlineError.optString("message", "Unknown SSE error")
+                        // [T-android-effort-self-learn] Same hook as the HTTP-400 path:
+                        // some relays report the identical error inside a 200 stream, so
+                        // the enum lands in the event instead of the status body.
+                        EffortTierLearner.record(request.url.host, bodyStr, event.toString())
                         val err = mapHttpError(code, event.toString())
                         throw err
                     }
@@ -2455,7 +2465,13 @@ class OpenAIProvider constructor(
             modelId = model.id,
             instanceId = thinkingRuleInstanceId,
             supportsReasoning = model.supportsReasoning,
-            declaredEffortValues = model.reasoningEffortValues,
+            // [T-android-effort-self-learn] A tier set the gateway told us about on a
+            // previous 400 outranks the catalog's declaration — it is one-hand truth and
+            // the only source that ever updates itself. With nothing learned the
+            // expression is byte-identical to `model.reasoningEffortValues`, so a host we
+            // have never heard a complaint from keeps today's behaviour exactly.
+            declaredEffortValues = EffortTierLearner.learned(host, model.id)
+                ?: model.reasoningEffortValues,
             declaresNoEffortTiers = model.declaresNoEffortTiers == true,
             level = level,
             maxTokens = maxTokens,

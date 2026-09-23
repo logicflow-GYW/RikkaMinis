@@ -32,6 +32,7 @@ import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.network.NetworkMonitor
 import com.rikkaminis.app.offload.OffloadPermissionManager
 import com.rikkaminis.app.provider.ModelsDevApi
+import com.rikkaminis.app.provider.thinking.EffortTierLearner
 import com.rikkaminis.app.sandbox.ExecutionCoordinator
 import com.rikkaminis.app.sandbox.NativeOffloadServer
 import com.rikkaminis.app.sandbox.PRootKernel
@@ -228,6 +229,10 @@ class MinisApp : Application(), ImageLoaderFactory {
             // process's line | 升级触发: garbled/interleaved lines observed in
             // the daily log
             AppLogger.init(this)
+            // [T-android-effort-self-learn] The worker is the process that actually
+            // issues chat requests, so it must be able to learn from their 400s.
+            // The persistence file lives in filesDir, shared across processes.
+            EffortTierLearner.init(this)
             return
         }
 
@@ -399,6 +404,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         // the rest of onCreate land in today's log file. Mirrors iOS
         // `LoggingManager.startIfEnabled()` (called from MinisApp.swift:143).
         AppLogger.init(this)
+        EffortTierLearner.init(this)
 
         // Bug 2 (MIUI silent kill) diagnostic: write a launch-cycle beacon
         // so a subsequent launch can observe whether the previous run
