@@ -485,10 +485,53 @@ class ThinkingRulesRegressionTest {
             body.has("thinking"),
         )
         assertEquals(
-            // [T-android-thinking-level-arch] DeepSeek V4 tops out at "max"; every
-            // high-and-above tier collapses onto it — HIGH→max, not high.
+            // [T-deepseek-relay-data-driven] HIGH is a DISTINCT tier when the model
+            // declares it: the relay leg now maps like the sibling leg (wireEffort +
+            // clamp onto the declared set) instead of collapsing every high-and-above
+            // tier onto "max". The previous expectation pinned the pre-refactor relay
+            // ladder, under which LOW and MEDIUM produced an IDENTICAL request and HIGH
+            // silently jumped a tier — the collapse users reported on relay-hosted
+            // deepseek-v4. The relay-safe part is the SHAPE (root reasoning_effort, not
+            // the vendor thinking{} object), which is what this test still guards.
             "relay controls thinking via standard root reasoning_effort: $body",
+            "high",
+            body.optString("reasoning_effort", null),
+        )
+    }
+
+    /**
+     * [T-deepseek-relay-data-driven] The declared set is the authority when we have one:
+     * a relay that only advertises {max} must still receive "max" for HIGH, which is the
+     * protection the old unconditional ladder used to provide.
+     */
+    @Test
+    fun `relay deepseek clamps onto a declared set that lacks the requested tier`() {
+        val body = capture(
+            model = model("deepseek-v4-pro", reasoningEffortValues = listOf("max")),
+            level = ThinkingLevel.HIGH,
+        )
+        assertEquals(
+            "a tier the model never declared must snap to the strongest one below it: $body",
             "max",
+            body.optString("reasoning_effort", null),
+        )
+    }
+
+    /**
+     * [T-deepseek-relay-data-driven] No declared set = we do not know what this relay
+     * accepts. Fall back to the ladder, which only ever emits {high, max} — both accepted
+     * by the relays these rules ship for — rather than trading a dead tier for a 400 on
+     * an unverified endpoint.
+     */
+    @Test
+    fun `relay deepseek falls back to the ladder when nothing is declared`() {
+        val body = capture(
+            model = model("deepseek-v4-pro", reasoningEffortValues = null),
+            level = ThinkingLevel.MEDIUM,
+        )
+        assertEquals(
+            "an unknown relay must not be handed an unverified tier: $body",
+            "high",
             body.optString("reasoning_effort", null),
         )
     }

@@ -631,10 +631,31 @@ object ThinkingRuleResolver {
                 // thinks BY DEFAULT; omission silently leaves it on). The old chain sent
                 // that shape to relays too, and it is accepted there (it is the standard
                 // DeepSeek API toggle, unlike the nested effort field).
+                //
+                // [T-deepseek-relay-data-driven] The SHAPE is relay-specific; the VALUE
+                // is not. This branch used to run the pre-refactor `deepSeekV4Effort`
+                // ladder unconditionally (HIGH and above -> "max", everything else ->
+                // "high"), collapsing the picker's tiers onto two wire values: LOW and
+                // MEDIUM produced an identical request, and HIGH silently jumped a tier.
+                // DeepSeekSibling already moved to the data-driven mapping (upstream
+                // parity) — the relay branch reaches the same model family through a
+                // different endpoint, so it now maps the same way.
+                //
+                // The declared set is the authority WHEN WE HAVE ONE: it is the only
+                // statement of what this particular relay accepts, and clamping onto it
+                // is what stops a relay that only takes {high,max} from being handed
+                // "medium". Without a declared set we fall back to the ladder, which is
+                // known-accepted on the relays these rules ship for — an unknown endpoint
+                // stays conservative rather than trading a dead tier for a 400.
                 if (ctx.level.isEnabled) {
-                    val effort = deepSeekV4Effort(ctx.level)
-                    body.put("reasoning_effort", effort)
-                    effort to effort
+                    val requested = clampEffortForModel(wireEffort(ctx.level), ctx.modelId)
+                    val clamped = if (ctx.declaredEffortValues.isNullOrEmpty()) {
+                        deepSeekV4Effort(ctx.level)
+                    } else {
+                        clampEffort(requested, ctx.declaredEffortValues)
+                    }
+                    body.put("reasoning_effort", clamped)
+                    requested to clamped
                 } else {
                     body.put("thinking", JSONObject().put("type", "disabled"))
                     null to null
@@ -944,16 +965,13 @@ object ThinkingRuleResolver {
         }
     }
 
-    fun wireEffort(level: ThinkingLevel): String = when (level) {
-        ThinkingLevel.OFF, ThinkingLevel.LOW -> "low"
-        ThinkingLevel.MEDIUM -> "medium"
-        ThinkingLevel.HIGH -> "high"
-        ThinkingLevel.XHIGH -> "xhigh"
-        // ULTRA is a client-side "Max + orchestration" concept and is NEVER a valid
-        // server effort string (iOS b38bf3d5).
-        ThinkingLevel.MAX, ThinkingLevel.ULTRA -> "max"
-        ThinkingLevel.AUTO -> "low" // unreachable; AUTO returns at the top of apply()
-    }
+    // [T-thinking-effort-ladder] The mapping itself now lives in ThinkingEffortLadder so
+    // a plain JVM test can exercise it without compiling this resolver's dependency graph
+    // (org.json, provider layer). These remain as delegates: every existing call site —
+    // and the built-in rules above — keeps calling the resolver and gets byte-identical
+    // behaviour.
+
+    fun wireEffort(level: ThinkingLevel): String = ThinkingEffortLadder.wireEffort(level)
 
     /**
      * [T-android-xhigh-effort-clamp] MiMo/Agnes reject xhigh (400/422); their ladder tops
@@ -961,20 +979,9 @@ object ThinkingRuleResolver {
      * `mimo-v2.5` while docs say `mimo-2.5` (iOS 72968c4f).
      */
     fun clampEffortForModel(effort: String, lid: String): String =
-        if (effort == "xhigh" && (lid.contains("mimo") || lid.contains("agnes"))) "high" else effort
+        ThinkingEffortLadder.clampEffortForModel(effort, lid)
 
     /** Snap a requested tier onto the model's declared set, walking DOWN then up. */
-    fun clampEffort(effort: String, values: List<String>?): String {
-        if (values.isNullOrEmpty()) return effort
-        if (values.contains(effort)) return effort
-        val ladder = listOf("none", "minimal", "low", "medium", "high", "xhigh", "max")
-        val want = ladder.indexOf(effort)
-        if (want < 0) return effort
-        val declared = values.mapNotNull { v ->
-            val i = ladder.indexOf(v)
-            if (i >= 0) i to v else null
-        }.sortedBy { it.first }
-        if (declared.isEmpty()) return effort
-        return declared.lastOrNull { it.first <= want }?.second ?: declared.first().second
-    }
+    fun clampEffort(effort: String, values: List<String>?): String =
+        ThinkingEffortLadder.clampEffort(effort, values)
 }

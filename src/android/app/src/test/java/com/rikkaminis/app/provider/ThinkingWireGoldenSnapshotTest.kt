@@ -41,6 +41,16 @@ import org.junit.Test
  *   4. MockWebServer base never qualifies for `explicitOffEffort`, so OFF renders `{}`
  *      on unified-gateway rows where upstream's live-base baseline shows the off tier.
  *   5. AUTO rows emit nothing (T-thinking-auto-level, no upstream equivalent).
+ *   6. [T-deepseek-relay-data-driven] The deepseek-v4 RELAY leg now maps tiers like the
+ *      sibling leg (wireEffort + clamp onto the declared set) instead of the
+ *      pre-refactor ladder that folded everything above MEDIUM onto `max`. For a relay
+ *      row declaring {high,max} that renders HIGH/XHIGH as `high` — a tier the row
+ *      actually advertises — rather than jumping to `max`. Reason for the change, in
+ *      words: on relay-hosted deepseek-v4 the ladder made LOW and MEDIUM produce an
+ *      IDENTICAL request and made HIGH silently skip a tier, so the picker changed
+ *      nothing. The declared-set clamp preserves the ladder's protection (a relay
+ *      advertising only {max} still receives `max` for HIGH); with no declared set at
+ *      all the ladder is still the fallback.
  */
 class ThinkingWireGoldenSnapshotTest {
 
@@ -237,8 +247,8 @@ qwen-tiny-max/AUTO -> {}
 deepseek-v4/OFF -> {thinking:{type:"disabled"}}
 deepseek-v4/LOW -> {reasoning_effort:"high"}
 deepseek-v4/MEDIUM -> {reasoning_effort:"high"}
-deepseek-v4/HIGH -> {reasoning_effort:"max"}
-deepseek-v4/XHIGH -> {reasoning_effort:"max"}
+deepseek-v4/HIGH -> {reasoning_effort:"high"}
+deepseek-v4/XHIGH -> {reasoning_effort:"high"}
 deepseek-v4/MAX -> {reasoning_effort:"max"}
 deepseek-v4/ULTRA -> {reasoning_effort:"max"}
 deepseek-v4/AUTO -> {}

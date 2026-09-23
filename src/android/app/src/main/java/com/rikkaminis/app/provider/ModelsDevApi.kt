@@ -3,6 +3,7 @@ package com.rikkaminis.app.provider
 import android.content.Context
 import android.util.Log
 import com.rikkaminis.app.data.model.LLMModel
+import com.rikkaminis.app.provider.thinking.GatewayEffortTruth
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -149,6 +150,35 @@ object ModelsDevApi {
                 return@map applyDevData(model, devModel)
             }
             model
+        }
+    }
+
+    /**
+     * [T-sensenova-effort-enum] Replace the declared effort tiers with the gateway's
+     * MEASURED enum, for endpoints where models.dev is demonstrably wrong.
+     *
+     * models.dev's `sensenova` row under-declares every model on that gateway — e.g.
+     * `sensenova-6.8-flash-lite` is declared `none|low|medium|high` while the gateway
+     * accepts `none|low|medium|high|xhigh`. The declared set drives the thinking-level
+     * picker ceiling, so the user could not reach a tier the gateway actually serves.
+     * (The wire side is corrected independently in OpenAIProvider; this fixes the UI.)
+     *
+     * Applied at MODEL-SYNC time: the enum is a property of the ENDPOINT, not of the
+     * registry row, and scoping it to the base URL's host keeps it from leaking onto
+     * another provider that happens to serve the same bare model id.
+     *
+     * Older saves keep the un-corrected set until that provider's model list is
+     * refreshed; nothing breaks in the meantime because the wire clamp falls back to the
+     * measurement rather than to the declared set.
+     */
+    fun applyGatewayEffortTruth(models: List<LLMModel>, baseUrl: String?): List<LLMModel> {
+        if (models.isEmpty() || baseUrl.isNullOrBlank()) return models
+        val host = runCatching { URL(baseUrl).host }.getOrNull()?.lowercase() ?: return models
+        if (!GatewayEffortTruth.isSensenovaHost(host)) return models
+        return models.map { model ->
+            val measured = GatewayEffortTruth.tiersFor(host, model.id) ?: return@map model
+            if (model.reasoningEffortValues == measured) return@map model
+            model.copy(reasoningEffortValues = measured)
         }
     }
 
