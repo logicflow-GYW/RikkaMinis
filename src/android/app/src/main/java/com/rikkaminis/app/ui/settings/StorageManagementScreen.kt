@@ -8,6 +8,8 @@ import android.content.Context
 import android.text.format.Formatter
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -98,6 +101,13 @@ private const val SNAPSHOT_STALE_MS = 3 * 60 * 1000L
 // RESCAN_DELAY_MS: when the cached snapshot IS stale, wait this long before
 // starting the background rescan so it never overlaps the transition frames.
 private const val RESCAN_DELAY_MS = 500L
+
+// SESSION_LIST_MAX_HEIGHT: cap for the bounded LazyColumn of session rows.
+// The value is a plain viewport budget (≈9 rows of the ~48dp row height), not
+// a tuned constant — it exists so the nested LazyColumn gets a bounded
+// max-height (required inside a verticalScroll Column) while staying tall
+// enough that most users never see the inner scrollbar.
+private const val SESSION_LIST_MAX_HEIGHT = 432.dp
 
 /** Process-lifetime holder for the latest [StorageSnapshot]. SWR cache:
  *  no age gate — re-entry always renders the last scan immediately and a
@@ -403,23 +413,45 @@ fun StorageManagementScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(16.dp),
                 )
-                else -> sessions.forEachIndexed { index, session ->
-                    val valueLabel = buildString {
-                        append(Formatter.formatFileSize(context, session.totalSize))
-                        val top = session.topSubdir
-                        if (top != null) {
-                            val ratio = if (session.totalSize > 0) top.second.toFloat() / session.totalSize else 0f
-                            if (ratio >= 0.15f) {
-                                append(" (${top.first}: ${Formatter.formatFileSize(context, top.second)})")
+                else -> {
+                    // [storage-lazy-session-list] The session list previously
+                    // composed EVERY row eagerly (`forEachIndexed` inside the
+                    // page's verticalScroll Column) — with hundreds of
+                    // sessions that is hundreds of composables in one frame,
+                    // on the main thread, on every entry to this screen. A
+                    // LazyColumn with a bounded height only composes visible
+                    // rows; `heightIn` coerces the unbounded max-height the
+                    // scrolling Column passes down, which is what lets a
+                    // LazyColumn nest inside it at all.
+                    // ponytail: inner list scrolls independently of the page |
+                    // 天花板: swiping on the list scrolls the list, not the
+                    // page | 升级触发: user reports the page being hard to
+                    // scroll by touching the list (then convert the whole
+                    // SettingsScaffold content to a LazyColumn).
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = SESSION_LIST_MAX_HEIGHT),
+                    ) {
+                        itemsIndexed(sessions, key = { _, session -> session.id }) { index, session ->
+                            val valueLabel = buildString {
+                                append(Formatter.formatFileSize(context, session.totalSize))
+                                val top = session.topSubdir
+                                if (top != null) {
+                                    val ratio = if (session.totalSize > 0) top.second.toFloat() / session.totalSize else 0f
+                                    if (ratio >= 0.15f) {
+                                        append(" (${top.first}: ${Formatter.formatFileSize(context, top.second)})")
+                                    }
+                                }
                             }
+                            SettingsValueRow(
+                                title = session.title ?: "Untitled",
+                                value = valueLabel,
+                                onClick = { onSessionClick(session.id) },
+                                showDivider = index < sessions.size - 1,
+                            )
                         }
                     }
-                    SettingsValueRow(
-                        title = session.title ?: "Untitled",
-                        value = valueLabel,
-                        onClick = { onSessionClick(session.id) },
-                        showDivider = index < sessions.size - 1,
-                    )
                 }
             }
         }
