@@ -970,7 +970,14 @@ internal fun ChatViewModel.loadSession() {
         // rather than crashing the session load.
         val persistedOverride = session.thinkingOverride
             ?.let { runCatching { ThinkingLevel.valueOf(it) }.getOrNull() }
-        _thinkingLevel.value = persistedOverride ?: ThinkingLevel.OFF
+        // [feat/thinking-global-remember] null override = the session never
+        // had an explicit choice → fall through to the cross-conversation
+        // last-tuned level (not hard OFF), so reopening an old chat also
+        // shows what the user last tuned. A non-null per-session override
+        // still wins.
+        _thinkingLevel.value = persistedOverride
+            ?: com.rikkaminis.app.data.ThinkingGlobalPrefs.lastLevel(context)
+            ?: ThinkingLevel.OFF
         // [T-thinking-effective-level] A value already in the DB counts as an
         // explicit choice, so a later group (re-)selection must not clobber it
         // — see applyGroupSessionDefaults. Null override = never chose → the
