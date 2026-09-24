@@ -142,8 +142,34 @@ object ContextCompactor {
         return Decision.AUTO_COMPACT
     }
 
-    /** 简易 token 估算：每 [CHARS_PER_TOKEN] 字符 ≈ 1 token。 */
-    fun estimateTokens(text: String): Long = (text.length / CHARS_PER_TOKEN).toLong()
+    /**
+     * 简易 token 估算：CJK 字符 ≈ 1 token/字，其余每 [CHARS_PER_TOKEN] 字符 ≈ 1 token。
+     *
+     * [fix/cjk-token-estimate] 为什么分语系：这个估算喂 [estimateTailTokens] 的
+     * TAIL_TOO_SMALL 闸门（触发线本身用 provider 上报的真实用量，不走这里）。
+     * 旧口径 chars/4 对 CJK 低估 3-4 倍（现代 tokenizer 对汉字/假名/谚文约
+     * 1 字 1 token），真实 8000 token 的中文尾部被估成 ~2000 → 永远
+     * TAIL_TOO_SMALL → 自动压缩对中文对话实际从未触发过（用户直接看到
+     * EXHAUSTED 对话框 / 空响应兜底）。ASCII 行为逐字节不变（既有测试不动）。
+     * Emoji 等 astral 区（surrogate pair）按 other 计入，估算语义可接受。
+     */
+    fun estimateTokens(text: String): Long {
+        var cjk = 0
+        var other = 0
+        for (ch in text) {
+            if (isCjkChar(ch)) cjk++ else other++
+        }
+        return cjk.toLong() + (other / CHARS_PER_TOKEN).toLong()
+    }
+
+    /** CJK 表意区（汉字/假名/谚文/全角形式）≈ 1 字 1 token。 */
+    private fun isCjkChar(ch: Char): Boolean {
+        val c = ch.code
+        return c in 0x2E80..0x9FFF ||   // 部首/CJK 标点/假名/注音/CJK 统一表意
+            c in 0xAC00..0xD7AF ||      // 谚文音节
+            c in 0xF900..0xFAFF ||      // CJK 兼容表意
+            c in 0xFF00..0xFFEF         // 全角/半角形式
+    }
 
     /**
      * 估算一条消息完整贡献的 token 数：content 文本 + contentParts 里的
