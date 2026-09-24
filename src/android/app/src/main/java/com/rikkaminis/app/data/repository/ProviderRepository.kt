@@ -1548,6 +1548,34 @@ class ProviderRepository(private val context: Context) {
     }
 
     /**
+     * [reorder-providers] Persist a user-arranged order for the AI provider
+     * list (drag-to-reorder on ProviderListScreen).
+     *
+     * Presentation-only, like [reorderGroups]: nothing reads `instances`
+     * positionally to make a routing decision — the primary/sub defaults live
+     * on model groups and the list UI buckets instances by providerType.
+     * Persisting the drag order keeps the user's arrangement across restarts
+     * and backup round-trips for free: [ProviderConfig.toSnapshot] writes
+     * `sortOrder = list index`, so the order survives the DB snapshot /
+     * legacy-JSON mirror / restore paths unchanged. No schema change needed.
+     *
+     * [newOrder] must be a permutation of the currently persisted set; anything
+     * else is a stale snapshot (e.g. a cascade cleanup removed an instance
+     * mid-drag) and is dropped rather than applied, so a race can't silently
+     * delete or duplicate an instance. Reordering is done by lookup (not by
+     * index) so the ProviderInstance objects are carried over untouched.
+     */
+    fun reorderInstances(newOrder: List<String>) = synchronized(configLock) {
+        ensureConfigLoaded()
+        val config = mutationSnapshot(_config.value)
+        val reordered = permuteById(config.instances, newOrder) { it.id }
+            ?: return@synchronized
+        config.instances.clear()
+        config.instances.addAll(reordered)
+        saveConfig(config)
+    }
+
+    /**
      * Resolve the effective model entries visible to the agent loop (minis-model-use).
      * Expands groups to their members, unions with individual entries, dedupes by ID,
      * and filters to entries of enabled provider instances. Mirrors iOS
