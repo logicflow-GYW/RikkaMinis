@@ -2,22 +2,11 @@
 <resources>
     <string name="app_name">RikkaMinis</string>
     <string name="onboarding_default_group_name">기본 모델</string>
-    <string name="new_chat">새 채팅</string>
     <string name="settings">설정</string>
-    <string name="providers">AI 공급자</string>
-    <string name="add_provider">AI 공급자 추가</string>
-    <string name="appearance">외관</string>
     <string name="no_sessions">아직 대화가 없습니다</string>
-    <string name="no_providers">시작하려면 제공자를 추가하세요</string>
-    <string name="send">전송</string>
-    <string name="type_message">메시지를 입력하세요…</string>
     <string name="delete">삭제</string>
     <string name="cancel">취소</string>
     <string name="save">저장</string>
-    <string name="api_key">API Key</string>
-    <string name="label">라벨</string>
-    <string name="enabled">활성화됨</string>
-    <string name="select_model">모델 선택</string>
     <string name="session_memory_title">세션의 메모리</string>
     <string name="memory_section_auto_injected">자동 주입</string>
     <string name="memory_section_auto_injected_footer">각 에이전트 턴 시작 시 시스템 프롬프트에 로드됩니다.</string>
@@ -25,7 +14,6 @@
     <string name="memory_section_tool_activity_footer">이 세션 중 에이전트가 수행한 메모리 읽기 및 쓰기.</string>
     <string name="memory_section_written_content">기록된 내용</string>
     <string name="memory_section_tool_result">도구 결과</string>
-    <string name="memory_section_keywords">키워드</string>
     <string name="memory_action_edit">편집</string>
     <string name="memory_action_save">저장</string>
     <string name="memory_action_revoke">철회</string>
@@ -36,30 +24,12 @@
     <string name="memory_revoke_result_not_found">최근 로그에서 항목을 찾을 수 없습니다.</string>
     <string name="memory_revoke_result_io_error">파일 쓰기 오류: %1$s</string>
     <string name="memory_save_toast">저장됨</string>
-    <string name="memory_save_error">저장 실패: %1$s</string>
     <string name="memory_global_footer">모든 세션에서 에이전트에게 표시되는 영구 지침 및 환경 설정입니다. 에이전트는 이 파일을 수정할 수 없습니다.</string>
-    <string name="permissions_title">권한</string>
-    <string name="permissions_reset_all">모두 재설정</string>
-    <string name="permissions_reset_dialog_title">모든 권한을 재설정하시겠습니까?</string>
-    <string name="permissions_reset_dialog_message">모든 권한을 기본값(항상 허용)으로 되돌립니다. 도구별 재정의는 모두 지워집니다.</string>
-    <string name="permissions_reset_confirm">초기화</string>
-    <string name="permissions_level_always_allow">항상 허용</string>
-    <string name="permissions_level_ask_once">한 번 묻기</string>
-    <string name="permissions_level_not_allowed">허용 안 함</string>
-    <string name="permissions_category_privacy">개인정보</string>
-    <string name="permissions_category_media">미디어</string>
-    <string name="permissions_category_system">시스템</string>
     <string name="mention_scanning">파일 스캔 중…</string>
     <string name="mention_no_match">일치하는 파일 없음</string>
     <string name="resume_banner_title">중단됨 — 재개를 눌러 계속하세요</string>
     <string name="resume_action">재개</string>
-    <string name="search_chats_placeholder">대화 검색…</string>
-    <string name="search_no_results">\"%1$s\"에 대한 결과가 없습니다</string>
     <string name="stop_tool">도구 중지</string>
-    <string name="mic_permission_title">마이크 권한이 필요합니다</string>
-    <string name="mic_permission_message">음성 입력은 마이크 권한이 필요합니다. 설정 열기를 눌러 RikkaMinis에 권한을 부여하세요.</string>
-    <string name="mic_permission_open_settings">설정 열기</string>
-    <string name="mic_permission_cancel">취소</string>
     <string name="bg_section_header">백그라운드 및 알림</string>
     <string name="bg_section_subtitle">배터리 최적화 및 OEM 자동 시작</string>
     <string name="bg_section_footer">오래 실행되는 에이전트 작업은 화면이 꺼진 동안 CPU를 깨운 상태로 유지하기 위한 권한이 필요합니다. 이 설정이 없으면 시스템은 몇 분 후 백그라운드 추론을 중지할 수 있습니다.</string>
@@ -182,9 +152,6 @@
     <string name="session_skills_footer">이 세션에 대해서만 스킬을 토글합니다. 기본값은 설정 → 스킬에서 가져옵니다.</string>
     <string name="session_skills_empty_title">설치된 스킬이 없습니다</string>
     <string name="session_skills_empty_subtitle">설정 → 스킬에서 스킬을 가져옵니다.</string>
-    <string name="speech_lang_picker_title">음성 언어</string>
-    <string name="speech_lang_picker_empty">활성 인식기에서 사용 가능한 언어가 없습니다.</string>
-    <string name="speech_lang_picker_selected">선택됨</string>
     <string name="standard_sheet_close">닫기</string>
     <string name="token_usage_sheet_title">세션 토큰 사용량</string>
     <string name="token_usage_section_context">컨텍스트</string>
@@ -280,7 +247,6 @@
     <string name="env_var_error_invalid_key">문자로 시작하며 문자/숫자/밑줄만 사용 가능</string>
     <string name="env_var_error_duplicate">같은 이름의 변수가 이미 있습니다</string>
     <string name="log_title">로그</string>
-    <string name="log_share_all">전체 공유</string>
     <string name="log_section_logging">로깅</string>
     <string name="log_section_logging_footer">활성화하면 모든 콘솔 출력이 앱의 비공개 저장소에 일일 로그 파일로 캡처됩니다.</string>
     <string name="log_enable_switch">로깅 활성화</string>
@@ -295,11 +261,9 @@
     <string name="log_delete_confirm_title">모든 로그를 삭제하시겠습니까?</string>
     <string name="log_delete_confirm_text">%1$s 의 로그 파일이 삭제됩니다. 이 작업은 되돌릴 수 없습니다.</string>
     <string name="log_delete_confirm">모두 삭제</string>
-    <string name="log_truncated_marker">…（잘림, 총 %1$s）</string>
     <string name="log_not_found">로그 파일을 찾을 수 없습니다.</string>
     <string name="log_error_reading">로그 읽기 오류: %1$s</string>
     <string name="log_share_chooser">로그 공유</string>
-    <string name="log_share_all_chooser">로그 공유</string>
     <string name="memory_title">메모리</string>
     <string name="memory_empty_title">메모리 파일 없음</string>
     <string name="memory_empty_description">메모리 파일은 세션 간 지식을 유지합니다. GLOBAL.md 를 편집해 에이전트에 보이는 지침을 추가하세요.</string>
@@ -309,7 +273,6 @@
     <string name="memory_section_view_less">덜 보기</string>
     <string name="memory_delete_confirm_title">%1$s 을(를) 삭제하시겠습니까?</string>
     <string name="memory_delete_confirm_text">이 메모리 로그가 영구적으로 제거됩니다.</string>
-    <string name="memory_editor_placeholder">내용 입력…</string>
     <string name="perm_title">권한</string>
     <string name="perm_reset_all">모두 재설정</string>
     <string name="perm_reset_confirm_title">모든 권한을 재설정하시겠습니까?</string>
@@ -325,11 +288,9 @@
     <string name="perm_tool_a11y_cli">android-a11y-cli</string>
     <string name="perm_tool_shizuku_cli">android-shizuku-cli</string>
     <string name="perm_section_a11y">접근성</string>
-    <string name="perm_section_shizuku">Shizuku</string>
     <string name="perm_a11y_section_footer">android-a11y-cli는 에이전트가 화면 UI 구조를 읽고, 탭과 제스처를 수행하며 시스템 이벤트를 감시할 수 있게 합니다. 아래 두 행을 모두 설정하세요: 에이전트 권한을 선택하고 시스템 설정에서 접근성 서비스를 활성화하세요.</string>
     <string name="perm_shizuku_section_footer">android-shizuku-cli는 무선 ADB 또는 root로 시작된 Shizuku 서비스를 통해 에이전트에게 권한 있는 Android API(패키지 설치, settings put, 강제 중지 등)를 부여합니다. 아래 두 행을 모두 설정하세요.</string>
     <string name="perm_a11y_cli_description">에이전트가 화면 UI를 읽고, 탭/입력하며, 이벤트를 감시</string>
-    <string name="perm_shizuku_cli_description">Shizuku 서비스를 통한 권한 있는 Android API</string>
     <string name="perm_a11y_open_settings">접근성 설정 열기</string>
     <string name="perm_system_authorization">시스템 인가</string>
     <string name="perm_agent_policy">에이전트 권한</string>
@@ -357,15 +318,12 @@
     <string name="skill_minis_skills_modal">RikkaMinis Skills</string>
     <string name="skill_delete_confirm_title">%1$s 을(를) 삭제하시겠습니까?</string>
     <string name="skill_delete_confirm_text">이 skill 과 파일이 영구적으로 제거됩니다.</string>
-    <string name="skill_import_sheet_title">스킬 가져오기</string>
     <string name="skill_import_tab_url">URL</string>
     <string name="skill_import_tab_paste">붙여넣기</string>
     <string name="skill_import_tab_file">파일</string>
     <string name="skill_import_url_instruction">SKILL.md 파일의 URL 을 입력하세요 (GitHub 링크 지원).</string>
-    <string name="skill_import_url_label">URL</string>
     <string name="skill_import_url_placeholder">github.com/user/repo/blob/main/SKILL.md</string>
     <string name="skill_import_paste_instruction">SKILL.md 파일 내용을 붙여넣으세요. \'name\' 필드가 포함된 YAML frontmatter 가 필요합니다.</string>
-    <string name="skill_import_paste_label">SKILL.md 내용</string>
     <string name="skill_import_file_instruction">기기에서 .md 또는 .skill 파일을 선택하세요.</string>
     <string name="skill_import_file_button">파일 선택</string>
     <string name="skill_import_error_no_url">URL 을 입력하세요</string>
@@ -385,10 +343,6 @@
     <string name="skill_detail_updated">업데이트됨</string>
     <string name="skill_detail_delete">Skill 삭제</string>
     <string name="skill_detail_edit_name_title">이름 편집</string>
-    <string name="skill_detail_section_description">설명</string>
-    <string name="skill_detail_section_files">파일</string>
-    <string name="skill_detail_section_meta">메타</string>
-    <string name="skill_detail_section_update">업데이트</string>
     <string name="skill_file_save">저장</string>
     <string name="skill_file_edit">편집</string>
     <string name="skill_detail_status_reading">파일 읽는 중…</string>
@@ -398,7 +352,6 @@
     <string name="skill_detail_status_downloading">다운로드 중…</string>
     <string name="skill_detail_status_rescanning">다시 스캔 중…</string>
     <string name="skill_detail_error_missing">디스크의 SKILL.md 가 없거나 잘못됨</string>
-    <string name="skill_detail_source_url">URL</string>
     <string name="skill_detail_source_file">파일 가져오기</string>
     <string name="skill_detail_source_bundled">내장</string>
     <string name="skill_detail_source_session">세션 생성</string>
@@ -428,7 +381,6 @@
     <string name="storage_clear_session_button">세션 파일 삭제</string>
     <string name="storage_clear_confirm_title">세션 파일을 삭제하시겠습니까?</string>
     <string name="storage_clear_confirm_text">%1$s 의 파일을 삭제합니다. 이 작업은 되돌릴 수 없습니다.</string>
-    <string name="storage_clear_confirm_button">%1$s 지우기</string>
     <string name="storage_section_orphans">회수 가능한 공간</string>
     <string name="storage_orphan_banner">삭제된 세션의 고아 항목 %1$d개 — %2$s</string>
     <string name="storage_reclaim_button">회수</string>
@@ -447,9 +399,6 @@
     <string name="usage_label_cache_hit_rate">캐시 적중률</string>
     <string name="usage_detail_input">입력</string>
     <string name="usage_detail_output">출력</string>
-    <string name="usage_detail_cache_read">캐시 읽기</string>
-    <string name="usage_detail_cache_creation">캐시 생성</string>
-    <string name="usage_detail_cache_hit_rate">캐시 적중률</string>
     <string name="usage_detail_daily_avg">일 평균</string>
     <string name="usage_detail_session_avg">세션 평균</string>
     <string name="usage_detail_sessions">세션</string>
@@ -462,7 +411,6 @@
     <string name="mirror_mirrors_section">미러</string>
     <string name="mirror_test_speed_testing">테스트 중…</string>
     <string name="mirror_test_speed_label">속도 테스트</string>
-    <string name="mirror_detect_fast_testing">테스트 중…</string>
     <string name="mirror_detect_fast_label">빠른 미러 감지</string>
     <string name="mirror_official_badge">공식</string>
     <string name="mirror_timeout_label">시간 초과</string>
@@ -480,21 +428,12 @@
     <string name="rootfs_install_label">Rootfs 설치</string>
     <string name="rootfs_reset_label">Rootfs 초기화</string>
     <string name="rootfs_reset_description">모두 삭제 후 재설치</string>
-    <string name="rootfs_reset_backup_label">초기화 및 사용자 데이터 백업</string>
-    <string name="rootfs_reset_backup_description">재설정 전 /root 저장</string>
-    <string name="rootfs_restore_label">사용자 데이터 복원</string>
-    <string name="rootfs_restore_description">이전에 백업한 /root 복원</string>
     <string name="rootfs_progress_section">진행 상황</string>
     <string name="rootfs_result_section">결과</string>
     <string name="rootfs_info_section">정보</string>
     <string name="rootfs_about_title">Rootfs에 대하여</string>
-    <string name="rootfs_about_description">rootfs 에는 샌드박스가 사용하는 Alpine Linux 파일시스템이 포함됩니다. 재설정하면 모든 데이터가 삭제되고 초기 상태로 복원됩니다.</string>
-    <string name="rootfs_about_operations">재설정: 모두 삭제 | 백업: /root 저장 | 복원: 저장된 데이터 복원</string>
     <string name="rootfs_reset_confirm_title">Rootfs를 초기화하시겠습니까?</string>
     <string name="rootfs_reset_confirm_message">rootfs 전체가 삭제됩니다. 모든 데이터가 손실됩니다.</string>
-    <string name="rootfs_reset_backup_confirm_title">백업 후 초기화하시겠습니까?</string>
-    <string name="rootfs_reset_backup_confirm_message">/root 디렉토리를 백업한 후 rootfs를 초기화합니다. 나중에 백업을 복원할 수 있습니다.</string>
-    <string name="rootfs_reset_backup_confirm_button">초기화 및 백업</string>
 
     <!-- T172 — components / onboarding / preview i18n -->
     <string name="common_back">뒤로</string>
@@ -518,9 +457,7 @@
     <string name="webpreview_close">닫기</string>
     <string name="webpreview_stop">로딩 중지</string>
     <string name="webpreview_reload">새로 고침</string>
-    <string name="webpreview_share">공유</string>
     <string name="webpreview_open_external">외부 브라우저에서 열기</string>
-    <string name="webpreview_open_in_browser">브라우저에서 열기</string>
     <string name="webpreview_open_fullscreen">전체 화면으로 열기</string>
 
     <!-- T172 — sandbox / sessions / browser / terminal i18n -->
@@ -529,7 +466,6 @@
     <string name="filebrowser_delete_title">“%1$s” 삭제하시겠습니까?</string>
     <string name="filebrowser_delete_message">이 작업은 되돌릴 수 없습니다.</string>
     <string name="filebrowser_error_title">오류</string>
-    <string name="filebrowser_sort_action">정렬</string>
     <string name="filebrowser_sort_ascending">오름차순</string>
     <string name="filebrowser_sort_descending">내림차순</string>
     <string name="filebrowser_sort_folders_first">폴더 우선</string>
@@ -547,12 +483,9 @@
     <string name="filepreview_office_subtitle">Office 문서는 외부 뷰어에서 미리 봅니다.</string>
     <string name="filepreview_pdf_render_failed">PDF를 렌더링할 수 없습니다: %1$s</string>
     <string name="filepreview_pdf_empty">빈 문서</string>
-    <string name="filepreview_image_decode_error">이미지를 디코딩할 수 없음</string>
-    <string name="filepreview_image_load_error">이미지 로드 실패</string>
     <string name="filepreview_file_read_error">파일 읽기 실패</string>
     <string name="filepreview_csv_parse_error">CSV 파싱 실패</string>
     <string name="filepreview_archive_read_error">아카이브 읽기 실패</string>
-    <string name="filepreview_pdf_render_error">PDF 렌더링 실패</string>
     <string name="filepreview_page_n">%1$d페이지</string>
     <string name="sessionlist_section_pinned">고정됨</string>
     <string name="sessionlist_section_today">오늘</string>
@@ -560,31 +493,15 @@
     <string name="sessionlist_section_this_week">이번 주</string>
     <string name="sessionlist_section_this_month">이번 달</string>
     <string name="sessionlist_section_earlier">이전</string>
-    <string name="sessionlist_select_title">세션 선택</string>
-    <string name="sessionlist_n_selected">%1$d개 선택됨</string>
-    <string name="sessionlist_select_all">모두 선택</string>
-    <string name="sessionlist_deselect_all">모두 선택 해제</string>
-    <string name="sessionlist_select_action">선택</string>
-    <string name="sessionlist_settings">설정</string>
-    <string name="sessionlist_shell">셸</string>
-    <string name="sessionlist_shell_terminal">셸 터미널</string>
-    <string name="sessionlist_rootfs_management">Rootfs 관리</string>
-    <string name="sessionlist_open_browser">브라우저 열기</string>
-    <string name="sessionlist_browser_settings">브라우저 설정</string>
     <string name="sessionlist_pin">고정</string>
     <string name="sessionlist_unpin">고정 해제</string>
     <string name="sessionlist_badge_paused">일시 중지</string>
     <string name="sessionlist_export">내보내기</string>
     <string name="sessionlist_export_json">JSON</string>
     <string name="sessionlist_export_plain">일반 텍스트</string>
-    <string name="sessionlist_edit_title_category">제목 및 카테고리 편집</string>
     <string name="sessionlist_regenerate_title">제목 다시 생성</string>
     <string name="sessionlist_regenerating_title">제목 재생성 중…</string>
-    <string name="sessionlist_duplicate">복제</string>
-    <string name="sessionlist_search_action">검색</string>
-    <string name="sessionlist_dismiss">닫기</string>
     <string name="sessionlist_delete_one_title">이 대화를 삭제하시겠습니까?</string>
-    <string name="sessionlist_delete_n_title">%1$d개의 대화를 삭제하시겠습니까?</string>
     <string name="sessionlist_delete_message">이 작업은 되돌릴 수 없습니다.</string>
     <string name="browser_title">브라우저</string>
     <string name="browser_settings_title">브라우저 설정</string>
@@ -602,7 +519,6 @@
     <string name="chat_typing_indicator">%1$s가 생각하는 중</string>
     <string name="chat_queued_indicator">대기 중 — 앞에 %1$d개 요청</string>
     <string name="chat_waiting_network">응답 대기 중 — %1$d초</string>
-    <string name="chat_input_placeholder">%1$s에게 메시지 (@로 파일 참조)</string>
     <string name="browser_takeover">제어 인계</string>
     <string name="browser_settings_done">완료</string>
     <string name="browser_settings_user_agent">사용자 에이전트</string>
@@ -630,13 +546,10 @@
     <string name="browser_history_search">기록 검색</string>
     <string name="browser_history_empty_title">브라우징 기록 없음</string>
     <string name="browser_history_empty_subtitle">기록은 7일 동안 보관됩니다</string>
-    <string name="browser_history_results">결과</string>
     <string name="browser_history_clear_dialog_title">브라우징 기록을 지우시겠습니까?</string>
     <string name="browser_history_clear_dialog_message">모든 브라우징 기록이 삭제됩니다. 이 작업은 되돌릴 수 없습니다.</string>
     <string name="terminal_title">RikkaMinis 셸</string>
     <string name="terminal_clear">지우기</string>
-    <string name="terminal_show_keyboard">표시</string>
-    <string name="terminal_hide_keyboard">숨기기</string>
 
     <!-- T172-A providers / models / settings i18n -->
     <string name="provider_list_providers">AI 공급자</string>
@@ -677,19 +590,13 @@
 
     <string name="provider_detail_status">상태</string>
     <string name="provider_detail_enabled">활성화됨</string>
-    <string name="provider_detail_refresh_models">모델 새로 고침</string>
     <string name="provider_detail_manage_models">모든 모델 관리</string>
     <string name="provider_detail_api_connection">API 및 연결</string>
-    <string name="provider_detail_manage_models_search_hint">모델 검색…</string>
     <string name="provider_detail_manage_models_all_header">전체 모델 (%1$d)</string>
-    <string name="provider_detail_models_title">전체 모델</string>
     <string name="provider_detail_add_custom_model">사용자 정의 모델 추가</string>
     <string name="provider_detail_delete_provider">AI 공급자 삭제</string>
     <string name="provider_detail_delete_model">Delete Model</string>
     <string name="provider_detail_save_key">키 저장</string>
-    <string name="provider_detail_paste_bearer_token">베어러 토큰 붙여넣기</string>
-    <string name="provider_detail_save_token">토큰 저장</string>
-    <string name="common_change">변경</string>
     <string name="common_remove">제거</string>
     <string name="add_provider_choose_provider">AI 공급자 선택</string>
     <string name="add_provider_you_can_add_multiple_instances_of_the_sa">동일한 제공업체의 여러 인스턴스를 추가할 수 있습니다 (예: 업무용 및 개인 계정). OpenAI 와 Anthropic 은 호환되는 타사 엔드포인트와도 작동합니다 — 일치하는 프로토콜을 선택한 후 사용자 정의 API Base URL 을 설정하세요.</string>
@@ -700,16 +607,6 @@
     <string name="add_provider_your_key_is_stored_securely_in_encrypted">키는 암호화된 저장소에 안전하게 보관되며 기기를 벗어나지 않습니다.</string>
     <string name="add_provider_endpoint">엔드포인트</string>
     <string name="add_provider_custom_api_base_optional">사용자 정의 API 베이스 (선택 사항)</string>
-    <string name="add_provider_authentication">인증</string>
-    <string name="add_provider_sign_in_succeeded_the_token_is_stored_in">로그인에 성공했습니다. 토큰이 암호화된 저장소에 저장되었습니다. 저장을 눌러 제공업체를 추가하세요.</string>
-    <string name="add_provider_authenticated">인증됨</string>
-    <string name="add_provider_token">Token</string>
-    <string name="add_provider_save_provider">AI 공급자 저장</string>
-    <string name="add_provider_opens_the_provider_s_web_sign_in_flow_af">제공업체의 웹 로그인 플로를 엽니다. 로그인 후 토큰이 여기에 자동으로 채워집니다.</string>
-    <string name="add_provider_signing_in">로그인 중…</string>
-    <string name="add_provider_or_configure_manually">또는 수동으로 설정</string>
-    <string name="add_provider_for_third_party_coding_plans_e_g_minimax">For third-party Coding Plans (e.g. MiniMax, Kimi) or compatible proxy endpoints, enter the API base URL and bearer token manually.</string>
-    <string name="add_provider_bearer_token">Bearer Token</string>
     <string name="add_custom_model_model_id">모델 ID</string>
     <string name="add_custom_model_display_name_optional">표시 이름 (선택 사항)</string>
     <string name="model_entry_model_detail">모델 세부 정보</string>
@@ -766,24 +663,17 @@
     <string name="model_groups_groups_let_you_combine_models_for_fallba">그룹을 사용하면 대체 또는 로드 밸런싱을 위해 모델을 결합할 수 있습니다.</string>
     <string name="model_groups_group_name">그룹 이름</string>
     <string name="model_groups_create">생성</string>
-    <string name="model_groups_none">없음</string>
     <string name="model_groups_set_default_primary">Set as Default Primary</string>
     <string name="model_groups_clear_default_primary">Clear Default Primary</string>
     <string name="agent_loop_section_entry_title">Agent Loop Models</string>
     <string name="agent_loop_section_entry_subtitle">Models and groups usable by the agent via minis-model-use</string>
     <string name="add_models_to_group_search_models">모델 검색</string>
     <string name="add_models_to_group_clear">지우기</string>
-    <string name="settings_agent_loop_models">에이전트 루프 모델</string>    <string name="agent_loop_models_groups">그룹</string>
-    <string name="agent_loop_models_picking_a_group_pins_every_model_in_it_a">그룹을 선택하면 그룹 내 모든 모델이 고정됩니다. 모델 추가나 제거는 모델 그룹에서 하세요.</string>
-    <string name="agent_loop_models_add_a_provider_and_refresh_its_model_lis">제공업체를 추가하고 모델 목록을 새로 고치면 이 선택기에 표시됩니다.</string>
-    <string name="agent_loop_models_no_models_or_groups_available_yet">아직 사용할 수 있는 모델이나 그룹이 없습니다.</string>
-    <string name="agent_loop_models_selected">선택됨</string>
-    <string name="agent_loop_models_not_selected">선택 안 됨</string>
+    <string name="agent_loop_models_groups">그룹</string>
 
     <!-- T172-A parameterized strings -->
     <string name="add_custom_model_id_footer">Model ID 는 %1$s 에 전송되는 API 식별자입니다. 표시 이름은 모델 선택기에서 사용되는 더 친숙한 라벨이며, 비워두면 Model ID 로 대체됩니다.</string>
     <string name="add_custom_model_eg_id_placeholder">예: gpt-4o-custom</string>
-    <string name="add_provider_built_in_models_count">내장 모델 %1$d 개</string>
     <string name="add_provider_configure_provider">%1$s 구성</string>
     <string name="add_models_to_group_add_count">추가 (%1$d)</string>
     <string name="provider_detail_https_api_example_placeholder">https://api.example.com</string>
@@ -792,7 +682,6 @@
     <string name="provider_detail_refresh_no_key">API 키가 설정되지 않음 – 새로고침할 내용 없음.</string>
     <string name="provider_detail_refresh_preserved">일치하는 models.dev 항목 없음 – 기존 모델 목록 유지.</string>
     <string name="provider_detail_refresh_failed">모델을 새로고침할 수 없습니다.</string>
-    <string name="provider_detail_refreshing">새로고침 중…</string>
     <string name="provider_detail_refresh_models_list">모델 목록 새로고침</string>
     <string name="provider_detail_delete_provider_confirm">\"%1$s\" 을(를) 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.</string>
     <string name="provider_detail_delete_model_confirm">\"%1$s\" 을(를) 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.</string>
@@ -913,15 +802,12 @@
     <string name="mount_all_files_access_required_desc">허용되지 않으면 shell은 이 앱이 만든 파일만 볼 수 있습니다 — 다른 앱(예: Obsidian)이 쓴 파일은 숨겨집니다. 시스템 설정에서 권한을 허용하려면 탭하세요.</string>
     <string name="mount_detail_title">마운트 편집</string>
     <string name="mount_detail_browse_files">파일 탐색</string>
-    <string name="mount_detail_browse_files_toast">채팅 @ 언급에서 이 마운트에 접근하세요.</string>
     <string name="mount_path_unavailable">경로 사용 불가</string>
     <string name="mount_add_failed">마운트를 추가할 수 없습니다. 이름이 사용 중이거나 잘못되었을 수 있습니다.</string>
 
     <!-- T241: 슬래시 명령어 패널 + 모델 선택 시트 -->
-    <string name="slash_compact_subtitle">대화 기록을 요약으로 압축</string>
     <string name="slash_memory_writes_on">쓰기 켜짐 — 탭하여 전환</string>
     <string name="slash_memory_writes_off">쓰기 꺼짐 — 탭하여 전환</string>
-    <string name="slash_thinking_subtitle">사고 %1$s — 탭하여 전환</string>
     <string name="slash_thinking_unsupported">현재 모델은 지원하지 않음</string>
     <string name="thinking_level_off">꺼짐</string>
     <string name="thinking_level_low">낮음</string>
@@ -949,46 +835,10 @@
     </plurals>
 
     <!-- T288 — 로그 / 설정 변경 -->
-    <string name="logs_config_used_count">%1$d / %2$d 사용됨</string>
-    <string name="logs_config_clear_all">모두 지우기</string>
-    <string name="logs_config_empty">설정 변경 기록이 아직 없습니다.</string>
-    <string name="logs_config_status_applied">적용됨</string>
-    <string name="logs_config_status_pending">대기 중</string>
-    <string name="logs_config_status_rejected">거부됨</string>
-    <string name="logs_config_status_timeout">시간 초과</string>
-    <string name="logs_config_status_reverted">되돌림</string>
     <string name="logs_config_revert">되돌리기</string>
-    <string name="logs_config_revert_chip">↩ 되돌리기</string>
-    <string name="logs_config_reverted_label">↩ 되돌림</string>
-    <string name="logs_config_revert_dialog_title">이 변경을 되돌릴까요?</string>
-    <string name="logs_config_revert_success_title">되돌림</string>
-    <string name="logs_config_revert_success_body">설정이 복원되었습니다.</string>
-    <string name="logs_config_revert_failed_title">되돌리기 실패</string>
-    <string name="logs_config_revert_unknown_error">알 수 없는 오류</string>
-    <string name="logs_config_dialog_ok">확인</string>
-    <string name="logs_config_dialog_cancel">취소</string>
-    <string name="logs_config_source_agent">에이전트</string>
-    <string name="logs_config_source_user">사용자</string>
-    <string name="logs_config_source_agent_revert">에이전트 되돌림</string>
-    <string name="logs_config_source_user_revert">사용자 되돌림</string>
-    <string name="logs_config_time_just_now">방금</string>
-    <string name="logs_config_time_min_ago">%1$d분 전</string>
-    <string name="logs_config_time_hr_ago">%1$d시간 전</string>
-    <string name="logs_config_time_yesterday">어제</string>
 
     <!-- Welcome / onboarding (T332) -->
     <!-- TODO translate -->
-    <string name="sessionlist_welcome_title">RikkaMinis에 오신 것을 환영합니다</string>
-    <string name="sessionlist_welcome_subtitle">첫 온디바이스 Agent가 곧 준비됩니다.</string>
-    <string name="sessionlist_welcome_step1_title">공급자 추가</string>
-    <string name="sessionlist_welcome_step1_subtitle">API 키를 설정하거나 OAuth로 로그인하세요</string>
-    <string name="sessionlist_welcome_step2_title">모델 선택</string>
-    <string name="sessionlist_welcome_step2_subtitle">사용할 모델을 선택하세요</string>
-    <string name="sessionlist_welcome_step2_locked">먼저 1단계를 완료하세요</string>
-    <string name="sessionlist_welcome_step3_title">대화 시작</string>
-    <string name="sessionlist_welcome_step3_subtitle">탭하여 시작</string>
-    <string name="sessionlist_welcome_step3_locked">먼저 2단계를 완료하세요</string>
-    <string name="sessionlist_welcome_step_done">완료</string>
     <!-- T-selection-add-to-input — 길게 누르기 선택 메뉴 "입력란에 추가" -->
     <string name="selection_add_to_chat_input">입력란에 추가</string>
     <!-- T-minis-textkit 선택 메뉴 버튼 -->
@@ -1001,13 +851,7 @@
     <string name="composer_swipe_release_to_send">놓으면 전송</string>
     <string name="composer_swipe_release_to_queue">놓으면 대기열에 추가</string>
     <!-- T-android-update-check-403-hint — friendly update-check failure hints -->
-    <string name="update_error_network_unreachable">업데이트 서버에 연결할 수 없습니다. 네트워크를 확인해주세요.</string>
-    <string name="update_error_forbidden_with_link">업데이트 서버에 접근할 수 없습니다. 네트워크 제한일 수 있습니다. GitHub Releases 에서 수동으로 다운로드할 수 있습니다.</string>
-    <string name="update_error_open_releases">GitHub Releases 열기</string>
     <!-- T-android-crash-freq-share -->
-    <string name="crash_freq_dialog_title">여러 번의 충돌 감지</string>
-    <string name="crash_freq_dialog_message">RikkaMinis가 지난 1시간 동안 여러 번 충돌했습니다. 문제 해결을 위해 충돌 로그를 공유하시겠습니까?</string>
-    <string name="crash_freq_dialog_share">로그 공유</string>
     <string name="crash_freq_dialog_dismiss">나중에</string>
     <string name="crash_freq_email_subject">RikkaMinis 충돌 보고서 %1$s</string>
     <string name="crash_freq_share_chooser">충돌 로그 보내기</string>
@@ -1116,16 +960,9 @@
     <string name="thinking_truncated_hint">%2$dK자 중 마지막 %1$dK자 표시 중</string>
     <string name="thinking_view_full">전체 내용 보기</string>
     <!-- Spoken substitutions for links during read-aloud (TTS) -->
-    <string name="voice_link_to_host">%1$s 링크</string>
-    <string name="voice_bare_link">링크</string>
     <!-- [T-android-voice-correction] Consent + correction UI -->
     <string name="voice_provider_system">시스템</string>
     <string name="add_provider_subtitle_kimi">Kimi Coding Plan — Kimi 계정으로 로그인</string>
-    <string name="kimi_login_title">Kimi Code로 로그인</string>
-    <string name="kimi_login_instructions">인증 페이지를 열고 이 코드를 입력하여 RikkaMinis를 승인하세요:</string>
-    <string name="kimi_login_copy_code">코드 복사</string>
-    <string name="kimi_login_open_verification">인증 페이지 열기</string>
-    <string name="kimi_login_waiting">승인 대기 중…</string>
     <string name="browser_downloads_title">다운로드</string>
     <string name="browser_downloads_clear">지우기</string>
     <string name="browser_downloads_empty">다운로드 없음</string>
@@ -1179,7 +1016,6 @@
     <string name="backup_secret_without">키 없이</string>
     <string name="webdav_notify_title_restored">WebDAV 복원</string>
     <string name="webdav_notify_title">WebDAV 백업</string>
-    <string name="webdav_loading">백업을 불러오는 중…</string>
     <string name="webdav_remote_empty">서버에 백업이 없습니다</string>
     <string name="webdav_restore">복원</string>
     <string name="webdav_delete">삭제</string>
@@ -1202,7 +1038,6 @@
     <string name="appearance_chat_menu_section_topbar">상단 바 버튼</string>
     <string name="input_history_title">입력 기록</string>
     <string name="input_history_topbar_description">상단 바에 검색 가능한 메시지 목록을 표시합니다. 항목을 탭하면 해당 메시지로 바로 이동합니다.</string>
-    <string name="input_history_search_hint">메시지 검색…</string>
     <string name="input_history_search">검색</string>
     <string name="input_history_done">완료</string>
     <string name="input_history_empty">아직 메시지 없음</string>
@@ -1213,7 +1048,6 @@
     <string name="appearance_chat_menu_footer_attach">입력줄의 "＋" 메뉴에 표시할 첨부 작업과 순서를 선택합니다. 모든 작업을 숨기면 "＋" 버튼이 사라지고, 정확히 하나만 남기면 보내기 버튼 옆에 해당 버튼이 직접 표시됩니다.</string>
     <string name="composer_model_picker_button_title">모델 선택 버튼</string>
     <string name="composer_model_picker_button_description">입력줄 왼쪽에 위쪽 화살표 원형 버튼을 표시해 모델 선택을 한 번의 탭으로 엽니다. 오른쪽 위 부제의 모델 이름은 어느 경우든 탭할 수 있습니다.</string>
-    <string name="chat_menu_pin_to_footer">Pin to footer</string>
     <string name="chat_menu_settings_always_last">Always last</string>
     <string name="back_to_exit_press_again">Press back again to exit</string>
     <string name="backup_snapshot_section_title">로컬 스냅샷</string>
@@ -1269,7 +1103,6 @@
     <string name="sysmsg_compacted_count">메시지 %1$d개 압축됨</string>
     <string name="sysmsg_compact_failed">압축 실패: %1$s</string>
     <string name="sysmsg_context_full_hint">컨텍스트가 곧 가득 찹니다(%1$d / %2$d tokens). /compact를 실행하여 이전 대화를 요약으로 접을 수 있습니다.</string>
-    <string name="sysmsg_context_full_auto">컨텍스트가 곧 가득 찹니다(%1$d / %2$d tokens). 이전 대화를 자동으로 압축합니다.</string>
     <string name="sysmsg_wait_compact">보내기 전에 현재 압축이 완료될 때까지 기다려 주세요.</string>
     <string name="sysmsg_context_trimmed">컨텍스트가 %1$d 한도에 도달하여 가장 오래된 메시지 %2$d개를 잘라내고 작업을 계속했습니다.</string>
     <string name="sysmsg_compact_no_provider">공급자가 구성되지 않았습니다. 압축할 수 없습니다.</string>
@@ -1408,7 +1241,6 @@
     <string name="soul_lang_zh">中文</string>
     <string name="soul_lang_en">English</string>
     <string name="soul_body_placeholder">에이전트가 어떻게 말하고, 생각하고, 행동해야 하는지 설명하세요…</string>
-    <string name="soul_length_indicator">%1$d자</string>
     <string name="soul_count_zero">0자</string>
     <string name="soul_count_chars">%1$d / %2$d자</string>
     <string name="soul_count_words">%1$d / %2$d단어</string>
@@ -1424,9 +1256,7 @@
     <string name="soul_injection_error">이것은 성격 지침이 아니라 모델에 대한 지시처럼 보입니다. "이전 지침 무시"와 같은 문구는 SOUL.md에서 허용되지 않습니다. 진정한 캐릭터, 어조, 행동에 집중하세요.</string>
     <string name="skills_search_placeholder">스킬 검색</string>
     <string name="skills_search_no_match">"%1$s"와(과) 일치하는 스킬이 없습니다.</string>
-    <string name="webpreview_open_external_failed">이 항목을 열 수 있는 앱이 없습니다</string>
     <string name="webpreview_more">더 보기</string>
-    <string name="webpreview_collapse">접기</string>
     <string name="webpreview_desktop_site">데스크톱 사이트</string>
     <string name="webpreview_mobile_site">모바일 사이트</string>
     <string name="webpreview_pin_to_home">홈 화면에 추가</string>
@@ -1437,26 +1267,12 @@
     <string name="filebrowser_show_hidden">숨김 파일 표시</string>
     <string name="filebrowser_hide_hidden">숨김 파일 숨기기</string>
     <string name="filebrowser_sort_by">정렬 기준</string>
-    <string name="export_summary_format">형식</string>
-    <string name="export_summary_format_value_json">JSON</string>
-    <string name="export_summary_format_value_txt">일반 텍스트</string>
-    <string name="export_summary_messages">메시지</string>
-    <string name="export_summary_messages_value">%1$d개 메시지</string>
-    <string name="export_summary_timerange">시간 범위</string>
-    <string name="export_summary_timerange_value">%1$s — %2$s</string>
-    <string name="export_summary_attachments">첨부 파일</string>
-    <string name="export_summary_attachments_value">이미지 %1$d개 / 동영상 %2$d개</string>
-    <string name="export_summary_size">예상 크기</string>
-    <string name="export_summary_size_value">~ %1$s</string>
-    <string name="export_progress_running">내보내는 중 %1$d / %2$d…</string>
-    <string name="export_progress_done">내보내기 완료</string>
     <string name="export_progress_failed">내보내기 실패</string>
     <string name="export_empty_hint">이 대화에는 아직 내보낼 내용이 없습니다</string>
     <string name="appearance_section_chat_title">채팅 제목</string>
     <string name="appearance_show_chat_title">채팅 제목 표시</string>
     <string name="appearance_show_chat_title_subtitle">스크롤 중 고정 제목 표시</string>
     <string name="appearance_show_chat_title_footer">기록을 스크롤하는 동안 현재 세션 제목을 채팅 상단에 플로팅 pill로 표시합니다.</string>
-    <string name="chat_title_pill_session_default">제목 없음</string>
     <string name="appearance_section_deep_thinking">깊은 사고</string>
     <string name="appearance_auto_expand_thinking_title">스트리밍 중 생각 펼치기</string>
     <string name="appearance_auto_expand_thinking_footer">켜면 모델이 추론하는 동안 새 생각 블록이 자동으로 펼쳐지고 완료되면 접힙니다. 끄면 생각 블록이 접힌 상태로 유지됩니다 — 탭하여 읽으세요.</string>
@@ -1465,7 +1281,6 @@
     <string name="settings_memory_global_enabled_title">메모리 기본 활성화</string>
     <string name="settings_memory_global_enabled_subtitle">끄면 새 세션이 기본적으로 GLOBAL.md 및 일일 메모리를 건너뜁니다</string>
     <string name="shizuku_title">Shizuku</string>
-    <string name="shizuku_settings_subtitle">Shizuku 또는 AXManager를 통한 권한 있는 Android 제어</string>
     <string name="shizuku_status_header">상태</string>
     <string name="shizuku_status_footer">Shizuku는 무선 ADB 또는 root를 통해 시작되는 작은 서비스를 실행하여 root 없이 사용자 앱에 권한 있는 시스템 API를 노출합니다. Shizuku(RikkaApps)와 AXManager(Axeron) 두 가지 호환 관리자 앱이 지원됩니다 — 둘 중 하나를 설치하세요. 인증되면 RikkaMinis는 android-shizuku-cli CLI를 사용하여 패키지, 권한, 설정, 입력, 활동 관리를 수행할 수 있습니다.</string>
     <string name="shizuku_actions_header">다음 단계</string>
@@ -1535,8 +1350,6 @@
     <string name="model_group_detail_limit_context_window">컨텍스트 창 제한</string>
     <string name="model_group_detail_max_context">최대 컨텍스트</string>
     <string name="model_group_detail_unlimited">무제한</string>
-    <string name="model_group_detail_context_limit_unavailable">그룹 멤버가 컨텍스트 창을 선언하지 않았습니다. 제한을 적용할 수 없습니다. 먼저 모델을 추가하거나 모델 메타데이터를 확인하세요.</string>
-    <string name="model_group_detail_context_limit_runtime_capped">현재 멤버 최대 컨텍스트=%1$s. 저장된 %2$s는 런타임에 잘립니다. 저장된 값은 유지되며 더 높은 컨텍스트 모델을 추가하면 다시 적용됩니다.</string>
     <string name="add_provider_subtitle_openai">Codex, DeepSeek, Moonshot, Groq 및 기타 호환 공급업체와 작동합니다.</string>
     <string name="add_provider_subtitle_anthropic">Claude 및 Anthropic 프로토콜 호환 서비스와 작동합니다.</string>
     <string name="add_provider_subtitle_gemini">Gemini 시리즈 및 Google AI Studio와 작동합니다.</string>
@@ -1566,8 +1379,6 @@
     <string name="backup_chat_window_days">%1$d일</string>
     <string name="backup_done_chat">%1$d개 세션, %2$d개 메시지 복원됨</string>
     <string name="backup_saved">백업 저장됨</string>
-    <string name="backup_generating_title">백업 생성 중…</string>
-    <string name="backup_generating_body">백업 파일을 만드는 중입니다. 채팅 기록이 많으면 몇 초가 걸릴 수 있습니다.</string>
     <string name="backup_done_title">복원 완료</string>
     <string name="backup_err_write">파일 쓰기 실패: %1$s</string>
     <string name="backup_err_read">선택한 파일을 읽을 수 없습니다</string>
@@ -1592,16 +1403,11 @@
     <string name="model_picker_modality_image">이미지</string>
     <string name="model_picker_modality_audio">오디오</string>
     <string name="model_picker_modality_video">비디오</string>
-    <string name="voice_system_recognition_online">시스템 인식 (온라인)</string>
-    <string name="voice_system_recognition_offline">시스템 인식 (오프라인)</string>
-    <string name="voice_system_online_subtitle">Android 내장, 네트워크 필요</string>
-    <string name="voice_system_offline_subtitle">Android 내장, 오프라인에서 작동</string>
     <string name="model_picker_non_text_warning_title">이 모델은 Agent로 작동하지 않을 수 있습니다</string>
     <string name="model_picker_non_text_warning_body">%1$s은(는) %2$s을(를) 출력하며 일반적으로 Agent 작업을 수행할 수 없습니다. 세션에 텍스트 출력 모델을 선택하거나, 이 모델을 Agent 루프에 도구로 추가하여 에이전트가 필요할 때 %3$s을(를) 생성하도록 호출할 수 있습니다.</string>
     <string name="model_picker_non_text_warning_use_anyway">그래도 사용</string>
     <string name="model_picker_non_text_warning_choose_other">다른 모델 선택</string>
     <string name="system_permissions_title">시스템 권한</string>
-    <string name="system_permissions_subtitle">시스템 설정에서 부여된 OS 수준 권한</string>
     <string name="system_permissions_section_a11y">접근성</string>
     <string name="system_permissions_a11y_row">RikkaMinis 접근성 서비스</string>
     <string name="system_permissions_a11y_enabled">활성화됨 — android-a11y-cli 준비됨</string>
@@ -1618,7 +1424,6 @@
     <string name="a11y_service_summary">RikkaMinis용 UI 계층 자동화 백엔드</string>
     <string name="back">뒤로</string>
     <string name="webapp_activity_label">RikkaMinis WebApp</string>
-    <string name="webapp_source_missing">원본 파일이 더 이상 존재하지 않습니다.</string>
     <string name="webapp_external_nav_blocked">외부 탐색이 차단되었습니다.</string>
     <string name="webapp_pin_unsupported">이 런처에서는 바로가기 고정을 지원하지 않습니다.</string>
     <string name="webapp_pin_failed">홈 화면에 추가하지 못했습니다.</string>
@@ -1645,7 +1450,6 @@
     <string name="import_zip_no_supported">압축 파일에 가져올 수 있는 파일이 없습니다</string>
     <string name="import_zip_summary">파일 %2$d개 중 %1$d개를 가져왔습니다</string>
     <string name="image_budget_compressed">보내기 전에 이미지 %1$d개를 압축했습니다</string>
-    <string name="image_budget_dropped">초과 크기 URL %1$d개를 건너뛰었습니다 (&gt;5MB)</string>
     <string name="image_budget_total_exceeded">이미지 총 크기가 25MB를 초과하여 이후 이미지는 건너뜁니다</string>
     <string name="image_budget_request_elided">25MB 제한에 맞추기 위해 이전 이미지 %1$d개를 요청에서 생략했습니다</string>
     <string name="chat_message_large_collapsed_title">대용량 콘텐츠 (%1$s)</string>
