@@ -1479,8 +1479,13 @@ object ConfigBackup {
     internal const val MAX_BACKUP_REASONING_CHARS = 2000
 
     /** [fix-audit-p0-3] How many pre-restore snapshots to keep on disk.
-     *  Rollback candidates; older ones are pruned by [writeSnapshot]. */
-    const val SNAPSHOT_KEEP = 5
+     *  Rollback candidates; older ones are pruned by [writeSnapshot].
+     *  [fix-snapshot-keep-1] Reduced 5 -> 1: each full payload is 70MB+
+     *  (chat history included), so keeping 5 pinned up to ~350MB of local
+     *  storage for a safety net whose only job is rolling back the restore
+     *  that just happened. One rollback point (the newest) keeps that
+     *  protection at a fraction of the cost. */
+    const val SNAPSHOT_KEEP = 1
 
     /** [fix-audit-p1-2] Per-skill archive cap for backups. A skill with
      *  bundled assets bigger than this degrades to SKILL.md-only in the
