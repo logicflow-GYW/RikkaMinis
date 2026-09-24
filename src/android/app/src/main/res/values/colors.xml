@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="seed">#6750A4</color>
     <!--
       T-android-shortcut-icons-blank: foreground glyph color for the
       app-icon shortcut adaptive icons. The shortcut background is always

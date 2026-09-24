@@ -2,22 +2,11 @@
 <resources>
     <string name="app_name">RikkaMinis</string>
     <string name="onboarding_default_group_name">デフォルトモデル</string>
-    <string name="new_chat">新しいチャット</string>
     <string name="settings">設定</string>
-    <string name="providers">AIプロバイダー</string>
-    <string name="add_provider">AIプロバイダーを追加</string>
-    <string name="appearance">外観</string>
     <string name="no_sessions">まだ会話がありません</string>
-    <string name="no_providers">プロバイダーを追加してはじめましょう</string>
-    <string name="send">送信</string>
-    <string name="type_message">メッセージを入力…</string>
     <string name="delete">削除</string>
     <string name="cancel">キャンセル</string>
     <string name="save">保存</string>
-    <string name="api_key">API Key</string>
-    <string name="label">ラベル</string>
-    <string name="enabled">有効</string>
-    <string name="select_model">モデルを選択</string>
     <string name="session_memory_title">セッション内のメモリ</string>
     <string name="memory_section_auto_injected">自動注入</string>
     <string name="memory_section_auto_injected_footer">各エージェントターン開始時にシステムプロンプトへ読み込まれます。</string>
@@ -25,7 +14,6 @@
     <string name="memory_section_tool_activity_footer">このセッション中にエージェントが行ったメモリの読み書き。</string>
     <string name="memory_section_written_content">書き込んだ内容</string>
     <string name="memory_section_tool_result">ツール結果</string>
-    <string name="memory_section_keywords">キーワード</string>
     <string name="memory_action_edit">編集</string>
     <string name="memory_action_save">保存</string>
     <string name="memory_action_revoke">取り消し</string>
@@ -36,30 +24,12 @@
     <string name="memory_revoke_result_not_found">最近のログにエントリが見つかりません。</string>
     <string name="memory_revoke_result_io_error">ファイル書き込みエラー: %1$s</string>
     <string name="memory_save_toast">保存済み</string>
-    <string name="memory_save_error">保存に失敗しました: %1$s</string>
     <string name="memory_global_footer">すべてのセッションでエージェントに表示される永続的な指示と設定です。エージェントはこのファイルを変更できません。</string>
-    <string name="permissions_title">アクセス許可</string>
-    <string name="permissions_reset_all">すべてリセット</string>
-    <string name="permissions_reset_dialog_title">すべての権限をリセットしますか？</string>
-    <string name="permissions_reset_dialog_message">各権限を既定（常に許可）に戻します。ツールごとの上書きは解除されます。</string>
-    <string name="permissions_reset_confirm">リセット</string>
-    <string name="permissions_level_always_allow">常に許可</string>
-    <string name="permissions_level_ask_once">毎回確認</string>
-    <string name="permissions_level_not_allowed">許可しない</string>
-    <string name="permissions_category_privacy">プライバシー</string>
-    <string name="permissions_category_media">メディア</string>
-    <string name="permissions_category_system">システム</string>
     <string name="mention_scanning">ファイルをスキャン中…</string>
     <string name="mention_no_match">一致するファイルはありません</string>
     <string name="resume_banner_title">中断されました — 「再開」をタップして続行</string>
     <string name="resume_action">再開</string>
-    <string name="search_chats_placeholder">会話を検索…</string>
-    <string name="search_no_results">\"%1$s\" の結果はありません</string>
     <string name="stop_tool">ツールを停止</string>
-    <string name="mic_permission_title">マイクの権限が必要です</string>
-    <string name="mic_permission_message">音声入力にはマイクの権限が必要です。「設定を開く」をタップして RikkaMinis に許可を与えてください。</string>
-    <string name="mic_permission_open_settings">設定を開く</string>
-    <string name="mic_permission_cancel">キャンセル</string>
     <string name="bg_section_header">バックグラウンドと通知</string>
     <string name="bg_section_subtitle">電池最適化と OEM 自動起動</string>
     <string name="bg_section_footer">長時間のエージェントタスクは画面オフ中も CPU を起動状態に保つ権限が必要です。これらの設定がないと、システムは数分後にバックグラウンド推論を停止することがあります。</string>
@@ -182,9 +152,6 @@
     <string name="session_skills_footer">このセッションのみスキルを切り替えます。デフォルトは「設定 → スキル」から取得します。</string>
     <string name="session_skills_empty_title">スキルがインストールされていません</string>
     <string name="session_skills_empty_subtitle">「設定 → スキル」からスキルをインポートしてください。</string>
-    <string name="speech_lang_picker_title">音声入力の言語</string>
-    <string name="speech_lang_picker_empty">現在の認識エンジンで利用可能な言語はありません。</string>
-    <string name="speech_lang_picker_selected">選択中</string>
     <string name="standard_sheet_close">閉じる</string>
     <string name="token_usage_sheet_title">セッショントークン使用量</string>
     <string name="token_usage_section_context">コンテキスト</string>
@@ -280,7 +247,6 @@
     <string name="env_var_error_invalid_key">英字で始まり、英数字とアンダースコアのみ使用可</string>
     <string name="env_var_error_duplicate">同名の変数が既に存在します</string>
     <string name="log_title">ログ</string>
-    <string name="log_share_all">すべて共有</string>
     <string name="log_section_logging">ロギング</string>
     <string name="log_section_logging_footer">有効時、すべてのコンソール出力がアプリのプライベートストレージ内の日次ログファイルに記録されます。</string>
     <string name="log_enable_switch">ログを有効化</string>
@@ -295,11 +261,9 @@
     <string name="log_delete_confirm_title">すべてのログを削除しますか？</string>
     <string name="log_delete_confirm_text">%1$s のログファイルを削除します。この操作は取り消せません。</string>
     <string name="log_delete_confirm">すべて削除</string>
-    <string name="log_truncated_marker">…（省略、合計 %1$s）</string>
     <string name="log_not_found">ログファイルが見つかりません。</string>
     <string name="log_error_reading">ログの読み込みエラー: %1$s</string>
     <string name="log_share_chooser">ログを共有</string>
-    <string name="log_share_all_chooser">ログを共有</string>
     <string name="memory_title">メモリ</string>
     <string name="memory_empty_title">メモリファイルなし</string>
     <string name="memory_empty_description">メモリファイルはセッションをまたいで知識を保持します。GLOBAL.md を編集してエージェントから見える指示を追加できます。</string>
@@ -309,7 +273,6 @@
     <string name="memory_section_view_less">減らして表示</string>
     <string name="memory_delete_confirm_title">%1$s を削除しますか？</string>
     <string name="memory_delete_confirm_text">このメモリログを完全に削除します。</string>
-    <string name="memory_editor_placeholder">内容を入力…</string>
     <string name="perm_title">アクセス許可</string>
     <string name="perm_reset_all">すべてリセット</string>
     <string name="perm_reset_confirm_title">すべての権限をリセットしますか？</string>
@@ -325,11 +288,9 @@
     <string name="perm_tool_a11y_cli">android-a11y-cli</string>
     <string name="perm_tool_shizuku_cli">android-shizuku-cli</string>
     <string name="perm_section_a11y">ユーザー補助</string>
-    <string name="perm_section_shizuku">Shizuku</string>
     <string name="perm_a11y_section_footer">android-a11y-cli を使うと、エージェントは画面の UI 構造を読み取り、タップやジェスチャーを実行し、システムイベントを監視できます。下の 2 行をどちらも設定してください: エージェントの権限を選び、システム設定でユーザー補助サービスを有効化します。</string>
     <string name="perm_shizuku_section_footer">android-shizuku-cli は、ワイヤレス ADB または root で起動された Shizuku サービスを介して、エージェントに特権 Android API(パッケージインストール、settings put、強制停止など)へのアクセスを許可します。下の 2 行をどちらも設定してください。</string>
     <string name="perm_a11y_cli_description">エージェントが画面 UI を読み、タップ・入力し、イベントを監視できるようにします</string>
-    <string name="perm_shizuku_cli_description">Shizuku サービス経由の特権 Android API</string>
     <string name="perm_a11y_open_settings">ユーザー補助設定を開く</string>
     <string name="perm_system_authorization">システム認可</string>
     <string name="perm_agent_policy">エージェント権限</string>
@@ -357,15 +318,12 @@
     <string name="skill_minis_skills_modal">RikkaMinis Skills</string>
     <string name="skill_delete_confirm_title">%1$s を削除しますか？</string>
     <string name="skill_delete_confirm_text">この skill とファイルを完全に削除します。</string>
-    <string name="skill_import_sheet_title">スキルをインポート</string>
     <string name="skill_import_tab_url">URL</string>
     <string name="skill_import_tab_paste">貼り付け</string>
     <string name="skill_import_tab_file">ファイル</string>
     <string name="skill_import_url_instruction">SKILL.md ファイルの URL を入力してください（GitHub リンク対応）。</string>
-    <string name="skill_import_url_label">URL</string>
     <string name="skill_import_url_placeholder">github.com/user/repo/blob/main/SKILL.md</string>
     <string name="skill_import_paste_instruction">SKILL.md ファイルの内容を貼り付けてください。\'name\' フィールドを含む YAML frontmatter が必須です。</string>
-    <string name="skill_import_paste_label">SKILL.md の内容</string>
     <string name="skill_import_file_instruction">デバイスから .md または .skill ファイルを選択してください。</string>
     <string name="skill_import_file_button">ファイルを選択</string>
     <string name="skill_import_error_no_url">URL を入力してください</string>
@@ -385,10 +343,6 @@
     <string name="skill_detail_updated">更新済み</string>
     <string name="skill_detail_delete">Skill を削除</string>
     <string name="skill_detail_edit_name_title">名前を編集</string>
-    <string name="skill_detail_section_description">説明</string>
-    <string name="skill_detail_section_files">ファイル</string>
-    <string name="skill_detail_section_meta">メタ</string>
-    <string name="skill_detail_section_update">更新</string>
     <string name="skill_file_save">保存</string>
     <string name="skill_file_edit">編集</string>
     <string name="skill_detail_status_reading">ファイル読み込み中…</string>
@@ -398,7 +352,6 @@
     <string name="skill_detail_status_downloading">ダウンロード中…</string>
     <string name="skill_detail_status_rescanning">再スキャン中…</string>
     <string name="skill_detail_error_missing">ディスク上の SKILL.md が不足または無効</string>
-    <string name="skill_detail_source_url">URL</string>
     <string name="skill_detail_source_file">ファイルインポート</string>
     <string name="skill_detail_source_bundled">内蔵</string>
     <string name="skill_detail_source_session">セッション作成</string>
@@ -428,7 +381,6 @@
     <string name="storage_clear_session_button">セッションファイルを削除</string>
     <string name="storage_clear_confirm_title">セッションファイルを削除しますか？</string>
     <string name="storage_clear_confirm_text">%1$s のファイルを削除します。この操作は取り消せません。</string>
-    <string name="storage_clear_confirm_button">%1$s をクリア</string>
     <string name="storage_section_orphans">回収可能な容量</string>
     <string name="storage_orphan_banner">削除済みセッションの孤立項目 %1$d 件 — %2$s</string>
     <string name="storage_reclaim_button">回収</string>
@@ -447,9 +399,6 @@
     <string name="usage_label_cache_hit_rate">キャッシュヒット率</string>
     <string name="usage_detail_input">入力</string>
     <string name="usage_detail_output">出力</string>
-    <string name="usage_detail_cache_read">キャッシュ読み取り</string>
-    <string name="usage_detail_cache_creation">キャッシュ作成</string>
-    <string name="usage_detail_cache_hit_rate">キャッシュヒット率</string>
     <string name="usage_detail_daily_avg">日平均</string>
     <string name="usage_detail_session_avg">セッション平均</string>
     <string name="usage_detail_sessions">セッション</string>
@@ -462,7 +411,6 @@
     <string name="mirror_mirrors_section">ミラー</string>
     <string name="mirror_test_speed_testing">テスト中…</string>
     <string name="mirror_test_speed_label">速度テスト</string>
-    <string name="mirror_detect_fast_testing">テスト中…</string>
     <string name="mirror_detect_fast_label">高速ミラーを検出</string>
     <string name="mirror_official_badge">公式</string>
     <string name="mirror_timeout_label">タイムアウト</string>
@@ -480,21 +428,12 @@
     <string name="rootfs_install_label">Rootfsをインストール</string>
     <string name="rootfs_reset_label">Rootfsをリセット</string>
     <string name="rootfs_reset_description">すべて削除して再インストール</string>
-    <string name="rootfs_reset_backup_label">リセットしてユーザーデータをバックアップ</string>
-    <string name="rootfs_reset_backup_description">リセット前に /root を保存</string>
-    <string name="rootfs_restore_label">ユーザーデータを復元</string>
-    <string name="rootfs_restore_description">以前バックアップした /root を復元</string>
     <string name="rootfs_progress_section">進捗</string>
     <string name="rootfs_result_section">結果</string>
     <string name="rootfs_info_section">情報</string>
     <string name="rootfs_about_title">Rootfsについて</string>
-    <string name="rootfs_about_description">rootfs にはサンドボックスが使用する Alpine Linux ファイルシステムが含まれます。リセットするとすべてのデータが削除され、初期状態に戻ります。</string>
-    <string name="rootfs_about_operations">リセット：すべて削除 | バックアップ：/root を保存 | 復元：保存したデータを復元</string>
     <string name="rootfs_reset_confirm_title">Rootfsをリセットしますか？</string>
     <string name="rootfs_reset_confirm_message">rootfs 全体を削除します。すべてのデータが失われます。</string>
-    <string name="rootfs_reset_backup_confirm_title">バックアップしてリセットしますか？</string>
-    <string name="rootfs_reset_backup_confirm_message">/root ディレクトリをバックアップしてからrootfsをリセットします。後でバックアップを復元できます。</string>
-    <string name="rootfs_reset_backup_confirm_button">リセット＆バックアップ</string>
 
     <!-- T172 — components / onboarding / preview i18n -->
     <string name="common_back">戻る</string>
@@ -518,9 +457,7 @@
     <string name="webpreview_close">閉じる</string>
     <string name="webpreview_stop">読み込みを停止</string>
     <string name="webpreview_reload">再読み込み</string>
-    <string name="webpreview_share">共有</string>
     <string name="webpreview_open_external">外部ブラウザで開く</string>
-    <string name="webpreview_open_in_browser">ブラウザで開く</string>
     <string name="webpreview_open_fullscreen">フルスクリーンで開く</string>
 
     <!-- T172 — sandbox / sessions / browser / terminal i18n -->
@@ -529,7 +466,6 @@
     <string name="filebrowser_delete_title">“%1$s” を削除しますか？</string>
     <string name="filebrowser_delete_message">この操作は元に戻せません。</string>
     <string name="filebrowser_error_title">エラー</string>
-    <string name="filebrowser_sort_action">並べ替え</string>
     <string name="filebrowser_sort_ascending">昇順</string>
     <string name="filebrowser_sort_descending">降順</string>
     <string name="filebrowser_sort_folders_first">フォルダを先頭に</string>
@@ -547,12 +483,9 @@
     <string name="filepreview_office_subtitle">Office ドキュメントは外部ビューアでプレビューします。</string>
     <string name="filepreview_pdf_render_failed">PDF をレンダリングできません：%1$s</string>
     <string name="filepreview_pdf_empty">空のドキュメント</string>
-    <string name="filepreview_image_decode_error">画像をデコードできません</string>
-    <string name="filepreview_image_load_error">画像の読み込みに失敗</string>
     <string name="filepreview_file_read_error">ファイルの読み込みに失敗</string>
     <string name="filepreview_csv_parse_error">CSV の解析に失敗</string>
     <string name="filepreview_archive_read_error">アーカイブの読み込みに失敗</string>
-    <string name="filepreview_pdf_render_error">PDF レンダリングに失敗</string>
     <string name="filepreview_page_n">%1$d ページ目</string>
     <string name="sessionlist_section_pinned">ピン留め</string>
     <string name="sessionlist_section_today">今日</string>
@@ -560,31 +493,15 @@
     <string name="sessionlist_section_this_week">今週</string>
     <string name="sessionlist_section_this_month">今月</string>
     <string name="sessionlist_section_earlier">それ以前</string>
-    <string name="sessionlist_select_title">セッションを選択</string>
-    <string name="sessionlist_n_selected">%1$d 件選択</string>
-    <string name="sessionlist_select_all">すべて選択</string>
-    <string name="sessionlist_deselect_all">すべての選択を解除</string>
-    <string name="sessionlist_select_action">選択</string>
-    <string name="sessionlist_settings">設定</string>
-    <string name="sessionlist_shell">シェル</string>
-    <string name="sessionlist_shell_terminal">シェルターミナル</string>
-    <string name="sessionlist_rootfs_management">Rootfs 管理</string>
-    <string name="sessionlist_open_browser">ブラウザを開く</string>
-    <string name="sessionlist_browser_settings">ブラウザ設定</string>
     <string name="sessionlist_pin">ピン留め</string>
     <string name="sessionlist_unpin">ピンを外す</string>
     <string name="sessionlist_badge_paused">一時停止</string>
     <string name="sessionlist_export">エクスポート</string>
     <string name="sessionlist_export_json">JSON</string>
     <string name="sessionlist_export_plain">プレーンテキスト</string>
-    <string name="sessionlist_edit_title_category">タイトルとカテゴリを編集</string>
     <string name="sessionlist_regenerate_title">タイトルを再生成</string>
     <string name="sessionlist_regenerating_title">タイトルを再生成中…</string>
-    <string name="sessionlist_duplicate">複製</string>
-    <string name="sessionlist_search_action">検索</string>
-    <string name="sessionlist_dismiss">閉じる</string>
     <string name="sessionlist_delete_one_title">この会話を削除しますか？</string>
-    <string name="sessionlist_delete_n_title">%1$d 件の会話を削除しますか？</string>
     <string name="sessionlist_delete_message">この操作は元に戻せません。</string>
     <string name="browser_title">ブラウザ</string>
     <string name="browser_settings_title">ブラウザ設定</string>
@@ -602,7 +519,6 @@
     <string name="chat_typing_indicator">%1$s が考えています</string>
     <string name="chat_queued_indicator">待機中 — 前に %1$d 件のリクエスト</string>
     <string name="chat_waiting_network">応答待ち — %1$d 秒</string>
-    <string name="chat_input_placeholder">%1$s にメッセージ（@ でファイルを参照）</string>
     <string name="browser_takeover">操作引き継ぎ</string>
     <string name="browser_settings_done">完了</string>
     <string name="browser_settings_user_agent">ユーザーエージェント</string>
@@ -630,13 +546,10 @@
     <string name="browser_history_search">履歴を検索</string>
     <string name="browser_history_empty_title">閲覧履歴はありません</string>
     <string name="browser_history_empty_subtitle">履歴は 7 日間保持されます</string>
-    <string name="browser_history_results">結果</string>
     <string name="browser_history_clear_dialog_title">閲覧履歴を消去しますか？</string>
     <string name="browser_history_clear_dialog_message">すべての閲覧履歴が削除されます。この操作は元に戻せません。</string>
     <string name="terminal_title">RikkaMinis シェル</string>
     <string name="terminal_clear">クリア</string>
-    <string name="terminal_show_keyboard">表示</string>
-    <string name="terminal_hide_keyboard">非表示</string>
 
     <!-- T172-A providers / models / settings i18n -->
     <string name="provider_list_providers">AIプロバイダー</string>
@@ -677,19 +590,13 @@
 
     <string name="provider_detail_status">ステータス</string>
     <string name="provider_detail_enabled">有効</string>
-    <string name="provider_detail_refresh_models">モデルを更新</string>
     <string name="provider_detail_manage_models">すべてのモデルを管理</string>
     <string name="provider_detail_api_connection">API と接続</string>
-    <string name="provider_detail_manage_models_search_hint">モデルを検索…</string>
     <string name="provider_detail_manage_models_all_header">すべてのモデル (%1$d)</string>
-    <string name="provider_detail_models_title">すべてのモデル</string>
     <string name="provider_detail_add_custom_model">カスタムモデルを追加</string>
     <string name="provider_detail_delete_provider">AIプロバイダーを削除</string>
     <string name="provider_detail_delete_model">Delete Model</string>
     <string name="provider_detail_save_key">キーを保存</string>
-    <string name="provider_detail_paste_bearer_token">ベアラートークンを貼り付け</string>
-    <string name="provider_detail_save_token">トークンを保存</string>
-    <string name="common_change">変更</string>
     <string name="common_remove">削除</string>
     <string name="add_provider_choose_provider">AIプロバイダーを選択</string>
     <string name="add_provider_you_can_add_multiple_instances_of_the_sa">同じプロバイダーの複数のインスタンスを追加できます（例：仕事用と個人用のアカウント）。OpenAI と Anthropic は互換性のあるサードパーティエンドポイントとも連携します ── 一致するプロトコルを選択した後、カスタム API Base URL を設定してください。</string>
@@ -700,16 +607,6 @@
     <string name="add_provider_your_key_is_stored_securely_in_encrypted">キーは暗号化ストレージに安全に保存され、デバイスから出ることはありません。</string>
     <string name="add_provider_endpoint">エンドポイント</string>
     <string name="add_provider_custom_api_base_optional">カスタムAPIベース（オプション）</string>
-    <string name="add_provider_authentication">認証</string>
-    <string name="add_provider_sign_in_succeeded_the_token_is_stored_in">サインインに成功しました。トークンは暗号化ストレージに保存されています。「保存」をタップしてプロバイダーを追加してください。</string>
-    <string name="add_provider_authenticated">認証済み</string>
-    <string name="add_provider_token">Token</string>
-    <string name="add_provider_save_provider">AIプロバイダーを保存</string>
-    <string name="add_provider_opens_the_provider_s_web_sign_in_flow_af">プロバイダーのウェブサインインフローを開きます。サインイン後、トークンがここに自動的に取り込まれます。</string>
-    <string name="add_provider_signing_in">サインイン中…</string>
-    <string name="add_provider_or_configure_manually">または手動で設定</string>
-    <string name="add_provider_for_third_party_coding_plans_e_g_minimax">For third-party Coding Plans (e.g. MiniMax, Kimi) or compatible proxy endpoints, enter the API base URL and bearer token manually.</string>
-    <string name="add_provider_bearer_token">Bearer Token</string>
     <string name="add_custom_model_model_id">モデルID</string>
     <string name="add_custom_model_display_name_optional">表示名（省略可）</string>
     <string name="model_entry_model_detail">モデルの詳細</string>
@@ -766,24 +663,17 @@
     <string name="model_groups_groups_let_you_combine_models_for_fallba">グループを使うとフォールバックや負荷分散のためにモデルを組み合わせられます。</string>
     <string name="model_groups_group_name">グループ名</string>
     <string name="model_groups_create">作成</string>
-    <string name="model_groups_none">なし</string>
     <string name="model_groups_set_default_primary">Set as Default Primary</string>
     <string name="model_groups_clear_default_primary">Clear Default Primary</string>
     <string name="agent_loop_section_entry_title">Agent Loop Models</string>
     <string name="agent_loop_section_entry_subtitle">Models and groups usable by the agent via minis-model-use</string>
     <string name="add_models_to_group_search_models">モデルを検索</string>
     <string name="add_models_to_group_clear">クリア</string>
-    <string name="settings_agent_loop_models">エージェントループモデル</string>    <string name="agent_loop_models_groups">グループ</string>
-    <string name="agent_loop_models_picking_a_group_pins_every_model_in_it_a">グループを選択すると、そのグループ内のすべてのモデルがピン留めされます。メンバーの追加や削除はモデルグループから行ってください。</string>
-    <string name="agent_loop_models_add_a_provider_and_refresh_its_model_lis">プロバイダーを追加し、そのモデルリストを更新するとこのピッカーに表示されます。</string>
-    <string name="agent_loop_models_no_models_or_groups_available_yet">利用できるモデルやグループはまだありません。</string>
-    <string name="agent_loop_models_selected">選択済み</string>
-    <string name="agent_loop_models_not_selected">未選択</string>
+    <string name="agent_loop_models_groups">グループ</string>
 
     <!-- T172-A parameterized strings -->
     <string name="add_custom_model_id_footer">Model ID は %1$s に送信される API 識別子です。表示名はモデルピッカーで使われる分かりやすいラベルで、空欄時は Model ID にフォールバックします。</string>
     <string name="add_custom_model_eg_id_placeholder">例: gpt-4o-custom</string>
-    <string name="add_provider_built_in_models_count">%1$d 個の組み込みモデル</string>
     <string name="add_provider_configure_provider">%1$s を設定</string>
     <string name="add_models_to_group_add_count">追加 (%1$d)</string>
     <string name="provider_detail_https_api_example_placeholder">https://api.example.com</string>
@@ -792,7 +682,6 @@
     <string name="provider_detail_refresh_no_key">APIキーが設定されていません – 更新対象なし。</string>
     <string name="provider_detail_refresh_preserved">一致する models.dev エントリなし – 既存のモデルリストを保持。</string>
     <string name="provider_detail_refresh_failed">モデルを更新できませんでした。</string>
-    <string name="provider_detail_refreshing">更新中…</string>
     <string name="provider_detail_refresh_models_list">モデル一覧を更新</string>
     <string name="provider_detail_delete_provider_confirm">\"%1$s\" を削除してもよろしいですか?この操作は元に戻せません。</string>
     <string name="provider_detail_delete_model_confirm">\"%1$s\" を削除してもよろしいですか?この操作は元に戻せません。</string>
@@ -913,15 +802,12 @@
     <string name="mount_all_files_access_required_desc">許可されていないと、shell からはこのアプリが作成したファイルしか見えません — 他のアプリ（Obsidian など）が書き込んだファイルは非表示になります。タップしてシステム設定で許可してください。</string>
     <string name="mount_detail_title">マウントを編集</string>
     <string name="mount_detail_browse_files">ファイルを開く</string>
-    <string name="mount_detail_browse_files_toast">チャットの @ メンションからこのマウントにアクセスできます。</string>
     <string name="mount_path_unavailable">パスが利用できません</string>
     <string name="mount_add_failed">マウントを追加できませんでした。名前が既に使用済みか無効です。</string>
 
     <!-- T241: スラッシュコマンドパネル + モデル選択シート -->
-    <string name="slash_compact_subtitle">会話履歴を要約に圧縮</string>
     <string name="slash_memory_writes_on">書き込みオン — タップで切替</string>
     <string name="slash_memory_writes_off">書き込みオフ — タップで切替</string>
-    <string name="slash_thinking_subtitle">思考 %1$s — タップで切替</string>
     <string name="slash_thinking_unsupported">現在のモデルは未対応</string>
     <string name="slash_clear_subtitle">このセッションのすべてのメッセージを消去</string>
     <string name="thinking_level_off">オフ</string>
@@ -950,38 +836,13 @@
     </plurals>
 
     <!-- T288 — ログ / 設定変更 -->
-    <string name="logs_config_used_count">%1$d / %2$d 使用中</string>
-    <string name="logs_config_clear_all">すべてクリア</string>
-    <string name="logs_config_empty">設定変更の記録はまだありません。</string>
-    <string name="logs_config_status_applied">適用済み</string>
-    <string name="logs_config_status_pending">保留中</string>
     <string name="overlay_completion_completed">完了</string>
     <string name="overlay_completion_failed">失敗</string>
     <string name="overlay_completion_cancelled">キャンセル</string>
     <!-- [T-dedup-neutral-status] same-turn deduplicated tool pill content -->
     <string name="tool_dedup_skipped">スキップ — 同一呼び出しを既に実行済み</string>
     <string name="overlay_completion_timeout">タイムアウト</string>
-    <string name="logs_config_status_rejected">却下</string>
-    <string name="logs_config_status_timeout">タイムアウト</string>
-    <string name="logs_config_status_reverted">取消済み</string>
     <string name="logs_config_revert">元に戻す</string>
-    <string name="logs_config_revert_chip">↩ 元に戻す</string>
-    <string name="logs_config_reverted_label">↩ 取消済み</string>
-    <string name="logs_config_revert_dialog_title">この変更を元に戻しますか？</string>
-    <string name="logs_config_revert_success_title">元に戻しました</string>
-    <string name="logs_config_revert_success_body">設定を復元しました。</string>
-    <string name="logs_config_revert_failed_title">元に戻せませんでした</string>
-    <string name="logs_config_revert_unknown_error">不明なエラー</string>
-    <string name="logs_config_dialog_ok">OK</string>
-    <string name="logs_config_dialog_cancel">キャンセル</string>
-    <string name="logs_config_source_agent">エージェント</string>
-    <string name="logs_config_source_user">ユーザー</string>
-    <string name="logs_config_source_agent_revert">エージェント取消</string>
-    <string name="logs_config_source_user_revert">ユーザー取消</string>
-    <string name="logs_config_time_just_now">たった今</string>
-    <string name="logs_config_time_min_ago">%1$d 分前</string>
-    <string name="logs_config_time_hr_ago">%1$d 時間前</string>
-    <string name="logs_config_time_yesterday">昨日</string>
     <string name="model_picker_modality_image">画像</string>
     <string name="model_picker_modality_audio">音声</string>
     <string name="model_picker_modality_video">動画</string>
@@ -992,17 +853,6 @@
 
     <!-- Welcome / onboarding (T332) -->
     <!-- TODO translate -->
-    <string name="sessionlist_welcome_title">RikkaMinis へようこそ</string>
-    <string name="sessionlist_welcome_subtitle">最初のオンデバイス Agent がもうすぐ準備完了です。</string>
-    <string name="sessionlist_welcome_step1_title">プロバイダを追加</string>
-    <string name="sessionlist_welcome_step1_subtitle">API キーを設定するか OAuth でサインイン</string>
-    <string name="sessionlist_welcome_step2_title">モデルを選択</string>
-    <string name="sessionlist_welcome_step2_subtitle">使用したいモデルを選択してください</string>
-    <string name="sessionlist_welcome_step2_locked">先にステップ 1 を完了してください</string>
-    <string name="sessionlist_welcome_step3_title">会話を開始</string>
-    <string name="sessionlist_welcome_step3_subtitle">タップして開始</string>
-    <string name="sessionlist_welcome_step3_locked">先にステップ 2 を完了してください</string>
-    <string name="sessionlist_welcome_step_done">完了</string>
     <!-- T-selection-add-to-input — 長押し選択メニュー「入力欄に追加」 -->
     <string name="selection_add_to_chat_input">入力欄に追加</string>
     <!-- T-minis-textkit 選択メニューボタン -->
@@ -1015,13 +865,7 @@
     <string name="composer_swipe_release_to_send">離して送信</string>
     <string name="composer_swipe_release_to_queue">離してキューに追加</string>
     <!-- T-android-update-check-403-hint — friendly update-check failure hints -->
-    <string name="update_error_network_unreachable">アップデートサーバーに接続できません。ネットワークを確認してください。</string>
-    <string name="update_error_forbidden_with_link">アップデートサーバーにアクセスできません。ネットワーク制限の可能性があります。GitHub Releases から手動でダウンロードできます。</string>
-    <string name="update_error_open_releases">GitHub Releases を開く</string>
     <!-- T-android-crash-freq-share -->
-    <string name="crash_freq_dialog_title">複数回のクラッシュを検出</string>
-    <string name="crash_freq_dialog_message">RikkaMinis は過去 1 時間に複数回クラッシュしました。問題解決のためにクラッシュログを共有しますか？</string>
-    <string name="crash_freq_dialog_share">ログを共有</string>
     <string name="crash_freq_dialog_dismiss">後で</string>
     <string name="crash_freq_email_subject">RikkaMinis クラッシュレポート %1$s</string>
     <string name="crash_freq_share_chooser">クラッシュログを送信</string>
@@ -1124,16 +968,9 @@
     <string name="thinking_truncated_hint">%2$dK 文字のうち末尾 %1$dK 文字を表示中</string>
     <string name="thinking_view_full">全文を表示</string>
     <!-- Spoken substitutions for links during read-aloud (TTS) -->
-    <string name="voice_link_to_host">%1$s のリンク</string>
-    <string name="voice_bare_link">リンク</string>
     <!-- [T-android-voice-correction] Consent + correction UI -->
     <string name="voice_provider_system">システム</string>
     <string name="add_provider_subtitle_kimi">Kimi Coding Plan — Kimi アカウントでサインイン</string>
-    <string name="kimi_login_title">Kimi Code でサインイン</string>
-    <string name="kimi_login_instructions">認証ページを開き、このコードを入力して RikkaMinis を許可してください:</string>
-    <string name="kimi_login_copy_code">コードをコピー</string>
-    <string name="kimi_login_open_verification">認証ページを開く</string>
-    <string name="kimi_login_waiting">認証を待っています…</string>
     <string name="browser_downloads_title">ダウンロード</string>
     <string name="browser_downloads_clear">クリア</string>
     <string name="browser_downloads_empty">ダウンロードなし</string>
@@ -1186,7 +1023,6 @@
     <string name="backup_secret_without">キーなし</string>
     <string name="webdav_notify_title_restored">WebDAV 復元</string>
     <string name="webdav_notify_title">WebDAV バックアップ</string>
-    <string name="webdav_loading">バックアップを読み込み中…</string>
     <string name="webdav_remote_empty">サーバーにバックアップがありません</string>
     <string name="webdav_restore">復元</string>
     <string name="webdav_delete">削除</string>
@@ -1209,7 +1045,6 @@
     <string name="appearance_chat_menu_section_topbar">トップバーボタン</string>
     <string name="input_history_title">入力履歴</string>
     <string name="input_history_topbar_description">トップバーに検索可能なメッセージ一覧を表示します。項目をタップするとそのメッセージに直接ジャンプできます。</string>
-    <string name="input_history_search_hint">メッセージを検索…</string>
     <string name="input_history_search">検索</string>
     <string name="input_history_done">完了</string>
     <string name="input_history_empty">メッセージはまだありません</string>
@@ -1220,7 +1055,6 @@
     <string name="appearance_chat_menu_footer_attach">コンポーザーの「＋」メニューに表示する添付アクションとその順序を選択します。すべてのアクションを非表示にすると「＋」ボタン自体が消え、1つだけ残すと送信ボタンの隣にそのボタンが直接表示されます。</string>
     <string name="composer_model_picker_button_title">モデル選択ボタン</string>
     <string name="composer_model_picker_button_description">入力行の左端に上矢印の丸ボタンを表示し、モデル選択をワンタップで開きます。右上のサブタイトルにあるモデル名はどちらの場合もタップ可能です。</string>
-    <string name="chat_menu_pin_to_footer">Pin to footer</string>
     <string name="chat_menu_settings_always_last">Always last</string>
     <string name="back_to_exit_press_again">Press back again to exit</string>
     <string name="backup_snapshot_section_title">ローカルスナップショット</string>
@@ -1276,7 +1110,6 @@
     <string name="sysmsg_compacted_count">%1$d 件のメッセージを圧縮しました</string>
     <string name="sysmsg_compact_failed">圧縮に失敗しました：%1$s</string>
     <string name="sysmsg_context_full_hint">コンテキストが間もなく満杯になります（%1$d / %2$d tokens）。/compact を実行して古い会話を要約に畳み込めます。</string>
-    <string name="sysmsg_context_full_auto">コンテキストが間もなく満杯になります（%1$d / %2$d tokens）。古い会話を自動的に圧縮します。</string>
     <string name="sysmsg_wait_compact">送信前に現在の圧縮が完了するまでお待ちください。</string>
     <string name="sysmsg_context_trimmed">コンテキストが %1$d の制限に達したため、最も古い %2$d 件のメッセージを切り捨ててタスクを続行しました。</string>
     <string name="sysmsg_compact_no_provider">プロバイダーが設定されていません。圧縮できません。</string>
@@ -1415,7 +1248,6 @@
     <string name="soul_lang_zh">中文</string>
     <string name="soul_lang_en">English</string>
     <string name="soul_body_placeholder">エージェントの話し方、考え方、振る舞いを記述…</string>
-    <string name="soul_length_indicator">%1$d文字</string>
     <string name="soul_count_zero">0文字</string>
     <string name="soul_count_chars">%1$d / %2$d文字</string>
     <string name="soul_count_words">%1$d / %2$d語</string>
@@ -1431,9 +1263,7 @@
     <string name="soul_injection_error">これはパーソナリティのガイダンスではなく、モデルへの指示のように見えます。「前の指示を無視」などのフレーズはSOUL.mdでは許可されていません。本当のキャラクター、トーン、行動に留めてください。</string>
     <string name="skills_search_placeholder">スキルを検索</string>
     <string name="skills_search_no_match">「%1$s」に一致するスキルはありません。</string>
-    <string name="webpreview_open_external_failed">これを開けるアプリがありません</string>
     <string name="webpreview_more">もっと見る</string>
-    <string name="webpreview_collapse">折りたたむ</string>
     <string name="webpreview_desktop_site">PC版サイト</string>
     <string name="webpreview_mobile_site">モバイル版サイト</string>
     <string name="webpreview_pin_to_home">ホーム画面に追加</string>
@@ -1444,26 +1274,12 @@
     <string name="filebrowser_show_hidden">隠しファイルを表示</string>
     <string name="filebrowser_hide_hidden">隠しファイルを隠す</string>
     <string name="filebrowser_sort_by">並べ替え</string>
-    <string name="export_summary_format">フォーマット</string>
-    <string name="export_summary_format_value_json">JSON</string>
-    <string name="export_summary_format_value_txt">プレーンテキスト</string>
-    <string name="export_summary_messages">メッセージ</string>
-    <string name="export_summary_messages_value">%1$d件のメッセージ</string>
-    <string name="export_summary_timerange">期間</string>
-    <string name="export_summary_timerange_value">%1$s — %2$s</string>
-    <string name="export_summary_attachments">添付ファイル</string>
-    <string name="export_summary_attachments_value">画像%1$d枚 / 動画%2$d件</string>
-    <string name="export_summary_size">推定サイズ</string>
-    <string name="export_summary_size_value">約 %1$s</string>
-    <string name="export_progress_running">エクスポート中 %1$d / %2$d…</string>
-    <string name="export_progress_done">エクスポート完了</string>
     <string name="export_progress_failed">エクスポートに失敗しました</string>
     <string name="export_empty_hint">この会話にはまだエクスポートするコンテンツがありません</string>
     <string name="appearance_section_chat_title">チャットタイトル</string>
     <string name="appearance_show_chat_title">チャットタイトルを表示</string>
     <string name="appearance_show_chat_title_subtitle">スクロール中に固定タイトルピルを表示</string>
     <string name="appearance_show_chat_title_footer">履歴をスクロールしている間、現在のセッションタイトルをチャット上部のフローティングピルとして表示します。</string>
-    <string name="chat_title_pill_session_default">無題</string>
     <string name="appearance_section_deep_thinking">ディープシンキング</string>
     <string name="appearance_auto_expand_thinking_title">ストリーミング中に思考を自動展開</string>
     <string name="appearance_auto_expand_thinking_footer">オンにすると、モデルが推論している間、新しい思考ブロックが自動的に展開され、完了すると折りたたまれます。オフの間は、思考ブロックは折りたたまれたままになります。タップして読んでください。</string>
@@ -1472,7 +1288,6 @@
     <string name="settings_memory_global_enabled_title">メモリーをデフォルトで有効にする</string>
     <string name="settings_memory_global_enabled_subtitle">オフのとき、新しいセッションはデフォルトでGLOBAL.mdと日次メモリーをスキップします</string>
     <string name="shizuku_title">Shizuku</string>
-    <string name="shizuku_settings_subtitle">ShizukuまたはAXManagerを介した特権Android制御</string>
     <string name="shizuku_status_header">ステータス</string>
     <string name="shizuku_status_footer">Shizukuは、ワイヤレスADBまたはrootで開始される小さなサービスを実行することで、rootなしでユーザーアプリに特権システムAPIを公開します。互換性のある2つのマネージャーアプリがサポートされています— Shizuku (RikkaApps) とAXManager (Axeron) — どちらかをインストールします。承認されると、RikkaMinisはandroid-shizuku-cli CLIを使用して、パッケージ、権限、設定、入力、アクティビティ管理を行うことができます。</string>
     <string name="shizuku_actions_header">次のステップ</string>
@@ -1542,8 +1357,6 @@
     <string name="model_group_detail_limit_context_window">コンテキストウィンドウを制限</string>
     <string name="model_group_detail_max_context">最大コンテキスト</string>
     <string name="model_group_detail_unlimited">無制限</string>
-    <string name="model_group_detail_context_limit_unavailable">グループメンバーがコンテキストウィンドウを宣言していないため、制限を適用できません。先にモデルを追加するか、モデルのメタデータを確認してください。</string>
-    <string name="model_group_detail_context_limit_runtime_capped">現在のメンバーの最大ctx=%1$sです。保存された%2$sは実行時に切り詰められます。保存された値は保持され、より高いコンテキストのモデルを追加すると再適用されます。</string>
     <string name="add_provider_subtitle_openai">Codex、DeepSeek、Moonshot、Groq、その他互換ベンダーで動作します</string>
     <string name="add_provider_subtitle_anthropic">ClaudeおよびAnthropicプロトコル互換サービスで動作します</string>
     <string name="add_provider_subtitle_gemini">GeminiシリーズおよびGoogle AI Studioで動作します</string>
@@ -1573,8 +1386,6 @@
     <string name="backup_chat_window_days">%1$d日</string>
     <string name="backup_done_chat">%1$dセッション、%2$dメッセージを復元しました</string>
     <string name="backup_saved">バックアップを保存しました</string>
-    <string name="backup_generating_title">バックアップを生成中…</string>
-    <string name="backup_generating_body">バックアップファイルを作成しています。チャット履歴が大きい場合、数秒かかることがあります。</string>
     <string name="backup_done_title">復元完了</string>
     <string name="backup_err_write">ファイルの書き込みに失敗しました: %1$s</string>
     <string name="backup_err_read">選択したファイルを読み取れませんでした</string>
@@ -1595,12 +1406,7 @@
     <string name="thinking_level_ultra">ウルトラ</string>
     <string name="thinking_level_sheet_title">思考の強度</string>
     <string name="model_picker_groups_edit">編集</string>
-    <string name="voice_system_recognition_online">システム認識（オンライン）</string>
-    <string name="voice_system_recognition_offline">システム認識（オフライン）</string>
-    <string name="voice_system_online_subtitle">Android内蔵、ネットワークが必要</string>
-    <string name="voice_system_offline_subtitle">Android内蔵、オフラインで動作</string>
     <string name="system_permissions_title">システム権限</string>
-    <string name="system_permissions_subtitle">システム設定から付与されるOSレベルの権限</string>
     <string name="system_permissions_section_a11y">アクセシビリティ</string>
     <string name="system_permissions_a11y_row">RikkaMinis アクセシビリティサービス</string>
     <string name="system_permissions_a11y_enabled">有効 — android-a11y-cli が使用可能です</string>
@@ -1617,7 +1423,6 @@
     <string name="a11y_service_summary">RikkaMinisのUIレイヤー自動化バックエンド</string>
     <string name="back">戻る</string>
     <string name="webapp_activity_label">RikkaMinis WebApp</string>
-    <string name="webapp_source_missing">ソースファイルが存在しません。</string>
     <string name="webapp_external_nav_blocked">外部ナビゲーションはブロックされました。</string>
     <string name="webapp_pin_unsupported">このランチャーではショートカットのピン留めはサポートされていません。</string>
     <string name="webapp_pin_failed">ホーム画面に追加できませんでした。</string>
@@ -1644,7 +1449,6 @@
     <string name="import_zip_no_supported">アーカイブにインポート可能なファイルがありません</string>
     <string name="import_zip_summary">%1$d / %2$d ファイルをインポートしました</string>
     <string name="image_budget_compressed">送信前に%1$d枚の画像を圧縮しました</string>
-    <string name="image_budget_dropped">%1$d個の巨大なURLをスキップしました (&gt;5MB)</string>
     <string name="image_budget_total_exceeded">画像サイズの合計が25MBを超えるため、以降の画像は削除されました</string>
     <string name="image_budget_request_elided">25MBの制限に収めるため、古い%1$d枚の画像をリクエストから省略しました</string>
     <string name="chat_message_large_collapsed_title">大きなコンテンツ（%1$s）</string>

@@ -2,22 +2,11 @@
 <resources>
     <string name="app_name">RikkaMinis</string>
     <string name="onboarding_default_group_name">Standardmodelle</string>
-    <string name="new_chat">Neuer Chat</string>
     <string name="settings">Einstellungen</string>
-    <string name="providers">KI-Anbieter</string>
-    <string name="add_provider">KI-Anbieter hinzufügen</string>
-    <string name="appearance">Erscheinungsbild</string>
     <string name="no_sessions">Noch keine Unterhaltungen</string>
-    <string name="no_providers">Füge einen Anbieter hinzu, um loszulegen</string>
-    <string name="send">Senden</string>
-    <string name="type_message">Nachricht eingeben…</string>
     <string name="delete">Löschen</string>
     <string name="cancel">Abbrechen</string>
     <string name="save">Sichern</string>
-    <string name="api_key">API Key</string>
-    <string name="label">Bezeichnung</string>
-    <string name="enabled">Aktiviert</string>
-    <string name="select_model">Modell auswählen</string>
     <string name="session_memory_title">Erinnerungen in der Sitzung</string>
     <string name="memory_section_auto_injected">Automatisch eingefügt</string>
     <string name="memory_section_auto_injected_footer">Wird zu Beginn jedes Agent-Schritts in den Systemprompt geladen.</string>
@@ -25,7 +14,6 @@
     <string name="memory_section_tool_activity_footer">Speicherlese- und -schreibvorgänge des Agenten in dieser Sitzung.</string>
     <string name="memory_section_written_content">Geschriebener Inhalt</string>
     <string name="memory_section_tool_result">Tool-Ergebnis</string>
-    <string name="memory_section_keywords">Stichwörter</string>
     <string name="memory_action_edit">Bearbeiten</string>
     <string name="memory_action_save">Sichern</string>
     <string name="memory_action_revoke">Widerrufen</string>
@@ -36,30 +24,12 @@
     <string name="memory_revoke_result_not_found">Eintrag in den jüngsten Logs nicht gefunden.</string>
     <string name="memory_revoke_result_io_error">Fehler beim Schreiben der Datei: %1$s</string>
     <string name="memory_save_toast">Gesichert</string>
-    <string name="memory_save_error">Speichern fehlgeschlagen: %1$s</string>
     <string name="memory_global_footer">Dauerhafte Anweisungen und Einstellungen, die dem Agenten in jeder Sitzung angezeigt werden. Der Agent kann diese Datei nicht ändern.</string>
-    <string name="permissions_title">Berechtigungen</string>
-    <string name="permissions_reset_all">Alles zurücksetzen</string>
-    <string name="permissions_reset_dialog_title">Alle Berechtigungen zurücksetzen?</string>
-    <string name="permissions_reset_dialog_message">Setzt jede Berechtigung auf den Standard (Immer erlauben) zurück. Tool-spezifische Überschreibungen werden gelöscht.</string>
-    <string name="permissions_reset_confirm">Zurücksetzen</string>
-    <string name="permissions_level_always_allow">Immer erlauben</string>
-    <string name="permissions_level_ask_once">Einmal fragen</string>
-    <string name="permissions_level_not_allowed">Nicht erlaubt</string>
-    <string name="permissions_category_privacy">Datenschutz</string>
-    <string name="permissions_category_media">Medien</string>
-    <string name="permissions_category_system">System</string>
     <string name="mention_scanning">Dateien werden durchsucht…</string>
     <string name="mention_no_match">Keine passenden Dateien</string>
     <string name="resume_banner_title">Unterbrochen — tippen Sie auf „Fortfahren“</string>
     <string name="resume_action">Fortfahren</string>
-    <string name="search_chats_placeholder">Unterhaltungen suchen…</string>
-    <string name="search_no_results">Keine Treffer für \"%1$s\"</string>
     <string name="stop_tool">Tool stoppen</string>
-    <string name="mic_permission_title">Mikrofon-Berechtigung erforderlich</string>
-    <string name="mic_permission_message">Spracheingabe benötigt die Mikrofon-Berechtigung. Tippe auf Einstellungen öffnen, um sie für RikkaMinis zu erlauben.</string>
-    <string name="mic_permission_open_settings">Einstellungen öffnen</string>
-    <string name="mic_permission_cancel">Abbrechen</string>
     <string name="bg_section_header">Hintergrund &amp; Benachrichtigungen</string>
     <string name="bg_section_subtitle">Akkuoptimierung und OEM-Autostart</string>
     <string name="bg_section_footer">Lang laufende Agent-Aufgaben brauchen die Erlaubnis, die CPU bei ausgeschaltetem Bildschirm wach zu halten. Ohne diese Einstellungen kann das System die Inferenz nach wenigen Minuten im Hintergrund pausieren.</string>
@@ -182,9 +152,6 @@
     <string name="session_skills_footer">Schaltet Fähigkeiten nur für diese Sitzung um. Die Standardwerte stammen aus Einstellungen → Fähigkeiten.</string>
     <string name="session_skills_empty_title">Keine Fähigkeiten installiert</string>
     <string name="session_skills_empty_subtitle">Fähigkeiten aus Einstellungen → Fähigkeiten importieren.</string>
-    <string name="speech_lang_picker_title">Sprachsprache</string>
-    <string name="speech_lang_picker_empty">Keine Sprachen für die aktive Spracherkennung verfügbar.</string>
-    <string name="speech_lang_picker_selected">Ausgewählt</string>
     <string name="standard_sheet_close">Schließen</string>
     <string name="token_usage_sheet_title">Sitzung Token-Verbrauch</string>
     <string name="token_usage_section_context">Kontext</string>
@@ -280,7 +247,6 @@
     <string name="env_var_error_invalid_key">Muss mit einem Buchstaben beginnen, nur Buchstaben/Zahlen/Unterstriche</string>
     <string name="env_var_error_duplicate">Eine Variable mit diesem Namen existiert bereits</string>
     <string name="log_title">Protokolle</string>
-    <string name="log_share_all">Alle teilen</string>
     <string name="log_section_logging">Protokollierung</string>
     <string name="log_section_logging_footer">Wenn aktiviert, werden alle Konsolenausgaben in tägliche Logdateien im privaten App-Speicher geschrieben.</string>
     <string name="log_enable_switch">Protokollierung aktivieren</string>
@@ -295,11 +261,9 @@
     <string name="log_delete_confirm_title">Alle Logs löschen?</string>
     <string name="log_delete_confirm_text">Es werden %1$s an Logdateien gelöscht. Diese Aktion ist nicht umkehrbar.</string>
     <string name="log_delete_confirm">Alle löschen</string>
-    <string name="log_truncated_marker">… (abgeschnitten, %1$s gesamt)</string>
     <string name="log_not_found">Logdatei nicht gefunden.</string>
     <string name="log_error_reading">Fehler beim Lesen des Logs: %1$s</string>
     <string name="log_share_chooser">Log teilen</string>
-    <string name="log_share_all_chooser">Logs teilen</string>
     <string name="memory_title">Speicher</string>
     <string name="memory_empty_title">Keine Memory-Dateien</string>
     <string name="memory_empty_description">Memory-Dateien speichern persistentes Wissen über Sitzungen. Bearbeiten Sie GLOBAL.md, um für den Agenten sichtbare Anweisungen hinzuzufügen.</string>
@@ -309,7 +273,6 @@
     <string name="memory_section_view_less">Weniger anzeigen</string>
     <string name="memory_delete_confirm_title">%1$s löschen?</string>
     <string name="memory_delete_confirm_text">Dieses Memory-Log wird dauerhaft entfernt.</string>
-    <string name="memory_editor_placeholder">Inhalt eingeben…</string>
     <string name="perm_title">Berechtigungen</string>
     <string name="perm_reset_all">Alles zurücksetzen</string>
     <string name="perm_reset_confirm_title">Alle Berechtigungen zurücksetzen?</string>
@@ -325,11 +288,9 @@
     <string name="perm_tool_a11y_cli">android-a11y-cli</string>
     <string name="perm_tool_shizuku_cli">android-shizuku-cli</string>
     <string name="perm_section_a11y">Bedienungshilfen</string>
-    <string name="perm_section_shizuku">Shizuku</string>
     <string name="perm_a11y_section_footer">android-a11y-cli ermöglicht dem Agenten, die UI-Struktur zu lesen, Tippen und Gesten auszuführen sowie Systemereignisse zu beobachten. Beide Zeilen unten müssen gesetzt sein: Agent-Berechtigung wählen und Bedienungshilfen-Dienst in den Systemeinstellungen aktivieren.</string>
     <string name="perm_shizuku_section_footer">android-shizuku-cli gewährt dem Agenten privilegierte Android-APIs (Paket-Installation, settings put, Force-Stop, …) über den Shizuku-Dienst, autorisiert via WLAN-ADB oder Root. Beide Zeilen unten müssen gesetzt sein.</string>
     <string name="perm_a11y_cli_description">Agent darf Bildschirm-UI lesen, tippen, eingeben, Ereignisse beobachten</string>
-    <string name="perm_shizuku_cli_description">Privilegierte Android-APIs über den Shizuku-Dienst</string>
     <string name="perm_a11y_open_settings">Bedienungshilfen-Einstellungen öffnen</string>
     <string name="perm_system_authorization">Systemautorisierung</string>
     <string name="perm_agent_policy">Agent-Berechtigung</string>
@@ -357,15 +318,12 @@
     <string name="skill_minis_skills_modal">RikkaMinis Skills</string>
     <string name="skill_delete_confirm_title">%1$s löschen?</string>
     <string name="skill_delete_confirm_text">Skill und zugehörige Dateien werden dauerhaft entfernt.</string>
-    <string name="skill_import_sheet_title">Skill importieren</string>
     <string name="skill_import_tab_url">URL</string>
     <string name="skill_import_tab_paste">Einfügen</string>
     <string name="skill_import_tab_file">Datei</string>
     <string name="skill_import_url_instruction">URL einer SKILL.md-Datei eingeben (GitHub-Links unterstützt).</string>
-    <string name="skill_import_url_label">URL</string>
     <string name="skill_import_url_placeholder">github.com/user/repo/blob/main/SKILL.md</string>
     <string name="skill_import_paste_instruction">Inhalt einer SKILL.md-Datei einfügen. Muss YAML-Frontmatter mit \'name\'-Feld enthalten.</string>
-    <string name="skill_import_paste_label">SKILL.md-Inhalt</string>
     <string name="skill_import_file_instruction">.md- oder .skill-Datei vom Gerät auswählen.</string>
     <string name="skill_import_file_button">Datei auswählen</string>
     <string name="skill_import_error_no_url">URL eingeben</string>
@@ -385,10 +343,6 @@
     <string name="skill_detail_updated">Aktualisiert</string>
     <string name="skill_detail_delete">Skill löschen</string>
     <string name="skill_detail_edit_name_title">Name bearbeiten</string>
-    <string name="skill_detail_section_description">BESCHREIBUNG</string>
-    <string name="skill_detail_section_files">DATEIEN</string>
-    <string name="skill_detail_section_meta">META</string>
-    <string name="skill_detail_section_update">AKTUALISIEREN</string>
     <string name="skill_file_save">Sichern</string>
     <string name="skill_file_edit">Bearbeiten</string>
     <string name="skill_detail_status_reading">Datei wird gelesen…</string>
@@ -398,7 +352,6 @@
     <string name="skill_detail_status_downloading">Wird heruntergeladen…</string>
     <string name="skill_detail_status_rescanning">Wird erneut gescannt…</string>
     <string name="skill_detail_error_missing">SKILL.md fehlt oder ist auf der Festplatte ungültig</string>
-    <string name="skill_detail_source_url">URL</string>
     <string name="skill_detail_source_file">Dateiimport</string>
     <string name="skill_detail_source_bundled">Integriert</string>
     <string name="skill_detail_source_session">In Sitzung erstellt</string>
@@ -428,7 +381,6 @@
     <string name="storage_clear_session_button">Sitzungsdateien löschen</string>
     <string name="storage_clear_confirm_title">Sitzungsdateien löschen?</string>
     <string name="storage_clear_confirm_text">Es werden %1$s an Dateien gelöscht. Diese Aktion ist nicht umkehrbar.</string>
-    <string name="storage_clear_confirm_button">%1$s leeren</string>
     <string name="storage_section_orphans">Wiederverwendbarer Speicher</string>
     <string name="storage_orphan_banner">%1$d verwaiste Einträge aus gelöschten Sitzungen — %2$s</string>
     <string name="storage_reclaim_button">Freigeben</string>
@@ -447,9 +399,6 @@
     <string name="usage_label_cache_hit_rate">Cache-Trefferquote</string>
     <string name="usage_detail_input">Eingabe</string>
     <string name="usage_detail_output">Ausgabe</string>
-    <string name="usage_detail_cache_read">Cache-Lesen</string>
-    <string name="usage_detail_cache_creation">Cache-Erstellung</string>
-    <string name="usage_detail_cache_hit_rate">Cache-Trefferquote</string>
     <string name="usage_detail_daily_avg">Tagesdurchschnitt</string>
     <string name="usage_detail_session_avg">Durchschnitt pro Sitzung</string>
     <string name="usage_detail_sessions">Sitzungen</string>
@@ -462,7 +411,6 @@
     <string name="mirror_mirrors_section">Mirrors</string>
     <string name="mirror_test_speed_testing">Wird getestet…</string>
     <string name="mirror_test_speed_label">Geschwindigkeit testen</string>
-    <string name="mirror_detect_fast_testing">Wird getestet…</string>
     <string name="mirror_detect_fast_label">Schnelle Mirrors erkennen</string>
     <string name="mirror_official_badge">Offiziell</string>
     <string name="mirror_timeout_label">Zeitüberschreitung</string>
@@ -480,21 +428,12 @@
     <string name="rootfs_install_label">Rootfs installieren</string>
     <string name="rootfs_reset_label">Rootfs zurücksetzen</string>
     <string name="rootfs_reset_description">Alles löschen und neu installieren</string>
-    <string name="rootfs_reset_backup_label">Zurücksetzen &amp; Benutzerdaten sichern</string>
-    <string name="rootfs_reset_backup_description">/root vor dem Zurücksetzen sichern</string>
-    <string name="rootfs_restore_label">Benutzerdaten wiederherstellen</string>
-    <string name="rootfs_restore_description">Zuvor gesichertes /root wiederherstellen</string>
     <string name="rootfs_progress_section">Fortschritt</string>
     <string name="rootfs_result_section">Ergebnis</string>
     <string name="rootfs_info_section">Info</string>
     <string name="rootfs_about_title">Über Rootfs</string>
-    <string name="rootfs_about_description">Das rootfs enthält das Alpine-Linux-Dateisystem, das von der Sandbox verwendet wird. Beim Zurücksetzen werden alle Daten gelöscht und der Werkszustand wiederhergestellt.</string>
-    <string name="rootfs_about_operations">Zurücksetzen: alles löschen | Sichern: /root speichern | Wiederherstellen: gesicherte Daten wiederherstellen</string>
     <string name="rootfs_reset_confirm_title">Rootfs zurücksetzen?</string>
     <string name="rootfs_reset_confirm_message">Das gesamte rootfs wird gelöscht. Alle Daten gehen verloren.</string>
-    <string name="rootfs_reset_backup_confirm_title">Zurücksetzen mit Sicherung?</string>
-    <string name="rootfs_reset_backup_confirm_message">Ihr /root-Verzeichnis wird gesichert, dann wird das Rootfs zurückgesetzt. Sie können die Sicherung später wiederherstellen.</string>
-    <string name="rootfs_reset_backup_confirm_button">Zurücksetzen &amp; Sichern</string>
 
     <!-- T172 — components / onboarding / preview i18n -->
     <string name="common_back">Zurück</string>
@@ -518,9 +457,7 @@
     <string name="webpreview_close">Schließen</string>
     <string name="webpreview_stop">Laden stoppen</string>
     <string name="webpreview_reload">Neu laden</string>
-    <string name="webpreview_share">Teilen</string>
     <string name="webpreview_open_external">Im externen Browser öffnen</string>
-    <string name="webpreview_open_in_browser">Im Browser öffnen</string>
     <string name="webpreview_open_fullscreen">Vollbild öffnen</string>
 
     <!-- T172 — sandbox / sessions / browser / terminal i18n -->
@@ -529,7 +466,6 @@
     <string name="filebrowser_delete_title">„%1$s“ löschen?</string>
     <string name="filebrowser_delete_message">Diese Aktion kann nicht rückgängig gemacht werden.</string>
     <string name="filebrowser_error_title">Fehler</string>
-    <string name="filebrowser_sort_action">Sortieren</string>
     <string name="filebrowser_sort_ascending">Aufsteigend</string>
     <string name="filebrowser_sort_descending">Absteigend</string>
     <string name="filebrowser_sort_folders_first">Ordner zuerst</string>
@@ -547,12 +483,9 @@
     <string name="filepreview_office_subtitle">Office-Dokumente werden in einem externen Viewer angezeigt.</string>
     <string name="filepreview_pdf_render_failed">PDF konnte nicht gerendert werden: %1$s</string>
     <string name="filepreview_pdf_empty">Leeres Dokument</string>
-    <string name="filepreview_image_decode_error">Bild konnte nicht dekodiert werden</string>
-    <string name="filepreview_image_load_error">Bild konnte nicht geladen werden</string>
     <string name="filepreview_file_read_error">Datei konnte nicht gelesen werden</string>
     <string name="filepreview_csv_parse_error">CSV konnte nicht geparst werden</string>
     <string name="filepreview_archive_read_error">Archiv konnte nicht gelesen werden</string>
-    <string name="filepreview_pdf_render_error">PDF konnte nicht gerendert werden</string>
     <string name="filepreview_page_n">Seite %1$d</string>
     <string name="sessionlist_section_pinned">Angeheftet</string>
     <string name="sessionlist_section_today">Heute</string>
@@ -560,31 +493,15 @@
     <string name="sessionlist_section_this_week">Diese Woche</string>
     <string name="sessionlist_section_this_month">Diesen Monat</string>
     <string name="sessionlist_section_earlier">Früher</string>
-    <string name="sessionlist_select_title">Sitzungen auswählen</string>
-    <string name="sessionlist_n_selected">%1$d ausgewählt</string>
-    <string name="sessionlist_select_all">Alle auswählen</string>
-    <string name="sessionlist_deselect_all">Auswahl aufheben</string>
-    <string name="sessionlist_select_action">Auswählen</string>
-    <string name="sessionlist_settings">Einstellungen</string>
-    <string name="sessionlist_shell">Shell</string>
-    <string name="sessionlist_shell_terminal">Shell-Terminal</string>
-    <string name="sessionlist_rootfs_management">Rootfs-Verwaltung</string>
-    <string name="sessionlist_open_browser">Browser öffnen</string>
-    <string name="sessionlist_browser_settings">Browser-Einstellungen</string>
     <string name="sessionlist_pin">Anheften</string>
     <string name="sessionlist_unpin">Lösen</string>
     <string name="sessionlist_badge_paused">Pausiert</string>
     <string name="sessionlist_export">Exportieren</string>
     <string name="sessionlist_export_json">JSON</string>
     <string name="sessionlist_export_plain">Klartext</string>
-    <string name="sessionlist_edit_title_category">Titel und Kategorie bearbeiten</string>
     <string name="sessionlist_regenerate_title">Titel neu erzeugen</string>
     <string name="sessionlist_regenerating_title">Titel wird neu erzeugt…</string>
-    <string name="sessionlist_duplicate">Duplizieren</string>
-    <string name="sessionlist_search_action">Suchen</string>
-    <string name="sessionlist_dismiss">Schließen</string>
     <string name="sessionlist_delete_one_title">Konversation löschen?</string>
-    <string name="sessionlist_delete_n_title">%1$d Konversationen löschen?</string>
     <string name="sessionlist_delete_message">Diese Aktion kann nicht rückgängig gemacht werden.</string>
     <string name="browser_title">Browser</string>
     <string name="browser_settings_title">Browser-Einstellungen</string>
@@ -602,7 +519,6 @@
     <string name="chat_typing_indicator">%1$s denkt nach</string>
     <string name="chat_queued_indicator">In Warteschlange — %1$d Anfrage(n) voraus</string>
     <string name="chat_waiting_network">Warte auf Antwort — %1$ds</string>
-    <string name="chat_input_placeholder">Nachricht an %1$s (@ um Dateien zu erwähnen)</string>
     <string name="browser_takeover">Übernehmen</string>
     <string name="browser_settings_done">Fertig</string>
     <string name="browser_settings_user_agent">User Agent</string>
@@ -630,13 +546,10 @@
     <string name="browser_history_search">Verlauf durchsuchen</string>
     <string name="browser_history_empty_title">Kein Browserverlauf</string>
     <string name="browser_history_empty_subtitle">Verlauf wird 7 Tage aufbewahrt</string>
-    <string name="browser_history_results">Ergebnisse</string>
     <string name="browser_history_clear_dialog_title">Browserverlauf löschen?</string>
     <string name="browser_history_clear_dialog_message">Dadurch wird der gesamte Browserverlauf entfernt. Dies kann nicht rückgängig gemacht werden.</string>
     <string name="terminal_title">RikkaMinis-Shell</string>
     <string name="terminal_clear">Löschen</string>
-    <string name="terminal_show_keyboard">Anzeigen</string>
-    <string name="terminal_hide_keyboard">Ausblenden</string>
 
     <!-- T172-A providers / models / settings i18n -->
     <string name="provider_list_providers">KI-Anbieter</string>
@@ -677,19 +590,13 @@
 
     <string name="provider_detail_status">Status</string>
     <string name="provider_detail_enabled">Aktiviert</string>
-    <string name="provider_detail_refresh_models">Modelle aktualisieren</string>
     <string name="provider_detail_manage_models">Alle Modelle verwalten</string>
     <string name="provider_detail_api_connection">API &amp; Verbindung</string>
-    <string name="provider_detail_manage_models_search_hint">Modelle suchen…</string>
     <string name="provider_detail_manage_models_all_header">Alle Modelle (%1$d)</string>
-    <string name="provider_detail_models_title">Alle Modelle</string>
     <string name="provider_detail_add_custom_model">Benutzerdefiniertes Modell hinzufügen</string>
     <string name="provider_detail_delete_provider">KI-Anbieter löschen</string>
     <string name="provider_detail_delete_model">Delete Model</string>
     <string name="provider_detail_save_key">Schlüssel speichern</string>
-    <string name="provider_detail_paste_bearer_token">Bearer-Token einfügen</string>
-    <string name="provider_detail_save_token">Token speichern</string>
-    <string name="common_change">Ändern</string>
     <string name="common_remove">Entfernen</string>
     <string name="add_provider_choose_provider">KI-Anbieter wählen</string>
     <string name="add_provider_you_can_add_multiple_instances_of_the_sa">Du kannst mehrere Instanzen desselben Anbieters hinzufügen (z. B. Arbeits- und Privatkonten). OpenAI und Anthropic funktionieren auch mit kompatiblen Drittanbieter-Endpunkten — lege nach Auswahl des passenden Protokolls eine benutzerdefinierte API-Basis-URL fest.</string>
@@ -700,16 +607,6 @@
     <string name="add_provider_your_key_is_stored_securely_in_encrypted">Dein Schlüssel wird in einem verschlüsselten Speicher sicher abgelegt und verlässt das Gerät nicht.</string>
     <string name="add_provider_endpoint">Endpunkt</string>
     <string name="add_provider_custom_api_base_optional">Benutzerdefinierte API-Basis (optional)</string>
-    <string name="add_provider_authentication">Authentifizierung</string>
-    <string name="add_provider_sign_in_succeeded_the_token_is_stored_in">Anmeldung erfolgreich. Der Token wird im verschlüsselten Speicher abgelegt. Tippe auf „Speichern\", um den Anbieter hinzuzufügen.</string>
-    <string name="add_provider_authenticated">Authentifiziert</string>
-    <string name="add_provider_token">Token</string>
-    <string name="add_provider_save_provider">KI-Anbieter speichern</string>
-    <string name="add_provider_opens_the_provider_s_web_sign_in_flow_af">Öffnet den Web-Anmeldevorgang des Anbieters. Nach der Anmeldung wird der Token hier automatisch übernommen.</string>
-    <string name="add_provider_signing_in">Anmeldung läuft…</string>
-    <string name="add_provider_or_configure_manually">Oder manuell konfigurieren</string>
-    <string name="add_provider_for_third_party_coding_plans_e_g_minimax">For third-party Coding Plans (e.g. MiniMax, Kimi) or compatible proxy endpoints, enter the API base URL and bearer token manually.</string>
-    <string name="add_provider_bearer_token">Bearer Token</string>
     <string name="add_custom_model_model_id">Modell-ID</string>
     <string name="add_custom_model_display_name_optional">Anzeigename (optional)</string>
     <string name="model_entry_model_detail">Modelldetails</string>
@@ -766,24 +663,17 @@
     <string name="model_groups_groups_let_you_combine_models_for_fallba">Gruppen ermöglichen die Kombination von Modellen für Fallback oder Lastverteilung.</string>
     <string name="model_groups_group_name">Gruppenname</string>
     <string name="model_groups_create">Erstellen</string>
-    <string name="model_groups_none">Keine</string>
     <string name="model_groups_set_default_primary">Set as Default Primary</string>
     <string name="model_groups_clear_default_primary">Clear Default Primary</string>
     <string name="agent_loop_section_entry_title">Agent Loop Models</string>
     <string name="agent_loop_section_entry_subtitle">Models and groups usable by the agent via minis-model-use</string>
     <string name="add_models_to_group_search_models">Modelle suchen</string>
     <string name="add_models_to_group_clear">Löschen</string>
-    <string name="settings_agent_loop_models">Agent-Loop-Modelle</string>    <string name="agent_loop_models_groups">Gruppen</string>
-    <string name="agent_loop_models_picking_a_group_pins_every_model_in_it_a">Eine Gruppe auszuwählen heftet alle Modelle in ihr an. Modelle in Modellgruppen hinzufügen oder entfernen.</string>
-    <string name="agent_loop_models_add_a_provider_and_refresh_its_model_lis">Anbieter hinzufügen und dessen Modellliste aktualisieren, um diese Auswahl zu füllen.</string>
-    <string name="agent_loop_models_no_models_or_groups_available_yet">Noch keine Modelle oder Gruppen verfügbar.</string>
-    <string name="agent_loop_models_selected">Ausgewählt</string>
-    <string name="agent_loop_models_not_selected">Nicht ausgewählt</string>
+    <string name="agent_loop_models_groups">Gruppen</string>
 
     <!-- T172-A parameterized strings -->
     <string name="add_custom_model_id_footer">Die Model ID ist der API-Bezeichner, der an %1$s gesendet wird. Der Anzeigename ist das benutzerfreundlichere Label in der Auswahl; bei leerer Angabe wird auf die Model ID zurückgegriffen.</string>
     <string name="add_custom_model_eg_id_placeholder">z. B. gpt-4o-custom</string>
-    <string name="add_provider_built_in_models_count">%1$d integrierte Modelle</string>
     <string name="add_provider_configure_provider">%1$s konfigurieren</string>
     <string name="add_models_to_group_add_count">Hinzufügen (%1$d)</string>
     <string name="provider_detail_https_api_example_placeholder">https://api.example.com</string>
@@ -792,7 +682,6 @@
     <string name="provider_detail_refresh_no_key">Kein API-Schlüssel konfiguriert – nichts zu aktualisieren.</string>
     <string name="provider_detail_refresh_preserved">Kein passender models.dev-Eintrag – bestehende Modellliste behalten.</string>
     <string name="provider_detail_refresh_failed">Modelle konnten nicht aktualisiert werden.</string>
-    <string name="provider_detail_refreshing">Aktualisiere…</string>
     <string name="provider_detail_refresh_models_list">Modellliste aktualisieren</string>
     <string name="provider_detail_delete_provider_confirm">Möchtest du \"%1$s\" wirklich löschen? Dies kann nicht rückgängig gemacht werden.</string>
     <string name="provider_detail_delete_model_confirm">Möchtest du \"%1$s\" wirklich löschen? Dies kann nicht rückgängig gemacht werden.</string>
@@ -913,15 +802,12 @@
     <string name="mount_all_files_access_required_desc">Ohne diese Berechtigung sieht die Shell nur Dateien, die diese App erstellt hat — Dateien anderer Apps (z. B. Obsidian) bleiben verborgen. Tippen, um sie in den Einstellungen zu erteilen.</string>
     <string name="mount_detail_title">Einbindung bearbeiten</string>
     <string name="mount_detail_browse_files">Dateien durchsuchen</string>
-    <string name="mount_detail_browse_files_toast">Zugriff über @-Erwähnungen im Chat.</string>
     <string name="mount_path_unavailable">Pfad nicht verfügbar</string>
     <string name="mount_add_failed">Einbindung konnte nicht hinzugefügt werden. Name evtl. vergeben oder ungültig.</string>
 
     <!-- T241: Slash-Befehlsleiste + Modellauswahl-Sheet -->
-    <string name="slash_compact_subtitle">Verlauf in Zusammenfassung komprimieren</string>
     <string name="slash_memory_writes_on">Schreiben an — Tippen zum Umschalten</string>
     <string name="slash_memory_writes_off">Schreiben aus — Tippen zum Umschalten</string>
-    <string name="slash_thinking_subtitle">Denken %1$s — Tippen zum Umschalten</string>
     <string name="slash_thinking_unsupported">Vom aktuellen Modell nicht unterstützt</string>
     <string name="thinking_level_off">Aus</string>
     <string name="thinking_level_low">Niedrig</string>
@@ -950,46 +836,10 @@
     </plurals>
 
     <!-- T288 — Protokolle / Konfigurationsänderungen -->
-    <string name="logs_config_used_count">%1$d / %2$d belegt</string>
-    <string name="logs_config_clear_all">Alle löschen</string>
-    <string name="logs_config_empty">Noch keine Konfigurationsänderungen aufgezeichnet.</string>
-    <string name="logs_config_status_applied">ANGEWENDET</string>
-    <string name="logs_config_status_pending">AUSSTEHEND</string>
-    <string name="logs_config_status_rejected">ABGELEHNT</string>
-    <string name="logs_config_status_timeout">ZEITÜBERSCHREITUNG</string>
-    <string name="logs_config_status_reverted">ZURÜCKGESETZT</string>
     <string name="logs_config_revert">Zurücksetzen</string>
-    <string name="logs_config_revert_chip">↩ Zurücksetzen</string>
-    <string name="logs_config_reverted_label">↩ Zurückgesetzt</string>
-    <string name="logs_config_revert_dialog_title">Diese Änderung zurücksetzen?</string>
-    <string name="logs_config_revert_success_title">Zurückgesetzt</string>
-    <string name="logs_config_revert_success_body">Einstellung wiederhergestellt.</string>
-    <string name="logs_config_revert_failed_title">Zurücksetzen fehlgeschlagen</string>
-    <string name="logs_config_revert_unknown_error">Unbekannter Fehler</string>
-    <string name="logs_config_dialog_ok">OK</string>
-    <string name="logs_config_dialog_cancel">Abbrechen</string>
-    <string name="logs_config_source_agent">Agent</string>
-    <string name="logs_config_source_user">Benutzer</string>
-    <string name="logs_config_source_agent_revert">Agent (Rücksetzung)</string>
-    <string name="logs_config_source_user_revert">Benutzer (Rücksetzung)</string>
-    <string name="logs_config_time_just_now">Gerade eben</string>
-    <string name="logs_config_time_min_ago">vor %1$d Min</string>
-    <string name="logs_config_time_hr_ago">vor %1$d Std</string>
-    <string name="logs_config_time_yesterday">Gestern</string>
 
     <!-- Welcome / onboarding (T332) -->
     <!-- TODO translate -->
-    <string name="sessionlist_welcome_title">Willkommen bei RikkaMinis</string>
-    <string name="sessionlist_welcome_subtitle">Dein erster On-Device-Agent ist fast bereit.</string>
-    <string name="sessionlist_welcome_step1_title">Anbieter hinzufügen</string>
-    <string name="sessionlist_welcome_step1_subtitle">API-Schlüssel konfigurieren oder mit OAuth anmelden</string>
-    <string name="sessionlist_welcome_step2_title">Modelle auswählen</string>
-    <string name="sessionlist_welcome_step2_subtitle">Wähle die Modelle, die du nutzen möchtest</string>
-    <string name="sessionlist_welcome_step2_locked">Schließe zuerst Schritt 1 ab</string>
-    <string name="sessionlist_welcome_step3_title">Unterhaltung starten</string>
-    <string name="sessionlist_welcome_step3_subtitle">Zum Starten tippen</string>
-    <string name="sessionlist_welcome_step3_locked">Schließe zuerst Schritt 2 ab</string>
-    <string name="sessionlist_welcome_step_done">Fertig</string>
     <!-- T-selection-add-to-input — Aktion im Auswahlmenü beim langen Drücken -->
     <string name="selection_add_to_chat_input">Zum Eingabefeld hinzufügen</string>
     <!-- T-minis-textkit Auswahlmenü-Tasten -->
@@ -1002,13 +852,7 @@
     <string name="composer_swipe_release_to_send">Loslassen zum Senden</string>
     <string name="composer_swipe_release_to_queue">Loslassen zum Einreihen</string>
     <!-- T-android-update-check-403-hint — friendly update-check failure hints -->
-    <string name="update_error_network_unreachable">Update-Server nicht erreichbar. Netzwerk prüfen und erneut versuchen.</string>
-    <string name="update_error_forbidden_with_link">Update-Server nicht erreichbar, möglicherweise durch das Netzwerk blockiert. GitHub Releases zum manuellen Download öffnen.</string>
-    <string name="update_error_open_releases">GitHub Releases öffnen</string>
     <!-- T-android-crash-freq-share -->
-    <string name="crash_freq_dialog_title">Mehrere Abstürze erkannt</string>
-    <string name="crash_freq_dialog_message">RikkaMinis ist in der letzten Stunde mehrfach abgestürzt. Absturzprotokolle teilen, um das Problem zu beheben?</string>
-    <string name="crash_freq_dialog_share">Protokolle teilen</string>
     <string name="crash_freq_dialog_dismiss">Nicht jetzt</string>
     <string name="crash_freq_email_subject">RikkaMinis-Absturzbericht %1$s</string>
     <string name="crash_freq_share_chooser">Absturzprotokolle senden</string>
@@ -1117,16 +961,9 @@
     <string name="thinking_truncated_hint">Letzte %1$dK von %2$dK Zeichen werden angezeigt</string>
     <string name="thinking_view_full">Vollständigen Inhalt anzeigen</string>
     <!-- Spoken substitutions for links during read-aloud (TTS) -->
-    <string name="voice_link_to_host">Link zu %1$s</string>
-    <string name="voice_bare_link">Link</string>
     <!-- [T-android-voice-correction] Consent + correction UI -->
     <string name="voice_provider_system">System</string>
     <string name="add_provider_subtitle_kimi">Kimi Coding Plan — mit Kimi-Konto anmelden</string>
-    <string name="kimi_login_title">Mit Kimi Code anmelden</string>
-    <string name="kimi_login_instructions">Öffne die Bestätigungsseite und gib diesen Code ein, um RikkaMinis zu autorisieren:</string>
-    <string name="kimi_login_copy_code">Code kopieren</string>
-    <string name="kimi_login_open_verification">Bestätigungsseite öffnen</string>
-    <string name="kimi_login_waiting">Warte auf Autorisierung…</string>
     <string name="browser_downloads_title">Downloads</string>
     <string name="browser_downloads_clear">Leeren</string>
     <string name="browser_downloads_empty">Keine Downloads</string>
@@ -1179,7 +1016,6 @@
     <string name="backup_secret_without">Ohne Schlüssel</string>
     <string name="webdav_notify_title_restored">WebDAV-Wiederherstellung</string>
     <string name="webdav_notify_title">WebDAV-Backup</string>
-    <string name="webdav_loading">Lade Backups…</string>
     <string name="webdav_remote_empty">Keine Backups auf dem Server</string>
     <string name="webdav_restore">Wiederherstellen</string>
     <string name="webdav_delete">Löschen</string>
@@ -1202,7 +1038,6 @@
     <string name="appearance_chat_menu_section_topbar">Symbolleiste</string>
     <string name="input_history_title">Eingabeverlauf</string>
     <string name="input_history_topbar_description">Zeigt eine durchsuchbare Nachrichtenliste in der Symbolleiste. Tippe auf einen Eintrag, um direkt zur Nachricht zu springen.</string>
-    <string name="input_history_search_hint">Nachrichten suchen…</string>
     <string name="input_history_search">Suchen</string>
     <string name="input_history_done">Fertig</string>
     <string name="input_history_empty">Noch keine Nachrichten</string>
@@ -1213,7 +1048,6 @@
     <string name="appearance_chat_menu_footer_attach">Wählen Sie, welche Anhänge-Aktionen im „＋"-Menü des Eingabefelds erscheinen und deren Reihenfolge. Wenn jede Aktion ausgeblendet wird, verschwindet die „＋"-Schaltfläche; bleibt genau eine übrig, wird sie direkt neben Senden als Schaltfläche angezeigt.</string>
     <string name="composer_model_picker_button_title">Modellauswahl-Schaltfläche</string>
     <string name="composer_model_picker_button_description">Zeigt die Kreis-Schaltfläche mit Pfeil nach oben links im Eingabefeld für den Ein-Tipp-Zugriff auf die Modellauswahl. Der Modellname in der oberen rechten Untertitel bleibt in jedem Fall antippbar.</string>
-    <string name="chat_menu_pin_to_footer">Pin to footer</string>
     <string name="chat_menu_settings_always_last">Always last</string>
     <string name="back_to_exit_press_again">Press back again to exit</string>
     <string name="backup_snapshot_section_title">Lokale Snapshots</string>
@@ -1269,7 +1103,6 @@
     <string name="sysmsg_compacted_count">%1$d Nachrichten komprimiert</string>
     <string name="sysmsg_compact_failed">Komprimierung fehlgeschlagen: %1$s</string>
     <string name="sysmsg_context_full_hint">Der Kontext wird voll (%1$d / %2$d Tokens). Führen Sie /compact aus, um ältere Turns in eine Zusammenfassung zu falten.</string>
-    <string name="sysmsg_context_full_auto">Der Kontext wird voll (%1$d / %2$d Tokens) — ältere Turns werden automatisch zu einer Zusammenfassung komprimiert.</string>
     <string name="sysmsg_wait_compact">Warten Sie, bis die aktuelle Komprimierung abgeschlossen ist, bevor Sie senden.</string>
     <string name="sysmsg_context_trimmed">Kontext hat das Limit %1$d erreicht; die ältesten %2$d Nachrichten wurden entfernt, um fortzufahren.</string>
     <string name="sysmsg_compact_no_provider">Kein Provider konfiguriert. Komprimierung nicht möglich.</string>
@@ -1408,7 +1241,6 @@
     <string name="soul_lang_zh">中文</string>
     <string name="soul_lang_en">English</string>
     <string name="soul_body_placeholder">Beschreibe, wie der Agent klingen, denken und sich verhalten soll…</string>
-    <string name="soul_length_indicator">%1$d Zeichen</string>
     <string name="soul_count_zero">0 Zeichen</string>
     <string name="soul_count_chars">%1$d / %2$d Zeichen</string>
     <string name="soul_count_words">%1$d / %2$d Wörter</string>
@@ -1424,9 +1256,7 @@
     <string name="soul_injection_error">Dies sieht nach einer Anweisung an das Modell aus, nicht nach Persönlichkeitsanleitung. Phrasen wie "frühere Anweisungen ignorieren" sind in SOUL.md nicht erlaubt – bleiben Sie bei echtem Charakter, Ton und Verhalten.</string>
     <string name="skills_search_placeholder">Fähigkeiten suchen</string>
     <string name="skills_search_no_match">Keine Fähigkeiten entsprechen "%1$s".</string>
-    <string name="webpreview_open_external_failed">Keine App verfügbar, um dies zu öffnen</string>
     <string name="webpreview_more">Mehr</string>
-    <string name="webpreview_collapse">Einklappen</string>
     <string name="webpreview_desktop_site">Desktop-Website</string>
     <string name="webpreview_mobile_site">Mobile Website</string>
     <string name="webpreview_pin_to_home">Zum Startbildschirm hinzufügen</string>
@@ -1437,26 +1267,12 @@
     <string name="filebrowser_show_hidden">Versteckte Dateien anzeigen</string>
     <string name="filebrowser_hide_hidden">Versteckte Dateien ausblenden</string>
     <string name="filebrowser_sort_by">Sortieren nach</string>
-    <string name="export_summary_format">Format</string>
-    <string name="export_summary_format_value_json">JSON</string>
-    <string name="export_summary_format_value_txt">Klartext</string>
-    <string name="export_summary_messages">Nachrichten</string>
-    <string name="export_summary_messages_value">%1$d Nachrichten</string>
-    <string name="export_summary_timerange">Zeitraum</string>
-    <string name="export_summary_timerange_value">%1$s — %2$s</string>
-    <string name="export_summary_attachments">Anhänge</string>
-    <string name="export_summary_attachments_value">%1$d Bilder / %2$d Videos</string>
-    <string name="export_summary_size">Geschätzte Größe</string>
-    <string name="export_summary_size_value">~ %1$s</string>
-    <string name="export_progress_running">Exportiere %1$d / %2$d…</string>
-    <string name="export_progress_done">Export abgeschlossen</string>
     <string name="export_progress_failed">Export fehlgeschlagen</string>
     <string name="export_empty_hint">Diese Unterhaltung enthält noch keinen Inhalt zum Exportieren</string>
     <string name="appearance_section_chat_title">Chat-Titel</string>
     <string name="appearance_show_chat_title">Chat-Titel anzeigen</string>
     <string name="appearance_show_chat_title_subtitle">Beim Scrollen einen fixierten Titelschwimmer anzeigen</string>
     <string name="appearance_show_chat_title_footer">Den aktuellen Sitzungstitel beim Verlaufsscrollen als schwebendes Element oben im Chat anzeigen.</string>
-    <string name="chat_title_pill_session_default">Ohne Titel</string>
     <string name="appearance_section_deep_thinking">Tiefes Denken</string>
     <string name="appearance_auto_expand_thinking_title">Denken beim Streamen automatisch erweitern</string>
     <string name="appearance_auto_expand_thinking_footer">Wenn aktiviert, wird ein neuer Denkblock automatisch erweitert, während das Modell denkt, und beim Abschluss eingeklappt. Wenn deaktiviert, bleiben Denkblöcke eingeklappt – tippen Sie auf einen, um ihn zu lesen.</string>
@@ -1465,7 +1281,6 @@
     <string name="settings_memory_global_enabled_title">Speicher standardmäßig aktiviert</string>
     <string name="settings_memory_global_enabled_subtitle">Wenn deaktiviert, überspringen neue Sitzungen standardmäßig GLOBAL.md und den täglichen Speicher</string>
     <string name="shizuku_title">Shizuku</string>
-    <string name="shizuku_settings_subtitle">Privilegierte Android-Steuerung über Shizuku oder AXManager</string>
     <string name="shizuku_status_header">Status</string>
     <string name="shizuku_status_footer">Shizuku stellt privilegierte System-APIs für Benutzer-Apps ohne Root bereit, indem ein kleiner Dienst über drahtloses ADB oder Root gestartet wird. Es werden zwei kompatible Manager-Apps unterstützt: Shizuku (RikkaApps) und AXManager (Axeron). Installieren Sie eine davon. Nach der Autorisierung kann RikkaMinis das android-shizuku-cli-CLI für die Verwaltung von Paketen, Berechtigungen, Einstellungen, Eingaben und Aktivitäten verwenden.</string>
     <string name="shizuku_actions_header">Nächster Schritt</string>
@@ -1535,8 +1350,6 @@
     <string name="model_group_detail_limit_context_window">Kontextfenster begrenzen</string>
     <string name="model_group_detail_max_context">Max. Kontext</string>
     <string name="model_group_detail_unlimited">Unbegrenzt</string>
-    <string name="model_group_detail_context_limit_unavailable">Gruppenmitglieder haben kein Kontextfenster angegeben – ein Limit kann nicht angewendet werden. Fügen Sie zuerst ein Modell hinzu oder prüfen Sie die Modellmetadaten.</string>
-    <string name="model_group_detail_context_limit_runtime_capped">Aktuelles Mitglied max. Kontext=%1$s; gespeicherter Wert %2$s wird zur Laufzeit begrenzt. Der gespeicherte Wert bleibt erhalten und wird erneut angewendet, wenn Sie ein Modell mit größerem Kontext hinzufügen.</string>
     <string name="add_provider_subtitle_openai">Funktioniert mit Codex, DeepSeek, Moonshot, Groq und anderen kompatiblen Anbietern</string>
     <string name="add_provider_subtitle_anthropic">Funktioniert mit Claude und Diensten, die das Anthropic-Protokoll unterstützen</string>
     <string name="add_provider_subtitle_gemini">Funktioniert mit der Gemini-Serie und Google AI Studio</string>
@@ -1566,8 +1379,6 @@
     <string name="backup_chat_window_days">%1$d Tage</string>
     <string name="backup_done_chat">%1$d Sitzung(en), %2$d Nachricht(en) wiederhergestellt</string>
     <string name="backup_saved">Sicherung gespeichert</string>
-    <string name="backup_generating_title">Sicherung wird erstellt …</string>
-    <string name="backup_generating_body">Die Sicherungsdatei wird erstellt. Dies kann bei großen Chat-Verläufen einige Sekunden dauern.</string>
     <string name="backup_done_title">Wiederherstellung abgeschlossen</string>
     <string name="backup_err_write">Datei konnte nicht geschrieben werden: %1$s</string>
     <string name="backup_err_read">Die ausgewählte Datei konnte nicht gelesen werden</string>
@@ -1592,16 +1403,11 @@
     <string name="model_picker_modality_image">Bild</string>
     <string name="model_picker_modality_audio">Audio</string>
     <string name="model_picker_modality_video">Video</string>
-    <string name="voice_system_recognition_online">Systemerkennung (Online)</string>
-    <string name="voice_system_recognition_offline">Systemerkennung (Offline)</string>
-    <string name="voice_system_online_subtitle">Android-integriert, benötigt Netzwerk</string>
-    <string name="voice_system_offline_subtitle">Android-integriert, funktioniert offline</string>
     <string name="model_picker_non_text_warning_title">Dieses Modell funktioniert möglicherweise nicht als Agent</string>
     <string name="model_picker_non_text_warning_body">%1$s gibt %2$s aus und kann normalerweise keine Agent-Aufgabe ausführen. Wählen Sie für die Sitzung ein Textausgabe-Modell oder fügen Sie dieses Modell als Werkzeug in eine Agent-Schleife ein, damit der Agent es bei Bedarf aufrufen kann, um %3$s zu erzeugen.</string>
     <string name="model_picker_non_text_warning_use_anyway">Trotzdem verwenden</string>
     <string name="model_picker_non_text_warning_choose_other">Anderes Modell wählen</string>
     <string name="system_permissions_title">Systemberechtigungen</string>
-    <string name="system_permissions_subtitle">Betriebssystem-Berechtigungen, die über die Systemeinstellungen gewährt werden</string>
     <string name="system_permissions_section_a11y">Bedienungshilfen</string>
     <string name="system_permissions_a11y_row">RikkaMinis Bedienungshilfen-Dienst</string>
     <string name="system_permissions_a11y_enabled">Aktiviert – android-a11y-cli ist bereit</string>
@@ -1618,7 +1424,6 @@
     <string name="a11y_service_summary">UI-Automatisierungs-Backend für RikkaMinis</string>
     <string name="back">Zurück</string>
     <string name="webapp_activity_label">RikkaMinis WebApp</string>
-    <string name="webapp_source_missing">Quelldatei existiert nicht mehr.</string>
     <string name="webapp_external_nav_blocked">Externe Navigation blockiert.</string>
     <string name="webapp_pin_unsupported">Verknüpfung wird von diesem Launcher nicht unterstützt.</string>
     <string name="webapp_pin_failed">Hinzufügen zum Startbildschirm fehlgeschlagen.</string>
@@ -1645,7 +1450,6 @@
     <string name="import_zip_no_supported">Keine importierbaren Dateien im Archiv</string>
     <string name="import_zip_summary">%1$d von %2$d Dateien importiert</string>
     <string name="image_budget_compressed">%1$d Bild(er) vor dem Senden komprimiert</string>
-    <string name="image_budget_dropped">%1$d überdimensionierte URL(s) übersprungen (&gt;5MB)</string>
     <string name="image_budget_total_exceeded">Gesamtbildgröße überschreitet 25MB; spätere Bilder übersprungen</string>
     <string name="image_budget_request_elided">Ältere %1$d Bild(er) aus der Anfrage entfernt, um das 25MB-Budget einzuhalten</string>
     <string name="chat_message_large_collapsed_title">Großer Inhalt (%1$s)</string>

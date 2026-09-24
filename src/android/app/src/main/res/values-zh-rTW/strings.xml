@@ -24,9 +24,6 @@
     <string name="session_skills_footer">僅為此會話切換技能。預設值來自「設定 → 技能」。</string>
     <string name="session_skills_empty_title">未安裝任何技能</string>
     <string name="session_skills_empty_subtitle">從「設定 → 技能」匯入技能。</string>
-    <string name="speech_lang_picker_title">語音語言</string>
-    <string name="speech_lang_picker_empty">當前識別引擎沒有可用的語言。</string>
-    <string name="speech_lang_picker_selected">已選中</string>
     <string name="standard_sheet_close">關閉</string>
     <string name="token_usage_sheet_title">會話 Token 用量</string>
     <string name="token_usage_section_context">上下文</string>
@@ -85,13 +82,9 @@
     <string name="webpreview_close">關閉</string>
     <string name="webpreview_stop">停止載入</string>
     <string name="webpreview_reload">重新載入</string>
-    <string name="webpreview_share">分享</string>
     <string name="webpreview_open_external">在外部瀏覽器中開啟</string>
-    <string name="webpreview_open_external_failed">沒有可用應用程式來開啟</string>
-    <string name="webpreview_open_in_browser">在瀏覽器中開啟</string>
     <string name="webpreview_open_fullscreen">全螢幕開啟</string>
     <string name="webpreview_more">更多</string>
-    <string name="webpreview_collapse">收起</string>
     <string name="webpreview_desktop_site">桌面版網頁</string>
     <string name="webpreview_mobile_site">行動版網頁</string>
     <string name="webpreview_pin_to_home">加入主畫面</string>
@@ -104,7 +97,6 @@
     <string name="filebrowser_delete_title">刪除 “%1$s”？</string>
     <string name="filebrowser_delete_message">此操作無法復原。</string>
     <string name="filebrowser_error_title">錯誤</string>
-    <string name="filebrowser_sort_action">排序</string>
     <string name="filebrowser_sort_ascending">升序</string>
     <string name="filebrowser_sort_descending">降序</string>
     <string name="filebrowser_sort_folders_first">資料夾優先</string>
@@ -122,12 +114,9 @@
     <string name="filepreview_office_subtitle">Office 文件需要使用外部應用預覽。</string>
     <string name="filepreview_pdf_render_failed">無法渲染 PDF：%1$s</string>
     <string name="filepreview_pdf_empty">空文件</string>
-    <string name="filepreview_image_decode_error">無法解碼圖片</string>
-    <string name="filepreview_image_load_error">圖片載入失敗</string>
     <string name="filepreview_file_read_error">讀取檔案失敗</string>
     <string name="filepreview_csv_parse_error">解析 CSV 失敗</string>
     <string name="filepreview_archive_read_error">讀取壓縮檔失敗</string>
-    <string name="filepreview_pdf_render_error">渲染 PDF 失敗</string>
     <string name="filepreview_page_n">第 %1$d 頁</string>
     <string name="sessionlist_section_pinned">置頂</string>
     <string name="sessionlist_section_today">今天</string>
@@ -135,17 +124,6 @@
     <string name="sessionlist_section_this_week">本週</string>
     <string name="sessionlist_section_this_month">本月</string>
     <string name="sessionlist_section_earlier">更早</string>
-    <string name="sessionlist_select_title">選擇會話</string>
-    <string name="sessionlist_n_selected">已選 %1$d 項</string>
-    <string name="sessionlist_select_all">全選</string>
-    <string name="sessionlist_deselect_all">全不選</string>
-    <string name="sessionlist_select_action">選擇</string>
-    <string name="sessionlist_settings">設定</string>
-    <string name="sessionlist_shell">Shell</string>
-    <string name="sessionlist_shell_terminal">Shell 終端</string>
-    <string name="sessionlist_rootfs_management">Rootfs 管理</string>
-    <string name="sessionlist_open_browser">開啟瀏覽器</string>
-    <string name="sessionlist_browser_settings">瀏覽器設定</string>
     <string name="sessionlist_pin">置頂</string>
     <string name="sessionlist_unpin">取消置頂</string>
     <string name="sessionlist_badge_paused">已暫停</string>
@@ -153,28 +131,10 @@
     <string name="sessionlist_export_json">JSON</string>
     <string name="sessionlist_export_plain">純文字</string>
     <!-- T-export-optimize (b443b54d) — 分批/打包匯出進度 + 預覽 -->
-    <string name="export_summary_format">匯出格式</string>
-    <string name="export_summary_format_value_json">JSON</string>
-    <string name="export_summary_format_value_txt">純文字</string>
-    <string name="export_summary_messages">選中訊息</string>
-    <string name="export_summary_messages_value">%1$d 則</string>
-    <string name="export_summary_timerange">時間範圍</string>
-    <string name="export_summary_timerange_value">%1$s — %2$s</string>
-    <string name="export_summary_attachments">附件</string>
-    <string name="export_summary_attachments_value">%1$d 張圖片 / %2$d 段影片</string>
-    <string name="export_summary_size">預計大小</string>
-    <string name="export_summary_size_value">約 %1$s</string>
-    <string name="export_progress_running">正在匯出 %1$d / %2$d…</string>
-    <string name="export_progress_done">匯出完成</string>
     <string name="export_progress_failed">匯出失敗</string>
-    <string name="sessionlist_edit_title_category">編輯標題與分類</string>
     <string name="sessionlist_regenerate_title">重新生成標題</string>
     <string name="sessionlist_regenerating_title">正在重新生成標題…</string>
-    <string name="sessionlist_duplicate">複製</string>
-    <string name="sessionlist_search_action">搜尋</string>
-    <string name="sessionlist_dismiss">關閉</string>
     <string name="sessionlist_delete_one_title">刪除此對話？</string>
-    <string name="sessionlist_delete_n_title">刪除 %1$d 個對話？</string>
     <string name="sessionlist_delete_message">此操作無法復原。</string>
     <string name="browser_title">瀏覽器</string>
     <string name="browser_settings_title">瀏覽器設定</string>
@@ -192,7 +152,6 @@
     <string name="chat_typing_indicator">%1$s 正在思考</string>
     <string name="chat_queued_indicator">排隊中 — 前面還有 %1$d 個請求</string>
     <string name="chat_waiting_network">等待回應中 — %1$d 秒</string>
-    <string name="chat_input_placeholder">傳訊息給 %1$s（@ 提及檔案）</string>
     <string name="browser_takeover">接管</string>
     <string name="browser_settings_done">完成</string>
     <string name="browser_settings_user_agent">使用者代理</string>
@@ -220,13 +179,10 @@
     <string name="browser_history_search">搜尋歷史</string>
     <string name="browser_history_empty_title">沒有瀏覽紀錄</string>
     <string name="browser_history_empty_subtitle">歷史紀錄保留 7 天</string>
-    <string name="browser_history_results">結果</string>
     <string name="browser_history_clear_dialog_title">清除瀏覽紀錄？</string>
     <string name="browser_history_clear_dialog_message">這將刪除所有瀏覽紀錄。此操作無法復原。</string>
     <string name="terminal_title">RikkaMinis Shell</string>
     <string name="terminal_clear">清屏</string>
-    <string name="terminal_show_keyboard">顯示</string>
-    <string name="terminal_hide_keyboard">隱藏</string>
 
     <!-- T172-A providers / models / settings i18n -->
     <string name="provider_list_providers">AI 服務商</string>
@@ -271,21 +227,15 @@
 
     <string name="provider_detail_status">狀態</string>
     <string name="provider_detail_enabled">已啓用</string>
-    <string name="provider_detail_refresh_models">重新整理模型</string>
     <string name="provider_detail_manage_models">管理全部模型</string>
     <string name="provider_detail_api_connection">API 與連線</string>
-    <string name="provider_detail_manage_models_search_hint">搜尋模型…</string>
     <string name="provider_detail_manage_models_all_header">全部模型 (%1$d)</string>
-    <string name="provider_detail_models_title">全部模型</string>
     <string name="provider_detail_add_custom_model">添加自定義模型</string>
     <string name="provider_detail_delete_provider">刪除 AI 服務商</string>
     <string name="provider_detail_delete_model">Delete Model</string>
     <string name="common_cancel">取消</string>
     <string name="provider_detail_save_key">儲存金鑰</string>
     <string name="common_edit">編輯</string>
-    <string name="provider_detail_paste_bearer_token">貼上 bearer token</string>
-    <string name="provider_detail_save_token">儲存 Token</string>
-    <string name="common_change">更換</string>
     <string name="common_remove">移除</string>
     <string name="add_provider_choose_provider">選擇 AI 服務商</string>
     <string name="add_provider_you_can_add_multiple_instances_of_the_sa">你可以新增同一供應商的多個實例（例如工作與個人帳號）。OpenAI 和 Anthropic 也支援相容的第三方端點 —— 選擇對應的通訊協定後再設定自訂 API Base URL。</string>
@@ -296,16 +246,6 @@
     <string name="add_provider_your_key_is_stored_securely_in_encrypted">你的金鑰儲存在加密儲存中,不會離開裝置。</string>
     <string name="add_provider_endpoint">端點</string>
     <string name="add_provider_custom_api_base_optional">自定義 API 地址（可選）</string>
-    <string name="add_provider_authentication">認證</string>
-    <string name="add_provider_sign_in_succeeded_the_token_is_stored_in">登入成功。token 已儲存在加密儲存中。點擊儲存以新增供應商。</string>
-    <string name="add_provider_authenticated">已認證</string>
-    <string name="add_provider_token">Token</string>
-    <string name="add_provider_save_provider">保存 AI 服務商</string>
-    <string name="add_provider_opens_the_provider_s_web_sign_in_flow_af">開啟供應商的網頁登入流程。登入後,token 會自動寫入這裡。</string>
-    <string name="add_provider_signing_in">正在登入…</string>
-    <string name="add_provider_or_configure_manually">或手動配置</string>
-    <string name="add_provider_for_third_party_coding_plans_e_g_minimax">For third-party Coding Plans (e.g. MiniMax, Kimi) or compatible proxy endpoints, enter the API base URL and bearer token manually.</string>
-    <string name="add_provider_bearer_token">Bearer Token</string>
     <string name="add_custom_model_model_id">模型 ID</string>
     <string name="add_custom_model_display_name_optional">顯示名稱（選填）</string>
     <string name="model_entry_model_detail">模型詳情</string>
@@ -377,24 +317,17 @@
     <string name="model_groups_groups_let_you_combine_models_for_fallba">模型分組可實現回退或負載均衡。</string>
     <string name="model_groups_group_name">分組名稱</string>
     <string name="model_groups_create">創建</string>
-    <string name="model_groups_none">無</string>
     <string name="model_groups_set_default_primary">Set as Default Primary</string>
     <string name="model_groups_clear_default_primary">Clear Default Primary</string>
     <string name="agent_loop_section_entry_title">Agent Loop Models</string>
     <string name="agent_loop_section_entry_subtitle">Models and groups usable by the agent via minis-model-use</string>
     <string name="add_models_to_group_search_models">搜索模型</string>
     <string name="add_models_to_group_clear">清除</string>
-    <string name="settings_agent_loop_models">智慧型代理循環模型</string>    <string name="agent_loop_models_groups">分組</string>
-    <string name="agent_loop_models_picking_a_group_pins_every_model_in_it_a">選取群組會固定其中所有模型。在模型群組裡新增或移除成員。</string>
-    <string name="agent_loop_models_add_a_provider_and_refresh_its_model_lis">新增供應商並重新整理其模型列表以填入此選擇器。</string>
-    <string name="agent_loop_models_no_models_or_groups_available_yet">尚無可用的模型或群組。</string>
-    <string name="agent_loop_models_selected">已選擇</string>
-    <string name="agent_loop_models_not_selected">未選取</string>
+    <string name="agent_loop_models_groups">分組</string>
 
     <!-- T172-A parameterized strings -->
     <string name="add_custom_model_id_footer">Model ID 是傳送到 %1$s 的 API 識別符。顯示名稱是模型選擇器裡更友善的標籤;留空時回落到 Model ID。</string>
     <string name="add_custom_model_eg_id_placeholder">例如 gpt-4o-custom</string>
-    <string name="add_provider_built_in_models_count">%1$d 個內建模型</string>
     <string name="add_provider_subtitle_openai">支援 Codex、DeepSeek、Moonshot、Groq 等相容廠商</string>
     <string name="add_provider_subtitle_anthropic">支援 Claude 及相容 Anthropic 協議的服務商</string>
     <string name="add_provider_subtitle_gemini">支援 Gemini 系列及 Google AI Studio</string>
@@ -408,7 +341,6 @@
     <string name="provider_detail_refresh_no_key">未設定 API 金鑰——沒有可重新整理的內容。</string>
     <string name="provider_detail_refresh_preserved">無相符的 models.dev 項目——保留現有模型清單。</string>
     <string name="provider_detail_refresh_failed">無法重新整理模型。</string>
-    <string name="provider_detail_refreshing">重新整理中…</string>
     <string name="provider_detail_refresh_models_list">重新整理模型清單</string>
     <string name="provider_detail_delete_provider_confirm">確定要刪除 \"%1$s\" 嗎?此操作無法復原。</string>
     <string name="provider_detail_delete_model_confirm">確定要刪除 \"%1$s\" 嗎?此操作無法復原。</string>
@@ -528,7 +460,6 @@
     <string name="webdav_notify_title_failed">WebDAV 操作失敗</string>
     <string name="webdav_notify_title_restored">WebDAV 還原</string>
     <string name="webdav_notify_title">WebDAV 備份</string>
-    <string name="webdav_loading">正在載入備份…</string>
     <string name="webdav_remote_empty">伺服器上沒有備份</string>
     <string name="webdav_restore">還原</string>
     <string name="webdav_delete">刪除</string>
@@ -559,8 +490,6 @@
     <string name="backup_secret_body">匯出的檔案含有提供商的 API 金鑰與登入憑證，任何取得該檔案的人都能使用。請妥善保管，勿分享。金鑰以明文 Base64 儲存（未加密），任何拿到檔案的人都能讀取。</string>
     <string name="backup_secret_confirm">包含金鑰並匯出</string>
     <string name="backup_secret_without">不含金鑰</string>
-    <string name="backup_generating_title">正在產生備份…</string>
-    <string name="backup_generating_body">正在建置備份檔案。聊天記錄較多時可能需要數秒。</string>
     <string name="backup_done_title">還原完成</string>
     <string name="backup_err_write">寫入失敗：%1$s</string>
     <string name="backup_err_read">無法讀取所選檔案</string>
@@ -601,15 +530,12 @@
     <string name="mount_all_files_access_required_desc">未開啟時，shell 只能看到本應用程式建立的檔案——其他應用程式（如 Obsidian）寫入的檔案會被隱藏。點此前往系統設定授權。</string>
     <string name="mount_detail_title">編輯掛載</string>
     <string name="mount_detail_browse_files">瀏覽檔案</string>
-    <string name="mount_detail_browse_files_toast">在聊天中以 @ 提及存取此掛載。</string>
     <string name="mount_path_unavailable">路徑不可用</string>
     <string name="mount_add_failed">無法新增掛載，名稱可能已被使用或無效。</string>
 
     <!-- T241: 斜線指令面板 + 選擇模型 sheet -->
-    <string name="slash_compact_subtitle">壓縮對話歷史為摘要</string>
     <string name="slash_memory_writes_on">寫入已開啟 — 點擊切換</string>
     <string name="slash_memory_writes_off">寫入已關閉 — 點擊切換</string>
-    <string name="slash_thinking_subtitle">思考 %1$s — 點擊切換</string>
     <string name="slash_thinking_unsupported">目前模型不支援</string>
     <string name="thinking_level_off">關閉</string>
     <string name="thinking_level_low">低</string>
@@ -645,51 +571,15 @@
     <string name="env_var_privacy_footer">開啟後，shell-execute 輸出中偵測到的環境變數值會在送達模型前被打碼（例如 `sk-1********ajhks`）。少於 8 個字元的值會被全部替換為 `*`。聊天中使用者可見的輸出維持不變。</string>
 
     <!-- T288 — 日誌 / 設定變更 -->
-    <string name="logs_config_used_count">%1$d / %2$d 已使用</string>
-    <string name="logs_config_clear_all">清除全部</string>
-    <string name="logs_config_empty">尚無設定變更記錄。</string>
-    <string name="logs_config_status_applied">已套用</string>
-    <string name="logs_config_status_pending">待套用</string>
-    <string name="logs_config_status_rejected">已拒絕</string>
-    <string name="logs_config_status_timeout">逾時</string>
-    <string name="logs_config_status_reverted">已撤銷</string>
     <string name="logs_config_revert">撤銷</string>
-    <string name="logs_config_revert_chip">↩ 撤銷</string>
-    <string name="logs_config_reverted_label">↩ 已撤銷</string>
-    <string name="logs_config_revert_dialog_title">撤銷此次變更？</string>
-    <string name="logs_config_revert_success_title">已撤銷</string>
-    <string name="logs_config_revert_success_body">設定已還原。</string>
-    <string name="logs_config_revert_failed_title">撤銷失敗</string>
-    <string name="logs_config_revert_unknown_error">未知錯誤</string>
-    <string name="logs_config_dialog_ok">確定</string>
-    <string name="logs_config_dialog_cancel">取消</string>
-    <string name="logs_config_source_agent">智能體</string>
-    <string name="logs_config_source_user">使用者</string>
-    <string name="logs_config_source_agent_revert">智能體撤銷</string>
-    <string name="logs_config_source_user_revert">使用者撤銷</string>
-    <string name="logs_config_time_just_now">剛剛</string>
-    <string name="logs_config_time_min_ago">%1$d 分鐘前</string>
-    <string name="logs_config_time_hr_ago">%1$d 小時前</string>
-    <string name="logs_config_time_yesterday">昨天</string>
 
     <!-- Welcome / onboarding (T332) -->
-    <string name="sessionlist_welcome_title">歡迎使用 RikkaMinis</string>
-    <string name="sessionlist_welcome_subtitle">你的第一個端側 Agent 即將就緒。</string>
     <string name="overlay_completion_completed">執行完成</string>
     <string name="overlay_completion_failed">執行失敗</string>
     <string name="overlay_completion_cancelled">已取消</string>
     <!-- [T-dedup-neutral-status] same-turn deduplicated tool pill content -->
     <string name="tool_dedup_skipped">已跳過 — 相同呼叫已執行過</string>
     <string name="overlay_completion_timeout">已逾時</string>
-    <string name="sessionlist_welcome_step1_title">新增供應商</string>
-    <string name="sessionlist_welcome_step1_subtitle">設定 API Key 或使用 OAuth 登入</string>
-    <string name="sessionlist_welcome_step2_title">選擇模型</string>
-    <string name="sessionlist_welcome_step2_subtitle">選擇你想使用的模型</string>
-    <string name="sessionlist_welcome_step2_locked">請先完成第 1 步</string>
-    <string name="sessionlist_welcome_step3_title">開始對話</string>
-    <string name="sessionlist_welcome_step3_subtitle">點擊開始</string>
-    <string name="sessionlist_welcome_step3_locked">請先完成第 2 步</string>
-    <string name="sessionlist_welcome_step_done">已完成</string>
 
     <!-- T336 follow-up: ASK_ONCE 在進程生命週期內只問一次,改文案避免誤導 -->
     <string name="perm_level_ask_once">本次啟動詢問</string>
@@ -698,11 +588,9 @@
     <string name="perm_tool_a11y_cli">android-a11y-cli</string>
     <string name="perm_tool_shizuku_cli">android-shizuku-cli</string>
     <string name="perm_section_a11y">無障礙</string>
-    <string name="perm_section_shizuku">Shizuku</string>
     <string name="perm_a11y_section_footer">android-a11y-cli 讓 Agent 讀取螢幕 UI、模擬點擊與輸入、監聽系統事件。下方兩項都需配置:選擇 Agent 權限,並在系統設定啟用無障礙服務。</string>
     <string name="perm_shizuku_section_footer">android-shizuku-cli 透過 Shizuku 服務呼叫 Android 高權限 API(安裝應用、settings put、強制停止等)。Shizuku 由無線 ADB 或 root 啟動。下方兩項都需配置。</string>
     <string name="perm_a11y_cli_description">讓 Agent 讀取螢幕、點擊、輸入、監聽事件</string>
-    <string name="perm_shizuku_cli_description">透過 Shizuku 呼叫 Android 高權限 API</string>
     <string name="perm_a11y_open_settings">前往無障礙設定</string>
     <string name="perm_system_authorization">系統授權</string>
     <string name="perm_agent_policy">Agent 權限</string>
@@ -726,20 +614,13 @@
 
     <!-- T-imgsize: composer-side image-budget Snackbar messages -->
     <string name="image_budget_compressed">傳送前已壓縮 %1$d 張圖片</string>
-    <string name="image_budget_dropped">已略過 %1$d 個超大圖片 URL（&gt;5MB）</string>
     <string name="image_budget_total_exceeded">圖片總大小超過 25MB，已捨棄後續圖片</string>
     <!-- T-request-imgsize: request-level image-budget Snackbar message -->
     <string name="image_budget_request_elided">為配合 25MB 請求額度，已省略 %1$d 張歷史圖片</string>
     <string name="composer_swipe_release_to_send">放開以發送</string>
     <string name="composer_swipe_release_to_queue">放開以加入佇列</string>
     <!-- T-android-update-check-403-hint — friendly update-check failure hints -->
-    <string name="update_error_network_unreachable">無法連線到更新伺服器，請檢查網路後重試。</string>
-    <string name="update_error_forbidden_with_link">存取更新伺服器失敗，可能受網路限制。可前往 GitHub Releases 手動下載最新版本。</string>
-    <string name="update_error_open_releases">開啟 GitHub Releases</string>
     <!-- T-android-crash-freq-share -->
-    <string name="crash_freq_dialog_title">偵測到多次崩潰</string>
-    <string name="crash_freq_dialog_message">RikkaMinis 在過去 1 小時內多次崩潰。是否分享崩潰日誌以協助修復？</string>
-    <string name="crash_freq_dialog_share">分享日誌</string>
     <string name="crash_freq_dialog_dismiss">暫不分享</string>
     <string name="crash_freq_email_subject">RikkaMinis 崩潰報告 %1$s</string>
     <string name="crash_freq_share_chooser">傳送崩潰日誌</string>
@@ -848,16 +729,9 @@
     <string name="thinking_truncated_hint">顯示最後 %1$dK / 共 %2$dK 字元</string>
     <string name="thinking_view_full">查看完整內容</string>
     <!-- Spoken substitutions for links during read-aloud (TTS) -->
-    <string name="voice_link_to_host">%1$s 的連結</string>
-    <string name="voice_bare_link">連結</string>
     <!-- [T-android-voice-correction] Consent + correction UI -->
     <string name="voice_provider_system">系統</string>
     <string name="add_provider_subtitle_kimi">Kimi Coding Plan — 使用 Kimi 帳號登入</string>
-    <string name="kimi_login_title">使用 Kimi Code 登入</string>
-    <string name="kimi_login_instructions">開啟驗證頁面並輸入以下代碼以授權 RikkaMinis:</string>
-    <string name="kimi_login_copy_code">複製代碼</string>
-    <string name="kimi_login_open_verification">開啟驗證頁面</string>
-    <string name="kimi_login_waiting">等待授權中…</string>
     <string name="browser_downloads_title">下載</string>
     <string name="browser_downloads_clear">清除</string>
     <string name="browser_downloads_empty">暫無下載</string>
@@ -872,7 +746,6 @@
     <string name="appearance_chat_menu_section_topbar">頂欄按鈕</string>
     <string name="input_history_title">歷史輸入</string>
     <string name="input_history_topbar_description">在頂欄顯示可搜尋的訊息清單。點選任意條目可直接跳轉至該訊息。</string>
-    <string name="input_history_search_hint">搜尋訊息…</string>
     <string name="input_history_search">搜尋</string>
     <string name="input_history_done">完成</string>
     <string name="input_history_empty">尚無訊息</string>
@@ -883,7 +756,6 @@
     <string name="appearance_chat_menu_footer_attach">選擇輸入欄「＋」選單中顯示的新增動作及其順序。隱藏所有動作時「＋」按鈕消失；只保留一個時，會直接顯示為傳送按鈕旁的獨立按鈕。</string>
     <string name="composer_model_picker_button_title">模型選擇按鈕</string>
     <string name="composer_model_picker_button_description">在輸入欄左側顯示向上箭頭的圓形按鈕，一鍵開啟模型選擇。右上角副標題中的模型名稱無論何時都可點擊。</string>
-    <string name="chat_menu_pin_to_footer">置於底欄</string>
     <string name="chat_menu_settings_always_last">固定最右</string>
     <string name="back_to_exit_press_again">再按一次返回退出</string>
     <string name="backup_snapshot_section_title">本機快照</string>
@@ -948,7 +820,6 @@
     <string name="sysmsg_compacted_count">已壓縮 %1$d 則訊息</string>
     <string name="sysmsg_compact_failed">壓縮失敗：%1$s</string>
     <string name="sysmsg_context_full_hint">上下文即將佔滿（%1$d / %2$d tokens），可執行 /compact 將較早的對話摺疊為摘要。</string>
-    <string name="sysmsg_context_full_auto">上下文即將佔滿（%1$d / %2$d tokens），正在自動壓縮較早的對話。</string>
     <string name="sysmsg_wait_compact">請等待目前壓縮完成後再傳送。</string>
     <string name="sysmsg_context_trimmed">上下文已達 %1$d 限制，已自動裁剪 %2$d 則最舊的對話以繼續任務。</string>
     <string name="sysmsg_compact_no_provider">未設定模型提供者，無法壓縮。</string>
@@ -1004,22 +875,11 @@
     <!-- i18n-rtw-backfill -->
     <string name="app_name">RikkaMinis</string>
     <string name="onboarding_default_group_name">預設模型</string>
-    <string name="new_chat">新對話</string>
     <string name="settings">設定</string>
-    <string name="providers">AI 服務商</string>
-    <string name="add_provider">新增 AI 服務商</string>
-    <string name="appearance">外觀</string>
     <string name="no_sessions">暫無會話</string>
-    <string name="no_providers">新增一個提供商以開始使用</string>
-    <string name="send">傳送</string>
-    <string name="type_message">輸入訊息…</string>
     <string name="delete">刪除</string>
     <string name="cancel">取消</string>
     <string name="save">儲存</string>
-    <string name="api_key">API Key</string>
-    <string name="label">標籤</string>
-    <string name="enabled">已啟用</string>
-    <string name="select_model">選擇模型</string>
     <string name="session_memory_title">會話中的記憶</string>
     <string name="memory_section_auto_injected">自動注入</string>
     <string name="memory_section_auto_injected_footer">在每個 agent 回合開始時載入到系統提示中。</string>
@@ -1027,7 +887,6 @@
     <string name="memory_section_tool_activity_footer">代理在此會話期間執行的記憶讀寫操作。</string>
     <string name="memory_section_written_content">寫入內容</string>
     <string name="memory_section_tool_result">工具結果</string>
-    <string name="memory_section_keywords">關鍵詞</string>
     <string name="memory_action_edit">編輯</string>
     <string name="memory_action_save">儲存</string>
     <string name="memory_action_revoke">撤銷</string>
@@ -1038,30 +897,12 @@
     <string name="memory_revoke_result_not_found">在最近的日誌中未找到該條目。</string>
     <string name="memory_revoke_result_io_error">寫入檔案出錯：%1$s</string>
     <string name="memory_save_toast">已儲存</string>
-    <string name="memory_save_error">儲存失敗：%1$s</string>
     <string name="memory_global_footer">每個會話中對智慧體可見的持久指令和偏好。智慧體無法修改此檔案。</string>
-    <string name="permissions_title">權限</string>
-    <string name="permissions_reset_all">全部重置</string>
-    <string name="permissions_reset_dialog_title">重置全部權限？</string>
-    <string name="permissions_reset_dialog_message">將每項權限恢復為預設（始終允許）。逐工具的覆蓋配置將被清除。</string>
-    <string name="permissions_reset_confirm">重置</string>
-    <string name="permissions_level_always_allow">始終允許</string>
-    <string name="permissions_level_ask_once">每次詢問</string>
-    <string name="permissions_level_not_allowed">不允許</string>
-    <string name="permissions_category_privacy">隱私</string>
-    <string name="permissions_category_media">媒體</string>
-    <string name="permissions_category_system">跟隨系統</string>
     <string name="mention_scanning">正在掃描檔案…</string>
     <string name="mention_no_match">沒有匹配的檔案</string>
     <string name="resume_banner_title">已中斷 - 點選「繼續」以恢復</string>
     <string name="resume_action">繼續</string>
-    <string name="search_chats_placeholder">搜尋會話…</string>
-    <string name="search_no_results">未找到 \"%1$s\" 的結果</string>
     <string name="stop_tool">停止工具</string>
-    <string name="mic_permission_title">需要麥克風權限</string>
-    <string name="mic_permission_message">語音輸入需要麥克風權限。點選「開啟設定」以為 RikkaMinis 授權。</string>
-    <string name="mic_permission_open_settings">開啟設定</string>
-    <string name="mic_permission_cancel">取消</string>
     <string name="bg_section_header">後臺與通知</string>
     <string name="bg_section_subtitle">電池最佳化與 OEM 自啟動</string>
     <string name="bg_section_footer">長時間執行的 agent 任務需要權限以在螢幕熄滅時保持 CPU 喚醒。沒有這些設定，系統可能會在後臺幾分鐘後暫停推理。</string>
@@ -1126,7 +967,6 @@
     <string name="soul_lang_zh">中文</string>
     <string name="soul_lang_en">English</string>
     <string name="soul_body_placeholder">描述助手的語氣、思考方式和行為偏好…</string>
-    <string name="soul_length_indicator">%1$d 字元</string>
     <string name="soul_count_zero">0 字元</string>
     <string name="soul_count_chars">%1$d / %2$d 字元</string>
     <string name="soul_count_words">%1$d / %2$d 詞</string>
@@ -1229,7 +1069,6 @@
     <string name="appearance_show_chat_title">顯示會話標題</string>
     <string name="appearance_show_chat_title_subtitle">滾動時顯示當前會話標題</string>
     <string name="appearance_show_chat_title_footer">滾動瀏覽歷史訊息時，在聊天頂部以懸浮膠囊形式顯示當前會話標題。</string>
-    <string name="chat_title_pill_session_default">未命名會話</string>
     <string name="appearance_section_tool_preview">工具狀態列</string>
     <string name="appearance_tool_preview_footer">控制 Agent 呼叫工具時輸入框上方顯示的懸浮條：可隱藏整個狀態列，或僅隱藏實時預覽縮圖。</string>
     <string name="appearance_tool_status_bar_title">工具狀態列</string>
@@ -1267,7 +1106,6 @@
     <string name="env_var_error_invalid_key">必須以字母開頭，只能使用字母、數字、下劃線</string>
     <string name="env_var_error_duplicate">同名變數已存在</string>
     <string name="log_title">日誌</string>
-    <string name="log_share_all">全部分享</string>
     <string name="log_section_logging">日誌</string>
     <string name="log_section_logging_footer">啟用後，所有控制檯輸出將每天捕獲到應用私有儲存中的日誌檔案。</string>
     <string name="log_enable_switch">啟用日誌</string>
@@ -1282,11 +1120,9 @@
     <string name="log_delete_confirm_title">刪除所有日誌？</string>
     <string name="log_delete_confirm_text">這將刪除 %1$s 的日誌檔案。此操作無法撤銷。</string>
     <string name="log_delete_confirm">全部刪除</string>
-    <string name="log_truncated_marker">…（已截斷，共 %1$s）</string>
     <string name="log_not_found">未找到日誌檔案。</string>
     <string name="log_error_reading">讀取日誌出錯: %1$s</string>
     <string name="log_share_chooser">分享日誌</string>
-    <string name="log_share_all_chooser">分享日誌</string>
     <string name="memory_title">記憶</string>
     <string name="settings_memory_global_header">預設</string>
     <string name="settings_memory_global_footer">單個會話的開關（透過 /memory 斜槓命令或"會話記憶"面板設定）會覆蓋此預設值。切換此開關不會影響已有會話。</string>
@@ -1297,7 +1133,6 @@
     <string name="memory_section_files">檔案</string>
     <string name="memory_section_footer">GLOBAL.md 包含 agent 可見的持久指令。每日日誌在對話期間自動建立。</string>
     <string name="memory_delete_confirm_text">這將永久刪除該記憶日誌。</string>
-    <string name="memory_editor_placeholder">輸入內容…</string>
     <string name="perm_title">權限</string>
     <string name="perm_reset_all">全部重置</string>
     <string name="perm_reset_confirm_title">重置所有權限？</string>
@@ -1319,7 +1154,6 @@
     <string name="perm_tool_notification">通知</string>
     <string name="perm_tool_speech_recognition">語音辨識</string>
     <string name="shizuku_title">Shizuku</string>
-    <string name="shizuku_settings_subtitle">透過 Shizuku 或 AXManager 呼叫 Android 高權限 API</string>
     <string name="shizuku_status_header">狀態</string>
     <string name="shizuku_status_footer">Shizuku 透過無線 ADB 或 root 啟動一個本地服務，讓使用者應用無需 root 即可呼叫 Android 系統隱藏 API。支援兩款相容的管理器：Shizuku（RikkaApps）和 AXManager（Axeron），任意安裝一個即可。授權後，RikkaMinis 可使用 android-shizuku-cli 命令管理包、權限、設定、輸入、Activity 等。</string>
     <string name="shizuku_actions_header">下一步</string>
@@ -1362,15 +1196,12 @@
     <string name="skill_minis_skills_modal">RikkaMinis Skills</string>
     <string name="skill_delete_confirm_title">刪除 %1$s？</string>
     <string name="skill_delete_confirm_text">這將永久刪除該 skill 及其檔案。</string>
-    <string name="skill_import_sheet_title">匯入技能</string>
     <string name="skill_import_tab_url">URL</string>
     <string name="skill_import_tab_paste">貼上</string>
     <string name="skill_import_tab_file">檔案</string>
     <string name="skill_import_url_instruction">輸入 SKILL.md 檔案的 URL（支援 GitHub 連結）。</string>
-    <string name="skill_import_url_label">URL</string>
     <string name="skill_import_url_placeholder">github.com/user/repo/blob/main/SKILL.md</string>
     <string name="skill_import_paste_instruction">貼上 SKILL.md 檔案的內容。必須包含帶 \'name\' 欄位的 YAML frontmatter。</string>
-    <string name="skill_import_paste_label">SKILL.md 內容</string>
     <string name="skill_import_file_instruction">從裝置中選擇 .md 或 .skill 檔案。</string>
     <string name="skill_import_file_button">選擇檔案</string>
     <string name="skill_import_error_no_url">請輸入 URL</string>
@@ -1390,10 +1221,6 @@
     <string name="skill_detail_updated">已更新</string>
     <string name="skill_detail_delete">刪除 Skill</string>
     <string name="skill_detail_edit_name_title">編輯名稱</string>
-    <string name="skill_detail_section_description">描述</string>
-    <string name="skill_detail_section_files">檔案</string>
-    <string name="skill_detail_section_meta">後設資料</string>
-    <string name="skill_detail_section_update">更新</string>
     <string name="skill_file_save">儲存</string>
     <string name="skill_file_edit">編輯</string>
     <string name="skill_detail_status_reading">正在讀取檔案…</string>
@@ -1403,7 +1230,6 @@
     <string name="skill_detail_status_downloading">下載中…</string>
     <string name="skill_detail_status_rescanning">重新掃描中…</string>
     <string name="skill_detail_error_missing">磁碟上 SKILL.md 缺失或無效</string>
-    <string name="skill_detail_source_url">URL</string>
     <string name="skill_detail_source_file">檔案匯入</string>
     <string name="skill_detail_source_bundled">內建</string>
     <string name="skill_detail_source_session">會話建立</string>
@@ -1433,7 +1259,6 @@
     <string name="storage_clear_session_button">清除會話檔案</string>
     <string name="storage_clear_confirm_title">清除會話檔案？</string>
     <string name="storage_clear_confirm_text">這將刪除 %1$s 的檔案。此操作無法撤銷。</string>
-    <string name="storage_clear_confirm_button">清除 %1$s</string>
     <string name="usage_title">用量</string>
     <string name="usage_section_total">總用量</string>
     <string name="usage_label_total_input">總輸入（含快取）</string>
@@ -1442,9 +1267,6 @@
     <string name="usage_label_cache_creation">快取建立</string>
     <string name="usage_detail_input">輸入</string>
     <string name="usage_detail_output">輸出</string>
-    <string name="usage_detail_cache_read">快取讀取</string>
-    <string name="usage_detail_cache_creation">快取建立</string>
-    <string name="usage_detail_cache_hit_rate">快取命中率</string>
     <string name="usage_detail_daily_avg">日均</string>
     <string name="usage_detail_session_avg">會話均值</string>
     <string name="usage_detail_sessions">會話</string>
@@ -1457,7 +1279,6 @@
     <string name="mirror_mirrors_section">映象</string>
     <string name="mirror_test_speed_testing">測試中…</string>
     <string name="mirror_test_speed_label">測速</string>
-    <string name="mirror_detect_fast_testing">測試中…</string>
     <string name="mirror_detect_fast_label">檢測最快映象</string>
     <string name="mirror_official_badge">官方</string>
     <string name="mirror_timeout_label">超時</string>
@@ -1475,21 +1296,12 @@
     <string name="rootfs_install_label">安裝 Rootfs</string>
     <string name="rootfs_reset_label">重置 Rootfs</string>
     <string name="rootfs_reset_description">刪除全部並重新安裝</string>
-    <string name="rootfs_reset_backup_label">重置並備份使用者資料</string>
-    <string name="rootfs_reset_backup_description">重置前儲存 /root</string>
-    <string name="rootfs_restore_label">恢復使用者資料</string>
-    <string name="rootfs_restore_description">恢復之前備份的 /root</string>
     <string name="rootfs_progress_section">進度</string>
     <string name="rootfs_result_section">結果</string>
     <string name="rootfs_info_section">資訊</string>
     <string name="rootfs_about_title">關於 Rootfs</string>
-    <string name="rootfs_about_description">rootfs 包含沙箱使用的 Alpine Linux 檔案系統。重置將刪除所有資料並恢復出廠狀態。</string>
-    <string name="rootfs_about_operations">重置：刪除全部 | 備份：儲存 /root 目錄 | 恢復：恢復已儲存的資料</string>
     <string name="rootfs_reset_confirm_title">重置 Rootfs？</string>
     <string name="rootfs_reset_confirm_message">這將刪除整個 rootfs。所有資料將丟失。</string>
-    <string name="rootfs_reset_backup_confirm_title">備份並重置？</string>
-    <string name="rootfs_reset_backup_confirm_message">這將備份您的 /root 目錄，然後重置 rootfs。您可以稍後恢復備份。</string>
-    <string name="rootfs_reset_backup_confirm_button">重置並備份</string>
     <string name="provider_detail_http_endpoint_warning">⚠ 該端點使用未加密的 HTTP。發往其中的 API 金鑰、訊息和工具結果可被網路中的任何人讀取。僅對可信的本地伺服器使用 HTTP。</string>
     <string name="provider_detail_custom_user_agent">自定義 User-Agent</string>
     <string name="provider_detail_custom_user_agent_placeholder">留空使用預設值</string>
@@ -1511,8 +1323,6 @@
     <string name="model_group_detail_limit_context_window">限制上下文視窗</string>
     <string name="model_group_detail_max_context">最大上下文</string>
     <string name="model_group_detail_unlimited">不限</string>
-    <string name="model_group_detail_context_limit_unavailable">分組成員未宣告上下文視窗，無法啟用上限。請先新增模型或檢查模型後設資料。</string>
-    <string name="model_group_detail_context_limit_runtime_capped">當前分組成員最大 ctx=%1$s，配置值 %2$s 會被執行時裁剪。配置值已保留，新增更高上下文模型後會重新生效。</string>
     <string name="model_group_no_usable_models_badge">無可用模型</string>
     <string name="settings_section_notifications">通知</string>
     <string name="settings_task_notifications">任務通知</string>
@@ -1540,16 +1350,11 @@
     <string name="model_picker_modality_image">影象</string>
     <string name="model_picker_modality_audio">音訊</string>
     <string name="model_picker_modality_video">影片</string>
-    <string name="voice_system_recognition_online">系統識別（線上）</string>
-    <string name="voice_system_recognition_offline">系統識別（離線）</string>
-    <string name="voice_system_online_subtitle">Android 內建，需要網路</string>
-    <string name="voice_system_offline_subtitle">Android 內建，離線可用</string>
     <string name="model_picker_non_text_warning_title">該模型可能無法作為 Agent 使用</string>
     <string name="model_picker_non_text_warning_body">%1$s 輸出 %2$s，通常無法驅動 Agent 任務。建議為會話選擇文字輸出模型；如需生成 %3$s，可將該模型作為工具加入 Agent 迴圈，讓智慧體按需呼叫。</string>
     <string name="model_picker_non_text_warning_use_anyway">仍要使用</string>
     <string name="model_picker_non_text_warning_choose_other">更換其他模型</string>
     <string name="system_permissions_title">系統權限</string>
-    <string name="system_permissions_subtitle">從系統設定授予的 OS 級權限</string>
     <string name="system_permissions_section_a11y">無障礙服務</string>
     <string name="system_permissions_a11y_row">RikkaMinis 無障礙服務</string>
     <string name="system_permissions_a11y_enabled">已啟用 — android-a11y-cli 已就緒</string>
@@ -1560,7 +1365,6 @@
     <string name="a11y_service_summary">RikkaMinis 的 UI 層自動化後端</string>
     <string name="back">返回</string>
     <string name="webapp_activity_label">RikkaMinis 應用</string>
-    <string name="webapp_source_missing">原始檔不存在。</string>
     <string name="webapp_external_nav_blocked">已阻止外部跳轉。</string>
     <string name="webapp_pin_unsupported">當前桌面不支援建立快捷方式。</string>
     <string name="webapp_pin_failed">新增到桌面失敗。</string>
