@@ -1509,7 +1509,14 @@ class ChatViewModel(
         MutableStateFlow(com.rikkaminis.app.data.MemoryGlobalPrefs.isGlobalEnabled(context))
     val memoryEnabled: StateFlow<Boolean> = _memoryEnabled.asStateFlow()
 
-    internal val _thinkingLevel = MutableStateFlow(ThinkingLevel.OFF)
+    // [feat/thinking-global-remember] Seed from the cross-conversation
+    // last-tuned level instead of hard OFF: the user's explicit picker choice
+    // must survive cold start even when the launch preference opens a fresh
+    // draft. Existing sessions overwrite this from the per-session DB row in
+    // loadSession(); the raw default (OFF) only applies when the user never
+    // explicitly tuned thinking anywhere.
+    internal val _thinkingLevel =
+        MutableStateFlow(com.rikkaminis.app.data.ThinkingGlobalPrefs.lastLevel(context) ?: ThinkingLevel.OFF)
 
     /**
      * [T-thinking-effective-level] True once the USER (not a group default) has

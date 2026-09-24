@@ -271,6 +271,14 @@ fun ChatViewModel.setThinkingLevel(level: ThinkingLevel) {
  */
 private fun ChatViewModel.persistThinkingOverride(level: ThinkingLevel) {
     viewModelScope.launch {
+        // [feat/thinking-global-remember] Record the explicit choice globally
+        // BEFORE the row-existence guard: tuning on a draft (no DB row yet)
+        // must still be remembered across conversations — that is the whole
+        // point of the global layer. Only the two explicit user actions
+        // (setThinkingLevel / toggleThinking) reach here, so group defaults
+        // and fork copies never overwrite the global value.
+        com.rikkaminis.app.data.ThinkingGlobalPrefs.setLastLevel(context, level)
+
         // [T-empty-session-residue] Do NOT materialise a row just to store
         // a thinking preference. On a draft chat (no message sent yet)
         // realSessionId is empty; the choice already lives in
