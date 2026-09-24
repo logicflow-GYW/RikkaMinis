@@ -11,11 +11,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -55,6 +59,10 @@ import com.rikkaminis.app.data.model.ProviderInstance
 import com.rikkaminis.app.data.repository.ProviderRepository
 import com.rikkaminis.app.R
 import com.rikkaminis.app.ui.theme.ChatColors
+import com.rikkaminis.app.ui.components.SectionDesign
+import com.rikkaminis.app.ui.components.SectionHeader
+import sh.calvin.reorderable.ReorderableItem
+import sh.calvin.reorderable.rememberReorderableLazyListState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -88,6 +96,62 @@ fun ProviderListScreen(
     }
 
     var showMenu by remember { mutableStateOf(false) }
+
+    val lazyListState = rememberLazyListState()
+
+    // [reorder-providers] Drag-to-reorder the provider list. Rendering
+    // tolerates a duplicate-id config by hiding the extra rows (same
+    // belt-and-suspenders as the Model Groups list): duplicate
+    // LazyColumn/Reorderable keys would otherwise crash this screen on
+    // scroll. The reorder path below is the deliberate asymmetry —
+    // ProviderRepository.permuteById REFUSES a list holding duplicate ids, so
+    // on a corrupted config drags just no-op until the duplicate is gone.
+    val reorderableRows = remember(instances) { providerRows.distinctBy { it.instance.id } }
+    val pinnedRows = reorderableRows.filter { it.instance.pinned }
+    val groupedRows = reorderableRows.filter { !it.instance.pinned }.groupBy { it.instance.providerType }
+
+    val reorderState = rememberReorderableLazyListState(lazyListState) { from, to ->
+        val fromKey = from.key as? String ?: return@rememberReorderableLazyListState
+        val toKey = to.key as? String ?: return@rememberReorderableLazyListState
+        // The list also contains headers and spacers. Only "inst:"-keyed rows
+        // participate; anything else is a no-op, which reads better than a
+        // snap-back.
+        if (!fromKey.startsWith("inst:") || !toKey.startsWith("inst:")) {
+            return@rememberReorderableLazyListState
+        }
+        val fromId = fromKey.removePrefix("inst:")
+        val toId = toKey.removePrefix("inst:")
+        val cur = providerRepository.config.value.instances
+        val fromInst = cur.find { it.id == fromId } ?: return@rememberReorderableLazyListState
+        val toInst = cur.find { it.id == toId } ?: return@rememberReorderableLazyListState
+        // Same-section only: the UI buckets instances by providerType (plus a
+        // pinned Favorites section floating on top), so a cross-section drag
+        // has no meaning — the row would snap back into its own bucket on the
+        // next recomposition anyway. Both pinned, or both unpinned of the same
+        // providerType, participate; anything else is a no-op.
+        val sameSection = if (fromInst.pinned) toInst.pinned
+        else !toInst.pinned && fromInst.providerType == toInst.providerType
+        if (!sameSection) return@rememberReorderableLazyListState
+        // Members of the dragged row's section, in current flat order.
+        val memberIds = cur.filter {
+            if (fromInst.pinned) it.pinned
+            else !it.pinned && it.providerType == fromInst.providerType
+        }.map { it.id }
+        val fromIdx = memberIds.indexOf(fromId)
+        val toIdx = memberIds.indexOf(toId)
+        if (fromIdx < 0 || toIdx < 0) return@rememberReorderableLazyListState
+        val newMembers = memberIds.toMutableList().apply { add(toIdx, removeAt(fromIdx)) }
+        // Splice the re-ordered section back into the flat instance order.
+        // Each section is derived by filtering this flat list, so the
+        // relative order of everything outside the section must be preserved.
+        val memberSet = memberIds.toSet()
+        val newOrder = ArrayList<String>(cur.size)
+        var memberPos = 0
+        for (inst in cur) {
+            if (inst.id in memberSet) newOrder.add(newMembers[memberPos++]) else newOrder.add(inst.id)
+        }
+        providerRepository.reorderInstances(newOrder)
+    }
 
     val importScope = rememberCoroutineScope()
     // [T6-M4] Toast needs a Looper; the import now runs on IO, so post the
