@@ -106,8 +106,9 @@ private const val RESCAN_DELAY_MS = 500L
 // The value is a plain viewport budget (≈9 rows of the ~48dp row height), not
 // a tuned constant — it exists so the nested LazyColumn gets a bounded
 // max-height (required inside a verticalScroll Column) while staying tall
-// enough that most users never see the inner scrollbar.
-private const val SESSION_LIST_MAX_HEIGHT = 432.dp
+// enough that most users never see the inner scrollbar. Plain `val` — Dp is
+// not allowed as a `const val` (only primitives and String are).
+private val SESSION_LIST_MAX_HEIGHT = 432.dp
 
 /** Process-lifetime holder for the latest [StorageSnapshot]. SWR cache:
  *  no age gate — re-entry always renders the last scan immediately and a
