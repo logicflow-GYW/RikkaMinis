@@ -39,7 +39,6 @@ import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.ScreenLockPortrait
-import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.Icon
@@ -251,7 +250,10 @@ fun AppearanceScreen(
         // -- Launch Session --
         // Same per-row icon treatment as the Theme section. Bolt = Auto
         // (system picks), History = Last Session (revisit), ChatBubble =
-        // New Chat (compose), Home = Home screen.
+        // New Chat (compose; also re-fires on every foreground resume).
+        // Mode 3 (Safe Start, formerly the deleted Home/session-list) has no
+        // settings row — it survives only as the internal circuit-breaker
+        // target; the stored value 3 remains valid via LaunchSessionMode.
         SettingsSection(
             header = stringResource(R.string.appearance_section_launch),
             footer = stringResource(R.string.appearance_launch_footer),
@@ -261,7 +263,6 @@ fun AppearanceScreen(
                 LaunchRow(stringResource(R.string.appearance_launch_auto), Icons.Outlined.Bolt, tileBlue),
                 LaunchRow(stringResource(R.string.appearance_launch_last), Icons.Outlined.History, tileTeal),
                 LaunchRow(stringResource(R.string.appearance_launch_new), Icons.Outlined.ChatBubbleOutline, tileGreen),
-                LaunchRow(stringResource(R.string.appearance_launch_safe), Icons.Outlined.Shield, tileBlue),
             )
             launchRows.forEachIndexed { idx, row ->
                 SettingsChoiceRow(

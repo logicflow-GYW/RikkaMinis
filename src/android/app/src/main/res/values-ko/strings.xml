@@ -236,7 +236,6 @@
     <string name="appearance_launch_auto">자동</string>
     <string name="appearance_launch_last">마지막 세션</string>
     <string name="appearance_launch_new">새 채팅</string>
-    <string name="appearance_launch_safe">안전 시작</string>
     <string name="appearance_section_return_key">Return 키</string>
     <string name="appearance_return_key_footer">채팅 입력란의 Return 키가 줄바꿈을 삽입할지 메시지를 보낼지 선택합니다. 하드웨어 Shift+Return 은 항상 줄바꿈을 삽입합니다.</string>
     <string name="appearance_return_key_newline">줄바꿈</string>

@@ -236,7 +236,6 @@
     <string name="appearance_launch_auto">Automatisch</string>
     <string name="appearance_launch_last">Letzte Sitzung</string>
     <string name="appearance_launch_new">Neuer Chat</string>
-    <string name="appearance_launch_safe">Sicherer Start</string>
     <string name="appearance_section_return_key">Eingabetaste</string>
     <string name="appearance_return_key_footer">Wählen Sie, ob die Eingabetaste im Chat-Eingabefeld einen Zeilenumbruch einfügt oder die Nachricht sendet. Hardware-Umschalt+Eingabe fügt immer einen Zeilenumbruch ein.</string>
     <string name="appearance_return_key_newline">Zeilenumbruch</string>
