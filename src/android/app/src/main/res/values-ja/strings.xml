@@ -236,7 +236,6 @@
     <string name="appearance_launch_auto">自動</string>
     <string name="appearance_launch_last">前回のセッション</string>
     <string name="appearance_launch_new">新しいチャット</string>
-    <string name="appearance_launch_safe">セーフスタート</string>
     <string name="appearance_section_return_key">改行キー</string>
     <string name="appearance_return_key_footer">チャット入力欄の改行キーで改行を挿入するか、メッセージを送信するかを選択します。ハードウェアの Shift+Return は常に改行を挿入します。</string>
     <string name="appearance_return_key_newline">改行</string>

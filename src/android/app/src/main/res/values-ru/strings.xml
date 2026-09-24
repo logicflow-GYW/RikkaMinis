@@ -436,7 +436,6 @@
     <string name="appearance_launch_auto">Авто</string>
     <string name="appearance_launch_last">Последняя сессия</string>
     <string name="appearance_launch_new">Новый чат</string>
-    <string name="appearance_launch_safe">Безопасный запуск</string>
     <string name="appearance_section_return_key">Клавиша Enter</string>
     <string name="appearance_return_key_footer">Выберите, вставляет ли клавиша Enter в поле ввода чата перенос строки или отправляет сообщение. Аппаратное Shift+Enter всегда вставляет перенос строки.</string>
     <string name="appearance_return_key_newline">Перенос строки</string>

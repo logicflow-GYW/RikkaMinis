@@ -628,10 +628,10 @@ internal object ConfigBuiltins {
             PrefsIntCodedEnumField(
                 path = "appearance.launchSession",
                 displayName = "Launch behaviour",
-                description = "What the app opens on cold start: auto, the last session, a new chat, or the home screen.",
+                description = "What the app opens on cold start: auto, the last session, a new chat, or a safe start (new chat, no resume bounce).",
                 prefs = prefs,
                 key = com.rikkaminis.app.ui.settings.KEY_LAUNCH_SESSION,
-                cases = listOf("auto", "lastSession", "newChat", "home"),
+                cases = listOf("auto", "lastSession", "newChat", "safeStart"),
                 defaultIndex = 0,
             )
         )

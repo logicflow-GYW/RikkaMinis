@@ -572,7 +572,6 @@
     <string name="appearance_launch_auto">Auto</string>
     <string name="appearance_launch_last">Last Session</string>
     <string name="appearance_launch_new">New Chat</string>
-    <string name="appearance_launch_safe">Safe Start</string>
     <string name="appearance_section_return_key">Return Key</string>
     <string name="appearance_return_key_footer">Choose whether the Return key in the chat input inserts a newline or sends the message. Hardware Shift+Return always inserts a newline.</string>
     <string name="appearance_return_key_newline">Newline</string>

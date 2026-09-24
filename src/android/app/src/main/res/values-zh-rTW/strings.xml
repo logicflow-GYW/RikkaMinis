@@ -1218,7 +1218,6 @@
     <string name="appearance_launch_auto">自動</string>
     <string name="appearance_launch_last">上次會話</string>
     <string name="appearance_launch_new">新對話</string>
-    <string name="appearance_launch_safe">安全啟動</string>
     <string name="appearance_section_return_key">回車鍵</string>
     <string name="appearance_return_key_footer">選擇聊天輸入框中回車鍵的行為：插入換行或傳送訊息。硬體鍵盤 Shift+Return 始終插入換行。</string>
     <string name="appearance_return_key_newline">換行</string>

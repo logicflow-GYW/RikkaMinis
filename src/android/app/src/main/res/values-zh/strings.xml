@@ -272,7 +272,6 @@
     <string name="appearance_launch_auto">自动</string>
     <string name="appearance_launch_last">上次会话</string>
     <string name="appearance_launch_new">新对话</string>
-    <string name="appearance_launch_safe">安全启动</string>
     <string name="appearance_section_return_key">回车键</string>
     <string name="appearance_return_key_footer">选择聊天输入框中回车键的行为：插入换行或发送消息。硬件键盘 Shift+Return 始终插入换行。</string>
     <string name="appearance_return_key_newline">换行</string>
