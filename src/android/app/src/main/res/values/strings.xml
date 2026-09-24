@@ -1239,13 +1239,14 @@
     <string name="settings_backup">Backup &amp; Restore</string>
     <string name="settings_backup_subtitle">Export or import settings and providers</string>
     <string name="auto_backup_section_title">Automatic backup</string>
-    <string name="auto_backup_section_footer">Runs once a day at first app open. Covers capability (providers, thinking rules, skills, env vars, memory, MCP) and outputs (shared/ files and knowledge-graph data) — chat transcripts are deliberately excluded (agent process byproduct). Includes API keys; local copies stay in app storage, remote copies go to your WebDAV server (newest 7 kept).</string>
+    <string name="auto_backup_section_footer">Runs once a day at first app open. Covers capability (providers, thinking rules, skills, env vars, memory, MCP) and outputs (shared/ files and knowledge-graph data) — chat transcripts are deliberately excluded (agent process byproduct). Includes API keys; local copies stay in app storage, remote copies go to your WebDAV server (newest 3 kept).</string>
     <string name="auto_backup_enable">Daily automatic backup</string>
     <string name="auto_backup_enable_sub">Backs up automatically the first time the app is opened each day</string>
     <string name="auto_backup_run_now">Back up now</string>
     <string name="auto_backup_last_run">Last backup: %1$s</string>
     <string name="auto_backup_never">Never run yet</string>
     <string name="auto_backup_remote">Remote automatic backups</string>
+    <string name="auto_backup_local">Local automatic backups</string>
     <string name="auto_backup_remote_sub">Restore, fetch or delete automatic backups on your WebDAV server</string>
     <string name="auto_backup_remote_empty">No remote automatic backups yet. Copies pushed by your other devices (same WebDAV path) appear here.</string>
     <string name="auto_backup_remote_fetch">Fetch to local</string>

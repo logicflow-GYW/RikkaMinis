@@ -17,7 +17,8 @@ import kotlinx.coroutines.launch
  * transcripts deliberately excluded: this is a task-runner, not a chat app,
  * and the 90% AI-generated chat stream is process byproduct. The full
  * payload that manual export builds minus chat (chatRepo = null) is written
- * locally under `filesDir/backup-autos/` (rotating [AUTO_BACKUP_KEEP]) and
+ * locally under `filesDir/backup-autos/` (rotating
+ * [WebDavSync.AUTO_BACKUP_KEEP]) and
  * pushed to the configured WebDAV server under the `auto/` subdirectory
  * as `rikkaminis-backup-auto-*` (rotated remotely by
  * WebDavSync.pruneAutoBackups) — a dedicated folder of its own, so
@@ -42,7 +43,6 @@ object AutoBackupManager {
 
     /** Auto-backup local file prefix (public for the settings UI list). */
     const val LOCAL_FILE_PREFIX = "rikkaminis-auto-"
-    private const val AUTO_BACKUP_KEEP = 7
 
     fun isEnabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -135,7 +135,7 @@ object AutoBackupManager {
 
         // Local rotation: keep the newest AUTO_BACKUP_KEEP auto files.
         listLocal(app)
-            .drop(AUTO_BACKUP_KEEP)
+            .drop(WebDavSync.AUTO_BACKUP_KEEP)
             .forEach { runCatching { it.delete() } }
 
         // Remote push is best-effort: local copy already exists, so a failed
@@ -144,7 +144,7 @@ object AutoBackupManager {
         if (cfg != null && cfg.url.isNotBlank() && cfg.username.isNotBlank()) {
             runCatching {
                 WebDavSync.backupAuto(cfg, payload)
-                WebDavSync.pruneAutoBackups(cfg, keep = AUTO_BACKUP_KEEP)
+                WebDavSync.pruneAutoBackups(cfg, keep = WebDavSync.AUTO_BACKUP_KEEP)
             }.onFailure { Log.w(TAG, "remote push failed: ${it.message}") }
         }
 

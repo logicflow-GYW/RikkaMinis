@@ -1162,13 +1162,14 @@
     <string name="webdav_saved">サーバー設定を保存しました</string>
     <string name="webdav_uploaded">バックアップをアップロードしました</string>
     <string name="auto_backup_section_title">自動バックアップ</string>
-    <string name="auto_backup_section_footer">アプリを毎日最初に開いたときに1回実行。能力（プロバイダー、思考ルール、スキル、環境変数、メモリ、MCP）と成果物（shared/ ファイルとナレッジグラフデータ）を対象とし、チャット履歴は意図的に除外（エージェントの作業副産物）。APIキーを含みます。ローカルコピーはアプリ領域に、リモートコピーは自分のWebDAVサーバーに保存（最新7件を保持）。</string>
+    <string name="auto_backup_section_footer">アプリを毎日最初に開いたときに1回実行。能力（プロバイダー、思考ルール、スキル、環境変数、メモリ、MCP）と成果物（shared/ ファイルとナレッジグラフデータ）を対象とし、チャット履歴は意図的に除外（エージェントの作業副産物）。APIキーを含みます。ローカルコピーはアプリ領域に、リモートコピーは自分のWebDAVサーバーに保存（最新3件を保持）。</string>
     <string name="auto_backup_enable">毎日自動バックアップ</string>
     <string name="auto_backup_enable_sub">アプリを毎日最初に開いたときに自動バックアップ</string>
     <string name="auto_backup_run_now">今すぐバックアップ</string>
     <string name="auto_backup_last_run">前回のバックアップ: %1$s</string>
     <string name="auto_backup_never">未実行</string>
     <string name="auto_backup_remote">サーバー上の自動バックアップ</string>
+    <string name="auto_backup_local">ローカルの自動バックアップ</string>
     <string name="auto_backup_remote_sub">WebDAV サーバー上の自動バックアップを復元・取得・削除</string>
     <string name="auto_backup_remote_empty">サーバーに自動バックアップはまだありません。他のデバイス（同じ WebDAV パス）からアップロードされた自動バックアップがここに表示されます。</string>
     <string name="auto_backup_remote_fetch">ローカルに取得</string>

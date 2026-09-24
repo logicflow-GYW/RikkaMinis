@@ -1083,13 +1083,14 @@
     <string name="settings_backup">备份与恢复</string>
     <string name="settings_backup_subtitle">导出或导入设置与提供商</string>
     <string name="auto_backup_section_title">自动备份</string>
-    <string name="auto_backup_section_footer">每天首次打开应用时自动执行。覆盖能力（提供商、思考规则、技能、环境变量、记忆、MCP）与产出（shared/ 文件与知识图谱数据）——聊天记录刻意排除（Agent 工作过程产物）。含 API 密钥；本地副本存于应用存储，远端副本推送到你的 WebDAV 服务器（保留最近 7 份）。</string>
+    <string name="auto_backup_section_footer">每天首次打开应用时自动执行。覆盖能力（提供商、思考规则、技能、环境变量、记忆、MCP）与产出（shared/ 文件与知识图谱数据）——聊天记录刻意排除（Agent 工作过程产物）。含 API 密钥；本地副本存于应用存储，远端副本推送到你的 WebDAV 服务器（保留最近 3 份）。</string>
     <string name="auto_backup_enable">每日自动备份</string>
     <string name="auto_backup_enable_sub">每天首次打开应用时自动备份</string>
     <string name="auto_backup_run_now">立即备份</string>
     <string name="auto_backup_last_run">上次备份：%1$s</string>
     <string name="auto_backup_never">尚未运行</string>
     <string name="auto_backup_remote">远端自动备份</string>
+    <string name="auto_backup_local">本地自动备份</string>
     <string name="auto_backup_remote_sub">恢复、拉取或删除 WebDAV 服务器上的自动备份</string>
     <string name="auto_backup_remote_empty">远端还没有自动备份。其他设备推送的自动备份（同一 WebDAV 路径）会显示在这里。</string>
     <string name="auto_backup_remote_fetch">拉取到本地</string>

@@ -1154,13 +1154,14 @@
     <string name="webdav_saved">서버 설정이 저장되었습니다</string>
     <string name="webdav_uploaded">백업이 업로드되었습니다</string>
     <string name="auto_backup_section_title">자동 백업</string>
-    <string name="auto_backup_section_footer">앱을 매일 처음 열 때 1회 실행됩니다. 능력(프로바이더, 사고 규칙, 스킬, 환경 변수, 메모리, MCP)과 산출물(shared/ 파일과 지식 그래프 데이터)을 포함하며 채팅 기록은 의도적으로 제외됩니다(에이전트 작업 부산물). API 키 포함. 로컬 사본은 앱 저장소에, 원격 사본은 본인 WebDAV 서버에 보관(최신 7개 유지).</string>
+    <string name="auto_backup_section_footer">앱을 매일 처음 열 때 1회 실행됩니다. 능력(프로바이더, 사고 규칙, 스킬, 환경 변수, 메모리, MCP)과 산출물(shared/ 파일과 지식 그래프 데이터)을 포함하며 채팅 기록은 의도적으로 제외됩니다(에이전트 작업 부산물). API 키 포함. 로컬 사본은 앱 저장소에, 원격 사본은 본인 WebDAV 서버에 보관(최신 3개 유지).</string>
     <string name="auto_backup_enable">매일 자동 백업</string>
     <string name="auto_backup_enable_sub">앱을 매일 처음 열 때 자동으로 백업</string>
     <string name="auto_backup_run_now">지금 백업</string>
     <string name="auto_backup_last_run">마지막 백업: %1$s</string>
     <string name="auto_backup_never">아직 실행 안 됨</string>
     <string name="auto_backup_remote">서버의 자동 백업</string>
+    <string name="auto_backup_local">로컬 자동 백업</string>
     <string name="auto_backup_remote_sub">WebDAV 서버의 자동 백업 복원, 가져오기 또는 삭제</string>
     <string name="auto_backup_remote_empty">서버에 아직 자동 백업이 없습니다. 다른 기기(동일한 WebDAV 경로)에서 업로드한 자동 백업이 여기에 표시됩니다.</string>
     <string name="auto_backup_remote_fetch">로컬로 가져오기</string>
