@@ -41,9 +41,13 @@ import com.rikkaminis.app.ui.components.SectionDesign
  * share one implementation of the card visual, the divider, the badge, and
  * the drag handle instead of drifting apart.
  *
- * Deliberately NOT applied to the provider list: that screen buckets
- * instances by `providerType` and its order carries no meaning, so it stays
- * a static grouped list (see ProviderListScreen).
+ * [reorder-providers] The provider list now uses them as well (drag-to-reorder
+ * with a same-section guard): the "order carries no meaning" rationale for
+ * keeping it static is gone — the order is persisted via
+ * ProviderRepository.reorderInstances (sortOrder = list index). The added
+ * wrinkle vs the other two screens is the section structure: the provider list
+ * buckets rows by providerType plus a pinned Favorites section, so its reorder
+ * callback refuses cross-section moves instead of accepting any pair.
  */
 
 /**
@@ -128,8 +132,8 @@ internal fun BadgeLabel(text: String, color: Color) {
  *
  * Using an explicit handle (rather than making the whole row draggable) is
  * also what keeps drag-to-reorder from fighting a row's other gestures —
- * on the Model Groups list the row itself is clickable *and* wrapped in a
- * horizontal `SwipeToDismissBox` for delete.
+ * the Model Groups row and the provider row are both clickable, and the
+ * provider row also carries the pinned-star toggle.
  */
 @Composable
 internal fun DragHandleButton(

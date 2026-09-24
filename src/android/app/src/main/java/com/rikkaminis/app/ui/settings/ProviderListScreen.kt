@@ -66,7 +66,6 @@ fun ProviderListScreen(
 ) {
     val config by providerRepository.config.collectAsState()
     val instances = config.instances
-    val pinnedInstances = instances.filter { it.pinned }
     val context = LocalContext.current
 
     // [perf-provider-list] Pre-compute per-instance display data once per
@@ -171,103 +170,140 @@ fun ProviderListScreen(
                 Icon(Icons.Default.Add, contentDescription = stringResource(R.string.provider_list_add_provider))
             }
         },
+        // [reorder-providers] The list below is a LazyColumn (reorderable rows
+        // must be its direct children) — no nested verticalScroll here.
+        scrollable = false,
     ) {
-        if (instances.isEmpty()) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 20.dp)
-                    .padding(horizontal = 16.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                    .padding(vertical = 32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Outlined.VpnKey,
-                    contentDescription = null,
-                    modifier = Modifier.size(36.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
-                )
-                Text(
-                    text = stringResource(R.string.provider_list_no_providers_configured),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    text = stringResource(R.string.provider_list_add_a_provider_to_get_started),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                )
-            }
-        } else {
-            // [P0-pinned-providers] Favorites section: pinned instances float
-            // to the very top, separate from their providerType group, so the
-            // providers the user reaches for most are always one tap away.
-            if (pinnedInstances.isNotEmpty()) {
-                SettingsSection(header = stringResource(R.string.provider_list_favorites)) {
-                    val pinnedRows = providerRows.filter { it.instance.pinned }
-                    pinnedRows.forEachIndexed { index, row ->
-                        ProviderInstanceRow(
-                            instance = row.instance,
-                            modelCount = row.modelCount,
-                            apiKey = row.apiKey,
-                            isConfigured = row.isConfigured,
-                            pinned = row.instance.pinned,
-                            onTogglePinned = remember(row.instance.id) {
-                                { providerRepository.setInstancePinned(row.instance.id, !row.instance.pinned) }
-                            },
-                            onClick = remember(row.instance.id) { { onProviderClick(row.instance.id) } },
-                        )
-                        if (index < pinnedRows.size - 1) {
-                            val divider = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(start = 38.dp, end = 14.dp)
-                                    .height(0.5.dp)
-                                    .background(divider),
-                            )
-                        }
-                    }
-                }
-            }
-            val groupedRows = providerRows.filter { !it.instance.pinned }.groupBy { it.instance.providerType }
-            groupedRows.forEach { (providerType, typeRows) ->
-                SettingsSection(header = providerType.displayName) {
-                    typeRows.forEachIndexed { index, row ->
-                        ProviderInstanceRow(
-                            instance = row.instance,
-                            modelCount = row.modelCount,
-                            apiKey = row.apiKey,
-                            isConfigured = row.isConfigured,
-                            pinned = row.instance.pinned,
-                            onTogglePinned = remember(row.instance.id) {
-                                { providerRepository.setInstancePinned(row.instance.id, !row.instance.pinned) }
-                            },
-                            onClick = remember(row.instance.id) { { onProviderClick(row.instance.id) } },
-                        )
-                        if (index < typeRows.size - 1) {
-                            val divider = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(start = 38.dp, end = 14.dp)
-                                    .height(0.5.dp)
-                                    .background(divider),
-                            )
-                        }
-                    }
-                }
-            }
-        }
+        LazyColumn(
+            state = lazyListState,
+            modifier = Modifier
+                .fillMaxSize()
+                .background(SectionDesign.screenBackgroundColor()),
+        ) {
+            item("top_gap") { Spacer(Modifier.height(SectionDesign.FirstSectionTopGap)) }
 
-        // [voice-removed] The runtime "Voice Services" shadow section was
-        // removed along with the rest of the in-app voice UI. The underlying
-        // voice provider engine still exists for agent-facing tools; it just no
-        // longer surfaces as its own provider-list section here.
-        Spacer(Modifier.height(80.dp))
+            if (instances.isEmpty()) {
+                item("empty_state") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 20.dp)
+                            .padding(horizontal = 16.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                            .padding(vertical = 32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.VpnKey,
+                            contentDescription = null,
+                            modifier = Modifier.size(36.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
+                        )
+                        Text(
+                            text = stringResource(R.string.provider_list_no_providers_configured),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            text = stringResource(R.string.provider_list_add_a_provider_to_get_started),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        )
+                    }
+                }
+            } else {
+                // [P0-pinned-providers] Favorites section: pinned instances float
+                // to the very top, separate from their providerType group, so the
+                // providers the user reaches for most are always one tap away.
+                //
+                // [reorder-providers] Each row MUST be its own top-level
+                // LazyColumn item: ReorderableLazyListState only observes direct
+                // children of the list, so the old "one SettingsSection wrapping
+                // every row" shape can't reorder. The iOS-style card panel is
+                // repainted per row via cardRow(isFirst, isLast) +
+                // SectionDividerInsetCard() between rows — the same helpers the
+                // Model Groups list uses (ReorderableCardRow.kt). Drag only moves
+                // a row within its own section (see the same-section guard in
+                // reorderState): the screen buckets by providerType, so a
+                // cross-section move would snap straight back.
+                if (pinnedRows.isNotEmpty()) {
+                    item("fav_header") {
+                        SectionHeader(text = stringResource(R.string.provider_list_favorites))
+                    }
+                    itemsIndexed(
+                        items = pinnedRows,
+                        key = { _, row -> "inst:${row.instance.id}" },
+                    ) { index, row ->
+                        ReorderableItem(state = reorderState, key = "inst:${row.instance.id}") { _ ->
+                            Column {
+                                if (index != 0) SectionDividerInsetCard()
+                                Box(
+                                    modifier = Modifier.cardRow(
+                                        isFirst = index == 0,
+                                        isLast = index == pinnedRows.lastIndex,
+                                    ),
+                                ) {
+                                    ProviderInstanceRow(
+                                        instance = row.instance,
+                                        modelCount = row.modelCount,
+                                        apiKey = row.apiKey,
+                                        isConfigured = row.isConfigured,
+                                        pinned = row.instance.pinned,
+                                        onTogglePinned = remember(row.instance.id) {
+                                            { providerRepository.setInstancePinned(row.instance.id, !row.instance.pinned) }
+                                        },
+                                        onClick = remember(row.instance.id) { { onProviderClick(row.instance.id) } },
+                                        dragHandleModifier = with(this@ReorderableItem) { Modifier.draggableHandle() },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                groupedRows.forEach { (providerType, typeRows) ->
+                    item("type_header_${providerType.name}") {
+                        SectionHeader(text = providerType.displayName)
+                    }
+                    itemsIndexed(
+                        items = typeRows,
+                        key = { _, row -> "inst:${row.instance.id}" },
+                    ) { index, row ->
+                        ReorderableItem(state = reorderState, key = "inst:${row.instance.id}") { _ ->
+                            Column {
+                                if (index != 0) SectionDividerInsetCard()
+                                Box(
+                                    modifier = Modifier.cardRow(
+                                        isFirst = index == 0,
+                                        isLast = index == typeRows.lastIndex,
+                                    ),
+                                ) {
+                                    ProviderInstanceRow(
+                                        instance = row.instance,
+                                        modelCount = row.modelCount,
+                                        apiKey = row.apiKey,
+                                        isConfigured = row.isConfigured,
+                                        pinned = row.instance.pinned,
+                                        onTogglePinned = remember(row.instance.id) {
+                                            { providerRepository.setInstancePinned(row.instance.id, !row.instance.pinned) }
+                                        },
+                                        onClick = remember(row.instance.id) { { onProviderClick(row.instance.id) } },
+                                        dragHandleModifier = with(this@ReorderableItem) { Modifier.draggableHandle() },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // [voice-removed] The runtime "Voice Services" shadow section was
+            // removed along with the rest of the in-app voice UI. The underlying
+            // voice provider engine still exists for agent-facing tools; it just
+            // no longer surfaces as its own provider-list section here.
+            item("bottom_gap") { Spacer(Modifier.height(80.dp)) }
+        }
     }
 
     if (showMenu) {
@@ -325,6 +361,12 @@ private fun ProviderInstanceRow(
     pinned: Boolean,
     onTogglePinned: () -> Unit,
     onClick: () -> Unit,
+    // [reorder-providers] Built by the caller because
+    // ReorderableItemScope.draggableHandle() is scope-bound; threading it in
+    // keeps this row scope-agnostic (same pattern as GroupRow on the Model
+    // Groups list). Only the handle starts a drag — the row itself stays
+    // clickable and the star stays a tap, so neither gesture fights the drag.
+    dragHandleModifier: Modifier = Modifier,
 ) {
     val isActive = isConfigured && instance.isEnabled
 
@@ -421,6 +463,10 @@ private fun ProviderInstanceRow(
             )
         }
 
+        // [reorder-providers] Explicit drag handle (IconButton, not a bare Icon
+        // — see [T198] on DragHandleButton). Content description reuses the
+        // model-group "drag to reorder" string: same gesture, same meaning.
+        DragHandleButton(handleModifier = dragHandleModifier)
 
     }
 }

@@ -38,13 +38,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -201,16 +197,11 @@ fun ModelGroupsScreen(
                     key = { _, g -> "group:${g.id}" },
                 ) { index, group ->
                     ReorderableItem(state = reorderState, key = "group:${group.id}") { _ ->
-                        // Swipe-to-delete state is scoped per row here (keyed by
-                        // the item key) rather than per composition slot, so a
-                        // reorder can't carry a half-swiped state onto whichever
-                        // group lands in that position.
-                        val dismissState = rememberSwipeToDismissBoxState()
-                        LaunchedEffect(dismissState.currentValue) {
-                            if (dismissState.currentValue == SwipeToDismissBoxValue.EndToStart) {
-                                providerRepository.removeGroup(group.id)
-                            }
-                        }
+                        // [remove-group-swipe-delete] Delete now lives only in the
+                        // group detail screen (⋮ menu): one destructive action, one
+                        // entry point. The row-level swipe was redundant with it and
+                        // dangerous in a reorderable list — a horizontal fling while
+                        // scrolling removed a group with no confirmation step.
                         Column {
                             if (index != 0) SectionDividerInsetCard()
                             Box(
@@ -219,25 +210,19 @@ fun ModelGroupsScreen(
                                     isLast = index == reorderableGroups.lastIndex,
                                 ),
                             ) {
-                                SwipeToDismissBox(
-                                    state = dismissState,
-                                    backgroundContent = {},
-                                    enableDismissFromStartToEnd = false,
-                                ) {
-                                    GroupRow(
-                                        group = group,
-                                        config = config,
-                                        onClick = { onGroupClick(group.id) },
-                                        onSetPrimary = { providerRepository.defaultPrimaryGroupId = group.id },
-                                        onClearPrimary = { providerRepository.defaultPrimaryGroupId = null },
-                                        // Drag only from the explicit handle. The row is
-                                        // clickable AND horizontally swipe-to-delete, so a
-                                        // whole-row drag would fight both gestures.
-                                        dragHandleModifier = Modifier.then(
-                                            with(this@ReorderableItem) { Modifier.draggableHandle() },
-                                        ),
-                                    )
-                                }
+                                GroupRow(
+                                    group = group,
+                                    config = config,
+                                    onClick = { onGroupClick(group.id) },
+                                    onSetPrimary = { providerRepository.defaultPrimaryGroupId = group.id },
+                                    onClearPrimary = { providerRepository.defaultPrimaryGroupId = null },
+                                    // Drag only from the explicit handle. The row
+                                    // itself is clickable, so a whole-row drag
+                                    // would fight the tap.
+                                    dragHandleModifier = Modifier.then(
+                                        with(this@ReorderableItem) { Modifier.draggableHandle() },
+                                    ),
+                                )
                             }
                         }
                     }
