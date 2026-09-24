@@ -127,8 +127,13 @@ object WebDavSync {
         return deleted
     }
 
-    /** How many auto-backup copies to keep on the remote (and locally). */
-    const val AUTO_BACKUP_KEEP = 7
+    /** How many auto-backup copies to keep on the remote (and locally).
+     *  [fix-autobackup-keep-3] Reduced 7 -> 3: auto copies rotate daily and
+     *  the full payload minus chat is still tens of MB, so 7 copies pinned a
+     *  long list on the remote and in the UI. 3 days of history keeps a
+     *  usable fallback if one day's write/upload goes bad. Single source of
+     *  truth: AutoBackupManager and the settings UI read this constant. */
+    const val AUTO_BACKUP_KEEP = 3
 
     /** Remote *manual* backups, newest first. Automatic backups
      *  ([AUTO_BACKUP_PREFIX]) are deliberately excluded — they live under

@@ -1155,13 +1155,14 @@
     <string name="webdav_saved">Servereinstellungen gespeichert</string>
     <string name="webdav_uploaded">Backup hochgeladen</string>
     <string name="auto_backup_section_title">Automatische Sicherung</string>
-    <string name="auto_backup_section_footer">Läuft einmal täglich beim ersten Öffnen der App. Sichert Fähigkeiten (Anbieter, Denkregeln, Skills, Umgebungsvariablen, Speicher, MCP) und Ergebnisse (shared/-Dateien und Wissensgraphen-Daten) – Chatverlauf ist bewusst ausgenommen (Nebenprodukt des Agenten). Enthält API-Schlüssel; lokale Kopien bleiben im App-Speicher, entfernte Kopien gehen an Ihren WebDAV-Server (die neuesten 7 werden behalten).</string>
+    <string name="auto_backup_section_footer">Läuft einmal täglich beim ersten Öffnen der App. Sichert Fähigkeiten (Anbieter, Denkregeln, Skills, Umgebungsvariablen, Speicher, MCP) und Ergebnisse (shared/-Dateien und Wissensgraphen-Daten) – Chatverlauf ist bewusst ausgenommen (Nebenprodukt des Agenten). Enthält API-Schlüssel; lokale Kopien bleiben im App-Speicher, entfernte Kopien gehen an Ihren WebDAV-Server (die neuesten 3 werden behalten).</string>
     <string name="auto_backup_enable">Tägliche automatische Sicherung</string>
     <string name="auto_backup_enable_sub">Sichert automatisch beim ersten Öffnen der App an jedem Tag</string>
     <string name="auto_backup_run_now">Jetzt sichern</string>
     <string name="auto_backup_last_run">Letzte Sicherung: %1$s</string>
     <string name="auto_backup_never">Noch nie ausgeführt</string>
     <string name="auto_backup_remote">Automatische Sicherungen auf dem Server</string>
+    <string name="auto_backup_local">Lokale automatische Backups</string>
     <string name="auto_backup_remote_sub">Automatische Sicherungen auf Ihrem WebDAV-Server wiederherstellen, abrufen oder löschen</string>
     <string name="auto_backup_remote_empty">Noch keine automatischen Sicherungen auf dem Server. Sicherungen, die von Ihren anderen Geräten (gleicher WebDAV-Pfad) hochgeladen wurden, erscheinen hier.</string>
     <string name="auto_backup_remote_fetch">Lokal abrufen</string>
