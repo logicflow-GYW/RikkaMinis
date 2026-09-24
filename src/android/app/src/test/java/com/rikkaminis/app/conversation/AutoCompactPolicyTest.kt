@@ -147,10 +147,15 @@ class AutoCompactPolicyTest {
     // ── token estimation ──────────────────────────────────────────────────
 
     @Test
-    fun `estimateTokens is chars divided by 4`() {
+    fun `estimateTokens ascii chars divided by 4, CJK one token per char`() {
         assertEquals(0L, ContextCompactor.estimateTokens("abc")) // 3/4 = 0
         assertEquals(1L, ContextCompactor.estimateTokens("abcd"))
         assertEquals(10L, ContextCompactor.estimateTokens("a".repeat(40)))
+        // [fix/cjk-token-estimate] CJK ≈ 1 字 1 token（旧口径 3 字 = 0 token，低估 3-4 倍）
+        assertEquals(3L, ContextCompactor.estimateTokens("中文了"))
+        assertEquals(3L, ContextCompactor.estimateTokens("abcd中文")) // 1 + 2
+        assertEquals(3L, ContextCompactor.estimateTokens("テスト")) // 假名同 CJK 区
+        assertEquals(2L, ContextCompactor.estimateTokens("，。")) // 全角标点
     }
 
     @Test
