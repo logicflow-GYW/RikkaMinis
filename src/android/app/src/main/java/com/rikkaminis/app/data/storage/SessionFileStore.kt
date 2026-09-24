@@ -99,6 +99,81 @@ class SessionFileStore internal constructor(
     }
 
     /**
+     * One-pass media-tree scan producing BOTH the per-live-session sizes and
+     * the orphan media-leaf report.
+     *
+     * [storage-rescan-jank] The Storage page previously walked the whole media
+     * tree twice per entry (`mediaSizesBySessionBrief` + `scanOrphans`'s
+     * internal walk). This single walk replaces both production paths; the two
+     * old methods remain as thin wrappers (their tests still pin the
+     * semantics).
+     *
+     * Semantics per file: NOFOLLOW_LINKS attrs, hardlinks deduped by fileKey
+     * across the WHOLE tree (one shared set — a hardlink spanning a live dir
+     * and an orphan leaf is counted once, at the first visit; the old per-leaf
+     * `sizeOf` dedupe window was narrower, but cross-leaf hardlinks in media
+     * trees are not a real shape).
+     */
+    fun scanMediaOnce(liveSessionIds: Set<String>): MediaScan {
+        if (!mediaRoot.exists()) return MediaScan(emptyMap(), 0, 0L)
+        val sizes = mutableMapOf<String, Long>()
+        var orphanDirs = 0
+        var orphanBytes = 0L
+        val seen = HashSet<Any>()
+
+        fun walk(dir: File, parentOrphanLeaf: Boolean) {
+            val children = dir.listFiles()
+            if (children == null) {
+                // [Bug 2 parity] unreadable dir: assume orphan-leaf candidate
+                // (bytes unknowable — 0) so measurement never silently misses.
+                if (!parentOrphanLeaf && looksLikeSessionId(dir.name) && dir.name !in liveSessionIds) {
+                    orphanDirs++
+                }
+                return
+            }
+            val isOrphanLeaf = !parentOrphanLeaf &&
+                children.none { it.isDirectory } && // File.isDirectory: same check as the old isOrphanMediaLeaf
+                looksLikeSessionId(dir.name) &&
+                dir.name !in liveSessionIds
+            for (child in children) {
+                val attrs = try {
+                    Files.readAttributes(
+                        Paths.get(child.path),
+                        BasicFileAttributes::class.java,
+                        LinkOption.NOFOLLOW_LINKS,
+                    )
+                } catch (e: Exception) {
+                    continue
+                }
+                if (attrs.isDirectory) {
+                    // Do not follow symlinked dirs.
+                    if (!attrs.isSymbolicLink) walk(child, isOrphanLeaf)
+                } else if (attrs.isRegularFile) {
+                    val key = attrs.fileKey()
+                    if (key != null && !seen.add(key)) continue
+                    val sid = child.parentFile?.name ?: continue
+                    if (sid in liveSessionIds) {
+                        sizes[sid] = (sizes[sid] ?: 0L) + attrs.size()
+                    } else if (isOrphanLeaf) {
+                        orphanBytes += attrs.size()
+                    }
+                }
+            }
+            if (isOrphanLeaf) orphanDirs++
+        }
+
+        walk(mediaRoot, false)
+        return MediaScan(sizes, orphanDirs, orphanBytes)
+    }
+
+    /** Result of [scanMediaOnce]: live per-session sizes + orphan media leaves. */
+    data class MediaScan(
+        val liveSizes: Map<String, Long>,
+        val orphanDirs: Int,
+        val orphanBytes: Long,
+    )
+
+    /**
      * All media leaf dirs matching layout `media/<date>/<sid>/` whose name is
      * [sessionId]. Used by both [mediaSize] (size) and [deleteSessionFiles]
      * (delete), so the size shown and the bytes deleted always refer to the
@@ -212,10 +287,25 @@ class SessionFileStore internal constructor(
      * banner that the user explicitly confirms before anything is removed.
      */
     fun scanOrphans(liveSessionIds: Set<String>): ReclaimReport {
+        val sessionPart = scanOrphanSessionDirs(liveSessionIds)
+        val media = scanMediaOnce(liveSessionIds)
+        return ReclaimReport(
+            sessionIds = sessionPart.sessionIds,
+            sessionDirs = sessionPart.sessionDirs,
+            sessionBytes = sessionPart.sessionBytes,
+            mediaDirs = media.orphanDirs,
+            mediaBytes = media.orphanBytes,
+        )
+    }
+
+    /**
+     * Orphan session dirs under [sessionsRoot] ONLY — the media half of the
+     * orphan report lives inside [scanMediaOnce], so the Storage page can do
+     * one media walk total instead of two.
+     */
+    fun scanOrphanSessionDirs(liveSessionIds: Set<String>): ReclaimReport {
         val sessionIds = mutableListOf<String>()
-        val mediaIds = mutableListOf<String>()
         var sessionBytes = 0L
-        var mediaBytes = 0L
         if (sessionsRoot.exists()) {
             sessionsRoot.listFiles()?.forEach { dir ->
                 if (dir.isDirectory && looksLikeSessionId(dir.name) && dir.name !in liveSessionIds) {
@@ -224,20 +314,10 @@ class SessionFileStore internal constructor(
                 }
             }
         }
-        if (mediaRoot.exists()) {
-            mediaRoot.walkTopDown().forEach { dir ->
-                if (isOrphanMediaLeaf(dir, liveSessionIds)) {
-                    mediaIds += dir.name
-                    mediaBytes += sizeOf(dir)
-                }
-            }
-        }
         return ReclaimReport(
             sessionIds = sessionIds,
             sessionDirs = sessionIds.size,
             sessionBytes = sessionBytes,
-            mediaDirs = mediaIds.size,
-            mediaBytes = mediaBytes,
         )
     }
 
@@ -280,35 +360,7 @@ class SessionFileStore internal constructor(
      * way `sizeOf` did).
      */
     fun mediaSizesBySessionBrief(sessionIds: Set<String>): Map<String, Long> {
-        if (!mediaRoot.exists()) return emptyMap()
-        val sizes = mutableMapOf<String, Long>()
-        val seen = HashSet<Any>()
-        fun walk(dir: File) {
-            val children = dir.listFiles() ?: return
-            for (child in children) {
-                val attrs = try {
-                    Files.readAttributes(
-                        Paths.get(child.path),
-                        BasicFileAttributes::class.java,
-                        LinkOption.NOFOLLOW_LINKS,
-                    )
-                } catch (e: Exception) {
-                    continue
-                }
-                if (attrs.isDirectory) {
-                    if (!attrs.isSymbolicLink) walk(child)
-                } else if (attrs.isRegularFile) {
-                    val sid = child.parentFile?.name ?: continue
-                    if (sid in sessionIds) {
-                        val key = attrs.fileKey()
-                        if (key != null && !seen.add(key)) continue
-                        sizes[sid] = (sizes[sid] ?: 0L) + attrs.size()
-                    }
-                }
-            }
-        }
-        walk(mediaRoot)
-        return sizes
+        return scanMediaOnce(sessionIds).liveSizes
     }
 
     data class ReclaimReport(
