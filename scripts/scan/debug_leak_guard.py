@@ -42,6 +42,7 @@ Exit: 0 = clean, 1 = violation(s) found.
 
 import os
 import re
+import struct
 import sys
 import zipfile
 
@@ -150,6 +151,52 @@ def apk_verdict(present, dex_count):
     return 0
 
 
+def _read_uleb128(data, off):
+    """Read a uleb128 from a dex. Raises ValueError past the buffer end."""
+    result = 0
+    shift = 0
+    while True:
+        if off >= len(data):
+            raise ValueError("uleb128 runs past end of buffer")
+        b = data[off]
+        off += 1
+        result |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return result, off
+        shift += 7
+        if shift > 28:
+            raise ValueError("uleb128 too long")
+
+def dex_strings(data):
+    """Return the string contents of a dex's string_data section.
+
+    Pure (takes bytes) so the string-table-only scan is testable without a
+    real build.
+
+    [2026-09-24] The guard used to scan the RAW dex bytes. A short marker can
+    coincide with dalvik bytecode operands across instruction boundaries:
+    the 2026-09-24 release CI false-positived on "5321" — two iput-object
+    instructions whose field-index bytes spelled 5321 (offset 3161468, code
+    section, verified NOT inside any string_data item; each branch built
+    clean, the merged input deterministically produced the byte sequence).
+    A real debug leak always surfaces as strings in string_data (class names
+    survive only via keep rules, whose names live in the same table), so
+    scanning ONLY string contents removes the raw-byte false-positive class
+    entirely while still catching every real leak.
+    """
+    if len(data) < 64:
+        raise ValueError("dex too small to parse")
+    string_ids_size, string_ids_off = struct.unpack_from("<II", data, 56)
+    if string_ids_off + 4 * string_ids_size > len(data):
+        raise ValueError("string_ids table runs past end of buffer")
+    out = []
+    for i in range(string_ids_size):
+        (item_off,) = struct.unpack_from("<I", data, string_ids_off + 4 * i)
+        _utf16_len, pos = _read_uleb128(data, item_off)
+        end = data.index(b"\x00", pos)  # MUTF-8 NUL is 0xC0 0x80, so 0x00 is safe
+        out.append(data[pos:end].decode("utf-8", errors="replace"))
+    return out
+
 def scan_apk(apk_path):
     """Return (debug markers present, dex entries scanned) for the APK."""
     present = []
@@ -158,9 +205,16 @@ def scan_apk(apk_path):
         for name in dex_entries(zf.namelist()):
             dex_count += 1
             data = zf.read(name)
-            for marker in APK_MARKERS:
-                if marker.encode() in data:
-                    present.append(f"{name}: {marker}")
+            try:
+                strings = dex_strings(data)
+            except ValueError as e:
+                # Fail CLOSED: an unparseable dex must not read as clean.
+                present.append(f"{name}: UNPARSEABLE DEX ({e})")
+                continue
+            for s in strings:
+                for marker in APK_MARKERS:
+                    if marker in s:
+                        present.append(f"{name}: {marker} (string: {s[:60]!r})")
     return present, dex_count
 
 
@@ -217,6 +271,65 @@ def self_test():
     ok &= check("apk verdict: ZERO dex entries is a VIOLATION (fail closed)", apk_verdict([], 0) == 1)
     ok &= check("apk verdict: markers present is a violation", apk_verdict(["classes.dex: DebugServer"], 1) == 1)
     ok &= check("apk verdict: clean dex passes", apk_verdict([], 1) == 0)
+
+    # --- apk scan: string-table-only (2026-09-24 raw-byte false-positive regression) ---
+    # The raw-byte scan flagged "5321" that was actually dalvik bytecode
+    # operands (two iput-object field indices). These fixtures pin: bytes in
+    # bytecode/metadata territory never count; a marker in string_data does.
+    def _mk_dex(strings, junk=b""):
+        """Minimal dex-shaped fixture: 64-byte header + string table + data."""
+        n = len(strings)
+        buf = bytearray(64 + 4 * n)
+        struct.pack_into("<II", buf, 56, n, 64)
+        data_off = 64 + 4 * n
+        blob = b""
+        for i, s in enumerate(strings):
+            raw = s.encode("utf-8") + b"\x00"
+            ln = len(s)
+            uleb = bytes([ln]) if ln < 0x80 else bytes([0x80 | (ln & 0x7F), ln >> 7])
+            struct.pack_into("<I", buf, 64 + 4 * i, data_off + len(blob))
+            blob += uleb + raw
+        return bytes(buf) + blob + junk
+
+    import zipfile as _zf
+    dex_clean = _mk_dex(
+        ["Lcom/example/Foo;", "hello world"],
+        junk=b"\x55\x53\x35\x33\x32\x31\xab\xcd" * 4,  # the 09-24 bytecode class
+    )
+    dex_dirty = _mk_dex(["Lcom/example/DebugServer;", "minis-debug"], junk=b"")
+    with tempfile.NamedTemporaryFile(suffix=".apk", delete=False) as tf:
+        with _zf.ZipFile(tf, "w") as z:
+            z.writestr("classes.dex", dex_clean)
+            z.writestr("resours/foo.bin", b"junk")
+        apk_clean_path = tf.name
+    with tempfile.NamedTemporaryFile(suffix=".apk", delete=False) as tf2:
+        with _zf.ZipFile(tf2, "w") as z:
+            z.writestr("classes.dex", dex_dirty)
+        apk_dirty_path = tf2.name
+    with tempfile.NamedTemporaryFile(suffix=".apk", delete=False) as tf3:
+        with _zf.ZipFile(tf3, "w") as z:
+            z.writestr("classes.dex", b"\x00" * 10)
+        apk_broken_path = tf3.name
+    present_c, cnt_c = scan_apk(apk_clean_path)
+    ok &= check(
+        "apk scan: marker bytes in bytecode (not string_data) are NOT flagged",
+        present_c == [] and cnt_c == 1,
+        str(present_c),
+    )
+    present_d, cnt_d = scan_apk(apk_dirty_path)
+    ok &= check(
+        "apk scan: a debug marker in string_data IS flagged",
+        cnt_d == 1 and any("DebugServer" in p for p in present_d),
+        str(present_d),
+    )
+    present_b, cnt_b = scan_apk(apk_broken_path)
+    ok &= check(
+        "apk scan: an unparseable dex fails CLOSED",
+        cnt_b == 1 and any("UNPARSEABLE" in p for p in present_b),
+        str(present_b),
+    )
+    for p in (apk_clean_path, apk_dirty_path, apk_broken_path):
+        os.unlink(p)
     return 0 if ok else 1
 
 
