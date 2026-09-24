@@ -23,6 +23,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import kotlin.math.roundToInt
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -677,10 +678,19 @@ internal fun LimitsSwitchRow(
     }
 }
 
-// [fix/tuning-slider-density] Keep every pre-existing tuning row on its
-// original 1-unit stepping (the widest shipped span is 983), and collapse
-// only wider spans.
-internal const val MAX_FINE_SPAN = 1024
+// [fix/tuning-slider-density] Spans up to MAX_FINE_SPAN keep exact 1-unit
+// stepping — at 64 units the ticks are ~5dp apart on a phone-width track, so
+// every unit is still a visible, tappable snap point. Wider spans collapse
+// onto the slot widths chosen in [sliderStepsFor].
+//
+// [T-slider-visible-snap] 2026-09-24: lowered from 1024 to 64. Every tuning
+// slider now has VISIBLE snapping — the user-facing rule is "all sliders
+// snap": a 983-step row (e.g. 50..1000 turns) drew sub-pixel ticks that read
+// as a continuous drag, while the wide rows (500-token / 50-px steps) visibly
+// snapped. Unifying on the coarse side also strictly REDUCES tick count
+// (983 → 38 on that row), so the [fix/tuning-slider-density] scan-cost
+// motivation only gets stronger.
+internal const val MAX_FINE_SPAN = 64
 /** Slot target for wide spans; the actual count is `span / width`. */
 internal const val WIDE_TARGET_SLOTS = 64
 /** Below this many slots a wide span falls back to a continuous slider. */
@@ -695,12 +705,17 @@ internal const val MIN_SLIDE_SLOTS = 16
  * ~30 000 circles per frame (shipped maximum before this fix: 983 steps,
  * which stayed affordable).
  *
- * Spans up to [MAX_FINE_SPAN] keep exact 1-unit stepping; wider spans snap
- * to ≈[WIDE_TARGET_SLOTS] slots. The slot width is chosen as the smallest
- * exact divisor of the span (preferring a round multiple of 5), so dragged
- * values stay nice: 2000..32000 lands on 500-token steps, 800..4000 on
- * 50-px steps, 60..1800 on 30-s steps. Spans with no usable divisor fall
- * back to a continuous slider (0): no ticks, no scan cost.
+ * [T-slider-visible-snap] Spans up to [MAX_FINE_SPAN] (64) keep exact 1-unit
+ * stepping — those ticks are ~5dp apart, every unit a visible snap point.
+ * Wider spans snap to ≈[WIDE_TARGET_SLOTS] slots. The slot width is chosen
+ * as the smallest exact divisor of the span (preferring a round multiple of
+ * 5), so dragged values stay nice: 2000..32000 lands on 500-token steps,
+ * 800..4000 on 50-px steps, 60..1800 on 30-s steps. A span with no usable
+ * divisor (prime-ish, e.g. 1031) falls back to ≈[WIDE_TARGET_SLOTS]
+ * NON-exact slots rather than a continuous slider: the thumb still snaps,
+ * the ticks stay visible, and [LimitsSliderRow] rounds the fractional slot
+ * values to the nearest int on commit — so no slider ever reads as
+ * "continuous" again.
  */
 internal fun sliderStepsFor(min: Int, max: Int): Int {
     val span = max - min
@@ -723,8 +738,13 @@ internal fun sliderStepsFor(min: Int, max: Int): Int {
         width++
     }
     val pick = if (roundDivisor > 0) roundDivisor else firstDivisor
-    if (pick <= 0) return 0
-    return span / pick - 1
+    if (pick > 0) return span / pick - 1
+    // [T-slider-visible-snap] Prime-ish span: no exact divisor in the window.
+    // Round(span/start) non-exact slots ≈ WIDE_TARGET_SLOTS, so the ticks
+    // stay visible and the scan stays bounded; the slot values are
+    // fractional and get rounded on commit.
+    val slots = (span + start / 2) / start
+    return (slots - 1).coerceAtLeast(1)
 }
 
 /**
@@ -777,7 +797,12 @@ internal fun LimitsSliderRow(
         }
         Slider(
             value = value.toFloat(),
-            onValueChange = { onCommit(it.toInt()) },
+            // [T-slider-visible-snap] roundToInt, not toInt(): with the
+            // non-exact slot fallback the Slider hands back fractional slot
+            // positions, and float slot math can also land at 23.9999… —
+            // truncation would snap that to 23 instead of 24. Rounding keeps
+            // exact-divisor slots unchanged and makes fallback slots int.
+            onValueChange = { onCommit(it.roundToInt()) },
             valueRange = min.toFloat()..max.toFloat(),
             steps = remember(min, max) { sliderStepsFor(min, max) },
         )
