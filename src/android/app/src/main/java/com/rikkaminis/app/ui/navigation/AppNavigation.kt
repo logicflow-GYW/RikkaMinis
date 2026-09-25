@@ -402,11 +402,18 @@ fun AppNavigation(
         // SharedPreferences counter increments. Resets automatically the
         // moment the user has ANY non-crash_or_stall cycle (clean_exit /
         // silent_kill / first_launch) — see LaunchCycleBeacon.lastRestartCount.
-        val mode = if (
-            com.rikkaminis.app.diagnostics.HangDetector.shouldForceHomeOnLaunch(context) ||
-            com.rikkaminis.app.crash.CrashFrequencyDetector.shouldForceHomeOnLaunch(context) ||
-            com.rikkaminis.app.diagnostics.LaunchCycleBeacon.shouldForceHomeOnLaunch()
-        ) 3 else rawMode
+        // [feat/forcehome-observation] The three probes are evaluated
+        // separately (all pure reads, no side effects) so the trace can say
+        // WHICH breaker(s) fired, not just that one did. Semantics unchanged
+        // from the old inline OR — the resolver now logs one structured line
+        // whenever a breaker forces home.
+        val mode = com.rikkaminis.app.diagnostics.ForceHomeTrace.resolverMode(
+            context = context,
+            rawMode = rawMode,
+            hang = com.rikkaminis.app.diagnostics.HangDetector.shouldForceHomeOnLaunch(context),
+            crash = com.rikkaminis.app.crash.CrashFrequencyDetector.shouldForceHomeOnLaunch(context),
+            beacon = com.rikkaminis.app.diagnostics.LaunchCycleBeacon.shouldForceHomeOnLaunch(),
+        )
         val autoThresholdMs = 15L * 60 * 1000
         val target: String? = when {
             // T185: if a system share is buffered, the fresh chat below is
