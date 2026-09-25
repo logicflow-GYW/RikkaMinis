@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -19,14 +20,21 @@ import com.rikkaminis.app.ui.theme.ChatColors
 
 /**
  * Shared monospace editor used by Settings → Memory file editor and
- * Session Memory sheet auto-file detail. Stateless — the caller owns
- * [value], [onValueChange], and Save logic. Renders a [BasicTextField]
- * plus optional error banner below it.
+ * Session Memory sheet auto-file detail. The caller owns the
+ * [TextFieldState] (and Save logic). Renders the state-holding
+ * [BasicTextField] overload plus optional error banner below it.
+ *
+ * [fix-memory-editor-jump-to-top] Uses the new state-holding overload —
+ * the legacy `value`/`onValueChange` overload keeps the cursor position
+ * only in the hoisted state, which flows back a frame late, so the
+ * same-frame caret bringIntoView after a tap uses the PREVIOUS cursor
+ * position and the content jumps to the top (Google issuetracker
+ * 235693496, unfixed upstream). TextFieldState stores the selection in
+ * the field's own state immediately, removing the one-frame staleness.
  */
 @Composable
 fun MemoryFileEditorContent(
-    value: String,
-    onValueChange: (String) -> Unit,
+    state: TextFieldState,
     errorMessage: String?,
     modifier: Modifier = Modifier,
     textStyle: TextStyle = TextStyle(
@@ -37,8 +45,7 @@ fun MemoryFileEditorContent(
 ) {
     Column(modifier = modifier) {
         BasicTextField(
-            value = value,
-            onValueChange = onValueChange,
+            state = state,
             modifier = Modifier
                 .fillMaxSize()
                 .weight(1f)

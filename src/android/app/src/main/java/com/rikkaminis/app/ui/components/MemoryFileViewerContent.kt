@@ -48,14 +48,20 @@ import com.rikkaminis.app.ui.theme.ChatColors
  *
  * The caller owns edit mode; this composable is read-only by construction.
  */
-// ponytail: 只读路径虚拟化，编辑路径仍是整份文本的输入框 | 天花板: 在 200KB+
-// 文件上点 Edit 会回到 150-250ms/帧（编辑态无法分块——分块输入框等于自造编辑器）
-// | 升级触发: 出现"点 Edit 后卡"的用户报告，或记忆文件常态超过 ~500KB 时改做按块编辑。
+// ponytail: 只读路径虚拟化 + 编辑路径窗口化（buildEditWindow，编辑器只持
+// O(窗口) 文本，Save 按 spliceEditWindow 拼回整份文件）| 天花板: 编辑模式下
+// 只能滚动窗口内 ~几屏（要编辑别处需退回只读滚过去再点 Edit）| 升级触发:
+// 用户反馈"编辑框滚不出窗口"不可接受时，改做窗口自动平移（光标接近窗口边
+// 界时重建窗口）。
 @Composable
 public fun MemoryFileViewerContent(
     text: String,
     modifier: Modifier = Modifier,
     emptyText: String? = null,
+    // Hoisted so the Settings editor and the Session Memory sheet can read
+    // the visible chunk range when building the edit window. Keyed on `text`
+    // by callers that pass their own, so switching files starts at the top.
+    listState: LazyListState = remember(text) { LazyListState() },
     textStyle: TextStyle = TextStyle(
         fontFamily = FontFamily.Monospace,
         fontSize = 12.sp,
@@ -64,9 +70,6 @@ public fun MemoryFileViewerContent(
     ),
 ) {
     val chunks = remember(text) { chunkText(text) }
-    // Keyed on `text` so switching files starts at the top instead of keeping
-    // the previous file's scroll offset.
-    val listState = remember(text) { LazyListState() }
 
     if (chunks.isEmpty()) {
         if (emptyText != null) {
