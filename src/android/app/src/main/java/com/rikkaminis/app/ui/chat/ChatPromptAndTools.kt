@@ -1715,7 +1715,7 @@ internal fun ChatViewModel.uniqueUploadFileName(dir: java.io.File, original: Str
 
 /** LLM-based title + category generation, mirrors iOS generateSessionTitleIfNeeded(). */
 
-internal fun ChatViewModel.generateSessionTitleIfNeeded() {
+internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) {
     // [T-android-titlegen-diag-logging] Unified "TitleGen" trail across
     // every path of this function — XIN 40454 reported sessions silently
     // staying "New Chat" and the failure paths were under-logged.
@@ -1733,7 +1733,9 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded() {
         return
     }
     // Skip if title already set (not "New Chat")
-    if (_sessionTitle.value != "New Chat" && _sessionTitle.value.isNotEmpty()) {
+    // [feat/drawer-context-menu] The manual regenerate path (drawer context
+    // menu) passes force=true to bypass this guard — the auto path keeps it.
+    if (!force && _sessionTitle.value != "New Chat" && _sessionTitle.value.isNotEmpty()) {
         AppLogger.info("TitleGen", "skip guard=title-already-set title='${_sessionTitle.value.take(200)}'")
         return
     }
