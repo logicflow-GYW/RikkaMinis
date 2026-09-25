@@ -4105,12 +4105,33 @@ fun ChatScreen(
                     // signal. Mirrors the old in-bubble indicator condition
                     // (streaming + no visible content), whose render site this
                     // band replaces (see ChatAssistantMessageUI).
-                    val lastAssistant = messages.lastOrNull { it.role == "assistant" }
-                    val typingActive = lastAssistant != null &&
-                        lastAssistant.isStreaming &&
-                        lastAssistant.content.isEmpty() &&
-                        lastAssistant.toolBlocks.none { it.kind != "info" }
+                    // [fix/typing-band-overlay] The band previously read the
+                    // canonical trailing message, whose content/toolBlocks
+                    // stay empty for the WHOLE live turn — during streaming
+                    // those fields live in the streamingById side-channel
+                    // (T-streaming-side-channel) and only drain back into the
+                    // canonical list at stream end, so typingActive was stuck
+                    // true until the turn finished and the band showed
+                    // "thinking / waiting" the entire time (user-reported
+                    // 2026-09-26). Derive from the overlay-merged view — the
+                    // same source the message renderers use — so the band
+                    // goes dark the moment real content or tool blocks become
+                    // visible, and the awaiting seconds counter only ticks
+                    // during actual network waits. The collect lives INSIDE
+                    // the item lambda: LazyListScope's builder is not a
+                    // composable context (CI caught the first placement at
+                    // 4121:70), while LazyItemScope is — and per-item
+                    // subscription keeps recomposition scoped to this 36dp
+                    // band instead of the whole transcript.
                     item(key = "__typing_band__", contentType = "typing_band") {
+                        val streamingBandById by viewModel.streamingById.collectAsState()
+                        val bandMerged = if (streamingBandById.isEmpty()) messages
+                            else mergeStreamingOverlay(messages, streamingBandById, viewModel.currentStreamEpoch())
+                        val lastAssistant = bandMerged.lastOrNull { it.role == "assistant" }
+                        val typingActive = lastAssistant != null &&
+                            lastAssistant.isStreaming &&
+                            lastAssistant.content.isEmpty() &&
+                            lastAssistant.toolBlocks.none { it.kind != "info" }
                         if (typingActive) {
                             TypingIndicator(
                                 queueWaitingAhead = queueWaitingAhead,
