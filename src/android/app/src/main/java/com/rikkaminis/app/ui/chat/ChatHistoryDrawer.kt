@@ -23,14 +23,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -231,15 +231,56 @@ fun ChatHistoryDrawer(
                             // date) and showPin only in the Pinned section
                             // (the section header marks pinned state; the icon
                             // is the unpin entry).
-                            DrawerSessionRow(
-                                session = session,
-                                selected = session.id == currentSessionId,
-                                onClick = { onSessionClick(session.id) },
-                                onLongClick = { menuTarget = session },
-                                showTime = period == DatePeriod.TODAY,
-                                showPin = period == DatePeriod.PINNED,
-                                onTogglePin = { onPinSession(session.id) },
-                            )
+                            //
+                            // [feat/drawer-context-menu] The long-press menu is
+                            // a compact DropdownMenu anchored to the pressed
+                            // row (rikkahub-style), not a full AlertDialog:
+                            // menu items are natively full-row tappable, and
+                            // tapping outside dismisses — no cancel button.
+                            Box {
+                                DrawerSessionRow(
+                                    session = session,
+                                    selected = session.id == currentSessionId,
+                                    onClick = { onSessionClick(session.id) },
+                                    onLongClick = { menuTarget = session },
+                                    showTime = period == DatePeriod.TODAY,
+                                    showPin = period == DatePeriod.PINNED,
+                                    onTogglePin = { onPinSession(session.id) },
+                                )
+                                if (menuTarget?.id == session.id) {
+                                    DropdownMenu(
+                                        expanded = true,
+                                        onDismissRequest = { menuTarget = null },
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    text = stringResource(
+                                                        if (session.pinnedAt != null) R.string.sessionlist_unpin
+                                                        else R.string.sessionlist_pin,
+                                                    ),
+                                                )
+                                            },
+                                            onClick = {
+                                                menuTarget = null
+                                                onPinSession(session.id)
+                                            },
+                                        )
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    text = stringResource(R.string.delete),
+                                                    color = MaterialTheme.colorScheme.error,
+                                                )
+                                            },
+                                            onClick = {
+                                                menuTarget = null
+                                                deleteTarget = session
+                                            },
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                     item { Spacer(modifier = Modifier.height(8.dp)) }
@@ -302,45 +343,11 @@ fun ChatHistoryDrawer(
         )
     }
 
-    // [fix/drawer-row-slim] context menu for a long-pressed session row: pin/
-    // unpin (moved here from the removed inline toggle on unpinned rows) and
-    // delete (kept behind its own confirm dialog, unchanged).
-    menuTarget?.let { target ->
-        val targetPinned = target.pinnedAt != null
-        AlertDialog(
-            onDismissRequest = { menuTarget = null },
-            title = { Text(text = target.title ?: stringResource(R.string.chat_menu_new_chat)) },
-            text = {
-                Column {
-                    TextButton(onClick = {
-                        menuTarget = null
-                        onPinSession(target.id)
-                    }) {
-                        Text(
-                            text = stringResource(
-                                if (targetPinned) R.string.sessionlist_unpin else R.string.sessionlist_pin,
-                            ),
-                        )
-                    }
-                    TextButton(onClick = {
-                        menuTarget = null
-                        deleteTarget = target
-                    }) {
-                        Text(
-                            text = stringResource(R.string.delete),
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { menuTarget = null }) {
-                    Text(text = stringResource(R.string.cancel))
-                }
-            },
-        )
-    }
+    // [feat/drawer-context-menu] The long-press context menu moved to a
+    // compact DropdownMenu anchored at each row (see the items loop above) —
+    // the old full AlertDialog (title + option rows + redundant cancel) is
+    // gone: menu items are natively full-row tappable and tapping outside
+    // dismisses.
 }
 
 /**
