@@ -299,9 +299,16 @@ class MainActivity : ComponentActivity() {
                 // the synthesised restore deep link skips (hasDeepLink) — so on
                 // precisely the path they exist to protect (re-entering the chat
                 // that was hanging / killing the process) they never ran.
-                com.rikkaminis.app.crash.CrashFrequencyDetector.shouldForceHomeOnLaunch(this) ||
-                    com.rikkaminis.app.diagnostics.HangDetector.shouldForceHomeOnLaunch(this) ||
-                    com.rikkaminis.app.diagnostics.LaunchCycleBeacon.shouldForceHomeOnLaunch()
+                // [feat/forcehome-observation] The probes feed ForceHomeTrace so
+                // this suppression path logs a structured line (which breaker,
+                // live counters) — the "cold start refused my restore link"
+                // symptom is now mechanically attributable instead of guessed.
+                com.rikkaminis.app.diagnostics.ForceHomeTrace.guardBlocked(
+                    this,
+                    hang = com.rikkaminis.app.diagnostics.HangDetector.shouldForceHomeOnLaunch(this),
+                    crash = com.rikkaminis.app.crash.CrashFrequencyDetector.shouldForceHomeOnLaunch(this),
+                    beacon = com.rikkaminis.app.diagnostics.LaunchCycleBeacon.shouldForceHomeOnLaunch(),
+                )
             }
 
         settingsLauncher = registerForActivityResult(
