@@ -60,7 +60,20 @@ internal interface AgentLoopHost {
      * landing points can never drift apart again.
      */
     fun isContextExhausted(): Boolean
-    fun offloadContextIfNeeded(contextWindow: Int, lastContextTokens: Int, force: Boolean = false)
+    /**
+     * [fix/offload-stale-token-compact] Returns the post-offload token
+     * estimate (same accounting basis as [lastContextTokens]) when this pass
+     * actually offloaded parts, or null when nothing was offloaded (policy
+     * disabled / below threshold / candidate pool dry). The engine uses the
+     * non-null value for the compact + hard-trim decisions that immediately
+     * follow, instead of the pre-offload [lastContextTokens] — see the
+     * 2026-09-25 logs: two real sessions offloaded down to 117470/250000 and
+     * 91107/200000 yet still triggered a summary because the decision ran on
+     * the stale pre-offload figure (166806 / 147380). The next provider
+     * Usage chunk refreshes loopState.lastContextTokens as before, so this
+     * return value never persists beyond the turn it was computed in.
+     */
+    fun offloadContextIfNeeded(contextWindow: Int, lastContextTokens: Int, force: Boolean = false): Int?
     fun trimContextHistoryWindow(contextWindow: Int, lastContextTokens: Int)
     /**
      * [T-auto-compact-in-loop] Turn-boundary automatic summarization: before
