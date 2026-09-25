@@ -11,6 +11,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -92,6 +94,13 @@ internal fun StreamingDotsText() {
 
 // ─── Typing Indicator (three dots pulsing) ────────────────────────────────────
 
+// [fix/typing-band-live] Fixed-height band the typing indicator occupies.
+// The transcript-bottom band item (ChatScreen) and the in-message render
+// sites both get a stable 36dp footprint, so the indicator appearing or its
+// text changing never shifts the layout. Plain val: Kotlin const val
+// rejects Dp.
+internal val TYPING_BAND_HEIGHT = 36.dp
+
 @Composable
 internal fun TypingIndicator(queueWaitingAhead: Int = -1, awaitingNetworkSinceMs: Long = 0L) {
     val infiniteTransition = rememberInfiniteTransition(label = "typing")
@@ -132,40 +141,51 @@ internal fun TypingIndicator(queueWaitingAhead: Int = -1, awaitingNetworkSinceMs
     }
     val waitingNetwork = awaitingNetworkSinceMs > 0L
 
-    Row(
-        modifier = Modifier.padding(top = 2.dp, bottom = 8.dp),
-        verticalAlignment = Alignment.Bottom,
+    // [fix/typing-band-live] The content Row is wrapped in a fixed-height
+    // band (bottom-aligned, matching the chat semantics of the bouncing dots
+    // sitting on the baseline). Every render site therefore occupies the same
+    // stable footprint whether the indicator is showing or the band is blank.
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(TYPING_BAND_HEIGHT),
+        contentAlignment = Alignment.BottomStart,
     ) {
-        Text(
-            text = if (queued) {
-                stringResource(R.string.chat_queued_indicator, queueWaitingAhead)
-            } else if (waitingNetwork) {
-                stringResource(R.string.chat_waiting_network, elapsedSec)
-            } else {
-                stringResource(R.string.chat_typing_indicator, soulName)
-            },
-            fontSize = 15.sp,
-            color = ChatColors.tertiaryText,
-        )
-        // Animated bouncing dots
-        val dots = listOf(".", ".", ".")
-        dots.forEachIndexed { index, dot ->
-            val offsetY by infiniteTransition.animateFloat(
-                initialValue = 0f,
-                targetValue = -6f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(400, delayMillis = index * 150, easing = LinearEasing),
-                    repeatMode = RepeatMode.Reverse,
-                ),
-                label = "dot_bounce_$index",
-            )
+        Row(
+            modifier = Modifier.padding(top = 2.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.Bottom,
+        ) {
             Text(
-                text = dot,
+                text = if (queued) {
+                    stringResource(R.string.chat_queued_indicator, queueWaitingAhead)
+                } else if (waitingNetwork) {
+                    stringResource(R.string.chat_waiting_network, elapsedSec)
+                } else {
+                    stringResource(R.string.chat_typing_indicator, soulName)
+                },
                 fontSize = 15.sp,
-                fontWeight = FontWeight.Bold,
                 color = ChatColors.tertiaryText,
-                modifier = Modifier.graphicsLayer { translationY = offsetY },
             )
+            // Animated bouncing dots
+            val dots = listOf(".", ".", ".")
+            dots.forEachIndexed { index, dot ->
+                val offsetY by infiniteTransition.animateFloat(
+                    initialValue = 0f,
+                    targetValue = -6f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(400, delayMillis = index * 150, easing = LinearEasing),
+                        repeatMode = RepeatMode.Reverse,
+                    ),
+                    label = "dot_bounce_$index",
+                )
+                Text(
+                    text = dot,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = ChatColors.tertiaryText,
+                    modifier = Modifier.graphicsLayer { translationY = offsetY },
+                )
+            }
         }
     }
 }

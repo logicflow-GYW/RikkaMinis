@@ -509,17 +509,11 @@ internal fun AssistantMessageView(
             }
         }
 
-        // Typing indicator when streaming with no content yet (info-only blocks don't count)
-        val hasRealBlocks = message.toolBlocks.any { it.kind != "info" }
-        if (message.isStreaming && message.content.isEmpty() && !hasRealBlocks) {
-            // [fix/zero-chunk-cancel] Pass the wait clock only for a message
-            // that is itself awaiting; a finished message keeps the plain
-            // indicator (and in practice never reaches this branch).
-            TypingIndicator(
-                awaitingNetworkSinceMs =
-                    if (message.isAwaitingModelResponse) awaitingResponseSinceMs else 0L,
-            )
-        }
+        // [fix/typing-band-live] The in-bubble typing indicator moved to the
+        // persistent fixed-height status band at the transcript bottom
+        // (ChatScreen) — keeping BOTH would render the indicator twice while
+        // the band is active. Same condition (streaming, no visible content),
+        // now derived in ChatScreen from the live trailing message.
 
         // Legacy fallback: render message.content when no text blocks exist (old sessions).
         if (!hasAnyTextBlock && message.content.isNotEmpty()) {
