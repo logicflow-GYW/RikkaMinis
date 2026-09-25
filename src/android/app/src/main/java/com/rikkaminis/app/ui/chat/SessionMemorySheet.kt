@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Undo
@@ -78,8 +79,12 @@ fun SessionMemorySheet(
     // Editing state for the active detail screen. Lives at the sheet level so
     // a single Save button in the header can read the latest buffer without
     // threading callbacks through the body composable.
+    // [fix-memory-editor-jump-to-top] TextFieldState replaces the legacy
+    // String buffer: the field stores its cursor/selection in its own state
+    // immediately, so a tap mid-file no longer scrolls back to the top
+    // (issuetracker 235693496).
     var isEditing by remember(mode) { mutableStateOf(false) }
-    var editedContent by remember(mode) { mutableStateOf("") }
+    val editedState = remember(mode) { TextFieldState() }
     var savedToastVisible by remember { mutableStateOf(false) }
 
     // Per-mode dialog state for revoke flow.
@@ -97,11 +102,12 @@ fun SessionMemorySheet(
     // Reset editing buffer when entering a new detail view.
     LaunchedEffect(mode, isEditing) {
         if (isEditing) {
-            editedContent = when (val m = mode) {
+            val text = when (val m = mode) {
                 is MemorySheetMode.AutoFile -> m.content
                 is MemorySheetMode.Write -> m.record.writtenContent ?: ""
                 else -> ""
             }
+            editedState.edit { replace(0, length, text) }
         }
     }
 
@@ -154,10 +160,13 @@ fun SessionMemorySheet(
                     showEdit = m.editable && !isEditing,
                     showSave = m.editable && isEditing,
                     showRevoke = false,
-                    onEdit = { isEditing = true; editedContent = m.content },
+                    onEdit = {
+                        isEditing = true
+                        editedState.edit { replace(0, length, m.content) }
+                    },
                     onSave = {
                         try {
-                            memoryRepository.saveFile(m.name, editedContent)
+                            memoryRepository.saveFile(m.name, editedState.text.toString())
                             // SOUL.md drives [SoulStore.cachedMetadata] which
                             // backs the chat-bubble header name. The raw
                             // saveFile() path here bypasses SoulStore.save(),
@@ -166,7 +175,7 @@ fun SessionMemorySheet(
                             if (m.name == "SOUL.md") {
                                 com.rikkaminis.app.agent.SoulStore.refreshCache(context)
                             }
-                            mode = MemorySheetMode.AutoFile(m.name, editedContent, m.editable)
+                            mode = MemorySheetMode.AutoFile(m.name, editedState.text.toString(), m.editable)
                             isEditing = false
                             savedToastVisible = true
                         } catch (_: Exception) { /* fall through; UI toast omitted on failure */ }
@@ -180,8 +189,7 @@ fun SessionMemorySheet(
                 if (isEditing) {
                     Box(modifier = Modifier.fillMaxSize()) {
                         MemoryFileEditorContent(
-                            value = editedContent,
-                            onValueChange = { editedContent = it },
+                            state = editedState,
                             errorMessage = null,
                             modifier = Modifier.fillMaxSize(),
                         )
@@ -210,15 +218,15 @@ fun SessionMemorySheet(
                     showRevoke = canEditOrRevoke && !isEditing,
                     onEdit = {
                         isEditing = true
-                        editedContent = m.record.writtenContent ?: ""
+                        editedState.edit { replace(0, length, m.record.writtenContent ?: "") }
                     },
                     onSave = {
-                        val result = onSaveRecord(m.record, editedContent)
+                        val result = onSaveRecord(m.record, editedState.text.toString())
                         if (result is MemoryRepository.EntryMutationResult.Success) {
                             // Update the displayed record in-place so a follow-up
                             // revoke targets the new body.
                             mode = MemorySheetMode.Write(
-                                m.record.copy(writtenContent = editedContent)
+                                m.record.copy(writtenContent = editedState.text.toString())
                             )
                             isEditing = false
                             savedToastVisible = true
@@ -231,8 +239,7 @@ fun SessionMemorySheet(
                 MemoryWriteDetailBody(
                     record = m.record,
                     isEditing = isEditing,
-                    editedContent = editedContent,
-                    onEditedContentChange = { editedContent = it },
+                    state = editedState,
                     showSavedToast = savedToastVisible,
                 )
             }

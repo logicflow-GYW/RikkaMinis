@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -339,7 +340,12 @@ fun MemoryFileEditScreen(
     memoryRepository: MemoryRepository,
     onBack: () -> Unit,
 ) {
-    var content by remember { mutableStateOf("") }
+    // [fix-memory-editor-jump-to-top] TextFieldState replaces the legacy
+    // String buffer: the field stores its cursor/selection in its own state
+    // immediately, so a tap mid-file no longer scrolls back to the top
+    // (issuetracker 235693496). readFile is non-suspend so it can seed the
+    // state directly; remember(fileName) reloads on file switch.
+    val state = remember(fileName) { TextFieldState(memoryRepository.readFile(fileName)) }
     var saveError by remember { mutableStateOf<String?>(null) }
     // [T-android-memory-file-jank] false = virtualized read-only viewer.
     var isEditing by remember(fileName) { mutableStateOf(false) }
@@ -352,9 +358,8 @@ fun MemoryFileEditScreen(
     // detail editor's SavedToast so the wording stays consistent.
     val savedToastText = stringResource(R.string.memory_save_toast)
 
-    LaunchedEffect(fileName) {
-        content = memoryRepository.readFile(fileName)
-    }
+    // [fix-memory-editor-jump-to-top] state is seeded via remember(fileName)
+    // above — the LaunchedEffect readFile is gone with the String buffer.
 
     Scaffold(
         topBar = {
@@ -381,7 +386,7 @@ fun MemoryFileEditScreen(
                         // no hasChanges gate (see KDoc above).
                         MinisTextButton(onClick = {
                             try {
-                                memoryRepository.saveFile(fileName, content)
+                                memoryRepository.saveFile(fileName, state.text.toString())
                                 saveError = null
                                 android.widget.Toast.makeText(
                                     context,
@@ -424,17 +429,16 @@ fun MemoryFileEditScreen(
                 // [P3-shared-editor] Shared monospace editor, also used by
                 // SessionMemorySheet auto-file detail.
                 MemoryFileEditorContent(
-                    value = content,
-                    onValueChange = { content = it },
+                    state = state,
                     errorMessage = saveError,
                     modifier = Modifier.weight(1f),
                 )
             } else {
-                // No emptyText here: `content` is "" for the first frame until
-                // the LaunchedEffect readFile lands, so an empty-state label
-                // would flash "Empty" on every open of a non-empty file.
+                // No emptyText here: `state` is seeded synchronously inside
+                // remember(fileName) above, so an empty-state label would
+                // flash "Empty" on every open of a non-empty file.
                 MemoryFileViewerContent(
-                    text = content,
+                    text = state.text.toString(),
                     modifier = Modifier.weight(1f),
                 )
             }

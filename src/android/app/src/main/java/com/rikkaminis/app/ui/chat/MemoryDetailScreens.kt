@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -126,17 +127,20 @@ internal fun SavedToast(modifier: Modifier = Modifier) {
 fun MemoryWriteDetailBody(
     record: MemoryToolRecord,
     isEditing: Boolean,
-    editedContent: String,
-    onEditedContentChange: (String) -> Unit,
+    state: TextFieldState,
     showSavedToast: Boolean,
 ) {
     val written = record.writtenContent ?: ""
 
     Box(modifier = Modifier.fillMaxSize()) {
         if (isEditing) {
+            // [fix-memory-editor-jump-to-top] State-holding BasicTextField —
+            // the legacy value/onValueChange overload keeps the cursor
+            // position only in hoisted state, which flows back a frame late,
+            // so a tap mid-file scrolled back to the top (issuetracker
+            // 235693496).
             BasicTextField(
-                value = editedContent,
-                onValueChange = onEditedContentChange,
+                state = state,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(horizontal = 16.dp, vertical = 12.dp),
