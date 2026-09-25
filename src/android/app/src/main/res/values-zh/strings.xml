@@ -425,7 +425,6 @@
     <string name="skill_detail_label_source">来源</string>
     <string name="skill_detail_update_url">从 URL 更新</string>
     <string name="skill_detail_update_file">从文件更新…</string>
-    <string name="skill_detail_rescan">从磁盘重新扫描</string>
     <string name="skill_export_share">导出 Skill</string>
     <string name="skill_export_failed">无法导出此 Skill。</string>
     <string name="skill_detail_updated">已更新</string>
@@ -438,8 +437,6 @@
     <string name="skill_detail_error_invalid">不是有效的 SKILL.md（缺少 \'name:\' frontmatter）</string>
     <string name="skill_detail_error_update_failed">更新失败</string>
     <string name="skill_detail_status_downloading">下载中…</string>
-    <string name="skill_detail_status_rescanning">重新扫描中…</string>
-    <string name="skill_detail_error_missing">磁盘上 SKILL.md 缺失或无效</string>
     <string name="skill_detail_source_file">文件导入</string>
     <string name="skill_detail_source_bundled">内置</string>
     <string name="skill_detail_source_session">会话创建</string>

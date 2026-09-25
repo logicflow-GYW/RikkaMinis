@@ -534,7 +534,6 @@
     <string name="skill_detail_label_source">Источник</string>
     <string name="skill_detail_update_url">Обновить из URL</string>
     <string name="skill_detail_update_file">Обновить из файла…</string>
-    <string name="skill_detail_rescan">Пересканировать с диска</string>
     <string name="skill_export_share">Экспорт Skill</string>
     <string name="skill_export_failed">Не удалось экспортировать этот Skill.</string>
     <string name="skill_detail_updated">Обновлено</string>
@@ -547,8 +546,6 @@
     <string name="skill_detail_error_invalid">Недействительный SKILL.md (отсутствует заголовок \'name:\')</string>
     <string name="skill_detail_error_update_failed">Не удалось обновить</string>
     <string name="skill_detail_status_downloading">Загрузка…</string>
-    <string name="skill_detail_status_rescanning">Пересканирование…</string>
-    <string name="skill_detail_error_missing">SKILL.md отсутствует или недействителен на диске</string>
     <string name="skill_detail_source_file">Импорт из файла</string>
     <string name="skill_detail_source_bundled">Встроенный</string>
     <string name="skill_detail_source_session">Создан в сессии</string>

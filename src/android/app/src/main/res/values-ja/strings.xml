@@ -337,7 +337,6 @@
     <string name="skill_detail_label_source">ソース</string>
     <string name="skill_detail_update_url">URLから更新</string>
     <string name="skill_detail_update_file">ファイルから更新…</string>
-    <string name="skill_detail_rescan">ディスクから再スキャン</string>
     <string name="skill_export_share">Skill をエクスポート</string>
     <string name="skill_export_failed">この Skill をエクスポートできませんでした。</string>
     <string name="skill_detail_updated">更新済み</string>
@@ -350,8 +349,6 @@
     <string name="skill_detail_error_invalid">有効な SKILL.md ではありません（\'name:\' frontmatter が欠落）</string>
     <string name="skill_detail_error_update_failed">更新失敗</string>
     <string name="skill_detail_status_downloading">ダウンロード中…</string>
-    <string name="skill_detail_status_rescanning">再スキャン中…</string>
-    <string name="skill_detail_error_missing">ディスク上の SKILL.md が不足または無効</string>
     <string name="skill_detail_source_file">ファイルインポート</string>
     <string name="skill_detail_source_bundled">内蔵</string>
     <string name="skill_detail_source_session">セッション作成</string>
