@@ -1464,7 +1464,10 @@ class SkillRepository(private val context: Context) {
         val cursor = db.rawQuery("SELECT * FROM skills ORDER BY installed_at DESC", null)
         while (cursor.moveToNext()) {
             val id = cursor.getString(cursor.getColumnIndexOrThrow("id"))
-            val body = readSkillMdBody(id)
+            // One on-disk parse per row: `body` comes from it, and the same
+            // parse feeds the metadata re-sync further down.
+            val diskSkill = parseSkillMdOnDisk(id)
+            val body = diskSkill?.body ?: ""
             // [fix/subagent-frontmatter] Frontmatter-only fields (subagent:
             // true, max_turns, allowed_tools) never reach `body` — parseSkillMd
             // strips the block — so read it separately for consumers that
@@ -1495,6 +1498,33 @@ class SkillRepository(private val context: Context) {
                         Log.i(TAG, "Self-healed skill description for $id")
                     }
                 }
+            }
+            // [T-skillmeta-resync] Reconcile the row with the on-disk
+            // frontmatter. Rows are written at import time and
+            // reloadFromDisk() only re-reads the DB, so a SKILL.md edited
+            // outside the in-app editor (agent file_write/file_edit, or a
+            // shell sed in the sandbox — both already route through
+            // reloadFromDisk via maybeReloadSkillsForPath /
+            // SkillsManagementScreen) kept its original description forever.
+            // That description is what the model reads in
+            // <available_skills>, so a stale row means it triggers on
+            // outdated text. Disk wins for the fields it carries; see
+            // SkillMetadataSync for the guards.
+            val synced = SkillMetadataSync.reconcile(
+                stored = SkillMetadataSync.Metadata(name, description, version),
+                disk = diskSkill?.let {
+                    SkillMetadataSync.Metadata(it.name, it.description, it.version)
+                },
+            )
+            if (synced != null) {
+                name = synced.name
+                description = synced.description
+                version = synced.version
+                db.execSQL(
+                    "UPDATE skills SET name=?, description=?, version=?, updated_at=? WHERE id=?",
+                    arrayOf<Any>(name, description, version, System.currentTimeMillis(), id),
+                )
+                Log.i(TAG, "Re-synced skill metadata from disk: $id (v$version)")
             }
             dbSkills.add(Skill(
                 id = id,
@@ -1598,11 +1628,15 @@ class SkillRepository(private val context: Context) {
         file.writeText(content)
     }
 
-    private fun readSkillMdBody(id: String): String {
+    /**
+     * Parse the skill's on-disk SKILL.md, or null when the file is missing or
+     * isn't a valid SKILL.md (no/incomplete frontmatter). Callers treat null as
+     * "disk has nothing to say" — never as "the skill is empty".
+     */
+    private fun parseSkillMdOnDisk(id: String): ParsedSkill? {
         val file = File(skillsDir, "$id/SKILL.md")
-        if (!file.exists()) return ""
-        val parsed = parseSkillMd(file.readText())
-        return parsed?.body ?: ""
+        if (!file.exists()) return null
+        return parseSkillMd(runCatching { file.readText() }.getOrNull() ?: "")
     }
 
     /**
