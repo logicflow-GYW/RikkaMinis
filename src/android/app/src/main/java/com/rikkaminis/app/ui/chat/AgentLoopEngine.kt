@@ -353,10 +353,21 @@ internal class AgentLoopEngine(
             // snapshot inside a long-running agent turn is exactly the iOS
             // fcc22b66 item-3 bug.
             host.effectiveContextWindowTokens()?.takeIf { it > 0 }?.let { window ->
-                host.offloadContextIfNeeded(
+                // [fix/offload-stale-token-compact] When the offload pass
+                // actually shrunk the history, it returns the post-offload
+                // estimate (same accounting basis as lastContextTokens); use
+                // that for the compact + hard-trim decisions below instead of
+                // the pre-offload figure. 2026-09-25 real-session evidence:
+                // two runs offloaded down to 117470/250000 and 91107/200000 —
+                // both already BELOW their compact lines (162457 / 131639) —
+                // yet still triggered a summary wait (92 s / 38 s) because
+                // the decisions ran on the stale 166806 / 147380. Null (no
+                // offload happened) falls back to the previous behavior.
+                val postOffloadTokens = host.offloadContextIfNeeded(
                     contextWindow = window,
                     lastContextTokens = loopState.lastContextTokens,
                 )
+                val decisionTokens = postOffloadTokens ?: loopState.lastContextTokens
                 // [T-auto-compact-in-loop] Before falling back to the hard trim
                 // (which drops the oldest turns verbatim and inserts a jarring
                 // "trimmed N messages" line mid-answer), try to summarise the
@@ -369,7 +380,7 @@ internal class AgentLoopEngine(
                 // model is mid-task.
                 val compacted = host.maybeAutoCompactInLoop(
                     contextWindow = window,
-                    lastContextTokens = loopState.lastContextTokens,
+                    lastContextTokens = decisionTokens,
                 )
                 // [fix/diff-audit-0904-F3] When auto-compact just fired, SKIP the
                 // trim this turn. Compact does NOT shrink agentHistory (it only
@@ -397,7 +408,7 @@ internal class AgentLoopEngine(
                 if (!compacted) {
                     host.trimContextHistoryWindow(
                         contextWindow = window,
-                        lastContextTokens = loopState.lastContextTokens,
+                        lastContextTokens = decisionTokens,
                     )
                 } else {
                     AppLogger.info(TAG_STREAM, "auto-compact folded old turns; skipping hard trim this turn (anchor preserved)")

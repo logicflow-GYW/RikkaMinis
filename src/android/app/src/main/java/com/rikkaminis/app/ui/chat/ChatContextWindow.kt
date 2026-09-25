@@ -154,7 +154,7 @@ internal fun ChatViewModel.offloadContextIfNeeded(
     contextWindow: Int,
     lastContextTokens: Int,
     force: Boolean = false,
-) {
+): Int? {
     val sid = activeSessionId
     // [T-adaptive-compact-reserve] Same shifted policy the compact decision
     // uses, so offload always fires strictly before the compact line it is
@@ -165,7 +165,7 @@ internal fun ChatViewModel.offloadContextIfNeeded(
     if (!force && policy.offloadThreshold == 0) {
     // Small-window tier: offload disabled — UI surfaces "exhausted"
     // when the user crosses the threshold. Nothing to do here.
-        return
+        return null
     }
 
     val effectiveTokens =
@@ -174,7 +174,7 @@ internal fun ChatViewModel.offloadContextIfNeeded(
     if (!force && effectiveTokens < policy.offloadThreshold) {
     // Below threshold — no work needed. Caller logs at debug level
     // via dynamicMaxTokens; we stay silent to keep logs readable.
-        return
+        return null
     }
 
     val targetTokens = if (force) 0 else policy.offloadTarget
@@ -361,6 +361,22 @@ internal fun ChatViewModel.offloadContextIfNeeded(
     // of waiting for that line.
     val neededTokens = (beforeTokens - targetTokens).coerceAtLeast(0)
     offloadUnderDelivered = neededTokens > 0 && freedTokens < neededTokens / 2
+
+    // [fix/offload-stale-token-compact] Post-offload estimate for the compact
+    // + hard-trim decisions that immediately follow in the agent loop.
+    // ponytail: currentTokens only subtracts the offloaded candidates' tokens
+    // and does not re-add the replacement stubs' own tokens | 天花板: a pass
+    // that offloads many tiny parts would understate usage by ~20-30 tokens
+    // per stub — bounded by (parts offloaded × ~30), noise against the tens
+    // of thousands of tokens a pass actually frees | 升级触发: a log line
+    // where post-offload tokens diverge visibly from the next provider
+    // Usage value (loopState.lastContextTokens refresh) → re-estimate via
+    // estimateContextTokens() instead of the arithmetic delta.
+    // Null when nothing was offloaded (candidates already stubbed / pool
+    // dry): the engine then keeps using the pre-offload figure, and the
+    // under-delivery flag above is what escalates the compact — not a
+    // fabricated lower estimate.
+    return if (offloadedCount > 0) currentTokens else null
 }
     /**
      * [T-context-limit-enforce] Hard-cap fallback after offload: if the
