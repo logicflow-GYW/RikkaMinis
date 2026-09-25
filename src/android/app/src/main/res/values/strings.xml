@@ -693,7 +693,6 @@
     <string name="skill_detail_label_source">Source</string>
     <string name="skill_detail_update_url">Update from URL</string>
     <string name="skill_detail_update_file">Update from File…</string>
-    <string name="skill_detail_rescan">Rescan from Disk</string>
     <string name="skill_export_share">Export Skill</string>
     <string name="skill_export_failed">Could not export this skill.</string>
     <string name="skill_detail_updated">Updated</string>
@@ -706,8 +705,6 @@
     <string name="skill_detail_error_invalid">Not a valid SKILL.md (missing \'name:\' frontmatter)</string>
     <string name="skill_detail_error_update_failed">Update failed</string>
     <string name="skill_detail_status_downloading">Downloading…</string>
-    <string name="skill_detail_status_rescanning">Rescanning…</string>
-    <string name="skill_detail_error_missing">SKILL.md missing or invalid on disk</string>
     <string name="skill_detail_source_file">File import</string>
     <string name="skill_detail_source_bundled">Built-in</string>
     <string name="skill_detail_source_session">Session created</string>

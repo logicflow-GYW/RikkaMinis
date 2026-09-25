@@ -337,7 +337,6 @@
     <string name="skill_detail_label_source">소스</string>
     <string name="skill_detail_update_url">URL에서 업데이트</string>
     <string name="skill_detail_update_file">파일에서 업데이트…</string>
-    <string name="skill_detail_rescan">디스크에서 다시 스캔</string>
     <string name="skill_export_share">Skill 내보내기</string>
     <string name="skill_export_failed">이 Skill을 내보낼 수 없습니다.</string>
     <string name="skill_detail_updated">업데이트됨</string>
@@ -350,8 +349,6 @@
     <string name="skill_detail_error_invalid">유효한 SKILL.md 가 아닙니다 (\'name:\' frontmatter 누락)</string>
     <string name="skill_detail_error_update_failed">업데이트 실패</string>
     <string name="skill_detail_status_downloading">다운로드 중…</string>
-    <string name="skill_detail_status_rescanning">다시 스캔 중…</string>
-    <string name="skill_detail_error_missing">디스크의 SKILL.md 가 없거나 잘못됨</string>
     <string name="skill_detail_source_file">파일 가져오기</string>
     <string name="skill_detail_source_bundled">내장</string>
     <string name="skill_detail_source_session">세션 생성</string>

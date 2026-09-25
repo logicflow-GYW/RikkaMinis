@@ -758,7 +758,7 @@ fun SkillDetailScreen(
 
             // ── Update Actions Section ──
             // T154: every row now drives `updateStatus`. The repository APIs
-            // already exist (updateFromURL / update / rescanFromDisk); the
+            // already exist (updateFromURL / update); the
             // previous TODOs and the "always show Done" flag were stubs.
             val isBusy = updateStatus is UpdateStatus.InProgress
             DetailSection {
@@ -793,23 +793,6 @@ fun SkillDetailScreen(
                     SettingsActionIcon(Icons.Outlined.Description, SettingsIconBlue)
                     Spacer(Modifier.width(14.dp))
                     Text(stringResource(R.string.skill_detail_update_file), color = MaterialTheme.colorScheme.primary)
-                }
-                DetailDivider()
-
-                DetailRow(clickable = !isBusy, onClick = {
-                    if (isBusy) return@DetailRow
-                    updateStatus = UpdateStatus.InProgress(context.getString(R.string.skill_detail_status_rescanning))
-                    // [audit-0917] rescanFromDisk walks the skill dir on disk - run it
-                    // off the Main thread like the update row above.
-                    scope.launch {
-                        val refreshed = skillRepository.rescanFromDisk(skill.id)
-                        updateStatus = if (refreshed != null) UpdateStatus.Done
-                            else UpdateStatus.Failed(context.getString(R.string.skill_detail_error_missing))
-                    }
-                }) {
-                    SettingsActionIcon(Icons.Default.Refresh, SettingsIconGreen)
-                    Spacer(Modifier.width(14.dp))
-                    Text(stringResource(R.string.skill_detail_rescan), color = MaterialTheme.colorScheme.primary, modifier = Modifier.weight(1f))
                 }
 
                 // Inline status row — only rendered while there's something to
@@ -1067,15 +1050,11 @@ private val SettingsIconBlue: Color
     @Composable
     @ReadOnlyComposable
     get() = ChatColors.link
-private val SettingsIconGreen: Color
-    @Composable
-    @ReadOnlyComposable
-    get() = ChatColors.success
 
 /**
  * [T-android-skill-icon-circular] A colored circular badge with a white glyph
  * centered inside, for the skill detail ACTION rows (Update from URL / Update
- * from file / Rescan).
+ * from file).
  *
  * Spec is copied VERBATIM from the main Settings page rows
  * (SettingsScreen's row icon: a 30dp circle filled with `iconColor`, holding a

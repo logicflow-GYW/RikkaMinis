@@ -337,7 +337,6 @@
     <string name="skill_detail_label_source">Quelle</string>
     <string name="skill_detail_update_url">Von URL aktualisieren</string>
     <string name="skill_detail_update_file">Aus Datei aktualisieren…</string>
-    <string name="skill_detail_rescan">Von Datenträger neu scannen</string>
     <string name="skill_export_share">Skill exportieren</string>
     <string name="skill_export_failed">Dieser Skill konnte nicht exportiert werden.</string>
     <string name="skill_detail_updated">Aktualisiert</string>
@@ -350,8 +349,6 @@
     <string name="skill_detail_error_invalid">Keine gültige SKILL.md (fehlendes \'name:\'-Frontmatter)</string>
     <string name="skill_detail_error_update_failed">Aktualisierung fehlgeschlagen</string>
     <string name="skill_detail_status_downloading">Wird heruntergeladen…</string>
-    <string name="skill_detail_status_rescanning">Wird erneut gescannt…</string>
-    <string name="skill_detail_error_missing">SKILL.md fehlt oder ist auf der Festplatte ungültig</string>
     <string name="skill_detail_source_file">Dateiimport</string>
     <string name="skill_detail_source_bundled">Integriert</string>
     <string name="skill_detail_source_session">In Sitzung erstellt</string>
