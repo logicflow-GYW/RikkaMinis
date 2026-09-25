@@ -205,6 +205,21 @@ internal fun ChatViewModel.compactAll(
     // with nothing compacted: auto-compaction silently went quiet. Stamping
     // here (not on success) still keeps the anti-thrash interval for genuine
     // failures — repeated provider errors must not re-hammer the model.
+    // [feat/compact-range-observation] Seed observation for "compact folds
+    // content by POSITION only (no relevance)": record what the folded range
+    // actually contains — message count, tool-result-only share, user-text
+    // turns, raw chars. Accumulating this answers, with two weeks of real
+    // data, whether a relevance-aware selection (semantic / BM25) would fold
+    // a different set than the positional range — the gate for deciding
+    // whether to build one, before any such machinery is paid for.
+    AppLogger.info(
+        ChatViewModel.TAG,
+        "[Compact] range composition: msgs=${toCompact.size} " +
+            "toolResultOnly=${toCompact.count { it.isToolResultOnly() }} " +
+            "userTextTurns=${toCompact.count { it.isPersistedUserPrompt() }} " +
+            "chars=${toCompact.sumOf { it.content.length }} " +
+            "start=$effectiveStartIdx anchor=$anchorIdx",
+    )
     lastAutoCompactAtMs = System.currentTimeMillis()
     traceObserver.t7State(
         traceObserver.t7ObservedPhase ?: ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.EXECUTING_TOOLS),
