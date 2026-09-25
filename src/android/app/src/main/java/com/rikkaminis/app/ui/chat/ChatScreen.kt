@@ -2095,6 +2095,11 @@ fun ChatScreen(
                         chatRepository.pinSession(id, session.pinnedAt == null)
                     }
                 },
+                // [feat/drawer-context-menu] Manual title regeneration from
+                // the drawer context menu. Acts on the CURRENT session's
+                // ViewModel — the drawer only shows the item on the current
+                // session's row (the VM has no per-session regeneration path).
+                onRegenerateTitle = { viewModel.regenerateSessionTitle() },
             )
         },
     ) {

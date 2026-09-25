@@ -36,6 +36,21 @@ fun ChatViewModel.updateTitleAndCategory(title: String, category: String?) {
     }
 }
 
+/** [feat/drawer-context-menu] Manual title regeneration from the drawer
+ *  context menu. The auto path (generateSessionTitleIfNeeded) skips when a
+ *  title is already set and stops after TITLE_MAX_ATTEMPTS — both guards
+ *  exist to stop runaway auto-retry, not user intent. An explicit regenerate
+ *  resets the attempt counter and forces past the title-already-set guard;
+ *  the in-flight guard stays (no concurrent dispatch). Acts on the CURRENT
+ *  session's ViewModel only — callers must not wire it for non-current
+ *  drawer rows (the VM has no per-session regeneration path).
+ *  ponytail: 无 loading 态反馈，靠标题 StateFlow 刷新可见 | 天花板: 用户点了没反应感知 | 升级触发: 用户报"点了重新生成没变化" */
+fun ChatViewModel.regenerateSessionTitle() {
+    if (isDraft || realSessionId.isEmpty()) return
+    titleGenerationAttempts = 0
+    generateSessionTitleIfNeeded(force = true)
+}
+
 /**
  * [promote-draft-on-new-chat] If the user is on a draft with unsent text
  * and taps "New Chat", promote the current draft to a real session so the

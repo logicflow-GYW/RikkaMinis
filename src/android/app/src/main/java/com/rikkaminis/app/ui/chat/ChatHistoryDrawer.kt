@@ -20,17 +20,20 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.outlined.PushPin
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -103,6 +106,11 @@ fun ChatHistoryDrawer(
     footerActions: List<ChatActionSpec> = emptyList(),
     onAction: (String) -> Unit = {},
     onPinSession: (String) -> Unit = {},
+    // [feat/drawer-context-menu] Manual title regeneration. Only wire it for
+    // the CURRENT session — the ChatViewModel has no per-session regeneration
+    // path, so callers must ignore the id for non-current rows (the menu item
+    // is only shown on the current session's row).
+    onRegenerateTitle: (String) -> Unit = {},
 ) {
     val sessions by chatRepository.observeSessions()
         .collectAsState(initial = emptyList())
@@ -120,11 +128,6 @@ fun ChatHistoryDrawer(
     val grouped = remember(visibleSessions) { groupSessionsByDate(visibleSessions) }
 
     var deleteTarget by remember { mutableStateOf<ChatSessionEntity?>(null) }
-    // [fix/drawer-row-slim] long-press now opens a context menu (pin/unpin +
-    // delete) instead of jumping straight to the delete confirm dialog: with
-    // the inline pin toggle gone from unpinned rows, the menu is the single
-    // pin entry point for them.
-    var menuTarget by remember { mutableStateOf<ChatSessionEntity?>(null) }
 
     ModalDrawerSheet(
         modifier = Modifier.width(300.dp),
@@ -231,15 +234,95 @@ fun ChatHistoryDrawer(
                             // date) and showPin only in the Pinned section
                             // (the section header marks pinned state; the icon
                             // is the unpin entry).
-                            DrawerSessionRow(
-                                session = session,
-                                selected = session.id == currentSessionId,
-                                onClick = { onSessionClick(session.id) },
-                                onLongClick = { menuTarget = session },
-                                showTime = period == DatePeriod.TODAY,
-                                showPin = period == DatePeriod.PINNED,
-                                onTogglePin = { onPinSession(session.id) },
-                            )
+                            //
+                            // [feat/drawer-context-menu] The long-press menu is
+                            // a compact DropdownMenu anchored to the pressed
+                            // row, mirroring rikkahub ConversationList:
+                            // per-row local open state (no hoisted
+                            // menuTarget), items with leading icons, tapping
+                            // outside dismisses — no cancel button, no title
+                            // (the anchored row IS the context). Delete still
+                            // routes through the confirm dialog (deleteTarget).
+                            // Regenerate shows only on the current session's
+                            // row: the ChatViewModel regenerates the CURRENT
+                            // session's title, so wiring it for other rows
+                            // would rewrite the wrong session.
+                            var menuOpen by remember { mutableStateOf(false) }
+                            Box {
+                                DrawerSessionRow(
+                                    session = session,
+                                    selected = session.id == currentSessionId,
+                                    onClick = { onSessionClick(session.id) },
+                                    onLongClick = { menuOpen = true },
+                                    showTime = period == DatePeriod.TODAY,
+                                    showPin = period == DatePeriod.PINNED,
+                                    onTogglePin = { onPinSession(session.id) },
+                                )
+                                if (menuOpen) {
+                                    DropdownMenu(
+                                        expanded = menuOpen,
+                                        onDismissRequest = { menuOpen = false },
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    text = stringResource(
+                                                        if (session.pinnedAt != null) R.string.sessionlist_unpin
+                                                        else R.string.sessionlist_pin,
+                                                    ),
+                                                )
+                                            },
+                                            onClick = {
+                                                menuOpen = false
+                                                onPinSession(session.id)
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                    imageVector = if (session.pinnedAt != null) Icons.Outlined.PushPin
+                                                    else Icons.Filled.PushPin,
+                                                    contentDescription = null,
+                                                )
+                                            },
+                                        )
+                                        if (session.id == currentSessionId) {
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(text = stringResource(R.string.sessionlist_regenerate_title))
+                                                },
+                                                onClick = {
+                                                    menuOpen = false
+                                                    onRegenerateTitle(session.id)
+                                                },
+                                                leadingIcon = {
+                                                    Icon(
+                                                        imageVector = Icons.Filled.Refresh,
+                                                        contentDescription = null,
+                                                    )
+                                                },
+                                            )
+                                        }
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    text = stringResource(R.string.delete),
+                                                    color = MaterialTheme.colorScheme.error,
+                                                )
+                                            },
+                                            onClick = {
+                                                menuOpen = false
+                                                deleteTarget = session
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                    imageVector = Icons.Filled.Delete,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.error,
+                                                )
+                                            },
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                     item { Spacer(modifier = Modifier.height(8.dp)) }
@@ -302,45 +385,11 @@ fun ChatHistoryDrawer(
         )
     }
 
-    // [fix/drawer-row-slim] context menu for a long-pressed session row: pin/
-    // unpin (moved here from the removed inline toggle on unpinned rows) and
-    // delete (kept behind its own confirm dialog, unchanged).
-    menuTarget?.let { target ->
-        val targetPinned = target.pinnedAt != null
-        AlertDialog(
-            onDismissRequest = { menuTarget = null },
-            title = { Text(text = target.title ?: stringResource(R.string.chat_menu_new_chat)) },
-            text = {
-                Column {
-                    TextButton(onClick = {
-                        menuTarget = null
-                        onPinSession(target.id)
-                    }) {
-                        Text(
-                            text = stringResource(
-                                if (targetPinned) R.string.sessionlist_unpin else R.string.sessionlist_pin,
-                            ),
-                        )
-                    }
-                    TextButton(onClick = {
-                        menuTarget = null
-                        deleteTarget = target
-                    }) {
-                        Text(
-                            text = stringResource(R.string.delete),
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { menuTarget = null }) {
-                    Text(text = stringResource(R.string.cancel))
-                }
-            },
-        )
-    }
+    // [feat/drawer-context-menu] The long-press context menu moved to a
+    // compact DropdownMenu anchored at each row (see the items loop above) —
+    // the old full AlertDialog (title + option rows + redundant cancel) is
+    // gone: menu items are natively full-row tappable and tapping outside
+    // dismisses.
 }
 
 /**
