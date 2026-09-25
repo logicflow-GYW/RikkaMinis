@@ -4094,6 +4094,33 @@ fun ChatScreen(
                         .lastOrNull { it.role == "assistant" }
                         ?.error
                         ?.isNotBlank() == true
+                    // [fix/typing-band-live] Persistent fixed-height status
+                    // band at the visual bottom of the transcript. Idle →
+                    // blank 36dp placeholder (zero layout shift, ever);
+                    // streaming → the typing indicator shows INSIDE the band
+                    // (same 36dp). typingActive is derived from the LIVE
+                    // trailing message's state: FlatChatItem.AssistantTyping
+                    // items only ever come from the runtime-dead legacy
+                    // pipeline (LegacyFlatChatBuilder), so they can't be the
+                    // signal. Mirrors the old in-bubble indicator condition
+                    // (streaming + no visible content), whose render site this
+                    // band replaces (see ChatAssistantMessageUI).
+                    val lastAssistant = messages.lastOrNull { it.role == "assistant" }
+                    val typingActive = lastAssistant != null &&
+                        lastAssistant.isStreaming &&
+                        lastAssistant.content.isEmpty() &&
+                        lastAssistant.toolBlocks.none { it.kind != "info" }
+                    item(key = "__typing_band__", contentType = "typing_band") {
+                        if (typingActive) {
+                            TypingIndicator(
+                                queueWaitingAhead = queueWaitingAhead,
+                                awaitingNetworkSinceMs =
+                                    if (lastAssistant?.isAwaitingModelResponse == true) awaitingResponseSinceMs else 0L,
+                            )
+                        } else {
+                            Spacer(Modifier.height(TYPING_BAND_HEIGHT))
+                        }
+                    }
                     if (canResume && !isStreaming && error == null && !lastAssistantHasError) {
                         item(key = "__resume_banner__", contentType = "resume_banner") {
                             ResumeBanner(onResume = {
