@@ -667,6 +667,25 @@ class MinisApp : Application(), ImageLoaderFactory {
             }
         }
 
+        // [fix/partial-stream-recovery] Cold-start recovery of streamed partial
+        // content: a process kill mid-answer leaves the partial content only in
+        // the worker's stream.jsonl staging file (client-side flush points all
+        // live on turn-exit paths). Recover the deltas into the owning session
+        // as an assistant message + truncation reminder, then delete the dir.
+        // Runs off-main after chatRepository is up; same guarded-scope pattern
+        // as the badge reconcile above.
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            runCatching {
+                val recovered = com.rikkaminis.app.sandbox.offload.PartialStreamRecovery
+                    .recover(this@MinisApp, chatRepository)
+                if (recovered > 0) {
+                    android.util.Log.i("MinisApp", "partial stream recovery: $recovered run dir(s)")
+                }
+            }.onFailure {
+                android.util.Log.w("MinisApp", "partial stream recovery failed: ${it.message}")
+            }
+        }
+
         // T180-bg-notif: background-settings + task-completion notifier.
         // The notifier is wired into SessionActivityTracker's completion
         // hook so any session whose stream finishes (success or error)
