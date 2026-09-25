@@ -4117,16 +4117,21 @@ fun ChatScreen(
                     // same source the message renderers use — so the band
                     // goes dark the moment real content or tool blocks become
                     // visible, and the awaiting seconds counter only ticks
-                    // during actual network waits.
-                    val streamingBandById by viewModel.streamingById.collectAsState()
-                    val bandMerged = if (streamingBandById.isEmpty()) messages
-                        else mergeStreamingOverlay(messages, streamingBandById, viewModel.currentStreamEpoch())
-                    val lastAssistant = bandMerged.lastOrNull { it.role == "assistant" }
-                    val typingActive = lastAssistant != null &&
-                        lastAssistant.isStreaming &&
-                        lastAssistant.content.isEmpty() &&
-                        lastAssistant.toolBlocks.none { it.kind != "info" }
+                    // during actual network waits. The collect lives INSIDE
+                    // the item lambda: LazyListScope's builder is not a
+                    // composable context (CI caught the first placement at
+                    // 4121:70), while LazyItemScope is — and per-item
+                    // subscription keeps recomposition scoped to this 36dp
+                    // band instead of the whole transcript.
                     item(key = "__typing_band__", contentType = "typing_band") {
+                        val streamingBandById by viewModel.streamingById.collectAsState()
+                        val bandMerged = if (streamingBandById.isEmpty()) messages
+                            else mergeStreamingOverlay(messages, streamingBandById, viewModel.currentStreamEpoch())
+                        val lastAssistant = bandMerged.lastOrNull { it.role == "assistant" }
+                        val typingActive = lastAssistant != null &&
+                            lastAssistant.isStreaming &&
+                            lastAssistant.content.isEmpty() &&
+                            lastAssistant.toolBlocks.none { it.kind != "info" }
                         if (typingActive) {
                             TypingIndicator(
                                 queueWaitingAhead = queueWaitingAhead,
