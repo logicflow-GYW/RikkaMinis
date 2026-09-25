@@ -230,6 +230,10 @@ object ProviderExecutionGateway {
         inputJson: String = "",
         outputExt: String? = null,
         enhancedCache: Boolean = false,
+        // [fix/partial-stream-recovery] Owning session id (stamped into the
+        // run dir for cold-start partial-stream recovery). Optional with a
+        // default so the sub-agent call site is untouched.
+        sessionId: String? = null,
     ): Flow<LLMStreamChunk> {
         val requestJson = buildRequest(
             instance = instance,
@@ -246,7 +250,7 @@ object ProviderExecutionGateway {
             streaming = true,
             enhancedCache = enhancedCache,
         )
-        return ChatStreamOffloadHandler.stream(context, requestJson, thinkingLevel.isEnabled)
+        return ChatStreamOffloadHandler.stream(context, requestJson, thinkingLevel.isEnabled, sessionId)
     }
 
     /**

@@ -103,6 +103,11 @@ object ChatStreamOffloadHandler {
         context: Context,
         requestJson: String,
         thinkingEnabled: Boolean = false,
+        // [fix/partial-stream-recovery] Owning session id, stamped into the run
+        // dir's meta.json so a killed run's partial stream.jsonl can be
+        // recovered into the right session at cold start. Sub-agent streams
+        // have no session — they pass null (default) and stay unattributable.
+        sessionId: String? = null,
     ): Flow<LLMStreamChunk> = flow {
         // [fix/audit-s2h4] activeStreams was incremented BEFORE the staging try.
         // If root.mkdirs()/d.mkdir() threw ("stream staging failed"), the flow
@@ -122,6 +127,9 @@ object ChatStreamOffloadHandler {
             d
         } catch (e: Exception) {
             throw RuntimeException("stream staging failed", e)
+        }
+        if (!sessionId.isNullOrBlank()) {
+            PartialStreamRecovery.writeMeta(dir, sessionId)
         }
 
         val cancelFile = File(dir, ModelExecutionService.CANCEL_FILE)

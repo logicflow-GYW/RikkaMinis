@@ -62,5 +62,9 @@ internal fun ChatViewModel.streamChatTurnOffloaded(
         // it) and carry it across the boundary instead, so the worker can stamp
         // the provider that actually talks to the API.
         enhancedCache = enhancedCacheEnabled.value,
+        // [fix/partial-stream-recovery] Stamp the owning session so a killed
+        // run's partial stream.jsonl is recoverable at cold start. Same
+        // draft-vs-real resolution the preview update path uses.
+        sessionId = realSessionId.ifEmpty { sessionId },
     )
 }
