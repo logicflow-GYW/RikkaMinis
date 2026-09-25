@@ -208,16 +208,20 @@ internal fun ChatViewModel.compactAll(
     // [feat/compact-range-observation] Seed observation for "compact folds
     // content by POSITION only (no relevance)": record what the folded range
     // actually contains — message count, tool-result-only share, user-text
-    // turns, raw chars. Accumulating this answers, with two weeks of real
-    // data, whether a relevance-aware selection (semantic / BM25) would fold
-    // a different set than the positional range — the gate for deciding
+    // turns, estimated tokens. Accumulating this answers, with two weeks of
+    // real data, whether a relevance-aware selection (semantic / BM25) would
+    // fold a different set than the positional range — the gate for deciding
     // whether to build one, before any such machinery is paid for.
+    // [fix/stream-recovery-grace-race] estTokens uses the compactor's own
+    // token estimate (content + contentParts) instead of raw content chars:
+    // tool-result text lives in contentParts, so the old chars figure
+    // under-counted tool-heavy sessions to near-zero.
     AppLogger.info(
         ChatViewModel.TAG,
         "[Compact] range composition: msgs=${toCompact.size} " +
             "toolResultOnly=${toCompact.count { it.isToolResultOnly() }} " +
             "userTextTurns=${toCompact.count { it.isPersistedUserPrompt() }} " +
-            "chars=${toCompact.sumOf { it.content.length }} " +
+            "estTokens=${toCompact.sumOf { ContextCompactor.estimateMessageTokens(it) }} " +
             "start=$effectiveStartIdx anchor=$anchorIdx",
     )
     lastAutoCompactAtMs = System.currentTimeMillis()
