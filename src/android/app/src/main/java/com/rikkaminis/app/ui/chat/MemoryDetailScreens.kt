@@ -47,54 +47,11 @@ import com.rikkaminis.app.ui.theme.ChatColors
  * in the header can read the latest buffer without passing references around.
  */
 
-/**
- * Read-only / editable viewer for an auto-injected memory file (GLOBAL.md or
- * a daily log). Mirrors iOS `MemoryContentView`.
- *
- * When [isEditing] is true, [editedContent] is the current text and
- * [onEditedContentChange] is invoked on every keystroke. The parent owns
- * the buffer and renders the Save button.
- */
-@Composable
-fun MemoryFileViewerBody(
-    initialContent: String,
-    isEditing: Boolean,
-    editedContent: String,
-    onEditedContentChange: (String) -> Unit,
-    showSavedToast: Boolean,
-) {
-    Box(modifier = Modifier.fillMaxSize()) {
-        if (isEditing) {
-            BasicTextField(
-                value = editedContent,
-                onValueChange = onEditedContentChange,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                textStyle = LocalTextStyle.current.copy(
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    color = ChatColors.primaryText,
-                ),
-                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-            )
-        } else {
-            // [T-android-memory-file-jank] Was SelectionContainer +
-            // verticalScroll + LazyRevealMemoryTextBody, which joined every
-            // revealed chunk into ONE Text. That only deferred the cliff: the
-            // window grows +200 lines (~40KB) per reveal, so 2-3 reveals put
-            // the single Text back over the ~100KB threshold where each frame
-            // costs 150-250ms. MemoryFileViewerContent virtualizes instead, so
-            // only on-screen chunks are ever measured.
-            MemoryFileViewerContent(
-                text = initialContent,
-                emptyText = stringResource(R.string.memory_file_empty),
-            )
-        }
-
-        if (showSavedToast) SavedToast(modifier = Modifier.align(Alignment.BottomCenter))
-    }
-}
+// [fix-memory-editor-windowed-edit] `MemoryFileViewerBody` is gone: its only
+// call site (Session Memory sheet AutoFile detail) passed isEditing=false
+// unconditionally, so its edit branch was dead code, and the sheet now calls
+// MemoryFileViewerContent directly with a hoisted list state (needed to
+// build the windowed edit buffer).
 
 @Composable
 internal fun SavedToast(modifier: Modifier = Modifier) {

@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -53,8 +54,13 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import com.rikkaminis.app.data.repository.MemoryRepository
+import com.rikkaminis.app.ui.components.EditWindow
+import com.rikkaminis.app.ui.components.MEMORY_EDIT_WINDOW_MARGIN_CHUNKS
 import com.rikkaminis.app.ui.components.MemoryFileEditorContent
 import com.rikkaminis.app.ui.components.MemoryFileViewerContent
+import com.rikkaminis.app.ui.components.buildEditWindow
+import com.rikkaminis.app.ui.components.chunkText
+import com.rikkaminis.app.ui.components.spliceEditWindow
 import java.util.Date
 import kotlinx.coroutines.launch
 
@@ -340,12 +346,17 @@ fun MemoryFileEditScreen(
     memoryRepository: MemoryRepository,
     onBack: () -> Unit,
 ) {
-    // [fix-memory-editor-jump-to-top] TextFieldState replaces the legacy
-    // String buffer: the field stores its cursor/selection in its own state
-    // immediately, so a tap mid-file no longer scrolls back to the top
-    // (issuetracker 235693496). readFile is non-suspend so it can seed the
-    // state directly; remember(fileName) reloads on file switch.
-    val state = remember(fileName) { TextFieldState(memoryRepository.readFile(fileName)) }
+    // [fix-memory-editor-windowed-edit] Windowed editing on 200KB+ files:
+    // fullBase is the file text captured at entry (source of truth for the
+    // read-only viewer AND for splice-back); the editor state only holds the
+    // chunk window built at Edit tap from the viewer's visible range, so text
+    // layout stays O(window) instead of O(file). readFile is non-suspend so
+    // it can run directly in remember; remember(fileName) reloads on switch.
+    var fullBase by remember(fileName) { mutableStateOf(memoryRepository.readFile(fileName)) }
+    val chunks = remember(fullBase) { chunkText(fullBase) }
+    val listState = remember(fileName) { LazyListState() }
+    val state = remember(fileName) { TextFieldState() }
+    var editWindow by remember(fileName) { mutableStateOf<EditWindow?>(null) }
     var saveError by remember { mutableStateOf<String?>(null) }
     // [T-android-memory-file-jank] false = virtualized read-only viewer.
     var isEditing by remember(fileName) { mutableStateOf(false) }
@@ -357,9 +368,6 @@ fun MemoryFileEditScreen(
     // memory_save_toast string already wired for the per-chat memory
     // detail editor's SavedToast so the wording stays consistent.
     val savedToastText = stringResource(R.string.memory_save_toast)
-
-    // [fix-memory-editor-jump-to-top] state is seeded via remember(fileName)
-    // above — the LaunchedEffect readFile is gone with the String buffer.
 
     Scaffold(
         topBar = {
@@ -375,7 +383,24 @@ fun MemoryFileEditScreen(
                     // read-only mode we show the pencil; while editing we show
                     // Save (always visible — see the KDoc note above).
                     if (!isEditing) {
-                        IconButton(onClick = { isEditing = true }) {
+                        IconButton(onClick = {
+                            // [fix-memory-editor-windowed-edit] Window = the
+                            // chunks the user was looking at ± margin
+                            // (clamped inside buildEditWindow). The editor
+                            // holds only the window, so text layout stays
+                            // O(window) on files that grow past 200KB.
+                            val visible = listState.layoutInfo.visibleItemsInfo
+                            val first = visible.firstOrNull()?.index ?: 0
+                            val last = (visible.lastOrNull()?.index ?: first) +
+                                MEMORY_EDIT_WINDOW_MARGIN_CHUNKS
+                            editWindow = buildEditWindow(
+                                chunks,
+                                first - MEMORY_EDIT_WINDOW_MARGIN_CHUNKS,
+                                last,
+                            )
+                            state.edit { replace(0, length, editWindow?.text ?: fullBase) }
+                            isEditing = true
+                        }) {
                             Icon(
                                 Icons.Default.Edit,
                                 contentDescription = stringResource(R.string.memory_action_edit),
@@ -386,7 +411,18 @@ fun MemoryFileEditScreen(
                         // no hasChanges gate (see KDoc above).
                         MinisTextButton(onClick = {
                             try {
-                                memoryRepository.saveFile(fileName, state.text.toString())
+                                // [fix-memory-editor-windowed-edit] Splice the
+                                // edited window back into the full file
+                                // (byte-exact, offsets captured at edit
+                                // entry), then refresh the viewer's source.
+                                val newText = state.text.toString()
+                                val full = editWindow
+                                    ?.let {
+                                        spliceEditWindow(fullBase, it.startOffset, it.endOffset, newText)
+                                    }
+                                    ?: newText
+                                memoryRepository.saveFile(fileName, full)
+                                fullBase = full
                                 saveError = null
                                 android.widget.Toast.makeText(
                                     context,
@@ -422,7 +458,8 @@ fun MemoryFileEditScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             // [T-android-memory-file-jank] Read-only mode renders the
-            // virtualized viewer; edit mode keeps the shared monospace editor.
+            // virtualized viewer (hoisted list state feeds the edit window);
+            // edit mode keeps the shared monospace editor holding the window.
             // The IME padding above stays on the host Column so the caret
             // scroll-into-view inside the editor behaves as before.
             if (isEditing) {
@@ -434,11 +471,11 @@ fun MemoryFileEditScreen(
                     modifier = Modifier.weight(1f),
                 )
             } else {
-                // No emptyText here: `state` is seeded synchronously inside
-                // remember(fileName) above, so an empty-state label would
-                // flash "Empty" on every open of a non-empty file.
+                // No emptyText here: an empty-state label would flash "Empty"
+                // on every open of a non-empty file.
                 MemoryFileViewerContent(
-                    text = state.text.toString(),
+                    text = fullBase,
+                    listState = listState,
                     modifier = Modifier.weight(1f),
                 )
             }

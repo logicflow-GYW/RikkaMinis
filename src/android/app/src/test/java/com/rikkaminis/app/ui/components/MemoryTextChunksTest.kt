@@ -132,4 +132,86 @@ class MemoryTextChunksTest {
     fun chunkText_rejectsZeroMaxBytes() {
         chunkText("a\nb", maxBytes = 0)
     }
+
+    // ─── windowed edit helpers ([fix-memory-editor-windowed-edit]) ──────
+
+    @Test
+    fun chunkStartOffsets_matchesJoinedText() {
+        val text = (1..300).joinToString("\n") { "line $it" }
+        val chunks = chunkText(text)
+        val offsets = chunkStartOffsets(chunks)
+        val joined = chunks.joinToString("\n")
+        // Every chunk starts exactly where the join puts it.
+        chunks.forEachIndexed { i, chunk ->
+            assertEquals(joined.substring(offsets[i], offsets[i] + chunk.length), chunk)
+        }
+        // Last chunk ends at the end of the joined text.
+        assertEquals(joined.length, offsets.last() + chunks.last().length)
+    }
+
+    @Test
+    fun buildEditWindow_isByteExactInsideBase() {
+        val text = (1..300).joinToString("\n") { "line $it" }
+        val chunks = chunkText(text)
+        val win = buildEditWindow(chunks, 2, 4)!!
+        assertEquals(text.substring(win.startOffset, win.endOffset), win.text)
+        assertEquals(chunks.subList(2, 5).joinToString("\n"), win.text)
+    }
+
+    @Test
+    fun buildEditWindow_clampsOutOfRangeIndices() {
+        val text = (1..100).joinToString("\n") { "l$it" }
+        val chunks = chunkText(text, maxLines = 10)
+        val win = buildEditWindow(chunks, -5, 500)!!
+        assertEquals(chunks.joinToString("\n"), win.text)
+        assertEquals(0, win.startOffset)
+        assertEquals(text.length, win.endOffset)
+    }
+
+    @Test
+    fun buildEditWindow_emptyChunks_returnsNull() {
+        assertTrue(buildEditWindow(emptyList(), 0, 1) == null)
+    }
+
+    @Test
+    fun buildEditWindow_isOrderInsensitive() {
+        val text = (1..100).joinToString("\n") { "l$it" }
+        val chunks = chunkText(text, maxLines = 10)
+        val a = buildEditWindow(chunks, 3, 5)!!
+        val b = buildEditWindow(chunks, 5, 3)!!
+        assertEquals(a.text, b.text)
+        assertEquals(a.startOffset, b.startOffset)
+        assertEquals(a.endOffset, b.endOffset)
+    }
+
+    @Test
+    fun spliceEditWindow_roundTripsUnchangedText() {
+        val text = (1..300).joinToString("\n") { "line $it" }
+        val win = buildEditWindow(chunkText(text), 2, 4)!!
+        assertEquals(text, spliceEditWindow(text, win.startOffset, win.endOffset, win.text))
+    }
+
+    @Test
+    fun spliceEditWindow_replacesEditedWindow() {
+        val text = (1..300).joinToString("\n") { "line $it" }
+        val win = buildEditWindow(chunkText(text), 2, 4)!!
+        val edited = "REPLACED\nCONTENT"
+        val spliced = spliceEditWindow(text, win.startOffset, win.endOffset, edited)
+        assertEquals(
+            text.substring(0, win.startOffset) + edited + text.substring(win.endOffset),
+            spliced,
+        )
+        // Everything outside the window is byte-identical.
+        assertTrue(spliced.startsWith(text.substring(0, win.startOffset)))
+        assertTrue(spliced.endsWith(text.substring(win.endOffset)))
+    }
+
+    @Test
+    fun spliceEditWindow_staleOffsets_refuseInsteadOfGuess() {
+        val text = "abc"
+        assertEquals(text, spliceEditWindow(text, 5, 6, "x"))  // start past length
+        assertEquals(text, spliceEditWindow(text, 1, 0, "x"))  // inverted range
+        assertEquals(text, spliceEditWindow(text, 0, 9, "x"))  // end past length
+        assertEquals(text, spliceEditWindow(text, -1, 2, "x")) // negative start
+    }
 }

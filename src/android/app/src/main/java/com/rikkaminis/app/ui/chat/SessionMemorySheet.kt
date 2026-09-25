@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.material.icons.Icons
@@ -48,7 +49,13 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import com.rikkaminis.app.ui.components.MinisTextButton
+import com.rikkaminis.app.ui.components.EditWindow
+import com.rikkaminis.app.ui.components.MEMORY_EDIT_WINDOW_MARGIN_CHUNKS
 import com.rikkaminis.app.ui.components.MemoryFileEditorContent
+import com.rikkaminis.app.ui.components.MemoryFileViewerContent
+import com.rikkaminis.app.ui.components.buildEditWindow
+import com.rikkaminis.app.ui.components.chunkText
+import com.rikkaminis.app.ui.components.spliceEditWindow
 
 /**
  * Bottom sheet showing memory state for the current session.
@@ -85,6 +92,14 @@ fun SessionMemorySheet(
     // (issuetracker 235693496).
     var isEditing by remember(mode) { mutableStateOf(false) }
     val editedState = remember(mode) { TextFieldState() }
+    // [fix-memory-editor-windowed-edit] Windowed AutoFile editing: the editor
+    // only holds the chunk window the user was looking at (O(window) layout
+    // cost instead of O(file) on 200KB+ daily logs), and Save splices it back
+    // byte-exactly via spliceEditWindow. editedFullBase is the file text
+    // captured at edit entry — re-reading the file at Save would invalidate
+    // the window offsets.
+    var editedWindow by remember { mutableStateOf<EditWindow?>(null) }
+    var editedFullBase by remember { mutableStateOf("") }
     var savedToastVisible by remember { mutableStateOf(false) }
 
     // Per-mode dialog state for revoke flow.
@@ -99,17 +114,11 @@ fun SessionMemorySheet(
         }
     }
 
-    // Reset editing buffer when entering a new detail view.
-    LaunchedEffect(mode, isEditing) {
-        if (isEditing) {
-            val text = when (val m = mode) {
-                is MemorySheetMode.AutoFile -> m.content
-                is MemorySheetMode.Write -> m.record.writtenContent ?: ""
-                else -> ""
-            }
-            editedState.edit { replace(0, length, text) }
-        }
-    }
+    // [fix-memory-editor-windowed-edit] The LaunchedEffect buffer fill is
+    // gone: AutoFile edit now fills the editor with the chunk WINDOW at Edit
+    // tap (needs the viewer's visible range), and Write edit fills the full
+    // written content in its own onEdit — both are in the onEdit callbacks
+    // below.
 
     val title = when (val m = mode) {
         MemorySheetMode.List -> stringResource(R.string.session_memory_title)
@@ -156,17 +165,40 @@ fun SessionMemorySheet(
             )
 
             is MemorySheetMode.AutoFile -> Column(modifier = Modifier.fillMaxSize()) {
+                val autoChunks = remember(m.content) { chunkText(m.content) }
+                val autoListState = remember(m.content) { LazyListState() }
                 DetailToolbar(
                     showEdit = m.editable && !isEditing,
                     showSave = m.editable && isEditing,
                     showRevoke = false,
                     onEdit = {
+                        // [fix-memory-editor-windowed-edit] Window = the
+                        // chunks the user was looking at ± margin (clamped
+                        // inside buildEditWindow). The editor holds only the
+                        // window, so text layout stays O(window) on files
+                        // that grow past 200KB.
+                        val visible = autoListState.layoutInfo.visibleItemsInfo
+                        val first = visible.firstOrNull()?.index ?: 0
+                        val last = (visible.lastOrNull()?.index ?: first) +
+                            MEMORY_EDIT_WINDOW_MARGIN_CHUNKS
+                        editedFullBase = m.content
+                        editedWindow = buildEditWindow(
+                            autoChunks,
+                            first - MEMORY_EDIT_WINDOW_MARGIN_CHUNKS,
+                            last,
+                        )
                         isEditing = true
-                        editedState.edit { replace(0, length, m.content) }
+                        editedState.edit { replace(0, length, editedWindow?.text ?: m.content) }
                     },
                     onSave = {
                         try {
-                            memoryRepository.saveFile(m.name, editedState.text.toString())
+                            val newText = editedState.text.toString()
+                            val full = editedWindow
+                                ?.let {
+                                    spliceEditWindow(editedFullBase, it.startOffset, it.endOffset, newText)
+                                }
+                                ?: newText
+                            memoryRepository.saveFile(m.name, full)
                             // SOUL.md drives [SoulStore.cachedMetadata] which
                             // backs the chat-bubble header name. The raw
                             // saveFile() path here bypasses SoulStore.save(),
@@ -175,7 +207,7 @@ fun SessionMemorySheet(
                             if (m.name == "SOUL.md") {
                                 com.rikkaminis.app.agent.SoulStore.refreshCache(context)
                             }
-                            mode = MemorySheetMode.AutoFile(m.name, editedState.text.toString(), m.editable)
+                            mode = MemorySheetMode.AutoFile(m.name, full, m.editable)
                             isEditing = false
                             savedToastVisible = true
                         } catch (_: Exception) { /* fall through; UI toast omitted on failure */ }
@@ -183,9 +215,10 @@ fun SessionMemorySheet(
                     onRevoke = {},
                 )
                 // [P3-shared-editor] Editing mode uses shared monospace
-                // editor (same as MemoryFileEditScreen in Settings).
-                // Read-only mode keeps MemoryFileViewerBody for its
-                // SelectionContainer + verticalScroll behaviour.
+                // editor (same as MemoryFileEditScreen in Settings) holding
+                // the windowed buffer. Read-only mode calls the virtualized
+                // viewer directly with the hoisted list state (the old
+                // MemoryFileViewerBody wrapper was dead edit-branch code).
                 if (isEditing) {
                     Box(modifier = Modifier.fillMaxSize()) {
                         MemoryFileEditorContent(
@@ -200,13 +233,16 @@ fun SessionMemorySheet(
                         }
                     }
                 } else {
-                    MemoryFileViewerBody(
-                        initialContent = m.content,
-                        isEditing = false,
-                        editedContent = "",
-                        onEditedContentChange = {},
-                        showSavedToast = savedToastVisible,
-                    )
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        MemoryFileViewerContent(
+                            text = m.content,
+                            emptyText = stringResource(R.string.memory_file_empty),
+                            listState = autoListState,
+                        )
+                        if (savedToastVisible) {
+                            SavedToast(modifier = Modifier.align(Alignment.BottomCenter))
+                        }
+                    }
                 }
             }
 

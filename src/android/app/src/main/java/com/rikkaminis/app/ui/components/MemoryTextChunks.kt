@@ -43,6 +43,14 @@ public const val MEMORY_CHUNK_MAX_LINES: Int = 40
 public const val MEMORY_CHUNK_MAX_BYTES: Int = 4 * 1024
 
 /**
+ * Chunks of slack added on each side of the viewer's visible range when the
+ * edit window is built ([buildEditWindow]). 1 gives the editor ~1 screen of
+ * scroll room in each direction beyond what the user was looking at, keeping
+ * the window at ~3-5 chunks (~12-20KB) so text layout stays O(window).
+ */
+public const val MEMORY_EDIT_WINDOW_MARGIN_CHUNKS: Int = 1
+
+/**
  * Split [text] into ordered chunks of at most [maxLines] lines and at most
  * [maxBytes] UTF-8 bytes, whichever binds first.
  *
@@ -81,4 +89,77 @@ public fun chunkText(
         start = end
     }
     return out
+}
+
+/**
+ * Start offset of each chunk in `chunks.joinToString("\n")`. Chunk k starts
+ * at the sum of (chunk j length + 1) for all j < k — the +1 is the "\n" the
+ * join re-inserts after every chunk but the last.
+ */
+public fun chunkStartOffsets(chunks: List<String>): List<Int> {
+    val out = ArrayList<Int>(chunks.size)
+    var offset = 0
+    for (chunk in chunks) {
+        out.add(offset)
+        offset += chunk.length + 1
+    }
+    return out
+}
+
+/**
+ * A contiguous window of chunks plus its byte-exact position in the full
+ * text. This is the unit of the windowed memory-file editor: the editor only
+ * holds [text] (O(window) layout cost), and [startOffset]/[endOffset] let
+ * Save splice the edited window back into the full file via
+ * [spliceEditWindow].
+ */
+public data class EditWindow(
+    val text: String,
+    val startOffset: Int,
+    val endOffset: Int,
+)
+
+/**
+ * Build an [EditWindow] covering chunks [firstChunk]..[lastChunkInclusive]
+ * (both clamped into range, order-insensitive). Returns null for empty input.
+ * Guarantees (asserted in tests):
+ *  - `base.substring(startOffset, endOffset) == text` for the base the chunks
+ *    came from — the window is byte-exact, so splice-back cannot lose or
+ *    duplicate characters at the boundary.
+ *  - [text] round-trips: it is exactly the joined chunks, no character added
+ *    or dropped.
+ */
+public fun buildEditWindow(
+    chunks: List<String>,
+    firstChunk: Int,
+    lastChunkInclusive: Int,
+): EditWindow? {
+    if (chunks.isEmpty()) return null
+    val first = minOf(firstChunk, lastChunkInclusive).coerceIn(0, chunks.size - 1)
+    val last = maxOf(firstChunk, lastChunkInclusive).coerceIn(first, chunks.size - 1)
+    val text = chunks.subList(first, last + 1).joinToString("\n")
+    val start = chunkStartOffsets(chunks)[first]
+    return EditWindow(
+        text = text,
+        startOffset = start,
+        endOffset = start + text.length,
+    )
+}
+
+/**
+ * Replace the byte range [startOffset, endOffset) of [base] with [newText].
+ * Offsets must come from an [EditWindow] built from the SAME base text —
+ * callers keep the base captured at edit entry instead of re-reading the
+ * file, so offsets stay valid. Any stale/malformed offset returns [base]
+ * unchanged (refuse instead of guess).
+ */
+public fun spliceEditWindow(
+    base: String,
+    startOffset: Int,
+    endOffset: Int,
+    newText: String,
+): String {
+    if (startOffset < 0 || startOffset > base.length) return base
+    if (endOffset < startOffset || endOffset > base.length) return base
+    return base.substring(0, startOffset) + newText + base.substring(endOffset)
 }
