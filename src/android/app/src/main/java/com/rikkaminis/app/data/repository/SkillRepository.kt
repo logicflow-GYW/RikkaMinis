@@ -46,7 +46,12 @@ class SkillRepository(private val context: Context) {
         private const val TAG = "SkillRepository"
         private const val DB_NAME = "skills.db"
         private const val DB_VERSION = 3
-        private const val MAX_SKILLS_IN_PROMPT = 20
+        // [s38a] 20 -> 40: 8 of 28 skills never entered the prompt under the
+        // old budget (4 of them core engineering skills — cloudflare-fullright-ops
+        // is the standard path in GLOBAL.md). Token cost grows linearly; the
+        // 3-tier priority below is unchanged. Upgrade path if skills > 40:
+        // keyword prefilter -> embedding retrieval (see backlog §38-A).
+        private const val MAX_SKILLS_IN_PROMPT = 40
         private const val MAX_SKILL_DESC_LENGTH = 200
         private const val RECENT_WINDOW_MS = 7L * 24 * 3600 * 1000
         private const val RECENT_SLOTS = 10
