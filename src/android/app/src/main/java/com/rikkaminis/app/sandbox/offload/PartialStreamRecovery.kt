@@ -38,6 +38,18 @@ object PartialStreamRecovery {
     private const val META_FILE = "meta.json"
     private const val RECOVERED_FILE = "recovered.json"
 
+    /**
+     * [fix/stream-recovery-grace-race] One delayed second pass after the
+     * cold-start scan (see MinisApp): a kill-then-immediate-reopen leaves the
+     * staging dir younger than RECENT_WRITE_GRACE_MS, so the first scan
+     * SKIP_ACTIVEs it and — without a retry — nobody would scan again until
+     * the next cold start. Must comfortably exceed the grace; recover() is a
+     * cheap dir listing, one retry past the grace is enough (a recurring
+     * timer would be a new resident task for a path that also self-heals on
+     * the next cold start).
+     */
+    const val RETRY_DELAY_MS: Long = 90_000L
+
     /** Assistant role string, matching the chat transcript's persisted value. */
     internal const val ROLE_ASSISTANT = "assistant"
 
@@ -92,7 +104,16 @@ object PartialStreamRecovery {
                     PartialStreamRecoveryPolicy.Decision.SKIP_NO_META,
                     -> {
                         // Nothing recoverable and nothing downstream will ever
-                        // clean these up (the reaper needs a terminal barrier).
+                        // clean these up (the reaper needs a terminal barrier)
+                        // — BUT never delete a dir whose worker is provably
+                        // alive: a main-process restart can race a live
+                        // :modelservice here (non-streaming runs write no
+                        // stream.jsonl and no meta), and deleteRecursively()
+                        // is irreversible. Same rule as the reaper's
+                        // safeToDelete; the grace in the policy is the first
+                        // line of defense, this beatAlive re-check is the
+                        // second.
+                        if (ModelExecutionRunDir.beatAlive(dir)) continue
                         dir.deleteRecursively()
                         continue
                     }
@@ -101,11 +122,17 @@ object PartialStreamRecovery {
                 val sessionId = readMetaSessionId(dir)
                 if (sessionId.isNullOrBlank()) {
                     Log.w(TAG, "unattributable killed run (no session meta), discarding: ${dir.name}")
+                    // Corrupt meta proves nothing while the worker is alive —
+                    // it may still be writing the stream we'd be discarding.
+                    if (ModelExecutionRunDir.beatAlive(dir)) continue
                     dir.deleteRecursively()
                     continue
                 }
                 val text = joinRecoveredText(stream.readLines())
                 if (text.isBlank()) {
+                    // No visible text yet: thinking frames may still be
+                    // streaming — keep the dir if the worker is alive.
+                    if (ModelExecutionRunDir.beatAlive(dir)) continue
                     dir.deleteRecursively()
                     continue
                 }
@@ -142,44 +169,6 @@ object PartialStreamRecovery {
         } catch (_: Throwable) {
             null
         }
-    }
-}
-
-/**
- * Pure decision table for one staging run dir at cold start. JVM-testable —
- * the Android-side [PartialStreamRecovery.recover] consumes it verbatim.
- *
- * Order matters: recovered-barrier first (a duplicate insert is the worst
- * outcome — the delete after insert can fail), then terminal / cancel (their
- * owners already committed or discarded the content), then empty, then the
- * recent-write grace (a dir touched moments ago may still be streaming).
- */
-internal object PartialStreamRecoveryPolicy {
-
-    enum class Decision { RECOVER, SKIP_TERMINAL, SKIP_CANCELLED, SKIP_EMPTY, SKIP_ACTIVE, SKIP_RECOVERED, SKIP_NO_META }
-
-    /**
-     * Grace for dirs touched very recently: at cold start the :modelservice
-     * process is normally dead too, but a service that outlived a main-process
-     * restart may still be appending — never race an active run.
-     */
-    const val RECENT_WRITE_GRACE_MS: Long = 30_000L
-
-    fun decide(
-        streamLen: Long,
-        terminalPresent: Boolean,
-        cancelPresent: Boolean,
-        recoveredPresent: Boolean,
-        hasSessionMeta: Boolean,
-        mtimeAgeMs: Long,
-    ): Decision = when {
-        recoveredPresent -> Decision.SKIP_RECOVERED
-        terminalPresent -> Decision.SKIP_TERMINAL
-        cancelPresent -> Decision.SKIP_CANCELLED
-        streamLen <= 0L -> Decision.SKIP_EMPTY
-        !hasSessionMeta -> Decision.SKIP_NO_META
-        mtimeAgeMs < RECENT_WRITE_GRACE_MS -> Decision.SKIP_ACTIVE
-        else -> Decision.RECOVER
     }
 }
 

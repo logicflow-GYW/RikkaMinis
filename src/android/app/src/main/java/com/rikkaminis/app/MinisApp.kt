@@ -675,6 +675,13 @@ class MinisApp : Application(), ImageLoaderFactory {
         // Runs off-main after chatRepository is up; same guarded-scope pattern
         // as the badge reconcile above.
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            // [fix/stream-recovery-grace-race] Second pass inside the same
+            // guarded scope, after one delayed interval: the first scan runs
+            // before the UI settles and a kill-then-immediate-reopen staging
+            // dir is younger than the 30s active grace, so it lands in
+            // SKIP_ACTIVE (kept, never rescanned). One retry past the grace
+            // closes that window without a recurring timer. Own runCatching
+            // so a first-pass failure cannot skip it.
             runCatching {
                 val recovered = com.rikkaminis.app.sandbox.offload.PartialStreamRecovery
                     .recover(this@MinisApp, chatRepository)
@@ -683,6 +690,21 @@ class MinisApp : Application(), ImageLoaderFactory {
                 }
             }.onFailure {
                 android.util.Log.w("MinisApp", "partial stream recovery failed: ${it.message}")
+            }
+            runCatching {
+                kotlinx.coroutines.delay(
+                    com.rikkaminis.app.sandbox.offload.PartialStreamRecovery.RETRY_DELAY_MS,
+                )
+                val retried = com.rikkaminis.app.sandbox.offload.PartialStreamRecovery
+                    .recover(this@MinisApp, chatRepository)
+                if (retried > 0) {
+                    android.util.Log.i(
+                        "MinisApp",
+                        "partial stream recovery (second pass): $retried run dir(s)",
+                    )
+                }
+            }.onFailure {
+                android.util.Log.w("MinisApp", "partial stream recovery retry failed: ${it.message}")
             }
         }
 

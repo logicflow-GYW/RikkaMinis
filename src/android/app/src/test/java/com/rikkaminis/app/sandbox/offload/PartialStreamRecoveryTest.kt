@@ -60,6 +60,29 @@ class PartialStreamRecoveryTest {
     }
 
     @Test
+    fun activeEmptyStream_kept_notDeleted() {
+        // [fix/stream-recovery-grace-race] A live worker's NON-streaming run
+        // (title-gen / QuickTest / compaction dispatch) has no stream.jsonl —
+        // the grace must outrank the empty check or recovery deletes a dir
+        // being written to.
+        assertEquals(
+            PartialStreamRecoveryPolicy.Decision.SKIP_ACTIVE,
+            decide(streamLen = 0L, mtimeAgeMs = 1_000L),
+        )
+    }
+
+    @Test
+    fun activeNoMeta_kept_notDeleted() {
+        // Same family: meta is written by the chat-stream path only; a live
+        // non-streaming run has none. Empty/meta-less proves nothing while
+        // the beat is fresh.
+        assertEquals(
+            PartialStreamRecoveryPolicy.Decision.SKIP_ACTIVE,
+            decide(meta = false, mtimeAgeMs = 1_000L),
+        )
+    }
+
+    @Test
     fun graceBoundary_exactlyAtGrace_recovers() {
         assertEquals(
             PartialStreamRecoveryPolicy.Decision.RECOVER,
