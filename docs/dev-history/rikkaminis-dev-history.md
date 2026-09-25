@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-24）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-09-25）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-09-24，共 53 天
-- 条目总数：1263（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
-- 总字符数：1688493 / 总行数：24797
+- 合并范围：2026-08-03 ～ 2026-09-25，共 54 天
+- 条目总数：1276（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
+- 总字符数：1696332 / 总行数：24884
 
 ---
 
@@ -24790,6 +24790,93 @@ summarize.py、runlog-2153/2155.txt、backup10/ 12 个回滚源、inventory/dump
 **核查三道**：①diff 走查 4 文件干净，调用点核实 toggleThinking + setThinkingLevel 均经 persistThinkingOverride（setThinkingLevel 有 `==` early-return 在 persist 前=重选同档不重复持久化，可接受）；context 是 ChatViewModel 构造参数，extension 内可用；②扫描门 18/18（分支树独立复跑）；③CI run 35966466032 success + head_sha `2d860b5ec152ea64da8d7b801ea2f102856beef5` 与本地 HEAD 逐字符一致。
 **合并收口**：`--no-ff` merge `04f1860c`（新 clone 先 git config user.name/email 防 "Committer identity unknown"）；gh_sync.sh push 成功（665877a5..04f1860c）；ls-remote 机械核实远端 main = 04f1860c；`merge-base --is-ancestor` 核实后 API DELETE 远端分支（204），远端只剩 main。release CI run 35967753182 @ main 已**自动触发**（触及 src/android/**，未手动 dispatch——遵守今日「push 已触发就不 dispatch」的修正顺序）。
 **诚实边界**：无 Android SDK，UI 行为未真机验证——用户装包后验证点：调强度→完全杀 app→重进，无论回到原对话还是开新草稿，强度应保留（per-session override 的旧会话仍优先）；刻意 OFF 也会被记住（ponytail 天花板已声明）。
+
+<!-- 2026-09-24 15:10:52 -->
+## 用户指令「更新一下文档」→ dev-history 三件套重建 + 推送公开仓库。
+
+用户指令「更新一下文档」→ dev-history 三件套重建 + 推送公开仓库。
+
+**流程**：三个回归测试先过（test_rebuild/test_sanitize/test_sagas 全 PASS）→ rebuild（53 天，**1204→1263 条**，dropped 74）→ sanitize（main 224 处 + INDEX 27 处替换，探针复扫 NONE）→ SAGAS（23 saga，**orphans 76→84**=6.7%、multi4 66→77，口径未漂移）→ 结构校验（fences 60 偶数 / anchors 1263 == header / outOrder 0，SAGAS 无 fence 无 anchor 正常）。
+
+**仓库同步**：复用 /tmp/rk-check-0924b 克隆（已在 main 04f1860c），建分支 `docs/dev-history-0924` @ `1013dc3d`（3 文件 +1320/−46），`gh_sync.sh push` 推送成功（**第一次调用静默无输出且没推上去——重跑一次才成功，教训：gh_sync.sh push 无输出 ≠ 成功，必须 ls-remote 机械核实**）；ls-remote 核实远端 = 本地 HEAD 逐字符一致。docs/** 不触发 CI（paths 过滤），文档类停止节点 = 本地校验，已全绿。**未合并，分支停在远端（合并权在用户）**。
+
+<!-- 2026-09-24 15:16:14 -->
+## 合并收口（用户放行）：--no-ff merge docs/dev-history-0924 → main = 7b76
+
+**合并收口（用户放行）**：`--no-ff` merge `docs/dev-history-0924` → main = `7b76c034`（3 文件 +1320/−46）；`gh_sync.sh push --branch main` 成功；ls-remote 核实远端 main = 本地 HEAD 逐字符一致；`merge-base --is-ancestor` 机械核实后 API DELETE 远端 docs 分支（204），远端只剩 main。docs/** 不触发 CI，无 CI run 需确认。仓库档案副本现覆盖 1263 条（至 09-24）。
+
+<!-- 2026-09-24 16:36:41 -->
+## 用户反馈：应用已很稳定，release 页的「⚠️ 已知问题与使用边界」（内存飙升警告 + 4 步处理阶梯）过期。定案：
+
+用户反馈：应用已很稳定，release 页的「⚠️ 已知问题与使用边界」（内存飙升警告 + 4 步处理阶梯）过期。定案：该文案在 `.github/workflows/build-apk.yml` 的 Publish to Releases body 块（约 382-423 行）。
+- 直接动作：PATCH 线上 release（tag android-latest, id 363608856）body —— 立即生效，asset 不动（PATCH 只传 body）。gh_sync.sh 只有 release create 没有 edit，改已有 release 走裸 API PATCH（应急方案）。
+- 持久动作：分支 `chore/release-notes-stable` @ `8b299630`（1 commit，1 文件 +9/−27），gh_sync.sh push 成功，ls-remote 核实逐字符一致。**未合并**（合并权在用户；注意：合并进 main 触及 workflow 自身会自动触发一次完整 APK rebuild 并用新 body 重发 release——行为一致，只是多一次构建）。
+- 新 body：「## 📝 说明」4 条：滚动更新+运行稳定无需维护操作 / 异常先强行停止再重开无需重装 / 回退上一条 release / debug 签名只从 Releases 页下载。删掉了内存飙升警告与处理阶梯。
+- 工具坑：本地 splice 用 python 脚本做（中文 + ${{ }} 表达式 heredoc 引号会炸）；改前 YAML safe_load 验过。
+
+<!-- 2026-09-24 17:04:19 -->
+## Jev 抓 bug 评估（09-24 续，jev-1.13 文档全拉）：官方最新 jev-1.13.0（$42/Btok
+
+Jev 抓 bug 评估（09-24 续，jev-1.13 文档全拉）：官方最新 jev-1.13.0（$42/Btok=$0.042/Mtok 输入，输出免费，250k tok/s，1200 req/min，64k context，text only，批 13 问=10x 快 12.2x 便宜）。失败模式表（model-jaggedness/jev-1.13）对抓 bug 最要命的三条：①indirection 多跳掉精度（11 个 HIGH bug 全是跨层跨文件的，不在单窗口里）②literal reading（"这段代码有没有 bug"是最模糊问法）③无生成（只有概率无解释链，每个阳性还得生成模型 localize——0.17% 字节撞假阳性教训：发现必须带 why 才能分诊）。另：adversarial content 会移动答案；结构不变量不保证（P(noul)≠1-P(not noul)，阈值不跨问法迁移）；高级语言好于低级（Kotlin 源码 OK）。适配形状 = 分诊排序器（rerank cookbook：过滤短名单 + 每候选一问），RikkaMinis 有免费 ground truth（FIX-WAVE 77 条 findings + 已核实 P 级）可 backtest；77 条×~1k tok≈$0.003。KEY 未配（403），接口模式替代（deepseek logprobs 探测）上次被中断且响应无 logprobs 字段。
+
+<!-- 2026-09-24 17:16:21 -->
+## Jev 分诊 backtest 跑完（09-24，key 已配 tokendance.space 网关 bocha-je
+
+Jev 分诊 backtest 跑完（09-24，key 已配 tokendance.space 网关 bocha-jev-v1，~60 调用 ≈ 8k tok）：**快成立（4-10ms，均值 7ms）好不成立**。三轮：Noul 宽问法 AUC 0.569（全高分 0.6-0.97）；Noul 严格问法 AUC 0.600（压缩到 0.9+ 更差）；Choice 四档（网关用 criteria dict 不是 options，偶发 308 需手动跟重定向）exact 3/17 ±1 13/17（P3 过度预测——登记文本的「不修/勿重开」语言反向泄漏）。校准臂 8 控制组 6/8，失败两条=否定句（"no user has ever reported"→0.95）+字面歧义（"can never execute"→0.98）。核心发现：**判断被 state 文本框架主导而非事实**（bug 报告框架→全「用户会碰到」；登记框架→全「P3 刻意设计」），无视明写的 P 标签。干净事实性 state 能区分 6/8 → 唯一适配位是生成模型归一化后的最后一道置信度门，但那道不贵不值得加。结论：杀掉。报告 /var/minis/shared/jev-backtest-0924/REPORT.md。
+
+<!-- 2026-09-24 20:39:17 -->
+## 今日（09-24）全部修改统一核查（用户要求）：独立 clone /tmp/rk-audit-0924f @ main
+
+今日（09-24）全部修改统一核查（用户要求）：独立 clone /tmp/rk-audit-0924f @ main 7b76c034（远端逐字符一致，远端只剩 main + chore/release-notes-stable）。
+**核查矩阵全绿**：23 commits / 33 文件 +2175/−2075 / 冲突标记 0；scan.sh 18/18；i18n CLEAN（1472 refs/1481 defs）；four-way ALL CLEAN；test_scan 80/80；7 语言 key-set 逐语言一致（各 1479）；release CI run 35967753182 @ 04f1860c success（其后 docs-only 不触发 CI，符合 paths 过滤）。
+**高风险改动抽查**：死类/死资源/死依赖零残留（AntigravityModelsApi、zh_background_wordfreq、datastore）；AUTO_BACKUP_KEEP 单一来源（WebDavSync=3，全部调用点读它）；SNAPSHOT_KEEP=1 两处调用点（writeSnapshot+Streaming）都在；shortcut_icon_fg 保留正确（values+values-night 定义 + 2 drawable 引用）；roundToInt 在位。
+**诚实边界**：滑杆手感/存储卡顿改善/思考强度记住/备份 3 份轮转实际生效均未真机验证（装包后验证）。
+
+<!-- 2026-09-24 20:39:50 -->
+## 今日（09-24）诚实边界真机验证闭环：用户确认全部真机验证通过——滑杆可见吸附手感、存储页进出卡顿改善、思考强度跨对话
+
+今日（09-24）诚实边界真机验证闭环：用户确认全部真机验证通过——滑杆可见吸附手感、存储页进出卡顿改善、思考强度跨对话记住、备份 3 份轮转。今日 8 笔合并（051a6b35..7b76c034）至此三源取二闭环（CI 绿 + 沙箱静态全套 + 用户真机验证）。
+
+<!-- 2026-09-24 20:41:54 -->
+## release-notes 源头同步合并收口（用户放行）：diff 走查 1 文件干净（仅 release body 块
+
+release-notes 源头同步合并收口（用户放行）：diff 走查 1 文件干净（仅 release body 块，4 条新说明，debug 签名警告保留）、YAML safe_load 验过；`--no-ff` merge `chore/release-notes-stable` → main = `724a179c`；gh_sync.sh push 成功；ls-remote 核实远端 main 逐字符一致；merge-base --is-ancestor 核实后 API DELETE 远端分支（204），远端只剩 main。push 触及 workflow 自身自动触发 release CI run 36000658742（in_progress，触发即确认未 dispatch）。该 run 会用新文案（4 条稳定版说明，无内存警告）重发 release——行为一致，源头与线上已对齐。至此今日唯一挂起项清零。
+
+<!-- 2026-09-24 20:45:25 -->
+## 仓库生态盘点（09-24，API 实测）：本仓库 ***OWNER***/RikkaMinis 8 forks（4
+
+仓库生态盘点（09-24，API 实测）：本仓库 ***OWNER***/RikkaMinis 8 forks（4 个有过改动：MZHlongchu 09-19、***ALT_USER*** 小号 09-24、hjhjd 改名 VCPMinis 2★、wj5403293 09-24 同步中；4 个纯 fork 未动）+ 20 stargazers（ notable：lioensky 283 followers、youth007 359 repos、Filterrr 68 repos）。上游 OpenMinis/OpenMinis 4685★ / 562 forks / pushed 09-01；fork 时间分布 07 月 310 个爆发、08 月 141、09 月 92；有过改动的 fork 93 个（17%），近 4 天活跃 15 个；**本仓库是全部 553 个上游 fork 中 star 最高的（20★，第二名 tall-1997/OpenMinis-Linux 8★）**；其他活跃改向 fork：LunWhale/minis-open 7★、doimty、GawrAzusa、MGCWM 等。脚本 /tmp/fork_report.py（会话内）。
+
+<!-- 2026-09-24 20:57:55 -->
+## 分支 CI 忘记手动 dispatch（复发 3+ 次确认，用户拍板加措施）。根因：build-apk.yml 的 on
+
+分支 CI 忘记手动 dispatch（复发 3+ 次确认，用户拍板加措施）。根因：build-apk.yml 的 on:push 限定 branches:[main]，非 main 分支 push 永远不触发 CI；每天日志反复记了这事但每个新会话还是忘——散文日志不是共享层。措施三层（同族复发≥2 修共享层）：①gh_sync.sh push --branch <非main> 输出里自动带提醒（在失败点机械提醒，sh -n 验过）；②github-ops SKILL.md 同步命令表下加 ⚠️ 块；③GLOBAL.md「GitHub 操作基础设施」节加规则（每会话启动必读层）。
+
+<!-- 2026-09-24 21:12:33 -->
+## 用户指令「按流程检查云端正在跑的分支，没问题就合并」= 核实 + 合并放行。
+
+用户指令「按流程检查云端正在跑的分支，没问题就合并」= 核实 + 合并放行。
+
+**分支**：`fix/cjk-token-estimate` @ `13e5612c`（1 commit，2 文件 +34/−3，基点 main 724a179c，非本会话所建）。改动：`ContextCompactor.estimateTokens` 从 chars/4 改为 CJK≈1 token/字 + 其余 chars/4——旧口径对中文低估 3-4 倍 → 尾部永远 TAIL_TOO_SMALL → 自动压缩对中文对话从未触发。
+
+**三道核查（全独立实测）**：①diff 走查 2 文件干净，单一关注点、测试同步更新、ponytail 注释三段齐全；`estimateTokens` 全部调用点都在 ContextCompactor 内部（estimateTailTokens → TAIL_TOO_SMALL 尾闸 + estimateMessageTokens → budget anchor/slice clamp），口径变大方向一致，无同族漏改；②扫描门 18/18 + Python 独立复算 7 条测试断言全过 + ASCII 行为不变；③CI run 36002222903 success + head_sha 逐字符一致。
+
+**合并收口**：`--no-ff` merge = `2022b0c5`；gh_sync.sh push 成功（724a179c..2022b0c5）；ls-remote 核实远端 main 逐字符一致；merge-base --is-ancestor 核实后 API DELETE 远端分支（204），远端只剩 main。release CI run 36004057791 @ main 已自动触发（触发即确认）。
+
+**诚实边界**：压缩对中文对话真正触发的端到端行为未真机验证（装包后需真实中文长对话涨到压缩线观察 `[Compact]` 日志）。
+
+<!-- 2026-09-24 21:13:23 -->
+## cjk-token-estimate 分支收口（另一会话完成）：用户确认另一对话已检查并合并——远端 main = 20
+
+cjk-token-estimate 分支收口（另一会话完成）：用户确认另一对话已检查并合并——远端 main = 2022b0c5（13e5612c 之上的 merge commit），fix/cjk-token-estimate 远端分支已删，只剩 main。estimateTokens CJK 感知口径进 main：TAIL_TOO_SMALL 闸门对中文不再失明，自动压缩可真正触发。本会话措施的分支 CI 手动 dispatch 三层（gh_sync.sh 提醒 / SKILL.md / GLOBAL.md）已落地。
+
+## 2026-09-25
+
+<!-- 2026-09-25 09:12:13 -->
+## 硬编码参数审计（09-25）
+
+用户问「应用还有哪些参数是硬编码的」→ 硬编码参数全量审计（09-25，main 2022b0c，独立 clone /tmp/rk-hardcode）。脚本 /tmp/scan_hardcode.py + /tmp/scan_named.py（会话内）。结论：437 个数值常量，大部分已被 AgentRuntimeLimitsPrefs（~30 旋钮 + ConfigBridge 35 条 runtime.* 路径）+ ChatTuningPrefs 吸收；真正硬编码六层：①§38 已登记三个 MAX_SKILLS/MCPS_IN_PROMPT=20 + MAX_SKILL_DESC_LENGTH=200；②agent 行为预算无旋钮（GLOBAL_MAX_*_CEILING=128k 两处、MAX_AGENT_TURNS=256、COMPACT_KEEP_RECENT_USER_TURNS=3、SoulStore 1600/1000/0.3）；③熔断器阈值组最值得注意（HangDetector=3/3s、CrashFrequency=2/1h、force-home beacon=3、JAVA_HEAP_PRESSURE=0.70）——直接影响 force-home 且用户报过卡顿但零旋钮；④周边 OkHttp 超时散落 8 客户端值不一（provider 主链路已收敛 ✓）；⑤96 处裸字面量（多为 UI settle 等待）。stance：只动①和③（先加观测再谈旋钮），④是 P2 顺路。
+<!-- 2026-09-25 -->
 
 ---
 
