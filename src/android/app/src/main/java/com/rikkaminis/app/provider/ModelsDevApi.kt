@@ -174,7 +174,7 @@ object ModelsDevApi {
     fun applyGatewayEffortTruth(models: List<LLMModel>, baseUrl: String?): List<LLMModel> {
         if (models.isEmpty() || baseUrl.isNullOrBlank()) return models
         val host = runCatching { URL(baseUrl).host }.getOrNull()?.lowercase() ?: return models
-        if (!GatewayEffortTruth.isSensenovaHost(host)) return models
+        if (!GatewayEffortTruth.isMeasuredHost(host)) return models
         return models.map { model ->
             val measured = GatewayEffortTruth.tiersFor(host, model.id) ?: return@map model
             if (model.reasoningEffortValues == measured) return@map model
