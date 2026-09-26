@@ -73,12 +73,22 @@ object ModelExecutionDispatcher {
         // toggle stamped on the main-process provider object never reached the
         // wire. Carried as an explicit payload key instead.
         enhancedCache: Boolean = false,
+        /**
+         * [T-multi-api-key] Which credential of the instance this request must
+         * use (`0` = the historical `apikey_<id>` slot). The worker maps this
+         * to a prefs slot name and reads the secret itself — the API key is
+         * deliberately NOT included (see the KDoc above), and multi-key keeps
+         * it that way: the plaintext would be one of N rather than a single
+         * value, and the request dir is app-private but unencrypted.
+         */
+        credentialIndex: Int = 0,
     ): String {
         return JSONObject().apply {
             put("instance_id", instance.id)
             put("instance_label", instance.label)
             put("provider_type", instance.providerType.name)
             put("credential_type", instance.credentialType.name)
+            if (credentialIndex > 0) put("credential_index", credentialIndex)
             instance.customBaseURL?.let { put("base_url", it) }
             put("append_v1", instance.appendV1Suffix)
             instance.customUserAgent?.let { put("user_agent", it) }

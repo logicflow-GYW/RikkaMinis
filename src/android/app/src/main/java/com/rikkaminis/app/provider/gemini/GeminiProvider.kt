@@ -4,6 +4,7 @@ import android.util.Base64
 import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.AgentToolDefinition
 import com.rikkaminis.app.data.model.LLMError
+import com.rikkaminis.app.data.model.isQuotaExhaustedResponse
 import com.rikkaminis.app.data.model.parseRetryAfterMs
 import com.rikkaminis.app.provider.applyUserAgentOverride
 import com.rikkaminis.app.data.model.LLMMessage
@@ -664,6 +665,16 @@ class GeminiProvider(
     }
 
     private fun mapHttpError(statusCode: Int, body: String, retryAfterMs: Long? = null): LLMError {
+        // [T-multi-api-key] Gemini reports a spent key as 429 RESOURCE_EXHAUSTED
+        // with `quota` / `billing` in the status. Classify before the 429 rung
+        // so a hard quota wall (which no amount of waiting clears) is not
+        // mistaken for a per-minute rate limit. NOTE: RESOURCE_EXHAUSTED alone
+        // is NOT a quota marker — Gemini reuses that status for per-minute
+        // rate limits too, so the bare status must keep falling through to the
+        // RateLimited rung and only the body prose flips it.
+        if (isQuotaExhaustedResponse(statusCode, body)) {
+            return LLMError.QuotaExhausted(body.take(300))
+        }
         if (statusCode == 401 || statusCode == 403) return LLMError.InvalidApiKey()
         if (statusCode == 429) return LLMError.RateLimited(retryAfterMs = retryAfterMs)
         val message = "Gemini API error $statusCode: ${extractHttpErrorMessage(body, fallbackTake = 200)}"

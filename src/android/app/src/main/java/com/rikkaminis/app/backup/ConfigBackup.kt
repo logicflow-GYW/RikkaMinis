@@ -732,7 +732,7 @@ object ConfigBackup {
      * the secret-strip list reflects what can actually appear in a payload.
      */
     private val SECRET_PROVIDER_KEYS = listOf(
-        "apiKey", "oauthToken", "manualOAuthToken",
+        "apiKey", "apiKeys", "oauthToken", "manualOAuthToken",
     )
 
     /** Thrown for payloads that aren't ours, or are from a future major format. */

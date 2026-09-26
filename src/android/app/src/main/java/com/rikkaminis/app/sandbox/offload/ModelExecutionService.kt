@@ -790,6 +790,26 @@ class ModelExecutionService : Service() {
         }
     }
 
+    /**
+     * [T-multi-api-key] Map a request to its credential slot name:
+     * `credential_index` absent/0 → the historical `apikey_<id>` slot, N →
+     * `apikey_<id>_<N>`. Mirrors
+     * [com.rikkaminis.app.data.repository.ProviderRepository.saveApiKeys].
+     *
+     * The slot NAME is the only thing multi-key changed here — the secret
+     * itself still never appears in request.json, so multi-key does not widen
+     * the plaintext-on-disk surface. An index the app process did not actually
+     * stage falls through to the missing-key path (surfacing the existing
+     * typed credential error) instead of a baffling 401.
+     */
+    private fun workerApiKeySlot(
+        instance: com.rikkaminis.app.data.model.ProviderInstance,
+        req: JSONObject,
+    ): String {
+        val index = req.optInt("credential_index", 0)
+        return if (index <= 0) "apikey_${instance.id}" else "apikey_${instance.id}_$index"
+    }
+
     private fun executeRun(requestJson: String, dir: File): String {
         val req = JSONObject(requestJson)
         // [T-worker-thinking-rules-restore] Restore this instance's custom thinking
@@ -926,7 +946,7 @@ class ModelExecutionService : Service() {
         }
         val apiKey = try {
             com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(this, "provider_secrets")
-                .getString("apikey_${instance.id}", null) ?: ""
+                .getString(workerApiKeySlot(instance, req), null) ?: ""
         } catch (_: Exception) { "" }
         if (apiKey.isEmpty()) {
             return JSONObject().apply {
@@ -1248,7 +1268,7 @@ class ModelExecutionService : Service() {
             }
             val apiKey = try {
                 com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(this, "provider_secrets")
-                    .getString("apikey_${instance.id}", null) ?: ""
+                    .getString(workerApiKeySlot(instance, req), null) ?: ""
             } catch (_: Exception) { "" }
             ModelExecutionRunLog.log(dir, android.os.Process.myPid(), ModelExecutionRunLog.Phase.REQUEST_PARSED, "streaming=true model=${model.id}", runId = runIdOf(dir))
             if (apiKey.isEmpty()) {

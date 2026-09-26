@@ -44,6 +44,12 @@ object ChatStreamErrorPolicy {
      *    the whole IOException family; same-provider retry absorbs the blip)
      *  - rate_limited / invalid_key / provider → FALLBACK_NOW (retrying the
      *    same member won't help; mirrors LLMError.isFallbackable semantics)
+     *  - quota_exhausted → FALLBACK_NOW ([T-multi-api-key] the key is spent,
+     *    not rate-limited — waiting cannot clear it. The rotation wrapper
+     *    [ChatCredentialRotation] tries sibling credentials FIRST; this rung
+     *    only fires once rotation is exhausted, i.e. no sibling credential
+     *    remains, so the group fallback chain is the right next step — same
+     *    reasoning as rate_limited, minus the waiting.)
      *  - null (legacy untyped) / unknown → FATAL (conservative; never guess)
      */
     fun classify(kind: String?): Action = when (kind) {
@@ -51,6 +57,7 @@ object ChatStreamErrorPolicy {
         ChatStreamErrorPolicyKind.KIND_RATE_LIMITED,
         ChatStreamErrorPolicyKind.KIND_INVALID_KEY,
         ChatStreamErrorPolicyKind.KIND_PROVIDER -> Action.FALLBACK_NOW
+        ChatStreamErrorPolicyKind.KIND_QUOTA_EXHAUSTED -> Action.FALLBACK_NOW
         else -> Action.FATAL
     }
 

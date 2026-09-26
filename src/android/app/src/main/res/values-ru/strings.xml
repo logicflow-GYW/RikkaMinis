@@ -1507,4 +1507,20 @@
     <string name="browser_no_app_for_link">Нет приложения для открытия этой ссылки.</string>
     <string name="browser_could_not_open_link">Не удалось открыть эту ссылку.</string>
     <string name="filepreview_pdf_render_failed_fallback">Не удалось отобразить PDF</string>
+<!--
+    [T-multi-api-key] Редактор нескольких ключей доступа.
+-->
+    <string name="provider_credential_multi_title">API-ключи</string>
+    <string name="provider_credential_multi_summary">Настроено: %1$d. Когда у ключа исчерпывается квота или срабатывает лимит, запрос автоматически переключается на следующий ключ.</string>
+    <string name="provider_credential_manage">Управление</string>
+    <string name="provider_credential_add_second">Добавить резервный ключ</string>
+    <string name="provider_credential_section_hint">Несколько ключей чередуются автоматически: сначала используется последний сработавший, а ключ с исчерпанной квотой или отклонённый уступает место остальным.</string>
+    <string name="provider_credential_rotated_toast">Переключено на ключ %1$d из %2$d (ключ %3$d недоступен)</string>
+    <string name="provider_credential_add">Добавить ключ</string>
+    <string name="provider_credential_delete">Удалить ключ</string>
+    <string name="provider_credential_edit">Изменить</string>
+    <string name="provider_credential_empty">Ключ не сохранён</string>
+    <string name="provider_credential_label_placeholder">Название (необязательно)</string>
+    <string name="provider_credential_note_placeholder">Заметка (необязательно)</string>
+    <string name="provider_credential_replace_placeholder">Вставьте новый ключ для замены</string>
 </resources>
