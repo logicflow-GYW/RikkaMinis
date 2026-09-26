@@ -94,6 +94,14 @@ object ProviderExecutionGateway {
         streaming: Boolean = false,
         // [FIX-1 / F-191] Cross-process instance flags. See buildRequestJson.
         enhancedCache: Boolean = false,
+        /**
+         * [T-multi-api-key] Which credential of the instance to use (`0` =
+         * the historical `apikey_<id>` slot). Flows through to
+         * [ModelExecutionDispatcher.buildRequestJson], which carries it to the
+         * worker as `credential_index`; the secret itself never rides the
+         * request.
+         */
+        credentialIndex: Int = 0,
     ): String = MemorySpikeRecorder.measurePhase(
         kind = "phase:build-request",
         detail = "messages=${messages.size} systemChars=${systemPrompt?.length ?: 0} tools=${tools.size}",
@@ -112,6 +120,7 @@ object ProviderExecutionGateway {
             thinkingLevel = thinkingLevel,
             streaming = streaming,
             enhancedCache = enhancedCache,
+            credentialIndex = credentialIndex,
         )
     }
 
