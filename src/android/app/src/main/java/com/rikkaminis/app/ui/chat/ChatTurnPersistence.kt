@@ -91,6 +91,23 @@ internal suspend fun ChatViewModel.persistAssistantTurn(
 }
 
 
+/**
+ * [fix/early-turn-persist] Overwrite the parts of an assistant row that was
+ * persisted before its tools ran. Same payload shape as
+ * [persistAssistantTurn] (text + toolUse blocks) so a reload sees one
+ * identical row — this only moves WHEN the turn becomes durable, not what it
+ * contains. No-op on an empty part list, mirroring the append path's guard.
+ */
+internal suspend fun ChatViewModel.updatePersistedAssistantTurn(
+    dbId: String,
+    parts: List<AgentContentPart>,
+    toolBlockMeta: Map<String, AssistantBlock> = emptyMap(),
+) {
+    if (parts.isEmpty()) return
+    chatRepository.updateMessageParts(dbId, buildAssistantPartsJson(parts, toolBlockMeta))
+}
+
+
 /** Persist tool results as a user-role message (mirrors iOS behavior). */
 internal suspend fun ChatViewModel.persistToolResultMessage(
     parts: List<AgentContentPart>,

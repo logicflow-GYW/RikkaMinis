@@ -1267,6 +1267,9 @@ class ChatViewModel(
             toolBlockMeta: Map<String, AssistantBlock>, modelId: String?, entryId: String?,
         ): String? = this@ChatViewModel.persistAssistantTurn(
             parts, usage, reasoningContent, toolBlockMeta, modelId, entryId)
+        override suspend fun updatePersistedAssistantTurn(
+            dbId: String, parts: List<AgentContentPart>, toolBlockMeta: Map<String, AssistantBlock>,
+        ) = this@ChatViewModel.updatePersistedAssistantTurn(dbId, parts, toolBlockMeta)
         override suspend fun persistToolResultMessage(
             parts: List<AgentContentPart>,
             transcriptRedactions: Map<String, String>,
