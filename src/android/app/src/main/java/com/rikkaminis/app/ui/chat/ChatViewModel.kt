@@ -1156,7 +1156,12 @@ class ChatViewModel(
      */
     internal fun notifyCredentialRotated(fromIndex: Int, toIndex: Int, keyCount: Int) {
         _fallbackToastEvent.tryEmit(
-            "Switched to alternate API key ${toIndex + 1}/$keyCount (key ${fromIndex + 1} exhausted)",
+            context.getString(
+                R.string.provider_credential_rotated_toast,
+                toIndex + 1,
+                keyCount,
+                fromIndex + 1,
+            ),
         )
     }
 

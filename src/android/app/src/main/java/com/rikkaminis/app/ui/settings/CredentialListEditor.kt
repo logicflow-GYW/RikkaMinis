@@ -39,20 +39,6 @@ import com.rikkaminis.app.ui.components.MinisSmallTextButton
 import com.rikkaminis.app.ui.components.SectionTextField
 
 /**
- * [T-multi-api-key] Working row for [CredentialListEditor].
- *
- * `draft == null` means "keep whatever secret is already stored in this slot".
- * That is the load-bearing state for every pre-existing row: the UI shows a
- * masked summary of the stored secret, and a draft only appears once the user
- * actually types a replacement. Without it, pressing Save after simply opening
- * the editor would demand retyping every key — a data-loss trap.
- */
-private data class CredentialRow(
-    val meta: ProviderCredentialMeta,
-    val draft: String?,
-)
-
-/**
  * [T-multi-api-key] Editor for an instance's credential list.
  *
  * ## Where the secrets live
@@ -70,6 +56,13 @@ private data class CredentialRow(
  * essential, because rotation is keyed by index and a stale secret left at a
  * now-unused index would be silently reused for a key the user believed they
  * removed.
+ *
+ * Secrets follow their row's IDENTITY, not its position: each row remembers the
+ * slot it was loaded from ([CredentialSlotRow.sourceSlot]) and the save writes
+ * the resulting dense list, so deleting row 0 of three moves K2/K3's secrets
+ * down with them instead of leaving K2 wearing K1's secret while K3's secret is
+ * erased from the tail. A row the user adds owns no slot and can never inherit
+ * one.
  */
 @Composable
 internal fun CredentialListEditor(
@@ -78,14 +71,19 @@ internal fun CredentialListEditor(
     onSave: (metas: List<ProviderCredentialMeta>, drafts: List<String?>, previousCount: Int) -> Unit,
 ) {
     val rows = remember(metas) {
-        mutableStateListOf<CredentialRow>().apply {
+        mutableStateListOf<CredentialSlotRow>().apply {
             if (metas.isEmpty()) {
                 // An instance with no metadata still holds the historical
                 // single key at slot 0 — surface it as one row rather than an
                 // empty editor, which would read as "your key is gone".
-                add(CredentialRow(ProviderCredentialMeta(label = ""), draft = null))
+                add(CredentialSlotRow(ProviderCredentialMeta(label = ""), draft = null, sourceSlot = 0))
             } else {
-                metas.forEach { add(CredentialRow(it, draft = null)) }
+                // sourceSlot = the row's own position: this is what keeps each
+                // row bound to its own secret when a deletion shifts the list
+                // (see CredentialSlotRow's doc).
+                metas.forEachIndexed { i, meta ->
+                    add(CredentialSlotRow(meta, draft = null, sourceSlot = i))
+                }
             }
         }
     }
@@ -103,7 +101,7 @@ internal fun CredentialListEditor(
             CredentialRowView(
                 index = index,
                 row = row,
-                storedKey = storedKeys[index],
+                storedKey = row.effectiveSecret(storedKeys),
                 expanded = expandedIndex == index,
                 secretVisible = visibleIndex == index,
                 canDelete = rows.size > 1,
@@ -127,7 +125,10 @@ internal fun CredentialListEditor(
         Spacer(modifier = Modifier.height(12.dp))
         MinisSmallOutlinedButton(
             onClick = {
-                rows.add(CredentialRow(ProviderCredentialMeta(label = ""), draft = null))
+                // sourceSlot = null: a brand-new row owns no slot yet, so it can
+                // never inherit (and then re-save) the secret of a row the user
+                // just deleted in the same editing session.
+                rows.add(CredentialSlotRow(ProviderCredentialMeta(label = ""), draft = null, sourceSlot = null))
                 expandedIndex = rows.lastIndex
             },
         ) {
@@ -141,7 +142,12 @@ internal fun CredentialListEditor(
             onClick = {
                 onSave(
                     rows.map { it.meta },
-                    rows.map { it.draft },
+                    // Materialized: every row contributes its OWN secret (draft
+                    // or the stored value at its original slot), so the written
+                    // list is dense and positional — null now means "this row
+                    // has no secret", which the repository turns into an
+                    // explicit clear instead of silently keeping a stale one.
+                    planCredentialSlots(rows, storedKeys),
                     // The pre-edit size drives the slot cleanup on the
                     // repository side: slots at/after this index that the user
                     // just removed must be cleared.

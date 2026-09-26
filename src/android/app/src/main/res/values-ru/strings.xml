@@ -1513,6 +1513,9 @@
     <string name="provider_credential_multi_title">API-ключи</string>
     <string name="provider_credential_multi_summary">Настроено: %1$d. Когда у ключа исчерпывается квота или срабатывает лимит, запрос автоматически переключается на следующий ключ.</string>
     <string name="provider_credential_manage">Управление</string>
+    <string name="provider_credential_add_second">Добавить резервный ключ</string>
+    <string name="provider_credential_section_hint">Несколько ключей чередуются автоматически: сначала используется последний сработавший, а ключ с исчерпанной квотой или отклонённый уступает место остальным.</string>
+    <string name="provider_credential_rotated_toast">Переключено на ключ %1$d из %2$d (ключ %3$d недоступен)</string>
     <string name="provider_credential_add">Добавить ключ</string>
     <string name="provider_credential_delete">Удалить ключ</string>
     <string name="provider_credential_edit">Изменить</string>

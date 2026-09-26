@@ -5,6 +5,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -28,9 +32,11 @@ import kotlinx.coroutines.withContext
 
 import com.rikkaminis.app.R
 import com.rikkaminis.app.data.model.ImageEndpointMode
+import com.rikkaminis.app.data.model.ProviderCredentialMeta
 import com.rikkaminis.app.data.model.ProviderType
 import com.rikkaminis.app.data.repository.ProviderRepository
 import com.rikkaminis.app.logging.AppLogger
+import com.rikkaminis.app.ui.components.MinisSmallOutlinedButton
 import com.rikkaminis.app.ui.components.SectionTextField
 
 private const val TAG = "ProviderConnection"
@@ -92,7 +98,11 @@ fun ProviderConnectionScreen(
         // ─── Credential / API Key ───────────────────────────────────
         SettingsSection(
             header = stringResource(R.string.provider_list_api_key),
-            footer = stringResource(R.string.add_provider_multi_key_hint),
+            // This screen has a real multi-key editor, so it describes THAT
+            // (the shared `add_provider_multi_key_hint` promises a
+            // comma-separated field format nothing implements — still true on
+            // the onboarding/add-provider screens and tracked separately).
+            footer = stringResource(R.string.provider_credential_section_hint),
         ) {
             SettingsCardBlock {
                 if (instance.hasMultipleCredentials) {
@@ -125,6 +135,37 @@ fun ProviderConnectionScreen(
                             isEditingKey = false
                         },
                     )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    // Reachability: this is the ONLY way a single-credential
+                    // instance can acquire a second one. The editor's own "add
+                    // key" button renders only for instances that already have
+                    // >= 2 credential metas, so without this entry point the
+                    // whole rotation feature was unreachable for exactly the
+                    // users it was built for.
+                    MinisSmallOutlinedButton(
+                        onClick = {
+                            // Slot 0 already holds this instance's key; give it
+                            // its metadata (migrated = it predates the list) and
+                            // open one empty row for the new key.
+                            val promoted = buildList {
+                                addAll(instance.credentials.ifEmpty {
+                                    listOf(ProviderCredentialMeta(label = "", migrated = true))
+                                })
+                                add(ProviderCredentialMeta(label = ""))
+                            }
+                            providerRepository.updateInstance(
+                                instance.copy(credentials = promoted.toMutableList()),
+                            )
+                            AppLogger.info(
+                                TAG,
+                                "Promoted ${instance.id} to a multi-key credential list (${promoted.size} rows)",
+                            )
+                        },
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(stringResource(R.string.provider_credential_add_second))
+                    }
                 }
             }
         }

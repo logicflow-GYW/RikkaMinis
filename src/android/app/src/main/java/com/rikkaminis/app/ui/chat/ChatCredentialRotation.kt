@@ -2,7 +2,6 @@ package com.rikkaminis.app.ui.chat
 
 import com.rikkaminis.app.data.db.compositeEntryKey
 import com.rikkaminis.app.data.model.AgentToolDefinition
-import com.rikkaminis.app.data.model.LLMError
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMStreamChunk
 import com.rikkaminis.app.data.model.ThinkingLevel
@@ -90,6 +89,9 @@ internal fun ChatViewModel.streamChatTurnWithRotation(
     val entryId = compositeEntryKey(instance.id, provider.model.id)
     val keyCount = instance.credentialCount
     var index = groupRouter.preferredCredential(entryId, keyCount)
+    // One shot per credential per turn (source feature's bound) — the cheap
+    // rung must stay cheap; without it a health-blind router walk could spin.
+    var rotationsDone = 0
 
     while (true) {
         var emittedContent = false
@@ -118,28 +120,33 @@ internal fun ChatViewModel.streamChatTurnWithRotation(
             }
             return@flow
         } catch (e: Throwable) {
-            val eligible = errorIsCredentialScoped(e)
-            val next = if (!emittedContent && eligible) {
-                groupRouter.rotateCredential(entryId, index, keyCount)
-            } else {
-                null
+            // Single-credential instances keep the pre-rotation behavior
+            // byte-for-byte: no health record, no sticky write, no notice.
+            val credentialKind = credentialScopedKind(e)?.takeIf { keyCount > 1 }
+            if (credentialKind != null) {
+                // Park the credential that just failed BEFORE asking for a
+                // successor. [GroupRouter.rotateCredential] walks the health
+                // map, so an unrecorded failure means the walk can hand the next
+                // attempt straight back to this same slot (two keys: A → B → A
+                // bounce) — the sibling the user paid for would never get a
+                // second look. Park ONLY this credential: the bare entry keeps
+                // its health record, because a sibling key that could still
+                // serve must not be taken down with the one that was spent.
+                groupRouter.recordResult(
+                    groupRouter.routeId(entryId, index),
+                    credentialOutcomeFor(credentialKind, e),
+                )
             }
-            if (next == null) {
-                if (eligible) {
-                    // Park ONLY the spent credential. The bare entry keeps its
-                    // health record — the engine's fallback loop records the
-                    // entry-level demotion when it gets this failure, and a
-                    // sibling key that could have served must not be taken
-                    // down with the one that was spent.
-                    groupRouter.recordResult(
-                        groupRouter.routeId(entryId, index),
-                        when (e) {
-                            is LLMError.QuotaExhausted -> RouteOutcome.QuotaExhausted
-                            is LLMError.RateLimited -> RouteOutcome.RateLimited(e.retryAfterMs)
-                            is LLMError.InvalidApiKey -> RouteOutcome.AuthError
-                            else -> RouteOutcome.ServerError
-                        },
-                    )
+            val decision = decideCredentialRotation(
+                kind = credentialKind,
+                emittedContent = emittedContent,
+                rotationsDone = rotationsDone,
+                keyCount = keyCount,
+            ) {
+                groupRouter.rotateCredential(entryId, index, keyCount)
+            }
+            if (decision !is RotationDecision.Rotate) {
+                if (credentialKind != null) {
                     // Persist the sticky memory BEFORE rethrowing, so a user
                     // who retries manually lands on the credential that last
                     // worked instead of paying the same doomed attempt again.
@@ -148,44 +155,21 @@ internal fun ChatViewModel.streamChatTurnWithRotation(
                 throw e
             }
             // ── Rotate ──
+            val next = decision.nextIndex
+            rotationsDone++
+            // Sticky memory migrates WITH the rotation (GroupRouter's KDoc: "on
+            // turn success AND on every rotation"). Recording only the success
+            // path made the memory a stale trap: after a rotation the map still
+            // pointed at the spent slot, and preferredCredential re-validates
+            // health at use time, so the next turn would start on the dead key
+            // and burn one attempt before finding the sibling again.
+            groupRouter.rememberCredential(entryId, next, keyCount)
             AppLogger.info(
                 ChatViewModel.TAG,
-                "credential rotate on $entryId: slot $index -> $next",
+                "credential rotate on $entryId: slot $index -> $next (kind=$credentialKind, rotations=$rotationsDone/$keyCount)",
             )
             notifyCredentialRotated(index, next, keyCount)
             index = next
         }
     }
-}
-
-/**
- * True when a stream failure actually implicates the CREDENTIAL (as opposed
- * to the endpoint, the network, or the model). Rotation is cheap — one header
- * change — so the predicate is deliberately narrow:
- *
- *  - `true`  → RateLimited / InvalidApiKey / QuotaExhausted.
- *  - `false` → ProviderError / TransientError / NetworkError.
- *
- * [T-rotate-on-any-error] NOTE: this is the gate for rotating *silently*
- * (the user sees the key switch in the top bar only via the notice). A
- * credential-scoped error is the only one that says anything about the
- * credential; a 5xx says nothing about it, so rotating on one would just burn
- * the sibling credentials of an endpoint that was down for everyone — and
- * every key of that endpoint would go dark while only ONE was actually at
- * fault. The cheap retry before a model switch is the group fallback's job.
- */
-private fun errorIsCredentialScoped(t: Throwable): Boolean {
-    var cur: Throwable? = t
-    var depth = 0
-    while (cur != null && depth < 6) {
-        when (cur) {
-            is LLMError.RateLimited,
-            is LLMError.InvalidApiKey,
-            is LLMError.QuotaExhausted,
-            -> return true
-        }
-        cur = cur.cause
-        depth++
-    }
-    return false
 }

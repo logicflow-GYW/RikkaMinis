@@ -2223,6 +2223,14 @@ class ProviderRepository(private val context: Context) {
      *
      * @param entryId the group entry that owns the instance (sticky key)
      * @param keyCount credentials to consider ([ProviderInstance.credentialCount])
+     *
+     * Range-checking only, by design: it returns the remembered index when that
+     * index still exists, otherwise 0. It does NOT consult credential health
+     * (the router's demotion map lives in [GroupRouter]) and does not fall
+     * through to "the first usable sibling" — a parked slot can therefore be
+     * returned here and spend one request discovering it is parked. An earlier
+     * version of this doc claimed otherwise; fixed to match the body so the next
+     * reader doesn't trust a guarantee that isn't there.
      */
     fun loadAnyUsableApiKey(entryId: String?, keyCount: Int): Int {
         val remembered = stickyKeysPrefs.getStringSet(STICKY_KEY_ENTRIES, null)
@@ -2236,20 +2244,27 @@ class ProviderRepository(private val context: Context) {
     /**
      * [T-multi-api-key] Persist a whole credential list: write slots 0..N-1,
      * then clean up slots beyond [previousCount] so deleted keys leave no
-     * orphan plaintext in the encrypted store. Order matters — persisting the
-     * metadata BEFORE this call (the UI does) is what makes the slot count
-     * the cleanup runs against the one the user just confirmed.
+     * orphan plaintext in the encrypted store.
+     *
+     * `null` in [keys] means "this row has no secret" and is written as an
+     * explicit CLEAR (slot 0 excepted — it is the historical single-key slot).
+     * The list is the single source of truth: a row the user added but never
+     * filled, or emptied, must not silently inherit whatever secret the slot
+     * still held — that is how a just-deleted key comes back to life with a
+     * different label on it. [previousCount] is passed explicitly (not read from
+     * the stored metadata), so the cleanup runs against the list size the user
+     * just confirmed regardless of write ordering.
      */
     fun saveApiKeys(instanceId: String, keys: List<String?>, previousCount: Int) {
         val editor = encryptedPrefs.edit()
-        keys.forEachIndexed { i, k ->
-            if (k != null) editor.putString(apiKeySlotKey(instanceId, i), k)
-        }
-        // Orphan cleanup: any slot the shrunken list no longer addresses must
-        // be erased, or a deleted key stays decryptable in the store forever.
-        val maxIndex = maxOf(previousCount, keys.size)
-        for (i in keys.size until maxIndex) {
-            if (i > 0) editor.remove(apiKeySlotKey(instanceId, i))
+        for (op in planCredentialSlotWrites(keys, previousCount)) {
+            when (op) {
+                is CredentialSlotOp.Put ->
+                    editor.putString(apiKeySlotKey(instanceId, op.index), op.value)
+
+                is CredentialSlotOp.Remove ->
+                    editor.remove(apiKeySlotKey(instanceId, op.index))
+            }
         }
         editor.commit()
     }
@@ -2572,32 +2587,37 @@ class ProviderRepository(private val context: Context) {
         // A null slot in the array preserves the gap rather than shifting
         // later keys onto spent indexes (identity/index decoupling, see
         // ProviderCredentialMeta's class doc).
-        val extraKeys = dict.optJSONArray("apiKeys") ?: run {
-            // [T-multi-api-key] Legacy payload with a working key but no
-            // metadata: synthesize ONE credential marked `migrated` so the UI
-            // can say where it came from instead of looking like a key the
-            // user never created. Absent array + no key → leave the instance
-            // in the "never configured" state (returning metadata here would
-            // invent a credential the payload never described).
-            val hasKey = dict.optString("apiKey", "").isNotEmpty() ||
-                (dict.optJSONArray("apiKeys")?.length() ?: 0) > 0
-            if (hasKey) {
+        val extraKeys = dict.optJSONArray("apiKeys")
+        if (extraKeys == null) {
+            // [T-multi-api-key] Legacy payload: synthesize ONE credential marked
+            // `migrated` so the UI can say where it came from instead of looking
+            // like a key the user never created — but ONLY when the payload
+            // actually carried a secret. Inventing a credential the payload never
+            // described would be worse than showing none.
+            //
+            // This branch must NOT return before the metadata below: a redacted
+            // backup legitimately has no apiKey/apiKeys (ConfigBackup strips
+            // exactly those two names) while `credentialMeta` rides through, so
+            // returning here threw away every label/note/order the user had —
+            // the "device migration hands back N anonymous rows" trap the export
+            // comment promises to avoid.
+            if (dict.optString("apiKey", "").isNotEmpty()) {
                 instance.credentials = mutableListOf(
                     ProviderCredentialMeta(label = "", migrated = true),
                 )
                 updateInstance(instance)
             }
-            return
-        }
-        for (i in 0 until extraKeys.length()) {
-            val raw = extraKeys.optString(i, "")
-            if (raw.isEmpty() || raw == "null") continue
-            val decoded = try {
-                String(Base64.decode(raw, Base64.NO_WRAP))
-            } catch (_: Exception) {
-                raw // plain text fallback
+        } else {
+            for (i in 0 until extraKeys.length()) {
+                val raw = extraKeys.optString(i, "")
+                if (raw.isEmpty() || raw == "null") continue
+                val decoded = try {
+                    String(Base64.decode(raw, Base64.NO_WRAP))
+                } catch (_: Exception) {
+                    raw // plain text fallback
+                }
+                if (i > 0) saveApiKeyAt(instance.id, i, decoded)
             }
-            if (i > 0) saveApiKeyAt(instance.id, i, decoded)
         }
         // Credential METADATA rides under its own key — labels/notes/order/
         // identity, never the secrets. A malformed entry is skipped rather

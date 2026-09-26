@@ -1559,6 +1559,9 @@
     <string name="provider_credential_multi_title">API 키</string>
     <string name="provider_credential_multi_summary">%1$d개 구성됨. 한 키의 할당량이 소진되거나 속도 제한에 걸리면 요청이 자동으로 다음 키로 전환됩니다.</string>
     <string name="provider_credential_manage">관리</string>
+    <string name="provider_credential_add_second">예비 키 추가</string>
+    <string name="provider_credential_section_hint">여러 키는 자동으로 순환합니다. 마지막으로 성공한 키를 먼저 사용하고, 할당량이 소진되었거나 거부된 키는 다른 키에 양보합니다.</string>
+    <string name="provider_credential_rotated_toast">%2$d개 중 %1$d번째 키로 전환했습니다(키 %3$d 사용 불가)</string>
     <string name="provider_credential_add">키 추가</string>
     <string name="provider_credential_delete">키 삭제</string>
     <string name="provider_credential_edit">편집</string>

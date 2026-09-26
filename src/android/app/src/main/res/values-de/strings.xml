@@ -1560,6 +1560,9 @@
     <string name="provider_credential_multi_title">API-Schlüssel</string>
     <string name="provider_credential_multi_summary">%1$d konfiguriert. Anfragen wechseln automatisch zum nächsten Schlüssel, wenn ein Kontingent erschöpft ist oder ein Limit erreicht wird.</string>
     <string name="provider_credential_manage">Verwalten</string>
+    <string name="provider_credential_add_second">Weiteren Schlüssel hinzufügen</string>
+    <string name="provider_credential_section_hint">Mehrere Schlüssel rotieren automatisch: Zuerst wird der zuletzt funktionierende verwendet; ein Schlüssel ohne Kontingent oder mit Ablehnung tritt für die anderen zurück.</string>
+    <string name="provider_credential_rotated_toast">Auf Schlüssel %1$d von %2$d gewechselt (Schlüssel %3$d nicht verfügbar)</string>
     <string name="provider_credential_add">Schlüssel hinzufügen</string>
     <string name="provider_credential_delete">Schlüssel löschen</string>
     <string name="provider_credential_edit">Bearbeiten</string>
