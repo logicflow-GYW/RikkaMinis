@@ -1147,25 +1147,6 @@ class ChatViewModel(
     internal val groupRouter = com.rikkaminis.app.data.routing.GroupRouter()
 
     /**
-     * [T-multi-api-key] Rotation notice, callable from the
-     * ChatCredentialRotation extension (a private inner-class member is NOT
-     * visible to a same-package extension — the first CI run caught that).
-     * Deliberately NOT a blocking dialog: the user's model top bar shows the
-     * same entry (rotation never changes the model), so the toast is the only
-     * visible signal that a credential switch happened.
-     */
-    internal fun notifyCredentialRotated(fromIndex: Int, toIndex: Int, keyCount: Int) {
-        _fallbackToastEvent.tryEmit(
-            context.getString(
-                R.string.provider_credential_rotated_toast,
-                toIndex + 1,
-                keyCount,
-                fromIndex + 1,
-            ),
-        )
-    }
-
-    /**
      * [T-per-message-load-balance] One-shot entry override for the NEXT new
      * user turn. Set by [selectGroupEntry] when the user hand-picks a member
      * inside a loadBalance group — that pick serves the next turn (instead of
@@ -1211,7 +1192,6 @@ class ChatViewModel(
         override val activeSessionId: String get() = this@ChatViewModel.activeSessionId
         override fun string(resId: Int, vararg args: Any): String = context.getString(resId, *args)
         override fun emitFallbackToast(text: String) { _fallbackToastEvent.tryEmit(text) }
-
         override fun updateSessionPreview(text: String) {
             viewModelScope.launch { chatRepository.updateSessionPreview(realSessionId.ifEmpty { sessionId }, text) }
         }
@@ -1292,7 +1272,7 @@ class ChatViewModel(
             provider: LLMProvider, messages: List<LLMMessage>, systemPrompt: String?,
             maxTokens: Int, temperature: Double?, imageParts: List<LLMMessage.ImagePart>,
             tools: List<AgentToolDefinition>, thinkingLevel: ThinkingLevel,
-        ): Flow<LLMStreamChunk> = this@ChatViewModel.streamChatTurnWithRotation(
+        ): Flow<LLMStreamChunk> = this@ChatViewModel.streamChatTurnOffloaded(
             provider, messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel)
         override fun generateSessionTitleIfNeeded() = this@ChatViewModel.generateSessionTitleIfNeeded()
         override suspend fun injectQueuedPromptsAsNewTurn(
@@ -2321,11 +2301,6 @@ class ChatViewModel(
     internal var realSessionId: String = if (isDraft) "" else sessionId
 
     init {
-        // [T-multi-api-key] Adopt the persisted sticky credential memory BEFORE
-        // the first request of this session — restoreStickyCredentialMemory()
-        // is a no-op on a cold memory and on single-key instances, so the
-        // legacy path is byte-for-byte unchanged.
-        restoreStickyCredentialMemory()
         loadSession()
         // [composer-draft-v1] Restore the persisted unsent text of a resumed
         // draft session (__new__<id>) after a cold start. Non-draft sessions

@@ -1553,20 +1553,4 @@
     <string name="browser_no_app_for_link">このリンクを開けるアプリがありません。</string>
     <string name="browser_could_not_open_link">このリンクを開けませんでした。</string>
     <string name="filepreview_pdf_render_failed_fallback">PDF の描画に失敗しました</string>
-<!--
-    [T-multi-api-key] マルチクレデンシャルエディター。
--->
-    <string name="provider_credential_multi_title">API キー</string>
-    <string name="provider_credential_multi_summary">%1$d 件設定済み。あるキーのクォータが尽きたりレート制限に達したりすると、リクエストは自動的に次のキーへ切り替わります。</string>
-    <string name="provider_credential_manage">管理</string>
-    <string name="provider_credential_add_second">予備キーを追加</string>
-    <string name="provider_credential_section_hint">複数のキーは自動でローテーションします。直近で機能したキーを優先し、割り当てを使い切ったキーや拒否されたキーは他のキーに譲ります。</string>
-    <string name="provider_credential_rotated_toast">キー %1$d/%2$d に切り替えました（キー %3$d は利用不可）</string>
-    <string name="provider_credential_add">キーを追加</string>
-    <string name="provider_credential_delete">キーを削除</string>
-    <string name="provider_credential_edit">編集</string>
-    <string name="provider_credential_empty">キーが未保存</string>
-    <string name="provider_credential_label_placeholder">名前（任意）</string>
-    <string name="provider_credential_note_placeholder">メモ（任意）</string>
-    <string name="provider_credential_replace_placeholder">置き換える新しいキーを貼り付け</string>
 </resources>

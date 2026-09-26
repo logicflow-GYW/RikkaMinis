@@ -258,18 +258,23 @@ abstract class ProviderDatabase : RoomDatabase() {
             }
         }
 
+        // [retained-schema:multi-api-key] Kept even though the multi-key
+        // feature it was written for has been removed, and
+        // [ProviderInstanceEntity.credentialsJson] is kept with it. Two reasons,
+        // both hit at upgrade time:
+        //   1. every device that ran the feature already has provider.db at
+        //      version 11, and the database version is a high-water mark —
+        //      declaring 10 here makes Room throw on the next open ("a
+        //      migration from 11 to 10 was required but not found").
+        //   2. dropping the column instead would need a v11 → v12 table rebuild
+        //      of the provider table, i.e. a data-migration risk traded for one
+        //      unused nullable TEXT column.
+        // Pure additive nullable TEXT: existing rows read as null, no row is
+        // rewritten and no provider is dropped, so the round-trip is lossless.
+        // (ALTER TABLE shape verified in sqlite3 before landing: the existing
+        // row keeps its values and the new column is NULL.)
         val MIGRATION_10_11 = object : Migration(10, 11) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                // [T-multi-api-key] Credential metadata blob (labels/notes/
-                // identity for an instance's credentials). Pure additive
-                // nullable TEXT: existing rows read as null → "legacy
-                // single-key instance", which the load path maps to exactly
-                // one credential backed by the historical `apikey_<id>`
-                // EncryptedPrefs slot. No row is rewritten and no provider is
-                // dropped, so a downgrade/upgrade round-trip is lossless —
-                // same contract as MIGRATION_2_3's image-endpoint columns.
-                // (ALTER TABLE shape verified in sqlite3 before landing: the
-                // existing row keeps its values and the new column is NULL.)
                 db.execSQL("ALTER TABLE provider_instances ADD COLUMN credentials_json TEXT")
             }
         }

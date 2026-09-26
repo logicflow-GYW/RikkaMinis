@@ -1555,20 +1555,4 @@
     <string name="browser_no_app_for_link">沒有可開啟此連結的應用程式。</string>
     <string name="browser_could_not_open_link">無法開啟此連結。</string>
     <string name="filepreview_pdf_render_failed_fallback">PDF 轉譯失敗</string>
-<!--
-    [T-multi-api-key] 多憑證編輯器。
--->
-    <string name="provider_credential_multi_title">API Key</string>
-    <string name="provider_credential_multi_summary">已設定 %1$d 個。某個 Key 額度耗盡或被限流時，請求會自動輪換到下一個 Key。</string>
-    <string name="provider_credential_manage">管理</string>
-    <string name="provider_credential_add_second">新增備用 Key</string>
-    <string name="provider_credential_section_hint">多個 Key 會自動輪換：優先使用上次可用的那一個。額度用盡或被服務方拒絕的 Key 會自動讓給其他 Key。</string>
-    <string name="provider_credential_rotated_toast">已切換到第 %1$d 個 Key（共 %2$d 個），第 %3$d 個暫不可用</string>
-    <string name="provider_credential_add">新增 Key</string>
-    <string name="provider_credential_delete">刪除 Key</string>
-    <string name="provider_credential_edit">編輯</string>
-    <string name="provider_credential_empty">尚未儲存 Key</string>
-    <string name="provider_credential_label_placeholder">名稱（選填）</string>
-    <string name="provider_credential_note_placeholder">備註（選填）</string>
-    <string name="provider_credential_replace_placeholder">貼上新 Key 以替換</string>
 </resources>

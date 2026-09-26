@@ -38,11 +38,12 @@ data class ProviderInstanceEntity(
     // MIGRATION_3_4's ALTER TABLE backfills existing rows to "not pinned",
     // matching the entity default and the JSON model's `pinned = false`.
     @ColumnInfo(name = "pinned") val pinned: Int = 0,
-    // [T-multi-api-key] JSON array of ProviderCredentialMeta — labels/notes/
-    // identity for this instance's credentials, in user order. Nullable TEXT
-    // (null for every pre-migration row) so the load path can tell "legacy
-    // single-key instance, never touched" apart from "user explicitly has one
-    // credential", which matters for the UI's first-run hint. SECRETS ARE NOT
-    // STORED HERE — see ProviderCredentialMeta's class doc.
+    // [retained-schema:multi-api-key] JSON array of ProviderCredentialMeta.
+    // The multi-key feature was removed, but this column stays (version 11 is
+    // already applied on installed devices — Room refuses a downgrade) and so
+    // does the matching [ProviderInstance.credentials] field, so the four-way
+    // sync gate still sees a fully mapped column. Nothing reads it; see
+    // MIGRATION_10_11 for the removal path. SECRETS ARE NOT STORED HERE — see
+    // ProviderCredentialMeta's class doc.
     @ColumnInfo(name = "credentials_json") val credentialsJson: String? = null,
 )

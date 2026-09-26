@@ -20,9 +20,6 @@ object ChatStreamErrorPolicyKind {
     const val KIND_INVALID_KEY = "invalid_key"
     const val KIND_PROVIDER = "provider"
 
-    /** [T-multi-api-key] The key is spent (quota / balance), not rate-limited. */
-    const val KIND_QUOTA_EXHAUSTED = "quota_exhausted"
-
     /**
      * Classify a worker-side failure for the error line's `k` field.
      * Walks the cause chain because provider layers wrap real failures:
@@ -40,13 +37,6 @@ object ChatStreamErrorPolicyKind {
                 is com.rikkaminis.app.data.model.LLMError.NetworkError -> return KIND_NETWORK
                 is com.rikkaminis.app.data.model.LLMError.TransientError -> return KIND_TRANSIENT
                 is com.rikkaminis.app.data.model.LLMError.ProviderError -> return KIND_PROVIDER
-                // [T-multi-api-key] Distinct from rate_limited on purpose: a
-                // spent key does NOT clear with time (no Retry-After exists),
-                // and the recovery action differs — rotate credentials, don't
-                // wait. Classifying it as rate_limited would make the router
-                // wait 60s (or a Retry-After the provider never sent) for a
-                // key that is out of balance.
-                is com.rikkaminis.app.data.model.LLMError.QuotaExhausted -> return KIND_QUOTA_EXHAUSTED
                 is java.io.IOException -> return KIND_NETWORK
             }
             cur = cur.cause

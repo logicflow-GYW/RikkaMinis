@@ -8,9 +8,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * JVM unit tests for [ProviderCredentialMeta] (T-multi-api-key).
+ * JVM unit tests for [ProviderCredentialMeta] — kept after the multi-key
+ * feature was removed, because the `credentials_json` column it backs is
+ * still part of the persisted schema (see ProviderInstance.credentials).
  *
- * These pin the two contracts that keep the feature lossless:
+ * These pin the two contracts that keep the retained blob safe:
  *
  *  1. **Round-trip**: meta → JSON → meta reproduces every field, INCLUDING an
  *     explicitly blank label (the model deliberately does NOT default it — an
@@ -75,8 +77,8 @@ class ProviderCredentialMetaRoundTripTest {
 
     @Test
     fun listRoundTrip_preservesOrder() {
-        // Order is user-arranged and load-bearing: rotation and health records
-        // are keyed by position, so a round-trip must not reorder.
+        // Order was user-arranged and is the only thing tying a metadata row
+        // to a physical EncryptedPrefs slot name, so it must not reorder.
         val metas = listOf(
             ProviderCredentialMeta(id = "a", label = "one"),
             ProviderCredentialMeta(id = "b", label = "two"),
@@ -122,18 +124,30 @@ class ProviderCredentialMetaRoundTripTest {
     }
 
     @Test
-    fun providerInstanceCredentialCount_neverZero() {
-        // An instance with no metadata still has the historical single
-        // `apikey_<id>` slot — credentialCount coerces 0 up to 1 so every call
-        // site stays on the multi-key path without a null/empty branch.
-        val empty = ProviderInstance(id = "i", label = "l", providerType = ProviderType.openAI, credentialType = ProviderCredential.apiKey)
-        assertEquals(1, empty.credentialCount)
-        assertFalse(empty.hasMultipleCredentials)
-        val one = empty.copy(credentials = mutableListOf(ProviderCredentialMeta()))
-        assertEquals(1, one.credentialCount)
-        assertFalse(one.hasMultipleCredentials)
-        val two = empty.copy(credentials = mutableListOf(ProviderCredentialMeta(), ProviderCredentialMeta()))
-        assertEquals(2, two.credentialCount)
-        assertTrue(two.hasMultipleCredentials)
+    fun credentialsBlob_survivesInstanceRoundTrip() {
+        // The retained `credentials_json` column is empty in practice today,
+        // but the mapping must not be the thing that loses data if anything
+        // ever writes it again: an instance carrying metadata must serialize
+        // and read back with the same ids and order.
+        val instance = ProviderInstance(
+            id = "i",
+            label = "l",
+            providerType = ProviderType.openAI,
+            credentialType = ProviderCredential.apiKey,
+            credentials = mutableListOf(
+                ProviderCredentialMeta(id = "a", label = "one"),
+                ProviderCredentialMeta(id = "b", label = "two"),
+            ),
+        )
+        val encoded = json.encodeToString(
+            ListSerializer(ProviderCredentialMeta.serializer()),
+            instance.credentials,
+        )
+        val decoded = json.decodeFromString(
+            ListSerializer(ProviderCredentialMeta.serializer()),
+            encoded,
+        )
+        assertEquals(listOf("a", "b"), decoded.map { it.id })
+        assertEquals(listOf("one", "two"), decoded.map { it.label })
     }
 }

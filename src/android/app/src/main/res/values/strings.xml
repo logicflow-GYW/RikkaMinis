@@ -1651,20 +1651,4 @@
     <string name="browser_no_app_for_link">No app available to open this link.</string>
     <string name="browser_could_not_open_link">Could not open this link.</string>
     <string name="filepreview_pdf_render_failed_fallback">Failed to render PDF</string>
-<!--
-    [T-multi-api-key] Multi-credential editor.
--->
-    <string name="provider_credential_multi_title">API keys</string>
-    <string name="provider_credential_multi_summary">%1$d configured. Requests rotate to the next key when one runs out of quota or hits a rate limit.</string>
-    <string name="provider_credential_manage">Manage</string>
-    <string name="provider_credential_add_second">Add another key</string>
-    <string name="provider_credential_section_hint">Keys rotate automatically, starting with the one that last worked. A key that has run out of quota, or that the provider rejects, steps aside for the others.</string>
-    <string name="provider_credential_rotated_toast">Switched to key %1$d of %2$d (key %3$d unavailable)</string>
-    <string name="provider_credential_add">Add key</string>
-    <string name="provider_credential_delete">Delete key</string>
-    <string name="provider_credential_edit">Edit</string>
-    <string name="provider_credential_empty">No key saved</string>
-    <string name="provider_credential_label_placeholder">Name (optional)</string>
-    <string name="provider_credential_note_placeholder">Note (optional)</string>
-    <string name="provider_credential_replace_placeholder">Paste a new key to replace</string>
 </resources>
