@@ -46,6 +46,17 @@ class NetworkMonitor {
         val sharedLLMConnectionPool = okhttp3.ConnectionPool(
             5, 5, java.util.concurrent.TimeUnit.MINUTES,
         )
+
+        /**
+         * [absorb-network-pack: P0-2-offline-retry-hold] The last started
+         * monitor, for context-free connectivity probes (AgentLoopEngine's
+         * offline retry hold — AgentLoopHost cannot grow a probe member
+         * without touching every implementor). Null when monitoring was
+         * never started — probes fail-open (treated as online) so a missing
+         * monitor can never wedge a retry loop.
+         */
+        @Volatile
+        var activeMonitor: NetworkMonitor? = null
     }
 
     private val _status = MutableStateFlow(NetworkStatus.DISCONNECTED)
@@ -100,6 +111,8 @@ class NetworkMonitor {
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
 
+        activeMonitor = this
+
         val callback = object : ConnectivityManager.NetworkCallback() {
 
             override fun onAvailable(network: Network) {
@@ -108,6 +121,13 @@ class NetworkMonitor {
                 if (previousStatus == NetworkStatus.DISCONNECTED) {
                     Log.d(TAG, "Network transition: DISCONNECTED -> CONNECTED")
                     evictConnectionPool()
+                    // [absorb-network-pack: OPT7-warm-reconnect] The pool was
+                    // just evicted — clear stale warmup debounce stamps and
+                    // re-warm the most recent origins so the recovery path
+                    // re-arms the pool before the user's next send. Without
+                    // this, the first request after a swap pays the full
+                    // cold-connect cost (DNS+TCP+TLS, 1-3s via a proxy).
+                    ConnectionWarmer.onNetworkChanged()
                 }
                 // Always refresh sandbox DNS on availability — an interface
                 // swap (Wi-Fi → cellular) can fire onAvailable without a
@@ -137,6 +157,11 @@ class NetworkMonitor {
                     Log.d(TAG, "Network capabilities changed: ${_status.value} -> $newStatus")
                     _status.value = newStatus
                     evictConnectionPool()
+                    // [absorb-network-pack: OPT7-warm-reconnect] Same
+                    // re-warm as onAvailable: only on a transition INTO
+                    // connectivity (re-warming while disconnected is
+                    // pointless — every HEAD would just fail).
+                    if (newStatus == NetworkStatus.CONNECTED) ConnectionWarmer.onNetworkChanged()
                     refreshSandboxDns("onCapabilitiesChanged")
                 }
             }
@@ -163,6 +188,9 @@ class NetworkMonitor {
         connectivityManager = null
         okHttpClient = null
         appContext = null
+        // [absorb-network-pack] Context-free probes must fail-open once the
+        // monitor is gone (see the companion doc).
+        activeMonitor = null
     }
 
     /**

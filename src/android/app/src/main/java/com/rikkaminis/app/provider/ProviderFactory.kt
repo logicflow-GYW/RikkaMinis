@@ -43,6 +43,23 @@ object ProviderFactory {
         // completions endpoint suffix at OpenAIProvider.kt:710 then
         // produces a single-slash join.
         val basePath = instance.effectiveBaseURL
+        // [absorb-network-pack: OPT7-conn-warmup] The origin the provider's
+        // client will actually hit — computed once here (mirroring each
+        // branch's default below) so the .also{} can pre-warm the connection
+        // right after the provider is built. warm() strips to
+        // scheme://host:port and no-ops on a malformed base, so this is
+        // best-effort and can never delay or fail the factory.
+        val warmBase = when (instance.providerType) {
+            ProviderType.anthropic -> basePath ?: "https://api.anthropic.com"
+            ProviderType.gemini -> basePath ?: "https://generativelanguage.googleapis.com/v1beta"
+            ProviderType.openRouter -> "https://openrouter.ai/api/v1"
+            // openAI / xAI / kimiCode: mirror each branch's default (warm()
+            // strips to the origin, so the /v1 / /coding path suffixes don't
+            // matter here).
+            ProviderType.openAI -> basePath ?: "https://api.openai.com/v1"
+            ProviderType.xAI -> basePath ?: "https://api.x.ai/v1"
+            ProviderType.kimiCode -> basePath ?: "${KimiConstants.CODING_API_BASE}/v1"
+        }
         return (when (instance.providerType) {
             ProviderType.anthropic -> {
                 // [T-provider-custom-user-agent] Only meaningful for custom-base
@@ -109,6 +126,12 @@ object ProviderFactory {
             }
         }).also { provider ->
             provider.instanceContext = instance
+            // [absorb-network-pack: OPT7-conn-warmup] Pre-warm the TLS/HTTP
+            // connection to the provider origin so the FIRST real request
+            // skips DNS+TCP+TLS (+ proxy tunnel) — typically 1-3s cold, more
+            // through a proxy. Fire-and-forget, internally debounced, no
+            // credentials on the HEAD.
+            com.rikkaminis.app.network.ConnectionWarmer.warm(warmBase)
             // [T-android-thinking-rules-phase2] Tag OpenAI-family providers with their
             // owning instance id so the thinking resolver can look up this instance's
             // user-authored custom rules. Only OpenAIProvider consults the resolver's
