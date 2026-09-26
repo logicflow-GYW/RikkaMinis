@@ -95,29 +95,37 @@ fun ProviderConnectionScreen(
             footer = stringResource(R.string.add_provider_multi_key_hint),
         ) {
             SettingsCardBlock {
-                ApiKeyCredentialBlock(
-                    storedKey = storedKey,
-                    keyVisible = keyVisible,
-                    onToggleVisibility = { keyVisible = !keyVisible },
-                    isEditing = isEditingKey,
-                    editValue = editKeyValue,
-                    onEditValueChange = { editKeyValue = it },
-                    onBeginEdit = {
-                        isEditingKey = true
-                        editKeyValue = storedKey ?: ""
-                    },
-                    onCancelEdit = {
-                        isEditingKey = false
-                        editKeyValue = ""
-                        keyVisible = false
-                    },
-                    onSave = {
-                        providerRepository.saveApiKey(instanceId, editKeyValue)
-                        storedKey = editKeyValue
-                        AppLogger.info(TAG, "Saved API key for ${instance.id}")
-                        isEditingKey = false
-                    },
-                )
+                if (instance.hasMultipleCredentials) {
+                    MultiKeyCredentialSection(
+                        instanceId = instanceId,
+                        instance = instance,
+                        providerRepository = providerRepository,
+                    )
+                } else {
+                    ApiKeyCredentialBlock(
+                        storedKey = storedKey,
+                        keyVisible = keyVisible,
+                        onToggleVisibility = { keyVisible = !keyVisible },
+                        isEditing = isEditingKey,
+                        editValue = editKeyValue,
+                        onEditValueChange = { editKeyValue = it },
+                        onBeginEdit = {
+                            isEditingKey = true
+                            editKeyValue = storedKey ?: ""
+                        },
+                        onCancelEdit = {
+                            isEditingKey = false
+                            editKeyValue = ""
+                            keyVisible = false
+                        },
+                        onSave = {
+                            providerRepository.saveApiKey(instanceId, editKeyValue)
+                            storedKey = editKeyValue
+                            AppLogger.info(TAG, "Saved API key for ${instance.id}")
+                            isEditingKey = false
+                        },
+                    )
+                }
             }
         }
 
@@ -300,5 +308,66 @@ fun ProviderConnectionScreen(
                 }
             }
         }
+    }
+}
+
+/**
+ * [T-multi-api-key] Multi-credential editor section, shown instead of the
+ * single-key block once the instance actually carries more than one
+ * credential. Secrets ride the [CredentialListEditor] draft callback only —
+ * they are persisted straight into the encrypted store by
+ * [ProviderRepository.saveApiKeys] and never enter the config document.
+ */
+@Composable
+private fun MultiKeyCredentialSection(
+    instanceId: String,
+    instance: com.rikkaminis.app.data.model.ProviderInstance,
+    providerRepository: ProviderRepository,
+) {
+    var storedKeys by remember(instance.credentials.size) {
+        mutableStateOf<Map<Int, String?>>(emptyMap())
+    }
+    var metasVersion by remember { mutableStateOf(0) }
+    LaunchedEffect(instanceId, instance.credentials.size, metasVersion) {
+        storedKeys = withContext(Dispatchers.IO) {
+            val loaded = providerRepository.loadApiKeys(instanceId)
+            val map = mutableMapOf<Int, String?>()
+            map.putAll(loaded)
+            // Distinguish "no key in this slot" from "not scanned"
+            // so a deleted slot renders the empty-state copy rather
+            // than the last value this composition happened to see.
+            for (i in 0 until instance.credentialCount) map.putIfAbsent(i, null)
+            map
+        }
+    }
+    Column {
+        Text(
+            text = stringResource(
+                R.string.provider_credential_multi_summary,
+                instance.credentialCount,
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        CredentialListEditor(
+            metas = instance.credentials,
+            storedKeys = storedKeys,
+            onSave = { metas, drafts, previousCount ->
+                providerRepository.saveApiKeys(
+                    instanceId = instanceId,
+                    keys = drafts,
+                    previousCount = previousCount,
+                )
+                providerRepository.updateInstance(
+                    instance.copy(credentials = metas.toMutableList()),
+                )
+                AppLogger.info(
+                    TAG,
+                    "Saved credential list for $instanceId: ${metas.size} entries",
+                )
+                metasVersion += 1
+            },
+        )
     }
 }

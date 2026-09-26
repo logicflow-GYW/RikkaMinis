@@ -1578,4 +1578,17 @@
     <string name="browser_no_app_for_link">没有可打开此链接的应用。</string>
     <string name="browser_could_not_open_link">无法打开此链接。</string>
     <string name="filepreview_pdf_render_failed_fallback">PDF 渲染失败</string>
+<!--
+    [T-multi-api-key] 多凭证编辑器。
+-->
+    <string name="provider_credential_multi_title">API Key</string>
+    <string name="provider_credential_multi_summary">已配置 %1$d 个。某个 Key 额度耗尽或被限流时，请求会自动轮换到下一个 Key。</string>
+    <string name="provider_credential_manage">管理</string>
+    <string name="provider_credential_add">添加 Key</string>
+    <string name="provider_credential_delete">删除 Key</string>
+    <string name="provider_credential_edit">编辑</string>
+    <string name="provider_credential_empty">尚未保存 Key</string>
+    <string name="provider_credential_label_placeholder">名称（可选）</string>
+    <string name="provider_credential_note_placeholder">备注（可选）</string>
+    <string name="provider_credential_replace_placeholder">粘贴新 Key 以替换</string>
 </resources>

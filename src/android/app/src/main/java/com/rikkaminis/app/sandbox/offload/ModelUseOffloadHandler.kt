@@ -7,6 +7,7 @@ import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.ModelEntry
 import com.rikkaminis.app.data.model.ProviderType
 import com.rikkaminis.app.data.repository.ProviderRepository
+import com.rikkaminis.app.data.db.compositeEntryKey
 import com.rikkaminis.app.provider.ProviderFactory
 import com.rikkaminis.app.provider.safeOptString
 import com.rikkaminis.app.sandbox.NativeOffloadHandler
@@ -271,7 +272,17 @@ class ModelUseOffloadHandler(
 
         // Build provider + call — runBlocking is acceptable here: this handler
         // is invoked off the main thread by the offload server.
-        val apiKey = providerRepository.loadApiKey(entry.providerInstanceId)
+        // [T-multi-api-key] Sticky-aware credential selection: prefer the key
+        // that last served this entry, fall back to the first usable sibling,
+        // then the historical slot 0. A multi-key instance therefore keeps
+        // serving after one key runs out instead of failing here.
+        val credentialCount = providerRepository.instance(entry.providerInstanceId)
+            ?.credentialCount ?: 1
+        val credentialIndex = providerRepository.loadAnyUsableApiKey(
+            entryId = compositeEntryKey(entry.providerInstanceId, entry.baseModel.id),
+            keyCount = credentialCount,
+        )
+        val apiKey = providerRepository.loadApiKeyAt(entry.providerInstanceId, credentialIndex)
             ?: return NativeOffloadResult(
                 2,
                 JSONObject().put("error", "missing_api_key")

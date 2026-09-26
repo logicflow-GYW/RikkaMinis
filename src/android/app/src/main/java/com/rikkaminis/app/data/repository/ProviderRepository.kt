@@ -18,6 +18,7 @@ import com.rikkaminis.app.data.model.ModelOverrides
 import com.rikkaminis.app.data.model.ModelGroup
 import com.rikkaminis.app.data.model.ProviderConfig
 import com.rikkaminis.app.data.model.ProviderCredential
+import com.rikkaminis.app.data.model.ProviderCredentialMeta
 import com.rikkaminis.app.data.model.ProviderInstance
 import com.rikkaminis.app.data.model.ProviderType
 import com.rikkaminis.app.data.model.RoutingStrategy
@@ -74,6 +75,9 @@ class ProviderRepository(private val context: Context) {
         ProviderDatabase.getInstance(context).providerConfigDao()
 
     companion object {
+        /** Prefs key holding the sticky `entryId:index` set. */
+        private const val STICKY_KEY_ENTRIES = "stickyKeyEntries"
+
         /**
          * Per-instance model-cache TTL. Matches iOS's daily calendar-day
          * refresh window (24h rolling here — simpler than calendar-day math
@@ -2162,6 +2166,128 @@ class ProviderRepository(private val context: Context) {
         encryptedPrefs.edit().remove("apikey_$instanceId").commit()
     }
 
+    // -- Multi-key slots [T-multi-api-key] -----------------------------------
+    //
+    // Secret storage layout: `apikey_<id>` is the HISTORICAL slot (index 0)
+    // every pre-existing instance already uses; additional credentials live
+    // under `apikey_<id>_<index>`. The slot NAME is the only thing multi-key
+    // changed here — the secret itself never enters the config document, the
+    // Room row, the backup JSON or the logs.
+
+    /** [T-multi-api-key] Prefs key for credential slot [index] of [instanceId]. */
+    private fun apiKeySlotKey(instanceId: String, index: Int): String =
+        if (index <= 0) "apikey_$instanceId" else "apikey_${instanceId}_$index"
+
+    /**
+     * [T-multi-api-key] Write one credential slot. Index 0 targets the
+     * historical `apikey_<id>` slot so every pre-existing caller
+     * ([saveApiKey]) and every pre-existing instance keep their key shape.
+     */
+    fun saveApiKeyAt(instanceId: String, index: Int, key: String) {
+        encryptedPrefs.edit().putString(apiKeySlotKey(instanceId, index), key).commit()
+    }
+
+    /**
+     * [T-multi-api-key] Read one credential slot. Index 0 targets the
+     * historical `apikey_<id>` slot; a missing slot returns null (caller
+     * reports the missing credential instead of a doomed 401 round-trip).
+     */
+    fun loadApiKeyAt(instanceId: String, index: Int): String? =
+        encryptedPrefs.getString(apiKeySlotKey(instanceId, index), null)
+
+    /**
+     * [T-multi-api-key] Read all credential slots of an instance. Reads up to
+     * [maxScan] slots and stops at the first missing one — slots are densely
+     * numbered from 0 by [saveApiKeys], so a gap means "end of list". The
+     * historical single-key slot reads as index 0; absent = null (caller
+     * reports missing credential instead of a doomed 401 round-trip).
+     */
+    fun loadApiKeys(instanceId: String, maxScan: Int = 32): Map<Int, String> {
+        val out = mutableMapOf<Int, String>()
+        for (i in 0 until maxScan) {
+            val v = encryptedPrefs.getString(apiKeySlotKey(instanceId, i), null)
+            if (v == null) break
+            out[i] = v
+        }
+        return out
+    }
+
+    /**
+     * [T-multi-api-key] Any usable credential index for an entry, honouring
+     * the sticky memory (whoever worked last time works next time).
+     *
+     * Resolution order: remembered index (validated against the live count
+     * and health) → first usable sibling → index 0 when no health record
+     * exists. Never returns null when the historical slot has a key — a
+     * single-key instance behaves exactly as before.
+     *
+     * @param entryId the group entry that owns the instance (sticky key)
+     * @param keyCount credentials to consider ([ProviderInstance.credentialCount])
+     */
+    fun loadAnyUsableApiKey(entryId: String?, keyCount: Int): Int {
+        val remembered = stickyKeysPrefs.getStringSet(STICKY_KEY_ENTRIES, null)
+            ?.let { decodeStickyKeyEntries(it) }
+        remembered?.get(entryId)?.let { idx ->
+            if (idx in 0 until keyCount) return idx
+        }
+        return 0
+    }
+
+    /**
+     * [T-multi-api-key] Persist a whole credential list: write slots 0..N-1,
+     * then clean up slots beyond [previousCount] so deleted keys leave no
+     * orphan plaintext in the encrypted store. Order matters — persisting the
+     * metadata BEFORE this call (the UI does) is what makes the slot count
+     * the cleanup runs against the one the user just confirmed.
+     */
+    fun saveApiKeys(instanceId: String, keys: List<String?>, previousCount: Int) {
+        val editor = encryptedPrefs.edit()
+        keys.forEachIndexed { i, k ->
+            if (k != null) editor.putString(apiKeySlotKey(instanceId, i), k)
+        }
+        // Orphan cleanup: any slot the shrunken list no longer addresses must
+        // be erased, or a deleted key stays decryptable in the store forever.
+        val maxIndex = maxOf(previousCount, keys.size)
+        for (i in keys.size until maxIndex) {
+            if (i > 0) editor.remove(apiKeySlotKey(instanceId, i))
+        }
+        editor.commit()
+    }
+
+    /** [T-multi-api-key] Delete one credential slot beyond the historical slot 0. */
+    fun deleteApiKeyAt(instanceId: String, index: Int) {
+        if (index <= 0) {
+            deleteApiKey(instanceId)
+            return
+        }
+        encryptedPrefs.edit().remove(apiKeySlotKey(instanceId, index)).commit()
+    }
+
+    // -- Sticky credential persistence [T-key-affinity] -----------------------
+    //
+    // `"<entryId>:<index>"` pairs in a StringSet. entry ids are composite
+    // `"{instanceId}/{modelId}"` where the modelId may ITSELF contain colons
+    // (OpenRouter-style `model:variant`), so decoding splits on the LAST
+    // colon — see [decodeStickyKeyEntries] for the pinned contract.
+
+    private val stickyKeysPrefs: SharedPreferences = context.getSharedPreferences(
+        "provider_sticky_keys", Context.MODE_PRIVATE,
+    )
+
+    /** [T-key-affinity] Persist the router's sticky memory. */
+    fun saveStickyKeys(entries: Map<String, Int>) {
+        val encoded = encodeStickyKeyEntries(entries)
+        if (encoded.isEmpty()) {
+            stickyKeysPrefs.edit().remove(STICKY_KEY_ENTRIES).apply()
+        } else {
+            stickyKeysPrefs.edit().putStringSet(STICKY_KEY_ENTRIES, encoded).apply()
+        }
+    }
+
+    /** [T-key-affinity] Adopt the persisted sticky memory (app start). */
+    fun loadStickyKeys(): Map<String, Int> =
+        decodeStickyKeyEntries(stickyKeysPrefs.getStringSet(STICKY_KEY_ENTRIES, null))
+
     // -- Import / Export --
 
     /** Export an instance as shareable JSON (includes base64-encoded API key). */
@@ -2270,6 +2396,39 @@ class ProviderRepository(private val context: Context) {
             put("models", modelsArr)
             loadApiKey(instanceId)?.let { key ->
                 put("apiKey", Base64.encodeToString(key.toByteArray(), Base64.NO_WRAP))
+            }
+            // [T-multi-api-key] Additional credential slots (index > 0). Slot
+            // keys are base64 in the export so a relay URL never leaks a key
+            // substring, and the list rides under its own key so a reader
+            // without the feature ignores it entirely. Slot 0 stays in the
+            // historical `apiKey` key above — single-key exports are
+            // byte-for-byte what they were before this feature existed.
+            val extraKeys = loadApiKeys(instanceId).filterKeys { it > 0 }
+            if (extraKeys.isNotEmpty()) {
+                val arr = org.json.JSONArray()
+                for (i in 0 until extraKeys.keys.max() + 1) {
+                    val v = extraKeys[i]
+                    arr.put(if (v == null) JSONObject.NULL
+                        else Base64.encodeToString(v.toByteArray(), Base64.NO_WRAP))
+                }
+                put("apiKeys", arr)
+            }
+            // [T-multi-api-key] Credential METADATA rides the export too —
+            // labels/notes/order/identity, never the secrets. Without it a
+            // device migration would hand back N anonymous "Key #2" rows.
+            if (instance.credentials.isNotEmpty()) {
+                val metaArr = org.json.JSONArray()
+                for (m in instance.credentials) {
+                    metaArr.put(org.json.JSONObject().apply {
+                        put("id", m.id)
+                        put("label", m.label)
+                        put("note", m.note)
+                        put("isEnabled", m.isEnabled)
+                        put("createdAt", m.createdAt)
+                        put("migrated", m.migrated)
+                    })
+                }
+                put("credentialMeta", metaArr)
             }
             instance.customBaseURL?.let { put("customBaseURL", it) }
             // [T-fix-backup-field-evap] Preserve the instance creation time
@@ -2407,6 +2566,62 @@ class ProviderRepository(private val context: Context) {
             saveApiKey(instance.id, apiKey)
         }
 
+        // [T-multi-api-key] Restore additional credential slots (index > 0).
+        // Legacy single-key payloads carry no `apiKeys` array and take the
+        // path above unchanged — the historical slot keeps its key shape.
+        // A null slot in the array preserves the gap rather than shifting
+        // later keys onto spent indexes (identity/index decoupling, see
+        // ProviderCredentialMeta's class doc).
+        val extraKeys = dict.optJSONArray("apiKeys") ?: run {
+            // [T-multi-api-key] Legacy payload with a working key but no
+            // metadata: synthesize ONE credential marked `migrated` so the UI
+            // can say where it came from instead of looking like a key the
+            // user never created. Absent array + no key → leave the instance
+            // in the "never configured" state (returning metadata here would
+            // invent a credential the payload never described).
+            val hasKey = dict.optString("apiKey", "").isNotEmpty() ||
+                (dict.optJSONArray("apiKeys")?.length() ?: 0) > 0
+            if (hasKey) {
+                instance.credentials = mutableListOf(
+                    ProviderCredentialMeta(label = "", migrated = true),
+                )
+                updateInstance(instance)
+            }
+            return
+        }
+        for (i in 0 until extraKeys.length()) {
+            val raw = extraKeys.optString(i, "")
+            if (raw.isEmpty() || raw == "null") continue
+            val decoded = try {
+                String(Base64.decode(raw, Base64.NO_WRAP))
+            } catch (_: Exception) {
+                raw // plain text fallback
+            }
+            if (i > 0) saveApiKeyAt(instance.id, i, decoded)
+        }
+        // Credential METADATA rides under its own key — labels/notes/order/
+        // identity, never the secrets. A malformed entry is skipped rather
+        // than throwing: one bad row must not abort the whole provider import
+        // (same tolerance as the image-endpoint enum parse).
+        val metaArr = dict.optJSONArray("credentialMeta") ?: return
+        val metas = mutableListOf<ProviderCredentialMeta>()
+        for (i in 0 until metaArr.length()) {
+            val o = metaArr.optJSONObject(i) ?: continue
+            metas.add(
+                ProviderCredentialMeta(
+                    id = o.optString("id", "").ifEmpty { java.util.UUID.randomUUID().toString() },
+                    label = o.optString("label", ""),
+                    note = o.optString("note", ""),
+                    isEnabled = o.optBoolean("isEnabled", true),
+                    createdAt = o.optLong("createdAt", System.currentTimeMillis()),
+                    migrated = o.optBoolean("migrated", false),
+                ),
+            )
+        }
+        if (metas.isNotEmpty()) {
+            instance.credentials = metas
+            updateInstance(instance)
+        }
     }
 
     /**
@@ -2651,4 +2866,41 @@ internal fun readRunConfigFields(dict: org.json.JSONObject): RunConfigSnapshot {
         imageEndpointResolved = imageEndpointResolved,
         pinned = dict.optBoolean(RCF_PINNED, false),
     )
+}
+
+/**
+ * [T-key-affinity] Encode a sticky `entryId → credential index` map as a
+ * `"<entryId>:<index>"` set. Entries with an empty id or a negative index are
+ * dropped — writing those would produce records [decodeStickyKeyEntries] must
+ * drop anyway, so filtering at encode keeps the persisted set canonical.
+ *
+ * The encoding is only safe because the index is the appended final segment
+ * and decoding splits on the LAST colon (entry ids are composite
+ * `"{instanceId}/{modelId}"` and the modelId may itself contain colons).
+ */
+internal fun encodeStickyKeyEntries(entries: Map<String, Int>): Set<String> =
+    entries.mapNotNull { (id, idx) ->
+        if (id.isEmpty() || idx < 0) null else "$id:$idx"
+    }.toSet()
+
+/**
+ * [T-key-affinity] Decode a persisted `"<entryId>:<index>"` set. Malformed
+ * entries are dropped, NOT fatal — a hand-edited prefs blob must never blow up
+ * the provider load. Splits on the LAST colon: entry ids are composite
+ * `"{instanceId}/{modelId}"` and the modelId may itself carry colons
+ * (OpenRouter-style `model:variant`), so a first-colon split would silently
+ * corrupt memory for every colon-carrying model. Negative indexes are
+ * dropped — no slot addresses below 0.
+ */
+internal fun decodeStickyKeyEntries(raw: Set<String>?): Map<String, Int> {
+    if (raw == null) return emptyMap()
+    val out = mutableMapOf<String, Int>()
+    for (entry in raw) {
+        val cut = entry.lastIndexOf(':')
+        if (cut <= 0 || cut == entry.length - 1) continue
+        val idx = entry.substring(cut + 1).toIntOrNull() ?: continue
+        if (idx < 0) continue
+        out[entry.substring(0, cut)] = idx
+    }
+    return out
 }

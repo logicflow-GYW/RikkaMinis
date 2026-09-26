@@ -1554,4 +1554,17 @@
     <string name="browser_no_app_for_link">Keine App zum Öffnen dieses Links verfügbar.</string>
     <string name="browser_could_not_open_link">Dieser Link konnte nicht geöffnet werden.</string>
     <string name="filepreview_pdf_render_failed_fallback">PDF konnte nicht gerendert werden</string>
+<!--
+    [T-multi-api-key] Editor für mehrere Zugangsdaten.
+-->
+    <string name="provider_credential_multi_title">API-Schlüssel</string>
+    <string name="provider_credential_multi_summary">%1$d konfiguriert. Anfragen wechseln automatisch zum nächsten Schlüssel, wenn ein Kontingent erschöpft ist oder ein Limit erreicht wird.</string>
+    <string name="provider_credential_manage">Verwalten</string>
+    <string name="provider_credential_add">Schlüssel hinzufügen</string>
+    <string name="provider_credential_delete">Schlüssel löschen</string>
+    <string name="provider_credential_edit">Bearbeiten</string>
+    <string name="provider_credential_empty">Kein Schlüssel gespeichert</string>
+    <string name="provider_credential_label_placeholder">Name (optional)</string>
+    <string name="provider_credential_note_placeholder">Notiz (optional)</string>
+    <string name="provider_credential_replace_placeholder">Neuen Schlüssel zum Ersetzen einfügen</string>
 </resources>

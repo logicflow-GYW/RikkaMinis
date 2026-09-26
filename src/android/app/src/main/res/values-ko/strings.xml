@@ -1553,4 +1553,17 @@
     <string name="browser_no_app_for_link">이 링크를 열 수 있는 앱이 없습니다.</string>
     <string name="browser_could_not_open_link">이 링크를 열 수 없습니다.</string>
     <string name="filepreview_pdf_render_failed_fallback">PDF 렌더링 실패</string>
+<!--
+    [T-multi-api-key] 다중 크리덴셜 편집기.
+-->
+    <string name="provider_credential_multi_title">API 키</string>
+    <string name="provider_credential_multi_summary">%1$d개 구성됨. 한 키의 할당량이 소진되거나 속도 제한에 걸리면 요청이 자동으로 다음 키로 전환됩니다.</string>
+    <string name="provider_credential_manage">관리</string>
+    <string name="provider_credential_add">키 추가</string>
+    <string name="provider_credential_delete">키 삭제</string>
+    <string name="provider_credential_edit">편집</string>
+    <string name="provider_credential_empty">저장된 키 없음</string>
+    <string name="provider_credential_label_placeholder">이름 (선택)</string>
+    <string name="provider_credential_note_placeholder">메모 (선택)</string>
+    <string name="provider_credential_replace_placeholder">교체할 새 키를 붙여넣기</string>
 </resources>

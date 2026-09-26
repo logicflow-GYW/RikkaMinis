@@ -5,6 +5,7 @@ import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.AgentToolDefinition
 import com.rikkaminis.app.data.model.sanitizeToolId
 import com.rikkaminis.app.data.model.LLMError
+import com.rikkaminis.app.data.model.isQuotaExhaustedResponse
 import com.rikkaminis.app.data.model.parseRetryAfterMs
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMModel
@@ -1135,6 +1136,15 @@ class AnthropicProvider(
     }
 
     private fun mapHttpError(statusCode: Int, body: String, retryAfterMs: Long? = null): LLMError {
+        // [T-multi-api-key] Anthropic itself reports credit exhaustion as
+        // 400 `invalid_request_error: Your credit balance is too low`, and
+        // OpenAI-compatible relays fronting Claude reuse 402 / 429
+        // `insufficient_quota`. Classify before the status ladder so a spent
+        // credential is never filed as a rate limit (which would only make the
+        // router wait for a key that is never coming back).
+        if (isQuotaExhaustedResponse(statusCode, body)) {
+            return LLMError.QuotaExhausted(body.take(300))
+        }
         if (statusCode == 401 || statusCode == 403) return LLMError.InvalidApiKey()
         if (statusCode == 429) return LLMError.RateLimited(retryAfterMs = retryAfterMs)
 

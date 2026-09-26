@@ -1192,6 +1192,18 @@ class ChatViewModel(
         override val activeSessionId: String get() = this@ChatViewModel.activeSessionId
         override fun string(resId: Int, vararg args: Any): String = context.getString(resId, *args)
         override fun emitFallbackToast(text: String) { _fallbackToastEvent.tryEmit(text) }
+
+        /**
+         * [T-multi-api-key] Rotation notice. Deliberately NOT a blocking
+         * dialog: the user's model top bar shows the same entry (rotation
+         * never changes the model), so the toast is the only visible signal
+         * that a credential switch happened.
+         */
+        internal fun notifyCredentialRotated(fromIndex: Int, toIndex: Int, keyCount: Int) {
+            _fallbackToastEvent.tryEmit(
+                "Switched to alternate API key ${toIndex + 1}/$keyCount (key ${fromIndex + 1} exhausted)",
+            )
+        }
         override fun updateSessionPreview(text: String) {
             viewModelScope.launch { chatRepository.updateSessionPreview(realSessionId.ifEmpty { sessionId }, text) }
         }
@@ -1269,7 +1281,7 @@ class ChatViewModel(
             provider: LLMProvider, messages: List<LLMMessage>, systemPrompt: String?,
             maxTokens: Int, temperature: Double?, imageParts: List<LLMMessage.ImagePart>,
             tools: List<AgentToolDefinition>, thinkingLevel: ThinkingLevel,
-        ): Flow<LLMStreamChunk> = this@ChatViewModel.streamChatTurnOffloaded(
+        ): Flow<LLMStreamChunk> = this@ChatViewModel.streamChatTurnWithRotation(
             provider, messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel)
         override fun generateSessionTitleIfNeeded() = this@ChatViewModel.generateSessionTitleIfNeeded()
         override suspend fun injectQueuedPromptsAsNewTurn(
@@ -2298,6 +2310,11 @@ class ChatViewModel(
     internal var realSessionId: String = if (isDraft) "" else sessionId
 
     init {
+        // [T-multi-api-key] Adopt the persisted sticky credential memory BEFORE
+        // the first request of this session — restoreStickyCredentialMemory()
+        // is a no-op on a cold memory and on single-key instances, so the
+        // legacy path is byte-for-byte unchanged.
+        restoreStickyCredentialMemory()
         loadSession()
         // [composer-draft-v1] Restore the persisted unsent text of a resumed
         // draft session (__new__<id>) after a cold start. Non-draft sessions

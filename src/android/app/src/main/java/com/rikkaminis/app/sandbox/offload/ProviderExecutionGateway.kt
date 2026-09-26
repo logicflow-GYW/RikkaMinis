@@ -138,6 +138,12 @@ object ProviderExecutionGateway {
         outputExt: String? = null,
         tools: List<AgentToolDefinition> = emptyList(),
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
+        /**
+         * [T-multi-api-key] Which credential of the instance to use (`0` =
+         * the historical `apikey_<id>` slot). Carried to the worker as
+         * `credential_index`; the secret itself never rides the request.
+         */
+        credentialIndex: Int = 0,
     ): SendResult {
         val requestJson = buildRequest(
             instance = instance,
@@ -152,6 +158,7 @@ object ProviderExecutionGateway {
             tools = tools,
             thinkingLevel = thinkingLevel,
             streaming = false,
+            credentialIndex = credentialIndex,
         )
         val raw = ModelExecutionDispatcher.dispatch(context, requestJson)
             ?: return SendResult.Unavailable("model service dispatch failed or timed out")
@@ -234,6 +241,10 @@ object ProviderExecutionGateway {
         // run dir for cold-start partial-stream recovery). Optional with a
         // default so the sub-agent call site is untouched.
         sessionId: String? = null,
+        // [T-multi-api-key] Which credential of the instance this stream must
+        // use (`0` = the historical `apikey_<id>` slot). Carried to the worker
+        // as `credential_index`; the secret itself never rides the request.
+        credentialIndex: Int = 0,
     ): Flow<LLMStreamChunk> {
         val requestJson = buildRequest(
             instance = instance,
@@ -249,6 +260,7 @@ object ProviderExecutionGateway {
             thinkingLevel = thinkingLevel,
             streaming = true,
             enhancedCache = enhancedCache,
+            credentialIndex = credentialIndex,
         )
         return ChatStreamOffloadHandler.stream(context, requestJson, thinkingLevel.isEnabled, sessionId)
     }

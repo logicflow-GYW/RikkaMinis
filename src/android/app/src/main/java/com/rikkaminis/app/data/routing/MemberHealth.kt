@@ -32,6 +32,20 @@ sealed class MemberHealth {
 
     /** Auth failure (401/403) / quota exhausted — never usable until user re-auths. */
     object Dead : MemberHealth()
+
+    /**
+     * [T-multi-api-key] Credential is out of quota / balance (HTTP 402,
+     * `insufficient_quota`, 余额不足). Terminal for THIS credential — unlike
+     * [Cooling] there is no `untilMs`, because waiting does not restore it.
+     * Only a top-up (or a manual health clear) makes it usable again.
+     *
+     * Deliberately separate from [Dead]: `Dead` means "this identity can no
+     * longer authenticate" (the user must re-login), whereas `Exhausted`
+     * means "this identity authenticates fine but has no money left" (the
+     * user must pay, or simply use a sibling key). The UI copy and the
+     * recovery action differ, so the states must not be conflated.
+     */
+    object Exhausted : MemberHealth()
 }
 
 /**
@@ -43,4 +57,5 @@ fun MemberHealth.isUsable(nowMs: Long): Boolean = when (this) {
     is MemberHealth.Cooling -> nowMs >= untilMs
     is MemberHealth.OpenCircuit -> nowMs >= untilMs
     MemberHealth.Dead -> false
+    MemberHealth.Exhausted -> false
 }
