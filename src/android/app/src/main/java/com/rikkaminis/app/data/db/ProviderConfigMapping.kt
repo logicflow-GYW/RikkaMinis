@@ -9,6 +9,7 @@ import com.rikkaminis.app.data.model.ModelGroup
 import com.rikkaminis.app.data.model.ModelOverrides
 import com.rikkaminis.app.data.model.ProviderConfig
 import com.rikkaminis.app.data.model.ProviderCredential
+import com.rikkaminis.app.data.model.ProviderCredentialMeta
 import com.rikkaminis.app.data.model.ProviderInstance
 import com.rikkaminis.app.data.model.ProviderType
 import com.rikkaminis.app.data.model.RoutingStrategy
@@ -96,6 +97,18 @@ fun ProviderConfig.toSnapshot(
             // [P0-pinned-providers] Persist the favorite flag so Room
             // round-trips don't snap pinned instances back to unpinned.
             pinned = if (inst.pinned) 1 else 0,
+            // [retained-schema:multi-api-key] Credential metadata blob. The
+            // feature that used it is gone; the column (and this mapping) stay
+            // because schema version 11 is already applied on installed
+            // devices and the four-way sync gate wants the column mapped.
+            // Encoded explicitly (not via a copy-through fast path) so the blob
+            // keeps a typed, round-trip-tested shape. Secrets are NOT part of
+            // it — see ProviderCredentialMeta's class doc.
+            credentialsJson = if (inst.credentials.isEmpty()) null
+                else jsonForBlobs.encodeToString(
+                    kotlinx.serialization.builtins.ListSerializer(ProviderCredentialMeta.serializer()),
+                    inst.credentials,
+                ),
         )
     }
 
@@ -229,6 +242,21 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
             },
             // [P0-pinned-providers] Restore the favorite flag on load.
             pinned = row.pinned != 0,
+            // [retained-schema:multi-api-key] Restore credential metadata. A
+            // decode failure must NOT throw — that would blow up the whole
+            // provider load and, via the JSON-mirror fallback, wipe the
+            // provider list from the UI. Degrading to an empty list is
+            // harmless: the single-key view always resolves the historical
+            // `apikey_<id>` slot, so the user keeps a working provider even if
+            // this blob is corrupt.
+            credentials = row.credentialsJson?.let { blob ->
+                runCatching {
+                    jsonForBlobs.decodeFromString(
+                        ListSerializer(ProviderCredentialMeta.serializer()),
+                        blob,
+                    )
+                }.getOrElse { emptyList() }
+            }?.toMutableList() ?: mutableListOf(),
         )
     }.toMutableList()
 

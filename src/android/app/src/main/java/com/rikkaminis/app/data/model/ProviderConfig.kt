@@ -226,7 +226,24 @@ data class ProviderInstance(
     // instances may be pinned at once. Boolean default false == old
     // persisted JSON stays valid (coerceInputValues covers missing field).
     var pinned: Boolean = false,
+    // [retained-schema:multi-api-key] Metadata for this instance's
+    // credentials, in the order the user arranged them. SECRETS ARE NOT HERE —
+    // only labels/notes that are safe to surface; the secret for index i lives
+    // in EncryptedSharedPreferences under `apikey_<id>` (i == 0, the
+    // historical slot) or `apikey_<id>_<i>`. An empty list is the normal state.
+    //
+    // The multi-key FEATURE (rotation, sticky memory, the credential editor)
+    // was removed; this field and its Room column are kept on purpose: the
+    // `provider.db` on any device that ran the feature is already at version
+    // 11, and Room refuses a version downgrade, so the column cannot be
+    // un-added without a table rebuild. Keeping the field mapped across all
+    // four layers is also what keeps the four-way sync gate honest — a column
+    // with no model counterpart is exactly the drift that gate exists to
+    // catch. Nothing reads it. Drop the column and this field together, with a
+    // v11 → v12 migration, never piecemeal.
+    var credentials: MutableList<ProviderCredentialMeta> = mutableListOf(),
 ) {
+
     /** Returns the effective API base URL, applying v1 suffix if configured. */
     val effectiveBaseURL: String?
         get() {

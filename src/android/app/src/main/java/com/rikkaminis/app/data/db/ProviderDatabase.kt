@@ -36,7 +36,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ProviderConfigMetaEntity::class,
         ProviderThinkingRuleEntity::class,
     ],
-    version = 10,
+    version = 11,
     exportSchema = false,
 )
 abstract class ProviderDatabase : RoomDatabase() {
@@ -258,6 +258,27 @@ abstract class ProviderDatabase : RoomDatabase() {
             }
         }
 
+        // [retained-schema:multi-api-key] Kept even though the multi-key
+        // feature it was written for has been removed, and
+        // [ProviderInstanceEntity.credentialsJson] is kept with it. Two reasons,
+        // both hit at upgrade time:
+        //   1. every device that ran the feature already has provider.db at
+        //      version 11, and the database version is a high-water mark —
+        //      declaring 10 here makes Room throw on the next open ("a
+        //      migration from 11 to 10 was required but not found").
+        //   2. dropping the column instead would need a v11 → v12 table rebuild
+        //      of the provider table, i.e. a data-migration risk traded for one
+        //      unused nullable TEXT column.
+        // Pure additive nullable TEXT: existing rows read as null, no row is
+        // rewritten and no provider is dropped, so the round-trip is lossless.
+        // (ALTER TABLE shape verified in sqlite3 before landing: the existing
+        // row keeps its values and the new column is NULL.)
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE provider_instances ADD COLUMN credentials_json TEXT")
+            }
+        }
+
         fun getInstance(context: Context): ProviderDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -265,7 +286,7 @@ abstract class ProviderDatabase : RoomDatabase() {
                     ProviderDatabase::class.java,
                     "provider.db",
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
                     .build()
                     .also { INSTANCE = it }
             }
