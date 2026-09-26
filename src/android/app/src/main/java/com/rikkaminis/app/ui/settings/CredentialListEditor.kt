@@ -164,7 +164,7 @@ internal fun CredentialListEditor(
 @Composable
 private fun CredentialRowView(
     index: Int,
-    row: CredentialRow,
+    row: CredentialSlotRow,
     storedKey: String?,
     expanded: Boolean,
     secretVisible: Boolean,
