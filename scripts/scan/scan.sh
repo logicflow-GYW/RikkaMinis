@@ -17,7 +17,7 @@ echo "╚═══════════════════════�
 echo ""
 
 # --- 1. Four-way sync check ---
-echo "━━━ [1/18] Four-way sync check ━━━"
+echo "━━━ [1/20] Four-way sync check ━━━"
 if python3 scripts/scan/four_way_sync_check.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -30,7 +30,7 @@ fi
 # --- 2. i18n consistency ---
 #   - Orphan keys (in code but not in strings.xml) = HARD FAIL
 #   - Missing translations = WARNING only (known legacy from upstream)
-echo "━━━ [2/18] i18n consistency check ━━━"
+echo "━━━ [2/20] i18n consistency check ━━━"
 python3 -c "
 import re, os, sys
 root = '$ROOT'
@@ -72,7 +72,7 @@ fi
 echo ""
 
 # --- 3. Bare valueOf check (persisted enum safety) ---
-echo "━━━ [3/18] Enum parse safety check ━━━"
+echo "━━━ [3/20] Enum parse safety check ━━━"
 if python3 scripts/scan/enum_parse_safety_check.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -85,7 +85,7 @@ fi
 # --- 4. Provider process-boundary guard (TF-E) ---
 # Mechanical constraint: the app process must never call a provider network
 # entry point directly — only :modelservice (ModelExecutionService) owns them.
-echo "━━━ [4/18] Provider process-boundary guard ━━━"
+echo "━━━ [4/20] Provider process-boundary guard ━━━"
 if python3 scripts/scan/provider_boundary_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -101,7 +101,7 @@ fi
 # loop on AgentTraceRecorder output (produce → consume). Inline selftest
 # goldens keep the evaluator itself honest in CI; device traces can be added
 # later under tests/traces/golden/ referencing real .jsonl files.
-echo "━━━ [5/18] Agent trace replay eval ━━━"
+echo "━━━ [5/20] Agent trace replay eval ━━━"
 if python3 scripts/scan/trace_eval_check.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -118,7 +118,7 @@ fi
 #   always empty and nothing ever failed, logged or warned. New references are a
 #   build failure unless the file is allow-listed or justifies it inline with
 #   `legacy-ok: <reason>`.
-echo "━━━ [6/18] Legacy pipeline guard ━━━"
+echo "━━━ [6/20] Legacy pipeline guard ━━━"
 if python3 scripts/scan/legacy_pipeline_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -135,7 +135,7 @@ fi
 #   would ship unverified — the same header source is compiled by the host
 #   compiler and asserted against fixture /proc text. Skipped (not failed) on
 #   machines without a host C++ compiler.
-echo "━━━ [7/18] Native crash-field host test ━━━"
+echo "━━━ [7/20] Native crash-field host test ━━━"
 if sh "$ROOT/scripts/native/crash_fields_host_test.sh" > /tmp/minis_crash_fields_host_test.log 2>&1; then
     tail -n 2 /tmp/minis_crash_fields_host_test.log
     PASS=$((PASS + 1))
@@ -157,7 +157,7 @@ fi
 #   outside the audited allow-list is the silent path by which debug code
 #   (token-free loopback JSON-RPC on 127.0.0.1:5321) reaches release. The apk
 #   mode (below, in build-apk.yml) verifies the artifact itself.
-echo "━━━ [8/18] Debug-code release boundary (source) ━━━"
+echo "━━━ [8/20] Debug-code release boundary (source) ━━━"
 if python3 scripts/scan/debug_leak_guard.py source "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -173,7 +173,7 @@ fi
 #   wired. The last one compiles and runs — it just never executes, so a
 #   fresh install and an upgraded install end up with different schemas and
 #   nothing fails until a user hits the missing column.
-echo "━━━ [9/18] Room migration chain ━━━"
+echo "━━━ [9/20] Room migration chain ━━━"
 if python3 scripts/scan/room_migration_check.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -188,7 +188,7 @@ fi
 #   decision (wire init in that process's Application branch, or justify with
 #   `logging-ok:`). The 2026-09-18 incident: :modelservice never ran init, so
 #   the LLM-request process logged zero lines — 9 provider 400s, no trace.
-echo "━━━ [10/18] Process-logging coverage ━━━"
+echo "━━━ [10/20] Process-logging coverage ━━━"
 if python3 scripts/scan/process_logging_gate.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -204,7 +204,7 @@ fi
 #   so an int[] (or Kotlin's listOf()) makes a repeating alarm silently replay
 #   as a one-shot. No crash, no failing test, no user-visible log. The repo has
 #   two ACTION_SET_ALARM writers and they drifted apart once already.
-echo "━━━ [11/18] AlarmClock EXTRA_DAYS container type ━━━"
+echo "━━━ [11/20] AlarmClock EXTRA_DAYS container type ━━━"
 if python3 scripts/scan/extra_days_container_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -223,7 +223,7 @@ fi
 #   streaming text froze at the first composed frame (user saw the first two
 #   characters of an answer until they re-entered the session). Nothing
 #   crashed, no test failed. Fix is always `rememberUpdatedState`.
-echo "━━━ [12/18] Stale-closure guard ━━━"
+echo "━━━ [12/20] Stale-closure guard ━━━"
 if python3 scripts/scan/stale_closure_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -242,7 +242,7 @@ fi
 #   test, no log. User-reported 2026-09-20 (skill + memory editors) after the
 #   same family had been patched piecemeal 4+ times (BrowserSettingsSheet /
 #   MCPIntegrations GH#44 / EnvironmentVariables / SettingsComponents T183).
-echo "━━━ [13/18] IME-inset guard ━━━"
+echo "━━━ [13/20] IME-inset guard ━━━"
 if python3 scripts/scan/ime_inset_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -263,7 +263,7 @@ fi
 #   unreachable at once. 2026-09-20: a 1.6MB request sat 272s with no byte back.
 #   No test can catch this (it would have to wait 30 real minutes), so it has
 #   to be a static judgement.
-echo "━━━ [14/18] Stream-flow dispatch guard ━━━"
+echo "━━━ [14/20] Stream-flow dispatch guard ━━━"
 if python3 scripts/scan/stream_flow_dispatch_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -282,7 +282,7 @@ fi
 #   ok:true while every reader kept serving the primed default (128 KB) until
 #   process restart. Unobservable at runtime (no exception, no log), so it has
 #   to be a static judgement.
-echo "━━━ [15/18] Prefs listener holder guard ━━━"
+echo "━━━ [15/20] Prefs listener holder guard ━━━"
 if python3 scripts/scan/prefs_listener_holder_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -301,7 +301,7 @@ fi
 #   Sibling guard four_way_sync_check.py covers Model<->Entity<->snapshot for
 #   ProviderInstance/ModelGroup only; it does not cover this IPC hop, nor
 #   LLMModel. Any new boundary model must be registered in BOUNDARY_MODELS.
-echo "━━━ [16/18] Cross-process boundary completeness ━━━"
+echo "━━━ [16/20] Cross-process boundary completeness ━━━"
 if python3 scripts/scan/xproc_boundary_check.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -322,7 +322,7 @@ fi
 #   tested in the sandbox, so this gate reads the call site as text and checks
 #   the argument's PROVENANCE (following local `val` bindings, so a rename
 #   cannot defeat it).
-echo "━━━ [17/18] Thinking-level wiring guard ━━━"
+echo "━━━ [17/20] Thinking-level wiring guard ━━━"
 if python3 scripts/scan/thinking_wiring_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
@@ -341,8 +341,40 @@ fi
 #   entry whose probe was deleted is a dead ruler holding a permission slip
 #   (2026-09-22: buildFlatChatItems.ledgerReseed); (C) census call-site counts
 #   match raw counts (regex-drift guard; the D4 `[dwiev]` shape hid 47.6%).
-echo "━━━ [18/18] Liveness static guard ━━━"
+echo "━━━ [18/20] Liveness static guard ━━━"
 if python3 scripts/scan/liveness_static_guard.py "$ROOT"; then
+    PASS=$((PASS + 1))
+    echo ""
+else
+    RC=1
+    FAIL=$((FAIL + 1))
+    echo ""
+fi
+
+# --- 19. Log URL redaction guard (a secret must not reach an output surface) ---
+#   Added 2026-09-26 after the absorb pack shipped a trace listener logging the
+#   whole request URL (`?key=` providers). Every existing gate was green because
+#   they check SHAPES (keys, mappings, compiles) and this is a WIRING question:
+#   can a credential reach an output through this new line? The gate flags whole
+#   URL interpolation inside log calls within the credential-bearing subtrees and
+#   keeps an audited allow-list (`--seed` regenerates it).
+echo "━━━ [19/20] Log URL redaction guard ━━━"
+if python3 scripts/scan/log_url_redaction_guard.py "$ROOT"; then
+    PASS=$((PASS + 1))
+    echo ""
+else
+    RC=1
+    FAIL=$((FAIL + 1))
+    echo ""
+fi
+
+# --- 20. Discarded-return guard (a call whose value MUST be consumed) ---
+#   Added 2026-09-26 after a TTFB observer called an immutable-by-copy recorder in
+#   statement position: it compiled, logged, and recorded nothing, so a budget
+#   silently stayed at its 30 s default. Watchlist-driven, so extending it is the
+#   maintenance path when another value-returning recorder is discovered.
+echo "━━━ [20/20] Discarded-return guard ━━━"
+if python3 scripts/scan/discarded_return_guard.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
 else
