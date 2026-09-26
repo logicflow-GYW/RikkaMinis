@@ -56,4 +56,44 @@ class LaunchCycleBeaconTest {
         val lines = listOf("garbage", launch("crash_or_stall"), "more garbage")
         assertEquals(1, LaunchCycleBeacon.consecutiveCrashLaunches(lines))
     }
+
+    @Test
+    fun `written beacon line keeps the uptime detail`() {
+        // [audit-0926] The beacon must carry `uptime_was`, because it is the only
+        // artefact that survives log pruning and it is the only field telling a
+        // 3 s install window apart from a 6 h LMK reclaim. Before this, the line
+        // was truncated to the bare verdict word at the space.
+        val line = LaunchCycleBeacon.beaconLine(
+            "2026-09-25T05:33:10.345",
+            1234,
+            "silent_kill (uptime_was=20891335ms)",
+        )
+        assertEquals(
+            "[2026-09-25T05:33:10.345] launch pid=1234 verdict=silent_kill(uptime_was=20891335ms)",
+            line,
+        )
+    }
+
+    @Test
+    fun `written beacon lines stay countable in both directions`() {
+        // The detail must not disturb the run-boundary decision: a silent_kill
+        // line with detail still ends a crash run, a crash line with file detail
+        // still extends it.
+        val crash = LaunchCycleBeacon.beaconLine("t", 1, "crash_or_stall (stall-2026-09-25.log)")
+        val silent = LaunchCycleBeacon.beaconLine("t", 2, "silent_kill (uptime_was=6556ms)")
+        assertEquals(1, LaunchCycleBeacon.consecutiveCrashLaunches(listOf(crash)))
+        assertEquals(0, LaunchCycleBeacon.consecutiveCrashLaunches(listOf(silent)))
+        assertEquals(1, LaunchCycleBeacon.consecutiveCrashLaunches(listOf(crash, silent, crash)))
+    }
+
+    @Test
+    fun `first launch and no-prior-launch verdicts keep a bare token`() {
+        // These verdicts carry no detail today; the helper must not invent a
+        // suffix (an empty substringAfter would otherwise be harmless, but the
+        // shape is asserted so a future refactor can't append a stray space).
+        assertEquals(
+            "[t] launch pid=7 verdict=first_launch",
+            LaunchCycleBeacon.beaconLine("t", 7, "first_launch"),
+        )
+    }
 }

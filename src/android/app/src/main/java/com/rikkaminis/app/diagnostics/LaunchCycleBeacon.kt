@@ -132,12 +132,29 @@ object LaunchCycleBeacon {
             lastRestartCount = 0
         }
 
-        appendLine(
-            file,
-            "[$nowIso] launch pid=${android.os.Process.myPid()} " +
-                "verdict=${previousVerdict.substringBefore(' ')}",
-        )
+        appendLine(file, beaconLine(nowIso, android.os.Process.myPid(), previousVerdict))
     }
+
+    /**
+     * [audit-0926] One beacon line, carrying the verdict's DETAIL — not just the
+     * bare word.
+     *
+     * Why: `silent_kill` is a catch-all (install-over / manual kill / MIUI-LMK
+     * reclaim / force-stop all land there), and the only field that separates a
+     * 3-second install window from a 6-hour background reclaim is `uptime_was`.
+     * That value existed solely in the AppLogger line, which is size-pruned —
+     * while the beacon is deliberately never rolled, so it outlives the pruned
+     * window. 2026-09-26 log analysis had to re-fish uptimes out of the pruned
+     * main log for exactly this reason.
+     *
+     * Format: the detail is appended with NO separator (`verdict=silent_kill(uptime_was=…ms)`),
+     * matching the shape the existing crash-detail test already pins, so
+     * `VERDICT_IN_LINE = verdict=(\S+)` keeps reading a single token and
+     * `verdict.startsWith("crash_or_stall")` keeps deciding the run boundary.
+     */
+    internal fun beaconLine(nowIso: String, pid: Int, previousVerdict: String): String =
+        "[$nowIso] launch pid=$pid " +
+            "verdict=${previousVerdict.substringBefore(' ')}${previousVerdict.substringAfter(' ', "")}"
 
     /**
      * [T-android-perf-logging] Count launch records in the beacon tail that
