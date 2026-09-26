@@ -104,7 +104,14 @@ internal suspend fun ChatViewModel.updatePersistedAssistantTurn(
     toolBlockMeta: Map<String, AssistantBlock> = emptyMap(),
 ) {
     if (parts.isEmpty()) return
-    chatRepository.updateMessageParts(dbId, buildAssistantPartsJson(parts, toolBlockMeta))
+    // [fix/early-persist-row-cap] Same 500 KB row ceiling the append path
+    // applies (ChatRepository.capPartsJsonForRow) — this UPDATE now writes the
+    // final payload of a tool-running turn, so it must not be the one write
+    // that skips the guard the append had already enforced on the same row.
+    chatRepository.updateMessageParts(
+        dbId,
+        ChatRepository.capPartsJsonForRow(buildAssistantPartsJson(parts, toolBlockMeta)),
+    )
 }
 
 
