@@ -401,7 +401,10 @@ class OpenAIProvider constructor(
         // a per-client pool was never evicted, and a dead h2 tunnel through
         // a local proxy got reused on every retry (silent infinite hang).
         .connectionPool(com.rikkaminis.app.network.NetworkMonitor.sharedLLMConnectionPool)
-        .eventListenerFactory { OkHttpNetTraceListener() }
+        // [absorb-network-pack] Listener promoted to the shared network
+        // package; wrapped in the per-model TTFB/health feed (trace
+        // semantics preserved via the OkHttpNetTraceListener subclass).
+        .eventListenerFactory { com.rikkaminis.app.network.ProviderHealthTraceListener(model.id, model.displayName) }
         .build()
 
     /** Detect OpenRouter base URL. */

@@ -82,6 +82,10 @@ class GeminiProvider(
         // [T-android-stale-conn-retry-hang] Shared pool — see NetworkMonitor.
         // Network-transition eviction must reach provider connections.
         .connectionPool(com.rikkaminis.app.network.NetworkMonitor.sharedLLMConnectionPool)
+        // [absorb-network-pack] Cross-provider network-leg trace + per-model
+        // TTFB/health feed — previously only OpenAIProvider attached a
+        // listener, so Gemini failures were invisible per-leg.
+        .eventListenerFactory { com.rikkaminis.app.network.ProviderHealthTraceListener(model.id, model.displayName) }
         .build()
 
     override suspend fun sendMessageClamped(

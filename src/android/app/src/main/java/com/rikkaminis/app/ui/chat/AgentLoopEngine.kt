@@ -1179,6 +1179,20 @@ internal class AgentLoopEngine(
                         }
                         try {
                             for (remaining in delaySec downTo 1) {
+                                // [absorb-network-pack: P0-2-offline-retry-hold]
+                                // Wait for connectivity BEFORE consuming this
+                                // countdown second, so attempts are not burned
+                                // into a dead network (Wi-Fi↔cellular swap /
+                                // elevator). While held, the visible countdown
+                                // freezes on the current second. The hold is
+                                // bounded (90s) so a wedged network state can't
+                                // wedge the loop; the probe fails-open when no
+                                // NetworkMonitor was ever started.
+                                com.rikkaminis.app.network.OfflineRetryHold.awaitConnected {
+                                    com.rikkaminis.app.network.NetworkMonitor.activeMonitor
+                                        ?.let { it.status.value == com.rikkaminis.app.network.NetworkMonitor.NetworkStatus.DISCONNECTED }
+                                        ?: false
+                                }
                                 host.setAutoRetryCountdown(remaining)
                                 kotlinx.coroutines.delay(1000)
                             }
