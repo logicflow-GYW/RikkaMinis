@@ -112,7 +112,7 @@ internal fun ChatViewModel.streamChatTurnWithRotation(
             groupRouter.rememberCredential(entryId, index, keyCount)
             if (keyCount > 1) {
                 groupRouter.recordResult(
-                    GroupRouter.routeId(entryId, index),
+                    groupRouter.routeId(entryId, index),
                     RouteOutcome.Success,
                 )
             }
@@ -132,7 +132,7 @@ internal fun ChatViewModel.streamChatTurnWithRotation(
                     // sibling key that could have served must not be taken
                     // down with the one that was spent.
                     groupRouter.recordResult(
-                        GroupRouter.routeId(entryId, index),
+                        groupRouter.routeId(entryId, index),
                         when (e) {
                             is LLMError.QuotaExhausted -> RouteOutcome.QuotaExhausted
                             is LLMError.RateLimited -> RouteOutcome.RateLimited(e.retryAfterMs)

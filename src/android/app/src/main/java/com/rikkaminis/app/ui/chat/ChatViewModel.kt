@@ -1147,6 +1147,20 @@ class ChatViewModel(
     internal val groupRouter = com.rikkaminis.app.data.routing.GroupRouter()
 
     /**
+     * [T-multi-api-key] Rotation notice, callable from the
+     * ChatCredentialRotation extension (a private inner-class member is NOT
+     * visible to a same-package extension — the first CI run caught that).
+     * Deliberately NOT a blocking dialog: the user's model top bar shows the
+     * same entry (rotation never changes the model), so the toast is the only
+     * visible signal that a credential switch happened.
+     */
+    internal fun notifyCredentialRotated(fromIndex: Int, toIndex: Int, keyCount: Int) {
+        _fallbackToastEvent.tryEmit(
+            "Switched to alternate API key ${toIndex + 1}/$keyCount (key ${fromIndex + 1} exhausted)",
+        )
+    }
+
+    /**
      * [T-per-message-load-balance] One-shot entry override for the NEXT new
      * user turn. Set by [selectGroupEntry] when the user hand-picks a member
      * inside a loadBalance group — that pick serves the next turn (instead of
@@ -1193,17 +1207,6 @@ class ChatViewModel(
         override fun string(resId: Int, vararg args: Any): String = context.getString(resId, *args)
         override fun emitFallbackToast(text: String) { _fallbackToastEvent.tryEmit(text) }
 
-        /**
-         * [T-multi-api-key] Rotation notice. Deliberately NOT a blocking
-         * dialog: the user's model top bar shows the same entry (rotation
-         * never changes the model), so the toast is the only visible signal
-         * that a credential switch happened.
-         */
-        internal fun notifyCredentialRotated(fromIndex: Int, toIndex: Int, keyCount: Int) {
-            _fallbackToastEvent.tryEmit(
-                "Switched to alternate API key ${toIndex + 1}/$keyCount (key ${fromIndex + 1} exhausted)",
-            )
-        }
         override fun updateSessionPreview(text: String) {
             viewModelScope.launch { chatRepository.updateSessionPreview(realSessionId.ifEmpty { sessionId }, text) }
         }
