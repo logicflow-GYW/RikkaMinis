@@ -637,6 +637,15 @@ fun SessionStorageDetailScreen(
                             minisSize = sessionFiles.sizeOf(sessionFiles.sessionDir(sessionId))
                             mediaSize = sessionFiles.mediaSize(sessionId)
                         }
+                        // [storage-rescan-jank] Same invalidation the orphan
+                        // reclaim flow does above, for the same reason: the list
+                        // screen's freshness gate renders the cached snapshot for
+                        // up to SNAPSHOT_STALE_MS on re-entry, so without this the
+                        // session kept showing its pre-clear size after going back
+                        // (user report: cleared a 70 MB session, list still said
+                        // 70 MB). Only on the success path — a failed delete leaves
+                        // the snapshot alone, since it is still accurate.
+                        StorageSnapshotCache.snapshot = null
                         isClearing = false
                     }
                 }) {
