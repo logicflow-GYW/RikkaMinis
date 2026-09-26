@@ -144,4 +144,72 @@ class GatewayEffortTruthTest {
             GatewayEffortTruth.resolveTier(host, "brand-new-model", ThinkingLevel.HIGH, emptyList()),
         )
     }
+
+    // ── [T-senseaudio-effort-enum] second measured gateway (api.senseaudio.cn) ──
+
+    private val saHost = "api.senseaudio.cn"
+
+    @Test
+    fun `senseaudio host is measured but is not a sensenova host`() {
+        assertTrue(GatewayEffortTruth.isMeasuredHost(saHost))
+        assertTrue(GatewayEffortTruth.isMeasuredHost("token.sensenova.cn"))
+        assertFalse(GatewayEffortTruth.isSensenovaHost(saHost))
+        assertFalse(GatewayEffortTruth.isMeasuredHost("api.senseaudio.cn.evil.test"))
+        // Only the probed host is listed — token.senseaudio.cn was never probed.
+        assertFalse(GatewayEffortTruth.isMeasuredHost("token.senseaudio.cn"))
+    }
+
+    @Test
+    fun `senseaudio table matches the probe output`() {
+        assertEquals(
+            listOf("none", "low", "high", "xhigh", "max"),
+            GatewayEffortTruth.tiersFor(saHost, "deepseek-v4.1-flash"),
+        )
+        // A model we have not probed on this gateway stays un-measured.
+        assertNull(GatewayEffortTruth.tiersFor(saHost, "senseaudio-s2"))
+        assertNull(GatewayEffortTruth.tiersFor(saHost, "sensenova-6.8-flash-lite"))
+    }
+
+    @Test
+    fun `senseaudio medium degrades to low, xhigh and max are reachable`() {
+        // The reported bug: `medium` 400s on this gateway — it must never reach the wire.
+        val id = "deepseek-v4.1-flash"
+        assertEquals("low", GatewayEffortTruth.resolveTier(saHost, id, ThinkingLevel.MEDIUM, null))
+        assertEquals("low", GatewayEffortTruth.resolveTier(saHost, id, ThinkingLevel.LOW, null))
+        assertEquals("high", GatewayEffortTruth.resolveTier(saHost, id, ThinkingLevel.HIGH, null))
+        // The tiers the gateway actually serves become reachable instead of capped.
+        assertEquals("xhigh", GatewayEffortTruth.resolveTier(saHost, id, ThinkingLevel.XHIGH, null))
+        assertEquals("max", GatewayEffortTruth.resolveTier(saHost, id, ThinkingLevel.MAX, null))
+    }
+
+    @Test
+    fun `the two gateways keep different ladders for the same model id`() {
+        // Same id, different gateway: Sensenova's deepseek-v4.1-flash takes `medium`
+        // (and no `max`), SenseAudio's takes `max` and 400s on `medium`. The tables
+        // must never be merged — merging would reintroduce one of the two 400s.
+        val id = "deepseek-v4.1-flash"
+        assertTrue(GatewayEffortTruth.tiersFor(host, id)!!.contains("medium"))
+        assertFalse(GatewayEffortTruth.tiersFor(saHost, id)!!.contains("medium"))
+        assertTrue(GatewayEffortTruth.tiersFor(saHost, id)!!.contains("max"))
+    }
+
+    @Test
+    fun `measurement outranks a wrong declared set on senseaudio too`() {
+        // Older saves carry a models.dev row that names `medium` (400s here) and omits
+        // `max` (reachable here) — the measured table must win on this gateway as well.
+        assertEquals(
+            "low",
+            GatewayEffortTruth.resolveTier(
+                saHost, "deepseek-v4.1-flash", ThinkingLevel.MEDIUM,
+                listOf("none", "minimal", "low", "medium", "high"),
+            ),
+        )
+        assertEquals(
+            "max",
+            GatewayEffortTruth.resolveTier(
+                saHost, "deepseek-v4.1-flash", ThinkingLevel.MAX,
+                listOf("none", "minimal", "low", "medium", "high"),
+            ),
+        )
+    }
 }

@@ -57,11 +57,29 @@ import com.rikkaminis.app.data.model.ThinkingLevel
  * Upgrade trigger: a `400 field ReasoningEffort invalid` from this gateway for a value
  * listed below, or a new model id appearing on the gateway — re-measure and extend the
  * table. The single-invalid-probe trick above takes one request per model.
+ *
+ * [T-senseaudio-effort-enum] The [SENSEAUDIO_TIERS] table below covers a second
+ * gateway (api.senseaudio.cn, measured 2026-09-26) with the SAME mechanism but a
+ * DIFFERENT ladder for the same model id — including a tier Sensenova accepts and
+ * this gateway 400s on. Do not merge the two tables. The reported symptom there:
+ * the picker offered LOW/MEDIUM/HIGH while the wire 400'd on `medium` and the
+ * `xhigh`/`max` tiers the gateway actually serves had no UI entry — the declared
+ * ceiling came from a models.dev row that neither matches this endpoint.
  */
 object GatewayEffortTruth {
 
     /** Hosts whose OpenAI-compatible dialect this table describes. */
     private val SENSENOVA_HOSTS = setOf("token.sensenova.cn", "api.sensenova.cn")
+
+    /**
+     * [T-senseaudio-effort-enum] Second measured gateway (2026-09-26). Unlike
+     * Sensenova, this relay REJECTS `medium` outright on its deepseek-v4.1-flash —
+     * its enum is coarser but has higher tiers (`xhigh`/`max`), so the two tables
+     * must never be merged: the same model id means different ladders on the two
+     * gateways. Only the host we actually probed is listed; other hosts on the
+     * same product are unknown until measured.
+     */
+    private val SENSEAUDIO_HOSTS = setOf("api.senseaudio.cn")
 
     /** Measured legal `reasoning_effort` values, per model id. Ladder-ordered. */
     private val SENSENOVA_TIERS: Map<String, List<String>> = mapOf(
@@ -83,14 +101,37 @@ object GatewayEffortTruth {
      */
     val SENSENOVA_FALLBACK_TIERS = listOf("none", "low", "medium", "high", "xhigh")
 
+    /**
+     * [T-senseaudio-effort-enum] Measured live 2026-09-23-style probe on
+     * api.senseaudio.cn (each value sent in turn, non-streaming):
+     * `low`/`high`/`xhigh`/`max` → 200; `none` → 200 and really stops the reasoning
+     * stream; `minimal` → 200 (accepted, mapped upstream); **`medium` → 400** —
+     * `"reasoning_effort must be low, high, xhigh, max, or an integer within [1, 100]"`.
+     * The gateway also honours integer 1-100 efforts via chat_template_kwargs, which
+     * have no client-side tier counterpart. Note the contrast with Sensenova's
+     * `deepseek-v4.1-flash` row above, which DOES take `medium` — same model id,
+     * different gateway, different ladder.
+     */
+    private val SENSEAUDIO_TIERS: Map<String, List<String>> = mapOf(
+        "deepseek-v4.1-flash" to listOf("none", "low", "high", "xhigh", "max"),
+    )
+
     fun isSensenovaHost(host: String): Boolean = host in SENSENOVA_HOSTS
+
+    /** True when [host] has a measured truth table — the caller may replace the
+     *  models.dev declared tiers with it ([ModelsDevApi.applyGatewayEffortTruth]). */
+    fun isMeasuredHost(host: String): Boolean =
+        isSensenovaHost(host) || host in SENSEAUDIO_HOSTS
 
     /**
      * Measured tiers for [modelId] when [host] is a gateway this object describes,
      * or null when we have no measurement (caller should fall back to the declared set).
      */
-    fun tiersFor(host: String, modelId: String): List<String>? =
-        if (isSensenovaHost(host)) SENSENOVA_TIERS[modelId] else null
+    fun tiersFor(host: String, modelId: String): List<String>? = when {
+        isSensenovaHost(host) -> SENSENOVA_TIERS[modelId]
+        host in SENSEAUDIO_HOSTS -> SENSEAUDIO_TIERS[modelId]
+        else -> null
+    }
 
     /**
      * The wire value for an ENABLED [level] on a gateway whose strict enum this object
