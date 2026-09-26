@@ -54,10 +54,13 @@ import java.net.InetSocketAddress
  * the per-model TTFB/success ring (com.rikkaminis.app.diagnostics
  * .ProviderHealthTracker) without touching the trace semantics.
  */
-internal class OkHttpNetTraceListener : EventListener() {
+internal open class OkHttpNetTraceListener : EventListener() {
     private val tag = "OkHttpNetTrace"
     private val t0 = System.nanoTime()
-    private fun ms(): Long = (System.nanoTime() - t0) / 1_000_000L
+
+    /** [absorb-network-pack] protected: ProviderHealthTraceListener reuses the
+     *  same callStart-relative offset for its TTFB readings. */
+    protected fun ms(): Long = (System.nanoTime() - t0) / 1_000_000L
     private fun callTag(call: Call): String {
         val id = System.identityHashCode(call).toString(16)
         return "call#$id"
