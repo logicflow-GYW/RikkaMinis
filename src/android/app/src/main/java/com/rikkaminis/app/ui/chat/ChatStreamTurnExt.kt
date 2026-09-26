@@ -33,11 +33,6 @@ internal fun ChatViewModel.streamChatTurnOffloaded(
     imageParts: List<LLMMessage.ImagePart>,
     tools: List<AgentToolDefinition>,
     thinkingLevel: ThinkingLevel,
-    // [T-multi-api-key] Which credential of the instance to use (`0` = the
-    // historical `apikey_<id>` slot). Carried to the worker as
-    // `credential_index`; the secret itself never rides the request. Default
-    // 0 keeps every non-rotating caller untouched.
-    credentialIndex: Int = 0,
 ): Flow<LLMStreamChunk> {
     val instance = provider.instanceContext
         ?: throw ModelStreamErrorException(
@@ -71,7 +66,5 @@ internal fun ChatViewModel.streamChatTurnOffloaded(
         // run's partial stream.jsonl is recoverable at cold start. Same
         // draft-vs-real resolution the preview update path uses.
         sessionId = realSessionId.ifEmpty { sessionId },
-        // [T-multi-api-key] Which credential slot the worker must read.
-        credentialIndex = credentialIndex,
     )
 }

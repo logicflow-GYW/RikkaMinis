@@ -36,7 +36,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ProviderConfigMetaEntity::class,
         ProviderThinkingRuleEntity::class,
     ],
-    version = 11,
+    version = 10,
     exportSchema = false,
 )
 abstract class ProviderDatabase : RoomDatabase() {
@@ -258,22 +258,6 @@ abstract class ProviderDatabase : RoomDatabase() {
             }
         }
 
-        val MIGRATION_10_11 = object : Migration(10, 11) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                // [T-multi-api-key] Credential metadata blob (labels/notes/
-                // identity for an instance's credentials). Pure additive
-                // nullable TEXT: existing rows read as null → "legacy
-                // single-key instance", which the load path maps to exactly
-                // one credential backed by the historical `apikey_<id>`
-                // EncryptedPrefs slot. No row is rewritten and no provider is
-                // dropped, so a downgrade/upgrade round-trip is lossless —
-                // same contract as MIGRATION_2_3's image-endpoint columns.
-                // (ALTER TABLE shape verified in sqlite3 before landing: the
-                // existing row keeps its values and the new column is NULL.)
-                db.execSQL("ALTER TABLE provider_instances ADD COLUMN credentials_json TEXT")
-            }
-        }
-
         fun getInstance(context: Context): ProviderDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -281,7 +265,7 @@ abstract class ProviderDatabase : RoomDatabase() {
                     ProviderDatabase::class.java,
                     "provider.db",
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
                     .build()
                     .also { INSTANCE = it }
             }

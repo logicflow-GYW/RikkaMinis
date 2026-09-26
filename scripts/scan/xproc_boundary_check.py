@@ -67,13 +67,6 @@ WORKER = "src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/Model
 # Each entry MUST have a reason -- an unexplained entry is how the next P0 hides.
 BENIGN = {
     "ProviderInstance": {
-        "credentials": (
-            "credential METADATA deliberately stays on the host side: the "
-            "worker only needs WHICH SLOT to read (credential_index, written "
-            "separately) — secrets live in the host's EncryptedPrefs and the "
-            "worker reads the slot by name, so the metadata never crosses the "
-            "boundary. See ProviderCredentialMeta's class doc."
-        ),
         "isEnabled": "worker never reads it; gating happens on the host side",
         "createdAt": "presentation-only ordering metadata",
         "pinned": "worker hard-codes pinned=false; pinning is a host-side UI concept",

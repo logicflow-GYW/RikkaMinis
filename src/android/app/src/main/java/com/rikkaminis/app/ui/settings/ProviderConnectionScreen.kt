@@ -5,10 +5,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -32,11 +28,9 @@ import kotlinx.coroutines.withContext
 
 import com.rikkaminis.app.R
 import com.rikkaminis.app.data.model.ImageEndpointMode
-import com.rikkaminis.app.data.model.ProviderCredentialMeta
 import com.rikkaminis.app.data.model.ProviderType
 import com.rikkaminis.app.data.repository.ProviderRepository
 import com.rikkaminis.app.logging.AppLogger
-import com.rikkaminis.app.ui.components.MinisSmallOutlinedButton
 import com.rikkaminis.app.ui.components.SectionTextField
 
 private const val TAG = "ProviderConnection"
@@ -98,75 +92,32 @@ fun ProviderConnectionScreen(
         // ─── Credential / API Key ───────────────────────────────────
         SettingsSection(
             header = stringResource(R.string.provider_list_api_key),
-            // This screen has a real multi-key editor, so it describes THAT
-            // (the shared `add_provider_multi_key_hint` promises a
-            // comma-separated field format nothing implements — still true on
-            // the onboarding/add-provider screens and tracked separately).
-            footer = stringResource(R.string.provider_credential_section_hint),
+            footer = stringResource(R.string.add_provider_multi_key_hint),
         ) {
             SettingsCardBlock {
-                if (instance.hasMultipleCredentials) {
-                    MultiKeyCredentialSection(
-                        instanceId = instanceId,
-                        instance = instance,
-                        providerRepository = providerRepository,
-                    )
-                } else {
-                    ApiKeyCredentialBlock(
-                        storedKey = storedKey,
-                        keyVisible = keyVisible,
-                        onToggleVisibility = { keyVisible = !keyVisible },
-                        isEditing = isEditingKey,
-                        editValue = editKeyValue,
-                        onEditValueChange = { editKeyValue = it },
-                        onBeginEdit = {
-                            isEditingKey = true
-                            editKeyValue = storedKey ?: ""
-                        },
-                        onCancelEdit = {
-                            isEditingKey = false
-                            editKeyValue = ""
-                            keyVisible = false
-                        },
-                        onSave = {
-                            providerRepository.saveApiKey(instanceId, editKeyValue)
-                            storedKey = editKeyValue
-                            AppLogger.info(TAG, "Saved API key for ${instance.id}")
-                            isEditingKey = false
-                        },
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    // Reachability: this is the ONLY way a single-credential
-                    // instance can acquire a second one. The editor's own "add
-                    // key" button renders only for instances that already have
-                    // >= 2 credential metas, so without this entry point the
-                    // whole rotation feature was unreachable for exactly the
-                    // users it was built for.
-                    MinisSmallOutlinedButton(
-                        onClick = {
-                            // Slot 0 already holds this instance's key; give it
-                            // its metadata (migrated = it predates the list) and
-                            // open one empty row for the new key.
-                            val promoted = buildList {
-                                addAll(instance.credentials.ifEmpty {
-                                    listOf(ProviderCredentialMeta(label = "", migrated = true))
-                                })
-                                add(ProviderCredentialMeta(label = ""))
-                            }
-                            providerRepository.updateInstance(
-                                instance.copy(credentials = promoted.toMutableList()),
-                            )
-                            AppLogger.info(
-                                TAG,
-                                "Promoted ${instance.id} to a multi-key credential list (${promoted.size} rows)",
-                            )
-                        },
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = null)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(stringResource(R.string.provider_credential_add_second))
-                    }
-                }
+                ApiKeyCredentialBlock(
+                    storedKey = storedKey,
+                    keyVisible = keyVisible,
+                    onToggleVisibility = { keyVisible = !keyVisible },
+                    isEditing = isEditingKey,
+                    editValue = editKeyValue,
+                    onEditValueChange = { editKeyValue = it },
+                    onBeginEdit = {
+                        isEditingKey = true
+                        editKeyValue = storedKey ?: ""
+                    },
+                    onCancelEdit = {
+                        isEditingKey = false
+                        editKeyValue = ""
+                        keyVisible = false
+                    },
+                    onSave = {
+                        providerRepository.saveApiKey(instanceId, editKeyValue)
+                        storedKey = editKeyValue
+                        AppLogger.info(TAG, "Saved API key for ${instance.id}")
+                        isEditingKey = false
+                    },
+                )
             }
         }
 
@@ -349,66 +300,5 @@ fun ProviderConnectionScreen(
                 }
             }
         }
-    }
-}
-
-/**
- * [T-multi-api-key] Multi-credential editor section, shown instead of the
- * single-key block once the instance actually carries more than one
- * credential. Secrets ride the [CredentialListEditor] draft callback only —
- * they are persisted straight into the encrypted store by
- * [ProviderRepository.saveApiKeys] and never enter the config document.
- */
-@Composable
-private fun MultiKeyCredentialSection(
-    instanceId: String,
-    instance: com.rikkaminis.app.data.model.ProviderInstance,
-    providerRepository: ProviderRepository,
-) {
-    var storedKeys by remember(instance.credentials.size) {
-        mutableStateOf<Map<Int, String?>>(emptyMap())
-    }
-    var metasVersion by remember { mutableStateOf(0) }
-    LaunchedEffect(instanceId, instance.credentials.size, metasVersion) {
-        storedKeys = withContext(Dispatchers.IO) {
-            val loaded = providerRepository.loadApiKeys(instanceId)
-            val map = mutableMapOf<Int, String?>()
-            map.putAll(loaded)
-            // Distinguish "no key in this slot" from "not scanned"
-            // so a deleted slot renders the empty-state copy rather
-            // than the last value this composition happened to see.
-            for (i in 0 until instance.credentialCount) map.putIfAbsent(i, null)
-            map
-        }
-    }
-    Column {
-        Text(
-            text = stringResource(
-                R.string.provider_credential_multi_summary,
-                instance.credentialCount,
-            ),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        CredentialListEditor(
-            metas = instance.credentials,
-            storedKeys = storedKeys,
-            onSave = { metas, drafts, previousCount ->
-                providerRepository.saveApiKeys(
-                    instanceId = instanceId,
-                    keys = drafts,
-                    previousCount = previousCount,
-                )
-                providerRepository.updateInstance(
-                    instance.copy(credentials = metas.toMutableList()),
-                )
-                AppLogger.info(
-                    TAG,
-                    "Saved credential list for $instanceId: ${metas.size} entries",
-                )
-                metasVersion += 1
-            },
-        )
     }
 }

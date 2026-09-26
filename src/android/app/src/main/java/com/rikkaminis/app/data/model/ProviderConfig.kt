@@ -226,31 +226,7 @@ data class ProviderInstance(
     // instances may be pinned at once. Boolean default false == old
     // persisted JSON stays valid (coerceInputValues covers missing field).
     var pinned: Boolean = false,
-    // [T-multi-api-key] Metadata for this instance's credentials, in the order
-    // the user arranged them. SECRETS ARE NOT HERE — only the labels/notes
-    // that are safe to surface. The secret for index i lives in
-    // EncryptedSharedPreferences under `apikey_<id>` (i == 0, the historical
-    // slot) or `apikey_<id>_<i>`. An empty list means "legacy single-key
-    // instance": readers treat absence as exactly one credential (index 0),
-    // which is why every pre-existing provider keeps working untouched and
-    // why the JSON mirror written by an older build stays valid.
-    var credentials: MutableList<ProviderCredentialMeta> = mutableListOf(),
 ) {
-    /**
-     * [T-multi-api-key] Number of credentials to consider when routing.
-     *
-     * Never returns 0: an instance with no metadata still has the historical
-     * single `apikey_<id>` slot, so it presents exactly one credential. This
-     * keeps every call site on the multi-key path without a null/empty branch,
-     * and is what makes the feature a pure superset of the old behaviour —
-     * with one credential, rotation is a no-op and the composite route id
-     * degenerates to the bare entry id.
-     */
-    val credentialCount: Int get() = credentials.size.coerceAtLeast(1)
-
-    /** True when this instance actually carries more than one credential. */
-    val hasMultipleCredentials: Boolean get() = credentials.size > 1
-
     /** Returns the effective API base URL, applying v1 suffix if configured. */
     val effectiveBaseURL: String?
         get() {

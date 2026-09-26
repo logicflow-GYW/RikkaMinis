@@ -36,12 +36,6 @@ FIELD_ALIASES = {
     "ModelGroup": {
         "memberEntryIds": "memberEntryIdsJson",
     },
-    "ProviderInstance": {
-        # [T-multi-api-key] The credential list is a List<ProviderCredentialMeta>
-        # on the model but a JSON blob column in Room — same shape as
-        # ModelGroup.memberEntryIdsJson, so it reuses that established pattern.
-        "credentials": "credentialsJson",
-    },
 }
 
 def read(path):

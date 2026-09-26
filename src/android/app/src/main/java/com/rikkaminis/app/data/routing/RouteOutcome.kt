@@ -27,27 +27,6 @@ sealed class RouteOutcome {
      */
     data class RateLimited(val retryAfterMs: Long?) : RouteOutcome()
 
-    /**
-     * [T-multi-api-key] The credential is spent (HTTP 402, or a 429/403 body
-     * that says `insufficient_quota` / 余额不足). Distinct from
-     * [RateLimited] in the only way that matters for routing: **waiting does
-     * not clear it**.
-     *
-     * Before this outcome existed, quota exhaustion arrived here as
-     * [ServerError] and opened a 5-minute circuit breaker —
-     * [GroupRouter.CIRCUIT_OPEN_MS] is a *server-side* cooldown, so the dead
-     * credential was retried every 5 minutes forever, and the user saw
-     * "Provider returned an error" for what was really "this key needs
-     * topping up".
-     *
-     * Recorded as [MemberHealth.Exhausted]: terminal for the *credential*
-     * (never auto-recovers), but — crucially — NOT for the instance. When the
-     * instance carries sibling credentials, the router rotates to the next
-     * one and only the spent key is parked; see
-     * [GroupRouter.rotateCredential].
-     */
-    object QuotaExhausted : RouteOutcome()
-
     /** HTTP 5xx (ProviderError). Counts toward the circuit breaker. */
     object ServerError : RouteOutcome()
 

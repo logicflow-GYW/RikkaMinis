@@ -38,11 +38,4 @@ data class ProviderInstanceEntity(
     // MIGRATION_3_4's ALTER TABLE backfills existing rows to "not pinned",
     // matching the entity default and the JSON model's `pinned = false`.
     @ColumnInfo(name = "pinned") val pinned: Int = 0,
-    // [T-multi-api-key] JSON array of ProviderCredentialMeta — labels/notes/
-    // identity for this instance's credentials, in user order. Nullable TEXT
-    // (null for every pre-migration row) so the load path can tell "legacy
-    // single-key instance, never touched" apart from "user explicitly has one
-    // credential", which matters for the UI's first-run hint. SECRETS ARE NOT
-    // STORED HERE — see ProviderCredentialMeta's class doc.
-    @ColumnInfo(name = "credentials_json") val credentialsJson: String? = null,
 )
