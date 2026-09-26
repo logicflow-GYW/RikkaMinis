@@ -164,6 +164,15 @@ object ExecutionCoordinator {
      * One hour is far longer than any single command the agent runs
      * interactively, and everything older still gets reclaimed on the next
      * sweep.
+     *
+     * WHY age alone was not enough: this timestamp is the entry's OWN mtime,
+     * and a directory's mtime does not move when something writes *inside* it
+     * (git commit, checkout, appending, a build dropping objects). An entry in
+     * constant use for hours therefore crossed this gate while still in use and
+     * was reaped mid-work. Aged candidates now get a second chance — a recent
+     * mtime in their top levels, or an explicit pin — before deletion; the
+     * policy and its budget live in [GuestTmpSweepPlan.kt] as
+     * [internalGuestTmpNewestActivityMs] / [GUEST_TMP_KEEP_MARKER].
      */
     private const val GUEST_TMP_MAX_AGE_MS = 60 * 60 * 1000L   // 1 h
 
@@ -1030,6 +1039,11 @@ object ExecutionCoordinator {
      *    re-applying the same gate at each level (so the count reflects real
      *    deletions rather than double-counting a child of a deleted parent).
      */
+    /**
+     * [P2-guest-tmp-reclaim] Delete aged children of one guest temp dir,
+     * oldest-first policy: an entry is removed only when it is both aged and
+     * not [guestTmpEntryStillInUse]. Returns the number of entries removed.
+     */
     private fun sweepGuestTmpDir(dir: File, maxAgeMs: Long): Long {
         if (!dir.isDirectory) return 0L
         val now = System.currentTimeMillis()
@@ -1039,6 +1053,11 @@ object ExecutionCoordinator {
             val symlink = runCatching { java.nio.file.Files.isSymbolicLink(child.toPath()) }
                 .getOrDefault(false)
             if (!internalGuestTmpIsAged(child.lastModified(), now, maxAgeMs)) continue
+            // [guest-tmp-activity-probe] Second chance before reaping: the age
+            // gate read the entry's own mtime, which does not move when
+            // something writes inside it. Probed only for aged candidates, so a
+            // fresh entry never pays for it.
+            if (guestTmpEntryStillInUse(child, symlink, now, maxAgeMs)) continue
             val ok = runCatching {
                 if (symlink) java.nio.file.Files.deleteIfExists(child.toPath())
                 else child.deleteRecursively()
@@ -1050,6 +1069,26 @@ object ExecutionCoordinator {
             }
         }
         return removed
+    }
+
+    /**
+     * [guest-tmp-activity-probe] True when an aged entry must be left alone
+     * because it is still in use: explicitly pinned, or showing a write inside
+     * its top levels more recent than the age gate.
+     *
+     * Symlinks are excluded from both checks — the link itself is the entry, and
+     * following it would judge (and then delete) files outside the temp dir.
+     */
+    private fun guestTmpEntryStillInUse(child: File, symlink: Boolean, now: Long, maxAgeMs: Long): Boolean {
+        if (symlink) return false
+        if (internalGuestTmpIsPinned(child)) return true
+        if (!child.isDirectory) return false
+        val newest = internalGuestTmpNewestActivityMs(
+            child,
+            GUEST_TMP_ACTIVITY_MAX_DEPTH,
+            GUEST_TMP_ACTIVITY_MAX_ENTRIES,
+        )
+        return internalGuestTmpLooksLive(newest, now, maxAgeMs)
     }
 
     /**
