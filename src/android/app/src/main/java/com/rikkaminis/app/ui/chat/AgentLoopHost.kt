@@ -120,6 +120,19 @@ internal interface AgentLoopHost {
         entryId: String? = null,
     ): String?
     /**
+     * [fix/early-turn-persist] Refresh an assistant row that was already
+     * persisted BEFORE its tools ran (see the dispatch site in
+     * AgentLoopEngine). Tools can run for minutes; writing the turn up-front
+     * means a process kill inside that window no longer erases text the user
+     * already read on screen — only the tool outcomes are missing. The row is
+     * updated in place so the turn still occupies exactly one DB row.
+     */
+    suspend fun updatePersistedAssistantTurn(
+        dbId: String,
+        parts: List<AgentContentPart>,
+        toolBlockMeta: Map<String, AssistantBlock>,
+    )
+    /**
      * [T-sensitive-transcript] [transcriptRedactions] maps tool-call id to the
      * text that should REPLACE its result in the persisted conversation. The
      * caller decides — it is the only place that still has the command line —

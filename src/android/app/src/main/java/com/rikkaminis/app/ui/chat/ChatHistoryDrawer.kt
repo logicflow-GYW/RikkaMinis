@@ -541,15 +541,24 @@ private fun DrawerSessionRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            session.lastMessage?.takeIf { it.isNotBlank() }?.let { preview ->
-                Text(
-                    text = preview,
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+            // [fix/row-height-jump] Always render the preview line so every row
+            // keeps the same two-line height. It used to be skipped whenever
+            // lastMessage was empty/blank — exactly the state of a session whose
+            // turn is still running (its assistant row is not durable yet) — and
+            // then reappeared the moment a tool call pushed a live preview
+            // ([T-android-session-last-message-live-tool-call]). Every tool
+            // dispatch therefore flipped the row between one and two lines and
+            // shifted the whole list. A blank preview renders a space, which
+            // keeps the same line box.
+            // ponytail: 空预览用空格占位，不新增文案键 | 天花板: 行高恒定但空行
+            // 无信息量 | 升级触发: 产品要求空预览显示「正在处理…」类提示（需新 i18n 键）
+            Text(
+                text = session.lastMessage?.takeIf { it.isNotBlank() } ?: " ",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
 
         // [fix/drawer-row-slim] Relative time only in the Today section: in

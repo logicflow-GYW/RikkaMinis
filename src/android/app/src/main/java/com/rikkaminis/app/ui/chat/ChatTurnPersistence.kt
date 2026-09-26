@@ -11,6 +11,7 @@ package com.rikkaminis.app.ui.chat
 
 import com.rikkaminis.app.agent.runtime.AgentRunEvent
 import com.rikkaminis.app.data.model.AgentContentPart
+import com.rikkaminis.app.data.repository.ChatRepository
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMUsage
 import com.rikkaminis.app.provider.LLMProvider
@@ -88,6 +89,30 @@ internal suspend fun ChatViewModel.persistAssistantTurn(
         throw e
     }
     return entity.id
+}
+
+
+/**
+ * [fix/early-turn-persist] Overwrite the parts of an assistant row that was
+ * persisted before its tools ran. Same payload shape as
+ * [persistAssistantTurn] (text + toolUse blocks) so a reload sees one
+ * identical row — this only moves WHEN the turn becomes durable, not what it
+ * contains. No-op on an empty part list, mirroring the append path's guard.
+ */
+internal suspend fun ChatViewModel.updatePersistedAssistantTurn(
+    dbId: String,
+    parts: List<AgentContentPart>,
+    toolBlockMeta: Map<String, AssistantBlock> = emptyMap(),
+) {
+    if (parts.isEmpty()) return
+    // [fix/early-persist-row-cap] Same 500 KB row ceiling the append path
+    // applies (ChatRepository.capPartsJsonForRow) — this UPDATE now writes the
+    // final payload of a tool-running turn, so it must not be the one write
+    // that skips the guard the append had already enforced on the same row.
+    chatRepository.updateMessageParts(
+        dbId,
+        ChatRepository.capPartsJsonForRow(buildAssistantPartsJson(parts, toolBlockMeta)),
+    )
 }
 
 

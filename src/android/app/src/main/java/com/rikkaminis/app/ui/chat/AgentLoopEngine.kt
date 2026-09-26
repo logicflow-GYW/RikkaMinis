@@ -2397,6 +2397,10 @@ internal class AgentLoopEngine(
             // assistant's partial text and falls back to the tool summary, so
             // the list reflects exactly what the model just emitted. Mirrors
             // iOS overlaying the live VM's last message over the DB value.
+            // [fix/early-turn-persist] Row id written BEFORE the tools run (see
+            // the dispatch block below); the post-tool persist site updates it
+            // in place instead of inserting a second row for the same turn.
+            var earlyAssistantDbId: String? = null
             run {
                 val livePreviewParts = host.buildTurnParts(loopState.allToolBlocks, turnStartBlockIndex, toolInputMap)
                 val liveMeta = loopState.allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
@@ -2404,6 +2408,28 @@ internal class AgentLoopEngine(
                     host.updateSessionPreview(
                         host.buildAssistantPartsJson(livePreviewParts, liveMeta),
                     )
+                    // [fix/early-turn-persist] Make the turn durable *now*
+                    // rather than after the tools return. Tool execution is the
+                    // longest single stretch of a turn (minutes for sandbox
+                    // calls) and it used to hold the ONLY copy of text the user
+                    // had already read: a kill inside that window (app update,
+                    // swipe-away, OOM) erased the whole turn and left the
+                    // session tail on a tool_result row, which cold start then
+                    // reported as "paused". Worst case now is a missing tool
+                    // outcome on a row whose text is intact.
+                    earlyAssistantDbId = host.persistAssistantTurn(
+                        livePreviewParts, lastUsage, turnReasoningContent, liveMeta,
+                        modelId = loopState.currentProvider.model.id,
+                        entryId = host.activeEntryId,
+                    )
+                    earlyAssistantDbId?.let { earlyId ->
+                        val earlyIdx = host.agentHistory.indexOfLast {
+                            it.role == LLMMessage.Role.ASSISTANT && it.dbMessageId == null
+                        }
+                        if (earlyIdx >= 0) {
+                            host.agentHistory[earlyIdx] = host.agentHistory[earlyIdx].copy(dbMessageId = earlyId)
+                        }
+                    }
                 }
             }
 
@@ -2899,11 +2925,22 @@ internal class AgentLoopEngine(
             android.util.Log.i("ChatVMStream", "runAgentLoop turn=$turn persist-begin blocks=${loopState.allToolBlocks.size}")
             val turnParts = host.buildTurnParts(loopState.allToolBlocks, turnStartBlockIndex, toolInputMap)
             val blockMeta = loopState.allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
-            val assistantDbId = host.persistAssistantTurn(
-                turnParts, lastUsage, turnReasoningContent, blockMeta,
-                modelId = loopState.currentProvider.model.id,
-                entryId = host.activeEntryId,
-            )
+            // [fix/early-turn-persist] When the row already exists (written
+            // before the tools ran) refresh it with the finished tool blocks
+            // instead of inserting a second row for the same turn. Copy to a
+            // local val first: the var is captured by the dispatch block
+            // above, so it no longer smart-casts.
+            val earlyId = earlyAssistantDbId
+            val assistantDbId = if (earlyId != null) {
+                host.updatePersistedAssistantTurn(earlyId, turnParts, blockMeta)
+                earlyId
+            } else {
+                host.persistAssistantTurn(
+                    turnParts, lastUsage, turnReasoningContent, blockMeta,
+                    modelId = loopState.currentProvider.model.id,
+                    entryId = host.activeEntryId,
+                )
+            }
             if (assistantDbId != null) {
                 val lastIdx = host.agentHistory.indexOfLast { it.role == LLMMessage.Role.ASSISTANT && it.dbMessageId == null }
                 if (lastIdx >= 0) {

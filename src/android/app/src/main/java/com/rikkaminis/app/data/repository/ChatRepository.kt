@@ -452,11 +452,7 @@ class ChatRepository(
         // CJK/emoji payload reach ~3-4× the intended size (measured: 1.5 MB
         // for CJK, 2.0 MB for 4-byte emoji against a 500 KB nominal cap) —
         // exactly the SQLiteBlobTooBigException this guard exists to prevent.
-        val capped = if (partsJson.toByteArray(Charsets.UTF_8).size > MAX_MESSAGE_PARTS_JSON_BYTES) {
-            buildTruncatedPartsJson(partsJson)
-        } else {
-            partsJson
-        }
+        val capped = capPartsJsonForRow(partsJson)
         val cappedReasoning = reasoningContent?.let { rc ->
             if (rc.toByteArray(Charsets.UTF_8).size > MAX_MESSAGE_PARTS_JSON_BYTES) {
                 buildTruncatedText(rc)
@@ -1037,6 +1033,30 @@ class ChatRepository(
             "\n\n[Content truncated at " +
                 "${MAX_MESSAGE_PARTS_JSON_BYTES / 1000} KB — original length " +
                 "${original.length} chars]"
+
+        /**
+         * [fix/early-persist-row-cap] The single funnel for the per-row
+         * `parts_json` size ceiling. Every write of that column must go
+         * through here — a row that exceeds
+         * [MAX_MESSAGE_PARTS_JSON_BYTES] is not a lint issue, it is the
+         * Issue #17 crash (SQLiteBlobTooBigException when the loader reads
+         * the row back out of a 2 MB CursorWindow).
+         *
+         * The ceiling used to be applied *implicitly*, by the only writer
+         * being [appendMessage]. The early-turn-persist path added a second
+         * writer ([ChatViewModel.updatePersistedAssistantTurn] →
+         * [ChatDao.updateMessageParts]) that edits the same row in place, so
+         * the cap has to live where both writers can share it — otherwise
+         * the post-tool rewrite silently reinstates the oversize payload the
+         * append had just truncated (a tool_use `input` carries the full tool
+         * arguments: a large file_write/bash body lands here verbatim).
+         */
+        internal fun capPartsJsonForRow(partsJson: String): String =
+            if (partsJson.toByteArray(Charsets.UTF_8).size > MAX_MESSAGE_PARTS_JSON_BYTES) {
+                buildTruncatedPartsJson(partsJson)
+            } else {
+                partsJson
+            }
 
         /** [F-226] Byte-budgeted truncation of a plain string field (reasoning). */
         internal fun buildTruncatedText(original: String): String {
