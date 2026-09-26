@@ -1178,21 +1178,28 @@ internal class AgentLoopEngine(
                             host.setTransientInlineError("$errSummary — retrying ($retryAttempt/${retryDelays.size})…")
                         }
                         try {
+                            // [absorb-network-pack: P0-2-offline-retry-hold]
+                            // Wait for connectivity ONCE per retry attempt, before
+                            // the countdown starts, so the attempt is not burned
+                            // into a dead network (Wi-Fi↔cellular swap / elevator).
+                            // The visible countdown simply does not start until
+                            // the link is back.
+                            //
+                            // Placement is deliberate: `awaitConnected` is bounded
+                            // at 90s per call, so calling it once per attempt caps
+                            // the stall at 90s. Calling it inside the per-second
+                            // loop below would re-arm that 90s budget on every
+                            // second and stretch a single attempt to
+                            // `delaySec × 90s` (10.5 min on the default ladder),
+                            // which is exactly the failure path the bound exists
+                            // to avoid. The probe fails-open when no NetworkMonitor
+                            // was ever started.
+                            com.rikkaminis.app.network.OfflineRetryHold.awaitConnected {
+                                com.rikkaminis.app.network.NetworkMonitor.activeMonitor
+                                    ?.let { it.status.value == com.rikkaminis.app.network.NetworkMonitor.NetworkStatus.DISCONNECTED }
+                                    ?: false
+                            }
                             for (remaining in delaySec downTo 1) {
-                                // [absorb-network-pack: P0-2-offline-retry-hold]
-                                // Wait for connectivity BEFORE consuming this
-                                // countdown second, so attempts are not burned
-                                // into a dead network (Wi-Fi↔cellular swap /
-                                // elevator). While held, the visible countdown
-                                // freezes on the current second. The hold is
-                                // bounded (90s) so a wedged network state can't
-                                // wedge the loop; the probe fails-open when no
-                                // NetworkMonitor was ever started.
-                                com.rikkaminis.app.network.OfflineRetryHold.awaitConnected {
-                                    com.rikkaminis.app.network.NetworkMonitor.activeMonitor
-                                        ?.let { it.status.value == com.rikkaminis.app.network.NetworkMonitor.NetworkStatus.DISCONNECTED }
-                                        ?: false
-                                }
                                 host.setAutoRetryCountdown(remaining)
                                 kotlinx.coroutines.delay(1000)
                             }

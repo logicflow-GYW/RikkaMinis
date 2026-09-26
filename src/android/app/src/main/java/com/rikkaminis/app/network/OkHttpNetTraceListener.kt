@@ -67,9 +67,15 @@ internal open class OkHttpNetTraceListener : EventListener() {
     }
 
     override fun callStart(call: Call) {
+        // Secret discipline: some routes carry the API key as a URL query parameter
+        // (Gemini uses `?key=<API_KEY>`, and OpenAI-compatible relays can put one in a
+        // user-supplied base URL). This listener is attached to every provider route, so
+        // the raw URL must never reach AppLogger — it is echoed to logcat unconditionally
+        // and lands in the app log files (filesDir/logs) whenever logging is on. Same redaction that
+        // LLMRequestLog applies to its debug payload.
         com.rikkaminis.app.logging.AppLogger.info(
             tag,
-            "[${callTag(call)}] +${ms()}ms callStart url=${call.request().url}"
+            "[${callTag(call)}] +${ms()}ms callStart url=${com.rikkaminis.app.debug.LLMRequestLog.redactURL(call.request().url.toString())}"
         )
     }
 

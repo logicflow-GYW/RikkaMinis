@@ -37,7 +37,14 @@ internal class ProviderHealthTraceListener(
 
     override fun responseHeadersStart(call: Call) {
         attempt?.let {
-            com.rikkaminis.app.diagnostics.ProviderHealthTracker.recordFirstToken(it, ms())
+            // recordFirstToken returns a COPY carrying the TTFB — the tracker never
+            // mutates the attempt it was given, and finish() is what appends to the
+            // ring. Dropping this return value (the obvious-looking call) silently
+            // leaves every recorded attempt with a null TTFB, which makes
+            // recordedTtfbs()/ttfbP50/P95 permanently empty. Keep the copy.
+            attempt = attempt?.let {
+                com.rikkaminis.app.diagnostics.ProviderHealthTracker.recordFirstToken(it, ms())
+            }
         }
         super.responseHeadersStart(call)
     }

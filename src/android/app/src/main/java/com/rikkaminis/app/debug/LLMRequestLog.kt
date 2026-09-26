@@ -79,7 +79,7 @@ object LLMRequestLog {
      *  alternatives. */
     private val SENSITIVE_QUERY_KEYS = setOf(
         "key", "api_key", "apikey", "api-key", "token", "access_token",
-        "secret", "password", "signature", "sig", "auth",
+        "secret", "password", "signature", "sig", "auth", "authorization",
     )
 
     /**
