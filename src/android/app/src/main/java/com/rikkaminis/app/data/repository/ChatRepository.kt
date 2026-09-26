@@ -493,8 +493,25 @@ class ChatRepository(
             }
         }
         val preview = extractTextPreview(capped)
-        AppLogger.info("ChatRepository", "appendMessage: updateLastMessage enter")
-        dao.updateLastMessage(sessionId, preview, now)
+        AppLogger.info("ChatRepository", "appendMessage: updateLastMessage enter hasPreview=${preview != null}")
+        if (preview != null) {
+            dao.updateLastMessage(sessionId, preview, now)
+        } else {
+            // [fix/preview-null-overwrite] A toolResult-only tail parses to a
+            // null preview: every tool round of a multi-round agent turn lands
+            // a user row whose parts are all tool_result (no text part), and
+            // extractTextPreview only understands text/mediaRef/toolUse.
+            // Overwriting last_message with null left the drawer's second line
+            // blank for the whole next model round — minutes with slow models.
+            // Keep the previous preview instead (mirrors
+            // updateSessionPreview's no-op-on-null guard in this same class)
+            // and only bump updated_at so date grouping / ordering stay live.
+            // No consumer depends on a null preview: the drawer surfaces
+            // sessions by message counts (P0-1-drawer-title-visibility) and
+            // the PAUSED badge derives from role + parts_json
+            // (interruptedSessionIds), never from last_message.
+            dao.touchSession(sessionId, now)
+        }
         AppLogger.info("ChatRepository", "appendMessage: updateLastMessage done (${System.currentTimeMillis() - t0}ms)")
         return persisted
     }
