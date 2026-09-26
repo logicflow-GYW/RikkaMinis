@@ -11,6 +11,7 @@ package com.rikkaminis.app.ui.chat
 
 import com.rikkaminis.app.agent.runtime.AgentRunEvent
 import com.rikkaminis.app.data.model.AgentContentPart
+import com.rikkaminis.app.data.repository.ChatRepository
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMUsage
 import com.rikkaminis.app.provider.LLMProvider
