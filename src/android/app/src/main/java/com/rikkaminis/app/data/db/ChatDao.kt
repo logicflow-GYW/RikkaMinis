@@ -188,6 +188,41 @@ interface ChatDao {
     """)
     suspend fun usageRecordsBetween(sinceMs: Long, untilMs: Long): List<UsageRecord>
 
+    /**
+     * SQLite JSON1 availability probe (feat/usage-stats-perf-1007). minSdk 26
+     * devices (Android 8, platform SQLite 3.18) may lack json_valid; callers
+     * catch the exception (or read 0) and fall back to the legacy
+     * full-materialization aggregation path.
+     */
+    @Query("SELECT json_valid('{}')")
+    suspend fun json1Probe(): Int
+
+    /**
+     * SQL-side usage aggregation: one GROUP BY query returns ~10 rows instead
+     * of materializing every usage row into Kotlin (the legacy path froze the
+     * UI thread for seconds once history grew). Field semantics match
+     * [com.rikkaminis.app.data.usage.UsageAggregator.aggregate]:
+     * `json_valid` filters malformed rows (same tolerance as the Kotlin
+     * try/catch skip), the COALESCE chains keep the legacy cache-key
+     * fallbacks, and COUNT DISTINCT reproduces the per-model day/session
+     * sets as counts. Half-open window [sinceMs, untilMs) — pass 0 /
+     * Long.MAX_VALUE for the unbounded "All" range.
+     */
+    @Query("""
+        SELECT COALESCE(m.usage_model_id, s.model_id) AS modelId,
+               COALESCE(SUM(COALESCE(json_extract(m.token_usage, '\$.inputTokens'), 0)), 0) AS inputTokens,
+               COALESCE(SUM(COALESCE(json_extract(m.token_usage, '\$.outputTokens'), 0)), 0) AS outputTokens,
+               COALESCE(SUM(COALESCE(json_extract(m.token_usage, '\$.cacheCreationTokens'), json_extract(m.token_usage, '\$.cacheCreationInputTokens'), 0)), 0) AS cacheCreationTokens,
+               COALESCE(SUM(COALESCE(json_extract(m.token_usage, '\$.cacheReadTokens'), json_extract(m.token_usage, '\$.cacheReadInputTokens'), 0)), 0) AS cacheReadTokens,
+               COUNT(DISTINCT date(m.created_at / 1000, 'unixepoch', 'localtime')) AS distinctDays,
+               COUNT(DISTINCT m.session_id) AS distinctSessions
+        FROM messages m JOIN sessions s ON m.session_id = s.id
+        WHERE m.token_usage IS NOT NULL AND json_valid(m.token_usage)
+          AND m.created_at >= :sinceMs AND m.created_at < :untilMs
+        GROUP BY modelId
+    """)
+    suspend fun usageStatsAggregated(sinceMs: Long, untilMs: Long): List<UsageStatsRow>
+
     // Last message preview for session list
     @Query("""
         SELECT parts_json FROM messages

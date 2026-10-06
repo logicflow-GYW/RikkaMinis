@@ -37,6 +37,8 @@ import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ProviderConfig
 import com.rikkaminis.app.data.usage.UsageAggregator
 import com.rikkaminis.app.data.usage.UsageRow
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -45,12 +47,15 @@ private data class ModelStats(
     val modelId: String,
     val displayName: String,
     val provider: String,
-    var inputTokens: Long = 0,
-    var outputTokens: Long = 0,
-    var cacheCreationTokens: Long = 0,
-    var cacheReadTokens: Long = 0,
-    val distinctDays: MutableSet<String> = mutableSetOf(),
-    val distinctSessions: MutableSet<String> = mutableSetOf(),
+    val inputTokens: Long = 0,
+    val outputTokens: Long = 0,
+    val cacheCreationTokens: Long = 0,
+    val cacheReadTokens: Long = 0,
+    // Pre-aggregated counts: the SQL fast path returns them directly; the
+    // legacy path derives them from the aggregator's distinct sets (only
+    // .size was ever consumed).
+    val distinctDays: Int = 0,
+    val distinctSessions: Int = 0,
 ) {
     val totalInput: Long get() = inputTokens + cacheReadTokens + cacheCreationTokens
 }
@@ -83,82 +88,20 @@ fun UsageStatsScreen(
     var range by remember { mutableStateOf(UsageRange.ALL) }
 
     LaunchedEffect(range) {
+        // A (usage-stats-perf-1007): the whole compute used to run on the main
+        // dispatcher — with enough history the spinner froze for seconds.
+        // Query + aggregation off-main, then hand the results back to
+        // composition (state writes stay on main).
+        val (total, groups) = withContext(Dispatchers.Default) {
+            computeUsageStats(range, chatDao, providerConfig)
+        }
+        grandTotal = total
+        providerGroups = groups
         // Loading skeleton only on the first load; subsequent range flips keep
         // showing stale data instead of flashing blank. (T6-L2: isLoaded is set
         // to true at the end of this block and never reset, so the deleted
         // `if (!isLoaded) isLoaded = false` was a no-op that only looked like
         // half-written logic.)
-        val records = when (range) {
-            UsageRange.ALL -> chatDao.allUsageRecords()
-            else -> {
-                val now = System.currentTimeMillis()
-                val since = when (range) {
-                    UsageRange.DAYS_7 -> now - 7L * 24 * 60 * 60 * 1000
-                    UsageRange.DAYS_30 -> now - 30L * 24 * 60 * 60 * 1000
-                    UsageRange.ALL -> 0L
-                }
-                chatDao.usageRecordsBetween(since, now + 1)
-            }
-        }
-
-        // modelId → (displayName, provider), builtin models first then custom
-        // entries from the live config.
-        val modelLookup = mutableMapOf<String, Pair<String, String>>()
-        for (m in LLMModel.allModels) modelLookup[m.id] = m.displayName to m.provider
-        providerConfig?.let { config ->
-            for (entry in config.modelEntries) {
-                if (entry.model.id !in modelLookup) {
-                    val instance = config.instances.find { it.id == entry.providerInstanceId }
-                    val providerName = instance?.providerType?.displayName ?: entry.model.provider
-                    modelLookup[entry.model.id] = entry.model.displayName to providerName
-                }
-            }
-        }
-
-        // Device-local timezone day formatter for distinct-day bucketing
-        // (matches the pre-refactor behavior). Created per-load — cheap.
-        val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-
-        val aggregated = UsageAggregator.aggregate(
-            rows = records.map {
-                UsageRow(it.modelId, it.tokenUsage, it.createdAt, it.sessionId)
-            },
-            dayFormat = { ms -> dateFormat.format(Date(ms)) },
-        )
-
-        val statsMap = aggregated.mapValues { (modelId, stats) ->
-            val (displayName, provider) = modelLookup[modelId] ?: (modelId to "Unknown")
-            ModelStats(
-                modelId = modelId,
-                displayName = displayName,
-                provider = provider,
-                inputTokens = stats.inputTokens,
-                outputTokens = stats.outputTokens,
-                cacheCreationTokens = stats.cacheCreationTokens,
-                cacheReadTokens = stats.cacheReadTokens,
-                distinctDays = stats.distinctDays.toMutableSet(),
-                distinctSessions = stats.distinctSessions.toMutableSet(),
-            )
-        }
-
-        val providerOrder = listOf("OpenAI", "Anthropic", "Google Gemini", "Google", "Antigravity", "Unknown")
-        val grouped = statsMap.values.groupBy { it.provider }
-        val sortedGroups = grouped.entries.sortedBy { (name, _) ->
-            val idx = providerOrder.indexOf(name)
-            if (idx >= 0) idx else providerOrder.size
-        }.map { (name, models) ->
-            ProviderGroup(name, models.sortedByDescending { it.totalInput })
-        }
-
-        val allStats = statsMap.values
-        grandTotal = GrandTotal(
-            totalInput = allStats.sumOf { it.totalInput },
-            outputTokens = allStats.sumOf { it.outputTokens },
-            cacheReadTokens = allStats.sumOf { it.cacheReadTokens },
-            cacheCreationTokens = allStats.sumOf { it.cacheCreationTokens },
-        )
-
-        providerGroups = sortedGroups
         isLoaded = true
     }
 
@@ -233,6 +176,129 @@ fun UsageStatsScreen(
     }
 }
 
+private suspend fun computeUsageStats(
+    range: UsageRange,
+    chatDao: ChatDao,
+    providerConfig: ProviderConfig?,
+): Pair<GrandTotal, List<ProviderGroup>> {
+    val now = System.currentTimeMillis()
+    // Half-open window [since, until) — identical bounds to the legacy path.
+    val window = when (range) {
+        UsageRange.ALL -> 0L to Long.MAX_VALUE
+        UsageRange.DAYS_7 -> (now - 7L * 24 * 60 * 60 * 1000) to (now + 1)
+        UsageRange.DAYS_30 -> (now - 30L * 24 * 60 * 60 * 1000) to (now + 1)
+    }
+
+    // modelId → (displayName, provider), builtin models first then custom
+    // entries from the live config. Shared by both paths below.
+    val modelLookup = mutableMapOf<String, Pair<String, String>>()
+    for (m in LLMModel.allModels) modelLookup[m.id] = m.displayName to m.provider
+    providerConfig?.let { config ->
+        for (entry in config.modelEntries) {
+            if (entry.model.id !in modelLookup) {
+                val instance = config.instances.find { it.id == entry.providerInstanceId }
+                val providerName = instance?.providerType?.displayName ?: entry.model.provider
+                modelLookup[entry.model.id] = entry.model.displayName to providerName
+            }
+        }
+    }
+
+    fun statsFor(
+        modelId: String,
+        inputTokens: Long,
+        outputTokens: Long,
+        cacheCreationTokens: Long,
+        cacheReadTokens: Long,
+        days: Int,
+        sessions: Int,
+    ): ModelStats {
+        val (displayName, provider) = modelLookup[modelId] ?: (modelId to "Unknown")
+        return ModelStats(
+            modelId = modelId,
+            displayName = displayName,
+            provider = provider,
+            inputTokens = inputTokens,
+            outputTokens = outputTokens,
+            cacheCreationTokens = cacheCreationTokens,
+            cacheReadTokens = cacheReadTokens,
+            distinctDays = days,
+            distinctSessions = sessions,
+        )
+    }
+
+    // C (usage-stats-perf-1007): SQL-side aggregation — one GROUP BY query
+    // returns ~10 rows instead of materializing every usage row into Kotlin.
+    // Requires SQLite JSON1: on platforms without it (minSdk 26 → Android 8
+    // ships SQLite 3.18) the probe throws and we fall back to the legacy
+    // full-materialization path below — same tolerance, just slower.
+    val fast = try {
+        if (chatDao.json1Probe() == 1) {
+            chatDao.usageStatsAggregated(window.first, window.second)
+        } else {
+            null
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    val statsList: List<ModelStats> = if (fast != null) {
+        fast.map { row ->
+            statsFor(
+                modelId = row.modelId,
+                inputTokens = row.inputTokens,
+                outputTokens = row.outputTokens,
+                cacheCreationTokens = row.cacheCreationTokens,
+                cacheReadTokens = row.cacheReadTokens,
+                days = row.distinctDays,
+                sessions = row.distinctSessions,
+            )
+        }
+    } else {
+        // Legacy path: full materialization + pure-JVM aggregator. Also the
+        // behavioral reference the SQL path must stay in sync with.
+        val records = when (range) {
+            UsageRange.ALL -> chatDao.allUsageRecords()
+            else -> chatDao.usageRecordsBetween(window.first, window.second)
+        }
+        // Device-local timezone day formatter for distinct-day bucketing
+        // (matches the pre-refactor behavior). Created per-load — cheap.
+        val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        UsageAggregator.aggregate(
+            rows = records.map {
+                UsageRow(it.modelId, it.tokenUsage, it.createdAt, it.sessionId)
+            },
+            dayFormat = { ms -> dateFormat.format(Date(ms)) },
+        ).map { (modelId, stats) ->
+            statsFor(
+                modelId = modelId,
+                inputTokens = stats.inputTokens,
+                outputTokens = stats.outputTokens,
+                cacheCreationTokens = stats.cacheCreationTokens,
+                cacheReadTokens = stats.cacheReadTokens,
+                days = stats.distinctDays.size,
+                sessions = stats.distinctSessions.size,
+            )
+        }
+    }
+
+    val providerOrder = listOf("OpenAI", "Anthropic", "Google Gemini", "Google", "Antigravity", "Unknown")
+    val grouped = statsList.groupBy { it.provider }
+    val sortedGroups = grouped.entries.sortedBy { (name, _) ->
+        val idx = providerOrder.indexOf(name)
+        if (idx >= 0) idx else providerOrder.size
+    }.map { (name, models) ->
+        ProviderGroup(name, models.sortedByDescending { it.totalInput })
+    }
+
+    val total = GrandTotal(
+        totalInput = statsList.sumOf { it.totalInput },
+        outputTokens = statsList.sumOf { it.outputTokens },
+        cacheReadTokens = statsList.sumOf { it.cacheReadTokens },
+        cacheCreationTokens = statsList.sumOf { it.cacheCreationTokens },
+    )
+    return total to sortedGroups
+}
+
 @Composable
 private fun ExpandableModelRow(model: ModelStats, showDivider: Boolean) {
     var expanded by remember { mutableStateOf(false) }
@@ -277,8 +343,8 @@ private fun ExpandableModelRow(model: ModelStats, showDivider: Boolean) {
                     val rate = (model.cacheReadTokens.toDouble() / modelTotalInput) * 100
                     DetailRow(stringResource(R.string.usage_label_cache_hit_rate), String.format("%.1f%%", rate))
                 }
-                val days = model.distinctDays.size
-                val sessions = model.distinctSessions.size
+                val days = model.distinctDays
+                val sessions = model.distinctSessions
                 if (days > 0) {
                     DetailRow(stringResource(R.string.usage_detail_daily_avg), formatCount((model.inputTokens + model.outputTokens) / days))
                 }

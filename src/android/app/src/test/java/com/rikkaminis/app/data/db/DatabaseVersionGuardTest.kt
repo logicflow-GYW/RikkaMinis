@@ -63,8 +63,10 @@ class DatabaseVersionGuardTest {
             Row(11, 12, proceed),
             Row(5, 12, proceed),
             Row(1, 12, proceed),
-            // downgrade with no registered migration -> guidance, never a crash
-            Row(13, 12, guidance),
+            // downgrade covered by the wired MIGRATION_13_12 reverse ->
+            // normal open, no guidance
+            Row(13, 12, proceed),
+            // downgrades with no registered migration -> guidance, never a crash
             Row(14, 12, guidance),
             Row(99, 12, guidance),
             // the covered jump is specific: 13 is not the same as 14
@@ -89,12 +91,13 @@ class DatabaseVersionGuardTest {
     fun `decide - an uncovered downgrade never resolves to proceed`() {
         // The failure this whole mechanism exists to prevent: an uncovered
         // downgrade must NOT resolve to PROCEED, because that is where Room
-        // throws and the app stops starting. The whitelist is empty in this
-        // build, so nothing is excluded — and nothing depends on asking the
-        // function under test whether it should be, so a silently widened
-        // whitelist turns this sweep red instead of passing.
+        // throws and the app stops starting. The one wired covered pair
+        // (13 → 12, MIGRATION_13_12) is excluded by literal — NOT by asking
+        // isHandledDowngrade, so a silently widened whitelist still turns
+        // this sweep red.
         for (code in 1..25) {
             for (onDisk in (code + 1)..(code + 25)) {
+                if (onDisk == 13 && code == 12) continue // wired: MIGRATION_13_12
                 if (DatabaseVersionGuard.decide(onDisk, code) == proceed) {
                     fail(
                         "decide(onDisk=$onDisk, code=$code) unexpectedly PROCEEDed an " +
@@ -108,20 +111,22 @@ class DatabaseVersionGuardTest {
     // ───────────────────────── handled-downgrade whitelist ─────────────────
 
     @Test
-    fun `isHandledDowngrade - this build whitelists nothing`() {
-        // No pair can be whitelisted here, and Room cannot even REGISTER the
-        // corresponding migration: see HANDLED_DOWNGRADES. The 25x25 sweep
-        // below is the guard against a half-landed bump.
+    fun `isHandledDowngrade - whitelists exactly the wired 13-to-12`() {
+        // The 12 → 13 bump wired MIGRATION_13_12 (empty-body reverse of a
+        // partial ADD INDEX). The whitelist must name exactly that pair: the
+        // 25x25 sweep below is the guard against a half-landed or silently
+        // widened bump. See HANDLED_DOWNGRADES.
         val hits = (0..25).flatMap { code ->
             (0..25).map { onDisk -> onDisk to code }
         }.filter { DatabaseVersionGuard.isHandledDowngrade(it.first, it.second) }
-        assertTrue(
-            "no jump may be whitelisted in this build; got $hits",
-            hits.isEmpty(),
+        assertEquals(
+            "the whitelist must name exactly the wired MIGRATION_13_12; got $hits",
+            setOf(13 to 12),
+            hits.toSet(),
         )
 
         // Argument order is load-bearing: (onDisk, code). A flipped call
-        // would read 12 -> 13 as "the database is ahead", and the empty
+        // would read 12 -> 13 as "the database is ahead", and the narrow
         // whitelist above would not notice either way.
         assertFalse("12 is not a downgrade at all",
             DatabaseVersionGuard.isHandledDowngrade(12, 12))
@@ -129,6 +134,9 @@ class DatabaseVersionGuardTest {
             DatabaseVersionGuard.isHandledDowngrade(11, 12))
         assertFalse("13 -> 14 is an upgrade, not a downgrade",
             DatabaseVersionGuard.isHandledDowngrade(13, 14))
+        // the covered jump is specific: 13 is not the same as 14
+        assertFalse("14 -> 12 has no wired reverse",
+            DatabaseVersionGuard.isHandledDowngrade(14, 12))
     }
 
     // ───────────── constant vs @Database(version = N) ──────────────────────

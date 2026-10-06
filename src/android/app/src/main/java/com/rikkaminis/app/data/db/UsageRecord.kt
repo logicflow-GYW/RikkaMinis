@@ -11,3 +11,20 @@ data class UsageRecord(
     val usageModelId: String? = null,
     val usageEntryId: String? = null,
 )
+
+/**
+ * Pre-aggregated per-model usage row from the SQL-side aggregation
+ * ([ChatDao.usageStatsAggregated], feat/usage-stats-perf-1007): one GROUP BY
+ * query replaces materializing every usage row into Kotlin. Field semantics
+ * match [com.rikkaminis.app.data.usage.UsageAggregator.aggregate]; distinct
+ * days/sessions arrive as counts (COUNT DISTINCT) instead of sets.
+ */
+data class UsageStatsRow(
+    val modelId: String,
+    val inputTokens: Long,
+    val outputTokens: Long,
+    val cacheCreationTokens: Long,
+    val cacheReadTokens: Long,
+    val distinctDays: Int,
+    val distinctSessions: Int,
+)

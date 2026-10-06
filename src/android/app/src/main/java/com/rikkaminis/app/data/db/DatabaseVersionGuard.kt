@@ -74,7 +74,7 @@ object DatabaseVersionGuard {
      * apart silently: a stale copy here would either disable the guard or
      * trip it on every launch.
      */
-    const val CODE_DB_VERSION = 12
+    const val CODE_DB_VERSION = 13
 
     /** Filename must match the one passed to `Room.databaseBuilder`. */
     private const val DB_NAME = "minis.db"
@@ -95,9 +95,13 @@ object DatabaseVersionGuard {
 
     /**
      * [T-android-downgrade-compat] Downgrade jumps this build can open
-     * losslessly, keyed (onDisk, code). Empty here — see [isHandledDowngrade].
+     * losslessly, keyed (onDisk, code). The 12 → 13 bump
+     * (feat/usage-stats-perf-1007) added `13 to 12`: MIGRATION_12_13 is a
+     * partial ADD INDEX whose empty-body reverse (AppDatabase.MIGRATION_13_12)
+     * is lossless — Room ignores extra indexes on open, same reasoning as
+     * the ADD COLUMN case.
      */
-    private val HANDLED_DOWNGRADES: Set<Pair<Int, Int>> = emptySet()
+    private val HANDLED_DOWNGRADES: Set<Pair<Int, Int>> = setOf(13 to 12)
 
     /**
      * Whether a registered downgrade migration covers this jump, in which case
@@ -110,20 +114,15 @@ object DatabaseVersionGuard {
      * screen they can dismiss by upgrading; being wrong the other way costs
      * them a crash.
      *
-     * Deliberately EMPTY in this build, and for a hard reason: Room 2.6.1
-     * refuses to REGISTER a downgrade whose `from` exceeds the `@Database`
-     * version. `MigrationManager.buildMap` walks the list in order and throws
-     * `IllegalArgumentException("Invalid migration ... Migrations must be
-     * chained ... expected a migration starting at version 12")` for the first
-     * migration whose `from` is neither a known target nor the walk head, and
-     * the walk tops out at the database version. Verified against the bytecode
-     * of `room-common:2.6.1` — the version this build pins.
-     *
-     * Consequence: `isHandledDowngrade` cannot return `true` for any pair in
-     * this branch, because no such migration can exist here. When the 12 → 13
-     * bump lands, add MIGRATION_12_13 AND its empty-body counterpart
-     * MIGRATION_13_12 in the same commit, and extend `HANDLED_DOWNGRADES` to
-     * `setOf(13 to 12)`. `DatabaseVersionGuardTest` asserts the two stay equal.
+     * Room 2.6.1 refuses to REGISTER a downgrade whose `from` exceeds the
+     * `@Database` version (`MigrationManager.buildMap` throws "Migrations
+     * must be chained" — verified against the room-common 2.6.1 bytecode).
+     * So each entry here must ship in the same commit as the forward bump
+     * that creates its `from` version, with an empty-body reverse migration
+     * in [AppDatabase]; `DatabaseVersionGuardTest` asserts the whitelist and
+     * the wired downgrades stay the same set. Any future bump that is NOT
+     * purely additive (rename / drop / data-rewrite) has no safe reverse and
+     * must NOT add an entry here.
      */
     fun isHandledDowngrade(onDiskVersion: Int, codeVersion: Int): Boolean =
         onDiskVersion to codeVersion in HANDLED_DOWNGRADES

@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         CompactMarkerEntity::class,
         WebAppShortcutEntity::class,
     ],
-    version = 12,
+    version = 13,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -257,6 +257,39 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * [feat/usage-stats-perf-1007] Partial index on the usage rows. The
+         * usage stats screen scans `messages WHERE token_usage IS NOT NULL`
+         * (no other index applies), which is a full table scan of every
+         * message — a multi-second spinner once history grows. The partial
+         * index holds only usage rows, so `allUsageRecords` /
+         * `usageRecordsBetween` and the SQL-side aggregation query
+         * (`usageStatsAggregated`) stop scanning non-usage messages.
+         * Purely additive — see [MIGRATION_13_12] for the reverse.
+         */
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_messages_usage_created ON messages(created_at) WHERE token_usage IS NOT NULL")
+            }
+        }
+
+        /**
+         * [T-android-downgrade-compat] Empty-body reverse of
+         * [MIGRATION_12_13]. An extra index on disk is ignored by Room's
+         * schema validation and costs a few dozen KB, so the round trip is
+         * lossless — same reasoning as the ADD COLUMN case in the
+         * MIGRATION_3_4 doc block. MUST ship in the same commit as
+         * [MIGRATION_12_13] (Room rejects a downgrade whose `from` exceeds
+         * the @Database version) and with the matching `13 to 12` entry in
+         * [com.rikkaminis.app.data.db.DatabaseVersionGuard.HANDLED_DOWNGRADES].
+         */
+        val MIGRATION_13_12 = object : Migration(13, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Empty: ADD INDEX has a lossless no-op reverse (an extra
+                // index is ignored on open).
+            }
+        }
+
+        /**
          * [T-android-downgrade-compat] There is deliberately NO downgrade
          * migration in this file, even though Room supports them. This is a
          * hard Room constraint, not a style choice:
@@ -274,14 +307,14 @@ abstract class AppDatabase : RoomDatabase() {
          * `RoomOpenHelper.buildOpenHelper`).
          *
          * So a downgrade pair may only be registered in the build that also
-         * contains the forward migration creating its `from` version. When
-         * the 12 → 13 bump lands, add MIGRATION_12_13 AND MIGRATION_13_12 in
-         * the same commit, and flip
+         * contains the forward migration creating its `from` version. The
+         * 12 → 13 bump (feat/usage-stats-perf-1007) did exactly that:
+         * MIGRATION_12_13 + MIGRATION_13_12 landed in the same commit and
          * [com.rikkaminis.app.data.db.DatabaseVersionGuard.isHandledDowngrade]
-         * from `false` to `(onDiskVersion to codeVersion) in setOf(13 to 12)`.
-         * The unit tests `no registered downgrade starts above the database
-         * version` and `whitelisted pairs and wired downgrades are the same
-         * set` fail if either half is added without the other.
+         * grew the matching `13 to 12` entry. The unit tests `no registered
+         * downgrade starts above the database version` and `whitelisted
+         * pairs and wired downgrades are the same set` fail if either half
+         * is added without the other.
          *
          * The 13 → 12 reverse should then be an empty body: `ADD COLUMN` is
          * the one schema change with a safe reverse, because
@@ -353,7 +386,16 @@ abstract class AppDatabase : RoomDatabase() {
                     // [T-android-downgrade-compat] 11 upgrades, 0 downgrades — see the
                     // MIGRATION_3_4 doc block above for why a downgrade pair belongs
                     // with its forward bump, not with this build.
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_12)
+                    // Fresh installs jump straight to the current version —
+                    // migrations never run for them, so the usage partial
+                    // index has to be created here as well (upgrades get it
+                    // from MIGRATION_12_13).
+                    .addCallback(object : RoomDatabase.Callback() {
+                        override fun onCreate(db: SupportSQLiteDatabase) {
+                            db.execSQL("CREATE INDEX IF NOT EXISTS index_messages_usage_created ON messages(created_at) WHERE token_usage IS NOT NULL")
+                        }
+                    })
                     .build()
                     .also { INSTANCE = it }
             }
