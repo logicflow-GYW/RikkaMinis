@@ -1046,6 +1046,7 @@
     <!-- T182 agent loop section i18n -->
     <string name="agent_loop_section_title">Available Models in Agent Loop</string>
     <string name="agent_loop_section_footer">Models and groups listed here can be invoked from the terminal via minis-model-use. Only these are visible to the agent.</string>
+    <string name="model_groups_compaction_footer">Changes apply immediately — no save needed.</string>
     <string name="agent_loop_section_empty_hint">No models or groups added</string>
     <string name="agent_loop_section_add_models">Add Models</string>
     <string name="agent_loop_section_add_groups">Add Groups</string>

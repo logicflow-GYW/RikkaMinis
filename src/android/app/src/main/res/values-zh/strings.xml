@@ -884,6 +884,7 @@
     <!-- T182 agent loop section i18n -->
     <string name="agent_loop_section_title">智能体循环可用模型</string>
     <string name="agent_loop_section_footer">这里列出的模型和分组可以在终端通过 minis-model-use 调用。只有这些对智能体可见。</string>
+    <string name="model_groups_compaction_footer">更改立即生效，无需保存。</string>
     <string name="agent_loop_section_empty_hint">尚未添加模型或分组</string>
     <string name="agent_loop_section_add_models">添加模型</string>
     <string name="agent_loop_section_add_groups">添加分组</string>

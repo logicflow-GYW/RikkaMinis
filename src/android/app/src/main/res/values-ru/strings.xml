@@ -813,6 +813,7 @@
     <string name="settings_bg_overlay_permission_needed">Разрешите отображение поверх других приложений для включения</string>
     <string name="agent_loop_section_title">Доступные модели в цикле агента</string>
     <string name="agent_loop_section_footer">Перечисленные здесь модели и группы можно вызывать из терминала через minis-model-use. Только они видны агенту.</string>
+    <string name="model_groups_compaction_footer">Изменения применяются сразу — сохранение не требуется.</string>
     <string name="agent_loop_section_empty_hint">Модели и группы не добавлены</string>
     <string name="agent_loop_section_add_models">Добавить модели</string>
     <string name="agent_loop_section_add_groups">Добавить группы</string>

@@ -688,7 +688,8 @@ internal suspend fun ChatViewModel.generateCompactSummary(conversationText: Stri
     // lastFailure exactly as before, so the splitter's halving retry is
     // untouched. See ordersCompactionCandidates for the ordering logic.
     // [feat/compact-model-pin-1005] The user-pinned compaction model
-    // (Settings → Runtime Limits → 压缩模型) rides the chain head. It works
+    // (Settings → Model Groups → 压缩模型, moved from Runtime Limits) rides
+    // the chain head. It works
     // in BOTH selection modes: inside the current group (matched against
     // buildFallbackProviders' filtered candidates) or outside it (direct
     // global resolution — e.g. the session runs a group but the pin points

@@ -355,6 +355,7 @@
     <!-- T182 agent loop section i18n -->
     <string name="agent_loop_section_title">智慧型代理循環可用模型</string>
     <string name="agent_loop_section_footer">這裡列出的模型和群組可以在終端機透過 minis-model-use 呼叫。只有這些對智慧型代理可見。</string>
+    <string name="model_groups_compaction_footer">變更立即生效，無需儲存。</string>
     <string name="agent_loop_section_empty_hint">尚未新增模型或群組</string>
     <string name="agent_loop_section_add_models">新增模型</string>
     <string name="agent_loop_section_add_groups">新增群組</string>

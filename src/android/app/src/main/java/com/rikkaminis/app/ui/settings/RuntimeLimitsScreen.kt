@@ -5,12 +5,6 @@ import android.content.SharedPreferences
 import com.rikkaminis.app.R
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -65,8 +59,14 @@ import com.rikkaminis.app.ui.components.MinisTextButton
  *   - Defaults == the previously hard-coded constants, so an untouched
  *     install behaves identically to the pre-panel build.
  *
- * All edits are local state; the single Save action persists every group in
- * one shot (ConcurrencyPrefs + SubagentPrefs + AgentRuntimeLimitsPrefs).
+ * All edits are local state; the single Save action (top-right app bar,
+ * [ui/runtime-page-adjust-1006]) persists every group in one shot
+ * (ConcurrencyPrefs + SubagentPrefs + AgentRuntimeLimitsPrefs).
+ *
+ * [ui/runtime-page-adjust-1006] The pinned compaction-model picker moved to
+ * ModelGroupsScreen (Settings → Model Groups): it is a model-routing role
+ * choice, not a runtime budget knob, and it now saves immediately there
+ * (single-key save) instead of riding this page's batched Save.
  */
 @Composable
 fun RuntimeLimitsScreen(onBack: () -> Unit) {
@@ -109,28 +109,11 @@ fun RuntimeLimitsScreen(onBack: () -> Unit) {
     // [feat/chat-tuning-panel-b] Group 5 + 6.
     var autoCompactMinTailTokens by remember { mutableStateOf(AgentRuntimeLimitsPrefs.autoCompactMinTailTokens()) }
     var autoCompactMinIntervalMin by remember { mutableStateOf(AgentRuntimeLimitsPrefs.autoCompactMinIntervalMin()) }
-    // [feat/compact-model-pin-1005] "" = follow the session chain (default).
-    var compactModelEntryId by remember {
-        mutableStateOf(AgentRuntimeLimitsPrefs.compactModelEntryId())
-    }
-    // Choices = every model entry in the provider config (provider label for
-    // grouping, display name for the row). Refreshed when the screen enters.
-    val compactModelChoices by produceState(
-        initialValue = emptyList<CompactModelChoice>(),
-    ) {
-        val app = context.applicationContext as com.rikkaminis.app.MinisApp
-        app.providerRepository.config.collect { cfg ->
-            value = cfg.modelEntries.mapNotNull { entry ->
-                val inst = cfg.instances.find { it.id == entry.providerInstanceId }
-                    ?: return@mapNotNull null
-                CompactModelChoice(
-                    entryId = entry.id,
-                    displayName = entry.model.displayName,
-                    providerLabel = inst.label.ifEmpty { entry.model.provider },
-                )
-            }
-        }
-    }
+    // [feat/compact-model-pin-1005 → ui/runtime-page-adjust-1006] The picker
+    // moved to ModelGroupsScreen (Settings → Model Groups), where it now saves
+    // immediately via AgentRuntimeLimitsPrefs.save(compactModelEntryId=...) —
+    // it is a model-routing role choice, not a runtime budget knob, and it no
+    // longer participates in this page's batched Save.
     var memoryInjectLines by remember { mutableStateOf(AgentRuntimeLimitsPrefs.memoryInjectLines()) }
     var memoryRollupInjectKb by remember { mutableStateOf(AgentRuntimeLimitsPrefs.memoryRollupInjectKb()) }
     var memorySearchLines by remember { mutableStateOf(AgentRuntimeLimitsPrefs.memorySearchLines()) }
@@ -229,6 +212,63 @@ fun RuntimeLimitsScreen(onBack: () -> Unit) {
     SettingsScaffold(
         title = stringResource(R.string.runtime_limits_title),
         onBack = onBack,
+        // [ui/runtime-page-adjust-1006] Save lives in the top bar (same
+        // actions-slot pattern as ProviderDetailScreen / OffloadPermissionScreen):
+        // this page is ~35 knobs tall, and a bottom-of-page Save forced a full
+        // scroll after every edit. Same body, same save-and-exit semantics.
+        actions = {
+            MinisTextButton(
+                onClick = {
+                    SubagentPrefs.setEnabled(context, subagentEnabled)
+                    ConcurrencyPrefs.setMaxConcurrentSessions(context, maxSessions)
+                    AgentRuntimeLimitsPrefs.save(
+                        context = context,
+                        maxTurns = maxTurns,
+                        maxProviderAttempts = maxProviderAttempts,
+                        maxToolCalls = maxToolCalls,
+                        maxShellCommands = maxShellCommands,
+                        maxCompactionCalls = maxCompactionCalls,
+                        maxConcurrentTools = maxConcurrentTools,
+                        runDeadlineMinutes = runDeadlineMin,
+                        lengthWallContinues = lengthWallContinues,
+                        eofStubContinues = eofStubContinues,
+                        deterministicEmptyLimit = deterministicEmptyLimit,
+                        transientRetries = transientRetries,
+                        verifyNudges = verifyNudges,
+                        generationTimeoutMinutes = generationTimeoutMin,
+                        firstChunkDirectSec = firstChunkDirectSec,
+                        firstChunkProxySec = firstChunkProxySec,
+                        providerSlots = providerSlots,
+                        queueAdmission = queueAdmission,
+                        // [feat/chat-tuning-panel-b] Group 5 + 6.
+                        autoCompactMinTailTokens = autoCompactMinTailTokens,
+                        autoCompactMinIntervalMin = autoCompactMinIntervalMin,
+                        memoryInjectLines = memoryInjectLines,
+                        memoryRollupInjectKb = memoryRollupInjectKb,
+                        memorySearchLines = memorySearchLines,
+                        memoryLookbackDays = memoryLookbackDays,
+                        imageMaxPerImageMb = imageMaxPerImageMb,
+                        imageMaxTotalMb = imageMaxTotalMb,
+                        imageMaxRequestMb = imageMaxRequestMb,
+                        imageMaxEdgePx = imageMaxEdgePx,
+                        imageJpegQuality = imageJpegQuality,
+                        browserNavTimeoutSec = browserNavTimeoutSec,
+                        browserDomStableSec = browserDomStableSec,
+                        browserScreenshotQuality = browserScreenshotQuality,
+                        shellOutputKb = shellOutputKb,
+                        shellTimeoutSec = shellTimeoutSec,
+                        guestTmpMaxAgeMin = guestTmpMaxAgeMin,
+                        guestTmpSweepIntervalSec = guestTmpSweepIntervalSec,
+                        stallNoProgressSec = stallNoProgressSec,
+                        shellIdleTimeoutMin = shellIdleTimeoutMin,
+                        heavyGateTimeoutSec = heavyGateTimeoutSec,
+                    )
+                    onBack()
+                },
+            ) {
+                Text(stringResource(R.string.common_save))
+            }
+        },
         // scaffold already wraps content in verticalScroll (default true) —
         // no nested scrolling here.
     ) {
@@ -436,17 +476,6 @@ fun RuntimeLimitsScreen(onBack: () -> Unit) {
                     max = AgentRuntimeLimitsPrefs.COMPACT_INTERVAL_MAX_MIN,
                     onCommit = { autoCompactMinIntervalMin = it },
                 )
-                // [feat/compact-model-pin-1005] Compaction model picker row.
-                // All edits are local state (this page's design rule); the
-                // Save button persists it together with the other knobs.
-                CompactModelPickerRow(
-                    title = stringResource(R.string.runtime_limits_compact_model),
-                    subtitle = stringResource(R.string.runtime_limits_compact_model_desc),
-                    pinnedEntryId = compactModelEntryId,
-                    available = compactModelChoices,
-                    onPick = { compactModelEntryId = it },
-                    onClear = { compactModelEntryId = "" },
-                )
                 LimitsSliderRow(
                     title = stringResource(R.string.runtime_limits_memory_inject),
                     subtitle = stringResource(R.string.runtime_limits_memory_inject_desc),
@@ -635,67 +664,6 @@ fun RuntimeLimitsScreen(onBack: () -> Unit) {
                 )
             }
             LimitsSectionFooter(stringResource(R.string.runtime_limits_sandbox_footer))
-
-            // ── Save ─────────────────────────────────────────────────────
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 16.dp),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                MinisTextButton(
-                    onClick = {
-                        SubagentPrefs.setEnabled(context, subagentEnabled)
-                        ConcurrencyPrefs.setMaxConcurrentSessions(context, maxSessions)
-                        AgentRuntimeLimitsPrefs.save(
-                            context = context,
-                            maxTurns = maxTurns,
-                            maxProviderAttempts = maxProviderAttempts,
-                            maxToolCalls = maxToolCalls,
-                            maxShellCommands = maxShellCommands,
-                            maxCompactionCalls = maxCompactionCalls,
-                            maxConcurrentTools = maxConcurrentTools,
-                            runDeadlineMinutes = runDeadlineMin,
-                            lengthWallContinues = lengthWallContinues,
-                            eofStubContinues = eofStubContinues,
-                            deterministicEmptyLimit = deterministicEmptyLimit,
-                            transientRetries = transientRetries,
-                            verifyNudges = verifyNudges,
-                            generationTimeoutMinutes = generationTimeoutMin,
-                            firstChunkDirectSec = firstChunkDirectSec,
-                            firstChunkProxySec = firstChunkProxySec,
-                            providerSlots = providerSlots,
-                            queueAdmission = queueAdmission,
-                            // [feat/chat-tuning-panel-b] Group 5 + 6.
-                            autoCompactMinTailTokens = autoCompactMinTailTokens,
-                            autoCompactMinIntervalMin = autoCompactMinIntervalMin,
-                            compactModelEntryId = compactModelEntryId,
-                            memoryInjectLines = memoryInjectLines,
-                            memoryRollupInjectKb = memoryRollupInjectKb,
-                            memorySearchLines = memorySearchLines,
-                            memoryLookbackDays = memoryLookbackDays,
-                            imageMaxPerImageMb = imageMaxPerImageMb,
-                            imageMaxTotalMb = imageMaxTotalMb,
-                            imageMaxRequestMb = imageMaxRequestMb,
-                            imageMaxEdgePx = imageMaxEdgePx,
-                            imageJpegQuality = imageJpegQuality,
-                            browserNavTimeoutSec = browserNavTimeoutSec,
-                            browserDomStableSec = browserDomStableSec,
-                            browserScreenshotQuality = browserScreenshotQuality,
-                            shellOutputKb = shellOutputKb,
-                            shellTimeoutSec = shellTimeoutSec,
-                            guestTmpMaxAgeMin = guestTmpMaxAgeMin,
-                            guestTmpSweepIntervalSec = guestTmpSweepIntervalSec,
-                            stallNoProgressSec = stallNoProgressSec,
-                            shellIdleTimeoutMin = shellIdleTimeoutMin,
-                            heavyGateTimeoutSec = heavyGateTimeoutSec,
-                        )
-                        onBack()
-                    },
-                ) {
-                    Text(stringResource(R.string.common_save))
-                }
-            }
         }
     }
 }
@@ -925,203 +893,4 @@ internal fun LimitsSliderRow(
             )
         }
     }
-}
-
-
-// ── [feat/compact-model-pin-1005] Compaction model picker ────────────────
-
-/** One pickable model entry for the compaction-model dialog. */
-internal data class CompactModelChoice(
-    val entryId: String,
-    val displayName: String,
-    val providerLabel: String,
-)
-
-/**
- * Settings row + dialog for the pinned compaction model. Same visual
- * language as [LimitsSliderRow] (title/subtitle left, value right); the
- * whole row is clickable and opens the chooser (no separate button —
- * row-level click target matches the rest of the settings surfaces).
- * The pinned VALUE is stored in local
- * state and persisted by the page Save button, like every knob here.
- *
- * A stale pin (entry deleted / provider removed) keeps its id and shows a
- * ⚠ label instead of auto-clearing — user intent is preserved; at chain
- * build the stale pin degrades to follow-the-session (INFO log).
- */
-@Composable
-private fun CompactModelPickerRow(
-    title: String,
-    subtitle: String,
-    pinnedEntryId: String,
-    available: List<CompactModelChoice>,
-    onPick: (String) -> Unit,
-    onClear: () -> Unit,
-    showDivider: Boolean = true,
-) {
-    var showDialog by remember { mutableStateOf(false) }
-    val pinned = available.firstOrNull { it.entryId == pinnedEntryId }
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { showDialog = true }
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    lineHeight = 15.sp,
-                )
-            }
-            Text(
-                text = when {
-                    pinnedEntryId.isBlank() ->
-                        stringResource(R.string.runtime_limits_compact_model_follow)
-                    pinned != null -> pinned.displayName
-                    // Stale pin: keep showing it (intent preserved), mark it.
-                    else -> "⚠ " + stringResource(R.string.runtime_limits_compact_model_stale)
-                },
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.primary,
-            )
-        }
-        if (showDivider) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 6.dp)
-                    .height(0.5.dp)
-                    .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
-            )
-        }
-    }
-    if (showDialog) {
-        CompactModelPickerDialog(
-            pinnedEntryId = pinnedEntryId,
-            available = available,
-            onPick = {
-                onPick(it)
-                showDialog = false
-            },
-            onClear = {
-                onClear()
-                showDialog = false
-            },
-            onDismiss = { showDialog = false },
-        )
-    }
-}
-
-@Composable
-private fun CompactModelPickerDialog(
-    pinnedEntryId: String,
-    available: List<CompactModelChoice>,
-    onPick: (String) -> Unit,
-    onClear: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    var query by remember { mutableStateOf("") }
-    val filtered = if (query.isBlank()) {
-        available
-    } else {
-        available.filter {
-            it.displayName.contains(query, ignoreCase = true) ||
-                it.providerLabel.contains(query, ignoreCase = true)
-        }
-    }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.runtime_limits_compact_model_dialog_title)) },
-        text = {
-            Column {
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 420.dp),
-                ) {
-                    item(key = "follow") {
-                        val selected = pinnedEntryId.isBlank()
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onClear() }
-                                .padding(horizontal = 4.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = stringResource(R.string.runtime_limits_compact_model_follow),
-                                    style = MaterialTheme.typography.bodyLarge,
-                                )
-                                Text(
-                                    text = stringResource(R.string.runtime_limits_compact_model_follow_desc),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            if (selected) {
-                                Text(
-                                    text = "✓",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = MaterialTheme.colorScheme.primary,
-                                )
-                            }
-                        }
-                    }
-                    items(filtered, key = { it.entryId }) { choice ->
-                        val selected = choice.entryId == pinnedEntryId
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onPick(choice.entryId) }
-                                .padding(horizontal = 4.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = choice.displayName,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                )
-                                Text(
-                                    text = choice.providerLabel,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            if (selected) {
-                                Text(
-                                    text = "✓",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = MaterialTheme.colorScheme.primary,
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            MinisTextButton(onClick = onDismiss) {
-                Text(stringResource(android.R.string.cancel))
-            }
-        },
-    )
 }
