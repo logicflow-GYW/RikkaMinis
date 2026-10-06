@@ -316,11 +316,12 @@ internal object ConfigBuiltins {
             defaultValue = L.COMPACT_INTERVAL_DEFAULT_MIN, minValue = L.COMPACT_INTERVAL_MIN_MIN, maxValue = L.COMPACT_INTERVAL_MAX_MIN,
         ))
         // [feat/compact-model-pin-1005] Pinned compaction model entry id.
-        // "" = follow the session chain (default). Written by the Runtime
-        // Limits panel's model picker; registered here so the in-app backup
-        // carries it and minis-config can inspect it. Accepts any string —
-        // a stale/invalid id simply resolves to nothing at chain-build time
-        // and compaction falls back to the session chain.
+        // "" = follow the session chain (default). Written by the Model
+        // Groups screen's compaction-model picker (moved out of the Runtime
+        // Limits panel in [ui/runtime-page-adjust-1006]); registered here so
+        // the in-app backup carries it and minis-config can inspect it.
+        // Accepts any string — a stale/invalid id simply resolves to nothing
+        // at chain-build time and compaction falls back to the session chain.
         r.register(PrefsStringField(
             path = "runtime.compactModelEntryId",
             displayName = "Auto-compact model entry id",

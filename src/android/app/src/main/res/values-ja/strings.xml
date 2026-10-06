@@ -712,6 +712,7 @@
     <!-- T182 agent loop section i18n -->
     <string name="agent_loop_section_title">エージェントループで使えるモデル</string>
     <string name="agent_loop_section_footer">ここに表示されているモデルとグループはターミナルから minis-model-use で呼び出せます。エージェントが認識するのはこれらだけです。</string>
+    <string name="model_groups_compaction_footer">変更はすぐに反映されます。保存は不要です。</string>
     <string name="agent_loop_section_empty_hint">追加されたモデルやグループはありません</string>
     <string name="agent_loop_section_add_models">モデルを追加</string>
     <string name="agent_loop_section_add_groups">グループを追加</string>

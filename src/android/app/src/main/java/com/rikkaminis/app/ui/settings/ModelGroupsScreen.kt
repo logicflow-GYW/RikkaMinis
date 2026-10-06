@@ -13,7 +13,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
@@ -50,11 +52,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.stringResource
 import com.rikkaminis.app.data.model.DEFAULT_GROUP_CONTEXT_LIMIT_TOKENS
 import com.rikkaminis.app.data.model.ModelGroup
 import com.rikkaminis.app.data.model.RoutingStrategy
 import com.rikkaminis.app.data.repository.ProviderRepository
+import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import com.rikkaminis.app.R
 import com.rikkaminis.app.ui.components.MinisTextButton
 import com.rikkaminis.app.ui.components.sanitizeSingleLineInput
@@ -81,6 +85,34 @@ fun ModelGroupsScreen(
     val groups = config.modelGroups
     var showNewGroupDialog by remember { mutableStateOf(false) }
     var newGroupName by remember { mutableStateOf("") }
+
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    // [feat/compact-model-pin-1005 → ui/runtime-page-adjust-1006] Pinned
+    // compaction model ("" = follow the session chain). Moved here from the
+    // Runtime Limits panel: it is a model-ROUTING role choice ("which model
+    // serves the compaction role"), the same family as the agent-loop set on
+    // this page — not a runtime budget knob. Unlike the runtime page's batched
+    // Save it persists IMMEDIATELY (AgentRuntimeLimitsPrefs.save's null
+    // params leave every other knob untouched), matching this page's
+    // edit-then-live semantics.
+    var compactModelEntryId by remember {
+        mutableStateOf(AgentRuntimeLimitsPrefs.compactModelEntryId())
+    }
+    // Choices = every model entry in the provider config (provider label for
+    // grouping, display name for the row); recomputed whenever the config
+    // changes, so a model added/renamed in this session is reflected live.
+    val compactModelChoices = remember(config) {
+        config.modelEntries.mapNotNull { entry ->
+            val inst = config.instances.find { it.id == entry.providerInstanceId }
+                ?: return@mapNotNull null
+            CompactModelChoice(
+                entryId = entry.id,
+                displayName = entry.model.displayName,
+                providerLabel = inst.label.ifEmpty { entry.model.provider },
+            )
+        }
+    }
 
     val lazyListState = rememberLazyListState()
 
@@ -251,6 +283,37 @@ fun ModelGroupsScreen(
             }
             item("agent_loop_entry_footer") {
                 SectionFooter(text = stringResource(R.string.agent_loop_section_footer))
+            }
+
+            // [feat/compact-model-pin-1005 → ui/runtime-page-adjust-1006]
+            // Pinned compaction model — moved from the Runtime Limits panel.
+            // Selection persists immediately (single-key save at
+            // AgentRuntimeLimitsPrefs), so no Save button or dirty tracking
+            // here — same edit-then-live pattern as group edits on this page.
+            item("compaction_model_entry_spacer") {
+                Spacer(modifier = Modifier.height(SectionDesign.SectionTopGap))
+            }
+            item("compaction_model_entry_row") {
+                SectionCard {
+                    CompactModelPickerRow(
+                        title = stringResource(R.string.runtime_limits_compact_model),
+                        subtitle = stringResource(R.string.runtime_limits_compact_model_desc),
+                        pinnedEntryId = compactModelEntryId,
+                        available = compactModelChoices,
+                        onPick = {
+                            compactModelEntryId = it
+                            AgentRuntimeLimitsPrefs.save(context, compactModelEntryId = it)
+                        },
+                        onClear = {
+                            compactModelEntryId = ""
+                            AgentRuntimeLimitsPrefs.save(context, compactModelEntryId = "")
+                        },
+                        showDivider = false,
+                    )
+                }
+            }
+            item("compaction_model_entry_footer") {
+                SectionFooter(text = stringResource(R.string.model_groups_compaction_footer))
             }
 
             item("bottom_gap") { Spacer(modifier = Modifier.height(SectionDesign.SectionTopGap)) }
@@ -583,4 +646,203 @@ private fun GroupRow(
             )
         }
     }
+}
+
+// ── [feat/compact-model-pin-1005] Compaction model picker ────────────────
+
+/** One pickable model entry for the compaction-model dialog. */
+internal data class CompactModelChoice(
+    val entryId: String,
+    val displayName: String,
+    val providerLabel: String,
+)
+
+/**
+ * Settings row + dialog for the pinned compaction model. Same visual
+ * language as [LimitsSliderRow] (title/subtitle left, value right); the
+ * whole row is clickable and opens the chooser (no separate button —
+ * row-level click target matches the rest of the settings surfaces).
+ * The pinned VALUE is persisted IMMEDIATELY by the callers ([ui/runtime-page-
+ * adjust-1006]) via AgentRuntimeLimitsPrefs.save(compactModelEntryId=...) —
+ * no batched Save on this page.
+ *
+ * A stale pin (entry deleted / provider removed) keeps its id and shows a
+ * ⚠ label instead of auto-clearing — user intent is preserved; at chain
+ * build the stale pin degrades to follow-the-session (INFO log).
+ */
+@Composable
+private fun CompactModelPickerRow(
+    title: String,
+    subtitle: String,
+    pinnedEntryId: String,
+    available: List<CompactModelChoice>,
+    onPick: (String) -> Unit,
+    onClear: () -> Unit,
+    showDivider: Boolean = true,
+) {
+    var showDialog by remember { mutableStateOf(false) }
+    val pinned = available.firstOrNull { it.entryId == pinnedEntryId }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { showDialog = true }
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 15.sp,
+                )
+            }
+            Text(
+                text = when {
+                    pinnedEntryId.isBlank() ->
+                        stringResource(R.string.runtime_limits_compact_model_follow)
+                    pinned != null -> pinned.displayName
+                    // Stale pin: keep showing it (intent preserved), mark it.
+                    else -> "⚠ " + stringResource(R.string.runtime_limits_compact_model_stale)
+                },
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        if (showDivider) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp)
+                    .height(0.5.dp)
+                    .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+            )
+        }
+    }
+    if (showDialog) {
+        CompactModelPickerDialog(
+            pinnedEntryId = pinnedEntryId,
+            available = available,
+            onPick = {
+                onPick(it)
+                showDialog = false
+            },
+            onClear = {
+                onClear()
+                showDialog = false
+            },
+            onDismiss = { showDialog = false },
+        )
+    }
+}
+
+@Composable
+private fun CompactModelPickerDialog(
+    pinnedEntryId: String,
+    available: List<CompactModelChoice>,
+    onPick: (String) -> Unit,
+    onClear: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    val filtered = if (query.isBlank()) {
+        available
+    } else {
+        available.filter {
+            it.displayName.contains(query, ignoreCase = true) ||
+                it.providerLabel.contains(query, ignoreCase = true)
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.runtime_limits_compact_model_dialog_title)) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp),
+                ) {
+                    item(key = "follow") {
+                        val selected = pinnedEntryId.isBlank()
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onClear() }
+                                .padding(horizontal = 4.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = stringResource(R.string.runtime_limits_compact_model_follow),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                                Text(
+                                    text = stringResource(R.string.runtime_limits_compact_model_follow_desc),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            if (selected) {
+                                Text(
+                                    text = "✓",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
+                    }
+                    items(filtered, key = { it.entryId }) { choice ->
+                        val selected = choice.entryId == pinnedEntryId
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onPick(choice.entryId) }
+                                .padding(horizontal = 4.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = choice.displayName,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                                Text(
+                                    text = choice.providerLabel,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            if (selected) {
+                                Text(
+                                    text = "✓",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            MinisTextButton(onClick = onDismiss) {
+                Text(stringResource(android.R.string.cancel))
+            }
+        },
+    )
 }
