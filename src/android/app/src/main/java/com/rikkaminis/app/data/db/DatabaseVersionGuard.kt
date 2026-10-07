@@ -96,10 +96,12 @@ object DatabaseVersionGuard {
     /**
      * [T-android-downgrade-compat] Downgrade jumps this build can open
      * losslessly, keyed (onDisk, code). The 12 → 13 bump
-     * (feat/usage-stats-perf-1007) added `13 to 12`: MIGRATION_12_13 is a
-     * partial ADD INDEX whose empty-body reverse (AppDatabase.MIGRATION_13_12)
-     * is lossless — Room ignores extra indexes on open, same reasoning as
-     * the ADD COLUMN case.
+     * (feat/usage-stats-perf-1007) added `13 to 12`: MIGRATION_12_13 is an
+     * ADD INDEX (declared on MessageEntity — keep it declared: Room's
+     * post-migration validation compares the full index set, and an
+     * undeclared index fails the open) whose empty-body reverse
+     * (AppDatabase.MIGRATION_13_12) is lossless, same rendering as the
+     * ADD COLUMN case.
      */
     private val HANDLED_DOWNGRADES: Set<Pair<Int, Int>> = setOf(13 to 12)
 

@@ -16,7 +16,10 @@ import androidx.room.PrimaryKey
             onDelete = ForeignKey.CASCADE,
         )
     ],
-    indices = [Index(value = ["session_id", "sort_order"], unique = true)]
+    indices = [
+        Index(value = ["session_id", "sort_order"], unique = true),
+        Index(value = ["created_at"]),
+    ]
 )
 data class MessageEntity(
     @PrimaryKey val id: String,
