@@ -9,6 +9,7 @@ import com.rikkaminis.app.data.db.MessageSearchRow
 import com.rikkaminis.app.data.db.SessionMetaRow
 import com.rikkaminis.app.data.db.SessionTailRow
 import com.rikkaminis.app.data.db.UsageRecord
+import com.rikkaminis.app.data.db.UsageStatsRow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
@@ -170,6 +171,8 @@ class ChatRepositoryCreateSessionTest {
         override suspend fun allUsageRecords(): List<UsageRecord> = emptyList()
 
         override suspend fun usageRecordsBetween(sinceMs: Long, untilMs: Long): List<UsageRecord> = emptyList()
+        override suspend fun json1Probe(): Int = 1
+        override suspend fun usageStatsAggregated(sinceMs: Long, untilMs: Long): List<UsageStatsRow> = emptyList()
         override suspend fun lastMessageParts(sessionId: String): String? = null
         override suspend fun lastMessageTailPerSession(): List<SessionTailRow> = emptyList()
         override suspend fun updateMemoryEnabled(id: String, enabled: Int, updatedAt: Long) {}
