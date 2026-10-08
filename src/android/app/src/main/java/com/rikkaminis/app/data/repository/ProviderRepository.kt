@@ -232,6 +232,14 @@ class ProviderRepository(private val context: Context) {
                 if (!_configLoaded.value) {
                     _config.value = loaded
                     _configLoaded.value = true
+                    // [T-thinking-rules-cold-start-warm] Warm the resolver's
+                    // custom-rule cache on the adopt path too. The sync-load
+                    // path warms inside [ensureConfigLoaded], but once this
+                    // async load wins the race every later ensureConfigLoaded
+                    // early-returns — without this warm the cache stayed
+                    // empty after a cold start and user thinking rules were
+                    // silently ignored until the next rule edit.
+                    loadAllThinkingRulesIntoCache()
                 }
             }
             if (!configLoadComplete.isCompleted) configLoadComplete.complete(Unit)
