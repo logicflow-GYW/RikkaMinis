@@ -931,13 +931,16 @@ class ChatViewModel(
      * before persisting the new content as a fresh user turn.
      * Mirrors iOS AIChatViewModel.editingMessageIndex.
      */
-    private val _editingMessageId = MutableStateFlow<String?>(null)
+    // [sweep-p1] flipped private->internal: removeAttachment/clearAttachments
+    // (ChatViewModelUiStateExt.kt) must sync the edit snapshot while editing,
+    // same visibility convention as the other backing state fields.
+    internal val _editingMessageId = MutableStateFlow<String?>(null)
     val editingMessageId: StateFlow<String?> = _editingMessageId.asStateFlow()
     // [T-edit-resend-attachment-loss-1008] Pre-edit composer attachment
     // staging, snapshotted when edit mode starts and restored by
     // cancelEdit(). A successful send consumes the snapshot together with
     // the edited turn (the send path clears _attachments itself).
-    private val _preEditAttachments = MutableStateFlow<List<InputAttachment>?>(null)
+    internal val _preEditAttachments = MutableStateFlow<List<InputAttachment>?>(null)
 
     internal val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
@@ -2690,6 +2693,12 @@ class ChatViewModel(
         toolLoopDetector.reset()
         _canResume.value = false
         _attachments.value = emptyList()
+        // [sweep-p1] Editing state must go too (backlog §72): a mid-edit
+        // clearChat used to leave _preEditAttachments/_editingMessageId
+        // alive, so tapping "Exit Edit Mode" after the wipe restored the
+        // stale pre-edit composer staging into the fresh chat.
+        _preEditAttachments.value = null
+        _editingMessageId.value = null
         _promptQueue.value = emptyList()
         _hasInjectedShareContent.value = false
         // T261: tool-detail sheet is per-session UI state — clear it so a
@@ -3596,7 +3605,7 @@ class ChatViewModel(
             val userContentParts = mutableListOf<AgentContentPart>()
             if (trimmed.isNotEmpty()) userContentParts.add(AgentContentPart.Text(trimmed))
             imageParts.forEachIndexed { idx, part ->
-                val path = prepared.imageUploadPaths.getOrNull(idx)
+                val path = part.linuxPath
                 if (path != null) userContentParts.add(AgentContentPart.Text("[attached image: $path]"))
                 userContentParts.add(AgentContentPart.ImageData(part.data, part.mimeType, linuxPath = path))
             }

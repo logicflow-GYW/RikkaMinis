@@ -141,8 +141,22 @@ internal fun ChatViewModel.addAttachment(attachment: InputAttachment) {
 
 internal fun ChatViewModel.removeAttachment(id: String) {
     _attachments.value = _attachments.value.filter { it.id != id }
+    // [sweep-p1] While editing, the composer represents the edited turn and
+    // the pre-edit snapshot is what cancelEdit() restores. Deleting from the
+    // list must also delete from the snapshot, otherwise canceling edit
+    // revives an attachment the user deliberately removed.
+    if (_editingMessageId.value != null) {
+        _preEditAttachments.value = _preEditAttachments.value?.filter { it.id != id }
+    }
 }
 
 internal fun ChatViewModel.clearAttachments() {
     _attachments.value = emptyList()
+    // [sweep-p1] Same as removeAttachment: while editing, a deliberate clear
+    // must clear the snapshot too — or cancelEdit() resurrects the cleared
+    // attachments. Empty list (not null) so editMessage()'s snapshot-once
+    // semantics stay intact.
+    if (_editingMessageId.value != null) {
+        _preEditAttachments.value = emptyList()
+    }
 }

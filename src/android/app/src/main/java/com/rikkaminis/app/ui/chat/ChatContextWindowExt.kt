@@ -38,16 +38,21 @@ internal fun ChatViewModel.reloadSessionFromDb() {
  */
 internal fun queuedPromptBubble(prompt: QueuedPrompt): ChatMessage {
     val pendingAttachments = prompt.attachments
-    val attachmentNames = pendingAttachments.map { it.fileName }
-    val imageUris = pendingAttachments.filter { it.isImage }.map { it.uri }
-    val attachmentUris = pendingAttachments.filterNot { it.isImage }.map { it.uri }
+    // [sweep-p1] image-first contract — the send path persists
+    // `attachmentNames = imageNames + nonImageNames` (prepareUserAttachments),
+    // and the chip renderer (UserAttachmentList) drops the first
+    // imageUris.size names as images before pairing the rest with
+    // attachmentUris. A mixed original order here would shift every
+    // name↔uri pair by one while the prompt is queued.
+    val images = pendingAttachments.filter { it.isImage }
+    val nonImages = pendingAttachments.filterNot { it.isImage }
     return ChatMessage(
         id = "queued_msg_${prompt.id}",
         role = "user",
         content = prompt.text,
-        imageUris = imageUris,
-        attachmentNames = attachmentNames,
-        attachmentUris = attachmentUris,
+        imageUris = images.map { it.uri },
+        attachmentNames = images.map { it.fileName } + nonImages.map { it.fileName },
+        attachmentUris = nonImages.map { it.uri },
         isQueued = true,
         queuedPromptId = prompt.id,
     )

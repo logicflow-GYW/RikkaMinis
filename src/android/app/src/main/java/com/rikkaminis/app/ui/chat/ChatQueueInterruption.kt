@@ -158,7 +158,7 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
         }
     }
     prepared.imageParts.forEachIndexed { idx, part ->
-        val path = prepared.imageUploadPaths.getOrNull(idx)
+        val path = part.linuxPath
         if (path != null) combinedParts.add(AgentContentPart.Text("[attached image: $path]"))
         combinedParts.add(AgentContentPart.ImageData(part.data, part.mimeType, linuxPath = path))
     }
@@ -342,7 +342,7 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
             }
         }
         prepared.imageParts.forEachIndexed { idx, part ->
-            val path = prepared.imageUploadPaths.getOrNull(idx)
+            val path = part.linuxPath
             if (path != null) combinedParts.add(AgentContentPart.Text("[attached image: $path]"))
             combinedParts.add(AgentContentPart.ImageData(part.data, part.mimeType, linuxPath = path))
         }

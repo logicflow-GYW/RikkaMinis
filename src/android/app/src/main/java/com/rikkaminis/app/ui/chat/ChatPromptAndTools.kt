@@ -1484,11 +1484,8 @@ internal data class PreparedAttachments(
     // T132: iOS-parity additions so the model sees the attachment as
     // a real file in the agent's sandbox (read_image / shell_execute can
     // open these paths).
-    //   imageUploadPaths: one /var/minis/attachments/uploads/<safe> per
-    //     inlined image, in the same order as `imageParts`.
     //   attachedFilesXml:  null when no attachments, otherwise the
     //     <user-attached-files> XML block iOS appends to the user turn.
-    val imageUploadPaths: List<String>,
     val attachedFilesXml: String?,
     // T150: file:// URIs of persisted non-image attachments, in the same
     // order as the non-image suffix of `attachmentNames`. Carried into
@@ -1524,7 +1521,6 @@ internal fun ChatViewModel.prepareUserAttachments(
     // and restoredAttachmentUris also come out image-first/non-image-suffix.
     val imageMediaRefPartsJson = mutableListOf<String>()
     val nonImageMediaRefPartsJson = mutableListOf<String>()
-    val imageUploadPaths = mutableListOf<String>()
     // T132: also write the resized bytes into the session's iSH-bound
     // attachments dir (filesDir/minis-sessions/<sid>/attachments/uploads/),
     // which is mounted at /var/minis/attachments/ inside iSH. This makes
@@ -1596,7 +1592,6 @@ internal fun ChatViewModel.prepareUserAttachments(
             }
             val linuxPath = if (uploadOk) "/var/minis/attachments/uploads/$safeName" else null
             if (linuxPath != null) {
-                imageUploadPaths.add(linuxPath)
                 metas.add(UploadMeta(linuxPath = linuxPath, size = rawBytes.size.toLong(), modifiedIso = nowStr))
             }
 
@@ -1624,7 +1619,11 @@ internal fun ChatViewModel.prepareUserAttachments(
         // Stream-copy to the uploads dest first, then hand that
         // file to MediaStore.saveMediaStreamed so a second
         // streaming pass produces the durable mediaRef.
-        nonImageNames.add(attachment.fileName)
+        //
+        // [sweep-p1] The name is only added after BOTH gates pass
+        // (upload + persist), matching the image branch — adding it
+        // earlier would leave a ghost name in attachmentNames with no
+        // matching URI/mediaRef, shifting every later pair by one.
         val safeName = uniqueUploadFileName(uploadsHostDir, attachment.fileName)
         val dest = java.io.File(uploadsHostDir, safeName)
         val uploadOk = try {
@@ -1652,6 +1651,7 @@ internal fun ChatViewModel.prepareUserAttachments(
             null
         }
         if (ref != null) {
+            nonImageNames.add(attachment.fileName)
             nonImageMediaRefPartsJson.add(buildMediaRefPartJson(ref))
             nonImageUris.add(Uri.fromFile(java.io.File(mediaStore.mediaBaseDir, ref.relativePath)))
         }
@@ -1686,7 +1686,6 @@ internal fun ChatViewModel.prepareUserAttachments(
         while (imageUris.size > newSize) imageUris.removeAt(imageUris.size - 1)
         while (imageNames.size > newSize) imageNames.removeAt(imageNames.size - 1)
         while (imageMediaRefPartsJson.size > newSize) imageMediaRefPartsJson.removeAt(imageMediaRefPartsJson.size - 1)
-        while (imageUploadPaths.size > newSize) imageUploadPaths.removeAt(imageUploadPaths.size - 1)
         if (budgetResult.mutated) {
             AppLogger.info(
                 ChatViewModel.TAG,
@@ -1723,7 +1722,6 @@ internal fun ChatViewModel.prepareUserAttachments(
         imageUris = imageUris,
         attachmentNames = imageNames + nonImageNames,
         mediaRefPartsJson = imageMediaRefPartsJson + nonImageMediaRefPartsJson,
-        imageUploadPaths = imageUploadPaths,
         attachedFilesXml = xml,
         nonImageUris = nonImageUris,
     )
