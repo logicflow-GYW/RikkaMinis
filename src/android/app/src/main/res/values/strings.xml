@@ -1148,6 +1148,9 @@
     <string name="webdav_testing">Testing…</string>
     <string name="webdav_test_ok">Connection OK</string>
     <string name="webdav_saved">Server settings saved</string>
+    <string name="webdav_clear_pw_title">Clear stored password?</string>
+    <string name="webdav_clear_pw_body">The password field is empty. Saving will clear the stored password, and the next upload will fail until you enter a new one.</string>
+    <string name="webdav_clear_pw_confirm">Clear and save</string>
     <string name="webdav_uploaded">Backup uploaded</string>
     <string name="backup_restored_notify_body">Restored %1$d providers and %2$d groups.</string>
     <string name="webdav_notify_title_failed">WebDAV operation failed</string>

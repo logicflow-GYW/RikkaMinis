@@ -991,6 +991,9 @@
     <string name="webdav_testing">测试中…</string>
     <string name="webdav_test_ok">连接成功</string>
     <string name="webdav_saved">服务器设置已保存</string>
+    <string name="webdav_clear_pw_title">清除已存口令？</string>
+    <string name="webdav_clear_pw_body">密码字段为空。保存将清除已存口令，下次上传前需重新输入，否则认证会失败。</string>
+    <string name="webdav_clear_pw_confirm">清除并保存</string>
     <string name="webdav_uploaded">备份已上传</string>
     <string name="backup_restored_notify_body">已恢复 %1$d 个提供方和 %2$d 个分组。</string>
     <string name="webdav_notify_title_failed">WebDAV 操作失败</string>

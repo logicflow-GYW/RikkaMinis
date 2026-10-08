@@ -987,6 +987,9 @@
     <string name="webdav_testing">Teste…</string>
     <string name="webdav_test_ok">Verbindung OK</string>
     <string name="webdav_saved">Servereinstellungen gespeichert</string>
+    <string name="webdav_clear_pw_title">Gespeichertes Passwort löschen?</string>
+    <string name="webdav_clear_pw_body">Das Passwortfeld ist leer. Beim Speichern wird das gespeicherte Passwort gelöscht — der nächste Upload schlägt fehl, bis ein neues Passwort eingegeben wird.</string>
+    <string name="webdav_clear_pw_confirm">Löschen und speichern</string>
     <string name="webdav_uploaded">Backup hochgeladen</string>
     <string name="auto_backup_section_title">Automatische Sicherung</string>
     <string name="auto_backup_section_footer">Läuft einmal täglich beim ersten Öffnen der App. Sichert Fähigkeiten (Anbieter, Denkregeln, Skills, Umgebungsvariablen, Speicher, MCP) und Ergebnisse (shared/-Dateien und Wissensgraphen-Daten) – Chatverlauf ist bewusst ausgenommen (Nebenprodukt des Agenten). Enthält API-Schlüssel; lokale Kopien bleiben im App-Speicher, entfernte Kopien gehen an Ihren WebDAV-Server (die neuesten 3 werden behalten).</string>

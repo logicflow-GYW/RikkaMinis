@@ -1124,6 +1124,9 @@
     <string name="webdav_testing">Проверка…</string>
     <string name="webdav_test_ok">Соединение установлено</string>
     <string name="webdav_saved">Настройки сервера сохранены</string>
+    <string name="webdav_clear_pw_title">Удалить сохранённый пароль?</string>
+    <string name="webdav_clear_pw_body">Поле пароля пусто. При сохранении сохранённый пароль будет удалён — следующая загрузка не удастся, пока не будет введён новый пароль.</string>
+    <string name="webdav_clear_pw_confirm">Удалить и сохранить</string>
     <string name="webdav_uploaded">Резервная копия загружена</string>
     <string name="auto_backup_section_title">Автоматическое резервное копирование</string>
     <string name="auto_backup_section_footer">Выполняется раз в день при первом открытии приложения. Охватывает возможности (провайдеры, правила мышления, скиллы, переменные окружения, память, MCP) и результаты (файлы shared/ и данные графа знаний) — переписка намеренно исключена (побочный продукт агента). Включает API-ключи; локальные копии хранятся в хранилище приложения, удалённые отправляются на ваш WebDAV-сервер (хранятся последние 3).</string>

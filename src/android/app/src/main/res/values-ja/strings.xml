@@ -994,6 +994,9 @@
     <string name="webdav_testing">テスト中…</string>
     <string name="webdav_test_ok">接続に成功しました</string>
     <string name="webdav_saved">サーバー設定を保存しました</string>
+    <string name="webdav_clear_pw_title">保存済みパスワードを消去しますか？</string>
+    <string name="webdav_clear_pw_body">パスワード欄が空です。保存すると保存済みのパスワードが消去され、新しいパスワードを入力するまで次回のアップロードは失敗します。</string>
+    <string name="webdav_clear_pw_confirm">消去して保存</string>
     <string name="webdav_uploaded">バックアップをアップロードしました</string>
     <string name="auto_backup_section_title">自動バックアップ</string>
     <string name="auto_backup_section_footer">アプリを毎日最初に開いたときに1回実行。能力（プロバイダー、思考ルール、スキル、環境変数、メモリ、MCP）と成果物（shared/ ファイルとナレッジグラフデータ）を対象とし、チャット履歴は意図的に除外（エージェントの作業副産物）。APIキーを含みます。ローカルコピーはアプリ領域に、リモートコピーは自分のWebDAVサーバーに保存（最新3件を保持）。</string>
