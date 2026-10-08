@@ -1519,6 +1519,7 @@ private fun WebDavConfigDialog(
     }
     var testing by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf<String?>(null) }
+    var confirmClearPassword by remember { mutableStateOf(false) }
 
     val runTest: () -> Unit = runTest@{
         val cfg = WebDavConfig(
@@ -1632,6 +1633,13 @@ private fun WebDavConfigDialog(
                         testResult = context.getString(R.string.webdav_err_invalid_url)
                         return@TextButton
                     }
+                    if (password.isBlank() && !initial?.password.isNullOrBlank()) {
+                        // A blank field is the only way to remove the stored
+                        // password (WebDavConfigStore.save treats blank as
+                        // "clear"), so make that explicit before saving.
+                        confirmClearPassword = true
+                        return@TextButton
+                    }
                     onSave(
                         WebDavConfig(
                             url = url,
@@ -1651,6 +1659,36 @@ private fun WebDavConfigDialog(
             }
         },
     )
+
+    if (confirmClearPassword) {
+        AlertDialog(
+            onDismissRequest = { confirmClearPassword = false },
+            title = { Text(stringResource(R.string.webdav_clear_pw_title)) },
+            text = { Text(stringResource(R.string.webdav_clear_pw_body)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmClearPassword = false
+                    // url/username were validated before the prompt; the
+                    // blank password is the deliberate "clear" action.
+                    onSave(
+                        WebDavConfig(
+                            url = url,
+                            username = username,
+                            password = "",
+                            path = path,
+                        )
+                    )
+                }) {
+                    Text(stringResource(R.string.webdav_clear_pw_confirm))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClearPassword = false }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
 }
 
 /**

@@ -457,6 +457,9 @@
     <string name="webdav_testing">測試中…</string>
     <string name="webdav_test_ok">連線成功</string>
     <string name="webdav_saved">伺服器設定已儲存</string>
+    <string name="webdav_clear_pw_title">清除已存密碼？</string>
+    <string name="webdav_clear_pw_body">密碼欄位為空。儲存將清除已存密碼，下次上傳前需重新輸入，否則驗證會失敗。</string>
+    <string name="webdav_clear_pw_confirm">清除並儲存</string>
     <string name="webdav_uploaded">備份已上傳</string>
     <string name="backup_restored_notify_body">已還原 %1$d 個提供方和 %2$d 個分組。</string>
     <string name="webdav_notify_title_failed">WebDAV 操作失敗</string>

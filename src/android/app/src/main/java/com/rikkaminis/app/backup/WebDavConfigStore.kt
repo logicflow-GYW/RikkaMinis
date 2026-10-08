@@ -39,7 +39,8 @@ class WebDavConfigStore(context: Context) {
     /** Save the server settings. A blank [WebDavConfig.password] CLEARS the
      *  stored password — the config dialog pre-fills the stored value, so a
      *  blank only happens when the user deliberately clears it (e.g. to
-     *  switch servers or remove credentials). */
+     *  switch servers or remove credentials); the dialog asks for
+     *  confirmation before saving a blank password over a stored one. */
     fun save(config: WebDavConfig) {
         prefs.edit()
             .putString(KEY_URL, config.url.trim())
