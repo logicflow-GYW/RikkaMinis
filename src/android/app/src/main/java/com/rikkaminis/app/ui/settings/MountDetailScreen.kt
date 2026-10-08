@@ -49,7 +49,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rikkaminis.app.R
 import com.rikkaminis.app.data.MountedFoldersStore
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.rikkaminis.app.ui.components.MinisTextButton
 import com.rikkaminis.app.ui.theme.ChatColors
 
@@ -81,7 +83,10 @@ fun MountDetailScreen(
     val entry = entries.firstOrNull { it.id == mountId }
 
     if (entry == null) {
-        // Entry was removed (e.g. unmount + back-stack pop race). Pop out.
+        // Entry is gone: unmounted from this screen (remove() empties the
+        // entries flow synchronously — this guard is the SINGLE pop for that
+        // path; the confirm button must not call onBack() as well) or removed
+        // externally. Pop out.
         LaunchedEffect(Unit) { onBack() }
         return
     }
@@ -187,8 +192,19 @@ fun MountDetailScreen(
                 MinisTextButton(onClick = {
                     showUnmountConfirm = false
                     scope.launch {
-                        store.remove(entry.id)
-                        onBack()
+                        // NonCancellable: this screen pops as soon as remove()
+                        // updates the entries flow (mid-remove, while
+                        // saveToDisk is still suspending), which cancels this
+                        // screen's composition scope — the unmount must still
+                        // complete on disk and fire onChange (shell rebind).
+                        withContext(NonCancellable) {
+                            store.remove(entry.id)
+                        }
+                        // NB: NO explicit onBack() here. The null-guard at the
+                        // top is the SINGLE pop for this path; calling onBack()
+                        // here too would pop TWO levels (detail → list →
+                        // settings) and land on settings. Same fix as
+                        // ModelGroupDetailScreen.removeGroup (see its NB).
                     }
                 }) {
                     Text(
