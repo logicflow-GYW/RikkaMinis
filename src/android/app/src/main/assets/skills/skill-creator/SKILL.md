@@ -1,9 +1,8 @@
 ---
 name: skill-creator
-version: 2.0.0
-description: Guide for creating effective skills. This skill should be used when users want to create a new skill (or update an existing skill) that extends Claude's capabilities with specialized knowledge, workflows, or tool integrations.
+description: Guide for creating effective skills. Trigger when users want to create a new skill or update an existing one (frontmatter, evals.json, description conventions, scripts).
+version: 2.2.0
 ---
-
 # Skill Creator
 
 This skill provides guidance for creating effective skills.
@@ -86,6 +85,40 @@ Skills use three loading levels:
 - Only add context Claude doesn't already have
 - Prefer concise examples over verbose explanations
 - Keep essential workflow in SKILL.md; move detailed reference material to separate files
+
+### evals.json (trigger verification — write one for every new skill)
+
+One `evals.json` per skill, 3-5 entries. The prompt is deliberately casual (real user phrasings);
+the first assertion is always the trigger check — this makes "did it trigger / did it misfire" a
+verifiable item instead of a hope.
+
+```json
+{"skill": "<name>", "version": "1.0.0", "evals": [
+  {"id": 1, "prompt": "<real casual sentence>", "expect_triger": true,
+   "assertions": ["触发检查：...", "<key action that must happen>"]}]}
+```
+
+Rules: first assertion must mention 触发/trigger; include at least one positive prompt with **no**
+trigger word (casual-drift case) and at least one negative prompt (`expect_triger: false`).
+
+Checker (same dir as this file): `scripts/check_evals.py static` — format + trigger-word coverage
+(reads 「」-quoted trigger words from the skill's description); `--strict` also fails skills with no
+evals.json. `scripts/check_evals.py run <skill>` — behavioural: calls a real model via
+minis-model-use and compares the verdicted trigger against `expect_triger`. Both have `--self-test`
+(fixture + reverse control).
+
+`run` is rate-limited by design since 2026-09-26: `--interval <s>` (default 5, 0 = off) spaces
+the calls out and a rate-limited/empty call is retried once after `--retry-wait <s>` (default 15).
+Its verdicts are three-state — `PASS` / `FAIL` (we got a readable answer: evidence about the
+trigger face) vs `UNKNOWN` (no readable output: no output file / 429 / empty response: evidence
+about the *call*, not the trigger face). Exit codes: `0` all matched, `1` at least one FAIL,
+`3` no FAIL but ≥1 UNKNOWN — **never** record a 3 as a pass, re-run it. Before this split, a
+gateway rate-limit storm turned a whole batch into "trigger-face failures" (2026-09-25: 25 × 429
+in three minutes) and polluted the evals data.
+
+**Changing a `description` requires one behavioural `run`** — the description IS the trigger face.
+Empirically verified: a single tightening flipped the same prompt's verdict outright. Static checks
+cannot see that; only a real call can.
 
 ### What NOT to Include
 

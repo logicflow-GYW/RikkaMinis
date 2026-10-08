@@ -1,7 +1,7 @@
 ---
 name: cloudflare-fullright-ops
-description: Cloudflare 小号（CF_ACCOUNT_EMAIL's Account，Account ID CF_ACCOUNT_ID）全权限操作。当用户提到 CF/Cloudflare 小号、Cloudflare Workers/R2/DNS/Zone、cfat token，或需要查询/操作 Cloudflare 账号资源（列 Workers、查 DNS、R2 桶、账号设置）时触发。调用方式：直接 curl api.cloudflare.com。
-version: 1.0.1
+description: Cloudflare 小号全权限操作（CF_ACCOUNT_ID 的 Account）。当用户提到 CF/Cloudflare 小号、Workers/R2/DNS/Zone、cfat token，或要查询/操作 Cloudflare 账号资源（列 Workers、查 DNS、R2 桶、账号设置）时触发。调用方式 curl api.cloudflare.com，账号与 token 约定见正文。
+version: 1.0.2
 ---
 # Cloudflare 满权限小号操作
 
@@ -23,6 +23,13 @@ curl -s -H "Authorization: Bearer $CF_TOKEN" \
 - ✅ token 鉴权有效（R2 报业务错误 10042 而非鉴权错误）
 - ❌ R2 未激活：需用户在 dashboard 手动激活（API 返回 10042 "Please enable R2 through the Cloudflare Dashboard"）
 - ❌ R2 S3 端点（*.r2.cloudflarestorage.com）被当前设备网络 SNI 过滤，rclone 配置已就绪但需换网络/代理才能用
+
+## 已部署 Workers（现成资源，别重复造）
+
+- **`rikka-ci-bridge`** — GitHub Actions webhook → CF KV → 公开状态端点。**查 CI 状态优先用它，零 token 开销**：
+  - `GET https://rikka-ci-bridge.logos7313.workers.dev/status/<branch>` → `{"name","branch","status","conclusion","html_url","at"}`
+  - `GET https://rikka-ci-bridge.logos7313.workers.dev/` → 根探活
+- **`rikka-bulletin`** — 边缘计算/公网入口（用途待确认）
 
 ## 常用操作模板（curl 路径）
 

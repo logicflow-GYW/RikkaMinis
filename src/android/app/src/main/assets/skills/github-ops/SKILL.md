@@ -1,7 +1,7 @@
 ---
 name: github-ops
-description: General GitHub/Git operations + automation for GitHub platform objects (Issues/Labels/Milestones/Releases/Actions) in the Minis environment. This skill must be triggered when the user mentions any Git/GitHub operation or workflow, including "how to use GitHub," clone, init, remote, branch, commit, push, pull, fetch, merge, rebase, tag, release, issues, actions, labels, milestone, protected branches, fork, PR, sync to upstream, delete branches, restore after emptying a directory, push directly to main, or one-click operations.
-version: 1.0.1
+description: Trigger on ANY Git/GitHub op, workflow, or 'how to use GitHub' — clone/branch/commit/push/pull/merge/rebase/tag, issues/labels/releases/actions/PRs/forks, CI, delete/restore. Not pure browsing.
+version: 1.0.2
 ---
 ## Objectives
 
@@ -39,6 +39,8 @@ Codify GitHub/Git "basic operations" and common collaboration workflows into:
 | 7 | Stage | add | Add changes to the staging area | `git add -A` | `add` |
 | 8 | Commit | commit | Package the staging area into a commit | `git commit -m "..."` | `commit` |
 | 9 | Sync | fetch/pull/push | Fetch, merge, or push commits | `git fetch` `git pull` `git push` | `fetch/pull/push/push-main` |
+
+> ⚠️ **分支 CI 必须手动 dispatch（易忘，已复发 3+ 次）**：`build-apk.yml` 的 `on: push` 限定 `branches: [main]`——**非 main 分支的 push 永远不会触发 CI**。推完分支后 CI 查不到 run 不是 webhook 延迟，是根本没触发。标准动作：`sh gh_sync.sh gh-actions-dispatch --repo logicflow-GYW/RikkaMinis --workflow build-apk.yml --ref <branch>`（Publish 步骤有 main 门控，不会污染 release 资产）。`gh_sync.sh push --branch <非main>` 现在会在输出里自动带上这条提醒。
 |10| Merge | merge/rebase | Merge branch history | `git merge` `git rebase` | `merge/rebase` (use with caution) |
 |11| Stash | stash | Temporarily set aside uncommitted changes | `git stash` | `stash` |
 |12| Tag | tag | Add a version tag to a commit | `git tag` | `tag` |
@@ -64,6 +66,54 @@ Codify GitHub/Git "basic operations" and common collaboration workflows into:
 | 9 | `gh-release-create --repo <owner/repo> --tag <vX.Y.Z> --name <n> [--body <b>] [--draft true|false] [--prerelease true|false]` | Create a release |
 |10| `gh-actions-list --repo <owner/repo>` | List workflows |
 |11| `gh-actions-dispatch --repo <owner/repo> --workflow <id_or_file> [--ref <branch>] [--inputs <json>]` | Manually trigger workflow_dispatch |
+|12| `gh_ci_wait.sh --repo <owner/repo> --workflow <id_or_file> --ref <branch> [--expect <sha>] [--timeout <s>] [--poll <s>] [--no-dispatch] [--job-detail]` | **Dispatch + wait for the run + verify head_sha + report verdict in one shot** — replaces the manual dispatch→wait→find→check-head→poll→conclude dance. |
+
+## CI waits: use gh_ci_wait.sh (not hand-rolled loops)
+
+Prefer the single-purpose script `scripts/gh_ci_wait.sh` over pasting fresh curl/python polling each time. It encodes the hard-won RikkaMinis CI pitfalls:
+
+- **One call does everything**: optionally dispatches, then waits for the run, then verifies `head_sha`, then prints a one-line Markdown verdict and exits 0/1/2/3.
+- **`--expect <sha>` = anti false-green guard**: only accepts a run whose `head_sha` equals your pushed commit, and rejects a wrong-head completed run as "CI is a liar — do NOT trust it". This is the exact `head_sha` verification the methodology mandates.
+- **Picks the newest matching run** on the branch (handles the API list-cache-lag / multiple-runs-per-branch cases), and drops runs that don't match `--expect`.
+- **`--no-dispatch`** to attach to an already-triggered run (e.g. after a `main` push release build).
+
+```sh
+# dispatch build-apk.yml on a branch, wait, verify head, report, exit 0/1
+sh /var/minis/skills/github-ops/scripts/gh_ci_wait.sh \
+  --repo logicflow-GYW/RikkaMinis --workflow build-apk.yml --ref fix/branch \
+  --expect <full-commit-sha> --timeout 900 --poll 60 --job-detail
+```
+
+Exit codes: `0` all-clear; `1` any step failed; `2` timed out with no verdict; `3` wrong-head when `--expect` given (phantom/false-green). Anything non-zero means **do not trust the green; investigate before merging**.
+
+## Long waits: ≥180 s of silence gets your command killed (stall-guard)
+
+The shell tool runs behind a **silence watchdog**: a command that produces no
+stdout/stderr for ~180 s is SIGINT'd (exit 130, logged as
+`stall:sigint idle=180xxxms targets=N`). This is not about how long the command
+runs — it is about how long it stays *quiet*. Two real casualties (2026-09-25,
+both legitimate waits doing nothing wrong):
+
+| command | outcome |
+|---|---|
+| `gh_ci_wait.sh --timeout 900` (quiet until the run finished) | `stall:sigint idle=180394ms targets=3` after 643 s |
+| `sleep 240; curl …` (intentional 240 s wait) | `stall:sigint idle=180913ms targets=1` at 180 s |
+
+Rules:
+
+- **Waiting is the `delay` parameter's job, not `sleep`'s.** `shell_execute(delay=N)`
+  blocks the agent flow *without* holding a shell process, so the watchdog never
+  sees it. Then run the status check in the next call.
+- **Polling loops must stay under the threshold**: keep each wait slice **<180 s**
+  and emit a heartbeat line per slice (`echo "… waiting $i/6"`), or the loop dies
+  mid-flight and the failure looks like a CI/API problem rather than a watchdog kill.
+- **Never pipe a long waiter through a filter**: `gh_ci_wait.sh … 2>&1 | tail -5`
+  buffers everything, so the script is mute to the watchdog even though it is
+  working. Let it write directly and read the output at the end.
+- When a wait *is* killed, the evidence is in `/var/minis/logs/memspike-<date>.log`
+  (`[stall:sigint] session=… idle=… targets=…`) — check that before blaming the network.
+- Upgrade trigger: a third recurrence after this rule is documented means the
+  discipline isn't enough and the shell tool itself needs to warn on long `sleep`s.
 
 ## Script Command List (gh_sync.sh)
 

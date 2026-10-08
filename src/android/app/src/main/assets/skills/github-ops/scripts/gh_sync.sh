@@ -5,7 +5,7 @@ set -e
 
 err() { printf '%s\n' "$*" >&2; }
 need_cmd() { command -v "$1" >/dev/null 2>&1 || { err "missing command: $1"; exit 1; }; }
-need_env() { name="$1"; eval "val=\${$name-}"; [ -n "$val" ] || { err "missing env: $name"; exit 1; }; }
+need_env() { _need_env_n="$1"; eval "_need_env_v=\${$_need_env_n-}"; [ -n "$_need_env_v" ] || { err "missing env: $_need_env_n"; exit 1; }; }
 repo_root() { git rev-parse --show-toplevel 2>/dev/null; }
 
 # Print and require --yes for dangerous commands
@@ -167,7 +167,7 @@ case "$cmd" in
       case "$1" in
         --url) url="$2"; shift 2;;
         --dir) dir="$2"; shift 2;;
-        *) break;;
+        *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;;
       esac
     done
     [ -n "$url" ] || { err "--url required"; usage; exit 1; }
@@ -191,7 +191,7 @@ case "$cmd" in
       case "$1" in
         --name) name="$2"; shift 2;;
         --url) url="$2"; shift 2;;
-        *) break;;
+        *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;;
       esac
     done
     [ -n "$name" ] && [ -n "$url" ] || { err "--name and --url required"; usage; exit 1; }
@@ -205,7 +205,7 @@ case "$cmd" in
       case "$1" in
         --name) name="$2"; shift 2;;
         --url) url="$2"; shift 2;;
-        *) break;;
+        *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;;
       esac
     done
     [ -n "$name" ] && [ -n "$url" ] || { err "--name and --url required"; usage; exit 1; }
@@ -218,7 +218,7 @@ case "$cmd" in
     while [ $# -gt 0 ]; do
       case "$1" in
         --name) name="$2"; shift 2;;
-        *) break;;
+        *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;;
       esac
     done
     [ -n "$name" ] || { err "--name required"; usage; exit 1; }
@@ -231,7 +231,7 @@ case "$cmd" in
     while [ $# -gt 0 ]; do
       case "$1" in
         --upstream) upstream="$2"; shift 2;;
-        *) break;;
+        *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;;
       esac
     done
     [ -n "$upstream" ] || { err "--upstream required"; usage; exit 1; }
@@ -264,16 +264,16 @@ case "$cmd" in
     ;;
 
   branches)
-    l="$(git branch --format='%(refname:short)' | tr '\n' ', ' | sed 's/, $//')"
+    l="$(git for-each-ref refs/heads --format='%(refname:short)' | tr '\n' ', ' | sed 's/, $//')"
     r="$(git branch -r --format='%(refname:short)' | tr '\n' ', ' | sed 's/, $//')"
     add_row 1 local OK "$l"; add_row 2 remote OK "$r"
     ;;
 
   create-branch)
     name=""; from=""
-    while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift 2;; --from) from="$2"; shift 2;; *) break;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift 2;; --from) from="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
     [ -n "$name" ] || { err "--name required"; usage; exit 1; }
-    [ -n "$from" ] && git checkout -b "$name" "$from" >/dev/null || git checkout -b "$name" >/dev/null
+    if [ -n "$from" ]; then git checkout -b "$name" "$from" >/dev/null; else git checkout -b "$name" >/dev/null; fi
     add_row 1 create-branch OK "$name"
     ;;
 
@@ -304,17 +304,32 @@ case "$cmd" in
 
   pull)
     remote="origin"; br=""
-    while [ $# -gt 0 ]; do case "$1" in --remote) remote="$2"; shift 2;; --branch) br="$2"; shift 2;; *) break;; esac; done
-    [ -n "$br" ] && git pull "$remote" "$br" >/dev/null || git pull >/dev/null
+    while [ $# -gt 0 ]; do case "$1" in --remote) remote="$2"; shift 2;; --branch) br="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
+    [ -n "$br" ] && { git pull "$remote" "$br" >/dev/null; } || { [ -z "$br" ] && git pull >/dev/null; }
     add_row 1 pull OK "${remote}${br:+/$br}"
     ;;
 
   push)
-    remote="origin"; br=""
-    while [ $# -gt 0 ]; do case "$1" in --remote) remote="$2"; shift 2;; --branch) br="$2"; shift 2;; *) break;; esac; done
+    remote="origin"; br=""; force=""
+    while [ $# -gt 0 ]; do case "$1" in --remote) remote="$2"; shift 2;; --branch) br="$2"; shift 2;; --force) force="-f"; shift 1;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
     ensure_askpass
-    [ -n "$br" ] && git push "$remote" "$br" >/dev/null || git push >/dev/null
-    add_row 1 push OK "${remote}${br:+/$br}"
+    # [gh-sync-push-explicit] 10-03 硬化（失误盘点 backlog §51）：缺 --branch 时解析当前分支，不再裸
+    # push —— 裸 push 在无 upstream 的新分支上失败且易被吞（复发 ≥4：盘点条目 208/212/255/284）。
+    if [ -z "$br" ]; then
+      br="$(git branch --show-current)"
+      [ -n "$br" ] || { err "push: no --branch given and no current branch"; exit 1; }
+    fi
+    if [ -n "$force" ]; then git push -f "$remote" "$br" >/dev/null; else git push "$remote" "$br" >/dev/null; fi
+    # [gh-sync-push-verify] 推送后核验（条目 277/280 假成功同族）：远端必须真的有该分支，否则 exit 1。
+    git ls-remote --heads "$remote" "$br" | grep -q "refs/heads/$br\$" || { err "push verification failed: refs/heads/$br not on $remote"; exit 1; }
+    # ⚠️ 机制提醒（复发 ≥3 次后加）：build-apk.yml 的 on:push 限定 branches:[main]，
+    # 非 main 分支的 push 永远不会触发 CI —— 分支 CI 只能 workflow_dispatch 手动触发。
+    # 把提醒塞进 push 的输出里，让 agent 在每次推分支时都看到，不靠记忆。
+    if [ "$br" != "main" ]; then
+      add_row 1 push OK "${remote}/${br}；⚠️ 分支 push 不触发 CI（build-apk.yml 只认 main）——分支 CI 需手动 dispatch：gh-actions-dispatch --workflow build-apk.yml --ref ${br}"
+    else
+      add_row 1 push OK "${remote}/${br}"
+    fi
     ;;
 
   stash)
@@ -328,7 +343,7 @@ case "$cmd" in
 
   tag)
     name=""; msg=""
-    while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift 2;; --message) msg="$2"; shift 2;; *) break;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift 2;; --message) msg="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
     [ -n "$name" ] || { err "--name required"; usage; exit 1; }
     [ -n "$msg" ] && git tag -a "$name" -m "$msg" || git tag "$name"
     add_row 1 tag OK "$name"
@@ -348,14 +363,46 @@ case "$cmd" in
       case "$1" in
         --keep) keep="$2"; shift 2;;
         --yes) yes="--yes"; shift 1;;
-        *) break;;
+        *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;;
       esac
     done
     need_yes "$yes"
     ensure_askpass
-    i=1
-    for b in $(git branch --format='%(refname:short)'); do [ "$b" = "$keep" ] && continue; git branch -D "$b" >/dev/null 2>&1 || true; add_row "$i" "delete local branch" OK "$b"; i=$((i+1)); done
-    for rb in $(git branch -r --format='%(refname:short)' | grep '^origin/' | sed 's#^origin/##'); do [ "$rb" = "$keep" ] && continue; git push origin --delete "$rb" >/dev/null 2>&1 || true; add_row "$i" "delete remote branch" OK "origin/$rb"; i=$((i+1)); done
+    # [gh-sync-delete-verify] 10-03 硬化（失误盘点 backlog §51）：此前 || true 吞掉全部失败、
+    # add_row 无条件记 OK —— 9 个分支假成功 0 删除（盘点条目 277；182 同族）。现在逐条记
+    # 实际结果，任何一条失败即非零退出，add_row 不再撒谎。
+    i=1; failn=0
+    # [gh-sync-foreachref] §59 修：detached HEAD 下 git branch --format 输出合成行
+    # "(HEAD detached at <sha>)"，被空格切 4 token → -D 各失败一次 → failn 假 4。
+    # for-each-ref 只列真实分支（实测对照 10-06）。
+    for b in $(git for-each-ref refs/heads --format='%(refname:short)'); do
+      [ "$b" = "$keep" ] && continue
+      if git branch -D "$b" >/dev/null 2>&1; then
+        add_row "$i" "delete local branch" OK "$b"
+      else
+        add_row "$i" "delete local branch" FAIL "$b"; failn=$((failn+1))
+      fi
+      i=$((i+1))
+    done
+    for rb in $(git branch -r --format='%(refname:short)' | grep '^origin/' | sed 's#^origin/##'); do
+      [ "$rb" = "$keep" ] && continue
+      if git push origin --delete "$rb" >/dev/null 2>&1; then
+        add_row "$i" "delete remote branch" OK "origin/$rb"
+      elif [ -z "$(git ls-remote --heads origin "refs/heads/$rb" 2>/dev/null)" ]; then
+        # [gh-sync-delete-stale] §66 修：push 失败但远端已无此分支 = 目标态已达成
+        # （stale tracking ref 或并发已删），清掉本地 ref、记 OK，不计 failn。
+        # 此前 stale ref 一律 FAIL → rc=1 假失败（10-06 实测误导一轮排查）。
+        git update-ref -d "refs/remotes/origin/$rb" 2>/dev/null
+        add_row "$i" "delete remote branch" OK "origin/$rb (already gone, stale ref cleared)"
+      else
+        add_row "$i" "delete remote branch" FAIL "origin/$rb"; failn=$((failn+1))
+      fi
+      i=$((i+1))
+    done
+    # [gh-sync-delete-summary] §66 修：失败出口补 print_summary —— 此前 exit 1 跳过脚本末尾
+    # 的表格打印，报「N failure(s) — see summary rows」但 rows 从未输出（同文件 L471/L644
+    # 失败路径均有提前调用，此处遗漏）。
+    [ "$failn" -eq 0 ] || { print_summary; err "delete-branches: $failn failure(s) — see summary rows"; exit 1; }
     ;;
 
   empty-dir)
@@ -364,7 +411,7 @@ case "$cmd" in
       case "$1" in
         --dir) dir="$2"; shift 2;;
         --yes) yes="--yes"; shift 1;;
-        *) break;;
+        *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;;
       esac
     done
     [ -n "$dir" ] || { err "--dir required"; usage; exit 1; }
@@ -383,7 +430,7 @@ case "$cmd" in
         --src) src="$2"; shift 2;;
         --dst) dst="$2"; shift 2;;
         --yes) yes="--yes"; shift 1;;
-        *) break;;
+        *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;;
       esac
     done
     [ -n "$src" ] && [ -n "$dst" ] || { err "--src and --dst required"; usage; exit 1; }
@@ -403,7 +450,7 @@ case "$cmd" in
     while [ $# -gt 0 ]; do
       case "$1" in
         --yes) yes="--yes"; shift 1;;
-        *) break;;
+        *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;;
       esac
     done
     need_yes "$yes"
@@ -417,7 +464,7 @@ case "$cmd" in
 
   pr)
     upstream=""; head=""; base="main"; title=""; body=""
-    while [ $# -gt 0 ]; do case "$1" in --upstream) upstream="$2"; shift 2;; --head) head="$2"; shift 2;; --base) base="$2"; shift 2;; --title) title="$2"; shift 2;; --body) body="$2"; shift 2;; *) break;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in --upstream) upstream="$2"; shift 2;; --head) head="$2"; shift 2;; --base) base="$2"; shift 2;; --title) title="$2"; shift 2;; --body) body="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
     [ -n "$upstream" ] && [ -n "$head" ] && [ -n "$title" ] || { err "--upstream --head --title required"; usage; exit 1; }
     need_env GITHUB_TOKEN
     export UP="$upstream" HEAD="$head" BASE="$base" TITLE="$title" BODY="$body"
@@ -437,7 +484,7 @@ except urllib.error.HTTPError as e:
 
   gh-issues-list)
     repo=""; state="open"
-    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --state) state="$2"; shift 2;; *) break;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --state) state="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
     [ -n "$repo" ] || repo="$(infer_repo)"
     [ -n "$repo" ] || { err "--repo required (or set origin remote)"; exit 1; }
     need_env GITHUB_TOKEN
@@ -452,7 +499,7 @@ print("; ".join(lines))' 2>/dev/null)" || true
 
   gh-issue-create)
     repo=""; title=""; body=""
-    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --title) title="$2"; shift 2;; --body) body="$2"; shift 2;; *) break;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --title) title="$2"; shift 2;; --body) body="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
     [ -n "$repo" ] || repo="$(infer_repo)"
     [ -n "$repo" ] && [ -n "$title" ] || { err "--repo (or origin remote) and --title required"; exit 1; }
     need_env GITHUB_TOKEN
@@ -467,7 +514,7 @@ except urllib.error.HTTPError as e:
 
   gh-issue-close)
     repo=""; num=""
-    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --number) num="$2"; shift 2;; *) break;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --number) num="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
     [ -n "$repo" ] || repo="$(infer_repo)"
     [ -n "$repo" ] && [ -n "$num" ] || { err "--repo (or origin remote) and --number required"; exit 1; }
     need_env GITHUB_TOKEN
@@ -488,7 +535,7 @@ except urllib.error.HTTPError as e:
 
   gh-label-create)
     repo=""; name=""; color=""; desc=""
-    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --name) name="$2"; shift 2;; --color) color="$2"; shift 2;; --description) desc="$2"; shift 2;; *) break;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --name) name="$2"; shift 2;; --color) color="$2"; shift 2;; --description) desc="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
     [ -n "$repo" ] || repo="$(infer_repo)"
     [ -n "$repo" ] && [ -n "$name" ] || { err "--repo (or origin remote) and --name required"; exit 1; }
     need_env GITHUB_TOKEN
@@ -499,18 +546,18 @@ except urllib.error.HTTPError as e:
 
   gh-milestones-list)
     repo=""; state="open"
-    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --state) state="$2"; shift 2;; *) break;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --state) state="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
     [ -n "$repo" ] || repo="$(infer_repo)"
     [ -n "$repo" ] || { err "--repo required (or set origin remote)"; exit 1; }
     need_env GITHUB_TOKEN
     export REPO="$repo" STATE="$state"
-    out="$(python3 -c 'import os,json,urllib.request; tok=os.environ["GITHUB_TOKEN"]; owner,repo=os.environ["REPO"].split("/",1); state=os.environ.get("STATE","open"); url=f"https://api.github.com/repos/{owner}/{repo}/milestones?state={state}&per_page=30"; req=urllib.request.Request(url,headers={"Authorization":"Bearer "+tok,"Accept":"application/vnd.github+json","User-Agent":"minis"}); data=json.load(urllib.request.urlopen(req,timeout=30)); print("; ".join([f"#{it['number']} {it['title']}" for it in data]))' 2>/dev/null)" || true
+    out="$(python3 -c 'import os,json,urllib.request; tok=os.environ["GITHUB_TOKEN"]; owner,repo=os.environ["REPO"].split("/",1); state=os.environ.get("STATE","open"); url=f"https://api.github.com/repos/{owner}/{repo}/milestones?state={state}&per_page=30"; req=urllib.request.Request(url,headers={"Authorization":"Bearer "+tok,"Accept":"application/vnd.github+json","User-Agent":"minis"}); data=json.load(urllib.request.urlopen(req,timeout=30)); print("; ".join(["#%s %s" % (it.get("number"), it.get("title")) for it in data]))' 2>/dev/null)" || true
     add_row 1 gh-milestones-list OK "$out"
     ;;
 
   gh-milestone-create)
     repo=""; title=""; desc=""; due=""
-    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --title) title="$2"; shift 2;; --description) desc="$2"; shift 2;; --due) due="$2"; shift 2;; *) break;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --title) title="$2"; shift 2;; --description) desc="$2"; shift 2;; --due) due="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
     [ -n "$repo" ] || repo="$(infer_repo)"
     [ -n "$repo" ] && [ -n "$title" ] || { err "--repo (or origin remote) and --title required"; exit 1; }
     need_env GITHUB_TOKEN
@@ -533,7 +580,7 @@ data=json.dumps(payload).encode("utf-8"); req=urllib.request.Request(f"https://a
 
   gh-release-create)
     repo=""; tag=""; name=""; body=""; draft="false"; pre="false"
-    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --tag) tag="$2"; shift 2;; --name) name="$2"; shift 2;; --body) body="$2"; shift 2;; --draft) draft="$2"; shift 2;; --prerelease) pre="$2"; shift 2;; *) break;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --tag) tag="$2"; shift 2;; --name) name="$2"; shift 2;; --body) body="$2"; shift 2;; --draft) draft="$2"; shift 2;; --prerelease) pre="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
     [ -n "$repo" ] || repo="$(infer_repo)"
     [ -n "$repo" ] && [ -n "$tag" ] && [ -n "$name" ] || { err "--repo (or origin remote), --tag, --name required"; exit 1; }
     need_env GITHUB_TOKEN
@@ -548,13 +595,13 @@ data=json.dumps(payload).encode("utf-8"); req=urllib.request.Request(f"https://a
     [ -n "$repo" ] || { err "--repo required (or set origin remote)"; exit 1; }
     need_env GITHUB_TOKEN
     export REPO="$repo"
-    out="$(python3 -c 'import os,json,urllib.request; tok=os.environ["GITHUB_TOKEN"]; owner,repo=os.environ["REPO"].split("/",1); url=f"https://api.github.com/repos/{owner}/{repo}/actions/workflows?per_page=50"; req=urllib.request.Request(url,headers={"Authorization":"Bearer "+tok,"Accept":"application/vnd.github+json","User-Agent":"minis"}); data=json.load(urllib.request.urlopen(req,timeout=30)); w=data.get("workflows",[]); print("; ".join([f"{it['id']} {it['name']}" for it in w[:20]]))' 2>/dev/null)" || true
+    out="$(python3 -c 'import os,json,urllib.request; tok=os.environ["GITHUB_TOKEN"]; owner,repo=os.environ["REPO"].split("/",1); url=f"https://api.github.com/repos/{owner}/{repo}/actions/workflows?per_page=50"; req=urllib.request.Request(url,headers={"Authorization":"Bearer "+tok,"Accept":"application/vnd.github+json","User-Agent":"minis"}); data=json.load(urllib.request.urlopen(req,timeout=30)); w=data.get("workflows",[]); print("; ".join(["%s %s" % (it.get("id"), it.get("name")) for it in w[:20]]))' 2>/dev/null)" || true
     add_row 1 gh-actions-list OK "$out"
     ;;
 
   gh-actions-runs)
     repo=""; status=""; branch=""
-    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --status) status="$2"; shift 2;; --branch) branch="$2"; shift 2;; *) break;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --status) status="$2"; shift 2;; --branch) branch="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
     [ -n "$repo" ] || repo="$(infer_repo)"
     [ -n "$repo" ] || { err "--repo required (or set origin remote)"; exit 1; }
     need_env GITHUB_TOKEN
@@ -564,18 +611,25 @@ if status: qs.append("status="+status)
 if branch: qs.append("branch="+branch)
 url=f"https://api.github.com/repos/{owner}/{repo}/actions/runs?"+"&".join(qs); req=urllib.request.Request(url,headers={"Authorization":"Bearer "+tok,"Accept":"application/vnd.github+json","User-Agent":"minis"}); d=json.load(urllib.request.urlopen(req,timeout=30)); runs=d.get("workflow_runs",[]); lines=[]
 for r in runs[:10]:
-  lines.append(f"#{r.get('run_number')} {r.get('name')} {r.get('status')} {r.get('conclusion')}")
+  lines.append("#%s %s %s %s" % (r.get("run_number"), r.get("name"), r.get("status"), r.get("conclusion")))
 print("; ".join(lines))' 2>/dev/null)" || true
     add_row 1 gh-actions-runs OK "$out"
     ;;
 
   gh-actions-dispatch)
     repo=""; wf=""; ref="main"; inputs="{}"
-    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --workflow) wf="$2"; shift 2;; --ref) ref="$2"; shift 2;; --inputs) inputs="$2"; shift 2;; *) break;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --workflow) wf="$2"; shift 2;; --ref) ref="$2"; shift 2;; --inputs) inputs="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
     [ -n "$repo" ] || repo="$(infer_repo)"
     [ -n "$repo" ] && [ -n "$wf" ] || { err "--repo (or origin remote) and --workflow required"; exit 1; }
     need_env GITHUB_TOKEN
     export REPO="$repo" WF="$wf" REF="$ref" INPUTS="$inputs"
+    # [gh-sync-dispatch-verify] 10-03 硬化（失误盘点 backlog §51）：204 不保证 run 已创建
+    # （盘点条目 176，连续两次）。以「出现比 dispatch 前更新的 workflow_dispatch run」为准，
+    # ~15 秒内没出现 = FAIL 并非零退出。
+    latest_run() {
+      python3 -c 'import os,json,urllib.request; tok=os.environ["GITHUB_TOKEN"]; owner,repo=os.environ["REPO"].split("/",1); ref=os.environ["REF"]; url=f"https://api.github.com/repos/{owner}/{repo}/actions/runs?event=workflow_dispatch&branch={ref}&per_page=1"; req=urllib.request.Request(url,headers={"Authorization":"Bearer "+tok,"Accept":"application/vnd.github+json","User-Agent":"minis"}); d=json.load(urllib.request.urlopen(req,timeout=30)); runs=d.get("workflow_runs",[]); print(runs[0].get("created_at","") if runs else "")' 2>/dev/null || true
+    }
+    before="$(latest_run)"
     out="$(python3 -c 'import os,json,urllib.request,urllib.error; tok=os.environ["GITHUB_TOKEN"]; owner,repo=os.environ["REPO"].split("/",1); wf=os.environ["WF"]; ref=os.environ.get("REF","main");
 try:
   inputs=json.loads(os.environ.get("INPUTS","{}") or "{}")
@@ -586,23 +640,35 @@ try:
   r=urllib.request.urlopen(req,timeout=30); print(getattr(r,"status",204))
 except urllib.error.HTTPError as e:
   print(e.code)' 2>/dev/null)" || true
-    add_row 1 gh-actions-dispatch OK "$out"
+    ok=0; after=""
+    for a in 1 2 3 4 5; do
+      sleep 3
+      after="$(latest_run)"
+      if [ -n "$after" ] && [ "$after" != "$before" ]; then ok=1; break; fi
+    done
+    if [ "$ok" -eq 1 ]; then
+      add_row 1 gh-actions-dispatch OK "$out; run created at $after"
+    else
+      add_row 1 gh-actions-dispatch FAIL "$out; no new workflow_dispatch run for $ref within ~15s（查 workflow 名/触发器）"
+      print_summary
+      exit 1
+    fi
     ;;
 
   gh-pr-list)
     repo=""; state="open"
-    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --state) state="$2"; shift 2;; *) break;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --state) state="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
     [ -n "$repo" ] || repo="$(infer_repo)"
     [ -n "$repo" ] || { err "--repo required (or set origin remote)"; exit 1; }
     need_env GITHUB_TOKEN
     export REPO="$repo" STATE="$state"
-    out="$(python3 -c 'import os,json,urllib.request; tok=os.environ["GITHUB_TOKEN"]; owner,repo=os.environ["REPO"].split("/",1); state=os.environ.get("STATE","open"); url=f"https://api.github.com/repos/{owner}/{repo}/pulls?state={state}&per_page=20"; req=urllib.request.Request(url,headers={"Authorization":"Bearer "+tok,"Accept":"application/vnd.github+json","User-Agent":"minis"}); arr=json.load(urllib.request.urlopen(req,timeout=30)); lines=[f"#{p.get('number')} {p.get('title')} ({p.get('state')})" for p in arr[:20]]; print("; ".join(lines))' 2>/dev/null)" || true
+    out="$(python3 -c 'import os,json,urllib.request; tok=os.environ["GITHUB_TOKEN"]; owner,repo=os.environ["REPO"].split("/",1); state=os.environ.get("STATE","open"); url=f"https://api.github.com/repos/{owner}/{repo}/pulls?state={state}&per_page=20"; req=urllib.request.Request(url,headers={"Authorization":"Bearer "+tok,"Accept":"application/vnd.github+json","User-Agent":"minis"}); arr=json.load(urllib.request.urlopen(req,timeout=30)); lines=["#%s %s (%s)" % (p.get("number"), p.get("title"), p.get("state")) for p in arr[:20]]; print("; ".join(lines))' 2>/dev/null)" || true
     add_row 1 gh-pr-list OK "$out"
     ;;
 
   gh-pr-close)
     repo=""; num=""
-    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --number) num="$2"; shift 2;; *) break;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --number) num="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
     [ -n "$repo" ] || repo="$(infer_repo)"
     [ -n "$repo" ] && [ -n "$num" ] || { err "--repo (or origin remote) and --number required"; exit 1; }
     need_env GITHUB_TOKEN
@@ -613,7 +679,7 @@ except urllib.error.HTTPError as e:
 
   gh-pr-merge)
     repo=""; num=""; method="merge"
-    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --number) num="$2"; shift 2;; --method) method="$2"; shift 2;; *) break;; esac; done
+    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --number) num="$2"; shift 2;; --method) method="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
     [ -n "$repo" ] || repo="$(infer_repo)"
     [ -n "$repo" ] && [ -n "$num" ] || { err "--repo (or origin remote) and --number required"; exit 1; }
     need_env GITHUB_TOKEN
