@@ -1642,4 +1642,8 @@
     <string name="scheduled_delete_body">「%1$s」は完全に削除されます。</string>
     <string name="scheduled_fuse_notification_title">定時タスクを停止しました</string>
     <string name="scheduled_fuse_notification_body">「%1$s」が %2$d 回連続で失敗したため停止しました。設定から再開できます。</string>
+
+    <string name="backup_passphrase_title">暗号化されたバックアップ</string>
+    <string name="backup_passphrase_body">この OpenMinis パッケージは暗号化されています（minisbak-enc/1）。エクスポート時に設定したパスフレーズを入力してください。</string>
+    <string name="backup_passphrase_label">パスフレーズ</string>
 </resources>

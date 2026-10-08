@@ -1644,4 +1644,8 @@
     <string name="scheduled_delete_body">„%1$s“ wird endgültig gelöscht.</string>
     <string name="scheduled_fuse_notification_title">Geplante Aufgabe pausiert</string>
     <string name="scheduled_fuse_notification_body">„%1$s“ ist %2$d-mal hintereinander fehlgeschlagen und wurde deaktiviert. In den Einstellungen fortsetzbar.</string>
+
+    <string name="backup_passphrase_title">Verschlüsseltes Backup</string>
+    <string name="backup_passphrase_body">Dieses OpenMinis-Paket ist verschlüsselt (minisbak-enc/1). Geben Sie die beim Export verwendete Passphrase ein.</string>
+    <string name="backup_passphrase_label">Passphrase</string>
 </resources>

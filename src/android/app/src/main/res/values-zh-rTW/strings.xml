@@ -1644,4 +1644,8 @@
     <string name="scheduled_delete_body">「%1$s」將被永久刪除。</string>
     <string name="scheduled_fuse_notification_title">排程任務已暫停</string>
     <string name="scheduled_fuse_notification_body">「%1$s」連續失敗 %2$d 次，已自動停用。可於設定中恢復。</string>
+
+    <string name="backup_passphrase_title">加密備份套件</string>
+    <string name="backup_passphrase_body">此 OpenMinis 備份套件已加密（minisbak-enc/1）。請輸入匯出時設定的密碼。</string>
+    <string name="backup_passphrase_label">密碼</string>
 </resources>

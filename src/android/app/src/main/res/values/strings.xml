@@ -1188,6 +1188,9 @@
     <string name="backup_err_write">Failed to write file: %1$s</string>
     <string name="backup_err_read">Could not read the selected file</string>
     <string name="backup_err_import">Import failed</string>
+    <string name="backup_passphrase_title">Encrypted backup</string>
+    <string name="backup_passphrase_body">This OpenMinis package is encrypted (minisbak-enc/1). Enter the passphrase that was used when it was exported.</string>
+    <string name="backup_passphrase_label">Passphrase</string>
     <string name="backup_err_busy">A backup or restore is already in progress — please wait for it to finish.</string>
     <string name="backup_err_title">Something went wrong</string>
     <string name="backup_done_summary">Imported %1$d settings and %2$d providers.</string>

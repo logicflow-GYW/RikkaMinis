@@ -135,3 +135,6 @@ deps/lame-3.100/**/*.la
 deps/lame-3.100/**/*.lai
 deps/lame-3.100/**/.libs/
 deps/lame-3.100/**/.deps/
+
+# Kotlin 编译器的会话/保活文件（构建产物，不入库）
+/src/android/.kotlin/
