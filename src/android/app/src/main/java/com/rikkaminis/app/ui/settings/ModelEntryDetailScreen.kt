@@ -12,6 +12,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,7 +56,10 @@ fun ModelEntryDetailScreen(
     val instance = config.instances.find { it.id == instanceId }
 
     if (entry == null) {
-        onBack()
+        // [S6-composition-back] onBack() during composition is a Compose
+        // anti-pattern (re-fires on every recomposition of this branch) —
+        // wrap in LaunchedEffect like ModelGroupDetailScreen/MountDetailScreen.
+        LaunchedEffect(Unit) { onBack() }
         return
     }
 

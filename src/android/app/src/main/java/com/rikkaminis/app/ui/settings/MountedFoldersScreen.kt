@@ -72,7 +72,9 @@ import com.rikkaminis.app.R
 import com.rikkaminis.app.data.MountedFoldersStore
 import com.rikkaminis.app.data.SafMountHelper
 import com.rikkaminis.app.ui.components.DialogTextField
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.rikkaminis.app.ui.theme.ChatColors
 
 /**
@@ -251,7 +253,15 @@ fun MountedFoldersScreen(
                         val dismissState = rememberSwipeToDismissBoxState()
                         LaunchedEffect(dismissState.currentValue) {
                             if (dismissState.currentValue == SwipeToDismissBoxValue.EndToStart) {
-                                scope.launch { store.remove(entry.id) }
+                                // [S1-noncancellable-remove] Same family as
+                                // 9fd86c4b (detail-page path): remove() triggers
+                                // a save whose disk write must survive scope
+                                // cancellation — a swipe followed by quickly
+                                // leaving the page on slow IO could otherwise
+                                // cancel mid-save and resurrect the folder.
+                                scope.launch {
+                                    withContext(NonCancellable) { store.remove(entry.id) }
+                                }
                             }
                         }
                         SwipeToDismissBox(

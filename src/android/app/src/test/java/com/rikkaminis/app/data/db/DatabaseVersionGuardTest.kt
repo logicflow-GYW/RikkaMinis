@@ -113,9 +113,9 @@ class DatabaseVersionGuardTest {
     @Test
     fun `isHandledDowngrade - whitelists exactly the wired 13-to-12`() {
         // The 12 → 13 bump wired MIGRATION_13_12 (empty-body reverse of a
-        // partial ADD INDEX). The whitelist must name exactly that pair: the
-        // 25x25 sweep below is the guard against a half-landed or silently
-        // widened bump. See HANDLED_DOWNGRADES.
+        // plain ADD INDEX declared on MessageEntity). The whitelist must name
+        // exactly that pair: the 25x25 sweep below is the guard against a
+        // half-landed or silently widened bump. See HANDLED_DOWNGRADES.
         val hits = (0..25).flatMap { code ->
             (0..25).map { onDisk -> onDisk to code }
         }.filter { DatabaseVersionGuard.isHandledDowngrade(it.first, it.second) }

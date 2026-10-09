@@ -186,6 +186,12 @@ class CompactCancelOnStopTest {
         assertTrue("raw-id verify missing CancellationException rethrow", ce >= 0)
         assertTrue("raw-id verify missing generic catch", generic >= 0)
         assertTrue("CE arm must precede the Exception arm or it gets swallowed", ce < generic)
+        // The CE arm must actually rethrow, not swallow: a keep-the-catch-
+        // order-but-drop-the-throw regression slips past the order asserts
+        // alone (mutation B, review-clearchat-compact-ce-1002 — 10/10 green
+        // with the swallow in place).
+        val ceArm = region.substring(ce, generic)
+        assertTrue("raw-id CE arm does not rethrow", ceArm.contains("throw e"))
     }
 
     /**

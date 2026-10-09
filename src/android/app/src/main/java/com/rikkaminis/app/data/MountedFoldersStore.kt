@@ -323,7 +323,7 @@ class MountedFoldersStore(private val context: Context) {
     private fun sanitizeName(raw: String): String {
         val trimmed = raw.trim()
         if (trimmed == "." || trimmed == "..") return ""
-        if (trimmed.contains('/') || trimmed.contains(' ')) return ""
+        if (trimmed.contains('/') || trimmed.contains('\u0000')) return ""
         return trimmed.take(MAX_NAME_LENGTH)
     }
 

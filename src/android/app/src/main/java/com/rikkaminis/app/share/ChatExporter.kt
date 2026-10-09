@@ -8,6 +8,7 @@ import com.rikkaminis.app.data.db.ChatSessionEntity
 import com.rikkaminis.app.data.db.MessageEntity
 import com.rikkaminis.app.data.repository.ChatRepository
 import com.rikkaminis.app.logging.AppLogger
+import com.rikkaminis.app.provider.openai.stripOrphanThinkClosers
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -186,7 +187,7 @@ object ChatExporter {
                 forEachBatch(repository, session.id, total) { batch ->
                     for (msg in batch) {
                         val role = if (msg.role == "user") "You" else "Assistant"
-                        val text = extractPlainText(msg.partsJson)
+                        val text = extractPlainText(msg.partsJson, msg.role)
                         writer.write(role)
                         writer.write(": ")
                         writer.write(text)
@@ -255,7 +256,7 @@ object ChatExporter {
         zos.closeEntry()
     }
 
-    private fun extractPlainText(partsJson: String): String = try {
+    private fun extractPlainText(partsJson: String, role: String): String = try {
         val arr = JSONArray(partsJson)
         val sb = StringBuilder()
         for (i in 0 until arr.length()) {
@@ -276,6 +277,12 @@ object ChatExporter {
                         value.substring(0, start)
                     }.trim()
                 }
+                // [fix-think-closer-third-face] Same orphan-closer rule as the
+                // UI transcript / send history / drawer faces
+                // (stripOrphanThinkClosersForRole): assistant rows only — a
+                // user row carries tool output where a `</thinking>` inside
+                // command stdout is evidence, not an artifact.
+                if (role == "assistant") value = stripOrphanThinkClosers(value)
                 if (value.isNotEmpty()) {
                     if (sb.isNotEmpty()) sb.append('\n')
                     sb.append(value)

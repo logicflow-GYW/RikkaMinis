@@ -299,8 +299,9 @@ abstract class AppDatabase : RoomDatabase() {
          */
         val MIGRATION_13_12 = object : Migration(13, 12) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                // Empty: ADD INDEX has a lossless no-op reverse (an extra
-                // index is ignored on open).
+                // Empty body: the index stays declared on MessageEntity, so
+                // re-opening a v12 file validates under v13 (see the
+                // MIGRATION_12_13 doc block for what Room checks).
             }
         }
 
