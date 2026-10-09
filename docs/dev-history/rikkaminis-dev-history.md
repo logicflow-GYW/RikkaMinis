@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-10-06）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-10-09）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-10-06，共 65 天
-- 条目总数：1546（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
-- 总字符数：2043144 / 总行数：28467
+- 合并范围：2026-08-03 ～ 2026-10-09，共 68 天
+- 条目总数：1592（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
+- 总字符数：2089842 / 总行数：29012
 
 ---
 
@@ -28460,6 +28460,551 @@ backlog 全文 1338 行逐条分类：**登记未修缺陷类 42 条，防御性
 - **装置自错×1（同族第 2 次值得警惕）**：audit.py 的 `find(x)` 取首次出现撞 L74 旧 `if(!isNew)` 块（文件里多处同模式）→ 守卫/位置 2 断言假红；修法=从 Save 文本之后定位。与昨天 audit.py 首跑 4 红同族：**期望值三件套（出现序/词边界/定位起点）先过再判缺陷**。
 - **待真机（4 项）**：①编辑页出现红色删除按钮（新建任务不出现）②点击弹确认框、取消不删 ③确认后任务消失并返回列表 ④删 running 任务运行标记清空、in-flight 不崩。
 - **报告**：`/var/minis/shared/work/review-sched-delete-1006/REPORT.md`。
+
+<!-- 2026-10-06 09:12:50 -->
+## dev-history 档案清理：新增 2 排除轴，去掉 21 条无关条目（10-06，用户报「最近几天无关的多」）
+
+
+- **触发**：用户要求更新开发档案并去除与 RikkaMinis 开发无关的部分。
+- **改动**（rebuild_dev_history.py EXCLUDE_AXES，title-only）：新轴 `自有其他项目`（workbuddy2api/wb2api/workbuddy/clashpilot/clashmetaforandroid/"cmfa 分支"）+ 新轴 `agent基建`（LEARN 边/遗忘层/待办登记纪律/agent 执行失误盘点/failure-inventory）+ 平台账号工具链轴加 gh_sync/沙箱缺陷注册表/proot 本地 git。
+- **关键判据**：ClashPilot/CMFA、WorkBuddy2API 是用户的其他仓库（完整项目线混进档案）；gh_sync 硬化/沙箱注册表/PRoot git 食谱是 agent 工具链；LEARN 边/遗忘层/执行失误盘点是 agent 自我改进——都不改 app 代码。**防误伤**：cmfa 用「cmfa 分支」而非裸词（tier1 双仓合并条目含「CMFA main=」但一半是 RM 工作要保留）；classify 是 title-only（body 匹配曾误删真修复），正文提及其他项目的 6 处开发条目全正确保留。
+- **结果**：排除 112→133 条（21 条新排除：ClashPilot×2、WorkBuddy×8、cmfa×4、wb2api×1、agent基建×6）；档案 1546 条目/28467 行，fences even、anchors==header、outOrder=0，sanitize 主档+INDEX+SAGAS 全 NONE；test_rebuild.py PASS。SKILL.md 轴表与 current state 已同步（7 轴）。
+- **教训**：新项目线开工时（如当时 wb2api）就应想到「这不是 app 开发，日志会混档」——排除轴滞后于项目线出现是混档根因；下次开新项目线时顺手在当日日志标题带上项目名（title-only 匹配靠标题）。
+
+<!-- 2026-10-06 09:41:38 -->
+## dev-history 云端同步完成：docs-only 归档同步 82410cc 直推 main（沿用该目录 6 先例
+
+- **dev-history 云端同步完成**：docs-only 归档同步 82410cc 直推 main（沿用该目录 6 先例惯例），remote sha==local 逐字符一致；**docs-only 提交不触发 CI 是预期行为**——build-apk.yml 的 on:push 配了 paths 过滤（src/android、src/shared、deps、workflow 自身），docs/** 不在列表，与「非 main 分支必须手动 dispatch」同族（这次是「docs-only 不触发」，不是失败，别等 run）。
+- **dev-history 副本全景**（用户问「不止这一份」）：①本地 mount 笔记/RikkaMinis开发档案/ 三件套 ②云端 RikkaMinis/docs/dev-history/（README+三件套）——两处已同步（1546 条/65 天/排除 133）；③repo-docs/ 是 8 月仓库文档快照不含 dev-history；④mount 里另有 4 份手写精炼文档（开发时间线全记录→08-14、阶段总结→09-22〔引用「1204 条/23 主题线」已漂移〕、五日梳理 09-17~21、资产清单 09-22）——手写文档非自动产物，未动，待用户决定是否重做。
+- **口径提醒**：档案「总字符数」（字符数）与文件字节数差 ~1.5x 是 UTF-8 中文 3 字节/字，不是内容丢失——比对版本先看 header 的条目数与字符数，别拿 ls 字节数直接比。
+
+<!-- 2026-10-06 12:25:13 -->
+## 对象：上游 OpenMinis v1.15-beta.1（10-01）+ beta.2（10-04）。逐项过修复门核查
+
+**对象**：上游 OpenMinis v1.15-beta.1（10-01）+ beta.2（10-04）。逐项过修复门核查 fork 同族 @273aecc6。
+**总判**：~20 新功能 + ~15 修复里 7 项 fork 已覆盖或领先（bridge row 单 UI sink 反超上游）、1 项形态不同、6 项 P2 登记不修、8 项功能候选仅「提问卡片」过一阶门。
+**fork 已覆盖（重要防重复调查）**：大文件 32MB cap（比上游 8MB 宽）+ T-FILEREAD-CAP、工具折叠（ChatFlatItems:424）、shell 超时（ChatShellExecution:258）、bridge row 过滤（ChatViewModel:487 T-bridge-message-ui-leak，fork 早于上游）、工具胶囊防超权（sendEpoch/claimEpoch）。
+**P2 池已登记 backlog §65**：文件工具无超时、工具耗时重开丢失（ChatMessageJson 无 duration）、TLS 证书未命名+通用重试、FGS 拒绝防护、auto-retry 徽标（状态有 UI 无）、minis-config 可读化、env var 停用。
+**功能候选**：提问卡片（assistant→user 反向提问，跨进程存活）= 唯一过一阶门；如做先种子（仅单选+确认，wizard 后置）。quota/balance、Share Chat 长图、应用内更新渠道、嵌套工具参数 = 不立项。
+**报告**：`/var/minis/shared/work/openminis-port-115-1006/REPORT.md`。
+
+<!-- 2026-10-06 14:00:07 -->
+## 提问卡片降级（2026-10-06 用户拍板：不立项/花架子）：用户质疑「agent 日常直接问就行，卡片是炫酷功能」。
+
+**提问卡片降级（2026-10-06 用户拍板：不立项/花架子）**：用户质疑「agent 日常直接问就行，卡片是炫酷功能」。重过一阶门证实判定修正：纯文本提问已覆盖「追问并等待」（turn 结束问、历史持久、杀掉重问上下文成本≈0），卡片四项差量全是装饰——结构化选项（小便利）、确认门（fork 已有应用内确认 UI+风险门）、跨 App 存活（纯文本问句同样存活）、中途阻塞（turn 便宜假差量）。唯一说得通场景 = 用户缺席时的挂起决策（定时任务/后台 run 遇分叉等人），但 fork 定时任务 L0 零次实测事件。已落 backlog §65（降级）+ REPORT.md（三处同步：功能候选表/总判/§65）。**升级触发 = 后台/定时任务出现「需要用户缺席决策」的实测事件（真机日志或用户报告）**，届时做缺席场景最小形态（挂起+回来作答，不带选项/向导）。方法论注：上轮判「过一阶门」的「agent 能做之前做不到的事」这句话写得太宽——追问并等待本来就是纯文本可达的能力，判定新能力时要先问「现有路径是不是已经做到了」。
+
+<!-- 2026-10-06 14:25:48 -->
+## 触发：用户拍板筛选标准——「攒着的那些事项，确定需要修并且不引入副作用的，就是有根本原因之类的」= 对 backlog
+
+**触发**：用户拍板筛选标准——「攒着的那些事项，确定需要修并且不引入副作用的，就是有根本原因之类的」= 对 backlog 活项按三条件（确定要修/无副作用/有根因）筛出即修。
+
+**修了 4 项（脚本 3 + 仓库 1 批）**：
+- §59 gh_sync.sh delete-branches detached 假 FAIL：本地循环 + branches 列举改 `git for-each-ref refs/heads`（`[gh-sync-foreachref]`）。实测双源：旧写法 detached 负向对照 failn=4（合成行切 4 token 复现）；新写法同仓库 rc=0。
+- §60 verify_branch.sh 不认 worktree：入口改 `git -C rev-parse --git-dir`（`[verify-worktree-form]`）。实测：worktree 复跑入口通过、非 git 目录仍 exit 2。
+- §64 **无需修**：脚本内 `[verify-zero-diff-guard]` 09-26（mtime 证据）就已存在，对 DIFF_LINES==0 显式判 FAIL；负向对照（orphan 分支无共同历史 + 三点 diff 静默空）实测守卫拦住「FAIL: diff 为 0 行」→ 汇总有 FAIL exit 1。登记时「脚本不校验 diff 非空」与现场不符（整体不会假过）。
+- §57+§62 仓库批：分支 `chore/backlog-batch-1006` @ `5c5cd126`（git rm .commitmsg + CompactOrchestration 5 个同包 import 删除，五符号均在 conversation 包核实）。CI run 37422390073 success，head_sha 逐字符一致（bridge+API 双源）。**停在分支，合并权在用户。**
+
+**继续攒（不符合三条件）**：§65 六项/§44/§35/§45 F2·F8/§41-3（无触发证据 latent）、§61（抖动根因未明+有绕过）、§27c(1)/§39（改动大有副作用风险）、§48/§49/§52/§53/§56/§63（等数据或等升级触发）。
+
+**backlog 四条已标记**（§57/§59/§60/§62 ✅ + §64 无需修）。
+
+<!-- 2026-10-06 14:26:39 -->
+## chore/backlog-batch-1006 核查完成（云端分支检查，CI 绿 @5c5cd126）
+
+- **对象**：`chore/backlog-batch-1006` @ `5c5cd126`（1 commit，相对 main 纯删除 2 文件 -20 行）：删 `.commitmsg`（backlog §57）+ 删 CompactOrchestration.kt 5 个同包冗余 import（§62：CompactPin.kt ×4 + ContextCompactor ×1，全在 conversation 包）。
+- **CI**：run 37422390073 success（06:11:34Z→06:23:08Z，head_sha 逐字符一致双源；Publish to Releases 正确 skip）。verify_branch.sh 机械项全过（冲突 0、scan 20/20、four-way 全层一致、scan_debt 0、i18n AUTO-SKIP、CI 门禁四项全中）。
+- **独立核查**：5 符号定义包实证（同包免 import = Kotlin 语义，零行为变化）；.commitmsg 全仓零引用（唯一命中 docs/dev-history 为叙述非引用）。
+- **发现并修正（backlog §57 归因偏差）**：实际引入提交 = `35d3a9bd`（08-18 15:44 直提 main first-parent——audit-RC1 的 commit 草稿随提交误加入，当时分支隔离纪律尚未建立）；**非**「4f40e4a（10-05）误带入」——4f40e4a 只是它被注意到的核查窗口。验证：`git merge-base --is-ancestor 35d3a9bd 4f40e4a^1`=YES。已加「引入史核实」注记（保留原叙述，不改历史痕迹）。
+- **状态**：停止节点（分支 CI 绿），停在分支，合并权在用户。本地主 clone 停在该分支、工作树干净。
+
+<!-- 2026-10-06 14:54:56 -->
+## chore/backlog-batch-1006 合并完成 + delete-branches 「1 failure」追查闭环（10-06 下午）
+
+- **合并**：`chore/backlog-batch-1006` → main **`df1f0fea`**（parents 82410cc3+5c5cd126；merge tree==branch tree 逐字符；推送 82410cc3..df1f0fea）。main CI run **37424112377** success（13.7 分钟，head_sha 逐字符一致双源，含正常发布步骤）。分支本地/远端已删（仅剩 main）。
+- **「1 failure」真相（首跑 delete-branches 报 rc=1 但无表格）**：受控实验复现——①本地 stale remote-tracking ref（远端已删未 prune）使 `git push origin --delete` 必然失败 → failn=1；②失败路径 `exit 1` 跳过脚本末尾 `print_summary`（L688）→ 表格整表丢失（同文件 L471/L644 有提前调用，此处漏——同族第三处）。**删除操作本身全部成功**（终态干净、prune 后复跑空表 rc=0）；实验与首跑输出逐字符一致（探针已清理）。
+- **登记**：backlog **§66**（P1 待拍板；A 输出修复必做=exit 前补 print_summary，B 假失败修复可选=远端循环前 prune 或 ls-remote 甄别）。
+- **backlog 更新**：§57/§62 注记补「已合并 main `df1f0fea`」。
+- **教训（可复用）**：`git branch -r`/remote-tracking refs ≠ 远端真实状态（含 stale ref + origin/HEAD 合成行）；遍历它们做远端操作前要有 stale 处理或 prune；「输出说 see XX 但 XX 没显示」= 先查 exit/打印路径再怀疑内容。
+
+<!-- 2026-10-06 16:41:21 -->
+## 应用现状指标全盘盘点（10-06 晚，用户问「各项指标什么样、推到哪一阶段」）
+
+
+**报告**：`/var/minis/shared/work/app-status-1006/REPORT.md`（全数字实测，含来源口径）。
+
+**阶段判定**：从「能跑的自用原型」进入「工程化私产产品」成熟段；开发模式从「功能推进」切换为「可靠性纵深 + 修复闭环」。
+
+**核心数字**（便于未来对比的快照）：
+- 代码：main 196,121 行（576 文件）+ test 58,708 行（321 文件）/ @Test 3,763；总提交 1,493（04-25 起）；近 7 天净 +15,547 行
+- 节奏：近 30 天提交 576、合并 116；近 7 天合并 25（全 fix/refactor/chore 类）
+- CI：总 1,944 runs；近 100 = 89S/8F/3C；**main 34/34 全绿**（8 次失败全在分支首轮）；平均 13.1 分钟
+- 运行（10-04/05/06）：ERROR 4/5/0、WARN 101/36/12、error-snapshot 26/5/0、致命 0/0/0；native 峰值 60MB、RSS p50 253MB
+- 压缩：10-05 11 成功+12 候选超时（全有回退）；10-06 仅 1
+- 使用：会话 >100/周、10-06 当天 33 激活/562 工具调用；发布链 android-latest 10-06 06:44 更新
+- 体系：scan 20 门、dev-history 1,546 条、skills 29、backlog 66 编号（45 顶层活）
+
+**缺口**：崩溃率无正式口径（beacon 混装包/回收，需前台/后台标记）；长跑样本不足；功能侧接近冻结（上游审查仅 1 项过门且降级）。下一段方向 = 长跑可靠 + 打磨，不是加功能。
+
+<!-- 2026-10-06 17:43:00 -->
+## 外部项目吸收审查：OpenDots + Raven → backlog §67 全部登记不做（10-06）
+
+
+- **对象**：OpenDots（CopilotKit，AI 同事模板，本质 = CopilotKit Intelligence 托管服务导流壳）+ Raven（EverMind，RSI 研究 harness，本质 = 云/容器基准农场研究装置，arXiv 2609.33439）。用户「看看有什么可吸收的」，纯调查零代码。
+- **候选 5 项全不过门**：①后台任务 Interrupted 显式语义（升级触发 = L0 出现中断歧义实测事件）；②保存前审查卡（= 已否决的提问卡片）；③per-agent 容器电脑（fork 单用户端侧无此威胁模型）；④Evolver 基准门（fork 同构物 = evals + CI 门禁已存在且更轻）；⑤agent loop 四模块策略化（无触发证据）。
+- **结构判断**：可吸收面在语义/纪律层（Interrupted 诚实性、验证文化），不在功能/装置层；这两个是参考读物，与上游 OpenMinis（同血缘直接可比）性质不同。登记 backlog §67。
+- **可复用方法**：外部项目审查先问结构本质（为什么长这样：商业导流壳/研究装置/产品），再逐候选过一阶门；结构不同的项目产出负决策 + 升级触发是正常结果。
+
+<!-- 2026-10-06 19:52:40 -->
+## 报告/证据：/tmp/verify-ui_runtime-page-adjust-1006.scan.log（scan
+
+**报告/证据**：`/tmp/verify-ui_runtime-page-adjust-1006.scan.log`（scan 20/20）、分支 CI run 37457321155 @7de88189 success（bridge+API+本地 rev-parse 三源 head_sha 逐字符一致）。
+
+**改动**（11 文件 +347/−307，1 commit @7de88189，分支 `ui/runtime-page-adjust-1006`，**停在分支，合并权在用户**）：
+1. **RuntimeLimits 保存按钮底部 → 右上角**：搬进 SettingsScaffold `actions` slot（ProviderDetail/OffloadPermission 同款先例），body 与保存后退出语义不变，仅位置变。底部 Save Row 删除。
+2. **压缩模型 pin 从运行时页 → 模型分组页**（ModelGroupsScreen，Agent Loop 入口区之后）：本质是模型路由角色选择（哪个模型承担压缩），与 agent-loop 集合同族，不是数值预算 knob。搬过来后改为**选定即存**（`AgentRuntimeLimitsPrefs.save(context, compactModelEntryId=...)`，null 参数不碰其他 knob）；运行时页批量 Save 删掉该参数（null=untouched，pin 保留不回滚）。
+
+**关键事实**：picker 行+对话框+Choice 数据类从 RuntimeLimitsScreen 搬入 ModelGroupsScreen 逐字节一致（唯一差异=有意更新的注释）；消费端 CompactOrchestration/ConfigBuiltins/备份零改动（CompactModelPinTest 钉的是 CompactOrchestration 源文，不受影响）；i18n 1 新键 `model_groups_compaction_footer` ×7 语言（说明即时生效语义），picker 既有键全复用零翻译成本；RuntimeLimits 净删 6 个未用 import。
+
+**过程教训（同族第 2 次值得警惕）**：从 git 原文截取搬运块时 `sed -n '925,1127p'` 起点切深 6 行（上一个函数的收尾 `)}]}` 混进落点），**括号配平脚本抓到**（HEAD 0/0 vs 落点 -3/-1）——「搬运算脚自检（配平→引用→字符串）不能省」再次实证；配平脚本要带 HEAD 基线对照，落点自身 0/0 不够（当时若只看落点会漏）。
+**新坑**：`remember(config)` vs `produceState`——从 config flow 派生选择列表时 produceState 不 collect flow 只跑一次，config 变化不重算（首版写错当场改 remember(config)）；「外部 flow 派生记忆化」一律 remember(key)。
+**待真机（用户清单）**：①设置→模型分组→底部「压缩模型」行：点击弹选择框，选定即生效（无保存按钮）；②运行时限制页：右上角「保存」常驻可见，改滑杆后无需滚动到底；③压缩行为不变：pin 的模型仍骑压缩链头，stale pin 显示 ⚠ 并回退跟随会话。
+
+<!-- 2026-10-06 20:06:20 -->
+## 云端分支核查：ui/runtime-page-adjust-1006（10-06 晚，用户令「检查一下云端正在跑的分支」）
+
+
+**对象**：`ui/runtime-page-adjust-1006` @ `7de88189`（main df1f0fea + 1 commit，可 ff；11 文件 +347/−307 = Runtime Limits Save→顶栏 + 压缩模型 pin→Model Groups 即时保存 + 1 新字符串×7 语言 + 2 注释同步）。CI run **37457321155** completed/success（workflow_dispatch；checkout 日志证实检出本分支；Publish 正确 skip）。**核查完成、未合并——停在分支，合并权在用户。**
+
+**核查结论**：机械项 8/8 全过（verify_branch.sh exit 0 @11:48Z）、判断项 3/3、**未发现缺陷（0 P0/P1）**。报告：`/var/minis/shared/work/review-ui-runtime-page-adjust-1006/REPORT.md`。
+
+**独立证据（项7/7b）**：自建 JVM shadow harness `/tmp/rv-prefs-jvm/`（真实 AgentRuntimeLimitsPrefs.kt sha256 ba3a9f7f… + android.content 最小桩）→ **7/7 OK**；**变异负控**（null 守卫→无条件写）→ 定向 1 红（batch save 测试）、其余 6 绿 ⇒ 测试非空绿。验证语义：save(null)=不动键、单键 save 只写 pin 键+缓存即时可见、""=清空、trim、重启往返。装置自错披露：首跑 2 红=期望值越界（maxTurns 9/7 被 coerceIn 夹到 TURNS_MIN=50），修正 100 后全绿——「期望值三件套」同族第 N 次。
+
+**关键机械核实**（可复用）：
+- 参数集机械对比法：从新旧两版提取 `save(` 调用参数名集合做差 → 新=旧−{compactModelEntryId}，签名内未传键恰为该键（无意外丢参）——「搬移页面的 Save 不误伤」类核查的高效手法。
+- 搬移代码块逐字节 diff：仅 KDoc 一段差异，其余 196 行相同。
+- SettingsScaffold `actions` 槽（SettingsComponents.kt:106-113 = TopAppBar actions）证实顶栏渲染；ProviderDetailScreen:183 / OffloadPermissionScreen:92 同 pattern。
+
+**观察（非缺陷）**：rikka-ci-bridge 刷新滞后 ~15 分钟（11:49Z 仍报 in_progress，实际 11:48:42Z 已 success）——stop-node 判定继续以 GitHub API 为准（脚本契约已如此）。
+
+**待办**：用户拍板是否合并；合并后真机清单 4 项（顶栏 Save 渲染/立场、Model Groups 压缩模型行、对话框交互+立即生效、保存后 pin 不被清）。
+
+<!-- 2026-10-06 20:12:14 -->
+## ui/runtime-page-adjust-1006 合并 main 完成（10-06 晚，用户放行「没检查出问题就合并」）
+
+
+- **merge commit `ac927148`**（parents df1f0fea + 7de88189，--no-ff）；merge tree == branch tree 逐字符（4ccadcc9…）；增量 11 文件 +347/−307 与分支精确吻合。推送 `df1f0fea..ac927148`，remote==local 核验一致。
+- **分支已清理**：本地+远端均删（gh_sync.sh delete-branches --keep main --yes），仅剩 main。
+- **main CI run 37461445353** 自动触发（event=push，head_sha=ac927148 精确）；**用户拍板不等 CI**（「触发了就不用等了」）——轮询中断后未再等；快照时 in_progress。风险低：树与已绿分支 run 逐字符相同 + main 近期 34/34 绿。**未核项**：main run 最终结论 + Publish to Releases 步骤（用户下次提及时补核一眼）。
+- 流程要点：合并前状态复核（fetch 后 main/分支 sha 零漂移）→ --no-ff → 树一致性验证（merge vs branch diff 空）→ push 核验 → 清理。合并信息沿用新风格 `merge <branch>: <desc> @ <tip>`。
+
+<!-- 2026-10-06 20:20:45 -->
+## 压缩模型 pin（sensenova-6.8-flash-lite）日志核查：今日 0 次压缩，pin 未被检验
+
+- **结论**：10-06 全天日志零压缩事件（主日志 `[Compact]` 遥测 0 条，对照 10-05 有 28 条 outTok 遥测；modelservice 日志 sensenova 0 命中；无会话越过压缩阈值）→ pin 不是没生效，是**还没有压缩发生来检验它**。
+- 时机吻合：pin 功能（feat/compact-model-pin-1005）10-06 01:13 才合并 main，发布链 06:44 更新；Model Groups「选定即存」新 UI（runtime-page-adjust-1006）20:12 才合并、未发版。昨晚 21:32 失败链=1/1 发生在 pin 功能存在之前。
+- sensenova entry id = `***UUID***/sensenova-6.8-flash-lite`（***.sensenova.cn provider）。
+- **pin 生效日志判据**（CompactOrchestration.kt ~L745-775）：下次压缩触发后主日志 `[Compact]` 行 label 应为 `entry=272401dd-…/sensenova-6.8-flash-lite`（pin 链头 entryId 非空时 `summary fallback SUCCESS` 带 `in Xms chars= outTok=`）；若仍显示 `active` = pin 未接上。验证命令 `grep '\[Compact\]' /var/minis/logs/minis-YYYY-MM-DD.log`。
+- 主动触发途径：长会话聊到超窗，或调低 Runtime Limits 的 autoCompactMinTailTokens。
+
+<!-- 2026-10-06 20:27:39 -->
+## 修正：65K→50K 下降 = offload 分支生效，摘要压缩链被 TAIL_TOO_SMALL 跳过 ×5
+
+- **用户观察核实**：20:23:54 本会话（session 0c7917d1，glm-5.3-flash，window=70000）Context Offload 触发：65256 tokens(93%) → 18 个工具结果 offload 到 /var/minis/offloads/ → 释放 ~13118 → 52138(74%)。**这条路径是本地文件搬移，不经过任何模型，与 pin 无关。**
+- **摘要压缩链（真正用 pin 模型的）**：20:23–20:25 `[AutoCompactLoop] skipped: TAIL_TOO_SMALL` ×5（tail=4836–6116 tokens，低于最小尾阈值）→ sensenova-6.8-flash-lite（entry 272401dd…）**仍未被实际调用**。
+- **排障教训（可复用）**：压缩体系有两条日志 tag 族——offload 路径 tag 是 `ChatViewModel` 的 `✂ Context Offload / Context Offload Complete`，摘要链是 `[AutoCompactLoop]`（skip 行）+ `[Compact]`（compactAll/summary 执行行）。**判「压缩有没有发生」必须三条 tag 都扫**，只 grep `[Compact]` 会把 offload 触发的下降误判为「没压缩」。
+- 验证 pin 的剩余途径：tail 涨过 minTailTokens 后自然触发，或调低 autoCompactMinTailTokens。触发后 `[Compact]` 行 label 应为 `entry=272401dd-…/sensenova-6.8-flash-lite`。
+
+## 2026-10-07
+
+<!-- 2026-10-07 07:16:34 -->
+## 用量页（UsageStatsScreen）加载慢 5-6s 调查 — 审计完成未修（10-07）
+
+
+**对象**：设置→Token 用量（UsageStatsScreen）。每次进页面 LaunchedEffect 全表扫 messages（token_usage/created_at 无索引）+ org.json 逐行解析聚合 + **聚合段在主线程**，无缓存。耗时随历史消息数线性增长。
+
+**同设备实测**（合成库，沙箱=这台手机，/var/minis/shared/work/rm-usage-1007-bench/）：30 万消息/10 万用量行：SQL 全扫 0.43s（部分索引→0.21s）、Room 物化+JVM 聚合 0.82s、SQL json_extract 聚合 0.51s（返回 4 行）。用户体感 5-6s = ART 2-4× + 冷缓存 I/O + 主线程冻结叠加（沙箱 JVM 是乐观下界）。
+
+**选项等拍板**：A withContext(Default)（主线程不冻结）/ B 部分索引 migration（2×）/ C SQL 侧 json_extract 聚合（收益最大，minSdk 26 需运行时探测 JSON1 回退）/ D 内存缓存。报告：/var/minis/shared/work/usage-stats-perf-1007/REPORT.md。
+
+**可复用方法**：性能调查先分层拆成本（SQL 扫描/物化/后处理/线程模型）再逐层实测——合成库 + 生产同款 SQL + 同库 org.json Java 基准，一次量出各层占比；沙箱就在真机 CPU 上，JVM 数字可当同硬件下界。
+
+<!-- 2026-10-07 07:45:54 -->
+## usage-stats-perf-1007 施工完成：SQL 聚合 + 部分索引 + off-main（分支 CI 绿，未合并）
+
+
+**交付**：分支 `fix/usage-stats-perf-1007` @ `aabd3636`（2 commits：0665c6b 主改动 6 文件 +286/−119 + aabd363 测试桩补齐 3 文件 +9），CI run **#1943 success**（head_sha 逐字符一致）。停在分支，合并权在用户。
+
+**改动**：A=UsageStatsScreen 计算段包 withContext(Dispatchers.Default)（原主线程冻结）；C=ChatDao 新增 `json1Probe()`（JSON1 运行时探测，minSdk 26 回退）+ `usageStatsAggregated(sinceMs, untilMs)`（json_extract+GROUP BY 一条查询出 ~10 行，`\$` 转义）；B=DB version 12→13 + MIGRATION_12_13（部分索引 `created_at WHERE token_usage IS NOT NULL`，查得扫描 2×）+ MIGRATION_13_12 空体反向 + HANDLED_DOWNGRADES=setOf(13 to 12) + onCreate callback 给全新安装建索引。D（内存缓存）**未做**：C 已消除重进成本，缓存引陈旧性边缘，登记不修。
+
+**验证**：SQL 等价性对拍（EquivBench：SQL json_extract 聚合 vs 旧路径逐行聚合，边缘库+4 万行库 token sums/distinct counts 全同）；抓到一个已接受行为差异——全行 malformed 的模型旧路径出 0/0 行、SQL 路径不显示（生产不可达+SQL 行为更优）。CI 首轮红：3 个测试 DAO 桩（RacingDao/RecordingDao×2）没实现新抽象方法 → 补 `json1Probe()`/`usageStatsAggregated()` 桩后绿。
+
+**可复用教训**：**给 DAO 接口加方法 = 全部测试桩类必须同步补实现**（ChatDao 3 个桩类在 data/repository 测试里，编译只在 CI 抓到——本地无 Android SDK 装置无法预验，下次加 DAO 方法先 grep `: ChatDao` 找全部实现类）。
+
+**待真机验证清单**：①设置→Token 用量进页速度（有历史时秒开）；②7天/30天筛选正常；③总输入/输出/缓存命中率数字与改前一致；④12→13 升级后旧数据完整。
+
+<!-- 2026-10-07 08:37:30 -->
+## fix/usage-stats-perf-1007 独立检查完成（08:25–08:40，第二双眼睛核查 @15b9a24a）
+
+
+**对象**：`fix/usage-stats-perf-1007` @ `15b9a24a`（3 commits：0665c6b1 主改动 + aabd3636 测试桩 + 15b9a24a P0 修复）。另一会话 0ba1cb89 先做「检查+修复」（发现 P0：迁移建的 partial 索引无实体声明 → Room 迁移校验必败）并推送；本会话独立复核其修复。
+
+**结论**：0 个 P0/P1；3 个非阻塞小项（F1 AppDatabase.kt:303 残留旧说法注释；F2 测试「partial」措辞过时；F3 catch(_:Exception) 吞取消一次——项目惯例内）。**不阻塞合并；合并权在用户**（截至完成未合并）。
+
+**机械门**：scan 20/20、four-way ✓、i18n AUTO-SKIP、scan_debt 0、冲突 0；CI run 37551185476 success @15b9a24a（逐字符），Publish 正确 skip。diff 654 行全读（10 文件 +307/−120）。
+
+**P0 修复三重独立验证**：
+1. **源码语义**（room 2.6.1 sources 实读）：onUpgrade 迁移后必跑 onValidateSchema；readIndices 收全部 `origin='c'`、无 SDK 分支、不读 partial 列；Index.equals 名字**宽松比较**（双方均 `index_` 前缀即等）；命名规则 index_<table>_<cols>；addMigration/RoomOpenHelper.init **无注册校验** ⇒ (13,12) 注册合法性闭环。
+2. **APK 产物**（CI artifact dex 字符串）：迁移手写 SQL + 生成 SQL（带反引号）+ **裸串（声明构造常量）**三处齐；计数对称 session_id 4（生成/手写 CREATE/手写 DROP/声明构造）vs created_at 3（生成/手写/声明构造）；旧名 0 残留。
+3. **sqlite 实验**（脚本留 shared/work/review-usage-1007/）：S1 修复形式双射✓；S2 P0 复现（size mismatch）；**S2b 发现：名字宽松——「旧名+声明」也 True ⇒ 声明才是必要半边，改名=稳妥加固**（与 commit「both fix forms true」互证）；S2c/S4b 属性硬比较、非 index_ 名需精确等；S3 round-trip 幂等；S4a partial/plain xinfo 逐行相同。
+
+**可复用方法**：
+- **APK dex 字符串计数对称法**：对「迁移 SQL / 生成 SQL / TableInfo.Index 声明构造」三类字符串做出现次数镜像（如 DROP 参与计数），从产物反推「编译期 auto-name 非空」——无需反编译工具。
+- **Room 2.6.1 索引校验精确规则**（写迁移的硬知识）：全集双射（多一个未声明索引=bomb）；名字宽比较（都 index_ 前缀即等，但守 same-name 惯例防未来收紧）；partial 在 2.6.1 校验中完全透明（xinfo 读不出）；unique/columns/orders 硬比较；`(13,12)` 类降级条目运行时不可达（登记性，pytest=DatabaseVersionGuardTest 一致性断言管）。
+
+**证据**：`/var/minis/shared/work/review-usage-1007/`（REPORT.md + sqlite 脚本/输出 + diff + scan log）。
+
+<!-- 2026-10-07 08:58:54 -->
+## fix/usage-stats-perf-1007 合并 main 完成（2026-10-07 08:41–08:57 SGT，用户放行「攒着的攒着、没问题就合并」）
+
+
+- 流程：独立检查 0 阻塞 → `--no-ff` merge **`297fa516`**（parents ac927148+15b9a24a；merge 树==分支树 diff 0 行；增量 10 文件 +307/−120 精确吻合）→ push `ac927148..297fa516 main -> main`（gh_sync.sh，远端 SHA 逐字符核验）→ 分支清理（本地+远端 fix/usage-stats-perf-1007 删，仅剩 main）。
+- **main CI #1945（run 37553251967）completed/success**：23/23 步骤全绿；**「Publish to Releases」是唯一与分支构建实质不同的步骤，本次实际执行并成功**；发布 `android-latest` → **v1.0.0+1945**（00:55:09Z）。
+- 攒着登记：backlog **§68**（F1 AppDatabase.kt:303 旧注释残留 / F2 测试 partial 措辞 / F3 catch 吞取消；另附「RoomOpenHelper 构造器」注释误记旁注）。
+- 可复用：①**合并收尾必须核 main CI 的 Publish step**（分支 skip / main 实跑，是唯一实质差异）；②gh_sync.sh delete-branches 在本轮一次通过（§66 修复后无假 FAIL）；③merge 验证两式并用：vs-branch diff=0 + vs-old-main 增量与分支 diff 吻合。
+
+<!-- 2026-10-07 23:50:34 -->
+## shared/work + logs 数据膨胀清理（10-07，用户报「应用数据膨胀厉害」）
+
+- 膨胀构成（实测）：shared/work 1004M + logs 200M（debug-* modelservice 全量日志占 117M）+ mounts 811M（用户音频/笔记，非 app 数据）。设备 /data 89% 满。
+- **主因 1**：RikkaMinis 同仓库重复克隆 ×8（rk-check-1004/rm-usage-1007/rk-compact-1005±dverify±verify/review-sched-delete-1006/rk-sched-1004/devhistory-push-1006，共 ~390M）——每个任务一个独立 clone，任务收口后没删。
+- **主因 2**：logs 历史天 debug-*.modelservice.log（每天 40-55M 全量 SSE delta）不清理，3 天即 140M。
+- 清理动作：①删 8 个旧克隆（删前逐个核 unpushed/dirty）；rk-compact-1005 有 1 个未推送提交（502f70e pin v0，已被 feat/compact-model-pin-1005 合并版取代）→ 先 bundle 存 `/var/minis/shared/work/archive/pin-v0-unpushed-502f70e.bundle` 再删；review-sched-delete-1006 的 3 个未跟踪审计文件（REPORT/audit.py/audit-output）→ 搬 `shared/work/review-sched-delete-1006-artifacts/` 再删。②删历史 debug 日志 + 10-03 前的 error-snapshot + 09 月旧日志。
+- 结果：work 1004M→~615M，logs 200M→60M，共回收 ~530M。
+- **登记惯例（可复用）**：任务克隆收口（CI 绿/合并完成）后应顺手删目录，或至少 git gc；删前三查 = branch/unpushed/dirty，有未推送内容先 bundle 到 archive/。
+- 留给用户决策未删：openminis-ref 146M（上游对比参考）、ultra-1002 139M（Minis Ultra 构建副本）、sub2api-1003 77M、tools 21M。
+
+## 2026-10-08
+
+<!-- 2026-10-08 12:31:19 -->
+## mount 卸载双 pop 修复完成（10-08，分支 CI 绿停，未合并）
+
+
+- **现象（用户报）**：设置→挂载文件夹→详情页取消挂载确认后，跳回设置主页而非列表页。
+- **根因**：`MountDetailScreen` 确认回调 `store.remove(id); onBack()`——remove 同步更新 StateFlow → 屏幕带着 entry==null 重组 → 顶部 null-guard 的 `LaunchedEffect { onBack() }` 再 pop 一次（常先发生，在 saveToDisk 的 IO 挂起窗口内）。双 pop 把详情+列表一起出栈。
+- **修法（方案 A，照同族既有契约）**：同款 bug 在 `ModelGroupDetailScreen.removeGroup`（audit-0917）已修过，注释原话与用户报现象一字不差（"Calling onBack() here too would pop TWO levels and land on settings"）——阶梯停在②「代码库里已有」。改动：删确认回调的 onBack + remove 包 `withContext(NonCancellable)`（守卫 pop 会取消屏幕 composition scope，不包则 saveToDisk/onChange 可能被截断=卸载重启复活）+ 守卫注释更新为「SINGLE pop」契约。
+- **交付**：分支 `fix/mount-unmount-double-pop-1008` @ `9fd86c4b`，1 文件 +19/−3，CI run #1946 (37726567025) success，head_sha 逐字符一致。停在分支，合并权在用户。
+- **同族扫描结果**：AddCustomModel/ModelGroupDetail/SharedFolderDetail 的守卫页均无「详情页内删除」可达路径；ModelEntryDetailScreen:55-58 组合期直调 onBack()（无 LaunchedEffect）为 latent → backlog §69。
+- **待真机清单**：①取消挂载确认后应落在列表页（非设置主页）；②卸载后重启 app 该挂载不复活；③卸载后聊天里 /var/minis/mounts/<name> 不再可访问（shell 重绑生效）。
+
+<!-- 2026-10-08 12:43:26 -->
+## fix/mount-unmount-double-pop-1008 审查 + 合并完成（2026-10-08）
+
+
+**对象**：@9fd86c4b（1 文件 +19/−3，MountDetailScreen.kt）：删卸载路径显式 onBack()（null-guard 成唯一 pop）+ remove 包 `withContext(NonCancellable)`。用户令「检查→有问题修→没问题合并」。
+
+**核查**（8 项全做，0 P0/P1）：机械捆绑 exit 0（scan 20/20、four-way ✅、scan_debt 0、i18n AUTO-SKIP、冲突 0、CI run 37726567025 completed/success @9fd86c4b 逐字符一致）；diff 48 行全读无夹带；调用点：MountDetailScreen 唯一调用（AppNavigation:750）、store.remove 仅 2 真实调用（另一处=列表 swipe）。**独立证据**：JVM 对照臂 `shared/work/review-mount-1008/jvm/MountHarness.kt`（真实 kotlinx-coroutines）——E1 pops 旧 2→新 1（双 pop 复现）；E2 保存中取消 control saved=false → fix saved=true/onChange=true。
+
+**合并**：--no-ff → `9ab9f949`（parents 297fa516+9fd86c4b；merge tree == branch tree a5f1ac5e 逐字符）；push `297fa516..9ab9f949` 远端核验一致；分支本地+远端清理（仅剩 main）。
+**发布闭环**：main CI run 37728036747 completed/success @9ab9f949（Publish 步骤成功，资产 04:47Z 更新 = v1.0.0+1947）；**用户真机验证确认「问题已修复」**（10-08）——审查、合并、发布、真机四层全闭环。
+
+**登记**：backlog §70 —— S1 列表 swipe 路径同族取消窗口（MountedFoldersScreen:254 无 NonCancellable）；S2 MountedFoldersStore.kt 含**原始 0x00 字节**→ grep/file(1) 判 binary **静默跳过**（本次两次踩中；GNU grep 也跳 binary）。
+
+**新踩坑（可复用）**：①grep 命中 0 的归因清单要加一层「目标文件是否被当成 binary」（`grep -a` / `file(1)` 先验，仅查 grep --version 不够）；②同日多会话写 backlog 会撞编号（并发出现两个 §69 → 后写者改 §70）——写 backlog 前先 grep `^## §` 最新编号。
+
+**可复用方法**：UI 导航类修复的审查版「对照臂」——把屏幕作用域生命周期（dispose→cancel）与 store 悬挂顺序用真实 coroutines 镜像成 JVM 模型（E1 计数/E2 强制取消时序），为 Compose 跑不了的接线层提供行为证据（形状门不覆盖导航时序）。
+
+<!-- 2026-10-08 13:13:47 -->
+## RikkaMinis 审计图表资产诊断 + 报告形态提案（10-08）
+
+
+**任务**：用户觉得「挂载/笔记/RikkaMinis审计图表」现状太可惜，想升级为"图表式报告"，先听看法。
+
+**资产诊断（实测）**：
+- 两层分居：①挂载 24 md（128 个 mermaid 源码 + 每章发现索引）+ 128 PNG + 513 条台账索引（13M）；②shared/archive/reports-2026-10/offload-audit-0919（21 文件/371K：20 HANDOFF + FIX-8 报告）。**md 中 0 张内嵌图**，图/文互不引用。
+- **失联证据**：9-22《开发产物资产清单》记载原包 18M/662 文件（175 个 verify_findings_*.sh、6 个 jvm 装置、LEDGER-INDEX、FIX-DISPOSITION/REPORT、merged-wave2.json）；全盘搜索后仅剩 21 文件——97% 正文层已失联，22 棒 md 引用的 FIX-* 已是死链。
+- 数字口径两套待对账：00 总览「77 条修复级」vs 99 索引「F- 255 编号族」。
+
+**提案**：自包含 HTML 报告（放回挂载）四层——L1 叙事 / L2 档案（128 图分章 + 513 台账可搜）/ L3 五形态探针（回扫今日代码出「绝迹/存活/复发」）/ 诚实层（登记失联件）。乘数：同类审计家族（audit-0917、loop/thinking/regression-audit）都在归档区，模板可批量复用。
+
+**种子已做**：/var/minis/workspace/audit-report-seed/index.html（封面+总览六图+解读，已验证 6 图全加载、深色样式生效）。停在等用户拍板方向。
+
+<!-- 2026-10-08 17:21:29 -->
+## RikkaMinis 审计图表 → 对外报告站交付完成（2026-10-08 下午；上承「种子等拍板」）
+
+
+**交付**：自包含报告站 `report/`（31 页 / 128 PNG / 12M）：L1 叙事 index → L2 27 章节页 + 513 条可搜台账 → L3 五形态探针 → 诚实层 archive。工作副本 `/var/minis/shared/work/audit-report-1008/report/`；正式落位 `mounts/笔记/RikkaMinis审计图表/report/`（两副本 diff 全等 + sha256 一致）；打包 `rikkaminis-audit-report-2026-10-08.tar.gz`（10.6MB / 164 条目，可整体带走对外展示）。
+**重跑**：`cd /var/minis/shared/work/audit-report-1008 && nice python3 scripts/build_report.py`（重跑后须 rm+cp 重拷 mount 副本——复核中曾出现 mount 落后一轮修订）。
+
+**L3 探针结论**（对 main `9ab9f949`）：保持修复 7 / 仍存活 4 / 残留观察 1 / 被机械门守住 3；自带 20 道扫描门 20/20 全绿。判读：未修四条（F-170/171/175/F-103）全部无门守、原地未动；有门守的教训全部保持。
+
+**发布前复核抓出并修正 13 处数字/表述**（CLEARING.md §6 全表留痕），典型：fixed_kept 6→7（12 条逐条重算）；LOST 数组 21→22（缺 `report.md`——数组 vs 定稿名单机械 diff 发现）；「20 份 HANDOFF」→18 份（目录实测）；gate_covered 4→3（口径=被门守住的条数）；「无门（…）」被渲染成蓝色门徽章（否定表成肯定）→改「未固化门」文本；97.7 口径「逐行走查覆盖率」→「机械核验覆盖率」（对齐源材料原文）。
+
+**可复用方法/教训**：①报告类产物收尾必做三方数字对账（渲染层 DOM 实测 ↔ 数据源 json/csv ↔ 脚本常量），本次多处错误只在渲染层可见（统计卡 vs 徽章）；②否定值渲染 bug 模式：自由文本字段含「无…（说明）」时按值分支渲染 = 否定表成肯定；③修数字要留「复核修订记录」表（位置/修正/依据）否则未来无法复现；④mount 副本同步纪律：重建后 rm+cp 重拷并 diff/sha 核验。
+**登记**：backlog §71——四条存活发现（P2，触发条件+方案+理由三件齐全，scan_debt notes rc=0）。其中 F-170（加密清单三文件名对不上，换机恢复撞凭据失效）修法最便宜、后果最重，建议下批顺路修。
+**链接**：minis://shared/work/audit-report-1008/report/index.html（+probe/archive/ledger/chapters）。
+
+<!-- 2026-10-08 19:23:20 -->
+## T-edit-resend-attachment-loss-1008（长按编辑重发丢附件）
+
+
+**现象**：用户带附件发消息 → 长按气泡「重新编辑」→ 改完重发 → 指令在、附件消失。
+
+**根因**：`editMessage()`（ChatViewModel.kt）只回填文本；发送路径附件唯一来源是输入框 `_attachments`（sendMessage:3448），且 `truncateBeforeEdit()`（ChatQueueInterruption.kt:37）把原消息连 mediaRef 一起删 → 附件失去唯一载体。同族「重试丢附件」早修过（`T-android-retry-attachment-loss`），编辑入口漏了——**对照臂思维：修同族 bug 时要枚举所有入口**。
+
+**修法**：新增纯函数 `restageEditAttachments`（EditAttachmentRestage.kt，JVM 11 测全绿），editMessage 里把持久化附件按 image-first 契约重挂回输入框 + `_preEditAttachments` 快照（cancelEdit 还原 / sendMessage 消费）。
+
+**关键契约**：`attachmentNames = imageNames + nonImageNames`（image-first），doc URI 锚定在 `nameIdx - imageUris.size`；所有生产写入方（prepareUserAttachments、ChatTranscriptRebuild 恢复路径）都保证名字↔URI 位置对齐。
+
+**教训**：① 夹具自错先于代码怀疑——第一次测试 9 失败是夹具把 doc 名放进 image 槽（违反 image-first 契约），实现是对的；② 夹具数据必须满足生产契约再谈断言；③ gh_sync.sh push 偶发 exit 128 瞬时网络抖动，sh -x 重跑即过；④ gh_ci_wait 轮询被 SSL 抖动打断后**不要重新 dispatch**（竞态），改用 rikka-ci-bridge status 端点续查；⑤ harness 在 /var/minis/shared/work/invest-edit-attach-1008/jvm/（shadow Uri 桩 + 单次 kotlinc 编译，注意 -cp 要带 junit）。
+
+**状态**：分支 `fix/edit-resend-attachment-loss-1008` @ ad45ac8，CI run 37767532746 绿（head_sha 核对一致）。停在分支，未合并（等用户）。真机行为未验证。
+
+<!-- 2026-10-08 20:14:36 -->
+## 两条并行线审查完成（2026-10-08）：#1948 + PR #5，均放行
+
+
+**① A 线 fix/edit-resend-attachment-loss-1008 @ `ad45ac879f96`（base main `9ab9f949`）→ 放行，0 阻塞**
+- 对象：编辑重发附件丢失修复，2 文件 +116/−1（ChatViewModel.kt +59/−1、EditAttachmentRestage.kt 新 +57）。
+- 证据：CI #1948 completed/success 23/23（Publish skip、head 逐字符一致）；机械门全过（scan 20/20、four-way、scan_debt、i18n、冲突 0）；**独立 JVM 装置**（自写 android.net.Uri 真实语义 stub，生产源逐字节）→ 作者套件 **OK (13 tests)** + 审查者 file:// 边界测试；**变异 D/E 双检出**（11/13、10/13 红）＝测试非空绿。
+- 走查：image-first 契约两端一致（prepareUserAttachments ↔ ChatTranscriptRebuild）；状态三转移齐（snapshot-once / restore-on-cancel / consume-on-send）。
+- 唯一发现 **F1（P2）**：`clearChat()` 清了 `_attachments` 但未清 `_preEditAttachments`（也没清既有 `_editingMessageId`）→ 编辑中清空聊天后点取消，旧附件快照复活。已登记 **backlog §72**（1-2 行修法）。
+- 产物：`shared/work/review-edit-resend-1008/{REPORT.md,EVIDENCE.md}`。**停在分支，合并权在用户**。
+
+**② B 线 PR #5（OpenMinis .minisbak 导入兼容层，haliChina）@ `1683e87`（base = 当前 main tip）→ 放行，0 阻塞**
+- 规模：10 commits / 11 files / +1632−4；GitHub 实时 **mergeable=True / state=clean**（scan check completed/success）。
+- 修的三个真缺陷：兼容层三处与真实格式不符；兼容层此前是死代码（接线时暴露"用 readText 读 ZIP → 真机报 Backup root is not a JSON object"）；加密包导入必被 restoreWithSnapshot 互斥锁拒（operationBusy 预置，解密成果被吞）→ 统一收口 convertAndRestore。
+- 证据三源：scan gate 绿；作者套件独立复现 14 绿；**王牌＝自写 `IosVectorCompatTest.kt`（上游 iOS 原语生成的黄金向量，走公开 convert()）→ OK (19 tests) 全绿**（正控解密成功 + 4 负控：错口令/错盐/改名AAD/截断）。意义：排除"作者自测同源循环"，锁定 wire format/KDF/HKDF/AAD/GCM/段框架与 iOS 一致。
+- 其他核查：时间戳四形态 OffsetDateTime 实测全过（数字形态兜底＝上游超集）；zip-slip 防护 `sanitizeEntryName`；段长下限 `len<12+16` 已修；UI 双门禁 + 同帧让锁 + `pw.fill(' ')`；七大契约与上游逐字核对。
+- 三项 **P3 条件登记（backlog §73）**：①`i+len` Int 溢出盲区（建议 `len > raw.size - i`）②不校验 verifier（极端包等价，可留档）③`PBEKeySpec` 未 clearPassword（对齐上游 1 行）。
+- 产物：`shared/work/review-pr5-1008/{REPORT.md,EVIDENCE.md}`。**合并动作由用户拍板（外部 PR）**。
+
+**方法可复用**：跨实现验证是"自测同源循环"的解药——优先找**第三方实现生成的向量**（此处上游 iOS 原语），比再写一个同源测试强一个量级；沙箱 JVM 直跑（java 单文件 / kotlinc+JUnit）成本极低，适合做第二双眼睛。
+
+<!-- 2026-10-08 20:39:01 -->
+## 两条线合并完成（2026-10-08 晚，用户令「合并吧」+「合并 PR 走经典流程」）
+
+
+**A 线 #1948 → main `6c969fae`**：本地 `--no-ff`（parents 9ab9f949 + ad45ac87）；merge 树 == 分支树逐字符；增量 +116/−1 精确吻合；push 远端核验一致；分支本地+远端已清理（远端仅剩 main）。合并前核查三项齐（diff 无残留 / 分支 CI 37767532746 @ad45ac879f96 与本地 HEAD 逐字符一致 / 三源证据）。
+
+**B 线 PR #5 → main `8159d256`**：经典 PR 流程（`gh_sync.sh gh-pr-merge --number 5`，PUT /pulls/5/merge，merge_method=merge）→ merge commit **`8159d256`**（parents 6c969fae + 1683e87），merged_by ***OWNER***，2026-10-08T12:19:10Z。**作者 10 提交与署名原样保留**；fork 侧分支未动（作者所有）。相对 6c969fae 增量 11 文件 +1632/−4 与 PR 逐字符吻合。
+
+**main CI**：run 37776022036 @8159d256 **completed/success 26/26 步**，**Publish to Releases 成功** → `android-latest` = **v1.0.0+1950**（资产 12:34:50Z 更新，14.3MB）。@6c969fae 的 run 37775985661 被并发取消 = 预期（main 连推只看最新 run）。
+
+**字节级复核**：合并后 main 上 `OpenMinisBackupCompat.kt`/`Test.kt` sha256 == 审查副本（3002fcbf…/12a524b6…）；`EditAttachmentRestage.kt` == 分支版本（d0c6dd1e…）。
+
+**用户决定**：三项 P3 **不**作 review comment 回作者；登记 backlog §73。§72/§73 标题均已标注「已合并，触发面上线」。
+
+**可复用（经典 PR 合并流程）**：① `gh_sync.sh gh-pr-merge --number N [--method merge]` 是外部 PR 的经典合并入口（保留作者提交/署名；`gh-pr-list`/`gh-pr-close` 同族）；② 合并前快照必查「PR head sha 未漂移 + 审查副本 sha256 与 head 逐字节一致 + mergeable」；③ main 连续 push 会 concurrency 取消旧 run —— 只看最新 run 的 Publish step（唯一与分支构建实质不同的步骤）；④ 合并后立即 `git fetch --prune` + `merge --ff-only` 同步本地 clone，并核「增量 == PR diff」。⑤ 两次合并各自触发 main CI，但前者的改动已含在后者的树里，只看最后一次即可。
+
+<!-- 2026-10-08 21:01:15 -->
+## §74 修复 + §75 登记（2026-10-08）
+
+
+**§74 已修**：`/var/minis/skills/github-ops/scripts/gh_sync.sh` L8 `need_env` 改用 `_need_env_n`/`_need_env_v` 前缀（原全局 `name`/`val` 会覆写子命令的 `--name` 参数 → gh-label-create 建出名为 GITHUB_TOKEN 的标签；gh-release-create 同构必现）。备份 `shared/work/archive/gh_sync.sh.bak-pre-fix74-20261008`。验证：`sh -n` 过 + 实弹负控（真建 fix74-negative-control 标签，名字/颜色/描述全对、无 GITHUB_TOKEN 标签，随即删除）。教训：**file_edit 返回的字节数元数据可能误导（本次显示 37299，实际 38191），编辑后必须 shell diff/wc 核实**。
+
+**§75 已登记（等拍板）**：仓库 `src/android/app/src/main/assets/skills/` 是 app 的技能安装种子（SkillRepository.kt:1294），但 github-ops/gh_sync.sh 快照停在 9-30（e4d423bd），§51/§66/§74 三轮修复只在 live（差 146 行）→ 真机端仍会踩已修的坑。回灌惯例存在（735eadbc 修过 assets 的 semantic-memory；47d8fcd5 用 bump requirements.json 版本触发重装），只是 github-ops 漏了。修法：live → assets 回灌 + bump 版本。
+
+**gh_sync.sh 各副本**：live 38191B（已含 §74）；仓库快照与各 workdir 克隆内快照 = 旧版 14d05614…（勿误以为已同步）。
+
+<!-- 2026-10-08 21:20:04 -->
+## §75 技能快照回灌完成（2026-10-08）
+
+
+**机制（RikkaMinis 内置技能）**：`assets/skills/` 是安装种子，SkillRepository.installBundledSkill（:1335）用**语义版本比较**做门——assets 的 SKILL.md 版本 > 设备已装版本才重解包（extractBundledSiblings 复制同目录全部文件）。回灌时若 live 版本 ≤ 已装版本必须 bump（先例 47d8fcd5：1.0.0→1.0.1）。
+
+**本次**：live 版本本就高于设备（1.0.2/1.0.2/1.3.1/2.2.0 vs 1.0.1/1.0.1/1.2.0/2.0.0），直接复制 8 文件 → 提交 `e59ed04a` → CI 26/26 绿 → 发布 v1.0.0+1951。**排除项惯例**：evals.json（从不打包）、semantic-memory/vector_index.pkl（8MB 设备端运行时索引）、__pycache__。SKILL.md 引用链决定必打包项（gh_ci_wait.sh、check_evals.py 本次新增进 bundle）。
+
+**教训**：① py_compile/py_compile 类验证会在源文件旁生成 __pycache__ —— 在 git 树里跑完必须清，本次 status 检查时自己抓出来清掉了；② file_edit 的字节数元数据不可信（§74 时已踩一次），以 shell diff/wc 为准。
+
+**可复用回灌清单**：diff -rq live vs assets → 复制 SKILL.md + 引用链文件 + scripts → 排除运行时产物 → sh -n / 语法核验（不在树内做会产生副作用的验证）→ 精确 git add → 提交（commit message 记录版本门判定依据）→ 等 CI 绿 → 核 release 资产 updated_at。
+
+<!-- 2026-10-08 23:14:16 -->
+## Contributors 页眉不显示 haliChina 的原因（2026-10-08 实测）
+
+
+**结论**：数据层已就位（API /contributors 已列 haliChina=10；/stats/contributors 已含 haliChina=9，202→200 已验证），但**页面渲染层全部是独立缓存、各自异步重算**：①仓库首页侧栏 Contributors 是 React 骨架屏客户端异步填充；②Insights 贡献者图表数据走 `/graphs/contributors-data` 端点 —— 实测返回 **HTTP 202 空体**（GitHub 后台重算中），页面就显示「Crunching the latest data…」spinner/骨架屏，挂多久取决于仓库体量。**无需任何维护操作**，等 GitHub 自己算完即可；若等太久重开一次页面（请求即触发计算，202→数据就绪会自动渲染）。
+
+**实测链路**：浏览器直接开 github.com 会被风控跳 /login（不可用）；改用 curl + 浏览器 UA 抓 SSR HTML，从 embeddedData 里挖出 `graphDataPath: /graphs/contributors-data`。Pulse 的 SSR 载荷也不含新贡献者。HTTP 202 空体 = 后台计算中，是官方文档记载的 stats 类端点行为。
+
+**教训**：判断「页面没变化」时，先分数据层（API）与渲染层（页面缓存）——数据层在、渲染层 202 = 纯等待；两边都没有才是真问题。浏览器风控跳登录时，curl+UA 抓 SSR HTML + 解析 embeddedData 是有效的替代链路。
+
+<!-- 2026-10-08 23:39:23 -->
+## 两线 bug 成因结构分析（用户问「为什么会出现」）
+
+
+A 线（编辑重发丢附件）+ B 线（PR #5 .minisbak 兼容层）的共同产生机制，四模式：
+1. **隐式契约 + 多入口**：附件 image-first 契约只活在发送侧注释里，每个重建 composer 的入口都要手工记得（retry 修过、edit 漏）；导入路径给 JSON 写的被盲用到 ZIP。
+2. **同源自测循环**：作者自加密自解密两侧同错测试仍绿；UI 交互序列（长按编辑）不在任何测试面。解药=第三方实现 golden vector（iOS 向量）。
+3. **生命周期跨阶段**：truncateBeforeEdit 删掉附件最后载体；operationBusy 跨 convert→restore 两阶段不还锁。
+4. **防线盲区**：真实交互序列/真实外部输入才触发的路径，静态门（scan/CI/JVM）全部看不见。
+
+**自指证据**：本次修复新加 `_preEditAttachments`，clearChat() 没同步清（backlog §72）——同一根因在修复内部立刻复发 = 结构性问题，非个人疏忽。降复发率的两个真杠杆：①附件恢复收敛为唯一函数（restageEditAttachments 方向）；②协议实现强制配第三方 golden vector。
+
+<!-- 2026-10-08 23:57:04 -->
+## send 派发竞态诊断（D2 空历史，第 3 次撞上）
+
+
+**根因（日志实锤）**：`minis-sessions-cli send` 创建会话时，用户指令 append 到 DB 与 run 的历史加载并发——输者 runAgentLoop 以 historySize=0 启动（D2 实测：db.query count=0 @21.113 先于 append @21.119），代理只见系统提示词，做启动语义搜索仪式后结束 turn，从未读任务文件。6 连发 5 赢 1 输。判据：`runAgentLoop ENTER historySize=` 行。
+**UI 冷开缺口（次要）**：派发会话的 ChatScreen 打开时 coldOpen 只 newestRowWarm（msgs=1 rows=1 totalChars=608 四次打开全同，store 冻结基线不回灌 DB）→ 用户看不到派发指令与历史。
+**诊断方法**：数据层（messages CLI）与渲染层（coldOpen 日志）分开核；代理行为（跑了什么命令，memspike cmd-start）与上下文（historySize）分层归因。
+**登记**：backlog §76。D2 已补发任务（Running）。
+**同族**：check-then-act 不原子（A8）；用户报告第 3 次。
+
+## 2026-10-09
+
+<!-- 2026-10-09 00:03:06 -->
+## D2 域扫描完成（sweep-1008，子代理）
+
+<!-- 2026-10-09 -->
+**产出**：/var/minis/shared/sweep-1008/reports/D2.md。域 = ui/chat 其余 ~87 个（除 D1 状态核心），重点全读 ChatScreen/ChatViewModel/StreamingMarkdownText/AgentLoopEngine/ChatPromptAndTools/ChatInputArea。
+**发现 5 项**：high 0 / medium 2 / low 3。medium 两项均在 prepareUserAttachments（ChatPromptAndTools.kt）——**并行列表部分失败错位（P4）**：①image 分支 imageUploadPaths 有第二个门（uploadOk）而 imageParts 无条件加 → 消费端 getOrNull(idx) 位置配对整体错位，agent read_image 解析错文件（最小修法：消费端改读 part.linuxPath，part 自带该字段且冗余列表可退役）；②non-image 分支 nonImageNames.add 在成功门之前 → attachmentNames 含幽灵名、nonImageUris 短一截，chip 点开错文件（修法：移到门后）。low：retry 路径 catch{true}（与 D1 F-6 同族兄弟，ChatViewModel:3168）、instanceContext check-then-act（当前不可达）、ChatScreen derivedStateOf maxByOrNull!! 隐式契约。
+**可复用**：ChatScreen 跟随状态机经多轮修复 + JVM 纯函数门测试，是高防护区，重审时快速通过；AgentLoopEngine/ChatTurnPersistence 的 T-stale-finally epoch 双门、audit-0907/0917/0920 修复全在位。「并行列表多个失败门之一少加一项」是 prepareUserAttachments 的结构性模式（两分支各一处），同族检查时先列全并行列表再逐个核门。
+
+<!-- 2026-10-09 00:04:03 -->
+## D4 域扫描完成（sandbox + offload，main @ e59ed04a）：报告 /var/minis/sh
+
+**D4 域扫描完成**（sandbox + offload，main @ e59ed04a）：报告 `/var/minis/shared/sweep-1008/reports/D4.md`。8 条发现（0 high / 3 medium / 5 low）：F-1 PRootKernel.boot() 无锁 check-then-act（并发 boot → 双解压/互相拆根，medium）；F-2 ModelExecutionService:387 slot acquire 裸奔（异常路径 active/queued 计数器永卡 + 心跳线程泄漏，medium）；F-3 RootfsEventLog.readBootId 生产侧零消费者（boot-id 半接线 + 参数名 rootfsDir 误导，medium）；F-4 shutdown 标记永不删除（low）；F-5 ChatStreamOffloadHandler 自然完成路径双重清理 5s 空等（low，真机日志验证主链路 0 命中）；F-6 STALL_EXIT_CODE=125 撞码（low）；F-7 cleanupProotTmp isBusy 门不覆盖 TerminalSession（low）；F-8 dispatcher KDoc 漂移（low）。已知候选 restoreThinkingRules 本域核清：两执行路径都恢复、null 清缓存已修、present-only 写侧——无问题。同族教训：audit RC7/s2h3/s2h4/s4h4 等修过的点全部保持；scan gate 类发现集中在「无锁 check-then-act」与「裸奔段在 try/finally 之外」两个形状。
+
+<!-- 2026-10-09 00:08:19 -->
+## D3 扫描（ui/settings + backup）完成 — 12 发现（0H/5M/7L）
+
+<!-- 2026-10-08 -->
+- 报告：/var/minis/shared/sweep-1008/reports/D3.md（backups 全读 11 文件 + BackupSettingsScreen 全读 + 其余 settings grep 签名扫）。
+- 最有价值发现 F-001：OpenMinisBackupCompat 的 notes（skill 打包失败/memory 超限跳过）收集后从未写入输出/返回/日志——报告通道整个死码，迁移丢数据零痕迹（grep 确认 notes 只 add 不消费）。
+- 核实排除的关键候选（防重复审计已写进报告「已核对」）：①pinnedAt 往返无坑（org.json put(name,null)=移除键，不是 JSON null→0）；②restore/restoreAuto/deleteBackupFile 双入口一致；③restoreWithSnapshot 6 入口单收口；④memoryEnabled 实体是 Int 无 Boolean→Int 坑。
+- 方法教训：org.json 的 put(String, null) 语义（移除键 vs JSONObject.NULL 写出 null）两方向都要查才能下结论——差点误报 pinnedAt 全变 pinned。
+
+<!-- 2026-10-09 00:09:45 -->
+## D5 域扫描完成（sweep-1008）
+
+<!-- 2026-10-08 -->
+
+**任务**：/var/minis/shared/sweep-1008/tasks/D5.md（data+provider+conversation+service+config），报告已写 sweep-1008/reports/D5.md。
+
+**5 发现**：high 1 / medium 1 / low 3。
+- **F-1 [high]** ProviderRepository.kt:497-506 — **冷启动后 thinking 规则缓存从不预热**：`loadAllThinkingRulesIntoCache()` 全仓唯一调用点在 `ensureConfigLoaded()`，但该函数 `if (_configLoaded.value) return` 在异步加载赢下竞态后永远提前返回；init 异步路径只调 ensureVoiceTemplateModels（内部 ensureConfigLoaded 同样被短路）→ 每次冷启动后用户自定义 thinking 规则被静默解析为内置规则（offload dispatcher 序列化 0 条），直到动规则编辑器。修法一行：init 的 synchronized 块内 `_configLoaded=true` 后补一次 warm。
+- F-2 [medium] restoreThinkingRules(:1031) 裸 DAO 调用无 runCatching（[audit-0909 T4-H1] 同族加固漏此处，provider.db 迁移 abort 时炸 ConfigBackup 恢复流程）。
+- F-3 [low] configLoaded StateFlow + awaitConfigLoaded() 零消费方（历史消费方 SessionListScreen 已删 5faf9411，KDoc 失真）；F-4 [low] ComposerDraftStore saveText check-then-act（主线程调用，极低）；F-5 [low] SessionActivityTracker setPresent/setAbsent/clearPresence 无锁读-改-写（b8 修复只覆盖 setActive/setInactive）。
+
+**已核对无问题（17 项）**：restoreThinkingRules 三实现协议一致（encodeRuleJson↔decodeRuleJson 镜像、instance_id 键一致、null 清缓存）；ProviderConfigMapping 四层同步；备份模型往返；ChatDao↔UsageAggregator COALESCE；AgentForegroundService combine 14 flow 索引映射；SessionConcurrency promote 三态；CompactOrchestration 旗标全路径；压缩旋钮默认值 8000/5min 无漂移；ContextOffload F-232 双守卫等。
+
+**方法可复用**：查「某 API 有无消费方」必须全 src grep + `git log -S` 双验（本次 configLoaded 零消费即靠 git 历史定位删除点）；「缓存只在竞态窗口预热」类 bug 的判据 = 全仓唯一调用点 + early-return 分支短路。
+
+<!-- 2026-10-09 00:18:52 -->
+## 全库四模式扫描收口（2026-10-08 晚）
+
+
+**产物**：/var/minis/shared/sweep-1008/{TRIAGE.md, reports/D1-D6.md}。6 域并行会话（llm-bug-audit 规则库+四结构模式）扫全库 197K 行，46 项发现（1 high/16 medium/29 low），第二道门抽检 5/5 实锤。
+**唯一 high**：D5 F-1 —— thinking 规则缓存冷启动从不预热（`loadAllThinkingRulesIntoCache` 唯一调用点在 `ensureConfigLoaded:506` early-return 之后，异步加载赢下竞态后永远跳过；09-04 9db76bda 引入时就接错位置）→ 用户自定义规则被静默忽略。修法一行：init 异步块补预热。
+**同族呼应**：附件契约家族第 5 次产出发现（D1 F-1=§72 同族第 3/4 入口、D2 F-1/F-2 并行列表错位、queuedPromptBubble）；headless harness 静默错答（D6 F-2/F-3）= 同源自测循环的实例。
+**P1 6 项等拍板**（TRIAGE.md 表）；P2 40 项已登记 backlog §77。
+**派发坑（同族）**：send 竞态空历史（§76）——D2 会话第一次派发输掉竞态没收到任务，补发解决。
+
+<!-- 2026-10-09 00:40:43 -->
+## sweep-B 修复完成（thinking 规则缓存冷启动预热，sweep-1008 唯一 HIGH）
+
+<!-- 2026-10-09 00:45 -->
+
+**任务**：/var/minis/shared/sweep-1008/fix-tasks/B.md。分支 `fix/sweep-p1-thinking-cache-1008` @ `4f6646f8b6ac94e0081ee7279be4c9adf4ad2b39`（基于 main e59ed04a），CI run 37808590334（#1952）**completed/success，head_sha 逐字符一致**。**停在分支，未合并**（合并权在用户）。收尾 clone 已删。
+
+**改动**：ProviderRepository.kt 1 文件 +8——init 异步块 adopt 分支（`if (!_configLoaded.value)` 内、`_configLoaded.value = true` 之后）补 `loadAllThinkingRulesIntoCache()`。根因先 grep 核实（唯一生产调用点 :506 在 ensureConfigLoaded early-return 后；init 异步路径只调 ensureVoiceTemplateModels 且被短路）。
+
+**修复前取证（4 项全过）**：①异步 adopt 路径现在必达预热；②ensureConfigLoaded 同步路径行为不变（预热在同步块外）；③`setAllCustomRules` = 全量替换直接赋值（ThinkingRuleResolver.kt:147），幂等无副作用；④机械门：真实冲突标记 0（全 src 16 处 `====` 全是注释分隔线）、scan_debt 22 条/0 no-trigger 无新增、diff 新增行 0 花括号无配平损。
+
+**流程坑（同族复发）**：①`gh_sync.sh clone` 在非 git repo cwd 下 exit 128 静默失败（脚本 `repo_root` 要求在仓库内）→ 改用 GIT_ASKPASS 直接 git clone；②clone 中途被打断 → 目录 broken（"your current branch appears to be broken"），rm 重浅克隆（--depth 50）即过；③CI 等待用 delay 分段 + rikka-ci-bridge 零 token 轮询（3 段 5 分钟后 completed）。
+
+<!-- 2026-10-09 00:42:54 -->
+## fix-sweep-a-1008 修复收口（sweep-1008 附件契约族 P1 五项全修）
+
+
+**任务**：/var/minis/shared/sweep-1008/fix-tasks/A.md。分支 `fix/sweep-p1-attach-1008` @ `77cf817e95ca29370aa5177174f9835c84d92fd9`（基线 main e59ed04a），CI run 37808887280 **completed/success**，head_sha 与本地 HEAD 逐字符一致。**停在分支，不合并**（合并权在用户）。clone 已删。
+
+**5 项修复**（5 文件 +45/−19，全在 ui/chat）：
+1. 整体退役 `PreparedAttachments.imageUploadPaths`（单构造点已核实）：3 消费端（ChatViewModel:3605 发送主路径、ChatQueueInterruption:161/345 排队注入两处）改读 `part.linuxPath`（字段自带且 ImageBudget 尾裁保留）。选退役而非保留——避免修后字段零消费成死码。
+2. `nonImageNames.add` 移到 upload+persist 双门后（与 image 分支对齐）；消费端 UserAttachmentList `drop(imageUris.size)+getOrNull(idx)` 配对不受影响反而更稳。
+3. removeAttachment/clearAttachments 在 `_editingMessageId != null` 时同步清/滤 `_preEditAttachments`（§72 同族）；**两字段 private→internal**（扩展函数访问 private 编译必炸，按 4-backing-field 既有惯例翻）。
+4. clearChat 补清 `_preEditAttachments`/`_editingMessageId`（backlog §72）。
+5. queuedPromptBubble 改 image-first（`images.map{name}+nonImages.map{name}`）对齐 prepareUserAttachments 契约。
+
+**可复用**：①gh_sync.sh clone 需 `--url` 参数（无 url 时要求 cwd 在 git 仓库内 infer_repo）；②中断的 git clone 留半残目录，重克隆前 rm -rf；③新 clone 无 git 身份，从 RikkaMinis 主克隆抄 `user.email/name`；④sleep 在命令内会撞 180s stall-guard——轮询用 delay 参数+纯 curl；⑤PRoot 删 .git/objects 偶发 Operation not permitted，rm -rf 重跑一次即过。
+
+<!-- 2026-10-09 00:42:56 -->
+## 任务 C 修复完成：WebDAV 空口令静默清口令（sweep-1008 fix C）
+
+
+- 分支 `fix/sweep-p1-webdav-pw-1008` @ `61a50d9687f741e0090b6d859c0af3f5aa8b6a74`，CI run 37808857774 completed/success，head_sha 逐字符一致。**停在分支未合并**。改动 9 文件 +61/−1。
+- 修法走第二分支：核实 `WebDavConfigStore.clear()` 零调用方、无显式清除按钮 → 空字段是唯一清口令途径 → 保留清空语义 + 保存前弹确认（webdav_clear_pw_title/body/_confirm 三键 × 7 语言文件，锚点 webdav_saved 后插入）。清空+有已存口令时才弹，直接保存路径不变。
+- **沙箱新坑（l2s 翻译层断链）**：clone 后 git 报 "bad object HEAD"/"invalid sha1 pointer"——`.git/objects/pack/` 里 pack-*.idx/.pack/.rev 是指向 `.l2s.tmp_*` 的 symlink，且目标名**少了 `.0001` 后缀**（全断）。救法：rm 三个断链 symlink，把 `.l2s.tmp_*.0001` 复制为正常 pack 文件名即恢复。中招触发条件：共享目录下中断/大 clone，表现为 clone 刚完成时 git log 可读、稍后全部失效。
+- gh_sync.sh clone **必须带 --url**（任务书只写 --dir 会 exit 128）；gh-actions-runs 不输出 head_sha，核对假绿需直接 API 查 run 对象。
+
+<!-- 2026-10-09 00:42:59 -->
+## Pattern-Key: sandbox-l2s-pack-symlink-broken
+
+Pattern-Key: sandbox-l2s-pack-symlink-broken
+- 症状：共享目录下 git clone 后，git log 刚完成时可读，稍后报 "bad object HEAD" / "invalid sha1 pointer"（全部 ref）。
+- 断点层：sandbox l2s 翻译层把 .git/objects/pack/pack-*.idx/.pack/.rev 写成指向 .l2s.tmp_* 的 symlink，目标名缺 .0001 后缀 → 断链。
+- 健康路径：rm 三个断链 symlink，cp .l2s.tmp_*.0001 为正常 pack 文件名。
+- 救不动变体：未知。
+
+<!-- 2026-10-09 01:03:01 -->
+## P1 批量修复合并完成（2026-10-08 晚，用户令「没问题就合并」）
+
+
+**闭环**：3 个并行修复会话（任务书 sweep-1008/fix-tasks/A-C.md）→ 各自分支 1 commit + CI 绿 → 用户放行 → 合并前核查三项齐（diff 逐文件 / CI head_sha 逐字符 / 根因修法主会话已核）→ --no-ff ×3 合入 main `fff05e7f`（15 文件 +114/−20 = 三分支并集精确吻合，文件域不相交零冲突）→ push → main CI #1955 success 含 Publish → android-latest 更新（v1.0.0+1952）→ 分支清理（本地+远端仅剩 main）。
+**修复内容**：A 附件契约族 5 项（imageUploadPaths 并行列表整体退役、消费端读 part.linuxPath；nonImageNames 移双门后；编辑态快照同步；clearChat 补清(§72 闭环)；queuedPromptBubble image-first）@77cf817e；B thinking 缓存预热 @4f6646f（唯一 HIGH：自定义规则冷启动静默失效）；C WebDAV 确认弹窗 @61a50d96（保留清空语义+确认，i18n 7 语言）。
+**流程教训**：①修复会话收尾自删 clone → 合并前需重新 clone（正常，任务书第⑤步）；②gh_sync.sh clone 偶发 128，直接 git clone 绕过；③顺序合并的树一致性检查要用增量 vs 前序 main（vs 分支 diff），不能拿 HEAD vs 分支比（HEAD 已含前序合并）；④并行修复按文件域拆 3 批（同族同文件必须单会话包干），文件域不相交 → 合并零冲突。
+**P2 40 项**已登记 backlog §77。
+
+<!-- 2026-10-09 12:49:52 -->
+## 备份 OOM（512MB largeHeap 打满）根因与修复 — 2026-10-09
+
+
+**症状**：真机报 `写入失败: Failed to allocate a 4480 byte allocation … <1% of heap free after GC`（target/growth limit 536870912 = 512MB largeHeap），本地导出与 WebDAV 全量备份全挂。logq 锚定 10-09 11:31–11:37 六次 OOM，memspike 显示 java 堆 26MB→511MB 六秒暴涨（chat 装配段，紧跟 SkillRepository exportSkillToZip 序列之后）。
+
+**根因**：`ConfigBackup.buildSections` 的 chat 段用 `sessions.map { messagesLast(...) }` 把 90 天窗口**全量预物化**（原始 parts_json，输出上限管不到输入）→ 字节预算只约束输出，输入先撑爆堆。流式导出（T-backup-streaming-export）只消掉了最终文档 String，没消掉这次预加载。
+
+**修复**：分支 `fix/backup-chat-eager-load-oom-1009` @ `33c1c067`+`71f605ed`，CI run 37884504189 绿。逐会话懒加载 + 前沿早停（`packChatHistoryWithBudgetLazily`）；前沿算术收口 `sessionMetadataFits` + `packMessagesIntoBudget`（eager 驱动共用，语义不变）；骨架测量只留 `.length`。对照臂实验（`shared/work/backup-oom-1009/jvm`，生产代码原样编译 -Xmx512m）：eager ≥100 会话 OOM，lazy 200 会话 peak 308MB/alive 60MB，保留 39959/40000 条。
+
+**教训**：①「预算只管输出」的截断型设计必须配「输入侧懒加载」，否则峰值随窗口涨不随备份涨；② Kotlin 普通参数在调用点求值——lazy API 不能把 `messagesAt(index)` 当实参传给做元数据检查的函数，必须先过门再取体（CI 37883189847 红、37884504189 绿实锤）；③ `写入失败` 文案 = `backup_err_write`，只在 BackupSettingsScreen（手动导出/上传/恢复快照）用；AutoBackupManager 不传 chatRepo 不受此 OOM 影响（其 String 路径风险 = backlog §77 D3 F-002）。残留：import 整篇解析、skeleton 测量漏 scheduledTasks 段 → backlog §78。
+
+<!-- 2026-10-09 13:23:46 -->
+## 分支审查完成：fix/backup-chat-eager-load-oom-1009（无次生问题，§79 登记）
+
+**对象**：fix/backup-chat-eager-load-oom-1009 @ `71f605e`（远端仅此分支+main），2 commits（33c1c06 lazy 逐会话加载 → 71f605e 先过 metadata 门再拉体，修 commit 1 自身缺陷：经 packSessionIntoBudget 时 messagesAt 调用点先求值）。CI run 37884504189 success（head_sha 一致；33c1c06 的 run 37883189847 failure 被修复）。
+**结论**：0 个 P0/P1，无次生问题。走 6.6 审查线（含糊默认，未跑 8 项机械门）。独立 JVM 影子 harness 三路对照（main 旧实现改包 vs 新 eager vs 新 lazy，真实源码+org.json 20240303+coroutines 1.8.1）：签入套件 OK(14 tests)、300+300 trials 0 mismatch（frontierHit=287）、zero-budget bodiesLoaded=0。三条导出路径（本地/WebDAV/定时）全走 buildSections→lazy，无漏改面；skeleton 只取 length 不留 40MB 引用；writeJsonArray 逐元素写——接线成立。
+**登记**：backlog §79（等价测试只测不触发前沿的 budget=1M 配置，前沿截断等价无 CI 覆盖；影子 harness ② 段可移植）；P3 观察（eager 驱动生产零调用=对照 oracle，非死码）。
+**报告**：/var/minis/shared/work/review-backup-oom-1009-1009/REPORT.md；装置 /var/minis/workspace/review-backup-oom-1009/jvm/。停在分支等用户拍板；真机导出行为未复测。
+**环境**：①Maven Central 封沙箱 IP（403 excessive consumption）→ aliyun 镜像可取 jar；②中断的克隆留 .l2s.tmp_* 污染对象库（git log 先好后坏、cat-file 全挂）→ 干净重克隆 + diff 逐字节一致自证；③自查误判一次：「shared/work 有东西在清目录」实为自己路径笔误（workspace vs shared/work）——报环境异常前先查自己的命令。
+
+<!-- 2026-10-09 13:30 -->
+
+<!-- 2026-10-09 13:32:37 -->
+## 备份 OOM 修复合并收口（2026-10-09）
+
+**合并完成（用户放行「修好了，合并吧」）**：三项核查齐（diff 3 文件逐行读无夹带、0 冲突标记；分支 CI 37884504189 head_sha 逐字符 = 71f605e；独立证据=影子 harness 三路对照全绿）→ 干净克隆 review-backup-oom-1009b `--no-ff` 合入 main **`b4647299690a9361d76a23883eb5fdc79d4fd659`**（parents fff05e7+71f605e，merge 树==分支树 diff 0 行）→ gh_sync.sh push 远端核验一致（fff05e7..b464729）→ main CI run 37888720772 触发（用户令不用等，结果未确认）→ 远端分支 API DELETE 204 + 本地已删（远端仅剩 main）。
+**合并流程坑（同族）**：新 clone 无 git 身份（exit 128）→ 从主克隆 .git/config 抄 user.email/name；PRoot 下 `grep -c | grep -v | wc` 管道 Broken pipe 属正常（head/grep 截断），非错误。
+
+<!-- 2026-10-09 13:45 -->
+
+<!-- 2026-10-09 14:15:56 -->
+## backlog 第1+2档批量修复合并收口（2026-10-09）
+
+
+**分支**：`fix/backlog-batch-1009` @ `333a1989`（基线 main b4647299），CI run 37890926335 success（05:55 dispatch → 06:09 绿，14.9min），head_sha 逐字符一致。**停在分支待用户合并**。
+**10 条全修**（14 文件 +90/−28）：§71-F170（backup XML 9 处排除名对齐真实 prefs 名，其余排除项复核一致）、§41-3（think closer 接入第三消费面：ChatExporter.extractPlainText 加 role 参数 / ConversationHistoryTool.renderPart 加 role / ChatRepository.extractTextForOffload 加 role，3 调用点全传，assistant 行 only）、§70-S1（swipe 删除 NonCancellable）、§70-S2（NUL→\u0000，python 字节替换）、§69（LaunchedEffect 包 onBack）、§73-1/3（len 减法判据 + clearPassword）、§68-F1/F2/F3、§47-N1（raw-id 断言 ceArm.contains("throw e")）、§78-2（skeletonChars 补 scheduledTasks）。
+**流程坑**：①sed 输出在 shell 结果里可能截断显示（UsageStats try/catch 误看丢了 `null`，cat -A 字节级复核后确认完好）——怀疑文件被改坏时先 cat -A 再归因；②grep -c $'\x00' 在 ash 里展开为空串 → 匹配全部行=行数，NUL 计数必须用 python bytes；③CompactCancelOnStopTest 括号计数 {20 vs }15 为 pre-existing（HEAD 同数，字符串模板所致），配平检查同数即过。
+**台账**：backlog §69/§70/§41/§68/§47/§78/§71-F170/§73 已标 ✅（§73 部分：②verifier 未修）；§72-F1 顺带核实已闭环（sweep-A 77cf817e 已修 clearChat 补清）。
+
+<!-- 2026-10-09 14:23:19 -->
+## 分支审查完成：fix/backlog-batch-1009（0 P0/P1，无次生问题，§80 登记）
+
+
+**对象**：`fix/backlog-batch-1009` @ `333a1989`（tier1+tier2 十项清账，基线 main `b464729`，14 文件 +90/−28）。CI run 37890926335 success，head_sha 逐字符一致。走 6.6 审查线（非合并语境，未跑 8 项机械门）。
+**报告**：/var/minis/shared/work/review-backlog-1009-1009/REPORT.md；探针 probe/（Ovf.java 溢出对照 + T.kt 字面量）。停在分支等用户拍板。
+**关键核实**：①溢出修复（`len > raw.size - i`）Java 探针实锤：len=0x7FFFFFFF、i=4 时旧检查 `i+len` 环绕 −2147483645 → 通过 → 裸 IAE；新检查当场抛 MinisBakException；负 len 由 `len < 28` 前半兜住。②三个加签名函数（extractTextForOffload/extractPlainText/renderPart）调用点 3/1/1 全更新，assistant-only 规则与 stripOrphanThinkClosers KDoc 一致；SessionMeta preview 的 role="user" 与 SQL `m2.role='user'` 过滤自洽。③骨架 scheduledTasks 镜像由构造保证（两调用点同参传递 + frameKeys/emit else 分支齐）。④XML 三 prefs 名与代码常量逐一核对实锤（minis_device_identity/env_var_values/mcp_oauth_secrets）= 真凭据泄露修复。
+**重大自纠（管道假象）**：本审查中途误判 main 上 `sanitizeName` 含裸换行字符字面量（od 确认）→ 判断 main 编译必炸、与 CI 绿矛盾 → 用 2.0.21/2.1.0 双版本编译探针、查 job 步骤、API 直取文件字节，最后 **python 直查显示字节是 0x00（NUL）不是 0x0A**——`git show | sed | od` 管道里 busybox sed 把 NUL 转成了换行，制造假象。main 上的 `'\x00'` 是合法 Kotlin，分支改动 `'\x00'→'\u0000'` 为语义等价卫生修复。**教训：查文件字节一律 python 直查 repr，不信 sed/grep 管道（NUL/UTF-8 都会被转换）；grep 报 binary file matches 时先 python 看原文**。
+**流程**：gh_sync.sh clone 的 repo_root 要求 cwd 在 git 仓库内（即使带 --url 也 128）→ GIT_ASKPASS 直接 git clone 绕过；浅克隆后 `git fetch --depth 1 origin main` 只进 FETCH_HEAD（无 origin/main ref），diff 用 FETCH_HEAD。
+**登记**：backlog §80（O1 webdavConfig 测量骨架缺口 P3；O2 role 散点 if 三处读面 P3）。
 
 ---
 
