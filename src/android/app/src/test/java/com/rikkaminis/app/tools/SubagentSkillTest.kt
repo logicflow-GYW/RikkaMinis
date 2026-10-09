@@ -316,6 +316,37 @@ class SubagentSkillTest {
         assertEquals("", SubagentSkill.extractFrontmatterBlock("---\nname: a\nsubagent: true"))
     }
 
+    @Test
+    fun `auto-discover path parses a mid-session-written skill as subagent`() {
+        // [fix/subagent-frontmatter-autodiscover] Simulates the auto-discover
+        // path's contract: a mid-session-written SKILL.md is parsed with
+        // parseSkillMd (body = stripped) and the block extracted from the SAME
+        // raw text feeds the Skill's frontmatter field. Pre-fix the auto-
+        // discover Skill got frontmatter="" and parseSubagentConfig fell back
+        // to the stripped body → isSubagent=false → every spawn_agent on the
+        // skill failed until the next full app restart.
+        val raw = """
+            ---
+            name: fresh-skill
+            description: written mid-session
+            version: 1.0.0
+            subagent: true
+            ---
+            You are a fresh skill.
+        """.trimIndent()
+        val fm = SubagentSkill.extractFrontmatterBlock(raw)
+        val body = raw.lines()
+            .dropWhile { it.trim() != "---" }
+            .drop(1)
+            .dropWhile { it.trim() != "---" }
+            .drop(1)
+            .joinToString("\n")
+            .trim()
+        val skill = makeProductionSkill(body = body, frontmatter = fm)
+        val config = SubagentSkill.parseSubagentConfig(skill)
+        assertTrue("auto-discovered skill must parse as subagent", config.isSubagent)
+    }
+
     // ── context fragments ────────────────────────────────────────────────
 
     @Test

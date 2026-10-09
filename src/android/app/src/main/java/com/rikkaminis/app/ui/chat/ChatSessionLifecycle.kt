@@ -614,8 +614,41 @@ internal fun ChatViewModel.loadSession() {
         // other five rebuild sites in this package (ChatModelRouting,
         // ChatQueueInterruption, ChatViewModel x2, ChatContextWindow's trim)
         // already pair clear()+addAll.
+        val inFlightExtras = if (_isStreaming.value) {
+            // [fix/send-dispatch-race] Fallback for the §76 race: a dispatch
+            // that raced this rebuild already appended its user message to
+            // agentHistory (sendMessage is synchronous on Main), while
+            // loaded.llmHistory was snapshotted off-Main BEFORE that append
+            // committed to the DB. The blind clear() below would then wipe
+            // the instruction and the run starts with historySize=0.
+            // HeadlessChatRunner now awaits _sessionLoaded first (root fix);
+            // this preserves any in-flight send's not-yet-snapshotted
+            // messages if a rebuild still races it. Scoped to _isStreaming so
+            // revertCompact's second pass (not streaming) keeps its
+            // load-bearing clear (audit-0920) and can never resurrect stale
+            // pre-compact history.
+            val loadedIds = HashSet<String>()
+            for (m in loaded.llmHistory) {
+                m.dbMessageId?.let { loadedIds.add(it) }
+            }
+            agentHistory.filter { msg ->
+                val id = msg.dbMessageId
+                id != null && id !in loadedIds
+            }
+        } else {
+            emptyList()
+        }
         agentHistory.clear()
         agentHistory.addAll(loaded.llmHistory)
+        if (inFlightExtras.isNotEmpty()) {
+            // The in-flight dispatch turn is the newest entry — it belongs
+            // at the tail, after the persisted snapshot.
+            agentHistory.addAll(inFlightExtras)
+            Log.i(
+                ChatViewModel.TAG,
+                "[fix/send-dispatch-race] loadSession raced an in-flight send: preserved ${inFlightExtras.size} not-yet-persisted message(s)",
+            )
+        }
         val tHangDiagAfterAgentHistory = System.currentTimeMillis()
         println(
             "[T-HANG-DIAG] agentHistory rebuilt session=${SessionIdAliases.resolve(sessionId)} tookMs=${tHangDiagAfterAgentHistory - tHangDiagAfterTransform}",
