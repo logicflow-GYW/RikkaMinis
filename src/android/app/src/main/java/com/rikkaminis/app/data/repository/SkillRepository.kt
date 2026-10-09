@@ -232,7 +232,21 @@ class SkillRepository(private val context: Context) {
      * [addLock] so concurrent calls with the same slug can't produce
      * duplicate DB rows / on-disk dirs or lose the _skills update.
      */
-    fun add(name: String, description: String, body: String, version: String = "1.0.0", source: ImportSource = ImportSource.FILE, sourceURL: String? = null): Skill? {
+    fun add(
+        name: String,
+        description: String,
+        body: String,
+        version: String = "1.0.0",
+        source: ImportSource = ImportSource.FILE,
+        sourceURL: String? = null,
+        // [fix/subagent-frontmatter-newskill] Raw frontmatter block of the
+        // source SKILL.md (`---` … `---` included), or "". Callers that parsed
+        // a full markdown document (importFromContent, installBundledSkill)
+        // pass the block through so frontmatter-only keys (`subagent: true`,
+        // `max_turns`, `allowed_tools`) survive the first landing — see
+        // writeSkillMd, which seeds its merge with this when the skill is new.
+        frontmatter: String = "",
+    ): Skill? {
         val id = slugify(name)
         if (id.isBlank()) return null
 
@@ -249,6 +263,7 @@ class SkillRepository(private val context: Context) {
                 importSource = source,
                 body = body,
                 sourceURL = sourceURL,
+                frontmatter = frontmatter,
             )
 
             insertDb(skill)
@@ -529,6 +544,15 @@ class SkillRepository(private val context: Context) {
                 body = parsed.body,
                 updatedAt = System.currentTimeMillis(),
                 sourceURL = sourceURL ?: current.sourceURL,
+                // [fix/subagent-frontmatter-newskill] Refresh the in-memory
+                // frontmatter from the incoming content so frontmatter-only
+                // keys (`subagent: true`) the caller edited land without
+                // waiting for the next full loadAll. Keep the previous block
+                // when the incoming document has none — the on-disk merge
+                // below preserves it, and a blank here would shadow it until
+                // the next reload.
+                frontmatter = SubagentSkill.extractFrontmatterBlock(content)
+                    .ifBlank { current.frontmatter },
             )
             db.execSQL(
                 "UPDATE skills SET name=?, description=?, version=?, import_source=?, source_url=?, updated_at=? WHERE id=?",
@@ -549,6 +573,11 @@ class SkillRepository(private val context: Context) {
             version = parsed.version,
             source = source,
             sourceURL = sourceURL,
+            // [fix/subagent-frontmatter-newskill] Carry the incoming block so
+            // a brand-new skill keeps its `subagent: true` / max_turns /
+            // allowed_tools on the first landing (writeSkillMd seeds its merge
+            // with this when no on-disk file exists).
+            frontmatter = SubagentSkill.extractFrontmatterBlock(content),
         )
     }
 
@@ -1356,6 +1385,10 @@ class SkillRepository(private val context: Context) {
                 body = parsed.body,
                 version = bundledVersion,
                 source = ImportSource.BUNDLED,
+                // [fix/subagent-frontmatter-newskill] Carry the bundled block
+                // so a first install keeps `subagent: true` / max_turns /
+                // allowed_tools on disk and in memory.
+                frontmatter = SubagentSkill.extractFrontmatterBlock(content),
             )
             extractBundledSiblings(dirName)
             Log.i(TAG, "Installed bundled skill: $dirName (v$bundledVersion)")
@@ -1573,7 +1606,8 @@ class SkillRepository(private val context: Context) {
         for (dir in onDisk) {
             val skillMd = File(dir, "SKILL.md")
             if (skillMd.exists() && dbSkills.none { it.id == dir.name }) {
-                val parsed = parseSkillMd(skillMd.readText())
+                val raw = runCatching { skillMd.readText() }.getOrNull() ?: continue
+                val parsed = parseSkillMd(raw)
                 if (parsed != null) {
                     val skill = Skill(
                         id = dir.name,
@@ -1581,6 +1615,18 @@ class SkillRepository(private val context: Context) {
                         description = parsed.description,
                         importSource = ImportSource.SESSION,
                         body = parsed.body,
+                        // [fix/subagent-frontmatter-autodiscover] The Skill
+                        // created here used to default frontmatter to "" —
+                        // parseSkillMd strips the block from body — so a skill
+                        // first discovered mid-session (e.g. written by an
+                        // agent file_write with `subagent: true`) parsed as
+                        // isSubagent=false and EVERY spawn_agent on it failed
+                        // with "not a sub-agent skill" until the next full
+                        // loadAll (10-08 23:44 sweep: 7/7 spawn failures on a
+                        // skill whose file had the flag). Extract the block
+                        // from the same raw text the parse consumed — mirrors
+                        // the DB-row path above (readSkillMdFrontmatter).
+                        frontmatter = SubagentSkill.extractFrontmatterBlock(raw),
                     )
                     insertDb(skill)
                     dbSkills.add(skill)
@@ -1618,8 +1664,18 @@ class SkillRepository(private val context: Context) {
         // rename via the skills UI made the skill vanish from the spawn_agent
         // list. Preserving the original block keeps unknown keys intact.
         val existing = runCatching { file.readText() }.getOrNull()
+        // [fix/subagent-frontmatter-newskill] A brand-new skill (no on-disk
+        // file yet) used to emit the canonical 3-key block, silently dropping
+        // every frontmatter-only key (`subagent: true`, `max_turns`,
+        // `allowed_tools`) the caller carried — an import of a `subagent:
+        // true` SKILL.md via the skills editor landed WITHOUT the flag, so
+        // parseSubagentConfig read isSubagent=false until the source was
+        // re-imported. Seed the merge with the caller's frontmatter block:
+        // mergeFrontmatter swaps the three managed keys in place and carries
+        // every other key verbatim.
+        val mergeBase = existing ?: skill.frontmatter.ifBlank { null }
         val content = mergeFrontmatter(
-            existing = existing,
+            existing = mergeBase,
             name = skill.name,
             description = skill.description,
             version = skill.version,

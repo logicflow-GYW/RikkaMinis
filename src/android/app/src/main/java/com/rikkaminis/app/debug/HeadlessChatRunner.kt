@@ -235,6 +235,30 @@ internal object HeadlessChatRunner {
                 timedOut = false,
             )
         }
+        // [fix/send-dispatch-race] Await the _sessionLoaded latch (set in
+        // ChatSessionLifecycle.loadSession's finally) BEFORE appending the
+        // dispatch instruction. Pre-fix we only awaited activeEntryId, which
+        // flips mid-loadSession — a dispatch that beat the agentHistory
+        // rebuild had its just-appended user message WIPED by the rebuild's
+        // clear()+addAll (snapshotted from a DB read taken BEFORE this
+        // append committed), and the run started with historySize=0: the
+        // agent only did the startup ritual, never saw the task (backlog
+        // §76, user-reported 3×, 6-dispatch burst lost 1). Awaiting the
+        // latch structurally orders append AFTER the DB read. Draft
+        // sessions early-return in loadSession with the latch already set,
+        // so this never blocks them. Timeout is non-fatal (proceed) — the
+        // pre-fix behavior is the floor, not a new failure mode.
+        val sessionReady = withContext(Dispatchers.Default) {
+            withTimeoutOrNull(5000L) {
+                vm.sessionLoaded.first { it }
+            }
+        }
+        if (sessionReady == null) {
+            android.util.Log.w(
+                "HeadlessChatRunner",
+                "sessionLoaded not observed in 5s for $sessionId — proceeding with dispatch (pre-fix behavior)",
+            )
+        }
         for (att in attachments) vm.addAttachment(att)
         vm.sendMessage(text)
         if (!wait) return@withContext PromptResult(status = "Running", responseText = null, timedOut = false)

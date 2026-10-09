@@ -1351,6 +1351,28 @@ Environment variables:
     // invalidated.
     skillRepository?.reloadFromDisk()
     val skillFragment = skillRepository?.skillPromptFragment(activeSessionId)
+    // [T-subagent-routing-default] The 「子代理 → spawn_agent」 default lives
+    // HERE, in app code, not in skill descriptions or per-session memory:
+    // before this fragment the routing depended on whichever skill happened
+    // to carry the word in its description, and a spawn_agent failure (e.g.
+    // the auto-discovered-frontmatter gap) silently rerouted delegation work
+    // to cross-session `minis-sessions-cli send` — new chat sessions the user
+    // never asked for. Gated on the same SubagentPrefs switch as the tool
+    // itself (dual gate, mirroring the memory fragment/tool pattern): both
+    // present or both explaining-disabled, never a mismatch.
+    val subagentOn = com.rikkaminis.app.data.SubagentPrefs.isEnabled(context)
+    val subagentRoutingFragment = if (subagentOn) {
+        """
+
+Sub-agent routing (会话子代理):
+- When the user says 子代理 / sub-agent, the DEFAULT target is the spawn_agent tool — the in-session sub-agent (its own system prompt, filtered tool set, independent loop and budget, result returned into this conversation). Delegate to it first.
+- Use minis-sessions-cli send ONLY when the user explicitly wants SEPARATE chat sessions / 多会话并行派发 (cross-session dispatch). It is NOT a fallback for spawn_agent errors — if a spawn_agent call fails, read the error (it lists sub-agent-capable skills) and retry with a valid skill name, or report the blocker to the user.
+- spawn_agent requires a skill whose SKILL.md frontmatter declares `subagent: true`. Find candidates with grep over /var/minis/skills/*/SKILL.md; the error reply also lists them."""
+    } else {
+        """
+
+Sub-agent routing: the in-session sub-agent feature (spawn_agent) and cross-session dispatch (minis-sessions-cli send) are currently DISABLED (runtime.subagentEnabled). If the user asks for 子代理 / sub-agents, tell them the feature is off and that they can enable it in Settings → Agent Runtime; do not simulate delegation yourself."""
+    }
     // [T-mcp-integration-android] Re-read servers.json (the CLI / file
     // browser may have changed it out-of-band) then build the Top-20
     // enabled-MCP disclosure, injected right after the skills fragment.
@@ -1389,6 +1411,9 @@ Environment variables:
             append("\n\n")
             append(skillFragment)
         }
+        // [T-subagent-routing-default] Right after the skills disclosure — the
+        // routing fragment refers to skills and the spawn_agent surface.
+        append(subagentRoutingFragment)
         if (integrationFragment != null) {
             append("\n\n")
             append(integrationFragment)

@@ -148,4 +148,37 @@ class SkillFrontmatterMergeTest {
         assertTrue(out.contains("name: renamed"))
         assertTrue(out.contains("subagent: true"))
     }
+
+    @Test
+    fun `caller frontmatter block seeds a new skill landing`() {
+        // [fix/subagent-frontmatter-newskill] writeSkillMd now seeds its merge
+        // with the caller's frontmatter block when no on-disk file exists
+        // (mergeBase = existing ?: skill.frontmatter). An import of a
+        // `subagent: true` SKILL.md must land WITH the flag on disk, not the
+        // bare 3-key canonical block. mergeFrontmatter itself is unchanged —
+        // the seeding happens at the writeSkillMd call site, so this pins the
+        // NEW call shape (a frontmatter block as `existing`).
+        val callerFm = """
+            ---
+            name: fresh
+            description: imported skill
+            version: 1.0.0
+            subagent: true
+            max_turns: 50
+            allowed_tools: [file_read, file_write]
+            ---
+        """.trimIndent()
+
+        val seeded = merge(
+            existing = callerFm,
+            name = "fresh",
+            description = "imported skill",
+            version = "1.0.0",
+            body = "Body.",
+        )
+        assertTrue("subagent must survive the first landing", seeded.contains("subagent: true"))
+        assertTrue("max_turns must survive", seeded.contains("max_turns: 50"))
+        assertTrue("allowed_tools must survive", seeded.contains("allowed_tools: [file_read, file_write]"))
+        assertTrue("body preserved", seeded.endsWith("Body."))
+    }
 }

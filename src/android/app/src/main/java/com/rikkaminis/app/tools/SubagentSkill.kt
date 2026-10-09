@@ -76,6 +76,10 @@ object SubagentSkill {
         description = "Spawn a sub-agent with its own system prompt, tool set, " +
             "and budget. The sub-agent runs independently and returns its final " +
             "result. Use this to delegate complex sub-tasks to a focused agent. " +
+            "When the user says 子代理 / sub-agent, this tool is the DEFAULT " +
+            "in-session delegation path; cross-session dispatch via " +
+            "minis-sessions-cli send is only for the user explicitly wanting " +
+            "separate chat sessions. " +
             "The skill must be defined with `subagent: true` in its SKILL.md " +
             "frontmatter and must already be installed and enabled; an error " +
             "reply lists the skills that are. Find candidates by searching " +
