@@ -1,5 +1,6 @@
 package com.rikkaminis.app.backup
 
+import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -164,6 +165,80 @@ class ChatBackupBudgetTest {
         assertEquals(1, result.messages.size)
         assertEquals(0, result.messagesDropped)
         assertTrue(result.messages[0].getString("partsJson").contains("media message elided"))
+    }
+
+    // ── Lazy per-session loading [T-backup-lazy-chat-load] ──────────────
+
+    @Test
+    fun `lazy driver produces exactly the eager driver's result`() = runBlocking {
+        val sessionsInOrder = listOf(
+            sessionJson("a") to listOf(msg("a1", "a", "one", 1), msg("a2", "a", "two", 2)),
+            sessionJson("b") to listOf(msg("b1", "b", "three", 1)),
+            sessionJson("c") to listOf(msg("c1", "c", "four", 1)),
+        )
+        val eager = packChatHistoryWithBudget(
+            skeletonChars = 100,
+            budgetTotalChars = 1_000_000,
+            sessionsInOrder = sessionsInOrder,
+            sanitize = ::sanitize,
+            capReasoning = ::capReasoning,
+        )
+        val lazyResult = packChatHistoryWithBudgetLazily(
+            skeletonChars = 100,
+            budgetTotalChars = 1_000_000,
+            sessionJsons = sessionsInOrder.map { it.first },
+            messagesAt = { sessionsInOrder[it].second },
+            sanitize = ::sanitize,
+            capReasoning = ::capReasoning,
+        )
+        assertEquals(eager.sessions.map { it.toString() }, lazyResult.sessions.map { it.toString() })
+        assertEquals(eager.messages.map { it.toString() }, lazyResult.messages.map { it.toString() })
+        assertEquals(eager.sessionsDropped, lazyResult.sessionsDropped)
+        assertEquals(eager.messagesDropped, lazyResult.messagesDropped)
+    }
+
+    @Test
+    fun `lazy driver stops loading sessions once the budget frontier is reached`() = runBlocking {
+        // 40 sessions × 20 messages, budget worth a handful of them. The whole
+        // point of the lazy driver is that the sessions past the frontier are
+        // never read: materializing every eligible body up front is what blew
+        // the 512MB largeHeap on a heavy install (2026-10-09).
+        val total = 40
+        val per = 20
+        val loaded = mutableListOf<Int>()
+        val result = packChatHistoryWithBudgetLazily(
+            skeletonChars = 0,
+            budgetTotalChars = 3_000,
+            sessionJsons = (0 until total).map { sessionJson("s$it") },
+            messagesAt = { index ->
+                loaded += index
+                (0 until per).map { msg("m-$index-$it", "s$index", "body $index $it", it) }
+            },
+            sanitize = ::sanitize,
+            capReasoning = ::capReasoning,
+        )
+        assertTrue("some session must be dropped", result.sessionsDropped > 0)
+        assertTrue("frontier must cut the loads (${loaded.size} of $total)", loaded.size < total)
+        assertEquals("loads must be the first N sessions, in order",
+            (0 until loaded.size).toList(), loaded.toList())
+        assertTrue(result.messages.isNotEmpty())
+    }
+
+    @Test
+    fun `lazy driver reads no message body when the skeleton already fills the budget`() = runBlocking {
+        val loaded = mutableListOf<Int>()
+        val result = packChatHistoryWithBudgetLazily(
+            skeletonChars = 10_000,
+            budgetTotalChars = 5_000,
+            sessionJsons = listOf(sessionJson("a")),
+            messagesAt = { loaded += it; emptyList() },
+            sanitize = ::sanitize,
+            capReasoning = ::capReasoning,
+        )
+        assertEquals(0, result.sessions.size)
+        assertEquals(0, result.messages.size)
+        assertEquals(1, result.sessionsDropped)
+        assertEquals("no message body may be read", emptyList<Int>(), loaded.toList())
     }
 
     // ── Per-part caps (sanitizeChatParts) ───────────────────────────────

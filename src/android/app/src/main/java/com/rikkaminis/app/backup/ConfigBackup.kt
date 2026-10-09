@@ -246,6 +246,15 @@ object ConfigBackup {
      *
      * Peak heap is bounded by the largest single element instead of the whole
      * document, which is what keeps a 90-day export inside a 512MB largeHeap.
+     *
+     * [T-backup-lazy-chat-load] That claim only holds because assembly no
+     * longer materializes the whole eligible window either:
+     * [buildSections] pulls message bodies one session at a time and stops at
+     * the budget frontier. Before that, streaming removed the final document
+     * String but the eager `sessions.map { messagesLast(...) }` pre-load put
+     * the same cost back into the tree — chat-bearing exports OOMed on a
+     * heavy install (measured 2026-10-09: 26MB → 511MB of java heap in six
+     * seconds, `Failed to allocate … <1% of heap free after GC`).
      */
     suspend fun exportToWriter(
         providerRepo: ProviderRepository,
@@ -617,7 +626,12 @@ object ConfigBackup {
             // under MAX_PAYLOAD_BYTES. SAFETY_MARGIN_BYTES absorbs the JSON
             // escaping / separators between the skeleton and the chat arrays
             // plus any drift between the estimate and the final document.
-            val skeletonJson = JSONObject().apply {
+            //
+            // [T-backup-lazy-chat-load] Take the LENGTH only. Binding the
+            // string to a val here kept ~40MB of UTF-16 reachable for the
+            // whole chat-packing block below, on top of the tree it was
+            // rendered from and the arrays that accumulate during packing.
+            val skeletonChars = JSONObject().apply {
                 put("format", "openminis.config.backup")
                 put("version", FORMAT_VERSION)
                 put("createdAt", System.currentTimeMillis())
@@ -634,8 +648,7 @@ object ConfigBackup {
                 put("chatSessions", JSONArray())
                 put("chatMessages", JSONArray())
                 if (readFailures > 0) put("readFailures", readFailures)
-            }.toString()
-            val skeletonChars = skeletonJson.length
+            }.toString().length
 
             val cutoff = System.currentTimeMillis() - chatWindowDays * 24L * 3600 * 1000
             val sessions = runCatching {
@@ -645,8 +658,19 @@ object ConfigBackup {
             // DAO contract: sessions ordered by updatedAt DESC; messagesLast
             // returns newest-first. That is exactly the packing order — the
             // most recent context always lands in the backup first.
-            val packInput = sessions.map { session ->
-                val sessionJson = JSONObject().apply {
+            //
+            // [T-backup-lazy-chat-load] Only the metadata (one row per
+            // session, a few hundred bytes each) is materialized up front.
+            // Message bodies are pulled per session by the packer, and it
+            // stops pulling at the budget frontier. Materializing every
+            // eligible body first — which the previous
+            // `sessions.map { ... messagesLast(...) }` did, with raw
+            // parts_json that the per-part caps never apply to on the INPUT
+            // side — made peak heap grow with the whole window instead of
+            // with the backup, so a heavy install OOMed before the budget
+            // could trim anything.
+            val sessionJsons = sessions.map { session ->
+                JSONObject().apply {
                     put("id", session.id)
                     put("title", session.title)
                     put("modelId", session.modelId)
@@ -661,26 +685,29 @@ object ConfigBackup {
                     put("editCount", session.editCount)
                     put("thinkingOverride", session.thinkingOverride)
                 }
-                val messages = runCatching {
-                    chatRepo.dao.messagesLast(session.id, MAX_CHAT_MESSAGES_PER_SESSION)
-                }.getOrDefault(emptyList()).map { m ->
-                    BudgetChatMessage(
-                        id = m.id,
-                        sessionId = m.sessionId,
-                        role = m.role,
-                        partsJson = m.partsJson,
-                        createdAt = m.createdAt,
-                        sortOrder = m.sortOrder,
-                        reasoningContent = m.reasoningContent,
-                    )
-                }
-                sessionJson to messages
             }
 
-            val packed = packChatHistoryWithBudget(
+            val packed = packChatHistoryWithBudgetLazily(
                 skeletonChars = skeletonChars,
                 budgetTotalChars = (MAX_PAYLOAD_BYTES - SAFETY_MARGIN_BYTES).toLong(),
-                sessionsInOrder = packInput,
+                sessionJsons = sessionJsons,
+                messagesAt = { index ->
+                    runCatching {
+                        chatRepo.dao.messagesLast(
+                            sessions[index].id, MAX_CHAT_MESSAGES_PER_SESSION,
+                        )
+                    }.getOrDefault(emptyList()).map { m ->
+                        BudgetChatMessage(
+                            id = m.id,
+                            sessionId = m.sessionId,
+                            role = m.role,
+                            partsJson = m.partsJson,
+                            createdAt = m.createdAt,
+                            sortOrder = m.sortOrder,
+                            reasoningContent = m.reasoningContent,
+                        )
+                    }
+                },
                 sanitize = ::sanitizeChatParts,
                 capReasoning = ::capReasoningContent,
             )
