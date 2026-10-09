@@ -55,7 +55,9 @@ internal data class BudgetPackResult(
  * lying transcript. Better to carry a prefix that ends at a clean frontier
  * and report the cut via [BudgetPackResult.messagesDropped].
  *
- * Two drivers share the same frontier step ([packSessionIntoBudget]):
+ * Two drivers share the same frontier step — [sessionMetadataFits] for the
+ * metadata charge, [packMessagesIntoBudget] for the messages (eager goes
+ * through the [packSessionIntoBudget] convenience wrapper):
  * [packChatHistoryWithBudget] for fully materialized input, and
  * [packChatHistoryWithBudgetLazily] for production export, where message
  * bodies are pulled per session and loading stops at the frontier.
@@ -79,21 +81,21 @@ internal class ChatBudgetState(
 )
 
 /**
- * Pack ONE session (metadata + its newest-first messages) into [state],
- * appending to [keptSessions] / [keptMessages].
+ * Metadata-only frontier step, shared by both drivers so the charge
+ * arithmetic stays in ONE place. Charges [sessionJson]'s serialized size
+ * against [ChatBudgetState.budgetChars] when it fits; sets
+ * [ChatBudgetState.exhausted] and returns false when it does not.
  *
- * Returns false when even the session metadata did not fit (the caller counts
- * it as dropped); true when the session landed, whether or not its messages
- * ran into the frontier.
+ * [T-backup-lazy-chat-load] The lazy driver MUST run this BEFORE pulling a
+ * session's message bodies: [packSessionIntoBudget] takes the body list as
+ * a plain parameter, so calling it directly evaluates `messagesAt(index)`
+ * at the call site — a session whose metadata was about to be dropped
+ * still loaded every message body first (CI run 37883189847 caught exactly
+ * that: "no message body may be read expected:<[]> but was:<[0]>").
  */
-internal fun packSessionIntoBudget(
+internal fun sessionMetadataFits(
     state: ChatBudgetState,
     sessionJson: JSONObject,
-    messages: List<BudgetChatMessage>,
-    keptSessions: MutableList<JSONObject>,
-    keptMessages: MutableList<JSONObject>,
-    sanitize: (String) -> String?,
-    capReasoning: (String?) -> String?,
 ): Boolean {
     val sessionChars = sessionJson.toString().length
     if (sessionChars.toLong() > state.budgetChars) {
@@ -101,7 +103,28 @@ internal fun packSessionIntoBudget(
         return false
     }
     state.budgetChars -= sessionChars
+    return true
+}
 
+/**
+ * Pack a session's newest-first messages into [state], appending to
+ * [keptSessions] / [keptMessages]. The session metadata must ALREADY be
+ * charged (see [sessionMetadataFits]). Always lands the session: its
+ * metadata is tiny and keeping it makes the restore show the session (with
+ * whatever prefix of its messages fit) instead of losing the whole
+ * conversation silently. Messages after the frontier in THIS session are
+ * not counted individually — the frontier message was already counted;
+ * the remainder is older history.
+ */
+internal fun packMessagesIntoBudget(
+    state: ChatBudgetState,
+    sessionJson: JSONObject,
+    messages: List<BudgetChatMessage>,
+    keptSessions: MutableList<JSONObject>,
+    keptMessages: MutableList<JSONObject>,
+    sanitize: (String) -> String?,
+    capReasoning: (String?) -> String?,
+) {
     for (message in messages) {
         val cleaned = sanitize(message.partsJson)
             ?: "[{\"type\":\"text\",\"value\":\"[media message elided]\"}]"
@@ -123,13 +146,31 @@ internal fun packSessionIntoBudget(
         state.budgetChars -= messageChars
         keptMessages.add(messageJson)
     }
-    // A session whose packing hit the frontier mid-way still lands: its
-    // metadata is tiny and keeping it makes the restore show the session
-    // (with whatever prefix of its messages fit) instead of losing the
-    // whole conversation silently. Messages after the frontier in THIS
-    // session are not counted individually — the frontier message was
-    // already counted; the remainder is older history.
     keptSessions.add(sessionJson)
+}
+
+/**
+ * Pack ONE session (metadata + its newest-first messages) into [state],
+ * appending to [keptSessions] / [keptMessages]. Eager-driver entry point.
+ *
+ * Returns false when even the session metadata did not fit (the caller counts
+ * it as dropped); true when the session landed, whether or not its messages
+ * ran into the frontier.
+ */
+internal fun packSessionIntoBudget(
+    state: ChatBudgetState,
+    sessionJson: JSONObject,
+    messages: List<BudgetChatMessage>,
+    keptSessions: MutableList<JSONObject>,
+    keptMessages: MutableList<JSONObject>,
+    sanitize: (String) -> String?,
+    capReasoning: (String?) -> String?,
+): Boolean {
+    if (!sessionMetadataFits(state, sessionJson)) return false
+    packMessagesIntoBudget(
+        state, sessionJson, messages, keptSessions, keptMessages,
+        sanitize, capReasoning,
+    )
     return true
 }
 
@@ -146,7 +187,7 @@ private fun newChatBudgetState(
  * materialized in [sessionsInOrder]. Use this when the bodies are in hand
  * (JVM tests, callers with a tiny corpus). Production export uses
  * [packChatHistoryWithBudgetLazily], which pulls one session at a time —
- * both run the same [packSessionIntoBudget] step.
+ * both run the same metadata gate + message-packing step.
  */
 internal fun packChatHistoryWithBudget(
     skeletonChars: Int,
@@ -219,13 +260,19 @@ internal suspend fun packChatHistoryWithBudgetLazily(
             sessionsDropped++
             continue
         }
-        if (!packSessionIntoBudget(
-                state, sessionJsons[index], messagesAt(index),
-                keptSessions, keptMessages, sanitize, capReasoning,
-            )
-        ) {
+        // [T-backup-lazy-chat-load] Metadata gate FIRST. packSessionIntoBudget
+        // takes the body list as a plain parameter, so routing the lazy driver
+        // through it evaluated messagesAt(index) at the call site — a session
+        // whose metadata was about to be dropped still loaded every body
+        // first (caught by the zero-budget test, CI run 37883189847).
+        if (!sessionMetadataFits(state, sessionJsons[index])) {
             sessionsDropped++
+            continue
         }
+        packMessagesIntoBudget(
+            state, sessionJsons[index], messagesAt(index),
+            keptSessions, keptMessages, sanitize, capReasoning,
+        )
     }
 
     return BudgetPackResult(
