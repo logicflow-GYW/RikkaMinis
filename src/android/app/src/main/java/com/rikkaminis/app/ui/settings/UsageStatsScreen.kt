@@ -37,6 +37,7 @@ import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ProviderConfig
 import com.rikkaminis.app.data.usage.UsageAggregator
 import com.rikkaminis.app.data.usage.UsageRow
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -237,6 +238,12 @@ private suspend fun computeUsageStats(
         } else {
             null
         }
+    } catch (e: CancellationException) {
+        // [F3-ce-rethrow] A scope cancellation landing on the probe or the
+        // aggregated query must unwind at the next suspend point, not be
+        // misread as "JSON1 unavailable" (which would silently re-run the
+        // legacy full-materialization path).
+        throw e
     } catch (_: Exception) {
         null
     }

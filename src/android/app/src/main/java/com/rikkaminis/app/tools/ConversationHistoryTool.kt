@@ -2,6 +2,7 @@ package com.rikkaminis.app.tools
 
 import com.rikkaminis.app.data.model.AgentToolDefinition
 import com.rikkaminis.app.data.model.AgentToolParam
+import com.rikkaminis.app.provider.openai.stripOrphanThinkClosers
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -108,11 +109,16 @@ sealed class ConversationHistoryRequest {
 }
 
 /** Renders one part JSON array element. Returns null for parts with nothing to say. */
-private fun renderPart(part: JSONObject, payloadBudget: Int): Pair<String, Boolean>? {
+private fun renderPart(part: JSONObject, payloadBudget: Int, role: String): Pair<String, Boolean>? {
     val type = part.optString("type")
     val value = part.opt("value")
     return when (type) {
-        "text" -> (value as? String)?.takeIf { it.isNotEmpty() }?.let { it to false }
+        "text" -> (value as? String)?.takeIf { it.isNotEmpty() }?.let {
+            // [fix-think-closer-third-face] Same orphan-closer rule as the
+            // other read faces (assistant rows only — user rows carry tool
+            // output where a `</thinking>` is evidence, not an artifact).
+            (if (role == "assistant") stripOrphanThinkClosers(it) else it) to false
+        }
         "mediaRef" -> {
             val name = (value as? JSONObject)?.let {
                 it.optString("originalFileName").ifEmpty { it.optString("mimeType") }
@@ -155,7 +161,7 @@ fun renderTranscriptLine(row: TranscriptRow): TranscriptLine {
     if (parts != null) {
         for (i in 0 until parts.length()) {
             val part = parts.optJSONObject(i) ?: continue
-            val (text, cut) = renderPart(part, ConversationHistoryContract.PAYLOAD_PREVIEW_CHARS) ?: continue
+            val (text, cut) = renderPart(part, ConversationHistoryContract.PAYLOAD_PREVIEW_CHARS, row.role) ?: continue
             if (text.isBlank()) continue
             if (sb.isNotEmpty()) sb.append('\n')
             sb.append(text)

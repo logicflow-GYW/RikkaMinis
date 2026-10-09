@@ -12,6 +12,7 @@ import com.rikkaminis.app.data.db.ChatSessionEntity
 import com.rikkaminis.app.data.db.MessageEntity
 import com.rikkaminis.app.data.db.UsageRecord
 import com.rikkaminis.app.data.storage.SessionFileStore
+import com.rikkaminis.app.provider.openai.stripOrphanThinkClosers
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -759,7 +760,7 @@ class ChatRepository(
             androidx.sqlite.db.SimpleSQLiteQuery(sql, args.toTypedArray()),
         )
         return rows.map { r ->
-            val preview = r.firstUserMsg?.let { extractTextForOffload(it) }
+            val preview = r.firstUserMsg?.let { extractTextForOffload(it, role = "user") }
                 ?.takeIf { it.isNotBlank() }
                 ?.take(60)
             SessionMeta(
@@ -825,7 +826,7 @@ class ChatRepository(
         )
         val out = mutableListOf<MessageSearchMatch>()
         for (r in rows) {
-            val text = extractTextForOffload(r.partsJson)
+            val text = extractTextForOffload(r.partsJson, r.role)
             if (text.isBlank()) continue
             val snip = keywordSnippet(text, keywords, SNIPPET_MAX)
             if (snip.isBlank()) continue
@@ -862,7 +863,7 @@ class ChatRepository(
             dao.loadMessagesPageInRange(sessionId, offset, limit, startMs, endMs)
         }
         return rows.mapNotNull { e ->
-            val text = extractTextForOffload(e.partsJson)
+            val text = extractTextForOffload(e.partsJson, e.role)
             if (text.isBlank()) return@mapNotNull null
             MessagePageItem(
                 e.id, e.role, e.createdAt, text.take(maxChars),
@@ -920,7 +921,7 @@ class ChatRepository(
      *   3. tool names / tool_title when any toolUse exists
      *   4. "[Tool result: …]" summaries when any toolResult exists
      */
-    private fun extractTextForOffload(partsJson: String): String {
+    private fun extractTextForOffload(partsJson: String, role: String): String {
         return try {
             val arr = org.json.JSONArray(partsJson)
             val texts = mutableListOf<String>()
@@ -932,7 +933,16 @@ class ChatRepository(
                 when (o.optString("type")) {
                     "text" -> {
                         val v = o.optString("value", "")
-                        if (v.isNotBlank()) texts.add(stripSystemReminders(v))
+                        if (v.isNotBlank()) {
+                            val cleaned = stripSystemReminders(v)
+                            // [fix-think-closer-third-face] Same orphan-closer
+                            // rule as the other read faces (assistant rows
+                            // only — user rows carry tool output where a
+                            // `</thinking>` is evidence, not an artifact).
+                            texts.add(
+                                if (role == "assistant") stripOrphanThinkClosers(cleaned) else cleaned,
+                            )
+                        }
                     }
                     "mediaRef" -> hasMedia = true
                     "toolUse" -> o.optJSONObject("value")?.let { toolUses.add(it) }

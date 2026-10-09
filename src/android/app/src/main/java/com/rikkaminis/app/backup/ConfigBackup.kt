@@ -647,6 +647,12 @@ object ConfigBackup {
                 put("artifacts", artifacts)
                 put("chatSessions", JSONArray())
                 put("chatMessages", JSONArray())
+                // Mirror buildPayloadObject's conditional sections so their
+                // serialized cost lands inside the measured skeleton — the
+                // SAFETY_MARGIN only absorbs escaping/separators, not a whole
+                // section the list forgot. (chatTruncated is null at measure
+                // time; webdavConfig isn't in buildSections scope.)
+                scheduledTasks?.let { put("scheduledTasks", it) }
                 if (readFailures > 0) put("readFailures", readFailures)
             }.toString().length
 

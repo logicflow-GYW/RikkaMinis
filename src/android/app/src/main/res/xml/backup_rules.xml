@@ -6,9 +6,9 @@
          AEADBadTagException on first access and trigger the plaintext
          fallback / credential-loss path. -->
     <exclude domain="sharedpref" path="provider_secrets.xml" />
-    <exclude domain="sharedpref" path="env_var_encrypted.xml" />
-    <exclude domain="sharedpref" path="mcp_oauth.xml" />
-    <exclude domain="sharedpref" path="device_identity.xml" />
+    <exclude domain="sharedpref" path="env_var_values.xml" />
+    <exclude domain="sharedpref" path="mcp_oauth_secrets.xml" />
+    <exclude domain="sharedpref" path="minis_device_identity.xml" />
     <exclude domain="sharedpref" path="webdav_config.xml" />
     <!-- Exclude any plaintext fallback files that may have been created
          by EncryptedPrefsFactory during a degraded state. -->

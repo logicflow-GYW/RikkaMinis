@@ -320,6 +320,9 @@ object OpenMinisBackupCompat {
         val spec = PBEKeySpec(passphrase, salt, iterations, 256)
         val kek = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
             .generateSecret(spec).encoded
+        // [fix-minisbak-hygiene] KEK 派生完即清口令副本（对齐上游 BackupCrypto
+        // 的 clearPassword），避免口令在堆上多留整个解密周期。
+        spec.clearPassword()
         return Keys(hkdfSha256(kek, "minisbak/data"), hkdfSha256(kek, "minisbak/secrets"))
     }
 
@@ -350,7 +353,9 @@ object OpenMinisBackupCompat {
             // 原先只查上界，len < 12 时 copyOfRange 的 from > to 会抛裸
             // IllegalArgumentException（而非 MinisBakException），错误信息
             // 绕开统一的"加密成员损坏"语义。
-            if (len < 12 + 16 || i + len > raw.size) {
+            // [fix-minisbak-overflow] 上界用减法：len 是 4B 大端 Int，i ≥ 1 时
+            // i + len 可环绕为负 → 上界失效 → copyOfRange 抛裸 IAE。
+            if (len < 12 + 16 || len > raw.size - i) {
                 throw MinisBakException("加密成员损坏：$aadPath")
             }
             val nonce = raw.copyOfRange(i, i + 12)
