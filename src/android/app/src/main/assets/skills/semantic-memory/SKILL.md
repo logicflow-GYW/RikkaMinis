@@ -1,12 +1,22 @@
 ---
 name: semantic-memory
-description: HF 语义记忆系统 — 用自然语言搜索历史经验（不依赖关键词）。基于 HF Dataset + embeddings 实现跨会话「真正回忆」。当要按含义/语义而非关键词找历史经验时触发。
-version: 1.3.1
+description: HF 语义记忆系统 — 用自然语言搜索历史经验（不依赖关键词）。基于 HF Dataset + embeddings（HF Inference / CF Workers AI 双后端）实现跨会话「真正回忆」。当要按含义/语义而非关键词找历史经验时触发。
+version: 1.4.0
 ---
 # Semantic Memory Skill
 
 ## 这是什么
-RikkaMinis 应用的外部语义记忆系统。基于 HF Dataset（存储）+ HF Inference / embeddings（检索），实现「用自然语言搜记忆，不依赖关键词匹配」。
+RikkaMinis 应用的外部语义记忆系统。基于 HF Dataset（存储）+ 嵌入后端（检索），实现「用自然语言搜记忆，不依赖关键词匹配」。
+
+**嵌入后端（2026-10-10 起双后端）**：
+| 后端 | 模型 | 维度 | 状态 |
+|---|---|---|---|
+| HF Inference | paraphrase-multilingual-MiniLM-L12-v2 | 384 | ❌ 免费额度失效（全模型 402 Payment Required） |
+| **CF Workers AI** | `@cf/baai/bge-m3` | **1024** | ✅ 现行默认（HF 失败自动回退） |
+
+后端与维度**锁死在索引里**（`backend` 字段）：`auto`（默认）先试 HF、首个批次失败即整体切 CF；
+`SEMANTIC_EMBED_BACKEND=hf|cf` 可强制。**换后端必须全量重建** —— 384 与 1024 维混在一个索引里
+`cosine()` 的 `zip` 会静默截断到 384 维算，相似度全错且不报错。
 
 ## 何时触发
 - **新会话启动时**：自动运行 `python3 /var/minis/skills/semantic-memory/semantic_memory.py search "<当前任务关键词>"` 获取相关经验
@@ -31,7 +41,10 @@ python3 /var/minis/skills/semantic-memory/semantic_memory.py build              
 实测 1239 条语料通常只有 100-200 条变化 → **11s vs 全量 ~90s**。复用判据是 content 逐字相同
 （不用 mtime —— 日报会被 memory_write 反复追加，时间戳不可靠）。
 
-**批量嵌入**：`EMBED_BATCH = 16`，把单条成本从 ~7.8s 降到 ~0.22s（35×，HF Inference 的往返开销远大于计算）。
+**批量嵌入**：HF 后端 16 条/批（单条 ~7.8s → ~0.22s，往返开销远大于计算）；CF 后端 32 条/批。
+批大小与步长必须同步推进（`while` 游标，**不能用 `range(0,total,batch)`** —— range 的步长
+在创建时固定，后端回退改 batch 会让窗口重叠、条目重复嵌入；chunk 也必须在重试循环内重切，
+否则按新步长推进会整段跳过条目）。
 
 ### search — 语义搜索（混合评分）
 ```bash
@@ -50,10 +63,12 @@ python3 /var/minis/skills/semantic-memory/semantic_memory.py compare "<查询>"
 python3 /var/minis/skills/semantic-memory/semantic_memory.py status
 ```
 
-## HF 资源
-- Dataset: `HF_USER_NAME/rikkaminis-memory` (private)
-- 嵌入模型: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
-- 向量维度: 384
+## 资源
+- Dataset（存储）: `HF_USER_NAME/rikkaminis-memory` (private)
+- 嵌入（现行）: CF Workers AI `@cf/baai/bge-m3`，1024 维
+- 嵌入（停用）: HF Inference `paraphrase-multilingual-MiniLM-L12-v2`，384 维
+- 本地索引: `skills/semantic-memory/vector_index.pkl`（重建后约 18MB；**不进仓库、不打包**，rootfs 重建后需 `build` 重建）
+- 实测检索质量（bge-m3，中文查询）：top1 真实 cos 0.62~0.78，较 384 维时代更锐利
 
 ## 与本地 memory_get 的关系
 - `memory_get`：关键词精确匹配，适合查具体术语（如 "GITHUB_TOKEN"、"build-apk.yml"）

@@ -1,12 +1,15 @@
 {
-  "apk": ["python3", "py3-pip", "py3-numpy"],
-  "pip": ["sentence-transformers"],
+  "apk": ["python3", "py3-pip"],
+  "pip": ["huggingface_hub"],
   "env": {
-    "HF_TOKEN": "Tier 2 - 写入经验到 Dataset（Tier 0/1 搜索不需要）"
+    "CF_ACCOUNT_ID": "Tier 0 - 嵌入后端（CF Workers AI bge-m3，默认路径）",
+    "CF_API_TOKEN": "Tier 0 - 嵌入后端（CF Workers AI bge-m3，默认路径）",
+    "HF_TOKEN": "Tier 1/2 - 读取/写入 HF Dataset（仅本地索引搜索时不需要）"
   },
   "tiers": {
-    "0": "搜索已有经验（公开推理 API + 内置向量索引，零配置）",
+    "0": "搜索已有经验（CF Workers AI 嵌入查询 + 本地向量索引）",
     "1": "搜索 + 读取 Dataset（需 HF_TOKEN 只读 scope）",
     "2": "搜索 + 读写 Dataset（需 HF_TOKEN 读写 scope）"
-  }
+  },
+  "notes": "2026-10 起 HF Inference 免额失效（全模型 402），嵌入默认走 CF Workers AI；索引换后端必须全量重建（维度 384→1024）。"
 }
