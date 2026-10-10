@@ -1,6 +1,6 @@
 # rikkaminis-dev-history 按天索引
 
-快速跳转到每日开发日志。共 1592 条记录，68 天。
+快速跳转到每日开发日志。共 1605 条记录，69 天。
 
 ## 2026-08-03（11 条）
 
@@ -3346,7 +3346,7 @@
 - `23:57` **send 派发竞态诊断（D2 空历史，第 3 次撞上）**
   - **根因（日志实锤）**：`minis-sessions-cli send` 创建会话时，用户指令 append 到 DB 与 run 的历史加载并发——输者 …
 
-## 2026-10-09（15 条）
+## 2026-10-09（24 条）
 
 - `00:03` **D2 域扫描完成（sweep-1008，子代理）**
   - **产出**：/var/minis/shared/sweep-1008/reports/D2.md。域 = ui/chat 其余 ~87 个（除 D1 状态核心…
@@ -3378,3 +3378,32 @@
   - **分支**：`fix/backlog-batch-1009` @ `333a1989`（基线 main b4647299），CI run 3789092633…
 - `14:23` **分支审查完成：fix/backlog-batch-1009（0 P0/P1，无次生问题，§80 登记）**
   - **对象**：`fix/backlog-batch-1009` @ `333a1989`（tier1+tier2 十项清账，基线 main `b464729`，…
+- `14:32` **docs 更新不需要触发分支 CI（用户纠正）**
+  - - 实证：docs/dev-history-1009 档案推送后我惯性 dispatch 了 build-apk.yml（#1961），用户指出「文档更新不是不…
+- `19:13` **症状：用户说「子代理」不指向会话子代理（spawn_agent）；且派发时「指令没发过去」。**
+  - **症状**：用户说「子代理」不指向会话子代理（spawn_agent）；且派发时「指令没发过去」。
+- `19:56` **分支施工完成（用户拍板「按你建议的来」，A 同族全修 + B 路由下沉 + C 根治+兜底）：**
+  - **分支施工完成（用户拍板「按你建议的来」，A 同族全修 + B 路由下沉 + C 根治+兜底）**：
+- `20:16` **分支审查+合并收口：fix/subagent-routing-delivery-1009（2026-10-09 晚，用户令「有问题就修，没有问题的话合并」）**
+  - **对象**：`fix/subagent-routing-delivery-1009` @ `5862b647`（1 commit，7 文件 +209/−3，基…
+- `20:21` **子代理修复（7275bbd4）真机验证完成（2026-10-09 晚，构建 v1.0.0+1962 @20:16:52 装机）**
+  - - **A（frontmatter 全链路）✅**：file_write 带 `subagent:true` 的 SKILL.md → auto-discove…
+- `21:13` **Filterrr/RikkaMinis 仓库调查（用户问「贡献者栏为什么我这边没有」）**
+  - - 用户仓库 ***OWNER***/RikkaMinis 是 **fork**（of OpenMinis/OpenMinis，isFork:true）→ …
+- `21:42` **Filterrr/RikkaMinis 深度比对（分岔分析与镜像行为）**
+  - - 分岔点 2026-07-25 (3b9015e2)。他的仓库是**镜像复制**非 fork：保留原作者署名（他仓库里 406 个提交署名 ***OWNER***…
+- `22:43` **tall-1997/OpenMinis-Linux（Minis Ultra）调查结论**
+  - - 与用户同 fork 自 OpenMinis/OpenMinis，分岔点 9-02 (v1.13)。24 天 19 星（0.79/天）vs 用户 69 天 2…
+- `22:55` **用户对 RikkaMinis 仓库的运营立场（重要偏好）**
+  - - 用户**明确拒绝**「release → 用户 → issue → 星」的公开回路：不打算发正式 release、不寻求用户/社区/推广，希望仓库「保持纯粹…
+
+## 2026-10-10（4 条）
+
+- `12:16` **tg-tproxy 部署（2026-10-10）**
+  - - 部署了 ToiCF/CF-Workers-TGProxy（TG web-proxy/tproxy 的 Worker 实现，GPL-3.0）到 CF 账号2（…
+- `12:33` **tg-tproxy 域名绑定完成（2026-10-10）**
+  - - 用户走 Dashboard 路径 A 完成绑定：`tg.hermesagent7313.***DOMAIN***` → Worker `tg-tproxy`（账号2）
+- `14:19` **沙盒内构建 Android APK 完整配方（已验证跑通）**
+  - 无 Android Studio/Gradle，纯 CLI 工具链，全部单文件来自 Google Maven，aarch64 原生可跑：
+- `14:37` **沙盒能力探测补充（2026-10-10 第二轮实验）**
+  - 在 APK 配方基础上新增验证：

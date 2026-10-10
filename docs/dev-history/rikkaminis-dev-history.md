@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-10-09）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-10-10）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-10-09，共 68 天
-- 条目总数：1592（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
-- 总字符数：2089842 / 总行数：29012
+- 合并范围：2026-08-03 ～ 2026-10-10，共 69 天
+- 条目总数：1605（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
+- 总字符数：2101560 / 总行数：29163
 
 ---
 
@@ -29005,6 +29005,157 @@ Pattern-Key: sandbox-l2s-pack-symlink-broken
 **重大自纠（管道假象）**：本审查中途误判 main 上 `sanitizeName` 含裸换行字符字面量（od 确认）→ 判断 main 编译必炸、与 CI 绿矛盾 → 用 2.0.21/2.1.0 双版本编译探针、查 job 步骤、API 直取文件字节，最后 **python 直查显示字节是 0x00（NUL）不是 0x0A**——`git show | sed | od` 管道里 busybox sed 把 NUL 转成了换行，制造假象。main 上的 `'\x00'` 是合法 Kotlin，分支改动 `'\x00'→'\u0000'` 为语义等价卫生修复。**教训：查文件字节一律 python 直查 repr，不信 sed/grep 管道（NUL/UTF-8 都会被转换）；grep 报 binary file matches 时先 python 看原文**。
 **流程**：gh_sync.sh clone 的 repo_root 要求 cwd 在 git 仓库内（即使带 --url 也 128）→ GIT_ASKPASS 直接 git clone 绕过；浅克隆后 `git fetch --depth 1 origin main` 只进 FETCH_HEAD（无 origin/main ref），diff 用 FETCH_HEAD。
 **登记**：backlog §80（O1 webdavConfig 测量骨架缺口 P3；O2 role 散点 if 三处读面 P3）。
+
+<!-- 2026-10-09 14:32:11 -->
+## docs 更新不需要触发分支 CI（用户纠正）
+
+- 实证：docs/dev-history-1009 档案推送后我惯性 dispatch 了 build-apk.yml（#1961），用户指出「文档更新不是不用触发 CI 吗」→ 已 API 取消。
+- 规则：dev-history 三件套推送流程 = rebuild → sanitize → sagas → 拷入 docs/dev-history/ → 推分支即停；**不 dispatch CI**（build-apk 打 APK，docs-only 零验证面；分支 push 本就不触发）。分支 CI 绿 = 停止节点只适用于代码改动。
+- 档案现状：1592 条目（2026-08-03..10-09），三件套 @ b2ffd393 停在分支 docs/dev-history-1009 待用户合并。
+
+<!-- 2026-10-09 19:13:14 -->
+## 症状：用户说「子代理」不指向会话子代理（spawn_agent）；且派发时「指令没发过去」。
+
+**症状**：用户说「子代理」不指向会话子代理（spawn_agent）；且派发时「指令没发过去」。
+**层1 根因（日志实锤 10-08 23:44 sweep-1008）**：`SkillRepository.loadAll()` auto-discover 路径（~L1578）构造 Skill 漏传 frontmatter（默认 ""），ParsedSkill 本身不带 frontmatter、body 又剥净 → parseSubagentConfig 回落 body → isSubagent=false → spawn_agent 报 "not a sub-agent skill" ×7 全败 → agent 回落 minis-sessions-cli send 开 7 个会话。时序：23:44:31.682 file_write 写入带 subagent:true 的 SKILL.md → .829 "Auto-discovered skill" → 23:44:47 spawn 全败。同族：DB 行路径（L1529）✓带 frontmatter；add()/importFromContent 新建路径 ✗（技能编辑器导入带 subagent:true 会丢标记，writeSkillMd 对新文件只发 3 键 canonical 块）。
+**层2**：全 app 代码 0 处「子代理」字样；「子代理→spawn_agent 默认」映射不存在于任何 prompt（系统提示词构建在 ChatPromptAndTools.buildSystemPrompt，技能披露 SkillRepository.skillPromptFragment）。
+**指令没送达**：会话内 spawn_agent 的 query 直接进 history（ChatToolExecutors.runSubagentLoop L~285 `mutableListOf(LLMMessage(USER, query))`）正常；真凶 = 跨会话 send 派发的 §76 竞态（backlog L1789 已登记，第 3 次撞上）：新建 headless VM 的 loadSession DB 读（count=0）与指令 append 并发，loadSession 的 clear+repopulate 跑在 sendMessage 内存 append（ChatViewModel L3623）之后 → 指令被抹，historySize=0 启动。6 连发 5 赢 1 输。
+**toggle**：spawn_agent 受 SubagentPrefs（runtime.subagentEnabled，默认 OFF，Settings→Agent Runtime）门控；本会话已 ON。
+**方案已给用户对齐（未动手）**：A=auto-discover+import 同族补 frontmatter；B=子代理路由默认下沉 prompt；C=send 竞态根治。
+
+<!-- 2026-10-09 19:56:11 -->
+## 分支施工完成（用户拍板「按你建议的来」，A 同族全修 + B 路由下沉 + C 根治+兜底）：
+
+**分支施工完成（用户拍板「按你建议的来」，A 同族全修 + B 路由下沉 + C 根治+兜底）**：
+- A（5 处同族）：SkillRepository auto-discover 补 frontmatter（从同一 raw 提取）；add() 加 frontmatter 参数；importFromContent 替换路径刷新（ifBlank 保旧）/新建路径传参；installBundledSkill 新装传参；writeSkillMd 新文件用 skill.frontmatter 播种 mergeBase。
+- B：buildSystemPrompt 加 Sub-agent routing 片段（SubagentPrefs dual-gate：ON=子代理默认 spawn_agent+send 仅限显式多会话+失败读错误不回落；OFF=告知 disabled 指向 Settings→Agent Runtime）；spawn_agent 工具描述加默认指向句。
+- C：HeadlessChatRunner 派发前 await _sessionLoaded latch（5s 超时非致命 proceed）；ChatSessionLifecycle.loadSession 重建保留在途 send 未持久化消息（_isStreaming 门控防 revertCompact 复活旧史）。
+- 流程坑：SubagentSkillTest 加测试时 file_edit 只换了函数声明行，留孤儿语句（括号 30/31）→ 两轮修复才净；**教训：file_edit 加新函数时 old_string 必须含完整锚点（函数声明+后一行），别只锚声明行**。
+- 验证：本地 JVM 装置（/var/minis/shared/work/subagent-fix-1009/jvm，7 文件 android/okhttp stub + kotlinc）SubagentSkillTest OK(24) 含新 auto-discover 契约测试、SkillFrontmatterMergeTest OK(8) 含新播种契约测试；SkillRepository 编译过。Cursor stub 的 getString 须返回非空 String 模拟 Java platform type，接口与实现都要改。
+- 分支 `fix/subagent-routing-delivery-1009` @ `5862b647`（基线 main cbb9d2b4，7 文件 +209/−3），CI run 37925446699 success（12min），head_sha 逐字符一致。**停在分支待用户合并**。backlog §76 已标 ✅。
+
+<!-- 2026-10-09 20:16:31 -->
+## 分支审查+合并收口：fix/subagent-routing-delivery-1009（2026-10-09 晚，用户令「有问题就修，没有问题的话合并」）
+
+
+**对象**：`fix/subagent-routing-delivery-1009` @ `5862b647`（1 commit，7 文件 +209/−3，基线 main `cbb9d2b4`）。CI run 37925446699 success，head_sha 逐字符一致。
+**内容**：三修复——A=SkillRepository frontmatter 全链路传递（add() 加带默认值参数、auto-discover 路径 extractFrontmatterBlock(raw)、writeSkillMd 新技能 seed mergeBase=existing?:skill.frontmatter、update 路径刷新内存 frontmatter）；B=「子代理→spawn_agent 默认」下沉进 system prompt（ChatPromptAndTools 路由 fragment，SubagentPrefs 双门）+ spawn_agent tool description 更新；C=HeadlessChatRunner await sessionLoaded（root fix）+ loadSession inFlightExtras 保留（fallback，限 _isStreaming）。
+**审查结论：0 P0/P1，无次生问题**。关键核实：①sessionLoaded/SkillInfo/SubagentPrefs 全部真实存在（pre-existing 模式）；②persist-before-append（dbMessageId=persistedUser.id）→ fallback 过滤器 id!=null 无空窗；③非 streaming 路径 inFlightExtras=emptyList，audit-0920 load-bearing clear 不受影响；④mergeFrontmatter 未改（只动调用点）；⑤新测试期望全字面量。
+**机械门**：verify_branch.sh 全过（20/20 scan、four-way、i18n AUTO-SKIP、冲突 0、CI 四项全中）。
+**独立证据（影子 harness）**：真实源码+桩单次 kotlinc 编译（SkillRepository+SkillMetadataSync+SubagentSkill+AgentToolDefinition+两测试类），musl JVM：SkillFrontmatterMergeTest 8/8、SubagentSkillTest 24/24 全绿，含两个新测试（caller frontmatter seed / auto-discover subagent 解析）。
+**合并**：用户放行 → 远端 main 未动核验 → `--no-ff` 合入 main **`7275bbd4`**（merge 树==分支树 diff 0 行，0 冲突标记）→ push 核验 cbb9d2b..7275bbd → main CI run 37928631200 触发（用户令「不用等」，结果未确认）→ 分支本地+远端已删（远端仅剩 main + docs/dev-history-1009）。
+**流程坑**：①gh_sync.sh clone 要求 cwd 在 git 仓库内（即使带 --url）→ askpass 直接克隆；②浅克隆分支+浅 fetch main 无共同祖先 → 三点 diff/merge-base 失败 → **`.git/shallow` 里删掉分支 tip 行**（父对象已 fetch）即恢复，比 unshallow 便宜；③新 clone 无 git 身份 → 从惯例抄 user.email/name；④git checkout main 单独跑，别和重活挤同一条命令（120s 超时过一次）。
+**桩签名教训**：Android 平台类型在 Kotlin 是平台类型（非空）——Cursor.getString/getInt 等桩必须返回非空、execSQL 第二参须 `Array<out Any?>?`，否则真实源码编译假红；Uri 桩要带 host/pathSegments、AssetManager 带 list/open、ResponseBody 带 string()。
+**未验证边界**：send-dispatch race 根修（await sessionLoaded）无 JVM 覆盖（Android VM+Main dispatcher），真机派发行为未复测——但 timeout 非致命（pre-fix 行为为地板）+ loadSession fallback 兜底，风险低。
+
+<!-- 2026-10-09 20:21:08 -->
+## 子代理修复（7275bbd4）真机验证完成（2026-10-09 晚，构建 v1.0.0+1962 @20:16:52 装机）
+
+
+- **A（frontmatter 全链路）✅**：file_write 带 `subagent:true` 的 SKILL.md → auto-discover（20:18:21.835，与事故同时序）→ spawn_agent 直接成功回 `VTEST-1009 OK`。同款动作在旧构建（10-08 事故）×7 全败，基线复现转修复验证成立。探针技能已删。
+- **B（路由下沉 prompt）✅**：系统提示词含 Sub-agent routing 片段（build-time 内容 = 代码证据）。
+- **C（send 派发竞态）✅ 5/5**：`--async` 连发 5 探针会话（20:20:09.146/.186/.278/.360/.421），`runAgentLoop ENTER historySize=` 判据全为 **1**（旧构建 6 发 1 输=0）；用户行为确认「都做出了反应」。D2/日志留档的三次竞态在新构建零复现。
+- **验证方法论**：装机版本用 `android-shizuku-cli exec "dumpsys package com.rikkaminis.app | grep versionName"` 直查（versionName+lastUpdateTime 两行足够归因）；竞态类修复用「低概率 bug 连发 N 次 + 判据行 grep」做统计性验证。
+- **尾注**：合并 CI 37928631200（7275bbd4）跑时 +1962 已装机——版本号来源与该 run 不对应（可能来自 scheduled/artifact），不影响结论（行为+prompt 双证据已锁代码版本）。
+
+<!-- 2026-10-09 21:13:41 -->
+## Filterrr/RikkaMinis 仓库调查（用户问「贡献者栏为什么我这边没有」）
+
+
+- 用户仓库 ***OWNER***/RikkaMinis 是 **fork**（of OpenMinis/OpenMinis，isFork:true）→ GitHub 前端对 fork 仓库**不渲染侧栏 Contributors 栏目**（数据在，API 可查 566/144/10 条，仅前端不显示）。非 fork 仓库正常显示。诊断法：curl+UA 抓两侧 SSR 对比，骨架完全一样，唯一差异是 `isFork` 标志位。
+- Filterrr/RikkaMinis（2026-08-16 创建，**非 fork 独立仓库**）= 用户仓库历史的完整复制品（同样 rikkaminis@/dev@/agent@ 提交者邮箱系列），此后平行开发（61+ PR、agent 式 fix 分支+PR 合并流，最近活跃 10-08 21:24，9 星）。
+- 贡献者图谱按 **git 历史 commit 作者**计数不看仓库归属 → 用户（***OWNER*** 313）在 Filterrr 仓库里排第一贡献者，Filterrr 本人 223。Filterrr 从未向用户仓库提 PR。
+
+<!-- 2026-10-09 21:42:07 -->
+## Filterrr/RikkaMinis 深度比对（分岔分析与镜像行为）
+
+
+- 分岔点 2026-07-25 (3b9015e2)。他的仓库是**镜像复制**非 fork：保留原作者署名（他仓库里 406 个提交署名 ***OWNER***，故用户在其贡献者图谱排第一），但提交 SHA 因重写父级而全部不同。
+- 镜像时间线：08-16 建仓 → 08 月几乎全量同步用户提交（779 非merge 中镜像 763，漏 14）→ 08-29 最后一次同步（三条伪造的 "Merge ***OWNER***:main"，父提交为同主题同日期的仿制 SHA）→ **09-01 起完全断供**。
+- 用户分岔后 1330 非 merge 提交，568 个补丁缺失于他仓库（9月496+10月58 全部 + 8月零星14）。内容级验证：.minisbak 兼容层在其代码树零命中；edit-resend/attachment contract/usage-stats SQL/WebDAV/thinking-rules warm/subagent routing 全部没有。
+- 他自有改动 229 补丁（9月起）：antigravity ×16、subagent ×22、ui ×8、network ×8；09-09 两次整树回滚到 378b393。
+- 定性：他的仓库 = 用户 08-29 快照 + 其 229 补丁，双方已实质分叉，无任何 PR 互动。
+- 分析工具留存：/var/minis/shared/work/filterrr-cmp/his（git 克隆含 user remote）。
+
+<!-- 2026-10-09 22:43:17 -->
+## tall-1997/OpenMinis-Linux（Minis Ultra）调查结论
+
+
+- 与用户同 fork 自 OpenMinis/OpenMinis，分岔点 9-02 (v1.13)。24 天 19 星（0.79/天）vs 用户 69 天 22 星（0.32/天）。
+- **无买星证据**：星标逐星核对（事件流 WatchEvent），每天 0~2 颗平稳，给星者全是正常账号。增速差的真实原因：①他有 release（2.0.42→2.0.51 连发 + android-latest 滚动构建）；②有真实用户反馈闭环（issue #2 耗电发烫 10-02 open、issue #1 小米设备 bug）；③产品化包装（Minis Ultra 启动器名、独立包名、双语 README、签名/镜像文档）。用户仓库 0 issue 0 discussion = 无外部用户。
+- 成熟度：产品早期（耗电 issue 挂 7 天、bug 报告留白、版本号 24 天冲到 2.0.51）；但工程体量已超用户（2547 文件 vs 1356、kt 1368 vs 913、测试 410 vs 336）；509 提交（369 本人+116 minis-ultra agent+24 bot），9-17 起日均 12~49 提交，跑在上游主开发线前面（上游同期仅 15 提交）。
+- 画像：工程体量≈用户现在，产品稳定性≈用户 8 月中旬。建议用户发 release 启动同样的飞轮。
+- 注意：当前 GITHUB_TOKEN 为细粒度受限 token，stargazers REST 端点对他人仓库 404（用户自己仓库 200），GraphQL 也异常；星标时间线靠 events 流 WatchEvent 提取。raw.githubusercontent.com 始终可用。
+- 大仓库（100MB+）在沙箱克隆易中断产生坏 pack，优先用 API/trees/raw 路线。
+
+<!-- 2026-10-09 22:55:17 -->
+## 用户对 RikkaMinis 仓库的运营立场（重要偏好）
+
+
+- 用户**明确拒绝**「release → 用户 → issue → 星」的公开回路：不打算发正式 release、不寻求用户/社区/推广，希望仓库「保持纯粹」。动机是当初做这个仓库就没想过名利（私人版自用）。
+- 用户认为该回路「随时可以打开」——技术上成立（CI/构建链健在，android-latest tag 存在，开关不衰减）。该选择与仓库定位（personal edition）自洽。
+- 用户的审计批次/sweep/backlog/fault-golden 工作流功能上等同内部 issue tracker，回路是「内化」而非「缺失」。
+- **以后不要再向用户建议发布 release、做推广、开放社区、引流等方向**；讨论仓库运营时以此为前提。
+
+## 2026-10-10
+
+<!-- 2026-10-10 12:16:26 -->
+## tg-tproxy 部署（2026-10-10）
+
+
+- 部署了 ToiCF/CF-Workers-TGProxy（TG web-proxy/tproxy 的 Worker 实现，GPL-3.0）到 CF 账号2（***USER***-503.workers.dev）
+- Worker 名 `tg-tproxy`，入口 https://tg-tproxy.***USER***-503.workers.dev ，/health 正常，密钥在 /root/tgproxy-credentials.txt，档案 /root/tg-tproxy/DEPLOY-NOTES.md
+- 三个 CF 账号 token（CF_API_TOKEN / _1 / _2）权限面：Workers Scripts 可读写 + Zone 列表只读；**DNS 记录、Workers Routes、Custom Domains 写入全部 403/405** → 域名绑定需用户在 Dashboard 完成（目标 tg.hermesagent7313.***DOMAIN***，该 zone 闲置）或提权 token
+- 账号域名地图：主账号 ***DOMAIN***（apex 被 ***WORKER*** 占）；账号1 ***DOMAIN***（apex 被 ***WORKER*** 占）；账号2 hermesagent7313.***DOMAIN***（全闲置）/ ***DOMAIN***（apex ***WORKER***）/ ***DOMAIN***.cc.cd（apex 有独立站）
+- 各账号已有 Worker：主账号 ***WORKER***/rikka-bulletin/rikka-ci-bridge；账号1、账号2 各有 ***WORKER***
+- 教训：/user/tokens/verify 对受限 token 误报 Invalid，要用业务接口（如 GET /zones）验证；account-level workers/domains 旧 PUT 端点只接受空数组
+
+<!-- 2026-10-10 12:33:18 -->
+## tg-tproxy 域名绑定完成（2026-10-10）
+
+
+- 用户走 Dashboard 路径 A 完成绑定：`tg.hermesagent7313.***DOMAIN***` → Worker `tg-tproxy`（账号2）
+- 验证通过：DNS A+AAAA 橙云、`/health` `{"ok":true}`、无鉴权 404
+- 正式入口 `https://tg.hermesagent7313.***DOMAIN***`，密钥 `/root/tgproxy-credentials.txt`
+- 部署全流程收尾，待用户在 TG 客户端（Desktop/Android）填域名+SECRET 实测
+
+<!-- 2026-10-10 14:19:23 -->
+## 沙盒内构建 Android APK 完整配方（已验证跑通）
+
+
+无 Android Studio/Gradle，纯 CLI 工具链，全部单文件来自 Google Maven，aarch64 原生可跑：
+
+- **aapt2**: `dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/<v>/aapt2-<v>-<classifier>.jar`
+  - 分类符是 `linux_arm64`（下划线，不是 linux-aarch64/linux-arm64），x86 是 `linux`
+  - jar 内含原生二进制，解压 chmod +x 直接跑
+- **android.jar**: `dl.google.com/android/repository/platform-36_r02.zip` → `android-36/android.jar`（注意 r02 里路径是 android-36）
+- **r8/d8**: `dl.google.com/dl/android/maven2/com/android/tools/r8/9.5.23/r8-9.5.23.jar`，入口 `com.android.tools.r8.D8`
+- **apksig**: maven2 `com/android/tools/build/apksig/9.4.1/apksig-9.4.1.jar`，API：`ApkSigner`/`ApkVerifier`（纯 Java，无 CLI 工具，需自己写 wrapper）
+- **zipalign**: 无官方 aarch64，用 Python 重实现（重打包 + 0xD935 extra field 填充；resources.arsc 必须 STORED 未压缩）
+- 签名: keytool 生成 PKCS12 + ApkSigner v2/v3；PKCS12 keystore 的证书链是 `Certificate[]` 需逐个转 X509
+
+构建流程：aapt2 compile → aapt2 link(生成 R.java) → javac -bootclasspath android.jar → d8 → zip 塞 classes.dex → python 对齐 → apksig 签名 → ApkVerifier 验证
+
+成品: `/root/android-build/build.sh`（一键）、`dist/HelloAlpine.apk`（17KB，v2+v3 签名，minSdk 24 / target 36）
+
+坑：
+1. file_write 工具偶发写入与提交内容不符的"幻影"文件（尤其长 Python 脚本）——关键文件用 shell heredoc 写，写完必读回或 py_compile 验证
+2. zip CD 条目 = 46B 头 + 文件名，漏拼文件名会导致 EOCD cd_size 与实际不符 → BadZipFile
+3. extra field 对齐计算要计入 (id,size) 4 字节头
+
+<!-- 2026-10-10 14:37:09 -->
+## 沙盒能力探测补充（2026-10-10 第二轮实验）
+
+
+在 APK 配方基础上新增验证：
+- **Kotlin 可用**：kotlinc 2.0.21（GitHub releases 单 zip）在 aarch64 JVM 原生编译+运行 OK，APK 可走 Kotlin 开发
+- **gcc 14.2 原生编译可用**：`apk add gcc musl-dev` 即装即用（主机侧工具）
+- **后台进程跨工具调用存活**：nohup + sleep 8s 验证通过（长存活未测）
+- **软件源全通**：Maven Central / GitHub Releases / Google Maven 均 200
+- qemu-x86_64 在 apk 仓库存在（NDK x86_64 + 模拟跑目标端原生代码的潜在路径，未验证）
+
+用户已将沙盒构建的 APK 装到真机验证可用 → "沙盒=个人 APK 生产线"结论成立，迭代闭环：需求→构建→minis://链接→真机安装→反馈。
+用户对"这个应用比预期强大"的认知升级感兴趣，关注能力边界判断。
 
 ---
 
