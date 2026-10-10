@@ -1,7 +1,7 @@
 ---
 name: semantic-memory
 description: HF 语义记忆系统 — 用自然语言搜索历史经验（不依赖关键词）。基于 HF Dataset + embeddings（HF Inference / CF Workers AI 双后端）实现跨会话「真正回忆」。当要按含义/语义而非关键词找历史经验时触发。
-version: 1.4.0
+version: 1.4.1
 ---
 # Semantic Memory Skill
 
@@ -75,19 +75,23 @@ python3 /var/minis/skills/semantic-memory/semantic_memory.py status
 - semantic search：语义模糊匹配，适合查「感觉」——"之前有没有类似的事"、"滚动跳相关的东西"
 - **两者互补，不是替代**。先用 semantic search 找方向，再用 memory_get 精确定位
 
-## 兄弟装置：MCP 知识图谱（别混）
-本地还有第二套记忆装置，与本 skill **互补但独立**：
-- **`memory` MCP 服务器**（`@modelcontextprotocol/server-memory`）：JSONL 知识图谱，实体 + 关系。
-  调用：`minis-mcp-cli call memory <tool> --input '{...}'`（9 工具：create_entities / create_relations /
-  add_observations / delete_* / read_graph / search_nodes / open_nodes）
-- **本 skill = 非结构化经验**（日报条目，自然语言语义检索）
-- **KG = 结构化事实**（谁是什么、谁依赖谁、账号/工具/基础设施的关系网）
-- 两者是**不同的问题**：搜「之前有没有类似的卡顿排查」→ 语义记忆；问「rikka-ci-bridge 属于哪个账号、
-  和哪个仓库有关系」→ 知识图谱。
-- **KG 的备份/恢复**：`python3 /var/minis/shared/knowledge-graph-backup/kg_backup.py`（默认恢复，
-  `--backup` 备份）。live 文件在 npx 缓存内，**rootfs 重建会丢**，备份在 shared 层才跨重建。
-- ⚠️ **KG 目前没有自动同步器**（09-06 的 `sync_kg.py` 随 rootfs 丢失、未重建）⇒ **新事实要手工灌**。
-  更新约定：新增实体/观察后**务必**跑一次 `kg_backup.py --backup`，否则下次 rootfs 重建会丢。
+## 已退役的兄弟装置：MCP 知识图谱（2026-10-10 退役，别再调用）
+
+曾经有过第二套记忆装置——`@modelcontextprotocol/server-memory` 的 JSONL 知识图谱（实体 + 关系），
+与本 skill 互补：语义记忆管**非结构化经验**，图谱管**结构化事实**（谁是什么、谁依赖谁）。
+
+**2026-10-10 用户拍板退役**，原因（详见归档 README 与 backlog §81）：
+- 09-28 实锤它**无持久化**（每次调用 spawn 新 session，create 后 read=0）；修法把
+  `MEMORY_FILE_PATH` 写进 config，但 **daemon 不把 env 传给 STDIO 子进程**（app 侧缺口），从未修好。
+- 随后的 fallback 是"直写 shared 文件"，但那两个脚本**自身仍调用 `minis-mcp-cli call memory`**
+  → 接口已不在注册表，它们也跑不动。
+- 退役时数据 21 实体 / 24 关系（停在 09-21），live 与备份一致故无丢失。
+
+**现在该问结构化事实时**：用 `memory_get`（关键词）或读 `GLOBAL.md`（账号/基础设施/环境章节）——
+实体关系网与 GLOBAL 的账号地图本来就有重叠。**不要再尝试 `minis-mcp-cli call memory`**（返回 NOT_FOUND）。
+
+**退役资产**：`/var/minis/shared/archive/retired-knowledge-graph-2026-10/`（数据 + 脚本 + 退役说明）。
+复活须先修 app 侧 env 透传缺口，触发条件见 `backlog.md` §81。
 
 ## Agent 使用约定
 - 每个会话启动时：用当前任务的 2-3 个核心关键词做一次 semantic search
