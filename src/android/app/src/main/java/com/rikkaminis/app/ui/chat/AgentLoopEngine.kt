@@ -459,6 +459,44 @@ internal class AgentLoopEngine(
                 } else {
                     AppLogger.info(TAG_STREAM, "auto-compact folded old turns; skipping hard trim this turn (anchor preserved)")
                 }
+
+                // [fix/compact-stale-context-tokens-1010] Both rewrites above
+                // change what the NEXT request actually carries — the offload
+                // pass replaces tool results with disk stubs (postOffloadTokens
+                // != null ⇒ it did free parts) and the auto-compact fold
+                // replaces whole turns with a summary — yet
+                // `loopState.lastContextTokens` still describes the PRE-rewrite
+                // request. Two consumers read it within seconds and both fail
+                // in the same direction:
+                //   * dynamicMaxTokens() computes `remaining = window − input`
+                //     from it, so a pre-rewrite figure at/over the window pins
+                //     the output budget at MIN_MAX_TOKENS; and
+                //   * isContextExhausted() reads the same figure (via
+                //     _lastTurnContextTokens) to refuse the empty-length retry
+                //     with "context is at/over the window ceiling".
+                // Field evidence 2026-10-10 23:22:30 (session efbb18b6): the
+                // rescue compact had just folded 24 entries (anchor 328→365) yet
+                // the next request went out with input=467879 vs window=220000
+                // → maxTokens=1024 → the model spent the entire budget on
+                // reasoning, returned finish=length with an EMPTY body, and the
+                // retry gate re-read the same stale figure and gave up — the run
+                // died silently ~2 min later (no reply, no error). The
+                // offload-only turn just before it (23:22:07, input figure
+                // already over window, no compact) survived only because the
+                // model happened to fit its tool calls inside 1024.
+                // The figure is provider-reported (it is the only writer of that
+                // field, :1023/:1029), so re-tuning the local char estimate
+                // would not have prevented this. Clearing to 0 = "unknown,
+                // re-estimate": offload falls back to a fresh estimate,
+                // dynamicMaxTokens sends its full (still ceiling-bounded)
+                // budget — the same request shape every first turn of a run
+                // already sends today — and the retry gate stops claiming a
+                // ceiling it cannot substantiate. The next Usage chunk (this
+                // turn's stream) repopulates the figure from the provider.
+                if (postOffloadTokens != null || compacted) {
+                    loopState.lastContextTokens = 0
+                    host.setLastTurnContextTokens(0)
+                }
             }
 
             // Mark where this turn's blocks start in loopState.allToolBlocks so we can persist
