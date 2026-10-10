@@ -15,6 +15,14 @@ from huggingface_hub import HfApi, InferenceClient
 
 # ─── 配置 ───
 EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+# ── 嵌入后端选择（2026-10-10）──
+# HF Inference 免费额度已失效：任何模型的 feature-extraction 都返回
+# 402 Payment Required（实测 MiniLM / bge-m3 / all-MiniLM 全中）。
+# 兜底改用 CF Workers AI（bge-m3，1024 维，POST /ai/run/@cf/baai/bge-m3）。
+# SEMANTIC_EMBED_BACKEND=auto(默认) | hf | cf
+CF_EMBED_MODEL = "@cf/baai/bge-m3"
+CF_EMBED_BATCH = 32          # CF 单请求最大 100 条，取 32 保守（含 token 上限）
+EMBED_BACKEND = os.environ.get("SEMANTIC_EMBED_BACKEND", "auto")
 MEMORY_DIR = Path("/var/minis/memory")
 SKILL_DIR = Path(__file__).resolve().parent  # 脚本所在目录（skills/semantic-memory）
 WORK_DIR = SKILL_DIR
@@ -77,34 +85,77 @@ def extract_entries(glob_pattern="2026-*.md"):
     return entries
 
 
-EMBED_BATCH = 16  # 批量嵌入（实测 16 条/批 ≈ 0.22s/条，单条 ≈ 7.8s）
+EMBED_BATCH = 16  # HF 批量（实测 16 条/批 ≈ 0.22s/条，单条 ≈ 7.8s）
+_ACTIVE_BACKEND = None  # 本次实际使用的后端，由 embed_texts 记录
 
-def embed_texts(entries, client=None):
-    """对条目列表做向量化，原地添加 embedding 字段。
 
-    批量调用（EMBED_BATCH 条/次）——HF Inference 的单次往返开销远大于
-    实际计算，批量可把单条成本从 ~7.8s 降到 ~0.22s（35×）。
+def cf_embed(texts):
+    """CF Workers AI 嵌入（stdlib urllib，无新依赖）。返回 list[list[float]]。"""
+    import urllib.request
+    acct, tok = os.environ.get("CF_ACCOUNT_ID"), os.environ.get("CF_API_TOKEN")
+    if not acct or not tok:
+        raise RuntimeError("CF_ACCOUNT_ID / CF_API_TOKEN 未设置")
+    url = f"https://api.cloudflare.com/client/v4/accounts/{acct}/ai/run/{CF_EMBED_MODEL}"
+    req = urllib.request.Request(
+        url, data=json.dumps({"text": list(texts)}).encode(),
+        headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        payload = json.loads(r.read().decode())
+    if not payload.get("success"):
+        raise RuntimeError(f"CF embed 失败: {str(payload.get('errors'))[:200]}")
+    return payload["result"]["data"]
+
+
+def embed_texts(entries, client=None, backend=None):
+    """对条目列表做向量化，原地添加 embedding 字段；返回成功条目。
+
+    后端：hf（HF Inference，384 维 MiniLM）/ cf（CF Workers AI bge-m3，1024 维）。
+    auto（默认）先试 HF，首个批次失败即整体切 CF；显式 hf/cf 不切换。
+    两种后端维度不同，**不可混用**——索引记录 backend，检索与增量重建都按
+    索引自己的后端走。
     """
+    global _ACTIVE_BACKEND
+    if backend is None:
+        backend = EMBED_BACKEND if EMBED_BACKEND in ("hf", "cf") else "hf"
     if client is None:
         client = InferenceClient()
+    batch = CF_EMBED_BATCH if backend == "cf" else EMBED_BATCH
     total = len(entries)
-    for i in range(0, total, EMBED_BATCH):
-        chunk = entries[i:i + EMBED_BATCH]
-        texts = [(e["title"] + "\n" + e["content"])[:512] for e in chunk]
-        try:
-            vecs = client.feature_extraction(text=texts, model=EMBED_MODEL)
-            if hasattr(vecs, "tolist"):
-                vecs = vecs.tolist()
-            # 单条批次时 API 返回 (1,384)，tolist 后是 [[...]]；若返回 1D 才需包一层
-            if len(chunk) == 1 and vecs and not isinstance(vecs[0], list):
-                vecs = [vecs]
-            for e, v in zip(chunk, vecs):
-                e["embedding"] = v
-        except Exception as ex:
-            print(f"  ⚠️ 批次 {i//EMBED_BATCH+1} 失败: {ex}")
-            for e in chunk:
-                e["embedding"] = None
-        print(f"  向量化进度: {min(i+EMBED_BATCH, total)}/{total}")
+    i = 0
+    # 必须用游标而非 range(0,total,batch)：range 的步长在创建时固定，
+    # 而 batch 会在 HF→CF 回退时从 16 变 32，导致窗口重叠、条目重复嵌入
+    # （2026-10-10 实测：51 批跑成 102 批，结果正确但白烧一倍调用）。
+    while i < total:
+        while True:
+            # chunk 必须在 while 内重切：HF→CF 回退会改 batch，
+            # 沿用旧 chunk 则按新步长推进会整段跳过条目（实测漏 16 条）
+            chunk = entries[i:i + batch]
+            texts = [(e["title"] + "\n" + e["content"])[:512] for e in chunk]
+            try:
+                if backend == "hf":
+                    vecs = client.feature_extraction(text=texts, model=EMBED_MODEL)
+                    if hasattr(vecs, "tolist"):
+                        vecs = vecs.tolist()
+                    # 单条批次时 API 返回 (1,384)；tolist 后是 [[...]]，1D 才需包一层
+                    if len(chunk) == 1 and vecs and not isinstance(vecs[0], list):
+                        vecs = [vecs]
+                else:
+                    vecs = cf_embed(texts)
+                for e, v in zip(chunk, vecs):
+                    e["embedding"] = v
+                break
+            except Exception as ex:
+                if backend == "hf" and EMBED_BACKEND not in ("hf", "cf"):
+                    print(f"  ⚠️ HF 不可用（{str(ex)[:90]}）→ 切换到 CF ({CF_EMBED_MODEL})")
+                    backend, batch = "cf", CF_EMBED_BATCH
+                    continue
+                print(f"  ⚠️ 批次 {i // batch + 1} 失败: {ex}")
+                for e in chunk:
+                    e["embedding"] = None
+                break
+        _ACTIVE_BACKEND = backend
+        print(f"  [{backend}] 向量化进度: {min(i + batch, total)}/{total}")
+        i += batch
     # 过滤失败条目
     return [e for e in entries if e.get("embedding") is not None]
 
@@ -225,9 +276,27 @@ def search(query, top_k=5, client=None, compare=False):
     idx = pickle.loads(INDEX_FILE.read_bytes())
     entries = idx["entries"]
 
-    vec = client.feature_extraction(text=query[:512], model=EMBED_MODEL)
-    if hasattr(vec, "tolist"):
-        vec = vec.tolist()
+    if "backend" not in idx:
+        # 旧格式索引（HF 384 维时代）。HF Inference 已于 2026-10 全模型 402，
+        # 这类索引在本机是废的——给出可执行指引，别只抛堆栈。
+        print("⚠️  索引是旧格式（HF 384 维时代）且缺 backend 标记。")
+        print("   HF Inference 免额已失效（402），请先全量重建：")
+        print("   python3 " + str(Path(__file__).resolve()) + " build")
+        print("   （维度 384→1024 不同，不能走 --incremental）\n")
+
+    backend = idx.get("backend") or _ACTIVE_BACKEND or ("cf" if EMBED_BACKEND == "cf" else "hf")
+    try:
+        if backend == "cf":
+            vec = cf_embed([query[:512]])[0]
+        else:
+            vec = client.feature_extraction(text=query[:512], model=EMBED_MODEL)
+            if hasattr(vec, "tolist"):
+                vec = vec.tolist()
+    except Exception as ex:
+        print(f"❌ 查询向量化失败（后端 {backend}）: {str(ex)[:160]}")
+        print("   对策：CF 后端需 CF_ACCOUNT_ID + CF_API_TOKEN 环境变量；"
+              "HF 后端需可用额度。也可 `SEMANTIC_EMBED_BACKEND=cf` 强制。")
+        return []
 
     import datetime
     today = datetime.date.today()
@@ -274,18 +343,22 @@ def cmd_build():
     entries = extract_entries()
     print(f"  提取 {len(entries)} 条")
 
-    print("🧠 向量化（HF Inference）...")
+    print("🧠 向量化（HF → CF 自动兜底）...")
     client = InferenceClient()
     entries = embed_texts(entries, client)
-    print(f"  成功: {len(entries)} 条")
+    print(f"  成功: {len(entries)} 条（后端 {_ACTIVE_BACKEND}）")
 
+    hf_username()
     print(f"☁️  上传到 HF Dataset: {DATASET}")
     uploaded = upload_to_hf(entries)
     if uploaded:
         print(f"  ✅ 已上传")
 
     # 保存本地索引
-    idx_data = {"entries": entries, "model": EMBED_MODEL, "count": len(entries)}
+    backend = _ACTIVE_BACKEND or ("cf" if EMBED_BACKEND == "cf" else "hf")
+    idx_data = {"entries": entries, "backend": backend,
+                "model": CF_EMBED_MODEL if backend == "cf" else EMBED_MODEL,
+                "count": len(entries)}
     INDEX_FILE.write_bytes(pickle.dumps(idx_data))
     print(f"  📍 本地索引: {INDEX_FILE} ({INDEX_FILE.stat().st_size} bytes)")
     if uploaded:
@@ -304,7 +377,9 @@ def cmd_build_incremental():
         print("❌ 索引不存在，请先运行 build（全量）")
         return
 
-    old = {(e["source"], e["title"]): e for e in pickle.loads(INDEX_FILE.read_bytes())["entries"]}
+    _old_idx = pickle.loads(INDEX_FILE.read_bytes())
+    old = {(e["source"], e["title"]): e for e in _old_idx["entries"]}
+    old_backend = _old_idx.get("backend", "hf")  # 无字段 = HF 时代旧索引
     todo = []
     reused = 0
     for e in entries:
@@ -317,8 +392,8 @@ def cmd_build_incremental():
     print(f"♻️  复用旧向量 {reused} 条 | 🧠 待嵌入 {len(todo)} 条")
 
     if todo:
-        client = InferenceClient()
-        todo = embed_texts(todo, client)
+        # 复用索引自己的后端：新旧向量必须同维度，混用会静默算错相似度
+        todo = embed_texts(todo, backend=old_backend)
     good = [e for e in entries if e.get("embedding")]
     if len(good) < len(entries):
         print(f"  ⚠️ {len(entries)-len(good)} 条无向量，已丢弃")
@@ -327,7 +402,9 @@ def cmd_build_incremental():
     if uploaded:
         print(f"  ✅ 已上传 {uploaded}")
 
-    idx_data = {"entries": good, "model": EMBED_MODEL, "count": len(good)}
+    idx_data = {"entries": good, "backend": old_backend,
+                "model": CF_EMBED_MODEL if old_backend == "cf" else EMBED_MODEL,
+                "count": len(good)}
     INDEX_FILE.write_bytes(pickle.dumps(idx_data))
     print(f"📍 本地索引: {len(good)} 条 ({INDEX_FILE.stat().st_size} bytes)")
 
@@ -355,7 +432,10 @@ def cmd_status():
     if INDEX_FILE.exists():
         idx = pickle.loads(INDEX_FILE.read_bytes())
         print(f"索引条目: {idx['count']}")
-        print(f"嵌入模型: {idx['model']}")
+        print(f"嵌入模型: {idx['model']}（后端 {idx.get('backend', 'hf(旧索引)')}）")
+        entries = idx.get("entries") or []
+        if entries and entries[0].get("embedding"):
+            print(f"向量维度: {len(entries[0]['embedding'])}")
         print(f"索引文件: {INDEX_FILE} ({INDEX_FILE.stat().st_size} bytes)")
     else:
         print("❌ 索引不存在")
