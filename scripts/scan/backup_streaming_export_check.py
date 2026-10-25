@@ -10,35 +10,35 @@ Pins the automatic-backup streaming + fetch-hardening contract:
         artifacts + knowledge graph) reaches tens of MB on a heavy install
         and the String path materializes it ×2 in UTF-16 before the first
         byte hits disk. runLocked must also rotate through the shared
-        `rotateLocalAutoBackups(` helper instead of an inline drop loop.
+        `rotateLocalAutoBackups(` helper, and that call must be REACHABLE.
   arm2 (WebDavSync surface): WebDavSync must expose a `backupAuto` File
         overload (callers that already have the document on disk must not
         rebuild a String to upload it) and the pure
-        `sanitizeAutoBackupStamp(` token reducer.
+        `sanitizeAutoBackupStamp(` token reducer — whose BODY must actually
+        refuse the dangerous names (declaration alone is not a reducer).
   arm3 (screen fetch hardening): BackupSettingsScreen's fetch-to-local path
         must sanitize the remote display name through
-        `WebDavSync.sanitizeAutoBackupStamp(` (the name arrives from the
-        WebDAV server and used to be concatenated straight into a local
-        path) and must join the fetched copy into the shared local rotation
-        via `rotateLocalAutoBackups(`.
-  arm4 (no main-thread dir listing): every `listLocal(` call line in
-        BackupSettingsScreen must ride a `withContext(Dispatchers.IO)` on the
-        SAME line. The threading contract is deliberately style-pinned
-        (single-line wrapping) so the gate stays a dumb, greppable text check
-        instead of a brace-tracking heuristic; the entry load, the post-run
-        refresh and the post-fetch refresh are the only three call sites.
+        `WebDavSync.sanitizeAutoBackupStamp(`, reject a null answer, and build
+        the destination `File(…)` from the value the sanitizer RETURNED (via
+        real value flow, not token presence), and must join the fetched copy
+        into the shared local rotation via `rotateLocalAutoBackups(`.
+  arm4 (no main-thread dir listing): every `listLocal(` call must sit INSIDE
+        a `withContext(Dispatchers.IO) { … }` block. `Dispatchers.IO` merely
+        appearing on the same line (e.g. inside a discarding
+        `.also { Dispatchers.IO }`) does not move the call off the main
+        thread, so containment — not token co-occurrence — is the criterion.
   arm5 (secret-warning routing flag, deep-audit-1027 ISSUE-03): the
         `webDavUploadPending` marker is read once, inside the shared secret
         confirmation (`runExport`), to decide whether a confirmed export goes
         to WebDAV or through the local SAF picker. Any path that can leave a
         stale `true` behind silently re-routes a later LOCAL export to a
         remote upload (API keys included). The flag must therefore be cleared
-        on >= 3 sites: the local-export entry, the `runExport` consumption and
-        the dialog's `onDismissRequest`. Anchor is fail-closed: if the flag
-        declaration disappears (renamed/moved), the arm goes RED instead of
-        silently counting zero and passing — re-point the arm at the new name.
-        The count contract is deliberately dumb/greppable (same style as arm4)
-        rather than brace-tracking.
+        on >= 3 REACHABLE sites: the local-export entry, the `runExport`
+        consumption and the dialog's `onDismissRequest`; and no clear may be
+        overwritten by a later `= true` in the SAME block (only the last write
+        in a block survives). Anchor is fail-closed: if the flag declaration
+        disappears (renamed/moved), the arm goes RED instead of silently
+        counting zero and passing — re-point the arm at the new name.
   arm6 (fetch-to-local busy gate + tail liveness, deep-audit-1040 B-08): the
         `onFetch` handler pulls a full auto-backup payload into memory and then
         writes + rotates `filesDir/backup-autos` — the same directory the
@@ -55,6 +55,35 @@ Pins the automatic-backup streaming + fetch-hardening contract:
         located — or that no longer carries the refresh call — is RED, not a
         silent zero-count pass; re-point the arm, do not delete it.
 
+batch-5 hardening (six witnesses passed this gate unchanged)
+
+  * 01-1 `parser-death` — the gate's own `strip_comments` kept string CONTENT
+    while its brace counter was quote-blind, so a `}` inside a `Log.w` message
+    closed `runLocked` early: the function body was truncated, the (banned)
+    `ConfigBackup.export(` after the cut was never seen and the rotation call
+    "found" inside the log string counted as the real one. All structure now
+    comes from the shared `_kotlin_lexer` (`mask_code`) + `_kotlin_ast`
+    (`function_body`, `match_bracket`): strings and comments are blanks, offsets
+    are preserved, and a lex failure is fail-closed.
+  * 01-2 `family-hole` — `if (1 == 2) rotateLocalAutoBackups(app)` defeated a
+    5-item literal regex (`false` / `!true` / `0 > 1` …). Reachability is now
+    the shared `path_feasible` / `guard_feasible` (constant folding with Kotlin
+    precedence, plus `when` branches).
+  * 01-3 `anchor` — arm2 only asked whether `fun sanitizeAutoBackupStamp(`
+    exists, so a body that returns the raw name unchanged stayed green. The
+    criterion now reads the BODY (`function_body`) and requires a reachable
+    `return null` plus an actual refusal of `/`, `\\` and `..`.
+  * 01-4 `dataflow` — `File(dir, (prefix + rawStamp + ".json").also { stamp })`
+    contains the token `stamp` while evaluating the RAW name. Destination
+    arguments are now resolved through `value_sources` / `peel_discarding`, so a
+    discarded lambda cannot stand in for the value.
+  * 01-5 `dataflow` — `listLocal(…).also { Dispatchers.IO }` satisfied a
+    same-line substring test. Containment inside the `withContext(` lambda is
+    now the criterion.
+  * 01-6 `order` — `webDavUploadPending = false; webDavUploadPending = true`
+    kept the `= false` count intact while the truthy write won. Clears must be
+    reachable AND survive to the end of their block.
+
 Usage:
   python3 backup_streaming_export_check.py <repo_root>   # real tree
   python3 backup_streaming_export_check.py --selftest    # fixtures
@@ -67,186 +96,77 @@ import re
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import KotlinLexError, mask_comments  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    function_body,
+    match_bracket,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    code_view,
+    contains_ident,
+    path_feasible,
+    value_sources,
+)
+
 AUTO_MGR_REL = "src/android/app/src/main/java/com/rikkaminis/app/backup/AutoBackupManager.kt"
 SYNC_REL = "src/android/app/src/main/java/com/rikkaminis/app/backup/WebDavSync.kt"
 SCREEN_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/settings/BackupSettingsScreen.kt"
 
-FILE_OVERLOAD_PAT = re.compile(r"fun backupAuto\(\s*config: WebDavConfig,\s*file: File")
+FILE_OVERLOAD_PAT = re.compile(
+    r"fun\s+backupAuto\(\s*config:\s*WebDavConfig\s*,\s*file:\s*File")
 
 
-def strip_comments(src):
-    """Remove // line comments and /* */ block comments (KDoc included),
-    STRING-AWARE: `"` and `'` literals (regular + triple-quoted) are consumed
-    as strings so a `/*` or `//` inside a string literal (BackupSettingsScreen
-    has one at its path-pattern site) cannot open a phantom block comment and
-    silently eat half the file."""
-    out = []
-    i, n = 0, len(src)
-    state = "code"  # code | line | block | str | rawstr | char
-    while i < n:
-        if state == "line":
-            if src[i] == "\n":
-                state = "code"
-                out.append("\n")
-            i += 1
-        elif state == "block":
-            if src.startswith("*/", i):
-                state = "code"
-                i += 2
-            else:
-                i += 1
-        elif state == "rawstr":
-            if src.startswith('"""', i):
-                state = "code"
-                i += 3
-            else:
-                out.append(src[i])
-                i += 1
-        elif state == "str":
-            c = src[i]
-            if c == "\\":
-                i += 2
-            elif c == '"':
-                state = "code"
-                i += 1
-            elif c == "\n":
-                state = "code"  # unterminated single-line string — bail to code
-                out.append("\n")
-                i += 1
-            else:
-                out.append(c)
-                i += 1
-        elif state == "char":
-            c = src[i]
-            if c == "\\":
-                i += 2
-            elif c == "'":
-                state = "code"
-                i += 1
-            else:
-                i += 1
-        else:  # code
-            if src.startswith("//", i):
-                state = "line"
-                i += 2
-            elif src.startswith("/*", i):
-                state = "block"
-                i += 2
-            elif src.startswith('"""', i):
-                state = "rawstr"
-                i += 3
-            elif src[i] == '"':
-                state = "str"
-                i += 1
-            elif src[i] == "'":
-                state = "char"
-                i += 1
-            else:
-                out.append(src[i])
-                i += 1
-    return "".join(out)
+def squash(expr):
+    """Whitespace-free, outer-paren-stripped form of an expression."""
+    e = re.sub(r"\s+", "", expr or "")
+    while (len(e) >= 2 and e[0] == "(" and e[-1] == ")"
+           and match_bracket(e, 0) == len(e) - 1):
+        e = e[1:-1]
+    return e
 
 
-def read_stripped(root, rel):
+def read_views(root, rel):
+    """(structural view, literal view) — both length-preserving.
+
+    structural: comments AND string/char literal interiors blanked (brace and
+                paren analysis, call-argument slicing, identifier lookups);
+    literal:    comments only (what a string/char literal actually SAYS — the
+                sanitizer's forbidden-character refusals live inside literals).
+    A missing file reads as (None, None); a lex failure propagates so the
+    caller can fail closed.
+    """
     path = os.path.join(root, rel)
     if not os.path.isfile(path):
-        return None
-    src = open(path, encoding="utf-8", errors="replace").read()
-    return strip_comments(src)
+        return None, None
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        src = fh.read()
+    return code_view(src), mask_comments(src)
 
 
-DEAD_COND_PAT = re.compile(
-    r"\bif\s*\(\s*(?:false\b|!\s*true\b|0\s*!=\s*0\b|1\s*==\s*0\b|true\s*==\s*false\b)")
-
-
-def brace_block_span(text, pos):
-    """(start, end) of the SMALLEST `{ … }` block containing `pos`."""
-    depth = 0
-    i = pos - 1
-    while i >= 0:
-        c = text[i]
-        if c == "}":
-            depth += 1
-        elif c == "{":
-            if depth == 0:
-                d = 0
-                for j in range(i, len(text)):
-                    if text[j] == "{":
-                        d += 1
-                    elif text[j] == "}":
-                        d -= 1
-                        if d == 0:
-                            return i, j + 1
-                return i, len(text)
-            depth -= 1
-        i -= 1
+def block_span(text, pos):
+    """(start, end) of the innermost `{ … }` block containing `pos`."""
+    stack = []
+    for i, ch in enumerate(text):
+        if ch == "{":
+            stack.append(i)
+        elif ch == "}":
+            if not stack:
+                continue
+            start = stack.pop()
+            if start < pos <= i:
+                return start, i + 1
     return 0, len(text)
 
 
-def fun_span(code, name):
-    """(start, end) of `fun <name>( … ) { … }`, or None."""
-    m = re.search(r"\bfun\s+%s\s*\(" % re.escape(name), code)
-    if m is None:
+def braced_from(text, start):
+    """Text from `start` through the brace closing the first `{` at/after it."""
+    open_i = text.find("{", start)
+    if open_i < 0:
         return None
-    brace = code.find("{", m.end())
-    if brace < 0:
-        return None
-    start, end = brace_block_span(code, brace + 1)
-    return start, end
-
-
-def dead_guarded(code, pos):
-    """True when `pos` can never execute: its own statement is gated on a
-    constant that is false, or an enclosing block is (`if (false) { … }`).
-
-    `if (false) rotateLocalAutoBackups(app)` keeps the call, the helper and
-    every other anchor of arm 1 — the rotation simply never runs."""
-    line_start = code.rfind("\n", 0, pos) + 1
-    if DEAD_COND_PAT.search(code[line_start:pos]):
-        return True
-    # A guard on the previous line / on a wrapped statement: `if (false)\n call()`.
-    j = pos - 1
-    while j >= 0 and code[j] in " \t\r\n":
-        j -= 1
-    if j >= 0 and code[j] == ")":
-        depth = 0
-        i = j
-        while i >= 0:
-            if code[i] == ")":
-                depth += 1
-            elif code[i] == "(":
-                depth -= 1
-                if depth == 0:
-                    break
-            i -= 1
-        if re.search(r"\bif\s*$", code[max(0, i - 40):i]) and DEAD_COND_PAT.search(code[i:j + 1]):
-            return True
-    # Enclosing blocks: walk out through every `{ … }` that contains `pos`.
-    probe = pos
-    while True:
-        start, end = brace_block_span(code, probe)
-        if start == 0 and end == len(code):
-            break
-        head = code[max(0, start - 90):start]
-        if DEAD_COND_PAT.search(head):
-            return True
-        if start <= 0:
-            break
-        probe = start
-    return False
-
-
-def paren_block(code, open_idx):
-    """The balanced `( … )` starting at `open_idx`, or None."""
-    depth = 0
-    for i in range(open_idx, len(code)):
-        if code[i] == "(":
-            depth += 1
-        elif code[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return code[open_idx:i + 1]
-    return None
+    close = match_bracket(text, open_i)
+    return None if close < 0 else text[start:close + 1]
 
 
 def assign_target(code, pos):
@@ -254,6 +174,11 @@ def assign_target(code, pos):
     head = code[max(0, pos - 240):pos]
     m = re.search(r"(?:val\s+|var\s+)?([A-Za-z_]\w*)\s*(?::\s*[\w<>?,. ]+)?=\s*$", head)
     return m.group(1) if m else None
+
+
+STREAM_CALL = re.compile(r"ConfigBackup\s*\.\s*exportToWriter\s*\(")
+STRING_CALL = re.compile(r"ConfigBackup\s*\.\s*export\s*\(")
+ROTATE_APP = re.compile(r"rotateLocalAutoBackups\s*\(\s*app\s*\)")
 
 
 def check_arm1(auto_code):
@@ -265,40 +190,97 @@ def check_arm1(auto_code):
     `filesDir/backup-autos` then grows without bound until the device is full,
     which is the defect [deep-audit-1027 B-04] closed. The check is now scoped
     to runLocked's body and the call site is checked for a dead guard.
+
+    batch-5: the body is derived from the shared lexer's masked view, so a `}`
+    inside a log string can no longer truncate the region (witness 01-1), and
+    reachability comes from the shared `path_feasible` instead of a five-item
+    literal regex (witness 01-2).
     """
     if auto_code is None:
         return "AutoBackupManager.kt not found"
-    span = fun_span(auto_code, "runLocked")
+    span = function_body(auto_code, "runLocked")
     if span is None:
         return ("AutoBackupManager.runLocked not found (anchor drift) — re-point arm 1 "
                 "at the renamed writer; do not delete it")
-    region = auto_code[span[0]:span[1]]
-    if "ConfigBackup.exportToWriter(" not in region:
+    body_start, body_end, kind = span
+    if kind != "block":
+        return ("AutoBackupManager.runLocked is no longer a block-bodied function — its "
+                "streaming writer cannot be audited (fail-closed)")
+    region = auto_code[body_start:body_end]
+    if not STREAM_CALL.search(region):
         return "runLocked must stream via ConfigBackup.exportToWriter( (no full-document String)"
-    if "ConfigBackup.export(" in region:
+    if STRING_CALL.search(region):
         return "runLocked must not assemble the whole document via ConfigBackup.export("
-    pos = region.find("rotateLocalAutoBackups(app)")
-    if pos < 0:
+    sites = [m.start() for m in ROTATE_APP.finditer(region)]
+    if not sites:
         return "runLocked must rotate through the shared rotateLocalAutoBackups(app) helper"
-    if dead_guarded(region, pos):
+    if not any(path_feasible(region, pos) for pos in sites):
         return ("runLocked's shared rotation is DEAD-GUARDED (a constant condition can "
                 "never hold) — the call is there, the rotation never runs, and "
                 "filesDir/backup-autos grows without bound until the device is full")
     return None
 
 
-def check_arm2(sync_code):
-    """WebDavSync: File overload for backupAuto + the stamp sanitizer."""
+SANITIZER = "sanitizeAutoBackupStamp"
+SLASH_TOK = re.compile(r"""['"]/['"]""")
+BACKSLASH_TOK = re.compile(r"""['"]\\\\['"]""")
+DOTDOT_TOK = re.compile(r"""['"]\.\.['"]""")
+RETURN_NULL = re.compile(r"\breturn\s+null\b")
+
+
+def check_arm2(sync_code, sync_literal=None):
+    """WebDavSync: File overload for backupAuto + a sanitizer that REFUSES.
+
+    batch-5 (witness 01-3): the criterion used to stop at the declaration, so
+    replacing the body with `if (trimmed.isNotEmpty()) return trimmed` kept the
+    arm green — and put the path-traversal defect [deep-audit-1031 A-07] back
+    in place. The body is now read (from the literal view, so quoted
+    characters stay visible) and must reject: a reachable `return null` plus an
+    explicit refusal of `/`, `\\` and `..`.
+    """
     if sync_code is None:
         return "WebDavSync.kt not found"
     if not FILE_OVERLOAD_PAT.search(sync_code):
         return "WebDavSync.backupAuto needs a File overload (streaming callers must not rebuild a String)"
-    if "fun sanitizeAutoBackupStamp(" not in sync_code:
+    span = function_body(sync_code, SANITIZER)
+    if span is None:
         return "WebDavSync must define sanitizeAutoBackupStamp( (pure filename-token reducer)"
+    if sync_literal is None:
+        sync_literal = sync_code
+    body_start, body_end, kind = span
+    body = sync_literal[body_start:body_end]
+    body_struct = sync_code[body_start:body_end]
+    rejects = [m.start() for m in RETURN_NULL.finditer(body_struct)]
+    if not any(path_feasible(body_struct, pos) for pos in rejects):
+        return ("sanitizeAutoBackupStamp keeps its signature but never REJECTS a name (no "
+                "reachable `return null`) — a remote display name is passed straight through "
+                "into the local backup path")
+    missing = [name for name, pat in (("/", SLASH_TOK), ("\\", BACKSLASH_TOK), ("..", DOTDOT_TOK))
+               if not pat.search(body)]
+    if missing:
+        return ("sanitizeAutoBackupStamp's body no longer refuses %s — the declaration is "
+                "still there, the refusal is not, so a display name carrying it lands in "
+                "filesDir/backup-autos unchanged" % ", ".join("'%s'" % m for m in missing))
     return None
 
 
-SANITIZE_CALL = "WebDavSync.sanitizeAutoBackupStamp"
+SANITIZE_CALL_RE = re.compile(r"WebDavSync\s*\.\s*sanitizeAutoBackupStamp\s*\(")
+ROTATE_SCREEN = re.compile(r"rotateLocalAutoBackups\s*\(\s*context\s*\)")
+
+
+def _dest_uses(region, var):
+    """Does some `File(…)` argument's REAL value derive from `var`?
+
+    Resolved through `value_sources`, so a discarding scope function
+    (`.also { var }`, `.apply { … }`) cannot masquerade as a use: those return
+    their receiver, not the lambda's value.
+    """
+    for f in re.finditer(r"\bFile\s*\(", region):
+        for a_start, a_end in call_args(region, f.end() - 1):
+            for src in value_sources(region[a_start:a_end]):
+                if contains_ident(src, var):
+                    return True
+    return False
 
 
 def check_arm3(screen_code):
@@ -313,35 +295,34 @@ def check_arm3(screen_code):
 
     Criterion (per call site, on its enclosing block):
       1. the result is BOUND to a variable (not discarded);
-      2. the sanitizer's null result is REJECTED (guard or `?:`) — the whole
-         point of the reducer is that it can say "no";
-      3. the destination `File(…)` is built from the sanitized value (or a
-         variable assigned from it), never from the raw token alone.
+      2. the sanitizer's null result is REJECTED (guard or `?:`);
+      3. the destination `File(…)` is built from the sanitized value's REAL
+         value flow, never from the raw token alone (batch-5, witness 01-4).
     An unparseable call site fail-closes.
     """
     if screen_code is None:
         return "BackupSettingsScreen.kt not found"
-    if SANITIZE_CALL + "(" not in screen_code:
+    calls = list(SANITIZE_CALL_RE.finditer(screen_code))
+    if not calls:
         return "fetch-to-local must sanitize the remote display name via WebDavSync.sanitizeAutoBackupStamp("
-    if "rotateLocalAutoBackups(context)" not in screen_code:
+    if not ROTATE_SCREEN.search(screen_code):
         return "fetch-to-local must join the shared local rotation via rotateLocalAutoBackups(context)"
-    for m in re.finditer(re.escape(SANITIZE_CALL), screen_code):
-        if re.search(r"fun\s+$", screen_code[max(0, m.start() - 40):m.start()]):
+    for m in calls:
+        if re.search(r"\bfun\s+$", screen_code[max(0, m.start() - 40):m.start()]):
             continue  # the declaration itself
-        op = screen_code.find("(", m.end() - 1)
-        block = paren_block(screen_code, op) if op >= 0 else None
-        if block is None:
+        close = match_bracket(screen_code, m.end() - 1)
+        if close < 0:
             return ("WebDavSync.sanitizeAutoBackupStamp( … ) does not balance at offset %d "
                     "(fail-closed)" % m.start())
-        call_end = op + len(block)
+        call_end = close + 1
         var = assign_target(screen_code, m.start())
         if not var:
             return ("the sanitized remote name is DISCARDED at offset %d (result not bound "
                     "to a variable) — the file name is still derived from the raw, "
                     "remote-controlled display name (path traversal / overwrite into "
                     "filesDir/backup-autos)" % m.start())
-        start, end = brace_block_span(screen_code, m.start())
-        after = screen_code[call_end:end]
+        b_start, b_end = block_span(screen_code, m.start())
+        after = screen_code[call_end:b_end]
         guarded = (re.match(r"\s*\?:", after) is not None
                    or re.search(r"\b%s\s*==\s*null\b" % re.escape(var), after) is not None
                    or re.search(r"\bnull\s*==\s*%s\b" % re.escape(var), after) is not None
@@ -350,84 +331,116 @@ def check_arm3(screen_code):
             return ("the sanitizer's rejection is IGNORED (`%s` is never null-checked) — a "
                     "remote display name that the reducer refuses is then written as-is "
                     "into filesDir/backup-autos" % var)
-        uses = [x for x in re.finditer(r"\b%s\b" % re.escape(var), after)]
-        if not uses:
-            return ("`%s` (the sanitized result) is never read — the destination path is "
-                    "built from something else, so sanitising the name changed nothing" % var)
-        aliases = {var}
-        for a in re.finditer(r"\b([A-Za-z_]\w*)\s*=\s*%s\b" % re.escape(var), after):
-            aliases.add(a.group(1))
-        region = screen_code[start:end]
-        dests = [paren_block(region, d.end() - 1)
-                 for d in re.finditer(r"\bFile\s*\(", region)]
-        dests = [d for d in dests if d]
-        if dests and not any(any(re.search(r"\b%s\b" % re.escape(a), d) for a in aliases)
-                             for d in dests):
-            return ("the destination `File(…)` is not built from the sanitized value "
-                    "(none of %s appears in it) — the guard protects a value the writer "
-                    "never uses" % ", ".join(sorted("`%s`" % a for a in aliases)))
+        region = screen_code[b_start:b_end]
+        if not _dest_uses(region, var):
+            return ("no `File(…)` in the fetch block is built from the sanitized value `%s` — the "
+                    "sanitizer's result is decorative and the destination is derived from "
+                    "something else (a discarded `.also { %s }` still evaluates the RAW, "
+                    "remote-controlled name)" % (var, var))
     return None
 
 
+IO_SCOPE = re.compile(r"\bwithContext\s*\(")
+LIST_LOCAL = re.compile(r"\blistLocal\s*\(")
+
+
+def io_scope_spans(code):
+    """Spans of `withContext(Dispatchers.IO) { … }` calls (masked view)."""
+    out = []
+    for m in IO_SCOPE.finditer(code):
+        args = call_args(code, m.end() - 1)
+        if not args or squash(code[args[0][0]:args[0][1]]) != "Dispatchers.IO":
+            continue
+        close = match_bracket(code, m.end() - 1)
+        if close < 0:
+            continue
+        i = close + 1
+        while i < len(code) and code[i] in " \t\r\n":
+            i += 1
+        if i >= len(code) or code[i] != "{":
+            continue  # no trailing lambda ⇒ no IO body to be inside of
+        end = match_bracket(code, i)
+        if end < 0:
+            continue
+        out.append((m.start(), end + 1))
+    return out
+
+
 def check_arm4(screen_code):
-    """Every listLocal( call line in the screen must ride withContext(Dispatchers.IO)."""
+    """Every listLocal( call must sit INSIDE a withContext(Dispatchers.IO) block.
+
+    batch-5 (witness 01-5): the old criterion only required `Dispatchers.IO` to
+    appear somewhere on the same line, so `listLocal(context).also {
+    Dispatchers.IO }` — a discarding lambda that does not dispatch anything —
+    read exactly like a properly wrapped call while the directory walk ran on
+    the main thread. Containment, not token co-occurrence, is the contract.
+    """
     if screen_code is None:
         return "BackupSettingsScreen.kt not found"
-    violations = []
-    for lineno, line in enumerate(screen_code.split("\n"), 1):
-        if "listLocal(" in line and "Dispatchers.IO" not in line:
-            violations.append(lineno)
-    if violations:
+    spans = io_scope_spans(screen_code)
+    bad = []
+    for m in LIST_LOCAL.finditer(screen_code):
+        if not any(s <= m.start() < e for s, e in spans):
+            bad.append(screen_code.count("\n", 0, m.start()) + 1)
+    if bad:
         return (
-            "main-thread local auto-backup listing: listLocal( lines without "
-            "withContext(Dispatchers.IO) on the same line (style-pinned contract): "
-            f"{violations}"
+            "main-thread local auto-backup listing: listLocal( call(s) outside a "
+            "`withContext(Dispatchers.IO) { … }` block — the `Dispatchers.IO` token appearing "
+            "on the same line (e.g. inside a discarding `.also { Dispatchers.IO }`) does not "
+            f"move the call off the main thread: lines {bad}"
         )
     return None
 
 
+FLAG_DECL = re.compile(r"\bvar\s+webDavUploadPending\b")
+FLAG_WRITE = re.compile(r"(?<![\w])webDavUploadPending\s*=\s*(true|false)\b")
+
+
 def check_arm5(screen_code):
-    """Secret-warning routing flag must be cleared on every escaping path.
+    """Secret-warning routing flag must survive to the point where it is read.
 
     A leaked `webDavUploadPending = true` (dialog dismissed via back press /
-    tap outside) re-routes the NEXT local export into a WebDAV upload —
-    silently shipping a secrets-included payload to the remote server.
+    tap outside, or the clear getting overwritten right away) re-routes the NEXT
+    local export into a WebDAV upload — silently shipping a secrets-included
+    payload to the remote server.
+
+    batch-5 (witness 01-6): counting `webDavUploadPending = false` occurrences
+    was satisfied by `= false; = true;` in the same lambda, because only the
+    LAST write to a field survives. Clears must now be reachable and must be
+    the last write of their own block.
     """
     if screen_code is None:
         # Drift-probe / mini-tree fixture without the screen: nothing to pin.
         return None
-    if not re.search(r"\bvar webDavUploadPending\b", screen_code):
+    if not FLAG_DECL.search(screen_code):
         return (
             "BackupSettingsScreen must declare `var webDavUploadPending` — the "
             "secret-warning routing flag vanished (anchor drift). Re-point this "
             "arm at the renamed flag; do not delete the arm."
         )
-    clears = screen_code.count("webDavUploadPending = false")
-    if clears < 3:
+    writes = [(m.start(), m.group(1)) for m in FLAG_WRITE.finditer(screen_code)]
+    clears = [pos for pos, val in writes if val == "false" and path_feasible(screen_code, pos)]
+    if len(clears) < 3:
         return (
-            "webDavUploadPending must be cleared on >= 3 sites (local-export "
+            "webDavUploadPending must be cleared on >= 3 REACHABLE sites (local-export "
             "entry / runExport consumption / dialog onDismissRequest) — a stale "
             "`true` redirects a later local export to a remote WebDAV upload "
-            f"(secrets included): found {clears}"
+            f"(secrets included): found {len(clears)}"
         )
-    return None
-
-
-def _braced_region(src, start):
-    """Text from `start` through the brace that closes the first `{` at or after
-    it, or None when the braces never balance."""
-    open_i = src.find("{", start)
-    if open_i < 0:
-        return None
-    depth = 0
-    for i in range(open_i, len(src)):
-        c = src[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return src[start : i + 1]
+    by_block = {}
+    for pos, val in writes:
+        by_block.setdefault(block_span(screen_code, pos), []).append((pos, val))
+    for (b_start, b_end), sites in sorted(by_block.items()):
+        sites.sort()
+        if any(val == "false" for _p, val in sites) and sites[-1][1] == "true":
+            line = screen_code.count("\n", 0, b_start) + 1
+            return (
+                "the clear at block line %d is OVERWRITTEN by a later "
+                "`webDavUploadPending = true` in the SAME block (offset %d) — only the last "
+                "write survives, so a confirmed LOCAL export reads a stale `true` and ships "
+                "the secrets-included payload to WebDAV instead of the SAF picker"
+                % (line, sites[-1][0])
+            )
     return None
 
 
@@ -441,7 +454,7 @@ def fetch_handler_region(screen_code):
     count.
     """
     for m in re.finditer(r"\bonFetch\b", screen_code):
-        region = _braced_region(screen_code, m.start())
+        region = braced_from(screen_code, m.start())
         if region and "openAutoRemoteList(" in region:
             return region
     return None
@@ -494,7 +507,7 @@ def check_arm6(screen_code):
             "fetch-to-local must release the shared operationBusy gate on its "
             "exit path (no `finally` in the handler region)"
         )
-    finally_region = _braced_region(region, finally_i) or ""
+    finally_region = braced_from(region, finally_i) or ""
     # wide-1024 (order axis): a release that is followed by another claim is
     # not a release — the LAST write in the exit path is the one that survives.
     writes = re.findall(r"operationBusy\s*=\s*(true|false)", finally_region)
@@ -511,7 +524,7 @@ def check_arm6(screen_code):
             "recreated (a release followed by a re-claim is not a release)" % writes[-1]
         )
     refresh_i = region.find("openAutoRemoteList(")
-    window = region[max(0, refresh_i - 200) : refresh_i]
+    window = region[max(0, refresh_i - 200):refresh_i]
     if not LIVENESS_PAT.search(window):
         return (
             "the post-fetch openAutoRemoteList() must be liveness-guarded "
@@ -522,13 +535,16 @@ def check_arm6(screen_code):
 
 
 def check_all(root):
-    auto = read_stripped(root, AUTO_MGR_REL)
-    sync = read_stripped(root, SYNC_REL)
-    screen = read_stripped(root, SCREEN_REL)
+    try:
+        auto, _auto_lit = read_views(root, AUTO_MGR_REL)
+        sync, sync_lit = read_views(root, SYNC_REL)
+        screen, _screen_lit = read_views(root, SCREEN_REL)
+    except KotlinLexError as exc:
+        return ["source is not lexable (%s) — fail-closed" % exc]
     failures = []
     for name, err in (
         ("arm1", check_arm1(auto)),
-        ("arm2", check_arm2(sync)),
+        ("arm2", check_arm2(sync, sync_lit)),
         ("arm3", check_arm3(screen)),
         ("arm4", check_arm4(screen)),
         ("arm5", check_arm5(screen)),
@@ -575,7 +591,13 @@ object WebDavSync {
 
     private fun putAutoBackup(config: WebDavConfig, bytes: ByteArray, client: OkHttpClient): String = "x"
 
-    fun sanitizeAutoBackupStamp(raw: String): String? = raw
+    fun sanitizeAutoBackupStamp(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        if (trimmed.contains('/') || trimmed.contains('\\\\')) return null
+        if (trimmed.contains("..")) return null
+        return trimmed
+    }
 }
 """
 
@@ -660,10 +682,16 @@ VIOLATION_NO_FILE_OVERLOAD = COMPLIANT_SYNC.replace(
     "",
 )
 
-VIOLATION_NO_SANITIZER = COMPLIANT_SYNC.replace(
-    "    fun sanitizeAutoBackupStamp(raw: String): String? = raw",
-    "",
-)
+SANITIZER_FN = """    fun sanitizeAutoBackupStamp(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        if (trimmed.contains('/') || trimmed.contains('\\\\')) return null
+        if (trimmed.contains("..")) return null
+        return trimmed
+    }
+"""
+
+VIOLATION_NO_SANITIZER = COMPLIANT_SYNC.replace(SANITIZER_FN, "")
 
 VIOLATION_FETCH_NO_SANITIZE = COMPLIANT_SCREEN.replace(
     "val stamp = WebDavSync.sanitizeAutoBackupStamp(entry.item.displayName) ?: return",
@@ -763,6 +791,73 @@ VIOLATION_FETCH_GATE_RECLAIM = COMPLIANT_SCREEN.replace(
 )
 
 
+# A correctly WRAPPED sanitize call is a legal spelling: the arms must anchor on
+# structure (call/argument identity), not on a single-line style.
+COMPLIANT_SANITIZER_WRAPPED = COMPLIANT_SCREEN.replace(
+    'val stamp = WebDavSync.sanitizeAutoBackupStamp(entry.item.displayName) ?: return',
+    'val stamp = WebDavSync.sanitizeAutoBackupStamp(\n'
+    '                    entry.item.displayName,\n'
+    '                ) ?: return',
+)
+
+# ── batch-5 witnesses (each one passed this gate unchanged) ───────────────
+
+# 01-1 (parser-death): a `}` INSIDE a log string closed the quote-blind brace
+# counter, truncating runLocked's body — the banned String export after the cut
+# was never inspected and the rotation call "found" inside the message text.
+VIOLATION_ROTATION_STRING_ESCAPE = COMPLIANT_AUTO.replace(
+    "        rotateLocalAutoBackups(app)",
+    '        Log.w(TAG, "auto backup wrote rotateLocalAutoBackups(app) } unreadable field(s)")\n'
+    "        val leakedFullString = ConfigBackup.export(\n"
+    "            providerRepo = app.providerRepository,\n"
+    "            includeSecrets = false,\n"
+    "        )",
+)
+
+# 01-2 (family-hole): the rotation keeps its exact text and is gated on a
+# constant comparison the literal whitelist (`false` / `!true` / `0 > 1`) never
+# knew.
+VIOLATION_ROTATION_CONST_COMPARE = COMPLIANT_AUTO.replace(
+    "        rotateLocalAutoBackups(app)",
+    "        if (1 == 2) rotateLocalAutoBackups(app)",
+)
+
+# 01-3 (anchor): the sanitizer keeps its signature and hands the raw name back,
+# so "does WebDavSync define sanitizeAutoBackupStamp(" stays true.
+VIOLATION_SANITIZER_HOLLOW = COMPLIANT_SYNC.replace(
+    SANITIZER_FN,
+    """    fun sanitizeAutoBackupStamp(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.isNotEmpty()) return trimmed
+        return null
+    }
+""",
+)
+
+# 01-4 (dataflow): the sanitized token appears in the expression while the RAW,
+# remote-controlled name is what gets evaluated — the classic
+# `.also { stamp }` (discarding scope) disguise.
+VIOLATION_FETCH_ALSO_DISCARD = COMPLIANT_SCREEN.replace(
+    'val local = File(dir, AutoBackupManager.LOCAL_FILE_PREFIX + stamp + ".json")',
+    'val local = File(dir, (AutoBackupManager.LOCAL_FILE_PREFIX'
+    ' + entry.item.displayName + ".json").also { stamp })',
+)
+
+# 01-5 (dataflow): `Dispatchers.IO` appears on the line, but inside a
+# discarding lambda — the directory walk still runs on the main thread.
+VIOLATION_MAIN_THREAD_ALSO = COMPLIANT_SCREEN.replace(
+    "autoBackupFiles = withContext(Dispatchers.IO) { AutoBackupManager.listLocal(context) }",
+    "autoBackupFiles = AutoBackupManager.listLocal(context).also { Dispatchers.IO }",
+)
+
+# 01-6 (order): the clear is undone in the SAME lambda — counts stay intact,
+# only the last write survives, and a later local export ships the secrets.
+VIOLATION_ENTRY_OVERWRITE = COMPLIANT_SCREEN.replace(
+    "({ webDavUploadPending = false; showSecretWarning = true })",
+    "({ webDavUploadPending = false; webDavUploadPending = true; showSecretWarning = true })",
+)
+
+
 def write_tree(tmp, auto=None, sync=None, screen=None):
     for rel, content in (
         (AUTO_MGR_REL, auto),
@@ -821,9 +916,25 @@ def selftest():
     ok &= run_fixture("violation-fetch-sanitizer-dead", expect_ok=False,
                       screen=VIOLATION_FETCH_SANITIZER_DEAD, contains="rejection is IGNORED")
     ok &= run_fixture("violation-fetch-raw-path", expect_ok=False,
-                      screen=VIOLATION_FETCH_RAW_PATH, contains="never read")
+                      screen=VIOLATION_FETCH_RAW_PATH, contains="is decorative")
     ok &= run_fixture("violation-fetch-gate-reclaim", expect_ok=False,
                       screen=VIOLATION_FETCH_GATE_RECLAIM, contains="last write")
+    # batch-5: each witness must trip the arm it was written against.
+    ok &= run_fixture("violation-rotation-string-escape", expect_ok=False,
+                      auto=VIOLATION_ROTATION_STRING_ESCAPE, contains="must not assemble")
+    ok &= run_fixture("violation-rotation-const-compare", expect_ok=False,
+                      auto=VIOLATION_ROTATION_CONST_COMPARE, contains="DEAD-GUARDED")
+    ok &= run_fixture("violation-sanitizer-hollow", expect_ok=False,
+                      sync=VIOLATION_SANITIZER_HOLLOW, contains="no longer refuses")
+    ok &= run_fixture("violation-fetch-also-discard", expect_ok=False,
+                      screen=VIOLATION_FETCH_ALSO_DISCARD, contains="is decorative")
+    ok &= run_fixture("violation-main-thread-also", expect_ok=False,
+                      screen=VIOLATION_MAIN_THREAD_ALSO, contains="outside a `withContext(Dispatchers.IO)")
+    ok &= run_fixture("violation-entry-overwrite", expect_ok=False,
+                      screen=VIOLATION_ENTRY_OVERWRITE, contains="OVERWRITTEN by a later")
+    # a wrapped-but-correct call / a wrapped File build is a legal spelling
+    ok &= run_fixture("compliant-sanitizer-wrapped", expect_ok=True,
+                      screen=COMPLIANT_SANITIZER_WRAPPED)
     print("BACKUP_STREAMING_EXPORT_SELFTEST=" + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 
