@@ -123,8 +123,14 @@ trace 字段: 字段 put("args")只出现在恒不执行的 if 分支里（false
 ## ⑥ CI
 
 - 分支：`fix/meta-wide3-04-loop-turn`
-- HEAD：见提交后回填（`git rev-parse HEAD` 与 run 的 `head_sha` 逐字符一致才算绿）
-- run：见回填
+- HEAD：`ed63130d465e6a89e19b03cec0670788a439693a`
+- run：**#2654 / id `40161394351` / attempt 1 / conclusion success**，`head_sha` = `ed63130d465e6a89e19b03cec0670788a439693a`（与本地 HEAD **逐字符一致**）
+- 日志判读（下载 27 个 step 文件逐条核）：
+  - `║  Summary: 112 passed, 0 failed` 恰 1 条（合并日志里出现 2 次为同一行的双写）
+  - `✅ ALL 344 CASES PASS` 恰 1 条
+  - `` ` e: ` `` 编译错 **0** 行
+  - 含 `FAILED` 的 12 行去重后 **6** 条，全部是 `… PASSED` 的**用例名子串**（`slot denied produces FAILED…`、`reason PERSISTENCE_FAILED maps to…` 等），非失败
+  - 26 步全部执行（本分支非 main，Publish 门控跳过；无其它 skipped）
 
 ## ⑦ 残留（触发条件 / 触发后方案 / 搁置理由）
 
