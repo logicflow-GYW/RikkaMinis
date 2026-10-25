@@ -76,171 +76,91 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import KotlinLexError, mask_comments  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    enclosing_conditions as shared_enclosing_conditions,
+    if_blocks,
+    match_bracket,
+    split_top,
+    strip_parens,
+    when_branches,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    guard_feasible,
+    is_single_assignment,
+    path_feasible,
+)
+
 REL = "src/android/app/src/main/java/com/rikkaminis/app/provider/anthropic/AnthropicProvider.kt"
 ROT_MARK = "class AnthropicProvider"
 
 # ── Kotlin-aware source scanning ─────────────────────────────────────────────
-# Criteria below are matched on comment-stripped text with string literals
-# intact (several anchors ARE string literals: put("max_tokens", …)). Comments
-# are blanked but their newlines kept, so every line number this gate prints is
-# a real line in the original file.
-
-def skip_string(text, i):
-    """Index just past the string literal starting at `text[i]` (a quote)."""
-    if text.startswith('"""', i):
-        j = text.find('"""', i + 3)
-        return len(text) if j < 0 else j + 3
-    q = text[i]
-    i += 1
-    while i < len(text) and text[i] != q:
-        if text[i] == "\\":
-            i += 2
-        elif text.startswith("${", i):
-            i = skip_template(text, i + 2)
-        else:
-            i += 1
-    return i + 1
-
-
-def skip_template(text, i):
-    """Index just past the `}` matching an already-consumed `${`."""
-    depth = 1
-    while i < len(text):
-        c = text[i]
-        if c == '"' or c == "'":
-            i = skip_string(text, i)
-            continue
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return len(text)
-
+# Criteria below are matched on comment-masked text with string literals intact
+# (several anchors ARE string literals: put("max_tokens", …)). The view comes
+# from the shared lexer, which is length- and line-preserving, so every line
+# number this gate prints is a real line and a `}` inside a literal can no
+# longer move a brace counter.
+#
+# [batch5-t05] The hand-written scanners that used to live here — `skip_string`,
+# `skip_template`, `strip_comments`, `brace_body`, `paren_body`,
+# `split_top_level_args`, and the brace walkers behind `enclosing_*` — are gone.
+# The same work is done by `_kotlin_lexer` / `_kotlin_ast` /
+# `_kotlin_valueflow`; only the *criteria* live in this file now.
 
 def strip_comments(src):
-    """Remove line + block comments, leaving string literals and newlines."""
-    out = []
-    i = 0
-    n = len(src)
-    while i < n:
-        c = src[i]
-        if c == '"' or c == "'":
-            j = skip_string(src, i)
-            out.append(src[i:j])
-            i = j
-        elif src.startswith("//", i):
-            j = src.find("\n", i)
-            i = n if j < 0 else j
-        elif src.startswith("/*", i):
-            j = src.find("*/", i + 2)
-            end = n if j < 0 else j + 2
-            out.append("\n" * src.count("\n", i, end))
-            i = end
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
-
-
-def brace_body(text, start):
-    """Balanced `{...}` starting at `start`; -> (body incl. braces, end index)."""
-    depth = 0
-    k = start
-    while k < len(text):
-        c = text[k]
-        if c == '"' or c == "'":
-            k = skip_string(text, k)
-            continue
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start:k + 1], k + 1
-        k += 1
-    return text[start:], len(text)
-
-
-def paren_body(text, start):
-    """Balanced `(...)` starting at `start`; -> (body incl. parens, end index)."""
-    depth = 0
-    k = start
-    while k < len(text):
-        c = text[k]
-        if c == '"' or c == "'":
-            k = skip_string(text, k)
-            continue
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return text[start:k + 1], k + 1
-        k += 1
-    return text[start:], len(text)
+    """Comment-masked view: string literals and newlines intact, length equal."""
+    return mask_comments(src)
 
 
 FUN_HEAD_RE = re.compile(r"\bfun\s+(?:<[^>\n]*>\s*)?(?:[\w.]+\.)?([A-Za-z_]\w*)\s*\(")
 
 
+def brace_body(text, start):
+    """Balanced `{...}` starting at `start`; -> (body incl. braces, end index).
+
+    Fail-closed: an unbalanced run returns the rest of the text with end = -1,
+    so a caller can never mistake a truncated body for a complete one.
+    """
+    close = match_bracket(text, start)
+    if close < 0:
+        return text[start:], -1
+    return text[start:close + 1], close + 1
+
+
 def iter_functions(text):
-    """-> [(name, start, body)] for every block-bodied `fun` in `text`.
+    """-> [(name, brace_at, body)] for every block-bodied `fun` in `text`.
 
     Derived, not listed: no criterion below names the functions it polices, so
-    renaming (or splitting) the request builder keeps the gate honest.
+    renaming (or splitting) the request builder keeps the gate honest. The
+    signature is closed by the shared bracket matcher, so a default-argument
+    lambda cannot hand the body brace a wrong start.
     """
     out = []
     for m in FUN_HEAD_RE.finditer(text):
-        paren_at = text.find("(", m.end() - 1)
-        _sig, after = paren_body(text, paren_at)
-        brace_at = text.find("{", after - 1)
+        close = match_bracket(text, m.end() - 1)
+        if close < 0:
+            continue
+        k = close + 1
+        brace_at = text.find("{", k)
         if brace_at < 0:
             continue
-        # A `)` followed by `=` / `:` before any `{` is an expression-bodied fun.
-        gap = text[after:brace_at] if brace_at > after else ""
-        if "=" in gap:
+        # `fun f(): T = expr` / `fun f() = expr` are expression-bodied.
+        eq = text.find("=", k)
+        if 0 <= eq < brace_at:
             continue
-        body, _end = brace_body(text, brace_at)
+        body, body_end = brace_body(text, brace_at)
+        if body_end < 0:
+            continue
         out.append((m.group(1), brace_at, body))
     return out
 
 
 def split_top_level_args(text, open_paren_index):
-    """Split the argument list of the call whose `(` is at `open_paren_index`.
-
-    -> list of raw argument expressions (trimmed); nested calls/brackets safe.
-    """
-    args = []
-    i = open_paren_index + 1
-    depth = 0
-    cur = []
-    while i < len(text):
-        c = text[i]
-        if c == '"' or c == "'":
-            j = skip_string(text, i)
-            cur.append(text[i:j])
-            i = j
-            continue
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            if depth == 0:
-                break
-            depth -= 1
-        if c == "," and depth == 0:
-            args.append("".join(cur).strip())
-            cur = []
-            i += 1
-            continue
-        cur.append(c)
-        i += 1
-    tail = "".join(cur).strip()
-    if tail:
-        args.append(tail)
-    return args
+    """-> raw argument expressions of the call whose `(` is at [open_paren_index]."""
+    return [text[a:b].strip() for a, b in call_args(text, open_paren_index)]
 
 
 def find_calls(text, callee_re):
@@ -253,8 +173,7 @@ def find_calls(text, callee_re):
         paren_at = text.find("(", m.start())
         if paren_at < 0:
             continue
-        args = split_top_level_args(text, paren_at)
-        out.append((m.start(), args))
+        out.append((m.start(), split_top_level_args(text, paren_at)))
     return out
 
 
@@ -262,7 +181,6 @@ MAX_TOKENS_CALL = re.compile(r"\bput\(\s*\"max_tokens\"")
 BUDGET_CALL = re.compile(r"\bput\(\s*\"budget_tokens\"")
 BUDGET_FN = re.compile(r"(?<![\w.])thinkingBudget\s*\(")
 THINKING_HAS = re.compile(r"\bhas\(\s*\"thinking\"\s*\)")
-GUARD_GT_ZERO = "\x00gt0"   # placeholder, real regex built per-variable below
 IF_RE = re.compile(r"\bif\s*\(")
 DISABLED_COMPARE = re.compile(
     r"""(?:==|!=)\s*"disabled"|"disabled"\s*(?:==|!=)|"disabled"\s*->"""
@@ -273,8 +191,39 @@ def norm(expr):
     return re.sub(r"\s+", "", expr)
 
 
-BETA_ADD_RE = re.compile(r"\.add\s*\(")
+BETA_ADD_RE = re.compile(r"\.(?:add|plusAssign|addAll)\s*\(")
 BETA_TOKENS = ("interleaved-thinking", "effort-")
+
+_STR_LIT = r'"(?:[^"\\\n]|\\.)*"'
+_TMPL_CONST = re.compile(r'"\$\{(' + _STR_LIT + r')\}"')
+_PLUS_CONST = re.compile(r'(' + _STR_LIT + r')\s*\+\s*(' + _STR_LIT + r')')
+
+
+def fold_strings(text):
+    """Fold constant string concatenation / literal interpolation.
+
+    [batch5-t05 G09-A3] `plusAssign("interleaved-" + "thinking-2025-05-14")` and
+    `plusAssign("${"interleaved"}-thinking-2025-05-14")` contain no
+    `interleaved-thinking` substring, yet both are that exact literal to the
+    compiler — the token blacklist was reading source text, not values. Folding
+    only ever rewrites an equivalent spelling into the canonical one, so it can
+    produce a red but never a spurious green.
+    """
+    prev = None
+    while prev != text:
+        prev = text
+        text = _TMPL_CONST.sub(lambda m: '"' + m.group(1)[1:-1] + '"', text)
+        text = _PLUS_CONST.sub(
+            lambda m: '"' + m.group(1)[1:-1] + m.group(2)[1:-1] + '"', text)
+    return text
+
+
+def _beta_leak(body):
+    """The offending snippet when [body] announces a thinking beta, else None."""
+    folded = fold_strings(body)
+    if BETA_ADD_RE.search(folded) or any(t in folded for t in BETA_TOKENS):
+        return re.sub(r"\s+", " ", body).strip()[:60]
+    return None
 
 
 def disabled_path_adds_beta(text):
@@ -295,111 +244,77 @@ def disabled_path_adds_beta(text):
         else:
             nl = text.find("\n", k)
             body = text[k:nl if nl >= 0 else len(text)]
-        if BETA_ADD_RE.search(body) or any(t in body for t in BETA_TOKENS):
-            return re.sub(r"\s+", " ", body).strip()[:60]
+        leak = _beta_leak(body)
+        if leak:
+            return leak
     # `if (type == "disabled") betaFlags.add(...)` — the same contradiction in
     # comparison form.
-    for m in IF_RE.finditer(text):
-        paren_at = text.find("(", m.end() - 1)
-        cond, after = paren_body(text, paren_at)
-        if not re.search(r'==\s*"disabled"', cond):
+    for _cond, t_start, t_end, _e_start, _e_end in if_blocks(text):
+        if not re.search(r'==\s*"disabled"', fold_strings(_cond)):
             continue
-        brace_at = text.find("{", after - 1)
-        if brace_at < 0:
-            continue
-        body, _end = brace_body(text, brace_at)
-        if BETA_ADD_RE.search(body) or any(t in body for t in BETA_TOKENS):
-            return re.sub(r"\s+", " ", cond[1:-1]).strip()
+        leak = _beta_leak(text[t_start:t_end])
+        if leak:
+            return re.sub(r"\s+", " ", _cond).strip()
     return None
 
 
-def enclosing_ifs(func_body, write_index):
-    """-> [condition text] of every brace-bodied `if` whose body holds write_index."""
-    out = []
-    for m in IF_RE.finditer(func_body):
-        paren_at = func_body.find("(", m.end() - 1)
-        cond, after = paren_body(func_body, paren_at)
-        brace_at = func_body.find("{", after - 1)
-        if brace_at < 0:
-            continue
-        body, end = brace_body(func_body, brace_at)
-        if brace_at <= write_index < end:
-            out.append(cond[1:-1])
-    return out
+def enclosing_conditions(text, pos):
+    """`if` and `when`-arm conditions that enclose `pos`.
+
+    Delegates to the shared control-flow view, which covers braceless
+    `if (x) if (y) { … }` chains and `when { … }` arms (including
+    `when (false) { … }`, which is the same dead guard as `if (false)`).
+    """
+    return [cond for _kind, cond in shared_enclosing_conditions(text, pos)]
 
 
 # ── Guard liveness: an anchor that is PRESENT but SHORT-CIRCUITED ───────────
-# `if (a && (true || b))` keeps the `b` tokens in the condition while deleting
-# the decision, so任何「条件里出现了 X」的判据都会被它骗过。A guard is only a
-# guard when a bare boolean literal is not an operand of `&&` / `||`.
-BOOL_OP_LITERAL = re.compile(
-    r"(?:&&|\|\|)\s*(?:true|false)(?![\w])"
-    r"|(?<![\w.\"'])(?:true|false)\s*(?:&&|\|\|)"
-)
+# [batch5-t05] The old whitelist (`&& true`, `|| false`, `1 == 1`) WAS the
+# defect: every equivalent spelling — `(1 == 1 || b)`, `!true`, `1 == 2 && b`,
+# `x && !x` — is the same "anchor present, decision deleted" shape. The shared
+# `guard_feasible` / `const_bool` fold them all, so there is no list to extend.
 
+def required_atoms(cond):
+    """Atoms that MUST hold whenever [cond] holds.
 
-def literal_decides(cond):
-    """True when a bare `true` / `false` is an operand of a boolean operator."""
-    return bool(BOOL_OP_LITERAL.search(cond))
+    `A && B` -> atoms(A) ∪ atoms(B); `A || B` -> the surviving side only when the
+    other side is constant-false; a constant-true disjunct makes the whole
+    condition vacuous, so NOTHING inside it is required; a bare atom is itself.
 
-
-WHEN_BLOCK_RE = re.compile(r"\bwhen\s*\{")
-
-
-def enclosing_when_arms(text, pos):
-    """-> [arm condition] for every `when { ... }` arm whose body holds `pos`.
-
-    `when { x > 0 -> ... }` is an `if` in disguise: the same defect comes back
-    when the guard is nested inside an arm that only matches positive values.
+    This is what distinguishes "the comparison is written" from "the comparison
+    decides": in `if (budgetTokens > 0 && (1 == 1 || budgetTokens < capped))` the
+    `< capped` atom is not required, so the guard decides nothing.
     """
-    out = []
-    for m in WHEN_BLOCK_RE.finditer(text):
-        if m.start() > pos:
-            break
-        brace_at = m.end() - 1
-        _body, end = brace_body(text, brace_at)
-        if not (brace_at < pos < end):
-            continue
-        depth = 0
-        arm_start = brace_at + 1
-        k = brace_at + 1
-        while k < pos:
-            c = text[k]
-            if c == '"' or c == "'":
-                k = skip_string(text, k)
-                continue
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-            elif depth == 0 and text.startswith("->", k):
-                out.append(text[arm_start:k])
-                arm_start = k + 2
-                k += 2
-                continue
-            k += 1
-    return out
+    c = strip_parens(cond)
+    if not c:
+        return []
+    if const_bool(c) is not None:
+        return []
+    parts = split_top(c, ("||",))
+    if len(parts) > 1:
+        vals = [(a, b, const_bool(c[a:b])) for a, b in parts]
+        if any(v is True for _a, _b, v in vals):
+            return []
+        alive = [(a, b) for a, b, v in vals if v is not False]
+        if len(alive) == 1:
+            return required_atoms(c[alive[0][0]:alive[0][1]])
+        return []
+    parts = split_top(c, ("&&",))
+    if len(parts) > 1:
+        out = []
+        for a, b in parts:
+            out.extend(required_atoms(c[a:b]))
+        return out
+    return [c]
 
 
-def enclosing_conditions(text, pos):
-    """`if` and `when`-arm conditions that enclose `pos`, INCLUDING braceless
-    `if (x) if (y) { ... }` chains — the parser shape that used to slip past
-    `enclosing_ifs` (it only walks `if (...) {`)."""
-    out = list(enclosing_ifs(text, pos))
-    for m in IF_RE.finditer(text):
-        if m.start() > pos:
-            break
-        paren_at = text.find("(", m.end() - 1)
-        cond, after = paren_body(text, paren_at)
-        nxt = after
-        while nxt < len(text) and text[nxt] in " \t\r\n":
-            nxt += 1
-        if nxt < len(text) and text[nxt] == "{":
-            continue  # handled by enclosing_ifs
-        if nxt <= pos and re.match(r"if\s*\(", text[nxt:nxt + 8]):
-            out.append(cond[1:-1])
-    out.extend(enclosing_when_arms(text, pos))
-    return out
+def _short_circuit_detail(conds):
+    """Human-readable quote of the guard that keeps its tokens but not its teeth."""
+    for c in conds:
+        flat = re.sub(r"\s+", " ", c).strip()
+        if not guard_feasible(c) or not required_atoms(c):
+            return flat
+    return re.sub(r"\s+", " ", conds[0]).strip() if conds else ""
 
 
 def check_source(src):
@@ -434,6 +349,21 @@ def check_source(src):
                 c1_ok = False
                 c1_detail = "budget derives from `%s` but max_tokens writes `%s`" % (
                     arg.strip(), max_expr.strip())
+                continue
+            # [batch5-t05 G09-A1] Equal TEXT is not equal VALUE. Inserting
+            # `var cappedMaxTokens = maxTokens` in front of the budget call keeps
+            # both readers spelling the same name while the nearer binding (or
+            # the re-assignment) silently hands the budget the raw request value
+            # again. Lexical identity is the claim this criterion makes, so the
+            # identifier must have exactly one binding in the function.
+            token = arg.strip()
+            if re.fullmatch(r"[A-Za-z_]\w*", token) and not is_single_assignment(body, token):
+                c1_ok = False
+                c1_detail = (
+                    "`%s` is re-declared / re-assigned / shadowed inside %s — both readers "
+                    "print the same name but no longer provably resolve to the same value "
+                    "(a nearer `var %s = <raw>` hands the budget the unclamped request "
+                    "value)" % (token, name, token))
     if not checked_any:
         c1_ok = False
     results.append((
@@ -460,24 +390,33 @@ def check_source(src):
                 c2_ok = False
                 c2_detail = "budget_tokens written outside any brace-bodied if (%s)" % name
                 continue
-            # A guard that keeps both halves but is short-circuited by a literal
-            # (`a && (true || b)`, `false && a`) decides nothing: the write runs
-            # as if the guard were absent. Only live conditions may satisfy C2.
-            live = [c for c in conds if not literal_decides(c)]
-            dead = [c for c in conds if literal_decides(c)]
-            if not live:
+            # [batch5-t05 G09-A2] A guard is only a guard when the bounds are
+            # REQUIRED for the branch to run. `a && (true || b)` keeps both
+            # halves and deletes the decision; so does `a && (1 == 1 || b)`,
+            # `a && (!false || b)` … the old whitelist enumerated spellings and
+            # therefore lost this arm of the family on the very next variant.
+            # `required_atoms` folds through `const_bool`, so nothing is left to
+            # enumerate.
+            if not guard_feasible(" && ".join("(%s)" % c for c in conds)):
                 c2_ok = False
                 c2_detail = (
-                    "the only guard(s) around the budget_tokens write are short-circuited by a "
-                    "boolean literal (`%s`) — the guard is present but decides nothing"
-                    % re.sub(r"\s+", " ", dead[0]).strip())
+                    "the guard(s) around the budget_tokens write can never be true (`%s`) — "
+                    "the clamp is present but unreachable, so the write is gone and the "
+                    "budget ships as-is" % _short_circuit_detail(conds))
                 continue
-            if not any(gt.search(c) for c in live):
+            atoms = []
+            for c in conds:
+                atoms.extend(required_atoms(c))
+            if not any(gt.search(a) for a in atoms):
                 c2_ok = False
-                c2_detail = "no `%s > 0` guard encloses the budget_tokens write" % value
-            elif not any(lt.search(c) for c in live):
+                c2_detail = "no DECIDING `%s > 0` guard encloses the budget_tokens write (`%s`)" % (
+                    value, _short_circuit_detail(conds))
+            elif not any(lt.search(a) for a in atoms):
                 c2_ok = False
-                c2_detail = "no `%s < <max>` guard encloses the budget_tokens write" % value
+                c2_detail = (
+                    "no DECIDING `%s < <max>` guard encloses the budget_tokens write — the "
+                    "comparison is written but short-circuited, so the branch runs as if the "
+                    "guard were absent (`%s`)" % (value, _short_circuit_detail(conds)))
     if not seen_write:
         c2_ok = False
     results.append((
@@ -586,6 +525,19 @@ def check_openai_pair(src):
                         "%s: thinking budget derives from `%s` but max_tokens writes `%s` — "
                         "two readers of two different numbers (a budget above the wire "
                         "max_tokens is a deterministic 400)" % (name, third, wrote))
+                elif (re.fullmatch(r"[A-Za-z_]\w*", third)
+                      and not is_single_assignment(body, third)):
+                    # [batch5-t05 G09-A4] Both readers spell the same name here —
+                    # but the write and the injector can sit inside different
+                    # blocks, and a nearer `val safeMaxTokens = maxTokens` inside
+                    # the injector's block re-binds the name for ONE of them. The
+                    # pair then disagrees while the source text does not.
+                    violations.append(
+                        "%s: `%s` is re-declared / re-assigned / shadowed inside the "
+                        "function — the wire value and the budget source print the same "
+                        "name but no longer provably resolve to the same binding (a "
+                        "nearer `val %s = <raw>` inside the injector's block hands it "
+                        "the unclamped request value)" % (name, third, third))
     if writes == 0:
         violations.append(
             "no max_tokens write site found in OpenAIProvider.kt — refusing to report green "
@@ -598,31 +550,37 @@ def check_openai_pair(src):
 def check_resolver_guard(src):
     """C-OAI-2 — the `maxTokens < 2` guard must not nest inside `maxTokens > 0`.
 
-    Derived by brace depth: for every `if` whose condition tests `< 2` and whose
-    body zeroes a variable, no ENCLOSING `if` may test `maxTokens > 0`."""
+    Derived by shared control flow: for every `if` whose condition tests `< 2`
+    and whose body zeroes a variable, (a) the comparison must be REQUIRED for
+    the body to run and (b) no ENCLOSING `if` / `when` arm may test
+    `maxTokens > 0`."""
     stripped = strip_comments(src)
     violations = []
     guards = 0
-    for m in IF_RE.finditer(stripped):
-        paren_at = stripped.find("(", m.end() - 1)
-        cond, after = paren_body(stripped, paren_at)
-        brace_at = stripped.find("{", after - 1)
-        if brace_at < 0:
-            continue
-        body, _end = brace_body(stripped, brace_at)
+    for cond, t_start, t_end, _e_start, _e_end in if_blocks(stripped):
+        body = stripped[t_start:t_end]
         if not LT_TWO.search(cond) or not ZERO_ASSIGN.search(body):
             continue
         guards += 1
-        line = stripped[:m.start()].count("\n") + 1
-        inner = cond[1:-1]
-        # (a) the guard must DECIDE: `if (false && maxTokens < 2)` keeps the
-        #     comparison and the `budget = 0` block while clamping nothing.
-        if literal_decides(inner):
+        line = stripped[:t_start].count("\n") + 1
+        inner = cond
+        flat = re.sub(r"\s+", " ", inner).strip()
+        # (a) the guard must DECIDE. `if (false && maxTokens < 2)` and
+        #     `if ((1 == 2) && maxTokens < 2)` keep the comparison and the
+        #     `budget = 0` block while clamping nothing — the old check only
+        #     knew the bare literals `false` / `true`, so the arithmetic
+        #     spelling of the same constant walked through (witness G09-A5).
+        if not guard_feasible(inner):
             violations.append(
-                "ThinkingRuleResolver.kt:%d the `< 2 → 0` guard is short-circuited by a "
-                "boolean literal (`%s`) — the clamp is present but never runs, so a "
+                "ThinkingRuleResolver.kt:%d the `< 2 → 0` guard can never be true (`%s`) — "
+                "the clamp is present but unreachable, so a non-positive request value "
+                "ships its raw budget against a wire max_tokens of 1" % (line, flat))
+        elif not any(LT_TWO.search(a) for a in required_atoms(inner)):
+            violations.append(
+                "ThinkingRuleResolver.kt:%d the `< 2 → 0` guard is short-circuited (`%s`) — "
+                "the comparison is written but the branch runs as if it were absent, so a "
                 "non-positive request value ships its raw budget against a wire "
-                "max_tokens of 1" % (line, re.sub(r"\s+", " ", inner).strip()))
+                "max_tokens of 1" % (line, flat))
         # (b) last write wins: `budget = 0; budget = 4096` in the same block keeps
         #     the `= 0` token while restoring the defect.
         zeroed = re.search(r"([A-Za-z_]\w*)\s*=\s*0\b", body)
@@ -638,13 +596,14 @@ def check_resolver_guard(src):
                         "budget still reaches the wire" % (line, var, last))
         # (c) reachability: a `maxTokens > 0` enclosure (if OR when-arm) makes the
         #     guard unreachable exactly when the value is non-positive.
-        for outer in enclosing_conditions(stripped, m.start()):
+        for outer in enclosing_conditions(stripped, t_start - 1):
             if MAX_TOKENS_GT_ZERO.search(outer):
                 violations.append(
                     "ThinkingRuleResolver.kt:%d `maxTokens < 2` guard nests inside "
                     "`%s` — a non-positive request value then skips the clamp entirely "
                     "while the provider floors the wire value at 1, so the raw budget "
-                    "reaches the wire above max_tokens" % (line, re.sub(r"\s+", " ", outer).strip()))
+                    "reaches the wire above max_tokens"
+                    % (line, re.sub(r"\s+", " ", outer).strip()))
     if guards == 0:
         violations.append(
             "ThinkingRuleResolver.kt: no `< 2 → 0` budget guard found — refusing to report "
@@ -795,6 +754,64 @@ MUT_C3_DISABLED_ADDS = GREEN_BODY.replace(
     '"disabled" -> betaFlags.add("interleaved-thinking-2025-05-14")',
 )
 
+# ── [batch5-t05] the five witnesses, one arm each ────────────────────────────
+# G09-A1: same NAME, different binding. The nearer `var` re-points the identifier
+# the budget reads at the raw request value while the wire write keeps the
+# clamped one — the pair disagrees without a single differing token.
+MUT_C1_REBIND = GREEN_BODY.replace(
+    "                val budgetTokens = thinkingBudget(cappedMaxTokens, thinkingLevel)",
+    "                var cappedMaxTokens = maxTokens\n"
+    "                val budgetTokens = thinkingBudget(cappedMaxTokens, thinkingLevel)",
+)
+
+# G09-A2: `< max` kept, decision deleted — arithmetic spelling of the same
+# constant-true disjunct the `true ||` arm already covers.
+MUT_C2_ARITH_TAUTOLOGY = GREEN_BODY.replace(
+    "if (budgetTokens > 0 && budgetTokens < cappedMaxTokens)",
+    "if (budgetTokens > 0 && (1 == 1 || budgetTokens < cappedMaxTokens))",
+)
+
+# G09-A3: the beta token is concatenated, so no single literal contains it.
+MUT_C3_CONCAT = GREEN_BODY.replace(
+    '"disabled" -> Unit',
+    '"disabled" -> betaFlags.plusAssign("interleaved-" + "thinking-2025-05-14")',
+)
+
+# G09-A3, second spelling: a constant template interpolation.
+MUT_C3_TEMPLATE = GREEN_BODY.replace(
+    '"disabled" -> Unit',
+    '"disabled" -> betaFlags.plusAssign("${"interleaved"}-thinking-2025-05-14")',
+)
+
+# Precision: a concatenated beta on a NON-disabled arm is legitimate — folding
+# must not turn the criterion into "no string arithmetic anywhere".
+GREEN_C3_CONCAT_ELSEWHERE = GREEN_BODY.replace(
+    '"enabled" -> betaFlags.add("interleaved-thinking-2025-05-14")',
+    '"enabled" -> betaFlags.plusAssign("interleaved-" + "thinking-2025-05-14")',
+)
+
+# Precision: the two bounds may be split across NESTED guards — that is a
+# stronger shape than the single conjunction, not a weaker one.
+GREEN_C2_NESTED = GREEN_BODY.replace(
+    """                if (budgetTokens > 0 && budgetTokens < cappedMaxTokens) {
+                    body.put("thinking", JSONObject().apply {""",
+    """                if (budgetTokens > 0) {
+                  if (budgetTokens < cappedMaxTokens) {
+                    body.put("thinking", JSONObject().apply {""",
+).replace(
+    """                    })
+                }
+            }
+        }
+        return body""",
+    """                    })
+                  }
+                }
+            }
+        }
+        return body""",
+)
+
 
 def _crit_set(src):
     """-> {'C1','C2','C3'} of the criteria that FAIL on `src`."""
@@ -805,7 +822,12 @@ def _crit_set(src):
     return failed
 
 
+_ARM_COUNT = 0
+_OAI_ARMS = 0
+
+
 def selftest():
+    global _ARM_COUNT
     fails = []
     # Every expected set below is written from the criterion table above, never
     # derived from the gate's own output.
@@ -819,7 +841,18 @@ def selftest():
         ("budget written from a literal", MUT_LITERAL_BODY, {"C2"}),
         ("guard kept but short-circuited by `true ||`", MUT_C2_DEAD_GUARD, {"C2"}),
         ("disabled arm announces a thinking beta", MUT_C3_DISABLED_ADDS, {"C3"}),
+        # [batch5-t05] witnesses G09-A1/A2/A3 — same anchor, different binding /
+        # different constant spelling / different literal spelling.
+        ("budget identifier re-bound to the raw value", MUT_C1_REBIND, {"C1"}),
+        ("guard kept but short-circuited by `1 == 1 ||`", MUT_C2_ARITH_TAUTOLOGY, {"C2"}),
+        ("disabled arm builds the beta token by concatenation", MUT_C3_CONCAT, {"C3"}),
+        ("disabled arm builds the beta token by interpolation", MUT_C3_TEMPLATE, {"C3"}),
+        # precision arms: legitimate shapes that must stay green
+        ("concatenated beta on a non-disabled arm", GREEN_C3_CONCAT_ELSEWHERE, set()),
+        ("bounds split across nested guards", GREEN_C2_NESTED, set()),
     ]
+    global _OAI_ARMS
+    _ARM_COUNT = len(arms)
     for label, src, expected in arms:
         got = _crit_set(src)
         if got != expected:
@@ -833,10 +866,17 @@ def selftest():
         ("MUT_LITERAL", MUT_LITERAL_BODY, GREEN_BODY),
         ("MUT_C2_DEAD_GUARD", MUT_C2_DEAD_GUARD, GREEN_BODY),
         ("MUT_C3_DISABLED_ADDS", MUT_C3_DISABLED_ADDS, GREEN_BODY),
+        ("MUT_C1_REBIND", MUT_C1_REBIND, GREEN_BODY),
+        ("MUT_C2_ARITH_TAUTOLOGY", MUT_C2_ARITH_TAUTOLOGY, GREEN_BODY),
+        ("MUT_C3_CONCAT", MUT_C3_CONCAT, GREEN_BODY),
+        ("MUT_C3_TEMPLATE", MUT_C3_TEMPLATE, GREEN_BODY),
+        ("GREEN_C3_CONCAT_ELSEWHERE", GREEN_C3_CONCAT_ELSEWHERE, GREEN_BODY),
+        ("GREEN_C2_NESTED", GREEN_C2_NESTED, GREEN_BODY),
     ):
         if mutated == base:
             fails.append("arm '%s' did not apply (string replace missed)" % label)
     fails.extend(_selftest_oai())
+    _ARM_COUNT += _OAI_ARMS
     return fails
 
 
@@ -870,6 +910,15 @@ OAI_PRE = OAI_GREEN.replace(
 OAI_NO_INJECT = OAI_GREEN.replace(
     "            echoPolicy = injectThinkingParams(body, thinkingLevel, safeMaxTokens)\n",
     "",
+)
+
+# [batch5-t05 G09-A4] Both readers keep the name; the injector's block re-binds
+# it to the raw request value (`val safeMaxTokens = maxTokens` inside the
+# `if (!isMistral)` block). Every token is unchanged at the call sites.
+OAI_SHADOW = OAI_GREEN.replace(
+    "            echoPolicy = injectThinkingParams(body, thinkingLevel, safeMaxTokens)",
+    "            val safeMaxTokens = maxTokens\n"
+    "            echoPolicy = injectThinkingParams(body, thinkingLevel, safeMaxTokens)",
 )
 
 # Only one of the two writes is wired to the clamped value.
@@ -921,6 +970,20 @@ RESOLVER_DEAD_GUARD = RESOLVER_GREEN.replace(
     "if (false && ctx.maxTokens < 2) {",
 )
 
+# [batch5-t05 G09-A5] The arithmetic spelling of the same constant-false prefix:
+# `(1 == 2)` is `false` to the compiler and invisible to a literal whitelist.
+RESOLVER_ARITH_DEAD = RESOLVER_GREEN.replace(
+    "if (ctx.maxTokens < 2) {",
+    "if ((1 == 2) && ctx.maxTokens < 2) {",
+)
+
+# Precision: `if (true || ...)` around a DIFFERENT variable must not red the
+# `< 2` guard — the constant only has to not swallow the bound under test.
+RESOLVER_UNRELATED_TAUTOLOGY = RESOLVER_GREEN.replace(
+    "        if (budget > 0) {\n            if (ctx.maxTokens < 2) {",
+    "        if (true || budget > 0) {\n            if (ctx.maxTokens < 2) {",
+)
+
 # The zeroing is written first and overwritten in the same block.
 RESOLVER_LAST_WRITE = RESOLVER_GREEN.replace(
     '''            if (ctx.maxTokens < 2) {
@@ -963,6 +1026,7 @@ RESOLVER_BRACELESS = '''object ThinkingRuleResolver {
 
 
 def _selftest_oai():
+    global _OAI_ARMS
     fails = []
     # (label, criterion, source, expected-to-be-red) — each fixture is shaped for
     # ONE criterion, so the arms stay independent (an OpenAI fixture is not a
@@ -972,6 +1036,11 @@ def _selftest_oai():
         ("baseline shape: injector gets the raw value", check_openai_pair, OAI_PRE, True),
         ("no injector call in the max_tokens writer", check_openai_pair, OAI_NO_INJECT, True),
         ("only one of two max_tokens writes is wired", check_openai_pair, OAI_HALF, True),
+        # [batch5-t05] witnesses G09-A4 / G09-A5
+        ("injector block re-binds the wire value to the raw one", check_openai_pair, OAI_SHADOW, True),
+        ("resolver guard short-circuited by `(1 == 2) &&`", check_resolver_guard, RESOLVER_ARITH_DEAD, True),
+        ("an unrelated tautology does not swallow the `< 2` guard", check_resolver_guard,
+         RESOLVER_UNRELATED_TAUTOLOGY, False),
         ("resolver guard outside `maxTokens > 0`", check_resolver_guard, RESOLVER_GREEN, False),
         ("resolver guard nested inside `maxTokens > 0`", check_resolver_guard, RESOLVER_PRE, True),
         ("resolver guard removed entirely", check_resolver_guard, RESOLVER_NO_GUARD, True),
@@ -980,6 +1049,7 @@ def _selftest_oai():
         ("resolver guard nested in a `when` arm that needs maxTokens > 0", check_resolver_guard, RESOLVER_WHEN_ARM, True),
         ("resolver guard nested in a braceless `if` chain", check_resolver_guard, RESOLVER_BRACELESS, True),
     ]
+    _OAI_ARMS = len(oai_arms)
     for label, fn, src, expect_red in oai_arms:
         got = bool(fn(src))
         if got != expect_red:
@@ -991,6 +1061,9 @@ def _selftest_oai():
         ("OAI_PRE", OAI_PRE, OAI_GREEN),
         ("OAI_NO_INJECT", OAI_NO_INJECT, OAI_GREEN),
         ("OAI_HALF", OAI_HALF, OAI_GREEN),
+        ("OAI_SHADOW", OAI_SHADOW, OAI_GREEN),
+        ("RESOLVER_ARITH_DEAD", RESOLVER_ARITH_DEAD, RESOLVER_GREEN),
+        ("RESOLVER_UNRELATED_TAUTOLOGY", RESOLVER_UNRELATED_TAUTOLOGY, RESOLVER_GREEN),
         ("RESOLVER_PRE", RESOLVER_PRE, RESOLVER_GREEN),
         ("RESOLVER_NO_GUARD", RESOLVER_NO_GUARD, RESOLVER_GREEN),
         ("RESOLVER_DEAD_GUARD", RESOLVER_DEAD_GUARD, RESOLVER_GREEN),
@@ -1009,7 +1082,7 @@ def main():
         if fails:
             print("SELFTEST FAIL (%d)" % len(fails))
             return 1
-        print("ANTHROPIC_THINKING_BUDGET_SELFTEST=PASS")
+        print("ANTHROPIC_THINKING_BUDGET_SELFTEST=PASS (%d arms)" % _ARM_COUNT)
         return 0
 
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
