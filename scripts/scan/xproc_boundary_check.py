@@ -46,10 +46,22 @@ and each has a negative arm in `--selftest`:
      LLMModel twice: streaming and non-streaming; one silently-degraded path is
      the defect).
 """
+import os
 import re
 import sys
-import os
 import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import analyse  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    const_value,
+    enclosing_conditions,
+    match_bracket,
+    split_top,
+    when_branches,
+)
 
 REPO = sys.argv[1] if len(sys.argv) > 1 else "."
 
@@ -119,79 +131,42 @@ def read(path):
 
 
 # ── lexical helpers ───────────────────────────────────────────────────────────
-# Two views of the same source, both SAME LENGTH as the input so every offset
-# (and therefore every line number) stays valid:
-#   strings=False → comments blanked, string literals intact (for key literals)
-#   strings=True  → comments AND literal contents blanked (for structure:
-#                   parens/braces/commas inside a literal must not count)
-def blank(text, *, strings):
-    out = []
-    i, n = 0, len(text)
-    mode = None
-    while i < n:
-        ch = text[i]
-        nxt = text[i + 1] if i + 1 < n else ""
-        if mode == "line":
-            if ch == "\n":
-                mode = None
-                out.append(ch)
-            else:
-                out.append(" ")
-        elif mode == "block":
-            if ch == "*" and nxt == "/":
-                mode = None
-                out.append("  ")
-                i += 1
-            else:
-                out.append("\n" if ch == "\n" else " ")
-        elif mode == "str":
-            if ch == "\\":
-                out.append("  ")
-                i += 1
-            elif ch == '"':
-                mode = None
-                out.append('"')
-            else:
-                out.append((" ", ch)[not strings] if ch != "\n" else "\n")
-        elif mode == "raw":
-            if text[i:i + 3] == '"""':
-                mode = None
-                out.append('"""')
-                i += 2
-            else:
-                out.append((" ", ch)[not strings] if ch != "\n" else "\n")
-        elif mode == "chr":
-            if ch == "\\":
-                out.append("  ")
-                i += 1
-            elif ch == "'":
-                mode = None
-                out.append("'")
-            else:
-                out.append((" ", ch)[not strings] if ch != "\n" else "\n")
-        else:
-            if ch == "/" and nxt == "/":
-                mode = "line"
-                out.append("  ")
-                i += 1
-            elif ch == "/" and nxt == "*":
-                mode = "block"
-                out.append("  ")
-                i += 1
-            elif text[i:i + 3] == '"""':
-                mode = "raw"
-                out.append('"""')
-                i += 2
-            elif ch == '"':
-                mode = "str"
-                out.append('"')
-            elif ch == "'":
-                mode = "chr"
-                out.append("'")
-            else:
-                out.append(ch)
-        i += 1
-    return "".join(out)
+# Both views come from the ONE shared Kotlin lexer (_kotlin_lexer.analyse):
+#   views['comments'] → comments blanked, string literals intact (keys live there)
+#   views['code']     → comments AND literal contents blanked (structure: parens,
+#                       braces and commas inside a literal must not count)
+# They are strictly the same length as the input, so every offset (and every
+# line number) stays valid.
+#
+# [wide4 / `blank`] This gate used to carry its own lexer. It mishandled
+# `${...}` templates inside a string (a `"` inside the interpolation ended the
+# string early), so `val contextWindow: Int? = "${")"}".toIntOrNull()` put a
+# REAL `)` into the structural view, truncated `data class LLMModel(...)` after
+# four fields, and every field declared below it silently dropped out of the
+# boundary check. Lexing is now delegated, and an unparseable source is a
+# VIOLATION — never an empty field list that reads as clean.
+def views_of(text):
+    """(comments_view, code_view, error)."""
+    ok, reason, views = analyse(text)
+    if not ok:
+        return None, None, reason
+    return views['comments'], views['code'], None
+
+
+def when_arm_dead(subject, cond):
+    """`when (false) { true -> … }` / `when (1) { 2 -> … }`: an arm that can
+    never be selected because subject and arm are unequal constants."""
+    cond = cond.strip()
+    if not cond or cond.startswith("else"):
+        return False
+    subj = const_value(subject) if subject.strip() else None
+    if subj is None:
+        return False
+    for arm in cond.split(","):
+        v = const_value(arm)
+        if v is None or v == subj:
+            return False
+    return True
 
 
 DEAD_RE = re.compile(
@@ -225,28 +200,28 @@ def stmt_start(code, off):
 
 
 def dead_guarded(code, off):
-    """True when a constant-false condition governs `off`.
+    """True when a constant-FALSE condition governs `off`.
 
-    Covers both `if (false) call(...)` (same statement) and a constant-false
-    block that encloses the call (`if (false) { ... }`, `model.x?.let { ... }`
-    hanging off a `false &&` expression). Structural: the whole point is that
-    `if (false) <real code>` keeps every literal the old criteria looked for.
+    [wide4 / dead_guarded] The regex this replaced enumerated spellings
+    (`if (false`, `!true`, `0 == 1`, `false &&`, `true ||`) and therefore
+    missed the whole `when` family — `when (false) { true -> … else -> Unit }`
+    keeps every token of the write while deleting the decision, and the P0
+    (`max_output_tokens` never written) came straight back. Liveness is now
+    decided by constant folding over the conditions that actually enclose the
+    offset: `if` headers (braced and braceless), enclosing `{ }` blocks and
+    `when` arms whose subject/arm pair can never match. Unknown conditions fold
+    to None, which is "not dead" — the criterion only fires on proof.
     """
     if DEAD_RE.search(code[stmt_start(code, off):off]):
         return True
-    depth = 0
-    i = off
-    while i > 0:
-        i -= 1
-        c = code[i]
-        if c in "})":
-            depth += 1
-        elif c in "({":
-            if depth == 0:
-                if c == "{" and DEAD_RE.search(code[stmt_start(code, i):i]):
-                    return True
-            else:
-                depth -= 1
+    for kind, cond in enclosing_conditions(code, off):
+        if kind == "if" and const_bool(cond) is False:
+            return True
+        if kind == "when" and when_arm_dead("", cond):
+            return True
+    for subject, cond, b_start, b_end in when_branches(code):
+        if b_start <= off < b_end and when_arm_dead(subject, cond):
+            return True
     return False
 
 
@@ -278,7 +253,10 @@ def split_first_arg(argtext):
 
 def extract_data_class_fields(src, cls_name):
     """Return the ctor parameter names of `data class <cls_name>(...)`."""
-    st = blank(src, strings=True)
+    _ks, st, lex_err = views_of(src)
+    if st is None:
+        return None, "cannot lex %s (%s) — refusing to enumerate a field list " \
+                     "it cannot read" % (cls_name, lex_err)
     m = re.search(r"data\s+class\s+" + re.escape(cls_name) + r"\s*\(", st)
     if not m:
         return None, "data class not found: " + cls_name
@@ -324,11 +302,59 @@ LITERAL_RE = re.compile(
     r'^(?:-?\d[\d_]*[lLfFdD]?|0x[0-9a-fA-F]+|true|false|null|"([^"\\]|\\.)*"|\'([^\'\\]|\\.)\')$')
 
 
+SCOPE_HEAD_RE = re.compile(
+    r"\??\s*\.\s*(?:let|also|run|apply|with|takeIf|takeUnless)\s*"
+    r"(?:\([^()]*\))?\s*$")
+
+
+def producing_start(code, off):
+    """Start of the expression that PRODUCES the value written at `off`.
+
+    The statement boundary is not enough: in `model.maxOutputTokens?.let { put(
+    "max_output_tokens", it) }` the statement starts at `put`, so the chain that
+    decides the value lives in the enclosing lambda header. Walk out through
+    every enclosing scope-function lambda (`let`/`also`/`takeIf`/…) until the
+    enclosing construct is not a scope call, then take that statement boundary.
+    Without this the derivation check sees only `put(..., it)` (wide4).
+    """
+    depth = 0
+    i = off - 1
+    while i >= 0:
+        c = code[i]
+        if c in ")]}":
+            depth += 1
+        elif c in "([{":
+            if depth == 0:
+                if c == "{":
+                    m = SCOPE_HEAD_RE.search(code[:i])
+                    if m:
+                        # Resume just BEFORE the scope head, swallowing the
+                        # indentation/newline that may separate chain segments
+                        # (`x?.takeIf { … }\n  ?.let { put(…) }`): otherwise the
+                        # walk stops at that newline and the chain header above
+                        # it is cut out of the window.
+                        i = m.start() - 1
+                        while i >= 0 and code[i] in " \t\r\n":
+                            i -= 1
+                        continue
+                return i + 1
+            depth -= 1
+        elif depth == 0 and c in "\n;":
+            return i + 1
+        i -= 1
+    return 0
+
+
 def put_sites(ks, st):
     """Every named put() call, with its value expression and liveness.
 
     `ks` keeps string literals (keys live there); `st` blanks them (paren
     matching must not be fooled by a literal). Both share offsets.
+
+    Each site also carries `producer`: the statement that produces the value,
+    from its statement boundary up to the end of the value expression. That is
+    where a chain like `model.maxOutputTokens?.takeIf { false }?.let { … }`
+    hides its decision, so the derivation check needs it (wide4 / derives_field).
     """
     out = []
     for m in PUT_RE.finditer(ks):
@@ -336,32 +362,93 @@ def put_sites(ks, st):
         end = paren_end(st, op)
         if end is None:
             continue  # unbalanced call: cannot judge it; other arms still run
-        args = ks[op + 1:end]
-        _k, val = split_first_arg(args)
+        args = st[op + 1:end]
+        parts = split_top(args, (",",))
+        if len(parts) < 2:
+            continue
+        vs, ve = parts[1]
+        val = ks[op + 1 + vs:op + 1 + ve]
         out.append({
             "key": m.group(1),
             "value": val.strip(),
             "off": m.start(),
             "end": end,
+            "producer": st[producing_start(st, m.start()):op + 1 + ve],
             "dead": dead_guarded(st, m.start()),
         })
     return out
 
 
-def derives_field(site, field, ks):
+SCOPE_CHAIN_RE = re.compile(
+    r"\.\s*(let|map|mapNotNull|takeIf|takeUnless|filter|filterNot)\s*"
+    r"(?:<[^<>{}]*>)?\s*\{")
+
+
+def _chain_kills(text):
+    """Why this producing expression can never carry the field value, or None.
+
+    [wide4 / derives_field] "the field name appears within 320 characters of
+    the put" is a presence test. `model.maxOutputTokens?.takeIf { false }?.let
+    { put("max_output_tokens", it) }` contains the field name, the key, a
+    non-literal value and a live call — and `takeIf { false }` turns the value
+    into null, so the key is never written at all. Any constant-false filter in
+    the chain, and any scope function whose lambda body folds to a constant,
+    destroys the value; both are now judged by folding, not by spelling.
+    """
+    for m in SCOPE_CHAIN_RE.finditer(text):
+        ob = m.end() - 1
+        cb = match_bracket(text, ob)
+        if cb < 0:
+            # The producer window ends inside the lambda that CONTAINS the put,
+            # so its closing brace is not in the window. That is a truncation
+            # artifact, not a defect — the earlier, decision-carrying calls in
+            # the chain (takeIf/…) are balanced and are still judged.
+            continue
+        body = text[ob + 1:cb].strip()
+        kind = m.group(1)
+        cv = const_value(body)
+        if kind == "takeIf":
+            if cv == ("bool", False):
+                return "`takeIf { false }` — the value is always null, the key is never written"
+        elif kind == "takeUnless":
+            if cv == ("bool", True):
+                return "`takeUnless { true }` — the value is always null"
+        elif kind in ("filter", "filterNot"):
+            if cv is not None:
+                return "`%s { %s }` — the collection is filtered away" % (kind, body)
+        elif cv is not None:
+            return "`%s { %s }` — the lambda returns a constant, not the field" % (kind, body)
+    return None
+
+
+def derives_field(site, field, ks, st=None):
     """Does this live put() carry a value derived from `field`?
 
     `put("k", 0)` and `put("k", "literal")` spell the key but carry no user
     value; `model.maxOutputTokens?.let { put("k", it) }` derives through the
-    `it` bound by the receiver expression. The window is the statement that
-    produces the call (bounded, comment-blanked), so a field name only counts
-    when it is really this call's source.
+    `it` bound by the receiver expression. Two tests, in order:
+      1. LIVE: no scope function in the producing chain can fold the value away
+         (wide4: `takeIf { false }` swallowed the whole write);
+      2. DERIVED: the field name is in the expression that PRODUCES the value —
+         the receiver chain for `it`, the value expression otherwise. A field
+         name that only appears in a neighbouring statement or in a dead branch
+         does not count.
+    Returns (derived: bool, why: str|None).
     """
-    if not site["value"] or LITERAL_RE.match(site["value"]):
-        return False
-    start = max(0, site["off"] - 320)
-    window = ks[start:site["end"]]
-    return re.search(r"\b%s\b" % re.escape(field), window) is not None
+    value = site["value"]
+    if not value or LITERAL_RE.match(value):
+        return False, "the value is a constant literal, not the field"
+    producer = site.get("producer", "")
+    kill = _chain_kills(producer)
+    if kill:
+        return False, kill
+    if re.search(r"\?:\s*(?:-?\d|true\b|false\b|null\b|\")", value):
+        return False, "the value falls back to a constant when the field is absent"
+    if re.search(r"\b%s\b" % re.escape(field), value):
+        return True, None
+    if re.search(r"\b%s\b" % re.escape(field), producer):
+        return True, None
+    return False, "the field name is not in the expression that produces the value"
 
 
 def key_read_sites(ks, st):
@@ -420,6 +507,39 @@ def construction_spans(st, name):
     return spans
 
 
+def named_args(st, span):
+    """{param_name: (rhs_start, rhs_end)} for `Name(...)` args; positional args
+    are collected under None so a caller can tell the two apart."""
+    op, end = span
+    out = {}
+    for vs, ve in split_top(st[op + 1:end], (",",)):
+        seg = st[op + 1 + vs:op + 1 + ve]
+        m = re.match(r"\s*(\w+)\s*=(?!=)", seg)
+        if not m:
+            out.setdefault(None, []).append((op + 1 + vs, op + 1 + ve))
+            continue
+        out[m.group(1)] = (op + 1 + vs + m.end(), op + 1 + ve)
+    return out
+
+
+READ_CALL_RE = re.compile(r"\b(?:get|opt)[A-Za-z]*\s*\(\s*\"([^\"]+)\"")
+
+
+def key_read_in(rhs, key):
+    """True when this expression actually EXTRACTS the key's value.
+
+    [wide4 / construction_spans] `if (req.has("max_output_tokens")) null else
+    null` mentions the key, calls the bundle, and returns a constant: the
+    `has()` probe satisfied the old "the key is read somewhere" test while both
+    branches dropped it. Only `get*`/`opt*` with the key as the first string
+    argument count as extraction; a probe is not a value.
+    """
+    for m in READ_CALL_RE.finditer(rhs):
+        if m.group(1) == key:
+            return True
+    return False
+
+
 def to_snake(name):
     """camelCase / PascalCase -> snake_case (matches the dispatcher's key style)."""
     s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
@@ -447,16 +567,21 @@ def evaluate(root):
         # cannot be judged at all, and "cannot judge" must never read as clean.
         return ["cannot read " + WORKER + " (worker moved? reverse check cannot run)"], lines
 
-    dks = blank(dsrc, strings=False)
-    dst = blank(dsrc, strings=True)
-    wks = blank(wsrc, strings=False)
-    wst = blank(wsrc, strings=True)
+    dks, dst, lex_err = views_of(dsrc)
+    if dst is None:
+        # Fail closed: a source this gate cannot lex must never read as clean.
+        return ["cannot lex the dispatcher (%s) — the boundary check refuses to "
+                "judge a file whose structure it cannot read" % lex_err], lines
+    wks, wst, lex_err = views_of(wsrc)
+    if wst is None:
+        return ["cannot lex the worker (%s) — the reverse direction and the "
+                "per-site completeness cannot be judged" % lex_err], lines
 
     sites = put_sites(dks, dst)
     if not sites:
         return ["dispatcher writes no named put() keys — parser death, not a clean tree"], lines
     live_keys = {s["key"] for s in sites if not s["dead"]}
-    model_keys = {}
+    model_keys = {}      # model -> {field: dispatcher key}  (live + derived)
     for g in BOUNDARY_MODELS:
         name = g["name"]
         src = read_at(g["model_path"])
@@ -467,7 +592,7 @@ def evaluate(root):
         if err:
             problems.append("%s: %s" % (name, err))
             continue
-        model_keys[name] = set()
+        model_keys[name] = {}
 
         benign = BENIGN.get(name, {})
         alias = KEY_ALIASES.get(name, {})
@@ -483,10 +608,18 @@ def evaluate(root):
                        if cand else "dispatcher never writes %r" % want)
                 missing.append((f, why))
                 continue
-            model_keys[name].add(want)
-            if not any(derives_field(s, f, dks) for s in live):
+            derived, why_not = False, "unresolved expression"
+            for s in live:
+                ok_now, why_now = derives_field(s, f, dks, dst)
+                if ok_now:
+                    derived = True
+                    break
+                why_not = why_now or why_not
+            if not derived:
                 missing.append((f, "dispatcher writes %r but the value carries no "
-                                   "`%s` (constant / unrelated expression)" % (want, f)))
+                                   "`%s` (%s)" % (want, f, why_not)))
+                continue
+            model_keys[name][f] = want
 
         status = "OK" if not missing else "GAP"
         lines.append("%-18s %2d fields  ->  %s" % (name, len(fields), status))
@@ -510,19 +643,37 @@ def evaluate(root):
     # more than one site (streaming + non-streaming). A key missing from ONE
     # site is a silently degraded path, and the global text search cannot see
     # it because the other site mentions the key.
-    for name, keys in model_keys.items():
+    # Each NAMED argument of each construction site is judged on its own
+    # right-hand side (wide4 / construction_spans): `maxOutputTokens =
+    # if (req.has(k)) null else null` mentions the key, calls the bundle and
+    # still drops the value; a span-wide `'"key"' in span` test cannot see it,
+    # because the other construction site keeps the key spelled out.
+    for name, fmap in model_keys.items():
         spans = construction_spans(wst, name)
-        wanted = sorted(keys & live_keys)
+        wanted = {f: k for f, k in fmap.items() if k in live_keys}
         if not spans or not wanted:
             continue
-        for (a, b) in spans:
-            span = wks[a:b]
-            gone = [k for k in wanted if ('"%s"' % k) not in span]
-            if gone:
-                line = wst.count("\n", 0, a) + 1
+        for span in spans:
+            args = named_args(wst, span)
+            bad = []
+            for f, k in sorted(wanted.items()):
+                where = args.get(f)
+                if where is None:
+                    bad.append((k, "the constructor has no `%s = …` argument" % f))
+                    continue
+                rs, re_ = where
+                rhs = wks[rs:re_]
+                if ('"%s"' % k) not in rhs:
+                    bad.append((k, "`%s` is built without the %r key" % (f, k)))
+                elif not key_read_in(rhs, k):
+                    bad.append((k, "`%s` mentions %r but only probes it (`has`) or "
+                                   "assigns a constant — the value never arrives" % (f, k)))
+            if bad:
+                line = wst.count("\n", 0, span[0]) + 1
                 lines.append("    SITE     %s(...) at line %d drops %s"
-                             % (name, line, ", ".join(gone[:6])))
-                problems.extend("%s site@%d drops %s" % (name, line, k) for k in gone)
+                             % (name, line, ", ".join(k for k, _ in bad[:6])))
+                problems.extend("%s site@%d drops %s (%s)" % (name, line, k, why)
+                                for k, why in bad)
                 break
     return problems, lines
 
@@ -663,6 +814,40 @@ def selftest():
     )
     arm("multi-site: one of two ctor sites dropping the key is red",
         _fixture(puts=live_put, worker_extra=second), 1, "SITE")
+
+    # ── w4- witnesses: each flipped this gate green before ───────────
+    # 8. dead_guarded: `when (false) { true -> … }` keeps the literal and kills
+    #    the write — the shape the DEAD_RE spelling list could not see.
+    arm("w4-dead-guarded: `when (false) { true -> put(…) }` is red",
+        _fixture(puts='            when (false) { true -> model.maxOutputTokens?.let '
+                      '{ put("max_output_tokens", it) } else -> Unit }\n'),
+        1, "maxOutputTokens")
+
+    # 9. derives_field: `takeIf { false }` folds the value to null while the
+    #    field name, the key and the live call all stay in place.
+    arm("w4-derives-field: `?.takeIf { false }?.let { put(…) }` is red",
+        _fixture(puts='            model.maxOutputTokens?.takeIf { false }?.let '
+                      '{ put("max_output_tokens", it) }\n'),
+        1, "maxOutputTokens")
+
+    # 10. construction_spans: both branches null — `has()` is a probe, not a read.
+    arm("w4-construction-spans: `if (has(k)) null else null` is red",
+        _fixture(puts=live_put,
+                 worker_tail='            maxOutputTokens = if (b.has("max_output_tokens")) '
+                             'null else null,\n        )\n    }\n}\n'),
+        1, "max_output_tokens")
+
+    # 11. blank: a `${…}` template holding a `)` must not truncate the ctor list.
+    template_model = (
+        "package com.rikkaminis.app.data.model\n\n"
+        "data class LLMModel(\n"
+        "    val id: String,\n"
+        "    val contextWindow: Int? = \"${\")\"}\".toIntOrNull(),\n"        "    val maxOutputTokens: Int? = null,\n"
+        "    val unbridgedNewField: Int? = null,\n"
+        ")\n"
+    )
+    arm("w4-blank: `)` inside a ${…} template cannot hide later fields",
+        _fixture(model=template_model, puts=live_put), 1, "unbridgedNewField")
 
     # 7. fail-closed: a missing worker file is a violation, not a clean tree.
     files = _fixture(puts=live_put)

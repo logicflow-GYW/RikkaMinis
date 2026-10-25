@@ -39,114 +39,38 @@ fails closed on anything it cannot resolve, and (d) derives the expected writer
 FILES from the tree (every file that builds an ACTION_SET_ALARM intent must
 have at least one verified writer).
 """
+import os
 import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import analyse  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    const_value,
+    enclosing_conditions,
+    when_branches,
+)
+
 # --------------------------------------------------------------------------
-# Comment/string masking (position preserving)
+# Lexing: the shared Kotlin lexer is the single source of truth
 # --------------------------------------------------------------------------
+# [wide4 parser-death rule] This gate used to carry its own masker. A gate
+# that re-implements Kotlin lexical rules is a gate that loses them: nested
+# block comments, char literals holding a quote, triple-quoted raw strings
+# and `${...}` templates each blinded a different criterion. Every source is
+# now lexed by `_kotlin_lexer.analyse()` and an unparseable file is a
+# VIOLATION, never a silent skip.
 
 
-def mask_comments(text):
-    """Blank out `//`, `/* */` and KDoc comments, keeping every offset.
-
-    Literal-aware: `"video/*"` and `"// not a comment"` must not open a
-    comment. [meta-audit wide3 parser-death rule] the same class of bug that
-    blinded the offload taint gate (a `/*` inside a string literal eating 67
-    lines of the handler body) would here let a writer hide behind a comment.
-    """
-    out = list(text)
-    i, n = 0, len(text)
-    state = None  # 'line' | 'block' | 'str' | 'tstr' | 'char'
-    block_depth = 0  # Kotlin block comments nest
-    while i < n:
-        ch = text[i]
-        two = text[i:i + 2]
-        if state is None:
-            if two == "//":
-                state = "line"
-                out[i] = out[i + 1] = " "
-                i += 2
-                continue
-            if two == "/*":
-                state = "block"
-                block_depth = 1
-                out[i] = out[i + 1] = " "
-                i += 2
-                continue
-            if text[i:i + 3] == '"""':
-                state = "tstr"
-                i += 3
-                continue
-            if ch == '"':
-                state = "str"
-                i += 1
-                continue
-            if ch == "'":
-                state = "char"
-                i += 1
-                continue
-            i += 1
-            continue
-        if state == "line":
-            if ch == "\n":
-                state = None
-            else:
-                out[i] = " " if ch != "\n" else ch
-            i += 1
-            continue
-        if state == "block":
-            if two == "/*":
-                block_depth += 1
-                out[i] = out[i + 1] = " "
-                i += 2
-                continue
-            if two == "*/":
-                block_depth -= 1
-                out[i] = out[i + 1] = " "
-                i += 2
-                if block_depth == 0:
-                    state = None
-                continue
-            if ch != "\n":
-                out[i] = " "
-            i += 1
-            continue
-        if state == "str":
-            if ch == "\\":
-                out[i] = " "
-                if i + 1 < n and text[i + 1] != "\n":
-                    out[i + 1] = " "
-                i += 2
-                continue
-            if ch == '"':
-                state = None
-                i += 1
-                continue
-            i += 1
-            continue
-        if state == "tstr":
-            if text[i:i + 3] == '"""':
-                state = None
-                i += 3
-                continue
-            i += 1
-            continue
-        if state == "char":
-            if ch == "\\":
-                out[i] = " "
-                if i + 1 < n and text[i + 1] != "\n":
-                    out[i + 1] = " "
-                i += 2
-                continue
-            if ch == "'":
-                state = None
-                i += 1
-                continue
-            i += 1
-            continue
-    return "".join(out)
+def code_view(text):
+    """(code_view, error). Comments AND literal contents blanked, same length."""
+    ok, reason, views = analyse(text)
+    if not ok:
+        return None, reason
+    return views['code'], None
 
 
 # --------------------------------------------------------------------------
@@ -172,48 +96,25 @@ WRONG_CONTAINERS = {
 def split_args(text, open_paren):
     """Top-level argument expressions of the call whose `(` is at open_paren.
 
+    `text` MUST be the lexer's `code` view (comments and literal contents
+    blanked, delimiters kept). [wide4 / split_args] The hand-written string
+    tracker this replaced only knew a single `"`, so a triple-quoted raw string
+    holding `)` and `,` in the KEY argument
+    (`EXTRA_DAYS.also { val s = <triple-quoted string with ) and ,> }`) closed
+    the call early and the guard judged `arrayListOf(1)` while the real second
+    argument was an int[]. Blanking literal contents makes that shape
+    unrepresentable.
+
     Returns (list_of_arg_texts, index_of_closing_paren) or (None, None) when
-    the parenthesis never closes — which the caller treats as a violation
-    rather than as "nothing to check".
+    the parenthesis never closes — the caller treats that as a violation.
     """
     depth = 1  # the caller's own `(` is already open
     args = []
     cur = []
     i = open_paren + 1
     n = len(text)
-    in_str = in_char = None
     while i < n:
         ch = text[i]
-        if in_str:
-            if ch == "\\":
-                cur.append(text[i:i + 2])
-                i += 2
-                continue
-            if ch == in_str:
-                in_str = None
-            cur.append(ch)
-            i += 1
-            continue
-        if in_char:
-            if ch == "\\":
-                cur.append(text[i:i + 2])
-                i += 2
-                continue
-            if ch == in_char:
-                in_char = None
-            cur.append(ch)
-            i += 1
-            continue
-        if ch == '"':
-            in_str = ch
-            cur.append(ch)
-            i += 1
-            continue
-        if ch == "'":
-            in_char = ch
-            cur.append(ch)
-            i += 1
-            continue
         if ch in "([{":
             depth += 1
             cur.append(ch)
@@ -332,50 +233,83 @@ def _backward_expr(text, end):
     return expr or None
 
 
+SCOPE_IT_RE = re.compile(
+    r"\??\s*\.\s*(?:let|also|takeIf|takeUnless)\s*(?:\([^()]*\))?\s*$")
+
+
 def lambda_receiver(masked, value_off):
-    """For a value of the bare form `it`, the receiver expression of the
-    enclosing scope function (`x?.let { … }` / `x?.also { … }` / `x.run { … }`).
+    """Receiver of the scope function that binds a bare `it` at `value_off`.
 
-    Returns the receiver text (one call chain) or None.
+    [wide4 / lambda_receiver] The old version used `seg.rfind("{")` — the last
+    `{` in the file, closed or not. An empty nested lambda one line above
+    (`daysForRepeatMode(r)?.let {}`) therefore made `it` resolve to the WRONG
+    producer and an int[] value stayed green. The scan now walks backwards with
+    brace depth and stops at the first UNCLOSED `{`; it also accepts the
+    non-null `x.let {` spelling (the old pattern required a literal `?`).
+
+    Only `let`/`also`/`takeIf`/`takeUnless` bind `it`. `apply`/`run`/`with`
+    rebind the receiver `this`, so an `it` inside them comes from somewhere
+    else — returning None there keeps the caller fail-closed.
     """
-    seg = masked[:value_off]
-    b = seg.rfind("{")
-    if b < 0:
-        return None
-    head = seg[:b]
-    m = re.search(r"\?\s*\.\s*(?:let|also|run|apply|with|takeIf|takeUnless)"
-                  r"\s*(?:\([^()]*\))?\s*$", head)
-    if not m:
-        return None
-    return _backward_expr(head, m.start())
-
-
-def find_local_binding(masked, name, before):
-    """`val <name> = <expr>` nearest above `before`, or None."""
-    best = None
-    for m in re.finditer(r"\b(?:val|var)\s+" + re.escape(name) +
-                         r"\s*(?::[^=\n]+?)?\s*=\s*", masked):
-        if m.start() >= before:
-            break
-        best = m
-    if best is None:
-        return None
-    # Slice the expression to the end of its top-level line.
-    rest = masked[best.end():]
+    i = value_off - 1
     depth = 0
-    out = []
-    for ch in rest:
+    while i >= 0:
+        c = masked[i]
+        if c == "}":
+            depth += 1
+        elif c == "{":
+            if depth:
+                depth -= 1
+            else:
+                head = masked[:i]
+                m = SCOPE_IT_RE.search(head)
+                if not m:
+                    return None
+                return _backward_expr(head, m.start())
+        i -= 1
+    return None
+
+
+def _expr_end(text, start):
+    """End of the expression starting at `start` (depth-0 newline/semicolon)."""
+    depth = 0
+    i = start
+    n = len(text)
+    while i < n:
+        ch = text[i]
         if ch in "([{":
             depth += 1
         elif ch in ")]}":
-            depth -= 1
-            if depth < 0:
+            if depth == 0:
                 break
-        if ch == "\n" and depth <= 0:
+            depth -= 1
+        elif ch in "\n;" and depth == 0:
             break
-        out.append(ch)
-    expr = "".join(out)
-    return expr or None
+        i += 1
+    return i
+
+
+def find_local_binding(masked, name, before):
+    """The binding of `name` that actually WINS at `before`.
+
+    [wide4 / find_local_binding] `val|var <name> = <expr>` alone is only the
+    DECLARATION. `var days: Serializable = arrayListOf(1)` followed by
+    `days = intArrayOf(1, 2, 3)` hands an int[] to the bundle while a
+    declaration-only reading still classifies `arrayListOf(1)` — the guard
+    blessed exactly the value the JVM never passes. Last write wins;
+    compound assignment (`+=`) and re-assignment included.
+
+    Returns (rhs_text, rhs_offset, is_decl, op) or None.
+    """
+    pat = re.compile(r"(?:\b(?:val|var)\s+)?\b" + re.escape(name) +
+                     r"\s*(?::[^=\n]+?)?\s*(\+=|-=|=)(?!=)")
+    last = None
+    for m in pat.finditer(masked, 0, before):
+        is_decl = re.match(r"\b(?:val|var)\s", masked[m.start():m.end()]) is not None
+        rhs_start = m.end()
+        end = _expr_end(masked, rhs_start)
+        last = (masked[rhs_start:end].strip(), rhs_start, is_decl, m.group(1))
+    return last
 
 
 def find_param_type(masked, name):
@@ -432,10 +366,16 @@ def classify_value(masked, expr, value_off, depth_left=3, base=""):
             recv = lambda_receiver(masked, value_off)
             if recv:
                 traced, how = recv, f"?.let/also receiver `{recv}`"
+        trace_off = value_off
         if traced is None:
             local = find_local_binding(masked, v, value_off)
             if local is not None:
-                traced, how = local, f"local binding `{v} = {strip_trailing(local)}`"
+                rhs, rhs_off, _is_decl, op = local
+                if op != "=":
+                    return ("wrong", rhs,
+                            f"value `{v}` is folded onto `{rhs}` with `{op}` — the "
+                            f"result is not verifiable as java.util.ArrayList")
+                traced, how, trace_off = rhs, f"local binding `{v} = {strip_trailing(rhs)}`", rhs_off
         if traced is None:
             ptype = find_param_type(masked, v)
             if ptype:
@@ -472,7 +412,7 @@ def classify_value(masked, expr, value_off, depth_left=3, base=""):
                     f"value `{v}` traces to {how} -> {cname}() : {ret} — {why}")
         kind_hint = classify_type(strip_trailing(traced), v)
         if kind_hint[0] == "unknown":
-            return classify_value(masked, traced, value_off, depth_left - 1,
+            return classify_value(masked, traced, trace_off, depth_left - 1,
                                   base)
         if kind_hint[0] == "ArrayList":
             return "ArrayList", f"{how}", None
@@ -541,6 +481,40 @@ def find_writers(masked):
     return sites
 
 
+def when_arm_dead(subject, cond):
+    """`when (false) { true -> … }` / `when (1) { 2 -> … }` — an arm that can
+    never be selected, so anything inside it never runs."""
+    cond = cond.strip()
+    if not cond or cond.startswith("else"):
+        return False
+    subj = const_value(subject) if subject.strip() else None
+    if subj is None:
+        return False
+    for arm in cond.split(","):
+        v = const_value(arm)
+        if v is None or v == subj:
+            return False
+    return True
+
+
+def dead_site(code, off):
+    """True when a constant-false condition governs the write at `off`.
+
+    [wide4 / run_checks] "Is there a putExtra(EXTRA_DAYS, …) in this file" is
+    not "does the intent carry the repeat days": `if (false) putExtra(…)` keeps
+    every token the old criterion looked for while the alarm silently degrades
+    to a one-shot. Covers `if (false)`, `false && …`, `if (!true)`, `if (1 == 2)`
+    and the `when (false) { true -> … }` arm family.
+    """
+    for kind, cond in enclosing_conditions(code, off):
+        if kind == "if" and const_bool(cond) is False:
+            return True
+    for subject, cond, b_start, b_end in when_branches(code):
+        if b_start <= off < b_end and when_arm_dead(subject, cond):
+            return True
+    return False
+
+
 def check_file(masked, rel):
     """(writer_descriptions, problems) for one source file."""
     problems = []
@@ -550,6 +524,13 @@ def check_file(masked, rel):
         if err:
             problems.append(f"{rel}:{line} {err}")
             found.append((line, "error"))
+            continue
+        if dead_site(masked, off):
+            problems.append(
+                f"{rel}:{line} the EXTRA_DAYS write sits behind a constant-false "
+                f"guard (dead branch) — the intent never carries the repeat days, "
+                f"so the alarm replays as a one-shot")
+            found.append((line, "dead"))
             continue
         kind, detail, problem = classify_value(masked, expr, value_off,
                                                base=rel)
@@ -578,8 +559,14 @@ def run_checks(root):
         except OSError as exc:  # unreadable = fail closed, never skip
             problems.append(f"{path} could not be read ({exc})")
             continue
-        masked = mask_comments(text)
         rel = str(path.relative_to(root))
+        masked, lex_err = code_view(text)
+        if masked is None:
+            problems.append(
+                f"{rel}: the guard cannot lex this Kotlin source ({lex_err}) — "
+                f"refusing to judge a file whose structure it cannot read "
+                f"(fail closed)")
+            continue
         if ALARM_INTENT_RE.search(masked):
             alarm_files.append(rel)
         if "EXTRA_DAYS" not in masked:
@@ -769,6 +756,71 @@ SELFTEST_FILES = {
             "    fun g(i: Intent) { i.putExtra(AlarmClock.EXTRA_DAYS, arrayListOf(1)) }\n"
             "}\n"),
     },
+    # ---- wide4 witnesses (each one flipped this gate green) -----------
+    "w4-var-reassign": {
+        # find_local_binding: the declaration says arrayListOf, the LIVE value
+        # (last write) is intArrayOf. Declaration-only reading blessed it.
+        "src/a/MinisApp.kt": (
+            "class M {\n"
+            "    fun f() {\n"
+            "        var days: java.io.Serializable = arrayListOf(1)\n"
+            "        days = intArrayOf(1, 2, 3)\n"
+            "        putExtra(android.provider.AlarmClock.EXTRA_DAYS, days)\n"
+            "    }\n"
+            "}\n"),
+        "src/a/Handler.kt": (
+            "class H {\n"
+            "    fun g(i: Intent) { i.putExtra(AlarmClock.EXTRA_DAYS, arrayListOf(1)) }\n"
+            "}\n"),
+    },
+    "w4-closed-inner-lambda": {
+        # lambda_receiver: an EMPTY nested lambda above makes `rfind("{")`
+        # resolve `it` to daysForRepeatMode; the real binding is the int[] one.
+        "src/a/MinisApp.kt": (
+            "class M {\n"
+            "    fun f(r: String) {\n"
+            "        intArrayOf(1, 2, 3).let {\n"
+            "            daysForRepeatMode(r)?.let {}\n"
+            "            putExtra(android.provider.AlarmClock.EXTRA_DAYS, it)\n"
+            "        }\n"
+            "    }\n"
+            "}\n"),
+        "src/a/Handler.kt": (
+            "class H {\n"
+            "    fun g(i: Intent) { i.putExtra(AlarmClock.EXTRA_DAYS, arrayListOf(1)) }\n"
+            "}\n"),
+    },
+    "w4-raw-string-in-key": {
+        # split_args: a raw string in the KEY argument carries `)` and `,`;
+        # a single-quote-only tracker closes the call early and judges the
+        # decoy arrayListOf(1) instead of the real intArrayOf second argument.
+        "src/a/MinisApp.kt": (
+            "class M {\n"
+            "    fun f(i: Intent) { i.putExtra(\n"
+            "        AlarmClock.EXTRA_DAYS.also { val s = \"\"\" \" ), arrayListOf(1)) \"\"\" },\n"
+            "        intArrayOf(2, 3, 4, 5, 6),\n"
+            "    ) }\n"
+            "}\n"),
+        "src/a/Handler.kt": (
+            "class H {\n"
+            "    fun g(i: Intent) { i.putExtra(AlarmClock.EXTRA_DAYS, arrayListOf(1)) }\n"
+            "}\n"),
+    },
+    "w4-dead-writer": {
+        # run_checks: the writer exists but never runs.
+        "src/a/MinisApp.kt": (
+            "class M {\n"
+            "    fun f(r: String) {\n"
+            "        daysForRepeatMode(r)?.let {\n"
+            "            if (false) putExtra(android.provider.AlarmClock.EXTRA_DAYS, it)\n"
+            "        }\n"
+            "    }\n"
+            "}\n"),
+        "src/a/Handler.kt": (
+            "class H {\n"
+            "    fun g(i: Intent) { i.putExtra(AlarmClock.EXTRA_DAYS, arrayListOf(1)) }\n"
+            "}\n"),
+    },
     "no_writer_at_all": {
         "src/a/Only.kt": (
             "class O {\n"
@@ -794,6 +846,11 @@ def selftest():
         ("producer_intarray", 1, ["IntArray"]),
         ("unknown_value", 1, ["could not determine"]),
         ("no_writer_at_all", 1, ["ACTION_SET_ALARM intent but has NO"]),
+        # ---- wide4 witnesses: each must flip red on ITS OWN criterion ----
+        ("w4-var-reassign", 1, ["IntArray (parcels as int[])"]),
+        ("w4-closed-inner-lambda", 1, ["IntArray (parcels as int[])"]),
+        ("w4-raw-string-in-key", 1, ["IntArray (parcels as int[])"]),
+        ("w4-dead-writer", 1, ["dead branch", "constant-false"]),
     ]
     failures = []
     for key, want_rc, needles in ARMS:
