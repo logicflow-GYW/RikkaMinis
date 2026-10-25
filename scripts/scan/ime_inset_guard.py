@@ -56,6 +56,30 @@ Escape hatch — TWO forms, both inline and therefore immune to line-number rot:
 Do NOT silence this with a line-numbered allow-list — those rot on the first
 refactor. The escape reasons are greppable, reviewable and survive edits.
 
+## Anchor discipline (wide4 hardening)
+
+Every criterion below is anchored on the EFFECT the host ends up with, not on
+the spelling of a fix — the wide4 adversarial round falsified the previous
+"some string is present" forms with five minimal patches:
+
+  * the `.imePadding()` must sit in an argument list of a host that can resize
+    THIS field (the leaf call, or a layout container whose trailing block
+    contains it). A padding handed to `Spacer`, or one that is a lambda's
+    non-tail expression (`.let { if (1 == 2) it.imePadding() else it }`),
+    changes nothing;
+  * a hoisted `val x = Modifier…imePadding()` counts only when `x` is READ BY
+    one of those `modifier =` slots — a second lexical mention is not a read;
+  * `onBack = <value>` counts only when the value keeps the in-scope handler
+    (`onBack`, or `{ onBack() }`). `null`, `{}` and discarding chains
+    (`onBack.takeIf { false } ?: {}`) render a back arrow that does nothing;
+  * literal-decided guards are dead, not protection: `if (false && g)`,
+    `while (false)`, `when (false)`, `1 == 2`, `x == x`.
+
+Source lexing is delegated to the shared `scripts/scan/_kotlin_lexer.py`
+projection (one lexer for the whole wave); a file it cannot parse is reported
+as a violation — fail-closed, because judging a broken view is how the
+parser-death axis gets in.
+
 ## Known ceiling (read this before trusting a green run)
 
 The judge is a STATIC HEURISTIC over "same composable", not a dataflow proof.
@@ -75,6 +99,17 @@ import re
 import shutil
 import sys
 import tempfile
+
+# Shared Kotlin primitives (wide4): every gate in this wave projects the source
+# through ONE lexer instead of carrying its own scanner — see the block comment
+# above `strip_comments`.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+from _kotlin_lexer import analyse                      # noqa: E402
+from _kotlin_ast import (                              # noqa: E402
+    const_bool, if_blocks, split_top, strip_parens, when_branches,
+)
 
 SRC_ROOTS = [
     "src/android/app/src/main/java",
@@ -139,66 +174,36 @@ ESCAPE_RE = re.compile(r"ime-(?:ok|unreachable)\s*:")
 #     stops at the first non-blank line — blanking it would widen the window).
 
 def strip_comments(text):
-    out = []
-    i = 0
-    n = len(text)
-    in_block = False
-    quote = None          # '"' / "'" while inside a string or char literal
-    while i < n:
-        ch = text[i]
-        if in_block:
-            if text.startswith("*/", i):
-                in_block = False
-                out.append("  ")
-                i += 2
-                continue
-            out.append("\n" if ch == "\n" else " ")
-            i += 1
+    """代码视图：注释与字符串内容抹成空格。返回 (lines, None) 或 (None, reason)。
+
+    词法器换成了共享的 `_kotlin_lexer.analyse`——手上这一版用布尔 `in_block`
+    标记块注释，遇到 Kotlin 的**嵌套块注释** `/* outer /* inner */ .imePadding() */`
+    会在第一个 `*/` 就把扫描器放回「代码」态，仍被注释掉的 `.imePadding()` 于是
+    算作保护（外部见证，parser-death 轴）。同族构造（单引号字符 `'"'`、三引号
+    原始字符串、`${...}` 模板、反引号标识符）在同一波已经击穿另外几道门——自己
+    写词法器就是「下一个词法特性上线即失明」，所以这里只调用共享投影。
+
+    保留的旧不变量（都有实测理由）：
+      - 行数不变（投影严格等长，命中按行号报）；
+      - 带 `ime-ok:` / `ime-unreachable:` 的行注释原样保留 —— 逃生口不能被
+        自己的词法器抹掉；
+      - 解析失败**不静默**：返回 None，调用方一律 fail-closed 报违规（残缺视图
+        读成「干净」正是 parser-death 轴的入口）。
+    """
+    ok, reason, views = analyse(text)
+    if not ok:
+        return None, reason
+    out = list(views["code"])
+    # 恢复逃生口行注释：`//` 在注释视图里被抹白才说明它是真注释（字符串里的
+    # `"http://…"` 不会被抹）。代价：块注释里的 `ime-ok:` 也会被恢复成逃生口——
+    # 与「加一条明文 ime-ok 就能豁免」等价，不构成新的绕过面（已记 §6）。
+    for m in re.finditer(r"//[^\n]*", text):
+        s = m.start()
+        if views["comments"][s:s + 2] != "  ":
             continue
-        if quote is not None:
-            if ch == "\\" and i + 1 < n:
-                out.append("  ")          # escaped char (length preserved)
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-                out.append(ch)
-            else:
-                out.append("\n" if ch == "\n" else " ")
-            i += 1
-            continue
-        if ch == "/" and text.startswith("/*", i):
-            in_block = True
-            out.append("  ")
-            i += 2
-            continue
-        if ch == "/" and text.startswith("//", i):
-            eol = text.find("\n", i)
-            eol = n if eol < 0 else eol
-            com = text[i:eol]
-            out.append(com if ESCAPE_RE.search(com)
-                       else "//" + " " * max(0, len(com) - 2))
-            i = eol
-            continue
-        if text.startswith('"""', i):
-            j = text.find('"""', i + 3)
-            end = n if j < 0 else j
-            out.append('"""' + "".join("\n" if c == "\n" else " "
-                                       for c in text[i + 3:end]))
-            if j < 0:
-                i = n
-            else:
-                out.append('"""')
-                i = j + 3
-            continue
-        if ch == '"' or ch == "'":
-            quote = ch
-            out.append(ch)
-            i += 1
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out).split("\n")
+        if ESCAPE_RE.search(text[s:m.end()]):
+            out[s:m.end()] = list(text[s:m.end()])
+    return "".join(out).split("\n"), None
 
 def function_spans(lines):
     """返回 [(name, start, end)] —— 用「下一个函数起点」当上一个的终点。
@@ -273,55 +278,50 @@ def _split_top(expr, op):
 
 
 def cond_truth(expr):
-    """True / False when the boolean expression's value is decided by a
-    LITERAL operand, else None (unknown). Handles `!`, `&&`, `||`, parens.
+    """True / False 当布尔表达式被**字面量**决定，否则 None（未知）。
 
-    This is the decision-point test the whole wave turns on: `if (false && g)`,
-    `if (true || g)`, `!(true)` all decide the branch without looking at `g`,
-    so a guard sitting inside them is dead even though its spelling survives.
+    折叠交给共享的 `_kotlin_ast.const_bool`：`!` / `&&` / `||` / 括号之外还覆盖
+    **常量比较**（`1 == 2`、`0 == 1`、`"a" == "b"`）。手写版只认 `true`/`false`/
+    `!`/`&&`/`||`，于是 `if (1 == 2) { … }` 里的死分支活着（外部见证，family-hole
+    轴：保留拼写、删掉决定）。
+
+    `x == x` 恒真 / `x != x` 恒假是同一族的身份折叠，一并判掉。
     """
-    s = expr.strip()
-    while s.startswith("(") and s.endswith(")") and match_paren(s, 0) == len(s) - 1:
-        s = s[1:-1].strip()
-    if s == "true":
-        return True
-    if s == "false":
-        return False
-    if s.startswith("!"):
-        inner = cond_truth(s[1:])
-        return None if inner is None else (not inner)
-    ors = _split_top(s, "||")
-    if len(ors) > 1:
-        vals = [cond_truth(p) for p in ors]
-        if any(v is True for v in vals):
-            return True
-        if vals and all(v is False for v in vals):
-            return False
-        return None
-    ands = _split_top(s, "&&")
-    if len(ands) > 1:
-        vals = [cond_truth(p) for p in ands]
-        if any(v is False for v in vals):
-            return False
-        if vals and all(v is True for v in vals):
-            return True
-        return None
+    s = strip_parens(expr)
+    v = const_bool(s)
+    if v is not None:
+        return v
+    for op, verdict in (("==", True), ("!=", False)):
+        parts = split_top(s, (op,))
+        if len(parts) == 2:
+            a = s[parts[0][0]:parts[0][1]].strip()
+            b = s[parts[1][0]:parts[1][1]].strip()
+            if a and a == b:
+                return verdict
     return None
 
 
 def dead_guard_spans(text):
-    """[(start, end)] of bodies whose controlling condition is literal-FALSE.
+    """[(start, end)] of the branches whose controlling condition is literal-decided.
 
-    Body span = the `{…}` block when one follows the condition, else the rest
-    of the line (the brace-less `if (false) doThing()` shape).
+    覆盖三类，全部从 `_kotlin_ast` 派生（不再用自己那版正则 + 布尔）：
+      * `if (<恒假>)` 的 then 臂 / `if (<恒真>)` 的 else 臂（含 braceless 形态）；
+      * `while (<恒假>)` 的体；
+      * `when (<字面量>) { … }`——`when (false)` 的每个非 `else` 分支都不执行
+        （旧版只认 `if (false)`，`when (false) { true -> IconButton(…) }` 保留了
+        拼写、渲染出空导航槽）。
     """
     spans = []
-    for m in re.finditer(r"\b(?:if|while)\s*\(", text):
+    for cond, t_start, t_end, e_start, e_end in if_blocks(text):
+        truth = cond_truth(cond)
+        if truth is False:
+            spans.append((t_start, t_end))
+        elif truth is True and e_start is not None:
+            spans.append((e_start, e_end))
+    for m in re.finditer(r"\bwhile\s*\(", text):
         op = m.end() - 1
         cl = match_paren(text, op)
-        if cl is None:
-            continue
-        if cond_truth(text[op + 1:cl]) is not False:
+        if cl is None or cond_truth(text[op + 1:cl]) is not False:
             continue
         k = cl + 1
         while k < len(text) and text[k] in " \t":
@@ -333,6 +333,16 @@ def dead_guard_spans(text):
         else:
             eol = text.find("\n", k)
             spans.append((k, eol if eol >= 0 else len(text)))
+    for subject, cond, b_start, b_end in when_branches(text):
+        branch = cond.strip()
+        if branch in ("else", ""):
+            continue
+        subj = cond_truth(subject) if subject.strip() else None
+        if subj is False:
+            spans.append((b_start, b_end))          # `when (false)` — 无分支执行
+            continue
+        if cond_truth(branch) is False:
+            spans.append((b_start, b_end))
     return spans
 
 
@@ -340,21 +350,81 @@ def _inside(spans, pos):
     return any(a <= pos <= b for a, b in spans)
 
 
+def _split_args(text, start, end):
+    """[(start, end)] spans of the TOP-LEVEL arguments in text[start:end]."""
+    spans, depth, last = [], 0, start
+    i = start
+    while i < end:
+        c = text[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            spans.append((last, i))
+            last = i + 1
+        i += 1
+    spans.append((last, end))
+    return [(a, b) for a, b in spans if text[a:b].strip()]
+
+
+def _named_arg(text, arg_start, arg_end):
+    """(key, value_start, value_end) when the argument is a `key = value` form."""
+    seg = text[arg_start:arg_end]
+    m = re.match(r"\s*([A-Za-z_]\w*)\s*=(?![=>])", seg)
+    if m is None:
+        return None
+    return m.group(1), arg_start + m.end(), arg_end
+
+
+def arg_value_by_key(text, start, end, key):
+    """(raw value text, offset) of the top-level argument `key = …`, or (None, -1).
+
+    Bracket-aware on purpose: `onBack = { nav.popBackStack() }` must be captured
+    whole — the old `[^,\n)]+` regex stopped at the first `)` inside the lambda.
+    """
+    for a, b in _split_args(text, start, end):
+        named = _named_arg(text, a, b)
+        if named is not None and named[0] == key:
+            return text[named[1]:named[2]], named[1]
+    return None, -1
+
+
 def enclosing_call(text, pos):
-    """(callee, open_idx, close_idx) of the innermost call enclosing `pos`."""
-    depth = 0
+    """(callee, open_idx, close_idx) of the innermost call enclosing `pos`.
+
+    `pos` must sit in a call's ARGUMENT LIST. When an unmatched `{` is met
+    before an unmatched `(` the position lives inside a LAMBDA BODY, and a chain
+    there does not reach the host: the lambda's RESULT decides what the receiver
+    becomes (`.let { if (1 == 2) it.imePadding() else it }` returns the
+    un-padded receiver — external witness, family-hole axis). The old version
+    only tracked `(`/`)`, walked straight through the lambda and attributed the
+    padding to the outer `DialogTextField`, i.e. it graded the SPELLING of the
+    chain instead of what the host receives. Returns ('', -1, None) for the
+    lambda case so the caller treats the chain as unattached.
+    """
+    paren = 0
+    brace = 0
     for i in range(pos - 1, -1, -1):
         c = text[i]
         if c == ")":
-            depth += 1
+            paren += 1
         elif c == "(":
-            if depth == 0:
+            if paren == 0:
+                if brace > 0:
+                    return "", -1, None
                 cl = match_paren(text, i)
                 j = i - 1
                 while j >= 0 and (text[j].isalnum() or text[j] == "_"):
                     j -= 1
                 return text[j + 1:i], i, cl
-            depth -= 1
+            paren -= 1
+        elif c == "}":
+            brace += 1
+        elif c == "{":
+            if brace == 0:
+                return "", -1, None
+            brace -= 1
     return "", -1, None
 
 
@@ -384,7 +454,7 @@ FIELD_CALLEES = frozenset({
 
 
 def hoisted_modifier_name(text, pos):
-    """Name of a `val x = Modifier…` whose chain reaches `pos`, else None."""
+    """Name of a `val x = Modifier…` declared before `pos`, else None."""
     seg = text[max(0, pos - 2000):pos]
     last = None
     for m in re.finditer(
@@ -397,25 +467,78 @@ def hoisted_modifier_name(text, pos):
     return last.group(1)
 
 
+def modifier_slot_hosts(body, field_pos, dead):
+    """[(callee, value_start, value_end)] — `modifier = …` arguments that can
+    actually resize the host of the field at `field_pos`.
+
+    A slot qualifies when it belongs to
+      * the text-field call itself (leaf-level editor), or
+      * a layout CONTAINER whose trailing lambda block CONTAINS the field.
+    Everything else (`Spacer`, a sibling, a non-host call) is someone else's
+    modifier chain and cannot protect this field.
+    """
+    out = []
+    for m in re.finditer(r"(?<![\w.])modifier\s*=", body):
+        if _inside(dead, m.start()):
+            continue
+        callee, _op, cl = enclosing_call(body, m.start())
+        if cl is None:
+            continue
+        if callee in CONTAINER_CALLEES:
+            blk = trailing_block(body, cl)
+            if blk is None or not (blk[0] <= field_pos <= blk[1]):
+                continue
+        elif callee not in FIELD_CALLEES:
+            continue
+        v_start = m.end()
+        v_end = cl
+        depth = 0
+        i = v_start
+        while i < cl:
+            c = body[i]
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                depth -= 1
+            elif c == "," and depth == 0:
+                v_end = i
+                break
+            i += 1
+        out.append((callee, v_start, v_end))
+    return out
+
+
+def hoisted_reaches_host(body, name, slots, dead):
+    """True when `name` is READ BY a host's `modifier =` argument.
+
+    Presence is not consumption (external witness, family-hole axis):
+    `val unused = Modifier.imePadding()` followed by `val _ignore = unused`
+    satisfied the old `len(re.findall(name)) >= 2` count while the host received
+    a padding-free `Modifier`. The identifier must appear inside a slot that can
+    resize the field, and not under a dead guard.
+    """
+    pat = re.compile(r"\b%s\b" % re.escape(name))
+    for _callee, v_start, v_end in slots:
+        for m in pat.finditer(body, v_start, v_end):
+            if not _inside(dead, m.start()):
+                return True
+    return False
+
+
 def live_ime_padding(body, field_pos):
     """True when `body` carries a `.imePadding()` that can actually protect the
     text field at `field_pos`.
 
-    Anchor-on-effect, not on spelling (external witness IME-HOST / anchor):
-    the old test was `IME_PADDING_RE.search(body)`, so a padding that render
-    code can never reach — `if (false) { Spacer(Modifier.imePadding()) }`, or a
-    padding hung on an unrelated 0dp Spacer — counted as protection while the
-    host container had none.
-
-    Counted only when the modifier chain is attached to a real host:
-      * an argument list of a layout CONTAINER whose trailing lambda block
-        encloses the field (the documented fix shape);
-      * the text-field call itself (leaf-level BasicTextField editor);
-      * a hoisted `val x = Modifier…imePadding()` that is referenced again
-        (`SettingsComponents`' `baseMod`);
-    and never when it sits inside a literal-decided guard.
+    Anchor-on-effect, not on spelling (external witnesses IME-HOST / anchor /
+    wide4 family-hole):
+      * an argument list of a layout CONTAINER whose trailing lambda encloses the
+        field (the documented fix shape), or of the text-field call itself;
+      * a hoisted `val x = Modifier…imePadding()` that is READ BY one of those
+        `modifier =` slots (a mere second mention is not consumption);
+    and never inside a literal-decided guard / a discarded lambda result.
     """
     dead = dead_guard_spans(body)
+    slots = modifier_slot_hosts(body, field_pos, dead)
     for m in re.finditer(r"\.imePadding\(\)", body):
         pos = m.start()
         if _inside(dead, pos):
@@ -428,18 +551,24 @@ def live_ime_padding(body, field_pos):
                 blk = trailing_block(body, cl)
                 if blk is not None and blk[0] <= field_pos <= blk[1]:
                     return True
-        elif callee:
-            pass
+            continue        # attached to a non-host call — not this field's host
         name = hoisted_modifier_name(body, pos)
-        if name and len(re.findall(r"\b%s\b" % re.escape(name), body)) >= 2:
+        if name and hoisted_reaches_host(body, name, slots, dead):
             return True
     return False
 
 
-def scan_file(path, rel):
+def project(path):
+    """(code_text, None) for `path`, or (None, reason) when it cannot be lexed."""
     raw = open(path, encoding="utf-8", errors="replace").read()
-    lines = strip_comments(raw)
-    text = "\n".join(lines)
+    lines, reason = strip_comments(raw)
+    if lines is None:
+        return None, reason
+    return "\n".join(lines), None
+
+
+def scan_file(text, rel):
+    lines = text.split("\n")
     offs = line_offsets(lines)
     funcs = function_spans(lines)
     findings = []
@@ -473,7 +602,7 @@ def scan_file(path, rel):
         window.append(lines[i])
         if any(ESCAPE_RE.search(l) for l in window):
             continue
-        findings.append((i + 1, name))
+        findings.append((i + 1, name, "IME-INSET"))
     return findings
 
 
@@ -519,13 +648,14 @@ SCAFFOLD_REL = "com/rikkaminis/app/ui/settings/SettingsComponents.kt"
 NAV_SLOT_DECL_RE = re.compile(r"\bval\s+navigationSlot\s*:")
 NAV_ARM_RE = re.compile(r"\bnavigation\s*!=\s*null\s*->")
 ONBACK_ARM_RE = re.compile(r"\bonBack\s*!=\s*null\s*->")
-ONBACK_RENDER_RE = re.compile(r"IconButton\s*\([\s\S]{0,200}?onClick\s*=\s*onBack\b")
+# The `onClick = …` VALUE is parsed with `_onclick_values` instead of this
+# substring anchor: `onClick = onBack.takeIf { false } ?: {}` satisfies a
+# `onBack\b` match while discarding the handler (external witness, wide4).
 SCAFFOLD_CALL_RE = re.compile(r"(?<![\w.])SettingsScaffold\s*\(")
-# Capture the VALUE rather than asserting a negative lookahead: `\s*=(?!null)`
-# can backtrack the whitespace and match `onBack = null` anyway (measured: the
-# lookahead form counted 26 of 27 call sites, i.e. essentially every one).
-ONBACK_ARG_RE = re.compile(r"\bonBack\s*=\s*([^,\n)]+)")
-ONBACK_NULL_RE = re.compile(r"\bonBack\s*=\s*(?:null|false)\b")
+# Argument VALUES are parsed bracket-aware by `arg_value_by_key` — the old
+# `[^,\n)]+` capture truncated any lambda containing a `)` and had to be paired
+# with a separate `null|false` blacklist, which is exactly the spelling-not-value
+# hole the wide4 witnesses walked through.
 NAV_ARG_RE = re.compile(r"\bnavigation\s*=")
 ARM_BOUNDARY_RE = re.compile(r"\b(?:navigation|onBack)\s*!=\s*null\s*->|\belse\s*->")
 # 11 call sites pass a non-null `onBack` on 2026-10-25; the floor is two below
@@ -565,6 +695,19 @@ def _function_params(text, decl_off):
     return text[op + 1:cl]
 
 
+ONBACK_ONCLICK_OK = re.compile(r"^(?:onBack|\{\s*onBack\s*\(\s*\)\s*\})$")
+
+
+def _onclick_values(text, open_idx, close_idx):
+    """Raw `onClick = <value>` argument texts inside the call at `open_idx`."""
+    out = []
+    for a, b in _split_args(text, open_idx + 1, close_idx):
+        named = _named_arg(text, a, b)
+        if named is not None and named[0] == "onClick":
+            out.append(text[named[1]:named[2]].strip())
+    return out
+
+
 def check_scaffold_navigation(text):
     """B01-* — see the block comment above. Returns [(criterion, ok, detail)]."""
     results = []
@@ -592,14 +735,25 @@ def check_scaffold_navigation(text):
         arm_body = slot[arm.end():nxt.start() if nxt else len(slot)]
         dead = dead_guard_spans(slot)
         base = arm.end()
-        live = [r for r in re.finditer(r"IconButton\s*\(", arm_body)
-                if not _inside(dead, base + r.start())
-                and ONBACK_RENDER_RE.search(arm_body[r.start():r.start() + 220])]
+        live = []
+        for r in re.finditer(r"IconButton\s*\(", arm_body):
+            if _inside(dead, base + r.start()):
+                continue
+            op = base + r.end() - 1
+            cl = match_paren(slot, op)
+            if cl is None:
+                continue
+            for value in _onclick_values(slot, op, cl):
+                if ONBACK_ONCLICK_OK.match(strip_parens(value)):
+                    live.append(value)
+                    break
         if not live:
             problems.append(
                 "the `onBack` arm renders no LIVE `IconButton(onClick = onBack)` — a "
-                "literal-short-circuited wrapper (`if (false) IconButton(…)`) or a deleted "
-                "render keeps the spelling and loses the back affordance")
+                "literal-short-circuited wrapper (`if (false) IconButton(…)`, `when (false)`), "
+                "a deleted render, or a DISCARDING chain "
+                "(`onClick = onBack.takeIf { false } ?: {}`) keeps the spelling and loses the "
+                "back affordance")
     results.append(("B01-SLOT", not problems,
                     "the navigation slot honours the custom slot, and falls back to a back arrow "
                     "when only `onBack` is set" if not problems else "; ".join(problems)))
@@ -644,10 +798,29 @@ TOP_LEVEL_NULL_SITES = {
 }
 
 
-def audit_scaffold_callsites(text, rel):
-    """B01-CALLS — per-site argument-value judgment.
+def onback_value_kind(value):
+    """Classify the `onBack = …` argument VALUE (not its presence)."""
+    v = strip_parens(value.strip())
+    if not v:
+        return "empty"
+    if v == "null":
+        return "null"
+    if v == "false":
+        return "false"
+    if re.fullmatch(r"\{\s*\}", v):
+        return "empty-lambda"
+    return "value"
 
-    Returns (violations, non_null_handlers, total_call_sites, matched_registry).
+
+def _handler_params(params):
+    """Names of handler parameters declared by a composable signature."""
+    return [m.group(1) for m in re.finditer(r"\b(onBack\w*)\s*:", params)]
+
+
+def audit_scaffold_callsites(text, rel):
+    """B01-CALLS — per-site argument-VALUE judgment (presence is not wiring).
+
+    Returns (violations, live_handlers, total_call_sites, matched_registry).
     """
     viols, non_null, total = [], 0, 0
     matched = set()
@@ -655,38 +828,59 @@ def audit_scaffold_callsites(text, rel):
     offs = line_offsets(lines)
     funcs = function_spans(lines)
     for cm in SCAFFOLD_CALL_RE.finditer(text):
+        # `fun SettingsScaffold(` / `override fun SettingsScaffold(` is the HOST
+        # itself, not a call site: judging its parameter list as an argument list
+        # would flag the declaration for "not passing onBack".
+        if re.search(r"\bfun\s+$", text[max(0, cm.start() - 12):cm.start()]):
+            continue
         total += 1
-        args = balanced_args(text, cm.end() - 1)
+        op = cm.end() - 1
+        args = balanced_args(text, op)
         line_no = text.count("\n", 0, cm.start()) + 1
         if args is None:
             viols.append(
                 "B01-CALLS  %s:%d  unbalanced `SettingsScaffold(` argument list (fail-closed: "
                 "re-derive this criterion)" % (rel, line_no))
             continue
-        vm = ONBACK_ARG_RE.search(args)
-        if vm is not None and vm.group(1).strip() != "null":
+        value, _voff = arg_value_by_key(args, 0, len(args), "onBack")
+        kind = onback_value_kind(value) if value is not None else "absent"
+        has_nav = arg_value_by_key(args, 0, len(args), "navigation")[0] is not None
+        if kind not in ("null", "false", "absent"):
             non_null += 1
-        if not ONBACK_NULL_RE.search(args) or NAV_ARG_RE.search(args):
-            continue
         idx = line_no - 1
         encl = [f for f in funcs if f[1] <= idx < f[3]]
         owner = min(encl, key=lambda x: x[3] - x[1])[0] if encl else "?"
-        if not any(re.search(r"\bonBack\s*:", _function_params(text, offs[f[1]]))
-                   for f in encl):
+        handlers = []
+        for f in sorted(encl, key=lambda x: x[3] - x[1]):
+            handlers.extend(_handler_params(_function_params(text, offs[f[1]])))
+        if not handlers:
             continue       # no handler in scope -> the documented top-level shape
         key = (rel, owner)
-        if key in TOP_LEVEL_NULL_SITES:
-            matched.add(key)
+        if kind in ("absent", "null", "false"):
+            if has_nav:
+                continue
+            if key in TOP_LEVEL_NULL_SITES:
+                matched.add(key)
+                continue
+            viols.append(
+                "B01-CALLS  %s:%d  passes `onBack = null` (and no `navigation` slot) while this "
+                "screen's own `onBack` handler is in scope — the back arrow disappears and a "
+                "drill-down screen is left with no visible way out" % (rel, line_no))
             continue
-        viols.append(
-            "B01-CALLS  %s:%d  passes `onBack = null` (and no `navigation` slot) while this "
-            "screen's own `onBack` handler is in scope — the back arrow disappears and a "
-            "drill-down screen is left with no visible way out" % (rel, line_no))
+        # A present, non-null value can still DISCARD the handler: `{}` renders
+        # an arrow that does nothing (external witness B01-CALLS wide4), and so
+        # does any expression that never mentions the in-scope handler.
+        if kind in ("empty", "empty-lambda") or not any(
+                re.search(r"\b%s\b" % re.escape(h), value) for h in handlers):
+            viols.append(
+                "B01-CALLS  %s:%d  discards in-scope `onBack` handler (passes `%s` instead of "
+                "wiring `%s`) — the back arrow renders but the tap does nothing"
+                % (rel, line_no, value.strip()[:48], handlers[0]))
     return viols, non_null, total, matched
 
 
 def collect(root):
-    """(ime violations, scaffold violations, scaffold file seen, non-null sites)."""
+    """(ime violations, scaffold violations, scaffold file seen, live handlers)."""
     violations = []
     scaffold_violations = []
     scaffold_seen = False
@@ -700,12 +894,19 @@ def collect(root):
                     continue
                 path = os.path.join(base, fn)
                 rel = os.path.relpath(path, os.path.join(root, sr)).replace(os.sep, "/")
-                for line_no, fname in scan_file(path, rel):
-                    violations.append(f"{rel}:{line_no}  in {fname}()")
+                text, reason = project(path)
+                if text is None:
+                    # fail-closed: a file the shared lexer cannot parse must never
+                    # read as "clean" (that is exactly how the parser-death axis
+                    # got in: the stripper gave up and the gate judged the remains).
+                    violations.append(
+                        "%s  cannot lex the file (%s) — the gate refuses to judge on a "
+                        "broken lexer view" % (rel, reason))
+                    continue
+                for line_no, fname, criterion in scan_file(text, rel):
+                    violations.append("%s:%d  in %s()  [%s]" % (rel, line_no, fname, criterion))
                 # [deep-audit-1040 B-01] the shared settings host's navigation
                 # affordance (see the block comment above the criteria).
-                text = "\n".join(strip_comments(
-                    open(path, encoding="utf-8", errors="replace").read()))
                 if rel == SCAFFOLD_REL:
                     scaffold_seen = True
                     for cid, ok, detail in check_scaffold_navigation(text):
@@ -841,9 +1042,14 @@ def selftest():
     arms = []
     failures = []
 
-    def arm(name, files, expect_ime, expect_scaffold):
+    def arm(name, files, expect_ime, expect_scaffold, needle=None):
         v, sv, _seen, _n = _selftest_tree(files)
         ok = (len(v) == expect_ime) and (len(sv) == expect_scaffold)
+        # `needle` pins WHICH criterion fired, so an arm cannot pass because a
+        # different criterion happened to be red (a fixture that drifts must not
+        # silently re-point an arm at somebody else's rule).
+        if ok and needle is not None:
+            ok = any(needle in msg for msg in (v + sv))
         arms.append((name, ok, "ime=%d/%d scaffold=%d/%d"
                      % (len(v), expect_ime, len(sv), expect_scaffold)))
         if not ok:
@@ -946,6 +1152,67 @@ fun MemoryManagementScreen() {
 }
 '''
     arm("B01 top-level null stays green", {pkg + "/Top.kt": top_level}, 0, 0)
+
+    # ── wide4 arms: every FALSIFIED witness of this wave, pinned ────────────
+    # Each one used to be a green gate over a real defect; the arm asserts the
+    # gate now goes red on exactly that patch (and nothing else).
+
+    # w4-1 (family-hole) hoisted modifier that is mentioned twice but never
+    # handed to a host: `val dead = Modifier.imePadding()` + `val _ignore = dead`
+    w4_hoist = CLEAN_SCREEN.replace(
+        "        Column(\n",
+        "        val deadMod = Modifier.imePadding()\n"
+        "        val _ignore = deadMod\n"
+        "        Column(\n").replace(
+        "                .imePadding(),\n", "                ,\n")
+    arm("w4 hoisted-but-unattached modifier is caught", {pkg + "/W4a.kt": w4_hoist}, 1, 0)
+
+    # w4-2 (family-hole) a present, non-null onBack that DISCARDS the handler
+    w4_calls = CALLSITE_GOOD.replace("onBack = onBack,", "onBack = {},")
+    arm("w4 onBack = {} discards handler is caught", {pkg + "/W4b.kt": w4_calls}, 0, 1,
+        needle="discards in-scope `onBack` handler")
+
+    # w4-3 (family-hole) discarding onClick chain in the slot arm
+    slot_chain = SLOT_GOOD.replace(
+        "onBack != null -> IconButton(onClick = onBack) {",
+        "onBack != null -> IconButton(onClick = onBack.takeIf { false } ?: {}) {")
+    arm("w4 onClick = onBack.takeIf{false} ?: {} is caught",
+        {"com/rikkaminis/app/ui/settings/SettingsComponents.kt": slot_chain}, 0, 1,
+        needle="no LIVE `IconButton(onClick = onBack)`")
+
+    # w4-4 (family-hole) padding inside a discarded lambda result: `.let { if (1 == 2) … }`
+    w4_let = CLEAN_SCREEN.replace(
+        "                .imePadding(),\n",
+        "                .let { if (1 == 2) it.imePadding() else it },\n")
+    arm("w4 padding in a discarded `.let` result is caught", {pkg + "/W4c.kt": w4_let}, 1, 0)
+
+    # w4-5 (parser-death) NESTED block comment around the padding
+    w4_nested = CLEAN_SCREEN.replace(
+        "                .imePadding(),\n",
+        "                /* outer /* inner */ .imePadding() */\n")
+    arm("w4 nested block comment blinds padding", {pkg + "/W4d.kt": w4_nested}, 1, 0)
+
+    # w4-6 (CAUGHT witness, kept honest): compound literal short-circuit
+    w4_short = CLEAN_SCREEN.replace(
+        "                .imePadding(),\n", "").replace(
+        '            OutlinedTextField(value = "", onValueChange = {})',
+        '            if (false && isEditing) { Box(Modifier.imePadding()) {} }\n'
+        '            OutlinedTextField(value = "", onValueChange = {})')
+    arm("w4 `false && x` dead guard stays caught", {pkg + "/W4e.kt": w4_short}, 1, 0)
+
+    # w4-7 (registry axis) `when (false)` inside the slot arm renders nothing
+    slot_when = SLOT_GOOD.replace(
+        "onBack != null -> IconButton(onClick = onBack) {",
+        "onBack != null -> when (false) { true -> IconButton(onClick = onBack) {").replace(
+        "            }\n        }\n    }",
+        "            } }\n        }\n    }")
+    arm("w4 `when (false)` back arrow is caught",
+        {"com/rikkaminis/app/ui/settings/SettingsComponents.kt": slot_when}, 0, 1,
+        needle="no LIVE `IconButton(onClick = onBack)`")
+
+    # w4-8 clean shapes that must stay green: the handler wired through a lambda
+    calls_lambda = CALLSITE_GOOD.replace("onBack = onBack,", "onBack = { onBack() },")
+    arm("w4 `onBack = { onBack() }` stays green", {pkg + "/W4f.kt": calls_lambda}, 0, 0)
 
     for name, ok, detail in arms:
         print("  SELFTEST %-44s %s (%s)" % (name, "OK" if ok else "FAIL", detail))
