@@ -55,64 +55,158 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import analyse as kotlin_analyse  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool, if_blocks, match_bracket, split_top, stmt_spans, when_branches,
+)
+
 IFACE_DEFAULT = "AndroidBridge"
 ANNOTATION = "@JavascriptInterface"
 
+# [wide4-02] JS/HTML comment stripping must know REGEX LITERALS.
+# Witness (parser-death/4): `var _re = /\//;` — the last two characters of the
+# regex literal are `//`, which the old scanner read as a line comment and ate
+# the rest of the line, including the 2-arg `AndroidBridge.onRendered(...)` call
+# the gate exists to check. The page's `catch` block kept `calls_found > 0`, so
+# the rot guard stayed quiet and the gate went green on a bridge that no longer
+# resolved arity.
+_REGEX_PREV = set("=(,:[!&|?;{}%-*~^")
+_REGEX_WORDS = ("return", "typeof", "case", "in", "of", "new", "delete",
+                "void", "instanceof", "do", "else", "yield", "await")
 
-def strip_comments(text):
-    """Remove comments before any structural scan — QUOTE-AWARE.
 
-    Prose apostrophes in comments ("the pool's cache", "Chromium's bridge")
-    otherwise read as string delimiters and swallow real parentheses — which is
-    how the first draft of this scanner silently mis-parsed `KaTeXView.kt` and
-    reported a clean tree. After stripping, a `'` in Kotlin is a char literal
-    and a `'` in JS is a real string delimiter, matching the scanner's rules.
+def _blank_span(out, start, end):
+    for k in range(start, end):
+        if out[k] != "\n":
+            out[k] = " "
 
-    [wide3-06] The old version was three regexes, so a `"/*"` INSIDE a string
-    literal started a block comment and ate the code up to the next `*/` — the
-    witness hid a 2-arg call between two such literals. This scanner walks the
-    text: inside a quoted span nothing is a comment, and comment bodies are
-    blanked (newlines kept) so offsets stay stable.
+
+def strip_js_comments(text):
+    """Blank JS/HTML comments — string/template/regex-literal aware.
+
+    Returns the stripped text or raises `ValueError` on an unterminated
+    construct (the caller reports ROT: a page this scanner cannot tokenise must
+    never be judged — silently returning the raw text is how parser-death
+    witnesses pass).
     """
-    out = []
+    out = list(text)
     i, n = 0, len(text)
-    quote = None
+    prev = ""          # last significant character outside comments
+    word = ""          # last identifier word outside comments (regex context)
+
+    def at_expr_start():
+        if prev == "" or prev in _REGEX_PREV:
+            return True
+        return word in _REGEX_WORDS
+
     while i < n:
         c = text[i]
-        if quote is not None:
-            out.append(c)
-            if c == "\\" and i + 1 < n:
-                out.append(text[i + 1])
-                i += 2
-                continue
-            if c == quote:
-                quote = None
-            i += 1
-            continue
-        if c in "\"'`":
-            quote = c
-            out.append(c)
-            i += 1
-            continue
-        if text.startswith("//", i):
+        if c == "/" and text.startswith("//", i):
             j = text.find("\n", i)
-            i = n if j < 0 else j
+            j = n if j < 0 else j
+            _blank_span(out, i, j)
+            i = j
             continue
-        if text.startswith("/*", i):
+        if c == "/" and text.startswith("/*", i):
             j = text.find("*/", i + 2)
-            end = n if j < 0 else j + 2
-            out.append("".join(ch if ch == "\n" else " " for ch in text[i:end]))
-            i = end
+            if j < 0:
+                raise ValueError(f"unterminated block comment at offset {i}")
+            _blank_span(out, i, j + 2)
+            i = j + 2
             continue
         if text.startswith("<!--", i):
             j = text.find("-->", i + 3)
-            end = n if j < 0 else j + 3
-            out.append(" " * max(1, end - i))
-            i = end
+            if j < 0:
+                raise ValueError(f"unterminated HTML comment at offset {i}")
+            _blank_span(out, i, j + 3)
+            i = j + 3
             continue
-        out.append(c)
+        if c in "\"'`":
+            j = i + 1
+            while j < n:
+                ch = text[j]
+                if ch == "\\":
+                    j += 2
+                    continue
+                if ch == c:
+                    j += 1
+                    break
+                if c != "`" and ch == "\n":
+                    raise ValueError(f"unterminated string literal at offset {i}")
+                j += 1
+            else:
+                raise ValueError(f"unterminated string literal at offset {i}")
+            prev, word = c, ""
+            i = j
+            continue
+        if c == "/" and at_expr_start():
+            # Try a regex literal; if no closing `/` on this line, fall back to
+            # treating it as division (and keep scanning normally).
+            j = i + 1
+            in_class = False
+            closed = -1
+            while j < n:
+                ch = text[j]
+                if ch == "\\":
+                    j += 2
+                    continue
+                if ch == "\n":
+                    break
+                if ch == "[":
+                    in_class = True
+                elif ch == "]":
+                    in_class = False
+                elif ch == "/" and not in_class:
+                    closed = j
+                    break
+                j += 1
+            if closed > 0:
+                prev, word = "/", ""
+                i = closed + 1
+                # flags
+                while i < n and text[i].isalpha():
+                    i += 1
+                continue
+        if c.isalnum() or c in "_$":
+            j = i
+            while j < n and (text[j].isalnum() or text[j] in "_$"):
+                j += 1
+            word = text[i:j]
+            prev = text[j - 1]
+            i = j
+            continue
+        if not c.isspace():
+            prev, word = c, ""
         i += 1
     return "".join(out)
+
+
+def kotlin_views(text):
+    """(comments_view, code_view) from the shared lexer, or (None, None, reason).
+
+    [wide4-02] The gate used to strip Kotlin comments with its own quote-aware
+    scanner. That scanner did not know nested block comments, `\"\"\"` raw
+    strings, `${...}` templates or backtick identifiers, so any of them could
+    desynchronise the quote state and hide a declaration. The shared lexer
+    (`_kotlin_lexer`) is the one implementation for the whole wave.
+    """
+    ok, reason, views = kotlin_analyse(text)
+    if not ok:
+        return None, None, reason
+    return views["comments"], views["code"], None
+
+
+def strip_comments(text):
+    """Legacy name: Kotlin comment stripping is now the shared lexer.
+
+    Kept as a thin alias so the module's public surface does not change for
+    callers that only need the comment-masked view.
+    """
+    comments, _code, reason = kotlin_views(text)
+    if comments is None:
+        raise ValueError(reason)
+    return comments
 
 
 def match_paren(text, open_idx):
@@ -289,77 +383,192 @@ def member_declarations(obj_body):
     return out
 
 
-def _object_body(kt_text, arg):
-    """The brace block of the object denoted by a registration's first arg.
+def _decl_spans(code):
+    """[(name, depth, body_start, body_end)] for every named class/object.
+
+    `depth` is the brace depth at the declaration keyword. Used to pick THE
+    declaration a registration refers to: the old `re.search` took the first
+    textual match, so a same-named class parked inside an unrelated holder
+    (`class UnusedHolder { class JsBridge { … 4 args … } }`) satisfied the
+    arity contract while the class actually instantiated at the registration
+    site declared three parameters (witness family-hole/3).
+    """
+    depths = _depth_map(code)
+    out = []
+    for m in re.finditer(r"\b(?:class|object)\s+([A-Za-z_]\w*)", code):
+        b = code.find("{", m.end())
+        if b < 0:
+            continue
+        end = match_brace(code, b)
+        if end < 0:
+            continue
+        out.append((m.group(1), depths[m.start()], b, end))
+    return out
+
+
+def _enclosing_decl_depth(code, pos):
+    """Brace depth of the innermost named class/object containing `pos` (-1)."""
+    best = -1
+    for _name, depth, b_start, b_end in _decl_spans(code):
+        if b_start <= pos < b_end and depth > best:
+            best = depth
+    return best
+
+
+def _lambda_body(lit):
+    """Body of a `{ params -> body }` lambda literal (params stripped)."""
+    lit = lit.strip()
+    if not lit.startswith("{"):
+        return None
+    end = match_brace(lit, 0)
+    if end < 0:
+        return None
+    inner = lit[1:end - 1]
+    arrow = -1
+    depth = 0
+    k = 0
+    while k < len(inner):
+        ch = inner[k]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and inner.startswith("->", k):
+            arrow = k
+            break
+        k += 1
+    return inner[arrow + 2:] if arrow >= 0 else inner
+
+
+def _call_lambdas(arg):
+    """Lambda literals passed to a constructor/function call expression.
+
+    `JsBridge { … }`, `JsBridge(cb) { … }` and `JsBridge({ … })` all yield the
+    lambda body. Returns [] when the argument is not a call shape.
+    """
+    m = re.match(r"[A-Za-z_]\w*", arg)
+    if not m:
+        return []
+    i = m.end()
+    while i < len(arg) and arg[i] in " \t":
+        i += 1
+    lits = []
+    if i < len(arg) and arg[i] == "(":
+        end = match_paren(arg, i)
+        if end < 0:
+            return []
+        base = i + 1
+        for a, b in split_top(arg[base:end - 1]):
+            piece = arg[base + a:base + b].strip()
+            if piece.startswith("{"):
+                lits.append(piece)
+        i = end
+    while i < len(arg) and arg[i] in " \t\r\n":
+        i += 1
+    if i < len(arg) and arg[i] == "{":
+        lits.append(arg[i:])
+    return lits
+
+
+def _resolve_object(code, arg, pos):
+    """(obj_body, callback_bodies, reason) for a registration's first argument.
 
     Accepted shapes: an inline `object { … }` / `object : X() { … }`, an
     identifier bound to such an object (`val jsBridge = object { … }`), or a
     type/constructor reference (`JsBridge { … }`, `JsBridge(cb)`). Anything
-    else returns None → the caller fails closed (a registration it cannot
-    resolve must never silently drop out of the host set).
+    else returns None with a reason → the caller fails closed (a registration
+    it cannot resolve must never silently drop out of the host set).
+
+    [wide4-02] Two blind spots closed here:
+      * SHADOWING — the type is looked up among declarations that can actually
+        be the one instantiated (top level, or a sibling member of the class
+        that encloses the registration). Two candidates at that level are
+        ambiguous and fail closed instead of silently picking the first.
+      * CALLBACK — `JsBridge { _, _, _, _ -> }` keeps the class body intact
+        (it still calls `onResult(…)`) and moves the behaviour into an empty
+        constructor lambda, so the member body alone was never the whole
+        surface. The lambdas passed at the registration site are returned and
+        judged by the caller.
     """
     arg = arg.strip()
     if not arg:
-        return None
+        return None, [], "empty registration argument"
     if re.match(r"object\b", arg):
         b = arg.find("{")
         if b < 0:
-            return None
+            return None, [], "inline `object` without a body"
         end = match_brace(arg, b)
-        return arg[b:end] if end > 0 else None
-    m = re.fullmatch(r"[A-Za-z_]\w*", arg)
-    if m:
-        decl = re.search(
-            r"\b(?:val|var)\s+" + re.escape(arg) + r"\s*(?::[^=\n]*)?=\s*object\b",
-            kt_text,
-        )
-        if not decl:
-            return None
-        b = kt_text.find("{", decl.end())
+        if end < 0:
+            return None, [], "inline `object` body is unbalanced"
+        return arg[b:end], [], None
+
+    if re.fullmatch(r"[A-Za-z_]\w*", arg):
+        best = None
+        pat = re.compile(r"\b(?:val|var)\s+" + re.escape(arg)
+                         + r"\s*(?::[^=\n]*)?=\s*object\b")
+        for m in pat.finditer(code):
+            if m.start() < pos:
+                best = m
+        if best is None:
+            return None, [], f"`{arg}` is not bound to an `object {{ }}` before the registration"
+        b = code.find("{", best.end())
         if b < 0:
-            return None
-        end = match_brace(kt_text, b)
-        return kt_text[b:end] if end > 0 else None
+            return None, [], f"`{arg}` binding has no object body"
+        end = match_brace(code, b)
+        if end < 0:
+            return None, [], f"`{arg}` object body is unbalanced"
+        return code[b:end], [], None
+
     m = re.match(r"([A-Za-z_]\w*)\s*[({]", arg)
     if m:
         type_name = m.group(1)
-        decl = re.search(
-            r"\b(?:class|object)\s+" + re.escape(type_name) + r"\b", kt_text
-        )
-        if not decl:
-            return None
-        b = kt_text.find("{", decl.end())
-        if b < 0:
-            return None
-        # A constructor arg list may sit between the name and the body.
-        end = match_brace(kt_text, b)
-        return kt_text[b:end] if end > 0 else None
-    return None
+        cands = [d for d in _decl_spans(code) if d[0] == type_name]
+        env = _enclosing_decl_depth(code, pos)
+        allowed = {0, env + 1}
+        pick = [d for d in cands if d[1] in allowed]
+        if len(pick) != 1:
+            return None, [], (
+                "cannot pick THE declaration of `%s` — %d candidate(s) at the "
+                "registration's own scope level, %d in the file"
+                % (type_name, len(pick), len(cands)))
+        b_start, b_end = pick[0][2], pick[0][3]
+        return code[b_start:b_end], _call_lambdas(arg), None
+    return None, [], "registration argument is not an object/identifier/constructor"
 
 
-def registrations(kt_text):
-    """[(name, object_arg)] per `addJavascriptInterface(obj, "Name")` call.
+def registrations(code, comments):
+    """[dict(name, arg, pos, reason)] per `addJavascriptInterface(obj, "Name")`.
 
-    Fail-closed contract: when the call is present but the interface NAME is
-    not a string literal, or the object expression cannot be resolved, the
-    caller gets a `None` in the second slot and must report ROT.
+    `code` is the lexer's code view (strings masked, positions identical to the
+    source); `comments` is its comment-masked view, used to read the interface
+    NAME literal out of the same offsets. Fail-closed contract: when the call
+    is present but the interface name is not a string literal, or the argument
+    list cannot be delimited, `name` is None with a reason and the caller must
+    report ROT.
     """
     out = []
-    for m in re.finditer(r"addJavascriptInterface\s*\(", kt_text):
+    for m in re.finditer(r"addJavascriptInterface\s*\(", code):
         open_idx = m.end() - 1
-        end = match_paren(kt_text, open_idx)
+        end = match_paren(code, open_idx)
         if end < 0:
-            out.append((None, None))
+            out.append({"name": None, "arg": None, "pos": m.start(),
+                        "reason": "unbalanced addJavascriptInterface( … )"})
             continue
-        args = split_args(kt_text[open_idx + 1:end])
-        if len(args) < 2:
-            out.append((None, None))
+        base = open_idx + 1
+        spans = split_top(code[base:end])
+        if len(spans) < 2:
+            out.append({"name": None, "arg": None, "pos": m.start(),
+                        "reason": "addJavascriptInterface takes two arguments"})
             continue
-        literals = re.findall(r"\"([^\"]*)\"", args[-1])
-        if not literals:
-            out.append((None, None))
+        arg_text = code[base + spans[0][0]:base + spans[0][1]]
+        iface_src = comments[base + spans[-1][0]:base + spans[-1][1]]
+        lits = re.findall(r"\"([^\"]*)\"", iface_src)
+        if not lits:
+            out.append({"name": None, "arg": arg_text, "pos": m.start(),
+                        "reason": "interface name is not a string literal"})
             continue
-        out.append((literals[-1], args[0]))
+        out.append({"name": lits[-1], "arg": arg_text, "pos": m.start(),
+                    "reason": None})
     return out
 
 
@@ -379,16 +588,30 @@ def js_call_sites(html_text, names):
 
 
 def _body_is_dead(body):
-    """Statically-unreachable body: `if (true) return` / a bare leading return.
+    """Statically-unreachable body: execution cannot reach the end of it.
 
     [wide3-06 C2-dead] Arity agreement alone let `fun onRendered(…4 args…) { if
     (true) return }` pass while no formula was ever captured.
+
+    [wide4-02] The old test was a two-entry spelling blacklist (`^{ return` and
+    a literal `if (true)`), so `if (!false) return`, `if (1 == 1) return` and
+    `when { true -> return }` — all the same unconditional early exit — kept
+    the gate green. Conditions are now CONSTANT-FOLDED through
+    `_kotlin_ast.const_bool`, which is the wave's single folding implementation.
     """
     if not body:
         return False
-    if re.match(r"\{\s*return\b", body):
+    if re.match(r"\{\s*(?:return|throw)\b", body):
         return True
-    return bool(re.search(r"\bif\s*\(\s*true\s*\)", body))
+    for cond, t_start, t_end, _e_start, _e_end in if_blocks(body):
+        if const_bool(cond) is True and re.search(r"\b(?:return|throw)\b",
+                                                  body[t_start:t_end]):
+            return True
+    for _subject, cond, b_start, b_end in when_branches(body):
+        if const_bool(cond) is True and re.search(r"\b(?:return|throw)\b",
+                                                  body[b_start:b_end]):
+            return True
+    return False
 
 
 def run(root):
@@ -408,33 +631,59 @@ def run(root):
                 continue
             path = os.path.join(dirpath, name)
             with open(path, encoding="utf-8", errors="replace") as fh:
-                text = strip_comments(fh.read())
-            if "addJavascriptInterface" not in text:
-                continue
+                raw = fh.read()
             rel = os.path.relpath(path, root)
-            regs = registrations(text)
+            comments, code, reason = kotlin_views(raw)
+            if code is None:
+                # [wide4-02 parser-death] a file this guard cannot tokenise must
+                # never be judged: the old hand-written stripper desynchronised
+                # on raw strings / templates and silently hid declarations.
+                unparsed.append(f"{rel} (cannot tokenise: {reason})")
+                continue
+            if "addJavascriptInterface" not in code:
+                continue
+            regs = registrations(code, comments)
             if not regs:
                 unparsed.append(rel)
                 continue
             per_name = {}
-            bad = False
-            for iface, obj_arg in regs:
-                if iface is None:
-                    bad = True
+            bad = []
+            for reg in regs:
+                if reg["name"] is None:
+                    bad.append(reg["reason"])
                     continue
-                body = _object_body(text, obj_arg)
+                body, callbacks, why = _resolve_object(code, reg["arg"], reg["pos"])
                 if body is None:
-                    bad = True
+                    bad.append(why)
                     continue
-                decls = member_declarations(body)
                 arities = {}
-                for method, arity, mbody in decls:
+                for method, arity, mbody in member_declarations(body):
                     arities.setdefault(method, set()).add(arity)
                     if _body_is_dead(mbody):
-                        per_name.setdefault("__dead__", []).append((method, arity))
-                per_name[iface] = arities
+                        per_name.setdefault("__dead__", []).append(
+                            (method, arity,
+                             "never runs its body (statically unreachable)"))
+                for lit in callbacks:
+                    lbody = _lambda_body(lit)
+                    if lbody is None:
+                        bad.append("registration passes a lambda this guard cannot parse")
+                    elif not lbody.strip():
+                        # [wide4-02 family-hole/2] `JsBridge { _, _, _, _ -> }`
+                        # is the whole behaviour: the class body still calls
+                        # `onResult(...)`, so judging the member alone says
+                        # "alive" while every render waits out its timeout.
+                        per_name.setdefault("__dead__", []).append(
+                            ("<callback>", None,
+                             "registration callback is an empty lambda — the "
+                             "bridge call succeeds and does nothing"))
+                    elif _body_is_dead("{" + lbody + "}"):
+                        per_name.setdefault("__dead__", []).append(
+                            ("<callback>", None,
+                             "registration callback never runs its body "
+                             "(statically unreachable)"))
+                per_name[reg["name"]] = arities
             if bad:
-                unparsed.append(rel)
+                unparsed.append(f"{rel} ({'; '.join(bad)})")
                 continue
             hosts[rel] = per_name
     if unparsed:
@@ -446,7 +695,7 @@ def run(root):
         # is precisely the stale-host shape the guard exists to catch, so a
         # silent skip is the one failure mode it must never have.
         c = "❌"
-        print(f"{c} ROT: addJavascriptInterface present but no interface name could be parsed:")
+        print(f"{c} ROT: a registration could not be resolved to a declaration:")
         for rel in unparsed:
             print(f"   {rel}")
         print("   Keep the interface name a string literal in the registration, and pass")
@@ -469,7 +718,14 @@ def run(root):
     for path in sorted(pages):
         rel = os.path.relpath(path, root)
         with open(path, encoding="utf-8", errors="replace") as fh:
-            text = strip_comments(fh.read())
+            raw = fh.read()
+        try:
+            text = strip_js_comments(raw)
+        except ValueError as exc:
+            # [wide4-02 parser-death/4] fail closed: a page whose lexer state
+            # cannot be settled is exactly where a hidden call site lives.
+            print(f"❌ ROT: cannot tokenise {rel}: {exc}")
+            return 1
         sites, unparsed_sites = js_call_sites(text, all_names)
         if unparsed_sites:
             # [wide3-06 C2-parser] an unbalanced call site used to be skipped,
@@ -491,8 +747,8 @@ def run(root):
                 if state == "MISMATCH":
                     violations.append((rel, iface, method, argc, host_file, arities))
         for host_file, per_name in sorted(hosts.items()):
-            for method, arity in per_name.get("__dead__", []):
-                violations.append((rel, ANNOTATION, method, arity, host_file, "DEAD"))
+            for method, arity, why in per_name.get("__dead__", []):
+                violations.append((rel, ANNOTATION, method, arity, host_file, why))
     if calls_found == 0:
         print("❌ ROT: no JS-bridge call site found in assets (contract unchecked)")
         return 1
@@ -501,10 +757,9 @@ def run(root):
         print("")
         print(f"❌ KATEX BRIDGE ARITY: {len(violations)} mismatch(es)")
         for rel, iface, method, argc, host_file, arities in violations:
-            if arities == "DEAD":
-                print(f"   {host_file}: @JavascriptInterface {method}/{argc} never runs "
-                      f"its body (statically unreachable) — the bridge call succeeds "
-                      f"and renders nothing")
+            if isinstance(arities, str):
+                print(f"   {host_file}: @JavascriptInterface {method} {arities} — "
+                      f"the bridge call succeeds and renders nothing")
                 continue
             print(f"   {rel} calls {iface}.{method} with {argc} args, but {host_file} declares {sorted(arities) if arities else 'nothing'}")
         print("   Chromium resolves @JavascriptInterface by name AND arity: the call dies")
@@ -552,6 +807,24 @@ function renderMath(latex, token) {
   }
 }
 </script></html>
+"""
+
+
+_SELFTEST_POOL = """package com.rikkaminis.app.ui.chat
+class Pool {
+    fun mount(wv: WebView) {
+        wv.addJavascriptInterface(JsBridge { w, h, err, callbackToken ->
+            pending.complete(Triple(w, h, err))
+        }, "AndroidBridge")
+    }
+
+    private class JsBridge(private val onResult: (Int, Int, String, Long) -> Unit) {
+        @JavascriptInterface
+        fun onRendered(width: Int, height: Int, error: String, token: Long) {
+            onResult(width, height, error, token)
+        }
+    }
+}
 """
 
 
@@ -635,6 +908,56 @@ def selftest():
     expect("C2-scope an unresolvable registration fails loudly",
            _SELFTEST_SHEET.replace('}, "AndroidBridge")', "}, name)"),
            _SELFTEST_PAGE, 1, "ROT")
+
+    # ── [wide4-02] arms: the four shapes the external witnesses got through ──
+    expect("w4-base class-constructed host with a live callback",
+           _SELFTEST_POOL, _SELFTEST_PAGE, 0)
+
+    # family-hole/1: the same unconditional early exit, spelled `!false`.
+    dead2 = _SELFTEST_SHEET.replace(
+        """            fun onRendered(width: Int, height: Int, error: String, token: Long) {
+                post { capture(width, height, token) }""",
+        """            fun onRendered(width: Int, height: Int, error: String, token: Long) {
+                if (!false) return
+                post { capture(width, height, token) }""",
+    )
+    expect("w4-dead-guard `if (!false) return` is folded, not spell-matched",
+           dead2, _SELFTEST_PAGE, 1, "statically unreachable")
+
+    # family-hole/2: behaviour moved into an EMPTY constructor lambda.
+    empty_cb = _SELFTEST_POOL.replace(
+        """JsBridge { w, h, err, callbackToken ->
+            pending.complete(Triple(w, h, err))
+        }""", "JsBridge { _, _, _, _ -> }")
+    expect("w4-callback an empty registration lambda is a violation",
+           empty_cb, _SELFTEST_PAGE, 1, "empty lambda")
+
+    # family-hole/3: a same-named class parked in an unrelated holder must not
+    # satisfy the contract on behalf of the class actually instantiated.
+    shadow = _SELFTEST_POOL.replace(
+        """    private class JsBridge(private val onResult: (Int, Int, String, Long) -> Unit) {
+        @JavascriptInterface
+        fun onRendered(width: Int, height: Int, error: String, token: Long) {
+            onResult(width, height, error, token)
+        }
+    }""",
+        """    private class UnusedHolder { class JsBridge {
+        @JavascriptInterface fun onRendered(a: Int, b: Int, c: String, d: Long) { val x = a + b }
+    } }
+    private class JsBridge(private val onResult: (Int, Int, String, Long) -> Unit) {
+        @JavascriptInterface
+        fun onRendered(width: Int, height: Int, error: String) { }
+    }""")
+    expect("w4-shadow a nested same-named class cannot stand in for the real one",
+           shadow, _SELFTEST_PAGE, 1, "onRendered with 4 args")
+
+    # parser-death/4: a JS REGEX literal `/\//` must not read as `//` and eat
+    # the rest of the line — the page's catch block keeps the rot guard happy.
+    regex_page = _SELFTEST_PAGE.replace(
+        """    AndroidBridge.onRendered(Math.ceil(rect.width), Math.ceil(rect.height), '', token);""",
+        """    var _re = /\\//; AndroidBridge.onRendered(Math.ceil(rect.width), Math.ceil(rect.height));""")
+    expect("w4-regex a JS regex literal cannot hide the call site",
+           _SELFTEST_SHEET, regex_page, 1, "2 args")
 
     if failures:
         print(f"KATEX_BRIDGE_ARITY_SELFTEST=FAIL ({failures} arms)")
