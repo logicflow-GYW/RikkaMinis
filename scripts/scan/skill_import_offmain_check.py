@@ -81,6 +81,9 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import analyse as _analyse  # noqa: E402 (shared lexer)
+
 SM_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/settings/SkillsManagementScreen.kt"
 CALL = "skillRepository.importFromContent(pasteContent)"
 OPENER = "withContext(Dispatchers.IO)"
@@ -108,104 +111,147 @@ INITIAL_LITERAL = "val initialContent = remember"
 SELFTEST_MARK = "SKILL_IMPORT_OFFMAIN_SELFTEST=PASS"
 
 
+LEX_FAILURES = []
+
+
 def strip_comments(text):
-    """Remove // and /* */ comments; strings are kept (length-preserving)."""
-    out = []
-    i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        if c == '"':
-            if text.startswith('"""', i):
-                j = text.find('"""', i + 3)
-                j = n if j < 0 else j + 3
-            else:
-                j = i + 1
-                while j < n:
-                    if text[j] == "\\":
-                        j += 2
-                        continue
-                    if text[j] in ('"', "\n"):
-                        j += 1
-                        break
-                    j += 1
-            out.append(text[i:j])
-            i = j
-        elif text.startswith("//", i):
-            j = text.find("\n", i)
-            i = n if j < 0 else j
-        elif text.startswith("/*", i):
-            j = text.find("*/", i)
-            i = n if j < 0 else j + 2
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
+    """Comments blanked to spaces (length preserved), strings untouched.
+
+    [wide4-12 arm5, axis=parser-death] This used to be a hand-written scanner
+    with a `"` state and NO `'` state: `val _o = '"'; val _c = "/*"` made the
+    next `/*` open a "block comment" that swallowed the real
+    `MCPOAuthStore.signOut(…)` line between them. The shared `_kotlin_lexer`
+    is the single conforming state machine (char literals, nested block
+    comments, raw strings, `${…}` templates) and a lexing failure is
+    FAIL-CLOSED: the gate reports it instead of judging a truncated surface.
+    """
+    ok, reason, views = _analyse(text)
+    if not ok or views is None:
+        LEX_FAILURES.append(
+            "a scanned file could not be lexed (%s) — the gate refuses to judge "
+            "a truncated surface (fail-closed)" % reason)
+        return ""
+    return views["comments"]
 
 
 def mask_strings(text):
-    """Replace string-literal and char-literal CONTENTS with 'x'
-    (length-preserving) so brace matching survives `${...}` templates."""
-    out = []
-    i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        if c == '"':
-            if text.startswith('"""', i):
-                j = text.find('"""', i + 3)
-                j = n if j < 0 else j + 3
-            else:
-                j = i + 1
-                while j < n:
-                    if text[j] == "\\":
-                        j += 2
-                        continue
-                    if text[j] in ('"', "\n"):
-                        j += 1
-                        break
-                    j += 1
-            out.append('x' * (j - i))
-            i = j
-        elif c == "'":
-            j = i + 1
-            while j < n:
-                if text[j] == "\\":
-                    j += 2
-                    continue
-                if text[j] in ("'", "\n"):
-                    j += 1
-                    break
-                j += 1
-            out.append('x' * (j - i))
-            i = j
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
+    """String/char literal CONTENTS blanked to spaces (length preserved), so
+    brace matching survives `${...}` templates."""
+    ok, reason, views = _analyse(text)
+    if not ok or views is None:
+        LEX_FAILURES.append(
+            "a scanned file could not be lexed (%s) — the gate refuses to judge "
+            "a truncated surface (fail-closed)" % reason)
+        return ""
+    return views["strings"]
 
 
 DISPATCH_API_RE = re.compile(r"\b(withContext|launch|async)$")
+# `CoroutineScope(Dispatchers.Main).launch { … }` — the scope's context decides,
+# and the spelling puts the dispatcher in the receiver, not in `launch(...)`.
+SCOPE_CHAIN_RE = re.compile(
+    r"\bCoroutineScope\s*\(([^()]*)\)\s*\.\s*(withContext|launch|async)\s*$")
+DISPATCH_ARG_NAMES = ("context", "dispatcher", "newContext")
+LAMBDA_ARG_RE = re.compile(r"[A-Za-z_]\w*\s*=\s*\{")
 
-def _trailing_dispatch_head(masked, i):
-    """The dispatcher expression when the text before the `{` at `i` ends with
-    `withContext(<expr>)` / `launch(<expr>)` / `async(<expr>)`, else None."""
-    head = masked[max(0, i - 240):i].rstrip()
-    if not head.endswith(")"):
-        return None
+
+def _matching_open(text, close_idx):
+    """Index of the `(` matching the `)` at close_idx (-1 when unbalanced)."""
     depth = 0
-    open_idx = -1
-    for k in range(len(head) - 1, -1, -1):
-        if head[k] == ")":
+    for k in range(close_idx, -1, -1):
+        if text[k] == ")":
             depth += 1
-        elif head[k] == "(":
+        elif text[k] == "(":
             depth -= 1
             if depth == 0:
-                open_idx = k
-                break
-    if open_idx < 0:
+                return k
+    return -1
+
+
+def _enclosing_open_paren(masked, idx):
+    """Index of the innermost `(` left open at position idx (-1 when none)."""
+    depth = 0
+    for k in range(idx - 1, -1, -1):
+        if masked[k] == ")":
+            depth += 1
+        elif masked[k] == "(":
+            if depth == 0:
+                return k
+            depth -= 1
+    return -1
+
+
+def _dispatch_callee(head):
+    """The dispatcher API name when `head` ends with one (else None)."""
+    m = DISPATCH_API_RE.search(head.rstrip())
+    return m.group(1) if m else None
+
+
+def _first_dispatch_arg(arglist):
+    """The dispatcher expression inside a dispatcher call's argument list.
+
+    Handles the three spellings that carry a context:
+      `withContext(Dispatchers.IO)`            → first positional argument
+      `withContext(context = Dispatchers.Main)` → the named context argument
+      `withContext(context = X, block = { … })` → same, lambda argument skipped
+    Returns "" when the call names a dispatcher API but shows no context.
+    """
+    for part in _split_top(arglist, ","):
+        p = part.strip()
+        if not p:
+            continue
+        m = re.match(r"(%s)\s*=(?!=)\s*(.*)\Z" % "|".join(DISPATCH_ARG_NAMES),
+                     p, re.S)
+        if m:
+            return m.group(2).strip()
+        if p.startswith("{") or LAMBDA_ARG_RE.match(p):
+            continue                    # a lambda argument switches nothing
+        return p                        # first positional argument
+    return ""
+
+
+def _dispatch_block_context(masked, i):
+    """Dispatcher expression of the lambda block whose `{` is at `i`.
+
+    None  → this block switches nothing (plain `if` / `let` / bare `launch {`,
+            which INHERITS the enclosing context — Kotlin semantics).
+    ''    → it IS a dispatcher-establishing call with an unknown context
+            (fail-closed: unknown is not IO).
+    expr  → that context decides the thread of everything inside.
+
+    [wide4-12 arm1, axis=family-hole] The old `_trailing_dispatch_head` only
+    accepted a `{` that followed a `)` directly, so the NAMED-argument lambda
+    `withContext(context = Dispatchers.Main, block = { … })` was not even seen
+    as a dispatcher block and the call inside inherited the OUTER IO context.
+    """
+    head = masked[max(0, i - 400):i].rstrip()
+    # (a) trailing lambda: `withContext(X) {`, `scope.launch(X) {`
+    if head.endswith(")"):
+        open_idx = _matching_open(head, len(head) - 1)
+        if open_idx >= 0 and _dispatch_callee(head[:open_idx]) is not None:
+            return _first_dispatch_arg(head[open_idx + 1:len(head) - 1])
+    # (b) `CoroutineScope(Dispatchers.Main).launch {` — dispatcher in the receiver
+    m = SCOPE_CHAIN_RE.search(head)
+    if m:
+        return m.group(1).strip()
+    # (c) bare `withContext {` / `scope.launch {` — inherits the parent context
+    if _dispatch_callee(head) is not None:
         return None
-    if not DISPATCH_API_RE.search(head[:open_idx].rstrip()):
-        return None
-    return head[open_idx + 1:len(head) - 1].strip()
+    # (d) named-argument lambda inside a dispatcher call:
+    #     `withContext(context = Dispatchers.Main, block = {`
+    paren = _enclosing_open_paren(masked, i)
+    if paren >= 0 and LAMBDA_ARG_RE.match(masked[paren + 1:].lstrip()):
+        callee_head = masked[:paren].rstrip()
+        if _dispatch_callee(callee_head) is not None:
+            close = _match_paren(masked, paren)
+            args = masked[paren + 1:close if close > 0 else len(masked)]
+            return _first_dispatch_arg(args)
+    elif paren >= 0 and _dispatch_callee(masked[:paren].rstrip()) is not None:
+        close = _match_paren(masked, paren)
+        args = masked[paren + 1:close if close > 0 else len(masked)]
+        return _first_dispatch_arg(args)
+    return None
+
 
 def _innermost_dispatch(masked, idx):
     """Dispatcher expression of the INNERMOST enclosing dispatcher block.
@@ -220,7 +266,7 @@ def _innermost_dispatch(masked, idx):
     stack = []
     for i, ch in enumerate(masked[:idx]):
         if ch == "{":
-            stack.append(_trailing_dispatch_head(masked, i))
+            stack.append(_dispatch_block_context(masked, i))
         elif ch == "}":
             if stack:
                 stack.pop()
@@ -229,17 +275,45 @@ def _innermost_dispatch(masked, idx):
             return entry
     return None
 
+
+IO_EXPR_RE = re.compile(r"Dispatchers\.IO(?:\.[A-Za-z_]\w*\s*\([^()]*\))?$")
+
+
+def _alias_is_io(name, masked):
+    """True when the local binding `name` provably holds `Dispatchers.IO`.
+
+    [wide4-12 arm2, axis=dataflow] The old check was an existence regex that
+    accepted `var` and any RHS starting with `Dispatchers.IO`, so
+      `var ioCtx = Dispatchers.IO; ioCtx = Dispatchers.Main`
+    and `val ioCtx = Dispatchers.IO + Dispatchers.Main` both read as IO (the
+    second one really runs on Main: `+` keeps the RIGHT pair of the same Key).
+    Now: immutable `val` only, and the LAST write must be exactly IO.
+    """
+    if not masked:
+        return False
+    if re.search(r"\bvar\s+%s\b" % re.escape(name), masked):
+        return False                    # a mutable binding is not a constant
+    writes = []
+    for m in re.finditer(r"\bval\s+%s\s*(?::[^=\n]+)?=\s*" % re.escape(name), masked):
+        writes.append((m.start(), _line_end_expr(masked, m.end()).strip()))
+    for m in re.finditer(r"(?<![\w.])%s\s*=(?!=)" % re.escape(name), masked):
+        writes.append((m.start(), _line_end_expr(masked, m.end()).strip()))
+    if not writes:
+        return False
+    writes.sort()
+    _pos, rhs = writes[-1]
+    return bool(IO_EXPR_RE.match(rhs.rstrip().rstrip(";,")))
+
+
 def _is_io_dispatcher(expr, masked=""):
     """True when a dispatcher expression is an IO context (alias resolved)."""
     if not expr:
         return False
     e = expr.strip()
-    if e == "Dispatchers.IO" or e.startswith("Dispatchers.IO."):
+    if IO_EXPR_RE.match(e):
         return True
     if re.fullmatch(r"[A-Za-z_]\w*", e):
-        # one-hop local binding: `val ctx = Dispatchers.IO`
-        return re.search(r"\b(?:val|var)\s+%s\s*(?::[^=\n]+)?=\s*"
-                         r"Dispatchers\.IO\b" % re.escape(e), masked) is not None
+        return _alias_is_io(e, masked)
     return False
 
 def inside_io_wrap(text_nc, text_masked):
@@ -322,6 +396,34 @@ def _lit_value(part):
         return None
     return (not v) if neg else v
 
+def _const_truth(cond):
+    """True/False when the condition is decided by literals alone, else None.
+
+    [wide4-12 arm4, axis=family-hole] `_literal_decides` only knew bare
+    `true` / `false`, so `if ((1 == 1) || sid == null)` re-introduced the
+    same dead guard through a comparison operator. `x == x` counts too: the
+    spelling tests nothing.
+    """
+    c = _unparen(cond)
+    v = _lit_value(c)
+    if v is not None:
+        return v
+    if c.startswith("!") and not c.startswith("!="):
+        inner = _const_truth(c[1:])
+        return None if inner is None else (not inner)
+    for op in ("==", "!="):
+        parts = _split_top(c, op)
+        if len(parts) == 2:
+            a, b = _unparen(parts[0]), _unparen(parts[1])
+            if a and a == b:
+                return op == "=="
+            if re.fullmatch(r"-?\d+", a) and re.fullmatch(r"-?\d+", b):
+                same = int(a) == int(b)
+                return same if op == "==" else (not same)
+            return None
+    return None
+
+
 def _literal_decides(cond):
     """True when the condition's outcome is fixed by a literal.
 
@@ -331,9 +433,13 @@ def _literal_decides(cond):
     c = _unparen(cond)
     if _lit_value(c) is not None:
         return True
+    if _const_truth(c) is not None:
+        return True
     for op, dead in (("||", True), ("&&", False)):
         for part in _split_top(c, op):
             if _lit_value(part) is dead:
+                return True
+            if _const_truth(part) is dead:
                 return True
     return False
 
@@ -412,9 +518,31 @@ def _id_expressions(body):
 
 def _tests_null_of(cond, names):
     """True when `cond` compares one of `names` against null."""
-    if not re.search(r"[=!]=\s*null\b", cond):
-        return False
-    return any(re.search(r"(?<![\w.])%s\b" % re.escape(n), cond) for n in names)
+    return _null_test_kind(cond, names) is not None
+
+
+def _null_test_kind(cond, names):
+    """'eq' for `<name> == null`, 'ne' for `<name> != null`, None otherwise.
+
+    [wide4-12 arm4, axis=family-hole] The old regex `[=!]=\\s*null` matched
+    BOTH directions, so `if (sid != null) { reset; return }` — which wipes the
+    OAuth draft for every server that HAS an id, i.e. on every real edit — read
+    as a proper null guard. Direction is part of the meaning: a reset branch on
+    the then-side may only fire when the id is ABSENT.
+    """
+    c = _unparen(cond)
+    hit = any(re.search(r"(?<![\w.])%s\b" % re.escape(n), c) for n in names)
+    if not hit:
+        return None
+    eq = bool(re.search(r"(?<![=!<>])==\s*null\b", c)) or bool(
+        re.search(r"\bnull\s*==(?!=)", c))
+    ne = bool(re.search(r"!=\s*null\b", c)) or bool(
+        re.search(r"\bnull\s*!=", c))
+    if eq and not ne:
+        return "eq"
+    if ne and not eq:
+        return "ne"
+    return None
 
 
 REPO_CALL_RE = re.compile(r"skillRepository\.([A-Za-z_]\w*)\s*\(")
@@ -442,15 +570,19 @@ def check_all_repo_calls(files):
     nc = strip_comments(text)
     masked = mask_strings(nc)
     repo_text = files.get(SKILL_REPO_REL)
-    hits = list(REPO_CALL_RE.finditer(nc))
+    hits = [(m.start(), m.group(1)) for m in REPO_CALL_RE.finditer(nc)]
+    # [wide4-12 arm3] the same receiver through a scope block: the benchmark is
+    # "which object is called", not "which spelling names it".
+    hits.extend(_scope_receiver_hits(
+        nc, masked, "skillRepository.", _alias_receivers(nc, "skillRepository.")))
+    hits.sort()
     if not hits:
         return ["%s: no `skillRepository.<method>(` call site found — the arm6 "
                 "anchor lost its subject (fail-closed)" % SM_REL]
     failures = []
-    for m in hits:
-        method = m.group(1)
-        line = nc[:m.start()].count("\n") + 1
-        if _io_wrapped_at(nc, masked, m.start(), IO_OPENERS):
+    for pos, method in hits:
+        line = nc[:pos].count("\n") + 1
+        if _io_wrapped_at(nc, masked, pos, IO_OPENERS):
             continue
         alt = False
         if repo_text is not None:
@@ -845,6 +977,64 @@ def _alias_receivers(text_nc, prefix):
                      r"(?:[A-Za-z_][\w.]*\.)?%s\b" % re.escape(obj))
     return [m.group(1) for m in pat.finditer(text_nc)]
 
+
+# Scope functions that hand the receiver to a lambda under another name.
+SCOPE_FN_RE = r"(let|run|also|apply)"
+
+
+def _scope_receiver_hits(text_nc, masked, prefix, aliases):
+    """(pos, method) for calls made on a scope block's IMPLICIT receiver.
+
+    [wide4-12 arm3, axis=family-hole] `MCPOAuthStore.let { it.signOut(ctx, id) }`
+    — and `with(MCPOAuthStore) { signOut(…) }` — reach the same object through
+    the lambda receiver. The old criterion only understood
+    `val store = MCPOAuthStore`, so the call was invisible: `.let {` is not
+    `.<method>(` and `it` is not an alias binding.
+
+      .let / .also   → receiver is `it` (or the explicit lambda parameter)
+      .run / .apply  → receiver is `this` (or the explicit parameter)
+      with(obj) { }  → receiver is `this` (or the explicit parameter)
+    """
+    obj = prefix.rstrip(".").split(".")[-1]
+    receivers = [obj] + list(aliases)
+    out = []
+    for recv in dict.fromkeys(receivers):
+        # `com.….oauth.MCPOAuthStore.let { … }` is the same receiver as the
+        # short spelling; a qualified prefix must not hide it.
+        qualified = r"(?:[A-Za-z_][\w.]*\.)?" + re.escape(recv)
+        patterns = [
+            (r"(?<![\w.])%s\s*\.\s*let\s*\{" % qualified, False),
+            (r"(?<![\w.])%s\s*\.\s*also\s*\{" % qualified, False),
+            (r"(?<![\w.])%s\s*\.\s*run\s*\{" % qualified, True),
+            (r"(?<![\w.])%s\s*\.\s*apply\s*\{" % qualified, True),
+            (r"(?<![\w.])with\s*\(\s*%s\s*\)\s*\{" % qualified, True),
+        ]
+        for pat, implicit_this in patterns:
+            for m in re.finditer(pat, masked):
+                op = masked.find("{", m.end() - 1)
+                if op < 0:
+                    continue
+                end = _match_brace(masked, op)
+                body = text_nc[op + 1:end - 1]
+                names = {"it"} if not implicit_this else {"this"}
+                pm = re.match(
+                    r"\s*(?:\(\s*([A-Za-z_]\w*)[^)]*\)|([A-Za-z_]\w*))\s*->", body)
+                if pm:
+                    names = {pm.group(1) or pm.group(2)}
+                alt = "|".join(re.escape(n) for n in sorted(names))
+                if implicit_this:
+                    # bare `method(` = a call on `this` inside the block
+                    for mm in re.finditer(
+                            r"(?:\b(?:%s)\s*\.\s*)?\b([A-Za-z_]\w*)\s*\(" % alt,
+                            body):
+                        out.append((op + 1 + mm.start(0), mm.group(1)))
+                else:
+                    for mm in re.finditer(
+                            r"\b(?:%s)\s*\.\s*([A-Za-z_]\w*)\s*\(" % alt, body):
+                        out.append((op + 1 + mm.start(0), mm.group(1)))
+    return out
+
+
 def check_offmain_calls(files, sites, label):
     """Shared criterion for arms 7 and 9: a call passes when it sits inside an
     IO opener, or when the callee wraps its own work (repository-side fix).
@@ -861,16 +1051,21 @@ def check_offmain_calls(files, sites, label):
             continue
         nc = strip_comments(text)
         masked = mask_strings(nc)
-        hits = list(re.finditer(re.escape(prefix) + r"([A-Za-z_]\w*)\s*\(", nc))
+        hits = [(m.start(), m.group(1))
+                for m in re.finditer(re.escape(prefix) + r"([A-Za-z_]\w*)\s*\(", nc)]
         # [wide3-08 arm7, axis=spelling] `val store = com.….MCPOAuthStore` then
         # `store.setClientSecret(…)` is the same call through another name: the
         # criterion binds the RECEIVER, so the alias set is derived from the
         # bindings in this file instead of spelling the object once.
-        for alias in _alias_receivers(nc, prefix):
-            for m in re.finditer(r"(?<![\w.])%s\s*\.\s*([A-Za-z_]\w*)\s*\("
-                                 % re.escape(alias), nc):
-                hits.append(m)
-        hits.sort(key=lambda m: m.start())
+        aliases = _alias_receivers(nc, prefix)
+        for alias in aliases:
+            hits.extend((m.start(), m.group(1)) for m in re.finditer(
+                r"(?<![\w.])%s\s*\.\s*([A-Za-z_]\w*)\s*\(" % re.escape(alias), nc))
+        # [wide4-12 arm3] …and a scope block hands the same receiver to `it`
+        # (`.let` / `.also`) or to `this` (`.run` / `.apply` / `with(obj)`) —
+        # the call is spelled on the receiver, not on the object.
+        hits.extend(_scope_receiver_hits(nc, masked, prefix, aliases))
+        hits.sort()
         if not hits:
             failures.append(
                 "%s: no `%s<method>(` call site found — the %s anchor lost its "
@@ -882,17 +1077,16 @@ def check_offmain_calls(files, sites, label):
                 "missing file %s (cannot judge the I/O-ness of the `%s` calls in "
                 "%s)" % (decl_rel, prefix, screen_rel))
             continue
-        for m in hits:
-            method = m.group(1)
+        for pos, method in hits:
             state, why = method_io_state(decl, method)
             if state == "pure":
                 continue
-            if _io_wrapped_at(nc, masked, m.start(), IO_OPENERS):
+            if _io_wrapped_at(nc, masked, pos, IO_OPENERS):
                 continue
             alt, _ = repo_method_wraps_io(decl, method)
             if alt:
                 continue
-            line = nc[:m.start()].count("\n") + 1
+            line = nc[:pos].count("\n") + 1
             failures.append(
                 "%s: `%s%s(` at line %d runs on Main while its callee performs "
                 "disk I/O (%s) — wrap it in withContext(Dispatchers.IO), or move "
@@ -988,7 +1182,8 @@ def check_seed_effect_keys(files):
                         "editServer?.id`) — fail-closed" % (MCP_REL, subject)]
             for pos in resets:
                 guards = [c for c in _enclosing_if_conds(body, pos)
-                          if _tests_null_of(c, id_exprs) and not _literal_decides(c)]
+                          if _null_test_kind(c, id_exprs) == "eq"
+                          and not _literal_decides(c)]
                 if not guards:
                     return ["%s: the `%s` reset is not inside a live `<id> == null` "
                             "guard — the draft is wiped on every editServer change and "
@@ -1094,6 +1289,7 @@ def _read(root, rel):
 def run_checks_map(files):
     """All arms over a {rel_path: text} map (real tree or fixtures)."""
     failures = []
+    del LEX_FAILURES[:]
     sm = files.get(SM_REL)
     if sm is None:
         failures.append("missing file %s" % SM_REL)
@@ -1106,6 +1302,8 @@ def run_checks_map(files):
     failures.extend(check_b04_offmain(files))
     failures.extend(check_b03_offmain(files))
     failures.extend(check_seed_effect_keys(files))
+    for msg in dict.fromkeys(LEX_FAILURES):
+        failures.append(msg)
     return failures
 
 
@@ -1924,6 +2122,94 @@ W308_FIXTURES = [
 ]
 
 
+# ── [wide4-12] witness arms ──────────────────────────────────────────────
+# Five gates-blind shapes verified by the external audit; each becomes one
+# negative arm, plus clean twins that must stay legal.
+_OAUTH_IO_BLOCK = (
+    "        withContext(Dispatchers.IO) {\n"
+    "            MCPOAuthStore.setClientSecret(context, id, \"\")\n"
+    "        }\n"
+)
+_ARM8_INVERTED = _ARM8_DEAD.replace('if (true || sid == null) {',
+                                    'if (sid != null) {')
+_ARM8_CONST_CMP = _ARM8_DEAD.replace('if (true || sid == null) {',
+                                     'if ((1 == 1) || sid == null) {')
+
+W4_FIXTURES = [
+    # w4-arm1 family-hole: the lambda arrives as a NAMED argument, so the `{`
+    # is not preceded by `)` and the inner Main switch disappeared from the
+    # stack — the call inherited the outer IO.
+    ("w4-arm1 named-arg lambda still runs on Main",
+     lambda: _files(mcp=_mcp_text().replace(
+         _OAUTH_IO_BLOCK,
+         "        withContext(context = Dispatchers.Main, block = {\n"
+         "            MCPOAuthStore.setClientSecret(context, id, \"\")\n"
+         "        })\n")),
+     True, "runs on Main"),
+    # w4-arm2 dataflow: a `var` dispatcher reassigned to Main is not IO.
+    ("w4-arm2 reassigned var dispatcher is Main",
+     lambda: _files(mcp=_mcp_text().replace(
+         _OAUTH_IO_BLOCK,
+         "        var ioCtx: kotlin.coroutines.CoroutineContext = Dispatchers.IO\n"
+         "        ioCtx = Dispatchers.Main\n"
+         "        withContext(ioCtx) {\n"
+         "            MCPOAuthStore.setClientSecret(context, id, \"\")\n"
+         "        }\n")),
+     True, "runs on Main"),
+    # w4-arm2 precision: `+` keeps the RIGHT pair of the same Key (Main wins).
+    ("w4-arm2 context-plus-Main runs on Main",
+     lambda: _files(mcp=_mcp_text().replace(
+         _OAUTH_IO_BLOCK,
+         "        val ioCtx = Dispatchers.IO + Dispatchers.Main\n"
+         "        withContext(ioCtx) {\n"
+         "            MCPOAuthStore.setClientSecret(context, id, \"\")\n"
+         "        }\n")),
+     True, "runs on Main"),
+    # w4-arm2 precision twin: an immutable local binding is still legal.
+    ("w4-arm2 precision: val ioCtx = Dispatchers.IO stays legal",
+     lambda: _files(mcp=_mcp_text().replace(
+         _OAUTH_IO_BLOCK,
+         "        val ioCtx = Dispatchers.IO\n"
+         "        withContext(ioCtx) {\n"
+         "            MCPOAuthStore.setClientSecret(context, id, \"\")\n"
+         "        }\n")),
+     False, None),
+    # w4-arm3 family-hole: the receiver arrives through a scope function.
+    ("w4-arm3 scope receiver .let on Main",
+     lambda: _files(mcp=_mcp_text(extra=(
+         '    val s3 = MCPOAuthStore.let { it.clientSecret(context, id) }\n'))),
+     True, "runs on Main"),
+    # w4-arm3 precision twin: the same scope block inside an IO wrap is legal.
+    ("w4-arm3 precision: scope receiver inside IO stays legal",
+     lambda: _files(mcp=_mcp_text(extra=(
+         '    val s3 = withContext(Dispatchers.IO) {\n'
+         '        MCPOAuthStore.let { it.clientSecret(context, id) }\n'
+         '    }\n'))),
+     False, None),
+    # w4-arm4 family-hole: the null test's DIRECTION is the decision.
+    ("w4-arm4 inverted null guard wipes the draft",
+     lambda: _files(mcp=_w308_mcp(_ARM8_INVERTED)),
+     True, "reset is not inside a live"),
+    # w4-arm4 family-hole: `(1 == 1)` is a literal decision in disguise.
+    ("w4-arm4 constant-comparison guard is dead",
+     lambda: _files(mcp=_w308_mcp(_ARM8_CONST_CMP)),
+     True, "reset is not inside a live"),
+    # w4-arm5 parser-death: a char literal `'"'` used to desync the comment
+    # scanner, swallowing every line up to the planted `*/`.
+    ("w4-arm5 char-literal desync does not hide the call",
+     lambda: _files(mcp=_mcp_text(extra=(
+         '    val _o = \'"\'; val _c = "/*"\n'
+         '    val s3 = MCPOAuthStore.clientSecret(context, id)\n'
+         '    val _x = "*/" + \'"\'\n'))),
+     True, "runs on Main"),
+    # w4-arm6 parser fail-closed: an unlexable file is a violation, not a
+    # silently-empty surface that reports itself clean.
+    ("w4-arm6 unlexable file is a violation",
+     lambda: _files(mcp=_mcp_text() + "    /* unterminated\n"),
+     True, "could not be lexed"),
+]
+
+
 def selftest():
     ok = True
     f = run_checks_text(GOOD_SM)
@@ -1999,6 +2285,17 @@ def selftest():
         if good and expect_red and needle:
             good = any(needle in x for x in f)
         print("selftest wide3-08 %-45s: %s%s" % (
+            label, "RED" if red else "CLEAN",
+            "" if good else "  UNEXPECTED %s" % f[:2]))
+        ok &= good
+
+    for label, make, expect_red, needle in W4_FIXTURES:
+        f = run_checks_map(make())
+        red = len(f) > 0
+        good = (red == expect_red)
+        if good and expect_red and needle:
+            good = any(needle in x for x in f)
+        print("selftest wide4-12 %-45s: %s%s" % (
             label, "RED" if red else "CLEAN",
             "" if good else "  UNEXPECTED %s" % f[:2]))
         ok &= good
