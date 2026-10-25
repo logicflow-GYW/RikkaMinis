@@ -178,7 +178,28 @@ file: src/android/app/src/main/java/com/rikkaminis/app/ui/chat/MinisMarkdownText
 
 ## 5. CI
 
-见文末「CI 回填」。
+**run `40208261139` / job `121213772352` / attempt 1 / conclusion `success`**
+`head_sha = 55fbb9cd3caddd7a1d43d1ee6ebd1ea84517c0ba`（= 本地报告提交 HEAD，逐字符一致；源码树见下）
+
+逐条判读（日志 1,485,948 B / 17,850 行，`probe` 脚本机械核对，不靠肉眼）：
+
+| 判据 | 读数 |
+|---|---|
+| **带框线** `Summary: 112 passed, 0 failed` | **恰 1 条**（其余 7 条 `Summary: N passed` 是子套件：28/5/14/36/15/25/10） |
+| `ALL 344 CASES PASS` | **恰 1 条** ← 夹具套件 344/344 全绿（本批 L5 的权威读数） |
+| Kotlin 编译错误 `^ e: ` | **0** |
+| 门头 `[N/112]` | 112 条，**编号互异**（112 个唯一） |
+| 含 `FAILED` 的 6 行 | **全是 PASSED 用例名的子串**，逐条确认：`slot denied produces FAILED without calling provider` / `reason PERSISTENCE_FAILED maps to persistence_failed` / `phase FAILED maps to Failed` / `terminal FAILED maps to Failed` / `reason EXECUTION_FAILED maps to all_fallbacks_exhausted` / `the fixed tail still reaches a legal FAILED terminal` —— 无一条是真失败 |
+| 26 步结论 | **唯一 `skipped` = `Publish to Releases`**（main 门控，符合预期），其余 25 步 success |
+| 本门在 CI 内的读数 | `chat_ui_interaction_check: … CHAT-UI-INTERACTION GATE OK`（真树 exit 0）；`✅ chat UI gate selftest has teeth (CHAT_UI_INTERACTION_SELFTEST=PASS)`；`✅ chat UI gate on real repo exits 0` |
+
+> **L5 本地读数说明**：分支 CI 的 `ALL 344 CASES PASS` 是夹具套件的权威证据。本机施工窗口内
+> `test_scan.py` 三次被杀（并发窗口 ENOSYS / 内存压力：同机另有 t01/t04/t05/t10/t11 五个会话在跑各自
+> 的全量门，load average 峰值 17.8），本地跑到 79 个用例（0 失败）后让位给 CI —— 不是门红，是沙箱症状
+> （registry S28）。同理 `scan.sh` 两次死在 `[16/112]`，故 L4 用**逐门一台**的方式取证（111 个门文件全绿）。
+
+**源码树等价性**（报告提交在 CI 绿之后）：`git diff --name-only 55fbb9cd3..HEAD -- . ':(exclude)fix-reports'`
+→ **空**（本轮只有 `fix-reports/FIX-BATCH5-t06.md` 一节）。
 
 ## 6. 残留（本支不修，逐条带三件）
 
@@ -261,6 +282,8 @@ sh /var/minis/shared/tools/gate_run.sh --exec --repo "$PWD" -- 'python3 scripts/
 
 ---
 
-## CI 回填
+## 附：施工过程中踩到的两个沙箱症状（不属门）
 
-（施工完成、推送后回填：run id / head_sha / attempt / 读数逐条核对）
+1. `scan.sh` 在并发窗口内两次死在 `[16/112]`（`Function not implemented`，registry S28）→ 改逐门跑。
+2. `test_scan.py` 三次被杀（并发窗口 + 同机 5 个会话并行跑全量，load 峰值 17.8；本地到 79 用例 0 失败）
+   → 夹具套件由 CI 提供权威读数（`ALL 344 CASES PASS`）。
