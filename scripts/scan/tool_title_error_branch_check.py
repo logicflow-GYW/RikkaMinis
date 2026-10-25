@@ -71,7 +71,7 @@ def strip_line_comments(src: str) -> str:
                 continue
             if c == '"':
                 in_str = not in_str
-            elif c == "/" and not in_str and i + 1 < len(line) and line[i + 1] == "//":
+            elif c == "/" and not in_str and i + 1 < len(line) and line[i + 1] == "/":
                 cut = i
                 break
             i += 1
@@ -114,8 +114,157 @@ def check_file(source: str, fname: str) -> list:
         errs.append("hardcoded toolTitle = NAME still present in an error branch")
     if 'toolTitle = ""' in src:
         errs.append('empty toolTitle still present in an error branch')
-
+    # [wide3-07 C-TITLE] ...and the same rule on the DECLARATION, whatever
+    # spelling wraps the constant in. The external witness commented the
+    # resolver out and wrote `val toolTitle = (NAME)`: the parenthesized form
+    # walks past the `toolTitle = NAME` substring blacklist, and with the
+    # comment stripper blind to `//` the resolver call itself stayed visible.
+    # Scoped to the declaration on purpose — later `toolTitle =` assignments in
+    # this file carry legitimately different sources (`result.toolTitle`,
+    # `MEMORY_DISABLED_TOOL_TITLE`, a local `title`), and judging those would
+    # flag the corrected code.
+    for m in re.finditer(r"\bval\s+toolTitle\s*=\s*([^\n]+)", src):
+        core = m.group(1).strip()
+        while core.startswith("(") and core.endswith(")"):
+            core = core[1:-1].strip()
+        if re.fullmatch(r'"[^"]*"', core) or re.fullmatch(r"[A-Z][A-Z0-9_]*", core):
+            errs.append(
+                "`val toolTitle` is initialized to the constant `%s` instead of the "
+                "resolved title — the model's `tool_title` argument is ignored and the "
+                "UI card / offload summary falls back to a bare tool name" % core)
     return errs
+
+
+# ══════════════════════════════════════════════════════════════════════
+# decision-point primitives ([wide3-07] hardening)
+#
+# A guard's SPELLING is not its EFFECT. Both external witnesses of this wave
+# kept the call and removed the decision:
+#   C-EDIT-ENC  `if (false && isUnpairedSurrogateFailure(content)) { return … }`
+#               — the guard call, the message constant and the return all stay
+#               in the text, and the write proceeds unguarded.
+#   C-ARTIFACT  `if (false) { … minis_url … }` inside the `!= null` block —
+#               the append stays inside the guard it is supposed to sit in.
+# The primitives below let a criterion ask "can this branch actually decide?"
+# instead of "does this token appear?".
+# ══════════════════════════════════════════════════════════════════════
+
+def _match_paren(text, open_idx):
+    depth = 0
+    for i in range(open_idx, len(text)):
+        c = text[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return None
+
+
+def _split_top(expr, op):
+    parts, depth, last, i = [], 0, 0, 0
+    while i < len(expr):
+        c = expr[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and expr.startswith(op, i):
+            parts.append(expr[last:i])
+            last = i + len(op)
+            i = last
+            continue
+        i += 1
+    parts.append(expr[last:])
+    return parts
+
+
+def cond_truth(expr):
+    """True/False when a LITERAL operand decides the condition, else None."""
+    s = expr.strip()
+    while s.startswith("(") and s.endswith(")") and _match_paren(s, 0) == len(s) - 1:
+        s = s[1:-1].strip()
+    if s == "true":
+        return True
+    if s == "false":
+        return False
+    if s.startswith("!"):
+        inner = cond_truth(s[1:])
+        return None if inner is None else (not inner)
+    ors = _split_top(s, "||")
+    if len(ors) > 1:
+        vals = [cond_truth(x) for x in ors]
+        if any(v is True for v in vals):
+            return True
+        if vals and all(v is False for v in vals):
+            return False
+        return None
+    ands = _split_top(s, "&&")
+    if len(ands) > 1:
+        vals = [cond_truth(x) for x in ands]
+        if any(v is False for v in vals):
+            return False
+        if vals and all(v is True for v in vals):
+            return True
+        return None
+    return None
+
+
+def dead_guard_spans(text):
+    """[(start, end)] of bodies whose controlling condition is literal-FALSE."""
+    spans = []
+    for m in re.finditer(r"\b(?:if|while)\s*\(", text):
+        op = m.end() - 1
+        cl = _match_paren(text, op)
+        if cl is None or cond_truth(text[op + 1:cl]) is not False:
+            continue
+        k = cl + 1
+        while k < len(text) and text[k] in " \t":
+            k += 1
+        if k < len(text) and text[k] == "{":
+            e = _brace_end(text, k)
+            if e is not None:
+                spans.append((k, e))
+        else:
+            eol = text.find("\n", k)
+            spans.append((k, eol if eol >= 0 else len(text)))
+    return spans
+
+
+def inside_spans(spans, pos):
+    return any(a <= pos <= b for a, b in spans)
+
+
+def guard_is_live(body, call_pos):
+    """True when the guard call at `call_pos` sits in an `if` condition that can
+    reject: not literal-decided, and the branch terminates (`return`/`throw`).
+
+    Picks the INNERMOST enclosing `if` — an outer `if (x != null) { if (false &&
+    guard(x)) … }` must be judged on the inner condition, not the outer one."""
+    best = None
+    for m in re.finditer(r"\bif\s*\(", body):
+        op = m.end() - 1
+        cl = _match_paren(body, op)
+        if cl is None or not (op <= call_pos <= cl):
+            continue
+        if best is None or m.start() > best[0]:
+            best = (m.start(), op, cl)
+    if best is None:
+        return False
+    _s, op, cl = best
+    if cond_truth(body[op + 1:cl]) is False:
+        return False
+    k = cl + 1
+    while k < len(body) and body[k] in " \t":
+        k += 1
+    if k < len(body) and body[k] == "{":
+        e = _brace_end(body, k)
+        branch = body[k:e + 1] if e is not None else ""
+    else:
+        eol = body.find("\n", k)
+        branch = body[k:eol if eol >= 0 else len(body)]
+    return re.search(r"\b(return|throw)\b", branch) is not None
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -335,6 +484,7 @@ def check_write_guard_source(src: str, fname: str, guard_names) -> list:
         total += len(writes)
         for target, content, idx in writes:
             guard_ok = False
+            guard_dead = False
             for g in sorted(guard_names):
                 if g == fname_fun:
                     continue  # a function is not its own guard
@@ -342,16 +492,25 @@ def check_write_guard_source(src: str, fname: str, guard_names) -> list:
                     if m.start() > idx:
                         break
                     if content and content in m.group(1):
-                        guard_ok = True
-                        break
+                        if guard_is_live(body, m.start()):
+                            guard_ok = True
+                            break
+                        guard_dead = True
                 if guard_ok:
                     break
             if not guard_ok:
-                errs.append(
-                    f"{fname}: [C-EDIT-ENC] the write of `{content}` is not preceded "
-                    "by a UTF-8 validity guard (CodingErrorAction.REPORT) applied to "
-                    "that same content — unpaired surrogates are silently "
-                    "substituted with '?' by the encoder and the file lands corrupted")
+                if guard_dead:
+                    errs.append(
+                        f"{fname}: [C-EDIT-ENC] the guard applied to `{content}` cannot "
+                        "reject: its `if` condition is literal-decided (`false && …`) or its "
+                        "branch does not terminate (`return`/`throw`) — the write proceeds "
+                        "with unpaired surrogates and the encoder substitutes them")
+                else:
+                    errs.append(
+                        f"{fname}: [C-EDIT-ENC] the write of `{content}` is not preceded "
+                        "by a UTF-8 validity guard (CodingErrorAction.REPORT) applied to "
+                        "that same content — unpaired surrogates are silently "
+                        "substituted with '?' by the encoder and the file lands corrupted")
     if total == 0:
         # fail closed: a write-shaped tool with no recognizable write call
         # means the derivation broke, not that the tool is safe
@@ -467,6 +626,26 @@ def check_artifact_writer_src(src: str) -> list:
         if "minis_url" not in block and "linuxPathToMinisURL" not in block:
             problems.append("artifactWriter() `%s`: the minis_url append sits OUTSIDE the "
                             "`%s != null` guard" % (name, name))
+        else:
+            # Inside the guard is not the same as reachable: a literal-decided
+            # wrapper (`if (false) { … minis_url … }`) keeps the token inside the
+            # guard block and never runs (external witness C-ARTIFACT).
+            dead = dead_guard_spans(block)
+            live = []
+            for m in re.finditer(r"minis_url", block):
+                if inside_spans(dead, m.start()):
+                    continue
+                ls = block.rfind("\n", 0, m.start()) + 1
+                le = block.find("\n", m.start())
+                line = block[ls: le if le >= 0 else len(block)]
+                if "output" in line:
+                    live.append(line)
+            if not live:
+                problems.append(
+                    "artifactWriter() `%s`: the minis_url append cannot run — it sits inside "
+                    "a literal-decided guard (`if (false) …`) or no longer assigns to "
+                    "`output`, so a persisted artifact is never advertised to the agent"
+                    % name)
     if sites == 0:
         problems.append("ChatToolExecutors.kt: no artifactWriter( call found — the artifact "
                         "persistence moved, so this criterion saw nothing to check")
@@ -647,6 +826,16 @@ def selftest() -> int:
             }
         }
     """
+    # [wide3-07 C-TITLE] the resolver is COMMENTED OUT and the title is a
+    # parenthesized constant — the two bugs at once: the comment stripper never
+    # stripped `//` (so the resolver call stayed visible) and the blacklist only
+    # knew the bare `toolTitle = NAME` spelling.
+    bad_title_paren = good_exec.replace(
+        "        val toolTitle = resolveToolTitle(argsJson, NAME)",
+        '        // val toolTitle = resolveToolTitle(argsJson, NAME)\n'
+        '        val toolTitle = (NAME)',
+    )
+
     # V11: the inline runCatching copy (non-single-source) — red under helper mode
     bad_filewrite_inline = good_filewrite.replace(
         "val toolTitle = resolveToolTitle(argsJson, NAME)",
@@ -679,6 +868,12 @@ class FileEditTool {
     }
 }
 """
+
+    # [wide3-07 C-EDIT-ENC] the guard call, the message and the return all stay;
+    # only the DECISION is short-circuited away.
+    DEAD_GUARD_EDIT = GOOD_EDIT.replace(
+        "if (isUnpairedSurrogateFailure(newContent)) {",
+        "if (false && isUnpairedSurrogateFailure(newContent)) {")
 
     # The guard is gone — the pre-fix file_edit shape.
     NO_ENC_EDIT = GOOD_EDIT.replace(
@@ -797,6 +992,9 @@ class FileWriteTool {
         # from the run's own output) ---
         # A compliant tree: both judgments green.
         arm("a08-compliant", GOOD_EDIT, GUARD_HELPER, "PASS", "PASS")
+        # [wide3-07] Teeth 0: the guard is dead (`false &&`) -> only C-EDIT-ENC
+        # fires, and it must say the guard cannot reject.
+        arm("a08-dead-guard", DEAD_GUARD_EDIT, GUARD_HELPER, "FAIL", "PASS")
         # Teeth 1: the encoding guard is deleted -> only C-EDIT-ENC fires.
         arm("a08-guard-removed", NO_ENC_EDIT, GUARD_HELPER, "FAIL", "PASS")
         # Teeth 2: the guard survives but guards a DIFFERENT string than the
@@ -858,6 +1056,9 @@ internal const val UNENCODABLE_CONTENT_MESSAGE = "Error: unpaired surrogates"
         ("V10 convhist full pre-fix shape", "ConversationHistoryTool.kt", bad_convhist_prefix, 3),
         ("compliant file_write (helper)", "FileWriteTool.kt", good_filewrite, 0),
         ("V11 file_write inline copy (non-single-source)", "FileWriteTool.kt", bad_filewrite_inline, 2),
+        # [wide3-07] C-TITLE witness: `// val toolTitle = resolveToolTitle(…)`
+        # + `val toolTitle = (NAME)` -> the missing resolver AND the constant.
+        ("V12 commented resolver + parenthesized NAME", "FileReadTool.kt", bad_title_paren, 2),
     ]
     # ── [deep-audit-1048 B-03] artifactWriter verdict ─────────────────────
     GOOD_ARTIFACT = "\n".join([
@@ -910,6 +1111,20 @@ internal const val UNENCODABLE_CONTENT_MESSAGE = "Error: unpaired surrogates"
         '                output = "$output\\nminis_url: $it"\n'
         '            }\n'
         '            if (false) {\n')
+    # [wide3-07 C-ARTIFACT] the append stays INSIDE the `!= null` guard but is
+    # wrapped in a literal-decided block — the token is where the old check
+    # looked, the code never runs.
+    ARTIFACT_DEAD_URL = GOOD_ARTIFACT.replace(
+        '            if (fetchPersistPath != null) {\n'
+        '                linuxPathToMinisURL("/var/minis/browser/$fetchName")?.let {\n'
+        '                    output = "$output\\nminis_url: $it"\n'
+        '                }\n',
+        '            if (fetchPersistPath != null) {\n'
+        '                if (false) {\n'
+        '                    linuxPathToMinisURL("/var/minis/browser/$fetchName")?.let {\n'
+        '                        output = "$output\\nminis_url: $it"\n'
+        '                    }\n'
+        '                }\n')
     # B-03-V3: the verdict is never tested at all.
     ARTIFACT_UNTESTED = GOOD_ARTIFACT.replace(
         '            if (fetchPersistPath != null) {\n',
@@ -920,6 +1135,7 @@ internal const val UNENCODABLE_CONTENT_MESSAGE = "Error: unpaired surrogates"
         ("b03-discarded verdict", ARTIFACT_DISCARDED, 1),
         ("b03-url outside the guard", ARTIFACT_URL_OUTSIDE, 1),
         ("b03-verdict never tested", ARTIFACT_UNTESTED, 1),
+        ("b03-dead-guarded url append", ARTIFACT_DEAD_URL, 1),
     ):
         got = check_artifact_writer_src(sample)
         if len(got) == want:

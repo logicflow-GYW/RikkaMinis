@@ -113,28 +113,146 @@ def strip_comments(src: str) -> str:
     return "".join(out)
 
 
+def _match_paren(src: str, open_idx: int):
+    depth = 0
+    for i in range(open_idx, len(src)):
+        c = src[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return None
+
+
 def brace_slice(src: str, sig: str, from_pos: int = 0) -> str:
     """Char-offset slice from `sig` through the brace it opens (balanced).
 
     `from_pos` matters when the signature appears several times: each
     `withContext(Dispatchers.IO) {` match must slice ITS OWN block, not the
     first one in the file (the selftest caught the always-slice-first bug:
-    the second IO region's deleteFile site looked unguarded)."""
+    the second IO region's deleteFile site looked unguarded).
+
+    For a FUNCTION signature the body brace is looked for AFTER the parameter
+    list's matching paren, never at the first `{` to the right: a call-shaped
+    default (`maxInjectLines: Int = run { … }`) used to end the slice inside the
+    signature, so the real body was never judged at all — external witness E
+    put `minOf(lineCount, 200)` there and every criterion stayed green
+    (`brace_slice` had the same blind spot on MemoryFileRow /
+    MemoryFileEditScreen, which this fixes too).
+    """
     i = src.find(sig, from_pos)
     if i < 0:
         return ""
+    body_from = i + len(sig) - 1
+    if "fun " in sig:
+        op = src.find("(", i)
+        if op < 0:
+            return ""
+        cl = _match_paren(src, op)
+        if cl is None:
+            return ""            # unbalanced params → fail closed
+        body_from = cl
+    ob = src.find("{", body_from)
+    if ob < 0:
+        return ""
     depth = 0
-    started = False
-    for j in range(i, len(src)):
+    for j in range(ob, len(src)):
         c = src[j]
         if c == "{":
             depth += 1
-            started = True
         elif c == "}":
             depth -= 1
-            if started and depth == 0:
+            if depth == 0:
                 return src[i:j + 1]
-    return src[i:] if started else ""
+    return src[i:]
+
+
+def _split_top(expr: str, op: str):
+    parts, depth, last, i = [], 0, 0, 0
+    while i < len(expr):
+        c = expr[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and expr.startswith(op, i):
+            parts.append(expr[last:i])
+            last = i + len(op)
+            i = last
+            continue
+        i += 1
+    parts.append(expr[last:])
+    return parts
+
+
+def cond_truth(expr: str):
+    """True/False when a LITERAL operand decides the condition, else None."""
+    s = expr.strip()
+    while s.startswith("(") and s.endswith(")") and _match_paren(s, 0) == len(s) - 1:
+        s = s[1:-1].strip()
+    if s == "true":
+        return True
+    if s == "false":
+        return False
+    if s.startswith("!"):
+        inner = cond_truth(s[1:])
+        return None if inner is None else (not inner)
+    ors = _split_top(s, "||")
+    if len(ors) > 1:
+        vals = [cond_truth(x) for x in ors]
+        if any(v is True for v in vals):
+            return True
+        if vals and all(v is False for v in vals):
+            return False
+        return None
+    ands = _split_top(s, "&&")
+    if len(ands) > 1:
+        vals = [cond_truth(x) for x in ands]
+        if any(v is False for v in vals):
+            return False
+        if vals and all(v is True for v in vals):
+            return True
+        return None
+    return None
+
+
+def dead_guard_spans(text: str):
+    """[(start, end)] of bodies whose controlling condition is literal-FALSE.
+
+    `if (false && onDelete != null) { IconButton(onClick = onDelete) … }` keeps
+    the callback reference, the IconButton spelling and the whole confirmation
+    path in the text — and renders nothing (external witness A). Same shape
+    revived the SOUL cache refresh in witness D.
+    """
+    spans = []
+    for m in re.finditer(r"\b(?:if|while)\s*\(", text):
+        op = m.end() - 1
+        cl = _match_paren(text, op)
+        if cl is None or cond_truth(text[op + 1:cl]) is not False:
+            continue
+        k = cl + 1
+        while k < len(text) and text[k] in " \t":
+            k += 1
+        if k < len(text) and text[k] == "{":
+            depth = 0
+            for j in range(k, len(text)):
+                if text[j] == "{":
+                    depth += 1
+                elif text[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        spans.append((k, j))
+                        break
+        else:
+            eol = text.find("\n", k)
+            spans.append((k, eol if eol >= 0 else len(text)))
+    return spans
+
+
+def inside_spans(spans, pos: int) -> bool:
+    return any(a <= pos <= b for a, b in spans)
 
 
 def check(screen_src: str, sheet_src: str) -> list:
@@ -158,6 +276,19 @@ def check(screen_src: str, sheet_src: str) -> list:
             errs.append(
                 "MemoryFileRow has no IconButton(onClick = onDelete) — no "
                 "rendered handle can reach the confirm dialog")
+        else:
+            # Inside the body is not the same as reachable: `if (false &&
+            # onDelete != null)` keeps every token the checks above match and
+            # never renders the row's delete handle (external witness A).
+            dead = dead_guard_spans(row)
+            live = [m for m in re.finditer(r"IconButton\s*\(", row)
+                    if not inside_spans(dead, m.start())]
+            if not live:
+                errs.append(
+                    "MemoryFileRow's IconButton(onClick = onDelete) cannot run — it sits "
+                    "inside a literal-decided guard (`if (false && onDelete != null)`) or "
+                    "the whole row body is dead: the delete feature is unreachable again "
+                    "while every spelling survives")
 
     # ---- B. every blocking repository call site is inside Dispatchers.IO ----
     io_slices = []
@@ -219,6 +350,20 @@ def check(screen_src: str, sheet_src: str) -> list:
                         "SoulStore.refreshCache( — a SOUL.md edit from this "
                         "screen leaves SoulStore.cachedMetadata / writeVersion "
                         "stale for the chat header and Settings → Soul editors")
+                else:
+                    # Present is not the same as running: `if (false &&
+                    # fileName == SOUL_FILE_NAME) { refreshCache(...) }` keeps the
+                    # call inside the IO region and never executes it (external
+                    # witness D).
+                    dead = dead_guard_spans(scr[a:b])
+                    live = [m for m in re.finditer(r"SoulStore\.refreshCache\(", scr[a:b])
+                            if not inside_spans(dead, m.start())]
+                    if not live:
+                        errs.append(
+                            "SoulStore.refreshCache( in the save IO region cannot run — its "
+                            "guarding condition is literal-decided (`if (false && "
+                            "fileName == SOUL_FILE_NAME)`), so a SOUL.md save never "
+                            "refreshes the cache while the call keeps its spelling")
 
     # ---- C. autoItems snapshot must rebuild on every in-sheet mutation ----
     tick_decl = re.search(r"var\s+autoItemsRefreshTick\s+by\s+remember", sht)
@@ -253,6 +398,16 @@ def check(screen_src: str, sheet_src: str) -> list:
             errs.append(
                 "E: dailyAutoItemFor has no maxInjectLines parameter — the "
                 "sheet cannot follow the user-tunable injection cap")
+        else:
+            body = daily[daily.find(")"): ] if daily.find(")") >= 0 else daily
+            # Declared is not the same as consumed: the witness kept the
+            # parameter (with a call-shaped default) and hardcoded `200` in the
+            # body — both facts green until the slice covered the body at all.
+            if "maxInjectLines" not in body:
+                errs.append(
+                    "E: dailyAutoItemFor declares maxInjectLines but the body never "
+                    "consumes it — the injection cap is hard-coded and the `N/M lines "
+                    "injected` label lies about what was injected")
     if "AgentRuntimeLimitsPrefs.memoryInjectLines()" not in sht:
         errs.append(
             "E: " + MEM_SHEET + " never reads "
@@ -447,8 +602,44 @@ internal fun dailyAutoItemFor(
     # V10: save not launched on a coroutine scope (inline `run`)
     v10_screen = good_screen.replace(EDIT_SCOPE, "\n        run {\n")
 
+    # ── [wide3-07] the three external witnesses of this gate ───────────────
+    # A the dead-guarded delete handle keeps the callback, the IconButton and
+    # the confirmation path, and renders nothing.
+    A_ROW = ("        if (onDelete != null) {\n"
+             "            IconButton(onClick = onDelete) { Icon(Icons.Filled.Delete, null) }\n"
+             "        }\n")
+    if good_screen.count(A_ROW) != 1:
+        print("  FAIL selftest fixture drift: A_ROW matched %d time(s), expected 1"
+              % good_screen.count(A_ROW))
+        return 1
+    v13_screen = good_screen.replace(
+        A_ROW,
+        "        if (false && onDelete != null) {\n"
+        "            IconButton(onClick = onDelete) { Icon(Icons.Filled.Delete, null) }\n"
+        "        }\n")
+    # D the SOUL cache refresh stays inside the IO region and is short-circuited.
+    v14_screen = good_screen.replace(
+        EDIT_REFRESH,
+        "                    if (false && fileName == SOUL_FILE_NAME) {\n"
+        "                        SoulStore.refreshCache(context)\n"
+        "                    }\n")
+    if v14_screen == good_screen:
+        print("  FAIL selftest fixture drift: EDIT_REFRESH no longer matches")
+        return 1
+    # E a call-shaped default truncates the slice, so the hardcoded cap in the
+    # body is never judged (the parameter and the prefs read both stay).
+    v15_sheet = good_sheet.replace(
+        DAILY_PARAM,
+        "    maxInjectLines: Int = run { AgentRuntimeLimitsPrefs.memoryInjectLines() },\n").replace(
+        DAILY_BODY,
+        "    val injected = minOf(lineCount, 200)\n"
+        "    val detail = if (lineCount > 200)")
+
     arms = [
         ("compliant pair", good_screen, good_sheet, 0),
+        ("V13 delete handle behind `if (false && …)`", v13_screen, good_sheet, 1),
+        ("V14 SOUL refresh behind `if (false && …)`", v14_screen, good_sheet, 1),
+        ("V15 call-shaped default hides the hardcoded cap", good_screen, v15_sheet, 1),
         ("V1 row never consumes onDelete", v1_screen, good_sheet, 1),
         ("V1b comment-only wiring (comments stripped)", v1_comment_screen, good_sheet, 1),
         ("V2 blocking repository calls outside Dispatchers.IO", v2_screen, good_sheet, 1),
