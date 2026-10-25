@@ -88,6 +88,40 @@ consumed / never re-pointed" defects (also read from BrowserTabPool.kt):
       which races the download/URL writers), and `loadSavedState()` must stay
       the last step (fail-closed: unextractable bodies = red).
 
+[batch5-t01] What the criteria can no longer be fooled by. Five witnesses
+were run against the previous version; each one kept the defect and passed:
+
+  * `if (!true) { if (isDisposed) return }` — the guard was matched as a
+    substring and its position, so wrapping it in a statically-dead block
+    deleted the decision and kept the spelling (C4f);
+  * `stamped.copy(text = stamped.text, …)` — C5 accepted ANY `text =` write
+    after the renderer call, so the copy could re-project the source text
+    while an earlier `val text = … notice …` (still on screen) satisfied the
+    substring test; the criterion now reads the returned action's own text
+    argument and follows the value into it (one local hop allowed);
+  * `… any { it.inUse } && !true` — C9b compared top-level operands against
+    the literal strings "true"/"false", so `!true` read as a live conjunct;
+  * `run { if (isContextOnlySession) return@run }` — a return that leaves the
+    lambda is not a guard: C11 now requires the guard to exit the FUNCTION
+    (shared `returns_exiting`), the same rule C4f uses;
+  * `if (false) downloadScope.cancel()` — C4e counted cancelled scope names
+    without asking whether the call was reachable.
+
+Hardening applied to every arm rather than to the one that was attacked:
+
+  * structure runs on the SHARED lexer (`code_view`, length preserving, string
+    and char literals masked) — the gate's own `strip_comments` kept string
+    contents, so a `"}"` or `"/*"` inside a literal could hand a criterion a
+    body that was not the body (parser-death axis). Literal CONTENT (the
+    `browser_tabs` path) is read from `literal_view`, never from the
+    structural channel;
+  * one dead-branch decision (`_guard_dead` → shared `const_bool` /
+    `guard_feasible` + the absorbing-literal layer + `X == X`), used by every
+    dead-span test instead of per-arm literal whitelists;
+  * one guard decision (`_live_guard_positions`: not dead + `returns_exiting`)
+    shared by C4f and C11 — an arm cannot be hardened while its sibling keeps
+    matching on spelling.
+
 Usage: python3 browser_tabs_lifecycle_check.py <repo_root>
        python3 browser_tabs_lifecycle_check.py --root <repo_root>
        python3 browser_tabs_lifecycle_check.py --selftest
@@ -96,6 +130,15 @@ Exit 0 = pass, 1 = violation, 2 = usage error.
 import os
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Shared primitives (batch-5 discipline: this gate keeps its criteria but no
+# longer carries its own lexer / bracket matcher / dead-branch regex).
+from _kotlin_ast import const_bool, match_bracket, split_top, strip_parens
+from _kotlin_valueflow import (KotlinLexError, brace_depth, code_view,
+                               contains_ident, expr_end, guard_feasible,
+                               literal_view, returns_exiting, value_sources)
 
 PKG = "src/android/app/src/main/java/com/rikkaminis/app/data/storage"
 TARGET = "SessionFileStore.kt"
@@ -108,116 +151,25 @@ SHEET_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/browser/Browser
 MARKER = "BROWSER_TABS_SELFTEST=PASS"
 
 
-def strip_comments(src: str) -> str:
-    """Remove // line comments AND /* */ block comments, string-aware."""
-    out = []
-    in_str = False
-    in_line = False
-    in_block = False
-    i = 0
-    n = len(src)
-    while i < n:
-        c = src[i]
-        nxt = src[i + 1] if i + 1 < n else ""
-        if in_line:
-            if c == "\n":
-                in_line = False
-                out.append(c)
-            i += 1
-            continue
-        if in_block:
-            if c == "*" and nxt == "/":
-                in_block = False
-                i += 2
-                continue
-            if c == "\n":
-                out.append(c)
-            i += 1
-            continue
-        if in_str:
-            if c == "\\":
-                out.append(src[i:i + 2])
-                i += 2
-                continue
-            if c == '"':
-                in_str = False
-            out.append(c)
-            i += 1
-            continue
-        if c == "/" and nxt == "/":
-            in_line = True
-            i += 2
-            continue
-        if c == "/" and nxt == "*":
-            in_block = True
-            i += 2
-            continue
-        if c == '"':
-            in_str = True
-            out.append(c)
-            i += 1
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
+def _structure(src: str):
+    """(code, lit, None) or (None, None, error).
 
+    `code` is the shared `code_view` (comments AND string/char literal
+    interiors blanked, length preserved) — the only channel structural
+    analysis may use. `lit` is `literal_view` (comments stripped, literals
+    kept) and exists solely for criteria that must READ a path literal
+    (`browser_tabs`), never for structure.
 
-def _match_paren(src: str, open_idx: int) -> int:
-    """Index of the `)` matching src[open_idx] == `(`, or -1 (string-aware)."""
-    if open_idx < 0 or open_idx >= len(src) or src[open_idx] != "(":
-        return -1
-    depth = 0
-    i = open_idx
-    while i < len(src):
-        c = src[i]
-        if c == '"':
-            j = i + 1
-            while j < len(src):
-                if src[j] == "\\":
-                    j += 2
-                    continue
-                if src[j] == '"':
-                    break
-                j += 1
-            i = j + 1
-            continue
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-        i += 1
-    return -1
-
-
-def _brace_span(src: str, open_idx: int) -> int:
-    """Index just past the `}` matching src[open_idx] == `{`, or -1."""
-    if open_idx < 0 or open_idx >= len(src) or src[open_idx] != "{":
-        return -1
-    depth = 0
-    i = open_idx
-    while i < len(src):
-        c = src[i]
-        if c == '"':
-            j = i + 1
-            while j < len(src):
-                if src[j] == "\\":
-                    j += 2
-                    continue
-                if src[j] == '"':
-                    break
-                j += 1
-            i = j + 1
-            continue
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return -1
+    Fail-closed: an unlexable source is a violation. The old self-written
+    `strip_comments` kept string contents, so `"{"` / `"}"` / `"/*"` inside a
+    literal could open or close blocks and hand the criteria a body that is
+    not the body it thinks it is (batch-5 `parser-death` axis).
+    """
+    try:
+        return code_view(src), literal_view(src), None
+    except KotlinLexError as exc:
+        return None, None, (f"source not lexable ({exc}) — refusing to fall "
+                            f"back to raw scanning")
 
 
 # [wide3-06 C4f] A next-line token that can only begin a new class member —
@@ -227,49 +179,6 @@ _MEMBER_HEAD_RE = re.compile(
     r"^(?:@|(?:public|private|internal|protected|override|suspend|inline|operator|"
     r"open|abstract|fun|val|var|class|object|init)\b)"
 )
-
-
-def _expr_end(src: str, eq_idx: int) -> int:
-    """End offset of the expression body that starts after `=` at [eq_idx].
-
-    A depth-0 newline ends it UNLESS the next line is a continuation
-    (`.foo()`, `?: x`, `+ x`, `&& x`, …), which is how a wrapped expression is
-    written in this tree. Deriving the end this way is what stops an
-    expression-bodied function from swallowing the next declaration — the
-    blindness C4f's witness exploited (`= null` followed by a sibling fun).
-    """
-    depth = 0
-    i = eq_idx + 1
-    n = len(src)
-    while i < n:
-        c = src[i]
-        if c == '"':
-            j = i + 1
-            while j < n:
-                if src[j] == "\\":
-                    j += 2
-                    continue
-                if src[j] == '"':
-                    break
-                j += 1
-            i = j + 1
-            continue
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            if depth == 0:
-                return i
-            depth -= 1
-        elif c == "\n" and depth == 0:
-            j = i + 1
-            while j < n and src[j] in " \t":
-                j += 1
-            if j < n and src[j] in ".?:+-*/&|,":
-                i = j
-                continue
-            return i
-        i += 1
-    return n
 
 
 def slice_body(src: str, header: str) -> str:
@@ -292,7 +201,7 @@ def slice_body(src: str, header: str) -> str:
     open_paren = src.find("(", idx)
     if open_paren < 0:
         return ""
-    close_paren = _match_paren(src, open_paren)
+    close_paren = match_bracket(src, open_paren)
     if close_paren < 0:
         return ""
     i = close_paren + 1
@@ -307,56 +216,73 @@ def slice_body(src: str, header: str) -> str:
             i = j
             continue
         if c == "{":
-            end = _brace_span(src, i)
-            return src[i:end] if end > 0 else ""
+            end = match_bracket(src, i)
+            return src[i:end + 1] if end > 0 else ""
         if c == "=" and src[i + 1:i + 2] != "=":
-            return src[i:_expr_end(src, i)]
+            return src[i:expr_end(src, i + 1)]
         if c == "}":
             return ""
         i += 1
     return ""
 
 
-def _cond_dead_text(cond: str) -> bool:
-    """True when a literal operand decides the condition.
+def _guard_dead(cond: str) -> bool:
+    """True when `cond` can never be true — the ONE decision every arm of this
+    gate uses for "is this branch dead / is this literal absorbing".
 
-    `false && guard` / `true || guard` keep the guard's spelling and delete
-    its decision — the single most common dataflow witness in this wave.
+    Two layers, both spelling-independent:
+
+    * `_kotlin_ast.const_bool` folds constants arithmetically and logically
+      under Kotlin precedence, so `!true`, `1 == 2`, `(0 > 1)` and
+      `!true || false` are decided without a literal whitelist;
+    * the absorbing-literal layer runs per top-level operator, because
+      const_bool deliberately refuses to fold as soon as an unknown identifier
+      appears: `false && !isDisposed` is still never true, and
+      `absence || true` is still always true. The previous version compared
+      each top-level operand against the strings "true"/"false", so
+      `!true` (witness G01-A1 / G01-A3 / G01-A5 family) sailed through.
     """
-    parts, depth, buf, i = [], 0, "", 0
-    while i < len(cond):
-        c = cond[i]
-        two = cond[i:i + 2]
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        if depth == 0 and two in ("&&", "||"):
-            parts.append(buf)
-            buf = ""
-            i += 2
-            continue
-        buf += c
-        i += 1
-    parts.append(buf)
-    return any(p.strip() in ("true", "false") for p in parts)
+    c = strip_parens((cond or "").strip())
+    if not c:
+        return False
+    parts = split_top(c, ("||",))
+    if len(parts) > 1:
+        return all(_guard_dead(c[a:b]) for a, b in parts)
+    parts = split_top(c, ("&&",))
+    if len(parts) > 1:
+        for a, b in parts:
+            if const_bool(c[a:b].strip()) is False:
+                return True  # absorbing conjunct: the whole body is dead
+    # `X == X` / `X != X` is decided by the operands being the same text, not
+    # by any literal (the same rule the C11 fixture used in wide3).
+    same = re.fullmatch(r"(.+?)\s*(==|!=)\s*(.+)", c)
+    if same and strip_parens(same.group(1).strip()) == strip_parens(same.group(3).strip()):
+        return same.group(2) == "!="
+    # Leaf decision: shared feasibility (handles `0 > 1`, `2 == 2`, …), which
+    # is also what the value-flow arms use — one predicate, no literal lists.
+    return not guard_feasible(c)
 
 
 def _dead_spans(code: str) -> list:
-    """Spans of statically-unreachable `if (false …)` / `while (false)` bodies."""
+    """Spans of statically-unreachable `if (…)` / `while (…)` bodies.
+
+    The condition goes through `_guard_dead`, so the dead-branch family is
+    decided once for the whole gate (`if (false)`, `if (!true)`,
+    `if (false && X)`, `if (1 == 2)` …) instead of per-arm literal matching.
+    """
     spans = []
     for m in re.finditer(r"\b(?:if|while)\s*\(", code):
         open_idx = m.end() - 1
-        close_idx = _match_paren(code, open_idx)
-        if close_idx < 0 or not _cond_dead_text(code[open_idx + 1:close_idx]):
+        close_idx = match_bracket(code, open_idx)
+        if close_idx < 0 or not _guard_dead(code[open_idx + 1:close_idx]):
             continue
         j = close_idx + 1
         while j < len(code) and code[j] in " \t":
             j += 1
         if j < len(code) and code[j] == "{":
-            end = _brace_span(code, j)
+            end = match_bracket(code, j)
             if end > 0:
-                spans.append((j, end))
+                spans.append((j, end + 1))
                 continue
         eol = code.find("\n", j)
         spans.append((j, len(code) if eol < 0 else eol))
@@ -369,44 +295,66 @@ def _pos_dead(code: str, pos: int, spans=None) -> bool:
 
 
 def _stmt_tail(src: str, start: int, limit: int = 600) -> str:
-    """The expression starting at [start], up to a depth-0 newline / closer."""
-    depth = 0
+    """The expression starting at [start] — the shared `expr_end` decides where
+    it stops (depth-0 newline, continuation aware)."""
+    stop = expr_end(src, start)
+    return src[start:min(stop, start + limit)]
+
+
+def _live_guard_positions(body: str, cond_re: str) -> list:
+    """Positions of `if (<cond matching cond_re>) …` guards that DECIDE.
+
+    A guard decides only when both hold:
+
+    * it is not nested inside a statically-dead block — `if (!true) { if
+      (isDisposed) return }` keeps the spelling and drops the decision
+      (witness G01-A1);
+    * the guarded statement carries a return that exits the enclosing
+      FUNCTION. `run { if (isContextOnlySession) return@run }` returns from
+      the `run` block and execution continues straight into the persist path
+      (witness G01-A4), and a bare return inside any lambda is equally
+      useless as a fail-closed guard.
+
+    `returns_exiting` (shared) gives the brace-depth verdict, so this is the
+    same decision the C4f latch and the C11 borrow latch both use — one arm
+    cannot be hardened while its sibling keeps matching on spelling.
+    """
+    spans = _dead_spans(body)
     out = []
-    i = start
-    n = min(len(src), start + limit)
-    while i < n:
-        c = src[i]
-        if c == '"':
-            j = i + 1
-            while j < n:
-                if src[j] == "\\":
-                    j += 2
-                    continue
-                if src[j] == '"':
-                    break
-                j += 1
-            out.append(src[i:j + 1])
-            i = j + 1
+    for m in re.finditer(r"\bif\s*\(" + cond_re + r"\s*\)", body):
+        if _pos_dead(body, m.start(), spans):
             continue
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            if depth == 0:
-                break
-            depth -= 1
-        elif c == "\n" and depth == 0:
-            break
-        out.append(c)
-        i += 1
-    return "".join(out)
+        open_paren = body.index("(", m.start())
+        close_paren = match_bracket(body, open_paren)
+        if close_paren < 0:
+            continue
+        j = close_paren + 1
+        while j < len(body) and body[j] in " \t":
+            j += 1
+        if j >= len(body):
+            continue
+        if body[j] == "{":
+            end = match_bracket(body, j)
+            if end < 0:
+                continue
+            seg = (j, end + 1)
+        else:
+            eol = body.find("\n", j)
+            seg = (j, len(body) if eol < 0 else eol)
+        if returns_exiting(body, seg[0], seg[1],
+                           fn_depth=max(1, brace_depth(body, seg[0]))):
+            out.append(m.start())
+    return out
 
 
 def check_source(source: str) -> list:
-    src = strip_comments(source)
+    src, lit, err = _structure(source)
+    if err is not None:
+        return [f"C1: {err}"]
     errs = []
 
     # C1: root + definition (fail-closed)
-    if "browser_tabs" not in src:
+    if "browser_tabs" not in lit:
         errs.append("C1: no browser_tabs root in SessionFileStore")
     if "fun browserTabFile(" not in src:
         errs.append("C1: no fun browserTabFile( definition found")
@@ -437,12 +385,12 @@ def check_source(source: str) -> list:
         # is rejected by C7's single-literal count.
 
     # --- [da1040-A3] C7: the session-shape predicate carries BOTH shapes ---
-    if not re.search(r"const val DRAFT_ID_PREFIX\s*=\s*\"__new__\"", src):
+    if not re.search(r"const val DRAFT_ID_PREFIX\s*=\s*\"__new__\"", lit):
         errs.append("C7: the __new__ draft prefix is not declared as a single constant (fail-closed)")
-    lit = len(re.findall(r'"__new__"', src))
-    if lit != 1:
+    occurrences = len(re.findall(r'"__new__"', lit))
+    if occurrences != 1:
         errs.append(
-            f'C7: the "__new__" namespace literal appears {lit} times in SessionFileStore '
+            f'C7: the "__new__" namespace literal appears {occurrences} times in SessionFileStore '
             "(expected exactly 1 — inside the shape predicate); a per-call-site copy is "
             "how four of five sweep callers kept the narrower notion and deleted an "
             "in-flight draft's files")
@@ -517,7 +465,14 @@ def _c4_cancel_closure(code: str, entry_body: str) -> set:
         if body in seen:
             continue
         seen.add(body)
+        spans = _dead_spans(body)
         for m in re.finditer(r"\b([A-Za-z_]\w*)\s*\.\s*cancel\s*\(", body):
+            # [batch5-t01 G01-A5] `if (false) downloadScope.cancel()` keeps the
+            # call's spelling and deletes its effect — disposing then leaves
+            # the scope running against a destroyed pool. Same dead-branch
+            # decision as every other arm in this gate.
+            if _pos_dead(body, m.start(), spans):
+                continue
             cancelled.add(m.group(1))
         for m in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", body):
             name = m.group(1)
@@ -527,29 +482,68 @@ def _c4_cancel_closure(code: str, entry_body: str) -> set:
 
 
 def _c4_guard_pos(body: str, latch: str) -> int:
-    """Position of an early `if (<latch>) return` guard in body, or -1.
+    """Position of a LIVE, function-exiting `if (<latch>) …` guard, or -1.
 
-    [wide3-06 C11] A guard nested inside a statically-dead block
-    (`if (false) { if (latch) return }`) keeps the spelling and loses the
-    decision, so dead spans are skipped.
+    Delegates to `_live_guard_positions`, the same decision C11 uses: a guard
+    wrapped in a dead block (witness G01-A1) or one whose return only leaves a
+    lambda (`run { if (latch) return@run }`, witness G01-A4) is spelled but
+    never decides.
     """
-    spans = _dead_spans(body)
-    if re.search(rf"\bif\s*\(\s*{re.escape(latch)}\s*\)\s*return\b", body):
-        for m in re.finditer(rf"\bif\s*\(\s*{re.escape(latch)}\s*\)\s*return\b", body):
-            if not _pos_dead(body, m.start(), spans):
-                return m.start()
-    m = re.search(rf"\bif\s*\(\s*{re.escape(latch)}\s*\)\s*\{{", body)
-    if m and not _pos_dead(body, m.start(), spans) and re.search(
-        r"\breturn\b", body[m.end():m.end() + 160]
-    ):
-        return m.start()
-    return -1
+    pos = _live_guard_positions(body, re.escape(latch))
+    return pos[0] if pos else -1
+
+
+def _result_text_args(action: str, since: int) -> list:
+    """[(pos, value)] for every `text = …` named argument of a `.copy(` call
+    that the action assembles after `since` — i.e. the candidates for the
+    returned BrowserActionResult's text. Later entries win."""
+    out = []
+    for m in re.finditer(r"\.\s*copy\s*\(", action[since:]):
+        open_paren = since + m.end() - 1
+        close = match_bracket(action, open_paren)
+        if close < 0:
+            continue
+        base = open_paren + 1
+        inner = action[base:close]
+        for a, b in split_top(inner, (",",)):
+            seg = inner[a:b]
+            am = re.match(r"\s*text\s*=(?!=)\s*(.*)$", seg, re.S)
+            if am:
+                out.append((base + a, am.group(1).strip()))
+    return out
+
+
+def _flows_from(text: str, expr: str, name: str, pos: int, depth: int = 0) -> bool:
+    """Does `expr` read `name` — directly, or through one local binding?"""
+    e = strip_parens(expr.strip())
+    if contains_ident(e, name):
+        return True
+    if depth >= 2:
+        return False
+    m = re.fullmatch(r"[A-Za-z_`]\w*", e)
+    if not m:
+        return False
+    ident = re.escape(e.strip("`"))
+    best = None
+    for d in re.finditer(r"\b(?:val|var)\s+" + ident + r"\s*(?::[^=\n]+)?=(?!=)",
+                         text):
+        if d.start() > pos:
+            continue
+        if best is None or d.start() > best.start():
+            best = d
+    if best is None:
+        return False
+    rhs_pos = best.end()
+    return _flows_from(text, text[rhs_pos:expr_end(text, rhs_pos)], name, best.start(),
+                       depth + 1)
 
 
 def check_pool_source(pool_src: str) -> list:
     """[fix/dv14-B2] C4 — dispose() must not re-persist; the evicted tab's
     URL must be stored AFTER destroyTab. Fail-closed throughout."""
-    code = strip_comments(pool_src)
+    code, lit, err = _structure(pool_src)
+    if err is not None:
+        return [f"C4: {err}"]
     errs = []
     disp = slice_body(code, "fun dispose")
     if not disp:
@@ -636,11 +630,13 @@ def check_pool_source(pool_src: str) -> list:
                     f"C4f: dispose() sets `{latch}` only after it starts releasing — a "
                     "second dispose must be a no-op before any scope is cancelled")
             save = slice_body(code, "private fun saveState") or slice_body(code, "fun saveState")
+            save_lit = (slice_body(lit, "private fun saveState")
+                        or slice_body(lit, "fun saveState"))
             if not save:
                 errs.append("C4f: fun saveState body not extractable (fail-closed)")
             else:
                 pos = _c4_guard_pos(save, latch)
-                touch = save.find("browser_tabs")
+                touch = save_lit.find("browser_tabs")
                 if pos < 0:
                     errs.append(
                         f"C4f: saveState does not short-circuit on `{latch}` — a restore "
@@ -694,18 +690,32 @@ def check_pool_source(pool_src: str) -> list:
                     "its result cannot flow anywhere else (fail-closed)")
             else:
                 name = bound.group(1)
-                merged = False
-                for w in re.finditer(r"\btext\s*=", action[notice_pos:]):
-                    tail = _stmt_tail(action, notice_pos + w.end())
-                    if re.search(rf"\b{re.escape(name)}\b", tail):
-                        merged = True
-                        break
-                if not merged:
+                # [batch5-t01 G01-A2] The carrier is the returned action's own
+                # `text =` argument, not "any `text =` written after the call":
+                # `stamped.copy(text = stamped.text, …)` left the earlier
+                # `val text = … notice …` binding untouched on screen and threw
+                # its value away, so the substring test kept passing while the
+                # notice never reached the agent.
+                products = _result_text_args(action, notice_pos)
+                if not products:
                     errs.append(
-                        f"C5: the rendered risk notice `{name}` is never merged into "
-                        "the result text (no `text =` write whose expression reads it "
-                        "after the challengeNoticeLine( call — the notice is computed "
-                        "and dropped, so the agent still cannot read it)")
+                        "C5: the returned action copies `stamped` without a `text =` "
+                        "argument after the renderer call — the notice cannot reach "
+                        "result.text, the only field the agent reads (fail-closed)")
+                else:
+                    pos, rhs = products[-1]
+                    rhs = rhs.strip().rstrip(",")
+                    if re.fullmatch(r"[A-Za-z_`]\w*\s*\.\s*text", rhs):
+                        errs.append(
+                            f"C5: the result copy re-projects its own source text "
+                            f"(`text = {rhs}`) — the rendered risk notice `{name}` is "
+                            "computed and dropped, so the agent still cannot read it")
+                    elif not _flows_from(action, rhs, name, pos):
+                        errs.append(
+                            f"C5: the rendered risk notice `{name}` never flows into "
+                            f"the returned action's text (the winning `text = {rhs}` "
+                            "does not read it, directly or through one local binding — "
+                            "the notice is computed and dropped)")
         if "BrowserRiskControl." not in action:
             errs.append("C5: runAcquiredAction no longer consults BrowserRiskControl (fail-closed)")
 
@@ -1077,6 +1087,46 @@ POOL_V_NO_LATCH = POOL_COMPLIANT.replace(
 )
 
 
+# --- [batch5-t01] the shapes five external witnesses used to pass --------
+# G01-A1: the disposal guard is SPELLED inside a statically-dead block — the
+# substring and its position survive, the decision does not.
+POOL_V_DEAD_WRAPPED_GUARD = POOL_COMPLIANT.replace(
+    "    private fun restoreSavedTabs() {\n        if (isDisposed) return\n",
+    "    private fun restoreSavedTabs() {\n        if (!true) { if (isDisposed) return }\n",
+)
+
+# G01-A1b: a guard whose return only leaves a lambda is not a guard at all.
+POOL_V_LAMBDA_GUARD = POOL_COMPLIANT.replace(
+    "    private fun restoreSavedTabs() {\n        if (isDisposed) return\n",
+    "    private fun restoreSavedTabs() {\n        run { if (isDisposed) return@run }\n",
+)
+
+# G01-A5: the scope is "cancelled" inside a dead block (single-statement form).
+POOL_V_DEAD_CANCEL = POOL_COMPLIANT.replace(
+    "        downloadScope.cancel()\n",
+    "        if (false) downloadScope.cancel()\n",
+)
+
+# G01-A5b: both scopes are cancelled inside one dead block.
+POOL_V_DEAD_CANCEL_BLOCK = POOL_COMPLIANT.replace(
+    "        evictionScope.cancel()\n        downloadScope.cancel()\n",
+    "        if (!true) { evictionScope.cancel(); downloadScope.cancel() }\n",
+)
+
+# G01-A2: the result copy re-projects the SOURCE text — the merged one is
+# bound and thrown away, so the agent reads the un-annotated text.
+POOL_V_RISK_SELF_PROJECTION = POOL_COMPLIANT.replace(
+    "            return stamped.copy(text = text, riskChallengeDetected = true).text",
+    "            return stamped.copy(text = stamped.text, riskChallengeDetected = true).text",
+)
+
+# negative control: merging through one extra local is still the notice.
+POOL_OK_RISK_TWO_HOP = POOL_COMPLIANT.replace(
+    "            return stamped.copy(text = text, riskChallengeDetected = true).text",
+    "            val merged = text\n"
+    "            return stamped.copy(text = merged, riskChallengeDetected = true).text",
+)
+
 # --- [da1040-B2] C9: the busy signal must be observable -------------------
 # The defect: `Tab.inUse` flips in place (audit-b21 forbids the copy that would
 # make the list change), so `tabs` stays content-equal and StateFlow swallows
@@ -1085,7 +1135,9 @@ POOL_V_NO_LATCH = POOL_COMPLIANT.replace(
 def check_busy_source(pool_src: str, sheet_src: str) -> list:
     """[da1040-B2] C9 — one funnel for in-use writes, one reactive carrier, and
     a consumer that subscribes. Fail-closed throughout."""
-    code = strip_comments(pool_src)
+    code, _lit, err = _structure(pool_src)
+    if err is not None:
+        return [f"C9: {err}"]
     errs = []
 
     # C9a: the reactive face exists and no non-reactive getter is back
@@ -1114,7 +1166,7 @@ def check_busy_source(pool_src: str, sheet_src: str) -> list:
             errs.append(
                 "C9: publishAgentBusy no longer re-derives from any-tab-in-use — the "
                 "published flag can drift from Tab.inUse (fail-closed)")
-        elif _cond_dead_text(rhs):
+        elif _guard_dead(rhs):
             # [wide3-06 C9] `false && _tabs.value.any { it.inUse }` keeps the
             # derivation's spelling and publishes a constant false: the sheet
             # then offers to close tabs an agent is driving.
@@ -1150,7 +1202,10 @@ def check_busy_source(pool_src: str, sheet_src: str) -> list:
             "pool no longer holds)")
 
     # C9f: the consumer subscribes
-    sheet = strip_comments(sheet_src)
+    sheet, _sheet_lit, sheet_err = _structure(sheet_src)
+    if sheet_err is not None:
+        errs.append(f"C9: {sheet_err}")
+        sheet = ""
     if not re.search(r"by\s+tabPool\.agentBusy\.collectAsState\(\)", sheet):
         errs.append(
             "C9: BrowserSheet does not subscribe to the pool's busy flow "
@@ -1242,7 +1297,9 @@ def _c10_destroy_callers(code: str) -> list:
 
 def check_destroy_busy_source(pool_src: str) -> list:
     """[dv22-B2] C10 — destroy paths re-derive agentBusy. Fail-closed."""
-    code = strip_comments(pool_src)
+    code, _lit, err = _structure(pool_src)
+    if err is not None:
+        return [f"C10: {err}"]
     errs = []
 
     callers = _c10_destroy_callers(code)
@@ -1533,6 +1590,12 @@ BUSY_SHEET_V_GETTER = BUSY_SHEET_COMPLIANT.replace(
 BUSY_V_SHORT_CIRCUIT = BUSY_COMPLIANT.replace(
     "        _agentBusy.value = _tabs.value.any { it.inUse }",
     "        _agentBusy.value = false && _tabs.value.any { it.inUse }")
+# [batch5-t01 G01-A3] `&& !true` is the same absorption with a different
+# literal — the old literal whitelist ("true"/"false" as a whole operand) read
+# it as a live conjunction.
+BUSY_V_NOT_TRUE = BUSY_COMPLIANT.replace(
+    "        _agentBusy.value = _tabs.value.any { it.inUse }",
+    "        _agentBusy.value = _tabs.value.any { it.inUse } && !true")
 
 busy_arms = [
     ("C9 compliant busy signal", BUSY_COMPLIANT, BUSY_SHEET_COMPLIANT, []),
@@ -1540,6 +1603,7 @@ busy_arms = [
     ("C9a non-reactive getter restored", BUSY_V_GETTER_BACK, BUSY_SHEET_COMPLIANT, ["C9"]),
     ("C9b publish no longer re-derived", BUSY_V_STALE_PUBLISH, BUSY_SHEET_COMPLIANT, ["C9"]),
     ("C9b publish short-circuited by a literal", BUSY_V_SHORT_CIRCUIT, BUSY_SHEET_COMPLIANT, ["C9"]),
+    ("C9b publish absorbed by `&& !true`", BUSY_V_NOT_TRUE, BUSY_SHEET_COMPLIANT, ["C9"]),
     ("C9c write bypasses the funnel", BUSY_V_WRITE_BYPASSES_FUNNEL, BUSY_SHEET_COMPLIANT, ["C9"]),
     ("C9c funnel stops publishing", BUSY_V_FUNNEL_NO_PUBLISH, BUSY_SHEET_COMPLIANT, ["C9"]),
     ("C9d updateTabs stops re-deriving", BUSY_V_UPDATETABS_NO_PUBLISH, BUSY_SHEET_COMPLIANT, ["C9"]),
@@ -1595,13 +1659,22 @@ CTX_V_DEAD_GUARD = CTX_COMPLIANT.replace(
     "        if (false) { if (isContextOnlySession) return }\n",
 )
 
+# [batch5-t01 G01-A4] `return@run` leaves the lambda, not saveState: the
+# borrow guard keeps its spelling and its position and still persists.
+CTX_V_LAMBDA_GUARD = CTX_COMPLIANT.replace(
+    "        if (isContextOnlySession) return\n",
+    "        run { if (isContextOnlySession) return@run }\n",
+)
+
 
 def check_context_only_persist(pool_src: str) -> list:
     """[dv23-B4 B-04] C11 — the borrow latch is set on the context-only bind,
     cleared by a full bind, and consulted before saveState touches the file.
     Anchored on the DECISION (return before the write), not on spelling of the
     surrounding code; fail-closed everywhere."""
-    code = strip_comments(pool_src)
+    code, lit, err = _structure(pool_src)
+    if err is not None:
+        return [f"C11: {err}"]
     if "isContextOnlySession" not in code:
         return ["C11: the borrow latch is gone — context-only binds persist again"]
     errs = []
@@ -1622,21 +1695,23 @@ def check_context_only_persist(pool_src: str) -> list:
     if not save:
         errs.append("C11: fun saveState body not extractable (fail-closed)")
     else:
-        # [wide3-06 C11] A guard wrapped in `if (false) { … }` still contains
-        # the substring and still precedes the write — skipped.
-        spans = _dead_spans(save)
-        guard = -1
-        for m in re.finditer(r"\bif\s*\(\s*isContextOnlySession\s*\)\s*return\b", save):
-            if not _pos_dead(save, m.start(), spans):
-                guard = m.start()
-                break
+        # [batch5-t01 G01-A4] The guard has to DECIDE, not merely be spelled:
+        # `run { if (isContextOnlySession) return@run }` leaves the lambda and
+        # control falls straight through to `val sid = sessionId ?: return` and
+        # the write. `_live_guard_positions` is the same predicate C4f uses
+        # (dead spans + returns_exiting), so both latches are judged alike.
+        guards = _live_guard_positions(save, "isContextOnlySession")
+        guard = guards[0] if guards else -1
         if guard < 0:
             errs.append(
-                "C11: saveState writes regardless of the borrow latch (no live "
-                "`if (isContextOnlySession) return` before the tab file)")
+                "C11: saveState writes regardless of the borrow latch (no live, "
+                "function-exiting `if (isContextOnlySession) return` before the tab file)")
         else:
+            save_lit = (slice_body(lit, "private fun saveState")
+                        or slice_body(lit, "fun saveState"))
             touches = [
-                i for i in (save.find("browser_tabs"), save.find("getSharedPreferences"))
+                i for i in (save_lit.find("browser_tabs"),
+                            save.find("getSharedPreferences"))
                 if i >= 0
             ]
             first = min(touches) if touches else -1
@@ -1848,9 +1923,15 @@ class SessionFileStore internal constructor(
         ("C4f saveState drops its disposal guard", POOL_V_SAVE_NO_GUARD, ["C4f"]),
         ("C4f disposal latch is not volatile", POOL_V_LATCH_NOT_VOLATILE, ["C4f"]),
         ("C4f dispose never latches", POOL_V_NO_LATCH, ["C4f"]),
+        ("C4f guard wrapped in a dead block", POOL_V_DEAD_WRAPPED_GUARD, ["C4f"]),
+        ("C4f guard returns from a lambda only", POOL_V_LAMBDA_GUARD, ["C4f"]),
+        ("C4e scope.cancel inside a dead block", POOL_V_DEAD_CANCEL, ["C4e"]),
+        ("C4e both cancels inside one dead block", POOL_V_DEAD_CANCEL_BLOCK, ["C4e"]),
         ("C5 risk notice rendered but dropped", POOL_V_RISK_NOT_MERGED, ["C5"]),
         ("C5 risk notice bound then dropped", POOL_V_RISK_DROPPED, ["C5"]),
         ("C5 risk notice never rendered", POOL_V_RISK_NO_CALL, ["C5"]),
+        ("C5 result copy re-projects the source text", POOL_V_RISK_SELF_PROJECTION, ["C5"]),
+        ("C5 notice merged through one extra local stays green", POOL_OK_RISK_TWO_HOP, []),
         ("C6 setSession forgets to re-point downloads", POOL_V_SESSION_NO_REMAP, ["C6"]),
         ("C6 setSession rewrites _downloads by assignment", POOL_V_SESSION_PLAIN_ASSIGN, ["C6"]),
     ]
@@ -1874,6 +1955,7 @@ class SessionFileStore internal constructor(
         ("C11 saveState persists anyway", CTX_V_PERSIST, ["C11"]),
         ("C11 full bind never clears the latch", CTX_V_NO_CLEAR, ["C11"]),
         ("C11 borrow guard wrapped in a dead block", CTX_V_DEAD_GUARD, ["C11"]),
+        ("C11 borrow guard returns from a lambda only", CTX_V_LAMBDA_GUARD, ["C11"]),
     ]
     for name, sample, expect in ctx_arms:
         errs = check_context_only_persist(sample)
@@ -1891,7 +1973,7 @@ class SessionFileStore internal constructor(
     # --- [dv22-B2] C10 arms: destroy paths re-derive the busy flag ---
     # Arms are generated from the fixture's OWN derived caller set, so the
     # "one breaker per destroy path" coverage cannot silently shrink.
-    destroy_names = [n for n, _ in _c10_destroy_callers(strip_comments(DESTROY_COMPLIANT))]
+    destroy_names = [n for n, _ in _c10_destroy_callers(code_view(DESTROY_COMPLIANT))]
     destroy_arms = [("C10 compliant destroy paths", DESTROY_COMPLIANT, [])]
     for nm in destroy_names:
         destroy_arms.append((f"C10 {nm} stops re-deriving", _c10_strip_publish(DESTROY_COMPLIANT, nm), ["C10"]))
