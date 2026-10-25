@@ -201,10 +201,16 @@
 ## ⑤ CI run
 
 - 分支：`fix/wide4-07-gemini-base`
-- 代码提交：`4fa606d7`（门 + 夹具 + 自证臂）
-- CI：见文末回填（`Build RikkaMinis Android APK`，run `40179534916`）
-- 判据行（CI 日志逐条核）：`Summary: 112 passed, 0 failed` 恰一条 · `ALL 344 CASES PASS` 恰一条 ·
-  ` e: ` 0 条 · 唯一 `skipped` = Publish（main 门控）· `head_sha` 与本地逐字符一致。
+- 代码提交：`4fa606d7`（门 + 夹具 + 自证臂）；报告回填后 HEAD `fbfd6643`，
+  `git diff --name-only 4fa606d7 HEAD -- . ':(exclude)fix-reports'` = **0 行**（源码树等价）。
+- CI：`Build RikkaMinis Android APK` · run **40179534916** · job `121127409107` ·
+  **attempt 1 success** · `head_sha 4fa606d7…5926` 与本地逐字符一致 · 26 步、
+  唯一 skipped = `Publish to Releases`（main 门控）。
+- 日志逐条核（1,481,892 B）：`Summary: 112 passed, 0 failed` **恰一条** ·
+  `ALL 344 CASES PASS` **恰一条** · ` e: ` **0** 条 · 门头 `[N/112]` **112 个互异、无缺号** ·
+  含 `FAILED` 的 **6 行全是 PASSED 用例名子串**（`produced FAILED without calling provider` 等）·
+  本门段落 14 行 `[OK]` + `✅ gemini base version guard: all normalizers restore /v1beta,
+  both call sites routed`，无 `[FAIL]`。
 
 ## ⑥ 残留（每条带触发条件 / 触发后方案 / 搁置理由）
 
