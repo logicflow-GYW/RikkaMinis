@@ -145,7 +145,17 @@ python3 -c "import test_scan as t; t.test_extra_days_container(); t.test_xproc_b
 
 ## 6. CI
 
-见提交后的回填（run id / head_sha / 112 passed 0 failed / ALL 344 CASES PASS / 门数 112）。
+- 分支 `fix/wide4-01-extradays-xproc-pin` @ **`07aba2e86e20`**（= 本地 HEAD，逐字符一致）。
+- run **#2668** / id `40179743685` / attempt **1** / job `121128051294` → **completed success**。
+- 日志 1,481,274 B / 17,848 行，逐条核对：
+  - `║  Summary: 112 passed, 0 failed` 恰 **1** 条 → 门数仍是 **112**（未新建门）。
+  - `✅ ALL 344 CASES PASS` 恰 **1** 条 → 夹具仍是 **344**（冻结面未动）。
+  - 门头 `[N/112]` **112 个且互异**（1..112 连续）。
+  - ` e: `（Kotlin 编译错误标记）**0** 条。
+  - 唯一 skipped 步 = `Publish to Releases`（main 门控），其余步骤全 success。
+  - 标记实测：`COMPACT_PIN_TRUTH_SELFTEST=PASS` 在日志内（既有冻结断言）；
+    `EXTRA_DAYS_SELFTEST=PASS` / `XPROC-BOUNDARY SELFTEST=PASS` **不在** CI 日志里 ——
+    本支新臂的自证 stdout 只有被 `test_scan.py` 注册才会跑，注册权在并集收口（§7 R1）。
 
 ## 7. 残留（三件套：触发条件 / 触发后方案 / 搁置理由）
 
