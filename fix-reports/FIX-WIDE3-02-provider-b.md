@@ -148,9 +148,35 @@ $ python3 scripts/scan/test_scan.py
 
 ## 6. CI
 
-见分支回报（`fix/meta-wide3-02-provider-b`）：run id / `head_sha` 与本地 `git rev-parse HEAD` 逐字符一致 / `Summary: 112 passed, 0 failed` / `ALL 344 CASES PASS` / ` e: ` 0 / 唯一 skipped = Publish（main 门控）。
+- run：**`40163435471`** / job **`121079556556`** / attempt **1** / conclusion **success**
+- `head_sha = 91228b9a92a5d365e9619623b2f3e991b2efb926`，与本支 `git rev-parse HEAD` **逐字符一致**
+- 26 步，`skipped = ['Publish to Releases']`（main 门控），`failed = []`
+- 日志判读（1.48 MB / 17,846 行，`probe/ci/job.log`）：
+
+| 读数 | 期望 | 实测 |
+|---|---|---|
+| 带框线 `Summary: 112 passed, 0 failed` | 恰 1 条 | 1 条（其余 7 条为子套件 Summary：5/10/14/15/25/28/36） |
+| `ALL 344 CASES PASS` | 恰 1 条 | 1 条 |
+| 门头 `━━━ [N/112]` | 112 个互异 | 112 / 112 unique |
+| ` e: `（Kotlin 编译错） | 0 | 0 |
+| 含 `FAILED` 的行 | 全是 PASSED 用例名子串 | 6 条，全部 `… PASSED` |
+| `Publish` 步骤 | 分支上必须 skipped | skipped |
+
+- **本支四门都在 CI 里被跑到**：`provider_boundary_guard` 2 次 / `budget_stop_break_guard` 2 / `thinking_wiring_guard` 2 / `thinking_rule_editor_preserve_check` 3。
+- ⚠️ **自证臂在 CI 日志里只有 1 个可见**：`THINKING_RULE_EDITOR_PRESERVE_SELFTEST` 1 次（test_scan 里有精确子串断言），而 `PROVIDER_BOUNDARY_SELFTEST` / `BUDGET_STOP_BREAK_SELFTEST` / `THINKING_EFFORT_SELFTEST` 各 **0** 次 —— 门自己的 `--selftest` stdout 不进 CI 日志，只有 `test_scan.py` 注册了标记才会被看见。`test_scan.py` 是本支冻结面（任务书 §2.1），注册留给主会话并集收口，见 §7 第 0 条（与 wide-1024 M6 的 R9 同族）。
 
 ## 7. 残留（三件套：触发条件 / 触发后方案 / 搁置理由）
+
+0. **`test_scan.py` 未注册本支三个新自证标记 ⇒ CI 里看不见这些臂**
+   触发条件：主会话并集收口时（本支任务书 §2.1 把 `test_scan.py` 列为冻结面，不得改）。
+   触发后方案：在 `test_scan.py` 的对应 `DA*_GATES` 列表各加一行（格式 `(script, marker, (), (REPO_ROOT,))`）：
+   ```python
+   ("provider_boundary_guard",   "PROVIDER_BOUNDARY_SELFTEST=PASS",    (), (REPO_ROOT,)),
+   ("budget_stop_break_guard",   "BUDGET_STOP_BREAK_SELFTEST=PASS",    (), (REPO_ROOT,)),
+   ("thinking_wiring_guard",     "THINKING_EFFORT_SELFTEST=PASS",      (), (REPO_ROOT,)),
+   ```
+   （`provider_boundary_guard` / `budget_stop_break_guard` 本波才首次拥有 `--selftest`；`thinking_wiring_guard` 的标记名沿用旧打印串 `THINKING_EFFORT_SELFTEST=PASS`，臂数 11→15。）
+   搁置理由：`test_scan.py` 是冻结面（11 支并行改同一文件必撞），且注册只影响"CI 日志里能不能看见自证臂"，不影响门的判定；注册缺失时这些臂仍由本地 `--selftest` 与 L2 反攻覆盖。
 
 1. **`host.endsWith("senseaudio.cn")` 这类后缀匹配仍能建第二套分支**
    触发条件：出现第三个 measured gateway，或有人在 provider 里用 `endsWith` / `startsWith` / 正则匹配 host。
