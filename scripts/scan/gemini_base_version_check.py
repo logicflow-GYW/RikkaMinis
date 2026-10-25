@@ -92,79 +92,158 @@ TARGETS = {
 SHARED_DELEGATE = "GeminiBasePath.normalize"
 
 
+def _skip_string(text, i):
+    """Index just past the string literal starting at `text[i]` (a quote)."""
+    if text.startswith('"""', i):
+        j = text.find('"""', i + 3)
+        return len(text) if j < 0 else j + 3
+    q = text[i]
+    i += 1
+    while i < len(text) and text[i] != q:
+        if text[i] == "\\":
+            i += 2
+        elif text.startswith("${", i):
+            i = _skip_template(text, i + 2)
+        else:
+            i += 1
+    return i + 1
+
+
+def _skip_template(text, i):
+    """Index just past the `}` matching an already-consumed `${`."""
+    depth = 1
+    while i < len(text):
+        c = text[i]
+        if c == '"' or c == "'":
+            i = _skip_string(text, i)
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return len(text)
+
+
 def strip_comments(text):
-    """Drop // and /* */ comments so prose cannot fake a structural match."""
+    """Comments blanked (same length, newlines kept), STRING LITERALS INTACT.
+
+    Literals must survive: the criteria below look for `"/v1beta"` and for URL
+    templates. The old scanner walked into literals, so `"https://.../v1beta"`
+    was truncated at `//` and the default base became unverifiable.
+    """
     out = []
-    i = 0
-    n = len(text)
+    i, n = 0, len(text)
     while i < n:
         c = text[i]
-        if c == "/" and i + 1 < n and text[i + 1] == "/":
-            while i < n and text[i] != "\n":
-                i += 1
-        elif c == "/" and i + 1 < n and text[i + 1] == "*":
-            i += 2
-            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
-                i += 1
-            i += 2
-        else:
-            out.append(c)
-            i += 1
+        if c == '"' or c == "'":
+            j = _skip_string(text, i)
+            out.append(text[i:j])
+            i = j
+            continue
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            end = n if j < 0 else j
+            out.append(" " * (end - i))
+            i = end
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            end = n if j < 0 else j + 2
+            out.append("".join("\n" if ch == "\n" else " " for ch in text[i:end]))
+            i = end
+            continue
+        out.append(c)
+        i += 1
     return "".join(out)
 
 
-def function_body(text, name):
-    """Return the body of `fun <name>(...)`, brace-balanced; None if not found.
+CONTINUATION_CHARS = "||&&,.+-*/?:=(<["
 
-    Skips string literals so `"${...}"` interpolation braces cannot unbalance the
-    count, and so a quoted brace can never be mistaken for structure.
+
+def expr_span(text, start):
+    """Expression text from `start` to the end of the statement.
+
+    A newline only ends the expression when the last non-space character is not
+    a continuation operator — a blank line in the middle of a multi-line
+    expression must NOT truncate it (the old `find("\\n\\n")` slice let a blank
+    line hide the rest of a predicate).
+    """
+    depth = 0
+    i = start
+    n = len(text)
+    last = ""
+    while i < n:
+        c = text[i]
+        if c == '"' or c == "'":
+            j = _skip_string(text, i)
+            last = text[j - 1]
+            i = j
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                return text[start:i]
+            depth -= 1
+        if c == "\n" and depth == 0 and last not in CONTINUATION_CHARS:
+            return text[start:i]
+        if not c.isspace():
+            last = c
+        i += 1
+    return text[start:]
+
+
+def _close_index(text, k, open_ch, close_ch):
+    depth = 0
+    i = k
+    while i < len(text):
+        c = text[i]
+        if c == '"' or c == "'":
+            i = _skip_string(text, i)
+            continue
+        if c == open_ch:
+            depth += 1
+        elif c == close_ch:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def function_body(text, name):
+    """Return the body of `fun <name>(...)`; None if not found.
+
+    Block bodies are brace-balanced over code only. Expression bodies are
+    captured with `expr_span`, which keeps multi-line expressions (including
+    blank lines) together — the old single-line slice let a one-line
+    `.also { while (false) { ... } }` carry every token while returning the raw
+    argument.
     """
     m = re.search(r"\bfun\s+" + re.escape(name) + r"\s*\(", text)
     if not m:
         return None
     i = text.find("(", m.end() - 1)
-    depth = 0
-    while i < len(text):
-        c = text[i]
-        if c == '"':
-            i += 1
-            while i < len(text) and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-        elif c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                break
-        i += 1
+    close = _close_index(text, i, "(", ")")
+    if close < 0:
+        return None
     # expression body (`: Type = expr`) or block body (`{ ... }`) — whichever the
     # signature reaches first. These normalizers are one-liners when they delegate.
-    tail = text[i + 1 :]
+    tail = text[close + 1:]
     eq = tail.find("=")
     brace = tail.find("{")
     if eq >= 0 and (brace < 0 or eq < brace):
-        line_end = tail.find("\n", eq)
-        return tail[eq + 1 : line_end if line_end >= 0 else len(tail)]
-    j = i + 1 + brace  # brace was found in `tail`; the scan below indexes `text`
+        return expr_span(text, close + 1 + eq + 1).strip()
     if brace < 0:
         return None
-    depth = 0
-    k = j
-    while k < len(text):
-        c = text[k]
-        if c == '"':
-            k += 1
-            while k < len(text) and text[k] != '"':
-                k += 2 if text[k] == "\\" else 1
-        elif c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[j + 1 : k]
-        k += 1
-    return None
-
+    j = close + 1 + brace  # brace was found in `tail`; the scan below indexes `text`
+    end = _close_index(text, j, "{", "}")
+    if end < 0:
+        return None
+    return text[j + 1:end]
 
 def restores_version(body):
     """True when the body puts `/v1beta` back, rather than only stripping it.
@@ -177,13 +256,111 @@ def restores_version(body):
     return "/v1beta" in residue
 
 
-def analyse(body):
-    """Which of the three structural pieces the normalizer body has."""
+RESTORE_SUFFIX_RE = re.compile(r'/v1beta"\s*$|\+\s*"/v1beta"')
+
+
+def _assignments(src):
+    """-> {name: [rhs, ...]} for `val|var name = rhs` and plain `name = rhs`."""
+    out = {}
+    for m in re.finditer(
+            r"(?:const\s+)?(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+?)?=\s*([^\n]+)", src):
+        out.setdefault(m.group(1), []).append(m.group(2))
+    for m in re.finditer(r"(?m)^[ \t]+([A-Za-z_]\w*)\s*=\s*([^\n]+)", src):
+        out.setdefault(m.group(1), []).append(m.group(2))
+    return out
+
+
+def _const_names(src):
+    return set(m.group(1) for m in re.finditer(r"\bconst\s+val\s+([A-Za-z_]\w*)", src))
+
+
+def _top_level_returns(body):
+    """Every depth-0 `return` expression; for an expression-bodied fun the body
+    itself IS the returned value."""
+    out = []
+    depth = 0
+    i = 0
+    while i < len(body):
+        c = body[i]
+        if c == '"' or c == "'":
+            i = _skip_string(body, i)
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and re.match(r"return\b", body[i:]):
+            expr = expr_span(body, i + 6).strip()
+            out.append(expr)
+            i += 6 + len(expr)
+            continue
+        i += 1
+    if not out:
+        out.append(body.strip())
+    return out
+
+
+def _chain_only(expr):
+    """`expr` with nested `{...}` bodies dropped: `.also { ... }` returns its
+    RECEIVER, so whatever happens inside the lambda cannot restore the value."""
+    out = []
+    depth = 0
+    i = 0
+    while i < len(expr):
+        c = expr[i]
+        if c == '"' or c == "'":
+            j = _skip_string(expr, i)
+            out.append(expr[i:j])
+            i = j
+            continue
+        if c == "{":
+            depth += 1
+            i += 1
+            continue
+        if c == "}":
+            depth = max(0, depth - 1)
+            i += 1
+            continue
+        if depth == 0:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def returned_value_restores(body, src):
+    """Does the VALUE the normalizer returns carry the version segment?
+
+    A restore that lives only in the body (`val unused = "/v1beta"`, or inside a
+    `.also { }` whose receiver is the raw argument) hands the caller a
+    versionless base: `/models/<id>:generateContent` then 404s for every
+    instance. Judged on each `return`'s top-level chain, with one hop into a
+    local/constant for the `?: return DEFAULT_BASE` early exit.
+    """
+    if SHARED_DELEGATE in body:
+        return True
+    table = _assignments(src)
+    for expr in _top_level_returns(body):
+        chain = _chain_only(expr).strip()
+        if SHARED_DELEGATE in chain:
+            continue
+        if RESTORE_SUFFIX_RE.search(chain):
+            continue
+        if re.fullmatch(r"[A-Za-z_]\w*", chain):
+            if any(RESTORE_SUFFIX_RE.search(rhs) for rhs in table.get(chain, ())):
+                continue
+        return False, chain
+    return True, ""
+
+
+def analyse(body, src=""):
+    """Which structural pieces the normalizer body has."""
+    restores, chain = returned_value_restores(body, src)
     return {
         "strips /v1beta": '.removeSuffix("/v1beta")' in body,
         "strips /v1": '.removeSuffix("/v1")' in body,
         "restores /v1beta": restores_version(body),
-    }
+        "restore /v1beta in the returned value": restores,
+    }, chain
 
 
 def balanced_block(text, open_idx):
@@ -252,6 +429,117 @@ def read(rel, root):
         return strip_comments(f.read())
 
 
+DEAD_CODE_RE = re.compile(r"\b(?:if|while)\s*\(\s*false\s*\)")
+IF_RE = re.compile(r"\bif\s*\(")
+# `if (false && baseURL.endsWith("/v1"))` keeps the guard token and deletes the
+# decision — the same defect class one spelling over.
+BOOL_OP_LITERAL = re.compile(
+    r"(?:&&|\|\|)\s*(?:true|false)(?![\w])"
+    r"|(?<![\w.\"'])(?:true|false)\s*(?:&&|\|\|)")
+
+
+def _guard_conditions(arm):
+    """-> every `if (...)` condition text inside `arm`."""
+    out = []
+    for m in IF_RE.finditer(arm):
+        op = arm.find("(", m.end() - 1)
+        out.append(expr_span(arm, op))
+    return out
+
+
+def _live_guard_testing(arm, needle):
+    """-> (found, live): does a guard test `needle`, and is any such guard live?"""
+    found = False
+    live = False
+    for cond in _guard_conditions(arm):
+        if needle not in cond:
+            continue
+        found = True
+        inner = cond.strip()
+        if inner.startswith("(") and inner.endswith(")"):
+            inner = inner[1:-1]
+        if not BOOL_OP_LITERAL.search(inner):
+            live = True
+    return found, live
+
+MIN_URL_SITES = 2
+URL_MODEL_MARK_RE = re.compile(r":(?:stream)?[Gg]enerateContent")
+BASE_INTERP_RE = re.compile(r"(?:\$\{([^}]*)\}|\$([A-Za-z_]\w*))\s*/models/")
+FUN_HEAD_RE = re.compile(r"\bfun\s+[A-Za-z_]\w*\s*\(")
+
+
+def _string_literals(text):
+    """-> [(start, literal-text)] for every double-quoted literal."""
+    out = []
+    i = 0
+    while i < len(text):
+        if text[i] != '"':
+            i += 1
+            continue
+        j = _skip_string(text, i)
+        out.append((i, text[i:j]))
+        i = j
+    return out
+
+
+def enclosing_function(src, pos):
+    """Text of the innermost `fun` body that contains `pos` (None when outside)."""
+    best = None
+    for m in FUN_HEAD_RE.finditer(src):
+        if m.start() > pos:
+            break
+        op = src.find("(", m.end() - 1)
+        cp = _close_index(src, op, "(", ")")
+        if cp < 0 or cp > pos:
+            continue
+        k = cp + 1
+        while k < pos and src[k] not in "{=":
+            k += 1
+        if k >= pos:
+            continue
+        if src[k] == "{":
+            end = _close_index(src, k, "{", "}")
+            if end < 0 or end < pos:
+                continue
+            best = src[m.start():end + 1]
+        else:
+            best = src[m.start():]
+    return best
+
+
+def check_url_routing(src):
+    """-> (routed_sites, violations) for every models URL built from a base.
+
+    Derived from the literals themselves: the interpolation that sits directly
+    before `/models/` is the base, and it must be the NORMALIZED base (inline
+    call, or a local bound to the normalizer in the same function).
+    """
+    violations = []
+    sites = 0
+    for start, literal in _string_literals(src):
+        if not URL_MODEL_MARK_RE.search(literal):
+            continue
+        interps = list(BASE_INTERP_RE.finditer(literal))
+        if not interps:
+            continue  # a hard-coded base needs no normalization
+        sites += 1
+        fn = enclosing_function(src, start) or ""
+        for m in interps:
+            expr = (m.group(1) or m.group(2) or "").strip()
+            if "normalizedBasePath(" in expr:
+                continue
+            if re.fullmatch(r"[A-Za-z_]\w*", expr) and re.search(
+                    r"\b(?:val|var)\s+%s\s*(?::[^=\n]+)?=\s*[^\n]*normalizedBasePath\("
+                    % re.escape(expr), fn):
+                continue
+            line = src[:start].count("\n") + 1
+            violations.append(
+                f"GeminiProvider.kt:{line} the models URL interpolates `{expr}` instead of the "
+                "normalized base — a base ending in /v1 (appendV1Suffix) or carrying a "
+                "duplicate segment then 404s on every non-streaming call")
+    return sites, violations
+
+
 def check_cross_file_sites(root, gemini_bodies):
     """Criteria 4/5 — the three sibling sites must delegate like the shared rule.
 
@@ -317,15 +605,24 @@ def check_cross_file_sites(root, gemini_bodies):
                     )
             elif type_name == "anthropic":
                 seen["anthropic"] += 1
-                ok = 'endsWith("/v1")' in arm
+                guard_found, guard_live = _live_guard_testing(arm, 'endsWith("/v1")')
+                ok = guard_found and guard_live
                 print(f"  [{'OK' if ok else 'FAIL'}] probe arm ProviderType.anthropic guards on /v1")
                 if not ok:
-                    failures.append(
-                        "ProviderMutationMethods.kt: the anthropic probe arm appends /v1 with no "
-                        "endsWith(\"/v1\") guard — effectiveBaseURL already ends in /v1 when "
-                        "appendV1Suffix applied, so it probes /v1/v1/models (404). The sibling "
-                        "openAI/xAI/kimiCode arms all guard; the asymmetry is the defect."
-                    )
+                    if guard_found and not guard_live:
+                        failures.append(
+                            "ProviderMutationMethods.kt: the anthropic probe arm keeps the "
+                            "endsWith(\"/v1\") comparison but short-circuits it with a boolean "
+                            "literal (`false && ...`) — the raw arm runs, so a base that already "
+                            "ends in /v1 probes /v1/v1/models (404)"
+                        )
+                    else:
+                        failures.append(
+                            "ProviderMutationMethods.kt: the anthropic probe arm appends /v1 with no "
+                            "endsWith(\"/v1\") guard — effectiveBaseURL already ends in /v1 when "
+                            "appendV1Suffix applied, so it probes /v1/v1/models (404). The sibling "
+                            "openAI/xAI/kimiCode arms all guard; the asymmetry is the defect."
+                        )
     for type_name, count in sorted(seen.items()):
         if count == 0:
             failures.append(
@@ -545,11 +842,12 @@ _FIXTURE_VENDOR_BASELINE = (
 
 def write_fixture(root, partial=False, sibling_body=None, voice_fn_body=None,
                   decoy_body=None, probe=None, voice_fn_name="buildVoiceOutputRequest",
-                  voice_normalizer=None, voice_factory=None, vendors_extra=None):
+                  voice_normalizer=None, voice_factory=None, vendors_extra=None,
+                  provider_file=None, base_file=None):
     gemini_dir = os.path.join(root, GEMINI_DIR)
     os.makedirs(gemini_dir, exist_ok=True)
     files = {
-        os.path.join(GEMINI_DIR, "GeminiProvider.kt"): (
+        os.path.join(GEMINI_DIR, "GeminiProvider.kt"): provider_file if provider_file else (
             "package com.rikkaminis.app.provider.gemini\n"
             "class GeminiProvider(private val basePath: String = GeminiBasePath.DEFAULT_BASE) {\n"
             "    private fun normalizedBasePath(): String = GeminiBasePath.normalize(basePath)\n"
@@ -561,7 +859,7 @@ def write_fixture(root, partial=False, sibling_body=None, voice_fn_body=None,
             "    }\n"
             "}\n"
         ),
-        os.path.join(GEMINI_DIR, "GeminiBasePath.kt"): (
+        os.path.join(GEMINI_DIR, "GeminiBasePath.kt"): base_file if base_file else (
             "package com.rikkaminis.app.provider.gemini\n"
             "internal object GeminiBasePath {\n"
             '    const val DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta"\n'
@@ -624,6 +922,48 @@ def _run_gate(root):
         sys.argv = old
     return code, buf.getvalue()
 
+
+_BASE_DEAD_RESTORE = (
+    "package com.rikkaminis.app.provider.gemini\n"
+    "internal object GeminiBasePath {\n"
+    '    const val DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta"\n'
+    "    fun normalize(raw: String?): String {\n"
+    "        val base = raw?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() } "
+    "?: return DEFAULT_BASE\n"
+    "        var stripped = base\n"
+    "        while (true) {\n"
+    '            val next = stripped.removeSuffix("/v1beta").removeSuffix("/v1")\n'
+    "            if (next == stripped) break\n"
+    "            stripped = next\n"
+    "        }\n"
+    '        val unused = "/v1beta"\n'
+    "        return stripped\n"
+    "    }\n"
+    "}\n"
+)
+
+_BASE_LAMBDA_DEAD_LOOP = (
+    "package com.rikkaminis.app.provider.gemini\n"
+    "internal object GeminiBasePath {\n"
+    '    const val DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta"\n'
+    "    fun normalize(raw: String?): String = (raw ?: DEFAULT_BASE).also { "
+    'while (false) { "".removeSuffix("/v1beta").removeSuffix("/v1"); "/v1beta" } }\n'
+    "}\n"
+)
+
+_PROVIDER_RAW_BASE = (
+    "package com.rikkaminis.app.provider.gemini\n"
+    "class GeminiProvider(private val basePath: String = GeminiBasePath.DEFAULT_BASE) {\n"
+    "    private fun normalizedBasePath(): String = GeminiBasePath.normalize(basePath)\n"
+    "    fun sendMessage() {\n"
+    "        val ignored = normalizedBasePath()\n"
+    '        val url = "$basePath/models/gemini-2.5-flash:generateContent"\n'
+    "    }\n"
+    "    fun streamMessage() {\n"
+    '        val url = "${normalizedBasePath()}/models/gemini-2.5-flash:streamGenerateContent"\n'
+    "    }\n"
+    "}\n"
+)
 
 def selftest():
     """Fixture trees — one dirty arm per criterion, every one must turn it red."""
@@ -712,6 +1052,39 @@ def selftest():
         True,
         "not found",
         voice_fn_name="buildOutputRequest",
+    )
+
+    # ── wide3-01: the four externally-witnessed shapes ─────────────────────
+    run(
+        "a restore kept as a dead local while the return drops it is caught",
+        True,
+        "restore /v1beta in the returned value",
+        base_file=_BASE_DEAD_RESTORE,
+    )
+    run(
+        "a normalizer whose whole body is a dead-loop lambda is caught",
+        True,
+        "restore /v1beta in the returned value",
+        base_file=_BASE_LAMBDA_DEAD_LOOP,
+    )
+    run(
+        "a models URL on the raw basePath with a decoy normalizer call is caught",
+        True,
+        "instead of the normalized base",
+        provider_file=_PROVIDER_RAW_BASE,
+    )
+    run(
+        "the anthropic probe guard short-circuited by `false &&` is caught",
+        True,
+        "short-circuits",
+        probe=_probe_body(
+            arms=(
+                '        ProviderType.anthropic -> if (false && baseURL.endsWith("/v1")) '
+                '"$baseURL/models" else "$baseURL/v1/models"\n'
+                '        ProviderType.gemini -> "${GeminiBasePath.normalize(baseURL)}/models?key=" '
+                "+ (key ?: \"\")\n"
+            )
+        ),
     )
 
     # Criterion 6 — the voice family's own base rules (A-05). One green arm, so a
@@ -907,32 +1280,39 @@ def main():
             results[fname] = True
             print(f"  [OK] {fname}::{fn_name}  delegates to {SHARED_DELEGATE}")
             continue
-        pieces = analyse(body)
+        pieces, chain = analyse(body, text)
+        if DEAD_CODE_RE.search(body):
+            pieces["run live code (an `if (false)` / `while (false)` block cannot strip "
+                   "or restore anything)"] = False
         ok = all(pieces.values())
         results[fname] = ok
         tag = "[OK]" if ok else "[FAIL]"
         print(f"  {tag} {fname}::{fn_name}  " + ", ".join(f"{k}={v}" for k, v in pieces.items()))
         for piece, present in pieces.items():
             if not present:
-                failures.append(f"{fname}::{fn_name} does not {piece}")
+                detail = f" (returns `{chain}`)" if piece.startswith("restore /v1beta") and chain else ""
+                failures.append(f"{fname}::{fn_name} does not {piece}{detail}")
 
     if seen == 0:
         failures.append("no base normalizer found in any target file")
     if delegating and not results.get("GeminiBasePath.kt", False):
         failures.append("a normalizer delegates to GeminiBasePath.normalize, but GeminiBasePath.kt is missing or not OK")
 
-    # Wiring: both GeminiProvider call sites must go through the normalizer.
+    # Wiring: every models URL built from the configured base must interpolate the
+    # NORMALIZED base. A call-count is not evidence — `val ignored =
+    # normalizedBasePath()` keeps the count at 2 while the URL still reads the raw
+    # `basePath`, and `"$basePath/models/"` (no braces) slips a literal check.
     provider = os.path.join(root, GEMINI_DIR, "GeminiProvider.kt")
     if os.path.exists(provider):
         src = strip_comments(open(provider, encoding="utf-8").read())
-        routed = len(re.findall(r"normalizedBasePath\(\)", src)) - 1  # minus the declaration
-        print(f"  [{'OK' if routed >= 2 else 'FAIL'}] GeminiProvider routes {routed} call site(s) through the normalizer")
-        if routed < 2:
-            failures.append(f"GeminiProvider routes only {routed} call site(s) through the normalizer (need 2)")
-        raw = re.findall(r'"\$\{basePath\}/models/', src)
-        if raw:
-            failures.append(f"GeminiProvider builds {len(raw)} URL(s) from the raw basePath")
-            print(f"  [FAIL] {len(raw)} URL(s) built from the raw basePath")
+        sites, url_failures = check_url_routing(src)
+        print(f"  [{'OK' if not url_failures else 'FAIL'}] GeminiProvider routes {sites} models "
+              "URL(s) through the normalizer")
+        if sites < MIN_URL_SITES:
+            url_failures.append(
+                f"GeminiProvider: only {sites} models URL(s) interpolate a base (expected >= "
+                f"{MIN_URL_SITES}) — the URL shape moved; re-anchor this criterion deliberately")
+        failures.extend(url_failures)
 
     # Criteria 4/5 — the sibling sites. Gated on a full check-out: the frozen
     # test_scan.py fixtures build a gemini-only tree, so an absent cross-file

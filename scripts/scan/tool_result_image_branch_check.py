@@ -129,6 +129,137 @@ def strip_comments_and_strings(text):
     return out
 
 
+BOOL_OP_LITERAL = re.compile(
+    r"(?:&&|\|\|)\s*(?:true|false)(?![\w])"
+    r"|(?<![\w.\"'])(?:true|false)\s*(?:&&|\|\|)")
+IF_RE = re.compile(r"\bif\s*\(")
+CONTINUATION_CHARS = "||&&,.+-*/?:=(<["
+
+
+def _skip_string(text, i):
+    if text.startswith('"""', i):
+        j = text.find('"""', i + 3)
+        return len(text) if j < 0 else j + 3
+    q = text[i]
+    i += 1
+    while i < len(text) and text[i] != q:
+        if text[i] == "\\":
+            i += 2
+        elif text.startswith("${", i):
+            depth = 1
+            i += 2
+            while i < len(text) and depth:
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                i += 1
+        else:
+            i += 1
+    return i + 1
+
+
+def _close_of(text, k, open_ch, close_ch):
+    depth = 0
+    i = k
+    while i < len(text):
+        c = text[i]
+        if c == '"' or c == "'":
+            i = _skip_string(text, i)
+            continue
+        if c == open_ch:
+            depth += 1
+        elif c == close_ch:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _expr_span(text, start):
+    """Expression text up to the statement end. A newline only ends it when the
+    last non-space character is not a continuation operator, so a BLANK LINE in
+    the middle of an expression does not truncate it."""
+    depth = 0
+    i = start
+    last = ""
+    while i < len(text):
+        c = text[i]
+        if c == '"' or c == "'":
+            j = _skip_string(text, i)
+            last = text[j - 1]
+            i = j
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                return text[start:i]
+            depth -= 1
+        if c == "\n" and depth == 0 and last not in CONTINUATION_CHARS:
+            return text[start:i]
+        if not c.isspace():
+            last = c
+        i += 1
+    return text[start:]
+
+
+def _if_conditions(text):
+    """-> [(cond_start, cond_text)] for every brace- or bracket-bodied `if (`."""
+    out = []
+    for m in IF_RE.finditer(text):
+        op = text.find("(", m.end() - 1)
+        cp = _close_of(text, op, "(", ")")
+        if cp < 0:
+            continue
+        out.append((op, text[op:cp + 1]))
+    return out
+
+
+def dead_guard_in(text, needle):
+    """-> offending condition text when `needle` is only guarded by a condition a
+    boolean literal short-circuits (`if (false && part.imageData != null)`).
+
+    Presence of the token is not a decision: the branch stays textually intact
+    and never runs, so the payload is silently dropped.
+    """
+    for _pos, cond in _if_conditions(text):
+        if needle not in cond:
+            continue
+        inner = cond[1:-1] if cond.startswith("(") and cond.endswith(")") else cond
+        if BOOL_OP_LITERAL.search(inner) or re.match(r"\s*(?:true|false)\b", inner):
+            return re.sub(r"\s+", " ", inner).strip()[:80]
+    return None
+
+
+def payload_predicate_body(text):
+    """Body of the shared payload predicate, bounded by the EXPRESSION itself.
+
+    The old slice ended at the first blank line (`find("\n\n")`): a carrier arm
+    written after a blank line — or after a blank line inside the multi-line
+    `||` chain — vanished from C-IMG-1, so the declaration could promise a
+    payload no serializer consumes.
+    """
+    blanked = blank_comments(text)
+    idx = blanked.find(PAYLOAD_PREDICATE_DECL)
+    if idx < 0:
+        return None
+    op = blanked.find("(", idx)
+    cp = _close_of(blanked, op, "(", ")")
+    if cp < 0:
+        return None
+    k = cp + 1
+    while k < len(blanked) and blanked[k] not in "={":
+        k += 1
+    if k >= len(blanked):
+        return None
+    if blanked[k] == "{":
+        end = _close_of(blanked, k, "{", "}")
+        return blanked[k + 1:end] if end > 0 else blanked[k + 1:]
+    return _expr_span(blanked, k + 1)
+
+
 def branch_block(text, start):
     """Return the text of the block opened at/after `start` (first `{` reached),
     brace-balanced over code only."""
@@ -240,7 +371,21 @@ def check_payload_filters(root, provider_dir, texts):
             % (PAYLOAD_PREDICATE_FILE, PAYLOAD_PREDICATE_DECL)
         )
         return violations, total
-    alive = [arm for arm in PAYLOAD_MEDIA_ARMS + (PAYLOAD_TURN_IMAGE_ARM,) if arm not in predicate]
+    body = payload_predicate_body(predicate)
+    if body is None:
+        violations.append(
+            "%s: the payload predicate's body could not be derived — refusing to report "
+            "green (the declaration shape moved)" % PAYLOAD_PREDICATE_FILE)
+        return violations, total
+    dead = BOOL_OP_LITERAL.search(body)
+    if dead is not None:
+        window = body[max(0, dead.start() - 60):dead.end() + 60]
+        violations.append(
+            "%s: the payload predicate's decision is short-circuited by a boolean literal "
+            "(`%s`) — every media arm is still present as text and none of them is weighed, "
+            "so a media-only turn is deleted and its bytes never reach the model"
+            % (PAYLOAD_PREDICATE_FILE, re.sub(r"\s+", " ", window).strip()))
+    alive = [arm for arm in PAYLOAD_MEDIA_ARMS + (PAYLOAD_TURN_IMAGE_ARM,) if arm not in body]
     if alive:
         violations.append(
             "%s: the payload predicate no longer weighs %s — that payload can only come "
@@ -467,14 +612,9 @@ def preceding_sibling(structure, if_start):
 
 def predicate_carrier_arms(predicate_text):
     """-> set of carrier names the shared payload predicate weighs, or None."""
-    blanked = blank_comments(predicate_text)
-    idx = blanked.find(PAYLOAD_PREDICATE_DECL)
-    if idx < 0:
+    span = payload_predicate_body(predicate_text)
+    if span is None:
         return None
-    end = blanked.find("\n\n", idx)
-    if end < 0:
-        end = len(blanked)
-    span = blanked[idx:end]
     return {m.group(1) for m in CARRIER_ARM_RE.finditer(span)}
 
 
@@ -634,6 +774,16 @@ def scan_root(root, exemptions=None):
                         % (rel, line, IMAGE_FIELD)
                     )
                     bad_branch = True
+                else:
+                    dead = dead_guard_in(block, IMAGE_FIELD)
+                    if dead is not None:
+                        violations.append(
+                            "%s:%d the ToolResult branch reads %s only inside a condition a "
+                            "boolean literal short-circuits (`%s`) — the image path is dead "
+                            "code, so every tool-result image is silently dropped"
+                            % (rel, line, IMAGE_FIELD, dead)
+                        )
+                        bad_branch = True
             report.append((rel, "branch-without-imageData" if bad_branch else "ok"))
 
     # An exemption that no longer matches any scanned file is dead weight and
@@ -741,6 +891,30 @@ def selftest():
             "when-branch that ignores imageData inside its own body is red",
             any("SplitProvider.kt" in v and "ToolResult branch does not consume" in v for v in violations),
         )
+
+        # (e) wide3-01: the branch keeps `imageData` but the condition that
+        #     gates the encode is short-circuited by a literal — the path is dead.
+        d_root = tempfile.mkdtemp(prefix="trimg-deadguard-")
+        try:
+            d_pkg = os.path.join(d_root, PROVIDER_REL)
+            write_fixture(os.path.join(d_pkg, "anthropic/DeadGuardProvider.kt"),
+                          "class D {\n"
+                          "    fun f(part: Any) = when (part) {\n"
+                          "        is AgentContentPart.ToolResult -> {\n"
+                          "            if (false && part.imageData != null "
+                          "&& part.imageMimeType != null) {\n"
+                          '                put("image", part.imageData)\n'
+                          "            }\n"
+                          "        }\n"
+                          "        else -> Unit\n"
+                          "    }\n"
+                          "}\n")
+            v_dead_guard, _, _ = scan_root(d_root)
+            check("a ToolResult image guard short-circuited by a literal is red",
+                  any("DeadGuardProvider.kt" in v and "dead code" in v for v in v_dead_guard),
+                  str(v_dead_guard[:2]))
+        finally:
+            shutil.rmtree(d_root, ignore_errors=True)
 
         # Exemption with a live symbol is honoured; a dead one is rot.
         write(
@@ -867,6 +1041,23 @@ def selftest():
                    "                    turnImageCount = images.size,\n"
                    "                )\n")
 
+            # (5) wide3-01: the media arms stay verbatim but a literal
+            #     short-circuits the whole disjunction.
+            write_fixture(os.path.join(p_pkg, PAYLOAD_PREDICATE_FILE),
+                          "internal fun LLMMessage.hasWirePayload(\n"
+                          "    isLastUserTurn: Boolean,\n"
+                          "    turnImageCount: Int,\n"
+                          "): Boolean =\n"
+                          "    contentParts.isNotEmpty() ||\n"
+                          "        content.isNotEmpty() ||\n"
+                          "        (false && (audioParts.isNotEmpty() || "
+                          "imageParts.isNotEmpty() || "
+                          "(isLastUserTurn && turnImageCount > 0)))\n")
+            v_dead, _sc, _rp = scan_root(p_root)
+            check("a payload predicate short-circuited by `false &&` is red",
+                  any("short-circuited by a boolean literal" in v for v in v_dead),
+                  str(v_dead[:2]))
+
             # (4) the shared predicate file disappears
             os.remove(os.path.join(p_pkg, PAYLOAD_PREDICATE_FILE))
             v_gone, _, _ = scan_root(p_root)
@@ -908,6 +1099,19 @@ def selftest():
             v_back, _, _ = scan_root(m_root)
             check("restoring the merged branch clears the C-IMG-2 arm",
                   not media_crit_codes(v_back), str(sorted(media_crit_codes(v_back))))
+            # (3) wide3-01: a carrier arm added after a BLANK LINE must still be
+            #     derived — the old slice ended at the first `\n\n`.
+            write_fixture(os.path.join(m_pkg, PAYLOAD_PREDICATE_FILE),
+                          PREDICATE_BODY.replace(
+                              "        imageParts.isNotEmpty() ||\n",
+                              "        imageParts.isNotEmpty() ||\n"
+                              "\n"
+                              "        unconsumedCarrierParts.isNotEmpty() ||\n"))
+            v_blank, _, _ = scan_root(m_root)
+            check("a carrier arm after a blank line is still derived (C-IMG-1 red)",
+                  media_crit_codes(v_blank) == {"C-IMG-1"},
+                  str(sorted(media_crit_codes(v_blank))))
+            write_fixture(os.path.join(m_pkg, PAYLOAD_PREDICATE_FILE), PREDICATE_BODY)
             if "openai/A.kt" not in m_snapshot or MEDIA_MERGED not in m_snapshot["openai/A.kt"]:
                 check("media fixture carries the merged branch it mutates", False)
         finally:
