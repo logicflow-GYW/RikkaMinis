@@ -87,6 +87,7 @@ Usage:
     python3 scripts/scan/sysinfo_state_thread_check.py --selftest
 """
 
+import bisect
 import os
 import re
 import sys
@@ -284,18 +285,130 @@ def rule_single_home(repo_root, class_file, class_span):
     return problems
 
 
+# ── structural helpers: "under the lock" is a POSITION, not a substring ──────
+DEAD_COND_RE = re.compile(
+    r"(?:\bif\s*\(\s*|\bwhile\s*\(\s*)"
+    r"(?:false\b|!\s*true\b|0\s*==\s*1\b|true\s*\|\||false\s*&&)"
+    r"|\bfalse\s*&&|\btrue\s*\|\|")
+
+
+def _line_starts(code):
+    starts = [0]
+    for i, ch in enumerate(code):
+        if ch == "\n":
+            starts.append(i + 1)
+    return starts
+
+
+def _stmt_start(code, off):
+    """Offset just after the last statement boundary before `off`.
+
+    A newline at bracket depth 0 is a boundary — Kotlin almost never uses
+    semicolons here, so without it a guard belonging to the previous statement
+    would be attributed to this one.
+    """
+    depth = 0
+    i = off - 1
+    while i >= 0:
+        ch = code[i]
+        if ch in ")]":
+            depth += 1
+        elif ch in "([":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and ch in "\n;{}":
+            return i + 1
+        i -= 1
+    return i + 1
+
+
+def dead_guarded(code, off):
+    """True when a constant condition governs `off` (dead code, not a guard)."""
+    if DEAD_COND_RE.search(code[_stmt_start(code, off):off]):
+        return True
+    depth = 0
+    i = off
+    while i > 0:
+        i -= 1
+        ch = code[i]
+        if ch in "})":
+            depth += 1
+        elif ch in "({":
+            if depth == 0:
+                if ch == "{" and DEAD_COND_RE.search(code[_stmt_start(code, i):i]):
+                    return True
+            else:
+                depth -= 1
+    return False
+
+
+def _brace_end(code, open_idx):
+    depth = 0
+    for j in range(open_idx, len(code)):
+        if code[j] == "{":
+            depth += 1
+        elif code[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return j
+    return -1
+
+
+def live_sync_bodies(code):
+    """(start, end) offsets of every LIVE, NON-EMPTY `synchronized(...) { … }` body.
+
+    [wide3/10] A block that is empty guards nothing, and a block behind a
+    constant-false condition never runs: `if (false) synchronized(lock) {}` keeps
+    the word and drops the mutual exclusion. Membership in this list — not the
+    presence of the substring `"synchronized"` on the line — is what makes an
+    access "locked".
+    """
+    out = []
+    for m in re.finditer(r"\bsynchronized\s*\(", code):
+        op = code.find("(", m.start())
+        cl = _paren_end(code, op)
+        j = cl + 1
+        while j < len(code) and code[j] in " \t\r\n":
+            j += 1
+        if j >= len(code) or code[j] != "{":
+            continue
+        k = _brace_end(code, j)
+        if k < 0:
+            continue
+        if not code[j + 1:k].strip():
+            continue  # empty critical section: no mutual exclusion at all
+        if dead_guarded(code, m.start()):
+            continue  # `if (false) synchronized(…) { … }`
+        out.append((j + 1, k))
+    return out
+
+
+def in_live_sync(bodies, off):
+    return any(a <= off < b for (a, b) in bodies)
+
+
 def rule_guarded_access(class_text, class_span, code):
     """B + C + D on the coalescer source."""
     problems = []
     lo, hi = class_span
     lines = class_text.split("\n")
-    code_lines = code.split("\n")
-    inside = sync_regions(code)
     spans = fun_spans(code, class_lo=lo + 1, class_hi=hi + 1)
+    bodies = live_sync_bodies(code)
+    # The monitor expression itself (`synchronized(lock) {`) is a read of `lock`
+    # — it is the lock, not state accessed outside it.
+    monitor_spans = []
+    for m in re.finditer(r"\bsynchronized\s*\(", code):
+        op = code.find("(", m.start())
+        monitor_spans.append((op, _paren_end(code, op)))
+    starts = _line_starts(code)
     locked_lines = set()
     for name, (a, b) in spans.items():
         if name.endswith("Locked"):
             locked_lines.update(range(a, b + 1))
+
+    def line_of(off):
+        return bisect.bisect_right(starts, off)
 
     # mutable state = the class's own private var/val declarations
     state = []
@@ -309,71 +422,135 @@ def rule_guarded_access(class_text, class_span, code):
 
     for name, decl_line in state:
         pat = re.compile(r"\b%s\b" % re.escape(name))
-        for idx in range(lo, hi + 1):
-            line_no = idx + 1
+        for m in pat.finditer(code):
+            off = m.start()
+            line_no = line_of(off)
+            if line_no < lo + 1 or line_no > hi + 1:
+                continue
             if line_no == decl_line:
                 continue
-            src = code_lines[idx]
-            if not pat.search(src):
-                continue
+            src = code[starts[line_no - 1]:starts[line_no] if line_no < len(starts)
+                       else len(code)]
             # another member's declaration (e.g. `val blocks: List<T>,` in the
             # Window class) is not an access to this class's mutable state
             if re.match(r"^\s*(?:private |internal |protected |public )?(?:val|var)\s+\w+",
                         src):
                 continue
-            if "synchronized" in src or line_no in inside or line_no in locked_lines:
+            # [wide3/10] The old escape hatch was the substring
+            # `"synchronized" in src`: an EMPTY block (`synchronized(lock) {}`)
+            # or a constant-false guard on the same line kept the word and
+            # dropped the mutual exclusion -- the access was exempt anyway.
+            # Membership is now positional: the access must sit inside the body
+            # of a live, non-empty synchronized block.
+            if in_live_sync(bodies, off) or line_no in locked_lines:
                 continue
+            if any(a < off < b for (a, b) in monitor_spans):
+                continue  # `synchronized(lock)` — the monitor is the lock
             problems.append("[B guarded-access] %s:%d reads/writes `%s` outside the lock: %s"
-                            % ("", line_no, name, lines[idx].strip()))
+                            % ("", line_no, name, lines[line_no - 1].strip()))
 
     # C: every publish() invocation must be under the lock (or inside a *Locked helper)
-    for idx in range(lo, hi + 1):
-        line_no = idx + 1
-        src = code_lines[idx]
-        m = re.search(r"\bpublish(Locked)?\s*\(", src)
-        if not m:
+    for m in re.finditer(r"\bpublish(Locked)?\s*\(", code):
+        off = m.start()
+        line_no = line_of(off)
+        if line_no < lo + 1 or line_no > hi + 1:
             continue
+        src = code[starts[line_no - 1]:starts[line_no] if line_no < len(starts)
+                   else len(code)]
         if re.search(r"fun\s+\w+\s*\(\s*publish\s*:", src) or "publish:" in src:
             continue  # the parameter declaration
-        if "synchronized" in src or line_no in inside or line_no in locked_lines:
+        if in_live_sync(bodies, off) or line_no in locked_lines:
             continue
         problems.append("[C publish-under-lock] line %d calls publish outside the lock: %s"
-                        % (line_no, lines[idx].strip()))
+                        % (line_no, lines[line_no - 1].strip()))
 
     # D: the drained list must be handed out as a copy behind a read-only type
     if not re.search(r"val\s+blocks\s*:\s*List<", class_text):
         problems.append("[D no-raw-handout] Window.blocks is not declared as List<T>")
-    if not window_ctor_args(class_text):
+    args_list = window_ctor_args(code)
+    if not args_list:
         problems.append("[D no-raw-handout] no Window(...) construction found")
-    for args in window_ctor_args(class_text):
-        m = re.search(r"blocks\s*=\s*([^,)]+)", args)
-        if m is None:
+    for args in args_list:
+        val = _named_arg(args, "blocks")
+        if val is None:
             problems.append("[D no-raw-handout] Window(...) without blocks: %s" % args.strip())
-        elif not re.search(r"blocks\.(toList|toMutableList)\s*\(", m.group(1)):
-            problems.append("[D no-raw-handout] window built with a live list: %s"
-                            % m.group(0).strip())
+            continue
+        if _is_copy_of_blocks(val):
+            continue
+        # [wide3/10] `blocks = blocks.also { blocks.toList() }` CONTAINS the copy
+        # call and still hands out the live list: `.also`/`.apply` return the
+        # receiver, and `blocks.clear()` runs two lines later. The criterion is
+        # now the whole value expression, not a search inside it.
+        lossy = re.search(r"\.\s*(also|apply|let|run)\s*\{", val)
+        hint = " (copy result discarded by `.%s { … }`)" % lossy.group(1) if lossy else ""
+        problems.append("[D no-raw-handout] window built with a live list%s: %s"
+                        % (hint, val.strip()))
     return problems
 
 
-def window_ctor_args(class_text):
-    """Argument texts of every `Window(...)` *construction* (declaration skipped)."""
+def window_ctor_args(code):
+    """Argument text of every `Window(...)` *construction* (declaration skipped).
+
+    The FULL argument list is returned (paren/brace balanced). The old criterion
+    sliced the value with `[^,)]+`, so `blocks = blocks.also { blocks.toList() }`
+    was read as `blocks.also { blocks.toList(` — the copy call was "found" inside
+    a value whose outermost operation is `.also`.
+    """
     out = []
-    for m in re.finditer(r"(?<!class )\bWindow(?:<[^>]*>)?\(", class_text):
-        start = m.end() - 1
-        depth = 0
-        for j in range(start, len(class_text)):
-            if class_text[j] == "(":
-                depth += 1
-            elif class_text[j] == ")":
-                depth -= 1
-                if depth == 0:
-                    out.append(class_text[start:j + 1])
-                    break
+    for m in re.finditer(r"\bWindow(?:<[^>]*>)?\s*\(", code):
+        head = code[max(0, m.start() - 24):m.start()]
+        if re.search(r"\bclass\s+$", head):
+            continue
+        op = code.find("(", m.start())
+        end = _paren_end(code, op)
+        if end is None:
+            continue
+        out.append(code[op + 1:end])
     return out
 
 
+def _split_args(args):
+    parts, depth, cur = [], 0, ""
+    for ch in args:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    return parts
+
+
+def _named_arg(args, name):
+    for part in _split_args(args):
+        m = re.match(r"\s*%s\s*=(?!=)\s*(.*)$" % re.escape(name), part, re.S)
+        if m:
+            return m.group(1)
+    return None
+
+
+COPY_OF_BLOCKS_RE = re.compile(
+    r"^\s*blocks\s*\.\s*(?:toList|toMutableList)\s*\(\s*\)\s*$", re.S)
+
+
+def _is_copy_of_blocks(val):
+    """The value must BE `blocks.toList()` — not merely contain that call."""
+    return bool(COPY_OF_BLOCKS_RE.match(val or ""))
+
+
 def rule_convergence(repo_root, class_file):
-    """E: appendSystemInfo routes through the coalescer, not loose fields."""
+    """E: appendSystemInfo routes through the coalescer, not loose fields.
+
+    [wide3/10] The old criterion asked whether the body CONTAINED
+    `…Coalescer.method(`. `if (false) sysInfoCoalescer.append(…)` keeps that
+    substring and drops every system notice, so the call must now be LIVE
+    (`dead_guarded()`): a constant-false condition on the statement or in an
+    enclosing block makes it a no-op, which is exactly the incident shape.
+    """
     problems = []
     for path in iter_prod_kt(repo_root):
         text = read(path)
@@ -381,26 +558,36 @@ def rule_convergence(repo_root, class_file):
             continue
         rel = os.path.relpath(path, repo_root)
         code = blank_comments(text)
-        m = re.search(r"fun\s+\w*appendSystemInfo\s*\(", code)
-        if not m:
-            continue
-        start = code[: m.start()].count("\n")
-        depth, opened, end = 0, False, start
-        for j in range(start, min(start + 120, len(code.split("\n")))):
-            line = code.split("\n")[j]
-            depth += line.count("{") - line.count("}")
-            if "{" in line:
-                opened = True
-            if opened and depth == 0:
-                end = j
-                break
-        body = "\n".join(code.split("\n")[start: end + 1])
-        if not re.search(r"\b\w*[Cc]oalescer\s*\.\s*\w+\s*\(", body):
-            problems.append("%s:%d [E convergence] appendSystemInfo does not route "
-                            "through a coalescer instance" % (rel, start + 1))
-        if "pendingSysInfo" in body:
-            problems.append("%s:%d [E convergence] appendSystemInfo still touches "
-                            "pendingSysInfo*" % (rel, start + 1))
+        for m in re.finditer(r"fun\s+\w*appendSystemInfo\s*\(", code):
+            start_off = m.start()
+            line_no = code.count("\n", 0, start_off) + 1
+            op = code.find("(", m.end() - 1)
+            cl = _paren_end(code, op)
+            brace = code.find("{", cl)
+            head = code[cl + 1:brace] if brace > cl else ""
+            if brace < 0 or re.search(r"(?<![=!<>+\-*/])=(?!=)", head):
+                # expression body (`fun f() = expr`) — judge the expression, never
+                # the next declaration's block.
+                eol = code.find("\n", brace if brace > 0 else cl)
+                end_off = (eol if eol >= 0 else len(code)) - 1
+            else:
+                end_off = _brace_end(code, brace)
+                if end_off < 0:
+                    problems.append("%s:%d [E convergence] unbalanced body — cannot "
+                                    "judge the route" % (rel, line_no))
+                    continue
+            body = code[start_off:end_off + 1]
+            calls = list(re.finditer(r"\b\w*[Cc]oalescer\s*\.\s*\w+\s*\(", body))
+            live = [c for c in calls
+                    if not dead_guarded(code, start_off + c.start())]
+            if not live:
+                why = ("only in dead code (constant-false guard)" if calls
+                       else "no coalescer call at all")
+                problems.append("%s:%d [E convergence] appendSystemInfo does not route "
+                                "through a coalescer instance — %s" % (rel, line_no, why))
+            if "pendingSysInfo" in body:
+                problems.append("%s:%d [E convergence] appendSystemInfo still touches "
+                                "pendingSysInfo*" % (rel, line_no))
     return problems
 
 
@@ -1465,6 +1652,38 @@ def selftest():
         "blocks = blocks.toList()", "blocks = blocks")
     root = make_tree(bad)
     arms.append(("handing out the live list is red", run(root) == 1))
+    _rm(root)
+
+    # ── [wide3/10] "the word `synchronized` is on the line" ≠ "the lock is held"
+    bad = dict(good)
+    bad[CHAT + "/ChatViewModel.kt"] = (GOOD_VM + "\n" + GOOD_COALESCER).replace(
+        "    fun flush(publish: (Window<T>) -> Unit) {\n"
+        "        synchronized(lock) {\n"
+        "            publishLocked(publish)\n"
+        "        }\n"
+        "    }",
+        "    fun flush(publish: (Window<T>) -> Unit) {\n"
+        "        if (false) synchronized(lock) {}; publishLocked(publish)\n"
+        "    }")
+    root = make_tree(bad)
+    arms.append(("dead empty lock on the same line does not guard publish", run(root) == 1))
+    _rm(root)
+
+    # a copy call whose RESULT is discarded by `.also` hands out the live list
+    bad = dict(good)
+    bad[CHAT + "/ChatViewModel.kt"] = (GOOD_VM + "\n" + GOOD_COALESCER).replace(
+        "blocks = blocks.toList()", "blocks = blocks.also { blocks.toList() }")
+    root = make_tree(bad)
+    arms.append(("a copy discarded by .also is still the live list", run(root) == 1))
+    _rm(root)
+
+    # a coalescer call behind a constant-false guard routes nowhere
+    bad = dict(good)
+    bad[CHAT + "/ChatViewModel.kt"] = (GOOD_VM + "\n" + GOOD_COALESCER).replace(
+        "        sysInfoCoalescer.append(text, iconKind) { window -> publish(window) }",
+        "        if (false) sysInfoCoalescer.append(text, iconKind) { window -> publish(window) }")
+    root = make_tree(bad)
+    arms.append(("a dead coalescer call does not route appendSystemInfo", run(root) == 1))
     _rm(root)
 
     bad = dict(good)
