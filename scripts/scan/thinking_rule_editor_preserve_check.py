@@ -72,6 +72,11 @@ FROM_HEADER = "fun from(fmt: ThinkingWireFormat?): FormatChoice"
 ARM1_ANCHORS = ("buildEditedThinkingRule(", "seed = seed")
 # Arm 2 — builder derivation shape.
 ARM2_ANCHORS = ("seed.copy(", "kind = ThinkingRule.Kind.CUSTOM")
+# Fields the dialog does NOT surface: naming either one inside `seed.copy(…)`
+# re-drops it on every save (da1024 ISSUE-06 defect 1). `reasoningEcho` drives the
+# vendor history-echo contract, `id` keys the persisted rule.
+COPY_FORBIDDEN_FIELDS = ("id", "reasoningEcho")
+SEED_COPY = "seed.copy("
 # Arm 3 — guarded format choice.
 ARM3_DIALOG_ANCHORS = (
     "chooseEditedWireFormat(",
@@ -87,9 +92,17 @@ BARE_CTOR_RE = re.compile(r"\bThinkingRule\s*\(")
 # Arm 4 — per-format `when (choice)` block and the flag every control sets.
 PER_FORMAT_MARKER = "FormatChoice.BOOLEAN_TOGGLE, FormatChoice.EXTRA_BODY_TOGGLE"
 PER_FORMAT_MIN_HANDLERS = 5
-HANDLER_RE = re.compile(r"on(?:ValueChange|CheckedChange)\s*=\s*\{([^{}]*)\}")
 DROPDOWN_RE = re.compile(r"onClick\s*=\s*\{([^{}]*)\}")
 FLAG_ASSIGNMENT = "formatChanged = true"
+# Names of the handlers, by HEAD (the body is brace-matched). `[^{}]*` bodies
+# dropped every handler that contains a nested `{ … }` — see handlers_in().
+HANDLER_HEAD_RE = re.compile(r"on(?:ValueChange|CheckedChange)\s*=\s*\{")
+# A handler parked under a literal-false guard is not a control the user can
+# reach; counting it is how a real handler's missing flag got cancelled out.
+DEAD_GUARD_RE = re.compile(r"if\s*\(\s*(?:false\b|true\s*\|\|)")
+# Last write wins: a handler that sets the flag and then clears it discards the
+# user's edit exactly like one that never set it.
+FLAG_WRITE_RE = re.compile(r"\bformatChanged\s*=\s*(true|false)\b")
 
 # Arm 5 — type names after `is ThinkingWireFormat.` in each function body.
 FMT_TYPE_RE = re.compile(r"is\s+ThinkingWireFormat\.(\w+)")
@@ -177,6 +190,92 @@ def read(rel, root):
         return f.read()
 
 
+def call_arg_lists(src, call):
+    """The argument-list text of every `call` in `src`, paren-matched."""
+    out = []
+    idx = 0
+    while True:
+        i = src.find(call, idx)
+        if i < 0:
+            return out
+        j = i + len(call)
+        depth = 1
+        while j < len(src) and depth:
+            if src[j] in "([{":
+                depth += 1
+            elif src[j] in ")]}":
+                depth -= 1
+            j += 1
+        out.append(src[i + len(call):j - 1])
+        idx = j
+
+
+def split_args(arglist):
+    """Split a Kotlin argument list on TOP-LEVEL commas (depth-aware)."""
+    args, depth, cur = [], 0, ""
+    for ch in arglist:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            args.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        args.append(cur)
+    return args
+
+
+def named_arg_keys(arglist):
+    """The `name =` keys of a Kotlin argument list (positional args skipped)."""
+    keys = []
+    for a in split_args(arglist):
+        if "=" not in a:
+            continue
+        key = a.split("=", 1)[0].strip()
+        if re.fullmatch(r"[A-Za-z_]\w*", key):
+            keys.append(key)
+    return keys
+
+
+def handlers_in(block):
+    """(offset, body) for every on*Change lambda in `block`, brace-matched.
+
+    `[^{}]*` silently dropped every handler that contains a nested `{ … }` —
+    from the COUNT and from the flag check alike. Writing one control's body as
+    `{ run { … } }` therefore removed it from the audit while the `>= 5` count
+    was still satisfied by an unreachable `if (false) Switch(…)` elsewhere
+    (witness Arm 4, parser-death).
+    """
+    out = []
+    for m in HANDLER_HEAD_RE.finditer(block):
+        brace = m.end() - 1
+        depth = 0
+        for k in range(brace, len(block)):
+            if block[k] == "{":
+                depth += 1
+            elif block[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    out.append((m.start(), block[brace + 1:k]))
+                    break
+    return out
+
+
+def dead_guarded(block, offset):
+    """True when the handler at `offset` sits under a literal-false guard."""
+    line_start = block.rfind("\n", 0, offset) + 1
+    return bool(DEAD_GUARD_RE.search(block[line_start:offset]))
+
+
+def last_flag_write(block):
+    """The final `formatChanged = …` value in `block`, or None."""
+    writes = FLAG_WRITE_RE.findall(block)
+    return writes[-1] if writes else None
+
+
 def run_checks(root, rels=None):
     rels = rels or {"editor": EDITOR_REL, "pure": PURE_REL}
     srcs = {k: read(rel, root) for k, rel in rels.items()}
@@ -212,6 +311,26 @@ def run_checks(root, rels=None):
             checks.append((PURE_REL, 0, "2",
                            "buildEditedThinkingRule builds `ThinkingRule(` instead of "
                            "`seed.copy(` — every field the dialog does not surface is wiped"))
+        # `seed.copy(` only preserves what it does NOT name: an explicit
+        # `id = …` / `reasoningEcho = null` in the argument list re-drops the very
+        # fields arm 2 exists to protect (witness Arm 2, dataflow).
+        copies = call_arg_lists(code_only(builder), SEED_COPY)
+        if not copies:
+            checks.append((PURE_REL, 0, "2",
+                           "could not read the `seed.copy(` argument list — the "
+                           "preserved-fields check cannot run (fail-closed)"))
+        else:
+            keys = set()
+            for arglist in copies:
+                keys.update(named_arg_keys(arglist))
+            overridden = sorted(keys & set(COPY_FORBIDDEN_FIELDS))
+            if overridden:
+                checks.append((PURE_REL, 0, "2",
+                               "buildEditedThinkingRule overrides %s inside `seed.copy(…)` — those "
+                               "are exactly the fields this dialog does not surface, so naming them "
+                               "(even to pass a re-derived value) re-opens da1024 ISSUE-06 defect 1: "
+                               "the vendor history-echo contract and the rule identity die on Save"
+                               % overridden))
 
     # ---- Arm 3: the format survives unless the user replaced it ----
     chooser = declaration_text(pure, CHOOSER_HEADER)
@@ -246,22 +365,43 @@ def run_checks(root, rels=None):
                                "the format dropdown's onClick must set `%s` alongside the "
                                "selection, or an untouched save keeps a format the user did "
                                "replace" % FLAG_ASSIGNMENT))
+            else:
+                last = last_flag_write(pick)
+                if last != "true":
+                    checks.append((EDITOR_REL, 0, "4",
+                                   "the format dropdown's onClick writes `formatChanged = %s` after "
+                                   "`%s` — the last write wins, so the user's pick is discarded on "
+                                   "Save exactly as if the flag were never set (witness Arm 4, order)"
+                                   % (last, FLAG_ASSIGNMENT)))
         block = per_format_block(dialog)
         if block is None:
             checks.append((EDITOR_REL, 0, "4", "per-format `when (choice)` block not found — gate ROT"))
         else:
-            handlers = [m.group(1) for m in HANDLER_RE.finditer(block)]
+            found = handlers_in(block)
+            handlers = [(off, body) for off, body in found if not dead_guarded(block, off)]
+            dead = len(found) - len(handlers)
+            if dead:
+                checks.append((EDITOR_REL, 0, "4",
+                               "%d on*Change handler(s) sit under a literal-false guard in the "
+                               "per-format block — an unreachable control cannot satisfy the flag "
+                               "requirement for a reachable one (witness Arm 4, parser-death)" % dead))
             if len(handlers) < PER_FORMAT_MIN_HANDLERS:
                 checks.append((EDITOR_REL, 0, "4",
                                "per-format block has only %d on*Change handler(s), expected >= %d — "
                                "gate ROT or fields removed without updating the flag wiring"
                                % (len(handlers), PER_FORMAT_MIN_HANDLERS)))
-            for h in handlers:
+            for _, h in handlers:
                 if FLAG_ASSIGNMENT not in h:
                     checks.append((EDITOR_REL, 0, "4",
                                    "per-format field handler `%s…` does not set `%s`: editing a "
                                    "parameter of a preserved format would be silently discarded"
                                    % (h.strip()[:48], FLAG_ASSIGNMENT)))
+                elif last_flag_write(h) != "true":
+                    checks.append((EDITOR_REL, 0, "4",
+                                   "per-format field handler `%s…` writes `formatChanged = %s` after "
+                                   "`%s` — the user's edit is recorded and then erased in the same "
+                                   "callback (last write wins)"
+                                   % (h.strip()[:48], last_flag_write(h), FLAG_ASSIGNMENT)))
 
     # ---- Arm 5: FormatChoice.from's concrete branches stay representable ----
     from_body = declaration_text(editor, FROM_HEADER)
@@ -465,6 +605,31 @@ FIX_EDITOR_FROM_DRIFT = FIX_EDITOR_OK.replace(
     "            is ThinkingWireFormat.DeepSeekRelay -> REASONING_EFFORT",
 )
 
+# Arm 2 (wide3 witness) — `seed.copy(` still there, but the two fields the dialog
+# cannot surface are named (re-derived / nulled) inside it.
+FIX_PURE_COPY_OVERRIDE = FIX_PURE_OK.replace(
+    """): ThinkingRule = seed.copy(
+    kind = ThinkingRule.Kind.CUSTOM,""",
+    """): ThinkingRule = seed.copy(
+    id = java.util.UUID.randomUUID().toString(),
+    reasoningEcho = null,
+    kind = ThinkingRule.Kind.CUSTOM,""",
+)
+
+# Arm 4 (wide3 witness, order) — the dropdown records the change, then erases it.
+FIX_EDITOR_DROPDOWN_FLAG_CLEARED = FIX_EDITOR_OK.replace(
+    "onClick = { choice = c; formatChanged = true; formatMenuOpen = false }",
+    "onClick = { choice = c; formatChanged = true; formatChanged = false; formatMenuOpen = false }",
+)
+
+# Arm 4 (wide3 witness, parser-death) — the reachable handler hides behind a
+# nested `run { }` and loses the flag; an unreachable Switch keeps the count.
+FIX_EDITOR_NESTED_HANDLER = FIX_EDITOR_OK.replace(
+    """            OutlinedTextField(value = offValue, onValueChange = { offValue = sanitizeSingleLineInput(it); formatChanged = true })""",
+    """            if (false) Switch(checked = false, onCheckedChange = { formatChanged = true })
+            OutlinedTextField(value = offValue, onValueChange = { run { offValue = sanitizeSingleLineInput(it) } })""",
+)
+
 # (name, {rel-key: fixture}, expected-arm)
 SELFTEST_CASES = [
     ("all-ok", {"editor": FIX_EDITOR_OK, "pure": FIX_PURE_OK}, None),
@@ -474,6 +639,13 @@ SELFTEST_CASES = [
     ("dropdown-no-flag", {"editor": FIX_EDITOR_DROPDOWN_NO_FLAG, "pure": FIX_PURE_OK}, "4"),
     ("field-handler-no-flag", {"editor": FIX_EDITOR_FIELD_NO_FLAG, "pure": FIX_PURE_OK}, "4"),
     ("from-list-drift", {"editor": FIX_EDITOR_FROM_DRIFT, "pure": FIX_PURE_OK}, "5"),
+    # ── wide3 witness arms (external adversarial audit, 2026-10-25) ──
+    ("copy-overrides-preserved",
+     {"editor": FIX_EDITOR_OK, "pure": FIX_PURE_COPY_OVERRIDE}, "2"),
+    ("dropdown-flag-erased",
+     {"editor": FIX_EDITOR_DROPDOWN_FLAG_CLEARED, "pure": FIX_PURE_OK}, "4"),
+    ("nested-handler-hidden",
+     {"editor": FIX_EDITOR_NESTED_HANDLER, "pure": FIX_PURE_OK}, "4"),
 ]
 
 

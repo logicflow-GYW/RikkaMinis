@@ -124,8 +124,27 @@ EFFECTIVE_EXPR_RE = re.compile(
 # is exactly how the first version of THIS gate went green on the real bug
 # (the caller's local was named `effectiveThinkingLevelState`, so no pattern
 # fired). Track what each `val` was bound FROM.
+# `var` is included on purpose: an effective value laundered through a MUTABLE
+# local is the same laundering. Witness C1 wrote
+#     var _thinkingLevel = viewModel.thinkingLevel.value   // EFFECTIVE level
+#     …  requested = _thinkingLevel
+# and went green — the binding table only read `val`, so `_thinkingLevel` was
+# taken at face value and its name matched the raw-source shape.
 BINDING_RE = re.compile(
-    r"\bval\s+([A-Za-z_]\w*)\s*(?::\s*[\w<>?., ]+)?\s*(?:=|by)\s*([^\n]+)"
+    r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::\s*[\w<>?., ]+)?\s*(?:=|by)\s*"
+)
+
+# How far an initializer is followed: enough for a wrapped expression, short
+# enough that a runaway capture cannot swallow the rest of the file.
+EXPR_MAX = 400
+# A depth-0 newline ends a Kotlin expression unless the next line CONTINUES it.
+CONTINUATION_CHARS = "?:.+-*/%&|=<>!,"
+
+STR_LIT_RE = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
+CONCAT_GAP_RE = re.compile(r"\s*\+\s*")
+# `host` parked in a local that the operand's value never reads.
+DEAD_HOST_BIND_RE = re.compile(
+    r"\b(?:val|var)\s+[A-Za-z_]\w*\s*(?::[^=\n]+)?=\s*host\b"
 )
 EFFECTIVE_SOURCE_RE = re.compile(
     r"viewModel\.thinkingLevel\b|\beffectiveThinkingLevel\b"
@@ -145,12 +164,89 @@ def strip_comments(text: str) -> str:
     return "\n".join(out)
 
 
+def initializer_text(src: str, start: int, limit: int = EXPR_MAX) -> str:
+    """The initializer expression at `start` — bracket- and continuation-aware.
+
+    A single-line capture is what made the provenance table a spelling check:
+    `val req = run {\\n viewModel.thinkingLevel.value\\n }` read as `run {` and
+    resolved to nothing (witness C1's second shape), while the argument name
+    still looked legitimate. Depth tracking keeps a brace/paren body whole, and a
+    depth-0 newline ends the expression unless the next line continues it.
+    """
+    depth = 0
+    i = start
+    out = []
+    while i < len(src) and len(out) < limit:
+        ch = src[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        if ch == "\n" and depth == 0:
+            j = i + 1
+            while j < len(src) and src[j] in " \t":
+                j += 1
+            nxt = src[j] if j < len(src) else ""
+            if nxt not in CONTINUATION_CHARS:
+                break
+            out.append(" ")
+            i += 1
+            continue
+        if ch == ";" and depth == 0:
+            break
+        out.append(ch)
+        i += 1
+    return "".join(out).strip()
+
+
 def binding_map(src: str):
     """name -> the expression it was bound from (last assignment wins)."""
     m = {}
-    for name, expr in BINDING_RE.findall(src):
-        m[name] = expr.strip()
+    for match in BINDING_RE.finditer(src):
+        m[match.group(1)] = initializer_text(src, match.end())
     return m
+
+
+def folded_string_literals(text: str) -> set:
+    """Every string literal, with `+`-joined neighbours folded into one value.
+
+    `host == "api.senseaudio" + ".cn"` is the same host test with the literal
+    typed in two pieces, and `f'"{host}"' in src` reads the host as absent — the
+    hole witness C4 used. Folding moves the comparison from how the literal was
+    typed onto the value the code compares against.
+    """
+    toks = [(m.start(), m.end(), m.group(1)) for m in STR_LIT_RE.finditer(text)]
+    out = set()
+    cur = None
+    for start, end, value in toks:
+        if cur is not None and CONCAT_GAP_RE.fullmatch(text[cur[1]:start]):
+            cur = (cur[0], end, cur[2] + value)
+        else:
+            if cur is not None:
+                out.add(cur[2])
+            cur = (start, end, value)
+    if cur is not None:
+        out.add(cur[2])
+    return out
+
+
+def host_is_consumed(operand: str) -> bool:
+    """True when `host` is READ where it decides the operand's value.
+
+    `run { val ignored = host; SENSENOVA_FALLBACK_TIERS }` mentions the host and
+    keeps the one global set: the value does not depend on it, so the two
+    gateways still share a last resort (witness C6). An argument
+    (`fallbackTiersFor(host)`), a condition (`if (host in …)`, `host == "…"`) or a
+    receiver (`host.startsWith(…)`) is a read; a local assigned from `host` and
+    never consulted is not.
+    """
+    dead = [(m.start(), m.end()) for m in DEAD_HOST_BIND_RE.finditer(operand)]
+    for m in re.finditer(r"\bhost\b", operand):
+        if not any(s <= m.start() < e for s, e in dead):
+            return True
+    return False
 
 
 def resolve_provenance(expr: str, bindings, depth: int = 0) -> str:
@@ -297,7 +393,10 @@ def check_measured_gateway_effort(root: str, violations: list) -> int:
 
     # ── 4 & 5: the provider delegates, it does not restate ───────────────
     if not EFFORT_ESCAPE_RE.search(prov):
-        found = sorted({h for h in hosts if f'"{h}"' in prov})
+        # Compare the VALUES the provider compares against, not the literal's
+        # spelling: `"api.senseaudio" + ".cn"` folds back to the host.
+        folded = folded_string_literals(prov)
+        found = sorted({h for h in hosts if h in folded})
         for h in found:
             violations.append(
                 f"{PROVIDER_REL}: host literal {h!r} is written into the provider — the "
@@ -327,12 +426,21 @@ def check_measured_gateway_effort(root: str, violations: list) -> int:
                 "(fail-closed)"
             )
         else:
-            tail = body[cut + 2:cut + 2 + FALLBACK_WINDOW]
-            if "host" not in tail:
+            # The LAST-RESORT OPERAND, not a character window: a window is
+            # satisfied by any later statement that happens to mention `host`
+            # (witness C6 laundered it through `val ignored = host`), and it can
+            # also cut the operand in half.
+            op = initializer_text(body, cut + 2, limit=FALLBACK_WINDOW * 2)
+            if not op:
+                violations.append(
+                    f"{TRUTH_REL}: resolveTier's last resort could not be read "
+                    "(fail-closed — an unreadable fallback would pass every shape)"
+                )
+            elif not host_is_consumed(op):
                 violations.append(
                     f"{TRUTH_REL}: resolveTier's last resort does not depend on `host` "
                     f"— one shared fallback then serves gateways whose enums disagree "
-                    f"(seen: {tail.strip().splitlines()[0][:70]!r}). Choose it per "
+                    f"(seen: {op.splitlines()[0][:70]!r}). Choose it per "
                     "gateway family. (thinking-effort-ok: <reason> to override.)"
                 )
 
@@ -384,6 +492,19 @@ def _selftest_wiring_fixture():
     return {pkg + "ChatInputArea.kt": caller, pkg + "ChatComposerWidgets.kt": body}
 
 
+def _wiring_tree(caller: str = None):
+    """The picker fixture, optionally with a rewritten caller.
+
+    wide3 witness arms live here: the picker family's provenance table is what
+    witnesses C1 (var-bound / multi-line-bound effective level) attacked.
+    """
+    tree = dict(_selftest_wiring_fixture())
+    if caller is not None:
+        pkg = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/"
+        tree[pkg + "ChatInputArea.kt"] = caller
+    return tree
+
+
 EFFORT_TRUTH_CLEAN = """package com.rikkaminis.app.provider.thinking
 
 object GatewayEffortTruth {
@@ -427,8 +548,27 @@ def _effort_tree(provider=EFFORT_PROVIDER_CLEAN, truth=EFFORT_TRUTH_CLEAN, drop=
     return tree
 
 
+WIRING_CALLER_REL = (
+    "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatInputArea.kt"
+)
+WIRING_REQUESTED_DECL = (
+    "        val requestedThinkingLevelState by "
+    "viewModel.requestedThinkingLevel.collectAsState()\n"
+)
+
+
+def _caller_with(binding: str, arg: str) -> str:
+    """The clean caller with a different `requested` binding/argument."""
+    base = _selftest_wiring_fixture()[WIRING_CALLER_REL]
+    base = base.replace(WIRING_REQUESTED_DECL, binding)
+    return base.replace(
+        "            requested = requestedThinkingLevelState,\n",
+        "            requested = %s,\n" % arg,
+    )
+
+
 def selftest(root: str | None = None) -> int:
-    """Negative arms for the effort family; each must red on ITS criterion only."""
+    """Negative arms; each must red on ITS criterion only."""
     cases = [
         ("clean text-book dispatch",
          _effort_tree(), 0, None),
@@ -474,6 +614,30 @@ def selftest(root: str | None = None) -> int:
          _effort_tree(drop=("provider",)), 1, "missing while its counterpart exists"),
         ("picker-only minimal tree skips the family",
          dict(_selftest_wiring_fixture()), 0, None),
+        # ── wide3 witness arms (external adversarial audit, 2026-10-25) ──
+        ("effective level laundered through a `var` local (witness C1)",
+         _wiring_tree(_caller_with(
+             "        var _thinkingLevel = viewModel.thinkingLevel.value\n",
+             "_thinkingLevel")),
+         1, "resolves to the EFFECTIVE level"),
+        ("effective level bound across lines inside `run { }` (witness C1)",
+         _wiring_tree(_caller_with(
+             "        val req = run {\n"
+             "            viewModel.thinkingLevel.value\n"
+             "        }\n",
+             "req")),
+         1, "resolves to the EFFECTIVE level"),
+        ("provider splits a measured host literal with `+` (witness C4)",
+         _effort_tree(provider=EFFORT_PROVIDER_CLEAN.replace(
+             "if (GatewayEffortTruth.isMeasuredHost(host)) {",
+             'if (host == "api.senseaudio" + ".cn" '
+             "|| GatewayEffortTruth.isMeasuredHost(host)) {")),
+         1, "host literal 'api.senseaudio.cn'"),
+        ("resolveTier mentions host but keeps one global fallback (witness C6)",
+         _effort_tree(truth=EFFORT_TRUTH_CLEAN.replace(
+             "?: fallbackTiersFor(host)",
+             "?: run { val ignored = host; SENSENOVA_FALLBACK_TIERS }")),
+         1, "last resort does not depend on `host`"),
     ]
     failures = []
     for label, tree, want_rc, want_text in cases:
