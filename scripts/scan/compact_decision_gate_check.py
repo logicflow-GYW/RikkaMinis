@@ -20,58 +20,49 @@ silently in production before [fix/compact-pregate-exhausted-1016] /
      `escalatedFromOffload` exists to bypass the *band* check on tiers that
      have a compact line. On an `exhaustedOnly` tier (`compactThreshold == 0`,
      contract: "too small for auto-compact; only surface .exhausted") the
-     bypass used to auto-compact anyway — measured on the real classes:
-     window 50 000 / tokens 45 000 / escalated -> AUTO_COMPACT while the same
-     coordinate's `check()` is EXHAUSTED.
+     bypass used to auto-compact anyway.
 
   3. THE CHAIN THROWS ITS CAPACITY EVIDENCE.
      The outer catch decides "halve and retry" purely on
      `isContextTooLargeError(e)`. When a 400 context-length failure was
      followed by an ordinary one (timeout / 5xx / unavailable), the chain threw
-     the ordinary one and the halving retry never fired ([Compact] Splitting:
-     0 hits in three days of device logs).
+     the ordinary one and the halving retry never fired.
 
-  plus the silent-mode card contract in `compactAll` (criterion 4): a card that
-  can be re-emitted on every eligible attempt must be `!silent`-gated, while a
-  provably-unreachable one-time invariant break is kept with an explicit
-  written criterion instead of being silenced for symmetry.
+  plus the silent-mode card contract in `compactAll` (criterion 4) and the two
+  latency levers of [fix/compact-timeout-budget-1022] (criterion 5).
 
-  plus [fix/compact-timeout-budget-1022] the two levers that keep a long agent
-  run alive when the summary chain is latency-bound (criterion 5). 2026-10-22
-  device log: a run with no new user turn to fold hands the whole agent
-  history to one summary call (estTokens 110 670 / 140 490), and the chain
-  then TIMEOUT'd on every candidate at exactly 30000ms — 25 timeouts, 32
-  "Compact failed", 119 "folded nothing", and 8 runs ended on
-  `finish=length ×3 empty output — giving up` because nothing folded while the
-  hard trim could not hold the context under the window. The members that
-  timed out were the SAME ones that succeeded at 25.0s / 28.2s / 29.1s that
-  day, and they never declare declaresNoEffortTiers (a user-configured relay
-  entry cannot) — so the quiet 30s floor was simply below their real latency
-  on large material. Two properties, both load-bearing:
-    (a) the per-candidate budget takes the summary material size and opens the
-        60s tier above the measured threshold (single-source constant, never a
-        bare literal, and the chain deadline still clamps);
-    (b) a route that timed out inside this chain (host + model, NOT the entry
-        id — three tierflow entries sharing https://tierflow.cn died three
-        times in one chain) is skipped before it is budgeted or sent, so the
-        remaining deadline reaches a candidate that can still answer.
+Mechanical criteria (each anchored on the DECISION, not on a spelling):
+  1. `entry-admits-exhausted` — inside `maybeAutoCompactInLoop` a single
+     `val verdict = policy.check(...)` feeds `if (!loopGateOpens(verdict, …))`
+     and that guard is the WHOLE decision: between it and `decide(` there is no
+     other reachable early exit that can refuse the ceiling verdict.
+  2. `gate-admits-exhausted` — `loopGateOpens` admits EXHAUSTED on a LIVE
+     disjunct (constant-folded: `(false && …)` / `(!true && …)` admit nothing).
+  3. `escalation-tier-contract` — the escalation shortcut consults the tier
+     predicate, and its body is exactly `return Decision.OK` (a nested early
+     return would eat half of the truth table the guard was written for).
+  4. `chain-pins-too-large` — the chain routes failures through
+     `ContextCompactor.chainFailureAfter(…)`; the two state variables are left
+     holding that reduction's halves (no kill-after-def, e.g. `= null`), and
+     `chainTerminalFailure(…)` is applied BEFORE `throw lastFailure`.
+  5. `silent-card-contract` — every repeatable `appendSystemInfo` card is
+     enclosed by a live `if (!silent)` (a constant-true arm such as `|| true`
+     or `|| !false` absorbs the guard even though `!silent` is still spelled).
+  6. `chain-budget-adaptive` — the summary budget is a function of the material
+     size, the large-material threshold is the single-source constant, and the
+     deadline still clamps.
+  7. `chain-timeout-dedup` — a route that timed out in this chain is skipped
+     before it is budgeted, and the skip branch actually terminates the
+     iteration (a dead `if (false) continue` terminates nothing).
 
-Mechanical criteria:
-  1. inside `maybeAutoCompactInLoop`: a single `val verdict = policy.check(...)`
-     feeds `ContextCompactor.loopGateOpens(verdict, escalatedFromOffload)`, and
-     the pre-fix gate shape is gone;
-  2. `ContextCompactor.loopGateOpens` admits EXHAUSTED, and `decide` carries
-     `tierHasNoCompactLine` in the escalation guard;
-  3. the chain routes failures through `ContextCompactor.chainFailureAfter(...)`
-     with `isTooLarge = ::isContextTooLargeError`, and
-     `chainTerminalFailure(...)` is applied BEFORE `throw lastFailure`;
-  4. each `appendSystemInfo` card in `compactAll` is either preceded by
-     `if (!silent)` (between it and the previous card) or carries the explicit
-     "Deliberately NOT" criterion.
-  5. the summary chain budget is a function of the material size (material
-     parameter + the large-material tier reading the single-source constant,
-     deadline clamp intact, real estimate at the call site), and a route that
-     already timed out in this chain is skipped before the budget call.
+[batch5 B5-t02] All structural reading now goes through the shared primitives
+(`_kotlin_lexer.mask_code`, `_kotlin_ast.{function_body,if_blocks,
+enclosing_conditions,last_write,stmt_spans,const_bool,split_top}`,
+`_kotlin_valueflow.{guard_feasible,path_feasible,brace_depth,expr_end}`): the
+hand-written lexer / brace counter / literal whitelist this gate used to carry
+was exactly what the five falsifying witnesses walked through (`!true`,
+`|| !false`, an extra `return false` after the gate, an early return inside the
+escalation guard, a kill-after-def on the pinned failure).
 
 Usage: python3 scripts/scan/compact_decision_gate_check.py [repo_root]
        python3 scripts/scan/compact_decision_gate_check.py --selftest
@@ -81,33 +72,51 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    const_value,
+    enclosing_conditions,
+    function_body,
+    if_blocks,
+    last_write,
+    split_top,
+    stmt_spans,
+    when_branches,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    brace_depth,
+    expr_end,
+    guard_feasible,
+    path_feasible,
+)
+
 MAIN = "src/android/app/src/main/java/com/rikkaminis/app"
 LOOP_FILE = MAIN + "/ui/chat/ChatContextWindowExt.kt"
 COMPACTOR_FILE = MAIN + "/conversation/ContextCompactor.kt"
 ORCH_FILE = MAIN + "/conversation/CompactOrchestration.kt"
 
-LOOP_BEGIN = "internal suspend fun ChatViewModel.maybeAutoCompactInLoop("
-LOOP_END = "internal suspend fun ChatViewModel.awaitAutoCompactIfNeeded()"
-
+LOOP_FUN = "maybeAutoCompactInLoop"
 GATE_CALL = "ContextCompactor.loopGateOpens(verdict, escalatedFromOffload)"
 VERDICT_DECL = "val verdict = policy.check(lastContextTokens, contextWindow)"
 OLD_GATE = "if (!inCompactBand && !escalatedFromOffload)"
 TIER_GUARD = "tierHasNoCompactLine"
 TIER_DECL = "val tierHasNoCompactLine = policy.compactThreshold <= 0 || policy.exhaustedOnly"
-# the guard EXPRESSION, not just the identifier: dropping the predicate from the
+# the guard CONDITION, not just the identifier: dropping the predicate from the
 # condition while leaving the declaration behind must still flip this red.
-TIER_GUARD_EXPR = "if (!bandReached && (!escalatedFromOffload || tierHasNoCompactLine))"
+TIER_GUARD_COND = "!bandReached && (!escalatedFromOffload || tierHasNoCompactLine)"
+TIER_GUARD_EXPR = "if (" + TIER_GUARD_COND + ")"
 RESOURCE_RE = re.compile(r"R\.string\.([A-Za-z0-9_]+)")
 CHAIN_PREDICATE = "isTooLarge = ::isContextTooLargeError"
 CHAIN_STEP = "ContextCompactor.chainFailureAfter("
 CHAIN_TERMINAL = "ContextCompactor.chainTerminalFailure("
-SILENT_GATE = "if (!silent)"
+REDUCE_DECL_RE = re.compile(r"\bval\s+(\w+)\s*=\s*" + re.escape(CHAIN_STEP))
+REMOTE_FAILURE = "SendResult.RemoteFailure"
+SILENT_RE = re.compile(r"!\s*silent\b")
 KEPT_CRITERION = "Deliberately NOT"
 
 # ── criterion 5 [fix/compact-timeout-budget-1022] anchors ────────────────
-# Anchored on decision points (the tier expression, the set membership, the
-# recording), not on whole lines: renaming an identifier must fail loudly via
-# the missing-needle arm, not silently pass.
 BUDGET_FN = "internal fun compactionCandidateBudgetMs("
 MATERIAL_PARAM = "materialTokens: Int"
 LARGE_TIER = "if (declaresNoEffortTiers == true || largeMaterial)"
@@ -118,11 +127,12 @@ KEY_FN = "internal fun compactionCandidateKey("
 ROUTE_SET_DECL = "val timedOutRoutes = mutableSetOf<String>()"
 ROUTE_DECL = "val route = compactionCandidateKey("
 ROUTE_MODEL_ARG = "modelId = candidate.model.id"
-ROUTE_SKIP = "if (route in timedOutRoutes)"
+ROUTE_SKIP_COND = "route in timedOutRoutes"
+ROUTE_SKIP = "if (" + ROUTE_SKIP_COND + ")"
 ROUTE_RECORD = "timedOutRoutes.add(route)"
 TIMEOUT_LOG = "summary TIMEOUT after"
 
-# resource ids of the four compactAll cards the silent contract is judged on
+# resource ids of the compactAll cards the silent contract is judged on
 GATED_CARDS = [
     "sysmsg_compact_empty_summary",
     "sysmsg_compact_anchor_failed",
@@ -138,181 +148,60 @@ def line_of(text, needle):
     return text.count("\n", 0, idx) + 1 if idx >= 0 else 0
 
 
-def mask_code(src):
-    """Offset-preserving projection: comment text AND string/char literal
-    contents blanked to spaces (newlines kept). Every criterion that asks
-    "does this code decide X" must read THIS projection — a criterion satisfied
-    by a commented-out line is not a criterion (wide3 `silent-card-contract`)."""
-    out = list(src)
-    i, n = 0, len(src)
-    while i < n:
-        if src.startswith('"""', i):
-            j = src.find('"""', i + 3)
-            j = n if j < 0 else j + 3
-            for k in range(i, j):
-                if src[k] != "\n":
-                    out[k] = " "
-            i = j
-            continue
-        if src[i] == '"':
-            j = i + 1
-            while j < n:
-                if src[j] == "\\":
-                    j += 2
-                    continue
-                if src[j] == '"' or src[j] == "\n":
-                    break
-                j += 1
-            for k in range(i, min(j + 1, n)):
-                out[k] = " "
-            i = j + 1
-            continue
-        if src[i] == "'":
-            j = src.find("'", i + 1)
-            if 0 < j - i <= 4:
-                for k in range(i, j + 1):
-                    out[k] = " "
-                i = j + 1
-                continue
-            i += 1
-            continue
-        if src.startswith("//", i):
-            j = src.find("\n", i)
-            j = n if j < 0 else j
-            for k in range(i, j):
-                out[k] = " "
-            i = j
-            continue
-        if src.startswith("/*", i):
-            j = src.find("*/", i + 2)
-            j = n if j < 0 else j + 2
-            for k in range(i, j):
-                if src[k] != "\n":
-                    out[k] = " "
-            i = j
-            continue
-        i += 1
-    return "".join(out)
+# ── shared-primitive adapters ────────────────────────────────────────────
+def parts(expr, op):
+    """顶层按 op 切分的片段文本（共享 split_top 返回区间）。"""
+    return [expr[a:b] for a, b in split_top(expr, (op,))]
 
 
-def match_close(text, start, opener, closer):
-    depth = 0
-    for i in range(start, len(text)):
-        if text[i] == opener:
-            depth += 1
-        elif text[i] == closer:
-            depth -= 1
-            if depth == 0:
-                return i
+def norm(expr):
+    return re.sub(r"\s+", "", expr)
+
+
+def const_true_arm(cond):
+    """条件里存在恒真的顶层析取臂（`|| true` / `|| !false` / `|| 1 == 1`）。
+
+    该臂把整个条件吸收成真，其它臂（含 `!silent`）再也无法拒绝 —— 这是
+    `always_true` 只看字面 `true` 的家族洞（G02-A5）。
+    """
+    return any(const_bool(p) is True for p in parts(cond, "||"))
+
+
+def live_cond(cond):
+    """条件是否可能为真。**同门所有臂都走这一个判定**：只认字面 `false`
+    的白名单漏掉 `!true` / `1 == 2` / `x && !x`。"""
+    return guard_feasible(cond) is not False
+
+
+def returning_expr(text, start, end):
+    """[start,end) 内顶层 `return` 的返回表达式；找不到则返回整段。"""
+    base = brace_depth(text, start)
+    for m in re.finditer(r"\breturn\b", text[start:end]):
+        pos = start + m.start()
+        if brace_depth(text, pos) != base:
+            continue
+        return text[pos + len("return"):expr_end(text, pos + len("return"))]
+    return text[start:end]
+
+
+def early_exit_between(text, start, end):
+    """[start,end) 内**可达的、真正退出外层函数**的 return/throw 位置。
+
+    `return@label` 只退 lambda；死分支（`if (false)`）里的不算 —— 判据问的是
+    「这之后还有没有别的语句能把这次调用拒掉」，不是「有没有出现过 return」。
+    """
+    base = brace_depth(text, start)
+    for m in re.finditer(r"\b(return|throw)\b", text[start:end]):
+        pos = start + m.start()
+        nxt = text[pos + len(m.group(1)):pos + len(m.group(1)) + 1]
+        if nxt == "@":
+            continue
+        if brace_depth(text, pos) != base:
+            continue
+        if not path_feasible(text, pos):
+            continue
+        return pos
     return -1
-
-
-IF_RE = re.compile(r"\bif\s*\(")
-
-
-def if_statements(masked):
-    """(cond_start, cond_end, body_start, body_end, cond) per `if (...)`,
-    brace-balanced. A single-statement body ends at the line."""
-    out = []
-    for m in IF_RE.finditer(masked):
-        p = m.end() - 1
-        close = match_close(masked, p, "(", ")")
-        if close < 0:
-            continue
-        j = close + 1
-        while j < len(masked) and masked[j] in " \t":
-            j += 1
-        if j < len(masked) and masked[j] == "{":
-            body_end = match_close(masked, j, "{", "}")
-            if body_end < 0:
-                body_end = len(masked)
-        else:
-            # Statement body (no braces right after the `)`): it runs to the end
-            # of the STATEMENT, which may carry a trailing lambda block
-            # (`if (false) withContext(Dispatchers.Main) { host.push(…) }`) — a
-            # line-based end would stop before the block and let the dead guard
-            # hide the publish from every liveness check.
-            k, depth = j, 0
-            while k < len(masked):
-                ch = masked[k]
-                if ch in "([{":
-                    depth += 1
-                elif ch in ")]}":
-                    if depth == 0:
-                        break
-                    depth -= 1
-                elif ch == "\n" and depth == 0:
-                    nxt = masked[k + 1:].lstrip(" \t")
-                    if nxt[:1] in (".", "?", "&", "|"):
-                        k += 1
-                        continue
-                    break
-                k += 1
-            body_end = k
-        out.append((p, close, j, body_end, masked[p + 1:close]))
-    return out
-
-
-def enclosing_conds(ifs, idx):
-    hits = [s for s in ifs if s[2] <= idx <= s[3]]
-    hits.sort(key=lambda s: s[0])
-    return [s[4] for s in hits]
-
-
-def split_top(expr, op):
-    parts, cur, depth, i = [], [], 0, 0
-    while i < len(expr):
-        ch = expr[i]
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            depth -= 1
-        if depth == 0 and expr.startswith(op, i):
-            parts.append("".join(cur))
-            cur = []
-            i += len(op)
-            continue
-        cur.append(ch)
-        i += 1
-    parts.append("".join(cur))
-    return parts
-
-
-def norm_atom(expr):
-    s = expr.strip()
-    while True:
-        if s.startswith("(") and match_close(s, 0, "(", ")") == len(s) - 1:
-            s = s[1:-1].strip()
-        elif s.startswith("(") or s.endswith(")"):
-            s = s.strip("() \t")
-        else:
-            return s
-
-
-def is_lit(expr, word):
-    return norm_atom(expr) == word
-
-
-def always_true(cond):
-    return any(is_lit(d, "true") for d in split_top(cond, "||"))
-
-
-def dead_for(cond, needle):
-    """True when `needle` sits in the part of `cond` that a literal kills —
-    including one level of parenthesised grouping (`|| (false && needle)`)."""
-    for disj in split_top(cond, "||"):
-        if needle not in disj:
-            continue
-        if is_lit(disj, "false"):
-            return True
-        inner = disj.strip()
-        if inner.startswith("(") and match_close(inner, 0, "(", ")") == len(inner) - 1:
-            if dead_for(inner[1:-1], needle):
-                return True
-        for con in split_top(disj, "&&"):
-            if needle not in con and is_lit(con, "false"):
-                return True
-    return False
 
 
 def segments_between_calls(text):
@@ -349,80 +238,173 @@ def check(loop, compactor, orch):
                 "%s:%d forbidden %r remains (%s)" % (where, line_of(text, needle), needle, why),
             ))
 
-    # ── criterion 1: the loop entry admits EXHAUSTED ────────────────────
-    if LOOP_BEGIN in loop and LOOP_END in loop:
-        region = loop.split(LOOP_BEGIN, 1)[1].split(LOOP_END, 1)[0]
+    try:
+        loop_m = mask_code(loop)
+        comp_m = mask_code(compactor)
+        orch_m = mask_code(orch)
+        # literal channel (strings kept, comments stripped) for needles that live
+        # inside string literals (`summary TIMEOUT after`), and raw text for the
+        # keep-criterion, which IS a written comment by design.
+        orch_l = mask_comments(orch)
+    except KotlinLexError as exc:  # fail-closed: never fall back to raw text
+        return [("parse", "kotlin lexer refused a source file — gate fails closed (%s)" % exc)]
+
+    # ── criterion 1: the loop entry admits EXHAUSTED, and the gate decides ──
+    body = function_body(loop_m, LOOP_FUN)
+    if body is None:
+        problems.append(("entry-admits-exhausted",
+                         "%s: could not isolate fun %s (gate ROT)" % (LOOP_FILE, LOOP_FUN)))
+    else:
+        b_start, b_end, _kind = body
+        region = loop_m[b_start:b_end]
         need(region, VERDICT_DECL, LOOP_FILE, "entry-admits-exhausted",
              "the pressure verdict must be computed once and fed to the gate")
         need(region, GATE_CALL, LOOP_FILE, "entry-admits-exhausted",
              "the pre-gate must be the single-source predicate")
         forbid(region, OLD_GATE, LOOP_FILE, "entry-admits-exhausted",
                "the pre-fix gate refused EXHAUSTED, which is what decide() adjudicates")
-        # [wide3 entry-admits-exhausted] The gate call must be the WHOLE
-        # decision. `if (!loopGateOpens(…) || verdict == EXHAUSTED) return false`
-        # keeps the call and the verdict, so every needle above still matches
-        # while the ceiling verdict is refused again — the once-per-action
-        # RESCUE channel is shut exactly when it is needed.
-        mregion = mask_code(region)
-        gate_idx = mregion.find(GATE_CALL)
-        if gate_idx >= 0:
-            hits = [s for s in if_statements(mregion) if s[0] <= gate_idx <= s[1]]
-            hits.sort(key=lambda s: s[0])
-            call_ns = re.sub(r"\s+", "", GATE_CALL)
-            if not hits:
+        # The gate call must be the WHOLE decision:
+        #  - `if (!gate || verdict == EXHAUSTED) return false` keeps the call and
+        #    the verdict (cond-exact check), and
+        #  - `if (!gate) { return false }` followed by a second, independent
+        #    `if (verdict == EXHAUSTED) return false` (G02-A1 order witness) keeps
+        #    the guard byte-identical — so the sequence up to `decide(` is judged
+        #    too: no reachable early exit may sit between the gate and the call.
+        call_ns = norm(GATE_CALL)
+        blocks = [b for b in if_blocks(region) if GATE_CALL in b[0]]
+        if not blocks:
+            problems.append((
+                "entry-admits-exhausted",
+                "%s: the loop gate verdict does not decide an `if` — computed and discarded"
+                % LOOP_FILE,
+            ))
+        else:
+            blocks.sort(key=lambda b: b[1])
+            cond, t_start, t_end, _es, _ee = blocks[-1]
+            cond_ns = norm(cond)
+            if cond_ns not in ("!" + call_ns, "!(" + call_ns + ")", call_ns):
                 problems.append((
                     "entry-admits-exhausted",
-                    "%s: the loop gate verdict does not decide an `if` — computed and discarded"
-                    % LOOP_FILE,
+                    "%s:%d: the entry guard must be exactly `!%s`; it is `%s` — an extra operand can "
+                    "refuse the ceiling verdict before decide() ever adjudicates it"
+                    % (LOOP_FILE, loop_m.count("\n", 0, b_start + t_start) + 1, GATE_CALL,
+                       cond.strip()),
                 ))
-            else:
-                cond_ns = re.sub(r"\s+", "", hits[-1][4])
-                if cond_ns not in ("!" + call_ns, "!(" + call_ns + ")", call_ns):
-                    problems.append((
-                        "entry-admits-exhausted",
-                        "%s:%d: the entry guard must be exactly `!%s`; it is `%s` — an extra "
-                        "operand can refuse the ceiling verdict before decide() ever adjudicates "
-                        "it, which is the pre-fix gate in new spelling"
-                        % (LOOP_FILE, region.count("\n", 0, gate_idx) + 1, GATE_CALL, hits[-1][4].strip()),
-                    ))
-    else:
-        problems.append(("entry-admits-exhausted",
-                         "%s: could not isolate %s" % (LOOP_FILE, LOOP_BEGIN)))
+            decide_idx = region.find("ContextCompactor.decide(", t_end)
+            stop = decide_idx if decide_idx > 0 else len(region)
+            exit_pos = early_exit_between(region, t_end, stop)
+            if exit_pos >= 0:
+                problems.append((
+                    "entry-admits-exhausted",
+                    "%s:%d: another early exit sits between the loop gate and `decide(` — the gate "
+                    "is no longer the whole decision, so a later statement can refuse the ceiling "
+                    "verdict that decide() exists to adjudicate (`%s`)"
+                    % (LOOP_FILE, loop_m.count("\n", 0, b_start + exit_pos) + 1,
+                       " ".join(region[exit_pos:exit_pos + 70].split())),
+                ))
 
-    # ── criterion 2: the gate itself + the escalation tier contract ─────
-    if "fun loopGateOpens(" in compactor:
-        # Read the CODE projection: `// verdict == EXHAUSTED` must not satisfy
-        # the criterion, and the admission must be a live disjunct
-        # (`|| (false && verdict == EXHAUSTED)` admits nothing).
-        cmp_masked = mask_code(compactor)
-        gate_body = cmp_masked.split("fun loopGateOpens(", 1)[1][:400]
-        need(gate_body, "ContextPolicy.CheckResult.EXHAUSTED", COMPACTOR_FILE,
-             "gate-admits-exhausted", "the gate must admit the ceiling verdict")
-        expr = gate_body.split("=", 1)[1] if "=" in gate_body else gate_body
-        expr = expr.split("{", 1)[0].split(";", 1)[0]
-        if dead_for(expr, "EXHAUSTED"):
+    # ── criterion 2: the gate itself (+ criterion 3's tier contract) ────
+    gate_at = comp_m.find("fun loopGateOpens(")
+    gate_line = comp_m.count("\n", 0, gate_at) + 1 if gate_at >= 0 else 0
+    gate_fn = function_body(comp_m, "loopGateOpens")
+    if gate_fn is None:
+        problems.append(("gate-admits-exhausted",
+                         "%s: fun loopGateOpens( missing — gate ROT" % COMPACTOR_FILE))
+    else:
+        g_start, g_end, g_kind = gate_fn
+        expr = comp_m[g_start:g_end] if g_kind == "expr" else returning_expr(comp_m, g_start, g_end)
+        if "ContextPolicy.CheckResult.EXHAUSTED" not in expr:
             problems.append((
                 "gate-admits-exhausted",
-                "%s: the EXHAUSTED admission is short-circuited by a literal — the gate still "
-                "refuses the ceiling verdict, which is the only state decide() turns into RESCUE"
-                % COMPACTOR_FILE,
+                "%s:%d: the gate no longer admits the ceiling verdict — EXHAUSTED is the only "
+                "state decide() turns into RESCUE" % (COMPACTOR_FILE, gate_line),
             ))
-    else:
-        problems.append(("gate-admits-exhausted",
-                         "%s: fun loopGateOpens( missing" % COMPACTOR_FILE))
-    need(compactor, TIER_DECL, COMPACTOR_FILE, "escalation-tier-contract",
+        else:
+            arms = [p for p in parts(expr, "||") if "EXHAUSTED" in p] or [expr]
+            if not any(live_cond(a) for a in arms):
+                problems.append((
+                    "gate-admits-exhausted",
+                    "%s:%d: the EXHAUSTED admission is constant-false (`%s`) — a dead disjunct "
+                    "admits nothing, the gate still refuses the ceiling verdict"
+                    % (COMPACTOR_FILE, gate_line, " ".join(arms[0].split())[:80]),
+                ))
+    need(comp_m, TIER_DECL, COMPACTOR_FILE, "escalation-tier-contract",
          "the tier contract needs a single-source predicate")
-    need(compactor, TIER_GUARD_EXPR, COMPACTOR_FILE, "escalation-tier-contract",
+    need(comp_m, TIER_GUARD_EXPR, COMPACTOR_FILE, "escalation-tier-contract",
          "the escalation shortcut must consult the tier predicate")
+    # The shortcut's branch must be exactly `return Decision.OK`: inserting a
+    # second, narrower early return INSIDE it (G02-A3) keeps the condition head
+    # byte-identical while eating half the truth table the guard was written for.
+    tier_blocks = [b for b in if_blocks(comp_m) if norm(b[0]) == norm(TIER_GUARD_COND)]
+    if not tier_blocks:
+        problems.append((
+            "escalation-tier-contract",
+            "%s: no `%s` guard is decided as a condition — the escalation bypass cannot be judged"
+            % (COMPACTOR_FILE, TIER_GUARD_COND),
+        ))
+    else:
+        for cond, t_start, t_end, _es, _ee in tier_blocks:
+            then_txt = comp_m[t_start:t_end].strip()
+            inner = then_txt[1:-1] if then_txt.startswith("{") and then_txt.endswith("}") else then_txt
+            stmts = [inner[a:b].strip() for a, b in stmt_spans(inner) if inner[a:b].strip()]
+            if len(stmts) != 1 or not norm(stmts[0]).startswith("returnDecision.OK"):
+                problems.append((
+                    "escalation-tier-contract",
+                    "%s:%d: the escalation guard's body must be exactly `return Decision.OK`; it is "
+                    "`%s` — an extra early exit inside the guard narrows the escalation it was "
+                    "written to allow"
+                    % (COMPACTOR_FILE, comp_m.count("\n", 0, t_start) + 1,
+                       " ".join(inner.split())[:90]),
+                ))
 
-    # ── criterion 3: the chain throws its capacity evidence ─────────────
-    need(orch, CHAIN_STEP, ORCH_FILE, "chain-pins-too-large",
+    # ── criterion 4: the chain keeps + throws its capacity evidence ─────
+    need(orch_m, CHAIN_STEP, ORCH_FILE, "chain-pins-too-large",
          "the reduction must be single-sourced in the pure function")
-    need(orch, CHAIN_PREDICATE, ORCH_FILE, "chain-pins-too-large",
+    need(orch_m, CHAIN_PREDICATE, ORCH_FILE, "chain-pins-too-large",
          "the reduction must be driven by the real classifier")
-    if CHAIN_TERMINAL in orch:
-        terminal_at = orch.find(CHAIN_TERMINAL)
-        throw_at = orch.rfind("throw lastFailure")
+    red_m = REDUCE_DECL_RE.search(orch_m)
+    if not red_m:
+        problems.append(("chain-pins-too-large",
+                         "%s: no `val <reduced> = %s…)` binding — the reduction result is dropped"
+                         % (ORCH_FILE, CHAIN_STEP)))
+    else:
+        reduced = red_m.group(1)
+        branch = [b for b in when_branches(orch_m) if REMOTE_FAILURE in b[1]]
+        seg_base = branch[0][2] if branch else red_m.start()
+        seg = orch_m[seg_base:branch[0][3] if branch else len(orch_m)]
+        for name, side, why in (
+            ("tooLargeFailure", "second",
+             "the pinned capacity evidence must hold the reduction's pinned half"),
+            ("lastFailure", "first",
+             "the chain's last failure must hold the reduction's ordinary half"),
+        ):
+            lw = last_write(seg, name)
+            if lw is None:
+                problems.append((
+                    "chain-pins-too-large",
+                    "%s: `%s` is never assigned from the reduction — the chain drops its capacity "
+                    "evidence and the outer catch cannot halve-and-retry" % (ORCH_FILE, name),
+                ))
+                continue
+            pos, rhs, _is_decl = lw
+            folded = const_value(rhs)
+            if folded is not None and folded[0] == "null":
+                problems.append((
+                    "chain-pins-too-large",
+                    "%s:%d: `%s` is overwritten with `null` right after it is set (kill-after-def) "
+                    "— the outer catch sees no capacity evidence (%s)"
+                    % (ORCH_FILE, orch_m.count("\n", 0, seg_base + pos) + 1, name, why),
+                ))
+            elif not (reduced in rhs and side in rhs):
+                problems.append((
+                    "chain-pins-too-large",
+                    "%s:%d: `%s` ends up holding `%s` instead of `%s.%s` — %s"
+                    % (ORCH_FILE, orch_m.count("\n", 0, seg_base + pos) + 1, name,
+                       " ".join(rhs.split())[:60], reduced, side, why),
+                ))
+    if CHAIN_TERMINAL in orch_m:
+        terminal_at = orch_m.find(CHAIN_TERMINAL)
+        throw_at = orch_m.rfind("throw lastFailure")
         if throw_at < 0 or terminal_at > throw_at:
             problems.append((
                 "chain-pins-too-large",
@@ -432,24 +414,22 @@ def check(loop, compactor, orch):
         problems.append(("chain-pins-too-large",
                          "%s: %s missing" % (ORCH_FILE, CHAIN_TERMINAL)))
 
-    # ── criterion 4: the silent-mode card contract ──────────────────────
-    # [wide3 silent-card-contract] Two parser-death holes fixed here:
-    #   (a) the gate used to be searched in RAW text, so `// if (!silent)` on
-    #       the line above the card satisfied it;
-    #   (b) it searched a look-back WINDOW, so an unrelated `if (!silent)` from
-    #       an earlier card could vouch for a later, unguarded one.
-    # Now: the guard must ENCLOSE the card call in the code projection, and the
-    # condition must actually test `silent` negatively (a `if (true)` decoy is
-    # not a gate).
-    cards = segments_between_calls(orch)
-    orch_masked = mask_code(orch)
-    orch_ifs = if_statements(orch_masked)
+    # ── criterion 5: the silent-mode card contract ─────────────────────
+    cards = segments_between_calls(orch_m)
+    orch_ifs = if_blocks(orch_m)
     seen = {resource: (start, idx) for start, idx, resource in cards if resource}
 
     def live_silent_gate(idx):
-        for cond in enclosing_conds(orch_ifs, idx):
-            if re.search(r"!\s*silent\b", cond) and not always_true(cond):
-                return True
+        for _kind, cond in enclosing_conditions(orch_m, idx):
+            if not SILENT_RE.search(cond):
+                continue
+            # `|| true` / `|| !false` are constant-true arms: the `!silent` is
+            # still spelled, the guard can never reject.
+            if const_true_arm(cond):
+                continue
+            if not live_cond(cond):
+                continue
+            return True
         return False
 
     for resource in GATED_CARDS:
@@ -457,13 +437,13 @@ def check(loop, compactor, orch):
             problems.append(("silent-card-contract",
                              "%s: card %s not found" % (ORCH_FILE, resource)))
             continue
-        start, idx = seen[resource]
+        _start, idx = seen[resource]
         if not live_silent_gate(idx):
             problems.append((
                 "silent-card-contract",
                 "%s:%d card %s is reachable in silent mode (not enclosed by a live `if (!silent)` "
-                "in code — a commented-out gate or a look-back neighbour does not count)"
-                % (ORCH_FILE, line_of(orch, "R.string." + resource), resource),
+                "in code — a commented-out gate, a look-back neighbour, or a constant-true arm does "
+                "not count)" % (ORCH_FILE, orch_m.count("\n", 0, idx) + 1, resource),
             ))
     if KEPT_CARD not in seen:
         problems.append(("silent-card-contract",
@@ -475,65 +455,70 @@ def check(loop, compactor, orch):
             problems.append((
                 "silent-card-contract",
                 "%s:%d %s is now silent-gated: the written keep-criterion must be revisited, not copied"
-                % (ORCH_FILE, line_of(orch, "R.string." + KEPT_CARD), KEPT_CARD),
+                % (ORCH_FILE, orch_m.count("\n", 0, idx) + 1, KEPT_CARD),
             ))
         if KEPT_CRITERION not in span:
             problems.append((
                 "silent-card-contract",
                 "%s:%d %s is not silent-gated but carries no explicit keep-criterion"
-                % (ORCH_FILE, line_of(orch, "R.string." + KEPT_CARD), KEPT_CARD),
+                % (ORCH_FILE, orch_m.count("\n", 0, idx) + 1, KEPT_CARD),
             ))
 
-    # ── criterion 5 [fix/compact-timeout-budget-1022] ───────────────────
-    # (a) the per-candidate budget is a function of the summary material size
-    if BUDGET_FN in orch:
-        # whole function body (up to the top-level closing brace), not a fixed
-        # window: a fixed window silently truncates when the KDoc above the
-        # tier grows, and the gate would then report a "missing" tier that is
-        # actually present (self-inflicted false red).
-        budget_body = orch.split(BUDGET_FN, 1)[1].split("\n}\n", 1)[0]
+    # ── criterion 6 [fix/compact-timeout-budget-1022] ──────────────────
+    budget_fn = function_body(orch_m, "compactionCandidateBudgetMs")
+    if budget_fn is None:
+        problems.append(("chain-budget-adaptive",
+                         "%s: %s missing" % (ORCH_FILE, BUDGET_FN)))
+    else:
+        bstart, bend, _k = budget_fn
+        header_at = orch_m.rfind("fun compactionCandidateBudgetMs(", 0, bstart)
+        # signature + body: `materialTokens: Int` is a PARAMETER, so a body-only
+        # slice would report it missing on a healthy tree.
+        budget_body = orch_m[header_at if header_at >= 0 else bstart:bend]
         need(budget_body, MATERIAL_PARAM, ORCH_FILE, "chain-budget-adaptive",
              "the budget must take the summary material size")
         need(budget_body, LARGE_TIER, ORCH_FILE, "chain-budget-adaptive",
              "a large material must be able to open the 60s tier")
         need(budget_body, LARGE_CONST_REF, ORCH_FILE, "chain-budget-adaptive",
              "the threshold must be the single-source constant, not a bare literal")
-        need(budget_body, DEADLINE_CLAMP, ORCH_FILE, "chain-budget-adaptive",
-             "the chain deadline must still clamp every candidate")
+        if DEADLINE_CLAMP not in budget_body and not re.search(
+                r"return\s+minOf\(", budget_body):
+            problems.append((
+                "chain-budget-adaptive",
+                "%s: the chain deadline must still clamp every candidate (no `minOf(perCandidate, "
+                "deadlineAt - nowMs)` in the budget body)" % ORCH_FILE,
+            ))
         if re.search(r"materialTokens\s*>\s*\d", budget_body):
             problems.append((
                 "chain-budget-adaptive",
                 "%s: the material threshold is inlined as a bare number" % ORCH_FILE,
             ))
-    else:
-        problems.append(("chain-budget-adaptive",
-                         "%s: %s missing" % (ORCH_FILE, BUDGET_FN)))
-    if BUDGET_CALL in orch:
-        args = orch.split(BUDGET_CALL, 1)[1].split(")", 1)[0]
-        parts = [p.strip() for p in args.split(",")]
-        second = parts[1].split("=")[-1].strip() if len(parts) > 1 else ""
+    if BUDGET_CALL in orch_m:
+        args = orch_m.split(BUDGET_CALL, 1)[1].split(")", 1)[0]
+        call_parts = [p.strip() for p in args.split(",")]
+        second = call_parts[1].split("=")[-1].strip() if len(call_parts) > 1 else ""
         if not second or re.fullmatch(r"[0-9_]+L?", second):
             problems.append((
                 "chain-budget-adaptive",
-                "%s: the budget call must pass the real material estimate (got %r) — a literal pins every "
-                "fold into one tier" % (ORCH_FILE, second or "<missing>"),
+                "%s: the budget call must pass the real material estimate (got %r) — a literal pins "
+                "every fold into one tier" % (ORCH_FILE, second or "<missing>"),
             ))
 
-    # (b) a route that timed out inside this chain is not paid for twice
+    # ── criterion 7: a route that timed out is not paid for twice ──────
     for needle, why in (
         (ROUTE_SET_DECL, "the chain must remember which routes timed out"),
         (KEY_FN, "the route identity must be a single-source function"),
         (ROUTE_DECL, "the candidate route must be resolved at the top of the loop body"),
         (ROUTE_MODEL_ARG, "the route key must carry the model id (host alone is not an identity)"),
-        (ROUTE_SKIP, "a route that already timed out must be skipped"),
+        (ROUTE_SKIP_COND, "a route that already timed out must be skipped"),
         (ROUTE_RECORD, "the timeout verdict must record its route"),
     ):
-        need(orch, needle, ORCH_FILE, "chain-timeout-dedup", why)
-    if ROUTE_SKIP in orch and BUDGET_CALL in orch and ROUTE_RECORD in orch:
-        skip_at = orch.find(ROUTE_SKIP)
-        budget_at = orch.find(BUDGET_CALL)
-        timeout_at = orch.find(TIMEOUT_LOG)
-        record_at = orch.find(ROUTE_RECORD)
+        need(orch_m, needle, ORCH_FILE, "chain-timeout-dedup", why)
+    if ROUTE_SKIP_COND in orch_m and BUDGET_CALL in orch_m and ROUTE_RECORD in orch_m:
+        skip_at = orch_m.find(ROUTE_SKIP_COND)
+        budget_at = orch_m.find(BUDGET_CALL)
+        timeout_at = orch_l.find(TIMEOUT_LOG)
+        record_at = orch_m.find(ROUTE_RECORD)
         if not skip_at < budget_at:
             problems.append((
                 "chain-timeout-dedup",
@@ -545,40 +530,29 @@ def check(loop, compactor, orch):
                 "chain-timeout-dedup",
                 "%s: the route must be recorded on the timeout verdict, not before it" % ORCH_FILE,
             ))
-
-    # [wide3 chain-timeout-dedup] The skip branch must TERMINATE the iteration.
-    # `if (route in timedOutRoutes) { AppLogger.info(… "skip" …) }` keeps the
-    # needle, prints a line that says "skip", and then pays the same wall again
-    # — position is not the decision; the `continue` is.
-    skip_env = mask_code(orch)
-    skip_idx = skip_env.find(ROUTE_SKIP)
-    if skip_idx >= 0:
-        paren_at = skip_idx + ROUTE_SKIP.index("(")
-        blk = [s for s in if_statements(skip_env) if s[0] == paren_at]
-        if not blk:
+    # The skip branch must TERMINATE the iteration. `if (route in timedOutRoutes) {
+    # AppLogger.info(… "skip" …) }` keeps the needle, prints a line that says
+    # "skip", and then pays the same wall again — position is not the decision;
+    # the `continue` is. And a `continue` behind a dead guard terminates nothing.
+    skip_blocks = [b for b in orch_ifs if norm(b[0]) == norm(ROUTE_SKIP_COND)]
+    if ROUTE_SKIP_COND in orch_m and not skip_blocks:
+        problems.append((
+            "chain-timeout-dedup",
+            "%s: the route skip is not an `if (...) { … }` statement — its body cannot be checked "
+            "for a terminating branch" % ORCH_FILE,
+        ))
+    for cond, t_start, t_end, _es, _ee in skip_blocks:
+        terminators = [m.start() for m in re.finditer(
+            r"\b(continue|break|return|throw)\b", orch_m[t_start:t_end])
+            if path_feasible(orch_m, t_start + m.start())]
+        if not terminators:
             problems.append((
                 "chain-timeout-dedup",
-                "%s: the route skip is not an `if (...) { … }` statement — its body cannot be "
-                "checked for a terminating branch" % ORCH_FILE,
+                "%s:%d: the timed-out route's skip branch does not terminate the iteration — it logs "
+                "`skip candidate` and then sends anyway, paying the same dead route twice and "
+                "starving the heterogeneous backups of the chain deadline"
+                % (ORCH_FILE, orch_m.count("\n", 0, t_start) + 1),
             ))
-        else:
-            p, close, bstart, bend, _cond = blk[0]
-            body_txt = skip_env[bstart:bend]
-            nested = [s for s in if_statements(skip_env) if bstart <= s[2] and s[3] <= bend]
-            terminators = 0
-            for m in re.finditer(r"\b(continue|break|return|throw)\b", body_txt):
-                guards = enclosing_conds(nested, bstart + m.start())
-                if any(is_lit(g, "false") for g in guards):
-                    continue
-                terminators += 1
-            if not terminators:
-                problems.append((
-                    "chain-timeout-dedup",
-                    "%s:%d: the timed-out route's skip branch does not terminate the iteration — it "
-                    "logs `skip candidate` and then sends anyway, paying the same dead route twice "
-                    "and starving the heterogeneous backups of the chain deadline"
-                    % (ORCH_FILE, orch.count("\n", 0, skip_idx) + 1),
-                ))
 
     return problems
 
@@ -746,6 +720,68 @@ def selftest(root):
                 1,
             )),
         ),
+        # ── batch5 B5-t02 witnesses (each was BLIND_CONFIRMED before) ────
+        (
+            "a second EXHAUSTED refusal is appended after the gate (order)",
+            "entry-admits-exhausted",
+            on_loop(lambda s: s.replace(
+                "    if (!" + GATE_CALL + ") {\n        return false\n    }",
+                "    if (!" + GATE_CALL + ") {\n        return false\n    }\n"
+                "    if (verdict == ContextPolicy.CheckResult.EXHAUSTED) return false",
+                1,
+            )),
+        ),
+        (
+            "EXHAUSTED admission negated with !true (family)",
+            "gate-admits-exhausted",
+            on_compactor(lambda s: s.replace(
+                "verdict == ContextPolicy.CheckResult.EXHAUSTED ||",
+                "(!true && verdict == ContextPolicy.CheckResult.EXHAUSTED) ||",
+                1,
+            )),
+        ),
+        (
+            "escalation guard body gains a narrower early return (dataflow)",
+            "escalation-tier-contract",
+            on_compactor(lambda s: s.replace(
+                "        if (" + TIER_GUARD_COND + ") {\n            return Decision.OK\n        }",
+                "        if (" + TIER_GUARD_COND + ") {\n"
+                "            if (!escalatedFromOffload) return Decision.OK\n"
+                "            return Decision.OK\n        }",
+                1,
+            )),
+        ),
+        (
+            "pinned capacity evidence killed after it is set (dataflow)",
+            "chain-pins-too-large",
+            on_orch(lambda s: s.replace(
+                "                lastFailure = reduced.first\n                tooLargeFailure = reduced.second",
+                "                lastFailure = candidateFailure\n                tooLargeFailure = null",
+                1,
+            )),
+        ),
+        (
+            "silent guard absorbed by || !false (family)",
+            "silent-card-contract",
+            on_orch(lambda s: s.replace(
+                "            if (!silent) {\n                withContext(Dispatchers.Main) {\n"
+                "                    appendSystemInfo(\n                        text = context.getString(R.string.sysmsg_compact_failed",
+                "            if (!silent || !false) {\n                withContext(Dispatchers.Main) {\n"
+                "                    appendSystemInfo(\n                        text = context.getString(R.string.sysmsg_compact_failed",
+                1,
+            )),
+        ),
+        (
+            "skip branch terminate wrapped in a dead guard (family)",
+            "chain-timeout-dedup",
+            on_orch(lambda s: s.replace(
+                "($label ${candidate.model.displayName}) — route $route already timed out in this chain\",\n"
+                "            )\n            continue\n",
+                "($label ${candidate.model.displayName}) — route $route already timed out in this chain\",\n"
+                "            )\n            if (!true) continue\n",
+                1,
+            )),
+        ),
     ]
 
     # compliant fixture first: the real tree must be clean, otherwise every arm below is meaningless.
@@ -788,9 +824,10 @@ def main():
         for criterion, msg in problems:
             print("   - [%s] %s" % (criterion, msg))
         return 1
-    print("✅ compact-decision gate: loop entry admits EXHAUSTED, escalation keeps the tier "
-          "contract, the chain throws its 400 evidence, and every compactAll card is either "
-          "silent-gated or carries a written keep-criterion")
+    print("✅ compact-decision gate: the loop entry admits every verdict decide() adjudicates "
+          "and does so alone, the gate + escalation keep the tier contract, the chain keeps and "
+          "throws its 400 evidence, every repeatable card is silent-gated, and a route that timed "
+          "out is skipped before it is paid for")
     return 0
 
 
