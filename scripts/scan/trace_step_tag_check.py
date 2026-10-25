@@ -490,9 +490,256 @@ def brace_block_end(code, open_idx):
     return -1
 
 
+def match_paren(code, open_idx):
+    """Index of the ')' matching the '(' at `open_idx`, or -1."""
+    depth = 0
+    for i in range(open_idx, len(code)):
+        if code[i] == "(":
+            depth += 1
+        elif code[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+# [wide3-04] Text between a parameter list's `)` and the body `{` may only be
+# whitespace + an optional return type. Anything else means the body was not
+# located and every judgement below would slice the wrong text.
+_RET_TYPE_ONLY = re.compile(r"^\s*(:\s*[\w<>,\[\]\s.?:]+)?\s*$")
+
+
+def body_brace(code, decl):
+    """(decl_idx, body_open_brace) for a `private fun name(` declaration.
+
+    The body brace is the first `{` AFTER the parameter list closes. The old
+    version took the first `{` after the declaration name, which a default
+    parameter value swallows:
+        private fun write(t: String, block: J.() -> Unit = { sync { build(...) } })
+    then sliced the DEFAULT LAMBDA as the function body — and a body whose lock
+    was removed still looked locked. Returns (-1, -1) when the declaration is
+    missing and (decl_idx, -1) when its body cannot be located (caller reports
+    ROT rather than passing).
+    """
+    start = code.find(decl)
+    if start < 0:
+        return -1, -1
+    po = code.find("(", start)
+    if po < 0:
+        return start, -1
+    pc = match_paren(code, po)
+    if pc < 0:
+        return start, -1
+    ob = code.find("{", pc)
+    if ob < 0 or not _RET_TYPE_ONLY.match(code[pc + 1:ob]):
+        return start, -1
+    return start, ob
+
+
+def split_top(text, sep):
+    """[(start, end)] of `text` split on top-level `sep`, quote/brace aware."""
+    spans, depth, start, i, n = [], 0, 0, 0, len(text)
+    quote = ""
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if c in "\"'":
+            quote = c
+            i += 1
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == sep and depth == 0:
+            spans.append((start, i))
+            start = i + 1
+        i += 1
+    spans.append((start, n))
+    return spans
+
+
+def _const_val(cond):
+    c = cond.strip()
+    while c.startswith("(") and c.endswith(")") and match_paren(c, 0) == len(c) - 1:
+        c = c[1:-1].strip()
+    if c in ("true", "1"):
+        return True
+    if c in ("false", "0"):
+        return False
+    return None
+
+
+def provably_false(cond):
+    """Is this `if` condition decided by a literal BEFORE the real guard runs?
+
+    `if (false && guard)` and `if (false)` are dead bodies. Only the DEAD
+    direction is reported here — a `put(field)` that can never execute is a
+    missing field.
+    """
+    # Split on TOP-LEVEL `||` / `&&` (split_top takes a single char, so peel the
+    # operator only when both neighbours are the same char).
+    ors, start, i, n = [], 0, 0, len(cond)
+    depth, quote = 0, ""
+    while i < n:
+        c = cond[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if c in "\"'":
+            quote = c
+            i += 1
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and cond.startswith("||", i):
+            ors.append(cond[start:i])
+            i += 2
+            start = i
+            continue
+        i += 1
+    ors.append(cond[start:])
+    if len(ors) > 1:
+        return all(provably_false(p) for p in ors)
+
+    ands, start, i = [], 0, 0
+    depth, quote = 0, ""
+    while i < n:
+        c = cond[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if c in "\"'":
+            quote = c
+            i += 1
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and cond.startswith("&&", i):
+            ands.append(cond[start:i])
+            i += 2
+            start = i
+            continue
+        i += 1
+    ands.append(cond[start:])
+    if len(ands) > 1:
+        return any(provably_false(p) for p in ands)
+    return _const_val(cond) is False
+
+
+def if_bodies(code):
+    """[(cond, body_start, body_end)] for every `if (...)` body (both forms)."""
+    out = []
+    for m in re.finditer(r"\bif\s*\(", code):
+        po = code.find("(", m.end() - 1)
+        pc = match_paren(code, po)
+        if pc < 0:
+            continue
+        cond = code[po + 1:pc]
+        j = pc + 1
+        while j < len(code) and code[j] in " \t\r\n":
+            j += 1
+        if j < len(code) and code[j] == "{":
+            be = brace_block_end(code, j)
+            if be < 0:
+                continue
+            out.append((cond, j, be + 1))
+        else:
+            k = j
+            depth = 0
+            while k < len(code) and not (code[k] == "\n" and depth == 0):
+                if code[k] in "([{":
+                    depth += 1
+                elif code[k] in ")]}":
+                    depth -= 1
+                k += 1
+            out.append((cond, j, k))
+    return out
+
+
+def dead_guards_at(code, idx, bodies):
+    """Conditions of the enclosing `if`s that provably never run at `idx`."""
+    return [c for c, b0, b1 in bodies if b0 <= idx < b1 and provably_false(c)]
+
+
+def mask_comments(src):
+    """Blank // and /* */ comments, keep string literals INTACT (offsets and
+    newlines preserved). face_schema matches `put("field"` — field names live
+    inside string literals, so the mask must keep them; only prose may not
+    satisfy a criterion."""
+    out = list(src)
+    i, n, quote = 0, len(src), ""
+    while i < n:
+        c = src[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if c in "\"'":
+            quote = c
+            i += 1
+            continue
+        if src.startswith("//", i):
+            j = src.find("\n", i)
+            j = n if j < 0 else j
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+            continue
+        if src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            for k in range(i, j):
+                if src[k] != "\n":
+                    out[k] = " "
+            i = j
+            continue
+        i += 1
+    return "".join(out)
+
+
+def is_constant_expr(text):
+    """True when an expression contains no identifier/member reference at all —
+    i.e. the value cannot depend on the data it is supposed to describe."""
+    t = re.sub(r'"""(?:.|\n)*?"""', " ", text)
+    t = re.sub(r'"[^"\n]*"', " ", t)
+    t = re.sub(r"'[^'\n]*'", " ", t)
+    t = re.sub(r"\b(?:true|false|null)\b", " ", t)
+    t = re.sub(r"\b\d[\w.]*\b", " ", t)
+    t = re.sub(r"[\s,=()]", "", t)
+    return t == ""
+
+
 # 面 1b 的锚点（[da1029-C / I09]）
 WRITE_DECL = "private fun write("
 TERMINAL_DECL = "private fun writeTerminalOnce("
+BEGIN_RUN_DECL = "fun beginRun("
+RUN_CONTEXT_FIELDS = ("activeRunId", "activeSessionId", "terminalWritten")
 LOCK_CALL = "synchronized(writeLock)"
 BUILD_LINE_CALL = "buildLine("
 
@@ -514,12 +761,15 @@ def face_lock_scope(src):
         return ["AgentTraceRecorder.kt: unterminated string/comment literal — cannot "
                 "brace-match write() (ROT — update this gate)"]
     for decl in (WRITE_DECL, TERMINAL_DECL):
-        start = code.find(decl)
+        start, open_brace = body_brace(code, decl)
         if start < 0:
             problems.append("AgentTraceRecorder.kt: '%s' not found (ROT — update this gate)" % decl)
             continue
-        open_brace = code.find("{", start)
-        end = brace_block_end(code, open_brace) if open_brace >= 0 else -1
+        if open_brace < 0:
+            problems.append("AgentTraceRecorder.kt: %s body does not open after its "
+                            "parameter list (ROT — update this gate)" % decl)
+            continue
+        end = brace_block_end(code, open_brace)
         if end < 0:
             problems.append("AgentTraceRecorder.kt: %s body braces do not balance "
                             "(ROT — update this gate)" % decl)
@@ -551,6 +801,55 @@ def face_lock_scope(src):
                                 "one run with session_id from the next, and its ts can precede "
                                 "lines appended by a concurrent writer"
                                 % (BUILD_LINE_CALL, p, name, LOCK_CALL))
+
+    # [wide3-04] The WRITE side of the same contract. The criteria above judge
+    # the readers only, so dropping the lock around `beginRun`'s three-field
+    # update left every one of them green: the readers still hold the lock, but
+    # what they read is no longer updated atomically. A concurrent writer can
+    # then build a line from run A's id plus run B's session id, or clear
+    # `terminalWritten` between the check and the append of the terminal event.
+    start, open_brace = body_brace(code, BEGIN_RUN_DECL)
+    if start < 0:
+        problems.append("AgentTraceRecorder.kt: '%s' not found (ROT — update this gate)"
+                        % BEGIN_RUN_DECL)
+    elif open_brace < 0:
+        problems.append("AgentTraceRecorder.kt: beginRun's body does not open after its "
+                        "parameter list (ROT — update this gate)")
+    else:
+        end = brace_block_end(code, open_brace)
+        if end < 0:
+            problems.append("AgentTraceRecorder.kt: beginRun's body braces do not balance "
+                            "(ROT — update this gate)")
+        else:
+            body = code[open_brace:end + 1]
+            lock_at = body.find(LOCK_CALL)
+            if lock_at < 0:
+                problems.append("AgentTraceRecorder.kt: beginRun updates the run context with "
+                                "no '%s' — the readers hold the lock but the fields they read "
+                                "are no longer updated atomically (a line can pair run_id from "
+                                "one run with session_id from the next)" % LOCK_CALL)
+            else:
+                lock_open = body.find("{", lock_at)
+                lock_end = brace_block_end(body, lock_open) if lock_open >= 0 else -1
+                if lock_end < 0:
+                    problems.append("AgentTraceRecorder.kt: beginRun's synchronized block "
+                                    "braces do not balance (ROT — update this gate)")
+                else:
+                    for fld in RUN_CONTEXT_FIELDS:
+                        writes = [m.start() for m in
+                                  re.finditer(r"\b%s\s*=(?!=)" % fld, body)]
+                        if not writes:
+                            problems.append("AgentTraceRecorder.kt: beginRun no longer assigns "
+                                            "'%s' — the run context the trace line carries is "
+                                            "not reset per run (ROT — update this gate)" % fld)
+                        for w in writes:
+                            if not (lock_open < w < lock_end):
+                                problems.append(
+                                    "AgentTraceRecorder.kt: beginRun assigns '%s' outside "
+                                    "'%s' — a concurrent write() can observe a half-updated "
+                                    "run context (run_id from one run, session_id from the "
+                                    "next) and a ts that precedes lines already appended"
+                                    % (fld, LOCK_CALL))
     return problems
 
 
@@ -562,25 +861,58 @@ def face_schema(root):
         print("  ❌ 找不到 AgentTraceRecorder.kt —— 接线面无法取证")
         return False
     src = open(kt, "r", encoding="utf-8", errors="replace").read()
+    # [wide3-04] Comments are masked (prose must never satisfy a criterion) but
+    # string literals are kept — the field NAMES live inside them.
+    code = mask_comments(src)
+    bodies = if_bodies(code)
     missing = []
     for ty in TRACE_REQUIRED_TYPES:
-        if ('"%s"' % ty) not in src:
+        if ('"%s"' % ty) not in code:
             missing.append("事件类型 %s" % ty)
     for fld in TRACE_REQUIRED_FIELDS:
-        if ('put("%s"' % fld) not in src:
+        needle = 'put("%s"' % fld
+        hits = [m.start() for m in re.finditer(re.escape(needle), code)]
+        if not hits:
             missing.append("字段 put(\"%s\")" % fld)
+            continue
+        # [wide3-04] The field must be written on a reachable path AND carry a
+        # derived value. `if (false) put("args", …)` keeps the literal in the
+        # file while every tool_call loses its args; `put("args", "")` keeps the
+        # path while the analyser can no longer tell VERIFY_TEST from
+        # WRITE_FIX. Both used to be invisible to the substring check.
+        live = []
+        for h in hits:
+            dead = dead_guards_at(code, h, bodies)
+            if dead:
+                missing.append("字段 put(\"%s\")只出现在恒不执行的 if 分支里（%s）—— 字段永远写不出来"
+                               % (fld, (dead[0] or "?").strip()))
+                continue
+            live.append(h)
+        for h in live:
+            po = code.find("(", h)
+            pc = match_paren(code, po) if po >= 0 else -1
+            if pc < 0:
+                missing.append("字段 put(\"%s\") 的实参表无法解析（fail-closed）" % fld)
+                continue
+            inner = code[po + 1:pc]
+            args = [inner[a:b] for a, b in split_top(inner, ",")]
+            value = args[1] if len(args) > 1 else ""
+            if is_constant_expr(value):
+                missing.append("字段 put(\"%s\") 的值是常量（%s）—— 包含不了任何事件数据"
+                               % (fld, value.strip() or "<空>"))
     if missing:
         print("  ❌ 标注器依赖的 trace 契约在 Kotlin 侧缺失：%s" % ", ".join(missing))
         print("     （标注器不会报错，只会安静地数出 0 次调用 —— 本面就是拦这个）")
         return False
-    print("  ✅ AgentTraceRecorder.kt 仍写出 %d 个事件类型 + %d 个字段"
+    print("  ✅ AgentTraceRecorder.kt 仍写出 %d 个事件类型 + %d 个字段（均可达且值非常量）"
           % (len(TRACE_REQUIRED_TYPES), len(TRACE_REQUIRED_FIELDS)))
     lock_problems = face_lock_scope(src)
     if lock_problems:
         for p in lock_problems:
             print("  ❌ " + p)
         return False
-    print("  ✅ write()/writeTerminalOnce() 的行构建都在 %s 内（锁归属判据）" % LOCK_CALL)
+    print("  ✅ write()/writeTerminalOnce() 的行构建都在 %s 内；beginRun 的三字段更新也在同一把锁内"
+          % LOCK_CALL)
     return True
 
 
@@ -654,38 +986,87 @@ def selftest():
         fails.append("精度对照：正确期望下契约竟然红了")
 
     # 牙 4 [da1029-C / I09]：把 write() 的 buildLine 挪到 writeLock 外 -> 接线面红
-    def _kt(lock_scope_write):
+    # [wide3-04] 夹具补齐 beginRun（写端判据）与 write 的默认参数形态（体定位判据）。
+    def _kt(lock_scope_write, begin_locked=True, default_param=False,
+            dead_field=False, constant_field=False):
         head = ('const val TYPE_TOOL_CALL = "tool_call"\n'
                 'const val TYPE_TOOL_RESULT = "tool_result"\n'
                 'const val TYPE_TURN_START = "turn_start"\n'
                 'const val TYPE_TURN_END = "turn_end"\n'
-                'put("tool", x)\nput("args", x)\nput("tool_id", x)\nput("success", x)\n')
-        sig = '    private fun write(type: String, block: JSONObject.() -> Unit) {\n'
-        build = '        val line = buildLine(type, block)\n'
+                'put("tool", x)\n'
+                + ('if (false) put("args", x)\n' if dead_field
+                   else 'put("args", "")\n' if constant_field
+                   else 'put("args", x)\n')
+                + 'put("tool_id", x)\nput("success", x)\n')
         lock_open = '        synchronized(writeLock) {\n'
         append = '            runCatching { appendLine(line) }\n'
         close = '        }\n    }\n'
-        if lock_scope_write:
-            write_fn = sig + lock_open + build + append + close
-        else:
+        build = '        val line = buildLine(type, block)\n'
+        if default_param:
+            # The lock lives inside a DEFAULT PARAMETER lambda; the real body
+            # builds the line outside it. "First `{` after the name" slices the
+            # default lambda and calls this locked.
+            sig = ('    private fun write(\n'
+                   '        type: String,\n'
+                   '        block: JSONObject.() -> Unit = { synchronized(writeLock) '
+                   '{ buildLine(type, {}) } },\n'
+                   '    ) {\n')
             write_fn = sig + build + lock_open + append + close
+        else:
+            sig = '    private fun write(type: String, block: JSONObject.() -> Unit) {\n'
+            write_fn = (sig + lock_open + build + append + close
+                        if lock_scope_write else sig + build + lock_open + append + close)
         terminal = ('    private fun writeTerminalOnce(block: JSONObject.() -> Unit) {\n'
-                    + lock_open + build + append + close)
-        return head + write_fn + terminal
+                    + lock_open + '            val line = buildLine(TYPE_TRACE_END, block)\n'
+                    + append + close)
+        begin_body = ('            activeRunId = runId\n'
+                      '            activeSessionId = sessionId\n'
+                      '            terminalWritten = false\n')
+        if begin_locked:
+            begin = ('    fun beginRun(runId: String, sessionId: String) {\n'
+                     + lock_open + begin_body + '        }\n    }\n')
+        else:
+            begin = ('    fun beginRun(runId: String, sessionId: String) {\n'
+                     + begin_body + '    }\n')
+        return head + write_fn + terminal + begin
 
     root = tempfile.mkdtemp(prefix="tst-tag-")
     kt_dir = os.path.join(root, "src", "android", "app", "src", "main", "java",
                           "com", "rikkaminis", "app", "tools")
     os.makedirs(kt_dir)
     path = os.path.join(kt_dir, "AgentTraceRecorder.kt")
-    with open(path, "w") as fh:
-        fh.write(_kt(lock_scope_write=False))
+
+    def write_kt(text):
+        with open(path, "w") as fh:
+            fh.write(text)
+
+    write_kt(_kt(lock_scope_write=False))
     if quiet(face_schema, root):
         fails.append("牙4：buildLine 被挪到 writeLock 外时，接线面竟然还是绿的")
-    with open(path, "w") as fh:
-        fh.write(_kt(lock_scope_write=True))
+    write_kt(_kt(lock_scope_write=True))
     if not quiet(face_schema, root):
         fails.append("牙4 精度对照：构行在锁内时接线面竟然红了")
+
+    # 牙 5 [wide3-04]：写端 —— beginRun 的三字段更新失去 writeLock -> 接线面红
+    write_kt(_kt(lock_scope_write=True, begin_locked=False))
+    if quiet(face_schema, root):
+        fails.append("牙5：beginRun 无锁更新 run 上下文时，接线面竟然还是绿的")
+    write_kt(_kt(lock_scope_write=True))
+    if not quiet(face_schema, root):
+        fails.append("牙5 精度对照：beginRun 在锁内时接线面竟然红了")
+
+    # 牙 6 [wide3-04]：默认参数里的 lambda 有锁、真函数体在锁外 -> 接线面红
+    write_kt(_kt(lock_scope_write=True, default_param=True))
+    if quiet(face_schema, root):
+        fails.append("牙6：默认参数 lambda 里的锁被当成函数体时，接线面竟然还是绿的")
+
+    # 牙 7 / 牙 8 [wide3-04]：字段存在但写不出来 —— 恒假分支 / 常量值 -> 接线面红
+    write_kt(_kt(lock_scope_write=True, dead_field=True))
+    if quiet(face_schema, root):
+        fails.append("牙7：put(\"args\") 只活在 if (false) 里时，接线面竟然还是绿的")
+    write_kt(_kt(lock_scope_write=True, constant_field=True))
+    if quiet(face_schema, root):
+        fails.append("牙8：put(\"args\", \"\") 写入常量时，接线面竟然还是绿的")
     shutil.rmtree(root, ignore_errors=True)
 
     if fails:
@@ -694,8 +1075,10 @@ def selftest():
         print("TRACE_STEP_TAG_SELFTEST=FAIL")
         return 1
     print("  牙1 Kotlin 缺字段 -> 接线面红 / 牙2 空 golden -> 端到端面红 / "
-          "牙3 期望翻反 -> 契约面红 / 牙4 buildLine 出锁 -> 接线面红；"
-          "三者互不连坐，正确输入下全绿")
+          "牙3 期望翻反 -> 契约面红 / 牙4 buildLine 出锁 -> 接线面红 / "
+          "牙5 beginRun 无锁 -> 接线面红 / 牙6 默认参数 lambda 冒充函数体 -> 接线面红 / "
+          "牙7 恒假分支里的字段 -> 接线面红 / 牙8 常量字段值 -> 接线面红；"
+          "各面互不连坐，正确输入下全绿")
     print("TRACE_STEP_TAG_SELFTEST=PASS")
     return 0
 

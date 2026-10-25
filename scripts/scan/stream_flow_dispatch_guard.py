@@ -63,7 +63,31 @@ SRC_ROOTS = [
 
 # Cold-flow builders whose body runs on the COLLECTOR's context unless the
 # chain carries a flowOn. Generics are allowed to nest one level.
-FLOW_RE = re.compile(r"\b(callbackFlow|channelFlow)\b\s*(?:<[^;{}]{0,200}?>\s*)?\{")
+#
+# [wide3-04] TWO syntactic forms, both legal Kotlin and both meaning the same
+# thing: the trailing lambda (`callbackFlow { ... }`) and the parenthesised
+# argument (`callbackFlow({ ... })`). The first version of this gate only knew
+# the trailing form, so `callbackFlow({ ... })` was invisible to the whole
+# judgement — the flow was never located, the missing `flowOn` never reported.
+FLOW_BRACE_RE = re.compile(
+    r"\b(callbackFlow|channelFlow)\b\s*(?:<[^;{}]{0,200}?>\s*)?\{")
+FLOW_PAREN_RE = re.compile(
+    r"\b(callbackFlow|channelFlow)\b\s*(?:<[^;{}]{0,200}?>\s*)?\(\s*\{")
+
+# [wide3-04] Allowlist, not blacklist. `flowOn` used to be judged by
+# "does the argument contain the word Main" — anything else counted as safe, so
+# `Dispatchers.Unconfined` (which runs the blocking body on the COLLECTOR's
+# thread until the first suspension) and `EmptyCoroutineContext` passed. Only
+# dispatchers that really hand the producer to another thread may pass.
+SAFE_DISPATCHERS = ("IO", "Default")
+
+# Calls that can move execution to another dispatcher *inside* the flow body.
+# A correct chain-level `flowOn` says nothing about what the body does
+# afterwards: `withContext(Dispatchers.Main) { call.execute() }` inside the
+# body runs the blocking call on the UI thread while the chain still looks
+# properly dispatched.
+DISPATCH_SWITCH_RE = re.compile(
+    r"\b(withContext|launch|async|flowOn|runBlocking)\s*\(")
 
 # Synchronous calls that occupy the thread for an unbounded / long time.
 # Deliberately narrow: only constructs that really park the thread. `.await()`
@@ -192,12 +216,34 @@ def match_paren(text, open_idx):
     return -1
 
 
+def dispatcher_verdict(arg):
+    """Classify a dispatcher expression (the text inside `flowOn(...)`).
+
+    Returns ("ok", name) only for an allowlisted background dispatcher;
+    ("main", name) for the UI thread; ("unsafe", name) for everything else —
+    including expressions this gate cannot read, which fail CLOSED.
+    """
+    inner = arg.strip()
+    if inner.startswith("(") and inner.endswith(")"):
+        inner = inner[1:-1]
+    if re.search(r"\bEmptyCoroutineContext\b|\bnewSingleThreadContext\b", inner):
+        return "unsafe", inner.strip()
+    names = re.findall(r"\bDispatchers?\s*\.\s*([A-Za-z_]\w*)", inner)
+    if not names:
+        return "unsafe", (inner.strip() or "<empty>")
+    for n in names:
+        if n not in SAFE_DISPATCHERS:
+            return ("main" if n == "Main" else "unsafe"), n
+    return "ok", names[0]
+
+
 def chain_dispatch(text, close_idx):
     """Walk the operator chain after a flow builder's closing brace.
 
-    Returns "ok"    -> a flowOn with a non-Main dispatcher was found
-            "main"  -> flowOn(Dispatchers.Main...) found (still a hazard)
-            None    -> no flowOn on the chain
+    Returns ("ok", name)     -> allowlisted background dispatcher
+            ("main", name)   -> Dispatchers.Main (still a hazard)
+            ("unsafe", expr) -> any other dispatcher (Unconfined, custom, …)
+            (None, None)     -> no flowOn on the chain
     """
     i = close_idx + 1
     n = len(text)
@@ -205,10 +251,10 @@ def chain_dispatch(text, close_idx):
         while i < n and text[i] in " \t\r\n":
             i += 1
         if i >= n or text[i] != ".":
-            return None
+            return None, None
         m = re.match(r"\.\s*([A-Za-z_]\w*)", text[i:])
         if not m:
-            return None
+            return None, None
         name = m.group(1)
         i += m.end()
         while i < n and text[i] in " \t\r\n":
@@ -217,25 +263,109 @@ def chain_dispatch(text, close_idx):
         if i < n and text[i] == "(":
             j = match_paren(text, i)
             if j < 0:
-                return None
+                return None, None
             arg = text[i:j + 1]
             i = j + 1
         if name == "flowOn":
-            return "main" if re.search(r"\bMain\b", arg) else "ok"
+            return dispatcher_verdict(arg)
+
+
+def body_dispatch_hazards(body):
+    """Blocking work moved onto a non-background dispatcher INSIDE the body.
+
+    Returns [(dispatcher_name, verdict, why)] — empty when the body keeps every
+    blocking call on the dispatcher the chain handed it.
+    """
+    out = []
+    for m in DISPATCH_SWITCH_RE.finditer(body):
+        po = body.find("(", m.end() - 1)
+        pc = match_paren(body, po) if po >= 0 else -1
+        if pc < 0:
+            continue
+        args = body[po + 1:pc]
+        if "Dispatcher" not in args and "CoroutineContext" not in args:
+            continue
+        verdict, name = dispatcher_verdict(args)
+        if verdict == "ok":
+            continue
+        # The blocking call may live in the arguments themselves (a passed
+        # lambda) or in the trailing lambda block.
+        region = args
+        j = pc + 1
+        while j < len(body) and body[j] in " \t\r\n":
+            j += 1
+        if j < len(body) and body[j] == "{":
+            be = match_brace(body, j)
+            if be > 0:
+                region += body[j:be + 1]
+        for pat, why in BLOCKING_PATTERNS:
+            if re.search(pat, region):
+                out.append((name, verdict, why))
+                break
+    return out
+
+
+def flow_sites(text):
+    """[(builder, body_open, chain_anchor, problem)] for every cold-flow site.
+
+    `chain_anchor` is the index after which the operator chain starts: the body's
+    closing brace for the trailing-lambda form, the CALL's closing paren for the
+    `callbackFlow({ … })` form. `problem` is non-None when the site cannot be
+    parsed — such a site is reported instead of skipped, because an unparseable
+    flow is exactly what a regression looks like.
+    """
+    sites = []
+    seen = set()
+    for rx, paren_form in ((FLOW_PAREN_RE, True), (FLOW_BRACE_RE, False)):
+        for m in rx.finditer(text):
+            open_idx = text.index("{", m.end() - 1)
+            if open_idx in seen:
+                continue
+            seen.add(open_idx)
+            close_idx = match_brace(text, open_idx)
+            if close_idx < 0:
+                sites.append((m.group(1), open_idx, -1,
+                              "body braces do not balance — the flow body cannot be "
+                              "delimited"))
+                continue
+            if paren_form:
+                paren_idx = text.rindex("(", 0, open_idx)
+                pc = match_paren(text, paren_idx)
+                # The call's own `)` must follow the body (optionally + a comma).
+                # A runaway match (the next `)` in the file belongs to unrelated
+                # code) means the site is unparseable, not that it is fine.
+                if pc < 0 or text[close_idx + 1:pc].strip() not in ("", ","):
+                    sites.append((m.group(1), open_idx, -1,
+                                  "the `builder({ … })` call does not close after the "
+                                  "body — the chain that carries flowOn cannot be located"))
+                    continue
+                anchor = pc
+            else:
+                anchor = close_idx
+            sites.append((m.group(1), open_idx, anchor, None))
+    return sites, len(sites)
 
 
 def scan_file(path):
     raw = open(path, encoding="utf-8", errors="replace").read()
+    return scan_text(raw)
+
+
+def scan_text(raw):
     text = mask_non_code(raw)
     raw_lines = raw.split("\n")
     findings = []
 
-    for m in FLOW_RE.finditer(text):
-        open_idx = text.index("{", m.end() - 1)
-        close_idx = match_brace(text, open_idx)
-        if close_idx < 0:
+    sites, _n = flow_sites(text)
+    for builder, open_idx, anchor, problem in sites:
+        start_line = text.count("\n", 0, open_idx) + 1
+        if problem:
+            findings.append((start_line, start_line, builder + ": " + problem,
+                             "[unparseable — fail-closed]"))
             continue
+        close_idx = match_brace(text, open_idx)
         body = text[open_idx:close_idx + 1]
+        end_line = text.count("\n", 0, close_idx) + 1
 
         hits = []
         for pat, why in BLOCKING_PATTERNS:
@@ -244,12 +374,6 @@ def scan_file(path):
         if not hits:
             continue
 
-        disp = chain_dispatch(text, close_idx)
-        if disp == "ok":
-            continue
-
-        start_line = text.count("\n", 0, m.start()) + 1
-        end_line = text.count("\n", 0, close_idx) + 1
         # Escape hatch: the flow line, the two lines above it, or the body.
         exempt = False
         for k in range(max(0, start_line - 3), min(len(raw_lines), end_line)):
@@ -259,28 +383,134 @@ def scan_file(path):
         if exempt:
             continue
 
-        for ln, why in sorted(set(hits)):
-            findings.append((start_line, ln, why, disp))
+        disp, dname = chain_dispatch(text, anchor)
+        if disp != "ok":
+            tag = {"main": "flowOn(Dispatchers.Main)",
+                   "unsafe": "flowOn(Dispatchers.%s)" % dname,
+                   None: "no flowOn"}[disp]
+            for ln, why in sorted(set(hits)):
+                findings.append((start_line, ln, why, tag))
+
+        # [wide3-04] …and the body must not hand the blocking call to a
+        # non-background dispatcher itself: a correct chain-level flowOn is
+        # defeated by one `withContext(Dispatchers.Main)` inside the body.
+        for name, verdict, why in body_dispatch_hazards(body):
+            findings.append((
+                start_line,
+                text.count("\n", 0, open_idx) + 1,
+                "body switches to %s for %s" % (name, why),
+                "[%s — the chain's flowOn cannot reach it]" % (
+                    "Dispatchers.Main" if verdict == "main" else "non-background dispatcher"),
+            ))
     return findings
 
 
+def selftest():
+    """[wide3-04] One arm per judgement: each arm is the regression shape the
+    external audit used, and each must flip its OWN criterion only."""
+    failures = []
+
+    def arm(name, raw, expect_tags):
+        got = scan_text(raw)
+        tags = sorted(t for _s, _h, _w, t in got)
+        if tags != sorted(expect_tags):
+            failures.append("%s: expected %s got %s" % (name, sorted(expect_tags), tags))
+
+    CLEAN_BODY = (
+        "fun ok(): Flow<Int> = callbackFlow<Int> {\n"
+        "    val resp = call.execute()\n"
+        "    awaitClose { }\n"
+        "}.flowOn(Dispatchers.IO)\n"
+    )
+    arm("clean trailing-lambda form", CLEAN_BODY, [])
+
+    # paren form, correctly dispatched — must be judged, and must pass
+    arm("clean parenthesised form",
+        "fun ok2(): Flow<Int> = callbackFlow({\n"
+        "    val resp = call.execute()\n"
+        "    awaitClose { }\n"
+        "}).flowOn(Dispatchers.IO)\n", [])
+
+    # witness 1 (spelling): Unconfined is not Main, but it runs the body on the
+    # collector's thread until the first suspension
+    arm("flowOn(Dispatchers.Unconfined) is unsafe",
+        CLEAN_BODY.replace("Dispatchers.IO", "Dispatchers.Unconfined"),
+        ["flowOn(Dispatchers.Unconfined)"])
+
+    arm("flowOn(EmptyCoroutineContext) is unsafe",
+        CLEAN_BODY.replace("Dispatchers.IO", "EmptyCoroutineContext"),
+        ["flowOn(Dispatchers.EmptyCoroutineContext)"])
+
+    # witness 2 (scope): the chain is right, the body switches to the UI thread
+    arm("body withContext(Dispatchers.Main) carrying the blocking call",
+        "fun bad(): Flow<Int> = callbackFlow<Int> {\n"
+        "    val resp = withContext(Dispatchers.Main) { call.execute() }\n"
+        "    awaitClose { }\n"
+        "}.flowOn(Dispatchers.IO)\n",
+        ["[Dispatchers.Main — the chain's flowOn cannot reach it]"])
+
+    arm("body launch(Main) carrying a blocking read",
+        "fun bad2(): Flow<Int> = callbackFlow<Int> {\n"
+        "    launch(Dispatchers.Main) { reader.readLine() }\n"
+        "}.flowOn(Dispatchers.IO)\n",
+        ["[Dispatchers.Main — the chain's flowOn cannot reach it]"])
+
+    # witness 3 (parser-death): `callbackFlow({` — the closing paren is gone, so
+    # the call never closes. The whole flow used to be invisible.
+    arm("callbackFlow({ without the closing paren",
+        "fun bad3(): Flow<Int> = callbackFlow({\n"
+        "    val resp = call.execute()\n"
+        "}.flowOn(Dispatchers.IO)\n",
+        ["[unparseable — fail-closed]"])
+
+    # control: a body that switches to IO is fine
+    arm("body withContext(Dispatchers.IO) stays green",
+        "fun ok3(): Flow<Int> = callbackFlow<Int> {\n"
+        "    val resp = withContext(Dispatchers.IO) { call.execute() }\n"
+        "}.flowOn(Dispatchers.IO)\n", [])
+
+    if failures:
+        print("STREAM_FLOW_DISPATCH_SELFTEST=FAIL")
+        for f in failures:
+            print("   - " + f)
+        return 1
+    print("STREAM_FLOW_DISPATCH_SELFTEST=PASS")
+    return 0
+
+
 def main():
-    root = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else ".")
+    argv = [a for a in sys.argv[1:] if not a.startswith("-")]
+    if "--selftest" in sys.argv:
+        return selftest()
+    root = os.path.abspath(argv[0] if argv else ".")
     violations = []
+    total_sites = 0
+    saw_src = False
     for sr in SRC_ROOTS:
         src = os.path.join(root, sr)
         if not os.path.isdir(src):
             continue
+        saw_src = True
         for base, _dirs, files in os.walk(src):
             for fn in sorted(files):
                 if not fn.endswith(".kt"):
                     continue
                 path = os.path.join(base, fn)
                 rel = os.path.relpath(path, src).replace(os.sep, "/")
-                for start_line, hit_line, why, disp in scan_file(path):
-                    tag = "flowOn(Dispatchers.Main)" if disp == "main" else "no flowOn"
+                text = mask_non_code(open(path, encoding="utf-8", errors="replace").read())
+                total_sites += flow_sites(text)[1]
+                for start_line, hit_line, why, tag in scan_file(path):
                     violations.append(
                         f"{rel}:{start_line}  (blocking at :{hit_line})  {why}  [{tag}]")
+
+    # [wide3-04] Fail-closed on a collapsed scan surface: a judgement that found
+    # nothing to judge must never read as "everything is fine".
+    if not saw_src:
+        violations.append("production source root missing (%s) — nothing was judged "
+                          "(fail-closed)" % ", ".join(SRC_ROOTS))
+    elif total_sites == 0:
+        violations.append("no callbackFlow/channelFlow site found under %s — the scan "
+                          "surface collapsed (fail-closed)" % ", ".join(SRC_ROOTS))
 
     if violations:
         print(f"❌ Stream-flow dispatch guard: {len(violations)} violation(s)")
