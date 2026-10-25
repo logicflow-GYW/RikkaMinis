@@ -171,6 +171,17 @@ sh /var/minis/shared/tools/gate_run.sh --full --repo "$PWD"
 python3 scripts/scan/test_scan.py
 ```
 
-## CI 回填
+## CI 回填（已核实）
 
-（dispatch 后填写：run id / conclusion / head_sha / `Summary: 112 passed, 0 failed` / `ALL 344 CASES PASS` / ` e: ` 计数 / skipped 步）
+- run：**#2653 / id `40161234052`**（`https://github.com/logicflow-GYW/RikkaMinis/actions/runs/40161234052`）
+- job：`121073043281`，**attempt 1 success**
+- `head_sha` = `d3f0bfb6318f7d66a210ba69b7bff62d7edda8fb` —— 与本地 `git rev-parse HEAD` **逐字符一致**
+- 26 步，唯一非 success = `Publish to Releases` **skipped**（main 门控，分支构建符合预期）
+- 日志读数（1,480,876 B）逐条核过：
+  - `║  Summary: 112 passed, 0 failed` **恰一条**（其余 8 条 Summary 为子套件：28/5/14/36/15/25/10 passed + `0 violation(s) found`，全部 0 failed）
+  - `ALL 344 CASES PASS` **恰一条**
+  - ` e: ` 命中 **0**（无 Kotlin 编译错）
+  - 含 `FAILED` 的 6 行全部是 **PASSED 用例名子串**（`RealAgentAdapterSkeletonTest > slot denied produces FAILED…`、`ChatAgentTraceObserverSchemaTest > reason PERSISTENCE_FAILED maps…`、`TerminalErrorSurfacedTest > … legal FAILED terminal` 等），无游离失败
+  - 四个冻结 selftest 标记串在 CI 日志中**全部命中**：`SKILL_IMPORT_OFFMAIN_SELFTEST=PASS` / `SKILL_FILE_SAVE_RESULT_SELFTEST=PASS` / `BACKUP_REMAP_ROLLUP_SELFTEST=PASS` / `SELFTEST=PASS (downloads_atomic_update: 4 fixtures)`
+
+**结论**：`112 passed, 0 failed` + `ALL 344 CASES PASS` —— 与基线（`6b6c918f`）读数一致，四门加固未改变门总数与夹具总数，未引入回归。CI 绿 = 本次开发的确定性停止节点，停在分支，不合并 main。
