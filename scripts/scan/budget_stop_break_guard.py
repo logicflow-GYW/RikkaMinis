@@ -66,78 +66,60 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import analyse as kotlin_analyse  # noqa: E402
+from _kotlin_ast import const_bool, enclosing_conditions, when_branches  # noqa: E402
+
 KOTLIN_APP = "src/android/app/src/main/java"
 
-ASSIGN_RE = re.compile(r"\bt7BudgetStopReason\s*=\s*\"")
+# [wide4-02] The old pattern required a double quote right after `=`, so
+# `t7BudgetStopReason = ("deadline_reached")`, a named constant, or a `when`
+# expression dropped the site out of the candidate set entirely — that branch
+# then fell through to the success tail with NO gate looking at it (witness
+# family-hole/3). Every write that is not the `= null` reset is a candidate.
+ASSIGN_RE = re.compile(r"\bt7BudgetStopReason\s*=(?!=)\s*(?!null\b)\S")
 ASSIGN_MARKER = "t7BudgetStopReason"
 LOOP_HEAD_RE = re.compile(r"(?:(?P<label>[A-Za-z_]\w*)\s*@\s*)?\b(?P<kind>while|for)\s*\(")
 BREAK_RE = re.compile(r"(?<![\w@$.])break\b(?:@(?P<label>[A-Za-z_]\w*))?")
 
 
 def strip_code_text(text):
-    """Blank comments and string/char literal CONTENTS, keeping every offset.
+    '''Blank comments and string/char literal CONTENTS, keeping every offset.
 
     Offsets must survive: the whole criterion is about positions (which loop
     encloses which break). Newlines are preserved so offsets map to lines.
-    """
-    out = list(text)
-    i, n = 0, len(text)
-    in_line = in_block = in_str = in_char = False
-    while i < n:
-        ch = text[i]
-        two = text[i:i + 2]
-        if in_line:
-            if ch == "\n":
-                in_line = False
-            else:
-                out[i] = " "
-            i += 1
-            continue
-        if in_block:
-            if two == "*/":
-                out[i] = out[i + 1] = " "
-                in_block = False
-                i += 2
-                continue
-            if ch != "\n":
-                out[i] = " "
-            i += 1
-            continue
-        if in_str or in_char:
-            if ch == "\\":
-                out[i] = " "
-                if i + 1 < n and text[i + 1] != "\n":
-                    out[i + 1] = " "
-                i += 2
-                continue
-            if (in_str and ch == '"') or (in_char and ch == "'"):
-                in_str = in_char = False
-                i += 1
-                continue
-            if ch != "\n":
-                out[i] = " "
-            i += 1
-            continue
-        if two == "//":
-            in_line = True
-            out[i] = out[i + 1] = " "
-            i += 2
-            continue
-        if two == "/*":
-            in_block = True
-            out[i] = out[i + 1] = " "
-            i += 2
-            continue
-        if ch == '"':
-            in_str = True
-            i += 1
-            continue
-        if ch == "'":
-            in_char = True
-            i += 1
-            continue
-        i += 1
-    return "".join(out)
+
+    [wide4-02 parser-death/4] This used to be a hand-written state machine
+    without a raw-string (triple quote) state: in `val _raw = <triple> " } <triple>`
+    the quotes re-synchronised one character off, the `}` leaked into the
+    structural view and `block_end()` closed the branch BEFORE the `break` — the
+    branch then looked break-less and was skipped. The shared lexer knows raw
+    strings, `${...}` templates, nested block comments and backtick identifiers;
+    a file it cannot tokenise returns None and the caller fails CLOSED.
+    '''
+    ok, reason, views = kotlin_analyse(text)
+    if not ok:
+        return None, reason
+    return views['code'], None
+
+
+def _is_dead_position(text, pos):
+    '''True when a constant-false condition governs `pos`.
+
+    [wide4-02 family-hole/1] `if (false) break@turnLoop` followed by a bare
+    `break` was read as a labelled transfer: the first `break` token found was
+    the dead one, it carried the right label, and the gate stopped looking. The
+    condition is folded with the shared const folder, so `if (false)` and
+    `when (false)` are both recognised as unreachable.
+    '''
+    for kind, cond in enclosing_conditions(text, pos):
+        if kind == "if" and const_bool(cond) is False:
+            return True
+    for subject, cond, b_start, b_end in when_branches(text):
+        if b_start <= pos < b_end and (const_bool(subject) is False
+                                       or const_bool(cond) is False):
+            return True
+    return False
 
 
 def match_paren(text, open_idx):
@@ -228,7 +210,18 @@ def analyse(path):
                   "outermost": None, "reason": f"unreadable ({type(e).__name__}: {e})"}],
                 {"candidates": 0, "loops": 0})
 
-    text = strip_code_text(raw)
+    text, lex_reason = strip_code_text(raw)
+    if text is None:
+        # Fail closed, but only for files that are actually in remit: a source
+        # this gate cannot tokenise and that never mentions the budget-stop
+        # marker carries no candidate to judge.
+        if ASSIGN_MARKER not in raw:
+            return [], {"candidates": 0, "loops": 0}
+        return ([{"line": 0, "break": "-", "assign_line": 0, "loop_count": 0,
+                  "outermost": None,
+                  "reason": "the file cannot be tokenised (%s) — a structural "
+                            "gate must not judge a half-masked source" % lex_reason}],
+                {"candidates": 0, "loops": 0})
     lines = text.split("\n")
     loops = loop_spans(text)
 
@@ -264,10 +257,35 @@ def analyse(path):
             inner = [lp for lp in enclosing if lp[0] > assign_pos and lp[1] <= end]
             if inner and enclosing[-1] in inner:
                 continue
+            # [wide4-02 family-hole/1] a `break` under a constant-false guard
+            # never runs: it must not be read as the branch's transfer. The
+            # witness put `if (false) break@turnLoop` FIRST and a bare `break`
+            # after it — the labelled (dead) one satisfied the gate.
+            if _is_dead_position(text, bpos):
+                continue
             decisive = (b, bpos, enclosing)
             break
         if decisive is None:
-            continue  # branch does not claim to end the run (e.g. returns)
+            # [wide4-02 family-hole/2] The old comment assumed "no break ⇒ the
+            # branch returns". In a `while (!collectDone)` loop,
+            # `collectDone = true; continue` (or simply running off the end of
+            # the branch) leaves the inner loop and falls through to the turn's
+            # success tail — exactly the damage the break rule exists to stop.
+            # Inside a loop, a budget-stop branch must leave the FUNCTION.
+            if not [lp for lp in loops if lp[0] <= assign_pos <= lp[1]]:
+                continue  # not inside a loop: out of remit
+            if re.search(r"\breturn\b(?!@)|\bthrow\b", text[m.end():max(end, m.end())]):
+                continue  # leaves the function, nothing to fall through to
+            violations.append({
+                "line": line_of(assign_pos), "break": "-",
+                "assign_line": line_of(assign_pos), "loop_count": 0,
+                "outermost": None,
+                "reason": "the budget-stop branch neither breaks to the run loop "
+                          "nor returns/throws — it falls through to the turn "
+                          "success tail (a `collectDone = true; continue` or a "
+                          "branch that runs off its end is the same escape)",
+            })
+            continue
 
         b, bpos, enclosing = decisive
         break_label = b.group("label")
@@ -483,6 +501,58 @@ def selftest():
                "fun f() {\n"
                '    traceObserver.t7BudgetStopReason = "deadline_reached"\n'
                "}\n"), 1, "no loop header"),
+        # ── [wide4-02] arms: the four shapes the external witnesses got through ──
+        # family-hole/1: the first `break` token is a DEAD labelled one; the
+        # live transfer is the bare `break` after it.
+        ("w4-dead-guard `if (false) break@turnLoop` then a bare break",
+         _fixture(
+             "        turnLoop@ for (turn in 0 until maxTurns) {\n"
+             "            while (!done) {\n"
+             "                if (budget.isExpired()) {\n"
+             '                    traceObserver.t7BudgetStopReason = "deadline_reached"\n'
+             "                    if (false) break@turnLoop\n"
+             "                    break\n"
+             "                }\n"
+             "            }\n"
+             "        }\n"), 1, "break@turnLoop"),
+        # family-hole/2: `collectDone = true; continue` — no break at all, and
+        # the branch falls through to the turn success tail.
+        ("w4-fallthrough `collectDone = true; continue` without a break",
+         _fixture(
+             "        turnLoop@ for (turn in 0 until maxTurns) {\n"
+             "            while (!done) {\n"
+             "                if (!budget.consume()) {\n"
+             '                    traceObserver.t7BudgetStopReason = "provider_attempt_limit"\n'
+             "                    collectDone = true\n"
+             "                    continue\n"
+             "                }\n"
+             "            }\n"
+             "        }\n"), 1, "falls through"),
+        # family-hole/3: the write is wrapped in parentheses, so the old
+        # `= "` pattern lost the site entirely.
+        ("w4-assign `= (\"reason\")` keeps the site in the candidate set",
+         _fixture(
+             "        turnLoop@ for (turn in 0 until maxTurns) {\n"
+             "            while (!done) {\n"
+             "                if (budget.isExpired()) {\n"
+             '                    traceObserver.t7BudgetStopReason = ("deadline_reached")\n'
+             "                    break\n"
+             "                }\n"
+             "            }\n"
+             "        }\n"), 1, "break@turnLoop"),
+        # parser-death/4: a raw string with a bare `}` must not close the
+        # branch early and hide the bare `break`.
+        ("w4-rawstring a `\"\"\"` raw string cannot close the branch early",
+         _fixture(
+             "        turnLoop@ for (turn in 0 until maxTurns) {\n"
+             "            while (!done) {\n"
+             "                if (budget.isExpired()) {\n"
+             '                    traceObserver.t7BudgetStopReason = "deadline_reached"\n'
+             '                    val _raw = """ " } """\n'
+             "                    break\n"
+             "                }\n"
+             "            }\n"
+             "        }\n"), 1, "break@turnLoop"),
     ]
     import shutil
     import tempfile
