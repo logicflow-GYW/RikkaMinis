@@ -145,7 +145,7 @@ branch totals: {'BLIND': 0, 'CAUGHT': 13}   restore=True ×13
 - 邻门 7 道 rc=0：`file_uri_parse_guard_check` / `file_preview_url_encode_check` / `offload_host_path_check` / `provider_rpc_symmetry_check` / `i18n_check` / `process_logging_gate` / `parts_json_funnel_check`。
 - 逐门等价全量：`probe/t03_scan_all.py`（逐门独立 subprocess + 断点续跑）→ **111/111 rc=0**（`probe/t03_scanall.done`；nonzero-gates: 0）。
 - `scan.sh` 门数核对：`scan.sh` 共 112 个门头，其中 111 个是独立脚本调用（110 个 `*_check.py` + 1 个 `scripts/native/crash_fields_host_test.sh`），第 112 个（`[2/112] i18n consistency check`）是 `scan.sh` 内的联内 `python3 -c` 块（无独立脚本文件；仓库里 `i18n_check.py` 存在但 `scan.sh` 不调用它）。逐门驱动覆盖全部 111 个独立脚本门，联内项由 `scan.sh`/CI 覆盖 ⇒ 无门静默漏跑。
-- `test_scan.py`：与本支两门直接相关的注册函数 `test_da1016_gates`（含 rss）、`test_da1020_gates`（含 filepreview）、`test_da1017_external_fixtures` 均 PASS；全量 344 用例的分段跑法见 §6 R7（沙箱并发窗口限制，本地分段跑到 33/46 函数被中断，其余由 CI 日志 `ALL 344 CASES PASS` 覆盖）。
+- `test_scan.py`：与本支两门直接相关的注册函数 `test_da1016_gates`（含 rss）、`test_da1020_gates`（含 filepreview）、`test_da1017_external_fixtures` 均 PASS；全量 344 用例改逐函数独立进程跑完 **46/46 函数、344 用例全 ✅ / 0 ❌**（`probe/t03_tsfn/*.log`，驱动 `probe/t03_tsfn_resume.py`；单进程整跑在沙箱并发窗口被杀，见 §6 R7）。
 - `git status --porcelain src/` = 空（反攻无变异残留）。
 
 ## 5. CI
@@ -189,7 +189,7 @@ branch totals: {'BLIND': 0, 'CAUGHT': 13}   restore=True ×13
   触发条件：新见证用 `item.key` / `item.file.name` 类非身份键（`name` 已在身份白名单外，会红；`item.key` 需看其值来源）。
   触发后方案：键来源追一跳 `val`（`value_sources`）。
   搁置理由：现有实现已挡住 `Unit` / 无参 / `parent`；更远形态无见证。
-- **R7（本地全量 test_scan）** 并发窗口内 `test_scan.py` 单进程两次被 SIGKILL（含分段驱动跑到第 13/46 个函数时被中断），本地没有拿到 `ALL 344 CASES PASS` 的整跑读数；改由「相关函数直跑 + 分段续跑 + CI 同一棵树整跑」三条覆盖。
+- **R7（本地全量 test_scan 的整跑形态）** 并发窗口内 `test_scan.py` 单进程整跑两次被 SIGKILL；改用**逐函数独立进程**驱动（`probe/t03_tsfn_resume.py`，可续跑）后本地跑完 **46/46 函数、344 用例全 ✅ / 0 ❌**（`probe/t03_tsfn/*.log`）。残留点 = 单进程整跑在该环境下仍不可用，必须分段；CI 同一棵树的整跑同样绿（`ALL 344 CASES PASS`）。
   触发条件：需要本地全量证据（离线/CI 不可用）。
   触发后方案：`probe/t03_tsfn_resume.py`（可续跑分段驱动，每函数独立进程 + 状态文件）。
   搁置理由：CI 每次 push 都在同一棵树跑 `scan.sh` 112 与 `test_scan` 344；本地读数不构成额外证据（环境限制，非门红）。
