@@ -591,7 +591,21 @@ def scan_revision_stream(store_raw):
                     % (STORE_REL, line_of(scan, bump), name, line_of(scan, w))
                 )
 
-    # (2) coverage: no write may escape the funnel (one bump per write path).
+    # (2) the bump has to MOVE the counter. [meta-audit wide3 scheduled-C1]
+    # The criterion used to be "there is a `_revision.value =` line inside the
+    # write funnel AND a nextRevision(…) call carrying `wrote`" — two presence
+    # checks that pass while `val nextRev = nextRevision(…)` is computed and
+    # thrown away and the counter is assigned its OWN value. StateFlow is
+    # distinctUntilChanged, so a self-assignment emits nothing: every screen
+    # keeps rendering the stale document while the gate reports a live ticker.
+    for bump in bumps:
+        why = bump_stalls(scan, backing, bump)
+        if why:
+            bad.append(
+                "%s:%d: %s" % (STORE_REL, line_of(scan, bump), why)
+            )
+
+    # (3) coverage: no write may escape the funnel (one bump per write path).
     for w in writes:
         span = enclosing(w)
         if span is None:
@@ -721,7 +735,25 @@ def scan_merge_insert_guard(policy_raw):
     deleted) and only the caller can tell them apart, so the insert branch has to
     sit behind a parameter. Unconditional append is what resurrected deleted
     records together with the form's stale run state."""
-    scan = strip_code(policy_raw)
+    # Literal-decided branches are blanked first: a `if (false && !allowInsert)`
+    # keeps the parameter AND the `return file` in the block (wide3 C4).
+    scan = prune_dead_branches(strip_code(policy_raw))
+    pre = []
+    # The mirror case: a condition that folds to TRUE (`!allowInsert || true`)
+    # keeps the refusal and the parameter, but the refusal is now unconditional —
+    # the parameter still decides nothing, and an insert can never succeed.
+    for gm in re.finditer(r"\bif\s*\(", scan):
+        cp = _match_paren(scan, gm.end() - 1)
+        if cp is None:
+            continue
+        cond = scan[gm.end():cp]
+        if "allowInsert" not in cond:
+            continue
+        if fold_bool(cond) is True:
+            pre.append(
+                "%s:%d: the insert guard's condition (%s) is constant-true, so "
+                "`allowInsert` never decides and every insert is refused"
+                % (POLICY_REL, line_of(scan, gm.start()), " ".join(cond.split())))
     for name, start, end, line in function_spans(scan):
         body = scan[start:end]
         if not APPEND_RE.search(body):
@@ -730,7 +762,7 @@ def scan_merge_insert_guard(policy_raw):
         sig = scan[head_start:start]
         params = _paren_args(sig, sig.find("(")) if sig.find("(") >= 0 else None
         if params is None:
-            return [
+            return pre + [
                 "%s:%d: [%s] the insert branch's signature could not be parsed (update this "
                 "gate's detection)" % (POLICY_REL, line, name)
             ]
@@ -740,7 +772,7 @@ def scan_merge_insert_guard(policy_raw):
             if re.search(r": *Boolean\b", p) and p.split(":")[0].strip()
         ]
         if not boolean_params:
-            return [
+            return pre + [
                 "%s:%d: [%s] appends an unknown id with no allow-insert parameter — an editor "
                 "save for a task that was deleted meanwhile resurrects it, carrying the run "
                 "state the form snapshotted (`enabled`, `lastRunDate`, a cleared fuse)"
@@ -752,25 +784,25 @@ def scan_merge_insert_guard(policy_raw):
             if block is not None:
                 break
         if block is None:
-            return [
+            return pre + [
                 "%s:%d: [%s] the `idx < 0` branch is unreadable — the insert decision cannot "
                 "be checked (update this gate's detection)" % (POLICY_REL, line, name)
             ]
         allowed = [p for p in boolean_params if re.search(r"(?<![.\w])%s\b" % re.escape(p), block)]
         if not allowed:
-            return [
+            return pre + [
                 "%s:%d: [%s] inserts an unknown id without consulting its allow-insert "
                 "parameter (%s) — the parameter exists but guards nothing"
                 % (POLICY_REL, line, name, ", ".join(boolean_params))
             ]
         if not re.search(r"return +file\b(?! *\.)", block):
-            return [
+            return pre + [
                 "%s:%d: [%s] the `idx < 0` branch has no `return file` path — a refused insert "
                 "must leave the document untouched (the same instance), or the store writes "
                 "and bumps for nothing" % (POLICY_REL, line, name)
             ]
-        return []
-    return [
+        return pre
+    return pre + [
         "%s: no function appends `file.tasks + task` — the merge/insert site moved "
         "(update this gate's detection)" % POLICY_REL
     ]
@@ -919,7 +951,45 @@ def selftest_revision():
                 "            recordMissing = true\n",
                 "            recordMissing = true\n            title = fresh?.title ?: \"\"\n", 1),
         ], scan_edit_screen_revision, 1],
+        # ── [meta-audit wide3 scheduled-C1] the bump must MOVE the counter ──
+        ["revision/self-assigned (next revision discarded)", [
+            clean_store.replace(
+                "        _revision.value = ScheduledTaskRevisionPolicy.nextRevision("
+                "_revision.value, wrote)\n",
+                "        val nextRev = ScheduledTaskRevisionPolicy.nextRevision("
+                "_revision.value, wrote)\n"
+                "        _revision.value = _revision.value\n"),
+        ], scan_revision_stream, 1],
+        ["revision/assigned a constant", [
+            clean_store.replace(
+                "        _revision.value = ScheduledTaskRevisionPolicy.nextRevision("
+                "_revision.value, wrote)\n",
+                "        _revision.value = 0L\n"),
+        ], scan_revision_stream, 1],
+        ["revision/update ignores `it`", [
+            clean_store.replace(
+                "        _revision.value = ScheduledTaskRevisionPolicy.nextRevision("
+                "_revision.value, wrote)\n",
+                "        _revision.update { 5L }\n"),
+        ], scan_revision_stream, 1],
+        ["revision/incremented from the old value (green)", [
+            clean_store.replace(
+                "        _revision.value = ScheduledTaskRevisionPolicy.nextRevision("
+                "_revision.value, wrote)\n",
+                "        if (wrote) _revision.value = _revision.value + 1\n"),
+        ], scan_revision_stream, 0],
         ["merge/clean", [clean_policy], scan_merge_insert_guard, 0],
+        # ── [meta-audit wide3 scheduled-C4] dead insert guard ──
+        ["merge/insert guard short-circuited by `false &&`", [
+            clean_policy.replace(
+                "            if (!allowInsert) return file\n",
+                "            if (false && !allowInsert) return file\n"),
+        ], scan_merge_insert_guard, 1],
+        ["merge/insert guard `|| true` never refuses", [
+            clean_policy.replace(
+                "            if (!allowInsert) return file\n",
+                "            if (!allowInsert || true) return file\n"),
+        ], scan_merge_insert_guard, 1],
         ["merge/unconditional append", [
             clean_policy.replace(
                 "        if (idx < 0) {\n"
@@ -1118,6 +1188,43 @@ def selftest():
     merge_failures = 0
     cansave_failures = 0
     editguard_failures = 0
+
+    # ── [meta-audit wide3 scheduled-PRESENCE] the release must carry the id(s) ──
+    clean_rel_store = (
+        "object ScheduledTasksStore {\n"
+        "    suspend fun deleteTask(context: Any, taskId: String): Any {\n"
+        "        val next = mutate(context) { file ->\n"
+        "            file.copy(tasks = file.tasks.filterNot { it.id == taskId })\n"
+        "        }\n"
+        "        ScheduledTaskRunner.onTasksRemoved(removedTaskIds = setOf(taskId))\n"
+        "        return next\n"
+        "    }\n"
+        "    suspend fun importDocument(context: Any, doc: Any) {\n"
+        "        lock.withLock { writeLocked(context, doc.copy(running = null)) }\n"
+        "        ScheduledTaskRunner.onTasksRemoved(removedTaskIds = null)\n"
+        "    }\n"
+        "}\n"
+    )
+    for nm, src, want in (
+        ("release/clean (setOf(taskId) + null release-all)", clean_rel_store, 0),
+        ("release/emptySet releases nothing",
+         clean_rel_store.replace("setOf(taskId)", "emptySet()"), 1),
+        ("release/empty listOf() releases nothing",
+         clean_rel_store.replace("setOf(taskId)", "listOf()"), 1),
+        ("release/constant set carries no removed id",
+         clean_rel_store.replace("setOf(taskId)", 'setOf("a")'), 1),
+        ("release/expression fed from a local id set (green)",
+         clean_rel_store.replace(
+             "        ScheduledTaskRunner.onTasksRemoved(removedTaskIds = setOf(taskId))\n",
+             "        val gone = setOf(taskId)\n"
+             "        ScheduledTaskRunner.onTasksRemoved(removedTaskIds = gone)\n"), 0),
+    ):
+        _fns, bad = check_removals(strip_code(src))
+        ok = (len(bad) == want) and (not bad or any("removal set" in b for b in bad))
+        print(f"  {'✅' if ok else '❌'} {nm} → {len(bad)} violation(s), expected {want}"
+              + ("" if ok else ": " + "; ".join(bad)[:150]))
+        if not ok:
+            failures += 1
     for name, fixture, scan in cases:
         args = fixture if isinstance(fixture, tuple) else (fixture,)
         bad = scan(*args)
@@ -1194,28 +1301,331 @@ def line_of(src, idx):
     return src.count("\n", 0, idx) + 1
 
 
+def _strip_outer_parens(expr):
+    e = expr.strip()
+    while len(e) >= 2 and e[0] == "(" and e[-1] == ")":
+        depth, ok = 0, True
+        for i, ch in enumerate(e):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and i != len(e) - 1:
+                    ok = False
+                    break
+        if not ok:
+            break
+        e = e[1:-1].strip()
+    return e
+
+
+def _split_top(expr, op):
+    parts, depth, cur, i = [], 0, [], 0
+    while i < len(expr):
+        ch = expr[i]
+        if ch in "\"'":
+            j = i + 1
+            while j < len(expr) and expr[j] != ch:
+                if expr[j] == "\\":
+                    j += 1
+                j += 1
+            cur.append(expr[i:j + 1])
+            i = j + 1
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if depth == 0 and expr.startswith(op, i):
+            parts.append("".join(cur))
+            cur = []
+            i += len(op)
+            continue
+        cur.append(ch)
+        i += 1
+    parts.append("".join(cur))
+    return parts
+
+
+def fold_bool(expr):
+    """True / False / None for a Kotlin condition, folding literal operands.
+
+    [meta-audit wide3 scheduled-C4] The insert guard used to be judged by
+    substring presence inside the `idx < 0` branch. `if (false && !allowInsert)
+    return file` keeps both `allowInsert` and `return file` in the branch while
+    removing the decision, so an editor save for a task deleted meanwhile
+    resurrected the record — the exact defect the criterion was written for.
+    """
+    e = _strip_outer_parens(expr)
+    if not e:
+        return None
+    ors = _split_top(e, "||")
+    if len(ors) > 1:
+        vals = [fold_bool(x) for x in ors]
+        if any(v is True for v in vals):
+            return True
+        if all(v is False for v in vals):
+            return False
+        return None
+    ands = _split_top(e, "&&")
+    if len(ands) > 1:
+        vals = [fold_bool(x) for x in ands]
+        if any(v is False for v in vals):
+            return False
+        if all(v is True for v in vals):
+            return True
+        return None
+    if e == "true":
+        return True
+    if e == "false":
+        return False
+    return None
+
+
+def _match_brace(scan, open_idx):
+    depth = 0
+    for k in range(open_idx, len(scan)):
+        if scan[k] == "{":
+            depth += 1
+        elif scan[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return k
+    return None
+
+
+def _stmt_span(scan, i):
+    n = len(scan)
+    while i < n and scan[i] in " \t\r\n":
+        i += 1
+    if i >= n:
+        return n
+    if scan[i] == "{":
+        end = _match_brace(scan, i)
+        return (end + 1) if end is not None else n
+    depth = 0
+    while i < n:
+        ch = scan[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth < 0:
+                return i
+        elif ch == "\n" and depth == 0:
+            return i + 1
+        i += 1
+    return n
+
+
+def prune_dead_branches(scan):
+    """Blank literal-decided branches (offsets and line numbers preserved)."""
+    out = scan
+    IF_RE = re.compile(r"\bif\s*\(")
+    for _round in range(50):
+        changed = False
+        for m in IF_RE.finditer(out):
+            open_paren = m.end() - 1
+            close_paren = _match_paren(out, open_paren)
+            if close_paren is None:
+                continue
+            val = fold_bool(out[open_paren + 1:close_paren])
+            if val is None:
+                continue
+            then_start = close_paren + 1
+            while then_start < len(out) and out[then_start] in " \t\r\n":
+                then_start += 1
+            then_end = _stmt_span(out, then_start)
+            k = then_end
+            while k < len(out) and out[k] in " \t\r\n":
+                k += 1
+            if val is False:
+                dead = (then_start, then_end)
+            elif out.startswith("else", k):
+                dead = (k + 4, _stmt_span(out, k + 4))
+            else:
+                continue
+            seg = out[dead[0]:dead[1]]
+            blanked = "".join(ch if ch == "\n" else " " for ch in seg)
+            if seg != blanked:
+                out = out[:dead[0]] + blanked + out[dead[1]:]
+                changed = True
+                break
+        if not changed:
+            break
+    return out
+
+
+def _match_paren(scan, open_idx):
+    """Index of the `)` matching the `(` at [open_idx], or None."""
+    depth = 0
+    i, n = open_idx, len(scan)
+    while i < n:
+        ch = scan[i]
+        if ch in "\"'":
+            j = i + 1
+            while j < n and scan[j] != ch and scan[j] != "\n":
+                if scan[j] == "\\":
+                    j += 1
+                j += 1
+            i = j + 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+DECL_TAIL_RE = re.compile(
+    r"(?:@\w+\s+)*"
+    r"(?:(?:private|internal|public|protected|suspend|override|open|inline|operator|"
+    r"tailrec|actual|expect|const|lateinit|abstract|fun)\b[\w\s]*)*"
+    r"(?:fun|val|var|object|class|interface)\b"
+)
+
+
+def _expr_end(scan, start):
+    """End of the expression starting at [start] (a new declaration or `}` ends it)."""
+    i, n, depth = start, len(scan), 0
+    while i < n:
+        ch = scan[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth < 0:
+                return i
+        if depth == 0 and ch == "\n":
+            k = i + 1
+            while k < n and scan[k] in " \t":
+                k += 1
+            if k >= n or scan[k] == "}" or DECL_TAIL_RE.match(scan, k):
+                return i
+        i += 1
+    return n
+
+
+def _body_span(scan, m):
+    """(start, end) of the body of the `fun` whose declaration matched at [m].
+
+    [meta-audit wide3 scheduled-S1] The old version was
+    `open_idx = scan.find("{", m.end())` — the first `{` after the function
+    NAME. A default lambda parameter
+    (`merger: (ScheduledTasksFile) -> ScheduledTasksFile = { f -> mergeUpsertTask(f, task, allowInsert) }`)
+    sits inside the parameter list, so `upsertTask`'s "body" became the default
+    argument: it still contained `mergeUpsertTask(`, the REAL body
+    (`file.copy(tasks = file.tasks.map { … })`, a whole-record overwrite) was
+    never read, and the merge criterion printed green. Walk the parameter list
+    first, then take the body that follows it (block body, or the expression
+    of an `=` body — `mutate(context) { … }` included).
+    """
+    open_paren = scan.find("(", m.end() - 1)
+    if open_paren < 0:
+        return None
+    close_paren = _match_paren(scan, open_paren)
+    if close_paren is None:
+        return None
+    n = len(scan)
+    j = close_paren + 1
+    while j < n:
+        ch = scan[j]
+        if ch == "{":
+            depth = 0
+            for k in range(j, n):
+                if scan[k] == "{":
+                    depth += 1
+                elif scan[k] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return j, k + 1
+            return None
+        if ch == "=" and scan[j:j + 2] != "==":
+            end = _expr_end(scan, j)
+            if end <= j + 1:
+                return None
+            return j, end
+        if ch == ";":
+            return None
+        if ch == "\n":
+            k = j + 1
+            while k < n and scan[k] in " \t":
+                k += 1
+            if k >= n or scan[k] == "}" or DECL_TAIL_RE.match(scan, k):
+                return None  # declaration-only member (interface / abstract)
+            j = k
+            continue
+        j += 1
+    return None
+
+
+BUMP_RHS_RE = re.compile(r"_%s\s*\.\s*value\s*=(?!=)([^\n;]*)")
+
+
+def bump_stalls(scan, backing, bump_idx):
+    """None when the bump moves the counter forward, else the reason it does not."""
+    text = scan[bump_idx:bump_idx + 400]
+    m = re.match(r"_%s\s*\.\s*update\s*[({]([^})]*)" % re.escape(backing), text)
+    if m:
+        if re.search(r"\bit\b", m.group(1)):
+            return None
+        return ("_%s.update { … } does not derive the new value from `it` — the "
+                "ticker is set to something independent of the old value, so a "
+                "repeated bump stops emitting" % backing)
+    m = re.match(r"_%s\s*\.\s*value\s*\+\+" % re.escape(backing), text)
+    if m:
+        return None
+    m = re.match(r"_%s\s*\.\s*value\s*\+=\s*(\S+)" % re.escape(backing), text)
+    if m:
+        if m.group(1).strip() in ("0", "0L"):
+            return ("_%s.value += 0 never changes the value — a StateFlow is "
+                    "distinctUntilChanged, so no screen is notified" % backing)
+        return None
+    m = re.match(r"_%s\s*\.\s*value\s*=(?!=)\s*([^\n;]*)" % re.escape(backing), text)
+    if not m:
+        return None
+    rhs = " ".join(m.group(1).split()).strip()
+    if not rhs:
+        return ("the ticker is assigned an unreadable expression — the guard cannot "
+                "tell whether it moves")
+    if rhs in ("_%s.value" % backing,):
+        return ("_%s.value = _%s.value is a self-assignment — MutableStateFlow is "
+                "distinctUntilChanged, so nothing is emitted and every screen keeps "
+                "the stale document (the ticker exists but never moves)" % (backing, backing))
+    if re.fullmatch(r"-?\d+L?|0L|true|false|null|\"\"", rhs):
+        return ("the ticker is assigned the constant %s — it emits once and never "
+                "again, so later changes are invisible" % rhs)
+    if "_%s" % backing in rhs:
+        return None
+    if re.search(r"\bnextRevision\s*\(", rhs):
+        return None
+    # RHS is a local: it only counts when that local holds nextRevision(…)
+    ident = re.match(r"^([A-Za-z_]\w*)$", rhs)
+    if ident:
+        bound = re.search(
+            r"\b(?:val|var)\s+" + re.escape(ident.group(1)) +
+            r"\s*(?::[^=\n]+)?=\s*[^\n]*nextRevision\s*\(", scan)
+        if bound:
+            return None
+        return ("the ticker is assigned `%s`, which does not hold the value of "
+                "nextRevision(…) — the computed next revision may be discarded"
+                % ident.group(1))
+    return ("the assigned expression (`%s`) does not derive from the current ticker "
+            "value — the guard cannot prove the counter moves" % rhs)
+
+
 def function_spans(scan):
     """[(name, body_start_index, body_end_index_exclusive, start_line)] for each fun."""
     spans = []
     for m in FUN_RE.finditer(scan):
-        # The body opens at the first '{' after the signature.
-        open_idx = scan.find("{", m.end())
-        if open_idx < 0:
+        span = _body_span(scan, m)
+        if span is None:
             continue
-        depth = 0
-        close_idx = None
-        for j in range(open_idx, len(scan)):
-            ch = scan[j]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    close_idx = j
-                    break
-        if close_idx is None:
-            continue
-        spans.append((m.group(1), open_idx, close_idx + 1, line_of(scan, m.start())))
+        open_idx, end_idx = span
+        spans.append((m.group(1), open_idx, end_idx, line_of(scan, m.start())))
     return spans
 
 
@@ -1224,38 +1634,81 @@ def depth_at(scan, start, idx):
     return scan.count("{", start + 1, idx) - scan.count("}", start + 1, idx) + 1
 
 
-def main():
-    if "--selftest" in sys.argv:
-        return selftest()
+RELEASE_ARG_BUILDERS = {
+    "setOf", "listOf", "mutableSetOf", "mutableListOf", "emptySet", "emptyList",
+    "hashSetOf", "linkedSetOf", "sortedSetOf", "removedTaskIds", "arrayListOf",
+}
+NULL_SET_SPELLINGS = {"null", "nullSet"}
 
-    root = sys.argv[1] if len(sys.argv) > 1 else "."
-    path = os.path.join(root, STORE_REL)
-    findings = []
-    rot = []
 
-    if not os.path.isfile(path):
-        print("ROT: %s not found — the gate cannot see the shape it guards." % STORE_REL)
-        print("     If the store moved, teach this gate the new path.")
-        return 1
+def check_release_argument(scan, body, call_off):
+    """None if the `removedTaskIds` argument can actually release something, else
+    a phrase describing why it cannot.
 
-    src = open(path, encoding="utf-8").read()
-    scan = strip_code(src)
-    spans = function_spans(scan)
+    [meta-audit wide3 scheduled-PRESENCE] The criterion used to be
+    "`ScheduledTaskRunner.onTasksRemoved(` appears at body depth 1" — the CALL.
+    The argument decides whether any lock is released, and `emptySet()` passes a
+    call-shaped criterion while releasing nothing: `ScheduledTaskReleasePlan`
+    sees an empty removed set, keeps `runningTaskId`, and the deleted task's run
+    holds the single-flight gate until the reap deadline. There are exactly two
+    meaningful spellings: `null` (the plan's "release everything" path, used by
+    the restore) and an expression that carries the id(s) being removed.
+    """
+    open_at = body.find("(", call_off)
+    if open_at < 0:
+        return "the call's argument list could not be read"
+    depth = 0
+    close_at = None
+    for k in range(open_at, len(body)):
+        if body[k] == "(":
+            depth += 1
+        elif body[k] == ")":
+            depth -= 1
+            if depth == 0:
+                close_at = k
+                break
+    if close_at is None:
+        return "the call's argument list never closes"
+    arg = body[open_at + 1:close_at].strip()
+    if not arg:
+        return "the call passes no removedTaskIds at all"
+    if "=" in arg.split("/")[0] and arg.startswith("removedTaskIds"):
+        arg = arg.split("=", 1)[1].strip()
+    elif arg.count("=") == 1 and "(" not in arg.split("=")[0]:
+        arg = arg.split("=", 1)[1].strip()
+    if arg in NULL_SET_SPELLINGS:
+        return None
+    squashed = " ".join(arg.split())
+    if re.fullmatch(r"(?:%s)\s*\(\s*\)" % "|".join(sorted(RELEASE_ARG_BUILDERS - {"removedTaskIds"})),
+                    squashed):
+        return ("passes %s — an empty removal set releases nothing, which is exactly "
+                "the deleted-task lock leak this criterion exists for" % squashed)
+    idents = {
+        t for t in re.findall(r"[A-Za-z_]\w*", squashed)
+        if t not in RELEASE_ARG_BUILDERS
+        and t not in {"it", "this", "true", "false", "null", "trim", "toSet", "toList"}
+    }
+    if not idents:
+        return ("passes %s — it carries no identifier, so no removed id reaches the "
+                "runner" % squashed)
+    rest = body[:call_off] + body[close_at + 1:]
+    body_idents = set(re.findall(r"[A-Za-z_]\w*", rest))
+    carried = idents & body_idents
+    if not carried:
+        return ("passes %s — none of %s is produced by this function, so the guard "
+                "cannot verify the removed ids travel (re-point this criterion if the "
+                "ids now come from a helper)" % (squashed, ", ".join(sorted(idents))))
+    return None
 
+
+def check_removals(scan):
+    """(removal_fns, findings) for every function that drops tasks from the doc."""
     removal_fns = []
-    for name, start, end, line in spans:
+    for name, start, end, line in function_spans(scan):
         body = scan[start:end]
         if any(r.search(body) for r in REMOVAL_RES):
             removal_fns.append((name, start, end, line))
-
-    if not spans:
-        rot.append("no `fun` at object-member indentation was parsed")
-    if not removal_fns:
-        rot.append(
-            "no task-removal function was detected (expected deleteTask / "
-            "importDocument shapes: `filterNot { it.id ==` or `copy(running = null)`)"
-        )
-
+    findings = []
     for name, start, end, line in removal_fns:
         body = scan[start:end]
         hits = [start + m.start() for m in re.finditer(re.escape(RELEASE_CALL), body)]
@@ -1281,6 +1734,46 @@ def main():
                     "(`markRunning`); nesting deadlocks. Call it after the lock."
                     % (STORE_REL, line_of(scan, hit), name, RELEASE_CALL.rstrip("("), d)
                 )
+            arg_bad = check_release_argument(scan, body, hit - start)
+            if arg_bad:
+                findings.append(
+                    "%s:%d: [%s] %s — the runner is told about a removal set that "
+                    "carries no removed id, so its single-flight state is never "
+                    "released and every other due task degrades to `overlap` until "
+                    "the reap deadline (B-7c returns)"
+                    % (STORE_REL, line_of(scan, hit), name, arg_bad)
+                )
+    return removal_fns, findings
+
+
+def main():
+    if "--selftest" in sys.argv:
+        return selftest()
+
+    root = sys.argv[1] if len(sys.argv) > 1 else "."
+    path = os.path.join(root, STORE_REL)
+    findings = []
+    rot = []
+
+    if not os.path.isfile(path):
+        print("ROT: %s not found — the gate cannot see the shape it guards." % STORE_REL)
+        print("     If the store moved, teach this gate the new path.")
+        return 1
+
+    src = open(path, encoding="utf-8").read()
+    scan = strip_code(src)
+    spans = function_spans(scan)
+
+    removal_fns, removal_findings = check_removals(scan)
+    findings.extend(removal_findings)
+
+    if not spans:
+        rot.append("no `fun` at object-member indentation was parsed")
+    if not removal_fns:
+        rot.append(
+            "no task-removal function was detected (expected deleteTask / "
+            "importDocument shapes: `filterNot { it.id ==` or `copy(running = null)`)"
+        )
 
     # File-wide: no runner reference while a store lock block is open.
     depth = 0
