@@ -14,31 +14,52 @@
   share of a chat attachment always fell through to a `file://` URI that the
   receiving app cannot read.
 
-判据 (all code/XML anchors — never comment text):
+判据 (all code/XML anchors — never comment text). Every structural question is
+answered on the shared lexer projection (`_kotlin_lexer.mask_code`, strictly
+length-preserving), and every "which value / which position" question uses the
+shared primitives (`_kotlin_ast.match_bracket|function_body`,
+`_kotlin_valueflow.path_feasible`): a `}` inside a string literal can no longer
+move a block boundary, a `File(` inside prose can no longer stand in for a
+root, and a dead `if (false)` call site no longer counts as "the write".
+
   C1  every writer dir is declared under the matching FileProvider tag
   C2  the writer sites named by the registry still exist (a renamed or
       removed dir means the registry silently stopped covering anything)
   C3  oversized-message export runs off the main thread: `exportLargeContent-
-      ToFile` is `suspend`, its body switches with `withContext(Dispatchers.IO)`,
-      and the call site is inside a coroutine `launch` whose scope comes from
-      `rememberCoroutineScope()`
+      ToFile` is `suspend`, and the disk calls that matter (`mkdirs`,
+      `pruneExpiredLargeMessageFiles`, `writeText`) sit INSIDE a
+      `withContext(Dispatchers.IO) { … }` REGION — a call merely spelled next
+      to an empty IO block does not count (witness 02-2).
   C4  the export prunes expired orphans before writing, wrapped so a prune
-      failure cannot block the export (`runCatching { prune... }`), and the
-      prune is defined with a literal TTL constant
-  C5  `getUriForFile` runs AFTER `writeText` inside the export (no
-      "URI handed out for a file that is not on disk yet" race)
+      failure cannot block the export (`runCatching { prune... }`), fed a real
+      clock (a constant `0L` makes the cutoff permanently negative and the
+      prune a no-op — witness 02-3), and the prune is defined with a literal
+      TTL constant
+  C5  `getUriForFile` runs AFTER the LIVE `writeText` inside the export (no
+      "URI handed out for a file that is not on disk yet" race) — a dead
+      `if (false) f.writeText("")` planted before it does not count
+      (witness 02-4)
   C7  no full-coverage provider root (`<external-path>`, `<root-path>`,
       `path="."`/`path=""`) — widening the provider to a whole volume is a
       separate, explicitly approved decision, not something a coverage fix
       may slip in.
-  C8  [fix/da1024-A] the `cacheDir/share_inbound/` writer copies on
-      `Dispatchers.IO` (`addAttachmentFromStagedShare` is `suspend`, its body
-      switches) AND prunes its own orphans there under a literal TTL constant —
+  C8  [fix/da1024-A] the `cacheDir/share_inbound/` writer prunes its own
+      orphans under a literal TTL constant AND the stream copy itself
+      (`inputStream` / `outputStream` / `copyTo`) runs inside the IO region —
+      the up-to-100 MB copy moving outside it is the defect (witness 02-5);
       nothing used to delete those staged copies (deep-audit-1024 ISSUE-01).
   C9  [fix/da1024-A] the ChatScreen share drain keeps its disk work on IO: the
       `LaunchedEffect(shareBufferVersion)` body switches with
       `withContext(Dispatchers.IO)` and the `cleanSharedFiles(` directory sweep
       sits inside one of those regions.
+  C10 every directory root created under filesDir/cacheDir in a guarded writer
+      is covered by a declared <files-path>/<cache-path>. Both spellings of a
+      root count: `File(context.filesDir, "x")` and
+      `context.filesDir.resolve("x")` (witness 02-1 — the extension spelling
+      never contains `File(`).
+  C11 the dir a registry entry claims must be bound to a LIVE property: a dead
+      alias parked on the legal literal while the live one points elsewhere is
+      the witness shape.
 
 用法:
   python3 file_provider_paths_coverage_check.py [repo_root]
@@ -53,6 +74,10 @@ import re
 import sys
 import tempfile
 from pathlib import Path
+
+from _kotlin_lexer import KotlinLexError
+from _kotlin_ast import const_value, function_body, match_bracket
+from _kotlin_valueflow import code_view, literal_view, path_feasible
 
 XML_REL = "src/android/app/src/main/res/xml/file_provider_paths.xml"
 KT_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/LargeContentGuard.kt"
@@ -84,7 +109,7 @@ WRITER_DIRS = [
 TTL_EXPECTED = "internal const val LARGE_MESSAGE_EXPORT_TTL_MS = 24L * 60L * 60L * 1000L"
 SHARE_TTL_EXPECTED = "internal const val SHARE_INBOUND_TTL_MS = 24L * 60L * 60L * 1000L"
 
-IO_OPEN_RE = re.compile(r'withContext\(\s*Dispatchers\.IO\s*\)\s*\{')
+IO_OPEN_RE = re.compile(r'withContext\s*\(\s*Dispatchers\.IO\s*\)')
 
 # [fix/meta-audit-m2-binding] C10/C11 — the falsifying witness added a SECOND
 # filesDir dir literal (`media-unregistered`) to MediaStore.kt and pointed the
@@ -97,6 +122,11 @@ IO_OPEN_RE = re.compile(r'withContext\(\s*Dispatchers\.IO\s*\)\s*\{')
 # Base dir → the FileProvider tag that must declare it.
 FILE_CTOR_RE = re.compile(
     r'(?:java\.io\.)?File\s*\(\s*context\.(?:applicationContext\.)?(filesDir|cacheDir)\s*,')
+# [batch-5 C10] the SAME directory root spelled as an extension call:
+# `context.filesDir.resolve("media-unregistered")` contains no `File(` at all,
+# so the constructor regex alone was blind to a re-pointed live dir (02-1).
+DIR_RESOLVE_RE = re.compile(
+    r'context\.(?:applicationContext\.)?(filesDir|cacheDir)\s*\.\s*resolve\s*\(')
 BASE_TAG = {"filesDir": "files-path", "cacheDir": "cache-path"}
 ASSIGN_RE_TAIL = re.compile(r'(?:val|var)\s+([A-Za-z_]\w*)\s*(?::\s*[\w.]+(?:\s*<[^>]*>)?)?\s*=\s*$')
 RETURN_RE_TAIL = re.compile(
@@ -104,59 +134,38 @@ RETURN_RE_TAIL = re.compile(
 MKDIRS_RE_HEAD = re.compile(r'\s*(?:\.(?:apply|also|let|run)\s*\{[^}]*mkdirs\s*\(\s*\)|\.mkdirs\s*\(\s*\))')
 
 
-def _close_paren(code: str, open_idx: int):
-    """Index just past the `)` matching the `(` at open_idx (string-aware)."""
-    depth = 0
-    i = open_idx
-    n = len(code)
-    while i < n:
-        c = code[i]
-        if c == '"':
-            i += 1
-            while i < n and code[i] != '"':
-                i += 2 if code[i] == "\\" else 1
-        elif c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return -1
-
-
-def fold_dir_literal(code: str, pos: int):
-    """Fold the second argument of File(base, ARG) into a literal string.
+def fold_dir_literal(lit: str, pos: int):
+    """Fold the directory argument starting at `pos` of the LITERAL view.
 
     Handles `"a" + "b"` (constant folding — the witness-shaped evasion).
     Returns (literal, resolved) — resolved=False when the argument is not a
     constant we can read (template, identifier, call …).
     """
     i = pos
-    n = len(code)
+    n = len(lit)
     parts = []
     while i < n:
-        if code[i] in " \t\r\n":
+        if lit[i] in " \t\r\n":
             i += 1
             continue
-        if code[i] == '"':
+        if lit[i] == '"':
             j = i + 1
             buf = []
-            while j < n and code[j] != '"':
-                if code[j] == "\\":
-                    buf.append(code[j:j + 2])
+            while j < n and lit[j] != '"':
+                if lit[j] == "\\":
+                    buf.append(lit[j:j + 2])
                     j += 2
                     continue
-                buf.append(code[j])
+                buf.append(lit[j])
                 j += 1
             seg = "".join(buf)
             if "$" in seg:          # template — value unknown at scan time
                 return ("", False)
             parts.append(seg)
             i = j + 1
-            while i < n and code[i] in " \t":
+            while i < n and lit[i] in " \t":
                 i += 1
-            if i < n and code[i] == "+":
+            if i < n and lit[i] == "+":
                 i += 1
                 continue
             break
@@ -166,8 +175,25 @@ def fold_dir_literal(code: str, pos: int):
     return ("".join(parts), True)
 
 
-def dir_root_sites(code: str):
-    """Every `File(context.filesDir|cacheDir, …)` that establishes a DIRECTORY.
+def _root_matches(code):
+    """[(match_start, base, paren_pos, arg_pos)] for both root spellings.
+
+    Matched on the MASKED view (a `File(` inside a string / comment is not a
+    site); the literal itself is read from the literal view at the same offset
+    (both projections are strictly length-preserving).
+    """
+    out = []
+    for m in FILE_CTOR_RE.finditer(code):
+        open_pos = code.rfind("(", m.start(), m.end())
+        out.append((m.start(), m.group(1), open_pos, m.end()))
+    for m in DIR_RESOLVE_RE.finditer(code):
+        out.append((m.start(), m.group(1), m.end() - 1, m.end()))
+    out.sort(key=lambda t: t[0])
+    return out
+
+
+def dir_root_sites(code: str, lit: str):
+    """Every filesDir/cacheDir DIRECTORY root, in both spellings.
 
     Returns [(base, tag, literal, resolved, name_or_None)] — a site qualifies as
     a directory root when it is bound to a val/var/property or is immediately
@@ -175,13 +201,11 @@ def dir_root_sites(code: str):
     is a FILE path and is deliberately not a provider root.
     """
     out = []
-    for m in FILE_CTOR_RE.finditer(code):
-        base = m.group(1)
-        arg_at = m.end()
-        lit, resolved = fold_dir_literal(code, arg_at)
-        open_idx = code.rfind("(", m.start(), m.end())
-        end = _close_paren(code, open_idx) if open_idx >= 0 else -1
-        before = code[max(0, m.start() - 200):m.start()]
+    for start, base, open_paren, arg_at in _root_matches(code):
+        value, resolved = fold_dir_literal(lit, arg_at)
+        close = match_bracket(code, open_paren) if open_paren >= 0 else -1
+        end = close + 1 if close > 0 else -1
+        before = code[max(0, start - 200):start]
         am = ASSIGN_RE_TAIL.search(before)
         name = am.group(1) if am else None
         after = code[end:end + 80] if end > 0 else ""
@@ -193,11 +217,11 @@ def dir_root_sites(code: str):
             # like a bare dir name (`"photos-scratch"`); `"config.json"` is a
             # file under filesDir and must not be dragged into the declaration
             # contract. Unresolvable literals stay in and fail closed.
-            if resolved and ("." in lit.split("/")[-1] or lit.endswith("/")):
+            if resolved and ("." in value.split("/")[-1] or value.endswith("/")):
                 continue
             if not resolved:
                 continue
-        out.append((base, BASE_TAG[base], lit, resolved, name))
+        out.append((base, BASE_TAG[base], value, resolved, name))
     return out
 
 
@@ -210,69 +234,12 @@ def declared_covers(decls, tag: str, seg: str) -> bool:
             return True
     return False
 
+
 DECL_RE = re.compile(
     r'<\s*(files-path|cache-path|external-path|external-files-path|external-cache-path|root-path)'
     r'\s+name\s*=\s*"([^"]*)"\s+path\s*=\s*"([^"]*)"\s*/?>',
     re.M,
 )
-
-
-def strip_comments(text: str) -> str:
-    """Remove line and block comments without touching string literals.
-
-    Anchors must be code, never comment text — the audit trail for this bug
-    is a KDoc that described the flow, not a check that enforced it.
-    """
-    out = []
-    i = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if c == '"':
-            if text.startswith('"""', i):
-                j = text.find('"""', i + 3)
-                j = n if j < 0 else j + 3
-                out.append(text[i:j])
-                i = j
-                continue
-            out.append(c)
-            i += 1
-            while i < n and text[i] != '"':
-                if text[i] == "\\":
-                    out.append(text[i:i + 2])
-                    i += 2
-                else:
-                    out.append(text[i])
-                    i += 1
-            if i < n:
-                out.append('"')
-                i += 1
-            continue
-        if c == "'":  # char literal, possibly escaped
-            out.append(c)
-            i += 1
-            while i < n and text[i] != "'":
-                if text[i] == "\\":
-                    out.append(text[i:i + 2])
-                    i += 2
-                else:
-                    out.append(text[i])
-                    i += 1
-            if i < n:
-                out.append("'")
-                i += 1
-            continue
-        if text.startswith("//", i):
-            j = text.find("\n", i)
-            i = n if j < 0 else j
-            continue
-        if text.startswith("/*", i):
-            j = text.find("*/", i + 2)
-            i = n if j < 0 else j + 2
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
 
 
 def declared_roots(xml_text: str):
@@ -293,48 +260,112 @@ def declared_roots(xml_text: str):
     return decls, violations
 
 
-def fn_body(code: str, signature_re: str):
-    """Brace-matched body of the function whose signature matches, or None."""
-    m = re.search(signature_re, code)
+# ── span helpers (shared primitives only — no per-character scanners) ───────
+
+def _views(path: Path):
+    """(masked_code, literal_view) for one Kotlin file. Raises KotlinLexError."""
+    src = path.read_text()
+    return code_view(src), literal_view(src)
+
+
+def _fn_spans(code: str, name: str):
+    """(start, end) of the function body, or None. `_kotlin_ast.function_body`
+    derives the body from the parameter list, so a default-argument lambda
+    cannot steal the body start."""
+    fb = function_body(code, name)
+    return None if fb is None else (fb[0], fb[1])
+
+
+def _block_after(code: str, anchor_re: str):
+    """(start, end) of the `{ … }` block that follows the anchor match."""
+    m = re.search(anchor_re, code)
     if not m:
-        return None, None
-    start = code.index("{", m.end() - 1) if "{" in code[m.end():] else -1
-    if start < 0:
-        return None, None
-    depth = 0
-    for i in range(start, len(code)):
-        if code[i] == "{":
-            depth += 1
-        elif code[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return code[start:i + 1], start
-    return None, None
-
-
-def brace_body(code: str, open_idx: int):
-    """Brace-matched body starting at the `{` at [open_idx], or None."""
-    depth = 0
-    for i in range(open_idx, len(code)):
-        if code[i] == "{":
-            depth += 1
-        elif code[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return code[open_idx:i + 1]
-    return None
+        return None
+    k = m.end()
+    while k < len(code) and code[k] in " \t\r\n":
+        k += 1
+    if k >= len(code) or code[k] != "{":
+        return None
+    close = match_bracket(code, k)
+    return None if close < 0 else (k + 1, close)
 
 
 def io_regions(code: str):
-    """Brace-matched bodies of every `withContext(Dispatchers.IO) { ... }` —
-    the only anchor that proves a disk call is actually inside the IO switch
-    rather than merely sitting next to it."""
+    """Inner spans of every `withContext(Dispatchers.IO) { … }`.
+
+    The only anchor that proves a disk call is actually inside the IO switch
+    rather than merely sitting next to it. Brace matching runs on the masked
+    view, so a `"{"` inside a string literal cannot extend the region over the
+    rest of the file (witness 02-6).
+    """
     out = []
     for m in IO_OPEN_RE.finditer(code):
-        body = brace_body(code, code.index("{", m.start()))
-        if body is not None:
-            out.append(body)
+        k = m.end()
+        while k < len(code) and code[k] in " \t\r\n":
+            k += 1
+        if k >= len(code) or code[k] != "{":
+            continue
+        close = match_bracket(code, k)
+        if close < 0:
+            continue
+        out.append((k + 1, close))
     return out
+
+
+def _inside(regions, pos: int) -> bool:
+    return any(a <= pos < b for a, b in regions)
+
+
+def _regions_in(regions, span):
+    """The IO regions nested inside `span` (the switch must wrap the work, not
+    merely be named somewhere in the file)."""
+    return [(a, b) for a, b in regions if span[0] <= a and b <= span[1]]
+
+
+def _live_in(code: str, span, pattern: str):
+    """Reachable match positions of `pattern` inside `span` (dead branches skipped).
+
+    `path_feasible` folds the enclosing guards with `guard_feasible`, so
+    `if (false) f.writeText("")` and `if (1 == 2) …` are both dead — the whole
+    constant-false family, not a spelling whitelist.
+    """
+    out = []
+    seg = code[span[0]:span[1]]
+    for m in re.finditer(pattern, seg):
+        pos = span[0] + m.start()
+        if path_feasible(code, pos):
+            out.append(pos)
+    return out
+
+
+def _arg_value(code: str, span):
+    """(name_or_None, value_text) — named arguments unwrapped."""
+    text = code[span[0]:span[1]]
+    m = re.match(r"^\s*([A-Za-z_]\w*)\s*=(?!=)\s*", text)
+    if m:
+        return m.group(1), text[m.end():].strip()
+    return None, text.strip()
+
+
+def _call_arg_spans(code: str, open_paren: int):
+    """Top-level argument spans of the call whose `(` is at `open_paren`."""
+    close = match_bracket(code, open_paren)
+    if close < 0:
+        return []
+    inner = code[open_paren + 1:close]
+    if not inner.strip():
+        return []
+    spans, depth, start = [], 0, 0
+    for k, ch in enumerate(inner):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            spans.append((open_paren + 1 + start, open_paren + 1 + k))
+            start = k + 1
+    spans.append((open_paren + 1 + start, close))
+    return spans
 
 
 def check(root: Path) -> list:
@@ -346,12 +377,18 @@ def check(root: Path) -> list:
         return [f"{XML_REL} MISSING"]
     if not kt_path.exists():
         return [f"{KT_REL} MISSING"]
-    for rel in (CHATVM_REL, SCREEN_REL):
+    for rel in (MEDIASTORE_REL, PHOTOS_REL, CHATVM_REL, SCREEN_REL):
         if not (root / rel).exists():
             return [f"{rel} MISSING"]
 
     xml_text = xml_path.read_text()
-    code = strip_comments(kt_path.read_text())
+    try:
+        code, lit = _views(kt_path)
+        vm_code, vm_lit = _views(root / CHATVM_REL)
+        scr_code, scr_lit = _views(root / SCREEN_REL)
+    except KotlinLexError as exc:
+        # fail-closed: an unparsable file is a violation, never a silent skip
+        return [f"LEXER could not parse the guarded writers ({exc}) — fail closed"]
 
     decls, xml_violations = declared_roots(xml_text)
     violations += xml_violations
@@ -363,8 +400,12 @@ def check(root: Path) -> list:
         if not wpath.exists():
             violations.append(f"C2 [{rid}] writer file MISSING: {rel}")
             continue
-        wcode = strip_comments(wpath.read_text())
-        if not re.search(writer_re, wcode):
+        try:
+            wlit = literal_view(wpath.read_text())
+        except KotlinLexError as exc:
+            violations.append(f"C2 [{rid}] LEXER could not parse {rel} ({exc}) — fail closed")
+            continue
+        if not re.search(writer_re, wlit):
             violations.append(
                 f"C2 [{rid}] writer site no longer matches `{writer_re}` in {rel} — the "
                 "coverage registry points at a dir that is not written any more; update "
@@ -375,48 +416,42 @@ def check(root: Path) -> list:
                 f"<{tag} path=\"{path}\"> in {XML_REL} — getUriForFile throws "
                 "IllegalArgumentException for every file under it")
 
-    # ── C10 / C11 [fix/meta-audit-m2-binding]: derive the dir set from the tree
-    #   ─────────────────────────────────────────────────────────────────────
-    #     C10: EVERY directory root created under filesDir/cacheDir in a guarded
-    #          writer must be covered by a declared <files-path>/<cache-path>.
-    #          C1 below is registry-shaped — it asks whether the registry regex
-    #          still matches *somewhere* in the file, so a second, undeclared
-    #          dir literal slips past it entirely.
-    #     C11: binding — the dir a registry entry claims must actually be bound
-    #          to a LIVE property/val. A dead alias parked on the legal literal
-    #          while the live one points elsewhere is the witness's shape:
-    #          `_legacyMediaDir` (never read) held `media`, `mediaBaseDir` (read
-    #          by every saveMedia call) held `media-unregistered`.
-    #     Fail-closed: an unresolvable dir literal is a violation, not a skip.
-    guarded_files = [KT_REL, MEDIASTORE_REL, PHOTOS_REL, CHATVM_REL, SCREEN_REL]
+    # ── C10 / C11 [fix/meta-audit-m2-binding + batch-5 scope]: derive the dir
+    #     set from the tree instead of trusting the registry ────────────────
+    guarded = {KT_REL: (code, lit), CHATVM_REL: (vm_code, vm_lit),
+               SCREEN_REL: (scr_code, scr_lit)}
+    for rel in (MEDIASTORE_REL, PHOTOS_REL):
+        try:
+            guarded[rel] = _views(root / rel)
+        except KotlinLexError as exc:
+            violations.append(f"C10 LEXER could not parse {rel} ({exc}) — fail closed")
+            guarded[rel] = (None, None)
     dir_sites = []       # (rel, base, tag, literal, name, live)
-    for rel in guarded_files:
-        gpath = root / rel
-        if not gpath.exists():
-            violations.append(f"C10 guarded writer MISSING: {rel}")
+    for rel in (KT_REL, MEDIASTORE_REL, PHOTOS_REL, CHATVM_REL, SCREEN_REL):
+        gcode, glit = guarded[rel]
+        if gcode is None:
             continue
-        gcode = strip_comments(gpath.read_text())
-        for base, tag, lit, resolved, name in dir_root_sites(gcode):
+        for base, tag, value, resolved, name in dir_root_sites(gcode, glit):
             if not resolved:
                 violations.append(
-                    f"C10 [{rel}] `File(context.{base}, …)` directory root built from a "
+                    f"C10 [{rel}] `context.{base}` directory root built from a "
                     "non-literal expression — the gate cannot tell which provider root it "
                     "lands under, so it must not pass silently")
                 continue
-            seg = lit.split("/")[0]
+            seg = value.split("/")[0]
             if not seg:
                 violations.append(f"C10 [{rel}] empty directory literal under context.{base}")
                 continue
             if not declared_covers(decls, tag, seg):
                 violations.append(
                     f"C10 [{rel}] directory `{base}/{seg}` is created ({name or 'inline'} = "
-                    f"File(context.{base}, \"{lit}\")) but no <{tag}> root declares it in "
+                    f"context.{base}[, .resolve](…\"{value}\")) but no <{tag}> root declares it in "
                     f"{XML_REL} — getUriForFile throws IllegalArgumentException for everything "
                     "under it, and the registry never noticed because it only checked whether "
                     "its own literal still appears somewhere in the file")
             live = True if name is None else (
                 len(re.findall(r'\b%s\b' % re.escape(name), gcode)) >= 2)
-            dir_sites.append((rel, base, tag, lit, name, live))
+            dir_sites.append((rel, base, tag, value, name, live))
 
     for rid, rel, _writer_re, tag, path in WRITER_DIRS:
         want = path.rstrip("/").split("/")[0]
@@ -439,32 +474,72 @@ def check(root: Path) -> list:
     if not re.search(r'private\s+suspend\s+fun\s+exportLargeContentToFile\s*\(', code):
         violations.append("C3 exportLargeContentToFile is not `private suspend fun` — the export "
                           "was a blocking disk write on the UI thread (deep-audit-1023 ISSUE-01)")
-    body, _off = fn_body(code, r'private\s+suspend\s+fun\s+exportLargeContentToFile\s*\(')
+    body = _fn_spans(code, "exportLargeContentToFile")
     if body is None:
         violations.append("C3 exportLargeContentToFile body not found — cannot verify IO dispatch")
     else:
-        if "withContext(Dispatchers.IO)" not in body:
-            violations.append("C3 exportLargeContentToFile body has no `withContext(Dispatchers.IO)` "
-                              "— mkdirs / listFiles / writeText must run off the main thread")
-        # ── C4: prune wired before the write, failure non-blocking ─────────
-        if "runCatching { pruneExpiredLargeMessageFiles(" not in body:
+        regions = _regions_in(io_regions(code), body)
+        if not regions:
+            violations.append("C3 exportLargeContentToFile body has no "
+                              "`withContext(Dispatchers.IO)` — mkdirs / listFiles / writeText "
+                              "must run off the main thread (deep-audit-1023 ISSUE-01)")
+        # [batch-5 C3] …and the disk calls must be INSIDE a region. An empty
+        # `withContext(Dispatchers.IO) {}` followed by the real work in `run {}`
+        # keeps the substring and puts a multi-MB writeText back on the UI
+        # thread (witness 02-2).
+        for token, label in ((r"mkdirs\s*\(", "mkdirs()"),
+                             (r"pruneExpiredLargeMessageFiles\s*\(", "the TTL prune"),
+                             (r"writeText\s*\(", "writeText()")):
+            hits = _live_in(code, body, token)
+            if not hits:
+                violations.append(f"C3 exportLargeContentToFile no longer calls {label} — the "
+                                  "export would leave nothing to share (fail-closed)")
+                continue
+            outside = [p for p in hits if not _inside(regions, p)]
+            if outside:
+                violations.append(
+                    f"C3 {label} in exportLargeContentToFile runs OUTSIDE "
+                    "`withContext(Dispatchers.IO)` — a call merely sitting next to an (empty) "
+                    "IO block still blocks the UI thread")
+
+        # ── C4: prune wired before the write, failure non-blocking, real clock ─
+        if "runCatching { pruneExpiredLargeMessageFiles(" not in code[body[0]:body[1]]:
             violations.append("C4 exportLargeContentToFile does not wrap the orphan prune in "
                               "`runCatching { pruneExpiredLargeMessageFiles(...) }` — exports must "
                               "stop leaving permanent files behind, and a prune failure must not "
                               "block the export the user asked for")
-        prune_at = body.find("pruneExpiredLargeMessageFiles(")
-        write_at = body.find("writeText(")
-        if prune_at >= 0 and write_at >= 0 and prune_at > write_at:
+        prunes = _live_in(code, body, r"pruneExpiredLargeMessageFiles\s*\(")
+        writes = _live_in(code, body, r"writeText\s*\(")
+        if prunes and writes and min(prunes) > max(writes):
             violations.append("C4 prune runs after writeText — the fresh export would be inside "
                               "the swept set; prune must precede the write")
+        for open_pos in [p + len("pruneExpiredLargeMessageFiles") for p in prunes]:
+            args = _call_arg_spans(code, open_pos)
+            if len(args) < 2:
+                continue            # default clock (`System.currentTimeMillis()`)
+            _nm, value = _arg_value(code, args[1])
+            if const_value(value) is not None:
+                # [batch-5 C4] `prune(dir, 0L)` ⇒ cutoff = -TTL ⇒ nothing is ever
+                # older than it ⇒ the prune is a silent no-op that still satisfies
+                # every "the call is there" rule (witness 02-3).
+                violations.append(
+                    f"C4 the orphan prune is fed a constant clock `{value}` — the cutoff becomes "
+                    "permanently negative, so no file is ever expired and the export leaves a "
+                    "permanent orphan again")
         # ── C5: URI handed out only after the bytes are on disk ────────────
-        uri_at = body.find("FileProvider.getUriForFile(")
-        if write_at >= 0 and uri_at >= 0 and uri_at < write_at:
-            violations.append("C5 getUriForFile precedes writeText in the export — the chooser may "
-                              "get a URI for a file that is not written yet")
+        uris = _live_in(code, body, r"getUriForFile\s*\(")
+        if writes and uris and max(writes) > min(uris):
+            violations.append("C5 getUriForFile precedes the live writeText in the export — the "
+                              "chooser may get a URI for a file that is not written yet "
+                              "(a dead `if (false) f.writeText(...)` does not count as the write)")
 
-    if not re.search(r'\binternal\s+fun\s+pruneExpiredLargeMessageFiles\s*\(', code):
+    prune_body = _fn_spans(code, "pruneExpiredLargeMessageFiles")
+    if prune_body is None:
         violations.append("C4 pruneExpiredLargeMessageFiles is not defined in LargeContentGuard.kt")
+    elif ".lastModified()" not in code[prune_body[0]:prune_body[1]] or \
+            ".delete()" not in code[prune_body[0]:prune_body[1]]:
+        violations.append("C4 pruneExpiredLargeMessageFiles no longer expires (`.lastModified()`) "
+                          "and deletes (`.delete()`) anything")
     if TTL_EXPECTED not in code:
         violations.append(f"C4 TTL literal changed — expected `{TTL_EXPECTED}` (recalibrating it "
                           "is a deliberate act: update this gate in the same commit)")
@@ -489,7 +564,6 @@ def check(root: Path) -> list:
     #     its own orphans (deep-audit-1024 ISSUE-01 face 2 + 3). The dir is
     #     written, never deleted, and the copy is up to 100 MB per file
     #     (ShareReceiverActivity cap) — all of it used to run on the UI thread.
-    vm_code = strip_comments((root / CHATVM_REL).read_text())
     if not re.search(r'internal\s+fun\s+pruneExpiredShareInboundFiles\s*\(', vm_code):
         violations.append("C8 pruneExpiredShareInboundFiles is not defined as a top-level "
                           "`internal fun` in ChatViewModel.kt — nothing would ever delete the "
@@ -501,46 +575,66 @@ def check(root: Path) -> list:
     if not re.search(r'suspend\s+fun\s+addAttachmentFromStagedShare\s*\(', vm_code):
         violations.append("C8 addAttachmentFromStagedShare is not `suspend` — a non-suspending "
                           "signature means the 100 MB stream copy cannot leave the UI thread")
-    vm_body, _vm_off = fn_body(vm_code, r'fun\s+addAttachmentFromStagedShare\s*\(')
+    vm_body = _fn_spans(vm_code, "addAttachmentFromStagedShare")
     if vm_body is None:
         violations.append("C8 addAttachmentFromStagedShare body not found — cannot verify the "
                           "share_inbound copy left the main thread")
     else:
-        regions = io_regions(vm_body)
+        regions = _regions_in(io_regions(vm_code), vm_body)
         if not regions:
             violations.append("C8 addAttachmentFromStagedShare body has no "
                               "`withContext(Dispatchers.IO)` — mkdirs / the TTL prune / the "
                               "stream copy would run on the UI thread again "
                               "(deep-audit-1024 ISSUE-01)")
-        elif not any("pruneExpiredShareInboundFiles(" in r for r in regions):
-            violations.append("C8 the share_inbound prune is not inside "
-                              "`withContext(Dispatchers.IO)` in addAttachmentFromStagedShare — a "
-                              "directory walk on the UI thread right before a 100 MB copy")
+        else:
+            if not any(_inside(regions, p) for p in
+                       _live_in(vm_code, vm_body, r"pruneExpiredShareInboundFiles\s*\(")):
+                violations.append("C8 the share_inbound prune is not inside "
+                                  "`withContext(Dispatchers.IO)` in addAttachmentFromStagedShare — "
+                                  "a directory walk on the UI thread right before a 100 MB copy")
+            # [batch-5 C8] …and the COPY itself. Prune inside the switch while the
+            # up-to-100 MB `inputStream().copyTo(out)` drifts outside it is the
+            # defect the criterion exists for (witness 02-5).
+            copies = _live_in(vm_code, vm_body, r"(?:\bcopyTo\s*\(|\binputStream\s*\(|\boutputStream\s*\()")
+            if not any(re.match(r"copyTo", vm_code[p:p + 6]) for p in copies):
+                violations.append("C8 addAttachmentFromStagedShare no longer streams the staged "
+                                  "bytes (no live `copyTo(`) — the attachment would never be "
+                                  "durable (fail-closed)")
+            outside = [p for p in copies if not _inside(regions, p)]
+            if outside:
+                violations.append(
+                    "C8 the share_inbound stream copy (inputStream / outputStream / copyTo) runs "
+                    "OUTSIDE `withContext(Dispatchers.IO)` — up to 100 MB on the UI thread right "
+                    "after the prune returned")
 
     # ── C9 [fix/da1024-A]: the ChatScreen share drain keeps its disk work on
     #     IO. Anchor is the `LaunchedEffect(shareBufferVersion)` body itself, so
     #     a `withContext(Dispatchers.IO)` that drifted to an unrelated call site
     #     does not satisfy the criterion.
-    scr_code = strip_comments((root / SCREEN_REL).read_text())
-    scr_body, _scr_off = fn_body(scr_code, r'LaunchedEffect\s*\(\s*shareBufferVersion\s*\)')
+    scr_body = _block_after(scr_code, r'LaunchedEffect\s*\(\s*shareBufferVersion\s*\)')
     if scr_body is None:
         violations.append("C9 ChatScreen share-drain ingestion point not found — expected a "
                           "`LaunchedEffect(shareBufferVersion) {` block in ChatScreen.kt")
     else:
-        if "addAttachmentFromStagedShare(" not in scr_body:
+        if "addAttachmentFromStagedShare(" not in scr_code[scr_body[0]:scr_body[1]]:
             violations.append("C9 ChatScreen share drain no longer calls "
                               "addAttachmentFromStagedShare — a staged share would stop being "
                               "attached to the composer")
-        regions = io_regions(scr_body)
+        regions = _regions_in(io_regions(scr_code), scr_body)
         if not regions:
             violations.append("C9 the ChatScreen share drain has no "
                               "`withContext(Dispatchers.IO)` — consumeBuffer / the attachment "
                               "copy / the staging-dir sweep all run on the UI thread again "
                               "(deep-audit-1024 ISSUE-01)")
-        elif not any("cleanSharedFiles(" in r for r in regions):
-            violations.append("C9 SharedShareStore.cleanSharedFiles is called outside "
-                              "`withContext(Dispatchers.IO)` in the ChatScreen share drain — "
-                              "listFiles() + per-file delete() on the UI thread")
+        else:
+            sweeps = _live_in(scr_code, scr_body, r"cleanSharedFiles\s*\(")
+            if not sweeps:
+                violations.append("C9 SharedShareStore.cleanSharedFiles is gone from the share "
+                                  "drain — the staging dir would grow without bound (fail-closed)")
+            elif any(not _inside(regions, p) for p in sweeps):
+                violations.append("C9 SharedShareStore.cleanSharedFiles is called outside "
+                                  "`withContext(Dispatchers.IO)` in the ChatScreen share drain — "
+                                  "listFiles() + per-file delete() on the UI thread")
 
     return violations
 
