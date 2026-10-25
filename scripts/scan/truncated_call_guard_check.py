@@ -688,11 +688,12 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
         for cond, cline in policy_single_source_returns(policy):
             problems.append((
                 "policy-single-source-early-return", POLICY, cline,
-                "%s — `return null` must happen exactly once, in the two-source AND "
-                "(`!ceilingDeclared && !turnTruncated`). Any other null exit (a "
-                "single-source `if`, a `when` arm, a duplicated guard) lets the other "
-                "source stop guarding: a turn cut by EOF while ceilingDeclared is false "
-                "reaches the executor with a partial argument object" % cond,
+                "`%s` decides on ONE truncation source — `return null` must happen "
+                "exactly once, in the two-source AND (`!ceilingDeclared && "
+                "!turnTruncated`). Any other null exit (a single-source `if`, a `when` "
+                "arm, a duplicated guard) lets the other source stop guarding: a turn "
+                "cut by EOF while ceilingDeclared is false reaches the executor with a "
+                "partial argument object" % cond,
             ))
 
     # C2 — the engine dispatch site feeds the flag, and the verdict IS the value
@@ -720,9 +721,9 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
                                     eng_code.find("val truncatedRefusal ="))):
         problems.append((
             "engine-feeds-flag", ENGINE, shadowed[0][1],
-            "the engine shadows the stream flag with a second `%s` declaration "
-            "before the refusal call — the policy reads the shadowing value, not "
-            "the one the stream callback wrote" % shadowed[0][0]))
+            "turnTruncated is shadowed or overwritten with a constant — `%s` is "
+            "declared again before the refusal call, so the policy reads the "
+            "shadowing value, not the one the stream callback wrote" % shadowed[0][0]))
     else:
         # [wide4] …and the CONSUMER. The witness kept the producer byte-identical
         # and wrote `if (false && truncatedRefusal != null) {`: the call, the
@@ -730,8 +731,10 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
         # call is dispatched anyway.
         live, why_live = refusal_branch_live(eng_code, "truncatedRefusal")
         if not live:
-            problems.append(("engine-feeds-flag", ENGINE, eline,
-                             "the engine tool-call guard: " + why_live))
+            problems.append((
+                "engine-feeds-flag", ENGINE, eline,
+                "the engine refusal branch (if (truncatedRefusal != null)) is missing "
+                "or short-circuited — " + why_live))
 
     # C3 — OpenAI's EOF guard counts tool-call events; Anthropic keeps its own.
     if openai.count(C3_OPENAI_GUARD) != 1:
@@ -777,8 +780,9 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
             problems.append((
                 "subagent-refusal-wired", TOOL_EXECUTORS,
                 line_of(tool_executors, C4_SUBAGENT_DECL),
-                "runSubagentLoop shadows `%s` with a second declaration before the "
-                "refusal call — the policy reads the shadowing value" % shadowed[0][0]))
+                "turnTruncated is shadowed or overwritten with a constant — "
+                "runSubagentLoop declares `%s` again before the refusal call, so the "
+                "policy reads the shadowing value" % shadowed[0][0]))
         elif C4_REFUSAL_GATE not in loop:
             problems.append(("subagent-refusal-gate", TOOL_EXECUTORS,
                              line_of(tool_executors, C4_SUBAGENT_DECL),
@@ -1293,8 +1297,8 @@ def selftest(root):
          on(0, lambda s: s.replace(
              C1_CONDITION,
              C1_CONDITION + "\n        val _open = " + '"' * 4 + "/*" + '"' * 3
-             + "\n        if (ceilingDeclared) return null"
-             + "\n        val _close = " + '"' * 3 + "*/" + '"' * 3, 1))),
+             + "\n        if (!ceilingDeclared) return null"
+             + "\n        val _close = " + '"' * 3 + "*/" + '"' * 4, 1))),
         ("w4-engine refusal branch short-circuited by a constant",
          "engine-feeds-flag",
          on(1, lambda s: s.replace(
