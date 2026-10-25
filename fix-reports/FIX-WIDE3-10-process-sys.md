@@ -130,14 +130,28 @@ sh scripts/scan/scan.sh          → 112 passed, 0 failed
 python3 scripts/scan/test_scan.py → ALL 344 CASES PASS
 ```
 
-（本地读数来自 `scripts/scan/` 沙箱内运行；CI 上同样两段，见 §6。）
+**本机侧说明（如实记录）**：wide3 期间 12 个会话并行，PRoot 层反复抛
+`OSError: [Errno 38] Function not implemented`（已登记的沙箱缺陷）。本轮本地全量
+`scan.sh` 在第 57/112 门处被打断、`test_scan.py` 亦在 auto-approve 段被打断
+（两次都被 `sandbox-limits.md` 记录的同族错误终止，与门判据无关）。
+**因此全量证据以 CI 为准**（§6，112 门 / 344 夹具一次跑完、零失败），
+本地证据取五门各自的真树 rc=0 + 各自自证臂全绿 + 15/15 反攻。
 
 ## 6. CI
 
-- run：见分支 `fix/meta-wide3-10-process-sys` 最新一次 `build-apk` run（`conclusion == success`）
-- `head_sha` 与本地 HEAD 逐字符一致
-- 日志判读：`Summary: 112 passed, 0 failed` 恰一条 · `ALL 344 CASES PASS` 恰一条 · `e: ` 0 条 ·
-  唯一 `skipped` = `Publish`（main 门控）· 含 `FAILED` 的行全部是 `PASSED` 用例名的子串
+- **run `40162937531`** · **#2658** `Build RikkaMinis Android APK` · `conclusion = success`，`run_attempt = 1`
+- **`head_sha = 3603dc420049e9af8258cee2ccc7e10359363ab7`** —— 与本地 `HEAD` 逐字符一致
+- 26 步，唯一 `skipped` = **`Publish to Releases`**（main 门控），`not_ok = []`
+- 日志判读（2,962,946 B / 35,731 行）：
+  - `║  Summary: 112 passed, 0 failed` 带框线恰 2 条（= 同一条输出被 CI 的双流各记一次）；其余 `Summary: 5/10/14/15/25/28/36 passed, 0 failed` 均为子套件，全部 `0 failed`
+  - 门头 `━━━ [N/112]` 共 224 条（同上双流），编号互异覆盖 1..112
+  - `ALL 344 CASES PASS` 2 条（双流）
+  - Kotlin `e: ` 错误 **0** 条
+  - 含 `FAILED` 的行 **12** 条，逐条核对全部是 `PASSED` 用例名的子串（如
+    `slot denied produces FAILED without calling provider PASSED`、
+    `reason PERSISTENCE_FAILED maps to persistence_failed PASSED`）
+- 报告回填提交发生在该 run 之后，故 `HEAD ≠ 绿 sha`；**源码树等价已核**：
+  `git diff --name-only 3603dc42 HEAD -- . ':(exclude)fix-reports'` 为 0 行（只多本报告）。
 
 ## 7. 残留（每条带 触发条件 / 触发后方案 / 搁置理由）
 
