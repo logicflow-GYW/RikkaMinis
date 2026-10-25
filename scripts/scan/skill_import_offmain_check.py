@@ -183,49 +183,239 @@ def mask_strings(text):
     return "".join(out)
 
 
+DISPATCH_API_RE = re.compile(r"\b(withContext|launch|async)$")
+
+def _trailing_dispatch_head(masked, i):
+    """The dispatcher expression when the text before the `{` at `i` ends with
+    `withContext(<expr>)` / `launch(<expr>)` / `async(<expr>)`, else None."""
+    head = masked[max(0, i - 240):i].rstrip()
+    if not head.endswith(")"):
+        return None
+    depth = 0
+    open_idx = -1
+    for k in range(len(head) - 1, -1, -1):
+        if head[k] == ")":
+            depth += 1
+        elif head[k] == "(":
+            depth -= 1
+            if depth == 0:
+                open_idx = k
+                break
+    if open_idx < 0:
+        return None
+    if not DISPATCH_API_RE.search(head[:open_idx].rstrip()):
+        return None
+    return head[open_idx + 1:len(head) - 1].strip()
+
+def _innermost_dispatch(masked, idx):
+    """Dispatcher expression of the INNERMOST enclosing dispatcher block.
+
+    [wide3-08 arm1, axis=scope] The old stack answered `any(stack)`, so an
+    OUTER `withContext(Dispatchers.IO)` made an INNER
+    `withContext(Dispatchers.Main) { ... }` look off-Main. The thread a call
+    runs on is decided by the nearest enclosing context switch, so only the
+    innermost dispatcher-establishing block counts (plain `if` / lambda blocks
+    do not switch the dispatcher and are skipped).
+    """
+    stack = []
+    for i, ch in enumerate(masked[:idx]):
+        if ch == "{":
+            stack.append(_trailing_dispatch_head(masked, i))
+        elif ch == "}":
+            if stack:
+                stack.pop()
+    for entry in reversed(stack):
+        if entry is not None:
+            return entry
+    return None
+
+def _is_io_dispatcher(expr, masked=""):
+    """True when a dispatcher expression is an IO context (alias resolved)."""
+    if not expr:
+        return False
+    e = expr.strip()
+    if e == "Dispatchers.IO" or e.startswith("Dispatchers.IO."):
+        return True
+    if re.fullmatch(r"[A-Za-z_]\w*", e):
+        # one-hop local binding: `val ctx = Dispatchers.IO`
+        return re.search(r"\b(?:val|var)\s+%s\s*(?::[^=\n]+)?=\s*"
+                         r"Dispatchers\.IO\b" % re.escape(e), masked) is not None
+    return False
+
 def inside_io_wrap(text_nc, text_masked):
-    """True when the paste call site sits inside a withContext(Dispatchers.IO)
-    block. Brace-depth stack over the masked text; each open brace remembers
-    the code text immediately preceding it."""
+    """True when the paste call site's INNERMOST dispatcher block is IO."""
     call_idx = text_nc.find(CALL)
     if call_idx < 0:
         return False, "call site not found"
     if text_nc.count(CALL) != 1:
         return False, "expected exactly 1 call site, found %d" % text_nc.count(CALL)
-    stack = []
-    for i, ch in enumerate(text_masked[:call_idx]):
-        if ch == "{":
-            head = text_nc[:i].rstrip()
-            head = head[:-1].rstrip() if head.endswith("{") else head
-            tail = head[-len("withContext(Dispatchers.IO)"):] if len(head) >= len(OPENER) else ""
-            stack.append(tail == OPENER)
-        elif ch == "}":
-            if stack:
-                stack.pop()
-    if any(stack):
+    disp = _innermost_dispatch(text_masked, call_idx)
+    if disp is None:
+        return False, "call site is not lexically inside %s { ... }" % OPENER
+    if _is_io_dispatcher(disp, text_masked):
         return True, ""
-    return False, "call site is not lexically inside %s { ... }" % OPENER
-
+    return False, ("call site runs inside `%s`, not %s - an enclosing IO wrap does "
+                   "not rescue an inner dispatcher switch (wide3-08 arm1)"
+                   % (disp, OPENER))
 
 def _io_wrapped_at(text_nc, text_masked, idx, openers=(OPENER,)):
-    """True when code position `idx` sits inside an opener-established block.
+    """True when code position `idx` runs on an IO dispatcher.
 
-    Brace-depth stack over the masked text; each open brace remembers the
-    code text immediately preceding it (same trick as inside_io_wrap).
+    [wide3-08 arm1] Judged on the INNERMOST dispatcher-establishing block, not
+    on `any(enclosing opener)`: `withContext(IO) { withContext(Main) { call } }`
+    runs the call on Main and used to pass.
     """
+    return _is_io_dispatcher(_innermost_dispatch(text_masked, idx), text_masked)
+
+IO_OPENERS = (OPENER, "launch(Dispatchers.IO)")
+
+def _match_paren(text, open_idx):
+    """Index of the `)` matching the `(` at open_idx (-1 if none)."""
+    masked = mask_strings(text)
+    depth = 0
+    for i in range(open_idx, len(masked)):
+        if masked[i] == "(":
+            depth += 1
+        elif masked[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+def _split_top(s, op):
+    """Split at depth-0 occurrences of `op` (string literals masked)."""
+    masked = mask_strings(s)
+    parts, depth, start, i = [], 0, 0, 0
+    while i < len(masked):
+        c = masked[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and masked.startswith(op, i):
+            parts.append(s[start:i])
+            i += len(op)
+            start = i
+            continue
+        i += 1
+    parts.append(s[start:])
+    return parts
+
+def _unparen(p):
+    p = p.strip()
+    while p.startswith("(") and p.endswith(")") and _match_paren(p, 0) == len(p) - 1:
+        p = p[1:-1].strip()
+    return p
+
+def _lit_value(part):
+    """True/False when `part` is a bare boolean literal (optionally negated)."""
+    p = _unparen(part)
+    neg = False
+    while p.startswith("!"):
+        neg = not neg
+        p = _unparen(p[1:])
+    if p == "true":
+        v = True
+    elif p == "false":
+        v = False
+    else:
+        return None
+    return (not v) if neg else v
+
+def _literal_decides(cond):
+    """True when the condition's outcome is fixed by a literal.
+
+    [wide3-08 arm8, axis=dataflow] `if (true || sid == null)` keeps the null
+    test in the spelling and deletes the decision.
+    """
+    c = _unparen(cond)
+    if _lit_value(c) is not None:
+        return True
+    for op, dead in (("||", True), ("&&", False)):
+        for part in _split_top(c, op):
+            if _lit_value(part) is dead:
+                return True
+    return False
+
+def _trailing_if_cond(masked, i):
+    """The condition when the text before the `{` at `i` ends with `if (...)`."""
+    head = masked[max(0, i - 400):i].rstrip()
+    if not head.endswith(")"):
+        return None
+    depth = 0
+    open_idx = -1
+    for k in range(len(head) - 1, -1, -1):
+        if head[k] == ")":
+            depth += 1
+        elif head[k] == "(":
+            depth -= 1
+            if depth == 0:
+                open_idx = k
+                break
+    if open_idx < 0 or not re.search(r"\bif$", head[:open_idx].rstrip()):
+        return None
+    return head[open_idx + 1:len(head) - 1].strip()
+
+def _enclosing_if_conds(body, idx):
+    """Conditions of the `if (...)` blocks that lexically enclose `idx`."""
+    masked = mask_strings(body)
     stack = []
-    for i, ch in enumerate(text_masked[:idx]):
+    for i, ch in enumerate(masked[:idx]):
         if ch == "{":
-            head = text_nc[:i].rstrip()
-            head = head[:-1].rstrip() if head.endswith("{") else head
-            stack.append(any(head.endswith(o) for o in openers))
+            stack.append(_trailing_if_cond(masked, i))
         elif ch == "}":
             if stack:
                 stack.pop()
-    return any(stack)
+    return [c for c in stack if c is not None]
 
+def _line_end_expr(text, start):
+    """The expression beginning at `start`, up to a depth-0 newline."""
+    masked = mask_strings(text)
+    depth = 0
+    i = start
+    while i < len(masked):
+        c = masked[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                return text[start:i]
+            depth -= 1
+        elif c == "\n" and depth == 0:
+            return text[start:i]
+        i += 1
+    return text[start:]
 
-IO_OPENERS = (OPENER, "launch(Dispatchers.IO)")
+EMPTY_VALUES = ('""', "false", "null", "String()", "emptyList()", "emptyMap()",
+                "0", "-1", "Unit")
+
+def _subject_writes(body, subject):
+    """(reset_offsets, seed_offsets) for `subject = <rhs>` inside `body`."""
+    resets, seeds = [], []
+    for m in re.finditer(r"\b%s\s*=(?!=)" % re.escape(subject), body):
+        rhs = _line_end_expr(body, m.end()).strip()
+        if rhs in EMPTY_VALUES or _lit_value(rhs) is not None:
+            resets.append(m.start())
+        else:
+            seeds.append(m.start())
+    return resets, seeds
+
+def _id_expressions(body):
+    """Identifiers/expressions standing for the edited server's id."""
+    names = []
+    for m in re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?="
+                         r"\s*editServer\s*\?\.\s*id\b", body):
+        names.append(m.group(1))
+    if re.search(r"editServer\s*\?\.\s*id", body):
+        names.append("editServer?.id")
+    return names
+
+def _tests_null_of(cond, names):
+    """True when `cond` compares one of `names` against null."""
+    if not re.search(r"[=!]=\s*null\b", cond):
+        return False
+    return any(re.search(r"(?<![\w.])%s\b" % re.escape(n), cond) for n in names)
+
 
 REPO_CALL_RE = re.compile(r"skillRepository\.([A-Za-z_]\w*)\s*\(")
 
@@ -648,6 +838,13 @@ def check_b03_offmain(files):
     return check_offmain_calls(files, B03_CALL_SITES, "B-03")
 
 
+def _alias_receivers(text_nc, prefix):
+    """Variable names bound to the object `prefix` names (`val x = <obj>`)."""
+    obj = prefix.rstrip(".").split(".")[-1]
+    pat = re.compile(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=\s*"
+                     r"(?:[A-Za-z_][\w.]*\.)?%s\b" % re.escape(obj))
+    return [m.group(1) for m in pat.finditer(text_nc)]
+
 def check_offmain_calls(files, sites, label):
     """Shared criterion for arms 7 and 9: a call passes when it sits inside an
     IO opener, or when the callee wraps its own work (repository-side fix).
@@ -665,6 +862,15 @@ def check_offmain_calls(files, sites, label):
         nc = strip_comments(text)
         masked = mask_strings(nc)
         hits = list(re.finditer(re.escape(prefix) + r"([A-Za-z_]\w*)\s*\(", nc))
+        # [wide3-08 arm7, axis=spelling] `val store = com.….MCPOAuthStore` then
+        # `store.setClientSecret(…)` is the same call through another name: the
+        # criterion binds the RECEIVER, so the alias set is derived from the
+        # bindings in this file instead of spelling the object once.
+        for alias in _alias_receivers(nc, prefix):
+            for m in re.finditer(r"(?<![\w.])%s\s*\.\s*([A-Za-z_]\w*)\s*\("
+                                 % re.escape(alias), nc):
+                hits.append(m)
+        hits.sort(key=lambda m: m.start())
         if not hits:
             failures.append(
                 "%s: no `%s<method>(` call site found — the %s anchor lost its "
@@ -762,6 +968,32 @@ def check_seed_effect_keys(files):
                     "keyed %s (missing %s) — an editServer change that keeps the "
                     "id resets the draft and the reader never re-runs"
                     % (MCP_REL, marker, keys, effects[0][0], missing)]
+        # [wide3-08 arm8, axis=dataflow] the effect must actually SEED on the
+        # non-null path, and the reset must be reached only when the id is null.
+        # `if (true || sid == null)` (and an effect that only clears) keeps every
+        # anchor above green while the draft is wiped on every edit.
+        body = effects[0][1]
+        resets, seeds = _subject_writes(body, subject)
+        if not seeds:
+            return ["%s: the LaunchedEffect for `%s` only clears the draft — no "
+                    "assignment reads the stored value, so the form stays empty"
+                    % (MCP_REL, subject)]
+        if resets:
+            # the guard criterion only has a subject when the effect resets the
+            # draft at all; a seed-only effect cannot wipe anything.
+            id_exprs = _id_expressions(body)
+            if not id_exprs:
+                return ["%s: the LaunchedEffect seeding `%s` resets the draft but no "
+                        "longer binds the edited server's id (`val x = "
+                        "editServer?.id`) — fail-closed" % (MCP_REL, subject)]
+            for pos in resets:
+                guards = [c for c in _enclosing_if_conds(body, pos)
+                          if _tests_null_of(c, id_exprs) and not _literal_decides(c)]
+                if not guards:
+                    return ["%s: the `%s` reset is not inside a live `<id> == null` "
+                            "guard — the draft is wiped on every editServer change and "
+                            "the seeding path never runs (wide3-08 arm8)"
+                            % (MCP_REL, subject)]
     if not found:
         return ["%s: neither OAuth seed draft (`%s`) was found — fail-closed"
                 % (MCP_REL, "` / `".join(SEED_DRAFT_MARKERS))]
@@ -1626,6 +1858,72 @@ def _expr_parser_arms():
     return out
 
 
+# ── [wide3-08] witness arms ──────────────────────────────────────────────
+# Every criterion added for wide3-08 carries its own negative arm here: the
+# witness patch applied to the fixture must turn EXACTLY this arm red while the
+# clean/precision twins stay green.
+_SEED_EFFECT_BLOCK = (
+    '    LaunchedEffect(editServer) {\n'
+    '        val s = withContext(Dispatchers.IO) {\n'
+    '            MCPOAuthStore.clientSecret(context, id)\n'
+    '        }\n'
+    '        oauthClientSecret = s ?: ""\n'
+    '    }\n'
+)
+_DRAFT_LINE = ('    var oauthClientSecret by remember(editServer) '
+               '{ mutableStateOf("") }\n')
+_ARM8_DEAD = (
+    '    LaunchedEffect(editServer?.id) {\n'
+    '        val sid = editServer?.id\n'
+    '        if (true || sid == null) {\n'
+    '            oauthClientSecret = ""\n'
+    '            return@LaunchedEffect\n'
+    '        }\n'
+    '        val s = withContext(Dispatchers.IO) {\n'
+    '            MCPOAuthStore.clientSecret(context, id)\n'
+    '        }\n'
+    '        oauthClientSecret = s ?: ""\n'
+    '    }\n'
+)
+_ARM8_LIVE = _ARM8_DEAD.replace('if (true || sid == null) {', 'if (sid == null) {')
+
+
+def _w308_mcp(seed):
+    """The shared MCP fixture with its seed effect replaced by `seed` and the
+    draft key matched to the effect key."""
+    text = _mcp_text()
+    text = text.replace(_SEED_EFFECT_BLOCK, seed)
+    text = text.replace(_DRAFT_LINE,
+                        _DRAFT_LINE.replace('remember(editServer)',
+                                            'remember(editServer?.id)'))
+    return text
+
+
+W308_FIXTURES = [
+    # arm1 scope: the INNER dispatcher decides. `scope.launch` wrapping a
+    # `withContext(Dispatchers.Main)` never makes the call off-main.
+    ("arm1 nested Main dispatcher still runs on Main",
+     lambda: _files(mcp=_mcp_text().replace(
+         "withContext(Dispatchers.IO) {\n            MCPOAuthStore.setClientSecret",
+         "withContext(Dispatchers.Main) {\n            MCPOAuthStore.setClientSecret")),
+     True, "runs on Main"),
+    # arm7 spelling: `val store = MCPOAuthStore` then `store.clientSecret(...)`.
+    ("arm7 alias receiver on Main",
+     lambda: _files(mcp=_mcp_text(extra=(
+         '    val store = MCPOAuthStore\n'
+         '    val s3 = store.clientSecret(context, id)\n'))),
+     True, "runs on Main"),
+    # arm8 dataflow: the reset must sit inside a LIVE `<id> == null` guard.
+    ("arm8 dead reset guard wipes the draft",
+     lambda: _files(mcp=_w308_mcp(_ARM8_DEAD)),
+     True, "reset is not inside a live"),
+    # precision twin: a live guard with the same keys stays legal.
+    ("arm8 precision: live null guard stays legal",
+     lambda: _files(mcp=_w308_mcp(_ARM8_LIVE)),
+     False, None),
+]
+
+
 def selftest():
     ok = True
     f = run_checks_text(GOOD_SM)
@@ -1689,6 +1987,18 @@ def selftest():
         if good and expect_red and needle:
             good = any(needle in x for x in f)
         print("selftest 1041-B03 %-46s: %s%s" % (
+            label, "RED" if red else "CLEAN",
+            "" if good else "  UNEXPECTED %s" % f[:2]))
+        ok &= good
+
+
+    for label, make, expect_red, needle in W308_FIXTURES:
+        f = run_checks_map(make())
+        red = len(f) > 0
+        good = (red == expect_red)
+        if good and expect_red and needle:
+            good = any(needle in x for x in f)
+        print("selftest wide3-08 %-45s: %s%s" % (
             label, "RED" if red else "CLEAN",
             "" if good else "  UNEXPECTED %s" % f[:2]))
         ok &= good
