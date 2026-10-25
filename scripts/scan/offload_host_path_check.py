@@ -51,6 +51,23 @@ import shutil
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import KotlinLexError            # noqa: E402
+from _kotlin_ast import (                            # noqa: E402
+    const_value,
+    function_body,
+    strip_parens,
+)
+from _kotlin_valueflow import (                      # noqa: E402
+    call_args,
+    code_view,
+    expr_end,
+    literal_view,
+    live_positions,
+    value_sources,
+)
+
 OFFLOAD_REL = os.path.join(
     "src", "android", "app", "src", "main", "java", "com", "rikkaminis", "app", "sandbox", "offload"
 )
@@ -109,7 +126,7 @@ FUN_DECL_RE = re.compile(r"\bfun\s+(?:<[^>]+>\s+)?([A-Za-z_]\w*)\s*\(")
 # mixed-case scheme silently degrades to ACTION_VIEW over the raw string.
 SCHEME_NORMALISE_RE = re.compile(r"[Ll]owercase")
 START_ACTIVITY_RE = re.compile(r"\bstartActivity\s*\(")
-# strip_comments() cuts a line at `//`, so `"intent://x"` arrives as `"intent:` —
+# literal_view() cuts a line at `//`, so `"intent://x"` arrives as `"intent:` —
 # accept the scheme prefix with or without its closing quote.
 INTENT_SCHEME_LITERAL_RE = re.compile(r'"(?:android-app|intent)(?::|")')
 FALLBACK_READ_RE = re.compile(r'getStringExtra\(\s*"browser_fallback_url"\s*\)')
@@ -207,6 +224,14 @@ HOST_OPEN_TOKEN_RE = re.compile(
     r"|\.\s*(?:inputStream|outputStream|readBytes|readText|bufferedReader|useLines|source)\s*\("
 )
 
+# The call forms whose FIRST argument is the path that gets opened. R7 reads
+# that argument as a value (`_value_resolves`), not as a line.
+HOST_OPEN_CALL_RE = re.compile(
+    r"\b(?:File|FileInputStream|FileOutputStream|RandomAccessFile)\s*\("
+    r"|\bFiles\s*\.\s*\w+\s*\("
+    r"|\.\s*(?:inputStream|outputStream|bufferedReader|useLines|source|readBytes|readText)\s*\("
+)
+
 # ── [da1025-A] R3: player session-path wiring ───────────────────────────────
 # android-player play <session> <path> must join relative paths against the
 # session cwd and resolve the file session-scoped, fail-closed. Pre-fix, the
@@ -236,24 +261,153 @@ DEBUG_OFFLOAD_REL = os.path.join(OFFLOAD_REL, "DebugOffloadHandler.kt")
 DEBUG_PATH_SUBJECTS = ("handleLS", "handleReadFile", "handleWriteFile")
 
 
-def _fun_body(text, header_pat):
-    """Body of the first function matching header_pat (brace-balanced), or None."""
-    m = re.search(header_pat, text)
+def _fun_body(text, name):
+    """Brace-inclusive body of the function called [name] (shared derivation).
+
+    Deleted: the hand-written brace walk this replaces. `function_body` already
+    handles the two shapes that walk got wrong — expression bodies and default
+    argument lambdas — and it is the same derivation the other gates use, so a
+    parsing fix lands everywhere at once.
+    """
+    fb = function_body(text, name)
+    if fb is None:
+        return None
+    start, end, kind = fb
+    return text[start - 1:end + 1] if kind == "block" else text[start:end]
+
+
+_RESOLVER_CALL = r"\b(?:PRootKernel\s*\.\s*)?resolvePathForSession\s*\("
+
+
+def _value_resolves(expr):
+    """Is the VALUE of [expr] the session resolver's result?
+
+    Read as dataflow, not as text: a discarding scope keeps its receiver, so
+    `raw.also { resolvePathForSession(...) }` is the RAW value with a resolver
+    call glued on — exactly the witness that made R1/R7 green. `?:` arms and
+    `if/else` both count (the shared `value_sources`), and the result is peeked
+    through `.absolutePath`-style members.
+    """
+    try:
+        return any(re.search(_RESOLVER_CALL, s) for s in value_sources(expr))
+    except KotlinLexError:
+        return False
+
+
+def _init_expr(code, start):
+    """The initialiser expression that begins at [start] (spans continuations)."""
+    return code[start:expr_end(code, start)]
+
+
+def _binding_expr(code, name):
+    """RHS of the first `val|var name =` in [code] (spans continuation lines)."""
+    m = re.search(r"\b(?:val|var)\s+%s\s*(?::[^=\n]*)?=" % re.escape(name), code)
     if not m:
         return None
-    open_brace = text.find("{", m.end())
-    if open_brace < 0:
-        return None
-    depth = 0
-    for i in range(open_brace, len(text)):
-        c = text[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[open_brace:i + 1]
-    return None
+    return _init_expr(code, m.end())
+
+
+def _traces_to(code, expr, pattern, depth=2, stop=()):
+    """Does the VALUE of [expr] trace (through local val bindings) to a call
+    matching [pattern]?
+
+    Every value source counts (elvis / if-else arms); a discarding scope keeps
+    its receiver so `raw.also { translate(...) }` still traces to `raw`. Bare
+    identifiers are followed to their binding, and [stop] names any function
+    that TRANSLATES the value (tracing stops there — the raw value does not
+    reach the caller through a translator).
+    """
+    for s in value_sources(expr):
+        if any(re.search(r"\b%s\s*\(" % re.escape(n), s) for n in stop):
+            continue
+        if re.search(pattern, s):
+            return True
+        t = strip_parens(s.strip())
+        if depth and re.fullmatch(r"[A-Za-z_]\w*", t):
+            rhs = _binding_expr(code, t)
+            if rhs is not None and _traces_to(code, rhs, pattern, depth - 1, stop):
+                return True
+    return False
+
+
+def _translators(code, resolver_pat=_RESOLVER_CALL):
+    """Names of the functions in [code] that translate guest→host through the
+    session resolver. DERIVED from the tree, not a hardcoded allow-list."""
+    names = set()
+    for m in re.finditer(r"\bfun\s+([A-Za-z_]\w*)\s*\(", code):
+        body = _fun_body(code, m.group(1))
+        if body and re.search(resolver_pat, body):
+            names.add(m.group(1))
+    return names
+
+
+def _call_arg_texts(code, open_pos):
+    """Text of each argument of the call whose `(` is at [open_pos]."""
+    return [code[a:b].strip() for a, b in call_args(code, open_pos)]
+
+
+PLAY_CALL_RE = re.compile(r"\bMediaPlayerManager\s*\.\s*play\s*\(")
+
+
+def _named_arg(arg_text):
+    """(name, value) for a named argument, (None, text) for a positional one."""
+    m = re.match(r"\s*([A-Za-z_]\w*)\s*=(?!=)\s*(.*)$", arg_text, re.S)
+    return (m.group(1), m.group(2)) if m else (None, arg_text)
+
+
+def _play_call_problems(code, rel):
+    """R3: the two values `play(id, path, …)` carries are DATA decisions.
+
+    * the path argument must be the cwd-joined resolved value
+      (`resolveMaybeRelative(...)`), and
+    * the session argument must be the caller's `request.sessionId`.
+
+    Both are read at the CALL SITE (`call_args`) and traced through local
+    bindings (`value_sources`). The criteria this replaces were file-level
+    substring tests ("`request.sessionId` appears somewhere", "`resolveMaybe
+    Relative(` appears somewhere"), which `play(id, path, chatSessionId =
+    null.also { request.sessionId })` satisfied twice over — the audited R3
+    witness, where the session id is computed and then discarded while the raw
+    guest path goes to the player.
+    """
+    sites = list(PLAY_CALL_RE.finditer(code))
+    if not sites:
+        return ["%s: no `MediaPlayerManager.play(...)` call site — the session-path "
+                "criterion cannot be traced (fail-closed)" % rel]
+    problems = []
+    for m in sites:
+        args = [_named_arg(code[a:b]) for a, b in call_args(code, m.end() - 1)]
+        if len(args) < 2:
+            problems.append(
+                "%s: `MediaPlayerManager.play(...)` could not be delimited — fail-closed" % rel)
+            continue
+        named = {n: v for n, v in args if n}
+        positional = [v for n, v in args if not n]
+        path_arg = positional[1] if len(positional) > 1 else named.get("path")
+        session_arg = named.get("chatSessionId")
+        if session_arg is None and len(positional) > 2:
+            session_arg = positional[2]
+        if path_arg is None:
+            problems.append("%s: play(...) receives no path argument — fail-closed" % rel)
+        elif not _traces_to(code, path_arg, r"\bresolveMaybeRelative\s*\("):
+            problems.append(
+                "%s: play(...) receives `%s` as the path — it is not the cwd-joined resolved "
+                "value (`resolveMaybeRelative(...)`), so a relative path reaches the player raw"
+                % (rel, " ".join(path_arg.split())[:60])
+            )
+        if session_arg is None:
+            problems.append(
+                "%s: play(...) gets no `chatSessionId` — playback cannot be session-scoped "
+                "(cross-session read hole)" % rel
+            )
+        elif not _traces_to(code, session_arg, r"\bsessionId\b"):
+            problems.append(
+                "%s: play(...) gets `%s` as `chatSessionId` — it does not carry the caller's "
+                "request.sessionId (a discarding scope keeps its receiver), so the player "
+                "resolves inside the wrong session's tree"
+                % (rel, " ".join(session_arg.split())[:60])
+            )
+    return problems
 
 
 def scan_player_session_path(root):
@@ -263,23 +417,22 @@ def scan_player_session_path(root):
     if not os.path.isfile(handler_path):
         return ["%s: missing — cannot verify player session-path wiring" % PLAYER_HANDLER_REL]
     with open(handler_path, encoding="utf-8", errors="replace") as fh:
-        handler = strip_comments(fh.read())
-    if "request.sessionId" not in handler:
-        problems.append(
-            "%s: `request.sessionId` never used — play cannot be session-scoped "
-            "(cross-session read hole)" % PLAYER_HANDLER_REL
-        )
-    if "resolveMaybeRelative(" not in handler:
-        problems.append(
-            "%s: no resolveMaybeRelative(...) call — relative play paths are "
-            "passed raw and fail" % PLAYER_HANDLER_REL
-        )
+        raw = fh.read()
+    try:
+        handler = literal_view(raw)
+    except KotlinLexError as exc:
+        return [_lex_problem(PLAYER_HANDLER_REL, exc)]
+    problems.extend(_play_call_problems(handler, PLAYER_HANDLER_REL))
     manager_path = os.path.join(root, PLAYER_MANAGER_REL)
     if not os.path.isfile(manager_path):
         return problems + ["%s: missing — cannot verify session-scoped play resolution" % PLAYER_MANAGER_REL]
     with open(manager_path, encoding="utf-8", errors="replace") as fh:
-        manager = strip_comments(fh.read())
-    body = _fun_body(manager, r"\bfun\s+play\s*\(")
+        raw = fh.read()
+    try:
+        manager = literal_view(raw)
+    except KotlinLexError as exc:
+        return problems + [_lex_problem(PLAYER_MANAGER_REL, exc)]
+    body = _fun_body(manager, "play")
     if body is None:
         problems.append("%s: `fun play` could not be delimited — fail-closed" % PLAYER_MANAGER_REL)
     elif "resolvePathForSession(" not in body:
@@ -310,35 +463,40 @@ SHIZUKU_PATH_SUBJECTS = (
 
 def _mask_strings(text):
     """Blank out string-literal bodies (quotes kept) so an identifier named in a
-    user-facing message is not read as a command operand."""
-    out = []
-    i = 0
-    while i < len(text):
-        c = text[i]
-        if c == '"':
-            out.append('"')
-            i += 1
-            while i < len(text) and text[i] != '"':
-                if text[i] == "\\":
-                    i += 1
-                out.append(" ")
-                i += 1
-            out.append('"')
-            i += 1
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
+    user-facing message is not read as a command operand.
+
+    Thin alias of the shared `code_view` (comments AND literal interiors
+    blanked, length preserved) — the local character walk this replaces did not
+    skip char literals or `${}` templates.
+    """
+    return code_view(text)
 
 
 def _command_operands(body):
-    """Identifiers handed to a privileged command inside a function body."""
-    masked = _mask_strings(body)
-    names = set(m.group(1) for m in re.finditer(r"\bcmd\.add\(\s*([A-Za-z_]\w*)\s*\)", masked))
-    for line in masked.splitlines():
-        if "arrayOf(" in line:
-            names.update(w for w in re.findall(r"[A-Za-z_]\w*", line) if w != "arrayOf")
-    return names
+    """(offset, text) of every EXPRESSION handed to a privileged command.
+
+    The operand is read as an expression, not as a bare identifier: `cmd.add(
+    path.trim())` hands the raw guest path to a process that runs OUTSIDE the
+    sandbox just as surely as `cmd.add(path)` does — the identifier-only reader
+    this replaces matched neither (it required `cmd.add(<ident>)` exactly).
+
+    Literal flags (`"-r"`) come back blanked by `code_view` and are dropped.
+    """
+    code = _mask_strings(body)
+    out = []
+    for m in re.finditer(r"\bcmd\s*\.\s*add\s*\(", code):
+        for a, b in call_args(code, m.end() - 1):
+            out.append((m.start() + a, code[a:b]))
+    for m in re.finditer(r"(?<![A-Za-z_])(?:arrayOf|listOf)\s*\(", code):
+        for a, b in call_args(code, m.end() - 1):
+            out.append((m.start() + a, code[a:b]))
+    cleaned = []
+    for pos, expr in out:
+        expr = " ".join(expr.split())
+        if not expr or re.fullmatch(r'"[^"]*"', expr) or re.fullmatch(r"'[^']*'", expr):
+            continue  # a literal flag, not a path
+        cleaned.append((pos, expr))
+    return cleaned
 
 
 def scan_shizuku_paths(root):
@@ -348,33 +506,114 @@ def scan_shizuku_paths(root):
     if not os.path.isfile(path):
         return ["%s: missing — cannot verify privileged path resolution" % SHIZUKU_HANDLER_REL]
     with open(path, encoding="utf-8", errors="replace") as fh:
-        code = strip_comments(fh.read())
+        raw = fh.read()
+    try:
+        code = literal_view(raw)
+    except KotlinLexError as exc:
+        return [_lex_problem(SHIZUKU_HANDLER_REL, exc)]
     if "resolvePathForSession(" not in code:
         problems.append(
             "%s: no PRootKernel.resolvePathForSession(...) — the Shizuku service runs outside "
             "the sandbox, so every guest path it receives is a silent no-op" % SHIZUKU_HANDLER_REL
         )
+    # DERIVED, not hardcoded: the translator is whichever function in this file
+    # resolves through the session resolver (here `shizukuHostPath`). Renaming or
+    # re-inlining it keeps the criterion intact.
+    translators = _translators(code)
     for fn, raw_params in SHIZUKU_PATH_SUBJECTS:
-        body = _fun_body(code, r"\bfun\s+%s\s*\(" % re.escape(fn))
+        body = _fun_body(code, fn)
         if body is None:
             problems.append(
                 "%s: `%s` not found — the privileged path surface moved (fail-closed)"
                 % (SHIZUKU_HANDLER_REL, fn)
             )
             continue
-        leaked = sorted(p for p in raw_params if p in _command_operands(body))
-        if leaked:
+        operands = _command_operands(body)
+        if not operands:
             problems.append(
-                "%s: %s hands the raw argument(s) %s to the privileged command — translate "
-                "through the session resolver first"
-                % (SHIZUKU_HANDLER_REL, fn, ", ".join("`%s`" % p for p in leaked))
+                "%s: `%s` hands no operand to the privileged command — the criterion cannot be "
+                "traced (fail-closed)" % (SHIZUKU_HANDLER_REL, fn)
             )
+        if translators:
+            translated = r"\b(?:%s)\s*\(" % "|".join(sorted(translators))
+            # Only operands that CARRY a path are judged: `cmd.addAll(listOf(
+            # "--user", it))` hands a user id, not a path, and must not red.
+            path_operands = [
+                (pos, e) for pos, e in operands
+                if _traces_to(body, e, translated)
+                or any(_traces_to(body, e, r"\b%s\b" % re.escape(p), stop=translators)
+                       for p in raw_params)
+            ]
+            if not path_operands:
+                problems.append(
+                    "%s: `%s` never hands a resolved path to the privileged command — the "
+                    "path operand does not reach it at all (fail-closed)"
+                    % (SHIZUKU_HANDLER_REL, fn)
+                )
+            for _pos, expr in path_operands:
+                if _traces_to(body, expr, translated):
+                    continue
+                leaked = [p for p in raw_params
+                          if _traces_to(body, expr, r"\b%s\b" % re.escape(p), stop=translators)]
+                problems.append(
+                    "%s: `%s` hands `%s` to the privileged command — it never went through %s, "
+                    "so %s"
+                    % (SHIZUKU_HANDLER_REL, fn, expr,
+                       " / ".join(sorted(translators)),
+                       ("the raw argument(s) %s reach a process outside the sandbox"
+                        % ", ".join("`%s`" % p for p in leaked)) if leaked
+                       else "the guest path is passed on unresolved")
+                )
         if not re.search(r"\?:\s*return\s+errEnvelope\(", body):
             problems.append(
                 "%s: %s has no fail-closed refusal for an unresolvable path (null must refuse, "
                 "not fall back to the raw spelling)" % (SHIZUKU_HANDLER_REL, fn)
             )
     return problems
+
+
+def _session_resolution_problems(body, rel, fn):
+    """R5: the session id handed to the resolver must be the CALLER's.
+
+    `resolvePathForSession(null, path, context)` keeps every anchor the old
+    criterion looked for — the `sessionId` local still exists in the body and
+    the call is still session-scoped by name — while the resolver searches every
+    `minis-sessions/<id>/` tree, i.e. exactly the cross-session hole R5 exists
+    to close (the audited witness). So the FIRST ARGUMENT is read as a value:
+    it must trace to a session id, and it must not be a literal.
+    """
+    out = []
+    sites = list(re.finditer(r"\bresolvePathForSession\s*\(", body))
+    if not sites:
+        out.append(
+            "%s: %s does not resolve through PRootKernel.resolvePathForSession — the "
+            "per-session bind mounts are bypassed (cross-session read / rootfs ghost write)"
+            % (rel, fn)
+        )
+        return out
+    for m in sites:
+        args = _call_arg_texts(body, m.end() - 1)
+        if not args:
+            out.append(
+                "%s: %s: resolvePathForSession(...) could not be delimited — fail-closed"
+                % (rel, fn)
+            )
+            continue
+        first = args[0]
+        if const_value(first) is not None or first in ("null", "None"):
+            out.append(
+                "%s: %s passes the literal `%s` as the session id — the resolver then searches "
+                "EVERY minis-sessions/<id>/ tree, so a read or write from one session can land "
+                "in another session's sandbox (or the rootfs ghost dir)"
+                % (rel, fn, first)
+            )
+        elif not _traces_to(body, first, r"\bsessionId\b"):
+            out.append(
+                "%s: %s passes `%s` as the session id — it does not carry the caller's "
+                "sessionId, so the per-session containment is not established"
+                % (rel, fn, " ".join(first.split())[:60])
+            )
+    return out
 
 
 def scan_debug_session_path(root):
@@ -388,22 +627,21 @@ def scan_debug_session_path(root):
     if not os.path.isfile(rpc_path):
         return ["%s: missing — cannot verify debug session-path wiring" % DEBUG_RPC_REL]
     with open(rpc_path, encoding="utf-8", errors="replace") as fh:
-        rpc = strip_comments(fh.read())
+        raw = fh.read()
+    try:
+        rpc = literal_view(raw)
+    except KotlinLexError as exc:
+        return [_lex_problem(DEBUG_RPC_REL, exc)]
 
     for fn in DEBUG_PATH_SUBJECTS:
-        body = _fun_body(rpc, r"\bfun\s+%s\s*\(" % re.escape(fn))
+        body = _fun_body(rpc, fn)
         if body is None:
             problems.append(
                 "%s: `%s` could not be delimited — fail-closed (signature moved?)"
                 % (DEBUG_RPC_REL, fn)
             )
             continue
-        if "resolvePathForSession(" not in body:
-            problems.append(
-                "%s: %s does not resolve through PRootKernel.resolvePathForSession — the per-session "
-                "bind mounts are bypassed (cross-session read / rootfs ghost write)"
-                % (DEBUG_RPC_REL, fn)
-            )
+        problems.extend(_session_resolution_problems(body, DEBUG_RPC_REL, fn))
         if "PRootKernel.resolveHostPath(" in body:
             problems.append(
                 "%s: %s still calls the bare global resolveHostPath — it scans every "
@@ -422,8 +660,8 @@ def scan_debug_session_path(root):
             "%s: missing — cannot verify the session-id passthrough" % DEBUG_OFFLOAD_REL
         ]
     with open(offload_path, encoding="utf-8", errors="replace") as fh:
-        offload = strip_comments(fh.read())
-    handle = _fun_body(offload, r"\boverride\s+fun\s+handle\s*\(")
+        offload = literal_view(fh.read())
+    handle = _fun_body(offload, "handle")
     if handle is None:
         problems.append(
             "%s: `override fun handle` could not be delimited — fail-closed" % DEBUG_OFFLOAD_REL
@@ -469,8 +707,53 @@ DEBUG_EXEC_SCOPE_MIN_ENTRIES = 2
 
 
 def _read_code(path):
+    """Comment-view of a file. An unlexable file RAISES KotlinLexError, and every
+    caller turns that into a violation: a tree the lexer cannot read must not
+    read as clean (fail-closed, not fail-open)."""
     with open(path, encoding="utf-8", errors="replace") as fh:
-        return strip_comments(fh.read())
+        return literal_view(fh.read())
+
+
+def _lex_problem(rel, exc):
+    return ("%s: cannot be tokenised (%s) — fail-closed: the hardening criteria "
+            "cannot read this file" % (rel, exc))
+
+
+def _scope_consumption_problems(handle, rel):
+    """R6: the caller's scope Map must REACH the RPC request.
+
+    `execScopeParams(sub, request.sessionId, request.cwd)` standing on its own
+    line keeps every anchor the old criterion looked for — the shared scope
+    parse, the session id, the cwd — while nothing is written into `rpc.params`.
+    That is the audited witness: the forwarder computes the caller's scope and
+    throws it away, so the RPC side still rebuilds the request from a bare argv
+    (relative operands resolve against the guest root, a named session falls
+    back to the global arm).
+
+    The call is therefore read as DATAFLOW: its value (chained, or through one
+    local binding) must end up in `params.put/putAll`.
+    """
+    sites = list(re.finditer(r"\bexecScopeParams\s*\(", handle))
+    if not sites:
+        return ["%s: no execScopeParams(...) call — fail-closed" % rel]
+    out = []
+    for m in sites:
+        line_start = handle.rfind("\n", 0, m.start()) + 1
+        stmt = handle[line_start:expr_end(handle, m.start())]
+        if re.search(r"params\s*\.\s*(?:put|putAll)\s*\(", stmt):
+            continue
+        bound = re.match(r"\s*(?:val|var)\s+([A-Za-z_]\w*)", stmt)
+        ident = bound.group(1) if bound else None
+        if ident and re.search(
+            r"params\s*\.\s*(?:put|putAll)\s*\([^)\n]*\b%s\b" % re.escape(ident), handle
+        ):
+            continue
+        out.append(
+            "%s: the scope Map built by execScopeParams(...) is DISCARDED — it never reaches "
+            "`rpc.params`, so the forwarder relays a bare argv and the RPC side resets the "
+            "caller's cwd/session"
+        )
+    return out
 
 
 def scan_debug_exec_scope(root):
@@ -484,7 +767,10 @@ def scan_debug_exec_scope(root):
     rpc_path = os.path.join(root, DEBUG_RPC_REL)
     if not os.path.isfile(rpc_path):
         return ["%s: missing — cannot verify the exec entry-point scope" % DEBUG_RPC_REL]
-    rpc = _read_code(rpc_path)
+    try:
+        rpc = _read_code(rpc_path)
+    except KotlinLexError as exc:
+        return [_lex_problem(DEBUG_RPC_REL, exc)]
 
     entries = re.findall(r"\bfun\s+(handle\w+Exec)\s*\(", rpc)
     for anchor in DEBUG_EXEC_ENTRY_ANCHORS:
@@ -497,7 +783,7 @@ def scan_debug_exec_scope(root):
     for fn in entries:
         if fn in DEBUG_EXEC_DEVICE_LEVEL:
             continue
-        body = _fun_body(rpc, r"\bfun\s+%s\s*\(" % re.escape(fn))
+        body = _fun_body(rpc, fn)
         if body is None or "NativeOffloadRequest(" not in body:
             continue
         checked += 1
@@ -527,13 +813,18 @@ def scan_debug_exec_scope(root):
         return problems + [
             "%s: missing — cannot verify the session-scope forwarding" % DEBUG_OFFLOAD_REL
         ]
-    offload = _read_code(offload_path)
-    handle = _fun_body(offload, r"\boverride\s+fun\s+handle\s*\(")
+    try:
+        offload = _read_code(offload_path)
+    except KotlinLexError as exc:
+        return [_lex_problem(DEBUG_OFFLOAD_REL, exc)]
+    handle = _fun_body(offload, "handle")
     if handle is None:
         problems.append(
             "%s: `override fun handle` could not be delimited — fail-closed" % DEBUG_OFFLOAD_REL
         )
-    elif DEBUG_EXEC_SCOPE_INJECT not in handle:
+    else:
+        problems.extend(_scope_consumption_problems(handle, DEBUG_OFFLOAD_REL))
+    if handle is not None and DEBUG_EXEC_SCOPE_INJECT not in handle:
         problems.append(
             "%s: the forwarder no longer adds the caller's scope to a pass-through exec call (%s gone) "
             "— the RPC side rebuilds the request without a session or cwd"
@@ -556,37 +847,12 @@ def scan_debug_exec_scope(root):
     return problems
 
 
-_CODE_TOKEN_RE = re.compile(
-    r'"""(?:\\.|[^\\])*?"""'          # triple-quoted string (may span lines)
-    r'|"(?:\\.|[^"\\\n])*"'           # single-line string
-    r"|'(?:\\.|[^'\\\n])*'"           # char literal
-    r"|//[^\n]*"                      # line comment
-    r"|/\*.*?\*/"                     # block comment, terminated
-    r"|/\*.*",                        # unterminated block comment (to EOF)
-    re.S,
-)
-
-
-def strip_comments(text):
-    """Blank out // and /* */ comment content, keeping line structure.
-
-    [meta-audit-1024 M6] Literals are tokenised first. The line-oriented version
-    this replaces opened a BLOCK comment on the `/*` inside a string: the import
-    handler's `"video/*"` / `"image/*"` MIME lookup blanked the following 67
-    lines — values, contentResolver.insert, openOutputStream and the
-    `FileInputStream(src)` read itself — so every criterion reading this file
-    (R1 included) was judging a handler with half its body missing. The
-    replacement keeps every newline, so line numbers are unchanged.
-    """
-    def repl(m):
-        s = m.group(0)
-        if s.startswith("//"):
-            return ""
-        if s.startswith("/*"):
-            return "\n" * s.count("\n")
-        return s
-
-    return _CODE_TOKEN_RE.sub(repl, text)
+# The comment-view helper (`literal_view`) and the "blank the literal interiors"
+# view (`code_view`) now come from the shared lexer / value-flow module: one
+# state machine for every gate in this wave. Deleted here: the local
+# `_CODE_TOKEN_RE` scanner (it tokenised literals first — the M6 fix — but knew
+# nothing about nested `/* /* */ */`, `${…}` templates or backticked
+# identifiers) and its `literal_view` body, which shadowed the shared one.
 
 
 def tainted_from_args(text):
@@ -630,7 +896,7 @@ def tainted_from_args(text):
         if a:
             name, expr = a.group(1), a.group(2)
             if any(re.search(r"\b%s\b" % re.escape(t), expr) for t in tainted):
-                tainted[name] = "resolved" if RESOLVER_CALL_RE.search(expr) else "raw"
+                tainted[name] = "resolved" if _value_resolves(expr) else "raw"
                 snapshot[name] = tainted[name]
         per_line[line] = snapshot
         # A scope that closed on this line drops the `it` binding again.
@@ -683,8 +949,12 @@ def scan_bare_file(rel, text):
                     continue  # covered by the identifier / ?.let criteria above
                 if re.search(r'get\(\s*"(?:%s)"' % ARG_NAMES, arg_s):
                     continue  # covered by FILE_DIRECT_RE
-                if RESOLVER_CALL_RE.search(arg_s):
-                    continue  # sanitised inline: File(resolvePathForSession(...))
+                if _value_resolves(arg_s):
+                    # The VALUE must be the resolver's result. A resolver call
+                    # glued into a discarding scope (`File(raw.also { resolve(
+                    # …) })`) keeps its RECEIVER, so the open still gets the raw
+                    # host path — the audited R1 witness.
+                    continue
                 hits = sorted(
                     t for t, state in snapshot.items()
                     if state == "raw" and re.search(r"\b%s\b" % re.escape(t), arg_s)
@@ -810,7 +1080,10 @@ def scan_photos_import_sanitisation(root):
     if not os.path.isfile(path):
         return ["%s: missing — cannot verify that the import path sanitises the guest "
                 "path before reading it as a host file (fail-closed)" % rel]
-    code = _read_code(path)
+    try:
+        code = _read_code(path)
+    except KotlinLexError as exc:
+        return [_lex_problem(rel, exc)]
     entries = [
         (name, body)
         for name, body in _fun_declarations(code)
@@ -829,20 +1102,44 @@ def scan_photos_import_sanitisation(root):
                 "happen in the entry, not merely exist elsewhere in the file)" % (rel, name)
             )
             continue
-        bound = re.search(
-            r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]*)?=\s*[^\n]*"
-            + RESOLVER_CALL_RE.pattern, body)
-        if bound:
-            ident = re.escape(bound.group(1))
-            used = any(
-                re.search(r"\b%s\b" % ident, line) and HOST_OPEN_TOKEN_RE.search(line)
-                for line in body.splitlines()
+        # The binding must RECEIVE the resolver's result. `val src = File(raw.also
+        # { resolvePathForSession(...) })` matches every textual anchor (a `val`
+        # on a line mentioning the resolver, `src` opened afterwards) while `src`
+        # is the raw host path — the audited R7 witness. So the RHS is read as a
+        # VALUE, not as a line: a discarding scope keeps its receiver.
+        resolved = []
+        for m in re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]*)?=", body):
+            expr = _init_expr(body, m.end())
+            if _value_resolves(expr):
+                resolved.append(m.group(1))
+        # `FileInputStream(PRootKernel.resolvePathForSession(...))` — an inline
+        # resolver result is a flow too, and it is judged the same way: the OPEN
+        # call's OWN argument must be the resolver's result. Two earlier shapes
+        # of this check were wrong and both hid live witnesses — a bare
+        # concatenation of the token alternation degenerated into "any host open
+        # token anywhere in the body", and a grouped `[^\n]*` version accepted
+        # `File(raw.also { resolve(…) })`, whose argument is still raw.
+        inline = False
+        for call in HOST_OPEN_CALL_RE.finditer(body):
+            args = call_args(body, call.end() - 1)
+            if not args:
+                continue
+            if _value_resolves(body[args[0][0]:args[0][1]]):
+                inline = True
+                break
+        if not resolved and not inline:
+            problems.append(
+                "%s: `%s` calls a session-scoped resolver but the RESOLVED value is "
+                "discarded — no binding receives it (a discarding scope such as `.also {}` "
+                "keeps its receiver), so the file that gets opened is the raw host path"
+                % (rel, name)
             )
-        else:
-            # `File(PRootKernel.resolvePathForSession(...))` — inline is a flow too.
-            used = re.search(
-                HOST_OPEN_TOKEN_RE.pattern + r"[^\n]*" + RESOLVER_CALL_RE.pattern, body
-            ) is not None
+            continue
+        used = inline or any(
+            re.search(r"\b%s\b" % re.escape(ident), line) and HOST_OPEN_TOKEN_RE.search(line)
+            for ident in resolved
+            for line in body.splitlines()
+        )
         if not used:
             problems.append(
                 "%s: `%s` resolves the guest path but its result never reaches a host open "
@@ -870,7 +1167,10 @@ def derive_sanitizer_names(root):
     """
     names = set()
     for path, _rel in _main_src_files(root):
-        code = _read_code(path)
+        try:
+            code = _read_code(path)
+        except KotlinLexError:
+            continue  # no name enters the set ⇒ no call site may hide behind it
         for m in FUN_DECL_RE.finditer(code):
             body = _brace_body(code, m.end())
             if body and has_full_hardening(body):
@@ -878,21 +1178,35 @@ def derive_sanitizer_names(root):
     return names
 
 
+def _live_has(window, pattern):
+    """Does [pattern] occur on a REACHABLE path of [window]?
+
+    Presence is not hardening: `if (false) IntentSanitizer.sanitize(this, ctx)`
+    keeps the sanitizer call in the statement window (and every other textual
+    anchor of the block) while the intent is dispatched unsanitised — the
+    audited R2 witness. Every criterion below is therefore routed through one
+    guard judgement (`path_feasible`: the enclosing `if`/`when` conditions must
+    be able to hold), so a new spelling of "dead branch" cannot pick its own
+    bypass.
+    """
+    return bool(live_positions(window, pattern))
+
+
 def _parse_uri_hardening_missing(window, sanitizer_names):
     """Criteria one `Intent.parseUri(...)` statement must satisfy."""
     missing = []
-    if not SCHEME_NORMALISE_RE.search(window):
+    if not _live_has(window, SCHEME_NORMALISE_RE.pattern):
         missing.append("scheme normalisation (`Intent.parseUri` matches `intent:` case-sensitively)")
     for name in sorted(sanitizer_names):
-        if re.search(r"\b%s\s*\(" % re.escape(name), window):
+        if _live_has(window, r"\b%s\s*\(" % re.escape(name)):
             return missing
-    if "removeFlags(" not in window:
+    if not _live_has(window, r"removeFlags\s*\("):
         missing.append("removeFlags(...)")
     for flag in GRANT_FLAGS:
-        if flag not in window:
+        if not _live_has(window, flag):
             missing.append(flag)
     for label, pattern in R2_STRIPS:
-        if not re.search(pattern, window):
+        if not _live_has(window, pattern):
             missing.append(label)
     return missing
 
@@ -943,7 +1257,11 @@ def scan_intent_uri_scope(root, sanitizer_names=None, skip_rels=()):
     stats = {"sites": 0, "consumers": 0, "fallbacks": 0}
     skip = set(skip_rels)
     for path, rel in _main_src_files(root):
-        code = _read_code(path)
+        try:
+            code = _read_code(path)
+        except KotlinLexError as exc:
+            problems.append(_lex_problem(rel, exc))
+            continue
         site_problems = []
         if "Intent.parseUri(" in code:
             stats["sites"] += code.count("Intent.parseUri(")
@@ -1000,7 +1318,11 @@ def check_tree(root, verbose=True):
             continue
         path = os.path.join(offload_dir, name)
         rel = os.path.join(OFFLOAD_REL, name)
-        code = _read_code(path)
+        try:
+            code = _read_code(path)
+        except KotlinLexError as exc:
+            problems.append(_lex_problem(rel, exc))
+            continue
         scanned += 1
         covered.add(rel)
         problems.extend(scan_bare_file(rel, code))
@@ -1244,6 +1566,21 @@ def selftest():
     # passes. Expected problem counts are literals: an arm that fires TWO
     # criteria is reported as a failure, so "only red on its own criterion" is
     # mechanically enforced rather than eyeballed.
+    # batch5 / B5-t10 witness (G03-A1): the resolver call is GLUED onto the raw
+    # value inside a discarding scope. `.also {}` keeps its receiver, so the
+    # argument of File(…) is still the raw host path while every textual marker
+    # of "sanitised" is present.
+    DIRTY_RESOLVER_IN_ALSO = """package com.rikkaminis.app.sandbox.offload
+
+class AOffloadHandler(private val context: Context) {
+    private fun handleImport(args: OffloadArgs, request: NativeOffloadRequest): String {
+        val rawPath = args.get("path") ?: return "required"
+        val src = File(rawPath.also { PRootKernel.resolvePathForSession(request.sessionId, rawPath, context) })
+        return src.readText()
+    }
+}
+
+"""
     a08_arms = [
         ("A08 dirty: global resolver used as the sanitizer",
          DIRTY_GLOBAL_AS_SANITIZER, 1, "without passing through a guest→host resolver"),
@@ -1251,6 +1588,8 @@ def selftest():
          DIRTY_UNLISTED_FLAG, 1, "without passing through a guest→host resolver"),
         ("A08 dirty: File(it) inside ?.let {}",
          DIRTY_LET_IT, 1, "inside `?.let {}`"),
+        ("A08 dirty (batch5 witness): resolver glued into `.also {}` — File arg stays raw",
+         DIRTY_RESOLVER_IN_ALSO, 1, "without passing through a guest→host resolver"),
         ("A08 clean: ?.let {} with the session resolver",
          CLEAN_LET_RESOLVED, 0, None),
     ]
@@ -1271,7 +1610,7 @@ def selftest():
     if a08_failures:
         print("❌ selftest failed: %s" % ", ".join(a08_failures))
         return 1
-    print("A08_R1_BLINDSPOT_SELFTEST=PASS (4 fixtures: 3 violations caught, 1 clean tree green)")
+    print("A08_R1_BLINDSPOT_SELFTEST=PASS (5 fixtures: 4 violations caught, 1 clean tree green)")
 
     # ── [deep-audit-1041 FIX-A6] R2 blind-spot fixtures ────────────────────
     # R2 used to read grants/clipData only, while this module's docstring had
@@ -1379,6 +1718,16 @@ object MediaPlayerManager {
 }
 """
 
+    # batch5 / B5-t10 witness (G03-A3): the session id is COMPUTED and then
+    # discarded (`.also` keeps the `null` receiver), and the path half keeps the
+    # resolver call glued onto the literal instead of using its result.
+    PLAYER_HANDLER_SESSION_DISCARDED = PLAYER_HANDLER_OK.replace(
+        'MediaPlayerManager.play("s", resolved, chatSessionId = request.sessionId, context = context)',
+        'MediaPlayerManager.play("s", resolved, chatSessionId = null.also { request.sessionId }, context = context)')
+    PLAYER_HANDLER_PATH_DISCARDED = PLAYER_HANDLER_OK.replace(
+        'MediaPlayerManager.play("s", resolved, chatSessionId = request.sessionId, context = context)',
+        'MediaPlayerManager.play("s", "y.wav".also { resolveMaybeRelative("y.wav", request.cwd) }, chatSessionId = request.sessionId, context = context)')
+
     def player_fixture_root(handler_src, manager_src):
         root = tempfile.mkdtemp(prefix="offload-gate-selftest-player-")
         for rel, content in ((PLAYER_HANDLER_REL, handler_src), (PLAYER_MANAGER_REL, manager_src)):
@@ -1392,6 +1741,10 @@ object MediaPlayerManager {
         ("R3 dirty: handler never uses request.sessionId", PLAYER_HANDLER_NO_SESSION, PLAYER_MANAGER_OK, False),
         ("R3 dirty: handler no resolveMaybeRelative", PLAYER_HANDLER_NO_RELATIVE, PLAYER_MANAGER_OK, False),
         ("R3 dirty: play() bypasses resolvePathForSession", PLAYER_HANDLER_OK, PLAYER_MANAGER_NO_SESSION, False),
+        ("R3 dirty (batch5 witness): chatSessionId computed then discarded (`.also`)",
+         PLAYER_HANDLER_SESSION_DISCARDED, PLAYER_MANAGER_OK, False),
+        ("R3 dirty (batch5 witness): play path is the raw literal with the resolver glued on",
+         PLAYER_HANDLER_PATH_DISCARDED, PLAYER_MANAGER_OK, False),
         ("R3 clean: cwd-join + session-scoped play", PLAYER_HANDLER_OK, PLAYER_MANAGER_OK, True),
     ]
     player_failures = []
@@ -1410,7 +1763,7 @@ object MediaPlayerManager {
     if player_failures:
         print("❌ selftest failed: %s" % ", ".join(player_failures))
         return 1
-    print("PLAYER_PATH_SELFTEST=PASS (4 fixtures: 3 violations caught, 1 clean tree green)")
+    print("PLAYER_PATH_SELFTEST=PASS (6 fixtures: 5 violations caught, 1 clean tree green)")
 
     # ── [da1034-A2 ISSUE-03] R4: Shizuku privileged path fixtures ──────────
     # One dirty arm per decision the criterion makes: the raw operand reaching
@@ -1472,6 +1825,8 @@ class ShizukuOffloadHandler(private val context: Context) : NativeOffloadHandler
         ("R4 clean: resolved operands + refusal on null", None, True),
         ("R4 dirty: `file ls` hands the raw `path` to the command",
          ("cmd.add(host)", "cmd.add(path)"), False),
+        ("R4 dirty (batch5 witness): the operand is an EXPRESSION over the raw path",
+         ("cmd.add(host)", "cmd.add(path.trim())"), False),
         ("R4 dirty: `cp` receives the raw src/dst",
          ('arrayOf("cp", "-r", srcHost, dstHost)', 'arrayOf("cp", "-r", src, dst)'), False),
         ("R4 dirty: no fail-closed refusal when the path does not resolve",
@@ -1500,7 +1855,7 @@ class ShizukuOffloadHandler(private val context: Context) : NativeOffloadHandler
     if shizuku_failures:
         print("❌ selftest failed: %s" % ", ".join(shizuku_failures))
         return 1
-    print("SHIZUKU_PATH_SELFTEST=PASS (5 fixtures: 4 violations caught, 1 clean tree green)")
+    print("SHIZUKU_PATH_SELFTEST=PASS (6 fixtures: 5 violations caught, 1 clean tree green)")
 
     # ── [dv16-A03] R5: debug RPC session-path fixtures ─────────────────────
     # One dirty arm per decision the criterion makes: the bare global resolver
@@ -1549,6 +1904,18 @@ class DebugOffloadHandler(private val context: Context) : NativeOffloadHandler {
 }
 """
 
+    # batch5 / B5-t10 witness (G03-A5): the resolver is handed a literal `null`
+    # session id — the `sessionId` local stays declared and every "is it
+    # session-scoped?" textual marker survives, but every session's tree is in
+    # scope.
+    DEBUG_RPC_NULL_SESSION = DEBUG_RPC_OK.replace(
+        "    private fun handleReadFile(params: JSONObject): JSONObject {\n"
+        "        val sessionId = params.optString(\"sessionId\", \"\").ifBlank { null }\n"
+        "        val hostFile = PRootKernel.resolvePathForSession(sessionId, path, context)",
+        "    private fun handleReadFile(params: JSONObject): JSONObject {\n"
+        "        val sessionId = params.optString(\"sessionId\", \"\").ifBlank { null }\n"
+        "        val hostFile = PRootKernel.resolvePathForSession(null, path, context)", 1)
+
     def debug_fixture_root(rpc_text, offload_text=None, rpc_present=True):
         root = tempfile.mkdtemp(prefix="offload-gate-selftest-debug-")
         if rpc_present:
@@ -1566,6 +1933,9 @@ class DebugOffloadHandler(private val context: Context) : NativeOffloadHandler {
     debug_arms = [
         ("R5 clean: session-scoped handlers + id forwarded", DEBUG_RPC_OK, DEBUG_OFFLOAD_OK,
          None, True),
+        ("R5 dirty (batch5 witness): the resolver gets a literal `null` session id",
+         DEBUG_RPC_NULL_SESSION, DEBUG_OFFLOAD_OK,
+         "literal `null` as the session id", False),
         ("R5 dirty: a handler keeps a bare global resolveHostPath",
          DEBUG_RPC_OK.replace(
              "        val hostFile = PRootKernel.resolvePathForSession(sessionId, path, context)\n"
@@ -1698,6 +2068,10 @@ internal fun execScopeParams(sub: String, sessionId: String?, cwd: String?): Map
 }
 """
 
+    # batch5 / B5-t10 witness (G03-A6): the scope Map is built and thrown away.
+    R6_OFFLOAD_DISCARD = R6_OFFLOAD_OK.replace(
+        R6_INJECT, "        execScopeParams(sub, request.sessionId, request.cwd)\n")
+
     def _patch_body(text, fn, old, new):
         """Replace [old] with [new] inside the `fn` body only (fixtures have one member per brace level)."""
         start = text.index("fun %s(" % fn)
@@ -1724,6 +2098,8 @@ internal fun execScopeParams(sub: String, sessionId: String?, cwd: String?): Map
     exec_arms = [
         ("R6 clean: scope-parsed entries + forwarding forwarder",
          R6_RPC_OK, R6_OFFLOAD_OK, None, True),
+        ("R6 dirty (batch5 witness): the scope Map is computed and DISCARDED",
+         R6_RPC_OK, R6_OFFLOAD_DISCARD, "is DISCARDED", False),
         ('R6 dirty: a scope-taking entry hardcodes cwd = "/"',
          _patch_body(R6_RPC_OK, "handleModelUseExec", "cwd = scope.cwd", 'cwd = "/"'),
          R6_OFFLOAD_OK, "still hardcodes cwd", False),
@@ -1789,8 +2165,8 @@ internal fun execScopeParams(sub: String, sessionId: String?, cwd: String?): Map
     if debug_failures:
         print("❌ selftest failed: %s" % ", ".join(debug_failures))
         return 1
-    print("DEBUG_SESSION_PATH_SELFTEST=PASS (6 fixtures + 2 fail-closed: "
-          "5 violations caught, 1 clean tree green)")
+    print("DEBUG_SESSION_PATH_SELFTEST=PASS (7 fixtures + 2 fail-closed: "
+          "6 violations caught, 1 clean tree green)")
     if exec_failures:
         print("❌ selftest failed: %s" % ", ".join(exec_failures))
         return 1
@@ -1849,6 +2225,13 @@ class F9OpenHandler(private val context: Context) {
     private fun dispatch(intent: Intent) = context.startActivity(intent)
 }
 """
+
+    # batch5 / B5-t10 witness (G03-A2): the shared sanitizer is CALLED, but from
+    # a branch that can never run — the statement window is textually complete
+    # and the intent is dispatched unsanitised.
+    F9_OFFLOAD_DEAD_SANITIZER = F9_OFFLOAD_CONSUMER.replace(
+        "            F9IntentSanitizer.sanitize(this, context)",
+        "            if (false) F9IntentSanitizer.sanitize(this, context)")
 
     F9_BROWSER_CONSUMER = """package com.rikkaminis.app.ui.browser
 
@@ -2002,6 +2385,10 @@ object F9NewConsumer {
          {F9_SANITIZER_REL: F9_SANITIZER_GUTTED,
           F9_OFFLOAD_REL: F9_OFFLOAD_CONSUMER,
           F9_BROWSER_REL: F9_BROWSER_CONSUMER}, 2, "FLAG_GRANT_READ_URI_PERMISSION"),
+        ("F9 dirty (batch5 witness): the sanitizer call sits in a DEAD branch",
+         {F9_SANITIZER_REL: F9_SANITIZER,
+          F9_OFFLOAD_REL: F9_OFFLOAD_DEAD_SANITIZER,
+          F9_BROWSER_REL: F9_BROWSER_CONSUMER}, 1, "Intent.parseUri without hardening"),
         ("F9 clean: inline hardening at the call site (no shared helper)",
          {F9_OFFLOAD_REL: F9_INLINE_CONSUMER}, 0, None),
     ]
@@ -2142,6 +2529,16 @@ class PhotosOffloadHandler(private val context: Context) : NativeOffloadHandler 
         val src = File(rawPath.trim())""",
     )
 
+    # batch5 / B5-t10 witness (G03-A1, R7 half): the resolver is still called —
+    # inside `.also {}` on the raw value — so `src` is the RAW host path and the
+    # import opens it. S1 (resolver called) passes; S2 (its RESULT is opened)
+    # must fail.
+    M6_PHOTOS_IMPORT_ALSO_WITNESS = M6_PHOTOS_IMPORT_OK.replace(
+        """        val src = PRootKernel.resolvePathForSession(request.sessionId, guestPath, context)
+            ?: return NativeOffloadResult(1, "no_file")""",
+        """        val src = File(rawPath.also { PRootKernel.resolvePathForSession(request.sessionId, guestPath, context) })""",
+    )
+
     M6_PHOTOS_NO_ENTRY = """package com.rikkaminis.app.sandbox.offload
 
 class PhotosOffloadHandler(private val context: Context) : NativeOffloadHandler {
@@ -2175,6 +2572,8 @@ class PhotosOffloadHandler(private val context: Context) : NativeOffloadHandler 
          "photos", M6_PHOTOS_IMPORT_NO_RESOLVER, 1, "never resolves the guest path"),
         ("M6 dirty: resolver present but its result never reaches the read",
          "photos", M6_PHOTOS_IMPORT_RESULT_DROPPED, 1, "never reaches a host open point"),
+        ("M6 dirty (batch5 witness): resolver glued into `.also {}` — the RAW value is opened",
+         "photos", M6_PHOTOS_IMPORT_ALSO_WITNESS, 1, "RESOLVED value is discarded"),
         ("M6 fail-closed: no import entry can be derived (renamed or moved)",
          "photos", M6_PHOTOS_NO_ENTRY, 1, "no import entry could be derived"),
         ("M6 fail-closed: PhotosOffloadHandler.kt missing",
