@@ -276,9 +276,25 @@ CI 逐项读数见 §5。
 
 ## ⑤ CI
 
-> 本节数字在 CI 出结论后回填（绝不预写占位）。
+分支 `fix/b5-compact-entryid` 手动 dispatch（`on: push` 只绑 main，分支必须 dispatch）。
 
-（待回填：run id / job id / attempt / head_sha 三方一致性 / `Summary: 112 passed, 0 failed` 计数 / `ALL 344 CASES PASS` 计数 / ` e: ` 计数 / 含 `FAILED` 的行是否全为 PASSED 用例名 / 唯一 skipped 步骤）
+| 项 | 读数 |
+|---|---|
+| run / job | `40203205487` / `121198635982`，attempt **1**，conclusion **success** |
+| head_sha 三方一致 | API `runs[].head_sha` = `5443e9f5ae28bc0ccdb089c1f8b7590a4cf206e4` = 本地 `git rev-parse HEAD`（逐字符） |
+| 日志规模 | 1,486,117 B / 17,850 行 |
+| 步骤 | 26 步，唯一非 success = **步骤 23 `Publish to Releases` skipped**（main 门控，分支构建预期） |
+| 门套件 | 门头 **112** 条，编号 1..112 互异，`/112` 总数标记唯一，**门名 112 互异** |
+| 门汇总 | `Summary: 112 passed, 0 failed` 恰 **1** 条（带框线前缀）；其余 `Summary: N passed, 0 failed` 均为子套件（5/14/15/25/28/33/36…） |
+| 夹具 | `ALL 344 CASES PASS` 恰 **1** 条 |
+| Kotlin 编译 | ` e: ` 命中 **0** |
+| 含 `FAILED` 的行 | **6** 条，逐条核过**全是 PASSED 用例名子串**（`slot denied produces FAILED without calling provider` / `reason PERSISTENCE_FAILED maps to persistence_failed` / `phase FAILED maps to Failed` / `terminal FAILED maps to Failed` / `reason EXECUTION_FAILED maps to all_fallbacks_exhausted` / `the fixed tail still reaches a legal FAILED terminal`），无游离失败 |
+| 本支门自证 | `COMPACT_DECISION_GATE_SELFTEST=PASS` 恰 **1**；`ENTRY_ID_RENAME_INTEGRITY_SELFTEST=PASS` 恰 **1** —— 25 臂 / 17 夹具在 CI 里有人见证（非只在本地） |
+| 本支门头 | `Compact decision gate coverage (ISSUE-04/05)`、`E/ISSUE-05 entry id rename integrity` 均在册且绿 |
+
+结论：**分支 CI 绿 = 本支确定性停止节点**（门 112 / 夹具 344 与基线一致 ⇒ 本支未新增/删除门，只加固判据）。未合并 main（起手权在用户/主会话）。
+
+补充说明：本支先于 `868f7029` 推了一版，CI run `40202023409` 因再次 push 被 **cancelled**（非失败）；最终证书对应 `5443e9f5a`。
 
 ---
 
