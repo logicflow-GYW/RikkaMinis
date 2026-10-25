@@ -59,6 +59,10 @@ import shutil
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _kotlin_ast as _ast          # noqa: E402  (shared Kotlin primitives)
+import _kotlin_lexer as _lex        # noqa: E402  (shared Kotlin lexer)
+
 GUARD = "isLinuxPathUnderReadOnlyMount("
 
 # Filled by `functions()` on every call: declarations the parser could not follow
@@ -99,9 +103,14 @@ WRITE_CALL = re.compile(
     r"|FileOutputStream\(|Files\.(copy|write|createDirectories)\("
 )
 
+# [wide4 parser-death] …including extension declarations (`fun ChatViewModel.f(`)
+# and generic ones (`fun <T> f(`). Without the optional receiver the parser never
+# saw those functions at all, so the writes inside them belonged to no parsed
+# body — invisible to criterion 1 and, before the orphan audit, silently skipped.
 FUN_DECL = re.compile(
     r"^\s*(?:(?:internal|private|public|protected|override|suspend|inline|operator|"
-    r"tailrec|open|abstract|final|external)\s+)*fun\s+(\w+)\s*[(<]"
+    r"tailrec|open|abstract|final|external)\s+)*fun\s+(?:<[^>\n]*>\s*)?"
+    r"(?:[\w.?!]+\s*\.\s*)?(\w+)\s*[(<]"
 )
 
 # rel path -> (reason, [(evidence file rel or None for "this file", regex, min hits)])
@@ -442,47 +451,15 @@ def constant_truth(cond):
     `false && guard(x)` / `x || true` keep every identifier a substring-based
     criterion looks for while pinning the decision — the single most common
     way a witness deleted a guard's effect without deleting the call.
+
+    [wide4 family-hole] The local folder this replaced knew the two bare
+    literals and `!`, so `if (0 == 1 && isLinuxPathUnderReadOnlyMount(p))` (the
+    witness) and `if (1 > 2 || …)` read as undecidable and the guard counted as
+    a live refusal. `_kotlin_ast.const_bool` folds `!`, `==`/`!=` over literals
+    and short-circuits `&&`/`||` the way Kotlin does; an unknown operand stays
+    None — never a silent True.
     """
-    s = cond.strip()
-    while s.startswith("(") and s.endswith(")"):
-        depth, ok, close_at = 0, True, -1
-        for i, ch in enumerate(s):
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
-                if depth == 0:
-                    close_at = i
-                    break
-        if close_at != len(s) - 1:
-            ok = False
-        if not ok:
-            break
-        s = s[1:-1].strip()
-    ors = split_top(s, ("||",))
-    if len(ors) > 1:
-        vals = [constant_truth(p) for p in ors]
-        if any(v is True for v in vals):
-            return True
-        if all(v is False for v in vals):
-            return False
-        return None
-    ands = split_top(s, ("&&",))
-    if len(ands) > 1:
-        vals = [constant_truth(p) for p in ands]
-        if any(v is False for v in vals):
-            return False
-        if all(v is True for v in vals):
-            return True
-        return None
-    if s == "true":
-        return True
-    if s == "false":
-        return False
-    if s.startswith("!"):
-        inner = constant_truth(s[1:])
-        return None if inner is None else (not inner)
-    return None
+    return _ast.const_bool(cond)
 
 
 def alias_names(text, seed, hops=2):
@@ -506,33 +483,255 @@ def alias_names(text, seed, hops=2):
     return names
 
 
-def decision_branches(text, names, terminators):
-    """[(cond, body_start, body_end, body)] for branches keyed on [names].
+RET_AT_RE = re.compile(r"^return\s*@\s*([A-Za-z_]\w*)")
+
+
+def block_label(text, open_idx):
+    """Name of the lambda/call that owns the `{` at [open_idx] (`X {` / `X(…) {`).
+
+    None when the brace is not a labelled lambda (`if`, `else`, `try`, `= {`).
+    """
+    j = open_idx - 1
+    while j >= 0 and text[j] in " \t\r\n":
+        j -= 1
+    if j < 0:
+        return None
+    if text[j] == ")":
+        depth = 0
+        k = j
+        while k >= 0:
+            if text[k] == ")":
+                depth += 1
+            elif text[k] == "(":
+                depth -= 1
+                if depth == 0:
+                    break
+            k -= 1
+        if k < 0:
+            return None
+        j = k - 1
+        while j >= 0 and text[j] in " \t\r\n":
+            j -= 1
+    if j < 0 or not (text[j].isalnum() or text[j] == "_"):
+        return None
+    end = j + 1
+    while j >= 0 and (text[j].isalnum() or text[j] in "_."):
+        j -= 1
+    return text[j + 1:end].split(".")[-1]
+
+
+def enclosing_label_blocks(text, pos):
+    """[(label, block_end)] for every brace block enclosing [pos], inner first."""
+    stack = []
+    for i in range(min(pos, len(text))):
+        ch = text[i]
+        if ch == "{":
+            stack.append(i)
+        elif ch == "}" and stack:
+            stack.pop()
+    out = []
+    for open_idx in reversed(stack):
+        end = balanced_block(text, open_idx)
+        out.append((block_label(text, open_idx), end if end > 0 else len(text)))
+    return out
+
+
+def branch_terminates(text, body_start, body_end, sink, terminators, labels=None):
+    """Does this branch body leave control so that [sink] never runs?
+
+    [wide4 family-hole] `if (<literal-false> && guard) { return … }` was one hole
+    (closed by `constant_truth`); this is the other: an if-statement whose body
+    holds the terminators' SPELLING but not their effect — an empty `{ }`, or a
+    nested lambda that returns out of ITSELF:
+
+        if (isLinuxPathUnderReadOnlyMount(p)) { }
+        if (replay) run { return@run }        // frame still applied
+
+    Termination is decided statement by statement at the branch body's own
+    depth, and a labelled `return@X` only counts when X names a block that still
+    contains [sink] — `return@collect` skips the rest of the collector,
+    `return@run` returns from a lambda that is already finished. [labels], when
+    given, additionally pins which label is allowed to count (the collector's
+    own), so `return@let` cannot impersonate it.
+    """
+    body = text[body_start:body_end]
+    inner = 0
+    if body.startswith("{"):
+        # `if_branches` hands back the braces too; the statements live inside.
+        inner = 1
+        body = body[1:]
+        if body.endswith("}"):
+            body = body[:-1]
+    for a, b in _ast.stmt_spans(body):
+        stmt = body[a:b].strip()
+        if not stmt:
+            continue
+        if not any(stmt.startswith(t) for t in terminators):
+            continue
+        if not stmt.startswith("return"):
+            return True  # `throw …` / `continue` — unconditional for this branch
+        m = RET_AT_RE.match(stmt)
+        if not m:
+            return True  # unlabelled: returns out of the function
+        label = m.group(1)
+        if labels is not None and label not in labels:
+            continue  # exits some inner helper lambda, not the frame
+        for lbl, end in enclosing_label_blocks(text, body_start + inner + a):
+            if lbl == label and end > sink:
+                return True  # exits a block that still held [sink]
+    return False
+
+
+def _if_chain_span(text, if_pos):
+    """(then_start, then_end, else_start, else_end) for the `if` at [if_pos]."""
+    m = re.match(r"if\s*\(", text[if_pos:])
+    if not m:
+        return None
+    op = if_pos + m.end() - 1
+    cl = match_paren(text, op)
+    if cl < 0:
+        return None
+    b = cl + 1
+    while b < len(text) and text[b] in " \t\r\n":
+        b += 1
+    if b < len(text) and text[b] == "{":
+        end = balanced_block(text, b)
+        te = end if end > 0 else len(text)
+    else:
+        eol = text.find("\n", b)
+        te = len(text) if eol < 0 else eol
+    k = te
+    while k < len(text) and text[k] in " \t\r\n":
+        k += 1
+    es = ee = None
+    if text.startswith("else", k):
+        k += 4
+        while k < len(text) and text[k] in " \t\r\n":
+            k += 1
+        es = k
+        if text.startswith("if", k):
+            sub = _if_chain_span(text, k)
+            if sub:
+                ee = sub[3] if sub[3] is not None else sub[1]
+            else:
+                ee = len(text)
+        elif k < len(text) and text[k] == "{":
+            end = balanced_block(text, k)
+            ee = end if end > 0 else len(text)
+        else:
+            eol = text.find("\n", k)
+            ee = len(text) if eol < 0 else eol
+    return (b, te, es, ee)
+
+
+def routes_around_write(body, carriers, sink):
+    """Is the write in the ELSE arm of an `if` keyed on the guard?
+
+    [wide4 family-hole] Not every refusal terminates the function. The model-use
+    path reports the refusal and keeps the JSON contract:
+
+        if (outputPath != null && isLinuxPathUnderReadOnlyMount(outputPath)) {
+            out.put("output_error", "… nothing was written")
+        } else if (outputPath != null) {
+            hostFile.writeBytes(data)          // ← only reachable when writable
+        }
+
+    That IS a guard: the write sits in the sibling arm, so it cannot run when the
+    predicate is true. A substring criterion cannot tell this apart from
+    `if (guard) { }` followed by an unconditional write, so the routing is
+    resolved structurally: the write must fall inside the else arm, and the
+    then arm must not write.
+    """
+    for m in re.finditer(r"\bif\s*\(", body):
+        cond_start = m.end()
+        cond_end = match_paren(body, cond_start - 1)
+        if cond_end < 0:
+            continue
+        cond = body[cond_start:cond_end]
+        if not any(re.search(r"\b%s\b" % re.escape(n), cond) for n in carriers):
+            continue
+        if in_dead_branch(body, cond_start):
+            continue
+        span = _if_chain_span(body, m.start())
+        if not span:
+            continue
+        ts, te, es, ee = span
+        if WRITE_CALL.search(body[ts:te]):
+            continue  # the guarded arm itself writes — not a refusal
+        if es is not None and ee is not None and es <= sink < ee:
+            return cond
+    return None
+
+
+def in_dead_branch(text, pos):
+    """True when [pos] sits inside an `if` body a literal decides false.
+
+    Without this, a guard inside `if (false) { if (guard) throw … }` still
+    "decides" — the inner condition is live, its enclosing block is not.
+    """
+    for cs, ce, bs, be in if_branches(text):
+        if bs <= pos < be and constant_truth(text[cs:ce]) is False:
+            return True
+    return False
+
+
+def decision_branches(text, names, terminators, sink=None, labels=None):
+    """[(cond, cond_start, cond_end, body_start, body_end, body)] keyed on [names].
 
     Returns only the branches where the decision is CONSUMED by a terminating
     statement (`return` / `throw` / `continue` / `return@label`) — the criterion
     the wide3 witnesses defeat by keeping the call and neutralising the branch.
+
+    [sink] is the offset the refusal has to protect (the write, or the frame
+    application); it decides which labelled returns actually skip it. [labels]
+    pins the accepted label (see `branch_terminates`).
     """
     out = []
     for cs, ce, bs, be in if_branches(text):
         cond = text[cs:ce]
         if not any(re.search(r"\b%s\b" % re.escape(n), cond) for n in names):
             continue
-        body = text[bs:be]
-        if not any(t in body for t in terminators):
+        if in_dead_branch(text, cs):
+            continue  # the deciding branch is itself unreachable
+        if not branch_terminates(text, bs, be, be if sink is None else sink,
+                                 terminators, labels):
             continue
-        out.append((cond, bs, be, body))
+        out.append((cond, cs, ce, bs, be, text[bs:be]))
     return out
 
 
-def functions(text):
-    """[(name, params, body)] for every `fun` declared in `text`.
+def _chain_continues(lines, k):
+    """Does the next non-blank line continue an EXPRESSION body?
+
+    [wide4 parser-death] `fun f(p: String): Int = run { … }` followed by
+    `    .let { … }` used to end at the `run { … }` line: bracket depth was back
+    to 0, so the chain line read as a new (unparseable) top-level statement and
+    the write inside it belonged to no function — criterion 1 never saw it, and
+    the "found >= 3 sites" floor kept the gate green. A chain / infix
+    continuation line keeps the expression open.
+    """
+    while k < len(lines) and not lines[k].strip():
+        k += 1
+    if k >= len(lines):
+        return False
+    s = lines[k].lstrip()
+    return s.startswith((".", "?", "&&", "||", "+", "->", "as ", "is "))
+
+
+def _parse_functions(text):
+    """[{name, params, body, start, end}] for every `fun` declared in `text`.
 
     Clears PARSE_FAILURES at entry, so the caller reads exactly the failures of
-    THIS call.
+    THIS call. `start`/`end` are character offsets of the body within `text`;
+    `scan()` audits the complement with them — a write call outside every
+    parsed body is a parse hole (fail-closed), not a site to skip.
     """
     del PARSE_FAILURES[:]
     lines = text.split("\n")
+    offs, acc = [], 0
+    for line in lines:
+        offs.append(acc)
+        acc += len(line) + 1
     out = []
     i = 0
     while i < len(lines):
@@ -554,6 +753,7 @@ def functions(text):
             if seen_open and paren <= 0:
                 break
             j += 1
+        j = min(j, len(lines) - 1)
         sig_text = "\n".join(sig)
         close = param_close(sig_text)
         params = sig_text[sig_text.find("(") + 1:close - 1] if close > 0 else ""
@@ -581,7 +781,7 @@ def functions(text):
             started = bool(tail.strip())
             k = j + 1
             while k < len(lines):
-                if started and depth <= 0:
+                if started and depth <= 0 and not _chain_continues(lines, k):
                     break
                 s = strip_strings(lines[k])
                 body.append(lines[k])
@@ -589,12 +789,15 @@ def functions(text):
                     started = True
                     depth += depth_of(s)
                 k += 1
+            start = offs[i] + max(close, 0)
+            end = offs[k - 1] + len(lines[k - 1]) if k > 0 else start
             if not started or depth != 0:
                 PARSE_FAILURES.append(
                     f"{name}: expression body could not be followed to its end "
                     f"(depth {depth}) — the criterion cannot see this function"
                 )
-            out.append((name, params, "\n".join(body)))
+            out.append({"name": name, "params": params, "body": "\n".join(body),
+                        "start": start, "end": end})
             i = k
             continue
         # Body: brace-balanced from the signature's last line.
@@ -608,9 +811,16 @@ def functions(text):
             if seen_brace and bal <= 0:
                 break
             k += 1
-        out.append((name, params, "\n".join(body)))
+        k = min(k, len(lines) - 1)
+        out.append({"name": name, "params": params, "body": "\n".join(body),
+                    "start": offs[j], "end": offs[k] + len(lines[k])})
         i = max(k, j) + 1
     return out
+
+
+def functions(text):
+    """[(name, params, body)] for every `fun` declared in `text`."""
+    return [(p["name"], p["params"], p["body"]) for p in _parse_functions(text)]
 
 
 def read(root, rel):
@@ -659,19 +869,49 @@ def scan(root):
             raw = open(full, encoding="utf-8", errors="replace").read()
             text = strip_comments(raw)
             files += 1
-            parsed = functions(text)
+            parsed = _parse_functions(text)
             # fail-closed: a `fun` the parser could not follow is a HOLE in the
             # criterion, not a function without a write. Silently dropping it is
             # exactly how the wide3 witness made a guarded write disappear.
             for why in PARSE_FAILURES:
                 violations.append(f"{rel}: {why}")
-            for name, params, body in parsed:
+            # …and the complement: a write call that belongs to NO parsed function
+            # is not "not a site", it is text the parser lost. [wide4]
+            # parser-death: truncating one expression body left the write inside
+            # it outside every function, and the tree stayed green (the site
+            # count merely dropped 8 → 7, still above the rot floor).
+            for w in WRITE_CALL.finditer(text):
+                if any(p["start"] <= w.start() < p["end"] for p in parsed):
+                    continue
+                line = text.count("\n", 0, w.start()) + 1
+                if any(why.startswith("parse:") for why in PARSE_FAILURES):
+                    continue
+                violations.append(
+                    f"{rel}:{line} — `{w.group(0).rstrip('(')}` belongs to no parsed "
+                    f"function body: the parser lost the enclosing declaration, so "
+                    f"criterion 1 cannot see this write (fail-closed)"
+                )
+            for item in parsed:
+                name, params, body = item["name"], item["params"], item["body"]
                 if not path_param_names(params):
                     continue
                 if not WRITE_CALL.search(body):
                     continue
                 checked += 1
+                write = WRITE_CALL.search(body)
                 if GUARD in body:
+                    # [wide4 family-hole] "the guard is called somewhere in this
+                    # body" is not a refusal — see `guard_decides`: an empty
+                    # branch, a branch without an exit and a nested `return@run`
+                    # all kept the call and refused nothing.
+                    live, dead = guard_decides(body, GUARD, sink=write.start())
+                    if live:
+                        continue
+                    violations.append(
+                        f"{rel}:{name}() — writes a host file from a path parameter; "
+                        f"the read-only-mount guard is present but never refuses "
+                        f"({dead if dead is not None else 'its branch does not exit'})"
+                    )
                     continue
                 if rel in EXEMPT:
                     reason, evidence = EXEMPT[rel]
@@ -975,7 +1215,7 @@ MOUNT_ROUTE = (
 )
 
 
-def guard_decides(body, needle):
+def guard_decides(body, needle, sink=None):
     """(live, dead_condition) — does `needle`'s value actually decide a refusal?
 
     wide3: the CALL being in front of the write is not the refusal. The witness
@@ -985,24 +1225,36 @@ def guard_decides(body, needle):
     that is reachable (`constant_truth(cond) is not False`) and that TERMINATES
     (`return`/`throw`). `return@launch` counts — the label form is the real
     shape inside a coroutine body.
+
+    [wide4 family-hole] Three more spellings kept every anchor and refused
+    nothing:
+
+      if (isLinuxPathUnderReadOnlyMount(p)) { }            // empty body
+      if (isLinuxPathUnderReadOnlyMount(p)) { log(p) }     // no exit
+      if (replay) run { return@run }                       // exits an inner lambda
+
+    The old code accepted the first two because it collected ANY `if` whose
+    CONDITION mentioned the needle (`found`), never asking what the body does,
+    and the third because `"return" in body` matched `return@run` three lines
+    deep in a nested block. `found` is gone: only `decision_branches` counts,
+    which now decides termination at the branch's own statement depth and only
+    accepts a labelled return that actually skips [sink] (the write).
     """
     name = needle[:-1] if needle.endswith("(") else needle
+    sink = len(body) if sink is None else sink
+    carriers = {name} | alias_names(body, name)
     live, dead = False, None
-    for m in re.finditer(re.escape(needle), body):
-        idx = m.start()
-        found = []
-        for cs, ce, _bs, _be in if_branches(body):
-            if cs <= idx < ce:
-                found.append(body[cs:ce])
-        carriers = {name} | alias_names(body, name)
-        found += [cond for cond, _bs, _be, _body in decision_branches(
-            body, carriers, ("return", "throw"))]
-        for cond in found:
-            if constant_truth(cond) is False:
-                if dead is None:
-                    dead = cond.strip()
-                continue
-            live = True
+    for cond, _cs, _ce, _bs, _be, _b in decision_branches(
+            body, carriers, ("return", "throw"), sink=sink):
+        if constant_truth(cond) is False:
+            if dead is None:
+                dead = cond.strip()
+            continue
+        live = True
+    if not live:
+        routed = routes_around_write(body, carriers, sink)
+        if routed is not None:
+            live, dead = True, None
     return live, dead
 
 
@@ -1070,7 +1322,7 @@ def check_guard_call_shape(root):
                 f"move it in front of it"
             )
         else:
-            live, dead = guard_decides(body, GUARD)
+            live, dead = guard_decides(body, GUARD, sink=write.start())
             if not live:
                 violations.append(
                     guard_message(f"{rel}:{fn}()", GUARD, dead, label))
@@ -1088,7 +1340,7 @@ def check_guard_call_shape(root):
                     f"refuse; move it in front of it"
                 )
             else:
-                live, dead = guard_decides(body, needle)
+                live, dead = guard_decides(body, needle, sink=write.start())
                 if not live:
                     violations.append(
                         guard_message(f"{rel}:{fn}()", needle, dead, label))
@@ -1119,7 +1371,7 @@ def check_guard_call_shape(root):
 def _rootfs_settlement(arms="settled", size="zeroed", repair_subscribes=True,
                        replay_gate=True, collect="present", repair_verdict=True,
                        repair_prior=True, settlement_stale_guard=True,
-                       replay_dead=False):
+                       replay_dead=False, replay_inner=False):
     """The B-02 subject: three lifecycle entry points, one failure terminal.
 
     [arms] settled — every `catch` delegates to the terminal (the shape the fix
@@ -1239,6 +1491,7 @@ def _rootfs_settlement(arms="settled", size="zeroed", repair_subscribes=True,
             "                val replay = isStaleInstallReplay(firstFrame, state, priorTerminal)\n"
             "                firstFrame = false\n"
             + ("                if (false && replay) return@collect\n" if replay_dead
+               else "                if (replay) run { return@run }\n" if replay_inner
                else "                if (replay) return@collect\n")
             + "                when (state) {\n"
             "                    is RootfsInstallState.Failed ->\n"
@@ -1553,6 +1806,9 @@ ROOTFS_SETTLEMENT_BODIES = {
     # wide3: the snapshot, the derived `replay` and the `return@collect` all stay;
     # only the branch's condition is pinned false.
     "replay_dead": _rootfs_settlement(replay_dead=True),
+    # wide4: the gate keeps `if (replay)` and a `return@…` — but the label
+    # belongs to an inner helper lambda, so the collector runs on.
+    "replay_inner": _rootfs_settlement(replay_inner=True),
     "collector_gone": _rootfs_settlement(collect="missing"),
     "repair_settles_on_boolean": _rootfs_settlement(repair_verdict=False),
     # [deep-audit-1043 B-01] the two halves of the inherited-terminal decision.
@@ -1781,6 +2037,40 @@ def _debug_rpc(shape="guard"):
         guard = RPC_GUARD_BODY.replace(
             "if (PRootKernel.isLinuxPathUnderReadOnlyMount(path))",
             "if (false && PRootKernel.isLinuxPathUnderReadOnlyMount(path))")
+    elif shape == "empty_guard":
+        # wide4: the branch is emptied. Call, position and function name all
+        # still say "guarded"; nothing refuses.
+        guard = ("        if (PRootKernel.isLinuxPathUnderReadOnlyMount(path)) {\n"
+                 "        }\n")
+    elif shape == "no_exit_guard":
+        # wide4: the branch logs and falls through — a post-mortem, not a guard.
+        guard = ("        if (PRootKernel.isLinuxPathUnderReadOnlyMount(path)) {\n"
+                 '            logging.log("refusing read-only path")\n'
+                 "        }\n")
+    elif shape == "const_guard":
+        # wide4: a comparison literal folds the condition to false.
+        guard = RPC_GUARD_BODY.replace(
+            "if (PRootKernel.isLinuxPathUnderReadOnlyMount(path))",
+            "if (0 == 1 && PRootKernel.isLinuxPathUnderReadOnlyMount(path))")
+    elif shape == "routed":
+        # control: refusing by ROUTING (report, then write only in the else arm)
+        # is a real refusal — the model-use shape.
+        return (
+            "package com.rikkaminis.app.debug\n"
+            "\n"
+            "class DebugRPCHandler {\n"
+            "    private fun handleWriteFile(params: JSONObject) {\n"
+            "        val path = params.optString(\"path\")\n"
+            "        val content = params.optString(\"content\")\n"
+            "        if (PRootKernel.isLinuxPathUnderReadOnlyMount(path)) {\n"
+            '            logging.log("refusing read-only path")\n'
+            "        } else if (path.isNotEmpty()) {\n"
+            "            val hostFile = PRootKernel.resolveHostPath(path) ?: File(path)\n"
+            "            hostFile.writeBytes(content.toByteArray())\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
     else:
         guard = RPC_GUARD_BODY
     fn = "handleWrite" if shape == "renamed" else "handleWriteFile"
@@ -2524,10 +2814,17 @@ def check_rootfs_progress_replay(root):
                 # snapshot, the derived `replay` and the `return@collect` all
                 # stayed, the skip did not.
                 carriers = {name} | alias_names(after_collect, name)
-                branches = decision_branches(
-                    after_collect, carriers, ("return", "continue"))
+                # Positions are `collector`-relative on purpose: the enclosing
+                # braces (`collect {` …) are what a labelled return has to exit,
+                # and a slice that starts AFTER the opening brace loses them.
+                branches = [br for br in decision_branches(
+                    collector, carriers, ("return", "continue"),
+                    # the collector's own label is the only `return@…` that
+                    # skips the frame; `return@let` / `return@run` do not
+                    labels={"collect"})
+                    if br[1] >= collects[0].end()]
                 live = []
-                for cond, _bs, _be, _body in branches:
+                for cond, _cs, _ce, _bs, _be, _body in branches:
                     if constant_truth(cond) is False:
                         if dead_gate is None:
                             dead_gate = cond.strip()
@@ -3086,6 +3383,64 @@ def selftest():
     # pinned false, so every replayed terminal is applied as a live event again.
     run("witness C11: a replay skip behind `false &&` is caught", True,
         "constantly false", settlement_shape="replay_dead")
+
+    # ── wide4 witnesses: one arm per falsified axis ─────────────────────────
+    # (family-hole) the guard keeps its name, its position and its own body
+    # text — only the BRANCH is emptied / made non-exiting, so every substring
+    # criterion still sees "guarded" while the write goes ahead.
+    run("w4-G1 an empty `if (guard) { }` branch refuses nothing", True,
+        "not consumed by a branch", rpc_shape="empty_guard")
+    run("w4-G2 a guard branch without an exit refuses nothing", True,
+        "not consumed by a branch", rpc_shape="no_exit_guard")
+    # …and the same empty branch at a CRITERION-1 site (a path-parameter write):
+    # "the guard is called somewhere in this body" used to be the whole check.
+    EMPTY_GUARD_CRIT1 = (
+        "package com.rikkaminis.app.sandbox.offload\n"
+        "\n"
+        "object EmptyGuard {\n"
+        "    fun saveGuest(outputPath: String, data: String) {\n"
+        "        if (PRootKernel.isLinuxPathUnderReadOnlyMount(outputPath)) {\n"
+        "        }\n"
+        "        java.io.File(outputPath).writeText(data)\n"
+        "    }\n"
+        "}\n"
+    )
+    run("w4-G1b an empty guard at a path-parameter write refuses nothing", True,
+        "never refuses", extra={"sandbox/offload/EmptyGuard.kt": EMPTY_GUARD_CRIT1})
+    run("w4-G3 `0 == 1 && guard` is a dead condition", True,
+        "constantly false", rpc_shape="const_guard")
+    # control: routing the write into the else arm IS a refusal (the shipped
+    # model-use shape). A hardening that demanded return/throw would false-red it.
+    run("w4-G4 a write routed into the else arm passes", False, rpc_shape="routed")
+    # (parser-death) the write sits on a chain-continuation line of an
+    # expression body; truncating the body left it outside every function, and
+    # the site count merely dropped while the tree stayed green.
+    EXPR_CHAIN_WRITE = (
+        "package com.rikkaminis.app.sandbox.offload\n"
+        "\n"
+        "object ExprChainWrite {\n"
+        "    private fun writeRunOutput(\n"
+        "        request: String,\n"
+        "        outputPath: String?,\n"
+        "    ): Int =\n"
+        "        run {\n"
+        "            request.length\n"
+        "        }\n"
+        "        .let { host ->\n"
+        "            if (outputPath != null) {\n"
+        "                java.io.File(outputPath).writeText(host.toString())\n"
+        "            }\n"
+        "            0\n"
+        "        }\n"
+        "}\n"
+    )
+    run("w4-G5 a write on a chain-continuation line is still scanned", True,
+        "writes a host file from a path parameter",
+        extra={"sandbox/offload/ExprChainWrite.kt": EXPR_CHAIN_WRITE})
+    # (family-hole) `return@run` exits an inner lambda — the collector keeps
+    # applying the replayed terminal, with every anchor still in place.
+    run("w4-G6 a replay skip via `return@run` still applies frames", True,
+        "REPLAYS on subscribe", settlement_shape="replay_inner")
 
     print("=== readonly_mount_write_guard --selftest ===")
     failed = 0
