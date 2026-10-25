@@ -19,8 +19,26 @@ B-06  The swipe-up release branch re-derived eligibility inside an already
       drives all three decision sites, and the threshold reads through
       rememberUpdatedState so ChatTuning adjustments reach the gesture.
 
-Checks run on comment-stripped, string-blanked text, so prose in a KDoc or a
-log literal cannot satisfy them:
+Checks run on the SHARED lexer's structural view (`_kotlin_lexer.mask_code`: comments
+and string/char literal interiors blanked, length preserved), so prose in a KDoc or a
+log literal cannot satisfy them and a brace inside a literal cannot end a body early.
+Every guard/constant judgement goes through `_kotlin_ast` / `_kotlin_valueflow`
+(`const_bool`, `if_blocks`, `when_branches`, `guard_feasible`, `path_feasible`,
+`live_positions`) — [b5-t06] removed this gate's hand-written scanners and its
+literal-only dead-branch whitelist, which is what five external witnesses used:
+
+  A1  the field surface is the CLASS (constructor params + class-body members +
+      extension properties), not the constructor alone — a `) { val isUnread … }`
+      body member is the same read surface.
+  A2  the `if (cmd.isMcp)` branch must RETURN the fill helper on a REACHABLE path:
+      `if (false)` and `if (1 == 2)` / `if (!true)` are the same decision.
+  C1  no `||` operand may be decided by a literal, in any spelling:
+      `… && (1 == 2)` and `|| (1 == 1)` both delete the decision.
+  D-IO the `withContext(Dispatchers.IO)` hop must CONTAIN the
+      `viewModel.filteredSlashCommands()` call — an empty hop block next to it (or
+      one behind a constant-false guard) hops nothing.
+  C-CLIP-1 the restore/clear actions must live on REACHABLE paths; a guarded
+      `if (false) cm.clearPrimaryClip()` hands nothing back.
 
   ChatModels.kt
     A1  every boolean field of the SlashCommand data class has >= 1 read point
@@ -130,6 +148,20 @@ import shutil
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    enclosing_conditions,
+    if_blocks,
+    match_bracket,
+    split_top,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    live_positions,
+    path_feasible,
+)
+
 CHAT = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat"
 MODELS_REL = CHAT + "/ChatModels.kt"
 TOKEN_REL = CHAT + "/ChatSlashTokenExt.kt"
@@ -153,145 +185,33 @@ IF_AND_RE = re.compile(r"if\s*\((\w+)\s*&&\s*(\w+)")
 
 # ── scanners (same provenance as the other gates: comment/string aware) ──────
 
-def strip_comments(text):
-    """Blank out comment content, keeping everything else, with a scanner that
-    understands Kotlin string templates (a `//` inside a URL literal or a
-    quote nested inside a `${…}` desyncs any naive scanner)."""
-    out = []
-    stack = [["code", 0]]
-    i = 0
-    n = len(text)
-    while i < n:
-        st = stack[-1]
-        if st[0] == "code":
-            if text.startswith('"""', i):
-                stack.append(["raw", 0]); i += 3; continue
-            c = text[i]
-            if c == '"':
-                stack.append(["str", 0]); out.append(c); i += 1; continue
-            if text.startswith("//", i):
-                while i < n and text[i] != "\n":
-                    i += 1
-                continue
-            if text.startswith("/*", i):
-                end = text.find("*/", i + 2)
-                i = n if end < 0 else end + 2
-                continue
-            if c == "{":
-                st[1] += 1
-            elif c == "}":
-                if st[1] == 0 and len(stack) > 1:
-                    stack.pop(); out.append(c); i += 1; continue
-                st[1] -= 1
-            out.append(c); i += 1; continue
-        if st[0] == "str":
-            c = text[i]
-            if c == "\\":
-                out.append(c)
-                if i + 1 < n:
-                    out.append(text[i + 1])
-                i += 2; continue
-            if text.startswith("${", i):
-                stack.append(["code", 0]); out.append("${"); i += 2; continue
-            if c == '"':
-                stack.pop(); out.append(c); i += 1; continue
-            out.append(c); i += 1; continue
-        if text.startswith('"""', i):
-            stack.pop(); out.append('"""'); i += 3; continue
-        out.append(text[i]); i += 1
-    return "".join(out)
+def mask(text):
+    """Structural view of a Kotlin source: comments AND string/char literal
+    interiors blanked, length preserved so offsets map back to the original.
+    Delegates to the shared lexer — a hand-written scanner here is what let a
+    `"/*"` in a literal swallow the rest of a call site (wide4 parser-death)."""
+    try:
+        return mask_code(text)
+    except KotlinLexError:
+        return None
 
 
-def strip_strings(code):
-    """Blank the contents of string literals in comment-free code, so a whole-
-    file call-site scan is never driven by a log literal."""
-    out = []
-    stack = [["code", 0]]
-    i = 0
-    n = len(code)
-    while i < n:
-        st = stack[-1]
-        if st[0] == "code":
-            if code.startswith('"""', i):
-                stack.append(["raw", 0]); out.append("   "); i += 3; continue
-            c = code[i]
-            if c == '"':
-                stack.append(["str", 0]); out.append(c); i += 1; continue
-            if len(stack) > 1 and c == "{":
-                st[1] += 1
-            elif len(stack) > 1 and c == "}":
-                if st[1] == 0:
-                    stack.pop(); out.append(c); i += 1; continue
-                st[1] -= 1
-            out.append(c); i += 1; continue
-        if st[0] == "str":
-            c = code[i]
-            if c == "\\":
-                out.append("  ")
-                i += 2
-                continue
-            if code.startswith("${", i):
-                stack.append(["code", 0]); out.append("${"); i += 2; continue
-            if c == '"':
-                stack.pop(); out.append(c); i += 1; continue
-            out.append(c if c == "\n" else " "); i += 1; continue
-        if code.startswith('"""', i):
-            stack.pop(); out.append('"""'); i += 3; continue
-        out.append(code[i] if code[i] == "\n" else " "); i += 1
-    return "".join(out)
-
-
-def declaration_slice(text, marker):
-    """Return the `{ ... }` body of the declaration containing `marker`
-    (template/string aware). Returns "" when absent."""
+def decl_slice(text, marker):
+    """The `{ ... }` body of the declaration containing `marker`, brace-matched
+    by the shared primitive. Returns "" when absent."""
     idx = text.find(marker)
     if idx == -1:
         return ""
-    start = text.find("{", idx)
+    op = text.find("(", idx)
+    if op == -1:
+        start = text.find("{", idx)
+    else:
+        pc = match_bracket(text, op)
+        start = text.find("{", pc + 1) if pc > 0 else text.find("{", idx)
     if start == -1:
         return ""
-    depth = 0
-    tdepth = 0
-    tstack = []
-    in_str = False
-    in_raw = False
-    i = start
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if in_raw:
-            if text.startswith('"""', i):
-                in_raw = False; i += 3; continue
-            i += 1; continue
-        if in_str:
-            if c == "\\":
-                i += 2; continue
-            if text.startswith("${", i):
-                tstack.append(tdepth); tdepth = 0; in_str = False; i += 2; continue
-            if c == '"':
-                in_str = False; i += 1; continue
-            i += 1; continue
-        if text.startswith('"""', i):
-            in_raw = True; i += 3; continue
-        if c == '"':
-            in_str = True; i += 1; continue
-        if c == "{":
-            if tstack:
-                tdepth += 1
-            else:
-                depth += 1
-        elif c == "}":
-            if tstack:
-                if tdepth == 0:
-                    tdepth = tstack.pop(); in_str = True
-                else:
-                    tdepth -= 1
-            else:
-                depth -= 1
-                if depth == 0:
-                    return text[start:i + 1]
-        i += 1
-    return text[start:]
+    close = match_bracket(text, start)
+    return text[start:] if close < 0 else text[start:close + 1]
 
 
 def signature_args(text, marker):
@@ -324,8 +244,8 @@ def signature_args_balanced(text, marker):
     op = text.find("(", idx)
     if op == -1:
         return None
-    cl = _balanced_paren(text, op)
-    if cl is None:
+    cl = match_bracket(text, op)
+    if cl < 0:
         return None
     return text[op + 1:cl]
 
@@ -397,20 +317,11 @@ SLASH_GUARD_RE = re.compile(
 # producer and truncated the guard's reach).
 SLASH_GUARD_WINDOW = 1600
 
-def _balanced_paren(text, op):
-    """Index of the `)` matching the `(` at `op`; None when unbalanced. The memo
-    keys contain nested calls (`collectAsState()`), so a first-`)` scan would
-    truncate the key list."""
-    depth = 0
-    for i in range(op, len(text)):
-        c = text[i]
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-    return None
+def _matching_brace_end(text, open_idx):
+    """Index of the `}` matching the `{` at [open_idx]; -1 when unbalanced.
+    Thin alias over the shared matcher so every span in this gate comes from
+    ONE bracket model."""
+    return match_bracket(text, open_idx)
 
 def _split_producer(text, op, close):
     """Split a call into (args, trailing_lambda_body, body_end). Kotlin's
@@ -450,8 +361,8 @@ def slash_memo_findings(inp_c):
                  "fail-closed (the menu load is composition-synchronous "
                  "again?)" % SLASH_PAYLOAD_DECL)]
     op = decl + m.end() - 1
-    close = _balanced_paren(inp_c, op)
-    if close is None:
+    close = match_bracket(inp_c, op)
+    if close < 0:
         return [("D-memo", "unbalanced producer argument list — fail-closed")]
     args, body, body_end = _split_producer(inp_c, op, close)
     if args is None:
@@ -491,12 +402,40 @@ def slash_memo_findings(inp_c):
     if SLASH_MEMO_CALL not in body:
         problems.append(("D-memo", "the producer body never calls %s — "
                          "fail-closed (who builds the list?)" % SLASH_MEMO_CALL))
-    elif IO_HOP not in body.split(SLASH_MEMO_CALL)[0]:
-        problems.append(("D-IO", "the producer calls %s without a preceding %s — "
-                         "produceState's producer inherits the composition "
-                         "context (Main), so the query burst stays on the main "
-                         "thread (1041-B3: produceState is NOT an IO context)"
-                         % (SLASH_MEMO_CALL, IO_HOP)))
+    else:
+        # D-IO is a CONTAINMENT decision, not a "the hop is mentioned" one: the
+        # query burst must sit INSIDE the body of a live
+        # `withContext(Dispatchers.IO) { … }`. A neighbouring hop — an empty
+        # `withContext(Dispatchers.IO) { }` next to the call, or one behind a
+        # constant-false guard — hops nothing (external witness G12-A4).
+        hops = []
+        for m3 in re.finditer(re.escape(IO_HOP), body):
+            ob = body.find("{", m3.end())
+            if ob < 0:
+                continue
+            cb = match_bracket(body, ob)
+            if cb < 0:
+                continue
+            if not _reachable(body, m3.start()):
+                continue
+            hops.append((ob, cb))
+        if not hops:
+            problems.append(("D-IO", "the producer calls %s with no live %s block "
+                             "at all — produceState's producer inherits the "
+                             "composition context (Main), so the query burst stays "
+                             "on the main thread (1041-B3: produceState is NOT an "
+                             "IO context)" % (SLASH_MEMO_CALL, IO_HOP)))
+        else:
+            for m2 in re.finditer(re.escape(SLASH_MEMO_CALL), body):
+                if not _reachable(body, m2.start()):
+                    continue
+                if not any(a < m2.start() < b for a, b in hops):
+                    problems.append(("D-IO", "the producer calls %s OUTSIDE the "
+                             "`%s { … }` body — a hop block that does not contain "
+                             "the call hops nothing, and the query burst keeps "
+                             "running on Main (1041-B3)"
+                             % (SLASH_MEMO_CALL, IO_HOP)))
+                    break
     for m2 in re.finditer(re.escape(SLASH_MEMO_CALL), inp_c):
         if not (op < m2.start() < body_end):
             problems.append(("D3", "%s runs OUTSIDE the producer — a "
@@ -525,7 +464,7 @@ def session_override_channel_findings(skillrepo_c, mcprepo_c):
                              % label))
             continue
         for mut in SESSION_MUTATORS:
-            body = declaration_slice(src, mut)
+            body = decl_slice(src, mut)
             if not body or not re.search(
                     r"_sessionOverridesRevision\.value\s*=", body):
                 problems.append(("D5", "%s.%s writes the session-override "
@@ -538,7 +477,7 @@ def slash_ext_batch_findings(slashext_c):
     """D6 on ChatViewModelSlashExt.kt (optional read — see the section note)."""
     if slashext_c is None:
         return []
-    body = declaration_slice(slashext_c, "fun ChatViewModel.filteredSlashCommands(")
+    body = decl_slice(slashext_c, "fun ChatViewModel.filteredSlashCommands(")
     if not body:
         return [("D6", "filteredSlashCommands() not found in "
                  "ChatViewModelSlashExt.kt — fail-closed")]
@@ -596,51 +535,20 @@ EXECUTE_RE = re.compile(r"executeSlashCommand\(")
 
 def brace_block_at(text, idx):
     """The innermost `{ … }` slice containing [idx] — the block a statement sits
-    in. Offsets come from the comment-stripped text, so a prose brace in a KDoc
-    cannot land the slice on the wrong block."""
-    depth = 0
-    start = -1
-    for i in range(idx):
-        c = text[i]
-        if c == "{":
-            depth += 1
-            start = i
-        elif c == "}":
-            depth -= 1
-            if depth <= 0:
-                start = -1
-    if start == -1:
-        return ""
-    depth = 0
-    for i in range(start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start:i + 1]
-    return text[start:]
+    in. One block model for the whole gate (shared bracket matcher)."""
+    span = _innermost_brace_span(text, idx)
+    return text[span[0]:span[1] + 1] if span else ""
 
 
 def call_arg_spans(text, open_idx):
-    """Top-level argument slices of the call whose `(` sits at [open_idx]."""
-    close = _balanced_paren(text, open_idx)
-    if close is None:
+    """Top-level argument slices of the call whose `(` sits at [open_idx] — the
+    split is the shared `split_top`, so a brace/bracket nested comma cannot cut
+    an argument in half."""
+    close = match_bracket(text, open_idx)
+    if close < 0:
         return None
     inner = text[open_idx + 1:close]
-    spans = []
-    depth = 0
-    cur = 0
-    for i, c in enumerate(inner):
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        elif c == "," and depth == 0:
-            spans.append(inner[cur:i])
-            cur = i + 1
-    spans.append(inner[cur:])
-    return [s.strip() for s in spans]
+    return [inner[a:b].strip() for a, b in split_top(inner, (",",))]
 
 
 def composer_live_source_findings(inp_c):
@@ -909,42 +817,30 @@ CMD_DECL_CLASS_RE = re.compile(r"data\s+class\s+(\w+)\s*\(")
 CMD_ARM_RE = re.compile(r"(?:is\s+)?ComposerCommand\s*\.\s*(\w+)\s*->")
 
 def _brace_block(text, open_idx):
-    """Text between the braces at/after [open_idx] (brace-matched)."""
+    """Text between the braces at/after [open_idx] (shared bracket matcher)."""
     ob = text.find("{", open_idx)
     if ob < 0:
         return None
-    depth = 0
-    i = ob
-    while i < len(text):
-        ch = text[i]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[ob + 1:i]
-        i += 1
-    return None
+    close = match_bracket(text, ob)
+    if close < 0:
+        return None
+    return text[ob + 1:close]
+
 
 def _fun_body(code, marker):
-    """Body of `fun <marker>(…)` — paren-matched signature, then the braces."""
+    """Body of `fun <marker>(…)` — signature parens matched by the shared
+    matcher, then the braces."""
     i = code.find(marker)
     if i < 0:
         return None
     j = code.find("(", i)
     if j < 0:
         return None
-    depth = 0
-    while j < len(code):
-        ch = code[j]
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                break
-        j += 1
-    return _brace_block(code, j)
+    close = match_bracket(code, j)
+    if close < 0:
+        return None
+    return _brace_block(code, close + 1)
+
 
 def composer_intent_parity_findings(vm_c, inp_c, screen_c):
     """[dv24/B-05] The composer has ONE writer, and the intent set is closed.
@@ -1103,75 +999,10 @@ def fast_mode_single_source_findings(vm_c, fm_c):
 # Both kept every substring the old criteria searched for. The primitives below
 # let a criterion ask "can this decide?" / "which value does it read?" instead.
 
-def _split_top(expr, op):
-    """Split [expr] on [op] at paren/bracket/brace depth 0."""
-    parts, depth, last, i = [], 0, 0, 0
-    while i < len(expr):
-        c = expr[i]
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        elif depth == 0 and expr.startswith(op, i):
-            parts.append(expr[last:i])
-            last = i + len(op)
-            i = last
-            continue
-        i += 1
-    parts.append(expr[last:])
-    return parts
-
-
-def cond_truth(expr):
-    """True/False when a LITERAL operand decides the condition, else None."""
-    s = expr.strip()
-    while s.startswith("(") and s.endswith(")") and _balanced_paren(s, 0) == len(s) - 1:
-        s = s[1:-1].strip()
-    if s == "true":
-        return True
-    if s == "false":
-        return False
-    if s.startswith("!"):
-        inner = cond_truth(s[1:])
-        return None if inner is None else (not inner)
-    ors = _split_top(s, "||")
-    if len(ors) > 1:
-        vals = [cond_truth(x) for x in ors]
-        if any(v is True for v in vals):
-            return True
-        if vals and all(v is False for v in vals):
-            return False
-        return None
-    ands = _split_top(s, "&&")
-    if len(ands) > 1:
-        vals = [cond_truth(x) for x in ands]
-        if any(v is False for v in vals):
-            return False
-        if vals and all(v is True for v in vals):
-            return True
-        return None
-    return None
-
-
-def dead_guard_spans(text):
-    """[(start, end)] of bodies whose controlling condition is literal-FALSE."""
-    spans = []
-    for m in re.finditer(r"\b(?:if|while)\s*\(", text):
-        op = m.end() - 1
-        cl = _balanced_paren(text, op)
-        if cl is None or cond_truth(text[op + 1:cl]) is not False:
-            continue
-        k = cl + 1
-        while k < len(text) and text[k] in " \t":
-            k += 1
-        if k < len(text) and text[k] == "{":
-            e = _matching_brace_end(text, k)
-            if e > k:
-                spans.append((k, e))
-        else:
-            eol = text.find("\n", k)
-            spans.append((k, eol if eol >= 0 else len(text)))
-    return spans
+def _reachable(text, pos):
+    """Is [pos] on a path that a condition cannot prove dead? Shared
+    `path_feasible` — the single guard judgement every arm of this gate uses."""
+    return path_feasible(text, pos)
 
 
 def inside_spans(spans, pos):
@@ -1200,78 +1031,68 @@ CLIP_RESTORE_RE = re.compile(r"\.setPrimaryClip\s*\(")
 CLIP_CLEAR_RE = re.compile(r"\.clearPrimaryClip\s*\(|newPlainText\s*\(")
 
 
-def _matching_brace_end(text, open_idx):
+def _when_body_spans(text):
+    """[(open_brace, close_brace)] of every `when (…) { … }` / `when { … }`
+    body. Built on the shared bracket matcher; used only to group arms."""
+    out = []
+    for m in re.finditer(r"\bwhen\b", text):
+        k = m.end()
+        while k < len(text) and text[k] in " \t\r\n":
+            k += 1
+        if k < len(text) and text[k] == "(":
+            pc = match_bracket(text, k)
+            if pc < 0:
+                continue
+            k = pc + 1
+            while k < len(text) and text[k] in " \t\r\n":
+                k += 1
+        if k >= len(text) or text[k] != "{":
+            continue
+        bc = match_bracket(text, k)
+        if bc < 0:
+            continue
+        out.append((k, bc))
+    return out
+
+
+def _arm_spans(text, w_open, w_close):
+    """Arm body ranges of one `when` body: split at the TOP-LEVEL `->` of each
+    arm, so a multi-line arm body belongs to its own label (the shared
+    `when_branches` split is line-based and cannot do this)."""
+    bounds = [w_open + 1]
     depth = 0
-    i = open_idx
-    while i < len(text):
+    i = w_open + 1
+    while i < w_close:
         ch = text[i]
-        if ch == "{":
+        if ch in "([{":
             depth += 1
-        elif ch == "}":
+        elif ch in ")]}":
             depth -= 1
-            if depth == 0:
-                return i
+        elif depth == 0 and text.startswith("->", i):
+            bounds.append(i + 2)
+            i += 2
+            continue
         i += 1
-    return -1
+    bounds.append(w_close)
+    return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
 
 
 def _mutually_exclusive_regions(block):
     """Groups of mutually-exclusive branch spans found inside [block].
 
     A group is a list of (start, end) spans whose bodies cannot both run.
-    Recognised shapes: `when (x) { A -> ... B -> ... }` arms, and
-    `if (c) { ... } else { ... }`.
+    Recognised shapes come from the shared `if_blocks` model (`if/else` pairs)
+    and from the arms of one `when` body (derived from the shared bracket
+    matcher, so a multi-line arm keeps its body).
     """
     regions = []
-    for m in re.finditer(r"\bwhen\s*\(", block):
-        ob = block.find("{", m.end())
-        if ob < 0:
-            continue
-        end = _matching_brace_end(block, ob)
-        if end < 0:
-            continue
-        body = block[ob + 1:end]
-        headers = [(h.start(), h.end()) for h in re.finditer(
-            r"(?m)^[ \t]*(?:else\s*)?(?:[A-Za-z_][\w.]*[ \t]*)?->", body)]
-        if len(headers) < 2:
-            continue
-        spans = []
-        for i, (hs, _he) in enumerate(headers):
-            nxt = headers[i + 1][0] if i + 1 < len(headers) else len(body)
-            spans.append((ob + 1 + hs, ob + 1 + nxt))
-        regions.append(spans)
-    for m in re.finditer(r"\bif\s*\(", block):
-        j = block.find("(", m.end())
-        if j < 0:
-            continue
-        depth = 0
-        k = j
-        while k < len(block):
-            if block[k] == "(":
-                depth += 1
-            elif block[k] == ")":
-                depth -= 1
-                if depth == 0:
-                    break
-            k += 1
-        ob = block.find("{", k)
-        if ob < 0:
-            continue
-        end = _matching_brace_end(block, ob)
-        if end < 0:
-            continue
-        tail = block[end + 1:]
-        stripped = tail.lstrip()
-        if not stripped.startswith("else"):
-            continue
-        e_ob = end + 1 + (len(tail) - len(stripped))
-        e_ob = block.find("{", e_ob)
-        if e_ob < 0:
-            continue
-        e_end = _matching_brace_end(block, e_ob)
-        if e_end < 0:
-            continue
-        regions.append([(ob + 1, end), (e_ob + 1, e_end)])
+    for cond, t_start, t_end, e_start, e_end in if_blocks(block):
+        if e_start is not None and t_end > t_start and e_end > e_start:
+            regions.append([(t_start, t_end), (e_start, e_end)])
+    for w_open, w_close in _when_body_spans(block):
+        arms = _arm_spans(block, w_open, w_close)
+        if len(arms) >= 2:
+            regions.append(arms)
     return regions
 
 
@@ -1288,18 +1109,26 @@ def clipboard_restore_findings(mdtoolbar_c):
     block = _brace_block(mdtoolbar_c, ob) if ob >= 0 else None
     if block is None:
         return [("C-CLIP-1", "cannot read the `finally` block of withSelection")]
-    restore = CLIP_RESTORE_RE.search(block)
-    clear = CLIP_CLEAR_RE.search(block)
-    if not restore:
+    # Positions come from LIVE paths only: a `setPrimaryClip` / clear wrapped in
+    # a constant-false guard is spelled but never runs, which is exactly the
+    # defect (external witness G12-A5 — `if (false) cm.clearPrimaryClip()` kept
+    # every substring this criterion used to search for).
+    restore_hits = live_positions(block, CLIP_RESTORE_RE)
+    clear_hits = live_positions(block, CLIP_CLEAR_RE)
+    restore = restore_hits[0] if restore_hits else None
+    clear = clear_hits[0] if clear_hits else None
+    if restore is None:
         problems.append(("C-CLIP-1", "the `finally` block never puts the original "
-                         "clip back (no setPrimaryClip) — the borrowed selection "
-                         "permanently replaces the user's clipboard"))
-    if not clear:
-        problems.append(("C-CLIP-1", "the `finally` block has no 'make it empty "
-                         "again' action (clearPrimaryClip / empty-string write) — a "
-                         "user whose clipboard was empty keeps our borrowed text"))
-    if restore and clear:
-        rp, cp = restore.start(), clear.start()
+                         "clip back on a live path (no reachable setPrimaryClip) — "
+                         "the borrowed selection permanently replaces the user's "
+                         "clipboard"))
+    if clear is None:
+        problems.append(("C-CLIP-1", "the `finally` block has no live 'make it "
+                         "empty again' action (clearPrimaryClip / empty-string "
+                         "write) — a user whose clipboard was empty keeps our "
+                         "borrowed text"))
+    if restore is not None and clear is not None:
+        rp, cp = restore, clear
         separated = False
         for spans in _mutually_exclusive_regions(block):
             in_r = [i for i, (s, e) in enumerate(spans) if s <= rp < e]
@@ -1338,45 +1167,96 @@ def check_tree(root):
     if problems:
         return None, problems
 
-    models_c = strip_strings(strip_comments(models))
-    token_c = strip_strings(strip_comments(token))
-    inp_c = strip_strings(strip_comments(inp))
-    gesture_c = strip_strings(strip_comments(gesture))
-    selection_c = strip_strings(strip_comments(selection))
-    stream_c = strip_strings(strip_comments(stream))
-    mdtoolbar_c = strip_strings(strip_comments(mdtoolbar))
+    # A lexer failure is ALWAYS a violation: the shared lexer masks every
+    # string/char/comment brace, so an unparsable source means this gate cannot
+    # see structure at all — reading it as clean is exactly the fail-open the
+    # parser-death axis exists to close.
+    masked = {}
+    for rel, src in ((MODELS_REL, models), (TOKEN_REL, token), (INPUT_REL, inp),
+                     (GESTURE_REL, gesture), (SELECTION_REL, selection),
+                     (STREAM_REL, stream), (MDTOOLBAR_REL, mdtoolbar)):
+        view = mask(src)
+        if view is None:
+            problems.append((rel, "the shared Kotlin lexer cannot parse this source "
+                             "— fail-closed (an unparsable source must never read "
+                             "as clean)"))
+            view = ""
+        masked[rel] = view
+    if problems:
+        return None, problems
+    models_c = masked[MODELS_REL]
+    token_c = masked[TOKEN_REL]
+    inp_c = masked[INPUT_REL]
+    gesture_c = masked[GESTURE_REL]
+    selection_c = masked[SELECTION_REL]
+    stream_c = masked[STREAM_REL]
+    mdtoolbar_c = masked[MDTOOLBAR_REL]
 
     # ── C-CLIP-1: the borrowed clipboard is always handed back ────────────
     for cid, msg in clipboard_restore_findings(mdtoolbar_c):
         problems.append((cid, msg))
 
     # ── A1: every SlashCommand boolean field has >= 1 read point ────────────
-    # SlashCommand is a primary-constructor-only data class (no body braces),
-    # so the field list is captured from the parameter list (paren-matched) —
-    # slicing from the first `{` would run into the NEXT declaration's body
-    # and pick up its computed properties (isText lives on AssistantBlock).
+    # The field SURFACE is the whole class, not just the primary constructor.
+    # A `) { val isUnread: Boolean = false }` body member and a top-level
+    # `val SlashCommand.x: Boolean` extension property are the same read
+    # surface for every consumer (same getter), and equally outside the
+    # parameter list — the external witness G12-A1 appended a class body and
+    # the constructor-only scan never looked at it.
     # Paren-MATCHED, not first-`)`: a default value containing a call
     # (`val tag: String = String()`) used to truncate the list, and every
     # boolean declared after it fell out of the scan while the earlier ones kept
     # the fail-closed check quiet (external witness A1).
     cmd_params = signature_args_balanced(models_c, "data class SlashCommand(")
     bool_fields = re.findall(r"val\s+(\w+)\s*:\s*Boolean", cmd_params or "")
-    if not bool_fields:
+    decl_pos = models_c.find("data class SlashCommand(")
+    body_fields = []
+    if decl_pos < 0:
+        problems.append(("A1", "`data class SlashCommand(` not found — fail-closed "
+                         "(the descriptor shape drifted, so the field surface "
+                         "cannot be derived)"))
+    else:
+        popen = decl_pos + len("data class SlashCommand")
+        pclose = match_bracket(models_c, popen)
+        if pclose < 0:
+            problems.append(("A1", "the SlashCommand constructor's parameter list "
+                             "does not balance — fail-closed (a field declared after "
+                             "the break would be invisible to this scan)"))
+        else:
+            k = pclose + 1
+            while k < len(models_c) and models_c[k] in " \t\r\n":
+                k += 1
+            if k < len(models_c) and models_c[k] == "{":
+                bend = match_bracket(models_c, k)
+                if bend < 0:
+                    problems.append(("A1", "the SlashCommand class body does not "
+                                     "balance — fail-closed"))
+                else:
+                    body_fields = re.findall(r"\bval\s+(\w+)\s*:\s*Boolean",
+                                             models_c[k + 1:bend])
+    if not bool_fields and not body_fields:
         problems.append((MODELS_REL, "A1 SlashCommand declares no boolean fields — "
                          "fail-closed (descriptor shape drifted?)"))
+    # Extension properties on the class are the same surface wherever they are
+    # declared: an unread one is the B-01 class again.
+    ext_fields = []
+    for src in (models_c, token_c, inp_c):
+        ext_fields += re.findall(r"\bval\s+SlashCommand\.(\w+)\s*:\s*Boolean", src)
     consumers = token_c + inp_c
-    for field in bool_fields:
+    for field in sorted(set(bool_fields) | set(body_fields) | set(ext_fields)):
         reads = len(re.findall(r"\.%s\b" % re.escape(field), consumers))
         if reads == 0:
             problems.append((
                 "A1:%s" % field,
                 "A1 SlashCommand.%s is written but has 0 read points across the "
                 "slash consumers (ChatSlashTokenExt + ChatInputArea) — the "
-                "B-01 class: a written-but-never-read descriptor flag" % field,
+                "B-01 class: a written-but-never-read descriptor flag (declared "
+                "in the constructor, the class body, or as an extension "
+                "property — all three are the same read surface)" % field,
             ))
 
     # ── A2: executeSlashCommand carries an isMcp branch ─────────────────────
-    exec_slice = declaration_slice(token_c, "fun ChatViewModel.executeSlashCommand(")
+    exec_slice = decl_slice(token_c, "fun ChatViewModel.executeSlashCommand(")
     if not exec_slice:
         problems.append(("A2", "executeSlashCommand not found — fail-closed"))
     else:
@@ -1396,10 +1276,14 @@ def check_tree(root):
                              "wipe the composer (B-01)"))
         else:
             block = _brace_block(exec_slice, mcp_arm.end() - 1) or ""
-            dead = dead_guard_spans(block)
             returns_fill = False
             for r in re.finditer(re.escape(FILL_HELPER), block):
-                if inside_spans(dead, r.start()):
+                # A constant-false guard (any spelling: `false`, `!true`,
+                # `1 == 2`, `when (false)`) makes the call unreachable, and an
+                # unreachable `return fill` is the pre-fix behaviour: the MCP
+                # tap falls through to the action dispatch and wipes the
+                # composer (external witness G12-A2).
+                if not _reachable(block, r.start()):
                     continue
                 stmt_head = block[block.rfind("\n", 0, r.start()) + 1:r.start()]
                 if re.match(r"^\s*return\s*$", stmt_head):
@@ -1443,7 +1327,7 @@ def check_tree(root):
         problems.append(("B3", "forgetTableActions must take the table "
                          "key too — a bare messageId remove takes whatever is "
                          "stored, including a still-composed sibling table"))
-    sel_slice = declaration_slice(selection_c, "fun selectionTableActions(")
+    sel_slice = decl_slice(selection_c, "fun selectionTableActions(")
     if sel_slice:
         if not re.search(r"(Map<Int|SnapshotStateMap<Int)", selection_c):
             problems.append(("B3", "the table registry declaration must be "
@@ -1479,7 +1363,7 @@ def check_tree(root):
                          "— fail-closed"))
         gesture_slice = ""
     else:
-        gesture_slice = declaration_slice(inp_c, "pointerInput(Unit)")
+        gesture_slice = decl_slice(inp_c, "pointerInput(Unit)")
 
     # ── C1/C2: one shared eligibility predicate, read at call time ──────────
     preds = PRED_RE.findall(inp_c)
@@ -1513,8 +1397,12 @@ def check_tree(root):
                              "string (inputText) — a just-typed prefix is invisible for "
                              "the debounce window; it must read the field's own "
                              "TextFieldValue"))
-        literals = [x.strip() for x in _split_top(pred_body, "||")
-                    if cond_truth(x) is not None]
+        # Fold each top-level `||` operand with the shared constant folder:
+        # `false`, `(1 == 2)` and `x && (1 == 2)` all decide the operand at
+        # compile time and delete the decision while keeping the expression
+        # (external witness G12-A3).
+        literals = [pred_body[a:b].strip() for a, b in split_top(pred_body, ("||",))
+                    if const_bool(pred_body[a:b]) is not None]
         if literals:
             problems.append(("C1", "C1 the swipe predicate contains a literal-decided "
                              "operand (%s) — a `false || …` / `true && …` arm deletes the "
@@ -1595,10 +1483,10 @@ def check_tree(root):
     mcprepo = read(root, MCP_REPO_REL)
     slashext = read(root, SLASH_EXT_REL)
     problems.extend(session_override_channel_findings(
-        strip_strings(strip_comments(skillrepo)) if skillrepo is not None else None,
-        strip_strings(strip_comments(mcprepo)) if mcprepo is not None else None))
+        mask(skillrepo) if skillrepo is not None else None,
+        mask(mcprepo) if mcprepo is not None else None))
     problems.extend(slash_ext_batch_findings(
-        strip_strings(strip_comments(slashext)) if slashext is not None else None))
+        mask(slashext) if slashext is not None else None))
 
     # ── E1-E3: composer decisions read the live field value (dv19-B1) ──────
     problems.extend(composer_live_source_findings(inp_c))
@@ -1609,7 +1497,7 @@ def check_tree(root):
     # (dv23-B3) OPTIONAL read — the minimal fixture trees ship no ChatScreen.
     screen = read(root, SCREEN_REL)
     problems.extend(composer_screen_handoff_findings(
-        strip_strings(strip_comments(screen)) if screen is not None else None, inp_c))
+        mask(screen) if screen is not None else None, inp_c))
     # ── G5-G7: every composer write is an intent (dv24-B05) ────────────────
     # OPTIONAL read for the same reason as ChatScreen.kt.
     # NOTE: comment-stripped only (no strip_strings). ChatViewModel.kt contains
@@ -1619,17 +1507,17 @@ def check_tree(root):
     # leaving string literals intact keeps the criteria honest here.
     vm = read(root, VM_REL)
     problems.extend(composer_intent_parity_findings(
-        strip_comments(vm) if vm is not None else None,
+        mask_comments(vm) if vm is not None else None,
         inp_c,
-        strip_strings(strip_comments(screen)) if screen is not None else None))
+        mask(screen) if screen is not None else None))
 
     # ── H1-H3: the Fast Mode toggle has one source (dv25-B05) ──────────────
     # ChatViewModel.kt is read comment-stripped only (see the note above: the
     # shared string stripper mis-tracks its CHAR literals).
     fastmode = read(root, FASTMODE_REL)
     problems.extend(fast_mode_single_source_findings(
-        strip_comments(vm) if vm is not None else None,
-        strip_comments(fastmode) if fastmode is not None else None))
+        mask_comments(vm) if vm is not None else None,
+        mask_comments(fastmode) if fastmode is not None else None))
 
     return INPUT_REL, problems
 
@@ -2064,28 +1952,24 @@ FUNNEL_CONSUMERS = [
 
 
 def _innermost_brace_span(text, idx):
-    """(open_idx, close_idx) of the innermost {...} containing [idx]."""
-    depth = 0
-    start = -1
-    for i in range(idx):
+    """(open_idx, close_idx) of the innermost `{...}` containing [idx].
+
+    The open comes from one stack pass, the close from the SHARED bracket
+    matcher, so every span this gate reasons about is derived from a single
+    bracket model (a hand-rolled closer is what let a literal brace end a
+    function body early)."""
+    stack = []
+    for i in range(min(idx, len(text))):
         c = text[i]
         if c == "{":
-            depth += 1
-            start = i
-        elif c == "}":
-            depth -= 1
-            if depth <= 0:
-                start = -1
-    if start == -1:
-        return None
-    d = 0
-    for j in range(start, len(text)):
-        if text[j] == "{":
-            d += 1
-        elif text[j] == "}":
-            d -= 1
-            if d == 0:
-                return (start, j)
+            stack.append(i)
+        elif c == "}" and stack:
+            stack.pop()
+    while stack:
+        open_idx = stack.pop()
+        close = match_bracket(text, open_idx)
+        if close >= 0:
+            return (open_idx, close)
     return None
 
 
@@ -2328,49 +2212,21 @@ def composer_clear_funnel_findings(inp_c):
 
 def _guard_before_brace(text, ob):
     """The `if (...)` condition whose body opens at [ob], or None when the brace
-    opens a bare block / lambda."""
-    j = ob - 1
-    while j >= 0 and text[j] in " \t\r\n":
-        j -= 1
-    if j < 0 or text[j] != ")":
-        return None
-    depth = 0
-    k = j
-    while k >= 0:
-        if text[k] == ")":
-            depth += 1
-        elif text[k] == "(":
-            depth -= 1
-            if depth == 0:
-                break
-        k -= 1
-    if k < 0:
-        return None
-    if not text[max(0, k - 8):k].rstrip().endswith("if"):
-        return None
-    return text[k + 1:j]
+    opens a bare block / lambda. Derived from the shared `if_blocks` model — no
+    backward token scan."""
+    for cond, t_start, _t_end, _e_start, _e_end in if_blocks(text):
+        k = t_start
+        while k < len(text) and text[k] in " \t\r\n":
+            k += 1
+        if k == ob:
+            return cond
+    return None
 
 
 def _enclosing_condition_chain(text, idx, floor):
-    """Every `if (...)` condition on the path from [idx] out to [floor].
-
-    A deposit nested inside two conditions (stream ended AND long enough) is
-    governed by BOTH — reading only the innermost one would report a missing
-    `isStreaming` guard on a correctly guarded deposit, and reading only the
-    outermost would let a source check sit on a branch that cannot reach it.
-    Anchoring on enclosing BLOCKS (not on a backward scan for the token `if`)
-    keeps a nested lambda's own parentheses out of the reading."""
-    conds = []
-    cur = idx
-    while cur > floor:
-        span = _innermost_brace_span(text, cur)
-        if span is None or span[0] <= floor:
-            break
-        cond = _guard_before_brace(text, span[0])
-        if cond is not None:
-            conds.append(cond)
-        cur = span[0] - 1
-    return conds
+    """Every `if (...)` condition on the path from [idx] out to [floor], in
+    source order (outermost first) — the shared enclosing-condition model."""
+    return [cond for kind, cond in enclosing_conditions(text, idx) if kind == "if"]
 
 
 BLOCK_STATE_PAIR_RE = re.compile(
@@ -2420,7 +2276,7 @@ def streaming_block_ledger_findings(stream_c):
     # keep their own bare `List<MdBlock>` state and are RUNTIME-DEAD while
     # AGGREGATE_MESSAGE_ITEMS is true (the audit's own 失真 #1: this gate must
     # not demand a change there — the barrier is deliberate).
-    body = declaration_slice(stream_c, "fun StreamingMarkdownTextBody(")
+    body = decl_slice(stream_c, "fun StreamingMarkdownTextBody(")
     body_off = stream_c.find(body)
     if not body:
         problems.append(("H", "`StreamingMarkdownTextBody` not found — the streaming "
@@ -2431,8 +2287,8 @@ def streaming_block_ledger_findings(stream_c):
     seed_keys = None
     for m in re.finditer(r"\bremember\s*\(", body):
         op = m.end() - 1
-        cl = _balanced_paren(body, op)
-        if cl is None:
+        cl = match_bracket(body, op)
+        if cl < 0:
             continue
         window = body[cl:cl + 500]
         if not CACHE_PEEK_RE.search(window):
@@ -2470,8 +2326,8 @@ def streaming_block_ledger_findings(stream_c):
     effect_keys = None
     for m in re.finditer(r"\bLaunchedEffect\s*\(", body):
         op = m.end() - 1
-        cl = _balanced_paren(body, op)
-        if cl is None:
+        cl = match_bracket(body, op)
+        if cl < 0:
             continue
         tail = body[cl:cl + 3000]
         if ".putBlocks(" not in tail:
@@ -3372,6 +3228,122 @@ def selftest():
             "    val commitComposerBody: (String, Int?) -> Unit = { text, caret ->",
             "    val commitComposerBodyRemoved: (String, Int?) -> Unit = { text, caret ->"),
     }), ["B06"])
+
+    # ── [b5-t06] 门见证第五批：五条实锤失明的回归臂 ────────────────────────
+    # 每一条都对应一个外部见证的最小补丁（报告 G12-A1..A5），并要求"只有这条
+    # 判据翻红"——变异在真树上恰好红、clean 臂仍绿。
+    # A1 (parser-death): the field SURFACE is the class, not the constructor.
+    # `) { val isUnreadBodyFlag: Boolean = false }` has the same getter and the
+    # same read visibility, and the constructor-only scan never looked at it.
+    expect_exact("A1 class-body member boolean unread", fixtures(**{
+        MODELS_REL: MODELS_F.replace(
+            "    val isMcp: Boolean = false,\n)",
+            "    val isMcp: Boolean = false,\n) {\n"
+            "    val isUnreadBodyFlag: Boolean = false\n}"),
+    }), ["A1:isUnreadBodyFlag"])
+    # Same surface, declared as an extension property instead of a body member.
+    expect_exact("A1 extension property unread", fixtures(**{
+        MODELS_REL: MODELS_F + (
+            "\nval SlashCommand.isUnreadExt: Boolean get() = false\n"),
+    }), ["A1:isUnreadExt"])
+    # Precision: a body member that IS read must stay clean (the arm above must
+    # not be satisfied by "any body member is a violation").
+    expect("A1 read class-body member stays clean", fixtures(**{
+        MODELS_REL: MODELS_F.replace(
+            "    val isMcp: Boolean = false,\n)",
+            "    val isMcp: Boolean = false,\n) {\n"
+            "    val isRowDimmed: Boolean = false\n}"),
+        TOKEN_REL: TOKEN_F.replace(
+            "    if (cmd.isMcp) {",
+            "    if (cmd.isRowDimmed) Unit\n    if (cmd.isMcp) {"),
+    }), None)
+    # A2 (family-hole): the guard is decided by CONSTANT FOLDING, not by the
+    # literal `false` — `if (1 == 2)` and `if (!true)` delete the decision the
+    # same way (the `if (false)` arm above is the CAUGHT control).
+    expect_exact("A2 constant-false comparison guard", fixtures(**{
+        TOKEN_REL: TOKEN_F.replace(
+            "    if (cmd.isMcp) {\n        resetSlashMenuState()\n"
+            "        return fillComposerWithSlashTitle(cmd, saved)\n    }\n",
+            "    if (cmd.isMcp) {\n        resetSlashMenuState()\n"
+            "        if (1 == 2) {\n"
+            "            return fillComposerWithSlashTitle(cmd, saved)\n        }\n    }\n"),
+    }), ["A2"])
+    expect_exact("A2 negated-literal guard", fixtures(**{
+        TOKEN_REL: TOKEN_F.replace(
+            "    if (cmd.isMcp) {\n        resetSlashMenuState()\n"
+            "        return fillComposerWithSlashTitle(cmd, saved)\n    }\n",
+            "    if (cmd.isMcp) {\n        resetSlashMenuState()\n"
+            "        if (!true) return fillComposerWithSlashTitle(cmd, saved)\n    }\n"),
+    }), ["A2"])
+    # C1 (family-hole): a literal operand in ANY spelling absorbs the decision.
+    expect_exact("C1 arithmetic absorption deletes the decision", fixtures(**{
+        INPUT_REL: INPUT_F.replace(
+            "    val canSwipeSendNow: () -> Boolean = {\n"
+            "        inputFieldValue.text.isNotBlank() || attachments.isNotEmpty()\n"
+            "    }\n",
+            "    val canSwipeSendNow: () -> Boolean = {\n"
+            "        inputFieldValue.text.isNotBlank() && (1 == 2) || "
+            "attachments.isNotEmpty() && (1 == 2)\n"
+            "    }\n"),
+    }), ["C1"])
+    expect_exact("C1 always-true absorption sends empty messages", fixtures(**{
+        INPUT_REL: INPUT_F.replace(
+            "    val canSwipeSendNow: () -> Boolean = {\n"
+            "        inputFieldValue.text.isNotBlank() || attachments.isNotEmpty()\n"
+            "    }\n",
+            "    val canSwipeSendNow: () -> Boolean = {\n"
+            "        inputFieldValue.text.isNotBlank() || attachments.isNotEmpty() "
+            "|| (1 == 1)\n"
+            "    }\n"),
+    }), ["C1"])
+    # D-IO (anchor): the hop must CONTAIN the call. An empty hop block next to
+    # the call, or a hop behind a constant-false guard, hops nothing.
+    IO_INLINE = (
+        "            withContext(Dispatchers.IO) {\n"
+        "                value = SlashMenuPayload(\n"
+        "                    commands = viewModel.filteredSlashCommands(),\n"
+        "                    loaded = true,\n"
+        "                )\n"
+        "            }\n"
+    )
+    expect_exact("D-IO empty hop block next to the call", fixtures(**{
+        INPUT_REL: INPUT_F.replace(IO_INLINE,
+            "            withContext(Dispatchers.IO) { }\n"
+            "            value = SlashMenuPayload(\n"
+            "                commands = viewModel.filteredSlashCommands(),\n"
+            "                loaded = true,\n"
+            "            )\n"),
+    }), ["D-IO"])
+    expect_exact("D-IO hop behind a constant-false guard", fixtures(**{
+        INPUT_REL: INPUT_F.replace(IO_INLINE,
+            "            if (1 == 2) withContext(Dispatchers.IO) { }\n"
+            "            value = SlashMenuPayload(\n"
+            "                commands = viewModel.filteredSlashCommands(),\n"
+            "                loaded = true,\n"
+            "            )\n"),
+    }), ["D-IO"])
+    # C-CLIP-1 (family-hole): the restore/clear must be on LIVE paths —
+    # `if (false) cm.clearPrimaryClip()` keeps every substring the old
+    # criterion searched for while handing nothing back.
+    expect_exact("C-CLIP-1 dead-guarded restore actions", fixtures(**{
+        MDTOOLBAR_REL: MDTOOLBAR_F.replace(
+            "                ClipboardRestoreAction.CLEAR_PLATFORM ->\n"
+            "                    cm.clearPrimaryClip()\n"
+            "                ClipboardRestoreAction.CLEAR_EMPTY_STRING ->\n"
+            "                    cm.setPrimaryClip(ClipData.newPlainText(\"\", \"\"))\n",
+            "                ClipboardRestoreAction.CLEAR_PLATFORM ->\n"
+            "                    if (false) cm.clearPrimaryClip()\n"
+            "                ClipboardRestoreAction.CLEAR_EMPTY_STRING ->\n"
+            "                    if (false) cm.setPrimaryClip(ClipData.newPlainText(\"\", \"\"))\n"),
+    }), ["C-CLIP-1"])
+    # Precision: the SAME two calls with a live guard stay clean.
+    expect("C-CLIP-1 live restore stays clean", fixtures(**{
+        MDTOOLBAR_REL: MDTOOLBAR_F.replace(
+            "                ClipboardRestoreAction.CLEAR_PLATFORM ->\n"
+            "                    cm.clearPrimaryClip()\n",
+            "                ClipboardRestoreAction.CLEAR_PLATFORM ->\n"
+            "                    if (atLeastQ) cm.clearPrimaryClip()\n"),
+    }), None)
 
     if failures:
         print("❌ selftest failed:")
