@@ -42,6 +42,27 @@ arm2's discovery is anchored on the `val ok =` binding (then the
 `LaunchedEffect` must not shadow the save's context. The asserted contract is
 unchanged.
 
+[wide4 2026-10-25] Four ways to keep the spelling and delete the decision were
+closed after an external audit re-attacked this gate:
+
+  arm2   the block's VALUE must be the write's result, not a presence of the
+         call: `writeSkillFile(…) || true` and `writeSkillFile(…).let { true }`
+         (w4-arm2) are constants — the write's boolean is discarded. A local
+         indirection (`val saved = …; saved`) still counts as the same value.
+  arm3   `if (ok)` must be exactly that condition (a literal-short-circuited
+         `if (ok || true)` is a guard in spelling only); the pop may be spelled
+         `onBack.invoke()` (w4-arm3); and statements are judged on the shared
+         lexer's projection, so a `"${"}"}"` template can no longer leak a `}`
+         and promote a dead `onBack()` out of an `if (false)` block
+         (w4-arm3, parser-death).
+  arm6c  "live flag" must be decided by const folding (`isLoaded || (1 == 1)`,
+         w4-arm6c) — and the flag must actually be FLIPPED to true after the
+         read in the same LaunchedEffect, which this docstring has promised
+         since [dv14-B5] but the code never checked.
+
+Any screen that cannot be lexed is a violation: the gate refuses to judge a
+projection it could not build.
+
 Usage: python3 scripts/scan/skill_file_save_result_check.py [repo_root]
        python3 scripts/scan/skill_file_save_result_check.py --selftest
 Exit:  0 = clean, 1 = violation(s), 2 = usage
@@ -60,119 +81,60 @@ OK_GUARD = "if (ok)"
 PREFERRED_ID = "preferredId = skillId"
 EXIT_ASSIGN = "isEditing = false"
 EXIT_CALL = "onBack()"
+# [wide4 w4-arm3] a pop is a pop in either spelling; the guard must be exactly
+# `if (ok)` — `if (ok || true)` keeps the spelling and drops the guard.
+EXIT_CALL_RE = re.compile(r"^onBack\s*(?:\(\s*\)|\.\s*invoke\s*\(\s*\))$")
+GUARD_RE = re.compile(r"\bif\s*\(\s*ok\s*\)")
+
+
+# ── shared lexical projection (wide4 parser-death axis) ─────────────────────
+# This gate used to carry its own `strip_comments` / `mask_strings`. Both were
+# blind to Kotlin string TEMPLATES: `val _s = "${"}"}"` left the inner `}` in
+# the projection, which closed an `if (false) { … }` block early and promoted
+# the dead `onBack()` inside it to a top-level statement of the save guard
+# (wide4 witness `mask_strings`). The projection now comes from the single
+# shared state machine, and a failed parse is a VIOLATION — never a silent
+# fallback to the raw text.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import analyse                                    # noqa: E402
+from _kotlin_ast import (const_bool, match_bracket, stmt_spans,      # noqa: E402
+                         strip_parens)
+
+
+class Unparseable(Exception):
+    """The screen could not be lexed — the gate refuses to judge it."""
+
+
+def _views(text):
+    ok, reason, views = analyse(text)
+    if not ok:
+        raise Unparseable(reason)
+    return views
 
 
 def strip_comments(text):
-    out = []
-    i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        if c == '"':
-            if text.startswith('"""', i):
-                j = text.find('"""', i + 3)
-                j = n if j < 0 else j + 3
-            else:
-                j = i + 1
-                while j < n:
-                    if text[j] == "\\":
-                        j += 2
-                        continue
-                    if text[j] in ('"', "\n"):
-                        j += 1
-                        break
-                    j += 1
-            out.append(text[i:j])
-            i = j
-        elif c == "'":
-            j = i + 1
-            while j < n:
-                if text[j] == "\\":
-                    j += 2
-                    continue
-                if text[j] in ("'", "\n"):
-                    j += 1
-                    break
-                j += 1
-            out.append(text[i:j])
-            i = j
-        elif text.startswith("//", i):
-            j = text.find("\n", i)
-            i = n if j < 0 else j
-        elif text.startswith("/*", i):
-            j = text.find("*/", i)
-            i = n if j < 0 else j + 2
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
+    """Comment-free projection, offsets preserved (string contents intact)."""
+    return _views(text)["comments"]
 
 
 def mask_strings(text):
-    """Blank the CONTENTS of string / char literals, length-preserving.
+    """Projection with comment text AND string/char contents blanked."""
+    return _views(text)["code"]
 
-    [wide3-08 W3] `find_matching_brace` used to scan raw text, so a string
-    literal that spells `"isEditing = false; onBack()"` satisfied arm3's
-    substring checks, and a literal containing `{` / `}` moved the block
-    boundary. Masking keeps every index aligned while the structural scan sees
-    no braces or criterion text inside literals.
-    """
-    out = []
-    i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        if text.startswith('"""', i):
-            j = text.find('"""', i + 3)
-            j = n if j < 0 else j + 3
-            out.append("x" * (j - i))
-            i = j
-        elif c in ('"', "'"):
-            j = i + 1
-            while j < n:
-                if text[j] == "\\":
-                    j += 2
-                    continue
-                if text[j] in (c, "\n"):
-                    j += 1
-                    break
-                j += 1
-            out.append("x" * (j - i))
-            i = j
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
 
 def find_matching_brace(text, open_idx):
-    """Index of the '}' matching the '{' at open_idx, on string-masked text."""
-    masked = mask_strings(text)
-    depth = 0
-    for i in range(open_idx, len(masked)):
-        if masked[i] == "{":
-            depth += 1
-        elif masked[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
+    """Index of the '}' matching the '{' at open_idx, on the code projection."""
+    return match_bracket(mask_strings(text), open_idx)
+
 
 def _match_paren(text, open_idx):
     """Index of the ')' matching the '(' at open_idx (-1 if none)."""
-    masked = mask_strings(text)
-    depth = 0
-    for i in range(open_idx, len(masked)):
-        if masked[i] == "(":
-            depth += 1
-        elif masked[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
+    return match_bracket(mask_strings(text), open_idx)
+
 
 def _unparen(p):
-    p = p.strip()
-    while p.startswith("(") and p.endswith(")") and _match_paren(p, 0) == len(p) - 1:
-        p = p[1:-1].strip()
-    return p
+    return strip_parens(p)
+
 
 def _split_top(s, op):
     """Split at depth-0 occurrences of `op` (string literals masked)."""
@@ -193,86 +155,164 @@ def _split_top(s, op):
     parts.append(s[start:])
     return parts
 
-def _lit_value(part):
-    """True/False when `part` is a bare boolean literal (optionally negated)."""
-    p = _unparen(part)
-    neg = False
-    while p.startswith("!"):
-        neg = not neg
-        p = _unparen(p[1:])
-    if p == "true":
-        v = True
-    elif p == "false":
-        v = False
-    else:
+
+def _fold_bool(expr):
+    """Boolean value of `expr` when literals alone decide it, else None.
+
+    Kotlin precedence is applied here — `||` lowest, then `&&`, then unary `!` —
+    because the shared folder tests a leading `!` BEFORE splitting the operators:
+    `!true && isLoaded` (== `false && …`) came back "unknown", so a gate that can
+    never open read as a live gate. Atoms go to the shared folder.
+    """
+    e = strip_parens(expr.strip())
+    if not e:
         return None
-    return (not v) if neg else v
+    for op in ("||", "&&"):
+        parts = _split_top(e, op)
+        if len(parts) > 1:
+            vals = [_fold_bool(p) for p in parts]
+            if op == "||":
+                if any(v is True for v in vals):
+                    return True
+                return None if any(v is None for v in vals) else False
+            if any(v is False for v in vals):
+                return False
+            return None if any(v is None for v in vals) else True
+    if e.startswith("!") and not e.startswith("!="):
+        v = _fold_bool(e[1:])
+        return None if v is None else (not v)
+    return const_bool(e)
+
+
+def _lit_value(part):
+    """Boolean value of `part` when literals alone decide it (else None).
+
+    [wide4 w4-arm6c] The old helper understood only a bare `true` / `false`
+    (optionally negated), so `isLoaded || (1 == 1)` — a constant by every
+    reading — came back as "unknown" and the gate accepted a dead gate.
+    Const folding is the shared primitive's job: it covers `!true`, `0 == 1`,
+    `"a" == "b"` and Kotlin's short-circuit semantics.
+    """
+    return _fold_bool(part)
+
 
 def _literal_decides(expr):
-    """True when the boolean value of `expr` is fixed by a literal.
+    """True when the boolean value of `expr` is fixed by literals alone.
 
-    `enabled = isLoaded || true` keeps the spelling of the gate and deletes the
-    decision (wide3-08 W2). Kotlin short-circuits, so only operands AFTER the
-    literal are unreachable — but the whole expression's value is already
-    fixed by it.
+    `enabled = isLoaded || true` (wide3-08 W2) and `enabled = isLoaded ||
+    (1 == 1)` (wide4 w4-arm6c) both keep the spelling and delete the decision.
     """
-    e = _unparen(expr)
-    if _lit_value(e) is not None:
-        return True
-    for op, dead in (("||", True), ("&&", False)):
-        for part in _split_top(e, op):
-            if _lit_value(part) is dead:
-                return True
-    return False
+    return _fold_bool(expr) is not None
+
 
 def _statements(block_body):
-    """Top-level statements of a block body (structure from masked text)."""
-    masked = mask_strings(block_body)
-    parts, depth, start = [], 0, 0
-    for i, c in enumerate(masked):
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        elif depth == 0 and (c == ";" or c == "\n"):
-            parts.append(block_body[start:i])
-            start = i + 1
-    parts.append(block_body[start:])
-    return [p.strip() for p in parts if p.strip()]
+    """Top-level statements of a block body (Kotlin needs no semicolons)."""
+    body = mask_strings(block_body)
+    return [body[a:b].strip() for a, b in stmt_spans(body) if body[a:b].strip()]
 
 REPO_WRITE_CALLS = ("importFromContent(", "writeSkillFile(")
 
-def _value_from_write(expr):
+# A plain receiver prefix (`skillRepository.`, `app.repo.`) — nothing else may
+# precede the write call: `.let { }.writeSkillFile(` is not the call's value.
+RECEIVER_PREFIX = re.compile(r"^[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*\s*\.\s*$")
+IDENT_ONLY = re.compile(r"^[A-Za-z_]\w*$")
+# What may follow the write call without replacing its value.
+VALUE_SUFFIXES = ("", "!= null", "== null", "!=null", "==null", "!!")
+BINDING_RE = re.compile(r"(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=]+?)?=\s*")
+
+
+def _norm(s):
+    return " ".join(s.split())
+
+
+def _leaf_is_write(e):
+    """True when the leaf expression's VALUE **is** a repository write result.
+
+    [wide4 w4-arm2] The old leaf test was `any(call in e)` — a presence test. So
+    `writeSkillFile(…) || true` (value: constant true) and
+    `writeSkillFile(…).let { true }` (value: the lambda's) both read as "the
+    write's result" and a FAILED write popped the screen as if it succeeded.
+    The leaf must now BE the call: a plain receiver prefix, the call itself, and
+    nothing after it but a null comparison.
+    """
+    n = _norm(e)
+    for call in REPO_WRITE_CALLS:
+        start = 0
+        while True:
+            idx = n.find(call, start)
+            if idx < 0:
+                break
+            start = idx + 1
+            prefix = n[:idx]
+            if prefix.strip() and not RECEIVER_PREFIX.match(prefix):
+                continue
+            close = match_bracket(n, idx + len(call) - 1)
+            if close < 0:
+                continue
+            if n[close + 1:].strip() in VALUE_SUFFIXES:
+                return True
+    return False
+
+
+def _block_last(expr):
+    """(last statement, {name: init}) of a `{ … }` block body."""
+    body = expr[1:-1]
+    stmts = [body[a:b].strip() for a, b in stmt_spans(body)]
+    stmts = [s for s in stmts if s]
+    if not stmts:
+        return None, {}
+    env = {}
+    for s in stmts[:-1]:
+        m = BINDING_RE.match(s)
+        if m:
+            env[m.group(1)] = s[m.end():]
+    return stmts[-1], env
+
+
+def _value_from_write(expr, env=None):
     """True when the VALUE of `expr` is derived from a repository write.
 
-    `val ok = withContext(Dispatchers.IO) { ...; true }` returns a constant:
-    the write's boolean is discarded, `if (ok)` pops the screen and the user's
-    edits vanish with no error (wide3-08 W1). The criterion walks the value
-    expression — brace blocks and both branches of an if/else — and requires
-    the leaf value to BE the write's result.
+    `val ok = withContext(Dispatchers.IO) { …; true }` returns a constant: the
+    write's boolean is discarded, `if (ok)` pops the screen and the user's edits
+    vanish with no error (wide3-08 W1). wide4 closes two more holes in this
+    walk: a trailing `|| true` on the write itself (w4-arm2), and the audited
+    FALSE_POSITIVE `val saved = …; saved`, which must stay GREEN.
     """
-    e = expr.strip()
-    while e.startswith("{") and e.endswith("}") and find_matching_brace(e, 0) == len(e) - 1:
-        stmts = _statements(e[1:-1])
-        if not stmts:
+    env = dict(env or {})
+    e = strip_parens(expr.strip())
+    while e.startswith("{") and match_bracket(e, 0) == len(e) - 1:
+        last, inner = _block_last(e)
+        if last is None:
             return False
-        e = stmts[-1].strip()
+        env.update(inner)
+        e = strip_parens(last)
+    if IDENT_ONLY.match(e) and e in env:
+        return _value_from_write(env.pop(e), env)
     m = re.match(r"if\s*\(", e)
     if m:
         mp = _match_paren(e, m.end() - 1)
         if mp < 0:
             return False
-        rest = e[mp + 1:]
-        then_part, else_part = _split_else(rest)
+        then_part, else_part = _split_else(e[mp + 1:])
         if not else_part.strip():
             # `if (c) X` without else evaluates to Unit — never the write result
             return False
-        return _value_from_write(then_part) and _value_from_write(else_part)
-    if _lit_value(e) is not None:
+        decided = const_bool(strip_parens(e[m.end():mp]))
+        if decided is True:
+            return _value_from_write(then_part, env)
+        if decided is False:
+            return _value_from_write(else_part, env)
+        return _value_from_write(then_part, env) and _value_from_write(else_part, env)
+    if const_bool(e) is not None:
         return False
     if re.fullmatch(r"(?:null|Unit|nothing)", e):
         return False
-    return any(c in e for c in REPO_WRITE_CALLS)
+    for op in ("||", "&&"):
+        parts = _split_top(e, op)
+        if len(parts) > 1:
+            return all(_value_from_write(p, env) for p in parts)
+    return _leaf_is_write(e)
+
 
 def _split_else(rest):
     """`then` / `else` halves of an `if (...) A else B` expression."""
@@ -305,7 +345,11 @@ def screen_segment(repo_root):
     if idx < 0:
         raise SystemExit("FATAL: %s not found in %s" % (SCREEN_ANCHOR, TARGET_REL))
     # The screen is the last top-level function in the file.
-    seg = strip_comments(src[idx:])
+    # [wide4] The projection is the shared lexer's `code` view (comments AND
+    # string/char contents blanked, offsets preserved). A parse failure raises
+    # Unparseable, which `main` reports as a violation: a gate that silently
+    # judged the raw text is exactly how `"${"}"}"` promoted a dead `onBack()`.
+    seg = mask_strings(src[idx:])
     return seg
 
 
@@ -338,7 +382,9 @@ def enclosing_io_block(text, read_idx):
     idx = text.find("withContext(Dispatchers.IO)")
     while idx >= 0:
         open_paren = text.find("(", idx)
-        close_paren = text.find(")", open_paren)
+        close_paren = _match_paren(text, open_paren) if open_paren >= 0 else -1
+        if close_paren < 0:
+            return None
         span = block_span(text, close_paren + 1)
         if span and span[0] < read_idx <= span[1]:
             return span
@@ -394,21 +440,58 @@ def _live_gate_flag(text, expr):
     """True when `expr` gates on a LIVE async-load flag.
 
     A live flag is: (a) declared as state whose initial value is not a literal
-    `true`/`false`, and (b) actually flipped (`<name> = true`) inside the
-    LaunchedEffect that performs the read. `isLoaded || true` and a flag seeded
-    `mutableStateOf(true)` both fail: the gate cannot ever hold the editor back.
+    `true`/`false` (a flag seeded `mutableStateOf(true)` can never hold the
+    editor back), (b) its value is not fixed by literals
+    (`isLoaded || true` — wide3-08 W2 — and `isLoaded || (1 == 1)` — wide4
+    w4-arm6c — both keep the spelling and delete the decision), and (c) it is
+    actually flipped to `true` AFTER the read, inside the LaunchedEffect that
+    performs the read.
+
+    (c) was promised by this docstring since [dv14-B5] but never implemented:
+    deleting `isLoaded = true` left the gate green, which is a gate that can
+    never open.
     """
-    e = _unparen(expr).rstrip(",").strip()
-    if not e or _lit_value(e) is not None or _literal_decides(e):
+    e = strip_parens(expr).rstrip(",").strip()
+    if not e or _literal_decides(e):
         return False
-    for name in set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", mask_strings(e))):
+    read_idx = text.find("readSkillFile(")
+    for name in sorted(set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", e))):
         init = _flag_decl_init(text, name)
         if init is None:
             continue
         # a flag seeded `mutableStateOf(true)` can never hold the editor back
-        if _lit_value(_unparen(init)) is not None:
+        if _lit_value(init) is not None:
             continue
-        return True
+        if _flip_after_read(text, name, read_idx):
+            return True
+    return False
+
+
+def _flip_after_read(text, name, read_idx):
+    """`<name> = true` inside the LaunchedEffect that performs the read, after it.
+
+    Returns False when such an effect exists but never flips the flag (the gate
+    can never open), and False when no effect contains the read at all — the
+    read then runs during composition, which arm6a/6b already reject; arm6c
+    stays fail-closed rather than crediting an unproven flag.
+    """
+    if read_idx < 0:
+        return False
+    idx = text.find("LaunchedEffect(")
+    while idx >= 0:
+        open_paren = text.find("(", idx)
+        close_paren = _match_paren(text, open_paren) if open_paren >= 0 else -1
+        if close_paren < 0:
+            return False
+        span = block_span(text, close_paren + 1)
+        if span and span[0] < read_idx <= span[1]:
+            blk = text[span[0]:span[1] + 1]
+            for m in re.finditer(r"\b" + re.escape(name) + r"\s*=\s*([^\n]+)", blk):
+                rhs = m.group(1).split("}")[0]
+                if span[0] + m.start() > read_idx and _lit_value(rhs) is True:
+                    return True
+            return False
+        idx = text.find("LaunchedEffect(", idx + 1)
     return False
 
 
@@ -455,10 +538,15 @@ def run_offmain_checks(seg):
 
 
 def _unguarded_pop(seg, guard_span):
-    """True when an `onBack()` statement runs OUTSIDE the `if (ok)` guard but
-    inside the same save callback (an unconditional pop, wide3-08 W3)."""
+    r"""True when a pop runs OUTSIDE the `if (ok)` guard but inside the same save
+    callback (an unconditional pop, wide3-08 W3).
+
+    [wide4 w4-arm3] `onBack` is a `() -> Unit` parameter, so `onBack.invoke()` is
+    the same call in different spelling and used to walk straight past the old
+    `\bonBack\s*\(\s*\)` pattern.
+    """
     masked = mask_strings(seg)
-    for m in re.finditer(r"\bonBack\s*\(\s*\)", masked):
+    for m in re.finditer(r"\bonBack\s*(?:\(\s*\)|\.\s*invoke\s*\(\s*\))", masked):
         i = m.start()
         if guard_span[0] <= i <= guard_span[1]:
             continue
@@ -521,17 +609,18 @@ def run_checks(seg):
     # literals masked: `val _dead = "isEditing = false; onBack()"` is not an
     # exit, and an `onBack()` hoisted above the guard is an unconditional pop
     # even though the guard block still spells both.
+    # [wide4 w4-arm3] the guard must be `if (ok)` exactly (a constant condition
+    # decides as a literal), and the pop may be spelled `onBack.invoke()`.
     arm3 = False
-    guard = seg.find(OK_GUARD)
-    if guard >= 0:
-        span = block_span(seg, guard + len(OK_GUARD))
+    guard_m = GUARD_RE.search(seg)
+    if guard_m:
+        span = block_span(seg, guard_m.end())
         blk = seg[span[0]:span[1] + 1] if span else None
-        masked_seg = mask_strings(seg)
-        exit_assigns = masked_seg.count(EXIT_ASSIGN)
+        exit_assigns = seg.count(EXIT_ASSIGN)
         if blk is not None:
             stmts = _statements(blk[1:-1])
             has_assign = any(s.startswith(EXIT_ASSIGN) for s in stmts)
-            has_call = any(s.startswith(EXIT_CALL) for s in stmts)
+            has_call = any(EXIT_CALL_RE.match(_norm(s)) for s in stmts)
             arm3 = has_assign and has_call and exit_assigns == 1 \
                 and not _unguarded_pop(seg, span)
     if not arm3:
@@ -757,14 +846,86 @@ SAVE_W3_LITERAL = COMPLIANT.replace(
 SAVE_W2_OR_TRUE = OFFMAIN_COMPLIANT.replace(
     "enabled = isLoaded,", "enabled = isLoaded || true,")
 
+# ── [wide4] witnesses re-attacked from the external audit ───────────────────
+# w4-arm2 (dataflow): the write's value is short-circuited on the SAME
+# expression, so the block's tail statement is still the write call — wide3's
+# trailing-`true`-statement arm cannot see it.
+SAVE_W4_OR_TRUE = COMPLIANT.replace(
+    "skillRepository.writeSkillFile(skillId, relativePath, contentToSave)\n",
+    "skillRepository.writeSkillFile(skillId, relativePath, contentToSave) || true\n")
+
+# w4-arm2 (dataflow): a scope function replaces the write's value.
+SAVE_W4_LET_TRUE = COMPLIANT.replace(
+    "skillRepository.writeSkillFile(skillId, relativePath, contentToSave)\n",
+    "skillRepository.writeSkillFile(skillId, relativePath, contentToSave).let { true }\n")
+
+# w4-arm3 (family-hole): `onBack` is a function VALUE, so `.invoke()` is the
+# same pop in a spelling the old `onBack()` pattern never matched.
+SAVE_W4_INVOKE_POP = COMPLIANT.replace(
+    """if (ok) {
+                                isEditing = false
+                                onBack()
+                            } else {""",
+    """onBack.invoke()
+                            if (ok) {
+                                isEditing = false
+                                onBack()
+                            } else {""")
+
+# w4-arm3 (parser-death): a `${…}` template inside the guard block used to leak
+# its inner `}` into the projection, split the block early and promote the dead
+# `onBack()` under `if (false)` to a top-level statement of the guard.
+SAVE_W4_TEMPLATE_BRACE = COMPLIANT.replace(
+    """if (ok) {
+                                isEditing = false
+                                onBack()
+                            } else {""",
+    '''if (ok) {
+                                isEditing = false
+                                if (false) {
+                                    val _s = "${"}"}"
+                                    onBack()
+                                }
+                            } else {''')
+
+# w4-arm6c (family-hole): a constant comparison in place of the literal `true`.
+SAVE_W4_CONST_COMPARE = OFFMAIN_COMPLIANT.replace(
+    "enabled = isLoaded,", "enabled = isLoaded || (1 == 1),")
+
+# w4-arm6c (dataflow): the flag is declared and gated on but never flipped —
+# the gate can never open, which the unaudited docstring promised to catch.
+SAVE_W4_FLAG_NEVER_FLIPPED = OFFMAIN_COMPLIANT.replace("        isLoaded = true\n", "")
+
+# w4-arm2 GREEN control: the audited FALSE_POSITIVE. The block's value is
+# carried by a local (`val saved = …; saved`) — an indirection, not a constant,
+# and a legitimate refactor the tightened leaf test must keep accepting.
+SAVE_W4_OK_SAVED = COMPLIANT.replace(
+    "                                if (isSkillMd) {\n",
+    "                                val saved = if (isSkillMd) {\n",
+).replace(
+    "skillRepository.writeSkillFile(skillId, relativePath, contentToSave)\n"
+    "                                }\n"
+    "                            }\n",
+    "skillRepository.writeSkillFile(skillId, relativePath, contentToSave)\n"
+    "                                }\n"
+    "                                saved\n"
+    "                            }\n")
+
 assert SAVE_W1_TAIL_TRUE != COMPLIANT, "wide3-08 W1 fixture anchor missing"
 assert SAVE_W3_LITERAL != COMPLIANT, "wide3-08 W3 fixture anchor missing"
 assert SAVE_W2_OR_TRUE != OFFMAIN_COMPLIANT, "wide3-08 W2 fixture anchor missing"
+assert SAVE_W4_OR_TRUE != COMPLIANT, "wide4 arm2 fixture anchor missing"
+assert SAVE_W4_LET_TRUE != COMPLIANT, "wide4 arm2 let fixture anchor missing"
+assert SAVE_W4_INVOKE_POP != COMPLIANT, "wide4 arm3 fixture anchor missing"
+assert SAVE_W4_TEMPLATE_BRACE != COMPLIANT, "wide4 arm3 template fixture anchor missing"
+assert SAVE_W4_CONST_COMPARE != OFFMAIN_COMPLIANT, "wide4 arm6c fixture anchor missing"
+assert SAVE_W4_FLAG_NEVER_FLIPPED != OFFMAIN_COMPLIANT, "wide4 arm6c flip fixture anchor missing"
+assert SAVE_W4_OK_SAVED != COMPLIANT, "wide4 saved-indirection fixture anchor missing"
 
 def selftest():
     failures = []
     # compliant fixture: all arms green
-    f = run_checks(strip_comments(COMPLIANT))
+    f = run_checks(mask_strings(COMPLIANT))
     if f:
         failures.append("compliant fixture unexpectedly red: %s" % f)
     # each violation fixture flips exactly its own arm red
@@ -774,23 +935,39 @@ def selftest():
     for name, fixture, arm in expectations + [
         ("W1'-tail-true", SAVE_W1_TAIL_TRUE, "arm2"),
         ("W3'-literal-pop", SAVE_W3_LITERAL, "arm3"),
+        ("w4-arm2-or-true", SAVE_W4_OR_TRUE, "arm2"),
+        ("w4-arm2-let-true", SAVE_W4_LET_TRUE, "arm2"),
+        ("w4-arm3-invoke-pop", SAVE_W4_INVOKE_POP, "arm3"),
+        ("w4-arm3-template-brace", SAVE_W4_TEMPLATE_BRACE, "arm3"),
     ]:
-        got = run_checks(strip_comments(fixture))
+        got = run_checks(mask_strings(fixture))
         red = [a for a in all_arms if any(a in x for x in got)]
         if red != [arm]:
             failures.append("%s: expected exactly [%s] red, got %s" % (name, arm, red))
+    # wide4 GREEN control: an indirection through a local keeps the contract.
+    got = run_checks(mask_strings(SAVE_W4_OK_SAVED))
+    if got:
+        failures.append("w4-ok-saved-indirection: a `val saved = …; saved` block value must "
+                        "stay green, got %s" % got)
     # [dv14-B5] arm6 fixtures: offmain compliant green + per-mutation teeth
-    f6 = run_offmain_checks(strip_comments(OFFMAIN_COMPLIANT))
+    f6 = run_offmain_checks(mask_strings(OFFMAIN_COMPLIANT))
     if f6:
         failures.append("offmain compliant fixture unexpectedly red: %s" % f6)
     off_expectations = [
-        ("W1", OFFMAIN_W1, ["arm6a", "arm6b"]),
+        # [wide4] arm6c now also proves the flag is FLIPPED after the read (the
+        # docstring promised it since [dv14-B5]); removing the whole
+        # LaunchedEffect leaves the flag stuck at its seed, so W1 trips all
+        # three arms — the read moved into composition AND the gate can never
+        # open.
+        ("W1", OFFMAIN_W1, ["arm6a", "arm6b", "arm6c"]),
         ("W2", OFFMAIN_W2, ["arm6a"]),
         ("W3", OFFMAIN_W3, ["arm6c"]),
         ("W2'-or-true", SAVE_W2_OR_TRUE, ["arm6c"]),
+        ("w4-arm6c-const-compare", SAVE_W4_CONST_COMPARE, ["arm6c"]),
+        ("w4-arm6c-never-flipped", SAVE_W4_FLAG_NEVER_FLIPPED, ["arm6c"]),
     ]
     for name, fixture, arms in off_expectations:
-        got = run_offmain_checks(strip_comments(fixture))
+        got = run_offmain_checks(mask_strings(fixture))
         red = [a for a in ["arm6a", "arm6b", "arm6c"] if any(a in x for x in got)]
         if red != arms:
             failures.append("%s: expected exactly %s red, got %s" % (name, arms, red))
@@ -800,10 +977,12 @@ def selftest():
         print("SKILL_FILE_SAVE_RESULT_SELFTEST=FAIL")
         return 1
     print(
-        "selftest OK: compliant green + 7 violation fixtures each flip exactly "
-        "their own arm + offmain green + 4 offmain fixtures each flip their own arm "
-        "(incl. the wide3-08 re-attacks: arm2 trailing constant, arm3 literal pop, "
-        "arm6c literal-short-circuited gate)"
+        "selftest OK: compliant green + 11 violation fixtures each flip exactly "
+        "their own arm + offmain green + 6 offmain fixtures each flip their own arm "
+        "+ the allowed indirection stays green "
+        "(incl. the wide3-08 and wide4 re-attacks: arm2 trailing constant / "
+        "short-circuit / scope suffix, arm3 literal pop / `onBack.invoke()` / "
+        "template-brace, arm6c literal-short-circuited and never-flipped gate)"
     )
     print("SKILL_FILE_SAVE_RESULT_SELFTEST=PASS")
     return 0
@@ -814,7 +993,14 @@ def main():
         return selftest()
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     root = args[0] if args else "."
-    seg = screen_segment(root)
+    try:
+        seg = screen_segment(root)
+    except Unparseable as exc:
+        # fail-closed: an unviewable screen is a violation, never a pass
+        print("skill_file_save_result_check: 1 violation(s) in %s" % TARGET_REL)
+        print("  - lex: the screen cannot be lexed (%s) — the gate refuses to judge "
+              "a broken lexical projection" % exc)
+        return 1
     failures = run_checks(seg) + run_offmain_checks(seg)
     if failures:
         print("skill_file_save_result_check: %d violation(s) in %s" % (len(failures), TARGET_REL))
