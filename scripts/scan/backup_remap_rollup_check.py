@@ -71,6 +71,10 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import analyse, mask_code, mask_comments, KotlinLexError  # noqa: E402
+from _kotlin_ast import const_bool, stmt_spans  # noqa: E402
+
 CFG_REL = "src/android/app/src/main/java/com/rikkaminis/app/backup/ConfigBackup.kt"
 MEM_REL = "src/android/app/src/main/java/com/rikkaminis/app/data/repository/MemoryRepository.kt"
 BUILTINS_REL = "src/android/app/src/main/java/com/rikkaminis/app/config/ConfigBuiltins.kt"
@@ -152,40 +156,18 @@ def strip_kotlin_comments(text):
 
     KDoc mentioning `RollupClass.TRANSIENT` must not satisfy a criterion that
     asks for a *filter*; blanking comments keeps presence checks about CODE.
+
+    [wide4-11 C3, parser-death] the hand-rolled scanner here closed a block
+    comment at the FIRST `*/`, so Kotlin's NESTED block comment
+    `/* outer /* inner */ still-a-comment */` ended early and the guarded code
+    inside came back as live code. It also mis-read `'"'`, raw strings and
+    `${…}` templates. All of that now comes from the shared lexer
+    (`_kotlin_lexer.mask_comments`), which is the single masking projection
+    every gate in this repo uses. A source the lexer cannot parse raises
+    `KotlinLexError`; `check()` pre-lexes every input and reports it as a
+    violation (fail-closed), so a broken file can never read as green.
     """
-    out = []
-    i = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if c == '"':
-            j = i + 1
-            while j < n:
-                if text[j] == '\\':
-                    j += 2
-                    continue
-                if text[j] == '"':
-                    j += 1
-                    break
-                j += 1
-            out.append(text[i:j])
-            i = j
-            continue
-        if c == '/' and i + 1 < n and text[i + 1] == '/':
-            j = text.find('\n', i)
-            j = n if j < 0 else j
-            out.append(' ' * (j - i))
-            i = j
-            continue
-        if c == '/' and i + 1 < n and text[i + 1] == '*':
-            j = text.find('*/', i + 2)
-            j = n if j < 0 else j + 2
-            out.append(''.join(ch if ch == '\n' else ' ' for ch in text[i:j]))
-            i = j
-            continue
-        out.append(c)
-        i += 1
-    return ''.join(out)
+    return mask_comments(text)
 
 def kotlin_fun_map(src):
     """Map function name -> body text (comments blanked) for every `fun` decl."""
@@ -258,11 +240,15 @@ def code_only(text):
     [wide3-08 C1-C3, parser-death] this used to split on `//` only, so
     `/* if (name == ROLLUP_FILE) return false */` still satisfied
     `ROLLUP_GUARD in code_only(body)` and the guard could be commented away
-    while the gate stayed green. `strip_kotlin_comments` (same file, already
-    used by the F/C-R rules) blanks both comment kinds and keeps string
-    literals intact, so literal-shaped criteria below are unaffected.
+    while the gate stayed green.
+
+    [wide4-11 C3, parser-death] the replacement still closed a block comment at
+    the first `*/`, so the NESTED form `/* outer /* inner */ <code> */` put the
+    code back in the "live" view. It now delegates to the shared lexer (see
+    `strip_kotlin_comments`), which keeps string literals intact — every
+    literal-shaped criterion below still reads the same text.
     """
-    return strip_kotlin_comments(text)
+    return mask_comments(text)
 
 
 def line_of(src, idx):
@@ -274,45 +260,18 @@ def _mask(text):
 
     Structure scans run on masked text, so a `}` inside a literal or a
     `/* } */` comment cannot move a block boundary (wide3-08 parser-death).
+
+    [wide4-11 C3, parser-death] shared lexer, so nested block comments, `'"'`,
+    raw strings and `${…}` templates no longer shift the bracket depth. A
+    DERIVED FRAGMENT that the lexer cannot close (a slice boundary inside a
+    literal) is blanked wholesale: nothing structural can be read out of it,
+    which is the fail-closed direction for every criterion that uses it.
     """
-    out = []
-    i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        if text.startswith('"""', i):
-            j = text.find('"""', i + 3)
-            j = n if j < 0 else j + 3
-            out.append("x" * (j - i))
-            i = j
-            continue
-        if c in ('"', "'"):
-            j = i + 1
-            while j < n:
-                if text[j] == "\\":
-                    j += 2
-                    continue
-                if text[j] in (c, "\n"):
-                    j += 1
-                    break
-                j += 1
-            out.append("x" * (j - i))
-            i = j
-            continue
-        if text.startswith("//", i):
-            j = text.find("\n", i)
-            j = n if j < 0 else j
-            out.append(" " * (j - i))
-            i = j
-            continue
-        if text.startswith("/*", i):
-            j = text.find("*/", i + 2)
-            j = n if j < 0 else j + 2
-            out.append("".join(ch if ch == "\n" else " " for ch in text[i:j]))
-            i = j
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
+    try:
+        return mask_code(text)
+    except KotlinLexError:
+        return " " * len(text)
+
 
 def _balanced(src, open_idx, opener="(", closer=")"):
     """Index just past the closer matching the opener at [open_idx] (-1 if none).
@@ -377,21 +336,20 @@ def _lit_value(part):
     return (not v) if neg else v
 
 def _truth(cond):
-    """True/False when a condition is DECIDED by a literal, else None.
+    """True/False when a condition is DECIDED by a constant, else None.
 
     `if (false) entryIdMap else emptyMap()` is decided: the map survives only
     in the branch that never runs (wide3-08 R1).
+
+    [wide4-11 A, family-hole] the local folding only knew bare `true`/`false`
+    and one `&&`/`||` level, so every equivalent spelling of "never" walked
+    through: `!true`, `0 == 1`, `1 == 2`, `false && guard`, `true || guard`,
+    `null != null`. Constant folding now comes from the shared
+    `_kotlin_ast.const_bool`, which implements exactly those (short-circuit
+    included), so a decision the compiler makes is a decision the gate makes.
     """
-    c = _unparen(cond)
-    if _lit_value(c) is not None:
-        return _lit_value(c)
-    for part in _split_top(c, "||"):
-        if _lit_value(part) is True:
-            return True
-    for part in _split_top(c, "&&"):
-        if _lit_value(part) is False:
-            return False
-    return None
+    return const_bool(_unparen(cond))
+
 
 def _split_else(rest):
     """`then` / `else` halves of an `if (...) A else B` expression."""
@@ -503,39 +461,81 @@ def _arg_value(text, start):
         i += 1
     return None
 
-CHAIN_LINK = re.compile(r"\.\s*(let|run|also|apply|takeIf|takeUnless)\s*\{")
+BRACED_MAP_CAST = re.compile(r"\s+as\s+[A-Za-z_][\w.]*(?:\s*<[^<>]*>)?\??\s*$")
 
-def _drops_remap(rhs):
-    """True when a chain link after the remap call throws its result away.
+def _live_ident(expr):
+    """The bare identifier an arm hands over at runtime, or None.
 
-    `remapSessionBindingJson(...).let { null }` keeps the call in the spelling
-    and discards the remapped JSON; `.let { s.optString("modelBinding") }` puts
-    the un-remapped source uuid back (wide3-08 B). A link that reads `it` (or
-    `this` for run/apply) passes the value along and stays legal.
+    [wide4-11 A / D2, family-hole] the routing criteria used to ask
+    `"entryIdMap" in _live_value(value)` — a SUBSTRING test, so a value that
+    keeps the spelling and deletes the decision stayed green:
+    `entryIdMap.filter { false }`, `entryIdMap.let { emptyMap() }`,
+    `entryIdMap.takeIf { false } ?: emptyMap()`, `entryIdMap.also { }`
+    (which is legal, hence an allow-list and not a deny-list of suffixes).
+    The judgement is now POSITIVE: after constant folding, the live value must
+    be exactly one identifier — nothing grafted onto it. A trailing `!!` or an
+    `as Map<…>` cast is spelling only and is ignored.
     """
-    idx = rhs.find(REMAP_SESSION_CALL)
-    if idx < 0:
+    live = _unparen(_live_value(expr))
+    live = re.sub(r"\s+", " ", live.strip().rstrip(",").strip())
+    live = BRACED_MAP_CAST.sub("", live).strip()
+    while live.endswith("!!"):
+        live = live[:-2].strip()
+    return live if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", live) else None
+
+
+def _arm_value_for(branch, literal):
+    """Value text of the `when` arm whose PATTERN spells `literal`, or None.
+
+    `branch` is the raw `when (path) { … }` text; the pattern position is the
+    occurrence with an `->` on the same line (a mention inside some other arm's
+    value is not a pattern). Values are taken from the raw text so messages
+    echo what the file says.
+    """
+    scan = code_only(branch)
+    pos = 0
+    while True:
+        k = scan.find(literal, pos)
+        if k < 0:
+            return None
+        arrow = scan.find("->", k + len(literal))
+        if arrow < 0:
+            return None
+        if "\n" not in scan[k + len(literal):arrow]:
+            return branch[arrow + 2:_arm_end(branch, arrow + 2)]
+        pos = k + len(literal)
+
+
+def _routes_to_map(branch, literal, ident):
+    """(True, value) when the arm's LIVE value is exactly `ident`."""
+    value = _arm_value_for(branch, literal)
+    if value is None:
+        return False, None
+    return _live_ident(value) == ident, value
+
+
+def _is_exact_call(rhs, call):
+    """True when `rhs` is exactly `<call>…)</call>` with nothing grafted on.
+
+    [wide4-11 B, family-hole] `_drops_remap` used to GUESS whether a trailing
+    chain link threw the result away by looking for `it` inside the link's
+    lambda body — so `.let { val _u = it; null }` read as "uses the value" and
+    stayed green, while `.takeIf { it == "never" }` (a real discard) was in
+    neither the allow-list nor the deny-list. The judgement is now POSITIVE:
+    the assignment's right-hand side must BE the call — the balanced `)` of
+    `call` has to be the last thing in the expression. Any `.let` / `.run` /
+    `.also` / `.apply` / `.takeIf` / `?:` / `if (…) … else …` wrapper is red.
+    """
+    r = _unparen(rhs).strip()
+    if not r.startswith(call):
         return False
-    op = rhs.find("(", idx)
-    cp = _match_paren(rhs, op) if op >= 0 else -1
+    op = r.find("(", len(call) - 1)
+    if op < 0:
+        return False
+    cp = _match_paren(r, op)
     if cp < 0:
-        return True
-    tail = rhs[cp + 1:]
-    m = CHAIN_LINK.search(tail)
-    if not m:
         return False
-    link = m.group(1)
-    brace = tail.find("{", m.end() - 1)
-    end = _balanced(tail, brace, "{", "}") if brace >= 0 else -1
-    if end < 0:
-        return True
-    body = _mask(tail[brace + 1:end - 1])
-    if link in ("run", "apply"):
-        return not re.search(r"\bthis\b", body)
-    pm = re.match(r"\s*([A-Za-z_]\w*)\s*->", body)
-    if pm:
-        return not re.search(r"\b%s\b" % re.escape(pm.group(1)), body[pm.end():])
-    return not re.search(r"\bit\b", body)
+    return r[cp + 1:].strip() == ""
 
 
 def function_text(src, header):
@@ -550,39 +550,36 @@ def function_text(src, header):
     return None if end < 0 else src[i:end]
 
 
-def check_remap_defaults(src):
-    """A: remapDefaultsIds' `when (path)` must route runtime.compactModelEntryId."""
+def _when_path_branch(src):
+    """The raw `when (path) { … }` text of remapDefaultsIds, or (None, reason)."""
     body = function_text(src, "fun remapDefaultsIds(")
     if body is None:
-        return [(CFG_REL, 0, "remapDefaultsIds( not found — gate ROT")]
+        return None, "remapDefaultsIds( not found — gate ROT"
     when = body.find("when (path)")
     if when < 0:
-        return [(CFG_REL, 0, "remapDefaultsIds no longer branches on `path` — gate ROT")]
+        return None, "remapDefaultsIds no longer branches on `path` — gate ROT"
     end = _balanced(body, body.find("{", when), "{", "}")
-    branch = body[when:end - 1 if end > 0 else len(body)]
-    routed = False
-    seen_value = None
-    for m in re.finditer(re.escape(COMPACT_PATH), branch):
-        arrow = branch.find("->", m.end())
-        if arrow < 0 or "\n" in branch[m.end():arrow]:
-            # not a pattern position (a mention inside some other arm's value)
-            continue
-        value = branch[arrow + 2:_arm_end(branch, arrow + 2)]
-        seen_value = value
-        if "entryIdMap" in _live_value(value):
-            routed = True
-            break
-    if not routed:
-        if seen_value is None:
-            msg = ("remapDefaultsIds does not route " + COMPACT_PATH + " to entryIdMap"
-                   " — a restored install silently loses its pinned compaction model")
-        else:
-            msg = ("remapDefaultsIds routes " + COMPACT_PATH + " through `"
-                   + " ".join(seen_value.split())[:70] + "`, whose LIVE value is not "
-                   "entryIdMap — the map survives in the spelling only (a dead branch "
-                   "or a constant fold never hands it over)")
-        return [(CFG_REL, line_of(src, src.find("fun remapDefaultsIds(")), msg)]
-    return []
+    return body[when:end - 1 if end > 0 else len(body)], None
+
+
+def check_remap_defaults(src):
+    """A: remapDefaultsIds' `when (path)` must route runtime.compactModelEntryId
+    to entryIdMap — as the value the code actually hands over."""
+    branch, rot = _when_path_branch(src)
+    if rot:
+        return [(CFG_REL, 0, rot)]
+    ok, value = _routes_to_map(branch, COMPACT_PATH, "entryIdMap")
+    if ok:
+        return []
+    if value is None:
+        msg = ("remapDefaultsIds does not route " + COMPACT_PATH + " to entryIdMap"
+               " — a restored install silently loses its pinned compaction model")
+    else:
+        msg = ("remapDefaultsIds routes " + COMPACT_PATH + " through `"
+               + " ".join(value.split())[:70] + "`, whose LIVE value is not exactly "
+               "entryIdMap — the map survives in the spelling only (a dead branch, a "
+               "constant fold or a chain grafted onto it never hands it over)")
+    return [(CFG_REL, line_of(src, src.find("fun remapDefaultsIds(")), msg)]
 
 
 def check_import_chat_sections(src):
@@ -615,7 +612,8 @@ def check_import_chat_sections(src):
                 line_of(src, src.find("internal suspend fun importChatSections(")),
                 "importChatSections calls " + REMAP_SESSION_CALL + " without " + arg,
             )]
-    # [wide3-08 B] ... and the value handed to modelBinding must BE the result.
+    # [wide3-08 B / wide4-11 B] ... and the value handed to modelBinding must BE
+    # the result: the balanced `)` of the call has to end the expression.
     for m in re.finditer(r"modelBinding\s*=", code):
         rhs = _arg_value(code, m.end())
         if rhs is None:
@@ -624,13 +622,15 @@ def check_import_chat_sections(src):
                 line_of(src, src.find("internal suspend fun importChatSections(")),
                 "modelBinding assignment cannot be parsed — fail-closed",
             )]
-        if _drops_remap(rhs):
+        if not _is_exact_call(rhs, REMAP_SESSION_CALL):
             return [(
                 CFG_REL,
                 line_of(src, src.find("internal suspend fun importChatSections(")),
-                "importChatSections keeps the " + REMAP_SESSION_CALL + " call but a "
-                "chain link after it does not use the result (`.let { null }` / "
-                "`.let { s.optString(…) }`) — the restored session keeps the source "
+                "importChatSections keeps the " + REMAP_SESSION_CALL + " call but the "
+                "assignment's right-hand side is not that call's result (`"
+                + " ".join(rhs.split())[:60] + "…`) — a chain link (`.let { null }` / "
+                "`.let { val _u = it; null }` / `.takeIf { … }`) or a wrapping branch "
+                "discards the remapped JSON and the restored session keeps the source "
                 "install's uuids",
             )]
     return []
@@ -683,46 +683,89 @@ def check_restore_writeback(src):
     return []
 
 
+GUARD_NORM = re.sub(r"\s+", " ", ROLLUP_GUARD).strip()
+DELETE_CALL = ".delete()"
+
+
+def _norm_stmt(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def check_delete_guard(src):
-    """C3: deleteFile must refuse the rollup product file."""
+    """C3: deleteFile must refuse the rollup product file — as a LIVE top-level
+    statement that runs before the delete.
+
+    [wide4-11 C3, family-hole] the criterion asked for the guard's SPELLING
+    (`ROLLUP_GUARD in code_only(body)`), so wrapping it in a dead outer
+    branch kept every character: `if (false) { if (name == ROLLUP_FILE) return
+    false }` stayed green while the compiler dropped the guard entirely. It is
+    now judged structurally: the guard must be one of deleteFile's TOP-LEVEL
+    statements (nothing enclosing it can short-circuit it — an outer `if
+    (false)`, `if (true)`, lambda or `when` arm all make it a different, deeper
+    statement) and it must precede the `.delete()` call it is meant to gate.
+    """
     body = function_text(src, "fun deleteFile(name: String)")
     if body is None:
         return [(MEM_REL, 0, "deleteFile( not found — gate ROT")]
-    if ROLLUP_GUARD not in code_only(body):
+    base = line_of(src, src.find("fun deleteFile(name: String)"))
+    brace = body.find("{")
+    end = _balanced(body, brace, "{", "}") if brace >= 0 else -1
+    if brace < 0 or end < 0:
+        return [(MEM_REL, base, "deleteFile body cannot be parsed — fail-closed")]
+    inner = body[brace + 1:end - 1]
+    scan = _mask(inner)
+    spans = stmt_spans(scan)
+    guard_at = None
+    for a, b in spans:
+        if _norm_stmt(scan[a:b]) == GUARD_NORM:
+            guard_at = a
+            break
+    if guard_at is None:
         return [(
             MEM_REL,
-            line_of(src, src.find("fun deleteFile(name: String)")),
+            base,
             "deleteFile has no " + ROLLUP_GUARD + " guard — the distilled memory "
             "layer can be deleted (and is lost on the next backup/restore)",
+        )]
+    delete_at = scan.find(DELETE_CALL)
+    if delete_at >= 0 and delete_at < guard_at:
+        return [(
+            MEM_REL,
+            base,
+            "deleteFile runs " + DELETE_CALL + " before the " + ROLLUP_GUARD +
+            " guard — the rollup is already gone when the guard would have refused it",
         )]
     return []
 
 
 def check_voice_group_remap(src):
-    """D2: remapDefaultsIds must route both voice group paths to groupIdMap."""
-    body = function_text(src, "fun remapDefaultsIds(")
-    if body is None:
-        return [(CFG_REL, 0, "remapDefaultsIds( not found — gate ROT")]
-    when = body.find("when (path)")
-    if when < 0:
-        return [(CFG_REL, 0, "remapDefaultsIds no longer branches on `path` — gate ROT")]
-    end = _balanced(body, body.find("{", when), "{", "}")
-    branch = body[when:end if end > 0 else len(body)]
+    """D2: remapDefaultsIds must route both voice group paths to groupIdMap.
+
+    [wide4-11 D2, family-hole] this criterion judged the group arm with the OLD
+    substring test (`"groupIdMap" in code.split("->", 1)[1]`) while the sibling
+    arm in the very same `when (path)` block had already been upgraded to a
+    live-value test — so `… "defaults.voiceInputGroup", … -> if (false)
+    groupIdMap else emptyMap()` stayed green: only the branch that got attacked
+    was fixed, its neighbour was not. Both arms now go through the same helper
+    (`_routes_to_map`), so the judgement cannot diverge per path again.
+    """
+    branch, rot = _when_path_branch(src)
+    if rot:
+        return [(CFG_REL, 0, rot)]
     out = []
     for path in VOICE_GROUP_PATHS:
-        routed = False
-        for line in branch.split("\n"):
-            code = line.split("//")[0]
-            if ('"%s"' % path) in code and "->" in code:
-                if "groupIdMap" in code.split("->", 1)[1]:
-                    routed = True
-        if not routed:
-            out.append((
-                CFG_REL,
-                line_of(src, src.find("fun remapDefaultsIds(")),
-                "remapDefaultsIds does not route \"%s\" to groupIdMap — a restored "
-                "install keeps the source install's group id and the voice binding dangles" % path,
-            ))
+        ok, value = _routes_to_map(branch, '"%s"' % path, "groupIdMap")
+        if ok:
+            continue
+        if value is None:
+            msg = ("remapDefaultsIds does not route \"%s\" to groupIdMap — a restored "
+                   "install keeps the source install's group id and the voice binding dangles" % path)
+        else:
+            msg = ("remapDefaultsIds routes \"%s\" through `%s`, whose LIVE value is "
+                   "not exactly groupIdMap — the map survives in the spelling only "
+                   "(a dead branch, a constant fold or a chain grafted onto it never "
+                   "hands it over)" % (path, " ".join(value.split())[:70]))
+        out.append((CFG_REL, line_of(src, src.find("fun remapDefaultsIds(")), msg))
     return out
 
 
@@ -1060,7 +1103,21 @@ def check(root, raw_cfg=None, raw_mem=None, raw_builtins=None, raw_engine=None,
     if raw_runner is None:
         with open(os.path.join(root, RUNNER_REL), encoding="utf-8") as f:
             raw_runner = f.read()
+    # [wide4-11, parser-death] Every criterion reads the shared lexer's views, so
+    # a source the lexer cannot tokenise must be a VIOLATION, never a silent
+    # fall-back to raw text: a file the gate cannot parse is a file the gate
+    # cannot vouch for. (This is the axis that killed 24 gates last wave: the
+    # hand-rolled strippers returned the raw text and kept judging it.)
     out = []
+    for rel, text in ((CFG_REL, raw_cfg), (MEM_REL, raw_mem),
+                      (BUILTINS_REL, raw_builtins), (ENGINE_REL, raw_engine),
+                      (RUNNER_REL, raw_runner)):
+        ok, reason, _views = analyse(text)
+        if not ok:
+            out.append((rel, 0, "cannot be tokenised (%s) — the gate refuses to "
+                                "judge a broken lexical surface (fail-closed)" % reason))
+    if out:
+        return out
     out += check_remap_defaults(raw_cfg)
     out += check_voice_group_remap(raw_cfg)
     out += check_voice_defaults_registered(raw_builtins)
@@ -1438,6 +1495,117 @@ def selftest(root):
             "        /* " + ROLLUP_GUARD + " */\n",
         ),
     )
+
+    # ── [wide4-11] the five axes the external audit re-broke (24 witnesses) ──
+    # Family-hole arms: the decision is deleted, the spelling survives. Every
+    # arm below is a witness that was FALSIFIED against this gate; each must
+    # flip exactly its own criterion.
+    anchor_compact = ('        "defaults.agentLoopEntries", "runtime.compactModelEntryId"'
+                      ' -> entryIdMap')
+
+    def compact_as(value):
+        return sub_once(cfg, anchor_compact,
+                        anchor_compact.replace("-> entryIdMap", "-> " + value))
+
+    # A-1: the map keeps its name and loses its content (`.filter { false }`).
+    arm("w4-A compact arm filtered empty", on_cfg(check_remap_defaults),
+        cfg=compact_as("entryIdMap.filter { false }"))
+    # A-2: … or a lambda hands an empty map over.
+    arm("w4-A compact arm let-empty", on_cfg(check_remap_defaults),
+        cfg=compact_as("entryIdMap.let { emptyMap() }"))
+    # A-3: a constant test `1 == 2` is the same "never" as `false`.
+    arm("w4-A compact arm numeric-false test", on_cfg(check_remap_defaults),
+        cfg=compact_as("if (1 == 2) entryIdMap else emptyMap()"))
+    # A-4: … and `!true` is the same "never" as `false`.
+    arm("w4-A compact arm double-negated literal", on_cfg(check_remap_defaults),
+        cfg=compact_as("if (!true) emptyMap() else entryIdMap"))
+    # A-5: a chain that turns the map into null keeps every character.
+    arm("w4-A compact arm takeIf-dropped", on_cfg(check_remap_defaults),
+        cfg=compact_as("entryIdMap.takeIf { false } ?: emptyMap()"))
+    # A-6: a RUNTIME test also hands over an empty map on one arm.
+    arm("w4-A compact arm runtime branch", on_cfg(check_remap_defaults),
+        cfg=compact_as("if (json != null) entryIdMap else emptyMap()"))
+    # A-7: `when { false -> … }` — a shape _live_value never folded at all; the
+    #      positive "must be exactly entryIdMap" form catches it for free.
+    arm("w4-A compact arm when-false", on_cfg(check_remap_defaults),
+        cfg=compact_as("when { false -> emptyMap(); else -> entryIdMap }"))
+    # A-8: a tautological self-comparison is the same "always true" as `true`.
+    arm("w4-A compact arm tautology", on_cfg(check_remap_defaults),
+        cfg=compact_as("if (json == json) entryIdMap else emptyMap()"))
+    # A-9 (CLEAN): a cast is spelling only — must stay green.
+    arm("w4-A clean cast is spelling only", None,
+        cfg=compact_as("entryIdMap as Map<String, String>"))
+
+    # B: the remap call survives, its RESULT is discarded.
+    anchor_bind = ('                        entryIdMap = entryIdMap,\n'
+                   '                    ),\n'
+                   '                    source = s.optString("source").ifEmpty { null },')
+
+    def bind_as(tail):
+        return sub_once(cfg, anchor_bind,
+                        anchor_bind.replace("                    ),\n",
+                                            "                    )" + tail + ",\n", 1))
+
+    # B-1: a phantom `it` reference inside the lambda fooled the old "uses it?"
+    #      heuristic (wide4 见证).
+    arm("w4-B binding let-unused-it", on_cfg(check_import_chat_sections),
+        cfg=bind_as(".let { val _unused = it; null }"))
+    # B-2: the un-remapped payload is written back inside the lambda.
+    arm("w4-B binding let-source-optString", on_cfg(check_import_chat_sections),
+        cfg=bind_as('.let { s.optString("modelBinding") }'))
+    # B-3: takeIf compares against a value that never matches ⇒ null.
+    arm("w4-B binding takeIf-never", on_cfg(check_import_chat_sections),
+        cfg=bind_as('.takeIf { it == "never" }'))
+    # B-4: an elvis discards the result just as well.
+    arm("w4-B binding elvis-null", on_cfg(check_import_chat_sections),
+        cfg=bind_as(" ?: null"))
+    # B-5: a wrapping `.let { if (false) it else null }` keeps the call.
+    arm("w4-B binding let-dead-branch", on_cfg(check_import_chat_sections),
+        cfg=bind_as(".let { if (false) it else null }"))
+
+    # D2: the SIBLING arm of the same `when (path)` block (only A was fixed).
+    anchor_voice = ('        "defaults.primaryGroup", "defaults.subGroup", "defaults.voiceInputGroup",'
+                    ' "defaults.voiceOutputGroup", "defaults.agentLoopGroups" -> groupIdMap')
+
+    def voice_as(value):
+        return sub_once(cfg, anchor_voice,
+                        anchor_voice.replace("-> groupIdMap", "-> " + value))
+
+    arm("w4-D2 group arm dead branch", on_cfg(check_voice_group_remap),
+        cfg=voice_as("if (false) groupIdMap else emptyMap()"))
+    arm("w4-D2 group arm filtered empty", on_cfg(check_voice_group_remap),
+        cfg=voice_as("groupIdMap.filter { false }"))
+    arm("w4-D2 group arm lambda empty", on_cfg(check_voice_group_remap),
+        cfg=voice_as("{ groupIdMap.let { emptyMap() } }"))
+
+    # C3: the guard survives in the spelling, a dead branch swallows it.
+    anchor_guard = "        " + ROLLUP_GUARD + "\n"
+    arm("w4-C3 guard inside if (false)",
+        on_mem(check_delete_guard),
+        mem=sub_once(mem, anchor_guard, "        if (false) { " + ROLLUP_GUARD + " }\n"))
+    arm("w4-C3 guard inside if (true)",
+        on_mem(check_delete_guard),
+        mem=sub_once(mem, anchor_guard, "        if (true) { " + ROLLUP_GUARD + " }\n"))
+    # parser-death: a NESTED block comment closed the old stripper at `inner */`.
+    arm("w4-C3 guard inside nested block comment",
+        on_mem(check_delete_guard),
+        mem=sub_once(mem, anchor_guard,
+                     "        /* outer /* inner */ " + ROLLUP_GUARD + " */\n"))
+    # parser-death: a `'"'` char literal opened a string and swallowed the guard.
+    arm("w4-C3 guard after a double-quote char literal",
+        on_mem(check_delete_guard),
+        mem=sub_once(mem, anchor_guard,
+                     "        val c = '\"'\n        /* " + ROLLUP_GUARD + " */\n"))
+    # parser-death: a raw string swallowed the guard.
+    arm("w4-C3 guard inside a raw string",
+        on_mem(check_delete_guard),
+        mem=sub_once(mem, anchor_guard,
+                     '        val s = """\n' + ROLLUP_GUARD + '"""\n'))
+    # order: the guard runs after the delete it is supposed to gate.
+    arm("w4-C3 guard after the delete call",
+        on_mem(check_delete_guard),
+        mem=sub_once(mem, anchor_guard + "        return File(memoryDir, name).delete()\n",
+                     "        return File(memoryDir, name).delete()\n" + anchor_guard))
 
     failures = []
     for name, crit, c, m, b, e, r in arms:
