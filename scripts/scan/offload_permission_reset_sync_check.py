@@ -35,6 +35,10 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _kotlin_ast as _ast          # noqa: E402  (shared Kotlin primitives)
+import _kotlin_lexer as _lex        # noqa: E402  (shared Kotlin lexer)
+
 MANAGER = "src/android/app/src/main/java/com/rikkaminis/app/offload/OffloadPermissionManager.kt"
 SCREEN = "src/android/app/src/main/java/com/rikkaminis/app/ui/settings/OffloadPermissionScreen.kt"
 MARKER = "OFFLOAD_PERMISSION_RESET_SYNC_SELFTEST=PASS"
@@ -47,66 +51,20 @@ REVISION_KEY_RE = re.compile(r"remember\s*\([^)\n]*\brevision\b[^)\n]*\)")
 
 
 def strip_comments(src: str) -> str:
-    """Remove // and /* */ comments, honouring string and raw-string literals.
+    """Code view of `src` — comments AND string bodies blanked, length preserved.
 
-    KDoc in these files quotes the very anchors the gate looks for, so comment
-    text must not be able to satisfy a criterion.
+    [wide4 parser-death] This used to be a hand-written state machine. It missed
+    two constructions the witnesses used: `"${"}"}"` (a string template whose
+    body holds a brace) desynchronised the brace walk so `_stmt_span` ended the
+    `if (false)` block early and the dead `clear()` calls escaped the pruning,
+    and a nested block comment `/* a /* b */ c */` ended at the first `*/`.
+    Both now go through the repo-wide lexer (one state machine, equal-length
+    views, so every offset downstream still lines up).
+
+    String bodies are blanked too: `val _s = "sessionGrants.clear()"` is a
+    string, not a statement, and must not satisfy criterion 1.
     """
-    out = []
-    state = "code"
-    i = 0
-    n = len(src)
-    while i < n:
-        c = src[i]
-        two = src[i:i + 2]
-        if state == "code":
-            if two == "//":
-                state = "line"
-                i += 2
-            elif two == "/*":
-                state = "block"
-                i += 2
-            elif src[i:i + 3] == '"""':
-                state = "raw"
-                i += 3
-            elif c == '"':
-                state = "str"
-                out.append(c)
-                i += 1
-            else:
-                out.append(c)
-                i += 1
-        elif state == "line":
-            if c == "\n":
-                state = "code"
-                out.append(c)
-            i += 1
-        elif state == "block":
-            if two == "*/":
-                state = "code"
-                i += 2
-            else:
-                if c == "\n":
-                    out.append(c)
-                i += 1
-        elif state == "str":
-            if c == "\\":
-                out.append(src[i:i + 2])
-                i += 2
-                continue
-            if c == "\n":
-                state = "code"
-            elif c == '"':
-                state = "code"
-            out.append(c)
-            i += 1
-        else:  # raw string
-            if src[i:i + 3] == '"""':
-                state = "code"
-                i += 3
-            else:
-                i += 1
-    return "".join(out)
+    return _lex.mask_code(src)
 
 
 def _match_paren(text: str, open_idx: int):
@@ -211,85 +169,23 @@ def body_of(src: str, header: str) -> str:
 
 
 # ── constant-condition pruning ───────────────────────────────────────────────
-def _strip_outer_parens(expr: str) -> str:
-    e = expr.strip()
-    while len(e) >= 2 and e[0] == "(" and e[-1] == ")":
-        depth, ok = 0, True
-        for i, ch in enumerate(e):
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
-                if depth == 0 and i != len(e) - 1:
-                    ok = False
-                    break
-        if not ok:
-            break
-        e = e[1:-1].strip()
-    return e
-
-
-def _split_top(expr: str, op: str):
-    parts, depth, cur, i = [], 0, [], 0
-    while i < len(expr):
-        ch = expr[i]
-        if ch in "\"'":
-            j = i + 1
-            while j < len(expr) and expr[j] != ch:
-                if expr[j] == "\\":
-                    j += 1
-                j += 1
-            cur.append(expr[i:j + 1])
-            i = j + 1
-            continue
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            depth -= 1
-        if depth == 0 and expr.startswith(op, i):
-            parts.append("".join(cur))
-            cur = []
-            i += len(op)
-            continue
-        cur.append(ch)
-        i += 1
-    parts.append("".join(cur))
-    return parts
-
-
 def fold_bool(expr: str):
-    """True / False / None for a Kotlin condition, folding literal operands.
+    """True / False / None for a Kotlin condition, decided by the SHARED folder.
 
     [meta-audit wide3 offload-C1] "clears the caches" has to mean the clear
     RUNS. Wrapping the two `clear()` calls in `if (false) { … }` keeps both
     substrings — and keeps the gate green — while Reset All stops clearing
     anything, so every session-scoped verdict survives the reset. Same class as
     `false && guard`: the spelling is preserved, the decision is deleted.
+
+    [wide4 family-hole] The local folder this replaces understood exactly two
+    spellings — the bare literals `true` and `false`. `if (!true) { … }` (the
+    witness), `if (0 == 1 && guard)`, `if ((false))` and `when (false)` all kept
+    every anchor while the body never ran. `_kotlin_ast.const_bool` folds `!`,
+    `==`/`!=` over literals and short-circuits `&&`/`||` the way Kotlin does;
+    an unknown operand stays None, never a silent True.
     """
-    e = _strip_outer_parens(expr)
-    if not e:
-        return None
-    ors = _split_top(e, "||")
-    if len(ors) > 1:
-        vals = [fold_bool(x) for x in ors]
-        if any(v is True for v in vals):
-            return True
-        if all(v is False for v in vals):
-            return False
-        return None
-    ands = _split_top(e, "&&")
-    if len(ands) > 1:
-        vals = [fold_bool(x) for x in ands]
-        if any(v is False for v in vals):
-            return False
-        if all(v is True for v in vals):
-            return True
-        return None
-    if e == "true":
-        return True
-    if e == "false":
-        return False
-    return None
+    return _ast.const_bool(expr)
 
 
 def _stmt_span(src: str, i: int):
@@ -317,13 +213,104 @@ def _stmt_span(src: str, i: int):
     return n
 
 
+def _blank_region(src: str, start: int, end: int) -> str:
+    """Blank [start:end) to spaces, newlines preserved (offset/line keeping)."""
+    seg = src[start:end]
+    blanked = "".join(ch if ch == "\n" else " " for ch in seg)
+    return src[:start] + blanked + src[end:]
+
+
+def _literal_branch_hits(cond: str, subject):
+    """`True`/`False`/`None` — does this `when` branch label hit the constant?
+
+    None means "not decidable as a literal list" (`is X`, `in 1..9`, `!true`,
+    a subject reference), and the caller must NOT prune on None.
+    """
+    c = cond.strip()
+    if not c or c == "else":
+        return None
+    if c.startswith("is ") or c.startswith("in ") or c.startswith("!") or "->" in c:
+        return None
+    hits = False
+    for a, b in _ast.split_top(c, (",",)):
+        piece = c[a:b].strip()
+        if not piece:
+            continue
+        val = _ast.const_value(piece)
+        if val is None:
+            return None
+        if val == subject:
+            hits = True
+    return hits
+
+
+def _prune_when(src: str) -> str:
+    """Blank `when` branches a constant subject decides against.
+
+    Same family as `if (false)`: the branch body keeps its spelling but never
+    runs, so a `sessionGrants.clear()` parked in `when (false) { else -> … }`
+    kept criterion 1 green while Reset All cleared nothing. Only folds when the
+    subject is a pure literal AND every label is a readable literal list;
+    anything it cannot parse is left alone (no false pruning).
+    """
+    for m in re.finditer(r"\bwhen\s*\(", src):
+        open_paren = m.end() - 1
+        close_paren = _match_paren(src, open_paren)
+        if close_paren is None:
+            continue
+        subject = _ast.const_value(src[open_paren + 1:close_paren])
+        if subject is None:
+            continue
+        brace = close_paren + 1
+        while brace < len(src) and src[brace] in " \t\r\n":
+            brace += 1
+        if brace >= len(src) or src[brace] != "{":
+            continue
+        close_brace = _match_brace(src, brace)
+        if close_brace is None:
+            continue
+        body = src[brace + 1:close_brace]
+        segments = []
+        readable = True
+        for a, b in _ast.split_top(body, ("\n",)):
+            seg = body[a:b]
+            arrow = seg.find("->")
+            if arrow < 0:
+                continue
+            cond = seg[:arrow].strip()
+            if cond == "else":
+                segments.append((a, b, None))
+                continue
+            hits = _literal_branch_hits(cond, subject)
+            if hits is None:
+                readable = False
+                break
+            segments.append((a, b, hits))
+        if not readable or not segments:
+            continue
+        matched = any(hits is True for _a, _b, hits in segments)
+        dead = [(a, b) for a, b, hits in segments
+                if (hits is False) or (hits is None and matched)]
+        if not dead:
+            continue
+        for a, b in dead:
+            src = _blank_region(src, brace + 1 + a, brace + 1 + b)
+        return src
+    return src
+
+
 def prune_dead_branches(src: str) -> str:
     """Blank out never-executed branch bodies (offset and line preserving).
 
     Only literal-decided conditions are folded, so this cannot mis-prune real
     logic; it just stops dead code from satisfying an existence criterion.
+
+    [wide4 family-hole] The folder used to know only `true` / `false`. Two
+    more spellings of the same idea are handled now: `when (<literal>)` (its
+    non-matching arms) and everything `_kotlin_ast.const_bool` can decide —
+    `!true`, `(false)`, `0 == 1`, `false && guard`.
     """
-    out = src
+    out = _prune_when(src)
     IF_RE = re.compile(r"\bif\s*\(")
     for _round in range(50):
         changed = False
@@ -351,14 +338,42 @@ def prune_dead_branches(src: str) -> str:
                 if else_start is None:
                     continue
                 dead = (k + 4, else_start)
-            seg = out[dead[0]:dead[1]]
-            blanked = "".join(ch if ch == "\n" else " " for ch in seg)
-            if seg != blanked:
-                out = out[:dead[0]] + blanked + out[dead[1]:]
+            if out[dead[0]:dead[1]].strip():
+                out = _blank_region(out, *dead)
                 changed = True
                 break
         if not changed:
             break
+    return _prune_when(out)
+
+
+LOCAL_LAMBDA_RE = re.compile(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=\s*\{")
+LOCAL_FUN_RE = re.compile(r"\bfun\s+([A-Za-z_]\w*)\s*\(")
+
+
+def strip_uncalled_locals(body: str) -> str:
+    """Blank local lambdas / local `fun`s whose NAME is never used again.
+
+    [wide4 family-hole] `val unused = { clearAllSessionGrants(); bumpRevision() }`
+    keeps both anchor calls inside `resetAll()`'s body while Reset All executes
+    neither — the closure is defined and never invoked. The wide3 fix only
+    deflected the *default-argument* lambda; the same dead body one line lower
+    walked straight through. A binding whose name appears nowhere else in the
+    body cannot be running, so its text must not count as an executed statement.
+    """
+    out = body
+    for pattern in (LOCAL_LAMBDA_RE, LOCAL_FUN_RE):
+        for m in pattern.finditer(out):
+            name = m.group(1)
+            if len(re.findall(r"\b%s\b" % re.escape(name), out)) > 1:
+                continue  # referenced elsewhere — it may well run
+            brace = out.find("{", m.end() - 1)
+            if brace < 0:
+                continue
+            close = _match_brace(out, brace)
+            if close is None:
+                continue
+            out = _blank_region(out, brace + 1, close)
     return out
 
 
@@ -370,8 +385,8 @@ def expand(src: str, body: str, defined, depth: int = 3) -> str:
     whole effect sits inside `if (false)` contributes nothing (wide3 offload-C1).
     """
     if depth <= 0 or not body:
-        return prune_dead_branches(body)
-    body = prune_dead_branches(body)
+        return strip_uncalled_locals(prune_dead_branches(body))
+    body = strip_uncalled_locals(prune_dead_branches(body))
     out = body
     for name in defined:
         if name + "(" in body:
@@ -382,6 +397,42 @@ def expand(src: str, body: str, defined, depth: int = 3) -> str:
 
 
 REV_ASSIGN_RE = re.compile(r"_revision\s*\.\s*value\s*=(?!=)\s*([^\n;]*)")
+REV_PLUS_ASSIGN_RE = re.compile(r"_revision\s*\.\s*value\s*\+=\s*([^=\n;]+)")
+
+
+def _moves_forward(expr: str) -> bool:
+    """Does this expression derive a NEW value from `it` (strictly forward)?
+
+    [wide4 family-hole] `it` alone (the identity update `_revision.update { it }`)
+    is runtime-equivalent to `_revision.value = _revision.value` —
+    `MutableStateFlow` is distinctUntilChanged, so it emits nothing and the
+    settings page never re-reads the level. `it + 0` / `it - 0` / `it * 2` (the
+    flow starts at 0) are the same no-op; only an additive step with a non-zero
+    (or unknown) operand, `.inc()` or `it++` actually moves the counter.
+    """
+    e = " ".join(expr.split())
+    if not e:
+        return False
+    if re.search(r"\bit\s*\.\s*inc\s*\(", e) or re.search(r"\bit\s*\+\+", e):
+        return True
+    if re.search(r"\bit\s*\.\s*dec\s*\(", e) or re.search(r"\bit\s*--", e):
+        return False
+    for m in re.finditer(r"\bit\b\s*([+\-])\s*([^+\-*/%)\s]+|\([^()]*\))", e):
+        op, operand = m.group(1), m.group(2).strip("() ")
+        val = _ast.const_value(operand)
+        if val is None:
+            return True  # unknown step: the gate cannot prove it is zero
+        if val[0] != "num":
+            continue
+        if op == "+" and val[1] > 0:
+            return True
+        if op == "-" and val[1] < 0:
+            return True
+    for m in re.finditer(r"([^+\-*/%(\s]+)\s*\+\s*\bit\b", e):
+        val = _ast.const_value(m.group(1).strip())
+        if val is None or (val[0] == "num" and val[1] != 0):
+            return True
+    return False
 
 
 def bumps_revision(text: str) -> bool:
@@ -392,13 +443,30 @@ def bumps_revision(text: str) -> bool:
     distinctUntilChanged, so writing the same value emits nothing: the settings
     page keeps showing pre-reset levels while the gate reports "bumps the
     revision". A bump has to derive the new value from the old one.
+
+    [wide4 family-hole] The `update { … }` channel used to be accepted on the
+    mere PRESENCE of `it` inside the braces — `_revision.update { it }` (the
+    witness) passed while emitting nothing, and `_revision.value += 0` passed
+    the `+=` arm. Both channels now have to prove a non-zero step.
     """
     if re.search(r"_revision\s*\.\s*value\s*\+\+", text):
         return True
-    if re.search(r"_revision\s*\.\s*value\s*\+=\s*[^=\s]", text):
-        return True
-    if re.search(r"_revision\s*\.\s*update\s*[({][^}]*\bit\b", text):
-        return True
+    for m in REV_PLUS_ASSIGN_RE.finditer(text):
+        val = _ast.const_value(m.group(1).strip())
+        if val is None or (val[0] == "num" and val[1] != 0):
+            return True
+    for m in re.finditer(r"_revision\s*\.\s*update\s*", text):
+        j = m.end()
+        if j < len(text) and text[j] == "(":
+            close = _match_paren(text, j)
+            inner = text[j + 1:close] if close else ""
+        elif j < len(text) and text[j] == "{":
+            close = _match_brace(text, j)
+            inner = text[j + 1:close] if close else ""
+        else:
+            continue
+        if _moves_forward(inner):
+            return True
     for m in REV_ASSIGN_RE.finditer(text):
         rhs = " ".join(m.group(1).split()).strip()
         if not rhs:
@@ -410,15 +478,28 @@ def bumps_revision(text: str) -> bool:
         if re.fullmatch(r"(?:true|false|null|\"\"|'.')", rhs):
             continue
         if "_revision" in rhs:
-            return True  # e.g. `_revision.value = _revision.value + 1`
+            if _moves_forward(rhs.replace("_revision.value", "it")):
+                return True  # e.g. `_revision.value = _revision.value + 1`
+            continue
         if re.match(r"(?:nextRevision|nextRev|advance\w*|bump\w*)\s*\(", rhs):
             return True
     return False
 
 
 def check(manager_raw: str, screen_raw: str) -> list:
-    mgr = strip_comments(manager_raw)
-    screen = strip_comments(screen_raw)
+    # [wide4 parser-death] Lex first, and refuse to judge a file whose strings /
+    # comments we could not follow: `mask_code()` raises on an unterminated
+    # literal, and a gate that silently fell back to the raw text would read
+    # prose as code. Fail-closed = a violation, never a green.
+    views = {}
+    for label, raw in ((MANAGER, manager_raw), (SCREEN, screen_raw)):
+        ok, reason, v = _lex.analyse(raw)
+        if not ok:
+            return [f"{label}: cannot be lexed ({reason}) — the gate refuses to judge "
+                    f"a file whose strings/comments it cannot follow"]
+        views[label] = v["code"]
+    mgr = views[MANAGER]
+    screen = views[SCREEN]
     defined = set(FUN_RE.findall(mgr))
     errs = []
 
@@ -759,6 +840,109 @@ private fun RegressionRow(toolName: String) {
     arms.append((
         "W3-C2b default lambda parameter on resetAll",
         _manager(reset=default_lambda_reset), _GOOD_SCREEN, 2,
+        "does not clear the in-memory session caches",
+    ))
+
+    # ── wide4 witnesses: one arm per falsified axis ─────────────────────────
+    # family-hole: the same "spelling preserved, decision deleted" move in the
+    # spellings the wide3 fix did not know.
+    arms.append((
+        "w4-F1 unary-negated literal guard `if (!true)`",
+        _manager(helpers=_HELPERS.replace(
+            "    internal fun clearAllSessionGrants() {\n"
+            "        sessionGrants.clear()\n"
+            "        sessionDenials.clear()\n"
+            "    }\n",
+            "    internal fun clearAllSessionGrants() {\n"
+            "        if (!true) {\n"
+            "            sessionGrants.clear()\n"
+            "            sessionDenials.clear()\n"
+            "        }\n"
+            "    }\n")),
+        _GOOD_SCREEN,
+        1,
+        "does not clear the in-memory session caches",
+    ))
+    arms.append((
+        "w4-F5 constant subject `when (false)` leaves only a non-matching arm",
+        _manager(helpers=_HELPERS.replace(
+            "    internal fun clearAllSessionGrants() {\n"
+            "        sessionGrants.clear()\n"
+            "        sessionDenials.clear()\n"
+            "    }\n",
+            "    internal fun clearAllSessionGrants() {\n"
+            "        when (false) {\n"
+            "            true -> {\n"
+            "                sessionGrants.clear()\n"
+            "                sessionDenials.clear()\n"
+            "            }\n"
+            "        }\n"
+            "    }\n")),
+        _GOOD_SCREEN,
+        1,
+        "does not clear the in-memory session caches",
+    ))
+    # …and the mirror arm: `else` under a constant subject DOES run, so the
+    # pruner must not touch it (a hardening that blanks `else` would be a false
+    # red on correct code).
+    arms.append((
+        "w4-F5b `when (false)` with only an `else` arm really runs it",
+        _manager(helpers=_HELPERS.replace(
+            "    internal fun clearAllSessionGrants() {\n"
+            "        sessionGrants.clear()\n"
+            "        sessionDenials.clear()\n"
+            "    }\n",
+            "    internal fun clearAllSessionGrants() {\n"
+            "        when (false) {\n"
+            "            else -> {\n"
+            "                sessionGrants.clear()\n"
+            "                sessionDenials.clear()\n"
+            "            }\n"
+            "        }\n"
+            "    }\n")),
+        _GOOD_SCREEN,
+        0,
+    ))
+    arms.append((
+        "w4-F2 identity update `_revision.update { it }` moves nothing",
+        _manager(helpers=_HELPERS.replace(
+            "        _revision.update { it + 1 }", "        _revision.update { it }")),
+        _GOOD_SCREEN,
+        2,
+        "does not bump _revision",
+    ))
+    arms.append((
+        "w4-F6 zero step `_revision.value += 0` moves nothing",
+        _manager(helpers=_HELPERS.replace(
+            "        _revision.update { it + 1 }", "        _revision.value += 0")),
+        _GOOD_SCREEN,
+        2,
+        "does not bump _revision",
+    ))
+    # the dead local closure: the same statements, one line lower, never invoked
+    arms.append((
+        "w4-F3 uncalled local lambda holds the whole effect",
+        _manager(reset=_GOOD_RESET.replace(
+            "        clearAllSessionGrants()\n        bumpRevision()",
+            "        val unused = { clearAllSessionGrants(); bumpRevision() }")),
+        _GOOD_SCREEN,
+        2,
+        "does not clear the in-memory session caches",
+    ))
+    # parser-death: a string template holding `}` inside the dead branch
+    arms.append((
+        "w4-F4 template brace inside `if (false)` desyncs the brace walk",
+        _manager(helpers=_HELPERS.replace(
+            "    internal fun clearAllSessionGrants() {\n"
+            "        sessionGrants.clear()\n"
+            "        sessionDenials.clear()\n"
+            "    }\n",
+            "    internal fun clearAllSessionGrants() {\n"
+            '        if (false) { val _s = "${"}"}"; sessionGrants.clear(); '
+            "sessionDenials.clear() }\n"
+            "    }\n")),
+        _GOOD_SCREEN,
+        1,
         "does not clear the in-memory session caches",
     ))
 

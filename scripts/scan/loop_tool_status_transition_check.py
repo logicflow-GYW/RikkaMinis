@@ -49,6 +49,25 @@ themselves comments) still resolve while the criteria read code only — a
 criterion satisfied by a comment must NOT count (see the `comment_only_push`
 self-test fixture).
 
+## wide4 (2026-10-25): decisions removed, spellings kept
+
+An external audit re-attacked this gate five times and found that every criterion
+tested for a TOKEN rather than for a DECISION:
+
+  T1/T3  `if (!true) publish()` / `if (!true && … != PENDING) continue` are the
+         same defects; liveness is now decided by const folding with Kotlin
+         precedence (`!true && x` == false), and `when (false) { … }` counts as a
+         guard context exactly like `if (false)`;
+  T1     the projection is the shared lexer's: a `"${"}"}"` template used to leak
+         a `}` and close a dead `if (false)` block early, which made the dead
+         publish read as live (parser-death);
+  T3     a guard can also invert instead of disappearing: `== PENDING → continue`
+         skips exactly the waiting calls;
+  T5/T6  "the body has an `if`" was the whole criterion — it now parses the
+         policy expression: T5 needs a LIVE PENDING comparison whose branches
+         are RUNNING / null, and T6 needs one branch to clear the cue (`""`) on
+         the branch that MATCHES it.
+
 ## Registration
 
 Registration into scripts/scan/scan.sh + the test_scan.py marker fixture is the
@@ -62,6 +81,56 @@ Usage:
 import os
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import analyse                                       # noqa: E402
+from _kotlin_ast import (const_bool, function_body, if_blocks,          # noqa: E402
+                         match_bracket, split_top as ast_split_top,
+                         stmt_spans, strip_parens, when_branches)
+
+
+class Unparseable(Exception):
+    """The engine cannot be lexed — the gate refuses to judge a broken view."""
+
+
+def _views(src):
+    ok, reason, views = analyse(src)
+    if not ok:
+        raise Unparseable(reason)
+    return views
+
+
+def blank_comments(src: str) -> str:
+    """Comment-free projection, offsets and newlines preserved.
+
+    Region anchors are comments, so the text cannot be pre-stripped; the criteria
+    read this projection with identical indices. String literals stay intact —
+    the cue literal IS a criterion subject (`code.count(CUE_TEXT)`).
+
+    [wide4 parser-death] This used to be a hand-written scanner with its own idea
+    of strings and comments. It is now the shared state machine: nested block
+    comments, `'"'`, raw strings and `${…}` templates are all handled in one
+    place, and a failed parse raises instead of silently judging raw text.
+    """
+    return _views(src)["comments"]
+
+
+def line_of(src: str, idx: int) -> int:
+    return src.count("\n", 0, idx) + 1
+
+
+# ── structure helpers (wide3: span/liveness based, never line- or spelling-based)
+
+def mask_code(src):
+    """Comment text AND string/char literal contents blanked, offsets preserved.
+
+    Brace matching and guard detection read THIS: a paren inside a string literal
+    must not shift the depth, a `}` inside a `${…}` template must not close an
+    `if` block early, and a criterion satisfied by a commented-out line is not a
+    criterion.
+    """
+    return _views(src)["code"]
+
 
 REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/AgentLoopEngine.kt"
 
@@ -84,112 +153,7 @@ CONTINUE_STMT = re.compile(r"\n[ \t]*continue[ \t]*\n")
 SELFTEST_MARKER = "LOOP_TOOL_STATUS_SELFTEST=PASS"
 
 
-def blank_comments(src: str) -> str:
-    """Replace comment characters with spaces, PRESERVING offsets and newlines.
-
-    Region anchors are comments, so the text cannot be pre-stripped; the criteria
-    instead read this comment-free projection with identical indices. String
-    literals are skipped first so a `//` inside one (a URL) is not a comment.
-    """
-    out = list(src)
-    i, n = 0, len(src)
-    while i < n:
-        if src.startswith('"""', i):
-            j = src.find('"""', i + 3)
-            i = n if j < 0 else j + 3
-            continue
-        c = src[i]
-        if c == '"':
-            i += 1
-            while i < n and src[i] != '"':
-                if src[i] == "\\":
-                    i += 1
-                elif src[i] == "\n":
-                    break
-                i += 1
-            i += 1
-            continue
-        if src.startswith("//", i):
-            j = src.find("\n", i)
-            j = n if j < 0 else j
-            for k in range(i, j):
-                out[k] = " "
-            i = j
-            continue
-        if src.startswith("/*", i):
-            j = src.find("*/", i + 2)
-            j = n if j < 0 else j + 2
-            for k in range(i, j):
-                if src[k] != "\n":
-                    out[k] = " "
-            i = j
-            continue
-        i += 1
-    return "".join(out)
-
-
-def line_of(src: str, idx: int) -> int:
-    return src.count("\n", 0, idx) + 1
-
-
 # ── structure helpers (wide3: span/liveness based, never line- or spelling-based)
-
-def mask_code(src):
-    """Offset-preserving projection with comment text AND string/char literal
-    contents blanked. Brace matching and guard detection read THIS: a paren
-    inside a string literal must not shift the depth, and a criterion satisfied
-    by a commented-out line is not a criterion."""
-    out = list(src)
-    i, n = 0, len(src)
-    while i < n:
-        if src.startswith('"""', i):
-            j = src.find('"""', i + 3)
-            j = n if j < 0 else j + 3
-            for k in range(i, j):
-                if src[k] != "\n":
-                    out[k] = " "
-            i = j
-            continue
-        if src[i] == '"':
-            j = i + 1
-            while j < n:
-                if src[j] == "\\":
-                    j += 2
-                    continue
-                if src[j] == '"' or src[j] == "\n":
-                    break
-                j += 1
-            for k in range(i, min(j + 1, n)):
-                out[k] = " "
-            i = j + 1
-            continue
-        if src[i] == "'":
-            j = src.find("'", i + 1)
-            if 0 < j - i <= 4:
-                for k in range(i, j + 1):
-                    out[k] = " "
-                i = j + 1
-                continue
-            i += 1
-            continue
-        if src.startswith("//", i):
-            j = src.find("\n", i)
-            j = n if j < 0 else j
-            for k in range(i, j):
-                out[k] = " "
-            i = j
-            continue
-        if src.startswith("/*", i):
-            j = src.find("*/", i + 2)
-            j = n if j < 0 else j + 2
-            for k in range(i, j):
-                if src[k] != "\n":
-                    out[k] = " "
-            i = j
-            continue
-        i += 1
-    return "".join(out)
-
 
 def match_close(text, start, opener, closer):
     depth = 0
@@ -247,10 +211,17 @@ def if_statements(masked):
     return out
 
 
-def enclosing(ifs, idx):
+def enclosing(ifs, whens, idx):
+    """Conditions that enclose `idx` — `if` bodies plus `when` branches.
+
+    [wide4 w4-T1] `when (false) { publish() }` is the same dead publish as
+    `if (false) publish()`; both contexts count so neither spelling buys a pass.
+    """
     hits = [s for s in ifs if s[2] <= idx <= s[3]]
     hits.sort(key=lambda s: s[0])
-    return [s[4] for s in hits]
+    conds = [s[4] for s in hits]
+    conds += [c for c, start, end in whens if start <= idx < end]
+    return conds
 
 
 def split_top(expr, op):
@@ -283,49 +254,171 @@ def norm_atom(expr):
             return s
 
 
+def _fold_bool(expr):
+    """Boolean value of `expr` when literals alone decide it, else None.
+
+    Kotlin precedence is applied here — `||` lowest, then `&&`, then unary `!` —
+    because the shared folder tests a leading `!` BEFORE splitting the operators:
+    `!true && x` (== `false && x` == false) came back "unknown" and every
+    literal-short-circuited guard written that way stayed green (wide4 w4-T1/T3).
+    Atoms go to the shared folder.
+    """
+    e = strip_parens(expr.strip())
+    if not e:
+        return None
+    for op in ("||", "&&"):
+        parts = split_top(e, op)
+        if len(parts) > 1:
+            vals = [_fold_bool(p) for p in parts]
+            if op == "||":
+                if any(v is True for v in vals):
+                    return True
+                return None if any(v is None for v in vals) else False
+            if any(v is False for v in vals):
+                return False
+            return None if any(v is None for v in vals) else True
+    if e.startswith("!") and not e.startswith("!="):
+        v = _fold_bool(e[1:])
+        return None if v is None else (not v)
+    return const_bool(e)
+
+
 def is_lit(expr, word):
-    return norm_atom(expr) == word
+    return _fold_bool(expr) is {"true": True, "false": False}.get(word)
 
 
 def always_false(cond):
-    """`if (false && guard)` — the guard's spelling survives, its decision does not."""
-    for disj in split_top(cond, "||"):
-        if is_lit(disj, "false"):
-            continue
-        if any(is_lit(c, "false") for c in split_top(disj, "&&")):
-            continue
-        return False
-    return True
+    """True when `cond` can never hold.
+
+    [wide4 w4-T1/T3] The spelling `false` was only one way to say it; `!true`,
+    `0 == 1`, `false && guard` and `!false` decide exactly the same way, and the
+    old literal comparison let them all through. The decision is now taken by the
+    shared const folder (short-circuit semantics included), so a guard that
+    cannot hold can never be counted as live again.
+    """
+    return _fold_bool(cond) is False
 
 
 def always_true(cond):
-    return any(is_lit(d, "true") for d in split_top(cond, "||"))
+    return _fold_bool(cond) is True
+
+
+def when_contexts(masked):
+    """Contexts opened by `when` branches: [(cond, start, end)].
+
+    [wide4 w4-T1] `when (false) { … }` wraps a publish exactly like `if (false)`
+    does; a branch is dead when its own condition is a constant false, or when
+    the subject is a constant false (`else ->` always lives).
+    """
+    out = []
+    for subject, cond, b_start, b_end in when_branches(masked):
+        conde = " ".join(cond.split())
+        if not conde or conde == "else":
+            continue
+        if _fold_bool(subject) is False:
+            conde = "false"
+        out.append((conde, b_start, b_end))
+    return out
+
+
+def cue_guard_polarity(ifs, masked, lo, hi):
+    """Conditions of `… PENDING … → continue` guards that ask the WRONG question.
+
+    The cue branch must skip the blocks that are NOT pending: `!=` (or a
+    negated test). `if (… == PENDING) continue` skips exactly the waiting calls
+    and annotates the running ones — the cue inverts into noise. Returns the
+    offending conditions (empty = every such guard is negative).
+    """
+    out = []
+    for p, close, body_start, body_end, cond in ifs:
+        if not (lo <= body_start <= hi):
+            continue
+        body = masked[body_start:body_end].strip()
+        if not re.match(r"^\{?\s*continue\b", body):
+            continue
+        if PENDING not in cond or always_false(cond) or always_true(cond):
+            continue
+        norm = " ".join(cond.split())
+        neg = re.search(r"!=\s*" + re.escape(PENDING), norm) or \
+            re.search(r"!\s*\(\s*[^)]*" + re.escape(PENDING), norm)
+        pos = re.search(r"(?<![=!<>])==\s*" + re.escape(PENDING), norm)
+        if not neg or pos:
+            out.append(norm)
+    return out
+
+
+def split_else_top(text):
+    """Split `A else B` on the depth-0 `else` keyword."""
+    depth = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and text.startswith("else", i) \
+                and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):
+            nxt = text[i + 4:i + 5]
+            if not (nxt.isalnum() or nxt == "_"):
+                return text[:i], text[i + 4:]
+        i += 1
+    return text, ""
+
+
+def branch_value(raw):
+    """Normalized value of one branch; a `{ … }` block collapses to its last stmt."""
+    v = raw.strip()
+    while v.startswith("{") and match_close(v, 0, "{", "}") == len(v) - 1:
+        inner = v[1:-1]
+        stmts = [inner[a:b].strip() for a, b in stmt_spans(inner)]
+        stmts = [s for s in stmts if s]
+        if not stmts:
+            return ""
+        v = stmts[-1]
+    v = " ".join(v.split())
+    # `{ return "" }` is the same value as `""`
+    if v.startswith("return ") or v == "return":
+        v = v[len("return"):].strip()
+    return v
+
+
+def policy_if(masked, code, span):
+    """(cond, then_value, else_value) of the `if (…) A else B` that IS the body.
+
+    Structure comes from the masked projection; the branch VALUES are read from
+    the comment-free projection so the empty-string literal `""` — the entire
+    point of T6 — stays visible.
+    """
+    m = re.search(r"\bif\s*\(", masked[span[0]:span[1]])
+    if not m:
+        return None
+    p_open = span[0] + m.end() - 1
+    p_close = match_close(masked, p_open, "(", ")")
+    if p_close < 0 or p_close > span[1]:
+        return None
+    cond = " ".join(masked[p_open + 1:p_close].split())
+    rest_start = p_close + 1
+    then_raw, else_raw = split_else_top(masked[rest_start:span[1]])
+    cut = rest_start + len(then_raw)
+    then_v = branch_value(code[rest_start:cut])
+    else_v = branch_value(code[cut + 4:span[1]]) if else_raw.strip() else ""
+    return cond, then_v, else_v
 
 
 def fun_body(masked, name):
-    """Body span of `fun name(...)`: brace-balanced, or the expression after `=`.
-    Located from the parameter list, never from the first `{` (a lambda in an
-    expression body owns that one)."""
-    m = re.search(r"\bfun\s+" + re.escape(name) + r"\s*\(", masked)
-    if not m:
-        return None
-    close = match_close(masked, m.end() - 1, "(", ")")
-    if close < 0:
-        return None
-    i = close + 1
-    while i < len(masked) and masked[i] not in "{=":
-        i += 1
-    if i >= len(masked):
-        return None
-    if masked[i] == "{":
-        end = match_close(masked, i, "{", "}")
-        return (i + 1, end) if end > 0 else None
-    stop = len(masked)
-    tm = re.search(r"\n[ \t]*\n|\n[ \t]*\}|\n[ \t]*(?:fun|internal|private|public|object|class|@)\b",
-                   masked[i:])
-    if tm:
-        stop = i + tm.start()
-    return (i + 1, stop)
+    """Body span of `fun name(...)`, from the shared primitive.
+
+    Located from the parameter list (a lambda in an expression body owns the
+    first `{`), and an expression body ends at the first depth-0 newline that is
+    not a continuation — the old `\\n\\n`-based stop swallowed trailing code.
+    """
+    span = function_body(masked, name)
+    return None if span is None else (span[0], span[1])
+
+
+def short_body(text, limit=80):
+    return " ".join(text.split())[:limit]
 
 
 def policy_sig_params(masked, name):
@@ -346,6 +439,7 @@ def check(src: str, label: str):
     # ── Regions (anchored on the raw text, read from the masked projection) ──
     masked = mask_code(src)
     ifs = if_statements(masked)
+    whens = when_contexts(masked)
     # (the LOOP_HEADER / PASS3_MARK anchors are comments themselves, so they are
     # looked up in the RAW source; the mask can never contain them.)
     header_at = src.find(LOOP_HEADER, src.find("// Pass 1 (sequential)"))
@@ -388,7 +482,7 @@ def check(src: str, label: str):
     crit_ifs = [s for s in ifs if crit_open < s[2] and s[3] < crit_end]
     terminators = 0
     for m in re.finditer(r"\b(?:continue|break|return|throw)\b", critical):
-        guards = enclosing(crit_ifs, critical_at + m.start())
+        guards = enclosing(crit_ifs, whens, critical_at + m.start())
         if any(always_false(g) for g in guards):
             continue
         terminators += 1
@@ -400,7 +494,7 @@ def check(src: str, label: str):
     # ── T1: a refusal publishes — and the publish must be LIVE ───────────────
     pushes = [critical_at + m.start() for m in re.finditer(re.escape(UI_PUSH), critical)]
     live_push = [at for at in pushes
-                 if not any(always_false(g) for g in enclosing(crit_ifs, at))]
+                 if not any(always_false(g) for g in enclosing(crit_ifs, whens, at))]
     if not live_push:
         if pushes:
             bad.append("%s:%d: the CRITICAL loop-detector branch publishes the refusal only under a "
@@ -434,10 +528,13 @@ def check(src: str, label: str):
                    % (label, CUE_CONST_REF))
     # The PENDING test must DECIDE: `if (false && cueBlock.toolStatus != PENDING) continue`
     # keeps the spelling and drops the guard, which is the whole point of T3.
+    # [wide4 w4-T3] Two more spellings that keep it and drop it: a condition
+    # decided by literals (`!true && …`), and a guard that asks the OPPOSITE
+    # question (`== PENDING → continue` skips exactly the blocks it must annotate).
     live_pending = False
     for m in re.finditer(re.escape(PENDING), pass2_seq):
         at = cue_call_at + m.start()
-        conds = list(enclosing(ifs, at))
+        conds = list(enclosing(ifs, whens, at))
         # the token may sit in a guard's CONDITION (the usual shape:
         # `if (cueBlock.toolStatus != PENDING) continue`) rather than in its body
         conds += [s[4] for s in ifs if s[0] <= at <= s[1]]
@@ -448,6 +545,11 @@ def check(src: str, label: str):
         bad.append("%s:1: the sequential cue is not guarded on a LIVE %s test — it would annotate a "
                    "call that already started (a literal-short-circuited guard is the same defect)"
                    % (label, PENDING))
+    wrong_polarity = cue_guard_polarity(ifs, masked, cue_call_at, execute_call_at)
+    for cond in wrong_polarity:
+        bad.append("%s:1: the sequential cue guard `%s` skips on a POSITIVE %s test — it annotates "
+                   "every call that already started and never the ones still waiting"
+                   % (label, cond, PENDING))
     if code.count(CUE_TEXT) != 1:
         bad.append("%s:1: the cue literal appears %d time(s) in code — it must be single-sourced in "
                    "%s, a second copy drifts" % (label, code.count(CUE_TEXT), "ToolPassTransitionPolicy"))
@@ -484,13 +586,32 @@ def check(src: str, label: str):
         bad.append("%s:1: `fun statusAtDispatch(` body not found — anchor moved or unbalanced"
                    % label)
     else:
-        body = masked[span[0]:span[1]]
-        if PENDING not in body or RUNNING not in body or not re.search(r"\b(?:if|when)\b", body):
-            bad.append("%s:%d: `statusAtDispatch` no longer decides on %s — its body is `%s`; an "
+        # [wide4 w4-T5] "there is an if" was the whole criterion: `if (current ==
+        # PENDING || true)` and `if (true) RUNNING else RUNNING` both have one.
+        # The body must now BE a live PENDING comparison whose branches return
+        # RUNNING / null respectively.
+        parts = policy_if(masked, code, span)
+        why = None
+        if parts is None:
+            why = "its body `%s` has no branching `if`" % short_body(masked[span[0]:span[1]])
+        else:
+            cond, then_v, else_v = parts
+            if always_true(cond) or always_false(cond):
+                why = "its condition `%s` is decided by literals, so every status flips" % cond
+            elif PENDING not in cond:
+                why = "its condition `%s` never looks at %s" % (cond, PENDING)
+            elif "==" not in cond:
+                why = "its condition `%s` is not a PENDING comparison" % cond
+            elif then_v != RUNNING:
+                why = "the PENDING branch yields `%s`, not %s" % (then_v, RUNNING)
+            elif else_v != "null":
+                why = ("the non-PENDING branch yields `%s`, not null — a refused block would be "
+                       "resurrected into a spinner" % else_v)
+        if why:
+            bad.append("%s:%d: `statusAtDispatch` no longer decides on %s — %s; an "
                        "unconditional flip resurrects a block Pass 1 already refused (FAILED) into "
                        "a RUNNING spinner"
-                       % (label, line_of(src, span[0]), PENDING,
-                          " ".join(body.split())[:80]))
+                       % (label, line_of(src, span[0]), PENDING, why))
 
     # ── T6: starting a call retires its cue ──────────────────────────────────
     # Same shape as T5: the call site can stay while the body degrades into
@@ -501,14 +622,39 @@ def check(src: str, label: str):
         bad.append("%s:1: `fun contentAtDispatchFlip(` body not found — anchor moved or unbalanced"
                    % label)
     else:
-        body = masked[span[0]:span[1]]
-        missing = [p for p in params if not re.search(r"\b" + re.escape(p) + r"\b", body)]
-        if missing or not re.search(r"\b(?:if|when)\b", body):
-            bad.append("%s:%d: `contentAtDispatchFlip` no longer retires the queue cue — its body "
-                       "is `%s` (missing %s / no branch); a leftover cue is shown and persisted as "
-                       "that tool's output"
-                       % (label, line_of(src, span[0]), " ".join(body.split())[:80],
-                          ", ".join(missing) or "branch"))
+        # [wide4 w4-T6] The branch VALUES decide, not the presence of an `if`:
+        # `if (current == queueCue) current else current` has a branch and never
+        # retires anything. The strings-intact projection is used so the empty
+        # literal is visible (the masked view blanks it).
+        parts = policy_if(masked, code, span)
+        missing = [p for p in params
+                   if not re.search(r"\b" + re.escape(p) + r"\b", masked[span[0]:span[1]])]
+        why = None
+        if missing:
+            why = "it never reads %s" % ", ".join(missing)
+        elif parts is None:
+            why = "its body `%s` has no branching `if`" % short_body(masked[span[0]:span[1]])
+        else:
+            cond, then_v, else_v = parts
+            if always_true(cond) or always_false(cond):
+                why = "its condition `%s` is decided by literals" % cond
+            elif then_v == else_v:
+                why = "both branches yield `%s` — the cue is never retired" % then_v
+            elif set([then_v, else_v]) != {'""', params[0]}:
+                why = ("its branches yield `%s` / `%s` — one must clear the cue to the empty "
+                       "string, the other must pass the live content through"
+                       % (then_v, else_v))
+            elif re.search(r"(?<![=!<>])==\s*", cond) and then_v != '""':
+                why = ("the `==` branch yields `%s` — the branch that MATCHES the cue is the one "
+                       "that must clear it" % then_v)
+            elif re.search(r"!=\s*", cond) and not re.search(r"(?<![=!<>])==\s*", cond) \
+                    and else_v != '""':
+                why = ("the `else` branch yields `%s` — the branch that MATCHES the cue is the one "
+                       "that must clear it" % else_v)
+        if why:
+            bad.append("%s:%d: `contentAtDispatchFlip` no longer retires the queue cue — %s; a "
+                       "leftover cue is shown and persisted as that tool's output"
+                       % (label, line_of(src, span[0]), why))
     if FLIP_CONTENT_CALL not in code:
         bad.append("%s:1: the dispatch flip no longer retires the queue cue (%s) — the cue text is "
                    "not tool output and the finalisation pass keeps max(existing, result) BY "
@@ -527,7 +673,12 @@ def run(repo: str) -> int:
         return 1
     with open(path, "r", encoding="utf-8") as fh:
         src = fh.read()
-    bad, notes = check(src, REL)
+    try:
+        bad, notes = check(src, REL)
+    except Unparseable as exc:
+        # fail-closed: an unviewable engine is a violation, never a pass
+        bad, notes = ["%s: lex: the engine cannot be lexed (%s) — the gate refuses to judge a "
+                      "broken lexical projection" % (REL, exc)], []
     for note in notes:
         print("  [OK] %s" % note)
     if bad:
@@ -653,6 +804,83 @@ FIXTURES = [
                                     ToolPassTransitionPolicy.QUEUE_CUE_TEXT,
                                 ),""",
          "                                content = flippingBlock.content,", 1)),
+    # ── wide4 witnesses: identical defects, the DECISION removed instead of the
+    #    spelling (literal folding / inverted polarity / branch values / a
+    #    template-brace that used to shift the block extents) ─────────────────
+    ("w4_t1_not_true", "only under a dead guard",
+     lambda s: s.replace(
+         """                        withContext(Dispatchers.Main) {
+                            host.updateAssistantMessage(loopState.assistantId, loopState.accumulatedText, true, loopState.allToolBlocks)
+                        }
+                    }
+                    // Record the blocked attempt""",
+         """                        if (!true) withContext(Dispatchers.Main) {
+                            host.updateAssistantMessage(loopState.assistantId, loopState.accumulatedText, true, loopState.allToolBlocks)
+                        }
+                    }
+                    // Record the blocked attempt""", 1)),
+    ("w4_t1_when_false", "only under a dead guard",
+     lambda s: s.replace(
+         """                        withContext(Dispatchers.Main) {
+                            host.updateAssistantMessage(loopState.assistantId, loopState.accumulatedText, true, loopState.allToolBlocks)
+                        }
+                    }
+                    // Record the blocked attempt""",
+         """                        when (false) {
+                            true -> withContext(Dispatchers.Main) {
+                                host.updateAssistantMessage(loopState.assistantId, loopState.accumulatedText, true, loopState.allToolBlocks)
+                            }
+                        }
+                    }
+                    // Record the blocked attempt""", 1)),
+    ("w4_t1_template_brace", "only under a dead guard",
+     lambda s: s.replace(
+         """                        withContext(Dispatchers.Main) {
+                            host.updateAssistantMessage(loopState.assistantId, loopState.accumulatedText, true, loopState.allToolBlocks)
+                        }
+                    }
+                    // Record the blocked attempt""",
+         """                        if (false) {
+                            val _close = "${"}"}"
+                            withContext(Dispatchers.Main) {
+                                host.updateAssistantMessage(loopState.assistantId, loopState.accumulatedText, true, loopState.allToolBlocks)
+                            }
+                            val _open = "${"{"}"
+                        }
+                    }
+                    // Record the blocked attempt""", 1)),
+    ("w4_t3_not_true", "not guarded on a LIVE",
+     lambda s: s.replace(
+         "                        if (cueBlock.toolStatus != ToolBlockStatus.PENDING) continue\n",
+         "                        if (!true && cueBlock.toolStatus != ToolBlockStatus.PENDING) continue\n", 1)),
+    ("w4_t3_polarity", "skips on a POSITIVE",
+     lambda s: s.replace(
+         "                        if (cueBlock.toolStatus != ToolBlockStatus.PENDING) continue\n",
+         "                        if (cueBlock.toolStatus == ToolBlockStatus.PENDING) continue\n", 1)),
+    ("w4_t5_or_true", "no longer decides",
+     lambda s: s.replace(
+         """    fun statusAtDispatch(current: ToolBlockStatus?): ToolBlockStatus? =
+        if (current == ToolBlockStatus.PENDING) ToolBlockStatus.RUNNING else null""",
+         """    fun statusAtDispatch(current: ToolBlockStatus?): ToolBlockStatus? =
+        if (current == ToolBlockStatus.PENDING || true) ToolBlockStatus.RUNNING else null""", 1)),
+    ("w4_t5_both_running", "no longer decides",
+     lambda s: s.replace(
+         """    fun statusAtDispatch(current: ToolBlockStatus?): ToolBlockStatus? =
+        if (current == ToolBlockStatus.PENDING) ToolBlockStatus.RUNNING else null""",
+         """    fun statusAtDispatch(current: ToolBlockStatus?): ToolBlockStatus? =
+        if (current == ToolBlockStatus.PENDING) ToolBlockStatus.RUNNING else ToolBlockStatus.RUNNING""", 1)),
+    ("w4_t6_both_current", "no longer retires",
+     lambda s: s.replace(
+         """    fun contentAtDispatchFlip(current: String, queueCue: String): String =
+        if (current == queueCue) "" else current""",
+         """    fun contentAtDispatchFlip(current: String, queueCue: String): String =
+        if (current == queueCue) current else current""", 1)),
+    ("w4_t6_inverted", "must clear",
+     lambda s: s.replace(
+         """    fun contentAtDispatchFlip(current: String, queueCue: String): String =
+        if (current == queueCue) "" else current""",
+         """    fun contentAtDispatchFlip(current: String, queueCue: String): String =
+        if (current == queueCue) current else "" """, 1)),
 ]
 
 

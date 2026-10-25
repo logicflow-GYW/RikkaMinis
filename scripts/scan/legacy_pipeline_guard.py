@@ -45,6 +45,14 @@ import os
 import re
 import sys
 
+# [wide4/10] Comment/string masking is the shared lexer's job. This gate used
+# `BLOCK_COMMENT_RE` (a bare `/*...*/` regex) and its own character state
+# machine in two different places; a string containing `/*` blanked hundreds of
+# real lines in one and mis-nested block comments in the other.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import analyse as _lex_analyse  # noqa: E402
+from _kotlin_ast import match_bracket as _match_bracket  # noqa: E402
+
 # Legacy row classes: no production code path constructs them any more
 # (buildAggregateChatItems emits only UserBubble + AssistantMessageItem).
 LEGACY_ROWS = [
@@ -71,6 +79,14 @@ FROZEN_LEGACY_SYMBOLS = frozenset({
     "splitMarkdownIntoBlockTexts",
 })
 
+# The frozen package's file set. Adding a file to a runtime-dead module is the
+# same hazard as adding a symbol; both stop being checked the moment the scan
+# surface quietly changes shape.
+FROZEN_LEGACY_FILES = frozenset({
+    "AppendOnlyMarkdownSegmenter.kt", "AudioWaveformView.kt",
+    "LegacyFlatChatBuilder.kt", "MarkdownStreamMerge.kt", "StableChatRowLedger.kt",
+})
+
 ALLOWED_FILES = {
     "com/rikkaminis/app/ui/chat/ChatFlatItems.kt",
     "com/rikkaminis/app/ui/chat/ChatScreen.kt",
@@ -83,29 +99,28 @@ ALLOWED_PREFIXES = [
 ]
 
 ESCAPE_RE = re.compile(r"legacy-ok\s*:")
-BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
 
 
-def strip_comments(text):
-    """Remove block comments and //-comments; keep line structure.
+def _views(text):
+    """(comments-blanked view, code view, reason) from the shared Kotlin lexer.
 
-    Lines carrying a `legacy-ok:` justification are kept verbatim — the escape
-    hatch has to survive comment stripping to be seen by the scanner."""
-    # keep the newlines a block comment spanned, so line numbers stay aligned
-    text = BLOCK_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
-    out = []
-    for line in text.splitlines():
-        if line.lstrip().startswith("//"):
-            # keep the justification; neutralise other comment lines WITHOUT
-            # making them blank (a blank line ends a legacy-ok block)
-            out.append(line if ESCAPE_RE.search(line) else "//")
-        else:
-            stripped = re.sub(r"//.*$", "", line)
-            if ESCAPE_RE.search(line):
-                # keep the justification visible even when it trails code
-                stripped += " // legacy-ok: "
-            out.append(stripped)
-    return out
+    `comments` keeps string literals (a reference spelled in a string is still a
+    reference); `code` blanks both (structure: brace depth, block headers).
+
+    [wide4/10] The old `strip_comments` ran `BLOCK_COMMENT_RE` — a bare regex
+    with no idea what a string literal is. A file holding `val open = "/*"` and,
+    a few hundred lines later, `val close = "*/"` had everything between them —
+    including a live reference to a dead-pipeline row class — replaced by blank
+    lines, and the gate reported "no new references" (the classic `"*/*"` /
+    `"video/*"` swallow, already documented inside this repo's own gate
+    comments). The shared lexer masks real comments only; a source it cannot lex
+    is a violation, never a silently emptied scan.
+    """
+    ok, reason, views = _lex_analyse(text)
+    if not ok:
+        return None, None, reason
+    return views["comments"], views["code"], None
+
 
 
 _DECL_MODIFIERS = (
@@ -128,59 +143,43 @@ _DECL_SITE_RE = re.compile(
     r"^[ \t]*(?:(?:%s|%s)\s+)*(?:val|var|fun|class|interface|object|typealias)\b"
     % (_DECL_ANNOT, "|".join(_DECL_MODIFIERS))
 )
-def mask_code(text):
-    """Blank comments AND literals, newline/offset preserving.
+_MEMBER_DECL_RE = re.compile(
+    r"\b(?:val|var|fun|class|object|interface|typealias)\s+[A-Za-z_`]")
+_FUN_HEAD_RE = re.compile(r"\bfun\b")
+_TYPE_HEAD_RE = re.compile(r"\b(?:class|object|interface|companion)\b")
 
-    `strip_comments` is line-oriented and has no idea about string literals, so
-    a URL (`"https://…"`) truncates its own line. Structure decisions (brace
-    depth, which line opens a declaration) must not be made on that text — a
-    single mismatched brace pushes local `val`s to depth 0 and turns them into
-    gate-wide patterns (`rawText`, `ordinal`, …).
+
+def _blocks(masked):
+    """(open, close, kind) for every `{ … }`; kind ∈ {'fun','type','other'}.
+
+    `kind` comes from the block HEADER (text between the previous statement
+    boundary and the `{`): `fun … {` opens a function body, `class … {` a type
+    body, everything else (`run {`, a lambda, `when {`, an initializer) is
+    'other'.
+
+    [wide4/10] The escape hatch is only meaningful for a USE SITE inside a
+    FUNCTION BODY. The old criterion was `depths[start] > 0` — a raw brace count
+    — and any top-level property initializer forges it:
+    `internal val leaked = run {` + `// legacy-ok:` + the lambda body exempted a
+    brand-new TOP-LEVEL declaration that binds a dead-pipeline type.
     """
     out = []
-    i, n = 0, len(text)
-    state = None
-    while i < n:
-        c = text[i]
-        two = text[i:i + 2]
-        if state is None:
-            if two == "//":
-                state = "line"; out.append("  "); i += 2; continue
-            if two == "/*":
-                state = "block"; out.append("  "); i += 2; continue
-            if text[i:i + 3] == '"""':
-                state = "raw"; out.append("   "); i += 3; continue
-            if c == '"':
-                state = "str"; out.append(" "); i += 1; continue
-            if c == "'":
-                state = "char"; out.append(" "); i += 1; continue
-            out.append(c); i += 1; continue
-        if state == "line":
-            out.append("\n" if c == "\n" else " ")
-            if c == "\n":
-                state = None
-            i += 1; continue
-        if state == "block":
-            if two == "*/":
-                state = None; out.append("  "); i += 2; continue
-            out.append("\n" if c == "\n" else " "); i += 1; continue
-        if state == "raw":
-            if text[i:i + 3] == '"""':
-                state = None; out.append("   "); i += 3; continue
-            out.append("\n" if c == "\n" else " "); i += 1; continue
-        if state == "str":
-            if c == "\\":
-                out.append("  "); i += 2; continue
-            if c == '"':
-                state = None
-            out.append(" "); i += 1; continue
-        if state == "char":
-            if c == "\\":
-                out.append("  "); i += 2; continue
-            if c == "'":
-                state = None
-            out.append(" "); i += 1; continue
-    return "".join(out)
+    n = len(masked)
+    for i, ch in enumerate(masked):
+        if ch != "{":
+            continue
+        head_start = max(masked.rfind("\n", 0, i), masked.rfind(";", 0, i),
+                         masked.rfind("{", 0, i), masked.rfind("}", 0, i)) + 1
+        head = masked[head_start:i]
+        if _FUN_HEAD_RE.search(head):
+            kind = "fun"          # also `fun f() = when (x) { … }`
+        elif _TYPE_HEAD_RE.search(head):
+            kind = "type"
+        else:
+            kind = "other"
+        close = _match_bracket(masked, i)
+        out.append((i, close if close > 0 else n - 1, kind))
+    return out
 
 
 def escape_regions(raw_lines, masked):
@@ -190,17 +189,33 @@ def escape_regions(raw_lines, masked):
       * the marker lives on the code line itself, or anywhere in the contiguous
         run of comment lines directly ABOVE the escaped code (a multi-line
         justification is the shipped shape) — a blank line breaks the run;
-      * the escaped code must be a USE SITE inside a body: a top-level line, or
-        a line that opens a declaration, is never exempted (that is a new
-        legacy surface, not a deliberate dual-pipeline statement);
-      * the region ends at the first blank line or the moment brace depth drops
-        below the escaped line's own depth — it can no longer swallow a whole
-        paragraph of unrelated new code.
+      * the escaped code must be a USE SITE inside a FUNCTION BODY: a top-level
+        line, a class-body member, a declaration head, or any line that
+        introduces a declaration is never exempted (that is a new
+        legacy-holding surface, which is the hazard this gate exists for);
+      * the region ends at the first blank line, the moment brace depth drops
+        below the escaped line's own depth, or the first line that would add a
+        declaration — it can no longer swallow a paragraph of unrelated code.
     """
+    text = "\n".join(masked)
+    blocks = _blocks(text)
     depths, depth = [], 0
     for line in masked:
         depths.append(depth)
         depth += line.count("{") - line.count("}")
+    offsets = []
+    pos = 0
+    for line in masked:
+        offsets.append(pos)
+        pos += len(line) + 1
+
+    def use_site(idx):
+        if not any(o < offsets[idx] < c and k == "fun" for o, c, k in blocks):
+            return False          # not inside a function body
+        if _DECL_SITE_RE.match(masked[idx]) or _MEMBER_DECL_RE.search(masked[idx]):
+            return False          # opens a new declaration surface
+        return True
+
     regions = []
     n = len(raw_lines)
     i = 0
@@ -220,28 +235,60 @@ def escape_regions(raw_lines, masked):
                     or raw_lines[start].lstrip().startswith("//"):
                 i = j + 1
                 continue
-            if depths[start] <= 0 or _DECL_SITE_RE.match(masked[start]):
+            if not use_site(start):
                 i = j + 1
                 continue
             base = depths[start]
             end = start
             k = start
             while k < n and masked[k].strip() and depths[k] >= base:
+                if k > start and not use_site(k):
+                    break
                 end = k
                 k += 1
             regions.append((start, end))
             i = end + 1
             continue
-        if not is_comment and ESCAPE_RE.search(line):
+        if not is_comment and ESCAPE_RE.search(line) and use_site(i):
+            # A trailing `// legacy-ok:` is the same justification as a leading
+            # one — but ONLY on a use site. It used to be appended blindly, so
+            # `internal val accidental = … // legacy-ok: x` exempted a brand-new
+            # TOP-LEVEL declaration (wide4/10 witness), and a run of lines after
+            # such a marker was exempted wholesale.
             regions.append((i, i))
         i += 1
     return regions
 
 
+
 def scan(root):
+    """Violations for references to the runtime-dead pipeline.
+
+    [wide4/10] Completeness is now enforced in BOTH directions: the parsed
+    declarations are compared with `FROZEN_LEGACY_SYMBOLS`, and the legacy
+    package's file set with `FROZEN_LEGACY_FILES`. The constant existed for a
+    whole round with no reader, so the frozen package could grow a new dead
+    function — or a symbol could stop being parsed — in complete silence.
+    """
     violations = []
     derived, per_file, drift = _legacy_scan(root)
     violations.extend(drift)
+    if per_file:
+        extra_files = sorted(set(per_file) - FROZEN_LEGACY_FILES)
+        if extra_files:
+            violations.append(
+                "ui/chat/legacy: the frozen (runtime-dead) package gained file(s) %s — "
+                "dead modules do not grow; delete the file or unfreeze the package "
+                "deliberately" % extra_files)
+        if set(per_file) == set(FROZEN_LEGACY_FILES):
+            missing = sorted(FROZEN_LEGACY_SYMBOLS - derived)
+            extra = sorted(derived - FROZEN_LEGACY_SYMBOLS)
+            if missing or extra:
+                violations.append(
+                    "ui/chat/legacy: parsed declarations and the frozen inventory "
+                    "disagree — missing=%s extra=%s. A name that stops being parsed is "
+                    "a scan surface that silently collapsed; a name that appears is new "
+                    "dead code that needs a human look." % (missing, extra))
     for fn, found in sorted(per_file.items()):
         if not found:
             # Fail-closed per file: this file still declares something, yet the
@@ -264,7 +311,7 @@ def scan(root):
     ]
 
     for base, _dirs, files in os.walk(os.path.join(root, "src/android/app/src")):
-        for fn in files:
+        for fn in sorted(files):
             if not fn.endswith(".kt"):
                 continue
             path = os.path.join(base, fn)
@@ -277,9 +324,16 @@ def scan(root):
             if any(a in posix for a in ALLOWED_PREFIXES):
                 continue
             raw = open(path, encoding="utf-8", errors="replace").read()
+            lit, masked_text, reason = _views(raw)
+            if lit is None:
+                violations.append(
+                    "%s  this gate cannot lex the file (%s) — it refuses to scan a "
+                    "source whose string/comment structure it cannot resolve"
+                    % (posix, reason))
+                continue
             raw_lines = raw.split("\n")
-            lines = strip_comments(raw)
-            masked = mask_code(raw).split("\n")
+            lines = lit.split("\n")
+            masked = masked_text.split("\n")
             exempt = set()
             for start, end in escape_regions(raw_lines, masked):
                 exempt.update(range(start, end + 1))
@@ -296,6 +350,13 @@ def scan(root):
     return violations
 
 
+
+_MODIFIER_ONLY_RE = re.compile(
+    r"^(?:(?:@[\w.]+(?:\((?:[^()]|\([^()]*\))*\))?)|(?:%s))\s*$"
+    % "|".join(_DECL_MODIFIERS)
+)
+
+
 def _legacy_scan(root):
     """(names, per_file, drift) for ui/chat/legacy/*.kt.
 
@@ -305,6 +366,11 @@ def _legacy_scan(root):
     `drift` lists declaration heads that are not at column 0 — the legacy
     package is frozen and runtime-dead, so a reformat of a declaration head is
     an edit of a dead module that nobody would otherwise notice.
+
+    [wide4/10] Two revisions: the masked view is the shared lexer's (the local
+    state machine mis-nested block comments), and a modifier on its own line is
+    carried onto the declaration below it — the inventory comparison that now
+    guards this package is only as good as the parser feeding it.
     """
     legacy_dir = os.path.join(
         root, "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/legacy"
@@ -318,15 +384,24 @@ def _legacy_scan(root):
         if not fn.endswith(".kt"):
             continue
         src = open(os.path.join(legacy_dir, fn), encoding="utf-8", errors="replace").read()
-        clean = _DECL_ANNOTATION_RE.sub("", mask_code(src))
+        _lit, clean_src, reason = _views(src)
+        if clean_src is None:
+            per_file[fn] = set()
+            drift.append(
+                "ui/chat/legacy/%s  cannot be lexed (%s) — the declaration inventory "
+                "is unknowable (fail-closed)" % (fn, reason))
+            continue
+        clean = _DECL_ANNOTATION_RE.sub("", clean_src)
         found = set()
         # Only TOP-LEVEL declarations count: a local `val out = …` inside a
         # function is not a symbol anyone can reference, and harvesting those
         # would turn common names (`out`, `i`, `parts`) into gate patterns.
         depth = paren = 0
+        pending = ""
         for idx, line in enumerate(clean.split("\n")):
+            probe = (pending + " " + line) if pending else line
             if depth == 0 and paren == 0:
-                m = _DECL_RE.match(line)
+                m = _DECL_RE.match(probe)
                 if m:
                     found.add(m.group(1))
                     if line[:1] in (" ", "\t"):
@@ -335,6 +410,8 @@ def _legacy_scan(root):
                             "legacy package was edited; confirm the reference is "
                             "still tracked" % (fn, idx + 1, m.group(1))
                         )
+            stripped = line.strip()
+            pending = stripped if (stripped and _MODIFIER_ONLY_RE.match(stripped)) else ""
             # Paren depth matters too: the parameter list of
             # `data class Slot(\n    val ordinal: Int,\n)` sits at brace depth 0
             # and would otherwise be harvested as a top-level declaration.
@@ -343,6 +420,7 @@ def _legacy_scan(root):
         per_file[fn] = found
         names |= found
     return names, per_file, drift
+
 
 
 def legacy_exported_symbols(root):
@@ -391,6 +469,39 @@ _SELFTEST_LEGACY_ANNOTATED = (
     " @Deprecated(\"dead pipeline\")\n"
     " fun AudioWaveformView() {}\n"
 )
+
+
+_FROZEN_GROUPS = {
+    "AppendOnlyMarkdownSegmenter.kt": [
+        "AppendOnlyMarkdownSegmenter", "commonPrefixLength", "longestSuffixPrefixOverlap"],
+    "AudioWaveformView.kt": ["AudioWaveformView", "MINIMUM_STREAMING_OVERLAP_LENGTH"],
+    "LegacyFlatChatBuilder.kt": [
+        "buildFlatChatItems", "splitMarkdownIntoBlockTexts", "coalesceMarkdownFragments"],
+    "MarkdownStreamMerge.kt": [
+        "mergeLegacyStreamingText", "isFenceFragment",
+        "looksLikeDivergentStreamingSnapshot", "mergeAgentTextSnapshot"],
+    "StableChatRowLedger.kt": [
+        "StableChatRowLedger", "StableMarkdownSlot",
+        "shouldIgnoreRegressiveStreamingSnapshot"],
+}
+
+
+def _frozen_fixture():
+    """A legacy package whose declarations reproduce FROZEN_LEGACY_SYMBOLS.
+
+    The completeness arm needs a tree that is BOTH the full frozen file set and
+    the full symbol inventory, otherwise the comparison is skipped by design.
+    """
+    files = {}
+    for fn, syms in _FROZEN_GROUPS.items():
+        body = ["package com.rikkaminis.app.ui.chat.legacy", ""]
+        for sym in syms:
+            if sym[:1].isupper():
+                body.append("internal class %s" % sym)
+            else:
+                body.append("internal fun %s() {}" % sym)
+        files[os.path.join(LEGACY_PKG, fn)] = "\n".join(body) + "\n"
+    return files
 
 
 def _consumer(body):
@@ -456,6 +567,72 @@ def _selftest():
              "    is FlatChatItem.AssistantMarkdownBlock -> 1\n"
              "    else -> 0\n"
              "}\n")},
+         1),
+    ]
+    # --- [wide4/10] the escape hatch must be a USE SITE inside a FUNCTION ---
+    cases += [
+        ("w4-trailing legacy-ok cannot launder a top-level declaration (scope)",
+         {os.path.join(CHAT_PKG, "ChatColdOpenPrewarm.kt"): _top_level(
+             "internal const val COLD_OPEN_CHAR_BUDGET = 96_000\n"
+             "internal val accidentalLegacyCheck: (FlatChatItem) -> Boolean = "
+             "{ it is FlatChatItem.AssistantMarkdownBlock } // legacy-ok: inline bypass\n")},
+         1),
+        ("w4-`run { }` initializer cannot forge depth (scope)",
+         {os.path.join(CHAT_PKG, "ChatColdOpenPrewarm.kt"): _top_level(
+             "internal val leakedExtractor = run {\n"
+             "    // legacy-ok: bypass the top-level declaration check via run block\n"
+             "    ({ it: FlatChatItem -> "
+             "(it as? FlatChatItem.AssistantMarkdownBlock)?.rawText })\n"
+             "}\n")},
+         1),
+        ("w4-a declaration inside a multi-line escape region is still judged (scope)",
+         {os.path.join(CHAT_PKG, "ChatColdOpenPrewarm.kt"): _top_level(
+             "internal fun sources(item: FlatChatItem): Int = when (item) {\n"
+             "    // legacy-ok: single-point source function for BOTH pipelines\n"
+             "    is FlatChatItem.AssistantMarkdownBlock -> 1\n"
+             "    else -> { val leaked = { x: FlatChatItem -> "
+             "x is FlatChatItem.AssistantMarkdownBlock }; 0 }\n"
+             "}\n")},
+         1),
+        ("w4-a `\"/*\"` string cannot blank the code below it (parser-death)",
+         {os.path.join(CHAT_PKG, "ChatColdOpenPrewarm.kt"): _top_level(
+             "internal fun collect(item: FlatChatItem): Int {\n"
+             "    val open = \"/*\"\n"
+             "    val hits = listOfNotNull((item as? "
+             "FlatChatItem.AssistantMarkdownBlock)?.rawText)\n"
+             "    val close = \"*/\" + \"\"\n"
+             "    return hits.size\n"
+             "}\n")},
+         1),
+    ]
+    # --- [wide4/10] completeness: the frozen inventory is now READ ---
+    # It existed for a whole round with no reader: the dead package could grow a
+    # new helper, or a symbol could stop being parsed (a `internal`/`fun` split
+    # across two lines), and nothing noticed.
+    _frozen = _frozen_fixture()
+    assert set(sum(_FROZEN_GROUPS.values(), [])) == FROZEN_LEGACY_SYMBOLS, \
+        "the selftest fixture drifted from FROZEN_LEGACY_SYMBOLS"
+    _stub = os.path.join(LEGACY_PKG, "LegacyFlatChatBuilder.kt")
+    _audio = os.path.join(LEGACY_PKG, "AudioWaveformView.kt")
+    cases += [
+        ("w4-frozen inventory matches the package (control)",
+         dict(_frozen), 0),
+        ("w4-new dead symbol in the frozen package is caught (completeness)",
+         dict(_frozen, **{_audio: _frozen[_audio]
+                          + "internal fun newUntrackedLegacyHelper(): Int = 0\n"}),
+         1),
+        ("w4-a modifier split across two lines does not hide a new symbol (completeness)",
+         dict(_frozen, **{_audio: _frozen[_audio]
+                          + "internal\nfun newSplitLegacyHelper(): Int = 0\n"}),
+         1),
+        ("w4-a frozen symbol that disappears is caught (completeness)",
+         dict(_frozen, **{_stub: _frozen[_stub].replace(
+             "internal fun coalesceMarkdownFragments() {}\n", "")}),
+         1),
+        ("w4-a dead file added to the frozen package is caught (completeness)",
+         dict(_frozen, **{os.path.join(LEGACY_PKG, "ExtraDeadSurface.kt"):
+                          "package com.rikkaminis.app.ui.chat.legacy\n"
+                          "internal fun extra() {}\n"}),
          1),
     ]
     passed = failed = 0

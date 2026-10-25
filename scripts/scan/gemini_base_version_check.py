@@ -51,6 +51,10 @@ import shutil
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import analyse as _kotlin_lex_analyse  # noqa: E402
+from _kotlin_ast import const_bool  # noqa: E402
+
 GEMINI_DIR = os.path.join(
     "src", "android", "app", "src", "main", "java", "com", "rikkaminis", "app", "provider", "gemini"
 )
@@ -92,6 +96,12 @@ TARGETS = {
 SHARED_DELEGATE = "GeminiBasePath.normalize"
 
 
+class LexFailure(Exception):
+    """Source the shared Kotlin lexer cannot project. The gate reports it as a
+    violation (fail closed) instead of judging a half-masked file."""
+
+
+
 def _skip_string(text, i):
     """Index just past the string literal starting at `text[i]` (a quote)."""
     if text.startswith('"""', i):
@@ -131,33 +141,32 @@ def strip_comments(text):
     """Comments blanked (same length, newlines kept), STRING LITERALS INTACT.
 
     Literals must survive: the criteria below look for `"/v1beta"` and for URL
-    templates. The old scanner walked into literals, so `"https://.../v1beta"`
-    was truncated at `//` and the default base became unverifiable.
+    templates. This used to be a hand-rolled scanner that ended a block comment at
+    the FIRST `*/`; Kotlin nests them, so `/* a /* b */ c */` left `c */` (and any
+    `return` hidden in `c`) outside the comment — a forged top-level return with the
+    real code pushed one brace deeper (wide4 witness `strip_comments /
+    _top_level_returns`). The shared lexer handles nested block comments, char
+    literals, raw strings and `${...}` templates; a file it cannot lex raises
+    `LexFailure` so the gate fails closed instead of judging a broken projection.
     """
-    out = []
-    i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        if c == '"' or c == "'":
-            j = _skip_string(text, i)
-            out.append(text[i:j])
-            i = j
-            continue
-        if text.startswith("//", i):
-            j = text.find("\n", i)
-            end = n if j < 0 else j
-            out.append(" " * (end - i))
-            i = end
-            continue
-        if text.startswith("/*", i):
-            j = text.find("*/", i + 2)
-            end = n if j < 0 else j + 2
-            out.append("".join("\n" if ch == "\n" else " " for ch in text[i:end]))
-            i = end
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
+    ok, reason, views = _kotlin_lex_analyse(text)
+    if not ok:
+        raise LexFailure(reason)
+    return views["comments"]
+
+
+def code_view(text):
+    """Same-length view with comments AND string contents blanked.
+
+    Structure (braces, `if`/`return` keywords) is judged on this view: a brace or a
+    `return` living inside a literal is not code. Positions are identical to
+    `strip_comments`'s output, so a span found here can be sliced from the literal-
+    preserving view to read the actual value.
+    """
+    ok, reason, views = _kotlin_lex_analyse(text)
+    if not ok:
+        raise LexFailure(reason)
+    return views["code"]
 
 
 CONTINUATION_CHARS = "||&&,.+-*/?:=(<["
@@ -258,6 +267,74 @@ def restores_version(body):
 
 RESTORE_SUFFIX_RE = re.compile(r'/v1beta"\s*$|\+\s*"/v1beta"')
 
+# The value-shaping operators. Every one can keep the restored text in the file while
+# handing the caller something else:
+#   `return stripped.takeIf { true } ?: "$stripped/v1beta"`  -> Elvis right side is dead,
+#   `return if (1 == 1) stripped else "$stripped/v1beta"`    -> same, one spelling over,
+#   `GeminiBasePath.normalize(x).let { basePath }`           -> `.let` replaces the value.
+# `.also` / `.apply` are deliberately absent: both return their RECEIVER.
+_DECIDER_RE = re.compile(
+    r"\?:|\bif\b|\bwhen\b|\.let\b|\.run\b|\.with\b|\.takeIf\b|\.takeUnless\b")
+
+# The value shapes that DO carry the version segment — positive assertions, not another
+# blacklist of dead spellings (every new `false &&`-style spelling walked through the
+# previous blacklist: wide4 family-hole axis).
+RESTORE_TEMPLATE_RE = re.compile(r'^"\$\{?[A-Za-z_]\w*\}?/v1beta"$')
+RESTORE_CONCAT_RE = re.compile(r'^[A-Za-z_][\w.]*(?:\([^()]*\))?\s*\+\s*"/v1beta"$')
+RESTORE_LITERAL_RE = re.compile(r'^"[^"]*/v1beta"$')
+_SCOPE_TAIL_RE = re.compile(r"\.(?:also|apply)$")
+
+
+def _peel_scope(chain):
+    """Drop trailing `.also` / `.apply` tokens (`_chain_only` removed their blocks).
+
+    Both are receiver-preserving, so `normalize(x).also { log() }` still hands back the
+    normalized base. Everything else in `_DECIDER_RE` is value-shaping: a violation,
+    not something to peel.
+    """
+    while True:
+        m = _SCOPE_TAIL_RE.search(chain.rstrip())
+        if not m:
+            return chain.strip()
+        chain = chain[:m.start()]
+
+
+def _call_tail(chain, head):
+    """-> text after `head(...)`'s closing paren, or None when `chain` is not that call.
+
+    `None` = the value is not this call's result; `""` = the call IS the value; a
+    non-empty tail = something value-shaping trails it (`.let`, `?:`, …) -> rejected.
+    """
+    idx = chain.find(head)
+    if idx < 0:
+        return None
+    if chain[:idx].strip():
+        return None
+    op = chain.find("(", idx + len(head))
+    if op < 0:
+        return None
+    cp = _close_index(chain, op, "(", ")")
+    if cp < 0:
+        return None
+    return chain[cp + 1:].strip()
+
+
+def _value_is_call(expr_text, expr_code, head):
+    """Does `expr` evaluate to exactly `head(...)`?
+
+    Judged on the code view (a `.let` spelled inside a literal is not a decider), with
+    the literal-preserving view confirming the call's own spelling.
+    """
+    chain_code = _peel_scope(_chain_only(expr_code))
+    chain_text = _peel_scope(_chain_only(expr_text))
+    if _DECIDER_RE.search(chain_code):
+        return False, chain_text
+    if _call_tail(chain_code, head) != "":
+        return False, chain_text
+    if _call_tail(chain_text, head) != "":
+        return False, chain_text
+    return True, chain_text
+
 
 def _assignments(src):
     """-> {name: [rhs, ...]} for `val|var name = rhs` and plain `name = rhs`."""
@@ -274,30 +351,40 @@ def _const_names(src):
     return set(m.group(1) for m in re.finditer(r"\bconst\s+val\s+([A-Za-z_]\w*)", src))
 
 
-def _top_level_returns(body):
-    """Every depth-0 `return` expression; for an expression-bodied fun the body
-    itself IS the returned value."""
-    out = []
+def _top_level_return_spans(code):
+    """[(start, end)] of every depth-0 `return` EXPRESSION in `code`.
+
+    `code` is the string-blanked view: a `return` inside a literal or a brace cannot
+    register, and braces balance even when a `${...}` template nests them. A body with
+    no top-level `return` is judged WHOLE (expression-body fun) — so a block body that
+    lost its `return` falls into the same check instead of being skipped as "nothing
+    to look at" (wide4 parser-death witness: a nested block comment forged a return and
+    pushed the real one one brace deeper).
+    """
+    spans = []
     depth = 0
     i = 0
-    while i < len(body):
-        c = body[i]
+    while i < len(code):
+        c = code[i]
         if c == '"' or c == "'":
-            i = _skip_string(body, i)
+            i = _skip_string(code, i)
             continue
         if c in "([{":
             depth += 1
         elif c in ")]}":
             depth -= 1
-        elif depth == 0 and re.match(r"return\b", body[i:]):
-            expr = expr_span(body, i + 6).strip()
-            out.append(expr)
-            i += 6 + len(expr)
+        elif depth == 0 and re.match(r"return\b", code[i:]):
+            raw = expr_span(code, i + 6)
+            body = raw.strip()
+            start = i + 6 + (len(raw) - len(raw.lstrip()))
+            spans.append((start, start + len(body)))
+            i += 6 + len(raw)
             continue
         i += 1
-    if not out:
-        out.append(body.strip())
-    return out
+    if not spans:
+        start = len(code) - len(code.lstrip())
+        spans.append((start, start + len(code.strip())))
+    return spans
 
 
 def _chain_only(expr):
@@ -327,34 +414,52 @@ def _chain_only(expr):
     return "".join(out)
 
 
-def returned_value_restores(body, src):
+def returned_value_restores(body, body_code, src):
     """Does the VALUE the normalizer returns carry the version segment?
 
     A restore that lives only in the body (`val unused = "/v1beta"`, or inside a
     `.also { }` whose receiver is the raw argument) hands the caller a
     versionless base: `/models/<id>:generateContent` then 404s for every
-    instance. Judged on each `return`'s top-level chain, with one hop into a
-    local/constant for the `?: return DEFAULT_BASE` early exit.
+    instance. Each top-level `return` chain must POSITIVELY match a carrying shape
+    (`"$x/v1beta"`, `x + "/v1beta"`, or a constant that itself ends in `/v1beta`), and
+    must not carry a value-shaping operator — `?:` / `if` / `when` / `.let` / `.run` /
+    `.takeIf` / `.takeUnless` are exactly "keep the spelling, drop the decision".
     """
-    if SHARED_DELEGATE in body:
-        return True
+    if SHARED_DELEGATE in body_code:
+        return _delegation_returns_value(body, body_code)
     table = _assignments(src)
-    for expr in _top_level_returns(body):
-        chain = _chain_only(expr).strip()
-        if SHARED_DELEGATE in chain:
-            continue
-        if RESTORE_SUFFIX_RE.search(chain):
+    for start, end in _top_level_return_spans(body_code):
+        chain = _peel_scope(_chain_only(body_code[start:end]))
+        chain_text = _peel_scope(_chain_only(body[start:end]))
+        if not chain:
+            return False, "<empty>"
+        if _DECIDER_RE.search(chain):
+            return False, chain_text
+        if RESTORE_TEMPLATE_RE.match(chain_text) or RESTORE_CONCAT_RE.match(chain_text):
             continue
         if re.fullmatch(r"[A-Za-z_]\w*", chain):
-            if any(RESTORE_SUFFIX_RE.search(rhs) for rhs in table.get(chain, ())):
+            # an early exit to a named default: the NAME only counts when its value
+            # carries the segment (`return DEFAULT_BASE` is verified, not assumed)
+            if any(RESTORE_LITERAL_RE.match(rhs.strip()) for rhs in table.get(chain, ())):
                 continue
-        return False, chain
+        return False, chain_text
     return True, ""
 
 
-def analyse(body, src=""):
+def _delegation_returns_value(body, body_code):
+    """Delegation is only a fix when the delegate's RESULT is the returned value:
+    `GeminiBasePath.normalize(basePath).let { basePath }` computes the normalized base
+    and hands back the raw one (wide4 witness `function_body / SHARED_DELEGATE`)."""
+    for start, end in _top_level_return_spans(body_code):
+        ok, chain = _value_is_call(body[start:end], body_code[start:end], SHARED_DELEGATE)
+        if not ok:
+            return False, chain
+    return True, ""
+
+
+def analyse(body, body_code, src=""):
     """Which structural pieces the normalizer body has."""
-    restores, chain = returned_value_restores(body, src)
+    restores, chain = returned_value_restores(body, body_code, src)
     return {
         "strips /v1beta": '.removeSuffix("/v1beta")' in body,
         "strips /v1": '.removeSuffix("/v1")' in body,
@@ -431,36 +536,99 @@ def read(rel, root):
 
 DEAD_CODE_RE = re.compile(r"\b(?:if|while)\s*\(\s*false\s*\)")
 IF_RE = re.compile(r"\bif\s*\(")
-# `if (false && baseURL.endsWith("/v1"))` keeps the guard token and deletes the
-# decision — the same defect class one spelling over.
-BOOL_OP_LITERAL = re.compile(
-    r"(?:&&|\|\|)\s*(?:true|false)(?![\w])"
-    r"|(?<![\w.\"'])(?:true|false)\s*(?:&&|\|\|)")
+# The anthropic probe arm, in its correct spelling. `cond` == endsWith("/v1") must
+# assemble `"$baseURL/models"` on the true branch and `"$baseURL/v1/models"` on the
+# false one; a negated cond swaps them. Checking only the CONDITION let a swapped or
+# rewritten branch keep the guard token while probing the wrong URL.
+PROBE_ARM_MODELS = '"$baseURL/models"'
+PROBE_ARM_V1_MODELS = '"$baseURL/v1/models"'
 
 
-def _guard_conditions(arm):
-    """-> every `if (...)` condition text inside `arm`."""
+def _squash(text):
+    """Whitespace outside string literals removed, so `"$baseURL/models"` compares
+    exactly and `"$baseURL" + "/models"` does not."""
     out = []
-    for m in IF_RE.finditer(arm):
-        op = arm.find("(", m.end() - 1)
-        out.append(expr_span(arm, op))
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == '"' or c == "'":
+            j = _skip_string(text, i)
+            out.append(text[i:j])
+            i = j
+            continue
+        if not c.isspace():
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _if_parts(arm, arm_code):
+    """-> [(cond_text, cond_code, then_text, else_text)] for every `if (...)` in `arm`.
+
+    Structure comes from the code view (braces inside literals cannot shift the
+    parens); the value texts come from the literal-preserving view at the same span.
+    """
+    out = []
+    for m in re.finditer(r"\bif\s*\(", arm_code):
+        op = m.end() - 1
+        cp = _close_index(arm_code, op, "(", ")")
+        if cp < 0:
+            continue
+        tail_code = arm_code[cp + 1:]
+        tail_text = arm[cp + 1:]
+        then_text, else_text = _split_else(tail_code, tail_text)
+        out.append((arm[op + 1:cp], arm_code[op + 1:cp], then_text, else_text))
     return out
 
 
+def _split_else(tail_code, tail_text):
+    """Split a braceless `then <else> else` tail at its top-level `else`."""
+    depth = 0
+    i = 0
+    while i < len(tail_code):
+        c = tail_code[i]
+        if c == '"' or c == "'":
+            i = _skip_string(tail_code, i)
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and re.match(r"else\b", tail_code[i:]):
+            return tail_text[:i].strip(), tail_text[i + 4:].strip()
+        i += 1
+    return tail_text.strip(), ""
+
+
 def _live_guard_testing(arm, needle):
-    """-> (found, live): does a guard test `needle`, and is any such guard live?"""
+    """-> (found, live, detail): does a guard test `needle`, and is it a LIVE guard?
+
+    Three ways the guard token survives while the decision dies:
+      * the condition folds to a constant — `false &&`, `!true`, `(1 == 2) &&`, `0 == 1`;
+      * the branches assemble the wrong URL (swapped, or the /v1 arm lost its segment).
+    Both are checked; `detail` says which one, for the finding text.
+    """
+    arm_code = code_view(arm)
     found = False
+    detail = ""
     live = False
-    for cond in _guard_conditions(arm):
-        if needle not in cond:
+    for cond_text, cond_code, then_text, else_text in _if_parts(arm, arm_code):
+        if needle not in cond_text:
             continue
         found = True
-        inner = cond.strip()
-        if inner.startswith("(") and inner.endswith(")"):
-            inner = inner[1:-1]
-        if not BOOL_OP_LITERAL.search(inner):
-            live = True
-    return found, live
+        if const_bool(cond_code) is not None:
+            detail = detail or "constant"
+            continue
+        negated = _squash(cond_text).lstrip("(").startswith("!")
+        expect_then, expect_else = (
+            (PROBE_ARM_V1_MODELS, PROBE_ARM_MODELS) if negated
+            else (PROBE_ARM_MODELS, PROBE_ARM_V1_MODELS)
+        )
+        if _squash(then_text) != expect_then or _squash(else_text) != expect_else:
+            detail = detail or "branches"
+            continue
+        live = True
+    return found, live, detail
 
 MIN_URL_SITES = 2
 URL_MODEL_MARK_RE = re.compile(r":(?:stream)?[Gg]enerateContent")
@@ -507,18 +675,47 @@ def enclosing_function(src, pos):
     return best
 
 
+def _binding_rhs(fn, name):
+    """-> (rhs_text, write_count) for local `val|var name = ...` bindings inside `fn`.
+
+    `rhs_text` is the WHOLE initializer (multi-line aware via `expr_span`), not just
+    the text up to the first newline: `val b = if (false) normalizedBasePath() else
+    basePath` has to be read as one expression, otherwise a dead-branch pick looks like
+    a normalized binding. `write_count` counts every assignment to the name (the
+    declaration plus any rebinding), so a good initializer cannot hide a later write.
+    """
+    rhs = None
+    writes = 0
+    for m in re.finditer(r"\b(?:val|var)\s+" + re.escape(name) + r"\s*(?::[^=\n]+?)?=(?!=)", fn):
+        rhs = expr_span(fn, m.end()).strip()
+        writes += 1
+    for m in re.finditer(r"(?<![\w.])" + re.escape(name) + r"\s*=(?!=)", fn):
+        before = fn[:m.start()].rstrip()
+        if before.endswith("val") or before.endswith("var"):
+            continue  # the declaration itself, already counted
+        writes += 1
+    return rhs, writes
+
+
 def check_url_routing(src):
     """-> (routed_sites, violations) for every models URL built from a base.
 
     Derived from the literals themselves: the interpolation that sits directly
     before `/models/` is the base. A site is ROUTED when that interpolation is
-    the normalizer itself, or a local bound to it in the same function; every
-    site that reads anything else is a violation. `routed` counts accepted
+    the normalizer itself, or a local whose initializer IS the normalizer call;
+    every site that reads anything else is a violation. `routed` counts accepted
     sites only, so a third bypassing site cannot inflate the count the way the
     old `normalizedBasePath()` tally did.
+
+    The local-binding arm is judged on the initializer's VALUE, not on the line
+    containing the name: a dead-branch pick (`if (false) normalizedBasePath() else
+    basePath`) and a `.let` that replaces the result with the raw base both mention
+    the normalizer and both hand the request the raw base (wide4 witness
+    `check_url_routing`).
     """
     violations = []
     routed = 0
+    code = code_view(src)
     for start, literal in _string_literals(src):
         if not URL_MODEL_MARK_RE.search(literal):
             continue
@@ -529,12 +726,14 @@ def check_url_routing(src):
         ok = True
         for m in interps:
             expr = (m.group(1) or m.group(2) or "").strip()
-            if "normalizedBasePath(" in expr:
+            if "normalizedBasePath(" in expr and not _DECIDER_RE.search(expr):
                 continue
-            if re.fullmatch(r"[A-Za-z_]\w*", expr) and re.search(
-                    r"\b(?:val|var)\s+%s\s*(?::[^=\n]+)?=\s*[^\n]*normalizedBasePath\("
-                    % re.escape(expr), fn):
-                continue
+            if re.fullmatch(r"[A-Za-z_]\w*", expr):
+                rhs, writes = _binding_rhs(fn, expr)
+                if rhs is not None and writes == 1:
+                    good, _ = _value_is_call(rhs, code_view(rhs), "normalizedBasePath")
+                    if good:
+                        continue
             ok = False
             line = src[:start].count("\n") + 1
             violations.append(
@@ -544,6 +743,48 @@ def check_url_routing(src):
         if ok:
             routed += 1
     return routed, violations
+
+
+def _gemini_probe_delegates(arm):
+    """-> (ok, chain): the gemini probe arm must interpolate the DELEGATE's value.
+
+    `SHARED_DELEGATE in arm` only proved the name appeared; `baseURL`/`basePath` can
+    be handed straight back by a `.let { … }` tail on the interpolated call, which is
+    the same discarded-result shape as everywhere else in this gate.
+    """
+    if SHARED_DELEGATE not in arm:
+        return False, ""
+    for m in re.finditer(r"\$\{([^{}]*)\}", arm):
+        expr = m.group(1).strip()
+        if SHARED_DELEGATE not in expr:
+            continue
+        return _value_is_call(expr, code_view(expr), SHARED_DELEGATE)
+    return False, "no ${...} interpolation carries the delegate call"
+
+
+def _voice_delegates(fn):
+    """-> (ok, chain): the voice site must bind the delegate's value and use that binding.
+
+    A `.let { effectiveBaseURL() }` tail leaves the delegate call in place while the
+    raw base is what the URL is built from.
+    """
+    if SHARED_DELEGATE not in fn:
+        return False, ""
+    bound = None
+    for m in re.finditer(r"\bval\s+([A-Za-z_]\w*)\s*(?::[^=\n]+?)?=(?!=)", fn):
+        rhs = expr_span(fn, m.end()).strip()
+        if SHARED_DELEGATE not in rhs:
+            continue
+        ok, chain = _value_is_call(rhs, code_view(rhs), SHARED_DELEGATE)
+        if not ok:
+            return False, chain
+        if bound is None:
+            bound = m.group(1)
+    if bound is None:
+        return False, "the delegate call's value is never bound to a name"
+    if not re.search(r"\$" + re.escape(bound) + r"\b", fn):
+        return False, bound
+    return True, ""
 
 
 def check_cross_file_sites(root, gemini_bodies):
@@ -559,7 +800,17 @@ def check_cross_file_sites(root, gemini_bodies):
         failures.append("GeminiModelsApi.kt::normalizeBase not found — cannot confirm it delegates")
         print("  [ROT] GeminiModelsApi.kt::normalizeBase not found")
     elif SHARED_DELEGATE in sibling:
-        print(f"  [OK] GeminiModelsApi.kt::normalizeBase delegates to {SHARED_DELEGATE}")
+        ok, chain = _delegation_returns_value(sibling, code_view(sibling))
+        if ok:
+            print(f"  [OK] GeminiModelsApi.kt::normalizeBase delegates to {SHARED_DELEGATE}")
+        else:
+            failures.append(
+                "GeminiModelsApi.kt::normalizeBase calls "
+                f"{SHARED_DELEGATE}(...) but does not return its value (returns `{chain}`) — "
+                "the normalized base is computed and thrown away, so the models list asks a "
+                "versionless (or doubly-versioned) URL"
+            )
+            print("  [FAIL] GeminiModelsApi.kt::normalizeBase discards the delegate's value")
     else:
         failures.append(
             "GeminiModelsApi.kt::normalizeBase carries its own copy of the rule — a second "
@@ -574,7 +825,16 @@ def check_cross_file_sites(root, gemini_bodies):
         failures.append(f"{VOICE_REL}: `{VOICE_CLASS}.{VOICE_FN}` not found — keep this gate honest")
         print(f"  [ROT] {VOICE_CLASS}::{VOICE_FN} not found")
     elif SHARED_DELEGATE in fn:
-        print(f"  [OK] {VOICE_CLASS}::{VOICE_FN} delegates to {SHARED_DELEGATE}")
+        ok, chain = _voice_delegates(fn)
+        if ok:
+            print(f"  [OK] {VOICE_CLASS}::{VOICE_FN} delegates to {SHARED_DELEGATE}")
+        else:
+            failures.append(
+                f"{VOICE_CLASS}::{VOICE_FN} calls {SHARED_DELEGATE}(...) but the request URL is "
+                f"not built from its value (returns `{chain}`) — the normalized base is computed "
+                "and discarded, so a base that already carries /v1beta goes out doubly versioned"
+            )
+            print(f"  [FAIL] {VOICE_CLASS}::{VOICE_FN} discards the delegate's value")
     else:
         failures.append(
             f"{VOICE_CLASS}::{VOICE_FN} builds the Gemini base itself (contains-check on "
@@ -601,26 +861,36 @@ def check_cross_file_sites(root, gemini_bodies):
                 continue
             if type_name == "gemini":
                 seen["gemini"] += 1
-                ok = SHARED_DELEGATE in arm
+                ok, chain = _gemini_probe_delegates(arm)
                 print(f"  [{'OK' if ok else 'FAIL'}] probe arm ProviderType.gemini delegates")
                 if not ok:
                     failures.append(
-                        "ProviderMutationMethods.kt: the gemini probe arm concatenates a literal "
-                        f"version segment instead of {SHARED_DELEGATE}(...) — a custom base that "
-                        "already carries /v1beta then probes /v1beta/v1beta/models (404)"
+                        "ProviderMutationMethods.kt: the gemini probe arm interpolates "
+                        f"`{chain}` instead of the bare {SHARED_DELEGATE}(...) result — the "
+                        "delegate is called and its value thrown away, so a custom base that "
+                        "already carries /v1beta probes /v1beta/v1beta/models (404)"
                     )
             elif type_name == "anthropic":
                 seen["anthropic"] += 1
-                guard_found, guard_live = _live_guard_testing(arm, 'endsWith("/v1")')
+                guard_found, guard_live, guard_detail = _live_guard_testing(arm, 'endsWith("/v1")')
                 ok = guard_found and guard_live
                 print(f"  [{'OK' if ok else 'FAIL'}] probe arm ProviderType.anthropic guards on /v1")
                 if not ok:
-                    if guard_found and not guard_live:
+                    if guard_found and guard_detail == "constant":
                         failures.append(
                             "ProviderMutationMethods.kt: the anthropic probe arm keeps the "
-                            "endsWith(\"/v1\") comparison but short-circuits it with a boolean "
-                            "literal (`false && ...`) — the raw arm runs, so a base that already "
-                            "ends in /v1 probes /v1/v1/models (404)"
+                            "endsWith(\"/v1\") comparison but short-circuits it with a constant "
+                            "condition (`false && ...`, `(1 == 2) && ...`, `!true && ...`) — the "
+                            "raw arm runs, so a base that already ends in /v1 probes "
+                            "/v1/v1/models (404)"
+                        )
+                    elif guard_found:
+                        failures.append(
+                            "ProviderMutationMethods.kt: the anthropic probe arm tests "
+                            "endsWith(\"/v1\") but the branches assemble the wrong URL (`then` must "
+                            "be \"$baseURL/models\", `else` \"$baseURL/v1/models\") — the guard "
+                            "token survives and the decision does not, so a base ending in /v1 "
+                            "probes /v1/v1/models (404)"
                         )
                     else:
                         failures.append(
@@ -971,6 +1241,97 @@ _PROVIDER_RAW_BASE = (
     "}\n"
 )
 
+# --- wide4 witness fixtures --------------------------------------------------
+# The clean shared normalizer, as text, so each wide4 arm can move exactly one
+# decision point (the restore's VALUE) without re-spelling the rest.
+_BASE_CLEAN = (
+    "package com.rikkaminis.app.provider.gemini\n"
+    "internal object GeminiBasePath {\n"
+    '    const val DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta"\n'
+    "    fun normalize(raw: String?): String {\n"
+    "        val base = raw?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() } "
+    "?: return DEFAULT_BASE\n"
+    "        var stripped = base\n"
+    "        while (true) {\n"
+    '            val next = stripped.removeSuffix("/v1beta").removeSuffix("/v1")\n'
+    "            if (next == stripped) break\n"
+    "            stripped = next\n"
+    "        }\n"
+    '        return "$stripped/v1beta"\n'
+    "    }\n"
+    "}\n"
+)
+_BASE_RETURN_LINE = '        return "$stripped/v1beta"\n'
+
+# wide4 witness `returned_value_restores / _chain_only`: the Elvis right side is
+# unreachable, so `takeIf { true }` hands back the versionless strip.
+_BASE_ELVIS_DISCARD = _BASE_CLEAN.replace(
+    _BASE_RETURN_LINE,
+    '        return stripped.takeIf { true } ?: "$stripped/v1beta"\n')
+# ... and the same decision, spelled as a constant branch.
+_BASE_IF_ELSE_DISCARD = _BASE_CLEAN.replace(
+    _BASE_RETURN_LINE,
+    '        return if (1 == 1) stripped else "$stripped/v1beta"\n')
+# ... and as a receiver-replacing `.let`.
+_BASE_LET_DISCARD = _BASE_CLEAN.replace(
+    _BASE_RETURN_LINE,
+    '        return "$stripped/v1beta".let { stripped }\n')
+
+# wide4 witness `strip_comments / _top_level_returns`: under the old first-`*/`
+# scanner the first line looked like a guarded top-level return and the real
+# `return stripped` landed one brace deeper. Kotlin nests block comments, so the
+# whole injection is commentary and the body returns a versionless base.
+_BASE_NESTED_COMMENT = _BASE_CLEAN.replace(
+    _BASE_RETURN_LINE,
+    '        /* outer /* inner */ if (1 == 2) return "$stripped/v1beta"\n'
+    "        val _f = { // */\n"
+    "        return stripped\n"
+    "        /* outer2 /* inner2 */ } // */\n")
+# Control arm: a nested comment that is genuinely just commentary must stay green
+# (proves the lexer does not eat the code around `*/`).
+_BASE_NESTED_COMMENT_CLEAN = _BASE_CLEAN.replace(
+    _BASE_RETURN_LINE,
+    "        /* outer /* inner */ commentary */ guard below */\n"
+    + _BASE_RETURN_LINE)
+# Fail-closed arm: a file the shared lexer cannot project must be REPORTED, not
+# skipped (the parser-death axis dies exactly here).
+_BASE_UNLEXABLE = _BASE_CLEAN.replace(
+    _BASE_RETURN_LINE,
+    '        val note = "unterminated\n'
+    '        return "$stripped/v1beta"\n')
+
+_PROVIDER_CLEAN = (
+    "package com.rikkaminis.app.provider.gemini\n"
+    "class GeminiProvider(private val basePath: String = GeminiBasePath.DEFAULT_BASE) {\n"
+    "    private fun normalizedBasePath(): String = GeminiBasePath.normalize(basePath)\n"
+    "    fun sendMessage() {\n"
+    '        val url = "${normalizedBasePath()}/models/gemini-2.5-flash:generateContent"\n'
+    "    }\n"
+    "    fun streamMessage() {\n"
+    '        val url = "${normalizedBasePath()}/models/gemini-2.5-flash:streamGenerateContent"\n'
+    "    }\n"
+    "}\n"
+)
+_PROVIDER_DELEGATE_LINE = (
+    "    private fun normalizedBasePath(): String = GeminiBasePath.normalize(basePath)\n")
+
+# wide4 witness `check_url_routing`: the binding names the normalizer, the value is
+# the raw base.
+_PROVIDER_DEAD_BRANCH_BASE = _PROVIDER_CLEAN.replace(
+    '        val url = "${normalizedBasePath()}/models/gemini-2.5-flash:generateContent"\n',
+    "        val b = if (false) normalizedBasePath() else basePath\n"
+    '        val url = "$b/models/gemini-2.5-flash:generateContent"\n')
+_PROVIDER_LET_BINDING = _PROVIDER_CLEAN.replace(
+    '        val url = "${normalizedBasePath()}/models/gemini-2.5-flash:generateContent"\n',
+    "        val b = normalizedBasePath().let { p -> p.let { basePath } }\n"
+    '        val url = "$b/models/gemini-2.5-flash:generateContent"\n')
+# wide4 witness `function_body / SHARED_DELEGATE`: the delegate runs, `.let` throws
+# its result away, and the caller gets the raw base.
+_PROVIDER_DELEGATE_LET = _PROVIDER_CLEAN.replace(
+    _PROVIDER_DELEGATE_LINE,
+    "    private fun normalizedBasePath(): String = "
+    "GeminiBasePath.normalize(basePath).let { basePath }\n")
+
 def selftest():
     """Fixture trees — one dirty arm per criterion, every one must turn it red."""
     results = []
@@ -1091,6 +1452,91 @@ def selftest():
                 "+ (key ?: \"\")\n"
             )
         ),
+    )
+
+    # ── wide4: the five externally-witnessed axes (one arm per spelling) ────
+    # Same shape, one spelling over: the restore/guard/call token survives while the
+    # decision dies. Each arm below failed BEFORE the wide4 hardening (rc=0 on the
+    # patched live tree) and must now be caught by its own criterion.
+    run(
+        "w4: a restore kept behind a dead Elvis right side is caught",
+        True,
+        "restore /v1beta in the returned value",
+        base_file=_BASE_ELVIS_DISCARD,
+    )
+    run(
+        "w4: a restore kept behind a constant if/else is caught",
+        True,
+        "restore /v1beta in the returned value",
+        base_file=_BASE_IF_ELSE_DISCARD,
+    )
+    run(
+        "w4: a restore thrown away by a trailing `.let` is caught",
+        True,
+        "restore /v1beta in the returned value",
+        base_file=_BASE_LET_DISCARD,
+    )
+    run(
+        "w4: a normalize body whose restore lives in a nested block comment is caught",
+        True,
+        "restore /v1beta in the returned value",
+        base_file=_BASE_NESTED_COMMENT,
+    )
+    run(
+        "w4: a nested block comment that is only commentary stays green",
+        False,
+        "[FULL]",
+        base_file=_BASE_NESTED_COMMENT_CLEAN,
+    )
+    run(
+        "w4: an unlexable normalizer fails closed instead of being skipped",
+        True,
+        "unlexable",
+        base_file=_BASE_UNLEXABLE,
+    )
+    run(
+        "w4: the /v1 guard short-circuited by a constant comparison is caught",
+        True,
+        "short-circuits",
+        probe=_probe_body(
+            arms=(
+                '        ProviderType.anthropic -> if ((1 == 2) && baseURL.endsWith("/v1")) '
+                '"$baseURL/models" else "$baseURL/v1/models"\n'
+                '        ProviderType.gemini -> "${GeminiBasePath.normalize(baseURL)}/models?key=" '
+                "+ (key ?: \"\")\n"
+            )
+        ),
+    )
+    run(
+        "w4: the /v1 guard with its branches swapped is caught",
+        True,
+        "assemble the wrong URL",
+        probe=_probe_body(
+            arms=(
+                '        ProviderType.anthropic -> if (baseURL.endsWith("/v1")) '
+                '"$baseURL/v1/models" else "$baseURL/models"\n'
+                '        ProviderType.gemini -> "${GeminiBasePath.normalize(baseURL)}/models?key=" '
+                "+ (key ?: \"\")\n"
+            )
+        ),
+    )
+    run(
+        "w4: a models URL on a dead-branch normalizer binding is caught",
+        True,
+        "instead of the normalized base",
+        provider_file=_PROVIDER_DEAD_BRANCH_BASE,
+    )
+    run(
+        "w4: a models URL on a `.let`-discarded normalizer binding is caught",
+        True,
+        "instead of the normalized base",
+        provider_file=_PROVIDER_LET_BINDING,
+    )
+    run(
+        "w4: a delegating normalizer that returns the raw base is caught",
+        True,
+        "does not restore /v1beta in the returned value",
+        provider_file=_PROVIDER_DELEGATE_LET,
     )
 
     # Criterion 6 — the voice family's own base rules (A-05). One green arm, so a
@@ -1268,9 +1714,17 @@ def main():
             failures.append(f"{fname}: file missing (base normalization moved?)")
             print(f"  [ROT] {fname}: not found at {GEMINI_DIR}")
             continue
-        with open(path, encoding="utf-8") as f:
-            text = strip_comments(f.read())
-        body = function_body(text, fn_name)
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = strip_comments(f.read())
+            body = function_body(text, fn_name)
+            body_code = code_view(body) if body is not None else ""
+        except LexFailure as exc:
+            failures.append(
+                f"{fname}: unlexable source ({exc}) — the shared Kotlin lexer cannot project "
+                "this file, so the normalizer is unauditable; refusing to judge it")
+            print(f"  [ROT] {fname}: unlexable source ({exc})")
+            continue
         if body is None:
             # Rot guard: a renamed/removed normalizer must not read as "clean".
             failures.append(f"{fname}: `{fn_name}` not found — keep this gate honest")
@@ -1278,15 +1732,25 @@ def main():
             continue
         seen += 1
         bodies[fname] = body
-        if SHARED_DELEGATE in body:
+        if SHARED_DELEGATE in body_code:
             # Delegation is the shape we want: the rule lives once. The shared
             # implementation is a target of this same gate, so its correctness is
-            # checked in the same run.
+            # checked in the same run. Delegation is NOT a free pass: `.let { basePath }`
+            # keeps the call and hands back the raw base.
             delegating.append(fname)
-            results[fname] = True
-            print(f"  [OK] {fname}::{fn_name}  delegates to {SHARED_DELEGATE}")
+            ok, chain = _delegation_returns_value(body, body_code)
+            results[fname] = ok
+            if ok:
+                print(f"  [OK] {fname}::{fn_name}  delegates to {SHARED_DELEGATE}")
+            else:
+                print(f"  [FAIL] {fname}::{fn_name}  delegates to {SHARED_DELEGATE} "
+                      f"but returns `{chain}`")
+                failures.append(
+                    f"{fname}::{fn_name} does not restore /v1beta in the returned value "
+                    f"(returns `{chain}`) — the {SHARED_DELEGATE}(...) result is computed and "
+                    "discarded, so the caller gets the raw base")
             continue
-        pieces, chain = analyse(body, text)
+        pieces, chain = analyse(body, body_code, text)
         if DEAD_CODE_RE.search(body):
             pieces["run live code (an `if (false)` / `while (false)` block cannot strip "
                    "or restore anything)"] = False
@@ -1310,8 +1774,14 @@ def main():
     # `basePath`, and `"$basePath/models/"` (no braces) slips a literal check.
     provider = os.path.join(root, GEMINI_DIR, "GeminiProvider.kt")
     if os.path.exists(provider):
-        src = strip_comments(open(provider, encoding="utf-8").read())
-        sites, url_failures = check_url_routing(src)
+        try:
+            src = strip_comments(open(provider, encoding="utf-8").read())
+            sites, url_failures = check_url_routing(src)
+        except LexFailure as exc:
+            sites = 0
+            url_failures = [
+                f"GeminiProvider.kt: unlexable source ({exc}) — the URL wiring is "
+                "unauditable; refusing to judge it"]
         print(f"  [{'OK' if not url_failures else 'FAIL'}] GeminiProvider routes {sites} call "
               "site(s) through the normalizer (models URL(s) judged by their base interpolation)")
         if sites < MIN_URL_SITES:
@@ -1332,7 +1802,12 @@ def main():
         )
     else:
         print("  [FULL] cross-file criteria 4/5:")
-        failures += check_cross_file_sites(root, bodies)
+        try:
+            failures += check_cross_file_sites(root, bodies)
+        except LexFailure as exc:
+            failures.append(
+                f"cross-file sites: unlexable source ({exc}) — the sibling delegation graph is "
+                "unauditable; refusing to judge it")
 
     # Criterion 6 — the voice family's own base rules (A-05). Same partial-tree
     # rule as 4/5: the frozen test_scan.py fixtures build a gemini-only tree, so
@@ -1349,7 +1824,12 @@ def main():
         )
     else:
         print("  [FULL] voice base criteria 6 (A-05):")
-        failures += check_voice_base_normalization(root)
+        try:
+            failures += check_voice_base_normalization(root)
+        except LexFailure as exc:
+            failures.append(
+                f"voice base criteria: unlexable source ({exc}) — the voice rules are "
+                "unauditable; refusing to judge them")
 
     print("")
     if failures:

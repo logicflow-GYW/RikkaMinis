@@ -36,6 +36,11 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import (  # noqa: E402  (shared, single lexer for all gates)
+    KotlinLexError, analyse, mask_strings,
+)
+
 KOTLIN = "src/android/app/src/main/java/com/rikkaminis/app/"
 DB_DIR = "data/db"
 
@@ -140,86 +145,375 @@ DAO_WRITTEN = {
     },
 }
 
+# ── ENTITY_CONST_PINS: columns a ctor site legitimately writes as a literal ──
+# [wide4-12 witness w4-fw-3, axis=completeness] The derivation criterion used
+# to run only for the four derived families; the six entity-self families —
+# including the chat core tables — `continue`d right after the "is this column
+# written at all?" set difference, so `summary = ""` on CompactMarkerEntity
+# (the compaction summary thrown away on EVERY save) passed as "mapped".
+# Every entity-self column is now also judged by the SAME positive criterion:
+# it must be carried from source at least once. A column whose value IS a
+# literal by design is pinned here, with a reason, so the pin is the audit.
+ENTITY_CONST_PINS = {
+    ("CompactMarkerEntity", "boundaryMessageId"):
+        "explicit null: the message-id boundary pin is idle for a "
+        "full-session compaction — the marker keeps the sort-order boundary",
+    ("CompactMarkerEntity", "firstKeptMessageId"):
+        "explicit null: 'kept-from-here' message boundary unused by the "
+        "sort-order-based compaction path (single ctor site by design)",
+    ("CompactMarkerEntity", "uiBoundarySortOrder"):
+        "explicit null: UI sort-order boundary only set by the trim path",
+    ("CompactMarkerEntity", "version"):
+        "marker FORMAT version constant — bumped with the marker schema, "
+        "never derived from the session row",
+    ("ProviderAgentLoopIdEntity", "kind"):
+        "discriminator column: the row kind IS the literal key "
+        "(\"entry\" / \"group\") that selects which table slot the id fills",
+}
+
 
 PARSE_FAILURES = []   # fail-closed: an unparseable shape is a violation
 CONST_IDS = {"true", "false", "null", "this", "it"}
+# Kotlin hard keywords — they spell control flow, not a value read, so they do
+# not make an expression "derived". `if` / `else` / `when` used to count as
+# source reads (the old CONST_IDS forgot them entirely).
+KOTLIN_KEYWORDS = {
+    "as", "break", "by", "class", "continue", "do", "else", "false", "for",
+    "fun", "if", "in", "interface", "is", "null", "object", "package",
+    "return", "super", "this", "throw", "true", "try", "typealias", "typeof",
+    "val", "var", "when", "while", "it", "and", "or", "not",
+}
+
 
 
 def mask_comments(src):
     """Blank `//` and `/* */` comment text with spaces (newlines and string
     literals preserved), so masks keep every index aligned with `src`.
 
-    This gate used to read raw source: a commented-out `pinned = …` still
-    counted as "the field is mapped" (witness G2/parser-death), and a comment
-    holding `1)` closed the `data class` parameter list early, silently
-    truncating every field after it (witness G1/parser-death).
+    [wide4-12, axis=parser-death] This used to be a hand-written single-level
+    scanner: it ended a block comment at the FIRST `*/`, so Kotlin's nested
+    form `/* outer /* inner */ ) */` leaked a `)` out of the comment and
+    truncated the `data class` parameter list right there (witness w4-fw-5:
+    the extra field after the comment was never checked). The shared
+    `_kotlin_lexer` is a strictly conforming state machine (nested block
+    comments, `'"'` char literals, triple-quoted raw strings, `${…}` templates) —
+    and a lexing failure is FAIL-CLOSED: an unparsed file is a violation, not
+    a silent "return the source unchanged" that reports itself clean.
+    """
+    try:
+        ok, reason, views = analyse(src)
+    except KotlinLexError as exc:          # pragma: no cover - defensive
+        ok, reason, views = False, str(exc), None
+    if not ok or views is None:
+        PARSE_FAILURES.append(
+            "无法解析（%s）—— 门拒绝在残缺词法上作判断 (fail-closed)" % reason)
+        return ""
+    return views["comments"]
+
+
+# ── Expression normalisation: "is this value a literal in disguise?" ───────
+# [wide4-12, axis=family-hole] The old criterion only removed string/char
+# literals and then asked "is any identifier left that is not in
+# CONST_IDS?". Enumerating the allowed identifiers is a blacklist: every
+# rewrite that keeps an identifier on the page — `if (false) A else B`,
+# `idx * 0`, `when (false) …`, `x == x`, `"${0}".toInt()` — reads as
+# "derived" while the value is a fixed literal. The criterion is now
+# POSITIVE: an expression is constant only when it provably folds to a
+# literal and carries no identifier that stems from the source object.
+def _strip_outer(s):
+    s = s.strip()
+    while len(s) >= 2 and s[0] == "(" and s[-1] == ")":
+        depth = 0
+        inner = -1
+        for i, ch in enumerate(s):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    inner = i
+                    break
+        if inner != len(s) - 1:
+            break
+        s = s[1:-1].strip()
+    return s
+
+
+def _match_paren(s, open_idx):
+    """Index of the `)` matching `s[open_idx] == '('` (-1 when unbalanced)."""
+    depth = 0
+    for i in range(open_idx, len(s)):
+        ch = s[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _split_top(s, op):
+    """Split at depth-0 occurrences of `op` (string contents are masked first
+    so an operator inside a literal cannot split the expression)."""
+    masked = mask_strings(s)
+    parts, depth, start, i = [], 0, 0, 0
+    while i < len(masked):
+        ch = masked[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and masked.startswith(op, i):
+            parts.append(s[start:i])
+            i += len(op)
+            start = i
+            continue
+        i += 1
+    parts.append(s[start:])
+    return parts
+
+
+def _skeleton(value):
+    """Drop literal text, KEEP what the literal interpolates.
+
+    `"fixed"` → nothing (constant). `"${inst.id}"` → `inst.id` (reads the
+    source). `"${0}".toInt()` → `(0).toInt()` (folds). `$sessionId` inside a
+    template counts as reading `sessionId` — ignoring it was the other half of
+    the old `"${" in value` shortcut.
     """
     out = []
-    i = 0
-    n = len(src)
-    state = None  # None | '"' | "'" | '"""'
+    i, n = 0, len(value)
     while i < n:
-        if state == '"""':
-            if src.startswith('"""', i):
-                out.append('"""')
-                i += 3
-                state = None
-                continue
-            out.append(src[i])
-            i += 1
+        if value[i] == '"':
+            j = i + 1
+            buf = []
+            while j < n and value[j] != '"':
+                if value[j] == "\\":
+                    j += 2
+                    continue
+                if value.startswith("${", j):
+                    depth, k = 1, j + 2
+                    while k < n and depth:
+                        if value[k] == "{":
+                            depth += 1
+                        elif value[k] == "}":
+                            depth -= 1
+                        k += 1
+                    buf.append(" (" + _skeleton(value[j + 2:k - 1]) + ") ")
+                    j = k
+                    continue
+                m = re.match(r"\$([A-Za-z_]\w*)", value[j:])
+                if m:
+                    buf.append(" " + m.group(1) + " ")
+                    j += len(m.group(0))
+                    continue
+                j += 1
+            out.append(" " + "".join(buf) + " ")
+            i = j + 1
             continue
-        c = src[i]
-        if state in ('"', "'"):
-            out.append(c)
-            if c == "\\" and i + 1 < n:
-                out.append(src[i + 1])
-                i += 2
-                continue
-            if (state == '"' and c == '"') or (state == "'" and c == "'"):
-                state = None
-            i += 1
+        if value[i] == "'":
+            j = i + 1
+            while j < n:
+                if value[j] == "\\":
+                    j += 2
+                    continue
+                if value[j] == "'":
+                    break
+                j += 1
+            out.append(" ")
+            i = j + 1
             continue
-        if src.startswith('"""', i):
-            out.append('"""')
-            i += 3
-            state = '"""'
-            continue
-        if c == '"' or c == "'":
-            state = c
-            out.append(c)
-            i += 1
-            continue
-        if src.startswith("//", i):
-            j = src.find("\n", i)
-            if j < 0:
-                j = n
-            out.append(" " * (j - i))
-            i = j
-            continue
-        if src.startswith("/*", i):
-            j = src.find("*/", i + 2)
-            j = n - 2 if j < 0 else j
-            out.append("".join("\n" if ch == "\n" else " " for ch in src[i:j + 2]))
-            i = j + 2
-            continue
-        out.append(c)
+        out.append(value[i])
         i += 1
     return "".join(out)
 
 
+def _const_bool(expr):
+    """True / False when the expression is a literal decision, else None.
+
+    `x == x` / `1 == 1` count as literal (they decide nothing about the
+    source), which is what the witness `if (1 == 1) …` leaned on.
+    """
+    s = _strip_outer(expr)
+    if s == "true":
+        return True
+    if s == "false":
+        return False
+    if s.startswith("!") and not s.startswith("!="):
+        inner = _const_bool(s[1:])
+        return None if inner is None else (not inner)
+    for op, dead, alive in (("||", True, False), ("&&", False, True)):
+        parts = _split_top(s, op)
+        if len(parts) > 1:
+            vals = [_const_bool(p) for p in parts]
+            if dead in vals:
+                return dead
+            if all(v is alive for v in vals):
+                return alive
+            return None
+    for op in ("==", "!="):
+        parts = _split_top(s, op)
+        if len(parts) == 2:
+            a, b = _strip_outer(parts[0]), _strip_outer(parts[1])
+            if a == b and a:
+                return True if op == "==" else False
+            if re.fullmatch(r"-?\d+", a) and re.fullmatch(r"-?\d+", b):
+                same = int(a) == int(b)
+                return same if op == "==" else (not same)
+            if re.fullmatch(r'"[^"]*"', a) and re.fullmatch(r'"[^"]*"', b):
+                same = a == b
+                return same if op == "==" else (not same)
+            return None
+    return None
+
+
+def _if_arms(rest):
+    """(then_arm, else_arm) of the tail after `if (cond)`; None when the tail
+    is not a recognised if/else shape."""
+    rest = rest.strip()
+    if not rest:
+        return None
+    if rest.startswith("{"):
+        end = _match_brace_src(rest, 0)
+        if end < 0:
+            return None
+        then_arm = rest[1:end]
+        tail = rest[end + 1:].strip()
+    else:
+        depth = 0
+        split_at = -1
+        for i, ch in enumerate(rest):
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            elif depth == 0 and rest.startswith("else", i):
+                split_at = i
+                break
+        if split_at < 0:
+            return rest, None
+        then_arm = rest[:split_at]
+        tail = rest[split_at + 4:].strip()
+    if not tail:
+        return then_arm, None
+    if tail.startswith("if"):
+        # `else if (…) …` — the nested if-expression IS the else arm, and
+        # `_is_const_expr` folds it recursively.
+        return then_arm, tail
+    return then_arm, tail
+
+
+def _match_brace_src(s, open_idx):
+    depth = 0
+    for i in range(open_idx, len(s)):
+        if s[i] == "{":
+            depth += 1
+        elif s[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _is_literal_zero(expr):
+    s = _strip_outer(expr)
+    return bool(re.fullmatch(r"[+-]?0+(?:\.0*)?[LlFfDd]?", s))
+
+
+def _is_const_expr(expr, guard=0):
+    s = _strip_outer(_skeleton(expr).strip())
+    if not s:
+        return True                       # pure literal text
+    if guard > 6:
+        return False                      # cannot prove → treat as derived
+    # `if (cond) A else B` — a literal cond selects ONE arm; the other arm is
+    # dead code and must not lend its identifiers to the value.
+    m = re.match(r"if\s*\(", s)
+    if m:
+        end = _match_paren(s, m.end() - 1)
+        if end > 0:
+            cond = _const_bool(s[m.end():end])
+            arms = _if_arms(s[end + 1:])
+            if cond is not None and arms is not None:
+                live = arms[0] if cond else arms[1]
+                if live is None or not live.strip():
+                    return True
+                return _is_const_expr(live, guard + 1)
+    # `when (<literal>) { … }` — a literal subject decides the branch.
+    m = re.match(r"when\s*\(", s)
+    if m:
+        end = _match_paren(s, m.end() - 1)
+        if end > 0 and _const_bool(s[m.end():end]) is not None:
+            body = s[end + 1:].strip()
+            if body.startswith("{"):
+                b_end = _match_brace_src(body, 0)
+                if b_end > 0:
+                    return _when_is_const(body[1:b_end], guard)
+    if s.startswith("!"):
+        return _const_bool(s) is not None
+    # boolean composition
+    for op, dead in (("||", True), ("&&", False)):
+        parts = _split_top(s, op)
+        if len(parts) > 1:
+            vals = [_const_bool(p) for p in parts]
+            if dead in vals:
+                return True               # the whole expression is a literal
+            if all(v is True for v in vals):
+                return True
+            return all(_is_const_expr(p, guard + 1) for p in parts)
+    # arithmetic: `idx * 0` is zero, and an all-literal sum is a literal
+    for op in ("*", "/", "%", "+", "-"):
+        parts = _split_top(s, op)
+        if len(parts) > 1:
+            if op == "*" and any(_is_literal_zero(p) for p in parts):
+                return True               # annihilation
+            if all(_is_const_expr(p, guard + 1) for p in parts):
+                return True
+            return False
+    # trailing pure-call chain on a constant receiver: `"${0}".toInt()`
+    for m in re.finditer(r"\.([A-Za-z_]\w*)\s*\(", s):
+        if _match_paren(s, m.end() - 1) == len(s) - 1:
+            recv = s[:m.start()]
+            args = s[m.end():len(s) - 1]
+            if _is_const_expr(recv, guard + 1) and all(
+                    _is_const_expr(a, guard + 1)
+                    for a in _split_top(args, ",") if a.strip()):
+                return True
+            return False
+    masked = mask_strings(s)
+    idents = set(re.findall(r"[A-Za-z_]\w*", masked))
+    calls = set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", masked))
+    return not (idents - calls - KOTLIN_KEYWORDS)
+
+
+def _when_is_const(body, guard):
+    """`when (<literal>) { … }` — the selected branch decides the value."""
+    branches = _split_top(body, ";")
+    if len(branches) == 1:
+        # branch separators may be newlines (Kotlin does not need `;`)
+        branches = [b for b in re.split(r"\n(?=\s*(?:else|[^.\n]*->))", body)]
+    for branch in branches:
+        if "->" not in branch:
+            continue
+        head, _, tail = branch.partition("->")
+        labels = [l.strip() for l in _split_top(head, ",")]
+        if "else" in labels:
+            return _is_const_expr(tail, guard + 1)
+    return False
+
+
 def value_is_constant(value):
     """True when an argument value cannot carry anything out of the source
-    object: no identifier survives once literals are removed.
+    object.
 
     `pinned = 0` keeps the argument NAME on the page while the user's value
-    never reaches the row (witness G2/dataflow). A string template is NOT a
-    constant — `"${inst.id}/…"` reads the source.
+    never reaches the row (witness G2/dataflow). [wide4-12] family holes —
+    `if (false) (if (w.pinned) 1 else 0) else 0`, `"${0}".toInt()`,
+    `idx * 0`, `when (false) { … }` — are folded first, so keeping an
+    identifier on the page no longer buys a pass.
     """
-    if "${" in value:
-        return False
-    s = re.sub(r'"(?:[^"\\]|\\.)*"', " ", value, flags=re.S)
-    s = re.sub(r"'(?:[^'\\]|\\.)*'", " ", s)
-    return not (set(re.findall(r"[A-Za-z_]\w*", s)) - CONST_IDS)
+    return _is_const_expr(value)
 
 
 def read(path):
@@ -376,6 +670,33 @@ def check_derivation(family, col_to_model, todb_sites, fromdb_sites,
     return out
 
 
+def entity_self_const_gaps(entity_name, sites, entity_fields):
+    """Columns written as a literal at EVERY ctor site that sets them.
+
+    [wide4-12 w4-fw-3, axis=completeness] Same positive criterion as
+    `check_derivation`, applied to the entity-self families (chat core tables
+    included). A column absent from some sites may legitimately rely on the
+    column default, so only "set everywhere, literal everywhere" is a gap; a
+    by-design literal is pinned in ENTITY_CONST_PINS.
+    """
+    out = []
+    for field in sorted(entity_fields):
+        carrier = [(rel, line, vals[field])
+                   for rel, line, _args, vals in sites if field in vals]
+        if not carrier or len(carrier) < len(sites):
+            continue
+        if all(value_is_constant(v) for _r, _l, v in carrier):
+            if (entity_name, field) in ENTITY_CONST_PINS:
+                continue
+            at = ", ".join("%s:%d" % (r, l) for r, l, _v in carrier)
+            out.append(
+                "%s: constructor column `%s` is a constant at every constructor "
+                "site (%s) — the value never travels, so it is lost on every save "
+                "(pin it in ENTITY_CONST_PINS with a reason if the literal IS the "
+                "design)" % (entity_name, field, at))
+    return out
+
+
 def discover_entities(db_dir_rel, root):
     """Every `data class *Entity` in data/db/ → {entity_name: fields}."""
     entities = {}
@@ -467,6 +788,20 @@ def run_checks(root):
             else:
                 print(f"  ✅ Every column written by some constructor site "
                       f"(or pinned DAO-written)")
+            # [wide4-12 w4-fw-3] written-at-all is not the same as CARRIED:
+            # `summary = ""` keeps every column name on the page while the
+            # model's summary never reaches the row.
+            if not positional:
+                for msg in entity_self_const_gaps(entity_name, sites, entity_fields):
+                    problems += 1
+                    print(f"  ❌ {msg}")
+                for (ent, fld), reason in sorted(ENTITY_CONST_PINS.items()):
+                    if ent != entity_name:
+                        continue
+                    vals = [val_map[fld] for _r, _l, _a, val_map in sites
+                            if fld in val_map]
+                    if vals and all(value_is_constant(v) for v in vals):
+                        print(f"  ℹ constant-by-design pin: {fld} — {reason}")
             continue
 
         model_name = entity_name[: -len("Entity")]
@@ -653,6 +988,49 @@ def _selftest_run(model, entity, mapping):
         shutil.rmtree(tmp)
 
 
+def _selftest_tree(files):
+    """Run the gate over an arbitrary {relative path: text} fixture tree."""
+    import contextlib
+    import io
+    import shutil
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="fws-")
+    try:
+        for rel, content in files.items():
+            path = os.path.join(tmp, KOTLIN, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = run_checks(tmp)
+        return rc, buf.getvalue()
+    finally:
+        shutil.rmtree(tmp)
+
+
+# ── wide4-12 arms: entity-self + lexer fixtures ───────────────────────────
+FW4_MARKER_ENTITY = """package com.rikkaminis.app.data.db
+
+data class CompactMarkerEntity(
+    val id: String,
+    val sessionId: String,
+    val summary: String,
+)
+"""
+
+FW4_MARKER_SITE = """package com.rikkaminis.app.data.repository
+
+fun mark(sessionId: String, summary: String) =
+    CompactMarkerEntity(
+        id = "m-$sessionId",
+        sessionId = sessionId,
+        summary = summary,
+    )
+"""
+
+
+
 def selftest():
     ok = True
 
@@ -698,6 +1076,79 @@ def selftest():
         FW_MODEL.replace("    val id: String,",
                          "    val id: String,\n    // (kept for history)\n"),
         FW_ENTITY, FW_MAPPING, 0)
+
+    # ── wide4-12 arms: the five family holes / parser-death witnesses ──────
+    # w4-fw-1 dataflow: `if (false) A else B` keeps the identifier on the page
+    # while a literal decides the row.
+    arm("w4-fw-1 dead branch keeps the value literal",
+        FW_MODEL, FW_ENTITY,
+        FW_MAPPING.replace("        name = w.name,",
+                           '        name = if (false) w.name else "fixed",'),
+        1, "is a constant at every mapping site")
+
+    # w4-fw-2 dataflow: `"${"` used to short-circuit the whole judgement, so a
+    # constant template (and anything appended to it) read as "derived".
+    arm("w4-fw-2 constant string template is a literal",
+        FW_MODEL, FW_ENTITY,
+        FW_MAPPING.replace("        name = w.name,",
+                           '        name = "${"fixed"}",'),
+        1, "is a constant at every mapping site")
+
+    # w4-fw-4 dataflow: an identifier from the ENVIRONMENT (the map index,
+    # multiplied by zero) is not the source field.
+    arm("w4-fw-4 annihilated index is a literal",
+        FW_MODEL, FW_ENTITY,
+        FW_MAPPING.replace("        name = w.name,", "        name = idx * 0,"),
+        1, "is a constant at every mapping site")
+
+    # w4-fw-5 parser-death: Kotlin nests block comments; a single-level masker
+    # leaked the `)` out of `/* outer /* inner */ ) */` and truncated the
+    # parameter list exactly there.
+    arm("w4-fw-5 nested block comment paren",
+        FW_MODEL.replace("    val id: String,",
+                         "    val id: String, /* outer /* inner */ ) */\n"
+                         "    val unmappedExtraField: Boolean = false,"),
+        FW_ENTITY, FW_MAPPING, 1, "unmappedExtraField")
+
+    # precision twin: the SAME nested comment with no fake paren stays green.
+    arm("w4-fw-5b nested comment without a fake paren",
+        FW_MODEL.replace("    val id: String,",
+                         "    val id: String, /* outer /* inner */ note */"),
+        FW_ENTITY, FW_MAPPING, 0)
+
+    # w4-fw-3 completeness: the entity-self families were only asked "is the
+    # column written at all?", so `summary = ""` (the compaction summary
+    # thrown away on every save) passed.
+    def arm_tree(label, files, want_rc, needle=""):
+        nonlocal ok
+        rc, out = _selftest_tree(files)
+        good = rc == want_rc and (not needle or needle in out)
+        print("  selftest %-38s %s" % (label, "PASS" if good else "FAIL"))
+        if not good:
+            print("    expected rc=%d%s, got rc=%d\n%s"
+                  % (want_rc, (" containing %r" % needle) if needle else "", rc,
+                     "\n".join(l for l in out.splitlines()
+                               if "❌" in l or "PARSE" in l)[:600]))
+        ok = ok and good
+
+    arm_tree("w4-fw-3 entity-self clean twin",
+             {"data/db/CompactMarkerEntity.kt": FW4_MARKER_ENTITY,
+              "data/repository/Marker.kt": FW4_MARKER_SITE}, 0)
+    arm_tree("w4-fw-3 entity-self constant column",
+             {"data/db/CompactMarkerEntity.kt": FW4_MARKER_ENTITY,
+              "data/repository/Marker.kt":
+                  FW4_MARKER_SITE.replace("summary = summary,",
+                                          'summary = "",')},
+             1, "is a constant at every constructor site")
+
+    # w4-fw-6 parser fail-closed: an unterminated block comment must not be
+    # silently reported clean (that is how a poisoned tree shrinks the surface).
+    arm_tree("w4-fw-6 unlexable file is a violation",
+             {"data/db/WidgetEntity.kt": FW_ENTITY,
+              "data/model/Widget.kt": FW_MODEL,
+              "data/db/WidgetMapping.kt": FW_MAPPING + "\n/* unterminated\n"},
+             1, "无法解析")
+
 
     if ok:
         print("FOUR_WAY_SYNC_SELFTEST=PASS")

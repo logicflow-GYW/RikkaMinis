@@ -51,6 +51,10 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import analyse                      # noqa: E402
+from _kotlin_ast import const_bool, if_blocks, stmt_spans  # noqa: E402
+
 MAIN = "src/android/app/src/main/java/com/rikkaminis/app"
 POLICY = MAIN + "/ui/chat/TruncatedToolCallPolicy.kt"
 ENGINE = MAIN + "/ui/chat/AgentLoopEngine.kt"
@@ -134,6 +138,13 @@ RESPONSES_STATUS_CALL = """mapHttpError(
                                 err?.toString() ?: event.toString(),
                             )"""
 
+# [wide4] Mutation anchors for the wide4 arms. Only the arms use them: every
+# criterion above derives its shape from structure, so renaming product code
+# keeps the gate working while these arms are updated deliberately.
+SUBAGENT_CALL = ("                val truncatedRefusal = "
+                 "TruncatedToolCallPolicy.rejectionReason(")
+ENGINE_CONSUMER = "                if (truncatedRefusal != null) {"
+
 ESCAPE = "truncated-guard-ok:"
 SELFTEST_MARK = "TRUNCATED_CALL_GUARD_SELFTEST=PASS"
 
@@ -148,30 +159,23 @@ ANTHROPIC_STOP_FEED = ("toolChars += toolUseStopActivityChars("
 ANTHROPIC_DELTA_FEED = "toolChars += toolInputDeltaActivityChars(partial)"
 
 
+LEX_FAILURES = []
+
+
 def strip_kotlin_comments(text):
-    """Blank out // and /* */ comments (newlines preserved, so line numbers
-    stay valid). Prose must never satisfy a pinned-expression criterion — the
-    KDoc of the fix itself quotes the defect's old line."""
-    out = []
-    i = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if c == "/" and i + 1 < n and text[i + 1] == "/":
-            while i < n and text[i] != "\n":
-                out.append(" ")
-                i += 1
-            continue
-        if c == "/" and i + 1 < n and text[i + 1] == "*":
-            while i < n and not (text[i] == "*" and i + 1 < n and text[i + 1] == "/"):
-                out.append("\n" if text[i] == "\n" else " ")
-                i += 1
-            out.append("  ")
-            i += 2
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
+    """Blank out comments (newlines preserved, so line numbers stay valid).
+
+    Prose must never satisfy a pinned-expression criterion — the KDoc of the fix
+    itself quotes the defect's old line. [wide4] Delegated to the shared lexer:
+    this scanner did not nest `/* a /* b */ c */` and did not know about char
+    literals or raw strings, so a file could be rewritten to place real code
+    inside what the gate believed was a comment.
+    """
+    ok, reason, views = analyse(text)
+    if not ok:
+        LEX_FAILURES.append(reason)
+        return text
+    return views["comments"]
 
 
 def line_of(text, needle):
@@ -192,45 +196,20 @@ def line_of(text, needle):
 
 def mask_code(text):
     """Blank comments AND string-literal contents; offsets and newlines are
-    preserved, so structure parsing on the result keeps line numbers valid."""
-    out = list(text)
-    i, n, quote = 0, len(text), ""
-    while i < n:
-        c = text[i]
-        if quote:
-            if c == "\\":
-                for k in (i, i + 1):
-                    if k < n and out[k] != "\n":
-                        out[k] = " "
-                i += 2
-                continue
-            if c == quote:
-                quote = ""
-            elif c != "\n":
-                out[i] = " "
-            i += 1
-            continue
-        if c in "\"'":
-            quote = c
-            i += 1
-            continue
-        if text.startswith("//", i):
-            j = text.find("\n", i)
-            j = n if j < 0 else j
-            for k in range(i, j):
-                out[k] = " "
-            i = j
-            continue
-        if text.startswith("/*", i):
-            j = text.find("*/", i + 2)
-            j = n if j < 0 else j + 2
-            for k in range(i, j):
-                if text[k] != "\n":
-                    out[k] = " "
-            i = j
-            continue
-        i += 1
-    return "".join(out)
+    preserved, so structure parsing on the result keeps line numbers valid.
+
+    [wide4] Delegated to the shared lexer. The local scanner flipped a single
+    `quote` character on every quote it met and had no notion of a raw string
+    (three quotes) at all, so a raw literal whose content is a `/*` opened a
+    REAL-looking block comment inside the literal — the witness used that to
+    hide a second `return null` from every criterion below. A lexing failure is
+    recorded and turned into a fail-closed finding by `check()`.
+    """
+    ok, reason, views = analyse(text)
+    if not ok:
+        LEX_FAILURES.append(reason)
+        return text
+    return views["code"]
 
 
 def match_paren(text, open_idx):
@@ -375,6 +354,73 @@ def feed_calls(code, counter):
     return out
 
 
+def refusal_branch_live(code, var):
+    """(ok, why) — the `if (<var> != null)` branch that CONSUMES the verdict.
+
+    [wide4] `operative_call` pins the PRODUCER (`val truncatedRefusal = policy(…)`).
+    The wide4 witness left the producer byte-identical and inverted the CONSUMER
+    instead: `if (false && truncatedRefusal != null) {` keeps the gate text, the
+    pairing, the `continue` and the wording count, and skips every refused call.
+    """
+    target = normalize_cond(var + " != null")
+    for cond, b0, b1, _e0, _e1 in if_blocks(code):
+        if normalize_cond(cond) != target:
+            continue
+        if const_bool(cond) is False:
+            return (False, "the refusal branch `if (%s)` is short-circuited by a "
+                           "constant, so the verdict is never consumed" % cond.strip())
+        if "continue" not in code[b0:b1]:
+            return (False, "the refusal branch no longer skips the truncated call "
+                           "(`continue` left the branch)")
+        return True, ""
+    return (False, "the refusal branch `if (%s != null)` is missing — the verdict is "
+                   "computed and dropped" % var)
+
+
+def flag_shadowed(code, names, before):
+    """[(name, line)] for a same-name declaration of a stream flag before `before`.
+
+    [wide4] `rargs[2] != "turnTruncated"` pinned the ARGUMENT'S SPELLING. The
+    witness kept the spelling and re-declared the name one line earlier
+    (`val turnTruncated = false`), so the call read a shadowing constant. A stream
+    flag is declared ONCE — the `var` the stream callback writes; a second
+    declaration before the read is, by Kotlin scoping, the value the read sees.
+    """
+    bad = []
+    for name in names:
+        decls = [m.start() for m in
+                 re.finditer(r"\b(?:val|var)\s+%s\b" % re.escape(name), code)]
+        decls = [d for d in decls if d < before]
+        if len(decls) > 1:
+            bad.append((name, code.count("\n", 0, decls[1]) + 1))
+    return bad
+
+
+def arg_is_branchy(args):
+    """A weight argument may not carry a branch — `is_constant_expr` cannot see
+    `if (false) x else 0` (it contains an identifier, so it reads as "derived")."""
+    return bool(re.search(r"\b(?:if|when|else)\b|\?:", args))
+
+
+def arg_is_zero_scaled(args):
+    """`x * 0` / `0 * x` / `0.coerceAtMost(x)` — the identifier is present and
+    decides nothing."""
+    return bool(re.search(r"\*\s*0(?![\d.])|(?<!\w)0\.\w+\s*\(", args))
+
+
+def dead_weight_arg(args):
+    """True when a fed weight cannot observe the stream.
+
+    Three shapes, all of which keep the call, the callee name and the counter:
+    an empty argument list, a pure literal (`(0)`, `("", "")`), and a dead
+    branch or zero multiplier wrapped around a real expression.
+    """
+    if args is None:
+        return True
+    return (is_constant_expr(args) or arg_is_branchy(args)
+            or arg_is_zero_scaled(args))
+
+
 def operative_call(code, var, callee):
     """(ok, why, line, args) — `val <var> = <callee>(…)` as the WHOLE initialiser.
 
@@ -436,6 +482,21 @@ def operative_call(code, var, callee):
 # leaves an EOF-truncated turn (ceiling absent, stream cut) reading as "clean".
 C1_CEILING_TOKENS = ("ceilingDeclared", "isTruncatedFinish", "finishReason")
 
+# [wide4] The verdict condition, normalised. The wide3 rule asked "does the
+# condition mention both sources", so the next witness wrote a tautology
+# (`(turnTruncated || !turnTruncated)`) or a constant prefix (`!false &&`) that
+# mentions both and decides nothing. The condition must BE the pinned AND of the
+# two sources, in either operand order — anything else is a spelling the gate
+# cannot see the value of.
+C1_CONDITION_OK = (
+    "!ceilingDeclared&&!turnTruncated",
+    "!turnTruncated&&!ceilingDeclared",
+)
+
+
+def normalize_cond(cond):
+    return re.sub(r"\s+", "", cond)
+
 
 def policy_single_source_returns(policy_src):
     """[(condition, line)] for early `return null`s keyed on exactly one source."""
@@ -444,12 +505,22 @@ def policy_single_source_returns(policy_src):
     if body is None:
         return [("<rejectionReason body not located>", 0)]
     bad = []
+    # [wide4] ONE `return null`, not "no single-source if". The wide4 witness
+    # added `when { !ceilingDeclared -> return null }` after the real AND
+    # condition: a `when` has no `if (` for `if_bodies` to see, and the ceiling
+    # wording / prefix count stay untouched, so the old rule read green while
+    # every EOF-truncated turn was again waved through.
+    n_returns = len(re.findall(r"\breturn\s+null\b", body))
+    if n_returns != 1:
+        bad.append((
+            "<%d return-null exits in rejectionReason (expected exactly 1)>"
+            % n_returns,
+            code.count("\n", 0, off) + 1,
+        ))
     for cond, b0, b1 in if_bodies(body):
         if "return null" not in body[b0:b1]:
             continue
-        has_ceiling = any(t in cond for t in C1_CEILING_TOKENS)
-        has_stream = "turnTruncated" in cond
-        if has_ceiling != has_stream:
+        if normalize_cond(cond) not in C1_CONDITION_OK:
             bad.append((cond.strip(), code.count("\n", 0, off + b0) + 1))
     return bad
 
@@ -573,6 +644,23 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
           anthropic_signals):
     """Return [(criterion, file, line, message)] — empty list means wired."""
     problems = []
+    # [wide4] Lex the whole surface first and FAIL CLOSED. Every criterion below
+    # reasons over the masked projections of these eight files; if one of them
+    # does not tokenise, the mask is a fiction and a green verdict would be a
+    # statement about text nobody read (the parser-death axis).
+    del LEX_FAILURES[:]
+    for rel, text in ((POLICY, policy), (ENGINE, engine), (OPENAI, openai),
+                      (ANTHROPIC, anthropic), (TOOL_EXECUTORS, tool_executors),
+                      (GEMINI, gemini), (SIGNALS, signals),
+                      (ANTHROPIC_SIGNALS, anthropic_signals)):
+        ok_lex, why_lex, _views = analyse(text)
+        if not ok_lex:
+            problems.append((
+                "unparseable-kotlin", rel, 0,
+                "the gate cannot tokenise this file (%s) — it refuses to judge a "
+                "lexing surface it does not trust" % why_lex))
+    if LEX_FAILURES:
+        return problems
 
     def add(criterion, rel, text, needle, message):
         if not escaped_segment(text, needle):
@@ -600,10 +688,12 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
         for cond, cline in policy_single_source_returns(policy):
             problems.append((
                 "policy-single-source-early-return", POLICY, cline,
-                "`if (%s) return null` decides on ONE truncation source — the other "
-                "source can no longer keep the call from being executed (a turn cut by "
-                "EOF while ceilingDeclared is false reaches the executor with a partial "
-                "argument object)" % cond,
+                "`%s` decides on ONE truncation source — `return null` must happen "
+                "exactly once, in the two-source AND (`!ceilingDeclared && "
+                "!turnTruncated`). Any other null exit (a single-source `if`, a `when` "
+                "arm, a duplicated guard) lets the other source stop guarding: a turn "
+                "cut by EOF while ceilingDeclared is false reaches the executor with a "
+                "partial argument object" % cond,
             ))
 
     # C2 — the engine dispatch site feeds the flag, and the verdict IS the value
@@ -627,6 +717,24 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
         problems.append(("engine-feeds-flag", ENGINE, eline,
                          "the engine no longer passes the protocol finish reason (%s)"
                          % eargs[1]))
+    elif (shadowed := flag_shadowed(eng_code, ("turnTruncated", "turnFinishReason"),
+                                    eng_code.find("val truncatedRefusal ="))):
+        problems.append((
+            "engine-feeds-flag", ENGINE, shadowed[0][1],
+            "turnTruncated is shadowed or overwritten with a constant — `%s` is "
+            "declared again before the refusal call, so the policy reads the "
+            "shadowing value, not the one the stream callback wrote" % shadowed[0][0]))
+    else:
+        # [wide4] …and the CONSUMER. The witness kept the producer byte-identical
+        # and wrote `if (false && truncatedRefusal != null) {`: the call, the
+        # wording, the pairing and the `continue` all survive, and every refused
+        # call is dispatched anyway.
+        live, why_live = refusal_branch_live(eng_code, "truncatedRefusal")
+        if not live:
+            problems.append((
+                "engine-feeds-flag", ENGINE, eline,
+                "the engine refusal branch (if (truncatedRefusal != null)) is missing "
+                "or short-circuited — " + why_live))
 
     # C3 — OpenAI's EOF guard counts tool-call events; Anthropic keeps its own.
     if openai.count(C3_OPENAI_GUARD) != 1:
@@ -663,6 +771,18 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
                              line_of(tool_executors, C4_SUBAGENT_DECL),
                              "runSubagentLoop must pass the stream-level flag as the third "
                              "argument (turnTruncated), found (%s)" % ", ".join(rargs)))
+        elif (shadowed := flag_shadowed(mask_code(loop), ("turnTruncated",
+                                                         "turnFinishReason"),
+                                        mask_code(loop).find("val truncatedRefusal ="))):
+            # [wide4] The name in the argument list is not the value: a same-name
+            # `val turnTruncated = false` one line above makes the policy read a
+            # constant while `rargs[2]` still says `turnTruncated`.
+            problems.append((
+                "subagent-refusal-wired", TOOL_EXECUTORS,
+                line_of(tool_executors, C4_SUBAGENT_DECL),
+                "turnTruncated is shadowed or overwritten with a constant — "
+                "runSubagentLoop declares `%s` again before the refusal call, so the "
+                "policy reads the shadowing value" % shadowed[0][0]))
         elif C4_REFUSAL_GATE not in loop:
             problems.append(("subagent-refusal-gate", TOOL_EXECUTORS,
                              line_of(tool_executors, C4_SUBAGENT_DECL),
@@ -798,13 +918,14 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
             # depend on nothing.
             ok_masked = mask_code(openai)
             for fn, fargs, fpos in feed_calls(ok_masked, wired_counter):
-                if fargs is not None and not is_constant_expr(fargs):
+                if fargs is not None and not dead_weight_arg(fargs):
                     continue
                 problems.append((
                     "openai-count-derived", OPENAI,
                     ok_masked.count("\n", 0, fpos) + 1,
-                    "'%s' is fed through %s(%s) — a constant weight cannot observe the "
-                    "stream, so the truncated-turn signal is silently lost"
+                    "'%s' is fed through %s(%s) — a constant / dead-branch / "
+                    "zero-scaled weight cannot observe the stream, so the "
+                    "truncated-turn signal is silently lost"
                     % (wired_counter, fn, (fargs or "").strip() or "<empty>")))
 
         # C9 — one status derivation, reachable from both in-stream error arms.
@@ -930,7 +1051,7 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
                     # always contributes 0 — the tool_use signal is gone while
                     # every substring criterion stays green.
                     bad = [(fn, a) for fn, a, p in feed_calls(start, tool_counter)
-                           if p in guarded and (a is None or is_constant_expr(a))]
+                           if p in guarded and dead_weight_arg(a)]
                     if bad:
                         problems.append((
                             "anthropic-tool-start-feeds-counter", ANTHROPIC,
@@ -953,7 +1074,7 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
                     "feeds '%s' — a zero-argument call cut before message_delta "
                     "survives as a clean no-finish EOF" % tool_counter))
             elif (sfeeds := feed_calls(stop, tool_counter)) and all(
-                    a is None or is_constant_expr(a) for _f, a, _p in sfeeds):
+                    dead_weight_arg(a) for _f, a, _p in sfeeds):
                 problems.append((
                     "anthropic-tool-stop-feeds-counter", ANTHROPIC,
                     line_of(anth_code, '"content_block_stop" ->'),
@@ -971,7 +1092,7 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
                     "pre-existing mid-argument truncation signal is gone"
                     % tool_counter))
             elif (dfeeds := feed_calls(delta, tool_counter)) and all(
-                    a is None or is_constant_expr(a) for _f, a, _p in dfeeds):
+                    dead_weight_arg(a) for _f, a, _p in dfeeds):
                 problems.append((
                     "anthropic-tool-delta-feeds-counter", ANTHROPIC,
                     line_of(anth_code, '"content_block_delta" ->'),
@@ -1062,10 +1183,14 @@ def selftest(root):
          on(4, drop_subagent_refusal)),
         ("subagent loop skips the policy", "subagent-refusal-wired",
          on(4, lambda s: s.replace(C4_POLICY_CALL, "TruncatedToolCallPolicy.isTruncatedFinish(", 1))),
+        # [wide4] The arm must stay VALID Kotlin: the shared lexer now refuses to
+        # judge a file it cannot tokenise, so an arm that splices an unterminated
+        # string would exercise the fail-closed path instead of this criterion.
         ("subagent loop hand-writes the wording", "subagent-single-source",
          on(4, lambda s: s.replace(
              "log(\"[Subagent] turn=$turns truncated tool call REFUSED",
-             "log(\"[TRUNCATED] " + "\"[Subagent] turn=$turns truncated tool call REFUSED", 1))),
+             "log(\"[TRUNCATED] \" + \"[Subagent] turn=$turns truncated tool call REFUSED",
+             1))),
         ("subagent refusal breaks the pairing", "subagent-refusal-pairing",
          on(4, lambda s: s.replace(C4_PAIRING,
                                                "content = truncatedRefusal, isError = false", 1))),
@@ -1159,6 +1284,43 @@ def selftest(root):
          "anthropic-tool-start-feeds-counter",
          on(3, lambda s: s.replace(ANTHROPIC_START_FEED,
                                    'toolChars += toolUseStartActivityChars("", "")', 1))),
+        # ---- [wide4] the five externally falsified shapes --------------------
+        # Each keeps the spelling, the wording and the pairing; each drops only
+        # the decision, so each expectation names exactly one criterion.
+        ("w4-policy adds a `when`-keyed single-source return",
+         "policy-single-source-early-return",
+         on(0, lambda s: s.replace(
+             C1_CONDITION,
+             C1_CONDITION + "\n        when { !ceilingDeclared -> return null }", 1))),
+        ("w4-policy hides a second return null inside raw strings",
+         "policy-single-source-early-return",
+         on(0, lambda s: s.replace(
+             C1_CONDITION,
+             C1_CONDITION + "\n        val _open = " + '"' * 4 + "/*" + '"' * 3
+             + "\n        if (!ceilingDeclared) return null"
+             + "\n        val _close = " + '"' * 3 + "*/" + '"' * 4, 1))),
+        ("w4-engine refusal branch short-circuited by a constant",
+         "engine-feeds-flag",
+         on(1, lambda s: s.replace(
+             ENGINE_CONSUMER,
+             "                if (false && truncatedRefusal != null) {", 1))),
+        ("w4-subagent shadows the stream flag before the refusal call",
+         "subagent-refusal-wired",
+         on(4, lambda s: s.replace(
+             SUBAGENT_CALL,
+             "                val turnTruncated = false\n" + SUBAGENT_CALL, 1))),
+        ("w4-openai feeds the EOF counter through a dead branch",
+         "openai-count-derived",
+         on(2, lambda s: s.replace(
+             CHAT_FEED,
+             "toolCallEventCount += chatCompletionsToolCallEventWeight("
+             "if (false) toolCalls.length() else 0)", 1))),
+        ("w4-openai feeds the EOF counter a zero-scaled weight",
+         "openai-count-derived",
+         on(2, lambda s: s.replace(
+             CHAT_FEED,
+             "toolCallEventCount += chatCompletionsToolCallEventWeight("
+             "toolCalls.length() * 0)", 1))),
     ]
 
     failed = []

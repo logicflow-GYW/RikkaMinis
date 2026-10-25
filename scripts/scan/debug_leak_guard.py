@@ -46,6 +46,22 @@ import struct
 import sys
 import zipfile
 
+# [wide4/10] Lexing Kotlin is a solved problem in this repo: the same
+# hand-rolled comment/string state machines were independently broken by the
+# same witnesses in gate after gate (nested block comments, `'"'`, raw strings,
+# `${...}` templates, backtick identifiers). This gate asks the shared lexer.
+# A source it cannot lex is a VIOLATION, never a silent pass.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import analyse as _lex_analyse  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool as _const_bool,
+    match_bracket as _match_bracket,
+    split_top as _split_top,
+    stmt_spans as _stmt_spans,
+    strip_parens as _strip_parens,
+    when_branches as _when_branches,
+)
+
 # Debug-package target: fully-qualified references AND imports.
 TARGET_RE = re.compile(r"com\.rikkaminis\.app\.debug\.")
 
@@ -110,109 +126,116 @@ APK_MARKERS = [
 ]
 
 
-def blank(text, *, strings):
-    """Comments -> spaces (and, when `strings`, literal contents too).
+def _views(text):
+    """(literal-kept view, code view, reason) from the shared Kotlin lexer.
 
-    Offsets, newlines and therefore line numbers are preserved, so a match found
-    in this view can be reported against the original line. Every branch falls
-    through to the shared `i += 1`: the two-character (escape) and three-character
-    (triple-quote) advances compensate inside the branch, which is what keeps the
-    output length identical to the input.
+    `literal-kept` = comments blanked, string contents KEPT (a reference spelled
+    inside a string is still a reference — that is how reflection builds one).
+    `code` = comments AND literal contents blanked (structure: brace depth, guard
+    nesting, statement boundaries).
+
+    [wide4/10] The gate used to carry its own `blank()` state machine. It fell
+    over on Kotlin's real lexical grammar: inside `/* outer /* inner */`, the
+    first `*/` closed the comment, so a triple-quote on the same line opened a
+    raw string and every real line after it — including an unbounded
+    `inputStream().use { … }` read — was blanked into invisibility
+    (parser-death witness). Both views are the same length as the input, so a
+    match offset still indexes the original text.
     """
-    out = []
-    i, n = 0, len(text)
-    mode = None
-    while i < n:
-        ch = text[i]
-        nxt = text[i + 1] if i + 1 < n else ""
-        if mode == "line":
-            if ch == "\n":
-                mode = None
-                out.append(ch)
-            else:
-                out.append(" ")
-        elif mode == "block":
-            if ch == "*" and nxt == "/":
-                mode = None
-                out.append("  ")
-                i += 1
-            else:
-                out.append("\n" if ch == "\n" else " ")
-        elif mode == "str":
-            if ch == "\\":
-                out.append(text[i:i + 2] if not strings else "  ")
-                i += 1
-            elif ch == '"':
-                mode = None
-                out.append('"')
-            else:
-                out.append("\n" if ch == "\n" else (" " if strings else ch))
-        elif mode == "chr":
-            if ch == "\\":
-                out.append(text[i:i + 2] if not strings else "  ")
-                i += 1
-            elif ch == "'":
-                mode = None
-                out.append("'")
-            else:
-                out.append("\n" if ch == "\n" else (" " if strings else ch))
-        elif mode == "raw":
-            if text[i:i + 3] == '"""':
-                mode = None
-                out.append('"""')
-                i += 2
-            else:
-                out.append("\n" if ch == "\n" else (" " if strings else ch))
-        else:
-            if ch == "/" and nxt == "/":
-                mode = "line"
-                out.append("  ")
-                i += 1
-            elif ch == "/" and nxt == "*":
-                mode = "block"
-                out.append("  ")
-                i += 1
-            elif text[i:i + 3] == '"""':
-                mode = "raw"
-                out.append('"""')
-                i += 2
-            elif ch == '"':
-                mode = "str"
-                out.append(ch)
-            elif ch == "'":
-                mode = "chr"
-                out.append(ch)
-            else:
-                out.append(ch)
-        i += 1
-    return "".join(out)
+    ok, reason, views = _lex_analyse(text)
+    if not ok:
+        return None, None, reason
+    return views["comments"], views["code"], None
 
 
-def strip_comments(text):
-    """Comments removed, literals KEPT (same length, same line structure).
+# `com.rikkaminis.app.BuildConfig.DEBUG` is the same flag as `BuildConfig.DEBUG`
+# (both spellings are in use in this tree); the package prefix is not a
+# different guard.
+_DEBUG_FLAG_RE = re.compile(r"^(?:[A-Za-z_]\w*\.)*BuildConfig\.DEBUG$")
 
-    [wide3/10] The old implementation ran `BLOCK_COMMENT_RE` on the raw text, so
-    a STRING containing `/*` opened a block comment: a file with `"video/*"` (or
-    a glob like `"logs/*"`) and a later `"*/"` had every real line between them
-    blanked — a hundred lines of release-bound debug calls became invisible. The
-    scan is literal-aware now.
+
+def _is_debug_flag(piece):
+    """`piece` is EXACTLY the build flag (optionally `== true`) and nothing else."""
+    if _DEBUG_FLAG_RE.match(piece):
+        return True
+    if piece.endswith("==true"):
+        return bool(_DEBUG_FLAG_RE.match(piece[:-6]))
+    return False
+
+
+def _squash(expr):
+    """The expression with its outer parens and every whitespace run removed."""
+    return re.sub(r"\s+", "", _strip_parens(expr))
+
+
+def guard_decides(cond):
+    """Does this `if` condition make its body DEAD in a release build?
+
+    [wide4/10] The criterion is POSITIVE now — the flag must be the thing that
+    decides. The old test was "mentions BuildConfig.DEBUG and contains no
+    true/false literal", which accepted both of these:
+      * `if (!BuildConfig.DEBUG)` — the guard INVERTED, i.e. the debug server
+        starts in RELEASE builds only: the worst shape of the defect; and
+      * `if (!BuildConfig.DEBUG || BuildConfig.DEBUG)` — a tautology, always on.
+    Rules: no top-level `||` (a disjunct can satisfy the guard by itself); one
+    top-level `&&` conjunct must be EXACTLY the flag (`BuildConfig.DEBUG` or
+    `BuildConfig.DEBUG == true`); a conjunct that only MENTIONS the flag in
+    another shape (`!DEBUG`, `DEBUG == false`, `f(DEBUG)`) is not evidence; a
+    conjunct that folds to constant false kills the guard.
     """
-    return blank(text, strings=False)
+    expr = _strip_parens(cond)
+    if not expr:
+        return False
+    if len(_split_top(expr, ("||",))) > 1:
+        return False
+    decided = False
+    for a, b in _split_top(expr, ("&&",)):
+        piece = _squash(expr[a:b])
+        if not piece:
+            return False
+        if _is_debug_flag(piece):
+            decided = True
+            continue
+        if "BuildConfig.DEBUG" in piece:
+            return False
+        if _const_bool(piece) is False:
+            return False
+    return decided
 
 
-def code_view(text):
-    """Comments AND literal contents blanked — for structural questions
-    (paren/brace matching, guard nesting)."""
-    return blank(text, strings=True)
+def _dead_cond(cond):
+    """A condition whose value is a compile-time constant FALSE.
+
+    [wide4/10] The old `DEAD_COND_RE` was a spelling list (`false`, `!true`,
+    `0 == 1`, `true ||`, `false &&`). `1 == 2` states the same fact in a
+    different spelling and walked straight through. Death is a VALUE question,
+    so ask the shared constant folder instead of enumerating spellings.
+    """
+    return _const_bool(cond) is False
 
 
-DEAD_COND_RE = re.compile(
-    r"(?:\bif\s*\(\s*|\bwhile\s*\(\s*)"
-    r"(?:false\b|!\s*true\b|0\s*==\s*1\b|true\s*\|\||false\s*&&)"
-    r"|\bfalse\s*&&|\btrue\s*\|\|")
-DEBUG_TEST_RE = re.compile(r"BuildConfig\s*\.\s*DEBUG")
-LITERAL_SHORTCIRCUIT_RE = re.compile(
-    r"(?:\btrue\s*\|\||\|\|\s*true\b|\bfalse\s*&&|&&\s*false\b|!\s*false\b)")
+def _in_dead_when_arm(code, pos):
+    """Is `pos` inside a `when` arm a constant subject can never select?
+
+    `when (false) { true -> A  else -> B }` runs B; A is dead code. A read
+    parked in A while B reads the file another way is exactly how
+    `readFileSegment(...)` stayed "present" in the handler while
+    `Files.readAllBytes(...)` performed the unbounded read.
+    """
+    for subject, arm_cond, b_start, b_end in _when_branches(code):
+        if not (b_start <= pos < b_end):
+            continue
+        subj = _const_bool(subject) if subject.strip() else None
+        if subj is None:
+            continue
+        arm = arm_cond.strip()
+        if arm in ("else", "") or arm.startswith("is ") or arm.startswith("in ") or "," in arm:
+            continue            # else / type test / value list: never provably dead
+        val = _const_bool(arm)
+        if val is not None and val != subj:
+            return True
+    return False
+
 
 
 def _stmt_start(code, off):
@@ -257,7 +280,15 @@ def _brace_end(code, open_idx):
 
 
 def dead_guarded(code, off):
-    if DEAD_COND_RE.search(code[_stmt_start(code, off):off]):
+    """Is the call at `off` in code no build can reach?
+
+    [wide4/10] Death is decided by the constant folder (`const_bool`) and by
+    `when` arm selection, not by a spelling list — see `_dead_cond` /
+    `_in_dead_when_arm`.
+    """
+    if any(_dead_cond(c) for c in _if_conditions(code[_stmt_start(code, off):off])):
+        return True
+    if _in_dead_when_arm(code, off):
         return True
     depth = 0
     i = off
@@ -268,11 +299,14 @@ def dead_guarded(code, off):
             depth += 1
         elif ch in "({":
             if depth == 0:
-                if ch == "{" and DEAD_COND_RE.search(code[_stmt_start(code, i):i]):
+                if ch == "{" and any(
+                        _dead_cond(c)
+                        for c in _if_conditions(code[_stmt_start(code, i):i])):
                     return True
             else:
                 depth -= 1
     return False
+
 
 
 def _if_conditions(head):
@@ -288,16 +322,15 @@ def _if_conditions(head):
 def debug_guarded(code, off):
     """Is the reference at `off` really behind `if (BuildConfig.DEBUG)`?
 
-    [wide3/10] Two shapes matter. (a) The guard must TEST DEBUG and the test must
-    DECIDE something: `if (true || BuildConfig.DEBUG)` reads the flag and ignores
-    it, so R8 keeps the class and release ships the token-free loopback server.
+    Two shapes matter. (a) The guard must DECIDE — see `guard_decides`: the old
+    "mentions the flag, no true/false literal" test accepted `if (true ||
+    BuildConfig.DEBUG)` (ignored flag), `if (!BuildConfig.DEBUG)` (the guard
+    inverted: release builds only) and `if (!DEBUG || DEBUG)` (tautology), so R8
+    kept the class and release shipped the token-free loopback server.
     (b) The reference must be inside the guarded block (`if (BuildConfig.DEBUG)
     { … }`) or on the guarded statement (`if (BuildConfig.DEBUG) call()`).
     """
-    def live(cond):
-        return bool(DEBUG_TEST_RE.search(cond)) and not LITERAL_SHORTCIRCUIT_RE.search(cond)
-
-    if any(live(c) for c in _if_conditions(code[_stmt_start(code, off):off])):
+    if any(guard_decides(c) for c in _if_conditions(code[_stmt_start(code, off):off])):
         return True
     depth = 0
     i = off
@@ -308,7 +341,7 @@ def debug_guarded(code, off):
             depth += 1
         elif ch in "({":
             if depth == 0:
-                if ch == "{" and any(live(c) for c in
+                if ch == "{" and any(guard_decides(c) for c in
                                      _if_conditions(code[_stmt_start(code, i):i])):
                     return True
             else:
@@ -353,46 +386,98 @@ def _fun_span(code, name):
     return (brace + 1, end)
 
 
-STREAM_READ_RE = re.compile(r"\.\s*(?:inputStream|readBytes|readNBytes|skip)\s*\(")
+# [wide4/10] Reads that cannot be bounded, or that ignore the requested
+# offset. The old list (`inputStream|readBytes|readNBytes|skip`) was a spelling
+# blacklist: `Files.readAllBytes`, `bufferedReader().readText()` and friends read
+# the whole file while ignoring `offset`/`limit` and simply were not on it.
+UNBOUNDED_READ_RE = re.compile(
+    r"\.\s*(?:readBytes|readNBytes|readAllBytes|readText|readLines|forEachLine|"
+    r"bufferedReader|reader|copyTo|inputStream|skip)\s*\(")
+
+# The read statement's value: `val bytes = <value>` or `return <value>`.
+_READ_STMT_PREFIX_RE = re.compile(
+    r"^(?:return|(?:val|var)\s+[A-Za-z_]\w*(?:\s*:[^=\n]+?)?\s*=)$")
+
+
+def _helper_calls(stmt):
+    """[(start, close)] offsets of every `readFileSegment(…)` in the statement."""
+    out = []
+    for m in re.finditer(re.escape(SEGMENT_HELPER) + r"\s*\(", stmt):
+        out.append((m.start(), _match_bracket(stmt, m.end() - 1)))
+    return out
+
+
+def read_source_verdict(stmt):
+    """Is the statement's VALUE exactly one bounded helper call?
+
+    [wide4/10] Two witnesses walked through the old criteria:
+      * `readFileSegment(...).let { f.bufferedReader().readText().toByteArray() }`
+        — helper called, its result dropped, unbounded read done in the chain;
+      * `when (false) { true -> readFileSegment(...) else -> Files.readAllBytes(...) }`
+        — helper present in the text, the real read elsewhere.
+    "The call exists" is not the property. "The call IS the value" is.
+    Returns (ok, why).
+    """
+    calls = _helper_calls(stmt)
+    if not calls:
+        return True, ""
+    if len(calls) > 1:
+        return False, "the bounded helper result is not the statement value (multiple calls)"
+    start, close = calls[0]
+    if close < 0:
+        return False, "the bounded helper call does not close (the read cannot be proven)"
+    prefix = stmt[:start].strip()
+    suffix = stmt[close + 1:].strip()
+    if not _READ_STMT_PREFIX_RE.match(prefix):
+        return False, ("the bounded helper call is not the read statement's value "
+                       "(`%s` before it)" % prefix[:60])
+    if suffix:
+        return False, "the bounded helper result is dropped by a trailing chain"
+    return True, ""
 
 
 def scan_api26_reads(root):
     """Violations for the minSdk-26 read contract in the debug RPC handler.
 
-    Criteria (fail-closed; comment- and literal-blanked, so a doc mention never
-    counts, and dead branches do not count either):
-      1. no LIVE `.readNBytes(` anywhere in the file;
-      2. `handleReadFile` uses RandomAccessFile, or routes through a LIVE call to
-         `readFileSegment`, whose body must then use RandomAccessFile;
-      3. no LIVE stream read inside `handleReadFile`
-         (`.inputStream(` / `.readBytes(` / `.readNBytes(` / `.skip(`);
-      4. a missing / renamed `handleReadFile`, or a helper that is called but
+    Criteria (fail-closed; comments and literal contents blanked, so a doc
+    mention never counts and a dead branch does not count either):
+      1. no LIVE `.readNBytes(` anywhere in the file (API 33+ on minSdk 26);
+      2. `handleReadFile` uses RandomAccessFile, or routes through a LIVE
+         `readFileSegment(...)` whose body uses RandomAccessFile;
+      3. no LIVE unbounded read inside `handleReadFile`
+         (`readBytes|readAllBytes|readText|readLines|bufferedReader|reader|
+         copyTo|inputStream|skip|…`);
+      4. the helper call must BE the value of the read statement — a trailing
+         `.let {}` / `.also {}` / `?:` chain, or a `when`/`if` wrapper with the
+         call in a dead arm, is a violation;
+      5. a missing / renamed `handleReadFile`, or a helper that is called but
          not defined here, is anchor drift and is itself a violation.
 
-    [wide3/10] Criterion 3 is what closes the reported hole:
-    `val bytes = if (false) readFileSegment(hostFile, offset, limit) else
-    hostFile.inputStream().use { it.skip(offset); it.readBytes() }` keeps the
-    helper call in the text (old criterion 2 passed) and reads unbounded from the
-    wrong offset (the da1028-A ISSUE-07 defect, restored verbatim).
+    [wide3/10] criterion 3 was added for `if (false) readFileSegment(...) else
+    inputStream()…`; [wide4/10] criteria 3+4 exist because existence-based
+    versions of them were defeated by `.let {}`, `when (false)` and
+    `Files.readAllBytes`.
 
-    A tree that has no DebugRPCHandler.kt at all (the source scan is also run
-    against synthetic fixtures) is reported as SKIPPED, loudly — never as a
-    silent pass.
+    A tree with no DebugRPCHandler.kt at all (the source scan also runs against
+    synthetic fixtures) is SKIPPED, loudly — never a silent pass.
     """
     path = os.path.join(root, DEBUG_RPC_REL)
     if not os.path.isfile(path):
         print("  [skip] api26 reads: %s absent from this tree" % DEBUG_RPC_REL)
         return []
     raw = open(path, encoding="utf-8", errors="replace").read()
-    code = code_view(raw)
     raw_lines = raw.splitlines()
+    _lit, code, reason = _views(raw)
+    if code is None:
+        return ["%s  cannot be lexed (%s) — the read contract is unverifiable on a "
+                "half-parsed file (fail-closed)" % (DEBUG_RPC_REL, reason)]
     out = []
-    for m in re.finditer(API33_STREAM_RE, code):
+    for m in API33_STREAM_RE.finditer(code):
         if dead_guarded(code, m.start()):
             continue
         line = code.count("\n", 0, m.start()) + 1
-        out.append("%s:%d  API 33+ stream call on minSdk 26: %s"
-                   % (DEBUG_RPC_REL, line, raw_lines[line - 1].strip()[:80]))
+        text = raw_lines[line - 1].strip()[:80] if line <= len(raw_lines) else ""
+        out.append("%s:%d  API 33+ stream call on minSdk 26: %s" % (DEBUG_RPC_REL, line, text))
     span = _fun_span(code, READ_FILE_FUN)
     if span is None:
         out.append("%s: anchor drift — `fun %s(` not found" % (DEBUG_RPC_REL, READ_FILE_FUN))
@@ -400,7 +485,7 @@ def scan_api26_reads(root):
     a, b = span
     body = code[a:b]
     body_line = code.count("\n", 0, a) + 1
-    for m in STREAM_READ_RE.finditer(body):
+    for m in UNBOUNDED_READ_RE.finditer(body):
         if dead_guarded(code, a + m.start()):
             continue
         line = code.count("\n", 0, a + m.start()) + 1
@@ -409,9 +494,21 @@ def scan_api26_reads(root):
                    % (DEBUG_RPC_REL, line, READ_FILE_FUN))
     if "RandomAccessFile" in body:
         return out
-    helper_calls = [m for m in re.finditer(SEGMENT_HELPER + r"\s*\(", body)
-                    if not dead_guarded(code, a + m.start())]
-    if helper_calls:
+    live_helper = False
+    for s_start, s_end in _stmt_spans(body):
+        stmt = body[s_start:s_end]
+        for start, _close in _helper_calls(stmt):
+            if dead_guarded(code, a + s_start + start):
+                continue
+            live_helper = True
+            ok_read, why = read_source_verdict(stmt)
+            if ok_read:
+                continue
+            line = code.count("\n", 0, a + s_start + start) + 1
+            out.append("%s:%d  %s() %s — the read must be exactly "
+                       "`readFileSegment(file, offset, limit)`"
+                       % (DEBUG_RPC_REL, line, READ_FILE_FUN, why))
+    if live_helper:
         helper = _fun_span(code, SEGMENT_HELPER)
         helper_line = (code.count("\n", 0, helper[0]) + 1) if helper else body_line
         if helper is None:
@@ -426,84 +523,186 @@ def scan_api26_reads(root):
     return out
 
 
+
 def _symbol_after(code, off):
     m = re.match(r"\s*(\w+)", code[off:])
     return m.group(1) if m else ""
 
 
+DEBUG_PKG_DIR = "src/android/app/src/main/java/com/rikkaminis/app/debug"
+DEBUG_IMPORT_RE = re.compile(
+    r"(?m)^[ \t]*import[ \t]+com\.rikkaminis\.app\.debug\.(\*|[A-Za-z_]\w*)")
+# The package prefix WITHOUT a trailing `.`: the head of a name built at
+# runtime, e.g. `Class.forName("com.rikkaminis.app.debug" + ".DebugServer")`,
+# which never spells the fully-qualified name TARGET_RE looks for.
+TARGET_PREFIX_RE = re.compile(r"com\.rikkaminis\.app\.debug(?![.\w])")
+_DEBUG_CLASS_RE = re.compile(
+    r"(?m)^[ \t]*(?:(?:@[\w.]+(?:\((?:[^()]|\([^()]*\))*\))?|(?:public|internal|private|"
+    r"protected|open|final|abstract|sealed|data|enum|value|annotation|inline|expect|actual|"
+    r"companion)\b)\s+)*(?:class|object|interface)[ \t]+([A-Za-z_]\w*)")
+
+
+def debug_package_symbols(root):
+    """({name…}, present) for the debug package's top-level types.
+
+    Needed for `import com.rikkaminis.app.debug.*`: the wildcard names nothing,
+    so the gate has to know what it brings into scope or that import form becomes
+    a blind spot for the whole package (wide4/10 scope witness).
+    """
+    d = os.path.join(root, DEBUG_PKG_DIR)
+    names = set()
+    if not os.path.isdir(d):
+        return names, False
+    for fn in sorted(os.listdir(d)):
+        if not fn.endswith(".kt"):
+            continue
+        raw = open(os.path.join(d, fn), encoding="utf-8", errors="replace").read()
+        _lit, struct, _reason = _views(raw)
+        if struct is None:
+            continue
+        names.update(m.group(1) for m in _DEBUG_CLASS_RE.finditer(struct))
+    return names, True
+
+
 def scan_source(root):
     """Every debug-package reference outside `debug/` must be audited AND guarded.
 
-    [wide3/10] Two revisions:
-      * allow-listed files are no longer skipped: a reference there must sit
-        behind a LIVE `if (BuildConfig.DEBUG)` block, or be one of the audited
-        unguarded symbols (`UNGUARDED_SYMBOLS`) — otherwise the allow-list is a
-        blanket pass and `if (true || BuildConfig.DEBUG)` ships the server;
-      * comments are stripped literal-aware, so `"/*"` in a string cannot hide
-        code between it and a later `"*/"`.
+    [wide3/10] allow-listed files are not skipped wholesale; every reference in
+    them must sit behind a live `if (BuildConfig.DEBUG)` or be one of the
+    audited inert symbols.
+    [wide4/10] three more spellings of the same reference are now covered:
+      * the guard must DECIDE (`guard_decides`), so `!BuildConfig.DEBUG` and
+        tautologies no longer read as guards;
+      * an imported symbol used UNQUALIFIED (`import …debug.DebugServer` then
+        `DebugServer(this).start()`) is the same reference as the qualified one,
+        and `debug.*` wildcards are resolved from the package itself;
+      * a package prefix assembled at runtime (reflection) is caught by
+        `TARGET_PREFIX_RE`.
+    A file the shared lexer cannot parse is a violation: the gate refuses to
+    judge a source whose string/comment structure it cannot resolve.
     """
     src = os.path.join(root, "src/android/app/src")
+    debug_syms, debug_pkg_present = debug_package_symbols(root)
     violations = []
     scanned = 0
     seen = 0
     for base, _dirs, files in os.walk(src):
-        for fn in files:
+        for fn in sorted(files):
             if not fn.endswith(".kt"):
                 continue
             seen += 1
             path = os.path.join(base, fn)
             rel = os.path.relpath(path, src).replace(os.sep, "/")
-            posix_rel = os.path.relpath(path, os.path.join(src, "main/java")).replace(os.sep, "/")
-            # [verify-1015 BUG-03] `rel` is relative to src/, so the top-level
-            # test tree reads as "test/java/..." — the old `"/test/" in rel`
-            # check never matched it (no leading slash), so every test file
-            # that references debug code was reported as a main-tree violation.
-            # Normalize with a leading slash before the containment checks.
+            posix_rel = os.path.relpath(
+                path, os.path.join(src, "main/java")).replace(os.sep, "/")
             rel_slash = "/" + rel
             if "/test/" in rel_slash or "/androidTest/" in rel_slash or "/debug/" in posix_rel:
                 continue  # the debug package itself + tests pin the behaviour
             scanned += 1
             raw = open(path, encoding="utf-8", errors="replace").read()
-            code = strip_comments(raw)
-            struct = code_view(raw)
+            lit, struct, reason = _views(raw)
+            if lit is None:
+                violations.append(
+                    "%s  this gate cannot lex the file (%s) — it refuses to judge a "
+                    "source whose string/comment structure it cannot resolve"
+                    % (posix_rel, reason))
+                continue
             raw_lines = raw.splitlines()
-            code_lines = code.splitlines()
+            lit_lines = lit.splitlines()
+            struct_lines = struct.splitlines()
             allowed_syms = UNGUARDED_SYMBOLS.get(posix_rel, set())
             audited = posix_rel in ALLOWED_FILES
-            for m in TARGET_RE.finditer(code):
-                line_no = code.count("\n", 0, m.start()) + 1
-                line = code_lines[line_no - 1] if line_no <= len(code_lines) else ""
+
+            def line_no_of(pos, view=None):
+                return (lit if view is None else view).count("\n", 0, pos) + 1
+
+            def exempt(line_no):
+                cur = raw_lines[line_no - 1] if line_no <= len(raw_lines) else ""
                 prev = raw_lines[line_no - 2] if line_no >= 2 else ""
-                raw_line = raw_lines[line_no - 1] if line_no <= len(raw_lines) else ""
-                if ESCAPE_RE.search(raw_line) or ESCAPE_RE.search(prev):
-                    continue  # `debug-ok: <reason>` escape
+                return bool(ESCAPE_RE.search(cur) or ESCAPE_RE.search(prev))
+
+            def report(pos, sym, note):
+                line_no = line_no_of(pos)
+                if exempt(line_no):
+                    return              # `debug-ok: <reason>` escape
+                if sym and sym in allowed_syms:
+                    return              # audited symbol that is inert in release
+                if debug_guarded(struct, pos):
+                    return
+                line = lit_lines[line_no - 1] if line_no <= len(lit_lines) else ""
+                if audited:
+                    violations.append(
+                        "%s:%d  audited file, but this reference is not behind a live "
+                        "`if (BuildConfig.DEBUG)` (a constant-true `||`, an inverted "
+                        "`!BuildConfig.DEBUG`, or a dropped flag disables the guard): "
+                        "%s  [%s]"
+                        % (posix_rel, line_no, line.strip()[:90], note))
+                else:
+                    violations.append("%s:%d  %s  [%s]"
+                                      % (posix_rel, line_no, line.strip()[:100], note))
+
+            # An import line carrying `debug-ok:` is a HUMAN audit of that symbol
+            # for THIS file (same semantics as UNGUARDED_SYMBOLS, but derived from
+            # the tree instead of a hardcoded table): the symbol is inert in
+            # release, so its use sites here do not each need their own guard.
+            # A debug import WITHOUT the escape still puts the symbol under the
+            # guard requirement — that is the wide4/10 scope witness.
+            for m in DEBUG_IMPORT_RE.finditer(lit):
+                name = m.group(1)
+                if name != "*" and exempt(line_no_of(m.start())):
+                    allowed_syms = allowed_syms | {name}
+
+            # (1) fully-qualified references
+            for m in TARGET_RE.finditer(lit):
+                line_no = line_no_of(m.start())
+                line = lit_lines[line_no - 1] if line_no <= len(lit_lines) else ""
+                if exempt(line_no):
+                    continue
                 if re.match(r"\s*import\b", line):
                     if audited:
-                        continue  # audited file may import a debug symbol
+                        continue        # an audited file may import a debug symbol
                     violations.append(
                         "%s:%d  unaudited debug-package import: %s"
                         % (posix_rel, line_no, line.strip()[:100]))
                     continue
-                sym = _symbol_after(code, m.end())
-                if sym in allowed_syms:
-                    continue  # audited symbol that is inert in release
-                if debug_guarded(struct, m.start()):
-                    continue
-                if not audited:
-                    violations.append(
-                        "%s:%d  %s" % (posix_rel, line_no, line.strip()[:100]))
+                report(m.start(), _symbol_after(lit, m.end()), "debug-package reference")
+
+            # (2) the package prefix assembled at runtime (reflection)
+            for m in TARGET_PREFIX_RE.finditer(lit):
+                report(m.start(), "", "debug-package prefix built at runtime (reflection)")
+
+            # (3) imported symbols used unqualified
+            imported = set()
+            wildcard = False
+            for m in DEBUG_IMPORT_RE.finditer(lit):
+                if m.group(1) == "*":
+                    wildcard = True
+                else:
+                    imported.add(m.group(1))
+            if wildcard:
+                if debug_pkg_present:
+                    imported |= debug_syms
                 else:
                     violations.append(
-                        "%s:%d  audited file, but this reference is not behind a live "
-                        "`if (BuildConfig.DEBUG)` (a constant-true `||` / `&& false` "
-                        "short-circuit disables the guard): %s"
-                        % (posix_rel, line_no, line.strip()[:90]))
+                        "%s  wildcard import of the debug package, but the package is not "
+                        "in this tree — the gate cannot enumerate what the import brings "
+                        "into scope (fail-closed)" % posix_rel)
+            for name in sorted(imported):
+                pat = re.compile(r"(?<![\w.$])" + re.escape(name) + r"\b")
+                for m in pat.finditer(struct):
+                    line_no = line_no_of(m.start(), struct)
+                    line = struct_lines[line_no - 1] if line_no <= len(struct_lines) else ""
+                    if re.match(r"\s*import\b", line):
+                        continue        # the import itself, already judged above
+                    report(m.start(), name,
+                           "unqualified use of the imported debug symbol `%s`" % name)
     if seen == 0:
         violations.append(
             "fail-closed: no .kt file under src/android/app/src was scanned — the "
             "root is wrong or the source layout moved (a walk that sees nothing "
             "must never read as clean)")
     return violations
+
 
 
 def dex_entries(names):
@@ -666,6 +865,63 @@ def self_test():
     v5 = scan_source(root5)
     ok &= check("parser-death: a `\"/*\"` string cannot blank the code below it",
                 len(v5) == 1 and "DebugMethodRegistry" in v5[0], str(v5))
+
+    # --- [wide4/10] family-hole: the guard must DECIDE, not merely mention ---
+    import shutil as _shutil
+
+    def _w4_tree(files):
+        d = tempfile.mkdtemp(prefix="debugleak-w4-")
+        for r, c in files.items():
+            pq = os.path.join(d, r)
+            os.makedirs(os.path.dirname(pq), exist_ok=True)
+            open(pq, "w").write(c)
+        return d
+
+    _w4_dbg = ("%s/debug/DebugServer.kt" % base,
+               "package com.rikkaminis.app.debug\nclass DebugServer\n")
+    w4_source_arms = [
+        ("w4-inverted guard `if (!BuildConfig.DEBUG)` is caught (release-only server)",
+         "%s/MinisApp.kt" % base,
+         "fun boot() {\n    if (!BuildConfig.DEBUG) {\n"
+         "        com.rikkaminis.app.debug.DebugServer(this).start()\n    }\n}\n",
+         ["not behind a live"]),
+        ("w4-tautology `if (!BuildConfig.DEBUG || BuildConfig.DEBUG)` is caught",
+         "%s/MinisApp.kt" % base,
+         "fun boot() {\n    if (!BuildConfig.DEBUG || BuildConfig.DEBUG) {\n"
+         "        com.rikkaminis.app.debug.DebugServer(this).start()\n    }\n}\n",
+         ["not behind a live"]),
+        ("w4-imported symbol used unqualified is the same reference",
+         "%s/MinisApp.kt" % base,
+         "import com.rikkaminis.app.debug.DebugServer\n"
+         "fun boot() {\n    DebugServer(this).start()\n}\n",
+         ["not behind a live"]),
+        ("w4-runtime-built package prefix (reflection) is caught",
+         "%s/MinisApp.kt" % base,
+         "fun boot() {\n    if (true) {\n"
+         "        val cls = Class.forName(\"com.rikkaminis.app.debug\" + \".DebugServer\")\n"
+         "    }\n}\n",
+         ["reflection"]),
+    ]
+    w4_ok = True
+    for label, rel, body, needles in w4_source_arms:
+        d = _w4_tree({rel: body, _w4_dbg[0]: _w4_dbg[1]})
+        got = scan_source(d)
+        passed = len(got) == 1 and all(any(n in x for x in got) for n in needles)
+        w4_ok &= check("source: %s" % label, passed, "got=%s" % got)
+        _shutil.rmtree(d, ignore_errors=True)
+    d = _w4_tree({
+        "%s/MinisApp.kt" % base:
+            "fun boot() {\n    if (com.rikkaminis.app.BuildConfig.DEBUG && flags) {\n"
+            "        com.rikkaminis.app.debug.DebugServer(this).start()\n    }\n}\n",
+        _w4_dbg[0]: _w4_dbg[1]})
+    got = scan_source(d)
+    w4_ok &= check(
+        "source: a DECIDED guard (`DEBUG && flags`, package-qualified) stays clean",
+        got == [], "got=%s" % got)
+    _shutil.rmtree(d, ignore_errors=True)
+    ok &= w4_ok
+    print("   DEBUG_SOURCE_SELFTEST=%s (%d fixtures)"
+          % ("PASS" if w4_ok else "FAIL", len(w4_source_arms) + 1))
 
     # --- [verify-1015 BUG-03] reverse controls for the two fail-open holes ---
     # (a) a test-tree file referencing debug code must NOT be reported as a
@@ -843,6 +1099,38 @@ def self_test():
         ("handleReadFile with neither RandomAccessFile nor the helper is caught", noraf_handler, ["neither uses"], False),
         ("a called-but-undefined helper is caught", missing_helper_handler, ["not defined"], False),
         ("a renamed handleReadFile is anchor drift", drifted_handler, ["anchor drift"], False),
+    ]
+    api_fixtures += [
+        ("w4-when(false) + Files.readAllBytes off the helper path is caught",
+         ok_handler.replace(
+             "        return readFileSegment(java.io.File(\"x\"), 0L, 16)\n",
+             "        val bytes = when (false) { true -> "
+             "readFileSegment(java.io.File(\"x\"), 0L, 16) else -> "
+             "java.nio.file.Files.readAllBytes(java.io.File(\"x\").toPath()) }\n"
+             "        return bytes\n"),
+         ["handleReadFile"], False),
+        ("w4-helper result dropped by a `.let` chain is caught",
+         ok_handler.replace(
+             "        return readFileSegment(java.io.File(\"x\"), 0L, 16)\n",
+             "        return readFileSegment(java.io.File(\"x\"), 0L, 16).let { "
+             "java.io.File(\"x\").bufferedReader().readText().toByteArray() }\n"),
+         ["handleReadFile"], False),
+        ("w4-nested block comment + raw string cannot hide a stream read",
+         ok_handler.replace(
+             "        return readFileSegment(java.io.File(\"x\"), 0L, 16)\n",
+             "        return readFileSegment(java.io.File(\"x\"), 0L, 16).let {\n"
+             "            /* outer /* inner */ val _s = \"\"\" */\n"
+             "            java.io.File(\"x\").inputStream().use { s -> s.skip(0L); "
+             "s.readBytes() }\n"
+             "            /* outer2 /* inner2 */ \"\"\" */\n"
+             "        }\n"),
+         ["reads through a stream"], False),
+        ("w4-the read statement's value is exactly the bounded helper (control)",
+         ok_handler.replace(
+             "        return readFileSegment(java.io.File(\"x\"), 0L, 16)\n",
+             "        val bytes = readFileSegment(java.io.File(\"x\"), 0L, 16)\n"
+             "        return bytes\n"),
+         [], True),
     ]
     api_ok = True
     for label, text, needles, want_clean in api_fixtures:

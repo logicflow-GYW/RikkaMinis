@@ -65,9 +65,17 @@ import os
 import re
 import sys
 
+# [wide4-09] 共享 Kotlin 词法器。本门上一轮自己写了一套 `_mask`：块注释只找第一个
+# `*/`（Kotlin 的块注释可嵌套，`/* a /* b */ c */` 里的 c 会被当成活代码）、
+# 字符字面量按字符串处理。外部见证各一击穿 —— 门自己再手写词法器 = 直接违规。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import analyse as _lex_analyse  # noqa: E402
+
 REL = "src/android/app/src/main/java/com/rikkaminis/app/browser/BrowserTabPool.kt"
 
 RECV = "_downloads"
+# [wide4-09] 真树的原子写站点数下限（BrowserTabPool 当前 5 个 update { }）
+BASELINE_UPDATE_SITES = 5
 WRITE_RE = re.compile(r"_downloads\s*\.\s*value\s*=(?!=)")          # explicit
 # [wide3-08 R2] the write surface is the RECEIVER, not one spelling of it.
 # `MutableStateFlow` inherits `tryEmit` / `emit` from `MutableSharedFlow`; on a
@@ -94,12 +102,35 @@ READ_ALIAS_BIND = re.compile(
     r"(?:asStateFlow|asSharedFlow|asFlow)\s*\(")
 
 def _read_receivers(src):
-    """`_downloads` plus every alias of its read-only view."""
-    names = ["_downloads"]
-    for m in READ_ALIAS_BIND.finditer(src):
-        if m.group(1) not in names:
-            names.append(m.group(1))
+    """`_downloads` + 它的只读视图别名 + 这些别名的别名（传递闭包）。
+
+    [wide4-09 尝试 2] `val flowAlias = downloads`（别名的别名）上一轮不在集合里，
+    从它取快照（`val stale = flowAlias.value`）既不触发「重读状态」也不进快照表，
+    CAS lambda 映射 stale 全绿。
+    """
+    names = list(_alias_names(src, RECV))
+    changed = True
+    while changed:
+        changed = False
+        for r in list(names):
+            pat = (r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=\s*%s\s*\.\s*"
+                   r"(?:asStateFlow|asSharedFlow|asFlow)\s*\(" % re.escape(r))
+            for m in re.finditer(pat, src):
+                if m.group(1) not in names:
+                    names.append(m.group(1))
+                    changed = True
+                for n in [_alias_names(src, m.group(1))]:
+                    for x in n:
+                        if x not in names:
+                            names.append(x)
+                            changed = True
+        for r in list(names):
+            for x in _alias_names(src, r):
+                if x not in names:
+                    names.append(x)
+                    changed = True
     return names
+
 
 def _reads_state(expr, receivers):
     """True when `expr` reads the CURRENT download state (raw `.value`)."""
@@ -110,61 +141,108 @@ def _reads_state(expr, receivers):
 
 
 # ── source helpers ──────────────────────────────────────────────────────────
-def _mask(src):
-    """Length-preserving blank of string/char contents, `//` comments and
-    `/* ... */` BLOCK comments.
+def _lex_views(src):
+    """(ok, reason, views)；ok=False 时调用方必须 fail-closed。"""
+    return _lex_analyse(src)
 
-    The brace matcher used to skip only `//` comments, so a `/* } */` inside a
-    block closed the scan at the fake brace and everything after it dropped out
-    of the judged span - `_downloads.apply { /* } */ value = value.filter { ... } }`
-    read as an empty block and every rule went green (wide3-08 R4,
-    parser-death). Blanking (instead of deleting) keeps every index aligned with
-    the original text, so the rules can still slice `src`.
+
+def _mask(src):
+    """注释 + 字符串内容抹空（长度保持）。
+
+    [wide4-09] 词法交给共享模块：Kotlin 块注释可嵌套（`/* a /* b */ c */`），
+    手写版遇第一个 `*/` 就退出，于是注释里的 `value = …` 会被当成真写点、
+    注释里的 `}` 会把块提前闭合。片段（已从 code 视图切出）重新解析失败时
+    原样返回：整文件的解析失败已在 `check_source` 开头 fail-closed。
     """
-    out = list(src)
-    i, n = 0, len(src)
-    while i < n:
-        if src.startswith('"""', i):
-            j = src.find('"""', i + 3)
-            j = n if j < 0 else j + 3
-            for k in range(i + 3, max(i + 3, j - 3)):
-                if out[k] != "\n":
-                    out[k] = "x"
-            i = j
+    ok, _reason, views = _lex_analyse(src)
+    return views["code"] if ok else src
+
+
+def _alias_names(code, base):
+    """`val|var x = <base>` 的传递闭包（别名链 alias-of-alias）。
+
+    [wide4-09 尝试 2/4] 上一轮只认 `_downloads` 这一种拼写：`val flowAlias =
+    downloads; flowAlias.value` 的快照、`val mut = _downloads; mut.value = …`
+    的写点都不在判据的接收者集合里 —— 把状态搬到别名后面，全部门判绿。
+    """
+    names = [base]
+    changed = True
+    while changed:
+        changed = False
+        for n in list(names):
+            pat = (r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=\s*%s\b(?![\w.(])"
+                   % re.escape(n))
+            for m in re.finditer(pat, code):
+                if m.group(1) not in names:
+                    names.append(m.group(1))
+                    changed = True
+    return names
+
+
+def _write_receivers(code):
+    """可写的接收者集合：`_downloads` + 直接持有它的别名（`val mut = _downloads`）。"""
+    return _alias_names(code, RECV)
+
+
+def _alt(names):
+    """正则用的接收者交替串（长的优先，避免前缀吃掉后缀）。"""
+    return "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+
+
+def _in_retry_loop(code, idx):
+    """调用是否落在 `while` 重试环里（`compareAndSet` 唯一的原子用法）。
+
+    两种合法形态：
+      while (!_downloads.compareAndSet(_downloads.value, next)) { }
+      while (true) { val prev = _downloads.value; if (compareAndSet(prev, next)) break }
+
+    要求环体/条件里**重新读当前值**：只把 CAS 包在一个不重读的循环里仍然会丢更新。
+    判不出来就按违规处理（fail-closed 的反面：宁可多报，不静默放过）。
+    """
+    lo = max(0, idx - 2000)
+    seg = code[lo:idx + 1]
+    for m in reversed(list(re.finditer(r"\bwhile\s*\(", seg))):
+        po = lo + m.end() - 1
+        pc = _match_paren(code, po)
+        if pc < 0:
             continue
-        if src[i] in ('"', "'"):
-            q = src[i]
-            j = i + 1
-            while j < n:
-                if src[j] == "\\":
-                    j += 2
-                    continue
-                if src[j] in (q, "\n"):
-                    j += 1
-                    break
-                j += 1
-            for k in range(i + 1, max(i + 1, j - 1)):
-                if out[k] != "\n":
-                    out[k] = "x"
-            i = j
+        if po <= idx <= pc:
+            return True
+        k = pc + 1
+        while k < len(code) and code[k] in " \t\r\n":
+            k += 1
+        if k >= len(code) or code[k] != "{":
             continue
-        if src.startswith("//", i):
-            j = src.find("\n", i)
-            j = n if j < 0 else j
-            for k in range(i, j):
-                out[k] = " "
-            i = j
+        span = _balanced(code, k)
+        if span is None or not (span[0] <= idx < span[1]):
             continue
-        if src.startswith("/*", i):
-            j = src.find("*/", i + 2)
-            j = n if j < 0 else j + 2
-            for k in range(i, j):
-                if out[k] != "\n":
-                    out[k] = " "
-            i = j
-            continue
-        i += 1
-    return "".join(out)
+        body = code[span[0]:span[1]]
+        if re.search(r"(?<![\w.])[A-Za-z_]\w*\s*\.\s*value\b", body):
+            return True
+    return False
+
+
+def _consumes(rest, name):
+    """CAS 参数是否被**返回值**消费（绑定量可传递：`val kept = current.filter{}; kept`）。
+
+    [wide4-09 尝试 3] 上一轮判「body 里出现过这个标识符」，于是
+        `_downloads.update { current -> val _ignore = current; emptyList() }`
+    仍然算「用了参数」—— 拼写在、决定被删掉。现在只认**最后一条语句（返回值）**
+    能追到参数（含经由 `val` 绑定的一跳传递）。
+    """
+    binds = {name}
+    stmts = [s for s in _split_statements(rest) if s.strip()]
+    if not stmts:
+        return False
+    for s in stmts[:-1]:
+        m = re.match(r"\s*(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)(.*)$",
+                     s, re.S)
+        if m and any(re.search(r"\b%s\b" % re.escape(b), _live_text(m.group(2)))
+                     for b in binds):
+            binds.add(m.group(1))
+    tail = _live_text(stmts[-1])
+    return any(re.search(r"\b%s\b" % re.escape(b), tail) for b in binds)
+
 
 def _match_paren(src, open_idx):
     """Index of the `)` matching the `(` at open_idx (-1 if none)."""
@@ -391,7 +469,9 @@ def _snapshot_bindings(src, receivers=None):
     out = []
     for m in SNAP_BIND.finditer(src):
         rhs = m.group(2)
-        if not _reads_state(rhs, receivers) and RECV not in rhs:
+        # [wide4-09] 读入口按派生集合判（含别名链），不再只查 `_downloads` 字面量
+        if not _reads_state(rhs, receivers) and not any(
+                re.search(r"(?<![\w.])%s\b" % re.escape(r), rhs) for r in receivers):
             continue
         nxt = FUN_HEAD.search(src, m.end())
         out.append((m.group(1), m.end(), nxt.start() if nxt else len(src),
@@ -454,13 +534,34 @@ def _judge_write(label, line_no, rhs, line, form, receivers):
 def check_source(src: str, label: str) -> list:
     bad = []
     seen = set()
+    # [wide4-09] 先过共享词法器：解析失败 = fail-closed（parser-death 轴），
+    # 绝不退回原文。之后全部扫描走 code 视图（注释/字符串内容抹平、行号不变），
+    # MARKER 仍从 raw 行取 —— 停用标记本来就该写在注释里。
+    ok, reason, views = _lex_analyse(src)
+    if not ok:
+        return ["%s: cannot lex (%s) — the gate refuses to judge a broken lexer "
+                "view, fail-closed (wide4-09 parser-death)" % (label, reason)]
+    raw_lines = src.splitlines()
+    src = views["code"]
+
+    def raw_line(line_no):
+        return raw_lines[line_no - 1] if 0 < line_no <= len(raw_lines) else ""
+
+    # [wide4-09] 写入口集合从发布树派生：`_downloads` + 直接持有它的别名
+    wrecv = _write_receivers(src)
+    alt = _alt(wrecv)
+    write_re = re.compile(r"\b(?:%s)\s*\.\s*value\s*=(?!=)" % alt)          # explicit
+    emit_re = re.compile(r"\b(?:%s)\s*\.\s*(tryEmit|emit|getAndSet|compareAndSet)\s*\(" % alt)
+    recv_block = re.compile(r"\b(?:%s)\s*\.\s*(apply|run|let|also)\s*\{" % alt)
+    with_block = re.compile(r"\bwith\s*\(\s*(?:%s)\s*\)\s*\{" % alt)
+    cas_lambda = re.compile(r"\b(?:%s)\s*\.\s*(?:update|updateAndGet|getAndUpdate)\s*\{" % alt)
     receivers = _read_receivers(src)
     binds = _snapshot_bindings(src, receivers)
 
-    # R1 / R1b / R2 — explicit `_downloads.value = …`
-    for m in WRITE_RE.finditer(src):
+    # R1 / R1b / R2 — explicit `<recv>.value = …`
+    for m in write_re.finditer(src):
         line_no = _line_of(src, m.end())
-        line = src.splitlines()[line_no - 1] if line_no <= len(src.splitlines()) else ""
+        line = raw_line(line_no)
         rhs = _statement_tail(src, m.end())
         seen.add(line_no)
         v = _stale_ref(label, line_no, rhs, binds, m.end())
@@ -471,16 +572,26 @@ def check_source(src: str, label: str) -> list:
         if v:
             bad.append(v)
 
-    # R5 [wide3-08 R2] — the shared-flow entrances are writes too.
+    # R5 [wide3-08 R2 + wide4-09 尝试 1] — the shared-flow entrances are writes too.
     # `MutableStateFlow` inherits `tryEmit` / `emit` from `MutableSharedFlow`;
     # on a StateFlow they replace the value outright (no CAS), so they are the
     # same non-atomic write as `_downloads.value = x` under another spelling.
-    for m in EMIT_RE.finditer(src):
+    # `compareAndSet` 只在**重试环**里才是原子写（每次重试都重读当前值）；
+    # 单发一次 `compareAndSet(读到的旧值, 新值)` 与 read-modify-write 同价。
+    for m in emit_re.finditer(src):
         line_no = _line_of(src, m.start())
         if line_no in seen:
             continue
         seen.add(line_no)
-        line = src.splitlines()[line_no - 1] if line_no <= len(src.splitlines()) else ""
+        line = raw_line(line_no)
+        if m.group(1) == "compareAndSet":
+            if _in_retry_loop(src, m.start()):
+                continue
+            bad.append("%s:%d: single-shot `_downloads.compareAndSet(...)` without a retry "
+                       "loop is the same non-atomic read-modify-write as `.value =` — use "
+                       "`update { … }` (wide4-09 尝试 1)"
+                       % (label, line_no))
+            continue
         args = _call_args(src, m.end() - 1)
         if args is None:
             bad.append("%s:%d: unbalanced `_downloads.%s(` call - cannot decide, "
@@ -492,7 +603,7 @@ def check_source(src: str, label: str) -> list:
             bad.append(v)
 
     # R4 — implicit receiver: apply / run / with (bare `value =`), let / also (`it.value =`)
-    for rx, kind in ((RECV_BLOCK, "recv"), (WITH_BLOCK, "with")):
+    for rx, kind in ((recv_block, "recv"), (with_block, "with")):
         for m in rx.finditer(src):
             brace = src.index("{", m.end() - 1)
             span = _balanced(src, brace)
@@ -513,7 +624,7 @@ def check_source(src: str, label: str) -> list:
                 line_no = _line_of(src, abs_idx)
                 if line_no in seen:
                     continue
-                line = src.splitlines()[line_no - 1]
+                line = raw_line(line_no)
                 seen.add(line_no)
                 rhs = _statement_tail(src, span[0] + w.end())
                 v = _judge_write(label, line_no, rhs, line, form, receivers)
@@ -524,8 +635,12 @@ def check_source(src: str, label: str) -> list:
     # "Consume" is judged on the LIVE half of the expression: keeping the
     # spelling `current` inside `if (false) current else stale` uses nothing
     # (wide3-08 R3).
+    # [wide4-09 尝试 2/3] 消费判据升级：①只认**返回值（最后一条语句）**能追到
+    # 参数（含 val 绑定一跳），`val _ignore = current; emptyList()` 判红；
+    # ②无显式形参的 lambda 记作隐式 `it`，`update { listOf(entry) }`（丢了 it）
+    # 判红。接收者集合用派生的别名闭包。
     snaps = [b[0] for b in binds]
-    for m in CAS_LAMBDA_RE.finditer(src):
+    for m in cas_lambda.finditer(src):
         brace = src.index("{", m.end() - 1)
         span = _balanced(src, brace)
         if span is None:
@@ -553,16 +668,22 @@ def check_source(src: str, label: str) -> list:
                        "instead of the parameter — the CAS retry recomputes from stale state "
                        "(wide-1024 B-22)" % (label, line_no, ", ".join(sorted(set(captured)))))
             continue
-        # explicit parameter that is never used at the top level
-        pm = re.match(r"\s*([A-Za-z_]\w*)\s*->", body)
+        # 参数消费：显式形参或隐式 `it`，只认返回值（wide4-09 尝试 2/3）
+        pm = re.match(r"\s*(?:\(([^)]*)\)|([A-Za-z_]\w*))\s*->", body)
         if pm:
-            name = pm.group(1)
-            rest = _strip_nested(body[pm.end():])
-            live_rest = _live_body(rest) if rest is not None else None
-            if live_rest is not None and MARKER not in body \
-                    and not re.search(r"\b%s\b" % re.escape(name), live_rest):
-                bad.append("%s:%d: `_downloads.update { %s -> … }` never uses `%s` "
-                           "(CAS result not consumed) — wide-1024 B-22" % (label, line_no, name, name))
+            names = [n.strip() for n in (pm.group(1) or pm.group(2)).split(",") if n.strip()]
+            rest = top[pm.end():]
+        else:
+            names = ["it"]
+            rest = top
+        rest = rest if rest is not None else ""
+        if MARKER in body or not any(
+                _consumes(rest, n) for n in names):
+            shown = ", ".join(names)
+            bad.append("%s:%d: `_downloads.update { %s -> … }` never uses %s in its return "
+                       "expression (CAS result not consumed) — wide-1024 B-22 / wide4-09"
+                       % (label, line_no, shown, "`%s`" % "`/`".join(names)))
+
     return bad
 
 
@@ -577,7 +698,21 @@ def run(repo: str) -> int:
         for b in bad:
             print("FAIL " + b)
         return 1
-    n_update = len(re.findall(r"_downloads\.update\s*\{", src))
+    # [wide4-09 尝试 1] 站点数下限：4 个真实写点必须都还是 `update { }`。
+    # 上一轮 EMIT_RE 白名单漏了 `compareAndSet`，把某个 update 站点整个替换成
+    # 单发 CAS 后，剩下的判据照样全绿（只丢了 1 个站点）。计数走 code 视图，
+    # 注释里的 `_downloads.update { … }` 示例不再抬数。
+    ok, reason, views = _lex_analyse(src)
+    if not ok:
+        print("FAIL %s: cannot lex (%s) — fail-closed (wide4-09 parser-death)" % (path, reason))
+        return 1
+    code = views["code"]
+    n_update = len(re.findall(r"_downloads\.update\s*\{", code))
+    if n_update < BASELINE_UPDATE_SITES:
+        print("FAIL %s: only %d `_downloads.update {` site(s), baseline is %d — an atomic "
+              "write entrance was replaced by a spelling the whitelist did not cover "
+              "(wide4-09 尝试 1)" % (REL, n_update, BASELINE_UPDATE_SITES))
+        return 1
     print("PASS downloads_atomic (%d _downloads.update{ } site(s), 0 non-atomic writes, "
           "0 stale-snapshot update lambdas)" % n_update)
     return 0
@@ -697,6 +832,63 @@ W3_TRY_EMIT_CLEAN = '''    fun resetDownloads() {
     }
 '''
 
+# ── [wide4-09] 本轮外部见证的四条新盲轴（family-hole ×3 + parser-death）──────
+# 尝试 1：单发 `compareAndSet` —— R5 的名字白名单里没有它，于是「把 update 换掉」
+# 这种最直白的改写照样门绿（站点数还少一个，也没人看）。
+W4_CAS_SINGLE = '''    private fun clearFinishedDownloads() {
+        _downloads.compareAndSet(downloads.value, downloads.value.filter { it.state == DownloadState.DOWNLOADING })
+    }
+'''
+
+# 尝试 1b（精度对照）：真正的 CAS 重试环 —— 每次重试都重读当前值，是原子写。
+W4_CAS_LOOP = '''    private fun pushEntry(entry: DownloadEntry) {
+        while (true) {
+            val prev = _downloads.value
+            if (_downloads.compareAndSet(prev, listOf(entry) + prev)) break
+        }
+    }
+'''
+
+# 尝试 2：别名的别名 —— `val flowAlias = downloads`（只读视图再起别名）取出快照
+# 交给 update。READ_ALIAS_BIND 只认一跳，这层别名不在接收者集合里。
+W4_ALIAS2 = '''    val downloads: StateFlow<List<DownloadEntry>> = _downloads.asStateFlow()
+
+    private fun registerDownload(dest: File): Long {
+        val flowAlias = downloads
+        val stale = flowAlias.value
+        _downloads.update { listOf(entry) + stale }
+        return id
+    }
+'''
+
+# 尝试 3：CAS 参数只出现在一条被丢弃的绑定里 —— `_live_body` 判「任意语句提到」，
+# 于是「拼写保留、决定删掉」的经典形态全绿。
+W4_DEAD_BIND = '''    private fun markSeen() {
+        _downloads.update { current -> val _ignore = current; emptyList() }
+    }
+'''
+
+# 尝试 4：写点搬到别名后面 —— WRITE_RE / RECV_BLOCK / _read_receivers 写死
+# `_downloads`，`val mut = _downloads; mut.value = …` 一个判据都碰不到。
+W4_WRITE_ALIAS = '''    val downloads: StateFlow<List<DownloadEntry>> = _downloads.asStateFlow()
+
+    fun clearFinishedDownloads() {
+        val mut = _downloads
+        mut.value = downloads.value.filter { it.state == DownloadState.DOWNLOADING }
+    }
+'''
+
+# 尝试 5：嵌套块注释里的 `}` —— Kotlin 把 `/* outer /* inner */ } */` 当一个完整
+# 注释；手写 masker 停在第一个 `*/`，那个 `}` 就变成真括号，apply 块提前闭合，
+# 真正的 non-atomic 写点落到被判区间之外。
+W4_NESTED_COMMENT = '''    fun clearFinishedDownloads() {
+        _downloads.apply {
+            /* outer /* inner */ } */ value = value.filter { it.state == DownloadState.DOWNLOADING }
+        }
+    }
+'''
+
+
 def selftest() -> int:
     failures = []
     good = check_source(GOOD, "good.kt")
@@ -719,6 +911,16 @@ def selftest() -> int:
         "w3-try-emit": (check_source(W3_TRY_EMIT, "w3-try-emit.kt"),
                         "non-atomic read-modify-write"),
         "w3-try-emit-clean": (check_source(W3_TRY_EMIT_CLEAN, "w3-try-emit-clean.kt"), None),
+        # [wide4-09]
+        "w4-cas-single": (check_source(W4_CAS_SINGLE, "w4-cas-single.kt"),
+                          "single-shot `_downloads.compareAndSet"),
+        "w4-cas-loop": (check_source(W4_CAS_LOOP, "w4-cas-loop.kt"), None),
+        "w4-alias2": (check_source(W4_ALIAS2, "w4-alias2.kt"), "pre-captured snapshot"),
+        "w4-dead-bind": (check_source(W4_DEAD_BIND, "w4-dead-bind.kt"), "never uses"),
+        "w4-write-alias": (check_source(W4_WRITE_ALIAS, "w4-write-alias.kt"),
+                           "read-modify-write on _downloads"),
+        "w4-nested-comment": (check_source(W4_NESTED_COMMENT, "w4-nested-comment.kt"),
+                              "hidden receiver"),
     }
     print("selftest good fixture -> %d violation(s)" % len(good))
     for name, (hits, needle) in cases.items():
