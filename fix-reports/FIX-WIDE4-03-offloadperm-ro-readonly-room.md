@@ -80,8 +80,18 @@
 
 ## §5 CI
 
-CI run **#40180729474**（`fix/wide4-03-offloadperm-ro-readonly-room`，代码提交 `4766afcd`）。
-判据行：`Summary: 112 passed, 0 failed` 恰一条 · `ALL 344 CASES PASS` 恰一条 · ` e: ` 0 · 唯一 skipped = Publish（main 门控）· `head_sha` 与本地逐字符一致。
+CI **#2670 / run `40180729474`**（`fix/wide4-03-offloadperm-ro-readonly-room`，**head_sha `4766afcd1bcb6e19f75790b509101b5cf1e970eb`** 与本地代码提交逐字符一致，`attempt 1` success，`completed_at 09:49:10Z`）。
+日志 1,481,258 B 逐条核过：
+
+- `║  Summary: 112 passed, 0 failed` **恰一条**（其余 `Summary: 28/5/14/36/15/25/10 passed` 是子套件行，`Summary: 0 violation(s) found` 是另一子门）
+- `✅ ALL 344 CASES PASS` **恰一条**
+- ` e: ` 计数 **0**
+- 26 步唯一非 success = `Publish to Releases`（main 门控 skipped）
+- 含 `FAILED` 的 6 行逐条确认**全是 PASSED 用例名子串**（`slot denied produces FAILED without calling provider` 等）
+- `OFFLOAD_PERMISSION_RESET_SYNC_SELFTEST=PASS` 在日志中可见（该门已注册进 `test_scan.py`）
+- **`MOUNT_PROBE_IO_SELFTEST=PASS` 与 Room 门的自证不在 CI 日志里**：`readonly_mount_write_guard` / `room_migration_check` 的 `--selftest` 未被 `test_scan.py` 注册（现状，非本支引入；本支 `test_scan.py` 是冻结面）。二者的 76 / 25 臂由本地实跑见证，注册项见 §7。
+
+报告回填提交 `39deaa1a` 之后，`HEAD` 与绿树 `4766afcd` 的差异仅限 `fix-reports/`（`git diff --name-only 4766afcd..HEAD -- . ':(exclude)fix-reports'` = 0 行），源码树等价。
 
 ---
 
