@@ -62,6 +62,21 @@ import os
 import re
 import sys
 
+# [wide4-09] 共享 Kotlin 词法/语法原语（12 支门共用的单一实现）。
+# 本门上一轮手写了两套词法器（`strip_literals` / `mask_comments`），在 Kotlin
+# 原生词法上系统性失明：嵌套块注释 `/* a /* b */ c */` 遇第一个 `*/` 就退出、
+# 单引号字符 `'"'` 被当成字符串起始吞掉后面整段真代码。外部见证各一击穿。
+# 现在词法一律走共享模块；解析失败**绝不**静默返回原文，由调用方 fail-closed。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import analyse as _lex_analyse  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool as _const_bool,
+    match_bracket as _match_bracket,
+    split_top as _ast_split_top,
+    if_blocks as _if_blocks,
+    when_branches as _when_branches,
+)
+
 # ── 标签词表 ──────────────────────────────────────────────────────────────
 TAGS = {
     "EXAMINE": "读/搜/看 —— 探索代码库或环境",
@@ -435,48 +450,6 @@ def face_golden(root):
     return ok
 
 
-def strip_literals(src):
-    """Empty out string bodies + drop comments before any brace matching.
-
-    The KDoc of `write` quotes `synchronized(writeLock)` / `buildLine` verbatim,
-    so a comment-blind matcher could be satisfied by documentation alone.
-    Returns None when a literal/comment never terminates (caller reports ROT
-    instead of matching garbage).
-    """
-    out, i, n = [], 0, len(src)
-    while i < n:
-        if src.startswith('"""', i):
-            end = src.find('"""', i + 3)
-            if end < 0:
-                return None
-            out.append("~")
-            i = end + 3
-            continue
-        c = src[i]
-        if c == '"':
-            i += 1
-            while i < n and src[i] != '"':
-                i += 2 if src[i] == "\\" else 1
-            if i >= n:
-                return None
-            out.append("~")
-            i += 1
-            continue
-        if src.startswith("//", i):
-            j = src.find("\n", i)
-            i = n if j < 0 else j
-            continue
-        if src.startswith("/*", i):
-            j = src.find("*/", i + 2)
-            if j < 0:
-                return None
-            i = j + 2
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
-
-
 def brace_block_end(code, open_idx):
     """Index just past the '}' matching the '{' at `open_idx`, or -1."""
     depth = 0
@@ -567,165 +540,102 @@ def split_top(text, sep):
 
 
 def _const_val(cond):
-    c = cond.strip()
-    while c.startswith("(") and c.endswith(")") and match_paren(c, 0) == len(c) - 1:
-        c = c[1:-1].strip()
-    if c in ("true", "1"):
-        return True
-    if c in ("false", "0"):
-        return False
-    return None
+    """条件能否折成字面量：True / False / None（未知）。
+
+    [wide4-09 family-hole] 上一轮只认裸 `true` / `false` / `0` / `1`：
+      `if (!true) put("args", …)`   —— 逻辑非没处理，provably_false 返回 False
+      `if (1 == 2) put("args", …)`  —— 常量相等比较没处理，同上
+    两条都让字段的写出路径整段消失，门却判绿。现在用共享常量折叠
+    （`_kotlin_ast.const_bool`，覆盖 `!X` / `X && Y` / `X || Y`（短路语义）/ `A == B`）。
+    """
+    return _const_bool(cond)
 
 
 def provably_false(cond):
     """Is this `if` condition decided by a literal BEFORE the real guard runs?
 
-    `if (false && guard)` and `if (false)` are dead bodies. Only the DEAD
-    direction is reported here — a `put(field)` that can never execute is a
-    missing field.
+    `if (false && guard)` and `if (false)` are dead bodies.  Only the DEAD
+    direction is reported here - a `put(field)` that can never execute is a
+    missing field.  A condition that only folds to TRUE (`if (true) …`) is not
+    reported by this function; the lock-scope face judges that shape itself
+    (see `_early_return_before`).
     """
-    # Split on TOP-LEVEL `||` / `&&` (split_top takes a single char, so peel the
-    # operator only when both neighbours are the same char).
-    ors, start, i, n = [], 0, 0, len(cond)
-    depth, quote = 0, ""
-    while i < n:
-        c = cond[i]
-        if quote:
-            if c == "\\":
-                i += 2
-                continue
-            if c == quote:
-                quote = ""
-            i += 1
-            continue
-        if c in "\"'":
-            quote = c
-            i += 1
-            continue
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        elif depth == 0 and cond.startswith("||", i):
-            ors.append(cond[start:i])
-            i += 2
-            start = i
-            continue
-        i += 1
-    ors.append(cond[start:])
-    if len(ors) > 1:
-        return all(provably_false(p) for p in ors)
-
-    ands, start, i = [], 0, 0
-    depth, quote = 0, ""
-    while i < n:
-        c = cond[i]
-        if quote:
-            if c == "\\":
-                i += 2
-                continue
-            if c == quote:
-                quote = ""
-            i += 1
-            continue
-        if c in "\"'":
-            quote = c
-            i += 1
-            continue
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        elif depth == 0 and cond.startswith("&&", i):
-            ands.append(cond[start:i])
-            i += 2
-            start = i
-            continue
-        i += 1
-    ands.append(cond[start:])
-    if len(ands) > 1:
-        return any(provably_false(p) for p in ands)
-    return _const_val(cond) is False
+    return _const_bool(cond) is False
 
 
 def if_bodies(code):
-    """[(cond, body_start, body_end)] for every `if (...)` body (both forms)."""
+    """[(cond, then_start, then_end, else_start, else_end)] —— 共享 AST 的薄包。
+
+    保留这个名字给下游（以及 selftest）用；真正的结构解析在 `_kotlin_ast`：
+    它覆盖 brace-bodied / braceless / else 臂三种形态，手写版漏了 else 臂。
+    """
+    return _if_blocks(code)
+
+
+def covering_conditions(code, idx):
+    """覆盖 `idx` 的**分支条件**（else 臂取反）。
+
+    与 `dead_guards_at` 同源，但不管条件是否恒假 —— 用来判「这个 `return`
+    是不是有条件的」（无覆盖条件 = 无条件早退）。
+    """
     out = []
-    for m in re.finditer(r"\bif\s*\(", code):
-        po = code.find("(", m.end() - 1)
-        pc = match_paren(code, po)
-        if pc < 0:
-            continue
-        cond = code[po + 1:pc]
-        j = pc + 1
-        while j < len(code) and code[j] in " \t\r\n":
-            j += 1
-        if j < len(code) and code[j] == "{":
-            be = brace_block_end(code, j)
-            if be < 0:
-                continue
-            out.append((cond, j, be + 1))
-        else:
-            k = j
-            depth = 0
-            while k < len(code) and not (code[k] == "\n" and depth == 0):
-                if code[k] in "([{":
-                    depth += 1
-                elif code[k] in ")]}":
-                    depth -= 1
-                k += 1
-            out.append((cond, j, k))
+    for cond, t0, t1, e0, e1 in _if_blocks(code):
+        if t0 <= idx < t1:
+            out.append(cond.strip())
+        elif e0 is not None and e0 <= idx < e1:
+            out.append("!(" + cond.strip() + ")")
+    for subject, cond, b0, b1 in _when_branches(code):
+        if b0 <= idx < b1:
+            out.append("when (%s) %s" % (subject.strip(), cond.strip()))
     return out
 
 
-def dead_guards_at(code, idx, bodies):
-    """Conditions of the enclosing `if`s that provably never run at `idx`."""
-    return [c for c, b0, b1 in bodies if b0 <= idx < b1 and provably_false(c)]
+def dead_guards_at(code, idx):
+    """Conditions of the enclosing branches that provably never run at `idx`.
+
+    [wide4-09] 结构由共享 AST 派生（`if` 的 then/else 臂 + `when` 臂），恒假由
+    共享常量折叠判定。上一轮只扫自己手写的「单语句 if」，于是
+    `when (false) { true -> put("args", …) }` 与 `if (1 == 2) { … }` 全漏。
+    """
+    dead = []
+    for cond, t0, t1, e0, e1 in _if_blocks(code):
+        if t0 <= idx < t1:
+            if _const_bool(cond) is False:
+                dead.append(cond.strip())
+        elif e0 is not None and e0 <= idx < e1:
+            if _const_bool(cond) is True:
+                dead.append("!(" + cond.strip() + ")")
+    for subject, cond, b0, b1 in _when_branches(code):
+        if b0 <= idx < b1:
+            sv = _const_bool(subject) if subject.strip() else None
+            cv = _const_bool(cond)
+            # 常量 subject 与常量臂标签不相等 -> 该臂永不执行
+            if sv is not None and cv is not None and sv != cv:
+                dead.append("%s ->" % cond.strip())
+    return dead
 
 
 def mask_comments(src):
-    """Blank // and /* */ comments, keep string literals INTACT (offsets and
-    newlines preserved). face_schema matches `put("field"` — field names live
-    inside string literals, so the mask must keep them; only prose may not
-    satisfy a criterion."""
-    out = list(src)
-    i, n, quote = 0, len(src), ""
-    while i < n:
-        c = src[i]
-        if quote:
-            if c == "\\":
-                i += 2
-                continue
-            if c == quote:
-                quote = ""
-            i += 1
-            continue
-        if c in "\"'":
-            quote = c
-            i += 1
-            continue
-        if src.startswith("//", i):
-            j = src.find("\n", i)
-            j = n if j < 0 else j
-            for k in range(i, j):
-                out[k] = " "
-            i = j
-            continue
-        if src.startswith("/*", i):
-            j = src.find("*/", i + 2)
-            j = n if j < 0 else j + 2
-            for k in range(i, j):
-                if src[k] != "\n":
-                    out[k] = " "
-            i = j
-            continue
-        i += 1
-    return "".join(out)
+    """注释抹空格、字符串原样（字段名活在字符串里）。
+
+    [wide4-09 parser-death] 手写版遇第一个 `*/` 就退出块注释，于是
+    `/* outer /* inner */ put("args", …) */` 里被 Kotlin 当作注释丢弃的字段
+    在掩码视图里成了活代码 —— 存在性/可达性/非常量三项全通过。
+    现在委托共享词法器（嵌套深度计数 + 字符字面量 + 三引号 + 模板插值）。
+    解析失败返回 None，调用方必须 fail-closed 报违规，不许静默返回原文。
+    """
+    ok, _reason, views = _lex_analyse(src)
+    return views["comments"] if ok else None
 
 
 def is_constant_expr(text):
     """True when an expression contains no identifier/member reference at all —
-    i.e. the value cannot depend on the data it is supposed to describe."""
+    i.e. the value cannot depend on the data it is supposed to describe.
+
+    [wide4-09] 这条判据**单独用不够**：`sanitize("", ARGS_MAX_LENGTH)` 把数据源
+    换成空串常量、外面再包一层纯函数，仍然「有标识符」（函数名 + 常量名）。
+    真正的判据是 `_value_failure`：值必须派生自形参/局部量。
+    """
     t = re.sub(r'"""(?:.|\n)*?"""', " ", text)
     t = re.sub(r'"[^"\n]*"', " ", t)
     t = re.sub(r"'[^'\n]*'", " ", t)
@@ -735,6 +645,114 @@ def is_constant_expr(text):
     return t == ""
 
 
+# ── [wide4-09] 字段值必须派生自输入（把「非常量」升级成「派生自形参」）──────
+FUN_DECL_RE = re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[A-Za-z_][\w.]*\.)?([A-Za-z_]\w*)\s*\(")
+_UPPER_CONST_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_NOT_DATA = ("true", "false", "null", "this")
+
+
+def _fun_spans(code):
+    """[(name, params_text, body_start, body_end)] —— 从发布树派生，不写死函数名。
+
+    体起点从参数表右括号之后派生（默认参数 lambda 不会冒充函数体），
+    表达式体 `fun f() = …` 也纳入（到深度 0 的换行为止）。
+    """
+    out = []
+    for m in FUN_DECL_RE.finditer(code):
+        po = m.end() - 1
+        pc = _match_bracket(code, po)
+        if pc < 0:
+            continue
+        k = pc + 1
+        while k < len(code) and code[k] in " \t\r\n":
+            k += 1
+        while k < len(code) and code[k] not in "={":
+            if code[k] == "\n":
+                break
+            k += 1
+        if k < len(code) and code[k] == "{":
+            be = _match_bracket(code, k)
+            if be < 0:
+                continue
+            out.append((m.group(1), code[po + 1:pc], k + 1, be))
+        elif k < len(code) and code[k] == "=":
+            end = k + 1
+            depth = 0
+            while end < len(code):
+                ch = code[end]
+                if ch in "([{":
+                    depth += 1
+                elif ch in ")]}":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                elif ch == "\n" and depth == 0:
+                    break
+                end += 1
+            out.append((m.group(1), code[po + 1:pc], k + 1, end))
+    return out
+
+
+def _param_names(params_text):
+    """形参名（`@Ann vararg name: Type = default` -> name）。"""
+    names = []
+    for a, b in _ast_split_top(params_text, (",",)):
+        seg = params_text[a:b].strip()
+        if not seg:
+            continue
+        mm = re.match(r"(?:@\w+\s+)*(?:(?:vararg|noinline|crossinline)\s+)?"
+                      r"([A-Za-z_]\w*)\s*[:=]", seg)
+        if mm:
+            names.append(mm.group(1))
+    return names
+
+
+def _enclosing_fun(code, idx):
+    """最内层包含 `idx` 的函数 span（顶层夹具没有函数 -> None）。"""
+    best = None
+    for span in _fun_spans(code):
+        if span[2] <= idx < span[3]:
+            if best is None or (span[3] - span[2]) < (best[3] - best[2]):
+                best = span
+    return best
+
+
+def _value_failure(value, code, put_idx):
+    """`put(field, value)` 的值为什么不能描述事件（None = 合格）。
+
+    [wide4-09 family-hole] 上一轮只问「表达式里还有没有标识符」，于是把数据源
+    换成空串常量、外面包一层纯函数（`sanitize("", ARGS_MAX_LENGTH)`）仍然算
+    「非常量」，4 个必填字段全部可以这样被掏空而门判绿。
+    新判据（归一化等价，不列黑名单）：值里**必须有一个引用指向形参或局部量**
+    —— 全大写常量名、函数/方法调用名、true/false/null/this 都不算数据。
+    """
+    if is_constant_expr(value):
+        return "的值是常量（%s）—— 包含不了任何事件数据" % (value.strip() or "<空>")
+    residual = []
+    for m in re.finditer(r"[A-Za-z_]\w*", value):
+        name = m.group(0)
+        if name in _NOT_DATA:
+            continue
+        if _UPPER_CONST_RE.match(name):            # ARGS_MAX_LENGTH 之类
+            continue
+        if re.match(r"\s*\(", value[m.end():]):   # 函数/方法名
+            continue
+        residual.append(name)
+    if not residual:
+        return ("的值里除了函数调用与常量名没有任何数据引用（%s）—— "
+                "数据源被替换成了常量" % value.strip())
+    fn = _enclosing_fun(code, put_idx)
+    if fn is None:
+        return None                                 # 顶层夹具：无形参可判，退回旧判据
+    params = set(_param_names(fn[1]))
+    locals_ = set(re.findall(r"\b(?:val|var)\s+([A-Za-z_]\w*)", code[fn[2]:fn[3]]))
+    if not any(n in params or n in locals_ for n in residual):
+        return ("的值不派生自任何形参/局部量（引用了 %s；%s 的形参是 %s）"
+                % (", ".join(sorted(set(residual))), fn[0],
+                   ", ".join(sorted(params)) or "<无>"))
+    return None
+
+
 # 面 1b 的锚点（[da1029-C / I09]）
 WRITE_DECL = "private fun write("
 TERMINAL_DECL = "private fun writeTerminalOnce("
@@ -742,6 +760,61 @@ BEGIN_RUN_DECL = "fun beginRun("
 RUN_CONTEXT_FIELDS = ("activeRunId", "activeSessionId", "terminalWritten")
 LOCK_CALL = "synchronized(writeLock)"
 BUILD_LINE_CALL = "buildLine("
+
+
+# ── [wide4-09] 锁的**身份**与锁内语句的**可达性** ─────────────────────────
+WRITE_LOCK_DECL_RE = re.compile(
+    r"\b(?:private\s+|internal\s+|protected\s+)?val\s+writeLock\b([^\n]*)")
+
+
+def _lock_field_problems(code):
+    """writeLock 必须是**稳定实例字段**（wide4-09 尝试 3，family-hole）。
+
+    `private val writeLock: Any get() = Any()` 保留了每一处
+    `synchronized(writeLock)` 的拼写，但每次访问都在堆上分配一个全新 monitor
+    —— 三个写者各自锁在不同的锁上，全类互斥当场退化为无锁。上一轮判据只问
+    「调用点落在锁块内」，所以这行声明一改，六条子判据全绿。
+    """
+    hits = list(WRITE_LOCK_DECL_RE.finditer(code))
+    if not hits:
+        return ["AgentTraceRecorder.kt: writeLock is not a stable instance field — "
+                "no `val writeLock = Any()` declaration found (ROT — update this gate)"]
+    problems = []
+    for m in hits:
+        tail = m.group(1)
+        if re.search(r"\bget\s*\(", tail):
+            problems.append(
+                "AgentTraceRecorder.kt: writeLock is not a stable instance field — the "
+                "declaration has a getter (`get() = Any()`), so every synchronized(writeLock) "
+                "locks a NEWLY allocated monitor and the writers are not mutually exclusive "
+                "at all (wide4-09 尝试 3)")
+            continue
+        if not re.search(r"=\s*(?:Any|Object)\s*\(\s*\)", tail):
+            problems.append(
+                "AgentTraceRecorder.kt: writeLock is not a stable instance field — expected "
+                "`val writeLock = Any()`, got `%s` (wide4-09 尝试 3)" % tail.strip())
+    return problems
+
+
+def _early_return_before(code, lo, hi, target):
+    """`[lo, hi)` 内、`target` 之前是否存在**必然执行**的 `return`。
+
+    返回描述串，没有则 None。`if (true) return` 或裸 `return` 让 target 及其后
+    全部语句不可达 —— beginRun 的三行 run 上下文赋值与 trace_start 落盘一起变成
+    死代码，而 `lock_open < w < lock_end` 依旧成立（wide4-09 尝试 4 self_doubt）。
+    带标签的 `return@label` 退出的是 lambda，不算。
+    """
+    stop = min(target, hi)
+    for m in re.finditer(r"\breturn\b", code[lo:stop]):
+        if code[lo + m.end():lo + m.end() + 1] == "@":
+            continue
+        pos = lo + m.start()
+        conds = covering_conditions(code, pos)
+        if not conds:
+            return "unconditional `return` (body offset %d)" % pos
+        if any(_const_bool(c) is True for c in conds):
+            return "`return` under a constant-true condition (%s)" % conds[0].strip()
+    return None
 
 
 def face_lock_scope(src):
@@ -756,10 +829,14 @@ def face_lock_scope(src):
     synchronized 块、或先赋给局部变量，都算通过。
     """
     problems = []
-    code = strip_literals(src)
-    if code is None:
-        return ["AgentTraceRecorder.kt: unterminated string/comment literal — cannot "
-                "brace-match write() (ROT — update this gate)"]
+    # [wide4-09 parser-death] 共享词法器（嵌套块注释 / 字符字面量 / 三引号 /
+    # 模板插值）；`'"'` 在手写版里会把后面整段真代码当字符串抹掉。
+    ok, reason, views = _lex_analyse(src)
+    if not ok:
+        return ["AgentTraceRecorder.kt: cannot lex (%s) — the gate refuses to brace-match "
+                "write() on a broken lexer view (fail-closed, wide4-09)" % reason]
+    code = views["code"]
+    problems.extend(_lock_field_problems(code))
     for decl in (WRITE_DECL, TERMINAL_DECL):
         start, open_brace = body_brace(code, decl)
         if start < 0:
@@ -801,6 +878,17 @@ def face_lock_scope(src):
                                 "one run with session_id from the next, and its ts can precede "
                                 "lines appended by a concurrent writer"
                                 % (BUILD_LINE_CALL, p, name, LOCK_CALL))
+                continue
+            dead = dead_guards_at(body, p)
+            if dead:
+                problems.append("AgentTraceRecorder.kt: %s builds a line inside a dead branch "
+                                "(%s) — the call sits in the lock block, but it never runs "
+                                "(wide4-09 family-hole)" % (name, (dead[0] or "?").strip()))
+            early = _early_return_before(body, lock_open, lock_end, p)
+            if early:
+                problems.append("AgentTraceRecorder.kt: %s returns before '%s' (%s) — the line "
+                                "is never built although the call sits in the lock block "
+                                "(wide4-09 family-hole)" % (name, BUILD_LINE_CALL, early))
 
     # [wide3-04] The WRITE side of the same contract. The criteria above judge
     # the readers only, so dropping the lock around `beginRun`'s three-field
@@ -843,6 +931,15 @@ def face_lock_scope(src):
                                             "'%s' — the run context the trace line carries is "
                                             "not reset per run (ROT — update this gate)" % fld)
                         for w in writes:
+                            dead = dead_guards_at(body, w)
+                            if dead:
+                                problems.append(
+                                    "AgentTraceRecorder.kt: beginRun assigns '%s' inside a dead "
+                                    "branch (%s) — the field is never updated: every run keeps "
+                                    "the previous run's context and `terminalWritten` stays "
+                                    "true, so trace_end is never written (wide4-09 尝试 4)"
+                                    % (fld, (dead[0] or "?").strip()))
+                                continue
                             if not (lock_open < w < lock_end):
                                 problems.append(
                                     "AgentTraceRecorder.kt: beginRun assigns '%s' outside "
@@ -850,6 +947,13 @@ def face_lock_scope(src):
                                     "run context (run_id from one run, session_id from the "
                                     "next) and a ts that precedes lines already appended"
                                     % (fld, LOCK_CALL))
+                                continue
+                            early = _early_return_before(body, lock_open, lock_end, w)
+                            if early:
+                                problems.append(
+                                    "AgentTraceRecorder.kt: beginRun assigns '%s' after %s — "
+                                    "the write never executes, so the run context is never "
+                                    "updated (wide4-09 尝试 4)" % (fld, early))
     return problems
 
 
@@ -863,8 +967,13 @@ def face_schema(root):
     src = open(kt, "r", encoding="utf-8", errors="replace").read()
     # [wide3-04] Comments are masked (prose must never satisfy a criterion) but
     # string literals are kept — the field NAMES live inside them.
+    # [wide4-09] The mask comes from the shared lexer; an unparsable file is a
+    # FAIL, never "judge the raw text anyway" (that is how parser-death works).
     code = mask_comments(src)
-    bodies = if_bodies(code)
+    if code is None:
+        print("  ❌ AgentTraceRecorder.kt 无法解析（引号/块注释未闭合）—— 门拒绝在残缺词法上作判断"
+              "（fail-closed，wide4-09 parser-death）")
+        return False
     missing = []
     for ty in TRACE_REQUIRED_TYPES:
         if ('"%s"' % ty) not in code:
@@ -880,9 +989,12 @@ def face_schema(root):
         # file while every tool_call loses its args; `put("args", "")` keeps the
         # path while the analyser can no longer tell VERIFY_TEST from
         # WRITE_FIX. Both used to be invisible to the substring check.
+        # [wide4-09] Reachability now also covers `if (!true)` / `if (1 == 2)` /
+        # `when (false) { … }`, and "derived value" now means "derived from a
+        # parameter or local", not merely "contains some identifier".
         live = []
         for h in hits:
-            dead = dead_guards_at(code, h, bodies)
+            dead = dead_guards_at(code, h)
             if dead:
                 missing.append("字段 put(\"%s\")只出现在恒不执行的 if 分支里（%s）—— 字段永远写不出来"
                                % (fld, (dead[0] or "?").strip()))
@@ -897,9 +1009,9 @@ def face_schema(root):
             inner = code[po + 1:pc]
             args = [inner[a:b] for a, b in split_top(inner, ",")]
             value = args[1] if len(args) > 1 else ""
-            if is_constant_expr(value):
-                missing.append("字段 put(\"%s\") 的值是常量（%s）—— 包含不了任何事件数据"
-                               % (fld, value.strip() or "<空>"))
+            why = _value_failure(value, code, h)
+            if why:
+                missing.append("字段 put(\"%s\")%s" % (fld, why))
     if missing:
         print("  ❌ 标注器依赖的 trace 契约在 Kotlin 侧缺失：%s" % ", ".join(missing))
         print("     （标注器不会报错，只会安静地数出 0 次调用 —— 本面就是拦这个）")
@@ -987,17 +1099,41 @@ def selftest():
 
     # 牙 4 [da1029-C / I09]：把 write() 的 buildLine 挪到 writeLock 外 -> 接线面红
     # [wide3-04] 夹具补齐 beginRun（写端判据）与 write 的默认参数形态（体定位判据）。
+    def out_of(fn, *a):
+        """同 `quiet`，但要拿到诊断原文（新判据的牙必须断言**是哪一条**响了）。"""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ok = fn(*a)
+        return ok, buf.getvalue()
+
+    FIELD_LINE = {
+        "live": 'put("args", x)\n',
+        # [wide4-09] 恒假分支的归一化等价形态（上一轮只挡裸 `if (false)`）
+        "dead_false": 'if (false) put("args", x)\n',
+        "dead_not_true": 'if (!true) put("args", x)\n',
+        "dead_num_eq": 'if (1 == 2) put("args", x)\n',
+        "dead_when": 'when (false) { true -> put("args", x) }\n',
+        # 常量值 → 常量包在纯函数里（数据源被换成空串）
+        "constant": 'put("args", "")\n',
+        "wrapped_constant": 'put("args", sanitize("", ARGS_MAX_LENGTH))\n',
+        # parser-death：嵌套块注释里被 Kotlin 丢弃的字段
+        "nested_comment": '/* outer /* inner */ put("args", x) */\n',
+    }
+
     def _kt(lock_scope_write, begin_locked=True, default_param=False,
-            dead_field=False, constant_field=False):
-        head = ('const val TYPE_TOOL_CALL = "tool_call"\n'
-                'const val TYPE_TOOL_RESULT = "tool_result"\n'
-                'const val TYPE_TURN_START = "turn_start"\n'
-                'const val TYPE_TURN_END = "turn_end"\n'
-                'put("tool", x)\n'
-                + ('if (false) put("args", x)\n' if dead_field
-                   else 'put("args", "")\n' if constant_field
-                   else 'put("args", x)\n')
-                + 'put("tool_id", x)\nput("success", x)\n')
+            field_shape="live", lock_field="stable", begin_shape="plain",
+            prefix=None):
+        if prefix is None:
+            prefix = ('const val TYPE_TOOL_CALL = "tool_call"\n'
+                      'const val TYPE_TOOL_RESULT = "tool_result"\n'
+                      'const val TYPE_TURN_START = "turn_start"\n'
+                      'const val TYPE_TURN_END = "turn_end"\n'
+                      + ("    private val writeLock: Any get() = Any()\n"
+                         if lock_field == "getter"
+                         else "    private val writeLock = Any()\n")
+                      + 'put("tool", x)\n'
+                      + FIELD_LINE[field_shape]
+                      + 'put("tool_id", x)\nput("success", x)\n')
         lock_open = '        synchronized(writeLock) {\n'
         append = '            runCatching { appendLine(line) }\n'
         close = '        }\n    }\n'
@@ -1022,13 +1158,23 @@ def selftest():
         begin_body = ('            activeRunId = runId\n'
                       '            activeSessionId = sessionId\n'
                       '            terminalWritten = false\n')
+        if begin_shape == "dead_branch":
+            begin_body = ('            if (false) {\n'
+                          + "".join("    " + ln + "\n" for ln in begin_body.splitlines())
+                          + '            }\n')
+        elif begin_shape == "char_literal":
+            # 精度对照：字符字面量 `'"'` 不再让扫描器吞掉后面整段真代码
+            begin_body = "            val _q = '\"'\n" + begin_body
+        inner = begin_body
+        if begin_shape == "early_return":
+            inner = '            if (true) return\n' + begin_body
         if begin_locked:
             begin = ('    fun beginRun(runId: String, sessionId: String) {\n'
-                     + lock_open + begin_body + '        }\n    }\n')
+                     + lock_open + inner + '        }\n    }\n')
         else:
             begin = ('    fun beginRun(runId: String, sessionId: String) {\n'
                      + begin_body + '    }\n')
-        return head + write_fn + terminal + begin
+        return prefix + write_fn + terminal + begin
 
     root = tempfile.mkdtemp(prefix="tst-tag-")
     kt_dir = os.path.join(root, "src", "android", "app", "src", "main", "java",
@@ -1061,12 +1207,78 @@ def selftest():
         fails.append("牙6：默认参数 lambda 里的锁被当成函数体时，接线面竟然还是绿的")
 
     # 牙 7 / 牙 8 [wide3-04]：字段存在但写不出来 —— 恒假分支 / 常量值 -> 接线面红
-    write_kt(_kt(lock_scope_write=True, dead_field=True))
+    write_kt(_kt(lock_scope_write=True, field_shape="dead_false"))
     if quiet(face_schema, root):
         fails.append("牙7：put(\"args\") 只活在 if (false) 里时，接线面竟然还是绿的")
-    write_kt(_kt(lock_scope_write=True, constant_field=True))
+    write_kt(_kt(lock_scope_write=True, field_shape="constant"))
     if quiet(face_schema, root):
         fails.append("牙8：put(\"args\", \"\") 写入常量时，接线面竟然还是绿的")
+
+    # ── wide4-09 新增臂：每条对应一条被外部见证击穿的轴 ────────────────────
+    # 牙 9（family-hole，逻辑非）：`if (!true)` 与 `if (1 == 2)` 都是恒假
+    for shape, label in (("dead_not_true", "!true"), ("dead_num_eq", "1 == 2")):
+        write_kt(_kt(lock_scope_write=True, field_shape=shape))
+        ok, out = out_of(face_schema, root)
+        if ok or "只出现在恒不执行的 if 分支里" not in out:
+            fails.append("w4牙9(%s)：恒假条件（%s）里的字段没被拦（ok=%s）" % (label, shape, ok))
+
+    # 牙 10（family-hole，when 臂）：`when (false) { true -> … }` 永远不执行
+    write_kt(_kt(lock_scope_write=True, field_shape="dead_when"))
+    ok, out = out_of(face_schema, root)
+    if ok or "只出现在恒不执行的 if 分支里" not in out:
+        fails.append("w4牙10：`when (false) { true -> put(\"args\") }` 没被拦")
+
+    # 牙 11（family-hole，数据源被常量顶替）：`sanitize("", ARGS_MAX_LENGTH)`
+    write_kt(_kt(lock_scope_write=True, field_shape="wrapped_constant"))
+    ok, out = out_of(face_schema, root)
+    if ok or '字段 put("args")' not in out:
+        fails.append("w4牙11：把数据源换成空串常量再包一层纯函数后，字段值判据没响")
+
+    # 牙 11b 精度对照：值真的派生自形参时必须绿
+    param_prefix = ('const val TYPE_TOOL_CALL = "tool_call"\n'
+                    'const val TYPE_TOOL_RESULT = "tool_result"\n'
+                    'const val TYPE_TURN_START = "turn_start"\n'
+                    'const val TYPE_TURN_END = "turn_end"\n'
+                    '    private val writeLock = Any()\n'
+                    'fun toolCall(turn: Int, toolId: String, name: String, argsJson: String) {\n'
+                    '    put("tool", name)\n'
+                    '    put("args", sanitize(argsJson, ARGS_MAX_LENGTH))\n'
+                    '    put("tool_id", toolId)\n'
+                    '    put("success", turn > 0)\n'
+                    '}\n')
+    write_kt(_kt(lock_scope_write=True, prefix=param_prefix))
+    ok, out = out_of(face_schema, root)
+    if not ok:
+        fails.append("w4牙11b 精度对照：值派生自形参时接线面竟然红了：%s" % out[-300:])
+
+    # 牙 12（family-hole，锁的身份）：`get() = Any()` 每次分配新 monitor
+    write_kt(_kt(lock_scope_write=True, lock_field="getter"))
+    ok, out = out_of(face_schema, root)
+    if ok or "writeLock is not a stable instance field" not in out:
+        fails.append("w4牙12：writeLock 被换成 `get() = Any()`（每次新锁）时没被拦")
+
+    # 牙 13（family-hole，锁内死分支）：beginRun 三行赋值包进 `if (false)`
+    write_kt(_kt(lock_scope_write=True, begin_shape="dead_branch"))
+    ok, out = out_of(face_schema, root)
+    if ok or "inside a dead branch" not in out:
+        fails.append("w4牙13：beginRun 的三行赋值被包进 if (false) 后没被拦")
+
+    # 牙 14（family-hole，恒真早退）：`if (true) return` 让赋值与 trace_start 不可达
+    write_kt(_kt(lock_scope_write=True, begin_shape="early_return"))
+    ok, out = out_of(face_schema, root)
+    if ok or "returns before" not in out and "after `return` under" not in out:
+        fails.append("w4牙14：beginRun 锁内的 `if (true) return` 没被拦：%s" % out[-300:])
+
+    # 牙 14b 精度对照：锁内出现字符字面量 `'"'` 但赋值都在锁内且可达 -> 绿
+    write_kt(_kt(lock_scope_write=True, begin_shape="char_literal"))
+    if not quiet(face_schema, root):
+        fails.append("w4牙14b 精度对照：锁内字符字面量让接线面误红")
+
+    # 牙 15（parser-death，嵌套块注释）：注释里的 put 不算写出
+    write_kt(_kt(lock_scope_write=True, field_shape="nested_comment"))
+    ok, out = out_of(face_schema, root)
+    if ok or 'put("args")' not in out:
+        fails.append("w4牙15：嵌套块注释里的 put(\"args\") 被当成活代码")
     shutil.rmtree(root, ignore_errors=True)
 
     if fails:
@@ -1077,8 +1289,12 @@ def selftest():
     print("  牙1 Kotlin 缺字段 -> 接线面红 / 牙2 空 golden -> 端到端面红 / "
           "牙3 期望翻反 -> 契约面红 / 牙4 buildLine 出锁 -> 接线面红 / "
           "牙5 beginRun 无锁 -> 接线面红 / 牙6 默认参数 lambda 冒充函数体 -> 接线面红 / "
-          "牙7 恒假分支里的字段 -> 接线面红 / 牙8 常量字段值 -> 接线面红；"
-          "各面互不连坐，正确输入下全绿")
+          "牙7 恒假分支里的字段 -> 接线面红 / 牙8 常量字段值 -> 接线面红 / "
+          "w4牙9 !true 与 1==2 -> 接线面红 / w4牙10 when(false) 臂 -> 接线面红 / "
+          "w4牙11 sanitize(\"\") 掏空数据源 -> 接线面红（牙11b 派生值精度对照绿）/ "
+          "w4牙12 writeLock get()=Any() -> 接线面红 / w4牙13 beginRun 赋值进死分支 -> 接线面红 / "
+          "w4牙14 锁内 if(true) return -> 接线面红（牙14b 锁内字符字面量精度对照绿）/ "
+          "w4牙15 嵌套块注释里的字段 -> 接线面红；各面互不连坐，正确输入下全绿")
     print("TRACE_STEP_TAG_SELFTEST=PASS")
     return 0
 
