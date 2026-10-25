@@ -38,6 +38,18 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# [meta-audit wide4] One Kotlin lexer / one constant folder for every gate.
+# The hand-rolled masker below used to be this gate's own private lexer, and it
+# was the parser-death axis: a char literal `'"'` opened a phantom string that
+# swallowed every real statement up to the next such literal, so a criterion
+# judged a body that no longer existed in the file. The shared module handles
+# nested block comments, char literals, raw strings, `${…}` templates and
+# backtick identifiers; it reports parse failure instead of guessing.
+from _kotlin_lexer import analyse as _lex_analyse  # noqa: E402
+from _kotlin_ast import const_bool as _const_bool  # noqa: E402
+
 STORE_REL = (
     "src/android/app/src/main/java/com/rikkaminis/app/scheduled/ScheduledTasksStore.kt"
 )
@@ -175,6 +187,8 @@ def scan_edit_screen_guards(screen_raw):
     that can never enable, and an inverted window must be visible on the form,
     not only as a silently disabled button."""
     scan = strip_code(screen_raw)
+    if scan is None:
+        return [_unlexable(EDIT_SCREEN_REL)]
     bad = []
 
     # Subject anchor: the id-keyed load. If the spelling changed, ROT loudly.
@@ -316,11 +330,87 @@ def copy_arg_names(body):
     return names
 
 
+DISCARD_LAMBDAS = {
+    "also", "let", "apply", "run", "map", "flatMap", "filter", "filterNot",
+    "forEach", "onEach", "takeIf", "takeUnless", "ifEmpty", "getOrElse", "use",
+    "mapNotNull", "sortedBy", "distinctBy", "repeat", "letOrNull",
+}
+
+
+def _enclosing_brace(text, pos):
+    """Index of the `{` opening the block that contains [pos], or -1."""
+    depth = 0
+    for k in range(pos, -1, -1):
+        ch = text[k]
+        if ch == "}":
+            depth += 1
+        elif ch == "{":
+            if depth == 0:
+                return k
+            depth -= 1
+    return -1
+
+
+def _lambda_head_name(text, brace):
+    """Name of the function whose trailing lambda starts at [brace], or None."""
+    j = brace - 1
+    while j >= 0 and text[j] in " \t\r\n":
+        j -= 1
+    if j < 0:
+        return None
+    if text[j] == ")":
+        depth = 0
+        k = j
+        while k >= 0:
+            if text[k] == ")":
+                depth += 1
+            elif text[k] == "(":
+                depth -= 1
+                if depth == 0:
+                    break
+            k -= 1
+        if k < 0:
+            return None
+        head_end = k
+    else:
+        head_end = j + 1
+    m = re.search(r"([A-Za-z_]\w*)\s*$", text[max(0, head_end - 80):head_end])
+    return m.group(1) if m else None
+
+
+def _result_discarded(body, pos):
+    """True when the value produced at [pos] is swallowed by a receiver lambda.
+
+    [meta-audit wide4 scheduled-S1] `mutate(context) { … }.also { … }` returns the
+    RECEIVER, not the lambda's value — a merge call placed inside `.also { }`
+    runs (or, behind `if (false)`, does not) and its result never reaches the
+    store. Same for `.let { null }`, `.map { }`, `.forEach { }`: the call is
+    present, the decision it embodies is thrown away.
+    """
+    brace = _enclosing_brace(body, pos)
+    if brace < 0:
+        return False
+    name = _lambda_head_name(body, brace)
+    if name not in DISCARD_LAMBDAS:
+        return False
+    head = body.rfind(name, 0, brace)
+    if head < 0:
+        return False
+    before = body[:head].rstrip()
+    return before.endswith(".") or before.endswith("?.")
+
+
 def scan_merge_semantics(store_raw, merge_raw):
     """S1 — an editor save must not be able to speak about run state.
 
     None = not applicable (this tree has no `upsertTask`)."""
     scan = strip_code(store_raw)
+    if scan is None:
+        return [_unlexable(STORE_REL)]
+    # Literal-decided branches are blanked BEFORE the routing check: keeping the
+    # call's spelling while deleting its effect (`if (false) mergeUpsertTask(…)`)
+    # is the same family as `!true && guard` — presence is not routing.
+    scan = prune_dead_branches(scan)
     upsert = None
     for name, start, end, line in function_spans(scan):
         if name == "upsertTask":
@@ -329,12 +419,27 @@ def scan_merge_semantics(store_raw, merge_raw):
         return None
     body, line = upsert
     bad = []
-    if MERGE_CALL not in body:
-        bad.append(
-            "%s:%d: [upsertTask] no longer routes through %s — a whole-record write lets a save "
-            "erase any run that settled while the editor was open (the run state lives in the "
-            "same record as the spec)" % (STORE_REL, line, MERGE_CALL.rstrip("("))
-        )
+    routed = [
+        m.start() for m in re.finditer(re.escape(MERGE_CALL), body)
+        if not _result_discarded(body, m.start())
+    ]
+    if not routed:
+        if MERGE_CALL in body:
+            bad.append(
+                "%s:%d: [upsertTask] no longer routes through ScheduledTaskTransitions."
+                "mergeUpsertTask — the call survives only inside a receiver lambda "
+                "(`.also` / `.let` / `.map` …) or a literal-decided branch, where its "
+                "result is discarded: a whole-record write lets a save erase any run "
+                "that settled while the editor was open"
+                % (STORE_REL, line)
+            )
+        else:
+            bad.append(
+                "%s:%d: [upsertTask] no longer routes through ScheduledTaskTransitions."
+                "mergeUpsertTask — a whole-record write lets a save erase any run that "
+                "settled while the editor was open (the run state lives in the same "
+                "record as the spec)" % (STORE_REL, line)
+            )
     if WHOLE_RECORD_ASSIGN.search(body):
         bad.append(
             "%s:%d: [upsertTask] writes the caller's whole record (`it[idx] = task`) — run state "
@@ -351,6 +456,8 @@ def scan_merge_semantics(store_raw, merge_raw):
         return bad
 
     scan_merge = strip_code(merge_raw)
+    if scan_merge is None:
+        return bad + [_unlexable("the `mergeUpsertTask` source")]
     merge_body = None
     for name, start, end, _line in function_spans(scan_merge):
         if name == "mergeUpsertTask":
@@ -379,6 +486,8 @@ def scan_merge_semantics(store_raw, merge_raw):
 def scan_can_save_gate(screen_raw):
     """S2 — Save must wait for the stored record before it may write over it."""
     scan = strip_code(screen_raw)
+    if scan is None:
+        return [_unlexable(EDIT_SCREEN_REL)]
     m = CAN_SAVE_RE.search(scan)
     if m is None:
         return [
@@ -410,8 +519,10 @@ def find_merge_source(root):
                     text = f.read()
             except OSError:
                 continue
-            if MERGE_FUN in strip_code(text):
-                return os.path.relpath(path, root), text
+            masked = strip_code(text)
+            if masked is None or MERGE_FUN not in masked:
+                continue
+            return os.path.relpath(path, root), text
     return None, None
 
 
@@ -494,6 +605,8 @@ def _brace_body(scan, idx):
 def _state_flow_name(store_raw):
     """(backing_field_name, exposed_property_name) of the store's change ticker."""
     scan = strip_code(store_raw)
+    if scan is None:
+        return None, None
     backing = re.search(r"private +val +_(\w+) *= *MutableStateFlow *[<(]", scan)
     if backing is None:
         return None, None
@@ -517,6 +630,8 @@ def scan_revision_stream(store_raw):
     to re-read a document that never changed — and a retry loop re-renders for
     nothing). Order is therefore part of the criterion, not a style note."""
     scan = strip_code(store_raw)
+    if scan is None:
+        return [_unlexable(STORE_REL)]
     writes = [m.start() for m in WRITE_CALL_RE.finditer(scan)]
     if not writes:
         # A store-shaped fixture that never writes (the removal-path fixtures in
@@ -638,6 +753,8 @@ def scan_list_screen_keys(store_raw, list_raw):
             "%s: the store exposes no StateFlow change ticker to key on" % STORE_REL
         ]
     scan = strip_code(list_raw)
+    if scan is None:
+        return [_unlexable(LIST_SCREEN_REL)]
     var = _collect_var(scan, flow)
     if var is None:
         return [
@@ -680,6 +797,8 @@ def scan_edit_screen_revision(store_raw, edit_raw):
     if flow is None:
         return ["%s: the store exposes no StateFlow change ticker to follow" % STORE_REL]
     scan = strip_code(edit_raw)
+    if scan is None:
+        return [_unlexable(EDIT_SCREEN_REL)]
     var = _collect_var(scan, flow)
     if var is None:
         return [
@@ -737,7 +856,10 @@ def scan_merge_insert_guard(policy_raw):
     records together with the form's stale run state."""
     # Literal-decided branches are blanked first: a `if (false && !allowInsert)`
     # keeps the parameter AND the `return file` in the block (wide3 C4).
-    scan = prune_dead_branches(strip_code(policy_raw))
+    masked_policy = strip_code(policy_raw)
+    if masked_policy is None:
+        return [_unlexable(POLICY_REL)]
+    scan = prune_dead_branches(masked_policy)
     pre = []
     # The mirror case: a condition that folds to TRUE (`!allowInsert || true`)
     # keeps the refusal and the parameter, but the refusal is now unconditional —
@@ -978,6 +1100,21 @@ def selftest_revision():
                 "_revision.value, wrote)\n",
                 "        if (wrote) _revision.value = _revision.value + 1\n"),
         ], scan_revision_stream, 0],
+        # ── [meta-audit wide4 scheduled-C1] the `=` tail must not accept any
+        # expression that merely MENTIONS the backing field ──
+        ["w4-revision/`+ 0L` never moves the ticker", [
+            clean_store.replace(
+                "        _revision.value = ScheduledTaskRevisionPolicy.nextRevision("
+                "_revision.value, wrote)\n",
+                "        _revision.value = _revision.value + 0L\n"),
+        ], scan_revision_stream, 1],
+        ["w4-revision/dead arm carries the only step", [
+            clean_store.replace(
+                "        _revision.value = ScheduledTaskRevisionPolicy.nextRevision("
+                "_revision.value, wrote)\n",
+                "        _revision.value = if (false) _revision.value + 1L "
+                "else _revision.value\n"),
+        ], scan_revision_stream, 1],
         ["merge/clean", [clean_policy], scan_merge_insert_guard, 0],
         # ── [meta-audit wide3 scheduled-C4] dead insert guard ──
         ["merge/insert guard short-circuited by `false &&`", [
@@ -1218,13 +1355,103 @@ def selftest():
              "        ScheduledTaskRunner.onTasksRemoved(removedTaskIds = setOf(taskId))\n",
              "        val gone = setOf(taskId)\n"
              "        ScheduledTaskRunner.onTasksRemoved(removedTaskIds = gone)\n"), 0),
+        # ── [meta-audit wide4 scheduled-PRESENCE] the set may be emptied by a
+        # chain or a literal-decided `if` while the id stays in the spelling ──
+        ("w4-release/chained filter empties the removal set",
+         clean_rel_store.replace(
+             "setOf(taskId)", "setOf(taskId).filter { false }.toSet()"), 1),
+        ("w4-release/.takeIf(false) empties the removal set",
+         clean_rel_store.replace(
+             "setOf(taskId)", "setOf(taskId).takeIf { false } ?: emptySet()"), 1),
+        ("w4-release/literal-decided inline if picks the empty arm",
+         clean_rel_store.replace(
+             "setOf(taskId)", "if (false) setOf(taskId) else emptySet()"), 1),
+        ("w4-release/id difference of two documents (green)",
+         clean_rel_store.replace(
+             "        ScheduledTaskRunner.onTasksRemoved(removedTaskIds = setOf(taskId))\n",
+             "        val beforeIds = before.tasks.map { it.id }\n"
+             "        val afterIds = next.tasks.map { it.id }\n"
+             "        ScheduledTaskRunner.onTasksRemoved("
+             "removedTaskIds = (beforeIds - afterIds).toSet())\n"), 0),
     ):
-        _fns, bad = check_removals(strip_code(src))
+        masked_src = strip_code(src)
+        assert masked_src is not None, "selftest fixture must lex"
+        _fns, bad = check_removals(masked_src)
         ok = (len(bad) == want) and (not bad or any("removal set" in b for b in bad))
         print(f"  {'✅' if ok else '❌'} {nm} → {len(bad)} violation(s), expected {want}"
               + ("" if ok else ": " + "; ".join(bad)[:150]))
         if not ok:
             failures += 1
+    # ── [meta-audit wide4] family-hole / parser-death / dataflow arms ──
+    w4_clean_policy = (
+        "object ScheduledTaskTransitions {\n"
+        "    fun mergeUpsertTask(file: Any, task: Any, allowInsert: Boolean = true): Any {\n"
+        "        val idx = file.tasks.indexOfFirst { it.id == task.id }\n"
+        "        if (idx < 0) {\n"
+        "            if (!allowInsert) return file\n"
+        "            return file.copy(tasks = file.tasks + task)\n"
+        "        }\n"
+        "        return file\n"
+        "    }\n"
+        "}\n"
+    )
+    MERGE_LINE = ("        mutate(context) { file -> "
+                  "ScheduledTaskTransitions.mergeUpsertTask(file, task) }")
+    w4_store_live_merge = clean_store.replace(
+        MERGE_LINE,
+        "        mutate(context) { file -> file.copy(tasks = file.tasks.map { task }) }"
+        ".also { ScheduledTaskTransitions.mergeUpsertTask(it, task) }")
+    w4_store_dead_merge = clean_store.replace(
+        MERGE_LINE,
+        "        mutate(context) { file -> file.copy(tasks = file.tasks.map { task }) }"
+        ".also { if (false) ScheduledTaskTransitions.mergeUpsertTask(it, task) }")
+    w4_store_unlexable = clean_store.replace(
+        "object ScheduledTasksStore {",
+        'object ScheduledTasksStore {\n    private val broken = "unterminated\n')
+    w4_merge_char_literal = clean_merge.replace(
+        "        return file.copy(tasks = file.tasks.toMutableList().also { it[idx] = merged })\n",
+        "        val _open = '\"'; val overwritten = merged.copy(enabled = task.enabled); "
+        "val _close = '\"'\n"
+        "        return file.copy(tasks = file.tasks.toMutableList().also "
+        "{ it[idx] = overwritten })\n")
+    w4_cases = [
+        # (name, args, scanner, expected_violation_count, message fragment)
+        ("w4-store/merge call swallowed by a live `.also` tail",
+         (w4_store_live_merge, clean_merge), scan_merge_semantics, 1,
+         "no longer routes through ScheduledTaskTransitions.mergeUpsertTask"),
+        ("w4-store/merge call kept only behind a dead `if`",
+         (w4_store_dead_merge, clean_merge), scan_merge_semantics, 1,
+         "no longer routes through ScheduledTaskTransitions.mergeUpsertTask"),
+        ("w4-store/store the lexer cannot parse is refused (fail-closed)",
+         (w4_store_unlexable, clean_merge), scan_merge_semantics, 1,
+         "cannot mask this file"),
+        ("w4-lex/char literal no longer hides the spliced `copy(enabled=…)`",
+         (clean_store, w4_merge_char_literal), scan_merge_semantics, 1,
+         "copies `enabled`"),
+        ("w4-merge/insert guard `!true &&` is a dead guard",
+         (w4_clean_policy.replace(
+             "            if (!allowInsert) return file\n",
+             "            if (!true && !allowInsert) return file\n"),),
+         scan_merge_insert_guard, 1, "allow-insert parameter"),
+        ("w4-merge/insert guard `!false ||` is constant-true",
+         (w4_clean_policy.replace(
+             "            if (!allowInsert) return file\n",
+             "            if (!false || !allowInsert) return file\n"),),
+         scan_merge_insert_guard, 1, "never decides"),
+        ("w4-merge/insert guard `0 == 1 &&` is a dead guard",
+         (w4_clean_policy.replace(
+             "            if (!allowInsert) return file\n",
+             "            if (0 == 1 && !allowInsert) return file\n"),),
+         scan_merge_insert_guard, 1, "allow-insert parameter"),
+    ]
+    for nm, args, scan_fn, want, frag in w4_cases:
+        bad = scan_fn(*args)
+        ok = len(bad) == want and (not frag or any(frag in b for b in bad))
+        print(f"  {'✅' if ok else '❌'} {nm} → {len(bad)} violation(s), expected {want}"
+              + ("" if ok else ": " + "; ".join(bad)[:150]))
+        if not ok:
+            failures += 1
+            merge_failures += 1
     for name, fixture, scan in cases:
         args = fixture if isinstance(fixture, tuple) else (fixture,)
         bad = scan(*args)
@@ -1246,55 +1473,42 @@ def selftest():
     return 1 if (failures or revision_failures) else 0
 
 
+UNLEXABLE = (
+    "%s: the shared Kotlin lexer cannot mask this file (%s) — the gate refuses to "
+    "judge a half-masked text: a parser it does not steer is a body it cannot see, "
+    "and every criterion below would be reading blanked-out code (fail-closed)"
+)
+
+_LEX_ERROR = [""]
+
+
+def _unlexable(rel):
+    return UNLEXABLE % (rel, _LEX_ERROR[0] or "unparsable")
+
+
 def strip_code(src):
-    """Blank out comments and string literals, preserving offsets and newlines."""
-    out = list(src)
-    i = 0
-    n = len(src)
-    while i < n:
-        c = src[i]
-        if c == "/" and i + 1 < n and src[i + 1] == "/":
-            while i < n and src[i] != "\n":
-                out[i] = " "
-                i += 1
-        elif c == "/" and i + 1 < n and src[i + 1] == "*":
-            while i < n and not (src[i] == "*" and i + 1 < n and src[i + 1] == "/"):
-                if src[i] != "\n":
-                    out[i] = " "
-                i += 1
-            for _ in range(2):
-                if i < n and src[i] != "\n":
-                    out[i] = " "
-                i += 1
-        elif c == '"':
-            if src[i:i + 3] == '"""':
-                for k in range(3):
-                    out[i + k] = " "
-                i += 3
-                while i < n and src[i:i + 3] != '"""':
-                    if src[i] != "\n":
-                        out[i] = " "
-                    i += 1
-                for _ in range(3):
-                    if i < n and src[i] != "\n":
-                        out[i] = " "
-                    i += 1
-            else:
-                out[i] = " "
-                i += 1
-                while i < n and src[i] != '"':
-                    if src[i] == "\\":
-                        out[i] = " "
-                        i += 1
-                    if i < n and src[i] != "\n":
-                        out[i] = " "
-                    i += 1
-                if i < n:
-                    out[i] = " "
-                    i += 1
-        else:
-            i += 1
-    return "".join(out)
+    """Comment/string mask of [src] from the shared Kotlin lexer.
+
+    Offsets and newlines are preserved (every caller slices by index), comments
+    and string/char CONTENTS are blanked. Returns None when the lexer cannot
+    parse the text — callers MUST treat that as a violation, never as "nothing
+    to see": silently returning the raw text (or an empty string) is exactly how
+    the parser-death axis walked a broken file past the gate.
+
+    [meta-audit wide4 scheduled-S1] This function used to be a hand-rolled
+    state machine that knew `//`, `/* */`, `\"\"\"` and `"` — and nothing else.
+    Two char literals `'"'` therefore opened and closed a phantom STRING that
+    hid every statement between them, so `copy(enabled = task.enabled)` spliced
+    in behind such a literal was invisible to `copy_arg_names` while the gate
+    printed green. A masker is not a place to be clever; it is a place to have
+    exactly one implementation.
+    """
+    ok, reason, views = _lex_analyse(src)
+    if not ok:
+        _LEX_ERROR[0] = reason
+        return None
+    return views["code"]
+
 
 
 def line_of(src, idx):
@@ -1355,6 +1569,18 @@ def fold_bool(expr):
     return file` keeps both `allowInsert` and `return file` in the branch while
     removing the decision, so an editor save for a task deleted meanwhile
     resurrected the record — the exact defect the criterion was written for.
+
+    [meta-audit wide4 scheduled-C4] The local folder handled `||`, `&&`, parens
+    and bare `true`/`false` — and NOT `!`, so `!true && !allowInsert` folded to
+    None, the dead branch was never blanked and the guard read green.
+
+    Leaves are folded by the shared `const_bool` (unary `!`, `0 == 1`, `1 == 1`,
+    constant string equality), but the SPLIT stays here: the shared folder tries
+    a leading `!` before it splits top-level operators, so `!true && !allowInsert`
+    would be read as `!(true && !allowInsert)` — right operand precedence. `!`
+    binds tighter than `&&` in Kotlin, so `&&` / `||` are split first and only
+    the leaves go to the shared folder. (Registered in the report: the shared
+    module is frozen for this wave.)
     """
     e = _strip_outer_parens(expr)
     if not e:
@@ -1375,11 +1601,7 @@ def fold_bool(expr):
         if all(v is True for v in vals):
             return True
         return None
-    if e == "true":
-        return True
-    if e == "false":
-        return False
-    return None
+    return _const_bool(e)
 
 
 def _match_brace(scan, open_idx):
@@ -1440,16 +1662,26 @@ def prune_dead_branches(scan):
             while k < len(out) and out[k] in " \t\r\n":
                 k += 1
             if val is False:
-                dead = (then_start, then_end)
+                # Blank the HEADER as well as the dead branch. Leaving
+                # `if (literal-false)` in place made the next round treat the
+                # statement AFTER the (now empty) branch as the dead body, so one
+                # dead guard ate its way down the rest of the function — which
+                # silently deleted the very `return file.copy(tasks = …)` the
+                # insert criterion has to look at.
+                dead = [(m.start(), close_paren + 1), (then_start, then_end)]
+                if out.startswith("else", k):
+                    dead.append((k, k + 4))  # the live arm stays, the keyword goes
             elif out.startswith("else", k):
-                dead = (k + 4, _stmt_span(out, k + 4))
+                dead = [(m.start(), close_paren + 1), (k, _stmt_span(out, k + 4))]
             else:
                 continue
-            seg = out[dead[0]:dead[1]]
-            blanked = "".join(ch if ch == "\n" else " " for ch in seg)
-            if seg != blanked:
-                out = out[:dead[0]] + blanked + out[dead[1]:]
-                changed = True
+            for start_at, end_at in dead:
+                seg = out[start_at:end_at]
+                blanked = "".join(ch if ch == "\n" else " " for ch in seg)
+                if seg != blanked:
+                    out = out[:start_at] + blanked + out[end_at:]
+                    changed = True
+            if changed:
                 break
         if not changed:
             break
@@ -1598,9 +1830,31 @@ def bump_stalls(scan, backing, bump_idx):
     if re.fullmatch(r"-?\d+L?|0L|true|false|null|\"\"", rhs):
         return ("the ticker is assigned the constant %s — it emits once and never "
                 "again, so later changes are invisible" % rhs)
-    if "_%s" % backing in rhs:
-        return None
-    if re.search(r"\bnextRevision\s*\(", rhs):
+    # [meta-audit wide4 scheduled-C1] The old tail was
+    #   if "_%s" in rhs: return None        # ← wide-open: `_revision.value + 0L`
+    #   if nextRevision( in rhs: return None
+    # so ANY expression that merely MENTIONED the backing field counted as a
+    # bump, and `_revision.value = _revision.value + 0L` (or a dead
+    # `if (false) … + 1L else _revision.value`) left the StateFlow emitting
+    # nothing while the gate reported a live ticker. Replaced by a positive
+    # whitelist: the RHS must either feed the current value INTO nextRevision(…)
+    # or add a NON-ZERO step to it.
+    ref = re.compile(r"_%s\s*\.\s*value\b" % re.escape(backing))
+    call = re.search(r"\bnextRevision\s*\(", rhs)
+    if call:
+        open_at = rhs.find("(", call.start())
+        args = _paren_args(rhs, open_at) if open_at >= 0 else None
+        if args is not None and ref.search(args):
+            return None
+        return ("the ticker is assigned a nextRevision(…) call that never reads "
+                "`_%s.value` — the counter cannot be shown to move" % backing)
+    step = re.fullmatch(
+        r"_%s\s*\.\s*value\s*([+-])\s*(\d+)L?" % re.escape(backing), rhs)
+    if step:
+        if int(step.group(2)) == 0:
+            return ("_%s.value %s 0 never changes the value — a StateFlow is "
+                    "distinctUntilChanged, so no screen is notified"
+                    % (backing, step.group(1)))
         return None
     # RHS is a local: it only counts when that local holds nextRevision(…)
     ident = re.match(r"^([A-Za-z_]\w*)$", rhs)
@@ -1639,6 +1893,32 @@ RELEASE_ARG_BUILDERS = {
     "hashSetOf", "linkedSetOf", "sortedSetOf", "removedTaskIds", "arrayListOf",
 }
 NULL_SET_SPELLINGS = {"null", "nullSet"}
+
+# [meta-audit wide4 scheduled-PRESENCE] Chain calls that can hand back FEWER
+# elements than they were given — i.e. that can turn `setOf(taskId)` into an
+# empty set without ever looking like `emptySet()`. `toSet()` / `toList()` /
+# `sorted()` are absent on purpose: they cannot drop ids.
+EMPTYING_CHAINS = {
+    "filter", "filterNot", "takeIf", "takeUnless", "take", "takeWhile", "drop",
+    "dropWhile", "dropLast", "minus", "subtract", "intersect", "distinct",
+    "distinctBy", "map", "mapNotNull", "mapNotNullTo", "let", "run", "also",
+    "apply", "ifEmpty", "orEmpty", "remove", "removeAll", "retainAll",
+}
+
+
+def _paren_close(text, open_at):
+    """Index of the `)` matching the `(` at [open_at], or None."""
+    if open_at < 0 or open_at >= len(text) or text[open_at] != "(":
+        return None
+    depth = 0
+    for k in range(open_at, len(text)):
+        if text[k] == "(":
+            depth += 1
+        elif text[k] == ")":
+            depth -= 1
+            if depth == 0:
+                return k
+    return None
 
 
 def check_release_argument(scan, body, call_off):
@@ -1679,10 +1959,38 @@ def check_release_argument(scan, body, call_off):
     if arg in NULL_SET_SPELLINGS:
         return None
     squashed = " ".join(arg.split())
-    if re.fullmatch(r"(?:%s)\s*\(\s*\)" % "|".join(sorted(RELEASE_ARG_BUILDERS - {"removedTaskIds"})),
-                    squashed):
+    if re.fullmatch(
+            r"(?:%s)\s*(?:<[^<>]*>)?\s*\(\s*\)"
+            % "|".join(sorted(RELEASE_ARG_BUILDERS - {"removedTaskIds"})), squashed):
         return ("passes %s — an empty removal set releases nothing, which is exactly "
                 "the deleted-task lock leak this criterion exists for" % squashed)
+    # [meta-audit wide4 scheduled-PRESENCE] The set can be emptied by a CHAIN that
+    # leaves the builder call and the id in the spelling:
+    #   setOf(taskId).filter { false }.toSet()   /  .takeIf { false }  /  .minus(taskId)
+    # The old criterion compared identifier sets, saw `taskId` in the argument and
+    # in the body, and passed — while the runner received an empty set and kept
+    # `runningTaskId`, so every other due task degraded to `overlap` for ~30 min.
+    # A removal set is allowed to be a builder call, a local, or a difference of
+    # two id collections; it is NOT allowed to be anything that can filter away
+    # the ids it just took.
+    for cm in re.finditer(r"\??\.\s*([A-Za-z_]\w*)\s*[({]", squashed):
+        if cm.group(1) in EMPTYING_CHAINS:
+            return ("passes %s — the `.%s` chain can empty the set while keeping the "
+                    "removed id in the spelling, so the runner may be told about a "
+                    "removal that carries nothing" % (squashed, cm.group(1)))
+    # Same family, expression form: `if (false) setOf(taskId) else emptySet()`
+    # keeps the id AND the builder in the argument; only the live arm matters.
+    for im in re.finditer(r"\bif\s*\(", squashed):
+        open_at = squashed.find("(", im.start())
+        close_at = _paren_close(squashed, open_at)
+        if close_at is None:
+            continue
+        cond = squashed[open_at + 1:close_at]
+        if _const_bool(cond) is not None:
+            return ("passes %s — the removal set is picked by a literal-decided "
+                    "condition (`if (%s) …`), so one arm is dead code and the live "
+                    "one may carry no removed id at all"
+                    % (squashed, " ".join(cond.split())))
     idents = {
         t for t in re.findall(r"[A-Za-z_]\w*", squashed)
         if t not in RELEASE_ARG_BUILDERS
@@ -1762,6 +2070,10 @@ def main():
 
     src = open(path, encoding="utf-8").read()
     scan = strip_code(src)
+    if scan is None:
+        print(_unlexable(STORE_REL))
+        print("\n1 violation(s).")
+        return 1
     spans = function_spans(scan)
 
     removal_fns, removal_findings = check_removals(scan)
