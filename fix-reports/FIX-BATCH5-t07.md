@@ -154,6 +154,7 @@ replace:  "customUserAgent" to (inst.customUserAgent?.let { ConfigValue.Str("") 
 | W3 wrapper | "调用文本"子串（含字符串） | `mask_code` 视图 + `call_args` 取第二实参 + `value_sources` 求来源，必须含 `_memoryEnabled`（字符串字面量进不了视图，`true` 常量/纯字面量被 `value_sources` 拆出来）。 |
 | W4 add 首参 | 实参文本含 `obj["customUserAgent"]` | `value_sources(实参)`（在保留字符串的视图上解析，位置与结构视图对齐）+ 去纯字面量 + `PAYLOAD_UA` 必须在**活来源**里（`null.also{…}` 剥成 `null` ⇒ 红）；另加 `as? X` 类型必须是 `ConfigValue.Str`（类型不匹配静默为 null 的另一形态）。 |
 | W5 守卫 | 条件形态 + 逃逸面字符串 | `if_blocks` 取守卫 then 分支区间，要求块内出现 `throw` 或**非标签 return**；`Unit` ⇒ 红（釜底抽薪：条件写得再对，块体不终止就是放行）。 |
+| 自测装置 | 臂只断言"红了/没红" | 每条负向臂追加**期望消息子串**（`landed = any(expected in v)`）：撞到别的判据 = 假臂 = FAIL。"摔对了地方"才算抓 |
 | W6 投影 | `UA_SUMMARY` 前缀在册 | `PROJ_RE` 精确到 `ConfigValue.Str(` 的实参（`call_args`），实参不得是纯字面量、且必须承载 `it` / `inst.customUserAgent` ⇒ `ConfigValue.Str("")` 红。 |
 
 **共享层不改**：本波发现 `_kotlin_valueflow.value_sources` 对 `if (c) A else B` **不分叉**（`rest` 以 `then` 开头时永远匹配不到 `else`，整体返回全表达式）——本波在门内用 `if_blocks` + `const_bool` 先折叠分支再调 `value_sources` 绕过，**共享层的修法交由主会话**（见 §6 R1）。
@@ -172,6 +173,7 @@ memory_gate_provider_fields_check: clean                              # rc=0
 $ python3 scripts/scan/memory_gate_provider_fields_check.py --selftest
 MEMORY_GATE_PROVIDER_FIELDS_SELFTEST=PASS (19 arms)                   # 12 → 19
 ```
+两门自测都是**臂身份断言**（`model` 判 arm id，`memory` 判违规消息子串）：一条夹具撞到别的判据 = 假臂 = FAIL，而不是"红了就算过"。
 新增臂（每臂 = 一条见证的负向夹具，断言"恰好红在该臂"）：`me-dead-guard-not-true` / `ob-early-return-not-false` / `ob-dead-merge-prefix` / `pr-funnel-discards-tail` / `asr-resolved-discards-tail` / `rollup return@let` / `gate helper always null` / `wrapper string anchor` / `add discard-scope UA` / `add wrong cast` / `writer Unit body` / `summary projects empty Str`。
 
 ### L2 — 邻门（12 道，逐门直跑，全 rc=0）

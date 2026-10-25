@@ -761,26 +761,46 @@ def _fixture(check_fn, executors, prompt, collection, builtins):
 
 
 SELFTEST_ARMS = [
-    # (label, executors, prompt, collection, builtins, must_trip)
-    ("compliant tree", GOOD_GATE, GOOD_WRAPPER, None, GOOD_SUMMARY, False),
-    ("rollup w/o gate", BAD_ROLLUP_NO_GATE, GOOD_WRAPPER, None, GOOD_SUMMARY, True),
-    ("rollup isWrite flipped", BAD_ROLLUP_ISWRITE_FLIP, GOOD_WRAPPER, None, GOOD_SUMMARY, True),
-    ("rollup return@let", BAD_ROLLUP_RETURN_LABEL, GOOD_WRAPPER, None, GOOD_SUMMARY, True),
-    ("rollup built-not-returned", BAD_ROLLUP_NO_RETURN, GOOD_WRAPPER, None, GOOD_SUMMARY, True),
-    ("gate helper always null", BAD_HELPER_ALWAYS_NULL, GOOD_WRAPPER, None, GOOD_SUMMARY, True),
-    ("wrapper w/o gate value", GOOD_GATE, BAD_WRAPPER_NO_VALUE, None, GOOD_SUMMARY, True),
-    ("wrapper string anchor", GOOD_GATE, BAD_WRAPPER_STRING_ANCHOR, None, GOOD_SUMMARY, True),
-    ("add w/o customUserAgent", GOOD_GATE, GOOD_WRAPPER, "NO_UA", GOOD_SUMMARY, True),
-    ("add fed null", GOOD_GATE, GOOD_WRAPPER, "NULL_UA", GOOD_SUMMARY, True),
-    ("add discard-scope UA", GOOD_GATE, GOOD_WRAPPER, "DISCARD_UA", GOOD_SUMMARY, True),
-    ("add wrong cast", GOOD_GATE, GOOD_WRAPPER, "WRONG_CAST_UA", GOOD_SUMMARY, True),
-    ("writer inline rule", GOOD_GATE, GOOD_WRAPPER, "INLINE_RULE", GOOD_SUMMARY, True),
-    ("writer Unit body", GOOD_GATE, GOOD_WRAPPER, "UNIT_BODY", GOOD_SUMMARY, True),
-    ("writer polarity flipped", GOOD_GATE, GOOD_WRAPPER, "POLARITY", GOOD_SUMMARY, True),
-    ("shared rule missing", GOOD_GATE, GOOD_WRAPPER, "NO_RULE", GOOD_SUMMARY, True),
-    ("summary w/o customUserAgent", GOOD_GATE, GOOD_WRAPPER, None, BAD_SUMMARY_NO_UA, True),
-    ("summary projects Null", GOOD_GATE, GOOD_WRAPPER, None, BAD_SUMMARY_NULL_VALUE, True),
-    ("summary projects empty Str", GOOD_GATE, GOOD_WRAPPER, None, BAD_SUMMARY_EMPTY_VALUE, True),
+    # (label, executors, prompt, collection, builtins, must_trip, expected message)
+    # `expected` is the substring of the criterion the arm must land on: a fixture
+    # that trips a DIFFERENT criterion is a false arm, not a pass.
+    ("compliant tree", GOOD_GATE, GOOD_WRAPPER, None, GOOD_SUMMARY, False, None),
+    ("rollup w/o gate", BAD_ROLLUP_NO_GATE, GOOD_WRAPPER, None, GOOD_SUMMARY, True,
+     "does not consult"),
+    ("rollup isWrite flipped", BAD_ROLLUP_ISWRITE_FLIP, GOOD_WRAPPER, None, GOOD_SUMMARY, True,
+     "must keep `isWrite = false`"),
+    ("rollup return@let", BAD_ROLLUP_RETURN_LABEL, GOOD_WRAPPER, None, GOOD_SUMMARY, True,
+     "only leaves the lambda"),
+    ("rollup built-not-returned", BAD_ROLLUP_NO_RETURN, GOOD_WRAPPER, None, GOOD_SUMMARY, True,
+     "only leaves the lambda"),
+    ("gate helper always null", BAD_HELPER_ALWAYS_NULL, GOOD_WRAPPER, None, GOOD_SUMMARY, True,
+     "is ALWAYS taken"),
+    ("wrapper w/o gate value", GOOD_GATE, BAD_WRAPPER_NO_VALUE, None, GOOD_SUMMARY, True,
+     "cannot reach the gate"),
+    ("wrapper string anchor", GOOD_GATE, BAD_WRAPPER_STRING_ANCHOR, None, GOOD_SUMMARY, True,
+     "the wrapper forwards `true`"),
+    ("add w/o customUserAgent", GOOD_GATE, GOOD_WRAPPER, "NO_UA", GOOD_SUMMARY, True,
+     "does not carry"),
+    ("add fed null", GOOD_GATE, GOOD_WRAPPER, "NULL_UA", GOOD_SUMMARY, True,
+     "does not (really) read the payload"),
+    ("add discard-scope UA", GOOD_GATE, GOOD_WRAPPER, "DISCARD_UA", GOOD_SUMMARY, True,
+     "does not (really) read the payload"),
+    ("add wrong cast", GOOD_GATE, GOOD_WRAPPER, "WRONG_CAST_UA", GOOD_SUMMARY, True,
+     "is read as `as? ConfigValue.Int`"),
+    ("writer inline rule", GOOD_GATE, GOOD_WRAPPER, "INLINE_RULE", GOOD_SUMMARY, True,
+     "must guard with"),
+    ("writer Unit body", GOOD_GATE, GOOD_WRAPPER, "UNIT_BODY", GOOD_SUMMARY, True,
+     "does not terminate"),
+    ("writer polarity flipped", GOOD_GATE, GOOD_WRAPPER, "POLARITY", GOOD_SUMMARY, True,
+     "must guard with"),
+    ("shared rule missing", GOOD_GATE, GOOD_WRAPPER, "NO_RULE", GOOD_SUMMARY, True,
+     "shared UA predicate"),
+    ("summary w/o customUserAgent", GOOD_GATE, GOOD_WRAPPER, None, BAD_SUMMARY_NO_UA, True,
+     "no longer projects"),
+    ("summary projects Null", GOOD_GATE, GOOD_WRAPPER, None, BAD_SUMMARY_NULL_VALUE, True,
+     "is not `inst.customUserAgent"),
+    ("summary projects empty Str", GOOD_GATE, GOOD_WRAPPER, None, BAD_SUMMARY_EMPTY_VALUE, True,
+     'projects `ConfigValue.Str("")`'),
 ]
 
 COLLECTION_VARIANTS = {
@@ -798,18 +818,20 @@ COLLECTION_VARIANTS = {
 
 def selftest():
     failures = []
-    for label, execs, prompt, coll_key, builtins, must_trip in SELFTEST_ARMS:
+    for label, execs, prompt, coll_key, builtins, must_trip, expected in SELFTEST_ARMS:
         coll = COLLECTION_VARIANTS[coll_key]
         violations = _fixture(check, execs, prompt, coll, builtins)
         tripped = bool(violations)
-        if tripped == must_trip:
+        landed = expected is None or any(expected in v for v in violations)
+        if tripped == must_trip and landed:
             print("  selftest %-28s PASS (%d violation(s))" % (label, len(violations)))
         else:
-            print("  selftest %-28s FAIL (%d violation(s))" % (label, len(violations)))
-            failures.append((label, violations, must_trip))
+            print("  selftest %-28s FAIL (%d violation(s), landed=%s)"
+                  % (label, len(violations), landed))
+            failures.append((label, violations, must_trip, landed))
     if failures:
-        for label, violations, must_trip in failures:
-            print("--- %s (must_trip=%s)" % (label, must_trip))
+        for label, violations, must_trip, landed in failures:
+            print("--- %s (must_trip=%s landed=%s)" % (label, must_trip, landed))
             for v in violations:
                 print("    " + v)
         print("MEMORY_GATE_PROVIDER_FIELDS_SELFTEST=FAIL")
