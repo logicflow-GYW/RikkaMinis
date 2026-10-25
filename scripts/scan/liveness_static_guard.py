@@ -52,39 +52,299 @@ def read(path):
         return f.read()
 
 
-def applogger_log_methods(appjava_dir):
-    """Public AppLogger log methods, from their `fun X(category: String` shape.
+# ── [wide3/10] Two structural helpers ────────────────────────────────────────
+# blank_comment(text): comments become spaces, string literals are KEPT (the
+#   RARE keys live inside string literals), length and newlines are preserved so
+#   offsets/line numbers stay valid.
+# dead_guarded(code, off): a constant-false condition governs `off`. `if (false)
+#   log(...)` keeps every literal the old criteria matched and emits nothing.
+DEAD_COND_RE = re.compile(
+    r"(?:\bif\s*\(\s*|\bwhile\s*\(\s*)"
+    r"(?:false\b|!\s*true\b|0\s*==\s*1\b|true\s*\|\||false\s*&&)"
+    r"|\bfalse\s*&&|\btrue\s*\|\|")
 
-    The private sink `log(level, category, message)` is level-first, so the
-    category-first signature is exactly the public per-level API.
+
+def blank_comment(text):
+    out = []
+    i, n = 0, len(text)
+    mode = None
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if mode == "line":
+            if ch == "\n":
+                mode = None
+                out.append(ch)
+            else:
+                out.append(" ")
+        elif mode == "block":
+            if ch == "*" and nxt == "/":
+                mode = None
+                out.append("  ")
+                i += 1
+            else:
+                out.append("\n" if ch == "\n" else " ")
+        elif mode == "str":
+            out.append(ch)
+            if ch == "\\":
+                out.append(nxt)
+                i += 1
+            elif ch == '"':
+                mode = None
+        elif mode == "raw":
+            out.append(ch)
+            if text[i:i + 3] == '"""':
+                out.append('""')
+                i += 2
+                mode = None
+        else:
+            if ch == "/" and nxt == "/":
+                mode = "line"
+                out.append("  ")
+                i += 1
+            elif ch == "/" and nxt == "*":
+                mode = "block"
+                out.append("  ")
+                i += 1
+            elif text[i:i + 3] == '"""':
+                mode = "raw"
+                out.append('"""')
+                i += 2
+            elif ch == '"':
+                mode = "str"
+                out.append(ch)
+            else:
+                out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _stmt_start(code, off):
+    depth = 0
+    i = off - 1
+    while i >= 0:
+        ch = code[i]
+        if ch in ")]":
+            depth += 1
+        elif ch in "([":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and ch in "\n;{}":
+            return i + 1
+        i -= 1
+    return i + 1
+
+
+def dead_guarded(code, off):
+    if DEAD_COND_RE.search(code[_stmt_start(code, off):off]):
+        return True
+    depth = 0
+    i = off
+    while i > 0:
+        i -= 1
+        ch = code[i]
+        if ch in "})":
+            depth += 1
+        elif ch in "({":
+            if depth == 0:
+                if ch == "{" and DEAD_COND_RE.search(code[_stmt_start(code, i):i]):
+                    return True
+            else:
+                depth -= 1
+    return False
+
+
+def _paren_end(code, open_idx):
+    depth = 0
+    for j in range(open_idx, len(code)):
+        if code[j] == "(":
+            depth += 1
+        elif code[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+    return -1
+
+
+def _brace_end(code, open_idx):
+    depth = 0
+    for j in range(open_idx, len(code)):
+        if code[j] == "{":
+            depth += 1
+        elif code[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return j
+    return -1
+
+
+def applogger_log_methods(appjava_dir):
+    """Public AppLogger log methods — derived from the SIGNATURE SHAPE, not from
+    a parameter NAME.
+
+    [wide3/10] The old pattern was `fun (\\w+)\\(\\s*category\\s*:` — it assumed
+    every public log method names its first parameter `category`. A new
+    `fun trace(cat: String, message: String)` (positional calls are unaffected by
+    the rename) was invisible to checks A and C by construction: the census could
+    never see probes fired through it. The shape that actually identifies a log
+    method is "non-private member of the object taking two String parameters".
     """
-    text = read(os.path.join(appjava_dir, APPLOGGER_REL))
-    return re.findall(r"\bfun\s+(\w+)\(\s*category\s*:", text)
+    text = blank_comment(read(os.path.join(appjava_dir, APPLOGGER_REL)))
+    out = []
+    for m in re.finditer(
+            r"^    (?!private\b)(?:public\s+|internal\s+)?fun\s+(\w+)\s*\(\s*"
+            r"\w+\s*:\s*String\s*,\s*\w+\s*:\s*String\s*\)", text, re.M):
+        out.append(m.group(1))
+    return out
+
+
+EMIT_RE = re.compile(r"\b(?:log\s*\(|enqueue\s*\()")
+
+
+def _fun_body(code, name):
+    """(body_start_offset, body_text) of `fun <name>(…) { … }`, or None."""
+    m = re.search(r"\bfun\s+" + re.escape(name) + r"\s*\(", code)
+    if not m:
+        return None
+    op = code.find("(", m.end() - 1)
+    cl = _paren_end(code, op)
+    if cl < 0:
+        return None
+    brace = code.find("{", cl)
+    if brace < 0:
+        return None
+    head = code[cl + 1:brace]
+    if re.search(r"(?<![=!<>+\-*/])=(?!=)", head):
+        return None  # expression body: no emission to inspect
+    end = _brace_end(code, brace)
+    if end < 0:
+        return None
+    return (brace + 1, code[brace + 1:end])
+
+
+def emission_problems(appjava_dir, methods):
+    """D: a signature is not a side effect.
+
+    [wide3/10] `fun info(category: String, message: String) { if (false) log(…) }`
+    keeps the signature (A passes), keeps the call-site count (C passes) and
+    emits nothing — every AppLogger.info probe in the app becomes a no-op while
+    the census still counts it as alive. Each discovered method must contain a
+    LIVE emission (`log(` sink call, or the debug channel's `enqueue(`).
+    """
+    problems = []
+    code = blank_comment(read(os.path.join(appjava_dir, APPLOGGER_REL)))
+    for name in methods:
+        body = _fun_body(code, name)
+        if body is None:
+            problems.append(
+                "D: cannot locate the body of AppLogger.%s — the emission check "
+                "cannot run (expression body or renamed shape)" % name)
+            continue
+        base, text = body
+        calls = list(EMIT_RE.finditer(text))
+        live = [c for c in calls if not dead_guarded(code, base + c.start())]
+        if not live:
+            why = "its only emission sits in dead code" if calls else "it never emits"
+            problems.append(
+                "D: AppLogger.%s emits nothing — %s. Every probe fired through "
+                "this method is silently dropped at runtime." % (name, why))
+    return problems
 
 
 def corpus_of(appjava_dir):
-    """(corpus_text, file_count) over all main-source .kt files."""
+    """(comment-stripped corpus_text, file_count) over all main-source .kt files.
+
+    [wide3/10] Comments were part of the corpus, so a commented-out probe (or a
+    `// AppLogger.info("Cat", …)` example in prose) counted as a live declaration
+    and kept a dead RARE entry's permission slip alive. String literals are KEPT:
+    RARE keys are embedded inside log literals (`"step=coldParse.offmain"`).
+    """
     parts = []
+    count = 0
     for r, _, ns in os.walk(appjava_dir):
         for n in ns:
             if n.endswith(".kt"):
-                parts.append(read(os.path.join(r, n)))
-    return "\n".join(parts), len(parts)
+                parts.append(blank_comment(read(os.path.join(r, n))))
+                count += 1
+    return "\n".join(parts), count
+
+
+def stripped_mirror(appjava_dir):
+    """Temp copy of the main source with comments blanked.
+
+    The census (`liveness_audit.declared`) is the OTHER side of check C's
+    comparison; it reads the tree itself, so it must see the same notion of "call
+    site" as `corpus_of` — otherwise one prose mention (`// Routed through
+    AppLogger.warning()`) makes the counts disagree. The caller removes the dir.
+    """
+    d = tempfile.mkdtemp(prefix="liveness-mirror-")
+    for r, _, ns in os.walk(appjava_dir):
+        for n in ns:
+            if not n.endswith(".kt"):
+                continue
+            src = os.path.join(r, n)
+            dst = os.path.join(d, os.path.relpath(src, appjava_dir))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(dst, "w", encoding="utf-8") as f:
+                f.write(blank_comment(read(src)))
+    return d
+
+
+COMMENT_PROBE_RE = re.compile(
+    r"AppLogger\.(?:info|warning|error|debug)\(\s*\"[^\"\n]*\"")
+
+
+def commented_probe_problems(appjava_dir):
+    """E: a probe that exists only inside a comment is a lie ([wide3/10]).
+
+    The corpus used to include comments, so `// AppLogger.info("FakeCat", "m")`
+    (or a probe someone commented out) counted as a live declaration: the raw
+    count and the census agreed ON THE COMMENT (`raw == enumerated`) and a dead
+    RARE entry kept its permission slip. Comments are now stripped before either
+    side looks (see `corpus_of` / `stripped_mirror`) — but stripping silently is
+    not enough: the shape must be LOUD, or the next reader believes the probe
+    exists. Real tree: zero such lines (verified 2026-10-25); a hit means someone
+    disabled a probe with `//` instead of deleting it.
+    """
+    problems = []
+    for r, _, ns in os.walk(appjava_dir):
+        for n in ns:
+            if not n.endswith(".kt"):
+                continue
+            p = os.path.join(r, n)
+            text = read(p)
+            blanked = blank_comment(text)
+            for m in COMMENT_PROBE_RE.finditer(text):
+                if blanked[m.start():m.end()].strip():
+                    continue  # live code, not a comment
+                line = text.count("\n", 0, m.start()) + 1
+                problems.append(
+                    "E: %s:%d spells a probe call inside a comment (%r) — comments "
+                    "are not declarations: the census does not count it and the next "
+                    "reader will believe the probe exists. Restore the call or delete "
+                    "the line." % (os.path.relpath(p, appjava_dir), line,
+                                   m.group(0)[:52]))
+    return problems
 
 
 def run_checks(appjava_dir):
     """Returns a list of human-readable problems (empty = clean)."""
     problems = []
     corpus, nfiles = corpus_of(appjava_dir)
-    cats, _tags, _steps, _events = liveness_audit.declared(appjava_dir)
+    mirror = stripped_mirror(appjava_dir)
+    try:
+        cats, _tags, _steps, _events = liveness_audit.declared(mirror)
+    finally:
+        shutil.rmtree(mirror, ignore_errors=True)
 
     # ── A. method coverage: signature-discovered methods must be enumerated ──
     methods = applogger_log_methods(appjava_dir)
     if not methods:
         problems.append(
-            "A: no `fun X(category: String` signatures found in AppLogger.kt — "
-            "either the file moved (update APPLOGGER_REL) or the public log API "
-            "changed shape; the census is running blind either way."
+            "A: no public `fun X(<a>: String, <b>: String)` signatures found in "
+            "AppLogger.kt — either the file moved (update APPLOGGER_REL) or the "
+            "public log API changed shape; the census is running blind either way."
         )
     for m in methods:
         fixture_dir = tempfile.mkdtemp(prefix="liveness-a-")
@@ -131,6 +391,12 @@ def run_checks(appjava_dir):
             "the patterns in scripts/diag/liveness_audit.py declared()."
             % (enumerated, raw)
         )
+
+    # ── D. emission: a signature is not a side effect ([wide3/10]) ──
+    problems.extend(emission_problems(appjava_dir, methods))
+
+    # ── E. a probe that exists only in a comment is not a probe ([wide3/10]) ──
+    problems.extend(commented_probe_problems(appjava_dir))
     return problems
 
 
@@ -139,6 +405,9 @@ def self_test():
     failures = []
 
     def expect(name, cond, detail=""):
+        # [wide3/10] print every arm: a self-test that only speaks when it fails
+        # is indistinguishable from a self-test that never ran.
+        print("  %s %s" % ("✅" if cond else "❌", name))
         if not cond:
             failures.append("%s  %s" % (name, detail))
 
@@ -152,10 +421,14 @@ def self_test():
         f.write(
             "package com.rikkaminis.app.logging\n"
             "object AppLogger {\n"
-            "    fun info(category: String, message: String) {}\n"
-            "    fun warning(category: String, message: String) {}\n"
-            "    fun error(category: String, message: String) {}\n"
-            "    fun debug(category: String, message: String) {}\n"
+            "    fun info(category: String, message: String) { "
+            "log(\"INFO\", category, message) }\n"
+            "    fun warning(category: String, message: String) { "
+            "log(\"WARN\", category, message) }\n"
+            "    fun error(category: String, message: String) { "
+            "log(\"ERROR\", category, message) }\n"
+            "    fun debug(category: String, message: String) { "
+            "enqueue(\"DEBUG\", category, message) }\n"
             "}\n"
         )
     body_lines = ["package com.example", ""]
@@ -182,8 +455,10 @@ def self_test():
         f.write(
             "package com.rikkaminis.app.logging\n"
             "object AppLogger {\n"
-            "    fun info(category: String, message: String) {}\n"
-            "    fun fatal(category: String, message: String) {}\n"
+            "    fun info(category: String, message: String) { "
+     "log(\"INFO\", category, message) }\n"
+            "    fun fatal(category: String, message: String) { "
+     "log(\"FATAL\", category, message) }\n"
             "}\n"
         )
     with open(os.path.join(pkg, "Other.kt"), "w", encoding="utf-8") as f:
@@ -205,7 +480,8 @@ def self_test():
         f.write(
             "package com.rikkaminis.app.logging\n"
             "object AppLogger {\n"
-            "    fun info(category: String, message: String) {}\n"
+            "    fun info(category: String, message: String) { "
+     "log(\"INFO\", category, message) }\n"
             "}\n"
         )
     with open(os.path.join(pkg, "Other.kt"), "w", encoding="utf-8") as f:
@@ -223,7 +499,8 @@ def self_test():
         f.write(
             "package com.rikkaminis.app.logging\n"
             "object AppLogger {\n"
-            "    fun info(category: String, message: String) {}\n"
+            "    fun info(category: String, message: String) { "
+     "log(\"INFO\", category, message) }\n"
             "}\n"
         )
     with open(os.path.join(pkg, "Other.kt"), "w", encoding="utf-8") as f:
@@ -248,11 +525,98 @@ def self_test():
            str(problems))
     shutil.rmtree(dirty_dir, ignore_errors=True)
 
+    # ── [wide3/10] three re-introduction shapes, one arm each ────────────────
+    def _appdir(prefix, applogger_text, other_text):
+        d = tempfile.mkdtemp(prefix=prefix)
+        pkg = os.path.join(d, "com", "rikkaminis", "app", "logging")
+        os.makedirs(pkg)
+        with open(os.path.join(pkg, "AppLogger.kt"), "w", encoding="utf-8") as fh:
+            fh.write(applogger_text)
+        with open(os.path.join(pkg, "Other.kt"), "w", encoding="utf-8") as fh:
+            fh.write(other_text)
+        return d
+
+    live_anchors = "".join('val k%d = "step=%s"\n' % (i, k)
+                           for i, k in enumerate(rare_keys))
+
+    # A2 (scope): a NEW public log method whose first parameter is not named
+    # `category`. Positional call sites are unaffected by the rename, so the
+    # method is real API and the census must enumerate it.
+    d = _appdir(
+        "liveness-a2-",
+        "package com.rikkaminis.app.logging\n"
+        "object AppLogger {\n"
+        '    fun info(category: String, message: String) { log("INFO", category, message) }\n'
+        '    fun trace(cat: String, message: String) { log("TRACE", cat, message) }\n'
+        "}\n",
+        "package com.example\n" + live_anchors
+        + 'fun a() { AppLogger.info("Cat", "m") }\n')
+    problems = run_checks(d)
+    expect("self/A2 method with a renamed first parameter is caught",
+           any(p.startswith("A:") and "trace" in p for p in problems), str(problems))
+    shutil.rmtree(d, ignore_errors=True)
+
+    # D (dataflow): the sink call exists but sits in dead code — signature and
+    # call-site count are untouched, the probe emits nothing.
+    d = _appdir(
+        "liveness-d2-",
+        "package com.rikkaminis.app.logging\n"
+        "object AppLogger {\n"
+        '    fun info(category: String, message: String) { '
+        'if (false) log("INFO", category, message) }\n'
+        "}\n",
+        "package com.example\n" + live_anchors
+        + 'fun a() { AppLogger.info("Cat", "m") }\n')
+    problems = run_checks(d)
+    expect("self/D2 a dead sink call in the method body is caught",
+           any(p.startswith("D:") and "info" in p for p in problems), str(problems))
+    shutil.rmtree(d, ignore_errors=True)
+
+    # B2 (parser-death): the RARE key survives only inside a comment. Unstripped
+    # corpora counted that as a live declaration and kept a dead entry's
+    # permission slip alive.
+    ghost = rare_keys[0]
+    commented = "".join('val k%d = "step=%s"\n' % (i, k)
+                        for i, k in enumerate(rare_keys[1:]))
+    commented += '// val ghost = "step=%s"\n' % ghost
+    d = _appdir(
+        "liveness-b2-",
+        "package com.rikkaminis.app.logging\n"
+        "object AppLogger {\n"
+        '    fun info(category: String, message: String) { log("INFO", category, message) }\n'
+        "}\n",
+        "package com.example\n" + commented
+        + 'fun a() { AppLogger.info("Cat", "m") }\n')
+    problems = run_checks(d)
+    expect("self/B2 a RARE key that survives only in a comment is caught",
+           any(p.startswith("B:") and ghost in p for p in problems), str(problems))
+    shutil.rmtree(d, ignore_errors=True)
+
+    # E2: the exact re-introduction shape — a probe call that lives only in a
+    # comment inside a real log method. Inert for the census, so the gate has to
+    # say it out loud or the next reader believes the probe exists.
+    d = _appdir(
+        "liveness-e2-",
+        "package com.rikkaminis.app.logging\n"
+        "object AppLogger {\n"
+        '    fun warning(category: String, message: String) {\n'
+        '        // AppLogger.info("FakeCommentCat", "fake")\n'
+        '        log("WARN", category, message)\n'
+        "    }\n"
+        "}\n",
+        "package com.example\n" + live_anchors
+        + 'fun a() { AppLogger.warning("Cat", "m") }\n')
+    problems = run_checks(d)
+    expect("self/E2 a probe spelled only inside a comment is caught",
+           any(p.startswith("E:") and "FakeCommentCat" in p for p in problems),
+           str(problems))
+    shutil.rmtree(d, ignore_errors=True)
+
     if failures:
         for f in failures:
             print("FAIL  " + f)
         return 1
-    print("✅ self-test: clean tree passes; A/B/C violation classes all caught")
+    print("✅ self-test: clean tree passes; A/B/C/D + renamed-parameter/dead-sink/commented-key arms all caught")
     return 0
 
 
