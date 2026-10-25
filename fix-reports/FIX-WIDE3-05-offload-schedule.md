@@ -164,7 +164,7 @@ sh /var/minis/shared/tools/gate_run.sh --full --repo "$PWD"   # 持锁 + ENOSYS 
 python3 scripts/scan/test_scan.py
 ```
 
-见 §⑥ 的最终读数（并发施工窗口期读数附后）。
+读数以 §⑥ 的分支 CI 为准：`Summary: 112 passed, 0 failed` + `ALL 344 CASES PASS`。本地运行器在并发窗口内被沙箱 ENOSYS 反复打断（详见 §⑥ 末段），不作为证据。
 
 ---
 
@@ -172,9 +172,18 @@ python3 scripts/scan/test_scan.py
 
 | 项 | 值 |
 |---|---|
-| run id | 见下方回填 |
-| conclusion | 见下方回填 |
-| head_sha | 必须与本地 `git rev-parse HEAD` 逐字符一致 |
+| run | **#2651** / id `40160832857` / job `121071847582` |
+| conclusion | **success**，attempt 1 |
+| head_sha | `bc8ec999a8a596fd117427d3ce7ac41341a6664f` = 本地 `git rev-parse HEAD`（逐字符一致） |
+| 步骤 | 26 步，唯一非 success = `Publish to Releases`（skipped，main 门控） |
+| 门读数 | `Summary: 112 passed, 0 failed` 恰一条（带框线）；112 个门头互异；本支四门均在册（`[11/112] AlarmClock EXTRA_DAYS container type`、`[21/112] Claim/release ownership guard`、`[28/112] Scheduled-task store release guard`、`[100/112] offload permission reset sync`） |
+| 夹具 | `✅ ALL 344 CASES PASS` 恰一条 |
+| 编译 | ` e: ` 0 条 |
+| FAILED 行 | 6 条，逐条确认全是 **PASSED 用例名子串**（`slot denied produces FAILED … PASSED` 等），无真失败 |
+
+日志下载：`curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/logicflow-GYW/RikkaMinis/actions/jobs/121071847582/logs`（1,485,213 B / 17,847 行）
+
+**并发窗口说明（L4 本地读数）**：本地全量运行器与 `test_scan.py` 在并发施工窗口内多次被沙箱 `ENOSYS / Bus error` 打断（另 4 个会话同时在跑 full），本地读数不稳定；分支 CI 的读数才是本支的权威 L4 证据（CI 在 GitHub runner 上跑同一 `scan.sh` + `test_scan.py`，同一 commit）。
 
 ---
 
