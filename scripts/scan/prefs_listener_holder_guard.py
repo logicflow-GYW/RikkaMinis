@@ -112,6 +112,64 @@ def _strip_comments_and_strings(text: str) -> str:
     return "".join(out)
 
 
+_DEAD_GUARD_RE = re.compile(r"\b(if|while)\s*\(")
+
+
+def _paren_close(clean, open_idx):
+    depth = 0
+    for i in range(open_idx, len(clean)):
+        if clean[i] == "(":
+            depth += 1
+        elif clean[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _condition_is_dead(cond):
+    parts = [p.strip() for p in re.split(r"&&|\|\|", cond)]
+    if cond.strip() == "false":
+        return True
+    if "&&" in cond and "false" in parts:
+        return True
+    if "||" in cond and "true" in parts:
+        return True
+    return False
+
+
+def _dead_guard_spans(clean):
+    """[(start, end)] of code that can never run: `if (false)` / `true || …`.
+
+    "The call is there" is not the same as "the call happens". `if (false)
+    publish(…)` keeps every token a text-based criterion looks for while
+    deleting the behaviour (wide3 witnesses S3 / C10a).
+    """
+    spans = []
+    for m in _DEAD_GUARD_RE.finditer(clean):
+        open_idx = clean.index("(", m.start())
+        close = _paren_close(clean, open_idx)
+        if close < 0 or not _condition_is_dead(clean[open_idx + 1:close]):
+            continue
+        body = close + 1
+        while body < len(clean) and clean[body] in " \t\r\n":
+            body += 1
+        if body < len(clean) and clean[body] == "{":
+            end = _brace_match(clean, body)
+            spans.append((body, len(clean) - 1 if end is None else end))
+        else:
+            eol = clean.find("\n", body)
+            spans.append((body, len(clean) - 1 if eol < 0 else eol))
+    return spans
+
+
+def _live_hits(clean, pattern):
+    """Offsets of `pattern` matches that are not inside a literal-dead guard."""
+    dead = _dead_guard_spans(clean)
+    return [m.start() for m in re.finditer(pattern, clean)
+            if not any(s <= m.start() <= e for s, e in dead)]
+
+
 def field_declarations(text: str) -> set:
     """Names declared as class/object-level properties (NOT locals inside a fun).
 
@@ -156,8 +214,19 @@ def field_declarations(text: str) -> set:
                          r"protected\s+|open\s+|override\s+|lateinit\s+|const\s+|@\w+\s+)*"
                          r"(val|var)\s+(\w+)")
 
+    def _record(buf):
+        """Record the declaration in `buf` when its NAME is complete."""
+        m = decl_re.search(buf)
+        if not m or "fun" in stack:
+            return
+        end = m.end()
+        if end < len(buf) and (buf[end] == "_" or buf[end].isalnum()):
+            return                      # still inside the identifier
+        fields.add(m.group(2))
+
     for ch in clean:
         if ch == "\n":
+            _record(pending)
             pending = ""
             # `head` spans lines, so it needs a separator here. Without one the
             # annotation and the keyword fuse into a single token --
@@ -202,10 +271,15 @@ def field_declarations(text: str) -> set:
             continue
         pending += ch
         head += ch
-        # A declaration only counts as a field when no function body encloses it.
-        m = decl_re.search(pending)
-        if m and "fun" not in stack:
-            fields.add(m.group(2))
+        if ch in " \t" or ch == "_" or ch.isalnum():
+            # The name may still be growing; feeding `decl_re` one character at
+            # a time without waiting for a delimiter records every PREFIX of a
+            # field name (`l`, `li`, `lis`, … `listener`), and a prefix match
+            # makes any local that happens to be a prefix of a real field look
+            # like a field ("held (l)" for `val l = …`).
+            continue
+        _record(pending)
+
     return fields
 
 
@@ -214,10 +288,56 @@ def ref_count(text: str, ident: str) -> int:
     return len(re.findall(rf"\b{re.escape(ident)}\b", _strip_comments_and_strings(text)))
 
 
+def _brace_match(text, open_idx):
+    """Index of the `}` matching the `{` at open_idx (None when unbalanced)."""
+    depth, i, n = 0, open_idx, len(text)
+    while i < n:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def _enclosing_fn_span(clean, pos):
+    """(start, end) of the innermost `fun` body containing pos, else (0, len)."""
+    best = None
+    for m in re.finditer(r"\bfun\b", clean):
+        if m.start() > pos:
+            break
+        brace = clean.find("{", m.end())
+        if brace < 0:
+            continue
+        end = _brace_match(clean, brace)
+        if end is None or not (brace < pos < end):
+            continue
+        if best is None or brace > best[0]:
+            best = (brace, end)
+    return best if best else (0, len(clean))
+
+
 def stored_into_something(text: str, ident: str) -> bool:
-    """`x = ident` / `val y = ident` -- the local escapes into another holder."""
+    """True when the local is held by a field THAT STILL HOLDS IT on return.
+
+    `x = ident` is not enough: a later `x = null` in the same function drops the
+    last strong reference before the listener is registered, i.e. the same
+    collectable-local defect one line further down (wide3 witness F-134 —
+    "write it somewhere, then overwrite it" satisfies any existence test).
+    """
     clean = _strip_comments_and_strings(text)
-    return bool(re.search(rf"=\s*{re.escape(ident)}\s*(?:\n|$|\))", clean))
+    for m in re.finditer(rf"(?<![\w.])(\w+)\s*=(?!=)\s*{re.escape(ident)}\b", clean):
+        target = m.group(1)
+        start, end = _enclosing_fn_span(clean, m.start())
+        later = clean[m.end():end]
+        if re.search(
+            rf"(?<![\w.]){re.escape(target)}\s*=(?!=)(?!\s*{re.escape(ident)}\b)", later
+        ):
+            continue          # overwritten before this function returns
+        return True
+    return False
 
 
 def inside_on_dispose(text: str, ident: str) -> bool:
@@ -602,11 +722,13 @@ def _self_sync_defects(body, obj, rel, problems, report):
                 "%s: `object %s` registers `%s` but its body could not be located -- cannot "
                 "prove it refreshes the cache" % (rel, obj, ident)
             )
-        elif not re.search(r"\bcached\w*\s*=(?!=)", found[0]) and "loadFromPreferences(" not in found[0]:
+        elif not (_live_hits(found[0], r"\bcached\w*\s*=(?!=)")
+                  or _live_hits(found[0], r"\bloadFromPreferences\s*\(")):
             problems.append(
-                "%s: `object %s`'s self-sync listener `%s` refreshes nothing (no `cached… =` "
-                "assignment and no shared loader call) -- it satisfies the shape while leaving "
-                "the cache at the startup value, i.e. the same silent desync one layer in"
+                "%s: `object %s`'s self-sync listener `%s` refreshes nothing that can run "
+                "(no live `cached… =` assignment and no live shared loader call) -- a body "
+                "guarded by `if (false)` keeps the shape while leaving the cache at the "
+                "startup value, i.e. the same silent desync one layer in"
                 % (rel, obj, ident)
             )
         else:
@@ -764,21 +886,24 @@ def _paren_span(text, open_idx):
         return None
     return text[open_idx + 1:i - 1]
 
-def _b1_when_arms(body):
-    """`when (key) { ... }` arm count, at brace depth 0 of the when body.
+def _b1_when_arm_idents(body):
+    """Per-arm SETS of state identifiers assigned, at depth 0 of the when body.
 
     Returns None when the body has no `when (key)` (the caller then treats any
-    other key decision -- `key in ...` -- as a single arm), and 0 when the
-    `when (key)` exists but its body cannot be balanced (fail-closed: a broken
-    when is a red, not a silent skip).
+    other key decision -- `key in ...` -- as a single decision), and [] when the
+    `when (key)` exists but cannot be balanced (fail-closed: a broken when is a
+    red, not a silent skip). A count of `->` tokens is not enough: six EMPTY
+    arms next to one arm that resets all seven controls satisfies "7 arms, 7
+    controls" while resetting everything on any single key change (wide3
+    witness C8b).
     """
     m = re.search(r"\bwhen\s*\(\s*key\s*\)\s*\{", body)
     if not m:
         return None
     inner = _brace_body(body, m.end() - 1)
     if inner is None:
-        return 0
-    arms, depth, i, n = 0, 0, 0, len(inner)
+        return []
+    starts, depth, i, n = [], 0, 0, len(inner)
     while i < n:
         c = inner[i]
         if c == "{":
@@ -786,11 +911,15 @@ def _b1_when_arms(body):
         elif c == "}":
             depth -= 1
         if depth == 0 and inner.startswith("->", i):
-            arms += 1
+            starts.append(i + 2)
             i += 2
             continue
         i += 1
-    return arms
+    out = []
+    for idx, start in enumerate(starts):
+        end = starts[idx + 1] if idx + 1 < len(starts) else len(inner)
+        out.append(set(_B1_ASSIGN_RE.findall(inner[start:end])))
+    return out
 
 def scan_batch_save_screens(root):
     """[dv22-b1] C8/C8b/C9. Returns (report lines, problems)."""
@@ -834,21 +963,30 @@ def scan_batch_save_screens(root):
                     % (rel, name or "<inline>", len(idents))
                 )
             else:
-                arms = _b1_when_arms(body)
-                if arms is None:
-                    arms = 1  # `key in ...` / `if (key == ...)` -- a single decision
-                if arms < len(idents):
+                arm_idents = _b1_when_arm_idents(body)
+                if arm_idents is None:
+                    # `key in (...)` / `if (key == …)`: one decision point for all.
+                    arm_idents = [set(idents)]
+                live_arms = [a for a in arm_idents if a]
+                widest = max((len(a) for a in arm_idents), default=0)
+                if not arm_idents:
                     problems.append(
-                        "%s: the listener `%s` decides by key but not PER key (when (key) "
-                        "arms=%s, distinct reset identifiers=%s) -- a whole-group re-read "
-                        "under one arm still clears every unsaved edit buffer when a single "
-                        "key changes"
-                        % (rel, name or "<inline>", arms, sorted(idents))
+                        "%s: the listener `%s` decides by key through a `when (key)` whose "
+                        "body could not be balanced -- fail-closed" % (rel, name or "<inline>")
+                    )
+                elif widest >= 2 or len(live_arms) < len(idents):
+                    problems.append(
+                        "%s: the listener `%s` decides by key but not PER key (arms that "
+                        "reset anything=%d, widest arm resets %d identifier(s), distinct "
+                        "reset identifiers=%d) -- one arm clearing several controls (or "
+                        "arms that reset nothing) still clears every unsaved edit buffer "
+                        "when a single key changes"
+                        % (rel, name or "<inline>", len(live_arms), widest, len(idents))
                     )
                 else:
                     report.append(
                         "  %s: listener re-reads %d control(s) per key (%d when-arms)"
-                        % (rel, len(idents), arms)
+                        % (rel, len(idents), len(live_arms))
                     )
 
         # C9: after the first prefs write in an onClick, args must be snapshots.
@@ -1024,14 +1162,25 @@ def scan_write_through(root):
 
     # C10a -- every writer publishes (catches a new variant that only applies()).
     for rel, line, cls, body in writers:
-        if _A4_PUBLISH not in body:
+        calls = [m.start() for m in re.finditer(re.escape(_A4_PUBLISH), body)]
+        dead = _dead_guard_spans(body)
+        live = [c for c in calls if not any(s <= c <= e for s, e in dead)]
+        if live:
+            continue
+        if calls:
             problems.append(
-                f"{rel}:{line} {cls}.write() applies the value but never calls "
-                f"PrefsWriteBus.publish(..) -- an external write reaches only the "
-                f"change callback, which is the delivery that failed on the device "
-                f"(`minis-config set background.overlay` persisted, consumer stayed "
-                f"stale until restart)"
+                f"{rel}:{line} {cls}.write() only publishes from dead code (`if (false)` / "
+                f"`true || …`) -- the value is applied to SharedPreferences and then handed to "
+                f"nobody, the exact staleness that failed on the device"
             )
+            continue
+        problems.append(
+            f"{rel}:{line} {cls}.write() applies the value but never calls "
+            f"PrefsWriteBus.publish(..) -- an external write reaches only the "
+            f"change callback, which is the delivery that failed on the device "
+            f"(`minis-config set background.overlay` persisted, consumer stayed "
+            f"stale until restart)"
+        )
 
     # C10b -- a snapshotted prefs key needs a sink that names it.
     registered_keys = {key for _rel, _line, key in registered}
@@ -1127,7 +1276,7 @@ def _selftest():
             "}\n" % (_PRIMING_CFG_PATH, cp, lp)
         )
 
-    def screen(prime_first=True):
+    def screen(prime_first=True, null_after_store=False):
         if prime_first:
             body = ("            ConcurrencyPrefs.prime(app)\n"
                     "            maxSessions = ConcurrencyPrefs.maxConcurrentSessions()\n")
@@ -1145,9 +1294,10 @@ def _selftest():
             "%s"
             "        }\n"
             "        listener = l\n"
+            "%s"
             "        concurrencyPrefs.registerOnSharedPreferenceChangeListener(l)\n"
             "    }\n"
-            "}\n" % body
+            "}\n" % (body, "        listener = null\n" if null_after_store else "")
         )
 
     inline_reg = HOLD + (
@@ -1189,7 +1339,14 @@ def _selftest():
         if context_field:
             lines.append("    private var appContext: Context? = null\n")
         if decl:
-            if refresh:
+            if refresh == "dead":
+                lines.append(
+                    "    private val selfSyncListener =\n"
+                    "        SharedPreferences.OnSharedPreferenceChangeListener { changed, _ ->\n"
+                    "            if (false) cachedValue = changed.getInt(KEY, 1)\n"
+                    "        }\n"
+                )
+            elif refresh:
                 lines.append(
                     "    private val selfSyncListener =\n"
                     "        SharedPreferences.OnSharedPreferenceChangeListener { changed, _ ->\n"
@@ -1269,6 +1426,19 @@ def _selftest():
                 '                "maxConcurrentSessions" -> maxSessions = ConcurrencyPrefs.maxConcurrentSessions()\n'
                 '                "maxTurns" -> maxTurns = AgentRuntimeLimitsPrefs.maxTurns()\n'
                 '                "guestTmpMaxAgeMin" -> guestTmpMaxAgeMin = AgentRuntimeLimitsPrefs.guestTmpMaxAgeMin()\n'
+                "            }\n"
+            )
+        elif keyed == "packed":
+            body = (
+                "            when (key) {\n"
+                '                "subagent.enabled", "maxConcurrentSessions", "maxTurns", '
+                '"guestTmpMaxAgeMin" -> {\n'
+                "                    subEnabled = prefs.getBoolean(key, false)\n"
+                "                    maxSessions = ConcurrencyPrefs.maxConcurrentSessions()\n"
+                "                    maxTurns = AgentRuntimeLimitsPrefs.maxTurns()\n"
+                "                    guestTmpMaxAgeMin = AgentRuntimeLimitsPrefs.guestTmpMaxAgeMin()\n"
+                "                }\n"
+                '                "unrelated.key" -> Unit\n'
                 "            }\n"
             )
         elif keyed == "group":
@@ -1363,7 +1533,8 @@ def _selftest():
             ") : Field {\n"
             "    override fun write(value: Boolean) {\n"
             "        prefs.edit().putBoolean(key, value).apply()\n"
-            + ("        PrefsWriteBus.publish(prefs, key)\n" if publish else "") +
+            + ("        if (false) PrefsWriteBus.publish(prefs, key)\n" if publish == "dead"
+               else ("        PrefsWriteBus.publish(prefs, key)\n" if publish else "")) +
             "    }\n"
             "}\n"
         )
@@ -1410,6 +1581,9 @@ def _selftest():
         ("clean tree (precision control)",
          {"Cfg.kt": cfg(), "Screen.kt": screen(), "Prefs.kt": self_sync_src()},
          0, "re-primed by"),
+        ("listener local stored into a field and then nulled (F-134 last write)",
+         {"Cfg.kt": cfg(), "Screen.kt": screen(null_after_store=True)}, 1,
+         "nothing keeps it alive"),
         ("concurrency listener never primes (C1)",
          {"Cfg.kt": cfg(conc_prime=False), "Screen.kt": screen()},
          1, "re-primes nothing: the listener `cl` on ConcurrencyPrefs.PREFS"),
@@ -1440,6 +1614,9 @@ def _selftest():
         ("self-sync listener refreshes nothing (S3)",
          {"Prefs.kt": self_sync_src(refresh=False)}, 1,
          "refreshes nothing"),
+        ("self-sync listener refreshes only inside `if (false)` (S3 dataflow)",
+         {"Prefs.kt": self_sync_src(refresh="dead")}, 1,
+         "refreshes nothing that can run"),
         ("self-synced cache object (precision control, green)",
          {"Prefs.kt": self_sync_src(), "Cfg.kt": cfg(), "Screen.kt": screen()},
          0, "self-syncs via"),
@@ -1468,6 +1645,9 @@ def _selftest():
         ("batch-save listener re-reads the whole group under one membership test (C8b)",
          {"Prefs.kt": self_sync_src(), "Bulk.kt": bulk_screen(keyed="group", snapshot=True)},
          1, "decides by key but not PER key"),
+        ("batch-save listener packs every reset into ONE arm (C8b per-arm)",
+         {"Bulk.kt": bulk_screen(keyed="packed")}, 1,
+         "not PER key"),
         ("Save reads listener-resettable state after an earlier apply (C9)",
          {"Prefs.kt": self_sync_src(), "Bulk.kt": bulk_screen(keyed="when", snapshot=False)},
          1, "as a direct argument AFTER an earlier apply()"),
@@ -1485,6 +1665,9 @@ def _selftest():
          "no PrefsWriteBus.Sink names that key"),
         ("write-through: field writer only applies, never publishes (C10a)",
          wt_tree(publish=False), 1, "never calls PrefsWriteBus.publish("),
+        ("write-through: publish only reachable from dead code (C10a dataflow)",
+         wt_tree(publish="dead"), 1,
+         "only publishes from dead code"),
         ("write-through: snapshot key is not registry-written (precision control)",
          wt_tree(registration=False, snapshot_key="KEY_UNREGISTERED"), 0,
          "write-through delivery green"),
