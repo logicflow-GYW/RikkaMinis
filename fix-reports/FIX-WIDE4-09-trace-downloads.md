@@ -109,4 +109,13 @@
 
 ## ⑨ CI
 
-（回填：run id / job id / attempt / 结论 / 日志逐条核对）
+- **run** `40179264941`（[链接](https://github.com/logicflow-GYW/RikkaMinis/actions/runs/40179264941)）· **job** `121126588893` · `workflow_dispatch` · **attempt 1** · `conclusion = success` · 09:06:13Z → 09:28:24Z（22 min）
+- **head_sha** `03a4f2350a017b3ec56ca5d6a2e401591b4952ba` = 本地 HEAD = 远端分支 head，三方逐字符一致
+- **26 步**：唯一 `skipped` = `Publish to Releases`（main 门控），其余全部 `success`（含 `Run pre-build scan gate`、`Run unit tests (full suite)`）
+- **日志逐条核对**（1,481,510 B / 17,851 行，`probe/ci/job-121126588893.log`）：
+  - `║  Summary: 112 passed, 0 failed` **恰 1 条**（其余 8 条 Summary 是子套件：28/5/14/36/15/25/10 passed + `0 violation(s) found`）
+  - `✅ ALL 344 CASES PASS` **恰 1 条**
+  - 门头 `[N/112]` **112 个、编号 1..112 互异**
+  - ` e: ` 编译错误 **0**；含 `FAILED` 的 **6 行全部是 PASSED 用例名子串**
+  - 两条冻结自证标记都进日志：`TRACE_STEP_TAG_SELFTEST=PASS`、`SELFTEST=PASS (downloads_atomic_update: 4 fixtures)`
+- **分支 CI 绿 = 确定性停止节点**，本支停分支，未合并 main（起手权在用户 / 主会话）。
