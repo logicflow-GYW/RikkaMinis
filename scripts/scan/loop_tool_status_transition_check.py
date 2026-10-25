@@ -132,16 +132,226 @@ def line_of(src: str, idx: int) -> int:
     return src.count("\n", 0, idx) + 1
 
 
+# ── structure helpers (wide3: span/liveness based, never line- or spelling-based)
+
+def mask_code(src):
+    """Offset-preserving projection with comment text AND string/char literal
+    contents blanked. Brace matching and guard detection read THIS: a paren
+    inside a string literal must not shift the depth, and a criterion satisfied
+    by a commented-out line is not a criterion."""
+    out = list(src)
+    i, n = 0, len(src)
+    while i < n:
+        if src.startswith('"""', i):
+            j = src.find('"""', i + 3)
+            j = n if j < 0 else j + 3
+            for k in range(i, j):
+                if src[k] != "\n":
+                    out[k] = " "
+            i = j
+            continue
+        if src[i] == '"':
+            j = i + 1
+            while j < n:
+                if src[j] == "\\":
+                    j += 2
+                    continue
+                if src[j] == '"' or src[j] == "\n":
+                    break
+                j += 1
+            for k in range(i, min(j + 1, n)):
+                out[k] = " "
+            i = j + 1
+            continue
+        if src[i] == "'":
+            j = src.find("'", i + 1)
+            if 0 < j - i <= 4:
+                for k in range(i, j + 1):
+                    out[k] = " "
+                i = j + 1
+                continue
+            i += 1
+            continue
+        if src.startswith("//", i):
+            j = src.find("\n", i)
+            j = n if j < 0 else j
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+            continue
+        if src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            for k in range(i, j):
+                if src[k] != "\n":
+                    out[k] = " "
+            i = j
+            continue
+        i += 1
+    return "".join(out)
+
+
+def match_close(text, start, opener, closer):
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == opener:
+            depth += 1
+        elif text[i] == closer:
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+IF_RE = re.compile(r"\bif\s*\(")
+
+
+def if_statements(masked):
+    out = []
+    for m in IF_RE.finditer(masked):
+        p = m.end() - 1
+        close = match_close(masked, p, "(", ")")
+        if close < 0:
+            continue
+        j = close + 1
+        while j < len(masked) and masked[j] in " \t":
+            j += 1
+        if j < len(masked) and masked[j] == "{":
+            body_end = match_close(masked, j, "{", "}")
+            if body_end < 0:
+                body_end = len(masked)
+        else:
+            # Statement body (no braces right after the `)`): it runs to the end
+            # of the STATEMENT, which may carry a trailing lambda block
+            # (`if (false) withContext(Dispatchers.Main) { host.push(…) }`) — a
+            # line-based end would stop before the block and let the dead guard
+            # hide the publish from every liveness check.
+            k, depth = j, 0
+            while k < len(masked):
+                ch = masked[k]
+                if ch in "([{":
+                    depth += 1
+                elif ch in ")]}":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                elif ch == "\n" and depth == 0:
+                    nxt = masked[k + 1:].lstrip(" \t")
+                    if nxt[:1] in (".", "?", "&", "|"):
+                        k += 1
+                        continue
+                    break
+                k += 1
+            body_end = k
+        out.append((p, close, j, body_end, masked[p + 1:close]))
+    return out
+
+
+def enclosing(ifs, idx):
+    hits = [s for s in ifs if s[2] <= idx <= s[3]]
+    hits.sort(key=lambda s: s[0])
+    return [s[4] for s in hits]
+
+
+def split_top(expr, op):
+    parts, cur, depth, i = [], [], 0, 0
+    while i < len(expr):
+        ch = expr[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if depth == 0 and expr.startswith(op, i):
+            parts.append("".join(cur))
+            cur = []
+            i += len(op)
+            continue
+        cur.append(ch)
+        i += 1
+    parts.append("".join(cur))
+    return parts
+
+
+def norm_atom(expr):
+    s = expr.strip()
+    while True:
+        if s.startswith("(") and match_close(s, 0, "(", ")") == len(s) - 1:
+            s = s[1:-1].strip()
+        elif s.startswith("(") or s.endswith(")"):
+            s = s.strip("() \t")
+        else:
+            return s
+
+
+def is_lit(expr, word):
+    return norm_atom(expr) == word
+
+
+def always_false(cond):
+    """`if (false && guard)` — the guard's spelling survives, its decision does not."""
+    for disj in split_top(cond, "||"):
+        if is_lit(disj, "false"):
+            continue
+        if any(is_lit(c, "false") for c in split_top(disj, "&&")):
+            continue
+        return False
+    return True
+
+
+def always_true(cond):
+    return any(is_lit(d, "true") for d in split_top(cond, "||"))
+
+
+def fun_body(masked, name):
+    """Body span of `fun name(...)`: brace-balanced, or the expression after `=`.
+    Located from the parameter list, never from the first `{` (a lambda in an
+    expression body owns that one)."""
+    m = re.search(r"\bfun\s+" + re.escape(name) + r"\s*\(", masked)
+    if not m:
+        return None
+    close = match_close(masked, m.end() - 1, "(", ")")
+    if close < 0:
+        return None
+    i = close + 1
+    while i < len(masked) and masked[i] not in "{=":
+        i += 1
+    if i >= len(masked):
+        return None
+    if masked[i] == "{":
+        end = match_close(masked, i, "{", "}")
+        return (i + 1, end) if end > 0 else None
+    stop = len(masked)
+    tm = re.search(r"\n[ \t]*\n|\n[ \t]*\}|\n[ \t]*(?:fun|internal|private|public|object|class|@)\b",
+                   masked[i:])
+    if tm:
+        stop = i + tm.start()
+    return (i + 1, stop)
+
+
+def policy_sig_params(masked, name):
+    m = re.search(r"\bfun\s+" + re.escape(name) + r"\s*\(", masked)
+    if not m:
+        return None
+    close = match_close(masked, m.end() - 1, "(", ")")
+    if close < 0:
+        return None
+    return [p.group(1) for p in re.finditer(r"\b([A-Za-z_]\w*)\s*:", masked[m.end():close])]
+
+
 def check(src: str, label: str):
     """Return (violations, notes). violations empty = PASS."""
     code = blank_comments(src)
     bad, notes = [], []
 
-    # ── Regions (anchored on the raw text, read from the blanked projection) ──
+    # ── Regions (anchored on the raw text, read from the masked projection) ──
+    masked = mask_code(src)
+    ifs = if_statements(masked)
+    # (the LOOP_HEADER / PASS3_MARK anchors are comments themselves, so they are
+    # looked up in the RAW source; the mask can never contain them.)
     header_at = src.find(LOOP_HEADER, src.find("// Pass 1 (sequential)"))
-    pass2_at = src.find(PASS2_COND)
+    pass2_at = masked.find(PASS2_COND)
     pass3_at = src.find(PASS3_MARK)
-    critical_at = src.find(CRITICAL_GUARD)
+    critical_at = masked.find(CRITICAL_GUARD)
     execute_call_at = code.find(EXECUTE_CALL)
     for name, at in (
         ("Pass-1 tool loop", header_at),
@@ -164,18 +374,42 @@ def check(src: str, label: str):
 
     pass1 = code[header_at:pass2_at]
     pass2_seq = code[cue_call_at:execute_call_at]
-    crit_end = CONTINUE_STMT.search(code, critical_at)
-    if crit_end is None:
-        bad.append("%s:%d: the CRITICAL branch has no terminating `continue`"
+    # The CRITICAL branch is delimited by BRACE DEPTH, not by "the first line that
+    # is exactly `continue`": `if (true) continue` / `continue // blocked` used to
+    # push the terminator search past this branch and swallow the NEXT refusal
+    # branch's publish as if it belonged here (wide3 T1 parser-death).
+    crit_open = masked.find("{", critical_at + len(CRITICAL_GUARD) - 1)
+    crit_end = match_close(masked, crit_open, "{", "}") if crit_open > 0 else -1
+    if crit_end < 0:
+        bad.append("%s:%d: the CRITICAL branch braces are unbalanced — cannot delimit it"
                    % (label, line_of(src, critical_at)))
         return bad, notes
-    critical = code[critical_at:crit_end.start()]
+    critical = code[critical_at:crit_end]
+    crit_ifs = [s for s in ifs if crit_open < s[2] and s[3] < crit_end]
+    terminators = 0
+    for m in re.finditer(r"\b(?:continue|break|return|throw)\b", critical):
+        guards = enclosing(crit_ifs, critical_at + m.start())
+        if any(always_false(g) for g in guards):
+            continue
+        terminators += 1
+    if not terminators:
+        bad.append("%s:%d: the CRITICAL branch has no live terminating `continue` — the refusal "
+                   "would fall through into execution" % (label, line_of(src, critical_at)))
+        return bad, notes
 
-    # ── T1: a refusal publishes ──────────────────────────────────────────────
-    if UI_PUSH not in critical:
-        bad.append("%s:%d: the CRITICAL loop-detector branch records the refusal without "
-                   "publishing it (no `%s`) — the tool card keeps spinning"
-                   % (label, line_of(src, critical_at), UI_PUSH))
+    # ── T1: a refusal publishes — and the publish must be LIVE ───────────────
+    pushes = [critical_at + m.start() for m in re.finditer(re.escape(UI_PUSH), critical)]
+    live_push = [at for at in pushes
+                 if not any(always_false(g) for g in enclosing(crit_ifs, at))]
+    if not live_push:
+        if pushes:
+            bad.append("%s:%d: the CRITICAL loop-detector branch publishes the refusal only under a "
+                       "dead guard (literal-short-circuited) — the call is spelled out, the card "
+                       "still keeps spinning" % (label, line_of(src, critical_at)))
+        else:
+            bad.append("%s:%d: the CRITICAL loop-detector branch records the refusal without "
+                       "publishing it (no `%s`) — the tool card keeps spinning"
+                       % (label, line_of(src, critical_at), UI_PUSH))
     else:
         notes.append("T1 CRITICAL branch publishes its refusal")
 
@@ -198,13 +432,26 @@ def check(src: str, label: str):
         bad.append("%s:1: the sequential branch no longer publishes the queue cue "
                    "(no `cueBlock.copy(... %s ...)` in the sequential region)"
                    % (label, CUE_CONST_REF))
-    if PENDING not in pass2_seq:
-        bad.append("%s:1: the sequential cue is not guarded on %s — it would annotate a call that "
-                   "already started" % (label, PENDING))
+    # The PENDING test must DECIDE: `if (false && cueBlock.toolStatus != PENDING) continue`
+    # keeps the spelling and drops the guard, which is the whole point of T3.
+    live_pending = False
+    for m in re.finditer(re.escape(PENDING), pass2_seq):
+        at = cue_call_at + m.start()
+        conds = list(enclosing(ifs, at))
+        # the token may sit in a guard's CONDITION (the usual shape:
+        # `if (cueBlock.toolStatus != PENDING) continue`) rather than in its body
+        conds += [s[4] for s in ifs if s[0] <= at <= s[1]]
+        for cond in conds:
+            if PENDING in cond and not always_false(cond) and not always_true(cond):
+                live_pending = True
+    if not live_pending:
+        bad.append("%s:1: the sequential cue is not guarded on a LIVE %s test — it would annotate a "
+                   "call that already started (a literal-short-circuited guard is the same defect)"
+                   % (label, PENDING))
     if code.count(CUE_TEXT) != 1:
         bad.append("%s:1: the cue literal appears %d time(s) in code — it must be single-sourced in "
                    "%s, a second copy drifts" % (label, code.count(CUE_TEXT), "ToolPassTransitionPolicy"))
-    if CUE_INDICES_CALL in code and cue_published and PENDING in pass2_seq \
+    if CUE_INDICES_CALL in code and cue_published and live_pending \
             and code.count(CUE_TEXT) == 1:
         notes.append("T3 sequential queue cue present, index-driven, PENDING-guarded, single-sourced")
 
@@ -221,15 +468,47 @@ def check(src: str, label: str):
     else:
         notes.append("T4 cue → dispatch flip → executeTool order holds")
 
-    # ── T5: both dispatch sites flip through the policy ──────────────────────
+    # ── T5: both dispatch sites flip through the policy, and the policy DECIDES ─
     if code.count(DISPATCH_FLIP_CALL) < 2:
         bad.append("%s:1: only %d call site(s) of %s — the parallel batch and the sequential "
                    "dispatch must both flip through the policy"
                    % (label, code.count(DISPATCH_FLIP_CALL), DISPATCH_FLIP_CALL))
     else:
         notes.append("T5 both dispatch sites flip through the policy")
+    # [wide3 T5] Delegating to the policy is only half the contract: an
+    # unconditional `= ToolBlockStatus.RUNNING` inside statusAtDispatch keeps
+    # both call sites and resurrects every refused block into a spinner. The
+    # body must branch on PENDING.
+    span = fun_body(masked, "statusAtDispatch")
+    if span is None:
+        bad.append("%s:1: `fun statusAtDispatch(` body not found — anchor moved or unbalanced"
+                   % label)
+    else:
+        body = masked[span[0]:span[1]]
+        if PENDING not in body or RUNNING not in body or not re.search(r"\b(?:if|when)\b", body):
+            bad.append("%s:%d: `statusAtDispatch` no longer decides on %s — its body is `%s`; an "
+                       "unconditional flip resurrects a block Pass 1 already refused (FAILED) into "
+                       "a RUNNING spinner"
+                       % (label, line_of(src, span[0]), PENDING,
+                          " ".join(body.split())[:80]))
 
     # ── T6: starting a call retires its cue ──────────────────────────────────
+    # Same shape as T5: the call site can stay while the body degrades into
+    # `= current` (cue text never retired, then persisted as tool output).
+    span = fun_body(masked, "contentAtDispatchFlip")
+    params = policy_sig_params(masked, "contentAtDispatchFlip")
+    if span is None or not params:
+        bad.append("%s:1: `fun contentAtDispatchFlip(` body not found — anchor moved or unbalanced"
+                   % label)
+    else:
+        body = masked[span[0]:span[1]]
+        missing = [p for p in params if not re.search(r"\b" + re.escape(p) + r"\b", body)]
+        if missing or not re.search(r"\b(?:if|when)\b", body):
+            bad.append("%s:%d: `contentAtDispatchFlip` no longer retires the queue cue — its body "
+                       "is `%s` (missing %s / no branch); a leftover cue is shown and persisted as "
+                       "that tool's output"
+                       % (label, line_of(src, span[0]), " ".join(body.split())[:80],
+                          ", ".join(missing) or "branch"))
     if FLIP_CONTENT_CALL not in code:
         bad.append("%s:1: the dispatch flip no longer retires the queue cue (%s) — the cue text is "
                    "not tool output and the finalisation pass keeps max(existing, result) BY "
@@ -319,6 +598,54 @@ FIXTURES = [
      lambda s: s.replace(
          "                    val flippedStatus = ToolPassTransitionPolicy.statusAtDispatch(sharedBlocks[flipIdx].toolStatus)",
          "                    val flippedStatus = sharedBlocks[flipIdx].toolStatus", 1)),
+    # ── wide3 witnesses: shapes the old criteria let through ────────────────
+    ("critical_push_dead_guard", "only under a dead guard",
+     lambda s: s.replace(
+         """                        withContext(Dispatchers.Main) {
+                            host.updateAssistantMessage(loopState.assistantId, loopState.accumulatedText, true, loopState.allToolBlocks)
+                        }
+                    }
+                    // Record the blocked attempt""",
+         """                        if (false) withContext(Dispatchers.Main) {
+                            host.updateAssistantMessage(loopState.assistantId, loopState.accumulatedText, true, loopState.allToolBlocks)
+                        }
+                    }
+                    // Record the blocked attempt""", 1)),
+    ("critical_push_lost_to_terminator", "records the refusal without publishing",
+     lambda s: s.replace(
+         """                        withContext(Dispatchers.Main) {
+                            host.updateAssistantMessage(loopState.assistantId, loopState.accumulatedText, true, loopState.allToolBlocks)
+                        }
+                    }
+                    // Record the blocked attempt""",
+         """                    }
+                    // Record the blocked attempt""", 1).replace(
+         """                        content = blockedMsg,
+                        isError = true,
+                    ))
+                    continue
+                }""",
+         """                        content = blockedMsg,
+                        isError = true,
+                    ))
+                    if (true) continue
+                }""", 1)),
+    ("cue_guard_short_circuited", "not guarded on a LIVE",
+     lambda s: s.replace(
+         "                        if (cueBlock.toolStatus != ToolBlockStatus.PENDING) continue\n",
+         "                        if (false && cueBlock.toolStatus != ToolBlockStatus.PENDING) continue\n", 1)),
+    ("status_at_dispatch_unconditional", "statusAtDispatch` no longer decides",
+     lambda s: s.replace(
+         """    fun statusAtDispatch(current: ToolBlockStatus?): ToolBlockStatus? =
+        if (current == ToolBlockStatus.PENDING) ToolBlockStatus.RUNNING else null""",
+         """    fun statusAtDispatch(current: ToolBlockStatus?): ToolBlockStatus? =
+        ToolBlockStatus.RUNNING""", 1)),
+    ("flip_content_passthrough", "contentAtDispatchFlip` no longer retires",
+     lambda s: s.replace(
+         """    fun contentAtDispatchFlip(current: String, queueCue: String): String =
+        if (current == queueCue) "" else current""",
+         """    fun contentAtDispatchFlip(current: String, queueCue: String): String =
+        current""", 1)),
     ("flip_keeps_cue_text", "no longer retires the queue cue",
      lambda s: s.replace(
          """                                content = ToolPassTransitionPolicy.contentAtDispatchFlip(
