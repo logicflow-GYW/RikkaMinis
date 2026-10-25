@@ -511,19 +511,22 @@ def check_url_routing(src):
     """-> (routed_sites, violations) for every models URL built from a base.
 
     Derived from the literals themselves: the interpolation that sits directly
-    before `/models/` is the base, and it must be the NORMALIZED base (inline
-    call, or a local bound to the normalizer in the same function).
+    before `/models/` is the base. A site is ROUTED when that interpolation is
+    the normalizer itself, or a local bound to it in the same function; every
+    site that reads anything else is a violation. `routed` counts accepted
+    sites only, so a third bypassing site cannot inflate the count the way the
+    old `normalizedBasePath()` tally did.
     """
     violations = []
-    sites = 0
+    routed = 0
     for start, literal in _string_literals(src):
         if not URL_MODEL_MARK_RE.search(literal):
             continue
         interps = list(BASE_INTERP_RE.finditer(literal))
         if not interps:
             continue  # a hard-coded base needs no normalization
-        sites += 1
         fn = enclosing_function(src, start) or ""
+        ok = True
         for m in interps:
             expr = (m.group(1) or m.group(2) or "").strip()
             if "normalizedBasePath(" in expr:
@@ -532,12 +535,15 @@ def check_url_routing(src):
                     r"\b(?:val|var)\s+%s\s*(?::[^=\n]+)?=\s*[^\n]*normalizedBasePath\("
                     % re.escape(expr), fn):
                 continue
+            ok = False
             line = src[:start].count("\n") + 1
             violations.append(
-                f"GeminiProvider.kt:{line} the models URL interpolates `{expr}` instead of the "
-                "normalized base — a base ending in /v1 (appendV1Suffix) or carrying a "
-                "duplicate segment then 404s on every non-streaming call")
-    return sites, violations
+                f"GeminiProvider.kt:{line} the models URL interpolates `{expr}` — a raw basePath "
+                "instead of the normalized base — so a base ending in /v1 (appendV1Suffix) or "
+                "carrying a duplicate segment 404s on every non-streaming call")
+        if ok:
+            routed += 1
+    return routed, violations
 
 
 def check_cross_file_sites(root, gemini_bodies):
@@ -1306,8 +1312,8 @@ def main():
     if os.path.exists(provider):
         src = strip_comments(open(provider, encoding="utf-8").read())
         sites, url_failures = check_url_routing(src)
-        print(f"  [{'OK' if not url_failures else 'FAIL'}] GeminiProvider routes {sites} models "
-              "URL(s) through the normalizer")
+        print(f"  [{'OK' if not url_failures else 'FAIL'}] GeminiProvider routes {sites} call "
+              "site(s) through the normalizer (models URL(s) judged by their base interpolation)")
         if sites < MIN_URL_SITES:
             url_failures.append(
                 f"GeminiProvider: only {sites} models URL(s) interpolate a base (expected >= "
