@@ -112,13 +112,42 @@ def brace_span(text: str, open_idx: int) -> tuple:
     return open_idx, i
 
 
+def matching_paren(text: str, open_idx: int) -> int:
+    """Index of the `)` closing text[open_idx], or -1."""
+    depth, i, n = 0, open_idx, len(text)
+    while i < n:
+        c = text[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
 def function_body(text: str, decl_pattern: str):
     """Stripped body (incl. braces) of the first function matching the
-    declaration pattern, or '' when not found."""
+    declaration pattern, or '' when not found.
+
+    The body starts AFTER the parameter list, so it is located by first finding
+    the `)` that closes the declaration's `(` and only then looking for the `{`.
+    Taking the first `{` after the name (the pre-wide3 shape) put the scan inside
+    a DEFAULT-VALUE lambda: a wide3 witness added
+    `guardStub: () -> Unit = { … }` to `shareMediaFile`'s parameter list and the
+    gate then inspected that lambda while the real body — the `Uri.fromFile(file)`
+    and the `try` it was meant to judge — fell outside the scan.
+    """
     m = re.search(decl_pattern, text)
     if not m:
         return ""
-    brace = text.find("{", m.end())
+    lp = text.find("(", m.start())
+    if lp < 0:
+        return ""
+    rp = matching_paren(text, lp)
+    if rp < 0:
+        return ""
+    brace = text.find("{", rp + 1)
     if brace < 0:
         return ""
     start, end = brace_span(text, brace)
@@ -189,6 +218,17 @@ def check_arms(clean: str):
                     "IllegalStateException once the player left the playable states "
                     "(the onError terminalize), which skips release() and leaks the "
                     "native codec (InlineMediaPlayer.onDispose is the fixed shape)")
+            elif stop_try[0] < release_call.start() < stop_try[1]:
+                # wide3: nesting `try { release() }` INSIDE the try that guards
+                # stop() keeps "two different try blocks" true while restoring the
+                # exact defect -- stop() throws, the outer catch swallows it, the
+                # sibling-inner release never runs. Judge reachability, not
+                # distinctness of spans.
+                problems.append(
+                    "arm1: release() is nested INSIDE the try block that calls stop() "
+                    "-- a throwing stop() (the onError terminalize runs in exactly that "
+                    "state) skips it and leaks the native codec; the two blocks must be "
+                    "SIBLINGS so release() runs on the stop()-threw path too")
 
     # arm 2: @Volatile on Session.state
     if not re.search(r"@Volatile\s+var\s+state\s*:\s*PlayerState", clean):
@@ -205,18 +245,44 @@ def check_arms(clean: str):
             "re-point this guard")
     else:
         m = re.search(r"sessions\s*\[\s*sessionId\s*\]\s*\?\.", play_body)
-        pre_rel = play_body.find("releaseSession(existing)")
-        if m and pre_rel >= 0:
-            # the ?.let lambda ends before the first `}` after pre_rel
-            if not inside_any(synchronized_lock_spans(play_body), m.start()):
+        locks = synchronized_lock_spans(play_body)
+        release_sites = [mm.start() for mm in
+                         re.finditer(r"releaseSession\s*\(\s*\w+\s*\)", play_body)]
+        if not release_sites:
+            problems.append(
+                "arm3: play() no longer pre-releases the existing session via "
+                "releaseSession(existing) -- if the shape changed, re-point this guard")
+        else:
+            if m and not inside_any(locks, m.start()):
                 problems.append(
                     "arm3: play() reads/releases the previous session OUTSIDE "
                     "synchronized(lock) -- the terminalize callbacks release the same "
                     "instance under this lock; unlocked this is a double-release race")
-        elif pre_rel < 0:
-            problems.append(
-                "arm3: play() no longer pre-releases the existing session via "
-                "releaseSession(existing) -- if the shape changed, re-point this guard")
+            # wide3: the REPLACEMENT call site is what races, not the read. The
+            # witness moved `releaseSession(existing)` out of the lock while leaving
+            # the map read inside it, so checking the read's position said green
+            # for a release the callback thread can hit at the same instant.
+            for idx in release_sites:
+                if inside_any(locks, idx):
+                    continue
+                # ...unless the instance left the map UNDER the lock before it: a
+                # `put`/`remove` of the same key is what makes the outside release
+                # safe (the callback no longer has a reachable owner).
+                detached = False
+                for ls, le in locks:
+                    if ls > idx:
+                        continue
+                    span = play_body[ls:le]
+                    if re.search(r"sessions\s*\.\s*(?:remove|put)\s*\(", span):
+                        detached = True
+                        break
+                if not detached:
+                    problems.append(
+                        "arm3: play() calls releaseSession(...) OUTSIDE "
+                        "synchronized(lock) without first removing/replacing the map "
+                        "entry under that lock -- the terminalize callbacks release the "
+                        "same Session instance under the lock, so this is the "
+                        "double-release race (da1022-C)")
 
     # arm 4: stop() remove under the lock
     stop_body = function_body(clean, r"fun\s+stop\s*\(")
@@ -783,14 +849,56 @@ object MediaPlayerManager {
         "        releaseSession(session)\n"
         "        sessions.remove(sessionId)")
 
+    # ── wide3 witnesses, one per falsified axis ──────────────────────────
+    # arm1 (anchor): the release try is nested INSIDE the stop try, so "two
+    # different try blocks" stays true while a throwing stop() skips release().
+    M5N = COMPLIANT.replace(
+        """        try {
+            if (session.state == PlayerState.PLAYING) {
+                session.player.stop()
+            }
+        } catch (e: Exception) { }
+        try {
+            session.player.release()
+            session.state = PlayerState.STOPPED
+        } catch (e: Exception) { }""",
+        """        try {
+            if (session.state == PlayerState.PLAYING) {
+                session.player.stop()
+            }
+            try {
+                session.player.release()
+                session.state = PlayerState.STOPPED
+            } catch (e: Exception) { }
+        } catch (e: Exception) { }""")
+    # arm3 (dataflow): the map read stays under the lock, the RELEASE does not.
+    M6N = COMPLIANT.replace(
+        """        synchronized(lock) {
+            sessions[sessionId]?.let { existing ->
+                releaseSession(existing)
+            }
+        }""",
+        """        val existing = synchronized(lock) { sessions[sessionId]?.let { it } }
+        if (existing != null) releaseSession(existing)""")
+    if M5N == COMPLIANT or M6N == COMPLIANT:
+        drift = True
+    else:
+        drift = False
+
     cases = [
         ("compliant", COMPLIANT, 0),
         ("M1 stop+release same try", M1, 1),
         ("M2 state not volatile", M2, 1),
         ("M3 play pre-release unlocked", M3, 1),
         ("M4 stop remove unlocked", M4, 1),
+        ("M5n release try nested inside the stop try (wide3 arm1)", M5N, 1),
+        ("M6n release moved out of the lock, read left inside (wide3 arm3)", M6N, 1),
     ]
     ok = True
+    if drift:
+        print("  selftest wide3 arm1/arm3: mutation did not apply (fixture "
+              "drifted) -- FAIL")
+        ok = False
     for name, src, want_red in cases:
         problems = check_arms(strip_comments_and_strings(src))
         red = len(problems) > 0
@@ -1037,6 +1145,30 @@ private fun shareMediaFile(context: android.content.Context, file: File, mime: S
     M6d = COMPLIANT.replace(
         "private fun shareMediaFile(context: android.content.Context, file: File, "
         "mime: String) {", "private fun shareSomethingElse(mime: String) {")
+    # wide3 arm6 (parser-death): a DEFAULT-VALUE lambda in the parameter list.
+    # `function_body` used to take the first `{` after the name, so it inspected
+    # the lambda and never saw the real body's `Uri.fromFile(file)`.
+    M6e = COMPLIANT.replace(
+        "private fun shareMediaFile(context: android.content.Context, file: File, "
+        "mime: String) {\n"
+        "    val authority = context.packageName + \".fileprovider\"\n"
+        "    val uri = try {",
+        "private fun shareMediaFile(\n"
+        "    context: android.content.Context,\n"
+        "    file: File,\n"
+        "    mime: String,\n"
+        "    guardStub: () -> Unit = {\n"
+        "        try { androidx.core.content.FileProvider.getUriForFile(context, \"\", file) }"
+        " catch (_: Throwable) {\n"
+        "            AppLogger.warning(\"InlineMediaPlayer\", \"\")\n"
+        "            Toast.makeText(context, R.string.file_share_failed_toast, "
+        "Toast.LENGTH_SHORT)\n"
+        "            return\n"
+        "        }\n"
+        "    },\n"
+        ") {\n"
+        "    val uri = Uri.fromFile(file)\n"
+        "    if (false) try {")
     # precision: comments may mention the very calls that are forbidden
     P2 = COMPLIANT.replace(
         "                if (!prepared) return@IconButton\n",
@@ -1048,7 +1180,7 @@ private fun shareMediaFile(context: android.content.Context, file: File, mime: S
     ok = True
     for label, mut in (("M6a", M6a), ("M6b", M6b), ("M6b2", M6b2), ("M6b3", M6b3),
                        ("M6b4", M6b4), ("M6b5", M6b5), ("M6c", M6c), ("M6d", M6d),
-                       ("P2", P2)):
+                       ("M6e", M6e), ("P2", P2)):
         if mut == COMPLIANT:
             print(f"  selftest arm6 {label}: mutation did not apply "
                   f"(fixture drifted) -- FAIL")
@@ -1065,6 +1197,7 @@ private fun shareMediaFile(context: android.content.Context, file: File, mime: S
         ("arm6 precision P2 comments mention the calls", P2, None),
         ("arm6a M6c no transport call site (fail-closed anchor)", M6c, "arm6a"),
         ("arm6b M6d shareMediaFile gone (fail-closed anchor)", M6d, "arm6b"),
+        ("arm6b M6e default-value lambda hides the body (wide3)", M6e, "arm6b"),
     ]
     for name, src, want_key in cases:
         problems = check_inline_player_guards(strip_comments_and_strings(src))
