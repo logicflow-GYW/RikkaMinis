@@ -46,7 +46,23 @@ import re
 import sys
 import tempfile
 
-KEY_RE = re.compile(r'name="([a-z0-9_]+)"')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_ast import const_bool, match_bracket, stmt_spans, when_branches  # noqa: E402
+from _kotlin_lexer import KotlinLexError  # noqa: E402
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    code_view,
+    expr_end,
+    path_feasible,
+    value_sources,
+)
+
+# A key is DEFINED by a string resource node, never by a bare `name="…"`
+# attribute (A01-5: `<eat-comment name="x"/>` / `<item type="id" name="x"/>`
+# carry the same attribute while producing `R.id`, not `R.string`).
+_STRING_TAG_RE = re.compile(r"<(string|item)\b([^>]*)>")
+_NAME_ATTR_RE = re.compile(r'\bname="([a-z0-9_]+)"')
+_TYPE_ATTR_RE = re.compile(r'\btype="([a-z0-9_]+)"')
 CODE_KEY_RE = re.compile(r'R\.string\.([a-z0-9_]+)')
 STRINGS_GLOB = (lambda fn: fn.startswith("strings") and fn.endswith(".xml"))
 
@@ -55,6 +71,12 @@ LOCALES_CONFIG = RES_DIR + "/xml/locales_config.xml"
 APPEARANCE_SCREEN = ("src/android/app/src/main/java/com/rikkaminis/app/"
                      "ui/settings/AppearanceScreen.kt")
 APPLY_FUNCTION = "applyLanguageChange("
+# A preference read, however it is spelled: `prefs.getString(…)` or
+# `getAppearancePrefs(ctx).getString(…)`.
+PREF_READ_FAMILY_RE = re.compile(
+    r"\bprefs\s*\.\s*get\w*\s*\("
+    r"|\bget\w*Prefs\s*\([^()]*\)\s*\.\s*get\w*\s*\("
+)
 LISTENER_ARM = "KEY_LANGUAGE ->"
 
 SELFTEST_MARKER = "I18N_CHECK_SELFTEST=PASS"
@@ -67,102 +89,144 @@ def strip_xml_comments(text):
     return _XML_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
 
 
-def mask_kt_comments(text):
-    """Blank //-comments and /* */ blocks; newlines and offsets preserved.
+def _when_arm_unreachable(text, pos):
+    """pos sits in a `when` arm whose pattern cannot match the constant subject.
 
-    Line structure has to survive: the arm body is searched with offsets (a
-    dead-guard span is compared against a call offset), and a commented-out call
-    must not count as the call (wide3 witness C4 parser-death)."""
-    out = []
-    i, n = 0, len(text)
-    state = None
-    while i < n:
-        c = text[i]
-        two = text[i:i + 2]
-        if state is None:
-            if two == "//":
-                state = "line"; out.append("  "); i += 2; continue
-            if two == "/*":
-                state = "block"; out.append("  "); i += 2; continue
-            if c == '"':
-                state = "str"; out.append(" "); i += 1; continue
-            out.append(c); i += 1; continue
-        if state == "line":
-            out.append("\n" if c == "\n" else " ")
-            if c == "\n":
-                state = None
-            i += 1; continue
-        if state == "block":
-            if two == "*/":
-                state = None; out.append("  "); i += 2; continue
-            out.append("\n" if c == "\n" else " "); i += 1; continue
-        if state == "str":
-            if c == "\\":
-                out.append("  "); i += 2; continue
-            if c == '"':
-                state = None
-            out.append(" "); i += 1; continue
-    return "".join(out)
-
-
-def _paren_close(text, open_idx):
-    """Index of the `)` matching the `(` at open_idx, or -1."""
-    depth = 0
-    for i in range(open_idx, len(text)):
-        if text[i] == "(":
-            depth += 1
-        elif text[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
-
-
-def _brace_close(text, open_idx):
-    depth = 0
-    for i in range(open_idx, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return i
-    return len(text) - 1
-
-
-def _condition_is_dead(cond):
-    """True when the condition can only ever be false.
-
-    The shapes that matter are the ones a reviewer skims past: `false`,
-    `false && …`, `… && false`, `true || …`, `… || true`.
+    `when (false) { true -> work(); else -> Unit }` is the `if (false)` sibling:
+    `enclosing_conditions` reports the arm pattern only and never the subject,
+    so this hop is closed here (A01-2).
     """
-    parts = [p.strip() for p in re.split(r"&&|\|\|", cond)]
-    if cond.strip() == "false":
-        return True
-    if "&&" in cond and "false" in parts:
-        return True
-    if "||" in cond and "true" in parts:
-        return True
+    for subject, cond, b_start, b_end in when_branches(text):
+        if not (b_start <= pos < b_end):
+            continue
+        if not subject.strip():
+            continue                      # `when { … }` carries no subject
+        subj = const_bool(subject)
+        if subj is None:
+            continue                      # non-constant subject: never judge dead
+        arm = cond.strip()
+        if arm.startswith("else"):
+            continue
+        arm_val = const_bool(arm)
+        if arm_val is None:
+            continue                      # non-constant pattern: never judge dead
+        if arm_val != subj:
+            return True
     return False
 
 
-def dead_guard_spans(clean):
-    """[(start, end)] spans of code guarded by a literal-dead condition."""
-    spans = []
-    for m in re.finditer(r"\b(if|while)\s*\(", clean):
-        open_idx = clean.index("(", m.start())
-        close = _paren_close(clean, open_idx)
-        if close < 0 or not _condition_is_dead(clean[open_idx + 1:close]):
+_IF_HEAD_RE = re.compile(r"\s*if\s*\(")
+_STMT_EXIT_RE = re.compile(r"\s*(?:return|throw)\b")
+
+
+def _stmt_unconditionally_exits(seg):
+    """Does this statement leave the enclosing lambda/function unconditionally?
+
+    `return@x` / `throw` do; `if (true) return@x` does too once `const_bool`
+    folds the condition (A01-3 — the witness wrapped the early return in
+    `if (true)` precisely to stay out of an "unconditional return" regex).
+    """
+    s = seg.strip()
+    if _STMT_EXIT_RE.match(s):
+        return True
+    m = _IF_HEAD_RE.match(s)
+    if not m:
+        return False
+    open_idx = s.index("(", m.end() - 1)
+    close = match_bracket(s, open_idx)
+    if close < 0:
+        return False
+    if const_bool(s[open_idx + 1:close]) is not True:
+        return False
+    return re.search(r"\b(?:return|throw)\b", s[close + 1:]) is not None
+
+
+def _innermost_block(text, pos):
+    """Index of the `{` of the innermost block that contains pos (or None)."""
+    i = pos - 1
+    while i >= 0:
+        if text[i] == "{":
+            close = match_bracket(text, i)
+            if close > pos:
+                return i
+            i = close if close > i else i - 1
             continue
-        body = close + 1
-        while body < len(clean) and clean[body] in " \t\r\n":
-            body += 1
-        if body < len(clean) and clean[body] == "{":
-            spans.append((body, _brace_close(clean, body)))
-        else:
-            eol = clean.find("\n", body)
-            spans.append((body, len(clean) - 1 if eol < 0 else eol))
-    return spans
+        i -= 1
+    return None
+
+
+def _unreachable_after_exit(text, pos):
+    """Is there an unconditional exit before pos inside the SAME block?
+
+    The statement list is taken from the innermost enclosing block, not from
+    the top of the arm: the arm body opens with `KEY_LANGUAGE -> {`, so a
+    whole-file statement scan would see one single depth-0 statement and never
+    look inside (A01-3).
+    """
+    brace = _innermost_block(text, pos)
+    if brace is None:
+        return False
+    close = match_bracket(text, brace)
+    inner = text[brace + 1:close]
+    rel = pos - brace - 1
+    for a, b in stmt_spans(inner):
+        if b > rel:
+            break
+        if _stmt_unconditionally_exits(inner[a:b]):
+            return True
+    return False
+
+
+def _reachable_at(text, pos):
+    """Will the code at pos actually run?
+
+    Three complementary criteria; each one was a separate falsified witness:
+      * `path_feasible` — `if (false)` / `if (!true)` / `if (1 == 2)`, because
+        the old whitelist compared operands to the exact strings `true`/`false`
+        and `!true` never matched (A01-1);
+      * `_when_arm_unreachable` — `when (false) { true -> … }` (A01-2);
+      * `_unreachable_after_exit` — anything after `if (true) return@Listener`
+        (A01-3).
+    """
+    return (path_feasible(text, pos)
+            and not _when_arm_unreachable(text, pos)
+            and not _unreachable_after_exit(text, pos))
+
+
+def _local_rhs(text, name, before):
+    """Right-hand side of the nearest `val/var name =` before [before]."""
+    rhs = None
+    for m in re.finditer(r"\b(?:val|var)\s+" + re.escape(name) + r"\b[^=\n]*=(?!=)", text):
+        if m.start() >= before:
+            break
+        rhs = text[m.end():expr_end(text, m.end())].strip()
+    return rhs
+
+
+def _value_origins(text, expr, before):
+    """Every value [expr] can evaluate to, following one local `val` hop.
+
+    `applyLanguageChange(context, prefs, code)` must be judged on where `code`
+    comes from, not on the call spelling (A01-6 passes a literal `""`).
+    """
+    out = []
+    for src_expr in value_sources(expr):
+        out.append(src_expr)
+        name = src_expr.strip()
+        if re.fullmatch(r"[A-Za-z_]\w*", name):
+            rhs = _local_rhs(text, name, before)
+            if rhs:
+                out.extend(value_sources(rhs))
+    return out
+
+
+
+
+
+
+
+
+
 
 
 def keys_defined_in(folder):
@@ -179,7 +243,28 @@ def keys_defined_in(folder):
         if not STRINGS_GLOB(fn):
             continue
         with open(os.path.join(folder, fn), encoding="utf-8") as f:
-            keys.update(KEY_RE.findall(strip_xml_comments(f.read())))
+            keys.update(defined_string_keys(strip_xml_comments(f.read())))
+    return keys
+
+
+def defined_string_keys(xml):
+    """Keys **defined as string resources** by one XML document.
+
+    `<string name="x">` defines `R.string.x`; `<item type="string" name="x">`
+    does too. `<eat-comment name="x"/>`, `<item type="id" name="x"/>` and
+    `<attr name="x"/>` carry the same attribute and define something else, so a
+    bare `name="…"` regex reports the key as defined while `R.string.x` is
+    missing at runtime (A01-5)."""
+    keys = set()
+    for m in _STRING_TAG_RE.finditer(xml):
+        tag, attrs = m.group(1), m.group(2)
+        if tag == "item":
+            t = _TYPE_ATTR_RE.search(attrs)
+            if not t or t.group(1) != "string":
+                continue
+        n = _NAME_ATTR_RE.search(attrs)
+        if n:
+            keys.add(n.group(1))
     return keys
 
 
@@ -296,12 +381,17 @@ def check_language_wiring(root):
               f"react to a stored language change (ROT: fail-closed)")
         return 1
     # The arm must REACH the shared function, not merely mention it: a call
-    # behind `if (false)` moves nothing, and a commented-out call never runs
-    # (wide3 witness C4 — dataflow and parser-death variants of the same arm).
-    clean = mask_kt_comments(body)
-    dead = dead_guard_spans(clean)
+    # behind `if (false)`/`if (!true)`/`when (false)` moves nothing, a
+    # commented-out or `""""…"""`-quoted call never runs, and a call after
+    # `if (true) return@Listener` is dead code (wide3 C4 + A01-1..A01-4).
+    try:
+        clean = code_view(body)
+    except KotlinLexError as exc:
+        print(f"❌ cannot parse the `{LISTENER_ARM}` arm ({exc}) — the wiring "
+              f"criterion cannot be evaluated (ROT: fail-closed)")
+        return 1
     mentions = [m.start() for m in re.finditer(re.escape(APPLY_FUNCTION), clean)]
-    live = [at for at in mentions if not any(s <= at <= e for s, e in dead)]
+    live = [at for at in mentions if _reachable_at(clean, at)]
     if not live:
         if mentions:
             print(f"❌ the `{LISTENER_ARM}` arm only reaches {APPLY_FUNCTION}…) from "
@@ -313,8 +403,23 @@ def check_language_wiring(root):
                   f"external write to the language preference would move the UI only, "
                   f"leaving the process in the previous language")
         return 1
-    print("✅ the language listener applies the change through the shared function")
-    return 0
+    # ...and the value it applies must be READ BACK from the preference, not a
+    # constant: `applyLanguageChange(context, prefs, "")` runs for real, resets
+    # the process locale AND overwrites the stored tag with "" (A01-6).
+    for at in live:
+        open_paren = clean.index("(", at)
+        origins = []
+        for a, b in call_args(clean, open_paren):
+            origins.extend(_value_origins(clean, clean[a:b], at))
+        if any(PREF_READ_FAMILY_RE.search(o) for o in origins):
+            print("✅ the language listener applies the stored language through "
+                  "the shared function")
+            return 0
+    print(f"❌ the `{LISTENER_ARM}` arm calls {APPLY_FUNCTION}…) but never with "
+          f"the language read back from the preference: a constant argument "
+          f"resets the process locale to the system default AND overwrites the "
+          f"stored tag, so an external write is not honoured either")
+    return 1
 
 
 def main():
@@ -396,7 +501,7 @@ def _appearance_screen(arm):
         "internal fun applyLanguageChange(code: String) { println(code) }\n\n"
         "fun AppearanceScreen() {\n"
         "    val prefs = 1\n"
-        "    val listener = { key: String ->\n"
+        "    val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->\n"
         "        when (key) {\n"
         "            \"other\" -> println(key)\n"
         + arm +
@@ -408,8 +513,8 @@ def _appearance_screen(arm):
 
 ARM_WIRED = (
     "            KEY_LANGUAGE -> {\n"
-    "                val code = \"\"\n"
-    "                applyLanguageChange(code)\n"
+    "                val code = prefs.getString(key, \"\") ?: \"\"\n"
+    "                applyLanguageChange(context, prefs, code)\n"
     "            }\n"
 )
 ARM_STATE_ONLY = (
@@ -432,13 +537,56 @@ ARM_COMMENTED = (
 )
 ARM_DEAD_THEN_LIVE = (
     "            KEY_LANGUAGE -> {\n"
-    "                if (false) applyLanguageChange(\"x\")\n"
-    "                applyLanguageChange(\"y\")\n"
+    "                if (false) applyLanguageChange(context, prefs, \"x\")\n"
+    "                applyLanguageChange(context, prefs, prefs.getString(key, \"\") ?: \"\")\n"
+    "            }\n"
+)
+# [B6-t04] the six falsified A01 witnesses, one arm each.
+ARM_NOT_TRUE = (
+    "            KEY_LANGUAGE -> {\n"
+    "                val code = prefs.getString(key, \"\") ?: \"\"\n"
+    "                if (!true) applyLanguageChange(context, prefs, code)\n"
+    "            }\n"
+)
+ARM_WHEN_FALSE = (
+    "            KEY_LANGUAGE -> {\n"
+    "                val code = prefs.getString(key, \"\") ?: \"\"\n"
+    "                when (false) { true -> applyLanguageChange(context, prefs, code); "
+    "else -> Unit }\n"
+    "            }\n"
+)
+ARM_EARLY_RETURN = (
+    "            KEY_LANGUAGE -> {\n"
+    "                val code = prefs.getString(key, \"\") ?: \"\"\n"
+    "                if (true) return@OnSharedPreferenceChangeListener\n"
+    "                applyLanguageChange(context, prefs, code)\n"
+    "            }\n"
+)
+ARM_RAW_STRING = (
+    "            KEY_LANGUAGE -> {\n"
+    '                val deadRaw = """" applyLanguageChange(context, prefs, code) """\n'
+    "            }\n"
+)
+ARM_CONST_ARG = (
+    "            KEY_LANGUAGE -> {\n"
+    "                val code = prefs.getString(key, \"\") ?: \"\"\n"
+    "                applyLanguageChange(context, prefs, \"\")\n"
     "            }\n"
 )
 COMMENTED_KEY = ('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n'
                  '    <!-- <string name="ghost_key">commented out</string> -->\n'
                  '</resources>\n')
+# [B6-t04 A01-5] `name="…"` on a node that is NOT a string resource: `<eat-comment>`
+# and `<item type="id">` both define something else, so `R.string.…` is missing at
+# runtime while a bare `name="…"` regex calls the key defined.
+NON_STRING_NODE_KEY = ('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n'
+                       '    <eat-comment name="ghost_string_key"/>\n'
+                       '    <item type="id" name="ghost_string_key"/>\n'
+                       '</resources>\n')
+ITEM_STRING_KEY = ('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n'
+                   '    <item type="string" name="ghost_string_key">x</item>\n'
+                   '</resources>\n')
+GHOST_KEY_KT = "package com.rikkaminis.app\nval g = R.string.ghost_string_key\n"
 GHOST_KT = "package com.rikkaminis.app\nval g = R.string.ghost_key\n"
 
 ARM_ABSENT = "            \"theme\" -> println(\"theme\")\n"
@@ -549,7 +697,37 @@ def _selftest():
 
     run("a live apply call next to a dead one is still green (no over-red)",
         dict(wired, **{APPEARANCE_SCREEN: _appearance_screen(ARM_DEAD_THEN_LIVE)}), 0,
-        expect_in=["applies the change"])
+        expect_in=["applies the stored language"])
+
+    # [B6-t04] the six A01 witnesses: each shape passed the gate before this
+    # batch and must now be red on the criterion it attacks.
+    run("A01-1 unary-negated literal guard (`if (!true)`) is dead code",
+        dict(wired, **{APPEARANCE_SCREEN: _appearance_screen(ARM_NOT_TRUE)}), 1,
+        expect_in=["dead or commented-out code"])
+    run("A01-2 `when (false) { true -> apply }` arm is unreachable",
+        dict(wired, **{APPEARANCE_SCREEN: _appearance_screen(ARM_WHEN_FALSE)}), 1,
+        expect_in=["dead or commented-out code"])
+    run("A01-3 apply call after `if (true) return@Listener` is unreachable",
+        dict(wired, **{APPEARANCE_SCREEN: _appearance_screen(ARM_EARLY_RETURN)}), 1,
+        expect_in=["dead or commented-out code"])
+    run("A01-4 `\"\"\"\" … \"\"\"` raw string containing the call is not wiring",
+        dict(wired, **{APPEARANCE_SCREEN: _appearance_screen(ARM_RAW_STRING)}), 1,
+        expect_in=["does not call"])
+    run("A01-5 a key only a non-string node names is still an orphan",
+        dict(wired, **{
+            os.path.join(RES_DIR, "values", "strings_extra.xml"): NON_STRING_NODE_KEY,
+            os.path.join("src/android/app/src/main/java/com/rikkaminis/app", "Ghost.kt"):
+                GHOST_KEY_KT,
+        }), 1, expect_in=["ghost_string_key"])
+    run("A01-5 precision: `<item type=\"string\">` still defines the key",
+        dict(wired, **{
+            os.path.join(RES_DIR, "values", "strings_extra.xml"): ITEM_STRING_KEY,
+            os.path.join("src/android/app/src/main/java/com/rikkaminis/app", "Ghost.kt"):
+                GHOST_KEY_KT,
+        }), 0, expect_in=["No orphan string keys"])
+    run("A01-6 apply call whose language argument is a literal is not wiring",
+        dict(wired, **{APPEARANCE_SCREEN: _appearance_screen(ARM_CONST_ARG)}), 1,
+        expect_in=["read back from the preference"])
 
     run("a resource key that exists only inside an XML comment is still an orphan",
         dict(wired, **{
