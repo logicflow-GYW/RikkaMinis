@@ -139,7 +139,21 @@ $ python3 /var/minis/shared/work/meta-wide3/reattack.py --repo "$PWD" \
 
 ## ⑥ CI run
 
-（提交后回填：分支 dispatch 的 run id / head_sha / `Summary: 112 passed, 0 failed` / `ALL 344 CASES PASS`）
+分支 dispatch（`build-apk.yml`，非 main 分支不自动触发）：
+
+| 项 | 值 |
+|---|---|
+| run | **#2650** / id `40160696915` / job `121071435808` |
+| 结论 | **success**（attempt 1） |
+| head_sha | `cb90f669f1641299d2b0b40466ee414e054b2e23`（本地 HEAD 逐字符一致） |
+| 步骤 | 26 步，唯一非 success = **Publish to Releases / skipped**（main 门控，符合预期） |
+| 门 | 门头 `[N/112]` **112 条、互不重复** |
+| 全量 | `║  Summary: 112 passed, 0 failed`（恰一条带框线汇总） |
+| 夹具 | `ALL 344 CASES PASS`（恰一条） |
+| 编译 | ` e: ` **0 条** |
+| 伪 FAILED | 含 `FAILED` 的 6 行全部是 **PASSED 用例名的子串**（如 `slot denied produces FAILED without calling provider PASSED`） |
+
+→ 分支 CI 绿 = 本支确定性停止节点，**未合并 main**。
 
 ---
 
