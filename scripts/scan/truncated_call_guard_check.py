@@ -179,6 +179,281 @@ def line_of(text, needle):
     return text.count("\n", 0, idx) + 1 if idx >= 0 else 0
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# [wide3-04] Structural helpers shared by the four hardened criteria below.
+#
+# Every one of them exists because a criterion used to ask "does this text
+# appear somewhere in the file?" — which a regression can satisfy while the
+# effect is gone:
+#   * C1  an early `return null` keyed on ONE truncation source disarms the other;
+#   * C2/C4 the policy call's result is wrapped in `if (false) … else null`;
+#   * C8/C10 the activity weight is fed a literal (`(0)`, `("", "")`).
+# ─────────────────────────────────────────────────────────────────────────
+
+def mask_code(text):
+    """Blank comments AND string-literal contents; offsets and newlines are
+    preserved, so structure parsing on the result keeps line numbers valid."""
+    out = list(text)
+    i, n, quote = 0, len(text), ""
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == "\\":
+                for k in (i, i + 1):
+                    if k < n and out[k] != "\n":
+                        out[k] = " "
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            elif c != "\n":
+                out[i] = " "
+            i += 1
+            continue
+        if c in "\"'":
+            quote = c
+            i += 1
+            continue
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            for k in range(i, j):
+                if text[k] != "\n":
+                    out[k] = " "
+            i = j
+            continue
+        i += 1
+    return "".join(out)
+
+
+def match_paren(text, open_idx):
+    """Index of the ')' matching the '(' at `open_idx`, or -1."""
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def split_top(text, sep=","):
+    """Top-level split of `text` on `sep` (quote/bracket aware)."""
+    spans, depth, start, i, n = [], 0, 0, 0, len(text)
+    quote = ""
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if c in "\"'":
+            quote = c
+            i += 1
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == sep and depth == 0:
+            spans.append((start, i))
+            start = i + 1
+        i += 1
+    spans.append((start, n))
+    return spans
+
+
+def split_args(text):
+    inner = text
+    return [inner[a:b].strip() for a, b in split_top(inner, ",")]
+
+
+_RET_TYPE_ONLY = re.compile(r"^\s*(:\s*[\w<>,\[\]\s.?:]+)?\s*$")
+
+
+def function_body(code, decl):
+    """(body_text, body_offset) for a `fun name(...)` with a BLOCK body.
+
+    The body brace must follow the parameter list; a lambda default inside the
+    params would otherwise be taken for the body (`block: J.() -> Unit = { … }`).
+    """
+    start = code.find(decl)
+    if start < 0:
+        return None, -1
+    po = code.find("(", start)
+    if po < 0:
+        return None, -1
+    pc = match_paren(code, po)
+    if pc < 0:
+        return None, -1
+    ob = code.find("{", pc)
+    if ob < 0 or not _RET_TYPE_ONLY.match(code[pc + 1:ob]):
+        return None, -1
+    depth = 0
+    for i in range(ob, len(code)):
+        if code[i] == "{":
+            depth += 1
+        elif code[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[ob:i + 1], ob
+    return None, -1
+
+
+def if_bodies(code):
+    """[(cond, body_start, body_end)] for every `if (...)` body."""
+    out = []
+    for m in re.finditer(r"\bif\s*\(", code):
+        po = code.find("(", m.end() - 1)
+        pc = match_paren(code, po)
+        if pc < 0:
+            continue
+        cond = code[po + 1:pc]
+        j = pc + 1
+        while j < len(code) and code[j] in " \t\r\n":
+            j += 1
+        if j < len(code) and code[j] == "{":
+            depth = 0
+            k = j
+            while k < len(code):
+                if code[k] == "{":
+                    depth += 1
+                elif code[k] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k += 1
+            out.append((cond, j, k))
+        else:
+            k = j
+            depth = 0
+            while k < len(code) and not (code[k] == "\n" and depth == 0):
+                if code[k] in "([{":
+                    depth += 1
+                elif code[k] in ")]}":
+                    depth -= 1
+                k += 1
+            out.append((cond, j, k))
+    return out
+
+
+def is_constant_expr(text):
+    """True when the expression holds no identifier/member reference at all —
+    so its value cannot depend on the data it is supposed to describe."""
+    t = re.sub(r'"[^"\n]*"', " ", text)
+    t = re.sub(r"'[^'\n]*'", " ", t)
+    t = re.sub(r"\b(?:true|false|null)\b", " ", t)
+    t = re.sub(r"\b\d[\w.]*\b", " ", t)
+    t = re.sub(r"[\s,=()]", "", t)
+    return t == ""
+
+
+def feed_calls(code, counter):
+    """[(fn, args_text, pos)] for every `counter += fn(args)` / `counter = fn(args)`."""
+    out = []
+    for m in re.finditer(r"\b%s\b\s*\+?=(?!=)\s*([A-Za-z_]\w*)\s*\("
+                         % re.escape(counter), code):
+        po = m.end() - 1
+        pc = match_paren(code, po)
+        if pc < 0:
+            out.append((m.group(1), None, m.start()))
+            continue
+        out.append((m.group(1), code[po + 1:pc], m.start()))
+    return out
+
+
+def operative_call(code, var, callee):
+    """(ok, why, line, args) — `val <var> = <callee>(…)` as the WHOLE initialiser.
+
+    "The call appears in the function" is not the criterion: wrapping it in
+    `if (false) … else null` keeps every character and drops the decision.
+    """
+    hits = [m for m in re.finditer(r"\bval\s+%s\s*=\s*" % re.escape(var), code)]
+    if not hits:
+        return False, "`val %s =` not found" % var, 0, []
+    if len(hits) > 1:
+        return (False, "`val %s =` assigned %d times — the refusal is no longer "
+                       "single-source" % (var, len(hits)),
+                code.count("\n", 0, hits[0].start()) + 1, [])
+    m = hits[0]
+    line = code.count("\n", 0, m.start()) + 1
+    rhs = m.end()
+    while rhs < len(code) and code[rhs] in " \t\r\n":
+        rhs += 1
+    if not code.startswith(callee, rhs):
+        return (False, "`val %s` is not initialised by %s(…) — the verdict is wrapped "
+                       "in a conditional/short-circuit, so the call's result is not what "
+                       "the refusal branch reads" % (var, callee), line, [])
+    po = rhs + len(callee)
+    if po >= len(code) or code[po] != "(":
+        return False, "%s is not called with an argument list" % callee, line, []
+    pc = match_paren(code, po)
+    if pc < 0:
+        return False, "%s(…) argument list does not balance" % callee, line, []
+    j = pc + 1
+    while j < len(code) and code[j] in " \t":
+        j += 1
+    args = split_args(code[po + 1:pc])
+    if j < len(code) and code[j] == "\r":
+        j += 1
+    if j < len(code) and code[j] == "\n":
+        # A statement ends here — unless the next line continues the expression
+        # with an operator, which is how `.let { }` / `?: null` are spelled when
+        # they do not fit on one line.
+        k = j + 1
+        while k < len(code) and code[k] in " \t\r\n":
+            k += 1
+        if k < len(code) and (code[k] == "." or code.startswith("?:", k)
+                              or code[k] == "?"):
+            return (False, "the verdict's value is continued on the next line (%s…) "
+                           "instead of being stored — the chain drops the decision"
+                           % code[k:k + 12].strip(), line, args)
+        return True, "", line, args
+    if j < len(code) and code[j] not in ";})":
+        return (False, "the verdict is used as a sub-expression (…%s"
+                       "%s) instead of being the value itself — a chain such as "
+                       "`.let { }`, `?: null` or a branch drops the decision"
+                       % (callee, code[pc:pc + 1]), line, args)
+    return True, "", line, args
+
+
+# [wide3-04] The two truncation sources the verdict must AND together. A
+# `return null` that tests only one of them disarms the other at every call
+# site: `if (!ceilingDeclared) return null` added after the real condition
+# leaves an EOF-truncated turn (ceiling absent, stream cut) reading as "clean".
+C1_CEILING_TOKENS = ("ceilingDeclared", "isTruncatedFinish", "finishReason")
+
+
+def policy_single_source_returns(policy_src):
+    """[(condition, line)] for early `return null`s keyed on exactly one source."""
+    code = mask_code(policy_src)
+    body, off = function_body(code, "fun rejectionReason(")
+    if body is None:
+        return [("<rejectionReason body not located>", 0)]
+    bad = []
+    for cond, b0, b1 in if_bodies(body):
+        if "return null" not in body[b0:b1]:
+            continue
+        has_ceiling = any(t in cond for t in C1_CEILING_TOKENS)
+        has_stream = "turnTruncated" in cond
+        if has_ceiling != has_stream:
+            bad.append((cond.strip(), code.count("\n", 0, off + b0) + 1))
+    return bad
+
+
 def strip_kotlin_comments_keep(text):
     return strip_kotlin_comments(text)
 
@@ -317,12 +592,41 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
                          line_of(policy, C1_PREFIX),
                          "expected %d refusal wordings (%s), found %d — a source lost its message"
                          % (C1_PREFIX_COUNT, C1_PREFIX, policy.count(C1_PREFIX))))
+    else:
+        # [wide3-04] …and no EARLY `return null` may key on a single source.
+        # `if (!ceilingDeclared) return null` inserted after the real AND
+        # condition leaves the ceiling wording and the prefix count untouched
+        # while every EOF-truncated turn reads as clean again.
+        for cond, cline in policy_single_source_returns(policy):
+            problems.append((
+                "policy-single-source-early-return", POLICY, cline,
+                "`if (%s) return null` decides on ONE truncation source — the other "
+                "source can no longer keep the call from being executed (a turn cut by "
+                "EOF while ceilingDeclared is false reaches the executor with a partial "
+                "argument object)" % cond,
+            ))
 
-    # C2 — the engine dispatch site feeds the flag.
-    if engine.count(C2_ENGINE_CALL) != 1:
-        add("engine-feeds-flag", ENGINE, engine, "truncated tool call REFUSED",
-            "the engine tool-call guard must call %s (found %d)"
-            % (C2_ENGINE_CALL, engine.count(C2_ENGINE_CALL)))
+    # C2 — the engine dispatch site feeds the flag, and the verdict IS the value
+    # the refusal branch reads.
+    # [wide3-04] `engine.count(C2_ENGINE_CALL) != 1` was a substring count: wrapping
+    # the same call in `if (false) … else null` keeps the text and drops the guard.
+    eng_code = mask_code(engine)
+    ok, why, eline, eargs = operative_call(
+        eng_code, "truncatedRefusal", "TruncatedToolCallPolicy.rejectionReason")
+    if not ok:
+        problems.append(("engine-feeds-flag", ENGINE, eline or
+                         line_of(engine, "truncated tool call REFUSED"),
+                         "the engine tool-call guard: " + why))
+    elif len(eargs) < 3 or eargs[2] != "turnTruncated":
+        problems.append(("engine-feeds-flag", ENGINE, eline,
+                         "the engine must pass the stream-level flag as the third "
+                         "argument (turnTruncated), found (%s) — a literal there means "
+                         "the EOF source never reaches the policy"
+                         % ", ".join(eargs)))
+    elif "turnFinishReason" not in eargs[1]:
+        problems.append(("engine-feeds-flag", ENGINE, eline,
+                         "the engine no longer passes the protocol finish reason (%s)"
+                         % eargs[1]))
 
     # C3 — OpenAI's EOF guard counts tool-call events; Anthropic keeps its own.
     if openai.count(C3_OPENAI_GUARD) != 1:
@@ -344,10 +648,21 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
         # slice to the next top-level doc comment after the loop
         nxt = tool_executors.find("\n/**", loop_start)
         loop = tool_executors[loop_start:nxt if nxt > 0 else len(tool_executors)]
-        if loop.count(C4_POLICY_CALL) < 1:
+        # [wide3-04] Same axis as C2: the call must be the refusal value itself,
+        # and it must carry the stream flag. `if (false) rejectionReason(…) else
+        # null` keeps the call, the gate and the pairing, and disarms the loop.
+        ok, why, rline, rargs = operative_call(
+            mask_code(loop), "truncatedRefusal",
+            "TruncatedToolCallPolicy.rejectionReason")
+        if not ok:
             problems.append(("subagent-refusal-wired", TOOL_EXECUTORS,
                              line_of(tool_executors, C4_SUBAGENT_DECL),
-                             "runSubagentLoop must consult TruncatedToolCallPolicy.rejectionReason"))
+                             "runSubagentLoop: " + why))
+        elif len(rargs) < 3 or rargs[2] != "turnTruncated":
+            problems.append(("subagent-refusal-wired", TOOL_EXECUTORS,
+                             line_of(tool_executors, C4_SUBAGENT_DECL),
+                             "runSubagentLoop must pass the stream-level flag as the third "
+                             "argument (turnTruncated), found (%s)" % ", ".join(rargs)))
         elif C4_REFUSAL_GATE not in loop:
             problems.append(("subagent-refusal-gate", TOOL_EXECUTORS,
                              line_of(tool_executors, C4_SUBAGENT_DECL),
@@ -476,6 +791,21 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
                     "'%s' is fed through functions that are not declared in "
                     "OpenAiStreamSignals (%s) — the derivation is no longer single-source"
                     % (wired_counter, ", ".join(extra))))
+            # [wide3-04] …and the derivation must be FED data. The substring
+            # arm above only asks whether the weight function is called; calling
+            # it with a literal (`chatCompletionsToolCallEventWeight(0)`) keeps
+            # the call, the name set and the guard count, and makes the counter
+            # depend on nothing.
+            ok_masked = mask_code(openai)
+            for fn, fargs, fpos in feed_calls(ok_masked, wired_counter):
+                if fargs is not None and not is_constant_expr(fargs):
+                    continue
+                problems.append((
+                    "openai-count-derived", OPENAI,
+                    ok_masked.count("\n", 0, fpos) + 1,
+                    "'%s' is fed through %s(%s) — a constant weight cannot observe the "
+                    "stream, so the truncated-turn signal is silently lost"
+                    % (wired_counter, fn, (fargs or "").strip() or "<empty>")))
 
         # C9 — one status derivation, reachable from both in-stream error arms.
         if len(status_fns) != 1:
@@ -593,6 +923,24 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
                            "" if not writes else "; it is written OUTSIDE the "
                            "tool_use guard, so a text/thinking block header would "
                            "be counted as tool activity")))
+                else:
+                    # [wide3-04] …and the announced weight must carry the block's
+                    # identity. `toolUseStartActivityChars("", "")` keeps the
+                    # guarded write, the declared callee and the counter, and
+                    # always contributes 0 — the tool_use signal is gone while
+                    # every substring criterion stays green.
+                    bad = [(fn, a) for fn, a, p in feed_calls(start, tool_counter)
+                           if p in guarded and (a is None or is_constant_expr(a))]
+                    if bad:
+                        problems.append((
+                            "anthropic-tool-start-feeds-counter", ANTHROPIC,
+                            line_of(anth_code, '"content_block_start" ->'),
+                            "the tool_use announcement feeds '%s' with a constant "
+                            "weight (%s) — the announcement must carry the block's own "
+                            "identity, otherwise a pure-tool turn cut before its first "
+                            "argument delta still reads as an empty stream"
+                            % (tool_counter, "; ".join(
+                                "%s(%s)" % (f, (a or "").strip()) for f, a in bad))))
 
             # (b) the block completion is progress too: a zero-argument call
             #     that finished streaming still must be flagged when the stream
@@ -604,6 +952,15 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
                     "the content_block_stop arm completes a tool call but never "
                     "feeds '%s' — a zero-argument call cut before message_delta "
                     "survives as a clean no-finish EOF" % tool_counter))
+            elif (sfeeds := feed_calls(stop, tool_counter)) and all(
+                    a is None or is_constant_expr(a) for _f, a, _p in sfeeds):
+                problems.append((
+                    "anthropic-tool-stop-feeds-counter", ANTHROPIC,
+                    line_of(anth_code, '"content_block_stop" ->'),
+                    "the content_block_stop arm feeds '%s' with a constant weight — the "
+                    "completed call contributes nothing, so a zero-argument call cut "
+                    "before message_delta still survives as a clean no-finish EOF"
+                    % tool_counter))
 
             # (c) regression guard on the one feed that always existed.
             if not counter_writes(delta, tool_counter):
@@ -613,6 +970,14 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
                     "the content_block_delta arm no longer feeds '%s' — the "
                     "pre-existing mid-argument truncation signal is gone"
                     % tool_counter))
+            elif (dfeeds := feed_calls(delta, tool_counter)) and all(
+                    a is None or is_constant_expr(a) for _f, a, _p in dfeeds):
+                problems.append((
+                    "anthropic-tool-delta-feeds-counter", ANTHROPIC,
+                    line_of(anth_code, '"content_block_delta" ->'),
+                    "the content_block_delta arm feeds '%s' with a constant weight — the "
+                    "mid-argument truncation signal no longer depends on the delta "
+                    "length" % tool_counter))
 
             # (d) single source: every feed goes through a pure weight declared
             #     in the signals module, and every declared weight is used.
@@ -759,6 +1124,41 @@ def selftest(root):
          "anthropic-tool-weights-single-source",
          on(3, lambda s: s.replace(ANTHROPIC_DELTA_FEED,
                                         "toolChars += partial.length", 1))),
+        # ---- [wide3-04] the four externally falsified shapes ----------------
+        # Each of these keeps every character the old criteria looked for and
+        # drops only the decision — so each expectation names exactly one arm.
+        ("policy adds an early return keyed on the ceiling source alone",
+         "policy-single-source-early-return",
+         on(0, lambda s: s.replace(
+             C1_CONDITION,
+             C1_CONDITION + "\n        if (!ceilingDeclared) return null", 1))),
+        ("sub-agent refusal variable is wrapped in if (false) … else null",
+         "subagent-refusal-wired",
+         on(4, lambda s: s.replace(
+             "val truncatedRefusal = TruncatedToolCallPolicy.rejectionReason(\n"
+             "                    call.name,\n"
+             "                    turnFinishReason,\n"
+             "                    turnTruncated,\n"
+             "                )",
+             "val truncatedRefusal = if (false) TruncatedToolCallPolicy.rejectionReason(\n"
+             "                    call.name,\n"
+             "                    turnFinishReason,\n"
+             "                    turnTruncated,\n"
+             "                ) else null", 1))),
+        ("engine refusal variable is wrapped in if (false) … else null",
+         "engine-feeds-flag",
+         on(1, lambda s: s.replace(
+             "val truncatedRefusal = " + C2_ENGINE_CALL,
+             "val truncatedRefusal = if (false) " + C2_ENGINE_CALL + " else null", 1))),
+        ("chat flavour feeds the EOF counter with a literal weight",
+         "openai-count-derived",
+         on(2, lambda s: s.replace(CHAT_FEED,
+                                   "toolCallEventCount += "
+                                   "chatCompletionsToolCallEventWeight(0)", 1))),
+        ("anthropic announcement feeds a constant (empty) tool identity",
+         "anthropic-tool-start-feeds-counter",
+         on(3, lambda s: s.replace(ANTHROPIC_START_FEED,
+                                   'toolChars += toolUseStartActivityChars("", "")', 1))),
     ]
 
     failed = []
