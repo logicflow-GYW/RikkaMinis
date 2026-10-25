@@ -179,11 +179,22 @@ ALL FOUR OK
 ## ⑥ CI run
 
 - 分支：`fix/meta-wide3-12-media-mount-trace`
-- HEAD：见 §⑧ 复现命令（`git rev-parse HEAD`）
+- 代码提交（CI 绿于此）：`95f94b91dabfa9f6671ff4bf9001a59cbd48a2f7`
 - 触发：非 main 分支必须手动 dispatch（`gh-actions-dispatch --ref fix/meta-wide3-12-media-mount-trace`）
-- 判据：`conclusion == success` **且** run 的 `head_sha` 与本地 HEAD 逐字符一致；日志里 `Summary: 112 passed, 0 failed` 恰一条、`ALL 344 CASES PASS` 恰一条、` e: ` 0 行、唯一 skipped 步 = Publish（main 门控）
+- **run #2648 / id `40160261615` / job `121070207839` / attempt 1 → `conclusion: success`**，`head_sha = 95f94b91dabf`（与本地 HEAD 逐字符一致）
 
-> 本条由收口时填写（run id / job id / 26 步读数）。
+机器判读（job 日志 1,485,232 B，`tmp12/job2648.log`）：
+
+| 判据 | 读数 |
+|---|---|
+| 门头 | `━━━ [N/112] … ━━━` **112 条互异**（1..112） |
+| 门汇总 | `Summary: 112 passed, 0 failed` **恰 1 条** |
+| 夹具 | `ALL 344 CASES PASS` 出现 |
+| 编译错 | ` e: ` **0** 行 |
+| 26 步 | 唯一非 success = `23 Publish to Releases` → **skipped**（main 门控，分支构建的正常形态） |
+| 含 `FAILED` 的 6 行 | 逐条确认全是 **PASSED 用例名子串**（`slot denied produces FAILED without calling provider`、`reason PERSISTENCE_FAILED maps to persistence_failed`、`phase FAILED maps to Failed`、`terminal FAILED maps to Failed`、`reason EXECUTION_FAILED maps to all_fallbacks_exhausted`、`the fixed tail still reaches a legal FAILED terminal`） |
+
+> 本报告的回填提交（§⑥ 表格 + 这份文件）**只动 `fix-reports/`**，源码树与 CI 绿树逐字节一致，故不重新 dispatch。
 
 ---
 
