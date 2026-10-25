@@ -100,7 +100,21 @@
 
 ## §5 CI
 
-（推送后回填）run 号 / head_sha / `Summary: 112 passed, 0 failed` / `ALL 344 CASES PASS` / ` e: ` 0。
+- **run**：`#40182328104`（`workflow_dispatch`，**attempt 1**，`conclusion: success`），
+  `html_url: https://github.com/logicflow-GYW/RikkaMinis/actions/runs/40182328104`
+- **head_sha**：`bb825cfbbe076671fd8f9196de72471876b9df3c` = 本地 HEAD `bb825cfb` **逐字符一致**
+- **job**：`121135793422`「build」，26 步，`not_ok = []`，唯一 `skipped = Publish to Releases`（main 门控，分支构建本应跳过）
+- **日志判读**（1,480,977 B / 17,845 行）：
+  - `║  Summary: 112 passed, 0 failed` 恰 **1** 条（另有 6 条子套件 Summary：28/5/14/36/15/25/10 passed）
+  - `ALL 344 CASES PASS` 恰 **1** 条
+  - `^e: `（Kotlin 编译错误）**0** 条
+  - 门头 `━━━ [N/112]` **112** 个、编号**互异**
+  - 含 `FAILED` 的 **6** 行逐条核对：全是 `… PASSED` 的用例名子串（0 条真失败）
+  - 本门判据行 2 条：`✅ IME-inset guard: no unprotected text field in a bare-Scaffold host` /
+    `✅ SettingsScaffold navigation guard: 11 call site(s) pass onBack…`（11 = 加固前的同一读数）
+  - **本门 selftest 标记字符串 0 命中**——`test_scan.py` 里还没注册（冻结面，见 §7），
+    21 条新臂目前只有本地 `--selftest` 见证；并集收口必须补 §7 那一行
+- **回填后**：报告提交只改 `fix-reports/`，`git diff --name-only bb825cfb..HEAD -- . ':(exclude)fix-reports'` = 0 行（源码树与 CI 绿树等价）
 
 ## §6 残留（每条带触发条件 / 触发后方案 / 搁置理由）
 
