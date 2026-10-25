@@ -273,6 +273,46 @@ def norm(expr):
     return re.sub(r"\s+", "", expr)
 
 
+BETA_ADD_RE = re.compile(r"\.add\s*\(")
+BETA_TOKENS = ("interleaved-thinking", "effort-")
+
+
+def disabled_path_adds_beta(text):
+    """-> offending snippet when the `"disabled"` path still adds a beta flag.
+
+    `"disabled" -> Unit` is the only correct arm: the body asks the API to stop
+    thinking, so announcing a thinking beta contradicts the request body. The
+    old criterion only proved the string `"disabled"` was COMPARED somewhere —
+    `"disabled" -> betaFlags.add("interleaved-thinking-2025-05-14")` kept that
+    token and shipped the contradiction.
+    """
+    for m in re.finditer(r'"disabled"\s*->', text):
+        k = m.end()
+        while k < len(text) and text[k] in " \t":
+            k += 1
+        if k < len(text) and text[k] == "{":
+            body, _end = brace_body(text, k)
+        else:
+            nl = text.find("\n", k)
+            body = text[k:nl if nl >= 0 else len(text)]
+        if BETA_ADD_RE.search(body) or any(t in body for t in BETA_TOKENS):
+            return re.sub(r"\s+", " ", body).strip()[:60]
+    # `if (type == "disabled") betaFlags.add(...)` — the same contradiction in
+    # comparison form.
+    for m in IF_RE.finditer(text):
+        paren_at = text.find("(", m.end() - 1)
+        cond, after = paren_body(text, paren_at)
+        if not re.search(r'==\s*"disabled"', cond):
+            continue
+        brace_at = text.find("{", after - 1)
+        if brace_at < 0:
+            continue
+        body, _end = brace_body(text, brace_at)
+        if BETA_ADD_RE.search(body) or any(t in body for t in BETA_TOKENS):
+            return re.sub(r"\s+", " ", cond[1:-1]).strip()
+    return None
+
+
 def enclosing_ifs(func_body, write_index):
     """-> [condition text] of every brace-bodied `if` whose body holds write_index."""
     out = []
@@ -285,6 +325,80 @@ def enclosing_ifs(func_body, write_index):
         body, end = brace_body(func_body, brace_at)
         if brace_at <= write_index < end:
             out.append(cond[1:-1])
+    return out
+
+
+# ── Guard liveness: an anchor that is PRESENT but SHORT-CIRCUITED ───────────
+# `if (a && (true || b))` keeps the `b` tokens in the condition while deleting
+# the decision, so任何「条件里出现了 X」的判据都会被它骗过。A guard is only a
+# guard when a bare boolean literal is not an operand of `&&` / `||`.
+BOOL_OP_LITERAL = re.compile(
+    r"(?:&&|\|\|)\s*(?:true|false)(?![\w])"
+    r"|(?<![\w.\"'])(?:true|false)\s*(?:&&|\|\|)"
+)
+
+
+def literal_decides(cond):
+    """True when a bare `true` / `false` is an operand of a boolean operator."""
+    return bool(BOOL_OP_LITERAL.search(cond))
+
+
+WHEN_BLOCK_RE = re.compile(r"\bwhen\s*\{")
+
+
+def enclosing_when_arms(text, pos):
+    """-> [arm condition] for every `when { ... }` arm whose body holds `pos`.
+
+    `when { x > 0 -> ... }` is an `if` in disguise: the same defect comes back
+    when the guard is nested inside an arm that only matches positive values.
+    """
+    out = []
+    for m in WHEN_BLOCK_RE.finditer(text):
+        if m.start() > pos:
+            break
+        brace_at = m.end() - 1
+        _body, end = brace_body(text, brace_at)
+        if not (brace_at < pos < end):
+            continue
+        depth = 0
+        arm_start = brace_at + 1
+        k = brace_at + 1
+        while k < pos:
+            c = text[k]
+            if c == '"' or c == "'":
+                k = skip_string(text, k)
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+            elif depth == 0 and text.startswith("->", k):
+                out.append(text[arm_start:k])
+                arm_start = k + 2
+                k += 2
+                continue
+            k += 1
+    return out
+
+
+def enclosing_conditions(text, pos):
+    """`if` and `when`-arm conditions that enclose `pos`, INCLUDING braceless
+    `if (x) if (y) { ... }` chains — the parser shape that used to slip past
+    `enclosing_ifs` (it only walks `if (...) {`)."""
+    out = list(enclosing_ifs(text, pos))
+    for m in IF_RE.finditer(text):
+        if m.start() > pos:
+            break
+        paren_at = text.find("(", m.end() - 1)
+        cond, after = paren_body(text, paren_at)
+        nxt = after
+        while nxt < len(text) and text[nxt] in " \t\r\n":
+            nxt += 1
+        if nxt < len(text) and text[nxt] == "{":
+            continue  # handled by enclosing_ifs
+        if nxt <= pos and re.match(r"if\s*\(", text[nxt:nxt + 8]):
+            out.append(cond[1:-1])
+    out.extend(enclosing_when_arms(text, pos))
     return out
 
 
@@ -341,15 +455,27 @@ def check_source(src):
                 continue
             gt = re.compile(r"\b%s\s*>\s*0\b|\b0\s*<\s*%s\b" % (re.escape(value), re.escape(value)))
             lt = re.compile(r"\b%s\s*<\s*[A-Za-z_]\w*" % re.escape(value))
-            conds = enclosing_ifs(body, pos)
+            conds = enclosing_conditions(body, pos)
             if not conds:
                 c2_ok = False
                 c2_detail = "budget_tokens written outside any brace-bodied if (%s)" % name
                 continue
-            if not any(gt.search(c) for c in conds):
+            # A guard that keeps both halves but is short-circuited by a literal
+            # (`a && (true || b)`, `false && a`) decides nothing: the write runs
+            # as if the guard were absent. Only live conditions may satisfy C2.
+            live = [c for c in conds if not literal_decides(c)]
+            dead = [c for c in conds if literal_decides(c)]
+            if not live:
+                c2_ok = False
+                c2_detail = (
+                    "the only guard(s) around the budget_tokens write are short-circuited by a "
+                    "boolean literal (`%s`) — the guard is present but decides nothing"
+                    % re.sub(r"\s+", " ", dead[0]).strip())
+                continue
+            if not any(gt.search(c) for c in live):
                 c2_ok = False
                 c2_detail = "no `%s > 0` guard encloses the budget_tokens write" % value
-            elif not any(lt.search(c) for c in conds):
+            elif not any(lt.search(c) for c in live):
                 c2_ok = False
                 c2_detail = "no `%s < <max>` guard encloses the budget_tokens write" % value
     if not seen_write:
@@ -376,6 +502,14 @@ def check_source(src):
         if not DISABLED_COMPARE.search(tail):
             c3_ok = False
             c3_detail = "%s does not distinguish thinking.type == \"disabled\"" % name
+            continue
+        # Distinguishing it is not enough: the disabled path must not announce a
+        # thinking beta (`"disabled" -> Unit`).
+        leaked = disabled_path_adds_beta(tail)
+        if leaked is not None:
+            c3_ok = False
+            c3_detail = ("%s still adds a thinking beta on the disabled path (`%s`) — the body "
+                         "asks for thinking off while the header announces it on" % (name, leaked))
     if not seen_header:
         c3_ok = False
     results.append((
@@ -480,7 +614,31 @@ def check_resolver_guard(src):
             continue
         guards += 1
         line = stripped[:m.start()].count("\n") + 1
-        for outer in enclosing_ifs(stripped, m.start()):
+        inner = cond[1:-1]
+        # (a) the guard must DECIDE: `if (false && maxTokens < 2)` keeps the
+        #     comparison and the `budget = 0` block while clamping nothing.
+        if literal_decides(inner):
+            violations.append(
+                "ThinkingRuleResolver.kt:%d the `< 2 → 0` guard is short-circuited by a "
+                "boolean literal (`%s`) — the clamp is present but never runs, so a "
+                "non-positive request value ships its raw budget against a wire "
+                "max_tokens of 1" % (line, re.sub(r"\s+", " ", inner).strip()))
+        # (b) last write wins: `budget = 0; budget = 4096` in the same block keeps
+        #     the `= 0` token while restoring the defect.
+        zeroed = re.search(r"([A-Za-z_]\w*)\s*=\s*0\b", body)
+        if zeroed:
+            var = zeroed.group(1)
+            writes = re.findall(r"\b%s\s*=\s*([^;\n]+)" % re.escape(var), body)
+            if writes:
+                last = writes[-1].strip().rstrip(";")
+                if not re.fullmatch(r"0", last):
+                    violations.append(
+                        "ThinkingRuleResolver.kt:%d the `< 2` guard block ends by writing "
+                        "`%s = %s` — the zeroing is dead (last write wins), so the raw "
+                        "budget still reaches the wire" % (line, var, last))
+        # (c) reachability: a `maxTokens > 0` enclosure (if OR when-arm) makes the
+        #     guard unreachable exactly when the value is non-positive.
+        for outer in enclosing_conditions(stripped, m.start()):
             if MAX_TOKENS_GT_ZERO.search(outer):
                 violations.append(
                     "ThinkingRuleResolver.kt:%d `maxTokens < 2` guard nests inside "
@@ -623,6 +781,20 @@ MUT_LITERAL_BODY = GREEN_BODY.replace(
     "put(\"budget_tokens\", 8192)",
 )
 
+# Guard kept verbatim but short-circuited — `a && (true || b)` deletes the
+# decision while every anchor stays in the condition.
+MUT_C2_DEAD_GUARD = GREEN_BODY.replace(
+    "if (budgetTokens > 0 && budgetTokens < cappedMaxTokens)",
+    "if (budgetTokens > 0 && (true || budgetTokens < cappedMaxTokens))",
+)
+
+# The disabled arm keeps the `"disabled"` comparison and announces a thinking
+# beta anyway: body says "off", header says "on".
+MUT_C3_DISABLED_ADDS = GREEN_BODY.replace(
+    '"disabled" -> Unit',
+    '"disabled" -> betaFlags.add("interleaved-thinking-2025-05-14")',
+)
+
 
 def _crit_set(src):
     """-> {'C1','C2','C3'} of the criteria that FAIL on `src`."""
@@ -645,6 +817,8 @@ def selftest():
         ("guard drops the `< max` half", MUT_C2_BODY, {"C2"}),
         ("beta branch back to two-way adaptive/else", MUT_C3_BODY, {"C3"}),
         ("budget written from a literal", MUT_LITERAL_BODY, {"C2"}),
+        ("guard kept but short-circuited by `true ||`", MUT_C2_DEAD_GUARD, {"C2"}),
+        ("disabled arm announces a thinking beta", MUT_C3_DISABLED_ADDS, {"C3"}),
     ]
     for label, src, expected in arms:
         got = _crit_set(src)
@@ -657,6 +831,8 @@ def selftest():
         ("MUT_C2", MUT_C2_BODY, GREEN_BODY),
         ("MUT_C3", MUT_C3_BODY, GREEN_BODY),
         ("MUT_LITERAL", MUT_LITERAL_BODY, GREEN_BODY),
+        ("MUT_C2_DEAD_GUARD", MUT_C2_DEAD_GUARD, GREEN_BODY),
+        ("MUT_C3_DISABLED_ADDS", MUT_C3_DISABLED_ADDS, GREEN_BODY),
     ):
         if mutated == base:
             fails.append("arm '%s' did not apply (string replace missed)" % label)
@@ -738,6 +914,53 @@ RESOLVER_NO_GUARD = RESOLVER_GREEN.replace(
             } else {''',
 )
 
+# The guard is short-circuited: the comparison and the `budget = 0` block stay,
+# but `false &&` makes the branch unreachable.
+RESOLVER_DEAD_GUARD = RESOLVER_GREEN.replace(
+    "if (ctx.maxTokens < 2) {",
+    "if (false && ctx.maxTokens < 2) {",
+)
+
+# The zeroing is written first and overwritten in the same block.
+RESOLVER_LAST_WRITE = RESOLVER_GREEN.replace(
+    '''            if (ctx.maxTokens < 2) {
+                budget = 0''',
+    '''            if (ctx.maxTokens < 2) {
+                budget = 0
+                budget = 4096''',
+)
+
+# Reachability moves from an `if` to a `when` arm: same semantics, invisible to a
+# parser that only walks `if (`.
+RESOLVER_WHEN_ARM = '''object ThinkingRuleResolver {
+    private fun emit(body: JSONObject, ctx: ThinkingResolveContext) {
+        var budget = 32768
+        when {
+            ctx.maxTokens > 0 -> if (ctx.maxTokens < 2) {
+                budget = 0
+            } else {
+                val ceiling = maxOf(1, ctx.maxTokens - 1)
+                if (budget >= ceiling) budget = ceiling
+            }
+        }
+        if (budget > 0) body.put("thinking_budget", budget)
+    }
+}
+'''
+
+# Braceless `if` chain: the outer enclosure has no `{`, so a brace-only parser
+# never sees it.
+RESOLVER_BRACELESS = '''object ThinkingRuleResolver {
+    private fun emit(body: JSONObject, ctx: ThinkingResolveContext) {
+        var budget = 32768
+        if (ctx.maxTokens > 0) if (ctx.maxTokens < 2) {
+            budget = 0
+        }
+        if (budget > 0) body.put("thinking_budget", budget)
+    }
+}
+'''
+
 
 def _selftest_oai():
     fails = []
@@ -752,6 +975,10 @@ def _selftest_oai():
         ("resolver guard outside `maxTokens > 0`", check_resolver_guard, RESOLVER_GREEN, False),
         ("resolver guard nested inside `maxTokens > 0`", check_resolver_guard, RESOLVER_PRE, True),
         ("resolver guard removed entirely", check_resolver_guard, RESOLVER_NO_GUARD, True),
+        ("resolver guard short-circuited by `false &&`", check_resolver_guard, RESOLVER_DEAD_GUARD, True),
+        ("resolver zeroing overwritten in the same block", check_resolver_guard, RESOLVER_LAST_WRITE, True),
+        ("resolver guard nested in a `when` arm that needs maxTokens > 0", check_resolver_guard, RESOLVER_WHEN_ARM, True),
+        ("resolver guard nested in a braceless `if` chain", check_resolver_guard, RESOLVER_BRACELESS, True),
     ]
     for label, fn, src, expect_red in oai_arms:
         got = bool(fn(src))
@@ -766,6 +993,8 @@ def _selftest_oai():
         ("OAI_HALF", OAI_HALF, OAI_GREEN),
         ("RESOLVER_PRE", RESOLVER_PRE, RESOLVER_GREEN),
         ("RESOLVER_NO_GUARD", RESOLVER_NO_GUARD, RESOLVER_GREEN),
+        ("RESOLVER_DEAD_GUARD", RESOLVER_DEAD_GUARD, RESOLVER_GREEN),
+        ("RESOLVER_LAST_WRITE", RESOLVER_LAST_WRITE, RESOLVER_GREEN),
     ):
         if mutated == base:
             fails.append("arm '%s' did not apply (string replace missed)" % label)
