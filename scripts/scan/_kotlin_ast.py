@@ -105,6 +105,8 @@ def const_value(expr):
     '''常量折叠。返回 ('bool', b) / ('num', float) / ('str', s) / ('null', None) / None。
 
     覆盖：字面量、`!X`、`X && Y`、`X || Y`、`A == B`、`A != B`、括号。
+    优先级严格按 Kotlin：`||` < `&&` < 比较 < `!`（先切最低优先级的运算符，
+    叶子再递归），因此 `!a && false` 折成 False 而不是 `!(a && false)`。
     '''
     e = strip_parens(expr)
     if not e:
@@ -115,11 +117,6 @@ def const_value(expr):
         return ('bool', False)
     if e == 'null':
         return ('null', None)
-    if e.startswith('!'):
-        v = const_value(e[1:])
-        if v and v[0] == 'bool':
-            return ('bool', not v[1])
-        return None
     for op in ('||', '&&'):
         parts = split_top(e, (op,))
         if len(parts) > 1:
@@ -143,6 +140,11 @@ def const_value(expr):
                 return None
             eq = a == b
             return ('bool', eq if op in ('==', '===') else not eq)
+    if e.startswith('!'):
+        v = const_value(e[1:])
+        if v and v[0] == 'bool':
+            return ('bool', not v[1])
+        return None
     if NUM_RE.match(e):
         try:
             return ('num', float(re.sub(r'[_fFdDlL]', '', e)))
@@ -414,6 +416,11 @@ ARMS = [
     ('const_or_literal_first', lambda A: A['const_bool']('true || guard') is True),
     ('const_ne_null_unknown', lambda A: A['const_bool']('sid != null') is None),
     ('const_str_eq', lambda A: A['const_bool']('"a" == "a"') is True),
+    ('const_not_then_and_short_circuit', lambda A: A['const_bool']('!a && false') is False),
+    ('const_not_true_and_false', lambda A: A['const_bool']('!true && false') is False),
+    ('const_not_true_and_true', lambda A: A['const_bool']('!true && true') is False),
+    ('const_not_paren_group', lambda A: A['const_bool']('!(true && false)') is True),
+    ('const_or_after_not', lambda A: A['const_bool']('!false || x') is True),
     ('pure_literal_num', lambda A: A['is_pure_literal']('1') is True),
     ('pure_literal_ident', lambda A: A['is_pure_literal']('someVal') is False),
     ('stmt_spans_no_semicolon',
