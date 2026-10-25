@@ -141,13 +141,98 @@ DAO_WRITTEN = {
 }
 
 
+PARSE_FAILURES = []   # fail-closed: an unparseable shape is a violation
+CONST_IDS = {"true", "false", "null", "this", "it"}
+
+
+def mask_comments(src):
+    """Blank `//` and `/* */` comment text with spaces (newlines and string
+    literals preserved), so masks keep every index aligned with `src`.
+
+    This gate used to read raw source: a commented-out `pinned = …` still
+    counted as "the field is mapped" (witness G2/parser-death), and a comment
+    holding `1)` closed the `data class` parameter list early, silently
+    truncating every field after it (witness G1/parser-death).
+    """
+    out = []
+    i = 0
+    n = len(src)
+    state = None  # None | '"' | "'" | '"""'
+    while i < n:
+        if state == '"""':
+            if src.startswith('"""', i):
+                out.append('"""')
+                i += 3
+                state = None
+                continue
+            out.append(src[i])
+            i += 1
+            continue
+        c = src[i]
+        if state in ('"', "'"):
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(src[i + 1])
+                i += 2
+                continue
+            if (state == '"' and c == '"') or (state == "'" and c == "'"):
+                state = None
+            i += 1
+            continue
+        if src.startswith('"""', i):
+            out.append('"""')
+            i += 3
+            state = '"""'
+            continue
+        if c == '"' or c == "'":
+            state = c
+            out.append(c)
+            i += 1
+            continue
+        if src.startswith("//", i):
+            j = src.find("\n", i)
+            if j < 0:
+                j = n
+            out.append(" " * (j - i))
+            i = j
+            continue
+        if src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            j = n - 2 if j < 0 else j
+            out.append("".join("\n" if ch == "\n" else " " for ch in src[i:j + 2]))
+            i = j + 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def value_is_constant(value):
+    """True when an argument value cannot carry anything out of the source
+    object: no identifier survives once literals are removed.
+
+    `pinned = 0` keeps the argument NAME on the page while the user's value
+    never reaches the row (witness G2/dataflow). A string template is NOT a
+    constant — `"${inst.id}/…"` reads the source.
+    """
+    if "${" in value:
+        return False
+    s = re.sub(r'"(?:[^"\\]|\\.)*"', " ", value, flags=re.S)
+    s = re.sub(r"'(?:[^'\\]|\\.)*'", " ", s)
+    return not (set(re.findall(r"[A-Za-z_]\w*", s)) - CONST_IDS)
+
+
 def read(path):
     with open(path, encoding="utf-8") as f:
         return f.read()
 
 
 def balanced(src, start, open_ch, close_ch):
-    """Return index of the close_ch matching src[start] == open_ch, or -1."""
+    """Return index of the close_ch matching src[start] == open_ch, or -1.
+
+    An unbalanced walk is recorded as a parse failure — returning "not found"
+    silently is how a truncated scan surface reads as a clean tree.
+    """
     depth = 0
     i = start
     while i < len(src):
@@ -159,6 +244,9 @@ def balanced(src, start, open_ch, close_ch):
             if depth == 0:
                 return i
         i += 1
+    PARSE_FAILURES.append(
+        "unbalanced %r…%r from line %d — the shape could not be parsed"
+        % (open_ch, close_ch, src.count("\n", 0, start) + 1))
     return -1
 
 
@@ -191,12 +279,32 @@ def extract_defaulted_fields(src, cls_name):
     return set(re.findall(r"\b(?:val|var)\s+(\w+)\s*:[^=\n]*=\s", body))
 
 
+def _split_args(body):
+    """Split a ctor argument list on top-level commas."""
+    parts = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(body):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(body[start:i])
+            start = i + 1
+    parts.append(body[start:])
+    return parts
+
+
 def collect_ctor_sites(files, cls_name):
     """All `cls_name(` call sites across files, skipping the file that
     declares the class itself (the data-class header would otherwise be
     parsed as a call and default values as named args).
 
-    Returns (named_args_union, sites) where sites = [(relpath, line, args)].
+    Returns (named_args_union, sites) where sites =
+    [(relpath, line, args_set, {arg: value_text})]. Values are kept because
+    "the argument is named" is not the criterion — "the value is carried
+    from the source object" is (witness G2/dataflow: `pinned = 0`).
     """
     decl = re.compile(r"\bclass\s+" + re.escape(cls_name) + r"\b")
     call = re.compile(r"(?<![\w])" + re.escape(cls_name) + r"\s*\(")
@@ -210,10 +318,62 @@ def collect_ctor_sites(files, cls_name):
             if end < 0:
                 continue
             body = src[m.end():end]
-            site_args = set(re.findall(r"\b(\w+)\s*=\s*", body))
+            values = {}
+            for part in _split_args(body):
+                am = re.match(r"\s*(\w+)\s*=(?!=)\s*(.*)\Z", part, re.S)
+                if am:
+                    values[am.group(1)] = am.group(2).strip()
+            site_args = set(values)
             args.update(site_args)
-            sites.append((rel, src.count("\n", 0, m.start()) + 1, site_args))
+            sites.append((rel, src.count("\n", 0, m.start()) + 1, site_args, values))
     return args, sites
+
+
+def mapping_shaped_sites(sites, target_fields):
+    """Sites that map a family rather than synthesise one.
+
+    A mapping site writes at least half of the target's fields; a synthetic
+    construction (`ProviderInstance(label = "x", pinned = false)` in an offload
+    worker) writes a handful and is not the mapping this gate guards.
+    """
+    out = []
+    for site in sites:
+        covered = sum(1 for a in site[2] if a in target_fields)
+        if covered >= 2 and covered * 2 >= len(target_fields):
+            out.append(site)
+    return out
+
+
+def check_derivation(family, col_to_model, todb_sites, fromdb_sites,
+                     entity_fields, model_fields):
+    """Every four-way field must be CARRIED by at least one mapping site.
+
+    A field set to a constant at every mapping-shaped site is the G2/dataflow
+    witness: the argument name is still there, the value never travels. A
+    field carried by at least one mapping site stays silent — the gate does
+    not police how synthetic constructions fill their own defaults.
+    """
+    out = []
+    for direction, sites, target_fields, fields in (
+        ("to-DB", todb_sites, entity_fields, sorted(col_to_model)),
+        ("from-DB", fromdb_sites, model_fields,
+         sorted({col_to_model[c] for c in col_to_model})),
+    ):
+        mapping = mapping_shaped_sites(sites, target_fields)
+        if not mapping:
+            continue
+        for field in fields:
+            values = [s[3][field] for s in mapping if field in s[3]]
+            if not values:
+                continue
+            if all(value_is_constant(v) for v in values):
+                at = ", ".join("%s:%d" % (s[0], s[1]) for s in mapping if field in s[3])
+                out.append(
+                    "%s: %s `%s` is a constant at every mapping site (%s) — the "
+                    "value never leaves the source object, so it is lost on every "
+                    "%s" % (family, direction, field, at,
+                            "save" if direction == "to-DB" else "load"))
+    return out
 
 
 def discover_entities(db_dir_rel, root):
@@ -225,7 +385,7 @@ def discover_entities(db_dir_rel, root):
     for fn in sorted(os.listdir(db_path)):
         if not fn.endswith(".kt"):
             continue
-        src = read(os.path.join(db_path, fn))
+        src = mask_comments(read(os.path.join(db_path, fn)))
         for m in re.finditer(r"data\s+class\s+(\w*Entity)\s*\(", src):
             name = m.group(1)
             fields = extract_data_class_fields(src, name)
@@ -235,18 +395,23 @@ def discover_entities(db_dir_rel, root):
 
 
 def load_kotlin_files(root):
+    """Every production .kt under the app package, comment-blanked.
+
+    Masking happens once at load so no criterion can read prose as code.
+    """
     files = {}
     base = os.path.join(root, KOTLIN)
     for dirpath, dirnames, filenames in os.walk(base):
-        for fn in filenames:
-            if fn.endswith(".kt"):
-                rel = os.path.relpath(os.path.join(dirpath, fn), base)
-                files[rel] = read(os.path.join(dirpath, fn))
+        for name in filenames:
+            if name.endswith(".kt"):
+                rel = os.path.relpath(os.path.join(dirpath, name), base)
+                files[rel] = mask_comments(read(os.path.join(dirpath, name)))
     return files
 
 
-def main():
-    root = sys.argv[1] if len(sys.argv) > 1 else "."
+def run_checks(root):
+    """Print the per-family report; return 0 = clean, 1 = real gaps."""
+    PARSE_FAILURES.clear()
     problems = 0
     files = load_kotlin_files(root)
     entities = discover_entities(DB_DIR, root)
@@ -286,9 +451,9 @@ def main():
             print(f"  Entity ({len(entity_fields)}): {sorted(entity_fields)}")
             if not positional:
                 partial = {
-                    f: (sum(1 for _, _, a in sites if f in a), len(sites))
+                    f: (sum(1 for _, _, a, _v in sites if f in a), len(sites))
                     for f in sorted(entity_fields & site_args)
-                    if sum(1 for _, _, a in sites if f in a) < len(sites)
+                    if sum(1 for _, _, a, _v in sites if f in a) < len(sites)
                 }
                 for f, (n, total) in partial.items():
                     print(f"  ℹ set by {n}/{total} site(s) (OK if the other sites "
@@ -360,11 +525,30 @@ def main():
         missing_todb -= LEGIT_ENTITY_ONLY
         missing_fromdb -= LEGIT_ENTITY_ONLY
 
+        # ── Derivation: a mapping site must CARRY the value, not name it ──
+        # `pinned = 0` keeps the argument name on the page while the user's
+        # setting never reaches the row (witness G2/dataflow). KNOWN_MISMATCH
+        # fields have no 1:1 column by design, so they are not in this set.
+        col_to_model = {}
+        for f in model_fields:
+            if (model_name, f) in KNOWN_MISMATCH:
+                continue
+            col = aliases.get(f, f)
+            if col in entity_fields:
+                col_to_model[col] = f
+        for col in entity_fields:
+            if col in model_fields and col not in col_to_model:
+                col_to_model[col] = col
+        derived_gaps = check_derivation(
+            f"{model_name}/{entity_name}", col_to_model, todb_sites, fromdb_sites,
+            entity_fields, model_fields)
+
         for (grp, fld), reason in sorted(KNOWN_MISMATCH.items()):
             if grp == model_name and fld in model_fields:
                 print(f"  ⚠ KNOWN-MISMATCH (pinned, by design): {grp}.{fld} — {reason}")
 
-        if not missing_entity and not missing_todb and not missing_fromdb:
+        if not missing_entity and not missing_todb and not missing_fromdb \
+                and not derived_gaps:
             print(f"  ✅ All four layers consistent")
         else:
             if missing_entity:
@@ -376,6 +560,9 @@ def main():
             if missing_fromdb:
                 problems += 1
                 print(f"  ❌ Model has but toProviderConfig missing (from-DB site doesn't restore it — lost on every load): {sorted(missing_fromdb)}")
+            for msg in derived_gaps:
+                problems += 1
+                print(f"  ❌ {msg}")
 
     # ── Coverage table: the blind spot must be printed, not silent ─────────
     print(f"\n{'='*60}")
@@ -387,6 +574,17 @@ def main():
         print("UNRESOLVED (visible, not failures — families NOT field-checked):")
         for name, reason in unresolved:
             print(f"  - {name}: {reason}")
+    if PARSE_FAILURES:
+        # fail-closed: an unparsed shape shrinks the checked surface, and an
+        # empty surface reports itself clean.
+        unique = []
+        for msg in PARSE_FAILURES:
+            if msg not in unique:
+                unique.append(msg)
+        problems += len(unique)
+        print("❌ PARSE FAILURES (fail-closed — an unparsed shape is a violation):")
+        for msg in unique:
+            print(f"  - {msg}")
     if not entities:
         print("!! No Room entities found — scanner is blind on this tree.")
     print(f"Done: {'PROBLEMS FOUND: ' + str(problems) if problems else 'ALL CLEAN ✅'} "
@@ -395,6 +593,133 @@ def main():
     if not entities:
         return 1  # fail loud: a tree with no derivable families is a rot signal
     return 1 if problems else 0
+
+
+# ── Selftest: one arm per criterion this gate claims, including the wide3
+# witnesses that blinded it (commented-out mapping, constant value, comment
+# paren truncating the parameter list). ──────────────────────────────────────
+FW_MODEL = """package com.rikkaminis.app.data.model
+
+data class Widget(
+    val id: String,
+    val name: String,
+)
+"""
+
+FW_ENTITY = """package com.rikkaminis.app.data.db
+
+data class WidgetEntity(
+    val id: String,
+    val name: String,
+)
+"""
+
+FW_MAPPING = """package com.rikkaminis.app.data.db
+
+fun toEntity(w: Widget): WidgetEntity =
+    WidgetEntity(
+        id = w.id,
+        name = w.name,
+    )
+
+fun toModel(e: WidgetEntity): Widget =
+    Widget(
+        id = e.id,
+        name = e.name,
+    )
+"""
+
+
+def _selftest_run(model, entity, mapping):
+    import contextlib
+    import io
+    import shutil
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="fws-")
+    try:
+        base = os.path.join(tmp, KOTLIN)
+        for rel, content in (("data/model/Widget.kt", model),
+                             ("data/db/WidgetEntity.kt", entity),
+                             ("data/db/WidgetMapping.kt", mapping)):
+            path = os.path.join(base, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = run_checks(tmp)
+        return rc, buf.getvalue()
+    finally:
+        shutil.rmtree(tmp)
+
+
+def selftest():
+    ok = True
+
+    def arm(label, model, entity, mapping, want_rc, needle=""):
+        nonlocal ok
+        rc, out = _selftest_run(model, entity, mapping)
+        good = rc == want_rc and (not needle or needle in out)
+        print("  selftest %-38s %s" % (label, "PASS" if good else "FAIL"))
+        if not good:
+            print("    expected rc=%d%s, got rc=%d\n%s"
+                  % (want_rc, (" containing %r" % needle) if needle else "", rc,
+                     "\n".join(l for l in out.splitlines() if "❌" in l or "PARSE" in l)[:600]))
+            ok = False
+
+    arm("clean four-way family", FW_MODEL, FW_ENTITY, FW_MAPPING, 0, "All four layers")
+
+    # G2/parser-death: commented-out mapping still counted as mapped.
+    arm("commented-out to-DB field caught",
+        FW_MODEL, FW_ENTITY,
+        FW_MAPPING.replace("        name = w.name,", "        // name = w.name,"),
+        1, "toSnapshot missing")
+
+    # G2/dataflow: the argument name survives, the value does not.
+    arm("constant to-DB value caught",
+        FW_MODEL, FW_ENTITY,
+        FW_MAPPING.replace("        name = w.name,", "        name = \"fixed\","),
+        1, "is a constant at every mapping site")
+
+    arm("constant from-DB value caught",
+        FW_MODEL, FW_ENTITY,
+        FW_MAPPING.replace("        name = e.name,", "        name = \"fixed\","),
+        1, "is a constant at every mapping site")
+
+    # G1/parser-death: `// 1)` inside the parameter list closed the list early.
+    arm("comment paren does not truncate the field list",
+        FW_MODEL.replace("    val id: String,",
+                         "    val id: String,\n    // 1) early paren in a comment\n"
+                         "    val unmappedExtraField: Boolean = false,"),
+        FW_ENTITY, FW_MAPPING, 1, "unmappedExtraField")
+
+    # negative control: a balanced paren in a comment is normal prose.
+    arm("balanced comment paren stays green",
+        FW_MODEL.replace("    val id: String,",
+                         "    val id: String,\n    // (kept for history)\n"),
+        FW_ENTITY, FW_MAPPING, 0)
+
+    if ok:
+        print("FOUR_WAY_SYNC_SELFTEST=PASS")
+        return 0
+    print("FOUR_WAY_SYNC_SELFTEST=FAIL")
+    return 1
+
+
+def main():
+    argv = sys.argv[1:]
+    if "--selftest" in argv:
+        return selftest()
+    positional = [a for a in argv if not a.startswith("--") and a != "root"]
+    if "--root" in argv:
+        i = argv.index("--root")
+        root = argv[i + 1] if i + 1 < len(argv) else "."
+    else:
+        root = positional[0] if positional else "."
+    if not os.path.isdir(root):
+        print("repo root not found: %s" % root, file=sys.stderr)
+        return 2
+    return run_checks(root)
 
 
 if __name__ == "__main__":
