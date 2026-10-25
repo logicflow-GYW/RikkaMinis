@@ -51,6 +51,28 @@ edit to this gate rather than a silent pass):
   4. ConfigBuiltins: the providers summary linkedMapOf carries
      `"customUserAgent" to`.
 
+[batch5-t07] PRESENCE was not enough — 6 external witnesses walked through
+this gate (report-A §05, report-B). Each criterion now judges the EFFECT,
+not the spelling, on the shared lexer/ast/valueflow primitives:
+
+  * W1 `return@let` — "the rejection is returned" now requires a NON-LOCAL
+    return (`return@let` leaves the lambda and the executor falls through to
+    the write).
+  * W2 helper scope — the shared decision `memoryToolDisabledMessage` is now
+    scanned in its OWN body: with `memoryEnabled = false` the folded decision
+    must not yield null (kills `if (true || memoryEnabled) null`).
+  * W3 parser-death — all structure work runs on `mask_code` (string/char
+    interiors blanked), so a string literal can no longer feed an anchor
+    needle; the wrapper's second argument is resolved through
+    `value_sources` and must be the live switch.
+  * W4 argument dataflow — the resolver's first argument is judged by
+    `value_sources` (discard scopes like `null.also { … }` peel back to
+    `null`) plus a payload-read/cast-shape test.
+  * W5 guard liveness — the OAuth guard's BODY must terminate (`throw` /
+    non-local `return`); `Unit` no longer passes for a rejection.
+  * W6 projection value — the summary must project the VALUE
+    (`ConfigValue.Str(it)`), not a constant (`ConfigValue.Str("")`).
+
 Usage: python3 scripts/scan/memory_gate_provider_fields_check.py [repo_root]
        python3 scripts/scan/memory_gate_provider_fields_check.py --selftest
 Exit:  0 = clean, 1 = violation(s), 2 = usage/ROT
@@ -58,6 +80,11 @@ Exit:  0 = clean, 1 = violation(s), 2 = usage/ROT
 import os
 import re
 import sys
+
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments
+from _kotlin_ast import (const_bool, function_body, if_blocks, is_pure_literal,
+                         match_bracket, strip_parens, tail_expr)
+from _kotlin_valueflow import (call_args, contains_ident, value_sources)
 
 APP = "src/android/app/src/main/java/com/rikkaminis/app/"
 
@@ -67,133 +94,349 @@ COLLECTION_REL = APP + "config/collections/ProvidersCollection.kt"
 BUILTINS_REL = APP + "config/ConfigBuiltins.kt"
 
 GATE_CALL = "memoryToolDisabledMessage(memoryEnabled)"
-ROLLUP_SIG = "internal fun executeMemoryRollupTool("
-WRITE_SIG = "internal fun executeMemoryWriteTool("
-WRAPPER_CALL = "executeMemoryRollupTool(repo, _memoryEnabled.value)"
-UA_RESOLVE = "resolveAddCustomUserAgent("
 UA_CTOR = "customUserAgent = customUserAgent,"
 UA_WRITER_RULE = "customUserAgentWritable(inst.credentialType)"
 UA_SUMMARY = '"customUserAgent" to (inst.customUserAgent'
+PAYLOAD_UA = 'obj["customUserAgent"]'
+
+GATE_CALL_RE = re.compile(r"\bmemoryToolDisabledMessage\s*\(\s*memoryEnabled\s*\)")
+LET_AFTER_RE = re.compile(r"\?\.\s*let\s*\{")
+RET_RE = re.compile(r"\breturn\b(\s*@\s*[A-Za-z_]\w*)?")
+GUARD_COND_RE = re.compile(
+    r"!\s*customUserAgentWritable\s*\(\s*inst\.credentialType\s*\)")
+PROJ_RE = re.compile(
+    r'"customUserAgent"\s+to\s*\(\s*inst\.customUserAgent\s*\?\.\s*let\s*\{\s*'
+    r'ConfigValue\.Str\s*\(')
 
 
-def strip_comments(src):
-    """Remove /* */ blocks and //-to-EOL comments (quote-aware for // URLs)."""
+# ── shared-primitive wrappers ───────────────────────────────────────────────
+
+def _code_view(src):
+    """Comment- AND literal-masked view (length-preserving)."""
+    return mask_code(src)
+
+
+def _literal_view(src):
+    """Comment-masked view, string contents kept (length-preserving)."""
+    return mask_comments(src)
+
+
+def _fn(code, name):
+    """(body_start, body_end, kind) of the first `fun name(`, or None."""
+    return function_body(code, name)
+
+
+def _fn_sig(code, name, bstart):
+    """The declaration text (name … closing paren) that precedes [bstart]."""
+    i = code.rfind(name + "(", max(0, bstart - 900), bstart)
+    return code[i:bstart] if i >= 0 else ""
+
+
+def _nonlocal_return(code, start, end):
+    """A bare `return` inside the span (Kotlin non-local return semantics).
+
+    `return@let` / `return@run` leave the lambda only and are NOT exits of the
+    enclosing function — the W1 witness shape.
+    """
+    return any(not m.group(1) for m in RET_RE.finditer(code, start, end))
+
+
+def _let_span(code, after):
+    """Span (body_start, body_end) of the `?.let { … }` at/after [after]."""
+    m = LET_AFTER_RE.search(code, after, min(len(code), after + 240))
+    if m is None:
+        return None
+    brace = m.end() - 1
+    close = match_bracket(code, brace)
+    if close < 0:
+        return None
+    return (brace + 1, close)
+
+
+def _branch_value(text):
+    """The value a braceless/braceless-braced branch yields, as written."""
+    t = text.strip()
+    if not t:
+        return ""
+    if t.startswith("{"):
+        close = match_bracket(t, 0)
+        inner = t[1:close] if close > 0 else t[1:]
+        return tail_expr(inner).strip()
+    return t
+
+
+def _nullish(value):
+    v = strip_parens(value.strip())
+    return v == "" or v == "null"
+
+
+# ── 1. the executors ────────────────────────────────────────────────────────
+
+def _executor_gate(code, rel, fname, label, out):
+    """Gate call present, consumed by `?.let { … }`, and the block RETURNS."""
+    span = _fn(code, fname)
+    if span is None:
+        out.append("%s: `%s` not found — gate ROT" % (rel, fname))
+        return None, None
+    bstart, bend, _kind = span
+    body = code[bstart:bend]
+    sig = _fn_sig(code, fname, bstart)
+    m = GATE_CALL_RE.search(body)
+    if m is None:
+        out.append("%s: %s does not consult `%s` — a replayed / queued tool_use "
+                   "reaches the write with memory off (ISSUE-07)"
+                   % (rel, label, GATE_CALL))
+        return body, sig
+    let_span = _let_span(code, bstart + m.end())
+    if let_span is None:
+        out.append("%s: %s gate is not consumed by `?.let { … }` (missing or "
+                   "unparseable) — the rejection cannot be judged (fail-closed)"
+                   % (rel, label))
+    elif not _nonlocal_return(code, let_span[0], let_span[1]):
+        out.append("%s: %s gate BUILDS the rejection but only leaves the lambda "
+                   "(`return@let` / a discarded expression) — the value is thrown "
+                   "away and the tool runs anyway (ISSUE-07)" % (rel, label))
+    return body, sig
+
+
+def _helper_violations(code, lit, rel):
+    """W2 — the shared decision must actually depend on `memoryEnabled`."""
     out = []
-    i, n = 0, len(src)
-    in_block = in_line = in_str = 0
-    while i < n:
-        c = src[i]
-        nxt = src[i + 1] if i + 1 < n else ""
-        if in_block:
-            if c == "*" and nxt == "/":
-                in_block = 0
-                i += 2
-                continue
-            i += 1
+    span = _fn(code, "memoryToolDisabledMessage")
+    if span is None:
+        out.append("%s: the shared gate decision `memoryToolDisabledMessage(` is "
+                   "gone — the two executors' rejection source cannot be judged "
+                   "(gate ROT)" % rel)
+        return out
+    bstart, bend, _kind = span
+    sig = _fn_sig(code, "memoryToolDisabledMessage", bstart)
+    if not re.search(r"\bmemoryEnabled\s*:\s*Boolean\b", sig):
+        out.append("%s: `memoryToolDisabledMessage` no longer takes "
+                   "`memoryEnabled: Boolean` — the gate decision lost its input "
+                   "(fail-closed)" % rel)
+    body_c = code[bstart:bend]
+    body_l = lit[bstart:bend]
+    blocks = if_blocks(body_c)
+    if not blocks:
+        out.append("%s: `memoryToolDisabledMessage` has no conditional — the "
+                   "decision cannot depend on `memoryEnabled` (fail-closed)" % rel)
+        return out
+    checked = False
+    for cond, t_start, t_end, e_start, e_end in blocks:
+        if not contains_ident(cond, "memoryEnabled"):
             continue
-        if in_line:
-            if c == "\n":
-                in_line = 0
-                out.append(c)
-            i += 1
-            continue
-        if in_str:
-            out.append(c)
-            if c == "\\" and nxt:
-                out.append(nxt)
-                i += 2
-                continue
-            if c == '"':
-                in_str = 0
-            i += 1
-            continue
-        if c == "/" and nxt == "*":
-            in_block = 1
-            i += 2
-            continue
-        if c == "/" and nxt == "/":
-            in_line = 1
-            i += 2
-            continue
-        if c == '"':
-            in_str = 1
-            out.append(c)
-            i += 1
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
+        checked = True
+        folded = const_bool(strip_parens(re.sub(r"\bmemoryEnabled\b", "false", cond)))
+        if folded is True:
+            taken = _branch_value(body_l[t_start:t_end])
+            if _nullish(taken):
+                out.append("%s: with `memoryEnabled = false` the gate decision "
+                           "`%s` is ALWAYS taken and yields %s — both memory tools "
+                           "are admitted while the feature is switched off"
+                           % (rel, " ".join(cond.split()), taken or "null"))
+        elif folded is False:
+            taken = _branch_value(body_l[e_start:e_end]) if e_start is not None else ""
+            if _nullish(taken):
+                out.append("%s: with `memoryEnabled = false` the gate decision "
+                           "`%s` yields %s — the false path returns no rejection, so "
+                           "every memory write is admitted"
+                           % (rel, " ".join(cond.split()),
+                              taken or "<nothing/null>"))
+    if not checked:
+        out.append("%s: `memoryToolDisabledMessage` never branches on "
+                   "`memoryEnabled` — the decision is not a function of the switch "
+                   "(fail-closed)" % rel)
+    return out
 
 
-def _balanced(src, open_idx, opener="{", closer="}"):
-    """Index one past the matching [closer], or -1 (fail-closed)."""
-    depth = 0
-    for i in range(open_idx, len(src)):
-        if src[i] == opener:
-            depth += 1
-        elif src[i] == closer:
-            depth -= 1
-            if depth == 0:
-                return i + 1
-    return -1
+# ── 2. the wrapper ─────────────────────────────────────────────────────────
+
+def _wrapper_violations(code, rel):
+    """W3 — the executor must receive the LIVE switch, not a constant."""
+    out = []
+    span = _fn(code, "executeMemoryRollupTool")
+    if span is None:
+        out.append("%s: the ChatViewModel memory_rollup wrapper is gone (gate ROT)"
+                   % rel)
+        return out
+    bstart, bend, _kind = span
+    body = code[bstart:bend]
+    m = re.search(r"\bexecuteMemoryRollupTool\s*\(", body)
+    if m is None:
+        out.append("%s: the wrapper does not call `executeMemoryRollupTool(` "
+                   "(gate ROT)" % rel)
+        return out
+    open_pos = bstart + m.end() - 1
+    args = call_args(code, open_pos)
+    if len(args) < 2:
+        out.append("%s: the wrapper calls the executor with %d argument(s) — the "
+                   "memory switch cannot reach the gate (fail-closed)"
+                   % (rel, len(args)))
+        return out
+    a, b = args[1]
+    given = code[a:b].strip()
+    sources = value_sources(code[a:b])
+    if not any(contains_ident(s, "_memoryEnabled") for s in sources):
+        out.append("%s: the wrapper forwards `%s` as memoryEnabled — the live "
+                   "switch `_memoryEnabled.value` is not what the executor receives, "
+                   "so a session with memory off still writes MEMORY-ROLLUP.md"
+                   % (rel, given))
+    return out
 
 
-def _let_block(region, anchor):
-    """Body of the `?.let { … }` that follows [anchor] in [region], or None."""
-    if region is None:
-        return None
-    i = region.find(anchor)
+# ── 3. ProvidersCollection ─────────────────────────────────────────────────
+
+def _payload_expr(body_lit, first):
+    """Resolve the UA argument to the expression that actually reads the payload."""
+    expr = first.strip()
+    if re.fullmatch(r"[A-Za-z_]\w*", expr):
+        decl = re.search(
+            r"\b(?:val|var)\s+" + re.escape(expr) + r"\b[^\n=]*=(.*)", body_lit)
+        if decl is not None:
+            return decl.group(1).strip()
+    return expr
+
+
+def _add_violations(code, lit, rel):
+    """W4 — the resolver must be fed the PAYLOAD, through real dataflow."""
+    out = []
+    span = _fn(code, "add")
+    if span is None:
+        out.append("%s: `add(` not found — gate ROT" % rel)
+        return out
+    bstart, bend, _kind = span
+    body_c = code[bstart:bend]
+    body_l = lit[bstart:bend]
+    if UA_CTOR not in body_c:
+        out.append("%s: add ProviderInstance does not carry `%s` — `minis-config "
+                   "add providers` loses the field the caller passed"
+                   % (rel, UA_CTOR.strip()))
+    m = re.search(r"\bresolveAddCustomUserAgent\s*\(", body_c)
+    if m is None:
+        out.append("%s: add does not resolve `resolveAddCustomUserAgent(` — the UA "
+                   "write path has no payload reader (ISSUE-07)" % rel)
+        return out
+    args = call_args(code, bstart + m.end() - 1)
+    if not args:
+        out.append("%s: the `resolveAddCustomUserAgent(` call is unparseable — the "
+                   "UA source cannot be judged (fail-closed)" % rel)
+        return out
+    a, b = args[0]
+    first_l = lit[a:b]
+    expr = _payload_expr(body_l, first_l)
+    sources = value_sources(expr)
+    alive = [s for s in sources if not is_pure_literal(s)]
+    if not alive or not any(PAYLOAD_UA in s for s in alive):
+        out.append("%s: add resolves the UA from `%s` — that expression does not "
+                   "(really) read the payload `%s` (discard scopes such as "
+                   "`null.also { … }` peel back to the constant), so every "
+                   "`minis-config add providers` silently drops the field"
+                   % (rel, " ".join(first_l.split()) or "nothing", PAYLOAD_UA))
+        return out
+    cast = re.search(r"\bas\??\s*([A-Za-z_][\w.]*)", expr)
+    if cast is not None and cast.group(1) != "ConfigValue.Str":
+        out.append("%s: the payload UA is read as `as? %s` — the field is a "
+                   "`ConfigValue.Str`, so the mismatch resolves to null and the "
+                   "value evaporates" % (rel, cast.group(1)))
+    return out
+
+
+def _writer_violations(code, rel):
+    """W5 — the OAuth guard must TERMINATE, not just be spelled."""
+    out = []
+    span = _fn(code, "customUserAgent")
+    if span is None:
+        out.append("%s: the `customUserAgent(` write field is gone (gate ROT)" % rel)
+        return out
+    bstart, bend, _kind = span
+    body = code[bstart:bend]
+    found = False
+    for cond, t_start, t_end, _e_start, _e_end in if_blocks(body):
+        if GUARD_COND_RE.fullmatch(" ".join(cond.split())) is None:
+            continue
+        found = True
+        branch = body[t_start:t_end]
+        if re.search(r"\bthrow\b", branch) is None and not _nonlocal_return(
+                branch, 0, len(branch)):
+            out.append("%s: the OAuth guard `if (!customUserAgentWritable(inst."
+                       "credentialType))` keeps its condition but its body does not "
+                       "terminate (`Unit` / a discarded expression) — execution falls "
+                       "through to `mutate(...)` and overwrites the fixed OAuth client "
+                       "UA" % rel)
+    if not found:
+        out.append("%s: the customUserAgent writer must guard with `if (!%s)` — "
+                   "without the `!` the polarity is inverted (API-key instances "
+                   "rejected, OAuth instances writable)" % (rel, UA_WRITER_RULE))
+    return out
+
+
+def _rule_violations(code, rel):
+    out = []
+    if "internal fun customUserAgentWritable(credentialType: ProviderCredential): Boolean" not in code:
+        out.append("%s: the shared UA predicate `internal fun "
+                   "customUserAgentWritable(credentialType: ProviderCredential): "
+                   "Boolean` is gone — `add` and the write field no longer share one "
+                   "credential rule (gate ROT)" % rel)
+    return out
+
+
+# ── 4. ConfigBuiltins summary ──────────────────────────────────────────────
+
+def _summary_violations(code, lit, rel):
+    """W6 — the projection must carry the VALUE, not a constant."""
+    out = []
+    i = lit.find('path = "providers",')
     if i < 0:
-        return None
-    m = re.search(r"\?\.\s*let\s*\{", region[i:])
-    if not m:
-        return None
-    brace = i + m.end() - 1
-    end = _balanced(region, brace)
-    return None if end < 0 else region[brace + 1:end - 1]
+        out.append("%s: the `providers` summary field is gone (gate ROT)" % rel)
+        return out
+    j = lit.find('path = "models",', i + 1)
+    stop = len(lit) if j < 0 else j
+    if UA_SUMMARY not in lit[i:stop]:
+        out.append("%s: the providers summary no longer projects "
+                   "`%s` — `minis-config get providers` drops the field"
+                   % (rel, UA_SUMMARY))
+        return out
+    m = PROJ_RE.search(lit, i, stop)
+    if m is None:
+        out.append("%s: the providers summary customUserAgent projection is not "
+                   "`inst.customUserAgent?.let {{ ConfigValue.Str(<value>) }}` — the "
+                   "value cannot be judged (fail-closed)" % rel)
+        return out
+    args = call_args(code, m.end() - 1)
+    if not args:
+        out.append("%s: the projected `ConfigValue.Str(` call is unparseable — the "
+                   "projected value cannot be judged (fail-closed)" % rel)
+        return out
+    a, b = args[0]
+    value = lit[a:b].strip()
+    if is_pure_literal(value) or not (contains_ident(value, "it")
+                                     or "inst.customUserAgent" in value):
+        out.append("%s: the providers summary projects `ConfigValue.Str(%s)` — not "
+                   "the instance's value, so `minis-config get providers` reports a "
+                   "constant / empty customUserAgent for every instance that has one"
+                   % (rel, value))
+    return out
 
 
-def _call_text(region, anchor):
-    """Text inside the parentheses of the first `anchor` call in [region]."""
-    if region is None:
-        return None
-    i = region.find(anchor)
-    if i < 0:
-        return None
-    open_idx = i + len(anchor) - 1
-    end = _balanced(region, open_idx, "(", ")")
-    return None if end < 0 else region[open_idx + 1:end - 1]
+# ── driver ─────────────────────────────────────────────────────────────────
+
+def _read(root, rel):
+    with open(os.path.join(root, rel), "r", encoding="utf-8") as fh:
+        return fh.read()
 
 
-def _split_args(inner):
-    """Split a call's argument text on top-level commas."""
-    parts, buf, depth = [], [], 0
-    for c in inner:
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        if c == "," and depth == 0:
-            parts.append("".join(buf).strip())
-            buf = []
-            continue
-        buf.append(c)
-    if buf:
-        parts.append("".join(buf).strip())
-    return [p for p in parts if p]
-
-
-def segment(src, start, end):
-    """Slice from start (inclusive) to end (exclusive); end None = EOF."""
-    i = src.find(start)
-    if i < 0:
-        return None
-    if end is None:
-        return src[i:]
-    j = src.find(end, i)
-    if j < 0:
-        return None
-    return src[i:j]
+def _views(rel, root, read, violations):
+    try:
+        src = read(root, rel)
+    except OSError as exc:
+        violations.append("%s: unreadable (%s) — gate ROT" % (rel, exc))
+        return None, None
+    try:
+        return _code_view(src), _literal_view(src)
+    except KotlinLexError as exc:
+        violations.append("%s: unparsable Kotlin (%s) — fail-closed "
+                          "(no fallback to raw scanning)" % (rel, exc))
+        return None, None
 
 
 def check(root, _read=None):
@@ -201,124 +444,56 @@ def check(root, _read=None):
         _read = globals()["_read"]
     violations = []
 
-    def need(rel, region, token, label):
-        if region is None:
-            violations.append("%s: region not found for %s" % (rel, label))
-        elif token not in region:
-            violations.append("%s: %s missing %r" % (rel, label, token))
+    code, lit = _views(EXECUTORS_REL, root, _read, violations)
+    if code is not None:
+        write_body, _ = _executor_gate(code, EXECUTORS_REL, "executeMemoryWriteTool",
+                                      "memory_write executor", violations)
+        roll_body, roll_sig = _executor_gate(code, EXECUTORS_REL,
+                                             "executeMemoryRollupTool",
+                                             "memory_rollup executor", violations)
+        if write_body is not None and "isWrite = true" not in write_body:
+            violations.append("%s: the memory_write record lost `isWrite = true` — "
+                              "the write row is mislabelled" % EXECUTORS_REL)
+        if roll_body is not None:
+            if "isWrite = false" not in roll_body:
+                violations.append("%s: the memory_rollup record must keep "
+                                  "`isWrite = false` (tool-kind discriminator, see "
+                                  "gate doc)" % EXECUTORS_REL)
+            if not re.search(r"\bmemoryEnabled\s*:\s*Boolean\b", roll_sig or ""):
+                violations.append("%s: the memory_rollup executor signature lost "
+                                  "`memoryEnabled: Boolean` — the gate has no input"
+                                  % EXECUTORS_REL)
+        violations += _helper_violations(code, lit, EXECUTORS_REL)
 
-    executors = strip_comments(_read(root, EXECUTORS_REL))
-    write_region = segment(executors, WRITE_SIG, "internal fun executeMemoryGetTool(")
-    rollup_region = segment(executors, ROLLUP_SIG, "internal fun appendSubagentTurnText(")
+    code, _lit = _views(PROMPT_REL, root, _read, violations)
+    if code is not None:
+        violations += _wrapper_violations(code, PROMPT_REL)
 
-    need(EXECUTORS_REL, write_region, GATE_CALL, "memory_write executor gate")
-    need(EXECUTORS_REL, write_region, "isWrite = true", "memory_write record isWrite")
-    need(EXECUTORS_REL, rollup_region, GATE_CALL, "memory_rollup executor gate")
-    need(EXECUTORS_REL, rollup_region, "memoryEnabled: Boolean", "memory_rollup signature")
-    need(EXECUTORS_REL, rollup_region, "isWrite = false", "memory_rollup record isWrite (tool-kind discriminator, see gate doc)")
+    code, lit = _views(COLLECTION_REL, root, _read, violations)
+    if code is not None:
+        violations += _add_violations(code, lit, COLLECTION_REL)
+        violations += _writer_violations(code, COLLECTION_REL)
+        violations += _rule_violations(code, COLLECTION_REL)
 
-    # ── [wide-1024] the gate must TERMINATE the executor ────────────────────
-    # `memoryToolDisabledMessage(memoryEnabled)?.let { ToolExecutionResult(…) }`
-    # keeps both needles above and throws the rejection away: execution falls
-    # through to MemoryRollupTool.execute and writes MEMORY-ROLLUP.md with the
-    # feature switched off — ISSUE-07 verbatim, in the fix's own shape.
-    for region, label in ((write_region, "memory_write executor"),
-                          (rollup_region, "memory_rollup executor")):
-        body = _let_block(region, GATE_CALL)
-        if body is None:
-            violations.append("%s: %s gate has no `?.let { … }` body — the "
-                              "rejection cannot be judged (fail-closed)"
-                              % (EXECUTORS_REL, label))
-        elif "return" not in body:
-            violations.append("%s: %s gate BUILDS the rejection but does not "
-                              "`return` it — the value is discarded and the tool "
-                              "runs anyway (ISSUE-07)" % (EXECUTORS_REL, label))
-
-    prompt = strip_comments(_read(root, PROMPT_REL))
-    wrapper = segment(prompt, "internal fun ChatViewModel.executeMemoryRollupTool(): ToolExecutionResult {", "internal fun ChatViewModel.updateAssistantMessage(")
-    need(PROMPT_REL, wrapper, WRAPPER_CALL, "memory_rollup wrapper gate value")
-
-    coll = strip_comments(_read(root, COLLECTION_REL))
-    add_region = segment(coll, "override fun add(payload: ConfigValue): String {", "override fun remove(id: String) {")
-    writer_region = segment(coll, "private fun customUserAgent(id: String): ConfigField =", "private fun apiKeyField(id: String): ConfigField =")
-    rule_region = segment(coll, "internal const val CUSTOM_USER_AGENT_OAUTH_MESSAGE: String", None)
-
-    need(COLLECTION_REL, add_region, UA_RESOLVE, "add payload UA resolution")
-    need(COLLECTION_REL, add_region, UA_CTOR, "add ProviderInstance carries customUserAgent")
-
-    # ── [wide-1024] …and the resolver must be fed the PAYLOAD ───────────────
-    # `resolveAddCustomUserAgent(null, credentialType)` keeps the call, the
-    # `customUserAgent = customUserAgent` wiring and the credential rule; what
-    # it resolves is now a constant, so `minis-config add` silently drops the
-    # field the user passed.
-    call_inner = _call_text(add_region, UA_RESOLVE)
-    if call_inner is None:
-        violations.append("%s: `%s` call is unparseable — the UA source cannot "
-                          "be judged (fail-closed)" % (COLLECTION_REL, UA_RESOLVE.strip()))
-    else:
-        args = _split_args(call_inner)
-        first = args[0] if args else ""
-        if first == "null" or not first:
-            violations.append("%s: add passes `%s` as the UA source — the payload "
-                              "field `customUserAgent` never reaches "
-                              "resolveAddCustomUserAgent, so every `minis-config "
-                              "add providers` loses it" % (COLLECTION_REL, first or "null"))
-        elif 'obj["customUserAgent"]' not in first:
-            bound = re.search(r"\b([A-Za-z_]\w*)\s*$", first)
-            src_decl = None
-            if bound:
-                src_decl = re.search(
-                    r"\b(?:val|var)\s+%s\b[^\n=]*=[^\n]*obj\[\"customUserAgent\"\]"
-                    % re.escape(bound.group(1)), add_region or "")
-            if src_decl is None:
-                violations.append("%s: add resolves the UA from `%s`, which does not "
-                                  "read the payload (`obj[\"customUserAgent\"]`) — the "
-                                  "call survives, its input does not"
-                                  % (COLLECTION_REL, first))
-
-    need(COLLECTION_REL, writer_region, UA_WRITER_RULE, "customUserAgent write field shared rule")
-
-    # ── [wide-1024] …and the OAuth guard must keep its POLARITY ─────────────
-    # `if (customUserAgentWritable(inst.credentialType)) throw …` needles the
-    # same two strings and inverts the rule: API-key instances are refused,
-    # OAuth instances get their UA overwritten.
-    if writer_region is not None and not re.search(
-            r"if\s*\(\s*!\s*" + re.escape(UA_WRITER_RULE) + r"\s*\)", writer_region):
-        violations.append("%s: the customUserAgent writer must guard with "
-                          "`if (!customUserAgentWritable(inst.credentialType))` — "
-                          "without the `!` the polarity is inverted (API-key "
-                          "instances rejected, OAuth instances writable)"
-                          % COLLECTION_REL)
-    need(COLLECTION_REL, rule_region, "internal fun customUserAgentWritable(credentialType: ProviderCredential): Boolean", "shared UA predicate")
-
-    builtins = strip_comments(_read(root, BUILTINS_REL))
-    summary = segment(builtins, 'path = "providers",', 'path = "models",')
-    need(BUILTINS_REL, summary, UA_SUMMARY, "providers summary customUserAgent")
-
-    # ── [wide-1024] …and the summary must project the VALUE ─────────────────
-    # `inst.customUserAgent?.let { ConfigValue.Null } ?: ConfigValue.Null`
-    # matches the prefix anchor and answers null for every instance.
-    projected = _let_block(summary, UA_SUMMARY)
-    if projected is None:
-        violations.append("%s: the providers summary customUserAgent projection "
-                          "has no `?.let { … }` body (fail-closed)" % BUILTINS_REL)
-    elif "ConfigValue.Str(" not in projected:
-        violations.append("%s: the providers summary projects `%s` instead of the "
-                          "value — `minis-config get providers` reports "
-                          "customUserAgent = null for every instance that has one"
-                          % (BUILTINS_REL, projected.strip() or "nothing"))
+    code, lit = _views(BUILTINS_REL, root, _read, violations)
+    if code is not None:
+        violations += _summary_violations(code, lit, BUILTINS_REL)
 
     return violations
 
 
-def _read(root, rel):
-    with open(os.path.join(root, rel), "r", encoding="utf-8") as fh:
-        return fh.read()
-
-
 # ── selftest fixtures ────────────────────────────────────────────────────────
 
-GOOD_GATE = """internal fun executeMemoryWriteTool(
+GOOD_HELPER = """internal fun memoryToolDisabledMessage(memoryEnabled: Boolean): String? =
+    if (memoryEnabled) null
+    else "Memory writes are disabled for this session (user toggled /memory off). Reads remain available."
+
+/** Shared toolTitle for a memory tool rejected by [memoryToolDisabledMessage]. */
+internal const val MEMORY_DISABLED_TOOL_TITLE = "Memory (disabled)"
+"""
+
+GOOD_GATE = GOOD_HELPER + """
+internal fun executeMemoryWriteTool(
     argsJson: String,
     repo: com.rikkaminis.app.data.repository.MemoryRepository,
     memoryEnabled: Boolean,
@@ -353,8 +528,6 @@ internal fun executeMemoryRollupTool(
 }
 
 internal fun appendSubagentTurnText(substitutions: List<String>) { }
-/**
- * [fix/da1017-subagent-residue] Record a finished turn's VISIBLE text in the
 """
 
 BAD_ROLLUP_NO_GATE = GOOD_GATE.replace(
@@ -369,6 +542,7 @@ BAD_ROLLUP_NO_GATE = GOOD_GATE.replace(
 """,
     """internal fun executeMemoryRollupTool(
     repo: com.rikkaminis.app.data.repository.MemoryRepository,
+    memoryEnabled: Boolean,
     recordSink: (MemoryToolRecord) -> Unit,
 ): ToolExecutionResult {
 """,
@@ -387,6 +561,23 @@ internal fun appendSubagentTurnText(substitutions: List<String>) { }""",
 internal fun appendSubagentTurnText(substitutions: List<String>) { }""",
 )
 
+# W1 (dataflow): the rejection keeps the `return` spelling but exits the lambda.
+BAD_ROLLUP_RETURN_LABEL = GOOD_GATE.replace(
+    """    memoryToolDisabledMessage(memoryEnabled)?.let {
+        return ToolExecutionResult(it, false, toolTitle = MEMORY_DISABLED_TOOL_TITLE)
+    }
+    recordSink(MemoryToolRecord(title = result.toolTitle, isWrite = false))""",
+    """    memoryToolDisabledMessage(memoryEnabled)?.let {
+        return@let ToolExecutionResult(it, false, toolTitle = MEMORY_DISABLED_TOOL_TITLE)
+    }
+    recordSink(MemoryToolRecord(title = result.toolTitle, isWrite = false))""")
+
+# W2 (scope): the shared decision is constant-true — it lives outside the
+# executor slices the gate used to scan.
+BAD_HELPER_ALWAYS_NULL = GOOD_GATE.replace(
+    "    if (memoryEnabled) null\n",
+    "    if (true || memoryEnabled) null\n", 1)
+
 GOOD_WRAPPER = """internal fun ChatViewModel.executeMemoryRollupTool(): ToolExecutionResult {
     val repo = memoryRepository ?: return ToolExecutionResult("Error: Memory not available", false)
     return com.rikkaminis.app.ui.chat.executeMemoryRollupTool(repo, _memoryEnabled.value) { record ->
@@ -401,6 +592,12 @@ BAD_WRAPPER_NO_VALUE = GOOD_WRAPPER.replace(
     "executeMemoryRollupTool(repo, _memoryEnabled.value)",
     "executeMemoryRollupTool(repo)",
 )
+
+# W3 (parser-death): a string literal carries the anchor, the real call is hard-coded.
+BAD_WRAPPER_STRING_ANCHOR = GOOD_WRAPPER.replace(
+    "    return com.rikkaminis.app.ui.chat.executeMemoryRollupTool(repo, _memoryEnabled.value) { record ->",
+    '    val _anchor = "executeMemoryRollupTool(repo, _memoryEnabled.value)"\n'
+    "    return com.rikkaminis.app.ui.chat.executeMemoryRollupTool(repo, true) { record ->")
 
 GOOD_ADD = """override fun add(payload: ConfigValue): String {
     val azureMode = (obj["azureMode"] as? ConfigValue.Bool)?.value ?: false
@@ -430,6 +627,11 @@ BAD_ADD_NO_UA = GOOD_ADD.replace(
     "",
 ).replace("customUserAgent = customUserAgent,\n", "")
 
+# W4 (dataflow): the payload read is present but discarded by a scope function.
+BAD_ADD_DISCARD_UA = GOOD_ADD.replace(
+    '        (obj["customUserAgent"] as? ConfigValue.Str)?.value,',
+    '        null.also { obj["customUserAgent"] },')
+
 GOOD_WRITER = """private fun customUserAgent(id: String): ConfigField =
     ClosureField(
         path = "providers.$id.customUserAgent",
@@ -450,6 +652,11 @@ BAD_WRITER_INLINE_RULE = GOOD_WRITER.replace(
     "if (!customUserAgentWritable(inst.credentialType)) {",
     "if (inst.credentialType != ProviderCredential.apiKey) {",
 )
+
+# W5 (family-hole): the guard condition survives, the rejection body is a no-op.
+BAD_WRITER_UNIT_BODY = GOOD_WRITER.replace(
+    "                throw ConfigError.InvalidValue(CUSTOM_USER_AGENT_OAUTH_MESSAGE)",
+    "                Unit")
 
 GOOD_RULE = """// ─── [fix/da1020-memory-gate-provider-fields] Shared UA credential rule ──
 internal const val CUSTOM_USER_AGENT_OAUTH_MESSAGE: String =
@@ -526,6 +733,17 @@ BAD_SUMMARY_NULL_VALUE = GOOD_SUMMARY.replace(
     '"customUserAgent" to (inst.customUserAgent?.let { ConfigValue.Str(it) } ?: ConfigValue.Null),',
     '"customUserAgent" to (inst.customUserAgent?.let { ConfigValue.Null } ?: ConfigValue.Null),')
 
+# ── [batch5-t07] witnesses (report-A §05): each knife must land on its own ──
+# W5 (dataflow): the projection keeps `ConfigValue.Str(` and passes a constant.
+BAD_SUMMARY_EMPTY_VALUE = GOOD_SUMMARY.replace(
+    '"customUserAgent" to (inst.customUserAgent?.let { ConfigValue.Str(it) } ?: ConfigValue.Null),',
+    '"customUserAgent" to (inst.customUserAgent?.let { ConfigValue.Str("") } ?: ConfigValue.Null),')
+
+# W6 (dataflow): the payload is read through a deliberately wrong cast.
+BAD_ADD_WRONG_CAST = GOOD_ADD.replace(
+    '(obj["customUserAgent"] as? ConfigValue.Str)?.value,',
+    '(obj["customUserAgent"] as? ConfigValue.Int)?.toString(),')
+
 
 def _fixture(check_fn, executors, prompt, collection, builtins):
     def fake_read(root_unused, rel):
@@ -542,89 +760,61 @@ def _fixture(check_fn, executors, prompt, collection, builtins):
     return check_fn(None, _read=fake_read)
 
 
+SELFTEST_ARMS = [
+    # (label, executors, prompt, collection, builtins, must_trip)
+    ("compliant tree", GOOD_GATE, GOOD_WRAPPER, None, GOOD_SUMMARY, False),
+    ("rollup w/o gate", BAD_ROLLUP_NO_GATE, GOOD_WRAPPER, None, GOOD_SUMMARY, True),
+    ("rollup isWrite flipped", BAD_ROLLUP_ISWRITE_FLIP, GOOD_WRAPPER, None, GOOD_SUMMARY, True),
+    ("rollup return@let", BAD_ROLLUP_RETURN_LABEL, GOOD_WRAPPER, None, GOOD_SUMMARY, True),
+    ("rollup built-not-returned", BAD_ROLLUP_NO_RETURN, GOOD_WRAPPER, None, GOOD_SUMMARY, True),
+    ("gate helper always null", BAD_HELPER_ALWAYS_NULL, GOOD_WRAPPER, None, GOOD_SUMMARY, True),
+    ("wrapper w/o gate value", GOOD_GATE, BAD_WRAPPER_NO_VALUE, None, GOOD_SUMMARY, True),
+    ("wrapper string anchor", GOOD_GATE, BAD_WRAPPER_STRING_ANCHOR, None, GOOD_SUMMARY, True),
+    ("add w/o customUserAgent", GOOD_GATE, GOOD_WRAPPER, "NO_UA", GOOD_SUMMARY, True),
+    ("add fed null", GOOD_GATE, GOOD_WRAPPER, "NULL_UA", GOOD_SUMMARY, True),
+    ("add discard-scope UA", GOOD_GATE, GOOD_WRAPPER, "DISCARD_UA", GOOD_SUMMARY, True),
+    ("add wrong cast", GOOD_GATE, GOOD_WRAPPER, "WRONG_CAST_UA", GOOD_SUMMARY, True),
+    ("writer inline rule", GOOD_GATE, GOOD_WRAPPER, "INLINE_RULE", GOOD_SUMMARY, True),
+    ("writer Unit body", GOOD_GATE, GOOD_WRAPPER, "UNIT_BODY", GOOD_SUMMARY, True),
+    ("writer polarity flipped", GOOD_GATE, GOOD_WRAPPER, "POLARITY", GOOD_SUMMARY, True),
+    ("shared rule missing", GOOD_GATE, GOOD_WRAPPER, "NO_RULE", GOOD_SUMMARY, True),
+    ("summary w/o customUserAgent", GOOD_GATE, GOOD_WRAPPER, None, BAD_SUMMARY_NO_UA, True),
+    ("summary projects Null", GOOD_GATE, GOOD_WRAPPER, None, BAD_SUMMARY_NULL_VALUE, True),
+    ("summary projects empty Str", GOOD_GATE, GOOD_WRAPPER, None, BAD_SUMMARY_EMPTY_VALUE, True),
+]
+
+COLLECTION_VARIANTS = {
+    None: GOOD_WRITER + "\n" + GOOD_RULE + "\n" + GOOD_ADD,
+    "NO_UA": GOOD_WRITER + "\n" + GOOD_RULE + "\n" + BAD_ADD_NO_UA,
+    "NULL_UA": GOOD_WRITER + "\n" + GOOD_RULE + "\n" + BAD_ADD_NULL_UA,
+    "DISCARD_UA": GOOD_WRITER + "\n" + GOOD_RULE + "\n" + BAD_ADD_DISCARD_UA,
+    "WRONG_CAST_UA": GOOD_WRITER + "\n" + GOOD_RULE + "\n" + BAD_ADD_WRONG_CAST,
+    "INLINE_RULE": BAD_WRITER_INLINE_RULE + "\n" + GOOD_RULE + "\n" + GOOD_ADD,
+    "UNIT_BODY": BAD_WRITER_UNIT_BODY + "\n" + GOOD_RULE + "\n" + GOOD_ADD,
+    "POLARITY": BAD_WRITER_POLARITY + "\n" + GOOD_RULE + "\n" + GOOD_ADD,
+    "NO_RULE": GOOD_WRITER + "\n" + BAD_RULE_NO_PREDICATE + "\n" + GOOD_ADD,
+}
+
+
 def selftest():
-    good_exec, bad_no_gate, bad_flip = GOOD_GATE, BAD_ROLLUP_NO_GATE, BAD_ROLLUP_ISWRITE_FLIP
-    good_prompt, bad_wrapper = GOOD_WRAPPER, BAD_WRAPPER_NO_VALUE
-    good_coll = GOOD_WRITER + "\n" + GOOD_RULE + "\n" + GOOD_ADD
-    bad_coll_gate = BAD_WRITER_INLINE_RULE + "\n" + GOOD_RULE + "\n" + GOOD_ADD
-    bad_coll_rule = GOOD_WRITER + "\n" + BAD_RULE_NO_PREDICATE + "\n" + GOOD_ADD
-    good_builtins, bad_builtins = GOOD_SUMMARY, BAD_SUMMARY_NO_UA
-
-    good = _fixture(check, good_exec, good_prompt, good_coll, good_builtins)
-    no_gate = _fixture(check, bad_no_gate, good_prompt, good_coll, good_builtins)
-    flip = _fixture(check, bad_flip, good_prompt, good_coll, good_builtins)
-    no_value = _fixture(check, good_exec, bad_wrapper, good_coll, good_builtins)
-    bad_coll_no_ua = GOOD_WRITER + "\n" + GOOD_RULE + "\n" + BAD_ADD_NO_UA
-    no_ua = _fixture(check, good_exec, good_prompt, bad_coll_no_ua, good_builtins)
-    writer_inline = _fixture(check, good_exec, good_prompt, bad_coll_gate, good_builtins)
-    rule_missing = _fixture(check, good_exec, good_prompt, bad_coll_rule, good_builtins)
-    summary_missing = _fixture(check, good_exec, good_prompt, good_coll, bad_builtins)
-
-    # [wide-1024] witness fixtures — each knife must trip on its own.
-    w1 = _fixture(check, BAD_ROLLUP_NO_RETURN, good_prompt, good_coll, good_builtins)
-    bad_coll_null_ua = GOOD_WRITER + "\n" + GOOD_RULE + "\n" + BAD_ADD_NULL_UA
-    w2 = _fixture(check, good_exec, good_prompt, bad_coll_null_ua, good_builtins)
-    bad_coll_polarity = BAD_WRITER_POLARITY + "\n" + GOOD_RULE + "\n" + GOOD_ADD
-    w3 = _fixture(check, good_exec, good_prompt, bad_coll_polarity, good_builtins)
-    w4 = _fixture(check, good_exec, good_prompt, good_coll, BAD_SUMMARY_NULL_VALUE)
-
-    print("selftest compliant tree          -> %d violation(s)" % len(good))
-    print("selftest rollup w/o gate         -> %d violation(s)" % len(no_gate))
-    print("selftest rollup isWrite flipped  -> %d violation(s)" % len(flip))
-    print("selftest wrapper w/o gate value  -> %d violation(s)" % len(no_value))
-    print("selftest add w/o customUserAgent -> %d violation(s)" % len(no_ua))
-    print("selftest writer inline rule      -> %d violation(s)" % len(writer_inline))
-    print("selftest shared rule missing     -> %d violation(s)" % len(rule_missing))
-    print("selftest summary w/o customUserAgent -> %d violation(s)" % len(summary_missing))
-    print("selftest W rollup built-not-returned -> %d violation(s)" % len(w1))
-    print("selftest W add fed null            -> %d violation(s)" % len(w2))
-    print("selftest W writer polarity flipped -> %d violation(s)" % len(w3))
-    print("selftest W summary projects Null   -> %d violation(s)" % len(w4))
-
-    ok = True
-    if good:
-        print("SELFTEST FAIL compliant tree must be clean")
-        ok = False
-    if not no_gate:
-        print("SELFTEST FAIL rollup gate removal must trip")
-        ok = False
-    if not flip:
-        print("SELFTEST FAIL rollup isWrite flip must trip")
-        ok = False
-    if not no_value:
-        print("SELFTEST FAIL wrapper gate-value removal must trip")
-        ok = False
-    if not no_ua:
-        print("SELFTEST FAIL add UA removal must trip")
-        ok = False
-    if not writer_inline:
-        print("SELFTEST FAIL writer inline rule must trip")
-        ok = False
-    if not rule_missing:
-        print("SELFTEST FAIL shared rule removal must trip")
-        ok = False
-    if not summary_missing:
-        print("SELFTEST FAIL summary UA removal must trip")
-        ok = False
-    # [wide-1024] the four witnessed knives must each land.
-    if not w1:
-        print("SELFTEST FAIL witness: rollup rejection built but not returned must trip")
-        ok = False
-    if not w2:
-        print("SELFTEST FAIL witness: add fed `null` instead of the payload must trip")
-        ok = False
-    if not w3:
-        print("SELFTEST FAIL witness: inverted customUserAgentWritable guard must trip")
-        ok = False
-    if not w4:
-        print("SELFTEST FAIL witness: summary projecting ConfigValue.Null must trip")
-        ok = False
-    if not ok:
-        for v in (good + no_gate + flip + no_value + no_ua + writer_inline + rule_missing + summary_missing + w1 + w2 + w3 + w4):
-            print("  " + v)
+    failures = []
+    for label, execs, prompt, coll_key, builtins, must_trip in SELFTEST_ARMS:
+        coll = COLLECTION_VARIANTS[coll_key]
+        violations = _fixture(check, execs, prompt, coll, builtins)
+        tripped = bool(violations)
+        if tripped == must_trip:
+            print("  selftest %-28s PASS (%d violation(s))" % (label, len(violations)))
+        else:
+            print("  selftest %-28s FAIL (%d violation(s))" % (label, len(violations)))
+            failures.append((label, violations, must_trip))
+    if failures:
+        for label, violations, must_trip in failures:
+            print("--- %s (must_trip=%s)" % (label, must_trip))
+            for v in violations:
+                print("    " + v)
+        print("MEMORY_GATE_PROVIDER_FIELDS_SELFTEST=FAIL")
         return 1
-
-    print("MEMORY_GATE_PROVIDER_FIELDS_SELFTEST=PASS")
+    print("MEMORY_GATE_PROVIDER_FIELDS_SELFTEST=PASS (%d arms)" % len(SELFTEST_ARMS))
     return 0
 
 
