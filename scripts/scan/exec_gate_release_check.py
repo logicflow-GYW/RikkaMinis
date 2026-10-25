@@ -60,6 +60,11 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import analyse                      # noqa: E402
+from _kotlin_ast import (const_bool, if_blocks, split_top as ast_split_top,  # noqa: E402
+                         stmt_spans, strip_parens, when_branches)
+
 TARGET = "src/android/app/src/main/java/com/rikkaminis/app/sandbox/ExecutionCoordinator.kt"
 
 MARK_RAW_ACQUIRE = "[exec-gate] raw blocking acquire"
@@ -72,6 +77,10 @@ MARK_SETTLE = "[exec-gate] calibrated settle changed"
 MARK_ANCHOR = "[exec-gate] anchor lost"
 MARK_DEAD = "[exec-gate] decision short-circuited by a constant"
 MARK_INNER = "[exec-gate] blocking acquire outside the interruptible block"
+# [wide4] 新增两条：词法解析失败 fail-closed，以及可中断包装跑在错误的调度器上
+# （`runInterruptible(Dispatchers.Main)` 里做阻塞等待 = 主线程卡死，4b 的镜像面）。
+MARK_LEX = "[exec-gate] unparseable Kotlin source"
+MARK_IO = "[exec-gate] interruptible wait not on Dispatchers.IO"
 
 
 def match_paren(text: str, open_idx: int) -> int:
@@ -128,6 +137,60 @@ def lambda_after_call(text: str, call_idx: int) -> tuple:
     if b < len(text) and text[b] == "{":
         return brace_span_from(text, b)
     return None
+
+
+def interruptible_lambda(text: str, call_idx: int):
+    """(args_text, lambda_start, lambda_end) for a `runInterruptible<...>(args) { }`.
+
+    [wide4] Returns the ARGUMENTS as well as the lambda: the wide3 criteria only
+    asked whether a `{ … }` followed the call, so `runInterruptible(Dispatchers.
+    Main) { blocking() }` — a blocking wait parked on the UI thread — passed.
+    """
+    op = text.find("(", call_idx)
+    if op < 0:
+        return None
+    cl = match_paren(text, op)
+    if cl < 0:
+        return None
+    span = lambda_after_call(text, call_idx)
+    if span is None:
+        return None
+    return text[op + 1:cl], span[0], span[1]
+
+
+def lambda_tail_holds(body: str, needle: str) -> tuple:
+    """(ok, why) — `needle` is the LAST top-level statement of the lambda body.
+
+    [wide4] Range containment (`bs <= pos < be`) was the whole criterion, and
+    the witness kept the call inside the lambda while parking it in an
+    unevaluated nested lambda (`val _unused = { heavyGate.tryAcquire(…) }`)
+    followed by `true`. The blocking call has to be the statement the lambda
+    RETURNS, at its own top level — anything else is a call that never runs.
+    """
+    inner = body
+    if inner.startswith("{"):
+        # brace_span_from hands back the braces themselves; judge the interior.
+        inner = inner[1:-1] if inner.rstrip().endswith("}") else inner[1:]
+        off = 1
+    pat = re.compile(r"\b%s\s*\(" % re.escape(needle))
+    hit = pat.search(inner)
+    if not hit:
+        return False, "no `%s(` inside the interruptible lambda" % needle
+    spans = stmt_spans(inner)
+    if not spans:
+        return False, "cannot parse the interruptible lambda body"
+    last = inner[spans[-1][0]:spans[-1][1]].strip()
+    head = inner[:hit.start()]
+    depth = head.count("{") - head.count("}")
+    if depth != 0:   # 0 == the lambda's own top level (braces stripped above)
+        return (False, "`%s(` sits inside a nested block/lambda of the interruptible "
+                       "block, so the wrapper never runs it" % needle)
+    if not re.fullmatch(r"(?:[A-Za-z_][\w.]*\.)?%s\s*\(.*\)" % re.escape(needle),
+                        last, re.S):
+        return (False, "`%s(` is not the interruptible block's own result (the block "
+                       "returns `%s`), so the wait is not what this wrapper performs"
+                % (needle, (last.splitlines()[0][:60] if last else "<empty>")))
+    return True, ""
 
 
 def if_branches(text: str):
@@ -260,50 +323,94 @@ def catch_blocks(body: str):
     return out
 
 
+LEX_FAILURES = []
+
+
 def mask(src: str) -> str:
     """Blank out comments and string-literal interiors, preserving offsets.
 
-    Kotlin source is full of braces and parentheses inside `"${x}ms"` strings
-    and inside KDoc, so balancing braces on the raw text is unreliable. Masking
-    keeps every identifier reachable (what this gate asserts on) while removing
-    everything that could unbalance a scan.
+    [wide4] Delegated to the shared `_kotlin_lexer` state machine. The gate used
+    to carry its own scanner and it died on the Kotlin constructs that scanner
+    did not model: a single-quote char literal (`'"'`) opened a fake string that
+    swallowed the code between it and the next quote (the `if (true) throw t`
+    witness), non-nested `/* */` handling let a nested block comment end early,
+    and `\"\"\"` was matched by `find` without the "last three quotes win" rule.
+    A lexing surface this gate cannot trust is a gate that reports green about
+    code it never saw — so a parse failure is recorded here and turned into a
+    finding by `main()` (fail closed), never silently ignored.
     """
-    buf = list(src)
-    i, n = 0, len(src)
-    while i < n:
-        if src.startswith("//", i):
-            j = src.find("\n", i)
-            j = n if j < 0 else j
-            for k in range(i, j):
-                buf[k] = " "
-            i = j
-        elif src.startswith("/*", i):
-            j = src.find("*/", i + 2)
-            j = n if j < 0 else j + 2
-            for k in range(i, j):
-                if buf[k] != "\n":
-                    buf[k] = " "
-            i = j
-        elif src.startswith('"""', i):
-            j = src.find('"""', i + 3)
-            j = n if j < 0 else j + 3
-            for k in range(i + 3, max(i + 3, j - 3)):
-                if buf[k] != "\n":
-                    buf[k] = " "
-            i = j
-        elif src[i] == '"':
-            j = i + 1
-            while j < n and src[j] != '"':
-                if src[j] == "\\":
-                    j += 1
-                j += 1
-            for k in range(i + 1, min(j, n)):
-                if buf[k] != "\n":
-                    buf[k] = " "
-            i = j + 1
-        else:
-            i += 1
-    return "".join(buf)
+    ok, reason, views = analyse(src)
+    if not ok:
+        LEX_FAILURES.append(reason)
+        return src
+    return views["code"]
+
+
+def normalize_expr(expr: str) -> str:
+    """Whitespace-free, outer-paren-free form — the shape a criterion pins.
+
+    [wide4] The wide3 criteria compared *spellings*: they stripped `false &&`
+    with a constant fold, so the next witness wrote `(1 == 2) &&` and every
+    character the fold looked at was still there. Normalising the whole
+    expression and asserting it EQUALS the expected shape closes the whole
+    family instead of the one spelling.
+    """
+    return strip_parens(re.sub(r"\s+", "", expr))
+
+
+# The only two spellings of the caller-thread decision. Anything else (a
+# constant prefix, a comparison, a negation, a helper call) is a decision the
+# gate cannot see, which is exactly how 4c came back last wave.
+DISPATCH_ARG_OK = (
+    "Looper.myLooper()==Looper.getMainLooper()",
+    "Looper.getMainLooper()==Looper.myLooper()",
+)
+
+
+def covering_conditions(text: str, idx: int) -> list:
+    """Every enclosing condition covering idx: ('if', cond) / ('when', subject, arm).
+
+    [wide4] `enclosing_if` returned only the INNERMOST `if`, so any outer dead
+    wrapper — `when (false) { true -> … }`, `if (false) { … }` — was invisible
+    while the inner `if (heavyGateHeld)` stayed live and the rollback counted as
+    present. A branch is only reachable when EVERY enclosing condition lets it
+    run, so the judgement has to walk the whole chain.
+    """
+    out = []
+    for cond, t_start, t_end, e_start, e_end in if_blocks(text):
+        if t_start <= idx < t_end:
+            out.append(("if", cond))
+        elif e_start is not None and e_start <= idx < e_end:
+            out.append(("if", "!" + cond))
+    for subject, cond, b_start, b_end in when_branches(text):
+        if b_start <= idx < b_end:
+            out.append(("when", subject, cond))
+    return out
+
+
+def condition_dead(entry) -> bool:
+    """True when this enclosing condition can never let the guarded code run.
+
+    `if (const)` folds directly. For `when`, the SUBJECT is folded too: the
+    witness `when (false) { true -> … }` has a perfectly live-looking arm
+    condition (`true`) and a const-false subject, which is why judging the arm
+    alone stayed green.
+    """
+    if entry[0] == "if":
+        return const_bool(entry[1]) is False
+    _kind, subject, arm = entry
+    if const_bool(arm) is False:
+        return True
+    subj = const_bool(subject)
+    if subj is None:
+        return False
+    arm_text = arm.strip()
+    if arm_text in ("else", "otherwise"):
+        return False
+    arm_val = const_bool(arm_text)
+    if arm_val is None:
+        return False
+    return arm_val != subj
 
 
 def body_of(masked: str, signature: str) -> str:
@@ -374,9 +481,16 @@ def main() -> int:
         return 1
 
     raw = open(path, encoding="utf-8").read()
+    del LEX_FAILURES[:]
     masked = mask(raw)
 
     findings: list[str] = []
+    for reason in LEX_FAILURES:
+        findings.append(
+            f"{MARK_LEX}: the target does not lex ({reason}) — the gate refuses to "
+            "judge a file it cannot tokenise, because a mis-lexed surface is how the "
+            "single-quote / nested-comment witnesses hid thirty lines of real code"
+        )
 
     # --- G1: exactly two blocking acquires, both inside the wrappers ---------
     acquire_sites = [m.start() for m in re.finditer(r"tryAcquire\(", masked)]
@@ -404,21 +518,45 @@ def main() -> int:
         # the ACQUIRE must run inside its lambda. `run { runInterruptible(IO) { true
         # }; heavyGate.tryAcquire(...) }` keeps every substring while the acquire
         # runs uninterruptibly on the worker thread (4b returns).
-        spans = [lambda_after_call(heavy_wrap, m.start())
-                 for m in re.finditer(r"\brunInterruptible\s*\(", heavy_wrap)]
-        spans = [s for s in spans if s]
+        # [wide4] …and being inside the lambda is not enough either: the wide4
+        # witness parked the acquire in an unevaluated nested lambda
+        # (`val _unused = { heavyGate.tryAcquire(…) }; true`), which satisfies any
+        # range containment. The wait must be the block's own result, and the
+        # block must run on Dispatchers.IO (`runInterruptible(Dispatchers.Main)`
+        # parks a blocking wait on the UI thread).
+        interrupts = []
+        for m in re.finditer(r"\brunInterruptible\s*\(", heavy_wrap):
+            parsed = interruptible_lambda(heavy_wrap, m.start())
+            if parsed is not None:
+                interrupts.append(parsed)
+        if not interrupts:
+            findings.append(
+                f"{MARK_INNER}: `awaitHeavyGatePermitInterruptibly` has a "
+                "runInterruptible call with no trailing block — nothing runs "
+                "interruptibly (4b)"
+            )
         acquires = [m.start() for m in re.finditer(r"\btryAcquire\s*\(", heavy_wrap)]
         if not acquires:
             findings.append(
                 f"{MARK_INNER}: `awaitHeavyGatePermitInterruptibly` no longer performs "
                 "any tryAcquire — the wait may have moved where nothing checks it"
             )
-        elif spans and not any(bs <= a < be for a in acquires for bs, be in spans):
-            findings.append(
-                f"{MARK_INNER}: the heavy-gate tryAcquire is no longer inside the "
-                "runInterruptible lambda — it runs uninterruptibly, so a cancelled "
-                "coroutine parks until the timeout (4b)"
-            )
+        else:
+            for args, b0, b1 in interrupts:
+                if normalize_expr(args) != "Dispatchers.IO":
+                    findings.append(
+                        f"{MARK_IO}: the heavy-gate wait is wrapped in "
+                        f"runInterruptible({args.strip()}) — the blocking acquire runs "
+                        "on a dispatcher the caller did not park for (4b)"
+                    )
+                    break
+            ok_tail, why_tail = False, "no interruptible lambda encloses the acquire"
+            for args, b0, b1 in interrupts:
+                ok_tail, why_tail = lambda_tail_holds(heavy_wrap[b0:b1], "tryAcquire")
+                if ok_tail:
+                    break
+            if not ok_tail:
+                findings.append(f"{MARK_INNER}: {why_tail} (4b)")
 
     global_wrap = body_of(masked, "suspend fun awaitGlobalShellSlotInterruptibly(")
     if not global_wrap:
@@ -436,20 +574,35 @@ def main() -> int:
                 "it is not handed back when the wait throws (4a)"
             )
         else:
-            # Same containment rule as the heavy wrapper: the delegated acquire
-            # (the only blocking call this wrapper reaches) must run INSIDE the
-            # interruptible lambda, not merely be mentioned in the same body.
-            spans = [lambda_after_call(global_wrap, m.start())
-                     for m in re.finditer(r"\brunInterruptible\s*\(", global_wrap)]
-            spans = [s for s in spans if s]
-            delegates = [m.start() for m in re.finditer(
-                r"\binternalAcquireGlobalShellSlot\s*\(", global_wrap)]
-            if spans and delegates and not any(
-                    bs <= d < be for d in delegates for bs, be in spans):
+            # Same rule as the heavy wrapper (one axis, both call sites): the
+            # delegated acquire must be the interruptible block's own result, on
+            # Dispatchers.IO — a delegate parked in an unevaluated lambda or run
+            # on another dispatcher is a wait the wrapper does not actually do.
+            g_parsed = [interruptible_lambda(global_wrap, m.start())
+                        for m in re.finditer(r"\brunInterruptible\s*\(", global_wrap)]
+            g_parsed = [x for x in g_parsed if x is not None]
+            if not g_parsed:
                 findings.append(
-                    f"{MARK_INNER}: internalAcquireGlobalShellSlot is no longer called "
-                    "inside the runInterruptible lambda of the global-slot wait (4b)"
+                    f"{MARK_GLOBAL_WRAP}: the global-slot wait has a runInterruptible "
+                    "call with no trailing block (4b)"
                 )
+            else:
+                for args, b0, b1 in g_parsed:
+                    if normalize_expr(args) != "Dispatchers.IO":
+                        findings.append(
+                            f"{MARK_IO}: the global-slot wait is wrapped in "
+                            f"runInterruptible({args.strip()}) — the blocking acquire "
+                            "runs on a dispatcher the caller did not park for (4b)"
+                        )
+                        break
+                ok_gate, why_gate = False, "no interruptible lambda encloses the delegate"
+                for args, b0, b1 in g_parsed:
+                    ok_gate, why_gate = lambda_tail_holds(
+                        global_wrap[b0:b1], "internalAcquireGlobalShellSlot")
+                    if ok_gate:
+                        break
+                if not ok_gate:
+                    findings.append(f"{MARK_INNER}: {why_gate} (4b)")
 
     # --- G3b: the wiring the wrappers exist for -------------------------------
     # Counted, not text-pinned (comments are masked out above): each name occurs
@@ -492,16 +645,25 @@ def main() -> int:
                 block = rollback[cs:ce]
                 for m in re.finditer(r"\bheavyGate\s*\.\s*release\s*\(\s*\)", block):
                     idx = cs + m.start()
-                    guard = enclosing_if(rollback, idx)
-                    if guard is not None and guard[4]:
-                        cond = rollback[guard[0]:guard[1]]
-                        if constant_truth(cond) is False:
-                            findings.append(
-                                f"{MARK_DEAD}: the catch's heavy-permit rollback sits "
-                                f"behind `if ({cond.strip()})`, which is constantly "
-                                "false — release() never runs (4a)"
-                            )
-                            continue
+                    # [wide4] EVERY enclosing condition decides reachability. The
+                    # wide3 rule looked at the INNERMOST `if` only, so
+                    # `when (false) { true -> if (heavyGateHeld) release() }` and
+                    # `if (false) { if (heavyGateHeld) release() }` both read as a
+                    # live rollback: the inner condition is genuinely unknown.
+                    dead = next((c for c in covering_conditions(rollback, idx)
+                                 if condition_dead(c)), None)
+                    if dead is not None:
+                        # label reads like the source it came from, so the CI log
+                        # tells an operator which construct to look at.
+                        label = (dead[1].strip() if dead[0] == "if"
+                                 else "%s) { %s ->"
+                                 % (dead[1].strip(), dead[2].strip()))
+                        findings.append(
+                            f"{MARK_DEAD}: the catch's heavy-permit rollback sits "
+                            f"behind `{dead[0]} ({label} …`, which can never be taken — "
+                            "release() never runs (4a)"
+                        )
+                        continue
                     released.append(idx)
                 if not any(cs <= idx < ce for idx in released):
                     findings.append(
@@ -564,12 +726,19 @@ def main() -> int:
                         f"{MARK_DISPATCH}: the dispatch argument no longer compares the "
                         "caller thread with the main looper (4c)"
                     )
-                truth = constant_truth(args.split("=", 1)[-1] if "=" in args else args)
-                if truth is not None:
+                # [wide4] Whitelist, not "is it constant". `constant_truth` only
+                # folded literals, so `(1 == 2) && Looper… == Looper…` was
+                # unknown-to-the-fold yet permanently false. The argument must BE
+                # the caller-thread comparison, in one of its two spellings.
+                named = re.match(r"\s*[A-Za-z_]\w*\s*=(?!=)", args)
+                arg_expr = args[named.end():] if named else args
+                if normalize_expr(arg_expr) not in DISPATCH_ARG_OK:
                     findings.append(
-                        f"{MARK_DEAD}: the isOnMainThread argument is constantly "
-                        f"{str(truth).lower()} — every call takes the same branch, so "
-                        "main-thread callers run the GC loop inline (4c)"
+                        f"{MARK_DEAD}: the isOnMainThread argument is "
+                        f"`{arg_expr.strip()}`, not the caller-thread comparison itself — "
+                        "anything else (a constant prefix, a comparison, a helper) pins "
+                        "every call to one branch, so main-thread callers run the GC "
+                        "loop inline (4c)"
                     )
                 # The decision must be CONSUMED: the `when`'s subject is the call.
                 if not re.search(r"\bwhen\s*\(\s*recycleDispatchMode\s*\(", wrapper):
@@ -582,6 +751,77 @@ def main() -> int:
                 f"{MARK_DISPATCH}: main-thread callers are no longer deferred to "
                 "recoveryScope (4c)"
             )
+        # [wide4] …and the ARM the launch sits in is the decision. The wide4
+        # witness kept `recoveryScope.launch` somewhere in the wrapper while
+        # moving it into the INLINE arm (and running the GC loop synchronously
+        # under DEFERRED): a substring in the body cannot tell the two arms
+        # apart, and a dead `if (false)` wrapper inside an arm cannot either.
+        arms = {}
+        for subject, cond, b0, b1 in when_branches(wrapper):
+            arms[cond.strip()] = wrapper[b0:b1].strip()
+        deferred_arm = arms.get("RecycleDispatch.DEFERRED")
+        inline_arm = arms.get("RecycleDispatch.INLINE")
+        if deferred_arm is None or inline_arm is None:
+            findings.append(
+                f"{MARK_DISPATCH}: cannot identify the RecycleDispatch.DEFERRED / "
+                "INLINE arms of the recovery dispatch — the branch/action pairing is "
+                "unreadable (4c decision unreadable — fail closed)"
+            )
+        else:
+            if (not deferred_arm.startswith("recoveryScope.launch")
+                    or "postRecycleMemoryRecoveryNow()" not in deferred_arm):
+                findings.append(
+                    f"{MARK_DISPATCH}: the DEFERRED arm is `{deferred_arm[:60]}…` — a "
+                    "main-thread caller must hand the GC loop to "
+                    "recoveryScope.launch { postRecycleMemoryRecoveryNow() } (4c)"
+                )
+            if "recoveryScope.launch" in inline_arm or \
+                    "postRecycleMemoryRecoveryNow()" not in inline_arm:
+                findings.append(
+                    f"{MARK_DISPATCH}: the INLINE arm is `{inline_arm[:60]}…` — the "
+                    "caller-thread arm must run the GC loop itself, not defer it (4c)"
+                )
+
+    # G5c (wide4): the DECISION function itself. `recycleDispatchMode` maps the
+    # caller's flag to the arm; a constant or an inverted body there defeats the
+    # `when` above just as thoroughly, and the wide3 criteria never looked at it.
+    mode_fn = body_of(masked, "internal fun recycleDispatchMode(")
+    if not mode_fn:
+        findings.append(f"{MARK_ANCHOR}: `recycleDispatchMode` not found")
+    else:
+        mode_ifs = if_blocks(mode_fn)
+        if not mode_ifs:
+            findings.append(
+                f"{MARK_DISPATCH}: recycleDispatchMode no longer branches on the "
+                "caller flag (4c)"
+            )
+        else:
+            cond, t0, _t1, _e0, _e1 = mode_ifs[0]
+            if const_bool(cond) is not None:
+                findings.append(
+                    f"{MARK_DEAD}: recycleDispatchMode decides on the constant "
+                    f"`{cond.strip()}` — every caller takes the same arm (4c)"
+                )
+            if normalize_expr(cond) != "isOnMainThread":
+                findings.append(
+                    f"{MARK_DEAD}: recycleDispatchMode no longer decides on its "
+                    f"`isOnMainThread` argument (found `{cond.strip()}`) (4c)"
+                )
+            # then/else values are read off the if's own tail rather than from
+            # `if_blocks`' arm spans: this function is an EXPRESSION body whose
+            # `else` sits on the same line, and a one-line arm split is exactly
+            # the shape that made a naive arm parser report "no else".
+            tail = mode_fn[t0:]
+            halves = re.split(r"\belse\b", tail, maxsplit=1)
+            then_val = re.search(r"RecycleDispatch\.(\w+)", halves[0])
+            else_val = (re.search(r"RecycleDispatch\.(\w+)", halves[1])
+                        if len(halves) > 1 else None)
+            if (then_val is None or then_val.group(1) != "DEFERRED"
+                    or else_val is None or else_val.group(1) != "INLINE"):
+                findings.append(
+                    f"{MARK_DISPATCH}: recycleDispatchMode no longer maps a main-thread "
+                    "caller to DEFERRED and a background caller to INLINE (4c)"
+                )
     if "fun postRecycleMemoryRecoveryNow(" not in masked:
         findings.append(
             f"{MARK_ANCHOR}: `postRecycleMemoryRecoveryNow` not found — the "
@@ -655,12 +895,91 @@ def selftest_fixture(shape):
             "        if (heavyGateHeld) heavyGate.release()\n",
             "        if (false && heavyGateHeld) heavyGate.release()\n",
         )
+    if shape == "when_dead_rollback":
+        # wide4 witness 1: the rollback keeps a LIVE inner `if` and hides it
+        # under a constantly-false `when` subject.
+        rollback = rollback.replace(
+            "        if (heavyGateHeld) heavyGate.release()\n",
+            "        when (false) { true -> if (heavyGateHeld) heavyGate.release() "
+            "else -> Unit }\n",
+        )
+    if shape == "nested_dead_if_rollback":
+        # wide4 witness 1 (self-doubt): the same escape with a plain outer `if`.
+        rollback = rollback.replace(
+            "        if (heavyGateHeld) heavyGate.release()\n",
+            "        if (false) { if (heavyGateHeld) heavyGate.release() }\n",
+        )
+    if shape == "char_literal_escape":
+        # wide4 witness 5: `'"'` char literals used to open a fake string that
+        # swallowed the `if (true) throw t` in between.
+        rollback = rollback.replace(
+            "        if (heavyGateHeld) heavyGate.release()\n        throw t\n",
+            "        val _open = '\"'; if (true) throw t; val _close = '\"'\n"
+            "        if (heavyGateHeld) heavyGate.release()\n        throw t\n",
+        )
     dispatch = DISPATCH_BODY
     if shape == "dead_dispatch_arg":
         # wide3 G5: the thread comparison stays, pinned to false.
         dispatch = dispatch.replace(
             "isOnMainThread = Looper.myLooper() == Looper.getMainLooper()",
             "isOnMainThread = false && Looper.myLooper() == Looper.getMainLooper()",
+        )
+    if shape == "dead_dispatch_compare":
+        # wide4 witness 2: `(1 == 2) &&` is permanently false but folds to
+        # "unknown" for a literal-only constant evaluator.
+        dispatch = dispatch.replace(
+            "isOnMainThread = Looper.myLooper() == Looper.getMainLooper()",
+            "isOnMainThread = (1 == 2) && "
+            "(Looper.myLooper() == Looper.getMainLooper())",
+        )
+    if shape == "swapped_when_arms":
+        # wide4 witness 4: the arms' actions swap while every substring stays.
+        dispatch = dispatch.replace(
+            "            RecycleDispatch.DEFERRED -> "
+            "recoveryScope.launch { postRecycleMemoryRecoveryNow() }\n"
+            "            RecycleDispatch.INLINE -> postRecycleMemoryRecoveryNow()\n",
+            "            RecycleDispatch.DEFERRED -> postRecycleMemoryRecoveryNow()\n"
+            "            RecycleDispatch.INLINE -> "
+            "recoveryScope.launch { postRecycleMemoryRecoveryNow() }\n",
+        )
+    if shape == "dead_inline_arm":
+        # wide4 witness 4 (self-doubt): the launch moves into the INLINE arm
+        # behind `if (false)`.
+        dispatch = dispatch.replace(
+            "            RecycleDispatch.DEFERRED -> "
+            "recoveryScope.launch { postRecycleMemoryRecoveryNow() }\n"
+            "            RecycleDispatch.INLINE -> postRecycleMemoryRecoveryNow()\n",
+            "            RecycleDispatch.DEFERRED -> recoveryScope.launch { "
+            "postRecycleMemoryRecoveryNow() }\n"
+            "            RecycleDispatch.INLINE -> if (false) { recoveryScope.launch { "
+            "postRecycleMemoryRecoveryNow() } } else postRecycleMemoryRecoveryNow()\n",
+        )
+    if shape == "unused_lambda_acquire":
+        # wide4 witness 3: the acquire never leaves the lambda but moves into an
+        # unevaluated nested lambda.
+        heavy = heavy.replace(
+            "): Boolean = runInterruptible(Dispatchers.IO) {\n"
+            "    heavyGate.tryAcquire(timeoutMs, TimeUnit.MILLISECONDS)\n"
+            "}\n",
+            "): Boolean = runInterruptible(Dispatchers.IO) {\n"
+            "    val _unused = { heavyGate.tryAcquire(timeoutMs, TimeUnit.MILLISECONDS) }\n"
+            "    true\n"
+            "}\n",
+        )
+    if shape == "main_dispatcher":
+        # wide4 witness 3 (self-doubt): an interruptible block on the wrong
+        # dispatcher parks the blocking wait on the caller's thread.
+        heavy = heavy.replace("runInterruptible(Dispatchers.IO)",
+                              "runInterruptible(Dispatchers.Main)")
+    mode_fn = (
+        "internal fun recycleDispatchMode(isOnMainThread: Boolean): RecycleDispatch =\n"
+        "    if (isOnMainThread) RecycleDispatch.DEFERRED else RecycleDispatch.INLINE\n"
+    )
+    if shape == "constant_mode_fn":
+        # wide4 witness 2 (self-doubt): the decision function itself is pinned.
+        mode_fn = (
+            "internal fun recycleDispatchMode(isOnMainThread: Boolean): RecycleDispatch =\n"
+            "    if (false) RecycleDispatch.DEFERRED else RecycleDispatch.INLINE\n"
         )
     return (
         "package com.rikkaminis.app.sandbox\n"
@@ -688,8 +1007,7 @@ def selftest_fixture(shape):
         "\n"
         "internal enum class RecycleDispatch { INLINE, DEFERRED }\n"
         "\n"
-        "internal fun recycleDispatchMode(isOnMainThread: Boolean): RecycleDispatch =\n"
-        "    if (isOnMainThread) RecycleDispatch.DEFERRED else RecycleDispatch.INLINE\n"
+        + mode_fn +
         "\n"
         "object ExecutionCoordinator {\n"
         "    private suspend fun executeCommand(\n"
@@ -723,6 +1041,23 @@ def selftest():
         ("witness G4: rollback behind `false &&`", "dead_rollback", 1, MARK_DEAD),
         ("witness G5: dispatch argument pinned to false",
          "dead_dispatch_arg", 1, MARK_DEAD),
+        # ---- [wide4] the five externally falsified shapes -------------------
+        # Each keeps every substring the wide3 criteria looked for and drops
+        # only the decision, so each expectation names exactly one marker.
+        ("w4-when-false rollback hides a live inner if", "when_dead_rollback",
+         1, MARK_DEAD),
+        ("w4-nested dead if wraps the rollback", "nested_dead_if_rollback",
+         1, MARK_DEAD),
+        ("w4-char literal `'\"'` no longer swallows the early throw",
+         "char_literal_escape", 1, "rethrows BEFORE releasing the heavy permit"),
+        ("w4-dispatch arg derived from a constant comparison", "dead_dispatch_compare",
+         1, MARK_DEAD),
+        ("w4-when arms swap their actions", "swapped_when_arms", 1, MARK_DISPATCH),
+        ("w4-launch parked in the INLINE arm", "dead_inline_arm", 1, MARK_DISPATCH),
+        ("w4-acquire parked in an unevaluated nested lambda", "unused_lambda_acquire",
+         1, MARK_INNER),
+        ("w4-interruptible block on Dispatchers.Main", "main_dispatcher", 1, MARK_IO),
+        ("w4-decision function pinned to a constant", "constant_mode_fn", 1, MARK_DEAD),
     ]
     ok = True
     for name, shape, want_rc, needle in arms:
