@@ -163,8 +163,17 @@
 
 ## §5 CI
 
-- run 号 / job 号 / head_sha 三方核对：**见下（回填）**
-- 判据行：`Summary: 112 passed, 0 failed`（带框线前缀，恰一条）· `ALL 344 CASES PASS`（恰一条）· ` e: `（Kotlin 编译错误）0 行 · 唯一 `skipped` 步 = Publish（main 门控）
+- **CI #2669 / run id `40180281460` / attempt 1 / job `121129678569` → conclusion `success`**
+- **三方 sha 逐字符一致**：本地 HEAD = `ac5882a5caa963fbbe07eca9708e37ecdad0cc03` · `GET /branches/fix/wide4-10-debugleak-legacy` = 同上 · `run.head_sha` = 同上
+- 步骤面：23 步 `success`，唯一 `skipped` = **Publish to Releases**（main 门控，本支是分支）；`Complete job` success
+- 日志判读（1,481,048 B / 17,845 行，`probe/ci/job-121129678569.log`）：
+  - `Summary: 112 passed, 0 failed` —— **总是 112 的那条恰一条**（另 7 条 28/5/14/36/15/25/10 是子套件摘要）
+  - `ALL 344 CASES PASS` —— **恰一条**
+  - ` e: `（Kotlin 编译错误）—— **0 行**
+  - 门头 `━━━ [N/112] ━━━` —— 112 条，编号 112 个互异、totals 全为 112
+  - 含 `FAILED` 的 6 行 —— **逐条确认全是 PASSED 用例名子串**（`RealAgentAdapterSkeletonTest > slot denied produces FAILED…`、`ChatAgentTraceObserverSchemaTest > … FAILED maps to …` ×3、`TerminalErrorSurfacedTest > … legal FAILED terminal`）
+  - 本支两门在册且绿：`[6/112] Legacy pipeline guard` → `✅ no new references to the dead path`；`[8/112] Debug-code release boundary (source)` → `✅ no unaudited debug-package references` + `✅ debug read path is minSdk-26 safe`；另有 apk 侧复核 `✅ Debug-leak guard (apk): 6 debug markers absent from 1 dex entries`
+- 冻结面读数与基线一致：门 112 / 夹具 344 不变（本支未新建门、未改 `scan.sh` / `test_scan.py`）
 
 ## §6 残留
 
