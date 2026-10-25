@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Gate: production code must not read the chat transcript through
-`.dao.loadMessages(` — every production read funnels through
+Gate: production code must not read the chat transcript through the raw DAO
+(`<dao>.loadMessages(...)`) — every production read funnels through
 ChatRepository.loadMessages / loadMessagePageRaw so the big-session
 (>2MB CursorWindow / SQLiteBlobTooBigException) tolerance path is
 unavoidable.
@@ -20,22 +20,46 @@ Scope:
   * production sources only: any .kt under */src/main/* (plus src/shared/,
     currently zero .kt) — instrumented/unit tests legitimately drive the
     raw DAO against fresh small databases and are out of scope by design;
-  * whitelist: ChatRepository.kt / ChatDao.kt (task criterion wording) —
-    the repository itself is additionally pinned by
-    DaoLoadMessagesConvergenceTest (`no dao.loadMessages( in the repository
-    source`), so the whitelist cannot hide a reintroduced bypass there.
+  * NO file-level whitelist. The repository and the DAO interface are in
+    scope like everything else: the DAO only *declares* `fun loadMessages`
+    (a declaration has no receiver, so it cannot match), and the repository
+    legitimately uses the paged calls (`dao.loadMessagePage*`) which this
+    gate does not flag. A whole-file exemption made ChatRepository.kt a
+    lawless zone where a new helper could re-introduce the bypass this gate
+    exists to stop (wide3 witness `WHITELIST_BASENAMES`).
+
+Criterion (what counts as a bypass): a live `loadMessages(...)` CALL whose
+receiver resolves to the DAO — directly (`dao.` / `x.dao.` /
+`app.chatRepository.dao.`), through a local alias (`val rawDao = repo.dao`
+… `rawDao.loadMessages(...)`), across a wrapped line (`repo.dao` then
+`.loadMessages(...)` — ktlint wraps chains at the dot), or bare inside a
+DAO scope function (`with(repo.dao) { loadMessages(...) }`). Receivers that
+resolve to neither the DAO nor a repository-shaped name are reported too:
+a static gate that silently accepts an unknown receiver goes blind again
+the moment a new alias spelling appears.
 
 Usage: python3 scripts/scan/dao_loadmessages_check.py [repo_root]
        python3 scripts/scan/dao_loadmessages_check.py --selftest
 Exit:  0 = clean (or selftest pass), 1 = violation(s) / selftest fail,
        2 = usage error
 """
+import re
 import sys
 import tempfile
 from pathlib import Path
 
-PATTERN = ".dao.loadMessages("
-WHITELIST_BASENAMES = {"ChatRepository.kt", "ChatDao.kt"}
+# `<receiver>.loadMessages(` / `<receiver>?.loadMessages(`
+CALL_RE = re.compile(r"(?<![\w.])([A-Za-z_][\w.]*)\s*(?:\?\.|\.)\s*loadMessages\s*\(")
+# A call with no receiver at all — legal only when it is a declaration
+# (`fun loadMessages(`) or the enclosing scope IS a dao (`with(…dao) { … }`).
+BARE_RE = re.compile(r"(?<![\w.])loadMessages\s*\(")
+DECL_BEFORE_RE = re.compile(r"\bfun\s+(?:suspend\s+)?$")
+DAO_SCOPE_RE = re.compile(
+    r"(?:\bwith\s*\(|\.\s*(?:let|run|also|apply)\s*\{)[^;{}\n]*dao", re.I)
+ASSIGN_RE = re.compile(r"\b(?:val|var)\s+(\w+)\s*=\s*")
+
+DAO_SUFFIX = re.compile(r"dao$", re.I)
+REPO_HINT = re.compile(r"repo", re.I)
 
 
 def is_production(path: Path, root: Path) -> bool:
@@ -48,25 +72,194 @@ def is_production(path: Path, root: Path) -> bool:
     return rel.startswith("src/shared/")
 
 
+def mask_comments(src: str) -> str:
+    """Blank `//` and `/* */` comments with spaces (newlines kept), leaving
+    string literals intact and every index aligned with `src`.
+
+    Without this the KDoc that *documents* the banned shape ("the legacy
+    `dao.loadMessages` path …") would be read as the banned shape itself —
+    which is exactly what the old whole-file whitelist papered over.
+    """
+    return _mask(src, blank_strings=False)
+
+
+def mask_strings(src: str) -> str:
+    """Blank string-literal contents with spaces (quotes kept), same length.
+
+    Used only for brace-depth bookkeeping: a `"{"` inside a literal must not
+    change how statements are glued together.
+    """
+    return _mask(src, blank_strings=True)
+
+
+def _mask(src: str, blank_strings: bool) -> str:
+    def _blank(ch: str) -> str:
+        return "\n" if ch == "\n" else " "
+
+    out = []
+    i = 0
+    n = len(src)
+    state = None  # None | '"' | "'" | '"""'
+    while i < n:
+        if state is not None:
+            if state == '"""':
+                if src.startswith('"""', i):
+                    out.append('"""')
+                    i += 3
+                    state = None
+                    continue
+                out.append(_blank(src[i]) if blank_strings else src[i])
+                i += 1
+                continue
+            c = src[i]
+            if c == "\\" and i + 1 < n:
+                out.append(_blank(c) if blank_strings else c)
+                out.append(_blank(src[i + 1]) if blank_strings else src[i + 1])
+                i += 2
+                continue
+            out.append(_blank(c) if (blank_strings and c != state) else c)
+            if c == state:
+                state = None
+            i += 1
+            continue
+        if src.startswith('"""', i):
+            out.append('"""')
+            i += 3
+            state = '"""'
+            continue
+        c = src[i]
+        if c == '"' or c == "'":
+            state = c
+            out.append(c)
+            i += 1
+            continue
+        if src.startswith("//", i):
+            j = src.find("\n", i)
+            if j < 0:
+                j = n
+            out.append(" " * (j - i))
+            i = j
+            continue
+        if src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            j = n - 2 if j < 0 else j
+            out.append("".join("\n" if ch == "\n" else " " for ch in src[i:j + 2]))
+            i = j + 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def logical_statements(text: str, structural: str):
+    """[(first_line_no, joined_text)] with wrapped lines glued back together.
+
+    A Kotlin chain wraps at the dot (ktlint puts the `.` at the start of the
+    continuation line), so `repo.dao` on one line and `.loadMessages(s)` on the
+    next is ONE expression; scanning line by line sees neither as the banned
+    shape — that is witness `is_production`. `structural` is the same text with
+    strings blanked, used only to count brackets.
+    """
+    lines = text.split("\n")
+    struc = structural.split("\n")
+    out = []
+    buf = []
+    start = 1
+    depth = 0
+    for i, line in enumerate(lines):
+        if not buf:
+            start = i + 1
+        buf.append(line)
+        for ch in struc[i]:
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+        nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+        open_next = depth > 0 or nxt[:1] in (".", "?", ":") or nxt[:1] == "|"
+        cont = open_next or line.rstrip().endswith(("=", ",", "(", "&&", "||", "+"))
+        if cont:
+            continue
+        out.append((start, "\n".join(buf)))
+        buf = []
+    if buf:
+        out.append((start, "\n".join(buf)))
+    return out
+
+
+def collect_dao_names(stmt: str) -> set:
+    """Identifiers that are bound to the DAO inside one statement.
+
+    `val rawDao = repo.dao` (and a wrapped variant) makes every later
+    `rawDao.loadMessages(...)` the same bypass spelled differently — that is
+    witness `PATTERN`.
+    """
+    names = set()
+    for m in ASSIGN_RE.finditer(stmt):
+        rhs = stmt[m.end():].strip()
+        if re.search(r"(?:^|\.)\s*dao$", rhs) or rhs == "dao":
+            names.add(m.group(1))
+    for m in re.finditer(r"\b(?:val|var)\s+(\w+)\s*:\s*\w*Dao\b", stmt):
+        names.add(m.group(1))
+    return names
+
+
+def _receiver_kind(receiver: str, dao_names: set) -> str:
+    """'dao' | 'repo' | 'unknown' for a call receiver expression."""
+    last = re.split(r"[\s.]", receiver.strip())[-1] or receiver.strip()
+    if last in dao_names or DAO_SUFFIX.search(last):
+        return "dao"
+    if REPO_HINT.search(receiver):
+        return "repo"
+    return "unknown"
+
+
 def scan(root: Path) -> list[str]:
     """Return violation descriptions (file:line + snippet), empty if clean."""
     violations: list[str] = []
+    scanned = 0
     for path in sorted(root.rglob("*.kt")):
         if not is_production(path, root):
             continue
-        if path.name in WHITELIST_BASENAMES:
-            continue
         try:
-            text = path.read_text(encoding="utf-8")
+            raw = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:  # unreadable = report it
             violations.append(f"{path}: unreadable ({exc})")
             continue
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            if PATTERN in line:
+        scanned += 1
+        text = mask_comments(raw)
+        structural = mask_strings(text)
+        dao_names = set()
+        for first_lineno, stmt in logical_statements(text, structural):
+            dao_names |= collect_dao_names(stmt)
+            for m in CALL_RE.finditer(stmt):
+                receiver = m.group(1)
+                kind = _receiver_kind(receiver, dao_names)
+                if kind == "repo":
+                    continue
+                line = first_lineno + stmt.count("\n", 0, m.start())
+                why = ("direct DAO read" if kind == "dao"
+                       else "receiver not provably the repository")
+                snippet = stmt[max(0, m.start() - 40):m.end() + 20].replace("\n", " ")
                 violations.append(
-                    f"{path}:{lineno}: direct dao.loadMessages bypass: "
-                    f"{line.strip()[:120]}"
-                )
+                    f"{path}:{line}: {why} — `{receiver}.loadMessages(` bypasses "
+                    f"ChatRepository.loadPageTolerant: {snippet.strip()[:120]}")
+            for m in BARE_RE.finditer(stmt):
+                if DECL_BEFORE_RE.search(stmt[:m.start()]):
+                    continue  # declaration, not a call
+                prefix = stmt[:m.start()]
+                line = first_lineno + stmt.count("\n", 0, m.start())
+                snippet = stmt[max(0, m.start() - 50):m.end() + 20].replace("\n", " ")
+                if DAO_SCOPE_RE.search(prefix):
+                    violations.append(
+                        f"{path}:{line}: DAO scope-function read — `loadMessages(` runs "
+                        f"on a dao receiver: {snippet.strip()[:120]}")
+                else:
+                    violations.append(
+                        f"{path}:{line}: unqualified loadMessages( call — cannot prove the "
+                        f"receiver is the repository (fail-closed): {snippet.strip()[:120]}")
+    if scanned == 0:
+        violations.append("no production .kt sources found — scanner is blind on this tree")
     return violations
 
 
@@ -76,85 +269,101 @@ def _write(path: Path, content: str) -> None:
 
 
 def selftest() -> int:
-    """Two arms, each blocking criterion individually toothed:
-       A) a violating production file must red the gate (and be named);
-       B) whitelist files, test source sets, and clean files must stay green
-          (scope + whitelist teeth in one arm)."""
+    """Arms: every banned spelling must red, every legal one must stay green.
+    Each arm names its own expectation so a broken criterion cannot pass as
+    noise from a neighbouring arm."""
     ok = True
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
 
-        # ---- arm A: violation must be caught and named ----
-        va = root / "a"
-        _write(
-            va / "src/android/app/src/main/java/com/example/Foo.kt",
-            "class Foo {\n"
-            "    fun bad(repo: ChatRepository) {\n"
-            "        val rows = repo.dao.loadMessages(\"s1\")\n"
-            "    }\n"
-            "}\n",
-        )
-        hits = scan(va)
-        if len(hits) == 1 and "Foo.kt" in hits[0] and "loadMessages" in hits[0]:
-            print("[selftest A] violation red + named: OK")
-        else:
-            print(f"[selftest A] EXPECTED 1 named violation, got: {hits!r}")
-            ok = False
+    def arm(label: str, files: dict, expect: int, needle: str = "") -> None:
+        nonlocal ok
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel, content in files.items():
+                _write(root / rel, content)
+            hits = scan(root)
+            good = len(hits) == expect and (not needle or any(needle in h for h in hits))
+            if good:
+                print(f"[selftest] {label}: OK ({len(hits)} violation(s))")
+            else:
+                print(f"[selftest] {label}: FAIL expected {expect} hit(s) "
+                      f"containing {needle!r}, got {hits!r}")
+                ok = False
 
-        # ---- arm B: whitelist + scope + clean must stay green ----
-        vb = root / "b"
-        _write(
-            vb / "src/android/app/src/main/java/com/example/ChatRepository.kt",
-            "class ChatRepository {\n"
-            "    fun x(dao: ChatDao) = dao.loadMessages(\"s1\")\n"
-            "}\n",  # whitelisted basename, would match the receiver pattern
-        )
-        _write(
-            vb / "src/android/app/src/main/java/com/example/Clean.kt",
-            "class Clean {\n"
-            "    fun ok(repo: ChatRepository) = repo.loadMessages(\"s1\")\n"
-            "}\n",
-        )
-        _write(  # unit-test source: out of scope by design
-            vb / "src/android/app/src/test/java/com/example/BadTest.kt",
-            "class BadTest {\n"
-            "    fun t(repo: ChatRepository) = repo.dao.loadMessages(\"s1\")\n"
-            "}\n",
-        )
-        _write(  # instrumented-test source: out of scope by design
-            vb / "src/android/app/src/androidTest/java/com/example/BadIt.kt",
-            "class BadIt {\n"
-            "    fun t(repo: ChatRepository) = repo.dao.loadMessages(\"s1\")\n"
-            "}\n",
-        )
-        _write(  # src/shared production tree is in scope (currently empty in repo)
-            vb / "src/shared/tool/note.kt",
-            "// note: src/shared has no .kt today; if one appears it is in scope\n",
-        )
-        hits_b = scan(vb)
-        if hits_b:
-            print(f"[selftest B] EXPECTED clean, got: {hits_b!r}")
-            ok = False
-        else:
-            print("[selftest B] whitelist + test-scope + clean green: OK")
+    P = "src/android/app/src/main/java/com/example/"
+    T = "src/android/app/src/test/java/com/example/"
 
-        # ---- arm C (negative tooth for the whitelist itself): a violating
-        #      file masquerading under a NON-whitelisted name must still red,
-        #      proving arm B's green is the whitelist/scope at work, not a
-        #      blind gate ----
-        vc = root / "c"
-        _write(
-            vc / "src/android/app/src/main/java/com/example/ChatRepositoryBackup.kt",
-            "class ChatRepositoryBackup {\n"
-            "    fun bad(repo: ChatRepository) = repo.dao.loadMessages(\"s1\")\n"
-            "}\n",
-        )
-        hits_c = scan(vc)
-        if len(hits_c) == 1 and "ChatRepositoryBackup.kt" in hits_c[0]:
-            print("[selftest C] near-whitelist name still red: OK")
-        else:
-            print(f"[selftest C] EXPECTED 1 violation, got: {hits_c!r}")
-            ok = False
+    # ---- banned spellings -------------------------------------------------
+    arm("A direct .dao receiver reds",
+        {P + "Foo.kt": "class Foo { fun bad(repo: ChatRepository) {"
+                       " val rows = repo.dao.loadMessages(\"s1\") } }\n"},
+        1, "direct DAO read")
+
+    arm("B local DAO alias reds",
+        {P + "Foo.kt": "class Foo {\n"
+                       "    suspend fun f(repo: ChatRepository) {\n"
+                       "        val rawDao = repo.dao\n"
+                       "        val rows = rawDao.loadMessages(\"s1\")\n"
+                       "    }\n}\n"},
+        1, "direct DAO read")
+
+    arm("C wrapped chain (dot on next line) reds",
+        {P + "Foo.kt": "class Foo {\n"
+                       "    suspend fun f(repo: ChatRepository) {\n"
+                       "        val rows = repo.dao\n"
+                       "            .loadMessages(\"s1\")\n"
+                       "    }\n}\n"},
+        1, "direct DAO read")
+
+    arm("D DAO inside a with() scope reds",
+        {P + "Foo.kt": "class Foo {\n"
+                       "    suspend fun f(repo: ChatRepository) {\n"
+                       "        with(repo.dao) { loadMessages(\"s1\") }\n"
+                       "    }\n}\n"},
+        1, "DAO scope-function read")
+
+    arm("E repository file is NOT a lawless zone (no whitelist)",
+        {P + "ChatRepository.kt": "class ChatRepository {\n"
+                                  "    suspend fun sessionTokenUsages(s: String) =\n"
+                                  "        this.dao.loadMessages(s).mapNotNull { it.tokenUsage }\n"
+                                  "}\n"},
+        1, "direct DAO read")
+
+    arm("F unreadable receiver is fail-closed",
+        {P + "Foo.kt": "class Foo { fun f(x: Any) = x.loadMessages(\"s1\") }\n"},
+        1, "not provably the repository")
+
+    # ---- legal spellings --------------------------------------------------
+    arm("G repository receiver green",
+        {P + "Clean.kt": "class Clean {\n"
+                         "    suspend fun ok(repo: ChatRepository) = repo.loadMessages(\"s1\")\n"
+                         "    suspend fun ok2(app: MinisApp) =\n"
+                         "        app.chatRepository.loadMessages(\"s1\")\n"
+                         "}\n"},
+        0)
+
+    arm("H the DAO interface declaration green",
+        {P + "ChatDao.kt": "interface ChatDao {\n"
+                           "    suspend fun loadMessages(sessionId: String): List<MessageEntity>\n"
+                           "    suspend fun loadMessagesPage(s: String, o: Int, l: Int):"
+                           " List<MessageEntity>\n"
+                           "}\n"},
+        0)
+
+    arm("I doc comment mentioning dao.loadMessages green",
+        {P + "ChatRepository.kt": "class ChatRepository {\n"
+                                  "    // the legacy `dao.loadMessages` path issued one SELECT\n"
+                                  "    suspend fun loadMessages(s: String) = loadMessagesInner(s)\n"
+                                  "}\n"},
+        0)
+
+    arm("J test source sets are out of scope",
+        {P + "Clean.kt": "class Clean { fun ok(repo: ChatRepository) ="
+                         " repo.loadMessages(\"s1\") }\n",
+         T + "BadTest.kt": "class BadTest { fun t(repo: ChatRepository) ="
+                           " repo.dao.loadMessages(\"s1\") }\n",
+         "src/android/app/src/androidTest/java/com/example/BadIt.kt":
+             "class BadIt { fun t(repo: ChatRepository) = repo.dao.loadMessages(\"s1\") }\n"},
+        0)
 
     if ok:
         print("DAO_LOADMESSAGES_SELFTEST=PASS")
@@ -191,7 +400,7 @@ def main(argv: list[str]) -> int:
             "/ loadMessagePageRaw (count-only sites: messageCount)."
         )
         return 1
-    print("[dao-loadmessages] clean: 0 direct .dao.loadMessages( in production")
+    print("[dao-loadmessages] clean: 0 direct dao.loadMessages( in production")
     return 0
 
 
