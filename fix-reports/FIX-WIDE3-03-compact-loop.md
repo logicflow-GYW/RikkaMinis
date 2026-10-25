@@ -189,16 +189,23 @@ PASS skill_restore_session_cleanup_check (id threaded, cleanup closed)      rc=0
 
 ### L4 全量
 
-（见 §6 CI 读数；本地全量读数在 CI 之前的一轮里补齐，两处都写在这里。）
+本地持锁全量（`gate_run.sh --full`）在并发窗口三次被 PRoot ENOSYS 打断（80/111 时 pass=80 fail=0 后壳层死；S28 已知缺陷，wt-02/wt-05/wt-07 同窗施工），**全量读数改以分支 CI 为准**（CI 本就跑 scan.sh + test_scan.py）：`Summary: 112 passed, 0 failed`（带框线恰一条）· `ALL 344 CASES PASS`（恰一条）· 门头 `[N/112]` 112 个互异 · ` e: ` 0 条 —— 见 §6 逐条读数。本门四道在 CI 里各自 ✅（含 selftest 有牙标记）。
 
 ---
 
 ## ⑥ CI run
 
 - 分支：`fix/meta-wide3-03-compact-loop`
-- HEAD：`<HEAD_SHA>`（门脚本 + 本报告）
-- run：`<RUN_ID>`，`conclusion=success`，`head_sha` 与本地 `git rev-parse HEAD` 逐字符一致
-- 关键行：`Summary: 112 passed, 0 failed`（恰一条）· `ALL 344 CASES PASS`（恰一条）· ` e: ` 0 条 · 唯一 skipped = Publish（main 门控）· 含 `FAILED` 的行逐条确认是 PASSED 用例名的子串
+- HEAD（CI 绿树）：`f8ae7f6ea9324af2f5fcffc4340227425eef934d`（门脚本 + 本报告初版）——与 CI `head_sha` 逐字符一致
+- run：**#2646 / id `40160005688`**，attempt 1，`conclusion=success`；job `121069386537`（26 步 not-ok = []，唯一 skipped = **Publish to Releases**，main 门控）
+- 日志判读（`ci03/job-121069386537.log`，1,485,316 B）：
+  - `Summary: 112 passed, 0 failed` **恰一条**（03:56:49Z，带框线 `╔══╗`；其余 7 条 `Summary:` 是子套件小计 5/14/28/36/15…）
+  - 门头 `[N/112]` **112 个互异**，分母只有 {112}
+  - `ALL 344 CASES PASS` **恰一条**
+  - ` e: `（Kotlin 编译错误）**0 条**
+  - 含 `FAILED` 的行 6 条，逐条确认全是 **PASSED 用例名的子串**（`slot denied produces FAILED without calling provider PASSED`、`reason PERSISTENCE_FAILED maps to persistence_failed PASSED`、`phase FAILED maps to Failed PASSED`、`terminal FAILED maps to Failed PASSED`、`reason EXECUTION_FAILED maps to all_fallbacks_exhausted PASSED`、`the fixed tail still reaches a legal FAILED terminal PASSED`）
+  - 本批四道门各自在册且带牙标记命中：`[47/112] C/ISSUE-07 compact pin truth` + `COMPACT_PIN_TRUTH_SELFT…`、`[41/112] Compact decision gate coverage` + `COMPACT_DECISION_GA…`、`[22/112] Loop counter reset guard`、loop_tool_status_transition `PASS …(Pass 1 decides, Pass 2 publishes…)`
+- 回填说明：本节与 §L4 读数为报告回填提交（`fix-reports/` 单文件）带入，**不再 dispatch CI** —— 判据 = `git diff --name-only f8ae7f6e..HEAD` 只含 `fix-reports/FIX-WIDE3-03-compact-loop.md`，源码树与 CI 绿树逐字节一致。
 
 ---
 
