@@ -101,7 +101,26 @@ python3 probe/reattack.py --root . --pristine /var/minis/shared/work/meta-wide4/
 
 ## §5 CI run 号与判据行
 
-（推送并 dispatch 后回填：run id / job id / attempt / head_sha / 112-0 计数 / 门头 112 互异 / `ALL 344` / ` e: ` 0 / 唯一 skipped = Publish。）
+| 项 | 读数 |
+|---|---|
+| run | **#2674** / `40183094522`（`2026-10-25T10:02:05Z` dispatch → `10:24:03Z` 完成，约 22 min） |
+| job | `121138101361` · `build` · **attempt 1 · success** |
+| head_sha | `9cf49582bac78c7541984581f235171b1d9d03de` = 本地 HEAD（推送 CI 时的 HEAD）**逐字符一致** |
+| 步骤 | 26 步，唯一非 success = `Publish to Releases`（**skipped**，main 门控，符合预期） |
+| 门全量 | **`Summary: 112 passed, 0 failed`** —— 带框线形态**恰 1 条** |
+| 门头 | `[N/112]` **112 个互异编号**，无缺号无重号 |
+| 夹具 | **`ALL 344 CASES PASS`** 恰 1 条 |
+| 编译错误 | `Z e: ` **0** 条 |
+| 游离 FAILED | 含 `FAILED` 的行 6 条，逐条核对**全是 PASSED 用例名子串**（`slot denied produces FAILED without calling provider` / `phase FAILED maps to Failed` / `the fixed tail still reaches a legal FAILED terminal` …），无一条是真红 |
+| 日志体量 | 1,485,633 B / 17,849 行（`probe/ci-2674.log`，未入库） |
+
+**标记可见性实测（wide3-08/M6 同族复核）**：
+
+- `SKILL_FILE_SAVE_RESULT_SELFTEST=PASS` × **1**（`test_scan.py:2809` 已注册）
+- `LOOP_TOOL_STATUS_SELFTEST=PASS` × **1**（`test_scan.py:2759` 已注册）
+- `PROVIDER_BOUNDARY_SELFTEST=PASS` × **0** —— 该门在 `test_scan.py` 只有 641/652 的外部 dirty/clean 夹具 + 2431 的真树绿，**没有任何一行断言它的 selftest 标记** ⇒ 13 条自证臂在 CI 里无人见证。按本支「`test_scan.py` 冻结」的约束**未自行添加**，作为 §7 的第 4 条注册项交给主会话。
+
+**源码树等价性**：本报告回填后才产生新提交，`git diff --name-only 9cf49582..HEAD -- . ':(exclude)fix-reports'` = 0 行（回填提交只动 `fix-reports/`）。
 
 ---
 
@@ -144,7 +163,14 @@ python3 probe/reattack.py --root . --pristine /var/minis/shared/work/meta-wide4/
 
 说明：
 
-- 三条标记**均未改动**（沿用 `test_scan.py` 既有注册：`loop_tool_status_transition_check` @ 2759、`skill_file_save_result_check` @ 2809，`provider_boundary_guard` 走 641/652 的 `run_scanner` 外部夹具 + 2431 注册），本支只**增加臂**、不动标记串 —— 若主会话需要把新臂纳入 CI 可见性，按既有格式 append 即可，无需重编号。
+- 三条标记**均未改动**（沿用 `test_scan.py` 既有注册：`loop_tool_status_transition_check` @ 2759、`skill_file_save_result_check` @ 2809），本支只**增加臂**、不动标记串。
+- **第 4 条注册项（新增，主会话必须做）**：`provider_boundary_guard` 在 `test_scan.py` **没有 selftest 标记断言**（只有 641/652 的外部 dirty/clean 夹具 + 2431 的真树绿），本波 CI 日志里 `PROVIDER_BOUNDARY_SELFTEST=PASS` 命中 **0** 次 ⇒ 13 条自证臂在 CI 无人见证。请照既有格式 append 一行：
+
+  ```python
+  ("provider_boundary_guard.py", "PROVIDER_BOUNDARY_SELFTEST=PASS", (REPO_ROOT,)),
+  ```
+
+  （该门 `--selftest` 收尾行为 `PROVIDER_BOUNDARY_SELFTEST=PASS (13 fixtures)`，断言串取前缀即可；若主会话希望锁死臂数，用全串并同步本报告的臂数记录。）
 - 本支**未新建门**，`scan.sh` 的 `[N/112]` 编号无需变动；门 112 / 夹具 344 均不变。
 
 ---
