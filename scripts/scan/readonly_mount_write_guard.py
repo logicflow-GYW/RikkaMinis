@@ -61,6 +61,11 @@ import tempfile
 
 GUARD = "isLinuxPathUnderReadOnlyMount("
 
+# Filled by `functions()` on every call: declarations the parser could not follow
+# to the end. `scan()` turns them into violations (fail-closed) instead of
+# pretending the function had no writes.
+PARSE_FAILURES = []
+
 # [deep-audit-1033 I01] A SECOND, independent refusal is required at the
 # browser's delete site. `deleteItem` already refuses read-only *mounts*
 # (da1031-C), but the same browser also opens the two folders the settings
@@ -364,8 +369,169 @@ def depth_of(text):
     return text.count("(") - text.count(")") + text.count("{") - text.count("}")
 
 
+def match_paren(text, open_idx):
+    """Index of the `)` closing text[open_idx]; -1 when unbalanced."""
+    depth, i, n = 0, open_idx, len(text)
+    while i < n:
+        c = text[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def if_branches(text):
+    """[(cond_start, cond_end, body_start, body_end)] for every `if (...)`.
+
+    Brace bodies and the single-statement body that runs to the end of the line
+    are both covered; `body_end` is exclusive.
+    """
+    out = []
+    for m in re.finditer(r"\bif\s*\(", text):
+        op = m.end() - 1
+        cl = match_paren(text, op)
+        if cl < 0:
+            continue
+        b = cl + 1
+        while b < len(text) and text[b] in " \t\r\n":
+            b += 1
+        if b < len(text) and text[b] == "{":
+            end = balanced_block(text, b)
+            be = end if end > 0 else len(text)
+        else:
+            eol = text.find("\n", b)
+            be = len(text) if eol < 0 else eol
+        out.append((op + 1, cl, b, be))
+    return out
+
+
+def split_top(s, tokens):
+    """Split on the given operators at parenthesis/brace depth 0."""
+    parts, depth, cur = [], 0, []
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+        hit = None
+        if depth == 0:
+            for t in tokens:
+                if s.startswith(t, i):
+                    hit = t
+                    break
+        if hit:
+            parts.append("".join(cur).strip())
+            cur = []
+            i += len(hit)
+            continue
+        cur.append(c)
+        i += 1
+    parts.append("".join(cur).strip())
+    return parts
+
+
+def constant_truth(cond):
+    """True/False when the condition's value is decidable without running it.
+
+    `false && guard(x)` / `x || true` keep every identifier a substring-based
+    criterion looks for while pinning the decision — the single most common
+    way a witness deleted a guard's effect without deleting the call.
+    """
+    s = cond.strip()
+    while s.startswith("(") and s.endswith(")"):
+        depth, ok, close_at = 0, True, -1
+        for i, ch in enumerate(s):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    close_at = i
+                    break
+        if close_at != len(s) - 1:
+            ok = False
+        if not ok:
+            break
+        s = s[1:-1].strip()
+    ors = split_top(s, ("||",))
+    if len(ors) > 1:
+        vals = [constant_truth(p) for p in ors]
+        if any(v is True for v in vals):
+            return True
+        if all(v is False for v in vals):
+            return False
+        return None
+    ands = split_top(s, ("&&",))
+    if len(ands) > 1:
+        vals = [constant_truth(p) for p in ands]
+        if any(v is False for v in vals):
+            return False
+        if all(v is True for v in vals):
+            return True
+        return None
+    if s == "true":
+        return True
+    if s == "false":
+        return False
+    if s.startswith("!"):
+        inner = constant_truth(s[1:])
+        return None if inner is None else (not inner)
+    return None
+
+
+def alias_names(text, seed, hops=2):
+    """Identifiers assigned from `seed` (transitively, a couple of hops).
+
+    A guard's value is routinely carried one line: `val replay =
+    isStaleInstallReplay(…)`, `val ro = isLinuxPathUnderReadOnlyMount(p)`. The
+    decision that matters is the one taken on the CARRIER, so the criterion has
+    to follow one hop or it would only accept the inlined spelling.
+    """
+    names = {seed}
+    for _ in range(hops):
+        before = len(names)
+        for m in re.finditer(r"\bval\s+(\w+)\s*=\s*([^\n]*)", text):
+            rhs = m.group(2)
+            if any(re.search(r"\b%s\b" % re.escape(n), rhs) for n in names):
+                names.add(m.group(1))
+        if len(names) == before:
+            break
+    names.discard(seed)
+    return names
+
+
+def decision_branches(text, names, terminators):
+    """[(cond, body_start, body_end, body)] for branches keyed on [names].
+
+    Returns only the branches where the decision is CONSUMED by a terminating
+    statement (`return` / `throw` / `continue` / `return@label`) — the criterion
+    the wide3 witnesses defeat by keeping the call and neutralising the branch.
+    """
+    out = []
+    for cs, ce, bs, be in if_branches(text):
+        cond = text[cs:ce]
+        if not any(re.search(r"\b%s\b" % re.escape(n), cond) for n in names):
+            continue
+        body = text[bs:be]
+        if not any(t in body for t in terminators):
+            continue
+        out.append((cond, bs, be, body))
+    return out
+
+
 def functions(text):
-    """[(name, params, body)] for every `fun` declared in `text`."""
+    """[(name, params, body)] for every `fun` declared in `text`.
+
+    Clears PARSE_FAILURES at entry, so the caller reads exactly the failures of
+    THIS call.
+    """
+    del PARSE_FAILURES[:]
     lines = text.split("\n")
     out = []
     i = 0
@@ -401,14 +567,33 @@ def functions(text):
         rest = strip_strings(sig_text[close:]) if close > 0 else ""
         eq, brace = rest.find("="), rest.find("{")
         if eq >= 0 and (brace < 0 or eq < brace):
+            # wide3 parser-death: the expression may START ON THE NEXT LINE
+            # (`): NativeOffloadResult =` newline `run {`). Seeding the depth from
+            # the tail of the signature line alone gave 0 for that shape, so the
+            # `while depth > 0` loop never ran, the body was the header fragment,
+            # and the whole function — its writes and the guard that refuses them
+            # — fell out of the scan while the remaining sites kept the
+            # `checked >= 3` floor satisfied. Consume lines until the expression
+            # has actually started AND balanced.
             body = [sig_text[close:]]
-            depth = depth_of(strip_strings(body[0]))
+            tail = rest[eq + 1:]
+            depth = depth_of(tail)
+            started = bool(tail.strip())
             k = j + 1
-            while depth > 0 and k < len(lines):
+            while k < len(lines):
+                if started and depth <= 0:
+                    break
                 s = strip_strings(lines[k])
                 body.append(lines[k])
-                depth += depth_of(s)
+                if s.strip():
+                    started = True
+                    depth += depth_of(s)
                 k += 1
+            if not started or depth != 0:
+                PARSE_FAILURES.append(
+                    f"{name}: expression body could not be followed to its end "
+                    f"(depth {depth}) — the criterion cannot see this function"
+                )
             out.append((name, params, "\n".join(body)))
             i = k
             continue
@@ -474,7 +659,13 @@ def scan(root):
             raw = open(full, encoding="utf-8", errors="replace").read()
             text = strip_comments(raw)
             files += 1
-            for name, params, body in functions(text):
+            parsed = functions(text)
+            # fail-closed: a `fun` the parser could not follow is a HOLE in the
+            # criterion, not a function without a write. Silently dropping it is
+            # exactly how the wide3 witness made a guarded write disappear.
+            for why in PARSE_FAILURES:
+                violations.append(f"{rel}: {why}")
+            for name, params, body in parsed:
                 if not path_param_names(params):
                     continue
                 if not WRITE_CALL.search(body):
@@ -784,6 +975,51 @@ MOUNT_ROUTE = (
 )
 
 
+def guard_decides(body, needle):
+    """(live, dead_condition) — does `needle`'s value actually decide a refusal?
+
+    wide3: the CALL being in front of the write is not the refusal. The witness
+    kept the call, its position and the early-return body and only wrote
+    `if (false && isLinuxPathUnderReadOnlyMount(path))`, so every substring said
+    guarded while every mount path was written. The predicate must feed a branch
+    that is reachable (`constant_truth(cond) is not False`) and that TERMINATES
+    (`return`/`throw`). `return@launch` counts — the label form is the real
+    shape inside a coroutine body.
+    """
+    name = needle[:-1] if needle.endswith("(") else needle
+    live, dead = False, None
+    for m in re.finditer(re.escape(needle), body):
+        idx = m.start()
+        found = []
+        for cs, ce, _bs, _be in if_branches(body):
+            if cs <= idx < ce:
+                found.append(body[cs:ce])
+        carriers = {name} | alias_names(body, name)
+        found += [cond for cond, _bs, _be, _body in decision_branches(
+            body, carriers, ("return", "throw"))]
+        for cond in found:
+            if constant_truth(cond) is False:
+                if dead is None:
+                    dead = cond.strip()
+                continue
+            live = True
+    return live, dead
+
+
+def guard_message(where, needle, dead, label):
+    if dead is not None:
+        return (
+            f"{where} — the refusal guard sits behind `if ({dead})`, a condition "
+            f"that is constantly false: {needle}) is in front of the write and "
+            f"never decides it, so the write happens anyway ({label})"
+        )
+    return (
+        f"{where} — {needle})'s result is not consumed by a branch that "
+        f"returns/throws: the predicate runs and the write goes ahead regardless "
+        f"({label})"
+    )
+
+
 def check_guard_call_shape(root):
     """Returns (violations, rot, sites, notes).
 
@@ -833,6 +1069,11 @@ def check_guard_call_shape(root):
                 f"{rel}:{fn}() — {GUARD}) runs AFTER the write it is meant to refuse; "
                 f"move it in front of it"
             )
+        else:
+            live, dead = guard_decides(body, GUARD)
+            if not live:
+                violations.append(
+                    guard_message(f"{rel}:{fn}()", GUARD, dead, label))
         extra = EXTRA_GUARDS.get((rel, fn))
         if extra is not None:
             needle, what = extra
@@ -846,6 +1087,11 @@ def check_guard_call_shape(root):
                     f"{rel}:{fn}() — {needle}) runs AFTER the write it is meant to "
                     f"refuse; move it in front of it"
                 )
+            else:
+                live, dead = guard_decides(body, needle)
+                if not live:
+                    violations.append(
+                        guard_message(f"{rel}:{fn}()", needle, dead, label))
 
     route_src = read(root, route_rel)
     if not route_src:
@@ -872,7 +1118,8 @@ def check_guard_call_shape(root):
 
 def _rootfs_settlement(arms="settled", size="zeroed", repair_subscribes=True,
                        replay_gate=True, collect="present", repair_verdict=True,
-                       repair_prior=True, settlement_stale_guard=True):
+                       repair_prior=True, settlement_stale_guard=True,
+                       replay_dead=False):
     """The B-02 subject: three lifecycle entry points, one failure terminal.
 
     [arms] settled — every `catch` delegates to the terminal (the shape the fix
@@ -991,8 +1238,9 @@ def _rootfs_settlement(arms="settled", size="zeroed", repair_subscribes=True,
             "            manager.installState.collect { state ->\n"
             "                val replay = isStaleInstallReplay(firstFrame, state, priorTerminal)\n"
             "                firstFrame = false\n"
-            "                if (replay) return@collect\n"
-            "                when (state) {\n"
+            + ("                if (false && replay) return@collect\n" if replay_dead
+               else "                if (replay) return@collect\n")
+            + "                when (state) {\n"
             "                    is RootfsInstallState.Failed ->\n"
             "                        _uiState.value = _uiState.value.copy("
             "isProcessing = false)\n"
@@ -1302,6 +1550,9 @@ ROOTFS_SETTLEMENT_BODIES = {
     # [deep-audit-1042 B-05] the two halves of criterion 11, each dirty shape
     # breaking exactly one decision.
     "replay_applied": _rootfs_settlement(replay_gate=False),
+    # wide3: the snapshot, the derived `replay` and the `return@collect` all stay;
+    # only the branch's condition is pinned false.
+    "replay_dead": _rootfs_settlement(replay_dead=True),
     "collector_gone": _rootfs_settlement(collect="missing"),
     "repair_settles_on_boolean": _rootfs_settlement(repair_verdict=False),
     # [deep-audit-1043 B-01] the two halves of the inherited-terminal decision.
@@ -1479,6 +1730,13 @@ def _file_browser_vm(shape="guard"):
         head, tail = BROWSER_MOUNT_GUARD, ""
     elif shape == "shared_late":
         head, tail = BROWSER_MOUNT_GUARD, BROWSER_SHARED_GUARD
+    elif shape == "dead_guard":
+        # wide3: the mount refusal keeps its call, its position and its
+        # `return@launch`; only the condition is pinned false.
+        head, tail = (BROWSER_MOUNT_GUARD.replace(
+            "if (PRootKernel.isLinuxPathUnderReadOnlyMount(lp))",
+            "if (false && PRootKernel.isLinuxPathUnderReadOnlyMount(lp))")
+            + BROWSER_SHARED_GUARD, "")
     elif shape == "late":
         head, tail = "", BROWSER_GUARD_BODY
     else:  # direct / renamed
@@ -1516,7 +1774,15 @@ def _debug_rpc(shape="guard"):
     """Criterion-5 anchor: the RPC write path (`params` is not a whitelisted
     parameter name, which is exactly why this criterion is keyed on the
     function name)."""
-    guard = "" if shape == "direct" else RPC_GUARD_BODY
+    if shape == "direct":
+        guard = ""
+    elif shape == "dead_guard":
+        # wide3: same call, same position, same throwing body — pinned false.
+        guard = RPC_GUARD_BODY.replace(
+            "if (PRootKernel.isLinuxPathUnderReadOnlyMount(path))",
+            "if (false && PRootKernel.isLinuxPathUnderReadOnlyMount(path))")
+    else:
+        guard = RPC_GUARD_BODY
     fn = "handleWrite" if shape == "renamed" else "handleWriteFile"
     return (
         "package com.rikkaminis.app.debug\n"
@@ -2245,25 +2511,54 @@ def check_rootfs_progress_replay(root):
     else:
         sites += 1
         gated = bool(DROPWHILE_ON_FLOW.search(collector))
+        dead_gate = None
         if not gated:
+            after_collect = collector[collects[0].end():]
             for m in PRIOR_CAPTURE.finditer(collector):
-                before_collect = m.start() < collects[0].start()
-                consulted = re.search(r"\b%s\b" % re.escape(m.group(1)),
-                                      collector[collects[0].end():])
-                if before_collect and consulted:
+                if m.start() >= collects[0].start():
+                    continue
+                name = m.group(1)
+                # The captured value must reach a branch that TERMINATES the
+                # frame. Merely naming it inside the collector was satisfied by
+                # the wide3 witness `if (false && replay) return@collect`: the
+                # snapshot, the derived `replay` and the `return@collect` all
+                # stayed, the skip did not.
+                carriers = {name} | alias_names(after_collect, name)
+                branches = decision_branches(
+                    after_collect, carriers, ("return", "continue"))
+                live = []
+                for cond, _bs, _be, _body in branches:
+                    if constant_truth(cond) is False:
+                        if dead_gate is None:
+                            dead_gate = cond.strip()
+                        continue
+                    live.append(cond)
+                if live:
                     gated = True
                     break
         if not gated:
-            violations.append(
-                "%s:observeInstallProgress — the collector applies every frame "
-                "`installState` hands it, including the terminal a StateFlow "
-                "REPLAYS on subscribe (the flow never returns to Idle). That "
-                "wipes the `installProgress` the caller just published and clears "
-                "`isProcessing` — the flag the screen disables Repair/Reset on, "
-                "so a second operation can be started over the first. Capture the "
-                "flow's current value before `.collect` and skip that frame (or "
-                "`dropWhile` it away) before touching the UI state" % ROOTFS_VM_REL
-            )
+            if dead_gate is not None:
+                violations.append(
+                    "%s:observeInstallProgress — the replayed terminal is skipped "
+                    "only behind `if (%s)`, whose condition is constantly false: "
+                    "the snapshot, the `isStaleInstallReplay` call and the "
+                    "`return@collect` are all still there, and the collector still "
+                    "applies every frame `installState` replays — including the "
+                    "previous operation's failed terminal, which wipes the "
+                    "`installProgress` the caller just published and clears "
+                    "`isProcessing`" % (ROOTFS_VM_REL, dead_gate)
+                )
+            else:
+                violations.append(
+                    "%s:observeInstallProgress — the collector applies every frame "
+                    "`installState` hands it, including the terminal a StateFlow "
+                    "REPLAYS on subscribe (the flow never returns to Idle). That "
+                    "wipes the `installProgress` the caller just published and clears "
+                    "`isProcessing` — the flag the screen disables Repair/Reset on, "
+                    "so a second operation can be started over the first. Capture the "
+                    "flow's current value before `.collect` and skip that frame (or "
+                    "`dropWhile` it away) before touching the UI state" % ROOTFS_VM_REL
+                )
 
     repair = bodies.get("repairRootfs")
     if repair is None:
@@ -2592,10 +2887,16 @@ def selftest():
     """Fixture trees — one dirty arm per criterion, every one must turn it red."""
     results = []
 
-    def run(name, expect_red, note_in=None, **kwargs):
+    def run(name, expect_red, note_in=None, extra=None, **kwargs):
         root = tempfile.mkdtemp(prefix="romount_")
         try:
             write_io_fixture(root, **kwargs)
+            for rel, text in (extra or {}).items():
+                path = os.path.join(root, APP_REL, *rel.split("/"))
+                if not os.path.isdir(os.path.dirname(path)):
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
             code, out = _run_gate(root)
             ok = (code == 1) if expect_red else (code == 0)
             if ok and note_in is not None and note_in not in out:
@@ -2748,6 +3049,43 @@ def selftest():
         "never snapshots the terminal", settlement_shape="repair_inherits_stale_terminal")
     run("a `Failed` arm left unconditional despite the snapshot is caught", True,
         "fires unconditionally", settlement_shape="repair_settlement_ignores_prior")
+
+    # ── wide3 witnesses: one arm per falsified axis ─────────────────────────
+    # C1 (parser-death): the write function's body starts on the NEXT line, so a
+    # parser that seeds the depth from the signature line sees a header fragment
+    # and drops the whole function out of the criterion.
+    EXPR_BODY_WRITE = (
+        "package com.rikkaminis.app.sandbox.offload\n"
+        "\n"
+        "object ExprBodyWrite {\n"
+        "    private fun writeRunOutput(\n"
+        "        request: String,\n"
+        "        outputPath: String?,\n"
+        "        appliedExtras: String,\n"
+        "    ): String =\n"
+        "        run {\n"
+        "            val sessionId = request\n"
+        "            if (outputPath != null) {\n"
+        "                java.io.File(outputPath).writeBytes("
+        "appliedExtras.toByteArray())\n"
+        "            }\n"
+        "            sessionId\n"
+        "        }\n"
+        "}\n"
+    )
+    run("witness C1: an expression body on the next line is still scanned", True,
+        "writes a host file from a path parameter",
+        extra={"sandbox/offload/ExprBodyWrite.kt": EXPR_BODY_WRITE})
+    # C5 (dataflow): the guard call stays in front of the write, its condition is
+    # pinned false — every substring said guarded while the write went ahead.
+    run("witness C5: a read-only guard behind `false &&` is caught", True,
+        "constantly false", rpc_shape="dead_guard")
+    run("witness C5: the browser's mount refusal behind `false &&` is caught", True,
+        "constantly false", browser_shape="dead_guard")
+    # C11 (dataflow): the replay snapshot + `return@collect` stay, the branch is
+    # pinned false, so every replayed terminal is applied as a live event again.
+    run("witness C11: a replay skip behind `false &&` is caught", True,
+        "constantly false", settlement_shape="replay_dead")
 
     print("=== readonly_mount_write_guard --selftest ===")
     failed = 0
