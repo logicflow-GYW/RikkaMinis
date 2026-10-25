@@ -252,26 +252,290 @@ GROUP_INLINE_READS = tuple('"%s"' % k for k in GROUP_RUN_KEYS)
 
 
 def code_only(text):
-    """Text with line comments (//…) removed — presence checks below must not be
-    satisfiable from prose in a comment."""
-    return "\n".join(line.split("//")[0] for line in text.split("\n"))
+    """Text with line AND block comments blanked — presence checks below must
+    not be satisfiable from prose in a comment.
+
+    [wide3-08 C1-C3, parser-death] this used to split on `//` only, so
+    `/* if (name == ROLLUP_FILE) return false */` still satisfied
+    `ROLLUP_GUARD in code_only(body)` and the guard could be commented away
+    while the gate stayed green. `strip_kotlin_comments` (same file, already
+    used by the F/C-R rules) blanks both comment kinds and keeps string
+    literals intact, so literal-shaped criteria below are unaffected.
+    """
+    return strip_kotlin_comments(text)
 
 
 def line_of(src, idx):
     return src.count("\n", 0, idx) + 1
 
 
+def _mask(text):
+    """Length-preserving blank of string/char CONTENTS plus both comment kinds.
+
+    Structure scans run on masked text, so a `}` inside a literal or a
+    `/* } */` comment cannot move a block boundary (wide3-08 parser-death).
+    """
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if text.startswith('"""', i):
+            j = text.find('"""', i + 3)
+            j = n if j < 0 else j + 3
+            out.append("x" * (j - i))
+            i = j
+            continue
+        if c in ('"', "'"):
+            j = i + 1
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] in (c, "\n"):
+                    j += 1
+                    break
+                j += 1
+            out.append("x" * (j - i))
+            i = j
+            continue
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i))
+            i = j
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out.append("".join(ch if ch == "\n" else " " for ch in text[i:j]))
+            i = j
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
 def _balanced(src, open_idx, opener="(", closer=")"):
-    """Index just past the closer matching the opener at [open_idx] (-1 if none)."""
+    """Index just past the closer matching the opener at [open_idx] (-1 if none).
+
+    Runs on masked text: a brace/paren inside a string literal or a comment is
+    not structure.
+    """
+    masked = _mask(src)
     depth = 0
-    for i in range(open_idx, len(src)):
-        if src[i] == opener:
+    for i in range(open_idx, len(masked)):
+        if masked[i] == opener:
             depth += 1
-        elif src[i] == closer:
+        elif masked[i] == closer:
             depth -= 1
             if depth == 0:
                 return i + 1
     return -1
+
+def _match_paren(text, open_idx):
+    """Index of the `)` matching the `(` at open_idx (-1 if none)."""
+    end = _balanced(text, open_idx, "(", ")")
+    return -1 if end < 0 else end - 1
+
+def _split_top(s, op):
+    """Split at depth-0 occurrences of `op` (literals/comments masked)."""
+    masked = _mask(s)
+    parts, depth, start, i = [], 0, 0, 0
+    while i < len(masked):
+        c = masked[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and masked.startswith(op, i):
+            parts.append(s[start:i])
+            i += len(op)
+            start = i
+            continue
+        i += 1
+    parts.append(s[start:])
+    return parts
+
+def _unparen(p):
+    p = p.strip()
+    while p.startswith("(") and p.endswith(")") and _match_paren(p, 0) == len(p) - 1:
+        p = p[1:-1].strip()
+    return p
+
+def _lit_value(part):
+    """True/False when `part` is a bare boolean literal (optionally negated)."""
+    p = _unparen(part)
+    neg = False
+    while p.startswith("!"):
+        neg = not neg
+        p = _unparen(p[1:])
+    if p == "true":
+        v = True
+    elif p == "false":
+        v = False
+    else:
+        return None
+    return (not v) if neg else v
+
+def _truth(cond):
+    """True/False when a condition is DECIDED by a literal, else None.
+
+    `if (false) entryIdMap else emptyMap()` is decided: the map survives only
+    in the branch that never runs (wide3-08 R1).
+    """
+    c = _unparen(cond)
+    if _lit_value(c) is not None:
+        return _lit_value(c)
+    for part in _split_top(c, "||"):
+        if _lit_value(part) is True:
+            return True
+    for part in _split_top(c, "&&"):
+        if _lit_value(part) is False:
+            return False
+    return None
+
+def _split_else(rest):
+    """`then` / `else` halves of an `if (...) A else B` expression."""
+    masked = _mask(rest)
+    depth = 0
+    i = 0
+    while i < len(masked):
+        c = masked[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and re.match(r"\belse\b", masked[i:]):
+            return rest[:i], rest[i + 4:]
+        i += 1
+    return rest, ""
+
+def _split_statements(body):
+    """Top-level statements of a block body (`;` or depth-0 newline ends one)."""
+    masked = _mask(body)
+    parts, depth, start = [], 0, 0
+    for i, c in enumerate(masked):
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and (c == ";" or c == "\n"):
+            parts.append(body[start:i])
+            start = i + 1
+    parts.append(body[start:])
+    return parts
+
+def _arm_end(text, start):
+    """Index where the `when`-arm value beginning at `start` ends."""
+    masked = _mask(text)
+    depth = 0
+    i = start
+    while i < len(masked):
+        c = masked[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                return i
+            depth -= 1
+        elif c == "\n" and depth == 0:
+            head = text[start:i].strip()
+            j = i + 1
+            while j < len(masked) and masked[j] in " \t\n":
+                j += 1
+            nxt = masked[j:j + 4].lstrip()
+            if nxt.startswith(".") or nxt.startswith("?:") or nxt.startswith("?") \
+                    or (head.startswith("if ") and nxt.startswith("else")):
+                i += 1
+                continue
+            return i
+        i += 1
+    return len(masked)
+
+def _live_value(expr, depth=0):
+    """The value expressions an arm can actually take at runtime.
+
+    Folds `if (<literal-decided>) A else B` onto the taken branch; when the
+    condition is a real runtime test both branches stay live. A literal value
+    folds to "" (nothing derived). This is the "does the decision still reach
+    the map?" judgement for the compact arm (wide3-08 R1).
+    """
+    if depth > 4:
+        return expr
+    e = expr.strip().rstrip(",").strip()
+    while e.startswith("{") and e.endswith("}") and _balanced(e, 0, "{", "}") == len(e):
+        stmts = [s for s in _split_statements(e[1:-1]) if s.strip()]
+        if not stmts:
+            return ""
+        e = stmts[-1].strip()
+    m = re.match(r"if\s*\(", e)
+    if m:
+        mp = _match_paren(e, m.end() - 1)
+        if mp < 0:
+            return e
+        cond = e[m.end():mp]
+        then_part, else_part = _split_else(e[mp + 1:])
+        tv = _truth(cond)
+        if tv is True:
+            return _live_value(then_part, depth + 1)
+        if tv is False:
+            return _live_value(else_part, depth + 1)
+        return (_live_value(then_part, depth + 1) + " "
+                + _live_value(else_part, depth + 1))
+    if _lit_value(e) is not None:
+        return ""
+    return e
+
+def _arg_value(text, start):
+    """Text of the argument value beginning at `start` (ends at a depth-0 `,`/`)`)."""
+    masked = _mask(text)
+    depth = 0
+    i = start
+    while i < len(masked):
+        c = masked[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                return text[start:i]
+            depth -= 1
+        elif c == "," and depth == 0:
+            return text[start:i]
+        i += 1
+    return None
+
+CHAIN_LINK = re.compile(r"\.\s*(let|run|also|apply|takeIf|takeUnless)\s*\{")
+
+def _drops_remap(rhs):
+    """True when a chain link after the remap call throws its result away.
+
+    `remapSessionBindingJson(...).let { null }` keeps the call in the spelling
+    and discards the remapped JSON; `.let { s.optString("modelBinding") }` puts
+    the un-remapped source uuid back (wide3-08 B). A link that reads `it` (or
+    `this` for run/apply) passes the value along and stays legal.
+    """
+    idx = rhs.find(REMAP_SESSION_CALL)
+    if idx < 0:
+        return False
+    op = rhs.find("(", idx)
+    cp = _match_paren(rhs, op) if op >= 0 else -1
+    if cp < 0:
+        return True
+    tail = rhs[cp + 1:]
+    m = CHAIN_LINK.search(tail)
+    if not m:
+        return False
+    link = m.group(1)
+    brace = tail.find("{", m.end() - 1)
+    end = _balanced(tail, brace, "{", "}") if brace >= 0 else -1
+    if end < 0:
+        return True
+    body = _mask(tail[brace + 1:end - 1])
+    if link in ("run", "apply"):
+        return not re.search(r"\bthis\b", body)
+    pm = re.match(r"\s*([A-Za-z_]\w*)\s*->", body)
+    if pm:
+        return not re.search(r"\b%s\b" % re.escape(pm.group(1)), body[pm.end():])
+    return not re.search(r"\bit\b", body)
 
 
 def function_text(src, header):
@@ -295,20 +559,29 @@ def check_remap_defaults(src):
     if when < 0:
         return [(CFG_REL, 0, "remapDefaultsIds no longer branches on `path` — gate ROT")]
     end = _balanced(body, body.find("{", when), "{", "}")
-    branch = body[when:end if end > 0 else len(body)]
+    branch = body[when:end - 1 if end > 0 else len(body)]
     routed = False
-    for line in branch.split("\n"):
-        code = line.split("//")[0]
-        if COMPACT_PATH in code and "->" in code:
-            if "entryIdMap" in code.split("->", 1)[1]:
-                routed = True
+    seen_value = None
+    for m in re.finditer(re.escape(COMPACT_PATH), branch):
+        arrow = branch.find("->", m.end())
+        if arrow < 0 or "\n" in branch[m.end():arrow]:
+            # not a pattern position (a mention inside some other arm's value)
+            continue
+        value = branch[arrow + 2:_arm_end(branch, arrow + 2)]
+        seen_value = value
+        if "entryIdMap" in _live_value(value):
+            routed = True
+            break
     if not routed:
-        return [(
-            CFG_REL,
-            line_of(src, src.find("fun remapDefaultsIds(")),
-            "remapDefaultsIds does not route " + COMPACT_PATH + " to entryIdMap"
-            " — a restored install silently loses its pinned compaction model",
-        )]
+        if seen_value is None:
+            msg = ("remapDefaultsIds does not route " + COMPACT_PATH + " to entryIdMap"
+                   " — a restored install silently loses its pinned compaction model")
+        else:
+            msg = ("remapDefaultsIds routes " + COMPACT_PATH + " through `"
+                   + " ".join(seen_value.split())[:70] + "`, whose LIVE value is not "
+                   "entryIdMap — the map survives in the spelling only (a dead branch "
+                   "or a constant fold never hands it over)")
+        return [(CFG_REL, line_of(src, src.find("fun remapDefaultsIds(")), msg)]
     return []
 
 
@@ -341,6 +614,24 @@ def check_import_chat_sections(src):
                 CFG_REL,
                 line_of(src, src.find("internal suspend fun importChatSections(")),
                 "importChatSections calls " + REMAP_SESSION_CALL + " without " + arg,
+            )]
+    # [wide3-08 B] ... and the value handed to modelBinding must BE the result.
+    for m in re.finditer(r"modelBinding\s*=", code):
+        rhs = _arg_value(code, m.end())
+        if rhs is None:
+            return [(
+                CFG_REL,
+                line_of(src, src.find("internal suspend fun importChatSections(")),
+                "modelBinding assignment cannot be parsed — fail-closed",
+            )]
+        if _drops_remap(rhs):
+            return [(
+                CFG_REL,
+                line_of(src, src.find("internal suspend fun importChatSections(")),
+                "importChatSections keeps the " + REMAP_SESSION_CALL + " call but a "
+                "chain link after it does not use the result (`.let { null }` / "
+                "`.let { s.optString(…) }`) — the restored session keeps the source "
+                "install's uuids",
             )]
     return []
 
@@ -1105,6 +1396,46 @@ def selftest(root):
             "                    com.rikkaminis.app.workspace.MemoryRollupEngine.RollupClass.TRANSIENT\n"
             "            }\n"
             "        return memoryDir.listFiles()",
+        ),
+    )
+
+    # ── [wide3-08] witnesses re-attacked from the external audit ─────────────
+    # 24. the compact arm still spells `entryIdMap` but folds it into a dead
+    #     branch: the value handed over is the empty map (axis=dataflow).
+    arm(
+        "M24 compact arm routed through a dead branch",
+        on_cfg(check_remap_defaults),
+        cfg=sub_once(
+            cfg,
+            '"defaults.agentLoopEntries", "runtime.compactModelEntryId" -> entryIdMap',
+            '"defaults.agentLoopEntries", "runtime.compactModelEntryId" -> '
+            'if (false) entryIdMap else emptyMap()',
+        ),
+    )
+    # 25. the remap call survives, its result is thrown away: `.let { null }`
+    #     after the call (axis=dataflow).
+    arm(
+        "M25 modelBinding drops the remap result",
+        on_cfg(check_import_chat_sections),
+        cfg=sub_once(
+            cfg,
+            """                        entryIdMap = entryIdMap,
+                    ),
+                    source = s.optString("source").ifEmpty { null },""",
+            """                        entryIdMap = entryIdMap,
+                    ).let { null },
+                    source = s.optString("source").ifEmpty { null },""",
+        ),
+    )
+    # 26. the rollup delete guard survives only inside a BLOCK comment: the
+    #     presence check read comments as code (axis=parser-death).
+    arm(
+        "M26 rollup guard hidden in a block comment",
+        on_mem(check_delete_guard),
+        mem=sub_once(
+            mem,
+            "        " + ROLLUP_GUARD + "\n",
+            "        /* " + ROLLUP_GUARD + " */\n",
         ),
     )
 
