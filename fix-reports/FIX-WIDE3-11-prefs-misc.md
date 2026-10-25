@@ -122,9 +122,18 @@ $ python3 scripts/scan/test_scan.py
 
 | 项 | 值 |
 |---|---|
-| workflow run | _（提交后回填）_ |
-| head_sha | _（提交后回填）_ |
-| 结论 | _（回填）_ |
+| workflow | `build-apk.yml`（手动 dispatch — 非 main 分支 push 不触发） |
+| run | **#2657** / id `40162861644` / job `121077879939` |
+| attempt | 1（一次通过，无重跑） |
+| head_sha | `e90482f1511890ae587fda3a72434f9b02ebafcd` —— 与本地 `git rev-parse HEAD`、远端 branch sha **三方逐字符一致** |
+| 结论 | `completed / success`（created 04:42:27Z → updated 04:59:23Z） |
+| 26 个 step | not-success 集合 = `[]`；唯一 skipped = **Publish to Releases**（main 门控，分支构建的正常形态） |
+| 门日志读数 | 门头 `[N/112]` 去重后 **112** 条；`║  Summary: 112 passed, 0 failed` 恰 1 条；`✅ ALL 344 CASES PASS` 恰 1 条 |
+| 本支四门在册 | `Prefs listener…` / `Enum parse…` / `Legacy pipeline…` / `i18n…` 全部出现在门日志 |
+| 编译告警 | 全日志 ` e: ` 命中 **0** 条（unit test / instrumented compile / APK build 三个 step 各自 grep = 0） |
+| 游离 FAILED | 全日志含 `FAILED` 的行 **6** 条，逐条核对**全部以 `PASSED` 结尾**（用例名里带 FAILED 字样，如 `phase FAILED maps to Failed PASSED`），真失败 **0** 条 |
+
+日志落盘：`probe/ci-2657.log.gz`（API `…/actions/runs/40162861644/logs`，Zip）+ 解包件 `probe/ci/build/*.txt`。
 
 ## 7. 残留（三件套：触发条件 / 触发后方案 / 搁置理由）
 
