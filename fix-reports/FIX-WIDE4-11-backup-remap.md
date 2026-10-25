@@ -64,8 +64,8 @@
 5. **词法面**：`strip_kotlin_comments` → `mask_comments`、`code_only` → `mask_comments`、
    `_mask` → `mask_code`；`_truth` → 共享 `const_bool`（短路语义）。`check()` 开头对 5 个输入
    **预词法**，任一 `analyse() != ok` 直接报违规（不再退回原文判断）。
-6. **20 条官方/同族见证固化成 `--selftest` 臂**（`w4-` 前缀，期望恰红自己那条判据）+ 1 条
-   clean 臂（`entryIdMap as Map<String,String>` 必须绿）。臂数 32 → **55**。
+6. **22 条官方/同族见证 + 1 条 clean 臂固化成 `--selftest` 臂**（`w4-` 前缀，期望恰红自己那条判据；
+   clean 臂 = `entryIdMap as Map<String,String>` 必须绿）。臂数 32 → **55**。
 
 ## ⑤ 四层证据
 
@@ -89,10 +89,20 @@
 
 ## ⑥ CI run
 
-- run id：`<待回填>` · job：`<待回填>` · attempt：`<待回填>` · conclusion：`<待回填>`
-- `head_sha` 与本地 HEAD 逐字符一致：`<待回填>`
-- 日志核对：`Summary: 112 passed, 0 failed` ×<待回填>、`ALL 344 CASES PASS` ×<待回填>、
-  ` e: ` 0、含 `FAILED` 的非 PASSED 行 0、唯一 non-success 步 = Publish（main 门控）。
+- **run #2672** · id `40182098405` · job `build` id `121135110598` · **attempt 1** · **conclusion: success**
+- `head_sha` = `19a27f58ad65`，与本地 HEAD **逐字符一致**（`MATCH=True`）
+- 26 步，唯一 non-success 步 = `Publish to Releases`（**skipped**，main 门控）
+- 日志（1,485,149 B）逐条核对：
+  - `║  Summary: 112 passed, 0 failed` **恰 1 条**（带框线前缀）
+  - `✅ ALL 344 CASES PASS` **恰 1 条**
+  - 门头 `[N/112]` **112 个互异编号**
+  - 本门两条冻结断言在册：`✅ backup_remap_rollup_check selftest has teeth (BACKUP_REMAP_ROLLUP_SELFTEST=PASS)`、
+    `✅ backup_remap_rollup_check real tree green`
+  - ` e: ` **0** 处；含 `FAILED` 的 6 行逐条确认**全是 PASSED 用例名子串**
+    （`produces FAILED without calling provider` / `PERSISTENCE_FAILED` / `phase FAILED` / `terminal FAILED` /
+    `EXECUTION_FAILED` / `legal FAILED terminal`）
+- 报告回填后 HEAD 与 CI 绿 sha 的关系：`git diff --name-only 19a27f58..HEAD` **只含 `fix-reports/FIX-WIDE4-11-backup-remap.md`**
+  ⇒ 源码树与 CI 绿树逐字节等价。
 
 ## ⑦ 残留（每条带触发条件 / 触发后方案 / 搁置理由）
 
