@@ -68,231 +68,197 @@ import shutil
 import sys  # [dv20-a1 A-02] fixture re-anchor
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import KotlinLexError  # noqa: E402,F401
+from _kotlin_ast import (  # noqa: E402
+    const_bool, enclosing_conditions, function_body, if_blocks, match_bracket,
+    split_top, strip_parens, tail_expr,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args, contains_ident, expr_end, guard_feasible, literal_view,
+    path_feasible, peel_discarding, value_sources,
+)
+
 # --------------------------------------------------------------------------
 # Comment stripping (a gate's own KDoc routinely quotes its anchors verbatim;
 # match against comment-stripped text only).
 # --------------------------------------------------------------------------
 
 
-def strip_comments(src: str) -> str:
-    out = []
-    i = 0
-    n = len(src)
-    in_block = False
-    in_line = False
-    in_str = False
-    str_ch = ""
-    while i < n:
-        c = src[i]
-        nxt = src[i + 1] if i + 1 < n else ""
-        if in_line:
-            if c == "\n":
-                in_line = False
-                out.append(c)
-            i += 1
-            continue
-        if in_block:
-            if c == "*" and nxt == "/":
-                in_block = False
-                i += 2
-                continue
-            if c == "\n":
-                out.append(c)
-            i += 1
-            continue
-        if in_str:
-            out.append(c)
-            if c == "\\":
-                if i + 1 < n:
-                    out.append(src[i + 1])
-                i += 2
-                continue
-            if c == str_ch:
-                in_str = False
-            i += 1
-            continue
-        if c == "/" and nxt == "/":
-            in_line = True
-            i += 2
-            continue
-        if c == "/" and nxt == "*":
-            in_block = True
-            i += 2
-            continue
-        if c in ('"', "'"):
-            in_str = True
-            str_ch = c
-            out.append(c)
-            i += 1
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
 
 
-# --------------------------------------------------------------------------
-# Balanced extraction (block bodies / paren blocks). Fail-closed: returns None
-# when the block never balances (truncated source, wrong anchor, etc.).
-# --------------------------------------------------------------------------
 
-
-def extract_braced(text: str, header_re: str) -> str | None:
-    """Extract the balanced {...} block that follows the first match of
-    header_re. Returns None (fail-closed) if the header is absent or the
-    block never balances."""
-    m = re.search(header_re, text)
-    if not m:
-        return None
-    i = m.end()
-    while i < len(text) and text[i] != "{":
-        if text[i] not in " \t\r\n":
-            return None  # not a block body (e.g. expression body) -> fail-closed
-        i += 1
-    if i >= len(text):
-        return None
-    depth = 0
-    start = i
-    while i < len(text):
-        c = text[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-        i += 1
-    return None
-
-
-def extract_paren_block(text: str, start_idx: int) -> str | None:
-    """Extract the balanced (...) block starting at the '(' at start_idx."""
-    depth = 0
-    i = start_idx
-    while i < len(text):
-        c = text[i]
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return text[start_idx : i + 1]
-        i += 1
-    return None
-
-
-def func_window(text: str, header_re: str, stop_re: str = r"\n    (private |override )?fun |^}") -> str | None:
-    """Declaration-text window: from the header match to the next function
-    header / class end. Used for expression-body members where brace pairing
-    silently grabs the WRONG block (da1025-FIX-F lesson)."""
-    m = re.search(header_re, text)
-    if not m:
-        return None
-    rest = text[m.start() :]
-    m2 = re.search(stop_re, rest, re.M)
-    if not m2:
-        return rest
-    return rest[: m2.start()]
-
-
-# --------------------------------------------------------------------------
-# The seven criteria. Each returns None (green) or a failure string (red).
-# --------------------------------------------------------------------------
 
 ENVVARS_REL = "EnvVarsCollection.kt"
 BUILTINS_REL = "ConfigBuiltins.kt"
 GROUPS_REL = "GroupsCollection.kt"
 BACKUP_REL = "ConfigBackup.kt"
 
+FIELDS_FIELD = "groupField"
+LIST_BUILDER_RE = re.compile(r"\b(?:listOf|mutableListOf|arrayListOf|buildList)\s*\(")
+RETURN_RE = re.compile(r"\breturn\b")
+
+def _registers_field(expr, ident):
+    """[expr] 是否把 [ident] 作为某个列表构造的顶层元素登记。
+
+    [batch5-t11] 元素位置才是"登记"，出现位置不是：把 groupField 挪进
+    `.also { }` 让列表构造仍与它同处一个表达式，`listOf(...)` 的元素其实没变，
+    字段照样从配置面蒸发。
+    """
+    for m in LIST_BUILDER_RE.finditer(expr):
+        open_idx = expr.find("(", m.start())
+        for s, e in call_args(expr, open_idx):
+            piece = expr[s:e]
+            if any(contains_ident(v, ident) for v in value_sources(piece)):
+                return True
+    return False
+
+def _return_sites(body):
+    """[(pos, expr)] —— body 里每个 `return` 的位置与返回表达式。"""
+    out = []
+    for m in RETURN_RE.finditer(body):
+        pos = m.start()
+        out.append((pos, body[m.end():expr_end(body, m.end())].strip()))
+    return out
+
+def _return_guard(body, pos):
+    """(guarded, constant_only) —— 这个 return 被"可能不走"的条件挡着吗。
+
+    guarded=False 表示无条件返回（它会把后面的路径全部短路）；constant_only
+    True 表示唯一的挡板是常量（`if (true)`），等于没挡。
+    """
+    conds = enclosing_conditions(body, pos)
+    elvis = re.search(r"\?:$", body[:pos].rstrip()) is not None
+    constant = bool(conds) and all(const_bool(c) is not None for _k, c in conds)
+    return (bool(conds) or elvis), (constant and not elvis)
+
 
 def check_fields_registration(envvars_src: str) -> str | None:
-    """Criterion 1: fields(forId)'s return list contains groupField(forId)."""
-    text = strip_comments(envvars_src)
-    body = extract_braced(text, r"override fun fields\(forId: String\): List<ConfigField>")
+    """Criterion 1: **每一条可达 return** 都要把 groupField(forId) 登记进列表。
+
+    [batch5-t11] 旧判据只问"fields 体内出现过 groupField(forId)"：把注册挪到
+    `listOf(…).also { groupField(forId) }`（列表元素不含它）依旧绿；再加一条
+    常量守卫 `if (true) return emptyList<ConfigField>().also { … }` 把真正的
+    注册整条短路，也依旧绿——字段在两个形状里都从配置面蒸发。
+    只有"未知 key 提前返回空表"这种**被 elvis/条件挡着**的返回才允许不登记。
+    """
+    text = literal_view(envvars_src)
+    body = fn_body(text, "fields")
     if body is None:
-        return "C1 EXTRACT_FAIL: fields(forId) block body not found (fail-closed)"
-    if "groupField(forId)" not in body:
-        return "C1 RED: fields(forId) return list does not register groupField(forId)"
+        return "C1 EXTRACT_FAIL: fields(forId) body not found (fail-closed)"
+    sites = [s for s in _return_sites(body) if path_feasible(body, s[0])]
+    if not sites:
+        return (
+            "C1 RED: fields(forId) has no reachable `return` — the config face has no "
+            "field list at all (fail-closed)"
+        )
+    if not any(_registers_field(expr, FIELDS_FIELD) for _p, expr in sites):
+        return (
+            "C1 RED: fields(forId) return list does not register groupField(forId) as a "
+            "list element — `minis-config get envvars.<key>.group` answers UnknownPath"
+        )
+    for pos, expr in sites:
+        if _registers_field(expr, FIELDS_FIELD):
+            continue
+        guarded, constant_only = _return_guard(body, pos)
+        if guarded and not constant_only:
+            continue
+        line = text[:pos].count("\n") + 1
+        return (
+            "C1 RED: fields(forId) can return `%s` (line %d) without registering "
+            "groupField(forId) — the registry entry is produced only on a path that "
+            "never survives (an unconditional or constant-guarded bail-out), so the "
+            "field still evaporates from the config face" % (expr[:60], line)
+        )
     return None
 
+def block_at(text, open_idx):
+    """[open_idx] 处的 `{…}` 块；配不平返回 None（fail-closed）。"""
+    close = match_bracket(text, open_idx)
+    return None if close < 0 else text[open_idx:close + 1]
 
-def enclosing_braces(text: str, pos: int) -> str:
-    """The nearest balanced { … } spanning pos (the predicate/expression the
-    site sits in). Returns the tail from the opener when it never closes."""
-    depth = 0
-    start = 0
-    i = pos
-    while i >= 0:
-        if text[i] == "}":
-            depth += 1
-        elif text[i] == "{":
-            if depth == 0:
-                start = i
-                break
-            depth -= 1
-        i -= 1
-    depth = 0
-    j = start
-    while j < len(text):
-        if text[j] == "{":
-            depth += 1
-        elif text[j] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start:j + 1]
-        j += 1
-    return text[start:]
+def paren_block(text, open_idx):
+    """[open_idx] 处的 `(…)` 块；配不平返回 None（fail-closed）。"""
+    close = match_bracket(text, open_idx)
+    return None if close < 0 else text[open_idx:close + 1]
 
-# [wide-1024 12-misc-b] A boolean expression that is constant no matter what
-# the input is: `x || !x`, `false && …`, `… && false`, `true || …`. Such a
-# predicate keeps every anchor token the criteria look for and decides nothing.
-DEAD_PREDICATE_RE = re.compile(
-    r"(?:\bfalse\s*&&|&&\s*false\b|\btrue\s*\|\||\|\|\s*true\b|\bif\s*\(\s*false\s*\))"
-)
-# `x || !x` — the excluded middle reads as "always true" without spelling the
-# literal `true`, so a check that only forbids the literal stays blind to it.
-DEAD_TAUTOLOGY_RE = re.compile(
-    r"([A-Za-z_][\w.]*(?:\([^()]*\))?)\s*\|\|\s*!\s*\1"
-)
+def fn_body(text, name):
+    """函数体文本（块体或表达式体都由共享 `function_body` 派生）。"""
+    span = function_body(text, name)
+    if span is None:
+        return None
+    start, end, _kind = span
+    return text[start:end]
 
+def enclosing_block(text, pos, limit=40):
+    """包含 [pos] 的最内层 `{…}` 内容（配平交给共享 match_bracket）。"""
+    opens = [m.start() for m in re.finditer(r"\{", text[:pos])][-limit:]
+    for i in reversed(opens):
+        close = match_bracket(text, i)
+        if close > pos:
+            return text[i + 1:close]
+    return None
+
+def constant_predicate(pred):
+    """谓词是否恒为常量（恒假恒真都算"没在判定"）。
+
+    [batch5-t11] 替换原来的两条死分支正则白名单（`false &&` 家族 + `x || !x`）：
+    常量折叠走共享 `const_bool`（`false && x` / `(1 == 2) && x` / `!true` 全覆盖），
+    互补对在顶层切开后按规范化文本比较。判"能不能为真"，不判"长什么样"。
+    """
+    e = strip_parens(pred or "")
+    if not e:
+        return False
+    if const_bool(e) is not None:
+        return True
+    for op in ("&&", "||"):
+        parts = split_top(e, (op,))
+        if len(parts) != 2:
+            continue
+        a = re.sub(r"\s+", "", e[parts[0][0]:parts[0][1]])
+        b = re.sub(r"\s+", "", e[parts[1][0]:parts[1][1]])
+        if a and b and (a == "!" + b or b == "!" + a):
+            return True
+    return False
 def check_group_path(envvars_src: str) -> str | None:
-    """Criterion 2: a groupField member registers path "envvars.$key.group"
-    (or the forId variant) AND its reader returns the stored group."""
-    text = strip_comments(envvars_src)
-    win = func_window(
-        text,
-        r"private fun groupField\(",
-        stop_re=r"\n    private fun |\n    override fun |^}",
-    )
-    if win is None:
-        return "C2 EXTRACT_FAIL: groupField member not found (fail-closed)"
-    if not re.search(r'path\s*=\s*"envvars\.\$(key|forId)\.group"', win):
-        return 'C2 RED: groupField does not register path "envvars.$key.group" (or forId variant)'
-    # [wide-1024 12-misc-b] The path makes the field ADDRESSABLE; the reader is
-    # what makes it ANSWER. `reader = { ConfigValue.Null }` keeps the path, the
-    # writer and the UI, and turns the single-path read into a constant.
-    body = extract_braced(win, r"reader\s*=")
+    """Criterion 2: groupField registers path "envvars.$key.group" AND its reader
+    YIELDS the stored group on a path it can actually return."""
+    text = literal_view(envvars_src)
+    body = fn_body(text, "groupField")
     if body is None:
+        return "C2 EXTRACT_FAIL: groupField member not found (fail-closed)"
+    if not re.search(r'path\s*=\s*"envvars\.\$(key|forId)\.group"', body):
+        return 'C2 RED: groupField does not register path "envvars.$key.group" (or forId variant)'
+    m = re.search(r"\breader\s*=\s*\{", body)
+    if not m:
         return (
             "C2 EXTRACT_FAIL: groupField's `reader = { … }` lambda not found "
             "(fail-closed: the criterion pins what the reader yields)"
         )
-    if not re.search(r"ConfigValue\.Str\(\s*[\w.]+\.group\s*\)", body):
+    block = block_at(body, m.end() - 1)
+    if block is None:
+        return "C2 EXTRACT_FAIL: groupField's reader lambda never balances (fail-closed)"
+    inner = block[1:-1]
+    tail = re.sub(r"^return\b", "", tail_expr(inner)).strip()
+    # [batch5-t11] 值必须来自 Str(<entry>.group)：`ConfigValue.Null.also {
+    # ConfigValue.Str(e.group) }` 保留了全部字面量，返回的却是接收者（恒 Null）。
+    sources = value_sources(tail)
+    if not any("ConfigValue.Str(" in v and re.search(r"\bgroup\b", v) for v in sources):
         return (
-            "C2 RED: groupField's reader never yields ConfigValue.Str(<entry>.group) — "
-            "the group set through the writer (UI / `set`) is invisible on the "
-            "single-path read `minis-config get envvars.<key>.group`"
+            "C2 RED: groupField's reader never yields ConfigValue.Str(<entry>.group) on "
+            "any path it can return — the group set through the writer (UI / `set`) is "
+            "invisible on the single-path read `minis-config get envvars.<key>.group`"
         )
-    if "repo." not in body:
+    if "repo." not in inner:
         return (
             "C2 RED: groupField's reader does not read the repository — the group must "
             "come from the entry (single source), not from a literal"
         )
     return None
 
-
 def check_summary_group(builtins_src: str) -> str | None:
     """Criterion 3: the `envvars` aggregate summary block contains a "group" key."""
-    text = strip_comments(builtins_src)
+    text = literal_view(builtins_src)
     anchor = re.search(r'path\s*=\s*"envvars",', text)
     if not anchor:
         return "C3 EXTRACT_FAIL: envvars summary registration (path = \"envvars\",) not found (fail-closed)"
@@ -302,7 +268,7 @@ def check_summary_group(builtins_src: str) -> str | None:
     if reg_start < 0:
         return "C3 EXTRACT_FAIL: enclosing r.register( not found (fail-closed)"
     paren_idx = text.index("(", reg_start)
-    block = extract_paren_block(text, paren_idx)
+    block = paren_block(text, paren_idx)
     if block is None:
         return "C3 EXTRACT_FAIL: envvars summary block never balances (fail-closed)"
     if '"group" to ConfigValue.Str' not in block:
@@ -323,41 +289,43 @@ def registered_block(text: str, anchor_re: str) -> str | None:
     if reg_start < 0:
         return None
     paren_idx = text.index("(", reg_start)
-    return extract_paren_block(text, paren_idx)
+    return paren_block(text, paren_idx)
 
 
 def check_add_calls_context_limit_helper(groups_src: str) -> str | None:
     """Criterion 4: GroupsCollection.add funnels the CLI context limit through
-    applyContextLimitWrite — the helper that IS the contextLimitField writer's
-    body. A CLI-created group that skips it keeps lastContextLimitTokens null
-    (see the gate docstring)."""
-    text = strip_comments(groups_src)
-    body = extract_braced(text, r"override fun add\(payload: ConfigValue\): String")
+    applyContextLimitWrite — with the PARSED value as the argument."""
+    text = literal_view(groups_src)
+    body = fn_body(text, "add")
     if body is None:
         return "C4 EXTRACT_FAIL: GroupsCollection.add body not found (fail-closed)"
-    if "applyContextLimitWrite(" not in body:
+    calls = list(re.finditer(r"applyContextLimitWrite\s*\(", body))
+    if not calls:
         return (
             "C4 RED: GroupsCollection.add never calls applyContextLimitWrite — "
             "a CLI-created group loses its limit on the first clearing write"
         )
-    # [wide-1024 12-misc-b] Calling the helper is half the contract; the ARG is
-    # the value. `applyContextLimitWrite(g, 0)` keeps the call, the helper and
-    # the field, and drops the limit the caller passed (lastContextLimitTokens
-    # stays 0 = "no limit"), so `minis-config add groups {contextLimitTokens:…}`
-    # silently loses the parameter.
+    # [batch5-t11] 调用在 ≠ 值在。`applyContextLimitWrite(g, 0.also { contextLimit })`
+    # 让参数位置仍能匹配到标识符，真实求值却是 0：辅助函数收到"无限制"，
+    # 组创建时给的 limit 静默丢失。
     parsed = re.search(
-        r'val\s+(\w+)\s*=\s*\(obj\["context_limit_tokens"\]\s*as\?\s*ConfigValue\.Int\)', body)
+        r'val\s+(\w+)\s*=\s*\(obj\["context_limit_tokens"\]\s*as\?\s*ConfigValue\.Int\)',
+        body)
     if parsed is None:
         return (
             'C4 EXTRACT_FAIL: add() no longer derives the limit from '
             'obj["context_limit_tokens"] (fail-closed: re-derive this criterion, '
             "never drop it)"
         )
-    for m in re.finditer(r"applyContextLimitWrite\s*\(", body):
-        args = extract_paren_block(body, m.end() - 1)
-        if args is None:
-            return "C4 EXTRACT_FAIL: applyContextLimitWrite( never balances (fail-closed)"
-        if parsed.group(1) not in args:
+    ident = parsed.group(1)
+    for m in calls:
+        args = call_args(body, m.end() - 1)
+        if not args:
+            return "C4 EXTRACT_FAIL: applyContextLimitWrite( has no readable arguments (fail-closed)"
+        sources = []
+        for s, e in args:
+            sources.extend(value_sources(body[s:e]))
+        if not any(contains_ident(v, ident) for v in sources):
             return (
                 "C4 RED: applyContextLimitWrite is called with a limit that is not the "
                 "parsed context_limit_tokens value — a CLI-created group silently loses "
@@ -365,26 +333,64 @@ def check_add_calls_context_limit_helper(groups_src: str) -> str | None:
             )
     return None
 
+def _summary_carrier(block: str) -> str | None:
+    """summary 里逐组载体的标识符：从 `"name" to ConfigValue.Str(<ident>.name)` 派生。"""
+    m = re.search(r'"name"\s+to\s+[\s\S]{0,80}?\b([A-Za-z_]\w*)\.name\b', block)
+    return m.group(1) if m else None
+
+def _entry_value(block: str, key: str) -> str | None:
+    """summary 里 `"<key>" to <expr>` 的 <expr> 文本（按表达式边界取，不按行）。
+
+    [batch5-t11] 行尾的逗号是 map 条目分隔符，会让共享 `expr_end` 判成续行、
+    把后面几个 key 一起卷进来（那样任意一个兄弟键带载体就会让本键蒙混过关）。
+    先按顶层逗号切，再取第一段。
+    """
+    m = re.search(r'"%s"\s+to\s+' % re.escape(key), block)
+    if not m:
+        return None
+    start = m.end()
+    raw = block[start:expr_end(block, start)]
+    parts = split_top(raw, (",",))
+    if not parts:
+        return None
+    return raw[parts[0][0]:parts[0][1]].strip()
 
 def check_groups_summary_keys(builtins_src: str) -> str | None:
     """Criterion 5: the `groups` aggregate summary block exposes both per-group
-    session defaults."""
-    text = strip_comments(builtins_src)
+    session defaults **with the group's value behind them**."""
+    text = literal_view(builtins_src)
     block = registered_block(text, r'path\s*=\s*"groups",')
     if block is None:
         return 'C5 EXTRACT_FAIL: groups summary registration (path = "groups",) not found (fail-closed)'
-    if '"default_thinking_level" to' not in block:
-        return 'C5 RED: groups summary block lacks a "default_thinking_level" key'
-    if '"context_limit_tokens" to' not in block:
-        return 'C5 RED: groups summary block lacks a "context_limit_tokens" key'
+    carrier = _summary_carrier(block)
+    if carrier is None:
+        return (
+            "C5 EXTRACT_FAIL: the groups summary block names no per-group carrier "
+            "(no `<ident>.<field>` value) — re-derive this criterion (fail-closed)"
+        )
+    for key, what in (("default_thinking_level", "defaultThinkingLevel"),
+                      ("context_limit_tokens", "contextLimitTokens")):
+        if '"%s" to' % key not in block:
+            return 'C5 RED: groups summary block lacks a "%s" key' % key
+        # [batch5-t11] 键在 ≠ 值在：`"default_thinking_level" to ConfigValue.Null`
+        # 把键钉成常量，agent 设了也读不回。脱敏后的值必须真的来自该组的字段
+        # （剥掉 also/apply 这类丢弃型作用域后再看，别被 lambda 里的引用骗过）。
+        expr = _entry_value(block, key)
+        if expr is None:
+            return 'C5 EXTRACT_FAIL: the value of "%s" cannot be read (fail-closed)' % key
+        if not contains_ident(peel_discarding(expr), carrier):
+            return (
+                "C5 RED: the groups summary's \"%s\" is not derived from the group's own "
+                "value — `minis-config get groups` keeps answering no-override after an "
+                "agent sets it, so %s never reaches the summary" % (key, what)
+            )
     return None
-
 
 def check_groups_summary_legacy_keys(builtins_src: str) -> str | None:
     """Criterion 6: the `groups` summary block still carries its five legacy
     keys — an extraction sanity check that also catches a block rewrite that
     drops them."""
-    text = strip_comments(builtins_src)
+    text = literal_view(builtins_src)
     block = registered_block(text, r'path\s*=\s*"groups",')
     if block is None:
         return 'C6 EXTRACT_FAIL: groups summary registration (path = "groups",) not found (fail-closed)'
@@ -398,7 +404,7 @@ def check_providers_summary_ua_key(builtins_src: str) -> str | None:
     """Criterion 7 (wrong-block guard, [fix/da1020]): the sibling `providers`
     summary must keep its customUserAgent key while the `groups` block above it
     is edited."""
-    text = strip_comments(builtins_src)
+    text = literal_view(builtins_src)
     block = registered_block(text, r'path\s*=\s*"providers",')
     if block is None:
         return 'C7 EXTRACT_FAIL: providers summary registration (path = "providers",) not found (fail-closed)'
@@ -416,21 +422,54 @@ LEGACY_BACKED_UP_SCOPES = (
     "soul", "memory", "logs", "runtime",
 )
 
-def backed_up_scopes_block(backup_src: str) -> str | None:
-    """The `setOf( … )` argument of BACKED_UP_SCOPES. None (fail-closed) when
-    the declaration is absent or the parens never balance."""
-    text = strip_comments(backup_src)
-    m = re.search(r"val\s+BACKED_UP_SCOPES\s*=\s*setOf\(", text)
+SCOPE_SET_RE = re.compile(r"val\s+BACKED_UP_SCOPES\s*=\s*setOf\(")
+
+def backed_up_scopes(backup_src: str) -> set[str] | None:
+    """BACKED_UP_SCOPES 的**有效**集合（setOf 之后套的 `-`/`+` 都在求值范围内）。
+
+    [batch5-t11] 旧判据只取 `setOf(…)` 的括号内容：`setOf(…, "envvars") - "envvars"`
+    里 `"envvars"` 照样命中，集合实际不含它，备份范围静默缩回、隐私开关既不备份
+    也不允许恢复。这里的常量集合运算按求值语义做，None 表示锚点不在（fail-closed）。
+    """
+    text = literal_view(backup_src)
+    m = SCOPE_SET_RE.search(text)
     if not m:
         return None
-    return extract_paren_block(text, m.end() - 1)
+    open_idx = m.end() - 1
+    close = match_bracket(text, open_idx)
+    if close < 0:
+        return None
+    cur = set(re.findall(r'"([^"]*)"', text[open_idx + 1:close]))
+    i = close + 1
+    while True:
+        op = re.match(r"\s*([-+])\s*", text[i:])
+        if not op:
+            break
+        sign = op.group(1)
+        i += op.end()
+        m2 = re.match(r"setOf\s*\(", text[i:])
+        if m2:
+            o = i + m2.end() - 1
+            c = match_bracket(text, o)
+            if c < 0:
+                return None
+            vals = set(re.findall(r'"([^"]*)"', text[o + 1:c]))
+            i = c + 1
+        else:
+            m3 = re.match(r'"([^"]*)"', text[i:])
+            if not m3:
+                return None
+            vals = {m3.group(1)}
+            i += m3.end()
+        cur = cur - vals if sign == "-" else cur | vals
+    return cur
 
 def check_backup_scope_envvars(backup_src: str) -> str | None:
-    """Criterion 8: BACKED_UP_SCOPES carries "envvars"."""
-    block = backed_up_scopes_block(backup_src)
-    if block is None:
+    """Criterion 8: BACKED_UP_SCOPES carries "envvars" **in the evaluated set**."""
+    scopes = backed_up_scopes(backup_src)
+    if scopes is None:
         return "C8 EXTRACT_FAIL: ConfigBackup.BACKED_UP_SCOPES setOf(…) not found (fail-closed)"
-    if '"envvars"' not in block:
+    if "envvars" not in scopes:
         return (
             'C8 RED: BACKED_UP_SCOPES lacks "envvars" — envvars.privacyMode is '
             "dropped from every backup and refused on restore (\"outside backup scope\")"
@@ -439,8 +478,8 @@ def check_backup_scope_envvars(backup_src: str) -> str | None:
 
 def check_overlay_registration(builtins_src: str) -> str | None:
     """Criterion 9: registerBackground registers path "background.overlay"."""
-    text = strip_comments(builtins_src)
-    body = extract_braced(text, r"fun registerBackground\(r: ConfigRegistry,\s*context: Context\)")
+    text = literal_view(builtins_src)
+    body = fn_body(text, "registerBackground")
     if body is None:
         return (
             "C9 EXTRACT_FAIL: ConfigBuiltins.registerBackground(r: ConfigRegistry, context: Context) "
@@ -458,8 +497,8 @@ def check_overlay_single_source(builtins_src: str) -> str | None:
     """Criterion 10: the overlay registration references the repository's key +
     default constants and does not re-spell the raw key (F-238/F-239 rule: the
     registry and BackgroundSettingsRepository must name the key identically)."""
-    text = strip_comments(builtins_src)
-    body = extract_braced(text, r"fun registerBackground\(r: ConfigRegistry,\s*context: Context\)")
+    text = literal_view(builtins_src)
+    body = fn_body(text, "registerBackground")
     if body is None:
         return (
             "C10 EXTRACT_FAIL: ConfigBuiltins.registerBackground(r: ConfigRegistry, context: Context) "
@@ -483,13 +522,13 @@ def check_reverse_anchors(backup_src: str, builtins_src: str) -> str | None:
     """Criterion 11 (reverse anchors): the eight legacy scopes are still in
     BACKED_UP_SCOPES, and `envvars.privacyMode` is still a registered field —
     a fix that swaps one out for the other is not a fix."""
-    block = backed_up_scopes_block(backup_src)
-    if block is None:
+    scopes = backed_up_scopes(backup_src)
+    if scopes is None:
         return "C11 EXTRACT_FAIL: ConfigBackup.BACKED_UP_SCOPES setOf(…) not found (fail-closed)"
     for scope in LEGACY_BACKED_UP_SCOPES:
-        if '"%s"' % scope not in block:
+        if scope not in scopes:
             return f'C11 RED: BACKED_UP_SCOPES lost legacy scope "{scope}"'
-    if not re.search(r'path\s*=\s*"envvars\.privacyMode"', strip_comments(builtins_src)):
+    if not re.search(r'path\s*=\s*"envvars\.privacyMode"', literal_view(builtins_src)):
         return 'C11 RED: path = "envvars.privacyMode" is no longer registered in ConfigBuiltins'
     return None
 
@@ -497,7 +536,7 @@ def check_reverse_anchors(backup_src: str, builtins_src: str) -> str | None:
 def check_sentinel_remap(backup_src: str) -> str | None:
     """Criterion 12 [dv20-a1 A-02]: the Stage 2 group-member remap keeps the
     virtual System voice ids instead of counting them as dropped members."""
-    text = strip_comments(backup_src)
+    text = literal_view(backup_src)
     drops = [m.start() for m in re.finditer(r"else\s+droppedMembers\+\+", text)]
     if not drops:
         return (
@@ -513,20 +552,27 @@ def check_sentinel_remap(backup_src: str) -> str | None:
                 "every voice-group member counts as a dropped member; the remap must "
                 "consult SystemVoiceEntries.isSystemEntryId (single source)"
             )
-        # [wide-1024 12-misc-b] …and the predicate must DECIDE. `takeIf { false &&
-        # SystemVoiceEntries.isSystemEntryId(it) }` keeps the call, answers false
-        # for every id, and every virtual member is dropped — the exact defect
-        # this criterion exists to stop, wearing the anchor as a decoration.
-        for call in re.finditer(r"SystemVoiceEntries\.isSystemEntryId\s*\(", window):
-            pred = enclosing_braces(window, call.start())
-            if DEAD_PREDICATE_RE.search(pred) or DEAD_TAUTOLOGY_RE.search(pred):
-                return (
-                    "C12 RED: the remap's isSystemEntryId predicate is constant "
-                    "(`false && …` / `… || true`) or a tautology (`x || !x`) — it keeps "
-                    "the call and "
-                    "decides nothing, so every virtual System voice member is still "
-                    "counted as dropped"
-                )
+        # [batch5-t11] …and the predicate must DECIDE. 旧的死分支判定是两条正则
+        # 白名单（`false &&` / `x || !x`）：`(1 == 2) && isSystemEntryId(it)`
+        # 一句话穿透。现在走共享常量折叠 + 顶层互补对，判"能不能为真"，
+        # 并同时看 if/when 条件与所在 lambda 体两个通道。
+        sites = [(kind, cond) for call in re.finditer(
+            r"SystemVoiceEntries\.isSystemEntryId\s*\(", window)
+            for kind, cond in enclosing_conditions(window, call.start())]
+        sites += [("lambda", blk) for call in re.finditer(
+            r"SystemVoiceEntries\.isSystemEntryId\s*\(", window)
+            for blk in [enclosing_block(window, call.start())] if blk]
+        for kind, cond in sites:
+            if "SystemVoiceEntries.isSystemEntryId" not in cond:
+                continue
+            if not constant_predicate(cond):
+                continue
+            return (
+                "C12 RED: the remap's isSystemEntryId predicate is constant "
+                "(`false && …` / `(1 == 2) && …` / `… || true` / `x || !x`, seen in the "
+                "enclosing %s) — it keeps the call and decides nothing, so every virtual "
+                "System voice member is still counted as dropped" % kind
+            )
     if "__builtin_system_speech__" in backup_src:
         return (
             "C12 RED: ConfigBackup spells the System sentinel id literal instead of "
@@ -537,7 +583,7 @@ def check_sentinel_remap(backup_src: str) -> str | None:
 def check_group_member_resolution(builtins_src: str) -> str | None:
     """Criterion 13 [dv20-a1 A-02]: the `groups` config summary resolves the
     virtual System voice entries instead of emitting a "missing" stub."""
-    text = strip_comments(builtins_src)
+    text = literal_view(builtins_src)
     if "SystemVoiceEntries.resolve(" not in text:
         return (
             "C13 RED: the `groups` config summary never calls "
@@ -553,7 +599,7 @@ def check_group_member_resolution(builtins_src: str) -> str | None:
     discarded = []
     for call in re.finditer(r"SystemVoiceEntries\.resolve\s*\(", text):
         head = text[: call.start()].rstrip()
-        close = extract_paren_block(text, call.end() - 1)
+        close = paren_block(text, call.end() - 1)
         if close is None:
             return (
                 "C13 EXTRACT_FAIL: SystemVoiceEntries.resolve( never balances "
@@ -598,7 +644,11 @@ def check(envvars_path: str, builtins_path: str, groups_path: str,
         ("C6", check_groups_summary_legacy_keys, cb),
         ("C7", check_providers_summary_ua_key, cb),
     ):
-        r = fn(src)
+        try:
+            r = fn(src)
+        except KotlinLexError as exc:
+            # [batch5-t11] 共享词法器解析失败 => 该源上的判据一律不可判 = 违规。
+            r = "%s LEX_FAIL: %s (fail-closed: the source cannot be lexed)" % (name, exc)
         if r is not None:
             failures.append(r)
 
@@ -608,15 +658,18 @@ def check(envvars_path: str, builtins_path: str, groups_path: str,
     if backup_path is not None:
         with open(backup_path, encoding="utf-8") as f:
             bk = f.read()
-        for fn in (
-            lambda: check_backup_scope_envvars(bk),
-            lambda: check_overlay_registration(cb),
-            lambda: check_overlay_single_source(cb),
-            lambda: check_reverse_anchors(bk, cb),
-            lambda: check_sentinel_remap(bk),
-            lambda: check_group_member_resolution(cb),
+        for name, fn in (
+            ("C8", lambda: check_backup_scope_envvars(bk)),
+            ("C9", lambda: check_overlay_registration(cb)),
+            ("C10", lambda: check_overlay_single_source(cb)),
+            ("C11", lambda: check_reverse_anchors(bk, cb)),
+            ("C12", lambda: check_sentinel_remap(bk)),
+            ("C13", lambda: check_group_member_resolution(cb)),
         ):
-            r = fn()
+            try:
+                r = fn()
+            except KotlinLexError as exc:
+                r = "%s LEX_FAIL: %s (fail-closed: the source cannot be lexed)" % (name, exc)
             if r is not None:
                 failures.append(r)
     return failures
@@ -1331,6 +1384,73 @@ object ConfigBuiltins {
             " ?: SystemVoiceEntries.resolve(entryId)",
             ".also { SystemVoiceEntries.resolve(entryId) }"),
         check_group_member_resolution, "C13 RED:")
+
+    # ── [batch5-t11] 第五批外部见证臂：拼写在、效果不在 ──────────────────
+    # FIX-29 (C1): 注册被挪进 `.also` —— 列表元素不含 groupField，字段从配置面蒸发。
+    d29 = fixture_dir()
+    p29 = os.path.join(d29, "fake", "config", "collections", "EnvVarsCollection.kt")
+    src29 = (open(p29, encoding="utf-8").read()
+             .replace("            groupField(forId),\n", "")
+             .replace("        )\n    }\n\n    private fun createdAtField",
+                      "        ).also { groupField(forId) }\n    }\n\n    private fun createdAtField"))
+    open(p29, "w", encoding="utf-8").write(src29)
+    ok &= expect(
+        "FIX-29 groupField registered inside .also",
+        check(p29, os.path.join(d29, "fake", "config", "ConfigBuiltins.kt"), groups_path(d29)),
+        "C1 RED:",
+    )
+
+    # FIX-30 (C2): reader 的 else 分支把常量当接收者（Str 只活在丢弃的 lambda 里）。
+    d30 = fixture_dir()
+    p30 = os.path.join(d30, "fake", "config", "collections", "EnvVarsCollection.kt")
+    src30 = open(p30, encoding="utf-8").read().replace(
+        "            if (e == null) ConfigValue.Null else ConfigValue.Str(e.group)",
+        "            if (e == null) ConfigValue.Null else ConfigValue.Null.also { ConfigValue.Str(e.group) }")
+    open(p30, "w", encoding="utf-8").write(src30)
+    ok &= expect(
+        "FIX-30 groupField reader answers a constant receiver",
+        check(p30, os.path.join(d30, "fake", "config", "ConfigBuiltins.kt"), groups_path(d30)),
+        "C2 RED:",
+    )
+
+    # FIX-31 (C4): 实参是 `0.also { contextLimit }` —— 标识符在，值是无限制。
+    d31 = fixture_dir()
+    p31 = groups_path(d31)
+    src31 = open(p31, encoding="utf-8").read().replace(
+        "applyContextLimitWrite(g, contextLimit ?: 0)",
+        "applyContextLimitWrite(g, 0.also { contextLimit })")
+    open(p31, "w", encoding="utf-8").write(src31)
+    ok &= expect(
+        "FIX-31 context-limit helper fed a discarded constant",
+        check(os.path.join(d31, "fake", "config", "collections", "EnvVarsCollection.kt"),
+              os.path.join(d31, "fake", "config", "ConfigBuiltins.kt"), p31),
+        "C4 RED:",
+    )
+
+    # FIX-32 (C5): 汇总键还在，值被钉成 ConfigValue.Null。
+    ok &= sentinel_arm(
+        "FIX-32 groups summary key pinned to a constant",
+        FIXTURE_BUILTINS_OK.replace(
+            '"default_thinking_level" to (g.defaultThinkingLevel?.let { '
+            "ConfigValue.Str(it) } ?: ConfigValue.Null),",
+            '"default_thinking_level" to ConfigValue.Null,'),
+        check_groups_summary_keys, "C5 RED:")
+
+    # FIX-33 (C8): `setOf(…, "envvars") - "envvars"` —— 字面量命中，集合实际不含它。
+    ok &= full_arm(
+        "FIX-33 backup scope subtracts envvars",
+        BUILTINS_OK4,
+        FIXTURE_BACKUP_OK.replace('        "envvars",\n    )', '        "envvars",\n    ) - "envvars"'),
+        ("C8 RED:",),
+    )
+
+    # FIX-34 (C12): 谓词换成 `(1 == 2) && isSystemEntryId(it)`（非 false 字面量的死守卫）。
+    ok &= sentinel_arm(
+        "FIX-34 sentinel predicate folded by a numeric guard",
+        SENTINEL_BACKUP_OK.replace(
+            "old.takeIf { SystemVoiceEntries.isSystemEntryId(it) }",
+            "old.takeIf { (1 == 2) && SystemVoiceEntries.isSystemEntryId(it) }"),
+        check_sentinel_remap, "C12 RED:")
 
     for dd in fds:
         shutil.rmtree(dd, ignore_errors=True)
