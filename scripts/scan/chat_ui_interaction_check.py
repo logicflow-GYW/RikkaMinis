@@ -307,6 +307,29 @@ def signature_args(text, marker):
     return text[op + 1:cl]
 
 
+def signature_args_balanced(text, marker):
+    """Argument list of `marker(...)`, paren-MATCHED, None when unbalanced.
+
+    `signature_args` stops at the first `)` — which is fine while every
+    parameter is a bare `val x: T`, and catastrophic the moment one carries a
+    call-shaped default (`val tag: String = String()`): everything after it
+    falls out of the scanned slice. External witness A1 declared
+    `val tag: String = String()` after `isSkill` and appended an unread
+    `isUnreadFlag` boolean — `isSkill` kept the field list non-empty, so the
+    fail-closed check did not fire and the new field was never judged.
+    """
+    idx = text.find(marker)
+    if idx == -1:
+        return None
+    op = text.find("(", idx)
+    if op == -1:
+        return None
+    cl = _balanced_paren(text, op)
+    if cl is None:
+        return None
+    return text[op + 1:cl]
+
+
 def read(root, rel):
     path = os.path.join(root, rel)
     if not os.path.isfile(path):
@@ -1071,6 +1094,90 @@ def fast_mode_single_source_findings(vm_c, fm_c):
     return problems
 
 
+# ── decision-point primitives ([wide3-07]) ──────────────────────────────────
+#
+# A branch's SPELLING is not its DECISION. Every dataflow witness of this wave
+# kept the call and deleted the effect:
+#   A2          `if (cmd.isMcp) { if (false) return fillComposerWithSlashTitle(…) }`
+#   C1          `inputFieldValue.let { inputText.isNotEmpty() && (false || attachments.isEmpty()) }`
+# Both kept every substring the old criteria searched for. The primitives below
+# let a criterion ask "can this decide?" / "which value does it read?" instead.
+
+def _split_top(expr, op):
+    """Split [expr] on [op] at paren/bracket/brace depth 0."""
+    parts, depth, last, i = [], 0, 0, 0
+    while i < len(expr):
+        c = expr[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and expr.startswith(op, i):
+            parts.append(expr[last:i])
+            last = i + len(op)
+            i = last
+            continue
+        i += 1
+    parts.append(expr[last:])
+    return parts
+
+
+def cond_truth(expr):
+    """True/False when a LITERAL operand decides the condition, else None."""
+    s = expr.strip()
+    while s.startswith("(") and s.endswith(")") and _balanced_paren(s, 0) == len(s) - 1:
+        s = s[1:-1].strip()
+    if s == "true":
+        return True
+    if s == "false":
+        return False
+    if s.startswith("!"):
+        inner = cond_truth(s[1:])
+        return None if inner is None else (not inner)
+    ors = _split_top(s, "||")
+    if len(ors) > 1:
+        vals = [cond_truth(x) for x in ors]
+        if any(v is True for v in vals):
+            return True
+        if vals and all(v is False for v in vals):
+            return False
+        return None
+    ands = _split_top(s, "&&")
+    if len(ands) > 1:
+        vals = [cond_truth(x) for x in ands]
+        if any(v is False for v in vals):
+            return False
+        if vals and all(v is True for v in vals):
+            return True
+        return None
+    return None
+
+
+def dead_guard_spans(text):
+    """[(start, end)] of bodies whose controlling condition is literal-FALSE."""
+    spans = []
+    for m in re.finditer(r"\b(?:if|while)\s*\(", text):
+        op = m.end() - 1
+        cl = _balanced_paren(text, op)
+        if cl is None or cond_truth(text[op + 1:cl]) is not False:
+            continue
+        k = cl + 1
+        while k < len(text) and text[k] in " \t":
+            k += 1
+        if k < len(text) and text[k] == "{":
+            e = _matching_brace_end(text, k)
+            if e > k:
+                spans.append((k, e))
+        else:
+            eol = text.find("\n", k)
+            spans.append((k, eol if eol >= 0 else len(text)))
+    return spans
+
+
+def inside_spans(spans, pos):
+    return any(a <= pos <= b for a, b in spans)
+
+
 # ── the gate ─────────────────────────────────────────────────────────────────
 
 # ---------------------------------------------------------------------------
@@ -1248,7 +1355,11 @@ def check_tree(root):
     # so the field list is captured from the parameter list (paren-matched) —
     # slicing from the first `{` would run into the NEXT declaration's body
     # and pick up its computed properties (isText lives on AssistantBlock).
-    cmd_params = signature_args(models_c, "data class SlashCommand(")
+    # Paren-MATCHED, not first-`)`: a default value containing a call
+    # (`val tag: String = String()`) used to truncate the list, and every
+    # boolean declared after it fell out of the scan while the earlier ones kept
+    # the fail-closed check quiet (external witness A1).
+    cmd_params = signature_args_balanced(models_c, "data class SlashCommand(")
     bool_fields = re.findall(r"val\s+(\w+)\s*:\s*Boolean", cmd_params or "")
     if not bool_fields:
         problems.append((MODELS_REL, "A1 SlashCommand declares no boolean fields — "
@@ -1269,14 +1380,38 @@ def check_tree(root):
     if not exec_slice:
         problems.append(("A2", "executeSlashCommand not found — fail-closed"))
     else:
-        if "if (cmd.isMcp)" not in exec_slice:
-            problems.append(("A2", "executeSlashCommand has no `if (cmd.isMcp)` "
-                             "branch — MCP row taps fall into the action dispatch and "
-                             "wipe the composer (B-01)"))
         if FILL_HELPER not in exec_slice:
             problems.append(("A2", "executeSlashCommand must route the "
                              "typing-aid fill through the shared helper %s (single "
                              "source for the prepend/caret semantics)" % FILL_HELPER))
+        # The helper call must be RETURNED FROM THE ISMcp BRANCH. A whole-slice
+        # substring test is satisfied by the isSkill arm above it, and by a call
+        # wrapped in `if (false) return …` — both leave an MCP tap falling into
+        # the action dispatch, which returns "" and wipes the composer (the
+        # external witness A2 shape).
+        mcp_arm = re.search(r"if\s*\(\s*cmd\.isMcp\s*\)\s*\{", exec_slice)
+        if mcp_arm is None:
+            problems.append(("A2", "executeSlashCommand has no `if (cmd.isMcp) { … }` "
+                             "branch — MCP row taps fall into the action dispatch and "
+                             "wipe the composer (B-01)"))
+        else:
+            block = _brace_block(exec_slice, mcp_arm.end() - 1) or ""
+            dead = dead_guard_spans(block)
+            returns_fill = False
+            for r in re.finditer(re.escape(FILL_HELPER), block):
+                if inside_spans(dead, r.start()):
+                    continue
+                stmt_head = block[block.rfind("\n", 0, r.start()) + 1:r.start()]
+                if re.match(r"^\s*return\s*$", stmt_head):
+                    returns_fill = True
+                    break
+            if not returns_fill:
+                problems.append(("A2", "the `if (cmd.isMcp)` branch does not RETURN the "
+                                 "shared fill helper %s on its live path — a literal-decided "
+                                 "`if (false) return …` (or a fill that only happens in the "
+                                 "isSkill arm) keeps the spelling and loses the decision, so "
+                                 "an MCP tap still falls through to the action dispatch and "
+                                 "wipes the composer (B-01)" % FILL_HELPER))
 
     # ── A3: isMcp read in a ChatInputArea condition ─────────────────────────
     if len(re.findall(r"\.isMcp\b", inp_c)) == 0:
@@ -1360,19 +1495,49 @@ def check_tree(root):
                          " || attachments.isNotEmpty() }`), not re-derive it per site (B-06)"))
     else:
         name = body_match.group(1)
-        # The body spans lines — capture from the opening brace to the matching
-        # close (same-line capture would see only the newline).
+        # The body spans lines — capture from the opening brace to its MATCHING
+        # close (a `find("}")` stops at the first inner brace, e.g. a `let { }`
+        # wrapper, and then only part of the expression is judged).
         brace = inp_c.find("{", body_match.start())
-        close = inp_c.find("}", brace)
-        pred_body = inp_c[brace:close] if brace != -1 and close != -1 else ""
-        if "inputText.isNotBlank()" in pred_body:
+        close = _matching_brace_end(inp_c, brace) if brace != -1 else -1
+        pred_body = inp_c[brace + 1:close] if brace != -1 and close > brace else ""
+        # Read the OPERANDS, not the tokens: the predicate must be an OR of
+        # (field value non-blank) and (attachments non-empty), and neither
+        # operand may be short-circuited by a literal. `inputFieldValue.let {
+        # inputText.isNotEmpty() && (false || attachments.isEmpty()) }` keeps
+        # the field-value spelling, reads the debounced string, inverts the
+        # attachment polarity and deletes the decision — the external witness
+        # C1 shape.
+        if re.search(r"\binputText\b", pred_body):
             problems.append((INPUT_REL, "C1 the swipe predicate reads the debounced VM "
                              "string (inputText) — a just-typed prefix is invisible for "
                              "the debounce window; it must read the field's own "
                              "TextFieldValue"))
-        if "attachments" not in pred_body:
-            problems.append(("C1", "C1 the swipe predicate ignores attachments — "
-                             "attachment-only drags must count as sendable (B-06)"))
+        literals = [x.strip() for x in _split_top(pred_body, "||")
+                    if cond_truth(x) is not None]
+        if literals:
+            problems.append(("C1", "C1 the swipe predicate contains a literal-decided "
+                             "operand (%s) — a `false || …` / `true && …` arm deletes the "
+                             "decision while keeping the expression" % ", ".join(literals)))
+        field_ok = re.search(
+            r"inputFieldValue\s*\.\s*text(?:\s*\.\s*trim\(\))?\s*\."
+            r"\s*(?:isNotBlank|isNotEmpty)\s*\(\s*\)", pred_body) is not None or \
+            re.search(r"!\s*inputFieldValue\s*\.\s*text\s*\.\s*(?:isBlank|isEmpty)"
+                      r"\s*\(\s*\)", pred_body) is not None
+        attach_ok = re.search(
+            r"\battachments\s*(?:\.\s*(?:isNotEmpty|any)\s*\(|\.\s*size\s*>\s*0)",
+            pred_body) is not None or \
+            re.search(r"!\s*attachments\s*\.\s*isEmpty\s*\(\s*\)", pred_body) is not None
+        if not field_ok:
+            problems.append((INPUT_REL, "C1 the swipe predicate never tests the field's "
+                             "own TextFieldValue for non-blank text (`inputFieldValue.text."
+                             "isNotBlank()`) — a wrapper, alias or debounced string stands "
+                             "in for the live value (B-06)"))
+        if not attach_ok:
+            problems.append(("C1", "C1 the swipe predicate does not treat a NON-EMPTY "
+                             "attachment list as sendable (`attachments.isNotEmpty()` / "
+                             "`attachments.size > 0`) — attachment-only drags are rejected "
+                             "(B-06)"))
         calls = len(re.findall(r"\b%s\(\)" % re.escape(name), inp_c))
         if calls < 3:
             problems.append(("C2", "C2 the shared predicate is used %d time(s) — the "
@@ -2627,6 +2792,37 @@ def selftest():
             "    if (cmd.isMcp) {\n        resetSlashMenuState()\n"
             "        return fillComposerWithSlashTitle(cmd, saved)\n    }\n", ""),
     }), ["A2"])
+    # ── [wide3-07] the three external witnesses of this gate ───────────────
+    # A1 parser-death: a call-shaped default (`String()`) truncates the
+    # parameter list, so every boolean declared AFTER it escapes the scan while
+    # `isSkill` keeps the fail-closed check quiet.
+    expect_exact("A1 call-shaped default truncates the field list", fixtures(**{
+        MODELS_REL: MODELS_F.replace(
+            "    val isSkill: Boolean = false,\n",
+            "    val isSkill: Boolean = false,\n"
+            "    val tag: String = String(),\n"
+            "    val isUnreadFlag: Boolean = false,\n"),
+    }), ["A1:isUnreadFlag"])
+    # A2 dataflow: the branch keeps the call, the decision is short-circuited.
+    expect("A2 dead-guarded mcp return", fixtures(**{
+        TOKEN_REL: TOKEN_F.replace(
+            "    if (cmd.isMcp) {\n        resetSlashMenuState()\n"
+            "        return fillComposerWithSlashTitle(cmd, saved)\n    }\n",
+            "    if (cmd.isMcp) {\n"
+            "        if (false) return fillComposerWithSlashTitle(cmd, saved)\n    }\n"),
+    }), ["A2"])
+    # C1 dataflow: the field-value spelling survives, the live read and the
+    # attachment polarity and the OR decision all go away.
+    expect("C1 wrapper reads the debounced string", fixtures(**{
+        INPUT_REL: INPUT_F.replace(
+            "    val canSwipeSendNow: () -> Boolean = {\n"
+            "        inputFieldValue.text.isNotBlank() || attachments.isNotEmpty()\n"
+            "    }\n",
+            "    val canSwipeSendNow: () -> Boolean = {\n"
+            "        inputFieldValue.let { inputText.isNotEmpty() && "
+            "(false || attachments.isEmpty()) }\n"
+            "    }\n"),
+    }), ["C1"])
     # B1: dropping the main-chat wiring flips red
     expect("B1 gesture call dropped", fixtures(**{
         GESTURE_REL: GESTURE_F.replace(
