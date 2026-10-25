@@ -29,6 +29,28 @@ that verdict: a call whose result is not assigned, or whose `minis_url` line
 is appended outside the `!= null` guard, ships a URL for a file that does not
 exist — the agent then fails at the NEXT read, pointing at the wrong layer.
 
+[batch-5] Five blind axes closed; the hand-written comment stripper, condition
+evaluator and span scanners behind them are gone. Structure comes from the shared
+primitives (`_kotlin_lexer.mask_comments`, `_kotlin_ast.match_bracket /
+const_bool / function_body`, `_kotlin_valueflow.path_feasible / value_sources /
+returns_exiting`); a lex failure is a violation, never a fallback to raw text.
+
+  * C-TITLE — the declaration must be BOUND to the resolver. Calling it into a
+    dead variable and declaring `val toolTitle = (NAME).toString()` keeps the
+    call (so "the resolver exists" passes) and ships a constant: the criterion is
+    now the value the expression finally yields (witness G10-A1).
+  * C-EDIT-ENC — a guard is live only when its condition can be TRUE and its
+    branch leaves the FUNCTION. `(1 == 2) && guard(x)` is folded by the shared
+    constant evaluator, and `run { return@run }` keeps the `return` keyword while
+    exiting nothing (witnesses G10-A2, G10-A3).
+  * C-EDIT-BYTES — the REPORTED number is resolved back to what was measured:
+    `newContent.length` (property, no parentheses) is the same String
+    measurement as `.length()`, and an unused `toByteArray().size` no longer
+    vouches for it (witness G10-A4).
+  * C-ARTIFACT — `minis_url` must be REACHABLE, not merely inside the guard
+    block: a nested infeasible wrapper (`if (1 == 2) { … }`, a dead `when` arm)
+    is judged by `path_feasible` (witness G10-A5).
+
 Usage: python3 tool_title_error_branch_check.py <repo_root>
        python3 tool_title_error_branch_check.py --root <repo_root>
        python3 tool_title_error_branch_check.py --selftest
@@ -39,6 +61,43 @@ import re
 import shutil
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import KotlinLexError, mask_comments  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    enclosing_conditions,
+    function_body,
+    match_bracket,
+    split_top,
+    strip_parens,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    brace_depth,
+    expr_end,
+    path_feasible,
+    returns_exiting,
+    value_sources,
+)
+
+
+class GateParseError(RuntimeError):
+    """Structural view failed — fail CLOSED instead of scanning raw text."""
+
+
+def literal_view(text: str) -> str:
+    """Comments blanked, string literals intact, length unchanged.
+
+    [batch-5] Replaces this gate's two hand-written strippers. The anchors here
+    are message literals (`"Error writing file: `), so the view must keep string
+    contents; the shared lexer additionally knows char literals, backtick
+    identifiers and `${}` templates, and refuses to guess when it cannot lex.
+    """
+    try:
+        return mask_comments(text)
+    except KotlinLexError as exc:
+        raise GateParseError(str(exc))
 
 TOOL_DIR = "src/android/app/src/main/java/com/rikkaminis/app/tools"
 UI_CHAT_DIR = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat"
@@ -58,29 +117,8 @@ SPEC = {
 }
 
 
-def strip_line_comments(src: str) -> str:
-    out_lines = []
-    for line in src.split("\n"):
-        in_str = False
-        i = 0
-        cut = len(line)
-        while i < len(line):
-            c = line[i]
-            if c == "\\" and in_str:
-                i += 2
-                continue
-            if c == '"':
-                in_str = not in_str
-            elif c == "/" and not in_str and i + 1 < len(line) and line[i + 1] == "/":
-                cut = i
-                break
-            i += 1
-        out_lines.append(line[:cut])
-    return "\n".join(out_lines)
-
-
 def check_file(source: str, fname: str) -> list:
-    src = strip_line_comments(source)
+    src = literal_view(source)
     _, anchor, kind = SPEC[fname]
     errs = []
 
@@ -123,16 +161,81 @@ def check_file(source: str, fname: str) -> list:
     # this file carry legitimately different sources (`result.toolTitle`,
     # `MEMORY_DISABLED_TOOL_TITLE`, a local `title`), and judging those would
     # flag the corrected code.
-    for m in re.finditer(r"\bval\s+toolTitle\s*=\s*([^\n]+)", src):
-        core = m.group(1).strip()
-        while core.startswith("(") and core.endswith(")"):
-            core = core[1:-1].strip()
-        if re.fullmatch(r'"[^"]*"', core) or re.fullmatch(r"[A-Z][A-Z0-9_]*", core):
-            errs.append(
-                "`val toolTitle` is initialized to the constant `%s` instead of the "
-                "resolved title — the model's `tool_title` argument is ignored and the "
-                "UI card / offload summary falls back to a bare tool name" % core)
+    # [batch-5] The criterion is what the declaration is BOUND to, not which
+    # spellings wrap a constant. The witness called the resolver into a dead
+    # variable and declared `val toolTitle = (NAME).toString()`: the call is
+    # present (so "resolveToolTitle( exists" passes), the constant is wrapped in
+    # a method call (so neither `toolTitle = NAME` nor the paren-stripping
+    # constant match fires), and the title text is gone. `value_sources` reports
+    # the value the expression finally yields — `.let { … }`, elvis arms and
+    # if-else expressions included — so a resolver whose result is discarded
+    # cannot satisfy it.
+    for m in re.finditer(r"\bval\s+toolTitle\s*=\s*", src):
+        value = src[m.end():expr_end(src, m.end())].strip()
+        if _binds_resolver(value) or not _is_constant_title(value, src):
+            continue
+        errs.append(
+            "`val toolTitle` is built from constants only (`%s`) — no exception text, so "
+            "the model's `tool_title` argument is ignored and the UI card / offload "
+            "summary falls back to a bare tool name" % value[:80])
     return errs
+
+
+def _binds_resolver(value: str) -> bool:
+    """True when the declared value IS the resolver call (after value flow)."""
+    for src_expr in value_sources(value):
+        if re.search(r"(?<![\w.])resolveToolTitle\s*\(", src_expr):
+            return True
+    return False
+
+
+def _value_identifiers(expr: str):
+    """Identifiers the expression is BUILT from (member names / callees dropped)."""
+    out = []
+    for m in re.finditer(r"[A-Za-z_]\w*", expr):
+        i, j = m.start(), m.end()
+        if i > 0 and expr[i - 1] in ".$":
+            continue  # `x.NAME` / `$NAME`: a member or interpolation name
+        k = j
+        while k < len(expr) and expr[k] in " \t":
+            k += 1
+        if k < len(expr) and expr[k] == "(":
+            continue  # a callee: it is what the value is built BY, not FROM
+        out.append(m.group(0))
+    return out
+
+
+def _val_rhs(src: str, name: str):
+    m = re.search(r"\bval\s+" + re.escape(name) + r"\s*(?::[^=\n]+)?=\s*", src)
+    if not m:
+        return None
+    return src[m.end():expr_end(src, m.end())].strip()
+
+
+def _is_constant_title(value: str, src: str, depth: int = 0) -> bool:
+    """True when the title value is derived from constants only.
+
+    [batch-5] This is the witness's shape: the resolver is called into a dead
+    variable and `val toolTitle = (NAME).toString()` — a lowercase method call
+    wrapping a constant, so neither `toolTitle = NAME` nor the paren-stripping
+    constant match fires while the file still contains the resolver. The
+    question asked here is about data: does anything in the value come from the
+    input? A value built only from literals / ALL_CAPS constants carries no
+    exception text. One hop into a local `val` is followed, because
+    `val toolTitle = titleConst` would otherwise be a free bypass.
+    """
+    if depth > 3:
+        return False
+    for expr in value_sources(value):
+        if _binds_resolver(expr):
+            return False
+        for ident in _value_identifiers(expr):
+            if re.fullmatch(r"[A-Z][A-Z0-9_]*", ident):
+                continue
+            rhs = _val_rhs(src, ident)
+            if rhs is None or not _is_constant_title(rhs, src, depth + 1):
+                return False
+    return True
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -149,139 +252,86 @@ def check_file(source: str, fname: str) -> list:
 # instead of "does this token appear?".
 # ══════════════════════════════════════════════════════════════════════
 
-def _match_paren(text, open_idx):
-    depth = 0
-    for i in range(open_idx, len(text)):
-        c = text[i]
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-    return None
-
-
-def _split_top(expr, op):
-    parts, depth, last, i = [], 0, 0, 0
-    while i < len(expr):
-        c = expr[i]
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        elif depth == 0 and expr.startswith(op, i):
-            parts.append(expr[last:i])
-            last = i + len(op)
-            i = last
-            continue
-        i += 1
-    parts.append(expr[last:])
-    return parts
-
-
-def cond_truth(expr):
-    """True/False when a LITERAL operand decides the condition, else None."""
-    s = expr.strip()
-    while s.startswith("(") and s.endswith(")") and _match_paren(s, 0) == len(s) - 1:
-        s = s[1:-1].strip()
-    if s == "true":
-        return True
-    if s == "false":
-        return False
-    if s.startswith("!"):
-        inner = cond_truth(s[1:])
-        return None if inner is None else (not inner)
-    ors = _split_top(s, "||")
-    if len(ors) > 1:
-        vals = [cond_truth(x) for x in ors]
-        if any(v is True for v in vals):
-            return True
-        if vals and all(v is False for v in vals):
-            return False
-        return None
-    ands = _split_top(s, "&&")
-    if len(ands) > 1:
-        vals = [cond_truth(x) for x in ands]
-        if any(v is False for v in vals):
-            return False
-        if vals and all(v is True for v in vals):
-            return True
-        return None
-    return None
-
-
-def dead_guard_spans(text):
-    """[(start, end)] of bodies whose controlling condition is literal-FALSE."""
-    spans = []
+def _if_conditions(text):
+    """[(open_paren, close_paren, condition_text)] for every `if (`/`while (`."""
+    out = []
     for m in re.finditer(r"\b(?:if|while)\s*\(", text):
         op = m.end() - 1
-        cl = _match_paren(text, op)
-        if cl is None or cond_truth(text[op + 1:cl]) is not False:
+        cl = match_bracket(text, op)
+        if cl < 0:
             continue
-        k = cl + 1
-        while k < len(text) and text[k] in " \t":
-            k += 1
-        if k < len(text) and text[k] == "{":
-            e = _brace_end(text, k)
-            if e is not None:
-                spans.append((k, e))
-        else:
-            eol = text.find("\n", k)
-            spans.append((k, eol if eol >= 0 else len(text)))
-    return spans
+        out.append((op, cl, text[op + 1:cl]))
+    return out
 
 
-def inside_spans(spans, pos):
-    return any(a <= pos <= b for a, b in spans)
+def _branch_exits(text, after_paren):
+    """True when the branch that follows [after_paren] leaves the FUNCTION.
+
+    `throw` anywhere does (it propagates out of lambdas too). A bare `return`
+    does only at the depth of the branch itself: `run { return@run }` matches
+    `\breturn\b` and exits nothing, so the statement below still runs with the
+    bad value — that is how a dead guard kept its `return`.
+    """
+    k = after_paren
+    while k < len(text) and text[k] in " \t\r\n":
+        k += 1
+    if k >= len(text):
+        return False
+    if text[k] == "{":
+        end = match_bracket(text, k)
+        if end < 0:
+            return False
+        branch = text[k:end + 1]
+        if re.search(r"\bthrow\b", branch):
+            return True
+        return returns_exiting(text, k, end + 1, fn_depth=brace_depth(text, k) + 1)
+    eol = text.find("\n", k)
+    seg_end = eol if eol >= 0 else len(text)
+    seg = text[k:seg_end]
+    if re.search(r"\bthrow\b", seg):
+        return True
+    return returns_exiting(text, k, seg_end, fn_depth=brace_depth(text, k))
 
 
 def guard_is_live(body, call_pos):
-    """True when the guard call at `call_pos` sits in an `if` condition that can
-    reject: not literal-decided, and the branch terminates (`return`/`throw`).
+    """True when the guard call at [call_pos] can actually reject the write.
 
-    Picks the INNERMOST enclosing `if` — an outer `if (x != null) { if (false &&
-    guard(x)) … }` must be judged on the inner condition, not the outer one."""
+    Two ways a guard is blind, both decided from the tree instead of from the
+    token that happens to be present:
+      * the `if` condition is literal-decided — `false && g(x)`, `(1 == 2) && g(x)`,
+        `!true && g(x)`: the shared evaluator folds arithmetic and comparison
+        constants, so a criterion that only recognized the `false` token missed
+        every other spelling of "never";
+      * the branch keeps its `return` keyword but does not leave the function
+        (`run { return@run }`), so the write below proceeds with the same value.
+    The innermost enclosing `if` decides: an outer `if (x != null)` says nothing
+    about whether the inner guard rejects.
+    """
     best = None
-    for m in re.finditer(r"\bif\s*\(", body):
-        op = m.end() - 1
-        cl = _match_paren(body, op)
-        if cl is None or not (op <= call_pos <= cl):
-            continue
-        if best is None or m.start() > best[0]:
-            best = (m.start(), op, cl)
+    for op, cl, cond in _if_conditions(body):
+        if op <= call_pos <= cl and (best is None or op > best[0]):
+            best = (op, cl, cond)
     if best is None:
         return False
-    _s, op, cl = best
-    if cond_truth(body[op + 1:cl]) is False:
+    _op, cl, cond = best
+    if const_bool(cond) is False:
         return False
-    k = cl + 1
-    while k < len(body) and body[k] in " \t":
-        k += 1
-    if k < len(body) and body[k] == "{":
-        e = _brace_end(body, k)
-        branch = body[k:e + 1] if e is not None else ""
-    else:
-        eol = body.find("\n", k)
-        branch = body[k:eol if eol >= 0 else len(body)]
-    return re.search(r"\b(return|throw)\b", branch) is not None
+    return _branch_exits(body, cl + 1)
 
 
-# ══════════════════════════════════════════════════════════════════════
-# [deep-audit-1047 / A-08] write-shaped tool guards
-#
-# Two judgments, both DERIVED from the tree (never a hand-listed line):
-#
-#   C-EDIT-ENC   every disk-write call of a write-shaped tool must be
-#                preceded by a UTF-8 validity guard that rejects unpaired
-#                surrogates. The guard may live in the tool or in a helper
-#                (resolved through the tools package), so a shared helper
-#                counts — but the guard must be applied to the SAME content
-#                that is written.
-#   C-EDIT-BYTES the byte count a write tool reports must come from the
-#                written FILE's length, not from a String length/count
-#                (UTF-16 code units under-report CJK by up to 3x).
-# ══════════════════════════════════════════════════════════════════════
+def live_url_appends(block):
+    """`minis_url` lines in [block] whose position is reachable."""
+    out = []
+    for m in re.finditer(r"minis_url", block):
+        if not path_feasible(block, m.start()):
+            continue
+        ls = block.rfind("\n", 0, m.start()) + 1
+        le = block.find("\n", m.start())
+        line = block[ls: le if le >= 0 else len(block)]
+        if "output" in line:
+            out.append(line)
+    return out
+
 
 WRITE_TOOLS = ("FileWriteTool.kt", "FileEditTool.kt")
 
@@ -291,65 +341,25 @@ WRITE_CALL_RES = (
     re.compile(r"\b([A-Za-z_]\w*)\s*\.\s*(?:writeText|appendText|writeBytes)\s*\(\s*([^)\n]+)\)"),
 )
 
-
-def strip_kotlin_comments(src: str) -> str:
-    """Blank out line AND block comments, preserving line structure.
-
-    Block comments matter here: a KDoc that merely MENTIONS
-    `CodingErrorAction.REPORT` or `file.length()` would otherwise satisfy
-    the judgment. Line structure is preserved so line-based function
-    splitting still works.
-    """
-    out = []
-    i = 0
-    n = len(src)
-    in_block = False
-    while i < n:
-        c = src[i]
-        if in_block:
-            if c == "*" and i + 1 < n and src[i + 1] == "/":
-                in_block = False
-                out.append("  ")
-                i += 2
-                continue
-            out.append("\n" if c == "\n" else " ")
-            i += 1
-            continue
-        if c == "/" and i + 1 < n and src[i + 1] == "*":
-            in_block = True
-            out.append("  ")
-            i += 2
-            continue
-        if c == "/" and i + 1 < n and src[i + 1] == "/":
-            while i < n and src[i] != "\n":
-                out.append(" ")
-                i += 1
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
-
-
-FUN_DECL_RE = re.compile(
-    r"^\s{0,8}(?:@\w+\s+)*(?:private\s+|internal\s+|public\s+|protected\s+|open\s+|"
-    r"override\s+|suspend\s+|inline\s+|final\s+|abstract\s+)*fun\s+([A-Za-z_]\w*)")
+FUN_DECL = re.compile(
+    r"\bfun\s+(?:<[^>]*>\s*)?(?:[A-Za-z_][\w.]*\.)?([A-Za-z_]\w*)\s*\(")
 
 
 def split_functions(src: str):
-    """[(name, body)] for every function declaration in `src`.
+    """[(name, body)] for every function declaration — body from the shared AST.
 
-    Line based rather than brace matched: an expression-bodied function
-    (`= try { ... }`) has no opening brace on its signature line, and a
-    brace matcher would truncate it at the wrong `}`.
+    [batch-5] The hand-rolled line-based splitter had to guess where a body
+    ends; `function_body` derives it (default-argument lambdas and expression
+    bodies included), so a following function's statements can no longer be
+    attributed to the previous one.
     """
-    lines = src.split("\n")
-    starts = [i for i, line in enumerate(lines) if FUN_DECL_RE.match(line)]
     out = []
-    for si in starts:
-        nxt = [s for s in starts if s > si]
-        end = nxt[0] if nxt else len(lines)
-        name = FUN_DECL_RE.match(lines[si]).group(1)
-        out.append((name, "\n".join(lines[si:end])))
+    for m in FUN_DECL.finditer(src):
+        got = function_body(src[m.start():], m.group(1))
+        if not got:
+            continue
+        start, end, _kind = got
+        out.append((m.group(1), src[m.start() + start:m.start() + end]))
     return out
 
 
@@ -363,7 +373,7 @@ def build_function_table(sources):
     """
     table = {}
     for path, code in sources:
-        for name, body in split_functions(strip_kotlin_comments(code)):
+        for name, body in split_functions(literal_view(code)):
             table.setdefault(name, []).append((path, body))
     return table
 
@@ -435,47 +445,84 @@ def _string_literals_with(body: str, needle: str):
     return out
 
 
-def _reported_size_exprs(body: str, targets):
-    """[(expr, receiver)] for every size expression the body REPORTS.
+_SIZE_CALL = re.compile(r"^(?P<base>.+?)\.\s*(?P<kind>length|count)\s*\(\s*\)$", re.S)
+_SIZE_PROP = re.compile(r"^(?P<base>.+?)\.\s*(?P<kind>length|size|count)$", re.S)
 
-    Only expressions that actually reach a user-visible message count: a
-    message literal mentioning `bytes` is the anchor, and the identifiers it
-    interpolates are resolved back to their `val` definitions. Size
-    expressions that are computed but never reported (a post-write
-    consistency probe, for instance) are not the judgment's business.
+
+def _measure(expr: str):
+    """(base_expression, kind) when [expr] measures a size, else None.
+
+    `length()` / `.length` / `.count()` / `.size` are one ACT spelled four
+    ways. Only the `x.length()` spelling used to be recognized, so
+    `val bytes = newContent.length` — a property read, no parentheses — walked
+    past a criterion about the MEASUREMENT.
     """
-    val_defs = {}
-    for m in re.finditer(
-            r"val\s+([A-Za-z_]\w*)\s*(?::[^=]+)?=\s*([A-Za-z_]\w*)\s*\.\s*(length|count)\(\)",
-            body):
-        val_defs[m.group(1)] = (m.group(2), m.group(3))
+    e = strip_parens(expr.strip())
+    if not e:
+        return None
+    m = _SIZE_CALL.match(e) or _SIZE_PROP.match(e)
+    if not m:
+        return None
+    return m.group("base").strip(), m.group("kind")
 
+
+def _root_ident(expr: str) -> str:
+    m = re.match(r"\s*([A-Za-z_]\w*)", expr or "")
+    return m.group(1) if m else ""
+
+
+def _size_defs(body: str, name: str):
+    """Every right-hand side assigned to [name] inside the body."""
+    out = []
+    for m in re.finditer(r"\b(?:val|var)\s+" + re.escape(name) + r"\s*(?::[^=\n]+)?=\s*", body):
+        start = m.end()
+        out.append(body[start:expr_end(body, start)].strip())
+    return out
+
+
+def _string_fragments(lit: str):
+    """Interpolated expressions of a Kotlin string literal, in source order."""
+    out = []
+    for m in re.finditer(r"\$\{([^{}]*)\}", lit):
+        out.append(m.group(1).strip())
+    for m in re.finditer(r"\$([A-Za-z_]\w*)", lit):
+        out.append(m.group(1))
+    return out
+
+
+def _reported_size_exprs(body: str, targets):
+    """[(reported_text, measured_base, kind)] for every size the body REPORTS.
+
+    Only values that reach a user-visible message count: a literal mentioning
+    `bytes` is the anchor, and everything it interpolates is resolved back to
+    what it was assigned. A size computed but never reported (a post-write
+    consistency probe) is not this judgment's business.
+
+    [batch-5] Resolution follows the VALUE, not one fixed `val x = id.length()`
+    shape: the witness declared `val bytes = newContent.length` while the real
+    `toByteArray(Charsets.UTF_8).size` sat in an unused variable, and the
+    reported number was the String's UTF-16 length.
+    """
     exprs = []
     for lit in _string_literals_with(body, "bytes"):
-        # ${...} form
-        for m in re.finditer(r"\$\{([^{}]*)\}", lit):
-            frag = m.group(1).strip()
-            direct = re.match(r"^([A-Za-z_]\w*)\s*\.\s*(length|count)\(\)$", frag)
-            if direct:
-                exprs.append((frag, direct.group(1), direct.group(2)))
+        for frag in _string_fragments(lit):
+            measured = _measure(frag)
+            if measured:
+                exprs.append((frag, measured[0], measured[1]))
                 continue
-            vm = re.match(r"^([A-Za-z_]\w*)$", frag)
-            if vm and vm.group(1) in val_defs:
-                recv, kind = val_defs[vm.group(1)]
-                exprs.append((f"{vm.group(1)} = {recv}.{kind}()", recv, kind))
-        # $name form
-        for m in re.finditer(r"\$([A-Za-z_]\w*)", lit):
-            nm = m.group(1)
-            if nm in val_defs:
-                recv, kind = val_defs[nm]
-                exprs.append((f"{nm} = {recv}.{kind}()", recv, kind))
+            if not re.fullmatch(r"[A-Za-z_]\w*", frag):
+                continue
+            for rhs in _size_defs(body, frag):
+                measured = _measure(rhs)
+                if measured:
+                    exprs.append((f"{frag} = {rhs}", measured[0], measured[1]))
     return exprs
 
 
 def check_write_guard_source(src: str, fname: str, guard_names) -> list:
     """C-EDIT-ENC — every disk write must be guarded, and guarded correctly."""
     errs = []
-    code = strip_kotlin_comments(src)
+    code = literal_view(src)
     total = 0
     for fname_fun, body in split_functions(code):
         writes = _write_calls(body)
@@ -502,8 +549,9 @@ def check_write_guard_source(src: str, fname: str, guard_names) -> list:
                 if guard_dead:
                     errs.append(
                         f"{fname}: [C-EDIT-ENC] the guard applied to `{content}` cannot "
-                        "reject: its `if` condition is literal-decided (`false && …`) or its "
-                        "branch does not terminate (`return`/`throw`) — the write proceeds "
+                        "reject: its `if` condition is constant-decided (`false && …`, "
+                        "`(1 == 2) && …`) or its branch does not leave the function "
+                        "(`run { return@run }`, `let { return@let }`) — the write proceeds "
                         "with unpaired surrogates and the encoder substitutes them")
                 else:
                     errs.append(
@@ -530,7 +578,7 @@ def check_write_guard_source(src: str, fname: str, guard_names) -> list:
 def check_byte_unit_source(src: str, fname: str) -> list:
     """C-EDIT-BYTES — the reported byte count must be the FILE's length."""
     errs = []
-    code = strip_kotlin_comments(src)
+    code = literal_view(src)
     for _fname_fun, body in split_functions(code):
         writes = _write_calls(body)
         if not writes:
@@ -546,12 +594,18 @@ def check_byte_unit_source(src: str, fname: str) -> list:
                     f"{fname}: [C-EDIT-BYTES] the reported size uses `{expr}` — "
                     "`.count()` is a character count, never a byte count")
                 continue
-            if recv not in targets:
-                errs.append(
-                    f"{fname}: [C-EDIT-BYTES] the reported size comes from "
-                    f"`{expr}` — it must be the length of the written file "
-                    f"({', '.join(sorted(targets))}), not a String length "
-                    "(UTF-16 code units under-report CJK by up to 3x)")
+            if _root_ident(recv) in targets:
+                continue
+            if re.search(r"\.\s*toByteArray\s*\(", recv):
+                continue  # a real byte array: right unit, even if not the file
+            # [batch-5] `newContent.length` (property, no parens) is the same
+            # measurement as `newContent.length()`; the criterion keys on what
+            # was measured, so both spellings now resolve to the same verdict.
+            errs.append(
+                f"{fname}: [C-EDIT-BYTES] the reported size comes from "
+                f"`{expr}` — it must be the length of the written file "
+                f"({', '.join(sorted(targets))}), not a String length "
+                "(UTF-16 code units under-report CJK by up to 3x)")
     seen, uniq = set(), []
     for e in errs:
         if e in seen:
@@ -601,7 +655,7 @@ def check_artifact_writer_src(src: str) -> list:
     artifact must live INSIDE that guard (so a failed write cannot advertise a
     URL). Fail-closed when the executor has no such call at all — the subject
     moved."""
-    code = strip_kotlin_comments(src)
+    code = literal_view(src)
     problems = []
     sites = 0
     for m in ARTIFACT_CALL_RE.finditer(code):
@@ -630,22 +684,17 @@ def check_artifact_writer_src(src: str) -> list:
             # Inside the guard is not the same as reachable: a literal-decided
             # wrapper (`if (false) { … minis_url … }`) keeps the token inside the
             # guard block and never runs (external witness C-ARTIFACT).
-            dead = dead_guard_spans(block)
-            live = []
-            for m in re.finditer(r"minis_url", block):
-                if inside_spans(dead, m.start()):
-                    continue
-                ls = block.rfind("\n", 0, m.start()) + 1
-                le = block.find("\n", m.start())
-                line = block[ls: le if le >= 0 else len(block)]
-                if "output" in line:
-                    live.append(line)
+            # [batch-5] Reachability comes from the enclosing conditions
+            # (`path_feasible`), so `if (1 == 2) { … minis_url … }` and a nested
+            # `when (false)` are dead too — the old span list only knew the
+            # `false` / `!true` tokens it was written for.
+            live = live_url_appends(block)
             if not live:
                 problems.append(
-                    "artifactWriter() `%s`: the minis_url append cannot run — it sits inside "
-                    "a literal-decided guard (`if (false) …`) or no longer assigns to "
-                    "`output`, so a persisted artifact is never advertised to the agent"
-                    % name)
+                    "artifactWriter() `%s`: the minis_url append cannot run — it sits on an "
+                    "infeasible path (`if (false) …`, `if (1 == 2) …`, a dead `when` arm) or "
+                    "no longer assigns to `output`, so a persisted artifact is never "
+                    "advertised to the agent" % name)
     if sites == 0:
         problems.append("ChatToolExecutors.kt: no artifactWriter( call found — the artifact "
                         "persistence moved, so this criterion saw nothing to check")
@@ -677,7 +726,7 @@ def check(root: str) -> list:
     # MemoryTools: both functions must resolve the title
     path = os.path.join(root, TOOL_DIR, "MemoryTools.kt")
     try:
-        src = strip_line_comments(open(path).read())
+        src = literal_view(open(path).read())
         n = src.count("resolveToolTitle(")
         if n < 2:
             errs.append(f"MemoryTools.kt: resolveToolTitle( found {n} times, expected 2 (write + get)")
@@ -895,6 +944,25 @@ class FileEditTool {
     CHAR_COUNT_EDIT = GOOD_EDIT.replace(
         "val bytes = file.length()", "val bytes = newContent.count()")
 
+    # [batch-5] `length` read as a PROPERTY — the same measurement, no parens.
+    STRING_LENGTH_PROP_EDIT = GOOD_EDIT.replace(
+        "val bytes = file.length()", "val bytes = newContent.length")
+
+    # [batch-5] the guard's decision is literal-decided by ARITHMETIC: the old
+    # evaluator only knew the `false` token, so `1 == 2` kept the guard alive.
+    DEAD_GUARD_ARITH_EDIT = GOOD_EDIT.replace(
+        "if (isUnpairedSurrogateFailure(newContent)) {",
+        "if ((1 == 2) && isUnpairedSurrogateFailure(newContent)) {")
+
+    # [batch-5] the guard branch keeps a `return` that only exits a lambda.
+    LAMBDA_RETURN_EDIT = GOOD_EDIT.replace(
+        """        if (isUnpairedSurrogateFailure(newContent)) {
+            return ToolExecutionResult(UNENCODABLE_CONTENT_MESSAGE, false, toolTitle = toolTitle)
+        }""",
+        """        if (isUnpairedSurrogateFailure(newContent)) {
+            run { return@run }
+        }""")
+
     # The guard is delegated to a helper the file calls — must stay GREEN.
     HELPER_EDIT = """
 package com.rikkaminis.app.tools
@@ -1005,6 +1073,13 @@ class FileWriteTool {
         arm("a08-string-length", STRING_LENGTH_EDIT, GUARD_HELPER, "PASS", "FAIL")
         # Teeth 4: a character count is never a byte count.
         arm("a08-char-count", CHAR_COUNT_EDIT, GUARD_HELPER, "PASS", "FAIL")
+        # [batch-5] Teeth 5: `newContent.length` — the property-read spelling of
+        # the same String measurement.
+        arm("a08-string-length-property", STRING_LENGTH_PROP_EDIT, GUARD_HELPER, "PASS", "FAIL")
+        # [batch-5] Teeth 6: the guard is decided by arithmetic, not by `false`.
+        arm("a08-dead-guard-arithmetic", DEAD_GUARD_ARITH_EDIT, GUARD_HELPER, "FAIL", "PASS")
+        # [batch-5] Teeth 7: the guard's `return` only leaves a lambda.
+        arm("a08-guard-lambda-return", LAMBDA_RETURN_EDIT, GUARD_HELPER, "FAIL", "PASS")
         # Precision: the guard delegated to a differently-NAMED helper that
         # still configures the encoder -> stays green (the criterion keys on
         # the encoder configuration, not on a memorized function name).
@@ -1039,6 +1114,19 @@ internal const val UNENCODABLE_CONTENT_MESSAGE = "Error: unpaired surrogates"
     # the encoder configuration, not on a memorized function name.
     GUARD_HELPER_ALT = GUARD_HELPER.replace("isUnpairedSurrogateFailure", "isEncodableUtf8")
 
+    # [batch-5 C-TITLE] resolver called into a dead variable, title from a
+    # constant wrapped in `.toString()` — the call is present, the text is not.
+    bad_title_dead_tostring = """
+        fun execute(argsJson: String, path: String, content: String): ToolExecutionResult {
+            val _unusedTitle = resolveToolTitle(argsJson, NAME)
+            val toolTitle = (NAME).toString()
+            return try {
+                ToolExecutionResult("ok", true, toolTitle = toolTitle)
+            } catch (e: Exception) {
+                ToolExecutionResult("Error writing file: ${e.message}", false, toolTitle = toolTitle)
+            }
+        }
+    """
     arms = [
         ("compliant exec", "FileReadTool.kt", good_exec, 0),
         ("V1 catch hardcode NAME", "FileReadTool.kt", bad_hardcode, 2),
@@ -1059,6 +1147,8 @@ internal const val UNENCODABLE_CONTENT_MESSAGE = "Error: unpaired surrogates"
         # [wide3-07] C-TITLE witness: `// val toolTitle = resolveToolTitle(…)`
         # + `val toolTitle = (NAME)` -> the missing resolver AND the constant.
         ("V12 commented resolver + parenthesized NAME", "FileReadTool.kt", bad_title_paren, 2),
+        ("V13 resolver into a dead val + toString constant", "FileWriteTool.kt",
+         bad_title_dead_tostring, 1),
     ]
     # ── [deep-audit-1048 B-03] artifactWriter verdict ─────────────────────
     GOOD_ARTIFACT = "\n".join([
@@ -1125,6 +1215,18 @@ internal const val UNENCODABLE_CONTENT_MESSAGE = "Error: unpaired surrogates"
         '                        output = "$output\\nminis_url: $it"\n'
         '                    }\n'
         '                }\n')
+    # [batch-5] the same dead wrapper, decided by arithmetic instead of `false`.
+    ARTIFACT_DEAD_URL_NESTED = GOOD_ARTIFACT.replace(
+        '            if (fetchPersistPath != null) {\n'
+        '                linuxPathToMinisURL("/var/minis/browser/$fetchName")?.let {\n'
+        '                    output = "$output\\nminis_url: $it"\n'
+        '                }\n',
+        '            if (fetchPersistPath != null) {\n'
+        '                if (1 == 2) {\n'
+        '                    linuxPathToMinisURL("/var/minis/browser/$fetchName")?.let {\n'
+        '                        output = "$output\\nminis_url: $it"\n'
+        '                    }\n'
+        '                }\n')
     # B-03-V3: the verdict is never tested at all.
     ARTIFACT_UNTESTED = GOOD_ARTIFACT.replace(
         '            if (fetchPersistPath != null) {\n',
@@ -1136,6 +1238,7 @@ internal const val UNENCODABLE_CONTENT_MESSAGE = "Error: unpaired surrogates"
         ("b03-url outside the guard", ARTIFACT_URL_OUTSIDE, 1),
         ("b03-verdict never tested", ARTIFACT_UNTESTED, 1),
         ("b03-dead-guarded url append", ARTIFACT_DEAD_URL, 1),
+        ("b03-dead-guarded url append (arithmetic)", ARTIFACT_DEAD_URL_NESTED, 1),
     ):
         got = check_artifact_writer_src(sample)
         if len(got) == want:
