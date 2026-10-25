@@ -282,7 +282,9 @@ def check(loop, compactor, orch):
             blocks.sort(key=lambda b: b[1])
             cond, t_start, t_end, _es, _ee = blocks[-1]
             cond_ns = norm(cond)
-            if cond_ns not in ("!" + call_ns, "!(" + call_ns + ")", call_ns):
+            # 只接受取反形态。裸 `if (loopGateOpens(...))` 是极性反了（门开=拒绝），
+            # 同样能让 decide() 在最需要时进不去。
+            if cond_ns not in ("!" + call_ns, "!(" + call_ns + ")"):
                 problems.append((
                     "entry-admits-exhausted",
                     "%s:%d: the entry guard must be exactly `!%s`; it is `%s` — an extra operand can "
@@ -687,6 +689,13 @@ def selftest(root):
                 "if (!" + GATE_CALL + ") {",
                 "if (!" + GATE_CALL + " || verdict == ContextPolicy.CheckResult.EXHAUSTED) {",
                 1,
+            )),
+        ),
+        (
+            "loop gate polarity inverted",
+            "entry-admits-exhausted",
+            on_loop(lambda s: s.replace(
+                "if (!" + GATE_CALL + ") {", "if (" + GATE_CALL + ") {", 1,
             )),
         ),
         (
