@@ -197,11 +197,25 @@ restore=True 12/12（工作树零残留；`git status --porcelain src/` 空）
 ### L4 — 全量（`scan.sh` 112 / `test_scan.py` ALL 344）
 施工期本机 13 支会话并行，`bash scan.sh` 与 `gate_run.sh --full` 均被沙箱 ENOSYS 打死（registry S28：`OSError: [Errno 38] Function not implemented`，两次分别停在 16/112 与 24/112 门，`src/` 零残留）。按 S28 登记的纪律（2026-10-18 变体 ⑤：施工期本地只跑本门+邻门+变异负控，全量证据取分支 CI 日志），**L4 以分支 CI job 日志为准** —— 见 §5。
 
-## 5. CI
+## 5. CI（已回填真实读数）
 
-- run / job / attempt：**待回填（CI 出结论后回填真实数字，不预写占位值）**
-- head_sha：**待回填**
-- 读数核对项：`Summary: 112 passed, 0 failed` 带框线恰 1 条 · 门头编号 112 互异 · `ALL 344 CASES PASS` 恰 1 条 · ` e: ` 0 行 · 含 `FAILED` 的行逐条确认是 PASSED 用例名子串 · 26 步 not_ok 仅 `Publish` skipped · head_sha 与本地 HEAD 逐字符一致 · 本支两门 selftest 收尾标记在日志中出现。
+- 分支 `fix/b5-modelentry-memorygate` · run **#2681** / id `40203173652` / job `build` / **attempt 1 · success**
+- `head_sha` = `f77bab3b3`（与推送时本地 HEAD 逐字符一致；`run.head_sha == git rev-parse HEAD` 已由 API 核对 `True`）
+- 前一次 dispatch 的 run **#2680**（sha `5b3723f45`）被同 ref 的新一轮 **cancelled**（GitHub concurrency 取消在跑的旧 sha，不是失败）
+- 26 步：`not_ok = []`，唯一 skipped = `Publish to Releases`（main 门控，符合预期）
+- 日志 `1,486,097 B` 逐条核对：
+
+| 核对项 | 读数 |
+|---|---|
+| `Summary: 112 passed, 0 failed`（框线 `║` 权威行） | 恰 **1** 条（log:1019） |
+| 门头编号 `━━━ [N/112]` | **112** 条、**112 个互异** |
+| `ALL 344 CASES PASS` | 恰 **1** 条 |
+| Kotlin 编译错误 ` e: ` | **0** 行 |
+| 含 `FAILED` 的行 | 6 条，逐条确认**全是 PASSED 用例名子串**（`slot denied produces FAILED without calling provider`、`reason PERSISTENCE_FAILED maps to …`、`phase/terminal FAILED maps to Failed`、`the fixed tail still reaches a legal FAILED terminal`） |
+| 本波两门在册 | `memory_gate_provider_fields_check: clean`（log:758）· `model_entry_override_parity_check: OK (7 arms, 0 violations)`（log:848） |
+| `test_scan.py` 对本波两门的断言 | `✅ memory_gate_provider_fields_check selftest has teeth (MEMORY_GATE_PROVIDER_FIELDS_SELFTEST=PASS)`（log:1279）+ `real tree green`（1280）· `✅ model_entry_override_parity_check selftest has teeth (MODEL_ENTRY_OVERRIDE_SELFTEST=PASS)`（log:1326）+ `real tree green`（1327） |
+
+注：门自己 `--selftest` 的 stdout **不进 CI 日志**（只有 test_scan 捕获后的 ✅ 行在册），所以"臂数 23 / 19"这一事实在 CI 里不可见 —— CI 断言的是标记串子串，见 §6 R6。
 
 ## 6. 残留（R1..R6）
 
@@ -235,7 +249,7 @@ restore=True 12/12（工作树零残留；`git status --porcelain src/` 空）
 - 现状：`test_scan.py` 断言的是子串 `MODEL_ENTRY_OVERRIDE_SELFTEST=PASS` / `MEMORY_GATE_PROVIDER_FIELDS_SELFTEST=PASS`（`marker in out`），臂数改为 `(23 arms)` / `(19 arms)` 后断言仍成立（**无需改冻结面**）。
 - 触发条件：主会话收口时若希望"臂数变化必须显式改门"，可把标记串升级成带臂数。
 - 触发后方案：`test_scan.py` 两行改为 `SELFTEST=PASS (23 arms)` / `(19 arms)`。
-- 搁置理由：`test_scan.py` 本波冻结；且臂数已由门自己的 `--selftest` 输出可核对。
+- 搁置理由：`test_scan.py` 本波冻结；且臂数已由门自己的 `--selftest` 输出可核对。**CI 侧不可核对**已实测确认：日志里只有 test_scan 的 `✅ … selftest has teeth (…=PASS)` 行（门自证 stdout 不进 CI 日志），故臂数变化对 CI 是静默的 —— 这正是"主会话收口时值得把臂数钉进标记串"的理由。
 
 ## 7. `test_scan.py` 注册项（交主会话统一处理）
 
