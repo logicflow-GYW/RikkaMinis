@@ -3,7 +3,7 @@
 - 分支：`fix/b5-compact-entryid`
 - 基线：`base/batch5-shared` @ `e145ec961232c7898644346ff4bc0c3f70980369`（= main `6ac77c6b2` + 共享原语 `_kotlin_valueflow.py`）
 - 改动面：**2 个门脚本**（+720 / −550），生产 `.kt` 0 行、`scan.sh` / `test_scan.py` / `_kotlin_{lexer,ast,valueflow}.py` 零触碰、门 112 / 夹具 344 不变、0 新建门。
-- 结果：12 条见证（10 实锤失明 + 2 CAUGHT 对照）**全部 CAUGHT**，两门 `--selftest` 24 + 17 臂全绿，真树 rc=0，邻门 12/12 rc=0。
+- 结果：12 条见证（10 实锤失明 + 2 CAUGHT 对照）**全部 CAUGHT**，两门 `--selftest` 25 + 17 臂全绿，真树 rc=0，邻门 12/12 rc=0。
 
 ---
 
@@ -212,7 +212,7 @@
 
 ### 新增 `--selftest` 臂（每修一条判据就固化一条）
 
-- `compact_decision_gate_check.py`：18 → **24 臂**。新增 6 条，其中 5 条直接就是本波见证的最小形态（`entry guard` 追加二次拒绝 / `!true` 死析取 / escalation 体内 early return / `tooLargeFailure = null` / `|| !false` 吸收），另 1 条把 02-6 的家族扩展到 `if (!true) continue`。
+- `compact_decision_gate_check.py`：18 → **25 臂**。新增 7 条：6 条是判据加固的正向臂——`entry guard` 追加二次拒绝 / `!true` 死析取 / escalation 体内 early return / `tooLargeFailure = null` / `|| !false` 吸收（5 条直接就是本波见证的最小形态）+ 把 02-6 的家族扩展到 `if (!true) continue`；另 1 条是我在读判据时自查出的极性洞（裸 `if (loopGateOpens(...))` = 门开即拒绝），一并固化。
 - `entry_id_rename_integrity_check.py`：8 → **17 fixtures**。新增 9 条：`!true` 死守卫、`others.any { false && … }`、`others.any { false }`、拒绝不返回、`|| true`、块注释（旧实现只剥 `//`）、blank 死守卫 + trim 旁路。
 - 臂的判据：先在真树上跑（基线必须 clean，否则所有臂无意义），再逐臂变异——**期望判据必须恰好出现在违规集合里**（`arms == {expected}`），锚点漂移（变异没打上）单独报错。
 
@@ -226,7 +226,7 @@
 python3 scripts/scan/compact_decision_gate_check.py .          → rc=0
    "✅ compact-decision gate: the loop entry admits every verdict decide() adjudicates and does so alone, …"
 python3 scripts/scan/compact_decision_gate_check.py --selftest  → rc=0
-   "✅ compact-decision gate --selftest: 24 arms flip exactly their criterion"
+   "✅ compact-decision gate --selftest: 25 arms flip exactly their criterion"
    COMPACT_DECISION_GATE_SELFTEST=PASS
 python3 scripts/scan/entry_id_rename_integrity_check.py .       → rc=0
    "entry_id_rename_integrity_check: OK (4 arms, 0 violations)"
@@ -343,7 +343,7 @@ CI 逐项读数见 §5。
 
 | 脚本 | 断言标记 | 臂/夹具数 | 注册行 |
 |---|---|---|---|
-| `compact_decision_gate_check` | `COMPACT_DECISION_GATE_SELFTEST=PASS` | **24 arms**（原 18） | `test_scan.py:2699`（`DA1016_GATES`） |
+| `compact_decision_gate_check` | `COMPACT_DECISION_GATE_SELFTEST=PASS` | **25 arms**（原 18） | `test_scan.py:2699`（`DA1016_GATES`） |
 | `entry_id_rename_integrity_check` | `ENTRY_ID_RENAME_INTEGRITY_SELFTEST=PASS` | **17 fixtures**（原 8） | `test_scan.py:2835`（`DA1022_GATES`） |
 
 已实测四条断言全部通过：
