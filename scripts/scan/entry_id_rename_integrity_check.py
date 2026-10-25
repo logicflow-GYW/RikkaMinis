@@ -30,6 +30,7 @@ Exit:  0 = clean, 1 = violation(s), 2 = usage/ROT
 """
 import argparse
 import os
+import re
 import sys
 import tempfile
 
@@ -73,9 +74,101 @@ ARM4_ANCHORS = (
 
 
 def code_only(text):
-    """Text with line comments (//…) removed — presence checks must not be
-    satisfiable from prose in a comment."""
-    return "\n".join(line.split("//")[0] for line in text.split("\n"))
+    """Text with comments removed (`//…` and `/* … */`), string literals kept.
+
+    Both comment forms matter: a `/* … */`-wrapped anchor still looks live to a
+    stripper that only handles `//` (wide3 witness `Arm 3`), and the same
+    block-comment hole blinded all four arms. String state is tracked so a
+    `"//"` inside a literal is not a comment and `/*` inside one is not an
+    opener.
+    """
+    out = []
+    i = 0
+    n = len(text)
+    state = None  # None | '"' | "'" | '"""'
+    while i < n:
+        if state == '"""':
+            if text.startswith('"""', i):
+                out.append('"""')
+                i += 3
+                state = None
+                continue
+            out.append(text[i])
+            i += 1
+            continue
+        c = text[i]
+        if state in ('"', "'"):
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if (state == '"' and c == '"') or (state == "'" and c == "'"):
+                state = None
+            i += 1
+            continue
+        if text.startswith('"""', i):
+            out.append('"""')
+            i += 3
+            state = '"""'
+            continue
+        if c == '"' or c == "'":
+            state = c
+            out.append(c)
+            i += 1
+            continue
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            if j < 0:
+                j = n
+            out.append(" " * (j - i))
+            i = j
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n - 2 if j < 0 else j
+            out.append("".join("\n" if ch == "\n" else " " for ch in text[i:j + 2]))
+            i = j + 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def literal_decides(cond):
+    """True when a bare boolean literal decides the condition by itself
+    (`if (false && guard)`, `if (true || guard)`): the guard's spelling
+    survives but it can never reject."""
+    return any(part.strip() in ("true", "false") for part in re.split(r"&&|\|\|", cond))
+
+
+def _if_guards(code):
+    """[(cond, body_text, offset)] for every `if (...)` in `code`."""
+    out = []
+    for m in re.finditer(r"\bif\s*\(", code):
+        q = m.end() - 1
+        end = _balanced(code, q, "(", ")")
+        if end < 0:
+            continue
+        cond = code[q + 1:end - 1]
+        j = end
+        while j < len(code) and code[j] in " \t\r\n":
+            j += 1
+        if j < len(code) and code[j] == "{":
+            be = _balanced(code, j, "{", "}")
+            if be < 0:
+                continue
+            out.append((cond, code[j:be], m.start()))
+        else:
+            k = code.find("\n", j)
+            k = len(code) if k < 0 else k
+            out.append((cond, code[j:k], m.start()))
+    return out
+
+
+def _rejects(block):
+    """True when the block actually returns a rejection (`allowed = false`)."""
+    return re.search(r"allowed\s*=\s*false", block) is not None
 
 
 def _balanced(src, open_idx, opener="(", closer=")"):
@@ -91,10 +184,23 @@ def _balanced(src, open_idx, opener="(", closer=")"):
 
 
 def function_text(src, header):
+    """Declaration body for the function starting at `header`.
+
+    Walks the parameter list before looking for the body brace: an
+    expression-body function (`fun f(...) = synchronized(x) { … }`) or a lambda
+    in the parameter list makes "the first `{` after the header" ambiguous, and
+    a mis-located body silently empties the scanned surface.
+    """
     i = src.find(header)
     if i < 0:
         return None
-    brace = src.find("{", i)
+    open_paren = src.find("(", i)
+    if open_paren < 0:
+        return None
+    close_paren = _balanced(src, open_paren, "(", ")")
+    if close_paren < 0:
+        return None
+    brace = src.find("{", close_paren)
     if brace < 0:
         return None
     end = _balanced(src, brace, "{", "}")
@@ -131,6 +237,85 @@ def check_anchors(src, rel, header, arm, anchors, what):
     return out
 
 
+def check_bail_guard(src, rel, header):
+    """Arm 1 — the fail-closed bail must be a guard that can actually reject.
+
+    Presence anchors alone accept `if (false && !decision.allowed)`: the call,
+    the `return@synchronized` and the renaming block are all still spelled out,
+    yet the decision is never consumed and the conflicting entry is written.
+    """
+    out = []
+    body = function_text(src, header)
+    if body is None:
+        return [(rel, 0, "1", header + " not found — gate ROT")]
+    code = code_only(body)
+    if "return@synchronized" not in code:
+        return [(rel, 0, "1", "the fail-closed `return@synchronized` bail is missing")]
+    guards = [g for g in _if_guards(code) if "return@synchronized" in g[1]]
+    if not guards:
+        out.append((rel, 0, "1",
+                    "`return@synchronized` is not owned by any `if (...)` — the "
+                    "rejection decision is not consumed"))
+    elif not any(".allowed" in cond for cond, _b, _o in guards):
+        out.append((rel, 0, "1",
+                    "no `if (...decision.allowed...)` guard owns the bail — the "
+                    "decideEntryRename result is never consumed"))
+    elif not any(".allowed" in cond and not literal_decides(cond)
+                 for cond, _b, _o in guards):
+        cond = [c for c, _b, _o in guards if ".allowed" in c][0].strip()
+        out.append((rel, 0, "1",
+                    "the `%s` guard can never reject — a bare literal decides it "
+                    "(dead guard)" % cond[:70]))
+    return out
+
+
+def check_collision_decision(src, rel, header):
+    """Arm 2 — the computed collision result must be what rejects the rename.
+
+    `val collides = others.any { … }` followed by `if (false && collides)` keeps
+    every anchor while discarding the decision; `others.any { false }` keeps the
+    spelling while deleting the test. Both must red.
+    """
+    out = []
+    body = function_text(src, header)
+    if body is None:
+        return [(rel, 0, "2", header + " not found — gate ROT")]
+    code = code_only(body)
+
+    blanks = [g for g in _if_guards(code) if "isBlank()" in g[0]]
+    if not blanks:
+        out.append((rel, 0, "2",
+                    "no `if (...isBlank())` guard — a blank id mints the dangling "
+                    "key `instanceId/` and orphans every downstream lookup"))
+    elif not any(_rejects(g[1]) and not literal_decides(g[0]) for g in blanks):
+        out.append((rel, 0, "2",
+                    "the blank-id guard does not reject (no live `allowed = false` "
+                    "body, or a literal decides the condition)"))
+
+    m = re.search(r"\bval\s+(\w+)\s*=\s*others\s*\.\s*any\s*\{([^}]*)\}", code, re.S)
+    if not m:
+        out.append((rel, 0, "2",
+                    "no `val X = others.any { … }` collision computation — an "
+                    "unchecked rename overwrites the row that already owns the key"))
+        return out
+    name, pred = m.group(1), m.group(2)
+    if "updatedInstanceId" not in pred or "updatedModelId" not in pred:
+        out.append((rel, 0, "2",
+                    "`others.any { %s }` never compares the proposed pair — the "
+                    "collision test is decorative" % pred.strip()[:70]))
+    consumers = [g for g in _if_guards(code)
+                 if re.search(r"\b%s\b" % re.escape(name), g[0])]
+    if not consumers:
+        out.append((rel, 0, "2",
+                    "`%s` (the collision result) is never tested — the decision is "
+                    "discarded" % name))
+    elif not any(_rejects(g[1]) and not literal_decides(g[0]) for g in consumers):
+        out.append((rel, 0, "2",
+                    "`%s` is only tested by a guard that cannot reject (dead guard, "
+                    "or a body with no `allowed = false`)" % name))
+    return out
+
+
 def run_checks(root, rels=None):
     rels = rels or {"pr": PR_REL, "pu": PU_REL, "me": ME_REL, "pm": PM_REL}
     srcs = {k: read(rel, root) for k, rel in rels.items()}
@@ -141,8 +326,10 @@ def run_checks(root, rels=None):
     checks = []
     checks += check_anchors(srcs["pr"], rels["pr"], "fun updateEntry(", "1",
                             ARM1_ANCHORS, "updateEntry")
+    checks += check_bail_guard(srcs["pr"], rels["pr"], "fun updateEntry(")
     checks += check_anchors(srcs["pu"], rels["pu"], "fun decideEntryRename(", "2",
                             ARM2_ANCHORS, "decideEntryRename")
+    checks += check_collision_decision(srcs["pu"], rels["pu"], "fun decideEntryRename(")
     checks += check_anchors(srcs["me"], rels["me"], None, "3",
                             ARM3_ANCHORS, "ModelEntryDetailScreen")
     checks += check_anchors(srcs["pm"], rels["pm"], "fun modelsUpdate(", "4",
@@ -349,6 +536,35 @@ SELFTEST_CASES = [
     ("me-notrim", {"pr": FIX_PR_OK, "pu": FIX_PU_OK, "me": FIX_ME_BAD_NOTRIM, "pm": FIX_PM_OK}, "3"),
     ("me-nogate", {"pr": FIX_PR_OK, "pu": FIX_PU_OK, "me": FIX_ME_BAD_NOGATE, "pm": FIX_PM_OK}, "3"),
     ("pm-notrim", {"pr": FIX_PR_OK, "pu": FIX_PU_OK, "me": FIX_ME_OK, "pm": FIX_PM_BAD_NOTRIM}, "4"),
+]
+
+# The four `*-witness` cases are the exact minimal patches the wide3 external
+# adversarial audit used to falsify this gate (GATE_BLIND_CONFIRMED) — they
+# keep the new dataflow / parser-death criteria load-bearing:
+#   Arm 1 `if (false && !decision.allowed)` — anchors intact, decision discarded
+#   Arm 2 `if (false && collides)`          — the collision result never rejects
+#   Arm 2 `others.any { false }`            — the collision test is decorative
+#   Arm 3 `/* enabled = … */ enabled = true`— only `//` used to be stripped
+FIX_PR_BAD_DEADGUARD = FIX_PR_OK.replace(
+    "if (!decision.allowed) {", "if (false && !decision.allowed) {")
+FIX_PU_BAD_DEADGUARD = FIX_PU_OK.replace(
+    "if (collides) {", "if (false && collides) {")
+FIX_PU_BAD_DECORATIVE = FIX_PU_OK.replace(
+    "val collides = others.any { it.first == updatedInstanceId && it.second == updatedModelId }",
+    "val collides = others.any { false }")
+FIX_ME_BAD_COMMENTED = FIX_ME_OK.replace(
+    "    enabled = !entry.isCustom || modelId.isNotBlank(),",
+    "    /* enabled = !entry.isCustom || modelId.isNotBlank(), */\n    enabled = true,")
+
+SELFTEST_CASES += [
+    ("pr-witness-deadguard",
+     {"pr": FIX_PR_BAD_DEADGUARD, "pu": FIX_PU_OK, "me": FIX_ME_OK, "pm": FIX_PM_OK}, "1"),
+    ("pu-witness-deadguard",
+     {"pr": FIX_PR_OK, "pu": FIX_PU_BAD_DEADGUARD, "me": FIX_ME_OK, "pm": FIX_PM_OK}, "2"),
+    ("pu-witness-decorative",
+     {"pr": FIX_PR_OK, "pu": FIX_PU_BAD_DECORATIVE, "me": FIX_ME_OK, "pm": FIX_PM_OK}, "2"),
+    ("me-witness-blockcomment",
+     {"pr": FIX_PR_OK, "pu": FIX_PU_OK, "me": FIX_ME_BAD_COMMENTED, "pm": FIX_PM_OK}, "3"),
 ]
 
 

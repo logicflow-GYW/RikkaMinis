@@ -66,14 +66,24 @@ ALLOWED = {
 
 
 def strip_comments(text):
-    text = BLOCK_COMMENT_RE.sub("", text)
-    out = []
-    for line in text.splitlines():
-        if line.lstrip().startswith("//"):
-            out.append(line if ESCAPE_RE.search(line) else "//")
-        else:
-            out.append(LINE_COMMENT_RE.sub("", line))
-    return out
+    r"""Blank comments AND the CONTENTS of string/char literals, preserving
+    offsets and newlines.
+
+    [wide3-04] The old version ran `BLOCK_COMMENT_RE = /\*.*?\*/` over the raw
+    text, blind to string literals: one `"/*"` anywhere above a produceState
+    opened a "comment" that swallowed everything up to the next `"*/"` — the
+    whole producer body became a blank line and the gate reported nothing to
+    judge. `code_only` (used by the B-03/B-05 sections) already got this right;
+    the P1 section was still on the old stripper.
+
+    Lines carrying the `stale-ok:` escape hatch are kept verbatim, because the
+    hatch itself lives inside a comment.
+    """
+    lines = code_only(text).split("\n")
+    for i, raw in enumerate(text.split("\n")):
+        if ESCAPE_RE.search(raw) and i < len(lines):
+            lines[i] = raw
+    return lines
 
 
 def enclosing_params(lines, idx):
@@ -176,19 +186,29 @@ def scan_file(path, rel):
             continue
         body, (b0, b1), key_text = effect_body(lines, i)
         body_text = "\n".join(body)
-        # 本 effect 里被 rememberUpdatedState 包装过的名字 = 安全
-        wrapped = set(re.findall(r"rememberUpdatedState\s*\(\s*(\w+)\s*\)", body_text))
-        # 也扫描 effect 之前同一函数内的包装（生产写法是先 wrap 再用）
-        for j in range(max(0, i - 40), i):
-            wrapped |= set(re.findall(r"rememberUpdatedState\s*\(\s*(\w+)\s*\)", lines[j]))
+
+        # [wide3-04] Only the EFFECT LAMBDA is a read zone. The call head's
+        # `initialValue = <param>` and the key list are not reads of the
+        # captured closure — counting them is why the old code had to skip
+        # every parameter that had a `rememberUpdatedState` wrapper somewhere
+        # nearby, which in turn is why wrapping `content` and then reading the
+        # RAW `content` inside the body sailed through.
+        lam = read_zone(body_text)
+        if lam is None:
+            # Fail closed: a producer body that cannot be located is exactly
+            # what a regression looks like.
+            findings.append((i + 1, "<body>"))
+            continue
+
         for p in sorted(params):
-            if p in wrapped:
-                continue
             # 参数出现在 key 列表里 ⇒ 每次变化都重启闭包 ⇒ 不会 stale
             if re.search(r"(?<![\w.])" + re.escape(p) + r"(?![\w:])", key_text):
                 continue
+            # The wrapper call itself is not a read of the captured value.
+            zone = re.sub(r"rememberUpdatedState\s*\(\s*" + re.escape(p) + r"\s*\)",
+                          "", lam)
             # 直接读该参数（裸标识符，非 .value / 非声明）
-            if re.search(r"(?<![\w.])" + re.escape(p) + r"(?![\w:])", body_text):
+            if re.search(r"(?<![\w.])" + re.escape(p) + r"(?![\w:])", zone):
                 exempt = False
                 for k in range(max(0, b0 - 1), min(len(lines), b1 + 2)):
                     if ESCAPE_RE.search(lines[k]):
@@ -197,6 +217,24 @@ def scan_file(path, rel):
                     continue
                 findings.append((i + 1, p))
     return findings
+
+
+def read_zone(body_text):
+    """The trailing-lambda body of a produceState call, or None.
+
+    The lambda opens at the first `{` that sits at paren depth 0 — a `{` inside
+    the argument list (a lambda default, a `buildString { }` in a key) is not
+    the producer body.
+    """
+    dp = 0
+    for k, ch in enumerate(body_text):
+        if ch == "(":
+            dp += 1
+        elif ch == ")":
+            dp -= 1
+        elif ch == "{" and dp <= 0:
+            return body_text[k:]
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -223,6 +261,86 @@ def scan_file(path, rel):
 # ─────────────────────────────────────────────────────────────────────────
 
 SCREEN_FILE = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatScreen.kt"
+
+
+def match_paren(text, open_idx):
+    """Index of the ')' matching the '(' at `open_idx`, or -1."""
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def split_top(text, sep=","):
+    """Top-level split of `text` on `sep`, quote- and bracket-aware."""
+    spans, depth, start, i, n = [], 0, 0, 0, len(text)
+    quote = ""
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if c in "\"'":
+            quote = c
+            i += 1
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == sep and depth == 0:
+            spans.append((start, i))
+            start = i + 1
+        i += 1
+    spans.append((start, n))
+    return spans
+
+
+def call_args(text, name):
+    """[(args_list, start)] for every `name(...)` call in `text`."""
+    out = []
+    for m in re.finditer(r"\b" + re.escape(name) + r"\s*\(", text):
+        po = text.find("(", m.end() - 1)
+        pc = match_paren(text, po)
+        if pc < 0:
+            out.append((None, m.start()))
+            continue
+        inner = text[po + 1:pc]
+        out.append(([inner[a:b].strip() for a, b in split_top(inner, ",")], m.start()))
+    return out
+
+
+def threshold_param_index(lines):
+    """Index of the `isListAtBottom` parameter that carries the threshold, or
+    None when the declaration cannot be read (the caller then falls back to
+    "some argument must be derived from the knob")."""
+    for i, ln in enumerate(lines):
+        m = re.search(r"fun\s+isListAtBottom\s*\(", ln)
+        if not m:
+            continue
+        blob = "\n".join(lines[i:min(len(lines), i + 12)])
+        po = blob.find("(")
+        pc = match_paren(blob, po)
+        if pc < 0:
+            return None
+        inner = blob[po + 1:pc]
+        params = [inner[a:b].strip() for a, b in split_top(inner, ",")]
+        params = [p for p in params if p]
+        for idx, p in enumerate(params):
+            if re.search(r"threshold", p, re.I):
+                return idx
+        return None
+    return None
 
 def code_only(text):
     """Blank comments and string-literal contents (spaces keep line/col).
@@ -359,7 +477,8 @@ def scan_bottom_verdict(root):
                 "the viewport top" % (s0 + 1)
             )
 
-    # S2: the threshold is consumed inside its remember body
+    # S2: the threshold is consumed INSIDE its remember body by the bottom
+    # verdict — a mention is not a consumption.
     rem_re = re.compile(r"remember\s*\([^)]*nearBottomThresholdPx[^)]*\)")
     r_idx = next((i for i, ln in enumerate(lines) if rem_re.search(ln)), -1)
     if r_idx < 0:
@@ -377,6 +496,36 @@ def scan_bottom_verdict(root):
                 "remember key list but never consumed in the body — the "
                 "scrollNearBottomDp knob is dead (this gate's own family)" % (r_idx + 1)
             )
+        else:
+            # [wide3-04] …and the consumption must reach the verdict ARGUMENT.
+            # The old criterion counted mentions, so one dead
+            # `if (false) nearBottomThresholdPx.toInt()` line kept the count
+            # above 2 while the real call passed a hard-coded `0`.
+            idx = threshold_param_index(lines)
+            calls = call_args(region, "isListAtBottom")
+            if not calls:
+                findings.append(
+                    "ChatScreen.kt:%d  [B-03 S2] the remember body never calls the shared "
+                    "bottom verdict — the knob cannot reach it" % (r_idx + 1)
+                )
+            for args, _at in calls:
+                if args is None:
+                    findings.append(
+                        "ChatScreen.kt:%d  [B-03 S2] isListAtBottom call cannot be parsed "
+                        "(fail-closed)" % (r_idx + 1)
+                    )
+                    continue
+                if idx is not None and idx < len(args):
+                    picked = args[idx]
+                else:
+                    picked = " ".join(args)
+                if "nearBottomThresholdPx" not in picked:
+                    findings.append(
+                        "ChatScreen.kt:%d  [B-03 S2] isListAtBottom is called with '%s' "
+                        "instead of a value derived from nearBottomThresholdPx — the "
+                        "scrollNearBottomDp knob does not reach the verdict"
+                        % (r_idx + 1, picked.strip() or "<empty>")
+                    )
 
     # S3: one bottom implementation, two consumers
     defs = [i for i, ln in enumerate(lines) if re.search(r"fun\s+isListAtBottom\s*\(", ln)]
@@ -558,6 +707,7 @@ def scan_visible_content(root):
 def self_test():
     import tempfile
     import shutil
+    KOTLIN_PKG = "src/android/app/src/main/java/com/rikkaminis/app"
     results = []
 
     def run_scan(files):
@@ -734,6 +884,86 @@ def self_test():
     results.append((
         "N6: duplicate predicate definition reds V1 only",
         len(got) == 1 and "[B-05 V1]" in got[0],
+        got,
+    ))
+
+    def run_effect(files):
+        """Scan with the P1 producer scanner (run_scan only covers B-03/B-05)."""
+        tmp = tempfile.mkdtemp(prefix="scguard-")
+        try:
+            for rel, text in files.items():
+                p = os.path.join(tmp, rel)
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+            out = []
+            for sr in SRC_ROOTS:
+                base_root = os.path.join(tmp, sr)
+                for base, _dirs, fs in os.walk(base_root):
+                    for fn in sorted(fs):
+                        if not fn.endswith(".kt"):
+                            continue
+                        path = os.path.join(base, fn)
+                        rel = os.path.relpath(path, base_root).replace(os.sep, "/")
+                        for line_no, pname in scan_file(path, rel):
+                            out.append("%s:%d %s" % (rel, line_no, pname))
+            return out
+        finally:
+            shutil.rmtree(tmp)
+
+    good = {KOTLIN_PKG + "/ui/Good.kt": (
+        "@Composable\n"
+        "private fun Good(content: String, isStreaming: Boolean) {\n"
+        "    val latestContent by rememberUpdatedState(content)\n"
+        "    val d by produceState(initialValue = content, isStreaming) {\n"
+        "        snapshotFlow { latestContent }.collect { value = it }\n"
+        "    }\n"
+        "}\n")}
+    got = run_effect(good)
+    results.append(("P1 control: wrapped value read through the wrapper stays green",
+                    got == [], got))
+
+    # P1 witness (dataflow): the wrapper exists, the closure reads the RAW param
+    # anyway — the 2026-09-20 freeze, reproduced verbatim.
+    stale = {KOTLIN_PKG + "/ui/Stale.kt": (
+        "@Composable\n"
+        "private fun Stale(content: String, isStreaming: Boolean) {\n"
+        "    val latestContent by rememberUpdatedState(content)\n"
+        "    val d by produceState(initialValue = content, isStreaming) {\n"
+        "        snapshotFlow { content }.collect { value = it }\n"
+        "    }\n"
+        "}\n")}
+    got = run_effect(stale)
+    results.append(("P1 witness: wrapper present + raw param read in the body reds",
+                    len(got) == 1 and got[0].endswith(" content"), got))
+
+    # P1 witness (parser-death): a `"/*"` string literal above the producer used
+    # to open a comment that swallowed the whole body.
+    masked = {KOTLIN_PKG + "/ui/Masked.kt": (
+        "@Composable\n"
+        "private fun Masked(content: String, isStreaming: Boolean) {\n"
+        "    val openMask = \"/*\"\n"
+        "    val d by produceState(initialValue = content, isStreaming) {\n"
+        "        snapshotFlow { content }.collect { value = it }\n"
+        "    }\n"
+        "    val closeMask = \"*/\"\n"
+        "}\n")}
+    got = run_effect(masked)
+    results.append(("P1 witness: a \"/*\" literal no longer blanks the producer body",
+                    len(got) == 1 and got[0].endswith(" content"), got))
+
+    # S2 witness (dataflow): a dead mention keeps the old hit-count happy while
+    # the verdict is fed a hard-coded constant.
+    n7 = dict(clean)
+    n7["src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatScreen.kt"] = clean_screen.replace(
+        "            isListAtBottom(last, 2, 3, nearBottomThresholdPx.toInt())\n",
+        "            if (false) nearBottomThresholdPx.toInt()\n"
+        "            isListAtBottom(last, 2, 3, 0)\n",
+    )
+    got = run_scan(n7)
+    results.append((
+        "N7: dead threshold mention + constant argument reds S2 only",
+        len(got) == 1 and "[B-03 S2]" in got[0],
         got,
     ))
 

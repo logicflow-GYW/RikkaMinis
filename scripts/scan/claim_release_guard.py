@@ -210,8 +210,18 @@ FWD_REPORT_WINDOW = 60
 # Receiver must be a plain identifier chain (a call result has no name to
 # self-compare against). The explicit-param form captures `s`, the implicit
 # form means `it`.
+# [meta-audit wide3 claim-C2] The tautology does not care WHICH scope function
+# binds the receiver: `?.let`, `?.also`, `?.run`, `?.apply`, `?.takeIf` all
+# hand the same object to the block. Pinning `let` alone let
+# `termuxSession?.also { s -> if (termuxSession === s) … }` through — the
+# self-bound check never recorded the span, so the fake identity test was read
+# as an ownership gate against `s` as if it were an external parameter.
+# `run`/`apply`/`with` bind `this` instead of a parameter.
+SCOPE_BINDING = ("let", "also", "takeIf", "takeUnless", "run", "apply", "with")
+SCOPES = "|".join(SCOPE_BINDING)
+THIS_SCOPES = ("run", "apply", "with")
 SELF_LET_RE = re.compile(
-    r"([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)\?\.\s*let\s*\{"
+    r"([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)\?\.\s*(?:" + SCOPES + r")\s*\{"
     r"(?:\s*([A-Za-z_]\w*)\s*->)?"
 )
 SELF_LET_SCAN_LINES = 15
@@ -329,6 +339,101 @@ def extract_condition(text, open_paren):
     return None
 
 
+def _strip_outer_parens(expr):
+    """Drop one redundant wrapping `( … )` if it spans the whole expression."""
+    e = expr.strip()
+    while len(e) >= 2 and e[0] == "(" and e[-1] == ")":
+        depth = 0
+        ok = True
+        for i, ch in enumerate(e):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and i != len(e) - 1:
+                    ok = False
+                    break
+        if not ok:
+            break
+        e = e[1:-1].strip()
+    return e
+
+
+def _split_top(expr, op):
+    """Split on a top-level two-char boolean operator (`&&` / `||`)."""
+    parts, depth, cur = [], 0, []
+    i = 0
+    while i < len(expr):
+        ch = expr[i]
+        if ch in '"\'':
+            j = i + 1
+            while j < len(expr) and expr[j] != ch:
+                if expr[j] == "\\":
+                    j += 1
+                j += 1
+            cur.append(expr[i:j + 1])
+            i = j + 1
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if depth == 0 and expr.startswith(op, i):
+            parts.append("".join(cur))
+            cur = []
+            i += len(op)
+            continue
+        cur.append(ch)
+        i += 1
+    parts.append("".join(cur))
+    return parts
+
+
+def fold_bool(expr):
+    """Constant-fold a Kotlin boolean condition to True / False / None.
+
+    Precedence order matters: `&&` binds tighter than `||`, so the `||` split
+    runs first and each disjunct folds on its own.
+
+    [meta-audit wide3 claim-C1] This is the difference between "an ownership
+    comparison is PRESENT" and "the ownership comparison DECIDES the branch".
+    `if (true || termuxSession === changedSession)` contains the comparison, so
+    the old gate certified the settlement behind it — while the branch is
+    taken unconditionally, i.e. exactly the stale-callback mass-murder the
+    criterion exists to prevent. `false && …` is the mirror image (branch
+    never taken, so a settlement inside it is dead code).
+    """
+    e = _strip_outer_parens(expr)
+    if not e:
+        return None
+    ors = _split_top(e, "||")
+    if len(ors) > 1:
+        vals = [fold_bool(x) for x in ors]
+        if any(v is True for v in vals):
+            return True
+        if all(v is False for v in vals):
+            return False
+        return None
+    ands = _split_top(e, "&&")
+    if len(ands) > 1:
+        vals = [fold_bool(x) for x in ands]
+        if any(v is False for v in vals):
+            return False
+        if all(v is True for v in vals):
+            return True
+        return None
+    if e == "true":
+        return True
+    if e == "false":
+        return False
+    return None
+
+
+def literal_decides(cond):
+    """True when the condition folds to a constant — no operand can gate it."""
+    return fold_bool(cond) is not None
+
+
 def compare_operands(cond):
     """Yield (op, left, right) for each comparison in a condition, left to right.
 
@@ -371,6 +476,11 @@ def is_ownership_cond(cond, taken=True):
                   execution continues past the guard only when cond is false.
     """
     if not cond:
+        return False
+    if literal_decides(cond):
+        # `true || guard` / `false && guard`: the comparison is spelled out but
+        # the branch does not depend on it. Anchoring the spelling is what let
+        # this through; anchor the DECISION (wide3 claim-C1).
         return False
     for op, left, right in compare_operands(cond):
         if LITERAL_RE.match(left) or LITERAL_RE.match(right):
@@ -426,6 +536,74 @@ def match_brace(text, open_idx):
     return None
 
 
+def match_paren(text, open_idx):
+    """Index of the `)` matching the `(` at [open_idx] (quote-aware), or None."""
+    depth = 0
+    i, n = open_idx, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '"' or ch == "'":
+            j = i + 1
+            while j < n and text[j] != ch and text[j] != "\n":
+                if text[j] == "\\":
+                    j += 1
+                j += 1
+            i = j + 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def fun_body_span(text, decl_match):
+    """(open_brace, close_brace) of the BLOCK body of the `fun` at decl_match.
+
+    [meta-audit wide3 claim-C3] The previous slice was
+    `text.find("{", decl_match.end())` — the first `{` after the function NAME.
+    A default lambda parameter (`onReady: () -> Unit = {}`) sits inside the
+    parameter list, so the "body" that got sliced out was the literal `{}` of
+    the default value (2 characters) and every settlement in the real body went
+    unscanned while the gate printed its green line. A default parameter that
+    is a lambda is an ordinary evolution of a start/callback function, so the
+    parser has to walk the parameter list, not guess.
+
+    Returns (None, None) for declaration-only members (interfaces / abstract)
+    and for expression-bodied functions — neither has a block to scan.
+    """
+    open_paren = text.find("(", decl_match.end() - 1)
+    if open_paren < 0:
+        return None, None
+    close_paren = match_paren(text, open_paren)
+    if close_paren is None:
+        return None, None
+    n = len(text)
+    j = close_paren + 1
+    while j < n:
+        ch = text[j]
+        if ch == "{":
+            end = match_brace(text, j)
+            return j, (end if end is not None else n - 1)
+        if ch == "=" and text[j:j + 2] != "==":
+            return None, None  # expression body
+        if ch == ";":
+            return None, None
+        if ch == "\n":
+            k = j + 1
+            while k < n and text[k] in " \t":
+                k += 1
+            if k >= n or text[k] != "{":
+                return None, None  # no block body — an interface member
+            j = k
+            continue
+        j += 1
+    return None, None
+
+
 def norm_cond(cond):
     return " ".join(cond.split())
 
@@ -444,7 +622,8 @@ def scan_fake_gates(clean_lines):
     for i, line in enumerate(clean_lines):
         for m in SELF_LET_RE.finditer(line):
             recv = norm_cond(m.group(1))
-            param = m.group(2) or "it"
+            scope = re.search(r"\?\s*\.\s*([A-Za-z_]+)", m.group(0)).group(1)
+            param = m.group(2) or ("this" if scope in THIS_SCOPES else "it")
             brace_off = m.start() + m.group(0).rfind("{")
             # Walk the lambda body (brace depth from the `let {`) to bound the scan.
             depth = 0
@@ -494,12 +673,9 @@ def terminal_settlement_findings(rel, clean_lines, fake_gates):
     joined = "\n".join(clean_lines)
     out = []
     for m in ON_SESSION_FINISHED_RE.finditer(joined):
-        open_brace = joined.find("{", m.end())
-        if open_brace < 0:
+        open_brace, close = fun_body_span(joined, m)
+        if open_brace is None:
             continue
-        close = match_brace(joined, open_brace)
-        if close is None:
-            close = len(joined) - 1
         body = joined[open_brace:close + 1]
         base_line = joined[:open_brace].count("\n")  # 0-based line of `{`
         decisions = []
@@ -609,12 +785,9 @@ def start_preemption_findings(rel, clean_lines, fake_gates):
                         "renamed or moved. ROT — update this gate."))
         return out
     for sm in starts:
-        open_brace = joined.find("{", sm.end())
-        if open_brace < 0:
+        open_brace, close = fun_body_span(joined, sm)
+        if open_brace is None:
             continue
-        close = match_brace(joined, open_brace)
-        if close is None:
-            close = len(joined) - 1
         body = joined[open_brace:close + 1]
         base_line = joined[:open_brace].count("\n")
         for fm in re.finditer(r"\bif\s*\(", body):
@@ -635,8 +808,13 @@ def start_preemption_findings(rel, clean_lines, fake_gates):
                 nl = body.find("\n", after)
                 end = nl if nl >= 0 else len(body)
                 block_off, block = after, body[after:end]
-            if not RETURN_RE.search(block):
-                continue  # an inner staleness test, not a bail-out
+            # [wide3 claim-C3] No `return` requirement. A staleness branch that
+            # settles shared state is wrong whether or not it bails out — a
+            # branch that publishes STOPPED over a live attempt and then KEEPS
+            # GOING is strictly worse than the one that returns. Requiring the
+            # `return` spelling let the pure-settlement mutation
+            # `if (myGeneration != startGeneration.get()) { _state.value =
+            # State.STOPPED }` walk through.
             block_line_base = base_line + body[:block_off].count("\n")
 
             def line_at(off, _b=block, _o=block_off, _l=block_line_base):
@@ -1943,6 +2121,65 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
          ["termuxSession slot clear inside a preemption bail-out without an "
           "ownership guard", "NOT `_state.value` publish"]),
     ]
+    # ── [meta-audit wide3] arms for the three hardened criteria ─────────────
+    # C1: the comparison is SPELLED but the branch does not depend on it.
+    W3_LITERAL_OR = POST.replace(
+        "            if (termuxSession === changedSession) {",
+        "            if (true || termuxSession === changedSession) {", 1)
+    arms.append((
+        "W3-C1 `true ||` ownership guard is not a gate",
+        {post: W3_LITERAL_OR}, 1,
+        ["[C1] ", "*Generation counter bump"]))
+    # precision: `false || guard` folds back to the guard and must stay green
+    W3_FALSE_OR = POST.replace(
+        "            if (termuxSession === changedSession) {",
+        "            if (false || termuxSession === changedSession) {", 1)
+    arms.append((
+        "W3-C1 precision: `false || guard` still decides (green)",
+        {post: W3_FALSE_OR}, 0, []))
+    # C2: the tautology spelled with `?.also` instead of `?.let`
+    w3_also = POST.replace(
+        """            if (termuxSession === createdSession) {
+                termuxSession = null
+                liveSessions.removeAll { it === this@Post }
+                _state.value = null
+            }""",
+        """            termuxSession?.also { s ->
+                if (termuxSession === s) {
+                    termuxSession = null
+                    liveSessions.removeAll { it === this@Post }
+                    _state.value = null
+                }
+            }""", 1)
+    assert w3_also != POST
+    arms.append((
+        "W3-C2 `?.also` self-bound guard is a tautology",
+        {post: w3_also}, 1, ["[C2] ", "tautology"]))
+    # C3: default lambda parameter — the first `{` used to be the default body
+    W3_START_LAMBDA = PRE_START.replace(
+        "    fun start() {",
+        "    fun start(onReady: () -> Unit = {}) {", 1)
+    assert W3_START_LAMBDA != PRE_START
+    arms.append((
+        "W3-C3 default lambda parameter does not hide the start() body",
+        {pre_start: W3_START_LAMBDA}, 1,
+        ["[C3] ", "`_state.value` publish inside a preemption bail-out"]))
+    # C3: a staleness branch that settles state WITHOUT returning still counts
+    W3_NO_RETURN = PRE_START.replace(
+        """        if (myGeneration != startGeneration.get()) {
+            kill(session)
+            _state.value = STOPPED
+            return
+        }""",
+        """        if (myGeneration != startGeneration.get()) {
+            _state.value = STOPPED
+        }""", 1)
+    assert W3_NO_RETURN != PRE_START
+    arms.append((
+        "W3-C3 settlement without a `return` is still a bail-out",
+        {pre_start: W3_NO_RETURN}, 1,
+        ["`_state.value` publish inside a preemption bail-out"]))
+
     failures = []
     for name, files, want_rc, needles in arms:
         root = mk_tree(files)

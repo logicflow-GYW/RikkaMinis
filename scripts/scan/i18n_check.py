@@ -59,9 +59,119 @@ LISTENER_ARM = "KEY_LANGUAGE ->"
 
 SELFTEST_MARKER = "I18N_CHECK_SELFTEST=PASS"
 
+_XML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+
+
+def strip_xml_comments(text):
+    """Blank XML comments, preserving line structure."""
+    return _XML_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+
+
+def mask_kt_comments(text):
+    """Blank //-comments and /* */ blocks; newlines and offsets preserved.
+
+    Line structure has to survive: the arm body is searched with offsets (a
+    dead-guard span is compared against a call offset), and a commented-out call
+    must not count as the call (wide3 witness C4 parser-death)."""
+    out = []
+    i, n = 0, len(text)
+    state = None
+    while i < n:
+        c = text[i]
+        two = text[i:i + 2]
+        if state is None:
+            if two == "//":
+                state = "line"; out.append("  "); i += 2; continue
+            if two == "/*":
+                state = "block"; out.append("  "); i += 2; continue
+            if c == '"':
+                state = "str"; out.append(" "); i += 1; continue
+            out.append(c); i += 1; continue
+        if state == "line":
+            out.append("\n" if c == "\n" else " ")
+            if c == "\n":
+                state = None
+            i += 1; continue
+        if state == "block":
+            if two == "*/":
+                state = None; out.append("  "); i += 2; continue
+            out.append("\n" if c == "\n" else " "); i += 1; continue
+        if state == "str":
+            if c == "\\":
+                out.append("  "); i += 2; continue
+            if c == '"':
+                state = None
+            out.append(" "); i += 1; continue
+    return "".join(out)
+
+
+def _paren_close(text, open_idx):
+    """Index of the `)` matching the `(` at open_idx, or -1."""
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _brace_close(text, open_idx):
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return len(text) - 1
+
+
+def _condition_is_dead(cond):
+    """True when the condition can only ever be false.
+
+    The shapes that matter are the ones a reviewer skims past: `false`,
+    `false && …`, `… && false`, `true || …`, `… || true`.
+    """
+    parts = [p.strip() for p in re.split(r"&&|\|\|", cond)]
+    if cond.strip() == "false":
+        return True
+    if "&&" in cond and "false" in parts:
+        return True
+    if "||" in cond and "true" in parts:
+        return True
+    return False
+
+
+def dead_guard_spans(clean):
+    """[(start, end)] spans of code guarded by a literal-dead condition."""
+    spans = []
+    for m in re.finditer(r"\b(if|while)\s*\(", clean):
+        open_idx = clean.index("(", m.start())
+        close = _paren_close(clean, open_idx)
+        if close < 0 or not _condition_is_dead(clean[open_idx + 1:close]):
+            continue
+        body = close + 1
+        while body < len(clean) and clean[body] in " \t\r\n":
+            body += 1
+        if body < len(clean) and clean[body] == "{":
+            spans.append((body, _brace_close(clean, body)))
+        else:
+            eol = clean.find("\n", body)
+            spans.append((body, len(clean) - 1 if eol < 0 else eol))
+    return spans
+
 
 def keys_defined_in(folder):
-    """Union of the keys defined by every strings*.xml in one res folder."""
+    """Union of the keys defined by every strings*.xml in one res folder.
+
+    Commented-out resources are NOT definitions: `<!-- <string name="x">…</string>
+    -->` leaves the key referenced in code and undefined at runtime, which is the
+    exact defect this phase exists to catch (wide3 witness C1 orphan-keys
+    parser-death)."""
     keys = set()
     if not os.path.isdir(folder):
         return keys
@@ -69,7 +179,7 @@ def keys_defined_in(folder):
         if not STRINGS_GLOB(fn):
             continue
         with open(os.path.join(folder, fn), encoding="utf-8") as f:
-            keys.update(KEY_RE.findall(f.read()))
+            keys.update(KEY_RE.findall(strip_xml_comments(f.read())))
     return keys
 
 
@@ -103,7 +213,7 @@ def declared_locales(root):
     if not os.path.exists(path):
         return None
     with open(path, encoding="utf-8") as f:
-        text = f.read()
+        text = strip_xml_comments(f.read())
     out = []
     for line in text.split("\n"):
         if "<locale" not in line:
@@ -157,6 +267,12 @@ def listener_arm_body(path):
     head = lines[start]
     arm_indent = len(head) - len(head.lstrip())
     indent = " " * arm_indent
+    rest = head.split("->", 1)[1].strip() if "->" in head else ""
+    if rest and rest != "{" and not rest.startswith("//"):
+        # A one-line arm is the whole arm: without this, the dedent rule below
+        # keeps reading the SIBLING arms, and a single-line
+        # `KEY_LANGUAGE -> println(…)` inherits the next arm's apply call.
+        return head
     body = [head]
     for line in lines[start + 1:]:
         if line.strip():
@@ -179,10 +295,23 @@ def check_language_wiring(root):
         print(f"❌ {APPEARANCE_SCREEN} has no `{LISTENER_ARM}` arm — nothing would "
               f"react to a stored language change (ROT: fail-closed)")
         return 1
-    if APPLY_FUNCTION not in body:
-        print(f"❌ the `{LISTENER_ARM}` arm does not call {APPLY_FUNCTION}…) — an "
-              f"external write to the language preference would move the UI only, "
-              f"leaving the process in the previous language")
+    # The arm must REACH the shared function, not merely mention it: a call
+    # behind `if (false)` moves nothing, and a commented-out call never runs
+    # (wide3 witness C4 — dataflow and parser-death variants of the same arm).
+    clean = mask_kt_comments(body)
+    dead = dead_guard_spans(clean)
+    mentions = [m.start() for m in re.finditer(re.escape(APPLY_FUNCTION), clean)]
+    live = [at for at in mentions if not any(s <= at <= e for s, e in dead)]
+    if not live:
+        if mentions:
+            print(f"❌ the `{LISTENER_ARM}` arm only reaches {APPLY_FUNCTION}…) from "
+                  f"dead or commented-out code — an external write to the language "
+                  f"preference would move the UI only, leaving the process in the "
+                  f"previous language")
+        else:
+            print(f"❌ the `{LISTENER_ARM}` arm does not call {APPLY_FUNCTION}…) — an "
+                  f"external write to the language preference would move the UI only, "
+                  f"leaving the process in the previous language")
         return 1
     print("✅ the language listener applies the change through the shared function")
     return 0
@@ -289,6 +418,29 @@ ARM_STATE_ONLY = (
     "            }\n"
 )
 ARM_ONE_LINER = "            KEY_LANGUAGE -> println(\"state only\")\n"
+# The apply call is present but unreachable / not code.
+ARM_DEAD_GUARD = (
+    "            KEY_LANGUAGE -> {\n"
+    "                if (false) applyLanguageChange(code)\n"
+    "            }\n"
+)
+ARM_COMMENTED = (
+    "            KEY_LANGUAGE -> {\n"
+    "                // applyLanguageChange(code)\n"
+    "                println(\"commented out\")\n"
+    "            }\n"
+)
+ARM_DEAD_THEN_LIVE = (
+    "            KEY_LANGUAGE -> {\n"
+    "                if (false) applyLanguageChange(\"x\")\n"
+    "                applyLanguageChange(\"y\")\n"
+    "            }\n"
+)
+COMMENTED_KEY = ('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n'
+                 '    <!-- <string name="ghost_key">commented out</string> -->\n'
+                 '</resources>\n')
+GHOST_KT = "package com.rikkaminis.app\nval g = R.string.ghost_key\n"
+
 ARM_ABSENT = "            \"theme\" -> println(\"theme\")\n"
 
 
@@ -387,6 +539,24 @@ def _selftest():
         dict(wired, **{APPEARANCE_SCREEN: _appearance_screen(ARM_ABSENT)}), 1,
         expect_in=["ROT"])
 
+    run("KEY_LANGUAGE arm whose only apply call sits behind `if (false)` is caught",
+        dict(wired, **{APPEARANCE_SCREEN: _appearance_screen(ARM_DEAD_GUARD)}), 1,
+        expect_in=["dead or commented-out code"])
+
+    run("commented-out apply call is not wiring",
+        dict(wired, **{APPEARANCE_SCREEN: _appearance_screen(ARM_COMMENTED)}), 1,
+        expect_in=["does not call"])
+
+    run("a live apply call next to a dead one is still green (no over-red)",
+        dict(wired, **{APPEARANCE_SCREEN: _appearance_screen(ARM_DEAD_THEN_LIVE)}), 0,
+        expect_in=["applies the change"])
+
+    run("a resource key that exists only inside an XML comment is still an orphan",
+        dict(wired, **{
+            os.path.join(RES_DIR, "values", "strings_extra.xml"): COMMENTED_KEY,
+            os.path.join("src/android/app/src/main/java/com/rikkaminis/app", "Ghost.kt"): GHOST_KT,
+        }), 1, expect_in=["ghost_key"])
+
     run("missing AppearanceScreen.kt is a clean skip, not a failure",
         base, 0, expect_in=["not checked"])
 
@@ -406,6 +576,6 @@ def main_against(root):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
+    if any(a == "--selftest" for a in sys.argv[1:]):
         sys.exit(_selftest())
     sys.exit(main())

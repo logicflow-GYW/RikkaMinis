@@ -171,10 +171,61 @@ FORBIDDEN_SAVE_SNIPPETS = (
 )
 
 
+def _skip_literal(text, i):
+    if text.startswith('"""', i):
+        j = text.find('"""', i + 3)
+        return len(text) if j < 0 else j + 3
+    q = text[i]
+    i += 1
+    while i < len(text) and text[i] != q:
+        if text[i] == "\\":
+            i += 2
+        elif text.startswith("${", i):
+            depth = 1
+            i += 2
+            while i < len(text) and depth:
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                i += 1
+        else:
+            i += 1
+    return i + 1
+
+
 def code_only(text):
-    """Text with line comments (//…) removed — presence checks must not be
-    satisfiable from prose in a comment."""
-    return "\n".join(line.split("//")[0] for line in text.split("\n"))
+    """Comments blanked — line AND block, literals intact.
+
+    Presence checks must not be satisfiable from prose, and a `/* … */` that
+    comments a field out must not read as the field being present. (The old
+    version only split on `//`, so wrapping a field in a block comment kept
+    every anchor alive.)
+    """
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"' or c == "'":
+            j = _skip_literal(text, i)
+            out.append(text[i:j])
+            i = j
+            continue
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            end = n if j < 0 else j
+            out.append(" " * (end - i))
+            i = end
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            end = n if j < 0 else j + 2
+            out.append("".join("\n" if ch == "\n" else " " for ch in text[i:end]))
+            i = end
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def function_text(src, header):
@@ -207,6 +258,53 @@ def read(rel, root):
         return f.read()
 
 
+COPY_CALL_RE = re.compile(r"\bentry\.copy\s*\(")
+LITERAL_GUARD_RE = re.compile(r"\b(?:if|while)\s*\(\s*(?:true|false)(?:[\s)]|$)")
+BOOL_OP_LITERAL = re.compile(
+    r"(?:&&|\|\|)\s*(?:true|false)(?![\w])"
+    r"|(?<![\w.\"'])(?:true|false)\s*(?:&&|\|\|)")
+
+
+def check_save_persists_derived(rel, block):
+    """Arm 1b — the value written to the repository must CARRY the derivation.
+
+    Anchors only prove `buildModelEntryOverrides(` is called somewhere in the
+    block. The defect shape keeps the call, keeps `newOverrides`, and passes
+    `ModelOverrides()` to `entry.copy(...)` — every edit the user made is
+    discarded while the sheet reports success.
+    """
+    out = []
+    code = code_only(block)
+    copies = list(COPY_CALL_RE.finditer(code))
+    if not copies:
+        out.append((rel, 0, "1",
+                    "the Save block builds no `entry.copy(` value — the computed overrides "
+                    "have nowhere to go (gate ROT)"))
+        return out
+    for m in copies:
+        open_paren = code.find("(", m.end() - 1)
+        close = _close_of(code, open_paren, "(", ")")
+        args = code[open_paren + 1:close if close > 0 else len(code)]
+        if not re.search(r"\boverrides\s*=\s*newOverrides\b", args):
+            given = re.search(r"\boverrides\s*=\s*([^,)]+)", args)
+            out.append((rel, line_of(code, m.start()), "1",
+                        "`entry.copy(...)` persists `overrides = %s` instead of the computed "
+                        "`newOverrides` — `newOverrides` is computed and dropped, so every "
+                        "override the user edited (display name, token caps, thinking level, "
+                        "modalities) is erased on Save"
+                        % (given.group(1).strip() if given else "<default>")))
+
+    # The persist call must consume the value that was built (not the raw entry).
+    binder = re.search(r"\bval\s+(\w+)\s*=\s*if\s*\(entry\.isCustom\)", code)
+    persist = re.search(r"updateEntry\s*\(\s*([A-Za-z_]\w*)\s*\)", code)
+    if persist and binder and persist.group(1) != binder.group(1):
+        out.append((rel, line_of(code, persist.start()), "1",
+                    "`updateEntry(%s)` persists a different value than the one built from "
+                    "`entry.copy(...)` (`%s`) — the derivation is computed and thrown away"
+                    % (persist.group(1), binder.group(1))))
+    return out
+
+
 def check_anchors(src, rel, body, arm, anchors, what):
     out = []
     code = code_only(body)
@@ -217,19 +315,60 @@ def check_anchors(src, rel, body, arm, anchors, what):
     return out
 
 
+def _close_of(src, k, open_ch, close_ch):
+    depth = 0
+    i = k
+    while i < len(src):
+        c = src[i]
+        if c == '"' or c == "'":
+            i = _skip_literal(src, i)
+            continue
+        if c == open_ch:
+            depth += 1
+        elif c == close_ch:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
 def save_block(src):
-    """The Save button's onClick body: from the first `onClick = {` up to the
-    `val updated = if (entry.isCustom) {` that follows it. ModelEntryDetailScreen
-    has exactly one such pair (Save) — the Cancel action is `onClick = onBack,`
-    and the Reset row's onClick (further down, in the content lambda) has no
-    `val updated = if (entry.isCustom) {` marker."""
+    """The Save button's onClick body — through the persist call.
+
+    The old slice stopped AT `val updated = if (entry.isCustom) {`, which put the
+    two `entry.copy(...)` expressions that actually become the persisted value
+    OUTSIDE the audited region: the block could compute `newOverrides` and then
+    persist `ModelOverrides()`. The block now runs to the end of that value
+    expression (then/else arms) and through the following `updateEntry(...)`.
+    """
     i = src.find(SAVE_BLOCK_START)
     if i < 0:
         return None
-    end = src.find(SAVE_BLOCK_END, i)
-    if end < 0:
+    marker = src.find(SAVE_BLOCK_END, i)
+    if marker < 0:
         return None
-    return src[i:end + len(SAVE_BLOCK_END)]
+    end = marker + len(SAVE_BLOCK_END)
+    brace = src.find("{", end - 1)
+    if brace >= 0:
+        close = _close_of(src, brace, "{", "}")
+        if close > 0:
+            end = close + 1
+            k = end
+            while k < len(src) and src[k] in " \t\r\n":
+                k += 1
+            if src.startswith("else", k):
+                b2 = src.find("{", k)
+                if b2 >= 0:
+                    c2 = _close_of(src, b2, "{", "}")
+                    if c2 > 0:
+                        end = c2 + 1
+    m = re.search(r"updateEntry\s*\(", src[end:end + 400])
+    if m:
+        close = _close_of(src, end + m.end() - 1, "(", ")")
+        if close > 0:
+            end = close + 1
+    return src[i:end]
 
 
 def strip_kotlin_comments(text):
@@ -426,12 +565,14 @@ def check_effective_model_funnel(root, rels):
         out.append((rels["pr"], 0, "4",
                     "`effectiveEntryModel(` funnel is gone — every capability decision in "
                     "this file has to route through ModelsDevApi.effectiveModel"))
-    elif "ModelsDevApi.effectiveModel(" not in funnel[0]:
+    elif not _funnel_returns_effective(funnel[0]):
         out.append((rels["pr"], 0, "4",
-                    "the effectiveEntryModel( funnel does not route through "
-                    "ModelsDevApi.effectiveModel( — a re-derivation (e.g. "
-                    "enrichModel(entry.model)) applies the registry ON TOP of the user's "
-                    "overrides and silently reverses an explicit choice"))
+                    "the effectiveEntryModel( funnel does not RETURN "
+                    "ModelsDevApi.effectiveModel( — the call is present in the body but the "
+                    "returned value is the raw model (a literal-gated branch, or a "
+                    "re-derivation such as enrichModel(entry.model) that applies the registry "
+                    "ON TOP of the user's overrides and silently reverses an explicit choice). "
+                    "Every capability decision downstream then reads un-enriched modalities"))
 
     # Arm 4c — decision ledger: a dropped/renamed capability gate must not pass.
     for fn, preds in PR_DECISION_LEDGER.items():
@@ -503,6 +644,57 @@ def check_effective_model_funnel(root, rels):
     return out
 
 
+def check_builder_derives(rel, fn):
+    """Arm 2b — the builder must RETURN the derivation, not just contain it.
+
+    Every ARM2 anchor can stay verbatim while the function returns early:
+    `if (true) return previous` at the top keeps `previous.copy(...)`,
+    `normalizeModalityList(...)` and both diff expressions in the body and makes
+    Save a silent no-op.
+    """
+    out = []
+    code = code_only(fn)
+    brace = code.find("{")
+    body = code[brace + 1:] if brace >= 0 else code
+    if LITERAL_GUARD_RE.search(body) or BOOL_OP_LITERAL.search(body):
+        out.append((rel, 0, "2",
+                    "buildModelEntryOverrides gates its derivation on a boolean literal — the "
+                    "copy expression is still in the body (every anchor matches) but the "
+                    "function returns the stale `previous`, so every Save is a no-op"))
+        return out
+    last = None
+    for last in re.finditer(r"\breturn\b", body):
+        pass
+    if last is None:
+        out.append((rel, 0, "2",
+                    "buildModelEntryOverrides has no `return` — the derivation result never "
+                    "leaves the function"))
+        return out
+    tail = body[last.end():last.end() + 160]
+    if "previous.copy(" not in tail:
+        head = tail.strip().split("\n")[0][:70]
+        out.append((rel, 0, "2",
+                    "buildModelEntryOverrides returns `%s` — the final value is not the "
+                    "`previous.copy(...)` derivation, so the sheet's edits are dropped" % head))
+    return out
+
+
+def _funnel_returns_effective(body):
+    """Arm 4b — the funnel must BE the enrichment, not merely mention it.
+
+    `= if (false) ModelsDevApi.effectiveModel(entry) else entry.model` keeps the
+    substring while every capability decision downstream reads the raw model
+    (all 39 built-ins have null modality lists → voice-input list empties, an
+    image-only model can be chosen as the default text model)."""
+    if LITERAL_GUARD_RE.search(body) or BOOL_OP_LITERAL.search(body):
+        return False
+    stripped = body.lstrip()
+    if stripped.startswith("="):
+        expr = stripped[1:].strip()
+        return bool(re.search(r"\bModelsDevApi\.effectiveModel\s*\(", expr))
+    return bool(re.search(r"\breturn\s+[^\n]*\bModelsDevApi\.effectiveModel\s*\(", body))
+
+
 def run_checks(root, rels=None):
     rels = rels or {"me": ME_REL, "ob": OB_REL, "pr": PR_REL, "asr": ASR_REL, "vm": VM_REL}
     srcs = {k: read(rel, root) for k, rel in rels.items()}
@@ -526,6 +718,7 @@ def run_checks(root, rels=None):
                                "save block contains forbidden inline-construction snippet `%s` "
                                "(regression of da1023 ISSUE-02: text/video drop, raw-space compare, "
                                "positional ctor wipes maxThinkingLevel)" % snippet))
+        checks += check_save_persists_derived(ME_REL, block)
 
     # Arm 2 — builder shape.
     fn = function_text(srcs["ob"], "fun buildModelEntryOverrides(")
@@ -540,6 +733,7 @@ def run_checks(root, rels=None):
                 checks.append((OB_REL, 0, "2",
                                "buildModelEntryOverrides contains positional construction `%s` — "
                                "wipes fields the screen does not own (maxThinkingLevel)" % snippet))
+        checks += check_builder_derives(OB_REL, fn)
 
     # Arm 3 — base passthrough in deriveModalityList.
     fn3 = function_text(srcs["ob"], "fun deriveModalityList(")
@@ -963,16 +1157,42 @@ BASE_FIXTURES = {
 }
 
 # (name, {rel-key: fixture override}, expected-arm)
+# ── wide3-01 witnesses ──────────────────────────────────────────────────────
+# The Save block still computes `newOverrides`; the persisted copy takes an empty
+# ModelOverrides() instead (the old slice stopped before the copy, so it never
+# looked).
+FIX_ME_DROPPED_OVERRIDES = (FIX_ME_OK
+                            .replace("entry.copy(overrides = newOverrides)",
+                                     "entry.copy(overrides = ModelOverrides())"))
+
+# Every ARM2 anchor stays in the body; an unconditional literal guard returns
+# the stale object first.
+FIX_OB_EARLY_RETURN = FIX_OB_OK.replace(
+    "): ModelOverrides {\n",
+    "): ModelOverrides {\n    if (true) return previous\n",
+    1,
+)
+
+# The funnel keeps the substring and returns the raw model.
+FIX_PR_FUNNEL_LITERAL_GATE = FIX_PR_OK.replace(
+    "ModelsDevApi.effectiveModel(entry)\n",
+    "if (false) ModelsDevApi.effectiveModel(entry) else entry.model\n",
+    1,
+)
+
 SELFTEST_CASES = [
     ("all-ok", {}, None),
     ("me-inline-lists", {"me": FIX_ME_BAD_INLINE_LISTS}, "1"),
     ("me-bare-ctor", {"me": FIX_ME_BAD_BARE_CTOR}, "1"),
+    ("me-overrides-dropped", {"me": FIX_ME_DROPPED_OVERRIDES}, "1"),
     ("ob-positional-ctor", {"ob": FIX_OB_BAD_POSITIONAL}, "2"),
     ("ob-raw-compare", {"ob": FIX_OB_BAD_RAW_COMPARE}, "2"),
+    ("ob-early-return", {"ob": FIX_OB_EARLY_RETURN}, "2"),
     ("ob-no-passthrough", {"ob": FIX_OB_BAD_NO_PASSTHROUGH}, "3"),
     ("ob-no-toggle-loop", {"ob": FIX_OB_BAD_NO_TOGGLE_LOOP}, "3"),
     ("pr-bare-modality-read", {"pr": FIX_PR_BAD_BARE}, "4"),
     ("pr-funnel-is-raw", {"pr": FIX_PR_BAD_NO_FUNNEL}, "4"),
+    ("pr-funnel-literal-gated", {"pr": FIX_PR_FUNNEL_LITERAL_GATE}, "4"),
     ("pr-gate-dropped", {"pr": FIX_PR_BAD_DROPPED_GATE}, "4"),
     ("pr-seed-enriched", {"pr": FIX_PR_BAD_SEED_ENRICHED}, "6"),
     ("pr-two-seed-owners", {"pr": FIX_PR_BAD_TWO_SEEDS}, "6"),

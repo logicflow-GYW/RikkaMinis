@@ -138,6 +138,183 @@ def line_of(text, needle):
     return text.count("\n", 0, idx) + 1 if idx >= 0 else 0
 
 
+def mask_code(src):
+    """Offset-preserving projection: comment text AND string/char literal
+    contents blanked to spaces (newlines kept). Every criterion that asks
+    "does this code decide X" must read THIS projection — a criterion satisfied
+    by a commented-out line is not a criterion (wide3 `silent-card-contract`)."""
+    out = list(src)
+    i, n = 0, len(src)
+    while i < n:
+        if src.startswith('"""', i):
+            j = src.find('"""', i + 3)
+            j = n if j < 0 else j + 3
+            for k in range(i, j):
+                if src[k] != "\n":
+                    out[k] = " "
+            i = j
+            continue
+        if src[i] == '"':
+            j = i + 1
+            while j < n:
+                if src[j] == "\\":
+                    j += 2
+                    continue
+                if src[j] == '"' or src[j] == "\n":
+                    break
+                j += 1
+            for k in range(i, min(j + 1, n)):
+                out[k] = " "
+            i = j + 1
+            continue
+        if src[i] == "'":
+            j = src.find("'", i + 1)
+            if 0 < j - i <= 4:
+                for k in range(i, j + 1):
+                    out[k] = " "
+                i = j + 1
+                continue
+            i += 1
+            continue
+        if src.startswith("//", i):
+            j = src.find("\n", i)
+            j = n if j < 0 else j
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+            continue
+        if src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            for k in range(i, j):
+                if src[k] != "\n":
+                    out[k] = " "
+            i = j
+            continue
+        i += 1
+    return "".join(out)
+
+
+def match_close(text, start, opener, closer):
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == opener:
+            depth += 1
+        elif text[i] == closer:
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+IF_RE = re.compile(r"\bif\s*\(")
+
+
+def if_statements(masked):
+    """(cond_start, cond_end, body_start, body_end, cond) per `if (...)`,
+    brace-balanced. A single-statement body ends at the line."""
+    out = []
+    for m in IF_RE.finditer(masked):
+        p = m.end() - 1
+        close = match_close(masked, p, "(", ")")
+        if close < 0:
+            continue
+        j = close + 1
+        while j < len(masked) and masked[j] in " \t":
+            j += 1
+        if j < len(masked) and masked[j] == "{":
+            body_end = match_close(masked, j, "{", "}")
+            if body_end < 0:
+                body_end = len(masked)
+        else:
+            # Statement body (no braces right after the `)`): it runs to the end
+            # of the STATEMENT, which may carry a trailing lambda block
+            # (`if (false) withContext(Dispatchers.Main) { host.push(…) }`) — a
+            # line-based end would stop before the block and let the dead guard
+            # hide the publish from every liveness check.
+            k, depth = j, 0
+            while k < len(masked):
+                ch = masked[k]
+                if ch in "([{":
+                    depth += 1
+                elif ch in ")]}":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                elif ch == "\n" and depth == 0:
+                    nxt = masked[k + 1:].lstrip(" \t")
+                    if nxt[:1] in (".", "?", "&", "|"):
+                        k += 1
+                        continue
+                    break
+                k += 1
+            body_end = k
+        out.append((p, close, j, body_end, masked[p + 1:close]))
+    return out
+
+
+def enclosing_conds(ifs, idx):
+    hits = [s for s in ifs if s[2] <= idx <= s[3]]
+    hits.sort(key=lambda s: s[0])
+    return [s[4] for s in hits]
+
+
+def split_top(expr, op):
+    parts, cur, depth, i = [], [], 0, 0
+    while i < len(expr):
+        ch = expr[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if depth == 0 and expr.startswith(op, i):
+            parts.append("".join(cur))
+            cur = []
+            i += len(op)
+            continue
+        cur.append(ch)
+        i += 1
+    parts.append("".join(cur))
+    return parts
+
+
+def norm_atom(expr):
+    s = expr.strip()
+    while True:
+        if s.startswith("(") and match_close(s, 0, "(", ")") == len(s) - 1:
+            s = s[1:-1].strip()
+        elif s.startswith("(") or s.endswith(")"):
+            s = s.strip("() \t")
+        else:
+            return s
+
+
+def is_lit(expr, word):
+    return norm_atom(expr) == word
+
+
+def always_true(cond):
+    return any(is_lit(d, "true") for d in split_top(cond, "||"))
+
+
+def dead_for(cond, needle):
+    """True when `needle` sits in the part of `cond` that a literal kills —
+    including one level of parenthesised grouping (`|| (false && needle)`)."""
+    for disj in split_top(cond, "||"):
+        if needle not in disj:
+            continue
+        if is_lit(disj, "false"):
+            return True
+        inner = disj.strip()
+        if inner.startswith("(") and match_close(inner, 0, "(", ")") == len(inner) - 1:
+            if dead_for(inner[1:-1], needle):
+                return True
+        for con in split_top(disj, "&&"):
+            if needle not in con and is_lit(con, "false"):
+                return True
+    return False
+
+
 def segments_between_calls(text):
     """(start, end, resource_id) for every appendSystemInfo card call site."""
     calls = []
@@ -181,15 +358,55 @@ def check(loop, compactor, orch):
              "the pre-gate must be the single-source predicate")
         forbid(region, OLD_GATE, LOOP_FILE, "entry-admits-exhausted",
                "the pre-fix gate refused EXHAUSTED, which is what decide() adjudicates")
+        # [wide3 entry-admits-exhausted] The gate call must be the WHOLE
+        # decision. `if (!loopGateOpens(…) || verdict == EXHAUSTED) return false`
+        # keeps the call and the verdict, so every needle above still matches
+        # while the ceiling verdict is refused again — the once-per-action
+        # RESCUE channel is shut exactly when it is needed.
+        mregion = mask_code(region)
+        gate_idx = mregion.find(GATE_CALL)
+        if gate_idx >= 0:
+            hits = [s for s in if_statements(mregion) if s[0] <= gate_idx <= s[1]]
+            hits.sort(key=lambda s: s[0])
+            call_ns = re.sub(r"\s+", "", GATE_CALL)
+            if not hits:
+                problems.append((
+                    "entry-admits-exhausted",
+                    "%s: the loop gate verdict does not decide an `if` — computed and discarded"
+                    % LOOP_FILE,
+                ))
+            else:
+                cond_ns = re.sub(r"\s+", "", hits[-1][4])
+                if cond_ns not in ("!" + call_ns, "!(" + call_ns + ")", call_ns):
+                    problems.append((
+                        "entry-admits-exhausted",
+                        "%s:%d: the entry guard must be exactly `!%s`; it is `%s` — an extra "
+                        "operand can refuse the ceiling verdict before decide() ever adjudicates "
+                        "it, which is the pre-fix gate in new spelling"
+                        % (LOOP_FILE, region.count("\n", 0, gate_idx) + 1, GATE_CALL, hits[-1][4].strip()),
+                    ))
     else:
         problems.append(("entry-admits-exhausted",
                          "%s: could not isolate %s" % (LOOP_FILE, LOOP_BEGIN)))
 
     # ── criterion 2: the gate itself + the escalation tier contract ─────
     if "fun loopGateOpens(" in compactor:
-        gate_body = compactor.split("fun loopGateOpens(", 1)[1][:400]
+        # Read the CODE projection: `// verdict == EXHAUSTED` must not satisfy
+        # the criterion, and the admission must be a live disjunct
+        # (`|| (false && verdict == EXHAUSTED)` admits nothing).
+        cmp_masked = mask_code(compactor)
+        gate_body = cmp_masked.split("fun loopGateOpens(", 1)[1][:400]
         need(gate_body, "ContextPolicy.CheckResult.EXHAUSTED", COMPACTOR_FILE,
              "gate-admits-exhausted", "the gate must admit the ceiling verdict")
+        expr = gate_body.split("=", 1)[1] if "=" in gate_body else gate_body
+        expr = expr.split("{", 1)[0].split(";", 1)[0]
+        if dead_for(expr, "EXHAUSTED"):
+            problems.append((
+                "gate-admits-exhausted",
+                "%s: the EXHAUSTED admission is short-circuited by a literal — the gate still "
+                "refuses the ceiling verdict, which is the only state decide() turns into RESCUE"
+                % COMPACTOR_FILE,
+            ))
     else:
         problems.append(("gate-admits-exhausted",
                          "%s: fun loopGateOpens( missing" % COMPACTOR_FILE))
@@ -216,18 +433,36 @@ def check(loop, compactor, orch):
                          "%s: %s missing" % (ORCH_FILE, CHAIN_TERMINAL)))
 
     # ── criterion 4: the silent-mode card contract ──────────────────────
+    # [wide3 silent-card-contract] Two parser-death holes fixed here:
+    #   (a) the gate used to be searched in RAW text, so `// if (!silent)` on
+    #       the line above the card satisfied it;
+    #   (b) it searched a look-back WINDOW, so an unrelated `if (!silent)` from
+    #       an earlier card could vouch for a later, unguarded one.
+    # Now: the guard must ENCLOSE the card call in the code projection, and the
+    # condition must actually test `silent` negatively (a `if (true)` decoy is
+    # not a gate).
     cards = segments_between_calls(orch)
+    orch_masked = mask_code(orch)
+    orch_ifs = if_statements(orch_masked)
     seen = {resource: (start, idx) for start, idx, resource in cards if resource}
+
+    def live_silent_gate(idx):
+        for cond in enclosing_conds(orch_ifs, idx):
+            if re.search(r"!\s*silent\b", cond) and not always_true(cond):
+                return True
+        return False
+
     for resource in GATED_CARDS:
         if resource not in seen:
             problems.append(("silent-card-contract",
                              "%s: card %s not found" % (ORCH_FILE, resource)))
             continue
         start, idx = seen[resource]
-        if SILENT_GATE not in orch[start:idx]:
+        if not live_silent_gate(idx):
             problems.append((
                 "silent-card-contract",
-                "%s:%d card %s is reachable in silent mode (no `if (!silent)` between it and the previous card)"
+                "%s:%d card %s is reachable in silent mode (not enclosed by a live `if (!silent)` "
+                "in code — a commented-out gate or a look-back neighbour does not count)"
                 % (ORCH_FILE, line_of(orch, "R.string." + resource), resource),
             ))
     if KEPT_CARD not in seen:
@@ -236,7 +471,7 @@ def check(loop, compactor, orch):
     else:
         start, idx = seen[KEPT_CARD]
         span = orch[start:idx]
-        if SILENT_GATE in span:
+        if live_silent_gate(idx):
             problems.append((
                 "silent-card-contract",
                 "%s:%d %s is now silent-gated: the written keep-criterion must be revisited, not copied"
@@ -310,6 +545,40 @@ def check(loop, compactor, orch):
                 "chain-timeout-dedup",
                 "%s: the route must be recorded on the timeout verdict, not before it" % ORCH_FILE,
             ))
+
+    # [wide3 chain-timeout-dedup] The skip branch must TERMINATE the iteration.
+    # `if (route in timedOutRoutes) { AppLogger.info(… "skip" …) }` keeps the
+    # needle, prints a line that says "skip", and then pays the same wall again
+    # — position is not the decision; the `continue` is.
+    skip_env = mask_code(orch)
+    skip_idx = skip_env.find(ROUTE_SKIP)
+    if skip_idx >= 0:
+        paren_at = skip_idx + ROUTE_SKIP.index("(")
+        blk = [s for s in if_statements(skip_env) if s[0] == paren_at]
+        if not blk:
+            problems.append((
+                "chain-timeout-dedup",
+                "%s: the route skip is not an `if (...) { … }` statement — its body cannot be "
+                "checked for a terminating branch" % ORCH_FILE,
+            ))
+        else:
+            p, close, bstart, bend, _cond = blk[0]
+            body_txt = skip_env[bstart:bend]
+            nested = [s for s in if_statements(skip_env) if bstart <= s[2] and s[3] <= bend]
+            terminators = 0
+            for m in re.finditer(r"\b(continue|break|return|throw)\b", body_txt):
+                guards = enclosing_conds(nested, bstart + m.start())
+                if any(is_lit(g, "false") for g in guards):
+                    continue
+                terminators += 1
+            if not terminators:
+                problems.append((
+                    "chain-timeout-dedup",
+                    "%s:%d: the timed-out route's skip branch does not terminate the iteration — it "
+                    "logs `skip candidate` and then sends anyway, paying the same dead route twice "
+                    "and starving the heterogeneous backups of the chain deadline"
+                    % (ORCH_FILE, orch.count("\n", 0, skip_idx) + 1),
+                ))
 
     return problems
 
@@ -433,6 +702,47 @@ def selftest(root):
             on_orch(lambda s: s.replace(ROUTE_SKIP, "if (false)", 1).replace(
                 "        val started = SystemClock.elapsedRealtime()",
                 "        " + ROUTE_SKIP + " { continue }\n        val started = SystemClock.elapsedRealtime()",
+                1,
+            )),
+        ),
+        # ── wide3 witnesses: the shapes the old criteria let through ─────
+        (
+            "entry guard gains a second operand that refuses EXHAUSTED",
+            "entry-admits-exhausted",
+            on_loop(lambda s: s.replace(
+                "if (!" + GATE_CALL + ") {",
+                "if (!" + GATE_CALL + " || verdict == ContextPolicy.CheckResult.EXHAUSTED) {",
+                1,
+            )),
+        ),
+        (
+            "EXHAUSTED admission becomes a dead disjunct",
+            "gate-admits-exhausted",
+            on_compactor(lambda s: s.replace(
+                "verdict == ContextPolicy.CheckResult.EXHAUSTED ||",
+                "(false && verdict == ContextPolicy.CheckResult.EXHAUSTED) ||",
+                1,
+            )),
+        ),
+        (
+            "route skip logs the skip but keeps sending",
+            "chain-timeout-dedup",
+            on_orch(lambda s: s.replace(
+                "($label ${candidate.model.displayName}) — route $route already timed out in this chain\",\n"
+                "            )\n            continue\n",
+                "($label ${candidate.model.displayName}) — route $route already timed out in this chain\",\n"
+                "            )\n",
+                1,
+            )),
+        ),
+        (
+            "silent gate commented out instead of removed",
+            "silent-card-contract",
+            on_orch(lambda s: s.replace(
+                "                if (!silent) {\n                    withContext(Dispatchers.Main) {\n"
+                "                        appendSystemInfo(context.getString(R.string.sysmsg_compact_anchor_failed)",
+                "                // if (!silent)\n                    withContext(Dispatchers.Main) {\n"
+                "                        appendSystemInfo(context.getString(R.string.sysmsg_compact_anchor_failed)",
                 1,
             )),
         ),
