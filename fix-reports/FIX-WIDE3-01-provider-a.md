@@ -176,15 +176,38 @@ models_provider_field_check rc=0          memory_gate_provider_fields_check rc=0
 
 ### L4 全量
 
-- **111 道 python 门：全绿**。经 `gate_run.sh --full`（持锁）跑到 96/111 时被沙箱 `ENOSYS` 中断（见 §7 R4），逐块复核方式补齐剩余 15 道：
+- **111 道 python 门：本地全绿**。经 `gate_run.sh --full`（持锁）跑到 96/111 时被沙箱 `ENOSYS` 中断（见 §7 R4），逐块复核方式补齐剩余 15 道：
   `subagent_handback` / `sysinfo_state_thread` / `thinking_wiring_guard` / `tool_title_error_branch` / `trace_eval` / `trace_step_tag` / `truncated_call_guard` / `tts_voice_and_sanitizer`（只吃 `--root`）/ `turn_tail_finalize_order` / `voice_cancel_guard` / `webapp_asset_url_cleanup` / `webview_holder_url_source` / `xproc_boundary` / `thinking_rule_editor_preserve` / `tool_result_image_branch` —— 全部 `rc=0`，无一红。
-- **`test_scan.py`（344 用例）**：本地两轮均被沙箱 `OSError: [Errno 38] Function not implemented` 打断（12 路并行会话争用，见 §7 R4），**未拿到本地 ALL 344 读数**；冻结面未改动（`git diff --name-only` 只含 4 个门脚本），该套件由分支 CI 权威执行，CI 日志中的 `ALL … CASES PASS` 为准（见 §6）。
+- **`test_scan.py`（344 用例）**：本地两轮均被沙箱 `OSError: [Errno 38] Function not implemented` 打断（12 路并行会话争用，见 §7 R4），**本地拿不到 ALL 344 读数**；冻结面未改动，由分支 CI 权威执行 —— **CI 日志 `✅ ALL 344 CASES PASS`，全绿**（见 §6）。
 
 ---
 
 ## ⑥ CI run
 
-（推送后回填：run id / head_sha / 结论 / 日志判据）
+- **分支**：`fix/meta-wide3-01-provider-a`
+- **run**：**#2655** / `40161784057` / job `121074697682`，`event=workflow_dispatch`，**attempt 1**，`conclusion=success`
+- **head_sha**：`5ad1226ba1c8913fb4c2cc14a2008f0a9ba0f5af`（= 本地 `git rev-parse HEAD`，逐字符一致）
+- **26 步**：唯一 skipped = `Publish to Releases`（`if: github.ref == 'refs/heads/main'` 门控，分支构建的预期形态）
+
+日志判据（`/tmp/ci-02.log`，17,848 行）：
+
+| 判据 | 读数 |
+|---|---|
+| `Summary: 112 passed, 0 failed` | 恰 1 条（`:1014`，带框线前缀） |
+| `✅ ALL 344 CASES PASS` | 恰 1 条（`:1410`） |
+| ` e: `（Kotlin 编译诊断） | **0** 行 |
+| 门头 `[N/112]` | **112** 个，互异 |
+| 含 `FAILED` 的行 | 6 条，逐条确认全是 **PASSED 用例名子串**（`slot denied produces FAILED…` / `reason PERSISTENCE_FAILED maps…` / `phase FAILED maps to Failed` / `terminal FAILED maps to Failed` / `reason EXECUTION_FAILED maps…` / `the fixed tail still reaches a legal FAILED terminal`） |
+| `BUILD SUCCESSFUL` | 4 次（unit tests / instrumented compile / native / APK） |
+
+**首跑红（#2652 / `40161216861`）与处置**：`Run pre-build scan gate` 步红，`FAILURES: 2` —— 两条都来自**冻结的** `test_scan.py` 断言，与本支改动冲突：
+
+1. `both call sites are counted`：断言输出含 `routes 2 call site(s)`，而我首版把打印改成 `routes 3 models URL(s)`，且**把「所有插值 base 的 URL」都计数**（bypass 夹具里第三个 raw-base URL 也被算进去）。
+2. `finding mentions the raw basePath`：断言违规文案含 `raw basePath`，我的首版写的是 `instead of the normalized base`。
+
+处置（`5ad1226b`）：`check_url_routing` 的计数改成**只计 routed 站点**（bypass 站点不得抬数），打印保留冻结措辞 `routes N call site(s) through the normalizer`，违规文案改回含 `raw basePath`。冻结面本身**未改动**（`git diff --name-only 6b6c918f..HEAD` 只有 4 个门脚本 + 1 份报告）。
+
+**可复用教训**：门脚本的任何 **stdout 措辞**都是冻结面的一部分 —— `test_scan.py` 对门输出做子串断言（`routes N call site(s)`、`raw basePath`），改判据时顺手改打印就会红。**改打印前先 `grep "<新措辞>|'<旧措辞>'" scripts/scan/test_scan.py`**；而「计数口径」尤其危险：旧口径数「调用了 normalizer 几次」，新口径必须在语义上兼容（这里 routed-only 才同时满足「bypass 不抬数」与旧读数的数值一致）。
 
 ---
 
