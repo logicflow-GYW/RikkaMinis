@@ -1075,6 +1075,98 @@ def selftest() -> int:
             'File(context.filesDir, "media")', 'File(context.filesDir, dirName)'),
     )
 
+
+    # ── [batch-5] one arm per falsified witness (each was BLIND before) ─────
+    # 02-1: the same dir root spelled as an extension call — no `File(` at all,
+    # so the constructor-only derivation never saw the re-pointed live dir.
+    run(
+        "WITNESS dir root spelled as context.filesDir.resolve(\u2026)",
+        expect_red=True,
+        media=CLEAN_MEDIASTORE.replace(
+            '    val mediaBaseDir: File = File(context.filesDir, "media")',
+            '    private val _legacyMediaDir: File = File(context.filesDir, "media")\n'
+            '    val mediaBaseDir: File = context.filesDir.resolve("media-unregistered")'),
+    )
+    # 02-2: an (empty) IO block keeps the substring while the real work runs in
+    # `run {}` — on the main thread again.
+    run(
+        "WITNESS export disk work beside an EMPTY IO block",
+        expect_red=True,
+        kt=CLEAN_KT.replace(
+            "    val file = withContext(Dispatchers.IO) {",
+            "    withContext(Dispatchers.IO) { }\n"
+            "    val file = run {"),
+    )
+    # 02-3: the prune is called, deletes, and never expires anything: 0L.
+    run(
+        "WITNESS prune fed a constant clock (0L)",
+        expect_red=True,
+        kt=CLEAN_KT.replace(
+            "runCatching { pruneExpiredLargeMessageFiles(dir, System.currentTimeMillis()) }",
+            "runCatching { pruneExpiredLargeMessageFiles(dir, 0L) }"),
+    )
+    # 02-4: a dead write planted before the uri, the real write moved after it.
+    run(
+        "WITNESS dead write before the uri, real write after",
+        expect_red=True,
+        kt=CLEAN_KT.replace(
+            "        f.writeText(content)\n        f\n",
+            "        if (false) f.writeText(\"\")\n        f\n")
+          .replace(
+            "    val uri = FileProvider.getUriForFile(",
+            "    file.writeText(content)\n    val uri = FileProvider.getUriForFile("),
+    )
+    # 02-5: the prune stays inside the IO switch, the up-to-100 MB copy drifts
+    # out of it.
+    run(
+        "WITNESS share_inbound copy drifted out of the IO region",
+        expect_red=True,
+        chatvm=CLEAN_CHATVM.replace(
+            '        val durable = withContext(Dispatchers.IO) {\n'
+            '            val durableDir = File(context.cacheDir, "share_inbound").apply { mkdirs() }\n'
+            '            runCatching { pruneExpiredShareInboundFiles(durableDir, System.currentTimeMillis()) }\n'
+            '                .onFailure { Log.w(TAG, "share_inbound prune failed: ${it.message}") }\n'
+            '            val f = File(durableDir, "${java.util.UUID.randomUUID()}-${file.name}")\n'
+            '            try {\n'
+            '                file.inputStream().use { input ->\n'
+            '                    f.outputStream().use { output -> input.copyTo(output) }\n'
+            '                }\n'
+            '                f\n'
+            '            } catch (e: Exception) {\n'
+            '                Log.w(TAG, "failed to copy staged share file ${file.name}: ${e.message}")\n'
+            '                null\n'
+            '            }\n'
+            '        } ?: return null',
+            '        val durableDir = withContext(Dispatchers.IO) {\n'
+            '            val d = File(context.cacheDir, "share_inbound").apply { mkdirs() }\n'
+            '            runCatching { pruneExpiredShareInboundFiles(d, System.currentTimeMillis()) }\n'
+            '                .onFailure { Log.w(TAG, "share_inbound prune failed: ${it.message}") }\n'
+            '            d\n'
+            '        }\n'
+            '        val durable = run {\n'
+            '            val f = File(durableDir, "${java.util.UUID.randomUUID()}-${file.name}")\n'
+            '            file.inputStream().use { input ->\n'
+            '                f.outputStream().use { output -> input.copyTo(output) }\n'
+            '            }\n'
+            '            f\n'
+            '        }'),
+    )
+    # 02-6: a `"{"` inside the first IO block. A bare brace counter never
+    # returns to depth 0 there, so the region swallows everything after it.
+    run(
+        "WITNESS a \"{\" inside the IO block (region swallows the sweep)",
+        expect_red=True,
+        screen=CLEAN_SCREEN.replace(
+            '            ShareCoordinator.consumeBuffer(context)\n',
+            '            val tpl = "{"\n'
+            '            ShareCoordinator.consumeBuffer(context, tpl)\n')
+          .replace(
+            '        withContext(Dispatchers.IO) {\n'
+            '            SharedShareStore.cleanSharedFiles(context)\n'
+            '        }\n',
+            '        SharedShareStore.cleanSharedFiles(context)\n'),
+    )
+
     print("=== file_provider_paths_coverage --selftest ===")
     failed = 0
     for name, ok, note in results:
