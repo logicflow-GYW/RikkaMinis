@@ -259,7 +259,27 @@ KOTLIN_VALUEFLOW_SELFTEST=PASS (26 arms)
 
 ## ⑤ CI
 
-（待 CI 出结论后回填，禁止预写。）
+| 项 | 值 |
+|---|---|
+| run | `40208987826`（`#2690` Build RikkaMinis Android APK） |
+| job | `121215959831`（`build`） |
+| attempt | **1** |
+| conclusion | **success** |
+| head_sha | `3f2676f982ec0c9dbe5127bfb5699218c782d64d` = 本地 `git rev-parse HEAD` **逐字符一致** |
+| 日志 | `probe/t05/ci-40208987826.log`，**1,486,235 B** |
+| 步骤 | 26 步，**非 success 仅 `Publish to Releases`（分支门控 skipped，`grep -c` = 0 次出现）** |
+
+日志逐条判读：
+
+| 判据 | 读数 |
+|---|---|
+| `Summary: 112 passed, 0 failed` | 带框线形态（`║  Summary: …`）恰 **1** 条，line 1019 @ `15:53:59Z` |
+| `ALL 344 CASES PASS` | 恰 **1** 条，`✅` @ `15:56:19Z` |
+| 门头 `[N/112]` 互异 | **112** 个不重复编号 |
+| ` e: `（Kotlin 编译错误行） | **0** |
+| 含 `FAILED` 的 6 行 | 逐条核对**全是 PASSED 用例名子串**（`slot denied produces FAILED without calling provider` / `reason PERSISTENCE_FAILED maps to persistence_failed` / `phase FAILED maps to Failed` / `terminal FAILED maps to Failed` / `reason EXECUTION_FAILED maps to all_fallbacks_exhausted` / `the fixed tail still reaches a legal FAILED terminal`）—— **零游离失败** |
+
+结论：**分支 CI 绿 = 本支的确定性停止节点**。`test_scan.py` 的权威读数取自此处的 `ALL 344 CASES PASS`（本地沙箱因 13 支并行 + `waitpid → OSError 38` 只跑完 28/46 个夹具函数，见 §4 L3）。
 
 ---
 
