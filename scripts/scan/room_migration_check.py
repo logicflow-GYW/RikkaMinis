@@ -79,6 +79,10 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _kotlin_ast as _ast          # noqa: E402  (shared Kotlin primitives)
+import _kotlin_lexer as _lex        # noqa: E402  (shared Kotlin lexer)
+
 DB_DIR = "src/android/app/src/main/java/com/rikkaminis/app/data/db"
 DATABASES = ["AppDatabase.kt", "ProviderDatabase.kt"]
 
@@ -104,66 +108,21 @@ def check(name, ok, detail=""):
 
 
 def mask_comments(src):
-    """Blank `//` and `/* */` comment text with spaces, keeping newlines and
-    string literals, so every index in the result lines up with `src`.
+    """Code view of `src` — comments AND string bodies blanked, length preserved.
 
-    Reading prose as code is how two witnesses blinded this gate:
-    `// MIGRATION_13_14, MIGRATION_14_13` inside `addMigrations(...)` still
-    counted as wired, and a comment holding an unbalanced `)` truncated a
-    bracket walk. String state is tracked so a `//` inside `"…"` is not a
-    comment and `"video/*"` does not open a block comment.
+    [wide4 parser-death] The hand-written scanner this replaces tracked string
+    state by hand and got two constructions wrong: a nested block comment
+    (`/* a /* b */ c */`, which Kotlin allows) ended at the first `*/`, and a
+    string template `"${…}"` was not jumped, so a brace inside one moved the
+    bracket walk. Both now go through the repo-wide lexer, whose views are
+    equal-length (every index below still lines up with `src`).
+
+    Strings are blanked here too — `val _sql = "db.execSQL(…)"` is a string, not
+    a statement, and must not read as migration work. The SQL TEXT a real call
+    passes is read from `views['comments']` (comments masked, literals kept) at
+    the same offsets; see `check_db`.
     """
-    out = []
-    i = 0
-    n = len(src)
-    state = None  # None | '"' | "'" | '"""'
-    while i < n:
-        if state == '"""':
-            if src.startswith('"""', i):
-                out.append('"""')
-                i += 3
-                state = None
-                continue
-            out.append(src[i])
-            i += 1
-            continue
-        c = src[i]
-        if state in ('"', "'"):
-            out.append(c)
-            if c == "\\" and i + 1 < n:
-                out.append(src[i + 1])
-                i += 2
-                continue
-            if (state == '"' and c == '"') or (state == "'" and c == "'"):
-                state = None
-            i += 1
-            continue
-        if src.startswith('"""', i):
-            out.append('"""')
-            i += 3
-            state = '"""'
-            continue
-        if c == '"' or c == "'":
-            state = c
-            out.append(c)
-            i += 1
-            continue
-        if src.startswith("//", i):
-            j = src.find("\n", i)
-            if j < 0:
-                j = n
-            out.append(" " * (j - i))
-            i = j
-            continue
-        if src.startswith("/*", i):
-            j = src.find("*/", i + 2)
-            j = n - 2 if j < 0 else j
-            out.append("".join("\n" if ch == "\n" else " " for ch in src[i:j + 2]))
-            i = j + 2
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
+    return _lex.mask_code(src)
 
 
 def _balanced(text, open_idx, opener="(", closer=")"):
@@ -184,11 +143,19 @@ def _skip_ws(text, i):
     return i
 
 
-def literal_decides(cond):
-    """True when a bare boolean literal decides the condition by itself
-    (`if (false)`, `false && guard`, `true || guard`): the guard's spelling
-    survives but it can never reject."""
-    return any(part.strip() in ("true", "false") for part in re.split(r"&&|\|\|", cond))
+def dead_condition(cond):
+    """True when the condition is decidable FALSE without running it.
+
+    `if (false)`, `if (!true)`, `if (0 == 1)`, `false && guard`, `true || guard`
+    all keep every identifier a substring-based criterion looks for while pinning
+    the decision — the single most common way a witness deleted a statement's
+    effect without deleting the statement. Decided by the shared folder, so the
+    family no longer has one spelling per gate.
+
+    `if (true) { … }` is NOT dead: it always runs, and calling it dead would be a
+    false red on correct code.
+    """
+    return _ast.const_bool(cond) is False
 
 
 def _if_guards(text):
@@ -216,9 +183,55 @@ def _if_guards(text):
 def dead_guarded(text, idx):
     """True when `idx` sits inside the body of an `if` a literal decides."""
     for cond, start, end in _if_guards(text):
-        if start <= idx < end and literal_decides(cond):
+        if start <= idx < end and dead_condition(cond):
             return True
     return False
+
+
+# 4b. [wide4 family-hole] "the body runs a `db.*` call" was satisfied by ANY
+# member — `db.toString()` (the witness) declares the step, wires it, does no
+# work, and the user still crashes on open-time schema validation. Only a
+# write-capable member counts, and for the SQL channels the statement has to
+# carry schema/data-changing keywords: `db.execSQL("SELECT 1")` migrates
+# nothing either.
+DB_CALL_RE = re.compile(r"\bdb\s*\.\s*([A-Za-z_]\w*)\s*\(")
+DB_WRITE_METHODS = {"insert", "insertOrThrow", "insertOrReplace", "update",
+                    "delete", "replace", "execSQL", "execSQLAsync"}
+DB_SQL_METHODS = {"execSQL", "execSQLAsync", "compileStatement"}
+SQL_WORK_RE = re.compile(r"\b(?:CREATE|ALTER|DROP|INSERT|UPDATE|DELETE|REPLACE|PRAGMA|VACUUM|WITH)\b",
+                         re.I)
+
+
+def live_db_writes(body, body_lit):
+    """Offsets (within `body`) of live, write-capable `db.*` statements.
+
+    [body] is the code view (strings blanked), [body_lit] the same span in the
+    literal-preserving view — the SQL text a call passes lives only in the
+    latter, and both are index-aligned.
+    """
+    out = []
+    for m in DB_CALL_RE.finditer(body):
+        method = m.group(1)
+        if method not in DB_WRITE_METHODS:
+            continue
+        if dead_guarded(body, m.start()):
+            continue
+        if method not in DB_SQL_METHODS:
+            out.append(m.start())
+            continue
+        open_paren = body.find("(", m.end() - 1)
+        close_paren = _balanced(body, open_paren) if open_paren >= 0 else -1
+        if close_paren < 0:
+            continue
+        args = body[open_paren + 1:close_paren]
+        pieces = _ast.split_top(args, (",",))
+        if not pieces:
+            continue
+        a, b = pieces[0]
+        sql_text = body_lit[open_paren + 1 + a:open_paren + 1 + b]
+        if SQL_WORK_RE.search(sql_text):
+            out.append(m.start())
+    return out
 
 
 def parse_database(src):
@@ -232,10 +245,14 @@ def parse_database(src):
 
 
 def parse_migration_bodies(src):
-    """{name: body_text or None} — the `override fun migrate(...)` body.
+    """{name: (body_start, body_end)} — the `override fun migrate(...)` body span.
 
     None means the body could not be located, which callers must treat as a
     violation, never as "nothing to check" (parser-death is fail-closed).
+
+    Spans, not text: the body has to be read in TWO views (code for structure,
+    literal-preserving for the SQL a call passes) and both are index-aligned
+    with `src`, so the caller slices each one with the same span.
     """
     bodies = {}
     for m in MIG_DECL_RE.finditer(src):
@@ -254,7 +271,7 @@ def parse_migration_bodies(src):
             bodies[name] = None
             continue
         close_brace = _balanced(src, brace, "{", "}")
-        bodies[name] = None if close_brace < 0 else src[brace + 1:close_brace]
+        bodies[name] = None if close_brace < 0 else (brace + 1, close_brace)
     return bodies
 
 
@@ -315,12 +332,29 @@ def parse_wired(src):
         for label, args in elements:
             if label != "addMigrations" or args is None:
                 continue
-            found = set(re.findall(r"\bMIGRATION_\d+_\d+\b", args))
-            if not found:
+            # [wide4 family-hole] The argument list used to be read with
+            # `findall(MIGRATION_\d+_\d+)`, so a name that is only MENTIONED in
+            # the list counted as registered — the witness passed
+            # `*if (false) arrayOf(MIGRATION_13_14, MIGRATION_14_13) else
+            # emptyArray()` and both migrations stayed unwired. Each argument
+            # must now BE a migration identifier; anything else (a spread of a
+            # conditional, a vararg holder, a call) registers nothing Room can
+            # see, so the names it mentions do not count.
+            pieces = _ast.split_top(args, (",",))
+            bare = [args[a:b].strip() for a, b in pieces]
+            literal = [n for n in bare if re.fullmatch(r"MIGRATION_\d+_\d+", n)]
+            if not bare:
                 problems.append(
                     "addMigrations(...) on the builder chain carries no migration "
                     "names — wiring unreadable")
-            names |= found
+            elif len(literal) != len(bare):
+                bad = [n for n in bare if n not in literal]
+                problems.append(
+                    "addMigrations(...) carries "
+                    f"{len(bad)} non-literal argument(s) (e.g. {bad[0][:80]!r}) — only a "
+                    "bare MIGRATION_A_B registers with Room; names mentioned inside a "
+                    "conditional/lambda are not migrated")
+            names |= set(literal)
     if not saw_chain:
         problems.append("no ...addMigrations(...).build() chain found — declarations "
                         "are registered nowhere")
@@ -338,10 +372,23 @@ def parse_wired(src):
 
 def check_db(path):
     """Return (problems, info) for one database file."""
-    # Comments are blanked up front (same length, indices preserved): every
-    # criterion below must read code, not prose — a commented-out declaration
-    # is not wired and a commented-out `db.execSQL` migrates nothing.
-    src = mask_comments(open(path, encoding="utf-8").read())
+    # Two views, one scan: the code view (comments AND string bodies blanked)
+    # is what every criterion below reads — a commented-out declaration is not
+    # wired and `val _sql = "db.execSQL(…)"` is not a statement — while the SQL
+    # text a live call passes is read from the literal-preserving view at the
+    # same offsets.
+    #
+    # [wide4 parser-death] Lexing first, fail-closed: a file whose strings or
+    # comments cannot be followed must be a violation, never a green built on a
+    # half-parsed view.
+    raw = open(path, encoding="utf-8").read()
+    ok, reason, views = _lex.analyse(raw)
+    if not ok:
+        return [f"{os.path.basename(path)}: cannot be lexed ({reason}) — the gate "
+                f"refuses to judge a database file whose strings/comments it cannot "
+                f"follow"], {}
+    src = views["code"]
+    src_lit = views["comments"]
     problems = []
     name = os.path.basename(path)
     version, decls = parse_database(src)
@@ -436,18 +483,19 @@ def check_db(path):
     # design ([T-android-downgrade-compat], e.g. MIGRATION_13_12).
     bodies = parse_migration_bodies(src)
     for mig, (a, b) in sorted(decls.items()):
-        body = bodies.get(mig)
-        if body is None:
+        span = bodies.get(mig)
+        if span is None:
             problems.append(
                 f"{name}: {mig} — cannot locate its `override fun migrate(...)` "
                 f"body, so the migration work is unverifiable")
             continue
-        live = [m.start() for m in re.finditer(r"\bdb\s*\.\s*\w+\s*\(", body)
-                if not dead_guarded(body, m.start())]
-        if b == a + 1 and not live:
+        body = src[span[0]:span[1]]
+        body_lit = src_lit[span[0]:span[1]]
+        writes = live_db_writes(body, body_lit)
+        if b == a + 1 and not writes:
             problems.append(
                 f"{name}: {mig} = Migration({a}, {b}) — the upgrade body "
-                f"{'is empty' if not body.strip() else 'has no live db.* statement'}; "
+                f"{'is empty' if not body.strip() else 'has no live, write-capable db.* statement'}; "
                 f"Room runs it as a no-op and the schema it was meant to create "
                 f"(or the data it was meant to move) is missing at open time — "
                 f"users on version {a} crash on the open-time validation")
@@ -697,7 +745,7 @@ data class Foo(@PrimaryKey val id: String, @ColumnInfo(name = "a") val a: String
     )
     ok &= check(
         "self-test: dead-guarded migration statement CATCHES",
-        any("no live db.* statement" in p for p in probs9b),
+        any("no live, write-capable db.* statement" in p for p in probs9b),
         str(probs9b),
     )
 
@@ -753,6 +801,88 @@ data class Foo(@PrimaryKey val id: String, @ColumnInfo(name = "a") val a: String
         not any("upgrade body" in p for p in probs12),
         str(probs12),
     )
+    # ── wide4 witnesses: one arm per falsified axis ─────────────────────────
+    NOLIVE = "no live, write-capable db.* statement"
+    # (f) family-hole: `!true` — the same deadness the wide3 arm covered for
+    #     `if (false)`, spelled so a bare-literal folder cannot see it.
+    probs13, _ = make(
+        '''        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                if (!true) db.execSQL("ALTER TABLE foos ADD COLUMN b TEXT")
+            }
+        }
+''',
+        "MIGRATION_1_2, MIGRATION_2_3",
+    )
+    ok &= check("self-test: w4 `if (!true)` migration statement CATCHES",
+                any(NOLIVE in p for p in probs13), str(probs13))
+
+    # (g) family-hole: a `db.*` call that is not a write. `db.toString()`
+    #     declares the step, wires it and does nothing.
+    probs14, _ = make(
+        '''        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.toString()
+            }
+        }
+''',
+        "MIGRATION_1_2, MIGRATION_2_3",
+    )
+    ok &= check("self-test: w4 side-effect-free `db.toString()` CATCHES",
+                any(NOLIVE in p for p in probs14), str(probs14))
+
+    # (h) family-hole: `execSQL` that runs no schema/data work.
+    probs15, _ = make(
+        '''        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("SELECT 1")
+            }
+        }
+''',
+        "MIGRATION_1_2, MIGRATION_2_3",
+    )
+    ok &= check("self-test: w4 `db.execSQL(\"SELECT 1\")` CATCHES",
+                any(NOLIVE in p for p in probs15), str(probs15))
+
+    # (i) family-hole: only SOME arguments are migration identifiers — a name
+    #     mentioned inside a dead conditional registers nothing.
+    probs16, _ = make(
+        MIG23,
+        "MIGRATION_1_2, *if (false) arrayOf(MIGRATION_2_3) else emptyArray()",
+    )
+    ok &= check("self-test: w4 non-literal addMigrations argument CATCHES",
+                any("non-literal argument" in p for p in probs16), str(probs16))
+    ok &= check("self-test: w4 dead-spread name still reported unwired",
+                any("NOT wired" in p and "MIGRATION_2_3" in p for p in probs16),
+                str(probs16))
+
+    # (j) parser-death: the call is only a STRING. `val _sql = "db.execSQL(…)"`.
+    probs17, _ = make(
+        '''        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                val _sql = "db.execSQL(CREATE INDEX index_foos ON foos(b))"
+            }
+        }
+''',
+        "MIGRATION_1_2, MIGRATION_2_3",
+    )
+    ok &= check("self-test: w4 statement inside a string literal CATCHES",
+                any(NOLIVE in p for p in probs17), str(probs17))
+
+    # (k) control: `if (true)` really runs — calling it dead would be a false
+    #     red on correct code.
+    probs18, _ = make(
+        '''        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                if (true) db.execSQL("ALTER TABLE foos ADD COLUMN b TEXT")
+            }
+        }
+''',
+        "MIGRATION_1_2, MIGRATION_2_3",
+    )
+    ok &= check("self-test: w4 `if (true)` migration statement stays legal",
+                len(probs18) == 0, str(probs18))
+
     return 0 if ok else 1
 
 
