@@ -73,6 +73,16 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import analyse  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    const_value,
+    enclosing_conditions,
+    when_branches,
+)
+
 MAIN = "src/android/app/src/main/java/com/rikkaminis/app"
 PIN_FILE = MAIN + "/conversation/CompactPin.kt"
 LOGIC_FILE = MAIN + "/ui/chat/ChatCompactionLogic.kt"
@@ -84,62 +94,57 @@ LIST_CTORS = ("ArrayList", "mutableListOf", "arrayListOf", "MutableList", "Linke
 
 # ─── structure helpers (offset-preserving) ──────────────────────────────────
 
-def mask_code(src):
-    """Return src of identical length with comment text AND string/char literal
-    contents blanked to spaces. Newlines are preserved, so every offset (and
-    therefore every line number) still matches the original source."""
-    out = list(src)
-    i, n = 0, len(src)
-    while i < n:
-        if src.startswith('"""', i):
-            j = src.find('"""', i + 3)
-            j = n if j < 0 else j + 3
-            for k in range(i, j):
-                if src[k] != "\n":
-                    out[k] = " "
-            i = j
-            continue
-        if src[i] == '"':
-            j = i + 1
-            while j < n:
-                if src[j] == "\\":
-                    j += 2
-                    continue
-                if src[j] == '"':
-                    break
-                if src[j] == "\n":
-                    break
-                j += 1
-            for k in range(i, min(j + 1, n)):
-                out[k] = " "
-            i = j + 1
-            continue
-        if src[i] == "'":
-            j = src.find("'", i + 1)
-            if 0 < j - i <= 4:
-                for k in range(i, j + 1):
-                    out[k] = " "
-                i = j + 1
-                continue
-            i += 1
-            continue
-        if src.startswith("//", i):
-            j = src.find("\n", i)
-            j = n if j < 0 else j
-            for k in range(i, j):
-                out[k] = " "
-            i = j
-            continue
-        if src.startswith("/*", i):
-            j = src.find("*/", i + 2)
-            j = n if j < 0 else j + 2
-            for k in range(i, j):
-                if src[k] != "\n":
-                    out[k] = " "
-            i = j
-            continue
-        i += 1
-    return "".join(out)
+def lex_code(src):
+    """(code_view, error): comments AND literal contents blanked, same length.
+
+    [wide4 parser-death] This gate used to carry its own masker. Its string
+    handling had no idea about `${...}` templates, so
+    `val _pad = "${"}"}"` handed a naked `}` to the body extractor, the
+    `extractPinnedUserMessages` span closed at that brace, and everything after
+    it — including `texts.clear()` — fell outside the body and was never judged.
+    A gate that re-implements Kotlin lexing loses it; the shared lexer keeps one
+    implementation, and a file it cannot read is a VIOLATION here, never a
+    shorter body that reads as clean.
+    """
+    ok, reason, views = analyse(src)
+    if not ok:
+        return None, reason
+    return views["code"], None
+
+
+# ── guard liveness (one implementation, shared with _kotlin_ast) ──────────
+def when_arm_dead(subject, cond):
+    """`when (false) { true -> … }` / `when (1) { 2 -> … }`: an arm that can
+    never be selected because subject and arm are unequal constants."""
+    cond = cond.strip()
+    if not cond or cond.startswith("else"):
+        return False
+    subj = const_value(subject) if subject.strip() else None
+    if subj is None:
+        return False
+    for arm in cond.split(","):
+        v = const_value(arm)
+        if v is None or v == subj:
+            return False
+    return True
+
+
+def dead_here(code, idx):
+    """True when a constant-FALSE guard governs `idx`.
+
+    [wide4 pin-both-sources] The previous liveness test only looked at `if`
+    conditions. `when (false) { true -> … }` around the parts loop keeps the
+    `AgentContentPart.Text` test, the `add(...)` call and every token the
+    criterion searched for, while nothing in the arm can ever run. Constant
+    folding over `if` headers and `when` arms closes that family.
+    """
+    for kind, cond in enclosing_conditions(code, idx):
+        if kind == "if" and (always_false(cond) or const_bool(cond) is False):
+            return True
+    for subject, cond, b_start, b_end in when_branches(code):
+        if b_start <= idx < b_end and when_arm_dead(subject, cond):
+            return True
+    return False
 
 
 def line_of(src, idx):
@@ -341,7 +346,12 @@ def is_list_ctor(tok):
 def check_pin(text):
     """Criteria 1-3 against CompactPin.kt."""
     problems = []
-    masked = mask_code(text)
+    masked, lex_err = lex_code(text)
+    if masked is None:
+        return [("pin-collector-found",
+                 "%s: the gate cannot lex this source (%s) — refusing to judge a "
+                 "collector whose body it cannot delimit (fail closed)"
+                 % (PIN_FILE, lex_err))]
     span = fun_body(masked, "extractPinnedUserMessages")
     if span is None:
         problems.append(("pin-collector-found",
@@ -379,12 +389,22 @@ def check_pin(text):
         break
     scope = masked[scope_start:scope_end]
 
+    # Every way the collector can write into a carrier. [wide4 / pin-dedup]
+    # Only `add`/`addAll` were recognised, so `texts += msg.content` (the
+    # plusAssign spelling) wrote production text straight into the result while
+    # the de-dup set stayed declared-but-unconsumed and the gate stayed green.
     adds = []
-    for am in re.finditer(r"\b(\w+)\s*\.\s*(add|addAll)\s*\(", scope):
+    for am in re.finditer(r"\b(\w+)\s*\.\s*(add|addAll|addLast|addFirst|set|plusAssign)\s*\(",
+                          scope):
         p = am.end() - 1
         close = match_close(scope, p, "(", ")")
         arg = scope[p + 1:close] if close > 0 else ""
         adds.append((am.group(1), am.group(2), arg, am.start()))
+    for am in re.finditer(r"\b(\w+)\s*\+=\s*([^\n;]*)", scope):
+        adds.append((am.group(1), "+=", am.group(2), am.start()))
+    for am in re.finditer(r"\b(\w+)\s*\[[^\]]*\]\s*=(?!=)\s*([^\n;]*)", scope):
+        adds.append((am.group(1), "[]=", am.group(2), am.start()))
+    adds.sort(key=lambda a: a[3])
 
     ret_exprs = [m.group(1).strip() for m in re.finditer(r"\breturn\b([^\n]*)", body)]
     list_dedup = any(re.search(r"\.(distinct|toSet|toMutableSet|toHashSet)\s*\(", e) for e in ret_exprs)
@@ -397,14 +417,27 @@ def check_pin(text):
                          % (PIN_FILE, line_of(masked, bstart))))
     else:
         bad = []
+        consumed_set = False
         for base, kind, arg, at in adds:
+            if kind == "addAll" and any(re.search(r"\b" + re.escape(s) + r"\b", arg)
+                                        for s in set_names):
+                consumed_set = True
             if base in set_names:
                 continue
-            if kind == "addAll" and any(re.search(r"\b" + re.escape(s) + r"\b", arg) for s in set_names):
+            if any(re.search(r"\b" + re.escape(s) + r"\b", arg) for s in set_names):
+                consumed_set = True          # `texts += seen` / `texts.addAll(seen)`
                 continue
             if list_dedup:
                 continue
             bad.append((base, kind, at))
+        # ret_exprs already has `return` stripped: `return seen.toList()` shows
+        # up as `seen.toList()`, so look for the carrier being CONVERTED.
+        set_in_return = any(re.search(r"\b" + re.escape(n) + r"\s*\.", e)
+                            for e in ret_exprs for n in set_names)
+        if set_names and not consumed_set and not list_dedup and not set_in_return:
+            # Belt and braces: a de-dup carrier that is declared but never
+            # reaches the result is a no-op, whatever the writes look like.
+            bad.append((sorted(set_names)[0], "unconsumed-set", 0))
         if bad:
             base, kind, at = bad[0]
             problems.append(("pin-dedup",
@@ -444,8 +477,14 @@ def check_pin(text):
                              "`AgentContentPart.Text`" % (PIN_FILE, line_of(masked, bstart + ob))))
         else:
             live_add = False
-            for am in re.finditer(r"\b(\w+)\s*\.\s*(add|addAll)\s*\(", loop_body):
-                guards = enclosing(ifs, bstart + ob + am.start())
+            write_re = r"\b(\w+)\s*(?:\.\s*(?:add|addAll|addLast|addFirst|set|plusAssign)\s*\(|\+=)"
+            for am in re.finditer(write_re, loop_body):
+                at = bstart + ob + am.start()
+                if dead_here(masked, at):
+                    # `when (false) { true -> … }` / `if (false && …)` — the
+                    # Text test and the add are spelled out, nothing runs.
+                    continue
+                guards = enclosing(ifs, at)
                 if any(always_false(g) or dead_for(g, "AgentContentPart.Text") for g in guards):
                     continue
                 live_add = True
@@ -467,7 +506,16 @@ def check_pin(text):
         tail_start = scope_start + max(a[3] for a in adds) if adds else bstart
         tail = masked[tail_start:bend]
         for name in sorted(carriers):
-            if re.search(r"\b" + re.escape(name) + r"\s*\.\s*(clear|removeAll|retainAll)\s*\(", tail):
+            # [wide4 / pin-collector-intact] The destructive list was
+            # (clear|removeAll|retainAll): `texts.removeIf { true }`,
+            # `removeAt(0)`, `removeLast()`, `subList(..).clear()` and an
+            # unguarded `return emptyList()` all emptied the carrier after the
+            # collection and every one of them stayed green.
+            # `removeIf`/`filterInPlace` take a LAMBDA (`texts.removeIf { true }`),
+            # so the destructive family must accept `(` and `{`.
+            if re.search(r"\b" + re.escape(name) +
+                         r"\s*\.\s*(clear|removeAll|retainAll|removeIf|removeAt|"
+                         r"removeLast|removeFirst|remove|subList)\s*(?:\(|\{)", tail):
                 problems.append(("pin-collector-intact",
                                  "%s:%d: `%s` is emptied after the collection — the pinned user "
                                  "messages never reach the summary (every instruction in the "
@@ -480,6 +528,26 @@ def check_pin(text):
                                  "%s:%d: `%s` is re-assigned after the collection — the collected "
                                  "text is discarded"
                                  % (PIN_FILE, line_of(masked, tail_start + tail.find(name)), name)))
+            # An unguarded `return emptyList()` discards the collection too; a
+            # guard that asks about the carrier itself (`if (texts.isEmpty())`)
+            # is the legitimate early-out.
+            for em in re.finditer(r"\breturn\s+emptyList\s*(?:<[^>]*>)?\s*\(", tail):
+                at = tail_start + em.start()
+                guards = [c for k, c in enclosing_conditions(masked, at) if k == "if"]
+                # The legitimate early-out asks about the RESULT carrier
+                # (`if (texts.isEmpty()) return emptyList()`), which may differ
+                # from the de-dup carrier the loop tracks — accept a guard that
+                # names any carrier in play.
+                names = sorted(carriers | list_names | {name})
+                mentioned = any(re.search(r"\b(?:%s)\b" % "|".join(re.escape(n) for n in names), g)
+                                for g in guards)
+                if mentioned:
+                    continue
+                problems.append(("pin-collector-intact",
+                                 "%s:%d: unguarded `return emptyList()` after collecting into `%s` "
+                                 "— the pinned user messages never reach the summary"
+                                 % (PIN_FILE, line_of(masked, at), name)))
+                break
     return problems
 
 
@@ -488,8 +556,21 @@ def check_logic(text):
     definition is the only place allowed to test ToolResult polarity against
     contentParts inline."""
     problems = []
-    masked = mask_code(text)
-    bare = re.compile(r"contentParts\s*\.\s*(any|all)\s*(?:<[^\n{}]*>)?\s*\{")
+    masked, lex_err = lex_code(text)
+    if masked is None:
+        return [("single-truth-source",
+                 "%s: the gate cannot lex this source (%s) — refusing to judge the "
+                 "tool-result polarity surface it cannot read (fail closed)"
+                 % (LOGIC_FILE, lex_err))]
+    # [wide4 / single-truth-source] `any|all` was the whole surface. The other
+    # spellings of the same polarity test — `none { it !is ToolResult }` above
+    # all — read the same field, carry the same empty-parts trap, and were never
+    # examined. Any collection terminal that takes a predicate on contentParts
+    # is now in scope.
+    bare = re.compile(
+        r"contentParts\s*\.\s*(any|all|none|count|filter|filterNot|find|first|firstOrNull|"
+        r"last|lastOrNull|single|singleOrNull|indexOfFirst|indexOfLast|partition|takeWhile|"
+        r"dropWhile|sumOf|fold)\s*(?:<[^\n{}]*>)?\s*\{")
     for m in bare.finditer(masked):
         ob = m.end() - 1
         cb = match_close(masked, ob, "{", "}")
@@ -704,6 +785,99 @@ def selftest(_root):
 }
 """
     arms.append(("arm10 cleared collector flags pin-collector-intact", cleared_pin,
+                 LOGIC_PREFIX + "}\n", [("pin-collector-intact")]))
+
+
+    # ── w4- witnesses: each flipped this gate green before ────────────
+    # Arm 11 — `pin-dedup`: the plusAssign spelling writes production text
+    # straight into the result; add/addAll were the whole recognised surface.
+    plus_assign_pin = PIN_PREFIX + ("    val texts = ArrayList<String>()\n"
+        "    for (msg in messages) {\n"
+        "        if (msg.role != LLMMessage.Role.USER) continue\n"
+        "        val seenInMessage = LinkedHashSet<String>()\n"
+        "        if (msg.content.isNotBlank()) seenInMessage.add(msg.content)\n"
+        "        for (part in msg.contentParts) {\n"
+        "            if (part is AgentContentPart.Text && part.text.isNotBlank()) seenInMessage.add(part.text)\n"
+        "        }\n"
+        "        texts += msg.content\n"
+        "        for (part in msg.contentParts) {\n"
+        "            if (part is AgentContentPart.Text && part.text.isNotBlank()) texts.add(part.text)\n"
+        "        }\n"
+        "    }\n"
+        "    if (texts.isEmpty()) return emptyList()\n"
+        "    return texts\n"
+        "}\n")
+    arms.append(("w4-plus-assign flags pin-dedup", plus_assign_pin,
+                 LOGIC_PREFIX + "}\n", [("pin-dedup")]))
+
+    # Arm 12 — `pin-both-sources`: the parts branch sits in a dead `when` arm.
+    dead_when_pin = PIN_PREFIX + ("    val texts = ArrayList<String>()\n"
+        "    for (msg in messages) {\n"
+        "        if (msg.role != LLMMessage.Role.USER) continue\n"
+        "        val seenInMessage = LinkedHashSet<String>()\n"
+        "        if (msg.content.isNotBlank()) seenInMessage.add(msg.content)\n"
+        "        for (part in msg.contentParts) {\n"
+        "            when (false) { true -> if (part is AgentContentPart.Text && part.text.isNotBlank()) seenInMessage.add(part.text) else -> Unit }\n"
+        "        }\n"
+        "        texts.addAll(seenInMessage)\n"
+        "    }\n"
+        "    if (texts.isEmpty()) return emptyList()\n"
+        "    return texts\n"
+        "}\n")
+    arms.append(("w4-dead-when flags pin-both-sources", dead_when_pin,
+                 LOGIC_PREFIX + "}\n", [("pin-both-sources")]))
+
+    # Arm 13 — `pin-collector-intact`: `removeIf { true }` empties the carrier.
+    remove_if_pin = PIN_PREFIX + ("    val texts = ArrayList<String>()\n"
+        "    for (msg in messages) {\n"
+        "        if (msg.role != LLMMessage.Role.USER) continue\n"
+        "        val seenInMessage = LinkedHashSet<String>()\n"
+        "        if (msg.content.isNotBlank()) seenInMessage.add(msg.content)\n"
+        "        for (part in msg.contentParts) {\n"
+        "            if (part is AgentContentPart.Text && part.text.isNotBlank()) seenInMessage.add(part.text)\n"
+        "        }\n"
+        "        texts.addAll(seenInMessage)\n"
+        "    }\n"
+        "    texts.removeIf { true }\n"
+        "    if (texts.isEmpty()) return emptyList()\n"
+        "    return texts\n"
+        "}\n")
+    arms.append(("w4-remove-if flags pin-collector-intact", remove_if_pin,
+                 LOGIC_PREFIX + "}\n", [("pin-collector-intact")]))
+
+    # Arm 14 — `single-truth-source`: the `none { it !is ToolResult }` spelling.
+    arm14_logic = LOGIC_PREFIX + """    } else if (i == 0 &&
+        history[0].role == LLMMessage.Role.USER &&
+        !history[0].contentParts.none { it !is AgentContentPart.ToolResult } &&
+        true
+    ) {
+        return -1
+    }
+    return 0
+}
+"""
+    arms.append(("w4-none-polarity flags single-truth-source",
+                 fixed_pin, arm14_logic, [("single-truth-source")]))
+
+    # Arm 15 — `pin-collector-found`: a `${"}"}` template used to close the body
+    # early and hide `texts.clear()` after it.
+    template_pad_pin = PIN_PREFIX + (
+        "    val texts = ArrayList<String>()\n"
+        "    for (msg in messages) {\n"
+        "        if (msg.role != LLMMessage.Role.USER) continue\n"
+        "        val seenInMessage = LinkedHashSet<String>()\n"
+        "        if (msg.content.isNotBlank()) seenInMessage.add(msg.content)\n"
+        "        for (part in msg.contentParts) {\n"
+        "            if (part is AgentContentPart.Text && part.text.isNotBlank()) seenInMessage.add(part.text)\n"
+        "        }\n"
+        "        texts.addAll(seenInMessage)\n"
+        "    }\n"
+        "    val _pad = \"${\"}\"}\"\n"
+        "    texts.clear()\n"
+        "    if (texts.isEmpty()) return emptyList()\n"
+        "    return texts\n"
+        "}\n")
+    arms.append(("w4-template-pad cannot hide `texts.clear()`", template_pad_pin,
                  LOGIC_PREFIX + "}\n", [("pin-collector-intact")]))
 
     failed = []
