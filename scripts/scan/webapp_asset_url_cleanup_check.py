@@ -431,6 +431,15 @@ VIOLATION_ARM9_NO_IO = SHEET_DECODE_TILE.replace(
         }""",
     """        value = ImageDecoding.decodeFileBounded(path, ICON_MAX_EDGE_PX)?.bitmap""",
 )
+# [wide3-06 arm9] The IO hop exists but the decode was hoisted OUT of it: the
+# old criterion only asked whether `Dispatchers.IO` appeared in the body.
+VIOLATION_ARM9_DECODE_BEFORE_IO = SHEET_DECODE_TILE.replace(
+    """        value = withContext(Dispatchers.IO) {
+            ImageDecoding.decodeFileBounded(path, ICON_MAX_EDGE_PX)?.bitmap
+        }""",
+    """        val decoded = ImageDecoding.decodeFileBounded(path, ICON_MAX_EDGE_PX)?.bitmap
+        value = withContext(Dispatchers.IO) { decoded }""",
+)
 
 
 # [dv26-E8] S-08 fixtures — the mount-scope resolver and its violations.
@@ -482,6 +491,16 @@ VIOLATION_ARM10_ORPHAN_REFRESH = COMPLIANT_RESOLVER.replace(
     "    private fun unusedRefresh(context: Context) {\n"
     "        PRootKernel.applyMountedFoldersSnapshot(context)\n"
     "    }\n",
+)
+
+# [wide3-06 arm10] An expression body (`= null`) directly above a sibling
+# declaration: the old span ran to the next `\n    private fun ` and swallowed
+# that sibling, so its `resolveMountWithRetry` call looked like `resolveMount`'s.
+VIOLATION_ARM10_EXPR_SWALLOW = COMPLIANT_RESOLVER.replace(
+    "    private fun resolveMount(context: Context, htmlPath: String): File? {",
+    "    private fun resolveMount(context: Context, htmlPath: String): File? = null\n"
+    "\n"
+    "    internal fun unusedMountHelper(context: Context, htmlPath: String): File? {",
 )
 
 # The source-missing exit without its null guard — "early exit before the
@@ -711,6 +730,65 @@ def _brace_block(code: str, open_idx: int) -> str:
     return code[open_idx:]
 
 
+def _balanced_within(text: str, open_idx: int, opener: str, closer: str) -> int:
+    """Index of the bracket closing text[open_idx] (quote-aware), or -1."""
+    if open_idx < 0 or open_idx >= len(text) or text[open_idx] != opener:
+        return -1
+    depth = 0
+    i = open_idx
+    while i < len(text):
+        c = text[i]
+        if c == '"':
+            j = i + 1
+            while j < len(text):
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == '"':
+                    break
+                j += 1
+            i = j + 1
+            continue
+        if c == opener:
+            depth += 1
+        elif c == closer:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _cond_dead_text(cond: str) -> bool:
+    """True when a literal operand decides the condition.
+
+    `false && guard` / `true || guard` preserve the guard's exact spelling and
+    delete its decision — the dominant dataflow witness of this wave.
+    """
+    cond = cond.strip()
+    if cond.startswith("("):
+        close = _balanced_within(cond, 0, "(", ")")
+        if close == len(cond) - 1:
+            cond = cond[1:-1]
+    parts, depth, buf, i = [], 0, "", 0
+    while i < len(cond):
+        c = cond[i]
+        two = cond[i:i + 2]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        if depth == 0 and two in ("&&", "||"):
+            parts.append(buf)
+            buf = ""
+            i += 2
+            continue
+        buf += c
+        i += 1
+    parts.append(buf)
+    return any(p.strip() in ("true", "false") for p in parts)
+
+
 def check_sheet_arm7(src: str) -> bool:
     """[dv14-B2] Title seed + guarded backfill (AddToHomeSheet.kt only).
 
@@ -805,7 +883,17 @@ def check_sheet_arm13(src: str) -> bool:
                 continue
             head = click[:set_at.start()]
             for cond in re.finditer(r"if\s*\(", head):
-                if re.search(r"\b%s\b" % re.escape(name), _paren_block(head, cond.end() - 1)):
+                cond_text = _paren_block(head, cond.end() - 1)
+                if not re.search(r"\b%s\b" % re.escape(name), cond_text):
+                    continue
+                if _cond_dead_text(cond_text):
+                    # [wide3-06 arm13] `if (false && isPinning) return@Button`
+                    # keeps the guard's spelling; the frame gap the CTA relies
+                    # on is then unguarded again (double submit on a double tap).
+                    continue
+                close = cond.end() - 1 + len(cond_text)
+                tail = head[close:]
+                if re.match(r"\s*(?:\{|return\b|return@)", tail):
                     return True
     return False
 
@@ -855,6 +943,10 @@ def check_sheet_arm14(src: str) -> bool:
                 continue  # a guard about the target, not about the closed sheet
             cond_text = _paren_block(body, cond.end() - 1)
             if any(re.search(r"\b%s\b" % re.escape(n), cond_text) for n in latched):
+                if _cond_dead_text(cond_text):
+                    # [wide3-06 arm14] `if (false && !pinShouldCommit(...))`
+                    # spells the close latch and deletes its decision.
+                    continue
                 return cond.start() < pin_at
     return False
 
@@ -942,9 +1034,15 @@ def check_sheet_arm9(src: str) -> bool:
         if any(br < s < br + len(body) for s in sites):
             return False
     for br, body in _block_body(code, r"\bproduceState\s*(?:<[^>{]*>)?\s*\("):
-        if any(br < s < br + len(body) for s in sites):
-            if not re.search(r"Dispatchers\s*\.\s*IO", body):
-                return False
+        for s in sites:
+            if br < s < br + len(body):
+                # [wide3-06 arm9] "Dispatchers.IO appears somewhere in the body"
+                # was also true of
+                #   val decoded = decode(path); value = withContext(IO) { decoded }
+                # — the decode itself still ran on the composition thread. The
+                # decode call must sit INSIDE the IO block.
+                if not enclosing_io_block(code, s):
+                    return False
     return True
 
 
@@ -956,12 +1054,56 @@ IDENT_CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
 RESOLVE_CALL = "WebAppPathResolver.resolve("
 
 
+def _expr_end(code: str, eq_idx: int) -> int:
+    """End offset of an expression body that starts after `=` at [eq_idx].
+
+    A depth-0 newline ends it unless the next line is a continuation
+    (`.foo()`, `?: x`, `+ x`, `&& x`, …). Deriving the end from the expression
+    itself — instead of `find("\\n    private fun ")` — is what stops a
+    one-line expression body (`= null`) from swallowing the NEXT declaration
+    and lending its calls to the wrong function (witness arm10).
+    """
+    depth = 0
+    i = eq_idx + 1
+    n = len(code)
+    while i < n:
+        c = code[i]
+        if c == '"':
+            j = i + 1
+            while j < n:
+                if code[j] == "\\":
+                    j += 2
+                    continue
+                if code[j] == '"':
+                    break
+                j += 1
+            i = j + 1
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                return i
+            depth -= 1
+        elif c == "\n" and depth == 0:
+            j = i + 1
+            while j < n and code[j] in " \t":
+                j += 1
+            if j < n and code[j] in ".?:+-*/&|,":
+                i = j
+                continue
+            return i
+        i += 1
+    return n
+
+
 def fun_spans(code: str):
     """{name: body} for every `fun` in [code] (comments already stripped).
 
-    Block bodies become brace blocks; expression bodies run to the next
-    declaration. A body that cannot be delimited is skipped — for arm10 that
-    fails CLOSED (a missing edge only removes a reachable function).
+    Block bodies become brace blocks; expression bodies run to the end of the
+    expression (see `_expr_end`). A body that cannot be delimited is skipped —
+    for arm10 that fails CLOSED (a missing edge only removes a reachable
+    function).
     """
     spans = {}
     for m in FUN_DECL_RE.finditer(code):
@@ -973,13 +1115,14 @@ def fun_spans(code: str):
         j = open_paren + len(paren)
         brace = code.find("{", j)
         eq = code.find("=", j)
-        if brace < 0:
+        if brace < 0 and eq < 0:
             continue
-        if 0 <= eq < brace and code[eq + 1:eq + 2] != "=":
-            nxt = code.find("\n    private fun ", eq)
-            spans[name] = code[eq:len(code) if nxt < 0 else nxt]
-        else:
-            spans[name] = _brace_block(code, brace)
+        if 0 <= eq and (brace < 0 or eq < brace) and code[eq + 1:eq + 2] != "=":
+            # [wide3-06 arm10] stops at the end of THIS expression, so a
+            # sibling declaration's calls stay out of this body.
+            spans.setdefault(name, code[eq:_expr_end(code, eq)])
+        elif brace >= 0:
+            spans.setdefault(name, _brace_block(code, brace))
     return spans
 
 
@@ -1193,6 +1336,8 @@ def selftest() -> int:
              VIOLATION_ARM9_REMEMBER, (False, False, True)),
             ("b08-decode-no-io-hop", COMPLIANT_PINNER, COMPLIANT_PREVIEW_SHORTCUT,
              VIOLATION_ARM9_NO_IO, (False, False, True)),
+            ("b08-decode-hoisted-out-of-io", COMPLIANT_PINNER, COMPLIANT_PREVIEW_SHORTCUT,
+             VIOLATION_ARM9_DECODE_BEFORE_IO, (False, False, True)),
         ):
             tree = os.path.join(tmp, name)
             for rel in (ACTIVITY_REL, SHEET_REL, PINNER_REL, PREVIEW_SHORTCUT_REL):
@@ -1260,6 +1405,8 @@ def selftest() -> int:
             ("e8-no-retry pre-fix resolver",
              VIOLATION_ARM10_NO_RETRY, COMPLIANT_ACTIVITY, ["arm10"]),
             ("e8-orphan-refresh", VIOLATION_ARM10_ORPHAN_REFRESH, COMPLIANT_ACTIVITY, ["arm10"]),
+            ("e8-expr-body swallows the sibling declaration",
+             VIOLATION_ARM10_EXPR_SWALLOW, COMPLIANT_ACTIVITY, ["arm10"]),
             ("e8-unguarded-missing",
              COMPLIANT_RESOLVER, VIOLATION_ARM11_UNGUARDED_MISSING, ["arm11"]),
             ("e8-main-thread-resolve",
@@ -1288,6 +1435,13 @@ def selftest() -> int:
                 "enabled = copiedFile != null && titleText.isNotBlank()"), (True, False)),
             ("b06-no-click-guard", COMPLIANT_SHEET.replace(
                 "            if (isPinning) return@Button\n", ""), (True, False)),
+            ("b06-dead-click-guard", COMPLIANT_SHEET.replace(
+                "            if (isPinning) return@Button\n",
+                "            if (false && isPinning) return@Button\n"), (True, False)),
+            ("b06-dead-close-guard", COMPLIANT_SHEET.replace(
+                "if (!pinShouldCommit(closed = sheetClosed, inFlight = isPinning)) {",
+                "if (false && !pinShouldCommit(closed = sheetClosed, "
+                "inFlight = isPinning)) {"), (False, True)),
             ("b06-no-close-latch",
              re.sub(r"^\s*sheetClosed = true\n", "", COMPLIANT_SHEET, flags=re.M),
              (False, True)),

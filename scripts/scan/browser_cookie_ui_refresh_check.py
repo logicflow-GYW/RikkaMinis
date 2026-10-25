@@ -101,27 +101,168 @@ MARKER = "BROWSER_COOKIE_UI_REFRESH_SELFTEST=PASS"
 
 
 def strip_line_comments(src: str) -> str:
-    """Remove // line comments, honouring string literals (URLs like
-    https://... must survive). Does not attempt /* */ handling: this file
-    uses line comments only for the strings the gate anchors on."""
-    out_lines = []
-    for line in src.split("\n"):
-        in_str = False
-        i = 0
-        cut = len(line)
-        while i < len(line):
-            c = line[i]
-            if c == "\\" and in_str:
+    """Comment masker used by the cookie family.
+
+    [wide3-06 F4] This used to strip `//` lines ONLY (its own docstring said so),
+    so code wrapped in `/* … */` still counted: commenting out `cm.flush()` +
+    `cookieRefreshTick++` with a block comment kept `count(...) == 2` and the
+    gate green. It now delegates to the string-aware BLOCK-comment masker —
+    string literals survive (the `"https://$domain"` anchors need them), and a
+    mention inside either comment style can neither satisfy nor trip a
+    criterion.
+    """
+    return strip_comments_only(src)
+
+
+def _match_paren(src: str, open_idx: int) -> int:
+    """Index of the `)` matching src[open_idx] == `(`, or -1."""
+    if open_idx < 0 or open_idx >= len(src) or src[open_idx] != "(":
+        return -1
+    depth = 0
+    i = open_idx
+    while i < len(src):
+        c = src[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _brace_end(src: str, open_idx: int) -> int:
+    """Index just past the `}` matching src[open_idx] == `{`, or -1."""
+    if open_idx < 0 or open_idx >= len(src) or src[open_idx] != "{":
+        return -1
+    depth = 0
+    i = open_idx
+    while i < len(src):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
+
+
+def _cond_dead_text(cond: str) -> bool:
+    """True when a literal operand decides the condition (`false && g`, `true || g`)."""
+    cond = cond.strip()
+    if cond.startswith("("):
+        close = _match_paren(cond, 0)
+        if close == len(cond) - 1:
+            cond = cond[1:-1]
+    parts, depth, buf, i = [], 0, "", 0
+    while i < len(cond):
+        c = cond[i]
+        two = cond[i:i + 2]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        if depth == 0 and two in ("&&", "||"):
+            parts.append(buf)
+            buf = ""
+            i += 2
+            continue
+        buf += c
+        i += 1
+    parts.append(buf)
+    return any(p.strip() in ("true", "false") for p in parts)
+
+
+def _dead_spans(code: str) -> list:
+    """Spans of statically-unreachable `if (false …)` / `while (false)` bodies."""
+    spans = []
+    for m in re.finditer(r"\b(?:if|while)\s*\(", code):
+        open_idx = m.end() - 1
+        close_idx = _match_paren(code, open_idx)
+        if close_idx < 0 or not _cond_dead_text(code[open_idx + 1:close_idx]):
+            continue
+        j = close_idx + 1
+        while j < len(code) and code[j] in " \t":
+            j += 1
+        if j < len(code) and code[j] == "{":
+            end = _brace_end(code, j)
+            if end > 0:
+                spans.append((j, end))
+                continue
+        eol = code.find("\n", j)
+        spans.append((j, len(code) if eol < 0 else eol))
+    return spans
+
+
+def _live_pos(code: str, needle: str, start: int = 0) -> int:
+    """First occurrence of [needle] at or after [start] that is NOT dead code."""
+    spans = _dead_spans(code)
+    idx = code.find(needle, start)
+    while idx >= 0:
+        if not any(a <= idx < b for a, b in spans):
+            return idx
+        idx = code.find(needle, idx + 1)
+    return -1
+
+
+def _inside_guard_body(text: str, guard_start: int, write_pos: int) -> bool:
+    """Is [write_pos] inside the body of the `if (...)` starting at [guard_start]?
+
+    Body = the brace block following the condition, or — for a braceless
+    `if (c) stmt` — the rest of that line. Position alone (`guard < write`) is
+    not enough: `if (c) Unit` followed by an unconditional write satisfies it
+    while the write escapes the branch entirely (witness V8).
+    """
+    open_idx = text.find("(", guard_start)
+    close = _match_paren(text, open_idx)
+    if close < 0:
+        return False
+    j = close + 1
+    while j < len(text) and text[j] in " \t":
+        j += 1
+    if j < len(text) and text[j] == "{":
+        end = _brace_end(text, j)
+        return end > 0 and j <= write_pos < end
+    eol = text.find("\n", j)
+    end = len(text) if eol < 0 else eol
+    return j <= write_pos < end
+
+
+def _brace_ranges(src: str):
+    """All matching `{ … }` spans as (start, end) — quote-aware, single pass."""
+    out, stack, quote, i = [], [], None, 0
+    while i < len(src):
+        c = src[i]
+        if quote:
+            if c == "\\":
                 i += 2
                 continue
-            if c == '"':
-                in_str = not in_str
-            elif c == "/" and not in_str and i + 1 < len(line) and line[i + 1] == "/":
-                cut = i
-                break
-            i += 1
-        out_lines.append(line[:cut])
-    return "\n".join(out_lines)
+            if c == quote:
+                quote = None
+        elif c in "\"'":
+            quote = c
+        elif c == "{":
+            stack.append(i)
+        elif c == "}":
+            if stack:
+                out.append((stack.pop(), i + 1))
+        i += 1
+    return out
+
+
+def _smallest_block_with(src: str, pos: int, needles) -> str:
+    """Smallest brace block containing [pos] that also contains every needle."""
+    ranges = sorted(
+        (r for r in _brace_ranges(src) if r[0] < pos < r[1]),
+        key=lambda r: r[1] - r[0],
+    )
+    for a, b in ranges:
+        body = src[a:b]
+        if all(n in body for n in needles):
+            return body
+    return ""
 
 
 def brace_slice(src: str, start_line_idx: int, open_line: str) -> str:
@@ -303,21 +444,24 @@ def check_viewport(source: str) -> list:
                 "(ROT: update this gate)" % action
             )
             continue
-        if RESET_CALL not in block:
+        reset_at = _live_pos(block, RESET_CALL)
+        if reset_at < 0:
             errs.append(
-                "`%s` never calls `%s` — a session override shadows the global "
-                "value it writes, so the action is a no-op for those tabs (V4)"
+                "`%s` never calls `%s` (a `false &&`-style dead wrapper does not "
+                "count) — a session override shadows the global value it writes, so "
+                "the action is a no-op for those tabs (V4)"
                 % (action, RESET_CALL)
             )
             continue
-        if GLOBAL_WRITE not in block:
+        write_at = _live_pos(block, GLOBAL_WRITE)
+        if write_at < 0:
             errs.append(
                 "`%s` clears the session override but never writes a global "
                 "value — the clear alone leaves every tab at the UA default"
                 % action
             )
             continue
-        if block.index(RESET_CALL) > block.index(GLOBAL_WRITE):
+        if reset_at > write_at:
             errs.append(
                 "`%s` writes the global viewport before clearing the session "
                 "override — the stale override wins the resolve (V4)" % action
@@ -627,6 +771,15 @@ def check_custom_ua_single_source(pool_src: str, sheet_src: str) -> list:
             "`setUserAgentFromUI` writes the stored custom UA BEFORE the "
             "`customUA != null` guard — the guard does not protect the write (V8)"
         )
+    elif not _inside_guard_body(setter, guard, write):
+        # [wide3-06 V8] `if (customUA != null) Unit` + an unconditional write
+        # keeps `guard < write` true while the write escapes the guard's body:
+        # every non-CUSTOM preset tap then clears the user's typed UA.
+        errs.append(
+            "`setUserAgentFromUI` writes the stored custom UA OUTSIDE the "
+            "`customUA != null` branch — the guard is a no-op statement, so a "
+            "preset tap (customUA = null) still clears the string the user typed (V8)"
+        )
 
     if "storedCustomUserAgent()" not in code:
         errs.append(
@@ -842,6 +995,35 @@ def check(source: str) -> list:
         if bumps < 2:
             errs.append(f"cookieRefreshTick++ bumped {bumps} times, expected >= 2 (per-domain + clear-all)")
 
+    # 4b. [wide3-06 F4] the per-domain delete must persist AND refresh itself.
+    #     The global `bumps >= 2` count above let a sibling site stand in for
+    #     the per-domain one, and a `/* … */` wrapper kept the count while the
+    #     delete stopped persisting — the user deletes a domain, the list keeps
+    #     showing it and the expired cookies are served again on the next load.
+    deletes = list(re.finditer(r"\bsetCookie\s*\(", src))
+    if not deletes:
+        errs.append(
+            "per-domain delete no longer expires cookies (no setCookie( call) — "
+            "deleting a domain cannot remove its cookies at all (F4)")
+    for m in deletes:
+        block = _smallest_block_with(src, m.start(), ("candidateUrls",))
+        if not block:
+            errs.append(
+                "the cookie delete no longer sits in a per-domain action block that "
+                "enumerates candidateUrls (fail-closed: the delete site was found but "
+                "its block cannot be delimited)")
+            continue
+        if "flush()" not in block:
+            errs.append(
+                "the per-domain delete never flush()es inside its own action block — the "
+                "expiries stay in memory and the next page load serves the deleted "
+                "cookies again (F4)")
+        if "cookieRefreshTick++" not in block:
+            errs.append(
+                "the per-domain delete never bumps cookieRefreshTick inside its own action "
+                "block — hasCookies/allDomains keep their pre-delete values, so the "
+                "removed domain stays on the list (F4)")
+
     return errs
 
 
@@ -866,15 +1048,17 @@ def selftest() -> int:
             cookieRefreshTick++
     """
     good_delete = """
-            val cm = CookieManager.getInstance()
-            val candidateUrls = if (domain.startsWith("http")) {
-                listOf(domain)
-            } else {
-                listOf("https://$domain", "http://$domain")
-            }
-            for (url in candidateUrls) { names.forEach { cm.setCookie(url, "$it=; Max-Age=0; Path=/") } }
-            cm.flush()
-            cookieRefreshTick++
+            IconButton(onClick = {
+                val cm = CookieManager.getInstance()
+                val candidateUrls = if (domain.startsWith("http")) {
+                    listOf(domain)
+                } else {
+                    listOf("https://$domain", "http://$domain")
+                }
+                for (url in candidateUrls) { names.forEach { cm.setCookie(url, "$it=; Max-Age=0; Path=/") } }
+                cm.flush()
+                cookieRefreshTick++
+            })
     """
     bad_nocallback = "CookieManager.getInstance().removeAllCookies(null)"
     bad_one_variant = """
@@ -982,6 +1166,14 @@ def selftest() -> int:
                 tabPool.setGlobalViewport(w, h)
                 tabPool.resetSessionViewport()"""),
          ["before clearing"]),
+        ("V4 reset wrapped in a statically-dead if",
+         good_vp.replace("""            coroutineScope.launch {
+                tabPool.resetSessionViewport()
+                tabPool.setGlobalViewport(w, h)""",
+                         """            coroutineScope.launch {
+                if (false) tabPool.resetSessionViewport()
+                tabPool.setGlobalViewport(w, h)"""),
+         ["never calls `resetSessionViewport()`"]),
         ("V5 filter box keyed",
          good_vp.replace("var cookieFilterText by remember {",
                          "var cookieFilterText by remember(cookieRefreshTick) {"),
@@ -1200,12 +1392,45 @@ def selftest() -> int:
          good_ua_pool,
          good_ua_sheet.replace("                    tabPool.stageCustomUserAgent(it)\n", ""),
          ["does not feed the pool's copy"]),
+        ("V8 guard reduced to a no-op statement beside an unconditional write",
+         good_ua_pool.replace(
+             "            if (customUA != null) {\n"
+             "                customUserAgentString = customUA.ifEmpty { null }\n"
+             "            }\n",
+             "            if (customUA != null) Unit\n"
+             "            customUserAgentString = customUA?.ifEmpty { null }\n"),
+         good_ua_sheet,
+         ["OUTSIDE the"]),
     ]
     # the comment trap: a KDoc mentioning removeAllCookies(null) must NOT trip
     good_with_comment = """
             // [fix/da1022-G] removeAllCookies(null) left no flush and no refresh:
             // use the callback form to persist + bump the tick.
     """ + compliant + good_delete
+
+    # [wide3-06 F4] one LIVE bump (clear-all) + one bump hidden in a block
+    # comment: the pre-fix masker counted both and reported 2 bumps.
+    block_commented_delete = """
+            IconButton(onClick = {
+                val cm = CookieManager.getInstance()
+                val candidateUrls = if (domain.startsWith("http")) {
+                    listOf(domain)
+                } else {
+                    listOf("https://$domain", "http://$domain")
+                }
+                for (url in candidateUrls) { names.forEach { cm.setCookie(url, "$it=; Max-Age=0; Path=/") } }
+                /* cm.flush()
+                cookieRefreshTick++ */
+            })
+            val hasCookies = remember(cookieRefreshTick, historyRevision) { cm.hasCookies() }
+            val allDomains = remember(hasCookies, cookieRefreshTick, historyRevision) {
+                uniqueDomains()
+            }
+            cm.removeAllCookies {
+                cm.flush()
+                cookieRefreshTick++
+            }
+    """
 
     # ── [deep-audit-1039 B-07] domain-refresh (B1–B2) fixtures ───────────────
     # Only-red-its-own-criterion: each dirty fixture below differs from the
@@ -1257,6 +1482,11 @@ def selftest() -> int:
         ("V2 single scheme variant", bad_one_variant, 1),
         ("V3 no flush in callback", bad_noflush, 1),
         ("V4 no refresh tick", bad_notick, 1),
+        # [wide3-06 F4] the per-domain flush + bump sit inside a `/* … */`
+        # block: the line-only masker still counted them, so `count`
+        # (`bumps >= 2`) stayed satisfied while the delete stopped persisting.
+        ("F4 per-domain flush+bump hidden in a block comment",
+         block_commented_delete, 1),
     ]
     failures = 0
     for name, sample, expect in arms:
