@@ -89,7 +89,26 @@ restore 6/6 通过 sha256 校验，事后 `git status --porcelain` 只剩两个�
 
 ## 6. CI
 
-（回填见下）
+| 项 | 值 |
+|---|---|
+| run | **#2732** / id `40309552147` / job `121527017574` / attempt 1 |
+| 触发 | `workflow_dispatch` → `build-apk.yml` @ `fix/r3-outcome-stale`（分支 push 不触发，符合 `paths` 过滤） |
+| 结论 | **success**，`head_sha` = `eec06ccf3d` 与本地 HEAD **逐字符一致** |
+| 时长 | 10:42:56Z → 11:08:16Z（25m20s） |
+| 步骤 | 26 步，**唯一非 success = `23 Publish to Releases` skipped**（main 门控，分支本就该跳） |
+
+日志判读（`probe/ci/t10-job.log`，1,487,613 B / NUL 0）：
+
+| 判据 | 读数 |
+|---|---|
+| `Summary: 112 passed, 0 failed` | **恰 1 处** |
+| `ALL 344 CASES PASS` | **恰 1 处** |
+| Kotlin 编译错误（`^\s*e: `） | **0** |
+| 门头 `[N/112]` | **112 条，编号 1..112 互异** |
+| 含 `FAILED` 的行 | 6 条，逐条确认**全是 PASSED 用例名子串**（`… produces FAILED without calling provider PASSED` 等），无真失败 |
+| `OUTCOME_KNOWN_CHAIN_SELFTEST` | **1 处**（`test_scan.py` 已有注册夹具，新臂计数随之进 CI） |
+| `STALE_CLOSURE_SELFTEST` | **0 处** —— 见 §7 R4：`stale_closure_guard` 的 marker 尚未在 `test_scan.py` 注册，新臂在 CI 里无人见证，主会话收口时需补注册项 |
+| 门真树标记 | `outcome_known_chain` 4 处 / `Stale-closure guard` 4 处（两门各三条真树绿线 + 标题） |
 
 ## 7. 残留
 
