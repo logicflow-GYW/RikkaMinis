@@ -215,6 +215,23 @@ val rawBytes = when (
 
 ---
 
-## CI 读数
+## CI 读数（已回填）
 
-（待分支 CI 结束后回填：run id / #编号 / attempt / head_sha / job / 关键日志行）
+| 项 | 值 |
+|---|---|
+| run | `40344757884` / **#2755** / attempt 1 |
+| job | `121648625237`（build） |
+| 结论 | **success**，14:58:45Z → 15:23:25Z（24m40s） |
+| head_sha | `215c1d951244248e9469f3ce24a3fa194cfb365a` = 本地 `git rev-parse HEAD` 逐字符一致 |
+| 26 步 | 唯一 `skipped` = `Publish to Releases`（`if: ref == main` 门控生效） |
+| 日志 | 1,491,430 B / NUL 0 |
+| 门 | 门头 **112** 条，编号 1..112 无重号、名称 112 互异；`║  Summary: 112 passed, 0 failed` **恰 1** |
+| 夹具 | `✅ ALL 344 CASES PASS` **恰 1** |
+| 编译 | `^ e: ` **0** |
+| FAILED 行 | 6 条，逐条确认全部以 `PASSED` 结尾（用例名含 FAILED 子串，非失败） |
+| 三门自证 | `FILE_URI_PARSE_GUARD_SELFTEST` / `FILEPREVIEW_PRINT_BOUNDED_SELFTEST` / `OFFLOAD_CLI_ARGS_SELFTEST` 各 **恰 1** ⇒ 三门的新豁免表形态在 CI 里有见证 |
+| 分段耗时 | 112 门并行池 14:59:14.0→15:00:41.8 = **87.8 s**；`ALL 344` @ 15:07:12.6；单测 `BUILD SUCCESSFUL in 6m 5s`；APK `BUILD SUCCESSFUL in 7m 40s` |
+
+**停止节点达成**：分支 CI 绿即本轮终点，未合并 main（有 `.kt` 验证面，合并起手权在用户）。
+
+源码树与 CI 绿树的差异 = 仅 `fix-reports/` 回填（`git diff --name-only 215c1d951..HEAD -- . ':(exclude)fix-reports'` = 0）。
