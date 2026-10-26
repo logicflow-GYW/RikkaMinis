@@ -18,21 +18,30 @@ browser/BrowserUseManager.kt:
    landed on disk as `1 1=2`. The sibling decoders in WebDavClient and
    OAuthCallbackServer already pre-escape the '+'.
 
-This gate pins, on the comment-stripped source:
+This gate pins, on the shared lexer/ast/valueflow views:
 
-  * `destroy()` wakes BOTH waiters (`navigationDeferred?.complete(` and
-    `asyncJsSlot.takeCurrent()`);
-  * `onRendererGone` wakes the async-JS waiter too;
+  * `destroy()` wakes BOTH waiters (`navigationDeferred?.complete(` and an
+    `asyncJsSlot.takeCurrent()` whose value reaches `.complete(…)`);
+  * `onRendererGone` wakes the async-JS waiter too — same effect anchor, so
+    taking the deferred out of the slot and dropping it is RED;
   * `AsyncJsSlot.takeCurrent()` still *takes* — [meta-audit-1024 anchor] the
     criterion used to be the declaration substring `"fun takeCurrent()"`, so
     the external witness rewrote the body to `return null` and the gate stayed
     green while every teardown wake-up became a no-op (the 1019 ISSUE-08 stall
-    again). The body must now read the slot, clear it (`entry = null`) AND
-    return the taken value; an unextractable body is RED (fail-closed);
+    again). The body must read the slot BEFORE it clears it, clear it
+    (`entry = null`) AND return a value derived from the taken entry; an
+    unextractable body is RED (fail-closed);
+  * the lifecycle latch must actually GATE: `if (destroyed) return` has to be
+    feasible, un-inverted and placed before the write it protects
+    (`if (destroyed && false) return` gates nothing);
+  * every deferred block (`post { }` / `postDelayed { }`) must open with a
+    FEASIBLE, correctly-polarised stand-down guard —
+    `if (false && !canRunDeferred()) return` never stands down,
+    `if (canRunDeferred()) return` never runs;
   * EVERY `URLDecoder.decode(` call site under src/android/app/src/main/java
-    carries the `.replace("+", "%2B")` escape inside a +/- window (no
-    allowlist: the two pre-existing call sites already comply, so any new
-    bare call site is a regression by construction).
+    decodes a value that actually carries the `.replace("+", "%2B")` escape in
+    its FIRST ARGUMENT (no allowlist: the two pre-existing call sites already
+    comply, so any new bare call site is a regression by construction).
 
 [deep-audit-1046 S-07] — the offscreen AndroidView hosts (`ui/markdown/KaTeXView.kt`,
 `ui/sandbox/FilePreviewScreen.kt`) and the shared teardown policy
@@ -53,6 +62,22 @@ import os
 import re
 import sys
 
+from _kotlin_ast import (
+    function_body as ast_function_body,
+    if_blocks,
+    match_bracket,
+    strip_parens,
+)
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments
+from _kotlin_valueflow import (
+    call_args,
+    contains_ident,
+    expr_end,
+    guard_feasible,
+    scope_calls,
+    value_sources,
+)
+
 MANAGER = "src/android/app/src/main/java/com/rikkaminis/app/browser/BrowserUseManager.kt"
 HOLDER = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebViewHolder.kt"
 SLOT = "src/android/app/src/main/java/com/rikkaminis/app/browser/AsyncJsSlot.kt"
@@ -62,13 +87,14 @@ FILE_PREVIEW = "src/android/app/src/main/java/com/rikkaminis/app/ui/sandbox/File
 RELEASE_POLICY = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebViewReleaseLatch.kt"
 SRC_ROOT = "src/android/app/src/main/java"
 
+# [batch-7] The async-JS wake-up is no longer a substring arm: "the spelling
+# `asyncJsSlot.takeCurrent()` appears" is satisfied by taking the deferred and
+# dropping it (witness 07-1). It is graded by `take_wakes_waiter()` below, i.e.
+# the taken deferred must reach `.complete(…)` on a live path.
 DESTROY_MUST = (
     ("destroy() does not wake the navigation waiter", "navigationDeferred?.complete("),
-    ("destroy() does not wake the async-JS waiter", "asyncJsSlot.takeCurrent()"),
 )
-RENDERER_MUST = (
-    ("onRendererGone does not wake the async-JS waiter", "asyncJsSlot.takeCurrent()"),
-)
+RENDERER_MUST = ()
 # [meta-audit-1024 anchor] `SLOT_MUST` was a declaration-shaped anchor: the
 # witness rewrote the body to `return null` and the gate stayed green. The three
 # regexes below are the EFFECT the teardown path depends on. `SLOT_MUST` is kept
@@ -79,8 +105,6 @@ SLOT_MUST = "fun takeCurrent()"
 SLOT_READ_RE = re.compile(r"\bentry\b(?!\s*=(?!=))")
 # clears it: the take must hand the entry out exactly once.
 SLOT_CLEAR_RE = re.compile(r"\bentry\s*=\s*null\b")
-# returns what it read — the deferred the teardown is about to complete.
-SLOT_RETURN_RE = re.compile(r"return\s+[\w?.]+\s*\.value\b")
 
 # ── [deep-audit-1045 B-02] WebView lifecycle contract ────────────────────────
 # Decision points, not spellings: a View-queue post on the manager's own
@@ -94,181 +118,122 @@ CLEAR_CALLBACKS = "removeCallbacks(null)"
 TEARDOWN = "webView.destroy()"
 LATCH = "destroyed"
 
-CALL_RE = re.compile(r"URLDecoder\.decode\(")
-ESCAPE = '.replace("+", "%2B")'
-BACK = 2  # lines of context before a call site
-FWD = 4   # lines after (multi-line call / chained .toByteArray())
+CALL_RE = re.compile(r"URLDecoder\s*\.\s*decode\s*\(")
+# the escape, in any spacing — matched against the first argument's VALUE
+ESCAPE_RE = re.compile(r'\.\s*replace\s*\(\s*"\+"\s*,\s*"%2B"\s*\)')
 
 
-def skip_string(text, i):
-    """Index just past the string literal starting at `text[i]` (a quote).
+# ── shared primitives ────────────────────────────────────────────────────────
+# [batch-7] Every criterion below used to lean on this file's own lexer
+# (`skip_string` / `skip_template` / `strip_comments` / `brace_body`) plus a
+# literal dead-branch blacklist. Those are gone: a `}` inside a string, a
+# template hole carrying its own literal, or `if (1 == 2)` each defeated one of
+# them — and 5 of this gate's 6 batch-7 witnesses landed in exactly those
+# places. Structure is read from `_kotlin_lexer.mask_code` (length preserving,
+# so positions port straight back to the source), literals from
+# `mask_comments`, control flow / value flow from `_kotlin_ast` /
+# `_kotlin_valueflow`.
 
-    Handles Kotlin raw strings (three quotes ... three quotes), which may hold a
-    single quote or two consecutive quotes. The pre-existing simple-string scan
-    stopped at the first quote inside a raw string and therefore swallowed whole
-    function bodies, so every derived criterion below read the wrong text.
+def code_of(src):
+    """Structure view: comments and string interiors blanked, length preserved.
+
+    Raises KotlinLexError on an unterminated literal. Every caller turns that
+    into a VIOLATION (fail-closed) — never into a source-text fallback.
     """
-    if text.startswith('"""', i):
-        j = text.find('"""', i + 3)
-        return len(text) if j < 0 else j + 3
-    q = text[i]
-    i += 1
-    while i < len(text) and text[i] != q:
-        if text[i] == "\\":
-            i += 2
-        elif text.startswith("${", i):
-            # string template: "${…}" may carry its own string literals
-            # ("${if (x) \"a\" else \"b\"}"), which would otherwise close this
-            # string early and swallow a brace.
-            i = skip_template(text, i + 2)
-        else:
-            i += 1
-    return i + 1
+    return mask_code(src)
 
 
-def skip_template(text, i):
-    """Index just past the `}` matching an already-consumed `${`."""
-    depth = 1
-    while i < len(text):
-        c = text[i]
-        if c == '"' or c == "'":
-            i = skip_string(text, i)
-            continue
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return len(text)
+def lit_of(src):
+    """Literal view: only comments blanked — string contents stay readable."""
+    return mask_comments(src)
 
 
-def strip_comments(src):
-    """Remove line + block comments, leaving string literals intact."""
-    out = []
-    i = 0
-    n = len(src)
-    while i < n:
-        c = src[i]
-        if c == '"' or c == "'":
-            j = skip_string(src, i)
-            out.append(src[i:j])
-            i = j
-        elif src.startswith("//", i):
-            # Blank the comment but KEEP its newline: every line number the
-            # criteria report must be a real line in the original file.
-            j = src.find("\n", i)
-            i = n if j < 0 else j
-        elif src.startswith("/*", i):
-            j = src.find("*/", i + 2)
-            end = n if j < 0 else j + 2
-            out.append("\n" * src.count("\n", i, end))
-            i = end
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
+def fn_span(doc, name):
+    """(body_start, body_end) of `fun <name>(…)` in a code view, or None."""
+    return ast_function_body(doc, name)
 
 
-def function_body(text, name):
-    """Body of `fun <name>(...)` — brace-balanced, string literals skipped."""
-    m = re.search(r"\bfun\s+" + re.escape(name) + r"\s*\(", text)
-    if not m:
-        return None
-    i = text.find("(", m.end() - 1)
-    depth = 0
-    while i < len(text):
-        c = text[i]
-        if c == '"' or c == "'":
-            i = skip_string(text, i)
-            continue
-        elif c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                break
-        i += 1
-    j = text.find("{", i)
-    if j < 0:
-        return None
-    body, _end = brace_body(text, j)
-    return body
+def fn_body(doc, name):
+    """Body text of `fun <name>(…)` (outer braces stripped), or None."""
+    r = fn_span(doc, name)
+    return None if r is None else doc[r[0]:r[1]]
 
 
-def brace_body(text, start):
-    """Balanced `{...}` starting at `start` (a '{'); string literals skipped.
-    -> (body including braces, index just past the closing brace)."""
-    depth = 0
-    k = start
-    while k < len(text):
-        c = text[k]
-        if c == '"' or c == "'":
-            k = skip_string(text, k)
-            continue
-        elif c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start:k + 1], k + 1
-        k += 1
-    return text[start:], len(text)
+def fn_bodies(doc, lit, name):
+    """(code_body, literal_body) — the SAME span in both views.
+
+    Deciding "what the code does" on the literal view lets a comment vouch for
+    a call that is not there; deciding "what the string says" on the code view
+    reads blanks. Both are needed, and they are the same length, so the split
+    is free.
+    """
+    r = fn_span(doc, name)
+    if r is None:
+        return None, None
+    return doc[r[0]:r[1]], lit[r[0]:r[1]]
+
+
+def reachable(text, pos):
+    """Is the code at [pos] reachable? Every enclosing condition must be
+    feasible, and the `else` side is graded on `!(cond)` — parenthesised.
+
+    `path_feasible()` prefixes a bare `!` onto the condition, so a compound one
+    (`a == null || true`) rebinds as `(!a) == null || true` and a dead branch
+    looks live. The sites here gate positively on `if (destroyed) return`,
+    where both agree, but negating correctly costs nothing.
+    """
+    for cond, t_start, t_end, e_start, e_end in if_blocks(text):
+        if t_start <= pos < t_end:
+            if not guard_feasible(cond):
+                return False
+        elif e_start is not None and e_start <= pos < e_end:
+            if not guard_feasible(f"!({cond})"):
+                return False
+    return True
 
 
 FUN_HEAD_RE = re.compile(r"\bfun\s+(?:<[^>\n]*>\s*)?(?:[\w.]+\.)?([A-Za-z_]\w*)\s*\(")
 
 
-def iter_functions(text):
-    """-> [(name, body)] for every BLOCK-bodied `fun` in `text`.
+def iter_functions(doc):
+    """-> [(name, body)] for every BLOCK-bodied `fun` in a code view.
 
-    Derived, not listed: the criteria below never name the functions they
-    police, so renaming (or adding) a UA writer / credential arming site is
-    covered on the day it lands. Expression-bodied functions carry no block and
-    are skipped — every site these criteria care about is block-bodied.
+    Derived, not listed: no criterion names the functions it polices, so a
+    renamed / newly added UA writer or credential-arming site is covered on the
+    day it lands. The parameter list and the body are delimited by the shared
+    bracket matcher, so a `}` inside a string, a comment or a template hole can
+    no longer close the body early (that is what made the old scanner read the
+    wrong text).
     """
     out = []
-    pos = 0
-    while True:
-        m = FUN_HEAD_RE.search(text, pos)
-        if not m:
-            return out
-        i = m.end() - 1
-        depth = 0
-        while i < len(text):
-            c = text[i]
-            if c == '"' or c == "'":
-                i = skip_string(text, i)
-                continue
-            elif c == "(":
-                depth += 1
-            elif c == ")":
-                depth -= 1
-                if depth == 0:
-                    break
-            i += 1
-        j = i + 1
-        while j < len(text) and text[j] not in "{=":
-            j += 1
-        if j >= len(text):
-            return out
-        if text[j] == "=":
-            pos = j + 1
+    n = len(doc)
+    for m in FUN_HEAD_RE.finditer(doc):
+        p_close = match_bracket(doc, m.end() - 1)
+        if p_close < 0:
             continue
-        body, end = brace_body(text, j)
-        out.append((m.group(1), body))
-        pos = end
+        j = p_close + 1
+        while j < n and doc[j] in " \t\r\n":
+            j += 1
+        if j < n and doc[j] == ":":
+            while j < n and doc[j] not in "={":
+                if doc[j] == "\n":
+                    break
+                j += 1
+        if j >= n or doc[j] != "{":
+            continue  # expression-bodied / abstract: nothing to grade
+        b_close = match_bracket(doc, j)
+        if b_close < 0:
+            continue
+        out.append((m.group(1), doc[j + 1:b_close]))
+    return out
 
 
 def analyse_lifecycle(manager_src, holder_src):
     """[deep-audit-1045 B-02] -> [(criterion, ok, detail)] for the WebView
     lifecycle contract: injected-script dispatch, runtime UA writers, and the
     teardown callback drain in BOTH owners."""
-    mdoc = strip_comments(manager_src)
-    hdoc = strip_comments(holder_src)
-    mfns = iter_functions(mdoc)
-    hfns = iter_functions(hdoc)
+    mdoc, hdoc = code_of(manager_src), code_of(holder_src)
+    mfns, hfns = iter_functions(mdoc), iter_functions(hdoc)
     out = []
 
     # C1 — the blob: download injection. Arms a one-shot bridge credential and
@@ -286,7 +251,7 @@ def analyse_lifecycle(manager_src, holder_src):
     for name, body in armed:
         out.append((
             "the blob-download injection (%s) is not gated by the destroyed latch" % name,
-            LATCH in body,
+            latch_guard(body, ARM_RE.search(body).start()),
             "BrowserUseManager.kt %s()" % name,
         ))
         out.append((
@@ -328,7 +293,7 @@ def analyse_lifecycle(manager_src, holder_src):
     for label, name, body in writers:
         out.append((
             "the user-agent switch (%s) writes settings/reload without the destroyed latch" % name,
-            LATCH in body,
+            latch_guard(body, body.find(UA_WRITE)),
             "%s %s()" % (label, name),
         ))
 
@@ -377,21 +342,59 @@ POLICY_LISTS_RE = re.compile(r"listOf\(([^)]*)\)")
 STEP_RE = re.compile(r"ReleaseStep\.([A-Z_]+)")
 
 def lambda_body(text, brace_at):
-    """`{...}` body at `brace_at` (the index of a '{'), or None."""
-    if brace_at < 0 or brace_at >= len(text) or text[brace_at] != "{":
-        j = text.find("{", max(brace_at, 0))
-        if j < 0:
+    """`{...}` text at `brace_at` (index of a '{'), or None — braces included.
+
+    Bracket matching comes from the shared ast (`match_bracket`), so a brace
+    inside a string / comment / template cannot truncate the lambda.
+    """
+    i = brace_at
+    if i < 0 or i >= len(text) or text[i] != "{":
+        i = text.find("{", max(brace_at, 0))
+        if i < 0:
             return None
-        brace_at = j
-    body, _end = brace_body(text, brace_at)
-    return body
+    end = match_bracket(text, i)
+    if end < 0:
+        return None
+    return text[i:end + 1]
+
+
+def latch_guard(body, write_pos):
+    """Is there a LIVE `if (<destroyed>…) { return/throw … }` before [write_pos]?
+
+    The old criterion was `LATCH in body` — a spelling anchor. It is green for
+    `if (destroyed && false) { return }` (the identifier is there, nothing is
+    gated) and for `if (!destroyed) return` (polarity inverted: every live call
+    is dropped instead). Both were witnesses.
+
+    Graded here: the condition mentions the latch, is FEASIBLE
+    (`guard_feasible` folds `&& false` / `1 == 2` / `!true`), is not negated,
+    its branch exits the caller (bare return / throw, not `return@label`), and
+    it stands BEFORE the write it is supposed to gate.
+    """
+    for cond, t_start, t_end, e_start, e_end in if_blocks(body):
+        if write_pos >= 0 and t_start > write_pos:
+            continue
+        if not contains_ident(cond, LATCH):
+            continue
+        if strip_parens(cond.strip()).startswith("!"):
+            continue  # inverted: keeps running exactly when destroyed
+        if not guard_feasible(cond):
+            continue  # `destroyed && false` gates nothing
+        if re.search(r"\b(?:return|throw)\b(?!\s*@)", body[t_start:t_end]):
+            return True
+    return False
 
 def deferred_body_guarded(body):
-    """True iff the body's FIRST statement is `if (<latch>…) return…`.
+    """True iff the body's FIRST statement is a stand-down guard on the latch.
 
-    Fail-closed by construction: the guard has to open the block. A guard placed
-    after the work it was meant to stop is exactly the pre-fix shape with extra
-    text.
+    The old rule only asked "does the first statement start with `if` and
+    mention the latch and return" — so `if (false && !canRunDeferred()) return`
+    (never taken: the block runs on a destroyed view, which is exactly the
+    bug) and `if (canRunDeferred()) return` (polarity inverted: the block never
+    runs at all, the formula never renders) both passed.
+
+    Graded here: the condition is FEASIBLE, and its POLARITY is "stand down
+    once released" — a negated `canRunDeferred()`, or a positive `isReleased`.
     """
     inner = body[1:]
     i = 0
@@ -402,24 +405,22 @@ def deferred_body_guarded(body):
     j = inner.find("(", i)
     if j < 0:
         return False
-    depth = 0
-    k = j
-    while k < len(inner):
-        c = inner[k]
-        if c == '"' or c == "'":
-            k = skip_string(inner, k)
-            continue
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                break
-        k += 1
-    cond = inner[j:k + 1]
-    if "canRunDeferred(" not in cond and "isReleased" not in cond:
+    close = match_bracket(inner, j)
+    if close < 0:
         return False
-    return re.match(r"\s*return\b", inner[k + 1:k + 120]) is not None
+    cond = inner[j + 1:close]
+    if not re.match(r"\s*(?:return|throw)\b", inner[close + 1:close + 120]):
+        return False
+    c = strip_parens(cond.strip())
+    negated = c.startswith("!")
+    inner_c = strip_parens(c[1:].strip()) if negated else c
+    if negated:
+        if "canRunDeferred(" not in inner_c:
+            return False
+    elif not contains_ident(inner_c, "isReleased"):
+        return False
+    return guard_feasible(cond)
+
 
 def analyse_release_latch(sources):
     """-> [(criterion, ok, detail)] for the offscreen WebView release contract.
@@ -428,7 +429,7 @@ def analyse_release_latch(sources):
     """
     out = []
     for label, src in sources:
-        doc = strip_comments(src)
+        doc = code_of(src)
         bodies = []
         for m in ONRELEASE_RE.finditer(doc):
             body = lambda_body(doc, m.end() - 1)
@@ -519,7 +520,7 @@ def analyse_release_latch(sources):
 def analyse_release_policy(src):
     """-> [(criterion, ok, detail)] for WebViewReleaseLatch.kt: the plan ORDER
     is the contract, and the two hosts cannot re-derive it locally."""
-    doc = strip_comments(src)
+    doc = code_of(src)
     plans = []
     for m in POLICY_LISTS_RE.finditer(doc):
         steps = STEP_RE.findall(m.group(1))
@@ -549,35 +550,83 @@ def analyse_release_policy(src):
     ))
     return out
 
+TAKE_RE = re.compile(r"asyncJsSlot\s*\.\s*takeCurrent\s*\(\s*\)")
+COMPLETE_RE = re.compile(r"\.\s*complete\s*\(")
+
+
+def take_wakes_waiter(body, lit_body):
+    """Does some LIVE `asyncJsSlot.takeCurrent()` hand its deferred to `.complete(…)`?
+
+    The old criterion was the substring `asyncJsSlot.takeCurrent()` — taking the
+    deferred out of the slot and DROPPING it satisfies that, while the waiter
+    keeps burning its full 30s/60s timeout after the renderer died. That is the
+    exact regression ISSUE-08 fixed, re-introduced by one deleted `?.complete(…)`.
+
+    Graded here: the take must be on a reachable path and the deferred it
+    returned must reach a `.complete(` in the same expression (directly via
+    `?.complete(…)`, or through a scope call such as `?.let { it.complete(…) }`).
+    """
+    for m in TAKE_RE.finditer(body):
+        if not reachable(body, m.start()):
+            continue
+        end = expr_end(body, m.start())
+        if end <= m.start():
+            continue
+        if COMPLETE_RE.search(lit_body[m.start():end]):
+            return True
+    return False
+
+
 def analyse_manager(manager_src):
     """-> [(criterion, ok, detail)] for the two teardown bodies."""
-    doc = strip_comments(manager_src)
+    doc = code_of(manager_src)
+    lit = lit_of(manager_src)
     out = []
-    destroy = function_body(doc, "destroy")
+    destroy, destroy_lit = fn_bodies(doc, lit, "destroy")
     for crit, needle in DESTROY_MUST:
-        if destroy is None:
-            out.append((crit, False, "destroy() body not found"))
-        else:
-            out.append((crit, needle in destroy, "destroy() body"))
-    onboard = function_body(doc, "onRendererGone")
+        out.append((crit, destroy is not None and needle in destroy, "destroy() body"))
+    out.append((
+        "destroy() does not wake the async-JS waiter",
+        destroy is not None and take_wakes_waiter(destroy, destroy_lit),
+        "destroy() body",
+    ))
+    onboard, onboard_lit = fn_bodies(doc, lit, "onRendererGone")
     for crit, needle in RENDERER_MUST:
-        if onboard is None:
-            out.append((crit, False, "onRendererGone() body not found"))
-        else:
-            out.append((crit, needle in onboard, "onRendererGone() body"))
+        out.append((crit, onboard is not None and needle in onboard, "onRendererGone() body"))
+    out.append((
+        "onRendererGone does not wake the async-JS waiter",
+        onboard is not None and take_wakes_waiter(onboard, onboard_lit),
+        "onRendererGone() body",
+    ))
     return out
 
 
 def scan_lines(name, src):
-    """-> [(name, lineno)] for every bare form-oriented decode call site."""
+    """-> [(name, lineno)] for every decode site whose FIRST ARGUMENT is not
+    the `+`-escaped payload.
+
+    The old rule grepped a five-line WINDOW around the call for the literal
+    `.replace("+", "%2B")`, so
+        p.replace("+", "%2B").let { URLDecoder.decode(p, "UTF-8") }
+    was green (the escape is on the same lines) while the decoded text was the
+    RAW payload — every `+` in it silently became a space. Graded here: the
+    escape must be in the value the first argument actually evaluates to.
+    """
+    try:
+        code = code_of(src)
+        lit = lit_of(src)
+    except KotlinLexError:
+        return [(name, 0)]
     bad = []
-    lines = strip_comments(src).split("\n")
-    for i, line in enumerate(lines):
-        if not CALL_RE.search(line):
+    for m in CALL_RE.finditer(code):
+        line = code[:m.start()].count("\n") + 1
+        spans = call_args(code, m.end() - 1)
+        if not spans:
+            bad.append((name, line))
             continue
-        window = "\n".join(lines[max(0, i - BACK):i + FWD + 1])
-        if ESCAPE not in window:
-            bad.append((name, i + 1))
+        a, b = spans[0]
+        if not any(ESCAPE_RE.search(src_) for src_ in value_sources(lit[a:b])):
+            bad.append((name, line))
     return bad
 
 
@@ -596,6 +645,25 @@ def url_decode_violations(root):
     return bad
 
 
+def identity_peel(expr):
+    """`.let { it }` / `.run { this }` hand the receiver straight through.
+
+    `value_sources()` reads a scope block's tail expression, so an identity
+    block reports `it` — which means "the receiver", and a value criterion that
+    graded the spelling would call a value-preserving chain a discard.
+    """
+    for _ in range(4):
+        calls = scope_calls(expr)
+        if not calls:
+            return expr
+        name, start, open_pos, end = max(calls, key=lambda c: c[3])
+        if name in ("let", "run") and expr[open_pos + 1:end - 1].strip() in ("it", "this"):
+            expr = expr[:start].strip()
+            continue
+        return expr
+    return expr
+
+
 def analyse_slot(slot_src):
     """[meta-audit-1024 anchor] The teardown take must still *take*.
 
@@ -607,18 +675,17 @@ def analyse_slot(slot_src):
     `executeJS()` / `fetch()` waiter burned its full 30s/60s timeout after a
     tab teardown or a renderer crash (deep-audit-1019 ISSUE-08 again).
 
-    The decision point is the EFFECT, so all three of these must hold inside the
-    body of `takeCurrent`:
-      1. it reads the slot (`val current = entry ?: return null` or any read of
-         `entry`);
-      2. it CLEARS the slot (`entry = null`) — a take that leaves the entry in
-         place hands the same deferred out on the next teardown;
-      3. it returns what it read (`return current.value`, or `return entry.value`
-         in a body that captured it first).
+    Batch 7 adds two more arms on the same effect:
+      * ORDER — the slot must be READ before it is cleared. `entry = null` on
+        the first line plus `val current = entry ?: return null` after it
+        returns null on every teardown, and every older arm was green.
+      * VALUE — the returned value must still derive from the taken entry, not
+        from a literal: `return current.let { null }` keeps "`.value` appears"
+        false for the regex but true for nothing else.
     A body that cannot be extracted is RED (fail-closed), never a silent pass.
     """
-    doc = strip_comments(slot_src)
-    body = function_body(doc, "takeCurrent")
+    doc = code_of(slot_src)
+    body = fn_body(doc, "takeCurrent")
     if body is None:
         return [
             ("AsyncJsSlot.takeCurrent() teardown entry point is gone",
@@ -627,17 +694,32 @@ def analyse_slot(slot_src):
              False, "AsyncJsSlot.kt"),
             ("AsyncJsSlot.takeCurrent() no longer clears the slot",
              False, "AsyncJsSlot.kt"),
+            ("AsyncJsSlot.takeCurrent() clears the slot before reading it",
+             True, "AsyncJsSlot.kt"),
             ("AsyncJsSlot.takeCurrent() no longer returns the taken value",
              False, "AsyncJsSlot.kt"),
         ]
+    reads = [m.start() for m in SLOT_READ_RE.finditer(body) if reachable(body, m.start())]
+    clears = [m.start() for m in SLOT_CLEAR_RE.finditer(body) if reachable(body, m.start())]
+    kept = None
+    for m in re.finditer(r"\breturn\b(?![\s]*@)", body):
+        if not reachable(body, m.start()):
+            continue
+        end = expr_end(body, m.end())
+        expr = body[m.end():end].strip()
+        if not expr:
+            continue
+        if any(re.search(r"\.value\b", src_) for src_ in value_sources(identity_peel(expr))):
+            kept = m.start()
+            break
+    order_ok = (not reads) or (not clears) or min(reads) < min(clears)
     return [
         ("AsyncJsSlot.takeCurrent() teardown entry point is gone", True, "AsyncJsSlot.kt"),
-        ("AsyncJsSlot.takeCurrent() no longer reads the slot",
-         bool(SLOT_READ_RE.search(body)), "AsyncJsSlot.kt"),
-        ("AsyncJsSlot.takeCurrent() no longer clears the slot",
-         bool(SLOT_CLEAR_RE.search(body)), "AsyncJsSlot.kt"),
+        ("AsyncJsSlot.takeCurrent() no longer reads the slot", bool(reads), "AsyncJsSlot.kt"),
+        ("AsyncJsSlot.takeCurrent() no longer clears the slot", bool(clears), "AsyncJsSlot.kt"),
+        ("AsyncJsSlot.takeCurrent() clears the slot before reading it", order_ok, "AsyncJsSlot.kt"),
         ("AsyncJsSlot.takeCurrent() no longer returns the taken value",
-         bool(SLOT_RETURN_RE.search(body)), "AsyncJsSlot.kt"),
+         kept is not None and (not clears or kept > min(clears)), "AsyncJsSlot.kt"),
     ]
 
 
@@ -826,10 +908,17 @@ BASE_KATEX = """
         }
 """
 
+# number of selftest arms executed (reported in the closing marker so the CI
+# log carries the arm count, not just PASS)
+ARMS = 0
+
+
 def selftest():
     fails = []
 
     def expect(label, got_ok, want_ok, crit_filter=None):
+        global ARMS
+        ARMS += 1
         if got_ok != want_ok:
             fails.append(label)
             print("  [FAIL] %s -> ok=%s (want %s)" % (label, got_ok, want_ok))
@@ -855,6 +944,22 @@ def selftest():
     commented = GOOD_MANAGER.replace("navigationDeferred?.complete(", "// navigationDeferred?.complete(")
     expect("breaker: navigation wake commented out", manager_ok(commented, "navigation waiter"), False)
 
+    # 07-1 (batch-7): the deferred is TAKEN and DROPPED — the old substring arm
+    # ("`asyncJsSlot.takeCurrent()` appears") is satisfied while the waiter keeps
+    # burning its full 30s/60s timeout after a teardown / renderer crash.
+    bare_teardown = re.sub(r"asyncJsSlot\.takeCurrent\(\)\?\.complete\([^\n]*",
+                           "asyncJsSlot.takeCurrent()", GOOD_MANAGER)
+    expect("witness: every async-JS wake-up takes the deferred and drops it",
+           manager_ok(bare_teardown, "destroy() does not wake the async-JS"), False)
+    expect("witness: onRendererGone takes the deferred and drops it",
+           manager_ok(bare_teardown, "onRendererGone does not"), False)
+    completed_via_scope = GOOD_MANAGER.replace(
+        'asyncJsSlot.takeCurrent()?.complete("{\\"error\\":\\"gone\\"}")',
+        'asyncJsSlot.takeCurrent()?.let { it.complete("{\\"error\\":\\"gone\\"}") }',
+    )
+    expect("precision: completing the take through `?.let { … }` still wakes the waiter",
+           manager_ok(completed_via_scope, "destroy() does not wake the async-JS"), True)
+
     # 5: the escape check (real call into scan_lines, not a sanity string).
     good_escape = 'val s = URLDecoder.decode(p.replace("+", "%2B"), "UTF-8")'
     bad_escape = 'val s = URLDecoder.decode(p, "UTF-8")'
@@ -872,6 +977,20 @@ def selftest():
     expect(
         "precision: a bare call inside a KDoc block is not a call",
         scan_lines("f.kt", "/** old shape was URLDecoder.decode(p, \"UTF-8\") */\nval y = 2") == [],
+        True,
+    )
+    # 07-4 (batch-7): the escape sits on the same lines as the call but not in
+    # the value being decoded — a +/-line window cannot see the difference.
+    expect(
+        "witness: the escape is applied to a value the call does not decode",
+        scan_lines("f.kt",
+                   'val s = p.replace("+", "%2B").let { URLDecoder.decode(p, "UTF-8") }') == [],
+        False,
+    )
+    expect(
+        "precision: the escape carried through a non-discarding call is accepted",
+        scan_lines("f.kt",
+                   'val s = URLDecoder.decode(p.replace("+", "%2B").trim(), "UTF-8")') == [],
         True,
     )
 
@@ -918,6 +1037,33 @@ def selftest():
         GOOD_SLOT.replace("        entry = null\n", ""),
         ["no longer clears"],
     )
+    # 07-2 (batch-7): the slot is cleared before it is read, so every teardown
+    # take hands out null — all three older arms (reads/clears/returns) stay green.
+    slot_expect(
+        "witness: takeCurrent clears before it reads",
+        GOOD_SLOT.replace(
+            "        val current = entry ?: return null\n        entry = null\n",
+            "        entry = null\n        val current = entry ?: return null\n",
+        ),
+        ["clears the slot before reading it"],
+    )
+    # 07-6 (batch-7): the taken value is nullified just before it is returned.
+    slot_expect(
+        "witness: the taken value is nullified inside `.let { null }`",
+        GOOD_SLOT.replace("return current.value", "return current.let { null }"),
+        ["no longer returns"],
+    )
+    slot_expect(
+        "witness: `.value` is read and then nullified on the same line",
+        GOOD_SLOT.replace("return current.value", "return current.value.let { null }"),
+        ["no longer returns"],
+    )
+    slot_expect(
+        "precision: a value-preserving `.let { it }` still returns the take",
+        GOOD_SLOT.replace("return current.value", "return current.value.let { it }"),
+        [],
+    )
+
     slot_expect(
         "breaker: takeCurrent clears but drops the value",
         GOOD_SLOT.replace("        return current.value\n", "        return null\n"),
@@ -971,6 +1117,8 @@ def selftest():
     # neighbouring criterion fails the selftest, which is what keeps "one arm
     # per criterion" honest.
     def expect_red(label, mgr, holder, want):
+        global ARMS
+        ARMS += 1
         got = [c for c, ok, _ in analyse_lifecycle(mgr, holder) if not ok]
         for w in want:
             if not any(w in c for c in got):
@@ -1062,6 +1210,67 @@ def selftest():
         [],
     )
 
+    # 07-5 (batch-7): the latch identifier is present but the guard gates
+    # nothing (`&& false`) or runs on the wrong polarity (`!destroyed`). Both were
+    # green for the old `LATCH in body` arm.
+    dead_ua_latch = GOOD_LIFECYCLE_MANAGER.replace(
+        "    fun setUserAgent(profile: UserAgentProfile, customUA: String? = null) {\n"
+        "        if (destroyed) {\n",
+        "    fun setUserAgent(profile: UserAgentProfile, customUA: String? = null) {\n"
+        "        if (destroyed && false) {\n",
+    )
+    expect_red(
+        "witness: the UA latch guard is dead (`destroyed && false`)",
+        dead_ua_latch,
+        GOOD_LIFECYCLE_HOLDER,
+        ["user-agent switch (setUserAgent) writes"],
+    )
+
+    inverted_ua_latch = GOOD_LIFECYCLE_MANAGER.replace(
+        "    fun setUserAgent(profile: UserAgentProfile, customUA: String? = null) {\n"
+        "        if (destroyed) {\n",
+        "    fun setUserAgent(profile: UserAgentProfile, customUA: String? = null) {\n"
+        "        if (!destroyed) {\n",
+    )
+    expect_red(
+        "witness: the UA latch guard is inverted (`!destroyed`)",
+        inverted_ua_latch,
+        GOOD_LIFECYCLE_HOLDER,
+        ["user-agent switch (setUserAgent) writes"],
+    )
+
+    dead_arm_latch = GOOD_LIFECYCLE_MANAGER.replace(
+        "    private fun fetchBlobDownload(url: String) {\n"
+        "        if (destroyed) {\n",
+        "    private fun fetchBlobDownload(url: String) {\n"
+        "        if (destroyed && false) {\n",
+    )
+    expect_red(
+        "witness: the blob-arm latch guard is dead (`destroyed && false`)",
+        dead_arm_latch,
+        GOOD_LIFECYCLE_HOLDER,
+        ["is not gated by the destroyed latch"],
+    )
+
+    late_ua_latch = GOOD_LIFECYCLE_MANAGER.replace(
+        "    fun setUserAgent(profile: UserAgentProfile, customUA: String? = null) {\n"
+        "        if (destroyed) {\n"
+        "            return\n"
+        "        }\n"
+        "        webView.settings.userAgentString = ua\n",
+        "    fun setUserAgent(profile: UserAgentProfile, customUA: String? = null) {\n"
+        "        webView.settings.userAgentString = ua\n"
+        "        if (destroyed) {\n"
+        "            return\n"
+        "        }\n",
+    )
+    expect_red(
+        "witness: the UA latch guard sits after the write it protects",
+        late_ua_latch,
+        GOOD_LIFECYCLE_HOLDER,
+        ["user-agent switch (setUserAgent) writes"],
+    )
+
     mgr_teardown = GOOD_LIFECYCLE_MANAGER.replace("        webView.removeCallbacks(null)\n", "")
     expect_red(
         "breaker: the manager destroy() drops the queued callbacks",
@@ -1150,6 +1359,8 @@ def selftest():
     # Same discipline as `expect_red`: the EXPECTED red set is written out by
     # hand from the criterion table, never derived from a run.
     def expect_latch(label, katex, preview, policy, want, n=None):
+        global ARMS
+        ARMS += 1
         res = analyse_release_latch([
             ("KaTeXView.kt", katex),
             ("FilePreviewScreen.kt", preview),
@@ -1228,6 +1439,47 @@ def selftest():
         GOOD_POLICY,
         ["KaTeXView.kt deferred block"],
         1,
+    )
+
+    # 07-3 (batch-7): the guard opens the block but can never fire, or fires on
+    # the wrong polarity — the old "first statement is an if" arm stays green.
+    dead_capture_guard = GOOD_KATEX.replace(
+        "                                        if (!releaseLatch.canRunDeferred()) return@Runnable\n",
+        "                                        if (false && !releaseLatch.canRunDeferred()) return@Runnable\n",
+    )
+    expect_latch(
+        "witness: the deferred guard's condition is always false (nothing stands down)",
+        dead_capture_guard,
+        GOOD_PREVIEW,
+        GOOD_POLICY,
+        ["KaTeXView.kt deferred block"],
+        1,
+    )
+
+    inverted_capture_guard = GOOD_KATEX.replace(
+        "                                        if (!releaseLatch.canRunDeferred()) return@Runnable\n",
+        "                                        if (releaseLatch.canRunDeferred()) return@Runnable\n",
+    )
+    expect_latch(
+        "witness: the deferred guard's polarity is inverted (the block never runs)",
+        inverted_capture_guard,
+        GOOD_PREVIEW,
+        GOOD_POLICY,
+        ["KaTeXView.kt deferred block"],
+        1,
+    )
+
+    released_flag_guard = GOOD_KATEX.replace(
+        "                                        if (!releaseLatch.canRunDeferred()) return@Runnable\n",
+        "                                        if (releaseLatch.isReleased) return@Runnable\n",
+    )
+    expect_latch(
+        "precision: a positive `isReleased` stand-down guard is accepted",
+        released_flag_guard,
+        GOOD_PREVIEW,
+        GOOD_POLICY,
+        [],
+        0,
     )
 
     untracked = GOOD_KATEX.replace("                                    releaseLatch.track(capture)\n", "")
@@ -1344,13 +1596,26 @@ def selftest():
     return fails
 
 
+def run_analysis(fn, *args):
+    """Run one analysis; a lexer failure is a RED finding, never a crash.
+
+    `mask_code` refuses an unterminated literal (`KotlinLexError`). Swallowing
+    that as "no violation" is how a gate goes blind on a file it cannot read.
+    """
+    try:
+        return list(fn(*args))
+    except KotlinLexError as exc:
+        return [("%s could not lex its source (%s)" % (getattr(fn, "__name__", "analysis"), exc),
+                 False, "fail-closed")]
+
+
 def main():
     if "--selftest" in sys.argv:
         fails = selftest()
         if fails:
             print("SELFTEST FAIL (%d)" % len(fails))
             return 1
-        print("BROWSER_DESTROY_WAKEUP_SELFTEST=PASS")
+        print("BROWSER_DESTROY_WAKEUP_SELFTEST=PASS (%d arms)" % ARMS)
         return 0
 
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -1368,14 +1633,14 @@ def main():
 
     manager_src = open(manager_path, encoding="utf-8").read()
     holder_src = open(holder_path, encoding="utf-8").read()
-    results = list(analyse_manager(manager_src))
-    results += list(analyse_lifecycle(manager_src, holder_src))
-    results += list(analyse_slot(open(slot_path, encoding="utf-8").read()))
-    results += list(analyse_release_latch([
+    results = run_analysis(analyse_manager, manager_src)
+    results += run_analysis(analyse_lifecycle, manager_src, holder_src)
+    results += run_analysis(analyse_slot, open(slot_path, encoding="utf-8").read())
+    results += run_analysis(analyse_release_latch, [
         ("KaTeXView.kt", open(katex_path, encoding="utf-8").read()),
         ("FilePreviewScreen.kt", open(preview_path, encoding="utf-8").read()),
-    ]))
-    results += list(analyse_release_policy(open(policy_path, encoding="utf-8").read()))
+    ])
+    results += run_analysis(analyse_release_policy, open(policy_path, encoding="utf-8").read())
 
     violations = url_decode_violations(root)
     results.append((
