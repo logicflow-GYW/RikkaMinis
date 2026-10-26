@@ -172,8 +172,38 @@ chat_session_id_binding_check  selftest rc=0 marker=True    real tree rc=0
 
 ## §6 CI
 
-- 分支 `fix/r3-sessionbinding`，head_sha 与本地 HEAD 逐字符一致（见下）
-- run id / 关键读数：**待回填**
+| 项 | 值 |
+|---|---|
+| run | **#2734** / id `40310010014` / job `121528522496` / attempt **1** |
+| 事件 | `workflow_dispatch`（分支 push 不触发，按纪律手动 dispatch） |
+| head_sha | `80aef69a1da3f2ed6973a57ddbc4720ff2dddee5` —— 与本地 `git rev-parse HEAD` **逐字符一致** |
+| 结论 | **success**（10:46:26Z → 11:11:08Z，24m42s；26 步，唯一非 success = 第 23 步 `Publish to Releases` **skipped**，main 门控符合预期） |
+| 日志 | 1,486,498 B / NUL 0 / 17,852 行 |
+
+逐条读数（判读口径见 evidence-discipline：「FAILED 行」先分辨用例名子串）：
+
+```
+Summary: 112 passed, 0 failed        恰 1 条
+ALL 344 CASES PASS                   恰 1 条        ← 冻结夹具全绿（本波未跑本地全量，由 CI 承担）
+^ e:                                 0 条           ← 无编译错误
+CHAT_SESSION_ID_BINDING_SELFTEST=PASS    恰 1 条    ← 16 臂在 CI 里有见证
+SESSION_SHEET_ID_BINDING_SELFTEST=PASS   恰 1 条    ← 49 臂
+含 FAILED 的行                        6 条，全部以 PASSED 结尾（用例名子串，非失败）
+```
+
+两门在 CI 里真跑（不是被跳过）：
+
+```
+[93/112] F/ISSUE-06 chat session id binding
+chat_session_id_binding_check: all criteria satisfied
+session_sheet_id_binding_check: OK (4 session-scoped call blocks + LocalMarkdownSessionId …)
+✅ chat_session_id_binding_check selftest has teeth (CHAT_SESSION_ID_BINDING_SELFTEST=PASS)
+✅ session_sheet_id_binding_check selftest has teeth (SESSION_SHEET_ID_BINDING_SELFTEST=PASS)
+```
+
+**门自证 stdout 不进 CI 日志**（既知装置限制）：`test_scan` 只断言 marker，`R3 seam arms = 8`
+这类计数行不会出现在 job 日志里（本次 grep `R3 seam` = 0 命中，符合预期）。臂数证据由本报告 §5
+与 `--selftest` 本地输出承载。
 
 ## §7 残留（P2，各带触发条件 · 触发后方案 · 搁置理由）
 
