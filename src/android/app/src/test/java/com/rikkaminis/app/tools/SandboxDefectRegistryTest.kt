@@ -20,7 +20,7 @@ class SandboxDefectRegistryTest {
         ## A 类：路径缺陷（有健康旁路，绕行即解）
 
         ### A1 本地 git push / clone --local 失败
-        - 症状：`unpack should have generated X / bad pack`、`failed to create link '.l2s.tmp_obj_*': Operation not permitted`
+        - 症状：`unpack should have generated X / bad pack header`、`failed to create link '.l2s.tmp_obj_*': Operation not permitted`
         - 断点层：receive-pack quarantine 跨目录迁移 + 硬链接扇出
         - 健康路径：①方向翻转 `git -C <dst> fetch <src> <refspec>` ②bundle create+fetch ③`git clone --no-local`
         - 救不动：thin pack / --no-thin / protocol v0 / file:// / unpackLimit 高值 / threads=1
@@ -53,7 +53,7 @@ class SandboxDefectRegistryTest {
         val a1 = SandboxDefectRegistry.parse(sample)[0]
         assertEquals(3, a1.seedGroups.size)
         assertEquals(listOf("unpack", "generated"), a1.seedGroups[0])
-        assertEquals(listOf("bad", "pack"), a1.seedGroups[1])
+        assertEquals(listOf("bad", "pack", "header"), a1.seedGroups[1])
         assertEquals(
             listOf("create", "link", "l2s.tmp_obj", "operation", "permitted"),
             a1.seedGroups[2],
@@ -72,6 +72,65 @@ class SandboxDefectRegistryTest {
         val text = "### X1 t\n- 症状：`fatal error`\n- 健康路径：p\n"
         val d = SandboxDefectRegistry.parse(text).single()
         assertTrue(d.seedGroups.isEmpty())
+    }
+
+    // ── 2026-10-27: heading bleed, field forms, generic-only seeds ────────
+
+    @Test
+    fun parse_accepts_double_hash_entry_heading() {
+        val text = """
+            ### B5 陈旧视图类
+            - 通用判据：换直接读取原语交叉验证
+            ## S28 壳内 scan.sh 整链假红
+            - 症状：`python3: Function not implemented`
+            - 健康路径：逐门直跑
+        """.trimIndent()
+        val d = SandboxDefectRegistry.parse(text)
+        assertEquals(listOf("B5", "S28"), d.map { it.id })
+        assertTrue(d[0].seedGroups.isEmpty())
+        assertEquals(listOf("python3", "function", "implemented"), d[1].seedGroups.single())
+    }
+
+    @Test
+    fun non_entry_heading_does_not_bleed_into_previous_entry() {
+        // The live defect: a `## <non-entry>` section's symptom line used to be
+        // appended to the last `###` entry (B5 fired carrying A19's seeds).
+        val text = """
+            ### B5 陈旧视图类
+            - 通用判据：x
+            ## 元规则
+            - 症状：`cat: /tmp/.native-offload-`
+            - 健康路径：错开启动
+        """.trimIndent()
+        val d = SandboxDefectRegistry.parse(text).single()
+        assertEquals("B5", d.id)
+        assertTrue(d.seedGroups.isEmpty())
+        assertNull(d.recovery)
+    }
+
+    @Test
+    fun parse_accepts_bold_field_lines() {
+        // Nine registry entries write `- **症状**：`; the old strict prefix
+        // check made every one of them permanently unmatchable.
+        val text = """
+            ### S26 git clone 后坏对象
+            - **症状**：`invalid sha1 pointer`
+            - **健康路径**：删三个断链 symlink
+        """.trimIndent()
+        val d = SandboxDefectRegistry.parse(text).single()
+        assertEquals(listOf("invalid", "sha1", "pointer"), d.seedGroups.single())
+        assertTrue(d.recovery!!.contains("断链"))
+    }
+
+    @Test
+    fun generic_only_seed_groups_never_become_match_groups() {
+        val text = """
+            ### X9 t
+            - 症状：`grep -n X file` / `" CODE "` / `wait` / `bad pack`
+            - 健康路径：p
+        """.trimIndent()
+        val d = SandboxDefectRegistry.parse(text).single()
+        assertTrue("all-generic seeds must be dropped", d.seedGroups.isEmpty())
     }
 
     // ── match ─────────────────────────────────────────────────────────────
@@ -114,6 +173,49 @@ class SandboxDefectRegistryTest {
         val defects = SandboxDefectRegistry.parse(sample)
         val hits = SandboxDefectRegistry.match("活跃工作目录莫名消失，磁盘压力归因错误", defects)
         assertTrue(hits.isEmpty())
+    }
+
+    @Test
+    fun no_hit_on_shell_noise_that_used_to_fire_a1b() {
+        // Replay of a real 2026-10-27 failing read: an unquoted $LOG made grep
+        // split the filename, so the output was 7× "No such file or directory"
+        // plus the exit-code trailer. It used to recall A1b (裸 NUL) because its
+        // seed `grep -n X file` reduced to [grep, file] and `" CODE "` to [code].
+        val defects = SandboxDefectRegistry.parse(
+            "### A1b t\n- 症状：`binary file matches`\n- 健康路径：把裸 NUL 规范成转义\n",
+        )
+        val noise = """
+            LOG=build/10_Verify JNI symbols match package.txt  size=1929
+            grep: build/10_Verify: No such file or directory
+            grep: JNI: No such file or directory
+            grep: symbols: No such file or directory
+            (exit code: 1) (exit code 1)
+        """.trimIndent()
+        assertTrue(SandboxDefectRegistry.match(noise, defects).isEmpty())
+        // positive control: the specific seed of the same entry still fires
+        assertEquals(
+            1,
+            SandboxDefectRegistry.match("MarkdownClipboard.kt: binary file matches", defects).size,
+        )
+    }
+
+    @Test
+    fun no_hit_on_stall_guard_text_that_used_to_fire_b5() {
+        // `wait` as a whole seed group matched the stall-guard wording; the
+        // group is now dropped, while A19's real error line still recalls.
+        val defects = SandboxDefectRegistry.parse(
+            "### A19 t\n- 症状：`cat: /tmp/.native-offload-`\n- 健康路径：错开启动\n",
+        )
+        val stall = "[stall-guard] no output and no CPU progress for 180s — the command " +
+            "was interrupted and its process tree was killed. If it was waiting for input, " +
+            "pass explicit arguments/flags"
+        assertTrue(SandboxDefectRegistry.match(stall, defects).isEmpty())
+        assertEquals(
+            1,
+            SandboxDefectRegistry.match(
+                "cat: /tmp/.native-offload-29831-4: No such file or directory", defects,
+            ).size,
+        )
     }
 
     @Test
