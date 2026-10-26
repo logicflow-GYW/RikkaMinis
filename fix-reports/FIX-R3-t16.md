@@ -132,7 +132,7 @@ xproc 此前只打印 `== N problem(s) ==` + 通用尾注，四族判据（缺�
 
 ### 5.1 全量夹具（`test_scan.py`）
 
-**结论：`ALL 344 CASES PASS` 交 CI 承担**——本沙箱单进程跑完整 `test_scan.py`（约 15 分钟）在 26/46 函数处被整壳打断（第三次同族），改用逐函数独立进程循环（`probe/test_scan_loop.py <start>`，按索引切片续跑）。
+**结论：`ALL 344 CASES PASS` 已由 CI 给出（run `40320801909` 恰 1 次，见 §7）**——本沙箱单进程跑完整 `test_scan.py`（约 15 分钟）在 26/46 函数处被整壳打断（第三次同族），改用逐函数独立进程循环（`probe/test_scan_loop.py <start>`，按索引切片续跑）。
 
 逐函数读数（`probe/test_scan_loop{,2,3,4}.log`）：
 
@@ -175,7 +175,16 @@ xproc 此前只打印 `== N problem(s) ==` + 通用尾注，四族判据（缺�
 
 ## 7. CI
 
-（回填：run id / #编号 / head_sha 逐字符核对 / 关键日志行）
+- run：**`40320801909`** / **#2750** / job `121564939567` / attempt **1** / `success`（12:12:50Z → 12:38:11Z，25m21s），workflow_dispatch 于 `fix/r3-xproc-execgate`
+- **head_sha `576765d41d0fa69dda0b17ca07b62bb2633628ea` = 本地 HEAD 逐字符一致**（本地 `git rev-parse HEAD` 同串）
+- 步骤：28 步里**唯一 `skipped` = step 23 `Publish to Releases`**（main 门控，分支上永远 skip），其余全 `success`（含 step 3 `Run pre-build scan gate`、step 15 `Run unit tests (full suite)`、step 18 `Build APK`）
+- 日志：`1,486,583 B`，NUL 字节 **0**
+- `Summary: 112 passed, 0 failed` **恰 1 次**；`ALL 344 CASES PASS` **恰 1 次**
+- 门头条 **112 条，编号 112 互异、显示名 112 互异**（`[1/112] …` → `[112/112] …`）
+- `^ e: `（Kotlin 编译错误行）**0 条**
+- 含 `FAILED` 的 6 行**逐条核对全是 `PASSED` 用例名子串**（`slot denied produces FAILED without calling provider PASSED` 等），无真失败
+- 两门在 CI 里的印记：`cross-process boundary OK` 恰 1（step 3 门跑真树）、`4a rollback + 4b interruptible waits …` 恰 1；`test_exec_gate`（8 例冻结夹具）与 `test_xproc_boundary`（4 例）计入 344 并通过 ⇒ 本波判据在**冻结夹具上没有假阳性**
+- 本波 12 条新臂的**门自证 stdout 不进 CI 日志**（已知家族，见 §6 R10）：`XPROC-BOUNDARY SELFTEST=PASS (18 arms)` / `EXEC_GATE_SELFTEST=PASS (18 arms)` 在日志里 0 命中，需主会话在 `test_scan.py` 注册标记断言（冻结面，本支不可改）
 
 ## 8. 复现命令
 
