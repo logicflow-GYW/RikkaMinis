@@ -148,7 +148,47 @@
 
 ## 6. CI
 
-（待回填）
+| 项 | 值 |
+|---|---|
+| run | **#2741** / id `40314208838` / job `121542611983` / attempt 1 |
+| 触发 | `workflow_dispatch` on `fix/r3-backup-mcp`（分支 push 不触发，`build-apk.yml` 只绑 main） |
+| 结论 | **success**（11:19:29Z → 11:42:39Z，23m10s） |
+| head_sha | `9c17f2f72b445ef3469ad10772ddf2ad58b194f8` —— 与本地 `git rev-parse HEAD` **逐字符一致** |
+| 26 步 | 唯一非 success = step 23 `Publish to Releases` **skipped**（`if: ref == refs/heads/main` 门控，分支构建的预期行为） |
+| 日志 | 1,486,880 B |
+
+日志关键行（各自 **恰 1** 次，`grep -c`）：
+
+```
+Summary: 112 passed, 0 failed          → 1
+ALL 344 CASES PASS                     → 1
+^ e: (Kotlin 编译错误)                  → 0
+BACKUP_REMAP_ROLLUP_SELFTEST=PASS       → 1
+MCP_OAUTH_LIFECYCLE_SELFTEST=PASS       → 1
+BACKUP_STREAMING_EXPORT_SELFTEST=PASS   → 1
+门头 [N/112] 互异编号                    → 112
+```
+
+本支三门在 CI 里的见证行（各 1 次，⇒ 新判据与新臂在 CI 上真跑）：
+
+```
+backup_remap_rollup_check: OK (compact pin remapped, binding remapped, rollup packed + guarded, group run-config restored on same-name merge)
+backup_streaming_export_check: OK (arm1 + arm2 + arm3 + arm4 + arm5 + arm6 + arm7 + arm8 green)
+PASS mcp_oauth_lifecycle_check (… ; 17 form field state(s) keyed on the entry)
+  ✅ backup_remap_rollup_check selftest has teeth (BACKUP_REMAP_ROLLUP_SELFTEST=PASS)
+  ✅ backup_remap_rollup_check real tree green
+  ✅ backup_streaming_export_check selftest has teeth (BACKUP_STREAMING_EXPORT_SELFTEST=PASS)
+  ✅ backup_streaming_export_check real tree green
+  ✅ mcp_oauth_lifecycle_check selftest has teeth (MCP_OAUTH_LIFECYCLE_SELFTEST=PASS)
+  ✅ mcp_oauth_lifecycle_check real tree green
+```
+
+`FAILED` 共 6 行，逐条确认**全部是用例名的子串**（`… produces FAILED without calling provider PASSED` 等），无一条是失败用例。
+
+**因此 `ALL 344 CASES PASS` 也有 CI 侧见证**——本地 `test_scan.py` 被沙箱 `Errno 38` 打死的问题（见 §5 L3）不影响结论。
+
+**停止节点**：分支 CI 绿 = 本轮开发到此结束，未合并 main（合并起手权在主会话 / 用户）。
+
 
 ---
 
