@@ -51,6 +51,17 @@ import shutil
 import sys
 import tempfile
 
+# [batch6-t03] One structural layer for the whole gate: the shared Kotlin
+# lexer/value-flow primitives. Every hand-rolled view below (comment stripper,
+# brace counter, "does the text contain X" judge) is a defect in waiting — the
+# witnesses that broke this gate did it by putting a `}` or a `readBytes()`
+# exactly where a text scan could not see it.
+from _kotlin_lexer import KotlinLexError, mask_code
+from _kotlin_ast import (const_bool, match_bracket, split_top, stmt_spans,
+                         strip_parens, tail_expr)
+from _kotlin_valueflow import (brace_depth, contains_ident, expr_end,
+                               path_feasible, returns_exiting, value_sources)
+
 TARGET_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/sandbox/FilePreviewScreen.kt"
 
 # buildPrintHtml must read through the bounded helper and keep the decode
@@ -63,6 +74,130 @@ BUILD_ANCHOR = "private fun buildPrintHtml(item: FileItem): String {"
 # :1275 was the last one. The prose in KDoc/line comments mentions
 # `readBytes()` on purpose (history notes), so comments are stripped first.
 UNBOUNDED_CALL = ".readBytes()"
+BOUNDED_READ_RE = re.compile(r"\breadCapped\s*\(\s*item\.file\s*,\s*MAX_TEXT_PREVIEW_BYTES\s*\)")
+# [batch6-t03] Whole-file reads through the JDK, same defect as `.readBytes()`.
+WHOLE_FILE_READS = (
+    (r"\bFiles\s*\.\s*readString\s*\(", "Files.readString"),
+    (r"\bFiles\s*\.\s*readAllBytes\s*\(", "Files.readAllBytes"),
+    (r"(?<!Files\s\.)\breadAllBytes\s*\(", "readAllBytes"),
+)
+# A Compose key decides whether the slot is reused by comparing VALUES, so a
+# key must be something that differs between two files. `item.file` identifies
+# the file; `.parent` identifies its directory.
+FILE_IDENTITY_PROPS = frozenset({"name", "path", "absolutePath", "absoluteFile",
+                                 "canonicalPath", "canonicalFile"})
+KEY_ROOTS = ("item.file", "renderer", "item")
+
+
+CAP_NUMERIC_RE = re.compile(r"^[\d\s+\-*/%().]+$")
+
+
+def _numeric_value(expr):
+    """Value of a pure numeric expression, or None.
+
+    `1_000_000` (Kotlin underscore literals), `Int.MAX_VALUE` and `Long.MAX_VALUE`
+    fold too — a cap written `Long.MAX_VALUE / 2` is a real value and has to be
+    compared, not pattern-matched.
+    """
+    e = re.sub(r"(?<=\d)_", "", (expr or "").strip())
+    e = e.replace("_", "")
+    e = re.sub(r"\b(?:Int|Long|Short|Byte)\s*\.\s*(?:MAX|MIN)_VALUE\b",
+               lambda m: str(2 ** 62), e)
+    if not CAP_NUMERIC_RE.fullmatch(e):
+        return None
+    try:
+        return eval(e, {"__builtins__": {}}, {})      # digits + operators only
+    except Exception:
+        return None
+
+
+def _cap_bound(expr, known_safe=(), text="", depth=0):
+    """Upper bound of a cap expression; 0 == "whatever the caller passed".
+
+    Derived, not spelled: `minOf(cap, 64 * 1024)` bounds at the caller's cap,
+    `cap + Long.MAX_VALUE / 2` does not (the caller's cap contributes 0 to the
+    sum, the constant is what the read actually allocates), and an unreadable
+    expression returns None so the caller fail-closes.
+    """
+    if depth > 4:
+        return None
+    e = strip_parens((expr or "").strip())
+    if not e:
+        return None
+    if e in known_safe:
+        return 0
+    m = re.fullmatch(r"(?:minOf|min|minOfOrNull)\s*\((.*)\)", e, re.S)
+    if m:
+        bounds = [_cap_bound(a, known_safe, text, depth + 1)
+                  for a in _split_args(e, e.index("("), len(e) - 1)]
+        if not bounds or any(b is None for b in bounds):
+            return None
+        return min(bounds)
+    parts = split_top(e, ("+",))
+    if len(parts) > 1:
+        total = 0
+        for a, b in parts:
+            v = _cap_bound(e[a:b], known_safe, text, depth + 1)
+            if v is None:
+                return None
+            total += v
+        return total
+    n = _numeric_value(e)
+    if n is not None:
+        return n
+    if re.fullmatch(r"[A-Za-z_]\w*", e):
+        decl = re.search(r"\b(?:const\s+)?val\s+" + re.escape(e)
+                         + r"\s*(?::[^=\n]+)?=\s*([^\n]+)", text)
+        if decl:
+            return _cap_bound(decl.group(1), known_safe, text, depth + 1)
+        return 0 if e in known_safe else None
+    return None
+
+
+def _cap_violation(where, call_text, cap_arg, limit):
+    """None when the cap is bounded, else the violation message."""
+    bound = _cap_bound(cap_arg, known_safe=("cap", "maxChars"), text=where)
+    if bound is not None and bound <= limit:
+        return None
+    shown = "%d" % bound if bound is not None else "unbounded/unreadable"
+    return ("%s: %s — the bound must be the caller's cap (`cap`, or `minOf(cap, …)` "
+            "with a bounded other arm), not an unbounded value; a correct call with a "
+            "wrong cap is still an unbounded read (bound = %s)"
+            % (call_text, cap_arg, shown))
+
+
+def _split_args(text, open_idx, close_idx):
+    """Top-level comma split of the argument list at (open_idx, close_idx]."""
+    args, depth, cur = [], 0, ""
+    for ch in text[open_idx + 1: close_idx]:
+        if ch in "([{<":
+            depth += 1
+        elif ch in ")]}>":
+            depth -= 1
+        if ch == "," and depth == 0:
+            args.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        args.append(cur)
+    return args
+
+
+def _is_file_identity_key(key):
+    """True when the key's VALUE changes with the file (the slot must restart)."""
+    k = (key or "").strip()
+    if not k:
+        return False
+    for src in KEY_ROOTS:
+        if k == src:
+            return True
+        if k.startswith(src + "."):
+            if src != "item.file":
+                return True
+            head = re.split(r"[.\s(]", k[len(src) + 1:], 1)[0]
+            return head in FILE_IDENTITY_PROPS
+    return False
 
 # [da1026-F] Every other read spelling a preview could reach for. Deliberately
 # NOT whitelisted inside readCapped: that body IS the bound, and letting the
@@ -76,8 +211,6 @@ BARE_READS = ("bufferedReader(", ".readText()", ".readLines()")
 # unkeyed `remember { }` is reused across a file switch (Compose keys by slot
 # position), which is how a failed read's error banner ended up masking the
 # next file — the success path never clears `error`.
-KEYED_REMEMBER = "by remember(item.file) {"
-BARE_REMEMBER = "remember {"
 REMEMBER_ANCHORS = (
     "private fun TextPreview(item: FileItem) {",
     "private fun MarkdownPreview(item: FileItem) {",
@@ -85,69 +218,90 @@ REMEMBER_ANCHORS = (
 
 
 
+# ── structural view ───────────────────────────────────────────────────────
+#
+# [batch6-t03] `mask_code()` blanks comment bodies AND string/char literal
+# contents in place (same length, same offsets), so the two ways this gate used
+# to be blind are structurally impossible now:
+#   * `strip_comments` did not know strings — a `"http://"` literal opened a
+#     line comment that swallowed the unconditional write behind it;
+#   * `grab_body` walked RAW braces — a `}` inside a `// …` comment closed the
+#     function body early and everything after it went unjudged.
+# A lexer error is a violation (fail-closed), never a fallback to raw regex.
+LEX = {"reason": ""}
+
+
 def strip_comments(text):
-    out = []
-    i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        if c == '"':
-            if text.startswith('"""', i):
-                j = text.find('"""', i + 3)
-                j = n if j < 0 else j + 3
-            else:
-                j = i + 1
-                while j < n:
-                    if text[j] == "\\":
-                        j += 2
-                        continue
-                    if text[j] in ('"', "\n"):
-                        j += 1
-                        break
-                    j += 1
-            out.append(text[i:j])
-            i = j
-        elif c == "'":
-            j = i + 1
-            while j < n:
-                if text[j] == "\\":
-                    j += 2
-                    continue
-                if text[j] in ("'", "\n"):
-                    j += 1
-                    break
-                j += 1
-            out.append(text[i:j])
-            i = j
-        elif text.startswith("//", i):
-            j = text.find("\n", i)
-            i = n if j < 0 else j
-        elif text.startswith("/*", i):
-            j = text.find("*/", i)
-            i = n if j < 0 else j + 2
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
-
-
-def grab_body(text, sig):
-    """Verbatim body of a brace-balanced declaration, or None."""
-    n = text.count(sig)
-    if n != 1:
+    """The gate's single structural view (name kept for its call sites)."""
+    try:
+        return mask_code(text)
+    except KotlinLexError as exc:
+        LEX["reason"] = str(exc)
         return None
-    i = text.index(sig)
-    depth = 0
-    k = text.index("{", i)
-    while k < len(text):
-        c = text[k]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[i:k + 1]
-        k += 1
-    return None
+
+
+FUN_DECL_FULL = re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[A-Za-z_][\w.]*\.)?([A-Za-z_]\w*)\s*\(")
+
+
+def decl_span(text, decl):
+    """(body_start, body_end) just inside the `{…}` opened by [decl].
+
+    None when the declaration is missing or duplicated — every caller reports
+    that as a violation rather than scanning the wrong bytes. `match_bracket`
+    (shared) is the only brace walk left in this gate.
+    """
+    if not decl or text.count(decl) != 1:
+        return None
+    i = text.index(decl)
+    open_idx = i + len(decl) - 1
+    if open_idx >= len(text) or text[open_idx] != "{":
+        open_idx = text.find("{", i)
+        if open_idx < 0:
+            return None
+    close = match_bracket(text, open_idx)
+    return (open_idx + 1, close) if close > 0 else None
+
+
+def decl_body(text, decl):
+    span = decl_span(text, decl)
+    return None if span is None else text[span[0]:span[1]]
+
+
+def decl_expr_span(text, decl):
+    """(start, end) of a single-expression declaration (`… = <expr>`)."""
+    if not decl or text.count(decl) != 1:
+        return None
+    i = text.index(decl)
+    eq = text.find("=", i + len(decl) - 1)
+    if eq < 0:
+        return None
+    return (i, expr_end(text, eq + 1))
+
+
+def fn_spans(text, name):
+    """[(body_start, body_end)] for EVERY `fun <name>(…)` — overloads included."""
+    out = []
+    for m in FUN_DECL_FULL.finditer(text):
+        if m.group(1) != name:
+            continue
+        p_close = match_bracket(text, m.end() - 1)
+        if p_close < 0:
+            continue
+        i, n = p_close + 1, len(text)
+        while i < n and text[i] not in "={":
+            if text[i] == "\n":
+                i = -1
+                break
+            i += 1
+        if i < 0 or i >= n:
+            continue
+        if text[i] == "{":
+            close = match_bracket(text, i)
+            if close > 0:
+                out.append((i + 1, close))
+        else:
+            out.append((i + 1, expr_end(text, i + 1)))
+    return out
 
 
 # ── [deep-audit-1049 B-05] the print slot's lifecycle ──────────────────────
@@ -190,69 +344,74 @@ SLOT_IDENTITY_HELPER_RE = re.compile(r"\bisCurrentPrintView\s*\(")
 SLOT_IDENTITY_HELPER_DECL = "internal fun isCurrentPrintView(owner: Any?, candidate: Any?): Boolean ="
 # A literal in front of the comparison makes the guard dead code — the whole
 # family of `false && guard` / `true || guard` rewrites.
-DEAD_GUARD_RE = re.compile(r"\bfalse\s*&&|\btrue\s*\|\|")
-CONTROL_FLOW_END_RE = re.compile(r"\b(return|throw)\b")
 
 
 def _if_statements(text):
-    """[(condition, branch_text)] for every `if (…)` in `text`.
+    """[(cond, branch_start, branch_end)] for every `if (…)` in [text].
 
-    Brace form yields the `{…}` block; a braceless branch yields the single
-    statement up to the end of the line. Unbalanced parentheses are skipped —
-    the caller treats "no usable guard" as a violation (fail-closed).
+    Positions are absolute and point INSIDE the branch, so the judge can ask
+    "does the branch body end control flow" of real bytes instead of searching
+    the block text for the word `return` (which `return@run` also satisfies).
+    Unbalanced parens/braces are skipped; the caller treats "no usable guard"
+    as a violation (fail-closed).
     """
     out = []
     for m in re.finditer(r"\bif\s*\(", text):
-        p = text.find("(", m.start())
-        depth, j = 0, p
-        while j < len(text):
-            if text[j] == "(":
-                depth += 1
-            elif text[j] == ")":
-                depth -= 1
-                if depth == 0:
-                    break
-            j += 1
-        else:
+        close = match_bracket(text, m.end() - 1)
+        if close < 0:
             continue
-        cond = text[p + 1: j]
-        k = j + 1
+        cond = text[m.end(): close]
+        k = close + 1
         while k < len(text) and text[k] in " \t\r\n":
             k += 1
-        if k < len(text) and text[k] == "{":
-            block = _block_at(text, k)
-            if block is None:
+        if k >= len(text):
+            continue
+        if text[k] == "{":
+            bend = match_bracket(text, k)
+            if bend < 0:
                 continue
+            out.append((cond, k + 1, bend))
         else:
-            nl = text.find("\n", k)
-            block = text[k: nl if nl >= 0 else len(text)]
-        out.append((cond, block))
+            bend = expr_end(text, k)
+            if bend <= k:
+                continue
+            out.append((cond, k, bend))
     return out
 
 
 def _decl_text(code, decl):
-    """Body of a declaration: `{…}` for block form, the logical line(s) for `= …`."""
-    if code.count(decl) != 1:
-        return None
-    i = code.index(decl)
-    nl = code.find("\n", i)
-    head = code[i: nl if nl >= 0 else len(code)]
-    if "{" in head:
-        return grab_body(code, decl)
-    end = code.find("\n\n", i)
-    return code[i: end if end >= 0 else len(code)]
+    """Body of a declaration: `{…}` for block form, the expression for `= …`."""
+    if decl.endswith("="):
+        span = decl_expr_span(code, decl)
+        if span is None:
+            return None
+        return code[span[0]:span[1]]
+    return decl_body(code, decl)
 
 
 def _block_at(text, open_idx):
-    depth = 0
-    for j in range(open_idx, len(text)):
-        if text[j] == "{":
-            depth += 1
-        elif text[j] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[open_idx: j + 1]
-    return None
+    """(start, end) just inside the balanced `{…}` at [open_idx], or None."""
+    if open_idx < 0 or open_idx >= len(text) or text[open_idx] != "{":
+        return None
+    close = match_bracket(text, open_idx)
+    return None if close < 0 else (open_idx + 1, close)
+
+
+def _branch_ends_control_flow(text, start, end):
+    """True when the branch's own LAST statement leaves the enclosing function.
+
+    Judged on the statement list, not on a substring: a `return` earlier in the
+    branch, or a `return@run` that only exits a lambda, does not stop the
+    superseded view from falling through into `printManager.print(...)`.
+    """
+    body = text[start:end]
+    spans = stmt_spans(body)
+    if not spans:
+        return False
+    tail = body[spans[-1][0]:spans[-1][1]].strip()
+    if not re.match(r"(?:return|throw)\b", tail):
+        return False
+    return not re.match(r"return\s*@", tail)
 
 
 def check_print_slot(src):
@@ -260,6 +419,9 @@ def check_print_slot(src):
     criterion has nothing to say (the real tree presence check lives in run())."""
     problems = []
     code = strip_comments(src)
+    if code is None:
+        return ["FilePreviewScreen.kt does not tokenise, so the print-slot contract "
+                "cannot be judged (fail-closed): %s" % LEX["reason"]]
     if "printWebView" not in code:
         return problems
     if code.count(SLOT_DECL) != 1:
@@ -279,7 +441,7 @@ def check_print_slot(src):
                             "previous WebView — the superseded renderer stays alive and "
                             "its onPageFinished can still pull a second print job")
     # (2) the releaser nulls the slot AND tears the renderer down
-    body = grab_body(code, SLOT_RELEASER_DECL)
+    body = decl_body(code, SLOT_RELEASER_DECL)
     if body is None:
         problems.append("the slot releaser `%s` must exist exactly once"
                         % SLOT_RELEASER_DECL)
@@ -293,7 +455,7 @@ def check_print_slot(src):
             # when that helper's own body really destroys.
             destroyed = False
             for call in re.finditer(r"\b(\w+)\s*\(\s*view\s*\)", body):
-                helper_body = grab_body(code, "private fun %s(" % call.group(1))
+                helper_body = decl_body(code, "private fun %s(" % call.group(1))
                 if helper_body and SLOT_DESTROY_RE.search(helper_body):
                     destroyed = True
                     break
@@ -309,8 +471,8 @@ def check_print_slot(src):
     else:
         released = False
         for m in disposes:
-            block = _block_at(code, code.find("{", m.start()))
-            if block and SLOT_RELEASE_CALL_RE.search(block):
+            span = _block_at(code, code.find("{", m.start()))
+            if span and SLOT_RELEASE_CALL_RE.search(code[span[0]:span[1]]):
                 released = True
                 break
         if not released:
@@ -320,7 +482,7 @@ def check_print_slot(src):
     #     decides it must actually END the branch (wide-1024: comparing is not
     #     skipping; `if (false && printWebView !== view)` and a guard body
     #     without `return` both let a superseded view fall through to print).
-    page = grab_body(code, ON_PAGE_FINISHED)
+    page = decl_body(code, ON_PAGE_FINISHED)
     if page is None:
         problems.append("`%s` must exist exactly once (anchor missing or duplicated)"
                         % ON_PAGE_FINISHED)
@@ -331,15 +493,20 @@ def check_print_slot(src):
                             "moved, re-point this criterion")
         else:
             head = page[: first_print.start()]
-            guards = [(cond, block) for cond, block in _if_statements(head)
+            guards = [(cond, s0, s1) for cond, s0, s1 in _if_statements(head)
                       if SLOT_IDENTITY_RE.search(cond) or SLOT_IDENTITY_HELPER_RE.search(cond)]
             if not guards:
                 problems.append("onPageFinished starts a print job without first checking that "
                                 "`view` is still the slot owner — a superseded view whose page "
                                 "finishes late starts a duplicate print dialog")
             live = []
-            for cond, block in guards:
-                if DEAD_GUARD_RE.search(cond):
+            for cond, s0, s1 in guards:
+                # [batch6-t03] The guard must be SATISFIABLE: the old judge only
+                # knew the spellings `false &&` / `true ||`, so `(1 == 2) && …`
+                # (or a folded `when (false)`) short-circuited the comparison
+                # while the criterion stayed green. const_bool folds any
+                # constant condition.
+                if const_bool(cond) is False:
                     problems.append(
                         "onPageFinished's superseded-view guard is short-circuited (%r) — the "
                         "comparison never runs, so the dead branch is what the slot gets"
@@ -354,54 +521,163 @@ def check_print_slot(src):
                             "not compare identity (`===`) — the guard has to be a real check"
                         )
                         continue
-                live.append((cond, block))
-            if guards and not any(CONTROL_FLOW_END_RE.search(block) for _c, block in live):
+                live.append((cond, s0, s1))
+            # [batch6-t03] "ends control flow" is judged on the branch's own
+            # statement list: `return@run` exits the lambda, not the function,
+            # and a `return` before a later statement is not the branch's exit.
+            if live and not any(_branch_ends_control_flow(head, s0, s1) for _c, s0, s1 in live):
                 problems.append(
                     "onPageFinished's superseded-view guard does not end control flow — the "
                     "branch must `return` (or `throw`) so a superseded view cannot fall through "
                     "into `printManager.print(...)`"
                 )
+            elif guards and not live:
+                problems.append(
+                    "onPageFinished's superseded-view guard never executes — every identity "
+                    "guard in front of `printManager.print(...)` is dead, so the identity "
+                    "check the slot depends on is decorative"
+                )
     return problems
+
+
+def _read_statement_for(body, spans, pos):
+    """(start, end) of the top-level statement that contains [pos]."""
+    for a, b in spans:
+        if a <= pos < b:
+            return a, b
+    return None
+
+
+def _bounded_value_used(body):
+    """Violations for "the bounded read must be the value the function returns".
+
+    [batch6-t03] The old criterion asked whether the SPELLING
+    `readCapped(item.file, MAX_TEXT_PREVIEW_BYTES)` appears in the body — so a
+    decoy bounded read bound to an unused local, next to a full
+    `Files.readString`, kept every criterion green while the print path read the
+    whole file. The judge is now a value-flow question: which name carries the
+    bounded bytes, is that name used, and does the returned expression derive
+    from it.
+    """
+    v = []
+    spans = stmt_spans(body)
+    if not spans:
+        return ["buildPrintHtml has no statements — the bounded read cannot be traced"]
+    tail = body[spans[-1][0]:spans[-1][1]]
+    bound, direct = [], 0
+    for m in BOUNDED_READ_RE.finditer(body):
+        stmt = _read_statement_for(body, spans, m.start())
+        if stmt is None:
+            continue
+        decl = re.match(r"\s*(?:val|var)\s+([A-Za-z_]\w*)\s*=", body[stmt[0]:stmt[1]])
+        if decl:
+            bound.append((decl.group(1), stmt))
+        elif stmt[0] == spans[-1][0]:
+            direct += 1
+    if not bound and not direct:
+        v.append("buildPrintHtml must consume the value it reads through readCapped — the "
+                 "bounded read is neither bound to a name nor part of the returned expression")
+        return v
+    used = []
+    for name, (_a, b) in bound:
+        if contains_ident(body[b:], name) or contains_ident(tail, name):
+            used.append(name)
+        else:
+            v.append("buildPrintHtml binds the bounded read to `%s` and never reads it — the "
+                     "text that actually gets printed comes from somewhere else (a decoy "
+                     "bounded read beside a full one)" % name)
+    if bound and used and not any(contains_ident(tail, n) for n in used):
+        v.append("buildPrintHtml returns a value that does not derive from the bounded read "
+                 "(%s) — the cap has to be on the bytes the caller prints"
+                 % ", ".join(used))
+    return v
+
+
+def _remember_violations(fbody, sig):
+    """Every `remember` in a preview must be keyed on something file-identifying.
+
+    [batch6-t03] Keyed state is Compose slot state: a bare `remember { }` or a
+    constant key (`remember(Unit) { }`) keeps the PREVIOUS file's value, so a
+    stale error banner or truncation flag masks the next file. The old judge
+    looked for the two spellings `remember {` and `by remember(item.file) {`;
+    the judge is now the argument set of every `remember` call in the body.
+    """
+    v = []
+    keyed_on_file = False
+    for m in re.finditer(r"\bremember\b", fbody):
+        k = m.end()
+        while k < len(fbody) and fbody[k] in " \t\r\n":
+            k += 1
+        if k < len(fbody) and fbody[k] == "(":
+            close = match_bracket(fbody, k)
+            if close < 0:
+                v.append("%s holds a remember whose argument list does not balance — the "
+                         "key set cannot be read (fail-closed)" % sig)
+                continue
+            keys = [a.strip() for a in _split_args(fbody, k, close) if a.strip()]
+            if any(_is_file_identity_key(key) for key in keys):
+                keyed_on_file = True
+            else:
+                v.append("%s holds a remember whose key set does not track the file (%s) — a "
+                         "constant key such as `remember(Unit)` reuses the previous file's slot, "
+                         "so a stale error banner masks the next file"
+                         % (sig, ", ".join(keys) if keys else "(no key)"))
+        elif k < len(fbody) and fbody[k] == "{":
+            v.append("%s holds unkeyed remember { } state — it must be keyed on item.file "
+                     "(a stale error banner otherwise survives the file switch)" % sig)
+    if not keyed_on_file:
+        v.append("%s must key its preview state on item.file "
+                 "(no 'by remember(item.file) {{' found)" % sig)
+    return v
 
 
 def check(src):
     v = []
-    body = grab_body(src, BUILD_ANCHOR)
-    if body is None:
+    code = strip_comments(src)
+    if code is None:
+        return ["FilePreviewScreen.kt does not tokenise, so the print path cannot be judged "
+                "(fail-closed): %s" % LEX["reason"]]
+    span = decl_span(code, BUILD_ANCHOR)
+    if span is None:
         v.append("buildPrintHtml must exist exactly once (anchor missing or duplicated)")
         return v
+    body = code[span[0]:span[1]]
     if BOUNDED_READ not in body:
         v.append("buildPrintHtml must read through readCapped(item.file, MAX_TEXT_PREVIEW_BYTES)")
     if DECODE_WIRED not in body:
         v.append("buildPrintHtml must keep decodeUtf8Capped wired in (decode-boundary handling)")
     if UNBOUNDED_CALL in body:
         v.append("buildPrintHtml body must not contain readBytes()")
-    code = strip_comments(src)
+    v.extend(_bounded_value_used(body))
     hits = code.count(UNBOUNDED_CALL)
     if hits != 0:
         v.append("FilePreviewScreen.kt has %d unbounded .readBytes() call(s) outside comments "
                  "(no whitelist — every call must go through readCapped)" % hits)
-    # [da1026-F] Bare reader spellings. Computed on comment-stripped code, so
-    # the KDoc history notes about the old `bufferedReader(...)` call can
-    # neither satisfy nor trip it. No whitelist — see BARE_READS.
+    # [batch6-t03] The same class of read, other spellings: `Files.readString` /
+    # `readAllBytes` materialise the whole file through the JDK before any cap.
+    for pattern, label in WHOLE_FILE_READS:
+        n = len(re.findall(pattern, code))
+        if n:
+            v.append("FilePreviewScreen.kt has %d whole-file %s read(s) — that call "
+                     "materialises the entire file before any cap; every preview read must "
+                     "go through readCapped/decodeUtf8Capped (no whitelist)"
+                     % (n, label))
+    # [da1026-F] Bare reader spellings. Computed on the masked view, so the KDoc
+    # history notes about the old `bufferedReader(...)` call can neither satisfy
+    # nor trip it. No whitelist — see BARE_READS.
     for needle in BARE_READS:
         n = code.count(needle)
         if n:
             v.append("FilePreviewScreen.kt has %d bare %s read(s) "
                      "(every preview read must go through readCapped/decodeUtf8Capped)"
                      % (n, needle))
-    # [da1026-F] Preview state must be keyed on the file.
+    # [da1026-F / batch6-t03] Preview state must be keyed on the file.
     for sig in REMEMBER_ANCHORS:
-        fbody = grab_body(code, sig)
+        fbody = decl_body(code, sig)
         if fbody is None:
             v.append("%s must exist exactly once (anchor missing or duplicated)" % sig)
             continue
-        if BARE_REMEMBER in fbody:
-            v.append("%s holds unkeyed remember { } state — it must be keyed on item.file "
-                     "(a stale error banner otherwise survives the file switch)" % sig)
-        if KEYED_REMEMBER not in fbody:
-            v.append("%s must key its preview state on item.file "
-                     "(no 'by remember(item.file) {{' found)" % sig)
+        v.extend(_remember_violations(fbody, sig))
     # [deep-audit-1047 B-03] C-PDF-KEY — derived preview set, derived key set.
     kv, ksites = check_preview_keys(src)
     v.extend(kv)
@@ -437,6 +713,11 @@ def check(src):
 LOG_SCREEN_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/settings/LogManagementScreen.kt"
 IO_BLOCK_RE = re.compile(r"withContext\s*\(\s*Dispatchers\.IO\s*\)\s*\{")
 CAP_TOKEN = re.compile(r"\bmaxChars\b|\bLOG_SHARE_MAX_CHARS\b")
+# [batch6-t03] Sanity ceilings for a "bounded" cap argument. The real caps are
+# 100_000 chars (log share) and 16/32 MiB (SAF); anything above these is a
+# caller-side override, not a bound.
+LOG_SHARE_CAP_SANITY_CHARS = 1_000_000
+SAF_CAP_SANITY_BYTES = 256 * 1024 * 1024
 FUN_DECL_RE = re.compile(r"\bfun\s+\w+\s*\(")
 
 
@@ -523,11 +804,53 @@ def check_log_share(root):
 
     bodies = [b for _sig, b in _log_functions(code)]
     sites += 1
-    if not any("FileInputStream(" in b and CAP_TOKEN.search(b) for b in bodies):
+    readers = []
+    for sig, body in _log_functions(code):
+        if "FileInputStream(" in body and CAP_TOKEN.search(body):
+            name = re.search(r"\bfun\s+([A-Za-z_]\w*)\s*\(", sig)
+            if name:
+                readers.append(name.group(1))
+    if not readers:
         violations.append(
             "%s: no bounded reader found — the share fallback needs one that streams "
             "through FileInputStream and stops at a cap" % LOG_SCREEN_REL
         )
+    # [batch6-t03] A bounded reader called with an unbounded cap is not a bounded
+    # read. The witness was `readLogShareText(file, maxChars = Int.MAX_VALUE)`:
+    # the helper stays perfect, the caller re-materialises the whole file. Every
+    # call site is judged on the VALUE of its cap argument (default = the named
+    # constant = fine), so a huge literal, a `MAX_VALUE` arithmetic form or an
+    # unreadable expression is a violation.
+    for name in readers:
+        for m in re.finditer(r"\b" + re.escape(name) + r"\s*\(", code):
+            if re.search(r"\bfun\s+$", code[: m.start()]):
+                continue                      # the declaration itself
+            close = match_bracket(code, m.end() - 1)
+            if close < 0:
+                violations.append(
+                    "%s: cannot read the %s(...) arguments (fail-closed) — the cap argument "
+                    "is the whole bound and must stay readable" % (LOG_SCREEN_REL, name)
+                )
+                continue
+            args = [a.strip() for a in _split_args(code, m.end() - 1, close)]
+            cap_arg = None
+            if len(args) >= 2:
+                cap_arg = args[1]
+            for a in args:
+                named = re.match(r"maxChars\s*=\s*(.+)$", a, re.S)
+                if named:
+                    cap_arg = named.group(1).strip()
+            if not cap_arg:
+                continue                      # default parameter = the bounded constant
+            msg = _cap_violation(
+                code,
+                "%s: %s(...) is called with a cap the reader cannot honour"
+                % (LOG_SCREEN_REL, name),
+                cap_arg, LOG_SHARE_CAP_SANITY_CHARS,
+            )
+            if msg:
+                violations.append(msg)
+            sites += 1
 
     prep = None
     launch = None
@@ -774,7 +1097,6 @@ def _saf_classify(text, idx, blocks):
 # or added can no longer quietly drop out of the `remember` criterion either.
 
 PREVIEW_SIG_RE = re.compile(r"^\s*private fun ([A-Za-z0-9_]+)Preview\(item: FileItem\)\s*\{")
-PDF_KEY_SOURCES = ("item.file", "renderer", "item")
 PRODUCE_STATE_RE = re.compile(r"produceState\b")
 # A key argument must BE a reference chain (`item.file`, `idx`, `renderer.epoch`).
 # Anything else — a lambda chain, an arithmetic expression, a literal — is judged
@@ -807,17 +1129,6 @@ def _call_paren(text, idx):
             return -1
         i += 1
     return -1
-
-
-def _brace_blocks(text):
-    """[(open, close)] for every balanced `{…}`."""
-    pairs, stack = [], []
-    for i, c in enumerate(text):
-        if c == "{":
-            stack.append(i)
-        elif c == "}" and stack:
-            pairs.append((stack.pop(), i))
-    return pairs
 
 
 def derived_preview_anchors(code):
@@ -877,65 +1188,16 @@ def _produce_keys(text, idx):
     return keys
 
 
-def blank_literals(text):
-    """Same text with the CONTENTS of string / char literals blanked.
-
-    `strip_comments` deliberately keeps literal contents (KDoc history notes
-    quote the old call shapes), but a Kotlin CHAR literal is written `'{'` —
-    exactly the brace a body-extractor counts. `JsonPreview`'s
-    `when (raw.firstOrNull()) { '{' -> … '[' -> … }` therefore unbalanced the
-    brace walk and made its own anchor look duplicated/missing (the criterion
-    reported "JsonPreview must exist exactly once" on a file where it does).
-    Newlines are preserved so line numbers stay meaningful.
-    """
-    out = []
-    i, n = 0, len(text)
-    while i < n:
-        ch = text[i]
-        if ch == '"':
-            if text[i:i + 3] == '"""':
-                j = text.find('"""', i + 3)
-                j = n if j < 0 else j + 3
-            else:
-                j = i + 1
-                while j < n:
-                    if text[j] == "\\":
-                        j += 2
-                        continue
-                    if text[j] in ('"', "\n"):
-                        j += 1
-                        break
-                    j += 1
-            seg = text[i:j]
-            out.append("".join(c if c == "\n" else " " for c in seg))
-            i = j
-            continue
-        if ch == "'":
-            j = i + 1
-            while j < n:
-                if text[j] == "\\":
-                    j += 2
-                    continue
-                if text[j] in ("'", "\n"):
-                    j += 1
-                    break
-                j += 1
-            seg = text[i:j]
-            out.append("".join(c if c == "\n" else " " for c in seg))
-            i = j
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
-
-
 def check_preview_keys(src):
     """(violations, sites) — C-PDF-KEY."""
     violations = []
     sites = 0
-    code = blank_literals(strip_comments(src))
+    code = strip_comments(src)
+    if code is None:
+        return (["FilePreviewScreen.kt does not tokenise, so the preview keys cannot be "
+                 "judged (fail-closed): %s" % LEX["reason"]], 0)
     for sig, line_no in derived_preview_anchors(code):
-        body = grab_body(code, sig)
+        body = decl_body(code, sig)
         if body is None:
             violations.append(
                 "%s must exist exactly once (anchor missing or duplicated)" % sig
@@ -966,12 +1228,27 @@ def check_preview_keys(src):
                     "call returning a constant freezes the slot across file switches"
                     % (sig, ", ".join(opaque))
                 )
-            if not any(k == src or k.startswith(src + ".") for k in keys for src in PDF_KEY_SOURCES):
+            # [batch6-t03] `startswith("item.file.")` accepted ANY property
+            # chain, so `key2 = item.file.parent` — identical for two documents
+            # in one directory — kept the producer's slot across a file switch
+            # and the old page stayed on screen. A key has to carry FILE
+            # identity: the file itself, or a property whose value differs
+            # between two files.
+            if not any(_is_file_identity_key(k) for k in keys):
                 violations.append(
                     "%s holds a produceState whose key set misses its data source "
                     "(key set = %s) — the slot is reused across files, so the "
                     "produced value must be keyed on item.file / renderer / item"
                     % (sig, hit)
+                )
+            weak = [k for k in keys
+                    if k.startswith("item.file.") and not _is_file_identity_key(k)]
+            if weak:
+                violations.append(
+                    "%s holds a produceState key that is derived from the file but does not "
+                    "identify it (%s) — `item.file.parent` is the same value for two documents "
+                    "in one directory, so the producer never restarts and the previous page "
+                    "stays on screen" % (sig, ", ".join(weak))
                 )
             _ = start
     if sites == 0:
@@ -1006,7 +1283,7 @@ def check_saf_imports(root):
         with open(helper, encoding="utf-8", errors="replace") as fh:
             helper_code = strip_comments(fh.read())
 
-    reader = grab_body(helper_code, SAF_READER_ANCHOR)
+    reader = decl_body(helper_code, SAF_READER_ANCHOR)
     sites += 1
     if reader is None:
         violations.append(
@@ -1024,7 +1301,7 @@ def check_saf_imports(root):
                 "%s: readAtMost must report an overflow as null, not as a truncated array "
                 "(half a document would import silently)" % _saf_short(SAF_HELPER_REL)
             )
-    entry = grab_body(helper_code, SAF_ENTRY_ANCHOR)
+    entry = decl_body(helper_code, SAF_ENTRY_ANCHOR)
     sites += 1
     if entry is None:
         violations.append(
@@ -1055,15 +1332,19 @@ def check_saf_imports(root):
                 )
                 continue
             cap_arg = args[1]
-            if not re.fullmatch(r"cap", cap_arg) and not re.fullmatch(
-                r"minOf\(\s*cap\b[^)]*\)", cap_arg
-            ):
-                violations.append(
-                    "%s: readSafBytes calls readAtMost(%s, %s) — the stream bound must be the "
-                    "caller's cap (`cap`, or `minOf(cap, …)`), not an unbounded value; a "
-                    "correct call with a wrong cap is still an unbounded read"
-                    % (_saf_short(SAF_HELPER_REL), args[0], cap_arg)
-                )
+            # [batch6-t03] The old judge accepted `minOf(cap…)` by SPELLING, so
+            # `minOf(cap + Long.MAX_VALUE / 2, Long.MAX_VALUE / 2)` (which really
+            # allocates 4 EiB) passed. The bound is now computed: the caller's cap
+            # contributes 0, every constant contributes itself, and `minOf` takes
+            # the minimum — so a huge arm makes the whole cap huge.
+            msg = _cap_violation(
+                helper_code,
+                "%s: readSafBytes calls readAtMost(%s, %s)"
+                % (_saf_short(SAF_HELPER_REL), args[0], cap_arg),
+                cap_arg, SAF_CAP_SANITY_BYTES,
+            )
+            if msg:
+                violations.append(msg)
     if not SAF_CAP_CONST_RE.search(helper_code):
         violations.append(
             "%s: the SAF caps must stay named MAX_*_BYTES constants (the reason has to "
@@ -1252,6 +1533,13 @@ _SAF_HELPER_NOCAP = _SAF_HELPER.replace("        if (total > cap) return null\n"
 # [wide-1024] The call is right, the cap is not: `readAtMost(input, Long.MAX_VALUE
 # - 1L)` still contains a `readAtMost(` token while materialising the whole
 # provider document before the heap dies.
+# [batch6-t03] `minOf(cap + Long.MAX_VALUE / 2, Long.MAX_VALUE / 2)` really
+# bounds at ~4 EiB: the old judge accepted it because it matched `minOf(cap…`.
+_SAF_HELPER_MINOF_HUGE = _SAF_HELPER.replace(
+    "        val bytes = readAtMost(input, cap)\n",
+    "        val bytes = readAtMost(input, minOf(cap + Long.MAX_VALUE / 2, "
+    "Long.MAX_VALUE / 2))\n",
+)
 _SAF_HELPER_UNBOUNDED_CAP = _SAF_HELPER.replace(
     "        val bytes = readAtMost(input, cap)\n",
     "        val bytes = readAtMost(input, Long.MAX_VALUE - 1L)\n",
@@ -1382,6 +1670,8 @@ def _saf_fixture(shape="fixed"):
         helper = _SAF_HELPER_NOCAP
     elif shape == "helper_unbounded_cap":
         helper = _SAF_HELPER_UNBOUNDED_CAP
+    elif shape == "helper_minof_huge":
+        helper = _SAF_HELPER_MINOF_HUGE
     elif shape == "readtext":
         provider = _SAF_PROVIDER_READTEXT
     elif shape == "skills_baseline":
@@ -1434,6 +1724,8 @@ def selftest_saf_imports():
     # [wide-1024] a bounded-looking call with an unbounded cap argument.
     arm("helper called with an unbounded cap", "must be the caller's cap",
         shape="helper_unbounded_cap")
+    arm("helper cap hidden behind minOf(...) is caught", "must be the caller's cap",
+        shape="helper_minof_huge")
     arm("helper gone (fail-closed)", "no implementation left", shape="no_helper")
     arm("over-cap verdict swallowed", "must stay visible", shape="too_large_swallowed")
     arm("unregistered unbounded site", "with no bound", shape="sweep_extra_unregistered")
@@ -1456,7 +1748,7 @@ def selftest_saf_imports():
 
 def _log_share_screen(shape="fixed"):
     """The B-07 subject. [shape]: fixed / readtext / on_main / start_in_io /
-    no_bounded_reader / no_reader_at_all."""
+    no_bounded_reader / no_reader_at_all / huge_cap_arg."""
     header = (
         "package com.rikkaminis.app.ui.settings\n"
         "\n"
@@ -1494,7 +1786,12 @@ def _log_share_screen(shape="fixed"):
     else:
         reader = fixed_reader
 
-    if shape == "readtext":
+    if shape == "huge_cap_arg":
+        # [batch6-t03] the helper stays perfect; the CALLER re-materialises the
+        # whole file through the named argument.
+        fallback = ("            val text = readLogShareText(file, maxChars = Int.MAX_VALUE) "
+                    "?: return\n")
+    elif shape == "readtext":
         fallback = ('            val text = try { file.readText().take(100_000) } '
                     'catch (_: Exception) { return }\n')
     else:
@@ -1593,6 +1890,8 @@ def selftest_log_share():
         "inside a Dispatchers.IO block", shape="start_in_io")
     arm("a fallback reader with no cap is caught", True,
         "no bounded reader", shape="no_bounded_reader")
+    arm("a call site that overrides the cap is caught", True,
+        "cap the reader cannot honour", shape="huge_cap_arg")
     arm("a file that lost its share anchor is a rot failure", True,
         "lost its anchor", drop=True)
     arm("a tree that never shipped ui/settings is skipped, not failed", False,
@@ -1851,6 +2150,51 @@ def selftest():
     print("selftest preview-set-gone     -> %d violation(s)" % len(bad_no_preview))
     print("selftest pdf-key-opaque       -> %d violation(s)" % len(bad_pdf_opaque))
 
+    # ── [batch6-t03] the seven witnesses that used to walk through this gate ─
+    def witness(name, src, needles):
+        got = check(src)
+        miss = [n for n in needles if not any(n in g for g in got)]
+        if miss:
+            failures.append("%s did not trip %r (got %s)" % (name, miss, got))
+            print("  SELFTEST %s: FAIL (missing %r, got %r)" % (name, miss, got))
+        else:
+            print("  SELFTEST %s: OK (%d violation(s))" % (name, len(got)))
+
+    # 01-1 — a bounded read bound to an unused local, beside a full JDK read.
+    witness(
+        "t03-01-1 decoy bounded read + Files.readString",
+        GOOD_SRC.replace(
+            "    val raw = decodeUtf8Capped(readCapped(item.file, MAX_TEXT_PREVIEW_BYTES))",
+            "    val ignored = decodeUtf8Capped(readCapped(item.file, MAX_TEXT_PREVIEW_BYTES))\n"
+            "    val raw = java.nio.file.Files.readString(item.file.toPath())"),
+        ("never reads it", "whole-file Files.readString"),
+    )
+    # 01-2 — a constant remember key on two of the three TextPreview slots.
+    witness(
+        "t03-01-2 remember(Unit) key",
+        GOOD_SRC.replace(
+            "    var truncated by remember(item.file) { mutableStateOf(false) }\n"
+            "    var error by remember(item.file) { mutableStateOf<String?>(null) }",
+            "    var truncated by remember(Unit) { mutableStateOf(false) }\n"
+            "    var error by remember(Unit) { mutableStateOf<String?>(null) }"),
+        ("does not track the file",),
+    )
+    # 01-3 — a produceState key derived from the file but not identifying it.
+    witness(
+        "t03-01-3 produceState key2 = item.file.parent",
+        GOOD_SRC.replace("key2 = item.file)", "key2 = item.file.parent)"),
+        ("does not identify it",),
+    )
+    # 01-7 — a `}` inside a `//` comment in front of the full read.
+    witness(
+        "t03-01-7 comment-brace + Files.readString",
+        GOOD_SRC.replace(
+            "    val raw = decodeUtf8Capped(readCapped(item.file, MAX_TEXT_PREVIEW_BYTES))",
+            "    // decodeUtf8Capped(readCapped(item.file, MAX_TEXT_PREVIEW_BYTES)) }\n"
+            "    val raw = java.nio.file.Files.readString(item.file.toPath())"),
+        ("whole-file Files.readString",),
+    )
+
     # [deep-audit-1041 B-07] the second target's arms.
     failures.append("B-07 arms misbehaved" if selftest_log_share() else None)
     # [deep-audit-1045 B-07] the third target's arms (user-picked SAF documents).
@@ -1946,6 +2290,12 @@ def selftest():
             "            if (printWebView !== view) {",
             "            if (false && printWebView !== view) {"),
          ("short-circuited",)),
+        # [batch6-t03] the guard must be SATISFIABLE, not merely free of the
+        # spellings `false &&` / `true ||`.
+        ("b05-guard unsatisfiable (1 == 2)", slot_clean.replace(
+            "            if (printWebView !== view) {",
+            "            if ((1 == 2) && printWebView !== view) {"),
+         ("short-circuited",)),
         ("b05-guard without return", slot_clean.replace(
             "                destroyPrintWebView(view)\n"
             "                return\n",
@@ -1973,6 +2323,9 @@ def selftest():
         print("FILEPREVIEW_PRINT_BOUNDED_SELFTEST=FAIL")
         return 1
     print("FILEPREVIEW_PRINT_BOUNDED_SELFTEST=PASS")
+    print("FILEPREVIEW_PRINT_BOUNDED_T03_SELFTEST=PASS (7 witness arms: bounded-read value "
+          "flow, remember key set, produceState key identity, satisfiable guard, cap call "
+          "sites)")
     return 0
 
 
@@ -1988,7 +2341,8 @@ def run(root):
     # slot; on the REAL tree that silence would mean the print path moved, so the
     # presence requirement is enforced here (fixture sources legitimately stop at
     # buildPrintHtml).
-    if "printWebView" not in strip_comments(src):
+    view = strip_comments(src)
+    if view is None or "printWebView" not in view:
         v.append("the print WebView slot (printWebView) is gone from the preview — the "
                  "lifecycle criteria below have lost their subject (fail-closed)")
     rc = 0
