@@ -16,6 +16,7 @@ import androidx.webkit.WebViewAssetLoader
 import com.rikkaminis.app.browser.SafeWebViewClient
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.ui.chat.decodeUriPath
+import com.rikkaminis.app.ui.sandbox.encodeFileUrlPath
 import java.io.File
 
 /**
@@ -80,8 +81,14 @@ class WebViewHolder(
     private val assetRootDir: String?
 
     init {
+        // [fix/fileurl-contract] `initialUrl` is a percent-ENCODED `file://` URL
+        // (construction contract: anything that crosses to a system component —
+        // here the WebView and the asset loader — is encoded). Everything below
+        // is filesystem semantics, so the URL is decoded back to a raw path
+        // first: `File("…/%E6%88%91…")` would name a directory that does not
+        // exist, and the loader would then serve nothing.
         val parent = if (initialUrl.startsWith("file://")) {
-            File(initialUrl.removePrefix("file://")).parentFile
+            File(decodeUriPath(initialUrl.removePrefix("file://"))).parentFile
         } else null
         assetRootDir = parent?.absolutePath
         @Suppress("DEPRECATION")
@@ -471,6 +478,13 @@ class WebViewHolder(
 // test convenience — `unitTests.isReturnDefaultValues = true` (build.gradle.kts)
 // makes stubbed `Uri.parse` return null instead of throwing, so a test built on
 // `android.net.Uri` would pass while testing nothing.
+//
+// [fix/fileurl-contract] Both directions speak the ONE `file://` contract:
+// **encoded at construction (encodeFileUrlPath), decoded at every
+// path-semantics consumer (decodeUriPath)**. The segment is decoded/re-encoded
+// across the loader boundary instead of being pasted through, which keeps
+// `fileUrlFor(file)` → holder → `currentUrl` → consumer byte-stable for names
+// containing space / CJK / `#` / `?` / a literal `%XX`.
 // --- begin asset-loader-url-mapping (JVM harness slices this region verbatim) ---
 
 /**
@@ -510,10 +524,20 @@ private const val HEX_DIGITS = "0123456789ABCDEF"
  * Scope: the loader's root is the initial file's *parent* directory, so only the
  * last path segment is meaningful here — this mapping is one-way-then-back with
  * [fromAssetLoaderUrl] and must stay symmetric with it.
+ *
+ * [fix/fileurl-contract] The incoming `fileUrl` carries the ENCODED URL form
+ * (`file://` + `encodeFileUrlPath(path)`), while the loader needs a path segment
+ * to percent-encode itself. Decoding the segment first is what makes the pair
+ * symmetric instead of double-encoding: without it a name already encoded as
+ * `%E6%88%91.html` would reach the loader as `%25E6%2588%2591.html` and 404.
+ * The split happens on the ENCODED form on purpose — `encodeFileUrlPath` leaves
+ * every `/` literal and never emits `%2F`, so the last `/`-separated piece is
+ * exactly one file name, and a name literally spelled `a%2Fb.html`
+ * (encoded `a%252Fb.html`) still decodes to itself.
  */
 internal fun toAssetLoaderUrl(fileUrl: String): String? {
     if (!fileUrl.startsWith(FILE_URL_PREFIX)) return null
-    val name = fileUrl.removePrefix(FILE_URL_PREFIX).substringAfterLast('/')
+    val name = decodeUriPath(fileUrl.removePrefix(FILE_URL_PREFIX).substringAfterLast('/'))
     if (name.isEmpty()) return null
     return ASSET_LOADER_PREFIX + encodePathSegment(name)
 }
@@ -541,6 +565,14 @@ internal fun toAssetLoaderUrl(fileUrl: String): String? {
  * on the wire) and keeps the published `file://` URL one a `File.exists()`
  * check can actually satisfy — `…/a.html#section` previously survived the
  * round trip and became a path that exists() rejected.
+ *
+ * [fix/fileurl-contract] The value is published in the ENCODED URL form, so the
+ * mapping stays byte-symmetric with what the holder was constructed with: the
+ * holder-reuse check in `ChatScreen` compares `currentUrl` against a freshly
+ * built `fileUrlFor(file)`, and every path-semantics consumer of `currentUrl`
+ * ([openExternalFromSheet], [WebPreviewShortcut.pin]) decodes. Publishing the
+ * raw path made the reuse check fail on every repeat tap (holder destroyed and
+ * rebuilt) and fed the decoders a form that mangles a literal `%XX` name.
  */
 internal fun fromAssetLoaderUrl(assetUrl: String, rootDir: String?): String? {
     if (rootDir == null) return null
@@ -549,7 +581,7 @@ internal fun fromAssetLoaderUrl(assetUrl: String, rootDir: String?): String? {
         assetUrl.removePrefix(ASSET_LOADER_PREFIX).substringBefore('#').substringBefore('?'),
     )
     val resolved = resolveWithinRoot(relative, rootDir) ?: return null
-    return FILE_URL_PREFIX + resolved
+    return FILE_URL_PREFIX + encodeFileUrlPath(resolved)
 }
 
 /**

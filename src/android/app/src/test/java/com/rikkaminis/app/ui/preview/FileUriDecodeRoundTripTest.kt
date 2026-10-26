@@ -1,7 +1,9 @@
 package com.rikkaminis.app.ui.preview
 
 import com.rikkaminis.app.ui.chat.decodeUriPath
+import com.rikkaminis.app.ui.sandbox.encodeFileUrlPath
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -22,7 +24,9 @@ import org.junit.Test
  *    semantics — `#` / `?` are plain filename characters, `%XX` decodes,
  *    plain paths pass through byte-identical;
  *  * the asset-loader mapping round-trips names containing `#` / `?` /
- *    space / CJK (encode on the way in, decode on the way out);
+ *    space / CJK / a literal `%XX`, and what comes back out is byte-identical
+ *    to the URL the holder was constructed with (encoded in, encoded out —
+ *    the holder-reuse invariant);
  *  * a LITERAL `#` / `?` in a *reported* asset URL is always a fragment /
  *    query (the encoder escapes real names to %23 / %3F), so
  *    [fromAssetLoaderUrl] must cut it before decoding — the androidx loader
@@ -80,22 +84,74 @@ class FileUriDecodeRoundTripTest {
 
     // ---- asset-loader mapping round-trips real names ----------------------
 
+    // [fix/fileurl-contract] The round trip is asserted in the ENCODED URL form:
+    // the contract is "encoded at construction, decoded at every path-semantics
+    // consumer", so what must come back out of the asset origin is exactly the
+    // URL the holder was constructed with (that byte-equality is what the
+    // holder-reuse comparison in ChatScreen depends on).
+    private fun fileUrl(path: String): String = "file://" + encodeFileUrlPath(path)
+
     @Test fun hashNameRoundTripsThroughAssetOrigin() {
-        val forward = toAssetLoaderUrl("file:///data/x/report#1.html")
+        val url = fileUrl("/data/x/report#1.html")
+        assertEquals("file:///data/x/report%231.html", url)
+        val forward = toAssetLoaderUrl(url)
         assertEquals("https://appassets.androidplatform.net/report%231.html", forward)
-        assertEquals("file:///data/x/report#1.html", fromAssetLoaderUrl(requireNotNull(forward), rootDir))
+        assertEquals(url, fromAssetLoaderUrl(requireNotNull(forward), rootDir))
     }
 
     @Test fun questionMarkNameRoundTripsThroughAssetOrigin() {
-        val forward = toAssetLoaderUrl("file:///data/x/v1?draft.html")
+        val url = fileUrl("/data/x/v1?draft.html")
+        assertEquals("file:///data/x/v1%3Fdraft.html", url)
+        val forward = toAssetLoaderUrl(url)
         assertEquals("https://appassets.androidplatform.net/v1%3Fdraft.html", forward)
-        assertEquals("file:///data/x/v1?draft.html", fromAssetLoaderUrl(requireNotNull(forward), rootDir))
+        assertEquals(url, fromAssetLoaderUrl(requireNotNull(forward), rootDir))
     }
 
     @Test fun spaceAndCjkNameRoundTripsThroughAssetOrigin() {
-        val fileUrl = "file:///data/x/我的 报告.html"
-        assertEquals("file:///data/x/我的 报告.html",
-            fromAssetLoaderUrl(requireNotNull(toAssetLoaderUrl(fileUrl)), rootDir))
+        val url = fileUrl("/data/x/我的 报告.html")
+        assertEquals("file:///data/x/%E6%88%91%E7%9A%84%20%E6%8A%A5%E5%91%8A.html", url)
+        assertEquals(url, fromAssetLoaderUrl(requireNotNull(toAssetLoaderUrl(url)), rootDir))
+    }
+
+    @Test fun publishedUrlIsByteIdenticalToTheRequestedUrl() {
+        // The holder-reuse invariant (ChatScreen: existing.currentUrl != url):
+        // after a page start, currentUrl must compare EQUAL to the URL the
+        // holder was built from, or every repeat tap destroys the WebView.
+        for (name in listOf("a.html", "my file.html", "我的 报告.html", "report#1.html",
+                            "v1?draft.html", "50%23.html")) {
+            val url = fileUrl("/data/x/$name")
+            val published = fromAssetLoaderUrl(requireNotNull(toAssetLoaderUrl(url)), rootDir)
+            assertEquals("published URL must equal the requested URL for `$name`", url, published)
+            // and the decoders get the real path back
+            assertEquals("/data/x/$name", decodeUriPath(requireNotNull(published).removePrefix("file://")))
+        }
+    }
+
+    @Test fun literalPercentNameSurvivesWhereALiteralDecodeWouldCorrupt() {
+        // fix/debt-sweep-1026 regression: a file NAMED `50%23.html` used to reach
+        // the decoding consumers as `50#.html` because the construction site
+        // concatenated the raw path. Encoded construction escapes the `%` first,
+        // so the URL carries `%2523` and decodes back to `%23`.
+        val raw = "/data/x/50%23.html"
+        val url = fileUrl(raw)
+        assertEquals("file:///data/x/50%2523.html", url)
+        assertEquals("https://appassets.androidplatform.net/50%2523.html", toAssetLoaderUrl(url))
+        val published = fromAssetLoaderUrl(requireNotNull(toAssetLoaderUrl(url)), rootDir)
+        assertEquals(url, published)
+        assertEquals(raw, decodeUriPath(requireNotNull(published).removePrefix("file://")))
+        // the shape this branch replaced: a raw concatenation decoded literally
+        // by the consumer mangles the name (this is the witness, not the fix).
+        assertTrue("decoding the RAW path must mangle the literal %XX name",
+            decodeUriPath(raw) != raw)
+    }
+
+    @Test fun unencodedLegacyUrlStillMapsToTheSameAssetUrl() {
+        // Backward-compat for any caller that still hands over a raw path (no
+        // literal %XX in it): decode-then-re-encode is idempotent there.
+        assertEquals(
+            toAssetLoaderUrl(fileUrl("/data/x/我的 报告.html")),
+            toAssetLoaderUrl("file:///data/x/我的 报告.html"),
+        )
     }
 
     // ---- literal #/? in a REPORTED asset URL = fragment/query, cut it ----
