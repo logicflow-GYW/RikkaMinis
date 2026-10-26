@@ -173,9 +173,24 @@ clean 臂守既有合法形态（`?.let { it.complete(…) }`、`current.value.l
 健康路径 = **逐门独立进程循环** + **test_scan 逐函数小批驱动**（每函数独立进程、
 90s SIGALRM，`test_real_repo` 需 600s）。全量读数由 CI 承担。
 
-## 5. CI
+## 5. CI（分支，workflow_dispatch）
 
-（CI 出结论后回填真实 run / job / head_sha 与日志读数。）
+- run `40267856685` / **#2717** / job `121394065654` / attempt 1 / **success**
+  （04:12:28Z → 04:28:57Z，16m29s）
+- `head_sha` = `9d539946401a810bbacb6fb2933b8d35d409be8e`，与本地 HEAD 逐字符一致
+- 26 步，唯一非 success = step 23 `Publish to Releases` **skipped**（main 门控，预期行为）
+- job 日志 **1,486,598 B**，NUL 字节 **0**（字节级核过）
+- `Summary: 112 passed, 0 failed` 恰 **1** · `ALL 344 CASES PASS` 恰 **1** ·
+  门头 `[N/112]` 互异 **112** · `^ e: ` **0**
+- `BROWSER_DESTROY_WAKEUP_SELFTEST=PASS` 恰 **1** · `MIRROR_CATEGORY_ROUTE_SELFTEST=PASS` 恰 **1**
+  ⇒ 两门自测臂在 CI 里有独立见证（不只是本地读数）
+- `GATE=GREEN browser_destroy_wakeup` 恰 **1** · `MIRROR_CATEGORY_ROUTE_CHECK=PASS` 恰 **1**
+  ⇒ 新判据在 CI 真树上没有误伤本仓
+- 含 `FAILED` 的 6 行逐条核过：**全部以 `PASSED` 结尾**（用例名子串，例如
+  `… produces FAILED without calling provider PASSED`），无真实失败
+
+CI 后源码树核对：`git diff --name-only 9d5399464..HEAD -- . ':(exclude)fix-reports'`
+= **0 行**，即 CI 绿的那棵树与本地源码树等价（差异仅在本报告）。
 
 ## 6. 残留（P2 登记，每条带三件）
 
