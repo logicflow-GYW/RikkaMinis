@@ -232,6 +232,146 @@ def override_sites(code):
     return out
 
 
+def enclosing_span(code, pos):
+    """包含 pos 的最内层函数体 (start, end)；找不到 → 整份文件。
+
+    `Request.Builder(` / `newCall(` 这类站点必须放回它自己的函数体里判，
+    否则同名局部变量（`builder`、`wsRequest`）会跨函数串味。
+    """
+    best = None
+    for m in re.finditer(r"\bfun\s+", code):
+        if m.start() > pos:
+            break
+        open_p = code.find("(", m.end())
+        if open_p < 0:
+            continue
+        close_p = match_bracket(code, open_p)
+        if close_p < 0:
+            continue
+        k = close_p + 1
+        while k < len(code) and code[k] not in "{=;}":
+            k += 1
+        if k >= len(code) or code[k] != "{":
+            continue
+        body_close = match_bracket(code, k)
+        if body_close < 0:
+            continue
+        if k < pos < body_close and (best is None or k > best[0]):
+            best = (k, body_close)
+    return best if best else (0, len(code))
+
+
+RE_BUILD_CALL = re.compile(r"\.\s*build\s*\(")
+RE_NEWCALL = re.compile(r"\.\s*newCall\s*\(")
+
+
+def request_carries_ua(code, expr, lo, hi):
+    """这个**请求值**是否带着 UA override：True / False / None（判断不了）。
+
+    [R3-t12] 旧判据问的是"函数体里有没有 `.applyUserAgentOverride(`"，于是
+    `val effectiveRequest = request.newBuilder().applyUserAgentOverride(..).build()`
+    之后 `httpClient.newCall(request)`（见证 12-1）依然全绿 —— 覆盖被建出来了，
+    但没被用掉。这里追的是**被消费的那个值**：
+
+      * 变量 → 找它在本函数内的声明，再看 `name.build(` 之前有没有一次
+        可达的 override 调用；
+      * 内联链 → 链上必须有 override；
+      * 参数 / 无法解析 → None（调用方 fail-closed 报违规）。
+    """
+    e = strip_parens((expr or "").strip())
+    if not e:
+        return None
+    m = (re.fullmatch(r"([A-Za-z_]\w*)\s*\.\s*build\s*\(\s*\)", e)
+         or re.fullmatch(r"([A-Za-z_]\w*)", e))
+    if m is None:
+        return True if RE_OVERRIDE_CALL.search(e) else None
+    name = m.group(1)
+    body = code[lo:hi]
+    decls = list(re.finditer(
+        r"\b(?:val|var)\s+" + re.escape(name) + r"\s*(?::[^=\n]+?)?=(?!=)", body))
+    if not decls:
+        return None                      # 形参 / 属性：本函数里证明不了
+    ok = False
+    for d in decls:
+        seg = body[d.start():]
+        b = re.search(r"(?<![\w.])" + re.escape(name) + r"\s*\.\s*build\s*\(", seg)
+        head = seg[:b.start()] if b else seg
+        if any(path_feasible(head, o.start())
+               for o in RE_OVERRIDE_CALL.finditer(head)):
+            ok = True
+    return ok
+
+
+REQ_BUILDER = re.compile(r"Request\s*\.\s*Builder\s*\(\s*\)")
+
+# 已审计的 builder：确实不该带 UA（第三方 CDN 资产下载，不经过我们网关的
+# UA 白名单；它的 URL 由 provider 的响应体给出）。
+OPENAI_BUILDER_EXEMPT = (
+    ("Request.Builder().url(urlStr).get().build()",
+     "下载 provider 返回的资产 URL（第三方 CDN），不走网关 UA 白名单"),
+)
+
+
+def check_openai_builders(code_p):
+    """[R3-t12] 每一个 `Request.Builder()` 都必须在 build 之前拿到 UA override。
+
+    旧判据按**函数名**锚 `rawPassthroughRequest`（D1），于是同一文件里对称的
+    `generateImage` builder（见证 12-3）整条不在扫描面上 —— 删掉它的
+    `.applyUserAgentOverride(customUserAgent)` 后门 12 直接 PASS。这里改为从树
+    派生 builder 集合：将来新增一条请求构建路径会自动进闸门。
+    """
+    v = []
+    lines = code_p.split("\n")
+    for m in REQ_BUILDER.finditer(code_p):
+        lineno = code_p.count("\n", 0, m.start()) + 1
+        lo, hi = enclosing_span(code_p, m.start())
+        src_line = lines[lineno - 1] if lineno - 1 < len(lines) else ""
+        span200 = code_p[m.start():m.start() + 200]
+        exempt = next((why for snippet, why in OPENAI_BUILDER_EXEMPT
+                       if snippet in src_line or snippet in span200), None)
+        head = code_p[lo:m.start()]
+        vm = re.search(r"(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+?)?=\s*$", head)
+        if vm is not None:
+            var = vm.group(1)
+            built = False
+            for b in re.finditer(r"(?<![\w.])" + re.escape(var)
+                                 + r"\s*\.\s*build\s*\(", code_p[lo:hi]):
+                bpos = lo + b.start()
+                if bpos <= m.start():
+                    continue
+                built = True
+                body = code_p[m.start():bpos]
+                if not any(path_feasible(body, o.start())
+                           for o in RE_OVERRIDE_CALL.finditer(body)):
+                    if exempt:
+                        continue
+                    v.append(
+                        "OpenAIProvider.kt:%d: builder `%s` reaches `%s.build()` "
+                        "without '.applyUserAgentOverride(' on a reachable path "
+                        "(R3-t12 12-3: every request builder owns its UA, not "
+                        "just the ones a criterion happens to name)"
+                        % (lineno, var, var))
+            if not built and not exempt:
+                v.append(
+                    "OpenAIProvider.kt:%d: builder `%s` is never built inside "
+                    "this function (fail-closed: the UA placement cannot be "
+                    "judged)" % (lineno, var))
+        else:
+            b = RE_BUILD_CALL.search(code_p[m.start():hi])
+            if b is None:
+                v.append(
+                    "OpenAIProvider.kt:%d: inline Request.Builder() chain never "
+                    "calls .build() (fail-closed)" % lineno)
+                continue
+            body = code_p[m.start():m.start() + b.start()]
+            if not RE_OVERRIDE_CALL.search(body) and not exempt:
+                v.append(
+                    "OpenAIProvider.kt:%d: inline Request.Builder() chain drops "
+                    "'.applyUserAgentOverride(' before build() (R3-t12 12-3)"
+                    % lineno)
+    return v
+
+
 def check_factory(src):
     """ISSUE-04a — every provider construction forwards the instance override.
 
@@ -643,6 +783,35 @@ def check_voice(provider_src, vendors_src, factory_src):
             "the single HTTP door for every ASR/TTS request in the family)"
         )
 
+    # V1b [R3-t12 12-1] the override must be CONSUMED: the request handed to
+    # newCall has to be the value that carries it. Building `effectiveRequest`
+    # and then calling `httpClient.newCall(request)` kept V1 green while every
+    # ASR/TTS request shipped the default UA.
+    if body is not None:
+        fb = function_body(code_p, "executeRequest")
+        if fb is not None:
+            lo, hi, _kind = fb
+            seg = code_p[lo:hi]
+            sites = list(RE_NEWCALL.finditer(seg))
+            if not sites:
+                v.append(
+                    "VoiceProvider.kt: executeRequest no longer issues "
+                    "'.newCall(' (gate anchors moved — deliberate edit required)")
+            for site in sites:
+                raw = args_of(seg, site.end() - 1)
+                pieces = split_top(raw, (",",)) if raw is not None else []
+                arg = raw[pieces[0][0]:pieces[0][1]] if pieces else None
+                carries = (None if arg is None
+                           else request_carries_ua(code_p, arg, lo, hi))
+                if carries is not True:
+                    v.append(
+                        "VoiceProvider.kt:%d: executeRequest hands '.newCall(' a "
+                        "request that does not carry the UA override (%s) "
+                        "(R3-t12 12-1: the override must be applied to the value "
+                        "that is actually sent, not to a local that is dropped)"
+                        % (code_p.count("\n", 0, lo + site.start()) + 1,
+                           (arg or "<unbalanced>").strip() or "<missing>"))
+
     # V2
     url_at = code_v.find(".url(signedUrl)")
     if url_at < 0:
@@ -674,6 +843,30 @@ def check_voice(provider_src, vendors_src, factory_src):
                             "the instance override (da1029 ISSUE-05 V2)"
                             % (code_v.count("\n", 0, url_at + pos) + 1,
                                (arg or "<unbalanced>").strip()))
+
+    # V2b [R3-t12 12-2] the same consumption rule for the WebSocket door: the
+    # FIRST argument handed to newWebSocket must be the request that carries the
+    # override. Building `wsRequest` and then passing a fresh
+    # `Request.Builder().url(signedUrl).build()` kept V2 green.
+    ws_sites = list(re.finditer(r"\.\s*newWebSocket\s*\(", code_v))
+    if not ws_sites:
+        v.append(
+            "VoiceProviderVendors.kt: no '.newWebSocket(' call site (gate "
+            "anchors moved — deliberate edit required)")
+    for site in ws_sites:
+        lo, hi = enclosing_span(code_v, site.start())
+        raw = args_of(code_v, site.end() - 1)
+        pieces = split_top(raw, (",",)) if raw is not None else []
+        arg = raw[pieces[0][0]:pieces[0][1]] if pieces else None
+        carries = (None if arg is None
+                   else request_carries_ua(code_v, arg, lo, hi))
+        if carries is not True:
+            v.append(
+                "VoiceProviderVendors.kt:%d: '.newWebSocket(' receives a request "
+                "that does not carry the UA override (%s) (R3-t12 12-2: the "
+                "handshake uses the argument, not the local built above it)"
+                % (code_v.count("\n", 0, site.start()) + 1,
+                   (arg or "<unbalanced>").strip() or "<missing>"))
 
     # V3
     body = decl_body(code_f, "fun make(")
@@ -834,6 +1027,9 @@ def check_openai_outbound(provider_src, models_src, auth_src, adapters_src, main
                 "override must sit in the builder chain, after extraHeaders/user "
                 "headers and before build(), or it never reaches the request)"
             )
+
+    # -- D4 [R3-t12 12-3]: every request builder owns its UA ----------------
+    v.extend(check_openai_builders(code_p))
 
     # -- D2a: single source for the api-key header ---------------------------
     if "fun Request.Builder.applyOpenAIKeyAuth(" not in code_auth:
@@ -1362,6 +1558,12 @@ BAD_VOICE_PROVIDER_DROP = GOOD_VOICE_PROVIDER.replace(
     """        val call = httpClient.newCall(request)""",
 )
 
+# [R3-t12 12-1] 见证原文：有效请求建出来了，但 newCall 收的是原始形参。
+BAD_VOICE_PROVIDER_NEWCALL_DECOY = GOOD_VOICE_PROVIDER.replace(
+    "        val call = httpClient.newCall(effectiveRequest)",
+    "        val call = httpClient.newCall(request)",
+)
+
 BAD_VOICE_PROVIDER_NO_FN = GOOD_VOICE_PROVIDER.replace(
     "suspend fun executeRequest(", "suspend fun sendBytes("
 )
@@ -1389,6 +1591,13 @@ BAD_VOICE_VENDORS_DROP = GOOD_VOICE_VENDORS.replace(
                     .applyUserAgentOverride(customUserAgent)
                     .build()""",
     """                val wsRequest = Request.Builder().url(signedUrl).build()""",
+)
+
+# [R3-t12 12-2] 见证原文：带覆盖的 wsRequest 还在，握手收的是新建裸 builder。
+BAD_VOICE_VENDORS_WS_DECOY = GOOD_VOICE_VENDORS.replace(
+    "val socket = httpClient.newWebSocket(wsRequest, listener)",
+    "val socket = httpClient.newWebSocket(Request.Builder()"
+    ".url(signedUrl).build(), listener)",
 )
 
 BAD_VOICE_VENDORS_ANCHOR_MOVED = GOOD_VOICE_VENDORS.replace(
@@ -1453,6 +1662,16 @@ class OpenAIProvider(
         val response = client.newCall(builder.build()).execute()
         response.body!!.bytes()
     }
+
+    suspend fun generateImage(): ByteArray = withContext(Dispatchers.IO) {
+        val builder = Request.Builder()
+            .url(url)
+            .post(requestBody)
+            .applyKeyAuth(token)
+        builder.applyUserAgentOverride(customUserAgent)
+        val request = builder.build()
+        client.newCall(request).execute().body!!.bytes()
+    }
 }
 """
 
@@ -1466,6 +1685,16 @@ BAD_OPENAI_PROVIDER_AFTER_BUILD = GOOD_OPENAI_PROVIDER.replace(
         val response = client.newCall(builder.build()).execute()""",
     """        val response = client.newCall(builder.build()).execute()
         val request = builder.applyUserAgentOverride(customUserAgent)""",
+)
+
+# [R3-t12 12-3] 对称轴见证：rawPassthroughRequest 的覆盖还在，同文件里
+# generateImage 的 builder 丢掉了它 —— 旧判据只按函数名锚，看不到这一条。
+BAD_OPENAI_PROVIDER_IMAGE_DROP = GOOD_OPENAI_PROVIDER.replace(
+    """        builder.applyUserAgentOverride(customUserAgent)
+        val request = builder.build()
+        client.newCall(request).execute().body!!.bytes()""",
+    """        val request = builder.build()
+        client.newCall(request).execute().body!!.bytes()""",
 )
 
 BAD_OPENAI_PROVIDER_RENAMED = GOOD_OPENAI_PROVIDER.replace(
@@ -1782,6 +2011,21 @@ def selftest():
     expect_trip("xunfei WS-anchor-moved fixture (ISSUE-05 V2)", bad_vv_moved,
                 "not found")
 
+    # [R3-t12] the three third-round witnesses: the override exists, the value
+    # that is actually sent does not carry it (and the symmetric builder that
+    # no function-named criterion looked at).
+    bad_vp_decoy = check_voice(BAD_VOICE_PROVIDER_NEWCALL_DECOY, GOOD_VOICE_VENDORS,
+                               GOOD_VOICE_FACTORY)
+    expect_trip("voice newCall-decoy fixture (R3-12-1)", bad_vp_decoy,
+                "does not carry the UA override")
+    bad_vv_decoy = check_voice(GOOD_VOICE_PROVIDER, BAD_VOICE_VENDORS_WS_DECOY,
+                               GOOD_VOICE_FACTORY)
+    expect_trip("xunfei WS-decoy fixture (R3-12-2)", bad_vv_decoy,
+                "does not carry the UA override")
+    good_vp_decoy = check_voice(GOOD_VOICE_PROVIDER, GOOD_VOICE_VENDORS,
+                                GOOD_VOICE_FACTORY)
+    expect_clean("compliant voice fixtures (recheck)", good_vp_decoy)
+
     bad_vf_drop = check_voice(GOOD_VOICE_PROVIDER, GOOD_VOICE_VENDORS, BAD_VOICE_FACTORY_DROP)
     expect_trip("voice factory injection-drop fixture (ISSUE-05 V3)", bad_vf_drop,
                 "does not inject")
@@ -1831,6 +2075,11 @@ def selftest():
     bad_p_after = oai(provider=BAD_OPENAI_PROVIDER_AFTER_BUILD)
     expect_trip("passthrough-UA-after-build fixture (D1)", bad_p_after,
                 "AFTER 'builder.build()'")
+    bad_img_drop = oai(provider=BAD_OPENAI_PROVIDER_IMAGE_DROP)
+    expect_trip("generateImage-UA-drop fixture (R3-12-3)", bad_img_drop,
+                "without '.applyUserAgentOverride('")
+    expect_single("generateImage-UA-drop fixture (R3-12-3)", bad_img_drop,
+                  "without '.applyUserAgentOverride('")
     bad_p_renamed = oai(provider=BAD_OPENAI_PROVIDER_RENAMED)
     expect_trip("passthrough-anchor-moved fixture (D1)", bad_p_renamed, "body not found")
 
@@ -1882,6 +2131,9 @@ def selftest():
     bad_ad_none = oai(adapters=BAD_OPENAI_ADAPTERS_NO_SITE)
     expect_trip("adapters-no-callsite fixture (D3)", bad_ad_none, "call not found")
 
+    print("selftest voice newCall decoy     -> %d violation(s)" % len(bad_vp_decoy))
+    print("selftest xunfei WS decoy         -> %d violation(s)" % len(bad_vv_decoy))
+    print("selftest generateImage UA drop   -> %d violation(s)" % len(bad_img_drop))
     print("selftest openai passthrough drop -> %d violation(s)" % len(bad_p_drop))
     print("selftest openai passthrough order-> %d violation(s)" % len(bad_p_after))
     print("selftest openai auth single-src  -> %d violation(s)" % len(bad_auth))
