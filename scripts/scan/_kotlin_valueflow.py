@@ -167,16 +167,25 @@ def value_sources(expr, depth=0):
         return (value_sources(e[parts[0][0]:parts[0][1]], depth + 1)
                 + value_sources(e[parts[1][0]:parts[1][1]], depth + 1))
 
-    # if / else 表达式
-    m = re.match(r"if\s*\(", e)
-    if m:
-        close = match_bracket(e, m.end() - 1)
-        if 0 <= close < len(e):
-            rest = e[close + 1:].strip()
-            els = re.match(r"else\b", rest)
-            if els:
-                then_part = rest[:els.start()].strip()
-                else_part = rest[els.end():].strip()
+    # if / else 表达式（A2）：旧实现把 `)` 之后的整段当 then、再在开头
+    # re.match(r"else\b") —— `)` 之后永远是 then 表达式，永远匹配不到，整个
+    # 分叉 100% 死代码，`if (c) a else b` 原样返回整条表达式。改用 if_blocks
+    # 定位 then/else 区间，再按常量条件三分支：真 → then、假 → else、
+    # 未知 → 两侧都算（保守不漏脏来源）。
+    if re.match(r"if\s*\(", e):
+        blks = if_blocks(e)
+        if blks:
+            cond, t_start, t_end, e_start, e_end = blks[0]
+            # else 段必须覆盖到表达式结尾：`if (c) a else b + z` 是一体的，
+            # 尾部还带别的语句的形态不许在这里错切（宁可退回整条表达式）。
+            if e_start is not None and e_end == len(e):
+                then_part = e[t_start:t_end].strip()
+                else_part = e[e_start:e_end].strip()
+                b = const_bool(cond)
+                if b is True:
+                    return value_sources(then_part, depth + 1)
+                if b is False:
+                    return value_sources(else_part, depth + 1)
                 return (value_sources(then_part, depth + 1)
                         + value_sources(else_part, depth + 1))
 
@@ -452,6 +461,48 @@ ARMS = [
      lambda V: V["path_feasible"](
          V["code_view"]("if (a == null) {\n  ok()\n} else {\n  boom()\n}\n"),
          V["code_view"]("if (a == null) {\n  ok()\n} else {\n  boom()\n}\n").index("boom")) is True),
+    # ---- A2：value_sources 的 if/else 分叉（旧实现 100% 死代码）----
+    # `)` 之后永远是 then 表达式，`re.match(r"else\b", rest)` 永不命中，于是
+    # `if (c) a else b` 原样返回整条表达式、两侧来源都没被拆出来。
+    ("value_sources_if_else_both",
+     lambda V: V["value_sources"]("if (c) a else b") == ["a", "b"]),
+    ("value_sources_if_true_then_only",
+     lambda V: V["value_sources"]("if (true) a else b") == ["a"]),
+    ("value_sources_if_false_else_only",
+     lambda V: V["value_sources"]("if (false) a else b") == ["b"]),
+    ("value_sources_nested_if_else_chain",
+     lambda V: V["value_sources"]("if (c) a else if (d) b else z") == ["a", "b", "z"]),
+    # 不是以 if 开头的表达式不许错切：`f(if (c) a else b)` 原样一条。
+    ("value_sources_call_wrapped_not_split",
+     lambda V: V["value_sources"]("f(if (c) a else b)") == ["f(if (c) a else b)"]),
+    # ---- A1 端到端：单行 if/else 的两条分支 ----
+    ("path_feasible_single_line_else_dead",
+     lambda V: V["path_feasible"](
+         V["code_view"]("if (1 == 1) ok() else boom()\n"),
+         V["code_view"]("if (1 == 1) ok() else boom()\n").index("boom")) is False),
+    ("path_feasible_single_line_else_live",
+     lambda V: V["path_feasible"](
+         V["code_view"]("if (1 == 2) ok() else boom()\n"),
+         V["code_view"]("if (1 == 2) ok() else boom()\n").index("boom")) is True),
+    # ---- A3 端到端：when 的 subject 与块体臂 ----
+    ("path_feasible_when_const_subject_dead",
+     lambda V: V["path_feasible"](
+         V["code_view"]("when (false) {\n  true -> dead()\n}\n"),
+         V["code_view"]("when (false) {\n  true -> dead()\n}\n").index("dead()")) is False),
+    ("path_feasible_when_block_arm_dead",
+     lambda V: V["path_feasible"](
+         V["code_view"]("when (false) {\n  true -> {\n    dead()\n  }\n}\n"),
+         V["code_view"]("when (false) {\n  true -> {\n    dead()\n  }\n}\n").index("dead()")) is False),
+    # dangling-else：`y()` 的真实条件是 `a && !b`，两种拼法都判活；外层条件
+    # 若被错挂成 `!(a)` 则外层为「未知」，同样判活 —— 所以这条只看可达性，
+    # 条件文本形态由 ast 侧的 enclosing_dangling_else_binds_inner 钉。
+    ("path_feasible_dangling_else_alive",
+     lambda V: V["path_feasible"](
+         V["code_view"]("if (a) if (b) x() else y()\n"),
+         V["code_view"]("if (a) if (b) x() else y()\n").index("y()")) is True),
+    # ---- A4 端到端：复合条件里的数值比较 ----
+    ("guard_feasible_cmp_inside_and",
+     lambda V: V["guard_feasible"]("1 > 2 && g") is False),
     ("returns_exiting_plain",
      lambda V: V["returns_exiting"](V["code_view"]("fun f() {\n  if (x) return\n  y()\n}\n"),
                                     V["code_view"]("fun f() {\n  if (x) return\n  y()\n}\n").index("if"),

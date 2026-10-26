@@ -928,7 +928,12 @@ ARM_EXPECT = [
     ("getlevel_early_return", 1),
     ("raw_string_comment_hole", 1),
     ("confirm_call_dead_branch", 1),
-    ("checkperm_auto_approve_overlay", 1),
+    # [primitive-round2 A2] `value_sources` 现在真的拆 if/else 分叉（此前那段
+    # 分叉是死代码，返回整条表达式）。本臂的见证本身是错的（overlay 替代了
+    # resolved level），因此两条 C6 判据**都**成立：①checkPermission 咨询了
+    # AutoApproveStore；②`level` 不是每条路径上的 getLevel() 判决。
+    # 同一个站点报两条 = 判据变准的直接后果，计数随之从 1 改 2。
+    ("checkperm_auto_approve_overlay", 2),
     ("checkperm_level_discarded", 1),
     ("risk_voice_input_downgraded", 1),
     ("risk_unknown_token", 1),
