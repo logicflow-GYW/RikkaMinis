@@ -168,16 +168,19 @@ if str(_HERE) not in sys.path:
 from _kotlin_lexer import KotlinLexError, mask_code, mask_comments  # noqa: E402
 from _kotlin_ast import (  # noqa: E402
     const_bool,
+    enclosing_conditions,
     function_body,
     if_blocks,
     last_write,
     match_bracket,
     split_top,
     strip_parens,
+    when_branches,
 )
 from _kotlin_valueflow import (  # noqa: E402
     call_args,
     expr_end,
+    literal_view,
     path_feasible,
     returns_exiting,
     value_sources,
@@ -1162,6 +1165,365 @@ def _fn_span(struct: str, name: str):
         return None
     return span[0], span[1]
 
+def _grep_cap_producer(code: str) -> list:
+    """[R3-t14 #152] the cap that grepTree terminates on must be SET, at the budget.
+
+    Witness 15-2 deleted exactly one line from `grepFile`:
+    `out.matchesCapped = true` at `if (out.matches.size >= limit)`. Every
+    criterion in S1/S2/S3a stayed green because all three read the CONSUMER
+    (`grepTree`), and the producer — the only place that can set the flag while
+    files are being read — was nobody's business. Consequence: the walk never
+    receives `FileVisitResult.TERMINATE`, keeps opening every remaining file
+    (up to MAX_GREP_FILE_BYTES each) and reports `truncated: false` while
+    holding `limit` matches.
+
+    So the producer is judged on ITS OWN terms: the budget-exhausted guard must
+    be readable, feasible, and its branch must set the flag and stop the read
+    loop — with no later reset inside the function (a `= false` after it would
+    re-open the same hole).
+    """
+    span = function_body(code, "grepFile")
+    if span is None or span[2] != "block":
+        return [("S4", "missing",
+                 "private fun grepFile(…) — the budget producer cannot be read "
+                 "(fail-closed: without it the cap grepTree waits for has no writer)")]
+    body = code[span[0]:span[1]]
+    site = None
+    for cond, t_start, t_end, _es, _ee in if_blocks(body):
+        if re.search(r"matches\s*\.\s*size\s*>=?\s*limit", cond):
+            site = (cond, t_start, t_end)
+            break
+    if site is None:
+        return [("S4", "missing",
+                 "grepFile no longer tests the budget (`out.matches.size >= limit`) — "
+                 "out.matchesCapped is then never set, so grepTree walks (and READS) the "
+                 "whole tree and reports truncated: false")]
+    cond, t_start, t_end = site
+    if const_bool(cond) is False:
+        return [("S4", "dead",
+                 "the budget-exhausted branch is constant-folded false (`%s`) — "
+                 "matchesCapped is never set, so the walk never terminates"
+                 % " ".join(cond.split())[:60])]
+    if not path_feasible(body, t_start):
+        return [("S4", "unreachable",
+                 "the budget-exhausted branch sits in a path that can never run — "
+                 "matchesCapped is never set")]
+    branch = body[t_start:t_end]
+    if not re.search(r"matchesCapped\s*=\s*true", branch):
+        return [("S4", "missing",
+                 "the budget-exhausted branch returns WITHOUT setting out.matchesCapped — "
+                 "every consumer in grepTree reads a flag that stays false: the walk runs "
+                 "to the end of the tree and the payload says truncated: false")]
+    if not re.search(r"\b(return|break)\b", branch):
+        return [("S4", "missing",
+                 "the budget-exhausted branch sets the cap and keeps reading the file — "
+                 "it must stop the read loop")]
+    writes = [(m.start(), m.group(0)) for m in
+              re.finditer(r"matchesCapped\s*=\s*(?:true|false)", body)]
+    if writes and writes[-1][1].split("=")[-1].strip() != "true":
+        return [("S4", "reset",
+                 "the cap is written back to false later in grepFile (`%s`) — the "
+                 "budget decision is undone before the caller can observe it"
+                 % writes[-1][1].strip())]
+    return []
+
+
+# ── [R3-t14 #151/#153] the two argv normalizers must DECIDE ─────────────────
+#
+# Both witnesses left every token F7/F8 pin untouched and gutted the FUNCTION
+# BODY instead:
+#
+#   15-1 `normalizeLongOptionSpelling(argv) = argv` — the agent's POSIX `find`
+#        spelling (`-name "*.kt" -type f -limit 50`) then reaches OffloadArgs
+#        as the short flags -n/-a/-m/-e plus three stray positionals: `name`
+#        and `type` are null, the filters are gone and the file patterns are
+#        reported as missing directories.
+#   15-3 `'C' -> Unit` inside `normalizeTarShorts` — `known` stays true, so the
+#        token is "expanded" into nothing: `tar -xf a.tar -C /dest` drops the
+#        target directory and unpacks into the cwd (and `/dest` becomes a
+#        member pattern).
+#
+# Signature presence is not the decision. Both tables are DECLARED in the
+# source (`SHORT_LONG_OPTIONS` / `SHORT_VALUE_OPTIONS`), so the criteria are
+# derived from those declarations: what the rewrite must do to a member, and
+# what an arm of the short-option table may do to a letter.
+SHORT_LONG_SET = "SHORT_LONG_OPTIONS"
+SHORT_VALUE_SET = "SHORT_VALUE_OPTIONS"
+_DECL_RE = r"\b%s\s*=\s*setOf\(([^)]*)\)"
+# A dash is ADDED to the token: `"-$it"`, `"--$it"`, `"-" + it`, `"--" + …`.
+DASH_TEMPLATE_RE = re.compile(r'"(-+)\s*\$\s*\{?\s*([A-Za-z_]\w*)')
+DASH_CONCAT_RE = re.compile(r'"(-+)"\s*\+')
+DASH_REPLACE_RE = re.compile(r'replaceFirst\s*\(\s*"-"\s*,\s*"--"')
+# `-f` is the ONE letter whose value must stay a positional (the archive): the
+# expander maps it to nothing ON PURPOSE, and the handler reads the archive
+# from the positional list. Any OTHER silent no-op drops a real option, which
+# is 15-3. Adding a letter here is a deliberate edit to this gate.
+NOOP_OK_LETTERS = {"f"}
+
+
+def _declared_members(code: str, name: str):
+    """String members of `val <name> = setOf(…)`, or None (fail-closed)."""
+    m = re.search(_DECL_RE % re.escape(name), code)
+    if m is None:
+        return None
+    return [x.strip().strip('"') for x in m.group(1).split(",") if x.strip()]
+
+
+def _adds_dash(seg_lit: str, elem: str) -> bool:
+    """Does this (literal-channel) expression yield a dash-PREFIXED [elem]?"""
+    for m in DASH_TEMPLATE_RE.finditer(seg_lit):
+        if m.group(2) == elem:
+            return True
+    if re.search(r"\b%s\b" % re.escape(elem), seg_lit) and (
+            DASH_CONCAT_RE.search(seg_lit) or DASH_REPLACE_RE.search(seg_lit)):
+        return True
+    return False
+
+
+def _handler_reads_key(lit_src: str, key: str) -> bool:
+    """Is `--<key>` a value/flag the handler actually reads?"""
+    return re.search(
+        r'(?:get|getInt|getLong|getDouble|hasFlag|resolvePageSize)\s*\(\s*"%s"' % re.escape(key),
+        lit_src) is not None
+
+
+def _split_if_else(seg: str, seg_lit: str, t_start: int, t_end: int):
+    """(then_lit, else_lit) of a braceless `if` whose then-branch may swallow the
+    `else` (shared `if_blocks` stops a single-line branch only at a newline).
+
+    The `else` is located at PAREN depth 0 of the then-text, on the CODE view
+    (string contents are blanked there, so a prose `else` inside a literal
+    cannot split it).
+    """
+    depth = 0
+    i = t_start
+    while i < t_end:
+        c = seg[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and seg.startswith("else", i) and (
+                i == t_start or not (seg[i - 1].isalnum() or seg[i - 1] == "_")) and (
+                i + 4 >= t_end or not (seg[i + 4].isalnum() or seg[i + 4] == "_")):
+            return seg_lit[t_start:i].strip(), seg_lit[i + 4:t_end].strip()
+        i += 1
+    return seg_lit[t_start:t_end].strip(), None
+
+
+def _check_long_option_rewrite(code: str, lit: str) -> list:
+    """[#151] `normalizeLongOptionSpelling` must rewrite its declared members."""
+    span = function_body(code, "normalizeLongOptionSpelling")
+    if span is None:
+        return [("N0", "missing",
+                 "internal fun normalizeLongOptionSpelling(argv: List<String>): List<String>")]
+    start, end, kind = span
+    body, body_lit = code[start:end], lit[start:end]
+    members = _declared_members(lit, SHORT_LONG_SET)
+    if not members or any(not x or not x.startswith("-") for x in members):
+        return [("N0", "missing",
+                 "%s = setOf(…) is not declared with single-dash members — the rewrite has "
+                 "no table to consult (fail-closed)" % SHORT_LONG_SET)]
+    m = re.search(r"\.\s*map(?:NotNull)?\s*\{", body)
+    if m is None:
+        return [("N1", "missing",
+                 "the normalizer no longer maps the argv at all — every single-dash long "
+                 "option (%s) reaches OffloadArgs as one short flag plus stray positionals"
+                 % ", ".join(members))]
+    lam_open = m.end() - 1
+    lam_close = match_bracket(body, lam_open)
+    if lam_close < 0:
+        return [("N1", "missing", "the normalizer's map lambda cannot be balanced (fail-closed)")]
+    lam = body[lam_open + 1:lam_close]
+    lam_lit = body_lit[lam_open + 1:lam_close]
+    em = re.match(r"\s*([A-Za-z_]\w*)\s*->", lam)
+    elem = em.group(1) if em else "it"
+    if kind == "block" and not re.search(r"\breturn\b", body[:m.start()]) \
+            and body[lam_close + 1:].strip():
+        return [("N1", "discarded",
+                 "the rewritten list is computed and then dropped — the function's result "
+                 "is not the mapped argv")]
+    test = re.search(r"\b%s\s+in\s+%s\b" % (re.escape(elem), SHORT_LONG_SET), lam) \
+        or re.search(r"%s\s*\.\s*contains\s*\(\s*%s\b" % (SHORT_LONG_SET, re.escape(elem)), lam)
+    if test is None:
+        return [("N2", "missing",
+                 "the rewrite no longer consults %s — a member token is passed through "
+                 "unchanged, which is exactly the pre-fix parse" % SHORT_LONG_SET)]
+    site = None
+    for cond, t_start, t_end, e_start, e_end in if_blocks(lam):
+        if re.search(SHORT_LONG_SET, cond) and re.search(r"\b%s\b" % re.escape(elem), cond):
+            site = (cond, t_start, t_end, e_start, e_end)
+            break
+    if site is None:
+        return [("N2", "missing",
+                 "the membership test is not the condition of an `if` the gate can read "
+                 "(fail-closed) — a rewrite the gate cannot see is not a rewrite")]
+    _cond, t_start, t_end, e_start, e_end = site
+    if e_start is not None:
+        then_lit, else_lit = lam_lit[t_start:t_end].strip(), lam_lit[e_start:e_end].strip()
+    else:
+        then_lit, else_lit = _split_if_else(lam, lam_lit, t_start, t_end)
+    if not _adds_dash(then_lit, elem):
+        return [("N2", "present",
+                 "a member token is not rewritten to the `--` spelling (`%s`) — OffloadArgs "
+                 "reads `-name` as the flags -n/-a/-m/-e and the following value as a "
+                 "positional" % " ".join(then_lit.split())[:60])]
+    if else_lit is None or else_lit != elem:
+        return [("N3", "missing" if else_lit is None else "present",
+                 "the pass-through arm must return the token itself — a non-member argument "
+                 "would be rewritten or dropped (got `%s`)" % (else_lit or "")[:60])]
+    return []
+
+
+def _when_arms_with_labels(body: str, body_lit: str):
+    """[(label, body_start, body_end)] of the first `when` — labels read from the
+    LITERAL channel.
+
+    Shared `when_branches` slices branch bodies correctly, but its label text
+    comes from the CODE view, where a char literal's content is blanked: every
+    `'c' -> …` arm would read as `' '`. The label is recovered at the same
+    offsets from `literal_view` (both views are length-equal, so positions are
+    interchangeable).
+    """
+    arms = when_branches(body)
+    out = []
+    prev = None
+    for _subj, _cond, b_start, b_end in arms:
+        arrow = body.rfind("->", 0 if prev is None else prev, b_start + 2)
+        if arrow < 0:
+            out.append((None, b_start, b_end))
+            prev = b_end
+            continue
+        start = body.rfind("{", 0, arrow) if prev is None else prev
+        out.append((body_lit[start + 1:arrow].strip(), b_start, b_end))
+        prev = b_end
+    return out
+
+
+def _check_tar_short_table(code: str, lit: str, lit_src: str) -> list:
+    """[#153] every arm of `normalizeTarShorts` must contribute or invalidate."""
+    findings = []
+    span = function_body(code, "normalizeTarShorts")
+    if span is None or span[2] != "block":
+        return [("T0", "missing",
+                 "internal fun normalizeTarShorts(argv: List<String>): List<String> "
+                 "(block body — fail-closed)")]
+    body, body_lit = code[span[0]:span[1]], lit[span[0]:span[1]]
+    declared_value = _declared_members(lit, SHORT_VALUE_SET)
+    if declared_value is None:
+        return [("T0", "missing",
+                 "%s = setOf(…) is not declared — the expander no longer models "
+                 "value-taking short options (fail-closed)" % SHORT_VALUE_SET)]
+    arms = _when_arms_with_labels(body, body_lit)
+    if not arms:
+        return [("T0", "missing",
+                 "normalizeTarShorts has no `when (ch)` arm table — no short option is "
+                 "expanded at all")]
+    table = {}
+    else_arm = None
+    for label, b_start, b_end in arms:
+        label = (label or "").strip()
+        arm_body = body[b_start:b_end]
+        arm_lit = body_lit[b_start:b_end]
+        produces = re.search(r"\.\s*add(?:All)?\s*\(", arm_body) is not None
+        key = None
+        km = re.search(r'\.\s*add\s*\(\s*"(--[A-Za-z][\w-]*)"', arm_lit)
+        if km:
+            key = km.group(1)
+        invalidates = re.search(r"\bknown\s*=\s*false\b", arm_body) is not None
+        letter = None
+        lm = re.match(r"^'(\w)'$", label) or re.match(r'^"(\w)"$', label)
+        if lm:
+            letter = lm.group(1)
+        entry = {"produces": produces, "key": key, "invalidates": invalidates,
+                 "body": arm_body.strip()}
+        if label == "else":
+            else_arm = entry
+        elif letter:
+            table[letter] = entry
+    # T2 — an unknown letter must invalidate the token (the caller reports it),
+    # never be dropped while `known` stays true.
+    if else_arm is None:
+        findings.append(("T2", "missing",
+                         "the short-option table has no `else` arm — an unknown letter "
+                         "silently disappears from the argument list"))
+    elif not else_arm["invalidates"]:
+        findings.append(("T2", "present",
+                         "the `else` arm does not invalidate the token (`known = false`) — "
+                         "an unknown letter is accepted and dropped"))
+    # T1 — a known letter may not silently no-op (15-3: `'C' -> Unit`).
+    for letter in sorted(table):
+        e = table[letter]
+        if e["produces"] or e["invalidates"]:
+            continue
+        if letter in NOOP_OK_LETTERS:
+            continue
+        findings.append(
+            ("T1", "present",
+             "'%s' -> `%s` drops the option while `known` stays true — the letter is "
+             "accepted and then contributes nothing, so the option's value/effect is lost "
+             "silently" % (letter, e["body"][:40])))
+    # T3 — a declared VALUE-taking short option must expand to a value-consuming
+    # long form (that is the only thing that stops its value becoming a
+    # positional).
+    for member in declared_value:
+        letter = member.lstrip("-")
+        e = table.get(letter)
+        if e is None:
+            findings.append(("T3", "missing",
+                             "%s lists `%s` as value-taking but the table has no arm for it"
+                             % (SHORT_VALUE_SET, member)))
+            continue
+        if not e["produces"] or not e["key"]:
+            findings.append(("T3", "present",
+                             "`%s` is declared value-taking (%s) but its arm does not expand "
+                             "to a `--` option — the value falls through as a positional"
+                             % (letter, SHORT_VALUE_SET)))
+            continue
+        if not _handler_reads_key(lit_src, e["key"][2:]):
+            findings.append(("T3", "missing",
+                             "the arm emits `%s`, which no handler reads — the option is "
+                             "accepted and then ignored" % e["key"]))
+    # T4 — the expansions must replace the token, under the `known` decision.
+    add_all = body.find("addAll(")
+    if add_all < 0:
+        findings.append(("T4", "missing",
+                         "the expander never appends its expansions (`out.addAll(expanded)`) "
+                         "— the token is dropped instead of expanded"))
+    else:
+        conds = [c for _k, c in enclosing_conditions(body, add_all)]
+        if not conds or "known" not in conds[-1]:
+            findings.append(("T4", "present",
+                             "the expansions are appended without consulting `known` — an "
+                             "unknown letter's partial expansion reaches the parser"))
+    if re.search(r"\.\s*add\s*\(\s*token\s*\)", body) is None:
+        findings.append(("T4", "missing",
+                         "no pass-through arm re-adds the untouched token (`out.add(token)`) "
+                         "— a token the expander cannot handle disappears"))
+    # T5 — every emitted option must be one the tar surface parses.
+    tar_opts = _declared_members(lit_src, "TAR_OPTIONS") or []
+    for letter in sorted(table):
+        key = table[letter]["key"]
+        if not key:
+            continue
+        bare = key[2:]
+        if bare in tar_opts or _handler_reads_key(lit_src, bare):
+            continue
+        findings.append(("T5", "missing",
+                         "'%s' expands to `%s`, which is in neither TAR_OPTIONS nor any "
+                         "handler read — the option is accepted and then ignored" % (letter, key)))
+    return findings
+
+
+@_fail_closed
+def check_fastio_normalizers(fastio_src: str) -> list:
+    """[R3-t14 #151/#153] the two argv normalizers, judged as decisions."""
+    code = code_view(fastio_src)
+    lit = literal_view(fastio_src)
+    return (_check_long_option_rewrite(code, lit)
+            + _check_tar_short_table(code, lit, lit))
+
+
 @_fail_closed
 def check_fastio_search(fastio_search_src: str) -> list:
     findings = []
@@ -1243,6 +1605,9 @@ def check_fastio_search(fastio_search_src: str) -> list:
                 findings.append(
                     ("S3b", "present",
                      "visitFile returns CONTINUE unconditionally after grepFile"))
+    # [R3-t14 #152] …and the cap every one of those consumers waits on must be
+    # SET where the budget actually runs out (inside grepFile).
+    findings += _grep_cap_producer(src)
     return findings
 
 
@@ -2443,6 +2808,7 @@ GREEN_FASTIO = """
             normalizeLongOptionSpelling(normalizeTarShorts(rawArgv)),
             booleanFlags = fastioBooleanFlags(isTarCommand),
         )
+        val destRaw = args.get("directory") ?: request.cwd
     }
     companion object {
         internal fun firstSubcommandToken(rawArgv: List<String>): String? {
@@ -2461,6 +2827,13 @@ GREEN_FASTIO = """
             return null
         }
         private val SHORT_VALUE_OPTIONS = setOf("-C")
+        private val SHORT_LONG_OPTIONS = setOf(
+            "-name", "-type", "-limit", "-max-entries", "-ignore-case",
+        )
+        private val TAR_OPTIONS = setOf(
+            "c", "x", "create", "extract", "f", "file", "z", "gzip", "C", "directory",
+            "v", "verbose", "force", "max-entries",
+        )
         internal fun fastioBooleanFlags(isTarCommand: Boolean): Set<String> =
             if (isTarCommand) {
                 setOf("recursive", "force", "ignore-case", "create", "extract", "gzip", "verbose")
@@ -2469,6 +2842,28 @@ GREEN_FASTIO = """
             }
         internal fun normalizeTarShorts(argv: List<String>): List<String> {
             if (firstSubcommandToken(argv) != "tar") return argv
+            val out = ArrayList<String>(argv.size)
+            for (token in argv) {
+                if (token.length < 2 || token[0] != '-' || token.startsWith("--")) {
+                    out.add(token)
+                    continue
+                }
+                val expanded = ArrayList<String>(token.length)
+                var known = true
+                for (ch in token.substring(1)) {
+                    when (ch) {
+                        'c' -> expanded.add("--create")
+                        'x' -> expanded.add("--extract")
+                        'z' -> expanded.add("--gzip")
+                        'v' -> expanded.add("--verbose")
+                        'C' -> expanded.add("--directory")
+                        'f' -> Unit
+                        else -> known = false
+                    }
+                }
+                if (known) out.addAll(expanded) else out.add(token)
+            }
+            return out
         }
         internal fun normalizeLongOptionSpelling(argv: List<String>): List<String> =
             argv.map { if (it in SHORT_LONG_OPTIONS) "-$it" else it }
@@ -2742,6 +3137,21 @@ internal fun findTree(
     out: FindOutcome,
 ) {
     out.matched++
+}
+
+private fun grepFile(file: Path, guestPath: String, regex: Regex, limit: Int, out: GrepOutcome) {
+    val reader = BufferedReader(InputStreamReader(Files.newInputStream(file), StandardCharsets.UTF_8))
+    var lineNumber = 0
+    while (true) {
+        val line = reader.readLine() ?: break
+        lineNumber++
+        if (!regex.containsMatchIn(line)) continue
+        if (out.matches.size >= limit) {
+            out.matchesCapped = true
+            return
+        }
+        out.matches.add(GrepMatch(guestPath, lineNumber, line))
+    }
 }
 """
 
@@ -4712,6 +5122,8 @@ def selftest() -> int:
     clean_bindings = check_offload_cli_bindings(
         GREEN_CONTACTS, GREEN_NOTIFICATION_HANDLE, GREEN_FASTIO)
     clean_search = check_fastio_search(GREEN_FASTIO_SEARCH)
+    # [R3-t14 #151/#153] the two argv normalizers, judged as decisions.
+    clean_norm = check_fastio_normalizers(GREEN_FASTIO)
     clean_payload = check_offload_json(
         ("PhotosOffloadHandler.kt", GREEN_PAYLOAD_PHOTOS),
         ("ContactsOffloadHandler.kt", GREEN_PAYLOAD_CONTACTS),
@@ -4906,12 +5318,104 @@ def selftest() -> int:
         b6 += 1
     print(f"BATCH6_T01_ARMS={b6} checks passed")
 
+    # ── [R3-t14] third-round witnesses #151 / #152 / #153 ───────────────────
+    # All three kept EVERY token the pre-existing criteria pin and gutted the
+    # function body instead: the long-option rewrite returned the argv
+    # untouched (#151), the grep cap lost its only writer (#152), and one arm
+    # of the tar short-option table became a silent no-op (#153). The arms
+    # below mutate exactly that decision, one at a time.
+    r3 = 0
+    MAP = 'if (it in SHORT_LONG_OPTIONS) "-$it" else it'
+    CAP = ('        if (out.matches.size >= limit) {\n'
+           '            out.matchesCapped = true\n'
+           '            return\n'
+           '        }\n')
+    r3_cases = [
+        ("r3-15-1: the long-option rewrite returns the argv untouched",
+         lambda: {r for r, _k, _d in check_fastio_normalizers(
+             GREEN_FASTIO.replace('argv.map { ' + MAP + ' }', "argv"))},
+         {"N1"}),
+        ("r3-15-1b: the member token is passed through unchanged (no dash added)",
+         lambda: {r for r, _k, _d in check_fastio_normalizers(
+             GREEN_FASTIO.replace(MAP, "if (it in SHORT_LONG_OPTIONS) it else it"))},
+         {"N2"}),
+        ("r3-15-1c: the table is declared but no longer consulted",
+         lambda: {r for r, _k, _d in check_fastio_normalizers(
+             GREEN_FASTIO.replace(MAP, 'if (it.isNotEmpty()) "-$it" else it'))},
+         {"N2"}),
+        ("r3-15-1d: the pass-through arm rewrites a non-member token too",
+         lambda: {r for r, _k, _d in check_fastio_normalizers(
+             GREEN_FASTIO.replace(MAP, 'if (it in SHORT_LONG_OPTIONS) "-$it" else it.trim()'))},
+         {"N3"}),
+        ("r3-15-3: the -C arm silently no-ops (`'C' -> Unit`)",
+         lambda: {r for r, _k, _d in check_fastio_normalizers(
+             GREEN_FASTIO.replace('\'C\' -> expanded.add("--directory")', "'C' -> Unit"))},
+         {"T1", "T3"}),
+        ("r3-15-3b: the -C arm is deleted outright",
+         lambda: {r for r, _k, _d in check_fastio_normalizers(
+             GREEN_FASTIO.replace('                        \'C\' -> expanded.add("--directory")\n',
+                                  ""))},
+         {"T3"}),
+        ("r3-15-3c: the -C arm expands to a key nothing parses",
+         lambda: {r for r, _k, _d in check_fastio_normalizers(
+             GREEN_FASTIO.replace('\'C\' -> expanded.add("--directory")',
+                                  '\'C\' -> expanded.add("--dir")'))},
+         {"T3", "T5"}),
+        ("r3-15-3d: an unknown option is dropped instead of invalidating the token",
+         lambda: {r for r, _k, _d in check_fastio_normalizers(
+             GREEN_FASTIO.replace("else -> known = false", "else -> Unit"))},
+         {"T2"}),
+        ("r3-15-3e: a new letter joins the table as a no-op",
+         lambda: {r for r, _k, _d in check_fastio_normalizers(
+             GREEN_FASTIO.replace("'f' -> Unit", "'q' -> Unit\n                        'f' -> Unit"))},
+         {"T1"}),
+        ("r3-15-3f: the expansions are appended regardless of `known`",
+         lambda: {r for r, _k, _d in check_fastio_normalizers(
+             GREEN_FASTIO.replace("if (known) out.addAll(expanded) else out.add(token)",
+                                  "out.addAll(expanded)"))},
+         {"T4"}),
+        ("r3-15-2: the budget branch returns without setting the cap",
+         lambda: {r for r, _k, _d in check_fastio_search(
+             GREEN_FASTIO_SEARCH.replace(CAP,
+                                         "        if (out.matches.size >= limit) {\n"
+                                         "            return\n"
+                                         "        }\n"))},
+         {"S4"}),
+        ("r3-15-2b: the cap is written back to false later in the file",
+         lambda: {r for r, _k, _d in check_fastio_search(
+             GREEN_FASTIO_SEARCH.replace(
+                 "        out.matches.add(GrepMatch(guestPath, lineNumber, line))",
+                 "        out.matchesCapped = false\n"
+                 "        out.matches.add(GrepMatch(guestPath, lineNumber, line))"))},
+         {"S4"}),
+        ("r3-15-2c: the budget guard constant-folds false",
+         lambda: {r for r, _k, _d in check_fastio_search(
+             GREEN_FASTIO_SEARCH.replace("if (out.matches.size >= limit) {",
+                                         "if (out.matches.size >= limit && false) {"))},
+         {"S4"}),
+    ]
+    for label, run, want in r3_cases:
+        got = run()
+        if got != want:
+            print(f"SELFTEST-FAIL: {label}: got {sorted(got)}, want {sorted(want)}")
+            failures += 1
+        else:
+            r3 += 1
+    # precision arm: `-f` is the ONE deliberate no-op (the archive must stay a
+    # positional), so dropping it must NOT be read as a silently-lost option.
+    if check_fastio_normalizers(GREEN_FASTIO.replace("'f' -> Unit", "'f' -> Unit")):
+        print("SELFTEST-FAIL: r3: the clean fixture tripped the normalizer arms")
+        failures += 1
+    else:
+        r3 += 1
+    print(f"R3_T14_ARMS={r3} checks passed")
+
     if clean or clean_flags or clean_debug or clean_sessions or clean_bindings \
             or clean_payload or clean_album or clean_search or clean_clipboard \
-            or clean_send_status or clean_provenance or clean_help:
+            or clean_send_status or clean_provenance or clean_help or clean_norm:
         green_findings = (clean + clean_flags + clean_debug + clean_sessions
                           + clean_bindings + clean_payload + clean_album + clean_search
-                          + clean_clipboard + clean_send_status)
+                          + clean_clipboard + clean_send_status + clean_norm)
         print(f"SELFTEST-FAIL: green fixtures must produce no findings, "
               f"got {describe(green_findings)}")
         failures += 1
@@ -4985,6 +5489,8 @@ def main(argv):
         findings += check_offload_json(*payload_files)
         findings += check_clipboard_clear((root / CLIPBOARD).read_text(encoding="utf-8"))
         findings += check_fastio_search(search_path.read_text(encoding="utf-8"))
+        # [R3-t14 #151/#153] the two argv normalizers, judged as decisions
+        findings += check_fastio_normalizers(fastio_path.read_text(encoding="utf-8"))
         # [dv25-A4 A-07] payload provenance ACROSS files (see check_payload_delegates)
         sources = {}
         for _dir in OFFLOAD_SOURCE_DIRS:
