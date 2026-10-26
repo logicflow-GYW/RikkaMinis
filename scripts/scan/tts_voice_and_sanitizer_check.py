@@ -26,6 +26,25 @@ Mechanism the gate protects (deep-audit-1016c ISSUE-07, P1):
      cross-chunk link rewrites, so the streaming path stays raw (declared
      residual, not a violation).
 
+A.06 / A.07 (deep-audit-1044) add two tables: the SpeechRecognizer error map
+(10/11 must not read as the API-33 language pair, 13 must not fall through to
+UNKNOWN) and the per-call TTS defaults (unconditional application, absent flag
+→ 1.0).  G10 (deep-audit-1046 S-10) adds the Quick Test clip's cancellation
+latch.
+
+**Judgement shape (batch-6 hardening).**  Every criterion in this file used to
+be an "is this token present" check, and every witness that broke it moved the
+*effect* rather than the token: the sanitize call stayed but its result was
+discarded, the policy call stayed but with `null` instead of the tag, the
+default stayed but got multiplied by 0, the `when` kept its arms under a
+constant subject, the guard stayed but behind `false &&`.  So the criteria are
+now derived from the tree: provenance (`value_sources` + one-hop local binding),
+control-flow reachability (`path_feasible` / `enclosing_conditions`), brace
+depth for guard dominance, and the whole expression for default resolution.
+Lexing/masking/brace matching all come from the shared modules
+(`_kotlin_lexer`, `_kotlin_ast`, `_kotlin_valueflow`); a lexer failure is a
+violation (fail-closed), never a fall back to raw text.
+
 Run from the repo root:
 `python3 scripts/scan/tts_voice_and_sanitizer_check.py`
 exit 0 = PASS, exit 1 = FAIL (violations printed as path[:line]).
@@ -39,6 +58,33 @@ import re
 import shutil
 import sys
 import tempfile
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+from _kotlin_lexer import KotlinLexError                        # noqa: E402
+from _kotlin_ast import (                                        # noqa: E402
+    const_value,
+    enclosing_conditions,
+    function_body,
+    if_blocks,
+    match_bracket,
+    split_top,
+    strip_parens,
+    when_branches,
+)
+from _kotlin_valueflow import (                                   # noqa: E402
+    brace_depth,
+    call_args,
+    code_view,
+    contains_ident,
+    expr_end,
+    guard_feasible,
+    literal_view,
+    path_feasible,
+    value_sources,
+)
 
 MAIN_ROOT = os.path.join("src", "android", "app", "src", "main", "java")
 MANAGER_REL = os.path.join(
@@ -76,6 +122,24 @@ CANCEL_READ_RE = re.compile(r"([A-Za-z_]\w*)\s*(?:\?\.|\.)\s*(?:is[A-Z]\w*|get)\
 # Explicit exemption marker for rule B (rare callers that must voice raw text).
 SANITIZER_EXEMPT_RE = re.compile(r"tts-sanitizer-exempt:\s*\S.*")
 
+# Provenance needles (rule A/B).
+SANITIZE_CALL_RE = re.compile(r"\bVoiceTextSanitizer\s*\.\s*sanitize\s*\(")
+RESOLVE_CALL_RE = re.compile(r"\bresolveTargetLocale\s*\(")
+APPLY_CALL_RE = re.compile(r"\bapplyLanguage\s*\(")
+ENGINE_SPEAK_RE = re.compile(r"\btts\s*\??\.\s*speak\s*\(")
+
+# A.07: per-call tuning. Left side covers BOTH spellings the fix allows: the
+# field write (`tts.speechRate = …`) and the named argument of the resolver
+# (`rate = …`). `tuning.rate` on the right of an `=` is excluded by the
+# `(?<![\w.`])` lookbehind.
+TUNING_FIELDS = (("speechRate", "rate"), ("speechPitch", "pitch"), ("speechVolume", "volume"))
+COERCION_RE = re.compile(r"\.\s*(?:toFloat|toDouble|toInt|toLong)\s*\(\s*\)")
+
+
+def _site_re(field_name, flag):
+    return re.compile(
+        r"\btts\s*\??\.\s*" + field_name + r"\s*=(?!=)|(?<![\w.`])" + flag + r"\s*=(?!=)")
+
 
 def read(root, rel):
     path = os.path.join(root, rel)
@@ -85,212 +149,114 @@ def read(root, rel):
         return fh.read()
 
 
-def function_body(src, signature):
-    """Brace-balanced body of the member whose declaration contains `signature`."""
-    start = src.find(signature)
-    if start < 0:
+# ── shared-primitive glue ──────────────────────────────────────────────────
+def _views(src):
+    """(structure, literal) projections; a lexer failure raises KotlinLexError."""
+    return code_view(src), literal_view(src)
+
+
+def _member(code, name):
+    """(body_start, body_end, kind) of `fun <name>(...)`, or None."""
+    got = function_body(code, name)
+    if not got:
         return None
-    open_curly = src.find("{", start)
-    if open_curly < 0:
-        return None
-    depth = 0
-    i = open_curly
-    n = len(src)
-    while i < n:
-        c = src[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return src[open_curly : i + 1]
-        i += 1
-    return None
+    start, end, kind = got
+    return (start, end, kind) if start >= 0 and end >= start else None
 
 
-def strip_comments(src):
-    """Blank out `//` and `/* */` comments (and keep string literals verbatim).
-
-    A criterion must be satisfiable only by code: this file's own precedents are
-    comments that name a code ("11 = ERROR_SERVER_DISCONNECTED") and a KDoc that
-    quotes the old table — those must neither satisfy nor trip a rule.
-    Offsets/newlines are preserved so line numbers stay usable in messages.
-    """
+def _params(code, name):
+    """Declared parameter names — the provenance walk needs to know what is raw input."""
+    m = re.search(r"\bfun\s+(?:[A-Za-z_][\w.]*\.)?" + re.escape(name) + r"\s*\(", code)
+    if not m:
+        return []
+    p_open = m.end() - 1
+    close = match_bracket(code, p_open)
+    if close < 0:
+        return []
     out = []
-    i = 0
-    n = len(src)
-    while i < n:
-        if src.startswith("//", i):
-            j = src.find("\n", i)
-            j = n if j < 0 else j
-            out.append(" " * (j - i))
-            i = j
-        elif src.startswith("/*", i):
-            j = src.find("*/", i + 2)
-            j = n if j < 0 else j + 2
-            out.append("".join("\n" if c == "\n" else " " for c in src[i:j]))
-            i = j
-        elif src[i] == '"':
-            j = i + 1
-            while j < n:
-                if src[j] == "\\":
-                    j += 2
-                    continue
-                if src[j] == '"':
-                    j += 1
-                    break
-                j += 1
-            out.append(src[i:j])
-            i = j
-        else:
-            out.append(src[i])
-            i += 1
-    return "".join(out)
+    for a, b in split_top(code[p_open + 1:close], (",",)):
+        piece = code[p_open + 1 + a:p_open + 1 + b]
+        pm = re.match(
+            r"\s*(?:(?:vararg|noinline|crossinline)\s+)?([A-Za-z_]\w*)\s*:", piece)
+        if pm:
+            out.append(pm.group(1))
+    return out
 
 
-# ── [dv26/G10] Quick Test clip: cancellation latch ─────────────────────────
-def mask_strings(src):
-    """Blank string/char literal bodies, preserving offsets and newlines.
+def _local_rhs(code, name, span):
+    """Initializer text of the LAST `val/var <name> = …` inside span, or None."""
+    start, end, _kind = span
+    best = None
+    for m in re.finditer(
+            r"\b(?:val|var)\s+" + re.escape(name) + r"\s*(?::[^=\n]+?)?\s*=(?!=)",
+            code[start:end]):
+        rhs_start = start + m.end()
+        best = code[rhs_start:expr_end(code, rhs_start)].strip()
+    return best
 
-    Brace matching must not read `"quicktest-clip-${System.currentTimeMillis()}.wav"`
-    as structure; template bodies are blanked too (their braces are what would
-    otherwise shift the depth).
+
+def _derives(code, span, expr, params, needle_re, hops=3):
+    """Does the value of `expr` carry a call matching `needle_re`?
+
+    Follows one identifier per hop through the member's local `val` bindings
+    (`speakable` → `sanitize(...)`). A value that was computed and then thrown
+    away by a trailing scope block has no path to the needle: `value_sources`
+    resolves `sanitize(...).let { text }` to the block's tail (`text` = the raw
+    parameter), so the walk stops there — exactly the "call present, effect
+    absent" shape the witnesses used.
     """
-    out = list(src)
-    i, n = 0, len(src)
-    while i < n:
-        c = src[i]
-        if c == '"':
-            triple = src.startswith('"""', i)
-            quote = '"""' if triple else '"'
-            i += len(quote)
-            while i < n:
-                if not triple and src[i] == "\\":
-                    out[i] = " "
-                    if i + 1 < n:
-                        out[i + 1] = " "
-                    i += 2
+    todo = [expr]
+    seen = 0
+    while todo and seen < 12:
+        cur = todo.pop(0)
+        seen += 1
+        srcs = value_sources(cur) or [cur]
+        if any(needle_re.search(s) for s in srcs):
+            return True
+        if hops <= 0:
+            continue
+        hops -= 1
+        for s in srcs:
+            for ident in re.findall(r"(?<![\w.`])([A-Za-z_]\w*)(?![\w`])", s):
+                if ident in params:
                     continue
-                if src.startswith(quote, i):
-                    i += len(quote)
-                    break
-                if src[i] != "\n":
-                    out[i] = " "
-                i += 1
-        elif c == "'":
-            j = i + 1
-            closed = False
-            while j < n and j < i + 6:
-                if src[j] == "\\":
-                    j += 2
-                    continue
-                if src[j] == "'":
-                    closed = True
-                    break
-                j += 1
-            if not closed:
-                i += 1
-                continue
-            for k in range(i + 1, j):
-                out[k] = " "
-            i = j + 1
-        else:
-            i += 1
-    return "".join(out)
+                rhs = _local_rhs(code, ident, span)
+                if rhs:
+                    todo.append(rhs)
+    return False
 
 
-def brace_map(src):
-    """open index -> close index for balanced braces (strings already masked)."""
-    pairs, stack = {}, []
-    for i, ch in enumerate(src):
-        if ch == "{":
-            stack.append(i)
-        elif ch == "}" and stack:
-            pairs[stack.pop()] = i
-    return pairs
+def _call_extent(code, open_paren):
+    """(start, end) of the call whose `(` is at open_paren, receiver included."""
+    close = match_bracket(code, open_paren)
+    if close < 0:
+        return None
+    i = open_paren
+    while i > 0 and (code[i - 1].isalnum() or code[i - 1] in "_."):
+        i -= 1
+    return (i, close + 1)
 
 
-def enclosing_blocks(pairs, pos):
-    """Blocks containing `pos`, innermost first."""
-    spans = [(o, c) for o, c in pairs.items() if o < pos < c]
-    spans.sort(key=lambda s: s[1] - s[0])
-    return spans
+def _first_arg(code, open_paren):
+    args = call_args(code, open_paren)
+    if not args:
+        return None
+    a, b = args[0]
+    return code[a:b].strip()
 
 
-def matching_paren(src, open_idx):
-    depth = 0
-    for i in range(open_idx, len(src)):
-        if src[i] == "(":
-            depth += 1
-        elif src[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
+def _statement_span(code, start, end, pos):
+    """Absolute (start, end) of the top-level statement inside [start, end) covering pos."""
+    from _kotlin_ast import stmt_spans
+    for a, b in stmt_spans(code[start:end]):
+        if a <= pos - start < b:
+            return (start + a, start + b)
+    return (start, end)
 
 
-def statement_end(src, pos, pairs):
-    """End index of the statement starting at `pos` (brace/ paren aware)."""
-    i = pos
-    n = len(src)
-    while i < n:
-        ch = src[i]
-        if ch == "(":
-            j = matching_paren(src, i)
-            if j < 0:
-                return n
-            i = j + 1
-            continue
-        if ch == "{":
-            j = pairs.get(i)
-            if j is None:
-                return n
-            i = j + 1
-            continue
-        if ch == "\n" or ch == ";":
-            return i
-        i += 1
-    return n
-
-
-def guard_before(code, pairs, pos, cancel_idents, scope):
-    """Nearest cancellation guard that dominates `pos`, or None.
-
-    A guard = `if (<reads a cancellation flag>) { … return … }` (or the
-    single-statement form) *inside a block that also contains `pos`* — a guard
-    parked inside a sibling callback (e.g. the utterance listener's `onStart`)
-    does not dominate the call it looks like it guards.
-    The flag read is derived, not spelled: the receiver must be an identifier the
-    cancellation path itself mentions, or the coroutine's own `cont`.
-    """
-    for b_open, b_close in enclosing_blocks(pairs, pos):
-        if b_open < scope[0] or b_close > scope[1]:
-            continue
-        best = None
-        for m in re.finditer(r"\bif\s*\(", code):
-            if m.start() <= b_open or m.start() >= pos:
-                continue
-            p_open = m.end() - 1
-            p_close = matching_paren(code, p_open)
-            if p_close < 0 or p_close >= pos:
-                continue
-            cond = code[p_open + 1 : p_close]
-            if not is_cancel_read(cond, cancel_idents):
-                continue
-            body_end = statement_end(code, p_close + 1, pairs)
-            if body_end > pos:
-                continue
-            body = code[p_close + 1 : body_end]
-            if not re.search(r"\breturn\b", body):
-                continue
-            # the guard's own innermost block must also contain pos
-            guards_blocks = enclosing_blocks(pairs, m.start())
-            if guards_blocks and guards_blocks[0][1] < pos:
-                continue
-            best = (m.start(), body_end)
-        if best is not None:
-            return best
-    return None
+def _statement_at(code, start, end, pos):
+    s, e = _statement_span(code, start, end, pos)
+    return code[s:e]
 
 
 def is_cancel_read(cond, cancel_idents):
@@ -300,76 +266,547 @@ def is_cancel_read(cond, cancel_idents):
     return False
 
 
+# ── Rule A: the language the engine will actually speak ────────────────────
+def _tag_carrying(code, piece):
+    """Every `resolveTargetLocale(…)` in `piece` passes a tag derived from the caller.
+
+    `resolveTargetLocale(null, speakable)` and
+    `resolveTargetLocale(explicitLanguage.let { null }, …)` both read as "no
+    explicit tag"; only a first argument that *is* `explicitLanguage` (or is
+    derived from it) counts.
+    """
+    found = False
+    for m in RESOLVE_CALL_RE.finditer(piece):
+        open_pos = m.end() - 1
+        close = match_bracket(piece, open_pos)
+        if close < 0:
+            return False
+        args = split_top(piece[open_pos + 1:close], (",",))
+        if not args:
+            return False
+        first = piece[open_pos + 1 + args[0][0]:open_pos + 1 + args[0][1]]
+        if not contains_ident(first, "explicitLanguage"):
+            return False
+        found = True
+    return found
+
+
+def _check_language_channel(code, span):
+    """Rule A: one resolution point, and it must honour the explicit tag."""
+    failures = []
+    start, end, _kind = span
+    body = code[start:end]
+    params = _params(code, "speak")
+    if re.search(r"\bautoDetectAndSetLanguage\s*\(", body):
+        failures.append(
+            "%s: [tts-voice] speak() must not call autoDetectAndSetLanguage "
+            "(that unconditional call was the override bug)" % MANAGER_REL
+        )
+    resolves = [start + m.start() for m in RESOLVE_CALL_RE.finditer(body)]
+    if not resolves:
+        failures.append(
+            "%s: [tts-voice] speak() must resolve the utterance language through "
+            "TtsLanguagePolicy.resolveTargetLocale(explicitLanguage, ...) - the "
+            "--voice tag must not be overwritten by auto-detection" % MANAGER_REL
+        )
+        return failures
+    # A resolve whose value is never consumed resolved nothing.
+    for pos in resolves:
+        stmt_s, stmt_e = _statement_span(code, start, end, pos)
+        ext = _call_extent(code, code.find("(", pos))
+        if ext is not None:
+            before = code[stmt_s:ext[0]].strip()
+            after = code[ext[1]:stmt_e].strip()
+            if not before and not after:
+                failures.append(
+                    "%s: [tts-voice] the `resolveTargetLocale(...)` result at "
+                    "line ~%d is thrown away — a resolution nobody applies leaves "
+                    "the engine on whatever language the previous call left"
+                    % (MANAGER_REL, code[:pos].count("\n") + 1))
+    honoured = False
+    for m in APPLY_CALL_RE.finditer(body):
+        arg = _first_arg(code, start + m.end() - 1)
+        if arg is None:
+            continue
+        if RESOLVE_CALL_RE.search(arg) or _derives(code, span, arg, params, RESOLVE_CALL_RE):
+            if _tag_carrying(code, arg):
+                honoured = True
+    if not honoured:
+        failures.append(
+            "%s: [tts-voice] the language handed to the engine never carries the "
+            "caller's tag: every applied `resolveTargetLocale(...)` must pass "
+            "`explicitLanguage` as its first argument (a `null`/raw guess there is "
+            "the same defect as the deleted auto-detect)"
+            % MANAGER_REL
+        )
+    return failures
+
+
+# ── Rule B: what is voiced must be the sanitizer's output ──────────────────
+def _check_sanitizer_flow(code, span):
+    failures = []
+    start, end, _kind = span
+    body = code[start:end]
+    params = _params(code, "speak")
+    san = [start + m.start() for m in SANITIZE_CALL_RE.finditer(body)]
+    eng = [start + m.start() for m in ENGINE_SPEAK_RE.finditer(body)]
+    if not san:
+        failures.append(
+            "%s: [tts-sanitizer] speak() must call VoiceTextSanitizer.sanitize() "
+            "BEFORE tts?.speak() (or declare 'tts-sanitizer-exempt: <reason>')"
+            % MANAGER_REL
+        )
+        return failures
+    if not eng:
+        failures.append(
+            "%s: [tts-sanitizer] speak() has no tts?.speak(...) call to judge"
+            % MANAGER_REL
+        )
+        return failures
+    e_pos = eng[0]
+    open_pos = code.find("(", e_pos)
+    spoken = _first_arg(code, open_pos)
+    if spoken is None:
+        failures.append(
+            "%s: [tts-sanitizer] cannot read the tts?.speak(...) arguments"
+            % MANAGER_REL
+        )
+        return failures
+    if not _derives(code, span, spoken, params, SANITIZE_CALL_RE):
+        failures.append(
+            "%s: [tts-sanitizer] the text handed to the engine (%r) does not derive "
+            "from VoiceTextSanitizer.sanitize(...) - calling the sanitizer and then "
+            "voicing something else is the same defect as not calling it"
+            % (MANAGER_REL, spoken.strip()[:60])
+        )
+    guarded = False
+    for m in re.finditer(r"\bif\s*\(", body):
+        p_open = start + m.end() - 1
+        if p_open >= e_pos:
+            break
+        p_close = match_bracket(code, p_open)
+        if p_close < 0:
+            continue
+        cond = code[p_open + 1:p_close]
+        if "isBlank(" not in cond and "isEmpty(" not in cond:
+            continue
+        subject = re.sub(r"\.\s*(?:isBlank|isEmpty)\s*\(\s*\)", "", cond).strip()
+        if not _derives(code, span, subject, params, SANITIZE_CALL_RE):
+            continue
+        body_end = _statement_span(code, start, end, p_open)[1]
+        if re.search(r"\breturn\b", code[p_close + 1:max(body_end, p_close + 1)]):
+            guarded = True
+            break
+    if not guarded:
+        failures.append(
+            "%s: [tts-sanitizer] speak() must bail on an empty sanitize result "
+            "instead of voicing the raw text (the `isBlank()` guard must test the "
+            "value that is actually spoken)" % MANAGER_REL
+        )
+    return failures
+
+
+# ── A.06: the SpeechRecognizer code table ──────────────────────────────────
+CODE_LABELS = {
+    10: ("RECOGNIZER_BUSY", "ERROR_TOO_MANY_REQUESTS, retryable busy"),
+    11: ("NETWORK", "ERROR_SERVER_DISCONNECTED"),
+    12: ("LANGUAGE_UNSUPPORTED", "ERROR_LANGUAGE_NOT_SUPPORTED"),
+    13: ("LANGUAGE_UNSUPPORTED", "ERROR_LANGUAGE_UNAVAILABLE"),
+}
+
+
+def resolves_to(result, simple_name):
+    """Every value the result expression can take is `…simple_name`."""
+    if not result:
+        return False
+    srcs = value_sources(result) or [result]
+    names = []
+    for s in srcs:
+        ids = re.findall(r"[A-Za-z_]\w*", s)
+        if not ids:
+            return False
+        names.append(ids[-1])
+    return bool(names) and all(n == simple_name for n in names)
+
+
+def _when_of(code, literals, span):
+    """(subject, {label: result_code}, {label: result_literal}, trailing) of the member."""
+    start, end, kind = span
+    region = code[start:end]
+    m = re.search(r"\bwhen\s*\(", region)
+    if not m:
+        return None
+    p_open = start + m.end() - 1
+    p_close = match_bracket(code, p_open)
+    if p_close < 0:
+        return None
+    subject = code[p_open + 1:p_close]
+    k = p_close + 1
+    while k < len(code) and code[k] in " \t\r\n":
+        k += 1
+    if k >= len(code) or code[k] != "{":
+        return None
+    b_close = match_bracket(code, k)
+    if b_close < 0:
+        return None
+    results, literals_view = {}, {}
+    for _subj, cond, b_start, b_end in when_branches(code):
+        if not (k < b_start <= b_close):
+            continue
+        for part in split_top(cond, (",",)):
+            label = cond[part[0]:part[1]].strip()
+            if re.fullmatch(r"\d+", label):
+                results[int(label)] = code[b_start:b_end].strip()
+                literals_view[int(label)] = literals[b_start:b_end].strip()
+    trailing = code[b_close + 1:end] if kind == "expr" else ""
+    return subject, results, literals_view, trailing
+
+
+def _check_error_table(src):
+    """[deep-audit-1044 A-06] SpeechRecognizer error codes must not be shifted.
+
+    The defect: `mapError`/`errorMessage` labelled 11/12 as the API-33 language
+    pair, so 11 (ERROR_SERVER_DISCONNECTED, API 31) surfaced as "language not
+    supported" and 13 (ERROR_LANGUAGE_UNAVAILABLE) fell through to UNKNOWN —
+    which silently disabled `onError`'s on-device→cloud retry (it gates on
+    LANGUAGE_UNSUPPORTED).
+    """
+    failures = []
+    try:
+        code, literals = _views(src)
+    except KotlinLexError as exc:
+        return ["%s: [tts-errorcodes] kotlin parse failure (%s) - refusing to judge "
+                "the table (fail-closed)" % (SYSTEM_SPEECH_REL, exc)]
+
+    for member, is_map in (("mapError", True), ("errorMessage", False)):
+        span = _member(code, member)
+        if span is None:
+            failures.append(
+                "%s: [tts-errorcodes] %s() not found - the SpeechRecognizer code "
+                "table is what keeps the on-device retry alive"
+                % (SYSTEM_SPEECH_REL, member))
+            continue
+        got = _when_of(code, literals, span)
+        if got is None:
+            failures.append(
+                "%s: [tts-errorcodes] %s() has no `when (…) { … }` table"
+                % (SYSTEM_SPEECH_REL, member))
+            continue
+        subject, results, texts, trailing = got
+        # 1. the subject must be the code parameter, not a constant. `when (0)`
+        #    parses fine and answers "no arm matched" for every real code.
+        params = _params(code, member)
+        if not params or not contains_ident(subject, params[0]) \
+                or const_value(subject) is not None:
+            failures.append(
+                "%s: [tts-errorcodes] %s() switches on %r, not on the incoming code "
+                "%r - a constant subject makes every arm unreachable"
+                % (SYSTEM_SPEECH_REL, member, subject.strip()[:30],
+                   params[0] if params else "code"))
+            continue
+        # 2. the table's value must be returned, not eaten by a trailing call.
+        if trailing.strip():
+            failures.append(
+                "%s: [tts-errorcodes] the %s() table is followed by %r - the arm "
+                "results never leave the function"
+                % (SYSTEM_SPEECH_REL, member, trailing.strip()[:40]))
+            continue
+        # 3. every arm the retry depends on must classify correctly.
+        for label in (10, 11, 12, 13) if is_map else (10, 11, 12, 13):
+            result = results.get(label)
+            if is_map:
+                want, why = CODE_LABELS[label]
+                if result is None:
+                    failures.append(
+                        "%s: [tts-errorcodes] mapError must cover %d (%s)"
+                        % (SYSTEM_SPEECH_REL, label, why))
+                elif not resolves_to(result, want):
+                    failures.append(
+                        "%s: [tts-errorcodes] mapError must map %d (%s) to %s "
+                        "(got %r)" % (SYSTEM_SPEECH_REL, label, why, want,
+                                      result.strip()[:50]))
+            else:
+                msg = texts.get(label) or ""
+                if result is None:
+                    failures.append(
+                        "%s: [tts-errorcodes] errorMessage must cover %d - otherwise "
+                        "the user reads 'Unknown error (%d)' and can do nothing"
+                        % (SYSTEM_SPEECH_REL, label, label))
+                elif not msg.startswith('"') and not msg.startswith('"""'):
+                    failures.append(
+                        "%s: [tts-errorcodes] errorMessage(%d) must be a message "
+                        "string (got %r)" % (SYSTEM_SPEECH_REL, label, msg[:40]))
+                elif "Unknown error" in msg:
+                    failures.append(
+                        "%s: [tts-errorcodes] errorMessage(%d) still falls back to "
+                        "'Unknown error'" % (SYSTEM_SPEECH_REL, label))
+        if not is_map:
+            m12, m13 = texts.get(12, ""), texts.get(13, "")
+            if m12 and m13 and m12 == m13:
+                failures.append(
+                    "%s: [tts-errorcodes] 12 (language not supported) and 13 (pack "
+                    "not downloaded) must read differently - only 13 is fixable by "
+                    "the user" % SYSTEM_SPEECH_REL)
+    return failures
+
+
+# ── A.07: per-call tuning defaults ─────────────────────────────────────────
+def _const_number(code, token):
+    token = token.strip()
+    try:
+        return float(token.rstrip("fFdD"))
+    except ValueError:
+        pass
+    m = re.search(r"\b(?:const\s+)?val\s+" + re.escape(token)
+                  + r"\s*(?::\s*Double\s*)?=\s*([0-9]+(?:\.[0-9]+)?)[fFdD]?", code)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _default_sites(code, literals, flag, span):
+    """[(value_code, value_literal)] of every `flag` binding carrying a `?:` default."""
+    start, end, _kind = span
+    out = []
+    for m in _site_re("speech" + flag.capitalize(), flag).finditer(code[start:end]):
+        v_start = start + m.end()
+        v_end = expr_end(code, v_start)
+        piece = code[v_start:v_end]
+        first = split_top(piece, (",",))
+        if first:
+            a, b = first[0]
+            piece = code[v_start + a:v_start + b]
+        raw = code[v_start + a:v_start + b] if first else piece
+        if "?:" in raw:
+            lead = len(raw) - len(raw.lstrip())
+            out.append((raw.strip(), literals[v_start + a + lead:v_start + b]))
+    return out
+
+
+def _default_ok(code, flag, value, value_lit):
+    """The absent flag must resolve to 1.0, and nothing may mangle it afterwards."""
+    norm = COERCION_RE.sub("", value).strip()
+    norm = strip_parens(norm).strip()
+    m = re.fullmatch(
+        r"(?:" + flag + r'|(?:[A-Za-z_][\w.]*\.)?getDouble\s*\(\s*"[^"]*"\s*\))'
+        r"\s*\?:\s*([A-Za-z_][\w.]*|\d+(?:\.\d+)?[fFdD]?)", norm)
+    if not m:
+        return False, ("the fallthrough default is mangled after the `?:` group "
+                       "(%r)" % value.strip()[:60])
+    if "getDouble" in norm and ('"%s"' % flag) not in value_lit:
+        return False, ("the `getDouble(…)` fallthrough does not read --%s" % flag)
+    token = m.group(1)
+    val = _const_number(code, token)
+    if val is None:
+        return False, ("the absent-value default %r does not resolve to a number"
+                       % token)
+    if abs(val - 1.0) > 1e-9:
+        return False, ("the absent-value default %r is %s, the CLI contract "
+                       "documents 1.0 for --%s" % (token, val, flag))
+    return True, ""
+
+
+def check_per_call_defaults(src):
+    """[deep-audit-1044 A-07] `android-speak` must apply its tuning every call.
+
+    `tts` is a process-wide singleton, so `args.getDouble("x")?.let { ... }`
+    means "absent flag = keep the previous call's value": one `--volume 0`
+    silenced the rest of the process. The decision pinned here is
+    *unconditional assignment with the documented default (1.0)*, not the
+    spelling of the resolver — inline `?: 1.0` and a `TtsSpeakTuning.from(...)`
+    call both pass. Two ways the old token-level check was beaten: the write
+    statement moved under a condition the old code did not recognise
+    (`Unit; if (…) …`, a raw string hid the rest of the file) and the default
+    stayed syntactically but got multiplied by 0 afterwards.
+    """
+    failures = []
+    try:
+        code, literals = _views(src)
+    except KotlinLexError as exc:
+        return ["%s: [tts-defaults] kotlin parse failure (%s) - refusing to judge "
+                "the tuning (fail-closed)" % (HANDLER_REL, exc)]
+    span = _member(code, "cmdSpeak")
+    if span is None:
+        return ["%s: [tts-defaults] cmdSpeak() not found" % HANDLER_REL]
+    start, end, _kind = span
+    body = code[start:end]
+
+    if re.search(r"getDouble\s*\(\s*\)\s*\?\.\s*(?:let|also|run)\b", body):
+        failures.append(
+            "%s: [tts-defaults] rate/pitch/volume must not be applied "
+            "conditionally (`args.getDouble(\"x\")?.let { tts.speechX = ... }`) "
+            "- an absent flag then inherits the previous call's value" % HANDLER_REL)
+
+    whole = (0, len(code), "block")
+    for field_name, flag in TUNING_FIELDS:
+        sites = [start + m.start() for m in
+                 _site_re(field_name, flag).finditer(body)]
+        writes = [p for p in sites
+                  if re.match(r"\btts", code[p:p + 6]) or
+                  re.match(r"tts\s*\??\.", code[p:p + 8])]
+        if len(writes) != 1:
+            failures.append(
+                "%s: [tts-defaults] cmdSpeak must assign tts.%s exactly once per "
+                "call (found %d) - the manager is a process-wide singleton, so a "
+                "skipped assignment leaks the previous call's value"
+                % (HANDLER_REL, field_name, len(writes)))
+        else:
+            pos = writes[0]
+            conds = [c for _k, c in enclosing_conditions(code, pos)]
+            stmt_s, _stmt_e = _statement_span(code, start, end, pos)
+            pre = code[stmt_s:pos]
+            if conds:
+                failures.append(
+                    "%s: [tts-defaults] tts.%s is assigned conditionally (under "
+                    "`%s`) - an absent flag then keeps the previous value"
+                    % (HANDLER_REL, field_name, conds[0].strip()[:40]))
+            elif "?." in pre:
+                failures.append(
+                    "%s: [tts-defaults] tts.%s is applied through a conditional "
+                    "scope call: %r" % (HANDLER_REL, field_name, pre.strip()[:60]))
+            elif not path_feasible(code, pos):
+                failures.append(
+                    "%s: [tts-defaults] the tts.%s assignment sits on an "
+                    "unreachable path" % (HANDLER_REL, field_name))
+
+        # the default resolution may live in the resolver function, outside
+        # cmdSpeak — the decision is "this file resolves --flag to 1.0", not
+        # "it does so inside this member".
+        defaults = _default_sites(code, literals, flag, whole)
+        if not defaults:
+            failures.append(
+                "%s: [tts-defaults] the per-call default for --%s is not resolved "
+                "anywhere (inline `?: 1.0` or a named constant equal to 1.0) - the "
+                "CLI contract documents 1.0 for all three" % (HANDLER_REL, flag))
+            continue
+        for value, value_lit in defaults:
+            ok, why = _default_ok(code, flag, value, value_lit)
+            if not ok:
+                failures.append("%s: [tts-defaults] --%s: %s" % (HANDLER_REL, flag, why))
+    return failures
+
+
+# ── [dv26/G10] the Quick Test clip's cancellation latch ────────────────────
+def _dominating_cancel_guard(block, pos, cancel_idents):
+    """Nearest cancellation guard that dominates `pos` inside `block`.
+
+    Dominates = the guard's `if` sits at the SAME brace depth as `pos` (a guard
+    parked in a sibling callback or in an already-closed inner block does not
+    guard this line), ends before `pos`, is on a feasible path (`if (false &&
+    guard)` folds to a constant false), and its body leaves the callback.
+    """
+    d0 = brace_depth(block, pos)
+    best = None
+    for cond, t_start, t_end, e_start, e_end in if_blocks(block):
+        if t_start >= pos or t_end > pos:
+            continue
+        if brace_depth(block, t_start) != d0:
+            continue
+        if not is_cancel_read(cond, cancel_idents):
+            continue
+        if not guard_feasible(cond):
+            continue
+        body = block[t_start:t_end]
+        if e_start is not None:
+            body += " " + block[e_start:e_end]
+        if not re.search(r"\breturn\b|\bthrow\b", body):
+            continue
+        if best is None or t_end > best[1]:
+            best = (t_start, t_end)
+    return best
+
+
+def _local_fun_region(block, pos):
+    """Innermost local `fun … { … }` body of `block` containing pos, else block."""
+    best = None
+    for m in re.finditer(r"\bfun\s+[A-Za-z_]\w*\s*\(", block):
+        p_close = match_bracket(block, m.end() - 1)
+        if p_close < 0:
+            continue
+        k = p_close + 1
+        while k < len(block) and block[k] in " \t\r\n":
+            k += 1
+        if k >= len(block) or block[k] != "{":
+            continue
+        b_close = match_bracket(block, k)
+        if b_close < 0 or not (k < pos < b_close):
+            continue
+        if best is None or (b_close - k) < (best[1] - best[0]):
+            best = (k, b_close)
+    return best or (0, len(block) - 1)
+
+
 def check_quick_test_clip(src):
     """[dv26/G10] The Quick Test clip must not outlive its caller.
 
     C1 (*guard*) — inside the `suspendCancellableCoroutine` block, every engine
     SETUP statement (`language =`, `setOn…Listener(`) needs a cancellation guard
-    before it, and every WRITE (`synthesizeToFile(`, file writes) needs a guard
-    that is *after the last setup statement* — the init callback and the write are
-    separated by the setup work, and that window was the defect: a cancellation
-    landing in it reached the write unharmed.
+    dominating it, and every WRITE (`synthesizeToFile(`, file writes) needs one
+    that is *after the last setup statement* — the init callback and the write
+    are separated by the setup work, and that window was the defect.
     C2 (*cancel*) — `invokeOnCancellation` must exist inside the block, shut the
-    engine down, and re-delete the clip (the engine can have finished the write
-    between dispatch and cancellation).
-    C3 (*cleanup*) — the `finally` must still delete the clip, and the block that
+    engine down, and re-delete the clip.
+    C3 (*cleanup*) — `finally` must still delete the clip, and the block that
     hands the result back (`resumeWith`) must drop the file when it ran after a
-    cancellation (that is the late-write path: no caller will ever read it).
+    cancellation (the late-write path: no caller will ever read it).
     """
     failures = []
-    code = mask_strings(strip_comments(src))
-    body = function_body(code, CLIP_SIG)
-    if body is None:
+    try:
+        code = code_view(src)
+    except KotlinLexError as exc:
+        return ["%s: [tts-clip-guard] kotlin parse failure (%s) - refusing to judge "
+                "the clip (fail-closed)" % (QUICK_TEST_REL, exc)]
+    span = _member(code, "synthesizeTestClip")
+    if span is None:
         return [
             "%s: [tts-clip-guard] %s not found — re-derive this criterion instead "
             "of deleting it (the clip's cancellation latch is what keeps a late "
             "engine callback from writing an orphan WAV into cacheDir)"
             % (QUICK_TEST_REL, CLIP_SIG.strip())
         ]
+    start, end, _kind = span
+    body = code[start:end]
 
     m = CLIP_FALLBACK_RE.search(body)
     clip_var = m.group(1) if m else None
 
-    coro = re.search(r"suspendCancellableCoroutine\s*\{\s*(\w+)\s*->", code)
-    span = None
-    if coro is not None:
-        pairs_all = brace_map(code)
-        open_curly = code.find("{", coro.start())
-        close_curly = pairs_all.get(open_curly)
-        if close_curly is not None:
-            span = (open_curly, close_curly)
-    if span is None:
+    coro = re.search(r"suspendCancellableCoroutine\s*\{", body)
+    if coro is None:
         return [
             "%s: [tts-clip-guard] no `suspendCancellableCoroutine { cont -> … }` "
             "block in synthesizeTestClip — re-derive" % QUICK_TEST_REL
         ]
+    o = start + coro.end() - 1
+    c = match_bracket(code, o)
+    if c < 0:
+        return ["%s: [tts-clip-guard] unbalanced suspendCancellableCoroutine block"
+                % QUICK_TEST_REL]
+    block = code[o:c + 1]
 
-    block = code[span[0] : span[1] + 1]
-    pairs = brace_map(block)
-
-    # identifiers the cancellation path itself mentions ⇒ candidate flags
-    cancel_body = ""
-    cancel_span = None
     inv = re.search(r"invokeOnCancellation\s*\{", block)
+    cancel_span = None
     if inv is not None:
-        o = block.find("{", inv.start())
-        c = pairs.get(o)
-        if c is not None:
-            cancel_span = (o, c)
-            cancel_body = block[o : c + 1]
+        io = inv.end() - 1
+        ic = match_bracket(block, io)
+        if ic > 0:
+            cancel_span = (io, ic)
+    cancel_body = block[cancel_span[0]:cancel_span[1] + 1] if cancel_span else ""
     cancel_idents = set(re.findall(r"[A-Za-z_]\w*", cancel_body)) if cancel_body else set()
 
     def fail(tag, msg):
         failures.append("%s: [%s] %s" % (QUICK_TEST_REL, tag, msg))
 
-    # ── C1: guard dominates every engine statement ──
+    # ── C1: a cancellation guard dominates every engine statement ──
     touches = []
     for rex, kind in ((TOUCH_SETUP_RE, "setup"), (TOUCH_WRITE_RE, "write")):
         for t in rex.finditer(block):
             touches.append((t.start(), kind, t.group(0).strip()))
     touches.sort()
     for pos, kind, what in touches:
-        g = guard_before(block, pairs, pos, cancel_idents, (0, len(block) - 1))
+        g = _dominating_cancel_guard(block, pos, cancel_idents)
         if g is None:
             fail(
                 "tts-clip-guard",
@@ -379,7 +816,7 @@ def check_quick_test_clip(src):
             )
             continue
         if kind == "write":
-            between = block[g[1] : pos]
+            between = block[g[1]:pos]
             setup = TOUCH_SETUP_RE.search(between)
             if setup is not None:
                 fail(
@@ -411,7 +848,9 @@ def check_quick_test_clip(src):
     fin = re.search(r"\bfinally\s*\{", body)
     fib = None
     if fin is not None:
-        fib = function_body(body[fin.start() :], "finally {")
+        fo = start + fin.end() - 1
+        fc = match_bracket(code, fo)
+        fib = code[fo:fc + 1] if fc > 0 else None
     if fib is None or clip_var is None or ("%s.delete()" % clip_var) not in fib.replace(" ", ""):
         fail(
             "tts-clip-cleanup",
@@ -422,19 +861,19 @@ def check_quick_test_clip(src):
     if resume < 0:
         fail("tts-clip-cleanup", "no `resumeWith(` in the coroutine block — re-derive")
     else:
-        host = enclosing_blocks(pairs, resume)
-        host_span = host[0] if host else (0, len(block) - 1)
+        host = _local_fun_region(block, resume)
         guarded_delete = False
-        for m2 in re.finditer(r"\bif\s*\(", block[host_span[0] : host_span[1] + 1]):
-            base = host_span[0]
-            p_open = base + m2.end() - 1
-            p_close = matching_paren(block, p_open)
-            if p_close < 0:
+        for cond, t_start, _t_end, e_start, e_end in if_blocks(block):
+            if not (host[0] < t_start < host[1]) or t_start >= resume:
                 continue
-            if not is_cancel_read(block[p_open + 1 : p_close], cancel_idents):
+            if not is_cancel_read(cond, cancel_idents) or not guard_feasible(cond):
                 continue
-            tail = block[p_close + 1 : p_close + 200].replace(" ", "")
-            if clip_var is not None and ("%s.delete()" % clip_var) in tail:
+            drop = ("%s.delete()" % clip_var).replace(" ", "") if clip_var else None
+            if drop is None:
+                continue
+            branch = (block[t_start:_t_end] + " " +
+                      (block[e_start:e_end] if e_start is not None else "")).replace(" ", "")
+            if drop in branch:
                 guarded_delete = True
                 break
         if not guarded_delete:
@@ -448,269 +887,6 @@ def check_quick_test_clip(src):
     return failures
 
 
-def split_top_level(text, sep):
-    """Split on `sep` occurrences that sit outside (), [] and {}."""
-    parts = []
-    depth = 0
-    cur = []
-    i = 0
-    while i < len(text):
-        if depth == 0 and text.startswith(sep, i):
-            parts.append("".join(cur))
-            cur = []
-            i += len(sep)
-            continue
-        c = text[i]
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        cur.append(c)
-        i += 1
-    parts.append("".join(cur))
-    return parts
-
-
-ARM_RESULT_RE = re.compile(r'\s*(?:"(?:[^"\\]|\\.)*"|[A-Za-z_][\w.]*)')
-
-
-def when_arms(body):
-    """[(labels_set, result_expr)] for a `when` block body (`{ ... -> ... }`).
-
-    Only the shapes this gate reads are supported: integer labels and an
-    identifier or a string-literal result. Anything else yields an empty label
-    set, which the callers treat as "arm not covered" (fail-closed).
-    """
-    inner = body.strip()
-    if inner.startswith("{") and inner.endswith("}"):
-        inner = inner[1:-1]
-    segments = split_top_level(inner, "->")
-    arms = []
-    rest = segments[0]
-    for seg in segments[1:]:
-        labels_text = rest
-        m = ARM_RESULT_RE.match(seg)
-        result = m.group(0).strip() if m else ""
-        rest = seg[m.end():] if m else seg
-        codes = set()
-        for part in split_top_level(labels_text, ","):
-            part = part.strip()
-            if re.fullmatch(r"\d+", part):
-                codes.add(int(part))
-        arms.append((codes, result))
-    return arms
-
-
-def arm_result(arms, code):
-    """Result expression of the arm covering `code`, or None when uncovered."""
-    for codes, result in arms:
-        if code in codes:
-            return result
-    return None
-
-
-def resolves_to(result, simple_name):
-    """`RecognitionError.LANGUAGE_UNSUPPORTED` and `LANGUAGE_UNSUPPORTED` both count."""
-    if not result:
-        return False
-    return result.split(".")[-1].strip() == simple_name
-
-
-def check_error_table(src):
-    """[deep-audit-1044 A-06] SpeechRecognizer error codes must not be shifted.
-
-    The defect: `mapError`/`errorMessage` labelled 11/12 as the API-33 language
-    pair, so 11 (ERROR_SERVER_DISCONNECTED, API 31) surfaced as "language not
-    supported" and 13 (ERROR_LANGUAGE_UNAVAILABLE) fell through to UNKNOWN —
-    which silently disabled `onError`'s on-device→cloud retry (it gates on
-    LANGUAGE_UNSUPPORTED). The decision points pinned here:
-      10 -> busy, 11 -> network (and never language), 12/13 -> language.
-    """
-    failures = []
-    code_src = strip_comments(src)
-
-    map_body = function_body(code_src, "fun mapError(")
-    if map_body is None:
-        failures.append(
-            "%s: [tts-errorcodes] mapError() not found - the SpeechRecognizer "
-            "code table is what keeps the on-device retry alive" % SYSTEM_SPEECH_REL
-        )
-    else:
-        arms = when_arms(map_body)
-        r13 = arm_result(arms, 13)
-        if not resolves_to(r13, "LANGUAGE_UNSUPPORTED"):
-            failures.append(
-                "%s: [tts-errorcodes] mapError must map 13 "
-                "(ERROR_LANGUAGE_UNAVAILABLE) to LANGUAGE_UNSUPPORTED - the "
-                "on-device->cloud retry in onError gates on it (got %r)"
-                % (SYSTEM_SPEECH_REL, r13)
-            )
-        r12 = arm_result(arms, 12)
-        if not resolves_to(r12, "LANGUAGE_UNSUPPORTED"):
-            failures.append(
-                "%s: [tts-errorcodes] mapError must map 12 "
-                "(ERROR_LANGUAGE_NOT_SUPPORTED) to LANGUAGE_UNSUPPORTED (got %r)"
-                % (SYSTEM_SPEECH_REL, r12)
-            )
-        r11 = arm_result(arms, 11)
-        if r11 is None:
-            failures.append(
-                "%s: [tts-errorcodes] mapError must cover 11 "
-                "(ERROR_SERVER_DISCONNECTED, API 31)" % SYSTEM_SPEECH_REL
-            )
-        elif resolves_to(r11, "LANGUAGE_UNSUPPORTED"):
-            failures.append(
-                "%s: [tts-errorcodes] 11 is ERROR_SERVER_DISCONNECTED, not a "
-                "language code - a dropped service must not be reported as "
-                "'language not supported'" % SYSTEM_SPEECH_REL
-            )
-        elif not resolves_to(r11, "NETWORK"):
-            failures.append(
-                "%s: [tts-errorcodes] mapError must map 11 "
-                "(ERROR_SERVER_DISCONNECTED) to NETWORK (got %r)"
-                % (SYSTEM_SPEECH_REL, r11)
-            )
-        r10 = arm_result(arms, 10)
-        if r10 is None:
-            failures.append(
-                "%s: [tts-errorcodes] mapError must cover 10 "
-                "(ERROR_TOO_MANY_REQUESTS, API 31)" % SYSTEM_SPEECH_REL
-            )
-        elif resolves_to(r10, "UNKNOWN"):
-            failures.append(
-                "%s: [tts-errorcodes] mapError must not leave 10 "
-                "(ERROR_TOO_MANY_REQUESTS) as UNKNOWN - a saturated recognizer "
-                "is a retryable busy, not an unknown fault" % SYSTEM_SPEECH_REL
-            )
-        elif not resolves_to(r10, "RECOGNIZER_BUSY"):
-            failures.append(
-                "%s: [tts-errorcodes] mapError must map 10 "
-                "(ERROR_TOO_MANY_REQUESTS) to RECOGNIZER_BUSY (got %r)"
-                % (SYSTEM_SPEECH_REL, r10)
-            )
-
-    msg_body = function_body(code_src, "fun errorMessage(")
-    if msg_body is None:
-        failures.append(
-            "%s: [tts-errorcodes] errorMessage() not found - the user-visible "
-            "half of the same table" % SYSTEM_SPEECH_REL
-        )
-    else:
-        arms = when_arms(msg_body)
-        texts = {}
-        for code in (10, 11, 12, 13):
-            result = arm_result(arms, code)
-            if result is None:
-                failures.append(
-                    "%s: [tts-errorcodes] errorMessage must cover %d - otherwise "
-                    "the user reads 'Unknown error (%d)' and can do nothing"
-                    % (SYSTEM_SPEECH_REL, code, code)
-                )
-                continue
-            if not result.startswith('"'):
-                failures.append(
-                    "%s: [tts-errorcodes] errorMessage(%d) must be a message "
-                    "string (got %r)" % (SYSTEM_SPEECH_REL, code, result)
-                )
-                continue
-            if result.strip('"').startswith("Unknown error"):
-                failures.append(
-                    "%s: [tts-errorcodes] errorMessage(%d) still falls back to "
-                    "'Unknown error'" % (SYSTEM_SPEECH_REL, code)
-                )
-                continue
-            texts[code] = result
-        if 12 in texts and 13 in texts and texts[12] == texts[13]:
-            failures.append(
-                "%s: [tts-errorcodes] 12 (language not supported) and 13 (pack "
-                "not downloaded) must read differently - only 13 is fixable by "
-                "the user" % SYSTEM_SPEECH_REL
-            )
-    return failures
-
-
-def check_per_call_defaults(handler):
-    """[deep-audit-1044 A-07] `android-speak` must apply its tuning every call.
-
-    `tts` is a process-wide singleton, so `args.getDouble("x")?.let { ... }`
-    means "absent flag = keep the previous call's value": one `--volume 0`
-    silenced the rest of the process. The decision pinned here is
-    *unconditional assignment with the documented default (1.0)*, not the
-    spelling of the resolver — inline `?: 1.0` and a `TtsSpeakTuning.from(...)`
-    call both pass.
-    """
-    failures = []
-    code_src = strip_comments(handler)
-
-    if re.search(r'getDouble\(\s*"\s*(?:rate|pitch|volume)\s*"\s*\)\s*\?\.let', code_src):
-        failures.append(
-            "%s: [tts-defaults] rate/pitch/volume must not be applied "
-            "conditionally (`args.getDouble(\"x\")?.let { tts.speechX = ... }`) "
-            "- an absent flag then inherits the previous call's value" % HANDLER_REL
-        )
-
-    body = function_body(code_src, "fun cmdSpeak(")
-    if body is None:
-        failures.append(
-            "%s: [tts-defaults] cmdSpeak() not found" % HANDLER_REL
-        )
-        return failures
-
-    for field_name, flag in (
-        ("speechRate", "rate"),
-        ("speechPitch", "pitch"),
-        ("speechVolume", "volume"),
-    ):
-        advances = re.findall(r"tts\.%s\s*=" % field_name, body)
-        if len(advances) != 1:
-            failures.append(
-                "%s: [tts-defaults] cmdSpeak must assign tts.%s exactly once "
-                "per call (found %d) - the manager is a process-wide singleton, "
-                "so a skipped assignment leaks the previous call's value"
-                % (HANDLER_REL, field_name, len(advances))
-            )
-            continue
-        for line in body.splitlines():
-            if not re.search(r"tts\.%s\s*=" % field_name, line):
-                continue
-            stripped = line.strip()
-            if stripped.startswith(("if ", "if(", "when ", "else")) or "?.let" in stripped:
-                failures.append(
-                    "%s: [tts-defaults] tts.%s is assigned conditionally: %r"
-                    % (HANDLER_REL, field_name, stripped)
-                )
-            break
-
-    for flag in ("rate", "pitch", "volume"):
-        if not resolve_default_ok(code_src, flag):
-            failures.append(
-                "%s: [tts-defaults] the per-call default for --%s must resolve "
-                "to 1.0 (inline `?: 1.0` or a named constant equal to 1.0) - the "
-                "CLI contract documents 1.0 for all three" % (HANDLER_REL, flag)
-            )
-    return failures
-
-
-def resolve_default_ok(src, flag):
-    """True when `flag`'s absent-value default is the documented 1.0."""
-    patterns = [
-        r"\(\s*%s\s*\?:\s*([^)\s]+)\s*\)" % flag,
-        r'getDouble\(\s*"\s*%s\s*"\s*\)\s*\?:\s*([^\s]+)' % flag,
-    ]
-    for pattern in patterns:
-        for m in re.finditer(pattern, src):
-            value = m.group(1).strip()
-            if value in ("1.0", "1.0f", "1f", "1"):
-                return True
-            const = re.search(
-                r"const\s+val\s+%s\s*(?::\s*Double\s*)?=\s*([0-9.]+)" % re.escape(value),
-                src,
-            )
-            if const and const.group(1) in ("1.0", "1"):
-                return True
-    return False
-
-
 def run(root, verbose=True):
     failures = []
     manager = read(root, MANAGER_REL)
@@ -721,86 +897,77 @@ def run(root, verbose=True):
             "%s: [tts-files] TextToSpeechManager.kt not found" % MANAGER_REL
         )
     else:
-        speak = function_body(manager, "fun speak(")
-        if speak is None:
+        try:
+            manager_code, manager_lit = _views(manager)
+        except KotlinLexError as exc:
+            manager_code = manager_lit = None
             failures.append(
-                "%s: [tts-files] TextToSpeechManager.speak() not found" % MANAGER_REL
-            )
-        else:
-            exempt = bool(SANITIZER_EXEMPT_RE.search(speak))
-            # ── Rule A: single-point language resolution, explicit honored ──
-            if "TtsLanguagePolicy.resolveTargetLocale(explicitLanguage" not in speak:
+                "%s: [tts-files] kotlin parse failure (%s) - refusing to judge "
+                "speak() (fail-closed)" % (MANAGER_REL, exc))
+        if manager_code is not None:
+            speak = _member(manager_code, "speak")
+            if speak is None:
                 failures.append(
-                    "%s: [tts-voice] speak() must resolve the utterance language "
-                    "through TtsLanguagePolicy.resolveTargetLocale(explicitLanguage, ...) "
-                    "- the --voice tag must not be overwritten by auto-detection"
-                    % MANAGER_REL
+                    "%s: [tts-files] TextToSpeechManager.speak() not found" % MANAGER_REL
                 )
-            if "autoDetectAndSetLanguage(" in speak:
+            else:
+                # the marker is a comment: literal_view masks comments, so the
+                # raw text is the only view that still carries it (all views
+                # are offset-aligned, so the span applies unchanged).
+                exempt = bool(SANITIZER_EXEMPT_RE.search(manager[speak[0]:speak[1]]))
+                failures.extend(_check_language_channel(manager_code, speak))
+                if not exempt:
+                    failures.extend(_check_sanitizer_flow(manager_code, speak))
+            # ── Rule C: streaming path keeps auto-detection ──
+            queued = _member(manager_code, "speakQueued")
+            if queued is not None and "autoDetectAndSetLanguage(" not in \
+                    manager_code[queued[0]:queued[1]]:
                 failures.append(
-                    "%s: [tts-voice] speak() must not call autoDetectAndSetLanguage "
-                    "(that unconditional call was the override bug)"
-                    % MANAGER_REL
+                    "%s: [tts-stream] speakQueued() must keep autoDetectAndSetLanguage "
+                    "(streaming fragments have no explicit language; per-chunk sanitize "
+                    "would break cross-chunk link rewrites)" % MANAGER_REL
                 )
-            # ── Rule B: sanitize before the engine call, empty result bails ──
-            if not exempt:
-                sanitize_at = speak.find("VoiceTextSanitizer.sanitize(")
-                engine_at = speak.find("tts?.speak(")
-                if sanitize_at < 0 or engine_at < 0 or sanitize_at > engine_at:
-                    failures.append(
-                        "%s: [tts-sanitizer] speak() must call "
-                        "VoiceTextSanitizer.sanitize() BEFORE tts?.speak() "
-                        "(or declare 'tts-sanitizer-exempt: <reason>')"
-                        % MANAGER_REL
-                    )
-                if "if (speakable.isBlank()) return false" not in speak:
-                    failures.append(
-                        "%s: [tts-sanitizer] speak() must bail on an empty "
-                        "sanitize result instead of voicing the raw text"
-                        % MANAGER_REL
-                    )
-        # ── Rule C: streaming path keeps auto-detection ──
-        queued = function_body(manager, "fun speakQueued(")
-        if queued is not None and "autoDetectAndSetLanguage(" not in queued:
-            failures.append(
-                "%s: [tts-stream] speakQueued() must keep autoDetectAndSetLanguage "
-                "(streaming fragments have no explicit language; per-chunk sanitize "
-                "would break cross-chunk link rewrites)" % MANAGER_REL
-            )
 
     if handler is None:
         failures.append(
             "%s: [tts-files] SpeakOffloadHandler.kt not found" % HANDLER_REL
         )
     else:
-        # ── Rule A, handler side: pass the tag, never set language itself ──
-        if "tts.setLanguage(" in handler:
+        try:
+            handler_code, handler_lit = _views(handler)
+        except KotlinLexError as exc:
+            handler_code = handler_lit = None
             failures.append(
-                "%s: [tts-voice] SpeakOffloadHandler must not call tts.setLanguage "
-                "- the language is resolved in one place (speak); the old "
-                "set-then-overwrite pair was the bug" % HANDLER_REL
-            )
-        if "tts.speak(text, explicitLanguage = voiceTag)" not in handler:
-            failures.append(
-                "%s: [tts-voice] the --voice path must pass the tag into speak "
-                '("tts.speak(text, explicitLanguage = voiceTag)"), not a bare '
-                "speak(text) that self-overwrites" % HANDLER_REL
-            )
-        # ── Rule A, honest result: report the effective language ──
-        if 'voiceTag ?: "auto"' in handler:
-            failures.append(
-                "%s: [tts-voice] the voice field must not echo the requested "
-                'tag (found `voiceTag ?: "auto"`)' % HANDLER_REL
-            )
-        if '.put("voice", effectiveVoice)' not in handler:
-            failures.append(
-                "%s: [tts-voice] the voice field must report the effective "
-                "language (currentLanguageTag()), not the input parameter"
-                % HANDLER_REL
-            )
-
-    if handler is not None:
-        failures.extend(check_per_call_defaults(handler))
+                "%s: [tts-files] kotlin parse failure (%s) - refusing to judge the "
+                "handler (fail-closed)" % (HANDLER_REL, exc))
+        if handler_code is not None:
+            # ── Rule A, handler side: pass the tag, never set language itself ──
+            if re.search(r"\btts\s*\??\.\s*setLanguage\s*\(", handler_code):
+                failures.append(
+                    "%s: [tts-voice] SpeakOffloadHandler must not call tts.setLanguage "
+                    "- the language is resolved in one place (speak); the old "
+                    "set-then-overwrite pair was the bug" % HANDLER_REL
+                )
+            if not re.search(
+                    r"\btts\s*\??\.\s*speak\s*\([^)]*explicitLanguage\s*=", handler_code):
+                failures.append(
+                    "%s: [tts-voice] the --voice path must pass the tag into speak "
+                    '("tts.speak(text, explicitLanguage = voiceTag)"), not a bare '
+                    "speak(text) that self-overwrites" % HANDLER_REL
+                )
+            # ── Rule A, honest result: report the effective language ──
+            if 'voiceTag ?: "auto"' in handler_lit:
+                failures.append(
+                    "%s: [tts-voice] the voice field must not echo the requested "
+                    'tag (found `voiceTag ?: "auto"`)' % HANDLER_REL
+                )
+            if '.put("voice", effectiveVoice)' not in handler_lit:
+                failures.append(
+                    "%s: [tts-voice] the voice field must report the effective "
+                    "language (currentLanguageTag()), not the input parameter"
+                    % HANDLER_REL
+                )
+            failures.extend(check_per_call_defaults(handler))
 
     system_speech = read(root, SYSTEM_SPEECH_REL)
     if system_speech is None:
@@ -809,7 +976,7 @@ def run(root, verbose=True):
             % SYSTEM_SPEECH_REL
         )
     else:
-        failures.extend(check_error_table(system_speech))
+        failures.extend(_check_error_table(system_speech))
 
     # ── [dv26/G10] the Quick Test clip's cancellation latch ──
     quick_test = read(root, QUICK_TEST_REL)
@@ -824,7 +991,6 @@ def run(root, verbose=True):
         for line in failures:
             print(line)
     return failures
-
 
 
 # ── [dv26/G10] Quick Test clip fixtures ─────────────────────────────────────
@@ -1197,6 +1363,156 @@ MUT_MSG_13_SYSTEM = COMPLIANT_SYSTEM.replace(
 )
 
 
+# ── batch-6 witness fixtures (06-1 … 06-6) ──────────────────────────────────
+# Each one is the shape an external witness used to walk through the gate. The
+# axis is printed in the label; the assertion is the same for every arm: the
+# gate must fire ON THE CRITERION THE DEFECT BREAKS (never "some violation").
+
+# 06-1 (dataflow): the sanitize call is still there, its RESULT is discarded on
+# the way to the engine — `.let { text }` hands the raw parameter back.
+SANITIZE_DISCARDED_MANAGER = '''
+class TextToSpeechManager {
+    fun speak(text: String, explicitLanguage: String? = null): Boolean {
+        val speakable = VoiceTextSanitizer.sanitize(text, TtsSpokenPhrases.from(appContext)).let { text }
+        if (speakable.isBlank()) return false
+        applyLanguage(TtsLanguagePolicy.resolveTargetLocale(explicitLanguage, speakable))
+        tts?.speak(speakable, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
+        return true
+    }
+
+    fun speakQueued(text: String) {
+        autoDetectAndSetLanguage(text)
+        tts?.speak(text, TextToSpeech.QUEUE_ADD, params, utteranceId)
+    }
+}
+'''
+
+# 06-1b (dataflow): sanitize into a variable nobody speaks.
+SANITIZE_UNUSED_MANAGER = '''
+class TextToSpeechManager {
+    fun speak(text: String, explicitLanguage: String? = null): Boolean {
+        val cleaned = VoiceTextSanitizer.sanitize(text, TtsSpokenPhrases.from(appContext))
+        val speakable = text
+        if (speakable.isBlank()) return false
+        applyLanguage(TtsLanguagePolicy.resolveTargetLocale(explicitLanguage, speakable))
+        tts?.speak(speakable, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
+        return true
+    }
+
+    fun speakQueued(text: String) {
+        autoDetectAndSetLanguage(text)
+        tts?.speak(text, TextToSpeech.QUEUE_ADD, params, utteranceId)
+    }
+}
+'''
+
+# 06-2 (dataflow): the policy call runs twice — once with the tag (discarded)
+# and once applied with `null`. The old check was a substring of the first.
+DISCARDED_RESOLVE_MANAGER = '''
+class TextToSpeechManager {
+    fun speak(text: String, explicitLanguage: String? = null): Boolean {
+        val speakable = VoiceTextSanitizer.sanitize(text, TtsSpokenPhrases.from(appContext))
+        if (speakable.isBlank()) return false
+        TtsLanguagePolicy.resolveTargetLocale(explicitLanguage, speakable)
+        applyLanguage(TtsLanguagePolicy.resolveTargetLocale(null, speakable))
+        tts?.speak(speakable, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
+        return true
+    }
+
+    fun speakQueued(text: String) {
+        autoDetectAndSetLanguage(text)
+        tts?.speak(text, TextToSpeech.QUEUE_ADD, params, utteranceId)
+    }
+}
+'''
+
+# 06-3 (anchor): the documented default is still spelled out, then multiplied
+# away — `--rate` without a flag now speaks at rate 0.
+MANGLED_DEFAULT_HANDLER = COMPLIANT_HANDLER.replace(
+    "rate = (rate ?: DEFAULT).toFloat()",
+    "rate = (rate ?: DEFAULT).toFloat() * 0f",
+)
+
+# 06-4 (scope): the arms are intact, the SUBJECT is a constant — every arm is
+# unreachable and every code falls through.
+MUT_WHEN_SUBJECT_SYSTEM = COMPLIANT_SYSTEM.replace(
+    "internal fun mapError(code: Int): RecognitionError = when (code) {",
+    "internal fun mapError(code: Int): RecognitionError = when (0) {",
+)
+
+# 06-4b (scope): the table is right, its VALUE is eaten by a trailing `.let`.
+MUT_WHEN_TAIL_SYSTEM = COMPLIANT_SYSTEM.replace(
+    "            else -> RecognitionError.UNKNOWN\n        }",
+    "            else -> RecognitionError.UNKNOWN\n        }.let { RecognitionError.UNKNOWN }",
+)
+
+# 06-6 (parser-death): a raw string whose body contains `//` used to make the
+# gate's own comment stripper swallow the rest of the file — the conditional
+# tuning below it became invisible.
+_QQ = '"' * 3
+RAW_STRING_HANDLER = ('''
+class SpeakOffloadHandler {
+    private fun cmdSpeak(args: OffloadArgs): NativeOffloadResult {
+        val banner = @QQ@see // not a comment@QQ@
+        val tuning = TtsSpeakTuning.from(
+            rate = args.getDouble("rate"),
+            pitch = args.getDouble("pitch"),
+            volume = args.getDouble("volume"),
+        )
+        if (args.getDouble("rate") != null) tts.speechRate = tuning.rate
+        tts.speechPitch = tuning.pitch
+        tts.speechVolume = tuning.volume
+        val spoke = tts.speak(text, explicitLanguage = voiceTag)
+        if (!spoke) {
+            return err().put("error", if (engineDown) "tts_unavailable" else "nothing_to_speak")
+        }
+        val effectiveVoice = tts.currentLanguageTag() ?: "unknown"
+        return ok().put("voice", effectiveVoice)
+    }
+}
+
+internal data class TtsSpeakTuning(val rate: Float, val pitch: Float, val volume: Float) {
+    companion object {
+        const val DEFAULT = 1.0
+
+        fun from(rate: Double?, pitch: Double?, volume: Double?): TtsSpeakTuning =
+            TtsSpeakTuning(
+                rate = (rate ?: DEFAULT).toFloat(),
+                pitch = (pitch ?: DEFAULT).toFloat(),
+                volume = (volume ?: DEFAULT).toFloat(),
+            )
+    }
+}
+''').replace("@QQ@", _QQ)
+
+# Green arm: the same decision spelled inline, without the resolver.
+INLINE_DEFAULT_HANDLER = COMPLIANT_HANDLER.replace(
+    '''        val tuning = TtsSpeakTuning.from(
+            rate = args.getDouble("rate"),
+            pitch = args.getDouble("pitch"),
+            volume = args.getDouble("volume"),
+        )
+        tts.speechRate = tuning.rate
+        tts.speechPitch = tuning.pitch
+        tts.speechVolume = tuning.volume
+''',
+    '''        tts.speechRate = (args.getDouble("rate") ?: 1.0).toFloat()
+        tts.speechPitch = (args.getDouble("pitch") ?: 1.0).toFloat()
+        tts.speechVolume = (args.getDouble("volume") ?: 1.0).toFloat()
+''',
+)
+
+# 06-5 (family-hole): the guard is still written out, behind a constant-false
+# first conjunct — `guard_feasible` folds it, a substring check does not.
+MUT_GUARD_CONST_FALSE_QUICK = _mut(
+    COMPLIANT_QUICK, SYNTH_GUARD,
+    "                    if (false && !SynthClipPolicy.maySynthesize(cancelled.get())) {\n"
+    "                        runCatching { tts?.shutdown() }\n"
+    "                        return@TextToSpeech\n"
+    "                    }\n",
+)
+
+
 def write_fixture(root, rel, body):
     path = os.path.join(root, rel)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -1373,6 +1689,72 @@ def selftest():
             {"tts-clip-cleanup"},
             MUT_NO_FINALLY_DROP_QUICK,
         ),
+        # ── batch-6 witnesses: "the token is still there, the effect is gone" ──
+        (
+            "06-1 (dataflow) sanitize result discarded via `.let { text }`",
+            SANITIZE_DISCARDED_MANAGER,
+            COMPLIANT_HANDLER,
+            COMPLIANT_SYSTEM,
+            {"tts-sanitizer"},
+        ),
+        (
+            "06-1b (dataflow) sanitize into a variable nobody speaks",
+            SANITIZE_UNUSED_MANAGER,
+            COMPLIANT_HANDLER,
+            COMPLIANT_SYSTEM,
+            {"tts-sanitizer"},
+        ),
+        (
+            "06-2 (dataflow) tag-carrying resolve discarded, `null` one applied",
+            DISCARDED_RESOLVE_MANAGER,
+            COMPLIANT_HANDLER,
+            COMPLIANT_SYSTEM,
+            {"tts-voice"},
+        ),
+        (
+            "06-3 (anchor) documented default multiplied away after the `?:` group",
+            COMPLIANT_MANAGER,
+            MANGLED_DEFAULT_HANDLER,
+            COMPLIANT_SYSTEM,
+            {"tts-defaults"},
+        ),
+        (
+            "06-4 (scope) code table switches on a constant subject (`when (0)`)",
+            COMPLIANT_MANAGER,
+            COMPLIANT_HANDLER,
+            MUT_WHEN_SUBJECT_SYSTEM,
+            {"tts-errorcodes"},
+        ),
+        (
+            "06-4b (scope) code table's value eaten by a trailing `.let`",
+            COMPLIANT_MANAGER,
+            COMPLIANT_HANDLER,
+            MUT_WHEN_TAIL_SYSTEM,
+            {"tts-errorcodes"},
+        ),
+        (
+            "06-5 (family-hole) cancellation guard behind `false &&`",
+            COMPLIANT_MANAGER,
+            COMPLIANT_HANDLER,
+            COMPLIANT_SYSTEM,
+            {"tts-clip-guard"},
+            MUT_GUARD_CONST_FALSE_QUICK,
+        ),
+        (
+            "06-6 (parser-death) raw string `//` hides the conditional tuning",
+            COMPLIANT_MANAGER,
+            RAW_STRING_HANDLER,
+            COMPLIANT_SYSTEM,
+            {"tts-defaults"},
+        ),
+        # ── green arms: equivalent spellings must not be dragged into red ──
+        (
+            "green: defaults spelled inline (`?: 1.0`) instead of the resolver",
+            COMPLIANT_MANAGER,
+            INLINE_DEFAULT_HANDLER,
+            COMPLIANT_SYSTEM,
+            set(),
+        ),
     ]
     ok = True
     for case in cases:
@@ -1390,8 +1772,6 @@ def selftest():
                 m = re.search(r"\[(tts-[a-z-]+)\]", f)
                 if m:
                     got.add(m.group(1))
-            else:
-                pass
             passed = got == expected
             print(
                 "[{}] selftest: {} (expected {}, got {})".format(
@@ -1407,7 +1787,25 @@ def selftest():
             ok = ok and passed
         finally:
             shutil.rmtree(root, ignore_errors=True)
-    print("tts_voice_and_sanitizer_check selftest: " + ("TTS-VOICE GATE ALL ARMS MATCH" if ok else "FAILED"))
+
+    # A tree the lexer cannot read must be a violation, never a silent pass.
+    root = tempfile.mkdtemp(prefix="ttsgate-")
+    try:
+        write_fixture(root, MANAGER_REL, COMPLIANT_MANAGER + '\nval broken = "unterminated\n')
+        write_fixture(root, HANDLER_REL, COMPLIANT_HANDLER)
+        write_fixture(root, SYSTEM_SPEECH_REL, COMPLIANT_SYSTEM)
+        write_fixture(root, QUICK_TEST_REL, COMPLIANT_QUICK)
+        got = {m.group(1) for f in run(root, verbose=False)
+               for m in [re.search(r"\[(tts-[a-z-]+)\]", f)] if m}
+        passed = got == {"tts-files"}
+        print("[{}] selftest: unparseable source is red (fail-closed) (got {})".format(
+            "PASS" if passed else "FAIL", sorted(got) if got else "green"))
+        ok = ok and passed
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    print("tts_voice_and_sanitizer_check selftest: "
+          + ("TTS-VOICE GATE ALL ARMS MATCH" if ok else "FAILED"))
     return 0 if ok else 1
 
 
