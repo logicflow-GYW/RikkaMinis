@@ -24,9 +24,33 @@ ISSUE-03b (FastioOffloadHandler.kt)
   `finishTar(deniedEntry(…), <flag>, …)` passes `true`, same as the
   destination-denied branch of tarExtractFrom.
 
-Checks assert PRESENCE of the corrected routing rather than the absence of a
-spelling, so a refactor that keeps the contract is a deliberate edit to this
-gate rather than a silent pass.
+Batch-7 hardened every criterion from "the spelling exists" to "the decision
+holds". The pre-fix gate grepped tokens (`SPLIT_NAME_OK`, a `<=`-shaped
+`STALE_CEILING_RE`, `"false &&"` on the LEFT of a guard, the substring
+`size - written`, "a sort appears in writeTree") — so each of the six witness
+patches below kept every token, kept the position, and reintroduced the bug:
+
+  09-1 the compliant ceiling line stays and `if (utf8Length(name) ==
+       NAME_LENGTH) …` is appended        -> the fit test is now parsed: every
+       `utf8Length(<half>)` comparison in `splitUstarName` must mean the STORED
+       ceiling (`<= FIELD - 1`, or `< FIELD`), judged by the arithmetic.
+  09-2 `if (false && Files.isSymbolicLink(archivePath))` -> the refusal is
+       judged by folding the condition: a guard that constant-folds refuses
+       nothing, and the guarded branch must return/throw.
+  09-3 `writeZeros(sink, (size - written) * 0L)` -> the fill AMOUNT must BE
+       `size - written`, not contain it.
+  09-4 `stream.toList().also { it.sortedBy { … } }` -> a sort inside a
+       discarding lambda (`also` / `apply` / `onEach` / `forEach`) hands back
+       the unsorted receiver, so it does not order anything.
+  09-5 `if (!attrs.isRegularFile && false)` -> the dead literal moved to the
+       RIGHT; the condition is folded instead of pattern-matched.
+  09-6 (already caught) the same dead literal on the LEFT — kept as an arm.
+
+Everything structural now comes from the shared lexer/AST/value-flow modules
+(`code_view`, `function_body`, `match_bracket`, `call_args`, `split_top`,
+`const_bool`, `guard_feasible`, `path_feasible`); the hand-written comment
+stripper, brace counter and guard scanner are gone. A refactor that keeps the
+contract is a deliberate edit to this gate rather than a silent pass.
 
 Usage: python3 scripts/scan/fastio_tar_bounds_check.py [repo_root]
        python3 scripts/scan/fastio_tar_bounds_check.py --selftest
@@ -36,18 +60,39 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_ast import (
+    const_bool,
+    enclosing_conditions,
+    function_body,
+    match_bracket,
+    split_top,
+    strip_parens,
+)
+from _kotlin_valueflow import (
+    call_args,
+    code_view,
+    expr_end,
+    guard_feasible,
+    path_feasible,
+    scope_calls,
+)
+
 TAR_REL = "src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/FastioTar.kt"
 HANDLER_REL = "src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/FastioOffloadHandler.kt"
 
 # ── ISSUE-03a: the fit test must use the stored sizes ────────────────────────
-SPLIT_NAME_OK = 'if (utf8Length(name) <= NAME_LENGTH - 1) return "" to name'
-SPLIT_PAIR_OK = (
-    "if (utf8Length(prefix) <= PREFIX_LENGTH - 1 && utf8Length(rest) <= NAME_LENGTH - 1) best = i"
-)
-# A `<= <FIELD>_LENGTH` that is NOT followed by ` - 1` is the stale raw ceiling.
-STALE_CEILING_RE = re.compile(
-    r"utf8Length\((?:name|prefix|rest)\) <= (?:NAME_LENGTH|PREFIX_LENGTH)(?!\s*-\s*1)"
-)
+# putText writes at most `length - 1` bytes of a fixed-width field (the last
+# byte is the NUL terminator), so the ONLY correct fit test is against the
+# STORED ceiling. Which field a half of the name is compared to is derived
+# from the operand, and the accepted spellings are the ones that mean the
+# same ceiling (`<= FIELD - 1`, `< FIELD`) — anything else (`== FIELD`,
+# `<= FIELD`, `>=`, `< FIELD - 1` is stricter but fine) is judged by the
+# arithmetic, not by a token list: batch-7 witness 09-1 kept the compliant
+# line and appended `if (utf8Length(name) == NAME_LENGTH) return "" to name`,
+# which a `<=`-only regex never saw.
+CEILING_FIELD = {"name": "NAME_LENGTH", "prefix": "PREFIX_LENGTH", "rest": "NAME_LENGTH"}
 # The NUL-terminator reserve in putText — the reason the ceilings are -1.
 PUTTEXT_RESERVE = "val count = minOf(bytes.size, length - 1)"
 
@@ -59,18 +104,101 @@ DENIED_CALL_RE = re.compile(
 MIN_DENIED_SITES = 2  # archive path (tarCreate) + dest path (tarExtract)
 
 
+def _ceiling_sites(body):
+    """[(pos, operand, op, rhs)] for every `utf8Length(<operand>) <op> <rhs>`."""
+    out = []
+    for m in re.finditer(r"utf8Length\s*\(", body):
+        spans = call_args(body, m.end() - 1)
+        close = match_bracket(body, m.end() - 1)
+        if close < 0:
+            out.append((m.start(), None, None, None))
+            continue
+        if len(spans) != 1:
+            out.append((m.start(), None, None, None))
+            continue
+        operand = body[spans[0][0]:spans[0][1]].strip()
+        j = close + 1
+        while j < len(body) and body[j] in " \t":
+            j += 1
+        op = None
+        for cand in ("<=", ">=", "==", "!=", "<", ">"):
+            if body.startswith(cand, j):
+                op = cand
+                j += len(cand)
+                break
+        if op is None:
+            out.append((m.start(), operand, None, None))
+            continue
+        # the right operand ends at a top-level `&&` / `||` / `,` / paren
+        tail = body[j:]
+        line_end = body.find("\n", j)
+        seg = body[j:line_end if line_end >= 0 else len(body)]
+        parts = split_top(seg, ("&&", "||"))
+        raw = seg[parts[0][0]:parts[0][1]] if parts else seg
+        # a following `)` closed the enclosing `if (` — it is not part of the rhs
+        depth = 0
+        cut = len(raw)
+        for k, ch in enumerate(raw):
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                if depth == 0:
+                    cut = k
+                    break
+                depth -= 1
+        out.append((m.start(), operand, op, raw[:cut].strip()))
+    return out
+
+
+def _ceiling_ok(operand, op, rhs):
+    """(ok, message) — does this fit test use the STORED ceiling?"""
+    field = CEILING_FIELD.get(operand)
+    if field is None:
+        return False, (
+            "stale raw-field ceiling: `utf8Length(%s)` is not one of the ustar name halves "
+            "(%s) — re-point this rule before trusting it"
+            % (operand, "/".join(sorted(CEILING_FIELD)))
+        )
+    if op is None:
+        return False, (
+            "splitUstarName computes `utf8Length(%s)` without comparing it to the stored "
+            "ceiling (`%s - 1`) — the fit test decides nothing" % (operand, field)
+        )
+    r = re.sub(r"\s+", "", strip_parens(rhs))
+    accepted = {field + "-1"}
+    if op == "<":
+        accepted.add(field)  # `< FIELD` is the same size as `<= FIELD - 1`
+    if op in ("<", "<=") and (r in accepted or (op == "<" and r == field + "-1")):
+        return True, ""
+    return False, (
+        "stale raw-field ceiling: `utf8Length(%s) %s %s` is not the STORED size "
+        "(`%s - 1`: putText reserves the last byte for the NUL terminator), so a %s-byte "
+        "name is declared to fit and then silently truncated by one byte (`.py` -> `.p`, a "
+        "multi-byte character cut in half)" % (operand, op, rhs or "<missing>", field, field)
+    )
+
+
 def check_tar(src):
     v = []
-    for needle, why in (
-        (SPLIT_NAME_OK, "splitUstarName must gate the short-name path on NAME_LENGTH - 1"),
-        (SPLIT_PAIR_OK, "splitUstarName must gate the prefix split on FIELD - 1 (both halves)"),
-        (PUTTEXT_RESERVE, "putText must keep the final field byte for the NUL terminator"),
-    ):
-        if needle not in src:
-            v.append("%s (required token missing)" % why)
-    for i, line in enumerate(src.split("\n")):
-        if STALE_CEILING_RE.search(line):
-            v.append("FastioTar.kt:%d stale raw-field ceiling: %r" % (i + 1, line.strip()))
+    if PUTTEXT_RESERVE not in src:
+        v.append("putText must keep the final field byte for the NUL terminator (required "
+                 "token missing)")
+    code = code_view(src)
+    span = function_body(code, "splitUstarName")
+    if span is None:
+        v.append("splitUstarName must exist in FastioTar.kt (required function missing)")
+        return v
+    base = span[0]
+    body = code[base:span[1]]
+    sites = _ceiling_sites(body)
+    if not sites:
+        v.append("splitUstarName has no `utf8Length(…)` fit test — re-point this rule before "
+                 "trusting it (the ustar ceilings are unchecked)")
+        return v
+    for pos, operand, op, rhs in sites:
+        ok, why = _ceiling_ok(operand, op, rhs)
+        if not ok:
+            v.append("FastioTar.kt:%d %s" % (code.count("\n", 0, base + pos) + 1, why))
     return v
 
 
@@ -117,71 +245,115 @@ def check_handler(src):
 ARCHIVE_LINK_GUARD = "Files.isSymbolicLink("
 NOFOLLOW_OPEN_RE = re.compile(r"new(?:Input|Output)Stream\([^)\n]*NOFOLLOW_LINKS")
 ARCHIVE_GUARD_PAYLOAD = "unsafe_archive_path"
-DECL_KEYWORDS = ("private ", "internal ", "public ", "protected ", "override ", "fun ",
-                 "class ", "object ", "}")
+LINK_CALL_RE = re.compile(r"Files\.isSymbolicLink\s*\(")
 
 
-def handler_member(src, name):
-    start = src.find("fun %s(" % name)
-    if start < 0:
+def member_body(code, name):
+    """The braced body of `fun <name>(…)`, via the shared brace-balanced slicer."""
+    span = function_body(code, name)
+    if span is None or span[2] != "block":
         return None
-    line_start = src.rfind("\n", 0, start) + 1
-    indent = len(src[line_start:start]) - len(src[line_start:start].lstrip(" "))
-    lines = src[line_start:].split("\n")
-    out = [lines[0]]
-    for line in lines[1:]:
-        stripped = line.strip()
-        if stripped:
-            ind = len(line) - len(line.lstrip(" "))
-            if ind <= indent and stripped.startswith(DECL_KEYWORDS):
-                break
-        out.append(line)
-    return "\n".join(out)
+    return code[span[0]:span[1]]
 
 
-def archive_open_guard_shape(src, name, extra_opener=None):
-    """'refuse' / 'nofollow' / None for the member that opens the archive.
-
-    extra_opener lets the read side put its NOFOLLOW open in the helper that
-    actually calls newInputStream (openArchive) instead of in the member — that
-    is the same decision made one call deeper, so it counts.
-    """
-    body = handler_member(src, name)
-    if body is None:
-        return "missing"
-    if ARCHIVE_LINK_GUARD in body:
-        return "refuse"
-    if NOFOLLOW_OPEN_RE.search(body):
-        return "nofollow"
-    if extra_opener:
-        opener = handler_member(src, extra_opener)
-        if opener is not None and NOFOLLOW_OPEN_RE.search(opener):
-            return "nofollow"
+def _if_cond_span(code, pos):
+    """(p_open, p_close) of the innermost `if (` whose CONDITION contains pos."""
+    for m in reversed(list(re.finditer(r"\bif\s*\(", code[:pos + 1]))):
+        p = m.end() - 1
+        q = match_bracket(code, p)
+        if q < 0:
+            continue
+        if p < pos <= q:
+            return p, q
     return None
+
+
+def _guarded_statement(code, close_paren):
+    """(start, end) of the statement/block guarded by the `if (…)` ending here."""
+    i = close_paren + 1
+    n = len(code)
+    while i < n and code[i] in " \t\r\n":
+        i += 1
+    if i < n and code[i] == "{":
+        j = match_bracket(code, i)
+        return (i, j + 1) if j > 0 else (i, n)
+    return (i, expr_end(code, i))
+
+
+def link_decision(code_body):
+    """(ok, pos, why) — is there a LIVE symlink refusal in this member?
+
+    Witness 09-2 wrote `if (false && Files.isSymbolicLink(archivePath))`: the
+    token, its position and the `refuseLinkedArchive` call all survived, and
+    nothing was ever refused. The decision is judged here, not the token: the
+    condition must be able to be TRUE, the path must be reachable, and the
+    guarded branch must actually stop the flow.
+    """
+    dead = None
+    for m in LINK_CALL_RE.finditer(code_body):
+        pos = m.start()
+        span = _if_cond_span(code_body, pos)
+        if span is None:
+            dead = dead or (pos, "the result of Files.isSymbolicLink(…) is not used as an `if` "
+                                 "condition — nothing is refused")
+            continue
+        cond = code_body[span[0] + 1:span[1]]
+        if not guard_feasible(cond):
+            dead = dead or (pos, "the symlink refusal is short-circuited (`%s` folds to false) — "
+                                 "the guard keeps the token and the refuse call and decides "
+                                 "nothing, so a link at the archive path is followed anyway"
+                            % " ".join(cond.split())[:70])
+            continue
+        if not path_feasible(code_body, pos):
+            dead = dead or (pos, "the symlink refusal sits in a branch that can never run — a "
+                                 "link at the archive path is followed anyway")
+            continue
+        t0, t1 = _guarded_statement(code_body, span[1])
+        if not re.search(r"\breturn\b|\bthrow\b", code_body[t0:t1]):
+            dead = dead or (pos, "the symlink is noticed and then followed anyway — the guarded "
+                                 "branch neither returns nor throws")
+            continue
+        return True, pos, ""
+    return False, None, (dead[1] if dead else None)
 
 
 def check_archive_open_guard(src):
     v = []
     shapes = {}
+    code = code_view(src)
     for name, extra in (("tarCreateInto", None), ("tarExtractFrom", "openArchive")):
-        shape = archive_open_guard_shape(src, name, extra_opener=extra)
-        if shape == "missing":
+        body = member_body(code, name)
+        if body is None:
             v.append("%s must exist in FastioOffloadHandler.kt (required function missing)" % name)
             continue
-        shapes[name] = shape
-        if shape is None:
-            v.append(
-                "%s opens the archive path without a NOFOLLOW-level guard — a symbolic link at the"
-                " archive path would be followed (write-through on create, read-through on extract)"
-                % name
-            )
+        refusal, _pos, why = link_decision(body)
+        if refusal:
+            shapes[name] = "refuse"
+            continue
+        if why is not None:
+            shapes[name] = None
+            v.append("%s: %s" % (name, why))
+            continue
+        if NOFOLLOW_OPEN_RE.search(body):
+            shapes[name] = "nofollow"
+            continue
+        if extra:
+            opener = member_body(code, extra)
+            if opener is not None and NOFOLLOW_OPEN_RE.search(opener):
+                shapes[name] = "nofollow"
+                continue
+        shapes[name] = None
+        v.append(
+            "%s opens the archive path without a NOFOLLOW-level guard — a symbolic link at the"
+            " archive path would be followed (write-through on create, read-through on extract)"
+            % name
+        )
     if "refuse" in shapes.values() and ARCHIVE_GUARD_PAYLOAD not in src:
         v.append(
             "a symlink at the archive path is detected but not refused — no %s payload"
             % ARCHIVE_GUARD_PAYLOAD
         )
     return v
-
 
 # ── [dv14-A2] writeRegular: open-before-header + short-payload refill ───────
 #
@@ -202,60 +374,42 @@ def check_archive_open_guard(src):
 # extend these checks onto it. The refill token matches `writeZeros(` or an
 # inlined `sink.write(`; a refactor that renames the helper is a deliberate
 # edit to this gate, not a silent pass.
-def _close_paren(text, open_idx):
-    depth = 0
-    for j in range(open_idx, len(text)):
-        if text[j] == "(":
-            depth += 1
-        elif text[j] == ")":
-            depth -= 1
-            if depth == 0:
-                return j
-    return -1
+def fn_body(code, name):
+    """The braced body of `fun <name>(…)` — the shared, brace-balanced slicer.
 
-
-def _close_brace(text, open_idx):
-    depth = 0
-    for j in range(open_idx, len(text)):
-        if text[j] == "{":
-            depth += 1
-        elif text[j] == "}":
-            depth -= 1
-            if depth == 0:
-                return j
-    return -1
-
-
-def _enclosing_guard_cond(text, idx):
-    """Condition of the innermost `if (…)` whose condition CONTAINS idx.
-
-    None when the guard token does not sit inside an if/when condition (a
-    subject-less `when { … }` branch, for instance) — the caller then judges
-    only the position, not the liveness.
+    The old `tar_fun_body()` cut at the literal `"\nprivate fun "`, which a
+    nested lambda or a spliced member silently swallowed; the old
+    `handler_member()` did the same ride on indentation.
     """
-    best = None
-    for m in re.finditer(r"\b(?:if|while)\s*\(", text[:idx]):
-        p = text.find("(", m.start())
-        q = _close_paren(text, p)
-        if q < 0 or q < idx:
-            continue
-        best = text[p + 1:q]
-    return best
+    return member_body(code, name)
 
 
-def tar_fun_body(src, name):
-    start = src.find("fun %s(" % name)
-    if start < 0:
-        return None
-    end = src.find("\nprivate fun ", start + 1)
-    if end < 0:
-        end = src.find("\ninternal fun ", start + 1)
-    return src[start:end] if end > start else src[start:]
+def _refill_amounts(seg):
+    """[(pos, amount)] — every printed-byte count handed to a zero-fill."""
+    out = []
+    for m in re.finditer(r"\bwriteZeros\s*\(", seg):
+        spans = call_args(seg, m.end() - 1)
+        if len(spans) >= 2:
+            out.append((m.start(), seg[spans[1][0]:spans[1][1]].strip()))
+    for m in re.finditer(r"\bsink\s*\.\s*write\s*\(", seg):
+        spans = call_args(seg, m.end() - 1)
+        if len(spans) == 1:
+            out.append((m.start(), seg[spans[0][0]:spans[0][1]].strip()))
+    return out
+
+
+def is_undelivered(amount):
+    """Is the fill amount EXACTLY the undelivered payload (`size - written`)?"""
+    e = strip_parens(amount)
+    e = re.sub(r"\.\s*toLong\s*\(\s*\)\s*$", "", e)
+    e = re.sub(r"\.\s*toInt\s*\(\s*\)\s*$", "", e)
+    return re.sub(r"\s+", "", strip_parens(e)) == "size-written"
 
 
 def check_write_regular(src):
     v = []
-    body = tar_fun_body(src, "writeRegular")
+    code = code_view(src)
+    body = fn_body(code, "writeRegular")
     if body is None:
         return ["writeRegular must exist in FastioTar.kt (required function missing)"]
     open_at = body.find("Files.newInputStream")
@@ -277,24 +431,31 @@ def check_write_regular(src):
     if catch_at < 0:
         v.append("writeRegular must guard the payload copy with a catch")
         return v
-    ret_at = body.find("return", catch_at)
-    catch_seg = body[catch_at : ret_at + 1 if ret_at >= 0 else catch_at + 800]
+    brace_at = body.find("{", catch_at)
+    close = match_bracket(body, brace_at) if brace_at >= 0 else -1
+    if close < 0:
+        v.append("writeRegular's copy-failure catch cannot be sliced - re-point this rule "
+                 "before trusting it")
+        return v
+    catch_seg = body[catch_at: close + 1]
     if "out.errors.add" not in catch_seg:
         v.append("the copy-failure catch must still record out.errors (truncation must not exit 0)")
-    has_refill = "writeZeros(" in catch_seg or "sink.write(" in catch_seg
-    if not has_refill:
+    amounts = _refill_amounts(catch_seg)
+    if not amounts:
         v.append("the copy-failure catch must zero-fill the short payload back to the declared size")
     else:
-        # [wide-1024] HOW MUCH matters, not just that a fill exists. The header
-        # already declared `size`, so the stream owes `size - written` bytes plus
-        # the 512-byte boundary; a constant fill (`writeZeros(sink, 0L)`) restores
-        # neither and every later member is swallowed as this entry's payload.
-        if not re.search(r"\bsize\s*-\s*written\b", catch_seg):
+        # [batch-7 09-3] HOW MUCH matters, and it must be the whole amount,
+        # not a substring of it: `writeZeros(sink, (size - written) * 0L)` keeps
+        # `size - written` visible while writing nothing, so the stream stays
+        # short of the size the header already declared.
+        if not any(is_undelivered(a) for _pos, a in amounts):
             v.append(
-                "the copy-failure refill must restore the UNDELIVERED payload "
-                "(`writeZeros(sink, size - written)`) - a constant fill (e.g. "
-                "`writeZeros(sink, 0L)`) leaves the stream short of the size the header "
-                "already declared, so every later member is read as payload"
+                "the copy-failure refill must restore the UNDELIVERED payload — the fill "
+                "amount (%s) is not `size - written`; a constant or a scaled expression "
+                "(`writeZeros(sink, (size - written) * 0L)`) restores nothing, so the stream "
+                "stays short of the size the header already declared and every later member "
+                "is read as payload"
+                % (", ".join(repr(a) for _pos, a in amounts))
             )
         if "boundaryPad(" not in catch_seg:
             v.append(
@@ -332,11 +493,39 @@ LISTING_RE = re.compile(r"newDirectoryStream\(|Files\.list\(")
 SORT_RE = re.compile(r"\.sorted[A-Za-z]*\s*[({]")
 
 
+DISCARD_SCOPES = ("also", "apply", "onEach", "forEach")
+
+
+def _listing_init(tree):
+    """(pos, initializer) of the local whose initializer lists the directory."""
+    for m in re.finditer(r"(?m)^[ \t]*(?:val|var)\s+[A-Za-z_]\w*\s*=", tree):
+        init = tree[m.end():expr_end(tree, m.end())]
+        if LISTING_RE.search(init):
+            return m.start(), init
+    return None, None
+
+
+def sort_result_survives(init):
+    """(ok, sorts, dead) — is a sort's VALUE the value of this expression?
+
+    [batch-7 09-4] `.also { it.sortedBy { … } }` runs the sort and hands back
+    the receiver, so the old "a sort appears in writeTree" test stayed green
+    while the members came out in directory-stream order again. A sort whose
+    position falls inside a discarding lambda (`also` / `apply` / `onEach` /
+    `forEach`) contributes nothing to the listing.
+    """
+    sorts = [m.start() for m in SORT_RE.finditer(init)]
+    discards = [(o, e) for name, _st, o, e in scope_calls(init) if name in DISCARD_SCOPES]
+    dead = [p for p in sorts if any(o < p < e for o, e in discards)]
+    return [p for p in sorts if p not in dead], sorts, dead
+
+
 def check_create_traversal(src):
     v = []
+    code = code_view(src)
     scope_parts = []
     for name in ("tarCreate", "writeTree"):
-        body = tar_fun_body(src, name)
+        body = fn_body(code, name)
         if body is None:
             v.append("the create traversal cannot be sliced (%s is gone) — re-point this rule "
                      "before trusting it" % name)
@@ -346,16 +535,25 @@ def check_create_traversal(src):
         v.append("the create traversal walks with Files.walkFileTree — member order is then "
                   "whatever the directory stream hands over, so the same tree archives differently "
                   "between runs (the FastioTarTest order flake)")
-    tree = tar_fun_body(src, "writeTree")
+    tree = fn_body(code, "writeTree")
     if not LISTING_RE.search(tree):
         v.append("writeTree no longer lists the directory itself — re-read this rule before "
-                  "trusting the order criterion")
+                 "trusting the order criterion")
         return v
-    if not SORT_RE.search(tree):
+    _pos, init = _listing_init(tree)
+    if init is None:
+        v.append("writeTree lists the directory but never binds the listing to a local — "
+                 "re-point this rule before trusting the order criterion")
+        return v
+    live, sorts, dead = sort_result_survives(init)
+    if not sorts:
         v.append("writeTree never orders the entries of a level — the archive member order is "
-                  "undecided again")
+                 "undecided again")
+    elif not live:
+        v.append("writeTree sorts the entries and then DISCARDS the sorted list — a sort inside "
+                 "`.also { it.sortedBy … }` / `.apply {}` / `.onEach {}` hands back the unsorted "
+                 "receiver, so members come out in directory-stream order again")
     return v
-
 
 # ── [dv22-A2] §1042-A-02: the top-level root loop is a walk like any other ───
 #
@@ -392,43 +590,14 @@ TOPLEVEL_TREE_CONSUMED_RE = re.compile(r"!\s*writeTree\(|writeTree\([^;\n]*?\)\s
 TOPLEVEL_REGULAR_GATE = "Files.isRegularFile("
 TOPLEVEL_SKIP_COUNT = "skippedSpecial++"
 
-def strip_kotlin_comments(text):
-    """Blank out // and /* */ comments, char-for-char (newlines kept), so a
-    criterion cannot be tripped — or hidden — by prose. Applied by the
-    top-level check only: its pre-fix shape (§1042-A-02) was first reported by
-    a comment that SAID `charge()` while the real call lived in writeTree."""
-    out = list(text)
-    i, n, in_block = 0, len(text), False
-    while i < n:
-        if in_block:
-            if text[i : i + 2] == "*/":
-                out[i] = out[i + 1] = " "
-                i += 2
-                in_block = False
-            else:
-                if text[i] != "\n":
-                    out[i] = " "
-                i += 1
-        elif text[i : i + 2] == "/*":
-            in_block = True
-            out[i] = out[i + 1] = " "
-            i += 2
-        elif text[i : i + 2] == "//":
-            j = text.find("\n", i)
-            j = n if j < 0 else j
-            for k in range(i, j):
-                out[k] = " "
-            i = j
-        else:
-            i += 1
-    return "".join(out)
-
 def check_toplevel_roots(src):
     v = []
-    raw = tar_fun_body(src, "tarCreate")
-    if raw is None:
+    # comments AND string contents blanked by the shared lexer (the pre-fix
+    # shape was first reported by a comment that SAID `charge()` while the real
+    # call lived in writeTree — 5.4 of the batch-7 family holes)
+    body = fn_body(code_view(src), "tarCreate")
+    if body is None:
         return ["tarCreate must exist in FastioTar.kt (required function missing)"]
-    body = strip_kotlin_comments(raw)
 
     # (a) the budget gate: exists, stops the walk, and precedes the writes.
     gate = TOPLEVEL_GATE_BLOCK_RE.search(body)
@@ -482,7 +651,7 @@ def check_toplevel_roots(src):
         seg_end = body.find("\n", m.start())
         seg = body[seg_start: seg_end if seg_end > 0 else len(body)]
         if seg.rstrip().endswith("{"):
-            cb = _close_brace(body, body.find("{", m.start()))
+            cb = match_bracket(body, body.find("{", m.start()))
             if cb > 0:
                 seg = body[seg_start: cb]
         if not re.search(r"\b(break|return)\b", seg):
@@ -589,7 +758,6 @@ SPECIAL_OPEN_CALLS = {
 #                   anything: its whole defect is the label it passes on.
 SPECIAL_GUARD_POSITION = {"grepTree": "before", "findTree": "in-argument", "copyTree": "before"}
 # [wide-1024] A literal in front of the decision makes the guard dead code.
-SPECIAL_DEAD_GUARD_RE = re.compile(r"\bfalse\s*&&|\btrue\s*\|\|")
 
 
 def kotlin_top_member(src, name):
@@ -626,6 +794,63 @@ def visit_file_block(src, engine):
     return body[start:] if nxt < 0 else body[start:nxt]
 
 
+WHEN_OPEN_RE = re.compile(r"\bwhen\s*(?:\(|\{)")
+
+
+def _when_label_at(code, pos):
+    """The `when` branch label whose span contains pos (findTree's `-type` map).
+
+    A label is the condition under which its branch body runs, so both
+    "pos inside the label" and "pos inside the body" resolve to that label.
+    """
+    for m in reversed(list(WHEN_OPEN_RE.finditer(code[:pos + 1]))):
+        if m.group(0).endswith("("):
+            q = match_bracket(code, m.end() - 1)
+            if q < 0:
+                continue
+            b = q + 1
+            while b < len(code) and code[b] in " \t\r\n":
+                b += 1
+        else:
+            b = m.end() - 1
+        if b >= len(code) or code[b] != "{":
+            continue
+        close = match_bracket(code, b)
+        if close < 0 or not (b < pos < close):
+            continue
+        seg_start = max(code.rfind("\n", b, pos), code.rfind("{", b, pos),
+                        code.rfind(";", b, pos))
+        arrow = code.find("->", seg_start, pos)
+        if arrow < 0:
+            # pos sits inside the LABEL itself — the arrow comes after it
+            arrow = code.find("->", pos, close)
+            if arrow < 0:
+                return None
+        label = code[seg_start + 1:arrow].strip()
+        return label or None
+    return None
+
+
+def guard_cond_at(code, pos):
+    """The condition that decides whether the statement at `pos` runs.
+
+    Covers the three shapes the engines use: the token inside a `when` branch
+    LABEL (`attrs.isRegularFile -> 'f'`), the token inside an `if`/`while`
+    CONDITION, and the token inside the guarded body.
+    """
+    conds = [c for _kind, c in enclosing_conditions(code, pos)]
+    if conds:
+        return conds[-1]
+    for m in reversed(list(re.finditer(r"\b(?:if|while)\s*\(", code[:pos + 1]))):
+        p = m.end() - 1
+        q = match_bracket(code, p)
+        if q < 0:
+            continue
+        if p < pos <= q:
+            return code[p + 1:q]
+    return _when_label_at(code, pos)
+
+
 def check_special_file_guards(search_src, copy_src):
     v = []
     engines = (
@@ -637,7 +862,7 @@ def check_special_file_guards(search_src, copy_src):
          "copyTree copies every non-link entry"),
     )
     for fname, raw, engine, why in engines:
-        block = visit_file_block(strip_kotlin_comments(raw), engine)
+        block = visit_file_block(code_view(raw), engine)
         if block is None:
             v.append("%s: %s's visitFile cannot be sliced - re-point this rule before "
                      "trusting it" % (fname, engine))
@@ -668,15 +893,35 @@ def check_special_file_guards(search_src, copy_src):
             )
             v.append("%s: %s: %s %s" % (fname, engine, why, tail))
         else:
-            # [wide-1024] Position and spelling are not the decision: a guard
-            # condition with a literal in front (`if (false && !attrs.isRegularFile)`)
-            # sits in exactly the right place and never decides anything.
-            cond = _enclosing_guard_cond(scope, tok_idx)
-            if cond is not None and SPECIAL_DEAD_GUARD_RE.search(cond):
+            # [batch-7 09-5] Position and spelling are not the decision. The old
+            # rule only caught a literal on the LEFT (`false && …`); putting the
+            # same literal on the right (`… && false`) kept the token in exactly
+            # the right place and decided nothing. The condition is folded here:
+            # a guard that constant-folds decides nothing, whichever side the
+            # literal sits on, and a guard in a dead outer branch never runs.
+            cond = guard_cond_at(scope, tok_idx)
+            if cond is not None:
+                folded = const_bool(cond)
+                if folded is not None:
+                    v.append(
+                        "%s: %s: the regular-file guard is short-circuited (`%s` folds to %s) — "
+                        "the condition keeps the token and decides nothing, so a writer-less "
+                        "FIFO still reaches open(2) and blocks an offload worker thread"
+                        % (fname, engine, " ".join(cond.split())[:60], folded)
+                    )
+                    continue
+                if not guard_feasible(cond):
+                    v.append(
+                        "%s: %s: the regular-file guard can never be true (`%s`) — every entry "
+                        "is skipped, or the branch that opens it runs regardless"
+                        % (fname, engine, " ".join(cond.split())[:60])
+                    )
+                    continue
+            if not path_feasible(scope, tok_idx):
                 v.append(
-                    "%s: %s: the regular-file guard is short-circuited (%r) — the condition "
-                    "keeps the token and decides nothing, so a writer-less FIFO still reaches "
-                    "open(2) and blocks an offload worker thread" % (fname, engine, cond.strip()[:60])
+                    "%s: %s: the regular-file guard sits in a branch that can never run — the "
+                    "open still happens without asking whether the entry is a regular file"
+                    % (fname, engine)
                 )
     return v
 
@@ -1203,14 +1448,75 @@ BAD_SEARCH_COMMENT_ONLY = GOOD_SEARCH_FIX.replace(
 # (f) marker gone: the rule must fail closed, not silently pass.
 BAD_SEARCH_RENAMED = GOOD_SEARCH_FIX.replace("fun grepTree(", "fun walkGrep(")
 
+# ── batch-7 witnesses (09-1 … 09-5) ─────────────────────────────────────────
+# 09-1: the compliant ceiling line is KEPT and a second raw-ceiling line is
+# appended — a `<=`-shaped token match never saw the `==`, and the hole is a
+# 100-byte name that putText then truncates to 99.
+B7_TAR_EXTRA_RAW = GOOD_TAR.replace(
+    '    if (utf8Length(name) <= NAME_LENGTH - 1) return "" to name\n',
+    '    if (utf8Length(name) <= NAME_LENGTH - 1) return "" to name\n'
+    '    if (utf8Length(name) == NAME_LENGTH) return "" to name\n')
+assert B7_TAR_EXTRA_RAW != GOOD_TAR
+
+# the equivalent spelling of the same stored ceiling must stay clean...
+B7_TAR_LT_SPELLING = GOOD_TAR.replace(
+    "utf8Length(name) <= NAME_LENGTH - 1", "utf8Length(name) < NAME_LENGTH")
+assert B7_TAR_LT_SPELLING != GOOD_TAR
+
+# ...and an INVERTED ceiling is a hole even though the ` - 1` is present.
+B7_TAR_INVERTED = GOOD_TAR.replace(
+    "utf8Length(prefix) <= PREFIX_LENGTH - 1", "utf8Length(prefix) >= PREFIX_LENGTH - 1")
+assert B7_TAR_INVERTED != GOOD_TAR
+
+# 09-2: the refusal keeps the token, the position AND the refuse call, and is
+# short-circuited by a literal literal in FRONT of it.
+B7_HANDLER_DEAD_LINK = GOOD_HANDLER.replace(
+    "if (Files.isSymbolicLink(archivePath)) {",
+    "if (false && Files.isSymbolicLink(archivePath)) {", 1)
+assert B7_HANDLER_DEAD_LINK != GOOD_HANDLER
+
+# 09-2b: the link is noticed and the flow continues past the refusal.
+B7_HANDLER_LINK_KEPT_GOING = GOOD_HANDLER.replace(
+    """    if (Files.isSymbolicLink(archivePath)) {
+        return refuseLinkedArchive(entry, "write", startedNs, args)
+    }""",
+    """    if (Files.isSymbolicLink(archivePath)) {
+        refuseLinkedArchive(entry, "write", startedNs, args)
+    }""")
+assert B7_HANDLER_LINK_KEPT_GOING != GOOD_HANDLER
+
+# 09-3: the undelivered payload is multiplied by zero — `size - written` is
+# still on the line, and nothing is written back.
+B7_REGULAR_ZERO_SCALED = GOOD_REGULAR.replace(
+    "writeZeros(sink, size - written)", "writeZeros(sink, (size - written) * 0L)")
+assert B7_REGULAR_ZERO_SCALED != GOOD_REGULAR
+
+# 09-4: the sort runs inside a discarding lambda — the listing keeps the
+# directory-stream order and the old "a sort appears in writeTree" test is green.
+B7_TREE_SORT_DISCARDED = GOOD_TREE.replace(
+    "stream.toList().sortedBy { it.fileName.toString() }",
+    "stream.toList().also { it.sortedBy { p -> p.fileName.toString() } }")
+assert B7_TREE_SORT_DISCARDED != GOOD_TREE
+
+# 09-5: the dead literal moves to the RIGHT of the guard — same dead branch,
+# same token, same position.
+B7_COPY_DEAD_RIGHT = GOOD_COPY_FIX.replace(
+    "if (!attrs.isRegularFile && !attrs.isSymbolicLink) {",
+    "if (!attrs.isRegularFile && !attrs.isSymbolicLink && false) {")
+assert B7_COPY_DEAD_RIGHT != GOOD_COPY_FIX
+
+
 def selftest():
     failures = []
+    arms = [0]
 
     def expect_clean(name, v):
+        arms[0] += 1
         if v:
             failures.append("%s must be clean, got %s" % (name, v))
 
     def expect_trip(name, v, needle):
+        arms[0] += 1
         if not any(needle in item for item in v):
             failures.append("%s did not trip %r (got %s)" % (name, needle, v))
 
@@ -1366,10 +1672,12 @@ def selftest():
         """Exactly one violation, and it is [needle]: the criterion has a tooth
         and the OTHER engines stay clean (a guard in one engine must not cover
         for a missing one in another)."""
+        arms[0] += 1
         if len(v) != 1 or needle not in v[0]:
             failures.append("%s must trip exactly %r, got %s" % (name, needle, v))
 
     def expect_all_clean(name, v):
+        arms[0] += 1
         if v:
             failures.append("%s must be clean, got %s" % (name, v))
 
@@ -1400,6 +1708,29 @@ def selftest():
         ),
     )
 
+    # ── batch-7 witnesses: each one used to pass this gate unchanged ────────
+    extra_raw = check_tar(B7_TAR_EXTRA_RAW)
+    arms[0] += 1
+    if len(extra_raw) != 1 or "stale raw-field ceiling" not in extra_raw[0]:
+        failures.append("09-1 extra raw ceiling must trip exactly one stale-ceiling finding "
+                        "(the compliant line above it keeps counting), got %s" % (extra_raw,))
+    expect_clean("09-1 equivalent `< FIELD` spelling stays clean", check_tar(B7_TAR_LT_SPELLING))
+    expect_trip("09-1b inverted ceiling is red", check_tar(B7_TAR_INVERTED),
+                "stale raw-field ceiling")
+    dead_link = check_archive_open_guard(B7_HANDLER_DEAD_LINK)
+    arms[0] += 1
+    if len(dead_link) != 1 or "short-circuited" not in dead_link[0]:
+        failures.append("09-2 short-circuited symlink refusal must trip exactly one "
+                        "short-circuit finding, got %s" % (dead_link,))
+    expect_trip("09-2b link noticed but not refused is red",
+                check_archive_open_guard(B7_HANDLER_LINK_KEPT_GOING), "neither returns nor throws")
+    expect_trip("09-3 zero-scaled refill is red", check_write_regular(B7_REGULAR_ZERO_SCALED),
+                "UNDELIVERED payload")
+    expect_trip("09-4 sort result discarded is red",
+                check_create_traversal(B7_TREE_SORT_DISCARDED), "DISCARDS the sorted list")
+    expect_only("09-5 dead literal on the RIGHT is red",
+                check_special_file_guards(GOOD_SEARCH_FIX, B7_COPY_DEAD_RIGHT), "short-circuited")
+
     print("selftest compliant tar          -> %d violation(s)" % len(good_tar))
     print("selftest compliant handler      -> %d violation(s)" % len(good_handler))
     print("selftest stale ceiling         -> %d violation(s)" % len(bad_stale))
@@ -1424,8 +1755,10 @@ def selftest():
     if failures:
         for f in failures:
             print("SELFTEST FAIL " + f)
+        print("FASTIO_TAR_BOUNDS_SELFTEST=FAIL (%d arms)" % arms[0])
         return 1
-    print("FASTIO_TAR_BOUNDS_SELFTEST=PASS")
+    print("FASTIO_TAR_SELFTEST_ARMS=%d" % arms[0])
+    print("FASTIO_TAR_BOUNDS_SELFTEST=PASS (%d arms)" % arms[0])
     return 0
 
 

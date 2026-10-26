@@ -16,31 +16,42 @@ The previous fix in the same file only taught the loop to carry a split PREFIX
 exposed. A pure-function regression here is silent: nothing crashes, the command
 just reports the wrong result.
 
-Criterion (mechanical):
-  0. every `MarkerScanResult(…)` whose hit argument is `true` — named
-     `hit = true` OR the FIRST POSITIONAL argument — must sit inside an
-     `if (<v> >= 0)` guard, `<v>` must be declared as
-     `val <v> = internalParseMinisExitCode(…)`, and the exitCode handed to the
-     result must be that same `<v>`. Otherwise the hit is backed by a constant /
-     a -1 / an unrelated variable and a split marker still reports completion.
-  1. inside `internalScanMarker`, an `if (exitCode >= 0)` guard must precede the
-     first `hit = true` — a hit without a parsed exit code is the bug;
-  2. a bounded window: `internal const val MAX_PENDING_MARKER_CHARS = <n>` must
-     exist with 32 <= n <= 256 (the prefix is 27-33 chars for an 8-char marker;
-     anything larger is not a cap), must be referenced by the function as a real
-     BOUND, and that bound must not be weakened by a top-level `||` (a
-     `if (len <= CAP || true)` reads as bounded and is not).
+Criterion (mechanical, all four judged on the DECISION, never on a spelling):
+  0. every `MarkerScanResult(…)` whose hit argument is not provably `false` —
+     named `hit = …` OR the FIRST POSITIONAL argument — must sit inside an
+     `if (<v> >= 0)` / `if (0 <= <v>)` guard that is REACHABLE; `<v>` must be
+     declared `val <v> = internalParseMinisExitCode(…)` as its WHOLE
+     initializer (nothing chained onto the call: no `.let { 0 }`, no
+     `.coerceAtLeast(0)`, no `?: 0`), and the exitCode handed to the result
+     must be that same `<v>`. Anything else means the reported completion is
+     backed by a constant / a -1 / an unrelated variable.
+  1. a `>= 0` guard must precede the first reachable hit;
+  2. the bounded window: `internal const val MAX_PENDING_MARKER_CHARS = <n>`
+     with 32 <= n <= 256 must be compared against the pending slice's own
+     length (`<pending>.length <= CAP`, or `CAP >= <pending>.length`) — the
+     window variable must itself be a `substring(…)` of the combined text —
+     the comparison must be LIVE (a `&& false` tail, `!`, or a constant left
+     operand folds the guard away) and must not be widened by `||`; the
+     bounded branch must withhold that slice (`keptTail` derived from it and
+     not a blank literal) and must not report a hit.
 
-Wide-sweep hardening (meta-wide 06 / wide-1024, three gate-blind witnesses):
-  W1 `val exitCode = 0` + the parse moved into the result ⇒ the guard tested a
-     constant (dataflow). Criterion 0 binds guard ⇄ parse ⇄ result.
-  W2 `if (pending.length <= MAX_PENDING_MARKER_CHARS || true)` ⇒ substring
-     presence was the whole check (dataflow). Criterion 2 rejects a weakened
-     bound.
-  W3 `if (true) return MarkerScanResult(true, …)` after the guard block ⇒
-     positional construction dodged the `hit = true` regex (anchor).
-     Criterion 0 also accepts positional arguments, so there is no second
-     spelling to hide in.
+Batch-7 gate-blind witnesses (each one used to pass this gate unchanged):
+  14-1 `val exitCode = internalParseMinisExitCode(…).let { 0 }` — the old
+       declaration check stopped at the `(` and never looked at the value.
+       Criterion 0 now requires the call to be the whole initializer.
+  14-2 `if (0 <= MAX_PENDING_MARKER_CHARS)` — the old check only asked whether
+       the cap NAME appeared next to SOME comparison operator. Criterion 2
+       binds the left operand to the pending window and the direction to a
+       real ceiling.
+  14-3 `keptTail = ""` inside the bounded branch — the old check only proved
+       the branch existed. Criterion 2 requires the withheld slice itself.
+  14-4 `hit = !false` — the old loop was `if hit_expr != "true": continue`.
+       Criterion 0 treats every hit that is not provably `false` as a hit.
+  14-5 a dedented `}` closing the bounded `if`, with a bare
+       `return MarkerScanResult(hit = true, …)` after it — the old
+       `function_span()` cut the body at the first `\n}`, so the injected
+       return sat outside the gate's view entirely. The body now comes from
+       the shared `function_body()` (brace-balanced, string/comment-masked).
 
 Usage: python3 scripts/scan/marker_boundary_check.py [repo_root]
        python3 scripts/scan/marker_boundary_check.py --selftest
@@ -50,300 +61,351 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import KotlinLexError
+from _kotlin_ast import (
+    const_bool,
+    const_value,
+    enclosing_conditions,
+    function_body,
+    if_blocks,
+    match_bracket,
+    split_top,
+    strip_parens,
+)
+from _kotlin_valueflow import (
+    code_view,
+    contains_ident,
+    expr_end,
+    guard_feasible,
+    path_feasible,
+)
+
 TARGET = "src/android/app/src/main/java/com/rikkaminis/app/sandbox/PersistentShell.kt"
 FUNC = "internalScanMarker"
 CAP_CONST = "MAX_PENDING_MARKER_CHARS"
-CAP_DECL = re.compile(r"internal const val %s\s*=\s*(\d+)" % CAP_CONST)
-GUARD = re.compile(r"if\s*\(\s*exitCode\s*>=\s*0\s*\)")  # legacy literal spelling
-HIT = re.compile(r"hit\s*=\s*true")
-PARSE_HELPER = "internalParseMinisExitCode("
+CAP_DECL_RE = re.compile(r"internal const val %s\s*=\s*(\d+)" % CAP_CONST)
+PARSE_HELPER = "internalParseMinisExitCode"
 MIN_CAP = 32
 MAX_CAP = 256
 
-IF_RE = re.compile(r"(?<![\w.])if\s*\(")
-CONST_TRUE_GUARD = re.compile(r"^\s*(?:true|1\s*==\s*1)\s*$")
+SITE_RE = re.compile(r"MarkerScanResult\s*\(")
+NAMED_ARG = re.compile(r"^([A-Za-z_]\w*)\s*=(?!=)\s*(.*)$", re.S)
+# `if (<v> >= 0)` and the equivalent `if (0 <= <v>)`
+GUARD_LEFT = re.compile(r"^\s*([A-Za-z_]\w*)\s*>=\s*0\s*$")
+GUARD_RIGHT = re.compile(r"^\s*0\s*<=\s*([A-Za-z_]\w*)\s*$")
+# a window length: `<name>.length` / `<name>.size`
+WINDOW_RE = re.compile(r"^([A-Za-z_]\w*)\s*\.\s*(?:length|size)$")
 
 
-# ── minimal Kotlin lexer ──────────────────────────────────────────────────────
-def mask(src):
-    """Blank out comment bodies and string/char literal CONTENTS in place.
-
-    Newlines and offsets are preserved so line numbers stay exact and every
-    structural scan sees code only. Strings are scanned BEFORE comments, so a
-    `"video/*"` literal can never open a block comment (the failure mode that
-    once hid 67 lines of a real handler from a gate).
-    """
-    out = list(src)
-    i, n = 0, len(src)
-    while i < n:
-        c = src[i]
-        if c == '"':
-            if src.startswith('"""', i):
-                j = i + 3
-                while j < n and not src.startswith('"""', j):
-                    if src[j] != "\n":
-                        out[j] = " "
-                    j += 1
-                i = j + 3
-                continue
-            j = i + 1
-            while j < n:
-                if src[j] == "\\":
-                    out[j] = " "
-                    if j + 1 < n and src[j + 1] != "\n":
-                        out[j + 1] = " "
-                    j += 2
-                    continue
-                if src[j] == '"':
-                    break
-                if src[j] != "\n":
-                    out[j] = " "
-                j += 1
-            i = j + 1
-            continue
-        if c == "'":
-            m = re.match(r"'(?:\\.|[^'\\\n])'", src[i:])
-            if m:
-                for k in range(i, i + m.end()):
-                    out[k] = " "
-                i += m.end()
-                continue
-            i += 1
-            continue
-        if c == "/" and i + 1 < n and src[i + 1] == "/":
-            j = i
-            while j < n and src[j] != "\n":
-                out[j] = " "
-                j += 1
-            i = j
-            continue
-        if c == "/" and i + 1 < n and src[i + 1] == "*":
-            j = i
-            while j < n and not (src[j] == "*" and j + 1 < n and src[j + 1] == "/"):
-                if src[j] != "\n":
-                    out[j] = " "
-                j += 1
-            for k in range(j, min(j + 2, n)):
-                if src[k] != "\n":
-                    out[k] = " "
-            i = j + 2
-            continue
-        i += 1
-    return "".join(out)
-
-
-def brace_block(text, open_idx):
-    """(body_text, end_idx) for the `{…}` starting at/after `open_idx`."""
-    j = text.find("{", open_idx)
-    if j < 0:
-        return None, None
-    depth = 0
-    for k in range(j, len(text)):
-        if text[k] == "{":
-            depth += 1
-        elif text[k] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[j:k + 1], k + 1
-    return None, None
-
-
-def paren_inner(text, open_idx):
-    """(inner_text, end_idx) for the `(…)` starting at/after `open_idx`."""
-    j = text.find("(", open_idx)
-    if j < 0:
-        return None, None
-    depth = 0
-    for k in range(j, len(text)):
-        if text[k] == "(":
-            depth += 1
-        elif text[k] == ")":
-            depth -= 1
-            if depth == 0:
-                return text[j + 1:k], k + 1
-    return None, None
-
-
-def guards(text):
-    """[(cond, body_start, body_end)] for every `if (…)` with a bounded body."""
-    out = []
-    for m in IF_RE.finditer(text):
-        cond, after = paren_inner(text, m.end() - 1)
-        if cond is None:
-            continue
-        k = after
-        while k < len(text) and text[k] in " \t\r\n":
-            k += 1
-        if k < len(text) and text[k] == "{":
-            blk, end = brace_block(text, k)
-            if blk is None:
-                continue
-            out.append((cond, k, end))
-        else:
-            # brace-less: the guarded statement is the rest of this statement
-            depth = 0
-            end = len(text)
-            for k2 in range(k, len(text)):
-                ch = text[k2]
-                if ch in "([{":
-                    depth += 1
-                elif ch in ")]}":
-                    if depth == 0:
-                        end = k2
-                        break
-                    depth -= 1
-                elif ch == "\n" and depth == 0:
-                    end = k2
-                    break
-            out.append((cond, k, end))
-    return out
-
-
-def enclosing(gs, pos):
-    return [g for g in gs if g[1] <= pos < g[2]]
-
-
-def function_span(text, name):
-    """(start, end) offsets of the top-level `internal fun <name>(` body."""
-    m = re.search(r"(?m)^internal fun %s\(" % re.escape(name), text)
-    if m is None:
-        return None, None, 0
-    line_no = text[:m.start()].count("\n") + 1
-    nl = text.find("\n}", m.start())
-    if nl < 0:
-        return None, None, line_no
-    return m.start(), nl + 2, line_no
-
-
-def split_args(inner):
-    args, cur, depth = [], "", 0
-    for ch in inner:
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            depth -= 1
-        if ch == "," and depth == 0:
-            args.append(cur)
-            cur = ""
-        else:
-            cur += ch
-    if cur.strip():
-        args.append(cur)
-    return [a.strip() for a in args]
-
-
-NAMED = re.compile(r"^([A-Za-z_]\w*)\s*=(?!=)\s*(.*)$", re.S)
+# ── shared-primitive helpers ────────────────────────────────────────────────
+def _call_args(text, open_paren_pos):
+    """[(start, end)] of the top-level arguments of the call at `(`."""
+    close = match_bracket(text, open_paren_pos)
+    if close < 0:
+        return []
+    base = open_paren_pos + 1
+    return [(base + a, base + b) for a, b in split_top(text[base:close], (",",))]
 
 
 def marker_sites(body):
-    """[(pos, hit_expr, exit_expr)] for every `MarkerScanResult(…)` construction.
+    """Every `MarkerScanResult(…)` construction, named or positional.
 
-    Named and positional arguments are both resolved, so a positional
-    `MarkerScanResult(true, …, -1, …)` cannot dodge the hit/hit-code pairing.
+    Resolved by the SHARED argument splitter, so a positional
+    `MarkerScanResult(true, …, -1, …)` cannot dodge the hit/hit-code pairing
+    and a multi-line construction cannot dodge it either.
     """
     sites = []
-    for m in re.finditer(r"MarkerScanResult\s*\(", body):
-        inner, _ = paren_inner(body, m.end() - 1)
-        if inner is None:
+    for m in SITE_RE.finditer(body):
+        spans = _call_args(body, m.end() - 1)
+        if not spans:
             continue
-        args = split_args(inner)
         named, positional = {}, []
-        for a in args:
-            nm = NAMED.match(a)
+        for a, b in spans:
+            txt = body[a:b].strip()
+            nm = NAMED_ARG.match(txt)
             if nm:
                 named[nm.group(1)] = nm.group(2).strip()
             else:
-                positional.append(a)
-        hit = named.get("hit", positional[0] if len(positional) > 0 else "")
+                positional.append(txt)
+        hit = named.get("hit", positional[0] if positional else "")
         exit_expr = named.get("exitCode", positional[2] if len(positional) > 2 else "")
-        sites.append((m.start(), hit.strip(), exit_expr.strip()))
+        kept = named.get("keptTail", positional[3] if len(positional) > 3 else "")
+        sites.append({"pos": m.start(), "hit": hit.strip(),
+                      "exit": exit_expr.strip(), "kept": kept.strip()})
     return sites
 
 
+def guard_var(cond):
+    """The variable an `if (<v> >= 0)` guard tests, or None."""
+    c = strip_parens(cond)
+    m = GUARD_LEFT.match(c) or GUARD_RIGHT.match(c)
+    return m.group(1) if m else None
+
+
+def parse_call_only(expr):
+    """Is `expr` EXACTLY a call to internalParseMinisExitCode(…)?
+
+    Nothing may be chained onto the call — `.let { 0 }`, `.coerceAtLeast(0)`
+    and `?: 0` all keep the declaration prefix while replacing the parsed
+    value with a constant (witness 14-1).
+    """
+    e = strip_parens(expr)
+    m = re.match(re.escape(PARSE_HELPER) + r"\s*\(", e)
+    if m is None:
+        return False
+    return match_bracket(e, m.end() - 1) == len(e) - 1
+
+
+def parse_decl(body, name):
+    """(start, keyword, initializer, init_start) of `val|var <name> = …`, or None."""
+    m = re.search(r"(?m)^[ \t]*(val|var)\s+" + re.escape(name) + r"\s*=", body)
+    if m is None:
+        return None
+    return (m.start(), m.group(1), body[m.end():expr_end(body, m.end())], m.end())
+
+
+PARSE_BACKED = ("ok", "no-decl", "after", "var", "not-parse-helper", "not-parse-call")
+
+
+def parse_backed(body, name, pos):
+    """Is `name`, at `pos`, declared as the parsed marker exit code?"""
+    decl = parse_decl(body, name)
+    if decl is None:
+        return "no-decl"
+    if decl[0] > pos:
+        return "after"
+    if decl[1] != "val":
+        return "var"
+    if not re.match(re.escape(PARSE_HELPER) + r"\s*\(", strip_parens(decl[2])):
+        return "not-parse-helper"
+    if not parse_call_only(decl[2]):
+        return "not-parse-call"
+    return "ok"
+
+
+def _window_var(body, name):
+    """Is `name` a local bound to `…substring(…)` (the pending marker slice)?"""
+    m = re.search(r"(?m)^[ \t]*(?:val|var)\s+" + re.escape(name) + r"\s*=", body)
+    if m is None:
+        return False
+    init = body[m.end():expr_end(body, m.end())]
+    return "substring(" in init
+
+
+def _comparison(cond):
+    """(op, lhs, rhs) of the top-level comparison, or (None, None, None)."""
+    c = strip_parens(cond)
+    for op in (">=", "<=", ">", "<"):
+        parts = split_top(c, (op,))
+        if len(parts) == 2:
+            return op, c[parts[0][0]:parts[0][1]].strip(), c[parts[1][0]:parts[1][1]].strip()
+    return None, None, None
+
+
+def cap_comparison(cond):
+    """(ok, window_var, message) — does `cond` actually cap the pending window?"""
+    op, lhs, rhs = _comparison(cond)
+    if op is None:
+        return False, None, (
+            "the %s guard is not a comparison — it cannot bound the pending window" % CAP_CONST
+        )
+    if rhs == CAP_CONST:
+        m = WINDOW_RE.match(lhs)
+        if m is None:
+            return False, None, (
+                "the %s bound compares `%s` — the LEFT operand must be the pending window's "
+                "length (`<pending>.length <= %s`); a constant such as `0 <= %s` is always "
+                "true, so a split-marker prefix accumulates without limit"
+                % (CAP_CONST, lhs, CAP_CONST, CAP_CONST)
+            )
+        if op not in ("<=", "<"):
+            return False, None, (
+                "the %s bound uses `%s` — only `<=` / `<` bound the window; `%s` inverts it, "
+                "so a short real split marker (length < %s) is flushed away and lost while a "
+                "long prefix is withheld forever" % (CAP_CONST, op, op, CAP_CONST)
+            )
+        return True, m.group(1), ""
+    if lhs == CAP_CONST:
+        m = WINDOW_RE.match(rhs)
+        if m is None:
+            return False, None, (
+                "the %s bound compares `%s` — the other operand must be the pending window's "
+                "length (`%s >= <pending>.length`), not a constant" % (CAP_CONST, rhs, CAP_CONST)
+            )
+        if op not in (">=", ">"):
+            return False, None, (
+                "the %s bound uses `%s` — only `>=` / `>` bound the window when the cap is on "
+                "the left; `%s` inverts the ceiling" % (CAP_CONST, op, op)
+            )
+        return True, m.group(1), ""
+    return False, None, (
+        "the %s guard never compares the cap to the pending window (`%s`)" % (CAP_CONST, cond.strip()[:70])
+    )
+
+
+# ── the criterion ───────────────────────────────────────────────────────────
 def check_source(text):
     """Return [(line_or_None, message)] for one source text."""
-    findings = []
-    code = mask(text)
-    start, end, body_line = function_span(code, FUNC)
-    body = code[start:end] if start is not None else None
-    if body is None:
+    try:
+        code = code_view(text)
+    except KotlinLexError as exc:  # pragma: no cover - fail closed
+        return [(None, "the Kotlin lexer rejected the file (%s) — fail closed" % exc)]
+    span = function_body(code, FUNC)
+    if span is None:
         return [(None, "`%s` not found — keep this gate honest (renamed or removed?)" % FUNC)]
+    base, end, kind = span
+    if kind != "block":
+        return [(None, "`%s` has no block body — re-point this gate before trusting it" % FUNC)]
+    body = code[base:end]
+    body_line = code.count("\n", 0, base) + 1
 
-    # ── 1. legacy ordering rule: an exit-code guard must precede the first hit
-    guard = GUARD.search(body)
-    hits = [m for m in HIT.finditer(body)]
-    if guard is None:
-        findings.append((body_line, "%s has no `if (exitCode >= 0)` guard — a bare marker "
-                         "prefix would report completion with exitCode -1 (\"shell died\")" % FUNC))
-    if hits and (guard is None or guard.start() > hits[0].start()):
-        findings.append((body_line + body[: hits[0].start()].count("\n"),
-                         "%s reports `hit = true` before any exit-code check" % FUNC))
+    def line_of(pos):
+        return code.count("\n", 0, base + pos) + 1
+
+    findings = []
+    sites = marker_sites(body)
+    blocks = if_blocks(body)
+    guard_blocks = [b for b in blocks if guard_var(b[0])]
+
+        # ── 1. legacy ordering rule: a REAL exit-code guard must precede the first hit
+    exit_guards = [b for b in blocks
+                   if guard_var(b[0]) and parse_backed(body, guard_var(b[0]), b[1]) == "ok"]
+    if not exit_guards:
+        findings.append((body_line, "%s has no `if (<parsedExitCode> >= 0)` guard — a bare "
+                         "marker prefix would report completion with exitCode -1 "
+                         "(\"shell died\")" % FUNC))
+    first_hit = next((s for s in sites if const_bool(s["hit"]) is not False
+                      and path_feasible(body, s["pos"])), None)
+    if first_hit is not None and exit_guards:
+        guard_at = min(b[1] for b in exit_guards)
+        if first_hit["pos"] < guard_at:
+            findings.append((line_of(first_hit["pos"]),
+                             "%s reports a hit before any exit-code check" % FUNC))
 
     # ── 0. every hit must be backed by the PARSED code, in every spelling
-    gs = guards(body)
-    for pos, hit_expr, exit_expr in marker_sites(body):
-        if hit_expr != "true":
+    for s in sites:
+        if const_bool(s["hit"]) is False:
+            continue  # provably not a hit
+        pos = s["pos"]
+        if not path_feasible(body, pos):
+            continue  # unreachable: it cannot report anything
+        # innermost covering `>= 0` guard first (source order: later == inner)
+        covering = [b for b in blocks if b[1] <= pos < b[2] and guard_var(b[0])]
+        covering.reverse()
+        if not covering:
+            findings.append((line_of(pos),
+                             "%s reports a hit (hit = %s) outside any `if (<parsedExitCode> >= 0)` "
+                             "guard — a split marker then completes the command with exitCode -1 "
+                             "(\"shell died\")" % (FUNC, s["hit"] or "<positional>")))
             continue
-        line = body_line + body[:pos].count("\n")
-        inner = enclosing(gs, pos)
-        g = None
-        for cond, b0, b1 in reversed(inner):
-            if re.match(r"^\s*([A-Za-z_]\w*)\s*>=\s*0\s*$", cond):
-                g = (cond, b0, b1)
-                break
-        if g is None:
-            findings.append((line, "%s reports a hit (hit = true / first positional `true`) "
-                             "outside any `if (<parsedExitCode> >= 0)` guard — a split marker "
-                             "then completes the command with exitCode -1 (\"shell died\")" % FUNC))
+        backed = next((b for b in covering
+                       if parse_backed(body, guard_var(b[0]), pos) == "ok"), None)
+        if backed is None:
+            cond, _t0, _t1, _e0, _e1 = covering[0]
+            var = guard_var(cond)
+            why = parse_backed(body, var, pos)
+            detail = {
+                "no-decl": "no `val %s = %s(…)` declares it" % (var, PARSE_HELPER),
+                "after": "`%s` is declared only AFTER the hit" % var,
+                "var": "`%s` is a `var` — it can be reassigned between the parse and the hit"
+                       % var,
+                "not-parse-helper": "`%s` is declared as `%s`, not as `%s(…)`"
+                                    % (var, " ".join(parse_decl(body, var)[2].split())[:60],
+                                       PARSE_HELPER),
+                "not-parse-call": "`%s` chains onto `%s(…)` (`.let { 0 }` / "
+                                  "`.coerceAtLeast(0)` / `?: 0`), so the value the guard tests "
+                                  "is not the parsed exit code"
+                                  % (var, PARSE_HELPER),
+            }[why]
+            findings.append((line_of(pos),
+                             "`%s` is not the parsed marker exit code: %s — a split marker then "
+                             "reports completion with a made-up exit code (the 14-1 hole)"
+                             % (var, detail)))
+            if s["exit"] != var:
+                findings.append((line_of(pos),
+                                 "the hit hands exitCode = '%s' to MarkerScanResult while the "
+                                 "guard validated '%s' — the value that decides completion must "
+                                 "be the value that is reported"
+                                 % (s["exit"] or "<missing>", var)))
             continue
-        var = re.match(r"^\s*([A-Za-z_]\w*)\s*>=", g[0]).group(1)
-        decl = re.search(r"(?m)^[ \t]*(?:val|var)\s+%s\s*=\s*%s" % (re.escape(var),
-                                                                    re.escape(PARSE_HELPER)), body)
-        if decl is None or decl.start() > pos:
-            findings.append((line, "the exit-code guard tests '%s', but no `val %s = %s…)` "
-                             "precedes the hit — the guard is on a constant / unrelated value, "
-                             "not on the parsed marker exit code" % (var, var, PARSE_HELPER)))
-        if exit_expr != var:
-            findings.append((line, "the hit hands exitCode = '%s' to MarkerScanResult while the "
-                             "guard validated '%s' — the value that decides completion must be the "
-                             "value that is reported" % (exit_expr or "<missing>", var)))
+        var = guard_var(backed[0])
+        if s["exit"] != var:
+            findings.append((line_of(pos),
+                             "the hit hands exitCode = '%s' to MarkerScanResult while the guard "
+                             "validated '%s' — the value that decides completion must be the "
+                             "value that is reported" % (s["exit"] or "<missing>", var)))
 
-    # ── 2. the cap must be a real bound at its use site
-    decl = CAP_DECL.search(code)
+    # ── 2. the cap must be a real, live, narrowing bound of the pending slice
+    decl = CAP_DECL_RE.search(code)
     if decl is None:
-        findings.append((None, "no `internal const val %s = <n>` — the pending marker "
-                         "window may grow without bound" % CAP_CONST))
+        findings.append((None, "no `internal const val %s = <n>` — the pending marker window "
+                         "may grow without bound" % CAP_CONST))
     else:
         value = int(decl.group(1))
         if not (MIN_CAP <= value <= MAX_CAP):
             findings.append((None, "%s = %d is outside %d..%d — a cap that large does not "
                              "bound anything" % (CAP_CONST, value, MIN_CAP, MAX_CAP)))
-    if CAP_CONST not in body:
-        findings.append((body_line, "%s does not use %s — the pending window is unbounded "
-                         "in the hit path" % (FUNC, CAP_CONST)))
-    else:
-        used = False
-        for cond, b0, b1 in gs:
-            if CAP_CONST not in cond:
+    cap_blocks = [b for b in blocks if CAP_CONST in b[0]]
+    if not cap_blocks:
+        findings.append((body_line, "%s does not use %s — the pending window is unbounded in "
+                         "the hit path" % (FUNC, CAP_CONST)))
+    for cond, t0, t1, _e0, _e1 in cap_blocks:
+        line = line_of(t0)
+        if len(split_top(strip_parens(cond), ("||",))) > 1:
+            findings.append((line,
+                             "the %s bound is weakened by a disjunction (`||`) — "
+                             "`if (… <= %s || true)` can never withhold anything, so a "
+                             "split-marker prefix accumulates without limit"
+                             % (CAP_CONST, CAP_CONST)))
+            continue
+        if not guard_feasible(cond):
+            findings.append((line,
+                             "the %s bound is dead (`%s` constant-folds to false) — the "
+                             "withholding branch never runs, so every split marker prefix is "
+                             "flushed and the window is effectively unbounded"
+                             % (CAP_CONST, " ".join(cond.split())[:70])))
+            continue
+        ok, pvar, why = cap_comparison(cond)
+        if not ok:
+            findings.append((line, why))
+            continue
+        if not _window_var(body, pvar):
+            findings.append((line,
+                             "`%s` bounds `%s`, but `%s` is not the pending marker slice "
+                             "(`val %s = …substring(…)`) — the cap measures something that does "
+                             "not grow with the withheld prefix" % (CAP_CONST, pvar, pvar, pvar)))
+            continue
+        held = [s for s in sites if t0 <= s["pos"] < t1]
+        if not held:
+            findings.append((line,
+                             "the %s-bounded branch returns no MarkerScanResult — the pending "
+                             "prefix is flushed as ordinary output and lost" % CAP_CONST))
+            continue
+        for s in held:
+            if const_bool(s["hit"]) is not False:
+                findings.append((line_of(s["pos"]),
+                                 "the %s-bounded branch reports a hit (hit = %s) — the withheld "
+                                 "prefix is the SPLIT marker, not a completion"
+                                 % (CAP_CONST, s["hit"] or "<positional>")))
                 continue
-            if "||" in cond:
-                findings.append((body_line + body[:b0].count("\n"),
-                                 "the %s bound is weakened by a disjunction (`||`) — "
-                                 "`if (… <= %s || true)` can never withhold anything, so a "
-                                 "split-marker prefix accumulates without limit"
-                                 % (CAP_CONST, CAP_CONST)))
-                continue
-            if CONST_TRUE_GUARD.match(cond):
-                continue
-            if re.search(r"%s\s*(<=|>=|<|>)" % re.escape(CAP_CONST), cond) or \
-               re.search(r"(<=|>=|<|>)\s*%s" % re.escape(CAP_CONST), cond):
-                used = True
-        if not used:
-            findings.append((body_line, "%s does not bound anything at its use site — the "
-                             "pending window is still unbounded in the hit path" % CAP_CONST))
+            kv = s["kept"]
+            cv = const_value(kv) if kv else None
+            if cv is not None and cv[0] == "str" and not cv[1]:
+                findings.append((line_of(s["pos"]),
+                                 "keptTail = '%s' — the withheld window is dropped, so the split "
+                                 "marker line never completes in the next chunk and the "
+                                 "completion marker is lost" % kv))
+            elif not (contains_ident(kv, pvar) or "substring(" in kv):
+                findings.append((line_of(s["pos"]),
+                                 "keptTail = '%s' does not carry the pending slice `%s` — the "
+                                 "bounded branch withholds something else, so the split marker "
+                                 "cannot complete" % (kv or "<missing>", pvar)))
     return findings
 
 
+# ── fixtures ────────────────────────────────────────────────────────────────
 OK_FIXTURE = """
 package p
 internal const val MAX_PENDING_MARKER_CHARS = 64
@@ -380,12 +442,13 @@ PRE_FIX_FIXTURE = OK_FIXTURE.replace(
                 exitCode = exitCode,
                 keptTail = "",
             )
-        }
 """,
     "        return MarkerScanResult(hit = true, beforeMarker = \"\", exitCode = -1, keptTail = \"\")\n",
 ).replace("        if (pending.length <= MAX_PENDING_MARKER_CHARS) {\n", "").replace(
     "internal const val MAX_PENDING_MARKER_CHARS = 64\n", ""
 )
+assert check_source(OK_FIXTURE) == []
+assert check_source(PRE_FIX_FIXTURE) != []
 
 NO_CAP_FIXTURE = OK_FIXTURE.replace("internal const val MAX_PENDING_MARKER_CHARS = 64\n", "")
 CAP_UNUSED_FIXTURE = OK_FIXTURE.replace(
@@ -434,50 +497,145 @@ W3_POSITIONAL_HIT_FIXTURE = OK_FIXTURE.replace(
         if (pending.length <= MAX_PENDING_MARKER_CHARS) {""",
 )
 
-SELFTEST = [
-    ("compliant source is green", OK_FIXTURE, 0, []),
-    ("pre-fix shape is red", PRE_FIX_FIXTURE, 6,
-     ["no `if (exitCode >= 0)` guard", "before any exit-code", "no `internal const val",
-      "does not use", "guard tests 'idx'"]),
-    ("missing cap declaration is red", NO_CAP_FIXTURE, 1, ["no `internal const val"]),
-    ("unused cap constant is red", CAP_UNUSED_FIXTURE, 1, ["does not use"]),
-    ("oversized cap is red", CAP_TOO_BIG_FIXTURE, 1, ["outside 32..256"]),
-    ("W1 constant guard is red", W1_CONST_GUARD_FIXTURE, 2,
-     ["no `val exitCode = internalParseMinisExitCode", "hands exitCode"]),
-    ("W2 weakened cap is red", W2_WEAKENED_CAP_FIXTURE, 2,
-     ["weakened by a disjunction", "does not bound anything"]),
-    ("W3 positional hit is red", W3_POSITIONAL_HIT_FIXTURE, 2,
-     ["guard tests 'idx'", "hands exitCode = '-1'"]),
+# ── batch-7 witnesses (14-1 … 14-5) ─────────────────────────────────────────
+PARSE_LINE = "        val exitCode = internalParseMinisExitCode(combined.substring(idx), marker)\n"
+
+# 14-1: the declaration prefix survives, the parsed value is replaced by a
+# constant that a "looks like business code" chain hangs off the call.
+B7_PARSE_LET_FIXTURE = OK_FIXTURE.replace(
+    PARSE_LINE, PARSE_LINE.replace("marker)\n", "marker).let { 0 }\n"))
+B7_PARSE_COERCE_FIXTURE = OK_FIXTURE.replace(
+    PARSE_LINE, PARSE_LINE.replace("marker)\n", "marker).coerceAtLeast(0)\n"))
+B7_PARSE_ELVIS_FIXTURE = OK_FIXTURE.replace(
+    PARSE_LINE, PARSE_LINE.replace("marker)\n", "marker) ?: 0\n"))
+
+# 14-2: the ceiling's left operand becomes a constant / the direction inverts.
+B7_CAP_CONST_LHS_FIXTURE = OK_FIXTURE.replace(
+    "if (pending.length <= MAX_PENDING_MARKER_CHARS) {",
+    "if (0 <= MAX_PENDING_MARKER_CHARS) {",
+)
+B7_CAP_INVERTED_FIXTURE = OK_FIXTURE.replace(
+    "if (pending.length <= MAX_PENDING_MARKER_CHARS) {",
+    "if (pending.length >= MAX_PENDING_MARKER_CHARS) {",
+)
+B7_CAP_UNRELATED_FIXTURE = OK_FIXTURE.replace(
+    "if (pending.length <= MAX_PENDING_MARKER_CHARS) {",
+    "if (kept.length <= MAX_PENDING_MARKER_CHARS) {",
+).replace("        val pending = combined.substring(idx)\n",
+          "        val pending = combined.substring(idx)\n        val kept = tail\n")
+
+# 14-3: the bounded branch exists and withholds nothing.
+B7_TAIL_DROPPED_FIXTURE = OK_FIXTURE.replace(
+    "return MarkerScanResult(hit = false, beforeMarker = \"\", exitCode = -1, keptTail = pending)",
+    "return MarkerScanResult(hit = false, beforeMarker = \"\", exitCode = -1, keptTail = \"\")",
+)
+
+# 14-4: an equivalent spelling of the hit flag dodges the `hit = true` grep.
+B7_HIT_ALGEBRA_FIXTURE = OK_FIXTURE.replace(
+    "        val pending = combined.substring(idx)\n",
+    "        if (1 == 1) return MarkerScanResult(hit = !false, beforeMarker = \"\", "
+    "exitCode = -1, keptTail = \"\")\n        val pending = combined.substring(idx)\n",
+)
+
+# 14-5: a dedented `}` closes the bounded if; the injected hit sits after it,
+# outside the slice the old `text.find("\\n}")` parser produced.
+B7_TRUNCATED_BODY_FIXTURE = OK_FIXTURE.replace(
+    """        val pending = combined.substring(idx)
+        if (pending.length <= MAX_PENDING_MARKER_CHARS) {
+            return MarkerScanResult(hit = false, beforeMarker = "", exitCode = -1, keptTail = pending)
+        }""",
+    """        val pending = combined.substring(idx)
+        if (pending.length <= MAX_PENDING_MARKER_CHARS && false) {
+            return MarkerScanResult(hit = false, beforeMarker = "", exitCode = -1, keptTail = pending)
+}
+        return MarkerScanResult(hit = true, beforeMarker = "", exitCode = -1, keptTail = "")""",
+)
+
+# ── clean arms: equivalent shapes that must stay green ──────────────────────
+# the mirrored guard spelling
+OK_GUARD_MIRRORED = OK_FIXTURE.replace("if (exitCode >= 0) {", "if (0 <= exitCode) {")
+# the withheld slice rebuilt from the combined text instead of the local
+OK_TAIL_SUBSTRING = OK_FIXTURE.replace("keptTail = pending)", "keptTail = combined.substring(idx))")
+# a multi-line parse call is still "exactly the parse call"
+OK_PARSE_MULTILINE = OK_FIXTURE.replace(
+    "        val exitCode = internalParseMinisExitCode(combined.substring(idx), marker)\n",
+    "        val exitCode = internalParseMinisExitCode(\n"
+    "            combined.substring(idx),\n"
+    "            marker,\n"
+    "        )\n",
+)
+# the cap on the left, window on the right, is the same ceiling
+OK_CAP_MIRRORED = OK_FIXTURE.replace(
+    "if (pending.length <= MAX_PENDING_MARKER_CHARS) {",
+    "if (MAX_PENDING_MARKER_CHARS >= pending.length) {",
+)
+
+ARMS = [
+    ("compliant source is green", OK_FIXTURE, [], True),
+    ("pre-fix shape is red", PRE_FIX_FIXTURE,
+     ["no `if (<parsedExitCode> >= 0)` guard", "not the parsed marker exit code",
+      "no `internal const val", "does not use"], False),
+    ("missing cap declaration is red", NO_CAP_FIXTURE, ["no `internal const val"], False),
+    ("unused cap constant is red", CAP_UNUSED_FIXTURE, ["does not use"], False),
+    ("oversized cap is red", CAP_TOO_BIG_FIXTURE, ["outside 32..256"], False),
+    ("W1 constant guard is red", W1_CONST_GUARD_FIXTURE,
+     ["not the parsed marker exit code", "hands exitCode"], False),
+    ("W2 weakened cap is red", W2_WEAKENED_CAP_FIXTURE,
+     ["weakened by a disjunction"], False),
+    ("W3 positional hit is red", W3_POSITIONAL_HIT_FIXTURE,
+     ["not the parsed marker exit code", "hands exitCode = '-1'"], False),
+    ("14-1 parse .let { 0 } is red", B7_PARSE_LET_FIXTURE,
+     ["not the parsed marker exit code", "`.let { 0 }`"], False),
+    ("14-1b parse .coerceAtLeast(0) is red", B7_PARSE_COERCE_FIXTURE,
+     ["not the parsed marker exit code"], False),
+    ("14-1c parse ?: 0 is red", B7_PARSE_ELVIS_FIXTURE,
+     ["not the parsed marker exit code"], False),
+    ("14-2 constant cap operand is red", B7_CAP_CONST_LHS_FIXTURE,
+     ["LEFT operand must be the pending window"], False),
+    ("14-2b inverted cap is red", B7_CAP_INVERTED_FIXTURE,
+     ["only `<=` / `<` bound the window"], False),
+    ("14-2c cap on an unrelated value is red", B7_CAP_UNRELATED_FIXTURE,
+     ["is not the pending marker slice"], False),
+    ("14-3 dropped withheld tail is red", B7_TAIL_DROPPED_FIXTURE,
+     ["the withheld window is dropped"], False),
+    ("14-4 hit = !false is red", B7_HIT_ALGEBRA_FIXTURE,
+     ["not the parsed marker exit code", "hands exitCode"], False),
+    ("14-5 dedented body truncation is red", B7_TRUNCATED_BODY_FIXTURE,
+     ["not the parsed marker exit code", "constant-folds to false"], False),
+    ("mirrored guard spelling stays green", OK_GUARD_MIRRORED, [], True),
+    ("tail rebuilt from the combined text stays green", OK_TAIL_SUBSTRING, [], True),
+    ("multi-line parse call stays green", OK_PARSE_MULTILINE, [], True),
+    ("mirrored cap spelling stays green", OK_CAP_MIRRORED, [], True),
 ]
 
 
 def selftest():
     bad = 0
-    for name, text, want_count, needles in SELFTEST:
+    for name, text, needles, clean in ARMS:
         findings = check_source(text)
         messages = "\n".join(m for _, m in findings)
-        ok = len(findings) == want_count and all(n in messages for n in needles)
+        missing = [n for n in needles if n not in messages]
+        if clean:
+            ok = not findings
+        else:
+            ok = bool(findings) and not missing
         if not ok:
             bad += 1
-            print("  [FAIL] %s: got %d findings, wanted %d" % (name, len(findings), want_count))
+            print("  [FAIL] %s: %d findings, missing needles %s" % (name, len(findings), missing))
             for line, msg in findings:
                 print("         %s" % msg)
         else:
             print("  [OK] %s (%d findings)" % (name, len(findings)))
-    # A fixture must never be green for the wrong reason.
-    if not check_source(OK_FIXTURE):
-        print("  [OK] unaffected fixture stays green")
-    else:
-        bad += 1
-        print("  [FAIL] compliant fixture reported findings")
-    print("SELFTEST=%s" % ("PASS" if bad == 0 else "FAIL"))
+    print("SELFTEST=%s (%d arms)" % ("PASS" if bad == 0 else "FAIL", len(ARMS)))
+    print("MARKER_BOUNDARY_SELFTEST=%s (%d arms)"
+          % ("PASS" if bad == 0 else "FAIL", len(ARMS)))
     return 1 if bad else 0
 
 
 def main():
     if "--selftest" in sys.argv:
         return selftest()
-    root = sys.argv[1] if len(sys.argv) > 1 else "."
+    root = next((a for a in sys.argv[1:] if not a.startswith("-")), ".")
     path = os.path.join(root, TARGET)
     if not os.path.exists(path):
         print("❌ marker-boundary guard: %s not found (moved?)" % TARGET)
