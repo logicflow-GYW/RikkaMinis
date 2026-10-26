@@ -5,7 +5,7 @@ Pins the contract fixed by branch fix/da1020-provider-models-cache: the sole
 production call site `ProviderRepository.refreshModels` ->
 `ModelListProviderRegistry.fetchModels(...)` must forward the application
 `Context`, the Registry must keep the `context` parameter and forward it to
-every fetcher, the five *ModelsApi adapters must keep passing
+every fetcher, the *ModelsApi adapters must keep passing
 `context = context`, and the disk-cache classes must keep their
 load / save / invalidate surface (the three things that were 100% inert while
 the context was dropped: 7-day disk cache read, 401/403 invalidate, save).
@@ -14,6 +14,27 @@ Every *ModelsApi short-circuits on `context != null`
 (OpenAIModelsApi:95/166, AnthropicModelsApi:42/117/175, GeminiModelsApi:75/
 113/154, OpenRouterModelsApi:39/58/73), so a dropped argument does not fail
 anywhere — it silently disables the whole cache chain.
+
+[batch7 / B7-t07] Six external witnesses walked through the previous revision
+(5 blind, 1 caught). All four families below were "the token is still spelled,
+the value is not the caller's":
+
+  dataflow   a same-named LOCAL (`val context = null`) shadows the parameter
+             or the constructor property at any hop of the 4-step chain
+             (Repo -> Registry -> Adapter -> Cache). The previous revision only
+             checked the Registry hop, so hoisting the shadow one hop up or
+             down the chain was free.
+  parser     the old `strip_comments()` was two non-string-aware regexes, so
+             `val _c1 = "/*"` swallowed every line up to `"*/"` and hid the
+             shadow entirely.
+  family-hole a constant guard is not a `true`/`false` literal: `if (1 == 1)
+             return null`, `if (0 == 1) runCatching { …delete() }`, `if (!false)
+             return` are all the same knife. Reachability is now decided by
+             constant folding + enclosing conditions, for every arm of the gate.
+
+All structure work goes through the shared primitives (`_kotlin_lexer` /
+`_kotlin_ast` / `_kotlin_valueflow`): no hand-rolled comment stripper, no bare
+brace counting, no `true|false` literal whitelist.
 
 Usage: python3 provider_models_cache_wiring_check.py [ROOT]   (ROOT = repo root)
        python3 provider_models_cache_wiring_check.py --root ROOT
@@ -24,163 +45,203 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import KotlinLexError
+from _kotlin_ast import (
+    const_bool,
+    enclosing_conditions,
+    function_body,
+    match_bracket,
+    split_top,
+    stmt_spans,
+    strip_parens,
+)
+from _kotlin_valueflow import (
+    brace_depth,
+    code_view,
+    decl_sites,
+    path_feasible,
+)
+
 REPO_REL = "src/android/app/src/main/java/com/rikkaminis/app/data/repository/ProviderRepository.kt"
 REGISTRY_REL = "src/android/app/src/main/java/com/rikkaminis/app/data/repository/ModelListProviderRegistry.kt"
 ADAPTERS_REL = "src/android/app/src/main/java/com/rikkaminis/app/provider/ModelListProviderAdapters.kt"
 CACHE_REL = "src/android/app/src/main/java/com/rikkaminis/app/provider/ProviderModelsCache.kt"
 
 REPO_ANCHOR = "ModelListProviderRegistry.fetchModels("
-ADAPTER_ANCHOR_RE = re.compile(r"\w+ModelsApi\.fetchModels\(")
-ADAPTER_PASS_ARG = "context = context"
+ADAPTER_ANCHOR_RE = re.compile(r"\b\w+ModelsApi\.fetchModels\s*\(")
+CONTEXT_TOKEN = "context"
 
-
-def strip_comments(src):
-    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
-    src = re.sub(r"//[^\n]*", "", src)
-    return src
-
-
-# [wide-1024] Presence is not a judgement: a body that keeps the call but makes
-# it unreachable (`if (true) return null` / `if (true) return`) satisfies every
-# substring criterion while the cache chain is exactly as inert as before the
-# fix. Same for a local that shadows a parameter: the identifier is still
-# spelled `context`, the value it forwards is not the caller's.
-DEAD_GUARD_RE = re.compile(r"\b(?:if|while)\s*\(\s*!?\s*(?:true|false)\b")
 READ_CALLS = ("readText(", "readBytes(", "readString(", "decodeFromString", "inputStream(")
 WRITE_CALLS = ("writeText(", "writeBytes(", "outputStream(", "renameTo(")
+DELETE_CALLS = (".delete(",)
+
+# ---------------------------------------------------------------------------
+# Structure helpers (shared primitives only)
+
+FUN_HEAD_RE = re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[A-Za-z_][\w.]*\.)?([A-Za-z_]\w*)\s*\(")
 
 
-def fn_block(text, header):
-    """Balanced `{ … }` body of the first declaration starting with [header].
+def view(src):
+    """code_view, or None when the file cannot be lexed (caller fails closed)."""
+    try:
+        return code_view(src)
+    except KotlinLexError:
+        return None
 
-    Returns the body text (braces excluded) or None — None is fail-closed at
-    every call site: a function we cannot locate is a function we cannot
-    vouch for.
+
+def fun_spans(code):
+    """[(name, body_start, body_end)] for every BLOCK-bodied `fun NAME(`.
+
+    Expression bodies are skipped: none of the functions this gate judges are
+    expression-bodied, and a span we cannot delimit must not become a span we
+    guess at.
     """
-    i = text.find(header)
-    if i < 0:
-        return None
-    j = text.find("(", i)
-    if j < 0:
-        return None
-    depth = 0
-    k = j
-    while k < len(text):
-        if text[k] == "(":
-            depth += 1
-        elif text[k] == ")":
-            depth -= 1
-            if depth == 0:
+    out = []
+    for m in FUN_HEAD_RE.finditer(code):
+        p_open = m.end() - 1
+        p_close = match_bracket(code, p_open)
+        if p_close < 0:
+            continue
+        i = p_close + 1
+        while i < len(code) and code[i] not in "={":
+            if code[i] == "\n":
                 break
-        k += 1
-    brace = text.find("{", k)
-    if brace < 0:
+            i += 1
+        if i >= len(code) or code[i] != "{":
+            continue
+        close = match_bracket(code, i)
+        if close > 0:
+            out.append((m.group(1), i + 1, close))
+    return out
+
+
+def enclosing_fun(code, pos):
+    """Innermost block-bodied function containing `pos`, or None."""
+    best = None
+    for name, start, end in fun_spans(code):
+        if start <= pos < end:
+            if best is None or start >= best[1]:
+                best = (name, start, end)
+    return best
+
+
+def call_arg_spans(code, anchor, start=0):
+    """[(start, end)] of the FIRST `anchor` call's arguments, or ([], -1).
+
+    `anchor` must end with `(`. Parenthesis-balanced via `match_bracket`; the
+    argument split is `split_top`, so nested calls / lambdas stay intact.
+    """
+    i = code.find(anchor, start)
+    if i < 0:
+        return [], -1
+    open_paren = i + len(anchor) - 1
+    close = match_bracket(code, open_paren)
+    if close < 0:
+        return [], -1
+    parts = split_top(code[open_paren + 1:close], (",",))
+    base = open_paren + 1
+    return [(base + a, base + b) for a, b in parts], open_paren
+
+
+def named_args(code, spans):
+    """{name: value_text} for the named arguments among `spans`."""
+    out = {}
+    for start, end in spans:
+        arg = code[start:end].strip()
+        m = re.match(r"^([A-Za-z_]\w*)\s*=(?!=)\s*(.*)$", arg, re.S)
+        if m:
+            out[m.group(1)] = m.group(2).strip()
+    return out
+
+
+def _norm(expr):
+    return re.sub(r"\s+", "", strip_parens(expr))
+
+
+def is_bare_context(expr):
+    """The expression IS the `context` identifier (nothing chained onto it)."""
+    return _norm(expr) in (CONTEXT_TOKEN, CONTEXT_TOKEN + "!!")
+
+
+def local_shadow(code, pos, name=CONTEXT_TOKEN):
+    """A same-named local declared in the enclosing function before `pos`.
+
+    Returns the declaration position, or None. `decl_sites` distinguishes
+    `val/var name =` from a plain assignment, so `context = other` (a mutation
+    of the property, which is a different defect) is not reported here.
+    """
+    span = enclosing_fun(code, pos)
+    if span is None:
         return None
-    d = 0
-    end = brace
-    while end < len(text):
-        c = text[end]
-        if c == "{":
-            d += 1
-        elif c == "}":
-            d -= 1
-            if d == 0:
-                return text[brace + 1:end]
-        end += 1
+    _name, body_start, body_end = span
+    body = code[body_start:body_end]
+    for decl_pos, kind in decl_sites(body, name):
+        if kind in ("decl", "shadow") and body_start + decl_pos <= pos:
+            return body_start + decl_pos
     return None
 
 
-def decl_slice(text, header, limit=400):
-    """The declaration starting at [header], up to the next `fun`/blank line.
+def guaranteed_exit_before(body, limit):
+    """A `return`/`throw` in body[:limit] that ALWAYS runs.
 
-    Works for both `= expression` and `{ … }` bodies (the cache-dir helper is
-    expression-bodied in production)."""
-    i = text.find(header)
-    if i < 0:
-        return None
-    seg = text[i:i + limit]
-    m = re.search(r"\n[ \t]*(?:private |internal |public )?fun\s", seg[1:])
-    if m:
-        seg = seg[:m.start() + 1]
-    return seg
+    "Always" = every enclosing condition folds to a constant True (`if (1 == 1)
+    return`, `if (!false) return`, `while (true)` is *not* handled on purpose:
+    its body is not guaranteed). A feasible-but-not-constant condition
+    (`if (!file.isFile) return null`) is an ordinary guard and stays legal.
+    """
+    spans = stmt_spans(body)
+    for m in re.finditer(r"\b(?:return|throw)\b(@\s*[A-Za-z_]\w*)?", body[:limit]):
+        if m.group(1):
+            continue                      # `return@run` only leaves the lambda
+        pos = m.start()
+        if brace_depth(body, pos) != 0:
+            continue                      # inside a nested block/lambda
+        # The exit must END before the action: `return runCatching { …readText() }`
+        # *contains* its action, it does not precede it.
+        stmt_end = next((b for a, b in spans if a <= pos < b), None)
+        if stmt_end is None or stmt_end > limit:
+            continue
+        conds = enclosing_conditions(body, pos)
+        if all(const_bool(cond) is True for _kind, cond in conds):
+            return True
+    return False
 
 
-def dead_body_reason(body, anchor):
-    """Why the body's [anchor] call cannot run, or None when it can.
+def action_positions(body, patterns):
+    """{(token, pos)} of matches, plus the reachable subset."""
+    all_pos, live_pos = [], []
+    for pat in patterns:
+        for m in re.finditer(re.escape(pat), body):
+            all_pos.append(m.start())
+            if path_feasible(body, m.start()):
+                live_pos.append(m.start())
+    return all_pos, live_pos
 
-    `anchor` is the call that must be REACHED (e.g. `keyFile(`), so a legitimate
-    `if (!file.isFile) return null` *after* it stays green.
+
+def dead_body_reason(body, patterns, verb):
+    """Why the body cannot perform its action, or None when it does.
+
+    [batch7] The judgement moved off "the call token exists somewhere in the
+    body" onto "the call actually runs": (a) at least one match must sit on a
+    reachable path — a constant-false guard wrapping the call (`if (0 == 1)
+    runCatching { …delete() }`) kills it; (b) no always-taken exit may sit in
+    front of it (`if (1 == 1) return null` between `keyFile(` and the read).
     """
     if body is None:
         return "function body not found (fail-closed)"
-    if DEAD_GUARD_RE.search(body):
-        return ("a constant-condition guard (`if (true)` / `if (false)`) makes "
-                "the rest of the body dead")
-    m = re.search(re.escape(anchor), body)
-    if m is None:
-        return "`%s` is absent" % anchor
-    if re.search(r"\b(?:return|throw)\b", body[:m.start()]):
-        return ("an unconditional return/throw short-circuits the body before "
-                "`%s`" % anchor)
+    all_pos, live_pos = action_positions(body, patterns)
+    if not all_pos:
+        return "the body never %ss anything (`%s` absent)" % (verb, "` / `".join(patterns))
+    if not live_pos:
+        return ("the `%s` call only appears inside a branch that can never run "
+                "(a constant-condition guard / dead else)" % patterns[0])
+    first = min(live_pos)
+    if guaranteed_exit_before(body, first):
+        return ("a constant-condition guard makes the body dead before `%s` "
+                "(`if (1 == 1) return` / `if (!false) return`)" % patterns[0])
     return None
-
-
-def call_args(text, anchor, start=0):
-    """Argument list of the FIRST call matching `anchor` at/after `start`.
-
-    Returns (args_list, end_offset) or (None, start) when not found.
-    Parenthesis-balanced; string literals skipped.
-    """
-    i = text.find(anchor, start)
-    if i < 0:
-        return None, start
-    j = i + len(anchor)
-    depth = 1
-    while j < len(text):
-        c = text[j]
-        if c == '"':
-            j += 1
-            while j < len(text) and text[j] != '"':
-                j += 2 if text[j] == "\\" else 1
-        elif c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                break
-        j += 1
-    if depth != 0:
-        return None, i
-    inner = text[i + len(anchor):j]
-    return split_top_level(inner), j
-
-
-def split_top_level(inner):
-    """Split an argument list on top-level commas."""
-    parts, buf, depth = [], [], 0
-    k = 0
-    while k < len(inner):
-        c = inner[k]
-        if c == '"':
-            end = k + 1
-            while end < len(inner) and inner[end] != '"':
-                end += 2 if inner[end] == "\\" else 1
-            buf.append(inner[k:end + 1])
-            k = end + 1
-            continue
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-        if c == "," and depth == 0:
-            parts.append("".join(buf).strip())
-            buf = []
-        else:
-            buf.append(c)
-        k += 1
-    if buf:
-        parts.append("".join(buf).strip())
-    return [p for p in parts if p != ""]
 
 
 def analyse(repo, registry, adapters, cache):
@@ -188,7 +249,11 @@ def analyse(repo, registry, adapters, cache):
     res = []
 
     # ── 1. the sole production call site must forward the Context ──
-    clean = strip_comments(repo)
+    clean = view(repo)
+    if clean is None:
+        res.append(("ProviderRepository has exactly one ModelListProviderRegistry.fetchModels call site",
+                    False, "unparseable Kotlin (fail-closed)", REPO_REL, 0))
+        return res
     count = clean.count(REPO_ANCHOR)
     res.append((
         "ProviderRepository has exactly one ModelListProviderRegistry.fetchModels call site",
@@ -198,38 +263,66 @@ def analyse(repo, registry, adapters, cache):
         clean.count("\n", 0, clean.find(REPO_ANCHOR)) + 1 if count else 0,
     ))
     if count == 1:
-        args, _ = call_args(clean, REPO_ANCHOR)
-        ok = bool(args) and args[-1] == "context"
+        args, open_paren = call_arg_spans(clean, REPO_ANCHOR)
+        line = clean.count("\n", 0, open_paren) + 1
+        last = clean[args[-1][0]:args[-1][1]].strip() if args else None
+        shadow = local_shadow(clean, open_paren)
+        ok = bool(args) and is_bare_context(last) and shadow is None
+        if not args:
+            detail = "argument list unparseable"
+        elif not is_bare_context(last):
+            detail = "last arg `%s` is not the `context` property" % last
+        elif shadow is not None:
+            detail = ("a local `%s` declared at line %d shadows the Context the "
+                      "call site must forward (the call forwards null, every "
+                      "*ModelsApi short-circuits and the whole disk cache dies)"
+                      % (" ".join(clean[shadow:shadow + 40].split("=")[0].split()),
+                         clean.count("\n", 0, shadow) + 1))
+        else:
+            detail = "args=%s" % (args and [clean[a:b].strip() for a, b in args])
         res.append((
             "the production call site forwards `context` as its last argument",
             ok,
-            "args=%s" % (args if args else "unparseable"),
+            detail,
             REPO_REL,
-            clean.count("\n", 0, clean.find(REPO_ANCHOR)) + 1,
+            line,
         ))
 
     # ── 2. the Registry must keep the context parameter and forward it ──
-    clean = strip_comments(registry)
-    sig_ok = re.search(r"\bcontext:\s*android\.content\.Context\??\b", clean) is not None
+    clean = view(registry)
+    if clean is None:
+        res.append(("Registry fetchModels keeps a `context: Context?` parameter",
+                    False, "unparseable Kotlin (fail-closed)", REGISTRY_REL, 0))
+        return res
+    sig_ok = re.search(r"\b" + CONTEXT_TOKEN + r":\s*android\.content\.Context\??\b",
+                       clean) is not None
     res.append((
         "Registry fetchModels keeps a `context: Context?` parameter",
         sig_ok,
         "parameter declaration %s" % ("present" if sig_ok else "MISSING"),
         REGISTRY_REL,
-        clean.count("\n", 0, clean.find("context:")) + 1 if "context:" in clean else 0,
+        clean.count("\n", 0, clean.find(CONTEXT_TOKEN + ":")) + 1
+        if CONTEXT_TOKEN + ":" in clean else 0,
     ))
-    # [wide-1024] The forwarder must hand over the PARAMETER, not a same-named
-    # local. `val context: Context? = null` as the first statement keeps every
-    # `context` spelling in place and forwards null to all five fetchers, which
-    # every *ModelsApi turns into "no cache" (they all short-circuit on
-    # `context != null`) — deep-audit-1020 ISSUE-01 verbatim.
-    reg_fn = fn_block(clean, "suspend fun fetchModels(")
-    shadow = re.search(r"\b(?:val|var)\s+context\b", reg_fn or "")
+    # [wide-1024 / batch7] The forwarder must hand over the PARAMETER, not a
+    # same-named local. `val context: Context? = null` as the first statement
+    # keeps every `context` spelling in place and forwards null to all five
+    # fetchers, which every *ModelsApi turns into "no cache" — deep-audit-1020
+    # ISSUE-01 verbatim. Judged on the function BODY (shared `function_body`),
+    # so a `"/*"` string can no longer swallow the declaration.
+    span = function_body(clean, "fetchModels")
+    reg_fn = clean[span[0]:span[1]] if span else None
+    shadow = None
+    if reg_fn is not None:
+        for pos, kind in decl_sites(reg_fn, CONTEXT_TOKEN):
+            if kind in ("decl", "shadow"):
+                shadow = reg_fn[pos:pos + 48].split("=")[0].strip()
+                break
     res.append((
         "Registry fetchModels forwards the caller's `context` parameter "
         "(nothing shadows it)",
         shadow is None and reg_fn is not None,
-        "shadowing declaration `%s`" % shadow.group(0).strip() if shadow else
+        "shadowing declaration `%s`" % shadow if shadow else
         ("body not found (fail-closed)" if reg_fn is None else "no shadowing local"),
         REGISTRY_REL,
         0,
@@ -238,11 +331,12 @@ def analyse(repo, registry, adapters, cache):
     fwd_sites = 0
     pos = 0
     while True:
-        args, pos = call_args(clean, "provider.fetchModels(", pos)
-        if args is None:
+        args, open_paren = call_arg_spans(clean, "provider.fetchModels(", pos)
+        if not args:
             break
+        pos = open_paren + 1
         fwd_sites += 1
-        if args and args[-1] == "context":
+        if is_bare_context(clean[args[-1][0]:args[-1][1]]):
             fwd += 1
     res.append((
         "Registry forwards `context` to every provider.fetchModels call",
@@ -254,19 +348,35 @@ def analyse(repo, registry, adapters, cache):
 
     # ── 3. every adapter call site must pass `context = context` (or be the
     #       known no-cache XAI site with no argument list) ──
-    clean = strip_comments(adapters)
+    clean = view(adapters)
+    if clean is None:
+        res.append(("every caching adapter passes `context = context` to its ModelsApi",
+                    False, "unparseable Kotlin (fail-closed)", ADAPTERS_REL, 0))
+        return res
     passing, silent, viol = 0, 0, []
     for m in ADAPTER_ANCHOR_RE.finditer(clean):
-        args, _ = call_args(clean, m.group(0), m.start())
-        if args is None:
+        args, open_paren = call_arg_spans(clean, m.group(0), m.start())
+        if open_paren < 0:
             viol.append((m.group(0), "unparseable argument list"))
             continue
-        if ADAPTER_PASS_ARG in args:
-            passing += 1
-        elif not args:
+        if not args:
             silent += 1  # XAI-style no-cache fetcher: accepted
+            continue
+        names = named_args(clean, args)
+        shadow = local_shadow(clean, open_paren)
+        if CONTEXT_TOKEN not in names:
+            viol.append((m.group(0), "args=%s (no `context = context`)"
+                         % [clean[a:b].strip() for a, b in args]))
+        elif not is_bare_context(names[CONTEXT_TOKEN]):
+            viol.append((m.group(0), "passes `context = %s` — not the parameter"
+                         % names[CONTEXT_TOKEN]))
+        elif shadow is not None:
+            viol.append((m.group(0),
+                         "a local `val %s` shadows the parameter at line %d — "
+                         "`context = context` now forwards null"
+                         % (CONTEXT_TOKEN, clean.count("\n", 0, shadow) + 1)))
         else:
-            viol.append((m.group(0), "args=%s (no `context = context`)" % args))
+            passing += 1
     res.append((
         "every caching adapter passes `context = context` to its ModelsApi",
         not viol,
@@ -284,7 +394,11 @@ def analyse(repo, registry, adapters, cache):
     ))
 
     # ── 4. the disk-cache classes must keep their surface ──
-    cache_code = strip_comments(cache)
+    cache_code = view(cache)
+    if cache_code is None:
+        res.append(("cache dir is built from `context.cacheDir`",
+                    False, "unparseable Kotlin (fail-closed)", CACHE_REL, 0))
+        return res
     for needle, crit in (
         ("fun load(", "ProviderModelsCache.load reachable"),
         ("fun save(", "ProviderModelsCache.save reachable"),
@@ -305,20 +419,20 @@ def analyse(repo, registry, adapters, cache):
     # "100% inert"; a body whose first line is `if (true) return` keeps all
     # three names, all three call sites and the whole wiring green while the
     # chain is inert again — 7-day cache never read, 401/403 never swept.
+    # [batch7] …and so does an inert `if (1 == 1) return null` after `keyFile(`,
+    # and an `if (0 == 1)` wrapping the delete.
     for fn, crit, calls, verb in (
-        ("fun load(", "ProviderModelsCache.load actually reads the cached file",
+        ("load", "ProviderModelsCache.load actually reads the cached file",
          READ_CALLS, "read"),
-        ("fun save(", "ProviderModelsCache.save actually writes the cache file",
+        ("save", "ProviderModelsCache.save actually writes the cache file",
          WRITE_CALLS, "write"),
-        ("fun invalidate(", "ProviderModelsCache.invalidate actually deletes the cache file",
-         (".delete(",), "delete"),
+        ("invalidate", "ProviderModelsCache.invalidate actually deletes the cache file",
+         DELETE_CALLS, "delete"),
     ):
-        body = fn_block(cache_code, fn)
-        reason = dead_body_reason(body, "keyFile(")
-        if reason is None and not any(tok in body for tok in calls):
-            reason = "the body never %ss anything (`%s` absent)" % (
-                verb, "` / `".join(calls))
-        if reason is None and "keyFile(context," not in body:
+        span = function_body(cache_code, fn)
+        body = cache_code[span[0]:span[1]] if span else None
+        reason = dead_body_reason(body, calls, verb)
+        if reason is None and "keyFile(" + CONTEXT_TOKEN + "," not in body:
             reason = ("the cache file is not keyed under the caller's context "
                       "(`keyFile(context, …)` absent)")
         res.append((
@@ -329,7 +443,8 @@ def analyse(repo, registry, adapters, cache):
             0,
         ))
 
-    cachedir = decl_slice(cache_code, "fun cacheDir(")
+    span = function_body(cache_code, "cacheDir")
+    cachedir = cache_code[span[0]:span[1]] if span else None
     res.append((
         "cache dir is built from `context.cacheDir`",
         cachedir is not None and "context.cacheDir" in cachedir,
@@ -454,6 +569,44 @@ _breaker(8, "cache", [(
     "    fun invalidate(context: android.content.Context, key: String) {\n        if (true) return\n")],
          "ProviderModelsCache.invalidate actually deletes the cache file")
 
+# ── batch7 witnesses (§3 of the task book) ──────────────────────────────────
+# 08-1 (dataflow): the shadow moves one hop UP the chain — the call site keeps
+# its `context` spelling and forwards the local.
+_breaker(9, "repo", [(
+    "            ModelListProviderRegistry.fetchModels(",
+    "            val context: android.content.Context? = null\n"
+    "            ModelListProviderRegistry.fetchModels(")],
+         "the production call site forwards `context` as its last argument")
+# 08-2 (dataflow): the shadow moves one hop DOWN the chain — the adapter keeps
+# the `context = context` spelling and forwards the local.
+_breaker(10, "adapters", [(
+    "    fun c() = OpenAIModelsApi.fetchModels(",
+    "    fun c() { val context: Any? = null; OpenAIModelsApi.fetchModels(x, y, z, f, context = context) }\n"
+    "    fun _c() = OpenAIModelsApi.fetchModels(")],
+         "every caching adapter passes `context = context` to its ModelsApi")
+# 08-3 (parser-death): `"/*"` … `"*/"` swallows the shadow for a
+# non-string-aware comment stripper.
+_breaker(11, "registry", [(
+    "        if (apiKey == null) return",
+    '        val _c1 = "/*"; val context: android.content.Context? = null; val _c2 = "*/"\n'
+    "        if (apiKey == null) return")],
+         "Registry fetchModels forwards the caller's `context` parameter "
+         "(nothing shadows it)")
+# 08-4 (family-hole): an always-true guard spelled with an arithmetic identity,
+# placed AFTER the `keyFile(` anchor so a "return before the anchor" scan misses
+# it.
+_breaker(12, "cache", [(
+    "        val file = keyFile(context, key)\n        if (!file.isFile) return null\n",
+    "        val file = keyFile(context, key)\n        if (1 == 1) return null\n"
+    "        if (!file.isFile) return null\n")],
+         "ProviderModelsCache.load actually reads the cached file")
+# 08-5 (family-hole): the delete is not returned-around, it is wrapped in an
+# always-false branch — no `return`, no `true`/`false` literal.
+_breaker(13, "cache", [(
+    "        runCatching { keyFile(context, key).delete() }\n",
+    "        if (0 == 1) runCatching { keyFile(context, key).delete() }\n")],
+         "ProviderModelsCache.invalidate actually deletes the cache file")
+
 
 def selftest():
     print("── selftest: compliant fixture must be green, each breaker must go red ──")
@@ -488,8 +641,9 @@ def selftest():
             failures.append("breaker %d did not turn %r red (red=%s)" % (idx, spec["target"], red))
             print("  [FAIL] breaker %d -> %r stayed green (red=%s)" % (idx, spec["target"], red))
         else:
+            detail = dict((c, d) for c, ok, d, _, _ in res if not ok)[spec["target"]]
             extra = "" if len(red) == 1 else " (+%d side)" % (len(red) - 1)
-            print("  [OK] breaker %d -> red on %r%s" % (idx, spec["target"], extra))
+            print("  [OK] breaker %d -> red on %r%s — %s" % (idx, spec["target"], extra, detail[:90]))
     return failures
 
 
