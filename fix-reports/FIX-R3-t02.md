@@ -117,7 +117,30 @@
 
 ## 6. CI
 
-（待回填：run id / job id / attempt / head_sha / 关键日志行）
+分支 `fix/r3-preview-asset`（`on: push` 只绑 main ⇒ 手动 dispatch）：
+
+| 项 | 值 |
+|---|---|
+| run | **#2745** / id `40316453439` / attempt 1 / **success** |
+| job | `121550152584` |
+| head_sha | `e66acd2355fa75b724c65ca8b1ceecaa6680bb67`（与本地 HEAD 逐字符一致） |
+| 步态 | 26 步，唯一非 success = step 23 `Publish to Releases` **skipped**（main 门控，符合预期） |
+| 日志 | 1,486,978 B / NUL 0 |
+
+逐条核过的读数：
+
+- `Summary: 112 passed, 0 failed` —— **恰 1 次**
+- `ALL 344 CASES PASS` —— **恰 1 次**（全量夹具在 CI 里真跑，补上本地 R5 缺口）
+- `^\s*e: ` —— **0 行**
+- 含 `FAILED` 的 6 行逐条确认全是 **PASSED 用例名的子串**
+  （`RealAgentAdapterSkeletonTest > slot denied produces FAILED …`、
+  `ChatAgentTraceObserverSchemaTest > phase FAILED maps to Failed PASSED` 等）
+- 三个门的新自测标记各 **恰 1 次** 出现 ⇒ 新臂在 CI 里有见证：
+  `FILE_PREVIEW_URL_ENCODE_SELFTEST`（17 arms）· `FILEPREVIEW_PRINT_BOUNDED_SELFTEST` ·
+  `WEBAPP_ASSET_URL_CLEANUP_SELFTEST`（18 arms）
+
+**分支 CI 绿 = 停止节点**，未合并 main。报告回填提交后源码树与绿 sha 等价：
+`git diff --name-only e66acd235..HEAD -- . ':(exclude)fix-reports'` = 0 行。
 
 ## 7. 残留（每条带 触发条件 · 触发后方案 · 搁置理由）
 
