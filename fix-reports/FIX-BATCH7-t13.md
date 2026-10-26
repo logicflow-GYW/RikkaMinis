@@ -139,7 +139,25 @@ BY VALUE、03-3 lock-holding call、03-4 注解拼写、03-5 锁块保护力、0
 
 ## 5. CI 读数
 
-（待回填）
+**run `40274349322` / #2723 / job `121413793062` / attempt 1 · success**（workflow_dispatch），
+head_sha `8c95fd6ca` 与门提交**逐字符一致**。日志 1,486,628 B，NUL 0。26 步唯一
+非 success = step 23 Publish to Releases **skipped**（main 门控，预期）。
+
+| 判读项 | 读数 | 判定 |
+|---|---|---|
+| `Summary: 112 passed, 0 failed` | 恰 1 | ✅ |
+| `ALL 344 CASES PASS` | 恰 1 | ✅ |
+| 门头 `[N/112]` | 112 个互异编号（1..112） | ✅ |
+| `^ *e: ` 编译错误 | 0 | ✅ |
+| 含 `FAILED` 的行 | 6 行，**全部以 PASSED 结尾**（用例名子串） | ✅ |
+| calendar selftest 有牙 | `selftest has teeth (ALL ARMS MATCH)` 恰 1 | ✅ |
+| calendar 真树 | `real tree green` 恰 1 | ✅ |
+| router selftest 有牙 | `selftest has teeth (ROUTER_LOCK_SELFTEST=PASS)` 恰 1 | ✅ |
+| router 真树 | `real tree green` 恰 1 | ✅ |
+| `STORE_LOCK_CRITERIA=PASS` | CI 日志 0 命中 | 已知残留（门自证 stdout 不进 CI 日志，见 §6 R13；CI 可见的见证是上面两行 teeth） |
+
+CI 后 `git diff --name-only 8c95fd6ca..HEAD -- . ':(exclude)fix-reports'` = **0**
+（源码树与 CI 绿 sha 等价，后置提交纯报告）。
 
 ---
 
