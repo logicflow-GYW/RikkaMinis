@@ -50,7 +50,25 @@ import shutil
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import _kotlin_ast as kast                                              # noqa: E402
+from _kotlin_lexer import KotlinLexError                                # noqa: E402
+from _kotlin_valueflow import (                                         # noqa: E402
+    call_args,
+    code_view,
+    contains_ident,
+    expr_end,
+    literal_view,
+    value_sources,
+)
+
 SRC_SUBDIR = "src/android/app/src/main/java"
+
+# [R3-t11] Arm tally for the registration marker the main session greps for.
+# Every assertion a --selftest run makes is counted once, so the printed count
+# cannot drift away from the arms that actually ran.
+_ARM_COUNT = [0]
 
 # name -> why the returned value must be consumed
 WATCHLIST = {
@@ -137,7 +155,8 @@ def scan(root):
             path = os.path.join(dirpath, name)
             rel = os.path.relpath(path, root)
             with open(path, encoding="utf-8", errors="replace") as fh:
-                lines = fh.read().split("\n")
+                src = fh.read()
+            lines = src.split("\n")
             for i, line in enumerate(lines):
                 if _DECL.match(line) or _COMMENT.match(line):
                     continue
@@ -150,7 +169,95 @@ def scan(root):
                     if EXEMPT in line or (i > 0 and EXEMPT in lines[i - 1]):
                         continue
                     violations.append((rel, i + 1, line.strip()[:80], fn, why))
+            violations.extend(_scan_bound_locals(rel, src))
     return violations
+
+# ─────────────────────────────────────────────────────────────────────────
+# [R3-t11 W-D] 绑定型丢弃：`val ignored = <watchlisted call>(…)`
+#
+# The line-anchored scanner above only sees a call written in STATEMENT
+# position. Bind it to a local and it disappears: the declaration makes the
+# value look consumed, and nothing looks at whether that local is ever read.
+# That is the exact regression shape the third-round witness used —
+#
+#     val ignoredAttempt =
+#         ProviderHealthTracker.recordFirstToken(it, ms())
+#
+# — which keeps every name the gate greps for, compiles, and records nothing:
+# `finish()` still sees the `begin()` attempt with `firstTokenMs == null`, so
+# recordedTtfbs()/ttfbP50/P95 stay empty forever.
+#
+# The criterion asks the dataflow question instead of the spelling one: the
+# local a watchlisted result is bound to must be CONSUMED — read somewhere that
+# is not a log line (a log line cannot carry the value into state), and not
+# disposed of by a `when` subject it is destructured on. A `when (val x = …)`
+# subject is consumed by its own branches, which is why that shape stays green.
+# ─────────────────────────────────────────────────────────────────────────
+
+_BOUND_DECL = re.compile(
+    r"(?m)^[ \t]*(?:val|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=\n]+)?=(?!=)"
+)
+_LOG_STMT = re.compile(
+    r"^[ \t]*(?:AppLogger\.|Log\.[a-z]|android\.util\.Log\.|println\b|print\b|"
+    r"System\.(?:out|err)\b|logger\b|debugLog\b)"
+)
+_WHEN_SUBJECT_BEFORE = re.compile(r"when\s*\(\s*$")
+
+def _call_in(expr, fn):
+    """fn(…) appears anywhere in [expr], as a call (receiver optional)."""
+    return re.search(
+        r"(?<![\w`])(?:[A-Za-z_][A-Za-z0-9_]*\s*\??\.\s*)*" + re.escape(fn) + r"\s*\(", expr
+    ) is not None
+
+def _stmt_head_at(text, pos):
+    """Statement head text for the statement containing [pos] (literal view)."""
+    line_start = text.rfind("\n", 0, pos) + 1
+    return text[line_start:pos]
+
+def _scan_bound_locals(rel, src):
+    """Watchlisted results bound to a local that is never consumed."""
+    out = []
+    try:
+        code = code_only(src)
+        lits = _literal_only(src)
+    except KotlinLexError as exc:
+        return [(rel, 0, "", "watchlist", "Kotlin 解析失败（fail-closed）: %s" % exc)]
+    for m in _BOUND_DECL.finditer(code):
+        local = m.group(1)
+        value_end = expr_end(code, m.end())
+        value = code[m.end():value_end]
+        if not value.strip():
+            continue
+        hit = next((fn for fn in WATCHLIST if _call_in(value, fn)), None)
+        if hit is None:
+            continue
+        # `record-ok:` on the declaration line (or the line above) exempts it.
+        line_no = code.count("\n", 0, m.start()) + 1
+        raw_lines = src.split("\n")
+        if (EXEMPT in raw_lines[line_no - 1]
+                or (line_no > 1 and EXEMPT in raw_lines[line_no - 2])):
+            continue
+        # A `when (val x = …)` subject is consumed by the branches themselves.
+        # The `when (` may sit on the previous line (`return when (` + newline +
+        # indented `val x = …`), so look back over whitespace, not just the head
+        # of this one line.
+        if _WHEN_SUBJECT_BEFORE.search(code[:m.start()].rstrip()):
+            continue
+        reads = [r for r in re.finditer(
+            r"(?<![\w`])" + re.escape(local) + r"(?![\w`])", lits) if r.start() >= value_end]
+        consumed = [r for r in reads
+                    if not _LOG_STMT.match(_stmt_head_at(lits, r.start()))]
+        if consumed:
+            continue
+        snippet = value.strip().split("\n")[0][:80]
+        if reads:
+            why = ("%s: 返回值被绑定到 `val %s`，但该局部**只被日志读取**——日志不会把值"
+                   "写回状态，效果等同于丢弃（W-D）" % (hit, local))
+        else:
+            why = ("%s: 返回值被绑定到 `val %s`，但该局部**从未被读取**——死绑定等同于"
+                   "语句位置丢弃（W-D）" % (hit, local))
+        out.append((rel, line_no, snippet, hit, why))
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -177,65 +284,22 @@ def scan(root):
 QI_FILE = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatQueueInterruption.kt"
 
 def code_only(text):
-    """Blank comments and string-literal contents (spaces keep line/col).
+    """结构通道：注释 + 字符串/字符字面量内部抹成空格，**长度与源码严格相等**。
 
-    Braces inside strings (JSON builders, string templates) are blanked too,
-    so block extraction only sees real code. Handles escapes, char literals
-    and triple-quoted raw strings.
+    [R3-t11] 改走共享词法器 [_kotlin_lexer.mask_code]（与全仓门同一状态机）：
+    自写版本在嵌套块注释、单引号字符字面量、三引号原始字符串、`${...}` 嵌套
+    插值上系统性失明（parser-death 轴），而本门的判据全部依赖括号/花括号配平
+    与切片位置。解析失败抛 [KotlinLexError]，调用方必须 fail-closed 报违规，
+    **不许**回退成原文扫描。
     """
-    out = []
-    i = 0
-    n = len(text)
-    while i < n:
-        ch = text[i]
-        nxt = text[i + 1] if i + 1 < n else ""
-        if ch == "/" and nxt == "/":
-            j = text.find("\n", i)
-            j = n if j < 0 else j
-            out.append(" " * (j - i))
-            i = j
-            continue
-        if ch == "/" and nxt == "*":
-            j = text.find("*/", i + 2)
-            j = n if j < 0 else j + 2
-            seg = text[i:j]
-            out.append("".join(c if c == "\n" else " " for c in seg))
-            i = j
-            continue
-        if ch == '"':
-            if text[i:i + 3] == '"""':
-                j = text.find('"""', i + 3)
-                j = n if j < 0 else j + 3
-            else:
-                j = i + 1
-                while j < n:
-                    if text[j] == "\\":
-                        j += 2
-                        continue
-                    if text[j] in ('"', "\n"):
-                        j += 1
-                        break
-                    j += 1
-            seg = text[i:j]
-            out.append("".join(c if c == "\n" else " " for c in seg))
-            i = j
-            continue
-        if ch == "'":
-            j = i + 1
-            while j < n:
-                if text[j] == "\\":
-                    j += 2
-                    continue
-                if text[j] in ("'", "\n"):
-                    j += 1
-                    break
-                j += 1
-            out.append(" " * (j - i))
-            i = j
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
+    return code_view(text)
+
+def _literal_only(text):
+    """字面量通道：只剥注释、保留字符串内容（读 `role = "user"` 这类字面量用）。
+
+    与 [code_only] 同样等长，因此位置可以互相回投。
+    """
+    return literal_view(text)
 
 def extract_block(lines, sig_re):
     """Brace-matched block for the first line matching sig_re.
@@ -310,51 +374,191 @@ def _arrow_arms(block):
     return out
 
 
+QUEUE_CONSUMERS = ("drainQueuedPrompts", "injectQueuedPromptsAsNewTurn")
+
+def _named_arg(span, name):
+    """Value text of the named argument `name = …` inside a call span.
+
+    [R3-t11] `dbMessageId = null` and `id = userEntity.id` are ARGUMENTS, so a
+    substring test on the whole call cannot tell one spelling from the other.
+    Reading the argument's own value text is what makes the criteria ask about
+    the value that is handed over, not about a name that appears nearby. Pass
+    the LITERAL view (`role = "user"`) or the code view (numbers, calls).
+    """
+    if "(" not in span:
+        return None
+    open_pos = span.index("(")
+    close = kast.match_bracket(span, open_pos)
+    if close < 0:
+        return None
+    inner = span[open_pos + 1:close]
+    for a, b in kast.split_top(inner, (",",)):
+        seg = inner[a:b]
+        m = re.match(r"\s*" + re.escape(name) + r"\s*=(?!=)", seg)
+        if m:
+            return seg[m.end():].strip()
+    return None
+
+def _call_spans(text, name):
+    """[(open_paren_pos, end_exclusive)] for every `name(` call, or None if a
+    call cannot be bracket-matched (fail-closed: the caller must red)."""
+    out = []
+    for m in re.finditer(r"(?<![\w`])" + re.escape(name) + r"\s*\(", text):
+        close = kast.match_bracket(text, m.end() - 1)
+        if close < 0:
+            return None
+        out.append((m.end() - 1, close + 1))
+    return out
+
+def _persist_binding(fbody):
+    """('bound', name) / ('discarded', None) / ('absent', None)."""
+    m = re.search(r"val\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*chatRepository\.appendMessage\s*\(", fbody)
+    if m:
+        return "bound", m.group(1)
+    if re.search(r"chatRepository\.appendMessage\s*\(", fbody):
+        return "discarded", None
+    return "absent", None
+
+def _flow_has_persisted_id(expr, bind):
+    """Does [expr] evaluate to (or carry) `<bind>.id` rather than a literal?
+
+    `dbMessageId = null` / `id = "queued_msg_1"` fail the constant test; a value
+    that reaches the argument through an elvis / `if` / `let` tail passes only
+    if one of its real sources is the persisted row's id.
+    """
+    if expr is None:
+        return False
+    if kast.const_value(expr) is not None:
+        return False
+    pat = r"(?<![\w`.])" + re.escape(bind) + r"\s*\.\s*id\b"
+    return any(re.search(pat, src or "") for src in value_sources(expr))
+
+def _appended_bubbles(fbody, lbody):
+    """[(id_expr, role_expr)] for bubbles that actually reach `_messages.value`.
+
+    Two shapes ship side by side: an inline `+ ChatMessage(…)` (the drain) and a
+    hoisted `val queuedUserMsg = ChatMessage(…)` that the append then adds (the
+    inject path). A criterion that only knew the inline shape would pass the
+    second consumer no matter what the bubble carried, so the local-binding hop
+    is resolved here. Returns None when a construct cannot be bracket-matched.
+    """
+    hoisted = {}
+    for m in re.finditer(r"val\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*ChatMessage\s*\(", fbody):
+        open_pos = m.end() - 1
+        close = kast.match_bracket(fbody, open_pos)
+        if close < 0:
+            return None
+        hoisted[m.group(1)] = (_named_arg(lbody[open_pos:close + 1], "id"),
+                               _named_arg(lbody[open_pos:close + 1], "role"))
+    bubbles = []
+    for m in re.finditer(r"_messages\.value\s*=\s*_messages\.value\s*\+", fbody):
+        stop = expr_end(fbody, m.end())
+        rhs = fbody[m.end():stop]
+        spans = _call_spans(rhs, "ChatMessage")
+        if spans is None:
+            return None
+        for open_pos, close in spans:
+            abs_open = m.end() + open_pos
+            bubbles.append((_named_arg(lbody[abs_open:m.end() + close], "id"),
+                            _named_arg(lbody[abs_open:m.end() + close], "role")))
+        for name, bubble in hoisted.items():
+            # Count EVERY mention: an append that adds the same bubble twice is
+            # two rows on screen for one persisted row (the duplicate the drain
+            # fix removed), so one mention must not stand in for the count.
+            n = len(re.findall(r"(?<![\w`.])" + re.escape(name) + r"(?![\w`])", rhs))
+            bubbles.extend([bubble] * n)
+    return bubbles
+
 def scan_queue_drain(root):
     findings = []
     path = os.path.join(root, QI_FILE)
     if not os.path.exists(path):
         return findings
-    code = code_only(open(path, encoding="utf-8", errors="replace").read())
+    src = open(path, encoding="utf-8", errors="replace").read()
+    try:
+        code = code_only(src)
+        lits = _literal_only(src)
+    except KotlinLexError as exc:
+        return ["ChatQueueInterruption.kt:?  [B-04] Kotlin 解析失败（fail-closed）: %s" % exc]
     lines = code.split("\n")
+    lit_lines = lits.split("\n")
 
     def body(sig_re):
         i0, i1 = extract_block(lines, sig_re)
         if i0 < 0:
             return None
-        return (i0, i1, "\n".join(lines[i0:i1 + 1]))
+        return (i0, i1, "\n".join(lines[i0:i1 + 1]), "\n".join(lit_lines[i0:i1 + 1]))
 
-    drain = body(re.compile(r"suspend fun ChatViewModel\.drainQueuedPrompts\s*\("))
-    inject = body(re.compile(r"suspend fun ChatViewModel\.injectQueuedPromptsAsNewTurn\s*\("))
+    bodies = {
+        "drainQueuedPrompts": body(re.compile(r"suspend fun ChatViewModel\.drainQueuedPrompts\s*\(")),
+        "injectQueuedPromptsAsNewTurn": body(
+            re.compile(r"suspend fun ChatViewModel\.injectQueuedPromptsAsNewTurn\s*\(")),
+    }
 
-    # D1: bind + dbMessageId in the drain
-    if drain is None:
-        findings.append(
-            "ChatQueueInterruption.kt:?  [B-04 D1] drainQueuedPrompts body NOT FOUND (fail-closed)"
-        )
-    else:
-        d0, d1, dbody = drain
-        if not re.search(r"val\s+userEntity\s*=\s*chatRepository\.appendMessage\s*\(", dbody):
+    # D1: bind + the id must FLOW into the agentHistory entry — graded on BOTH
+    # queue consumers. [R3-t11] It used to be anchored on `drainQueuedPrompts`
+    # alone, so the twin consumer could hand the loop a `dbMessageId = null`
+    # turn. That twin is where a message queued during a long TOOL CALL lands
+    # (the loop-end drain is the no-tool path), i.e. the common one.
+    for label in QUEUE_CONSUMERS:
+        fn = bodies[label]
+        if fn is None:
             findings.append(
-                "ChatQueueInterruption.kt:%d  [B-04 D1] drainQueuedPrompts discards "
-                "appendMessage's MessageEntity again — the merged row's DB id never "
-                "reaches the UI bubble / agentHistory / compaction anchors" % (d0 + 1)
+                "ChatQueueInterruption.kt:?  [B-04 D1] %s body NOT FOUND (fail-closed)" % label
             )
-        elif not re.search(r"dbMessageId\s*=\s*userEntity\.id", dbody):
+            continue
+        i0, _i1, fbody, lfbody = fn
+        kind, bind = _persist_binding(fbody)
+        if kind == "absent":
             findings.append(
-                "ChatQueueInterruption.kt:%d  [B-04 D1] the bound userEntity.id does not "
-                "flow into the agentHistory entry (dbMessageId = userEntity.id missing) — "
-                "the compaction anchors skip this turn" % (d0 + 1)
+                "ChatQueueInterruption.kt:%d  [B-04 D1] %s lost the appendMessage persist "
+                "entirely — the queued turn never reaches the DB" % (i0 + 1, label)
             )
+            continue
+        if kind == "discarded":
+            findings.append(
+                "ChatQueueInterruption.kt:%d  [B-04 D1] %s discards appendMessage's MessageEntity "
+                "again — the merged row's DB id never reaches the UI bubble / agentHistory / "
+                "compaction anchors" % (i0 + 1, label)
+            )
+            continue
+        msgs = _call_spans(fbody, "LLMMessage")
+        if msgs is None:
+            findings.append(
+                "ChatQueueInterruption.kt:%d  [B-04 D1] %s: LLMMessage( … ) unbalanced — "
+                "fail-closed" % (i0 + 1, label)
+            )
+            continue
+        user_msgs = []
+        for open_pos, close in msgs:
+            role = _named_arg(lfbody[open_pos:close], "role")
+            if role and "Role.USER" in role:
+                user_msgs.append((open_pos, close))
+        if not user_msgs:
+            findings.append(
+                "ChatQueueInterruption.kt:%d  [B-04 D1] %s no longer appends a "
+                "LLMMessage(role = USER) to agentHistory — the queued turn never reaches the "
+                "loop" % (i0 + 1, label)
+            )
+            continue
+        for open_pos, close in user_msgs:
+            expr = _named_arg(lfbody[open_pos:close], "dbMessageId")
+            if not _flow_has_persisted_id(expr, bind):
+                findings.append(
+                    "ChatQueueInterruption.kt:%d  [B-04 D1] %s: the bound %s.id does not flow into "
+                    "the agentHistory entry (dbMessageId = %s) — the compaction anchors skip this "
+                    "turn" % (i0 + 1, label, bind, (expr or "<missing>")[:40])
+                )
 
     # D2: empty-content guard before persist, both consumers
-    for label, fn in (("drainQueuedPrompts", drain), ("injectQueuedPromptsAsNewTurn", inject)):
+    for label in QUEUE_CONSUMERS:
+        fn = bodies[label]
         if fn is None:
             findings.append(
                 "ChatQueueInterruption.kt:?  [B-04 D2] %s body NOT FOUND (fail-closed)" % label
             )
             continue
-        i0, i1, fbody = fn
+        i0, i1, fbody, _l = fn
         guard = re.search(r"if\s*\(\s*combinedParts\.isEmpty\(\)\s*\)", fbody)
         persist = re.search(r"chatRepository\.appendMessage\s*\(", fbody)
         if not guard or not persist:
@@ -375,46 +579,63 @@ def scan_queue_drain(root):
             after = fbody[guard.end():]
             stripped = after.lstrip()
             if stripped.startswith("{"):
-                body = _brace_block(after, after.index("{"))
+                blk = _brace_block(after, after.index("{"))
             else:
-                body = after.split("\n", 1)[0]
-            if body is None or not re.search(r"\b(return|throw)\b", body):
+                blk = after.split("\n", 1)[0]
+            if blk is None or not re.search(r"\b(return|throw)\b", blk):
                 findings.append(
                     "ChatQueueInterruption.kt:%d  [B-04 D2] %s's combinedParts.isEmpty() guard "
                     "does not TERMINATE — control falls through to appendMessage, so an empty "
                     "user row is persisted and every provider answers 400" % (i0 + 1, label)
                 )
 
-    # D3: placeholders removed + exactly one merged bubble with the persisted id
-    if drain is None:
-        findings.append(
-            "ChatQueueInterruption.kt:?  [B-04 D3] drainQueuedPrompts body NOT FOUND (fail-closed)"
-        )
-    else:
-        d0, d1, dbody = drain
-        if "removeQueuedPlaceholders(queuedIds)" not in dbody:
+    # D3: placeholders removed + exactly ONE user bubble carrying the persisted
+    # id — graded on BOTH queue consumers (same seam as D1: the inject path
+    # appends its own bubble, so a kept placeholder duplicates the row on screen
+    # and a bubble without the persisted id resolves a phantom row on retry).
+    for label in QUEUE_CONSUMERS:
+        fn = bodies[label]
+        if fn is None:
             findings.append(
-                "ChatQueueInterruption.kt:%d  [B-04 D3] drainQueuedPrompts no longer drops the "
-                "placeholder bubbles through the single funnel — the screen keeps N rows where "
-                "the DB has 1 and the retry/edit cutoff counts disagree" % (d0 + 1)
+                "ChatQueueInterruption.kt:?  [B-04 D3] %s body NOT FOUND (fail-closed)" % label
             )
-        bubble = re.search(r"_messages\.value\s*=\s*_messages\.value\s*\+\s*ChatMessage\(", dbody)
-        if not bubble:
+            continue
+        i0, _i1, fbody, lfbody = fn
+        if not re.search(r"removeQueuedPlaceholders\s*\(", fbody):
             findings.append(
-                "ChatQueueInterruption.kt:%d  [B-04 D3] drainQueuedPrompts does not append the "
-                "merged user bubble — the persisted turn vanishes from the screen" % (d0 + 1)
+                "ChatQueueInterruption.kt:%d  [B-04 D3] %s no longer drops the placeholder "
+                "bubbles through the single funnel — the screen keeps N rows where the DB has 1 "
+                "and the retry/edit cutoff counts disagree" % (i0 + 1, label)
             )
-        elif not re.search(r"id\s*=\s*userEntity\.id", dbody):
+        kind, bind = _persist_binding(fbody)
+        if kind != "bound":
+            continue
+        bubbles = _appended_bubbles(fbody, lfbody)
+        if bubbles is None:
             findings.append(
-                "ChatQueueInterruption.kt:%d  [B-04 D3] the merged bubble does not carry the "
-                "persisted id (id = userEntity.id) — retry/edit resolve a phantom row" % (d0 + 1)
+                "ChatQueueInterruption.kt:%d  [B-04 D3] %s: ChatMessage( … ) unbalanced — "
+                "fail-closed" % (i0 + 1, label)
             )
-        n_bubbles = len(re.findall(r"_messages\.value\s*=\s*_messages\.value\s*\+\s*ChatMessage\(", dbody))
-        if n_bubbles > 1:
+            continue
+        user_bubbles = [b for b in bubbles if b[1] and '"user"' in b[1]]
+        if not user_bubbles:
             findings.append(
-                "ChatQueueInterruption.kt:%d  [B-04 D3] drainQueuedPrompts appends %d user "
-                "bubbles for ONE persisted row — the placeholder rows must be REMOVED, not "
-                "kept beside the merged bubble" % (d0 + 1, n_bubbles)
+                "ChatQueueInterruption.kt:%d  [B-04 D3] %s does not append the merged user "
+                "bubble — the persisted turn vanishes from the screen" % (i0 + 1, label)
+            )
+            continue
+        for id_expr, _role in user_bubbles:
+            if not _flow_has_persisted_id(id_expr, bind):
+                findings.append(
+                    "ChatQueueInterruption.kt:%d  [B-04 D3] %s: the merged bubble does not carry "
+                    "the persisted id (id = %s) — retry/edit resolve a phantom row"
+                    % (i0 + 1, label, (id_expr or "<missing>")[:40])
+                )
+        if len(user_bubbles) > 1:
+            findings.append(
+                "ChatQueueInterruption.kt:%d  [B-04 D3] %s appends %d user bubbles for ONE "
+                "persisted row — the placeholder rows must be REMOVED, not kept beside the merged "
+                "bubble" % (i0 + 1, label, len(user_bubbles))
             )
     return findings
 
@@ -588,6 +809,71 @@ def _admission_gate_gaps(branch):
     ]
 
 
+def _attach_credit_gaps(branch, line):
+    """[R3-t11 S2d] The AMOUNT credited must be the amount that was admitted.
+
+    The branch used to be graded on three names and their ORDER, so
+    `stagedBytes.credit(0L)` — or any literal, or any other binding — kept the
+    ledger at zero forever while the criteria stayed green. `admitAttachText`
+    then always saw `current() == 0`, so `RejectedCumulative` (the 500 MB cap)
+    stopped bounding text attachments entirely. Grade the value: the credited
+    expression must share a value source with the admitted byte count, and a
+    literal constant cannot (nothing was measured).
+    """
+    gaps = []
+    am = re.search(r"admitAttachText\s*\(", branch)
+    cm = re.search(r"stagedBytes\.credit\s*\(", branch)
+    if not am or not cm:
+        return gaps
+    aargs = call_args(branch, branch.index("(", am.start()))
+    cargs = call_args(branch, branch.index("(", cm.start()))
+    if not aargs or not cargs:
+        return ["%s:%d  [A-07 S2] admitAttachText(…) / credit(…) 的实参无法配平（fail-closed）"
+                % (SHARE_FILE, line)]
+    admitted = branch[aargs[0][0]:aargs[0][1]].strip()
+    credited = branch[cargs[0][0]:cargs[0][1]].strip()
+    if kast.const_value(credited) is not None:
+        gaps.append(
+            "%s:%d  [A-07 S2] the AttachText branch credits a CONSTANT (`credit(%s)`) instead of "
+            "the admitted byte count — the ledger stays at whatever the literal says, so "
+            "`admitAttachText` reads a current() that never grows and the cumulative cap stops "
+            "bounding text shares" % (SHARE_FILE, line, credited)
+        )
+        return gaps
+    src_credited = set(x.strip() for x in value_sources(credited))
+    src_admitted = set(x.strip() for x in value_sources(admitted))
+    if not (src_credited & src_admitted):
+        gaps.append(
+            "%s:%d  [A-07 S2] the AttachText branch credits `%s` but admitted `%s` — the amount "
+            "written back to the ledger is not the amount that was bounded"
+            % (SHARE_FILE, line, credited[:40], admitted[:40])
+        )
+    return gaps
+
+def _ledger_credit_lands(lcode):
+    """[R3-t11 S2e] `credit(bytes)` must actually add its parameter."""
+    m = re.search(r"fun\s+credit\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", lcode)
+    if not m:
+        return False, "`fun credit(<bytes>: …)` 签名不见了（fail-closed，重锚此判据）"
+    param = m.group(1)
+    open_brace = lcode.find("{", m.end())
+    if open_brace < 0:
+        return False, "`credit(%s)` 没有块体（fail-closed）" % param
+    blk = _brace_block(lcode, open_brace)
+    if blk is None:
+        return False, "`credit(%s)` 块体不配平（fail-closed）" % param
+    for am in re.finditer(r"addAndGet\s*\(", blk):
+        args = call_args(blk, am.end() - 1)
+        if not args:
+            continue
+        arg = blk[args[0][0]:args[0][1]].strip()
+        if kast.const_value(arg) is not None:
+            continue
+        if any(contains_ident(src, param) for src in value_sources(arg)):
+            return True, ""
+    return False, ("`credit(%s)` 没有把实参加进账本（addAndGet 的入参不含 %s）——记账恒为零，"
+                   "累计上限对文本附件失效" % (param, param))
+
 def scan_staged_bytes(root):
     findings = []
     base = os.path.join(root, SRC_SUBDIR, "com", "rikkaminis", "app")
@@ -705,6 +991,8 @@ def scan_staged_bytes(root):
                         "write — a failed write would leave phantom bytes counted against the cap"
                         % (SHARE_FILE, i0 + 1)
                     )
+                if credit and admit:
+                    findings.extend(_attach_credit_gaps(branch, i0 + 1))
 
     # S2b: the admission core itself must exist with the strict > shape.
     if not os.path.isfile(ledger_path):
@@ -725,6 +1013,9 @@ def scan_staged_bytes(root):
         #   B: set(total.addAndGet(-bytes).coerceAtLeast(0L))     (one-line set)
         idiom_a = re.search(r"updateAndGet\s*\{[^{}]*coerceAtLeast\s*\(\s*0", lcode)
         idiom_b = re.search(r"\.set\s*\([^()]*addAndGet\s*\(\s*-[^()]*\)[^()]*coerceAtLeast\s*\(\s*0", lcode)
+        lands, why_not = _ledger_credit_lands(lcode)
+        if not lands:
+            findings.append("%s:?  [A-07 S2] %s" % (LEDGER_FILE, why_not))
         if not (idiom_a or idiom_b):
             findings.append(
                 "%s:?  [A-07 S1] StagedBytesLedger.debit lost the clamp-inside-the-write "
@@ -1094,6 +1385,9 @@ FIXTURE_LINES = [
     "        consume(list.map {",
     "            %s.recordFirstToken(it, ms())" % _Q,
     "        })",
+    # [R3-t11 W-D] the read that makes line 2 a CONSUMPTION rather than a dead
+    # binding: a bound result must be read somewhere that is not a log line.
+    "        attempt = updated",
 ]
 EXPECTED_HITS = {1, 4, 12, 15}
 
@@ -1105,6 +1399,8 @@ def self_test():
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(FIXTURE_LINES) + "\n")
     got = {line for _rel, line, _t, _f, _w in scan(tmp)}
+    # Every fixture line asserts one verdict (caught here, or legitimately green).
+    _ARM_COUNT[0] += len(FIXTURE_LINES)
     if got != EXPECTED_HITS:
         print("SELF-TEST FAILED")
         print("  expected:", sorted(EXPECTED_HITS))
@@ -1113,7 +1409,8 @@ def self_test():
     print(
         "✅ self-test: catches the dropped recordFirstToken (bare + safe-call + "
         "inside `also`), passes assigned / returned / argument / declaration / "
-        "consuming-lambda / exempt forms"
+        "consuming-lambda / exempt forms, and catches the R3-t11 W-D dead / "
+        "log-only binding shapes"
     )
     return 0
 
@@ -1158,7 +1455,25 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     if (combinedParts.isEmpty()) {
         return
     }
-    chatRepository.appendMessage(sid, "user", userPartsJson)
+    val userEntity = chatRepository.appendMessage(sid, "user", userPartsJson)
+    agentHistory.add(LLMMessage(
+        role = LLMMessage.Role.USER,
+        content = userText,
+        contentParts = combinedParts,
+        dbMessageId = userEntity.id,
+    ))
+    withContext(Dispatchers.Main) {
+        removeQueuedPlaceholders(queuedIds)
+        val queuedUserMsg = ChatMessage(
+            id = userEntity.id,
+            role = "user",
+        )
+        val nextAssistantMsg = ChatMessage(
+            id = newAssistantId,
+            role = "assistant",
+        )
+        _messages.value = _messages.value + queuedUserMsg + nextAssistantMsg
+    }
 }
 """
 
@@ -1187,7 +1502,7 @@ def drain_self_test():
     # D1a: statement-position append (the pre-fix shape) — reds D1 binding only.
     n1 = {rel: DRAIN_CLEAN.replace(
         "    val userEntity = chatRepository.appendMessage(sid, \"user\", userPartsJson)",
-        "    chatRepository.appendMessage(sid, \"user\", userPartsJson)",
+        "    chatRepository.appendMessage(sid, \"user\", userPartsJson)", 1,
     )}
     got = run(n1)
     results.append((
@@ -1197,7 +1512,7 @@ def drain_self_test():
     ))
 
     # D1b: dbMessageId dropped from the agentHistory entry — reds D1 flow only.
-    n2 = {rel: DRAIN_CLEAN.replace("        dbMessageId = userEntity.id,\n", "")}
+    n2 = {rel: DRAIN_CLEAN.replace("        dbMessageId = userEntity.id,\n", "", 1)}
     got = run(n2)
     results.append((
         "D1b: missing dbMessageId reds D1 flow only",
@@ -1231,7 +1546,7 @@ def drain_self_test():
     ))
 
     # D3a: placeholders kept (funnel bypassed) — reds D3 funnel only.
-    n4 = {rel: DRAIN_CLEAN.replace("        removeQueuedPlaceholders(queuedIds)\n", "")}
+    n4 = {rel: DRAIN_CLEAN.replace("        removeQueuedPlaceholders(queuedIds)\n", "", 1)}
     got = run(n4)
     results.append((
         "D3a: funnel bypass reds D3 only",
@@ -1251,6 +1566,80 @@ def drain_self_test():
         got,
     ))
 
+    # ── [R3-t11 见证 #133] twin-consumer arms: the SAME criteria must hold on
+    # `injectQueuedPromptsAsNewTurn`. Before this round D1/D3 were anchored on
+    # the drain alone, so a `dbMessageId = null` in the mid-loop inject path
+    # (where a message queued during a long TOOL CALL actually lands) kept the
+    # gate green — the dual-gate witness's seam.
+    # D1c: inject hands the loop a null dbMessageId.
+    n6 = {rel: DRAIN_CLEAN.replace(
+        "        dbMessageId = userEntity.id,\n    ))\n    withContext(Dispatchers.Main) {\n"
+        "        removeQueuedPlaceholders(queuedIds)\n        val queuedUserMsg",
+        "        dbMessageId = null,\n    ))\n    withContext(Dispatchers.Main) {\n"
+        "        removeQueuedPlaceholders(queuedIds)\n        val queuedUserMsg",
+    )}
+    got = run(n6)
+    results.append((
+        "D1c: inject dbMessageId = null reds D1 (inject only)",
+        len(got) == 1 and "[B-04 D1]" in got[0] and "injectQueuedPromptsAsNewTurn" in got[0]
+        and "does not flow" in got[0],
+        got,
+    ))
+
+    # D1d: inject hands over a literal id instead of the persisted one.
+    n7 = {rel: DRAIN_CLEAN.replace(
+        "        dbMessageId = userEntity.id,\n    ))\n    withContext(Dispatchers.Main) {\n"
+        "        removeQueuedPlaceholders(queuedIds)\n        val queuedUserMsg",
+        "        dbMessageId = \"queued_msg_1\",\n    ))\n    withContext(Dispatchers.Main) {\n"
+        "        removeQueuedPlaceholders(queuedIds)\n        val queuedUserMsg",
+    )}
+    got = run(n7)
+    results.append((
+        "D1d: inject literal dbMessageId reds D1 (inject only)",
+        len(got) == 1 and "[B-04 D1]" in got[0] and "injectQueuedPromptsAsNewTurn" in got[0],
+        got,
+    ))
+
+    # D3c: inject stops dropping the placeholders — N rows on screen, 1 in the DB.
+    n8 = {rel: DRAIN_CLEAN.replace(
+        "    withContext(Dispatchers.Main) {\n        removeQueuedPlaceholders(queuedIds)\n"
+        "        val queuedUserMsg",
+        "    withContext(Dispatchers.Main) {\n        val queuedUserMsg",
+    )}
+    got = run(n8)
+    results.append((
+        "D3c: inject funnel bypass reds D3 (inject only)",
+        len(got) == 1 and "[B-04 D3]" in got[0] and "injectQueuedPromptsAsNewTurn" in got[0]
+        and "single funnel" in got[0],
+        got,
+    ))
+
+    # D3d: inject's merged bubble does not carry the persisted id.
+    n9 = {rel: DRAIN_CLEAN.replace(
+        "        val queuedUserMsg = ChatMessage(\n            id = userEntity.id,",
+        "        val queuedUserMsg = ChatMessage(\n            id = \"assistant_x\",",
+    )}
+    got = run(n9)
+    results.append((
+        "D3d: inject bubble without the persisted id reds D3 (inject only)",
+        len(got) == 1 and "[B-04 D3]" in got[0] and "injectQueuedPromptsAsNewTurn" in got[0]
+        and "phantom row" in got[0],
+        got,
+    ))
+
+    # D3e: the persisted row's bubble is appended twice (a kept duplicate).
+    n10 = {rel: DRAIN_CLEAN.replace(
+        "        _messages.value = _messages.value + queuedUserMsg + nextAssistantMsg",
+        "        _messages.value = _messages.value + queuedUserMsg + nextAssistantMsg + queuedUserMsg",
+    )}
+    got = run(n10)
+    results.append((
+        "D3e: inject double user bubble reds D3 (inject only)",
+        len(got) == 1 and "[B-04 D3]" in got[0] and "appends 2 user" in got[0],
+        got,
+    ))
+
+    _ARM_COUNT[0] += len(results)
     failed = [name for name, ok, got in results if not ok]
     if failed:
         print("DRAIN SELF-TEST FAILED (%d breaker(s))" % len(failed))
@@ -1261,9 +1650,9 @@ def drain_self_test():
                     print("      " + f)
         return 1
     print(
-        "✅ drain self-test has teeth: D1 (bind+flow) / D2 (empty guard, both "
-        "consumers) / D3 (funnel + merged bubble) each flip red on exactly their "
-        "own breaker; clean fixture green"
+        "✅ drain self-test has teeth: D1 (bind+flow, BOTH consumers) / D2 (empty "
+        "guard, both consumers) / D3 (funnel + merged bubble + persisted id, BOTH "
+        "consumers) each flip red on exactly their own breaker; clean fixture green"
     )
     return 0
 
@@ -1516,6 +1905,39 @@ def staged_self_test():
     ok = (len(got) == 1 and "[A-07 S2]" in got[0] and "BEFORE the write" in got[0])
     results.append(("S2c: credit before the write reds the phantom-bytes finding only", ok, got))
 
+    # ── [R3-t11 见证 #134] the AMOUNT credited, not just the call's presence.
+    # S2f: a literal amount — the ledger never grows, so the cumulative cap
+    #      reads current() == 0 forever.
+    n5b = clean_tree(activity=_staged_activity(
+        STAGED_ATTACH_CLEAN.replace(
+            "stagedBytes.credit(textBytes)", "stagedBytes.credit(0L)",
+        ),
+    ))
+    got = run(n5b)
+    ok = (len(got) == 1 and "[A-07 S2]" in got[0] and "CONSTANT" in got[0])
+    results.append(("S2f: credit(0L) literal amount reds the credit-amount finding only", ok, got))
+
+    # S2g: credits a DIFFERENT binding than the one that was admitted.
+    n5c = clean_tree(activity=_staged_activity(
+        STAGED_ATTACH_CLEAN.replace(
+            "stagedBytes.credit(textBytes)", "stagedBytes.credit(charsOnly)",
+        ),
+    ))
+    got = run(n5c)
+    ok = (len(got) == 1 and "[A-07 S2]" in got[0] and "credits `charsOnly`" in got[0])
+    results.append(("S2g: crediting a different binding reds the credit-amount finding only",
+                    ok, got))
+
+    # S2h: the ledger discards the amount it was handed.
+    bad_ledger3 = STAGED_LEDGER_CLEAN.replace(
+        "    fun credit(bytes: Long) {\n        if (bytes > 0L) total.addAndGet(bytes)\n    }",
+        "    fun credit(bytes: Long) {\n        if (bytes > 0L) total.addAndGet(0L)\n    }",
+    )
+    got = run(clean_tree(ledger=bad_ledger3))
+    ok = (len(got) == 1 and "[A-07 S2]" in got[0] and "记账恒为零" in got[0])
+    results.append(("S2h: ledger credit that swaps in a literal reds the ledger-credit finding "
+                    "only", ok, got))
+
     # S2d: the admission core lost the strict > shape (>= boundary drift).
     bad_ledger2 = STAGED_LEDGER_CLEAN.replace(
         "    textBytes > maxFileBytes -> AttachTextAdmission.RejectedPerFile",
@@ -1541,6 +1963,7 @@ def staged_self_test():
     ok = (len(got) == 1 and "[A-07 S2]" in got[0] and "no longer writes the text itself" in got[0])
     results.append(("ROT: delegated-away writeText is a re-anchor finding", ok, got))
 
+    _ARM_COUNT[0] += len(results)
     failed = [name for name, ok, got in results if not ok]
     if failed:
         print("STAGED-BYTES SELF-TEST FAILED (%d breaker(s))" % len(failed))
@@ -1693,19 +2116,51 @@ def share_stream_self_test():
             )
         got = scan(tmp)
         ok = len(got) == 1 and got[0][3] == "copySharedStream"
+        # [R3-t11 W-D] Control: a bound outcome that IS consumed (a `when`
+        # subject) stays green — binding alone is not the defect, a binding
+        # nobody reads is.
         with open(p, "w", encoding="utf-8") as fh:
             fh.write(
                 "class ShareReceiverActivity {\n"
                 "    fun stage() {\n"
-                "        val outcome = copySharedStream(openStream = { null }, dest = f)\n"
+                "        when (val outcome = copySharedStream(openStream = { null }, dest = f)) {\n"
+                "            is Copy.Staged -> use(outcome)\n"
+                "            else -> Unit\n"
+                "        }\n"
                 "    }\n"
                 "}\n"
             )
         control = scan(tmp)
         ok = ok and control == []
+        # [R3-t11 W-D] Witness arm: the bound outcome is never read — the exact
+        # regression shape the third-round dual-gate witness used. Every name
+        # the gate greps for survives; the value is still dropped.
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(
+                "class ShareReceiverActivity {\n"
+                "    fun stage() {\n"
+                "        val ignoredOutcome = copySharedStream(openStream = { null }, dest = f)\n"
+                "    }\n"
+                "}\n"
+            )
+        dead = scan(tmp)
+        ok = ok and (len(dead) == 1 and "从未被读取" in dead[0][4])
+        # [R3-t11 W-D] A log-only read cannot carry the value into state either.
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(
+                "class ShareReceiverActivity {\n"
+                "    fun stage() {\n"
+                "        val ignoredOutcome = copySharedStream(openStream = { null }, dest = f)\n"
+                "        AppLogger.warning(TAG, \"outcome=\" + ignoredOutcome)\n"
+                "    }\n"
+                "}\n"
+            )
+        logged = scan(tmp)
+        ok = ok and (len(logged) == 1 and "只被日志读取" in logged[0][4])
     finally:
         shutil.rmtree(tmp)
-    results.append(("A08-6: discarded copySharedStream outcome is watchlisted (control green)", ok, got))
+    results.append(("A08-6: discarded copySharedStream outcome is watchlisted (consumed control "
+                    "green, W-D dead/log-only binding caught)", ok, got + dead + logged))
 
     # A08-7: same regression seen by the section itself — the outcome is never
     #        bound, so nothing distinguishes "staged" from "staged nothing".
@@ -1799,6 +2254,7 @@ def share_stream_self_test():
           and "NO null early-exit" in got[0])
     results.append(("A08-9: unguarded core in a separate file reds G1 on that file", ok, got))
 
+    _ARM_COUNT[0] += len(results)
     failed = [name for name, ok, _got in results if not ok]
     if failed:
         print("SHARE-STREAM SELF-TEST FAILED (%d breaker(s))" % len(failed))
@@ -1990,6 +2446,7 @@ def binary_write_self_test():
             shutil.rmtree(root, ignore_errors=True)
 
     def arm(name, src, expect, forbid=()):
+        _ARM_COUNT[0] += 1
         v, _sites = run(src)
         blob = " ".join(v)
         ok = all(tok in blob for tok in expect) and not any(tok in blob for tok in forbid)
@@ -2343,6 +2800,7 @@ def encode_verdict_self_test():
             shutil.rmtree(root, ignore_errors=True)
 
     def arm(name, src, expect, forbid=()):
+        _ARM_COUNT[0] += 1
         v, _sites = run(src)
         blob = " ".join(v)
         ok = all(tok in blob for tok in expect) and not any(tok in blob for tok in forbid)
@@ -2383,7 +2841,12 @@ def main():
         rc4 = share_stream_self_test()
         rc5 = binary_write_self_test()
         rc6 = encode_verdict_self_test()
-        return 1 if (rc or rc2 or rc3 or rc4 or rc5 or rc6) else 0
+        # [R3-t11] Registration marker: a stable tail the main session asserts on
+        # (a gate gutted to `sys.exit(0)` cannot print it with a plausible count).
+        if (rc or rc2 or rc3 or rc4 or rc5 or rc6):
+            return 1
+        print("DISCARDED_RETURN_GUARD_SELFTEST=PASS (%d arms)" % _ARM_COUNT[0])
+        return 0
     violations = scan(args[0])
     # [B-04 deep-audit-1037] queue-drain persistence section. Its findings are
     # pre-formatted `file:line  [criterion] reason` strings, so they are
