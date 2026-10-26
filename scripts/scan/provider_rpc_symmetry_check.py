@@ -1121,6 +1121,13 @@ def _check_tree(root, detail):
     # ---- C8 ---- [da1030-C ISSUE-04] config face carries the same instance keys
     cfg_paths = find_files(root, CONFIG_BUILTINS_FILE)
     if len(cfg_paths) != 1:
+        # [dv24-FIX-4 R8] C11 below reads cfg_code unconditionally; leaving it
+        # unbound here made the gate CRASH (UnboundLocalError, a NameError
+        # subclass) instead of failing closed, so a tree with a missing or
+        # duplicated ConfigBuiltins.kt took the whole scan down. Bound to an
+        # empty string: every `.find()` misses, the anchors report fail-closed,
+        # rc=1 (the reason is already recorded above).
+        cfg_code = ""
         detail["fail_closed"].append(
             "expected exactly one %s, found %d" % (CONFIG_BUILTINS_FILE, len(cfg_paths))
         )
@@ -1353,6 +1360,11 @@ def _check_tree(root, detail):
     groups_paths = find_files(root, GROUPS_COLLECTION_FILE)
     rules_paths = find_files(root, GROUP_RULES_FILE)
     if len(groups_paths) != 1 or len(rules_paths) != 1:
+        # Same defect shape as C8 above (see the dv24-FIX-4 R8 note): C13 and
+        # check_group_member_faces read these two unconditionally, so a missing
+        # GroupsCollection.kt / GroupWriteRules.kt crashed the gate with
+        # UnboundLocalError instead of failing closed.
+        groups_code = rules_code = ""
         detail["fail_closed"].append(
             "expected exactly one %s and one %s, found %d/%d"
             % (GROUPS_COLLECTION_FILE, GROUP_RULES_FILE, len(groups_paths), len(rules_paths))
@@ -3064,6 +3076,51 @@ def run_selftest():
         detail,
     ))
     shutil.rmtree(root)
+
+    # [dv24-FIX-4 R8] Two branches read a variable that only their `len(...) == 1`
+    # success path bound (`cfg_code` for C8/C11, `groups_code`/`rules_code` for
+    # C13): deleting the file raised UnboundLocalError, so the gate CRASHED
+    # instead of failing closed. A traceback is not a verdict — CI would report a
+    # broken scanner rather than the missing anchor. The arms remove one input
+    # file each and assert both halves of the fix: rc=1 carrying the fail-closed
+    # reason, and no exception escaping. Per-file arms (not one aggregate) so a
+    # regression names the file it broke.
+    # `needle` proves the code got PAST the branch that used to raise.
+    for victim, needle in (
+            (DEBUG_FILE, None),
+            (MUTATION_FILE, None),
+            (CONFIG_BUILTINS_FILE, "anchor %s not found" % GROUPS_PATH_MARKER),
+            (CONNECTION_SCREEN_FILE, None),
+            (PROVIDERS_COLLECTION_FILE, None),
+            (GROUPS_COLLECTION_FILE, "requireKnownEntryIds not found"),
+            (GROUP_RULES_FILE, "requireKnownEntryIds not found"),
+            (AUTH_HEADER_FILE, None),
+            (VM_STORE_FILE, None),
+    ):
+        root = write_fixture(GOOD_DEBUG, GOOD_MUTATION)
+        victims = [os.path.join(dirpath, victim) for dirpath, _d, files in os.walk(root)
+                   if victim in files]
+        for path in victims:
+            os.remove(path)
+        crashed = None
+        detail = {"fail_closed": []}
+        try:
+            rc, detail = check_tree(root)
+        except Exception as exc:                                  # noqa: BLE001
+            crashed = "%s: %s" % (type(exc).__name__, exc)
+        fc = " || ".join(detail["fail_closed"])
+        ok = (victims
+              and crashed is None
+              and rc == 1
+              and ("expected exactly one" in fc and victim in fc)
+              and (needle is None or needle in fc))
+        results.append((
+            "F73-missing-%s-fails-closed-not-crash" % victim.replace(".kt", "").replace("_", "-").lower(),
+            ok,
+            {"victim": victim, "removed": len(victims), "crashed": crashed,
+             "rc": None if crashed else rc, "fail_closed": fc[:400]},
+        ))
+        shutil.rmtree(root)
 
     all_ok = True
     for name, ok, detail in results:

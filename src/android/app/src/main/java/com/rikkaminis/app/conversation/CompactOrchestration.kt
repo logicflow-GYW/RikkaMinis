@@ -954,7 +954,14 @@ internal fun ChatViewModel.resolveCompactionPinProvider(entryId: String): LLMPro
     if (!instance.isEnabled) return null
     val apiKey = providerRepository.loadApiKey(instance.id) ?: return null
     return try {
-        ProviderFactory.create(instance, apiKey, entry.model, context)
+        // [dv24-FIX-8 R3] Enriched model, same as every other create site:
+        // `entry.model` is the raw base model, whose modality/effort fields are
+        // null for built-in entries. :modelservice never initialises
+        // [ModelsDevApi], so the provider re-decides capabilities from the
+        // serialised object — an un-enriched model downgrades an attachment to
+        // `[attached image: …]` and clamps a MAX thinking pick (same reasoning
+        // as [ChatViewModel.providerModelFor]).
+        ProviderFactory.create(instance, apiKey, providerModelFor(entry), context)
     } catch (_: Exception) {
         null
     }
