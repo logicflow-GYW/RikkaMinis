@@ -96,9 +96,24 @@
 
 本地跑 `test_scan.py` 被同一 ENOSYS 风暴杀在 test_da1018_gates（`OSError: [Errno 38]`，`/tmp/testscan.log` 237 行）——**ALL 344 交分支 CI 承担**（CI 侧跑同一份 test_scan.py）。
 
-## 6. CI（待回填：run id / head_sha / 日志读数）
+## 6. CI
 
-（§6.1-6.3 由 CI 绿后回填）
+- **run** `40313395897` / **#2739** / job `121539878999` / **attempt 1** / **success**（`workflow_dispatch`，2026-10-26T11:13:03Z 创建）
+- **head_sha 三方逐字符一致**：本地 HEAD = `origin/fix/r3-voice-modelsvc` = CI `head_sha` = **`77ce5ca121e0560988ec8121f040bf7201785b83`**
+- **日志** `probe/ci/job-2739.log`，1,487,090 B / NUL 0：
+
+| 读数 | 命中 |
+|---|---|
+| `Summary: 112 passed, 0 failed` | 恰 1（其余 6 条小 Summary 是子套件 5/10/14/22/28/33 passed）|
+| `ALL 344 CASES PASS` | 恰 1 |
+| `^ e: `（编译错误） | 0 |
+| `VOICE_CANCEL_GUARD_SELFTEST=PASS` | 恰 1 |
+| `MODELSVC_SINGLE_READ_SELFTEST=PASS` | 恰 1 |
+| 含 `FAILED` 的 6 行 | 全部是 PASSED 用例名子串（根因判读）|
+
+- **步骤**：26 步，唯一非 success = step 23 `Publish to Releases` → **skipped**（main 门控，符合预期）
+- 两门新臂在 CI 里有见证（标记各恰 1）⇒ 37 臂 / 28 臂不是只在本地自测里成立。
+- 源码树与 CI 绿 sha 的差异 = 0（本节回填提交只动 `fix-reports/`）。
 
 ## 7. 残留（每条带触发条件·触发后方案·搁置理由）
 
