@@ -40,38 +40,115 @@ import re
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import KotlinLexError, mask_code                      # noqa: E402
+from _kotlin_ast import (match_bracket, split_top, strip_parens,        # noqa: E402
+                         const_value, function_body, if_blocks, last_write)
+from _kotlin_valueflow import contains_ident, value_sources             # noqa: E402
+
 REL = "src/android/app/src/main/java/com/rikkaminis/app/browser/BrowserTabPool.kt"
 
-EXEC_CALL = "tab.manager.execute("
-IMPLICIT_COND = "if (implicitTab)"
+# ── 判据锚 = 决定点，不是拼写 ───────────────────────────────────────────────
+# [B7-t05] 旧锚是字面量 `"tab.manager.execute("`，于是
+#   `tab.manager.let { it.execute(input) }` / `tab.manager\n    .execute(input)` /
+#   `tab.manager?.execute(input)` 三个等价写法全都不算「一次执行」。现在只锚
+#   `.execute(` 这个调用本身：runAcquiredAction 里唯一的 WebView 驱动调用就是它，
+#   拼写怎么拆都看得见。
+EXEC_SITE = re.compile(r"\.\s*execute\s*\(")
 LOCK_FN = "lockForTab"
+LOCK_CALL = re.compile(r"\blockForTab\s*\(")
+IMPLICIT_IDENT = "implicitTab"
 
 
 def line_of(src: str, idx: int) -> int:
     return src.count("\n", 0, idx) + 1
 
 
+def _code(src):
+    """注释 + 字符串内容抹平的结构视图（长度不变，位置可回投原文）。
+
+    [B7-t05] parser-death 轴：本门原先**没有**任何注释剥离，于是
+    `// lockForTab(tab.id).withLock {` + `// }` 两行注释就充当了语法树上的
+    锁块，中间的 execute 被判成「锁内」。解析失败一律 fail-closed。
+    """
+    try:
+        return mask_code(src)
+    except KotlinLexError:
+        return None
+
+
+def _params_of(fn_text):
+    """函数形参名集合（跳过类型/默认值/修饰符）。"""
+    m = re.search(r"\bfun\s+[A-Za-z_]\w*\s*\(", fn_text)
+    if m is None:
+        return set()
+    close = match_bracket(fn_text, m.end() - 1)
+    if close < 0:
+        return set()
+    names = set()
+    for a, b in split_top(fn_text[m.end():close], (",",)):
+        head = fn_text[m.end() + a: m.end() + b].split("=")[0].split(":")[0].strip()
+        head = re.sub(r"@\w+\s+", "", head).split()[-1] if head.split() else ""
+        if re.fullmatch(r"[A-Za-z_]\w*", head or ""):
+            names.add(head)
+    return names
+
+
+def _bound_rhs(scope: str, name: str) -> str:
+    """`val <name> = <rhs>` 的 rhs（无法解析 → ""）。"""
+    lw = last_write(scope, name)
+    return lw[1].strip() if lw and lw[1] else ""
+
+
+def _per_tab_arg(arg: str, scope: str, params, depth: int = 0) -> bool:
+    """`lockForTab(…)` 的实参是否**派生自被锁的那个 tab**。
+
+    [B7-t05] dataflow 轴：旧判据只认函数名 `lockForTab`，实参整个被丢弃，
+    于是 `lockForTab(-1)` 与 `lockForTab(tab.id)` 等价 —— 隐式路径锁在一个
+    永远不是任何 tab 的槽位上，per-tab 互斥完全消失。
+    """
+    a = strip_parens(arg).strip()
+    if not a:
+        return False
+    if const_value(a) is not None:
+        return False                              # `lockForTab(-1)` / `lockForTab(0)`
+    if re.search(r"\.\s*id\b", a):
+        return True                               # `tab.id` / `tab!!.id`
+    if re.fullmatch(r"[A-Za-z_]\w*", a):
+        if a in params:
+            return True                           # `lockForTab(tabId)`（入口形参）
+        if depth < 2:
+            rhs = _bound_rhs(scope, a)
+            if rhs:
+                return _per_tab_arg(rhs, scope, params, depth + 1)
+        return False
+    if any(contains_ident(a, p) for p in params):
+        return True                               # `input.tabId` 之类的形参派生
+    return False
+
+
 def withlock_receivers(src: str):
-    """Every `.withLock` in [src] reduced to its receiver.
+    """Every `.withLock` in [src] reduced to (kind, name, expr, pos).
 
-    Returns (kind, name, expr) triples:
-      ("call", callee, full_call)  — `lockForTab(tabId).withLock` / `Mutex().withLock`
-      ("ident", name, "")          — `mutex.withLock`
-      ("unknown", "", "")          — receiver could not be resolved (fail-closed)
+      ("call", callee, "(argcalls)", pos)  — `lockForTab(tabId).withLock` / `Mutex().withLock`
+      ("ident", name, "", pos)             — `mutex.withLock`
+      ("unknown", "", "", pos)             — receiver could not be resolved (fail-closed)
 
-    [fix/meta-audit-m2-binding] the falsifying witness kept `lockForTab(tabId)`
-    in the function (bound to a dead `val mutex`) and locked on a freshly
-    constructed `Mutex()` instead — the old "both substrings present" test read
-    that as serialized. The receiver of `withLock` is the contract; not the
-    co-occurrence of two words somewhere in the body.
+    `pos` is the index of `.withLock` in [src], so callers can compute the lock
+    block's span and report a source line.
+
+    [fix/meta-audit-m2-binding] the receiver of `withLock` is the contract, not
+    the co-occurrence of two words somewhere in the body.
     """
     out = []
-    for m in re.finditer(r"\.withLock", src):
-        i = m.start() - 1
+    for m in re.finditer(r"\.\s*withLock", src):
+        wl = m.start()
+        i = wl - 1
         while i >= 0 and src[i] in " \t\r\n":
             i -= 1
         if i < 0:
-            out.append(("unknown", "", ""))
+            out.append(("unknown", "", "", wl))
             continue
         if src[i] == ")":
             depth = 0
@@ -85,201 +162,253 @@ def withlock_receivers(src: str):
                         break
                 j -= 1
             if j < 0:
-                out.append(("unknown", "", ""))
+                out.append(("unknown", "", "", wl))
                 continue
             k = j - 1
             while k >= 0 and (src[k].isalnum() or src[k] in "_."):
                 k -= 1
-            out.append(("call", src[k + 1:j], src[j:i + 1]))
+            out.append(("call", src[k + 1:j], src[j:i + 1], wl))
             continue
         if src[i].isalnum() or src[i] == "_":
             k = i
             while k >= 0 and (src[k].isalnum() or src[k] in "_."):
                 k -= 1
-            out.append(("ident", src[k + 1:i + 1], ""))
+            out.append(("ident", src[k + 1:i + 1], "", wl))
             continue
-        out.append(("unknown", "", ""))
+        out.append(("unknown", "", "", wl))
     return out
 
 
-def receiver_is_per_tab(kind: str, name: str, scope: str) -> bool:
-    """True only when the receiver provably comes from lockForTab(…)."""
+def _lock_call_arg(expr: str) -> str:
+    """`(tab.id)` → `tab.id`（withlock_receivers 的 expr 只含括号组）。"""
+    e = expr.strip()
+    if e.startswith("(") and e.endswith(")"):
+        return e[1:-1]
+    return e
+
+
+def receiver_failure(kind: str, name: str, expr: str, scope: str, params):
+    """None = 接收者可证明是「被锁那个 tab 的 per-tab mutex」。
+
+    否则返回 (code, detail)：
+      ("factory",      "`Mutex.withLock`")      接收者不是 lockForTab(…)
+      ("constant-slot","`lockForTab(-1).withLock`") 函数名对、实参是常量槽位
+      ("not-bound",    "`<expr>`")              标识符绑定的 rhs 值不来自 lockForTab
+      ("unbound",      "`<name>`")              作用域里找不到绑定
+      ("unresolved",   "")                      接收者形态无法解析
+    """
     if kind == "call":
-        return name == LOCK_FN or name.endswith("." + LOCK_FN)
+        if not (name == LOCK_FN or name.endswith("." + LOCK_FN)):
+            return ("factory", "`%s.withLock`" % name)
+        arg = _lock_call_arg(expr)
+        if not _per_tab_arg(arg, scope, params):
+            return ("constant-slot", "`%s(%s).withLock`" % (name, arg.strip()))
+        return None
     if kind == "ident":
-        return bool(re.search(
-            r"\b%s\s*(?::\s*[^=]+)?=\s*%s\s*\(" % (re.escape(name), LOCK_FN), scope))
-    return False
-
-
-def balanced_block(src: str, open_idx: int):
-    """Return (start, end_exclusive) of the brace block opened at open_idx
-    (which must point at '{')."""
-    assert src[open_idx] == "{"
-    depth = 0
-    i = open_idx
-    in_str = None
-    while i < len(src):
-        c = src[i]
-        if in_str:
-            if c == "\\":
-                i += 2
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", name):
+            return ("unresolved", "")
+        rhs = _bound_rhs(scope, name.split(".")[-1])
+        if not rhs:
+            return ("unbound", "`%s`" % name)
+        for s in value_sources(rhs):
+            m = LOCK_CALL.search(s)
+            if m is None:
                 continue
-            if c == in_str:
-                in_str = None
-        elif c in ('"', "'"):
-            in_str = c
-        elif c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return (open_idx, i + 1)
-        i += 1
-    return (open_idx, len(src))
+            open_pos = m.end() - 1
+            close = match_bracket(s, open_pos)
+            if close < 0:
+                return ("unresolved", "")
+            arg = s[open_pos + 1:close]
+            if not _per_tab_arg(arg, scope, params):
+                return ("constant-slot", "`%s`" % rhs.strip())
+            return None
+        # 绑定的值不来自 lockForTab(…)：`val mutex = lockForTab(tabId).let { Mutex() }`
+        # 也是这样被抓住的（值的来源是 lambda 尾巴，不是接收者）。
+        return ("not-bound", "`%s`" % rhs.strip())
+    return ("unresolved", "")
 
 
-def extract_fun(src: str, signature: str):
-    """Body span of the function whose source contains [signature]."""
-    at = src.find(signature)
-    if at < 0:
+def _withlock_span(code: str, wl_pos: int):
+    """`.withLock` 之后那个 `{ … }` 块的区间；配平失败 → None。"""
+    i = code.find("{", wl_pos)
+    if i < 0:
         return None
-    brace = src.find("{", at)
-    if brace < 0:
-        return None
-    return balanced_block(src, brace)
+    close = match_bracket(code, i)
+    return (i, close + 1) if close > 0 else None
+
+
+def _receiver_message(where: str, line: int, fail, arm_label: str) -> str:
+    code, detail = fail
+    if code == "factory":
+        return ("%s:%d: %s locks on `%s` — a constructor/factory result is not the per-tab "
+                "mutex, so two concurrent actions still drive the same WebView "
+                "(ISSUE-03A overlap window)" % (where, line, arm_label, detail.strip("`")))
+    if code == "constant-slot":
+        return ("%s:%d: %s locks on %s — the receiver name is lockForTab(…) but its argument "
+                "is not derived from the acquired tab (a constant slot serializes against "
+                "nobody), so the per-tab mutex is never acquired (ISSUE-03A overlap window)"
+                % (where, line, arm_label, detail))
+    if code == "not-bound":
+        return ("%s:%d: %s locks on a variable whose value does not come from lockForTab(…) "
+                "(%s) — the lock is taken on a throwaway instance, so concurrent actions "
+                "still overlap (ISSUE-03A)" % (where, line, arm_label, detail))
+    if code == "unbound":
+        return ("%s:%d: %s locks on %s but no `val %s = …` binding exists in the function — "
+                "the gate cannot prove the per-tab mutex is held (fail-closed)"
+                % (where, line, arm_label, detail, detail.strip("`")))
+    return ("%s:%d: %s locks on a receiver this gate cannot resolve — re-pin the gate rather "
+            "than assume it is the per-tab mutex" % (where, line, arm_label))
+
+
+def _implicit_arm(code: str, b_lo: int, b_hi: int, exec_sites):
+    """`if (implicitTab) { … } else { … }` 的 (cond, t_s, t_e, e_s, e_e)。
+
+    [B7-t05] 锚的是「条件里出现 implicitTab 这个决定点」，不是字面量
+    `if (implicitTab)`：`if (implicitTab == true)` / `if (true == implicitTab)`
+    是同一个决定的等价拼写，用它绕开锚点不算修好。
+    """
+    cands = [b for b in if_blocks(code)
+             if contains_ident(b[0], IMPLICIT_IDENT)
+             and b[1] >= b_lo and b[1] < b_hi]
+    # 优先：有 else 的、且 then 支里就有执行点的那个（另有 `if (implicitTab == true)
+    # return …` 这类提前返回的孪生 if，不带 else，不能冒充锁跨度）。
+    for b in cands:
+        cond, t_s, t_e, e_s, e_e = b
+        if e_s is not None and any(t_s <= p < t_e for p in exec_sites):
+            return b
+    for b in cands:
+        if b[3] is not None:
+            return b
+    return None
 
 
 def check_source(src: str, label: str) -> list:
     """Returns a list of 'label:line: message' violations (empty = PASS)."""
     bad = []
-    body = extract_fun(src, "fun runAcquiredAction(")
-    if body is None:
+    code = _code(src)
+    if code is None:
+        return ["%s:1: cannot lex the source (unbalanced quote/comment) — fail-closed: "
+                "the lock spans cannot be located" % label]
+
+    fm = re.search(r"\bfun\s+runAcquiredAction\s*\(", code)
+    fb = function_body(code, "runAcquiredAction")
+    if fm is None or fb is None:
         bad.append("%s:1: runAcquiredAction(…) not found — the serialization "
                    "contract moved? re-pin this gate" % label)
         return bad
-    _, body_end = body
-    body_src = src[body[0]:body_end]
+    b_lo, b_hi, _kind = fb
+    fn_text = code[fm.start():b_hi + 1]
+    params = _params_of(fn_text)
+    fn_line = line_of(code, fm.start())
 
-    exec_hits = [m.start() for m in re.finditer(re.escape(EXEC_CALL), body_src)]
-    if not exec_hits:
-        bad.append("%s:%d: runAcquiredAction no longer calls %s — the "
-                   "WebView-driving call moved? re-pin this gate"
-                   % (label, line_of(src, body[0]), EXEC_CALL))
+    exec_sites = [m.start() for m in EXEC_SITE.finditer(code) if b_lo <= m.start() < b_hi]
+    if not exec_sites:
+        bad.append("%s:%d: runAcquiredAction no longer calls `<tab>.execute(` — the "
+                   "WebView-driving call moved? re-pin this gate" % (label, fn_line))
         return bad
 
-    # Locate the `if (implicitTab) { … } else { … }` conditional (if present).
-    cond = body_src.find(IMPLICIT_COND)
-    lock_span = None       # (start, end) of the sanctioned locked shape
-    else_span = None       # (start, end) of the sanctioned caller-held arm
-    if cond >= 0:
-        cond_line = line_of(src, body[0] + cond)
-        brace = body_src.find("{", cond + len(IMPLICIT_COND))
-        if brace < 0:
-            bad.append("%s:%d: if (implicitTab) has no block" % (label, cond_line))
+    lock_spans, else_spans = [], []
+    arm = _implicit_arm(code, b_lo, b_hi, exec_sites)
+    if arm is None:
+        bad.append("%s:%d: the `if (implicitTab) … else …` conditional is gone — the "
+                   "implicit path's execute has no sanctioned locked/unlocked shape "
+                   "anymore (re-pin this gate)" % (label, fn_line))
+    else:
+        cond, t_s, t_e, e_s, e_e = arm
+        cond_line = line_of(code, t_s)
+        arm_text = code[t_s:t_e]
+        arm_recv = withlock_receivers(arm_text)
+        if not arm_recv:
+            bad.append("%s:%d: the implicit arm takes no lock — it must acquire the "
+                       "acquired tab's per-tab mutex (lockForTab(tab.id).withLock { … })"
+                       % (label, cond_line))
+        for kind, name, expr, wl in arm_recv:
+            # 跨度先记（是否「包住执行点」与「接收者对不对」是两条判据，
+            # 否则一个错接收者会重复报两条，把真正的原因埋掉）。
+            span = _withlock_span(code, t_s + wl)
+            if span is None:
+                bad.append("%s:%d: the implicit arm's withLock block is unbalanced — "
+                           "fail-closed" % (label, cond_line))
+            else:
+                lock_spans.append(span)
+            fail = receiver_failure(kind, name, expr, fn_text, params)
+            if fail is not None:
+                bad.append(_receiver_message(label, cond_line, fail, "the implicit arm"))
+        if e_s is None:
+            bad.append("%s:%d: the if (implicitTab) conditional has no else arm — the "
+                       "explicit path's execute must stay here (its caller already holds "
+                       "the mutex)" % (label, cond_line))
         else:
-            c_start, c_end = balanced_block(body_src, brace)
-            arm = body_src[c_start:c_end]
-            arm_recv = withlock_receivers(arm)
-            if not arm_recv:
-                bad.append("%s:%d: the implicit arm takes no lock — it must "
-                           "acquire the acquired tab's per-tab mutex "
-                           "(lockForTab(tab.id).withLock { … })"
-                           % (label, cond_line))
-            else:
-                for kind, name, expr in arm_recv:
-                    if receiver_is_per_tab(kind, name, arm):
-                        continue
-                    if kind == "unknown":
-                        bad.append("%s:%d: the implicit arm locks on a "
-                                   "receiver this gate cannot resolve — "
-                                   "re-pin the gate rather than assume it is "
-                                   "the per-tab mutex" % (label, cond_line))
-                    elif kind == "call":
-                        bad.append("%s:%d: the implicit arm locks on "
-                                   "`%s.withLock` — not lockForTab(tab.id), so "
-                                   "the fan-out still drives the WebView "
-                                   "unserialized" % (label, cond_line, name))
-                    else:
-                        bad.append("%s:%d: the implicit arm locks on "
-                                   "`%s.withLock` but `%s` is not bound to "
-                                   "lockForTab(…) there" % (label, cond_line, name, name))
-                wl = arm.rfind("withLock")
-                wb = arm.find("{", wl)
-                if wb >= 0:
-                    ls, le = balanced_block(arm, wb)
-                    lock_span = (c_start + ls, c_start + le)
-            # else arm
-            else_kw = body_src.find("else", c_end - 1)
-            if else_kw < 0:
-                bad.append("%s:%d: the if (implicitTab) conditional has no "
-                           "else arm — the explicit path's execute must stay "
-                           "here (its caller already holds the mutex)"
-                           % (label, cond_line))
-            else:
-                e_brace = body_src.find("{", else_kw)
-                if e_brace < 0:
-                    bad.append("%s:%d: the else arm has no block" % (label, cond_line))
-                else:
-                    else_span = balanced_block(body_src, e_brace)
+            else_spans.append((e_s, e_e))
 
-    for hit in exec_hits:
-        line = line_of(src, body[0] + hit)
-        in_locked = lock_span and lock_span[0] <= hit < lock_span[1]
-        in_else = else_span and else_span[0] <= hit < else_span[1]
-        if in_locked or in_else:
+    live = [p for p in exec_sites if _feasible(code, p)]
+    if not live:
+        bad.append("%s:%d: every `<tab>.execute(` site in runAcquiredAction is provably "
+                   "unreachable — the WebView is never driven (fail-closed)"
+                   % (label, fn_line))
+    for pos in live:
+        if any(lo <= pos < hi for lo, hi in lock_spans + else_spans):
             continue
         bad.append(
-            "%s:%d: tab.manager.execute( outside a per-tab mutex scope "
-            "(ISSUE-03A: the implicit path must wrap it in "
-            "lockForTab(tab.id).withLock { … }; the explicit path's caller "
-            "already holds the mutex)" % (label, line)
+            "%s:%d: `<tab>.execute(` outside a per-tab mutex scope (ISSUE-03A: the "
+            "implicit path must wrap it in lockForTab(tab.id).withLock { … }; the "
+            "explicit path's caller already holds the mutex)" % (label, line_of(code, pos))
         )
 
-    # The serial entry must still exist and still take its mutex — on the
-    # per-tab mutex ITSELF, not merely in its neighbourhood.
-    #
-    # [fix/meta-audit-m2-binding] dataflow axis: the falsifying witness left
-    # `val mutex = lockForTab(tabId)` in place (now a dead local) and locked on
-    # `Mutex()` — every `executeSerialized` call then serialized against a
-    # throwaway instance while the tab's real mutex was never acquired, and the
-    # old "lockForTab( and withLock both appear" test stayed green.
-    ser = extract_fun(src, "fun executeSerialized(")
-    if ser is None:
-        bad.append("%s:1: executeSerialized(…) not found — the serial entry "
-                   "moved? re-pin this gate" % label)
-    else:
-        s_src = src[ser[0]:ser[1]]
-        # Scope for resolving `val x = lockForTab(...)`: the function body plus
-        # any enclosing-class locals are out of reach here, so bindings must be
-        # visible inside the function itself — that is where the witness lives.
-        recv = withlock_receivers(s_src)
-        if not recv:
-            bad.append("%s:%d: executeSerialized takes no lock at all — it "
-                       "must acquire lockForTab(tabId).withLock"
-                       % (label, line_of(src, ser[0])))
+    # ── executeSerialized: 锁本身 + 锁跨度 ────────────────────────────────
+    fm2 = re.search(r"\bfun\s+executeSerialized\s*\(", code)
+    fb2 = function_body(code, "executeSerialized")
+    if fm2 is None or fb2 is None:
+        bad.append("%s:1: executeSerialized(…) not found — the serial entry moved? "
+                   "re-pin this gate" % label)
+        return bad
+    s_lo, s_hi, _k2 = fb2
+    s_text = code[fm2.start():s_hi + 1]
+    ser_line = line_of(code, fm2.start())
+    s_params = _params_of(s_text)
+    recv = withlock_receivers(s_text)
+    s_spans = []
+    if not recv:
+        bad.append("%s:%d: executeSerialized takes no lock at all — it must acquire "
+                   "lockForTab(tabId).withLock" % (label, ser_line))
+    for kind, name, expr, wl in recv:
+        span = _withlock_span(code, fm2.start() + wl)
+        if span is None:
+            bad.append("%s:%d: executeSerialized's withLock block is unbalanced — "
+                       "fail-closed" % (label, ser_line))
         else:
-            for kind, name, expr in recv:
-                if receiver_is_per_tab(kind, name, s_src):
-                    continue
-                if kind == "unknown":
-                    bad.append("%s:%d: executeSerialized locks on a receiver "
-                               "this gate cannot resolve — re-pin the gate "
-                               "rather than assume it is the per-tab mutex"
-                               % (label, line_of(src, ser[0])))
-                elif kind == "call":
-                    bad.append("%s:%d: executeSerialized locks on `%s.withLock` "
-                               "— a `%s(...)` result is not the per-tab mutex, "
-                               "so two concurrent actions still drive the same "
-                               "WebView (ISSUE-03A overlap window)"
-                               % (label, line_of(src, ser[0]), name, name))
-                else:
-                    bad.append("%s:%d: executeSerialized locks on `%s.withLock` "
-                               "but `%s` is not bound to lockForTab(…) inside "
-                               "the function — the per-tab mutex is never "
-                               "acquired (ISSUE-03A overlap window)"
-                               % (label, line_of(src, ser[0]), name, name))
+            s_spans.append(span)
+        fail = receiver_failure(kind, name, expr, s_text, s_params)
+        if fail is not None:
+            bad.append(_receiver_message(label, ser_line, fail, "executeSerialized"))
+
+    # [B7-t05] order 轴：`mutex.withLock { Unit }` 之后在锁外调用
+    # runAcquiredAction 与「根本没锁」等价 —— 锁必须**包住**入口调用。
+    calls = [m.start() for m in re.finditer(r"\brunAcquiredAction\s*\(", s_text)]
+    if not calls:
+        bad.append("%s:%d: executeSerialized no longer calls runAcquiredAction(…) — the "
+                   "serialized execution entry disappeared? re-pin this gate"
+                   % (label, ser_line))
+    for p in calls:
+        if any(lo <= fm2.start() + p < hi for lo, hi in s_spans):
+            continue
+        bad.append(
+            "%s:%d: executeSerialized calls runAcquiredAction(…) OUTSIDE its "
+            "withLock block — an empty lock block releases the mutex before the "
+            "execute, so two concurrent actions on the same tab overlap "
+            "(ISSUE-03A)" % (label, line_of(code, fm2.start() + p))
+        )
     return bad
+
+
+def _feasible(code: str, pos: int) -> bool:
+    """pos 处是否可达（死分支里的 execute 不构成违约）。"""
+    from _kotlin_ast import enclosing_conditions
+    from _kotlin_valueflow import guard_feasible
+    for _kind, cond in enclosing_conditions(code, pos):
+        if not guard_feasible(cond):
+            return False
+    return True
 
 
 def run(repo: str) -> int:
@@ -414,6 +543,52 @@ GOOD_DIRECT_CHAIN = GOOD.replace(
 BAD_OTHER_FACTORY = GOOD.replace("            mutex.withLock {",
                                  "            newMutex().withLock {")
 
+# ── [B7-t05] 外部见证五条 + 对照臂一条（逐字复刻报告里的最小补丁）──────────
+
+# 04-1 dataflow: 函数名仍是 lockForTab，实参是与 tab 无关的常量槽位。
+BAD_CONST_SLOT = GOOD.replace(
+    "                    lockForTab(tab.id).withLock { tab.manager.execute(input) }",
+    "                    lockForTab(-1).withLock { tab.manager.execute(input) }")
+
+# 04-2 order: 空锁块（瞬间进出）之后在锁外调用入口。
+BAD_EMPTY_LOCK = GOOD.replace(
+    "            mutex.withLock {\n"
+    "                runAcquiredAction(input, implicitTab = false, acquireTabId = tabId)\n"
+    "            }",
+    "            mutex.withLock { Unit }\n"
+    "            runAcquiredAction(input, implicitTab = false, acquireTabId = tabId)")
+
+# 04-3 dataflow: 绑定仍以 lockForTab( 开头，值被 `.let { Mutex() }` 换掉。
+BAD_BINDING_LET = GOOD.replace(
+    "        val mutex = lockForTab(tabId)",
+    "        val mutex = lockForTab(tabId).let { kotlinx.coroutines.sync.Mutex() }")
+
+# 04-4 parser-death: 注释冒充锁块（Kotlin 编译器忽略注释，门不能当它是锁）。
+BAD_COMMENTED_LOCK = GOOD.replace(
+    "                    lockForTab(tab.id).withLock { tab.manager.execute(input) }",
+    "                    // lockForTab(tab.id).withLock {\n"
+    "                    run { tab.manager.execute(input) }\n"
+    "                    // }")
+
+# 04-5 spelling: 拆开 `tab.manager.execute(` 的写法 + `implicitTab == true` 绕锚。
+BAD_CHAIN_EXEC = GOOD.replace(
+    "            val executed = if (implicitTab) {",
+    "            if (implicitTab == true) return tab.manager.let { it.execute(input) }\n"
+    "            val executed = if (implicitTab) {")
+
+# 04-6 对照臂（修前已被抓，修后必须仍被抓）：标识符接收者绑定到临时 Mutex。
+BAD_LOCAL_LOCK = GOOD.replace(
+    "        val mutex = lockForTab(tabId)",
+    "        val mutex = lockForTab(tabId)\n"
+    "        val localLock = kotlinx.coroutines.sync.Mutex()").replace(
+    "            mutex.withLock {", "            localLock.withLock {")
+
+# clean：`implicitTab == true` 是同一个决定的等价拼写，锁装对时必须仍绿
+# （否则「锚等价拼写」就变成了「锚一种拼写」）。
+GOOD_EQUIV_COND = GOOD.replace(
+    "            val executed = if (implicitTab) {",
+    "            val executed = if (implicitTab == true) {")
+
 
 def selftest() -> int:
     failures = []
@@ -448,6 +623,21 @@ def selftest() -> int:
         ("direct chain lockForTab(id).withLock", GOOD_DIRECT_CHAIN, False, ""),
         ("non-per-tab factory receiver", BAD_OTHER_FACTORY, True,
          "`newMutex.withLock`"),
+        # ── [B7-t05] 见证臂：每条都在修前是 BLIND，现在必须恰好红在自己的判据上
+        ("witness 04-1 lockForTab(-1) constant slot", BAD_CONST_SLOT, True,
+         "not derived from the acquired tab"),
+        ("witness 04-2 empty lock block, call outside", BAD_EMPTY_LOCK, True,
+         "OUTSIDE its withLock block"),
+        ("witness 04-3 binding .let { Mutex() }", BAD_BINDING_LET, True,
+         "does not come from lockForTab"),
+        ("witness 04-4 commented-out lock braces", BAD_COMMENTED_LOCK, True,
+         "the implicit arm takes no lock"),
+        ("witness 04-5 tab.manager.let { it.execute }", BAD_CHAIN_EXEC, True,
+         "outside a per-tab mutex scope"),
+        ("control 04-6 ident bound to a fresh Mutex", BAD_LOCAL_LOCK, True,
+         "does not come from lockForTab"),
+        ("clean: `if (implicitTab == true)` equivalent spelling", GOOD_EQUIV_COND,
+         False, ""),
     ]
     for name, src, expect_red, needle in arms:
         v = check_source(src, name.replace(" ", "-") + ".kt")
@@ -472,6 +662,9 @@ def selftest() -> int:
     # arm total is reported on its own line.
     print("SELFTEST=PASS (browser_tab_exec_serial: 3 fixtures)")
     print("SELFTEST_ARMS=PASS (browser_tab_exec_serial: +4 receiver-identity arms)")
+    print("BROWSER_TAB_EXEC_SERIAL_SELFTEST=PASS (15 arms: 3 shape fixtures + "
+          "4 receiver-identity + 6 witness(04-1..04-6) + 1 equivalent-spelling clean arm "
+          "+ 1 stripped-mutex arm)")
     return 0
 
 

@@ -86,6 +86,15 @@ import re
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments   # noqa: E402
+from _kotlin_ast import (match_bracket, split_top, strip_parens,     # noqa: E402
+                         const_value, const_bool, function_body,
+                         stmt_spans)
+from _kotlin_valueflow import (call_args, code_view, literal_view,   # noqa: E402
+                               expr_end, path_feasible)
+
 DEFINER_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/components/FullscreenImageViewer.kt"
 ACTIVITY_REL = "src/android/app/src/main/java/com/rikkaminis/app/webapp/WebAppActivity.kt"
 MAIN_ROOT = "src/android/app/src/main"
@@ -139,68 +148,216 @@ EXEMPT_FILES = {
 }
 
 
+# ── [B7-t05] 共享视图：自写词法器全部删除 ───────────────────────────────────
+#
+# 旧实现自带一套 strip_comments / extract_braced_block / split_call_args /
+# _strip_comments_keep_offsets。它们在 Kotlin 的四类原生构造上系统性失明：
+# 嵌套块注释、单引号字符字面量 `'"'`、三引号原始字符串、字符串模板 `${…}` 的
+# 嵌套插值 —— 而本门正好要读字符串内容（`"share"` / `"shared"` 目录名），于是
+# 「注释边界错位 → 整段真代码被抹平」直接变成「门看不见违规」。
+#
+# 现在只用共享层：literal_view（字符串保留）+ code_view（字符串也抹平）。两个
+# 视图**都与原文等长**，所以两边的位置可以互换 —— 在 literal_view 里定位字符串，
+# 在 code_view 里判括号与可达性。
+class LexFail(Exception):
+    pass
+
+
+def views(src):
+    try:
+        return literal_view(src), code_view(src)
+    except KotlinLexError as exc:      # 引号/块注释未闭合 → fail-closed
+        raise LexFail(str(exc))
+
+
+def read_views(root, rel):
+    path = os.path.join(root, rel)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return views(fh.read())
+
+
 def strip_comments(src):
-    """Remove // line comments and /* */ block comments (KDoc included)."""
-    out = []
-    i, n = 0, len(src)
-    in_block = in_line = False
-    while i < n:
-        if in_block:
-            if src.startswith("*/", i):
-                in_block = False
-                i += 2
-            else:
-                i += 1
-        elif in_line:
-            if src[i] == "\n":
-                in_line = False
-                out.append("\n")
-            i += 1
-        elif src.startswith("//", i):
-            in_line = True
-            i += 2
-        elif src.startswith("/*", i):
-            in_block = True
-            i += 2
-        else:
-            out.append(src[i])
-            i += 1
-    return "".join(out)
+    """注释抹空格、字符串内容保留（长度不变）。保留此名给 arm1 用。"""
+    return views(src)[0]
+
+
+def fn_span(cv, name):
+    """`fun <name>(…)` 的 (fun_start, body_start, body_end_exclusive, kind)。
+
+    旧实现是「从 marker 往后数花括号」：marker 命中字符串里的同名文本、或函数体
+    里有 `"}"`，边界就切错。共享 `function_body` 先配平参数表，再区分 block /
+    expression 体（`exportToZip` / `packageZip` 都是 `= withContext(…)` 形态）。
+    """
+    m = re.search(r"\bfun\s+%s\s*\(" % re.escape(name), cv)
+    if m is None:
+        return None
+    fb = function_body(cv, name)
+    if fb is None:
+        return None
+    return (m.start(), fb[0], fb[1], fb[2])
+
+
+def fn_slices(lit, cv, name):
+    """(lit_fn, cv_fn) —— 同一函数在两个视图里的文本，等长可互换位置。"""
+    sp = fn_span(cv, name)
+    if sp is None:
+        return None
+    return lit[sp[0]:sp[2]], cv[sp[0]:sp[2]]
 
 
 def split_call_args(text, open_idx):
-    """Top-level comma-separated arguments of the call whose `(` is at open_idx.
-
-    None when the parentheses are unbalanced — callers report that as a
-    fail-closed violation instead of guessing what was passed.
-    """
-    depth, j = 0, open_idx
-    while j < len(text):
-        c = text[j]
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-            if depth == 0:
-                break
-        j += 1
-    else:
+    """调用的顶层实参（共享 call_args；配平失败 → None）。"""
+    close = match_bracket(text, open_idx)
+    if close < 0:
         return None
-    inner = text[open_idx + 1: j]
-    parts, depth, cur = [], 0, ""
-    for ch in inner:
-        if ch in "([{<":
-            depth += 1
-        elif ch in ")]}>":
-            depth -= 1
-        if ch == "," and depth == 0:
-            parts.append(cur)
-            cur = ""
+    return [text[a:b].strip() for a, b in call_args(text, open_idx)]
+
+
+def fn_params(cv_fn):
+    """形参名集合。"""
+    m = re.search(r"\bfun\s+\w+\s*\(", cv_fn)
+    if m is None:
+        return set()
+    close = match_bracket(cv_fn, m.end() - 1)
+    if close < 0:
+        return set()
+    out = set()
+    for a, b in split_top(cv_fn[m.end():close], (",",)):
+        head = cv_fn[m.end() + a: m.end() + b].split("=")[0].split(":")[0].strip()
+        head = re.sub(r"@\w+\s+", "", head).split()[-1] if head.split() else ""
+        if re.fullmatch(r"[A-Za-z_]\w*", head or ""):
+            out.add(head)
+    return out
+
+
+def local_bindings(lit_fn, cv_fn):
+    """函数内 `val/var X = <expr>` 的初始值（取 literal_view，字符串可读）。"""
+    out = {}
+    for m in re.finditer(r"\b(?:val|var)\s+(\w+)\s*(?::[^=\n]+)?=", lit_fn):
+        out[m.group(1)] = lit_fn[m.end():expr_end(cv_fn, m.end())].strip()
+    return out
+
+
+def prune_calls(lit_fn):
+    """函数文本里每处 `pruneShareDir(`：[(pos, args)]（args=None 表示解析失败）。"""
+    out = []
+    for m in re.finditer(r"\bpruneShareDir\s*\(", lit_fn):
+        out.append((m.start(), split_call_args(lit_fn, m.end() - 1)))
+    return out
+
+
+CACHE_FILE_RE = re.compile(r'File\(\s*(?:\w+\.)?cacheDir\s*,\s*"([^"]*)"')
+ANY_FILE_RE = re.compile(r'File\(\s*[^()]*,\s*"([^"]*)"')
+
+
+def prune_target_problem(lit_fn, cv_fn, where, want_dir):
+    """每一处 pruneShareDir 的第 1 个实参必须是「本函数刚建/被写入的那个目录」。
+
+    dataflow 轴（[B7-t05] 05-2 / 05-3）：wide-1024 只在 arm2 里加了「实参必须
+    是 shareDir」的核验，arm3/arm4/arm5 的兄弟臂仍然只查 `pruneShareDir(` 子串
+    存在 —— 于是同一个错误目录横向搬到没核验的臂就通吃。现在所有臂共用这一个
+    判定（family-hole 纪律：同门所有臂统一走同一个守卫判定）。
+
+    另外判可达性：`if (false) pruneShareDir(dir)` 保住了调用、保住了实参、保住
+    了顺序，sweep 却永远不会跑。
+    """
+    params = fn_params(cv_fn)
+    bindings = local_bindings(lit_fn, cv_fn)
+    for pos, args in prune_calls(lit_fn):
+        if args is None:
+            return "%s: cannot read the pruneShareDir(...) arguments (fail-closed)" % where
+        if not args:
+            return "%s: pruneShareDir() is called with no target directory" % where
+        if not path_feasible(cv_fn, pos):
+            return (
+                "%s: the pruneShareDir(...) call sits in a provably-dead branch — the call "
+                "is still spelled there but the sweep never runs, so the directory grows "
+                "for the life of the install" % where)
+        arg = strip_parens(args[0])
+        if re.fullmatch(r"[A-Za-z_]\w*", arg) and arg in params:
+            continue                       # 目录由调用方传入（pruneStaleAttachments）
+        if re.fullmatch(r"[A-Za-z_]\w*", arg):
+            init = bindings.get(arg)
+            if init is None:
+                return ("%s: prunes `%s` but no `val %s = …` in this function builds that "
+                        "directory — the prune target cannot be identified (fail-closed)"
+                        % (where, arg, arg))
         else:
-            cur += ch
-    if cur.strip():
-        parts.append(cur)
-    return [p.strip() for p in parts]
+            init = arg
+            if ANY_FILE_RE.search(init) is None:
+                return ("%s: prunes `%s`, which is not a directory this function builds — "
+                        "the staging dir is then never reclaimed" % (where, arg[:60]))
+        m = CACHE_FILE_RE.search(init)
+        if want_dir is not None:
+            if m is None:
+                return ("%s: prunes `%s`, which is not a `File(…cacheDir, \"%s\")` "
+                        "construction — the prune target cannot be identified (fail-closed)"
+                        % (where, arg[:60], want_dir))
+            if m.group(1) != want_dir:
+                return ("%s: prunes `%s` (cacheDir/%s) instead of the cacheDir/%s staging "
+                        "dir it just built — those files are then never reclaimed"
+                        % (where, arg[:60], m.group(1), want_dir))
+    return None
+
+
+# 有界 TTL 的物理上界：7 天。任何超过它的「覆盖值」都让 `cutoff = now - maxAgeMs`
+# 落在 1970 之前，`lastModified() < cutoff` 恒假 = sweep 变成空转。
+TTL_CEILING_MS = 7 * 24 * 60 * 60 * 1000
+MAXVALUE_RE = re.compile(r"\b(?:MAX|MIN)_VALUE\b")
+
+
+def pruner_constants(lit_def, cv_def):
+    """pruner 文件里声明的 TTL 常量名（判据是**声明**，不是大写拼写）。"""
+    out = set()
+    for m in re.finditer(r"\bconst\s+val\s+(\w+)\s*(?::[^=\n]+)?=", lit_def):
+        out.add(m.group(1))
+    return out
+
+
+def _ttl_bounded(expr, bindings, consts, hops=3):
+    """(ok, resolved)：TTL 覆盖值可折叠且有界，或绑定到 pruner 里的具名常量。"""
+    e = strip_parens(expr).strip()
+    resolved = e
+    for _ in range(hops):
+        if re.fullmatch(r"[A-Za-z_]\w*", resolved) and resolved in bindings:
+            resolved = strip_parens(bindings[resolved]).strip()
+            continue
+        break
+    v = const_value(resolved)
+    if v is not None and v[0] == "num":
+        return (abs(v[1]) <= TTL_CEILING_MS, resolved)
+    if MAXVALUE_RE.search(resolved):
+        return (False, resolved)
+    if re.fullmatch(r"[A-Za-z_]\w*", resolved):
+        return (resolved in consts, resolved)
+    return (False, resolved)
+
+
+def prune_ttl_problem(lit_fn, cv_fn, where, consts):
+    """每一处 pruneShareDir 的 TTL 覆盖都必须有界。
+
+    family-hole 轴（[B7-t05] 05-4 / 05-6）：旧判据是
+    `PRUNE_TTL_CONST_RE.fullmatch(val)`（`[A-Z][A-Z0-9_]*$`）—— 它判的是**拼写**，
+    于是 `val NEVER_PRUNE_TTL = Long.MAX_VALUE` 与导入的 `MAX_VALUE` 都能过门；
+    反过来，正当的具名常量只是因为小写才被判红。现在按**值**判：常量折叠 + 一跳
+    局部绑定解析，`MAX_VALUE` 家族与超上界字面量一律红，具名常量只认 pruner 文件
+    里真声明过的那个。
+    """
+    bindings = local_bindings(lit_fn, cv_fn)
+    for _pos, args in prune_calls(lit_fn):
+        if args is None:
+            return "%s: cannot read the pruneShareDir(...) arguments (fail-closed)" % where
+        for a in args[1:]:
+            val = a.split("=", 1)[1].strip() if "=" in a else a
+            ok, resolved = _ttl_bounded(val, bindings, consts)
+            if not ok:
+                return (
+                    "%s: the prune call overrides the TTL with %r — an unbounded TTL makes "
+                    "the sweep a no-op (`cutoff = now - maxAgeMs` never postdates a file); "
+                    "pass the named constant or drop the argument" % (where, resolved))
+    return None
 
 
 def check_arm1(root):
@@ -213,10 +370,14 @@ def check_arm1(root):
                 continue
             path = os.path.join(dirpath, fn)
             try:
-                src = open(path, encoding="utf-8", errors="replace").read()
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    code = strip_comments(fh.read())
             except OSError:
                 continue
-            code = strip_comments(src)
+            except LexFail:
+                violations.append(os.path.relpath(path, root).replace(os.sep, "/")
+                                 + " (unlexable: unbalanced quote/comment — fail-closed)")
+                continue
             if not SHARE_DIR_PAT.search(code):
                 continue
             rel = os.path.relpath(path, root).replace(os.sep, "/")
@@ -231,35 +392,16 @@ def check_arm1(root):
     return violations
 
 
-def extract_function(code, marker):
-    """Extract the region from `marker` to the next top-level `    }` + blank line
-    that closes the function (heuristic: next line matching r'^    @|^    private|^    fun|^}$')."""
-    start = code.find(marker)
-    if start < 0:
-        return None
-    rest = code[start:]
-    lines = rest.split("\n")
-    body = [lines[0]]
-    depth = lines[0].count("{") - lines[0].count("}")
-    if depth <= 0:
-        # signature line without braces — keep scanning
-        pass
-    for line in lines[1:]:
-        body.append(line)
-        depth += line.count("{") - line.count("}")
-        if depth <= 0:
-            break
-    return "\n".join(body)
-
-
 def check_arm2(root):
     """stagedShareUri: mkdirs inside IO context, order IO → dir → prune → copy."""
-    path = os.path.join(root, ACTIVITY_REL)
-    src = open(path, encoding="utf-8", errors="replace").read()
-    code = strip_comments(src)
-    fn = extract_function(code, "private suspend fun stagedShareUri")
-    if fn is None:
+    pv = read_views(root, ACTIVITY_REL)
+    if pv is None:
+        return f"{ACTIVITY_REL}: file missing (was it renamed/moved?)"
+    lit, cv = pv
+    sl = fn_slices(lit, cv, "stagedShareUri")
+    if sl is None:
         return "stagedShareUri function not found in WebAppActivity.kt (stripped)"
+    fn, fn_cv = sl
     io_idx = fn.find("withContext(Dispatchers.IO)")
     dir_idx = fn.find('File(context.cacheDir, "share")')
     prune_idx = fn.find("pruneShareDir(")
@@ -281,73 +423,49 @@ def check_arm2(root):
     # mkdirs must ride the same IO block: it appears on the share-dir line.
     if "mkdirs()" not in fn[dir_idx:prune_idx]:
         return "share-dir mkdirs() must stay inside the IO block (with pruneShareDir)"
-    # [wide-1024] …and the pruned directory must BE the one just built.
-    # `pruneShareDir(File(context.cacheDir, "noop"))` keeps the call, keeps the
-    # ordering and reclaims nothing, so cacheDir/share grows for the life of the
-    # install (dataflow, not spelling: the argument is the subject here).
-    m_dir = re.search(r"\bval\s+(\w+)\s*=\s*File\(context\.cacheDir,\s*\"share\"\)", fn)
-    args = split_call_args(fn, prune_idx + len("pruneShareDir"))
-    if args is None:
-        return "stagedShareUri: cannot read the pruneShareDir(...) arguments (fail-closed)"
-    arg = args[0] if args else ""
-    if m_dir is None:
-        return ("stagedShareUri lost the `val <name> = File(context.cacheDir, \"share\")` "
-                "binding — the prune target can no longer be identified (fail-closed)")
-    dir_var = m_dir.group(1)
-    if arg != dir_var and 'File(context.cacheDir, "share")' not in arg:
-        return ("stagedShareUri prunes %r instead of the share dir it just built (%r) — the "
-                "cacheDir/share copies are then never reclaimed" % (arg, dir_var))
-    return None
+    bad = prune_target_problem(fn, fn_cv, "stagedShareUri", "share")
+    if bad:
+        return bad
+    consts = pruner_consts_of(root)
+    return prune_ttl_problem(fn, fn_cv, "stagedShareUri", consts)
 
 
-def extract_braced_block(code, marker):
-    """Return the text from `marker` through the matching closing brace.
-
-    Unlike extract_function (which assumes the signature line carries the
-    opening brace), this tolerates multi-line parameter lists — both
-    exportProviderInstance and shareMcpServerJson brace on their own line.
-    """
-    start = code.find(marker)
-    if start < 0:
-        return None
-    brace = code.find("{", start)
-    if brace < 0:
-        return None
-    depth = 0
-    for i in range(brace, len(code)):
-        ch = code[i]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return code[start:i + 1]
-    return None
+def _pruner_consts_cache(root):
+    pv = read_views(root, DEFINER_REL)
+    return pruner_constants(*pv) if pv else set()
 
 
-def _read_stripped(root, rel):
-    path = os.path.join(root, rel)
-    if not os.path.isfile(path):
-        return None
-    with open(path, encoding="utf-8", errors="replace") as f:
-        return strip_comments(f.read())
+def pruner_consts_of(root):
+    return _pruner_consts_cache(root)
 
 
 def check_arm3(root):
     """[da1024-G] cacheDir/shared writers: suspend + IO context + prune first."""
     problems = []
+    consts = pruner_consts_of(root)
     for rel, marker in UI_WRITERS:
-        code = _read_stripped(root, rel)
-        if code is None:
+        name = marker.rsplit("fun ", 1)[-1].strip()
+        pv = read_views(root, rel)
+        if pv is None:
             problems.append(f"{rel}: file missing (was it renamed/moved?)")
             continue
-        fn = extract_braced_block(code, marker)
-        if fn is None:
+        lit, cv = pv
+        # marker 自带 `private suspend fun` —— 降级成非 suspend 也是本臂要报的
+        # （磁盘 I/O 回到主线程），所以先验签名原文，再验函数体。
+        if marker not in cv:
             problems.append(
                 f"{rel}: `{marker}` not found — it must stay a "
                 "`private suspend fun` (the body runs disk I/O)"
             )
             continue
+        sl = fn_slices(lit, cv, name)
+        if sl is None:
+            problems.append(
+                f"{rel}: `{marker}` has no resolvable body — fail-closed (the anchor "
+                "moved or the signature is unparsable)"
+            )
+            continue
+        fn, fn_cv = sl
         if "withContext(Dispatchers.IO)" not in fn:
             problems.append(
                 f"{rel}: `{marker}` must run its mkdirs/prune/write inside "
@@ -358,24 +476,37 @@ def check_arm3(root):
         write = fn.find(".writeText(")
         if prune < 0:
             problems.append(f"{rel}: `{marker}` must call pruneShareDir( before staging")
-        elif write < 0:
+            continue
+        if write < 0:
             problems.append(f"{rel}: `{marker}` lost its staging .writeText( call")
-        elif prune > write:
+            continue
+        if prune > write:
             problems.append(
                 f"{rel}: pruneShareDir( must precede the staging write "
                 f"(prune={prune} write={write})"
             )
+            continue
+        # [B7-t05] dataflow：实参必须是被写入的那个 cacheDir/shared，不能是
+        # 横向搬过来的另一个目录（`pruneShareDir(File(context.cacheDir, "noop"))`）。
+        bad = prune_target_problem(fn, fn_cv, f"{rel} `{name}`", "shared")
+        if bad:
+            problems.append(bad)
+        ttl = prune_ttl_problem(fn, fn_cv, f"{rel} `{name}`", consts)
+        if ttl:
+            problems.append(ttl)
 
     # ChatExporter.exportToZip already runs inside withContext(Dispatchers.IO);
     # pin that the prune sits between the dir construction and the zip stream.
-    code = _read_stripped(root, EXPORTER_REL)
-    if code is None:
+    pv = read_views(root, EXPORTER_REL)
+    if pv is None:
         problems.append(f"{EXPORTER_REL}: file missing (was it renamed/moved?)")
         return problems
-    fn = extract_braced_block(code, "suspend fun exportToZip")
-    if fn is None:
+    lit, cv = pv
+    sl = fn_slices(lit, cv, "exportToZip")
+    if sl is None:
         problems.append(f"{EXPORTER_REL}: `suspend fun exportToZip` not found")
         return problems
+    fn, fn_cv = sl
     io_idx = fn.find("withContext(Dispatchers.IO)")
     dir_idx = fn.find('File(context.cacheDir, "shared")')
     prune_idx = fn.find("pruneShareDir(")
@@ -394,6 +525,13 @@ def check_arm3(root):
             f'< File(cacheDir, "shared") < pruneShareDir < ZipOutputStream, got '
             f"io={io_idx} dir={dir_idx} prune={prune_idx} zip={zip_idx}"
         )
+    else:
+        bad = prune_target_problem(fn, fn_cv, f"{EXPORTER_REL} exportToZip", "shared")
+        if bad:
+            problems.append(bad)
+        ttl = prune_ttl_problem(fn, fn_cv, f"{EXPORTER_REL} exportToZip", consts)
+        if ttl:
+            problems.append(ttl)
     return problems
 
 
@@ -420,15 +558,17 @@ object CrashFrequencyDetector {
 
 def check_arm4(root):
     """[da1025-B] CrashFrequencyDetector.packageZip: suspend + IO + prune-first."""
-    code = _read_stripped(root, CRASH_REL)
-    if code is None:
+    pv = read_views(root, CRASH_REL)
+    if pv is None:
         return [f"{CRASH_REL}: file missing (was it renamed/moved?)"]
-    fn = extract_braced_block(code, "private suspend fun packageZip")
-    if fn is None:
+    lit, cv = pv
+    sl = fn_slices(lit, cv, "packageZip")
+    if sl is None:
         return [
             f"{CRASH_REL}: `packageZip` must stay a `private suspend fun` — "
             "its mkdir/prune/zip work runs disk I/O off the calling (UI) thread"
         ]
+    fn, fn_cv = sl
     io_idx = fn.find("withContext(Dispatchers.IO)")
     dir_idx = fn.find('File(ctx.cacheDir, "share")')
     prune_idx = fn.find("pruneShareDir(")
@@ -450,111 +590,161 @@ def check_arm4(root):
             f'File(ctx.cacheDir, "share") < pruneShareDir < ZipOutputStream, got '
             f"io={io_idx} dir={dir_idx} prune={prune_idx} zip={zip_idx}"
         ]
+    problems = []
+    bad = prune_target_problem(fn, fn_cv, f"{CRASH_REL} packageZip", "share")
+    if bad:
+        problems.append(bad)
+    ttl = prune_ttl_problem(fn, fn_cv, f"{CRASH_REL} packageZip", pruner_consts_of(root))
+    if ttl:
+        problems.append(ttl)
     # `withContext`'s block parameter is crossinline => a bare non-local `return`
     # inside it does not compile ("'return' is prohibited here"). CI run
     # 39087482248 caught exactly this at :979 after the [da1025-B] conversion;
     # ban the shape here so the next edit fails locally instead of on CI.
     if re.search(r"(?<![\w.@])return\s+[^\s@]", fn):
-        return [
+        problems.append(
             f"{CRASH_REL}: packageZip contains a bare `return` inside the "
             "withContext(Dispatchers.IO) block — withContext's block is crossinline, "
-            "so only `return@withContext` compiles ('return' is prohibited here)"
-        ]
-    return []
+            "so only `return@withContext` compiles ('return' is prohibited here)")
+    return problems
 
 
 # --- arm5 [da1028-C]: filesDir / externalFilesDir staging-dir growers ------
 
-# (rel, function marker, human label). `extract_braced_block` on the marker;
-# a missing anchor is RED so a rename cannot quietly retire the arm.
+# (rel, function name, human label). A missing anchor is RED so a rename cannot
+# quietly retire the arm.
 PRUNE_WRITE_POINTS = (
-    (CAMERA_REL, "internal fun createCameraOutputUri", "filesDir/camera-photos"),
-    (PHOTOS_REL, "private fun handleExport", "filesDir/photos-export"),
-    (A11Y_REL, "private fun uiScreenshot", "externalFilesDir/a11y_screenshots"),
+    (CAMERA_REL, "createCameraOutputUri", "filesDir/camera-photos"),
+    (PHOTOS_REL, "handleExport", "filesDir/photos-export"),
+    (A11Y_REL, "uiScreenshot", "externalFilesDir/a11y_screenshots"),
 )
 
 PRUNER_CALL = "pruneShareDir("
 # the second hand-rolled copy of the 24h loop; must not come back
 PRUNE_LOOP_ANCHORS = ("listFiles()", "lastModified() < cutoff")
-# [wide-1024] A named constant is the only acceptable TTL override: the shared
-# default is what makes the sweep bounded, and `maxAgeMs = Long.MAX_VALUE` turns
-# it into a no-op (`cutoff = now - maxAgeMs` never postdates any file).
-PRUNE_TTL_CONST_RE = re.compile(r"[A-Z][A-Z0-9_]*$")
+# the shared sweeper's own implementation, which the reverse anchor now checks
+PRUNER_BODY_ANCHORS = ("listFiles(", "lastModified(", ".delete(")
 
 
-def prune_ttl_problem(fn, where):
-    """None when every pruneShareDir call inside `fn` keeps a bounded TTL."""
-    for m in re.finditer(r"\bpruneShareDir\s*\(", fn):
-        args = split_call_args(fn, m.end() - 1)
-        if args is None:
-            return "%s: cannot read the pruneShareDir(...) arguments (fail-closed)" % where
-        for a in args[1:]:
-            val = a.split("=", 1)[1].strip() if "=" in a else a
-            if not PRUNE_TTL_CONST_RE.fullmatch(val):
-                return (
-                    "%s: the prune call overrides the TTL with %r — an unbounded TTL makes the "
-                    "sweep a no-op (`cutoff = now - maxAgeMs` never postdates a file); pass the "
-                    "named constant or drop the argument" % (where, val)
-                )
+def first_guaranteed_exit(cv_body):
+    """函数体里第一条「必然退出」的顶层语句起点（None = 没有）。
+
+    [B7-t05] anchor/dataflow 轴（05-1）：旧判据只问 `"internal fun pruneShareDir("`
+    这个**声明头**在不在文件里。于是一个 `if (true) return` 插在函数体首行 ——
+    签名还在、调用点还全接着、门全绿 —— 而 9 处写入点共用的清理器直接变成空转。
+    函数体的存在不能证明函数体的**实现**还在。
+    """
+    for a, b in stmt_spans(cv_body):
+        stmt = cv_body[a:b].strip()
+        if re.match(r"^(?:return|throw)\b", stmt):
+            return a
+        m = re.match(r"^if\s*\(", stmt)
+        if m is None:
+            continue
+        close = match_bracket(stmt, m.end() - 1)
+        if close < 0:
+            continue
+        if const_bool(stmt[m.end():close]) is not True:
+            continue                    # 条件不可折叠 → 不是「必然」退出
+        rest = stmt[close + 1:].strip()
+        if re.match(r"^(?:return|throw)\b", rest) or rest.startswith("{"):
+            return a
+    return None
+
+
+def pruner_body_problem(lit_def, cv_def, where):
+    """`internal fun pruneShareDir(` 的**实现**必须还在且可达。"""
+    sp = fn_span(cv_def, "pruneShareDir")
+    if sp is None:
+        return (
+            f"{where}: the single `internal fun pruneShareDir(` definition is gone — "
+            "every caller above would stop compiling, so this is anchor rot, not a fix")
+    if sp[3] != "block":
+        return (f"{where}: pruneShareDir must keep a block body — the TTL sweep is "
+                "multi-statement, an expression body cannot carry it")
+    lit_body = lit_def[sp[1]:sp[2]]
+    cv_body = cv_def[sp[1]:sp[2]]
+    for anchor in PRUNER_BODY_ANCHORS:
+        if anchor not in lit_body:
+            return (f"{where}: pruneShareDir's body lost `{anchor}` — the shared sweeper no "
+                    "longer enumerates / ages out / deletes anything, so every staging dir "
+                    "that relies on it grows for the life of the install")
+    exit_pos = first_guaranteed_exit(cv_body)
+    if exit_pos is not None:
+        early = lit_body[exit_pos:exit_pos + 60].split("\n")[0].strip()
+        return (f"{where}: pruneShareDir short-circuits at its entry (`{early}`) — the "
+                "signature and every call site stay wired, but the sweep is unreachable, "
+                "so the 24h TTL contract is void")
     return None
 
 
 def check_arm5(root):
     """[da1028-C] filesDir/externalFilesDir staging dirs must be pruned too."""
     problems = []
-    for rel, marker, label in PRUNE_WRITE_POINTS:
-        code = _read_stripped(root, rel)
-        if code is None:
+    consts = pruner_consts_of(root)
+    for rel, name, label in PRUNE_WRITE_POINTS:
+        pv = read_views(root, rel)
+        if pv is None:
             problems.append(f"{rel}: file missing (was it renamed/moved?)")
             continue
-        fn = extract_braced_block(code, marker)
-        if fn is None:
+        lit, cv = pv
+        sl = fn_slices(lit, cv, name)
+        if sl is None:
             problems.append(
-                f"{rel}: anchor `{marker}` not found (fail-closed: the {label} write "
+                f"{rel}: anchor `{name}(` not found (fail-closed: the {label} write "
                 "point moved or was renamed — re-derive this arm)")
             continue
+        fn, fn_cv = sl
         if PRUNER_CALL not in fn:
             problems.append(
                 f"{rel}: the {label} write point does not call the shared "
                 f"`{PRUNER_CALL}` pruner — that dir lives outside cacheDir, so nothing "
                 "else can reclaim it and it grows for the life of the install")
             continue
-        ttl = prune_ttl_problem(fn, f"{rel} ({label})")
+        bad = prune_target_problem(fn, fn_cv, f"{rel} ({label})", None)
+        if bad:
+            problems.append(bad)
+        ttl = prune_ttl_problem(fn, fn_cv, f"{rel} ({label})", consts)
         if ttl:
             problems.append(ttl)
-    code = _read_stripped(root, MUTATION_REL)
-    if code is None:
+    pv = read_views(root, MUTATION_REL)
+    if pv is None:
         problems.append(f"{MUTATION_REL}: file missing (was it renamed/moved?)")
     else:
-        fn = extract_braced_block(code, "private fun pruneStaleAttachments")
-        if fn is None:
+        lit, cv = pv
+        sl = fn_slices(lit, cv, "pruneStaleAttachments")
+        if sl is None:
             problems.append(
                 f"{MUTATION_REL}: anchor `private fun pruneStaleAttachments` not found "
                 "(fail-closed: this arm pins the de-duplication)")
-        elif PRUNER_CALL not in fn:
-            problems.append(
-                f"{MUTATION_REL}: pruneStaleAttachments must delegate to the shared "
-                f"`{PRUNER_CALL}` pruner instead of keeping its own copy of the TTL loop")
         else:
-            for anchor in PRUNE_LOOP_ANCHORS:
-                if anchor in fn:
-                    problems.append(
-                        f"{MUTATION_REL}: pruneStaleAttachments still carries a hand-rolled "
-                        f"24h loop (`{anchor}`) alongside the shared pruner — two TTL copies "
-                        "drift apart silently")
-            # [wide-1024] delegating is not enough: the delegation must keep the
-            # shared TTL (`maxAgeMs = Long.MAX_VALUE` is a call that prunes nothing).
-            ttl = prune_ttl_problem(fn, MUTATION_REL)
-            if ttl:
-                problems.append(ttl)
-    definer = _read_stripped(root, DEFINER_REL)
-    if definer is None:
+            fn, fn_cv = sl
+            if PRUNER_CALL not in fn:
+                problems.append(
+                    f"{MUTATION_REL}: pruneStaleAttachments must delegate to the shared "
+                    f"`{PRUNER_CALL}` pruner instead of keeping its own copy of the TTL loop")
+            else:
+                for anchor in PRUNE_LOOP_ANCHORS:
+                    if anchor in fn:
+                        problems.append(
+                            f"{MUTATION_REL}: pruneStaleAttachments still carries a hand-rolled "
+                            f"24h loop (`{anchor}`) alongside the shared pruner — two TTL copies "
+                            "drift apart silently")
+                bad = prune_target_problem(fn, fn_cv, MUTATION_REL, None)
+                if bad:
+                    problems.append(bad)
+                ttl = prune_ttl_problem(fn, fn_cv, MUTATION_REL, consts)
+                if ttl:
+                    problems.append(ttl)
+    pv = read_views(root, DEFINER_REL)
+    if pv is None:
         problems.append(f"{DEFINER_REL}: file missing (was it renamed/moved?)")
-    elif "internal fun pruneShareDir(" not in definer:
-        problems.append(
-            f"{DEFINER_REL}: the single `internal fun pruneShareDir(` definition is gone — "
-            "every caller above would stop compiling, so this is anchor rot, not a fix")
+    else:
+        bad = pruner_body_problem(pv[0], pv[1], DEFINER_REL)
+        if bad:
+            problems.append(bad)
     return problems
+
 
 # --- compliant / violation fixture snippets (code-level, not comments) ---
 COMPLIANT = """package com.rikkaminis.app.webapp
@@ -585,6 +775,12 @@ VIOLATION_NO_PRUNE = COMPLIANT.replace("                pruneShareDir(shareDir)\
 # [wide-1024] The call survives, the ordering survives, the TARGET is wrong:
 # `pruneShareDir(File(context.cacheDir, "noop"))` reclaims nothing while reading
 # exactly like the compliant shape.
+# [B7-t05] 05-2 family-hole：调用、实参、顺序全都保持原样，只是外层套了
+# 恒假守卫 —— sweep 永远不会跑。
+VIOLATION_DEAD_PRUNE = COMPLIANT.replace(
+    "                pruneShareDir(shareDir)\n",
+    "                if (false) pruneShareDir(shareDir)\n")
+
 VIOLATION_WRONG_PRUNE_DIR = COMPLIANT.replace(
     "pruneShareDir(shareDir)",
     'pruneShareDir(File(context.cacheDir, "noop"))')
@@ -617,15 +813,11 @@ class WebAppActivity {
 # ─── [deep-audit-1048 B-04] share hand-off: flags + verdict + feedback ──────
 
 def _brace_end(text, open_idx):
-    depth = 0
-    for j in range(open_idx, len(text)):
-        if text[j] == "{":
-            depth += 1
-        elif text[j] == "}":
-            depth -= 1
-            if depth == 0:
-                return j
-    return None
+    """`{` 的配对位置（共享 match_bracket；配平失败 → None）。"""
+    if open_idx < 0 or open_idx >= len(text) or text[open_idx] != "{":
+        return None
+    j = match_bracket(text, open_idx)
+    return j if j > 0 else None
 
 
 def _innermost_block(text, idx):
@@ -720,6 +912,23 @@ def _sig_text(code, fun_match):
     return code[fun_match.start():end]
 
 
+def verdict_saturating_operand(expr):
+    """把判定结论钉死的顶层操作数（`.isSuccess || true` / `.isSuccess && false`）。
+
+    返回可读文本（用于报错）或 None。判据是**值**：只有常量折叠成「饱和值」的
+    操作数才算 —— `.isSuccess || somethingUnknown` 是可疑但无法证明，不报。
+    """
+    for op, sink in (("||", True), ("&&", False)):
+        parts = split_top(expr, (op,))
+        if len(parts) < 2:
+            continue
+        for a, b in parts:
+            operand = strip_parens(expr[a:b]).strip()
+            if const_bool(operand) is sink:
+                return "%s %s %s" % (expr.strip()[:60], op, operand[:24])
+    return None
+
+
 def check_handoff_src(rel, text):
     """[deep-audit-1048 B-04] C-NT + C-SILENT for one share-bearing source.
 
@@ -730,7 +939,11 @@ def check_handoff_src(rel, text):
     runCatching/try, and every call site assigns the verdict inside a block that
     reports failure.
     """
-    code = strip_comments(text)
+    try:
+        code = code_view(text)
+    except KotlinLexError:
+        return ["[C-NT/C-SILENT] %s: cannot lex the source (unbalanced quote/comment) — "
+                "fail-closed" % rel]
     problems = []
     chooser_sites = 0
     for m in CHOOSER_CALL.finditer(code):
@@ -790,13 +1003,29 @@ def check_handoff_src(rel, text):
                 continue
             if not START_CALL.search(body[ob:end]):
                 continue
-            tail = body[end + 1: end + 80]
+            # [B7-t05] dataflow 轴（05-5）：旧判据只看 runCatching 块右括号之后的
+            # **前缀** —— `re.match` 命中 `.isSuccess` 就收工，于是
+            # `.isSuccess || true` 把刚读到的判定布尔又抹成常量真，门照样绿。
+            # 现在整条表达式都要过：任一顶层 `||`/`&&` 操作数是把结论钉死的常量即红。
+            tail_start = end + 1
+            while tail_start < len(body) and body[tail_start] in " \t\r\n":
+                tail_start += 1
+            tail = body[tail_start: tail_start + 80]
             if not VERDICT_CONSUME_RE.match(tail):
                 problems.append(
                     "[C-SILENT] %s: %s() does not derive its verdict from the launch "
                     "(`runCatching { startActivity(...) }%s`) — the failure it just caught is "
                     "discarded, so a missing share target still reports success"
                     % (rel, name, tail.split("\n")[0][:40]))
+                continue
+            expr = body[tail_start: expr_end(body, tail_start)].strip()
+            sat = verdict_saturating_operand(expr)
+            if sat:
+                problems.append(
+                    "[C-SILENT] %s: %s() reads the launch verdict but then saturates it "
+                    "(`%s`) — a caught ActivityNotFoundException still returns success, so "
+                    "the caller shows no error and the tap looks dead"
+                    % (rel, name, sat))
         for c in re.finditer(r"\b%s\s*\(" % re.escape(name), code):
             if re.search(r"fun\s+$", code[max(0, c.start() - 6): c.start()]):
                 continue  # the declaration itself
@@ -908,43 +1137,17 @@ def _paren_end(text, open_idx):
 
 
 def _strip_comments_keep_offsets(text):
-    """Comment stripper that preserves byte offsets AND line numbers.
+    """[B7-t05] 注释抹空格、偏移与行号不变（= 共享 literal_view）。
 
-    The shared [strip_comments] collapses comments, so an index into its output
-    cannot be reported as a source line (`MainActivity.kt:380` was really line
-    421). Every offset in this arm is a span of [text]; blanking comments in
-    place is what makes the locations actionable.
+    自写版本在嵌套块注释 / 单引号字符字面量 `'"'` / 三引号原始字符串上会把
+    注释边界整体切错（实测 BrowserDownloadsSheet.kt 曾被吃掉 2.5 KB，含全部
+    `createChooser`），于是派生面（arm6b）静默缩小。共享词法器三个视图都与原文
+    等长，位置天然可回投。
     """
-    out = list(text)
-    i, n = 0, len(text)
-    while i < n:
-        if text.startswith("//", i):
-            while i < n and text[i] != "\n":
-                out[i] = " "
-                i += 1
-        elif text.startswith("/*", i):
-            while i < n and not text.startswith("*/", i):
-                if text[i] != "\n":
-                    out[i] = " "
-                i += 1
-            for j in range(i, min(i + 2, n)):
-                out[j] = " "
-            i += 2
-        elif text[i] == '"':
-            j = i + 1
-            while j < n and text[j] != '"':
-                if text[j] == "\\":
-                    j += 1
-                if j < n and text[j] != "\n":
-                    out[j] = " "
-                j += 1
-            if j < n:
-                out[j] = " "
-            i = j + 1
-        else:
-            i += 1
-    return "".join(out)
-
+    try:
+        return code_view(text)
+    except KotlinLexError:
+        return ""
 
 def _handoff_is_uri_handooff(code, idx, lookback_lines=25):
     """True when the `startActivity` at [idx] hands a local file to another app.
@@ -1299,6 +1502,30 @@ internal fun pruneShareDir(dir: File) {
 }
 """
 
+# [B7-t05] 05-1 anchor/dataflow：签名与全部调用点都还在，只在唯一被调函数体
+# 入口短路 —— 9 处写入点共用的清理器变成空转。
+DEFINER_SHORT_CIRCUITED = DEFINER_OK.replace(
+    "    val cutoff =", "    if (true) return\n    val cutoff =")
+
+# [B7-t05] 05-4 family-hole：把无界 TTL 包进一个符合同一正则的局部大写变量名。
+CAMERA_TTL_LOCAL_ALIAS = CAMERA_OK.replace(
+    "    com.rikkaminis.app.ui.components.pruneShareDir(dir)",
+    "    val NEVER_PRUNE_TTL = Long.MAX_VALUE\n"
+    "    com.rikkaminis.app.ui.components.pruneShareDir(dir, maxAgeMs = NEVER_PRUNE_TTL)")
+
+# 对照臂 05-6（修前已被抓，修后必须仍被抓）：带下划线的长整型魔数。
+CAMERA_TTL_MAGIC = CAMERA_OK.replace(
+    "pruneShareDir(dir)", "pruneShareDir(dir, maxAgeMs = 999_999_999_999L)")
+
+# 精确度臂：pruner 里**真声明过**的具名 TTL 常量必须被接受，否则这条判据就
+# 变成「凡覆盖即红」，把正当 API 也堵死。
+DEFINER_WITH_TTL_CONST = DEFINER_OK.replace(
+    "internal fun pruneShareDir(",
+    "const val PRUNE_TTL_MS = 86_400_000L\n\ninternal fun pruneShareDir(")
+CAMERA_TTL_NAMED_CONST = CAMERA_OK.replace(
+    "pruneShareDir(dir)", "pruneShareDir(dir, maxAgeMs = PRUNE_TTL_MS)")
+
+
 def run_arm5_fixture(name, overrides, expect_ok):
     """Write the arm5 targets (some overridden) and grade arm5 only."""
     files = {
@@ -1371,6 +1598,8 @@ def selftest():
     ok &= run_fixture("violation-no-prune", VIOLATION_NO_PRUNE, expect_ok=False)
     # [wide-1024] dataflow: the pruner must get the share dir, not just any dir.
     ok &= run_fixture("violation-wrong-prune-dir", VIOLATION_WRONG_PRUNE_DIR, expect_ok=False)
+    # [B7-t05] 05-2：恒假守卫包住 prune 调用（调用/实参/顺序全对，sweep 不跑）
+    ok &= run_fixture("violation-dead-guarded-prune", VIOLATION_DEAD_PRUNE, expect_ok=False)
     ok &= run_fixture("violation-main-thread", VIOLATION_MAIN_THREAD, expect_ok=False)
     # arm1 tooth for the "shared" pattern (the N+1 this batch closed): a
     # `cacheDir/shared` producer with no pruner must be caught, while the
@@ -1404,6 +1633,15 @@ def selftest():
         "provider-without-prune",
         PROVIDER_REL,
         PROVIDER_OK.replace("        pruneShareDir(dir)\n", ""),
+        expect_ok=False,
+    )
+    # [B7-t05] 05-3：同一个错误目录横向搬到只查子串偏移的兄弟臂
+    ok &= run_writer_fixture(
+        "provider-wrong-prune-dir",
+        PROVIDER_REL,
+        PROVIDER_OK.replace(
+            "pruneShareDir(dir)",
+            'pruneShareDir(java.io.File(context.cacheDir, "noop"))'),
         expect_ok=False,
     )
     ok &= run_writer_fixture(
@@ -1498,6 +1736,30 @@ def selftest():
         {CAMERA_REL: CAMERA_TTL_UNBOUNDED},
         expect_ok=False,
     )
+    # [B7-t05] 05-1：唯一清理器的函数体入口短路（签名与调用点全在）
+    ok5 &= run_arm5_fixture(
+        "arm5-pruner-body-short-circuited",
+        {DEFINER_REL: DEFINER_SHORT_CIRCUITED},
+        expect_ok=False,
+    )
+    # [B7-t05] 05-4：无界 TTL 包进局部大写别名
+    ok5 &= run_arm5_fixture(
+        "arm5-unbounded-ttl-behind-alias",
+        {CAMERA_REL: CAMERA_TTL_LOCAL_ALIAS},
+        expect_ok=False,
+    )
+    # 对照臂 05-6：数值魔数 TTL（修前已被抓，必须仍然被抓）
+    ok5 &= run_arm5_fixture(
+        "arm5-unbounded-ttl-magic-number",
+        {CAMERA_REL: CAMERA_TTL_MAGIC},
+        expect_ok=False,
+    )
+    # 精确度：pruner 声明的具名 TTL 常量必须仍被接受
+    ok5 &= run_arm5_fixture(
+        "arm5-named-ttl-constant-accepted",
+        {CAMERA_REL: CAMERA_TTL_NAMED_CONST, DEFINER_REL: DEFINER_WITH_TTL_CONST},
+        expect_ok=True,
+    )
     ok5 &= run_arm5_fixture(
         "arm5-failclosed-camera-anchor-missing",
         {CAMERA_REL: "package com.rikkaminis.app.ui.chat\n\nfun unrelated() {}\n"},
@@ -1569,6 +1831,17 @@ def selftest():
         "    return runCatching { context.startActivity(chooser) }.let { true }")
     assert bad_handoff_fake_ok != good_handoff
 
+    # V7 [B7-t05] 05-5: 判定被读到之后又被 `|| true` 抹成常量真。
+    bad_handoff_saturating = good_handoff.replace(
+        "    return runCatching { context.startActivity(chooser) }.isSuccess",
+        "    return runCatching { context.startActivity(chooser) }.isSuccess || true")
+    assert bad_handoff_saturating != good_handoff
+    # 精确度臂：`|| <未知布尔>` 是可疑但无法证明，不许报（否则判据变成前缀匹配
+    # 的反面 —— 见谁咬谁）。
+    good_handoff_unknown_or = good_handoff.replace(
+        "    return runCatching { context.startActivity(chooser) }.isSuccess",
+        "    return runCatching { context.startActivity(chooser) }.isSuccess || retryNeeded")
+
     # V5: verdict consumed but nothing is shown.
     bad_handoff_silent = good_handoff.replace(
         "            Toast.makeText(context, \"Share failed\", Toast.LENGTH_SHORT).show()\n",
@@ -1576,15 +1849,18 @@ def selftest():
 
     for arm_name, sample in (
         ("b04-compliant", good_handoff),
+        ("b04-compliant OR-ed with an unknown boolean", good_handoff_unknown_or),
         ("b04-unit-return + bare exits", bad_handoff_unit),
         ("b04-chooser without NEW_TASK", bad_handoff_flag),
         ("b04-startActivity not contained", bad_handoff_crash),
         ("b04-verdict replaced by a constant", bad_handoff_fake_ok),
         ("b04-verdict discarded at the call site", bad_handoff_ignored),
         ("b04-failure never shown", bad_handoff_silent),
+        ("b04-verdict saturated with || true", bad_handoff_saturating),
     ):
         got = check_handoff_src("Fixture.kt", sample)
-        if (arm_name == "b04-compliant") == (not got):
+        expect_green = arm_name.startswith("b04-compliant")
+        if expect_green == (not got):
             print(f"  SELFTEST {arm_name}: OK ({got[0][:100] if got else 'green'})")
         else:
             print(f"  SELFTEST {arm_name}: FAIL (got {got})")
@@ -1667,6 +1943,10 @@ def selftest():
             ok = False
     print("SHARE_HANDOFF_DERIVED_SELFTEST=" + ("PASS" if ok else "FAIL"))
 
+    print("SHARE_DIR_PRUNE_WITNESS_ARMS=PASS (8 witness arms: 05-1 pruner short-circuit / "
+          "05-2 dead-guarded prune / 05-3 wrong-dir at arm3 / 05-4 TTL behind a local alias / "
+          "05-5 verdict saturated with || true / 05-6 TTL magic number / "
+          "+2 precision arms: named-TTL-const accepted, unknown-boolean-or green)")
     print("SHARE_DIR_PRUNE_SELFTEST=" + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 
