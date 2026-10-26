@@ -49,6 +49,17 @@ import sys
 import tempfile
 from pathlib import Path
 
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments
+from _kotlin_ast import (
+    const_bool,
+    const_value,
+    if_blocks,
+    match_bracket,
+    split_top,
+    strip_parens,
+)
+from _kotlin_valueflow import code_view, contains_ident, expr_end, literal_view, value_sources
+
 ROOT = Path(sys.argv[1] if len(sys.argv) > 1 else ".")
 
 SCREEN_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/settings/ChatMenuSettingsScreen.kt"
@@ -75,69 +86,45 @@ ORDER_TARGETS = {
 }
 
 
-def strip_comments_and_strings(text: str) -> str:
-    """Blank out // comments, /* */ blocks and string literals (brace-safe)."""
-    out = []
-    i, n = 0, len(text)
-    state = None
-    while i < n:
-        c = text[i]
-        two = text[i:i + 2]
-        if state is None:
-            if two == "//":
-                state = "line"; out.append("  "); i += 2; continue
-            if two == "/*":
-                state = "block"; out.append("  "); i += 2; continue
-            if c == '"':
-                state = "str"; out.append(" "); i += 1; continue
-            out.append(c); i += 1; continue
-        if state == "line":
-            out.append("\n" if c == "\n" else " ")
-            if c == "\n":
-                state = None
-            i += 1; continue
-        if state == "block":
-            if two == "*/":
-                state = None; out.append("  "); i += 2; continue
-            out.append("\n" if c == "\n" else " "); i += 1; continue
-        if state == "str":
-            if c == "\\":
-                out.append("  "); i += 2; continue
-            if c == '"':
-                state = None; out.append(" "); i += 1; continue
-            out.append(" "); i += 1; continue
-    return "".join(out)
+def views(text: str):
+    """(code, literal)：抹掉注释+字面量的等长视图 / 只剥注释的等长视图。
+
+    两套视图字符数严格相等，所以偏移可以互相回投：结构判定在 code 上做
+    （字符串里的 `}`、`'"'` 字符字面量都已经被抹平），读字面量内容（raw key
+    名、`"logging_prefs"`）时回投到 literal。解析失败返回 (None, None)，所有
+    调用方据此 fail-closed —— 本门不再自带词法器。
+    """
+    try:
+        return code_view(text), literal_view(text)
+    except KotlinLexError:
+        return None, None
 
 
 def listener_body(screen_text: str):
-    """(stripped_body, raw_body) of the DisposableEffect block that registers
-    the change listener. strip_comments_and_strings preserves character
-    offsets, so both slices cover exactly the same region."""
-    clean = strip_comments_and_strings(screen_text)
-    for m in re.finditer(r"\bDisposableEffect\b[^\n{]*\{", clean):
-        brace = clean.find("{", m.start())
-        depth, i, n = 1, brace + 1, len(clean)
-        while i < n and depth:
-            if clean[i] == "{":
-                depth += 1
-            elif clean[i] == "}":
-                depth -= 1
-            i += 1
-        if ".registerOnSharedPreferenceChangeListener" in clean[brace:i]:
-            return clean[brace:i], screen_text[brace:i]
+    """(code_body, literal_body)：注册 change listener 的 DisposableEffect 块。"""
+    code, lit = views(screen_text)
+    if code is None:
+        return "", ""
+    for m in re.finditer(r"\bDisposableEffect\s*\(", code):
+        open_paren = m.end() - 1
+        close_paren = match_bracket(code, open_paren)
+        if close_paren < 0:
+            continue
+        k = close_paren + 1
+        while k < len(code) and code[k] in " \t\r\n":
+            k += 1
+        if k >= len(code) or code[k] != "{":
+            continue
+        close = match_bracket(code, k)
+        if close < 0:
+            continue
+        if ".registerOnSharedPreferenceChangeListener" in code[k:close]:
+            return code[k:close], lit[k:close]
     return "", ""
 
 
 def _stmt_start(text: str, idx: int) -> int:
-    """Offset where the statement containing `idx` begins.
-
-    Scans backwards to the nearest statement boundary at bracket depth 0: an
-    opening/closing brace, `;`, or a newline outside brackets. Kotlin almost
-    never uses semicolons, so the depth-0 newline is load-bearing -- without
-    it a multi-line chain swallows the previous statement (the M1 shape:
-    judging the statement head is only sound when the head really starts the
-    statement).
-    """
+    """包含 `idx` 的语句起点（深度 0 的换行 / `;` / 花括号都是边界）。"""
     depth = 0
     i = idx - 1
     while i >= 0:
@@ -154,56 +141,131 @@ def _stmt_start(text: str, idx: int) -> int:
     return 0
 
 
-def result_consumed(body: str, read: str, target: str) -> bool:
-    """True when the value returned by `ChatMenuPrefs.<read>` is actually used.
+def _locals_map(body: str):
+    """`val/var <name> = <rhs>` 的一次绑定表（用于一跳委托判定）。"""
+    out = {}
+    for m in re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*=(?!=)", body):
+        out.setdefault(m.group(1), body[m.end():expr_end(body, m.end())])
+    return out
 
-    Two accepted shapes: the call is the right-hand side of an assignment to
-    the order State (`menuOrder = ChatMenuPrefs.resolveOrder(prefs)`, chains
-    allowed), or the call is bound to a local that the same block later
-    assigns to that State (`val o = ChatMenuPrefs.resolveOrder(prefs)` …
-    `menuOrder = o`) -- the one-hop delegation a legitimate refactor uses.
+
+def _carries(expr: str, read: str, locals_map, depth: int = 0) -> bool:
+    """这个表达式的**值**是否还携带 `read` 的结果（经 value_sources，含一跳局部）。"""
+    if depth > 3:
+        return False
+    identity = re.search(r"\?*\s*\.\s*(?:let|run)\s*\{\s*(?:it|this)\s*\}\s*$",
+                         expr.strip())
+    if identity:
+        return _carries(expr.strip()[:identity.start()], read, locals_map, depth)
+    for form in value_sources(expr):
+        f = form.strip()
+        if not f:
+            continue
+        if read in f:
+            return True
+        for name, rhs in locals_map.items():
+            if contains_ident(f, name) and _carries(rhs, read, locals_map, depth + 1):
+                return True
+    return False
+
+
+def result_consumed(body: str, read: str, target: str) -> bool:
+    """`read` 的结果是否真的**成为** `target` 的新值。
+
+    旧判据只看调用点左侧的语句头里有没有 `target =`，于是
+    `footerOrder = ChatMenuPrefs.settingsPinOrder(prefs).let { footerOrder }`
+    全绿：赋值号在，值却被 `.let` 尾巴换回旧状态。现在判的是值：
+    经受 value_sources 规约（丢弃型作用域只留接收者、值型作用域取 lambda 尾
+    表达式、elvis 两臂都算）后，还必须能从某个候选形式走到 `read`。
     """
-    idx = body.find(read)
-    while idx >= 0:
-        head = body[_stmt_start(body, idx):idx]
-        if re.search(r"\b" + target + r"\s*=(?!=)", head):
-            return True
-        local = re.search(r"\bva[lr]\s+(\w+)\s*=\s*(?:[\w.]+\.)?$", head)
-        if local and re.search(
-            r"\b" + target + r"\s*=\s*" + re.escape(local.group(1)) + r"\b", body
-        ):
-            return True
-        idx = body.find(read, idx + 1)
+    locals_map = _locals_map(body)
+    for m in re.finditer(re.escape(read), body):
+        idx = m.start()
+        stmt = body[_stmt_start(body, idx):expr_end(body, idx)]
+        direct = re.search(r"(?<![\w.])" + target + r"\s*=(?!=)", stmt)
+        if direct:
+            if _carries(stmt[direct.end():], read, locals_map):
+                return True
+            continue
+        bind = re.match(r"\s*(?:val|var)\s+([A-Za-z_]\w*)\s*=(?!=)", stmt)
+        if bind and read in stmt[bind.end():]:
+            for m2 in re.finditer(r"(?<![\w.])" + target + r"\s*=(?!=)", body):
+                if _carries(body[m2.end():expr_end(body, m2.end())], read, locals_map):
+                    return True
     return False
 
 
 def guarded_reads(body: str) -> bool:
-    """All three order reads sit inside the `draggingEntry == null` guard AND
-    each result is assigned to its State from inside that block."""
-    first_read = min((body.find(r) for r in ORDER_READS if body.find(r) >= 0), default=-1)
-    if first_read < 0:
-        return False
-    guard = body.find("draggingEntry == null")
-    if guard < 0 or guard > first_read:
-        return False
-    # brace-match the guarded block and require every read inside it
-    brace = body.find("{", body.find("draggingEntry == null"))
-    if brace < 0:
-        return False
-    depth, i, n = 1, brace + 1, len(body)
-    while i < n and depth:
-        if body[i] == "{":
-            depth += 1
-        elif body[i] == "}":
-            depth -= 1
-        i += 1
-    if depth:  # unbalanced guard block -> fail-closed
-        return False
-    inner = body[brace:i]
-    return all(
-        r in inner and result_consumed(inner, r, ORDER_TARGETS[r])
-        for r in ORDER_READS
-    )
+    """三条 order 重读必须落在一条**有效**的 `draggingEntry == null` 守卫里。
+
+    旧判据只 `find("draggingEntry == null")` 再配平花括号 —— 子串在写
+    `|| true` 让守卫恒真时照样成立。现在读整条条件并折叠：恒真（守卫失效）
+    或恒假（分支永不执行）都判红。
+    """
+    for cond, t_start, t_end, _es, _ee in if_blocks(body):
+        if not contains_ident(cond, "draggingEntry") or "null" not in cond:
+            continue
+        if const_bool(cond) is not None:
+            return False
+        inner = body[t_start:t_end]
+        return all(r in inner and result_consumed(inner, r, ORDER_TARGETS[r])
+                   for r in ORDER_READS)
+    return False
+
+
+def prune_bool(expr: str) -> str:
+    """把恒假分支从布尔表达式里剪掉：`A || (false && (B || C))` → `A`。
+
+    arm1 的判据必须判「谓词真的能命中这个键」，而不是「这个名字在块里出现过」：
+    剪枝后剩下的析取/合取骨架里若再也看不见某个固定键，就是被短路掉了。
+    """
+    e = strip_parens(expr.strip())
+    if not e:
+        return e
+    parts = split_top(e, ("||",))
+    if len(parts) > 1:
+        keep = [p for p in (prune_bool(e[a:b]) for a, b in parts) if p != "false"]
+        return " || ".join(keep) if keep else "false"
+    parts = split_top(e, ("&&",))
+    if len(parts) > 1:
+        keep = []
+        for a, b in parts:
+            p = prune_bool(e[a:b])
+            if p == "false":
+                return "false"
+            if p != "true":
+                keep.append(p)
+        return " && ".join(keep) if keep else "true"
+    if e.startswith("!"):
+        inner = prune_bool(e[1:])
+        if inner == "true":
+            return "false"
+        if inner == "false":
+            return "true"
+        return "!" + inner
+    b = const_bool(e)
+    if b is True:
+        return "true"
+    if b is False:
+        return "false"
+    return e
+
+
+def listener_predicate(body: str, lit_body: str):
+    """(code_cond, literal_cond)：守卫分支体（含 prefsTick / order 重读）的 if 条件。"""
+    for cond, t_start, t_end, _es, _ee in if_blocks(body):
+        inner = body[t_start:t_end]
+        if "prefsTick" not in inner and not any(r in inner for r in ORDER_READS):
+            continue
+        if_pos = body.rfind("if", 0, t_start)
+        if if_pos < 0:
+            continue
+        open_paren = body.find("(", if_pos)
+        close_paren = match_bracket(body, open_paren)
+        if open_paren < 0 or close_paren < 0:
+            continue
+        return body[open_paren + 1:close_paren], lit_body[open_paren + 1:close_paren]
+    return None
 
 
 def brace_body(clean: str, header_re: str) -> str:
@@ -252,6 +314,12 @@ _NOOP_SELF_RE = re.compile(
 )
 
 
+def _const_num(expr: str):
+    """常量折叠成 float；非常量返回 None。"""
+    v = const_value(expr)
+    return float(v[1]) if v and v[0] == "num" else None
+
+
 def bumps_write_version(body: str) -> bool:
     """True when the body actually CHANGES `_writeVersion`.
 
@@ -261,8 +329,14 @@ def bumps_write_version(body: str) -> bool:
     stays at the same value and emits nothing -- every keyed reload sleeps.
     So the RHS is read, not just matched.
     """
-    if re.search(r"_writeVersion\.value\s*(?:\+=|-=|\*=|/=)", body):
-        return True
+    compound = {"+=": 0.0, "-=": 0.0, "*=": 1.0, "/=": 1.0}
+    for m in re.finditer(r"_writeVersion\.value\s*(?:\+=|-=|\*=|/=)", body):
+        op = m.group(0)[-2:]
+        num = _const_num(body[m.end():expr_end(body, m.end())])
+        if num is None:
+            return True          # 未知增量：可能是 1，不据此判红
+        if num != compound[op]:
+            return True
     if re.search(r"_writeVersion\.value\s*(?:\+\+|--)", body):
         return True
     if re.search(r"(?:\+\+|--)\s*_writeVersion\.value", body):
@@ -284,7 +358,10 @@ def check_stale_write_arms(soul_store_text: str, soul_screen_text: str,
     problems = []
 
     # ---- arm 5/6: the store's write counter ------------------------------
-    store = strip_comments_and_strings(soul_store_text)
+    store, _store_raw = views(soul_store_text)
+    if store is None:
+        problems.append("arm5: KotlinLexError while reading SoulStore.kt (fail-closed)")
+        return problems
     if not re.search(r"\bval\s+writeVersion\b", store) or "_writeVersion" not in store:
         problems.append(
             "arm5: SoulStore exposes no writeVersion StateFlow -- outside writers "
@@ -316,7 +393,11 @@ def check_stale_write_arms(soul_store_text: str, soul_screen_text: str,
             )
 
     # ---- arm 7: the Soul screen re-loads on that counter ------------------
-    soul_clean = strip_comments_and_strings(soul_screen_text)
+    soul_clean, _soul_raw = views(soul_screen_text)
+    if soul_clean is None:
+        problems.append("arm7: KotlinLexError while reading SoulSettingsScreen.kt "
+                        "(fail-closed)")
+        return problems
     if "writeVersion" not in soul_clean:
         problems.append(
             "arm7: SoulSettingsScreen does not observe SoulStore.writeVersion -- "
@@ -326,16 +407,12 @@ def check_stale_write_arms(soul_store_text: str, soul_screen_text: str,
     else:
         keyed = None
         for m in re.finditer(r"\bLaunchedEffect\s*\(", soul_clean):
-            open_paren = soul_clean.find("(", m.start())
-            depth, i, n = 1, open_paren + 1, len(soul_clean)
-            while i < n and depth:
-                if soul_clean[i] == "(":
-                    depth += 1
-                elif soul_clean[i] == ")":
-                    depth -= 1
-                i += 1
-            if "writeVersion" in soul_clean[open_paren:i]:
-                keyed = i
+            open_paren = m.end() - 1
+            close_paren = match_bracket(soul_clean, open_paren)
+            if close_paren < 0:
+                continue
+            if "writeVersion" in soul_clean[open_paren:close_paren]:
+                keyed = close_paren + 1
                 break
         if keyed is None:
             problems.append(
@@ -356,14 +433,19 @@ def check_stale_write_arms(soul_store_text: str, soul_screen_text: str,
                 # LaunchedEffect(Unit) -- the effect restarts, returns, and the
                 # editor keeps the snapshot it read when the screen opened.
                 load_at = body.find("SoulStore.load(")
-                early = [m for m in re.finditer(r"\breturn\s*@LaunchedEffect\b", body)
+                # 任何在 load 之前的退出都会把 LaunchedEffect(writeVersion) 退化
+                # 成一次性加载：除了 `return@LaunchedEffect`，裸 `return`、
+                # `?: return`、以及被字符字面量伪装过的形态同样算数（词法由共享
+                # 词法器负责，`'"'` 不再能把整行抹白）。
+                early = [m for m in re.finditer(r"\breturn\b", body)
                          if m.start() < load_at]
                 if early:
                     problems.append(
                         "arm7: the writeVersion-keyed effect returns before "
-                        "re-reading the file (`return@LaunchedEffect` ahead of "
-                        "SoulStore.load) -- it degenerates into a one-shot load, so "
-                        "every external write stays invisible to the editor"
+                        "re-reading the file (%r ahead of SoulStore.load) -- it "
+                        "degenerates into a one-shot load, so every external write "
+                        "stays invisible to the editor"
+                        % body[early[0].start():early[0].start() + 40].replace("\n", " ")
                     )
 
     # ---- arm 8: the Logs screen listener ---------------------------------
@@ -416,11 +498,19 @@ def check_arms(screen_text: str, prefs_text: str,
                 soul_store_text or "", soul_screen_text or "", log_screen_text or ""))
         return problems, []
 
-    # arm 1: predicate matches both fixed keys (constant name in stripped
-    # code, or raw key string in case a literal form is used) -- both judged
-    # INSIDE the effect region only, so a KDoc mention elsewhere never fakes a pass
-    a_ok = (CONST_A in body or KEY_A in raw_body)
-    b_ok = (CONST_B in body or KEY_B in raw_body)
+    # arm 1: the predicate can ACTUALLY match both fixed keys. Judged on the
+    # pruned predicate skeleton (constant-false conjuncts / always-true
+    # disjuncts are folded out), not on "the constant name appears in the
+    # block": `… || (false && (key == A || key == B))` keeps both names and
+    # never fires. The literal view is consulted for the raw-string form.
+    pred = listener_predicate(body, raw_body)
+    if pred is None:
+        a_ok = b_ok = False
+        pruned = ""
+    else:
+        pruned = prune_bool(pred[0])
+        a_ok = contains_ident(pruned, CONST_A) or KEY_A in pred[1]
+        b_ok = contains_ident(pruned, CONST_B) or KEY_B in pred[1]
     if not (a_ok and b_ok):
         missing = []
         if not a_ok:
@@ -431,6 +521,8 @@ def check_arms(screen_text: str, prefs_text: str,
             "arm1: listener predicate does not match the fixed key(s) "
             + ", ".join(missing)
             + " -- the `chatMenu.` prefix alone never fires for external writes"
+            + ("; predicate skeleton after folding constant branches: "
+               + " ".join(pruned.split())[:120] if pruned else "")
         )
 
     # arm 2: all three order re-reads present in the listener body ...
@@ -453,7 +545,7 @@ def check_arms(screen_text: str, prefs_text: str,
             + ") -- the calls fire, the States stay stale (called != consumed)"
         )
 
-    # arm 3: re-reads inside the draggingEntry == null guard
+    # arm 3: re-reads inside an EFFECTIVE draggingEntry == null guard
     if not guarded_reads(body):
         problems.append(
             "arm3: the order re-reads are not inside the `draggingEntry == null` "
@@ -462,7 +554,9 @@ def check_arms(screen_text: str, prefs_text: str,
         )
 
     # arm 4: both key constants non-private in ChatMenuPrefs
-    clean_prefs = strip_comments_and_strings(prefs_text)
+    clean_prefs, _prefs_raw = views(prefs_text)
+    if clean_prefs is None:
+        clean_prefs = ""
     for name in (CONST_A, CONST_B):
         m = re.search(r"(private\s+)?const\s+val\s+" + name + r"\b", clean_prefs)
         if not m:
@@ -703,6 +797,90 @@ fun LogManagementScreen(context: Context) {
               W5_OK_STORE, COMPLIANT_SOUL_SCREEN, COMPLIANT_LOG_SCREEN)
     ok &= arm("W7 soul effect exits before re-reading (dataflow)", 1,
               COMPLIANT_STORE, W7_SCREEN, COMPLIANT_LOG_SCREEN)
+
+    # ── batch7-t12 witnesses（审计方给的补丁逐字重放）────────────────────
+    # 06-1 谓词保留两个常量名，但整段被 `false &&` 短路
+    T1_SCREEN = COMPLIANT_SCREEN.replace(
+        '''key.startsWith("chatMenu.") ||
+                            key == ChatMenuPrefs.TOP_BAR_INPUT_HISTORY_PREF ||
+                            key == ChatMenuPrefs.COMPOSER_MODEL_PICKER_BUTTON_PREF''',
+        '''key.startsWith("chatMenu.") ||
+                            (false && (key == ChatMenuPrefs.TOP_BAR_INPUT_HISTORY_PREF ||
+                            key == ChatMenuPrefs.COMPOSER_MODEL_PICKER_BUTTON_PREF))''')
+    # 06-2 赋值语尾 `.let { <旧状态> }`：赋值号在，值被换回旧列表
+    T2_SCREEN = COMPLIANT_SCREEN.replace(
+        "footerOrder = ChatMenuPrefs.settingsPinOrder(prefs)",
+        "footerOrder = ChatMenuPrefs.settingsPinOrder(prefs).let { footerOrder }").replace(
+        "attachOrder = ChatMenuPrefs.resolveAttachOrder(prefs)",
+        "attachOrder = ChatMenuPrefs.resolveAttachOrder(prefs).let { attachOrder }")
+    # 06-3 守卫原串保留，右置 `|| true` 让它恒真
+    T3_SCREEN = COMPLIANT_SCREEN.replace(
+        "if (draggingEntry == null) {", "if (draggingEntry == null || true) {")
+    # 06-4 复合赋值的加法单位元
+    T4_STORE = COMPLIANT_STORE.replace(
+        """        _cachedMetadata.value = parsed?.metadata ?: SoulMetadata.DEFAULT
+        _writeVersion.value += 1""",
+        """        _cachedMetadata.value = parsed?.metadata ?: SoulMetadata.DEFAULT
+        _writeVersion.value += 0""")
+    # 06-5 字符字面量 `'"'` 伪装掉 `if (loaded) return@LaunchedEffect`
+    T5_SCREEN = COMPLIANT_SOUL_SCREEN.replace(
+        "    LaunchedEffect(writeVersion) {\n",
+        "    LaunchedEffect(writeVersion) {\n"
+        "        val _q1 = '\"'; if (loaded) return@LaunchedEffect; val _q2 = '\"'\n")
+
+    def arm_expect(name, want_red_prefixes, s_store, s_screen, l_screen,
+                   screen=COMPLIANT_SCREEN, prefs=COMPLIANT_PREFS):
+        problems, _ = check_arms(screen, prefs, s_store, s_screen, l_screen)
+        reds = sorted(p.split(":")[0] for p in problems)
+        ok_case = True
+        if want_red_prefixes is None:
+            if reds:
+                ok_case = False
+        else:
+            for pre in want_red_prefixes:
+                if pre not in reds:
+                    ok_case = False
+            extra = [r for r in reds if r not in want_red_prefixes]
+            if extra:
+                ok_case = False
+        print(f"  selftest t12 {name}: RED={reds or 'none'} "
+              f"(expect {want_red_prefixes or 'none'}) {'ok' if ok_case else 'FAIL'}")
+        for p in problems:
+            print(f"      - {p}")
+        return ok_case
+
+    ok &= arm_expect("06-1 constant-false conjunct swallows both fixed keys", ["arm1"],
+                     COMPLIANT_STORE, COMPLIANT_SOUL_SCREEN, COMPLIANT_LOG_SCREEN,
+                     screen=T1_SCREEN)
+    ok &= arm_expect("06-2 assignment tail swaps the value back", ["arm2", "arm3"],
+                     COMPLIANT_STORE, COMPLIANT_SOUL_SCREEN, COMPLIANT_LOG_SCREEN,
+                     screen=T2_SCREEN)
+    ok &= arm_expect("06-3 guard made always-true with `|| true`", ["arm3"],
+                     COMPLIANT_STORE, COMPLIANT_SOUL_SCREEN, COMPLIANT_LOG_SCREEN,
+                     screen=T3_SCREEN)
+    ok &= arm_expect("06-4 compound assignment with the additive identity", ["arm6"],
+                     T4_STORE, COMPLIANT_SOUL_SCREEN, COMPLIANT_LOG_SCREEN)
+    ok &= arm_expect("06-5 char literal hides the early return", ["arm7"],
+                     COMPLIANT_STORE, T5_SCREEN, COMPLIANT_LOG_SCREEN)
+
+    # 对照臂：等价且合法的写法必须仍然 GREEN
+    ok &= arm_expect("control identity `.let { it }` stays consumed", None,
+                     COMPLIANT_STORE, COMPLIANT_SOUL_SCREEN, COMPLIANT_LOG_SCREEN,
+                     screen=COMPLIANT_SCREEN.replace(
+                         "footerOrder = ChatMenuPrefs.settingsPinOrder(prefs)",
+                         "footerOrder = ChatMenuPrefs.settingsPinOrder(prefs).let { it }"))
+    ok &= arm_expect("control `+= 2` still bumps", None,
+                     COMPLIANT_STORE.replace(
+                         """        _cachedMetadata.value = parsed?.metadata ?: SoulMetadata.DEFAULT
+        _writeVersion.value += 1""",
+                         """        _cachedMetadata.value = parsed?.metadata ?: SoulMetadata.DEFAULT
+        _writeVersion.value += 2"""),
+                     COMPLIANT_SOUL_SCREEN, COMPLIANT_LOG_SCREEN)
+    ok &= arm_expect("control guard with a real extra condition stays green", None,
+                     COMPLIANT_STORE, COMPLIANT_SOUL_SCREEN, COMPLIANT_LOG_SCREEN,
+                     screen=COMPLIANT_SCREEN.replace(
+                         "if (draggingEntry == null) {",
+                         "if (draggingEntry == null && prefsTick >= 0) {"))
     return ok
 
 
@@ -713,6 +891,7 @@ def main() -> int:
             print("FAIL: selftest")
             return 1
         print(MARKER)
+        print("CHAT_MENU_PREFS_LISTENER_SELFTEST_ARMS=26")
         return 0
 
     screen_path = ROOT / SCREEN_REL

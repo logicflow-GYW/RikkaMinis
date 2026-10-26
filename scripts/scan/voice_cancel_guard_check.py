@@ -39,9 +39,44 @@ Usage: python3 scripts/scan/voice_cancel_guard_check.py [repo_root]
        python3 scripts/scan/voice_cancel_guard_check.py --selftest
 Exit:  0 = clean, 1 = violation(s), 2 = usage/ROT
 """
+
+"""Structural helpers — 全部走共享词法/AST/值流原语。
+
+[B7 01-4 parser-death / family-hole] 旧版在这里自写了 `strip_comments`（只认行首
+`//`，字符串保留）、`balanced_block`（裸花括号计数，字符串里的 `}` 就能截断块）、
+`IF_RE` + `guards()`（只解析 `if (…)`，`when (false) { … }` 完全隐形）、
+`dead_condition()`（死分支白名单只有 `false` / `!true` / 整数比较三形）。四样都被
+见证逐一举穿。现在：
+
+* 词法 = `_kotlin_lexer`（注释与字符串/字符字面量内部抹成空格，长度不变；解析
+  失败抛 `KotlinLexError`，调用方一律 fail-closed）；
+* 括号配平 = `_kotlin_ast.match_bracket`；
+* 条件可行性 = `_kotlin_valueflow.guard_feasible`（常量折叠覆盖 `1 == 2`、
+  `! true`、`0 > 1`、短路求值…，不再是拼写白名单）；
+* if/when 结构 = `_kotlin_ast.if_blocks` / `when_branches` /
+  `enclosing_conditions`。
+"""
 import os
 import re
 import sys
+
+from _kotlin_lexer import KotlinLexError
+from _kotlin_ast import (
+    const_value,
+    enclosing_conditions,
+    match_bracket,
+    split_top,
+    strip_parens,
+    when_branches,
+)
+from _kotlin_valueflow import (
+    call_args,
+    code_view,
+    contains_ident,
+    expr_end,
+    guard_feasible,
+    literal_view,
+)
 
 VP_REL = "src/android/app/src/main/java/com/rikkaminis/app/provider/voice/VoiceProvider.kt"
 OR_REL = "src/android/app/src/main/java/com/rikkaminis/app/provider/openrouter/OpenRouterModelsApi.kt"
@@ -56,168 +91,198 @@ XUNFEI_TRANSCRIPT_GUARD = re.compile(
     r"VoiceProviderException\.Parse\(\"Unexpected Xunfei ASR response format\"\)"
 )
 
+# [B7 01-3] 空集合兜底不止 `emptyList()` 一种拼写：`emptyList<LLMModel>()`、
+# `listOf()`、`kotlin.collections.emptyList()` 是同一个"取消被伪装成没模型"。
+EMPTY_FALLBACK_RE = re.compile(
+    r"return@withContext\s+(?:[\w.]*\.)?(?:emptyList|emptySet|listOf|mutableListOf|arrayListOf)"
+    r"\s*(?:<[^<>]*>)?\s*\("
+)
 
-def strip_comments(src):
-    """Blank comment bodies, offsets preserved; string literals kept INTACT.
+# 值经过这些无损改写后仍然是解析器给出的那个转写文本；其余（take/drop/substring/
+# replace/plus/…）都能把非空结果抹成空串。
+SAFE_TAIL_RE = re.compile(r"\.\s*(?:trim|trimEnd|trimStart|toString|intern)\s*\(\s*\)\s*(?:!!)?\s*$")
 
-    Literal-aware on purpose: a `"video/*"` or `"https://…"` literal must not be
-    cut as a comment or open a block comment (that once blanked 67 real lines of
-    a handler for a sibling gate). Literal CONTENTS stay readable because this
-    gate matches on contract strings (the Parse messages, the `"ws"` frame).
+
+def views(src):
+    """(structural, literal)：等长双视图，位置可互投；词法失败抛 KotlinLexError。"""
+    return code_view(src), literal_view(src)
+
+
+def block_at(text, anchor):
+    """anchor 之后第一个 `{` 起、`match_bracket` 配平的块体区间 (start, end)。
+
+    `text` 必须是结构视图，所以字符串里的 `}` 再也不能提前闭合块（parser-death）。
     """
-    out = list(src)
-    i, n = 0, len(src)
-    while i < n:
-        c = src[i]
-        if c == '"':
-            if src.startswith('"""', i):
-                j = src.find('"""', i + 3)
-                i = n if j < 0 else j + 3
-                continue
-            j = i + 1
-            while j < n:
-                if src[j] == "\\":
-                    j += 2
-                    continue
-                if src[j] == '"':
-                    break
-                j += 1
-            i = j + 1
-            continue
-        if c == "'":
-            m = re.match(r"'(?:\\.|[^'\\\n])'", src[i:])
-            i += m.end() if m else 1
-            continue
-        if c == "/" and i + 1 < n and src[i + 1] == "/":
-            j = i
-            while j < n and src[j] != "\n":
-                out[j] = " "
-                j += 1
-            i = j
-            continue
-        if c == "/" and i + 1 < n and src[i + 1] == "*":
-            j = i
-            while j < n and not (src[j] == "*" and j + 1 < n and src[j + 1] == "/"):
-                if src[j] != "\n":
-                    out[j] = " "
-                j += 1
-            for k in range(j, min(j + 2, n)):
-                if src[k] != "\n":
-                    out[k] = " "
-            i = j + 2
-            continue
-        i += 1
-    return "".join(out)
-
-
-def balanced_block(src, anchor):
-    i = src.find(anchor)
+    i = text.find("{", anchor)
     if i < 0:
         return None
-    j = src.find("{", i)
-    if j < 0:
+    close = match_bracket(text, i)
+    return (i + 1, close) if close > 0 else None
+
+
+def lambda_param(text, brace_pos):
+    """`{ cause -> … }` 的形参名；无参 lambda 返回 None。"""
+    blk = block_at(text, brace_pos)
+    if blk is None:
         return None
-    depth = 0
-    for k in range(j, len(src)):
-        if src[k] == "{":
-            depth += 1
-        elif src[k] == "}":
-            depth -= 1
-            if depth == 0:
-                return src[i:k + 1]
+    m = re.match(r"\s*(?:val\s+)?([A-Za-z_]\w*|_)\s*(?::[^-\n]{0,80})?->", text[blk[0]:blk[1]])
+    return m.group(1) if m else None
+
+
+def dead_guards(text, pos):
+    """覆盖 pos 的条件里能证明"永不成立"的那些：[(kind, cond)]。
+
+    两条来源：①`enclosing_conditions`（if 与 when 分支条件）过
+    `guard_feasible`；②`when (常量) { … }` 的**主语** —— 只看分支条件的话，
+    `when (false) { true -> call.cancel() }` 的分支条件 `true` 当然可行，死的
+    是被选择的那条路。
+    """
+    dead = []
+    for kind, cond in enclosing_conditions(text, pos):
+        if guard_feasible(cond) is False:
+            dead.append((kind, strip_parens(cond)))
+    for subject, cond, b0, b1 in when_branches(text):
+        if not (b0 <= pos < b1):
+            continue
+        subj = strip_parens(subject)
+        if not subj:
+            continue
+        sv = const_value(subj)
+        if sv is None:
+            continue
+        c = strip_parens(cond)
+        if c == "else":
+            continue
+        if const_value(c) != sv:
+            dead.append(("when", "%s → %s" % (subj, c)))
+    return dead
+
+
+def cause_gated(text, pos, param):
+    """守卫条件依赖本次完成/异常**自带的那个值**吗？
+
+    `invokeOnCompletion { cause -> if (cause == null) call.cancel() }`：watchJob
+    跑的是 `awaitCancellation()`，只会被取消结束，所以 `cause` 恒为
+    CancellationException、`cause == null` 恒假 —— 这不是常量，但契约上是一条
+    死守卫。同族：`catch (e: CancellationException) { if (e.message == …
+    ) throw e }`。
+    """
+    if not param or param == "_":
+        return None
+    for _kind, cond in enclosing_conditions(text, pos):
+        if contains_ident(cond, param):
+            return strip_parens(cond)
     return None
 
 
-IF_RE = re.compile(r"(?<![\w.])if\s*\(")
+def why_dead(text, pos, param=None):
+    """位置不可达的原因（报错文案用）；None = 这条路是活的。"""
+    g = cause_gated(text, pos, param) if param else None
+    if g:
+        return g
+    d = dead_guards(text, pos)
+    return d[0][1] if d else None
 
 
-def paren_inner(text, open_idx):
-    j = text.find("(", open_idx)
-    if j < 0:
-        return None, None
-    depth = 0
-    for k in range(j, len(text)):
-        if text[k] == "(":
-            depth += 1
-        elif text[k] == ")":
-            depth -= 1
-            if depth == 0:
-                return text[j + 1:k], k + 1
-    return None, None
+def _first_arg_expr(text, a, b):
+    """把 `[a, b)` 的实参文本裁成一条表达式（顶层逗号处截断）。"""
+    raw = text[a:b]
+    spans = split_top(raw, (",",))
+    return raw[spans[0][0]:spans[0][1]].strip() if spans else raw.strip()
 
 
-def guards(text):
-    """[(cond, body_start, body_end)] for every `if (…)` with a bounded body."""
+def response_text_args(text):
+    """每个 `VoiceInputResponse(text = …)` 的实参：[(表达式, 表达式起点)]。"""
     out = []
-    for m in IF_RE.finditer(text):
-        cond, after = paren_inner(text, m.end() - 1)
-        if cond is None:
+    for m in re.finditer(r"VoiceInputResponse\s*\(", text):
+        open_at = m.end() - 1
+        if match_bracket(text, open_at) < 0:
             continue
-        k = after
-        while k < len(text) and text[k] in " \t\r\n":
-            k += 1
-        if k < len(text) and text[k] == "{":
-            blk = brace_block(text, k)
-            if blk is None:
+        for a, b in call_args(text, open_at):
+            nm = re.match(r"\s*text\s*=", text[a:b])
+            if not nm:
                 continue
-            out.append((cond, k, k + len(blk)))
-        else:
-            depth = 0
-            end = len(text)
-            for k2 in range(k, len(text)):
-                ch = text[k2]
-                if ch in "([{":
-                    depth += 1
-                elif ch in ")]}":
-                    if depth == 0:
-                        end = k2
-                        break
-                    depth -= 1
-                elif ch == "\n" and depth == 0:
-                    end = k2
-                    break
-            out.append((cond, k, end))
+            rhs_at = a + nm.end()
+            end = min(b, expr_end(text, rhs_at))
+            out.append((_first_arg_expr(text, rhs_at, end), rhs_at))
     return out
 
 
-def enclosing(gs, pos):
-    return [g for g in gs if g[1] <= pos < g[2]]
+def asr_value_kind(expr, binds):
+    """`text = <expr>` 到底还是不是解析器产出的那个值。
 
-
-def dead_condition(cond):
-    """True when a condition is a constant that can never hold on the guard path.
-
-    `if (false)` / `if (1 == 2)` keep every substring a text-matching gate looks
-    for while the guarded statement never runs — the exact shape of the
-    wide-1024 voice witnesses.
+    ok      = 绑定本身，或解析调用本身（可叠 trim/toString 这类无损改写）
+    literal = 常量（`""` 正是 da1020 ISSUE-05 B 的原始形状）
+    other   = 其余任何写法：值被换掉了（`.take(0)`、`.let { null }`、拼接…）
     """
-    c = cond.strip()
-    if c in ("false", "!true"):
-        return True
-    m = re.fullmatch(r"(-?\d+)\s*(==|!=|<|>|<=|>=)\s*(-?\d+)", c)
-    if m:
-        a, op, b = int(m.group(1)), m.group(2), int(m.group(3))
-        return not {"==": a == b, "!=": a != b, "<": a < b,
-                    ">": a > b, "<=": a <= b, ">=": a >= b}[op]
-    return False
+    e = strip_parens(expr)
+    if not e:
+        return "other"
+    if const_value(e) is not None:
+        return "literal"
+    cur = e
+    for _ in range(4):
+        m = SAFE_TAIL_RE.search(cur)
+        if not m:
+            break
+        cur = cur[:m.start()].strip()
+    if re.fullmatch(r"[A-Za-z_]\w*", cur) and cur in binds:
+        return "ok"
+    m = re.match(r"parseChatAsrTranscript\s*\(", cur)
+    if m and match_bracket(cur, m.end() - 1) == len(cur) - 1:
+        return "ok"
+    return "other"
 
+
+def decl_bindings(text):
+    """`val name = <expr>` → {name: (rhs_start, rhs_end)}（在结构视图上取）。"""
+    out = {}
+    for m in re.finditer(r"(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+?)?=(?!=)", text):
+        rhs = m.end()
+        out[m.group(1)] = (rhs, min(expr_end(text, rhs), _stmt_end(text, rhs)))
+    return out
+
+
+def _stmt_end(text, start):
+    """语句终点：深度 0 的换行（续行除外）。"""
+    from _kotlin_ast import _is_continuation
+    depth = 0
+    i, n = start, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return i
+            depth -= 1
+        elif ch == "\n" and depth == 0 and not _is_continuation(text, i):
+            return i
+        i += 1
+    return n
 
 def check_voiceprovider(src):
     v = []
-    code = strip_comments(src)
+    try:
+        cv, lv = views(src)
+    except KotlinLexError as exc:
+        return ["VoiceProvider.kt: source could not be lexed (%s) — fail-closed "
+                "(a string/char literal that cannot be closed hides the structure)" % exc]
 
-    body = balanced_block(code, "suspend fun executeRequest")
-    if body is None:
+    at = cv.find("suspend fun executeRequest")
+    blk = block_at(cv, at) if at >= 0 else None
+    if blk is None:
         v.append("VoiceProvider.kt: executeRequest declaration not found "
                  "(gate anchors moved — deliberate edit required)")
         return v
+    body = cv[blk[0]:blk[1]]
     if "executeOrCancel()" not in body:
         v.append("VoiceProvider.kt: executeRequest no longer calls "
                  "executeOrCancel() (cancellation rethrow + ensureActive lost)")
     if ".execute()" in body:
         v.append("VoiceProvider.kt:%d: bare '.execute()' is back in "
                  "executeRequest (da1020 ISSUE-05: uncancellable blocking read)"
-                 % (code.count("\n", 0, code.find(".execute()")) + 1))
+                 % (cv.count("\n", 0, cv.find(".execute()")) + 1))
     if "awaitCancellation" not in body:
         v.append("VoiceProvider.kt: prompt-interruption watcher missing "
                  "(launch { awaitCancellation() }) — the one-arg "
@@ -227,193 +292,263 @@ def check_voiceprovider(src):
     if "call.cancel()" not in body:
         v.append("VoiceProvider.kt: watcher hook no longer cancels the Call "
                  "(call.cancel() missing)")
-    # wide-1024 W1 — the hook must CANCEL, not merely spell `call.cancel()`:
-    # `if (false) call.cancel()` keeps every substring and cancels nothing.
+    # [wide-1024 W1 + B7 01-1/01-4] 判据锚"这个钩子在**会走到的**路上真的取消了
+    # Call"，不锚"某处拼了 call.cancel()"：
+    #   `if (false) call.cancel()` / `when (false) { true -> … }` 走不到；
+    #   `{ cause -> if (cause == null) call.cancel() }` 条件里没有常量，但 watchJob
+    #   跑的是 awaitCancellation()，只可能被取消结束 ⇒ cause 恒非 null，恒假。
     hook = re.search(r"invokeOnCompletion\s*\{", body)
     if hook is None:
         v.append("VoiceProvider.kt: no `invokeOnCompletion { … }` watcher hook found in "
                  "executeRequest (fail-closed: the cancel path cannot be graded)")
     else:
-        lam = brace_block(body, hook.end() - 1)
+        lam = block_at(body, hook.end() - 1)
         if lam is None:
             v.append("VoiceProvider.kt: the invokeOnCompletion hook body could not be parsed "
                      "(fail-closed)")
         else:
-            pos = lam.find("call.cancel()")
-            if pos < 0:
+            lam_body = body[lam[0]:lam[1]]
+            param = lambda_param(body, hook.end() - 1)
+            cancels = [m.start() for m in re.finditer(r"call\.cancel\(\)", lam_body)]
+            if not cancels:
                 v.append("VoiceProvider.kt: the watcher hook does not cancel the Call "
                          "(call.cancel() missing from the invokeOnCompletion lambda)")
             else:
-                for cond, _b0, _b1 in enclosing(guards(lam), pos):
-                    if dead_condition(cond):
-                        v.append("VoiceProvider.kt: call.cancel() sits behind the dead guard "
-                                 "`if (%s)` — the hook fires and cancels nothing, so a cancelled "
-                                 "coroutine holds the blocking body read until the 120s "
-                                 "readTimeout (da1020 ISSUE-05 A)" % cond.strip())
-                        break
+                reasons = [why_dead(lam_body, p, param) for p in cancels]
+                if all(r is not None for r in reasons):
+                    v.append("VoiceProvider.kt: call.cancel() sits behind the dead guard "
+                             "`if (%s)` — the hook fires and cancels nothing, so a cancelled "
+                             "coroutine holds the blocking body read until the 120s "
+                             "readTimeout (da1020 ISSUE-05 A)" % reasons[0])
+    for m in re.finditer(r"watchDisposable\.dispose\(\)", body):
+        why = why_dead(body, m.start())
+        if why is not None:
+            v.append("VoiceProvider.kt: watchDisposable.dispose() sits behind the dead guard "
+                     "`if (%s)` — the success path keeps the hook attached and the following "
+                     "watchJob.cancel() then fires it, so every completed request still cancels "
+                     "its Call (contract: zero cancellation on completion; da1020 ISSUE-05 A)"
+                     % why)
     if "watchDisposable.dispose()" not in body:
         v.append("VoiceProvider.kt: watcher hook is no longer disposed on the "
                  "success path (every completed request would cancel its Call)")
 
-    parse = balanced_block(code, "fun parseChatAsrTranscript")
-    if parse is None:
+    at = cv.find("fun parseChatAsrTranscript")
+    blk = block_at(cv, at) if at >= 0 else None
+    if blk is None:
         v.append("VoiceProvider.kt: parseChatAsrTranscript declaration not found "
                  "(the chat-ASR parse was inlined or renamed — deliberate edit)")
         return v
-    if "takeIf { it.isNotEmpty() }" not in parse:
+    parse_cv = cv[blk[0]:blk[1]]
+    parse_lv = lv[blk[0]:blk[1]]
+    if "takeIf { it.isNotEmpty() }" not in parse_cv:
         v.append("VoiceProvider.kt: parseChatAsrTranscript lost the "
                  "empty-transcript guard (takeIf) — malformed chat responses "
                  "map to text=\"\" and NO_MATCH instead of a protocol error")
-    if 'throw VoiceProviderException.Parse("Empty ASR transcript in chat ASR response")' not in parse:
+    if 'throw VoiceProviderException.Parse("Empty ASR transcript in chat ASR response")' not in parse_lv:
         v.append("VoiceProvider.kt: parseChatAsrTranscript lost the "
                  "empty-transcript Parse throw")
-    tcb = balanced_block(code, "suspend fun transcribeChatBased")
+
+    at = cv.find("suspend fun transcribeChatBased")
+    blk = block_at(cv, at) if at >= 0 else None
+    tcb = cv[blk[0]:blk[1]] if blk else None
     if tcb is None or "parseChatAsrTranscript(" not in tcb:
         v.append("VoiceProvider.kt: transcribeChatBased no longer routes "
                  "through parseChatAsrTranscript (a second inline parse would "
                  "re-open the empty-transcript hole)")
     else:
-        if re.search(r'text\s*=\s*""\s*\)', tcb):
-            # wide-1024 W2 — the parse result must reach the returned text.
-            v.append("VoiceProvider.kt: transcribeChatBased returns a hard-coded empty transcript "
-                     "(text = \"\") — the ASR result is thrown away, so the consumer reports "
-                     "NO_MATCH (\"heard nothing\") for every input and fail-over never advances")
-        for m in re.finditer(r"parseChatAsrTranscript\s*\(", tcb):
-            head = tcb[:m.start()].rstrip()
-            assign = re.search(r"([A-Za-z_]\w*)\s*=\s*$", head)
-            if assign and assign.group(1) == "text":
-                continue
-            bound = re.search(r"(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=\s*$", head)
-            if bound and re.search(r"text\s*=\s*%s\b" % re.escape(bound.group(1)),
-                                   tcb[m.end():]):
+        # [B7 01-2 dataflow] 旧版只查"解析结果绑到了某个局部，而后文出现
+        # `text = <那个局部>\b`"—— `text = parsed.take(0)` 靠单词边界命中，值被
+        # 完全截断却仍是绿的。现在判**返回值本身**：它必须就是解析器产出的那个值。
+        binds = decl_bindings(tcb)
+        texts = response_text_args(tcb)
+        if not texts:
+            v.append("VoiceProvider.kt: transcribeChatBased no longer returns "
+                     "VoiceInputResponse(text = …) — the ASR result has no landing place "
+                     "(fail-closed)")
+        for expr, _pos in texts:
+            kind = asr_value_kind(expr, binds)
+            if kind == "literal":
+                v.append("VoiceProvider.kt: transcribeChatBased returns a hard-coded transcript "
+                         "(text = %s) — the ASR result is thrown away, so the consumer reports "
+                         "NO_MATCH (\"heard nothing\") for every input and fail-over never "
+                         "advances" % expr[:40])
+            elif kind != "ok":
+                v.append("VoiceProvider.kt: the transcript handed to VoiceInputResponse is not "
+                         "the ASR result any more (`%s`) — a transform after the parse "
+                         "(take/drop/substring/replace/…) empties it, so every utterance maps to "
+                         "NO_MATCH and fail-over never advances (da1020 ISSUE-05 B)" % expr[:40])
+        # 解析调用要么是返回值的来源，要么本身就是返回值 —— 否则它就是白跑一趟。
+        spans = [(pos, pos + len(e)) for e, pos in texts]
+        parse_at = {m.start() for m in re.finditer(r"parseChatAsrTranscript\s*\(", tcb)}
+        bound_at = set()
+        for _name, (a, b) in binds.items():
+            for mm in re.finditer(r"parseChatAsrTranscript\s*\(", tcb[a:b]):
+                bound_at.add(a + mm.start())
+        for p in sorted(parse_at):
+            if any(s <= p < e for s, e in spans) or p in bound_at:
                 continue
             v.append("VoiceProvider.kt: the parseChatAsrTranscript( … ) result is DISCARDED — it "
                      "must be the value of VoiceInputResponse(text = …); a bare call next to an "
                      "empty literal parses the transcript and hands back text=\"\" "
                      "(da1020 ISSUE-05 B)")
+            break
+        for name, (a, b) in binds.items():
+            if "parseChatAsrTranscript" not in tcb[a:b]:
+                continue
+            if not any(contains_ident(e, name) for e, _ in texts):
+                v.append("VoiceProvider.kt: the parseChatAsrTranscript( … ) result is DISCARDED — "
+                         "`%s` never reaches VoiceInputResponse(text = …) (da1020 ISSUE-05 B)"
+                         % name)
+                break
     return v
-
 
 def check_openrouter(src):
     v = []
-    code = strip_comments(src)
-    i = code.find("val response = try {")
+    try:
+        cv, _lv = views(src)
+    except KotlinLexError as exc:
+        return ["OpenRouterModelsApi.kt: source could not be lexed (%s) — fail-closed" % exc]
+    i = cv.find("val response = try {")
     if i < 0:
         v.append("OpenRouterModelsApi.kt: response try envelope not found "
                  "(da1020 ISSUE-05: executeOrCancel must sit inside a try)")
         return v
-    try_blk = brace_block(code, i + len("val response = try "))
-    if try_blk is None:
+    blk = block_at(cv, i + len("val response = try "))
+    if blk is None:
         v.append("OpenRouterModelsApi.kt: the `try { … }` envelope could not be parsed "
                  "(fail-closed: the cancel/fallback split cannot be graded)")
         return v
+    try_blk = cv[blk[0]:blk[1]]
     if "executeOrCancel()" not in try_blk:
         v.append("OpenRouterModelsApi.kt: executeOrCancel() is back OUTSIDE the "
                  "try (da1020 ISSUE-05: an IOException would propagate out of "
                  "fetchModels instead of returning the empty fallback)")
-    rest = code[code.find(try_blk, i) + len(try_blk):]
+    rest = cv[blk[1]:]
 
     # ── CancellationException catch: a LIVE rethrow, never a fallback ─────
-    ce = re.search(r"catch\s*\(\s*e\s*:\s*kotlinx\.coroutines\.CancellationException\s*\)\s*\{",
+    ce = re.search(r"catch\s*\(\s*(\w+)\s*:\s*kotlinx\.coroutines\.CancellationException\s*\)\s*\{",
                    rest)
     if ce is None:
         v.append("OpenRouterModelsApi.kt: CancellationException catch missing "
                  "(a cancelled fetch must unwind, not fall back)")
     else:
-        blk = brace_block(rest, ce.end() - 1)
-        if blk is None:
+        param = ce.group(1)
+        cblk = block_at(rest, ce.end() - 1)
+        if cblk is None:
             v.append("OpenRouterModelsApi.kt: the CancellationException catch body could not be "
                      "parsed (fail-closed)")
         else:
-            pos = blk.find("throw e")
-            if pos < 0:
-                v.append("OpenRouterModelsApi.kt: cancellation rethrow (throw e) missing")
+            cbody = rest[cblk[0]:cblk[1]]
+            # [B7 01-3 family-hole] 重抛必须**无条件**：旧版只折字面量，
+            # `if (e.message == "__never__") throw e` 靠异常自带的内容当开关 ——
+            # 标准取消消息永远不等于它，等于把重抛做成了死码。
+            rethrows = [m.start() for m in re.finditer(r"\bthrow\s+%s\b" % re.escape(param), cbody)]
+            if not rethrows:
+                v.append("OpenRouterModelsApi.kt: cancellation rethrow (throw %s) missing" % param)
             else:
-                for cond, _a, _b in enclosing(guards(blk), pos):
-                    if dead_condition(cond):
-                        v.append("OpenRouterModelsApi.kt: `throw e` sits behind the dead guard "
-                                 "`if (%s)` — a cancelled fetch is swallowed instead of unwinding "
-                                 "(da1020 ISSUE-05 D)" % cond.strip())
-                        break
-            if re.search(r"return@withContext\s+emptyList\(\)", blk):
+                reasons = [why_dead(cbody, p, param) for p in rethrows]
+                if all(r is not None for r in reasons):
+                    v.append("OpenRouterModelsApi.kt: `throw %s` sits behind the dead guard "
+                             "`if (%s)` — a cancelled fetch is swallowed instead of unwinding "
+                             "(da1020 ISSUE-05 D)" % (param, reasons[0]))
+            # `emptyList<LLMModel>()` / `listOf()` 是同一条兜底的不同拼写。
+            if EMPTY_FALLBACK_RE.search(cbody):
                 v.append("OpenRouterModelsApi.kt: the CancellationException catch returns the "
                          "empty fallback — a cancelled fetch masquerades as \"no models\" and the "
                          "caller's cancellation never propagates (da1020 ISSUE-05 D)")
 
-    ex = re.search(r"catch\s*\(\s*e\s*:\s*Exception\s*\)\s*\{", rest)
+    ex = re.search(r"catch\s*\(\s*\w+\s*:\s*Exception\s*\)\s*\{", rest)
     if ex is None:
         v.append("OpenRouterModelsApi.kt: Exception catch missing")
     else:
-        blk = brace_block(rest, ex.end() - 1)
-        if blk is None or "return@withContext emptyList()" not in blk:
+        eblk = block_at(rest, ex.end() - 1)
+        if eblk is None or not EMPTY_FALLBACK_RE.search(rest[eblk[0]:eblk[1]]):
             v.append("OpenRouterModelsApi.kt: Exception catch must return the "
                      "empty fallback (return@withContext emptyList())")
     return v
 
 
-def brace_block(text, start):
-    """Brace-balanced block starting at the first `{` at/after `start`.
-
-    String literals are skipped so a quoted brace (e.g. inside a JSON template)
-    can never unbalance the count or be mistaken for structure. Returns None
-    when the braces never close — the caller treats that as a moved anchor.
-    """
-    j = text.find("{", start)
-    if j < 0:
-        return None
-    depth = 0
-    i = j
-    while i < len(text):
-        c = text[i]
-        if c == '"':
-            i += 1
-            while i < len(text) and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-            i += 1  # step past the closing quote (a bare `continue` here would
-            #         re-enter the SAME quote as an opener and desync every
-            #         subsequent string in the file)
-            continue
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[j:i + 1]
-        i += 1
-    return None
-
-
 def check_xunfei_transcript(src):
     """da1027 ISSUE-04 — the Xunfei guard must sit on the assembled transcript."""
     v = []
-    code = strip_comments(src)
+    try:
+        cv, lv = views(src)
+    except KotlinLexError as exc:
+        return ["VoiceProviderVendors.kt: source could not be lexed (%s) — fail-closed" % exc]
     # Scope first: three vendors override parseVoiceInputResponse in this file,
     # so an unscoped anchor would silently grade Doubao's copy instead.
-    cls = code.find("class XunfeiVoiceProvider")
+    cls = cv.find("class XunfeiVoiceProvider")
     if cls < 0:
         v.append("VoiceProviderVendors.kt: XunfeiVoiceProvider class not found "
                  "(gate anchors moved — deliberate edit required)")
         return v
-    anchor = code.find("fun parseVoiceInputResponse", cls)
-    body = brace_block(code, anchor) if anchor >= 0 else None
-    if body is None or '"ws"' not in body:
+    anchor = cv.find("fun parseVoiceInputResponse", cls)
+    blk = block_at(cv, anchor) if anchor >= 0 else None
+    body_cv = cv[blk[0]:blk[1]] if blk else None
+    body_lv = lv[blk[0]:blk[1]] if blk else None
+    if body_cv is None or '"ws"' not in body_lv:
         # No `ws` frame read ⇒ we are not looking at the Xunfei override (or it
         # was renamed/inlined). Fail closed rather than grade a sibling parser.
         v.append("VoiceProviderVendors.kt: XunfeiVoiceProvider.parseVoiceInputResponse "
                  "not found (its `ws` frame read is gone — gate anchors moved, "
                  "deliberate edit required)")
         return v
-    if not XUNFEI_TRANSCRIPT_GUARD.search(body):
+    if not XUNFEI_TRANSCRIPT_GUARD.search(body_lv):
         v.append("VoiceProviderVendors.kt: XunfeiVoiceProvider.parseVoiceInputResponse no "
                  "longer guards the ASSEMBLED transcript "
                  "(sb.toString().takeIf { it.isNotEmpty() } ?: throw "
                  "VoiceProviderException.Parse(\"Unexpected Xunfei ASR response format\")) "
                  "— da1027 ISSUE-04: an empty transcript is returned as a successful "
                  "result, pinning the candidate sticky + NO_MATCH and blocking fail-over")
-    if "return VoiceInputResponse(text = sb.toString()" in body:
+    if "return VoiceInputResponse(text = sb.toString()" in body_lv:
         v.append("VoiceProviderVendors.kt: bare 'return VoiceInputResponse(text = "
                  "sb.toString()' is back in the Xunfei parser (da1027 ISSUE-04: the "
                  "envelope-only guard let an empty transcript through as success)")
+
+    # [B7 01-6 dataflow] 守卫本身可以一字不改地被"喂饱再抹平"绕过：
+    #   sb.append(" ")                            → 空帧变成 " "，takeIf 恒真
+    #   return VoiceInputResponse(text = transcript.trim())  → 再抹回 ""
+    # 所以判据要落在**数据流两端**：builder 只能被 ASR 词喂，返回值只能是 guard
+    # 的绑定，且不得再做会丢内容的改写。
+    for m in re.finditer(r"\bsb\s*\.\s*(?:append|appendLine|insert)\s*\(", body_cv):
+        for a, b in call_args(body_cv, m.end() - 1):
+            arg = strip_parens(body_lv[a:b])
+            if const_value(arg) is not None:
+                v.append("VoiceProviderVendors.kt: the Xunfei transcript builder is fed a literal "
+                         "(`sb.append(%s)` in %s) — padding the builder makes "
+                         "`takeIf { it.isNotEmpty() }` always hold, so a silent-frame ASR result "
+                         "comes back as an empty-but-successful transcript (da1027 ISSUE-04, "
+                         "dataflow)" % (arg[:20], "XunfeiVoiceProvider.parseVoiceInputResponse"))
+                break
+    binds = decl_bindings(body_cv)
+    texts = response_text_args(body_cv)
+    if not texts:
+        v.append("VoiceProviderVendors.kt: the Xunfei parser no longer returns "
+                 "VoiceInputResponse(text = …) — the guarded transcript has no landing place "
+                 "(fail-closed)")
+    for expr, _pos in texts:
+        e = strip_parens(expr)
+        if const_value(e) is not None:
+            v.append("VoiceProviderVendors.kt: the Xunfei parser returns a hard-coded transcript "
+                     "(text = %s) — da1027 ISSUE-04: an empty transcript is reported as success "
+                     "and the consumer pins the candidate sticky + NO_MATCH" % expr[:40])
+        elif not re.fullmatch(r"[A-Za-z_]\w*", e):
+            v.append("VoiceProviderVendors.kt: the GUARDED transcript is rewritten before it is "
+                     "returned (`%s`) — any lossy tail (trim/take/substring/…) can turn the "
+                     "non-empty guarded text back into \"\", so the guard passes and the caller "
+                     "still gets an empty success (da1027 ISSUE-04, dataflow)" % expr[:40])
+        elif e not in binds:
+            v.append("VoiceProviderVendors.kt: `%s` is returned as the transcript but is not a "
+                     "binding in this parser — the value never went through the "
+                     "assembled-transcript guard (fail-closed)" % e)
+        else:
+            a, b = binds[e]
+            rhs = strip_parens(body_lv[a:b])
+            if not XUNFEI_TRANSCRIPT_GUARD.match(rhs):
+                v.append("VoiceProviderVendors.kt: `%s` is not bound to the assembled-transcript "
+                         "guard — the returned value must be exactly "
+                         "`sb.toString().takeIf { it.isNotEmpty() } ?: throw Parse(...)`, not a "
+                         "wrapper around it (`%s`)" % (e, rhs[:40]))
     return v
 
 
@@ -647,14 +782,60 @@ class DoubaoVoiceProvider(providerId: String, baseUrl: String, apiKey: String?) 
 ''' + BAD_VENDORS_BARE
 
 
+# ── B7 witnesses (each one passed this gate unchanged before the fix) ───────
+
+# 01-1: 守卫条件取的是完成回调自带的 cause —— watchJob 跑 awaitCancellation()，
+# 只可能被取消结束 ⇒ cause 恒非 null，`cause == null` 恒假，且没有任何常量可折。
+BAD_VP_CAUSE_GATED_CANCEL = GOOD_VP.replace(
+    "val watchDisposable = watchJob.invokeOnCompletion { _ -> call.cancel() }",
+    "val watchDisposable = watchJob.invokeOnCompletion { cause -> if (cause == null) call.cancel() }")
+
+# 01-4: 死分支写成 `when (false)` —— 旧 guards() 只解析 `if (`，这条完全隐形。
+BAD_VP_WHEN_DEAD = GOOD_VP.replace(
+    "val watchDisposable = watchJob.invokeOnCompletion { _ -> call.cancel() }",
+    "val watchDisposable = watchJob.invokeOnCompletion { _ -> when (false) { true -> call.cancel() else -> Unit } }")
+
+# 01-5: 成功路径的 dispose 被死分支短路（门只给 call.cancel() 装了死条件检查）。
+BAD_VP_DISPOSE_DEAD = GOOD_VP.replace(
+    "            watchDisposable.dispose()\n            watchJob.cancel()",
+    "            if (false) watchDisposable.dispose()\n            watchJob.cancel()")
+
+# 01-2: 绑定留住、单词边界命中，值被 take(0) 截成空串。
+BAD_VP_TRUNCATED_PARSE = GOOD_VP.replace(
+    """        val data = executeRequest(request.toRequest())
+        return VoiceInputResponse(text = parseChatAsrTranscript(data))""",
+    """        val data = executeRequest(request.toRequest())
+        val parsed = parseChatAsrTranscript(data)
+        return VoiceInputResponse(text = parsed.take(0))""")
+
+# 01-3: 重抛被异常自带的消息短路，兜底用带类型参数的空集合拼写。
+BAD_OR_MESSAGE_GATED_RETHROW = GOOD_OR.replace(
+    """        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e""",
+    """        } catch (e: kotlinx.coroutines.CancellationException) {
+            if (e.message == "__never__") throw e
+            return@withContext emptyList<LLMModel>()""")
+
+# 01-6: 守卫一字不改，在数据流两端对冲：builder 喂一个空格，返回时 trim 回去。
+BAD_VENDORS_PAD_TRIM = GOOD_VENDORS.replace(
+    """        val transcript = sb.toString().takeIf { it.isNotEmpty() }
+            ?: throw VoiceProviderException.Parse("Unexpected Xunfei ASR response format")
+        return VoiceInputResponse(text = transcript, language = request.language)""",
+    """        val transcript = sb.append(" ").let { sb.toString().takeIf { it.isNotEmpty() } ?: throw VoiceProviderException.Parse("Unexpected Xunfei ASR response format") }
+        return VoiceInputResponse(text = transcript.trim(), language = request.language)""")
+
+
 def selftest():
     failures = []
+    stats = {"checks": 0}
 
     def expect_clean(name, v):
+        stats["checks"] += 1
         if v:
             failures.append("%s must be clean, got %s" % (name, v))
 
     def expect_trip(name, v, needle):
+        stats["checks"] += 1
         if not any(needle in item for item in v):
             failures.append("%s did not trip '%s' (got %s)" % (name, needle, v))
 
@@ -669,7 +850,7 @@ def selftest():
     expect_trip("dead cancel hook fixture", bad_dead_cancel, "dead guard")
     bad_discard = check_voiceprovider(BAD_VP_DISCARD_PARSE)
     expect_trip("discarded parse fixture", bad_discard, "DISCARDED")
-    expect_trip("discarded parse fixture", bad_discard, "hard-coded empty transcript")
+    expect_trip("discarded parse fixture", bad_discard, "hard-coded transcript")
     bad_or_dead = check_openrouter(BAD_OR_DEAD_RETHROW)
     expect_trip("dead rethrow fixture", bad_or_dead, "dead guard")
     expect_trip("dead rethrow fixture", bad_or_dead, "returns the empty fallback")
@@ -706,6 +887,24 @@ def selftest():
     expect_trip("guarded-sibling-decoy fixture", bad_vend_decoy,
                 "no longer guards the ASSEMBLED transcript")
 
+    # ── B7 见证臂：每条变异必须恰好摔在自己那条判据上 ─────────────────────
+    bad_cause = check_voiceprovider(BAD_VP_CAUSE_GATED_CANCEL)
+    expect_trip("01-1 cause-gated cancel hook", bad_cause, "dead guard")
+    expect_trip("01-1 cause-gated cancel hook", bad_cause, "the hook fires and cancels nothing")
+    bad_when = check_voiceprovider(BAD_VP_WHEN_DEAD)
+    expect_trip("01-4 when(false) dead cancel hook", bad_when, "dead guard")
+    bad_dispose = check_voiceprovider(BAD_VP_DISPOSE_DEAD)
+    expect_trip("01-5 dead dispose guard", bad_dispose,
+                "dispose() sits behind the dead guard")
+    bad_trunc = check_voiceprovider(BAD_VP_TRUNCATED_PARSE)
+    expect_trip("01-2 truncated parse value", bad_trunc, "not the ASR result any more")
+    bad_or_msg = check_openrouter(BAD_OR_MESSAGE_GATED_RETHROW)
+    expect_trip("01-3 message-gated rethrow", bad_or_msg, "dead guard")
+    expect_trip("01-3 message-gated rethrow", bad_or_msg, "returns the empty fallback")
+    bad_vend_pad = check_xunfei_transcript(BAD_VENDORS_PAD_TRIM)
+    expect_trip("01-6 padded builder", bad_vend_pad, "builder is fed a literal")
+    expect_trip("01-6 padded builder", bad_vend_pad, "GUARDED transcript is rewritten")
+
     print("selftest compliant VoiceProvider    -> %d violation(s)" % len(good_vp))
     print("selftest compliant OpenRouter       -> %d violation(s)" % len(good_or))
     print("selftest compliant Xunfei transcript-> %d violation(s)" % len(good_vend))
@@ -725,7 +924,7 @@ def selftest():
         for f in failures:
             print("SELFTEST FAIL " + f)
         return 1
-    print("VOICE_CANCEL_GUARD_SELFTEST=PASS")
+    print("VOICE_CANCEL_GUARD_SELFTEST=PASS (%d arms)" % stats["checks"])
     return 0
 
 

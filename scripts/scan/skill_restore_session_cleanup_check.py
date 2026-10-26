@@ -62,6 +62,29 @@ import os
 import re
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+from _kotlin_lexer import KotlinLexError, mask_code
+from _kotlin_ast import (
+    const_value,
+    function_body,
+    if_blocks,
+    match_bracket,
+    split_top,
+    strip_parens,
+)
+from _kotlin_valueflow import (
+    call_args,
+    contains_ident,
+    expr_end,
+    guard_feasible,
+    path_feasible,
+    peel_discarding,
+    value_sources,
+)
+
 SKILL_REPO_REL = "src/android/app/src/main/java/com/rikkaminis/app/data/repository/SkillRepository.kt"
 CHAT_REPO_REL = "src/android/app/src/main/java/com/rikkaminis/app/data/repository/ChatRepository.kt"
 MINIS_APP_REL = "src/android/app/src/main/java/com/rikkaminis/app/MinisApp.kt"
@@ -85,13 +108,6 @@ DURABLE_WRITES = ("appendMessage(", "updateSessionPreview(")
 # invisible. The class is "any expression whose value cannot depend on `text`":
 # a string literal (masked to spaces by mask_keep_offsets), String(), the
 # String.EMPTY constant, an emptied builder, or a literal `.trim()`.
-COMPOSER_DISCARD_RE = re.compile(
-    r"_inputText\s*\.\s*value\s*=\s*(?:"
-    r"\"[^\n\"]*\"|'[^\n']*'|"
-    r"(?:kotlin\s*\.\s*)?String\s*\(\s*\)|"
-    r"(?:kotlin\s*\.\s*)?String\s*\.\s*EMPTY|"
-    r"buildString\s*\{\s*\}"
-    r")")
 # [dv25-B08 / deep-audit-1045 B-08] The promotion owns the session it creates.
 # The exit sweep must respect that ownership, and the promotion must keep the
 # draft slot recoverable when its durable write did not land.
@@ -119,7 +135,6 @@ DRAWER_VISIBLE_CALL = "isDrawerRowVisible("
 DRAWER_FILTER_RE = re.compile(r"sessions\s*\.\s*filter\s*\{[^}]*isDrawerRowVisible\(")
 # Blankness test on the preview column (any of these is the "no content" arm).
 PREVIEW_BLANK_CHECKS = ("isNullOrBlank", "isNotBlank", "isNullOrEmpty", "isNotEmpty")
-TOP_LEVEL_BOUNDS = ("\nfun ", "\ninternal fun ", "\nprivate fun ", "\n@Composable")
 
 ADD_DECL = "fun add("
 ADD_SIG_END = "): Skill? {"
@@ -154,6 +169,12 @@ RECORD_DECL = "fun recordSkillUse("
 RECORD_LOCK = "synchronized(addLock)"
 SKILLS_ASSIGN = "_skills.value ="
 SKILLS_STATE = "_skills.value"
+# Every way a MutableStateFlow's value can be replaced. The old criterion knew
+# only the `= ` setter, so `_skills.tryEmit(…)` — same effect on `.value`,
+# different spelling — published outside the lock unnoticed.
+SKILLS_WRITE_RE = re.compile(
+    r"(?<![\w.`])_skills\s*\.\s*(?:value\s*=(?!=)|tryEmit\s*\(|"
+    r"compareAndSet\s*\(|emit\s*\()")
 
 # [da1030-A ISSUE-01]
 ENSURE_DECL = "internal suspend fun ChatViewModel.ensureSession("
@@ -163,63 +184,33 @@ ON_SESSION_DELETED = "onSessionDeleted = { sid ->"
 BADGE_CLEAR = "SessionBadgeStore.clear("
 
 
-def lines_of(src, needle):
-    return [i + 1 for i, line in enumerate(src.split("\n")) if needle in line]
+def structure(src):
+    """Structural view: comments + string/char literal bodies -> spaces.
 
-
-def strip_literals(src):
-    """Empty out string bodies + drop comments so brace matching can't be fooled.
-
-    Needed because the KDoc for `recordSkillUse` quotes `synchronized(addLock)`
-    and `_skills.value` verbatim, and because SQL literals could carry braces.
-    Returns None when a literal/comment never terminates (caller treats that as
-    ROT rather than silently matching garbage).
+    Provided by the shared lexer (`mask_code`): offsets are preserved exactly, so
+    a position found here can be re-projected onto the raw source (needed by the
+    arms that must read a SQL literal). Returns None when a literal/comment never
+    terminates — callers report ROT / fail-closed instead of scanning raw text.
     """
-    out, i, n = [], 0, len(src)
-    while i < n:
-        if src.startswith('"""', i):
-            end = src.find('"""', i + 3)
-            if end < 0:
-                return None
-            out.append("~")
-            i = end + 3
-            continue
-        c = src[i]
-        if c == '"':
-            i += 1
-            while i < n and src[i] != '"':
-                i += 2 if src[i] == "\\" else 1
-            if i >= n:
-                return None
-            out.append("~")
-            i += 1
-            continue
-        if src.startswith("//", i):
-            j = src.find("\n", i)
-            i = n if j < 0 else j
-            continue
-        if src.startswith("/*", i):
-            j = src.find("*/", i + 2)
-            if j < 0:
-                return None
-            i = j + 2
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
+    try:
+        return mask_code(src)
+    except KotlinLexError:
+        return None
 
 
-def brace_block_end(code, open_idx):
-    """Index just past the '}' matching the '{' at `open_idx`, or -1."""
-    depth = 0
-    for i in range(open_idx, len(code)):
-        if code[i] == "{":
-            depth += 1
-        elif code[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
+def body_of(code, name):
+    """[decl_start, body_end) of `fun <name>(…)`, or (None, None).
+
+    Delegates to the shared AST (`function_body`), which understands both block
+    and expression bodies. `decl_start` is derived from the same match, so an
+    overload cannot shift the slice.
+    """
+    m = re.search(r"\bfun\s+(?:<[^>]*>\s*)?(?:[A-Za-z_][\w.]*\.)?" + re.escape(name) + r"\s*\(",
+                  code)
+    got = function_body(code, name)
+    if not m or not got:
+        return (None, None)
+    return (m.start(), got[1])
 
 
 def check_record_skill_use_lock(src):
@@ -232,75 +223,75 @@ def check_record_skill_use_lock(src):
     lost, memory drifts behind the DB) and a concurrent `add()` could be
     overwritten by the stale publish.
 
-    The criterion is on **lock ownership**, deliberately not on the shape of
-    the right-hand side: `_skills.value = <any expression>` inside the block is
-    accepted (mapping inline, or via an intermediate `val`).
+    Batch-7: the criterion is "every way the `_skills` StateFlow can be
+    replaced" — the `value =` setter, `tryEmit(…)`, `compareAndSet(…)` and
+    `emit(…)`. `tryEmit` on a MutableStateFlow always succeeds and lands in
+    `.value` exactly like the setter, so judging the setter spelling alone left
+    the whole publish-after-release window open for a one-word change.
     """
     v = []
-    code = strip_literals(src)
+    code = structure(src)
     if code is None:
         v.append("SkillRepository.kt: unterminated string/comment literal — cannot brace-match "
                  "recordSkillUse (ROT — update this gate)")
         return v
-    start = code.find(RECORD_DECL)
-    if start < 0:
+    start, end = body_of(code, "recordSkillUse")
+    if start is None:
         v.append("SkillRepository.kt: '%s' not found (ROT — update this gate)" % RECORD_DECL)
         return v
-    open_brace = code.find("{", start)
-    if open_brace < 0:
-        v.append("SkillRepository.kt: recordSkillUse has no body brace (ROT — update this gate)")
-        return v
-    end = brace_block_end(code, open_brace)
-    if end < 0:
-        v.append("SkillRepository.kt: recordSkillUse body braces do not balance (ROT — update this gate)")
-        return v
-    body = code[open_brace:end + 1]
 
-    lock_at = body.find(RECORD_LOCK)
+    lock_at = code.find(RECORD_LOCK, start, end)
     if lock_at < 0:
         v.append("SkillRepository.kt: recordSkillUse has no '%s' — the read-modify-write "
                  "over _skills.value is back outside the add lock" % RECORD_LOCK)
         return v
-    lock_open = body.find("{", lock_at)
-    lock_end = brace_block_end(body, lock_open) if lock_open >= 0 else -1
-    if lock_end < 0:
+    lock_open = code.find("{", lock_at)
+    lock_end = match_bracket(code, lock_open) if lock_open >= 0 else -1
+    if lock_open < 0 or lock_end < 0 or lock_end > end:
         v.append("SkillRepository.kt: recordSkillUse's synchronized block braces do not balance "
                  "(ROT — update this gate)")
         return v
 
-    assigns = [m.start() for m in re.finditer(re.escape(SKILLS_ASSIGN), body)]
-    if not assigns:
+    writes = [m.start() for m in SKILLS_WRITE_RE.finditer(code, start, end)]
+    if not writes:
         v.append("SkillRepository.kt: recordSkillUse never publishes '%s' — the use_count bump "
                  "would never reach the in-memory mirror" % SKILLS_ASSIGN)
         return v
-    inside = [p for p in assigns if lock_open < p < lock_end]
-    outside = [p for p in assigns if not (lock_open < p < lock_end)]
+    inside = [p for p in writes if lock_open < p < lock_end]
+    outside = [p for p in writes if not (lock_open < p < lock_end)]
     if not inside:
         v.append("SkillRepository.kt: recordSkillUse computes under the lock but publishes "
                  "'%s' only OUTSIDE it — a concurrent recordSkillUse loses one increment and a "
                  "concurrent add() can be overwritten by the stale publish" % SKILLS_ASSIGN)
     for p in outside:
         v.append("SkillRepository.kt: '%s' at body offset %d is out of the '%s' block — "
-                 "write-back must share the lock with add()" % (SKILLS_ASSIGN, p, RECORD_LOCK))
+                 "write-back must share the lock with add() (tryEmit/compareAndSet replace "
+                 "`.value` and are just as racy)"
+                 % (re.sub(r"\s+", " ", code[p:p + 24]).strip(), p - start, RECORD_LOCK))
 
     # wide-1024 (dataflow): publishing UNDER the lock is not enough. The write
     # is derived from a read of the same StateFlow, and the DB bump is the
     # other half of the pair — leaving either outside the lock restores the
     # lost-increment race the da1029-C fix closed (two concurrent calls both
     # read the pre-bump snapshot; the DB says +2, memory says +1).
-    assign_starts = set(assigns)
-    for p in [q for q in (m.start() for m in re.finditer(re.escape(SKILLS_STATE), body))
-              if not (lock_open < q < lock_end) and q not in assign_starts]:
+    write_starts = set(writes)
+    for m in re.finditer(re.escape(SKILLS_STATE), code[start:end]):
+        q = start + m.start()
+        if q in write_starts or lock_open < q < lock_end:
+            continue
+        if any(w <= q < w + len(SKILLS_ASSIGN) for w in write_starts):
+            continue
         v.append("SkillRepository.kt: recordSkillUse reads '%s' at body offset %d OUTSIDE the "
                  "'%s' block — the value the write is derived from must be read under the "
                  "same lock, otherwise two concurrent calls both read the pre-bump snapshot "
-                 "and one increment is lost in memory" % (SKILLS_STATE, p, RECORD_LOCK))
-    for m in re.finditer(r"\bdb\s*\.\s*execSQL\s*\(", body):
-        if not (lock_open < m.start() < lock_end):
+                 "and one increment is lost in memory" % (SKILLS_STATE, q - start, RECORD_LOCK))
+    for m in re.finditer(r"\bdb\s*\.\s*execSQL\s*\(", code[start:end]):
+        p = start + m.start()
+        if not (lock_open < p < lock_end):
             v.append("SkillRepository.kt: recordSkillUse issues its use_count bump "
                      "(db.execSQL) at body offset %d OUTSIDE the '%s' block — the DB half "
                      "and the memory half of the read-modify-write must be one critical "
-                     "section" % (m.start(), RECORD_LOCK))
+                     "section" % (p - start, RECORD_LOCK))
     return v
 
 
@@ -311,9 +302,77 @@ def slice_between(src, start_marker, end_marker, label, violations):
         return None
     end = src.find(end_marker, start + len(start_marker))
     if end < 0:
-        violations.append("%s: '%s' not found after %s (ROT — update this gate)" % (label, end_marker, start_marker))
+        violations.append("%s: '%s' not found after %s (ROT — update this gate)"
+                          % (label, end_marker, start_marker))
         return None
     return src[start:end]
+
+
+def check_sparse_clear(src, code):
+    """Arm 8 [dv16-A05]: setSessionOverride must sparse-clear.
+
+    The decision lives in the shared pure function
+    shouldDeleteSessionSkillOverride (the MCP twin's shape); a pinned row keeps
+    the session stuck at the old value after the user toggles back.
+
+    Batch-7: the branch must be REACHABLE. `if (shouldDelete(…) && false)` keeps
+    every anchor this arm looked for — the call, the shared decision, the
+    CURRENT-global read and the DELETE statement — while turning the whole
+    sparse-clear into dead code, so every session toggle that matches the
+    global default leaves a permanent hard-coded override row.
+    """
+    v = []
+    if code is None:
+        return ["SkillRepository.kt: unterminated string/comment literal — cannot read the "
+                "setSessionOverride decision (ROT — update this gate)"]
+    start = src.find(OVERRIDE_DECL)
+    end = src.find(OVERRIDE_NEXT, start + 1) if start >= 0 else -1
+    if start < 0 or end < 0:
+        return ["SkillRepository.kt: setSessionOverride / clearSessionOverrides declaration "
+                "not found (ROT — update this gate)"]
+    body = src[start:end]
+    if DELETE_OVERRIDE not in body:
+        v.append(
+            "SkillRepository.kt: setSessionOverride does not DELETE the override row when the "
+            "value equals the global default — a pinned row keeps the session stuck at the old "
+            "value after the user toggles back (sparse-clear is the MCP twin's shape)"
+        )
+    if SHARED_DECISION not in body:
+        v.append(
+            "SkillRepository.kt: setSessionOverride does not consult the shared decision "
+            "shouldDeleteSessionSkillOverride — a second decision copy is back"
+        )
+    if GLOBAL_READ not in body:
+        v.append(
+            "SkillRepository.kt: setSessionOverride does not read the CURRENT global default "
+            "before the branch — the row would be pinned even when it matches"
+        )
+
+    # The DELETE must sit in the branch whose guard is the shared decision, and
+    # that guard must be able to be TRUE at runtime.
+    guards = [(cond, ts, te) for cond, ts, te, _es, _ee in if_blocks(code)
+              if start <= ts < end and DELETE_OVERRIDE in src[ts:te]]
+    if not guards:
+        v.append("SkillRepository.kt: the DELETE of the override row is not the body of an "
+                 "`if` at all — the sparse-clear decision must gate the statement directly")
+        return v
+    for cond, ts, te in guards:
+        if SHARED_DECISION not in cond:
+            v.append("SkillRepository.kt: the DELETE branch is guarded by `%s`, not by the "
+                     "shared decision shouldDeleteSessionSkillOverride — the sparse-clear "
+                     "condition has drifted into a second copy"
+                     % re.sub(r"\s+", " ", cond).strip()[:80])
+        if not guard_feasible(cond):
+            v.append("SkillRepository.kt: setSessionOverride's sparse-clear guard is DEAD "
+                     "(`%s`) — the DELETE statement, the shared decision and the CURRENT-global "
+                     "read all survive as anchors but can never run, so every toggle that "
+                     "matches the global default now writes a pinned INSERT OR REPLACE row "
+                     "(dv16-A05: the session stays stuck at the old value forever)"
+                     % re.sub(r"\s+", " ", cond).strip()[:90])
+        elif not path_feasible(code, src.index(DELETE_OVERRIDE, ts)):
+            v.append("SkillRepository.kt: the DELETE of the override row is unreachable on the "
+                     "sparse-clear path (dead enclosing branch)")
+    return v
 
 
 def check_skill_repo(src):
@@ -322,32 +381,12 @@ def check_skill_repo(src):
     # Arm 4 [da1029-C / I04]: recordSkillUse's write-back shares add()'s lock.
     v.extend(check_record_skill_use_lock(src))
 
-    # Arm 1b (dataflow, wide-1024): the resolved id must actually REACH the
-    # policy — `preferredId.let { null }` keeps every anchor of arm 1.
+    # Arm 1b (dataflow, wide-1024 → batch-7): the resolved id must actually
+    # REACH the policy — the argument must evaluate to `preferredId` itself.
     v.extend(check_resolve_callee_args(src))
 
-    # Arm 8 [dv16-A05]: setSessionOverride sparse-clears when the requested
-    # value equals the CURRENT global default; the decision lives in the
-    # shared pure function shouldDeleteSessionSkillOverride (the MCP twin's
-    # shape). A pinned row keeps the session stuck at the old value forever.
-    override_slice = slice_between(src, OVERRIDE_DECL, OVERRIDE_NEXT, "SkillRepository.kt", v)
-    if override_slice is not None:
-        if DELETE_OVERRIDE not in override_slice:
-            v.append(
-                "SkillRepository.kt: setSessionOverride does not DELETE the override row when the "
-                "value equals the global default — a pinned row keeps the session stuck at the old "
-                "value after the user toggles back (sparse-clear is the MCP twin's shape)"
-            )
-        if SHARED_DECISION not in override_slice:
-            v.append(
-                "SkillRepository.kt: setSessionOverride does not consult the shared decision "
-                "shouldDeleteSessionSkillOverride — a second decision copy is back"
-            )
-        if GLOBAL_READ not in override_slice:
-            v.append(
-                "SkillRepository.kt: setSessionOverride does not read the CURRENT global default "
-                "before the branch — the row would be pinned even when it matches"
-            )
+    # Arm 8 [dv16-A05]: sparse-clear, now with guard feasibility.
+    v.extend(check_sparse_clear(src, structure(src)))
 
     # Arm 1: add()'s first assignment must resolve the id through the policy.
     add_slice = slice_between(src, ADD_DECL, ADD_SIG_END, "SkillRepository.kt", v)
@@ -373,7 +412,8 @@ def check_skill_repo(src):
     if ifc is not None:
         ra = ifc.find(RETURN_ADD)
         if ra < 0:
-            v.append("SkillRepository.kt: importFromContent has no '%s' (ROT — update this gate)" % RETURN_ADD)
+            v.append("SkillRepository.kt: importFromContent has no '%s' (ROT — update this gate)"
+                     % RETURN_ADD)
         else:
             block = ifc[ra:ifc.find(")\n", ra) if ifc.find(")\n", ra) > 0 else len(ifc)]
             if PREFERRED_ID not in block:
@@ -387,7 +427,8 @@ def check_skill_repo(src):
     if bundled is not None:
         a = bundled.find("add(")
         if a < 0:
-            v.append("SkillRepository.kt: installBundledSkill has no add() call (ROT — update this gate)")
+            v.append("SkillRepository.kt: installBundledSkill has no add() call "
+                     "(ROT — update this gate)")
         else:
             block = bundled[a:bundled.find(")\n", a) if bundled.find(")\n", a) > 0 else len(bundled)]
             if PREFERRED_ID not in block:
@@ -399,45 +440,46 @@ def check_skill_repo(src):
     return v
 
 
-NEUTRALISED_ARG_RE = re.compile(
-    r"(?<![\w.])null\b|(?<![\w.])false\b|!\s*true\b|\btrue\s*==\s*false\b|\"\"|''")
+def _inert_preferred_id(arg):
+    """Does this argument still EVALUATE to the caller's `preferredId`?
 
-
-def split_top_args(text):
-    """Split a Kotlin argument list on commas at bracket depth 0."""
-    out, buf, depth = [], [], 0
-    for c in text:
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        if c == "," and depth <= 0:
-            out.append("".join(buf))
-            buf = []
+    Only inert wrappers are accepted: parentheses, `!!` and a cast. Every other
+    transformation (`?.take(0)`, `.let { null }`, `.substring(0, 0)`, a literal)
+    changes the value the policy receives.
+    """
+    e = strip_parens(arg.strip())
+    for _ in range(6):
+        if e.endswith("!!"):
+            e = strip_parens(e[:-2].strip())
             continue
-        buf.append(c)
-    out.append("".join(buf))
-    return out
+        m = re.fullmatch(r"(.+?)\s+as\s+[A-Za-z_][\w.]*\s*\??", e, re.S)
+        if m:
+            e = strip_parens(m.group(1).strip())
+            continue
+        break
+    return re.sub(r"\s+", "", e) == "preferredId"
 
 
 def check_resolve_callee_args(src):
-    """Arm 1b (dataflow, wide-1024): the id resolution must be fed `preferredId`
-    ITSELF, not an expression that reduces to a constant.
+    """Arm 1b (dataflow, wide-1024 → batch-7): the id resolution must be fed
+    `preferredId` ITSELF, not an expression that reduces to something else.
 
     Arm 1 proves add()'s `val id =` statement mentions the policy call and the
-    `preferredId` identifier. `resolveImportId(preferredId.let { null },
-    slugify(name))` satisfies both while handing the policy a null — i.e. the
-    caller's already-resolved id is dropped exactly as before
-    [fix/da1021-A]: a renamed / pure-CJK skill (blank slug) is lost, or lands
-    under a fresh slug while its payload and overrides still point at the old
-    one.
+    `preferredId` identifier. `resolveImportId(preferredId.let { null }, …)`
+    satisfied both while handing the policy a null — and the blacklist that
+    followed (`null|false|!true|""`) could be stepped around with any other
+    neutraliser that keeps the identifier: `preferredId?.take(0)` passes an
+    empty string, `preferredId.substring(0, 0)` the same, all of which make
+    `resolveImportId` fall back to `slugify(name)` (a renamed / pure-CJK skill
+    is then lost, or lands under a fresh slug while its payload and overrides
+    still point at the old one [fix/da1021-A]).
 
     Criterion: for EVERY resolveImportId call site in the file (both entry
-    points — add() and importFromContent), argument 0 must mention
-    `preferredId` and must not contain a constant that neutralises it.
-    Unparseable argument lists fail closed."""
+    points) argument 0 must be an inert pass-through of `preferredId`.
+    Unparseable argument lists fail closed.
+    """
     v = []
-    code = strip_literals(src)
+    code = structure(src)
     if code is None:
         return ["SkillRepository.kt: unterminated string/comment literal — cannot read the "
                 "resolveImportId arguments (ROT — update this gate)"]
@@ -446,97 +488,99 @@ def check_resolve_callee_args(src):
         return v  # arm 1 already reports a missing call on the add() path
     for m in calls:
         op = m.end() - 1
-        cp = balanced_index(code, op, "(", ")")
-        if cp < 0:
+        spans = call_args(code, op)
+        if not spans:
             v.append("SkillRepository.kt: resolveImportId argument list does not balance at "
                      "offset %d (fail-closed)" % m.start())
             continue
-        args = split_top_args(code[op + 1:cp])
-        arg0 = re.sub(r"\s+", " ", args[0]).strip() if args else ""
-        if "preferredId" not in arg0:
+        a, b = spans[0]
+        raw = code[a:b]
+        arg0 = re.sub(r"\s+", " ", raw).strip()
+        if not contains_ident(raw, "preferredId"):
             v.append("SkillRepository.kt: resolveImportId is called without `preferredId` "
                      "(`%s`) — the caller's resolved id is dropped and a renamed skill lands "
                      "under slugify(name) again" % arg0[:80])
-        elif NEUTRALISED_ARG_RE.search(arg0):
+        elif not _inert_preferred_id(raw):
             v.append("SkillRepository.kt: resolveImportId's preferredId argument is "
                      "NEUTRALISED (`%s`) — the call and the identifier survive, but the value "
-                     "reduces to a constant, so a renamed / pure-CJK skill is lost or lands "
-                     "under a fresh slug (fail-closed)" % arg0[:90])
+                     "is transformed (scope call / truncation / literal), so a renamed or "
+                     "pure-CJK skill is lost or lands under a fresh slug (fail-closed)"
+                     % arg0[:90])
     return v
 
 
-def balanced_index(text, open_idx, opener, closer):
-    """Index of the delimiter matching [opener] at `open_idx`, or -1."""
-    depth = 0
-    for i in range(open_idx, len(text)):
-        if text[i] == opener:
-            depth += 1
-        elif text[i] == closer:
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
-
-
-def block_body(code, decl_idx):
-    """The `{...}` body of a block-bodied declaration at `decl_idx`, or None.
-
-    Bounded on purpose: the opening brace must sit on the SAME LINE as the
-    parameter list's closing paren (this codebase's style). That keeps an
-    expression-bodied sibling (`fun foo(): Int = 0`) from swallowing the next
-    declaration's brace.
-    """
-    op = code.find("(", decl_idx)
+def _params_of(code, decl_start):
+    """Parameter names of the declaration starting at `decl_start`."""
+    op = code.find("(", decl_start)
     if op < 0:
-        return None
-    cp = balanced_index(code, op, "(", ")")
+        return []
+    cp = match_bracket(code, op)
     if cp < 0:
-        return None
-    ob = code.find("{", cp)
-    if ob < 0 or "\n" in code[cp + 1:ob]:
-        return None
-    oe = brace_block_end(code, ob)
-    if oe < 0:
-        return None
-    return code[ob:oe + 1]
+        return []
+    names = []
+    for a, b in split_top(code[op + 1:cp], (",",)):
+        seg = code[op + 1 + a:op + 1 + b]
+        m = re.match(r"\s*(?:@\w+\s+)*(?:val\s+|var\s+)?([A-Za-z_]\w*)\s*:", seg)
+        if m:
+            names.append(m.group(1))
+    return names
 
 
-def block_functions(code):
-    """[(name, body)] for every block-bodied declaration in the file."""
-    out = []
-    for m in FN_DECL_RE.finditer(code):
-        body = block_body(code, m.start())
-        if body is not None:
-            out.append((m.group(1), body))
-    return out
+def _session_id_names(code, start, end, params):
+    """Identifiers in the body that plausibly carry the deleted session id.
+
+    The function's parameters, plus locals / loop variables derived from a `dao.`
+    call or from those parameters (the startup sweep forwards `id` from a
+    candidate list it fetched through `dao.`).
+    """
+    allowed = set(params)
+    for _ in range(3):
+        grew = False
+        for m in re.finditer(r"\b(?:val|var|for)\s*\(?\s*([A-Za-z_]\w*)", code[start:end]):
+            name = m.group(1)
+            rhs_start = start + m.end()
+            rhs = code[rhs_start:expr_end(code, rhs_start)]
+            if name in allowed:
+                continue
+            if "dao." in rhs or any(contains_ident(rhs, n) for n in allowed):
+                allowed.add(name)
+                grew = True
+        if not grew:
+            break
+    return allowed
 
 
 def check_chat_repo(src):
     """Arms 1–3 [fix/da1021-A, widened by dv21-a2]: EVERY `sessions`-row delete
-    entry point runs the cross-db cleanup.
+    entry point runs the cross-db cleanup, and that cleanup is handed the id
+    that was really deleted.
 
     The hook was originally wired into two of the three entry points; the
     startup empty-session sweep (`deleteEmptySessions`) skipped it, so a session
     the user opened, flipped a session-scoped toggle on and then abandoned kept
     its skills.db / mcp.db override rows, its badge and its offload grants for
-    whatever session later reused the id. Criterion: every function that removes
-    `sessions` rows must reach `onSessionDeleted` — inline, or through a helper
-    it calls — and the entry-point SET is derived from the tree, so a fourth
-    entry point that skips the cleanup goes red instead of passing a gate whose
-    list nobody updated.
+    whatever session later reused the id.
+
+    Batch-7: the hook call must carry the deleted id. `onSessionDeleted?.invoke("")`
+    keeps the whole spelling this arm looked for while the cleanup runs against
+    a fabricated id, so the real session's overrides, badge and grants survive
+    (da1021 ISSUE-10 / da1030 I02). Criterion: the first argument must not be a
+    constant, and must derive from the function's own parameters or from a
+    `dao.`-derived local / loop variable.
     """
     v = []
-    code = strip_literals(src)
+    code = structure(src)
     if code is None:
         v.append("ChatRepository.kt: unterminated string/comment (ROT — update this gate)")
         return v
-    funcs = block_functions(code)
-    bodies = {}
-    for name, body in funcs:
-        bodies.setdefault(name, body)
+    funcs = []
+    for m in FN_DECL_RE.finditer(code):
+        got = function_body(code, m.group(1))
+        if got:
+            funcs.append((m.group(1), m.start(), got[1]))
     # The decision this gate is about: which functions drop `sessions` rows.
-    row_deleters = sorted({name for name, body in funcs
-                           if any(call in body for call in SESSION_ROW_DELETES)})
+    row_deleters = sorted({name for name, s, e in funcs
+                           if any(call in code[s:e] for call in SESSION_ROW_DELETES)})
     registered = []
     for decl, label in ((DELETE_SESSION, "deleteSession"),
                         (DELETE_ROW_ONLY, "deleteSessionRowOnly"),
@@ -546,13 +590,18 @@ def check_chat_repo(src):
     names = {name for _, _, name in registered}
     # Arm 1: the registered declarations are still there (a rename is ROT, not
     # a silent pass).
-    entry_bodies = {}
+    entry_spans = {}
     for decl, label, name in registered:
         off = code.find(decl)
         if off < 0:
             v.append("ChatRepository.kt: '%s' not found (ROT — update this gate)" % decl)
             continue
-        entry_bodies[label] = block_body(code, off)
+        got = function_body(code, name)
+        if not got:
+            v.append("ChatRepository.kt: %s body braces do not balance (ROT — update this gate)"
+                     % label)
+            continue
+        entry_spans[label] = (off, got[1])
     # Arm 2: nothing removes `sessions` rows outside the registered set.
     for name in row_deleters:
         if name not in names:
@@ -562,39 +611,59 @@ def check_chat_repo(src):
                 % (name, INVOKE_HOOK)
             )
     # Arm 3: every entry point reaches the hook (directly or via a helper whose
-    # own body holds it), judged on the body, not on a whole-line spelling.
-    for _, label, _ in registered:
-        body = entry_bodies.get(label)
-        if body is None:
-            continue
-        if INVOKE_HOOK in body:
-            continue
-        if any(INVOKE_HOOK in bodies.get(c, "") for c in CALL_RE.findall(body)):
-            continue
-        v.append(
-            "ChatRepository.kt: %s does not invoke '%s' — cross-db "
-            "session cleanup is unwired" % (label, INVOKE_HOOK)
-        )
+    # own body holds it), judged on the body, not on a whole-line spelling; and
+    # every direct call hands over a real id, not a constant.
+    helpers = {name: code[s:e] for name, s, e in funcs}
+    for label, (off, end) in entry_spans.items():
+        body = code[off:end]
+        if INVOKE_HOOK not in body:
+            delegated = [c for c in CALL_RE.findall(body) if INVOKE_HOOK in helpers.get(c, "")]
+            if not delegated:
+                v.append(
+                    "ChatRepository.kt: %s does not invoke '%s' — cross-db "
+                    "session cleanup is unwired" % (label, INVOKE_HOOK)
+                )
+    for name, s, e in funcs:
+        allowed = _session_id_names(code, s, e, _params_of(code, s))
+        for m in re.finditer(re.escape(INVOKE_HOOK), code[s:e]):
+            pos = s + m.start()
+            spans = call_args(code, pos + len(INVOKE_HOOK) - 1)
+            if not spans:
+                v.append("ChatRepository.kt: %s's onSessionDeleted argument list does not "
+                         "balance (fail-closed)" % name)
+                continue
+            a, b = spans[0]
+            arg = code[a:b]
+            if const_value(strip_parens(arg.strip())) is not None:
+                v.append(
+                    "ChatRepository.kt: %s passes a CONSTANT to '%s' (`%s`) — the cleanup then "
+                    "runs against a fabricated id, so the deleted session's skills/mcp override "
+                    "rows, PAUSED badge and offload grants all survive the delete (da1021 "
+                    "ISSUE-10 / da1030 I02)" % (name, INVOKE_HOOK, arg.strip()[:40])
+                )
+            elif not any(contains_ident(arg, n) for n in allowed):
+                v.append(
+                    "ChatRepository.kt: %s hands `%s` to '%s' — not an id derived from the "
+                    "deleted row (parameters / dao-derived candidates), so the cross-db "
+                    "cleanup targets the wrong session"
+                    % (name, arg.strip()[:40], INVOKE_HOOK)
+                )
     if INVOKE_HOOK not in src:
         v.append("ChatRepository.kt: onSessionDeleted hook declaration missing")
     return v
 
 
-def code_only(src):
-    """Drop comment-only lines so a KDoc/backticked mention of an anchor
-    string can't satisfy (or shadow) a real code anchor."""
-    return "\n".join(l for l in src.split("\n") if not l.strip().startswith("//"))
-
-
 def check_minis_app(src):
-    src = code_only(src)
+    code = structure(src)
     v = []
-    if CHATREPO_NEW not in src:
+    if code is None:
+        return ["MinisApp.kt: unterminated string/comment literal (ROT — update this gate)"]
+    if CHATREPO_NEW not in code:
         v.append("MinisApp.kt: '%s' not found (ROT — update this gate)" % CHATREPO_NEW)
         return v
-    chat_line = src.find(CHATREPO_NEW)
-    skill_line = src.find(SKILL_NEW)
-    mcp_line = src.find(MCP_NEW)
+    chat_line = code.find(CHATREPO_NEW)
+    skill_line = code.find(SKILL_NEW)
+    mcp_line = code.find(MCP_NEW)
     if skill_line < 0:
         v.append("MinisApp.kt: '%s' assignment not found" % SKILL_NEW)
     if mcp_line < 0:
@@ -602,12 +671,15 @@ def check_minis_app(src):
     # Arm 5: skill/mcp must be constructed BEFORE chatRepository (the callback
     # must reference the real singletons, not a second copy built too late).
     if skill_line >= 0 and skill_line > chat_line:
-        v.append("MinisApp.kt: skillRepository is constructed AFTER chatRepository — the onSessionDeleted callback would reference an unwired instance")
+        v.append("MinisApp.kt: skillRepository is constructed AFTER chatRepository — the "
+                 "onSessionDeleted callback would reference an unwired instance")
     if mcp_line >= 0 and mcp_line > chat_line:
-        v.append("MinisApp.kt: mcpRepository is constructed AFTER chatRepository — the onSessionDeleted callback would reference an unwired instance")
-    if "clearSessionOverrides(sid)" not in src:
+        v.append("MinisApp.kt: mcpRepository is constructed AFTER chatRepository — the "
+                 "onSessionDeleted callback would reference an unwired instance")
+    if "clearSessionOverrides(sid)" not in code:
         v.append("MinisApp.kt: onSessionDeleted callback does not call clearSessionOverrides")
     return v
+
 
 def check_chat_entry(src):
     """Arm 6 [da1030-A / I01]: `ensureSession`'s draft-promotion block must
@@ -625,25 +697,16 @@ def check_chat_entry(src):
     and, on the draft path, would run after the promotion window.
     """
     v = []
-    code = strip_literals(src)
+    code = structure(src)
     if code is None:
         v.append("ChatSessionEntryExt.kt: unterminated string/comment literal — cannot "
                  "brace-match ensureSession (ROT — update this gate)")
         return v
-    start = code.find(ENSURE_DECL)
-    if start < 0:
+    start, end = body_of(code, "ensureSession")
+    if start is None:
         v.append("ChatSessionEntryExt.kt: '%s' not found (ROT — update this gate)" % ENSURE_DECL)
         return v
-    open_brace = code.find("{", start)
-    if open_brace < 0:
-        v.append("ChatSessionEntryExt.kt: ensureSession has no body brace (ROT — update this gate)")
-        return v
-    end = brace_block_end(code, open_brace)
-    if end < 0:
-        v.append("ChatSessionEntryExt.kt: ensureSession body braces do not balance "
-                 "(ROT — update this gate)")
-        return v
-    body = code[open_brace:end + 1]
+    body = code[start:end]
 
     draft_at = body.find(DRAFT_IF)
     if draft_at < 0:
@@ -651,7 +714,7 @@ def check_chat_entry(src):
                  % DRAFT_IF)
         return v
     draft_open = body.find("{", draft_at)
-    draft_end = brace_block_end(body, draft_open) if draft_open >= 0 else -1
+    draft_end = match_bracket(body, draft_open) if draft_open >= 0 else -1
     if draft_end < 0:
         v.append("ChatSessionEntryExt.kt: ensureSession's '%s' braces do not balance "
                  "(ROT — update this gate)" % DRAFT_IF)
@@ -665,6 +728,7 @@ def check_chat_entry(src):
                  "(launcher icon: \"Source Missing\")" % (DRAFT_IF, RENAME_SHORTCUTS))
     return v
 
+
 def check_minis_app_badge(src):
     """Arm 7 [da1030-A / I01 裂缝B]: the `onSessionDeleted` lambda must drop the
     deleted session's badge queue as well.
@@ -676,7 +740,7 @@ def check_minis_app_badge(src):
     `onCreate` would not run on the delete path.
     """
     v = []
-    code = strip_literals(src)
+    code = structure(src)
     if code is None:
         v.append("MinisApp.kt: unterminated string/comment literal — cannot brace-match "
                  "onSessionDeleted (ROT — update this gate)")
@@ -686,10 +750,7 @@ def check_minis_app_badge(src):
         v.append("MinisApp.kt: '%s' not found (ROT — update this gate)" % ON_SESSION_DELETED)
         return v
     open_brace = code.find("{", at)
-    if open_brace < 0:
-        v.append("MinisApp.kt: onSessionDeleted lambda has no brace (ROT — update this gate)")
-        return v
-    end = brace_block_end(code, open_brace)
+    end = match_bracket(code, open_brace) if open_brace >= 0 else -1
     if end < 0:
         v.append("MinisApp.kt: onSessionDeleted lambda braces do not balance "
                  "(ROT — update this gate)")
@@ -705,21 +766,6 @@ def check_minis_app_badge(src):
 A05_SWEEP_CALL = "deleteEmptySessions("
 A05_LIVE_SET = "activeSessionIds"
 A05_IO = "Dispatchers.IO"
-
-
-def _a05_balanced(src, open_idx, opener, closer):
-    depth = 0
-    k = open_idx
-    while k < len(src):
-        c = src[k]
-        if c == opener:
-            depth += 1
-        elif c == closer:
-            depth -= 1
-            if depth == 0:
-                return k
-        k += 1
-    return -1
 
 
 def _a05_io_regions(src):
@@ -750,7 +796,7 @@ def _a05_io_regions(src):
                 break
             if j < len(tail) and tail[j] == "{":
                 brace = k + len(token) + j
-                close = _a05_balanced(src, brace, "{", "}")
+                close = match_bracket(src, brace)
                 if close > brace:
                     regions.append((brace, close))
         k = src.find(token, k + 1)
@@ -772,107 +818,57 @@ def check_minis_app_sweep(src):
          session the user is in when they reopen the app;
       3. it runs off the main thread — it is a Room DELETE at cold start.
     """
-    src = code_only(src)
+    code = structure(src)
     v = []
-    off = src.find(A05_SWEEP_CALL)
+    if code is None:
+        return ["MinisApp.kt: unterminated string/comment literal (ROT — update this gate)"]
+    off = code.find(A05_SWEEP_CALL)
     if off < 0:
         v.append("MinisApp.kt: no call to '%s' — the startup empty-session "
                  "backstop never runs" % A05_SWEEP_CALL)
         return v
-    paren = src.find("(", off)
-    end = _a05_balanced(src, paren, "(", ")") if paren >= 0 else -1
-    args = src[paren:end + 1] if end > paren else src[paren:]
+    paren = code.find("(", off)
+    end = match_bracket(code, paren) if paren >= 0 else -1
+    args = code[paren:end + 1] if end > paren else code[paren:]
     if A05_LIVE_SET not in args:
         v.append("MinisApp.kt: '%s' is called without '%s()' — the sweep would "
                  "delete the sessions that are still live"
                  % (A05_SWEEP_CALL, A05_LIVE_SET))
-    if not any(lo <= off <= hi for lo, hi in _a05_io_regions(src)):
+    if not any(lo <= off <= hi for lo, hi in _a05_io_regions(code)):
         v.append("MinisApp.kt: '%s' is not inside a '%s' region — it is a Room "
                  "DELETE at cold start and must not run on the caller's thread"
                  % (A05_SWEEP_CALL, A05_IO))
     return v
 
 
-def mask_keep_offsets(src):
-    """Mask string/comment BODIES with spaces, keeping every offset intact.
+def _local_bindings(code, start, end):
+    """{name: rhs} for `val|var name = …` inside [start, end)."""
+    out = {}
+    for m in re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+?)?=(?!=)", code[start:end]):
+        rhs_start = start + m.end()
+        out[m.group(1)] = code[rhs_start:expr_end(code, rhs_start)]
+    return out
 
-    The sibling `strip_literals` collapses bodies (offsets shift) and
-    `code_only` drops whole comment lines — neither can be used when the
-    criterion is *ordering* ("the composer blanking must come after the durable
-    write"). Quotes are kept so `= ""` stays visible as an assignment of a
-    literal; only the bodies are blanked, newlines preserved.
 
-    Returns None when a literal/comment never terminates (caller treats that as
-    ROT rather than matching shifted garbage).
+def _keeps_value(expr, name, locals_map, depth=0):
+    """Does `expr` still carry the value of `name`?
+
+    Uses the shared value-flow: elvis/if-else count both arms, `let`/`run` are
+    judged on their tail expression, `also`/`apply` on their receiver. A bare
+    identifier is resolved one hop into the enclosing function's local `val`s.
     """
-    out = list(src)
-    i, n = 0, len(src)
-    while i < n:
-        if src.startswith('"""', i):
-            end = src.find('"""', i + 3)
-            if end < 0:
-                return None
-            for k in range(i + 3, end):
-                if out[k] != "\n":
-                    out[k] = " "
-            i = end + 3
-            continue
-        c = src[i]
-        if c == '"' or c == "'":
-            i += 1
-            while i < n and src[i] != c:
-                if src[i] == "\\":
-                    if out[i] != "\n":
-                        out[i] = " "
-                    i += 1
-                    if i < n and out[i] != "\n":
-                        out[i] = " "
-                    i += 1
-                    continue
-                if out[i] != "\n":
-                    out[i] = " "
-                i += 1
-            if i >= n:
-                return None
-            i += 1
-            continue
-        if src.startswith("//", i):
-            j = src.find("\n", i)
-            j = n if j < 0 else j
-            for k in range(i, j):
-                out[k] = " "
-            i = j
-            continue
-        if src.startswith("/*", i):
-            j = src.find("*/", i + 2)
-            if j < 0:
-                return None
-            for k in range(i, j + 2):
-                if out[k] != "\n":
-                    out[k] = " "
-            i = j + 2
-            continue
-        i += 1
-    return "".join(out)
-
-
-def decl_slice(masked, decl):
-    """`masked[decl:next-top-level-declaration]` — for BOTH body shapes.
-
-    `block_body` only understands block bodies and returns None for an
-    expression-bodied declaration (`): Boolean = ...`), which is the shape the
-    drawer helper is written in. Slicing to the next top-level declaration keeps
-    the anchor honest without dictating the shape.
-    """
-    start = masked.find(decl)
-    if start < 0:
-        return None
-    end = len(masked)
-    for pat in TOP_LEVEL_BOUNDS:
-        k = masked.find(pat, start + len(decl))
-        if k >= 0:
-            end = min(end, k)
-    return masked[start:end]
+    if depth > 3:
+        return True
+    for s in value_sources(expr):
+        s2 = peel_discarding(s)
+        if contains_ident(s2, name):
+            return True
+        key = re.sub(r"\s+", "", s2)
+        if key in locals_map and _keeps_value(locals_map[key], name, locals_map, depth + 1):
+            return True
+        if contains_ident(s2, key) and key in locals_map:
+            return True
+    return False
 
 
 def check_promote_draft(src):
@@ -890,28 +886,26 @@ def check_promote_draft(src):
       C1 — the captured text reaches `appendMessage(` / `updateSessionPreview(`
            AFTER `ensureSession()` (persisting under a sid that does not exist
            yet is a no-op);
-      C2 — IF the composer copy is blanked, that happens AFTER the durable write.
-           Ordering is the cancellation safety net: clearing first destroys the
-           only copy if the coroutine never resumes.
+      C2 — IF the composer copy is destroyed, that happens AFTER the durable
+           write. Batch-7: "destroyed" is judged on the VALUE, not on a list of
+           five spellings — any assignment to `_inputText.value` whose value no
+           longer carries the captured `text` throws the only copy away, no
+           matter how the empty string was built (`CharArray(0).concatToString()`
+           included).
     """
     v = []
-    masked = mask_keep_offsets(src)
-    if masked is None:
-        v.append("ChatSessionEntryExt.kt: unterminated string/comment literal — cannot mask "
-                 "offsets for the promotion ordering check (ROT — update this gate)")
+    code = structure(src)
+    if code is None:
+        v.append("ChatSessionEntryExt.kt: unterminated string/comment literal — cannot build "
+                 "the offset-preserving view for the promotion ordering check "
+                 "(ROT — update this gate)")
         return v
-    start = masked.find(PROMOTE_DECL)
-    if start < 0:
+    start, end = body_of(code, "promoteDraftIfNeeded")
+    if start is None:
         v.append("ChatSessionEntryExt.kt: '%s' not found (ROT — update this gate)"
                  % PROMOTE_DECL)
         return v
-    open_brace = masked.find("{", start)
-    end = brace_block_end(masked, open_brace) if open_brace >= 0 else -1
-    if end < 0:
-        v.append("ChatSessionEntryExt.kt: promoteDraftIfNeeded body braces do not balance "
-                 "(ROT — update this gate)")
-        return v
-    body = masked[open_brace:end + 1]
+    body = code[start:end]
 
     ensure_at = body.find(ENSURE_CALL)
     wired = []
@@ -919,11 +913,11 @@ def check_promote_draft(src):
         k = body.find(token)
         while k >= 0:
             paren = body.find("(", k + len(token) - 1)
-            close = balanced_index(body, paren, "(", ")") if paren >= 0 else -1
-            args = body[paren:close + 1] if close > paren else ""
+            spans = call_args(body, paren) if paren >= 0 else []
+            args = body[spans[0][0]:spans[-1][1]] if spans else ""
             # The persisted payload must carry the captured text. `sid`-only
             # writes (a title, a binding) are exactly the pre-fix shape.
-            if "text" in args:
+            if contains_ident(args, "text"):
                 wired.append(k)
             k = body.find(token, k + 1)
     if not wired:
@@ -941,17 +935,24 @@ def check_promote_draft(src):
                  "the write lands against a session id that does not exist yet and is "
                  "silently dropped" % ENSURE_CALL)
 
-    blanks = [m.start() for m in COMPOSER_DISCARD_RE.finditer(body)]
-    if blanks and wired:
+    locals_map = _local_bindings(code, start, end)
+    destroyed = []
+    for m in re.finditer(r"(?<![\w.`])_inputText\s*\.\s*value\s*=(?!=)", body):
+        rhs_start = m.end()
+        rhs = body[rhs_start:expr_end(body, rhs_start)]
+        if not _keeps_value(rhs, "text", locals_map):
+            destroyed.append(m.start())
+    if destroyed and wired:
         first_durable = min(wired)
-        for b in blanks:
+        for b in destroyed:
             if b < first_durable:
                 v.append(
                     "ChatSessionEntryExt.kt: promoteDraftIfNeeded blanks the composer "
-                    "(a constant is assigned to _inputText.value) BEFORE the durable body "
-                    "write — a cancellation or DB failure in between leaves NO copy of the "
-                    "draft text"
+                    "BEFORE the durable body write — the assigned value no longer carries the "
+                    "captured `text`, so a cancellation or DB failure in between leaves NO copy "
+                    "of the draft text"
                 )
+                break
     return v
 
 
@@ -985,24 +986,19 @@ def check_promote_ownership(vm_src, entry_src):
            pre-fix shape.
     """
     v = []
-    masked_vm = mask_keep_offsets(vm_src)
-    masked_entry = mask_keep_offsets(entry_src)
-    if masked_vm is None or masked_entry is None:
+    code_vm = structure(vm_src)
+    code_entry = structure(entry_src)
+    if code_vm is None or code_entry is None:
         v.append("ChatViewModel.kt / ChatSessionEntryExt.kt: unterminated string/comment literal "
-                 "— cannot mask offsets for the promotion-ownership check (ROT — update this gate)")
-        return v
-
-    cleanup_at = masked_vm.find(CLEANUP_DECL)
-    if cleanup_at < 0:
-        v.append("ChatViewModel.kt: '%s' not found (ROT — update this gate)" % CLEANUP_DECL)
-        return v
-    open_brace = masked_vm.find("{", cleanup_at)
-    end = brace_block_end(masked_vm, open_brace) if open_brace >= 0 else -1
-    if end < 0:
-        v.append("ChatViewModel.kt: cleanupIfEmptyOnExit body braces do not balance "
+                 "— cannot build the structural view for the promotion-ownership check "
                  "(ROT — update this gate)")
         return v
-    cleanup_body = masked_vm[open_brace:end + 1]
+
+    cleanup_start, cleanup_end = body_of(code_vm, "cleanupIfEmptyOnExit")
+    if cleanup_start is None:
+        v.append("ChatViewModel.kt: '%s' not found (ROT — update this gate)" % CLEANUP_DECL)
+        return v
+    cleanup_body = code_vm[cleanup_start:cleanup_end]
 
     if CLEANUP_PREDICATE not in cleanup_body:
         v.append("ChatViewModel.kt: cleanupIfEmptyOnExit does not route its decision through "
@@ -1015,17 +1011,11 @@ def check_promote_ownership(vm_src, entry_src):
                  "in flight owns the row it created, and deleting it here also releases the "
                  "ViewModel, cancelling the promotion that was about to fill it" % PROMOTE_OWNER_BIT)
 
-    start = masked_entry.find(PROMOTE_DECL)
-    if start < 0:
+    p_start, p_end = body_of(code_entry, "promoteDraftIfNeeded")
+    if p_start is None:
         v.append("ChatSessionEntryExt.kt: '%s' not found (ROT — update this gate)" % PROMOTE_DECL)
         return v
-    p_open = masked_entry.find("{", start)
-    p_end = brace_block_end(masked_entry, p_open) if p_open >= 0 else -1
-    if p_end < 0:
-        v.append("ChatSessionEntryExt.kt: promoteDraftIfNeeded body braces do not balance "
-                 "(ROT — update this gate)")
-        return v
-    promote_body = masked_entry[p_open:p_end + 1]
+    promote_body = code_entry[p_start:p_end]
 
     if not PROMOTE_OWNER_CLAIM_RE.search(promote_body):
         v.append("ChatSessionEntryExt.kt: promoteDraftIfNeeded never claims the session with "
@@ -1062,26 +1052,26 @@ def check_drawer_visibility(src):
     the preview term and this fix evaporates).
     """
     v = []
-    masked = mask_keep_offsets(src)
-    if masked is None:
+    code = structure(src)
+    if code is None:
         v.append("ChatHistoryDrawer.kt: unterminated string/comment literal — cannot inspect the "
                  "visibility filter (ROT — update this gate)")
         return v
-    if not DRAWER_FILTER_RE.search(masked):
+    if not DRAWER_FILTER_RE.search(code):
         v.append("ChatHistoryDrawer.kt: the session list filter does not route through '%s' — the "
                  "visibility decision is inline again (a promoted draft with a preview but no "
                  "messages row stays invisible)" % DRAWER_VISIBLE_CALL)
-    helper = decl_slice(masked, DRAWER_VISIBLE_DECL)
-    if helper is None:
+    decl_start, body_end = body_of(code, "isDrawerRowVisible")
+    if decl_start is None:
         v.append("ChatHistoryDrawer.kt: '%s' not found (ROT — update this gate)"
                  % DRAWER_VISIBLE_DECL)
         return v
     # Look at the DECISION, not the parameter list: the parameters are named
     # after the three inputs, so a term dropped from the predicate body would
     # otherwise still be "mentioned" by its own parameter.
-    paren = helper.find("(")
-    close = balanced_index(helper, paren, "(", ")") if paren >= 0 else -1
-    decision = helper[close + 1:] if close > paren else helper
+    paren = code.find("(", decl_start)
+    close = match_bracket(code, paren) if paren >= 0 else -1
+    decision = code[close + 1:body_end] if close > paren else code[decl_start:body_end]
     for term, label in (("pinnedAt", "the pinned reason"),
                         ("messageCount", "the has-messages reason"),
                         ("lastMessage", "the has-a-preview reason")):
@@ -1096,37 +1086,19 @@ def check_drawer_visibility(src):
     return v
 
 
-
-GOOD_APP_SWEEP = """
-class MinisApp : Application() {
-    override fun onCreate() {
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-            runCatching {
-                val swept = chatRepository.deleteEmptySessions(
-                    com.rikkaminis.app.ui.chat.ChatViewModelStore.activeSessionIds(),
-                )
-            }
-        }
-    }
-}
-"""
-
-
-# ── session-deletion step order (dv27-B4 / deep-audit-1047 B-06) ────────────
+# --------------------------------------------------------------------------
+# drawer delete order
+# --------------------------------------------------------------------------
 #
-# C-DEL-1 (order): the FIRST `ChatViewModelStore.release(` in the delete path
-#   must precede `deleteSession(`. The order may be delegated to one pure plan
-#   function (that is the fix's whole point — a JVM test can pin it), so the
-#   criterion resolves the plan the body iterates and reads ITS return order,
-#   then maps each step to its effect through the `when (step)` branches. Both
-#   the step names and the plan function's name are therefore free to change;
-#   only the relation "release before delete" is asserted.
+#   [dv27-B4 / B-06] `deleteSessionAndCleanup` released the ChatViewModel AFTER
+#   deleting the row + directory. Two windows opened: 1) the live streamJob /
+#   BrowserTabPool recreated the tree just removed (ghost directory), and 2) the
+#   cancelled stream's `finally` re-published a badge AFTER SessionBadgeStore.clear.
 #
-#   Deleting before releasing is not a style question: the resident
-#   ChatViewModel's streamJob / BrowserTabPool keep writing
-#   `minis-sessions/<id>/…` back into the directory that was just removed
-#   (ghost directory), and the cancelled stream's own `finally` re-publishes a
-#   badge AFTER SessionBadgeStore.clear(id) (deleted session lights up again).
+#   Batch-7: the plan's order is what runs at runtime, so the slice that feeds
+#   the order criterion must include the postfix chain — `listOf(…).reversed()`
+#   keeps the literal argument order (what the old slice read) while flipping
+#   the executed one.
 DELETE_FN_DECL = "fun deleteSessionAndCleanup("
 PLAN_FN_LOOP_RE = re.compile(
     r"for\s*\(\s*\w+\s+in\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*\)")
@@ -1137,30 +1109,57 @@ WHEN_BRANCH_RE = re.compile(r"(?:[A-Za-z_]\w*\.)?([A-Z][A-Z0-9_]{2,})\s*->")
 RELEASE_CALL_RE = re.compile(r"ChatViewModelStore\s*\.\s*release\s*\(")
 DELETE_CALL_RE = re.compile(r"\.\s*deleteSession\s*\(")
 BADGE_CLEAR_RE = re.compile(r"SessionBadgeStore\s*\.\s*clear\s*\(")
+# Postfix calls that change the runtime ORDER of a returned list.
+PLAN_REVERSING = ("reversed", "asReversed", "sortedByDescending", "sortedDescending")
+PLAN_ORDER_PRESERVING = ("toList", "toMutableList", "toTypedArray", "asList", "orEmpty")
 
 
 def _plan_constant_order(src, plan_name):
-    """The ordered constants a plan function RETURNS, or None.
+    """The ordered constants a plan function RETURNS (runtime order), or None.
 
     Resolution is two-hop on purpose: the name comes from the `for (step in
     <plan>())` loop in the drawer, so renaming the function (or any step) moves
-    the gate with it.
+    the gate with it. A postfix call that reorders the list is applied to the
+    extracted order; an unknown postfix call fails closed (None) rather than
+    guessing.
     """
     if not src:
         return None
-    masked = mask_keep_offsets(src)
-    if masked is None:
+    code = structure(src)
+    if code is None:
         return None
-    body = decl_slice(masked, "fun %s(" % plan_name)
-    if body is None:
+    start, end = body_of(code, plan_name)
+    if start is None:
         return None
+    body = code[start:end]
     open_call = body.find("listOf(")
     if open_call < 0:
         return None
-    close = balanced_index(body, open_call + len("listOf"), "(", ")")
+    close = match_bracket(body, open_call + len("listOf"))
     if close < 0:
         return None
-    return [m.group(1) for m in ENUM_CONST_RE.finditer(body[open_call:close])]
+    order = [m.group(1) for m in ENUM_CONST_RE.finditer(body[open_call:close])]
+    tail = body[close + 1:]
+    i = 0
+    while True:
+        while i < len(tail) and tail[i] in " \t\r\n":
+            i += 1
+        if i >= len(tail) or tail[i] != ".":
+            break
+        m = re.match(r"\.\s*([A-Za-z_]\w*)\s*\(", tail[i:])
+        if not m:
+            return None
+        name = m.group(1)
+        open_paren = i + m.end() - 1
+        call_close = match_bracket(tail, open_paren)
+        if call_close < 0:
+            return None
+        if name in PLAN_REVERSING:
+            order = list(reversed(order))
+        elif name not in PLAN_ORDER_PRESERVING:
+            return None
+        i = call_close + 1
+    return order
 
 
 def _branch_effects(fn_body):
@@ -1169,12 +1168,28 @@ def _branch_effects(fn_body):
     Effects are the three calls the plan is allowed to dispatch to. A branch
     that carries none of them is simply absent from the map (and the order
     criterion then reports the plan as unresolvable rather than guessing).
+
+    The branch text is bounded by the `when` block's closing brace, not by the
+    end of the function: the unconditional `finally` tail re-issues release and
+    clear, so an unbounded last branch would inherit those effects and make the
+    order criterion blind to a reordered plan.
     """
     marks = list(WHEN_BRANCH_RE.finditer(fn_body))
+    if not marks:
+        return {}
+    when_at = fn_body.rfind("when", 0, marks[0].start())
+    block_end = len(fn_body)
+    if when_at >= 0:
+        paren = fn_body.find("(", when_at)
+        brace = fn_body.find("{", paren) if paren >= 0 else -1
+        if brace >= 0:
+            close = match_bracket(fn_body, brace)
+            if close > brace:
+                block_end = close
     out = {}
     for i, m in enumerate(marks):
-        end = marks[i + 1].start() if i + 1 < len(marks) else len(fn_body)
-        branch = fn_body[m.end():end]
+        end = marks[i + 1].start() if i + 1 < len(marks) else block_end
+        branch = fn_body[m.end():min(end, block_end)]
         effects = set()
         if RELEASE_CALL_RE.search(branch):
             effects.add("release")
@@ -1196,16 +1211,17 @@ def check_drawer_delete_order(drawer_src, plan_src=None):
              contract for the new ordering.
     """
     v = []
-    masked = mask_keep_offsets(drawer_src)
-    if masked is None:
+    code = structure(drawer_src)
+    if code is None:
         v.append("ChatHistoryDrawer.kt: unterminated string/comment literal — cannot inspect "
                  "the session-deletion order (ROT — update this gate)")
         return v
-    fn_body = decl_slice(masked, DELETE_FN_DECL)
-    if fn_body is None:
+    fn_start, fn_end = body_of(code, "deleteSessionAndCleanup")
+    if fn_start is None:
         v.append("ChatHistoryDrawer.kt: '%s' not found (ROT — update this gate)"
                  % DELETE_FN_DECL)
         return v
+    fn_body = code[fn_start:fn_end]
 
     release_idx = delete_idx = None
     loop = PLAN_FN_LOOP_RE.search(fn_body)
@@ -1256,7 +1272,7 @@ def check_drawer_delete_order(drawer_src, plan_src=None):
                  "([fix/audit-0917-b9] contract, C-DEL-2)")
     else:
         open_at = fn_body.find("{", fin_at)
-        close_at = brace_block_end(fn_body, open_at) if open_at >= 0 else -1
+        close_at = match_bracket(fn_body, open_at) if open_at >= 0 else -1
         tail = fn_body[open_at:close_at + 1] if close_at > open_at else ""
         missing = []
         if not RELEASE_CALL_RE.search(tail):
@@ -1268,6 +1284,48 @@ def check_drawer_delete_order(drawer_src, plan_src=None):
                      "unconditional cleanup contract ([fix/audit-0917-b9]) is gone (C-DEL-2)"
                      % " / ".join(missing))
     return v
+
+GOOD_APP_SWEEP = """
+class MinisApp : Application() {
+    override fun onCreate() {
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            runCatching {
+                val swept = chatRepository.deleteEmptySessions(
+                    com.rikkaminis.app.ui.chat.ChatViewModelStore.activeSessionIds(),
+                )
+            }
+        }
+    }
+}
+"""
+
+
+# ── session-deletion step order (dv27-B4 / deep-audit-1047 B-06) ────────────
+#
+# C-DEL-1 (order): the FIRST `ChatViewModelStore.release(` in the delete path
+#   must precede `deleteSession(`. The order may be delegated to one pure plan
+#   function (that is the fix's whole point — a JVM test can pin it), so the
+#   criterion resolves the plan the body iterates and reads ITS return order,
+#   then maps each step to its effect through the `when (step)` branches. Both
+#   the step names and the plan function's name are therefore free to change;
+#   only the relation "release before delete" is asserted.
+#
+#   Deleting before releasing is not a style question: the resident
+#   ChatViewModel's streamJob / BrowserTabPool keep writing
+#   `minis-sessions/<id>/…` back into the directory that was just removed
+#   (ghost directory), and the cancelled stream's own `finally` re-publishes a
+#   badge AFTER SessionBadgeStore.clear(id) (deleted session lights up again).
+DELETE_FN_DECL = "fun deleteSessionAndCleanup("
+PLAN_FN_LOOP_RE = re.compile(
+    r"for\s*\(\s*\w+\s+in\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*\)")
+# Step constants may be written bare or qualified (`SessionDeleteStep.RELEASE_VM`);
+# both shapes must resolve, else renaming the enum makes the gate blind.
+ENUM_CONST_RE = re.compile(r"(?:[A-Za-z_]\w*\.)?([A-Z][A-Z0-9_]{2,})(?![.\w])")
+WHEN_BRANCH_RE = re.compile(r"(?:[A-Za-z_]\w*\.)?([A-Z][A-Z0-9_]{2,})\s*->")
+RELEASE_CALL_RE = re.compile(r"ChatViewModelStore\s*\.\s*release\s*\(")
+DELETE_CALL_RE = re.compile(r"\.\s*deleteSession\s*\(")
+BADGE_CLEAR_RE = re.compile(r"SessionBadgeStore\s*\.\s*clear\s*\(")
+
 
 BAD_APP_SWEEP_UNWIRED = GOOD_APP_SWEEP.replace(
     "chatRepository.deleteEmptySessions(", "chatRepository.countEmptySessions(")
@@ -1919,7 +1977,114 @@ class MinisApp : Application() {
 """
 
 
+# ── batch-7 witnesses (mechanically reproduced on the real tree) ──────────
+#
+# Each one keeps every anchor the pre-batch arms looked for and moves only the
+# VALUE / POSITION / REACHABILITY the arm now judges.
+
+# W1 (08-1, dataflow): the policy call and the `preferredId` identifier both
+# survive; the value is truncated to "", so the caller's resolved id is dropped
+# exactly as with `preferredId.let { null }` — only the spelling is new.
+BAD_SKILL_TAKE_ZERO = GOOD_SKILL.replace(
+    "val id = SkillRestorePolicy.resolveImportId(preferredId, slugify(name))",
+    "val id = SkillRestorePolicy.resolveImportId(preferredId?.take(0), slugify(name))",
+)
+
+# W2 (08-2, dataflow): the publish moves out of the lock but the `= ` setter is
+# no longer what publishes it — `tryEmit` lands in `.value` just the same.
+BAD_SKILL_TRYEMIT_OUTSIDE_LOCK = GOOD_SKILL.replace(
+    """            _skills.value = _skills.value.map { if (it.id == skillId) bumped else it }
+        }
+    }
+}""",
+    """            _skills.value = _skills.value.map { if (it.id == skillId) bumped else it }
+        }
+        _skills.tryEmit(emptyList())
+    }
+}""",
+)
+
+# W3 (08-3, family-hole): the shared decision, the CURRENT-global read and the
+# DELETE all stay in place — the conjunction makes the branch unreachable, so
+# every toggle that matches the global default pins a row forever.
+BAD_SKILL_DEAD_OVERRIDE_GUARD = GOOD_SKILL.replace(
+    "if (shouldDeleteSessionSkillOverride(globalEnabled, enabled)) {",
+    "if (shouldDeleteSessionSkillOverride(globalEnabled, enabled) && false) {",
+)
+
+# W4 (08-4, dataflow): the hook is still invoked on the delete path — with a
+# constant instead of the deleted id, so the cross-db cleanup targets nothing.
+BAD_CHAT_CONST_HOOK = GOOD_CHAT.replace(
+    """        dao.deleteSession(id)
+        runCatching { onSessionDeleted?.invoke(id) }.onFailure { warn(it) }
+        return sessionFiles?.deleteSessionFiles(id)""",
+    """        dao.deleteSession(id)
+        runCatching { onSessionDeleted?.invoke("") }.onFailure { warn(it) }
+        return sessionFiles?.deleteSessionFiles(id)""",
+)
+
+# W5 (08-5, spelling→effect): the same destruction as `= ""`, built at runtime
+# so no literal-shaped pattern can see it.
+BAD_PROMOTE_CHARARRAY_BLANK = GOOD_PROMOTE.replace(
+    """        val sid = ensureSession()
+        if (sid.isEmpty()) return@launch""",
+    """        val sid = ensureSession()
+        if (sid.isEmpty()) return@launch
+        _inputText.value = CharArray(0).concatToString()""",
+)
+
+# ── drawer delete plan fixtures (08-6 had no arm at all before this batch) ──
+GOOD_DELETE_PLAN = '''
+internal fun sessionDeletePlan(): List<SessionDeleteStep> = listOf(
+    SessionDeleteStep.RELEASE_VM,
+    SessionDeleteStep.DELETE_ROW,
+    SessionDeleteStep.CLEAR_BADGE,
+)
+'''
+
+BAD_DELETE_PLAN_REVERSED = GOOD_DELETE_PLAN.replace(
+    "    SessionDeleteStep.CLEAR_BADGE,\n)", "    SessionDeleteStep.CLEAR_BADGE,\n).reversed()")
+
+BAD_DELETE_PLAN_SWAPPED = GOOD_DELETE_PLAN.replace(
+    """    SessionDeleteStep.RELEASE_VM,
+    SessionDeleteStep.DELETE_ROW,""",
+    """    SessionDeleteStep.DELETE_ROW,
+    SessionDeleteStep.RELEASE_VM,""")
+
+GOOD_DRAWER_DELETE = '''
+internal fun deleteSessionAndCleanup(context: Context, id: String, scope: CoroutineScope) {
+    scope.launch {
+        try {
+            for (step in sessionDeletePlan()) {
+                when (step) {
+                    SessionDeleteStep.RELEASE_VM -> ChatViewModelStore.release(id)
+                    SessionDeleteStep.DELETE_ROW -> chatRepository.deleteSession(id)
+                    SessionDeleteStep.CLEAR_BADGE -> SessionBadgeStore.clear(id)
+                }
+            }
+        } catch (e: Throwable) {
+            warn(e)
+        } finally {
+            ChatViewModelStore.release(id)
+            SessionBadgeStore.clear(id)
+        }
+    }
+}
+'''
+
+# The unconditional tail dropped: a throw now leaves the VM + badge behind.
+BAD_DRAWER_NO_FINALLY = GOOD_DRAWER_DELETE.replace(
+    """        } finally {
+            ChatViewModelStore.release(id)
+            SessionBadgeStore.clear(id)
+        }""",
+    """        }""")
+
+_ARMS = []
+
+
 def expect_trip(name, violations, needle, failures):
+    _ARMS.append((name, needle))
     if not violations:
         failures.append("%s: no violation reported (gate is blind)" % name)
     elif not any(needle in v for v in violations):
@@ -2180,11 +2345,71 @@ def selftest():
     print("selftest drawer without count      -> %d violation(s)" % len(bad_no_count))
     print("selftest drawer any-non-null       -> %d violation(s)" % len(bad_any_non_null))
 
+    # ── batch-7 witnesses: the six shapes that walked through the pre-batch
+    # arms. Each keeps the anchors, and moves only the value / position /
+    # reachability the arm now judges.
+    bad_take_zero = check_skill_repo(BAD_SKILL_TAKE_ZERO)
+    expect_trip("08-1 preferredId?.take(0) (dataflow)", bad_take_zero, "NEUTRALISED", failures)
+    if any("does not consult preferredId" in v or "does not resolve" in v
+           for v in bad_take_zero):
+        failures.append("08-1 tripped an UNRELATED arm: %r" % bad_take_zero)
+
+    bad_tryemit = check_skill_repo(BAD_SKILL_TRYEMIT_OUTSIDE_LOCK)
+    expect_trip("08-2 tryEmit outside the lock (dataflow)", bad_tryemit, "out of the", failures)
+    # Precision: the `= ` setter is still inside the lock, so only the new
+    # "any write form" arm may fire.
+    if any("publishes" in v for v in bad_tryemit):
+        failures.append("08-2 tripped the setter-only arm: %r" % bad_tryemit)
+
+    bad_dead_guard = check_skill_repo(BAD_SKILL_DEAD_OVERRIDE_GUARD)
+    expect_trip("08-3 dead sparse-clear guard (family-hole)", bad_dead_guard, "DEAD", failures)
+
+    bad_const_hook = check_chat_repo(BAD_CHAT_CONST_HOOK)
+    expect_trip("08-4 constant id into onSessionDeleted (dataflow)", bad_const_hook,
+                "CONSTANT", failures)
+    if len(bad_const_hook) != 1:
+        failures.append("08-4 fixture tripped %d arms, expected exactly 1: %r"
+                        % (len(bad_const_hook), bad_const_hook))
+
+    bad_chararray = check_promote_draft(BAD_PROMOTE_CHARARRAY_BLANK)
+    expect_trip("08-5 CharArray(0) composer blank (spelling→effect)", bad_chararray,
+                "BEFORE the durable body write", failures)
+    if len(bad_chararray) != 1:
+        failures.append("08-5 fixture tripped %d arms, expected exactly 1: %r"
+                        % (len(bad_chararray), bad_chararray))
+
+    # 08-6 (order): the plan is what runs, so `listOf(…).reversed()` keeps the
+    # literal argument order the old slice read while flipping the executed one.
+    good_delete_order = check_drawer_delete_order(GOOD_DRAWER_DELETE, GOOD_DELETE_PLAN)
+    if good_delete_order:
+        failures.append("compliant drawer delete order is not clean: %r" % good_delete_order)
+    bad_reversed = check_drawer_delete_order(GOOD_DRAWER_DELETE, BAD_DELETE_PLAN_REVERSED)
+    expect_trip("08-6 plan reversed (order)", bad_reversed, "deleted BEFORE", failures)
+    if len(bad_reversed) != 1:
+        failures.append("08-6 reversed fixture tripped %d arms, expected exactly 1: %r"
+                        % (len(bad_reversed), bad_reversed))
+    # Control: the same defect spelled by hand in the literal order stays caught.
+    bad_swapped = check_drawer_delete_order(GOOD_DRAWER_DELETE, BAD_DELETE_PLAN_SWAPPED)
+    expect_trip("08-6 control: literal order swapped (order)", bad_swapped,
+                "deleted BEFORE", failures)
+    bad_no_finally = check_drawer_delete_order(BAD_DRAWER_NO_FINALLY, GOOD_DELETE_PLAN)
+    expect_trip("C-DEL-2 unconditional tail dropped", bad_no_finally, "'finally'", failures)
+
+    print("selftest 08-1 take(0) preferredId    -> %d violation(s)" % len(bad_take_zero))
+    print("selftest 08-2 tryEmit outside lock   -> %d violation(s)" % len(bad_tryemit))
+    print("selftest 08-3 dead sparse-clear      -> %d violation(s)" % len(bad_dead_guard))
+    print("selftest 08-4 constant session id    -> %d violation(s)" % len(bad_const_hook))
+    print("selftest 08-5 CharArray(0) blank     -> %d violation(s)" % len(bad_chararray))
+    print("selftest 08-6 plan reversed          -> %d violation(s)" % len(bad_reversed))
+    print("selftest 08-6 literal order swapped  -> %d violation(s)" % len(bad_swapped))
+    print("selftest C-DEL-2 finally dropped     -> %d violation(s)" % len(bad_no_finally))
+
     if failures:
         for f in failures:
             print("SELFTEST FAIL " + f)
         return 1
     print("SKILL_RESTORE_SESSION_CLEANUP_SELFTEST=PASS")
+    print("SKILL_RESTORE_SESSION_CLEANUP_SELFTEST_ARMS=%d" % len(set(_ARMS)))
     return 0
 
 

@@ -96,6 +96,26 @@ import shutil
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import KotlinLexError
+from _kotlin_ast import (
+    const_bool,
+    const_value,
+    enclosing_conditions,
+    function_body,
+    match_bracket,
+    split_top,
+    strip_parens,
+)
+from _kotlin_valueflow import (
+    call_args,
+    code_view,
+    expr_end,
+    scope_calls,
+    value_sources,
+)
+
 SELFTEST_MARKER = "SESSION_SHEET_ID_BINDING_SELFTEST=PASS"
 
 # ---------------------------------------------------------------------------
@@ -108,118 +128,178 @@ MCPS_SHEET = os.path.join(CHAT_DIR, "SessionMcpsSheet.kt")
 SESSIONS_DIR = "src/android/app/src/main/java/com/rikkaminis/app/ui/sessions"
 SESSIONS_SHARED = os.path.join(SESSIONS_DIR, "SessionsShared.kt")
 
-LINE_COMMENT_RE = re.compile(r"//.*$")
-BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
-KDOC_FENCE_RE = re.compile(r"^\s*/\*\*", re.M)
+# ---------------------------------------------------------------------------
+# [batch7] Structure helpers — shared primitives only
+#
+# The old revision carried a hand-written string-aware comment stripper, a
+# hand-rolled balanced-paren scanner and a backward `if (…)` condition matcher
+# here. All three are deleted: structure analysis goes through `code_view()`
+# (comments AND string/char literals masked to spaces, length preserved, so a
+# position maps straight back and a `"/*"` inside a string cannot swallow
+# code), `match_bracket`, `split_top` and `enclosing_conditions`.
+#
+# Fail-closed: a file the lexer refuses is reported by check(), never scanned
+# as raw text.
 
+def _call_block(code, call_name):
+    """(block_text, open_paren_offset) of the first `callName(` call, or None.
 
-def strip_comments(text):
-    """Remove block comments (incl. KDoc) and //-comments, keeping structure.
-
-    String-aware state machine: `//` inside string literals (e.g. URLs) is
-    NOT a comment and must survive — a naive per-line `//.*$` strip breaks
-    string literals and unbalances the call-block paren extraction.
+    A call whose parentheses do not close is a call this gate cannot judge;
+    the caller reports it instead of guessing a region.
     """
-    out = []
-    i = 0
-    n = len(text)
-    in_string = None  # quote char or None
-    while i < n:
-        c = text[i]
-        if in_string is not None:
-            out.append(c)
-            if c == "\\" and i + 1 < n:
-                out.append(text[i + 1])
-                i += 2
-                continue
-            if c == in_string:
-                in_string = None
-            i += 1
-            continue
-        if c in ('"', "'"):
-            in_string = c
-            out.append(c)
-            i += 1
-            continue
-        if c == "/" and i + 1 < n and text[i + 1] == "/":
-            # line comment: keep line structure, drop content
-            j = text.find("\n", i)
-            if j == -1:
-                j = n
-            out.append("//")
-            i = j
-            continue
-        if c == "/" and i + 1 < n and text[i + 1] == "*":
-            j = text.find("*/", i + 2)
-            end = n if j == -1 else j + 2
-            # keep newlines inside block comments so line structure survives
-            out.append("".join(ch if ch == "\n" else " " for ch in text[i:end]))
-            i = end
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
-
-
-def extract_call_block(code, call_name):
-    """Return the text of `callName(` call block (balanced parens), or None."""
     m = re.search(r"\b" + re.escape(call_name) + r"\s*\(", code)
     if not m:
-        return None
-    i = code.index("(", m.start())
-    depth = 0
-    for j in range(i, len(code)):
-        if code[j] == "(":
-            depth += 1
-        elif code[j] == ")":
-            depth -= 1
-            if depth == 0:
-                return code[i : j + 1]
-    return None
+        return None, -1
+    open_paren = m.end() - 1
+    close = match_bracket(code, open_paren)
+    if close < 0:
+        return None, -1
+    return code[open_paren:close + 1], open_paren
 
 
-def _match_forward(code, start, opener, closer):
-    """Index of the token that closes the group opened at `start`, or -1."""
-    depth = 0
-    for j in range(start, len(code)):
-        if code[j] == opener:
-            depth += 1
-        elif code[j] == closer:
-            depth -= 1
-            if depth == 0:
-                return j
-    return -1
+def _call_args(code, open_paren):
+    """[(name_or_None, value_text)] for the call whose `(` is at open_paren.
 
-
-def extract_block_fun_body(code, signature_fragment):
-    """Body of a BLOCK-body function, scoped so the file's other composables
-    cannot satisfy (or break) its anchors.
-
-    Parameters are paren-matched first and only then the body `{` is taken —
-    a bare brace-pairing search would trip over `onRegenerate: () -> Unit = {}`
-    inside the parameter list. Expressions bodies (`fun f(...) = ...`) are NOT
-    supported: returning None makes the caller fail closed rather than judge
-    the wrong region.
+    Argument splitting is the shared `split_top` (bracket aware), so a nested
+    call or lambda inside an argument cannot truncate it, and named arguments
+    are matched on `=` (never `==`).
     """
-    m = re.search(re.escape(signature_fragment), code)
-    if not m:
-        return None
-    open_paren = code.find("(", m.start())
-    if open_paren < 0:
-        return None
-    close_paren = _match_forward(code, open_paren, "(", ")")
-    if close_paren < 0:
-        return None
-    open_brace = code.find("{", close_paren)
-    if open_brace < 0:
-        return None
-    # `{` must be the body opener, not a stray brace in a return type/annotation
-    if "fun " in code[close_paren:open_brace]:
-        return None
-    close_brace = _match_forward(code, open_brace, "{", "}")
-    if close_brace < 0:
-        return None
-    return code[open_brace : close_brace + 1]
+    out = []
+    for start, end in call_args(code, open_paren):
+        arg = code[start:end].strip()
+        if not arg:
+            continue
+        m = re.match(r"^([A-Za-z_]\w*)\s*=(?!=)\s*(.*)$", arg, re.S)
+        out.append((m.group(1), m.group(2).strip()) if m else (None, arg))
+    return out
+
+
+def _effect_blocks_handoff(body, call_re):
+    """Yield (call_start, args) for every `call_re` match inside `body`."""
+    for m in re.finditer(call_re, body):
+        open_paren = m.end() - 1
+        args = _call_args(body, open_paren)
+        if args:
+            yield m.start(), args
+
+
+def _fun_body(code, name):
+    """Body slice of the (block-bodied) `fun name(`, or None (fail-closed)."""
+    span = function_body(code, name)
+    return code[span[0]:span[1]] if span else None
+
+
+def _pretty(expr):
+    """One-line rendering for findings (the view masks literal CONTENT)."""
+    return " ".join(expr.split())
+
+
+# ---------------------------------------------------------------------------
+# Value judgements ([batch7] dataflow / spelling)
+#
+# Both families of witness that walked through this gate shared one shape: the
+# TOKEN the criterion greps for survives, the VALUE it contributes does not
+# (`sessionId = viewModel.currentSessionId.let { "" }`,
+#  `isEnabledForSession(it, sessionId.let { "__new__" })`,
+#  `skills.map { it.id }.take(0)`, `liveSession.title?.let { title = "" }`,
+#  `selectedCategory = liveSession.category?.takeIf { false }`).
+# The judgement therefore runs on `value_sources()` — "what does this position
+# actually evaluate to" — not on the presence of a name.
+
+def _snorm(expr):
+    return re.sub(r"\s+", "", strip_parens(expr))
+
+
+def _sources(expr):
+    """`value_sources` + takeIf/takeUnless feasibility.
+
+    `x?.takeIf { false }` evaluates to null, not to `x`, but `value_sources`
+    reports the receiver (that is what takeIf returns when it matches), so the
+    predicate is folded here. Without this fold "the value still mentions the
+    source" is exactly the sentence an attacker writes.
+    """
+    for name, _start, open_pos, end in scope_calls(expr):
+        if name in ("takeIf", "takeUnless"):
+            flag = const_bool(expr[open_pos + 1:end - 1])
+            if (name == "takeIf" and flag is False) or (name == "takeUnless" and flag is True):
+                return ["null"]
+    return value_sources(expr)
+
+
+def _strip_marks(expr):
+    """Drop the null-assertion / safe-call marks that do not change the value.
+
+    `value_sources` reports the RECEIVER of `x?.takeIf { … }` including the
+    safe-call mark (`liveSession.category?`), which is the same value as
+    `liveSession.category` when the predicate can hold.
+    """
+    e = _snorm(expr)
+    while e.endswith(("?", "!")):
+        e = e[:-1]
+    return e
+
+
+def _is_value(expr, target):
+    return _strip_marks(expr) == _strip_marks(target)
+
+
+def _derives_only_from(value, target):
+    """Every possible value of `value` IS `target` — no literal, no rewrite."""
+    srcs = _sources(value)
+    if not srcs:
+        return False
+    return all(_is_value(s, target) for s in srcs)
+
+
+def _derives_from(value, target):
+    """At least one path of `value` IS `target`, and no path is a literal.
+
+    The looser shape used for state mirrors: `liveSession.title ?: title` is a
+    legal mirror (the fallback is the previous state), while `""`,
+    `let { "" }` and `takeIf { false }` all replace the value outright.
+    """
+    hit = False
+    for s in _sources(value):
+        if _is_value(s, target):
+            hit = True
+            continue
+        if const_value(strip_parens(s)) is not None:
+            return False
+    return hit
+
+
+def _assignments(text, state):
+    """[(pos, rhs_text)] of every `state = <expr>` in text."""
+    out = []
+    for m in re.finditer(r"(?<![\w.`])" + re.escape(state) + r"\s*=(?!=)", text):
+        start = m.end()
+        out.append((m.start(), text[start:expr_end(text, start)].strip()))
+    return out
+
+
+def _provably_empty(expr):
+    """True when the expression is a collection that is EMPTY at runtime.
+
+    The wide-1024 arm knew `emptyList()`; `.take(0)` (batch7) is the same
+    decision spelled as a pipeline, and `filter { false }` / `drop(MAX_VALUE)`
+    are the same family.
+    """
+    e = re.sub(r"\s+", "", expr)
+    if not e:
+        return False
+    if EMPTY_LITERAL_RE.match(e):
+        return True
+    for m in re.finditer(r"\.(?:take|takeLast)\(\s*(-?\d+)\s*\)", e):
+        if int(m.group(1)) <= 0:
+            return True
+    if re.search(r"\.(?:drop|dropLast)\(\s*Int\.MAX_VALUE\s*\)", e):
+        return True
+    for m in re.finditer(r"\.(filter|filterNot)\s*\{([^{}]*)\}", e):
+        flag = const_bool(m.group(2))
+        if (m.group(1) == "filter" and flag is False) or \
+                (m.group(1) == "filterNot" and flag is True):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -231,9 +311,16 @@ def extract_block_fun_body(code, signature_fragment):
 # flip the gate red.
 MERGE_FAMILY_RE = r"\bmerge[A-Za-z0-9_]*Overrides?\s*\("
 
-# `<map>[<key>] =` — an assignment into the live map. `=(?!=)` skips `==`,
-# the lookbehind skips `foo.map[…]` and `smap[…]` receivers of another object.
-SEED_WRITE_TMPL = r"(?<![\w.]){}\s*\[[^\]]*\]\s*=(?!=)"
+# [batch7] Every spelling of "write into the live map". The old revision only
+# knew `map[key] = value`, so `map.put(k, v)` — the same write, since
+# `SnapshotStateMap` implements MutableMap — counted as no write at all and an
+# unguarded seeding overwrite walked straight through.
+WRITE_SPELLINGS = (
+    (r"(?<![\w.]){}\s*\[[^\]]*\]\s*=(?!=)", "map[key] = value"),
+    (r"(?<![\w.]){}\s*\.\s*(?:put|putAll|set|getOrPut|compute|computeIfAbsent|merge)\s*\(",
+     "map.put(...)"),
+    (r"(?<![\w.]){}\s*(?:\+=|-=)", "map += ..."),
+)
 
 # The three spellings of "this id is still missing". What is pinned is the
 # DECISION (membership re-tested against THAT map at the write), not the words.
@@ -243,41 +330,15 @@ GUARD_TMPLS = [
     r"\b{}\s*\[[^\]]*\]\s*==\s*null",
 ]
 
-def _enclosing_brace(code, idx):
-    """Index of the `{` opening the block that contains `idx`, or None."""
-    depth = 0
-    for j in range(idx - 1, -1, -1):
-        c = code[j]
-        if c == "}":
-            depth += 1
-        elif c == "{":
-            if depth == 0:
-                return j
-            depth -= 1
-    return None
 
-def _attached_if_condition(text):
-    """Condition text of an `if ( … )` whose `)` is the last token of `text`.
+def _write_sites(body, map_var):
+    """[(pos, spelling)] of every write into `map_var`, all spellings."""
+    out = []
+    for tmpl, spelling in WRITE_SPELLINGS:
+        for m in re.finditer(tmpl.format(re.escape(map_var)), body):
+            out.append((m.start(), spelling))
+    return sorted(out)
 
-    Backward paren matching (not `[^)]*`) so nested calls inside the condition
-    — `if (!map.containsKey(s.id))` — do not truncate it. Returns None when the
-    text before the statement is not an `if` / `else if` header.
-    """
-    tail = text.rstrip()
-    if not tail.endswith(")"):
-        return None
-    depth = 0
-    for j in range(len(tail) - 1, -1, -1):
-        c = tail[j]
-        if c == ")":
-            depth += 1
-        elif c == "(":
-            depth -= 1
-            if depth == 0:
-                if not re.search(r"\bif\s*$", tail[:j]):
-                    return None
-                return tail[j + 1: len(tail) - 1]
-    return None
 
 def _seeding_effect_bodies(code):
     """[(offset, body)] of every `LaunchedEffect(<keys with sessionId>) { … }`.
@@ -289,7 +350,7 @@ def _seeding_effect_bodies(code):
     out = []
     for m in re.finditer(r"\bLaunchedEffect\s*\(", code):
         open_paren = m.end() - 1
-        close_paren = _match_forward(code, open_paren, "(", ")")
+        close_paren = match_bracket(code, open_paren)
         if close_paren < 0:
             continue
         if not re.search(r"\bsessionId\b", code[open_paren:close_paren]):
@@ -297,51 +358,60 @@ def _seeding_effect_bodies(code):
         open_brace = code.find("{", close_paren)
         if open_brace < 0:
             continue
-        close_brace = _match_forward(code, open_brace, "{", "}")
+        close_brace = match_bracket(code, open_brace)
         if close_brace < 0:
             continue
         out.append((open_brace, code[open_brace:close_brace + 1]))
     return out
 
+
 def _write_is_guarded(code, idx, map_var):
-    """True when the write starting at `idx` re-tests membership in `map_var`."""
+    """True when a condition ENCLOSING the write re-tests membership in it.
+
+    `enclosing_conditions` covers braced and braceless bodies, nested `if`s and
+    inverted `else` branches alike, so the guard no longer has to be spelled
+    `if (…) <write>` on one line.
+    """
     guards = [re.compile(t.format(re.escape(map_var))) for t in GUARD_TMPLS]
-    window = code[max(0, idx - 500):idx]
-    # (a) brace-less: `if (id !in overrides) overrides[id] = …`
-    cond = _attached_if_condition(window)
-    if cond is not None and any(g.search(cond) for g in guards):
-        return True
-    # (b) braced: the write is the first statement of a block whose opening
-    #     brace is attached to an `if ( … )` header
-    blk = _enclosing_brace(code, idx)
-    if blk is not None and not code[blk + 1:idx].strip():
-        cond2 = _attached_if_condition(code[max(0, blk - 500):blk])
-        if cond2 is not None and any(g.search(cond2) for g in guards):
+    for _kind, cond in enclosing_conditions(code, idx):
+        if any(g.search(cond) for g in guards):
             return True
     return False
 
-def _judge_merge_live_ids(body, value, label, findings):
-    """wide-1024 (dataflow): the merge must receive the LIVE id list.
 
-    `liveIds = emptyList()` is the shape that walks nothing while looking
-    exactly like the intended call: every stored seed is dropped and all
-    session toggles render off. Anchored on the value, not on the call.
+def _judge_merge_live_ids(body, value, label, findings):
+    """[wide-1024, hardened in batch7] the merge must receive the LIVE id list.
+
+    Anchored on the value, not on the call. `liveIds = emptyList()` (wide-1024)
+    and `val liveIds = skills.map { it.id }.take(0)` (batch7) are the same
+    defect one hop apart: the identifier is still handed to the helper, the
+    list it names is empty, every stored seed is dropped and every toggle in
+    the sheet renders off.
     """
     norm = re.sub(r"\s+", "", value)
-    if EMPTY_LITERAL_RE.match(norm):
+    if _provably_empty(norm):
         findings.append(
-            f"{label}: the merge helper is handed `liveIds = {value}` — an empty id "
+            f"{label}: the merge helper is handed `liveIds = {_pretty(value)}` — an empty id "
             f"list walks nothing, so the whole per-session seed set is discarded and "
             f"every toggle in the sheet renders off (the call looks right, the "
             f"argument is the wrong value)"
         )
         return
     if not re.fullmatch(r"[A-Za-z_]\w*", norm):
-        return  # an inline expression derived from the live list -- not a literal
-    if not re.search(r"\b(?:val|var)\s+" + re.escape(norm) + r"\s*=", body):
+        return  # an inline expression derived from the live list
+    decl = re.search(r"\b(?:val|var)\s+" + re.escape(norm) + r"\s*=(?!=)", body)
+    if not decl:
         findings.append(
             f"{label}: the merge helper is handed `liveIds = {value}`, a value this "
             f"effect never computes — the id list has to come from the live list"
+        )
+        return
+    rhs = body[decl.end():expr_end(body, decl.end())].strip()
+    if _provably_empty(rhs):
+        findings.append(
+            f"{label}: `{norm}` is computed from the live list and then emptied "
+            f"(`{norm} = {_pretty(rhs)}`) — the merge helper walks an empty id list, so "
+            f"no session override is ever read back and every toggle renders off"
         )
         return
     if len(re.findall(r"\b" + re.escape(norm) + r"\b", body)) < 2:
@@ -353,15 +423,20 @@ def _judge_merge_live_ids(body, value, label, findings):
 
 
 def _judge_seed_read_args(body, label, findings):
-    """wide-1024 (dataflow): the per-session read must use the sheet's own id."""
+    """[wide-1024, hardened in batch7] the per-session read must USE that id.
+
+    Spelling is not the judgement (`\bsessionId\b` in the argument text is what
+    let `sessionId.let { "__new__" }` through): the argument must resolve to
+    exactly the sheet's `sessionId`, or every lookup lands on the orphan
+    `__new__` row.
+    """
     for _, args in _effect_blocks_handoff(body, r"\bisEnabledForSession\s*\("):
         value = args[-1][1]
-        if not re.search(r"\b" + SESSION_ID_TOKEN + r"\b", value):
+        if not _derives_only_from(value, SESSION_ID_TOKEN):
             findings.append(
-                f"{label}: the seeding read calls `isEnabledForSession(…, {value})` "
-                f"instead of the sheet's own `{SESSION_ID_TOKEN}` — every lookup "
-                f"lands on the orphan `__new__` row, so the real session's toggles "
-                f"never come back"
+                f"{label}: the seeding read calls `isEnabledForSession(…, {_pretty(value)})` "
+                f"instead of the sheet's own `{SESSION_ID_TOKEN}` — every lookup lands on the "
+                f"orphan `__new__` row, so the real session's toggles never come back"
             )
 
 
@@ -372,7 +447,6 @@ def check_seeding_guard(code, label, findings):
     absences are already reported by the sibling criteria above, and re-reporting
     them would inflate their precision counts.
     """
-    code = strip_comments(code)
     map_vars = re.findall(
         r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*remember\s*\(\s*sessionId\s*\)", code)
     if not map_vars:
@@ -381,15 +455,14 @@ def check_seeding_guard(code, label, findings):
     if not bodies:
         return
     for map_var in map_vars:
-        write_re = re.compile(SEED_WRITE_TMPL.format(re.escape(map_var)))
         for offset, body in bodies:
-            writes = list(write_re.finditer(body))
+            writes = _write_sites(body, map_var)
             helper = re.search(MERGE_FAMILY_RE, body)
             helper_ok = False
             if helper:
                 # the family call must hand ITSELF the map it is seeding
                 call_open = offset + helper.end() - 1
-                call_close = _match_forward(code, call_open, "(", ")")
+                call_close = match_bracket(code, call_open)
                 helper_ok = (
                     call_close > call_open
                     and bool(re.search(r"\b" + re.escape(map_var) + r"\b",
@@ -410,13 +483,13 @@ def check_seeding_guard(code, label, findings):
                     f"seed either vanished or moved somewhere this guard cannot see"
                 )
                 continue
-            for w in writes:
-                idx = offset + w.start()
+            for w_pos, spelling in writes:
+                idx = offset + w_pos
                 if _write_is_guarded(code, idx, map_var):
                     continue
                 line = code.count("\n", 0, idx) + 1
                 findings.append(
-                    f"{label}:{line}: unguarded seeding write `{map_var}[…] =` inside the "
+                    f"{label}:{line}: unguarded seeding write `{spelling.format(map_var)}` inside the "
                     f"LaunchedEffect — the missing-id set is a snapshot taken before the IO "
                     f"await, so this overwrites an in-flight toggle. Guard it with "
                     f"`if (id !in {map_var})` at the write, or seed through a "
@@ -424,24 +497,37 @@ def check_seeding_guard(code, label, findings):
                 )
     return findings
 
+
 # ---------------------------------------------------------------------------
 # Anchor specs
 
-# (call_name, required_pattern, forbidden_pattern, label)
+# [batch7] The call-site criterion is on the VALUE the panel receives, not on
+# the spelling of the argument: `sessionId = viewModel.currentSessionId` is
+# required, and `sessionId = viewModel.currentSessionId.let { "" }` — same
+# prefix, same token, empty session id at runtime — is the same orphan-row
+# defect the gate exists to prevent.
+# (call_name, active-id argument, required value, forbidden bare pass, label)
 BLOCK_SPECS = [
-    ("SessionSkillsSheet", r"sessionId\s*=\s*viewModel\.currentSessionId", r"sessionId\s*=\s*sessionId\b", "skills sheet"),
-    ("SessionMcpsSheet", r"sessionId\s*=\s*viewModel\.currentSessionId", r"sessionId\s*=\s*sessionId\b", "mcps sheet"),
-    ("WebPreviewBottomSheet", r"pinSessionId\s*=\s*viewModel\.currentSessionId", r"pinSessionId\s*=\s*sessionId\b", "web preview pin"),
-    ("ChatHistoryDrawer", r"currentSessionId\s*=\s*viewModel\.currentSessionId", r"currentSessionId\s*=\s*sessionId\b", "history drawer"),
+    ("SessionSkillsSheet", "sessionId", "viewModel.currentSessionId",
+     r"sessionId\s*=\s*sessionId\b", "skills sheet"),
+    ("SessionMcpsSheet", "sessionId", "viewModel.currentSessionId",
+     r"sessionId\s*=\s*sessionId\b", "mcps sheet"),
+    ("WebPreviewBottomSheet", "pinSessionId", "viewModel.currentSessionId",
+     r"pinSessionId\s*=\s*sessionId\b", "web preview pin"),
+    ("ChatHistoryDrawer", "currentSessionId", "viewModel.currentSessionId",
+     r"currentSessionId\s*=\s*sessionId\b", "history drawer"),
 ]
+
+ACTIVE_ID = "viewModel.currentSessionId"
 
 # [da1032-A] ISSUE-02: `SessionEditSheet` is host-agnostic — `onRegenerate`
 # defaults to `{}` and `liveSession` defaults to the (stale) `session`
-# snapshot, so omitting either compiles clean and disables the feature
-# silently. Pin both arguments at the call site.
+# snapshot, so a host that omits THEM still compiles and the button silently
+# no-ops. [batch7] …and so does a host that spells the argument out and passes
+# the default anyway (`onRegenerate = {}`): the criterion is now the value.
 EDIT_SHEET_CALL = "SessionEditSheet"
 EDIT_SHEET_SPECS = [
-    (EDIT_SHEET_CALL, [r"onRegenerate\s*=", r"liveSession\s*="], "session edit sheet"),
+    (EDIT_SHEET_CALL, ["onRegenerate", "liveSession"], "session edit sheet"),
 ]
 
 EDIT_SHEET_FUN_SIG = "internal fun SessionEditSheet"
@@ -466,79 +552,39 @@ EMPTY_LITERAL_RE = re.compile(
 )
 
 
-def _call_args(code, open_paren):
-    """[(name_or_None, value_text)] for the call whose `(` is at open_paren.
-
-    Brackets are matched (not `[^,]*` split) so nested calls / lambdas inside an
-    argument do not truncate it. Returns [] when the call does not close.
-    """
-    close = _match_forward(code, open_paren, "(", ")")
-    if close < 0:
-        return []
-    out, depth, start, i = [], 0, open_paren + 1, open_paren + 1
-    while i < close:
-        c = code[i]
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        elif c == "," and depth == 0:
-            out.append(code[start:i])
-            start = i + 1
-        i += 1
-    out.append(code[start:close])
-    args = []
-    for raw in out:
-        arg = raw.strip()
-        if not arg:
-            continue
-        named = re.match(r"^([A-Za-z_]\w*)\s*=(?!=)\s*(.*)$", arg, re.S)
-        if named:
-            args.append((named.group(1), named.group(2).strip()))
-        else:
-            args.append((None, arg))
-    return args
-
-
-def _effect_blocks_handoff(body, call_re):
-    """Yield (call_start, args) for every `call_re` match inside `body`."""
-    for m in re.finditer(call_re, body):
-        open_paren = m.end() - 1
-        args = _call_args(body, open_paren)
-        if args:
-            yield m.start(), args
-
-
 def _mirrors_state(block, state, source):
     """True when the effect body feeds `source` into the local `state` state.
 
-    Three accepted spellings: direct assignment, a scope-function mirror
-    (`liveSession.title?.let { title = it }`), and a one-hop local binding.
-    Anchoring the DECISION ("the fresh value reaches the state") rather than
-    the spelling is the point: the gate used to accept an effect whose body
-    had been emptied of the mirror while the keys stayed correct.
+    [batch7] Anchoring the DECISION ("the fresh value reaches the state") is not
+    enough — the value has to BE the fresh value. The old spelling-based
+    branches accepted `liveSession.title?.let { title = "" }` (the mirror shape
+    with a constant on the right) and `selectedCategory =
+    liveSession.category?.takeIf { false }` (the assignment shape whose value is
+    always null), so the field was blanked on every regeneration instead of
+    mirrored.
     """
-    src = re.escape(source)
-    st = re.escape(state)
-    if re.search(r"\b" + st + r"\s*=(?!=)[^;\n]*" + src, block):
-        return True
-    if re.search(
-        src + r"\s*\?*\s*\.\s*(?:let|also|run|apply|takeIf)\s*\{[^{}]*\b"
-        + st + r"\s*=(?!=)",
-        block,
-    ):
-        return True
-    local = re.search(r"\bva[lr]\s+(\w+)\s*=\s*" + src + r"\b", block)
-    if local and re.search(r"\b" + st + r"\s*=\s*" + re.escape(local.group(1)) + r"\b",
-                           block):
-        return True
+    for _pos, rhs in _assignments(block, state):
+        if _derives_from(rhs, source):
+            return True
+    # scope-function spellings: the receiver must be the source, and the lambda
+    # must feed `it` (not a constant) into the state
+    pattern = (re.escape(source) + r"\s*\??\s*\.\s*(?:let|also|run|apply|takeIf)\s*\{")
+    for m in re.finditer(pattern, block):
+        open_brace = m.end() - 1
+        close = match_bracket(block, open_brace)
+        if close < 0:
+            continue
+        inner = block[open_brace:close + 1]
+        for _pos, rhs in _assignments(inner, state):
+            if _derives_from(rhs, "it") or _derives_from(rhs, source):
+                return True
     return False
 
 
 def _live_seed_effect_block(body):
     """Body of the first `LaunchedEffect(<keys with liveSession.id>) { … }`."""
     for m in re.finditer(r"\bLaunchedEffect\s*\(", body):
-        close_paren = _match_forward(body, m.end() - 1, "(", ")")
+        close_paren = match_bracket(body, m.end() - 1)
         if close_paren < 0:
             continue
         if not re.search(r"\bliveSession\.id\b", body[m.end():close_paren]):
@@ -546,24 +592,51 @@ def _live_seed_effect_block(body):
         open_brace = body.find("{", close_paren)
         if open_brace < 0:
             continue
-        close_brace = _match_forward(body, open_brace, "{", "}")
+        close_brace = match_bracket(body, open_brace)
         if close_brace < 0:
             return None  # unbalanced effect body -> caller fails closed
         return body[open_brace:close_brace + 1]
     return None
 
 
+def _empty_callback_reason(value):
+    """Why a callback argument equals the parameter default (a no-op), or None.
+
+    `{}` is the declaration's own default (`onRegenerate: () -> Unit = {}`), so
+    spelling the argument out and passing it changes nothing at runtime — the
+    button stays dead. Anything that calls something is accepted; a bare
+    reference to a real callback is accepted too.
+    """
+    v = value.strip()
+    if not v.startswith("{"):
+        return None
+    close = match_bracket(v, 0)
+    body = v[1:close if close > 0 else len(v)]
+    if re.search(r"[A-Za-z_]\w*\s*\(", body):
+        return None
+    return "the lambda body never calls anything, so it IS the parameter's default no-op"
+
+
 def check_chatscreen(code, findings):
-    code = strip_comments(code)
-    for call_name, required, forbidden, label in BLOCK_SPECS:
-        block = extract_call_block(code, call_name)
+    for call_name, arg_name, required, forbidden, label in BLOCK_SPECS:
+        block, open_paren = _call_block(code, call_name)
         if block is None:
             findings.append(f"ChatScreen.kt: call site `{call_name}(` not found")
             continue
-        if not re.search(required, block):
+        args = dict((n, v) for n, v in _call_args(code, open_paren) if n)
+        value = args.get(arg_name)
+        if value is None:
             findings.append(
                 f"ChatScreen.kt: `{call_name}(` ({label}) must pass the ACTIVE session id "
-                f"(expected pattern: {required})"
+                f"(expected `{arg_name} = {required}`, found argument)"
+            )
+        elif not _derives_only_from(value, required):
+            findings.append(
+                f"ChatScreen.kt: `{call_name}(` ({label}) passes "
+                f"`{arg_name} = {_pretty(value)}` — the panel has to receive `{required}` "
+                f"ITSELF, not a value derived from it: a rewrite (`.let {{ … }}`, `?: …`, "
+                f"`takeIf {{ false }}`) keeps the spelling and orphans every write against an "
+                f"empty / stale session id"
             )
         if re.search(forbidden, block):
             findings.append(
@@ -571,32 +644,51 @@ def check_chatscreen(code, findings):
                 f"`{forbidden}` — orphan key after draft promotion"
             )
     # LocalMarkdownSessionId composition local
-    m = re.search(r"LocalMarkdownSessionId\s+provides\s+([A-Za-z_.]+)", code)
+    m = re.search(r"LocalMarkdownSessionId\s+provides\s+([^\n,]+)", code)
     if m is None:
         findings.append("ChatScreen.kt: `LocalMarkdownSessionId provides` not found")
-    elif m.group(1) == "sessionId":
-        findings.append(
-            "ChatScreen.kt: LocalMarkdownSessionId binds the bare route arg `sessionId` — "
-            "markdown media lookups resolve against the stale __new__ session dir"
-        )
-    elif "viewModel.currentSessionId" not in m.group(1):
-        findings.append(
-            f"ChatScreen.kt: LocalMarkdownSessionId provides `{m.group(1)}` — expected viewModel.currentSessionId"
-        )
+    else:
+        provided = m.group(1).strip()
+        if re.fullmatch(r"sessionId", provided):
+            findings.append(
+                "ChatScreen.kt: LocalMarkdownSessionId binds the bare route arg `sessionId` — "
+                "markdown media lookups resolve against the stale __new__ session dir"
+            )
+        elif not _derives_only_from(provided, ACTIVE_ID):
+            findings.append(
+                f"ChatScreen.kt: LocalMarkdownSessionId provides `{_pretty(provided)}` — expected "
+                f"{ACTIVE_ID} itself; a rewrite re-orphans markdown media lookups"
+            )
     # [da1032-A] SessionEditSheet call block
-    for call_name, required_patterns, label in EDIT_SHEET_SPECS:
-        block = extract_call_block(code, call_name)
+    for call_name, required_args, label in EDIT_SHEET_SPECS:
+        block, open_paren = _call_block(code, call_name)
         if block is None:
             findings.append(f"ChatScreen.kt: call site `{call_name}(` not found")
             continue
-        for required in required_patterns:
-            if not re.search(required, block):
-                arg = required.replace(r"\s*=", "").replace("\\s*=", "")
+        args = dict((n, v) for n, v in _call_args(code, open_paren) if n)
+        for arg in required_args:
+            if arg not in args:
                 findings.append(
                     f"ChatScreen.kt: `{call_name}(` ({label}) must pass `{arg}` explicitly — "
                     f"it is a defaulted parameter, so omitting it compiles clean and silently "
                     f"disables the control it feeds"
                 )
+        value = args.get("onRegenerate")
+        if value is not None:
+            reason = _empty_callback_reason(value)
+            if reason:
+                findings.append(
+                    f"ChatScreen.kt: `{call_name}(` ({label}) passes "
+                    f"`onRegenerate = {_pretty(value)}` — {reason}; the Regenerate button "
+                    f"fires the parameter's own default and silently does nothing"
+                )
+        live = args.get("liveSession")
+        if live is not None and _snorm(live) == "session":
+            findings.append(
+                f"ChatScreen.kt: `{call_name}(` ({label}) passes `liveSession = session` — that "
+                f"IS the parameter default (the stale snapshot), so a regenerated title never "
+                f"reaches the field"
+            )
     return findings
 
 
@@ -607,8 +699,7 @@ def check_sessions_shared(code, findings):
     this file legitimately hold keyless `var … by remember` state and must not
     be judged.
     """
-    code = strip_comments(code)
-    body = extract_block_fun_body(code, EDIT_SHEET_FUN_SIG)
+    body = _fun_body(code, "SessionEditSheet")
     if body is None:
         findings.append(
             "SessionsShared.kt: `internal fun SessionEditSheet(` body not found — "
@@ -671,7 +762,6 @@ def check_skills_sheet(code, findings):
     threw away any toggle the user had already flipped in the open sheet. The
     two sheets are checked by the same shape now.
     """
-    code = strip_comments(code)
     if not re.search(r"overrides\s*=\s*remember\s*\(\s*sessionId\s*\)", code):
         findings.append(
             "SessionSkillsSheet.kt: overrides map must be keyed on sessionId "
@@ -700,7 +790,6 @@ def check_skills_sheet(code, findings):
 
 
 def check_mcps_sheet(code, findings):
-    code = strip_comments(code)
     if not re.search(r"overrides\s*=\s*remember\s*\(\s*sessionId\s*\)", code):
         findings.append(
             "SessionMcpsSheet.kt: overrides map must be keyed on sessionId "
@@ -735,7 +824,16 @@ def check(root):
             findings.append(f"missing file: {rel}")
             continue
         with open(p, encoding="utf-8", errors="replace") as f:
-            fn(f.read(), findings)
+            src = f.read()
+        # [batch7] Fail-closed lexing: the shared lexer masks comments AND
+        # string/char literals (length preserved), so an unterminated literal is
+        # reported instead of being scanned as if it were code.
+        try:
+            code = code_view(src)
+        except KotlinLexError as exc:
+            findings.append(f"{rel}: cannot be lexed (fail-closed): {exc}")
+            continue
+        fn(code, findings)
     return findings
 
 
@@ -1155,6 +1253,57 @@ FIX_SESSIONS_DIRECT_MIRROR = FIX_SESSIONS_OK.replace(
     "        title = liveSession.title ?: title")
 
 
+# ── batch7 witnesses: "the token survives, the value does not" ─────────────
+# (each is the find→replace from the batch-7 report, replayed verbatim)
+
+# 12-1 (dataflow): the call site still says viewModel.currentSessionId and
+# hands the panel "" — the panel then writes every toggle against an empty id.
+FIX_CHATSCEEN_ID_REWRITTEN = FIX_CHATSCEEN_OK.replace(
+    "            sessionId = viewModel.currentSessionId,",
+    '            sessionId = viewModel.currentSessionId.let { "" },', 1)
+
+# clean counter-arm: a different legal spelling of the same argument
+FIX_CHATSCEEN_ID_BANGS = FIX_CHATSCEEN_OK.replace(
+    "            sessionId = viewModel.currentSessionId,",
+    "            sessionId = viewModel.currentSessionId!!,", 1)
+
+# 12-2 (family-hole): the id list is built from the live list and then emptied.
+FIX_SKILLS_LIVE_IDS_TAKE_ZERO = FIX_SKILLS_OK.replace(
+    "            liveIds = skills.map { it.id },",
+    "            liveIds = skills.map { it.id }.take(0),")
+
+# clean counter-arm: a non-emptying stage on the same pipeline
+FIX_SKILLS_LIVE_IDS_STAGE = FIX_SKILLS_OK.replace(
+    "            liveIds = skills.map { it.id },",
+    "            liveIds = skills.map { it.id }.filter { it.isNotBlank() },")
+
+# 12-3 (dataflow): the seed read keeps the word `sessionId` and swaps the value.
+FIX_SKILLS_READ_NEW_ID = FIX_SKILLS_OK.replace(
+    "lookup = { repo.isEnabledForSession(it, sessionId) }",
+    'lookup = { repo.isEnabledForSession(it, sessionId.let { "__new__" }) }')
+
+# 12-4 (spelling): the same write in another spelling — a map put, unguarded.
+FIX_MCPS_PUT_NOGUARD = FIX_MCPS_MERGE.replace(
+    "        mergeSessionOverrides(",
+    "        for ((id, v) in seeds) overrides.put(id, v)\n        mergeSessionOverrides(", 1)
+
+# 12-5 (dataflow): both mirror shapes keep their spelling and drop the value.
+FIX_SESSIONS_MIRROR_BLANKED = FIX_SESSIONS_OK.replace(
+    "        liveSession.title?.let { title = it }\n"
+    "        selectedCategory = liveSession.category",
+    '        liveSession.title?.let { title = "" }\n'
+    "        selectedCategory = liveSession.category?.takeIf { false }")
+
+# clean counter-arm: a feasible takeIf predicate on the same mirror
+FIX_SESSIONS_TAKEIF_OK = FIX_SESSIONS_OK.replace(
+    "        selectedCategory = liveSession.category",
+    "        selectedCategory = liveSession.category?.takeIf { it != null }")
+
+# 12-6 (family-hole): the argument is passed and equals the parameter default.
+FIX_CHATSCEEN_REGEN_EMPTY = FIX_CHATSCEEN_OK.replace(
+    "            onRegenerate = { viewModel.regenerateSessionTitle() },",
+    "            onRegenerate = {},", 1)
+
 def make_tree(chatscreen, skills, mcps, sessions=FIX_SESSIONS_OK):
     root = tempfile.mkdtemp(prefix="ssib-selftest-")
     base = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat"
@@ -1375,6 +1524,52 @@ def selftest():
                       f"got {len(findings)}: {findings}")
             else:
                 print(f"[selftest ok] wide {name}: exactly {want_count} finding(s)")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    # ── batch7 witnesses: the token survives, the value does not ────────────
+    # 12-1/12-3/12-5 are the dataflow axis, 12-2/12-6 the family-hole axis and
+    # 12-4 the spelling axis; every one of them used to leave this gate green.
+    for name, cs, sk, mp, ss, must_mention, want_count in (
+        ("W7 call site hands the panel a rewritten id", FIX_CHATSCEEN_ID_REWRITTEN,
+         FIX_SKILLS_OK, FIX_MCPS_OK, FIX_SESSIONS_OK,
+         ["ChatScreen.kt", "SessionSkillsSheet", "currentSessionId"], 1),
+        ("W7ok `!!` on the same argument stays clean", FIX_CHATSCEEN_ID_BANGS,
+         FIX_SKILLS_OK, FIX_MCPS_OK, FIX_SESSIONS_OK, [], 0),
+        ("W8 live id list emptied by .take(0)", FIX_CHATSCEEN_OK,
+         FIX_SKILLS_LIVE_IDS_TAKE_ZERO, FIX_MCPS_OK, FIX_SESSIONS_OK,
+         ["SessionSkillsSheet.kt", "take(0)", "liveIds"], 1),
+        ("W8ok a non-emptying stage stays clean", FIX_CHATSCEEN_OK,
+         FIX_SKILLS_LIVE_IDS_STAGE, FIX_MCPS_OK, FIX_SESSIONS_OK, [], 0),
+        ("W9 seed read queries the __new__ id", FIX_CHATSCEEN_OK,
+         FIX_SKILLS_READ_NEW_ID, FIX_MCPS_OK, FIX_SESSIONS_OK,
+         ["SessionSkillsSheet.kt", "isEnabledForSession", "sessionId"], 1),
+        ("W10 unguarded seed write in map.put spelling", FIX_CHATSCEEN_OK,
+         FIX_SKILLS_OK, FIX_MCPS_PUT_NOGUARD, FIX_SESSIONS_OK,
+         ["SessionMcpsSheet.kt", "unguarded seeding write", "put"], 1),
+        ("W11 both mirrors blanked", FIX_CHATSCEEN_OK,
+         FIX_SKILLS_OK, FIX_MCPS_OK, FIX_SESSIONS_MIRROR_BLANKED,
+         ["SessionsShared.kt", "liveSession.title", "liveSession.category"], 2),
+        ("W11ok feasible takeIf mirror stays clean", FIX_CHATSCEEN_OK,
+         FIX_SKILLS_OK, FIX_MCPS_OK, FIX_SESSIONS_TAKEIF_OK, [], 0),
+        ("W12 onRegenerate passed as its own default", FIX_CHATSCEEN_REGEN_EMPTY,
+         FIX_SKILLS_OK, FIX_MCPS_OK, FIX_SESSIONS_OK,
+         ["ChatScreen.kt", "SessionEditSheet", "onRegenerate"], 1),
+    ):
+        root = make_tree(cs, sk, mp, ss)
+        try:
+            findings = check(root)
+            joined = " | ".join(findings)
+            for hit in must_mention:
+                if hit not in joined:
+                    ok = False
+                    print(f"[selftest FAIL] batch7 {name}: missing `{hit}` in findings")
+            if len(findings) != want_count:
+                ok = False
+                print(f"[selftest FAIL] batch7 {name}: expected {want_count} finding(s), "
+                      f"got {len(findings)}: {findings}")
+            else:
+                print(f"[selftest ok] batch7 {name}: exactly {want_count} finding(s)")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

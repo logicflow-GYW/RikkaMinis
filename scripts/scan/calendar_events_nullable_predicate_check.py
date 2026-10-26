@@ -54,6 +54,12 @@ import shutil
 import sys
 import tempfile
 
+# [B7-t13] 结构分析一律走共享原语（自写的 strip_comments / 花括号计数已删除）。
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments
+from _kotlin_ast import const_bool, function_body, if_blocks, match_bracket, strip_parens
+from _kotlin_valueflow import (call_args, code_view, expr_end, guard_feasible, path_feasible,
+                               value_sources)
+
 MAIN_ROOT = os.path.join("src", "android", "app", "src", "main", "java")
 HANDLER_REL = os.path.join(
     MAIN_ROOT, "com", "rikkaminis", "app", "sandbox", "offload", "CalendarOffloadHandler.kt"
@@ -69,12 +75,45 @@ NULL_GUARD_RE = re.compile(r"IS\s+NULL", re.IGNORECASE)
 # Comments are stripped before the rule-C read-path check: the gate must judge
 # the decision point, not prose that merely names it (the handler legitimately
 # explains IN a comment why the read path does NOT refuse).
-COMMENT_RE = re.compile(r"//[^\n]*|/\*(?:.|\n)*?\*/")
-
+# [B7-t13] 注释剥离改走共享词法器：只剥注释、字符串内容原样保留、长度严格
+# 不变（位置可回投原文）。自写正则对 `/*` 出现在字符串里（如 "video/*"）会
+# 吞掉后面整段代码。
 def strip_comments(src):
-    return COMMENT_RE.sub("", src)
+    return mask_comments(src)
+
+
+DTEND_TOKEN_RE = re.compile(r"dtend", re.IGNORECASE)
+SQL_BIND_CMP_RE = re.compile(r"[<>=!]+\s*\?")
+
+
+def literal_groups(view):
+    """[(offset, joined_text)] —— 把 `+` 拼接的字面量还原成一条字符串。
+
+    Kotlin 里 `("dtend > " + "?")` 与 `"dtend > ?"` 是同一个值。原判据逐个
+    `LITERAL_RE` 匹配，要求同一个字面量里三项齐全，于是把谓词拆成两段就
+    整段躲过（[B7-t13] 见证 05-1）。这里先按 `+` 语义合并，再交给规则判。
+    """
+    spans = [(m.start(), m.end()) for m in LITERAL_RE.finditer(view)]
+    groups = []
+    cur = []
+    for start, end in spans:
+        if cur:
+            gap = view[cur[-1][1]:start]
+            if not re.fullmatch(r"\s*\+\s*", gap):
+                groups.append(cur)
+                cur = []
+        cur.append((start, end))
+    if cur:
+        groups.append(cur)
+    def body_of(tok):
+        if tok.startswith('"""'):
+            return tok[3:-3] if len(tok) >= 6 else ""
+        return tok[1:-1] if len(tok) >= 2 else ""
+
+    return [(g[0][0], "".join(body_of(view[a:b]) for a, b in g)) for g in groups]
 
 RULE_A_CODE = 'predicate-on-nullable-column'
+RULE_B_CODE = 'freebusy-reads-instances'
 RULE_C_CODE = 'explicit-calendar-selector'
 RULE_D_CODE = 'day-window-refusal'
 RULE_E_CODE = 'write-permission-parity'
@@ -154,90 +193,221 @@ def fun_decls(src):
     return decls
 
 
-def rule_d(src):
-    """[dv14-A3] ISSUE-05 — a supplied-but-unreadable `--days` must be REFUSED,
-    never read as absent.
+# ── [B7-t13] 共享结构与值流辅助 ────────────────────────────────────────────
+FUN_DECL2_RE = re.compile(r"\bfun\s+(?:<[^>]*>\s*)?([A-Za-z_]\w*)\s*\(")
 
-    `args.getInt("days")` answers null both for "the flag was not given" and for
-    "`--days 7d`" — the second case used to fall through to the no-filter window
-    (Photos: the ENTIRE library, exit 0) or to the 24h default (Calendar: six of
-    the seven days the caller named, silently dropped).
 
-    The *day-window resolver* is discovered by shape: it returns one of the two
-    window types AND takes an injected parse callback (the pure core, as opposed
-    to the `args`-forwarding member). Every criterion is fail-closed — remove the
-    machinery and the rule goes red rather than silent.
+def code_of(src):
+    """结构视图 —— 共享词法器（注释 + 字面量内容抹成空格，长度不变）。"""
+    return code_view(src)
+
+
+def lit_of(src):
+    """字面量视图 —— 共享 `mask_comments`（只剥注释；读 SQL / 参数名 / key 用）。"""
+    return strip_comments(src)
+
+
+def all_fun_regions(code):
+    """[{name, head, start, body_start, end}] —— 每个 `fun`（块体与表达式体都算）。
+
+    `function_body` 只给第一个同名函数且不给签名，判据需要"签名 + 绝对位置"
+    （`args: OffloadArgs`、返回类型、行号），因此在共享 `match_bracket` /
+    `expr_end` 之上做这层发现 —— 括号配平仍然只有一份实现。
     """
-    problems = []
-    # Scope: a file that never names the `--days` flag has no day-window surface
-    # to protect (the minimal rule-A/B fixtures are deliberately free of it).
-    # Once the flag is handled, every criterion below is fail-closed.
-    if '"days"' not in src:
+    out = []
+    for m in FUN_DECL2_RE.finditer(code):
+        p_close = match_bracket(code, m.end() - 1)
+        if p_close < 0:
+            continue
+        i = p_close + 1
+        while i < len(code) and code[i] not in "={":
+            if code[i] == "\n":
+                i = -1
+                break
+            i += 1
+        if i < 0 or i >= len(code):
+            continue
+        end = match_bracket(code, i) if code[i] == "{" else expr_end(code, i + 1)
+        if end < 0:
+            continue
+        out.append({"name": m.group(1), "head": code[m.start():i],
+                    "start": m.start(), "body_start": i + 1, "end": end})
+    return out
+
+
+def _line(text, offset):
+    """1-based 行号（offset 必须落在同一个视图里，共享词法器长度不变）。"""
+    return text.count("\n", 0, max(0, offset)) + 1
+
+
+def ret_of(head):
+    """签名里的返回类型（`) : T` 的 T）；没有则空串。"""
+    m = re.search(r"\)\s*:\s*([^={\n]+)$", head.strip())
+    return m.group(1).strip() if m else ""
+
+
+def _short(text, limit=96):
+    t = " ".join(str(text).split())
+    return t if len(t) <= limit else t[:limit] + "…"
+
+
+DECL_RE = re.compile(r"\b(?:val|var)\s+(\([^()]*\)|[A-Za-z_]\w*)\s*(?::[^=\n]*?)?=(?!=)")
+
+
+def _binding_rhs(code, lit, name, before):
+    """name 在 before 之前最后一次绑定的右值（含解构声明 `val (a, b) = …`）。"""
+    best = None
+    for m in DECL_RE.finditer(code, 0, before):
+        lhs = m.group(1)
+        if lhs.startswith("("):
+            names = [x.split(":")[0].strip() for x in lhs[1:-1].split(",")]
+        else:
+            names = [lhs]
+        if name in names:
+            best = m
+    if best is None:
+        return None
+    s = best.end()
+    return lit[s:expr_end(code, s)].strip()
+
+
+def _all_sources(code, lit, seg_start, seg_end, depth=0):
+    """表达式**真正求值**的所有来源；局部标识符沿一跳绑定继续解析。
+
+    [B7-t13] DATAFLOW 轴：判据原本只问"某个子串在不在函数体里"，于是
+    `val _unused = Instances.CONTENT_URI` + `query(eventsUri, …)` 全绿 ——
+    Instances 在，查询不在。这里把调用的实参回溯到取值来源：解构声明的每一
+    项取同一条右值，`?.let { … }` 取 lambda 尾表达式（`value_sources`）。
+    """
+    expr = lit[seg_start:seg_end]
+    out = []
+    for src_expr in value_sources(expr):
+        s = src_expr.strip()
+        m = re.fullmatch(r"([A-Za-z_]\w*)", s)
+        if m and depth < 2:
+            rhs = _binding_rhs(code, lit, m.group(1), seg_start)
+            if rhs:
+                out.extend(x.strip() for x in value_sources(rhs))
+                continue
+        out.append(s)
+    return out
+
+
+def _satisfied_bodies(code, start, end):
+    """[(pos, lambda_body)] for every `satisfied = { … }` inside [start, end)."""
+    out = []
+    for m in re.finditer(r"\bsatisfied\s*=\s*\{", code[start:end]):
+        pos = start + m.start()
+        brace = start + m.end() - 1
+        close = match_bracket(code, brace)
+        if close < 0:
+            continue
+        out.append((pos, code[brace + 1:close]))
+    return out
+
+
+def rule_d(src):
+    """[dv14-A3] ISSUE-05 — a supplied-but-unreadable `--days` must be REFUSED.
+
+    [B7-t13] FAMILY-HOLE 轴：判据原本只做**子串存在性**检查 —— 看见
+    `toIntOrNull() == null` 与 `return null` 就绿。给条件补一个 `&& false`
+    （受检子串一个不少，拒绝分支成了死代码）后，`android-calendar list --days 7d`
+    静默降级成默认 24 小时窗口，门全绿。现在用共享 `if_blocks` + `guard_feasible`
+    判定条件**是否可行**、用 `path_feasible` 判定拒绝**是否可达**：恒假守卫、
+    被死分支包住的 return 都不再算数。
+    """
+    code = code_of(src)
+    lit = lit_of(src)
+    # 没提 `--days` 的文件没有这个面（rule A/B 的最小夹具刻意不含它）。
+    if '"days"' not in lit:
         return []
-    resolvers = [d for d in fun_decls(src) if DAYS_WINDOW_RET_RE.match(d["ret"]) and INJECTED_PARSER_RE.search(d["sig"])]
-    if not resolvers:
+    problems = []
+    regions = [r for r in all_fun_regions(code)
+               if DAYS_WINDOW_RET_RE.match(ret_of(r["head"])) and "->" in r["head"]]
+    if not regions:
         return ["no pure day-window resolver found (a function returning PhotoRange / Pair<Long, Long> with an "
                 "injected parse callback) — the --days decision has no core to hold the refusal"]
-    if not DAY_RAW_READ_RE.search(src):
+    if not DAY_RAW_READ_RE.search(lit):
         problems.append("the handler never reads the RAW --days string (args.get(\"days\")) — getInt() alone "
                         "cannot tell 'flag absent' from 'supplied but unreadable'")
-    # Overloads share a name (Photos keeps a positional back-compat shape next to
-    # the daysText core), so the criterion is per NAME: at least one same-named
-    # resolver must carry the raw parameter and the refusal. A pass-through
-    # overload cannot hold a guard, and dropping the guard from the real core
-    # leaves the name without one — red either way.
-    groups = {}
-    for d in resolvers:
-        groups.setdefault(d["name"], []).append(d)
-    for name in sorted(groups):
-        members = groups[name]
-        with_param = [d for d in members if DAY_PARAM_RE.search(d["sig"])]
-        line = members[0]["line"]
+    for name in sorted({r["name"] for r in regions}):
+        members = [r for r in regions if r["name"] == name]
+        with_param = [r for r in members if DAY_PARAM_RE.search(r["head"])]
+        decl_line = _line(code, members[0]["start"])
         if not with_param:
-            problems.append(f"{name} (line {line}) takes no raw `days…: String?` parameter — an unreadable "
+            problems.append(f"{name} (line {decl_line}) takes no raw `days…: String?` parameter — an unreadable "
                             "--days stays indistinguishable from an absent one")
             continue
-        if not any(UNREADABLE_DAYS_GUARD_RE.search(d["body"]) for d in with_param):
-            problems.append(f"{name} (line {line}) has no `toIntOrNull() == null` guard — a non-integer "
+        guarded = False
+        refusal_missing = False
+        for r in with_param:
+            body = code[r["body_start"]:r["end"]]
+            for cond, t_start, t_end, _es, _ee in if_blocks(body):
+                if not UNREADABLE_DAYS_GUARD_RE.search(cond):
+                    continue
+                where = _line(code, r["body_start"] + t_start)
+                if not guard_feasible(cond):
+                    problems.append(
+                        f"{name} (line {where}) caps the unreadable --days guard with an always-false term "
+                        f"({_short(cond, 70)}) — the refusal is dead code, so `--days 7d` degrades silently "
+                        "to the default window")
+                    guarded = True
+                    continue
+                seg = body[t_start:t_end]
+                m_ref = re.search(r"\breturn\b(?!\s*@)", seg)
+                if m_ref and path_feasible(body, t_start + m_ref.start()):
+                    guarded = True
+                else:
+                    refusal_missing = True
+                    problems.append(f"{name} (line {where}) detects an unreadable --days but the branch never "
+                                    "returns a refusal (null / Invalid)")
+        if not guarded and not refusal_missing:
+            problems.append(f"{name} (line {decl_line}) has no `toIntOrNull() == null` guard — a non-integer "
                             "--days is not refused")
-        elif not any(REFUSAL_RE.search(d["body"]) for d in with_param):
-            problems.append(f"{name} (line {line}) detects an unreadable --days but never returns a "
-                            "refusal (null / Invalid)")
     return problems
 
 
 def rule_e(src):
-    """[dv14-A3] ISSUE-06 — the write paths need READ as well as WRITE, and the
-    permission they REQUEST must be the permission they DECIDE on.
+    """[dv14-A3] ISSUE-06 — the write paths need READ as well as WRITE.
 
-    Every calendar write first reads the provider (listWritableCalendars queries
-    Calendars.CONTENT_URI, findEventRow queries Events.CONTENT_URI); with only
-    WRITE_CALENDAR granted those reads throw SecurityException which the read
-    helpers swallow, so the write reported `calendar_no_account` / `not_found`
-    while `satisfied = { hasWrite() }` claimed the permission was fine.
-
-    Discovery is shape-based: "a subcommand entry point" is a function taking
-    `args: OffloadArgs`; "a write path" is one that inserts/updates/deletes on
-    the provider (the reminder helpers take no args and are gated by their
-    caller, so they are not entry points). Read-only entry points must NOT ask
-    for WRITE — that is the minimum-permission half of the same rule.
+    [B7-t13] FAMILY-HOLE 轴：判据原本用 `satisfied\\s*=\\s*\\{[^}]*hasRead\\(\\)`
+    找子串 —— 花括号内出现 `hasRead()` / `hasWrite()` 就绿，于是
+    `satisfied = { calendarSatisfied(hasRead(), hasWrite(), needsWrite = true) || true }`
+    让 `ensurePermission` 恒返回"已授权"：没有权限时不再申请，直接
+    `contentResolver.delete` 抛 SecurityException 并误报成 provider_blocked。
+    现在取出 lambda 的**整个表达式体**做常量折叠（`const_bool` 折 `x || true`），
+    并把 `hasRead`/`hasWrite` 的检查放在同一个 lambda 体里判。
     """
+    code = code_of(src)
     problems = []
-    for d in fun_decls(src):
-        if not ARGS_PARAM_RE.search(d["sig"]):
+    for r in all_fun_regions(code):
+        if not ARGS_PARAM_RE.search(r["head"]):
             continue
-        body = strip_comments(d["body"])
+        body = code[r["body_start"]:r["end"]]
+        line = _line(code, r["start"])
         if WRITE_CALL_RE.search(body):
-            if not re.search(r"satisfied\s*=\s*\{[^}]*hasRead\(\)", body) or \
-               not re.search(r"satisfied\s*=\s*\{[^}]*hasWrite\(\)", body):
-                problems.append(f"{d['name']} (line {d['line']}) writes the calendar provider but its "
-                                "`satisfied` predicate does not check BOTH hasRead() and hasWrite()")
+            lambdas = _satisfied_bodies(code, r["body_start"], r["end"])
+            if not lambdas:
+                problems.append(f"{r['name']} (line {line}) writes the calendar provider but has no "
+                                "`satisfied = { … }` permission predicate")
+            for pos, lam in lambdas:
+                where = _line(code, pos)
+                if const_bool(lam) is True:
+                    problems.append(
+                        f"{r['name']} (line {where}) `satisfied` predicate is constantly TRUE "
+                        f"({_short(lam, 80)}) — ensurePermission answers 'granted' on every call, so a "
+                        "missing calendar permission surfaces later as a provider SecurityException "
+                        "instead of a permission request")
+                    continue
+                if not re.search(r"hasRead\s*\(", lam) or not re.search(r"hasWrite\s*\(", lam):
+                    problems.append(f"{r['name']} (line {where}) `satisfied` predicate does not check BOTH "
+                                    "hasRead() and hasWrite()")
             if "READ_CALENDAR" not in body or "WRITE_CALENDAR" not in body:
-                problems.append(f"{d['name']} (line {d['line']}) requests a permission set that does not match "
+                problems.append(f"{r['name']} (line {line}) requests a permission set that does not match "
                                 "what it decides on (both READ_CALENDAR and WRITE_CALENDAR must be requested)")
         elif QUERY_CALL_RE.search(body):
             if "WRITE_CALENDAR" in body or "needsWrite = true" in body:
-                problems.append(f"{d['name']} (line {d['line']}) is a read-only subcommand but asks for / gates on "
+                problems.append(f"{r['name']} (line {line}) is a read-only subcommand but asks for / gates on "
                                 "WRITE — the read paths must stay minimum-permission")
     return problems
 
@@ -254,17 +424,29 @@ def line_of(src, index):
 
 
 def rule_a(src):
-    """Predicates shaped on Events.DTEND (outside a NULL guard)."""
+    """Predicates shaped on a NULL-able DTEND column (any spelling).
+
+    [B7-t13] SPELLING + parser-death 轴：判据原本逐个 `LITERAL_RE` 匹配，要求
+    **同一个**字面量里同时出现 `CalendarContract.Events.DTEND`、比较算子与
+    `?`。于是
+
+        val (selection, selArgs) = instancesWindowSelection(startMs, endMs)
+            .let { ("dtend > " + "?") to arrayOf(startMs.toString()) }
+
+    三个面一起破：常量引用换成 SQL 物理列名（`dtend` 与常量的值完全等价）、
+    算子与占位符被拆进两个字面量、谓词本身藏在 `.let` 里。判据改成先把
+    「`+` 拼接的字面量组」还原成一条字符串（Kotlin 的常量拼接语义），再对
+    还原后的字符串做大小写无关的列名 / 比较 / 绑定占位符判定。
+    """
     hits = []
-    for m in LITERAL_RE.finditer(src):
-        lit = m.group(0)
-        if "CalendarContract.Events.DTEND" not in lit:
+    for offset, text in literal_groups(strip_comments(src)):
+        if not DTEND_TOKEN_RE.search(text):
             continue
-        if NULL_GUARD_RE.search(lit):
+        if NULL_GUARD_RE.search(text):
             continue
-        if not COMPARISON_RE.search(lit):
+        if not SQL_BIND_CMP_RE.search(text):
             continue
-        hits.append((line_of(src, m.start()), lit.strip()[:120]))
+        hits.append((line_of(src, offset), text.strip()[:120]))
     return hits
 
 
@@ -292,8 +474,8 @@ def member_slice(src, marker):
 def brace_slice(src, marker):
     """`src` from [marker] to the `}` that balances the first `{` after it.
 
-    Unlike [member_slice] this does not depend on indentation, so it also works
-    for top-level declarations (`resolveAlarmSelector` lives at file scope).
+    [B7-t13] 配平改走共享 `match_bracket`（自写的深度计数遇到字符串里的花括号
+    就错位；且原实现的 `find("{")` 可能越过参数默认值直接咬到后面的块）。
     """
     at = src.find(marker)
     if at < 0:
@@ -301,31 +483,66 @@ def brace_slice(src, marker):
     open_at = src.find("{", at)
     if open_at < 0:
         return None
-    depth = 0
-    for i in range(open_at, len(src)):
-        c = src[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return src[at:i + 1]
-    return None
+    close = match_bracket(src, open_at)
+    if close < 0:
+        return None
+    return src[at:close + 1]
+
+
+INSTANCES_URI_RE = re.compile(r"CalendarContract\s*\.\s*Instances\s*\.\s*CONTENT_URI")
+EVENTS_URI_RE = re.compile(r"CalendarContract\s*\.\s*Events\s*\.\s*CONTENT_URI|com\.android\.calendar/events")
 
 
 def rule_b(src):
-    """The freebusy path must read instances, never events."""
-    body = member_slice(src, "private fun doFreebusy(")
-    if body is None:
+    """The freebusy path must READ the instances window, not merely mention it.
+
+    [B7-t13] DATAFLOW 轴：判据原本是两条子串存在性 —— 函数体里有
+    `CalendarContract.Instances.CONTENT_URI`、没有
+    `CalendarContract.Events.CONTENT_URI`。于是
+
+        val _unused = CalendarContract.Instances.CONTENT_URI
+        val eventsUri = android.net.Uri.parse("content://com.android.calendar/events")
+        context.contentResolver.query(eventsUri, projection, selection, selArgs, sort)
+
+    两条都满足：Instances 在（没人用），Events 只以硬编码字符串形式出现。
+    查询实际落回未展开 RRULE 的 Events 表 → freebusy 对所有周期性日程漏报。
+    现在判 query() 的**实参值流**：uri 必须派生自 Instances.CONTENT_URI（且不得
+    是 Events 表 / 硬编码 events 路径），selection 必须派生自
+    `instancesWindowSelection(…)`（被 `.let { … }` 换掉同样算换掉）。
+    """
+    code = code_of(src)
+    lit = lit_of(src)
+    fb = function_body(code, "doFreebusy")
+    if fb is None:
         return []
+    body_start, body_end, _kind = fb
     problems = []
-    if "CalendarContract.Instances.CONTENT_URI" not in body:
-        problems.append("freebusy does not query CalendarContract.Instances.CONTENT_URI")
-    if "instancesWindowSelection(" not in body:
-        problems.append("freebusy does not use the shared instances window selection")
-    if "CalendarContract.Events.CONTENT_URI" in body:
+    queries = [m for m in re.finditer(r"contentResolver\s*\.\s*query\s*\(", code)
+               if body_start <= m.start() < body_end]
+    if not queries:
+        problems.append("freebusy never queries the provider — the instances read path is gone")
+    for m in queries:
+        args = call_args(code, m.end() - 1)
+        if len(args) < 3:
+            problems.append("freebusy query() call carries fewer than 3 arguments — uri/selection cannot be verified")
+            continue
+        uri_src = _all_sources(code, lit, *args[0])
+        if not any(INSTANCES_URI_RE.search(s) for s in uri_src):
+            problems.append(
+                "freebusy queries a uri whose value does not derive from "
+                "CalendarContract.Instances.CONTENT_URI (got %r) — an unused Instances reference "
+                "elsewhere in the method does not make the query read instances" % _short(" ".join(uri_src)))
+        if any(EVENTS_URI_RE.search(s) for s in uri_src):
+            problems.append("freebusy falls back to the Events table (got %r)" % _short(" ".join(uri_src)))
+        sel_src = _all_sources(code, lit, *args[2])
+        if not any("instancesWindowSelection(" in s for s in sel_src):
+            problems.append(
+                "the selection handed to query() does not derive from instancesWindowSelection(…) "
+                "(got %r) — the shared window predicate was replaced or rewritten" % _short(" ".join(sel_src)))
+    body_lit = lit[body_start:body_end]
+    if "CalendarContract.Events.CONTENT_URI" in body_lit:
         problems.append("freebusy queries CalendarContract.Events.CONTENT_URI")
-    if "CalendarContract.Events.DTEND" in body:
+    if "CalendarContract.Events.DTEND" in body_lit:
         problems.append("freebusy filters on CalendarContract.Events.DTEND (NULL for recurring events)")
     return problems
 
@@ -414,64 +631,104 @@ def rule_c(src):
     if re.search(r'get\(\s*"calendar-id"\s*\)\s*==\s*null', code):
         problems.append("the flag's existence is tested with `== null` on the raw string — a"
                         " non-numeric --calendar-id reads as 'not written' again")
+    # [B7-t13] DATAFLOW / family-hole：`pickWritableCalendar()` 的无参拼写禁令
+    # 只挡住一种写法，真正的契约是「显式选择器没命中 ⇒ 写入必须被拒绝」：
+    #   is CalendarTarget.Refused -> pickWritableCalendar(listWritableCalendars()) ?: return target.result
+    # 保留了 requireCalendarTarget( 调用（存在性检查满足），也保留了带参的
+    # `pickWritableCalendar(`（拼写禁令满足），却把拒绝分支换成「静默挑一个
+    # 日历继续写」—— `create --calendar WorkCal`（设备上无此日历）于是写进
+    # 用户的默认日历并返回 exit 0。判据锚在**决策分支本身**：两个写入入口里
+    # 每个 `CalendarTarget.Refused` 分支的全部内容必须恰好是一条
+    # `return <target>.result`（无 `?:`、无调用、无别的值）。
+    code_struct = code_of(src)
+    for verb in ("doCreate", "doUpdate"):
+        reg = next((r for r in all_fun_regions(code_struct) if r["name"] == verb), None)
+        if reg is None:
+            continue
+        body = code_struct[reg["body_start"]:reg["end"]]
+        branches = list(REFUSED_BRANCH_RE.finditer(body))
+        if not branches:
+            problems.append(f"{verb} has no `is CalendarTarget.Refused ->` branch — an explicit selector "
+                            "that matches nothing has no refusal of its own")
+            continue
+        for bm in branches:
+            stmt = strip_parens(body[bm.end():expr_end(body, bm.end())].strip())
+            if not UNCONDITIONAL_REFUSAL_RE.fullmatch(stmt):
+                problems.append(
+                    f"{verb} (line {_line(code_struct, reg['body_start'] + bm.start())}) answers a refused "
+                    f"calendar selector with `{_short(stmt, 80)}` instead of an unconditional "
+                    "`return <target>.result` — a selector miss silently falls back to the auto-picked calendar")
+        if "pickWritableCalendar(" in body:
+            problems.append(f"{verb} picks a writable calendar itself — the auto-pick belongs to the "
+                            "no-selector case only (requireCalendarTarget)")
     return problems
 
+REFUSED_BRANCH_RE = re.compile(r"\bis\s+CalendarTarget\.Refused\s*->")
+UNCONDITIONAL_REFUSAL_RE = re.compile(r"return\s+(?:[A-Za-z_]\w*\s*\.\s*)*result")
+
+ALARM_ARG_RE = re.compile(r'args\s*\.\s*get\(\s*"alarm"\s*\)')
+
+
 def rule_f(src):
-    """[dv18-A A-04] `--alarm` is written by TWO boundaries (create, update) and
-    both must answer "was the flag written?" from ONE classification of the raw
-    string.
+    """[dv18-A A-04] `--alarm` is classified ONCE, from the raw string.
 
-    The pre-fix shape read `args.getInt("alarm")` per writer: "the flag was not
-    given" and "the flag was given with `-5` / `abc`" both became null, so
-    `create --alarm -5` answered exit 0 with the reminder silently dropped and
-    `update --id X --alarm -5` answered `{"updated": true, "rows": 0}` while
-    writing nothing.
+    [B7-t13] DATAFLOW 轴：判据原本只问"函数体里有没有 `resolveAlarmSelector(`
+    调用、有没有 `AlarmSelector.Unreadable -> return …` 分支"。调用点把入参
+    中和掉就全绿：
 
-    Criteria (each fail-closed on a decision point, not a spelling):
-      F1  the shared classifier exists (`resolveAlarmSelector`) and its body
-          really classifies (nullable parse + the >= 0 bound live THERE);
-      F2  a supplied-but-unusable alarm reaches a refusal (exit 2) in BOTH
-          writers;
-      F3  neither writer re-parses `--alarm` on its own (`getInt("alarm")`).
+        resolveAlarmSelector(args.get("alarm")?.let { null })
+
+    分类器、拒绝分支、`getInt("alarm")` 禁令全部保留，而 `-5`（非法）与
+    `15`（合法）都变成"没写 --alarm"——create 报 exit 0 且提醒静默丢失。
+    现在判的是**实参活性**：传给分类器的表达式，其求值来源必须真读
+    `args.get("alarm")`（`?.let { null }` / `takeIf { false }` / 字面量都不算）。
     """
+    code = code_of(src)
+    lit = lit_of(src)
     if "fun doCreate(" not in src and "fun doUpdate(" not in src:
         return []
-    code = strip_comments(src)
     problems = []
-    if "resolveAlarmSelector(" not in code:
-        problems.append(
-            "resolveAlarmSelector() is gone — the --alarm decision has no single "
-            "source (the pre-fix per-writer getInt(\"alarm\") read again)"
-        )
+    if "resolveAlarmSelector(" not in lit:
+        problems.append("resolveAlarmSelector() is gone — the --alarm decision has no single "
+                        "source (the pre-fix per-writer getInt(\"alarm\") read again)")
     else:
-        classifier = brace_slice(code, "fun resolveAlarmSelector(")
-        if classifier is None or "toIntOrNull()" not in classifier or ">= 0" not in classifier:
-            problems.append(
-                "resolveAlarmSelector() no longer classifies (nullable parse + "
-                "the >= 0 bound must live in the classifier, not per writer)"
-            )
+        reg = next((r for r in all_fun_regions(code) if r["name"] == "resolveAlarmSelector"), None)
+        classifier = code[reg["body_start"]:reg["end"]] if reg else ""
+        if not reg or "toIntOrNull()" not in classifier or ">= 0" not in classifier:
+            problems.append("resolveAlarmSelector() no longer classifies (nullable parse + the >= 0 bound "
+                            "must live in the classifier, not per writer)")
     for verb in ("doCreate", "doUpdate"):
-        body = member_slice(code, f"fun {verb}(")
-        if body is None:
+        reg = next((r for r in all_fun_regions(code) if r["name"] == verb), None)
+        if reg is None:
             continue
-        if "resolveAlarmSelector(" not in body:
-            problems.append(
-                f"{verb} does not decide --alarm through resolveAlarmSelector() — "
-                "the two writers answer \"was the flag written?\" separately"
-            )
-        if "getInt(\"alarm\")" in body:
-            problems.append(
-                f"{verb} re-parses --alarm with getInt(\"alarm\") — a supplied "
-                "but unusable value reads as 'not written' again"
-            )
-        if not re.search(
-            r"AlarmSelector\.Unreadable\s*->\s*return NativeOffloadResult\(2,\s*alarmRefusalMessage\(",
-            body,
-        ):
-            problems.append(
-                f"{verb} does not turn AlarmSelector.Unreadable into an exit-2 "
-                "refusal via alarmRefusalMessage — a bad --alarm is ignored again"
-            )
+        body = code[reg["body_start"]:reg["end"]]
+        body_lit = lit[reg["body_start"]:reg["end"]]
+        calls = [m for m in re.finditer(r"resolveAlarmSelector\s*\(", code)
+                 if reg["body_start"] <= m.start() < reg["end"]]
+        if not calls:
+            problems.append(f"{verb} does not decide --alarm through resolveAlarmSelector() — the two "
+                            "writers answer \"was the flag written?\" separately")
+        for m in calls:
+            args = call_args(code, m.end() - 1)
+            where = _line(code, m.start())
+            if len(args) != 1:
+                problems.append(f"{verb} (line {where}) calls resolveAlarmSelector with {len(args)} "
+                                "argument(s) — the classifier takes the raw --alarm string")
+                continue
+            sources = _all_sources(code, lit, *args[0])
+            if not any(ALARM_ARG_RE.search(s) for s in sources):
+                problems.append(
+                    f"{verb} (line {where}) neutralises the --alarm argument: "
+                    f"`resolveAlarmSelector({_short(lit[args[0][0]:args[0][1]], 60)})` never evaluates to "
+                    "args.get(\"alarm\") — a supplied `-5` reads as absent and a legal `15` is dropped, "
+                    "both with exit 0")
+        if 'getInt("alarm")' in body_lit:
+            problems.append(f"{verb} re-parses --alarm with getInt(\"alarm\") — a supplied but unusable "
+                            "value reads as 'not written' again")
+        if not re.search(r"AlarmSelector\.Unreadable\s*->\s*return\s+NativeOffloadResult\(\s*2\s*,\s*"
+                         r"alarmRefusalMessage\(", body):
+            problems.append(f"{verb} does not turn AlarmSelector.Unreadable into an exit-2 refusal via "
+                            "alarmRefusalMessage — a bad --alarm is ignored again")
     return problems
 
 
@@ -485,7 +742,7 @@ def run(root, verbose=True):
             failures.append(f"{rel}:{lineno}: [{RULE_A_CODE}] Events.DTEND compared without a NULL guard: {snippet}")
         if os.path.normpath(rel) == os.path.normpath(HANDLER_REL):
             for problem in rule_b(src):
-                failures.append(f"{rel}: [{RULE_A_CODE}] freebusy path: {problem}")
+                failures.append(f"{rel}: [{RULE_B_CODE}] freebusy path: {problem}")
             for problem in rule_c(src):
                 failures.append(f"{rel}: [{RULE_C_CODE}] {problem}")
             for problem in rule_d(src):
@@ -873,6 +1130,57 @@ def write_fixture(root, name, body, handler_rel=True):
         fh.write(body)
 
 
+
+# ── [B7-t13] 第七批见证夹具（每条 = 外部攻击方的最小补丁，门在修复前全绿）───
+# 05-1: 谓词换成 SQL 物理列名 + 拆字面量拼接，且外层保留 instancesWindowSelection(。
+DTEND_LOWERCASE_SPLIT = '''
+package x
+
+class OtherHandler {
+    private fun doFreebusy() {
+        val (selection, selArgs) = instancesWindowSelection(startMs, endMs).let { ("dtend > " + "?") to arrayOf(startMs.toString()) }
+    }
+}
+'''
+
+# 05-2: 真正的查询落回 Events 表（硬编码 uri），Instances 只留一个没人用的引用。
+EVENTS_URI_DIVERSION = COMPLIANT_HANDLER.replace(
+    "        context.contentResolver.query(CalendarContract.Instances.CONTENT_URI, projection, selection, selArgs, sort)",
+    "        val _unused = CalendarContract.Instances.CONTENT_URI\n"
+    "        val eventsUri = android.net.Uri.parse(\"content://com.android.calendar/events\")\n"
+    "        context.contentResolver.query(eventsUri, projection, selection, selArgs, sort)",
+)
+
+# 05-1（rule B 半边）：instancesWindowSelection( 还在，返回值被 .let 换成了 dtend 谓词。
+SELECTION_REWRITTEN = COMPLIANT_HANDLER.replace(
+    "        val (selection, selArgs) = instancesWindowSelection(startMs, endMs)",
+    "        val (selection, selArgs) = instancesWindowSelection(startMs, endMs).let { (\"dtend > \" + \"?\") to arrayOf(startMs.toString()) }",
+)
+
+# 05-3: 拒绝分支改成"静默挑一个日历继续写"，调用形式带参（骗过无参拼写禁令）。
+SELECTOR_REFUSAL_FALLS_BACK = GREEN_SELECTOR_HANDLER.replace(
+    "            is CalendarTarget.Refused -> return target.result\n        }\n        return NativeOffloadResult(0, calendarId.toString())",
+    "            is CalendarTarget.Refused -> pickWritableCalendar(listWritableCalendars()) ?: return target.result\n        }\n        return NativeOffloadResult(0, calendarId.toString())",
+)
+
+# 05-4: 受检子串一个不少，只给守卫补一个恒假项 —— 拒绝分支变死代码。
+DAYS_GUARD_DEAD = GREEN_DAYS_PERM_HANDLER.replace(
+    "daysText.toIntOrNull() == null) {",
+    "daysText.toIntOrNull() == null && false) {",
+)
+
+# 05-5: satisfied 里两个权限调用都在，整体被 `|| true` 折成恒真。
+PERM_SATISFIED_ALWAYS_TRUE = GREEN_DAYS_PERM_HANDLER.replace(
+    "satisfied = { calendarSatisfied(hasRead(), hasWrite(), needsWrite = true) },",
+    "satisfied = { calendarSatisfied(hasRead(), hasWrite(), needsWrite = true) || true },",
+)
+
+# 05-6: 分类器与拒绝分支原样保留，入参在调用点被中和成 null。
+ALARM_ARG_NEUTRALISED = GREEN_ALARM_HANDLER.replace(
+    'resolveAlarmSelector(args.get("alarm"))',
+    'resolveAlarmSelector(args.get("alarm")?.let { null })',
+)
+
 def selftest():
     cases = [
         ("violating handler (events predicate + events query)", VIOLATING_HANDLER, True, 1),
@@ -910,6 +1218,7 @@ def selftest():
         ("the written-but-unparseable selector loses its payload", SELECTOR_NO_BAD_SELECTOR_PAYLOAD, True),
         ("an unreadable selector stops being refused on the write path", SELECTOR_UNREADABLE_NOT_REFUSED, True),
         ("the flag's existence is tested on the raw string again", SELECTOR_EXISTENCE_TEST, True),
+        ("a refused selector falls back to the auto-pick (parameterised call)", SELECTOR_REFUSAL_FALLS_BACK, True),
     ]
     for label, body, expect_red in selector_cases:
         root = tempfile.mkdtemp(prefix="calgate-c-")
@@ -926,6 +1235,26 @@ def selftest():
         finally:
             shutil.rmtree(root, ignore_errors=True)
     ok = ok and passed
+    # [B7-t13] rules A + B — 第七批的两个数据流/拼写见证：每条 arm 只断言
+    # 自己那条规则（撞到邻规则 = 该条判据仍无牙，必须判 FAIL）。
+    for label, body, rule, handler_rel, expect_red in (
+        ("a split lowercase dtend predicate (rule A spelling)", DTEND_LOWERCASE_SPLIT, RULE_A_CODE, False, True),
+        ("the freebusy query diverts to the Events uri", EVENTS_URI_DIVERSION, RULE_B_CODE, True, True),
+        ("the window selection is rewritten away", SELECTION_REWRITTEN, RULE_B_CODE, True, True),
+    ):
+        root = tempfile.mkdtemp(prefix="calgate-ab-")
+        try:
+            write_fixture(root, "CalendarOffloadHandler.kt", body, handler_rel=handler_rel)
+            failures = run(root, verbose=False)
+            hit = [f for f in failures if rule in f]
+            passed = (len(hit) > 0) == expect_red
+            print(f"[{'PASS' if passed else 'FAIL'}] selftest: {label} "
+                  f"({rule} expected {'red' if expect_red else 'green'}, got {len(hit)} violation(s))")
+            for f in hit:
+                print(f"        {f}")
+            ok = ok and passed
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
     # [dv14-A3] rules D + E — one control plus one arm per criterion, each arm
     # asserting its OWN rule code (an arm that trips another rule instead would
     # leave D/E toothless and still look green).
@@ -939,6 +1268,8 @@ def selftest():
         ("a write requests a permission set it does not decide on", PERM_REQUEST_DRIFT, RULE_E_CODE, True),
         ("a write entry point has no permission gate", PERM_NO_GATE, RULE_E_CODE, True),
         ("a read-only subcommand asks for WRITE", PERM_READ_PATH_ASKS_WRITE, RULE_E_CODE, True),
+        ("the days guard is capped by an always-false term", DAYS_GUARD_DEAD, RULE_D_CODE, True),
+        ("the satisfied predicate folds to true", PERM_SATISFIED_ALWAYS_TRUE, RULE_E_CODE, True),
     ):
         root = tempfile.mkdtemp(prefix="calgate-de-")
         try:
@@ -966,6 +1297,7 @@ def selftest():
         ("the classifier stops classifying", ALARM_CLASSIFIER_NO_CLASSIFY, RULE_F_CODE, True),
         ("a writer ignores an unusable --alarm", ALARM_UPDATE_NO_REFUSAL, RULE_F_CODE, True),
         ("a writer re-parses --alarm on its own", ALARM_CREATE_REPARSE, RULE_F_CODE, True),
+        ("the --alarm argument is neutralised at the call site", ALARM_ARG_NEUTRALISED, RULE_F_CODE, True),
     ):
         root = tempfile.mkdtemp(prefix="calgate-f-")
         try:

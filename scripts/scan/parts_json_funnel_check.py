@@ -67,6 +67,31 @@ import sys
 import os
 import re
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    FUN_RE,
+    const_bool,
+    split_top,
+    const_value,
+    function_body,
+    if_blocks,
+    match_bracket,
+    stmt_spans,
+    strip_parens,
+    tail_expr,
+    when_branches,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    contains_ident,
+    expr_end,
+    guard_feasible,
+    path_feasible,
+    value_sources,
+)
+
 OK, FAIL = "PASS", "FAIL"
 
 PARTS_RE = re.compile(r"dao\.loadMessagesPage\(")
@@ -76,6 +101,7 @@ RANGE_RE = re.compile(r"dao\.loadMessagesPageInRange\(")
 DEBUG_REL = "src/android/app/src/main/java/com/rikkaminis/app/debug/ChatDebugMethods.kt"
 MUTATION_DEBUG_REL = "src/android/app/src/main/java/com/rikkaminis/app/debug/ChatMutationMethods.kt"
 DAO_REL = "src/android/app/src/main/java/com/rikkaminis/app/data/db/ChatDao.kt"
+CHATREPO_REL = "src/android/app/src/main/java/com/rikkaminis/app/data/repository/ChatRepository.kt"
 
 # The @SerialName set of data/model/ContentPart.kt — the only three keys that
 # a real persisted parts_json row can carry besides "text".
@@ -87,76 +113,25 @@ BARE_MODEL_PREDICATE_RE = re.compile(r"modelEntries\.firstOrNull\s*\{[^}]*baseMo
 
 
 def strip_kotlin_comments(text):
-    """Blank out line/block comments (blocks nest in Kotlin) and leave every
-    other byte — newlines included — exactly where it was.
+    """Literal view of [text] — comments blanked, string CONTENT preserved.
 
-    Template-aware: `"${...}"` switches back to code mode (so a `//` inside a
-    template expression is still a comment) and returns to the string at the
-    matching `}`, so a quote inside a template cannot end the enclosing
-    literal. Raw strings can hold quotes and newlines.
+    [B7-t03] This used to be a hand-written lexer (string / raw string / `${…}`
+    template machine). Every failure mode the external witnesses exploited on
+    other gates began there: a `}` inside a literal closing a function body, a
+    `"video/*"` opening a block comment, a KDoc brace balancing a real one. The
+    shared `_kotlin_lexer` is the single implementation (length strictly
+    preserved, so a position found in this view is a position in the source),
+    and a lex failure is propagated to the caller as fail-closed.
+
+    Positions taken here are reusable on `mask_code` output and vice versa —
+    both views are length-identical to the source.
     """
-    out = []
-    i, n = 0, len(text)
-    # stack of [mode, brace-depth-for-templates]
-    stack = [["code", 0]]
-    while i < n:
-        c = text[i]
-        mode = stack[-1][0]
-        if mode == "string":
-            if c == "\\":
-                out.append(text[i:i + 2]); i += 2
-            elif c == '"':
-                stack.pop(); out.append(c); i += 1
-            elif c == "$" and i + 1 < n and text[i + 1] == "{":
-                stack.append(["template", 0]); out.append("${"); i += 2
-            else:
-                out.append(c); i += 1
-            continue
-        if mode == "raw":
-            if text.startswith('"""', i):
-                stack.pop(); out.append('"""'); i += 3
-            else:
-                out.append(c); i += 1
-            continue
-        if mode == "template":
-            if c == "{":
-                stack[-1][1] += 1; out.append(c); i += 1; continue
-            if c == "}":
-                if stack[-1][1] == 0:
-                    stack.pop()
-                else:
-                    stack[-1][1] -= 1
-                out.append(c); i += 1; continue
-            # otherwise fall through to code handling
-        # code / template-expression body
-        if text.startswith("//", i):
-            j = text.find("\n", i)
-            j = n if j < 0 else j
-            out.append(" " * (j - i)); i = j
-        elif text.startswith("/*", i):
-            j = i + 2
-            depth = 1
-            while j < n and depth:
-                if text.startswith("/*", j):
-                    depth += 1; j += 2
-                elif text.startswith("*/", j):
-                    depth -= 1; j += 2
-                else:
-                    j += 1
-            out.append("".join("\n" if ch == "\n" else " " for ch in text[i:j])); i = j
-        elif text.startswith('"""', i):
-            stack.append(["raw", 0]); out.append('"""'); i += 3
-        elif c == '"':
-            stack.append(["string", 0]); out.append(c); i += 1
-        elif c == "'":
-            j = i + 1
-            while j < n and text[j] != "'":
-                j += 2 if text[j] == "\\" else 1
-            j = min(j + 1, n)
-            out.append(text[i:j]); i = j
-        else:
-            out.append(c); i += 1
-    return "".join(out)
+    return mask_comments(text)
+
+
+def code_of(text):
+    """Structural view: comments AND string interiors blanked, length preserved."""
+    return mask_code(text)
 
 
 def read(path):
@@ -165,71 +140,47 @@ def read(path):
 
 
 def extract_function(text, sig):
-    """Body of the function matching sig, via paren-then-brace matching that
-    skips string literals and triple-quoted strings (a KDoc example like
-    {"type":"group",…} must not hand us a brace that belongs to a comment)."""
-    start = text.find(sig)
-    if start < 0:
+    """Body of the function named in [sig], via the shared `function_body`.
+
+    [B7-t03] The old version located a `{` after the signature and brace-matched
+    it. Two holes the witnesses drove through: an EXPRESSION-bodied funnel
+    (`fun capReasoningContentForRow(rc: String?) = rc`) has no body brace at
+    all, so the matcher ran on and returned the NEXT function's body — a
+    non-None answer for a body that no longer exists; and a KDoc example with a
+    balanced `{"type": …}` could be mistaken for the body. `function_body`
+    distinguishes `{ … }` from `= …` and knows where the expression ends.
+    """
+    name = None
+    m = re.search(r"fun\s+(?:[A-Za-z_][\w.]*\.)?([A-Za-z_]\w*)\s*\(", sig)
+    if m:
+        name = m.group(1)
+    if name is None:
+        # fall back to the first declaration mentioned in the signature string
+        m = re.search(r"([A-Za-z_]\w*)\s*\(", sig)
+        if m:
+            name = m.group(1)
+    if name is None:
         return None
-    p = text.find("(", start)
-    if p < 0:
+    # Prefer the declaration this signature actually names, in source order.
+    want = sig.strip()
+    best = None
+    for decl in FUN_RE.finditer(text):
+        if decl.group(1) != name:
+            continue
+        tail = text[decl.start():decl.start() + 200].replace("\n", " ")
+        if want and want.split("(")[0].split()[-1] not in tail and "(" in want:
+            # only accept a declaration whose signature prefix matches
+            if not tail.startswith(want.split("(")[0].strip()):
+                continue
+        best = decl
+        break
+    if best is None:
         return None
-    depth = 0
-    j = p
-    in_str = in_triple = False
-    while j < len(text):
-        c = text[j]
-        if in_triple:
-            if text.startswith('"""', j):
-                in_triple = False
-                j += 2
-        elif in_str:
-            if c == "\\":
-                j += 1
-            elif c == '"':
-                in_str = False
-        elif text.startswith('"""', j):
-            in_triple = True
-            j += 2
-        elif c == '"':
-            in_str = True
-        elif c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                break
-        j += 1
-    i = text.find("{", j)
-    if i < 0:
+    body = function_body(text[best.start():], name)
+    if body is None:
         return None
-    depth = 0
-    j = i
-    in_str = in_triple = False
-    while j < len(text):
-        c = text[j]
-        if in_triple:
-            if text.startswith('"""', j):
-                in_triple = False
-                j += 2
-        elif in_str:
-            if c == "\\":
-                j += 1
-            elif c == '"':
-                in_str = False
-        elif text.startswith('"""', j):
-            in_triple = True
-            j += 2
-        elif c == '"':
-            in_str = True
-        elif c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start:j + 1]
-        j += 1
-    return None
+    b_start, b_end, _kind = body
+    return text[best.start():best.start() + b_end + 1]
 
 
 def region_between(text, start_sig, end_sig_regex):
@@ -244,6 +195,135 @@ def region_between(text, start_sig, end_sig_regex):
     if m:
         return text[start:start + 10 + m.start()]
     return text[start:]
+
+
+
+# ── [B7-t03] value-flow helpers shared by [R5] / [R6] ─────────────────────
+FUNNEL_SPECS = (
+    ("capPartsJsonForRow", "buildTruncatedPartsJson", "partsJson"),
+    ("capReasoningContentForRow", "buildTruncatedText", "reasoningContent"),
+)
+NULLISH = ("null", "JSONObject.NULL", "Unit", "")
+
+
+def ceiling_funnel_violations(code, name, truncator):
+    """[R5] A ceiling funnel must DO the ceiling, not just exist.
+
+    The old judgment was `extract_function(...) is not None` — a funnel kept
+    with its full signature and every call site wired, whose body became
+    `= reasoningContent`, passed while every multi-MB reasoning blob reached
+    Room verbatim. Judged now on three facts about the body:
+      (a) the byte ceiling is COMPARED (the constant appears in a condition);
+      (b) the truncator is CALLED on a reachable path;
+      (c) the value the function RETURNS can come from that truncator.
+    """
+    b = function_body(code, name)
+    if b is None:
+        return ["missing"]
+    start, end, kind = b
+    body = code[start:end]
+    out = []
+    if not any("MAX_MESSAGE_PARTS_JSON_BYTES" in cond
+               for cond, _ts, _te, _es, _ee in if_blocks(body)):
+        out.append("does not compare against MAX_MESSAGE_PARTS_JSON_BYTES")
+    sites = [m.start() for m in re.finditer(r"\b" + truncator + r"\s*\(", body)]
+    if not sites:
+        out.append("never calls %s()" % truncator)
+    elif not any(path_feasible(body, x) for x in sites):
+        out.append("the %s() call is unreachable (dead guard)" % truncator)
+    # (c) the value the function RETURNS can come from that truncator. Every
+    # `return` point counts — a block funnel early-returns the truncated value
+    # and falls through to the original, which is the correct shape.
+    if kind == "block":
+        sources = []
+        for m in re.finditer(r"\breturn\b", body):
+            e = expr_end(body, m.end())
+            sources.extend(value_sources(body[m.end():e]))
+        if not sources:
+            tail = tail_expr(body)
+            sources = value_sources(tail) if tail else []
+    else:
+        sources = value_sources(body)
+    if not any(truncator in src for src in sources):
+        out.append("the returned value never comes from %s()" % truncator)
+    return out
+
+
+def local_decl_rhs(region, name):
+    """The right-hand side of the local declaration of [name], or None."""
+    m = re.search(r"\b(?:val|var)\s+" + re.escape(name) + r"\s*(?::[^=\n]+)?=(?!=)", region)
+    if m is None:
+        return None
+    e = expr_end(region, m.end())
+    return region[m.end():e].strip().rstrip(",").strip()
+
+
+def local_sources(region, rhs, depth=3):
+    """[rhs] resolved through local `val x = …` bindings (bounded hops)."""
+    out = []
+    for src in value_sources(rhs):
+        s = strip_parens(src.strip().rstrip(",").strip())
+        m = re.fullmatch(r"([A-Za-z_]\w*)", s)
+        if m and depth > 0:
+            init = local_decl_rhs(region, m.group(1))
+            if init is not None and init != s:
+                out.extend(local_sources(region, init, depth - 1))
+                continue
+        out.append(s)
+    return out
+
+
+def funnel_bypasses(code_region, literal_region, ident, funnel):
+    """[R5]/[R6] Every path by which [ident]'s value escapes [funnel].
+
+    Two shapes, both witnessed on this gate:
+
+      * a bare USE — `reasoningContent?.let { … }`, or an import that reads the
+        payload straight into the entity (`partsJson = m.optString("partsJson")`);
+      * a WRITE whose value does not come from the funnel — appending
+        `.let { m.optString("partsJson") }` to a correctly capped expression
+        keeps the whole capped call as a substring while storing the raw one.
+
+    Positions are located on the CODE view (string interiors blanked, so the
+    key name `"partsJson"` inside `m.optString("partsJson")` is not mistaken for
+    a variable), while the right-hand sides are sliced from the LITERAL view
+    (so the call that carries the key name survives).
+    """
+    out = []
+    spans = []
+    for m in re.finditer(r"\b" + re.escape(funnel) + r"\s*\(", code_region):
+        spans.extend(call_args(code_region, m.end() - 1))
+
+    writes = []
+    for m in re.finditer(r"(?<![\w`])" + re.escape(ident) + r"\s*=(?!=)", code_region):
+        e = expr_end(code_region, m.end())
+        writes.append((m.start(), m.end(), e, code_region[:m.start()].count("\n") + 1))
+
+    for m in re.finditer(r"(?<![\w`])" + re.escape(ident) + r"(?![\w`])", code_region):
+        if any(a <= m.start() < b for a, b in spans):
+            continue
+        if any(w[0] == m.start() for w in writes):
+            continue
+        out.append((code_region[:m.start()].count("\n") + 1,
+                    "raw use of %s outside %s(...)" % (ident, funnel)))
+
+    for _pos, rhs_start, rhs_end, line in writes:
+        # A named-argument assignment ends at its OWN top-level comma —
+        # `expr_end` would carry it past `,` into the next parameter.
+        seg = code_region[rhs_start:rhs_end]
+        parts = split_top(seg, (",",))
+        if parts and parts[0][1] < (rhs_end - rhs_start):
+            rhs_end = rhs_start + parts[0][1]
+        rhs = literal_region[rhs_start:rhs_end].strip().rstrip(",").strip()
+        if not rhs:
+            continue
+        for src in local_sources(literal_region, rhs):
+            if src in NULLISH or funnel in src:
+                continue
+            out.append((line, "`%s = %s` stores a value that never passed %s"
+                        % (ident, src[:60], funnel)))
+            break
+    return out
 
 
 DEBUG_BLOB_PARTY_RELS = (
@@ -340,16 +420,84 @@ def derive_parts_readers(dao_source):
 
 def _balanced_arg(text, open_idx):
     """Text between the paren at `open_idx` and its match ("" if unbalanced)."""
-    depth = 0
-    for i in range(open_idx, len(text)):
-        c = text[i]
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return text[open_idx + 1:i]
-    return None
+    close = match_bracket(text, open_idx)
+    if close < 0:
+        return None
+    return text[open_idx + 1:close]
+
+
+# ── [B7-t03] arm-level helpers shared by [R7] / [R10] / [R11] ─────────────
+def when_arm_spans(text, lo, hi):
+    """[(subject, cond, body_start, body_end)] of `when` arms opening in [lo,hi)."""
+    out = []
+    for subject, cond, b_start, b_end in when_branches(text):
+        if lo <= b_start < hi:
+            out.append((subject.strip(), cond, b_start, b_end))
+    return out
+
+
+def arm_extent(text, start, end):
+    """Tighten an arm body: a `{ … }` arm ends at its own closing brace."""
+    i = start
+    while i < end and text[i] in " \t\r\n":
+        i += 1
+    if i < end and text[i] == "{":
+        close = match_bracket(text, i)
+        if close > 0:
+            return i + 1, close
+    return start, end
+
+
+def arm_hands_on(text, start, end, var):
+    """The arm PASSES the loop value on: a live call receives [var].
+
+    `"mediaRef" -> Unit` keeps the serial name in the dispatch and drops the
+    part; `"mediaRef" -> if (false) attachments.put(p)` keeps both and drops it
+    anyway. Both are silent data loss at chat.messages.list, so the arm must
+    hand the value to a call that can actually run.
+    """
+    if not var:
+        return False
+    for m in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", text[start:end]):
+        open_pos = start + m.end() - 1
+        for a, b in call_args(text, open_pos):
+            if contains_ident(text[a:b], var) and path_feasible(text, a):
+                return True
+    return False
+
+
+def dao_bound_names(code):
+    """Names bound to the DAO (`val rawDao = repo.dao`), 3 hops."""
+    names = {"dao"}
+    for _ in range(3):
+        grew = False
+        for m in re.finditer(r"\b(?:val|var)\s+(\w+)\s*=(?!=)", code):
+            rhs_end = expr_end(code, m.end())
+            rhs = code[m.end():rhs_end]
+            if re.search(r"(?<![\w])dao\b", rhs) and m.group(1) not in names:
+                names.add(m.group(1))
+                grew = True
+        if not grew:
+            break
+    return names
+
+
+def call_receiver(code, pos):
+    """The receiver identifier immediately before a call at [pos], or None."""
+    j = pos - 1
+    while j >= 0 and code[j] in " \t":
+        j -= 1
+    if j >= 0 and code[j] == "?":
+        j -= 1
+    if j < 0 or code[j] != ".":
+        return None
+    j -= 1
+    while j >= 0 and code[j] in " \t":
+        j -= 1
+    end = j + 1
+    while j >= 0 and (code[j].isalnum() or code[j] == "_"):
+        j -= 1
+    return code[j + 1:end]
 
 
 def check_debug_surface(root):
@@ -367,21 +515,58 @@ def check_debug_surface(root):
     dbg = strip_kotlin_comments(read(dbg_path))
     mut = strip_kotlin_comments(read(mut_path))
 
-    # [R7] messageToJson must classify every real ContentPart serial name.
-    body = extract_function(dbg, "fun messageToJson(")
-    if body is None:
+    # [R7] messageToJson must classify every real ContentPart serial name —
+    # and, per [B7-t03], the arm must actually HAND THE PART ON. The old
+    # judgment was `serial name appears in the body`, so `"mediaRef" -> Unit`
+    # (a matched-but-discarded branch) kept the gate green while every image and
+    # file part vanished from chat.messages.list.
+    mb = function_body(dbg, "messageToJson")
+    if mb is None:
         findings.append(
             "[R7] FAIL messageToJson not found in ChatDebugMethods (fail-closed: this arm "
             "pins the parts_json read-side classification)")
     else:
-        missing = [s for s in PART_SERIAL_NAMES if s not in body]
-        if missing:
+        lo, hi, _k = mb
+        arms = when_arm_spans(dbg, lo, hi)
+        part_var = None
+        for subject, _cond, _bs, _be in arms:
+            vm = re.search(r"([A-Za-z_]\w*)\s*\.\s*optString\s*\(", subject)
+            if vm:
+                part_var = vm.group(1)
+                break
+        missing, silent = [], []
+        for name in PART_SERIAL_NAMES:
+            key = name.strip('"')
+            hits = [a for a in arms if contains_ident(a[1], key)]
+            if not hits:
+                missing.append(name)
+                continue
+            handed = False
+            for _subject, _cond, bs, be in hits:
+                a_start, a_end = arm_extent(dbg, bs, be)
+                if arm_hands_on(dbg, a_start, a_end, part_var):
+                    handed = True
+                    break
+            if not handed:
+                silent.append(name)
+        if part_var is None:
+            findings.append(
+                "[R7] FAIL cannot derive the part variable from the messageToJson ")
+            findings[-1] += "dispatch subject (fail-closed: a classification arm that "
+            findings[-1] += "cannot be traced cannot be judged)"
+        elif missing:
             findings.append(
                 f"[R7] FAIL messageToJson cannot classify {', '.join(missing)} — those parts "
                 "are dropped from chat.messages.list (toolCalls / attachments stay empty)")
+        elif silent:
+            findings.append(
+                f"[R7] FAIL messageToJson matches {', '.join(silent)} but never hands the "
+                "part on (arm body is Unit / dead / does not pass the part variable) — "
+                "the part is classified on paper and dropped in fact")
         else:
             findings.append(
-                "[R7] PASS messageToJson classifies toolUse / toolResult / mediaRef")
+                "[R7] PASS messageToJson classifies toolUse / toolResult / mediaRef "
+                "and hands each part on")
 
     # [R8] one session shape, reached from both RPCs through one mapper.
     list_body = extract_function(dbg, "fun sessionsList(")
@@ -455,18 +640,43 @@ def check_debug_surface(root):
                 "(fail-closed: the read surface could not be established)")
     if parts_readers:
         hits = []
+        # [B7-t03] The judged fact is "the DAO object is reached", not "the
+        # literal `.dao.` appears". Two spellings carried the same defect past
+        # the old regex: the DAO bound to a local (`val rawDao = repo.dao;
+        # rawDao.lastMessageParts(…)`) and a reader with no tolerant wrapper on
+        # ChatRepository at all (there is no `repo.<name>` funnel to hide behind).
+        repo_path = os.path.join(root, CHATREPO_REL)
+        repo_funs = set()
+        if os.path.exists(repo_path):
+            try:
+                repo_funs = {m.group(1) for m in FUN_RE.finditer(code_of(read(repo_path)))}
+            except KotlinLexError:
+                findings.append(
+                    "[R10] FAIL cannot parse ChatRepository.kt (fail-closed): the tolerant "
+                    "wrapper surface cannot be established")
+        else:
+            findings.append("[R10] FAIL missing ChatRepository.kt — cannot tell a wrapped "
+                            "reader from a raw one (fail-closed)")
         for path in DEBUG_BLOB_PARTY_RELS:
             p10 = os.path.join(root, path)
             if not os.path.exists(p10):
                 continue
             code = strip_kotlin_comments(read(p10))
+            bound = dao_bound_names(code)
             for name in parts_readers:
-                # DAO-level access only. `repo.loadMessages(...)` is the funnel
-                # and must stay green; `.dao.loadMessages(...)` is the raw read
-                # that skips it — the exact shape [fix/dv23-a5] removed.
-                for m in re.finditer(r"\.dao\s*\.\s*" + re.escape(name) + r"\s*\(", code):
-                    hits.append(
-                        f"{path.rsplit('/', 1)[-1]}:{code[:m.start()].count(chr(10)) + 1} {name}(")
+                wrapped = name in repo_funs
+                for m in re.finditer(r"(?<![\w`])" + re.escape(name) + r"\s*\(", code):
+                    recv = call_receiver(code, m.start())
+                    line = code[:m.start()].count(chr(10)) + 1
+                    if recv is None:
+                        if not wrapped:
+                            hits.append(
+                                "%s:%d %s( (no tolerant wrapper exists on ChatRepository)"
+                                % (path.rsplit('/', 1)[-1], line, name))
+                        continue
+                    if recv in bound:
+                        hits.append(
+                            "%s:%d %s( via '%s'" % (path.rsplit('/', 1)[-1], line, name, recv))
         if hits:
             findings.append(
                 "[R10] FAIL debug/ reads parts_json outside its tolerant funnel: "
@@ -478,6 +688,29 @@ def check_debug_surface(root):
                 f"({', '.join(sorted(parts_readers))})")
     return findings
 
+
+
+# ── [B7-t03] declaration enumeration through the shared primitives ────────
+def iter_functions(text):
+    """[(name, decl_start, body_start, body_end)] for every `fun` in [text].
+
+    The old enumeration split the file into line blocks by a hand-written
+    declaration regex — so a one-line `fun f() = x` swallowed the next N
+    declarations, and a signature wrapped over two lines was invisible. This
+    walks `FUN_RE` (shared) and lets `function_body` (shared) decide where each
+    body ends; overloads are sliced per declaration, because `function_body`
+    always answers for the FIRST match of a name.
+    """
+    decls = list(FUN_RE.finditer(text))
+    out = []
+    for i, m in enumerate(decls):
+        nxt = decls[i + 1].start() if i + 1 < len(decls) else len(text)
+        seg = text[m.start():nxt]
+        b = function_body(seg, m.group(1))
+        if b is None:
+            continue
+        out.append((m.group(1), m.start(), m.start() + b[0], m.start() + b[1]))
+    return out
 
 
 def derive_all_functions(root):
@@ -492,16 +725,10 @@ def derive_all_functions(root):
     table = {}
     for path in find_production_files(root):
         code = strip_kotlin_comments(read(path))
-        lines = code.split("\n")
-        starts = [i for i, line in enumerate(lines) if any(r.match(line) for r in DECL_RES)]
-        for si in starts:
-            nxt = [s for s in starts if s > si]
-            end = nxt[0] if nxt else len(lines)
-            n = re.search(r"fun\s+(\w+)", lines[si])
-            if n is None:
-                continue
-            table.setdefault(n.group(1), []).append(
-                (os.path.relpath(path, root), si + 1, "\n".join(lines[si:end])))
+        for name, decl, b_start, b_end in iter_functions(code):
+            table.setdefault(name, []).append(
+                (os.path.relpath(path, root), code[:decl].count("\n") + 1,
+                 code[decl:b_end]))
     return table
 
 
@@ -510,15 +737,9 @@ CALLEE_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\s*\(")
 
 def functions_in_source(code):
     """{name: body} for the function declarations inside one file's source."""
-    lines = code.split("\n")
-    starts = [i for i, line in enumerate(lines) if any(r.match(line) for r in DECL_RES)]
     out = {}
-    for si in starts:
-        nxt = [s for s in starts if s > si]
-        end = nxt[0] if nxt else len(lines)
-        n = re.search(r"fun\s+(\w+)", lines[si])
-        if n is not None:
-            out.setdefault(n.group(1), "\n".join(lines[si:end]))
+    for name, decl, b_start, b_end in iter_functions(code):
+        out.setdefault(name, code[decl:b_end])
     return out
 
 
@@ -540,7 +761,6 @@ def expand_same_file(body, local):
     return "\n".join(out)
 
 
-
 def count_type_dispatchers(root):
     """How many production functions dispatch a payload's `type` at all.
 
@@ -550,15 +770,16 @@ def count_type_dispatchers(root):
     n = 0
     for path in find_production_files(root):
         code = strip_kotlin_comments(read(path))
-        for _name, body in functions_in_source(code).items():
+        for _name, decl, b_start, b_end in iter_functions(code):
+            body = code[decl:b_end]
             if any(r.search(body) for r in TYPE_DISPATCH_RES):
                 n += 1
     return n
 
 
 def iter_image_video_faces(root):
-    """[(where, body)] for every production function that discriminates IMAGE
-    from VIDEO by legacy part name.
+    """[(where, body, local)] for every production function that discriminates
+    IMAGE from VIDEO by legacy part name.
 
     That discrimination is the invariant, not "touches partsJson": a body
     that answers "is this an image or a video?" is making a claim about
@@ -577,7 +798,8 @@ def iter_image_video_faces(root):
         # Comments are stripped first, so an explanatory KDoc that merely
         # NAMES serial names cannot satisfy the judgment.
         local = functions_in_source(code)
-        for name, body in local.items():
+        for name, decl, b_start, b_end in iter_functions(code):
+            body = code[decl:b_end]
             # Must actually dispatch a payload's `type` — otherwise this is a
             # modality badge/prompt helper that merely mentions `"image"` and
             # `"video"` as capability strings (17 such faces measured).
@@ -588,7 +810,6 @@ def iter_image_video_faces(root):
             vid = {i for i, l in enumerate(body_lines) if any(s in l for s in LEGACY_VIDEO_NAMES)}
             if not (img and vid and img != vid):
                 continue
-            line_no = body.count("\n")
             yield f"{os.path.relpath(path, root)} {name}()", body, local
 
 
@@ -603,6 +824,7 @@ def find_production_files(root):
             if fn.endswith(".kt"):
                 out.append(os.path.join(dirpath, fn))
     return out
+
 
 # ── [R11 / C-EXP] every parts_json name-dispatch must handle "mediaRef" ────
 # The persisted vocabulary is the @SerialName set of ContentPart.kt; a reader
@@ -623,37 +845,24 @@ TYPE_DISPATCH_RES = (
     re.compile(r'\bgetString\(\s*"type"\s*\)'),
     re.compile(r'\bopt\(\s*"type"\s*\)'),
 )
-DECL_RES = (
-    re.compile(r"^\s{0,8}(?:@\w+\s+)*(?:private\s+|internal\s+|public\s+|protected\s+|open\s+|override\s+|suspend\s+|inline\s+|final\s+|abstract\s+)*fun\s"),
-)
 
 
 def derive_parts_name_readers(source):
     """[(line_no, name, body)] for every function in `source` that touches a
-    persisted parts payload.
+    persisted parts payload and dispatches on its `type`.
 
     Derived bottom-up rather than hand-listed: after the mediaRef migration
     most faces handled the new name and one did not, so a list written against
-    today's tree would simply omit tomorrow's face. Body-splitting is line
-    based (not brace matching) to keep expression-bodied functions
-    (`= try { ... }`) whole; nested declarations count as part of the body —
-    the conservative direction, since a nested dispatcher is still inside this
-    face.
+    today's tree would simply omit tomorrow's face.
     """
-    lines = source.split("\n")
-    starts = [i for i, line in enumerate(lines) if any(r.match(line) for r in DECL_RES)]
     out = []
-    for si in starts:
-        nxt = [s for s in starts if s > si]
-        end = nxt[0] if nxt else len(lines)
-        body = "\n".join(lines[si:end])
+    for name, decl, b_start, b_end in iter_functions(source):
+        body = source[decl:b_end]
         payload = any(m in body for m in PARTS_PAYLOAD_MARKS)
         dispatch = any(r.search(body) for r in TYPE_DISPATCH_RES)
         if not (payload and dispatch):
             continue
-        name = lines[si].strip()
-        n = re.search(r"fun\s+(\w+)", name)
-        out.append((si + 1, n.group(1) if n else name[:40], body))
+        out.append((source[:decl].count("\n") + 1, name, body))
     return out
 
 
@@ -663,84 +872,102 @@ def derive_parts_name_readers(source):
 # mentions the name without ever classifying a mediaRef ROW — so a face whose
 # only mention is such a lookup would satisfy a naive substring check while
 # still counting every mediaRef row as nothing (the very defect R11 grades).
-# Dispatch arms in this codebase take two shapes, and both must count:
-#   - a `when` arm:   "mediaRef" -> { ... }
-#   - an equality test: type == "mediaRef"
 #
-# [meta-audit-1024 / M5] DATAFLOW axis. Naming the arm is not counting the
-# row. Two adversarial shapes satisfy every spelling criterion above while
-# throwing the value away:
-#
-#     "mediaRef" -> Unit
-#     "toolResult" -> {
-#         value?.optJSONObject("mediaRef")
-#     }
-#
-# The first dispatches on the modern name and accumulates nothing; the second
-# performs the nested read as a bare statement and discards its result. Every
-# mediaRef row and every tool-produced image/video is still counted as zero —
-# the structural zero this gate exists to remove is back, gate green. So the
-# judgment has to be the FLOW: the arm must BIND (or pass on) what it read,
-# and it must MOVE a counter.
-ACCUM_RES = (
-    re.compile(r"\b\w+\s*\+=\s*[^=]"),          # vid += 1
-    re.compile(r"\b\w+\s*=\s*\w+\s*\+\s*\d"),   # vid = vid + 1
-    re.compile(r"\b\w+\s*\+\+"),                # vid++
-    re.compile(r"\+\+\s*\w+"),
-)
+# [meta-audit-1024 / M5] DATAFLOW axis. Naming the arm is not counting the row;
+# `"mediaRef" -> Unit` and a discarded nested read throw the value away.
+# [batch7 B7-t03] FAMILY-HOLE axis. The arm MOVES a counter but by ZERO —
+# `vid += 0 else img += 0` — and the move sits behind a constant guard. Both
+# keep every spelling this gate once checked and quantify nothing.
+# So the judgment is the FLOW plus the VALUE plus the PATH: the arm must move a
+# counter by a possibly-non-zero amount, on a reachable line.
+ACCUM_INC_RE = re.compile(r"\b\w+\s*\+=(?!=)")
+ACCUM_SUM_RE = re.compile(r"\b(\w+)\s*=\s*\1\s*\+")
+ACCUM_PP_RE = re.compile(r"\b\w+\s*\+\+|\+\+\s*\w+")
 NESTED_READ_RE = re.compile(r"(?:opt|get)(?:JSONObject)?\(\s*\"mediaRef\"\s*\)")
 
 
-def brace_balanced_arm(lines, start):
-    """Text of the arm (or `if` block) opening on line [start].
+def dispatch_arm_span(surface, part_name):
+    """(start, end) of the arm dispatching on [part_name], or None.
 
-    Brace-aware: a block arm ends where its own braces balance, so a nested
-    `if (...) { … }` cannot be mistaken for the end of the arm. An arm with no
-    block (`"mediaRef" -> img += 1`, `"mediaRef" -> Unit`) is its own line.
+    Two dispatch shapes exist in this codebase, both located structurally now:
+    a `when` arm (`"mediaRef" -> …`, brace-balanced through `match_bracket`)
+    and an equality test (`type == "mediaRef"`, its own line).
     """
-    head = lines[start]
-    depth = head.count("{") - head.count("}")
-    out = [head]
-    if depth <= 0:
-        return head
-    for j in range(start + 1, len(lines)):
-        out.append(lines[j])
-        depth += lines[j].count("{") - lines[j].count("}")
-        if depth <= 0:
-            break
-    return "\n".join(out)
-
-
-def dispatch_arm(body, part_name):
-    """Text of the arm that dispatches on [part_name], or None.
-
-    Line-based, brace-balanced: the arm starts on the line that carries the
-    serial name next to an arrow/equality and ends where its braces close.
-    """
-    lines = body.split("\n")
-    for i, line in enumerate(lines):
-        if part_name in line and ("->" in line or "==" in line):
-            return brace_balanced_arm(lines, i)
+    key = part_name.strip('"')
+    for _subject, cond, b_start, b_end in when_branches(surface):
+        if contains_ident(cond, key):
+            return arm_extent(surface, b_start, b_end)
+    for m in re.finditer(r"==\s*" + re.escape(part_name), surface):
+        line_start = surface.rfind("\n", 0, m.start()) + 1
+        nl = surface.find("\n", m.end())
+        return line_start, (len(surface) if nl < 0 else nl)
     return None
 
 
-def arm_accumulates(arm, local=None):
-    """Does [arm] MOVE a counter — directly, or through a same-file helper?
+def dispatch_arm(body, part_name):
+    """Text of the arm that dispatches on [part_name], or None."""
+    span = dispatch_arm_span(body, part_name)
+    if span is None:
+        return None
+    return body[span[0]:span[1]]
 
-    Derived, not spelling-bound: any `+=` / `++` / `x = x + n` counts, and so
-    does a call to a sibling function whose body does one (one hop, same file,
-    mirroring [expand_same_file]).
+
+def _nonzero_delta(text, expr_start):
+    """Is the `+= <expr>` / `= x + <expr>` delta possibly non-zero?
+
+    `vid += 0` is a counter move that cannot move the counter — the whole
+    structural zero this gate exists to remove, wearing the spelling of a fix.
+    A non-constant operand stays "possibly non-zero" (fail-open on the value,
+    because an unknown expression may well be 1).
     """
+    e = expr_end(text, expr_start)
+    seg = text[expr_start:e]
+    # `vid += 0 else img += 0` — the delta ends at the arm's `else`, not at the
+    # end of the line: without this cut the whole `0 else img += 0` becomes one
+    # (unknown, hence "possibly non-zero") expression.
+    cut = re.search(r"\belse\b", seg)
+    if cut:
+        seg = seg[:cut.start()]
+    raw = strip_parens(seg.strip().rstrip(",").strip())
+    cv = const_value(raw)
+    if cv is None:
+        return True
+    try:
+        return not (cv[0] == "num" and float(cv[1]) == 0.0)
+    except (TypeError, ValueError, IndexError):
+        return True
+
+
+def arm_accumulates_at(text, start, end, local=None, depth=1):
+    """Does the arm at [start,end) MOVE a counter, by a non-zero amount, live?
+
+    Directly or through a same-file helper (one hop), mirroring
+    [expand_same_file].
+    """
+    for m in ACCUM_INC_RE.finditer(text, start, end):
+        if path_feasible(text, m.end()) and _nonzero_delta(text, m.end()):
+            return True
+    for m in ACCUM_SUM_RE.finditer(text, start, end):
+        if path_feasible(text, m.end()) and _nonzero_delta(text, m.end()):
+            return True
+    for m in ACCUM_PP_RE.finditer(text, start, end):
+        if path_feasible(text, m.start()):
+            return True
+    if local and depth > 0:
+        body = text[start:end]
+        for name in set(CALLEE_RE.findall(body)):
+            callee = local.get(name)
+            if callee and callee != body:
+                if arm_accumulates_at(callee, 0, len(callee), None, depth - 1):
+                    return True
+    return False
+
+
+def arm_accumulates(arm, local=None):
+    """Does [arm] MOVE a counter — directly, or through a same-file helper?"""
     if not arm:
         return False
-    if any(r.search(arm) for r in ACCUM_RES):
-        return True
-    if local:
-        for name in set(CALLEE_RE.findall(arm)):
-            callee = local.get(name)
-            if callee and callee != arm and any(r.search(callee) for r in ACCUM_RES):
-                return True
-    return False
+    return arm_accumulates_at(arm, 0, len(arm), local)
 
 
 def nested_read_consumed(arm):
@@ -755,6 +982,8 @@ def nested_read_consumed(arm):
     read happens, the value is thrown away, nothing is counted.
     """
     for m in NESTED_READ_RE.finditer(arm):
+        if not path_feasible(arm, m.start()):
+            continue
         line_start = arm.rfind("\n", 0, m.start()) + 1
         nl = arm.find("\n", m.end())
         line_end = len(arm) if nl < 0 else nl
@@ -762,7 +991,7 @@ def nested_read_consumed(arm):
         after = arm[m.end():line_end]
         bm = re.search(r"\b(?:val|var)\s+(\w+)\s*=\s*[^=\n]*$", before)
         if bm:
-            if re.search(r"\b" + re.escape(bm.group(1)) + r"\b", arm[m.end():]):
+            if contains_ident(arm[m.end():], bm.group(1)):
                 return True
             continue
         if before.count("(") > before.count(")"):
@@ -955,6 +1184,11 @@ def check(root):
             return FAIL, [f"missing file: {p}"]
     chatrepo = read(chatrepo_path)
     backup = read(backup_path)
+    try:
+        chatrepo_code = code_of(chatrepo)
+        backup_code = code_of(backup)
+    except KotlinLexError as exc:
+        return FAIL, ["[R1] FAIL cannot parse ChatRepository/ConfigBackup (fail-closed): %s" % exc]
 
     # [R1] the paged DAO shapes have exactly one call site each, inside loadPageSlice
     other_hits = []
@@ -1017,35 +1251,71 @@ def check(root):
     else:
         findings.append("[R4] FAIL updateMessageParts writes the payload verbatim")
 
-    # [R5] reasoning ceiling is a single companion funnel
-    funnel = extract_function(chatrepo, "internal fun capReasoningContentForRow(")
-    if funnel is None:
-        findings.append("[R5] FAIL capReasoningContentForRow missing from companion")
+    # [R5] reasoning ceiling is a single companion funnel that DOES the ceiling
+    # [B7-t03] anchored on the body's three facts, not on the signature.
+    bad_funnels = []
+    for fn, truncator, _ident in FUNNEL_SPECS:
+        for why in ceiling_funnel_violations(chatrepo_code, fn, truncator):
+            bad_funnels.append("%s: %s" % (fn, why))
+    if bad_funnels:
+        findings.append(
+            "[R5] FAIL the companion ceiling funnel no longer applies its ceiling — "
+            + "; ".join(bad_funnels)
+            + ". A funnel whose body returns the input verbatim keeps every call "
+            "site wired and every oversized row uncapped (Issue #17 / "
+            "SQLiteBlobTooBigException on the next read).")
     else:
-        findings.append("[R5] PASS capReasoningContentForRow present")
-    append = extract_function(chatrepo, "suspend fun appendMessage(")
+        findings.append(
+            "[R5] PASS capPartsJsonForRow / capReasoningContentForRow compare the "
+            "byte ceiling, truncate on a live path, and return the truncated value")
+    append = function_body(chatrepo_code, "appendMessage")
     if append is None:
         findings.append("[R5] FAIL appendMessage not found")
-    elif "capReasoningContentForRow(reasoningContent)" in append and \
-            "reasoningContent?.let" not in append:
-        findings.append("[R5] PASS appendMessage routes reasoning through the funnel")
     else:
-        findings.append("[R5] FAIL appendMessage re-derives the reasoning ceiling inline")
+        a_start, a_end, _k = append
+        append_body = chatrepo_code[a_start:a_end]
+        append_lit = strip_kotlin_comments(chatrepo)[a_start:a_end]
+        inline = len(re.findall(r"toByteArray\s*\(\s*Charsets\.UTF_8\s*\)", append_body))
+        wiring = funnel_bypasses(
+            append_body, append_lit, "reasoningContent", "capReasoningContentForRow")
+        if inline:
+            findings.append(
+                "[R5] FAIL appendMessage re-derives the reasoning byte ceiling inline "
+                "(the comparison must live only in the companion funnel)")
+        elif wiring:
+            findings.append(
+                "[R5] FAIL appendMessage binds reasoningContent without the funnel — "
+                + "; ".join("line %d: %s" % w for w in wiring[:3]))
+        else:
+            findings.append(
+                "[R5] PASS appendMessage routes reasoning through the funnel")
 
     # [R6] import caps both columns
-    ics = extract_function(backup, "internal suspend fun importChatSections(")
+    # [R6] import caps both columns — judged on the VALUE that reaches the row,
+    # not on the presence of the cap call somewhere in the function. [B7-t03]
+    ics = function_body(backup_code, "importChatSections")
     if ics is None:
         findings.append("[R6] FAIL importChatSections not found in ConfigBackup")
     else:
-        ok1 = 'ChatRepository.capPartsJsonForRow(m.optString("partsJson"))' in ics
-        ok2 = 'ChatRepository.capReasoningContentForRow(m.optString("reasoningContent"))' in ics
-        verbatim = re.search(r"partsJson = m\.optString\(\"partsJson\"\)", ics)
-        if ok1 and ok2 and not verbatim:
-            findings.append("[R6] PASS import caps both columns before insertMessage")
-        else:
+        i_start, i_end, _k = ics
+        ics_body = backup_code[i_start:i_end]
+        bad_cols = []
+        ics_lit = strip_kotlin_comments(backup)[i_start:i_end]
+        for fn, _trunc, ident in FUNNEL_SPECS:
+            found = funnel_bypasses(ics_body, ics_lit, ident, fn)
+            if not found:
+                continue
+            for line, src in found:
+                bad_cols.append("%s line %d: %s" % (ident, line, src))
+        if bad_cols:
             findings.append(
-                f"[R6] FAIL import wiring: partsJson={ok1} reasoning={ok2} verbatim={bool(verbatim)}"
-            )
+                "[R6] FAIL backup import stores an uncapped payload — "
+                + "; ".join(bad_cols[:4])
+                + ". The cap call is present but its result is discarded, so a "
+                "restored multi-MB row crashes the next read with "
+                "SQLiteBlobTooBigException.")
+        else:
+            findings.append("[R6] PASS import caps both columns before insertMessage")
 
     # [da1032-B] read-side debug RPC view of the very same rows
     findings.extend(check_debug_surface(root))
@@ -1123,7 +1393,30 @@ def build_debug_fixture(root, debug_body, mutation_body, dao_body=None):
     os.makedirs(os.path.dirname(dao_path), exist_ok=True)
     with open(dao_path, "w", encoding="utf-8") as f:
         f.write(DAO_GREEN if dao_body is None else dao_body)
+    # [B7-t03] [R10] now distinguishes a tolerant wrapper from a raw read by
+    # asking ChatRepository what it wraps, so every fixture needs its surface.
+    repo_path = os.path.join(root, CHATREPO_REL)
+    os.makedirs(os.path.dirname(repo_path), exist_ok=True)
+    with open(repo_path, "w", encoding="utf-8") as f:
+        f.write(REPO_GREEN)
     return root
+
+
+# [R10] the tolerant wrappers ChatRepository exposes. A reader named here may be
+# reached as `repo.<name>(…)`; a reader NOT named here has no funnel to hide
+# behind and any call site is a raw DAO read.
+REPO_GREEN = """package com.rikkaminis.app.data.repository
+
+class ChatRepository(private val dao: ChatDao) {
+    suspend fun messageCount(sessionId: String): Int = 0
+    suspend fun loadMessages(sessionId: String): List<MessageEntity> = emptyList()
+    suspend fun getMessage(id: String): MessageEntity? = null
+    suspend fun lastMessageParts(sessionId: String): String? = null
+    suspend fun loadMessagesPage(sessionId: String, limit: Int): List<MessageEntity> = emptyList()
+    suspend fun loadMessagesPageInRange(a: Int, b: Int): List<MessageEntity> = emptyList()
+    suspend fun loadUserMessagesSince(sessionId: String, since: Long): List<MessageEntity> = emptyList()
+}
+"""
 
 
 # --- [R7]-[R9] fixtures ------------------------------------------------------
@@ -1601,6 +1894,92 @@ internal fun isVideoMediaRef(media: JSONObject?): Boolean {
 """
 
 
+
+# --- batch7 B7-t03 fixtures: the spliced decision points ---------------------
+# 10-1: the funnel keeps its full signature and every call site, and stops
+# capping — the body is the identity function.
+FUNNEL_REPO_GOOD = """class Repo {
+    suspend fun appendMessage(sessionId: String, partsJson: String, reasoningContent: String?): Unit {
+        val capped = capPartsJsonForRow(partsJson)
+        val cappedReasoning = capReasoningContentForRow(reasoningContent)
+        val row = MessageEntity(
+            partsJson = capped,
+            reasoningContent = cappedReasoning,
+        )
+    }
+
+    internal fun capPartsJsonForRow(partsJson: String): String {
+        if (partsJson.toByteArray(Charsets.UTF_8).size > MAX_MESSAGE_PARTS_JSON_BYTES) {
+            return buildTruncatedPartsJson(partsJson)
+        }
+        return partsJson
+    }
+
+    internal fun capReasoningContentForRow(reasoningContent: String?): String? =
+        reasoningContent?.let { rc ->
+            if (rc.toByteArray(Charsets.UTF_8).size > MAX_MESSAGE_PARTS_JSON_BYTES) {
+                buildTruncatedText(rc)
+            } else {
+                rc
+            }
+        }
+}
+"""
+
+FUNNEL_REPO_IDENTITY = FUNNEL_REPO_GOOD.replace(
+    """    internal fun capReasoningContentForRow(reasoningContent: String?): String? =
+        reasoningContent?.let { rc ->
+            if (rc.toByteArray(Charsets.UTF_8).size > MAX_MESSAGE_PARTS_JSON_BYTES) {
+                buildTruncatedText(rc)
+            } else {
+                rc
+            }
+        }""",
+    """    internal fun capReasoningContentForRow(reasoningContent: String?): String? = reasoningContent""",
+)
+
+IMPORT_GOOD = """internal suspend fun importChatSections(
+    chatRepo: ChatRepository,
+    chatMessagesArr: JSONArray?,
+    skipped: MutableList<String>,
+): Pair<Int, Int> {
+    val message = MessageEntity(
+        partsJson = ChatRepository.capPartsJsonForRow(m.optString("partsJson")),
+        reasoningContent = ChatRepository.capReasoningContentForRow(m.optString("reasoningContent")),
+    )
+    return 0 to 0
+}
+"""
+
+# 10-2: the cap call is still there, verbatim; the stored value is the raw one.
+IMPORT_LET = IMPORT_GOOD.replace(
+    'partsJson = ChatRepository.capPartsJsonForRow(m.optString("partsJson")),',
+    'partsJson = ChatRepository.capPartsJsonForRow(m.optString("partsJson"))'
+    '.let { m.optString("partsJson") },',
+)
+
+# 10-3: the serial name and its dispatch arm survive; the arm drops the part.
+DEBUG_MEDIA_REF_UNIT = DEBUG_GREEN.replace(
+    '"mediaRef", "image", "file", "attachment" -> attachments.put(p)',
+    '"mediaRef", "image", "file", "attachment" -> Unit',
+)
+
+# 10-4: the DAO is reached through a local binding instead of `.dao`.
+DEBUG_DAO_ALIAS = DEBUG_GREEN.replace(
+    "if (!includeEmpty && repo.messageCount(session.id) == 0) continue",
+    "val rawDao = repo.dao\n"
+    "            if (!includeEmpty && rawDao.lastMessageParts(session.id) == null) continue",
+)
+
+# 10-5: the counter move survives, its amount is zero.
+MEDIA_ZERO_DELTA = MEDIA_GREEN.replace(
+    "if (isVideoMediaRef(value)) vid += 1 else img += 1",
+    "if (isVideoMediaRef(value)) vid += 0 else img += 0",
+).replace(
+    "if (isVideoMediaRef(media)) vid += 1 else img += 1",
+    "if (isVideoMediaRef(media)) vid += 0 else img += 0",
+)
+
 def selftest():
     import tempfile
     import shutil
@@ -1757,6 +2136,33 @@ def selftest():
             return
         print(f"  SELFTEST {name}: FAIL (expected {want}, got {hits[0][:160]})")
         bad += 1
+
+    # --- batch7 B7-t03: one arm per witnessed shape (10-1 .. 10-5) ----------
+    def repo_arm(name, repo_body, import_body, wanted, tag="[R5]"):
+        nonlocal bad
+        tmp = tempfile.mkdtemp(prefix="b7-repo-")
+        try:
+            root = build_fixture(tmp, repo_body, import_body)
+            hits = [f for f in check(root)[1] if f.startswith(tag)]
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        if not hits:
+            print(f"  SELFTEST {name}: FAIL ({tag} produced no finding — arm is empty)")
+            bad += 1
+            return
+        if (wanted == "FAIL") != ("FAIL" in hits[0]):
+            print(f"  SELFTEST {name}: FAIL (wanted {wanted}, got {hits[0][:130]})")
+            bad += 1
+            return
+        print(f"  SELFTEST {name}: OK ({hits[0].split(']')[0] + ']'} as expected)")
+
+    repo_arm("r5-wired-funnels", FUNNEL_REPO_GOOD, IMPORT_GOOD, "PASS")
+    repo_arm("r5-funnel-body-identity", FUNNEL_REPO_IDENTITY, IMPORT_GOOD, "FAIL")
+    repo_arm("r6-import-caps-both", FUNNEL_REPO_GOOD, IMPORT_GOOD, "PASS", "[R6]")
+    repo_arm("r6-import-let-discards-cap", FUNNEL_REPO_GOOD, IMPORT_LET, "FAIL", "[R6]")
+    debug_arm("r7-arm-drops-part", DEBUG_MEDIA_REF_UNIT, MUTATION_GREEN, "[R7]", "FAIL")
+    debug_arm("r10-dao-alias-read", DEBUG_DAO_ALIAS, MUTATION_GREEN, "[R10]", "FAIL")
+    media_arm("r11-counter-delta-zero", MEDIA_ZERO_DELTA, None, "FAIL")
 
     media_arm("r11-modern-name-handled", MEDIA_GREEN, None, "PASS")
     # --- [R12] the nested toolResult media arm ---

@@ -40,6 +40,19 @@ import os
 import re
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+# [batch7 B7-t04] 共享原语是唯一的词法器 / AST / 值流实现：自写的
+# strip_comments / blank_strings / 裸花括号配平全部删除（见 §4 轴→修法）。
+from _kotlin_ast import (const_bool, const_value, function_body, if_blocks,
+                         match_bracket, split_top, stmt_spans, strip_parens,
+                         when_branches)
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments
+from _kotlin_valueflow import (brace_depth, contains_ident, expr_end,
+                               guard_feasible, path_feasible, value_sources)
+
 FACTORY_REL = (
     "src/android/app/src/main/java/com/rikkaminis/app/provider/ProviderFactory.kt"
 )
@@ -107,169 +120,131 @@ VERDICT_CALL_ANCHOR = "shouldFlagEofTruncated("
 TOOL_ACCUM = "toolChars += toolCallActivityChars("
 
 
-def strip_comments(src):
-    """Remove /* */ blocks and //-to-EOL comments (quote-aware for // URLs)."""
-    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
-    out = []
-    for line in src.split("\n"):
-        cut = None
-        in_str = False
-        triple = False
-        i = 0
-        while i < len(line):
-            ch = line[i]
-            if in_str:
-                if ch == "\\":
-                    i += 2
-                    continue
-                if ch == '"':
-                    in_str = False
-            elif ch == '"':
-                in_str = True
-            elif ch == "/" and i + 1 < len(line) and line[i + 1] == "/":
-                cut = i
-                break
-            i += 1
-        out.append(line if cut is None else line[:cut])
-        del triple
-    return "\n".join(out)
+class LexFail(Exception):
+    """Kotlin 词法器拒绝解析 → 违规（fail-closed），不回退原文扫描。"""
 
 
-def blank_strings(src):
-    """Replace double-quoted spans with '' so paren balancing cannot be skewed
-    by string contents (URLs, JSON samples)."""
-    return re.sub(r'"(?:[^"\\]|\\.)*"', '""', src)
+def code_of(src, label):
+    """结构视图：注释 + 字符串/字符字面量内部抹成空格，长度严格不变。"""
+    try:
+        return mask_code(src)
+    except KotlinLexError as exc:
+        raise LexFail("%s: Kotlin lexer refused the source (%s) — fail-closed, the "
+                      "criterion cannot be judged" % (label, exc))
+
+
+def literal_of(src, label):
+    """字面量视图：只剥注释，保留字符串内容（读 `header("api-key"` 这类字面量）。"""
+    try:
+        return mask_comments(src)
+    except KotlinLexError as exc:
+        raise LexFail("%s: Kotlin lexer refused the source (%s) — fail-closed, the "
+                      "criterion cannot be judged" % (label, exc))
+
+
+def args_of(code, open_paren_pos):
+    """开括号 open_paren_pos 对应的配平实参内文；配平失败 → None。"""
+    close = match_bracket(code, open_paren_pos)
+    return None if close < 0 else code[open_paren_pos + 1:close]
 
 
 def balanced_slice(code, open_idx):
-    """Given the index of the opening paren, return the inner text of the
-    balanced (...) span, or None if unbalanced."""
-    depth = 0
-    for i in range(open_idx, len(code)):
-        if code[i] == "(":
-            depth += 1
-        elif code[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return code[open_idx + 1:i]
-    return None
+    """兼容别名（旧代码里的大量调用点）：配平 (...) 的内文。"""
+    return args_of(code, open_idx)
 
 
 def verdict_body(code):
-    """Return the body (block or expression) of the shouldFlagEofTruncated
-    declaration, or None if the declaration is not found."""
-    m = re.search(r"fun\s+shouldFlagEofTruncated\s*\(", code)
-    if not m:
+    """shouldFlagEofTruncated 的体（块体或表达式体），找不到 → None。"""
+    fb = function_body(code, "shouldFlagEofTruncated")
+    if fb is None:
         return None
-    params = balanced_slice(code, m.end() - 1)
-    if params is None:
-        return None
-    j = m.end() + len(params) + 1  # just past the closing paren
-    while j < len(code) and code[j] in " \t\r\n":
-        j += 1
-    # skip an optional return-type annotation (": Boolean" may itself contain
-    # parens) until the body starts: '{' (block) or '=' (expression)
-    depth = 0
-    k = j
-    while k < len(code):
-        c = code[k]
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-        elif depth == 0 and (c == "{" or c == "="):
-            break
-        k += 1
-    if k < len(code) and code[k] == "{":
-        bdepth = 0
-        for i in range(k, len(code)):
-            if code[i] == "{":
-                bdepth += 1
-            elif code[i] == "}":
-                bdepth -= 1
-                if bdepth == 0:
-                    return code[k:i + 1]
-        return None
-    if k < len(code) and code[k] == "=":
-        # expression body: gather lines until a blank line or a line that
-        # starts at column 0 (next top-level declaration)
-        lines = code[k:].split("\n")
-        acc = [lines[0]]
-        for ln in lines[1:]:
-            if ln.strip() == "" or not ln[:1].isspace():
-                break
-            acc.append(ln)
-        return "\n".join(acc)
-    return None
+    return code[fb[0]:fb[1]]
 
 
 def constructor_slices(code):
-    """Yield (lineno, type, text) for every balanced provider-constructor
-    statement in comment/string-stripped code."""
+    """每个配平的 provider 构造语句：(行号, 类型, 文本)。"""
     slices = []
     for m in CTOR_RE.finditer(code):
-        start = m.end() - 1  # position of the opening paren
-        depth = 0
-        end = None
-        for i in range(start, len(code)):
-            if code[i] == "(":
-                depth += 1
-            elif code[i] == ")":
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
-        if end is None:
+        end = match_bracket(code, m.end() - 1)
+        if end < 0:
             continue
         lineno = code.count("\n", 0, m.start()) + 1
         slices.append((lineno, m.group(1), code[m.start():end + 1]))
     return slices
 
 
-def decl_text(code, name):
-    """Text of the [name] declaration: its `{ … }` body when present, else the
-    expression body (`fun f() = …`) up to the next top-level declaration."""
-    body = decl_body(code, "fun " + name + "(")
+RE_UA_PARAM = re.compile(r"^(?:this\.)?customUserAgent$")
+
+
+def _ident_values(code, ident):
+    """ident 可能的取值来源：`val/var ident = rhs` 的 rhs（全部站点）+ 同名函数体。"""
+    out = []
+    for m in re.finditer(r"\b(?:val|var)\s+" + re.escape(ident) +
+                         r"\s*(?::[^=\n]+?)?=\s*", code):
+        out.append(code[m.end():expr_end(code, m.end())])
+    body = function_body(code, ident)
     if body is not None:
-        return body
-    m = re.search(r"\bfun\s+(?:[A-Za-z_][\w.]*\.)?" + re.escape(name) + r"\s*\(", code)
-    if not m:
-        return None
-    rest = code[m.end():]
-    end = len(rest)
-    for stop in ("\ninternal ", "\nprivate ", "\npublic ", "\nfun ",
-                 "\nobject ", "\nclass ", "\n@"):
-        idx = rest.find(stop)
-        if 0 <= idx < end:
-            end = idx
-    return rest[:end]
+        out.append(code[body[0]:body[1]])
+    return out
 
 
-def ua_value_flows(code, expr):
-    """[wide-1024] True when [expr] carries the instance's customUserAgent.
+def ua_arg_carries(code, arg, depth=0):
+    """[b7-t04] 实参**求值后**是否带着 UA 覆盖值（不锚拼写）。
 
-    Existence of the argument name is not use of the value: `customUserAgent =
-    null` spells the parameter and drops the override. Follow the value — the
-    field itself, a local alias of it, or a one-hop helper that reads it."""
-    if expr is None:
+    接受 `customUserAgent` / `this.customUserAgent` / `instance.customUserAgent`
+    以及它们的一跳局部别名 / 同名 helper。拒绝字面量（`null`、`""`、任意字符串）
+    与作用域改写（`x.let { null }`、`x.apply { }` 之类）——值被追到底，不是看
+    文本里出现过什么。
+    """
+    if arg is None or depth > 3:
         return False
-    if UA_SOURCE_TOKEN in expr:
-        return True
-    for ident in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", expr):
-        for m in re.finditer(
-                r"\b(?:val|var)\s+" + re.escape(ident) +
-                r"\s*(?::\s*[A-Za-z0-9_.<>?, ]+)?=\s*([^\n]*)", code):
-            if UA_SOURCE_TOKEN in m.group(1):
-                return True
-        helper = decl_text(code, ident)
-        if helper is not None and UA_SOURCE_TOKEN in helper:
+    for src in value_sources(arg):
+        s = strip_parens(src.strip())
+        if not s:
+            continue
+        if RE_UA_PARAM.match(s) or UA_SOURCE_TOKEN in s:
             return True
+        if const_value(s) is not None:
+            continue  # 字面量永远不是覆盖值
+        for ident in sorted(set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", s))):
+            for rhs in _ident_values(code, ident):
+                if ua_arg_carries(code, rhs, depth + 1):
+                    return True
     return False
 
 
+def ua_value_flows(code, expr):
+    """兼容名（factory / voice 判据用）：值是否携带 instance.customUserAgent。"""
+    return ua_arg_carries(code, expr)
+
+
+RE_OVERRIDE_CALL = re.compile(r"\.\s*applyUserAgentOverride\s*\(")
+
+
+def override_sites(code):
+    """每一处 `.applyUserAgentOverride(arg)`：[(pos, arg_text|None)]。
+
+    arg_text 为 None = 括号配平失败（fail-closed：调用方必须报违规）。
+    """
+    out = []
+    for m in RE_OVERRIDE_CALL.finditer(code):
+        out.append((m.start(), args_of(code, m.end() - 1)))
+    return out
+
+
 def check_factory(src):
+    """ISSUE-04a — every provider construction forwards the instance override.
+
+    [b7-t04] The argument NAME is not the value: `customUserAgent =
+    instance.customUserAgent.let { null }` keeps the token and ships null, so
+    the expression is traced through the shared value-flow (`ua_arg_carries`)
+    instead of a substring test.
+    """
+    try:
+        code = code_of(src, "ProviderFactory.kt")
+    except LexFail as exc:
+        return [str(exc)]
     v = []
-    code = blank_strings(strip_comments(src))
     slices = constructor_slices(code)
     if not slices:
         v.append("ProviderFactory.kt: no provider constructor statements found "
@@ -287,19 +262,54 @@ def check_factory(src):
         # [wide-1024] the parameter being spelled is not the value arriving
         m = UA_FLOW_RE.search(text)
         expr = None if m is None else m.group(1)
-        if not ua_value_flows(code, expr):
+        if not ua_arg_carries(code, expr):
             v.append(
                 "ProviderFactory.kt:%d: %s(...) passes '%s' to customUserAgent — "
-                "the instance override never arrives (ISSUE-04a: a literal or "
-                "null silently falls back to MinisUserAgent.DEFAULT)"
+                "the instance override never arrives (ISSUE-04a: a literal, a "
+                "`null` or a scope wrapper that rewrites the value silently falls "
+                "back to MinisUserAgent.DEFAULT)"
                 % (lineno, ctype, (expr or "").strip())
             )
     return v
 
+def _fn_params(code, name):
+    """函数声明里的形参名（`fun name(a: A, b: B)` → ['a', 'b']）。"""
+    m = re.search(r"\bfun\s+(?:[A-Za-z_][\w.]*\.)?" + re.escape(name) + r"\s*\(", code)
+    if not m:
+        return None
+    inner = args_of(code, m.end() - 1)
+    if inner is None:
+        return None
+    names = []
+    for a, b in split_top(inner, (",",)):
+        part = inner[a:b].strip()
+        if not part:
+            continue
+        names.append(re.split(r"\s*:", part)[0].strip())
+    return names
+
+
+def _statement_sites(code, sites):
+    """把 override 站点按语句分组：[[(pos, arg), ...], ...]（语句顺序）。"""
+    spans = stmt_spans(code)
+    groups = []
+    for pos, arg in sites:
+        for a, b in spans:
+            if a <= pos < b:
+                if groups and groups[-1][0] == a:
+                    groups[-1][1].append((pos, arg))
+                else:
+                    groups.append((a, [(pos, arg)]))
+                break
+    return [g for _a, g in groups]
+
 
 def check_gemini(src):
+    try:
+        code = code_of(src, "GeminiProvider.kt")
+    except LexFail as exc:
+        return [str(exc)]
     v = []
-    code = strip_comments(src)
 
     if CTOR_PARAM not in code:
         v.append(
@@ -322,6 +332,35 @@ def check_gemini(src):
             % (code.count(OVERRIDE_PASSED), OVERRIDE_PASSED)
         )
 
+    # [b7-t04] the override must be the LAST word and must carry the value:
+    # `.applyUserAgentOverride(customUserAgent).applyUserAgentOverride("")`
+    # keeps the count at 2 and blank-overrides the user value away (blank and
+    # null both mean "fall back to the branded default" inside the helper).
+    for group in _statement_sites(code, override_sites(code)):
+        for pos, arg in group:
+            if arg is None:
+                v.append(
+                    "GeminiProvider.kt:%d: .applyUserAgentOverride(...) call is "
+                    "unbalanced (fail-closed: the argument cannot be judged)"
+                    % (code.count("\n", 0, pos) + 1))
+                continue
+            if not ua_arg_carries(code, arg):
+                v.append(
+                    "GeminiProvider.kt:%d: .applyUserAgentOverride(%s) does not carry "
+                    "the constructor override (ISSUE-04b: a literal there — `null`, "
+                    "`\"\"` or any other constant — resets the request to the branded "
+                    "default UA, and a later override in the same chain wins)"
+                    % (code.count("\n", 0, pos) + 1, arg.strip()))
+        if len(group) > 1:
+            carrying = [p for p, a in group if a is not None and ua_arg_carries(code, a)]
+            last_pos = group[-1][0]
+            if carrying and last_pos not in carrying:
+                v.append(
+                    "GeminiProvider.kt:%d: the request builder applies the UA override "
+                    "%d times and the LAST one does not carry the constructor value "
+                    "(ISSUE-04b: last write wins in an OkHttp builder chain)"
+                    % (code.count("\n", 0, last_pos) + 1, len(group)))
+
     # ISSUE-04c: the EOF verdict must be the pure function fed BOTH counters.
     if VERDICT_CALL_ANCHOR not in code:
         v.append(
@@ -343,7 +382,7 @@ def check_gemini(src):
                 "tool-aware verdict)"
             )
         for m in call_sites:
-            args = balanced_slice(code, m.end() - 1)
+            args = args_of(code, m.end() - 1)
             if args is None:
                 continue
             if "toolChars" not in args:
@@ -367,6 +406,36 @@ def check_gemini(src):
             "weighs both 'contentChars > 0' and 'toolChars > 0' "
             "(ISSUE-04c: one counter was dropped from the verdict)"
         )
+
+    # [b7-t04] the accumulator's SOURCE must actually measure tool payload.
+    # The witness kept every wire (`toolChars += toolCallActivityChars(...)`,
+    # `geminiEofTerminal(..., toolChars)`, `toolChars > 0`) and hollowed the
+    # helper out to `= 0`, so the accumulator was fed a constant zero.
+    params = _fn_params(code, "toolCallActivityChars")
+    helper = function_body(code, "toolCallActivityChars")
+    if helper is None or params is None:
+        v.append(
+            "GeminiProvider.kt: 'fun toolCallActivityChars(' declaration not found "
+            "(ISSUE-04c: the tool counter's source is gone — the EOF verdict's "
+            "tool term can only read 0)"
+        )
+    else:
+        hbody = code[helper[0]:helper[1]]
+        unused = [p for p in params if p and not contains_ident(hbody, p)]
+        const = const_value(hbody.strip())
+        if const is not None:
+            v.append(
+                "GeminiProvider.kt: toolCallActivityChars body folds to a constant "
+                "(%r) — the accumulator adds the same amount for every call, so a "
+                "tool-only EOF reads as a clean end_turn (ISSUE-04c)"
+                % (hbody.strip()[:60],))
+        elif unused:
+            v.append(
+                "GeminiProvider.kt: toolCallActivityChars body never reads its own "
+                "input(s) %s — the tool counter cannot measure payload chars "
+                "(ISSUE-04c: the verdict's tool term stays 0)" % ", ".join(unused)
+            )
+
     if TOOL_ACCUM not in code:
         v.append(
             "GeminiProvider.kt: tool-payload accumulation '%s' missing "
@@ -374,17 +443,14 @@ def check_gemini(src):
             "condition is dead)" % TOOL_ACCUM
         )
     else:
-        # [wide-1024] the accumulator must arrive at the EOF call site. The old
-        # criterion only proved `toolChars` appears somewhere in the file (the
-        # helper's own parameter list), so `geminiEofTerminal(…, 0)` — the tool
-        # payload hard-coded away at the one place it is consumed — stayed green.
+        # [wide-1024] the accumulator must arrive at the EOF call site.
         accumulators = set(m.group(1) for m in TOOL_ACCUM_RE.finditer(code))
         terminal_sites = [
             m for m in re.finditer(r"\bgeminiEofTerminal\s*\(", code)
             if not re.search(r"fun\s+$", code[max(0, m.start() - 8):m.start()])
         ]
         for m in terminal_sites:
-            args = balanced_slice(code, m.end() - 1)
+            args = args_of(code, m.end() - 1)
             lineno = code.count("\n", 0, m.start()) + 1
             if args is None:
                 v.append(
@@ -400,68 +466,69 @@ def check_gemini(src):
                     % (lineno, "', '".join(sorted(accumulators))))
     return v
 
-
-def check_gemini_models(src):
-    """[da1020 ISSUE-05] GeminiModelsApi: the models-list fetcher accepts and
-    applies the per-provider customUserAgent (no hard-coded null override)."""
+def _models_api(label, src):
+    """GeminiModelsApi / OpenRouterModelsApi 共用的 UA 契约（同一判据，同一实现）。"""
     v = []
-    code = strip_comments(src)
+    try:
+        code = code_of(src, label)
+    except LexFail as exc:
+        return [str(exc)]
     if "customUserAgent: String? = null" not in code:
         v.append(
-            "GeminiModelsApi.kt: fetchModels no longer declares "
-            "'customUserAgent: String? = null' (da1020 ISSUE-05: without the "
-            "parameter the adapter cannot forward the override)"
+            "%s: fetchModels no longer declares 'customUserAgent: String? = null' "
+            "(da1020 ISSUE-05: without the parameter the adapter cannot forward "
+            "the override)" % label
         )
     if NULL_OVERRIDE in code:
         v.append(
-            "GeminiModelsApi.kt:%d: hard-coded '%s' is back "
+            "%s:%d: hard-coded '%s' is back "
             "(da1020 ISSUE-05: the fetcher must apply the customUserAgent "
             "parameter, falling back to the branded default when unset)"
-            % (code.split("\n").index(
+            % (label, code.split("\n").index(
                 next(l for l in code.split("\n") if NULL_OVERRIDE in l)) + 1,
                NULL_OVERRIDE)
         )
     if OVERRIDE_PASSED not in code:
         v.append(
-            "GeminiModelsApi.kt: '%s' missing (da1020 ISSUE-05: the request "
-            "builder must pass the customUserAgent parameter)" % OVERRIDE_PASSED
+            "%s: '%s' missing (da1020 ISSUE-05: the request builder must pass the "
+            "customUserAgent parameter)" % (label, OVERRIDE_PASSED)
         )
+    # [b7-t04] same criterion as GeminiProvider: the value is traced, so a blank
+    # / rewritten override is not accepted just because it is not `null`.
+    for pos, arg in override_sites(code):
+        if arg is None:
+            v.append("%s:%d: .applyUserAgentOverride(...) call is unbalanced "
+                     "(fail-closed: the argument cannot be judged)"
+                     % (label, code.count("\n", 0, pos) + 1))
+        elif not ua_arg_carries(code, arg):
+            v.append(
+                "%s:%d: .applyUserAgentOverride(%s) does not carry the override "
+                "(da1020 ISSUE-05: a literal there resets every models-list "
+                "request to the branded default UA)"
+                % (label, code.count("\n", 0, pos) + 1, arg.strip()))
     return v
+
+
+def check_gemini_models(src):
+    """[da1020 ISSUE-05] GeminiModelsApi: the models-list fetcher accepts and
+    applies the per-provider customUserAgent (no hard-coded null override)."""
+    return _models_api("GeminiModelsApi.kt", src)
 
 
 def check_openrouter_models(src):
     """[da1020 ISSUE-05] OpenRouterModelsApi: same UA parity contract as
     GeminiModelsApi."""
-    v = []
-    code = strip_comments(src)
-    if "customUserAgent: String? = null" not in code:
-        v.append(
-            "OpenRouterModelsApi.kt: fetchModels no longer declares "
-            "'customUserAgent: String? = null' (da1020 ISSUE-05: without the "
-            "parameter the adapter cannot forward the override)"
-        )
-    if NULL_OVERRIDE in code:
-        v.append(
-            "OpenRouterModelsApi.kt:%d: hard-coded '%s' is back "
-            "(da1020 ISSUE-05: the fetcher must apply the customUserAgent "
-            "parameter)" % (code.split("\n").index(
-                next(l for l in code.split("\n") if NULL_OVERRIDE in l)) + 1,
-               NULL_OVERRIDE)
-        )
-    if OVERRIDE_PASSED not in code:
-        v.append(
-            "OpenRouterModelsApi.kt: '%s' missing (da1020 ISSUE-05: the "
-            "request builder must pass the customUserAgent parameter)"
-            % OVERRIDE_PASSED
-        )
-    return v
+    return _models_api("OpenRouterModelsApi.kt", src)
 
 
 def check_adapters(src):
     """[da1020 ISSUE-05] Both adapter families forward instance.customUserAgent
     into their ModelsApi call."""
     v = []
-    code = strip_comments(src)
+    try:
+        code = code_of(src, "ModelListProviderAdapters.kt")
+    except LexFail as exc:
+        return [str(exc)]
     for api in ("GeminiModelsApi.fetchModels", "OpenRouterModelsApi.fetchModels"):
         i = code.find(api + "(")
         if i < 0:
@@ -470,20 +537,13 @@ def check_adapters(src):
                 "(gate anchors moved — deliberate edit required)" % api
             )
             continue
-        depth = 0
-        end = None
-        for k in range(i + len(api), len(code)):
-            if code[k] == "(":
-                depth += 1
-            elif code[k] == ")":
-                depth -= 1
-                if depth == 0:
-                    end = k
-                    break
-        if end is None:
+        args = args_of(code, i + len(api))
+        if args is None:
+            if UA_ARG not in code[i:]:
+                v.append("ModelListProviderAdapters.kt: %s unbalanced" % api)
+                continue
             v.append("ModelListProviderAdapters.kt: %s unbalanced" % api)
             continue
-        args = code[i + len(api):end]
         if UA_ARG + " instance.customUserAgent" not in args:
             v.append(
                 "ModelListProviderAdapters.kt:%d: %s call drops '%s' "
@@ -514,31 +574,25 @@ def read_optional(root, rel):
         return fh.read()
 
 
-def decl_body(code, decl):
-    """Return the balanced {...} of the body that follows `decl` (the first
-    opening brace after the declaration — a withContext lambda for
-    `executeRequest`, the `.also {}` lambda for an expression-bodied `make`),
-    or None when the declaration or a body is not found (fail-closed)."""
-    i = code.find(decl)
+def decl_body(code, decl, start=0):
+    """`decl` 之后第一个配平 {...} 块（executeRequest 的 withContext 体 /
+    make 的 `.also {}` 体），找不到 → None（fail-closed）。"""
+    i = code.find(decl, start)
     if i < 0:
         return None
     j = code.find("{", i)
     if j < 0:
         return None
-    depth = 0
-    for k in range(j, len(code)):
-        if code[k] == "{":
-            depth += 1
-        elif code[k] == "}":
-            depth -= 1
-            if depth == 0:
-                return code[j:k + 1]
-    return None
+    close = match_bracket(code, j)
+    return None if close < 0 else code[j:close + 1]
 
 
 INJECTION_RE = re.compile(
     r"(?<!val )(?<!var )[\w?.]*customUserAgent\s*=\s*instance\.customUserAgent"
 )
+
+# `x.customUserAgent = <rhs>` (not a property declaration) — the injection forms.
+RE_UA_ASSIGN = re.compile(r"(?<!val )(?<!var )([\w?.]*customUserAgent)\s*=(?!=)\s*")
 
 
 def check_voice(provider_src, vendors_src, factory_src):
@@ -554,13 +608,20 @@ def check_voice(provider_src, vendors_src, factory_src):
           the two early returns and the null arms — per-branch forwarding is
           the deep-audit-1019 ISSUE-04 shape that silently drops new arms).
 
+    [b7-t04] V3 additionally requires the injection to be REACHABLE: wrapping
+    the only assignment in `if (false)` kept every old criterion green (the
+    assignment existed, its RHS flowed) and shipped the default UA.
+
     provider/ModelsDevApi.kt is deliberately NOT part of this contract: it has
     no instance-level UA by design (TRIAGE §5) and must not be counted as a gap.
     """
     v = []
-    code_p = blank_strings(strip_comments(provider_src))
-    code_v = blank_strings(strip_comments(vendors_src))
-    code_f = blank_strings(strip_comments(factory_src))
+    try:
+        code_p = code_of(provider_src, "VoiceProvider.kt")
+        code_v = code_of(vendors_src, "VoiceProviderVendors.kt")
+        code_f = code_of(factory_src, "VoiceProviderFactory.kt")
+    except LexFail as exc:
+        return [str(exc)]
 
     # V1
     if "customUserAgent: String? = null" not in code_p:
@@ -594,12 +655,25 @@ def check_voice(provider_src, vendors_src, factory_src):
         build_at = code_v.find(".build()", url_at)
         if build_at < 0:
             v.append("VoiceProviderVendors.kt: Xunfei WebSocket request statement unbalanced")
-        elif ".applyUserAgentOverride(" not in code_v[url_at:build_at]:
-            v.append(
-                "VoiceProviderVendors.kt: the Xunfei TTS WebSocket request drops "
-                "'.applyUserAgentOverride(' (da1029 ISSUE-05: it is the one voice "
-                "request that bypasses executeRequest)"
-            )
+        else:
+            span = code_v[url_at:build_at]
+            if ".applyUserAgentOverride(" not in span:
+                v.append(
+                    "VoiceProviderVendors.kt: the Xunfei TTS WebSocket request drops "
+                    "'.applyUserAgentOverride(' (da1029 ISSUE-05: it is the one voice "
+                    "request that bypasses executeRequest)"
+                )
+            else:
+                # [b7-t04] same value trace as every other override site: a blank /
+                # rewritten argument is not the override.
+                for pos, arg in override_sites(span):
+                    if arg is None or not ua_arg_carries(code_v, arg):
+                        v.append(
+                            "VoiceProviderVendors.kt:%d: the Xunfei WebSocket "
+                            "request's .applyUserAgentOverride(%s) does not carry "
+                            "the instance override (da1029 ISSUE-05 V2)"
+                            % (code_v.count("\n", 0, url_at + pos) + 1,
+                               (arg or "<unbalanced>").strip()))
 
     # V3
     body = decl_body(code_f, "fun make(")
@@ -608,36 +682,88 @@ def check_voice(provider_src, vendors_src, factory_src):
             "VoiceProviderFactory.kt: 'fun make(' body not found (gate anchors "
             "moved — deliberate edit required)"
         )
-    elif not INJECTION_RE.search(body):
-        v.append(
-            "VoiceProviderFactory.kt: make() does not inject "
-            "'instance.customUserAgent' at its entry (da1029 ISSUE-05: one "
-            "post-construction injection must cover every build() arm; per-arm "
-            "forwarding is the deep-audit-1019 ISSUE-04 shape that drops new arms)"
-        )
     else:
-        # [wide-1024] the injection must be the LAST word. Existence of the
-        # assignment regex says nothing about a later assignment overwriting it:
-        # `.also { it?.customUserAgent = instance.customUserAgent;
-        #          it?.customUserAgent = null }` matched and still shipped the
-        # default UA. Judge the post-condition — every assignment in make()
-        # has to carry the instance value.
-        clobbers = []
-        for m in re.finditer(
-                r"(?<!val )(?<!var )([\w?.]*customUserAgent)\s*=(?!=)\s*([^;\n}]*)",
-                body):
-            rhs = m.group(2).strip()
-            if not ua_value_flows(code_f, rhs):
-                clobbers.append((m.group(1), rhs))
-        if clobbers:
+        assigns = []
+        for m in RE_UA_ASSIGN.finditer(body):
+            rhs = body[m.end():expr_end(body, m.end())].strip()
+            assigns.append((m.start(), m.group(1), rhs))
+        if not assigns:
             v.append(
-                "VoiceProviderFactory.kt: make() assigns '%s' to a value that is "
-                "not the instance override ('%s') — assign-then-clobber leaves "
-                "every voice request on the default UA (da1029 ISSUE-05 V3: one "
-                "injection, and it must survive)"
-                % (clobbers[0][0], clobbers[0][1])
+                "VoiceProviderFactory.kt: make() does not inject "
+                "'instance.customUserAgent' at its entry (da1029 ISSUE-05: one "
+                "post-construction injection must cover every build() arm; per-arm "
+                "forwarding is the deep-audit-1019 ISSUE-04 shape that drops new arms)"
             )
+        else:
+            live = [(p, t, r) for p, t, r in assigns if path_feasible(body, p)]
+            dead = [(p, t, r) for p, t, r in assigns if (p, t, r) not in live]
+            flowing = [(p, t, r) for p, t, r in live if ua_value_flows(code_f, r)]
+            if not flowing:
+                if dead and not live:
+                    v.append(
+                        "VoiceProviderFactory.kt: make() does not inject "
+                        "'instance.customUserAgent' at its entry — the only "
+                        "assignment ('%s = %s') sits inside a never-executed branch, "
+                        "so the injection is spelled but cannot run and every voice "
+                        "request keeps the default UA (da1029 ISSUE-05 V3)"
+                        % (dead[0][1], dead[0][2])
+                    )
+                else:
+                    v.append(
+                        "VoiceProviderFactory.kt: make() does not inject "
+                        "'instance.customUserAgent' at its entry (da1029 ISSUE-05: one "
+                        "post-construction injection must cover every build() arm; "
+                        "assignment(s) found: %s)"
+                        % ", ".join("'%s = %s'" % (t, r) for p, t, r in assigns)
+                    )
+            else:
+                clobbers = [(t, r) for p, t, r in live if not ua_value_flows(code_f, r)]
+                if clobbers:
+                    v.append(
+                        "VoiceProviderFactory.kt: make() assigns '%s' to a value that is "
+                        "not the instance override ('%s') — assign-then-clobber leaves "
+                        "every voice request on the default UA (da1029 ISSUE-05 V3: one "
+                        "injection, and it must survive)"
+                        % (clobbers[0][0], clobbers[0][1])
+                    )
     return v
+
+
+def _named_arg(args, name):
+    """命名实参的**完整**右值（到顶层逗号为止，不截断）；找不到 → None。"""
+    for a, b in split_top(args, (",",)):
+        part = args[a:b]
+        m = re.match(r"\s*" + re.escape(name) + r"\s*=(?!=)\s*", part)
+        if m:
+            return part[m.end():].strip()
+    return None
+
+
+def _azure_value(expr, code=None, depth=0):
+    """`azureMode = <expr>` 的判定值：'instance' / 'false' / None（脏值）。
+
+    [b7-t04] 旧判据用 `[A-Za-z0-9_.]+` 只截到标识符前缀，`instance.azureMode
+    && false` 被读成 `instance.azureMode`；这里取完整右值再判形态。
+    """
+    e = strip_parens(expr.strip())
+    if not e or depth > 3:
+        return None
+    if e == "false":
+        return "false"
+    if re.fullmatch(r"(?:[A-Za-z_]\w*\.)?instance\.azureMode", e):
+        return "instance"
+    for src in value_sources(e):
+        s = strip_parens(src.strip())
+        if s and s != e:
+            r = _azure_value(s, code, depth + 1)
+            if r:
+                return r
+    if code is not None and re.fullmatch(r"[A-Za-z_]\w*", e):
+        for rhs in _ident_values(code, e):
+            r = _azure_value(rhs, code, depth + 1)
+            if r:
+                return r
+    return None
 
 
 def check_openai_outbound(provider_src, models_src, auth_src, adapters_src, main_sources):
@@ -674,10 +800,14 @@ def check_openai_outbound(provider_src, models_src, auth_src, adapters_src, main
           list while still passing the per-site check.
     """
     v = []
-    code_p = blank_strings(strip_comments(provider_src))
-    code_m = blank_strings(strip_comments(models_src))
-    code_a = strip_comments(adapters_src)
-    code_auth = strip_comments(auth_src)
+    try:
+        code_p = code_of(provider_src, "OpenAIProvider.kt")
+        code_m = code_of(models_src, "OpenAIModelsApi.kt")
+        code_a = code_of(adapters_src, "ModelListProviderAdapters.kt")
+        # the api-key header decision is a STRING literal → literal view
+        code_auth = literal_of(auth_src, "OpenAIAuthHeader.kt")
+    except LexFail as exc:
+        return [str(exc)]
 
     # -- D1 ------------------------------------------------------------------
     body = decl_body(code_p, "suspend fun rawPassthroughRequest(")
@@ -721,7 +851,11 @@ def check_openai_outbound(provider_src, models_src, auth_src, adapters_src, main
     for rel, text in main_sources:
         if rel == OPENAI_AUTH_REL:
             continue
-        _body = strip_comments(text)
+        try:
+            _body = literal_of(text, rel)
+        except LexFail as exc:
+            v.append(str(exc))
+            continue
         _hit = next((f for f in API_KEY_DECISION_FORMS if f in _body), None)
         if _hit is not None:
             v.append(
@@ -764,6 +898,49 @@ def check_openai_outbound(provider_src, models_src, auth_src, adapters_src, main
                     % (code_m.count("\n", 0, m.start()) + 1, fn, why)
                 )
 
+    # [b7-t04] threading the flag is not applying it: the builder helper must
+    # DELEGATE the auth decision to applyOpenAIKeyAuth, with both of its own
+    # parameters. The witness kept every call/parameter intact and replaced the
+    # delegation inside `buildModelsRequest` with a hard-coded Bearer header, so
+    # every Azure models-list fetch 401'd while D2a/D2b stayed green.
+    builder = function_body(code_m, "buildModelsRequest")
+    if builder is None:
+        v.append(
+            "OpenAIModelsApi.kt: 'fun buildModelsRequest(' declaration not found "
+            "(da1030 ISSUE-06 裂缝B: the one place the models-list auth decision "
+            "can live is gone)"
+        )
+    else:
+        bstart, bend, _kind = builder
+        bbody = code_m[bstart:bend]
+        params = _fn_params(code_m, "buildModelsRequest") or []
+        delegations = [m for m in re.finditer(r"\bapplyOpenAIKeyAuth\s*\(", bbody)
+                       if path_feasible(bbody, m.start())]
+        if not delegations:
+            v.append(
+                "OpenAIModelsApi.kt: buildModelsRequest no longer delegates to "
+                "applyOpenAIKeyAuth (da1030 ISSUE-06 裂缝B: a hard-coded "
+                "Authorization/Bearer there sends the wrong header for every "
+                "Azure instance, and the models list 401s)"
+            )
+        for m in delegations:
+            dargs = args_of(bbody, m.end() - 1)
+            missing = [p for p in ("azureMode", "apiKey")
+                       if dargs is None or not contains_ident(dargs, p)]
+            if missing:
+                v.append(
+                    "OpenAIModelsApi.kt: buildModelsRequest delegates to "
+                    "applyOpenAIKeyAuth without %s (fail-closed: the helper's own "
+                    "parameters must reach the single auth source)"
+                    % ", ".join(missing)
+                )
+        if params and [p for p in ("azureMode", "apiKey") if p not in params]:
+            v.append(
+                "OpenAIModelsApi.kt: buildModelsRequest lost its %s parameter "
+                "(fail-closed: the auth decision cannot be threaded)"
+                % ", ".join(p for p in ("azureMode", "apiKey") if p not in params)
+            )
+
     # -- D3: every adapter call site forwards azureMode ----------------------
     api = "OpenAIModelsApi.fetchModels"
     sites = [m for m in re.finditer(re.escape(api + "("), code_a)
@@ -775,21 +952,10 @@ def check_openai_outbound(provider_src, models_src, auth_src, adapters_src, main
         )
     forwarded_from_instance = 0
     for m in sites:
-        args = code_a[m.end() - 1:]
-        depth = 0
-        end = None
-        for k in range(len(args)):
-            if args[k] == "(":
-                depth += 1
-            elif args[k] == ")":
-                depth -= 1
-                if depth == 0:
-                    end = k
-                    break
-        if end is None:
+        args = args_of(code_a, m.end() - 1)
+        if args is None:
             v.append("ModelListProviderAdapters.kt: %s unbalanced" % api)
             continue
-        args = args[:end]
         line = code_a.count("\n", 0, m.start()) + 1
         if UA_ARG not in args:
             v.append(
@@ -804,18 +970,18 @@ def check_openai_outbound(provider_src, models_src, auth_src, adapters_src, main
                 "the models list with Bearer auth)" % (line, api)
             )
             continue
-        azure_value = re.search(r"azureMode\s*=\s*([A-Za-z0-9_.]+)", args)
-        if azure_value is None or azure_value.group(1) not in (
-            "instance.azureMode", "false"
-        ):
+        azure_expr = _named_arg(args, "azureMode")
+        azure_value = None if azure_expr is None else _azure_value(azure_expr, code_a)
+        if azure_expr is None or azure_value is None:
             v.append(
                 "ModelListProviderAdapters.kt:%d: %s passes an azureMode value "
                 "that is neither `instance.azureMode` nor the explicit `false` "
-                "(da1030 ISSUE-06: the value must mirror that arm's chat path — "
-                "an invented value silently changes which header goes out)"
-                % (line, api)
+                "(%r) (da1030 ISSUE-06: the value must mirror that arm's chat "
+                "path — a rewritten value such as `instance.azureMode && false` "
+                "silently changes which header goes out)"
+                % (line, api, (azure_expr or "").strip() or "<missing>")
             )
-        elif azure_value.group(1) == "instance.azureMode":
+        elif azure_value == "instance":
             forwarded_from_instance += 1
     if sites and forwarded_from_instance == 0:
         v.append(
@@ -1000,6 +1166,9 @@ internal fun shouldFlagEofTruncated(
     contentChars: Int,
     toolChars: Int,
 ): Boolean = lastFinishReason == null && (contentChars > 0 || toolChars > 0)
+
+internal fun toolCallActivityChars(name: String, argsJson: String): Int =
+    name.length + argsJson.length
 """
 
 BAD_GEMINI_NULL = GOOD_GEMINI.replace(
@@ -1473,14 +1642,57 @@ BAD_OTHER_SOURCES_DUPLICATE = GOOD_OTHER_SOURCES + [
      'Request.Builder().url(url).header("api-key", apiKey).build()'),
 ]
 
+# -- [batch7 B7-t04] the six externally-witnessed bypasses -------------------
+# Each one kept the old criterion's symbol in place and changed what it DOES.
+
+BAD_FACTORY_UA_LET_NULL = GOOD_FACTORY.replace(
+    "customUserAgent = instance.customUserAgent,",
+    "customUserAgent = instance.customUserAgent.let { null },",
+)
+
+BAD_GEMINI_DOUBLE_OVERRIDE = GOOD_GEMINI.replace(
+    """            .applyUserAgentOverride(customUserAgent)
+            .build()
+        return LLMResponse""",
+    """            .applyUserAgentOverride(customUserAgent)
+            .applyUserAgentOverride("")
+            .build()
+        return LLMResponse""",
+)
+
+BAD_GEMINI_TOOL_CHARS_CONST = GOOD_GEMINI.replace(
+    """internal fun toolCallActivityChars(name: String, argsJson: String): Int =
+    name.length + argsJson.length""",
+    "internal fun toolCallActivityChars(name: String, argsJson: String): Int = 0",
+)
+
+BAD_VOICE_FACTORY_DEAD_GUARD = GOOD_VOICE_FACTORY.replace(
+    "build(instance, rawApiKey).also { it?.customUserAgent = instance.customUserAgent }",
+    "build(instance, rawApiKey).also { if (false) it?.customUserAgent = instance.customUserAgent }",
+)
+
+BAD_OPENAI_MODELS_BEARER = GOOD_OPENAI_MODELS.replace(
+    ".applyOpenAIKeyAuth(azureMode, apiKey)",
+    '.header("Authorization", "Bearer $apiKey")',
+)
+
+BAD_OPENAI_ADAPTERS_AND_FALSE = GOOD_OPENAI_ADAPTERS.replace(
+    "azureMode = instance.azureMode,",
+    "azureMode = instance.azureMode && false,",
+)
+
+
 def selftest():
     failures = []
+    arms = []
 
     def expect_clean(name, v):
+        arms.append(name)
         if v:
             failures.append("%s must be clean, got %s" % (name, v))
 
     def expect_trip(name, v, needle):
+        arms.append(name)
         if not any(needle in item for item in v):
             failures.append("%s did not trip '%s' (got %s)" % (name, needle, v))
 
@@ -1698,11 +1910,41 @@ def selftest():
     print("selftest openrouter-models null   -> %d violation(s)" % len(bad_orm_null))
     print("selftest adapters-drop            -> %d violation(s)" % len(bad_ad))
 
+    # -- [batch7 B7-t04] the six witnessed bypasses ------------------------
+    bad_ua_let = check_factory(BAD_FACTORY_UA_LET_NULL)
+    expect_trip("UA-let-null-in-factory-arm fixture (ISSUE-04a)", bad_ua_let,
+                "the instance override never arrives")
+
+    bad_double = check_gemini(BAD_GEMINI_DOUBLE_OVERRIDE)
+    expect_trip("double-override-blank fixture (ISSUE-04b)", bad_double,
+                "does not carry the constructor override")
+
+    bad_toolc = check_gemini(BAD_GEMINI_TOOL_CHARS_CONST)
+    expect_trip("tool-chars-helper-constant fixture (ISSUE-04c)", bad_toolc,
+                "folds to a constant")
+
+    bad_dead = check_voice(GOOD_VOICE_PROVIDER, GOOD_VOICE_VENDORS,
+                           BAD_VOICE_FACTORY_DEAD_GUARD)
+    expect_trip("voice factory dead-guard fixture (ISSUE-05 V3)", bad_dead,
+                "never-executed branch")
+
+    bad_bearer = check_openai_outbound(
+        GOOD_OPENAI_PROVIDER, BAD_OPENAI_MODELS_BEARER, GOOD_OPENAI_AUTH_PAIR,
+        GOOD_OPENAI_ADAPTERS, GOOD_OTHER_SOURCES_PAIR)
+    expect_trip("models-auth-delegation-dropped fixture (da1030 D2b)", bad_bearer,
+                "no longer delegates to applyOpenAIKeyAuth")
+
+    bad_andfalse = check_openai_outbound(
+        GOOD_OPENAI_PROVIDER, GOOD_OPENAI_MODELS, GOOD_OPENAI_AUTH_PAIR,
+        BAD_OPENAI_ADAPTERS_AND_FALSE, GOOD_OTHER_SOURCES_PAIR)
+    expect_trip("adapters-and-false fixture (da1030 D3)", bad_andfalse,
+                "neither `instance.azureMode` nor the explicit `false`")
+
     if failures:
         for f in failures:
             print("SELFTEST FAIL " + f)
         return 1
-    print("PROVIDER_UA_PARITY_SELFTEST=PASS")
+    print("PROVIDER_UA_PARITY_SELFTEST=PASS (%d arms)" % len(arms))
     return 0
 
 
