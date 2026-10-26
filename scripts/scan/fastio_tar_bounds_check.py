@@ -66,16 +66,21 @@ from _kotlin_ast import (
     const_bool,
     enclosing_conditions,
     function_body,
+    if_blocks,
     match_bracket,
     split_top,
     strip_parens,
+    tail_expr,
 )
 from _kotlin_valueflow import (
+    brace_depth,
     call_args,
     code_view,
     expr_end,
     guard_feasible,
+    literal_view,
     path_feasible,
+    returns_exiting,
     scope_calls,
 )
 
@@ -679,7 +684,351 @@ def check_toplevel_roots(src):
         )
     return v
 
+# ── [R3-t14 #154] the two-phase extract must GATE the write phase ────────────
+#
+# `tar -xf` opens the archive twice. Pass 1 (`tarValidate`) walks every member
+# and collects path-traversal / absolute-path errors into `validation`; Pass 2
+# (`tarExtract`) writes. The entire value of Pass 1 is atomicity: refuse BEFORE
+# a single byte lands. Witness 16-1 wrote `if (false && !safe)`: the call, its
+# binding, the position, the `unsafe_archive` payload and the `return` all
+# survived, the condition folded to false, and a mixed archive wrote its legal
+# prefix over the destination (overwriting same-named files) before pass 2
+# tripped on the first hostile entry.
+#
+# Judged on the DECISION, in both directions:
+#   - `tarValidate(` must exist, be reachable, and its verdict must be bound;
+#   - the verdict must be CONSUMED by a guard that can fire (not folded);
+#   - the guard must be the NEGATIVE form (`!safe` / `safe == false`): a bare
+#     `if (safe)` refuses the safe archives and writes the unsafe ones;
+#   - the guarded branch must exit AND carry the `unsafe_archive` payload;
+#   - `tarExtract(` must sit AFTER that branch (never inside it);
+#   - the `catch` fallback must answer "not safe", or an unreadable archive
+#     would be treated as validated.
+VALIDATE_CALL_RE = re.compile(r"\btarValidate\s*\(")
+EXTRACT_CALL_RE = re.compile(r"\btarExtract\s*\(")
+UNSAFE_ARCHIVE_TAG = "unsafe_archive"
+
+
+def _binding_of_call(body, pos):
+    """(decl_pos, name, rhs_end) of the `val <name> = …` whose RHS holds pos."""
+    best = None
+    for m in re.finditer(r"\bval\s+([A-Za-z_]\w*)\s*=(?!=)", body[:pos]):
+        end = expr_end(body, m.end())
+        if end <= pos:
+            continue
+        if best is None or m.start() > best[0]:
+            best = (m.start(), m.group(1), end)
+    return best
+
+
+def _negates(cond, name):
+    """Is this condition the NEGATION of `name` (refuse when it is false)?"""
+    c = re.sub(r"\s+", "", strip_parens(cond).strip())
+    if not c:
+        return False
+    for shape in (name + "==false", "false==" + name, name + ".not()"):
+        if shape and c == shape:
+            return True
+    m = re.match(r"^(!+)" + re.escape(name) + r"$", c)
+    return bool(m) and len(m.group(1)) % 2 == 1
+
+
+def check_extract_validate_gate(src):
+    """[R3-t14 #154] `tarExtractFrom`'s Pass-1 verdict must gate Pass 2."""
+    code = code_view(src)
+    lit = literal_view(src)
+    body = member_body(code, "tarExtractFrom")
+    if body is None:
+        return ["tarExtractFrom must exist in FastioOffloadHandler.kt (required function missing)"]
+    span = function_body(code, "tarExtractFrom")
+    base = span[0]
+    body_lit = lit[base:span[1]]
+    calls = list(VALIDATE_CALL_RE.finditer(body))
+    if not calls:
+        return ["tarExtractFrom no longer pre-validates the archive (no tarValidate( call) — "
+                "every entry of a hostile archive reaches the destination"]
+    vpos = calls[0].start()
+    if not path_feasible(body, vpos):
+        return ["the archive pre-validation sits in a path that can never run — the write "
+                "phase proceeds unvalidated"]
+    bound = _binding_of_call(body, vpos)
+    if bound is None:
+        return ["the tarValidate( verdict is not bound to a name — the gate cannot tell what "
+                "depends on it (fail-closed); bind it (`val safe = …`) and guard on it"]
+    _decl, name, rhs_end = bound
+    guard = None
+    for cond, t_start, t_end, _es, _ee in if_blocks(body):
+        if re.search(r"\b%s\b" % re.escape(name), cond):
+            guard = (cond, t_start, t_end)
+            break
+    if guard is None:
+        return ["tarValidate( produced `%s` and nothing tests it — pass 2 writes every entry "
+                "and reports at the end (the atomic refusal is gone)" % name]
+    cond, t_start, t_end = guard
+    if const_bool(cond) is False or not guard_feasible(cond):
+        return ["the unsafe-archive refusal is short-circuited (`%s` folds to false) — the "
+                "Pass-1 pre-scan decides nothing: a mixed archive writes its legal prefix over "
+                "the destination before pass 2 trips on the first hostile entry"
+                % " ".join(cond.split())[:70]]
+    if not path_feasible(body, t_start):
+        return ["the unsafe-archive refusal sits in a branch that can never run — the write "
+                "phase runs on an unvalidated archive"]
+    if not _negates(cond, name):
+        return ["the validation guard is inverted (`%s`) — it refuses VALIDATED archives and "
+                "writes the unvalidated ones" % " ".join(cond.split())[:60]]
+    branch = body[t_start:t_end]
+    if UNSAFE_ARCHIVE_TAG not in body_lit[t_start:t_end]:
+        return ["the refusal does not report `%s` — the caller reads a half-written extract as "
+                "an ordinary error" % UNSAFE_ARCHIVE_TAG]
+    # the refusal must EXIT: a bare `return` at the branch's own statement level
+    # (`return@let` only leaves the lambda and does not stop the write phase)
+    inner = t_start
+    while inner < t_end and body[inner] in " \t\r\n":
+        inner += 1
+    stmt_depth = brace_depth(body, inner) + (1 if (inner < len(body) and body[inner] == "{") else 0)
+    if not returns_exiting(body, t_start, t_end, fn_depth=stmt_depth):
+        return ["the refusal branch neither returns nor throws — the write phase runs anyway"]
+    writes = [m.start() for m in EXTRACT_CALL_RE.finditer(body)]
+    if not writes:
+        return ["tarExtractFrom no longer writes the archive (no tarExtract( call) — re-point "
+                "this rule before trusting it (fail-closed)"]
+    early = [p for p in writes if p < t_end]
+    if early:
+        return ["pass 2 (`tarExtract(`) runs BEFORE the Pass-1 refusal is answered — the "
+                "pre-scan is decorative, entries land and are reported afterwards"]
+    v = []
+    # the verdict's own fallback: an archive that cannot be read is NOT safe
+    cstart = body.find("catch", bound[0])
+    if 0 <= cstart < rhs_end:
+        cparen = body.find("(", cstart)
+        cbrace = body.find("{", cparen)
+        if cbrace > 0:
+            cclose = match_bracket(body, cbrace)
+            if cclose > cbrace:
+                tail = tail_expr(body[cbrace + 1:cclose])
+                if const_bool(tail) is not False:
+                    v.append("the `catch` fallback of the pre-scan answers `%s` instead of "
+                             "false — an unreadable archive is treated as validated" % tail[:40])
+    return v
+
+
+# ── [R3-t14 #155] `-type f` must actually FILTER the entries find types ──────
+#
+# `findTree.visitFile` labels a non-link, non-regular entry 'o' (the fix for
+# §1043-A-07), but the LABEL only helps if `consider(…)` rejects it. Witness
+# 16-2 appended `&& type != 'o'` to the filter: the label stayed correct, the
+# token stayed in place, and `find -type f` listed FIFOs and sockets — the
+# guest then opens one and blocks in `open(2)` forever.
+#
+# The predicate is judged as a TRUTH TABLE over `{typeFilter} × {type}`: it must
+# return for exactly the mismatches. That is spelling-independent (an inverted
+# or restructured condition is still decidable) and it catches every way of
+# exempting one type char.
+TYPE_FILTER_CHARS = ("f", "d", "l", "o")
+
+
+def _filter_operand(x, env):
+    x = strip_parens(x).strip()
+    if x == "null":
+        return None, True
+    m = re.match(r"^'(.)'$", x)
+    if m:
+        return m.group(1), True
+    if re.match(r"^[A-Za-z_]\w*$", x) and x in env:
+        return env[x], True
+    return None, False
+
+
+def _filter_atom(atom, env):
+    a = strip_parens(atom).strip()
+    if not a:
+        return None
+    if a.startswith("!"):
+        v = _filter_atom(a[1:], env)
+        return None if v is None else (not v)
+    for op in ("==", "!="):
+        parts = split_top(a, (op,))
+        if len(parts) == 2:
+            lv, lok = _filter_operand(a[parts[0][0]:parts[0][1]], env)
+            rv, rok = _filter_operand(a[parts[1][0]:parts[1][1]], env)
+            if not (lok and rok):
+                return None
+            return (lv == rv) if op == "==" else (lv != rv)
+    v, ok = _filter_operand(a, env)
+    return v if ok else None
+
+
+def _filter_cond_value(cond, env):
+    """Three-valued evaluation: True / False / None (not decidable)."""
+    e = strip_parens(cond).strip()
+    if not e:
+        return None
+    for op in ("||", "&&"):
+        parts = split_top(e, (op,))
+        if len(parts) > 1:
+            vals = [_filter_cond_value(e[a:b], env) for a, b in parts]
+            if any(v is None for v in vals):
+                return None
+            return any(vals) if op == "||" else all(vals)
+    return _filter_atom(e, env)
+
+
+def check_find_type_filter(src):
+    """[R3-t14 #155] `findTree.consider`'s `--type` predicate, as a truth table."""
+    code = code_view(src)
+    span = function_body(code, "findTree")
+    if span is None or span[2] != "block":
+        return ["findTree must exist in FastioSearch.kt (required function missing)"]
+    tree = code[span[0]:span[1]]
+    cspan = function_body(tree, "consider")
+    if cspan is None or cspan[2] != "block":
+        return ["findTree no longer funnels its hits through `consider(…)` — re-point this "
+                "rule before trusting it (fail-closed)"]
+    body = tree[cspan[0]:cspan[1]]
+    site = None
+    for cond, t_start, t_end, _es, _ee in if_blocks(body):
+        if re.search(r"\btypeFilter\b", cond):
+            # innermost wins: a nested `if (typeFilter != null) { if (…) return }`
+            # must be judged on the INNER decision, with the outer one as a
+            # conjunct (see below), not on the outer test alone.
+            site = (cond, t_start, t_end)
+    if site is None:
+        return ["findTree.consider(…) no longer filters by `--type` — `-type f` lists every "
+                "entry, including the pipes and sockets visitFile just labelled 'o'"]
+    cond, t_start, t_end = site
+    # The condition is EVALUATED, so it is read from the literal channel: the
+    # code view blanks a char literal's content and `type != 'o'` would then be
+    # judged as `type != ' '` — an exemption that exempts nothing.
+    lit_body = literal_view(src)[span[0] + cspan[0]:span[0] + cspan[1]]
+    ipos = body.rfind("if", 0, t_start)
+    p_open = body.find("(", ipos) if ipos >= 0 else -1
+    p_close = match_bracket(body, p_open) if p_open >= 0 else -1
+    if 0 <= p_open < p_close:
+        cond_eval = lit_body[p_open + 1:p_close]
+    else:
+        cond_eval = cond
+    # NESTED shape: `if (typeFilter != null) { if (typeFilter != type) return }`
+    # is the same decision as the flat conjunction. The effective predicate is
+    # the conjunction of every enclosing condition with the guard's own, so the
+    # truth table judges what actually decides the entry.
+    # `enclosing_conditions` includes the guard's OWN condition when the probe
+    # position sits at its then-start; that one is already in `cond_eval` (read
+    # from the literal channel), so only genuinely OUTER conditions are added.
+    enclosing = [c for _k, c in enclosing_conditions(body, t_start)
+                 if c.strip() != cond.strip()]
+    if any("' '" in c for c in enclosing):
+        return ["an enclosing condition carries a char literal the code view blanks — "
+                "re-point this rule at the literal channel (fail-closed)"]
+    if enclosing:
+        cond_eval = " && ".join("(%s)" % c.strip() for c in enclosing) + " && (%s)" % cond_eval
+    if not re.search(r"\breturn\b", body[t_start:t_end]):
+        return ["the `--type` filter does not stop the entry (no return in the branch) — the "
+                "label visitFile computes is ignored by the only consumer that could use it"]
+    for tf in (None,) + TYPE_FILTER_CHARS:
+        for ty in TYPE_FILTER_CHARS:
+            got = _filter_cond_value(cond_eval, {"typeFilter": tf, "type": ty})
+            if got is None:
+                return ["the `--type` predicate cannot be decided (`%s`) — the gate will not "
+                        "guess (fail-closed)" % " ".join(cond.split())[:60]]
+            want = tf is not None and tf != ty
+            if got == want:
+                continue
+            if want:
+                return ["`-type %s` admits the type '%s' — a FIFO/socket reaches the guest as "
+                        "a regular-file hit, and reading one blocks open(2) with no timeout"
+                        % (tf, ty)]
+            return ["`-type %s` rejects a '%s' entry — the filter hides entries the caller "
+                    "asked for" % (tf, ty)]
+    return []
+
+
+# ── [R3-t14 #156] the LINKNAME ceiling, on the prototype the comment names ───
+#
+# `splitUstarName` (the imitator) was pinned to `NAME_LENGTH - 1` long ago, and
+# its KDoc points at `writeHeader`'s `> LINKNAME_LENGTH - 1` as the prototype
+# that "had always accounted for the terminator". The gate only ever read the
+# imitator. Witness 16-3 relaxed the prototype to `> LINKNAME_LENGTH`: the
+# token, the position and the GNU 'K' emitter all survived, and a symlink whose
+# target is exactly 100 UTF-8 bytes was written into the 100-byte field, where
+# `putText` stores at most 99 (`.so` -> `.s`, or half a multi-byte character) —
+# a dangling link with nothing on the write path reporting it.
+LINK_CEILING_FIELD = "LINKNAME_LENGTH"
+LINK_BYTES_RES = (
+    re.compile(r"toByteArray\s*\(\s*StandardCharsets\.UTF_8\s*\)\s*\.\s*size"),
+    re.compile(r"utf8Length\s*\(\s*member\s*\.\s*linkName\s*\)"),
+    re.compile(r"encodeToByteArray\s*\(\s*\)\s*\.\s*size"),
+)
+
+
+def check_write_header_linkname(src):
+    """[R3-t14 #156] `writeHeader`'s long-link decision must use the STORED size."""
+    code = code_view(src)
+    lit = literal_view(src)
+    body = member_body(code, "writeHeader")
+    if body is None:
+        return ["writeHeader must exist in FastioTar.kt (required function missing)"]
+    span = function_body(code, "writeHeader")
+    body_lit = lit[span[0]:span[1]]
+    site = None
+    for cond, t_start, t_end, _es, _ee in if_blocks(body):
+        if LINK_CEILING_FIELD in cond and "linkName" in cond:
+            site = (cond, t_start, t_end)
+            break
+    if site is None:
+        return ["writeHeader no longer tests the link target against LINKNAME_LENGTH — a target "
+                "longer than the field is truncated by putText with nothing reporting it"]
+    cond, t_start, t_end = site
+    if not any(r.search(cond) for r in LINK_BYTES_RES):
+        if re.search(r"linkName\s*\.\s*length\b", cond):
+            return ["the link ceiling compares CHARACTERS (`member.linkName.length`) — a "
+                    "multi-byte UTF-8 target fits the count and is cut in half by the byte "
+                    "field"]
+        return ["the link ceiling is not measured in UTF-8 BYTES of member.linkName (`%s`) — "
+                "fail-closed" % " ".join(cond.split())[:60]]
+    m = re.search(r"(>=|>)\s*LINKNAME_LENGTH(?:\s*([+-])\s*(\d+))?", cond)
+    if m is None:
+        return ["the link ceiling does not compare against LINKNAME_LENGTH (`%s`) — fail-closed"
+                % " ".join(cond.split())[:60]]
+    off = 0
+    if m.group(2):
+        off = int(m.group(3)) * (1 if m.group(2) == "+" else -1)
+    fires_from = 100 + off + (1 if m.group(1) == ">" else 0)
+    if fires_from > 100:
+        return ["the long-link test fires only from %d bytes (`%s`) — the field stores 99 bytes "
+                "plus the NUL terminator, so a 100-byte target is declared to fit and silently "
+                "truncated (.so -> .s, or half a multi-byte character)"
+                % (fires_from, " ".join(cond.split())[:60])]
+    if not guard_feasible(cond):
+        return ["the long-link test can never be true (`%s`) — every long target is truncated"
+                % " ".join(cond.split())[:60]]
+    if not path_feasible(body, t_start):
+        return ["the long-link record sits in a branch that can never run — a long target is "
+                "truncated into the field"]
+    # The emitter: either inside the ceiling branch itself, or in the
+    # `if (<carrier> != null)` block that follows a `val <carrier> = if (…)`.
+    if_pos = body.rfind("if", 0, t_start)
+    carrier = None
+    m2 = re.search(r"\bval\s+([A-Za-z_]\w*)\s*=\s*$", body[:max(if_pos, 0)])
+    if m2:
+        carrier = m2.group(1)
+    emitter = None
+    if carrier:
+        for cond2, t2, t3, _es2, _ee2 in if_blocks(body):
+            if re.search(r"\b%s\b" % re.escape(carrier), cond2) and "'K'" in body_lit[t2:t3]:
+                emitter = (t2, t3)
+                break
+    elif "'K'" in body_lit[t_start:t_end]:
+        emitter = (t_start, t_end)
+    if emitter is None:
+        return ["the long-link decision no longer emits a GNU 'K' record — a target that does "
+                "not fit is carried only by the (truncating) header field"]
+    if ".write(" not in body[emitter[0]:emitter[1]]:
+        return ["the long-link branch builds the 'K' record and never writes it"]
+    return []
+
+
 def run(root):
+
     violations = []
     tar_path = os.path.join(root, TAR_REL)
     handler_path = os.path.join(root, HANDLER_REL)
@@ -691,12 +1040,16 @@ def run(root):
     violations += check_write_regular(tar_src)
     violations += check_create_traversal(tar_src)
     violations += check_toplevel_roots(tar_src)
+    # [R3-t14 #156] the LINKNAME ceiling on writeHeader (the documented prototype)
+    violations += check_write_header_linkname(tar_src)
     if not os.path.isfile(handler_path):
         return 2
     with open(handler_path, encoding="utf-8") as f:
         handler_src = f.read()
     violations += check_handler(handler_src)
     violations += check_archive_open_guard(handler_src)
+    # [R3-t14 #154] the Pass-1 verdict must gate the Pass-2 write
+    violations += check_extract_validate_gate(handler_src)
     search_path = os.path.join(root, SEARCH_REL)
     copy_path = os.path.join(root, COPY_REL)
     if not (os.path.isfile(search_path) and os.path.isfile(copy_path)):
@@ -706,6 +1059,8 @@ def run(root):
     with open(copy_path, encoding="utf-8") as f:
         copy_src = f.read()
     violations += check_special_file_guards(search_src, copy_src)
+    # [R3-t14 #155] the `-type` label must reach the consumer as a filter
+    violations += check_find_type_filter(search_src)
     if violations:
         for v in violations:
             print("VIOLATION " + v)
@@ -1506,6 +1861,86 @@ B7_COPY_DEAD_RIGHT = GOOD_COPY_FIX.replace(
 assert B7_COPY_DEAD_RIGHT != GOOD_COPY_FIX
 
 
+# ── [R3-t14] third-round witnesses #154 / #155 / #156 ───────────────────────
+# 16-1 kept the tarValidate call, its binding, the payload and the `return`,
+# and folded the guard instead (`false && !safe`); 16-2 kept the 'o' label walk
+# intact and exempted one type char inside the filter (`&& type != 'o'`);
+# 16-3 relaxed `writeHeader`'s link ceiling by exactly one byte
+# (`> LINKNAME_LENGTH`). Each fixture is the compliant shape; the arms mutate
+# exactly the decision.
+GOOD_EXTRACT_GATE = """
+private fun tarExtractFrom(entry: JSONObject, archivePath: Path, args: OffloadArgs): NativeOffloadResult {
+    val destPath = Paths.get(dest.hostPath)
+    val budget = tarEntryBudget(args)
+    val validation = TarExtractOutcome()
+    val safe = try {
+        openArchive(archivePath, gzip).use { tarValidate(it, destPath, budget, validation) }
+    } catch (e: Exception) {
+        validation.errors.add("${entry.getString("archive")}: ${e.message}")
+        false
+    }
+    if (!safe) {
+        entry.put("error", "unsafe_archive").put("errors", JSONArray(validation.errors))
+        return finishTar(entry, true, startedNs, args)
+    }
+    val outcome = TarExtractOutcome()
+    try {
+        openArchive(archivePath, gzip).use { tarExtract(it, destPath, force, budget, outcome) }
+    } catch (e: Exception) {
+        outcome.errors.add("${entry.getString("archive")}: ${e.message}")
+    }
+    return finishTar(entry, outcome.errors.isNotEmpty(), startedNs, args)
+}
+"""
+
+GOOD_FIND_FILTER = """
+internal fun findTree(root: Path, typeFilter: Char?, limit: Int, out: FindOutcome) {
+    Files.walkFileTree(
+        root,
+        object : SimpleFileVisitor<Path>() {
+            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                consider(
+                    file,
+                    when {
+                        attrs.isSymbolicLink -> 'l'
+                        attrs.isRegularFile -> 'f'
+                        else -> 'o'
+                    },
+                    attrs.size(),
+                )
+                return FileVisitResult.CONTINUE
+            }
+
+            private fun consider(path: Path, type: Char, size: Long) {
+                if (typeFilter != null && typeFilter != type) return
+                out.matches.add(size)
+            }
+        },
+    )
+}
+"""
+
+GOOD_WRITE_HEADER_LINK = """
+private fun writeHeader(sink: OutputStream, member: TarMember) {
+    val longLink = if (member.linkName.toByteArray(StandardCharsets.UTF_8).size > LINKNAME_LENGTH - 1) {
+        member.linkName.toByteArray(StandardCharsets.UTF_8) + 0
+    } else null
+    if (longLink != null) {
+        val kblock = ByteArray(BLOCK_SIZE)
+        kblock[TYPEFLAG_OFFSET] = 'K'.code.toByte()
+        putInt(kblock, SIZE_OFFSET, SIZE_LENGTH, longLink.size.toLong())
+        finishBlock(kblock)
+        sink.write(kblock)
+        sink.write(longLink)
+        sink.write(ByteArray(((BLOCK_SIZE - (longLink.size % BLOCK_SIZE)) % BLOCK_SIZE)))
+    }
+    val block = ByteArray(BLOCK_SIZE)
+    putText(block, LINKNAME_OFFSET, LINKNAME_LENGTH, member.linkName)
+    sink.write(block)
+}
+"""
+
+
 def selftest():
     failures = []
     arms = [0]
@@ -1730,6 +2165,105 @@ def selftest():
                 check_create_traversal(B7_TREE_SORT_DISCARDED), "DISCARDS the sorted list")
     expect_only("09-5 dead literal on the RIGHT is red",
                 check_special_file_guards(GOOD_SEARCH_FIX, B7_COPY_DEAD_RIGHT), "short-circuited")
+
+    # ── [R3-t14] the third-round witnesses: #154 / #155 / #156 ──────────────
+    expect_clean("compliant extract validate gate (R3-t14a)",
+                 check_extract_validate_gate(GOOD_EXTRACT_GATE))
+    expect_trip("16-1 short-circuited Pass-1 refusal is red",
+                check_extract_validate_gate(
+                    GOOD_EXTRACT_GATE.replace("if (!safe) {", "if (false && !safe) {")),
+                "short-circuited")
+    expect_trip("16-1b inverted Pass-1 guard is red",
+                check_extract_validate_gate(
+                    GOOD_EXTRACT_GATE.replace("if (!safe) {", "if (safe) {")),
+                "inverted")
+    expect_trip("16-1c Pass-1 verdict not consumed is red",
+                check_extract_validate_gate(
+                    GOOD_EXTRACT_GATE.replace(
+                        """    if (!safe) {
+        entry.put("error", "unsafe_archive").put("errors", JSONArray(validation.errors))
+        return finishTar(entry, true, startedNs, args)
+    }
+""", "")),
+                "nothing tests it")
+    expect_trip("16-1d unreadable archive treated as validated is red",
+                check_extract_validate_gate(
+                    GOOD_EXTRACT_GATE.replace(
+                        '        validation.errors.add("${entry.getString("archive")}: ${e.message}")\n'
+                        "        false\n",
+                        '        validation.errors.add("${entry.getString("archive")}: ${e.message}")\n'
+                        "        true\n")),
+                "catch` fallback")
+    expect_trip("16-1e write phase before the refusal is red",
+                check_extract_validate_gate(
+                    GOOD_EXTRACT_GATE.replace(
+                        "    if (!safe) {",
+                        "    tarExtract(archivePath, destPath)\n    if (!safe) {")),
+                "runs BEFORE")
+    expect_trip("16-1f no pre-validation at all is red",
+                check_extract_validate_gate(
+                    GOOD_EXTRACT_GATE.replace(
+                        "        openArchive(archivePath, gzip).use { tarValidate(it, destPath, budget, validation) }",
+                        "        validateLater(archivePath)")),
+                "no tarValidate(")
+
+    expect_clean("compliant --type filter (R3-t14b)", check_find_type_filter(GOOD_FIND_FILTER))
+    expect_trip("16-2 'o' exempted from the --type filter is red",
+                check_find_type_filter(
+                    GOOD_FIND_FILTER.replace(
+                        "if (typeFilter != null && typeFilter != type) return",
+                        "if (typeFilter != null && typeFilter != type && type != 'o') return")),
+                "admits the type 'o'")
+    # the SAME decision written as two nested guards must stay clean: the
+    # effective predicate is the conjunction of the enclosing condition and the
+    # inner one, so `if (typeFilter != null) { if (typeFilter != type) return }`
+    # is judged as the flat conjunction it means.
+    expect_clean("16-2d nested filter spelling stays clean",
+                 check_find_type_filter(
+                     GOOD_FIND_FILTER.replace(
+                         "                if (typeFilter != null && typeFilter != type) return",
+                         "                if (typeFilter != null) { if (typeFilter != type) return }")))
+    expect_trip("16-2b inverted filter is red (hides what was asked for)",
+                check_find_type_filter(
+                    GOOD_FIND_FILTER.replace(
+                        "if (typeFilter != null && typeFilter != type) return",
+                        "if (typeFilter == null || typeFilter == type) return")),
+                "rejects a")
+    expect_trip("16-2c filter removed is red",
+                check_find_type_filter(
+                    GOOD_FIND_FILTER.replace(
+                        "                if (typeFilter != null && typeFilter != type) return\n", "")),
+                "no longer filters by `--type`")
+
+    expect_clean("compliant writeHeader link ceiling (R3-t14c)",
+                 check_write_header_linkname(GOOD_WRITE_HEADER_LINK))
+    expect_trip("16-3 one-byte-loose link ceiling is red",
+                check_write_header_linkname(
+                    GOOD_WRITE_HEADER_LINK.replace(
+                        ".size > LINKNAME_LENGTH - 1)", ".size > LINKNAME_LENGTH)")),
+                "fires only from 101 bytes")
+    expect_trip("16-3b character-counted link ceiling is red",
+                check_write_header_linkname(
+                    GOOD_WRITE_HEADER_LINK.replace(
+                        "member.linkName.toByteArray(StandardCharsets.UTF_8).size > LINKNAME_LENGTH - 1",
+                        "member.linkName.length > LINKNAME_LENGTH - 1")),
+                "compares CHARACTERS")
+    expect_trip("16-3c long-link record not emitted is red",
+                check_write_header_linkname(
+                    GOOD_WRITE_HEADER_LINK.replace("'K'.code", "'L'.code")),
+                "no longer emits a GNU 'K' record")
+    expect_trip("16-3d link ceiling removed is red",
+                check_write_header_linkname(
+                    GOOD_WRITE_HEADER_LINK.replace(
+                        "    val longLink = if (member.linkName.toByteArray(StandardCharsets.UTF_8).size > LINKNAME_LENGTH - 1) {\n"
+                        "        member.linkName.toByteArray(StandardCharsets.UTF_8) + 0\n"
+                        "    } else null\n", "    val longLink = bytesOrNull(member)\n")),
+                "no longer tests the link target")
+
+    print("selftest R3-t14 arms        -> %d / %d / %d violation(s)"
+          % (len(check_extract_validate_gate(GOOD_EXTRACT_GATE)),
+             len(check_find_type_filter(GOOD_FIND_FILTER)),
+             len(check_write_header_linkname(GOOD_WRITE_HEADER_LINK))))
 
     print("selftest compliant tar          -> %d violation(s)" % len(good_tar))
     print("selftest compliant handler      -> %d violation(s)" % len(good_handler))
