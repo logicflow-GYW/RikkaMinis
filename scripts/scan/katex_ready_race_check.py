@@ -35,6 +35,25 @@ B. ChatViewModelStore.kt — the alias table read path must share the writers'
          (`.also { resolveKey(it) }` and `?.let { resolveKey(it); it }` both
          publish the un-resolved draft key).
 
+[r3-t05 / dual-gate + symmetric seams] Four properties that live BETWEEN the
+pinned shapes — each passes every spelling check above while the effect it
+exists to guarantee is gone:
+     A5  the renderer-death hook (`onRenderProcessGone` / `onRendererGone`)
+         must call `readyGate.markRendererGone(…)` on a live path, and the
+         gate's `markRendererGone` must actually clear `ready` and fail the
+         waiter — otherwise `ready` keeps its stale true and the next
+         `awaitReady()` admits renders onto a dead page (witness #100);
+     A6  the consumer `awaitReady()` must ANSWER with the gate's `failure`
+         (non-constant, sourced from it, right polarity) — a `return true`
+         reports a dead renderer as ready (witness #101);
+     A7  `renderInternal` must consume that answer behind a live `if
+         (!awaitReady())` that exits — `if (false && …)` or a bare call makes
+         A4 green while every cold-start render fails (same witness);
+     B5  the WRITE side of the alias table: `rename(from, to)` must record
+         `aliases[from] = to` on a reachable path — B1-B4 pin the read side
+         only, and a missing alias resolves a draft key to a fresh empty
+         ViewModelStore (witness #102).
+
 Analysis runs on `_kotlin_lexer.mask_code()` (comments and string bodies
 blanked, offsets preserved): this file's own KDoc quotes the pre-fix shapes and
 the sources contain `"http://"`-style literals whose `//` used to swallow the
@@ -66,13 +85,16 @@ from _kotlin_ast import (                                      # noqa: E402
     match_bracket,
     split_top,
     stmt_spans,
+    strip_parens,
     tail_expr,
 )
 from _kotlin_valueflow import (                                # noqa: E402
     code_view,
     contains_ident,
     expr_end,
+    guard_feasible,
     path_feasible,
+    returns_exiting,
     value_sources,
 )
 
@@ -89,6 +111,11 @@ CRIT_B1 = "B1 ChatViewModelStore.resolveKey is @Synchronized"
 CRIT_B2 = "B2 resolveKey still reads aliases[sessionId]"
 CRIT_B3 = "B3 ChatViewModelStore.activeSessionId getter is @Synchronized"
 CRIT_B4 = "B4 activeSessionId getter still resolves through resolveKey"
+CRIT_A5 = ("A5 onRendererGone tells the gate the renderer died, and that signal "
+           "clears `ready` + fails the waiter")
+CRIT_A6 = "A6 awaitReady() answers from the gate's failure (not a constant, right polarity)"
+CRIT_A7 = "A7 renderInternal consumes that answer behind a live, terminating guard"
+CRIT_B5 = "B5 rename() records the alias it promises"
 
 # ── shared-primitive glue ──────────────────────────────────────────────────
 # Everything below is derived from the lexer/AST/valueflow modules; this gate
@@ -439,6 +466,187 @@ def _returned_expr(text: str, start: int, end: int, kind: str) -> str:
     return (m.group(1) if m else tail).strip()
 
 
+def _cond_span(text: str, t_start: int):
+    """`if` 条件表达式的字符区间（then 体起点之前的那个括号里）。"""
+    last = None
+    for m in re.finditer(r"\bif\s*\(", text[:t_start]):
+        last = m
+    if last is None:
+        return None
+    open_paren = last.end() - 1
+    close = match_bracket(text, open_paren)
+    if close < 0:
+        return None
+    return open_paren + 1, close
+
+
+def _crit_a5(katex_code: str):
+    """渲染进程死亡信号必须真的到达 gate。
+
+    缝（W100）：A1 只钉 `onPageFinished -> markPageFinished`、Y 门只钉浏览器的
+    `onRendererGone`，中间「pool 的 onRendererGone 有没有告诉 gate」两门都不查。
+    漏掉这条，`ready` 在不该为 true 的时候保持 true —— 下一次 `awaitReady()`
+    立即放行，`renderMath` 跑在死页面上，4 秒后公式退化成源码。
+    """
+    span = _body(katex_code, "onRenderProcessGone") or _body(katex_code, "onRendererGone")
+    if span is None:
+        return False, ("no renderer-death hook (onRenderProcessGone / onRendererGone) in "
+                       "the pool -- re-point this guard"), -1
+    start, end, _kind = span
+    hits = [start + m.start() for m in
+            re.finditer(r"readyGate\s*\.\s*markRendererGone\s*\(",
+                        katex_code[start:end])]
+    if not hits:
+        return False, ("the renderer-death hook never calls readyGate.markRendererGone(…) -- "
+                       "`ready` keeps its stale true, so the next awaitReady() returns "
+                       "immediately and renderMath runs on a dead page"), -1
+    gate = _body(katex_code, "markRendererGone")
+    gbody = katex_code[gate[0]:gate[1]] if gate else ""
+    reasons = []
+    for pos in hits:
+        if not path_feasible(katex_code, pos):
+            reasons.append("the call sits in a dead branch (a constant-false guard)")
+            continue
+        if _dead_after_exit(katex_code, start, pos):
+            reasons.append("an unconditional early return above the call makes it unreachable")
+            continue
+        if not gate:
+            reasons.append("the gate has no markRendererGone(…) at all -- the death signal "
+                           "is dropped on the floor")
+            continue
+        if not re.search(r"\bready\s*=\s*false\b", gbody):
+            reasons.append("markRendererGone keeps `ready` true -- every later awaitReady() "
+                           "short-circuits on the stale flag")
+            continue
+        if "completeExceptionally(" not in gbody:
+            reasons.append("markRendererGone does not fail the waiting deferred "
+                           "(completeExceptionally) -- waiters burn the full budget on a "
+                           "renderer that is already gone")
+            continue
+        return True, "", line_of(katex_code, "markRendererGone(")
+    return False, "; ".join(sorted(set(reasons))), -1
+
+
+def _crit_a6(katex_code: str):
+    """`awaitReady()` 必须把 gate 的判决**回答出去**。
+
+    缝（W101）：A4 只钉 `KatexReadyGate.await` 的内部锁/预算/极性，调用侧的
+    `awaitReady()` 恒返回 true 完全不在视野里。判据 = 返回值不是常量、来源里
+    确实有 `failure`、且没有把非空 failure 当成 ready 的极性反转。
+    """
+    span = _body(katex_code, "awaitReady")
+    if span is None:
+        return False, "awaitReady() not found -- re-point this guard", -1
+    start, end, kind = span
+    expr = _returned_expr(katex_code, start, end, kind)
+    if not expr:
+        return False, "awaitReady() has no return expression to judge", -1
+    if const_bool(strip_parens(expr)) is not None:
+        return False, ("awaitReady() returns the constant %r -- the gate's verdict is "
+                       "dropped, so a renderer that never became ready is reported ready "
+                       "and the caller burns the full render timeout" % (expr[:60],)), -1
+    if not any(contains_ident(s, "failure") for s in value_sources(expr)):
+        return False, ("awaitReady()'s answer does not come from the gate's `failure` "
+                       "(%r) -- the verdict is computed and thrown away" % (expr[:70],)), -1
+    if (re.search(r"\bfailure\s*(?:!==?|!is)\s*(?:null|ReadyFailure)", expr)
+            or re.search(r"!\s*\(?\s*failure\b", expr)):
+        return False, ("awaitReady() inverts the polarity (%r) -- a timeout or a dead "
+                       "renderer is reported as ready" % (expr[:70],)), -1
+    return True, "", line_of(katex_code, "private suspend fun awaitReady")
+
+
+def _crit_a7(katex_code: str):
+    """renderInternal 必须按 `awaitReady()` 的答案退出。
+
+    W101 的 self_doubt：`if (false && !awaitReady())` 同样让 A4 全绿，却连正常
+    冷启动都失败。判据 = 调用点必须落在一条**可行**且**会退出**的
+    `if (!awaitReady())` 守卫里；裸调用（答案被丢弃）也算红。
+    """
+    span = _body(katex_code, "renderInternal")
+    if span is None:
+        return False, "renderInternal not found -- re-point this guard", -1
+    start, end, _kind = span
+    calls = [start + m.start() for m in
+             re.finditer(r"(?<![\w.])awaitReady\s*\(\s*\)", katex_code[start:end])]
+    if not calls:
+        return False, ("renderInternal never consults awaitReady() -- an unready renderer "
+                       "surfaces as a 4 s render timeout instead of a placeholder"), -1
+    problems = []
+    for pos in calls:
+        blk = None
+        for cond, t_start, t_end, _es, _ee in if_blocks(katex_code):
+            cs = _cond_span(katex_code, t_start)
+            if cs and cs[0] <= pos < cs[1]:
+                blk = (cond, t_start, t_end)
+                break
+        if blk is None:
+            problems.append("the awaitReady() answer is not used as an `if` condition "
+                            "(it is called and the value dropped)")
+            continue
+        cond, t_start, t_end = blk
+        norm = re.sub(r"\s+", "", strip_parens(cond))
+        if not (norm.startswith("!awaitReady()")
+                or norm in ("awaitReady()==false", "false==awaitReady()")):
+            problems.append("the awaitReady() answer is tested as `%s` -- only "
+                            "`if (!awaitReady())` means \"not ready -> fall back\""
+                            % cond.strip()[:50])
+            continue
+        if not guard_feasible(cond):
+            problems.append("the awaitReady() guard folds to a constant (`%s`) -- the "
+                            "fallback branch never runs" % cond.strip()[:50])
+            continue
+        if not returns_exiting(katex_code, t_start, t_end):
+            problems.append("the awaitReady() failure branch does not exit (no "
+                            "return/throw) -- rendering continues on a WebView that never "
+                            "became ready")
+            continue
+    if problems:
+        return False, "; ".join(sorted(set(problems))), -1
+    return True, "", line_of(katex_code, "awaitReady()")
+
+
+def _crit_b5(store_code: str):
+    """`rename(from, to)` 必须把别名写进 `aliases`。
+
+    缝（W102）：B1-B4 只钉读路径（`resolveKey` / getter），写入侧从没被查过。
+    别名不写 = 草稿 key 转正那一瞬，外部用旧 key 取 store 会新建一个空的，
+    正在进行的流式回复当场断连。
+    """
+    span = _body(store_code, "rename")
+    if span is None:
+        return False, "ChatViewModelStore.rename(…) not found -- re-point this guard", -1
+    start, end, _kind = span
+    params = _params(store_code, "rename")
+    if len(params) < 2:
+        return False, "rename(…) no longer takes (from, to) -- re-point this guard", -1
+    src, dst = params[0], params[1]
+    hits = [start + m.start() for m in
+            re.finditer(r"aliases\s*\[\s*" + re.escape(src) + r"\s*\]\s*=(?!=)",
+                        store_code[start:end])]
+    if not hits:
+        return False, ("rename(%s, %s) moves the ViewModelStore but never records the alias "
+                       "-- the draft key still held in activeSessionIdInternal resolves to a "
+                       "fresh empty store the moment the first message lands"
+                       % (src, dst)), -1
+    problems = []
+    for pos in hits:
+        eq = store_code.find("=", pos)
+        rhs = store_code[eq + 1:expr_end(store_code, eq + 1)]
+        if not any(contains_ident(s, dst) for s in value_sources(rhs)):
+            problems.append("the alias is recorded from %r instead of from %s"
+                            % (rhs.strip()[:50], dst))
+            continue
+        if not path_feasible(store_code, pos):
+            problems.append("the alias write sits in a dead branch")
+            continue
+        if _dead_after_exit(store_code, start, pos):
+            problems.append("an unconditional early return above it makes the alias write "
+                            "dead code")
+            continue
+        return True, "", line_of(store_code, "fun rename(")
+    return False, "; ".join(sorted(set(problems))), -1
+
+
 def _crit_b12(store_code: str):
     span = _body(store_code, "resolveKey")
     if span is None:
@@ -513,8 +721,12 @@ def analyse(katex_code: str, store_code: str):
     out.append((CRIT_A2,) + _crit_a2(katex_code))
     out.append((CRIT_A3,) + _crit_a3(katex_code))
     out.append((CRIT_A4,) + _crit_a4(katex_code))
+    out.append((CRIT_A5,) + _crit_a5(katex_code))
+    out.append((CRIT_A6,) + _crit_a6(katex_code))
+    out.append((CRIT_A7,) + _crit_a7(katex_code))
     out.extend(_crit_b12(store_code))
     out.extend(_crit_b34(store_code))
+    out.append((CRIT_B5,) + _crit_b5(store_code))
     return out
 
 
@@ -550,8 +762,28 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 internal class Pool {
     private val readyGate = KatexReadyGate()
+
     override fun onPageFinished() {
         readyGate.markPageFinished()
+    }
+
+    override fun onRendererGone(view: WebView?) {
+        readyGate.markRendererGone(
+            IllegalStateException("renderer process was killed by the system"),
+        )
+        if (webView === view) webView = null
+    }
+
+    private suspend fun renderInternal(): Int? {
+        val wv = ensureWebView() ?: return null
+        if (!awaitReady()) return null
+        return runOnMainSync()
+    }
+
+    private suspend fun awaitReady(): Boolean {
+        val failure = readyGate.await(RENDER_TIMEOUT_MS)
+        if (failure != null) android.util.Log.w("katex", "never ready")
+        return failure == null
     }
 }
 
@@ -569,6 +801,14 @@ internal class KatexReadyGate {
         d?.complete(Unit)
     }
 
+    fun markRendererGone(cause: Throwable) {
+        val d = synchronized(lock) {
+            ready = false
+            waiter.also { waiter = null }
+        }
+        d?.completeExceptionally(cause)
+    }
+
     suspend fun await(timeoutMs: Long): Boolean? {
         val d = synchronized(lock) {
             if (ready) return null
@@ -583,6 +823,7 @@ FIXED_STORE = '''package p
 
 object ChatViewModelStore {
     private val aliases = mutableMapOf<String, String>()
+    private val stores = mutableMapOf<String, Any>()
 
     @Synchronized
     private fun resolveKey(sessionId: String): String =
@@ -593,8 +834,21 @@ object ChatViewModelStore {
 
     val activeSessionId: String?
         @Synchronized get() = activeSessionIdInternal?.let { resolveKey(it) }
+
+    @Synchronized
+    fun rename(fromSessionId: String, toSessionId: String) {
+        if (fromSessionId == toSessionId) return
+        val store = stores.remove(fromSessionId)
+        if (store != null) {
+            stores[toSessionId] = store
+        }
+        aliases[fromSessionId] = toSessionId
+    }
 }
 '''
+
+
+ARMS_SEEN: list = []
 
 
 def selftest() -> int:
@@ -619,6 +873,7 @@ def selftest() -> int:
 
         def expect(sub_name: str, katex: str, store: str, needle: str, want_red=True):
             nonlocal ok
+            ARMS_SEEN.append(sub_name)
             r = write_pair("w_" + sub_name.replace(" ", "_").replace("/", "_"), katex, store)
             v = scan(r)
             hit = any(needle in x for x in v)
@@ -756,6 +1011,47 @@ def selftest() -> int:
                    "?: \"http://\".let { activeSessionIdInternal }", "B4d"),
                "B4")
 
+        # ---- A5/A6/A7/B5: the seam witnesses of r3-t05 ----
+        # #100: the renderer-death signal never reaches the gate (the pool drops
+        # it) -> `ready` stays true and the next render runs on a dead page.
+        expect("A5 (renderer-death hook drops the gate signal)",
+               rep(FIXED_KATEX,
+                   "        readyGate.markRendererGone(\n"
+                   "            IllegalStateException(\"renderer process was killed by the system\"),\n"
+                   "        )",
+                   "        // readyGate.markRendererGone(\n"
+                   "        //     IllegalStateException(\"renderer process was killed by the system\"),\n"
+                   "        // )", "A5"),
+               FIXED_STORE, "A5")
+        expect("A5b (markRendererGone keeps `ready` true)",
+               rep(FIXED_KATEX, "            ready = false\n            waiter.also",
+                   "            ready = true\n            waiter.also", "A5b"),
+               FIXED_STORE, "A5")
+        # #101: the consumer drops the gate's verdict.
+        expect("A6 (awaitReady answers with a constant)",
+               rep(FIXED_KATEX, "        return failure == null",
+                   "        return true", "A6"),
+               FIXED_STORE, "A6")
+        expect("A6b (awaitReady inverts the polarity)",
+               rep(FIXED_KATEX, "        return failure == null",
+                   "        return failure != null", "A6"),
+               FIXED_STORE, "A6")
+        # the self_doubt of the report: the guard is present but dead.
+        expect("A7 (awaitReady guard made constant-false)",
+               rep(FIXED_KATEX, "if (!awaitReady()) return null",
+                   "if (false && !awaitReady()) return null", "A7"),
+               FIXED_STORE, "A7")
+        expect("A7b (awaitReady answer discarded)",
+               rep(FIXED_KATEX, "if (!awaitReady()) return null",
+                   "awaitReady()", "A7"),
+               FIXED_STORE, "A7")
+        # #102: the write side of the alias table.
+        expect("B5 (rename never records the alias)",
+               FIXED_KATEX,
+               rep(FIXED_STORE, "        aliases[fromSessionId] = toSessionId",
+                   "        // aliases[fromSessionId] = toSessionId", "B5"),
+               "B5")
+
         # ---- arm C: missing file must red (not silently green) ----
         r = root / "c"
         _write(r / KATEX, FIXED_KATEX)
@@ -801,6 +1097,7 @@ def selftest() -> int:
 
     if ok:
         print(SELFTEST_MARKER)
+        print("KATEX_READY_RACE_SELFTEST_ARMS=%d" % len(ARMS_SEEN))
         return 0
     print("KATEX_READY_RACE_SELFTEST=FAIL")
     return 1
