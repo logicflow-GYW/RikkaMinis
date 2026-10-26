@@ -43,6 +43,25 @@ Criteria (all must hold):
       outlive the debt it names.
   F5  one media decision point (extension table / classifier / `#`-cut scope /
       absolute-path guard on every minis:// decode).
+  F6b the prefix-stripped path handed to `File(…)` is DECODED first — the root
+      is filesystem semantics, so the encoded URL form must not reach it;
+  F6c fromAssetLoaderUrl PUBLISHES the encoded form (`FILE_URL_PREFIX +
+      encodeFileUrlPath(…)`), keeping `currentUrl` byte-identical to the URL the
+      holder was constructed with;
+  F7  no raw path is concatenated into a `file://` URL anywhere under ui/** +
+      webapp/** — the operand must be the path encoder (`encodeFileUrlPath(…)`)
+      or its single builder (`fileUrlFor(…)`).
+
+[fix/fileurl-contract] The contract these three criteria pin — **encoded at
+construction, decoded at every path-semantics consumer** — is what the first
+three witnesses of this family kept half-fixing: `§1021-V` (a `#` in the name
+truncated the WebView load), `§1023-H` (`Uri.parse(url).path` on the same raw
+URL) and `fix/debt-sweep-1026` (a literal `%XX` name — `50%23.html` — arriving
+at the decoding consumers as `50#.html`). Every round fixed a consumer while the
+construction sites in `ChatScreen` / `WebAppActivity` kept concatenating the raw
+absolute path, so the two contracts stayed spliced together. F6b/F6c/F7 are the
+construction-side and holder-boundary halves of that same list; the sweep covers
+webapp/** too, because `WebAppActivity` was one of the three raw sites.
 
 Batch-7 witness wave — the criterion shape moved from "the token is present"
 to "the decision behind the token is live":
@@ -87,6 +106,10 @@ SHEET_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebPrev
 MD_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/StreamingMarkdownText.kt"
 HOLDER_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebViewHolder.kt"
 UI_ROOT_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui"
+# [fix/fileurl-contract] webapp/ constructs file:// URLs too (WebAppActivity was
+# one of the three raw sites this branch fixed), so the construction sweep covers
+# it; F4/F5 stay keyed on the merged dict and are green on webapp/.
+WEBAPP_ROOT_REL = "src/android/app/src/main/java/com/rikkaminis/app/webapp"
 # [dv22/B-06] the markdown media pipeline: one classifier, one parser, the
 # gallery collector and the image fetcher.
 MEDIA_MODEL_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/MarkdownBlockModel.kt"
@@ -451,6 +474,141 @@ def holder_root_problem(holder_code, holder_lit):
     return ""
 
 
+def holder_root_decode_problem(holder_code, holder_lit):
+    """F6b — the prefix-stripped path handed to `File(…)` is decoded first.
+
+    [fix/fileurl-contract] With the construction contract fixed (the initial
+    URL is encoded), `File(initialUrl.removePrefix("file://")).parentFile`
+    would look for a directory literally named `%E6%88%91…`: the loader root
+    exists nowhere, `InternalStoragePathHandler` serves nothing and every local
+    preview 404s while F6 still sees a stripped prefix. Only fires when the
+    strip IS present — the missing-strip case is F6's own witness.
+    """
+    args, unbalanced = [], False
+    for m in re.finditer(r"\bFile\s*\(", holder_code):
+        open_pos = m.end() - 1
+        if match_bracket(holder_code, open_pos) < 0:
+            unbalanced = True
+            continue
+        for a, b in call_args(holder_code, open_pos):
+            if "initialUrl" in holder_lit[a:b]:
+                args.append(holder_lit[a:b].strip())
+    if unbalanced:
+        return "unbalanced File(…) in the holder (fail-closed)"
+    stripped = [a for a in args if FILE_STRIP in a]
+    if not stripped:
+        return ""          # no stripped site to grade — F6 owns the missing-strip witness
+    bad = [a for a in stripped if "decodeUriPath(" not in a]
+    if bad:
+        return ("the asset root is built from the ENCODED URL %r — `File(…)` is filesystem "
+                "semantics, so the URL must be decoded first: "
+                "File(decodeUriPath(initialUrl.removePrefix(\"file://\")))" % bad[0][:80])
+    return ""
+
+
+def holder_publish_encode_problem(holder_code):
+    """F6c — `fromAssetLoaderUrl` publishes the ENCODED URL form.
+
+    [fix/fileurl-contract] `currentUrl` is read by three kinds of consumer: the
+    holder-reuse comparison in `ChatScreen` (`existing.currentUrl != url`),
+    `openExternalFromSheet` and `WebPreviewShortcut.pin`, both of which decode
+    (`decodeUriPath`). Publishing the raw resolved path (`FILE_URL_PREFIX +
+    resolved`) makes the reuse comparison fail on every repeat tap — the holder
+    is destroyed and rebuilt after every page start, which is the da1020-D
+    regression — and feeds the decoders a form that mangles a literal `%XX`
+    name (`50%23.html` → `50#.html`). Re-encoding with the same encoder keeps
+    the round trip byte-stable: `fileUrlFor(file)` → holder → `currentUrl` are
+    the identical string.
+    """
+    body = _body_text(holder_code, "fromAssetLoaderUrl")
+    if not body:
+        return "fromAssetLoaderUrl not found (fail-closed)"
+    rets = re.findall(r"\breturn\s+([^\n;]+)", body)
+    publishing = [r.strip() for r in rets if r.strip() not in ("", "null")]
+    if not publishing:
+        return "fromAssetLoaderUrl never publishes a URL (fail-closed)"
+    bad = [r for r in publishing if "encodeFileUrlPath(" not in r]
+    if bad:
+        return ("fromAssetLoaderUrl publishes %r — the reverse-mapped URL must be re-encoded "
+                "(FILE_URL_PREFIX + encodeFileUrlPath(resolved)) so `currentUrl` stays "
+                "byte-identical to the requested file:// URL; the raw path breaks the "
+                "holder-reuse comparison and the decoding consumers" % bad[0][:80])
+    return ""
+
+
+# A `file://` URL is built for a consumer that parses it as a URL (WebView /
+# asset loader / Intent / FileProvider), so its path must be percent-encoded at
+# construction. These are the only two sanctioned operands: the encoder itself
+# and the single builder that wraps it (`ui.sandbox.fileUrlFor`).
+FILE_URL_BUILDERS = ("encodeFileUrlPath(", "fileUrlFor(")
+FILE_URL_CONCAT_RE = re.compile(r'"file://"\s*\+')
+# Both interpolations: `"file://${expr}"` and the plain `"file://$ident"`.
+FILE_URL_TEMPLATE_RE = re.compile(r'"file://\$(?:\{|([A-Za-z_]\w*))')
+
+
+def _interpolation_at(lit, pos):
+    """Text inside `${ … }` starting at [pos] (just past the opening brace)."""
+    depth, j = 1, pos
+    while j < len(lit) and depth:
+        if lit[j] == '{':
+            depth += 1
+        elif lit[j] == '}':
+            depth -= 1
+        j += 1
+    return "" if depth else lit[pos:j - 1]
+
+
+def file_url_construction_problem(ui_views):
+    """F7 — no raw path may be concatenated into a `file://` URL.
+
+    [fix/fileurl-contract] Third witness of the same family; each previous round
+    fixed a *consumer* (§1021-V device-verified `#` truncation, §1023-H
+    `Uri.parse(url).path`, fix/debt-sweep-1026 literal-`%XX` double-decode) while
+    the construction sites kept `"file://" + file.absolutePath`. Returns
+    `(problem, encoded_sites)` — [encoded_sites] is the positive anchor: the
+    number of sanctioned construction sites the sweep did see.
+
+    Operates on the LITERAL view (comments blanked, string contents kept), so
+    the doc references to `"file://" + absolutePath` do not count. Concatenation
+    through the `FILE_URL_PREFIX` constant is out of this criterion's reach — it
+    is pinned by F6c at the one place that uses it.
+    """
+    offenders, encoded = [], 0
+    for rel in sorted(ui_views):
+        code, lit = ui_views[rel][0], ui_views[rel][1]
+        for m in FILE_URL_CONCAT_RE.finditer(lit):
+            pos = m.end()
+            while pos < len(lit) and lit[pos] in " \t\r\n":
+                pos += 1
+            if lit[pos:pos + 40].startswith(FILE_URL_BUILDERS):
+                encoded += 1
+            else:
+                offenders.append((rel, lit[pos:pos + 40].split("\n")[0].strip()))
+        for m in FILE_URL_TEMPLATE_RE.finditer(lit):
+            ident = m.group(1)
+            if ident:
+                # `"file://$path"` — the operand is one binding hop away.
+                rhs = _binding_rhs(code, ident, lit)
+                if rhs.startswith(FILE_URL_BUILDERS):
+                    encoded += 1
+                else:
+                    offenders.append((rel, "$%s (bound to %r)" % (ident, rhs[:40])))
+                continue
+            inner = _interpolation_at(lit, m.end()).strip()
+            if inner.startswith(FILE_URL_BUILDERS):
+                encoded += 1
+            else:
+                offenders.append((rel, "${%s}" % inner[:40]))
+    if offenders:
+        rel, snippet = offenders[0]
+        return ("%s builds a file:// URL by concatenating a raw path (%r) — its consumer "
+                "parses it as a URL, so the path must be percent-encoded at construction: "
+                "use ui.sandbox.fileUrlFor(file) / encodeFileUrlPath(path). A name containing "
+                "#, ?, a space or a literal %%XX otherwise resolves to a different file"
+                % (os.path.basename(rel), snippet), encoded)
+    return "", encoded
+
+
 def _dead_guard(cond):
     """Reason a guard decides nothing, or '' — constant folding covers
     `true || x`, `x || true`, `false && x`, `x && false`, `!true`, `1 == 2`."""
@@ -461,7 +619,8 @@ def _dead_guard(cond):
 
 
 def analyse(sheet_src, md_src, holder_src, ui_srcs, allowlist=None):
-    """ui_srcs: {repo_root_relpath: RAW source} for EVERY .kt under ui/**.
+    """ui_srcs: {repo_root_relpath: RAW source} for EVERY .kt under ui/** AND
+    webapp/** (main() merges the two walks; fixtures pass their own dict).
 
     Returns the criteria list [(name, ok, detail, line)]. A source the lexer
     cannot read makes the whole gate red (fail-closed) instead of falling back
@@ -520,6 +679,21 @@ def analyse(sheet_src, md_src, holder_src, ui_srcs, allowlist=None):
     problem6 = holder_root_problem(holder_code, holder_lit)
     results.append(("F6 holder asset root is derived from the prefix-stripped file:// URL",
                     problem6 == "", problem6 or "assetRootDir = <parent of the stripped path>", None))
+    problem6b = holder_root_decode_problem(holder_code, holder_lit)
+    results.append(("F6b holder asset root decodes the URL before File(…)",
+                    problem6b == "",
+                    problem6b or "File(decodeUriPath(initialUrl.removePrefix(\"file://\")))", None))
+    problem6c = holder_publish_encode_problem(holder_code)
+    results.append(("F6c fromAssetLoaderUrl publishes the encoded file:// form",
+                    problem6c == "",
+                    problem6c or "currentUrl = FILE_URL_PREFIX + encodeFileUrlPath(resolved)", None))
+
+    # --- F7: construction contract [fix/fileurl-contract] ---------------
+    problem7, encoded7 = file_url_construction_problem(ui_views)
+    results.append(("F7 every file:// URL under ui/** + webapp/** is built by the path encoder",
+                    problem7 == "",
+                    problem7 or "%d encoded construction site(s), no raw concatenation"
+                    % encoded7, None))
 
     # --- F4: ui/** sweep with allowlist --------------------------------
     allowlist = ALLOWLIST if allowlist is None else allowlist
@@ -743,7 +917,9 @@ fun resolveMdMediaFile(context: Context, stripped: String): File? {
 
 FIXED_HOLDER = """package probe
 class Holder(private val initialUrl: String) {
-    private val parentDir = java.io.File(initialUrl.removePrefix("file://")).parentFile
+    private val parentDir = java.io.File(
+        decodeUriPath(initialUrl.removePrefix("file://")),
+    ).parentFile
     private val assetRootDir: String? = parentDir?.absolutePath
 }
 internal fun toAssetLoaderUrl(fileUrl: String): String? {
@@ -756,14 +932,14 @@ internal fun fromAssetLoaderUrl(assetUrl: String, rootDir: String?): String? {
     val relative = decodeUriPath(
         assetUrl.removePrefix(ASSET_LOADER_PREFIX).substringBefore('#').substringBefore('?'),
     )
-    return FILE_URL_PREFIX + resolved
+    return FILE_URL_PREFIX + encodeFileUrlPath(resolved)
 }
 """
 
 # 01-1: the init block drops the `file://` strip — the root becomes `file:/…`
 BREAKER_HOLDER_ROOT = FIXED_HOLDER.replace(
-    'java.io.File(initialUrl.removePrefix("file://")).parentFile',
-    "java.io.File(initialUrl).parentFile")
+    'decodeUriPath(initialUrl.removePrefix("file://"))',
+    "initialUrl")
 assert BREAKER_HOLDER_ROOT != FIXED_HOLDER
 
 # 02-1: the forward mapping's name becomes a constant
@@ -771,6 +947,51 @@ BREAKER_HOLDER_NAME = FIXED_HOLDER.replace(
     "val name = fileUrl.removePrefix(FILE_URL_PREFIX).substringAfterLast('/')",
     'val name = ""')
 assert BREAKER_HOLDER_NAME != FIXED_HOLDER
+
+# [fix/fileurl-contract] strip kept, decode dropped — F6b alone.
+BREAKER_HOLDER_NO_DECODE = FIXED_HOLDER.replace(
+    'decodeUriPath(initialUrl.removePrefix("file://"))',
+    'initialUrl.removePrefix("file://")')
+assert BREAKER_HOLDER_NO_DECODE != FIXED_HOLDER
+
+# [fix/fileurl-contract] publish the raw resolved path — F6c alone.
+BREAKER_HOLDER_PUBLISH_RAW = FIXED_HOLDER.replace(
+    "return FILE_URL_PREFIX + encodeFileUrlPath(resolved)",
+    "return FILE_URL_PREFIX + resolved")
+assert BREAKER_HOLDER_PUBLISH_RAW != FIXED_HOLDER
+
+# [fix/fileurl-contract] F7 fixtures: the three construction spellings.
+RAW_CONCAT_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/RawFileUrlFixture.kt"
+RAW_CONCAT_FILE = """package probe
+fun openRaw(file: java.io.File) {
+    webView.loadUrl("file://" + file.absolutePath)
+}
+"""
+RAW_TEMPLATE_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/RawFileUrlTemplateFixture.kt"
+RAW_TEMPLATE_FILE = """package probe
+fun openRaw(file: java.io.File) {
+    webView.loadUrl("file://${file.absolutePath}")
+}
+"""
+RAW_DOLLAR_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/RawFileUrlDollarFixture.kt"
+RAW_DOLLAR_FILE = """package probe
+fun openRaw(file: java.io.File) {
+    webView.loadUrl("file://$path")
+}
+"""
+ENCODED_DOLLAR_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/EncodedFileUrlDollarFixture.kt"
+ENCODED_DOLLAR_FILE = """package probe
+fun openEncoded(file: java.io.File) {
+    val encoded = encodeFileUrlPath(file.absolutePath)
+    webView.loadUrl("file://$encoded")
+}
+"""
+ENCODED_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/EncodedFileUrlFixture.kt"
+ENCODED_FILE = """package probe
+fun openEncoded(file: java.io.File) {
+    webView.loadUrl("file://" + encodeFileUrlPath(file.absolutePath))
+}
+"""
 
 CUTS_REMOVED_HOLDER = """package probe
 internal fun fromAssetLoaderUrl(assetUrl: String, rootDir: String?): String? {
@@ -1137,6 +1358,50 @@ def selftest():
     expect(reds == ["F2c every minis:// strip in resolveMdMediaFile is decoded by decodeUriPath"],
            "r3-01-3 fallback-undecoded: exactly F2c must be RED, got %s" % reds)
 
+    # ---- [fix/fileurl-contract] construction contract arms (F6b / F6c / F7) --
+    # 04-1: strip kept, decode dropped — the encoded URL reaches File(…).
+    m = run(FIXED_SHEET, FIXED_MD, BREAKER_HOLDER_NO_DECODE, dict_of({}))
+    reds = sorted(c for c, ok, _d, _l in m if not ok)
+    expect(reds == ["F6b holder asset root decodes the URL before File(…)"],
+           "fileurl-04-1 no-decode root: exactly F6b must be RED, got %s" % reds)
+
+    # 04-2: the reverse mapping publishes the raw path again (holder reuse).
+    m = run(FIXED_SHEET, FIXED_MD, BREAKER_HOLDER_PUBLISH_RAW, dict_of({}))
+    reds = sorted(c for c, ok, _d, _l in m if not ok)
+    expect(reds == ["F6c fromAssetLoaderUrl publishes the encoded file:// form"],
+           "fileurl-04-2 publish-raw: exactly F6c must be RED, got %s" % reds)
+
+    # 04-3: a chat-side construction site goes back to raw concatenation.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({RAW_CONCAT_REL: RAW_CONCAT_FILE}))
+    reds = sorted(c for c, ok, _d, _l in m if not ok)
+    expect(reds == ["F7 every file:// URL under ui/** + webapp/** is built by the path encoder"],
+           "fileurl-04-3 raw-concat: exactly F7 must be RED, got %s" % reds)
+
+    # 04-4: the same defect in the string-template spelling.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({RAW_TEMPLATE_REL: RAW_TEMPLATE_FILE}))
+    reds = sorted(c for c, ok, _d, _l in m if not ok)
+    expect(reds == ["F7 every file:// URL under ui/** + webapp/** is built by the path encoder"],
+           "fileurl-04-4 raw-template: exactly F7 must be RED, got %s" % reds)
+
+    # 04-4b: the plain-interpolation spelling of the same defect.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({RAW_DOLLAR_REL: RAW_DOLLAR_FILE}))
+    reds = sorted(c for c, ok, _d, _l in m if not ok)
+    expect(reds == ["F7 every file:// URL under ui/** + webapp/** is built by the path encoder"],
+           "fileurl-04-4b raw-$interp: exactly F7 must be RED, got %s" % reds)
+
+    # 04-4c: precision — the same spelling IS sanctioned when the operand is the
+    # encoder's result through one binding hop.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({ENCODED_DOLLAR_REL: ENCODED_DOLLAR_FILE}))
+    expect(all_green(m),
+           "fileurl-04-4c encoded-$interp: one-hop encoder operand must stay GREEN, got %s"
+           % [c for c, ok, _d, _l in m if not ok])
+
+    # 04-5: precision — the encoder's own operand is the sanctioned form.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({ENCODED_REL: ENCODED_FILE}))
+    expect(all_green(m),
+           "fileurl-04-5 encoded-operand: the sanctioned form must stay GREEN, got %s"
+           % [c for c, ok, _d, _l in m if not ok])
+
     # 02-1: the forward mapping encodes a constant name (F3b only).
     m = run(FIXED_SHEET, FIXED_MD, BREAKER_HOLDER_NAME, dict_of({}))
     reds = sorted(c for c, ok, _d, _l in m if not ok)
@@ -1153,7 +1418,11 @@ def selftest():
           "host-precision=GREEN, media-hash-cut=RED, media-set-fork=RED, "
           "media-parser-ext=RED, media-chat-chain=RED, media-abs-guard=RED, "
           "dead-guard-both-sides=RED, consumption-cut=RED, md-let-parse=RED, "
-          "holder-post-cut=RED, raw-string-comment=RED, fail-closed=RED")
+          "holder-post-cut=RED, raw-string-comment=RED, fail-closed=RED, "
+          "fileurl-no-decode-root=RED, fileurl-publish-raw=RED, "
+          "fileurl-raw-concat=RED, fileurl-raw-template=RED, "
+          "fileurl-raw-dollar=RED, fileurl-encoded-dollar=GREEN, "
+          "fileurl-encoded-operand=GREEN")
     return arms
 
 
@@ -1171,14 +1440,10 @@ def main(argv):
     sheet_p = os.path.join(root, SHEET_REL)
     md_p = os.path.join(root, MD_REL)
     holder_p = os.path.join(root, HOLDER_REL)
-    ui_root = os.path.join(root, UI_ROOT_REL)
     for p in (sheet_p, md_p, holder_p):
         if not os.path.isfile(p):
             print("FAIL required file missing: %s" % p)
             return 1
-    if not os.path.isdir(ui_root):
-        print("FAIL ui root missing: %s" % ui_root)
-        return 1
 
     sheet_code = open(sheet_p, encoding="utf-8").read()
     md_code = open(md_p, encoding="utf-8").read()
@@ -1188,13 +1453,18 @@ def main(argv):
     # itself (mask_code / mask_comments), so a `}` or a `/*` inside a string
     # cannot truncate a body any more.
     ui_codes = {}
-    for dirpath, _dirnames, filenames in os.walk(ui_root):
-        for fn in filenames:
-            if not fn.endswith(".kt"):
-                continue
-            full = os.path.join(dirpath, fn)
-            rel = os.path.relpath(full, root).replace(os.sep, "/")
-            ui_codes[rel] = open(full, encoding="utf-8").read()
+    for base_rel in (UI_ROOT_REL, WEBAPP_ROOT_REL):
+        base = os.path.join(root, base_rel)
+        if not os.path.isdir(base):
+            print("FAIL swept root missing: %s" % base_rel)
+            return 1
+        for dirpath, _dirnames, filenames in os.walk(base):
+            for fn in filenames:
+                if not fn.endswith(".kt"):
+                    continue
+                full = os.path.join(dirpath, fn)
+                rel = os.path.relpath(full, root).replace(os.sep, "/")
+                ui_codes[rel] = open(full, encoding="utf-8").read()
 
     results = analyse(sheet_code, md_code, holder_code, ui_codes)
     failed = [r for r in results if not r[1]]
@@ -1204,7 +1474,7 @@ def main(argv):
         else:
             print("  [FAIL] %s%s — %s" % (crit, " (line %s)" % line if line else "", detail))
     print("Summary: %d passed, %d failed" % (len(results) - len(failed), len(failed)))
-    print("swept %d ui/** .kt file(s) under %s" % (len(ui_codes), UI_ROOT_REL))
+    print("swept %d .kt file(s) under %s + %s" % (len(ui_codes), UI_ROOT_REL, WEBAPP_ROOT_REL))
     if failed:
         print("file uri parse guard: RED — Uri.parse(...).path on local file:// "
               "paths truncates #/? and silently no-ops; resolve via ui.chat.decodeUriPath")

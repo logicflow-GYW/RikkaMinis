@@ -116,18 +116,33 @@ class AssetLoaderUrlMappingTest {
     }
 
     @Test fun encodedNameRoundTripsToTheSameFileUrl() {
-        val fileUrl = "file:///data/x/我的 报告.html"
+        // [fix/fileurl-contract] Round trip in the ENCODED form: what the reverse
+        // mapping publishes is the URL the holder was constructed with, not a raw
+        // path (ChatScreen compares the two strings to decide holder reuse).
+        val fileUrl = "file:///data/x/%E6%88%91%E7%9A%84%20%E6%8A%A5%E5%91%8A.html"
         val assetUrl = toAssetLoaderUrl(fileUrl)!!
         assertEquals(fileUrl, fromAssetLoaderUrl(assetUrl, rootDir))
+        assertEquals("/data/x/我的 报告.html",
+            com.rikkaminis.app.ui.chat.decodeUriPath(fileUrl.removePrefix("file://")))
 
-        val plusUrl = "file:///data/x/a+b.html"
+        val plusUrl = "file:///data/x/a%2Bb.html"
         assertEquals(plusUrl, fromAssetLoaderUrl(toAssetLoaderUrl(plusUrl)!!, rootDir))
     }
 
     @Test fun escapedPlusDecodesAsLiteralPlusNotSpace() {
+        // [fix/fileurl-contract] decoded to the name `a+b.html`, then published in
+        // the encoded form the contract requires (`+` is unreserved for this
+        // encoder, so it stays literal; only the `%2B` disappears).
         assertEquals(
-            "file:///data/x/a+b.html",
+            "file:///data/x/a%2Bb.html",
             fromAssetLoaderUrl("https://appassets.androidplatform.net/a%2Bb.html", rootDir),
+        )
+        assertEquals(
+            "/data/x/a+b.html",
+            com.rikkaminis.app.ui.chat.decodeUriPath(
+                fromAssetLoaderUrl("https://appassets.androidplatform.net/a%2Bb.html", rootDir)!!
+                    .removePrefix("file://"),
+            ),
         )
     }
 

@@ -1754,6 +1754,15 @@ internal fun encodeFileUrlPath(path: String): String {
  * concatenate `"file://" + file.absolutePath` raw: a name containing `#` or
  * `?` is parsed as fragment/query by WebView and the load fails with
  * `net::ERR_FILE_NOT_FOUND` (backlog §1021-V, device-verified 2026-10-17).
+ *
+ * [fix/fileurl-contract] This is the single construction point for a `file://`
+ * URL that crosses to a system component (WebView / asset loader / FileProvider),
+ * so it is `internal` rather than `private`: the chat HTML preview
+ * (`ChatScreen.openHtmlPreview` + the pinned-shortcut deep link) and the webapp
+ * shortcut (`WebAppActivity`) used to concatenate the raw path themselves, which
+ * left the two contracts spliced together — a file literally named `50%23.html`
+ * reached the decoding consumers as `50#.html`. Contract: **encoded at
+ * construction, decoded at every path-semantics consumer** (`decodeUriPath`).
  */
-private fun fileUrlFor(file: File): String = "file://" + encodeFileUrlPath(file.absolutePath)
+internal fun fileUrlFor(file: File): String = "file://" + encodeFileUrlPath(file.absolutePath)
 
