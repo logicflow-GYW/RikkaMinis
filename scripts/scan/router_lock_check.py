@@ -36,6 +36,12 @@ import os
 import re
 import sys
 
+# [B7-t13] 全部结构分析改走共享原语（自写的 code_only / 括号扫描已删除）。
+# 词法/语法/值流只有一份实现，见 scripts/scan/_kotlin_{lexer,ast,valueflow}.py。
+from _kotlin_lexer import KotlinLexError, mask_code
+from _kotlin_ast import match_bracket, strip_parens
+from _kotlin_valueflow import code_view, expr_end, value_sources
+
 ROUTER = "src/android/app/src/main/java/com/rikkaminis/app/data/routing/GroupRouter.kt"
 SCM = "src/android/app/src/main/java/com/rikkaminis/app/service/SessionConcurrencyManager.kt"
 
@@ -47,47 +53,12 @@ MIN_RESUME_SITES = 2
 
 
 def code_only(src):
-    """Comment/string-stripped view with ALL offsets preserved: contents are
-    replaced by spaces (newlines kept), so span/offset arithmetic below uses
-    the same coordinates as the raw file."""
-    out = list(src)
-    n = len(src)
-    i = 0
-    while i < n:
-        if src.startswith('"""', i):
-            j = src.find('"""', i + 3)
-            j = n if j < 0 else j
-            for k in range(i, min(j + 3, n)):
-                if out[k] != "\n":
-                    out[k] = " "
-            i = j + 3
-        elif src.startswith("//", i):
-            j = i
-            while j < n and src[j] != "\n":
-                out[j] = " "
-                j += 1
-            i = j
-        elif src.startswith("/*", i):
-            j = i + 2
-            while j + 1 < n and not (src[j] == "*" and src[j + 1] == "/"):
-                if out[j] != "\n":
-                    out[j] = " "
-                j += 1
-            for k in range(i, min(j + 2, n)):
-                if out[k] != "\n":
-                    out[k] = " "
-            i = j + 2
-        elif src[i] == '"':
-            j = i + 1
-            while j < n and src[j] != '"':
-                j += 2 if src[j] == "\\" else 1
-            for k in range(i + 1, min(j, n)):
-                if out[k] != "\n":
-                    out[k] = " "
-            i = j + 1
-        else:
-            i += 1
-    return "".join(out)
+    """结构视图 —— 共享词法器（注释 + 字符串/字符字面量内部抹成空格，长度与
+    原文严格相等，位置可直接回投）。[B7-t13] 这里原先是一份自写实现：字符串
+    里的 `}` / `{` 会让所有 span 与括号算术失真，正是 parser-death 轴的入口。
+    `KotlinLexError` 由调用方按 fail-closed 报红（不许回退原文扫描）。
+    """
+    return code_view(src)
 
 
 def blank_health_decl(code):
@@ -102,37 +73,27 @@ def blank_health_decl(code):
 
 
 def synchronized_spans(code):
-    """[(lock_expr, open_off, close_off)] for every `synchronized (…) { … }`."""
+    """[(lock_expr, open_off, close_off)] for every `synchronized (…) { … }`.
+
+    [B7-t13] 括号配平改用共享 `match_bracket`（自写深度计数遇到字符串里的
+    括号就错位；code 视图已抹平字面量，配平失败的一律丢弃 = 该 span 不存在，
+    依赖它的判据自然 fail-closed）。
+    """
     spans = []
     for m in re.finditer(r"\bsynchronized\s*\(", code):
-        i = m.end() - 1
-        depth = 0
-        while i < len(code):
-            if code[i] == "(":
-                depth += 1
-            elif code[i] == ")":
-                depth -= 1
-                if depth == 0:
-                    break
-            i += 1
-        if depth != 0:
+        p_close = match_bracket(code, m.end() - 1)
+        if p_close < 0:
             continue
-        lock_expr = code[m.end(): i].strip()
-        j = code.find("{", i + 1)
-        if j < 0 or j - i > 200:
+        lock_expr = code[m.end(): p_close].strip()
+        j = p_close + 1
+        while j < len(code) and code[j] in " \t\r\n":
+            j += 1
+        if j >= len(code) or code[j] != "{":
             continue
-        depth = 0
-        k = j
-        while k < len(code):
-            if code[k] == "{":
-                depth += 1
-            elif code[k] == "}":
-                depth -= 1
-                if depth == 0:
-                    break
-            k += 1
-        if depth == 0:
-            spans.append((lock_expr, j, k))
+        b_close = match_bracket(code, j)
+        if b_close < 0:
+            continue
+        spans.append((lock_expr, j, b_close))
     return spans
 
 
@@ -155,26 +116,46 @@ HEALTHLOCK_IDENTITY_CRIT = (
 )
 
 
+ACCESSOR_HEAD_RE = re.compile(r"^(?:(?:private|internal|protected|public|final|inline|override)\s+)*(?:get|set)\b")
+ANN_LINE_RE = re.compile(r"^@")
+
+
 def healthlock_identity(code):
     """(ok, detail, offset) — is `healthLock` one stable object?
 
-    A custom getter is written either inline (`val healthLock get() = …`) or on
-    the following line (`val healthLock: Any\\n    get() = …`), so both lines are
-    inspected. No initializer at all is a violation (fail-closed).
+    [B7-t13] SPELLING → 结构：判据原本只看声明行 + 「紧邻的下一非空行」，
+    于是
+        private val healthLock = Any()
+            @JvmName("getHealthLockMonitor")
+            get() = Any()
+    把访问器推到第 3 行就整段躲出视野（注解行占住了第 2 行，而它不匹配
+    `(get|set|by)`，窗口当场关闭）。现在按**属性的完整声明跨度**取：声明行
+    之后连续吞掉注解行与访问器行，直到出现真正的下一项声明为止 —— 窗口由
+    结构决定，不由行数决定。没有初始化器、`by` 委托、任何自定义访问器一律
+    红（fail-closed：monitor 身份静态不可确认）。
     """
     m = re.search(r"\bval\s+healthLock\b", code)
     if not m:
         return (False, "no `val healthLock` declaration", 0)
-    window = code[m.end(): m.end() + 240]
-    nl = window.find("\n")
-    first = window if nl < 0 else window[:nl]
-    tail = "" if nl < 0 else window[nl + 1:]
-    nxt = tail.lstrip().split("\n")[0] if tail.strip() else ""
-    joined = first + ("\n" + nxt if re.match(r"\s*(get|set|by)\b", nxt) else "")
+    lines = code[m.end():].split("\n")
+    first = lines[0]
+    consumed = [first]
+    for line in lines[1:6]:
+        stripped = line.strip()
+        if stripped and (ANN_LINE_RE.match(stripped) or ACCESSOR_HEAD_RE.match(stripped)):
+            consumed.append(line)
+            continue
+        break
+    joined = "\n".join(consumed)
     if re.search(r"\bget\s*\(", joined):
         return (False,
-                "custom getter (`get() = …`) — every read builds a NEW monitor, so "
-                "`synchronized(healthLock)` serializes nothing", m.start())
+                "custom getter (`get() = …`, %d declaration line(s) inspected) — every read "
+                "builds a NEW monitor, so `synchronized(healthLock)` serializes nothing"
+                % len(consumed), m.start())
+    if re.search(r"\bset\s*\(", joined):
+        return (False,
+                "custom setter on the monitor property — identity is not statically "
+                "confirmable (fail-closed)", m.start())
     if re.search(r"\bby\b", joined):
         return (False,
                 "delegated property (`by …`) — monitor identity is not statically "
@@ -184,6 +165,28 @@ def healthlock_identity(code):
                 "declaration carries no initializer — cannot confirm a stable "
                 "backing field (fail-closed)", m.start())
     return (True, "backing field, one instance for the object's lifetime", m.start())
+
+
+HEALTH_MONITOR_CRIT = (
+    "healthLock is the monitor BY VALUE (no per-call rewrite in the lock expression)"
+)
+
+
+def _is_health_monitor(expr):
+    """锁表达式**真正求值**的是不是 healthLock 本身。
+
+    `synchronized(healthLock)` → ['healthLock'] → 是。
+    `synchronized(healthLock.let { Any() })` → 共享 value_sources 取 let 的
+    lambda 尾表达式 → ['Any()'] → 不是（每次加锁都在一把新锁上）。
+    `synchronized(otherLock)` → 不是（但不属于本判据，由 span 归属判据处理）。
+    """
+    for src in value_sources(expr):
+        s = strip_parens(src.strip())
+        s = re.sub(r"^(?:this(?:@[A-Za-z_]\w*)?)\s*\.\s*", "", s)
+        s = re.sub(r"^@[A-Za-z_]\w*\s*\.\s*", "", s)
+        if s.strip() != "healthLock":
+            return False
+    return True
 
 
 def analyse_router(code):
@@ -203,7 +206,22 @@ def analyse_router(code):
         _line(code, off_id) if off_id else 0,
     ))
     spans = synchronized_spans(code)
-    health_spans = [(a, b) for (expr, a, b) in spans if "healthLock" in expr]
+    # [B7-t13] DATAFLOW: the span only counts as a health critical section if its
+    # monitor expression EVALUATES to healthLock. `"healthLock" in expr` accepted
+    # `synchronized(healthLock.let { Any() })` — the token is there, the lock is
+    # a brand-new object, so the section protects nothing.
+    health_spans = [(a, b) for (expr, a, b) in spans
+                    if "healthLock" in expr and _is_health_monitor(expr)]
+    rewritten = [(_line(code, a), expr) for (expr, a, b) in spans
+                 if "healthLock" in expr and not _is_health_monitor(expr)]
+    res.append((
+        HEALTH_MONITOR_CRIT,
+        not rewritten,
+        "every synthesized lock expression evaluates to healthLock" if not rewritten
+        else "%d lock expression(s) rewrite healthLock away at line(s) %s (e.g. %r)"
+             % (len(rewritten), ", ".join(str(l) for l, _ in rewritten[:4]), rewritten[0][1]),
+        rewritten[0][0] if rewritten else 0,
+    ))
     refs = list(HEALTH_REF.finditer(blank_health_decl(code)))
     res.append((
         "health access surface present (>= %d points)" % MIN_HEALTH_REFS,
@@ -228,9 +246,82 @@ def analyse_router(code):
     return res
 
 
+SYNCH_ANNOTATION_RE = (
+    # [B7-t13] SPELLING: `@kotlin.jvm.Synchronized` is the same annotation by
+    # bytecode, but `@Synchronized\b` never matched it — the qualified form split
+    # `@` and the name apart. Accept any qualification chain between them.
+    re.compile(r"@\s*(?:[A-Za-z_]\w*\s*\.\s*)*Synchronized\b")
+)
+
+FUN_DECL_RE = re.compile(r"\bfun\s+([A-Za-z_]\w*)\s*\(")
+
+
+def fun_regions(code):
+    """[{name,start,body_start,end}] for every `fun` (block and expression body).
+
+    Uses the shared bracket matcher / expression boundary; the previous
+    `fun_span` took the FIRST `{` after the signature, which for an expression
+    body (`= synchronized(lock) { … }`) is the lock block itself — anything
+    judged on "the body" then silently judged on the critical section.
+    """
+    out = []
+    for m in FUN_DECL_RE.finditer(code):
+        p_close = match_bracket(code, m.end() - 1)
+        if p_close < 0:
+            continue
+        i = p_close + 1
+        while i < len(code) and code[i] not in "={":
+            if code[i] == "\n":
+                i = -1
+                break
+            i += 1
+        if i < 0 or i >= len(code):
+            continue
+        end = match_bracket(code, i) if code[i] == "{" else expr_end(code, i + 1)
+        if end < 0:
+            continue
+        out.append({"name": m.group(1), "start": m.start(),
+                    "body_start": m.start(), "end": end,
+                    "expr_body": code[i] == "="})
+    return out
+
+
+def _call_sites(code, name):
+    """调用点（排除 `fun name(` 的声明本身）：[(pos)]。"""
+    out = []
+    for m in re.finditer(r"(?<![\w.`])" + re.escape(name) + r"\s*\(", code):
+        before = code[max(0, m.start() - 12):m.start()]
+        if re.search(r"\bfun\s+$", before):
+            continue
+        out.append(m.start())
+    return out
+
+
+def resumer_names(code, hops=2):
+    """函数名集合：函数体里出现 `.resume(`（或经 `hops` 跳调用到这种函数）。
+
+    [B7-t13] SCOPE 轴：判据原本只做**词法位置**包含 —— `.resume(` 的偏移量
+    在不在某个 `synchronized` 文本区间里。`synchronized(this) { finishPromotion(p) }`
+    里 `.resume(` 在辅助函数体内，词法上永远不在块内，于是"锁外 resume"这条
+    契约被一个字都不用改地绕开（这正是 ISSUE-10 原始 bug 的同构重现）。现在
+    判的是**调用关系**：持锁调用一个（传递地）会 resume 的函数 = 违规。
+    """
+    regions = fun_regions(code)
+    names = set()
+    for r in regions:
+        if RESUME_CALL.search(code[r["body_start"]:r["end"]]):
+            names.add(r["name"])
+    for _ in range(hops):
+        for r in regions:
+            body = code[r["body_start"]:r["end"]]
+            if any(_call_sites(body, n) for n in names):
+                names.add(r["name"])
+    return names
+
+
 def analyse_scm(code):
     res = []
-    synch = [m.start() for m in re.finditer(r"@Synchronized\b", code)]
+    synch = [m.start() for m in SYNCH_ANNOTATION_RE.finditer(code)]
     res.append((
         "no @Synchronized methods in SessionConcurrencyManager",
         not synch,
@@ -260,6 +351,31 @@ def analyse_scm(code):
         else "%d inside a span at line(s) %s" % (len(inside), ", ".join(str(_line(code, o)) for o in inside)),
         _line(code, inside[0]) if inside else 0,
     ))
+    # [B7-t13] SCOPE 轴：持锁调用"会 resume 的辅助函数"同样是持锁 resume。
+    annotated = []
+    for r in fun_regions(code):
+        head = code[max(0, r["start"] - 160):r["start"]]
+        if SYNCH_ANNOTATION_RE.search(head):
+            annotated.append((r["body_start"], r["end"]))
+    resumers = resumer_names(code)
+    locked_calls = []
+    for name in sorted(resumers):
+        for pos in _call_sites(code, name):
+            if any(a <= pos <= b for (_expr, a, b) in spans):
+                locked_calls.append((name, pos, "inside a synchronized span"))
+            elif any(s <= pos <= e for (s, e) in annotated):
+                locked_calls.append((name, pos, "inside an @Synchronized method"))
+    res.append((
+        "no lock-holding call reaches a resume site (helper indirection included)",
+        not locked_calls,
+        ("%d resumer(s) (%s), none called under a lock"
+         % (len(resumers), ", ".join(sorted(resumers)) or "-")) if not locked_calls
+        else "%d lock-holding call(s): %s" % (
+            len(locked_calls),
+            "; ".join("%s() at line %d %s" % (n, _line(code, p), why)
+                      for n, p, why in locked_calls[:4])),
+        _line(code, locked_calls[0][1]) if locked_calls else 0,
+    ))
     return res
 
 
@@ -269,18 +385,9 @@ STORE_GUARD = re.compile(r"\bsynchronized\s*\(\s*lock\s*\)")
 
 
 def block_span(code, open_off):
-    """(open, close) offsets of the brace block opened at `open_off`, or None."""
-    depth = 0
-    k = open_off
-    while k < len(code):
-        if code[k] == "{":
-            depth += 1
-        elif code[k] == "}":
-            depth -= 1
-            if depth == 0:
-                return (open_off, k)
-        k += 1
-    return None
+    """(open, close) of the brace block opened at `open_off` — shared matcher."""
+    close = match_bracket(code, open_off)
+    return None if close < 0 else (open_off, close)
 
 
 def companion_span(code):
@@ -291,31 +398,47 @@ def companion_span(code):
 
 
 def fun_span(code, name):
-    """(start, end) of `fun NAME(…)` INCLUDING its body block — block bodies and
-    expression bodies (`= synchronized(lock) { … }`) both take the first `{`
-    after the signature, which is exactly what identification needs."""
-    m = re.search(r"\bfun\s+" + re.escape(name) + r"\s*\(", code)
-    if not m:
-        return None
-    i = code.find("(", m.end() - 1)
-    depth = 0
-    while i < len(code):
-        if code[i] == "(":
-            depth += 1
-        elif code[i] == ")":
-            depth -= 1
-            if depth == 0:
-                break
-        i += 1
-    if depth != 0:
-        return None
-    br = code.find("{", i + 1)
-    if br < 0:
-        return None
-    span = block_span(code, br)
-    if span is None:
-        return None
-    return (m.start(), span[1])
+    """(start, end) of `fun NAME(…)` including its body (block or `= …` body).
+
+    [B7-t13] 原实现取签名后**第一个** `{`：对表达式体 `fun get() = synchronized(lock) { … }`
+    那个 `{` 就是临界区本身，函数体被截成锁块，任何"体内是否有锁"的判据
+    都只能看到锁、看不到锁外。现在用共享 fun_regions（表达式体按表达式
+    边界收尾）。
+    """
+    for r in fun_regions(code):
+        if r["name"] == name:
+            return (r["start"], r["end"])
+    return None
+
+
+LOOP_RE = re.compile(r"\b(?:while|for)\s*\(")
+
+
+def _is_lock_monitor(expr):
+    """锁表达式求值结果是 `lock` 本身吗（`lock.let { Any() }` 不是）。"""
+    for src in value_sources(expr):
+        if strip_parens(src.strip()) != "lock":
+            return False
+    return True
+
+
+def _loop_bodies(text):
+    """函数体里每个 while/for 的循环块文本（找不到块体返回单语句区间）。"""
+    out = []
+    for m in LOOP_RE.finditer(text):
+        close = match_bracket(text, m.end() - 1)
+        if close < 0:
+            continue
+        j = close + 1
+        while j < len(text) and text[j] in " \t\r\n":
+            j += 1
+        if j < len(text) and text[j] == "{":
+            end = match_bracket(text, j)
+            if end > 0:
+                out.append(text[j + 1:end])
+                continue
+        out.append(text[j:text.find("\n", j) if text.find("\n", j) > 0 else len(text)])
+    return out
 
 
 def analyse_store(code):
@@ -361,13 +484,41 @@ def analyse_store(code):
     for fname in ("get", "loadAll"):
         sp = fun_span(code, fname)
         body = code[sp[0]:sp[1]] if sp else ""
-        guarded = bool(sp) and STORE_GUARD.search(body) is not None
+        # [B7-t13] ORDER 轴：判据原本只问"函数体里出现过 synchronized(lock)"，
+        # 空块 `synchronized(lock) { Unit }` 也满足 —— 把受保护的读取搬到锁外，
+        # 门依然全绿。现在两件事都要有：①体内存在**非空**的 `synchronized(lock)`
+        # 块；②体内每一处状态读取（`prefs.` / `loadAll(` 调用）都落在这样的块里。
+        real_spans = []
+        for expr, a, b in synchronized_spans(body):
+            if not _is_lock_monitor(expr):
+                continue
+            if strip_parens(body[a + 1:b].strip()) in ("", "Unit"):
+                continue  # 空块 / 名义锁块：保护不到任何东西
+            real_spans.append((a, b))
+        loose_reads = []
+        for m in re.finditer(r"prefs\s*\.|(?<![\w.])loadAll\s*\(", body):
+            if re.search(r"\bfun\s+$", body[max(0, m.start() - 12):m.start()]):
+                continue  # `fun loadAll(` 的声明本身不是读取
+            if not any(a <= m.start() <= b for (a, b) in real_spans):
+                loose_reads.append(m.start())
+        guarded = bool(real_spans) and not loose_reads
+        if guarded:
+            detail = "the read path runs inside a non-empty `synchronized(lock)` block (%d span(s))" % len(real_spans)
+        elif not sp:
+            detail = "`fun %s(` not found (anchor drift)" % fname
+        elif not synchronized_spans(body):
+            detail = "body has no `synchronized(lock)`"
+        elif not real_spans:
+            detail = ("`synchronized(lock)` is only a nominal/empty block (`{ Unit }`) — "
+                      "the protected read sits outside it")
+        else:
+            detail = ("%d read(s) sit OUTSIDE the lock block at body offset(s) %s — an empty/"
+                      "nominal lock block does not protect them"
+                      % (len(loose_reads), ", ".join(str(o) for o in loose_reads[:4])))
         res.append((
             "store: %s() body holds synchronized(lock)" % fname,
             guarded,
-            ("`synchronized(lock)` present in the body" if guarded
-             else ("`fun %s(` not found (anchor drift)" % fname if not sp
-                   else "body has no `synchronized(lock)`")),
+            detail,
             _line(code, sp[0]) if sp else 0,
         ))
 
@@ -381,7 +532,13 @@ def analyse_store(code):
     rem_ok = bool(rem_sp) and bool(idem_accept.search(code[rem_sp[0]:rem_sp[1]]))
     help_body = code[help_sp[0]:help_sp[1]] if help_sp else ""
     n_returns = len(re.findall(r"\breturn\b", help_body))
-    help_ok = bool(help_sp) and ".remove(" in help_body and n_returns == 1
+    # [B7-t13] FAMILY-HOLE：判据原本只数 `return` 的个数（"体内恰好一个 return"
+    # = 扫完整个列表才返回）。把 `return true` 换成循环里的 `break`，关键字计数
+    # 一个不变，函数却退化成 removeFirstMatchById —— 幽灵行回来了。现在直接禁
+    # 循环体内的 `break`（提前退出扫描 = 没清干净）。
+    loop_breaks = [seg for seg in _loop_bodies(help_body) if re.search(r"\bbreak\b", seg)]
+    help_ok = (bool(help_sp) and ".remove(" in help_body
+               and n_returns == 1 and not loop_breaks)
     idem_ok = add_ok and rem_ok and help_ok
     if idem_ok:
         idem_detail = ("add()/remove() both route same-id handling through the "
@@ -400,6 +557,9 @@ def analyse_store(code):
             missing.append("remove() does not route same-id cleanup through the single helper (first-match-only?)")
         if help_sp and (n_returns != 1 or ".remove(" not in help_body):
             missing.append("removeAllById body must clear EVERY match (no early return inside the scan loop)")
+        if help_sp and loop_breaks:
+            missing.append("removeAllById breaks out of its scan loop — the remaining same-id rows stay behind "
+                           "(a `break` is a first-match exit that keeps the `return` count at one)")
         idem_detail = "; ".join(missing)
     res.append((
         "store: same-id ledger semantics (add replaces, remove clears all, one helper)",
@@ -467,6 +627,20 @@ ROUTER_BREAKERS = {
         [("private val healthLock = Any()", "private val healthLock get() = Any()")],
         HEALTHLOCK_IDENTITY_CRIT,
     ),
+    # [B7-t13] 03-1: the accessor hides behind an annotation line — the window
+    # that only looked at "declaration line + next non-empty line" was shut by
+    # the annotation, so `get() = Any()` on the third line was never read.
+    7: (
+        [("private val healthLock = Any()",
+          "private val healthLock = Any()\n        @JvmName(\"getHealthLockMonitor\")\n        get() = Any()")],
+        HEALTHLOCK_IDENTITY_CRIT,
+    ),
+    # [B7-t13] 03-2: the token is in the expression, the monitor is a new object.
+    8: (
+        [("fun clearHealth() = synchronized(healthLock) { health.clear() }",
+          "fun clearHealth() = synchronized(healthLock.let { Any() }) { health.clear() }")],
+        HEALTH_MONITOR_CRIT,
+    ),
     # delegated property: identity is not statically confirmable (fail-closed)
     6: (
         [("private val healthLock = Any()", "private val healthLock by lazy { Any() }")],
@@ -519,6 +693,18 @@ SCM_BREAKERS = {
         [("promotion.toResume?.resume(Unit)", "promotion.toResume"),
          ("resumeNow?.resume(Unit)", "checkNotNull(resumeNow)")],
         "waiter wake-up sites exist (>= 2)",
+    ),
+    # [B7-t13] 03-3: the resume stays inside a helper, but the helper is CALLED
+    # under the lock — the lexical span check could not see it.
+    5: (
+        [("fun releaseSlot(runId: String) {\n        val promotion = synchronized(this) { promoteLocked(runId) }\n        finishPromotion(promotion)\n    }",
+          "fun releaseSlot(runId: String) {\n        val promotion = synchronized(this) { promoteLocked(runId) }\n        synchronized(this) { finishPromotion(promotion) }\n    }")],
+        "no lock-holding call reaches a resume site (helper indirection included)",
+    ),
+    # [B7-t13] 03-4: the fully qualified annotation is the same annotation.
+    6: (
+        [("fun releaseSlot(runId: String) {", "@kotlin.jvm.Synchronized\n    fun releaseSlot(runId: String) {")],
+        "no @Synchronized methods in SessionConcurrencyManager",
     ),
     4: (
         [("val promotion = synchronized(this) { promoteLocked(runId) }", "val promotion = promoteLocked(runId)"),
@@ -606,6 +792,18 @@ STORE_BREAKERS = {
     "remove-first-only": (
         [("            if (removeAllById(rawList, id)) {\n                return true\n            }\n            return false",
           "            for (i in 0 until rawList.length()) {\n                if (rawList.getJSONObject(i).optString(\"id\") == id) {\n                    rawList.remove(i)\n                    return true\n                }\n            }\n            return false")],
+        "store: same-id ledger semantics (add replaces, remove clears all, one helper)",
+    ),
+    # [B7-t13] 03-5: the lock block survives, the protected read leaves it.
+    "get-nominal-lock": (
+        [("    fun get(id: String): String? = synchronized(lock) {\n        loadAll()\n        if (raw == id) id else null\n    }",
+          "    fun get(id: String): String? {\n        synchronized(lock) { Unit }\n        loadAll()\n        return if (raw == id) id else null\n    }")],
+        "store: get() body holds synchronized(lock)",
+    ),
+    # [B7-t13] 03-6: `break` is a first-match exit that keeps the return count.
+    "helper-loop-break": (
+        [("            list.remove(i)\n            removed = true\n        }",
+          "            list.remove(i)\n            removed = true\n            break\n        }")],
         "store: same-id ledger semantics (add replaces, remove clears all, one helper)",
     ),
     "helper-first-match-return": (
@@ -736,7 +934,11 @@ def main():
         if not os.path.isfile(path):
             print("FAIL %s not found under root %s" % (rel, root))
             return 1
-        code = code_only(open(path, encoding="utf-8").read())
+        try:
+            code = code_only(open(path, encoding="utf-8").read())
+        except KotlinLexError as exc:
+            print("FAIL %s: kotlin lex error (%s) — fail-closed" % (rel, exc))
+            return 1
         print("== enforced: %s" % rel)
         for crit, ok, detail, line in analyser(code):
             results.append((crit, ok, detail, line, rel))
