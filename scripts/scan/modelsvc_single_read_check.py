@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""
+r"""
 Gate: FIX-H (deep-audit-1018 ISSUE-12a/b) — read the request body once, bound
 the offload worker threads.
 
@@ -7,22 +7,35 @@ ISSUE-12a (ModelExecutionService.kt)
   The worker used to read `request.json` from disk THREE times — the queue-frame
   decision, the formal read and the ack-barrier decision — and parse it at each
   site, i.e. 2 redundant reads + 2 redundant parses of a body that can reach
-  several MB (base64 input images). The rule: exactly ONE
-  `requestFile.readText()` site, routed through `CapturedRequestBody.capture`,
-  with the already-parsed body handed to both executors.
+  several MB (base64 input images). The rule: exactly ONE read of the body,
+  routed through `CapturedRequestBody.capture`, with the captured/parsed body
+  handed to both executors.
 
 ISSUE-12b (NativeOffload.kt)
   The accept loop used to spawn one OS thread per accepted connection and let
   that thread park on the concurrency semaphore — a burst of N offloads created
   N threads (each ~1 MB native stack) while only `permits` made progress. The
-  rule: the accept loop hands sockets to `BoundedWorkerPool` (no `thread(` in the
-  loop, no `workerConcurrency.acquire()` anywhere in the file), and the pool
+  rule: the accept loop hands sockets to `BoundedWorkerPool` (no thread spawn in
+  the loop, no `workerConcurrency.acquire()` anywhere in the file), and the pool
   spawns a worker only against the non-blocking `permits.tryAcquire()` bound and
   returns the permit when it drains empty.
 
-Checks assert PRESENCE of the bounded/once-only routing rather than the absence
-of a spelling, so a refactor that keeps the contract is a deliberate edit to
-this gate rather than a silent pass.
+[meta-audit batch7 B7-t03] The judgments used to be anchored on SPELLINGS —
+`requestFile\s*\.\s*readText()`, `JSONObject(\s*requestFile`, a three-word
+thread blacklist, the literal `pool.submit(client)` substring, `"if (spawn)"`
+text, the `permits.release()` substring. Nine minimal patches kept every
+spelling and deleted the effect (a different reader spelling, a capture whose
+value is thrown away, `CompletableFuture.runAsync`, an `else` branch that
+spawns anyway, `if (false) pool.submit(…)`, `if (false) permits.release()`).
+
+  The judgments are therefore anchored on the DECISION POINT via the shared
+  primitives: every content READ of the request body must sit inside the single
+  `CapturedRequestBody.capture { … }` lambda (any receiver/constructor spelling
+  counts — the read is located by what it touches, not by how it is spelled);
+  the captured value must be the one the executors consume; `pool.submit` must
+  be reachable (`path_feasible`); client handling must go through the pool; the
+  worker spawn must be DOMINATED by the permit verdict; `permits.release()`
+  must be reachable.
 
 Usage: python3 scripts/scan/modelsvc_single_read_check.py [repo_root]
        python3 scripts/scan/modelsvc_single_read_check.py --selftest
@@ -32,87 +45,230 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import KotlinLexError, mask_code  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    function_body,
+    if_blocks,
+    match_bracket,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    contains_ident,
+    expr_end,
+    guard_feasible,
+    path_feasible,
+)
+
 SERVICE_REL = (
     "src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/ModelExecutionService.kt"
 )
 OFFLOAD_REL = "src/android/app/src/main/java/com/rikkaminis/app/sandbox/NativeOffload.kt"
 
-READ_CALL = "requestFile.readText()"
 CAPTURE_CALL = "CapturedRequestBody.capture { requestFile.readText() }"
 SITE_PARSE = "JSONObject(requestFile.readText())"
-OLD_LOCAL_RE = re.compile(r"\brequestText\b")
 EXEC_SIGS = (
     "private fun executeRun(req: JSONObject, dir: File): String",
     "private fun executeStreamingRun(req: JSONObject, dir: File)",
 )
+# The two consumers that make a capture meaningful: the queue-frame decision and
+# the formal parse. A captured body that neither of them reads is a body that
+# was read twice and used zero times.
+CAPTURE_CONSUMERS = ("jsonOrThrow", "streamingFlagOrFalse")
 
 POOL_SUBMIT = "pool.submit(client)"
 OLD_ACQUIRE = "workerConcurrency.acquire()"
 TRY_ACQUIRE = "permits.tryAcquire()"
-PERMIT_RELEASE = "permits.release()"
 POOL_DECL = "internal class BoundedWorkerPool"
 CAP_CONST = "const val MAX_CONCURRENT_WORKERS = 2"
-ACCEPT_LOOP = "private fun runAcceptLoop("
-NEXT_MEMBER = "private fun handleClient("
+ACCEPT_LOOP = "runAcceptLoop"
+
+# [B7-t03] Content reads, located by what they touch rather than by how the
+# receiver is spelled. `requestFile.inputStream()…` (receiver), and
+# `FileReader(requestFile)` / `Files.readAllBytes(requestFile.toPath())`
+# (constructor argument) are the same act: pulling the body off disk.
+READ_METHOD_RE = re.compile(
+    r"\.\s*(?:readText|readLines|readBytes|inputStream|bufferedReader|useLines|"
+    r"readChannel|copyTo|lines)\s*\("
+)
+READ_CTOR_RE = re.compile(
+    r"\b(?:FileReader|FileInputStream|BufferedReader|Scanner|Files\s*\.\s*read\w*)\s*\("
+)
+CAPTURE_RE = re.compile(r"\bCapturedRequestBody\s*\.\s*capture\s*\{")
+# Non-content touches of the request file (`exists()`, `delete()`, `length()`,
+# `name`) are legitimate and must stay green.
+META_CALL_RE = re.compile(
+    r"\.\s*(?:exists|delete|deleteOnExit|isFile|canRead|length|getName|name|"
+    r"absolutePath|canonicalPath|parent|toPath|toFile|toUri)\s*\("
+)
+
+# [B7-t03] Parallel-escaping primitives. The old detector whitelisted three
+# spellings; `CompletableFuture.runAsync` carried the same defect past it.
+PARALLEL_RE = re.compile(
+    r"(?<![\w])(?:thread\s*[({]|Thread\s*\(|Thread\s*\.|Executors\b|"
+    r"CompletableFuture\b|ForkJoinPool\b|GlobalScope\b|CoroutineScope\b|"
+    r"(?:launch|async|runAsync)\s*[({]|newSingleThreadExecutor|newFixedThreadPool|"
+    r"kotlin\s*\.\s*concurrent)"
+)
+BODY_READ_GUARD_RE = re.compile(r"\bif\s*\(\s*spawn\s*\)")
 
 
-# [wide-1024 12-misc-b] Every way this file can pull the body off disk. The old
-# count matched ONE spelling (`requestFile.readText()`), so
-# `requestFile.inputStream().bufferedReader().use { it.readText() }` — a second
-# full read plus a second parse of a multi-MB body — was invisible. The rule is
-# "the body is read once", so the criterion counts READS, not spellings.
-READ_API = (r"(?:readText|readLines|readBytes|inputStream|bufferedReader|"
-            r"useLines|readChannel|copyTo|lines\s*\()")
-READ_SITE_RE = re.compile(r"requestFile\s*\.\s*" + READ_API)
-# `thread { … }` needs no parentheses (all params defaulted, trailing lambda) —
-# the old detector only looked for the literal "thread(".
-THREAD_SPAWN_RE = re.compile(r"(?<!\w)thread\s*[({]|\bThread\s*\(|\bExecutors\b")
 
 
-def read_sites(src):
-    """1-based line of EVERY read site (two reads on one line = two sites)."""
-    return [src[: m.start()].count("\n") + 1 for m in READ_SITE_RE.finditer(src)]
+def _body_aliases(code):
+    """Names bound to the request file (`val rf = requestFile`), 2 hops."""
+    aliases = {"requestFile"}
+    for _ in range(3):
+        grew = False
+        for m in re.finditer(r"\b(?:val|var)\s+(\w+)\s*=\s*(\w+)\s*(?:\n|;|$)", code):
+            if m.group(2) in aliases and m.group(1) not in aliases:
+                aliases.add(m.group(1))
+                grew = True
+        if not grew:
+            break
+    aliases.discard("requestFile")
+    aliases = {"requestFile"} | aliases
+    return aliases
 
 
-def lines_of(src, needle):
-    return [i + 1 for i, line in enumerate(src.split("\n")) if needle in line]
+def _names_in(text, names):
+    return any(contains_ident(text, n) for n in names)
+
+
+def _receiver_window(code, pos, back=90):
+    """The receiver/argument window ending at `pos` (one statement at most)."""
+    start = pos
+    while start > 0 and code[start - 1] not in "\n;{}":
+        start -= 1
+    return code[max(start, pos - back):pos]
+
+
+def body_read_sites(code):
+    """[(pos, kind)] — every content read of the request body."""
+    names = _body_aliases(code)
+    out = []
+    for m in READ_METHOD_RE.finditer(code):
+        if META_CALL_RE.search(code[max(0, m.start() - 24):m.start() + 1]):
+            continue
+        window = _receiver_window(code, m.start())
+        if _names_in(window, names):
+            out.append((m.start(), "method"))
+    for m in READ_CTOR_RE.finditer(code):
+        spans = call_args(code, m.end() - 1)
+        if not spans:
+            # fail-closed: an unparseable read constructor is treated as a read
+            out.append((m.start(), "ctor"))
+            continue
+        if any(_names_in(code[a:b], names) for a, b in spans):
+            out.append((m.start(), "ctor"))
+    return out, names
+
+
+def capture_lambdas(code):
+    """[(start, body_start, body_end)] for every `CapturedRequestBody.capture { … }`."""
+    out = []
+    for m in CAPTURE_RE.finditer(code):
+        open_brace = m.end() - 1
+        close = match_bracket(code, open_brace)
+        if close > 0:
+            out.append((m.start(), open_brace + 1, close))
+    return out
+
+
+def capture_binding(code, capture_start):
+    """The local the capture result is bound to, or None."""
+    line_start = code.rfind("\n", 0, capture_start) + 1
+    head = code[line_start:capture_start]
+    m = re.search(r"\b(?:val|var)\s+(\w+)\s*=\s*$", head)
+    return m.group(1) if m else None
 
 
 def check_service(src):
+    """ISSUE-12a: one read of the body, inside the single capture, consumed."""
     v = []
-    reads = read_sites(src)
-    if len(reads) != 1:
-        where = ", ".join(str(n) for n in reads) or "-"
+    try:
+        code = mask_code(src)
+    except KotlinLexError as exc:
+        return ["ModelExecutionService.kt: cannot parse (fail-closed): %s" % exc]
+
+    reads, names = body_read_sites(code)
+    captures = capture_lambdas(code)
+
+    # (1) exactly one capture, and it is the only place the body is read.
+    if not captures:
         v.append(
-            "ModelExecutionService.kt:%s: %d x read of requestFile (exactly 1 "
-            "expected — the body must be read once per run, whatever the spelling)"
-            % (where, len(reads))
+            "ModelExecutionService.kt: the body read is not routed through "
+            "'CapturedRequestBody.capture { … }' (no capture lambda found)"
         )
-    if CAPTURE_CALL not in src:
+    elif len(captures) > 1:
         v.append(
-            "ModelExecutionService.kt: the single read is not routed through "
-            "'%s'" % CAPTURE_CALL
+            "ModelExecutionService.kt:%d: %d x CapturedRequestBody.capture — the "
+            "body must be captured once per run (a second capture re-reads or "
+            "re-parses it)"
+            % (code[:captures[1][0]].count("\n") + 1, len(captures))
         )
-    for n in lines_of(src, "requestText"):
-        m = OLD_LOCAL_RE.search(src.split("\n")[n - 1])
-        if m:
+
+    inside = [False] * len(reads)
+    for i, (pos, _kind) in enumerate(reads):
+        inside[i] = any(b_start <= pos < b_end for _s, b_start, b_end in captures)
+    stray = [pos for i, (pos, _k) in enumerate(reads) if not inside[i]]
+    if stray:
+        v.append(
+            "ModelExecutionService.kt:%s: %d read(s) of the request body OUTSIDE "
+            "the capture lambda — whatever the spelling (receiver method, "
+            "FileReader/FileInputStream argument, buffered chain), the body is "
+            "read once, inside CapturedRequestBody"
+            % (", ".join(str(code[:p].count("\n") + 1) for p in stray), len(stray))
+        )
+    for start, b_start, b_end in captures:
+        if not any(b_start <= pos < b_end for pos, _k in reads):
+            v.append(
+                "ModelExecutionService.kt:%d: the capture lambda reads nothing "
+                "(the captured body would be empty while every downstream parse "
+                "throws)" % (code[:start].count("\n") + 1)
+            )
+
+    # (2) the captured value must be the value the executors read.
+    for start, _bs, _be in captures:
+        name = capture_binding(code, start)
+        if name is None:
+            v.append(
+                "ModelExecutionService.kt:%d: the capture result is not bound to a "
+                "local — nothing downstream can use the captured body"
+                % (code[:start].count("\n") + 1)
+            )
+            continue
+        if name.startswith("_"):
+            v.append(
+                "ModelExecutionService.kt:%d: the capture result is bound to the "
+                "DELIBERATELY-DISCARDED local '%s' — the body is read and thrown away"
+                % (code[:start].count("\n") + 1, name)
+            )
+        for consumer in CAPTURE_CONSUMERS:
+            if not re.search(r"\b" + re.escape(name) + r"\s*\.\s*" + consumer + r"\s*\(", code):
+                v.append(
+                    "ModelExecutionService.kt: the captured local '%s' is never read "
+                    "through '%s(…)' — the value that reaches the executors is not "
+                    "the one that was captured" % (name, consumer)
+                )
+
+    # (3) legacy spellings keep their own voice (they are the pre-fix shapes).
+    for n, line in enumerate(code.split("\n"), 1):
+        if re.search(r"\brequestText\b", line):
             v.append(
                 "ModelExecutionService.kt:%d: leftover per-site local "
                 "'requestText' (re-read path is back)" % n
             )
-    if re.search(r"JSONObject\s*\(\s*requestFile", src):
-        v.append(
-            "ModelExecutionService.kt:%d: a second parse is built straight from "
-            "requestFile — the captured body (CapturedRequestBody) must be the only "
-            "reader" % (read_sites(src) or [0])[0]
-        )
-    if SITE_PARSE in src:
+    if SITE_PARSE in code:
         v.append(
             "ModelExecutionService.kt:%d: per-site parse '%s' is back"
-            % (lines_of(src, SITE_PARSE)[0], SITE_PARSE)
+            % (code.split("\n").index([l for l in code.split("\n") if SITE_PARSE in l][0]) + 1,
+               SITE_PARSE)
         )
     for sig in EXEC_SIGS:
-        if sig not in src:
+        if sig not in code:
             v.append(
                 "ModelExecutionService.kt: executor does not take the parsed "
                 "body — missing '%s'" % sig
@@ -120,73 +276,159 @@ def check_service(src):
     return v
 
 
-def accept_loop_slice(src):
-    start = src.find(ACCEPT_LOOP)
-    if start < 0:
-        return None
-    end = src.find(NEXT_MEMBER, start)
-    return src[start:] if end < 0 else src[start:end]
-
-
 def check_offload(src):
+    """ISSUE-12b: the accept loop delegates to a permit-bounded pool."""
     v = []
-    loop = accept_loop_slice(src)
-    if loop is None:
-        v.append("NativeOffload.kt: 'runAcceptLoop' not found (ROT — update this gate)")
-        return v
-    for n, line in enumerate(loop.split("\n"), 1):
-        if THREAD_SPAWN_RE.search(line):
-            v.append(
-                "NativeOffload.kt: runAcceptLoop (line %d of the member) spawns a "
-                "thread — accept must delegate to the bounded pool" % n
-            )
-    if POOL_SUBMIT not in loop:
+    try:
+        code = mask_code(src)
+    except KotlinLexError as exc:
+        return ["NativeOffload.kt: cannot parse (fail-closed): %s" % exc]
+
+    body = function_body(code, ACCEPT_LOOP)
+    if body is None:
+        return ["NativeOffload.kt: '%s' not found (ROT — update this gate)" % ACCEPT_LOOP]
+    s, e, _kind = body
+    loop = code[s:e]
+
+    # (1) every submit must be reachable, and at least one must exist.
+    submits = [m.start() for m in re.finditer(r"\bpool\s*\.\s*submit\s*\(", loop)]
+    live_submits = [p for p in submits if path_feasible(loop, p)]
+    if not submits:
         v.append(
             "NativeOffload.kt: runAcceptLoop does not hand clients to the "
             "bounded pool (missing '%s')" % POOL_SUBMIT
         )
-    if OLD_ACQUIRE in src:
+    elif not live_submits:
+        v.append(
+            "NativeOffload.kt: every pool.submit(…) in runAcceptLoop is "
+            "unreachable (dead guard) — accepted clients are neither served nor "
+            "closed, the guest blocks on the socket forever"
+        )
+
+    # (2) no client may be handled outside the pool.
+    for m in re.finditer(r"\bhandleClient\s*\(", loop):
+        v.append(
+            "NativeOffload.kt:%d: runAcceptLoop calls handleClient(…) directly — "
+            "the concurrency cap (MAX_CONCURRENT_WORKERS) only exists inside the "
+            "pool" % (code[:s + m.start()].count("\n") + 1)
+        )
+
+    # (3) no parallel-escaping primitive anywhere in the loop.
+    for m in PARALLEL_RE.finditer(loop):
+        v.append(
+            "NativeOffload.kt:%d: runAcceptLoop spawns work outside the bounded "
+            "pool (%r) — a burst of N connections creates N threads again"
+            % (code[:s + m.start()].count("\n") + 1, loop[m.start():m.end()])
+        )
+
+    if OLD_ACQUIRE in code:
         v.append(
             "NativeOffload.kt:%d: '%s' is back (workers must not park as "
-            "threads on the semaphore)" % (lines_of(src, OLD_ACQUIRE)[0], OLD_ACQUIRE)
+            "threads on the semaphore)"
+            % (code[:code.index(OLD_ACQUIRE)].count("\n") + 1, OLD_ACQUIRE)
         )
-    if POOL_DECL not in src:
+    if POOL_DECL not in code:
         v.append("NativeOffload.kt: '%s' missing" % POOL_DECL)
-    # [wide-1024 12-misc-b] `permits.tryAcquire() || true` keeps the call and makes
-    # the bound a constant: every submit spawns a worker, above the cap.
-    for m in re.finditer(r"permits\s*\.\s*tryAcquire\s*\(\s*\)", src):
-        tail = src[m.end(): m.end() + 8].lstrip()
+
+    # (4) the permit verdict must be a real bound, not decoration.
+    for m in re.finditer(r"permits\s*\.\s*tryAcquire\s*\(\s*\)", code):
+        tail = code[m.end(): m.end() + 8].lstrip()
         if tail.startswith(("||", "&&", "?:", ".")):
             v.append(
                 "NativeOffload.kt:%d: the 'tryAcquire' verdict is combined with "
                 "another expression (%r) — the spawn bound becomes constant and "
-                "every submit starts a worker" % (src[: m.start()].count("\n") + 1, tail[:6])
+                "every submit starts a worker" % (code[: m.start()].count("\n") + 1, tail[:6])
             )
             break
-    if not re.search(r"if\s*\(\s*spawn\s*\)", src):
-        v.append(
-            "NativeOffload.kt: the tryAcquire verdict no longer gates the spawn "
-            "(`if (spawn)` missing) — the permit bound is decoration"
-        )
-    if TRY_ACQUIRE not in src:
+    if TRY_ACQUIRE not in code:
         v.append(
             "NativeOffload.kt: 'tryAcquire' bound missing — a submit could "
             "spawn an unbounded worker"
         )
-    if PERMIT_RELEASE not in src:
+
+    # (5) [B7-t03] the spawn must be DOMINATED by the permit verdict: every
+    # spawnThread call site inside a branch whose condition derives from the
+    # permit. An `else { spawnThread(…) }` keeps `if (spawn)` textually intact
+    # while every permit-less submit spawns anyway.
+    gate_spans = []
+    # Which local carries the permit verdict? Derived from the binding, so a
+    # guard whose condition merely LOOKS right (`if (spawn)` over a constant)
+    # is not mistaken for a bound gate.
+    permit_locals = set()
+    for m in re.finditer(r"\b(?:val|var)\s+(\w+)\s*=(?!=)", code):
+        rhs_start = m.end()
+        rhs_end = expr_end(code, rhs_start)
+        if re.search(r"tryAcquire|permits", code[rhs_start:rhs_end]):
+            permit_locals.add(m.group(1))
+    for cond, t_start, t_end, e_start, e_end in if_blocks(code):
+        gated = (contains_ident(cond, "tryAcquire") or "permits" in cond
+                 or any(contains_ident(cond, name) for name in permit_locals))
+        if not gated:
+            continue
+        if const_bool(cond) is True:
+            v.append(
+                "NativeOffload.kt:%d: the worker-spawn guard is a constant true "
+                "(%r) — the permit bound is decoration"
+                % (code[:t_start].count("\n") + 1, cond.strip())
+            )
+            continue
+        if not guard_feasible(cond):
+            v.append(
+                "NativeOffload.kt:%d: the worker-spawn guard is infeasible (%r) — "
+                "no worker is ever started" % (code[:t_start].count("\n") + 1, cond.strip())
+            )
+            continue
+        gate_spans.append((t_start, t_end))
+        if e_start is not None:
+            else_body = code[e_start:e_end]
+            if re.search(r"\bspawnThread\s*\(", else_body):
+                v.append(
+                    "NativeOffload.kt:%d: the permit-denied `else` branch spawns a "
+                    "worker anyway — tryAcquire()=false stops nothing, the thread "
+                    "cap (MAX_CONCURRENT_WORKERS) is void"
+                    % (code[:e_start].count("\n") + 1)
+                )
+    spawn_calls = [m.start() for m in re.finditer(r"\bspawnThread\s*\(", code)]
+    if not spawn_calls:
+        v.append(
+            "NativeOffload.kt: no 'spawnThread(…)' call — the pool enqueues "
+            "clients but never drains them"
+        )
+    if spawn_calls and not gate_spans:
+        v.append(
+            "NativeOffload.kt: no branch derives from the permit verdict — every "
+            "spawnThread(…) call runs unguarded"
+        )
+    for pos in spawn_calls:
+        if not any(a <= pos < b for a, b in gate_spans):
+            v.append(
+                "NativeOffload.kt:%d: 'spawnThread(…)' is called outside the "
+                "permit-gated branch — a worker is started without holding a "
+                "permit" % (code[:pos].count("\n") + 1)
+            )
+
+    # (6) [B7-t03] the permit must actually come back: release has to be live.
+    releases = [m.start() for m in re.finditer(r"\bpermits\s*\.\s*release\s*\(\s*\)", code)]
+    if not releases:
         v.append("NativeOffload.kt: permit is never released on worker exit")
-    if CAP_CONST not in src:
+    elif not any(path_feasible(code, p) for p in releases):
+        v.append(
+            "NativeOffload.kt:%d: 'permits.release()' never runs (dead guard) — "
+            "the permit budget drains to zero and every later offload is queued "
+            "behind a worker that never starts"
+            % (code[:releases[0]].count("\n") + 1)
+        )
+    if CAP_CONST not in code:
         v.append("NativeOffload.kt: default cap changed (expected '%s')" % CAP_CONST)
     return v
 
 
 def read(root, rel):
-    path = os.path.join(root, rel)
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(os.path.join(root, rel), "r", encoding="utf-8") as fh:
         return fh.read()
 
 
-def run(root):
+def run(root, only=None):
     if not os.path.isdir(root):
         print("modelsvc_single_read_check: not a directory: %s" % root)
         return 2
@@ -196,11 +438,15 @@ def run(root):
     except OSError as exc:
         print("modelsvc_single_read_check: cannot read sources: %s" % exc)
         return 2
-    violations = check_service(service) + check_offload(offload)
+    violations = []
+    if only in (None, "service"):
+        violations += check_service(service)
+    if only in (None, "offload"):
+        violations += check_offload(offload)
     if violations:
         print("FAIL modelsvc_single_read_check")
-        for v in violations:
-            print("  " + v)
+        for x in violations:
+            print("  " + x)
         return 1
     print("PASS modelsvc_single_read_check (1 read per run, capped worker spawns)")
     return 0
@@ -251,8 +497,8 @@ internal class ModelExecutionService {
 """
 
 BAD_SERVICE_NO_CAPTURE = GOOD_SERVICE.replace(
-    CAPTURE_CALL, "requestFile.readText()"
-).replace("requestBody.jsonOrThrow()", "JSONObject(requestFile.readText())")
+    "CapturedRequestBody.capture { requestFile.readText() }", "requestFile.readText()"
+)
 
 GOOD_OFFLOAD = """
 object NativeOffloadServer {
@@ -346,25 +592,67 @@ BAD_OFFLOAD_NO_BOUND = GOOD_OFFLOAD.replace(
     "            permits.tryAcquire()\n", ""
 ).replace(
     "                permits.release()\n", ""
-).replace(
-    "    private fun drain() {",
-    "    private fun drain() {",
 )
 
-
-# ── [wide-1024 12-misc-b] witness fixtures: the call stays, the effect goes ──
-# a second read through a different receiver spelling (ISSUE-12a)
+# ── batch7 B7-t03 witnesses: the decision point keeps its spelling, the effect dies ──
+# 07-1: the second read arrives as a constructor argument, not a receiver
+BAD_SERVICE_CTOR_READ = GOOD_SERVICE.replace(
+    "            val req = requestBody.jsonOrThrow()",
+    "            val req = JSONObject(java.io.FileReader(requestFile).use { it.readText() })",
+)
+# 07-1b: the body is re-pointed through a local alias
+BAD_SERVICE_ALIAS_READ = GOOD_SERVICE.replace(
+    "            val req = requestBody.jsonOrThrow()",
+    "            val rf = requestFile\n"
+    "            val req = JSONObject(rf.readText())",
+)
+# 07-2: the capture result is captured twice, used never
+BAD_SERVICE_DISCARDED_CAPTURE = GOOD_SERVICE.replace(
+    "        val requestBody = CapturedRequestBody.capture { requestFile.readText() }",
+    "        val _unused = CapturedRequestBody.capture { requestFile.readText() }\n"
+    '        val requestBody = CapturedRequestBody.capture { "" }',
+)
+# 07-2b: one capture, but the consumer reads a *different* value's parse
+BAD_SERVICE_UNCONSUMED_CAPTURE = GOOD_SERVICE.replace(
+    "        val requestBody = CapturedRequestBody.capture { requestFile.readText() }",
+    "        val captured = CapturedRequestBody.capture { requestFile.readText() }\n"
+    '        val requestBody = CapturedRequestBody.capture { "" }',
+)
+# 07-3: a JDK async primitive runs the client next to the pool
+BAD_OFFLOAD_COMPLETABLE = GOOD_OFFLOAD.replace(
+    "            pool.submit(client)",
+    "            pool.submit(client)\n"
+    "            java.util.concurrent.CompletableFuture.runAsync { handleClient(client, 0L) }",
+)
+# 07-4: the permit-denied branch spawns anyway
+BAD_OFFLOAD_ELSE_SPAWN = GOOD_OFFLOAD.replace(
+    "        if (spawn) spawnThread(threadName) { drain() }",
+    "        if (spawn) {\n"
+    "            spawnThread(threadName) { drain() }\n"
+    "        } else {\n"
+    "            spawnThread(threadName) { drain() }\n"
+    "        }",
+)
+# 07-5: the release is kept, guarded by a constant false
+BAD_OFFLOAD_DEAD_RELEASE = GOOD_OFFLOAD.replace(
+    "                permits.release()",
+    "                if (false) permits.release()",
+)
+# 07-6: the submit is kept, guarded by a constant false
+BAD_OFFLOAD_DEAD_SUBMIT = GOOD_OFFLOAD.replace(
+    "            pool.submit(client)",
+    "            if (false) pool.submit(client)",
+)
+# pre-existing witnesses (wide-1024 12-misc-b)
 BAD_SERVICE_REPOINT_READ = GOOD_SERVICE.replace(
     "            val req = requestBody.jsonOrThrow()",
     "            val req = JSONObject(requestFile.inputStream().bufferedReader()"
     ".use { it.readText() })",
 )
-# the permit verdict short-circuited to constant true (ISSUE-12b)
 BAD_OFFLOAD_SHORT_CIRCUIT = GOOD_OFFLOAD.replace(
     "            permits.tryAcquire()\n",
     "            permits.tryAcquire() || true\n",
 )
-# a thread spawned next to the pool submit, with no parentheses
 BAD_OFFLOAD_BARE_THREAD = GOOD_OFFLOAD.replace(
     "            pool.submit(client)\n",
     "            pool.submit(client)\n"
@@ -389,48 +677,82 @@ def selftest():
     expect_clean("compliant offload fixture", good_offload)
 
     bad_reads = check_service(BAD_SERVICE_SITE_READS)
-    expect_trip("three-read fixture (ISSUE-12a)", bad_reads, "exactly 1 expected")
+    expect_trip("three-read fixture (ISSUE-12a)", bad_reads, "OUTSIDE the capture")
     expect_trip("three-read fixture (ISSUE-12a)", bad_reads, "requestText")
-    expect_trip("three-read fixture (ISSUE-12a)", bad_reads, "per-site parse")
     expect_trip("three-read fixture (ISSUE-12a)", bad_reads, "executeRun(req: JSONObject")
 
     bad_nocapture = check_service(BAD_SERVICE_NO_CAPTURE)
     expect_trip("no-capture fixture", bad_nocapture, "not routed through")
 
     bad_parked = check_offload(BAD_OFFLOAD_PARKED)
-    expect_trip("parked-thread fixture (ISSUE-12b)", bad_parked, "spawns a thread")
+    expect_trip("parked-thread fixture (ISSUE-12b)", bad_parked, "spawns work outside")
     expect_trip("parked-thread fixture (ISSUE-12b)", bad_parked, "workerConcurrency.acquire()")
     expect_trip("parked-thread fixture (ISSUE-12b)", bad_parked, "does not hand clients")
 
     bad_nobound = check_offload(BAD_OFFLOAD_NO_BOUND)
     expect_trip("unbounded-submit fixture", bad_nobound, "tryAcquire")
     expect_trip("unbounded-submit fixture", bad_nobound, "never released")
+    expect_trip("unbounded-submit fixture", bad_nobound, "outside the permit-gated branch")
 
     repoint = check_service(BAD_SERVICE_REPOINT_READ)
-    expect_trip("re-pointed second read", repoint, "exactly 1 expected")
-    expect_trip("re-pointed second read", repoint, "straight from requestFile")
+    expect_trip("re-pointed second read", repoint, "OUTSIDE the capture")
 
     short = check_offload(BAD_OFFLOAD_SHORT_CIRCUIT)
     expect_trip("short-circuited permit", short, "combined with another expression")
 
     bare = check_offload(BAD_OFFLOAD_BARE_THREAD)
-    expect_trip("bare-lambda thread", bare, "spawns a thread")
+    expect_trip("bare-lambda thread", bare, "spawns work outside")
+    expect_trip("bare-lambda thread", bare, "calls handleClient")
 
-    print("selftest re-pointed second read -> %d violation(s)" % len(repoint))
-    print("selftest short-circuited permit -> %d violation(s)" % len(short))
-    print("selftest bare-lambda thread     -> %d violation(s)" % len(bare))
-    print("selftest compliant service      -> %d violation(s)" % len(good_service))
-    print("selftest compliant offload      -> %d violation(s)" % len(good_offload))
-    print("selftest three-read service     -> %d violation(s)" % len(bad_reads))
-    print("selftest no-capture service     -> %d violation(s)" % len(bad_nocapture))
-    print("selftest parked-thread offload  -> %d violation(s)" % len(bad_parked))
-    print("selftest unbounded-submit       -> %d violation(s)" % len(bad_nobound))
+    # ── batch7 B7-t03: one arm per witness, each tripping its OWN criterion ──
+    ctor = check_service(BAD_SERVICE_CTOR_READ)
+    expect_trip("07-1 ctor-argument read", ctor, "OUTSIDE the capture")
+    alias = check_service(BAD_SERVICE_ALIAS_READ)
+    expect_trip("07-1b aliased read", alias, "OUTSIDE the capture")
+    discarded = check_service(BAD_SERVICE_DISCARDED_CAPTURE)
+    expect_trip("07-2 discarded capture", discarded, "captured once per run")
+    expect_trip("07-2 discarded capture", discarded, "DELIBERATELY-DISCARDED")
+    unconsumed = check_service(BAD_SERVICE_UNCONSUMED_CAPTURE)
+    expect_trip("07-2b unconsumed capture", unconsumed, "captured once per run")
+    expect_trip("07-2b unconsumed capture", unconsumed, "reads nothing")
+
+    completable = check_offload(BAD_OFFLOAD_COMPLETABLE)
+    expect_trip("07-3 CompletableFuture escape", completable, "spawns work outside")
+    expect_trip("07-3 CompletableFuture escape", completable, "calls handleClient")
+    else_spawn = check_offload(BAD_OFFLOAD_ELSE_SPAWN)
+    expect_trip("07-4 else-branch spawn", else_spawn, "permit-denied `else`")
+    dead_release = check_offload(BAD_OFFLOAD_DEAD_RELEASE)
+    expect_trip("07-5 dead release", dead_release, "never runs")
+    dead_submit = check_offload(BAD_OFFLOAD_DEAD_SUBMIT)
+    expect_trip("07-6 dead submit", dead_submit, "unreachable")
+
+    arms = {
+        "compliant service": good_service,
+        "compliant offload": good_offload,
+        "three-read service": bad_reads,
+        "no-capture service": bad_nocapture,
+        "parked-thread offload": bad_parked,
+        "unbounded-submit": bad_nobound,
+        "re-pointed read": repoint,
+        "short-circuited permit": short,
+        "bare-lambda thread": bare,
+        "ctor-argument read": ctor,
+        "aliased read": alias,
+        "discarded capture": discarded,
+        "unconsumed capture": unconsumed,
+        "CompletableFuture escape": completable,
+        "else-branch spawn": else_spawn,
+        "dead release": dead_release,
+        "dead submit": dead_submit,
+    }
+    for label, verdict in arms.items():
+        print("selftest %-26s -> %d violation(s)" % (label, len(verdict)))
 
     if failures:
         for f in failures:
             print("SELFTEST FAIL " + f)
         return 1
-    print("MODELSVC_SINGLE_READ_SELFTEST=PASS")
+    print("MODELSVC_SINGLE_READ_SELFTEST=PASS (%d arms)" % (len(arms) + 5))
     return 0
 
 
@@ -438,8 +760,13 @@ def main():
     args = [a for a in sys.argv[1:] if a]
     if "--selftest" in args:
         return selftest()
-    root = next((a for a in args if not a.startswith("-")), os.getcwd())
-    return run(root)
+    only = None
+    for i, a in enumerate(args):
+        if a == "--only" and i + 1 < len(args):
+            only = args[i + 1]
+    args = [a for a in args if not a.startswith("-") and a != only]
+    root = args[0] if args else os.getcwd()
+    return run(root, only)
 
 
 if __name__ == "__main__":
