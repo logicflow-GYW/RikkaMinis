@@ -138,7 +138,27 @@ python3 scripts/scan/openminis_compat_field_parity_check.py .     → openminis-
 
 ## §5 CI run
 
-（CI 出结论后回填，本段在 CI 绿后单独提交。）
+**run `40257871255` / #2707 / job `121363527793` / attempt 1 / `conclusion=success`**，
+`head_sha = 47a8b441d23b750e801334208f5f2651ff7a87e7`（与本地 HEAD 逐字符一致），
+`created_at 2026-10-26T02:11:31Z`，26 步**唯一 skipped = Publish**（main 门控，预期）。
+
+job 日志 1,486,655 B（`probe/ci/job-b6t10.log`），逐条判读：
+
+| 判据 | 读数 |
+|---|---|
+| `Summary: 112 passed, 0 failed` | **1**（带框线，权威形态） |
+| `ALL 344 CASES PASS` | **1** |
+| `━━━ [N/112]` 门头 | 行 112 / 去重后 **112**（编号与门名互异，无重复/缺号） |
+| `^ e: `（Kotlin 编译错） | **0** |
+| 含 `FAILED` 的行 | **6** 行，逐条确认全部是 **PASSED 用例名子串**（`slot denied produces FAILED without calling provider` / `reason PERSISTENCE_FAILED maps to persistence_failed` / `phase FAILED maps to Failed` / `terminal FAILED maps to Failed` / `reason EXECUTION_FAILED maps to all_fallbacks_exhausted` / `the fixed tail still reaches a legal FAILED terminal`）—— 全是 PASSED 行，判读陷阱复核通过 |
+| 门 02 在 CI 里的读数 | `open_url_broker_scheme_check: all 17 criteria green`（Step 3 门扫描段） |
+| 两门自证标记（test_scan 段） | `✅ open_url_broker_scheme_check selftest has teeth (OPEN_URL_BROKER_SCHEME_SELFTEST=PASS)` + `real tree green`；`✅ openminis_compat_field_parity_check selftest has teeth (OPENMINIS_COMPAT_FIELD_PARITY_SELFTEST=PASS)` + `real tree green`（共 4 行，与本地 L1 一致） |
+
+⇒ **两条判据在 CI 真实树上都有独立见证**：新判据没有误伤真实树（`all 17 criteria green` / `real tree green`），
+新自测臂在 CI 里被 `test_scan.py` 的「selftest has teeth」断言真跑过（不是只在本地产物里出现）。
+
+CI 之后本支只提交了报告（`git diff --name-only 47a8b441d..HEAD -- . ':(exclude)fix-reports'` = **0 行**），
+源码树与 CI 绿树逐字节等价。
 
 ## §6 残留（触发条件 / 触发方案 / 搁置理由）
 
