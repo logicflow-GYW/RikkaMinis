@@ -985,9 +985,14 @@ def main():
     if problems:
         print("== %d cross-process boundary problem(s) ==" % len(problems))
         print("")
-        print("A field on a boundary model that the dispatcher never writes will")
-        print("silently fall back to its default inside the worker. Fix by adding it")
-        print("to ModelExecutionDispatcher, or list it under BENIGN with a reason.")
+        for p in problems:
+            print("   ❌ " + p)
+        print("")
+        print("A field on a boundary model that the dispatcher never writes, a key the")
+        print("worker reads but throws away, a projection that stopped deriving from the")
+        print("instance, or an entry point that skips a restore: all four fall back to a")
+        print("default inside the worker without a single compile error. Fix the carrier")
+        print("(dispatcher / worker / model) or list the field under BENIGN with a reason.")
         return 1
     print("== cross-process boundary OK ==")
     return 0
