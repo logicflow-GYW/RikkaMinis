@@ -120,7 +120,23 @@ anthropic 侧每臂断言「期望红/绿」，另加 16 条「夹具 replace �
 
 ## 6. CI
 
-见文末回填（推送后填写 run id / head_sha / 关键日志行）。
+**run `40309607254` / #2733 / job `121527200219` / attempt 1 → success**
+（`workflow_dispatch` @ `fix/r3-thinking-wiring`，2026-10-26T10:43:22Z → 11:00:22Z，17m00s）。
+
+| 核对项 | 读数 |
+|---|---|
+| `head_sha` | `3110d6e29d65a80aee22b3f80cb91f9bbe57b01c` —— 与本地 HEAD / 远端分支 tip **逐字符一致** |
+| 步骤 | 26 步，唯一非 success = `Publish to Releases`（skipped，main 门控 —— 分支构建不该发布，符合预期） |
+| 日志 | `probe/ci/job-121527200219.log`，1,487,054 B，NUL 0 |
+| `Summary: 112 passed, 0 failed` | **恰 1 次** |
+| `ALL 344 CASES PASS` | **恰 1 次** |
+| 门头 | `[1/112] … [112/112]`，**112 条、编号互异** |
+| `^ e: `（Kotlin 编译错） | **0** |
+| 含 `FAILED` 的行 | 6 条，全部以 `PASSED` 结尾（用例名子串，非失败） |
+| 本支两门的 CI 见证 | `anthropic_thinking_budget_check selftest has teeth (ANTHROPIC_THINKING_BUDGET_SELFTEST=PASS)` × 1、`… real tree green` × 1、`thinking_wiring_guard.py on real repo exits 0` × 1 |
+
+**停止节点达成**：分支 CI 绿、`head_sha` 三方一致、`src_diff = 0`（提交后仅报告回填）。
+**不合并 main**（起手权在主会话/用户）。
 
 ## 7. 残留（P2，登记不修）
 
