@@ -39,6 +39,7 @@ from _kotlin_ast import (
     match_bracket,
     split_top,
     strip_parens,
+    tail_expr,
 )
 
 __all__ = [
@@ -50,6 +51,7 @@ __all__ = [
     "scope_calls",
     "peel_discarding",
     "value_sources",
+    "branch_value",  # if/else 块体分支的值 = 尾表达式
     "contains_ident",
     "guard_feasible",
     "path_feasible",
@@ -148,6 +150,23 @@ def peel_discarding(expr, rounds=6):
     return cur
 
 
+def branch_value(part):
+    """分支体**值**的表达式：块体 `{ … }` 取尾表达式，裸表达式原样返回。
+
+    `if (has(x)) { cap(x) } else { null }` 的 else 分支值是 `null`，不是
+    `{ null }` —— 不剥块的话消费门的 NULLISH 白名单（`"null"` / `"Unit"`）
+    匹配不上，消毒漏斗类判据会在真树上误红（CI #2760 实测）。
+    """
+    s = part.strip()
+    if not s.startswith("{"):
+        return s
+    close = match_bracket(s, 0)
+    if close != len(s) - 1:
+        return s
+    tail = tail_expr(s[1:close])
+    return tail.strip() if tail else s
+
+
 def value_sources(expr, depth=0):
     """表达式最终值的**所有可能来源**（保守：多算不漏算）。
 
@@ -179,15 +198,19 @@ def value_sources(expr, depth=0):
             # else 段必须覆盖到表达式结尾：`if (c) a else b + z` 是一体的，
             # 尾部还带别的语句的形态不许在这里错切（宁可退回整条表达式）。
             if e_start is not None and e_end == len(e):
-                then_part = e[t_start:t_end].strip()
-                else_part = e[e_start:e_end].strip()
+                then_part = branch_value(e[t_start:t_end])
+                else_part = branch_value(e[e_start:e_end])
                 b = const_bool(cond)
                 if b is True:
                     return value_sources(then_part, depth + 1)
                 if b is False:
                     return value_sources(else_part, depth + 1)
-                return (value_sources(then_part, depth + 1)
-                        + value_sources(else_part, depth + 1))
+                # 条件未知时两侧都算，但**纯字面量分支不是数据来源**：把它并回
+                # 整条表达式（`if (has(x)) cap(x) else null` 的 null 分支不是
+                # "没走消毒的值"，拆出来会让 require_all 型判据误红真树）。
+                if const_value(then_part) is None and const_value(else_part) is None:
+                    return (value_sources(then_part, depth + 1)
+                            + value_sources(else_part, depth + 1))
 
     # 丢弃型作用域：值是接收者
     if scope_calls(e) and any(s[0] in DISCARD_SCOPES for s in scope_calls(e)):
@@ -475,6 +498,30 @@ ARMS = [
     # 不是以 if 开头的表达式不许错切：`f(if (c) a else b)` 原样一条。
     ("value_sources_call_wrapped_not_split",
      lambda V: V["value_sources"]("f(if (c) a else b)") == ["f(if (c) a else b)"]),
+    # 条件未知 + 有一侧是纯字面量 ⇒ 不拆：字面量分支不是「数据来源」，
+    # 拆出来会把 require_all 型判据（"每条路径的值都必须经过消毒"）炸成误红。
+    ("value_sources_null_branch_merged",
+     lambda V: V["value_sources"]('if (has(x)) cap(x) else null')
+     == ["if (has(x)) cap(x) else null"]),
+    ("value_sources_literal_branch_merged",
+     lambda V: V["value_sources"]("if (c) 1 else b") == ["if (c) 1 else b"]),
+    # ---- 块体分支（CI #2760 实测红在 parts_json [R6]）----
+    # `{ … }` 分支的值是尾表达式，不是带花括号的整段文本：不剥块的话门侧的
+    # NULLISH 白名单（精确匹配 "null"/"Unit"）认不出 `{ null }`，消毒过的真
+    # 代码会被 require_all 判据判成"存了未消毒的载荷"。期望值是字面量。
+    ("value_sources_block_branch_split",
+     lambda V: V["value_sources"]("if (c) { a } else { b }") == ["a", "b"]),
+    ("value_sources_block_branch_mixed",
+     lambda V: V["value_sources"]("if (c) { a } else b") == ["a", "b"]),
+    ("value_sources_block_null_branch_merged",
+     lambda V: V["value_sources"]("if (has(x)) { cap(x) } else { null }")
+     == ["if (has(x)) { cap(x) } else { null }"]),
+    ("branch_value_peels_block_tail",
+     lambda V: V["branch_value"]("{\n  first()\n  second()\n}") == "second()"),
+    ("branch_value_keeps_non_block",
+     lambda V: V["branch_value"]("a ?: b") == "a ?: b"),
+    ("branch_value_keeps_trailing_text",
+     lambda V: V["branch_value"]("{ a } + b") == "{ a } + b"),
     # ---- A1 端到端：单行 if/else 的两条分支 ----
     ("path_feasible_single_line_else_dead",
      lambda V: V["path_feasible"](
@@ -533,6 +580,7 @@ def selftest():
     import _kotlin_valueflow as V
     ns = {"code_view": V.code_view, "literal_view": V.literal_view,
           "peel_discarding": V.peel_discarding, "value_sources": V.value_sources,
+          "branch_value": V.branch_value,
           "contains_ident": V.contains_ident, "guard_feasible": V.guard_feasible,
           "path_feasible": V.path_feasible, "returns_exiting": V.returns_exiting,
           "is_single_assignment": V.is_single_assignment,
