@@ -59,6 +59,13 @@ import shutil
 import sys
 import tempfile
 
+# [batch6] structural analysis comes from the shared layer: no local
+# comment/string stripper, no line-based window, no hand-rolled expression span.
+from _kotlin_lexer import KotlinLexError
+from _kotlin_ast import (match_bracket, split_top, strip_parens, const_bool,
+                         const_value, stmt_spans, tail_expr)
+from _kotlin_valueflow import code_view, literal_view, peel_discarding, expr_end
+
 SELFTEST_MARKER = "PROVIDER_WRITE_RULES_SELFTEST=PASS"
 
 PWR_REL = "src/android/app/src/main/java/com/rikkaminis/app/config/collections/ProviderWriteRules.kt"
@@ -90,16 +97,44 @@ BASE_URL_FACES = (
 )
 
 
+def _interior(body):
+    """The statement region of a (possibly) brace-wrapped body. A body that
+    starts with `{` is a block header: feeding it to the statement splitter
+    makes the whole function one depth-0 statement, so every line-level question
+    ("which lines touch customBaseURL?") gets answered for the entire body."""
+    t = body
+    stripped = t.lstrip()
+    if not stripped.startswith("{"):
+        return t
+    open_i = t.index("{")
+    close = match_bracket(t, open_i)
+    return t[open_i + 1:close] if close > 0 else t[open_i + 1:]
+
+
 def inline_blank_on_base_url_lines(body):
-    """Lines of `body` that mention customBaseURL AND spell blank handling
-    inline — the drift W8 forbids. Lines about other fields are ignored."""
+    """STATEMENTS of `body` that touch customBaseURL and spell blank handling
+    inline — the drift W8 forbids.
+
+    [batch6 A09-3] The old version was line-based, so the drift simply moved to
+    the continuation line of a multi-line call:
+
+        params.optString(
+            "customBaseURL", ""
+        ).ifEmpty { null }
+
+    The anchor line carried no pattern and the pattern line carried no anchor.
+    A statement is the unit that actually holds both halves.
+    """
+    raw = _interior(body)
+    code = code_view(raw)
     offenders = []
-    for line in body.splitlines():
-        if "customBaseURL" not in line:
+    for a, b in stmt_spans(code):
+        seg = code[a:b]
+        if "customBaseURL" not in seg:
             continue
         for pat in INLINE_BLANK_PATTERNS:
-            if pat in line:
-                offenders.append((line.strip()[:90], pat))
+            if pat in seg:
+                offenders.append((re.sub(r"\s+", " ", raw[a:b]).strip()[:90], pat))
     return offenders
 
 SRC_SCAN_ROOT = "src/android/app/src/main/java"
@@ -222,23 +257,6 @@ COLLAPSE_RE = re.compile(
 )
 
 
-def policy_body(code, name):
-    """Body of the shared policy `fun <name>` — expression bodies first (the
-    paren-safe scanner), block bodies via `extract_function`.
-
-    [meta-audit-1024] `extract_function` alone truncates
-    `= raw?.trim()?.takeIf { … }` at the first balanced paren, which is exactly
-    why the old anchor check could not see the body. None = fail-closed.
-    """
-    body = expression_body(code, name)
-    if body is not None:
-        return body
-    body = extract_function(code, name)
-    if body is None:
-        return None
-    return body if body.lstrip().startswith("{") else None
-
-
 def expression_body(code, name):
     """Body of an expression-bodied `fun <name>(...) = …`.
 
@@ -308,9 +326,226 @@ def count_decl(root, needle):
     return hits
 
 
+# ── [batch6 A09] dataflow helpers ───────────────────────────────────────────
+# Every witness in this batch kept the *spelling* (the call, the guard, the
+# `.trim()`) and moved the *value*: `raw.also { raw?.trim()… }` returns `raw`,
+# `val newBase = s` skips the helper while the helper still appears on a dead
+# neighbour line, a two-line `optString(…).ifEmpty { null }` wears the drift on
+# the continuation line, and `= true` deletes a policy whose head is intact.
+# So the criteria below ask "does the value that leaves this face derive from
+# the normalized chain?" instead of "does the token appear?".
+
+BIND_RE = re.compile(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)")
+IDENT_RE = re.compile(r"(?<![\w.])[A-Za-z_]\w*")
+BASE_WRITE_RE = re.compile(r"(?<![\w.])customBaseURL\s*=(?!=)")
+NULLISH_RE = re.compile(r'^null$|^""$')
+# code_view blanks string/char contents (`.trimEnd('/')` → `.trimEnd(' ')`), so
+# the trailing-slash half is matched structurally, not by literal comparison.
+TRIM_END_RE = re.compile(r"trimEnd\(\s*'[^']*'\s*\)")
+
+
+def _rhs_end(code, start):
+    """End of the value expression that begins at `start`: stops at a depth-0
+    `,` / `)` / `}` / `]` (an argument boundary) or at a depth-0 newline that is
+    not a continuation. `expr_end` alone runs past the trailing `,` of a named
+    argument (`… else current.customBaseURL,`) and would swallow the next
+    argument into the value."""
+    depth = 0
+    i = start
+    while i < len(code):
+        ch = code[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return i
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return i
+        elif ch == "\n" and depth == 0:
+            j = i + 1
+            while j < len(code) and code[j] in " \t\r\n":
+                j += 1
+            prev = code[start:i].rstrip()
+            if not prev:
+                i = j
+                continue
+            if prev.endswith((".", "?.", "?:", "&&", "||", "=", "+", "-", "->",
+                              "if", "else")):
+                i = j
+                continue
+            if j < len(code) and code[j] in ".?:":
+                i = j
+                continue
+            return i
+        i += 1
+    return len(code)
+
+
+def _local_inits(code):
+    """name -> [init expression] for the local `val`/`var`s of one body."""
+    out = {}
+    for m in BIND_RE.finditer(code):
+        end = _rhs_end(code, m.end())
+        out.setdefault(m.group(1), []).append(code[m.end():end])
+    return out
+
+
+def _values_leaving(code):
+    """Every value that can leave a face: each `customBaseURL = …` write and
+    each bare `return …`. Held to one rule — it must derive from the shared
+    normalization — so a face cannot call the helper into a discarded local and
+    persist something else."""
+    vals = []
+    for m in BASE_WRITE_RE.finditer(code):
+        vals.append(code[m.end():_rhs_end(code, m.end())])
+    for m in re.finditer(r"\breturn\b", code):
+        if code.startswith("return@", m.start()):
+            continue
+        vals.append(code[m.end():_rhs_end(code, m.end())])
+    return [v for v in vals if v.strip()]
+
+
+def _derives_from_normalize(code, expr, inits=None, depth=2):
+    """Does `expr` come out of `normalizeCustomBaseURL(…)` — directly, through a
+    local binding, or as a blank-as-clear constant?"""
+    e = strip_parens(expr.strip())
+    if not e:
+        return False
+    if NORMALIZE_CALL in e:
+        return True
+    if NULLISH_RE.match(e):
+        return True
+    if depth <= 0:
+        return False
+    inits = _local_inits(code) if inits is None else inits
+    for name in set(IDENT_RE.findall(e)):
+        for init in inits.get(name, []):
+            if _derives_from_normalize(code, init, inits, depth - 1):
+                return True
+    return False
+
+
+def _is_normalized(expr):
+    """The full read-side chain: whitespace trim AND trailing-slash collapse
+    AND blank->null. `.trimEnd(…)` alone does not satisfy the whitespace half
+    (that is S13's witness)."""
+    e = strip_parens(expr.strip())
+    if NULLISH_RE.match(e):
+        return True
+    return (".trim()" in e and bool(TRIM_END_RE.search(e))
+            and bool(COLLAPSE_RE.search(e)))
+
+
+def _fold_const_if(expr):
+    """Fold `if (<const>) A else B` to the branch that actually runs."""
+    m = re.match(r"if\s*\(", expr)
+    if not m:
+        return expr
+    op = m.end() - 1
+    cp = match_bracket(expr, op)
+    if cp < 0:
+        return expr
+    cond = const_bool(expr[op + 1:cp])
+    if cond is None:
+        return expr
+    rest = expr[cp + 1:].strip()
+    parts = split_top(rest, ("else",))
+    if parts and len(parts) >= 2:
+        then_txt = rest[parts[0][0]:parts[0][1]]
+        else_txt = rest[parts[1][0]:parts[1][1]]
+        branch = then_txt if cond else else_txt
+    else:
+        branch = rest
+    b = branch.strip()
+    if b.startswith("{"):
+        close = match_bracket(b, 0)
+        if close > 0:
+            b = b[1:close]
+    return b.strip()
+
+
+def effective_value(body):
+    """The value a helper body actually returns, after peeling the scopes that
+    discard it (`raw.also { normalize(raw) }` → `raw`) and folding constant
+    `if`s. This is the difference between "the normalization is written" and
+    "the normalization is what comes out"."""
+    e = body.strip()
+    if e.startswith("="):
+        e = e[1:].strip()
+    for _ in range(8):
+        prev = e
+        e = _fold_const_if(e)
+        pe = peel_discarding(e).strip()
+        if pe:
+            e = pe
+        if e == prev:
+            break
+    return e
+
+
+def _shared_body(code, name):
+    """Body of `fun <name>` — block form as-is, expression form via a
+    continuation-aware scan.
+
+    The older `expression_body` stopped at the FIRST balanced paren, so
+    `customBaseURL.isNullOrBlank() || providerType.supportsCustomBaseURL` was
+    read as `customBaseURL.isNullOrBlank()` — the capability arm (and the whole
+    decision) fell outside the slice. `|| true` had the same escape route.
+    """
+    m = re.search(r"\bfun\s+[\w.]*\b%s\s*\(" % re.escape(name), code)
+    if not m:
+        return None
+    op = m.end() - 1
+    cp = match_bracket(code, op)
+    if cp < 0:
+        return None
+    i = cp + 1
+    depth = 0
+    while i < len(code):
+        ch = code[i]
+        if ch == "{":
+            close = match_bracket(code, i)
+            return code[i:close + 1] if close > 0 else None
+        if ch == "=" and code[i:i + 2] != "==" and depth == 0:
+            start = i + 1
+            end = _rhs_end(code, start)
+            body = code[start:end]
+            return body if body.strip() else None
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        i += 1
+    return None
+
+
+def _decl_params(code, name):
+    """Parameter names of `fun <name>(…)`, derived from the declaration."""
+    m = re.search(r"\bfun\s+[\w.]*\b%s\s*\(" % re.escape(name), code)
+    if not m:
+        return []
+    op = m.end() - 1
+    cp = match_bracket(code, op)
+    if cp < 0:
+        return []
+    names = []
+    for a, b in split_top(code[op + 1:cp], (",")):
+        decl = code[op + 1 + a:op + 1 + b].strip()
+        nm = re.match(r"([A-Za-z_]\w*)\s*:", decl)
+        if nm:
+            names.append(nm.group(1))
+    return names
+
+
+def _snip(raw, code, a, b):
+    """Message text taken from the raw body at the offsets found in the masked
+    body (masking preserves length), so findings stay readable."""
+    return re.sub(r"\s+", " ", raw[a:b]).strip()[:80]
+
 def check_tree(root):
     detail = {k: [] for k in ("w1", "w2", "w3", "w4", "w5", "w6", "w7",
-                               "w8", "w9", "w10", "fail_closed")}
+                               "w8", "w9", "w10", "w11", "w12", "fail_closed")}
 
     pwr = read_code(os.path.join(root, PWR_REL))
     pc = read_code(os.path.join(root, PC_REL))
@@ -403,8 +638,24 @@ def check_tree(root):
         if NORMALIZE_CALL not in body:
             detail["w8"].append("%s does not consume %s" % (label, NORMALIZE_CALL))
         for line_text, pat in inline_blank_on_base_url_lines(body):
-            detail["w8"].append("%s spells blank handling inline on a customBaseURL line (%r): %s"
+            detail["w8"].append("%s spells blank handling inline on a customBaseURL statement (%r): %s"
                                 % (label, pat, line_text))
+        # [batch6 A09-2] The call being *present* proves nothing: a witness keeps
+        # it on a discarded local (`val _ignored = normalizeCustomBaseURL(s)`) and
+        # persists `s`. Follow the value that leaves the face instead.
+        bc = code_view(_interior(body))
+        inits = _local_inits(bc)
+        leaving = _values_leaving(bc)
+        if not leaving:
+            detail["w8"].append(
+                "%s: no customBaseURL write / return value found — re-anchor W8" % label)
+        for val in leaving:
+            if not _derives_from_normalize(bc, val, inits):
+                detail["w8"].append(
+                    "%s persists / returns a value that never went through %s (`%s`) — "
+                    "the helper is called in the face, but the written value is not its "
+                    "result" % (label, NORMALIZE_CALL,
+                                re.sub(r"\s+", " ", val).strip()[:80]))
 
     # No other file in the main source set may carry a second normalization
     # helper: exactly one declaration tree-wide.
@@ -421,19 +672,27 @@ def check_tree(root):
     # stripped `.trim()` out of the body while leaving both intact, so the gate
     # stayed green while every write face persisted padded / blank URLs again.
     # The declaration is not the decision point — its body is.
-    norm_body = policy_body(pwr, "normalizeCustomBaseURL")
+    norm_body = _shared_body(pwr, "normalizeCustomBaseURL")
     if norm_body is None:
         detail["fail_closed"].append(
             "normalizeCustomBaseURL body not extractable from ProviderWriteRules — re-anchor W10")
     else:
-        if not TRIM_RE.search(norm_body):
+        # [batch6 A09-1] Match on the value the body RETURNS, not on the tokens
+        # it spells. `raw.also { raw?.trim()?.takeIf { … } }` contains both
+        # halves and returns the raw input; a constant `if (true) raw else …`
+        # does the same. Peeling discarded scopes and folding constant branches
+        # leaves the value that is actually persisted.
+        effective = effective_value(code_view(norm_body))
+        if not TRIM_RE.search(effective):
             detail["w10"].append(
-                "normalizeCustomBaseURL body lost its whitespace normalization (.trim()): %r"
-                % norm_body.strip()[:90])
-        if not COLLAPSE_RE.search(norm_body):
+                "normalizeCustomBaseURL returns a value without whitespace "
+                "normalization (.trim()): %r (body: %r)"
+                % (effective.strip()[:90], norm_body.strip()[:90]))
+        if not COLLAPSE_RE.search(effective):
             detail["w10"].append(
-                "normalizeCustomBaseURL body lost its blank->null collapse: %r"
-                % norm_body.strip()[:90])
+                "normalizeCustomBaseURL returns a value without the blank->null "
+                "collapse: %r (body: %r)"
+                % (effective.strip()[:90], norm_body.strip()[:90]))
 
     # ---- W9 [deep-audit-1039 A-04] the read side trims before use ----
     pcf = read_code(os.path.join(root, PCF_REL))
@@ -443,10 +702,91 @@ def check_tree(root):
         getter = effective_base_getter(pcf)
         if getter is None:
             detail["fail_closed"].append("effectiveBaseURL getter not found in ProviderConfig.kt — re-anchor W9")
-        elif ".trim()" not in getter:
-            detail["w9"].append("effectiveBaseURL does not trim the stored value before use")
-        elif "trimEnd('/')" not in getter:
-            detail["w9"].append("effectiveBaseURL lost its trailing-slash collapse")
+        else:
+            # [batch6 A09-4] Whole-getter substring matching let a witness park
+            # the whole chain on a local nobody reads (`val _unused = trim…`) and
+            # return the raw field. The chain has to be on the value that is
+            # RETURNED — directly or through a local the return actually names.
+            gc = code_view(getter)
+            inits = _local_inits(gc)
+            norm_names = {n for n, exprs in inits.items()
+                          if any(_is_normalized(e) for e in exprs)}
+            returns = [gc[m.end():_rhs_end(gc, m.end())]
+                       for m in re.finditer(r"\breturn\b", gc)
+                       if not gc.startswith("return@", m.start())]
+            returns = [r for r in returns if r.strip()]
+            if not returns:
+                detail["w9"].append(
+                    "effectiveBaseURL getter has no return value — re-anchor W9")
+            for val in returns:
+                if _is_normalized(val):
+                    continue
+                if any(name in norm_names for name in set(IDENT_RE.findall(val))):
+                    continue
+                detail["w9"].append(
+                    "effectiveBaseURL returns a value that skips the read-side chain "
+                    "(`%s`) — the trim / trailing-slash / blank-collapse work happens "
+                    "on a local the return never names"
+                    % re.sub(r"\s+", " ", val).strip()[:80])
+
+    # ---- W11 [batch6 A09-5] normalizeCustomModelId still normalizes --------
+    # The model-id helper carries the same contract as the URL helper (trim +
+    # blank -> null). A witness emptied it to `= raw` and both the minis-config
+    # face and the debug RPC face began minting padded / blank composite keys.
+    model_body = _shared_body(pwr, "normalizeCustomModelId")
+    if model_body is None:
+        detail["fail_closed"].append(
+            "normalizeCustomModelId body not extractable from ProviderWriteRules — re-anchor W11")
+    else:
+        effective = effective_value(code_view(model_body))
+        if not TRIM_RE.search(effective):
+            detail["w11"].append(
+                "normalizeCustomModelId returns a value without whitespace "
+                "normalization (.trim()): %r (body: %r)"
+                % (effective.strip()[:90], model_body.strip()[:90]))
+        if not COLLAPSE_RE.search(effective):
+            detail["w11"].append(
+                "normalizeCustomModelId returns a value without the blank->null "
+                "collapse: %r (body: %r)"
+                % (effective.strip()[:90], model_body.strip()[:90]))
+
+    # ---- W12 [batch6 A09-6] the write policy still decides -----------------
+    # `isCustomBaseURLWriteAllowed` is the single decision every face routes
+    # through. A witness replaced its body with `= true`: the head, the name and
+    # the call sites all stay, and the openRouter phantom write is back.
+    policy = _shared_body(pwr, "isCustomBaseURLWriteAllowed")
+    params = _decl_params(pwr, "isCustomBaseURLWriteAllowed")
+    if policy is None:
+        detail["fail_closed"].append(
+            "isCustomBaseURLWriteAllowed body not extractable from ProviderWriteRules "
+            "— re-anchor W12")
+    else:
+        eff = effective_value(code_view(policy))
+        folded = const_bool(strip_parens(eff)) if eff else None
+        if not params:
+            detail["w12"].append(
+                "isCustomBaseURLWriteAllowed declaration has no readable parameter list "
+                "— re-anchor W12")
+        for name in params:
+            if not re.search(r"(?<![\w.])%s(?![\w])" % re.escape(name), eff):
+                detail["w12"].append(
+                    "isCustomBaseURLWriteAllowed never reads its `%s` argument (`%s`) — "
+                    "the decision does not depend on it" % (name, eff.strip()[:70]))
+        if folded is not None:
+            detail["w12"].append(
+                "isCustomBaseURLWriteAllowed is a constant (`%s`) — every write is "
+                "allowed or denied regardless of the provider and the URL"
+                % eff.strip()[:70])
+        else:
+            if "supportsCustomBaseURL" not in eff:
+                detail["w12"].append(
+                    "isCustomBaseURLWriteAllowed no longer consults "
+                    "providerType.supportsCustomBaseURL — the openRouter phantom write "
+                    "is allowed again")
+            if not re.search(r"isNullOr(?:Blank|Empty)\(|isBlank\(\)|isEmpty\(\)", eff):
+                detail["w12"].append(
+                    "isCustomBaseURLWriteAllowed lost the blank-is-a-clear arm — a "
+                    "stale value can no longer be cleared from any face")
 
     bad = any(detail[k] for k in detail if k != "fail_closed") or detail["fail_closed"]
     return (1 if bad else 0), detail
@@ -723,6 +1063,95 @@ def run_selftest():
     # accepted shape).
     run_real("S15-fixed-shape-green", lambda rel, text: text, ())
 
+    # ─── [batch6 A09] the six witnesses of the sixth wave ──────────────────
+    # Each one keeps the rule's SPELLING (the call, the guard, the chain) and
+    # moves the VALUE, so each is固化 here as its own arm: red on the mutation,
+    # and the untouched tree still green (S15/S19).
+
+    # A09-1: `.also { normalize… }` — the chain runs as a discarded scope and
+    # the expression returns the RAW input. W10 must judge the value, not the
+    # tokens the body spells.
+    run_real("S20-witness-also-discards-normalization-W10", replace_in(
+        PWR_REL,
+        "internal fun normalizeCustomBaseURL(raw: String?): String? =\n"
+        "    raw?.trim()?.takeIf { it.isNotEmpty() }",
+        "internal fun normalizeCustomBaseURL(raw: String?): String? =\n"
+        "    raw.also { raw?.trim()?.takeIf { s -> s.isNotEmpty() } }"), ("w10",))
+
+    # A09-1 sister shape: the same trick with `apply`, which peels the same way.
+    run_real("S20b-witness-apply-discards-normalization-W10", replace_in(
+        PWR_REL,
+        "internal fun normalizeCustomBaseURL(raw: String?): String? =\n"
+        "    raw?.trim()?.takeIf { it.isNotEmpty() }",
+        "internal fun normalizeCustomBaseURL(raw: String?): String? =\n"
+        "    raw.apply { raw?.trim()?.takeIf { it?.isNotEmpty() } }"), ("w10",))
+
+    # A09-2: the helper is still CALLED, its result is dropped on an unused
+    # local, and `newBase` (the raw RPC string) is what gets persisted.
+    run_real("S21-witness-normalize-result-discarded-W8", compose(
+        replace_in(
+            PC_REL,
+            "                val newBase = normalizeCustomBaseURL(s)",
+            "                val _ignoredNorm = normalizeCustomBaseURL(s)\n"
+            "                val newBase = s"),
+    ), ("w8",))
+
+    # A09-3: the blank handling is spelled across THREE lines, so the old
+    # two-line window never saw the anchor and the pattern on one line.
+    run_real("S22-witness-three-line-inline-blank-W8", replace_in(
+        PM_REL,
+        '                else normalizeCustomBaseURL(params.optString("customBaseURL", ""))',
+        '                else params.optString(\n'
+        '                    "customBaseURL", ""\n'
+        '                ).ifEmpty { null }'), ("w8",))
+
+    # A09-4: the whole read-side chain survives on a DEAD local; the value the
+    # getter returns is the untrimmed field.
+    run_real("S23-witness-chain-on-dead-local-W9", replace_in(
+        PCF_REL,
+        "            val base = customBaseURL?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() }"
+        " ?: return null\n"
+        '            return if (appendV1Suffix && !base.endsWith("/v1")) "$base/v1" else base',
+        "            val _unused = customBaseURL?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() }\n"
+        "            val raw = customBaseURL ?: return null\n"
+        '            return if (appendV1Suffix && !raw.endsWith("/v1")) "$raw/v1" else raw'),
+        ("w9",))
+
+    # A09-5: the SIBLING helper in the same file (normalizeCustomModelId) is
+    # emptied — the family hole: W10 was written for one function only.
+    run_real("S24-witness-sibling-modelid-body-emptied-W11", replace_in(
+        PWR_REL,
+        "internal fun normalizeCustomModelId(raw: String?): String? =\n"
+        "    raw?.trim()?.takeIf { it.isNotEmpty() }",
+        "internal fun normalizeCustomModelId(raw: String?): String? =\n"
+        "    raw"), ("w11",))
+
+    # A09-6: the shared WRITE POLICY becomes `= true` — declaration, call sites
+    # and every face stay, the decision is gone (openRouter phantom write back).
+    run_real("S25-witness-policy-body-constant-true-W12", replace_in(
+        PWR_REL,
+        "): Boolean = customBaseURL.isNullOrBlank() || providerType.supportsCustomBaseURL",
+        "): Boolean = true"), ("w12",))
+
+    # A09-6 sisters: the policy folded to a constant through an OR, and the
+    # policy that lost only the capability arm (blank-clear kept).
+    run_real("S25b-witness-policy-constant-by-or-W12", replace_in(
+        PWR_REL,
+        "): Boolean = customBaseURL.isNullOrBlank() || providerType.supportsCustomBaseURL",
+        "): Boolean = customBaseURL.isNullOrBlank() || true"), ("w12",))
+
+    run_real("S25c-witness-policy-drops-capability-arm-W12", replace_in(
+        PWR_REL,
+        "): Boolean = customBaseURL.isNullOrBlank() || providerType.supportsCustomBaseURL",
+        "): Boolean = customBaseURL.isNullOrBlank()"), ("w12",))
+
+    # Precision: a policy that ignores only ONE argument (keeps the shape,
+    # drops the provider check) must still red — and the real tree must not.
+    run_real("S25d-witness-policy-ignores-providerType-W12", replace_in(
+        PWR_REL,
+        "): Boolean = customBaseURL.isNullOrBlank() || providerType.supportsCustomBaseURL",
+        "): Boolean = customBaseURL.isNullOrBlank() || customBaseURL?.length != 0"), ("w12",))
+
     all_ok = True
     for name, ok, rc, got, exp in results:
         print("%s %s (rc=%d got=%s exp=%s)" % ("PASS" if ok else "FAIL", name, rc, got, exp))
@@ -730,6 +1159,7 @@ def run_selftest():
             all_ok = False
     if all_ok:
         print(SELFTEST_MARKER)
+        print("PROVIDER_WRITE_RULES_SELFTEST_ARMS=%d" % len(results))
         return 0
     return 1
 
