@@ -72,9 +72,9 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from _kotlin_ast import (const_bool, function_body, if_blocks, split_top,
-                         stmt_spans, strip_parens, when_branches)
-from _kotlin_lexer import KotlinLexError, mask_code
+from _kotlin_ast import (const_bool, function_body, if_blocks, match_bracket,
+                         split_top, stmt_spans, strip_parens, when_branches)
+from _kotlin_lexer import KotlinLexError, analyse, mask_code
 from _kotlin_valueflow import (brace_depth, contains_ident, expr_end,
                                path_feasible, value_sources)
 
@@ -204,6 +204,209 @@ def _live_conditions(body):
 # --------------------------------------------------------------------------
 # criteria
 # --------------------------------------------------------------------------
+
+def _decision_consumers(body):
+    """Reachable, non-constant places a value can be CONSUMED as the decision:
+    `if (…)` conditions and `when (…)` subjects (nothing in them folds away)."""
+    out = list(_live_conditions(body))
+    for subject, _cond, b_start, _b_end in when_branches(body):
+        if subject.strip() and const_bool(subject) is None \
+                and path_feasible(body, b_start):
+            out.append((subject, b_start))
+    return out
+
+
+def check_permission_consumption(manager_code):
+    """C6 — [R3-t17] the DECISION must be the resolved level, and nothing else.
+
+    Witness #3 (dual-gate with offload_permission_reset_sync_check, both rc=0):
+    C3/C5 pin `getLevel`'s body and this gate's C4 pins the mode's config
+    surface, while the CONSUMER — `checkPermission` — was nobody's business.
+    `val level = if (AutoApproveStore.isEnabled) PermissionLevel.BYPASS else
+    getLevel(toolName)` therefore left all five criteria green: the auto-approve
+    overlay moved OUT of `OffloadPermissionLevelPolicy` (the one place it is
+    allowed, where `privilegedToolsEnabled` gates it) into the decision, so a
+    plain "免确认模式" silently bypassed a tool the user had set to NOT_ALLOWED.
+
+    Three things are required of the consumer:
+      a) it must not mention `AutoApproveStore` at all — every overlay belongs to
+         the policy, which is where the privileged-tools sub-flag lives;
+      b) the level it decides on must BE `getLevel(...)`'s value (all sources),
+         not an expression that merely contains the call;
+      c) nothing may decide (return / throw) before that level is resolved.
+    """
+    body = function_body(manager_code, "checkPermission")
+    if body is None:
+        return ["C6: checkPermission not found in OffloadPermissionManager — the "
+                "consumer of getLevel() cannot be judged (fail-closed)"]
+    text = manager_code[body[0]:body[1]]
+    v = []
+
+    for m in re.finditer(r"\bAutoApproveStore\b", text):
+        line = manager_code.count("\n", 0, body[0] + m.start()) + 1
+        v.append(
+            "C6: checkPermission consults AutoApproveStore (line %d) — the auto-approve "
+            "overlay must stay inside OffloadPermissionLevelPolicy, where the "
+            "privileged-tools sub-flag is honoured; here it bypasses the user's stored "
+            "NOT_ALLOWED / ASK_ONCE level" % line)
+
+    spans = stmt_spans(text)
+    binds = []
+    for a, b in spans:
+        stmt = text[a:b].strip()
+        if "getLevel(" not in stmt:
+            continue
+        m = RE_LOCAL_BIND.match(stmt)
+        if m is not None:
+            rhs = stmt[stmt.index("=") + 1:]
+            binds.append((a, m.group(1), rhs))
+    if not binds:
+        v.append(
+            "C6: checkPermission does not bind `getLevel(...)` to a local — the "
+            "decision no longer comes from the resolved level (anchor drift, or the "
+            "level was inlined away)")
+    consumers = _decision_consumers(text)
+    for start, name, rhs in binds:
+        if not value_flows_from(text, rhs, "getLevel(", require_all=True):
+            v.append(
+                "C6: `%s` is decided by `%s`, which is not the getLevel() verdict on "
+                "every path — an overlay (auto-approve / a constant) replaces the "
+                "resolved level for at least one branch" % (name, rhs.strip()[:70]))
+            continue
+        if not any(contains_ident(cond, name) for cond, _pos in consumers):
+            v.append(
+                "C6: `%s` (the resolved level) never reaches a reachable condition or "
+                "`when` subject — the level is computed and then ignored" % name)
+        for a, b in spans:
+            if a >= start:
+                break
+            if re.search(r"\breturn\b|\bthrow\b", text[a:b]):
+                v.append(
+                    "C6: checkPermission decides (`%s`) BEFORE `%s` is resolved — an "
+                    "early verdict skips the level entirely"
+                    % (text[a:b].strip()[:60], name))
+    return v
+
+
+# ── C7: the risk tag is the auto-approve policy's INPUT ────────────────────
+# [R3-t17] #4 · dual-gate with backup_remap_rollup_check (both rc=0). C4 only
+# forbids the `auto-approve` NAME inside the registry; the field's `risk` tag —
+# the thing ConfigBridge feeds into `ConfigAutoApprovePolicy.shouldSkip` — was
+# never judged, so `defaults.voiceInputGroup` could be downgraded from SENSITIVE
+# to NORMAL and rewritten by the agent with the ordinary (non-sensitive) auto-
+# approve switch on, no dialog.
+RISK_RANK = {"NORMAL": 0, "SENSITIVE": 1, "DESTRUCTIVE": 2}
+
+# Frozen from the tree at R3-t17 (ConfigBuiltins.registerDefaults / the soul +
+# permissions registrations). The direction that matters is DOWNWARD: adding a
+# new SENSITIVE field is fine, silently re-classifying one of these as routine
+# is the defect. `test_scan`-registered arms pin both directions.
+PINNED_RISK = {
+    "permissions.minisConfig.enabled": "DESTRUCTIVE",
+    "session.primaryModel": "SENSITIVE",
+    "envvars.privacyMode": "SENSITIVE",
+    "defaults.primaryGroup": "SENSITIVE",
+    "defaults.subGroup": "SENSITIVE",
+    "defaults.voiceInputGroup": "SENSITIVE",
+    "defaults.voiceOutputGroup": "SENSITIVE",
+    "defaults.agentLoopEntries": "SENSITIVE",
+    "defaults.agentLoopGroups": "SENSITIVE",
+    "soul.name": "SENSITIVE",
+    "soul.style": "SENSITIVE",
+    "soul.lang": "SENSITIVE",
+    "soul.body": "SENSITIVE",
+}
+
+# A registration whose writer rebinds WHICH model group a surface uses is a
+# routing change: it must be SENSITIVE no matter what path it is registered
+# under, or a NEW field of the same family starts out silently writable.
+RE_GROUP_BINDING = re.compile(r"\brepo\s*\.\s*([A-Za-z_]\w*GroupId)\s*=(?!=)")
+
+
+def literal_view(root, rel):
+    """`rel` with comments blanked and string literals KEPT (length preserved).
+
+    `path = "defaults.voiceInputGroup"` lives inside a literal, which
+    `mask_code` blanks — the registry sweep needs the literal spelling; the
+    offsets still line up with the code view, so both are read side by side.
+    """
+    src = read(os.path.join(root, rel))
+    ok, reason, views = analyse(src)
+    if not ok:
+        raise LexFail("%s: Kotlin lexer refused the source (%s) — fail-closed, the "
+                      "criterion cannot be judged" % (rel, reason))
+    return views["comments"]
+
+
+def registered_fields(lit, code):
+    """[(path, risk_token, block_code)] for every `ClosureField(...)` registration."""
+    out = []
+    for m in re.finditer(r"\bClosureField\s*\(", lit):
+        close = match_bracket(lit, m.end() - 1)
+        if close < 0:
+            out.append((None, None, ""))
+            continue
+        lit_blk = lit[m.end() - 1:close + 1]
+        code_blk = code[m.end() - 1:close + 1]
+        path_m = re.search(r'\bpath\s*=\s*"([^"]*)"', lit_blk)
+        risk_m = re.search(r"\brisk\s*=\s*ConfigRisk\.([A-Za-z_]\w*)", code_blk)
+        out.append((path_m.group(1) if path_m else None,
+                    risk_m.group(1) if risk_m else None,
+                    code_blk))
+    return out
+
+
+def check_risk_tags(lit, code):
+    """C7 — a registered field's risk tag must not be silently weakened."""
+    v = []
+    problems = {}
+
+    def note(key, msg):
+        problems.setdefault(key, []).append(msg)
+
+    fields = registered_fields(lit, code)
+    seen = {}
+    opaque = 0
+    for path, risk, blk in fields:
+        if path is None:
+            # A FACTORY registration (`fontScaleField(path = path, …)`): the path
+            # arrives from the caller, so the pin cannot be resolved here. The
+            # path-independent rail (a model-group rebinding must be SENSITIVE)
+            # still applies; the pin rail is registered as a residual.
+            opaque += 1
+            rank = RISK_RANK.get(risk if risk is not None else "", None)
+            if RE_GROUP_BINDING.search(blk) and (rank is None or rank < RISK_RANK["SENSITIVE"]):
+                note("<factory risk=%s>" % (risk or "none"),
+                     "rebinds a model-group pointer (%s) yet is registered as %s"
+                     % (RE_GROUP_BINDING.search(blk).group(1), risk or "no risk"))
+            continue
+        seen[path] = risk
+        if risk is not None and risk not in RISK_RANK:
+            note(path, "declares `ConfigRisk.%s`, which is not a risk level — an "
+                       "unclassified field is treated as routine" % risk)
+        rank = RISK_RANK.get(risk if risk is not None else "", None)
+        pinned = PINNED_RISK.get(path)
+        if pinned is not None:
+            if rank is None:
+                note(path, "declares no readable risk (pinned minimum %s)" % pinned)
+            elif rank < RISK_RANK[pinned]:
+                note(path, "is registered as %s but is pinned %s — the auto-approve "
+                           "policy treats it as routine and rewrites it without the "
+                           "dialog the user's setting asks for" % (risk, pinned))
+        if RE_GROUP_BINDING.search(blk) and (rank is None or rank < RISK_RANK["SENSITIVE"]):
+            note(path, "rebinds a model-group pointer (%s) yet is registered as %s — "
+                       "every model-routing rebinding must be SENSITIVE"
+                 % (RE_GROUP_BINDING.search(blk).group(1), risk or "no risk"))
+    for path, pinned in sorted(PINNED_RISK.items()):
+        if path not in seen:
+            note(path, "is no longer registered at all (pinned %s) — the field either "
+                       "vanished or was renamed without updating this rail" % pinned)
+    for path in sorted(problems):
+        v.append("C7: `%s` %s" % (path, "; ".join(problems[path])))
+    check.opaque = opaque          # reported by main() as a [note], never a red
+    return v
+
+
 
 def check_policy_consult(batch_body):
     """C1 — the auto-approve verdict must DECIDE the confirmation.
@@ -452,6 +655,16 @@ def _check(root):
             failures.extend(check_policy_return(level_body))
             failures.extend(check_policy_reachable(level_body))
 
+    # --- Criterion 6: the offload decision must be the RESOLVED level --------
+    failures.extend(check_permission_consumption(manager))
+
+    # --- Criterion 7: the risk tags the policy reads must not be weakened ----
+    try:
+        failures.extend(check_risk_tags(literal_view(root, CONFIG_BUILTINS),
+                                        view(root, CONFIG_BUILTINS)))
+    except LexFail as exc:
+        failures.append("C7: %s" % exc)
+
     # --- Criterion 4: the mode must be invisible to the agent's config surface
     for name, path in (("ConfigRegistry", CONFIG_REGISTRY), ("ConfigBuiltins", CONFIG_BUILTINS)):
         src = view(root, path)
@@ -593,6 +806,78 @@ ARMS = {
             '    private val stealthClose = """ */" """',
         )],
     ),
+    # -- [R3-t17] the dead-code-gaps between this gate and its neighbours ----
+    # #3 dual-gate (×offload_permission_reset_sync_check): the overlay moves
+    # from the policy into the CONSUMER.
+    "checkperm_auto_approve_overlay": (
+        PERM_MANAGER,
+        [("        val level = getLevel(toolName)\n",
+          "        val level = if (AutoApproveStore.isEnabled) PermissionLevel.BYPASS"
+          " else getLevel(toolName)\n")],
+    ),
+    # #3 sibling: the level is resolved and then not used as the decision's value.
+    "checkperm_level_discarded": (
+        PERM_MANAGER,
+        [("        val level = getLevel(toolName)\n        return when (level) {",
+          "        val levelIgnored = PermissionLevel.BYPASS\n"
+          "        val level = levelIgnored\n        return when (level) {")],
+    ),
+    # #4 dual-gate (×backup_remap_rollup_check): a SENSITIVE field downgraded to
+    # the routine level, so the ordinary auto-approve switch covers it.
+    "risk_voice_input_downgraded": (
+        CONFIG_BUILTINS,
+        [('                path = "defaults.voiceInputGroup",\n'
+          '                displayName = "Default voice input group",\n'
+          '                description = "Group that resolves the voice-INPUT model. '
+          'Empty string clears the default.",\n'
+          '                valueSchema = ConfigSchema.Str(maxLength = 200),\n'
+          '                risk = ConfigRisk.SENSITIVE,\n',
+          '                path = "defaults.voiceInputGroup",\n'
+          '                displayName = "Default voice input group",\n'
+          '                description = "Group that resolves the voice-INPUT model. '
+          'Empty string clears the default.",\n'
+          '                valueSchema = ConfigSchema.Str(maxLength = 200),\n'
+          '                risk = ConfigRisk.NORMAL,\n')],
+    ),
+    # #4 as the external model literally wrote it: a token that is not a level.
+    "risk_unknown_token": (
+        CONFIG_BUILTINS,
+        [('                path = "defaults.voiceInputGroup",\n'
+          '                displayName = "Default voice input group",\n'
+          '                description = "Group that resolves the voice-INPUT model. '
+          'Empty string clears the default.",\n'
+          '                valueSchema = ConfigSchema.Str(maxLength = 200),\n'
+          '                risk = ConfigRisk.SENSITIVE,\n',
+          '                path = "defaults.voiceInputGroup",\n'
+          '                displayName = "Default voice input group",\n'
+          '                description = "Group that resolves the voice-INPUT model. '
+          'Empty string clears the default.",\n'
+          '                valueSchema = ConfigSchema.Str(maxLength = 200),\n'
+          '                risk = ConfigRisk.SAFE,\n')],
+    ),
+    # The pin: a registered path that quietly disappears (renamed).
+    "risk_pinned_path_missing": (
+        CONFIG_BUILTINS,
+        [('                path = "defaults.subGroup",', '                path = "defaults.subGroupAlias",')],
+    ),
+    # A NEW member of the model-group family must not start out routine.
+    "risk_new_group_family_safe": (
+        CONFIG_BUILTINS,
+        [('        r.register(\n            ClosureField(\n'
+          '                path = "defaults.agentLoopEntries",',
+          '        r.register(\n            ClosureField(\n'
+          '                path = "defaults.fallbackGroup",\n'
+          '                displayName = "Fallback group",\n'
+          '                description = "probe",\n'
+          '                valueSchema = ConfigSchema.Str(maxLength = 200),\n'
+          '                risk = ConfigRisk.NORMAL,\n'
+          '                revertable = true,\n'
+          '                reader = { ConfigValue.Str(repo.fallbackGroupId ?: "") },\n'
+          '                writer = { v -> repo.fallbackGroupId = (v as ConfigValue.Str).value },\n'
+          '            )\n        )\n'
+          '        r.register(\n            ClosureField(\n'
+          '                path = "defaults.agentLoopEntries",')],
+    ),
     # 02-6 family-hole: the single call site stays, inside a dead branch.
     "confirm_call_dead_branch": (
         CONFIG_BRIDGE,
@@ -619,6 +904,12 @@ SELFTEST_TAGS = {
     "getlevel_early_return": "AUTO_APPROVE_BYPASS_SELFTEST getlevel_early_return arm: OK",
     "raw_string_comment_hole": "AUTO_APPROVE_BYPASS_SELFTEST raw_string_comment_hole arm: OK",
     "confirm_call_dead_branch": "AUTO_APPROVE_BYPASS_SELFTEST confirm_call_dead_branch arm: OK",
+    "checkperm_auto_approve_overlay": "AUTO_APPROVE_BYPASS_SELFTEST checkperm_auto_approve_overlay arm: OK",
+    "checkperm_level_discarded": "AUTO_APPROVE_BYPASS_SELFTEST checkperm_level_discarded arm: OK",
+    "risk_voice_input_downgraded": "AUTO_APPROVE_BYPASS_SELFTEST risk_voice_input_downgraded arm: OK",
+    "risk_unknown_token": "AUTO_APPROVE_BYPASS_SELFTEST risk_unknown_token arm: OK",
+    "risk_pinned_path_missing": "AUTO_APPROVE_BYPASS_SELFTEST risk_pinned_path_missing arm: OK",
+    "risk_new_group_family_safe": "AUTO_APPROVE_BYPASS_SELFTEST risk_new_group_family_safe arm: OK",
 }
 
 # arm name -> expected violation count (exact). 0 = accepted spelling.
@@ -637,6 +928,12 @@ ARM_EXPECT = [
     ("getlevel_early_return", 1),
     ("raw_string_comment_hole", 1),
     ("confirm_call_dead_branch", 1),
+    ("checkperm_auto_approve_overlay", 1),
+    ("checkperm_level_discarded", 1),
+    ("risk_voice_input_downgraded", 1),
+    ("risk_unknown_token", 1),
+    ("risk_pinned_path_missing", 1),
+    ("risk_new_group_family_safe", 1),
 ]
 
 
@@ -699,6 +996,11 @@ def main():
         return selftest(root)
 
     failures = check(root)
+    opaque = getattr(check, "opaque", 0)
+    if opaque and not failures:
+        print("  [note] C7: %d factory registration(s) carry their `path` from the "
+              "caller — the pinned risk rail does not apply to them (see the C7 "
+              "residual in the gate report)" % opaque)
     if failures:
         print("AUTO_APPROVE_BYPASS_CHECK: RED")
         for f in failures:
