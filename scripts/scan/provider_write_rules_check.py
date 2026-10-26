@@ -48,6 +48,25 @@ silent pass):
   `ifEmpty { null }`). A body that cannot be extracted is RED (fail-closed),
   never a silent pass.
 
+  W13 [R3-t20 w39] `effectiveBaseURL` must apply `appendV1Suffix` with the
+      documented polarity (append `/v1` IFF the flag is true). W9 pinned the
+      read-side trimming chain; the flag's own polarity sat between W9 and
+      xproc_boundary_check and neither gate asked about it, so inverting the
+      condition silently sent every default instance to `host/chat/completions`.
+
+  W14 [R3-t20 w40] The capability getters on `ProviderInstance`
+      (`supportsImageEndpointSetting`, `supportsAzureMode`,
+      `supportsCustomThinkingRules`) must stay DECISIONS: a getter folded to a
+      constant hides/redirects UI for every instance while W9's `effectiveBaseURL`
+      anchors (and xproc's constructor-field list) stay green.
+
+  W15 [R3-t20 w41] `ProvidersCollection`'s `customUserAgent(id)` writer must
+      route through `customUserAgentWritable(`, and the guard must actually
+      terminate. W5 pins the debug create/update faces and W7 pins the
+      `customBaseURL` writer — the 2x2 (two write faces x two fields) was
+      missing exactly this quadrant, so `minis-config set …customUserAgent`
+      could overwrite an OAuth client's UA.
+
 Usage:  provider_write_rules_check.py <repo-root>
         provider_write_rules_check.py --selftest
 """
@@ -63,8 +82,9 @@ import tempfile
 # comment/string stripper, no line-based window, no hand-rolled expression span.
 from _kotlin_lexer import KotlinLexError
 from _kotlin_ast import (match_bracket, split_top, strip_parens, const_bool,
-                         const_value, stmt_spans, tail_expr)
-from _kotlin_valueflow import code_view, literal_view, peel_discarding, expr_end
+                         const_value, if_blocks, stmt_spans, tail_expr)
+from _kotlin_valueflow import (code_view, literal_view, peel_discarding, expr_end,
+                               contains_ident, path_feasible)
 
 SELFTEST_MARKER = "PROVIDER_WRITE_RULES_SELFTEST=PASS"
 
@@ -543,9 +563,156 @@ def _snip(raw, code, a, b):
     body (masking preserves length), so findings stay readable."""
     return re.sub(r"\s+", " ", raw[a:b]).strip()[:80]
 
+# ── [R3-t20] W13 / W14 / W15: the values that walk between two gates ──────
+APPEND_V1 = "appendV1Suffix"
+NEG_APPEND_RE = re.compile(
+    r"!\s*appendV1Suffix\b|appendV1Suffix\s*==\s*false|appendV1Suffix\s*\.\s*not\s*\(")
+
+
+def v1_suffix_problems(cc, lc):
+    """W13 — `/v1` is appended IFF `appendV1Suffix` is true.
+
+    Judged on the branch that BUILDS the suffix, in `literal_view` (the
+    `"/v1"` literal is blanked in the code channel) mapped onto the
+    `if_blocks` spans of the code channel — both views are length-preserving,
+    so the offsets line up.
+    """
+    span = effective_base_span(cc)
+    if span is None:
+        return []  # W9 already reports the missing getter (fail-closed)
+    s, e = span
+    body_c, body_l = cc[s:e], lc[s:e]
+    # `/` cannot appear inside an identifier, so no look-behind is needed — and
+    # a look-behind would MISS the template form `"$base/v1"` (the `/` follows
+    # `base`), which is exactly how the production getter builds it.
+    suffix = [m.start() for m in re.finditer(r"/v1(?![A-Za-z0-9_])", body_l)]
+    if not suffix:
+        return ["effectiveBaseURL never builds the `/v1` suffix — `appendV1Suffix` "
+                "has no effect on the URL that leaves the model"]
+    guards = []
+    for cond, ts, te, es, ee in if_blocks(body_c):
+        if not re.search(r"(?<![A-Za-z0-9_])appendV1Suffix(?![A-Za-z0-9_])", cond):
+            continue
+        guards.append((cond,
+                       bool(NEG_APPEND_RE.search(cond)),
+                       any(ts <= q < te for q in suffix),
+                       es is not None and any(es <= q < ee for q in suffix)))
+    if not guards:
+        return ["effectiveBaseURL builds the `/v1` suffix outside any "
+                "`appendV1Suffix` guard — the flag is consulted nowhere"]
+    out = []
+    for cond, negated, then_has, else_has in guards:
+        flat = re.sub(r"\s+", " ", cond).strip()[:70]
+        if then_has and negated:
+            out.append("effectiveBaseURL appends `/v1` when `appendV1Suffix` is FALSE "
+                       "(`if (%s)`) — the polarity is inverted: the default instance "
+                       "(appendV1Suffix = true) loses the version segment and a URL "
+                       "that pins its own version gets one appended" % flat)
+        if else_has and not negated:
+            out.append("effectiveBaseURL's `else` branch appends `/v1` under a POSITIVE "
+                       "`appendV1Suffix` guard (`if (%s) … else …`) — the suffix lands "
+                       "exactly when the flag is off" % flat)
+    if not any(t or el for _c, _n, t, el in guards):
+        out.append("no `appendV1Suffix` branch builds the suffix — the guard and the "
+                   "value it guards were separated (fail-closed)")
+    return out
+
+
+CAPABILITY_PROPS = ("supportsImageEndpointSetting", "supportsAzureMode",
+                    "supportsCustomThinkingRules")
+CAPABILITY_INPUTS = ("providerType", "credentialType", "useResponsesAPI", "customBaseURL")
+
+
+def property_body(code, name):
+    """Body of `val <name>: T get() = …` / `get() { … }` (expression or block)."""
+    m = re.search(r"\bval\s+%s\s*:" % re.escape(name), code)
+    if m is None:
+        return None
+    g = code.find("get()", m.end())
+    if g < 0:
+        return None
+    if re.search(r"\n\s{0,8}(?:val|var|fun|internal|private|public|override|@)\b",
+                 code[m.end():g]):
+        return None  # another declaration sits in between — not this property
+    j = g + len("get()")
+    while j < len(code) and code[j] in " \t":
+        j += 1
+    if j >= len(code):
+        return None
+    if code[j] == "=":
+        return code[j + 1:expr_end(code, j + 1)]
+    if code[j] == "{":
+        close = match_bracket(code, j)
+        return None if close < 0 else code[j + 1:close]
+    return None
+
+
+def capability_getter_problems(cc):
+    """W14 — a capability getter is a decision about THIS instance.
+
+    W9 anchors `effectiveBaseURL`; xproc anchors the constructor field list.
+    The computed properties in between were unowned, so `get() = false` closed
+    an entire UI surface (custom thinking rules) for every provider while both
+    gates stayed green.
+    """
+    out = []
+    for name in CAPABILITY_PROPS:
+        body = property_body(cc, name)
+        if body is None:
+            out.append("`%s`: getter body not extractable — re-anchor W14 "
+                       "(fail-closed)" % name)
+            continue
+        eff = effective_value(body)
+        if not eff.strip():
+            out.append("`%s`: getter has no value — re-anchor W14" % name)
+            continue
+        folded = const_bool(strip_parens(eff))
+        if folded is not None:
+            out.append("`%s` returns the CONSTANT `%s` — every instance gets the same "
+                       "capability answer, so the UI gate it drives is gone"
+                       % (name, re.sub(r"\s+", " ", eff).strip()[:50]))
+            continue
+        if not any(contains_ident(eff, key) for key in CAPABILITY_INPUTS):
+            out.append("`%s` never reads %s — the answer cannot depend on the instance"
+                       % (name, " / ".join(CAPABILITY_INPUTS)))
+    return out
+
+
+UA_WRITE_GUARD = "customUserAgentWritable("
+
+
+def ua_writer_problems(pc_code):
+    """W15 — the `minis-config` UA writer must carry the same guard as the
+    debug faces, and the guard must actually stop the write."""
+    writer = extract_function(pc_code, "customUserAgent")
+    if writer is None:
+        return ["customUserAgent(id) writer not found in ProvidersCollection — "
+                "re-anchor W15 (fail-closed)"]
+    if UA_WRITE_GUARD not in writer:
+        return ["customUserAgent writer does not route through customUserAgentWritable( "
+                "— an OAuth instance's UA can be written through `minis-config set` "
+                "while the debug create/update faces still block it (the 2x2 matrix "
+                "lost its fourth quadrant)"]
+    wc = code_view(writer)
+    write_pos = wc.find("mutate(")
+    for cond, ts, te, _es, _ee in if_blocks(wc):
+        if not re.search(r"customUserAgentWritable\s*\(", cond):
+            continue
+        if not path_feasible(wc, ts):
+            continue
+        if not re.search(r"\bthrow\b|\breturn\b", wc[ts:te]):
+            continue
+        if write_pos >= 0 and ts > write_pos:
+            continue
+        return []
+    return ["customUserAgent writer calls customUserAgentWritable( but no reachable "
+            "branch on it terminates BEFORE the write — the guard is decoration"]
+
+
 def check_tree(root):
     detail = {k: [] for k in ("w1", "w2", "w3", "w4", "w5", "w6", "w7",
-                               "w8", "w9", "w10", "w11", "w12", "fail_closed")}
+                               "w8", "w9", "w10", "w11", "w12", "w13",
+                               "w14", "w15", "fail_closed")}
 
     pwr = read_code(os.path.join(root, PWR_REL))
     pc = read_code(os.path.join(root, PC_REL))
@@ -607,6 +774,9 @@ def check_tree(root):
             detail["w6"].append("modelsAdd does not use canonicalModelProviderName(")
         if "instance.providerType.displayName" in models_add:
             detail["w6"].append("modelsAdd still builds the provider label inline")
+
+    # ---- W15 [R3-t20 w41] the minis-config UA writer carries the same guard ----
+    detail["w15"].extend(ua_writer_problems(pc))
 
     # ---- W7 ----
     writer = extract_function(pc, "customBaseURL")
@@ -729,6 +899,17 @@ def check_tree(root):
                     "on a local the return never names"
                     % re.sub(r"\s+", " ", val).strip()[:80])
 
+    # ---- W13/W14 [R3-t20] the getter's polarity + the capability getters ----
+    # Judged on the length-preserving shared views of the RAW file: the gate's
+    # own `read_code` drops comment text, so its offsets cannot be mapped onto
+    # the literal channel (see report §6 — W1..W12 still read through it).
+    if pcf is not None:
+        raw_pcf = read(os.path.join(root, PCF_REL)) or ""
+        cc_pcf = code_view(raw_pcf)
+        lc_pcf = literal_view(raw_pcf)
+        detail["w13"].extend(v1_suffix_problems(cc_pcf, lc_pcf))
+        detail["w14"].extend(capability_getter_problems(cc_pcf))
+
     # ---- W11 [batch6 A09-5] normalizeCustomModelId still normalizes --------
     # The model-id helper carries the same contract as the URL helper (trim +
     # blank -> null). A witness emptied it to `= raw` and both the minis-config
@@ -792,9 +973,11 @@ def check_tree(root):
     return (1 if bad else 0), detail
 
 
-def effective_base_getter(code):
-    """Body of the `effectiveBaseURL` property getter — brace-matched, because
-    a property getter is not a `fun` and extract_function cannot find it."""
+def effective_base_span(code):
+    """(start, end) of the `effectiveBaseURL` property getter. A property getter
+    is not a `fun`, so `function_body` cannot find it; the closing brace comes
+    from the shared bracket matcher (no hand-rolled depth counter, which a
+    string literal in the getter used to close early)."""
     i = code.find("val effectiveBaseURL")
     if i < 0:
         return None
@@ -802,16 +985,16 @@ def effective_base_getter(code):
     if j < 0:
         return None
     k = code.index("{", j)
-    depth = 0
-    while k < len(code):
-        if code[k] == "{":
-            depth += 1
-        elif code[k] == "}":
-            depth -= 1
-            if depth == 0:
-                return code[i:k + 1]
-        k += 1
-    return None
+    close = match_bracket(code, k)
+    if close < 0:
+        return None
+    return (i, close + 1)
+
+
+def effective_base_getter(code):
+    """Body of the `effectiveBaseURL` property getter (see effective_base_span)."""
+    span = effective_base_span(code)
+    return None if span is None else code[span[0]:span[1]]
 
 
 def replace_in(rel, old, new):
@@ -1152,6 +1335,58 @@ def run_selftest():
         "): Boolean = customBaseURL.isNullOrBlank() || providerType.supportsCustomBaseURL",
         "): Boolean = customBaseURL.isNullOrBlank() || customBaseURL?.length != 0"), ("w12",))
 
+    # ── [R3-t20] the three witnesses this revision was handed ─────────────
+    # S26 (w39): the `/v1` suffix polarity is inverted; the trim chain, the
+    # return shape and every W8/W9/W10 anchor stay intact.
+    run_real("S26-getter-inverted-append-v1-suffix-W13", replace_in(
+        PCF_REL, 'if (appendV1Suffix && !base.endsWith("/v1"))',
+        'if (!appendV1Suffix && !base.endsWith("/v1"))'), ("w13",))
+
+    # S27 (w40): a capability getter folds to a constant — the UI surface it
+    # drives vanishes for every instance.
+    run_real("S27-thinking-rules-getter-constant-W14", replace_in(
+        PCF_REL,
+        """    val supportsCustomThinkingRules: Boolean
+        get() = when (providerType) {
+            ProviderType.anthropic, ProviderType.gemini -> false
+            else -> {
+                val codexOAuth = credentialType == ProviderCredential.oauth &&
+                    customBaseURL.isNullOrBlank()
+                !useResponsesAPI && !codexOAuth
+            }
+        }
+""",
+        """    val supportsCustomThinkingRules: Boolean
+        get() = false
+"""), ("w14",))
+
+    # S28 (w41): the minis-config UA writer loses its guard; W5's debug faces
+    # keep theirs, so W5 alone cannot see this.
+    run_real("S28-ua-writer-drops-guard-W15", replace_in(
+        PC_REL,
+        """                val inst = repo.instance(id) ?: throw ConfigError.InvalidValue("Provider not found")
+                if (!customUserAgentWritable(inst.credentialType)) {
+                    throw ConfigError.InvalidValue(CUSTOM_USER_AGENT_OAUTH_MESSAGE)
+                }
+                mutate(id) { it.copy(customUserAgent = s.ifEmpty { null }) }
+""",
+        """                val inst = repo.instance(id) ?: throw ConfigError.InvalidValue("Provider not found")
+                mutate(id) { it.copy(customUserAgent = s.ifEmpty { null }) }
+"""), ("w15",))
+
+    # S29 (w41'): the guard survives but no longer terminates — spelling without
+    # teeth (a `Unit` body still "calls customUserAgentWritable(").
+    run_real("S29-ua-writer-guard-no-teeth-W15", replace_in(
+        PC_REL,
+        """                if (!customUserAgentWritable(inst.credentialType)) {
+                    throw ConfigError.InvalidValue(CUSTOM_USER_AGENT_OAUTH_MESSAGE)
+                }
+""",
+        """                if (!customUserAgentWritable(inst.credentialType)) {
+                    Unit
+                }
+"""), ("w15",))
+
     all_ok = True
     for name, ok, rc, got, exp in results:
         print("%s %s (rc=%d got=%s exp=%s)" % ("PASS" if ok else "FAIL", name, rc, got, exp))
@@ -1176,7 +1411,9 @@ def main():
         print("provider_write_rules: ALL GREEN (W1 shared rules, W2/W3 single declaration, "
               "W4 no literal copies, W5 debug wiring, W6 modelsAdd, W7 writer wiring, "
               "W8 normalization single-sourced on every write face, W9 read side trims, "
-              "W10 normalization body still trims and collapses)")
+              "W10 normalization body still trims and collapses, "
+              "W13 appendV1Suffix polarity, W14 capability getters decide, "
+              "W15 minis-config UA writer guarded)")
         return 0
     print("provider_write_rules: FAIL")
     print(json.dumps(detail, indent=2))
