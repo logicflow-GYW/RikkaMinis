@@ -1,5 +1,6 @@
 package com.rikkaminis.app.ui.chat
 
+import com.rikkaminis.app.agent.runtime.AgentRunBudgetCeilings
 import com.rikkaminis.app.data.model.AgentToolDefinition
 import com.rikkaminis.app.data.model.AgentToolParam
 import com.rikkaminis.app.data.model.LLMError
@@ -338,5 +339,256 @@ class AgentLoopBaselineScenariosTest {
             h.buildTurnPartsCalls.all { (start, size) -> start <= size },
         )
         assertEquals("all done", h.finalAssistantText)
+    }
+
+    // ── t09 / t10: 压缩触发 ────────────────────────────────────────────────────
+
+    /**
+     * Turn-entry window block. Two fixed contracts live in this branch:
+     *  1. compact receives the POST-offload decision figure, never the stale
+     *     pre-offload one ([fix/offload-stale-token-compact] — 2026-09-25 field
+     *     log: two runs already under their compact lines still paid a 92 s
+     *     summary wait, because the gate read a figure from before the offload);
+     *  2. a compact that actually folded MUST skip the hard trim
+     *     ([fix/diff-audit-0904-F3] — trimming on the stale figure drops the very
+     *     turns the new summary marker anchors on, so the summary is silently
+     *     discarded and every later turn re-compacts), and the cleared figure
+     *     must go to BOTH the loop state and the ViewModels.
+     */
+    @Test
+    fun t09_autoCompactFolded_skipsHardTrimAndClearsStaleFigure() = runTest(mainDispatcher) {
+        val h = host()
+        val p = provider()
+        h.autoCompactVerdict = true
+        h.offloadResultTokens = 117_470
+        h.scripts.add(
+            TurnScript(
+                listOf(
+                    LLMStreamChunk.Started,
+                    usage(),
+                    LLMStreamChunk.Text("folded"),
+                    LLMStreamChunk.Finished("stop"),
+                )
+            )
+        )
+
+        engine(h).runAgentLoop(p, systemPrompt = null)
+
+        assertEquals("one attempt", 1, h.streamRequests.size)
+        assertEquals("the offload pass ran once on the turn-entry block", 1, h.offloadCalls.size)
+        assertEquals("compact was asked once", 1, h.compactCalls.size)
+        assertEquals(
+            "compact receives the post-offload figure, not the stale one",
+            117_470,
+            h.compactCalls[0].second,
+        )
+        assertTrue("a folded compact must skip the last-resort trim (marker anchor)", h.trimCalls.isEmpty())
+        assertTrue(
+            "stale figure cleared to 0 after the fold",
+            h.lastTurnContextTokensValues.contains(0),
+        )
+        assertEquals("folded", h.finalAssistantText)
+    }
+
+    /**
+     * Control arm for t09. A compact that DECLINES to fold (still-compacting /
+     * debounced / tail too small) preserves no anchor, so the hard trim must
+     * still run — on the same decision figure. Without this arm, t09's
+     * `trimCalls.isEmpty()` could not tell "correctly skipped" from "trim never
+     * wired into the loop at all".
+     */
+    @Test
+    fun t10_compactDeclined_hardTrimStillRunsOnTheSameFigure() = runTest(mainDispatcher) {
+        val h = host()
+        val p = provider()
+        h.autoCompactVerdict = false
+        h.offloadResultTokens = 91_107
+        h.scripts.add(
+            TurnScript(
+                listOf(
+                    LLMStreamChunk.Started,
+                    usage(),
+                    LLMStreamChunk.Text("trimmed"),
+                    LLMStreamChunk.Finished("stop"),
+                )
+            )
+        )
+
+        engine(h).runAgentLoop(p, systemPrompt = null)
+
+        assertEquals("compact was asked once and declined", 1, h.compactCalls.size)
+        assertEquals("no fold → the last-resort trim runs", 1, h.trimCalls.size)
+        assertEquals(
+            "trim receives the same decision figure compact received",
+            h.compactCalls[0].second,
+            h.trimCalls[0].second,
+        )
+        assertEquals(91_107, h.trimCalls[0].second)
+        assertTrue("offload freed parts → stale figure cleared", h.lastTurnContextTokensValues.contains(0))
+        assertEquals("trimmed", h.finalAssistantText)
+    }
+
+    // ── t11: turn 上限 ─────────────────────────────────────────────────────────
+
+    /**
+     * The run's turn ceiling (user runtime limits clamped by the session's
+     * [AgentRunBudgetCeilings] entry) bounds the turn loop. Note the shape that
+     * makes this the ONLY live turn-limit path: `consumeTurn` checks
+     * `turnsUsed >= maxTurns` before incrementing, and the loop range is the
+     * same number, so the in-loop turn_limit break is unreachable by
+     * construction — the range exhausts first and the run finalizes as a
+     * resumable runaway. [audit-1015 BUG-03D] pins the banner to THIS run's
+     * figure, so the assert quotes the ceiling, not a live re-read.
+     */
+    @Test
+    fun t11_turnCeiling_finalizesAsResumableRunawayNotError() = runTest(mainDispatcher) {
+        val h = host(toolDef("shell"))
+        val p = provider()
+        AgentRunBudgetCeilings.register(
+            h.activeSessionId,
+            AgentRunBudgetCeilings.Ceiling(
+                deadlineMs = 10L * 60 * 1000,
+                maxTurns = 2,
+                maxEstimatedTokens = Long.MAX_VALUE,
+            ),
+        )
+        try {
+            // Three tool rounds queued; the ceiling is 2, so the third must never fire.
+            for (i in 0 until 3) {
+                h.scripts.add(
+                    TurnScript(
+                        listOf(
+                            LLMStreamChunk.Started,
+                            usage(),
+                            LLMStreamChunk.ToolUseStart("t$i", "shell"),
+                            LLMStreamChunk.ToolInputDelta("t$i", "{\"cmd\":\"round-$i\"}"),
+                            LLMStreamChunk.ToolCallComplete("t$i", "shell", JSONObject("{\"cmd\":\"round-$i\"}")),
+                            LLMStreamChunk.Finished("tool_calls"),
+                        )
+                    )
+                )
+            }
+            h.toolResults.add(ToolExecutionResult(output = "out 0", success = true, toolTitle = "Shell"))
+            h.toolResults.add(ToolExecutionResult(output = "out 1", success = true, toolTitle = "Shell"))
+
+            engine(h).runAgentLoop(p, systemPrompt = null)
+
+            assertEquals("loop stopped AT the ceiling — no request past it", 2, h.streamRequests.size)
+            assertEquals("both in-ceiling tool rounds executed", 2, h.toolExecutions.size)
+            assertEquals("work already done before the stop is kept", 2, h.persistedTurns.size)
+            assertEquals(
+                "turn-limit finalize fires exactly once with THIS run's ceiling",
+                1,
+                h.calls.count { it == "finalizeAtTurnLimit(maxTurns=2)" },
+            )
+            assertFalse("a turn ceiling is not a budget-stop exit", h.calls.any { it.startsWith("finalizeBudgetStop") })
+            assertTrue("a turn ceiling must not surface an inline error (it is resumable)", h.inlineErrors.isEmpty())
+        } finally {
+            AgentRunBudgetCeilings.clear(h.activeSessionId)
+        }
+    }
+
+    // ── t12: 预算停止（deadline 门）─────────────────────────────────────────────
+
+    /**
+     * Deadline already reached at turn entry: the run must stop BEFORE the first
+     * provider request and finalize through [AgentLoopHost.finalizeBudgetStop]
+     * with reason "deadline_reached" — an explicit terminal, not the silent
+     * "reply just stopped" exit that [fix/budget-stop-silent-exit] removed. The
+     * ceiling is the only JVM-reachable way to expire a run: the monotonic clock
+     * is frozen in this harness, so a run can never become expired mid-flight.
+     */
+    @Test
+    fun t12_deadlineReached_stopsBeforeFirstRequestAndFinalizesExplicitly() = runTest(mainDispatcher) {
+        val h = host()
+        val p = provider()
+        h.scripts.add(
+            TurnScript(
+                listOf(
+                    LLMStreamChunk.Started,
+                    usage(),
+                    LLMStreamChunk.Text("never sent"),
+                    LLMStreamChunk.Finished("stop"),
+                )
+            )
+        )
+        AgentRunBudgetCeilings.register(
+            h.activeSessionId,
+            AgentRunBudgetCeilings.Ceiling(
+                deadlineMs = 0L,
+                maxTurns = 8,
+                maxEstimatedTokens = Long.MAX_VALUE,
+            ),
+        )
+        try {
+            engine(h).runAgentLoop(p, systemPrompt = null)
+        } finally {
+            AgentRunBudgetCeilings.clear(h.activeSessionId)
+        }
+
+        assertEquals("the deadline gate fires before the first request", 0, h.streamRequests.size)
+        assertEquals(
+            "budget stop fires exactly once with the deadline reason",
+            1,
+            h.calls.count { it == "finalizeBudgetStop(reason=deadline_reached)" },
+        )
+        assertTrue("no turn ever started → nothing to persist", h.persistedTurns.isEmpty())
+        assertFalse("a deadline stop is not the turn-limit runaway path", h.calls.any { it.startsWith("finalizeAtTurnLimit") })
+        assertTrue("budget stop is explicit by contract, not an inline error", h.inlineErrors.isEmpty())
+    }
+
+    // ── t13: 真实取消落在工具执行中 ─────────────────────────────────────────────
+
+    /**
+     * A user stop landing WHILE A TOOL IS IN FLIGHT — a different exit than t07
+     * (stop during streaming). The engine has no catch around the sequential
+     * `host.executeTool` call, and this pins that: kotlinx's CancellationException
+     * IS an Exception, so a `catch (e: Exception)` added there later would swallow
+     * the stop and keep the loop running after the user pressed stop. Required
+     * behavior: propagate out of runAgentLoop, leave exactly the turn already
+     * made durable by [fix/early-turn-persist] (no tool result, no rewrite),
+     * reach no finalizer.
+     */
+    @Test
+    fun t13_cancellationDuringToolExecution_propagatesAndPersistsNothing() = runTest(mainDispatcher) {
+        val h = host(toolDef("shell"))
+        val p = provider()
+        h.scripts.add(
+            TurnScript(
+                listOf(
+                    LLMStreamChunk.Started,
+                    usage(),
+                    LLMStreamChunk.ToolUseStart("t1", "shell"),
+                    LLMStreamChunk.ToolInputDelta("t1", "{\"cmd\":\"sleep\"}"),
+                    LLMStreamChunk.ToolCallComplete("t1", "shell", JSONObject("{\"cmd\":\"sleep\"}")),
+                    LLMStreamChunk.Finished("tool_calls"),
+                )
+            )
+        )
+        // cause == null — a real job cancellation, not a wrapped model error.
+        h.toolThrowables.add(CancellationException("user stopped"))
+
+        try {
+            engine(h).runAgentLoop(p, systemPrompt = null)
+            fail("cancellation during tool execution must propagate out of runAgentLoop")
+        } catch (e: CancellationException) {
+            // expected exit
+        }
+
+        assertEquals("the tool really was dispatched", 1, h.toolExecutions.size)
+        // [fix/early-turn-persist] (engine:3367) — the assistant row is made
+        // durable BEFORE the tools run, precisely so a stop/kill inside the tool
+        // window cannot erase a turn the user already read. The fix promises the
+        // worst case is "a missing tool outcome on a row whose text is intact";
+        // these four asserts pin both halves of that promise.
+        assertEquals("the tool-call turn was already durable when the stop landed", 1, h.persistedTurns.size)
+        assertEquals("the durable row carries the tool_use block", listOf("tool_use:shell"), h.persistedTurns[0].partKinds)
+        assertTrue("a cancelled tool produces no persisted tool result", h.persistedToolResults.isEmpty())
+        assertTrue("no terminal rewrite of the early row happened after the stop", h.updatedPersistedTurns.isEmpty())
+        assertFalse(
+            "a cancelled run must not reach any budget finalizer",
+            h.calls.any { it.startsWith("finalizeBudgetStop") || it.startsWith("finalizeAtTurnLimit") },
+        )
+        assertTrue("a user stop is not an error banner", h.inlineErrors.isEmpty())
     }
 }

@@ -98,6 +98,12 @@ internal class FakeAgentLoopHost(
     val modelUpdates = mutableListOf<String>()
     val streamRequests = mutableListOf<StreamRequest>()
     val lastTurnContextTokensValues = mutableListOf<Int>()
+    /** offloadContextIfNeeded args: contextWindow to lastContextTokens to force. */
+    val offloadCalls = mutableListOf<Triple<Int, Int, Boolean>>()
+    /** maybeAutoCompactInLoop args: contextWindow to lastContextTokens (decision figure). */
+    val compactCalls = mutableListOf<Pair<Int, Int>>()
+    /** trimContextHistoryWindow args: contextWindow to lastContextTokens (decision figure). */
+    val trimCalls = mutableListOf<Pair<Int, Int>>()
 
     // ── scripted inputs ──
     /** One [TurnScript] per provider attempt, consumed in order. */
@@ -108,6 +114,10 @@ internal class FakeAgentLoopHost(
     var configEntries: List<ModelEntry> = emptyList()
     /** maybeAutoCompactInLoop scripted verdict. */
     var autoCompactVerdict: Boolean = false
+    /** Post-offload estimate returned by offloadContextIfNeeded (null = nothing offloaded). */
+    var offloadResultTokens: Int? = null
+    /** Throwables consumed by executeTool in dispatch order (models a stop pressed mid-tool). */
+    val toolThrowables = ArrayDeque<Throwable>()
 
     // ── internal state the engine reads back through getters ──
     private val history = mutableListOf<LLMMessage>().apply {
@@ -147,13 +157,16 @@ internal class FakeAgentLoopHost(
     override fun checkContextBeforeSend(): Boolean = true
     override fun isContextExhausted(): Boolean = false
     override fun offloadContextIfNeeded(contextWindow: Int, lastContextTokens: Int, force: Boolean): Int? {
+        offloadCalls.add(Triple(contextWindow, lastContextTokens, force))
         record("offloadContextIfNeeded(force=$force)")
-        return null
+        return offloadResultTokens
     }
     override fun trimContextHistoryWindow(contextWindow: Int, lastContextTokens: Int) {
+        trimCalls.add(contextWindow to lastContextTokens)
         record("trimContextHistoryWindow")
     }
     override suspend fun maybeAutoCompactInLoop(contextWindow: Int, lastContextTokens: Int): Boolean {
+        compactCalls.add(contextWindow to lastContextTokens)
         record("maybeAutoCompactInLoop")
         return autoCompactVerdict
     }
@@ -237,6 +250,7 @@ internal class FakeAgentLoopHost(
     ): ToolExecutionResult {
         toolExecutions.add(ToolExecution(toolId, name, argsJson, currentText))
         record("executeTool($name)")
+        toolThrowables.removeFirstOrNull()?.let { throw it }
         return toolResults.removeFirstOrNull()
             ?: ToolExecutionResult(output = "harness: no scripted result for $name", success = false, toolTitle = name)
     }
