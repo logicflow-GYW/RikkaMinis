@@ -34,14 +34,53 @@ does not turn this red): member names, line numbers, the shape of the guard
 call (`shouldRunShowPost(desired)` today), the `lingerJob` / completion
 linger semantics in AgentForegroundService.
 
+[BATCH7-t10 hardening, 2026-10-26] Six witness patches re-checked: every one
+kept the ANALYSED SPELLING while destroying the EFFECT, and every one was
+GREEN here before this branch. The judgements are now anchored on values and
+reachability instead of on substrings:
+
+  14-1 `desiredShown = 1 == 1` (and `this.desiredShown = true`) re-latches the
+       intent — the write is constant-FOLDED (`const_bool`), not matched
+       against the literals `true`/`false`, so any spelling of "true" is seen.
+  14-2 `&& 1 == 2` decides the posted guard — every operand is folded, not
+       only the bare `true`/`false`/`!true` spellings.
+  14-3 `shouldRunShowPost(desiredShown.let { true })` — the guard's ARGUMENT
+       no longer evaluates to the latch: a value wrapper whose tail ignores
+       its receiver is red.
+  14-4 `if (…) { Unit }` — the tail must actually ABORT on a reachable path
+       (`return`/`throw`/`return@label`), a block named `{ … }` is not enough.
+  14-5 `val shouldHide = controller.isShown; if (shouldHide) hide()` — gate
+       detection resolves local aliases (two hops) instead of only looking for
+       the field name in the condition text.
+  14-6 `controller.takeIf { it.isShown }?.let {\n it.hide()\n}` — a guard may
+       be the RECEIVER of the block the hide sits in (any enclosing block's
+       header, any line), not only `if (…)` / same-line prefixes.
+
+All lexing/brace work goes through the shared primitives (_kotlin_lexer /
+_kotlin_ast / _kotlin_valueflow); the hand-written stripper and brace counter
+that used to live here are gone.
+
 Usage: python3 overlay_show_hide_latch_check.py [--root ROOT] [ROOT]
        python3 overlay_show_hide_latch_check.py --selftest
 Exit:  0 = gate green, 1 = violations / selftest fail, 2 = usage error.
 """
+import os
 import re
 import sys
 import tempfile
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import KotlinLexError, mask_code  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool, function_body, if_blocks, match_bracket, split_top, strip_parens,
+    tail_expr,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args as vf_call_args, contains_ident, expr_end, path_feasible,
+    value_sources,
+)
 
 CONTROLLER = "src/android/app/src/main/java/com/rikkaminis/app/service/ToolOverlayController.kt"
 SERVICE = "src/android/app/src/main/java/com/rikkaminis/app/service/AgentForegroundService.kt"
@@ -53,216 +92,242 @@ CRIT_C2 = "C2 the posted show Runnable re-checks the intent latch before attach(
 CRIT_C3 = "C3 no hide() call site is gated on the lagging real attach-state field"
 CRIT_C4 = "C4 intent latch and real attach-state are two distinct fields"
 
-
-# --------------------------------------------------------------------------
-# source preparation: comments AND string bodies blanked, newlines preserved
-# --------------------------------------------------------------------------
-def prepare(src: str) -> str:
-    """Blank out comments and string bodies; every newline is kept, so byte
-    offsets and line numbers still map 1:1 onto the original file."""
-    out = []
-    i, n = 0, len(src)
-    while i < n:
-        c = src[i]
-        if c == "/" and i + 1 < n and src[i + 1] == "/":
-            while i < n and src[i] != "\n":
-                out.append(" ")
-                i += 1
-        elif c == "/" and i + 1 < n and src[i + 1] == "*":
-            out.append("  ")
-            i += 2
-            while i < n and not (src[i] == "*" and i + 1 < n and src[i + 1] == "/"):
-                out.append("\n" if src[i] == "\n" else " ")
-                i += 1
-            if i < n:
-                out.append("  ")
-                i += 2
-        elif c == '"':
-            if src.startswith('"""', i):
-                j = src.find('"""', i + 3)
-                end = n if j < 0 else j + 3
-            else:
-                j = i + 1
-                while j < n and src[j] != '"' and src[j] != "\n":
-                    j += 2 if src[j] == "\\" else 1
-                end = min(j + 1, n)
-            for k in range(i, end):
-                out.append("\n" if src[k] == "\n" else " ")
-            i = end
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
+IDENT_RE = re.compile(r"[A-Za-z_]\w*")
 
 
-def block_at(text: str, open_idx: int) -> str:
-    """Braced block starting at the '{' at open_idx (text must be prepared)."""
-    depth = 0
-    for i in range(open_idx, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[open_idx:i + 1]
-    return text[open_idx:]
+def line_of(text, pos):
+    return text.count("\n", 0, pos) + 1
 
 
-def find_fun(text: str, pattern: str) -> tuple[str, int] | None:
-    m = re.search(pattern, text)
+# ── shared-primitive structure helpers ─────────────────────────────────────
+
+def class_body(text, name):
+    """Inner text of `class <name> … { … }` (shared match_bracket)."""
+    m = re.search(r"\bclass\s+" + re.escape(name) + r"\b", text)
     if not m:
-        return None
-    brace = text.find("{", m.end() - 1)
+        return None, 0
+    brace = text.find("{", m.end())
     if brace < 0:
+        return None, 0
+    close = match_bracket(text, brace)
+    if close < 0:
+        return None, 0
+    return text[brace + 1:close], brace + 1
+
+
+def fun_body(text, name):
+    """Inner text of `fun <name>(…) { … }` (or its `= expr` tail)."""
+    fb = function_body(text, name)
+    if fb is None:
         return None
-    return block_at(text, brace), m.start()
+    return text[fb[0]:fb[1]]
 
 
-def paren_cond(text: str, open_idx: int) -> tuple[str, int]:
-    depth = 0
-    for i in range(open_idx, len(text)):
-        if text[i] == "(":
-            depth += 1
-        elif text[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return text[open_idx + 1:i], i
-    return text[open_idx + 1:], len(text) - 1
+def brace_blocks(text):
+    """Every brace block as (open, close), located by the shared matcher."""
+    out = []
+    for m in re.finditer(r"\{", text):
+        close = match_bracket(text, m.start())
+        if close > 0:
+            out.append((m.start(), close))
+    return out
 
 
-def line_of(text: str, pos: int) -> int:
-    return text[:pos].count("\n") + 1
+def assignments(text, name):
+    """[(pos, rhs, folded)] for every `[this.]<name> = <expr>` write.
+
+    [14-1] the VALUE is constant-folded — `desiredShown = 1 == 1` is a write of
+    `true`, which the old literal regex could not see."""
+    out = []
+    pat = re.compile(r"(?<![\w.])(?:this\s*\.\s*)?"
+                     + re.escape(name) + r"\s*=(?!=)")
+    for m in pat.finditer(text):
+        e = expr_end(text, m.end())
+        rhs = text[m.end():e].strip()
+        out.append((m.start(), rhs, const_bool(rhs)))
+    return out
 
 
-def assign_positions(body: str, name: str, value: str) -> list[int]:
-    pat = re.compile(r"(?<![.\w])" + re.escape(name) + r"\s*=\s*" + value + r"(?![\w.])")
-    return [m.start() for m in pat.finditer(body)]
+def bool_fields(class_text):
+    return re.findall(r"\bvar\s+(\w+)\s*:\s*Boolean\b", class_text)
 
 
-def bool_fields(class_body: str) -> list[str]:
-    return re.findall(r"\bvar\s+(\w+)\s*:\s*Boolean\b", class_body)
+def constant_decides(cond):
+    """True when a constant operand decides [cond]'s value.
+
+    [14-2] `x && 1 == 2` is as dead as `x && false`; every operand is folded,
+    not just the bare-literal spellings."""
+    e = strip_parens(cond.strip())
+    if not e:
+        return False
+    for op in ("||", "&&"):
+        parts = split_top(e, (op,))
+        if len(parts) > 1:
+            vals = []
+            for a, b in parts:
+                sub = e[a:b]
+                if constant_decides(sub):
+                    return True
+                vals.append(const_bool(sub))
+            return (any(v is True for v in vals) if op == "||"
+                    else any(v is False for v in vals))
+    return const_bool(e) is not None
 
 
-def literal_decides(cond: str) -> bool:
-    """True when a literal operand decides [cond]'s value.
+def scope_tail_carries_receiver(block_text):
+    """Does a `{ [param ->] body }` lambda produce a value derived from its
+    receiver? A tail naming neither the param nor `it` does not."""
+    inner = block_text[1:-1] if block_text.startswith("{") else block_text
+    m = re.match(r"\s*([A-Za-z_]\w*)\s*->", inner)
+    param, body = (m.group(1), inner[m.end():]) if m else (None, inner)
+    tail = tail_expr(body) or body.strip()
+    if not tail:
+        return False
+    if param:
+        return param != "_" and contains_ident(tail, param)
+    return contains_ident(tail, "it")
 
-    [wide-1024 C2] `if (!shouldRunShowPost(latch) && false) return@post` still
-    *mentions* the latch and still *contains* an early return, so every
-    substring criterion the old arm used stays satisfied while the guard is
-    dead. A conjunction that contains a bare `false` (or a disjunction with a
-    bare `true`) is decided by that literal, not by the latch."""
-    for part in re.split(r"&&|\|\|", cond):
-        t = part.strip().strip("()").strip()
-        if t in ("true", "false", "!true", "!false"):
+
+def wrapper_ignores_receiver(cond, intent):
+    """[14-3] `intent.let { true }` still mentions the latch and still feeds the
+    guard — but the value the guard receives is a constant."""
+    for m in re.finditer(r"\.\s*(let|run)\s*\{", cond):
+        close = match_bracket(cond, m.end() - 1)
+        if close < 0:
+            continue
+        receiver = cond[max(0, m.start() - 80):m.start()]
+        if not contains_ident(receiver, intent):
+            continue
+        if not scope_tail_carries_receiver(cond[m.end() - 1:close + 1]):
             return True
     return False
 
 
-def paren_cond_at(text: str, close_idx: int) -> tuple[str | None, int]:
-    """Condition text of the `(…)` group whose ')' sits at [close_idx]."""
-    depth = 0
-    i = close_idx
-    while i >= 0:
-        if text[i] == ")":
-            depth += 1
-        elif text[i] == "(":
-            depth -= 1
-            if depth == 0:
-                return text[i + 1:close_idx], i
-        i -= 1
-    return None, -1
+def guard_arg_constant(cond, intent):
+    """[14-3, paren form] the guard call's argument folds to a constant."""
+    for m in re.finditer(r"([A-Za-z_]\w*)\s*\(", cond):
+        p = m.end() - 1
+        for a, b in vf_call_args(cond, p):
+            arg = cond[a:b]
+            if not contains_ident(arg, intent):
+                continue
+            srcs = value_sources(arg)
+            if srcs and all(const_bool(s) is not None for s in srcs):
+                return True
+    return False
 
 
-def enclosing_conds(text: str, pos: int) -> list[str]:
-    """Header conditions of every brace block that textually encloses [pos].
-
-    [wide-1024 C3] The old scan only looked at the hide() call's own line and
-    the line above, so the canonical Kotlin block form
-
-        if (controller.isShown) {
-            controller.hide()
-        }
-
-    was invisible: the brace-brace form failed `prev.rstrip().endswith(")")`.
-    Conditions are read from the block HEADERS (if / while / when), brace
-    matched backwards, so the spelling of the body does not matter."""
-    out: list[str] = []
-    depth = 0
-    i = pos - 1
-    while i >= 0:
-        c = text[i]
-        if c == "}":
-            depth += 1
-        elif c == "{":
-            if depth == 0:
-                j = i - 1
-                while j >= 0 and text[j] in " \t\n":
-                    j -= 1
-                if j >= 0 and text[j] == ")":
-                    cond, open_at = paren_cond_at(text, j)
-                    if cond is not None:
-                        head = text[max(0, open_at - 12):open_at]
-                        if re.search(r"\b(if|while|when)\s*$", head):
-                            out.append(cond)
-            else:
-                depth -= 1
-        i -= 1
-    return out
+def tail_aborts(then_text):
+    """[14-4] the guard's tail must ABORT on a reachable path: a block that
+    merely exists (`{ Unit }`) cannot cancel the queued attach."""
+    body = then_text.strip()
+    if body.startswith("{"):
+        body = body[1:]
+    if body.endswith("}"):
+        body = body[:-1]
+    for m in re.finditer(r"\b(return|throw)\b", body):
+        if path_feasible(body, m.start()):
+            return True
+    return False
 
 
-def hide_gates(src: str) -> list[tuple[int, list[str]]]:
+GUARD_CALL_RE = re.compile(r"\.\s*(takeIf|takeUnless|filter|filterNot)\s*[({]")
+
+
+def expand_aliases(text, cond, pos, hops=2):
+    """[14-5] `val shouldHide = controller.isShown; if (shouldHide) hide()`
+    gates on the real field through one local hop."""
+    cur = cond
+    seen = set()
+    for _ in range(hops):
+        grew = False
+        for ident in [i for i in IDENT_RE.findall(cur) if i not in seen]:
+            seen.add(ident)
+            for m in re.finditer(r"\b(?:val|var)\s+" + re.escape(ident) + r"\s*=\s*", text):
+                if m.start() > pos:
+                    continue
+                e = expr_end(text, m.end())
+                rhs = text[m.end():e].strip()
+                if rhs and len(rhs) < 200:
+                    cur = cur + " || " + rhs
+                    grew = True
+        if not grew:
+            break
+    return cur
+
+
+def hide_gates(text, blocks):
     """(line, governing conditions) for every hide() CALL site."""
-    out: list[tuple[int, list[str]]] = []
-    for m in re.finditer(r"\bhide\s*\(\s*\)", src):
-        pre = src[max(0, m.start() - 30):m.start()]
+    out = []
+    for m in re.finditer(r"\bhide\s*\(\s*\)", text):
+        pre = text[max(0, m.start() - 30):m.start()]
         if re.search(r"\bfun\s*$", pre):
             continue  # the declaration itself
-        line_start = src.rfind("\n", 0, m.start()) + 1
-        prefix = src[line_start:m.start()]
-        conds: list[str] = []
-        for im in re.finditer(r"\bif\s*\(", prefix):
-            c, _ = paren_cond(prefix, im.end() - 1)
-            conds.append(c)
-        if re.search(r"takeIf|takeUnless", prefix):
-            conds.append(prefix)
-        conds.extend(enclosing_conds(src, m.start()))
-        out.append((line_of(src, m.start()), conds))
+        pos = m.start()
+        conds = []
+        for cond, t0, t1, e0, e1 in if_blocks(text):
+            if t0 <= pos < t1:
+                conds.append(cond)
+            elif e0 is not None and e0 <= pos < e1:
+                conds.append("! (" + cond + ")")
+        # [14-6] a guard may be the RECEIVER of the block the hide sits in.
+        enclosing = [b for b in blocks if b[0] < pos < b[1]]
+        for gm in GUARD_CALL_RE.finditer(text):
+            open_at = gm.end() - 1
+            close = match_bracket(text, open_at)
+            if close < 0:
+                continue
+            body = text[open_at + 1:close]
+            if open_at < pos < close:
+                conds.append(body)
+                continue
+            for b_open, _b_close in enclosing:
+                if b_open - 220 <= gm.start() < b_open:
+                    conds.append(body)
+                    break
+        conds = [expand_aliases(text, c, pos) for c in conds]
+        out.append((line_of(text, pos), conds))
     return out
 
 
 # --------------------------------------------------------------------------
 # analysis
 # --------------------------------------------------------------------------
-def analyse(ctrl: str, svc: str) -> list[tuple[str, bool, str]]:
-    """ctrl / svc = prepared sources. Returns (criterion, ok, detail)."""
-    out: list[tuple[str, bool, str]] = []
+def analyse(ctrl, svc):
+    """ctrl / svc = code views. Returns (criterion, ok, detail)."""
+    out = []
 
-    cls = block_at(ctrl, ctrl.find("{", ctrl.find("class ToolOverlayController")))
+    cls, _cls_at = class_body(ctrl, "ToolOverlayController")
+    if cls is None:
+        return [(CRIT_C1, False, "class ToolOverlayController not found"),
+                (CRIT_C2, False, "class ToolOverlayController not found"),
+                (CRIT_C3, False, "class ToolOverlayController not found"),
+                (CRIT_C4, False, "class ToolOverlayController not found")]
     fields = bool_fields(cls)
-    show_f = find_fun(cls, r"\bfun\s+show\s*\(")
-    hide_f = find_fun(cls, r"\bfun\s+hide\s*\(\s*\)\s*\{")
-    attach_f = find_fun(cls, r"\bfun\s+attach\s*\(\s*\)")
+    show_f = fun_body(cls, "show")
+    hide_f = fun_body(cls, "hide")
+    attach_f = fun_body(cls, "attach")
 
     # ---- derive the two roles -------------------------------------------
     intent = None
     intent_show_at = intent_hide_at = -1
-    if show_f and hide_f:
+    if show_f is not None and hide_f is not None:
         for f in fields:
-            s = assign_positions(show_f[0], f, "true")
-            h = assign_positions(hide_f[0], f, "false")
+            s = [a for a in assignments(show_f, f) if a[2] is True]
+            h = [a for a in assignments(hide_f, f) if a[2] is False]
             if s and h:
-                intent, intent_show_at, intent_hide_at = f, s[0], h[0]
+                intent, intent_show_at, intent_hide_at = f, s[0][0], h[0][0]
                 break
 
     real = None
-    if attach_f:
+    if attach_f is not None:
         for f in fields:
-            if assign_positions(attach_f[0], f, "true"):
+            if any(a[2] is True for a in assignments(attach_f, f)):
                 real = f
                 break
 
     # ---- C1: intent written at BOTH entries, before the post -----------
-    if not show_f or not hide_f:
+    if show_f is None or hide_f is None:
         out.append((CRIT_C1, False, "ToolOverlayController.show()/hide() not found"))
     elif intent is None:
         out.append((
@@ -272,75 +337,97 @@ def analyse(ctrl: str, svc: str) -> list[tuple[str, bool, str]]:
         ))
     else:
         bad = []
-        for label, body, pos in (("show()", show_f[0], intent_show_at),
-                                 ("hide()", hide_f[0], intent_hide_at)):
+        show_writes = assignments(show_f, intent)
+        hide_writes = assignments(hide_f, intent)
+        for label, body, writes in (("show()", show_f, show_writes),
+                                    ("hide()", hide_f, hide_writes)):
             post = re.search(r"\.post\s*[({]", body)
-            if post and pos > post.start():
-                bad.append(f"{label} writes {intent} only AFTER queueing the post")
-        # [wide-1024 C1] The entry must PUBLISH the intent and keep it: a
-        # second write of the opposite value (hide() re-latching `= true`, or
-        # show() re-latching `= false`) silently undoes the publication while
-        # every position/substring criterion above stays satisfied.
-        if assign_positions(show_f[0], intent, "false"):
-            bad.append(
-                f"show() re-latches {intent} = false after publishing it — the intent "
-                "is dropped again before the post runs"
-            )
-        if assign_positions(hide_f[0], intent, "true"):
-            bad.append(
-                f"hide() re-latches {intent} = true after publishing it — the hide "
-                "intent is overwritten and a queued attach survives"
-            )
+            first = min(a[0] for a in writes) if writes else -1
+            if post and first > post.start():
+                bad.append("%s writes %s only AFTER queueing the post" % (label, intent))
+        # [14-1] the entry must PUBLISH the intent and keep it: a second write
+        # of the opposite value silently undoes the publication while every
+        # position/substring criterion stays satisfied. The VALUE is folded, so
+        # `= 1 == 1` / `this.x = true` are the same defect as `= true`.
+        for pos, rhs, folded in show_writes:
+            if folded is False:
+                bad.append("show() re-latches %s = false (`%s`) — the intent is dropped "
+                           "again before the post runs" % (intent, rhs[:40]))
+            elif folded is None:
+                bad.append("show() writes %s = `%s`, which cannot be proven to be the "
+                           "published `true` (fail-closed)" % (intent, rhs[:40]))
+        for pos, rhs, folded in hide_writes:
+            if folded is True:
+                bad.append("hide() re-latches %s = true (`%s`) — the hide intent is "
+                           "overwritten and a queued attach survives" % (intent, rhs[:40]))
+            elif folded is None:
+                bad.append("hide() writes %s = `%s`, which cannot be proven to be the "
+                           "published `false` (fail-closed)" % (intent, rhs[:40]))
         if bad:
             out.append((CRIT_C1, False, "; ".join(bad)))
         else:
-            out.append((CRIT_C1, True, f"intent field = {intent}"))
+            out.append((CRIT_C1, True, "intent field = %s" % intent))
 
     # ---- C2: posted show Runnable re-checks it before attach() ---------
-    if not show_f:
+    if show_f is None:
         out.append((CRIT_C2, False, "show() not found"))
     elif intent is None:
         out.append((CRIT_C2, False, "no intent field derived (see C1)"))
     else:
-        body = show_f[0]
+        body = show_f
         post = re.search(r"\.post\s*\{", body)
         if not post:
             out.append((CRIT_C2, False, "show() posts no Runnable (shape changed)"))
         else:
-            runnable = block_at(body, post.end() - 1)
-            guard = -1
-            guard_cond, guard_lit = "", False
-            for m in re.finditer(r"\bif\s*\(", runnable):
-                cond, close = paren_cond(runnable, m.end() - 1)
-                if not re.search(r"(?<![\w])" + re.escape(intent) + r"(?!\w)", cond):
+            open_at = post.end() - 1
+            close = match_bracket(body, open_at)
+            runnable = body[open_at + 1:close] if close > 0 else ""
+            guard = None
+            for cond, t0, t1, _e0, _e1 in if_blocks(runnable):
+                if not contains_ident(cond, intent) and not wrapper_ignores_receiver(
+                        cond, intent) and not guard_arg_constant(cond, intent):
                     continue
-                tail = runnable[close + 1: close + 120].lstrip()
-                if tail.startswith("{") or tail.startswith("return"):
-                    guard, guard_cond = m.start(), cond
-                    guard_lit = literal_decides(cond)
+                if tail_aborts(runnable[t0:t1]):
+                    guard = (cond, t0, t1)
                     break
+                guard = guard or (cond, t0, t1)
             attach_at = runnable.find("attach(")
-            if guard >= 0 and guard_lit:
+            if guard is None:
                 out.append((
                     CRIT_C2, False,
-                    f"the posted show Runnable's {intent} guard is decided by a literal "
-                    f"(`{guard_cond.strip()}`) — the early return can never fire, so a "
-                    "hide inside the queue hop cannot cancel the attach",
-                ))
-            elif guard < 0:
-                out.append((
-                    CRIT_C2, False,
-                    f"the posted show Runnable never checks {intent} — a hide inside "
-                    "the queue hop cannot cancel the attach",
-                ))
-            elif attach_at >= 0 and guard > attach_at:
-                out.append((
-                    CRIT_C2, False,
-                    f"the {intent} guard sits AFTER attach() in the posted Runnable "
-                    "(the view is already on screen)",
+                    "the posted show Runnable never checks %s — a hide inside "
+                    "the queue hop cannot cancel the attach" % intent,
                 ))
             else:
-                out.append((CRIT_C2, True, f"guard on {intent} precedes attach()"))
+                cond, guard_at, guard_end = guard
+                if constant_decides(cond):
+                    out.append((
+                        CRIT_C2, False,
+                        "the posted show Runnable's %s guard is decided by a constant "
+                        "(`%s`) — the early return can never fire, so a hide inside the "
+                        "queue hop cannot cancel the attach" % (intent, cond.strip()[:70]),
+                    ))
+                elif wrapper_ignores_receiver(cond, intent) or guard_arg_constant(cond, intent):
+                    out.append((
+                        CRIT_C2, False,
+                        "the posted show Runnable's guard receives `%s`, which no longer "
+                        "evaluates to %s — the latch is read and then replaced by a "
+                        "constant, so the early return cannot fire" % (cond.strip()[:70], intent),
+                    ))
+                elif not tail_aborts(runnable[guard_at:guard_end]):
+                    out.append((
+                        CRIT_C2, False,
+                        "the posted show Runnable's %s guard does not abort (`%s` returns "
+                        "Unit) — the queued attach still runs" % (intent, cond.strip()[:70]),
+                    ))
+                elif attach_at >= 0 and guard_at < close and attach_at < guard_at:
+                    out.append((
+                        CRIT_C2, False,
+                        "the %s guard sits AFTER attach() in the posted Runnable "
+                        "(the view is already on screen)" % intent,
+                    ))
+                else:
+                    out.append((CRIT_C2, True, "guard on %s precedes attach()" % intent))
 
     # ---- C3: no hide() call site gated on the real attach-state --------
     viol = []
@@ -348,68 +435,67 @@ def analyse(ctrl: str, svc: str) -> list[tuple[str, bool, str]]:
         viol.append("could not derive the real attach-state field (no `= true` inside attach())")
     else:
         for path, src in ((CONTROLLER, ctrl), (SERVICE, svc)):
-            for line_no, conds in hide_gates(src):
-                hits = [
-                    c for c in conds
-                    if re.search(r"(?<![\w])" + re.escape(real) + r"(?!\w)", c)
-                ]
+            for line_no, conds in hide_gates(src, brace_blocks(src)):
+                hits = [c for c in conds if contains_ident(c, real)]
                 if hits:
                     viol.append(
-                        f"{path.rsplit('/', 1)[-1]}:{line_no} "
-                        f"hide() gated on `{hits[0].strip()}` — `{real}` lags the intent "
-                        "by a queue hop, so this drops the hide"
-                    )
+                        "%s:%d hide() gated on `%s` — `%s` lags the intent by a queue "
+                        "hop, so this drops the hide"
+                        % (path.rsplit("/", 1)[-1], line_no, hits[0].strip()[:70], real))
         if viol:
             out.append((CRIT_C3, False, "; ".join(viol)))
         else:
-            out.append((CRIT_C3, True, f"no hide() gated on {real}"))
+            out.append((CRIT_C3, True, "no hide() gated on %s" % real))
 
     # ---- C4: intent and real state must be distinct --------------------
     if intent is None or real is None:
         out.append((
             CRIT_C4, False,
-            f"both fields must exist and differ (intent={intent!r}, real={real!r})",
+            "both fields must exist and differ (intent=%r, real=%r)" % (intent, real),
         ))
     elif intent == real:
         out.append((
             CRIT_C4, False,
-            f"`{real}` doubles as the intent latch — an async flag cannot also be "
-            "the synchronous intent (this is the original defect)",
+            "`%s` doubles as the intent latch — an async flag cannot also be "
+            "the synchronous intent (this is the original defect)" % real,
         ))
     else:
-        out.append((CRIT_C4, True, f"intent={intent} / real={real}"))
+        out.append((CRIT_C4, True, "intent=%s / real=%s" % (intent, real)))
 
     return out
 
 
-def scan(root: Path) -> tuple[list[str], list[str]]:
+def scan(root):
     """Returns (violations, summary_lines)."""
     ctrl_p, svc_p = root / CONTROLLER, root / SERVICE
     missing = [str(p) for p in (ctrl_p, svc_p) if not p.is_file()]
     if missing:
-        return [f"missing source file(s): {', '.join(missing)}"], []
-    results = analyse(
-        prepare(ctrl_p.read_text(encoding="utf-8")),
-        prepare(svc_p.read_text(encoding="utf-8")),
-    )
+        return ["missing source file(s): %s" % ", ".join(missing)], []
+    sources = {}
+    for p in (ctrl_p, svc_p):
+        try:
+            sources[p] = mask_code(p.read_text(encoding="utf-8"))
+        except KotlinLexError as e:
+            return ["fail-closed: the shared lexer cannot analyse %s (%s)" % (p.name, e)], []
+    results = analyse(sources[ctrl_p], sources[svc_p])
     violations = []
     summary = []
     for crit, ok, detail in results:
         if ok:
-            summary.append(f"  OK   {crit} [{detail}]")
+            summary.append("  OK   %s [%s]" % (crit, detail))
         else:
-            violations.append(f"{crit}: {detail}")
+            violations.append("%s: %s" % (crit, detail))
     return violations, summary
 
 
 # --------------------------------------------------------------------------
 # selftest — every arm is a byte-level mutation of the REAL tree
 # --------------------------------------------------------------------------
-def _mutate(src: str, old: str, new: str, tag: str) -> str:
+def _mutate(src, old, new, tag):
     if src.count(old) != 1:
         raise SystemExit(
-            f"[selftest {tag}] anchor must appear exactly once, found {src.count(old)}: "
-            f"{old[:70]!r} — the gate's arms drifted from production; fix the gate"
+            "[selftest %s] anchor must appear exactly once, found %d: %r — the gate's "
+            "arms drifted from production; fix the gate" % (tag, src.count(old), old[:70])
         )
     return src.replace(old, new)
 
@@ -423,15 +509,17 @@ HIDE_HEAD = "        desiredShown = false\n"
 SVC_GATE1 = "            controller.hide()\n            return\n"
 SVC_IDLE = "        controller.hide()\n    }\n"
 CTRL_NOPERM = "            hide()\n            return\n"
+GUARD_LINE = "            if (!shouldRunShowPost(desiredShown)) return@post\n"
 
 
-def selftest() -> int:
+def selftest():
     root = Path(__file__).resolve().parents[2]
     ctrl = (root / CONTROLLER).read_text(encoding="utf-8")
     svc = (root / SERVICE).read_text(encoding="utf-8")
     tmp = Path(tempfile.mkdtemp(prefix="ovl-latch-"))
+    stats = {"arms": 0}
 
-    def arm(name: str, ctrl_src: str, svc_src: str, expect: list[str]) -> bool:
+    def arm(name, ctrl_src, svc_src, expect):
         """expect = criteria that must be red; every other criterion must stay
         green (so "exactly one arm, one criterion" is enforced, not narrated)."""
         d = tmp / name
@@ -439,20 +527,23 @@ def selftest() -> int:
             p = d / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(src, encoding="utf-8")
+        stats["arms"] += 1
         viol, _ = scan(d)
         reds = sorted({v.split(":")[0].split(" ")[0] for v in viol})
         ok = reds == sorted(expect)
-        print(f"[selftest {name}] expect red {expect} -> got {reds}: {'OK' if ok else 'FAIL'}")
+        print("[selftest %s] expect red %s -> got %s: %s"
+              % (name, expect, reds, "OK" if ok else "FAIL"))
         for v in viol:
-            print(f"    {v}")
+            print("    " + v)
         return ok
 
     good = True
 
     # arm 0: the real tree is green
+    stats["arms"] += 1
     viol, summary = scan(root)
     if viol:
-        print(f"[selftest ok-arm] EXPECTED green, got: {viol!r}")
+        print("[selftest ok-arm] EXPECTED green, got: %r" % (viol,))
         good = False
     else:
         print("[selftest ok-arm] real tree parses clean: OK")
@@ -464,9 +555,9 @@ def selftest() -> int:
     # re-add the latch as the last statement of show() instead of its entry
     late_show = _mutate(
         late_show,
-        "                Log.w(TAG, \"show failed: ${e.message}\", e)\n"
+        '                Log.w(TAG, "show failed: ${e.message}", e)\n'
         "            }\n        }\n    }\n\n    fun hide()",
-        "                Log.w(TAG, \"show failed: ${e.message}\", e)\n"
+        '                Log.w(TAG, "show failed: ${e.message}", e)\n'
         "            }\n        }\n        desiredShown = true\n    }\n\n    fun hide()",
         "c1b",
     )
@@ -482,20 +573,21 @@ def selftest() -> int:
 
     # arm 3: the posted show Runnable drops its intent guard
     good &= arm("c2-no-guard", _mutate(ctrl, SHOW_POST_TAIL,
-                                       "        mainHandler.post {\n            try {\n", "c3"), svc, ["C2"])
+                                       "        mainHandler.post {\n            try {\n", "c3"),
+                svc, ["C2"])
 
     # arm 4: guard moved behind attach()
     after = _mutate(
         ctrl,
         SHOW_POST_TAIL + "                pendingSessionId = targetSessionId\n"
         "                if (view == null) {\n"
-        "                    Log.d(TAG, \"show() attach() — view was null\")\n"
+        '                    Log.d(TAG, "show() attach() — view was null")\n'
         "                    attach()\n"
         "                }\n",
         "        mainHandler.post {\n            try {\n"
         "                pendingSessionId = targetSessionId\n"
         "                if (view == null) {\n"
-        "                    Log.d(TAG, \"show() attach() — view was null\")\n"
+        '                    Log.d(TAG, "show() attach() — view was null")\n'
         "                    attach()\n"
         "                }\n"
         "                if (!shouldRunShowPost(desiredShown)) return@post\n",
@@ -504,20 +596,23 @@ def selftest() -> int:
     good &= arm("c2-guard-after-attach", after, svc, ["C2"])
 
     # arm 5/6/7: each of the three call sites re-gated on the real state
-    good &= arm("c3-controller-noperm", _mutate(ctrl, CTRL_NOPERM,
-                                                "            if (isShown) hide()\n            return\n", "c5"),
+    good &= arm("c3-controller-noperm",
+                _mutate(ctrl, CTRL_NOPERM,
+                        "            if (isShown) hide()\n            return\n", "c5"),
                 svc, ["C3"])
     good &= arm("c3-service-gate1", ctrl, _mutate(
-        svc, SVC_GATE1, "            if (controller.isShown) controller.hide()\n            return\n", "c6"), ["C3"])
+        svc, SVC_GATE1,
+        "            if (controller.isShown) controller.hide()\n            return\n", "c6"), ["C3"])
     good &= arm("c3-service-idle", ctrl, _mutate(
-        svc, SVC_IDLE, "        if (controller.isShown) controller.hide()\n    }\n", "c7"), ["C3"])
+        svc, SVC_IDLE,
+        "        if (controller.isShown) controller.hide()\n    }\n", "c7"), ["C3"])
 
     # arm 8: collapse the two fields into one (the original defect shape)
     merged = _mutate(ctrl, "    @Volatile\n    private var desiredShown: Boolean = false\n", "", "c8")
     merged = merged.replace("desiredShown", "isShown")
     good &= arm("c4-merged-fields", merged, svc, ["C4"])
 
-    # ── wide-1024 witness arms (each was green before this branch) ──────────
+    # ── wide-1024 witness arms (each was green before that branch) ──────────
     # arm 10: hide() publishes `false` then immediately re-latches `true` —
     #         position/substring criteria stay satisfied, the intent is gone.
     good &= arm("c1-hide-relatch-true", _mutate(
@@ -527,8 +622,7 @@ def selftest() -> int:
     # arm 11: the posted guard mentions the latch and still returns early, but
     #         a literal `&& false` decides it.
     good &= arm("c2-guard-literal-false", _mutate(
-        ctrl,
-        "            if (!shouldRunShowPost(desiredShown)) return@post\n",
+        ctrl, GUARD_LINE,
         "            if (!shouldRunShowPost(desiredShown) && false) return@post\n", "c10"),
         svc, ["C2"])
 
@@ -540,24 +634,83 @@ def selftest() -> int:
         "                controller.hide()\n"
         "            }\n            return\n", "c11"), ["C3"])
 
+    # ── [BATCH7-t10] witness arms ───────────────────────────────────────────
+    # 14-1: the re-latch is spelled as an expression — the literal regex saw
+    #       `false` (published) and nothing else.
+    good &= arm("c1-hide-relatch-expr", _mutate(
+        ctrl, HIDE_HEAD, "        desiredShown = false\n        desiredShown = 1 == 1\n", "t1"),
+        svc, ["C1"])
+
+    # 14-1b: `this.` prefix on the re-latch.
+    good &= arm("c1-hide-relatch-this", _mutate(
+        ctrl, HIDE_HEAD, "        desiredShown = false\n        this.desiredShown = true\n", "t1b"),
+        svc, ["C1"])
+
+    # 14-2: a folded comparison decides the guard.
+    good &= arm("c2-guard-literal-expr", _mutate(
+        ctrl, GUARD_LINE,
+        "            if (!shouldRunShowPost(desiredShown) && 1 == 2) return@post\n", "t2"),
+        svc, ["C2"])
+
+    # 14-3: the guard receives a constant instead of the latch.
+    good &= arm("c2-guard-arg-const", _mutate(
+        ctrl, GUARD_LINE,
+        "            if (!shouldRunShowPost(desiredShown.let { true })) return@post\n", "t3"),
+        svc, ["C2"])
+
+    # 14-4: the guard's tail exists but does not abort.
+    good &= arm("c2-guard-body-noop", _mutate(
+        ctrl, GUARD_LINE,
+        "            if (!shouldRunShowPost(desiredShown)) { Unit }\n", "t4"),
+        svc, ["C2"])
+
+    # 14-5: the gate is one local alias away from the real field.
+    good &= arm("c3-service-alias", ctrl, _mutate(
+        svc, SVC_GATE1,
+        "            val shouldHide = controller.isShown\n"
+        "            if (shouldHide) controller.hide()\n            return\n", "t5"), ["C3"])
+
+    # 14-6: the gate is the RECEIVER of the block the hide sits in, across a
+    #       line break — no `if (…)` and no same-line prefix.
+    good &= arm("c3-service-receiver-gate", ctrl, _mutate(
+        svc, SVC_GATE1,
+        "            controller.takeIf { it.isShown }?.let {\n"
+        "                it.hide()\n"
+        "            }\n            return\n", "t6"), ["C3"])
+
     # arm 9: missing file must be red, never silently green
+    stats["arms"] += 1
     d = tmp / "missing"
     p = d / CONTROLLER
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(ctrl, encoding="utf-8")
     viol, _ = scan(d)
     ok = bool(viol) and "missing" in viol[0]
-    print(f"[selftest missing-file] expect missing-file violation -> {'OK' if ok else 'FAIL'}")
+    print("[selftest missing-file] expect missing-file violation -> %s" % ("OK" if ok else "FAIL"))
+    good &= ok
+
+    # fail-closed on a lexer failure
+    stats["arms"] += 1
+    d = tmp / "lexfail"
+    for rel, src in ((CONTROLLER, 'class X { val s = "unterminated\n'), (SERVICE, svc)):
+        p = d / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(src, encoding="utf-8")
+    viol, _ = scan(d)
+    ok = bool(viol) and "fail-closed" in viol[0]
+    print("[selftest lexer-fail-closed] expect fail-closed violation -> %s"
+          % ("OK" if ok else "FAIL"))
     good &= ok
 
     if good:
         print(SELFTEST_MARKER)
+        print("OVERLAY_SHOW_HIDE_LATCH_SELFTEST_ARMS=%d" % stats["arms"])
         return 0
     print("OVERLAY_SHOW_HIDE_LATCH_SELFTEST=FAIL")
     return 1
 
 
-def main(argv: list[str]) -> int:
+def main(argv):
     root = None
     i = 0
     while i < len(argv):
@@ -576,14 +729,14 @@ def main(argv: list[str]) -> int:
     if root is None:
         root = Path.cwd()
     if not root.is_dir():
-        print(f"repo root not found: {root}", file=sys.stderr)
+        print("repo root not found: %s" % root, file=sys.stderr)
         return 2
 
     violations, _ = scan(root)
     if violations:
         print("[overlay-show-hide-latch] VIOLATIONS FOUND:")
         for v in violations:
-            print(f"  FAIL: {v}")
+            print("  FAIL: %s" % v)
         print(
             "Fix: publish the overlay INTENT at the show()/hide() entries (before the "
             "post), re-check it inside the posted show Runnable before attach(), keep "
