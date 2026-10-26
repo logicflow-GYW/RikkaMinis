@@ -99,84 +99,90 @@ FLAG_ASSIGNMENT = "formatChanged = true"
 HANDLER_HEAD_RE = re.compile(r"on(?:ValueChange|CheckedChange)\s*=\s*\{")
 # A handler parked under a literal-false guard is not a control the user can
 # reach; counting it is how a real handler's missing flag got cancelled out.
-DEAD_GUARD_RE = re.compile(r"if\s*\(\s*(?:false\b|true\s*\|\|)")
 # Last write wins: a handler that sets the flag and then clears it discards the
-# user's edit exactly like one that never set it.
-FLAG_WRITE_RE = re.compile(r"\bformatChanged\s*=\s*(true|false)\b")
+# user's edit exactly like one that never set it. [B6-t07 A05-3] The old regex
+# only matched a literal `true|false`, so `formatChanged = !true` (or
+# `= (1 == 2)`, or `= someFlag`) was invisible and the previous `true` was taken
+# as the last write. The right-hand side is now captured whole and folded
+# through the shared constant folder.
+FLAG_WRITE_RE = re.compile(r"\bformatChanged\s*=(?!=)")
 
 # Arm 5 — type names after `is ThinkingWireFormat.` in each function body.
 FMT_TYPE_RE = re.compile(r"is\s+ThinkingWireFormat\.(\w+)")
 
 
-def code_only(text):
-    """Text with line comments (//…) removed — presence checks must not be
-    satisfiable from prose in a comment."""
-    return "\n".join(line.split("//")[0] for line in text.split("\n"))
+# ── shared lexer / ast / valueflow (batch-6 hard constraint #1) ────────────────
+# Every structural read goes through the shared projections: `code_view()` masks
+# comments AND string/char contents (length-preserving, so positions map back to
+# the source), `const_bool()` folds Kotlin booleans by real precedence, and
+# `path_feasible()` decides whether a position is reachable at all.
+#
+# Why the old hand-rolled slicer had to go (witness A05-6): `line.split("//")[0]`
+# removed line comments only, so an anchor parked in `/* … */` still read as live
+# code — the Save button could hand `seed.copy(wireFormat = …)` to onSave while a
+# commented-out `onSave(buildRule())` satisfied arm 1.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+from _kotlin_lexer import KotlinLexError  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    function_body,
+    match_bracket,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    code_view,
+    expr_end,
+    literal_view,
+    path_feasible,
+)
 
 
-def declaration_text(src, header):
-    """The text of the declaration starting at `header`, up to the next blank
-    line. Deliberately NOT a brace matcher: the chosen functions here use
-    expression bodies (no `{`), and a brace scan would silently grab a block
-    from further down the file. A declaration that grows an internal blank line
-    truncates the region — which surfaces as a missing-anchor violation
-    (fail-closed), never as a false pass."""
-    i = src.find(header)
+class Views:
+    """Both shared projections of one file (equal length → positions agree)."""
+
+    __slots__ = ("code", "lit")
+
+    def __init__(self, text):
+        self.code = code_view(text)    # comments + string/char contents → spaces
+        self.lit = literal_view(text)  # comments → spaces, string contents kept
+
+
+def dialog_span(code):
+    """(start, end) of the dialog: the composable up to `enum class FormatChoice(`."""
+    i = code.find(DIALOG_HEADER)
     if i < 0:
         return None
-    j = src.find("\n\n", i)
-    return src[i:j] if j > 0 else src[i:]
-
-
-def brace_block(src, header):
-    """The `{…}` block belonging to `header`, brace-matched (for the enum/class
-    shaped regions)."""
-    i = src.find(header)
-    if i < 0:
-        return None
-    brace = src.find("{", i)
-    if brace < 0:
-        return None
-    depth = 0
-    for k in range(brace, len(src)):
-        if src[k] == "{":
-            depth += 1
-        elif src[k] == "}":
-            depth -= 1
-            if depth == 0:
-                return src[i:k + 1]
-    return None
-
-
-def dialog_text(src):
-    i = src.find(DIALOG_HEADER)
-    if i < 0:
-        return None
-    j = src.find(DIALOG_END, i)
+    j = code.find(DIALOG_END, i)
     if j < 0:
         return None
-    return src[i:j]
+    return (i, j)
 
 
-def per_format_block(src):
-    """The per-format `when (choice)` block: the one that renders
-    VALUE handlers for the two path formats. Identified by CODE (its branch
-    list), not by a comment — comments are stripped before this runs."""
+def per_format_span(code):
+    """(body_start, body_end) of the per-format `when (choice)` block.
+
+    Identified by CODE (its branch list), not by a comment.
+    """
     selected = []
-    for m in re.finditer(r"when\s*\(\s*choice\s*\)\s*\{", src):
-        block = brace_block(src[m.start():], "when (choice) {")
-        if block and PER_FORMAT_MARKER in block:
-            selected.append(block)
+    for m in re.finditer(r"when\s*\(\s*choice\s*\)\s*\{", code):
+        brace = m.end() - 1
+        close = match_bracket(code, brace)
+        if close < 0:
+            continue
+        if PER_FORMAT_MARKER in code[brace + 1:close]:
+            selected.append((brace + 1, close))
     if len(selected) != 1:
         return None
     return selected[0]
 
 
-def check_anchors(src, rel, body, arm, anchors, what):
+def check_anchors(rel, body_code, arm, anchors, what):
     out = []
-    code = code_only(body)
     for anchor in anchors:
-        if anchor not in code:
+        if anchor not in body_code:
             out.append((rel, 0, arm,
                         "%s is missing required code anchor `%s`" % (what, anchor)))
     return out
@@ -190,90 +196,352 @@ def read(rel, root):
         return f.read()
 
 
-def call_arg_lists(src, call):
-    """The argument-list text of every `call` in `src`, paren-matched."""
-    out = []
-    idx = 0
-    while True:
-        i = src.find(call, idx)
-        if i < 0:
-            return out
-        j = i + len(call)
-        depth = 1
-        while j < len(src) and depth:
-            if src[j] in "([{":
-                depth += 1
-            elif src[j] in ")]}":
-                depth -= 1
-            j += 1
-        out.append(src[i + len(call):j - 1])
-        idx = j
+def call_sites(text, name, start=0, end=None):
+    """Offsets of every `(` of a call `name(` in [start,end) (word-bounded)."""
+    end = len(text) if end is None else end
+    pat = re.compile(r"(?<![\w`])%s\s*\(" % re.escape(name))
+    return [m.end() - 1 for m in pat.finditer(text, start, end)]
 
 
-def split_args(arglist):
-    """Split a Kotlin argument list on TOP-LEVEL commas (depth-aware)."""
-    args, depth, cur = [], 0, ""
-    for ch in arglist:
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            depth -= 1
-        if ch == "," and depth == 0:
-            args.append(cur)
-            cur = ""
-        else:
-            cur += ch
-    if cur.strip():
-        args.append(cur)
-    return args
+def copy_arg_lists(code, start, end):
+    """Every `seed.copy(` argument list in [start,end) PLUS every `.copy(` chained
+    directly onto it: [(site_pos, [(a, b)])].
 
-
-def named_arg_keys(arglist):
-    """The `name =` keys of a Kotlin argument list (positional args skipped)."""
-    keys = []
-    for a in split_args(arglist):
-        if "=" not in a:
-            continue
-        key = a.split("=", 1)[0].strip()
-        if re.fullmatch(r"[A-Za-z_]\w*", key):
-            keys.append(key)
-    return keys
-
-
-def handlers_in(block):
-    """(offset, body) for every on*Change lambda in `block`, brace-matched.
-
-    `[^{}]*` silently dropped every handler that contains a nested `{ … }` —
-    from the COUNT and from the flag check alike. Writing one control's body as
-    `{ run { … } }` therefore removed it from the audit while the `>= 5` count
-    was still satisfied by an unreachable `if (false) Switch(…)` elsewhere
-    (witness Arm 4, parser-death).
+    [B6-t07 A05-1] The old reader only resolved the list whose text started with
+    the literal `seed.copy(`, so a chained second `.copy(id = …, reasoningEcho =
+    null)` — same field-loss family, written one link further out — was invisible
+    while the runtime still wiped both fields.
     """
-    out = []
-    for m in HANDLER_HEAD_RE.finditer(block):
+    out, err = [], ""
+    seed_re = re.compile(r"(?<![\w`])seed\s*\.\s*copy\s*\(")
+    chain_re = re.compile(r"\.\s*copy\s*\(")
+    for m in seed_re.finditer(code, start, end):
+        open_pos = m.end() - 1
+        close = match_bracket(code, open_pos)
+        if close < 0:
+            return [], "the `seed.copy(` argument list could not be delimited (fail-closed)"
+        out.append((m.start(), call_args(code, open_pos)))
+        k = close + 1
+        while True:
+            while k < len(code) and code[k] in " \t\r\n":
+                k += 1
+            cm = chain_re.match(code, k)
+            if not cm:
+                break
+            o2 = cm.end() - 1
+            c2 = match_bracket(code, o2)
+            if c2 < 0:
+                return out, "a chained `.copy(` could not be delimited (fail-closed)"
+            out.append((k, call_args(code, o2)))
+            k = c2 + 1
+    return out, err
+
+
+def arg_keys(code, arglist):
+    """Named-argument keys of one argument list, plus positional sites.
+
+    [B6-t07 A05-1] `named_arg_keys` skipped `if '=' not in a`, so a POSITIONAL
+    `seed.copy(uuid(), …)` overwriting `id` read as an empty key set. Positional
+    arguments to `copy(` cannot be proven not to hit the preserved fields, so
+    they are reported by position.
+    """
+    keys, positional = [], []
+    for idx, (a, b) in enumerate(arglist):
+        arg = code[a:b].strip()
+        m = re.match(r"([A-Za-z_]\w*)\s*=(?!=)", arg)
+        if m:
+            keys.append(m.group(1))
+        else:
+            positional.append((idx, arg))
+    return keys, positional
+
+
+def handlers_in(code, start, end):
+    """(handlers, broken) — every on*Change lambda in [start,end).
+
+    handlers: [(head_offset, body_start, body_end)]; broken: offsets whose braces
+    could not be matched (fail-closed at the caller).
+    """
+    handlers, broken = [], []
+    for m in HANDLER_HEAD_RE.finditer(code, start, end):
         brace = m.end() - 1
-        depth = 0
-        for k in range(brace, len(block)):
-            if block[k] == "{":
-                depth += 1
-            elif block[k] == "}":
-                depth -= 1
-                if depth == 0:
-                    out.append((m.start(), block[brace + 1:k]))
-                    break
+        close = match_bracket(code, brace)
+        if close < 0:
+            broken.append(m.start())
+            continue
+        handlers.append((m.start(), brace + 1, close))
+    return handlers, broken
+
+
+def flag_writes(code, start, end):
+    """[(pos, rhs_text)] of every assignment to `formatChanged` in [start,end)."""
+    out = []
+    for m in FLAG_WRITE_RE.finditer(code, start, end):
+        k = m.end()
+        stop = k
+        while stop < end and code[stop] not in "\n;}":
+            stop += 1
+        out.append((m.start(), code[k:stop].strip()))
     return out
 
 
-def dead_guarded(block, offset):
-    """True when the handler at `offset` sits under a literal-false guard."""
-    line_start = block.rfind("\n", 0, offset) + 1
-    return bool(DEAD_GUARD_RE.search(block[line_start:offset]))
+def last_live_flag_write(code, start, end):
+    """The LAST REACHABLE `formatChanged = …` write in [start,end).
+
+    [B6-t07 A05-2] A write parked inside `if (false) …` never executes, so it
+    must not count as the control recording the user's change. Reachability is
+    decided by the shared `path_feasible` (constant-folding, not a literal
+    whitelist), which also covers the newline-spelled dead guard the old
+    line-prefix regex missed.
+    """
+    live = [(pos, rhs) for pos, rhs in flag_writes(code, start, end)
+            if path_feasible(code, pos)]
+    return live[-1] if live else (None, None)
 
 
-def last_flag_write(block):
-    """The final `formatChanged = …` value in `block`, or None."""
-    writes = FLAG_WRITE_RE.findall(block)
-    return writes[-1] if writes else None
+def flag_value(rhs):
+    """True / False / None (not provable) for a flag write's right-hand side."""
+    if not rhs:
+        return None
+    return const_bool(rhs)
+
+
+def _is_call_to(expr, name):
+    """True when [expr] IS exactly one call to `name(…)` (nothing before/after)."""
+    e = expr.strip()
+    m = re.match(r"(?:[A-Za-z_]\w*\.)*%s\s*\(" % re.escape(name), e)
+    if not m:
+        return False
+    close = match_bracket(e, m.end() - 1)
+    return close == len(e) - 1
+
+
+def _bare_returns(body):
+    """[(pos, returned_expr_text)] for every `return <expr>` in [body]."""
+    out = []
+    for m in re.finditer(r"\breturn\b", body):
+        start = m.end()
+        end = expr_end(body, start)
+        out.append((m.start(), body[start:end].strip()))
+    return out
+
+
+def check_save_binding(code, dspan):
+    """[A05-4 / A05-6] Save must persist what `buildRule()` RETURNS.
+
+    Two halves, both derived from the code:
+      * the button's `onSave(<arg>)` argument is the dialog's own `buildRule()` —
+        a `seed.copy(...)`/constructor there bypasses the whole guarded path;
+      * `buildRule()` returns the `buildEditedThinkingRule(...)` call — binding
+        its value to a local and returning the raw seed means the guarded
+        derivation is computed and thrown away.
+    """
+    out = []
+    start, end = dspan
+    save_sites = call_sites(code, "onSave", start, end)
+    if not save_sites:
+        out.append((EDITOR_REL, 0, "1",
+                    "the dialog never calls onSave( — gate ROT (the Save button "
+                    "disappeared)"))
+    for open_pos in save_sites:
+        arglist = call_args(code, open_pos)
+        if len(arglist) != 1:
+            out.append((EDITOR_REL, 0, "1",
+                        "onSave( does not take exactly one argument — fail-closed"))
+            continue
+        a, b = arglist[0]
+        arg = code[a:b].strip()
+        if not re.fullmatch(r"buildRule\s*\(\s*\)", arg):
+            out.append((EDITOR_REL, 0, "1",
+                        "the Save button hands `%s` to onSave( instead of `buildRule()` — "
+                        "the guarded derivation (buildEditedThinkingRule → "
+                        "chooseEditedWireFormat) never reaches the wire, so the seed's id / "
+                        "reasoningEcho and an unrepeatable format are rewritten again "
+                        "(witness A05-6)" % arg[:60]))
+
+    span = function_body(code, "buildRule")
+    if span is None:
+        out.append((EDITOR_REL, 0, "1", "buildRule() could not be delimited — gate ROT"))
+        return out
+    bstart, bend, kind = span
+    body = code[bstart:bend]
+    if kind == "expr":
+        val = body.strip()
+        if not _is_call_to(val, "buildEditedThinkingRule"):
+            out.append((EDITOR_REL, 0, "1",
+                        "buildRule() returns `%s` — Save must persist the value "
+                        "`buildEditedThinkingRule(...)` RETURNS; a different object here is "
+                        "the pre-fix shape with extra steps (witness A05-4)" % val[:60]))
+    else:
+        rets = _bare_returns(body)
+        if not rets:
+            out.append((EDITOR_REL, 0, "1",
+                        "buildRule() has no `return` — fail-closed"))
+        for _, text in rets:
+            if not _is_call_to(text, "buildEditedThinkingRule"):
+                out.append((EDITOR_REL, 0, "1",
+                            "buildRule() returns `%s` — the guarded builder's value is "
+                            "computed and DISCARDED, and the raw seed goes to onSave instead "
+                            "(witness A05-4)" % text[:60]))
+    return out
+
+
+def check_copy_chain(code, start, end):
+    """[A05-1] `id` / `reasoningEcho` must survive the WHOLE `seed.copy()` chain.
+
+    `copy` only preserves what it does NOT name, so every link of the chain counts:
+    the first `seed.copy(kind/scope/wireFormat/label)` survives when a chained
+    `.copy(id = …, reasoningEcho = null)` is appended. Positional arguments are
+    reported by position — `copy(uuid(), …)` cannot be proven not to hit `id`.
+    """
+    out = []
+    lists, err = copy_arg_lists(code, start, end)
+    if err:
+        return [(PURE_REL, 0, "2",
+                 "%s — the preserved-fields check cannot run" % err)]
+    if not lists:
+        return [(PURE_REL, 0, "2",
+                 "could not read the `seed.copy(` argument list — the preserved-fields "
+                 "check cannot run (fail-closed)")]
+    overridden, positional = [], []
+    for _pos, arglist in lists:
+        keys, positional_here = arg_keys(code, arglist)
+        overridden += [k for k in keys if k in COPY_FORBIDDEN_FIELDS]
+        positional += positional_here
+    if overridden:
+        out.append((PURE_REL, 0, "2",
+                    "buildEditedThinkingRule overrides %s inside the `seed.copy(…)` chain — "
+                    "those are exactly the fields this dialog does not surface, so naming them "
+                    "(even to pass a re-derived value) re-opens da1024 ISSUE-06 defect 1: the "
+                    "vendor history-echo contract and the rule identity die on Save "
+                    "(witness A05-1)" % sorted(set(overridden))))
+    if positional:
+        out.append((PURE_REL, 0, "2",
+                    "the `seed.copy(…)` chain passes POSITIONAL argument(s) %s — a positional "
+                    "argument cannot be proven not to overwrite `reasoningEcho` / `id`, which "
+                    "are precisely the preserved fields (witness A05-1 self-note)"
+                    % [idx for idx, _ in positional]))
+    return out
+
+
+def check_format_controls(code, dspan):
+    """[A05-2 / A05-3] Every format control must RECORD the change, provably.
+
+    The flag is read at Save time, so what matters is the last *reachable* write:
+    a write inside `if (false) …` never runs (A05-2), and a write whose value is
+    `!true` / `(1 == 2)` erases the one before it (A05-3). Both are decided by the
+    shared constant folder / reachability instead of a literal whitelist.
+    """
+    out = []
+    start, end = dspan
+    dropdown_at = code.find("DropdownMenu(", start, end)
+    if dropdown_at < 0:
+        return [(EDITOR_REL, 0, "4", "DropdownMenu( not found in the dialog — gate ROT")]
+    pick_re = re.compile(r"onClick\s*=\s*\{")
+    pick = pick_re.search(code, dropdown_at, end)
+    if pick is None:
+        out.append((EDITOR_REL, 0, "4", "no dropdown onClick block found — gate ROT"))
+    else:
+        brace = pick.end() - 1
+        close = match_bracket(code, brace)
+        if close < 0:
+            out.append((EDITOR_REL, 0, "4",
+                        "the dropdown onClick block could not be delimited — fail-closed"))
+        else:
+            if not re.search(r"\bchoice\s*=(?!=)", code[brace + 1:close]):
+                out.append((EDITOR_REL, 0, "4",
+                            "the format dropdown's onClick does not assign `choice` — gate ROT "
+                            "or the pick was rewired"))
+            pos, rhs = last_live_flag_write(code, brace + 1, close)
+            if pos is None:
+                out.append((EDITOR_REL, 0, "4",
+                            "the format dropdown's onClick never sets `%s` on a reachable path, "
+                            "or an untouched save keeps a format the user did replace"
+                            % FLAG_ASSIGNMENT))
+            elif flag_value(rhs) is not True:
+                out.append((EDITOR_REL, 0, "4",
+                            "the format dropdown's onClick's last write is `formatChanged = %s` "
+                            "(folded: %s) — the last write wins, so the user's pick is discarded "
+                            "on Save exactly as if the flag were never set (witness A05-3)"
+                            % (rhs[:40], flag_value(rhs))))
+
+    span = per_format_span(code)
+    if span is None:
+        out.append((EDITOR_REL, 0, "4",
+                    "per-format `when (choice)` block not found — gate ROT"))
+        return out
+    handlers, broken = handlers_in(code, span[0], span[1])
+    for off in broken:
+        out.append((EDITOR_REL, 0, "4",
+                    "an on*Change handler at offset %d could not be delimited — fail-closed"
+                    % off))
+    live, dead = [], 0
+    for off, bstart, bend in handlers:
+        if not path_feasible(code, off):
+            dead += 1
+            continue
+        live.append((off, bstart, bend))
+    if dead:
+        out.append((EDITOR_REL, 0, "4",
+                    "%d on*Change handler(s) sit in an UNREACHABLE branch of the per-format "
+                    "block — an unreachable control cannot satisfy the flag requirement for a "
+                    "reachable one (witness A05-2)" % dead))
+    if len(live) < PER_FORMAT_MIN_HANDLERS:
+        out.append((EDITOR_REL, 0, "4",
+                    "per-format block has only %d reachable on*Change handler(s), expected >= "
+                    "%d — gate ROT or fields removed without updating the flag wiring"
+                    % (len(live), PER_FORMAT_MIN_HANDLERS)))
+    for _off, bstart, bend in live:
+        pos, rhs = last_live_flag_write(code, bstart, bend)
+        if pos is None:
+            out.append((EDITOR_REL, 0, "4",
+                        "per-format field handler `%s…` never sets `%s` on a reachable path: "
+                        "editing a parameter of a preserved format would be silently discarded"
+                        % (code[bstart:bend].strip()[:48], FLAG_ASSIGNMENT)))
+        elif flag_value(rhs) is not True:
+            out.append((EDITOR_REL, 0, "4",
+                        "per-format field handler `%s…`'s last write is `formatChanged = %s` "
+                        "(folded: %s) — the user's edit is recorded and then erased in the same "
+                        "callback (last write wins)"
+                        % (code[bstart:bend].strip()[:48], rhs[:32], flag_value(rhs))))
+    return out
+
+
+def check_format_lists(editor, pure):
+    """[A05-5] `FormatChoice.from` and the representable list must agree BOTH ways.
+
+    The old check only computed `from_types - rep_types`. The defect's own trigger
+    is the other direction: adding a type to `isDropdownRepresentableWireFormat`
+    that `from` cannot actually reach makes `chooseEditedWireFormat` believe the
+    dropdown reproduces it, so an untouched save rewrites DeepSeekRelay /
+    QwenRootOnly into `else -> REASONING_EFFORT`. The violation text already said
+    "(or the reverse)" — the code did not.
+    """
+    out = []
+    from_span = function_body(editor, "from")
+    rep_span = function_body(pure, "isDropdownRepresentableWireFormat")
+    if from_span is None:
+        return [(EDITOR_REL, 0, "5", "FormatChoice.from( not found — gate ROT")]
+    if rep_span is None:
+        return [(PURE_REL, 0, "5", "isDropdownRepresentableWireFormat( not found — gate ROT")]
+    from_types = set(FMT_TYPE_RE.findall(editor[from_span[0]:from_span[1]]))
+    rep_types = set(FMT_TYPE_RE.findall(pure[rep_span[0]:rep_span[1]]))
+    if not from_types or not rep_types:
+        return [(EDITOR_REL, 0, "5",
+                 "could not read the format lists (from=%s, representable=%s) — gate ROT"
+                 % (sorted(from_types), sorted(rep_types)))]
+    both_ways = sorted(from_types ^ rep_types)
+    if both_ways:
+        only_rep = sorted(rep_types - from_types)
+        only_from = sorted(from_types - rep_types)
+        out.append((EDITOR_REL, 0, "5",
+                    "FormatChoice.from and isDropdownRepresentableWireFormat disagree on %s "
+                    "(only in `from`: %s, only in the representable list: %s) — a format the "
+                    "dropdown claims to represent but cannot build is rewritten into `else -> "
+                    "REASONING_EFFORT` by an untouched save, and the reverse makes a "
+                    "representable format un-saveable (witness A05-5)" % (both_ways, only_from,
+                                                                          only_rep)))
+    return out
 
 
 def run_checks(root, rels=None):
@@ -283,148 +551,65 @@ def run_checks(root, rels=None):
                for k, rel in rels.items() if srcs[k] is None]
     if missing:
         return missing
-    editor = code_only(srcs["editor"])
-    pure = code_only(srcs["pure"])
+    try:
+        v = {k: Views(s) for k, s in srcs.items()}
+    except KotlinLexError as exc:
+        return [(rels["editor"], 0, "?", "the editor sources cannot be lexed (%s) — "
+                 "fail-closed, no arm can be judged" % exc)]
+    editor = v["editor"].code
+    pure = v["pure"].code
     checks = []
 
-    # ---- Arm 1: the dialog routes Save through the pure builder ----
-    dialog = dialog_text(editor)
-    if dialog is None:
-        checks.append((EDITOR_REL, 0, "1", "ThinkingRuleEditorDialog region not found — gate ROT"))
+    # ---- Arm 1: the dialog routes Save through the pure builder, and Save
+    #      persists what `buildRule()` really returns ----
+    dspan = dialog_span(editor)
+    if dspan is None:
+        checks.append((EDITOR_REL, 0, "1",
+                       "ThinkingRuleEditorDialog region not found — gate ROT"))
     else:
-        checks += check_anchors(srcs["editor"], EDITOR_REL, dialog, "1",
-                                ARM1_ANCHORS, "ThinkingRuleEditorDialog")
+        dialog = editor[dspan[0]:dspan[1]]
+        checks += check_anchors(EDITOR_REL, dialog, "1", ARM1_ANCHORS,
+                                "ThinkingRuleEditorDialog")
         if BARE_CTOR_RE.search(dialog):
             checks.append((EDITOR_REL, 0, "1",
                            "ThinkingRuleEditorDialog constructs `ThinkingRule(` itself — the "
-                           "positional constructor drops reasoningEcho/id (da1024 ISSUE-06 defect 1); "
-                           "route it through buildEditedThinkingRule( instead"))
+                           "positional constructor drops reasoningEcho/id (da1024 ISSUE-06 "
+                           "defect 1); route it through buildEditedThinkingRule( instead"))
+        checks += check_save_binding(editor, dspan)
 
     # ---- Arm 2: the builder derives from seed.copy(...) ----
-    builder = declaration_text(pure, BUILDER_HEADER)
-    if builder is None:
+    bspan = function_body(pure, "buildEditedThinkingRule")
+    if bspan is None:
         checks.append((PURE_REL, 0, "2", "buildEditedThinkingRule( not found — gate ROT"))
     else:
-        checks += check_anchors(srcs["pure"], PURE_REL, builder, "2",
-                                ARM2_ANCHORS, "buildEditedThinkingRule")
+        builder = pure[bspan[0]:bspan[1]]
+        checks += check_anchors(PURE_REL, builder, "2", ARM2_ANCHORS,
+                                "buildEditedThinkingRule")
         if BARE_CTOR_RE.search(builder):
             checks.append((PURE_REL, 0, "2",
                            "buildEditedThinkingRule builds `ThinkingRule(` instead of "
                            "`seed.copy(` — every field the dialog does not surface is wiped"))
-        # `seed.copy(` only preserves what it does NOT name: an explicit
-        # `id = …` / `reasoningEcho = null` in the argument list re-drops the very
-        # fields arm 2 exists to protect (witness Arm 2, dataflow).
-        copies = call_arg_lists(code_only(builder), SEED_COPY)
-        if not copies:
-            checks.append((PURE_REL, 0, "2",
-                           "could not read the `seed.copy(` argument list — the "
-                           "preserved-fields check cannot run (fail-closed)"))
-        else:
-            keys = set()
-            for arglist in copies:
-                keys.update(named_arg_keys(arglist))
-            overridden = sorted(keys & set(COPY_FORBIDDEN_FIELDS))
-            if overridden:
-                checks.append((PURE_REL, 0, "2",
-                               "buildEditedThinkingRule overrides %s inside `seed.copy(…)` — those "
-                               "are exactly the fields this dialog does not surface, so naming them "
-                               "(even to pass a re-derived value) re-opens da1024 ISSUE-06 defect 1: "
-                               "the vendor history-echo contract and the rule identity die on Save"
-                               % overridden))
+        # `seed.copy(` only preserves what it does NOT name — every link of the
+        # chain counts (A05-1).
+        checks += check_copy_chain(pure, bspan[0], bspan[1])
 
     # ---- Arm 3: the format survives unless the user replaced it ----
-    chooser = declaration_text(pure, CHOOSER_HEADER)
-    if chooser is None:
+    cspan = function_body(pure, "chooseEditedWireFormat")
+    if cspan is None:
         checks.append((PURE_REL, 0, "3", "chooseEditedWireFormat( not found — gate ROT"))
-    else:
-        if ARM3_CHOOSER_ANCHOR not in code_only(chooser):
-            checks.append((PURE_REL, 0, "3",
-                           "chooseEditedWireFormat must keep `%s`" % ARM3_CHOOSER_ANCHOR))
-    if dialog is None:
-        pass
-    else:
-        checks += check_anchors(srcs["editor"], EDITOR_REL, dialog, "3",
+    elif ARM3_CHOOSER_ANCHOR not in pure[cspan[0]:cspan[1]]:
+        checks.append((PURE_REL, 0, "3",
+                       "chooseEditedWireFormat must keep `%s`" % ARM3_CHOOSER_ANCHOR))
+    if dspan is not None:
+        checks += check_anchors(EDITOR_REL, editor[dspan[0]:dspan[1]], "3",
                                 ARM3_DIALOG_ANCHORS, "ThinkingRuleEditorDialog")
 
     # ---- Arm 4: every format control records that the user changed it ----
-    if dialog is None:
-        pass
-    else:
-        dropdown_at = dialog.find("DropdownMenu(")
-        if dropdown_at < 0:
-            checks.append((EDITOR_REL, 0, "4", "DropdownMenu( not found in the dialog — gate ROT"))
-        else:
-            pick = None
-            for m in DROPDOWN_RE.finditer(dialog, dropdown_at):
-                pick = m.group(1)
-                break
-            if pick is None:
-                checks.append((EDITOR_REL, 0, "4", "no dropdown onClick block found — gate ROT"))
-            elif "choice = c" not in pick or FLAG_ASSIGNMENT not in pick:
-                checks.append((EDITOR_REL, 0, "4",
-                               "the format dropdown's onClick must set `%s` alongside the "
-                               "selection, or an untouched save keeps a format the user did "
-                               "replace" % FLAG_ASSIGNMENT))
-            else:
-                last = last_flag_write(pick)
-                if last != "true":
-                    checks.append((EDITOR_REL, 0, "4",
-                                   "the format dropdown's onClick writes `formatChanged = %s` after "
-                                   "`%s` — the last write wins, so the user's pick is discarded on "
-                                   "Save exactly as if the flag were never set (witness Arm 4, order)"
-                                   % (last, FLAG_ASSIGNMENT)))
-        block = per_format_block(dialog)
-        if block is None:
-            checks.append((EDITOR_REL, 0, "4", "per-format `when (choice)` block not found — gate ROT"))
-        else:
-            found = handlers_in(block)
-            handlers = [(off, body) for off, body in found if not dead_guarded(block, off)]
-            dead = len(found) - len(handlers)
-            if dead:
-                checks.append((EDITOR_REL, 0, "4",
-                               "%d on*Change handler(s) sit under a literal-false guard in the "
-                               "per-format block — an unreachable control cannot satisfy the flag "
-                               "requirement for a reachable one (witness Arm 4, parser-death)" % dead))
-            if len(handlers) < PER_FORMAT_MIN_HANDLERS:
-                checks.append((EDITOR_REL, 0, "4",
-                               "per-format block has only %d on*Change handler(s), expected >= %d — "
-                               "gate ROT or fields removed without updating the flag wiring"
-                               % (len(handlers), PER_FORMAT_MIN_HANDLERS)))
-            for _, h in handlers:
-                if FLAG_ASSIGNMENT not in h:
-                    checks.append((EDITOR_REL, 0, "4",
-                                   "per-format field handler `%s…` does not set `%s`: editing a "
-                                   "parameter of a preserved format would be silently discarded"
-                                   % (h.strip()[:48], FLAG_ASSIGNMENT)))
-                elif last_flag_write(h) != "true":
-                    checks.append((EDITOR_REL, 0, "4",
-                                   "per-format field handler `%s…` writes `formatChanged = %s` after "
-                                   "`%s` — the user's edit is recorded and then erased in the same "
-                                   "callback (last write wins)"
-                                   % (h.strip()[:48], last_flag_write(h), FLAG_ASSIGNMENT)))
+    if dspan is not None:
+        checks += check_format_controls(editor, dspan)
 
-    # ---- Arm 5: FormatChoice.from's concrete branches stay representable ----
-    from_body = declaration_text(editor, FROM_HEADER)
-    rep_body = declaration_text(pure, REPRESENTABLE_HEADER)
-    if from_body is None:
-        checks.append((EDITOR_REL, 0, "5", "FormatChoice.from( not found — gate ROT"))
-    elif rep_body is None:
-        checks.append((PURE_REL, 0, "5", "isDropdownRepresentableWireFormat( not found — gate ROT"))
-    else:
-        from_types = set(FMT_TYPE_RE.findall(code_only(from_body)))
-        rep_types = set(FMT_TYPE_RE.findall(code_only(rep_body)))
-        if not from_types or not rep_types:
-            checks.append((EDITOR_REL, 0, "5",
-                           "could not read the format lists (from=%s, representable=%s) — gate ROT"
-                           % (sorted(from_types), sorted(rep_types))))
-        else:
-            drift = sorted(from_types - rep_types)
-            if drift:
-                checks.append((EDITOR_REL, 0, "5",
-                               "FormatChoice.from maps %s to a concrete choice but "
-                               "isDropdownRepresentableWireFormat does not list them: the dropdown "
-                               "would DISPLAY a format the save path does not preserve (or the "
-                               "reverse) — the da1024 ISSUE-06 defect-2 root cause" % drift))
+    # ---- Arm 5: the two format lists agree in BOTH directions ----
+    checks += check_format_lists(editor, pure)
 
     return checks
 
@@ -630,9 +815,89 @@ FIX_EDITOR_NESTED_HANDLER = FIX_EDITOR_OK.replace(
             OutlinedTextField(value = offValue, onValueChange = { run { offValue = sanitizeSingleLineInput(it) } })""",
 )
 
+# ── batch-6 witnesses (external adversarial audit, 2026-10-26) ──
+# A05-1: the first `seed.copy(` stays intact and a chained `.copy(...)` wipes the
+# two fields the dialog cannot surface.
+FIX_PURE_CHAINED_COPY = FIX_PURE_OK.replace(
+    """    label = label.trim(),
+)""",
+    """    label = label.trim(),
+).copy(id = java.util.UUID.randomUUID().toString(), reasoningEcho = null)""",
+)
+
+# A05-1 self-note: the same wipe written POSITIONALLY — `named_arg_keys` used to
+# skip any argument without `=`, so this read as an empty key set.
+FIX_PURE_POSITIONAL_COPY = FIX_PURE_OK.replace(
+    """    label = label.trim(),
+)""",
+    """    label = label.trim(),
+).copy(java.util.UUID.randomUUID().toString(), ThinkingRule.Scope.AllModels, wireFormat)""",
+)
+
+# A05-2: the control still writes the flag, inside a literal-false guard, so the
+# write is dead but `FLAG_ASSIGNMENT in handler` is satisfied.
+FIX_EDITOR_DEAD_FLAG_IN_HANDLER = FIX_EDITOR_OK.replace(
+    "onCheckedChange = { sendOffValue = it; formatChanged = true }",
+    "onCheckedChange = { sendOffValue = it; if (false) formatChanged = true }",
+)
+
+# A05-3: the flag is recorded and then erased by a non-literal boolean the old
+# `(true|false)` regex could not see.
+FIX_EDITOR_FLAG_NEGATED = FIX_EDITOR_OK.replace(
+    "onClick = { choice = c; formatChanged = true; formatMenuOpen = false }",
+    "onClick = { choice = c; formatChanged = true; formatChanged = !true; formatMenuOpen = false }",
+)
+
+# A05-4: every anchor survives, the builder's value is bound to `_unused`, and
+# the dialog returns the raw seed (format re-derived without the chooser).
+FIX_EDITOR_BUILD_RULE_BYPASS = FIX_EDITOR_OK.replace(
+    """    fun buildRule() = buildEditedThinkingRule(
+        seed = seed,
+        allModels = true,
+        pattern = "",
+        wireFormat = chooseEditedWireFormat(
+            seedWire = seed.wireFormat,
+            formatChanged = formatChanged,
+            edited = buildWireFormat(),
+        ),
+        label = label,
+    )""",
+    """    fun buildRule(): ThinkingRule {
+        val _unused = buildEditedThinkingRule(
+            seed = seed,
+            allModels = true,
+            pattern = "",
+            wireFormat = chooseEditedWireFormat(
+                seedWire = seed.wireFormat,
+                formatChanged = formatChanged,
+                edited = buildWireFormat(),
+            ),
+            label = label,
+        )
+        return seed.copy(wireFormat = buildWireFormat())
+    }""",
+)
+
+# A05-5: the representable list grows a type `from` cannot reach — the opposite
+# direction of the drift the old one-way set difference measured.
+FIX_PURE_REP_DRIFT = FIX_PURE_OK.replace(
+    """    is ThinkingWireFormat.QwenDual,
+    is ThinkingWireFormat.CustomPath -> true""",
+    """    is ThinkingWireFormat.QwenDual,
+    is ThinkingWireFormat.DeepSeekRelay,
+    is ThinkingWireFormat.QwenRootOnly,
+    is ThinkingWireFormat.CustomPath -> true""",
+)
+
+# A05-6: Save bypasses buildRule(); the real call survives only inside a block
+# comment, which the old `//`-only stripper could not remove.
+FIX_EDITOR_SAVE_BYPASS = FIX_EDITOR_OK.replace(
+    "onClick = { if (isValid) onSave(buildRule()) }",
+    "onClick = { if (isValid) onSave(seed.copy(wireFormat = buildWireFormat())) /* onSave(buildRule()) */ }",
+)
+
 # (name, {rel-key: fixture}, expected-arm)
-SELFTEST_CASES = [
-    ("all-ok", {"editor": FIX_EDITOR_OK, "pure": FIX_PURE_OK}, None),
+SELFTEST_CASES = [    ("all-ok", {"editor": FIX_EDITOR_OK, "pure": FIX_PURE_OK}, None),
     ("dialog-bare-ctor", {"editor": FIX_EDITOR_BARE_CTOR, "pure": FIX_PURE_OK}, "1"),
     ("builder-bare-ctor", {"editor": FIX_EDITOR_OK, "pure": FIX_PURE_BARE_CTOR}, "2"),
     ("dialog-unguarded-format", {"editor": FIX_EDITOR_UNGUARDED, "pure": FIX_PURE_OK}, "3"),
@@ -646,6 +911,21 @@ SELFTEST_CASES = [
      {"editor": FIX_EDITOR_DROPDOWN_FLAG_CLEARED, "pure": FIX_PURE_OK}, "4"),
     ("nested-handler-hidden",
      {"editor": FIX_EDITOR_NESTED_HANDLER, "pure": FIX_PURE_OK}, "4"),
+    # ── batch-6 witness arms (external adversarial audit, 2026-10-26) ──
+    ("copy-chain-wipes-fields",
+     {"editor": FIX_EDITOR_OK, "pure": FIX_PURE_CHAINED_COPY}, "2"),
+    ("copy-positional-wipes-id",
+     {"editor": FIX_EDITOR_OK, "pure": FIX_PURE_POSITIONAL_COPY}, "2"),
+    ("dead-guard-inside-handler",
+     {"editor": FIX_EDITOR_DEAD_FLAG_IN_HANDLER, "pure": FIX_PURE_OK}, "4"),
+    ("flag-erased-by-negation",
+     {"editor": FIX_EDITOR_FLAG_NEGATED, "pure": FIX_PURE_OK}, "4"),
+    ("build-rule-return-bypass",
+     {"editor": FIX_EDITOR_BUILD_RULE_BYPASS, "pure": FIX_PURE_OK}, "1"),
+    ("representable-list-drift-reverse",
+     {"editor": FIX_EDITOR_OK, "pure": FIX_PURE_REP_DRIFT}, "5"),
+    ("save-bypasses-build-rule-in-block-comment",
+     {"editor": FIX_EDITOR_SAVE_BYPASS, "pure": FIX_PURE_OK}, "1"),
 ]
 
 
