@@ -3,7 +3,7 @@
 - 支线：`fix/r3-fileuri-webview`（基线 `main` @ `f0f14d46d`，工作树 `round3b/wt/t01`）
 - 见证来源：第三轮跨门缝攻击报告 §surface 2（9 条：#61-#69，其中 6 条 dual-gate、2 条 symmetric、1 条 dual-gate 单侧）
 - 改动面：**3 个门脚本**，生产 `.kt` **0 行**、`scan.sh` / `test_scan.py` / `_kotlin_{lexer,ast,valueflow}.py` **零触碰**
-- 判据面：12 / 30 → **16 / 30**（file_uri 12→16 条）、webview_holder 23→30 条、browser_destroy 41→44 条
+- 判据面（真树读数，`Summary: N passed`）：file_uri **10 → 14** 条、webview_holder **25 → 30** 条、browser_destroy **37 → 44** 条（三门合计 72 → 88）
 
 ---
 
@@ -119,15 +119,58 @@
 | **L3 负向夹具（`test_scan.py`）** | 三门在冻结夹具表里的注册项 | `<见 §5.1>` |
 | **L4 全量门线** | 全部 `*_check.py` / `*_guard.py` + 两个非 glob 门 | **109/109 rc=0**（逐门独立进程，`probe/gate_sweep.sh`，分块跑以避开沙箱 `Errno 38`）＋ `process_logging_gate` rc=0 ＋ `turn_tail_finalize_order` rc=0；本支只改门脚本、生产 `.kt` 零改动，旧门读数不可能变（见 §7 R2 对 `scan.sh` 整跑失败的登记） |
 
-### 5.1 `test_scan.py`
+### 5.1 `test_scan.py`（L3 负向夹具）
 
-`<§5.1 待回填：ALL 344 CASES PASS 或交 CI>`
+- **本地未跑完全量**：`timeout 860 nice -n 10 python3 scripts/scan/test_scan.py` 跑到 **241 个 ✅** 时被沙箱 stall-guard 打断（`probe/test_scan.log` 尾部 `KeyboardInterrupt` + `timeout: warning: disabling core dumps failed`），属 §7 R2 登记的同一沙箱缺陷族（长批量 fork 被整壳杀），**不是门红**。
+- **全量读数由 CI 承担**：CI 日志里 `ALL 344 CASES PASS` **恰 1 条**（见 §6 判读），三门在冻结夹具表里的注册项（`test_scan.py:2765` / `:2771` / `:2864`，断言各自 `*_SELFTEST=PASS` 标记）在 CI 里逐条命中。
+- 本支**未触碰** `test_scan.py`（硬约束），因此 344 例的构成与基线逐字一致。
 
 ---
 
 ## 6. CI
 
-`<§6 待回填：run id / job id / attempt / head_sha 三方一致 / 112 passed 0 failed / ALL 344 / 门头 112 互异 / ^ e: 0 / 唯一 skipped = Publish>`
+| 项 | 值 |
+|---|---|
+| workflow | `build-apk.yml`（`workflow_dispatch`，分支 push 不触发） |
+| run | **`40312087568`** / **#2737** / job `121535502180` / **attempt 1** / **success** |
+| 时间 | 2026-10-26T11:02:49Z → 11:27:22Z（约 24.5 min） |
+| 日志 | `probe/ci/job-121535502180.log`，**1,488,767 B**，裸 NUL **0** |
+
+**head_sha 三方逐字符一致**：
+
+```
+本地 HEAD        51e97fa4ad0cdcb446264297784a8f5bec7f1413
+run head_sha     51e97fa4ad0cdcb446264297784a8f5bec7f1413
+远端分支 tip      51e97fa4ad0cdcb446264297784a8f5bec7f1413   (GET /git/ref/heads/fix/r3-fileuri-webview)
+```
+
+**步骤面**：26 步，唯一 skipped = **step 23 `Publish to Releases`**（`if: github.ref == 'refs/heads/main'` 门控，分支构建正常不发布）。
+
+**日志判读（逐条机械计数）**：
+
+| 读数 | 期望 | 实测 |
+|---|---|---|
+| `Summary: 112 passed, 0 failed` | 恰 1 | **1** |
+| `ALL 344 CASES PASS` | 恰 1 | **1** |
+| 门头 `[N/112]` | 112 条、N 互异、分母恒为 112 | **112 / 112 互异 / {112}** |
+| `^\s*e: `（Kotlin 编译错误） | 0 | **0** |
+| 含 `FAILED` 的行 | 全部以 `PASSED` 结尾（用例名子串） | **6 条，全部 True** |
+| `FILE_URI_PARSE_GUARD_SELFTEST=PASS` | 恰 1 | **1** |
+| `WEBVIEW_HOLDER_URL_SOURCE_SELFTEST=PASS` | 恰 1 | **1** |
+| `BROWSER_DESTROY_WAKEUP_SELFTEST=PASS` | 恰 1 | **1** |
+| 三门真树绿标记 `GATE=GREEN <gate>` | 各恰 1 | **各 1** |
+| `GATE=RED` | 0 | **0** |
+
+**新判据在 CI 里真的跑到了**（否则三门的真树 `Summary` 不会比基线多）：
+
+| 门 | CI 里的 `Summary: N passed` | 基线（同树跑 HEAD~1 的门脚本） |
+|---|---|---|
+| `browser_destroy_wakeup_check` | **44** | 37 |
+| `webview_holder_url_source_check` | **30** | 25 |
+| `file_uri_parse_guard_check` | **14** | 10 |
+
+**源码树与 CI 绿 sha 的差异 = 0**：CI 绿的 `51e97fa4a` 即本次门改动提交；后续仅追加报告回填提交（只动 `fix-reports/`），
+`git diff --name-only 51e97fa4a..HEAD -- . ':(exclude)fix-reports'` = **0 行**。
 
 ---
 
