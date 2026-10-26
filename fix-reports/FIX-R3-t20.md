@@ -112,7 +112,16 @@
 
 ## §6 CI
 
-（待回填：push 后 dispatch `build-apk`，回填 run id / 编号 / head_sha 三方一致、`Summary: 112 passed, 0 failed` 恰一条、`ALL 344 CASES PASS` 恰一条、门头 112 互异、` e: ` 0、含 FAILED 的行全是 PASSED 用例名子串、唯一 skipped = Publish）
+- run **`40312466778`** / **#2738** / job `121536779630` / attempt **1** / `success`（`workflow_dispatch`，`--ref fix/r3-provider-persist`）
+- head_sha **`a9d9a831acb8cf784ecabaaa908334b3f48eeb69`** = 本地 `HEAD` 逐字符一致（三方：本地 / API `head_sha` / 分支 tip）
+- 26 步：唯一 skipped = `Publish to Releases`（main 门控）；非 success 步骤 = **0**
+- 日志 1,487,696 B / 裸 NUL **0**，逐条判读：
+  - `Summary: 112 passed, 0 failed` **恰 1** 条
+  - `ALL 344 CASES PASS` **恰 1** 条
+  - 门头 `[N/112]` **112** 条，编号 1..112 **互异**
+  - `^ e: ` **0** 行
+  - 含 `FAILED` 的 **6** 行全部是 `PASSED` 用例名子串（逐行核对，无真失败）
+  - 三门见证行各 **恰 1**：`PROVIDER_WRITE_RULES_SELFTEST=PASS` / `PROVIDER_MODELS_CACHE_WIRING_SELFTEST=PASS` / `COMPACT_ENTRY_PIN_MIGRATION_SELFTEST=PASS`，且三门 `… real tree green` 各 1 ⇒ **新增臂在 CI 里真跑过**
 
 ## §7 残留（每条带 触发条件 / 触发后方案 / 搁置理由）
 
