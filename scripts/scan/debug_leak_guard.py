@@ -55,11 +55,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _kotlin_lexer import analyse as _lex_analyse  # noqa: E402
 from _kotlin_ast import (  # noqa: E402
     const_bool as _const_bool,
+    const_value as _const_value,
+    if_blocks as _if_blocks,
     match_bracket as _match_bracket,
     split_top as _split_top,
     stmt_spans as _stmt_spans,
     strip_parens as _strip_parens,
     when_branches as _when_branches,
+    last_write as _last_write,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args as _call_args,
+    contains_ident as _contains_ident,
+    value_sources as _value_sources,
 )
 
 # Debug-package target: fully-qualified references AND imports.
@@ -124,6 +132,13 @@ APK_MARKERS = [
     "minis-debug",
     "5321",
 ]
+
+# [R3-t17] The SOURCE scan must cover the same symbol set as the DEX scan
+# (`APK_MARKERS` minus the bare port). It used to cover only the
+# `com.rikkaminis.app.debug.` PACKAGE, so `sandbox/offload/DebugOffloadHandler`
+# — registered as the `minis-debug` handler in MinisApp — was invisible to the
+# source gate even though the APK gate bans both names.
+SOURCE_DEBUG_SYMBOLS = [m for m in APK_MARKERS if m != "5321"]
 
 
 def _views(text):
@@ -238,114 +253,159 @@ def _in_dead_when_arm(code, pos):
 
 
 
-def _stmt_start(code, off):
-    depth = 0
-    i = off - 1
-    while i >= 0:
-        ch = code[i]
-        if ch in ")]":
-            depth += 1
-        elif ch in "([":
-            if depth == 0:
-                break
-            depth -= 1
-        elif depth == 0 and ch in "\n;{}":
-            return i + 1
-        i -= 1
-    return i + 1
+def _blocks(code):
+    """`if_blocks` for this exact string object, memoised (one walk per file).
 
-
-def _paren_end(code, open_idx):
-    depth = 0
-    for j in range(open_idx, len(code)):
-        if code[j] == "(":
-            depth += 1
-        elif code[j] == ")":
-            depth -= 1
-            if depth == 0:
-                return j
-    return -1
-
-
-def _brace_end(code, open_idx):
-    depth = 0
-    for j in range(open_idx, len(code)):
-        if code[j] == "{":
-            depth += 1
-        elif code[j] == "}":
-            depth -= 1
-            if depth == 0:
-                return j
-    return -1
-
-
-def dead_guarded(code, off):
-    """Is the call at `off` in code no build can reach?
-
-    [wide4/10] Death is decided by the constant folder (`const_bool`) and by
-    `when` arm selection, not by a spelling list — see `_dead_cond` /
-    `_in_dead_when_arm`.
+    [R3-t17] The guard question used to be answered by scanning the STATEMENT
+    PREFIX backwards for `if (…)`. That is a question about text near the
+    reference, so an `else` arm defeated it: `if (BuildConfig.DEBUG) Unit else
+    DebugServer(this).start()` starts the token-free loopback server in RELEASE
+    builds while the prefix still carries the flag (externally witnessed). The
+    question is positional now — WHICH ARM holds the reference, and is that arm
+    dead in a release build — answered from the shared `if_blocks` structure.
     """
-    if any(_dead_cond(c) for c in _if_conditions(code[_stmt_start(code, off):off])):
-        return True
-    if _in_dead_when_arm(code, off):
-        return True
+    if _MEMO["code"] is not code:
+        _MEMO["code"] = code
+        _MEMO["blocks"] = [_split_inline_else(code, blk) for blk in _if_blocks(code)]
+    return _MEMO["blocks"]
+
+
+_MEMO = {"code": None, "blocks": []}
+
+
+def _split_inline_else(code, blk):
+    """Split `if (c) A else B` written on ONE line into its two arms.
+
+    `if_blocks` walks the then-arm with `_branch_extent`, which ends at a
+    depth-0 newline — a braceless `else` on the same line therefore lands
+    INSIDE the then range, and the else arm disappears. That is exactly the
+    shape the external witness used, so the arm boundary is recomputed here:
+    the first depth-0 `else` keyword in the then range starts the else arm.
+    """
+    cond, t_start, t_end, e_start, e_end = blk
+    if e_start is not None:
+        return blk
+    word_before = re.compile(r"[\w$]")
+
+    def _is_kw(i):
+        return (code.startswith("else", i)
+                and not word_before.match(code[i + 4:i + 5] or " ")
+                and (i == 0 or not word_before.match(code[i - 1])))
+
     depth = 0
-    i = off
-    while i > 0:
-        i -= 1
+    i = t_start
+    while i < t_end:
         ch = code[i]
-        if ch in "})":
+        if ch in "([{":
             depth += 1
-        elif ch in "({":
-            if depth == 0:
-                if ch == "{" and any(
-                        _dead_cond(c)
-                        for c in _if_conditions(code[_stmt_start(code, i):i])):
-                    return True
-            else:
-                depth -= 1
-    return False
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and _is_kw(i):
+            return (cond, t_start, i, i + 4, t_end)
+        i += 1
+    return blk
 
 
-
-def _if_conditions(head):
-    """Conditions of every `if (...)` in `head`."""
+def _arm_of(code, off):
+    """[(is_else_arm, cond)] for every enclosing `if` arm that holds `off`."""
     out = []
-    for m in re.finditer(r"\bif\s*\(", head):
-        end = _paren_end(head, m.end() - 1)
-        if end > 0:
-            out.append(head[m.end():end])
+    for cond, t_start, t_end, e_start, e_end in _blocks(code):
+        if t_start <= off < t_end:
+            out.append((False, cond))
+        elif e_start is not None and e_start <= off < e_end:
+            out.append((True, cond))
     return out
 
 
+def _is_negated_debug_flag(piece):
+    """`!BuildConfig.DEBUG` / `BuildConfig.DEBUG == false` — the flag, negated."""
+    if piece.startswith("!") and _is_debug_flag(_strip_parens(piece[1:])):
+        return True
+    if piece.endswith("==false") and _is_debug_flag(piece[:-7]):
+        return True
+    return False
+
+
+def guard_release_true(cond):
+    """Does `cond` evaluate TRUE in a RELEASE build (DEBUG == false)?
+
+    Needed for else arms: `if (<cond>) … else <reference>` runs the else
+    branch when `cond` is false at runtime, so the else arm is release-dead
+    only when `cond` is TRUE in a release build. `if (!BuildConfig.DEBUG) { …
+    } else <debug>` is the safe shape; `if (BuildConfig.DEBUG) … else <debug>`
+    is the witness (release-only execution).
+    """
+    expr = _strip_parens(cond)
+    if not expr:
+        return False
+    if len(_split_top(expr, ("||",))) > 1:
+        return False
+    proved = False
+    for a, b in _split_top(expr, ("&&",)):
+        piece = _squash(expr[a:b])
+        if not piece:
+            return False
+        if _is_negated_debug_flag(piece):
+            proved = True
+            continue
+        if "BuildConfig.DEBUG" in piece:
+            return False
+        if _const_bool(piece) is False:
+            return False
+    return proved
+
+
+def _dead_cond(cond):
+    """A condition whose value is a compile-time constant FALSE.
+
+    [wide4/10] The old `DEAD_COND_RE` was a spelling list (`false`, `!true`,
+    `0 == 1`, `true ||`, `false &&`). `1 == 2` states the same fact in a
+    different spelling and walked straight through. Death is a VALUE question,
+    so ask the shared constant folder instead of enumerating spellings.
+    """
+    return _const_bool(cond) is False
+
+
+def dead_guarded(code, off):
+    """Is the call at `off` in code NO build can reach?
+
+    Death is a value question per ARM: a then arm whose condition folds to
+    false never runs, an else arm whose condition folds to TRUE never runs
+    (`if (false) A else B` runs B). `when` arms over a constant subject are the
+    same family. Everything comes from the shared folder / structure — no
+    spelling lists.
+    """
+    for is_else, cond in _arm_of(code, off):
+        val = _const_bool(cond)
+        if val is None:
+            continue
+        if (val is False and not is_else) or (val is True and is_else):
+            return True
+    return _in_dead_when_arm(code, off)
+
+
 def debug_guarded(code, off):
-    """Is the reference at `off` really behind `if (BuildConfig.DEBUG)`?
+    """Is the reference at `off` really unreachable in a release build?
 
     Two shapes matter. (a) The guard must DECIDE — see `guard_decides`: the old
     "mentions the flag, no true/false literal" test accepted `if (true ||
     BuildConfig.DEBUG)` (ignored flag), `if (!BuildConfig.DEBUG)` (the guard
     inverted: release builds only) and `if (!DEBUG || DEBUG)` (tautology), so R8
     kept the class and release shipped the token-free loopback server.
-    (b) The reference must be inside the guarded block (`if (BuildConfig.DEBUG)
-    { … }`) or on the guarded statement (`if (BuildConfig.DEBUG) call()`).
+    (b) [R3-t17] The reference must be in an arm that DIES in a release build.
+    A then arm needs `guard_decides(cond)`; an ELSE arm needs
+    `guard_release_true(cond)` — the old prefix scan read `if (BuildConfig.DEBUG)
+    Unit else <debug>` as guarded because the flag sat in the same statement.
+    An enclosing arm that says nothing about the flag (`else` of `if (x)`) is
+    neutral, not disqualifying: the decisive arm may be further in.
     """
-    if any(guard_decides(c) for c in _if_conditions(code[_stmt_start(code, off):off])):
-        return True
-    depth = 0
-    i = off
-    while i > 0:
-        i -= 1
-        ch = code[i]
-        if ch in "})":
-            depth += 1
-        elif ch in "({":
-            if depth == 0:
-                if ch == "{" and any(guard_decides(c) for c in
-                                     _if_conditions(code[_stmt_start(code, i):i])):
-                    return True
-            else:
-                depth -= 1
+    for is_else, cond in _arm_of(code, off):
+        if is_else:
+            if guard_release_true(cond) or _const_bool(cond) is True:
+                return True
+        else:
+            if guard_decides(cond) or _const_bool(cond) is False:
+                return True
     return False
 
 
@@ -371,7 +431,7 @@ def _fun_span(code, name):
     if not m:
         return None
     op = code.find("(", m.end() - 1)
-    cl = _paren_end(code, op)
+    cl = _match_bracket(code, op)
     if cl < 0:
         return None
     brace = code.find("{", cl)
@@ -380,10 +440,28 @@ def _fun_span(code, name):
     head = code[cl + 1:brace]
     if re.search(r"(?<![=!<>+\-*/])=(?!=)", head):
         return None  # expression body: no block to inspect
-    end = _brace_end(code, brace)
+    end = _match_bracket(code, brace)
     if end < 0:
         return None
     return (brace + 1, end)
+
+
+def _param_names(code, name):
+    """Parameter names of `fun NAME(…)`, in order (`x: T = …` ⇒ `x`)."""
+    m = re.search(r"\bfun\s+" + re.escape(name) + r"\s*\(", code)
+    if not m:
+        return []
+    op = code.find("(", m.end() - 1)
+    cl = _match_bracket(code, op)
+    if cl < 0:
+        return []
+    out = []
+    for a, b in _split_top(code[op + 1:cl], (",",)):
+        piece = code[op + 1 + a:op + 1 + b]
+        pm = re.match(r"\s*([A-Za-z_]\w*)\s*:", piece)
+        if pm:
+            out.append(pm.group(1))
+    return out
 
 
 # [wide4/10] Reads that cannot be bounded, or that ignore the requested
@@ -405,6 +483,89 @@ def _helper_calls(stmt):
     for m in re.finditer(re.escape(SEGMENT_HELPER) + r"\s*\(", stmt):
         out.append((m.start(), _match_bracket(stmt, m.end() - 1)))
     return out
+
+
+# An upper bound on the read size: `coerceIn(1, 4 MiB)` / `coerceAtMost(cap)`.
+LIMIT_CLAMP_RE = re.compile(r"\.\s*(?:coerceIn|coerceAtMost)\s*\(")
+
+
+def _value_chain(text, expr, depth=2):
+    """`expr` plus the one/two-hop locals it is built from.
+
+    `raf.seek(start)` where `val start = offset.coerceIn(0L, size)` is the same
+    read as `raf.seek(offset)`, and `coerceIn` on the local that holds the
+    limit is the same clamp as `coerceIn` on the argument.
+    """
+    out = [expr]
+    if depth <= 0:
+        return out
+    for ident in sorted(set(re.findall(r"\b([A-Za-z_]\w*)\b", expr))):
+        w = _last_write(text, ident)
+        if w is not None:
+            out.extend(_value_chain(text, w[1], depth - 1))
+    return out
+
+
+def _clamped(text, expr, helper_body, limit_param):
+    """Is this `limit` expression bounded above on its way to the read?
+
+    Three accepted places, because all three are real Kotlin: on the expression
+    itself, on the local that holds it (`val limit = ….coerceIn(…)`), or inside
+    the helper (the helper clamps its own `limit` parameter). `text` is the
+    ENCLOSING FUNCTION body: the file has more than one `limit` local, and a
+    file-wide lookup resolved the argument to the wrong one.
+    """
+    for src in _value_chain(text, expr):
+        for piece in _value_sources(src):
+            if LIMIT_CLAMP_RE.search(piece):
+                return True
+    if limit_param and helper_body:
+        for m in LIMIT_CLAMP_RE.finditer(helper_body):
+            if re.search(r"\b" + re.escape(limit_param) + r"\s*$",
+                         helper_body[:m.start()]):
+                return True
+    return False
+
+
+def _read_args_problem(code, scope, stmt, start, helper_body):
+    """Why the `readFileSegment(file, offset, limit)` arguments are unacceptable.
+
+    '' when they are the caller's own offset and a clamped limit. Fail-closed:
+    an argument list the gate cannot read is a violation, not a pass.
+    """
+    params = _param_names(code, SEGMENT_HELPER)
+    paren = stmt.find("(", start)
+    args = _call_args(stmt, paren) if paren >= 0 else []
+    if len(params) < 3:
+        return ("cannot read `%s`'s (file, offset, limit) signature — the argument "
+                "contract is unverifiable" % SEGMENT_HELPER)
+    if len(args) < 3:
+        return ("the call passes fewer than three arguments — offset/limit fall back "
+                "to defaults the caller never chose")
+    offset_param, limit_param = params[1], params[2]
+    offset_arg = stmt[args[1][0]:args[1][1]].strip()
+    limit_arg = stmt[args[2][0]:args[2][1]].strip()
+    if not offset_arg or not limit_arg:
+        return "an empty offset/limit argument — the read position is undecidable"
+    if _const_value(offset_arg) is not None:
+        return ("reads from a CONSTANT offset `%s` — the caller's `offset` is discarded, "
+                "so every page re-reads the same slice" % offset_arg[:40])
+    if not _clamped(scope, limit_arg, helper_body, limit_param):
+        return ("the limit `%s` is never clamped (`coerceIn` / `coerceAtMost`) — a "
+                "client-chosen limit sizes the allocation" % limit_arg[:40])
+    if helper_body:
+        seeks = [m for m in re.finditer(r"\bseek\s*\(", helper_body)]
+        if not seeks:
+            return ("`%s` never calls seek() — RandomAccessFile is opened but the "
+                    "requested offset is not applied" % SEGMENT_HELPER)
+        for m in seeks:
+            a = _call_args(helper_body, m.end() - 1)
+            if a and any(_contains_ident(src, offset_param)
+                         for src in _value_chain(helper_body, helper_body[a[0][0]:a[0][1]])):
+                return ""
+        return ("`%s`'s seek() does not use its `%s` parameter — every read starts "
+                "at a fixed position" % (SEGMENT_HELPER, offset_param))
+    return ""
 
 
 def read_source_verdict(stmt):
@@ -495,6 +656,8 @@ def scan_api26_reads(root):
     if "RandomAccessFile" in body:
         return out
     live_helper = False
+    helper = _fun_span(code, SEGMENT_HELPER)
+    helper_body = code[helper[0]:helper[1]] if helper else ""
     for s_start, s_end in _stmt_spans(body):
         stmt = body[s_start:s_end]
         for start, _close in _helper_calls(stmt):
@@ -502,12 +665,21 @@ def scan_api26_reads(root):
                 continue
             live_helper = True
             ok_read, why = read_source_verdict(stmt)
-            if ok_read:
+            if not ok_read:
+                line = code.count("\n", 0, a + s_start + start) + 1
+                out.append("%s:%d  %s() %s — the read must be exactly "
+                           "`readFileSegment(file, offset, limit)`"
+                           % (DEBUG_RPC_REL, line, READ_FILE_FUN, why))
                 continue
-            line = code.count("\n", 0, a + s_start + start) + 1
-            out.append("%s:%d  %s() %s — the read must be exactly "
-                       "`readFileSegment(file, offset, limit)`"
-                       % (DEBUG_RPC_REL, line, READ_FILE_FUN, why))
+            # [R3-t17] …and the arguments must be the caller's own offset/limit.
+            # The criterion used to stop at the call's SHAPE: dropping `offset`
+            # for a literal `0L` and deleting the limit clamp left the whole
+            # contract green (externally witnessed) while every paged read
+            # re-read the file head and a caller-chosen limit sized the array.
+            problem = _read_args_problem(code, body, stmt, start, helper_body)
+            if problem:
+                line = code.count("\n", 0, a + s_start + start) + 1
+                out.append("%s:%d  %s() %s" % (DEBUG_RPC_REL, line, READ_FILE_FUN, problem))
     if live_helper:
         helper = _fun_span(code, SEGMENT_HELPER)
         helper_line = (code.count("\n", 0, helper[0]) + 1) if helper else body_line
@@ -522,6 +694,123 @@ def scan_api26_reads(root):
                % (DEBUG_RPC_REL, body_line, READ_FILE_FUN, SEGMENT_HELPER))
     return out
 
+
+
+# ── [R3-t17] the dispatcher's own debug surface ────────────────────────────
+# `scan_source` skips the `debug/` package (R8 removes it wholesale), which left
+# the ONE place a release build could still reach debug code unwatched: the RPC
+# dispatcher the package itself exposes. Witness #5 (dual-gate with
+# auto_approve_bypass_check, both rc=0) deleted the `if (!BuildConfig.DEBUG)`
+# refusal from the `debug.minisConfig.exec` branch, so that branch would execute
+# `handleMinisConfigExec` — `skipConfirmation = true` config writes — in a
+# RELEASE build if the server were ever reachable.
+RE_DEBUG_ARM_LABEL = re.compile(r'"\s*(debug\.[A-Za-z0-9_.]*)\s*"\s*->\s*$')
+
+
+def _arm_label(lit, body_start):
+    """The string-literal label of the `when` arm whose body starts at body_start."""
+    m = RE_DEBUG_ARM_LABEL.search(lit[max(0, body_start - 80):body_start])
+    return m.group(1) if m else None
+
+
+def _refusal_guard_end(arm_code):
+    """End offset of a release-refusing EXIT guard inside a dispatch arm.
+
+    `if (!BuildConfig.DEBUG) { throw RPCException(…) }` at the top of the arm
+    makes the rest of the arm unreachable in a release build — the shape the
+    production dispatcher uses for every `debug.*` method. Returns -1 when the
+    arm has no such guard.
+    """
+    best = -1
+    for cond, t_start, t_end, _e_start, _e_end in _if_blocks(arm_code):
+        then = arm_code[t_start:t_end]
+        if guard_release_true(cond) and re.search(r"\b(?:throw|return)\b", then):
+            best = max(best, t_end)
+    return best
+
+
+# The `debug.*` methods whose branch carries its OWN release refusal. Frozen
+# from the tree at R3-t17: these four run shell commands / drive the offload
+# handlers, so the design refuses them per-method, on top of the whole server
+# being DEBUG-started. The rail is MONOTONIC — a new method may be added without
+# a guard, but one of these losing its guard is the witnessed defect.
+PINNED_RELEASE_GUARDED_ARMS = {
+    "debug.shizuku.exec",
+    "debug.modelUse.exec",
+    "debug.sessions.exec",
+    "debug.minisConfig.exec",
+}
+
+WRITE_SKIP_RE = re.compile(r"skipConfirmation\s*=\s*true")
+
+
+def _arm_privileged_write(code, arm):
+    """Does this arm reach a `skipConfirmation = true` config write?
+
+    Derived from the callee's body (one hop), not from the method name: an arm
+    that reaches a skip-confirmation write MUST refuse in a release build, no
+    matter what it is called.
+    """
+    if WRITE_SKIP_RE.search(arm):
+        return True
+    for m in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", arm):
+        span = _fun_span(code, m.group(1))
+        if span is not None and WRITE_SKIP_RE.search(code[span[0]:span[1]]):
+            return True
+    return False
+
+
+def scan_debug_dispatch(root):
+    """Every PRIVILEGED `debug.*` method branch must be dead in a RELEASE build.
+
+    [R3-t17] #5 (dual-gate with auto_approve_bypass_check, both rc=0):
+    `scan_source` skips the `debug/` package by design (R8 removes it), so the
+    dispatcher's own branches were nobody's business — deleting the
+    `if (!BuildConfig.DEBUG) throw` from `debug.minisConfig.exec` re-exposed the
+    `skipConfirmation = true` config write path in release builds while every
+    criterion here (and in auto_approve) stayed green.
+
+    Two rails, one per arm, both fail-closed:
+      * a PINNED privileged arm must keep its release refusal (monotonic: losing
+        it is red, adding new methods is not);
+      * any arm whose handler reaches a `skipConfirmation = true` write must have
+        a release refusal, whatever its name.
+    """
+    path = os.path.join(root, DEBUG_RPC_REL)
+    if not os.path.isfile(path):
+        print("  [skip] debug dispatch: %s absent from this tree" % DEBUG_RPC_REL)
+        return []
+    raw = open(path, encoding="utf-8", errors="replace").read()
+    lit, code, reason = _views(raw)
+    if code is None:
+        return ["%s  cannot be lexed (%s) — the debug dispatch contract is "
+                "unverifiable (fail-closed)" % (DEBUG_RPC_REL, reason)]
+    out = []
+    seen = set()
+    for _subject, _cond, b_start, b_end in _when_branches(code):
+        label = _arm_label(lit, b_start)
+        if label is None:
+            continue
+        seen.add(label)
+        arm = code[b_start:b_end]
+        if _refusal_guard_end(arm) >= 0:
+            continue
+        reasons = []
+        if label in PINNED_RELEASE_GUARDED_ARMS:
+            reasons.append("it is a pinned release-guarded debug method")
+        if _arm_privileged_write(code, arm):
+            reasons.append("its handler writes config with `skipConfirmation = true`")
+        if not reasons:
+            continue
+        line = code.count("\n", 0, b_start) + 1
+        out.append(
+            "%s:%d  `%s` is dispatchable in a RELEASE build (%s) — no "
+            "`if (!BuildConfig.DEBUG) throw` refuses the arm"
+            % (DEBUG_RPC_REL, line, label, "; ".join(reasons)))
+    if not seen:
+        out.append("%s  no `debug.*` dispatch arm found — anchor drift (the debug "
+                   "surface must be enumerable, not empty)" % DEBUG_RPC_REL)
+    return out
 
 
 def _symbol_after(code, off):
@@ -621,8 +910,12 @@ def scan_source(root):
                 prev = raw_lines[line_no - 2] if line_no >= 2 else ""
                 return bool(ESCAPE_RE.search(cur) or ESCAPE_RE.search(prev))
 
+            bad_lines = set()
+
             def report(pos, sym, note):
                 line_no = line_no_of(pos)
+                if line_no in bad_lines:
+                    return              # this line is already reported
                 if exempt(line_no):
                     return              # `debug-ok: <reason>` escape
                 if sym and sym in allowed_syms:
@@ -637,9 +930,11 @@ def scan_source(root):
                         "`!BuildConfig.DEBUG`, or a dropped flag disables the guard): "
                         "%s  [%s]"
                         % (posix_rel, line_no, line.strip()[:90], note))
+                    bad_lines.add(line_no)
                 else:
                     violations.append("%s:%d  %s  [%s]"
                                       % (posix_rel, line_no, line.strip()[:100], note))
+                bad_lines.add(line_no)
 
             # An import line carrying `debug-ok:` is a HUMAN audit of that symbol
             # for THIS file (same semantics as UNGUARDED_SYMBOLS, but derived from
@@ -670,6 +965,37 @@ def scan_source(root):
             # (2) the package prefix assembled at runtime (reflection)
             for m in TARGET_PREFIX_RE.finditer(lit):
                 report(m.start(), "", "debug-package prefix built at runtime (reflection)")
+
+            # (4) [R3-t17] scope: the APK marker list — not the `debug` package
+            # name — is the ground truth of "debug-only symbol". A sibling of the
+            # package (sandbox/offload/DebugOffloadHandler, registered as the
+            # `minis-debug` offload handler) lives OUTSIDE `com.rikkaminis.app.
+            # debug`, so it matched no pattern above and an unguarded
+            # registration shipped it into release builds with every gate green
+            # (externally witnessed). `5321` is deliberately absent here: a bare
+            # port number is a DEX-scan marker, too collision-prone in source.
+            imported_here = {m.group(1) for m in DEBUG_IMPORT_RE.finditer(lit)
+                             if m.group(1) != "*"}
+            for name in SOURCE_DEBUG_SYMBOLS:
+                # The symbol's OWN file is debug-only surface: R8 removes it
+                # together with the symbol, and its HELP text / literals are not
+                # call sites (same rationale as skipping the `debug/` package).
+                if os.path.splitext(fn)[0] in SOURCE_DEBUG_SYMBOLS:
+                    continue
+                for m in re.finditer(r"(?<![\w$])" + re.escape(name) + r"\b", lit):
+                    if re.search(r"com\.rikkaminis\.app\.debug\.\s*$",
+                                 lit[max(0, m.start() - 40):m.start()]):
+                        continue        # the package reference, judged above
+                    if name in imported_here:
+                        continue        # the imported-symbol use, judged below
+                    head = lit[max(0, m.start() - 40):m.start()]
+                    if re.search(r"\b(?:class|object|interface|fun|val|var)\s+$", head):
+                        continue    # the declaration itself, not a use
+                    line_no = line_no_of(m.start())
+                    line = lit_lines[line_no - 1] if line_no <= len(lit_lines) else ""
+                    if re.match(r"\s*import\b", line):
+                        continue        # the import is judged by the block above
+                    report(m.start(), name, "debug-only symbol `%s` (APK marker)" % name)
 
             # (3) imported symbols used unqualified
             imported = set()
@@ -901,14 +1227,46 @@ def self_test():
          "        val cls = Class.forName(\"com.rikkaminis.app.debug\" + \".DebugServer\")\n"
          "    }\n}\n",
          ["reflection"]),
+        # ── [R3-t17] #17: the guard must cover the ARM the reference is in ──
+        ("t17-`if (DEBUG) Unit else DebugServer().start()` runs the server in RELEASE",
+         "%s/MinisApp.kt" % base,
+         "fun boot() {\n"
+         "    if (BuildConfig.DEBUG) Unit else "
+         "com.rikkaminis.app.debug.DebugServer(this).start()\n}\n",
+         ["not behind a live"]),
+        # ── [R3-t17] #16: a debug-only symbol OUTSIDE the debug package ──
+        ("t17-unguarded `minis-debug` offload registration is caught (APK marker set)",
+         "%s/MinisApp.kt" % base,
+         "fun boot() {\n"
+         "    NativeOffloadServer.register(\n"
+         "        \"minis-debug\",\n"
+         "        com.rikkaminis.app.sandbox.offload.DebugOffloadHandler(this),\n"
+         "    )\n}\n",
+         ["minis-debug", "DebugOffloadHandler"], 2),
     ]
     w4_ok = True
-    for label, rel, body, needles in w4_source_arms:
+    for arm in w4_source_arms:
+        label, rel, body, needles = arm[:4]
+        want = arm[4] if len(arm) > 4 else 1
         d = _w4_tree({rel: body, _w4_dbg[0]: _w4_dbg[1]})
         got = scan_source(d)
-        passed = len(got) == 1 and all(any(n in x for x in got) for n in needles)
+        passed = len(got) == want and all(any(n in x for x in got) for n in needles)
         w4_ok &= check("source: %s" % label, passed, "got=%s" % got)
         _shutil.rmtree(d, ignore_errors=True)
+    d = _w4_tree({
+        "%s/MinisApp.kt" % base:
+            "fun boot() {\n"
+            "    if (!BuildConfig.DEBUG) {\n"
+            "        throw IllegalStateException(\"release\")\n"
+            "    } else {\n"
+            "        com.rikkaminis.app.debug.DebugServer(this).start()\n"
+            "    }\n}\n",
+        _w4_dbg[0]: _w4_dbg[1]})
+    got = scan_source(d)
+    w4_ok &= check(
+        "source: an ELSE arm behind `if (!BuildConfig.DEBUG) … throw` is release-dead (control)",
+        got == [], "got=%s" % got)
+    _shutil.rmtree(d, ignore_errors=True)
     d = _w4_tree({
         "%s/MinisApp.kt" % base:
             "fun boot() {\n    if (com.rikkaminis.app.BuildConfig.DEBUG && flags) {\n"
@@ -1045,6 +1403,11 @@ def self_test():
         open(p, "w").write(handler_text)
         return d
 
+    # A REALISTIC clean handler: the offset/limit locals are the CALLER's own,
+    # the limit is clamped, and the helper seeks to the offset it was handed.
+    # [R3-t17] The old fixture passed a literal `0L` offset and an unclamped
+    # `16` — it encoded exactly the two defects the witness re-introduced, so
+    # the "clean" control vouched for the broken shape.
     ok_handler = (
         "package com.rikkaminis.app.debug\n"
         "\n"
@@ -1054,7 +1417,9 @@ def self_test():
         "    // [da1028-A] was `it.skip(offset); it.readNBytes(limit)`: readNBytes(int) is\n"
         "    // API 33+ while minSdk is 26, and skip() may under-skip.\n"
         "    private fun handleReadFile(params: org.json.JSONObject): ByteArray {\n"
-        "        return readFileSegment(java.io.File(\"x\"), 0L, 16)\n"
+        "        val offset = params.optLong(\"offset\", 0)\n"
+        "        val limit = params.optInt(\"limit\", 4096).coerceIn(1, 4 * 1024 * 1024)\n"
+        "        return readFileSegment(java.io.File(\"x\"), offset, limit)\n"
         "    }\n"
         "\n"
         "    private fun readFileSegment(file: java.io.File, offset: Long, limit: Int): ByteArray {\n"
@@ -1065,14 +1430,16 @@ def self_test():
         "    }\n"
         "}\n"
     )
+    CALL = "        return readFileSegment(java.io.File(\"x\"), offset, limit)\n"
+    CLAMP = 'params.optInt("limit", 4096).coerceIn(1, 4 * 1024 * 1024)'
     live_handler = ok_handler.replace(
-        "        return readFileSegment(java.io.File(\"x\"), 0L, 16)\n",
+        CALL,
         "        val input = java.io.File(\"x\").inputStream()\n"
         "        input.skip(0L)\n"
         "        return input.readNBytes(16)\n",
     )
     noraf_handler = ok_handler.replace(
-        "        return readFileSegment(java.io.File(\"x\"), 0L, 16)\n",
+        CALL,
         "        return java.io.File(\"x\").readBytes()\n",
     )
     missing_helper_handler = ok_handler.replace(
@@ -1087,38 +1454,61 @@ def self_test():
     drifted_handler = ok_handler.replace("private fun handleReadFile(", "private fun readFileSection(")
 
     dead_else_handler = ok_handler.replace(
-        "        return readFileSegment(java.io.File(\"x\"), 0L, 16)\n",
-        "        val bytes = if (false) readFileSegment(java.io.File(\"x\"), 0L, 16)\n"
+        CALL,
+        "        val bytes = if (false) readFileSegment(java.io.File(\"x\"), offset, limit)\n"
         "            else java.io.File(\"x\").inputStream().use { it.skip(0L); it.readBytes() }\n"
         "        return bytes\n")
     api_fixtures = [
         ("a dead helper call plus a live stream read is caught", dead_else_handler,
          ["reads through a stream"], False),
-        ("comment-only readNBytes mention + helper with RandomAccessFile is clean", ok_handler, [], True),
+        ("the caller's own offset + a clamped limit is clean", ok_handler, [], True),
         ("live `.readNBytes(` is caught", live_handler, ["API 33+"], False),
         ("handleReadFile with neither RandomAccessFile nor the helper is caught", noraf_handler, ["neither uses"], False),
         ("a called-but-undefined helper is caught", missing_helper_handler, ["not defined"], False),
         ("a renamed handleReadFile is anchor drift", drifted_handler, ["anchor drift"], False),
+        # ── [R3-t17] the witnessed seam: the ARGUMENTS, not the call shape ──
+        ("t17-a literal offset discards the caller's paging (witness)",
+         ok_handler.replace(
+             CALL, "        return readFileSegment(java.io.File(\"x\"), 0L, limit)\n"),
+         ["CONSTANT offset"], False),
+        ("t17-an unclamped limit sizes the allocation (witness)",
+         ok_handler.replace(CLAMP, 'params.optInt("limit", 4096)'),
+         ["never clamped"], False),
+        ("t17-the helper seeks to a fixed position, ignoring its offset parameter",
+         ok_handler.replace("            raf.seek(offset)\n", "            raf.seek(0L)\n"),
+         ["does not use its"], False),
+        ("t17-the offset clamped THROUGH a local still reaches the seek (control)",
+         ok_handler.replace(
+             "            raf.seek(offset)\n",
+             "            val start = offset.coerceIn(0L, 64L)\n"
+             "            raf.seek(start)\n"),
+         [], True),
+        ("t17-a clamp applied INSIDE the helper counts (control)",
+         ok_handler.replace(CLAMP, 'params.optInt("limit", 4096)').replace(
+             "            raf.seek(offset)\n",
+             "            raf.seek(offset)\n"
+             "            val bounded = limit.coerceAtMost(4096)\n"),
+         [], True),
     ]
     api_fixtures += [
         ("w4-when(false) + Files.readAllBytes off the helper path is caught",
          ok_handler.replace(
-             "        return readFileSegment(java.io.File(\"x\"), 0L, 16)\n",
+             CALL,
              "        val bytes = when (false) { true -> "
-             "readFileSegment(java.io.File(\"x\"), 0L, 16) else -> "
+             "readFileSegment(java.io.File(\"x\"), offset, limit) else -> "
              "java.nio.file.Files.readAllBytes(java.io.File(\"x\").toPath()) }\n"
              "        return bytes\n"),
          ["handleReadFile"], False),
         ("w4-helper result dropped by a `.let` chain is caught",
          ok_handler.replace(
-             "        return readFileSegment(java.io.File(\"x\"), 0L, 16)\n",
-             "        return readFileSegment(java.io.File(\"x\"), 0L, 16).let { "
+             CALL,
+             "        return readFileSegment(java.io.File(\"x\"), offset, limit).let { "
              "java.io.File(\"x\").bufferedReader().readText().toByteArray() }\n"),
          ["handleReadFile"], False),
         ("w4-nested block comment + raw string cannot hide a stream read",
          ok_handler.replace(
-             "        return readFileSegment(java.io.File(\"x\"), 0L, 16)\n",
-             "        return readFileSegment(java.io.File(\"x\"), 0L, 16).let {\n"
+             CALL,
+             "        return readFileSegment(java.io.File(\"x\"), offset, limit).let {\n"
              "            /* outer /* inner */ val _s = \"\"\" */\n"
              "            java.io.File(\"x\").inputStream().use { s -> s.skip(0L); "
              "s.readBytes() }\n"
@@ -1127,8 +1517,8 @@ def self_test():
          ["reads through a stream"], False),
         ("w4-the read statement's value is exactly the bounded helper (control)",
          ok_handler.replace(
-             "        return readFileSegment(java.io.File(\"x\"), 0L, 16)\n",
-             "        val bytes = readFileSegment(java.io.File(\"x\"), 0L, 16)\n"
+             CALL,
+             "        val bytes = readFileSegment(java.io.File(\"x\"), offset, limit)\n"
              "        return bytes\n"),
          [], True),
     ]
@@ -1143,6 +1533,75 @@ def self_test():
             passed = (not clean) and all(any(n in x for x in got) for n in needles)
         api_ok &= check("api26: %s" % label, passed, "got=%s" % got)
         shutil.rmtree(d, ignore_errors=True)
+    # --- [R3-t17] #5: the dispatcher's privileged branches ------------------
+    dispatch_ok = (
+        "package com.rikkaminis.app.debug\n"
+        "class DebugRPCHandler {\n"
+        "    suspend fun dispatch(method: String, params: org.json.JSONObject): Any = when (method) {\n"
+        "        \"debug.appInfo\" -> handleAppInfo()\n"
+        "        \"debug.minisConfig.exec\" -> {\n"
+        "            if (!BuildConfig.DEBUG) {\n"
+        "                throw RPCException(-32601, \"Method not found: $method\")\n"
+        "            }\n"
+        "            handleMinisConfigExec(params)\n"
+        "        }\n"
+        "        else -> throw RPCException(-32601, \"Method not found\")\n"
+        "    }\n"
+        "\n"
+        "    private fun handleMinisConfigExec(params: org.json.JSONObject): Any {\n"
+        "        return ConfigBridge.performWriteBatch(params, skipConfirmation = true)\n"
+        "    }\n"
+        "\n"
+        "    private fun handleAppInfo(): Any = 1\n"
+        "}\n"
+    )
+    dispatch_witness = dispatch_ok.replace(
+        '        "debug.minisConfig.exec" -> {\n'
+        "            if (!BuildConfig.DEBUG) {\n"
+        '                throw RPCException(-32601, "Method not found: $method")\n'
+        "            }\n"
+        "            handleMinisConfigExec(params)\n",
+        '        "debug.minisConfig.exec" -> {\n'
+        "            handleMinisConfigExec(params)\n")
+    # renamed AND de-guarded: the PIN cannot match any more, so this fixture is
+    # the derived rail's (a skip-confirmation write needs a refusal) own ground truth.
+    dispatch_renamed = dispatch_witness.replace(
+        '"debug.minisConfig.exec" -> {', '"debug.writeConfig.exec" -> {')
+    dispatch_fixtures = [
+        ("t17-the compliant per-arm release refusal is clean", dispatch_ok, [], True),
+        ("t17-a pinned exec arm that lost its release refusal is caught (witness #5)",
+         dispatch_witness, ["debug.minisConfig.exec"], False),
+        ("t17-a RENAMED arm that reaches a skip-confirmation write is still caught",
+         dispatch_renamed, ["debug.writeConfig.exec"], False),
+        ("t17-an arm that never carried a release guard stays clean (no false red)",
+         dispatch_ok.replace('"debug.appInfo" -> handleAppInfo()',
+                             '"debug.other" -> handleMinisConfigExec(params)').replace(
+             '        "debug.minisConfig.exec" -> {\n'
+             "            if (!BuildConfig.DEBUG) {\n"
+             '                throw RPCException(-32601, "Method not found: $method")\n'
+             "            }\n"
+             "            handleMinisConfigExec(params)\n",
+             '        "debug.minisConfig.exec" -> {\n'
+             "            if (!BuildConfig.DEBUG) {\n"
+             '                throw RPCException(-32601, "Method not found")\n'
+             "            }\n"
+             "            handleMinisConfigExec(params)\n"),
+         ["debug.other"], False),
+    ]
+    dispatch_ok_all = True
+    for label, text, needles, want_clean in dispatch_fixtures:
+        d = _api_tree(text)
+        got = scan_debug_dispatch(d)
+        if want_clean:
+            passed = got == []
+        else:
+            passed = got != [] and all(any(n in x for x in got) for n in needles)
+        dispatch_ok_all &= check("dispatch: %s" % label, passed, "got=%s" % got)
+        shutil.rmtree(d, ignore_errors=True)
+    ok &= dispatch_ok_all
+    print("   DEBUG_DISPATCH_SELFTEST=%s (%d fixtures)"
+          % ("PASS" if dispatch_ok_all else "FAIL", len(dispatch_fixtures)))
+
     d_none = tempfile.mkdtemp(prefix="debugleak-api26-none-")
     api_ok &= check(
         "api26: a tree without the handler is skipped, never failed silently",
@@ -1247,7 +1706,8 @@ def main():
         return 1
     v = scan_source(root)
     api = scan_api26_reads(root)
-    if v or api:
+    dispatch = scan_debug_dispatch(root)
+    if v or api or dispatch:
         if v:
             print(f"❌ Debug-leak guard (source): {len(v)} unaudited debug-package reference(s)")
             print("   debug/ lives in src/main; release hygiene depends on R8 DCE +")
@@ -1255,6 +1715,14 @@ def main():
             print("   be audited and added to ALLOWED_FILES — or justified inline with")
             print("   `debug-ok: <reason>`.")
             for x in v:
+                print("     " + x)
+        if dispatch:
+            print(f"❌ Debug-leak guard (source): {len(dispatch)} reachable-in-release "
+                  f"debug RPC branch(es)")
+            print("   `debug/*` lives in src/main; each `debug.*` method branch in the")
+            print("   RPC dispatcher must refuse on non-DEBUG builds, or release ships")
+            print("   the token-free loopback server's method surface.")
+            for x in dispatch:
                 print("     " + x)
         if api:
             print(f"❌ Debug-leak guard (source): {len(api)} minSdk-26 read-contract violation(s)")
