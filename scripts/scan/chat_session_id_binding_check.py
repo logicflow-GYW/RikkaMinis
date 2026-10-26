@@ -80,7 +80,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _kotlin_lexer import KotlinLexError, mask_code, mask_comments  # noqa: E402
-from _kotlin_ast import const_bool, match_bracket  # noqa: E402
+from _kotlin_ast import const_bool, match_bracket, strip_parens  # noqa: E402
 from _kotlin_valueflow import (  # noqa: E402
     call_args,
     code_view,
@@ -654,6 +654,215 @@ def _active_session_binding_violations(effect_body: str) -> "list[str]":
     return []
 
 
+# ── [R3-t07] 第三轮 dual-gate 见证 01-1 / 01-2 / 01-3 ─────────────────────
+# 三条见证共用同一个形状：门证明「某个调用存在 / 某个函数可达」，却不证明
+# 「那次调用拿到的是哪个值」。缝就在两门的锚点之间：
+#   · 109 门 01 锚 `resolvePathForSession(` 出现在 effect 里，第一个实参传
+#     `activeSessionId` 还是路由参数 `sessionId` 谁都不查（Y=门 02 锚的是
+#     :5130 的 `WebPreviewBottomSheet(pinSessionId = …)`，同样看不见这里）。
+#   · 110 门 02 锚 `LocalMarkdownSessionId provides viewModel.currentSessionId`
+#     （渲染期），点击链接走的 `ChatLinkResolver.resolve(url, <sid>, context)`
+#     的会话实参两门都不查。
+#   · 111 门 01 判据 16 证明写路径「可达 restoreFromBinding(」，但驻留侧刷新
+#     拿到的是 `"{}"` 还是数据库里那份 `bindingJson` 没人问。
+# 三条都由**实参求值**判定（`call_args` + `value_sources`），不再是子串。
+RE_RESOLVE_FOR_SESSION = re.compile(r"\bresolvePathForSession\s*\(")
+RE_URL_CLICK_BIND = re.compile(r"\bval\s+urlClickHandler\s*=(?!=)")
+RE_LINK_RESOLVE_CALL = re.compile(r"\bChatLinkResolver\s*\.\s*resolve\s*\(")
+RE_REFRESH_LAMBDA = re.compile(r"\brefresh\s*=\s*\{")
+RE_ROW_BINDING_WRITE = re.compile(r"\bupdateSessionBinding\s*\(")
+# (call name, index of the argument that carries the binding)
+REFRESH_BINDING_SITES = (("applyBindingToResident", 1), ("restoreFromBinding", 0))
+
+
+def _norm(expr: str) -> str:
+    return re.sub(r"\s+", "", strip_parens(expr)).rstrip("?!")
+
+
+def _live_value_problem(value: str, live_names: "set[str]") -> "str | None":
+    """Why `value` is NOT the live session id, or None when it is.
+
+    Every value the expression can actually produce has to be either the live-id
+    seam (`viewModel.currentSessionId` / `ChatViewModelStore.resolveSessionId(…)`
+    / `.activeSessionId`) or a local this effect already proved is bound from one
+    (see `_active_session_binding_violations`). A rewrite that keeps the token and
+    drops the value — `.let { sessionId }`, `?: sessionId` — is what the witnesses
+    exploit.
+    """
+    sources = [s.strip() for s in value_sources(value)] or [value.strip()]
+    for src in sources:
+        norm = _norm(src)
+        if norm in live_names or RE_LIVE_ID_SOURCE.search(src):
+            continue
+        if norm == "sessionId":
+            return ("the bare route arg `sessionId` — after draft promotion that is "
+                    "the orphan `__new__<uuid>` key, not the session on screen")
+        return "`%s`, which is not derived from the live session id" % src
+    return None
+
+
+def _session_arg_span(text: str, open_paren: int, index: int) -> "str | None":
+    """Text of argument [index] of the call whose `(` sits at [open_paren].
+
+    Bracket counting runs on the shared code view (same length as `text`, so the
+    offsets slice `text` directly); an unbalanced call is reported, not guessed.
+    """
+    cv = _cv(text)
+    spans = call_args(cv, open_paren)
+    if not spans or len(spans) <= index:
+        return None
+    start, end = spans[index]
+    return text[start:end].strip()
+
+
+def _resolve_session_arg_violations(effect_body: str) -> "list[str]":
+    """[R3-t07 109] the pinned-preview resolver must be handed the LIVE id.
+
+    `"resolvePathForSession(" in effect_body` only proves the session-scoped
+    resolver is called. Its FIRST argument picks the session tree, and the route
+    arg stays on `__new__<uuid>` after promotion — the just-written HTML is then
+    looked up in the orphan draft tree, `!file.exists()` and the preview silently
+    never opens.
+    """
+    live_names = resolved_names(effect_body)
+    errs: "list[str]" = []
+    seen = 0
+    for m in RE_RESOLVE_FOR_SESSION.finditer(effect_body):
+        first = _session_arg_span(effect_body, m.end() - 1, 0)
+        if first is None:
+            errs.append(
+                "ChatScreen.kt: pinned-shortcut `resolvePathForSession(` arguments could "
+                "not be parsed (fail-closed) — re-anchor criterion 8, do not drop it"
+            )
+            return errs
+        seen += 1
+        problem = _live_value_problem(first, live_names)
+        if problem:
+            errs.append(
+                "ChatScreen.kt: pinned-shortcut calls `resolvePathForSession(%s, …)` — the "
+                "first argument selects the session tree and it is %s, so the resolver looks "
+                "the just-generated file up in the orphan draft tree, `!file.exists()` and the "
+                "HTML preview silently never opens (the session-scoped resolver IS called, "
+                "the value handed to it is not the live session)" % (first, problem)
+            )
+            return errs
+    if not seen:
+        errs.append(
+            "ChatScreen.kt: pinned-shortcut block no longer contains a "
+            "`resolvePathForSession(` call (fail-closed)"
+        )
+    return errs
+
+
+def _url_click_violations(screen: str) -> "list[str]":
+    """[R3-t07 110] the markdown link CLICK must resolve against the LIVE id.
+
+    Gate 02 pins the render-time provider (`LocalMarkdownSessionId provides
+    viewModel.currentSessionId`) so inline images resolve correctly; the click
+    handler is a separate closure with its own session-id argument, and neither
+    gate read it. Handing `ChatLinkResolver.resolve` the route arg makes every
+    attachment / generated-file link in a freshly promoted chat report
+    "file missing" while the same file renders inline.
+    """
+    m = RE_URL_CLICK_BIND.search(screen)
+    if m is None:
+        return [
+            "ChatScreen.kt: the markdown link click handler (`val urlClickHandler = …`) "
+            "is not present — re-anchor this criterion, do not drop it"
+        ]
+    brace = _cv(screen).find("{", m.end())
+    if brace == -1:
+        return ["ChatScreen.kt: the `urlClickHandler` body could not be located (fail-closed)"]
+    end = _match_brace(screen, brace)
+    if end is None:
+        return ["ChatScreen.kt: the `urlClickHandler` body does not balance (fail-closed)"]
+    body = screen[brace:end + 1]
+    live_names = resolved_names(body)
+    errs: "list[str]" = []
+    seen = 0
+    for call in RE_LINK_RESOLVE_CALL.finditer(body):
+        arg = _session_arg_span(body, call.end() - 1, 1)
+        if arg is None:
+            errs.append(
+                "ChatScreen.kt: `ChatLinkResolver.resolve(` arguments could not be parsed "
+                "(fail-closed) — the criterion binds its session-id parameter (2nd), "
+                "re-anchor it, do not drop it"
+            )
+            return errs
+        seen += 1
+        problem = _live_value_problem(arg, live_names)
+        if problem:
+            errs.append(
+                "ChatScreen.kt: markdown link clicks resolve through "
+                "`ChatLinkResolver.resolve(url, %s, …)` — the session parameter is %s, so a "
+                "tap on any generated attachment / preview link in a promoted draft looks the "
+                "file up under `__new__<uuid>` and reports it missing, while the inline image "
+                "(rendered through `LocalMarkdownSessionId`) still shows it" % (arg, problem)
+            )
+            return errs
+    if not seen:
+        errs.append(
+            "ChatScreen.kt: `urlClickHandler` no longer calls `ChatLinkResolver.resolve(` "
+            "(fail-closed) — the click path left this criterion's view"
+        )
+    return errs
+
+
+def _refresh_binding_violations(writer: str) -> "list[str]":
+    """[R3-t07 111] the resident refresh must be fed the SAME binding the row got.
+
+    Criterion 16 proves the write path REACHES both surfaces (`updateSessionBinding(`
+    and, two hops on, `restoreFromBinding(`). It never compared the values: passing
+    `applyBindingToResident(resident, "{}", …)` persists the row and resets the
+    live chat to the global default — the two surfaces then disagree forever
+    until a reload, and the screen is the one the user is looking at.
+    """
+    write = RE_ROW_BINDING_WRITE.search(writer)
+    if write is None:
+        return []
+    row_arg = _session_arg_span(writer, write.end() - 1, 1)
+    if row_arg is None:
+        return [
+            "HeadlessChatRunner.kt: `updateSessionBinding(` arguments could not be parsed "
+            "(fail-closed) — the criterion binds the binding column (2nd argument)"
+        ]
+    m = RE_REFRESH_LAMBDA.search(writer)
+    if m is None:
+        # No write-through lambda in this writer: the two-surface contract is
+        # already reported by the peeked/refreshed criteria above. Registered
+        # as residual R1 in FIX-R3-t07 §6 rather than guessed at here.
+        return []
+    brace = _cv(writer).find("{", m.end() - 1)
+    close = _match_brace(writer, brace) if brace >= 0 else None
+    if close is None:
+        return [
+            "HeadlessChatRunner.kt: the `refresh = { … }` lambda could not be parsed "
+            "(fail-closed) — the resident side of the write is unverifiable"
+        ]
+    lam = writer[brace:close + 1]
+    row_srcs = {_norm(s) for s in value_sources(row_arg)} or {_norm(row_arg)}
+    for name, index in REFRESH_BINDING_SITES:
+        for call in re.finditer(r"\b" + name + r"\s*\(", lam):
+            span = _session_arg_span(lam, call.end() - 1, index)
+            if span is None:
+                continue
+            srcs = {_norm(s) for s in value_sources(span)} or {_norm(span)}
+            if srcs and srcs <= row_srcs:
+                return []
+            return [
+                "HeadlessChatRunner.kt: the resident ViewModel is refreshed with `%s` "
+                "while the Room row is written with `%s` — the two surfaces are handed "
+                "different bindings, so the live chat resets to the global default "
+                "immediately after the RPC reports the new one (the write reaches both "
+                "sides; the VALUE only reaches one)" % (span, row_arg)
+            ]
+    return [
+        "HeadlessChatRunner.kt: the `refresh = { … }` lambda calls neither %s — the "
+        "resident binding is applied somewhere this criterion cannot see (fail-closed)"
+        % " / ".join("%s(…)" % n for n, _ in REFRESH_BINDING_SITES)
+    ]
+
+
 def _apply_override_violations(code: str) -> "list[str]":
     """Criterion 16 for one `debug/HeadlessChatRunner.kt` (comments stripped)."""
     body = _fn_body_after(code, RE_APPLY_OVERRIDE_DECL)
@@ -770,6 +979,10 @@ def _apply_override_violations(code: str) -> "list[str]":
                 "(none of %s) — the screen keeps the previous binding"
                 % "/".join(APPLY_OVERRIDE_VM_REFRESH)
             )
+        # [R3-t07 111] reaching both surfaces is not the contract: the resident
+        # side has to receive the SAME value the row did.
+        for writer in writers:
+            errs.extend(_refresh_binding_violations(writer))
     return errs
 
 # [deep-audit-1042 A-05] criterion 14 — the headless session-ready barrier.
@@ -1718,6 +1931,16 @@ def check(root: Path) -> int:
                 "(`pending.sessionId != activeSessionId`), not the route arg alone"
             )
         errors.extend(_active_session_binding_violations(effect_body))
+        # [R3-t07 109] the resolver IS called (checked above); this pins WHAT it
+        # is handed. The route arg survives draft promotion, the session tree
+        # does not.
+        errors.extend(_resolve_session_arg_violations(effect_body))
+
+    # --- 8b. [R3-t07 110] markdown link CLICKS resolve against the live id ---
+    # The render-time provider is pinned by session_sheet_id_binding_check (the
+    # 110 seam's other side); the click closure's own session argument was read
+    # by neither gate, so `ChatLinkResolver.resolve(url, sessionId, …)` survived.
+    errors.extend(_url_click_violations(screen))
 
     # --- 9. [da1029-A] MainActivity's New-Chat entries resolve the draft id
     #     through the single source (ComposerDraftStore.nextDraftId) ---
@@ -2242,7 +2465,9 @@ _R_OVERRIDE_ROW_READ = (
     "            },\n"
     "        )\n"
 )
-_R_OVERRIDE_REFRESH_CALL = "        if (vm != null) applyBindingToResident(vm, sessionId)\n"
+_R_OVERRIDE_REFRESH_CALL = (
+    "            refresh = { resident -> "
+    "applyBindingToResident(resident, bindingJson, sessionId) },\n")
 _R_OVERRIDE_ENTRY = (
     "\n"
     "    suspend fun applyModelOverride(\n"
@@ -2256,18 +2481,31 @@ _R_OVERRIDE_ENTRY = (
     "        requireSendableSession(app, sessionId)\n"
     "        val cfg = app.providerRepository.config.value\n"
     + _R_OVERRIDE_ROW_READ
-    + "        persistBinding(app, sessionId, target)\n"
+    + "        persistBinding(app, sessionId, target, modelEntryId)\n"
     "        null\n"
     "    }\n"
     "\n"
-    "    private fun persistBinding(app: MinisApp, sessionId: String, target: Any) {\n"
+    "    private fun persistBinding(\n"
+    "        app: MinisApp,\n"
+    "        sessionId: String,\n"
+    "        bindingJson: Any,\n"
+    "        modelId: String?,\n"
+    "    ) {\n"
     "        val vm = ChatViewModelStore.peekViewModel(sessionId)\n"
-    "        app.chatRepository.updateSessionBinding(sessionId, \"\", \"\")\n"
+    "        SessionConfigWriteThrough.deliver(\n"
+    "            vm = vm,\n"
+    "            persist = { app.chatRepository.updateSessionBinding(sessionId, bindingJson, modelId) },\n"
+    "            hasPersistedRow = { app.chatRepository.dao.getSession(sessionId) != null },\n"
     + _R_OVERRIDE_REFRESH_CALL
-    + "    }\n"
+    + "        )\n"
+    "    }\n"
     "\n"
-    "    private fun applyBindingToResident(vm: ChatViewModel, sessionId: String) {\n"
-    "        if (!vm.restoreFromBinding(\"\")) vm.applyDefaultModelFallback()\n"
+    "    private fun applyBindingToResident(\n"
+    "        vm: ChatViewModel,\n"
+    "        bindingJson: Any,\n"
+    "        sessionId: String,\n"
+    "    ) {\n"
+    "        if (!vm.restoreFromBinding(bindingJson)) vm.applyDefaultModelFallback()\n"
     "    }\n"
 )
 assert FIXTURE_RUNNER.endswith(_R_RUNNER_TAIL), "runner fixture tail moved"
@@ -2914,6 +3152,16 @@ def _green_fixtures() -> "tuple[str, str, str]":
         "        appCtx,\n"
         "    )\n"
         "}\n"
+        # [R3-t07 110] the markdown link CLICK handler (criterion 8b): its own
+        # session-id argument, resolved against the live id.
+        "val urlClickHandler = remember<(String) -> Unit>(viewModel) {\n"
+        "    { url ->\n"
+        "        when (val action = ChatLinkResolver.resolve(url, viewModel.currentSessionId, context)) {\n"
+        "            is ChatLinkAction.DeepLink -> ChatLinkResolver.dispatchDeepLink(context, url)\n"
+        "            else -> Unit\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
     )
     nav = (
         "onOpenTerminal = {\n"
@@ -3449,6 +3697,34 @@ def selftest() -> int:
         "existingBinding = app.chatRepository.dao.getSession(sessionId)"
         "?.modelBinding?.takeIf { false },",
     )
+    # [R3-t07] the three dual-gate seams: the call exists, the VALUE it is handed
+    # is wrong. 109/110 are one-argument swaps inside effects the gate already
+    # anchors; 111 keeps the row write intact and empties the resident refresh.
+    C8_ROUTE_ARG = screen.replace(
+        "PRootKernel.resolvePathForSession(\n        activeSessionId,",
+        "PRootKernel.resolvePathForSession(\n        sessionId,",
+    )
+    C8B_CLICK_ROUTE_ARG = screen.replace(
+        "ChatLinkResolver.resolve(url, viewModel.currentSessionId, context)",
+        "ChatLinkResolver.resolve(url, sessionId, context)",
+    )
+    C8B_CLICK_LET_TAIL = screen.replace(
+        "ChatLinkResolver.resolve(url, viewModel.currentSessionId, context)",
+        "ChatLinkResolver.resolve(url, viewModel.currentSessionId.let { sessionId }, context)",
+    )
+    C16_REFRESH_EMPTY = FIXTURE_RUNNER.replace(
+        "refresh = { resident -> applyBindingToResident(resident, bindingJson, sessionId) },",
+        'refresh = { resident -> applyBindingToResident(resident, "{}", sessionId) },',
+    )
+    C16_REFRESH_DISCARD = FIXTURE_RUNNER.replace(
+        "refresh = { resident -> applyBindingToResident(resident, bindingJson, sessionId) },",
+        "refresh = { resident -> "
+        "applyBindingToResident(resident, bindingJson.let { \"{}\" }, sessionId) },",
+    )
+    C16_REFRESH_CLEAN = FIXTURE_RUNNER.replace(
+        "applyBindingToResident(resident, bindingJson, sessionId) },",
+        "applyBindingToResident(resident, bindingJson.also { log(it) }, sessionId) },",
+    )
 
     _C3_MSG = "must pass `sessionId = viewModel.currentSessionId`"
     dirty_arms = (
@@ -3480,6 +3756,27 @@ def selftest() -> int:
          "not what the decision is fed",
          (screen, nav, move, FIXTURE_STORE, FIXTURE_ACTIVITY, C16_TAKEIF, None, None),
          C16_TAKEIF != FIXTURE_RUNNER),
+        # ── [R3-t07] 第三轮 dual-gate 见证（缝上的值，不是拼写）─────────────
+        ("R3 01-1 preview resolver handed the route arg (109, dataflow)",
+         "first argument selects the session tree",
+         (C8_ROUTE_ARG, nav, move, FIXTURE_STORE, None, None, None, None),
+         C8_ROUTE_ARG != screen),
+        ("R3 01-2 markdown click handed the route arg (110, dataflow)",
+         "markdown link clicks resolve",
+         (C8B_CLICK_ROUTE_ARG, nav, move, FIXTURE_STORE, None, None, None, None),
+         C8B_CLICK_ROUTE_ARG != screen),
+        ("R3 01-2b markdown click resolves then drops the value (110, dataflow)",
+         "the session parameter is",
+         (C8B_CLICK_LET_TAIL, nav, move, FIXTURE_STORE, None, None, None, None),
+         C8B_CLICK_LET_TAIL != screen),
+        ("R3 01-3 resident refresh handed an empty binding (111, symmetric)",
+         "resident ViewModel is refreshed with",
+         (screen, nav, move, FIXTURE_STORE, FIXTURE_ACTIVITY, C16_REFRESH_EMPTY, None, None),
+         C16_REFRESH_EMPTY != FIXTURE_RUNNER),
+        ("R3 01-3b resident refresh discards the binding via `.let` (111, dataflow)",
+         "resident ViewModel is refreshed with",
+         (screen, nav, move, FIXTURE_STORE, FIXTURE_ACTIVITY, C16_REFRESH_DISCARD, None, None),
+         C16_REFRESH_DISCARD != FIXTURE_RUNNER),
     )
     clean_arms = (
         ("B7 precision: `.also { log(it) }` on the passed id is still green",
@@ -3488,6 +3785,9 @@ def selftest() -> int:
         ("B7 precision: a named latch parameter is still green",
          (screen, nav, move, FIXTURE_STORE, FIXTURE_ACTIVITY, C14_CLEAN_NAMED, None, None),
          C14_CLEAN_NAMED != FIXTURE_RUNNER_BARRIER),
+        ("R3 precision: `.also { log(it) }` on the refreshed binding is still green",
+         (screen, nav, move, FIXTURE_STORE, FIXTURE_ACTIVITY, C16_REFRESH_CLEAN, None, None),
+         C16_REFRESH_CLEAN != FIXTURE_RUNNER),
     )
 
     for name, expect, tree, changed in dirty_arms:
