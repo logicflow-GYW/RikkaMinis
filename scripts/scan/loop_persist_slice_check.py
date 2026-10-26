@@ -79,8 +79,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _kotlin_lexer import KotlinLexError  # noqa: E402
 from _kotlin_ast import (  # noqa: E402
     enclosing_conditions,
+    if_blocks,
     match_bracket,
     split_top,
+    tail_expr,
 )
 from _kotlin_valueflow import (  # noqa: E402
     call_args,
@@ -112,6 +114,32 @@ BACKFILL = re.compile(r"copy\s*\(\s*dbMessageId\s*=\s*([^,)\n]*)")
 IDX_GUARD = re.compile(r"^[A-Za-z_]\w*(?:>=0|>-1|!=-1)$")
 NULL_GUARD = re.compile(r"^[A-Za-z_][\w.]*!=null$")
 VAL_DECL = re.compile(r"(?m)^[ \t]*(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=\s*([^\n]*)")
+
+# ── round-3 additions (dual-gate seams, witnesses #121 / #122 / #123) ─────
+# R11 the tool terminal ROUTES between the two persistence verbs: a row that
+#     already exists (the pre-tool preview insert) is refreshed, a turn without
+#     one is inserted. Neither gate looked at the refresh call, so dropping it
+#     left `assistantDbId` non-null while the row kept its pre-tool PENDING
+#     snapshot — and R5 still saw a successful advance.
+ROW_ROUTING_DECL = re.compile(r"\bval\s+assistantDbId\s*=")
+UPDATE_ROW_FUN = "updatePersistedAssistantTurn"
+INSERT_ROW_FUN = "persistAssistantTurn"
+
+# R12 the tool-result persist must be handed the container the turn FILLED.
+#     `persistToolResultMessage(emptyList(), …)` returns null inside the host
+#     (`if (resultParts.isEmpty()) return null`), so the paired tool_result row
+#     silently never lands while the assistant row does.
+TOOL_RESULT_FUN = "persistToolResultMessage"
+EMPTY_COLLECTION = re.compile(
+    r"^(?:emptyList|emptySet|emptyArray|emptySequence|listOf|setOf|arrayListOf|mutableListOf|"
+    r"mutableSetOf|LinkedList|ArrayList|HashSet|arrayOf)\s*(?:<[^<>]*>)?\s*\(\s*\)$")
+
+# R13 the per-turn baseline is INITIALISED to the list length at this turn's
+#     start. R2/R3 only audited how the index is USED; seeding it with 0 (or a
+#     stale value) makes rollback wipe every earlier turn's finished blocks and
+#     misplaces this turn's own text block.
+PER_TURN_DECL = re.compile(
+    r"(?m)^[ \t]*(?:val|var)\s+turnStartBlockIndex\s*(?::[^=\n]+)?=(?!=)")
 
 
 def line_of(src: str, idx: int) -> int:
@@ -491,7 +519,161 @@ def check_source(engine: str, state: str, label: str):
                        "falls back to a degraded walk"
                        % (label, line, val, "/".join(sorted(guard_ids))))
 
+    # ── R11: the tool terminal ROUTES row-refresh vs row-insert ────────────
+    bad.extend(_row_routing(code, engine, label))
+
+    # ── R12: the tool-result persist carries what the turn FILLED ──────────
+    bad.extend(_tool_result_persist(code, engine, label))
+
+    # ── R13: the per-turn baseline is seeded with the list length ──────────
+    bad.extend(_per_turn_baseline(code, engine, label))
+
     return bad
+
+
+def _branch_body(code: str, start: int, end: int):
+    """Text of the branch starting at `start`, braces stripped."""
+    i = start
+    while i < end and code[i] in " \t\r\n":
+        i += 1
+    if i < end and code[i] == "{":
+        close = match_bracket(code, i)
+        if close > 0:
+            return code[i + 1:close]
+    return code[i:end]
+
+
+def _row_routing(code: str, engine: str, label: str):
+    """R11 — `assistantDbId` must refresh the early row, not just return its id."""
+    m = ROW_ROUTING_DECL.search(code)
+    if m is None:
+        return ["%s:1: `val assistantDbId = …` row routing not found — the tool terminal must route "
+                "between refreshing the row written before the tools ran and inserting a new one "
+                "(fail-closed)" % label]
+    rhs_end = expr_end(code, m.end())
+    rhs = code[m.end():rhs_end]
+    blocks = if_blocks(rhs)
+    if not blocks:
+        return ["%s:%d: the assistant turn is persisted unconditionally — a turn whose preview row "
+                "already exists (`earlyAssistantDbId != null`, written before the tools ran) gets a "
+                "SECOND row instead of a refresh, so the first one keeps its pre-tool PENDING "
+                "snapshot while the cursor moves past those blocks"
+                % (label, line_of(engine, m.start()))]
+    cond, t_start, t_end, e_start, e_end = blocks[0]
+    cm = re.fullmatch(r"([A-Za-z_]\w*)!=null", squash(cond))
+    if cm is None:
+        return ["%s:%d: the assistant-row routing condition `%s` is not `if (<earlyId> != null)` — "
+                "cannot audit which row is refreshed (fail-closed)"
+                % (label, line_of(engine, m.start()), " ".join(cond.split()))]
+    early = cm.group(1)
+    then_body = _branch_body(rhs, t_start, t_end)
+    refresh = call_sites(then_body, UPDATE_ROW_FUN)
+    out = []
+    if not refresh:
+        out.append("%s:%d: the `if (%s != null)` branch returns the early row without calling %s(…) — "
+                   "the row keeps the pre-tool PENDING content/status while the run-scoped cursor "
+                   "advances past those blocks, so every finished tool card is lost on reload"
+                   % (label, line_of(engine, m.start() + t_start), early, UPDATE_ROW_FUN))
+    else:
+        for _pos, args in refresh:
+            if len(args) < 2:
+                out.append("%s:%d: %s(…) has %d argument(s) — cannot audit which row it refreshes "
+                           "(fail-closed)"
+                           % (label, line_of(engine, m.start() + t_start), UPDATE_ROW_FUN, len(args)))
+                continue
+            if args[0] != early:
+                out.append("%s:%d: %s(…) refreshes '%s', not the early row '%s' the branch belongs to"
+                           % (label, line_of(engine, m.start() + t_start), UPDATE_ROW_FUN,
+                              args[0], early))
+            if not re.fullmatch(r"[A-Za-z_]\w*", args[1]):
+                out.append("%s:%d: %s(…) is handed '%s' as its slice — must be the value built from "
+                           "loopState.allToolBlocks/unpersistedBlockStart, not an expression the "
+                           "gate cannot follow (fail-closed)"
+                           % (label, line_of(engine, m.start() + t_start), UPDATE_ROW_FUN, args[1]))
+        value = squash(tail_expr(then_body))
+        if value != early:
+            out.append("%s:%d: the early branch evaluates to '%s' — it must evaluate to '%s', the id "
+                       "it just refreshed (anything else makes the dbMessageId backfill anchor the "
+                       "wrong row)" % (label, line_of(engine, m.start() + t_start), value, early))
+    if e_start is None:
+        out.append("%s:%d: the assistant-row routing has no `else` branch — a turn without an early "
+                   "row would never be inserted" % (label, line_of(engine, m.start())))
+    else:
+        else_body = _branch_body(rhs, e_start, e_end)
+        if not call_sites(else_body, INSERT_ROW_FUN):
+            out.append("%s:%d: the `else` branch does not call %s(…) — the turn's row is never "
+                       "inserted" % (label, line_of(engine, m.start() + e_start), INSERT_ROW_FUN))
+    return out
+
+
+def _filled_container(code: str, name: str, pos: int):
+    """Last `+=' / `.add(` / `.addAll(` on `name` before `pos`, or None."""
+    fill = None
+    for m in re.finditer(r"(?<![\w`])" + re.escape(name) + r"\s*(?:\+=|\.\s*(?:add|addAll)\s*\()",
+                         code):
+        if m.start() < pos:
+            fill = m.start()
+    return fill
+
+
+def _tool_result_persist(code: str, engine: str, label: str):
+    """R12 — the persisted tool_result row must carry this turn's results."""
+    sites = call_sites(code, TOOL_RESULT_FUN)
+    if not sites:
+        return ["%s:1: %s(…) call not found — the turn's tool_result row is never persisted, so a "
+                "reload shows tool_use blocks with no paired result (fail-closed)"
+                % (label, TOOL_RESULT_FUN)]
+    out = []
+    for pos, args in sites:
+        line = line_of(engine, pos)
+        if not args:
+            out.append("%s:%d: %s(…) takes no argument — cannot audit what it persists (fail-closed)"
+                       % (label, line, TOOL_RESULT_FUN))
+            continue
+        value = args[0]
+        if EMPTY_COLLECTION.match(value):
+            out.append("%s:%d: the tool-result persist is handed '%s' — the host returns null for an "
+                       "empty list, so the paired tool_result row never lands while the assistant row "
+                       "does; a reload then shows orphan tool_use blocks and the model loses every "
+                       "real tool output" % (label, line, value))
+            continue
+        if not re.fullmatch(r"[A-Za-z_]\w*", value):
+            out.append("%s:%d: the tool-result persist is handed '%s' — that is not the container the "
+                       "turn fills, so what lands cannot be audited (fail-closed)"
+                       % (label, line, value))
+            continue
+        fill = _filled_container(code, value, pos)
+        if fill is None:
+            out.append("%s:%d: '%s' reaches %s(…) without ever being filled (`add` / `+=`) — an "
+                       "unbuilt or empty container persists nothing"
+                       % (label, line, value, TOOL_RESULT_FUN))
+            continue
+        cleared = [m.start() for m in re.finditer(
+            r"(?<![\w`])" + re.escape(value) +
+            r"\s*(?:\.\s*clear\s*\(\s*\)|=\s*(?:emptyList|emptySet|listOf|setOf|mutableListOf)"
+            r"\s*(?:<[^<>]*>)?\s*\(\s*\))", code)]
+        if any(fill < c < pos for c in cleared):
+            out.append("%s:%d: '%s' is emptied after it was filled and before it is persisted — what "
+                       "lands is the empty tail, not this turn's tool results"
+                       % (label, line, value))
+    return out
+
+
+def _per_turn_baseline(code: str, engine: str, label: str):
+    """R13 — `turnStartBlockIndex` starts at the list length, not at 0."""
+    decls = list(PER_TURN_DECL.finditer(code))
+    if not decls:
+        return ["%s:1: no `val turnStartBlockIndex = …` declaration found — the per-turn baseline "
+                "that rollback and turn visibility slice on is gone (fail-closed)" % label]
+    out = []
+    for m in decls:
+        rhs = squash(code[m.end():expr_end(code, m.end())])
+        if rhs != ADVANCE_RHS:
+            out.append("%s:%d: the per-turn baseline is initialised to '%s' — it must be the block "
+                       "count AT THIS TURN's start ('%s'); 0 (or any stale value) makes rollback "
+                       "erase earlier turns' finished blocks and misplaces this turn's own text "
+                       "block" % (label, line_of(engine, m.start()), rhs, ADVANCE_RHS))
+    return out
 
 
 def _receiver_of(code: str, pos: int):
@@ -503,12 +685,32 @@ def _receiver_of(code: str, pos: int):
     """
     prev = code[:pos].rstrip()
     if prev.endswith("."):
-        head = squash(prev[:-1])
+        # Only the receiver CHAIN immediately before the dot matters. Squashing
+        # the whole file prefix used to glue the previous line onto it
+        # (`…allToolBlocks.size` + `loopState` -> `sizeloopState`), so a
+        # multi-statement fixture silently escaped R8 entirely.
+        head_text = prev[:-1].rstrip()
+        if head_text.endswith(")"):
+            # `(loopState).x` / `((loopState)).x` — the parenthesised group IS
+            # the receiver, so unwrap it before reading the tail chain.
+            depth = 0
+            for i in range(len(head_text) - 1, -1, -1):
+                ch = head_text[i]
+                if ch == ")":
+                    depth += 1
+                elif ch == "(":
+                    depth -= 1
+                    if depth == 0:
+                        inner = squash(head_text[i + 1:-1])
+                        if inner == "loopState" or inner.endswith(".loopState"):
+                            return "loopState"
+                        head_text = head_text[:i].rstrip()
+                        break
+        chain_m = re.search(r"([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)\s*$", head_text)
+        head = squash(chain_m.group(1)) if chain_m else ""
         if head == "loopState" or head.endswith(".loopState"):
             return "loopState"
-        # `loopState.…` spellings already matched; anything else is another
-        # holder's property (or a chain we cannot read) — surface its last term.
-        term = re.search(r"([A-Za-z_][\w]*)$", head)
+        term = re.search(r"([A-Za-z_]\w*)$", head)
         return term.group(1) if term else None
     for brace in enclosing_open_braces(code, pos):
         head = code[max(0, brace - 160):brace].rstrip()
@@ -567,6 +769,7 @@ def run(repo: str) -> int:
 # ── fixtures for --selftest ────────────────────────────────────────────────
 
 GOOD_ENGINE = '''
+                val turnStartBlockIndex = loopState.allToolBlocks.size
                 val turnParts = host.buildTurnParts(loopState.allToolBlocks, loopState.unpersistedBlockStart, toolInputMap)
                 val persistedRowId = host.persistAssistantTurn(turnParts)
                 if (persistedRowId != null) {
@@ -578,11 +781,21 @@ GOOD_ENGINE = '''
                 }
             val livePreviewParts = host.buildTurnParts(loopState.allToolBlocks, loopState.unpersistedBlockStart, toolInputMap)
             val turnParts2 = host.buildTurnParts(loopState.allToolBlocks, loopState.unpersistedBlockStart, toolInputMap)
+                val earlyId = earlyAssistantDbId
+                val assistantDbId = if (earlyId != null) {
+                    host.updatePersistedAssistantTurn(earlyId, turnParts, blockMeta)
+                    earlyId
+                } else {
+                    host.persistAssistantTurn(turnParts2)
+                }
                 if (assistantDbId != null) {
                     loopState.unpersistedBlockStart = loopState.allToolBlocks.size
                 }
+                    resultParts.add(AgentContentPart.ToolResult(id = id, name = name))
+                    resultParts += pendingResults
                     loopState.allToolBlocks.clear()
                     loopState.unpersistedBlockStart = 0
+                val toolResultDbId = host.persistToolResultMessage(resultParts, transcriptRedactions)
                 rollbackTurnBlocksTo(loopState.allToolBlocks, turnStartBlockIndex)
                 rollbackTurnBlocksTo(loopState.allToolBlocks, turnStartBlockIndex)
                 val turnVisibleBlocks = loopState.allToolBlocks.drop(turnStartBlockIndex)
@@ -761,10 +974,52 @@ BAD_BACKFILL_WRONG_VALUE = GOOD_ENGINE.replace(
     "copy(dbMessageId = turnStartBlockIndex)",
 )
 
+# ── round-3 witnesses (#121 / #122 / #123) ───────────────────────────────
+
+# #121 (dual-gate seam): the early row keeps its id but is never REFRESHED, so
+# the pre-tool PENDING snapshot stays in the DB while the cursor advances.
+BAD_EARLY_REFRESH_DROPPED = GOOD_ENGINE.replace(
+    "                    host.updatePersistedAssistantTurn(earlyId, turnParts, blockMeta)\n"
+    "                    earlyId\n",
+    "                    earlyId\n",
+)
+
+# #121b (spelling): the refresh call survives but targets a different row.
+BAD_EARLY_REFRESH_WRONG_ROW = GOOD_ENGINE.replace(
+    "host.updatePersistedAssistantTurn(earlyId, turnParts, blockMeta)",
+    "host.updatePersistedAssistantTurn(nearestId, turnParts, blockMeta)",
+)
+
+# #122 (dual-gate seam): an empty container makes the host return null, so the
+# paired tool_result row never lands.
+BAD_TOOL_RESULT_EMPTY = GOOD_ENGINE.replace(
+    "host.persistToolResultMessage(resultParts, transcriptRedactions)",
+    "host.persistToolResultMessage(emptyList(), transcriptRedactions)",
+)
+
+# #122b (family-hole): the container is handed over but never filled.
+BAD_TOOL_RESULT_UNFILLED = GOOD_ENGINE.replace(
+    "                    resultParts.add(AgentContentPart.ToolResult(id = id, name = name))\n"
+    "                    resultParts += pendingResults\n",
+    "",
+)
+
+# #123 (symmetric axis): the rollback baseline is seeded with 0, so any retry
+# wipes every earlier turn's finished blocks.
+BAD_PER_TURN_ZERO = GOOD_ENGINE.replace(
+    "val turnStartBlockIndex = loopState.allToolBlocks.size",
+    "val turnStartBlockIndex = 0",
+)
+
+# #123b (stale baseline): a plausible-looking but wrong seed.
+BAD_PER_TURN_STALE = GOOD_ENGINE.replace(
+    "val turnStartBlockIndex = loopState.allToolBlocks.size",
+    "val turnStartBlockIndex = loopState.unpersistedBlockStart",
+)
+
 VIOLATING = [
     # (fixture name, engine, state, expected message fragment)
-    ("per-turn-slice", BAD_PER_TURN_SLICE, GOOD_STATE, "persistence slice starts at 'turnStartBlockIndex'"),
-    ("missing-advance", BAD_NO_ADVANCE, GOOD_STATE, "does not advance the unpersisted index"),
+    ("per-turn-slice", BAD_PER_TURN_SLICE, GOOD_STATE, "persistence slice starts at 'turnStartBlockIndex'"),    ("missing-advance", BAD_NO_ADVANCE, GOOD_STATE, "does not advance the unpersisted index"),
     ("over-broad-rollback", BAD_ROLLBACK_SWITCHED, GOOD_STATE, "rollback uses"),
     ("clear-without-reset", BAD_CLEAR_NO_RESET, GOOD_STATE, "does not reset the unpersisted index"),
     ("missing-backfill", BAD_NO_BACKFILL, GOOD_STATE, "does not backfill dbMessageId"),
@@ -784,6 +1039,18 @@ VIOLATING = [
     ("commented-out-field", GOOD_ENGINE, BAD_COMMENTED_FIELD, "does not declare"),
     ("paren-receiver", BAD_PAREN_RECEIVER, GOOD_STATE, "is set to 'turnStartBlockIndex'"),
     ("apply-receiver", BAD_APPLY_RECEIVER, GOOD_STATE, "is set to 'turnStartBlockIndex'"),
+    ("early-refresh-dropped", BAD_EARLY_REFRESH_DROPPED, GOOD_STATE,
+     "returns the early row without calling"),
+    ("early-refresh-wrong-row", BAD_EARLY_REFRESH_WRONG_ROW, GOOD_STATE,
+     "refreshes 'nearestId'"),
+    ("tool-result-empty-container", BAD_TOOL_RESULT_EMPTY, GOOD_STATE,
+     "the tool-result persist is handed 'emptyList()'"),
+    ("tool-result-never-filled", BAD_TOOL_RESULT_UNFILLED, GOOD_STATE,
+     "without ever being filled"),
+    ("per-turn-baseline-zero", BAD_PER_TURN_ZERO, GOOD_STATE,
+     "the per-turn baseline is initialised to '0'"),
+    ("per-turn-baseline-stale", BAD_PER_TURN_STALE, GOOD_STATE,
+     "the per-turn baseline is initialised to 'loopState.unpersistedBlockStart'"),
 ]
 
 CLEAN = [
