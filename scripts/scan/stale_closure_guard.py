@@ -45,6 +45,23 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import KotlinLexError, mask_code  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    function_body,
+    match_bracket,
+    split_top as _shared_split_top,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args as _shared_call_args,
+    code_view as _shared_code_view,
+    contains_ident,
+    decl_sites,
+    expr_end,
+    path_feasible,
+)
 BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
 ESCAPE_RE = re.compile(r"stale-ok\s*:")
 LINE_COMMENT_RE = re.compile(r"//.*$")
@@ -264,61 +281,34 @@ SCREEN_FILE = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatScre
 
 
 def match_paren(text, open_idx):
-    """Index of the ')' matching the '(' at `open_idx`, or -1."""
-    depth = 0
-    for i in range(open_idx, len(text)):
-        if text[i] == "(":
-            depth += 1
-        elif text[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
+    """Index of the ')' matching the '(' at `open_idx`, or -1.
 
+    [R3-t10] Thin alias over the shared `_kotlin_ast.match_bracket` — the
+    self-written counter is gone. `text` must be a masked view.
+    """
+    return match_bracket(text, open_idx)
 
 def split_top(text, sep=","):
-    """Top-level split of `text` on `sep`, quote- and bracket-aware."""
-    spans, depth, start, i, n = [], 0, 0, 0, len(text)
-    quote = ""
-    while i < n:
-        c = text[i]
-        if quote:
-            if c == "\\":
-                i += 2
-                continue
-            if c == quote:
-                quote = ""
-            i += 1
-            continue
-        if c in "\"'":
-            quote = c
-            i += 1
-            continue
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        elif c == sep and depth == 0:
-            spans.append((start, i))
-            start = i + 1
-        i += 1
-    spans.append((start, n))
-    return spans
+    """Top-level split of `text` on `sep`.
 
+    [R3-t10] Thin alias over the shared `_kotlin_ast.split_top`. The old copy
+    was quote-aware because it also ran on raw text; every caller here passes a
+    masked view (`code_only` / `code_view`), where literal interiors are already
+    blanks, so bracket awareness is the whole requirement.
+    """
+    return _shared_split_top(text, (sep,))
 
 def call_args(text, name):
     """[(args_list, start)] for every `name(...)` call in `text`."""
     out = []
     for m in re.finditer(r"\b" + re.escape(name) + r"\s*\(", text):
-        po = text.find("(", m.end() - 1)
-        pc = match_paren(text, po)
-        if pc < 0:
+        po = m.end() - 1
+        spans = _shared_call_args(text, po)
+        if not spans:
             out.append((None, m.start()))
             continue
-        inner = text[po + 1:pc]
-        out.append(([inner[a:b].strip() for a, b in split_top(inner, ",")], m.start()))
+        out.append(([text[a:b].strip() for a, b in spans], m.start()))
     return out
-
 
 def threshold_param_index(lines):
     """Index of the `isListAtBottom` parameter that carries the threshold, or
@@ -343,65 +333,16 @@ def threshold_param_index(lines):
     return None
 
 def code_only(text):
-    """Blank comments and string-literal contents (spaces keep line/col).
+    """Blank comments and string-literal contents (offsets and newlines kept).
 
-    Braces inside strings (JSON builders, string templates) are blanked too,
-    so brace matching and identifier scans only see real code. Handles
-    escapes, char literals and triple-quoted raw strings.
+    [R3-t10] Thin alias over the shared lexer (`_kotlin_valueflow.code_view`
+    -> `_kotlin_lexer.mask_code`). The self-written char walker is gone: it
+    was one more copy of the masking logic every gate needs, and it disagreed
+    with the shared one on template interpolation (`"${f("/*")}"`). Braces /
+    quotes inside literals are blanked by the shared implementation too, so
+    brace matching and identifier scans only ever see real code.
     """
-    out = []
-    i = 0
-    n = len(text)
-    while i < n:
-        ch = text[i]
-        nxt = text[i + 1] if i + 1 < n else ""
-        if ch == "/" and nxt == "/":
-            j = text.find("\n", i)
-            j = n if j < 0 else j
-            out.append(" " * (j - i))
-            i = j
-            continue
-        if ch == "/" and nxt == "*":
-            j = text.find("*/", i + 2)
-            j = n if j < 0 else j + 2
-            seg = text[i:j]
-            out.append("".join(c if c == "\n" else " " for c in seg))
-            i = j
-            continue
-        if ch == '"':
-            if text[i:i + 3] == '"""':
-                j = text.find('"""', i + 3)
-                j = n if j < 0 else j + 3
-            else:
-                j = i + 1
-                while j < n:
-                    if text[j] == "\\":
-                        j += 2
-                        continue
-                    if text[j] in ('"', "\n"):
-                        j += 1
-                        break
-                    j += 1
-            seg = text[i:j]
-            out.append("".join(c if c == "\n" else " " for c in seg))
-            i = j
-            continue
-        if ch == "'":
-            j = i + 1
-            while j < n:
-                if text[j] == "\\":
-                    j += 2
-                    continue
-                if text[j] in ("'", "\n"):
-                    j += 1
-                    break
-                j += 1
-            out.append(" " * (j - i))
-            i = j
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
+    return _shared_code_view(text)
 
 def extract_block(lines, sig_re):
     """Brace-matched block starting at the first line matching sig_re.
@@ -541,6 +482,91 @@ def scan_bottom_verdict(root):
             "consumers (isNearBottom + DragStop) must route through the shared "
             "verdict" % (total_calls - 1)
         )
+
+    # ── S4 [R3-t10] the verdict's OWN body consumes the threshold ──────────
+    # S2 judges the call argument; the round-3 seam was one hop deeper: the
+    # argument arrives, and the pure function drops it
+    # (`return distance >= 0 && distance <= 0`). Both gates of the pair were
+    # green because neither looked inside the callee.
+    findings += _s4_verdict_body(code)
+
+    return findings
+
+
+def _local_aliases(body, name):
+    """Names bound in `body` to an expression that reads `name` (one hop).
+
+    [R3-t10] Tolerance, not a hole: `val limit = thresholdPx` / `val boundary =
+    cutoffSortOrder` are legitimate rewrites of the same value flow. A criterion
+    that only accepts the bare identifier reds them — the false-positive class
+    the round-3 report caught in the L4 criterion one gate over. The hop is
+    one only: aliasing an alias is not followed.
+    """
+    out = set()
+    for m in re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+?)?=(?!=)", body):
+        rhs = body[m.end():expr_end(body, m.end())]
+        if contains_ident(rhs, name):
+            out.add(m.group(1))
+    return out
+
+
+def _s4_verdict_body(code):
+    """[R3-t10 S4] isListAtBottom's returned value must depend on the threshold.
+
+    Derived, not spelled: the parameter is the one whose name mentions
+    `threshold` (falling back to the last parameter, the documented order), and
+    the judgement is "a parameter cannot change the answer" — either the
+    returned expression never reads it, or the returned boolean is a constant
+    once folded (`... || true` / `... && false`).
+    """
+    findings = []
+    fb = function_body(code, "isListAtBottom")
+    if fb is None:
+        # S3 already fails closed when the definition is missing.
+        return findings
+    b_start, b_end, kind = fb
+    body = code[b_start:b_end]
+    m = re.search(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]*\.)?isListAtBottom\s*\(", code)
+    if not m:
+        return ["ChatScreen.kt:?  [B-03 S4] isListAtBottom signature NOT FOUND (fail-closed)"]
+    p_open = m.end() - 1
+    p_close = match_bracket(code, p_open)
+    if p_close < 0:
+        return ["ChatScreen.kt:?  [B-03 S4] isListAtBottom parameter list unparseable (fail-closed)"]
+    params = [code[p_open + 1:p_close][a:b].strip()
+              for a, b in _shared_split_top(code[p_open + 1:p_close], (",",))]
+    params = [p for p in params if p]
+    if not params:
+        return ["ChatScreen.kt:?  [B-03 S4] isListAtBottom has no parameters (fail-closed)"]
+    th = next((p.split(":")[0].strip() for p in params if "threshold" in p.lower()), None)
+    if th is None:
+        th = params[-1].split(":")[0].strip()
+    line = code[:b_start].count("\n") + 1
+
+    if kind == "expr":
+        rets = [body.strip()]
+    else:
+        rets = [body[r.start():expr_end(body, r.end())].strip()
+                for r in re.finditer(r"\breturn\b(?!@)", body)]
+    rets = [r for r in rets if r]
+    if not rets:
+        findings.append(
+            "ChatScreen.kt:%d  [B-03 S4] isListAtBottom has no return value to judge "
+            "(fail-closed)" % line)
+        return findings
+    readers = {th} | _local_aliases(body, th)
+    reading = [r for r in rets if any(contains_ident(r, nm) for nm in readers)]
+    if not reading:
+        findings.append(
+            "ChatScreen.kt:%d  [B-03 S4] isListAtBottom never reads its `%s` parameter "
+            "in the value it returns — the scrollNearBottomDp knob is dead one hop "
+            "below the call the S2 criterion already checks" % (line, th))
+        return findings
+    if all(const_bool(r) is not None for r in reading):
+        findings.append(
+            "ChatScreen.kt:%d  [B-03 S4] isListAtBottom folds to a constant (%r) even "
+            "though it names `%s` — the threshold is absorbed and cannot change the "
+            "verdict" % (line, reading[0][:70], th))
     return findings
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -699,6 +725,106 @@ def scan_visible_content(root):
                         )
     return findings
 
+
+# ─────────────────────────────────────────────────────────────────────────
+# [R3-t10] V4 / V5 — the cutoff's ARITHMETIC is the delete boundary
+#
+# `deleteMessagesAfter(sid, cutoff)` deletes `sort_order >= cutoff`, so the two
+# walks encode opposite intents and the KDoc says so:
+#   * edit  (truncateBeforeEdit)  — replaces the turn ⇒ boundary = row.sortOrder
+#     (the edited row itself goes);
+#   * retry (retryFromMessage)    — preserves the turn  ⇒ boundary = row.sortOrder + 1.
+# V2 checks the row predicate (`shared row predicate`), which is why both gates
+# of the pair stayed green when the +1 moved from one walk to the other: the
+# predicate is intact, the offset is the part nobody judged. Neither walk is
+# judged by spelling either — a lookup walks back from the delete call, and a
+# missing/unreadable boundary fails closed.
+# ─────────────────────────────────────────────────────────────────────────
+
+CUTOFF_NAME = "cutoffSortOrder"
+CUTOFF_SITES = (
+    # (file, function, +1 required?, criterion id, human name)
+    ("queue", "truncateBeforeEdit", False, "V4", "edit"),
+    ("viewmodel", "retryFromMessage", True, "V5", "retry"),
+)
+SORT_ORDER_RE = re.compile(r"\w+(?:\.\w+)*\.sortOrder")
+
+
+def scan_cutoff_offsets(root):
+    findings = []
+    for key, fn, plus_one, cid, label in CUTOFF_SITES:
+        rel = VC_FILES[key]
+        path = os.path.join(root, rel)
+        if not os.path.exists(path):
+            continue
+        base = os.path.basename(rel)
+        try:
+            code = _shared_code_view(open(path, encoding="utf-8", errors="replace").read())
+        except KotlinLexError as exc:
+            findings.append(
+                "%s:?  [B-05 %s] KotlinLexError (%s) — the %s cutoff arithmetic is "
+                "unchecked (fail-closed)" % (base, cid, exc, label))
+            continue
+        fb = function_body(code, fn)
+        if fb is None:
+            # V2 already fails closed on a missing body; do not double-report.
+            continue
+        b_start, b_end, _kind = fb
+        body = code[b_start:b_end]
+        assigns = [pos for pos, kind in decl_sites(body, CUTOFF_NAME) if kind == "assign"]
+        if not assigns:
+            findings.append(
+                "%s:%d  [B-05 %s] no `%s` assignment in the %s walk (fail-closed — the "
+                "delete boundary cannot be tracked; intent: %s)"
+                % (base, code[:b_start].count("\n") + 1, cid, CUTOFF_NAME, label,
+                   "sortOrder + 1" if plus_one else "sortOrder"))
+            continue
+        for pos in assigns:
+            eq = body.find("=", pos)
+            expr = " ".join(body[eq + 1:expr_end(body, eq + 1)].split())
+            line = code[:b_start + pos].count("\n") + 1
+            if not path_feasible(body, pos):
+                findings.append(
+                    "%s:%d  [B-05 %s] the %s cutoff is assigned only on an unreachable "
+                    "path (`if (false)` / contradictory guards) — the boundary keeps its "
+                    "initial value" % (base, line, cid, label))
+                continue
+            ok_shape = (re.fullmatch(r"\w+(?:\.\w+)*\.sortOrder\s*\+\s*1", expr) is not None
+                        if plus_one
+                        else SORT_ORDER_RE.fullmatch(expr) is not None)
+            if not ok_shape:
+                findings.append(
+                    "%s:%d  [B-05 %s] the %s cutoff is `%s = %s` — `deleteMessagesAfter` "
+                    "removes `sort_order >= %s`, so the %s walk must use %s"
+                    % (base, line, cid, label, CUTOFF_NAME, expr[:70], CUTOFF_NAME, label,
+                       "`<row>.sortOrder + 1` (keep the retried turn)" if plus_one
+                       else "exactly `<row>.sortOrder` (drop the edited turn)"))
+                continue
+            if not _cutoff_reaches_delete(body):
+                findings.append(
+                    "%s:%d  [B-05 %s] the %s cutoff never reaches `deleteMessagesAfter(` "
+                    "(fail-closed — the boundary is computed and then not consumed)"
+                    % (base, line, cid, label))
+    return findings
+
+
+def _cutoff_reaches_delete(body):
+    """True when some deleteMessagesAfter(..) call consumes the cutoff variable.
+
+    One-hop locals are accepted (`val boundary = cutoffSortOrder`), because the
+    judgement is "the boundary is consumed", not "the name is spelled".
+    """
+    names = {CUTOFF_NAME} | _local_aliases(body, CUTOFF_NAME)
+    for m in re.finditer(r"\bdeleteMessagesAfter\s*\(", body):
+        spans = _shared_call_args(body, m.end() - 1)
+        if not spans:
+            continue
+        for a, b in spans:
+            if any(contains_ident(body[a:b], nm) for nm in names):
+                return True
+    return False
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # self-test: one breaker per criterion, expected literals hand-written from
 # the rule table above (never derived from a run).
@@ -718,7 +844,8 @@ def self_test():
                 os.makedirs(os.path.dirname(p), exist_ok=True)
                 with open(p, "w", encoding="utf-8") as fh:
                     fh.write(text)
-            return scan_bottom_verdict(tmp) + scan_visible_content(tmp)
+            return (scan_bottom_verdict(tmp) + scan_visible_content(tmp)
+                    + scan_cutoff_offsets(tmp))
         finally:
             shutil.rmtree(tmp)
 
@@ -728,7 +855,10 @@ def self_test():
     clean_screen = (
         "package x\n"
         "class LazyListState { val layoutInfo = 0 }\n"
-        "internal fun isListAtBottom(a: Int, b: Int, c: Int, t: Int): Boolean = true\n"
+        "internal fun isListAtBottom(a: Int, b: Int, c: Int, t: Int): Boolean {\n"
+        "    val distance = c - (a + b)\n"
+        "    return distance >= 0 && distance <= t\n"
+        "}\n"
         "fun Screen(listState: LazyListState) {\n"
         "    val nearBottomThresholdPx = 32f\n"
         "    val isNearBottom = remember(listState, nearBottomThresholdPx) {\n"
@@ -768,12 +898,36 @@ def self_test():
         "fun retryFromMessage(messageId: String) {\n"
         "    if (!userRowHasVisibleContent(content, imgs, atts)) return\n"
         "    val hasText = userPartsJsonHasVisibleContent(entity.partsJson)\n"
+        "    var cutoffSortOrder = -1\n"
+        "    for (entity in messages) {\n"
+        "        if (entity.role == \"user\") {\n"
+        "            if (hasText) {\n"
+        "                if (entity.id == messageId) {\n"
+        "                    cutoffSortOrder = entity.sortOrder + 1\n"
+        "                    break\n"
+        "                }\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "    if (cutoffSortOrder >= 0) chatRepository.deleteMessagesAfter(sid, cutoffSortOrder)\n"
         "}\n"
     )
     clean_queue = (
         "package x\n"
         "fun ChatViewModel.truncateBeforeEdit(messageId: String) {\n"
         "    val hasText = userPartsJsonHasVisibleContent(entity.partsJson)\n"
+        "    var cutoffSortOrder = -1\n"
+        "    for (entity in messages) {\n"
+        "        if (entity.role == \"user\") {\n"
+        "            if (hasText) {\n"
+        "                if (entity.id == messageId) {\n"
+        "                    cutoffSortOrder = entity.sortOrder\n"
+        "                    break\n"
+        "                }\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "    chatRepository.deleteMessagesAfter(sid, cutoffSortOrder)\n"
         "}\n"
     )
     clean_bubble = (
@@ -967,6 +1121,98 @@ def self_test():
         got,
     ))
 
+    # ── [R3-t10] round-3 seam witnesses ────────────────────────────────────
+    # N8 (V4): the edit walk offsets by +1 — the pre-edit row survives
+    # `deleteMessagesAfter(sortOrder >= ...)`. V2 stays green: the row
+    # predicate is untouched, only the arithmetic moved.
+    n8 = dict(clean)
+    n8["src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatQueueInterruption.kt"] = clean_queue.replace(
+        "                    cutoffSortOrder = entity.sortOrder\n",
+        "                    cutoffSortOrder = entity.sortOrder + 1\n",
+    )
+    got = run_scan(n8)
+    results.append((
+        "N8: edit cutoff offset by +1 reds V4 only",
+        len(got) == 1 and "[B-05 V4]" in got[0],
+        got,
+    ))
+
+    # N9 (V5): the retry walk drops its +1 — the user's own turn is deleted.
+    n9 = dict(clean)
+    n9["src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatViewModel.kt"] = clean_vm.replace(
+        "                    cutoffSortOrder = entity.sortOrder + 1\n",
+        "                    cutoffSortOrder = entity.sortOrder\n",
+    )
+    got = run_scan(n9)
+    results.append((
+        "N9: retry cutoff without +1 reds V5 only",
+        len(got) == 1 and "[B-05 V5]" in got[0],
+        got,
+    ))
+
+    # N10 (S4): the verdict's own body stops reading the threshold — the call
+    # argument is still the knob (S2 green), the value is a hardcoded 0.
+    n10 = dict(clean)
+    n10["src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatScreen.kt"] = clean_screen.replace(
+        "    val distance = c - (a + b)\n"
+        "    return distance >= 0 && distance <= t\n",
+        "    return c >= 0 && c <= 0\n",
+    )
+    got = run_scan(n10)
+    results.append((
+        "N10: verdict body that ignores the threshold reds S4 only",
+        len(got) == 1 and "[B-03 S4]" in got[0],
+        got,
+    ))
+
+    # N11 (S4, order axis): the body names the threshold but absorbs it.
+    n11 = dict(clean)
+    n11["src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatScreen.kt"] = clean_screen.replace(
+        "    return distance >= 0 && distance <= t\n",
+        "    return distance >= 0 && distance <= t || true\n",
+    )
+    got = run_scan(n11)
+    results.append((
+        "N11: absorbed threshold (`|| true`) reds S4 only",
+        len(got) == 1 and "[B-03 S4]" in got[0] and "constant" in got[0],
+        got,
+    ))
+
+    # N12 (V5, path axis): the cutoff is stamped on a dead branch only.
+    n12 = dict(clean)
+    n12["src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatViewModel.kt"] = clean_vm.replace(
+        "                    cutoffSortOrder = entity.sortOrder + 1\n",
+        "                    if (false) cutoffSortOrder = entity.sortOrder + 1\n")
+    got = run_scan(n12)
+    results.append((
+        "N12: cutoff stamped on an unreachable branch reds V5 only",
+        len(got) == 1 and "[B-05 V5]" in got[0] and "unreachable" in got[0],
+        got,
+    ))
+
+    # Tolerant arms: the same walks/dots rewritten legitimately stay green, so
+    # the new criteria cannot pass by forbidding every rewrite.
+    tolerant = []
+    t1 = dict(clean)
+    t1["src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatViewModel.kt"] = clean_vm.replace(
+        "entity.sortOrder + 1", "row.sortOrder + 1").replace("for (entity in messages)", "for (row in messages)")
+    tolerant.append(("renamed loop variable in the retry walk", run_scan(t1)))
+    t2 = dict(clean)
+    t2["src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatScreen.kt"] = clean_screen.replace(
+        "    return distance >= 0 && distance <= t\n",
+        "    val limit = t\n    return distance >= 0 && distance <= limit\n",
+    )
+    tolerant.append(("threshold read through a local in the verdict body", run_scan(t2)))
+    t3 = dict(clean)
+    t3["src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatQueueInterruption.kt"] = clean_queue.replace(
+        "    chatRepository.deleteMessagesAfter(sid, cutoffSortOrder)\n",
+        "    val boundary = cutoffSortOrder\n"
+        "    chatRepository.deleteMessagesAfter(sid, boundary)\n")
+    got = run_scan(t3)
+    tolerant.append(("boundary handed to the delete call through a local", got))
+    for name, got in tolerant:
+        results.append(("T: " + name + " stays green", got == [], got))
+
     failed = [name for name, ok, got in results if not ok]
     if failed:
         print("SELF-TEST FAILED (%d breaker(s))" % len(failed))
@@ -977,15 +1223,23 @@ def self_test():
                     print("      " + f)
         return 1
     print(
-        "✅ self-test has teeth: bottom-verdict S1/S2/S3 and visible-content "
-        "V1/V2/V3 each flip red on exactly their own breaker; clean fixture green"
+        "✅ self-test has teeth: bottom-verdict S1/S2/S3/S4 and visible-content "
+        "V1/V2/V3/V4/V5 each flip red on exactly their own breaker; clean + "
+        "tolerant fixtures green"
     )
+    print("STALE_CLOSURE_SELFTEST=PASS (%d arms)" % len(results))
     return 0
 
 def main():
-    root = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else ".")
-    if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
+    args = sys.argv[1:]
+    if args and args[0] in ("--selftest", "--self-test"):
         return self_test()
+    if args and args[0] == "--root" and len(args) > 1:
+        args = args[1:]
+    if args and args[0].startswith("--"):
+        print("usage: stale_closure_guard.py [ROOT | --root ROOT] | --selftest")
+        return 2
+    root = os.path.abspath(args[0] if args else ".")
     violations = []
     for sr in SRC_ROOTS:
         for base, _dirs, files in os.walk(os.path.join(root, sr)):
@@ -1002,6 +1256,7 @@ def main():
     # [B-03 deep-audit-1037] bottom-verdict section + [B-05] visible-content
     violations += scan_bottom_verdict(root)
     violations += scan_visible_content(root)
+    violations += scan_cutoff_offsets(root)
 
     if violations:
         print(f"❌ Stale-closure guard: {len(violations)} violation(s)")
@@ -1014,6 +1269,7 @@ def main():
         return 1
     print("✅ Stale-closure guard: no long-lived effect reads a plain parameter")
     print("✅ Stale-closure guard: bottom verdict + visible-content sections green")
+    print("✅ Stale-closure guard: edit/retry cutoff arithmetic green")
     return 0
 
 
