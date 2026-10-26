@@ -470,6 +470,22 @@ def analyse_release_latch(sources):
                 stop >= 0 and destroy >= 0 and stop < destroy,
                 "%s onRelease stop=%d destroy=%d" % (label, stop, destroy),
             ))
+            # [r3 03-1] The four touches above are ORDER criteria: they are all
+            # satisfied by a teardown that is textually complete and never runs.
+            # The witness wrapped the whole plan in `if (false)` — every token
+            # stays where it was, and every uncached formula keeps one live
+            # WebView + renderer handle for the life of the process.
+            dead = [nm for nm, pos in (("releasePlan", plan), ("removeCallbacks", drop),
+                                       ("stopLoading", stop), ("destroy", destroy))
+                    if pos >= 0 and not reachable(body, pos)]
+            out.append((
+                "%s release path runs its teardown plan on a live path" % label,
+                not dead,
+                ("%s onRelease: %s sit under an infeasible condition — the plan parses "
+                 "but cannot execute, so the WebView leaks"
+                 % (label, ", ".join(dead))) if dead
+                else "%s onRelease teardown reachable" % label,
+            ))
             # Defensive: a bulk null-clear may only run once the view is detached
             # (that is the only ordering under which it even has a local meaning;
             # as written it removes nothing at all, which is why it is gone).
@@ -515,7 +531,86 @@ def analyse_release_latch(sources):
                 re.search(r"\.track\(\s*" + re.escape(name) + r"\s*\)", doc) is not None,
                 "%s:%d" % (label, line),
             ))
+            # [r3 03-2] Registration is the OTHER half: the witness deleted
+            # `post(initialLoad)` and left the guarded Runnable + its `.track(…)`
+            # in place, so the load was never queued — the guard became
+            # unreachable and every sandbox HTML preview stayed blank.
+            scheduled = any(
+                any(contains_ident(doc[a:b], name) for a, b in call_args(doc, m.end() - 1))
+                for m in re.finditer(r"(?<![\w.])(?:post|postDelayed)\s*\(", doc)
+            )
+            out.append((
+                "%s deferred runnable %s (line %d) is scheduled on the view queue"
+                % (label, name, line),
+                scheduled,
+                ("%s:%d — registered with the latch but never posted: the stand-down "
+                 "guard is unreachable and the deferred work never runs" % (label, line))
+                if not scheduled else "%s:%d" % (label, line),
+            ))
     return out
+
+HANDLER_POST_RE = re.compile(r"\.\s*post(?:Delayed)?\s*\{")
+KEYWORD_CALLS = frozenset(["if", "when", "for", "while", "catch", "return", "throw", "fun", "try", "else"])
+
+
+def analyse_js_chokepoint(manager_src):
+    """-> [(criterion, ok, detail)] for the main-thread JS execution chokepoint.
+
+    [r3 03-3] A `Handler(mainLooper).post { … }` hop can land AFTER `destroy()`
+    — the dispatch decision was taken before the hop, so it cannot see it. The
+    callee of the hop must therefore re-check the latch when it RUNS.
+
+    The witness deleted that re-check from `runJsNow`, and both older groups
+    stayed green: it writes neither `blobDownloadActiveToken` nor
+    `settings.userAgentString`, so the spelling-anchored C1/C3 never looked at
+    it. Derived — every function invoked inside a main-thread `post { … }`
+    block must gate its work behind a live latch guard.
+    """
+    doc = code_of(manager_src)
+    out = []
+    fns = {}
+    for name, body in iter_functions(doc):
+        fns.setdefault(name, []).append(body)
+    hops = 0
+    for m in HANDLER_POST_RE.finditer(doc):
+        body = lambda_body(doc, m.end() - 1)
+        if not body:
+            continue
+        for call in re.finditer(r"(?<![\w.])([A-Za-z_]\w*)\s*\(", body):
+            fname = call.group(1)
+            if fname not in fns:
+                continue
+            for cbody in fns[fname]:
+                # The execution point: the first WebView touch, else the first
+                # call the body makes (that is where the handed block runs).
+                touches = [c.start() for c in
+                           re.finditer(r"(?<![\w.])\w*[Ww]ebView\s*\.", cbody)]
+                call2 = None
+                for c2 in re.finditer(r"(?<![\w.])([A-Za-z_]\w*)\s*\(", cbody):
+                    if c2.group(1) not in KEYWORD_CALLS:
+                        call2 = c2
+                        break
+                pos = min(touches) if touches else (call2.start() if call2 else -1)
+                hops += 1
+                out.append((
+                    "the deferred main-thread hop %s(…) re-checks the destroyed latch "
+                    "when it runs" % fname,
+                    pos >= 0 and latch_guard(cbody, pos),
+                    ("%s(…) executes its work without a live `if (destroyed) … return` "
+                     "guard — a destroy that landed during the Looper hop then touches "
+                     "a destroyed WebView (the in-flight waiter is never woken, so the "
+                     "caller sits out its full timeout)" % fname)
+                    if not (pos >= 0 and latch_guard(cbody, pos))
+                    else "%s(…) guarded" % fname,
+                ))
+    if hops == 0:
+        out.append((
+            "no main-thread JS hop (Handler(...).post { … }) found in BrowserUseManager",
+            False,
+            "re-point this guard — the execution chokepoint moved (fail-closed)",
+        ))
+    return out
+
 
 def analyse_release_policy(src):
     """-> [(criterion, ok, detail)] for WebViewReleaseLatch.kt: the plan ORDER
@@ -863,6 +958,31 @@ GOOD_PREVIEW = """
         },
     )
 """
+
+# [r3 03-3] the main-thread dispatch chain: the hop callee must re-check the
+# latch at execution time (the dispatch decision was taken before the hop).
+GOOD_DISPATCH_MANAGER = """
+    private fun runJsOnMain(what: String, block: () -> Unit) {
+        when (jsDispatchFor(destroyed, Looper.myLooper() == Looper.getMainLooper())) {
+            JsDispatch.REJECT_DESTROYED -> Log.w(TAG, "dropped")
+            JsDispatch.INLINE -> runJsNow(what, block)
+            JsDispatch.HOP_TO_MAIN -> Handler(Looper.getMainLooper()).post { runJsNow(what, block) }
+        }
+    }
+
+    private fun runJsNow(what: String, block: () -> Unit) {
+        if (destroyed) {
+            Log.w(TAG, "JS dispatch dropped")
+            return
+        }
+        runCatching(block).onFailure { Log.w(TAG, "failed") }
+    }
+"""
+
+BAD_DISPATCH_MANAGER = GOOD_DISPATCH_MANAGER.replace(
+    '        if (destroyed) {\n            Log.w(TAG, "JS dispatch dropped")\n            return\n        }\n',
+    "")
+assert BAD_DISPATCH_MANAGER != GOOD_DISPATCH_MANAGER
 
 GOOD_POLICY = """
 internal fun releasePlan(attached: Boolean): List<ReleaseStep> =
@@ -1381,6 +1501,35 @@ def selftest():
 
     expect_latch("clean fixture: release latch contract", GOOD_KATEX, GOOD_PREVIEW, GOOD_POLICY, [], 0)
 
+    # ---- r3 round-3b witness arms (03-1 / 03-2 / 03-3) ------------------
+    dead_plan = GOOD_KATEX.replace(
+        "                    for (step in releasePlan(attached = wv.parent != null)) {",
+        "                    if (false) for (step in releasePlan(attached = wv.parent != null)) {")
+    expect_latch(
+        "r3-03-1 witness: the teardown plan sits under `if (false)`",
+        dead_plan, GOOD_PREVIEW, GOOD_POLICY,
+        ["runs its teardown plan on a live path"], 1,
+    )
+    gated_plan = GOOD_KATEX.replace(
+        "                    for (step in releasePlan(attached = wv.parent != null)) {",
+        "                    if (wv.parent != null) for (step in releasePlan(attached = wv.parent != null)) {")
+    expect_latch(
+        "precision: a feasible condition above the plan stays green",
+        gated_plan, GOOD_PREVIEW, GOOD_POLICY, [], 0,
+    )
+    unposted = GOOD_PREVIEW.replace("                post(initialLoad)\n", "")
+    expect_latch(
+        "r3-03-2 witness: the guarded runnable is never posted",
+        GOOD_KATEX, unposted, GOOD_POLICY,
+        ["is scheduled on the view queue"], 1,
+    )
+    disp = [ok for c, ok, _ in analyse_js_chokepoint(GOOD_DISPATCH_MANAGER) if "runJsNow" in c]
+    expect("r3-03-3 clean fixture: the hop callee re-checks the latch",
+           bool(disp) and all(disp), True)
+    disp = [ok for c, ok, _ in analyse_js_chokepoint(BAD_DISPATCH_MANAGER) if "runJsNow" in c]
+    expect("r3-03-3 witness: the hop callee runs the block unguarded",
+           bool(disp) and all(disp), False)
+
     # PRE arm — the pre-fix shape: no latch, no plan, null-clear teardown, both
     # deferred blocks unguarded.
     expect_latch(
@@ -1641,6 +1790,7 @@ def main():
         ("FilePreviewScreen.kt", open(preview_path, encoding="utf-8").read()),
     ])
     results += run_analysis(analyse_release_policy, open(policy_path, encoding="utf-8").read())
+    results += run_analysis(analyse_js_chokepoint, manager_src)
 
     violations = url_decode_violations(root)
     results.append((

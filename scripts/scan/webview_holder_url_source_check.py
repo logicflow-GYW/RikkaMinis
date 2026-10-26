@@ -302,6 +302,138 @@ def w4a_external_call(sheet):
 
 
 _VIEWPORT_FIELDS = ("useWideViewPort", "loadWithOverviewMode")
+UA_FIELD = "userAgentString"
+FILE_STRIP = 'removePrefix("file://")'
+
+
+def asset_root_problem(holder, holder_lit):
+    """W8 — the root the loader serves is a REAL directory derived from the file URL.
+
+    [r3 01-1] `assetRootDir` feeds `fromAssetLoaderUrl(url, assetRootDir)` — the
+    input half of the mapping pair this gate exists for. The witness built it
+    from the un-stripped URL (`File("file:///…").parentFile` → `file:/…`), so
+    the InternalStoragePathHandler root names no directory and every reverse
+    mapping returns null; W1/W2/W3 all stay green because the pair itself is
+    untouched.
+    """
+    sites = []
+    for m in re.finditer(r"\bassetRootDir\s*(?::[^=\n]*)?=(?!=)", holder):
+        end = expr_end(holder, m.end())
+        rhs = holder_lit[m.end():end].strip()
+        stmts = [rhs]
+        for ident in sorted(set(re.findall(r"[A-Za-z_]\w*", rhs))):
+            b = re.search(r"\b(?:val|var)\s+" + re.escape(ident) + r"\s*(?::[^=\n]*)?=\s*",
+                          holder)
+            if b:
+                stmts.append(holder_lit[b.end():expr_end(holder, b.end())].strip())
+        sites.append(" ".join(stmts))
+    if not sites:
+        return "no `assetRootDir = …` binding in the holder (fail-closed)"
+    if not any("File(" in s for s in sites):
+        return ("the asset root is not derived from a File(…) of the initial URL — the "
+                "reverse mapping's root half is unanchored (fail-closed)")
+    bad = [s for s in sites if "File(" in s and FILE_STRIP not in s]
+    if bad:
+        return ("the root the loader serves resolves from %r — the `file://` prefix must be "
+                "stripped BEFORE File(…), otherwise the root is `file:/…` (no such "
+                "directory) and every `fromAssetLoaderUrl` returns null" % bad[0][:90])
+    return ""
+
+
+def w4c_fullscreen_external_call(fullscreen):
+    """W4c — the fullscreen "open in external browser" entry reads the same source.
+
+    [r3 02-3] W4a only polices `WebPreviewBottomSheet.kt`. The fullscreen host is
+    the symmetric half of the same button, and `holder.webView.url` there is the
+    asset-loader origin (`https://appassets.androidplatform.net/…`) — a virtual
+    host only this app's interceptor resolves, so the external browser gets a
+    URL that cannot load.
+    """
+    sites = call_site_args(fullscreen, r"\bopenExternalFromSheet\s*\(")
+    if not sites:
+        return False, ("no openExternalFromSheet(…) in WebPreviewFullscreenScreen.kt "
+                       "(fail-closed)")
+    bad = []
+    for pos, args in sites:
+        if len(args) < 2:
+            bad.append(", ".join(args) or "<no args>")
+            continue
+        arg = args[1]
+        if "webView.url" in arg or "webView.getUrl" in arg or "webView.originalUrl" in arg:
+            bad.append(arg)
+        elif not contains_ident(arg, "currentUrl"):
+            bad.append(arg)
+        elif not path_feasible(fullscreen, pos):
+            bad.append(arg + " (dead path)")
+    if bad:
+        return False, ("the fullscreen entry passes %r — the WebView-reported URL is the "
+                       "asset-loader origin, which no external browser can resolve; it must "
+                       "read holder.currentUrl" % bad[0])
+    return True, "%d fullscreen call site(s) read holder.currentUrl" % len(sites)
+
+
+def first_param_name(code, fn_name):
+    """Name of the first parameter of `fun <fn_name>(…)`, or ''."""
+    m = re.search(r"\bfun\s+(?:[\w.]+\.)?" + re.escape(fn_name) + r"\s*\(", code)
+    if not m:
+        return ""
+    spans = call_args(code, m.end() - 1)
+    if not spans:
+        return ""
+    a, b = spans[0]
+    name = code[a:b].split(":")[0].strip()
+    return name if re.fullmatch(r"[A-Za-z_]\w*", name) else ""
+
+
+def _field_rhs(text, field):
+    """[(pos, rhs)] for every `field = …` write in `text`."""
+    out = []
+    for m in re.finditer(r"(?<![\w`])" + field + r"\s*=(?!=)", text):
+        rhs = text[m.end():expr_end(text, m.end())]
+        semi = rhs.find(";")
+        if semi >= 0:
+            rhs = rhs[:semi]
+        out.append((m.start(), rhs.strip()))
+    return out
+
+
+def to_asset_name_problem(holder):
+    """W3f — the forward mapping's encoded segment comes from the file URL.
+
+    [r3 02-1] The witness set `val name = ""` inside `toAssetLoaderUrl`: the
+    mapping pair, the origin constant, the call sites W2 grades and the loader
+    import all stay intact, but every file URL now maps to `null`, so
+    `toAssetLoaderUrl(x) ?: currentUrl` always takes the fallback and the
+    asset-loader origin is never used (relative fetch/module loads then fail on
+    the opaque `file://` origin).
+    """
+    body = function_text(holder, "toAssetLoaderUrl")
+    if body is None:
+        return "toAssetLoaderUrl(…) not found (fail-closed)"
+    param = first_param_name(holder, "toAssetLoaderUrl")
+    if not param:
+        return "toAssetLoaderUrl(…) has no parameter to derive the name from (fail-closed)"
+    enc = list(re.finditer(r"\bencodePathSegment\s*\(", body))
+    if len(enc) != 1:
+        return ("toAssetLoaderUrl must encode exactly one path segment (found %d) — the "
+                "loader URL carries the file name" % len(enc))
+    spans = call_args(body, enc[0].end() - 1)
+    if not spans:
+        return "encodePathSegment(…) has no readable argument (fail-closed)"
+    arg = "".join(body[a:b] for a, b in spans).strip()
+    if re.fullmatch(r"[A-Za-z_]\w*", arg):
+        b = re.search(r"\b(?:val|var)\s+" + re.escape(arg) + r"\s*(?::[^=\n]*)?=\s*", body)
+        if b:
+            arg = body[b.end():expr_end(body, b.end())].strip()
+    forms = value_forms(arg)
+    carries = [f for f in forms
+               if contains_ident(f, param) and "substringAfterLast" in f]
+    if not carries:
+        return ("the encoded segment resolves to %r — it must be the last path segment of "
+                "`%s`; a constant name makes the forward mapping encode nothing, so "
+                "`?: currentUrl` always wins and the asset-loader origin is never used"
+                % (forms[:2], param))
+    return ""
 
 
 def viewport_writes(text):
@@ -460,6 +592,12 @@ def analyse(holder_code, sheet_code, gallery_code=None, filepreview_code=None,
     n_decode = len(re.findall(r"import\s+com\.rikkaminis\.app\.ui\.chat\.decodeUriPath", holder))
     results.append(("W3e percent-decode reuses ui.chat.decodeUriPath", n_decode == 1,
                     "found %d imports" % n_decode, None))
+    problem3f = to_asset_name_problem(holder)
+    results.append(("W3f toAssetLoaderUrl encodes the file URL's own name segment",
+                    problem3f == "", problem3f or "the encoded segment comes from the URL", None))
+    problem8 = asset_root_problem(holder, literal_view(holder_code))
+    results.append(("W8 asset root is a real directory derived from the file:// URL",
+                    problem8 == "", problem8 or "assetRootDir = parent of the stripped path", None))
 
     # --- W4: downstream still reads the single source, on a live path ---
     ok_ext, d_ext = w4a_external_call(sheet)
@@ -471,6 +609,17 @@ def analyse(holder_code, sheet_code, gallery_code=None, filepreview_code=None,
         ok_pin = False
     results.append(("W4b pin entry still gates on holder.currentUrl", ok_pin,
                     "downstream must keep reading the single source", None))
+    if fullscreen_code is not None:
+        fs = code_of(fullscreen_code)
+        if fs is None:
+            results.append(("W4c fullscreen openExternalFromSheet reads holder.currentUrl",
+                            False,
+                            "KotlinLexError in WebPreviewFullscreenScreen.kt (fail-closed)",
+                            None))
+        else:
+            ok_fs, d_fs = w4c_fullscreen_external_call(fs)
+            results.append(("W4c fullscreen openExternalFromSheet reads holder.currentUrl",
+                            ok_fs, d_fs, None))
 
     # --- W5: mobile-mode viewport policy in toggleDesktopMode (dv14-B1) ---
     if "fun toggleDesktopMode(" in holder:
@@ -534,6 +683,53 @@ def analyse(holder_code, sheet_code, gallery_code=None, filepreview_code=None,
                         "(a constant / a derived predicate such as "
                         "`mobile.initialScale > 0` flips the viewport off because "
                         "initialScale is 0)" % (bad[0] if bad else ""), None))
+
+                # [r3 02-2] The mobile branch must actually SWITCH BACK: the UA
+                # value and the initial scale are the two settings the desktop
+                # branch sets and the viewport fields do not cover. The witness
+                # left every viewport token intact and kept writing DESKTOP_UA +
+                # a fixed scale here, so the cache-clear + reload below
+                # re-requested the desktop page at 100% zoom.
+                desktop_branch = None
+                for cond, ts, te, e_start2, e_end2 in if_blocks(body):
+                    if e_start2 is not None and "desktopMode" in cond:
+                        desktop_branch = body[ts:te]
+                        break
+                mob_ua = [rhs for _p, rhs in _field_rhs(mobile_branch, UA_FIELD)]
+                desk_ua = [rhs for _p, rhs in _field_rhs(desktop_branch or "", UA_FIELD)]
+                bad_ua = []
+                if desk_ua and not mob_ua:
+                    bad_ua.append("<no mobile UA write>")
+                for rhs in mob_ua:
+                    if desk_ua and rhs.strip() == desk_ua[0].strip():
+                        bad_ua.append(rhs)
+                    elif const_value(rhs) is not None:
+                        bad_ua.append(rhs)
+                results.append((
+                    "W5g mobile branch switches the UA back off the desktop value",
+                    not bad_ua,
+                    ("the mobile branch writes %s while the desktop branch writes %r — "
+                     "switching back to mobile then clearCache()+reload()s with the "
+                     "desktop user agent, so the server keeps serving the desktop page"
+                     % (bad_ua[0] if bad_ua else "", desk_ua[0] if desk_ua else ""))
+                    if bad_ua else
+                    "mobile_ua=%r desktop_ua=%r" % (mob_ua, desk_ua), None))
+
+                bad_scale = []
+                for m in re.finditer(r"\bsetInitialScale\s*\(", mobile_branch):
+                    spans = call_args(mobile_branch, m.end() - 1)
+                    arg = ", ".join(mobile_branch[a:b] for a, b in spans).strip()
+                    if const_value(arg) is not None:
+                        bad_scale.append(arg)
+                    elif policy_local and not contains_ident(arg, policy_local.group(1)):
+                        bad_scale.append(arg)
+                results.append((
+                    "W5h mobile branch restores the policy's initial scale",
+                    not bad_scale,
+                    ("setInitialScale(%s) is a fixed number — the mobile scale must come "
+                     "from the single-sourced policy, otherwise the page stays locked at "
+                     "that zoom after switching back"
+                     % (bad_scale[0] if bad_scale else "")), None))
 
     # --- W6: gallery window contract (dv14-B1) ---
     if gallery_code is not None:
@@ -615,9 +811,10 @@ def window_after(code, marker, size):
 
 # ---------------------------------------------------------------- selftest ---
 GOOD_HOLDER = """package probe
-class H {
+class H(private val initialUrl: String) {
     var currentUrl: String = "file:///d/a.html"
-    private val assetRootDir: String? = "/d"
+    private val assetParent = java.io.File(initialUrl.removePrefix("file://")).parentFile
+    private val assetRootDir: String? = assetParent?.absolutePath
     fun onPageStarted(url: String) {
         currentUrl = fromAssetLoaderUrl(url, assetRootDir) ?: url
     }
@@ -628,29 +825,40 @@ class H {
     }
     internal const val ASSET_LOADER_HOST = "appassets.androidplatform.net"
 }
-internal fun toAssetLoaderUrl(fileUrl: String): String? = null
+internal fun toAssetLoaderUrl(fileUrl: String): String? {
+    if (!fileUrl.startsWith(FILE_URL_PREFIX)) return null
+    val name = fileUrl.removePrefix(FILE_URL_PREFIX).substringAfterLast('/')
+    if (name.isEmpty()) return null
+    return ASSET_LOADER_PREFIX + encodePathSegment(name)
+}
 internal fun fromAssetLoaderUrl(assetUrl: String, rootDir: String?): String? = null
 import com.rikkaminis.app.ui.chat.decodeUriPath
 """
 
-BAD_HOLDER = """package probe
-class H {
-    var currentUrl: String = "file:///d/a.html"
-    private val assetRootDir: String? = "/d"
-    fun onPageStarted(url: String) {
-        currentUrl = url
-    }
-    fun startIfNeeded() {
-        val loadUrl = toAssetLoaderUrl(currentUrl) ?: currentUrl
-        webView.loadUrl(loadUrl)
-        webView.post { webView.loadUrl(loadUrl) }
-    }
-    internal const val ASSET_LOADER_HOST = "appassets.androidplatform.net"
-}
-internal fun toAssetLoaderUrl(fileUrl: String): String? = null
-internal fun fromAssetLoaderUrl(assetUrl: String, rootDir: String?): String? = null
-import com.rikkaminis.app.ui.chat.decodeUriPath
+# [r3 01-1] the loader root is built from the un-stripped URL (W8 red, rest OK)
+ROOT_UNSTRIPPED_HOLDER = GOOD_HOLDER.replace(
+    'java.io.File(initialUrl.removePrefix("file://")).parentFile',
+    "java.io.File(initialUrl).parentFile")
+assert ROOT_UNSTRIPPED_HOLDER != GOOD_HOLDER
+
+# [r3 02-1] the forward mapping encodes a constant name (W3f red, rest OK)
+NAME_CONSTANT_HOLDER = GOOD_HOLDER.replace(
+    "val name = fileUrl.removePrefix(FILE_URL_PREFIX).substringAfterLast('/')",
+    'val name = ""')
+assert NAME_CONSTANT_HOLDER != GOOD_HOLDER
+
+# [r3 02-3] the fullscreen external-open entry reads the WebView-reported URL
+W4_FULLSCREEN_GOOD = """package probe
+onOpenExternal = { openExternalFromSheet(context, holder.currentUrl) }
 """
+W4_FULLSCREEN_BAD = """package probe
+onOpenExternal = { openExternalFromSheet(context, holder.webView.url ?: "") }
+"""
+
+BAD_HOLDER = GOOD_HOLDER.replace(
+    "currentUrl = fromAssetLoaderUrl(url, assetRootDir) ?: url",
+    "currentUrl = url")
+assert BAD_HOLDER != GOOD_HOLDER
 
 LEGACY_HOLDER = """package probe
 class H {
@@ -747,6 +955,49 @@ class DesktopHolder {
         webView.settings.useWideViewPort = !mobile.useWideViewPort
         webView.settings.loadWithOverviewMode = !mobile.loadWithOverviewMode
         webView.setInitialScale(mobile.initialScale)
+    }
+}
+internal fun mobileViewportSettings(): MobileViewportSettings =
+    MobileViewportSettings(useWideViewPort = true, loadWithOverviewMode = true, initialScale = 0)
+"""
+
+# [r3 02-2] the mobile branch keeps the desktop UA and a fixed scale — both
+# settings the desktop branch owns and the viewport fields do not cover.
+DESKTOP_UA_REVERT_HOLDER = GOOD_HOLDER + """
+class DesktopHolder {
+    fun toggleDesktopMode() {
+        if (desktopMode) {
+            webView.settings.userAgentString = DESKTOP_UA
+            webView.settings.useWideViewPort = true
+            webView.settings.loadWithOverviewMode = true
+        } else {
+            webView.settings.userAgentString = DESKTOP_UA
+            val mobile = mobileViewportSettings()
+            webView.settings.useWideViewPort = mobile.useWideViewPort
+            webView.settings.loadWithOverviewMode = mobile.loadWithOverviewMode
+            webView.setInitialScale(100)
+        }
+    }
+}
+internal fun mobileViewportSettings(): MobileViewportSettings =
+    MobileViewportSettings(useWideViewPort = true, loadWithOverviewMode = true, initialScale = 0)
+"""
+
+# control: the same two writes, derived from the mobile source
+DESKTOP_UA_CLEAN_HOLDER = GOOD_HOLDER + """
+class DesktopHolder {
+    fun toggleDesktopMode() {
+        if (desktopMode) {
+            webView.settings.userAgentString = DESKTOP_UA
+            webView.settings.useWideViewPort = true
+            webView.settings.loadWithOverviewMode = true
+        } else {
+            webView.settings.userAgentString = mobileUserAgent
+            val mobile = mobileViewportSettings()
+            webView.settings.useWideViewPort = mobile.useWideViewPort
+            webView.settings.loadWithOverviewMode = mobile.loadWithOverviewMode
+            webView.setInitialScale(mobile.initialScale)
+        }
     }
 }
 internal fun mobileViewportSettings(): MobileViewportSettings =
@@ -937,7 +1188,7 @@ def selftest():
 
     # good fixtures: everything green
     good = analyse(GOOD_HOLDER, GOOD_SHEET)
-    expect(len(good) == 9, "good fixture should produce 9 criteria, got %d" % len(good))
+    expect(len(good) == 11, "good fixture should produce 11 criteria, got %d" % len(good))
     for crit, ok, detail, line in good:
         expect(ok, "good fixture must pass %s (%s)" % (crit, detail))
 
@@ -1005,6 +1256,34 @@ def selftest():
     # plain holder (no toggleDesktopMode) must produce NO W5 criteria
     expect(not any(c.startswith("W5") for c, _, _, _ in analyse(GOOD_HOLDER, GOOD_SHEET)),
            "holder without toggleDesktopMode must not emit W5 criteria")
+
+    # ---- r3 round-3b witness arms (01-1 / 02-1 / 02-2 / 02-3) -----------
+    dclean = dict((c, ok) for c, ok, _, _ in analyse(DESKTOP_UA_CLEAN_HOLDER, GOOD_SHEET))
+    for c, ok in dclean.items():
+        if c.startswith("W5"):
+            expect(ok, "ua-clean fixture must pass %s" % c)
+
+    drevert = dict((c, ok) for c, ok, _, _ in analyse(DESKTOP_UA_REVERT_HOLDER, GOOD_SHEET))
+    reds = sorted(c for c, ok in drevert.items() if not ok)
+    expect(reds == ["W5g mobile branch switches the UA back off the desktop value",
+                    "W5h mobile branch restores the policy's initial scale"],
+           "r3-02-2 ua-revert: exactly W5g+W5h must be RED, got %s" % reds)
+
+    d61 = dict((c, ok) for c, ok, _, _ in analyse(ROOT_UNSTRIPPED_HOLDER, GOOD_SHEET))
+    reds = sorted(c for c, ok in d61.items() if not ok)
+    expect(reds == ["W8 asset root is a real directory derived from the file:// URL"],
+           "r3-01-1 root-unstripped: exactly W8 must be RED, got %s" % reds)
+
+    d64 = dict((c, ok) for c, ok, _, _ in analyse(NAME_CONSTANT_HOLDER, GOOD_SHEET))
+    reds = sorted(c for c, ok in d64.items() if not ok)
+    expect(reds == ["W3f toAssetLoaderUrl encodes the file URL's own name segment"],
+           "r3-02-1 name-constant: exactly W3f must be RED, got %s" % reds)
+
+    ok_fs, d_fs = w4c_fullscreen_external_call(code_of(W4_FULLSCREEN_GOOD))
+    expect(ok_fs, "r3-02-3 fullscreen-currentUrl must pass W4c (%s)" % d_fs)
+    ok_fs, d_fs = w4c_fullscreen_external_call(code_of(W4_FULLSCREEN_BAD))
+    expect(not ok_fs and "webView.url" in d_fs,
+           "r3-02-3 fullscreen-webView.url must be RED on W4c (%s)" % d_fs)
 
     # bad: policy consumption negated — only W5e RED (the policy itself is
     # still correct, so W5a/W5c/W5d must stay green: this is the arm that
@@ -1189,7 +1468,7 @@ def selftest():
           "androidview rendererEpoch dropped=RED, mapper discarded via .also=RED, "
           "viewport derived from initialScale=RED, controller built from null window=RED; "
           "batch7-t12: 6 witnesses RED + 2 controls GREEN")
-    print("WEBVIEW_HOLDER_URL_SOURCE_SELFTEST_ARMS=%d" % 16)
+    print("WEBVIEW_HOLDER_URL_SOURCE_SELFTEST_ARMS=%d" % 57)
     return 0
 
 
