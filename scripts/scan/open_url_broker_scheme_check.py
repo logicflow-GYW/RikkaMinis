@@ -79,7 +79,7 @@ from _kotlin_ast import (const_value, if_blocks, is_pure_literal, match_bracket,
                          split_top, stmt_spans, strip_parens)
 from _kotlin_lexer import KotlinLexError
 from _kotlin_lexer import analyse as lex_kotlin
-from _kotlin_valueflow import (brace_depth, contains_ident, expr_end,
+from _kotlin_valueflow import (brace_depth, call_args, contains_ident, expr_end,
                                live_positions, path_feasible, returns_exiting,
                                value_sources)
 
@@ -624,6 +624,245 @@ def analyse_terminal_deeplink(code_raw, label):
          "from one — a bare, absent or discarded id binds the terminal to the draft "
          "key / global workspace. args=%r" % args.strip()[:160])))
     return results
+# ── [r3-t21] deep-link ARM + intent-launch EFFECT judges ──────────────────
+# Round-3 witnesses attack the seam between two gates: the deep-link gate pins
+# its own spelling anchor (branch name / collectAsState / runCatching) and this
+# gate pins the terminal arm, so a patch that keeps every spelling and drops
+# the EFFECT passes both. These judges read the arm/launch as control flow:
+# the preview must reach the consumer, the navigation must be reachable, and a
+# plain-URL launcher must not fall back to an unsanitised `Intent.parseUri`.
+
+REL_OFFLOAD = "src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/OpenOffloadHandler.kt"
+
+_ARM_LABEL_TOKEN = re.compile(
+    r"\s*(?:is\s+[A-Za-z_][\w.]*|\"[^\"\\]*\"|null|else)\s*,?\s*$")
+_NAV_CALL = re.compile(r"(?<![\w])(?:safeNavigate|navigate)\s*\(")
+_RE_PARSE_URI = re.compile(r"(?<![\w])Intent\s*\.\s*parseUri\s*\(")
+
+
+def _arm_labels(text):
+    labels = set(re.findall(r"\bis\s+([A-Za-z_][\w.]*)", text))
+    if re.search(r"(?<![\w])null(?![\w])", text):
+        labels.add("null")
+    if re.search(r"(?<![\w])else(?![\w])", text):
+        labels.add("else")
+    return frozenset(labels)
+
+
+def _arm_label_start(text, floor, arrow):
+    """Start of the match-label run ending at `arrow` (labels may wrap lines)."""
+    i = arrow
+    while True:
+        head = text.rfind("\n", floor, i) + 1
+        if _ARM_LABEL_TOKEN.fullmatch(text[head:i]):
+            i = head
+            while i > floor and text[i - 1] in " \t":
+                i -= 1
+            continue
+        break
+    return max(i, floor)
+
+
+def _arm_bodies(block):
+    """[(labels, body_text, braced)] for the depth-0 arms of `when (…) {…}`."""
+    brace = block.find("{")
+    close = match_bracket(block, brace) if brace >= 0 else -1
+    if brace < 0 or close < 0:
+        return []
+    body_all = block[brace + 1:close]
+    arrows = []
+    depth = 0
+    i = 0
+    while i < len(body_all):
+        ch = body_all[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "-" and depth == 0 and body_all.startswith("->", i):
+            arrows.append(i)
+            i += 2
+            continue
+        i += 1
+    arms = []
+    prev_end = 0
+    for k, arrow in enumerate(arrows):
+        labels = _arm_labels(body_all[prev_end:arrow])
+        nxt = (_arm_label_start(body_all, arrow + 2, arrows[k + 1])
+               if k + 1 < len(arrows) else len(body_all))
+        start = arrow + 2
+        while start < nxt and body_all[start] in " \t\r\n":
+            start += 1
+        if start < nxt and body_all[start] == "{":
+            bclose = match_bracket(body_all, start)
+            if bclose > 0:
+                arms.append((labels, body_all[start:bclose + 1], True))
+                prev_end = bclose + 1
+                continue
+        arms.append((labels, body_all[arrow + 2:nxt], False))
+        prev_end = nxt
+    return arms
+
+
+def _dispatch_arms(code, subject):
+    """Arms of the deep-link dispatch `when (<subject>)`, or None (fail-closed).
+
+    Selected by the dispatch-only OpenTerminal case; a neighbouring
+    `when (<subject>)` resolver stays out of scope.
+    """
+    hits = []
+    for m in re.finditer(re.escape("when (%s)" % subject) + r"\s*\{", code):
+        brace = m.end() - 1
+        close = match_bracket(code, brace)
+        if close < 0:
+            continue
+        block = code[brace - len("when (%s)" % subject):close + 1]
+        if "DeepLinkAction.OpenTerminal" in block:
+            hits.append(block)
+    return _arm_bodies(hits[0]) if len(hits) == 1 else None
+
+
+def _arm(arms, case):
+    for labels, body, braced in arms:
+        if case in labels:
+            return body, braced
+    return None, None
+
+
+def analyse_preview_arm(code_raw, subject):
+    """[r3-t21] U9 — the hot-start HTML-preview arm must PUBLISH the preview."""
+    title = "U9 hot-start OpenHtmlPreview arm publishes the pending preview"
+    try:
+        code, _lit = views(code_raw)
+    except KotlinLexError as exc:
+        return [(title, False, "lexer failure: %s — fail-closed" % exc)]
+    arms = _dispatch_arms(code, subject)
+    if arms is None:
+        return [(title, False, "deep-link dispatch `when (%s)` missing or ambiguous — "
+                               "fail-closed" % subject)]
+    body, braced = _arm(arms, "DeepLinkAction.OpenHtmlPreview")
+    if body is None or not braced:
+        return [(title, False, "`is DeepLinkAction.OpenHtmlPreview ->` arm missing or not "
+                               "a brace block — fail-closed")]
+    live = live_positions(body, r"(?<![\w])setPendingHtmlPreview\s*\(")
+    out = [(title, bool(live),
+            "the arm opens the chat but never calls setPendingHtmlPreview(…) on a reachable "
+            "path — the deep link consumes the preview request and shows nothing")]
+    if not live:
+        return out
+    args = " ".join(" ".join(body[a:b] for a, b in call_args(body, body.index("(", p)))
+                    for p in live)
+    missing = [f for f in ("sessionId", "resourcePath", "title")
+               if not re.search(r"\.\s*%s\b" % f, args)]
+    sourced = bool(re.search(r"(?<![\w])%s\s*\." % re.escape(subject), args))
+    out.append(("U9b published preview carries the action's own fields",
+                not missing and sourced,
+                "setPendingHtmlPreview(…) is fed from %s — the preview opens on a wrong "
+                "session/URL/title" % ("a partial payload (missing %s)" % ", ".join(missing)
+                                       if missing else "something other than the action")))
+    return out
+
+
+def analyse_nav_arms(code_raw, subject, cases, label):
+    """[r3-t21] U10 — an arm whose whole purpose is to open something must open it."""
+    title = "%s deep-link arms reach their navigation" % label
+    try:
+        code, _lit = views(code_raw)
+    except KotlinLexError as exc:
+        return [(title, False, "lexer failure: %s — fail-closed" % exc)]
+    arms = _dispatch_arms(code, subject)
+    if arms is None:
+        return [(title, False, "deep-link dispatch `when (%s)` missing or ambiguous — "
+                               "fail-closed" % subject)]
+    problems = []
+    for case in cases:
+        body, braced = _arm(arms, case)
+        if body is None or not braced:
+            continue                      # arm presence is U6/U7's job
+        sites = [m.start() for m in _NAV_CALL.finditer(body)]
+        if not sites:
+            problems.append("`%s` carries no navigation call" % case)
+        elif not [p for p in sites if path_feasible(body, p)]:
+            problems.append("every navigation call in `%s` sits behind a dead guard "
+                            "(constant `if (…)`, `if (false)`) — the arm runs and nothing "
+                            "opens" % case)
+    return [(title, not problems, "; ".join(problems))]
+
+
+def _enclosing_branch_span(code, pos):
+    """Innermost `if` BRANCH (then-arm or else-arm, not the whole if) with `pos`.
+
+    Judging the whole `if` would let a sanitize call in the OTHER arm vouch for
+    the arm under inspection — exactly the symmetry hole U11 exists for.
+    """
+    best = None
+    for _cond, t_start, t_end, e_start, e_end in if_blocks(code):
+        for lo, hi in ((t_start, t_end), (e_start, e_end)):
+            if lo is None or hi is None:
+                continue
+            if lo <= pos <= hi and (best is None or (hi - lo) < (best[1] - best[0])):
+                best = (lo, hi)
+    return best
+
+
+def analyse_intent_symmetry(code_raw):
+    """[r3-t21] U11 — a plain-URL launcher must not parse intent URIs."""
+    title = ("U11 every Intent.parseUri(…) is scheme-normalised, flag-guarded and "
+             "sanitised")
+    try:
+        code, _lit = views(code_raw)
+    except KotlinLexError as exc:
+        return [(title, False, "lexer failure: %s — fail-closed" % exc)]
+    sites = [m.start() for m in _RE_PARSE_URI.finditer(code)]
+    if not sites:
+        return [(title, False, "no Intent.parseUri(…) site at all — fail-closed (the "
+                               "`#Intent;` handler this criterion pins is gone)")]
+    problems = []
+    for pos in sites:
+        spans = call_args(code, code.index("(", pos))
+        parts = [code[a:b].strip() for a, b in spans]
+        target = parts[0] if parts else ""
+        flag = strip_parens(parts[1]) if len(parts) > 1 else ""
+        if not flag:
+            problems.append("Intent.parseUri(%s) without the URI_INTENT_SCHEME flag" % target)
+        else:
+            fv = const_value(flag)
+            if fv is not None and fv != 1:
+                problems.append("Intent.parseUri(%s, %s) — a non-URI_INTENT_SCHEME flag "
+                                "makes the parser honour `#Intent;` fragments on ANY scheme"
+                                % (target, flag))
+            elif fv is None and "URI_INTENT_SCHEME" not in flag:
+                problems.append("Intent.parseUri(%s, %s) — the flag is not pinned to "
+                                "Intent.URI_INTENT_SCHEME" % (target, flag))
+        if not any("lowercaseIntentScheme" in s for s in value_sources(target)):
+            problems.append("Intent.parseUri(%s) — the argument is not scheme-normalised "
+                            "through lowercaseIntentScheme(…)" % target)
+        span = _enclosing_branch_span(code, pos)
+        seg = code[span[0]:span[1]] if span is not None else ""
+        if span is None:
+            problems.append("Intent.parseUri(…) sits outside any `if` arm — fail-closed")
+        elif not live_positions(seg, r"(?<![\w])IntentSanitizer\s*\.\s*sanitize\s*\("):
+            problems.append("Intent.parseUri(…) is not followed by IntentSanitizer.sanitize(…) "
+                            "in the same arm — grant flags/clipData/component survive")
+    out = [(title, not problems, "; ".join(problems))]
+    ifm = [m for m in if_blocks(code) if "isIntentUri" in m[0]]
+    sym_ok, sym_detail = False, ""
+    if not ifm:
+        sym_detail = "no `if (isIntentUri)` dispatch — fail-closed"
+    else:
+        _cond, t_start, t_end, e_start, e_end = ifm[0]
+        then = code[t_start:t_end]
+        els = code[e_start:e_end] if e_start is not None and e_end is not None else ""
+        if not _RE_PARSE_URI.search(then):
+            sym_detail = "the intent-uri arm no longer parses `#Intent;` URIs"
+        elif _RE_PARSE_URI.search(els) or "ACTION_VIEW" not in els:
+            sym_detail = ("the plain-URL arm left ACTION_VIEW and parses intent URIs too, "
+                          "bypassing the sanitised arm")
+        else:
+            sym_ok = True
+    out.append(("U11b the plain-URL arm stays on ACTION_VIEW", sym_ok, sym_detail))
+    return out
+
 GOOD = """package probe
 class B {
     private val _pendingUrl = MutableStateFlow<Uri?>(null)
@@ -1061,6 +1300,113 @@ BAD_NAV_LET_NULL = GOOD_NAV_TERMINAL.replace(
     "                    sessionId = ChatViewModelStore.activeSessionId.let { null },")
 
 
+# ---- [r3-t21] fixtures: arm EFFECT / intent-symmetry half ------------------
+
+GOOD_PREVIEW_NAV = """package probe
+
+fun handleDeepLink(uri: Uri?) {
+    val action = DeepLinkHandler.parse(uri) ?: return
+    when (action) {
+        is DeepLinkAction.OpenTerminal -> {
+            nav.navigate(Routes.terminal(action.initCommand))
+        }
+        is DeepLinkAction.OpenSession -> {
+            nav.navigate(Routes.chat(action.sessionId))
+        }
+        is DeepLinkAction.OpenHtmlPreview -> {
+            DeepLinkCoordinator.setPendingHtmlPreview(
+                action.sessionId,
+                action.resourcePath,
+                action.title,
+            )
+            nav.navigate(Routes.chat(action.sessionId))
+        }
+        is DeepLinkAction.CreateEnvironmentVariable -> {
+            DeepLinkCoordinator.setPendingEnvVarCreate(action.key, action.value, action.note)
+            nav.navigate(Routes.ENV_VARS)
+        }
+    }
+}
+"""
+
+BAD_PREVIEW_DROPPED = GOOD_PREVIEW_NAV.replace(
+    "            DeepLinkCoordinator.setPendingHtmlPreview(\n"
+    "                action.sessionId,\n"
+    "                action.resourcePath,\n"
+    "                action.title,\n"
+    "            )\n", "")
+
+BAD_PREVIEW_PARTIAL = GOOD_PREVIEW_NAV.replace(
+    "                action.resourcePath,\n",
+    '                "",\n', 1)
+
+BAD_PREVIEW_DEAD = GOOD_PREVIEW_NAV.replace(
+    "            DeepLinkCoordinator.setPendingHtmlPreview(",
+    "            if (false) DeepLinkCoordinator.setPendingHtmlPreview(")
+
+BAD_NAV_DEAD_NAV = GOOD_PREVIEW_NAV.replace(
+    "            nav.navigate(Routes.chat(action.sessionId))\n"
+    "        }\n"
+    "        is DeepLinkAction.OpenHtmlPreview -> {",
+    "            if (false) nav.navigate(Routes.chat(action.sessionId))\n"
+    "        }\n"
+    "        is DeepLinkAction.OpenHtmlPreview -> {")
+
+GOOD_OFFLOAD = """package probe
+
+import android.content.Intent
+import android.net.Uri
+import com.rikkaminis.app.util.IntentSanitizer
+import com.rikkaminis.app.util.lowercaseIntentScheme
+
+private fun tryOpen(url: String): Intent {
+    val isIntentUri = url.startsWith("intent:", ignoreCase = true) ||
+        url.startsWith("android-app:", ignoreCase = true)
+    val intent: Intent = if (isIntentUri) {
+        Intent.parseUri(lowercaseIntentScheme(url), Intent.URI_INTENT_SCHEME).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            IntentSanitizer.sanitize(this, context)
+        }
+    } else {
+        Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    return intent
+}
+"""
+
+BAD_OFFLOAD_FLAG0 = GOOD_OFFLOAD.replace(
+    "Intent.parseUri(lowercaseIntentScheme(url), Intent.URI_INTENT_SCHEME)",
+    "Intent.parseUri(lowercaseIntentScheme(url), 0)")
+
+BAD_OFFLOAD_NOSAN = GOOD_OFFLOAD.replace(
+    "            IntentSanitizer.sanitize(this, context)\n", "")
+
+BAD_OFFLOAD_RAW = GOOD_OFFLOAD.replace(
+    "Intent.parseUri(lowercaseIntentScheme(url), Intent.URI_INTENT_SCHEME)",
+    "Intent.parseUri(url, Intent.URI_INTENT_SCHEME)")
+
+BAD_OFFLOAD_ELSE_PARSEURI = GOOD_OFFLOAD.replace(
+    "    } else {\n"
+    "        Intent(Intent.ACTION_VIEW, Uri.parse(url))\n"
+    "            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)\n",
+    "    } else {\n"
+    "        Intent.parseUri(url, 0)\n"
+    "            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)\n")
+
+# precision: statement form (no .apply) is the same effect
+GOOD_OFFLOAD_STATEMENT = GOOD_OFFLOAD.replace(
+    "        Intent.parseUri(lowercaseIntentScheme(url), Intent.URI_INTENT_SCHEME).apply {\n"
+    "            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)\n"
+    "            IntentSanitizer.sanitize(this, context)\n"
+    "        }\n",
+    "        val parsed = Intent.parseUri"
+    "(lowercaseIntentScheme(url), Intent.URI_INTENT_SCHEME)\n"
+    "        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)\n"
+    "        IntentSanitizer.sanitize(parsed, context)\n"
+    "        parsed\n")
+
+
 def selftest():
     failures = []
     arms = [0]
@@ -1267,6 +1613,70 @@ def selftest():
            "BAD_NAV_LET_NULL U7c must be RED (activeSessionId.let { null } discards the "
            "resolved value)")
 
+
+    # ---- [r3-t21] U9/U10/U11: arm EFFECT + intent-launch symmetry ----------
+    def by_prefix(res, prefix):
+        return [(k, ok) for k, ok, _d in res if k.startswith(prefix)]
+
+    nav_cases = ("DeepLinkAction.OpenSession", "DeepLinkAction.OpenTerminal",
+                 "DeepLinkAction.OpenHtmlPreview", "DeepLinkAction.CreateEnvironmentVariable")
+
+    res = analyse_preview_arm(GOOD_PREVIEW_NAV, "action")
+    expect(len(res) == 2 and all(ok for _k, ok, _d in res),
+           "U9 good fixture must pass both criteria: %s" % res)
+
+    res = analyse_preview_arm(BAD_PREVIEW_DROPPED, "action")
+    expect(len(by_prefix(res, "U9 ")) == 1
+           and not by_prefix(res, "U9 ")[0][1],
+           "U9 must be RED when the arm opens the chat but never publishes the preview")
+
+    res = analyse_preview_arm(BAD_PREVIEW_PARTIAL, "action")
+    expect(len(by_prefix(res, "U9b")) == 1 and not by_prefix(res, "U9b")[0][1],
+           "U9b must be RED when the published preview loses its URL/title")
+
+    res = analyse_preview_arm(BAD_PREVIEW_DEAD, "action")
+    expect(not by_prefix(res, "U9 ")[0][1],
+           "U9 must be RED when the publish sits behind `if (false)`")
+
+    res = analyse_preview_arm(BAD_OFFLOAD_ELSE_PARSEURI, "action")
+    expect(not by_prefix(res, "U9 ")[0][1],
+           "U9 must fail-closed when the dispatch arm cannot be found")
+
+    res = analyse_nav_arms(GOOD_PREVIEW_NAV, "action", nav_cases, "U9/U10")
+    expect(len(res) == 1 and res[0][1], "U10 good fixture must be green: %s" % res)
+
+    res = analyse_nav_arms(BAD_NAV_DEAD_NAV, "action", nav_cases, "U9/U10")
+    expect(len(res) == 1 and not res[0][1],
+           "U10 must be RED when every navigation call in an arm is behind a dead guard")
+
+    res = analyse_intent_symmetry(GOOD_OFFLOAD)
+    expect(len(res) == 2 and all(ok for _k, ok, _d in res),
+           "U11 good fixture must pass both criteria: %s" % res)
+
+    res = analyse_intent_symmetry(GOOD_OFFLOAD_STATEMENT)
+    expect(len(res) == 2 and all(ok for _k, ok, _d in res),
+           "U11 must accept the statement form (no .apply) — the effect is the same")
+
+    res = analyse_intent_symmetry(BAD_OFFLOAD_FLAG0)
+    expect(not by_prefix(res, "U11 ")[0][1],
+           "U11 must be RED when parseUri gets flag 0 (`#Intent;` on any scheme)")
+
+    res = analyse_intent_symmetry(BAD_OFFLOAD_NOSAN)
+    expect(not by_prefix(res, "U11 ")[0][1],
+           "U11 must be RED when the parsed intent never reaches IntentSanitizer")
+
+    res = analyse_intent_symmetry(BAD_OFFLOAD_RAW)
+    expect(not by_prefix(res, "U11 ")[0][1],
+           "U11 must be RED when the argument is not scheme-normalised")
+
+    res = analyse_intent_symmetry(BAD_OFFLOAD_ELSE_PARSEURI)
+    expect(not by_prefix(res, "U11 ")[0][1] and not by_prefix(res, "U11b")[0][1],
+           "the pure-URL arm falling back to parseUri must trip BOTH U11 and U11b")
+
+    res = analyse_intent_symmetry("class X {")
+    expect(len(res) == 1 and not res[0][1],
+           "U11 must fail-closed when there is no parseUri site at all")
+
     if failures:
         print("OPEN_URL_BROKER_SCHEME_SELFTEST=FAIL")
         for f in failures:
@@ -1306,6 +1716,32 @@ def main():
                 results = results + analyse_terminal_deeplink(f.read(), label)
         else:
             print("  [--] %s skipped — %s not staged in this tree" % (label, rel))
+    # ---- [r3-t21] U9/U10/U11: the EFFECT of the arm / the launch ----
+    for label, rel, subject, cases in (
+            ("U9/U10", REL_ACTIVITY, "action", (
+                "DeepLinkAction.OpenSession", "DeepLinkAction.OpenTerminal",
+                "DeepLinkAction.OpenHtmlPreview", "DeepLinkAction.CreateEnvironmentVariable")),
+            ("U10b", REL_NAV, "initialDeepLink", (
+                "DeepLinkAction.OpenSession", "DeepLinkAction.OpenTerminal",
+                "DeepLinkAction.CreateEnvironmentVariable")),
+    ):
+        apath = os.path.join(root, rel)
+        if not os.path.isfile(apath):
+            results.append(("%s arm effects" % label, False,
+                            "%s not staged in this tree — fail-closed" % rel))
+            continue
+        with open(apath, "r", encoding="utf-8") as f:
+            raw = f.read()
+        if subject == "action":
+            results = results + analyse_preview_arm(raw, subject)
+        results = results + analyse_nav_arms(raw, subject, cases, label)
+    opath = os.path.join(root, REL_OFFLOAD)
+    if not os.path.isfile(opath):
+        results.append(("U11 android-open intent-uri hardening", False,
+                        "%s not staged in this tree — fail-closed" % REL_OFFLOAD))
+    else:
+        with open(opath, "r", encoding="utf-8") as f:
+            results = results + analyse_intent_symmetry(f.read())
     failed = [(c, d) for c, ok, d in results if not ok]
     for c, ok, d in results:
         print("  [%s] %s%s" % ("ok" if ok else "RED", c,

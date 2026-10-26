@@ -61,20 +61,27 @@ from _kotlin_ast import (  # noqa: E402
     const_bool,
     const_value,
     function_body,
+    if_blocks,
     is_pure_literal,
     last_write,
     match_bracket,
     split_top,
     stmt_spans,
     strip_parens,
+    when_branches,
 )
 from _kotlin_valueflow import (  # noqa: E402
     brace_depth,
+    call_args,
     code_view,
     contains_ident,
+    enclosing_conditions,
+    expr_end,
     literal_view,
+    live_positions,
     path_feasible,
     scope_calls,
+    value_sources,
 )
 
 # Emitter list: minis://settings/<head> links the app itself emits.
@@ -140,6 +147,8 @@ SEG_BUILDERS = [
 ]
 
 VIOLATIONS = []
+# [r3-t21] arm bookkeeping for the selftest marker: one arm = one fixture pair
+CHECKS = [0]
 
 
 
@@ -617,7 +626,417 @@ def live_launch(code, ident):
     return False
 
 
+# ── [r3-t21] dispatch-arm EFFECT judges ───────────────────────────────────
+# The round-3 witnesses attack the SEAM BETWEEN two gates: one gate pins its
+# own spelling anchor (a branch NAME, a `.collectAsState()` call, a
+# `runCatching` backstop) and the other pins a different one, so a patch that
+# keeps every spelling and drops the EFFECT passes both. These judges read the
+# dispatch arm / consumer effect as control flow instead:
+#   * the coordinator write must EXIST, be REACHABLE and be fed from the action;
+#   * the navigation must EXIST and be REACHABLE;
+#   * the consumed request must be turned into the visible state it exists for;
+#   * the permission branch must have the polarity and the request branch that
+#     make the shortcut work in both permission states.
+
+REL_COLD = "src/android/app/src/main/java/com/rikkaminis/app/ui/navigation/ColdStartDispatch.kt"
+
+# A `when` match label list: `is DeepLinkAction.X`, a string label, `null`, `else`.
+LABEL_TOKEN_RE = re.compile(
+    r"\s*(?:is\s+[A-Za-z_][\w.]*|\"[^\"\\]*\"|null|else)\s*,?\s*$")
+NAV_CALL_RE = re.compile(r"(?<![\w])(?:safeNavigate|navigate)\s*\(")
+
+
+def _labels_of(text):
+    """Case labels written in one arm's label run."""
+    labels = set(re.findall(r"\bis\s+([A-Za-z_][\w.]*)", text))
+    if re.search(r"(?<![\w])null(?![\w])", text):
+        labels.add("null")
+    if re.search(r"(?<![\w])else(?![\w])", text):
+        labels.add("else")
+    return frozenset(labels)
+
+
+def _arm_label_run_start(text, floor, arrow):
+    """Start of the match-label run that ends at `arrow` (labels may wrap)."""
+    i = arrow
+    while True:
+        head = text.rfind("\n", floor, i) + 1
+        if LABEL_TOKEN_RE.fullmatch(text[head:i]):
+            i = head
+            while i > floor and text[i - 1] in " \t":
+                i -= 1
+            continue
+        break
+    return max(i, floor)
+
+
+def when_arm_bodies(block):
+    """[(labels, body_text, braced)] for every depth-0 arm of `when (…) {…}`.
+
+    Depth tracking keeps a NESTED `when (action)` (the warm-start camera
+    selector inside the NewChat arm) inside its parent arm instead of reading
+    its arrows as siblings. `block` must be the code view.
+    """
+    brace = block.find("{")
+    close = match_bracket(block, brace) if brace >= 0 else -1
+    if brace < 0 or close < 0:
+        return []
+    body_all = block[brace + 1:close]
+    arrows = []
+    depth = 0
+    i = 0
+    while i < len(body_all):
+        ch = body_all[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "-" and depth == 0 and body_all.startswith("->", i):
+            arrows.append(i)
+            i += 2
+            continue
+        i += 1
+    arms = []
+    prev_end = 0
+    for k, arrow in enumerate(arrows):
+        labels = _labels_of(body_all[prev_end:arrow])
+        nxt = (_arm_label_run_start(body_all, arrow + 2, arrows[k + 1])
+               if k + 1 < len(arrows) else len(body_all))
+        start = arrow + 2
+        while start < nxt and body_all[start] in " \t\r\n":
+            start += 1
+        if start < nxt and body_all[start] == "{":
+            bclose = match_bracket(body_all, start)
+            if bclose > 0:
+                arms.append((labels, body_all[start:bclose + 1], True))
+                prev_end = bclose + 1
+                continue
+        arms.append((labels, body_all[arrow + 2:nxt], False))
+        prev_end = nxt
+    return arms
+
+
+def dispatch_arms(code, subject):
+    """[(labels, body, braced)] of the deep-link dispatch `when (<subject>)`.
+
+    Selected by its dispatch-only OpenTerminal case, so a neighbouring
+    `when (<subject>)` resolver (quickActionStart, `else -> null`) stays out of
+    scope. Absence / ambiguity -> None (callers fail-closed).
+    """
+    blocks = [b for b in when_blocks(code, "when (%s)" % subject)
+              if "DeepLinkAction.OpenTerminal" in b]
+    if len(blocks) != 1:
+        return None
+    return when_arm_bodies(blocks[0])
+
+
+def arm_body(arms, case):
+    for labels, body, braced in arms:
+        if case in labels:
+            return body, braced
+    return None, None
+
+
+def _args_text(text, positions):
+    """Concatenated argument text of the calls starting at `positions`."""
+    out = []
+    for pos in positions:
+        open_pos = text.index("(", pos)
+        spans = call_args(text, open_pos)
+        out.append(" ".join(text[a:b] for a, b in spans))
+    return " ".join(out)
+
+
+# (file, dispatch subject, case, coordinator setter, payload fields, headline)
+PAYLOAD_ARMS = [
+    (REL_MAIN, "action", "DeepLinkAction.CreateEnvironmentVariable",
+     "setPendingEnvVarCreate", ("key", "value", "note"),
+     "warm-start env-var create"),
+    (REL_MAIN, "action", "DeepLinkAction.OpenHtmlPreview",
+     "setPendingHtmlPreview", ("sessionId", "resourcePath", "title"),
+     "warm-start HTML preview"),
+    (REL_NAV, "initialDeepLink", "DeepLinkAction.CreateEnvironmentVariable",
+     "setPendingEnvVarCreate", ("key", "value", "note"),
+     "cold-start env-var create"),
+]
+
+# arms whose whole purpose is to open something; a dead guard must not hide it
+NAVIGATING_ARMS = [
+    (REL_MAIN, "action", (
+        "DeepLinkAction.OpenSession", "DeepLinkAction.OpenTerminal",
+        "DeepLinkAction.CreateEnvironmentVariable", "DeepLinkAction.OpenHtmlPreview",
+        "DeepLinkAction.OpenPermissionSettings",
+    )),
+    (REL_NAV, "initialDeepLink", (
+        "DeepLinkAction.OpenSession", "DeepLinkAction.OpenTerminal",
+        "DeepLinkAction.CreateEnvironmentVariable",
+        "DeepLinkAction.OpenPermissionSettings",
+    )),
+]
+
+
+def judge_dispatch_effects(sources):
+    """[r3-t21] criteria 12/13 — every dispatch arm DELIVERS and NAVIGATES."""
+    for rel, subject, case, setter, fields, headline in PAYLOAD_ARMS:
+        code = sources.get(rel)
+        if not code:
+            continue                      # missing file already failed earlier
+        arms = dispatch_arms(code, subject)
+        if arms is None:
+            fail(rel, "deep-link dispatch `when (%s)` not found or ambiguous — "
+                      "fail-closed: criterion 12 pins the arm that DELIVERS the "
+                      "%s payload" % (subject, headline))
+            continue
+        body, braced = arm_body(arms, case)
+        if body is None:
+            fail(rel, "`is %s ->` arm not found in the deep-link dispatch — the "
+                      "%s deep link stops delivering its payload" % (case, headline))
+            continue
+        if not braced:
+            fail(rel, "`is %s ->` arm is not a brace block — fail-closed: criterion 12 "
+                      "judges the arm BODY" % case)
+            continue
+        live = live_positions(body, r"(?<![\w])%s\s*\(" % setter)
+        if not live:
+            fail(rel, "`is %s ->` arm never reaches `%s(` on a reachable path — the "
+                      "screen opens but the %s payload is dropped (warm-start and "
+                      "cold-start parities must BOTH deliver)"
+                      % (case, setter, headline))
+            continue
+        args = _args_text(body, live)
+        missing = [f for f in fields if not re.search(r"\.\s*%s\b" % f, args)]
+        if missing:
+            fail(rel, "`%s(` in the `%s` arm does not read %s off the action — a partial "
+                      "or hardcoded payload loses those fields"
+                      % (setter, case, ", ".join(missing)))
+            continue
+        if not re.search(r"(?<![\w])%s\s*\." % re.escape(subject), args):
+            fail(rel, "`%s(` in the `%s` arm is fed from something other than the "
+                      "deep-link action (`%s.…`), so the request carries no payload"
+                      % (setter, case, subject))
+
+    for rel, subject, cases in NAVIGATING_ARMS:
+        code = sources.get(rel)
+        if not code:
+            continue
+        arms = dispatch_arms(code, subject)
+        if arms is None:
+            fail(rel, "deep-link dispatch `when (%s)` not found or ambiguous — "
+                      "fail-closed: criterion 13 pins navigation reachability" % subject)
+            continue
+        for case in cases:
+            body, braced = arm_body(arms, case)
+            if body is None or not braced:
+                continue                  # arm presence is criterion 11's job
+            sites = [m.start() for m in NAV_CALL_RE.finditer(body)]
+            if not sites:
+                fail(rel, "`is %s ->` arm carries no navigation call — the deep link "
+                          "lands on whatever was already on screen" % case)
+                continue
+            if not [p for p in sites if path_feasible(body, p)]:
+                fail(rel, "every navigation call in the `%s` arm sits behind a dead "
+                          "guard (constant `if (…)`, `if (false)`) — the arm runs and "
+                          "nothing opens" % case)
+
+
+def judge_html_preview_delivery(chat, rel):
+    """[r3-t21] criterion 14 — the consumed preview must become VISIBLE state."""
+    target = None
+    for lineno, key, blk in launched_effects(chat):
+        if "consumePendingHtmlPreview(" in blk:
+            target = (lineno, key, blk)
+            break
+    if target is None:
+        fail(rel, "no LaunchedEffect consumes consumePendingHtmlPreview() — fail-closed: "
+                  "criterion 14 pins the preview a deep link opens")
+        return
+    lineno, _key, blk = target
+    holder = False
+    for m in re.finditer(r"\bhtmlPreviewHolder\s*=(?!=)", blk):
+        if not path_feasible(blk, m.start()):
+            continue
+        rhs = strip_parens(blk[m.end():expr_end(blk, m.end())].strip())
+        if not re.search(r"\bWebViewHolder\s*\(", rhs):
+            continue
+        if is_pure_literal(rhs):
+            continue
+        holder = True
+    if not holder:
+        fail(rel, f"the pendingHtmlPreview consumer (LaunchedEffect at line {lineno}) "
+                  "does not build the preview holder on a reachable path — the deep link "
+                  "consumes the request and shows nothing")
+        return
+    fullscreen = False
+    for m in re.finditer(r"\bhtmlPreviewFullscreen\s*=(?!=)", blk):
+        if not path_feasible(blk, m.start()):
+            continue
+        rhs = strip_parens(blk[m.end():expr_end(blk, m.end())].strip())
+        if const_bool(rhs) is True:
+            fullscreen = True
+    if not fullscreen:
+        fail(rel, f"the pendingHtmlPreview consumer (LaunchedEffect at line {lineno}) "
+                  "never sets `htmlPreviewFullscreen = true` on a reachable path — the "
+                  "holder is built and the preview still never opens")
+
+
+def judge_camera_permission_polarity(chat, rel):
+    """[r3-t21] criterion 15 — the camera quick action works in BOTH states."""
+    target = None
+    for lineno, key, blk in launched_effects(chat):
+        if "consumePendingChatAction(" in blk:
+            target = (lineno, key, blk)
+            break
+    if target is None:
+        fail(rel, "no LaunchedEffect consumes consumePendingChatAction() — fail-closed: "
+                  "criterion 15 pins the camera permission gate")
+        return
+    lineno, _key, blk = target
+    gate = None
+    innermost = None
+    for cond, t_start, t_end, e_start, e_end in if_blocks(blk):
+        if "launchCamera(" not in blk[t_start:t_end]:
+            continue
+        # an OUTER `if (state == OPEN_CAMERA)` also contains the call; only a
+        # condition that reads the permission state can be the gate
+        cond_c = strip_parens(cond.strip())
+        if not (contains_ident(cond_c, "granted") or "PERMISSION" in cond_c
+                or cond_c.startswith("!")):
+            continue
+        # the gate is the INNERMOST such if whose then-arm launches the camera
+        if innermost is not None and (t_end - t_start) >= innermost[0]:
+            continue
+        els = blk[e_start:e_end] if e_start is not None and e_end is not None else None
+        innermost = (t_end - t_start, cond, els)
+    if innermost is not None:
+        gate = (innermost[1], innermost[2])
+    if gate is None:
+        fail(rel, f"the camera quick action (LaunchedEffect at line {lineno}) launches the "
+                  "camera outside any permission branch — an ungranted start throws and "
+                  "the shortcut is dead")
+        return
+    cond, els = gate
+    c = strip_parens(cond.strip())
+    if c.startswith("!") and const_bool(c) is None:
+        fail(rel, f"the camera permission polarity is inverted (`if ({cond.strip()}) "
+                  f"launchCamera()` at line {lineno}) — the camera opens only when the "
+                  "permission is DENIED, so an already-granted shortcut does nothing")
+        return
+    if const_bool(c) is not None:
+        fail(rel, f"the camera permission guard is a constant (`if ({cond.strip()})` at "
+                  f"line {lineno}) — the permission state is never consulted")
+        return
+    if not (contains_ident(c, "granted") or "PERMISSION_GRANTED" in c):
+        fail(rel, f"the camera permission guard (`if ({cond.strip()})` at line {lineno}) "
+                  "does not read the granted state")
+        return
+    asks = bool(re.search(r"cameraPermissionLauncher\s*\.\s*launch\s*\(", els or "")) \
+        and "CAMERA" in (els or "")
+    # a named request helper is the same effect as the launcher lambda; a
+    # permission *check* is not, so the helper must read as request/ask/launch
+    asks = asks or bool(re.search(r"(?<![\w])(?:request|ask|launch)\w*"
+                                  r"(?:Permission|Camera)\w*\s*\(", els or ""))
+    if els is None or not asks:
+        fail(rel, f"the camera quick action (line {lineno}) has no request-the-permission "
+                  "branch for the denied case — the shortcut dies silently whenever the "
+                  "permission is not already granted")
+
+
+def judge_cold_start_draft_wiring(nav, cold):
+    """[r3-t21] criterion 16 — the cold-start new-chat path mints a REAL draft id."""
+    if not cold:
+        fail(REL_COLD, "missing source file (fail-closed: this file hosts the cold-start "
+                       "route decision)")
+        return
+    fb = function_body(cold, "coldStartStartDestination")
+    if fb is None:
+        fail(REL_COLD, "coldStartStartDestination( not found — fail-closed: criterion 16 "
+                       "pins the cold-start draft minting")
+    else:
+        start, end, _kind = fb
+        defn = cold[start:end]
+        calls = [m.start() for m in re.finditer(r"\bchatRoute\s*\(", defn)]
+        if not calls:
+            fail(REL_COLD, "coldStartStartDestination never builds a route through "
+                           "chatRoute(…) — fail-closed")
+        for pos in calls:
+            # Only the DRAFT-producing branches owe a minted id. The pinned
+            # shortcut and OpenSession name a REAL session (no draft is created),
+            # and requiring nextDraftId() there would be a false positive.
+            conds = " ".join(c for _sub, c, lo, hi in when_branches(defn)
+                             if lo <= pos <= hi)
+            guards = " ".join(c for _k, c in enclosing_conditions(defn, pos))
+            scope = conds + " " + guards
+            if re.search(r"htmlShortcut|OpenSession", scope):
+                continue          # names a REAL session: no draft is minted here
+            if scope.strip() and not re.search(
+                    r"NewCameraChat|NewChat|(?:^|\W)else(?:\W|$)", scope):
+                continue
+            spans = call_args(defn, defn.index("(", pos))
+            arg = " ".join(defn[a:b] for a, b in spans)
+            if not any(re.search(r"\bnextDraftId\s*\(", s) for s in value_sources(arg)):
+                fail(REL_COLD, "coldStartStartDestination hands chatRoute(%r) a route that "
+                               "is not minted through nextDraftId() — a constant draft id "
+                               "orphans the draft slot and saveText drops the user's text"
+                               % arg.strip()[:60])
+    m = re.search(r"\bcoldStartStartDestination\s*\(", nav)
+    if not m:
+        fail(REL_NAV, "the cold-start route decision no longer runs through "
+                      "coldStartStartDestination(…) — fail-closed: criterion 16 pins the "
+                      "injected nextDraftId/seed* wiring")
+        return
+    named = {}
+    for a, b in call_args(nav, nav.index("(", m.start())):
+        piece = nav[a:b]
+        nm = re.match(r"\s*([A-Za-z_]\w*)\s*=(?!=)", piece)
+        if nm:
+            named[nm.group(1)] = piece[nm.end():].strip()
+    nid = named.get("nextDraftId")
+    if nid is None:
+        fail(REL_NAV, "coldStartStartDestination(…) is called without a nextDraftId lambda")
+    elif not any(re.search(r"\bnextDraftId\s*\(", s) for s in value_sources(nid)):
+        fail(REL_NAV, "the injected `nextDraftId` does not come from "
+                      "ComposerDraftStore.nextDraftId(…): nextDraftId = %r — a constant id "
+                      "orphans the draft slot (saveText then drops the text)"
+                      % nid[:80])
+    seed_html = named.get("seedHtmlPreview")
+    if seed_html is None:
+        fail(REL_NAV, "coldStartStartDestination(…) is called without a seedHtmlPreview "
+                      "lambda — a cold-start HTML-preview shortcut opens an empty chat")
+    elif not re.search(r"\bsetPendingHtmlPreview\s*\(", seed_html):
+        fail(REL_NAV, "the injected `seedHtmlPreview` never calls "
+                      "setPendingHtmlPreview(…) — the cold-start preview request is "
+                      "consumed and dropped")
+    seed_cam = named.get("seedCamera")
+    if seed_cam is None:
+        fail(REL_NAV, "coldStartStartDestination(…) is called without a seedCamera lambda")
+    elif not re.search(r"\bsetPendingChatAction\s*\(", seed_cam):
+        fail(REL_NAV, "the injected `seedCamera` never calls setPendingChatAction(…) — a "
+                      "cold-start camera shortcut opens the chat without the camera")
+    host = re.search(r"\bNavHost\s*\(", nav)
+    if not host:
+        fail(REL_NAV, "NavHost( not found — fail-closed: criterion 16 cannot tell whether "
+                      "the cold-start decision reaches the host")
+        return
+    start_arg = None
+    for a, b in call_args(nav, nav.index("(", host.start())):
+        piece = nav[a:b]
+        nm = re.match(r"\s*startDestination\s*=(?!=)", piece)
+        if nm:
+            start_arg = piece[nm.end():].strip()
+    if not start_arg:
+        fail(REL_NAV, "NavHost has no `startDestination =` argument — fail-closed")
+        return
+    decl = re.search(r"(?m)^[ \t]*(?:val|var)\s+%s\s*(?::[^=\n]+)?=(?!=)"
+                     % re.escape(start_arg), nav)
+    rhs = nav[decl.end():expr_end(nav, decl.end())] if decl else ""
+    if "coldStartStartDestination(" not in rhs:
+        fail(REL_NAV, "`NavHost(startDestination = %s)` does not come from "
+                      "coldStartStartDestination(…) — the cold-start decision is computed "
+                      "and thrown away" % start_arg)
+
+
 def check(root: Path) -> None:
+    CHECKS[0] += 1
     dlh_raw = read(root, REL_DLH)
     nav_raw = read(root, REL_NAV)
     main_raw = read(root, REL_MAIN)
@@ -957,6 +1376,23 @@ def check(root: Path) -> None:
                      "startActivity() on a reachable path — the tap is a silent no-op (a call "
                      "behind `if (false)` / after an early return does not launch)")
 
+    # --- 12..16. [r3-t21] dispatch-arm EFFECT judges -----------------------
+    # Round-3 witnesses live in the seam between two gates: every spelling
+    # anchor here (branch name, collectAsState, runCatching) survived while the
+    # arm stopped DELIVERING. These five judges read the effect, not the names.
+    cold_raw = read(root, REL_COLD)
+    chat_raw2 = read(root, REL_CHAT_SCREEN)
+    cold_views = views(REL_COLD, cold_raw, "the cold-start route decision")
+    chat_views2 = views(REL_CHAT_SCREEN, chat_raw2, "ChatScreen")
+    if cold_views[0] is None or chat_views2[0] is None:
+        fail(REL_COLD, "source view unavailable — fail-closed: criteria 12..16 cannot "
+                       "judge the dispatch effects")
+    else:
+        judge_dispatch_effects({REL_MAIN: main, REL_NAV: nav})
+        judge_html_preview_delivery(chat_views2[0], REL_CHAT_SCREEN)
+        judge_camera_permission_polarity(chat_views2[0], REL_CHAT_SCREEN)
+        judge_cold_start_draft_wiring(nav, cold_views[0])
+
 # ---------------- selftest fixtures (minimal synthetic repo) ----------------
 
 FIXTURE_DLH = '''package com.rikkaminis.app.deeplink
@@ -1016,6 +1452,11 @@ suspend fun handleColdStartDeepLink(navController: NavController, initialDeepLin
             navController.navigate(Routes.chat(initialDeepLink.sessionId))
         }
         is DeepLinkAction.CreateEnvironmentVariable -> {
+            DeepLinkCoordinator.setPendingEnvVarCreate(
+                initialDeepLink.key,
+                initialDeepLink.value,
+                initialDeepLink.note,
+            )
             navController.navigate(Routes.ENV_VARS)
         }
         is DeepLinkAction.OpenSettingsScreen -> {
@@ -1039,6 +1480,30 @@ suspend fun handleColdStartDeepLink(navController: NavController, initialDeepLin
     }
 }
 
+@Composable
+fun AppNavigation(initialDeepLink: DeepLinkAction?) {
+    val startDestination = remember(initialDeepLink) {
+        coldStartStartDestination(
+            initialDeepLink = initialDeepLink,
+            nextDraftId = { com.rikkaminis.app.data.ComposerDraftStore.nextDraftId(context) },
+            chatRoute = { Routes.chat(it) },
+            seedCamera = {
+                DeepLinkCoordinator.setPendingChatAction(
+                    DeepLinkCoordinator.ChatAction.OPEN_CAMERA,
+                )
+            },
+            seedHtmlPreview = { sessionId, resourcePath, title ->
+                DeepLinkCoordinator.setPendingHtmlPreview(sessionId, resourcePath, title)
+            },
+        )
+    }
+    NavHost(
+        navController = navController,
+        startDestination = startDestination,
+    ) {
+    }
+}
+
 fun NavGraphBuilder.modelEntryDetailGraph(navController: NavController) {
     composable(
         route = Routes.MODEL_ENTRY_DETAIL,
@@ -1058,9 +1523,39 @@ fun NavGraphBuilder.modelEntryDetailGraph(navController: NavController) {
 
 FIXTURE_MAIN = '''package com.rikkaminis.app
 
-private fun handleDeepLink() {
-    runCatching { nav.navigate(action.route) }
-        .onFailure { nav.navigate(Routes.SETTINGS) }
+private fun handleDeepLink(uri: Uri?) {
+    val action = DeepLinkHandler.parse(uri) ?: return
+    when (action) {
+        is DeepLinkAction.OpenTerminal -> {
+            nav.navigate(Routes.terminal(action.initCommand))
+        }
+        is DeepLinkAction.OpenSession -> {
+            nav.navigate(Routes.chat(action.sessionId))
+        }
+        is DeepLinkAction.CreateEnvironmentVariable -> {
+            DeepLinkCoordinator.setPendingEnvVarCreate(action.key, action.value, action.note)
+            nav.navigate(Routes.ENV_VARS)
+        }
+        is DeepLinkAction.OpenHtmlPreview -> {
+            DeepLinkCoordinator.setPendingHtmlPreview(
+                action.sessionId,
+                action.resourcePath,
+                action.title,
+            )
+            nav.navigate(Routes.chat(action.sessionId))
+        }
+        is DeepLinkAction.OpenSettingsScreen -> {
+            runCatching { nav.navigate(action.route) }
+                .onFailure { nav.navigate(Routes.SETTINGS) }
+        }
+        is DeepLinkAction.OpenPermissionSettings -> {
+            nav.navigate(Routes.PERMISSIONS)
+        }
+        is DeepLinkAction.NewChat,
+        is DeepLinkAction.NewCameraChat -> {
+            nav.navigate(Routes.chat(action.sessionId))
+        }
+    }
 }
 '''
 
@@ -1151,13 +1646,24 @@ fun ChatScreen(sessionId: String) {
                 .ChatAction.OPEN_CAMERA
         ) {
             com.rikkaminis.app.deeplink.DeepLinkCoordinator.consumePendingChatAction()
-            launchCamera()
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.CAMERA,
+            ) == PackageManager.PERMISSION_GRANTED
+            if (granted) launchCamera()
+            else cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
         }
     }
     val pendingHtmlPreviewState by com.rikkaminis.app.deeplink.DeepLinkCoordinator
         .pendingHtmlPreview.collectAsState()
     LaunchedEffect(sessionId, pendingHtmlPreviewState) {
-        pendingHtmlPreviewState?.let { openHtmlPreview(it) }
+        val pending = pendingHtmlPreviewState ?: return@LaunchedEffect
+        com.rikkaminis.app.deeplink.DeepLinkCoordinator.consumePendingHtmlPreview()
+        val url = "file://" + pending.resourcePath
+        htmlPreviewHolder?.destroy()
+        htmlPreviewHolder = com.rikkaminis.app.ui.preview.WebViewHolder(appCtx, url)
+        htmlPreviewFallbackTitle = pending.title
+        htmlPreviewFullscreen = true
     }
 }
 '''
@@ -1174,13 +1680,24 @@ fun ChatScreen(sessionId: String) {
                 .ChatAction.OPEN_CAMERA
         ) {
             com.rikkaminis.app.deeplink.DeepLinkCoordinator.consumePendingChatAction()
-            launchCamera()
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.CAMERA,
+            ) == PackageManager.PERMISSION_GRANTED
+            if (granted) launchCamera()
+            else cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
         }
     }
     val pendingHtmlPreviewState by com.rikkaminis.app.deeplink.DeepLinkCoordinator
         .pendingHtmlPreview.collectAsState()
     LaunchedEffect(sessionId, pendingHtmlPreviewState) {
-        pendingHtmlPreviewState?.let { openHtmlPreview(it) }
+        val pending = pendingHtmlPreviewState ?: return@LaunchedEffect
+        com.rikkaminis.app.deeplink.DeepLinkCoordinator.consumePendingHtmlPreview()
+        val url = "file://" + pending.resourcePath
+        htmlPreviewHolder?.destroy()
+        htmlPreviewHolder = com.rikkaminis.app.ui.preview.WebViewHolder(appCtx, url)
+        htmlPreviewFallbackTitle = pending.title
+        htmlPreviewFullscreen = true
     }
 }
 '''
@@ -1190,7 +1707,13 @@ FIXTURE_CHAT_HTML_PREVIEW_REGRESSED = FIXTURE_CHAT_SCREEN.replace(
     "    val pendingHtmlPreviewState by com.rikkaminis.app.deeplink.DeepLinkCoordinator\n"
     "        .pendingHtmlPreview.collectAsState()\n"
     "    LaunchedEffect(sessionId, pendingHtmlPreviewState) {\n"
-    "        pendingHtmlPreviewState?.let { openHtmlPreview(it) }\n"
+    "        val pending = pendingHtmlPreviewState ?: return@LaunchedEffect\n"
+    "        com.rikkaminis.app.deeplink.DeepLinkCoordinator.consumePendingHtmlPreview()\n"
+    "        val url = \"file://\" + pending.resourcePath\n"
+    "        htmlPreviewHolder?.destroy()\n"
+    "        htmlPreviewHolder = com.rikkaminis.app.ui.preview.WebViewHolder(appCtx, url)\n"
+    "        htmlPreviewFallbackTitle = pending.title\n"
+    "        htmlPreviewFullscreen = true\n"
     "    }\n",
     "    LaunchedEffect(sessionId) {\n"
     "        com.rikkaminis.app.deeplink.DeepLinkCoordinator.pendingHtmlPreview.value\n"
@@ -1199,10 +1722,41 @@ FIXTURE_CHAT_HTML_PREVIEW_REGRESSED = FIXTURE_CHAT_SCREEN.replace(
 )
 
 
+# [r3-t21] the cold-start route decision: the new-chat branches must mint a real
+# draft id, and the html-preview shortcut names a REAL session (no draft).
+FIXTURE_COLD = '''package com.rikkaminis.app.ui.navigation
+
+internal fun coldStartStartDestination(
+    initialDeepLink: DeepLinkAction?,
+    nextDraftId: () -> String,
+    chatRoute: (String) -> String,
+    seedCamera: () -> Unit,
+    seedHtmlPreview: (String, String, String) -> Unit,
+): String {
+    val htmlShortcut = initialDeepLink as? DeepLinkAction.OpenHtmlPreview
+    if (htmlShortcut != null) {
+        seedHtmlPreview(htmlShortcut.sessionId, htmlShortcut.resourcePath, htmlShortcut.title)
+        return chatRoute(htmlShortcut.sessionId)
+    }
+    return when (initialDeepLink) {
+        is DeepLinkAction.OpenSession -> chatRoute(initialDeepLink.sessionId)
+        is DeepLinkAction.NewCameraChat -> {
+            seedCamera()
+            chatRoute(nextDraftId())
+        }
+        is DeepLinkAction.NewChat -> chatRoute(nextDraftId())
+        else -> chatRoute(nextDraftId())
+    }
+}
+'''
+
+
 def write_fixture(root: Path, dlh: str, nav: str, main: str,
-                  env: str = FIXTURE_ENV_SCREEN, chat: str = FIXTURE_CHAT_SCREEN) -> None:
+                  env: str = FIXTURE_ENV_SCREEN, chat: str = FIXTURE_CHAT_SCREEN,
+                  cold: str = FIXTURE_COLD) -> None:
     for rel, content in ((REL_DLH, dlh), (REL_NAV, nav), (REL_MAIN, main),
-                         (REL_ENV_SCREEN, env), (REL_CHAT_SCREEN, chat)):
+                         (REL_ENV_SCREEN, env), (REL_CHAT_SCREEN, chat),
+                         (REL_COLD, cold)):
         p = root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
@@ -1543,9 +2097,10 @@ def selftest() -> None:
         # for and drops the EFFECT, so each arm asserts the new criterion speaks
         # AND nothing else does.
         def witness_arm(label, needle, dlh=FIXTURE_DLH, nav=FIXTURE_NAV,
-                        env=FIXTURE_ENV_SCREEN, chat=FIXTURE_CHAT_SCREEN):
+                        env=FIXTURE_ENV_SCREEN, chat=FIXTURE_CHAT_SCREEN,
+                        main=FIXTURE_MAIN, cold=FIXTURE_COLD):
             nonlocal ok
-            write_fixture(root, dlh, nav, FIXTURE_MAIN, env=env, chat=chat)
+            write_fixture(root, dlh, nav, main, env=env, chat=chat, cold=cold)
             VIOLATIONS.clear()
             check(root)
             hits = [v for v in VIOLATIONS if needle in v]
@@ -1660,6 +2215,205 @@ def selftest() -> None:
                 "if (false) context.startActivity(showAlarms)"),
         )
 
+
+        # --- [r3-t21] dispatch-arm EFFECT arms -------------------------------
+        # Every arm below keeps the SPELLING a name-anchored criterion looks for
+        # (branch label, collectAsState, runCatching) and breaks only the
+        # EFFECT: the payload is not delivered, the navigation is dead, the
+        # consumed request never becomes visible state, or the permission
+        # branch cannot work in one of its two states.
+
+        def witness_clean(label, **kw):
+            """Precision arm: a LEGAL variant must raise no violation at all."""
+            nonlocal ok
+            write_fixture(root, kw.get("dlh", FIXTURE_DLH), kw.get("nav", FIXTURE_NAV),
+                          kw.get("main", FIXTURE_MAIN),
+                          env=kw.get("env", FIXTURE_ENV_SCREEN),
+                          chat=kw.get("chat", FIXTURE_CHAT_SCREEN),
+                          cold=kw.get("cold", FIXTURE_COLD))
+            VIOLATIONS.clear()
+            check(root)
+            if VIOLATIONS:
+                ok = False
+                print(f"SELFTEST {label} wrong verdict: {VIOLATIONS}")
+            else:
+                print(f"SELFTEST {label} GREEN as expected")
+
+        # T21-1: warm-start env-var create — the coordinator write is dropped
+        witness_arm(
+            "T21-1 (warm env-var create write dropped)",
+            "never reaches `setPendingEnvVarCreate(",
+            main=FIXTURE_MAIN.replace(
+                "            DeepLinkCoordinator.setPendingEnvVarCreate"
+                "(action.key, action.value, action.note)\n", ""),
+        )
+        # T21-2: cold-start env-var create — same write, other dispatch site
+        witness_arm(
+            "T21-2 (cold env-var create write dropped)",
+            "never reaches `setPendingEnvVarCreate(",
+            nav=FIXTURE_NAV.replace(
+                "            DeepLinkCoordinator.setPendingEnvVarCreate(\n"
+                "                initialDeepLink.key,\n"
+                "                initialDeepLink.value,\n"
+                "                initialDeepLink.note,\n"
+                "            )\n", ""),
+        )
+        # T21-3: the write survives as text, parked in a dead branch
+        witness_arm(
+            "T21-3 (warm env-var create write behind `if (false)`)",
+            "never reaches `setPendingEnvVarCreate(",
+            main=FIXTURE_MAIN.replace(
+                "            DeepLinkCoordinator.setPendingEnvVarCreate"
+                "(action.key, action.value, action.note)",
+                "            if (false) DeepLinkCoordinator.setPendingEnvVarCreate"
+                "(action.key, action.value, action.note)"),
+        )
+        # T21-4: partial payload — the note field is lost
+        witness_arm(
+            "T21-4 (env-var create drops the note field)",
+            "does not read note off the action",
+            main=FIXTURE_MAIN.replace(
+                "setPendingEnvVarCreate(action.key, action.value, action.note)",
+                'setPendingEnvVarCreate(action.key, action.value, "")'),
+        )
+        # T21-5: the published payload comes from somewhere else
+        witness_arm(
+            "T21-5 (env-var create fed from another object)",
+            "is fed from something other than the deep-link action",
+            main=FIXTURE_MAIN.replace(
+                "setPendingEnvVarCreate(action.key, action.value, action.note)",
+                "setPendingEnvVarCreate(other.key, other.value, other.note)"),
+        )
+        # T21-6: warm-start HTML preview — the publish is dropped, the route stays
+        witness_arm(
+            "T21-6 (warm HTML preview write dropped)",
+            "never reaches `setPendingHtmlPreview(",
+            main=FIXTURE_MAIN.replace(
+                "            DeepLinkCoordinator.setPendingHtmlPreview(\n"
+                "                action.sessionId,\n"
+                "                action.resourcePath,\n"
+                "                action.title,\n"
+                "            )\n", ""),
+        )
+        # T21-7: cold-start preview seeding degrades to a no-op lambda
+        witness_arm(
+            "T21-7 (cold-start seedHtmlPreview turned into a no-op)",
+            "never calls setPendingHtmlPreview",
+            nav=FIXTURE_NAV.replace(
+                "            seedHtmlPreview = { sessionId, resourcePath, title ->\n"
+                "                DeepLinkCoordinator.setPendingHtmlPreview"
+                "(sessionId, resourcePath, title)\n"
+                "            },\n",
+                "            seedHtmlPreview = { _, _, _ -> },\n"),
+        )
+        # T21-8: the arm navigates, but behind a dead guard
+        witness_arm(
+            "T21-8 (cold OpenSession navigation behind `if (false)`)",
+            "sits behind a dead guard",
+            nav=FIXTURE_NAV.replace(
+                "            navController.navigate(Routes.chat(initialDeepLink.sessionId))",
+                "            if (false) navController.navigate"
+                "(Routes.chat(initialDeepLink.sessionId))"),
+        )
+        # T21-9: the preview request is consumed, the holder is never built
+        witness_arm(
+            "T21-9 (preview holder never built)",
+            "does not build the preview holder",
+            chat=FIXTURE_CHAT_SCREEN.replace(
+                "        htmlPreviewHolder = com.rikkaminis.app.ui.preview.WebViewHolder"
+                "(appCtx, url)\n", ""),
+        )
+        # T21-10: the holder is built, the fullscreen flag never flips to true
+        witness_arm(
+            "T21-10 (preview built but never fullscreen)",
+            "never sets `htmlPreviewFullscreen = true`",
+            chat=FIXTURE_CHAT_SCREEN.replace(
+                "        htmlPreviewFullscreen = true",
+                "        htmlPreviewFullscreen = false"),
+        )
+        # T21-11: permission polarity inverted — works only when DENIED
+        witness_arm(
+            "T21-11 (camera polarity inverted)",
+            "polarity is inverted",
+            chat=FIXTURE_CHAT_SCREEN.replace(
+                "            if (granted) launchCamera()\n"
+                "            else cameraPermissionLauncher.launch"
+                "(android.Manifest.permission.CAMERA)\n",
+                "            if (!granted) launchCamera()\n"),
+        )
+        # T21-12: no permission branch at all
+        witness_arm(
+            "T21-12 (camera launched outside any permission branch)",
+            "outside any permission branch",
+            chat=FIXTURE_CHAT_SCREEN.replace(
+                "            val granted = ContextCompat.checkSelfPermission(\n"
+                "                context,\n"
+                "                android.Manifest.permission.CAMERA,\n"
+                "            ) == PackageManager.PERMISSION_GRANTED\n"
+                "            if (granted) launchCamera()\n"
+                "            else cameraPermissionLauncher.launch"
+                "(android.Manifest.permission.CAMERA)\n",
+                "            launchCamera()\n"),
+        )
+        # T21-13: cold-start draft id hardcoded -> orphaned draft slot
+        witness_arm(
+            "T21-13 (cold-start draft id hardcoded)",
+            "does not come from ComposerDraftStore.nextDraftId",
+            nav=FIXTURE_NAV.replace(
+                "            nextDraftId = { com.rikkaminis.app.data.ComposerDraftStore"
+                ".nextDraftId(context) },",
+                '            nextDraftId = { "__new__orphan" },'),
+        )
+        # T21-14: the route decision itself hardcodes the draft id
+        witness_arm(
+            "T21-14 (cold-start route hardcodes the draft id)",
+            "is not minted through nextDraftId()",
+            cold=FIXTURE_COLD.replace(
+                "        is DeepLinkAction.NewChat -> chatRoute(nextDraftId())",
+                '        is DeepLinkAction.NewChat -> chatRoute("__new__orphan")'),
+        )
+        # T21-15: the decision is computed and thrown away
+        witness_arm(
+            "T21-15 (cold-start decision computed and thrown away)",
+            "does not come from coldStartStartDestination",
+            nav=FIXTURE_NAV.replace(
+                "        startDestination = startDestination,",
+                '        startDestination = "chat/__home",'),
+        )
+
+        # --- precision arms: legal variants must stay GREEN ------------------
+        # a request helper + braces is the same effect as the launcher lambda
+        witness_clean(
+            "T21-16 (braced permission arms with a request helper)",
+            chat=FIXTURE_CHAT_SCREEN.replace(
+                "            if (granted) launchCamera()\n"
+                "            else cameraPermissionLauncher.launch"
+                "(android.Manifest.permission.CAMERA)\n",
+                "            if (granted) {\n"
+                "                launchCamera()\n"
+                "            } else {\n"
+                "                requestCameraPermission()\n"
+                "            }\n"),
+        )
+        # one dead nav call beside a live one is not a defect
+        witness_clean(
+            "T21-17 (one dead nav call beside a live one)",
+            nav=FIXTURE_NAV.replace(
+                "            navController.navigate(Routes.chat(initialDeepLink.sessionId))",
+                "            if (false) navController.navigate(Routes.SHARE)\n"
+                "            navController.navigate(Routes.chat(initialDeepLink.sessionId))"),
+        )
+        # an extra unrelated arm does not disturb the judges
+        witness_clean(
+            "T21-18 (extra unrelated dispatch arm)",
+            main=FIXTURE_MAIN.replace(
+                "        is DeepLinkAction.OpenPermissionSettings -> {",
+                "        is DeepLinkAction.OpenShare -> {\n"
+                "            nav.navigate(Routes.SHARE)\n"
+                "        }\n"
+                "        is DeepLinkAction.OpenPermissionSettings -> {"),
+        )
+
     if not ok:
         sys.exit("DEEPLINK_SETTINGS_ROUTES_SELFTEST=FAIL")
 
@@ -1668,7 +2422,7 @@ def main() -> None:
     args = sys.argv[1:]
     if "--selftest" in args:
         selftest()
-        print("DEEPLINK_SETTINGS_ROUTES_SELFTEST=PASS")
+        print("DEEPLINK_SETTINGS_ROUTES_SELFTEST=PASS (%d arms)" % max(CHECKS[0] - 1, 0))
         return
     root = Path(args[0]) if args else Path.cwd()
     if not root.exists():
