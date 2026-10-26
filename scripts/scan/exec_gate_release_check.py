@@ -53,6 +53,29 @@ Deliberately NOT checked: that `execute()` calls the wrappers by name — a rena
 is visible in review, and pinning call-site text is the brittle kind of rule
 that makes a gate get disabled later. The two wrapper bodies are pinned instead.
 
+Third wave (2026-10-26, round 3 "dual-gate bypass")
+--------------------------------------------------
+G1-G6 all judge the CATCH path (`internalAcquireGlobalShellSlot`) and the
+wrappers. Round 3 walked around them on the two paths that are not exceptions:
+the timeout-rejection branch (`if (!acquired) ... return`, witness #21) and the
+happy path's `finally` (witness #22). Both edits delete only the *return* of the
+permit — the acquire, the wrappers, the catch and every substring stay intact —
+and a leaked heavy permit queues every HEAVY command in the process until it
+dies, so "the catch still rolls back" says nothing about the path that leaked.
+
+  G7  The heavy permit is accounted for by EXIT PATH, derived from the tree
+      rather than from a spelling: the held variable comes from the assignment
+      that calls `awaitHeavyGatePermitInterruptibly`, the gate expression from
+      its first argument, and then
+        a) every `return` between the acquire and the guarded `try` needs a
+           release on its own path — unless an enclosing condition proves the
+           permit is NOT held (`!held`, `held == false`), which is exactly the
+           "heavy-gate timeout" branch that must not release;
+        b) when a guarded `try` follows, its `finally` must hand the permit back,
+           and the release must not sit behind a dead branch.
+      A shape with no guarded region (the JVM fixture's minimal command path)
+      has nothing to judge and stays green: the check never invents a structure.
+
 Usage: python3 scripts/scan/exec_gate_release_check.py [repo_root]
 Exit:  0 = clean, 1 = violation or lost anchor
 """
@@ -81,6 +104,11 @@ MARK_INNER = "[exec-gate] blocking acquire outside the interruptible block"
 # （`runInterruptible(Dispatchers.Main)` 里做阻塞等待 = 主线程卡死，4b 的镜像面）。
 MARK_LEX = "[exec-gate] unparseable Kotlin source"
 MARK_IO = "[exec-gate] interruptible wait not on Dispatchers.IO"
+# [r3] 新增：heavy permit 的「申请-归还」必须覆盖每一条退出路径。
+# 前三波都只看 internalAcquireGlobalShellSlot 的 catch（异常路径），于是 round 3
+# 的两条见证把 permit 泄漏搬到两条**正常**路径上：超时拒绝分支里删掉 release、
+# 成功路径的 finally 里删掉 release。两处都让「申请」原样存在、只删「归还」。
+MARK_PERMIT = "[exec-gate] heavy permit leaked on an exit path"
 
 
 def match_paren(text: str, open_idx: int) -> int:
@@ -472,6 +500,160 @@ def body_of(masked: str, signature: str) -> str:
     return region
 
 
+ACQUIRE_CALL = "awaitHeavyGatePermitInterruptibly"
+
+
+def _call_arg0(text: str, open_idx: int):
+    """First argument of the call whose `(` is at open_idx (text, depth-aware)."""
+    cl = match_paren(text, open_idx)
+    if cl < 0:
+        return None
+    parts = split_top(text[open_idx + 1:cl], (",",))
+    return parts[0] if parts and parts[0] else None
+
+
+def _acquire_site(masked: str):
+    """(call_idx, open_idx) of the CALL to the interruptible heavy acquire."""
+    for m in re.finditer(r"\b%s\s*\(" % ACQUIRE_CALL, masked):
+        if re.search(r"\bfun\s*$", masked[max(0, m.start() - 80):m.start()]):
+            continue                      # the declaration itself
+        return m.start(), m.end() - 1
+    return None, None
+
+
+def _innermost_if_body(text: str, idx: int):
+    """Start offset of the innermost `if` body containing idx, or None."""
+    lo = None
+    for _cond, t_start, t_end, _es, _ee in if_blocks(text):
+        if t_start <= idx < t_end:
+            lo = t_start if lo is None else max(lo, t_start)
+    return lo
+
+
+def permit_exit_path_findings(masked: str) -> list:
+    """[r3] G7 — the heavy permit is handed back on EVERY exit path.
+
+    Witness #21 deleted the release from the timeout-rejection branch
+    (`if (!acquired) { …; return }`), witness #22 deleted it from the happy
+    path's `finally`. G1–G6 judge the catch of the *global-slot* acquire, the
+    wrappers and the recovery loop: every one of them stays perfect while the ONE
+    heavy permit is never returned, so the next HEAVY command queues forever.
+
+    Structure derived from the tree, not from spelling:
+      * held variable  = the `val` bound to `awaitHeavyGatePermitInterruptibly(`
+      * gate expression = that call's first argument
+      * the "window"   = from the end of the acquire statement to the guarded
+                         `try`, i.e. the only stretch where the permit is held
+                         and unprotected
+      * a `return` in the window needs a release on its own path UNLESS an
+        enclosing condition proves the permit is not held (`!held`,
+        `held == false`) — that is the heavy-gate timeout branch, which must NOT
+        release (releasing a permit it never took is its own defect).
+    """
+    call_i, open_i = _acquire_site(masked)
+    if call_i is None:
+        return []                     # anchor moved: G2/G3 already fail closed
+    held = None
+    for m in re.finditer(r"\bval\s+(\w+)\s*=(?!=)", masked[max(0, call_i - 200):call_i]):
+        held = m.group(1)
+    gate = _call_arg0(masked, open_i)
+    if not gate or not held:
+        return ["%s — the acquire call's held variable / gate expression cannot be "
+                "derived from the tree, so the permit accounting is unjudgeable"
+                % MARK_PERMIT]
+    rel = re.compile(r"\b%s\s*\.\s*release\s*\(\s*\)" % re.escape(gate.strip()))
+    cl = match_paren(masked, open_i)
+    if cl < 0:
+        return ["%s — the acquire call does not close" % MARK_PERMIT]
+    stmt_end = masked.find("\n", cl)
+    if stmt_end < 0:
+        stmt_end = len(masked)
+    try_at = re.search(r"\btry\s*\{", masked[stmt_end:])
+    window_end = stmt_end + try_at.start() if try_at else len(masked)
+    out = []
+
+    # (a) every return between the acquire and the guarded try
+    for m in re.finditer(r"\breturn\b", masked[stmt_end:window_end]):
+        p = stmt_end + m.start()
+        if re.match(r"\s*@", masked[p + len("return"):p + len("return") + 8]):
+            continue                                   # return@lambda
+        conds = covering_conditions(masked, p)
+        not_held = any(
+            re.search(r"!\s*%s\b" % re.escape(held), c[1]) or
+            re.search(r"\b%s\s*==\s*false" % re.escape(held), c[1])
+            for c in conds if c[0] == "if")
+        if not_held:
+            continue
+        lo = _innermost_if_body(masked, p)
+        if lo is None:
+            lo = stmt_end
+        live = [r for r in rel.finditer(masked[lo:p])
+                if not any(condition_dead(c) for c in
+                           covering_conditions(masked, lo + r.start()))]
+        if not live:
+            line = masked.count("\n", 0, p) + 1
+            cond_txt = " ".join(conds[-1][1].split())[:60] if conds else "straight-line code"
+            out.append(
+                "%s — the branch that returns at line %d still holds %s "
+                "(`%s`) and never calls `%s.release()`: one HEAVY command then "
+                "queues the whole process" %
+                (MARK_PERMIT, line, held, cond_txt, gate.strip()))
+
+    # (b) the guarded try must hand the permit back in its finally
+    if try_at:
+        t_open = stmt_end + try_at.end() - 1
+        _s, t_end = brace_span_from(masked, t_open)
+        catches, fin = try_sections(masked, t_open)
+        if fin is None:
+            out.append(
+                "%s — the guarded region opened at line %d has no `finally`, so "
+                "any throw or early exit inside it keeps the single heavy permit" %
+                (MARK_PERMIT, masked.count("\n", 0, t_open) + 1))
+        else:
+            body = masked[fin[0]:fin[1]]
+            m = rel.search(body)
+            if not m:
+                out.append(
+                    "%s — the `finally` at line %d no longer calls `%s.release()`: "
+                    "the happy path keeps the permit, so the next HEAVY command "
+                    "queues forever (the catch still rolls back, which is why "
+                    "this reads as fine)" %
+                    (MARK_PERMIT, masked.count("\n", 0, fin[0]) + 1, gate.strip()))
+            elif any(condition_dead(c) for c in covering_conditions(masked, fin[0] + m.start())):
+                out.append(
+                    "%s — the release in the `finally` at line %d is behind a dead "
+                    "condition and can never run" %
+                    (MARK_PERMIT, masked.count("\n", 0, fin[0] + m.start()) + 1))
+    return out
+
+
+def try_sections(text: str, try_open_idx: int):
+    """(catch_spans, finally_span) of the `try` whose `{` is at try_open_idx."""
+    _s, t_end = brace_span_from(text, try_open_idx)
+    i = t_end
+    catches, fin = [], None
+    while True:
+        i = skip_ws(text, i)
+        m = re.match(r"catch\s*\(", text[i:])
+        if m:
+            cl = match_paren(text, i + m.end() - 1)
+            if cl < 0:
+                break
+            b = skip_ws(text, cl + 1)
+            if b < len(text) and text[b] == "{":
+                cs, ce = brace_span_from(text, b)
+                catches.append((cs, ce))
+                i = ce
+                continue
+        m = re.match(r"finally\s*", text[i:])
+        if m:
+            b = skip_ws(text, i + m.end())
+            if b < len(text) and text[b] == "{":
+                fin = brace_span_from(text, b)
+        break
+    return catches, fin
+
+
 def main() -> int:
     root = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "..")
@@ -836,6 +1018,9 @@ def main() -> int:
             "act (update this gate together with the reason)."
         )
 
+    # --- G7 (r3): the heavy permit, accounted per exit path -------------------
+    findings.extend(permit_exit_path_findings(masked))
+
     if findings:
         print("❌ Execution-gate guard found issues:")
         for f in findings:
@@ -981,6 +1166,51 @@ def selftest_fixture(shape):
             "internal fun recycleDispatchMode(isOnMainThread: Boolean): RecycleDispatch =\n"
             "    if (false) RecycleDispatch.DEFERRED else RecycleDispatch.INLINE\n"
         )
+    # ---- [r3] G7 shapes: the permit accounting, per exit path ---------------
+    # The clean shape is the REAL structure (reject branch releases, finally
+    # releases); each dirty shape deletes exactly one `release` and keeps every
+    # substring the earlier criteria look for.
+    reject_rel = "            if (heavyHeld) heavyGate.release()\n"
+    fin_rel = "            if (heavyHeld) heavyGate.release()\n"
+    has_finally = True  # noqa: F841
+    if shape == "leak_on_reject":            # witness #21
+        reject_rel = ""
+    elif shape == "leak_on_success":         # witness #22
+        fin_rel = ""
+    elif shape == "dead_reject_release":
+        reject_rel = "            if (false && heavyHeld) heavyGate.release()\n"
+    elif shape == "dead_finally_release":
+        fin_rel = "            if (false) heavyGate.release()\n"
+    elif shape == "no_finally":
+        has_finally = False
+
+    command = (
+        "        val heavyHeld = awaitHeavyGatePermitInterruptibly(heavyGate, 1000L)\n"
+        "        if (!heavyHeld) {\n"
+        "            return\n"
+        "        }\n"
+        "        val acquired = awaitGlobalShellSlotInterruptibly(\n"
+        "            globalConcurrency, heavyGate, heavyHeld)\n"
+        "        if (!acquired) {\n"
+        + reject_rel +
+        "            return\n"
+        "        }\n"
+    )
+    if shape == "no_finally":
+        command += (
+            "        try {\n"
+            "            runCommand()\n"
+            "        } catch (e: Exception) {\n"
+            "            throw e\n"
+            "        }\n")
+    else:
+        command += (
+            "        try {\n"
+            "            runCommand()\n"
+            "        } finally {\n"
+            "            globalConcurrency.release()\n"
+            + fin_rel +
+            "        }\n")
     return (
         "package com.rikkaminis.app.sandbox\n"
         "\n"
@@ -1014,8 +1244,7 @@ def selftest_fixture(shape):
         "        globalConcurrency: Semaphore,\n"
         "        heavyGate: Semaphore,\n"
         "    ) {\n"
-        "        val heavyHeld = awaitHeavyGatePermitInterruptibly(heavyGate, 1000L)\n"
-        "        awaitGlobalShellSlotInterruptibly(globalConcurrency, heavyGate, heavyHeld)\n"
+        + command +
         "    }\n"
         "\n"
         "    private fun postRecycleMemoryRecovery() {\n"
@@ -1058,6 +1287,19 @@ def selftest():
          1, MARK_INNER),
         ("w4-interruptible block on Dispatchers.Main", "main_dispatcher", 1, MARK_IO),
         ("w4-decision function pinned to a constant", "constant_mode_fn", 1, MARK_DEAD),
+        # ---- [r3] the two exits that are not exceptions ----------------------
+        # Both keep the acquire, the wrappers, the catch and every substring;
+        # only the RETURN of the permit is deleted.
+        ("r3-leak: the reject branch keeps the heavy permit", "leak_on_reject",
+         1, MARK_PERMIT),
+        ("r3-leak: the finally no longer returns the permit", "leak_on_success",
+         1, MARK_PERMIT),
+        ("r3-dead: the reject branch's release sits behind `false &&`",
+         "dead_reject_release", 1, MARK_PERMIT),
+        ("r3-dead: the finally's release sits behind `if (false)`",
+         "dead_finally_release", 1, MARK_PERMIT),
+        ("r3-structure: a guarded try with no finally is red", "no_finally",
+         1, MARK_PERMIT),
     ]
     ok = True
     for name, shape, want_rc, needle in arms:
