@@ -41,6 +41,42 @@ Exit:  0 = clean, 1 = violation(s), 2 = usage/ROT
 import os
 import re
 import sys
+from pathlib import Path
+
+# [batch6-t08] 共享词法 / 语法 / 值流原语（**唯一**实现）。本门不再自写词法器：
+# 注释与字符串内容剥离走 `mask_code` / `mask_comments`（嵌套块注释、三引号原始
+# 字符串、字符字面量、`${}` 插值全由共享状态机处理，视图长度与源码**严格相等**
+# → 位置可回投原文）；括号配平走 `match_bracket`；常量折叠走 `const_bool`；
+# 可达性走 `path_feasible`；退出判定走 `returns_exiting`；值流走 `value_sources`。
+# 解析失败一律 fail-closed（报违规，绝不回退成原文扫描）。
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from _kotlin_lexer import KotlinLexError  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    enclosing_conditions,
+    function_body,
+    if_blocks,
+    is_pure_literal,
+    match_bracket,
+    split_top,
+    strip_parens,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    brace_depth,
+    call_args,
+    code_view,
+    contains_ident,
+    expr_end,
+    guard_feasible,
+    live_positions,
+    literal_view,
+    path_feasible,
+    returns_exiting,
+    value_sources,
+)
 
 LIFECYCLE_REL = (
     "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatSessionLifecycle.kt"
@@ -89,292 +125,386 @@ _DECL_HEAD = re.compile(
     r"^[ \t]*(?:internal |private |public |override |suspend )*fun\s", re.M)
 
 
-def _strip_line_comments(text):
-    """`//` comments out — a judgement must be satisfiable only by code."""
-    return "\n".join(line.split("//")[0] for line in text.split("\n"))
+# ── shared lexical / structural / value-flow primitives ─────────────────────
+# [batch6-t08] 本门不再自写词法器。注释与字符串内容剥离走共享 `mask_code` /
+# `mask_comments`（嵌套块注释、三引号原始字符串、字符字面量、`${}` 插值全由共享
+# 状态机处理，三个视图长度与源码**严格相等** → 位置可回投原文），括号配平走
+# `match_bracket`，常量折叠走 `const_bool`，可达性走 `path_feasible`，退出判定走
+# `returns_exiting`，值流走 `value_sources`。解析失败一律 fail-closed：报违规，
+# 绝不回退成原文扫描（parser-death 轴）。
+_KW = frozenset((
+    "val", "var", "fun", "return", "if", "else", "when", "is", "as", "in",
+    "it", "null", "true", "false", "this", "let", "run", "also", "apply",
+    "onEach", "forEach", "with", "takeIf", "takeUnless", "first", "firstOrNull",
+    "last", "lastOrNull", "get", "elementAt", "map", "mapNotNull", "filter",
+))
 
 
-# [wide-1024] Value-flow helpers. Two rules run through this gate:
-#  * a scope call that keeps its RECEIVER (`.also` / `.apply` / `.onEach` /
-#    `.forEach`) cannot make an expression "come from" something the lambda
-#    merely mentions — whatever it references is discarded;
-#  * a decision only counts as taken if the code that depends on it is
-#    REACHABLE on the answered side, not merely textually after the call.
-_DISCARD_SCOPE_RE = re.compile(r"\.\s*(?:also|apply|onEach|forEach)\s*\{")
-DEAD_GUARD_RE = re.compile(r"\b(?:if|while)\s*\(\s*!?\s*(?:true|false)\b")
-NEG_USE_RE = re.compile(r"if\s*\([^)]*!\s*is\s+" + re.escape("SessionModelResolution.Use"))
-_CONTINUATION = ".?:+-*/%&|=<>!"
+def _views(text):
+    """(code, literal) 等长双视图；解析失败 → (None, None)（调用方 fail-closed）。"""
+    try:
+        return code_view(text), literal_view(text)
+    except KotlinLexError:
+        return None, None
 
 
-def _brace_end(text, open_idx):
-    """Index one past the matching `}`, or -1 (fail-closed)."""
-    depth = 0
-    for i in range(open_idx, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-    return -1
+def _mask_dependent_sites(raw, code):
+    """临界 token 的可见性是否依赖「字符串感知」这一词法细节（fail-closed）。
 
-
-def _match(text, idx, opener, closer):
-    """Index one past the matching [closer] for the [opener] at [idx], or -1."""
-    depth = 0
-    for i in range(idx, len(text)):
-        if text[i] == opener:
-            depth += 1
-        elif text[i] == closer:
-            depth -= 1
-            if depth == 0:
-                return i + 1
-    return -1
-
-
-CONST_COND_PREFIX_RE = re.compile(r"^\s*!?\s*(?:true|false)\s*(?:\)|&&|\|\|)")
-
-
-def _dead_use_guards(body):
-    """Every `if (false && … Use …)` / `if (true || …)` around the Use test.
-
-    [wide-1024] The guard can keep the funnel name, the `!is` polarity and the
-    `throw` and still be skipped: a constant first operand short-circuits the
-    whole condition, so the rejection never runs while every token the gate
-    looked for is present.
+    [外部见证 03-7 的形状] `val tag = "http://x"; ProviderFactory.create(…)`：
+    同一个 token，string-blind 读法（`line.split('//')[0]`，本门的旧实现）把
+    后半行整段当注释吃掉，共享掩码器看得见。改用 `mask_code` 之后这个形状
+    **本身**已经无害——但「这一行有两种读法」必须显式拒绝：两套读法给出不同的
+    token 数，说明有个字符串里藏着 `//`，任何单一读法都不能替它背书。
+    真树：8 个 create 站点各自独占一行 ⇒ 0 命中。
     """
-    out = []
-    for m in re.finditer(re.escape(FUNNEL_USE), body):
-        i = body.rfind("if", 0, m.start())
-        if i < 0:
-            continue
-        paren = body.find("(", i)
-        if paren < 0 or paren > m.start():
-            continue
-        close = _match(body, paren, "(", ")")
-        if close < 0:
-            continue
-        cond = body[paren + 1:close - 1]
-        if CONST_COND_PREFIX_RE.match(cond):
-            out.append(cond.strip()[:90])
-    return out
+    tokens = (FACTORY_CALL, FUNNEL_CALL, FUNNEL_DEF, BINDING_WRITE_CALL,
+              "!instance.isEnabled")
+    naive = "\n".join(line.split("//")[0] for line in raw.split("\n"))
+    return [tok for tok in tokens if code.count(tok) != naive.count(tok)]
 
 
-def _peel_discarding(expr, rounds=4):
-    """Drop `.also/.apply/.onEach/.forEach { … }` scopes, keeping the receiver:
-    the value of the whole expression is the receiver's value."""
-    for _ in range(rounds):
-        m = _DISCARD_SCOPE_RE.search(expr)
-        if not m:
-            break
-        brace = m.end() - 1
-        end = _brace_end(expr, brace)
-        if end < 0:
-            break
-        expr = expr[:m.start()] + expr[end:]
-    return expr
-
-
-def _value_end(text, start):
-    """End of the expression starting at [start]: the first newline at bracket
-    depth 0 that is not a continuation (`.`, `?:`, an operator)."""
-    depth = 0
-    i, n = start, len(text)
-    while i < n:
-        c = text[i]
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            if depth == 0:
-                return i
-            depth -= 1
-        elif c == "\n" and depth == 0:
-            j = i + 1
-            while j < n and text[j] in " \t":
-                j += 1
-            if j >= n or text[j] not in _CONTINUATION:
-                return i
-        i += 1
-    return n
-
-
-def _use_branch_encloses(seg, pos):
-    """Is [pos] nested inside a block whose header tests the decision for Use?"""
-    lines = seg.split("\n")
-    line_no = seg.count("\n", 0, pos)
-    indent = len(lines[line_no]) - len(lines[line_no].lstrip())
-    i = line_no - 1
-    while i >= 0:
-        ln = lines[i]
-        if ln.strip():
-            ind = len(ln) - len(ln.lstrip())
-            if ind < indent:
-                header = _logical_header(lines, i)
-                if "if" in header and "{" in header and FUNNEL_USE in header:
-                    return True
-                indent = ind
-        i -= 1
-    return False
-
-
-def _terminating_negative_guard(seg, call_at, pos):
-    """Does a `if (decision !is …Use) { … return/throw … }` sit between the
-    decision and the write? Then everything after it is the usable side."""
-    region = seg[call_at:pos]
-    for m in NEG_USE_RE.finditer(region):
-        tail = region[m.end():]
-        brace = tail.find("{")
-        line_end = tail.find("\n")
-        if line_end < 0:
-            line_end = len(tail)
-        if brace < 0 or brace > line_end:
-            # braceless form: `if (decision !is …Use) return false`
-            if re.search(r"\b(?:return|throw)\b", tail[:line_end]):
-                return True
-            continue
-        end = _brace_end(tail, brace)
-        if end < 0:
-            continue
-        if re.search(r"\b(?:return|throw)\b", tail[brace:end]):
-            return True
-    return False
-
-
-def _call_args(text, open_idx):
-    """Split the argument list whose `(` sits at `open_idx` (None if unbalanced)."""
-    depth = 0
-    args, cur = [], []
-    for i in range(open_idx, len(text)):
-        c = text[i]
-        if c in "([{":
-            depth += 1
-            if depth == 1:
-                continue
-        elif c in ")]}":
-            depth -= 1
-            if depth == 0:
-                args.append("".join(cur))
-                return args
-        elif c == "," and depth == 1:
-            args.append("".join(cur))
-            cur = []
-            continue
-        cur.append(c)
-    return None
-
-
-def _enclosing_source(text, pos):
-    """From the nearest preceding declaration to `pos` — the window in which a
-    `val effectiveModel = providerModelFor(entry)` may have been resolved."""
+def _enclosing_source(code, pos):
+    """从最近的 `fun` 声明到 pos —— 局部 `val` 绑定可能就在这里被解析。"""
     last = None
-    for m in _DECL_HEAD.finditer(text, 0, pos):
+    for m in _DECL_HEAD.finditer(code, 0, pos):
         last = m
-    return text[last.start():pos] if last else text[:pos]
+    return code[last.start():pos] if last else code[:pos]
+
+
+def _all_sources_enriched(expr):
+    """表达式的**所有可能值**是否都来自富化模型的单一来源。
+
+    [batch6-t08 03-2] 「富化调用出现在文本里」不是问题本身：
+    `providerModelFor(entry).let { entry.model }` 让调用留在文本里、真正求值的
+    是裸 `entry.model`（`let`/`run` 取 lambda 尾表达式，`also`/`apply` 只取接收
+    者，`?:` 两侧都算）。全部由共享 `value_sources` 折叠，本门不再自写剥离器。
+    """
+    sources = value_sources(expr)
+    return bool(sources) and all(any(tok in s for tok in ENRICH_CALLS)
+                                for s in sources)
 
 
 def _assigned_from(window, name):
-    """Is `name` assigned FROM one of ENRICH_CALLS inside `window`?
-
-    [wide-1024] "the call appears in the right-hand side" is not the question:
-    `val effectiveModel = entry.model.also { providerModelFor(entry) }` keeps
-    the call in the text and hands `entry.model` — the raw, un-enriched model —
-    to every `ProviderFactory.create` below, because `.also {}` returns its
-    receiver. Judge the peeled value instead (see [_peel_discarding]).
-    """
-    pat = re.compile(r"\b(?:val|var)\s+%s\b[^=\n]*=" % re.escape(name))
+    """`val name = …` 的**值**是否来自富化模型（不是「文本里出现过调用」）。"""
+    pat = re.compile(r"\b(?:val|var)\s+" + re.escape(name) + r"\b[^=\n]*=(?!=)")
     for m in pat.finditer(window):
-        rest = window[m.end():]
-        rhs = rest[:_value_end(rest, 0)]
-        value = _peel_discarding(rhs)
-        if any(tok in value for tok in ENRICH_CALLS):
+        rhs = window[m.end():expr_end(window, m.end())]
+        if _all_sources_enriched(rhs):
             return True
     return False
 
 
+def _implies(cond, test):
+    """`cond` 为真是否**必然**让 `test(叶)` 成立。
+
+    析取：每个分支都必须成立（`a || b` 只有一边成立推不出结论）；
+    合取：任一边成立即可（`a && b` 为真 ⇒ `a` 为真）。叶判定由调用方给。
+    """
+    c = strip_parens(cond)
+    if not c:
+        return False
+    parts = split_top(c, ("||",))
+    if len(parts) > 1:
+        return all(_implies(c[a:b], test) for a, b in parts)
+    parts = split_top(c, ("&&",))
+    if len(parts) > 1:
+        return any(_implies(c[a:b], test) for a, b in parts)
+    return test(c)
+
+
+def _use_leaf(part):
+    """叶：「decision is SessionModelResolution.Use」（取反形态不算）。"""
+    p = strip_parens(part)
+    if p.startswith("!"):
+        return False
+    return re.search(r"(?<![\w!])\bis\s+" + re.escape(USE_TYPE), p) is not None
+
+
+def _neg_use_leaf(part):
+    """叶：「decision !is SessionModelResolution.Use」。"""
+    p = strip_parens(part)
+    if p.startswith("!"):
+        return False
+    return re.search(r"!\s*is\s+" + re.escape(USE_TYPE), p) is not None
+
+
+def _positive_name_leaf(names):
+    """叶：「解析答案是 yes」（`resolved` 这类名字，取反形态不算）。"""
+    def leaf(part):
+        p = strip_parens(part)
+        if p.startswith("!"):
+            return False
+        for name in names:
+            if not contains_ident(p, name):
+                continue
+            if re.search(r"!\s*" + re.escape(name) + r"\b", p):
+                continue
+            if re.search(re.escape(name) + r"\s*==\s*(?:false|null|0)\b", p):
+                continue
+            if re.search(re.escape(name) + r"\s*!=\s*true\b", p):
+                continue
+            return True
+        return False
+    return leaf
+
+
+def _implies_at(code, pos, test):
+    """pos 处是否被某个「蕴含 test」的**活**条件包住。
+
+    `path_feasible` 先挡死分支（`if (false && decision is Use)` / `when { false -> }`），
+    再看覆盖 pos 的每一个条件是否蕴含结论 —— `decision is Use || entry != null`
+    这种「有一个析取臂什么也推不出」的条件不再放行（外部见证 03-3）。
+    """
+    if not path_feasible(code, pos):
+        return False
+    for _kind, cond in enclosing_conditions(code, pos):
+        if _implies(cond, test):
+            return True
+    return False
+
+
+def _exits_block(text, t_start, t_end):
+    """块体（或单语句分支）内是否有**退出外层函数**的 return。
+
+    `if_blocks` 给的 t_start 在 `{` **之前**，直接喂 `returns_exiting` 会把
+    函数体自己的深度当成基准（`return` 在块内深一层 ⇒ 永远判不出）。这里先
+    走到块体内部再取基准深度；`return@label` 由共享实现排除。
+    """
+    i = t_start
+    while i < t_end and text[i] in " \t\r\n":
+        i += 1
+    inner = i + 1 if (i < t_end and text[i] == "{") else i
+    if inner >= t_end:
+        return False
+    return returns_exiting(text, inner, t_end,
+                           fn_depth=brace_depth(text, inner))
+
+
+def _live_terminating_guard(text, pattern):
+    """某个 `if` 的**条件**里出现 pattern，且该块体真的退出函数。
+
+    pattern 在条件里匹配（不是体内）：`if (false && !instance.isEnabled)` 由
+    `guard_feasible` 折成不可行 ⇒ 不是守卫；体内被掏空 ⇒ `_exits_block` 为假；
+    守卫落在死分支里 ⇒ `path_feasible` 为假。三者都必须过，才算「这道闸门活着」。
+    """
+    rx = re.compile(pattern)
+    for cond, t_start, t_end, _e_start, _e_end in if_blocks(text):
+        if not rx.search(cond):
+            continue
+        if not guard_feasible(cond):
+            continue
+        if not path_feasible(text, t_start):
+            continue
+        if _exits_block(text, t_start, t_end):
+            return True
+    return False
+
+
+def _terminating_negative_guard(code, lo, hi):
+    """[lo, hi) 之间是否有「`!is …Use` → return」的终止守卫。
+
+    `if (decision !is …Use) { … return false }` 之后的语句才算「可用侧」。
+    守卫条件必须是**蕴含**「不是 Use」的活条件：`false && …` 永不执行，
+    `… || entry != null` 的另一个析取臂什么也推不出，都不构成许可。
+    """
+    for cond, t_start, t_end, _e_start, _e_end in if_blocks(code):
+        if not (lo <= t_start and t_end <= hi):
+            continue
+        if not guard_feasible(cond):
+            continue
+        if not _implies(cond, _neg_use_leaf):
+            continue
+        if _exits_block(code, t_start, t_end):
+            return True
+    return False
+
+
+def _constant_use_guards(body):
+    """条件被常量决定的 `if (… Use …)` —— Use 判定成了摆设（外部见证 03-7/W4）。
+
+    `if (false && decision !is …Use) return`：守卫永不执行，拒绝分支形同删除；
+    `if (true || decision !is …Use) return`：条件恒真，Use 判定根本没被求值。
+    两者都由共享 `const_bool` 折叠出来（`false && x` / `true || x` 短路）。
+    """
+    out = []
+    for cond, _ts, _te, _es, _ee in if_blocks(body):
+        if USE_TYPE not in cond:
+            continue
+        if const_bool(cond) is None:
+            continue
+        out.append(cond.strip()[:90])
+    return out
+
+
+_ARRAY_PICK = re.compile(r"\b([A-Za-z_]\w*)\s*\[\s*\d+\s*\]")
+_LAMBDA_PICKS = frozenset((
+    "minBy", "minByOrNull", "maxBy", "maxByOrNull", "sortedBy",
+    "sortedByDescending", "sortedWith", "take", "drop",
+))
+_POSITION_PICKS = frozenset((
+    "first", "firstOrNull", "last", "lastOrNull", "get", "elementAt",
+    "single", "singleOrNull", "head", "component1",
+)) | _LAMBDA_PICKS
+
+
+def _member_collections(body):
+    """派生「装着一组成员」的集合名：右值直接/间接来自 `memberEntryIds`。
+
+    不写死 `members`：见证 03-6 把 `group.memberEntryIds.first()` 换成
+    `members.minByOrNull { 0 }`，接收者是映射后的局部变量。
+    """
+    names = {"memberEntryIds"}
+    for _ in range(4):          # 不动点：链式派生（members -> usable -> …）
+        grew = False
+        for m in re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)\b[^=\n]*=(?!=)", body):
+            name = m.group(1)
+            if name in names:
+                continue
+            rhs = body[m.end():expr_end(body, m.end())]
+            if any(contains_ident(rhs, n) for n in names):
+                names.add(name)
+                grew = True
+        if not grew:
+            break
+    return names
+
+
+def _positional_picks(body, receivers):
+    """[(pos, text)] —— 在成员集合上按**位置**取成员（等于「谁排第一就用谁」）。
+
+    位置选择 = 无谓词选择：`.first()` / `.get(0)` / `x[0]` / `.minBy { 常量 }`。
+    `.firstOrNull { it.id == mid }`（真谓词）与 `.minByOrNull { it.priority }`
+    （真选择器）不算——那是过滤/排序，不是「取头一个」。
+    """
+    out = []
+    for m in re.finditer(r"\b([A-Za-z_]\w*)\s*\.\s*("
+                         + "|".join(sorted(_POSITION_PICKS)) + r")\s*([({])", body):
+        recv, call, opener = m.group(1), m.group(2), m.group(3)
+        if recv not in receivers:
+            continue
+        open_pos = m.end() - 1
+        close = match_bracket(body, open_pos)
+        if close < 0:
+            out.append((m.start(), m.group(0).strip()))
+            continue
+        inner = body[open_pos + 1:close]
+        if opener == "{":
+            if is_pure_literal(inner):        # 常量选择器 = 位置
+                out.append((m.start(), m.group(0).strip()))
+            continue
+        args = call_args(body, open_pos)
+        if not args or all(is_pure_literal(body[a:b]) for a, b in args):
+            out.append((m.start(), m.group(0).strip()))
+    for m in _ARRAY_PICK.finditer(body):
+        if m.group(1) in receivers:
+            out.append((m.start(), m.group(0).strip()))
+    return out
+
+
 def check_factory_models(texts, min_calls=None):
-    """[deep-audit-1044 B-03] Every `ProviderFactory.create(` in the chat layer
-    passes an enriched model. Returns (violations, resolved_call_sites)."""
+    """Every `ProviderFactory.create` in the chat layer must be handed the
+    ENRICHED model — judged on the VALUE, not on the spelling.
+
+    Returns (violations, site_count).
+    """
     min_calls = MIN_FACTORY_CALLS if min_calls is None else min_calls
     v, sites = [], 0
     for rel in sorted(texts):
-        code = _strip_line_comments(texts[rel])
+        code, _lit = _views(texts[rel])
+        if code is None:
+            v.append("%s: cannot lex (unterminated string/comment) — fail-closed"
+                     % rel)
+            continue
+        for tok in _mask_dependent_sites(texts[rel], code):
+            v.append("%s: `%s` 的可见性依赖字符串感知词法（同一物理行上有字符串"
+                     "含 `//`，string-blind 读法把这半行整段吃掉）—— 站点读法"
+                     "不唯一，拒绝放行" % (rel, tok))
         for m in re.finditer(re.escape(FACTORY_CALL), code):
             sites += 1
-            args = _call_args(code, m.end() - 1)
-            if args is None or len(args) < 3:
-                v.append("%s: unparseable %s call (fail-closed)" % (rel, FACTORY_CALL))
+            args = call_args(code, m.end() - 1)
+            if len(args) < 3:
+                v.append("%s: `ProviderFactory.create(` at offset %d has an "
+                         "unparseable argument list — fail-closed"
+                         % (rel, m.start()))
                 continue
-            model_arg = args[2].strip()
+            model_arg = code[args[2][0]:args[2][1]].strip()
             if model_arg in RAW_MODEL_ARGS:
-                v.append(
-                    "%s: %s passes the raw `%s` — that is the entry's "
-                    "baseModel+overrides, which carries no models.dev capabilities, "
-                    "and `:modelservice` never initialises ModelsDevApi to fill them "
-                    "in (dv24-B03)" % (rel, FACTORY_CALL, model_arg))
+                v.append("%s: `ProviderFactory.create(..., %s, ...)` hands over "
+                         "the RAW entry model — it must be resolved through %s"
+                         % (rel, model_arg, " / ".join(ENRICH_CALLS)))
                 continue
-            if any(tok in model_arg for tok in ENRICH_CALLS):
+            if _all_sources_enriched(model_arg):
                 continue
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", model_arg) and \
-                    _assigned_from(_enclosing_source(code, m.start()), model_arg):
+            if (re.fullmatch(r"[A-Za-z_]\w*", model_arg)
+                    and _assigned_from(_enclosing_source(code, m.start()),
+                                       model_arg)):
                 continue
-            v.append(
-                "%s: %s model argument `%s` is not resolved through %s — only the "
-                "enriched model answers vision / effort tiers / output cap (dv24-B03)"
-                % (rel, FACTORY_CALL, model_arg, " or ".join(ENRICH_CALLS)))
+            v.append("%s: the model argument of `ProviderFactory.create(` is "
+                     "`%s`, which is not resolved through %s"
+                     % (rel, model_arg[:60], " / ".join(ENRICH_CALLS)))
     if sites < min_calls:
-        v.append("only %d %s call site(s) across %d file(s) — expected >= %d "
-                 "(detection lost = ROT)"
-                 % (sites, FACTORY_CALL, len(texts), min_calls))
+        v.append("only %d `%s` site(s) in the chat layer (expected at least %d) "
+                 "— detection lost, ROT"
+                 % (sites, FACTORY_CALL, min_calls))
     return v, sites
 
 
-def _segment(text, start_needle, end_needle, where):
-    """Return the source slice [start_needle .. end_needle), fail-closed."""
+_STATE_WRITE_RE = re.compile(
+    r"\b(?:currentModel|_modelName\.value|_activeEntryId\.value"
+    r"|_providerName\.value|currentProvider)\s*=(?!=)")
+
+
+def _segment(text, start_needle, end_needle):
+    """[start_needle .. end_needle) 的偏移区间；任一锚点缺失 → None（fail-closed）。"""
     i = text.find(start_needle)
     if i < 0:
         return None
     j = text.find(end_needle, i + len(start_needle))
     if j < 0:
         return None
-    return text[i:j]
+    return (i, j)
 
 
-def _funnel_body(text):
-    """Slice the funnel definition from its signature to its closing line."""
-    i = text.find(FUNNEL_DEF)
-    if i < 0:
+def _funnel_span(code):
+    """漏斗函数体（`function_body`，括号配平派生）——自写花括号计数已删除。"""
+    got = function_body(code, "decideSessionModelResolution")
+    if not got:
         return None
-    close = text.find("return SessionModelResolution.Use(entry, instance, apiKey)", i)
-    if close < 0:
-        return None
-    # include the next `}` after the return statement (function brace)
-    brace = text.find("}", close)
-    if brace < 0:
-        return None
-    return text[i:brace]
+    return code[got[0]:got[1]]
 
 
 def check_source(text):
     """Return a list of violation strings for the lifecycle source."""
     v = []
-    site_segments = {}
+    code, _lit = _views(text)
+    if code is None:
+        return ["ChatSessionLifecycle.kt cannot be lexed (unterminated string or "
+                "block comment) — fail-closed"]
 
-    # ── A. funnel exists and enforces the isEnabled gate ──────────────────
-    funnel = _funnel_body(text)
+    # ── A. the funnel must gate, and the gate must actually run ───────────
+    # [batch6-t08 03-1] 「注解里含 `!instance.isEnabled`」不是判据：条件被常量
+    # 折死的 `if (false && !instance.isEnabled)` 里，禁用的 provider 从不被拒绝。
+    funnel = _funnel_span(code)
     if funnel is None:
         v.append("funnel missing: decideSessionModelResolution not found ( ROT? )")
     else:
-        if FUNNEL_ENABLED not in funnel:
-            v.append("funnel does not gate on !instance.isEnabled")
-        if FUNNEL_DISABLED_REASON not in funnel:
-            v.append("funnel does not map a disabled provider to PROVIDER_DISABLED")
-        if "apiKey == null" not in funnel:
-            v.append("funnel does not reject a missing credential (apiKey == null)")
-        if USE_TYPE not in funnel:
+        if not _live_terminating_guard(funnel, r"!\s*instance\s*\.\s*isEnabled"):
+            v.append("funnel does not gate on a REACHABLE, terminating "
+                     "`!instance.isEnabled` early exit — a disabled provider is "
+                     "never rejected")
+        if not live_positions(funnel, r"UnusableModelReason\s*\.\s*PROVIDER_DISABLED"):
+            v.append("funnel does not map a disabled provider to "
+                     "UnusableModelReason.PROVIDER_DISABLED")
+        if not _live_terminating_guard(funnel, r"apiKey\s*==\s*null"):
+            v.append("funnel does not reject a missing credential on a reachable "
+                     "`apiKey == null` early exit")
+        if not live_positions(funnel, re.escape(USE_TYPE)):
             v.append("funnel does not produce SessionModelResolution.Use")
 
-    # ── B/C. three sites: funnel call present, decision before state write ─
-    p2 = _segment(text, P2_START, P2_END, "loadSession p2")
+    # ── B. the three resolution sites must route through the funnel ──────
+    site_segments = {}
+    p2 = _segment(text, P2_START, P2_END)
     if p2 is None:
         v.append("loadSession Priority 2 segment not found (anchors drifted)")
     else:
@@ -384,76 +514,61 @@ def check_source(text):
     if binding_head < 0:
         v.append("restoreFromBinding signature not found (anchors drifted)")
     else:
-        entry = _segment(text[binding_head:], ENTRY_BRANCH_START, ENTRY_BRANCH_END, "entry")
+        entry = _segment(text[binding_head:], ENTRY_BRANCH_START, ENTRY_BRANCH_END)
         if entry is None:
-            v.append("restoreFromBinding \"entry\" branch not found (anchors drifted)")
+            v.append('restoreFromBinding "entry" branch not found (anchors drifted)')
         else:
-            site_segments["restoreFromBinding-entry"] = entry
+            site_segments["restoreFromBinding-entry"] = (binding_head + entry[0],
+                                                        binding_head + entry[1])
 
-    apply_head = text.find(APPLY_SIG)
-    if apply_head < 0:
+    apply_span = function_body(code, "applyNewChatDefaultModel")
+    if not apply_span:
         v.append("applyNewChatDefaultModel signature not found (anchors drifted)")
     else:
-        close = text.find("\n}", apply_head)
-        if close < 0:
-            v.append("applyNewChatDefaultModel body end not found (anchors drifted)")
-        else:
-            site_segments["applyNewChatDefaultModel"] = text[apply_head:close]
+        site_segments["applyNewChatDefaultModel"] = (apply_span[0], apply_span[1])
 
-    for site, seg in site_segments.items():
-        call_at = seg.find("decideSessionModelResolution(")
+    # ── C. decide-then-write, and only on the live Use side ─────────────
+    # [batch6-t08 03-3] 「分支头里出现了 Use」不是判据：`is Use || entry != null`
+    # 的另一个析取臂什么也推不出。写入点必须被一个**蕴含** Use 的活条件包住，
+    # 或者被 `if (decision !is …Use) return` 的终止守卫挡在外面。
+    for site in sorted(site_segments):
+        a, b = site_segments[site]
+        seg = code[a:b]
+        call_at = seg.find(FUNNEL_CALL)
         if call_at < 0:
-            v.append("%s: does not route through decideSessionModelResolution()" % site)
+            v.append("%s: does not route through %s — a DISABLED or key-less "
+                     "provider becomes the session model anyway"
+                     % (site, FUNNEL_CALL.rstrip("(")))
             continue
+        abs_call = a + call_at
         for token in STATE_WRITES:
-            wt = seg.find(token)
-            if 0 <= wt < call_at:
-                # allow `token` to the right of the call only
-                v.append(
-                    "%s: state write %r before the decision (must decide-then-write)"
-                    % (site, token)
-                )
+            w = seg.find(token)
+            if 0 <= w < call_at:
+                v.append("%s: `%s` runs before the decision — every state write "
+                         "must come after (and inside the Use branch of) %s"
+                         % (site, token, FUNNEL_CALL.rstrip("(")))
                 break
-        # [wide-1024] `decide … then write` is only half the property: the
-        # write must happen where the decision SAID YES. One stray line above
-        # the `if (decision is …Use)` branch keeps the order (call first) and
-        # publishes a disabled provider / a key-less instance as "model ready"
-        # — da1019-FIX-E verbatim.
-        if DEAD_GUARD_RE.search(seg):
-            v.append(
-                "%s: the decision is guarded behind a constant condition (`%s`) "
-                "— the funnel's answer is computed and then ignored"
-                % (site, DEAD_GUARD_RE.search(seg).group(0)))
-        for wm in re.finditer(
-                r"\b(?:currentModel|_modelName\.value|_activeEntryId\.value|"
-                r"_providerName\.value|currentProvider)\s*=", seg):
-            wp = wm.start()
-            if wp < call_at:
+        for wm in _STATE_WRITE_RE.finditer(seg):
+            wp = a + wm.start()
+            if wp < abs_call:
                 continue
-            if _use_branch_encloses(seg, wp) or \
-                    _terminating_negative_guard(seg, call_at, wp):
+            if _implies_at(code, wp, _use_leaf):
                 continue
-            v.append(
-                "%s: state write `%s` runs after the decision but OUTSIDE its "
-                "Use branch (no terminating `!is …Use` guard before it, not "
-                "nested in the `is …Use` branch) — a disabled provider or a "
-                "key-less instance is published as ready (da1019-FIX-E)"
-                % (site, wm.group(0).strip()))
+            if _terminating_negative_guard(code, abs_call, wp):
+                continue
+            v.append("%s: `%s` runs after the decision but OUTSIDE its Use branch "
+                     "(no live `if (decision !is …Use) return` between them) — the "
+                     "UI can claim a model the funnel refused"
+                     % (site, wm.group(0).strip()))
             break
 
-    # ── D. [deep-audit-1044 B-04] applyNewChatDefaultModel must publish the
-    # model it just resolved. Its KDoc has always promised
-    # "Sets currentModel / currentProvider / the name + activeEntry state
-    # flows"; the body never wrote `currentModel`, so a new chat with no
-    # default group left it null and three readers degraded silently
-    # (ensureSession() persisted model_id = "unknown", thinkingInfo() returned
-    # null, dynamicMaxTokens() skipped the remaining-context clamp).
-    apply_seg = site_segments.get("applyNewChatDefaultModel")
-    if apply_seg is not None and "currentModel =" not in apply_seg:
-        v.append(
-            "applyNewChatDefaultModel: never writes `currentModel =` — the KDoc "
-            "promises it and every reader (session model_id / thinkingInfo / "
-            "dynamicMaxTokens) falls back to null without it (dv24-B04)")
+    # ── D. applyNewChatDefaultModel must publish currentModel too ────────
+    if apply_span:
+        apply_seg = code[apply_span[0]:apply_span[1]]
+        if "currentModel =" not in apply_seg:
+            v.append("applyNewChatDefaultModel does not write `currentModel =` — a "
+                     "new chat with no default group persists model_id=unknown "
+                     "(B-04)")
     return v
 
 
@@ -473,6 +588,10 @@ def run(root):
             print("session_provider_enabled_check: missing target %s" % rel)
             return 2
         texts[rel] = text
+    for rel in sorted(texts):
+        if _views(texts[rel])[0] is None:
+            print("session_provider_enabled_check: %s cannot be lexed — fail-closed" % rel)
+            return 1
     violations = check_source(texts[LIFECYCLE_REL])
     factory_v, sites = check_factory_models(texts)
     violations += factory_v
@@ -563,102 +682,6 @@ def _fun_span(text, pos):
     return (prev, nxt if nxt is not None else len(text))
 
 
-def _resolution_names(code):
-    """Local names that carry the answer of a resolution.
-
-    Derived, not enumerated: anything whose right-hand side calls
-    resolveProviderFromGroup / planGroupSelect / decideSessionModelResolution.
-    `resolved`, `plan`, `decision` all fall out of this; renaming them keeps
-    the gate green, and inlining the resolution into the `if` keeps it green
-    too (the guard is then the call itself).
-    """
-    names = set()
-    for m in _ASSIGN_RE.finditer(code):
-        rhs = m.group(2)
-        if any(src in rhs for src in _RESOLVE_SOURCES):
-            names.add(m.group(1))
-    return names
-
-
-def _logical_header(lines, i):
-    """The statement that opened the block on line `i` — a condition may be
-    wrapped, so walk back until the parentheses balance."""
-    seg = lines[i]
-    opens = seg.count("(")
-    closes = seg.count(")")
-    j = i - 1
-    while closes > opens and j >= 0 and i - j <= 6:
-        seg = lines[j] + "\n" + seg
-        opens += lines[j].count("(")
-        closes += lines[j].count(")")
-        j -= 1
-    return seg
-
-
-def _guarded_by_resolution(code, write_pos, fun_start, names):
-    """True when the write may only run after a resolution said yes.
-
-    Indentation-based rather than brace-matched on purpose: these files carry
-    `\"\"\"{\"type\":\"group\",...}\"\"\"` literals whose braces would corrupt a
-    depth count, while the formatter's indentation is reliable.
-    """
-    lines = code.split("\n")
-    line_no = code.count("\n", 0, write_pos)
-    line_start = code.rfind("\n", 0, write_pos) + 1
-    own_line = code[line_start:write_pos]
-    candidates = [own_line]
-    indent = len(lines[line_no]) - len(lines[line_no].lstrip())
-    i = line_no - 1
-    while i >= 0 and code[:line_start].count("\n") >= 0:
-        ln = lines[i]
-        if ln.strip():
-            ind = len(ln) - len(ln.lstrip())
-            if ind < indent and ln.rstrip().endswith("{"):
-                candidates.append(_logical_header(lines, i))
-                indent = ind
-        i -= 1
-        if indent <= 0:
-            break
-    for cand in candidates:
-        if "if" not in cand:
-            continue
-        if FUNNEL_USE in cand:
-            return True
-        for name in names:
-            if re.search(r"\b%s\b" % re.escape(name), cand):
-                return True
-    return False
-
-
-def _traces_to_active(code, name, hops=3):
-    """Does `name` carry the entry id that actually got resolved?"""
-    seen = set()
-
-    def rec(n, h):
-        if h <= 0 or n in seen:
-            return False
-        seen.add(n)
-        m = re.search(r"\bval\s+%s\b[^=\n]*=" % re.escape(n), code)
-        if not m:
-            return False
-        rest = code[m.end():]
-        # [wide-1024] The traced name must CARRY the resolved id. `.also {}` /
-        # `.apply {}` keep their receiver, so `entryId.also { plan
-        # .effectiveEntryId }` mentions the resolution, evaluates to `entryId`,
-        # and used to be accepted because the token `plan` was in the window.
-        stmt = _peel_discarding(rest[:_value_end(rest, 0)])
-        if ACTIVE_ENTRY in stmt:
-            return True
-        for cand in set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b", stmt)):
-            if cand in ("val", "let", "null", "true", "false", "return", "it", "is"):
-                continue
-            if rec(cand, h - 1):
-                return True
-        return False
-
-    return rec(name, hops)
-
-
 def _usable_filters(texts):
     """Names of the functions that narrow a List<ModelEntry> through the funnel."""
     names = set()
@@ -683,18 +706,70 @@ def _is_resolver(header):
     return RESOLVE_CALL.rstrip("(") in header or FUNNEL_CALL.rstrip("(") in header
 
 
+def _resolution_names(code):
+    """局部名 → 右值调用了某个解析入口（`resolved` / `plan` 由此派生）。
+
+    [batch6-t08 03-4] 「守卫条件里出现了这个名字」不等于「这个答案被采纳了」：
+    `if (resolved || !resolved)` 恒真、`if (resolved && x)` 只在 x 时。判据改成
+    「条件**蕴含**答案为 yes」（析取全成立 / 合取任一侧成立），取反形态不算。
+    """
+    names = set()
+    for m in re.finditer(r"\bval\s+([A-Za-z_]\w*)\b[^=\n]*=(?!=)", code):
+        rhs = code[m.end():expr_end(code, m.end())]
+        if any(src in rhs for src in _RESOLVE_SOURCES):
+            names.add(m.group(1))
+    return names
+
+
+def _traces_to_active(code, name, hops=3):
+    """`name` 的**值**是否来自真正解析出来的 entry id（`_activeEntryId`）。
+
+    [batch6-t08 03-5] `plan.effectiveEntryId.let { entryId }` 让解析链留在文本
+    里、值却是入参 `entryId`：共享 `value_sources` 把 `let`/`run` 折叠到尾
+    表达式后，来源里根本没有 `_activeEntryId`，递归也走不到它。
+    """
+    seen = set()
+
+    def rec(n, h):
+        if h <= 0 or n in seen:
+            return False
+        seen.add(n)
+        m = re.search(r"\bval\s+" + re.escape(n) + r"\b[^=\n]*=(?!=)", code)
+        if not m:
+            return False
+        rhs = code[m.end():expr_end(code, m.end())]
+        sources = value_sources(rhs)
+        if any(contains_ident(s, ACTIVE_ENTRY) for s in sources):
+            return True
+        for src in sources:
+            for cand in sorted(set(re.findall(r"\b([A-Za-z_]\w{2,})\b", src))):
+                if cand in _KW:
+                    continue
+                if rec(cand, h - 1):
+                    return True
+        return False
+
+    return rec(name, hops)
+
+
 def check_group_selection(texts):
     """C-SEL-1/2/3 across the chat layer. Returns a list of violations."""
     v = []
     filters = _usable_filters(texts)
-    # the filter names live in whichever file declares them, so resolve them
-    # against the whole layer, not per file
-    all_code = {rel: _strip_line_comments(t) for rel, t in texts.items()}
+    views = {}
+    for rel, t in texts.items():
+        code, lit = _views(t)
+        if code is None:
+            v.append("%s: cannot lex (unterminated string/comment) — fail-closed"
+                     % rel)
+            continue
+        views[rel] = (code, lit)
     names = set()
-    for code in all_code.values():
+    for code, _lit in views.values():
         names |= _resolution_names(code)
 
-    for rel, code in sorted(all_code.items()):
+    for rel in sorted(views):
+        code, lit = views[rel]
         # ── C-SEL-1: a group id may only be published once it resolved ─────
         for m in _WRITE_RE.finditer(code):
             rhs = m.group(1).strip()
@@ -709,14 +784,17 @@ def check_group_selection(texts):
             header = code[fun_start:code.find("\n", fun_start)]
             if _is_resolver(header):
                 continue
-            if not _guarded_by_resolution(code, m.start(), fun_start, names):
+            if not _implies_at(code, m.start(), _positive_name_leaf(names)):
                 v.append(
                     "%s: `%s` publishes a group that nothing established as "
-                    "servable — it must sit inside the branch that a "
-                    "resolution opened (C-SEL-1)" % (rel, m.group(0).strip()))
+                    "servable — the branch that publishes it must have a "
+                    "condition that IMPLIES the resolution said yes "
+                    "(C-SEL-1)" % (rel, m.group(0).strip()))
 
         # ── C-SEL-2: one id per call — the persisted id is the resolved one ─
-        for m in _LAST_ENTRY_RE.finditer(code):
+        # the binding JSON is a string literal, so this one runs on the
+        # literal-preserving view (mask_code would blank the interpolation).
+        for m in _LAST_ENTRY_RE.finditer(lit):
             name = m.group(1)
             span = _fun_span(code, m.start())
             if span is None:
@@ -878,12 +956,6 @@ internal fun ChatViewModel.restoreFromBinding(bindingJson: String?): Boolean {
 #     banned outright: it names a member nobody established as usable.
 BINDING_WRITE_CALL = "updateSessionBinding("
 FUNNEL_NAME = "decideSessionModelResolution"
-RE_BARE_MEMBER_PICK = re.compile(
-    r"memberEntryIds\s*(?:\.\s*(?:first|firstOrNull|last|lastOrNull|get|elementAt)\s*\("
-    r"|\[\s*\d+\s*\])"
-)
-
-
 def _all_funs(code):
     """(name, body) for every `fun` in [code], any indentation."""
     out = []
@@ -909,7 +981,15 @@ def _funnel_reachable(body, index, hops=2):
 
 def check_binding_writes(texts):
     """C-SEL-4 across `debug/*.kt`. Returns a list of violations."""
-    code_by_rel = {rel: _strip_line_comments(t) for rel, t in texts.items()}
+    code_by_rel = {}
+    v = []
+    for rel, t in texts.items():
+        code, _lit = _views(t)
+        if code is None:
+            v.append("%s: cannot lex (unterminated string/comment) — fail-closed"
+                     % rel)
+            continue
+        code_by_rel[rel] = code
     index = {}
     for code in code_by_rel.values():
         for name, body in _all_funs(code):
@@ -924,13 +1004,14 @@ def check_binding_writes(texts):
             "debug/*: no function performs `%s` — the binding write path cannot "
             "be judged (fail-closed)" % BINDING_WRITE_CALL.rstrip("(")
         ]
-    v = []
     # [wide-1024] Scope matters: the Use guard is a DECISION site, not only a
     # write-entry one — `selectModel` holds a guard and writes nothing, so an
-    # entries-only sweep left it unjudged. Scan every function.
+    # entries-only sweep left it unjudged. Scan every function. [batch6-t08 03-7]
+    # The cond is folded by the shared `const_bool`, so `false && …` and
+    # `true || …` are both seen as "the Use test is decoration".
     for rel, code in sorted(code_by_rel.items()):
         for name, body in _all_funs(code):
-            for cond in _dead_use_guards(body):
+            for cond in _constant_use_guards(body):
                 v.append(
                     "%s: `%s` short-circuits the Use test with a constant "
                     "(`if (%s…`) — the funnel is called and its answer is "
@@ -950,12 +1031,17 @@ def check_binding_writes(texts):
                     "persisted, the resident VM then refuses the same binding and "
                     "falls back, and the caller is told the refused model was "
                     "used (C-SEL-4)" % (rel, name, FUNNEL_NAME))
-            for m in RE_BARE_MEMBER_PICK.finditer(body):
+            # [batch6-t08 03-6] The pick is judged on the RECEIVER, not on one
+            # spelling: `members.minByOrNull { 0 }` picks by position exactly
+            # like `memberEntryIds.first()` did, and `members` is a local
+            # derived from `memberEntryIds` — the receiver set is derived from
+            # the code, the pick set from "no predicate / constant selector".
+            for _pos, text in _positional_picks(body, _member_collections(body)):
                 v.append(
                     "%s: `%s` picks a group member by POSITION (`%s`) when it "
                     "writes `model_id` — that member need not be one the runtime "
                     "would ever pick; take the first USABLE member through %s "
-                    "(C-SEL-4)" % (rel, name, m.group(0).strip(), FUNNEL_NAME))
+                    "(C-SEL-4)" % (rel, name, text, FUNNEL_NAME))
     if entries == 0:
         v.append(
             "debug/*: no session-model binding entry found (nothing calls a "
@@ -1222,6 +1308,36 @@ W_CSEL4_DEAD_GUARD = BW_RUNNER_GOOD.replace(
     "                if (false && decision !is SessionModelResolution.Use) return null")
 
 
+# ── [batch6-t08] witnesses 03-4 / 03-5 / 03-6 / 03-7 ───────────────────────
+# W5 (family-hole): the guard keeps the resolution name and is a tautology —
+# `resolved || !resolved` is always true, so nothing was ever established.
+W_CSEL1_TAUTOLOGY = CSEL_ROUTING_GOOD.replace(
+    "    if (resolved) {\n        _selectedGroupId.value = groupId",
+    "    if (resolved || !resolved) {\n        _selectedGroupId.value = groupId")
+
+# W6 (dataflow): the resolved id is *mentioned* but `let` throws it away and
+# the value collapses back to the requested id.
+W_CSEL2_LET_REQUESTED = CSEL_ROUTING_GOOD.replace(
+    "        val resolvedEntryId = plan.effectiveEntryId ?: return",
+    "        val resolvedEntryId = plan.effectiveEntryId.let { entryId }")
+
+# W7 (family-hole): the position pick moves onto a derived local and gains a
+# constant selector — no `memberEntryIds.first(` spelling left anywhere.
+W_CSEL4_DERIVED_PICK = BW_RUNNER_GOOD.replace(
+    "                val usable = firstUsableGroupEntry(members)",
+    "                val usable = firstUsableGroupEntry(members)\n"
+    "                    ?: members.minByOrNull { 0 }")
+
+# W8 (parser-death): the shape the pre-fix lexer could not read — a `//` inside
+# a string literal, on the same physical line as an otherwise fine create site.
+# The model argument stays ENRICHED, so the only possible finding is the
+# mask-dependency one: the site's reading must not hinge on the lexer.
+W_FACTORY_MASKED_LINE = dict(FACTORY_OK)
+W_FACTORY_MASKED_LINE["lc"] = FACTORY_OK["lc"].replace(
+    "    currentProvider = ProviderFactory.create(instance, apiKey, effectiveModel, context)",
+    '    val tag = "http://x"; currentProvider = '
+    "ProviderFactory.create(instance, apiKey, effectiveModel, context)")
+
 def selftest():
     failures = []
 
@@ -1363,7 +1479,34 @@ def selftest():
         for f in failures:
             print("SELFTEST FAIL " + f)
         return 1
-    print("SESSION_PROVIDER_ENABLED_SELFTEST=PASS")
+    # ── [batch6-t08] witness arms 03-4 / 03-5 / 03-6 / 03-7 ────────────────
+    w5 = check_group_selection(
+        {ROUTING_REL: W_CSEL1_TAUTOLOGY, LIFECYCLE_REL: CSEL_LIFECYCLE_GOOD})
+    expect(any("C-SEL-1" in x for x in w5),
+           "W5: `resolved || !resolved` produced no C-SEL-1 violation (%r)" % (w5,))
+
+    w6 = check_group_selection(
+        {ROUTING_REL: W_CSEL2_LET_REQUESTED, LIFECYCLE_REL: CSEL_LIFECYCLE_GOOD})
+    expect(any("C-SEL-2" in x for x in w6),
+           "W6: `plan.effectiveEntryId.let { entryId }` produced no C-SEL-2 "
+           "violation (%r)" % (w6,))
+
+    w7 = check_binding_writes({DEBUG_DIR_REL + "/HeadlessChatRunner.kt":
+                               W_CSEL4_DERIVED_PICK})
+    expect(any("by POSITION" in x for x in w7),
+           "W7: `members.minByOrNull { 0 }` produced no positional-pick "
+           "violation (%r)" % (w7,))
+
+    w8, _w8_sites = check_factory_models(W_FACTORY_MASKED_LINE)
+    expect(len(w8) == 1 and "字符串感知词法" in w8[0],
+           "W8: an ENRICHED create site sharing a line with a `//`-in-string "
+           "produced %r (expected exactly the mask-dependency finding)" % (w8,))
+    expect(_w8_sites == 9, "W8 site count drifted: %r (want 9)" % (_w8_sites,))
+
+    print("selftest witness W5..W8      -> %d/%d/%d/%d violation(s)"
+          % (len(w5), len(w6), len(w7), len(w8)))
+
+    print("SESSION_PROVIDER_ENABLED_SELFTEST=PASS (24 arms)")
     return 0
 
 
