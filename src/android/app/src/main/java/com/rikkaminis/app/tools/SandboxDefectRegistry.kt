@@ -22,6 +22,23 @@ package com.rikkaminis.app.tools
  *   backticked seeds on its `- 症状：` line (the author marks raw error text
  *   with backticks); every non-stopword token of at least one seed group
  *   must occur in the output. Prefer a miss over a wrong hint.
+ *
+ * 2026-10-27 hardening (two live defects found by replaying real failing
+ * output through this matcher — see SandboxDefectRegistryTest):
+ * 1) BLEED: ENTRY_RE only accepted `###`, and a non-matching heading did NOT
+ *    close the current entry. Twelve entries are authored as `## A19 …` /
+ *    `## S28 …`, so their `- 症状：` lines were absorbed by the PREVIOUS `###`
+ *    entry — B5 ("陈旧视图") fired carrying A19's seeds and recovery path.
+ *    Now ANY markdown heading closes the entry, and `##`/`###` both open one
+ *    only when the token is id-shaped (`A1b`, `S28`) — so `## A 类：…` and
+ *    `## 元规则` stay non-entries.
+ * 2) LOOSENESS: an all-generic seed group is a near-universal hit. The
+ *    example-style seed `grep -n X file` tokenizes to [grep, file] (single
+ *    chars and `-n` are dropped) and fired on every `grep: …: No such file or
+ *    directory`; `" CODE "` → [code] fired on the literal "(exit code: 1)"
+ *    trailer; `wait` → [wait] fired on the stall-guard text. A group now
+ *    needs at least one SPECIFIC token (structural char, long latin run, or
+ *    CJK run) to be eligible.
  */
 object SandboxDefectRegistry {
 
@@ -52,11 +69,43 @@ object SandboxDefectRegistry {
         "their", "your", "you", "was", "were", "but",
     )
 
-    /** `### A1 title…` — the id is the first token, the rest is the human title. */
-    private val ENTRY_RE = Regex("""^###\s+(\S+)(?:\s+(.*))?$""")
+    /**
+     * Entry heading. `##` and `###` are both accepted (the registry uses both
+     * in practice), but the id must be id-shaped — letters + digits, optional
+     * lowercase suffix: `A1b`, `S28`. The shape guard is what keeps
+     * `## A 类：路径缺陷` and `## 元规则` from parsing as entries.
+     */
+    private val ENTRY_RE = Regex("""^#{2,3}\s+([A-Za-z]{1,3}\d+[A-Za-z]?)(?:\s+(.*))?$""")
+
+    /**
+     * Any markdown heading closes the entry being parsed — including headings
+     * that are NOT entries. Without this, a `## 元规则` section's field lines
+     * would be appended to whatever `###` entry came before it (the 2026-10-27
+     * bleed that made B5 fire with A19's seeds).
+     */
+    private val HEADING_RE = Regex("""^#{1,6}\s""")
+
+    /**
+     * Field line, tolerant of bold markup and of both colon widths:
+     * `- 症状：…` / `- **症状**：…` / `- **症状**: …`. Nine registry entries
+     * write the bold form, and the old strict-prefix check silently skipped
+     * all of them (no symptom ⇒ never matchable).
+     */
+    private val FIELD_RE = Regex("""^-\s*(?:\*\*)?(症状|健康路径|救不动)(?:\*\*)?\s*[:：]\s*(.*)$""")
 
     /** One backticked seed: `` `…` ``. */
     private val BACKTICK_RE = Regex("""`([^`\n]+)`""")
+
+    /**
+     * A token is *specific* when it carries structure a generic English/log
+     * word does not: a path/markup character, a ≥6 char latin run, or a CJK
+     * run. 6 is chosen as the shortest length at which log vocabulary stops
+     * colliding (`pack`/`file`/`code`/`wait` are 4, `error` is a stopword,
+     * while `binary`, `generated`, `permitted`, `pointer` are all ≥6).
+     */
+    private const val SPECIFIC_MIN_LEN = 6
+
+    private val STRUCTURAL_RE = Regex("""[/\\._\-:$*'<>\[\]()@=]""")
 
     // ── model ─────────────────────────────────────────────────────────────
 
@@ -104,35 +153,56 @@ object SandboxDefectRegistry {
 
         for (raw in text.lineSequence()) {
             val line = raw.trimEnd()
-            val entry = ENTRY_RE.find(line)
-            if (entry != null) {
+            if (HEADING_RE.containsMatchIn(line)) {
                 flush()
-                id = entry.groupValues[1]
-                title = entry.groupValues[2].trim()
+                val entry = ENTRY_RE.find(line.trimStart())
+                if (entry != null) {
+                    id = entry.groupValues[1]
+                    title = entry.groupValues[2].trim()
+                }
                 continue
             }
             if (id == null) continue
-            when {
-                line.startsWith("- 症状：") -> symptom = line.removePrefix("- 症状：").trim()
-                line.startsWith("- 健康路径：") -> recovery = line.removePrefix("- 健康路径：").trim()
-                line.startsWith("- 救不动：") -> frozen = line.removePrefix("- 救不动：").trim()
+            val field = FIELD_RE.find(line)
+            if (field != null) {
+                when (field.groupValues[1]) {
+                    "症状" -> symptom = field.groupValues[2].trim()
+                    "健康路径" -> recovery = field.groupValues[2].trim()
+                    "救不动" -> frozen = field.groupValues[2].trim()
+                }
             }
         }
         flush()
         return out
     }
 
-    /** Backticked seeds of a symptom line; ` / ` inside one seed splits phrasings. */
+    /**
+     * Backticked seeds of a symptom line; ` / ` inside one seed splits
+     * phrasings. A group made only of generic words is dropped — see
+     * [hasSpecificToken] and the 2026-10-27 note on the type.
+     */
     internal fun seedGroupsOf(symptom: String?): List<List<String>> {
         if (symptom.isNullOrBlank()) return emptyList()
         val groups = mutableListOf<List<String>>()
         for (m in BACKTICK_RE.findAll(symptom)) {
             for (alt in m.groupValues[1].split(" / ")) {
                 val tokens = tokensOf(alt)
-                if (tokens.isNotEmpty()) groups += tokens
+                if (tokens.isNotEmpty() && hasSpecificToken(tokens)) groups += tokens
             }
         }
         return groups
+    }
+
+    /**
+     * True when at least one token could not plausibly appear in unrelated
+     * output. AND-matching over generic-only tokens degenerates into a
+     * universal hit: `[grep, file]` (from the example-style seed
+     * `grep -n X file`, where `X` and `-n` are dropped by the tokenizer)
+     * matches every `grep: …: No such file or directory`; `[code]` (from
+     * `" CODE "`) matches the literal `(exit code: 1)` trailer.
+     */
+    internal fun hasSpecificToken(tokens: List<String>): Boolean = tokens.any { t ->
+        STRUCTURAL_RE.containsMatchIn(t) || t.length >= SPECIFIC_MIN_LEN || CJK_TOKEN_RE.matches(t)
     }
 
     /** Lowercased distinct tokens: latin runs ≥3 + CJK runs ≥2, stopwords dropped. */
@@ -147,7 +217,7 @@ object SandboxDefectRegistry {
 
     // ── matching ──────────────────────────────────────────────────────────
 
-    // ponytail: 自动召回只认反引号 seed（保守优先，宁漏勿错）| 天花板: 纯描述性症状条目永不命中（现注册表大多数），靠人工查表兜底 | 升级触发: 召回失效实证（agent 仍在已登记缺陷上烧试错轮）→ 放宽到断点层/关键词行匹配
+    // ponytail: 自动召回只认反引号 seed，且组内必须有特异性锚点（保守优先，宁漏勿错）| 天花板: 纯描述性症状条目永不命中（现注册表大多数）；收紧后「seed 全由通用短词构成」的组也转瞎（实测 A1 `bad pack` / S26 `git log`,`git fsck` / S29 `http=000 size=0` / S31 `git log`），靠人工查表 + 把 seed 改写成逐字报错原文兜底 | 升级触发: 召回失效实证（agent 仍在已登记缺陷上烧试错轮）→ 放宽到断点层/关键词行匹配，或短词组改用词边界匹配替代子串包含
     /** AND-match: an entry hits when every token of at least one seed group occurs. */
     fun match(output: String, defects: List<Defect>): List<Defect> {
         if (output.isBlank()) return emptyList()
