@@ -127,7 +127,7 @@ tts_voice_and_sanitizer_check.py / calendar_events_nullable_predicate_check.py �
 
 **沙箱事实（第 N 次同族，如实登记）**：`scan.sh` 整份、`gate_run.sh --full`、无重试的逐门循环各被 `OSError: [Errno 38] Function not implemented` 打死一次（三次尝试分别在 ~20、~23 门处整壳被杀，`/bin/sh: can't create /tmp/.minis_cwd_*` 同现）。健康路径 = 每批 ≤20 门 + 每门重试 + 错开启动（本次 8 批跑完 109/109）。14 条被标成 `SANDBOX` 的记录已全部重跑为 rc=0，`probe/t06-gates.jsonl` 里可逐条复核。
 
-`test_scan.py`（ALL 344）本地后台跑：见 §6，若本地跑不通 / 被打断则**交 CI 承担**。
+`test_scan.py`（ALL 344）本地后台跑两次，均被同一窗口的沙箱风暴静默杀死（进程消失、日志 0 字节，无输出）⇒ **交 CI 承担**：CI 的 `ALL 344 CASES PASS` 恰一条见 §6，两门自测标记亦在 CI 日志内命中。
 
 ### L4 — CI
 
@@ -135,7 +135,16 @@ tts_voice_and_sanitizer_check.py / calendar_events_nullable_predicate_check.py �
 
 ## 6. CI
 
-（回填）
+| 项 | 读数 |
+|---|---|
+| run | `40312031592`（#2736），workflow_dispatch on `fix/r3-mirror-route`，11:02:23Z → 11:20:27Z（18m04s），attempt 1 |
+| job | `121535315538`（build），**success** |
+| head_sha | `3c1bd1cee1…` 与本地 HEAD `3c1bd1cee1efcb46b794dbce83fade10202c155f` **逐字符一致** |
+| 步骤 | 26 步（非 Post 23），唯一 `skipped` = step 23 Publish to Releases（分支构建门控），其余全 success |
+| 日志 | 1,486,673 B / NUL 0（`probe/ci/job-121535315538.log`） |
+| 判读 | `probe/t06_ci_judge.py` **ALL CI CHECKS: PASS**（13 项）：`Summary: 112 passed, 0 failed` 恰 1 · `ALL 344 CASES PASS` 恰 1 · 门头 `[1..112]` 互异 · ` e: ` 编译错 0 · 含 `FAILED` 的行全是 PASSED 用例名子串 · 两门真树标记（`MIRROR_CATEGORY_ROUTE_CHECK=PASS` / `MIRROR_VM_THREAD_CHECK=PASS`）各恰 1 · 两门自测标记（`MIRROR_CATEGORY_ROUTE_SELFTEST=PASS` / `MIRROR_VM_THREAD_SELFTEST=PASS`）各恰 1 ⇒ **24 + 36 条臂在 CI 里真跑** |
+
+源码树与 CI 绿 sha 的差异 = 0（`git diff --name-only 3c1bd1cee..HEAD -- . ':(exclude)fix-reports'` = 0；绿 sha 之后只有本报告回填）。
 
 ## 7. 残留（每条带 触发条件 / 触发后方案 / 搁置理由）
 
