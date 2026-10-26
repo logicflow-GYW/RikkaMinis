@@ -70,6 +70,13 @@ import sys
 # 字符字面量按字符串处理。外部见证各一击穿 —— 门自己再手写词法器 = 直接违规。
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _kotlin_lexer import analyse as _lex_analyse  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool as _const_bool,
+    function_body as _function_body,
+    if_blocks as _if_blocks,
+)
+from _kotlin_valueflow import expr_end as _expr_end  # noqa: E402
+from _kotlin_valueflow import path_feasible as _path_feasible  # noqa: E402
 
 REL = "src/android/app/src/main/java/com/rikkaminis/app/browser/BrowserTabPool.kt"
 
@@ -490,6 +497,276 @@ def _stale_ref(label, line_no, rhs, binds, offset):
     return None
 
 
+# ── [R3-t04] 第三轮（dual-gate bypass）三个缝 ───────────────────────────────
+# 三条见证的共同形态是「拼写还在，决定没了」——门判的是**语句存在**，不是
+# **效果达成**，于是缝落在两条判据之间：
+#
+#   09-1 条目选择谓词：`_downloads.update` 的 lambda 里决定「哪一条被
+#        transform」的那个条件谁都不判。`if (it.id == id)` 改成
+#        `if (it.id == -1L)` 后 CAS 照样原子、CAS 参数照样被消费、update
+#        站点数不变 —— 但没有任何条目能匹配，下载状态永不推进。
+#   09-2 字节落盘：`startUrlDownload` 的 read 循环里 `out.write(buf, 0, n)`
+#        被删，进度照样涨到 100%、条目照样 settle 成 COMPLETED（R1-R6 全绿），
+#        磁盘上是 0 字节文件。
+#   09-3 伴生横幅流：`_activeDownload` 的重定位谓词没判 —— 从 DOWNLOADING
+#        换成 COMPLETED 后，横幅命中刚完成的条目而永久残留。
+FUN_DECL_RE = re.compile(
+    r"\bfun\s+(?:<[^>]*>\s*)?(?:[A-Za-z_][\w.]*\.)?([A-Za-z_]\w*)\s*\(")
+# 条目选择点：`if (…)` 之外还有集合侧的选择（filter / firstOrNull / find …）
+SELECTOR_CALL = re.compile(
+    r"(?<![\w.])(?:filter|filterNot|firstOrNull|first|find|singleOrNull|single|"
+    r"any|none|indexOf)\s*(?=\{)")
+READ_CALL = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\s*\.\s*read\s*\(")
+WRITE_CALL = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\s*\.\s*write\s*\(")
+
+
+def _func_body(code, name):
+    try:
+        b = _function_body(code, name)
+    except Exception:  # noqa: BLE001 — 解析失败按找不到处理，调用方 fail-closed
+        return None
+    return (b[0], b[1]) if b else None
+
+
+def _enclosing_fun(code, pos):
+    """(name, body_start, body_end, paren_open) of the innermost fun containing pos."""
+    best = None
+    for m in FUN_DECL_RE.finditer(code):
+        if m.start() > pos:
+            break
+        nb = _func_body(code, m.group(1))
+        if nb and nb[0] <= pos < nb[1]:
+            best = (m.group(1), nb[0], nb[1], m.end() - 1)
+    return best
+
+
+def _params_of(code, paren_open):
+    """形参名列表（解析不出来返回 None → 调用方 fail-closed）。"""
+    pc = _match_paren(code, paren_open)
+    if pc < 0:
+        return None
+    inner = code[paren_open + 1:pc]
+    out = []
+    for seg in _split_top(inner, ","):
+        seg = seg.strip()
+        if not seg:
+            continue
+        name = seg.split(":")[0].strip()
+        name = re.sub(r"^(?:vararg|crossinline|noinline|private|public|internal)\s+",
+                      "", name).strip()
+        if re.fullmatch(r"[A-Za-z_]\w*", name):
+            out.append(name)
+    return out
+
+
+def _selector_conds(body):
+    """块体内每个**条目选择点**的条件：(cond, start, end)。
+
+    `if (…)` 与集合侧选择（filter/firstOrNull/find… 的 lambda 体）都算：决定
+    「哪一条被更新」的是这两处，而不只是 map 的 lambda 本身。
+    """
+    out = []
+    for cond, t_start, t_end, e_start, e_end in _if_blocks(body):
+        out.append((cond, t_start, e_end if e_start is not None else t_end))
+    for m in SELECTOR_CALL.finditer(body):
+        span = _balanced(body, m.end())
+        if span is None:
+            continue
+        out.append((body[span[0]:span[1]], span[0], span[1]))
+    return out
+
+
+def _key_idents(code, fn_body, params, callables):
+    """调用方交进来的「键」：标量形参 + 由它们派生的局部别名（一跳）。"""
+    keys = [p for p in params if p not in callables]
+    if not keys:
+        return []
+    out = list(keys)
+    for m in re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)([^\n]*)",
+                         fn_body):
+        rhs = _mask(m.group(2))
+        if any(re.search(r"(?<![\w.])%s(?![\w.])" % re.escape(k), rhs) for k in keys):
+            if m.group(1) not in out:
+                out.append(m.group(1))
+    return out
+
+
+def _selection_problem(label, line_no, code, body, body_abs):
+    """R7 — 被 transform 的那一条必须由**调用方传入的键**选出来（09-1）。
+
+    判据不看谓词的拼写，而是看它由什么决定：`it.id == id`（键来自形参）绿，
+    `it.id == -1L`（纯字面量）红 —— 后者让「原子更新」变成「原子地什么都不做」。
+    """
+    fn = _enclosing_fun(code, body_abs)
+    if fn is None:
+        return None
+    name, b_start, b_end, paren = fn
+    params = _params_of(code, paren)
+    if params is None:
+        return ("%s:%d: cannot parse the parameter list of %s() — the entry-selection "
+                "criterion refuses to judge, fail-closed (R3-t04)"
+                % (label, line_no, name))
+    callables = [p for p in params
+                 if re.search(r"(?<![\w.])%s\s*\(" % re.escape(p), body)]
+    if not callables:
+        return None
+    cm = None
+    for p in callables:
+        m = re.search(r"(?<![\w.])%s\s*\(" % re.escape(p), body)
+        if m and (cm is None or m.start() < cm.start()):
+            cm = m
+    keys = _key_idents(code, code[b_start:b_end], params, callables)
+    selectors = _selector_conds(body)
+
+    def keyed(cond):
+        # 常量折叠成真/假的条件不是「选择」，是把选择抹平（wide3-08 同族）
+        if _const_bool(cond) is not None:
+            return False
+        live = _mask(cond)
+        return any(re.search(r"(?<![\w.])%s(?![\w.])" % re.escape(k), live) for k in keys)
+
+    if not selectors:
+        return ("%s:%d: the download update applies %s(...) to EVERY entry — there is no "
+                "entry-selection predicate at all, so one caller settles every download "
+                "(R3-t04)" % (label, line_no, callables[0]))
+    enclosing = [s for s in selectors if s[1] <= cm.start() < s[2]]
+    if enclosing:
+        cond = max(enclosing, key=lambda t: t[1])[0]
+        if keyed(cond):
+            return None
+        return ("%s:%d: the entry that gets transformed is selected by `%s` — that predicate "
+                "is not decided by any key the caller handed in (%s), so no entry can ever "
+                "match and the download state never advances (R3-t04)"
+                % (label, line_no, " ".join(_mask(cond).split())[:70],
+                   ", ".join(keys) or "none"))
+    before = [s for s in selectors if s[2] <= cm.start()]
+    if any(keyed(s[0]) for s in before):
+        return None
+    return ("%s:%d: %s(...) is applied with no caller-keyed selection before it — the "
+            "transform reaches entries the caller never named (R3-t04)"
+            % (label, line_no, callables[0]))
+
+
+def _stream_copy_problem(code, label):
+    """R9 — 流式下载必须真的把读到的字节写到目标文件（09-2）。"""
+    span = _func_body(code, "startUrlDownload")
+    if span is None:
+        return ["%s: cannot locate startUrlDownload() — the streamed download path moved, "
+                "the byte-copy criterion cannot judge, fail-closed (R3-t04)" % label]
+    body = code[span[0]:span[1]]
+    loops = []
+    for m in re.finditer(r"\bwhile\s*\(", body):
+        pc = _match_paren(body, m.end() - 1)
+        if pc < 0:
+            continue
+        k = pc + 1
+        while k < len(body) and body[k] in " \t\r\n":
+            k += 1
+        if k >= len(body) or body[k] != "{":
+            continue
+        sp = _balanced(body, k)
+        if sp is not None and READ_CALL.search(body[sp[0]:sp[1]]):
+            loops.append(sp)
+    if not loops:
+        return ["%s:%d: the streamed download has no byte-copy loop (`read(...)`) — a "
+                "download that never reads the body cannot produce the file it reports as "
+                "COMPLETED, fail-closed (R3-t04)" % (label, _line_of(code, span[0]))]
+    problems = []
+    for s0, s1 in loops:
+        chunk = body[s0:s1]
+        rm = READ_CALL.search(chunk)
+        args = _call_args(chunk, chunk.find("(", rm.start()))
+        buf = None
+        if args is not None:
+            first = args.split(",")[0].strip()
+            if re.fullmatch(r"[A-Za-z_]\w*", first):
+                buf = first
+        count = None
+        for mm in re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)",
+                              chunk[:rm.start()]):
+            count = mm.group(1)
+        where = "%s:%d" % (label, _line_of(code, span[0] + s0))
+        if buf is None or count is None:
+            problems.append(
+                "%s: the byte-copy loop does not expose a (buffer, count) pair — the "
+                "write-back criterion cannot judge, fail-closed (R3-t04)" % where)
+            continue
+        wrote = None
+        for w in WRITE_CALL.finditer(chunk):
+            wargs = _call_args(chunk, chunk.find("(", w.start()))
+            if wargs is None:
+                continue
+            if not (re.search(r"(?<![\w.])%s(?![\w.])" % re.escape(buf), wargs)
+                    and re.search(r"(?<![\w.])%s(?![\w.])" % re.escape(count), wargs)):
+                continue
+            if not _path_feasible(body, s0 + w.start()):
+                continue
+            wrote = w.start()
+            break
+        if wrote is None:
+            problems.append(
+                "%s: the byte-copy loop reads into `%s` and counts `%s` but never writes "
+                "them to the destination stream — progress reaches 100%% and the entry "
+                "settles COMPLETED while the file on disk stays empty (R3-t04)"
+                % (where, buf, count))
+            continue
+        prog = [p for p in (m.start() for m in
+                            re.finditer(r"\bupdateDownloadProgress\s*\(", chunk))
+                if _path_feasible(body, s0 + p)]
+        if prog and min(prog) < wrote:
+            problems.append(
+                "%s: the progress update runs BEFORE the bytes are written — the reported "
+                "percentage counts bytes that never reached the file (R3-t04)" % where)
+    return problems
+
+
+def _banner_selector_problem(code, label):
+    """R10 — 顶部横幅的重定位谓词必须是**在飞**成员（09-3）。
+
+    「在飞成员」从树里派生：`registerDownload` 给新条目的 `state =` 就是它。
+    同一条下载状态机里，`settleDownload` 重算横幅时拿它做过滤 —— 换成任何
+    终态成员都会让横幅命中刚完成的条目而永久残留。
+    """
+    em = re.search(r"enum\s+class\s+DownloadState\s*\{([^}]*)\}", code)
+    if em is None:
+        return []
+    members = re.findall(r"[A-Za-z_]\w*", em.group(1))
+    reg = _func_body(code, "registerDownload")
+    if reg is None:
+        return ["%s: DownloadState is declared but registerDownload() is gone — the "
+                "in-flight member cannot be derived, fail-closed (R3-t04)" % label]
+    st = re.search(r"\bstate\s*=\s*DownloadState\s*\.\s*([A-Za-z_]\w*)",
+                   code[reg[0]:reg[1]])
+    if st is None or st.group(1) not in members:
+        return ["%s: registerDownload() no longer assigns the new entry's state — the "
+                "in-flight member cannot be derived, fail-closed (R3-t04)" % label]
+    inflight = st.group(1)
+    settle = _func_body(code, "settleDownload")
+    if settle is None:
+        return ["%s: settleDownload() is gone — re-point the banner criterion, "
+                "fail-closed (R3-t04)" % label]
+    sbody = code[settle[0]:settle[1]]
+    writes = list(re.finditer(r"\b_activeDownload\s*\.\s*value\s*=(?!=)", sbody))
+    if not writes:
+        return ["%s: settleDownload() no longer recomputes the download banner — the "
+                "banner would never clear, fail-closed (R3-t04)" % label]
+    problems = []
+    for w in writes:
+        rhs = sbody[w.end():_expr_end(sbody, w.end())]
+        sel = re.search(r"\b(?:firstOrNull|first|find|singleOrNull|single)\s*\{([^}]*)\}", rhs)
+        if sel is None:
+            continue
+        for ref in re.findall(r"DownloadState\s*\.\s*([A-Za-z_]\w*)", sel.group(1)):
+            if ref != inflight:
+                problems.append(
+                    "%s:%d: the download banner is re-selected on DownloadState.%s, but the "
+                    "in-flight member registerDownload() assigns is DownloadState.%s — a "
+                    "settled entry then matches the banner selector and the progress banner "
+                    "never clears (R3-t04)"
+                    % (label, _line_of(code, settle[0] + w.start()), ref, inflight))
+    return problems
+
+
 # ── the rules ───────────────────────────────────────────────────────────────
 def _judge_write(label, line_no, rhs, line, form, receivers):
     """R1/R2 for one write site; `form` names the syntactic shape for messages.
@@ -683,6 +960,19 @@ def check_source(src: str, label: str) -> list:
             bad.append("%s:%d: `_downloads.update { %s -> … }` never uses %s in its return "
                        "expression (CAS result not consumed) — wide-1024 B-22 / wide4-09"
                        % (label, line_no, shown, "`%s`" % "`/`".join(names)))
+            continue
+        # [R3-t04 09-1] CAS 参数被消费只是「原子地算了一次」，还得看**选了谁**：
+        # 选择谓词纯字面量 ⇒ 那条更新永远匹配不到条目。
+        prob = _selection_problem(label, line_no, src, body, brace)
+        if prob:
+            bad.append(prob)
+
+    # [R3-t04 09-2 / 09-3] 流式下载的字节落盘与横幅重定位。只对完整注册表
+    # （BrowserTabPool 本体）判 —— 片段夹具没有这两处锚点；本体一旦缺锚点
+    # 就是 fail-closed 红，不会静默跳过。
+    if re.search(r"\bclass\s+BrowserTabPool\b", src):
+        bad.extend(_stream_copy_problem(src, label))
+        bad.extend(_banner_selector_problem(src, label))
 
     return bad
 
@@ -889,6 +1179,83 @@ W4_NESTED_COMMENT = '''    fun clearFinishedDownloads() {
 '''
 
 
+# ── [R3-t04] 第三轮（dual-gate）三个缝的见证臂 ──────────────────────────────
+# 完整注册表基座：新判据的锚点（enum / registerDownload / settleDownload /
+# startUrlDownload）都必须在，`class BrowserTabPool` 才会启用 09-2 / 09-3。
+FULL_BASE = '''class BrowserTabPool {
+    enum class DownloadState { DOWNLOADING, COMPLETED, FAILED }
+    data class DownloadEntry(val id: Long, val filename: String, val state: DownloadState, val bytesDone: Long, val totalBytes: Long)
+    data class DownloadUiState(val filename: String, val progress: Float)
+
+    private val _downloads = MutableStateFlow<List<DownloadEntry>>(emptyList())
+
+    private fun registerDownload(dest: File, totalBytes: Long): Long {
+        val entry = DownloadEntry(id = 1L, filename = dest.name, state = DownloadState.DOWNLOADING, bytesDone = 0L, totalBytes = totalBytes)
+        _downloads.update { listOf(entry) + it }
+        _activeDownload.value = DownloadUiState(dest.name, 0f)
+        return 1L
+    }
+
+    private fun updateDownloadEntry(id: Long, transform: (DownloadEntry) -> DownloadEntry) {
+        _downloads.update { current -> current.map { if (it.id == id) transform(it) else it } }
+    }
+
+    private fun settleDownload(id: Long, state: DownloadState) {
+        updateDownloadEntry(id) { it.copy(state = state) }
+        _activeDownload.value = _downloads.value
+            .firstOrNull { it.state == DownloadState.DOWNLOADING }
+            ?.let { DownloadUiState(it.filename, 1f) }
+    }
+
+    internal fun startUrlDownload(url: String) {
+        val dest = File("download.bin")
+        val id = registerDownload(dest, 1L)
+        downloadScope.launch {
+            conn.inputStream.use { input ->
+                dest.outputStream().use { out ->
+                    val buf = ByteArray(64 * 1024)
+                    var copied = 0L
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        copied += n
+                        updateDownloadProgress(id, dest.name, copied, 1L)
+                    }
+                }
+            }
+            finishDownload(id, dest)
+        }
+    }
+}
+'''
+
+# 09-1：选择谓词与键无关 —— 原子更新变成「原子地什么都不做」
+W5_ID_LITERAL = FULL_BASE.replace("if (it.id == id)", "if (it.id == -1L)")
+
+# 09-2：字节不落盘 —— 进度到 100%、条目 COMPLETED、文件 0 字节
+W6_NO_WRITE = FULL_BASE.replace("                        out.write(buf, 0, n)\n", "")
+
+# 09-2b（精度对照）：进度在读之后、写之前结算 —— 撒谎的百分比
+W6_PROGRESS_EARLY = FULL_BASE.replace(
+    "                        out.write(buf, 0, n)\n                        copied += n\n"
+    "                        updateDownloadProgress(id, dest.name, copied, 1L)",
+    "                        copied += n\n"
+    "                        updateDownloadProgress(id, dest.name, copied, 1L)\n"
+    "                        out.write(buf, 0, n)")
+
+# 09-3：横幅重定位谓词换了成员 —— 横幅永久残留
+W7_BANNER = FULL_BASE.replace(
+    ".firstOrNull { it.state == DownloadState.DOWNLOADING }",
+    ".firstOrNull { it.state == DownloadState.COMPLETED }")
+
+# 09-3b（精度对照）：「在飞成员」是从 registerDownload 派生的，不是写死的
+# DOWNLOADING —— 整族改名（枚举成员 + 赋值 + 横幅谓词）必须仍然绿。
+W7_RENAME_INFLIGHT = (FULL_BASE
+                      .replace("DownloadState { DOWNLOADING,", "DownloadState { PENDING,")
+                      .replace("DownloadState.DOWNLOADING", "DownloadState.PENDING"))
+
+
 def selftest() -> int:
     failures = []
     good = check_source(GOOD, "good.kt")
@@ -921,6 +1288,15 @@ def selftest() -> int:
                            "read-modify-write on _downloads"),
         "w4-nested-comment": (check_source(W4_NESTED_COMMENT, "w4-nested-comment.kt"),
                               "hidden receiver"),
+        # [R3-t04] 第三轮双门缝（09-1 / 09-2 / 09-3）
+        "r3-full-base": (check_source(FULL_BASE, "r3-full-base.kt"), None),
+        "r3-id-literal": (check_source(W5_ID_LITERAL, "r3-id-literal.kt"),
+                          "selected by"),
+        "r3-no-write": (check_source(W6_NO_WRITE, "r3-no-write.kt"), "never writes"),
+        "r3-progress-early": (check_source(W6_PROGRESS_EARLY, "r3-progress-early.kt"),
+                              "BEFORE the bytes"),
+        "r3-banner": (check_source(W7_BANNER, "r3-banner.kt"), "never clears"),
+        "r3-rename-inflight": (check_source(W7_RENAME_INFLIGHT, "r3-rename.kt"), None),
     }
     print("selftest good fixture -> %d violation(s)" % len(good))
     for name, (hits, needle) in cases.items():
@@ -949,6 +1325,10 @@ def selftest() -> int:
     # this exact string, and test_scan.py is a frozen surface for this sweep. Keep the
     # historical count; the real arm list is printed above, one line per arm.
     print("SELFTEST=PASS (downloads_atomic_update: 4 fixtures)")
+    # [R3-t04] 第三轮缝臂的独立标记（test_scan.py 的冻结 token 保持上面那行原样）。
+    print("DOWNLOAD_UPDATE_SEAM_SELFTEST=PASS (3 seams: 09-1 caller-keyed entry "
+          "selection / 09-2 byte-copy write-back + progress order / 09-3 in-flight "
+          "banner selector; +3 witness arms, +1 precision arm)")
     return 0
 
 
