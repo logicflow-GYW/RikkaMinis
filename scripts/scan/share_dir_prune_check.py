@@ -1988,7 +1988,12 @@ def selftest():
         '    } catch (_: Throwable) {',
         '        return false',
         '    }',
-        '    val chooser = Intent.createChooser(Intent(Intent.ACTION_SEND), "t").apply {',
+        # [R3-t04] 合规夹具必须真的把 uri 挂上去 —— 否则它自己是 C-STREAM 的反例。
+        '    val chooser = Intent.createChooser(Intent(Intent.ACTION_SEND).apply {',
+        '        type = "application/json"',
+        '        putExtra(Intent.EXTRA_STREAM, uri)',
+        '        clipData = ClipData.newRawUri("shared", uri)',
+        '    }, "t").apply {',
         '        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)',
         '    }',
         '    return runCatching { context.startActivity(chooser) }.isSuccess',
