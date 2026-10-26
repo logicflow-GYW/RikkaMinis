@@ -39,6 +39,7 @@ from _kotlin_ast import (
     match_bracket,
     split_top,
     strip_parens,
+    tail_expr,
 )
 
 __all__ = [
@@ -50,6 +51,7 @@ __all__ = [
     "scope_calls",
     "peel_discarding",
     "value_sources",
+    "branch_value",  # if/else 块体分支的值 = 尾表达式
     "contains_ident",
     "guard_feasible",
     "path_feasible",
@@ -148,6 +150,23 @@ def peel_discarding(expr, rounds=6):
     return cur
 
 
+def branch_value(part):
+    """分支体**值**的表达式：块体 `{ … }` 取尾表达式，裸表达式原样返回。
+
+    `if (has(x)) { cap(x) } else { null }` 的 else 分支值是 `null`，不是
+    `{ null }` —— 不剥块的话消费门的 NULLISH 白名单（`"null"` / `"Unit"`）
+    匹配不上，消毒漏斗类判据会在真树上误红（CI #2760 实测）。
+    """
+    s = part.strip()
+    if not s.startswith("{"):
+        return s
+    close = match_bracket(s, 0)
+    if close != len(s) - 1:
+        return s
+    tail = tail_expr(s[1:close])
+    return tail.strip() if tail else s
+
+
 def value_sources(expr, depth=0):
     """表达式最终值的**所有可能来源**（保守：多算不漏算）。
 
@@ -167,18 +186,31 @@ def value_sources(expr, depth=0):
         return (value_sources(e[parts[0][0]:parts[0][1]], depth + 1)
                 + value_sources(e[parts[1][0]:parts[1][1]], depth + 1))
 
-    # if / else 表达式
-    m = re.match(r"if\s*\(", e)
-    if m:
-        close = match_bracket(e, m.end() - 1)
-        if 0 <= close < len(e):
-            rest = e[close + 1:].strip()
-            els = re.match(r"else\b", rest)
-            if els:
-                then_part = rest[:els.start()].strip()
-                else_part = rest[els.end():].strip()
-                return (value_sources(then_part, depth + 1)
-                        + value_sources(else_part, depth + 1))
+    # if / else 表达式（A2）：旧实现把 `)` 之后的整段当 then、再在开头
+    # re.match(r"else\b") —— `)` 之后永远是 then 表达式，永远匹配不到，整个
+    # 分叉 100% 死代码，`if (c) a else b` 原样返回整条表达式。改用 if_blocks
+    # 定位 then/else 区间，再按常量条件三分支：真 → then、假 → else、
+    # 未知 → 两侧都算（保守不漏脏来源）。
+    if re.match(r"if\s*\(", e):
+        blks = if_blocks(e)
+        if blks:
+            cond, t_start, t_end, e_start, e_end = blks[0]
+            # else 段必须覆盖到表达式结尾：`if (c) a else b + z` 是一体的，
+            # 尾部还带别的语句的形态不许在这里错切（宁可退回整条表达式）。
+            if e_start is not None and e_end == len(e):
+                then_part = branch_value(e[t_start:t_end])
+                else_part = branch_value(e[e_start:e_end])
+                b = const_bool(cond)
+                if b is True:
+                    return value_sources(then_part, depth + 1)
+                if b is False:
+                    return value_sources(else_part, depth + 1)
+                # 条件未知时两侧都算，但**纯字面量分支不是数据来源**：把它并回
+                # 整条表达式（`if (has(x)) cap(x) else null` 的 null 分支不是
+                # "没走消毒的值"，拆出来会让 require_all 型判据误红真树）。
+                if const_value(then_part) is None and const_value(else_part) is None:
+                    return (value_sources(then_part, depth + 1)
+                            + value_sources(else_part, depth + 1))
 
     # 丢弃型作用域：值是接收者
     if scope_calls(e) and any(s[0] in DISCARD_SCOPES for s in scope_calls(e)):
@@ -437,6 +469,87 @@ ARMS = [
     ("path_feasible_live_branch",
      lambda V: V["path_feasible"](V["code_view"]("if (ready) {\n  boom()\n}\n"),
                                  V["code_view"]("if (ready) {\n  boom()\n}\n").index("boom")) is True),
+    # else 分支端到端（enclosing_conditions 的 `!(cond)` 括号化修复）：
+    # `|| true` 的 else 是死分支（False），`&& false` 的 else 是活分支（True），
+    # 简单条件 else 不回归（True）。期望值写死字面量。
+    ("path_feasible_else_dead_or_true",
+     lambda V: V["path_feasible"](
+         V["code_view"]("if (a == null || true) {\n  ok()\n} else {\n  boom()\n}\n"),
+         V["code_view"]("if (a == null || true) {\n  ok()\n} else {\n  boom()\n}\n").index("boom")) is False),
+    ("path_feasible_else_live_and_false",
+     lambda V: V["path_feasible"](
+         V["code_view"]("if (x == null && false) {\n  ok()\n} else {\n  boom()\n}\n"),
+         V["code_view"]("if (x == null && false) {\n  ok()\n} else {\n  boom()\n}\n").index("boom")) is True),
+    ("path_feasible_else_simple_not_regressed",
+     lambda V: V["path_feasible"](
+         V["code_view"]("if (a == null) {\n  ok()\n} else {\n  boom()\n}\n"),
+         V["code_view"]("if (a == null) {\n  ok()\n} else {\n  boom()\n}\n").index("boom")) is True),
+    # ---- A2：value_sources 的 if/else 分叉（旧实现 100% 死代码）----
+    # `)` 之后永远是 then 表达式，`re.match(r"else\b", rest)` 永不命中，于是
+    # `if (c) a else b` 原样返回整条表达式、两侧来源都没被拆出来。
+    ("value_sources_if_else_both",
+     lambda V: V["value_sources"]("if (c) a else b") == ["a", "b"]),
+    ("value_sources_if_true_then_only",
+     lambda V: V["value_sources"]("if (true) a else b") == ["a"]),
+    ("value_sources_if_false_else_only",
+     lambda V: V["value_sources"]("if (false) a else b") == ["b"]),
+    ("value_sources_nested_if_else_chain",
+     lambda V: V["value_sources"]("if (c) a else if (d) b else z") == ["a", "b", "z"]),
+    # 不是以 if 开头的表达式不许错切：`f(if (c) a else b)` 原样一条。
+    ("value_sources_call_wrapped_not_split",
+     lambda V: V["value_sources"]("f(if (c) a else b)") == ["f(if (c) a else b)"]),
+    # 条件未知 + 有一侧是纯字面量 ⇒ 不拆：字面量分支不是「数据来源」，
+    # 拆出来会把 require_all 型判据（"每条路径的值都必须经过消毒"）炸成误红。
+    ("value_sources_null_branch_merged",
+     lambda V: V["value_sources"]('if (has(x)) cap(x) else null')
+     == ["if (has(x)) cap(x) else null"]),
+    ("value_sources_literal_branch_merged",
+     lambda V: V["value_sources"]("if (c) 1 else b") == ["if (c) 1 else b"]),
+    # ---- 块体分支（CI #2760 实测红在 parts_json [R6]）----
+    # `{ … }` 分支的值是尾表达式，不是带花括号的整段文本：不剥块的话门侧的
+    # NULLISH 白名单（精确匹配 "null"/"Unit"）认不出 `{ null }`，消毒过的真
+    # 代码会被 require_all 判据判成"存了未消毒的载荷"。期望值是字面量。
+    ("value_sources_block_branch_split",
+     lambda V: V["value_sources"]("if (c) { a } else { b }") == ["a", "b"]),
+    ("value_sources_block_branch_mixed",
+     lambda V: V["value_sources"]("if (c) { a } else b") == ["a", "b"]),
+    ("value_sources_block_null_branch_merged",
+     lambda V: V["value_sources"]("if (has(x)) { cap(x) } else { null }")
+     == ["if (has(x)) { cap(x) } else { null }"]),
+    ("branch_value_peels_block_tail",
+     lambda V: V["branch_value"]("{\n  first()\n  second()\n}") == "second()"),
+    ("branch_value_keeps_non_block",
+     lambda V: V["branch_value"]("a ?: b") == "a ?: b"),
+    ("branch_value_keeps_trailing_text",
+     lambda V: V["branch_value"]("{ a } + b") == "{ a } + b"),
+    # ---- A1 端到端：单行 if/else 的两条分支 ----
+    ("path_feasible_single_line_else_dead",
+     lambda V: V["path_feasible"](
+         V["code_view"]("if (1 == 1) ok() else boom()\n"),
+         V["code_view"]("if (1 == 1) ok() else boom()\n").index("boom")) is False),
+    ("path_feasible_single_line_else_live",
+     lambda V: V["path_feasible"](
+         V["code_view"]("if (1 == 2) ok() else boom()\n"),
+         V["code_view"]("if (1 == 2) ok() else boom()\n").index("boom")) is True),
+    # ---- A3 端到端：when 的 subject 与块体臂 ----
+    ("path_feasible_when_const_subject_dead",
+     lambda V: V["path_feasible"](
+         V["code_view"]("when (false) {\n  true -> dead()\n}\n"),
+         V["code_view"]("when (false) {\n  true -> dead()\n}\n").index("dead()")) is False),
+    ("path_feasible_when_block_arm_dead",
+     lambda V: V["path_feasible"](
+         V["code_view"]("when (false) {\n  true -> {\n    dead()\n  }\n}\n"),
+         V["code_view"]("when (false) {\n  true -> {\n    dead()\n  }\n}\n").index("dead()")) is False),
+    # dangling-else：`y()` 的真实条件是 `a && !b`，两种拼法都判活；外层条件
+    # 若被错挂成 `!(a)` 则外层为「未知」，同样判活 —— 所以这条只看可达性，
+    # 条件文本形态由 ast 侧的 enclosing_dangling_else_binds_inner 钉。
+    ("path_feasible_dangling_else_alive",
+     lambda V: V["path_feasible"](
+         V["code_view"]("if (a) if (b) x() else y()\n"),
+         V["code_view"]("if (a) if (b) x() else y()\n").index("y()")) is True),
+    # ---- A4 端到端：复合条件里的数值比较 ----
+    ("guard_feasible_cmp_inside_and",
+     lambda V: V["guard_feasible"]("1 > 2 && g") is False),
     ("returns_exiting_plain",
      lambda V: V["returns_exiting"](V["code_view"]("fun f() {\n  if (x) return\n  y()\n}\n"),
                                     V["code_view"]("fun f() {\n  if (x) return\n  y()\n}\n").index("if"),
@@ -467,6 +580,7 @@ def selftest():
     import _kotlin_valueflow as V
     ns = {"code_view": V.code_view, "literal_view": V.literal_view,
           "peel_discarding": V.peel_discarding, "value_sources": V.value_sources,
+          "branch_value": V.branch_value,
           "contains_ident": V.contains_ident, "guard_feasible": V.guard_feasible,
           "path_feasible": V.path_feasible, "returns_exiting": V.returns_exiting,
           "is_single_assignment": V.is_single_assignment,
