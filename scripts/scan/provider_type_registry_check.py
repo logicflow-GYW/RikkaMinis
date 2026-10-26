@@ -55,6 +55,17 @@ import re
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import KotlinLexError, mask_code  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    const_value,
+    match_bracket,
+    split_top,
+    strip_parens,
+)
+from _kotlin_valueflow import code_view, literal_view, value_sources  # noqa: E402
+
 APP = "src/android/app/src/main/java/com/rikkaminis/app"
 PC_REL = APP + "/data/model/ProviderConfig.kt"
 MD_REL = APP + "/provider/ModelsDevApi.kt"
@@ -80,6 +91,17 @@ ENUM_ITER_RE = re.compile(r"ProviderType\s*\.\s*(?:values\(\)|entries)")
 EMPTY_MAPPING_RE = re.compile(
     r"\b(?:emptyList|emptySet|emptyArray|listOf|setOf|arrayOf)\s*"
     r"(?:<[^<>]*>\s*)?\(\s*\)")
+# [batch6-t06] A collection can be emptied AFTER construction, one operator
+# later: `listOf("a", "b").filter { false }` / `.take(0)` / `.drop(n)` is the
+# same zero mapping as `listOf()` — it just happens at evaluation time instead
+# of at construction time. Judging the constructor only sees the first shape.
+TRUNC_RE = re.compile(r"\.\s*(?:take|drop|filter|filterNot|takeWhile|dropWhile)\s*[({]")
+# A single blank element is not an empty list, but it is not a provider id
+# either: every lookup for the family then asks models.dev for "" and misses.
+BLANK_ELEMENT_RE = re.compile(r'"\s*"')
+LIST_CTOR_RE = re.compile(
+    r"\b(?:emptyList|emptySet|emptyArray|listOf|setOf|arrayOf)\s*"
+    r"(?:<[^<>]*>\s*)?\(")
 ALLOW_EMPTY_MAPPINGS = frozenset()
 # [wide-1024] The derived key set must still carry the displayName keys: the
 # add surfaces (`provider.models.add`, AddCustomModelScreen,
@@ -93,108 +115,225 @@ BASE_KEYS = ("Anthropic", "Google", "OpenAI", "OpenRouter", "Antigravity",
              "xAI", "Kimi", "Google Gemini", "xAI (Grok)", "Kimi Code")
 
 
+
 def code_only(text):
-    """Text with line comments (//…) removed — presence checks must not be
-    satisfiable from prose in a comment."""
-    return "\n".join(line.split("//")[0] for line in text.split("\n"))
+    """Comment-stripped text with STRING CONTENT kept (anchor checks).
+
+    Delegates to the shared lexer: the old line-based stripper kept `/* … */`
+    block comments alive, which is how a commented-out branch (or a commented
+    import) still satisfied a presence criterion. `literal_view` blanks both
+    comment forms and keeps literals, which is what the anchor checks need
+    (`"Anthropic" to …`); structural judgements use `code_view` instead.
+    """
+    try:
+        return literal_view(text)
+    except KotlinLexError:
+        return text
 
 
-def _balanced(src, open_idx, opener="(", closer=")"):
-    depth = 0
-    for i in range(open_idx, len(src)):
-        if src[i] == opener:
-            depth += 1
-        elif src[i] == closer:
-            depth -= 1
-            if depth == 0:
-                return i + 1
-    return -1
+def _literal(src):
+    """Literal view (comments blanked, string content kept) or None."""
+    try:
+        return literal_view(src)
+    except KotlinLexError:
+        return None
+
+
+def _structure(src):
+    """Code view (comments + literal bodies blanked) or None on parse failure."""
+    try:
+        return code_view(src)
+    except KotlinLexError:
+        return None
+
+
 
 
 def enum_constants(src):
-    """Constant names of `enum class ProviderType(...)`, or None when the
-    declaration is gone (gate ROT)."""
-    i = src.find(ENUM_HEADER)
+    r"""Constant names of `enum class ProviderType(...)`, or None when the
+    declaration is gone (gate ROT).
+
+    [batch6-t06] The old parser read ONE constant per line via a `^\s*NAME(`
+    anchor, so appending a second constant to an existing line
+    (`kimiCode("Kimi Code"), deepSeek("DeepSeek");`) was invisible — the gate
+    kept claiming the enum was fully covered while Kotlin had a new subclass.
+    The constant list is a comma-separated list, so it is parsed as one: code
+    view (comments blanked, a commented-out constant cannot be born), then the
+    region before the first top-level `;` (member declarations follow it),
+    then `split_top(…, ',')`.
+    """
+    code = _structure(src)
+    if code is None:
+        return None
+    i = code.find(ENUM_HEADER)
     if i < 0:
         return None
-    brace = src.find("{", i)
+    brace = code.find("{", i)
     if brace < 0:
         return None
-    end = _balanced(src, brace, "{", "}")
+    end = match_bracket(code, brace)
     if end < 0:
         return None
-    body = code_only(src[brace + 1:end])
-    # Constants live before the first top-level `;`; member declarations
-    # (`val …` / `get()` / `fun`) follow it and must not be mistaken for
-    # constants.
-    semi = body.find(";")
-    if semi >= 0:
-        body = body[:semi]
+    inner = code[brace + 1:end]
+    head = split_top(inner, (";",))
+    region = inner[head[0][0]:head[0][1]] if head else ""
     names = []
-    for raw in body.split("\n"):
-        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(", raw)
-        if m and m.group(1) not in ("get", "set", "val", "var", "fun"):
-            names.append(m.group(1))
+    for a, b in split_top(region, (",",)):
+        chunk = region[a:b]
+        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(|$)", chunk)
+        if not m:
+            continue
+        name = m.group(1)
+        if name in ("val", "var", "fun", "get", "set", "companion", "object",
+                    "override", "private", "internal", "public"):
+            continue
+        if re.search(r"\b(?:val|var|fun)\b", chunk):
+            continue
+        names.append(name)
     return names or None
 
 
-def when_body(src, prop):
-    """Body of the `when (this) { … }` inside `val ProviderType.<prop>`, or
-    None when the property (or its `when`) is absent."""
-    i = src.find("val ProviderType.%s" % prop)
+def branch_map(code, prop):
+    """[(labels, (start, end))] of the `when (this)` in `val ProviderType.<prop>`.
+
+    `code` must be the code view. Two layout facts the old arrow-to-arrow
+    parser got wrong are handled here: a branch may carry SEVERAL labels
+    (`ProviderType.xAI, ProviderType.kimiCode -> …`) and the label list may
+    wrap, while a branch whose arrow was only in a block comment must not
+    exist at all.
+    """
+    i = code.find("val ProviderType.%s" % prop)
     if i < 0:
         return None
-    w = src.find("when (this)", i)
+    w = code.find("when (this)", i)
     if w < 0:
         return None
-    brace = src.find("{", w)
+    brace = code.find("{", w)
     if brace < 0:
         return None
-    end = _balanced(src, brace, "{", "}")
-    return None if end < 0 else src[brace + 1:end]
-
-
-BRANCH_RE = re.compile(r"(?:ProviderType\s*\.\s*)?([A-Za-z_]\w*)\s*->")
-
-
-def branch_texts(body):
-    """{constant: branch body} for a `when` body.
-
-    A branch runs from its `->` to the next branch arrow. Bodies in this file
-    are single expressions, so arrow-to-arrow slicing is enough; a nested
-    lambda arrow shows up as an extra (never consulted) key.
-    """
-    out = {}
-    matches = list(BRANCH_RE.finditer(body))
-    for i, m in enumerate(matches):
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
-        name = m.group(1)
-        if name in out:          # first occurrence wins (later one is nested)
+    close = match_bracket(code, brace)
+    if close < 0:
+        return None
+    body = code[brace + 1:close]
+    arrows = []
+    depth = 0
+    k = 0
+    while k < len(body):
+        ch = body[k]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "-" and depth == 0 and body.startswith("->", k):
+            arrows.append(k)
+            k += 2
             continue
-        out[name] = body[m.end():end]
+        k += 1
+    starts = [_enum_label_run_start(body, a) for a in arrows]
+    out = []
+    for idx, arrow in enumerate(arrows):
+        run = body[starts[idx]:arrow]
+        rhs_end = starts[idx + 1] if idx + 1 < len(arrows) else len(body)
+        labels = [t for t in re.findall(r"(?:ProviderType\s*\.\s*)?\b([A-Za-z_]\w*)\b", run)
+                  if t not in ("is", "in", "null")]
+        out.append((labels, (brace + 1 + arrow + 2, brace + 1 + rhs_end)))
     return out
 
 
-def derived_body(src):
-    """Body of the `.flatMap { … }` that iterates the enum inside
-    `providerKeyMap`, or None when the derivation is gone."""
-    code = code_only(src)
+def _enum_label_run_start(body, arrow):
+    """Start of the enum-label list ending at `arrow` (labels may wrap)."""
+    start = body.rfind("\n", 0, arrow) + 1
+    while start > 0:
+        prev_end = start - 1
+        prev_start = body.rfind("\n", 0, prev_end) + 1
+        prev = body[prev_start:prev_end]
+        if "->" in prev:
+            break
+        if not re.fullmatch(r"\s*(?:(?:ProviderType\s*\.\s*)?[A-Za-z_]\w*\s*"
+                            r"(?:,\s*(?:ProviderType\s*\.\s*)?[A-Za-z_]\w*\s*)*,)?\s*",
+                            prev):
+            break
+        start = prev_start
+    return start
+
+
+def map_value_state(code_expr, lit_expr):
+    """'empty' | 'blank' | 'truncated' | 'ok' — the EFFECTIVE state of a
+    branch's `List<String>` value.
+
+    `listOf()` (construction) and `listOf("a").filter { false }` (evaluation)
+    both hand the family zero ids; `listOf("")` hands it one id that matches
+    nothing. Only the first shape was visible to an EMPTY_MAPPING_RE that
+    inspected the constructor.
+    """
+    e = strip_parens(code_expr.strip())
+    if not e:
+        return "ok"
+    for s in value_sources(e) or [e]:
+        s = strip_parens(s.strip())
+        if not s:
+            continue
+        if TRUNC_RE.search(s):
+            return "truncated"
+        if EMPTY_MAPPING_RE.search(s):
+            return "empty"
+    # Literal bodies are blanked in the code view (that is what makes the
+    # structural judgements safe), so an empty provider id has to be read off
+    # the literal projection at the same offsets.
+    if BLANK_ELEMENT_RE.search(lit_expr):
+        return "blank"
+    return "ok"
+
+
+def derivation(code):
+    """Locate the enum-iterating merge inside `providerKeyMap`.
+
+    `code` must be the code view. Returns a dict with the mapping body, the
+    key expression, the pair value and the ids binding — or None when the
+    derivation is gone. The gap between `ProviderType.values()` and the
+    mapping operator is reported verbatim so a `.take(0)` inserted there
+    cannot hide behind "the flatMap exists" (`ENUM_ITER_RE` still matches).
+    """
     i = code.find("providerKeyMap")
     if i < 0:
         return None
-    iter_m = ENUM_ITER_RE.search(code, i)
-    if not iter_m:
+    it = ENUM_ITER_RE.search(code, i)
+    if not it:
         return None
-    fm = re.search(r"\.\s*(?:flatMap|map|mapNotNull)\s*\{", code[iter_m.end():])
-    if not fm:
-        return None
-    brace = iter_m.end() + fm.end() - 1
-    end = _balanced(code, brace, "{", "}")
-    return None if end < 0 else code[brace:end]
+    tail = code[it.end():]
+    m = re.match(r"\s*(\.\s*(?:flatMap|map|mapNotNull|associate|associateBy)\s*\{)",
+                 tail)
+    if not m:
+        nxt = re.search(r"\.\s*(\w+)\s*[({]", tail)
+        return {"intercepted": nxt.group(1) if nxt else "", "body": None}
+    brace = it.end() + m.end() - 1
+    close = match_bracket(code, brace)
+    if close < 0:
+        return {"intercepted": "", "body": None}
+    body = code[brace + 1:close]
+    info = {"intercepted": "", "body": body, "keys_expr": None,
+            "pair_value": None, "bound": BOUND_IDS_RE.findall(body)}
+    km = DERIVED_KEYS_RE.search(body)
+    if km is None:
+        return info
+    info["keys_expr"] = body[:km.start()]
+    kbrace = km.end() - 1
+    kclose = match_bracket(body, kbrace)
+    if kclose < 0:
+        return info
+    pair = body[kbrace + 1:kclose]
+    tm = re.search(r"\bto\s+(.+)", pair)
+    info["pair_value"] = tm.group(1).strip() if tm else None
+    return info
+
+
+
+
+
 
 
 def map_literal_text(src):
-    """The `providerKeyMap = mapOf(...)` literal body (code-only)."""
+    """The `providerKeyMap = mapOf(...)` literal body (comments blanked)."""
     code = code_only(src)
     i = code.find("providerKeyMap")
     if i < 0:
@@ -202,9 +341,8 @@ def map_literal_text(src):
     open_idx = code.find("mapOf(", i)
     if open_idx < 0:
         return None
-    end = _balanced(code, open_idx + len("mapOf(") - 1)
-    return None if end < 0 else code[open_idx:end]
-
+    close = match_bracket(code, open_idx + len("mapOf") )
+    return None if close < 0 else code[open_idx:close + 1]
 
 def read(rel, root):
     path = os.path.join(root, rel)
@@ -216,60 +354,94 @@ def read(rel, root):
 
 def check_arm1(src, rel):
     out = []
+    code = _structure(src)
+    if code is None:
+        return [(rel, 0, "1a",
+                 "ProviderConfig.kt cannot be parsed by the shared Kotlin "
+                 "lexer — fail-closed (an unreadable file must not pass the "
+                 "mapping criteria)")]
     constants = enum_constants(src)
     if constants is None:
         out.append((rel, 0, "1a",
                     "`%s` not found — gate ROT" % ENUM_HEADER))
         return out
     for prop in DERIVED_PROPS:
-        body = when_body(src, prop)
-        if body is None:
+        branches = branch_map(code, prop)
+        if branches is None:
             out.append((rel, 0, "1b",
                         "`val ProviderType.%s` with a `when (this)` body not "
                         "found — the compile-time exhaustiveness contract is "
                         "gone (a new vendor would compile and silently fall out "
                         "of providerKeyMap)" % prop))
             continue
-        code = code_only(body)
-        if re.search(r"(?<![\w])else\s*->", code):
+        labels = set()
+        for names, _rhs in branches:
+            labels.update(names)
+        if "else" in labels:
             out.append((rel, 0, "1c",
                         "`%s` has an `else ->` branch — the `when` is no longer "
                         "exhaustive, so adding a ProviderType silently bypasses "
                         "the mapping instead of failing compilation" % prop))
         for c in constants:
-            if not re.search(r"(?:ProviderType\s*\.\s*)?\b%s\s*->" % re.escape(c), code):
+            if c not in labels:
                 out.append((rel, 0, "1d",
                             "`%s` does not cover ProviderType.%s — a new vendor "
                             "reached the enum without its models.dev mapping "
                             "(F-212 shape)" % (prop, c)))
-        # Arm 1e [wide-1024]: covering the constant is not enough — the branch
-        # must yield actual ids. `ProviderType.xAI -> emptyList()` keeps the
-        # `when` exhaustive and compiles, so every downstream lookup for that
-        # family returns nothing and grok-4.5 falls back to the relay scan.
-        branches = branch_texts(code)
-        for c in constants:
-            if c in ALLOW_EMPTY_MAPPINGS:
+        # Arm 1e [wide-1024 + batch6-t06]: covering the constant is not enough
+        # — the branch must YIELD usable ids. `emptyList()` empties the mapping
+        # at construction time, `listOf("a").filter { false }` / `.take(0)`
+        # empty it at evaluation time, and `listOf("")` yields one id that
+        # matches nothing. All three compile, all three keep the `when`
+        # exhaustive, and all three make the family fall back to the
+        # order-dependent all-providers scan (F-212).
+        lit = _literal(src) or src
+        for names, (a, b) in branches:
+            rhs_lit = lit[a:b]
+            state = map_value_state(code[a:b], rhs_lit)
+            if state == "ok":
                 continue
-            text = branches.get(c)
-            if text is None:
-                continue  # already reported by 1d
-            if EMPTY_MAPPING_RE.search(code_only(text)):
-                out.append((rel, 0, "1e",
-                            "`%s` maps ProviderType.%s to an EMPTY list — the "
-                            "`when` stays exhaustive, so this compiles, and the "
-                            "family silently falls out of providerKeyMap (the "
-                            "F-212 / 1026 shape: grok-4.5 takes a relay's "
-                            "1,000,000 context). Give it its models.dev ids, or "
-                            "add it to ALLOW_EMPTY_MAPPINGS in this gate with a "
-                            "reason" % (prop, c)))
+            for c in names:
+                if c in ALLOW_EMPTY_MAPPINGS:
+                    continue
+                if state == "empty":
+                    out.append((rel, 0, "1e",
+                                "`%s` maps ProviderType.%s to an EMPTY list — the "
+                                "`when` stays exhaustive, so this compiles, and the "
+                                "family silently falls out of providerKeyMap (the "
+                                "F-212 / 1026 shape: grok-4.5 takes a relay's "
+                                "1,000,000 context). Give it its models.dev ids, or "
+                                "add it to ALLOW_EMPTY_MAPPINGS in this gate with a "
+                                "reason" % (prop, c)))
+                elif state == "truncated":
+                    out.append((rel, 0, "1e",
+                                "`%s` maps ProviderType.%s to a list that is "
+                                "emptied by a collection operator after "
+                                "construction (`%s`) — `listOf(…).filter { false }` "
+                                "/ `.take(0)` is the same zero mapping as "
+                                "`listOf()`, one evaluation stage later"
+                                % (prop, c,
+                                   TRUNC_RE.search(code[a:b]).group(0).strip())))
+                else:
+                    out.append((rel, 0, "1e",
+                                "`%s` maps ProviderType.%s to BLANK provider "
+                                "id(s) (`%s`) — a single empty string is not an "
+                                "empty list, but no models.dev row is keyed "", "
+                                "so every lookup for the family misses and it "
+                                "falls back to the relay scan (F-212)"
+                                % (prop, c, rhs_lit.strip().splitlines()[0][:60]
+                                   if rhs_lit.strip() else "")))
     return out
-
 
 def check_arm2(src, rel):
     out = []
-    code = code_only(src)
+    code = _structure(src)
+    if code is None:
+        return [(rel, 0, "2a",
+                 "ModelsDevApi.kt cannot be parsed by the shared Kotlin lexer — "
+                 "fail-closed")]
     for imp in MD_IMPORTS:
-        if imp not in code:
+        if imp not in code_only(src):
             out.append((rel, 0, "2a",
                         "missing `%s` — providerKeyMap cannot derive from the "
                         "ProviderType metadata without it" % imp))
@@ -282,48 +454,71 @@ def check_arm2(src, rel):
         if token not in code:
             out.append((rel, 0, "2b",
                         "providerKeyMap merge is missing `%s`" % token))
-    # Arm 2d/2e [wide-1024]: the merge tokens can all be present while the
-    # derived table carries the wrong KEYS or the wrong VALUES — both are
-    # behaviourally identical to no derivation at all, so presence alone is not
-    # a judgement.
-    body = derived_body(src)
-    if body is None:
+    info = derivation(code)
+    if info is None:
         out.append((rel, 0, "2b",
                     "the enum-iterating `.flatMap { … }` of providerKeyMap is "
                     "missing — the derived table was dropped"))
+    elif info["intercepted"] or info["body"] is None:
+        out.append((rel, 0, "2b",
+                    "the enum iteration is intercepted by `.%s` before the "
+                    "mapping block — `ProviderType.values().take(0).flatMap { "
+                    "… }` still matches `ProviderType.values()` and still "
+                    "contains a flatMap, but the block never runs and the "
+                    "derived table is empty"
+                    % (info["intercepted"] or "?")))
     else:
-        keys_m = DERIVED_KEYS_RE.search(body)
-        keys_expr = body[:keys_m.start()] if keys_m else body
-        if "displayName" not in keys_expr:
-            out.append((rel, 0, "2d",
-                        "the derived key set no longer includes "
-                        "`type.displayName` — every add surface persists "
-                        "displayName, so \"Google Gemini\" / \"xAI (Grok)\" / "
-                        "\"Kimi Code\" rows miss the map (1026-D)"))
-        if keys_m is None:
+        body = info["body"]
+        if info["keys_expr"] is None:
             out.append((rel, 0, "2e",
                         "the derived table never builds key→ids pairs "
                         "(`.map { key -> … }` absent) — nothing is merged"))
         else:
-            pair_body = body[keys_m.end():]
-            bound = BOUND_IDS_RE.findall(body)
-            pairs = re.findall(r"\bto\s+([^\n}]+)", pair_body)
-            if not pairs:
+            keys_expr = info["keys_expr"]
+            # [batch6-t06] The key space is a SET; listing the right symbolic
+            # sources is not the same as keeping them. `.filter { it !=
+            # type.displayName }` keeps all three names in the text and drops
+            # one whole key family from the value.
+            trunc = TRUNC_RE.search(keys_expr)
+            if trunc:
+                out.append((rel, 0, "2d",
+                            "the derived key chain runs through a truncation "
+                            "operator (`%s`) — the key space is a set, and "
+                            "filtering it (e.g. `filter { it != "
+                            "type.displayName }`) silently drops a whole key "
+                            "family while every source name stays in the text"
+                            % trunc.group(0).strip()))
+            for token, pat in (
+                ("`type.displayName`", r"\bdisplayName\b"),
+                ("`type.name`", r"\bname\b"),
+                ("`type.legacyProviderNames`", r"\blegacyProviderNames\b"),
+            ):
+                if not re.search(pat, keys_expr):
+                    out.append((rel, 0, "2d",
+                                "the derived key set no longer includes %s — "
+                                "every add surface persists displayName, so "
+                                "\"Google Gemini\" / \"xAI (Grok)\" / \"Kimi "
+                                "Code\" rows miss the map (1026-D)" % token))
+            value = info["pair_value"]
+            bound = info["bound"]
+            if value is None:
                 out.append((rel, 0, "2e",
                             "the derived pair expression does not bind a value "
                             "with `to` — the merge yields nothing usable"))
-            for value in pairs:
-                value = value.strip()
-                ok = ("modelsDevProviderIds" in value
-                      or value.split(".")[0] in bound)
-                if not ok:
+            else:
+                core = strip_parens(value).strip()
+                direct = re.fullmatch(r"(?:[A-Za-z_]\w*\s*\.\s*)?"
+                                      r"modelsDevProviderIds", core)
+                if not (core in bound or direct):
                     out.append((rel, 0, "2e",
                                 "the derived table maps every key to `%s` "
                                 "instead of the family's ids — `val ids = "
                                 "type.modelsDevProviderIds` becomes dead and all "
                                 "%d vendors fall out of the key map (the "
                                 "derivation is present but its result is "
-                                "discarded)" % (value, len(BASE_KEYS))))
+                                "discarded; `.take(0)` / `.filter { }` on the "
+                                "binding is the same defect one stage later)"
+                                % (core, len(BASE_KEYS))))
     body = map_literal_text(src)
     if body is None:
         out.append((rel, 0, "2c",
@@ -337,7 +532,6 @@ def check_arm2(src, rel):
                             "readability anchors depend on these literals)"
                             % key))
     return out
-
 
 def run_checks(root, rels=None):
     rels = rels or {"pc": PC_REL, "md": MD_REL}
@@ -638,6 +832,81 @@ def selftest():
             ok = False
         else:
             print("  [OK]   discarded-value witness trips arm2e alone")
+        write("md", FIX_MD_OK)
+
+        # ── [batch6-t06] the six witnesses this branch's report proved blind ─
+        # Each keeps every token the old criteria looked for (an exhaustive
+        # `when`, `ProviderType.values()`, `flatMap`, `key to …`, the enum
+        # constant's name) and moves the EFFECT: the value empties one stage
+        # later, the key set is filtered, the enum stream is truncated, a
+        # branch lives only in a block comment, a constant shares a line.
+
+        def expect(label, want, checks, needle=""):
+            nonlocal ok
+            got = [(c[2], c[3]) for c in checks]
+            if len(got) != want or (needle and not all(needle in g[1] for g in got)):
+                ok = False
+                print("  [FAIL] %s: expected %d×%s, got %s"
+                      % (label, want, needle or "finding",
+                         [(c[2], c[3][:60]) for c in checks]))
+            else:
+                print("  [OK]   %s trips %d×%s" % (label, want, needle or "finding"))
+
+        # N1: the mapping value is emptied ONE STAGE LATER — `listOf(...).filter
+        # { false }` is `listOf()` at evaluation time, and it still contains a
+        # non-empty constructor for any criterion that inspects construction.
+        write("pc", FIX_PC_OK.replace(
+            'ProviderType.kimiCode -> listOf("moonshotai", "moonshotai-cn")',
+            'ProviderType.kimiCode -> listOf("moonshotai", "moonshotai-cn")'
+            '.filter { false }'))
+        write("md", FIX_MD_OK)
+        expect("evaluation-stage empty mapping", 1, run_checks(tmp, rels),
+               "emptied by a collection operator")
+
+        # N2: the value is derived, bound, then TRUNCATED at the pair site —
+        # `val ids = …` stays live-looking while `key to ids.take(0)` empties it.
+        write("pc", FIX_PC_OK)
+        write("md", FIX_MD_OK.replace("key to ids", "key to ids.take(0)"))
+        expect("truncated pair value", 1, run_checks(tmp, rels),
+               "instead of the family's ids")
+
+        # N3: the key SPACE is a set; filtering it keeps every symbolic source
+        # in the text while dropping one whole key family from the value.
+        write("md", FIX_MD_OK.replace(".distinct()",
+                                      ".filter { it != type.displayName }"))
+        expect("filtered key space", 1, run_checks(tmp, rels),
+               "truncation operator")
+
+        # N4: the enum stream is intercepted before the mapping block —
+        # `ProviderType.values().take(0).flatMap { … }` matches both old
+        # criteria (ENUM_ITER + MERGE_TOKENS) and maps nothing.
+        write("md", FIX_MD_OK.replace("ProviderType.values().flatMap",
+                                      "ProviderType.values().take(0).flatMap"))
+        expect("zeroed enum iteration", 1, run_checks(tmp, rels),
+               "enum iteration is intercepted by")
+
+        # N5: two branches move into a block comment and merge into a branch
+        # that yields one BLANK id — the line-based stripper kept `/* … */`
+        # alive, so coverage stayed "complete" via branches that do not exist.
+        write("pc", FIX_PC_OK.replace(
+            '        ProviderType.anthropic -> listOf("anthropic")\n'
+            '        ProviderType.gemini -> listOf("google", "google-vertex")',
+            '        /* ProviderType.anthropic -> listOf("anthropic")\n'
+            '        ProviderType.gemini -> listOf("google", "google-vertex") */\n'
+            '        ProviderType.anthropic, ProviderType.gemini -> listOf("")'))
+        write("md", FIX_MD_OK)
+        expect("commented-out branches + blank id", 2, run_checks(tmp, rels),
+               "BLANK provider id")
+
+        # N6: a second constant on an EXISTING line — the old enum parser was
+        # anchored at `^\s*NAME(`, so the enum grew a subclass the gate could
+        # not see (exhaustiveness then "held" for a constant it never listed).
+        write("pc", FIX_PC_OK.replace(
+            '    kimiCode("Kimi Code");',
+            '    kimiCode("Kimi Code"), deepSeek("DeepSeek");'))
+        expect("same-line enum constant", 2, run_checks(tmp, rels),
+               "does not cover ProviderType.deepSeek")
+        write("pc", FIX_PC_OK)
         write("md", FIX_MD_OK)
 
     print("PROVIDER_TYPE_REGISTRY_SELFTEST=%s" % ("PASS" if ok else "FAIL"))
