@@ -61,8 +61,13 @@ deep-audit-1023 ISSUE-07 gate. Two files, three defect surfaces:
          so the shown cap tracks the real one.
      Fail-closed on the function anchor: losing it is gate ROT.
 
-Comments are stripped before every judgment (the fix ships with prose
-comments that name each criterion; they must not carry the gate).
+Every judgment runs on `code_view()`: comments and the *inside* of string /
+char literals are blanked with the same length, so offsets back-project onto
+the source and the prose that names each criterion cannot carry the gate.
+A file that cannot be lexed is reported red (fail-closed), never re-scanned
+in raw form. [batch6-t08] criterion `live` (reachability) is decided by the
+shared `path_feasible` + a local dead-span set, never by matching the
+spelling `false`/`true`.
 
 Usage: python3 memory_ui_wiring_check.py <repo_root>
        python3 memory_ui_wiring_check.py --root <repo_root>
@@ -72,196 +77,181 @@ Exit 0 = pass, 1 = violation, 2 = usage error.
 import re
 import sys
 
+from pathlib import Path
+
+# [batch6-t08] 共享词法 / 语法 / 值流原语（**唯一**实现）。本门不再自写词法器：
+# 结构分析一律在 `code_view()`（注释与字符串/字符字面量内部抹成空格，长度与源码
+# **严格相等**，位置可回投原文）上做；括号配平走 `match_bracket`；常量折叠走
+# `const_bool` / `const_value`；可达性走 `path_feasible`（覆盖 if / else / when）；
+# 值流走 `value_sources`。解析失败一律 fail-closed（报违规，绝不回退原文扫描）。
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from _kotlin_lexer import KotlinLexError  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    const_value,
+    function_body,
+    if_blocks,
+    match_bracket,
+    strip_parens,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    code_view,
+    contains_ident,
+    expr_end,
+    path_feasible,
+)
+
 MEM_SCREEN = "src/android/app/src/main/java/com/rikkaminis/app/ui/settings/MemoryManagementScreen.kt"
 MEM_SHEET = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/SessionMemorySheet.kt"
 MARKER = "MEMORY_UI_WIRING_SELFTEST=PASS"
 
 
-def strip_comments(src: str) -> str:
-    """Remove // and /* */ comments, honouring string literals."""
-    out = []
-    i = 0
-    n = len(src)
-    in_str = False
-    while i < n:
-        c = src[i]
-        if in_str:
-            if c == "\\":
-                out.append(src[i:i + 2])
-                i += 2
-                continue
-            if c == '"':
-                in_str = False
-            out.append(c)
-            i += 1
-            continue
-        if c == '"':
-            in_str = True
-            out.append(c)
-            i += 1
-            continue
-        if c == "/" and i + 1 < n and src[i + 1] == "/":
-            j = src.find("\n", i)
-            i = n if j < 0 else j
-            continue
-        if c == "/" and i + 1 < n and src[i + 1] == "*":
-            j = src.find("*/", i + 2)
-            i = n if j < 0 else j + 2
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
+def _view(src: str):
+    """结构视图；解析失败 → None（调用方 fail-closed，绝不回退原文扫描）。"""
+    try:
+        return code_view(src)
+    except KotlinLexError:
+        return None
 
 
-def _match_paren(src: str, open_idx: int):
-    depth = 0
-    for i in range(open_idx, len(src)):
-        c = src[i]
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-    return None
+def _fn_body(text: str, name: str):
+    """函数体（不含两侧花括号）；找不到 → None。派生自共享 `function_body`。"""
+    got = function_body(text, name)
+    if not got:
+        return None
+    return text[got[0]:got[1]]
 
 
-def brace_slice(src: str, sig: str, from_pos: int = 0) -> str:
-    """Char-offset slice from `sig` through the brace it opens (balanced).
+def _block_at(text: str, sig: str, from_pos: int = 0):
+    """从 sig 起到它开启的块结束（含）的切片；配平失败 → ""（fail-closed）。
 
-    `from_pos` matters when the signature appears several times: each
-    `withContext(Dispatchers.IO) {` match must slice ITS OWN block, not the
-    first one in the file (the selftest caught the always-slice-first bug:
-    the second IO region's deleteFile site looked unguarded).
-
-    For a FUNCTION signature the body brace is looked for AFTER the parameter
-    list's matching paren, never at the first `{` to the right: a call-shaped
-    default (`maxInjectLines: Int = run { … }`) used to end the slice inside the
-    signature, so the real body was never judged at all — external witness E
-    put `minOf(lineCount, 200)` there and every criterion stayed green
-    (`brace_slice` had the same blind spot on MemoryFileRow /
-    MemoryFileEditScreen, which this fixes too).
+    `from_pos` 必须给：同一文件里有多个 `withContext(Dispatchers.IO) {`，每个
+    调用点要切自己那块（曾经"永远切第一块"让第二个 IO 区域看起来没有守卫）。
     """
-    i = src.find(sig, from_pos)
+    i = text.find(sig, from_pos)
     if i < 0:
         return ""
-    body_from = i + len(sig) - 1
-    if "fun " in sig:
-        op = src.find("(", i)
-        if op < 0:
-            return ""
-        cl = _match_paren(src, op)
-        if cl is None:
-            return ""            # unbalanced params → fail closed
-        body_from = cl
-    ob = src.find("{", body_from)
-    if ob < 0:
+    op = text.find("{", i + len(sig) - 1)
+    if op < 0:
         return ""
-    depth = 0
-    for j in range(ob, len(src)):
-        c = src[j]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return src[i:j + 1]
-    return src[i:]
+    close = match_bracket(text, op)
+    if close < 0:
+        return ""
+    return text[i:close + 1]
 
 
-def _split_top(expr: str, op: str):
-    parts, depth, last, i = [], 0, 0, 0
-    while i < len(expr):
-        c = expr[i]
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        elif depth == 0 and expr.startswith(op, i):
-            parts.append(expr[last:i])
-            last = i + len(op)
-            i = last
-            continue
-        i += 1
-    parts.append(expr[last:])
-    return parts
+def _dead_spans(text: str):
+    """字面常量判死的分支体：`if` 的 then 体 + **无主题** `when` 的常量假分支。
 
-
-def cond_truth(expr: str):
-    """True/False when a LITERAL operand decides the condition, else None."""
-    s = expr.strip()
-    while s.startswith("(") and s.endswith(")") and _match_paren(s, 0) == len(s) - 1:
-        s = s[1:-1].strip()
-    if s == "true":
-        return True
-    if s == "false":
-        return False
-    if s.startswith("!"):
-        inner = cond_truth(s[1:])
-        return None if inner is None else (not inner)
-    ors = _split_top(s, "||")
-    if len(ors) > 1:
-        vals = [cond_truth(x) for x in ors]
-        if any(v is True for v in vals):
-            return True
-        if vals and all(v is False for v in vals):
-            return False
-        return None
-    ands = _split_top(s, "&&")
-    if len(ands) > 1:
-        vals = [cond_truth(x) for x in ands]
-        if any(v is False for v in vals):
-            return False
-        if vals and all(v is True for v in vals):
-            return True
-        return None
-    return None
-
-
-def dead_guard_spans(text: str):
-    """[(start, end)] of bodies whose controlling condition is literal-FALSE.
-
-    `if (false && onDelete != null) { IconButton(onClick = onDelete) … }` keeps
-    the callback reference, the IconButton spelling and the whole confirmation
-    path in the text — and renders nothing (external witness A). Same shape
-    revived the SOUL cache refresh in witness D.
+    [batch6-t08 A04-1/A04-2] 旧实现只认 `true`/`false` 两个词：`1 == 2` 折不出
+    常量，`when { false && … -> }` 连扫都不扫。这里常量折叠交给共享 `const_bool`
+    （`1 == 2`、`!true`、`x && false` 全折）；`when` 分支按顶层 `->` 切分，
+    分支体从箭头到下一个箭头（无主题 when 的条件是布尔表达式，才可折）。
     """
     spans = []
-    for m in re.finditer(r"\b(?:if|while)\s*\(", text):
-        op = m.end() - 1
-        cl = _match_paren(text, op)
-        if cl is None or cond_truth(text[op + 1:cl]) is not False:
+    for cond, t_start, t_end, _e_start, _e_end in if_blocks(text):
+        if const_bool(cond) is False:
+            spans.append((t_start, t_end))
+    for m in re.finditer(r"\bwhen\s*\{", text):
+        close = match_bracket(text, m.end() - 1)
+        if close < 0:
             continue
-        k = cl + 1
-        while k < len(text) and text[k] in " \t":
-            k += 1
-        if k < len(text) and text[k] == "{":
-            depth = 0
-            for j in range(k, len(text)):
-                if text[j] == "{":
-                    depth += 1
-                elif text[j] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        spans.append((k, j))
-                        break
-        else:
-            eol = text.find("\n", k)
-            spans.append((k, eol if eol >= 0 else len(text)))
+        body_start, body_end = m.end(), close
+        arrows, depth, i = [], 0, body_start
+        while i < body_end:
+            ch = text[i]
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            elif depth == 0 and text.startswith("->", i):
+                arrows.append(i)
+                i += 2
+                continue
+            i += 1
+        prev = body_start
+        for k, arrow in enumerate(arrows):
+            end = arrows[k + 1] if k + 1 < len(arrows) else body_end
+            if const_bool(strip_parens(text[prev:arrow])) is False:
+                spans.append((arrow + 2, end))
+            prev = arrow + 2
     return spans
 
 
-def inside_spans(spans, pos: int) -> bool:
-    return any(a <= pos <= b for a, b in spans)
+def _live(text: str, pos: int) -> bool:
+    """pos 是否可达：条件都可行 **且** 不在任何字面常量判死的分支体里。"""
+    if not path_feasible(text, pos):
+        return False
+    return not any(a <= pos < b for a, b in _dead_spans(text))
 
 
+def _live_matches(text: str, pattern: str):
+    return [m for m in re.finditer(pattern, text) if _live(text, m.start())]
+
+
+def _fn_params(code: str, name: str):
+    """函数参数名集合（从签名派生，不写死名字）。"""
+    m = re.search(r"\bfun\s+(?:[A-Za-z_][\w.]*\.)?" + re.escape(name) + r"\s*\(",
+                  code)
+    if not m:
+        return set()
+    open_pos = m.end() - 1
+    close = match_bracket(code, open_pos)
+    if close < 0:
+        return set()
+    names = set()
+    for a, b in call_args(code, open_pos):
+        mm = re.match(r"\s*(?:(?:vararg|noinline|crossinline|val|var)\s+)?"
+                      r"([A-Za-z_]\w*)\s*:", code[a:b])
+        if mm:
+            names.add(mm.group(1))
+    return names
+
+
+_CAP_CALLS = ("minOf(", "maxOf(", "min(", "max(", "coerceAtMost(", "coerceAtLeast(")
+
+
+def _cap_operands(body: str):
+    """「上限操作数」：min/max/coerce 的实参 + 比较两侧。"""
+    out = []
+    for name in _CAP_CALLS:
+        for m in re.finditer(r"\b" + re.escape(name), body):
+            for a, b in call_args(body, m.end() - 1):
+                out.append(body[a:b].strip())
+    for m in re.finditer(r"([A-Za-z_][\w.()]*)\s*(?:<=|>=|<|>)\s*([A-Za-z_][\w.()]*)",
+                         body):
+        out.extend([m.group(1).strip(), m.group(2).strip()])
+    return [c for c in out if c]
+
+
+def _resolve(body: str, expr: str, hops: int = 3) -> str:
+    """局部 `val` 一跳（最多 hops）展开：`fixedCap` → `100 + 100`。"""
+    cur = expr.strip()
+    for _ in range(hops):
+        if not re.fullmatch(r"[A-Za-z_]\w*", cur):
+            break
+        m = re.search(r"\bval\s+" + re.escape(cur) + r"\b[^=\n]*=(?!=)", body)
+        if not m:
+            break
+        cur = body[m.end():expr_end(body, m.end())].strip()
+    return cur
 def check(screen_src: str, sheet_src: str) -> list:
     errs = []
-    scr = strip_comments(screen_src)
-    sht = strip_comments(sheet_src)
+    scr = _view(screen_src)
+    if scr is None:
+        return [MEM_SCREEN + " cannot be lexed (unterminated string/comment) — "
+                "fail-closed"]
+    sht = _view(sheet_src)
+    if sht is None:
+        return [MEM_SHEET + " cannot be lexed (unterminated string/comment) — "
+                "fail-closed"]
 
-    # ---- A. MemoryFileRow must consume onDelete in its body ----
-    row = brace_slice(scr, "private fun MemoryFileRow(")
+    # ---- A. MemoryFileRow must consume onDelete from a LIVE branch ----
+    row = _fn_body(scr, "MemoryFileRow")
     if not row:
         errs.append("MemoryFileRow not found in " + MEM_SCREEN + " — gate ROT")
     else:
@@ -271,99 +261,91 @@ def check(screen_src: str, sheet_src: str) -> list:
                 f"MemoryFileRow body references onDelete {refs} time(s) "
                 "(param only) — the row consumes the delete callback nowhere; "
                 "the daily-log delete stays unreachable")
-        if not re.search(r"IconButton\s*\(\s*onClick\s*=\s*onDelete\b", row) \
-                and not re.search(r"IconButton\s*\(\s*onClick\s*=\s*\{\s*onDelete\?\.\s*invoke\(\)\s*\}", row):
+        handles = []
+        for m in re.finditer(r"IconButton\s*\(", row):
+            close = match_bracket(row, m.end() - 1)
+            args = row[m.end():close] if close > 0 else ""
+            if not (re.search(r"onClick\s*=\s*onDelete\b", args)
+                    or re.search(r"onClick\s*=\s*\{\s*onDelete\?\s*\.\s*invoke\(\)\s*\}",
+                                 args)):
+                continue
+            handles.append(m.start())
+        if not [p for p in handles if _live(row, p)]:
             errs.append(
-                "MemoryFileRow has no IconButton(onClick = onDelete) — no "
-                "rendered handle can reach the confirm dialog")
-        else:
-            # Inside the body is not the same as reachable: `if (false &&
-            # onDelete != null)` keeps every token the checks above match and
-            # never renders the row's delete handle (external witness A).
-            dead = dead_guard_spans(row)
-            live = [m for m in re.finditer(r"IconButton\s*\(", row)
-                    if not inside_spans(dead, m.start())]
-            if not live:
-                errs.append(
-                    "MemoryFileRow's IconButton(onClick = onDelete) cannot run — it sits "
-                    "inside a literal-decided guard (`if (false && onDelete != null)`) or "
-                    "the whole row body is dead: the delete feature is unreachable again "
-                    "while every spelling survives")
+                "MemoryFileRow has no IconButton(onClick = onDelete) that can RUN "
+                "— the handle is missing, its argument list does not pass the "
+                "callback, or every such handle sits in a literal-decided branch "
+                "(`if (1 == 2 && onDelete != null)` / `when { false && … -> }`): "
+                "the delete feature is unreachable again while every spelling "
+                "survives")
 
     # ---- B. every blocking repository call site is inside Dispatchers.IO ----
+    # A dead IO region (`if (false) { withContext(Dispatchers.IO) { … } }`) does
+    # not hold anything: the region has to be reachable to count as a wrapper.
     io_slices = []
     for m in re.finditer(r"withContext\s*\(\s*Dispatchers\.IO\s*\)\s*\{", scr):
-        sl = brace_slice(scr, m.group(0), from_pos=m.start())
-        if sl:
-            io_slices.append((m.start(), m.start() + len(sl)))
+        if not _live(scr, m.start()):
+            continue
+        close = match_bracket(scr, m.end() - 1)
+        if close < 0:
+            continue
+        io_slices.append((m.start(), close))
     for call in ("memoryRepository.deleteFile(", "memoryRepository.listAllFiles(",
                  "memoryRepository.readFile(", "memoryRepository.saveFile("):
         for m in re.finditer(re.escape(call), scr):
             pos = m.start()
             if not any(a <= pos < b for a, b in io_slices):
                 errs.append(
-                    f"'{call}' at offset {pos} runs outside any "
+                    f"'{call}' at offset {pos} runs outside any reachable "
                     "withContext(Dispatchers.IO) region — main-thread file IO")
-    confirm = brace_slice(scr, "if (deleteFileName != null) {")
+    confirm = _block_at(scr, "if (deleteFileName != null) {")
     if not confirm:
         errs.append("delete-confirmation block not found — gate ROT")
     else:
-        if "scope.launch" not in confirm:
+        if not _live_matches(confirm, r"scope\.launch"):
             errs.append(
-                "delete confirm is synchronous — expected scope.launch + "
-                "withContext(Dispatchers.IO) (state must clear before launch)")
-        if "withContext(Dispatchers.IO)" not in confirm:
-            errs.append("delete confirm has no withContext(Dispatchers.IO)")
+                "delete confirm is synchronous — no REACHABLE scope.launch "
+                "(expected scope.launch + withContext(Dispatchers.IO); state must "
+                "clear before launch)")
+        if not _live_matches(confirm, r"withContext\s*\(\s*Dispatchers\.IO\s*\)"):
+            errs.append("delete confirm has no reachable "
+                        "withContext(Dispatchers.IO)")
 
     # ---- D. MemoryFileEditScreen: async read/save + SOUL cache refresh ----
-    # [deep-audit-1029 ISSUE-03] Fail-closed on the function anchor: the two
-    # async-IO call sites and the SOUL refresh live in its body, so a missing
-    # function means the gate can no longer see them at all.
-    edit = brace_slice(scr, "fun MemoryFileEditScreen(")
-    if not edit:
+    got = function_body(scr, "MemoryFileEditScreen")
+    if not got:
         errs.append(
             "MemoryFileEditScreen not found in " + MEM_SCREEN + " — gate ROT "
             "(its async read/save + SOUL-refresh anchors cannot be judged)")
     else:
+        edit = scr[got[0]:got[1]]
         if not re.search(r"LaunchedEffect\s*\(", edit):
             errs.append(
                 "MemoryFileEditScreen has no LaunchedEffect — the initial "
                 "readFile() must run in an effect, not on the composition pass")
-        if "scope.launch" not in edit:
+        if not _live_matches(edit, r"scope\.launch"):
             errs.append(
-                "MemoryFileEditScreen save is not launched on a coroutine "
-                "scope — saveFile() would block the click thread")
+                "MemoryFileEditScreen save is not launched on a reachable "
+                "coroutine scope — saveFile() would block the click thread")
         save_pos = edit.find("memoryRepository.saveFile(")
         if save_pos < 0:
             errs.append("MemoryFileEditScreen has no memoryRepository.saveFile( — gate ROT")
         else:
-            abs_pos = scr.find("fun MemoryFileEditScreen(") + save_pos
+            abs_pos = got[0] + save_pos
             holders = [(a, b) for a, b in io_slices if a <= abs_pos < b]
             # No holder = criterion B already reported saveFile as outside IO;
             # don't double-report here.
             if holders:
                 a, b = holders[0]
-                if "SoulStore.refreshCache(" not in scr[a:b]:
+                if not _live_matches(scr[a:b], r"SoulStore\.refreshCache\("):
                     errs.append(
                         "the withContext(Dispatchers.IO) region that writes "
-                        "memoryRepository.saveFile( does not call "
-                        "SoulStore.refreshCache( — a SOUL.md edit from this "
-                        "screen leaves SoulStore.cachedMetadata / writeVersion "
-                        "stale for the chat header and Settings → Soul editors")
-                else:
-                    # Present is not the same as running: `if (false &&
-                    # fileName == SOUL_FILE_NAME) { refreshCache(...) }` keeps the
-                    # call inside the IO region and never executes it (external
-                    # witness D).
-                    dead = dead_guard_spans(scr[a:b])
-                    live = [m for m in re.finditer(r"SoulStore\.refreshCache\(", scr[a:b])
-                            if not inside_spans(dead, m.start())]
-                    if not live:
-                        errs.append(
-                            "SoulStore.refreshCache( in the save IO region cannot run — its "
-                            "guarding condition is literal-decided (`if (false && "
-                            "fileName == SOUL_FILE_NAME)`), so a SOUL.md save never "
-                            "refreshes the cache while the call keeps its spelling")
+                        "memoryRepository.saveFile( has no REACHABLE "
+                        "SoulStore.refreshCache( — a SOUL.md edit from this screen "
+                        "leaves SoulStore.cachedMetadata / writeVersion stale, or "
+                        "the refresh hides behind a literal-decided guard "
+                        "(`if (false && fileName == SOUL_FILE_NAME)` / "
+                        "`when { false && … -> }`)")
 
     # ---- C. autoItems snapshot must rebuild on every in-sheet mutation ----
     tick_decl = re.search(r"var\s+autoItemsRefreshTick\s+by\s+remember", sht)
@@ -376,38 +358,49 @@ def check(screen_src: str, sheet_src: str) -> list:
             "autoItems remember does not key on autoItemsRefreshTick — "
             "edits made in this sheet leave the list (and the cached file "
             "contents the editor re-opens) permanently stale")
-    bumps = len(re.findall(r"autoItemsRefreshTick\+\+", sht))
-    if bumps < 3:
+    bumps = _live_matches(sht, r"autoItemsRefreshTick\+\+")
+    if len(bumps) < 3:
         errs.append(
-            f"autoItemsRefreshTick bumped {bumps} time(s), expected >= 3 "
-            "(AutoFile save + Write save + Write revoke)")
+            f"autoItemsRefreshTick is bumped {len(bumps)} time(s) that can RUN, "
+            "expected >= 3 (AutoFile save + Write save + Write revoke) — a bump "
+            "inside a literal-decided branch publishes nothing")
+    resets = list(re.finditer(r"autoItemsRefreshTick\s*(?:--|-=|=(?!=))", sht))
+    if resets:
+        errs.append(
+            "autoItemsRefreshTick is reset after a bump (`%s`) — the remember key "
+            "must only move forward; a later decrement/assignment collapses two "
+            "bumps into one rebuild" % resets[0].group(0).strip())
 
     # ---- E. [dv16 B-08] dailyAutoItemFor cap follows memoryInjectLines() ----
-    daily = brace_slice(sht, "fun dailyAutoItemFor(")
-    if not daily:
+    daily_span = function_body(sht, "dailyAutoItemFor")
+    if not daily_span:
         errs.append(
             "E: dailyAutoItemFor not found in " + MEM_SHEET + " — gate ROT "
             "(its injection-cap anchors cannot be judged)")
     else:
-        if re.search(r"\b200\b", daily):
-            errs.append(
-                "E: dailyAutoItemFor still hardcodes the 200-line injection "
-                "cap — it must flow through the maxInjectLines parameter "
-                "(AgentRuntimeLimitsPrefs.memoryInjectLines())")
-        if not re.search(r"maxInjectLines\s*:", daily):
+        daily = sht[daily_span[0]:daily_span[1]]
+        if "maxInjectLines" not in _fn_params(sht, "dailyAutoItemFor"):
             errs.append(
                 "E: dailyAutoItemFor has no maxInjectLines parameter — the "
                 "sheet cannot follow the user-tunable injection cap")
-        else:
-            body = daily[daily.find(")"): ] if daily.find(")") >= 0 else daily
-            # Declared is not the same as consumed: the witness kept the
-            # parameter (with a call-shaped default) and hardcoded `200` in the
-            # body — both facts green until the slice covered the body at all.
-            if "maxInjectLines" not in body:
-                errs.append(
-                    "E: dailyAutoItemFor declares maxInjectLines but the body never "
-                    "consumes it — the injection cap is hard-coded and the `N/M lines "
-                    "injected` label lies about what was injected")
+        if re.search(r"(?<![\w.])200(?![\w.])", daily):
+            errs.append(
+                "E: dailyAutoItemFor still carries the bare 200 literal — the cap "
+                "must flow through the maxInjectLines parameter")
+        caps = _cap_operands(daily)
+        consts = [c for c in caps if const_value(_resolve(daily, c)) is not None]
+        if consts:
+            errs.append(
+                "E: the injection cap is a constant expression (%s) — it must "
+                "flow from the maxInjectLines parameter "
+                "(AgentRuntimeLimitsPrefs.memoryInjectLines())"
+                % ", ".join(sorted(set(consts))[:3]))
+        if not any(contains_ident(_resolve(daily, c), "maxInjectLines")
+                   for c in caps):
+            errs.append(
+                "E: dailyAutoItemFor declares maxInjectLines but no cap operand "
+                "derives from it — the injection cap is hard-coded and the "
+                "`N/M lines injected` label lies about what was injected")
     if "AgentRuntimeLimitsPrefs.memoryInjectLines()" not in sht:
         errs.append(
             "E: " + MEM_SHEET + " never reads "
@@ -635,6 +628,66 @@ internal fun dailyAutoItemFor(
         "    val injected = minOf(lineCount, 200)\n"
         "    val detail = if (lineCount > 200)")
 
+    # ── [batch6-t08] witnesses A04-1..A04-6 ────────────────────────────────
+    extra_arms = []
+    # A04-1 (family-hole): the guard survives as a spelling but folds to false.
+    extra_arms.append((
+        "A04-1 `if (1 == 2 && onDelete != null)`",
+        good_screen.replace("if (onDelete != null) {",
+                            "if (1 == 2 && onDelete != null) {"), good_sheet, 1))
+    # A04-2 (family-hole): the SOUL refresh hides in a subject-less `when` branch
+    # whose condition folds to false — braces stay balanced.
+    extra_arms.append((
+        "A04-2 `when { false && … -> refresh }`",
+        good_screen.replace(
+            "                    if (fileName == SOUL_FILE_NAME) {\n"
+            "                        SoulStore.refreshCache(context)\n"
+            "                    }\n",
+            "                    when {\n"
+            "                        false && fileName == SOUL_FILE_NAME -> "
+            "SoulStore.refreshCache(context)\n"
+            "                    }\n"), good_sheet, 1))
+    # A04-3 (family-hole): the confirm-side launch guard folds to false.
+    extra_arms.append((
+        "A04-3 `if (name != null && false)`",
+        good_screen.replace("if (name != null) {",
+                            "if (name != null && false) {"), good_sheet, 1))
+    # A04-4 (order): four bumps, two of them inside a dead branch — the count is
+    # unchanged (4) but only two can ever run.
+    _a044_sheet = good_sheet.replace("autoItemsRefreshTick++\n", "", 1)
+    extra_arms.append((
+        "A04-4 two of four bumps are dead",
+        good_screen,
+        _a044_sheet + "\nif (false) { autoItemsRefreshTick++; "
+                      "autoItemsRefreshTick++ }\n", 1))
+    # A04-5 (spelling): the cap becomes a constant expression bound to a local.
+    extra_arms.append((
+        "A04-5 cap = `100 + 100` via a local",
+        good_screen,
+        good_sheet.replace(
+            "    val injected = minOf(lineCount, maxInjectLines)",
+            "    val _ignoredCap = maxInjectLines\n"
+            "    val fixedCap = 100 + 100\n"
+            "    val injected = minOf(lineCount, fixedCap)").replace(
+            "if (lineCount > maxInjectLines)",
+            "if (lineCount > fixedCap)"), 1))
+    # A04-6 (parser-death): a raw string holding a brace + the read pushed out of
+    # Dispatchers.IO — the pre-fix brace counter ended the function early.
+    extra_arms.append((
+        'A04-6 `"""` trap + read outside IO',
+        good_screen.replace(
+            "LaunchedEffect(Unit) {\n"
+            "    files = withContext(Dispatchers.IO) { "
+            "memoryRepository.listAllFiles() }\n"
+            "}\n",
+            'LaunchedEffect(Unit) {\n'
+            '    val note = """\n'
+            '        {"text":""} // this brace used to end the body\n'
+            '    """\n'
+            '    if (false) { withContext(Dispatchers.IO) { } }\n'
+            '    files = memoryRepository.listAllFiles()\n'
+            '}\n'), good_sheet, 1))
+
     arms = [
         ("compliant pair", good_screen, good_sheet, 0),
         ("V13 delete handle behind `if (false && …)`", v13_screen, good_sheet, 1),
@@ -654,6 +707,7 @@ internal fun dailyAutoItemFor(
         ("V11 daily cap hardcoded 200 back", good_screen, v11_sheet, 1),
         ("V12 maxInjectLines parameter dropped", good_screen, v12_sheet, 1),
     ]
+    arms += extra_arms
     failures = 0
     for name, s1, s2, expect_red in arms:
         errs = check(s1, s2)
