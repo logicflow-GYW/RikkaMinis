@@ -50,16 +50,21 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _kotlin_lexer import KotlinLexError, mask_code  # noqa: E402
 from _kotlin_ast import (  # noqa: E402
     const_bool,
+    const_value,
+    enclosing_conditions,
     function_body,
     if_blocks,
     match_bracket,
+    strip_parens,
 )
 from _kotlin_valueflow import (  # noqa: E402
     call_args,
     contains_ident,
     expr_end,
     guard_feasible,
+    literal_view,
     path_feasible,
+    value_sources,
 )
 
 SERVICE_REL = (
@@ -178,11 +183,111 @@ def capture_lambdas(code):
 
 
 def capture_binding(code, capture_start):
-    """The local the capture result is bound to, or None."""
+    """The local the capture result is bound to, or None.
+
+    [R3 14 误伤] `val requestBody: CapturedRequestBody = capture { … }` 是 100%
+    等价的正当写法（显式类型标注）；旧正则只认 `val x =`，把标注判成"结果未
+    绑定"。类型标注是可选的，绑定的身份由名字决定。
+    """
     line_start = code.rfind("\n", 0, capture_start) + 1
     head = code[line_start:capture_start]
-    m = re.search(r"\b(?:val|var)\s+(\w+)\s*=\s*$", head)
+    m = re.search(r"\b(?:val|var)\s+(\w+)\s*(?::[^=\n]+?)?=\s*$", head)
     return m.group(1) if m else None
+
+
+def named_args(text, open_paren_pos):
+    """`f(a = x, b = y)` → {name: (rhs_start, rhs_end)}。"""
+    out = {}
+    for a, b in call_args(text, open_paren_pos):
+        m = re.match(r"\s*([A-Za-z_]\w*)\s*=(?!=)", text[a:b])
+        if not m:
+            continue
+        rhs = a + m.end()
+        out[m.group(1)] = (rhs, min(b, expr_end(text, rhs)))
+    return out
+
+
+def captured_body_methods(code):
+    """{name: (body_start, body_end)} for the methods of `class CapturedRequestBody`."""
+    m = re.search(r"\bclass\s+CapturedRequestBody\b", code)
+    if not m:
+        return None
+    open_brace = code.find("{", m.end())
+    if open_brace < 0:
+        return None
+    close = match_bracket(code, open_brace)
+    if close < 0:
+        return None
+    klass = code[open_brace:close]
+    out = {}
+    for fm in re.finditer(r"\bfun\s+([A-Za-z_]\w*)\s*\(", klass):
+        fb = function_body(klass, fm.group(1))
+        if fb is None:
+            continue
+        out.setdefault(fm.group(1), (open_brace + fb[0], open_brace + fb[1]))
+    return out
+
+
+def check_capture_body(code, lit):
+    """[R3 14-1 symmetric seam] 包装类的方法体必须真的读捕获的 json。
+
+    调用点齐了不代表值对：`fun streamingFlagOrFalse(): Boolean = false` 让队列
+    状态帧守卫（L381）与流式 ACK 屏障守卫（L450）都拿到常量 false —— 流式请求
+    结束后去等一个只写 `.stream.ack` 的客户端写 `.ack`，每次白等一个 ACK 超时。
+    """
+    v = []
+    methods = captured_body_methods(code)
+    if methods is None:
+        v.append(
+            "ModelExecutionService.kt: `class CapturedRequestBody` not found — the "
+            "captured-body wrapper is gone or renamed (fail-closed: the consumers "
+            "would be reading a body nobody captured)"
+        )
+        return v
+    for name, needle, why in (
+        (
+            "streamingFlagOrFalse",
+            r'optBoolean\s*\(\s*"streaming"',
+            "the queue-frame guard and the streaming ACK barrier both read this "
+            "flag; a constant makes a streaming run take the non-streaming "
+            "`waitClientAck` path and burn a full ACK timeout per call",
+        ),
+        (
+            "jsonOrThrow",
+            r"json\s*\.\s*getOrThrow\s*\(",
+            "the formal executor site consumes this parse; a constant hands the "
+            "executor a body nobody read",
+        ),
+    ):
+        if name not in methods:
+            v.append(
+                "ModelExecutionService.kt: CapturedRequestBody.%s(…) is gone — the "
+                "consumer site has no derivation to read (fail-closed)" % name
+            )
+            continue
+        a, b = methods[name]
+        body = code[a:b]
+        body_lit = lit[a:b]
+        line = code[:a].count("\n") + 1
+        if const_bool(body) is not None or const_value(strip_parens(body)) is not None:
+            v.append(
+                "ModelExecutionService.kt:%d: CapturedRequestBody.%s(…) returns a "
+                "CONSTANT — %s" % (line, name, why)
+            )
+            continue
+        if not contains_ident(body, "json"):
+            v.append(
+                "ModelExecutionService.kt:%d: CapturedRequestBody.%s(…) never touches "
+                "the captured `json` — %s" % (line, name, why)
+            )
+            continue
+        if not re.search(needle, body_lit):
+            v.append(
+                "ModelExecutionService.kt:%d: CapturedRequestBody.%s(…) no longer "
+                "derives its answer from the captured body (`%s` missing) — %s"
+                % (line, name, needle, why)
+            )
+    return v
 
 
 def check_service(src):
@@ -190,6 +295,7 @@ def check_service(src):
     v = []
     try:
         code = mask_code(src)
+        lit = literal_view(src)
     except KotlinLexError as exc:
         return ["ModelExecutionService.kt: cannot parse (fail-closed): %s" % exc]
 
@@ -273,6 +379,7 @@ def check_service(src):
                 "ModelExecutionService.kt: executor does not take the parsed "
                 "body — missing '%s'" % sig
             )
+    v += check_capture_body(code, lit)
     return v
 
 
@@ -420,6 +527,149 @@ def check_offload(src):
         )
     if CAP_CONST not in code:
         v.append("NativeOffload.kt: default cap changed (expected '%s')" % CAP_CONST)
+
+    # (7) [R3 14-2 dual-gate seam] 装配段是两门之间的空白：accept loop 与各
+    # `*OffloadHandler` 都合规，但 `handleClient` 把从 socket 帧解出的 cwd 与
+    # `MINIS_CHAT_SESSION_ID` 换成常量，下游每一个 handler 都拿到 "/" 与 null。
+    v += check_dispatch(code)
+
+    # (8) [R3 14-3 symmetric seam] 信号量一侧查得很细（tryAcquire 绑 spawn、
+    # spawn 被 permit 支配、release 可达），队列一侧从没查过入队：
+    # `if (!acquired) pending.addLast(…)` 让"拿到了 permit"的那条路（也就是
+    # 池未满时的几乎每一次提交）把 item 丢掉，新 worker 立刻 pollFirst()=null。
+    v += check_enqueue(code)
+    return v
+
+
+def _first_param(code, fun_name):
+    m = re.search(r"\bfun\s+" + re.escape(fun_name) + r"\s*\(", code)
+    if not m:
+        return None
+    spans = call_args(code, m.end() - 1)
+    if not spans:
+        return None
+    pm = re.match(r"\s*(?:vararg\s+)?([A-Za-z_]\w*)\s*:", code[spans[0][0]:spans[0][1]])
+    return pm.group(1) if pm else None
+
+
+def check_enqueue(code):
+    """`submit` 必须无条件入队：permit 申请与队列是同一笔交易的两半。"""
+    v = []
+    if "pending" not in code:
+        return v  # 夹具没有队列（旧 per-connection 形态由 (1)/(2) 负责）
+    sub = function_body(code, "submit")
+    if sub is None:
+        return [
+            "NativeOffload.kt: BoundedWorkerPool.submit(…) not found — the enqueue "
+            "half of the bounded pool cannot be graded (fail-closed)"
+        ]
+    sa, sb = sub[0], sub[1]
+    sbody = code[sa:sb]
+    item = _first_param(code, "submit")
+    permit_locals = set()
+    for m in re.finditer(r"\b(?:val|var)\s+(\w+)\s*=(?!=)", sbody):
+        rhs = sbody[m.end():expr_end(sbody, m.end())]
+        if re.search(r"tryAcquire|permits", rhs):
+            permit_locals.add(m.group(1))
+    enq = [m.start() for m in re.finditer(
+        r"\bpending\s*\.\s*(?:addLast|addFirst|add|offer|push)\s*\(", sbody)]
+    if not enq:
+        v.append(
+            "NativeOffload.kt: BoundedWorkerPool.submit never enqueues — the accepted "
+            "client is dropped on the floor (the worker polls an empty queue and "
+            "releases the permit immediately)"
+        )
+        return v
+    carried = 0
+    for p in enq:
+        line = code[:sa + p].count("\n") + 1
+        if not path_feasible(sbody, p):
+            v.append(
+                "NativeOffload.kt:%d: the enqueue in submit is unreachable (dead guard) "
+                "— the item is dropped" % line
+            )
+            continue
+        gated = None
+        for _kind, cond in enclosing_conditions(sbody, p):
+            if ("permits" in cond or "tryAcquire" in cond
+                    or any(contains_ident(cond, name) for name in permit_locals)):
+                gated = cond
+                break
+        if gated is not None:
+            v.append(
+                "NativeOffload.kt:%d: pending.addLast(…) sits behind the permit verdict "
+                "`if (%s)` — on the permit-granted path (an idle pool, i.e. almost every "
+                "submit) the item is never queued, the freshly spawned worker polls null "
+                "and releases the permit, and the client socket is never served nor "
+                "closed (R3 14-3)" % (line, gated)
+            )
+            continue
+        open_at = sbody.find("(", p)
+        spans = call_args(sbody, open_at) if open_at > 0 else []
+        arg = sbody[spans[0][0]:spans[0][1]] if spans else ""
+        if item and not contains_ident(arg, item):
+            v.append(
+                "NativeOffload.kt:%d: the enqueue does not carry `%s` — the worker "
+                "drains something other than the accepted item" % (line, item)
+            )
+            continue
+        carried += 1
+    if carried == 0 and not any("sits behind the permit" in x for x in v):
+        v.append(
+            "NativeOffload.kt: no unconditional enqueue survives in submit — every "
+            "client handed to the pool is dropped"
+        )
+    return v
+
+
+def check_dispatch(code):
+    """`handleClient` 装配 NativeOffloadRequest 时必须转发帧里的 cwd / sessionId。"""
+    v = []
+    sites = []
+    for m in re.finditer(r"\bNativeOffloadRequest\s*\(", code):
+        # 跳过类型声明本身（`data class NativeOffloadRequest(…):`）
+        if re.search(r"\bclass\s+$", code[max(0, m.start() - 40):m.start()]):
+            continue
+        sites.append(m.start())
+    if not sites:
+        if re.search(r"\bhandler\s*\.\s*handle\s*\(", code):
+            v.append(
+                "NativeOffload.kt: `handler.handle(…)` has no NativeOffloadRequest "
+                "assembly — the frame-derived request cannot be graded (fail-closed)"
+            )
+        return v
+    for pos in sites:
+        open_at = code.find("(", pos)
+        line = code[:pos].count("\n") + 1
+        if open_at < 0 or match_bracket(code, open_at) < 0:
+            v.append("NativeOffload.kt:%d: NativeOffloadRequest(…) could not be parsed "
+                     "(fail-closed)" % line)
+            continue
+        na = named_args(code, open_at)
+        for arg, ref, why in (
+            ("cwd", "cwd", "every relative path resolves against `/`"),
+            ("sessionId", "env",
+             "session-scoped permissions / browsers lose their binding"),
+        ):
+            if arg not in na:
+                v.append(
+                    "NativeOffload.kt:%d: NativeOffloadRequest is built without `%s = …` "
+                    "— %s (fail-closed)" % (line, arg, why)
+                )
+                continue
+            a, b = na[arg]
+            expr = strip_parens(code[a:b])
+            if const_value(expr) is not None:
+                v.append(
+                    "NativeOffload.kt:%d: `%s = %s` is a constant — the frame-derived "
+                    "value is discarded, so %s (R3 14-2)" % (line, arg, expr[:24], why)
+                )
+                continue
+            if not any(contains_ident(s, ref) for s in value_sources(expr)):
+                v.append(
+                    "NativeOffload.kt:%d: `%s = %s` does not derive from `%s` — %s "
+                    "(R3 14-2)" % (line, arg, expr[:32], ref, why)
+                )
     return v
 
 
@@ -471,6 +721,20 @@ internal class ModelExecutionService {
     private fun executeRun(req: JSONObject, dir: File): String { return "" }
 
     private fun executeStreamingRun(req: JSONObject, dir: File) {}
+}
+
+internal class CapturedRequestBody private constructor(
+    private val json: Result<JSONObject>,
+) {
+    fun streamingFlagOrFalse(): Boolean =
+        json.map { it.optBoolean("streaming", false) }.getOrDefault(false)
+
+    fun jsonOrThrow(): JSONObject = json.getOrThrow()
+
+    companion object {
+        fun capture(read: () -> String): CapturedRequestBody =
+            CapturedRequestBody(runCatching { JSONObject(read()) })
+    }
 }
 """
 
@@ -524,7 +788,19 @@ object NativeOffloadServer {
         }
     }
 
-    private fun handleClient(client: LocalSocket, queueMs: Long) {}
+    private fun handleClient(client: LocalSocket, queueMs: Long) {
+        val cwd = "/var/minis/workspace"
+        val env = mapOf("MINIS_CHAT_SESSION_ID" to "sess-1")
+        handler.handle(
+            NativeOffloadRequest(
+                pid = 0,
+                argv = listOf("minis-fastio"),
+                env = env,
+                cwd = cwd,
+                sessionId = env["MINIS_CHAT_SESSION_ID"]?.takeIf { it.isNotEmpty() },
+            )
+        )
+    }
 }
 
 internal class BoundedWorkerPool<T>(
@@ -659,6 +935,40 @@ BAD_OFFLOAD_BARE_THREAD = GOOD_OFFLOAD.replace(
     "            kotlin.concurrent.thread { handleClient(client, 0L) }\n",
 )
 
+# ══════════════════════════════════════════════════════════════════════════
+# R3 第三轮（dual-gate / symmetric）见证臂
+# ══════════════════════════════════════════════════════════════════════════
+
+# 14-2 witness: 装配段把帧里的 cwd / sessionId 换成常量
+BAD_DISPATCH_CONSTANTS = GOOD_OFFLOAD.replace(
+    '                cwd = cwd,\n'
+    '                sessionId = env["MINIS_CHAT_SESSION_ID"]?.takeIf { it.isNotEmpty() },',
+    '                cwd = "/",\n'
+    '                sessionId = null,')
+# 14-2b: sessionId 干脆不转发（fail-closed）
+BAD_DISPATCH_DROPPED = GOOD_OFFLOAD.replace(
+    '                sessionId = env["MINIS_CHAT_SESSION_ID"]?.takeIf { it.isNotEmpty() },\n', '')
+# 14-3 witness: 入队被 permit 判定包起来（拿到许可的那条路丢掉 item）
+BAD_ENQUEUE_GATED = GOOD_OFFLOAD.replace(
+    '            pending.addLast(item)\n'
+    '            permits.tryAcquire()',
+    '            val acquired = permits.tryAcquire()\n'
+    '            if (!acquired) pending.addLast(item)\n'
+    '            acquired')
+# 14-1 witness: 包装类的方法体返回常量（调用点全在，值全错）
+BAD_STREAMING_FLAG_CONSTANT = GOOD_SERVICE.replace(
+    '    fun streamingFlagOrFalse(): Boolean =\n'
+    '        json.map { it.optBoolean("streaming", false) }.getOrDefault(false)',
+    '    fun streamingFlagOrFalse(): Boolean = false')
+BAD_JSON_OR_THROW_CONSTANT = GOOD_SERVICE.replace(
+    '    fun jsonOrThrow(): JSONObject = json.getOrThrow()',
+    '    fun jsonOrThrow(): JSONObject = JSONObject()')
+# 误伤回归：显式类型标注的捕获绑定是 100% 等价写法
+GOOD_SERVICE_TYPED_BINDING = GOOD_SERVICE.replace(
+    '        val requestBody = CapturedRequestBody.capture { requestFile.readText() }',
+    '        val requestBody: CapturedRequestBody = '
+    'CapturedRequestBody.capture { requestFile.readText() }')
+
 
 def selftest():
     failures = []
@@ -726,6 +1036,22 @@ def selftest():
     dead_submit = check_offload(BAD_OFFLOAD_DEAD_SUBMIT)
     expect_trip("07-6 dead submit", dead_submit, "unreachable")
 
+    # ── R3 第三轮: dual-gate / symmetric 见证臂 ──────────────────────────
+    typed = check_service(GOOD_SERVICE_TYPED_BINDING)
+    expect_clean("14-1 clean arm: typed capture binding", typed)
+    flag_const = check_service(BAD_STREAMING_FLAG_CONSTANT)
+    expect_trip("14-1 constant streamingFlagOrFalse", flag_const, "returns a ")
+    expect_trip("14-1 constant streamingFlagOrFalse", flag_const, "CONSTANT")
+    json_const = check_service(BAD_JSON_OR_THROW_CONSTANT)
+    expect_trip("14-1b constant jsonOrThrow", json_const, "never touches the captured `json`")
+    dispatch_const = check_offload(BAD_DISPATCH_CONSTANTS)
+    expect_trip("14-2 dispatch constants", dispatch_const, "is a constant")
+    expect_trip("14-2 dispatch constants", dispatch_const, "sessionId = null")
+    dispatch_drop = check_offload(BAD_DISPATCH_DROPPED)
+    expect_trip("14-2b sessionId not forwarded", dispatch_drop, "without `sessionId")
+    enq_gated = check_offload(BAD_ENQUEUE_GATED)
+    expect_trip("14-3 enqueue behind permit", enq_gated, "sits behind the permit")
+
     arms = {
         "compliant service": good_service,
         "compliant offload": good_offload,
@@ -744,6 +1070,12 @@ def selftest():
         "else-branch spawn": else_spawn,
         "dead release": dead_release,
         "dead submit": dead_submit,
+        "typed capture binding": typed,
+        "constant streaming flag": flag_const,
+        "constant jsonOrThrow": json_const,
+        "dispatch constants": dispatch_const,
+        "dispatch sessionId dropped": dispatch_drop,
+        "enqueue behind permit": enq_gated,
     }
     for label, verdict in arms.items():
         print("selftest %-26s -> %d violation(s)" % (label, len(verdict)))

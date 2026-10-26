@@ -62,6 +62,7 @@ import sys
 
 from _kotlin_lexer import KotlinLexError
 from _kotlin_ast import (
+    const_bool,
     const_value,
     enclosing_conditions,
     match_bracket,
@@ -76,6 +77,7 @@ from _kotlin_valueflow import (
     expr_end,
     guard_feasible,
     literal_view,
+    path_feasible,
 )
 
 VP_REL = "src/android/app/src/main/java/com/rikkaminis/app/provider/voice/VoiceProvider.kt"
@@ -158,7 +160,15 @@ def dead_guards(text, pos):
     return dead
 
 
-def cause_gated(text, pos, param):
+def _is_null_test(cond, param):
+    """条件是否恰好是 `<param> == null`（含 `===`、反写、外层括号）。"""
+    c = strip_parens(cond).strip()
+    c = strip_parens(c).strip()
+    name = re.escape(param)
+    return bool(re.fullmatch(r"(?:%s\s*===?\s*null|null\s*===?\s*%s)" % (name, name), c))
+
+
+def cause_gated(text, pos, param, role="catch"):
     """守卫条件依赖本次完成/异常**自带的那个值**吗？
 
     `invokeOnCompletion { cause -> if (cause == null) call.cancel() }`：watchJob
@@ -166,18 +176,30 @@ def cause_gated(text, pos, param):
     CancellationException、`cause == null` 恒假 —— 这不是常量，但契约上是一条
     死守卫。同族：`catch (e: CancellationException) { if (e.message == …
     ) throw e }`。
+
+    [R3 13-2 误伤] 角色必须分开：完成回调的形参只可能非 null，所以
+    `if (cause != null) call.cancel()` / `if (cause is CancellationException)`
+    是**活**守卫（旧版把任何引用形参的条件都当死守卫，误杀正当改写）；只有
+    `cause == null` 这一类才死。异常捕获的形参则相反：`e.message == "…"`
+    这类**内容**开关永远不等于标准取消消息，仍然是死守卫。
     """
     if not param or param == "_":
         return None
     for _kind, cond in enclosing_conditions(text, pos):
-        if contains_ident(cond, param):
-            return strip_parens(cond)
+        if not contains_ident(cond, param):
+            continue
+        c = strip_parens(cond)
+        if role == "hook":
+            if _is_null_test(c, param):
+                return c
+            continue
+        return c
     return None
 
 
-def why_dead(text, pos, param=None):
+def why_dead(text, pos, param=None, role="catch"):
     """位置不可达的原因（报错文案用）；None = 这条路是活的。"""
-    g = cause_gated(text, pos, param) if param else None
+    g = cause_gated(text, pos, param, role) if param else None
     if g:
         return g
     d = dead_guards(text, pos)
@@ -189,6 +211,125 @@ def _first_arg_expr(text, a, b):
     raw = text[a:b]
     spans = split_top(raw, (",",))
     return raw[spans[0][0]:spans[0][1]].strip() if spans else raw.strip()
+
+
+# ── try / catch 结构（只用 match_bracket 配平，不做花括号计数） ──────────────
+TRY_RE = re.compile(r"\btry\s*\{")
+CATCH_HEAD_RE = re.compile(r"\bcatch\s*\(")
+FINALLY_RE = re.compile(r"\bfinally\s*\{")
+# CancellationException 在 JVM 上继承 IllegalStateException → RuntimeException →
+# Exception；Throwable 更宽。能接住 CE 的 catch 类型只有这几族。
+CE_CATCHING_TYPES = {
+    "CancellationException",
+    "IllegalStateException",
+    "RuntimeException",
+    "Exception",
+    "Throwable",
+}
+# 阻塞读：响应体一旦开始读，取消只能靠 Call.cancel() 打断；把它塞进吞异常的
+# catch 里等于把结构性取消做成"空目录返回"。
+BLOCKING_READ_RE = re.compile(
+    r"\bbody\s*(?:\?|!!)?\s*\.\s*(?:string|bytes|charStream|byteStream|source|"
+    r"bufferedReader)\s*\("
+)
+
+
+def _simple_type(ctype):
+    return strip_parens(ctype).replace(" ", "").rsplit(".", 1)[-1]
+
+
+def try_blocks(text):
+    """[(try_body_span, [(param, type, catch_body_span)], finally_span|None)]。"""
+    out = []
+    for m in TRY_RE.finditer(text):
+        open_at = m.end() - 1
+        close = match_bracket(text, open_at)
+        if close < 0:
+            continue
+        catches = []
+        fin = None
+        i = close + 1
+        n = len(text)
+        while i < n:
+            while i < n and text[i] in " \t\r\n":
+                i += 1
+            cm = CATCH_HEAD_RE.match(text, i)
+            if cm:
+                p_open = cm.end() - 1
+                p_close = match_bracket(text, p_open)
+                if p_close < 0:
+                    break
+                clause = text[p_open + 1:p_close]
+                param, _sep, ctype = clause.partition(":")
+                param = param.strip()
+                ctype = (ctype or "*").strip()
+                j = p_close + 1
+                while j < n and text[j] in " \t\r\n":
+                    j += 1
+                if j >= n or text[j] != "{":
+                    break
+                c_close = match_bracket(text, j)
+                if c_close < 0:
+                    break
+                catches.append((param, ctype, (j + 1, c_close)))
+                i = c_close + 1
+                continue
+            fm = FINALLY_RE.match(text, i)
+            if fm:
+                f_open = fm.end() - 1
+                f_close = match_bracket(text, f_open)
+                if f_close > 0:
+                    fin = (f_open + 1, f_close)
+                break
+            break
+        out.append(((open_at + 1, close), catches, fin))
+    return out
+
+
+def swallowing_ce_handler(text, pos):
+    """pos 处的 CancellationException 实际落到哪个子句；吞掉的返回 (type, param)。
+
+    Kotlin 按子句顺序匹配：最先能接住 CE 的那个 catch 说了算。它的块里有
+    可达的 `throw` ⇒ 取消照常上抛（安全）；否则取消被这个子句吃掉。
+    """
+    best = None
+    for body, catches, _fin in try_blocks(text):
+        a, b = body
+        if a <= pos < b and (best is None or (b - a) < (best[0][1] - best[0][0])):
+            best = ((a, b), catches)
+    if best is None:
+        return None
+    for param, ctype, span in best[1]:
+        if _simple_type(ctype) not in CE_CATCHING_TYPES:
+            continue
+        cbody = text[span[0]:span[1]]
+        throws = [m.start() for m in re.finditer(r"\bthrow\b", cbody)]
+        if any(path_feasible(cbody, p) for p in throws):
+            return None
+        return (_simple_type(ctype), param)
+    return None
+
+
+def finally_span(text, pos):
+    """覆盖 pos 的 try 的 finally 块区间；该 try 没有 finally ⇒ None。"""
+    best = None
+    for body, _catches, fin in try_blocks(text):
+        a, b = body
+        if a <= pos < b and (best is None or (b - a) < (best[1] - best[0])):
+            best = (a, b) if fin is None else fin
+    return best
+
+
+def watcher_binding(body):
+    """`val <name> = launch { … awaitCancellation() … }` 的 <name>（派生，不写死）。"""
+    for m in re.finditer(
+        r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*=\s*launch\s*(?:\([^)]*\))?\s*\{", body
+    ):
+        open_at = m.end() - 1
+        close = match_bracket(body, open_at)
+        if close > 0 and "awaitCancellation" in body[open_at:close]:
+            return m.group(1)
+    return None
 
 
 def response_text_args(text):
@@ -314,7 +455,7 @@ def check_voiceprovider(src):
                 v.append("VoiceProvider.kt: the watcher hook does not cancel the Call "
                          "(call.cancel() missing from the invokeOnCompletion lambda)")
             else:
-                reasons = [why_dead(lam_body, p, param) for p in cancels]
+                reasons = [why_dead(lam_body, p, param, role="hook") for p in cancels]
                 if all(r is not None for r in reasons):
                     v.append("VoiceProvider.kt: call.cancel() sits behind the dead guard "
                              "`if (%s)` — the hook fires and cancels nothing, so a cancelled "
@@ -331,6 +472,28 @@ def check_voiceprovider(src):
     if "watchDisposable.dispose()" not in body:
         v.append("VoiceProvider.kt: watcher hook is no longer disposed on the "
                  "success path (every completed request would cancel its Call)")
+
+    # [R3 13-2 dual-gate seam] dispose() 只解绑完成回调，**不会**取消 watchJob。
+    # `withContext(Dispatchers.IO)` 的结构化并发要等作用域里所有子 Job 结束，
+    # 而 watchJob 跑的是 awaitCancellation()：少了这半条链，HTTP 明明 200 OK
+    # 读完，函数仍在 withContext 出口永远挂起（每次语音请求 100% 卡死）。
+    job = watcher_binding(body)
+    if job is not None:
+        exec_at = body.find("executeOrCancel()")
+        cancels = [m.start() for m in re.finditer(
+            r"\b%s\s*\.\s*cancel(?:AndJoin)?\s*\(" % re.escape(job), body)]
+        live = [p for p in cancels if path_feasible(body, p)]
+        fin = finally_span(body, exec_at) if exec_at >= 0 else None
+        if not live:
+            v.append("VoiceProvider.kt: the watcher job `%s` is never cancelled — dispose() "
+                     "only detaches the completion hook, so structured concurrency keeps "
+                     "withContext waiting on awaitCancellation() and every successful ASR/TTS "
+                     "request hangs at the withContext exit (da1020 ISSUE-05 A)" % job)
+        elif fin is not None and not any(fin[0] <= p < fin[1] for p in live):
+            v.append("VoiceProvider.kt: the watcher job `%s` is only cancelled outside the "
+                     "`finally` block of the guarded call — the normal-completion path still "
+                     "waits on awaitCancellation() until the 120s readTimeout (da1020 "
+                     "ISSUE-05 A)" % job)
 
     at = cv.find("fun parseChatAsrTranscript")
     blk = block_at(cv, at) if at >= 0 else None
@@ -465,6 +628,23 @@ def check_openrouter(src):
         if eblk is None or not EMPTY_FALLBACK_RE.search(rest[eblk[0]:eblk[1]]):
             v.append("OpenRouterModelsApi.kt: Exception catch must return the "
                      "empty fallback (return@withContext emptyList())")
+
+    # ── [R3 13-1 dual-gate seam] 阻塞读的取消归属 ─────────────────────────
+    # 已有判据只看 executeOrCancel() 有没有待在带 CE 重抛的 try 里；把
+    # `response.body?.string()` 整体搬进下面那条 `catch (_: Exception) { return
+    # emptyList() }`，两门都不管：开头（响应头已到）的取消在读完数 MB 响应体
+    # 期间被 catch-all 吞掉，调用方的结构性取消被伪装成"OpenRouter 没模型"。
+    # 判据取自 Kotlin 的匹配顺序：CE 由**最先能接住它**的 catch 子句决定归属，
+    # 那个子句里没有可达的 throw ⇒ 取消被吞。
+    for m in BLOCKING_READ_RE.finditer(cv):
+        hit = swallowing_ce_handler(cv, m.start())
+        if hit is not None:
+            v.append("OpenRouterModelsApi.kt:%d: the blocking body read `%s` sits inside a "
+                     "`catch (%s) { … }` with no reachable rethrow — CancellationException "
+                     "raised while the body is being drained is swallowed, so a cancelled "
+                     "fetch masquerades as \"no models\" and the caller's cancellation never "
+                     "propagates (da1020 ISSUE-05 D)"
+                     % (cv.count("\n", 0, m.start()) + 1, m.group(0).strip(), hit[0]))
     return v
 
 
@@ -557,6 +737,106 @@ def read(root, rel):
         return fh.read()
 
 
+# ── [R3 13-3 symmetric seam] 空转写守卫必须覆盖**每一个**厂商解析器 ──────────
+# 旧判据只认 Xunfei（da1027 的当事人），同文件对称的 Doubao / Deepgram 只写在
+# 注释里「与 Xunfei 对齐」——见证把 Doubao 的 `?.takeIf { it.isNotEmpty() }`
+# 删掉，`?: throw` 立刻变成死码，空转写以"成功"返回，候选被粘性钉死、永不
+# fail-over，门照绿。
+VENDOR_OVERRIDE_RE = re.compile(r"\boverride\s+fun\s+parseVoiceInputResponse\s*\(")
+CLASS_DECL_RE = re.compile(r"\bclass\s+([A-Za-z_]\w*)")
+# 真正拦得住空串的三种拼写（takeIf 判非空 / takeUnless 判空 / ifEmpty·ifBlank 兜底）
+GUARD_OK_RE = re.compile(
+    r"\btakeIf\s*\{[^{}]*\bisNot(?:Empty|Blank)\s*\(\s*\)"
+    r"|\btakeUnless\s*\{[^{}]*\bis(?:Empty|Blank)\s*\(\s*\)"
+    r"|\bif(?:Empty|Blank)\s*\{"
+)
+
+
+def named_args(text, open_paren_pos):
+    """`f(a = x, b = y)` → {name: (rhs_start, rhs_end)}。"""
+    out = {}
+    for a, b in call_args(text, open_paren_pos):
+        m = re.match(r"\s*([A-Za-z_]\w*)\s*=(?!=)", text[a:b])
+        if not m:
+            continue
+        rhs = a + m.end()
+        out[m.group(1)] = (rhs, min(b, expr_end(text, rhs)))
+    return out
+
+
+def vendor_parsers(cv):
+    """本文件每个 `parseVoiceInputResponse` 覆盖：[(所属类名, 函数体区间)]。"""
+    out = []
+    for m in VENDOR_OVERRIDE_RE.finditer(cv):
+        cls = None
+        for cm in CLASS_DECL_RE.finditer(cv[:m.start()]):
+            cls = cm.group(1)
+        p_close = match_bracket(cv, m.end() - 1)
+        if p_close < 0:
+            continue
+        i = p_close + 1
+        while i < len(cv) and cv[i] not in "{=":
+            i += 1
+        if i >= len(cv) or cv[i] != "{":
+            continue
+        close = match_bracket(cv, i)
+        if close < 0:
+            continue
+        out.append((cls or "?", (i + 1, close)))
+    return out
+
+
+def check_vendor_transcripts(src):
+    """每个厂商解析器返回的转写文本都必须带空串守卫 + 拒绝路径。"""
+    v = []
+    try:
+        cv, lv = views(src)
+    except KotlinLexError as exc:
+        return ["VoiceProviderVendors.kt: source could not be lexed (%s) — fail-closed" % exc]
+    parsers = vendor_parsers(cv)
+    for cls, (a, b) in parsers:
+        body_c = cv[a:b]
+        body_l = lv[a:b]
+        binds = decl_bindings(body_c)
+        spans = []
+        for m in re.finditer(r"VoiceInputResponse\s*\(", body_c):
+            open_at = m.end() - 1
+            if match_bracket(body_c, open_at) < 0:
+                continue
+            na = named_args(body_c, open_at)
+            if "text" in na:
+                spans.append(na["text"])
+        for rs, re_ in spans:
+            expr_c = strip_parens(body_c[rs:re_])
+            expr_l = body_l[rs:re_]
+            # 绑定的局部 → 回到它的右值（守卫通常写在声明那条链上）
+            if re.fullmatch(r"[A-Za-z_]\w*", expr_c) and expr_c in binds:
+                ba, bb = binds[expr_c]
+                expr_c = strip_parens(body_c[ba:bb])
+                expr_l = body_l[ba:bb]
+            if const_value(expr_c) is not None:
+                v.append("VoiceProviderVendors.kt: %s.parseVoiceInputResponse returns a "
+                         "hard-coded transcript (text = %s) — every utterance is reported as "
+                         "a successful empty transcription (fail-over never advances)"
+                         % (cls, " ".join(expr_l.split())[:32]))
+                continue
+            if not GUARD_OK_RE.search(expr_l):
+                v.append("VoiceProviderVendors.kt: %s.parseVoiceInputResponse returns an "
+                         "UNGUARDED transcript (`%s`) — optString yields \"\" for a missing or "
+                         "empty key, so the `?: throw` is dead code and an empty transcript is "
+                         "reported as success: the consumer pins the candidate sticky + "
+                         "NO_MATCH and the fail-over chain never advances (audit-0917 family / "
+                         "da1027 ISSUE-04, symmetric axis)"
+                         % (cls, " ".join(expr_l.split())[:60]))
+                continue
+            if not re.search(r"\bthrow\b", expr_l):
+                v.append("VoiceProviderVendors.kt: %s.parseVoiceInputResponse guards the "
+                         "transcript but never rejects it — the empty result still reaches the "
+                         "consumer as success (a guard needs a `?: throw Parse(…)` / `ifEmpty "
+                         "{ throw … }` payoff)" % cls)
+    return v
+
+
 def run(root):
     if not os.path.isdir(root):
         print("voice_cancel_guard_check: not a directory: %s" % root)
@@ -572,10 +852,12 @@ def run(root):
     if os.path.exists(vendors_path):
         try:
             with open(vendors_path, "r", encoding="utf-8") as fh:
-                violations += check_xunfei_transcript(fh.read())
+                vendors_src = fh.read()
         except OSError as exc:
             print("voice_cancel_guard_check: cannot read sources: %s" % exc)
             return 2
+        violations += check_xunfei_transcript(vendors_src)
+        violations += check_vendor_transcripts(vendors_src)
     if violations:
         print("FAIL voice_cancel_guard_check")
         for x in violations:
@@ -824,6 +1106,97 @@ BAD_VENDORS_PAD_TRIM = GOOD_VENDORS.replace(
     """        val transcript = sb.append(" ").let { sb.toString().takeIf { it.isNotEmpty() } ?: throw VoiceProviderException.Parse("Unexpected Xunfei ASR response format") }
         return VoiceInputResponse(text = transcript.trim(), language = request.language)""")
 
+# ══════════════════════════════════════════════════════════════════════════
+# R3 第三轮（dual-gate / symmetric）见证臂
+# ══════════════════════════════════════════════════════════════════════════
+
+# 13-1 clean baseline: 响应体在 `try { … } finally { close }` 里读（没有 catch-all）
+GOOD_OR_BODY = GOOD_OR.replace(
+    "        try {\n            emptyList()\n        } finally {\n            response.close()\n        }",
+    "        try {\n"
+    "            val body = response.body?.string() ?: return@withContext emptyList()\n"
+    "            body.length.let { emptyList() }\n"
+    "        } finally {\n"
+    "            response.close()\n"
+    "        }")
+
+# 13-1 witness: 同一个读被搬进 `catch (_: Exception) { return emptyList() }`
+BAD_OR_SWALLOW_READ = GOOD_OR.replace(
+    "        try {\n            emptyList()\n        } finally {\n            response.close()\n        }",
+    "        try {\n"
+    "            val body = response.body?.string() ?: return@withContext emptyList()\n"
+    "            body.length.let { emptyList() }\n"
+    "        } catch (_: Exception) {\n"
+    "            return@withContext emptyList()\n"
+    "        } finally {\n"
+    "            response.close()\n"
+    "        }")
+
+# 13-1 precision arm: catch-all 里**重抛**（取消照常上抛），必须保持绿
+GOOD_OR_RETHROW_READ = GOOD_OR.replace(
+    "        try {\n            emptyList()\n        } finally {\n            response.close()\n        }",
+    "        try {\n"
+    "            val body = response.body?.string() ?: return@withContext emptyList()\n"
+    "            body.length.let { emptyList() }\n"
+    "        } catch (e: Exception) {\n"
+    "            throw e\n"
+    "        } finally {\n"
+    "            response.close()\n"
+    "        }")
+
+# 13-2 witness: finally 里只剩 dispose()，watchJob 永不 cancel
+BAD_VP_NO_JOB_CANCEL = GOOD_VP.replace(
+    "            watchDisposable.dispose()\n            watchJob.cancel()\n",
+    "            watchDisposable.dispose()\n")
+
+# 13-2b: cancel 被挪到 finally 之外（成功路径仍然等 awaitCancellation）
+BAD_VP_CANCEL_OUTSIDE_FINALLY = GOOD_VP.replace(
+    "            watchDisposable.dispose()\n            watchJob.cancel()\n        }\n    }",
+    "            watchDisposable.dispose()\n        }\n        watchJob.cancel()\n    }")
+
+# 13-2 误伤回归：完成回调里 `cause != null` 恒真（awaitCancellation 只会被取消
+# 结束），是语义等价的正当改写；旧版按"引用了 cause"一律判死守卫。
+GOOD_VP_CAUSE_NONNULL = GOOD_VP.replace(
+    "val watchDisposable = watchJob.invokeOnCompletion { _ -> call.cancel() }",
+    "val watchDisposable = watchJob.invokeOnCompletion { cause -> "
+    "if (cause != null) call.cancel() }")
+
+# 13-3 clean baseline: 同文件两个对称厂商，守卫都在
+FAMILY_VENDORS = '''
+class DoubaoVoiceProvider(providerId: String, baseUrl: String, apiKey: String?) :
+    VoiceProvider(providerId, baseUrl, apiKey) {
+    override fun parseVoiceInputResponse(data: ByteArray, request: VoiceInputRequest): VoiceInputResponse {
+        val json = runCatching { JSONObject(String(data, Charsets.UTF_8)) }.getOrNull()
+        val text = json?.optJSONObject("result")?.optString("text")
+            ?.takeIf { it.isNotEmpty() }
+            ?: throw VoiceProviderException.Parse("Unexpected Doubao v3 ASR response format")
+        return VoiceInputResponse(text = text, language = request.language)
+    }
+}
+
+class DeepgramVoiceProvider(providerId: String, baseURL: String, apiKey: String?) :
+    VoiceProvider(providerId, baseURL, apiKey) {
+    override fun parseVoiceInputResponse(data: ByteArray, request: VoiceInputRequest): VoiceInputResponse {
+        val transcript = runCatching { JSONObject(String(data, Charsets.UTF_8)) }.getOrNull()
+            ?.optJSONObject("results")?.optString("transcript")
+            ?.takeIf { it.isNotEmpty() }
+            ?: throw VoiceProviderException.Parse("Unexpected Deepgram ASR response")
+        return VoiceInputResponse(text = transcript, language = request.language)
+    }
+}
+'''
+
+# 13-3 witness: Doubao 少了 `?.takeIf { it.isNotEmpty() }`
+BAD_FAMILY_DOUBAO = FAMILY_VENDORS.replace(
+    '        val text = json?.optJSONObject("result")?.optString("text")\n'
+    '            ?.takeIf { it.isNotEmpty() }\n',
+    '        val text = json?.optJSONObject("result")?.optString("text")\n')
+
+# 13-3b: 守卫在，但拒绝路径没了（空串照样当成功返回）
+BAD_FAMILY_NO_THROW = FAMILY_VENDORS.replace(
+    '            ?: throw VoiceProviderException.Parse("Unexpected Doubao v3 ASR response format")',
+    '            ?: ""')
+
 
 def selftest():
     failures = []
@@ -905,6 +1278,29 @@ def selftest():
     expect_trip("01-6 padded builder", bad_vend_pad, "builder is fed a literal")
     expect_trip("01-6 padded builder", bad_vend_pad, "GUARDED transcript is rewritten")
 
+    # ── R3 第三轮：dual-gate / symmetric 见证臂 ───────────────────────────
+    good_or_body = check_openrouter(GOOD_OR_BODY)
+    expect_clean("body read in try/finally fixture", good_or_body)
+    good_or_rethrow = check_openrouter(GOOD_OR_RETHROW_READ)
+    expect_clean("body read under a rethrowing catch", good_or_rethrow)
+    bad_swallow = check_openrouter(BAD_OR_SWALLOW_READ)
+    expect_trip("13-1 body read under a swallowing catch", bad_swallow, "blocking body read")
+    expect_trip("13-1 body read under a swallowing catch", bad_swallow, "no reachable rethrow")
+
+    bad_no_job = check_voiceprovider(BAD_VP_NO_JOB_CANCEL)
+    expect_trip("13-2 watcher job never cancelled", bad_no_job, "is never cancelled")
+    bad_outside = check_voiceprovider(BAD_VP_CANCEL_OUTSIDE_FINALLY)
+    expect_trip("13-2b cancel outside finally", bad_outside, "only cancelled outside")
+    good_nonnull = check_voiceprovider(GOOD_VP_CAUSE_NONNULL)
+    expect_clean("13-2 clean arm: cause != null hook", good_nonnull)
+
+    good_family = check_vendor_transcripts(FAMILY_VENDORS)
+    expect_clean("compliant vendor family", good_family)
+    bad_doubao = check_vendor_transcripts(BAD_FAMILY_DOUBAO)
+    expect_trip("13-3 unguarded Doubao transcript", bad_doubao, "UNGUARDED transcript")
+    bad_nothrow = check_vendor_transcripts(BAD_FAMILY_NO_THROW)
+    expect_trip("13-3b guard without a rejection", bad_nothrow, "never rejects")
+
     print("selftest compliant VoiceProvider    -> %d violation(s)" % len(good_vp))
     print("selftest compliant OpenRouter       -> %d violation(s)" % len(good_or))
     print("selftest compliant Xunfei transcript-> %d violation(s)" % len(good_vend))
@@ -919,6 +1315,15 @@ def selftest():
     print("selftest bare-sb-return             -> %d violation(s)" % len(bad_vend_bare))
     print("selftest drifted-guard-message      -> %d violation(s)" % len(bad_vend_msg))
     print("selftest guarded-sibling-decoy      -> %d violation(s)" % len(bad_vend_decoy))
+    print("selftest body-read-try-finally      -> %d violation(s)" % len(good_or_body))
+    print("selftest body-read-rethrow-catch    -> %d violation(s)" % len(good_or_rethrow))
+    print("selftest body-read-swallow-catch    -> %d violation(s)" % len(bad_swallow))
+    print("selftest watcher-job-not-cancelled  -> %d violation(s)" % len(bad_no_job))
+    print("selftest cancel-outside-finally     -> %d violation(s)" % len(bad_outside))
+    print("selftest cause-nonnull-hook (clean) -> %d violation(s)" % len(good_nonnull))
+    print("selftest vendor-family (clean)      -> %d violation(s)" % len(good_family))
+    print("selftest vendor-family-unguarded    -> %d violation(s)" % len(bad_doubao))
+    print("selftest vendor-family-no-rejection -> %d violation(s)" % len(bad_nothrow))
 
     if failures:
         for f in failures:
