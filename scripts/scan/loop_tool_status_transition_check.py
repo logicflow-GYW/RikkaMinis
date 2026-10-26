@@ -780,6 +780,15 @@ def check(src: str, label: str):
 
     # ── T9: the cue-index policy DECIDES ────────────────────────────────────
     span = fun_body(masked, "sequentialQueueCueIndices")
+    if span is not None:
+        # The shared expression-body stop can run past the body when a KDoc
+        # follows it (comments are blanked, so the next line looks like a
+        # continuation). Clamp at the next declaration so the judgement stays
+        # inside THIS function.
+        nxt = re.search(r"\n[ \t]*(?:private |internal |public |override )*fun\s+\w+",
+                        masked[span[0]:span[1]])
+        if nxt:
+            span = (span[0], span[0] + nxt.start())
     params = policy_sig_params(masked, "sequentialQueueCueIndices")
     if span is None or not params:
         bad.append("%s:1: `fun sequentialQueueCueIndices(` body not found — anchor moved or "
