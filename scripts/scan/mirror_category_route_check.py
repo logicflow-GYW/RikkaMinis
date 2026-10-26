@@ -27,6 +27,26 @@ lexer/ast/valueflow primitives (`_kotlin_lexer` / `_kotlin_ast` /
   the `else` dead) and `category` must not be re-assigned after it is resolved
   (the later write wins, the screen never sees the resolved value).
 
+Round-3 (dual-gate) hardening — the SEAMS between those anchors
+---------------------------------------------------------------
+Round 2 graded both ends of the chain and nothing in between, so a patch that
+sat between them stayed green in both gates:
+
+* `MirrorsSectionView` built every row with `MirrorCategoryRow(category =
+  category, onClick = { onNavigate(<const>) })` — the row's identity never
+  reached the tap, every row opened the same category, and neither gate looked
+  at the argument. Now the tap's argument must derive from the row's own
+  `category =` expression (one local binding hop is followed).
+* `MirrorCategoryDetailScreen` read `vm.results[ALPINE]` /
+  `MirrorCatalog.mirrors(ALPINE)` under a "Python pip" title. Now every
+  category-scoped read in that function must derive from its `category`
+  parameter.
+* `fromKey` could invert its predicate (`it.key != key`) — the old regex listed
+  `!=` next to `==` as a legal key comparison. Now the predicate is EVALUATED
+  symbolically against the enum's own declared keys: each key must select its
+  own entry, must not select any other, and an unknown key must select
+  nothing.
+
 Usage: python3 mirror_category_route_check.py [ROOT]   (ROOT = repo root, default ".")
        python3 mirror_category_route_check.py --selftest
 Exit:  0 = gate green, 1 = violations (or selftest failure).
@@ -39,6 +59,7 @@ from pathlib import Path
 
 from _kotlin_ast import (
     const_bool,
+    function_body,
     if_blocks,
     match_bracket,
     split_top,
@@ -49,6 +70,7 @@ from _kotlin_lexer import KotlinLexError, mask_code, mask_comments
 from _kotlin_valueflow import (
     call_args,
     contains_ident,
+    expr_end,
     guard_feasible,
     scope_calls,
     value_sources,
@@ -57,6 +79,8 @@ from _kotlin_valueflow import (
 REL_NAV = "src/android/app/src/main/java/com/rikkaminis/app/ui/navigation/AppNavigation.kt"
 PROD_KT_GLOB = "src/android/app/src/main/**/*.kt"
 REL_CAT = "src/android/app/src/main/java/com/rikkaminis/app/ui/sandbox/MirrorCategory.kt"
+REL_SCREEN = ("src/android/app/src/main/java/com/rikkaminis/app/ui/sandbox/"
+              "MirrorSettingsScreen.kt")
 
 VIOLATIONS = []
 
@@ -275,6 +299,317 @@ def predicate_fault(pred):
     return None
 
 
+# ------------------------------------------------- rounded-3: row / detail ---
+
+SAFE_IDENT = re.compile(r"[A-Za-z_]\w*")
+
+
+def _ident_sources(code, expr):
+    """`value_sources()` + ONE hop of local binding (`val x = <expr>`).
+
+    A row may hand the callback a name it bound itself (`val rowCategory =
+    category`); the bare source list would be `['rowCategory']` and a plain
+    set comparison would red a legal row. Following one declaration hop keeps
+    the criterion on the flow instead of on one spelling.
+    """
+    out = list(value_sources(expr))
+    seen = set()
+    for s in list(out):
+        name = s.strip()
+        if not SAFE_IDENT.fullmatch(name) or name in seen:
+            continue
+        seen.add(name)
+        m = re.search(r"\b(?:val|var)\s+" + re.escape(name) + r"\s*(?::[^=\n]*)?=\s*",
+                      code)
+        if m:
+            out.extend(value_sources(code[m.end():expr_end(code, m.end())]))
+    return out
+
+
+ROW_CALL_RE = re.compile(r"(?<!fun )\bMirrorCategoryRow\s*\(")
+
+
+def row_tap_problems(code, path):
+    """Every `MirrorCategoryRow(...)` must hand the tap ITS OWN category.
+
+    The seam both round-2 anchors skipped: the destination lambda in
+    AppNavigation resolves `cat.key` correctly and the detail screen receives a
+    resolved `category`, but the row in between may pass a constant. Then every
+    row opens the same category while both ends stay green.
+    """
+    out = []
+    for m in ROW_CALL_RE.finditer(code):
+        args = call_args(code, m.end() - 1)
+        cat = click = None
+        for a, b in args:
+            seg = code[a:b]
+            mm = re.match(r"\s*category\s*=\s*", seg)
+            if mm and cat is None:
+                cat = (a + mm.end(), b)
+            mm = re.match(r"\s*onClick\s*=\s*", seg)
+            if mm and click is None:
+                click = (a + mm.end(), b)
+        if cat is None or click is None:
+            out.append(
+                f"{path}: MirrorCategoryRow( is called without named `category =` / "
+                "`onClick =` arguments, so the row's identity cannot be graded "
+                "(fail-closed)")
+            continue
+        row_expr = code[cat[0]:cat[1]].strip()
+        row_sources = [s.strip() for s in _ident_sources(code, row_expr) if s.strip()]
+        lam = code[click[0]:click[1]]
+        carried = False
+        for cm in re.finditer(r"(?<![\w.])([A-Za-z_]\w*)\s*\(", lam):
+            for a, b in call_args(lam, cm.end() - 1):
+                for s in _ident_sources(code, lam[a:b]):
+                    s = s.strip()
+                    if not s:
+                        continue
+                    if any(s == t or contains_ident(s, t) or contains_ident(t, s)
+                           for t in row_sources):
+                        carried = True
+        if not carried:
+            out.append(
+                f"{path}: the MirrorCategoryRow tap does not carry the row's own "
+                f"category (`{row_expr[:50]}` never reaches the onClick callback's "
+                "argument) — every row opens the same category")
+    return out
+
+
+DETAIL_FUN = "MirrorCategoryDetailScreen"
+
+
+def detail_body_problems(code, path):
+    """The detail screen must READ the category it was handed.
+
+    Graded on the tree: every `results[…]` read and every `MirrorCatalog.xxx(…)`
+    call inside the function body must derive from the function's own
+    `category` parameter. A `MirrorCategory.ALPINE` read under a "Python pip"
+    title shows and edits the wrong list while the route stays perfect.
+    """
+    fb = function_body(code, DETAIL_FUN)
+    if fb is None:
+        return []                      # arm 1 grades "defined AND called"
+    body = code[fb[0]:fb[1]]
+    sig = re.search(r"\bfun\s+" + DETAIL_FUN + r"\s*\(", code)
+    params = []
+    if sig:
+        for a, b in call_args(code, sig.end() - 1):
+            pm = re.match(r"\s*(?:val\s+)?([A-Za-z_]\w*)\s*:\s*([^=,]+)", code[a:b])
+            if pm and "MirrorCategory" in pm.group(2):
+                params.append(pm.group(1))
+    if not params:
+        params = ["category"]
+    reads = []
+    for m in re.finditer(r"\bresults\b", body):
+        j = m.end()
+        while j < len(body) and body[j] in " \t\r\n":
+            j += 1
+        if j < len(body) and body[j] == "[":
+            close = match_bracket(body, j)
+            if close > 0:
+                reads.append((m.start(), body[j + 1:close], "results[...]"))
+        elif body.startswith(".get(", j):
+            close = match_bracket(body, j + 4)
+            if close > 0:
+                reads.append((m.start(), body[j + 5:close], "results.get(...)"))
+    for m in re.finditer(r"\bMirrorCatalog\s*\.\s*([A-Za-z_]\w*)\s*\(", body):
+        for a, b in call_args(body, m.end() - 1):
+            reads.append((m.start(), body[a:b], f"MirrorCatalog.{m.group(1)}(...)"))
+    if not reads:
+        return [f"{path}: {DETAIL_FUN} never reads this category's results/mirrors "
+                "— the screen cannot show what the route resolved (fail-closed)"]
+    out = []
+    for pos, expr, what in reads:
+        sources = _ident_sources(code, expr)
+        if not any(contains_ident(s, p) for s in sources for p in params):
+            line = body[:pos].count("\n") + 1
+            out.append(
+                f"{path}: {DETAIL_FUN} reads `{what}` with `{expr.strip()[:50]}` instead "
+                f"of its `{'/'.join(params)}` parameter (line ~{line}) — the screen "
+                "shows and edits another category's mirrors")
+    return out
+
+
+# --------------------------------------------- fromKey predicate semantics --
+
+UNKNOWN_KEY = "zz-not-a-real-category-key"
+
+
+def enum_key_table(cat_lit):
+    """[(ENTRY, key_literal)] in declaration order, read from the enum source."""
+    out = []
+    for m in re.finditer(
+            r'(?m)^\s*([A-Z][A-Za-z0-9_]*)\s*\(\s*"([^"]*)"\s*[,)]', cat_lit):
+        out.append((m.group(1), m.group(2)))
+    return out
+
+
+def _top_level_op(text, ops):
+    """(lhs, op, rhs) at the first top-level occurrence of any op, else None."""
+    depth = 0
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0:
+            for op in ops:
+                if text.startswith(op, i):
+                    return text[:i], op, text[i + len(op):]
+        i += 1
+    return None
+
+
+def _pred_side_value(side, entry_key, arg_key, entry_ident, key_prop, param):
+    """The string a side of a comparison evaluates to, or None when unmodelled."""
+    s = strip_parens(side.strip())
+    if not s:
+        return None
+    if re.fullmatch(re.escape(entry_ident) + r"\s*\.\s*" + re.escape(key_prop), s):
+        return entry_key
+    if re.fullmatch(re.escape(param), s):
+        return arg_key
+    m = re.fullmatch(r'"([^"]*)"', s)
+    if m:
+        return m.group(1)
+    m = re.fullmatch(r"(.+?)\s*\.\s*(lowercase|uppercase|trim)\s*\(\s*\)", s)
+    if m:
+        v = _pred_side_value(m.group(1), entry_key, arg_key, entry_ident, key_prop, param)
+        if v is None:
+            return None
+        return {"lowercase": v.lower(), "uppercase": v.upper(),
+                "trim": v.strip()}[m.group(2)]
+    return None
+
+
+def _eval_leaf(leaf, entry_key, arg_key, entry_ident, key_prop, param):
+    t = leaf.strip()
+    if not t:
+        return None
+    parts = _top_level_op(t, ("==", "!="))
+    if parts and parts[1] in ("==", "!="):
+        lv = _pred_side_value(parts[0], entry_key, arg_key, entry_ident, key_prop, param)
+        rv = _pred_side_value(parts[2], entry_key, arg_key, entry_ident, key_prop, param)
+        if lv is None or rv is None:
+            return None
+        return (lv == rv) if parts[1] == "==" else (lv != rv)
+    m = re.search(r"\.\s*(equals|equalsIgnoreCase|contains|startsWith)\s*\(", t)
+    if m and m.start() > 0:
+        recv = _pred_side_value(t[:m.start()], entry_key, arg_key, entry_ident,
+                                key_prop, param)
+        args = call_args(t, m.end() - 1)
+        if recv is None or not args:
+            return None
+        a0, b0 = args[0]
+        argv = _pred_side_value(t[a0:b0], entry_key, arg_key, entry_ident, key_prop, param)
+        if argv is None:
+            return None
+        rest = t[m.end():]
+        ignore = (m.group(1) == "equalsIgnoreCase"
+                  or ("ignoreCase" in rest and "true" in rest))
+        if ignore:
+            recv, argv = recv.lower(), argv.lower()
+        name = m.group(1)
+        if name in ("equals", "equalsIgnoreCase"):
+            return recv == argv
+        if name == "contains":
+            return argv in recv
+        return recv.startswith(argv)
+    parts = _top_level_op(t, (" in ",))
+    if parts:
+        lv = _pred_side_value(parts[0], entry_key, arg_key, entry_ident, key_prop, param)
+        rhs = parts[2].strip()
+        m = re.match(r"(?:setOf|listOf|arrayOf|mutableSetOf)\s*(?:<[^>]*>)?\s*\(", rhs)
+        if lv is None or not m:
+            return None
+        close = match_bracket(rhs, m.end() - 1)
+        if close < 0:
+            return None
+        lits = [rhs[a:b] for a, b in call_args(rhs, m.end() - 1)]
+        vals = [_pred_side_value(l, entry_key, arg_key, entry_ident, key_prop, param)
+                for l in lits]
+        if any(v is None for v in vals):
+            return None
+        return lv in vals
+    return None
+
+
+def eval_predicate(pred, entry_key, arg_key, entry_ident, key_prop, param):
+    """True / False / None (unmodelled) for the predicate under one assignment."""
+    e = strip_parens(pred.strip())
+    if not e:
+        return None
+    parts = split_top(e, ("||",))
+    if len(parts) > 1:
+        vals = [eval_predicate(e[a:b], entry_key, arg_key, entry_ident, key_prop, param)
+                for a, b in parts]
+        if any(v is True for v in vals):
+            return True
+        return False if all(v is False for v in vals) else None
+    parts = split_top(e, ("&&",))
+    if len(parts) > 1:
+        vals = [eval_predicate(e[a:b], entry_key, arg_key, entry_ident, key_prop, param)
+                for a, b in parts]
+        if any(v is False for v in vals):
+            return False
+        return True if all(v is True for v in vals) else None
+    m = re.match(r"^!\s*(?!=)", e)
+    if m:
+        inner = eval_predicate(e[m.end():], entry_key, arg_key, entry_ident, key_prop, param)
+        return None if inner is None else (not inner)
+    return _eval_leaf(e, entry_key, arg_key, entry_ident, key_prop, param)
+
+
+def fromkey_polarity_problem(cat_lit):
+    """Evaluate `fromKey`'s predicate against the enum's own declared keys.
+
+    The question is no longer "does the predicate mention the key" (which
+    `!=` satisfied) but "does key K select the entry whose key IS K, and only
+    that entry". Reversed polarity, a tautology, an unsatisfiable conjunction
+    and a non-fail-closed unknown-key path all fall out of the same evaluation.
+    """
+    entries = enum_key_table(cat_lit)
+    if len(entries) < 2:
+        return None
+    header = re.search(r"enum class\s+\w+\s*\(([^)]*)\)", cat_lit)
+    key_prop = "key"
+    if header:
+        mm = re.search(r"\bval\s+([A-Za-z_]\w*)\s*:\s*String", header.group(1))
+        if mm:
+            key_prop = mm.group(1)
+    sig = re.search(r"fun\s+fromKey\(\s*([A-Za-z_]\w*)\s*:", cat_lit)
+    param = sig.group(1) if sig else "key"
+    raw = re.search(r"firstOrNull\s*\{([^{}]*)\}", cat_lit)
+    if not raw:
+        return None
+    pred = raw.group(1)
+    head = re.match(r"\s*([A-Za-z_]\w*)\s*->", pred)
+    entry_ident = "it"
+    if head:
+        entry_ident = head.group(1)
+        pred = pred[head.end():]
+    for entry, key in entries:
+        if eval_predicate(pred, key, key, entry_ident, key_prop, param) is False:
+            return (f"the predicate `{pred.strip()}` REJECTS `{entry}`'s own key "
+                    f"\"{key}\" — a key is selected by an entry that does not match it "
+                    "(reversed comparison polarity: `!=` in place of `==`)")
+    for entry, key in entries:
+        for other, okey in entries:
+            if other == entry:
+                continue
+            if eval_predicate(pred, okey, key, entry_ident, key_prop, param) is True:
+                return (f"the predicate `{pred.strip()}` lets key \"{key}\" select "
+                        f"`{other}` as well — it does not discriminate by key")
+    for entry, key in entries:
+        if eval_predicate(pred, key, UNKNOWN_KEY, entry_ident, key_prop, param) is True:
+            return ("an unknown key still selects an entry — the fail-closed contract "
+                    "(unknown key -> null) is broken")
+    return None
+
+
 # ------------------------------------------------------------- the gate ----
 
 def reachable(text, pos):
@@ -311,6 +646,17 @@ def check(root: Path) -> None:
     if len(hits) < 2:
         fail("production sources", "MirrorCategoryDetailScreen( appears fewer than 2 times "
              f"(definition + navigation call) — found in {sorted(hits) or 'nothing'}")
+
+    # --- arm 1c: the row tap carries the row's OWN category; the detail screen
+    # --- reads the category it was handed (round-3 dual-gate seams) ----------
+    for p in root.glob(PROD_KT_GLOB):
+        try:
+            code = mask_code(p.read_text(encoding="utf-8"))
+        except KotlinLexError:
+            continue                     # arm 1 already reported this file
+        rel = str(p.relative_to(root))
+        VIOLATIONS.extend(row_tap_problems(code, rel))
+        VIOLATIONS.extend(detail_body_problems(code, rel))
 
     nav_path = root / REL_NAV
     if not nav_path.exists():
@@ -423,9 +769,10 @@ def check(root: Path) -> None:
     # --- arm 3: fromKey resolver exists, fail-closed AND discriminating ---
     cat_path = root / REL_CAT
     cat = ""
+    cat_lit = ""
     if cat_path.exists():
         try:
-            cat, _cat_lit = views(cat_path.read_text(encoding="utf-8"))
+            cat, cat_lit = views(cat_path.read_text(encoding="utf-8"))
         except KotlinLexError as exc:
             fail(REL_CAT, f"does not lex ({exc}) — fail-closed")
             return
@@ -436,7 +783,7 @@ def check(root: Path) -> None:
             except KotlinLexError:
                 continue
             if "fromKey(" in t and "MirrorCategory" in t:
-                cat = t
+                cat, cat_lit = mask_code(t), t
                 break
     if not cat:
         fail(REL_CAT, "MirrorCategory source (with fromKey resolver) not found")
@@ -470,6 +817,11 @@ def check(root: Path) -> None:
                 fault = predicate_fault(pred.group(1).strip())
                 if fault:
                     fail(REL_CAT, f"fromKey's predicate does not discriminate: {fault}")
+                else:
+                    polarity = fromkey_polarity_problem(cat_lit)
+                    if polarity:
+                        fail(REL_CAT,
+                             "fromKey does not resolve the key it was handed: " + polarity)
 
     # --- arm 4: route pattern + builder encode through seg() ---
     # string contents live in the literal view; the code view has them blanked.
@@ -502,10 +854,24 @@ enum class MirrorCategory(
 FIXTURE_SCREEN = '''package com.rikkaminis.app.ui.sandbox
 
 @Composable
+fun MirrorsSectionView(onNavigate: (MirrorCategory) -> Unit) {
+    for (category in MirrorCategory.entries) {
+        MirrorCategoryRow(category = category, onClick = { onNavigate(category) })
+    }
+}
+
+@Composable
+private fun MirrorCategoryRow(category: MirrorCategory, onClick: () -> Unit) {
+    Text(category.displayName)
+}
+
+@Composable
 fun MirrorCategoryDetailScreen(
     category: MirrorCategory,
     onBack: () -> Unit,
 ) {
+    val sortedResults = MirrorSpeedTestViewModel.results[category] ?: emptyList()
+    val allForCategory = MirrorCatalog.mirrors(category)
     Text(category.displayName)
 }
 '''
@@ -551,7 +917,7 @@ fun AppNavigationRoot(navController: NavController) {
 def write_fixture(root: Path) -> None:
     for rel, content in (
         (REL_CAT, FIXTURE_CAT),
-        ("src/android/app/src/main/java/com/rikkaminis/app/ui/sandbox/MirrorSettingsScreen.kt", FIXTURE_SCREEN),
+        (REL_SCREEN, FIXTURE_SCREEN),
         (REL_NAV, FIXTURE_NAV),
     ):
         p = root / rel
@@ -630,7 +996,8 @@ def selftest() -> None:
             print("SELFTEST D (raw mirrorCategoryDetail) RED as expected")
 
         # ---- witnesses: shapes that used to slip through -------------------
-        def expect_red(label: str, nav_text: str = None, cat_text: str = None, needle: str = ""):
+        def expect_red(label: str, nav_text: str = None, cat_text: str = None,
+                       screen_text: str = None, needle: str = ""):
             nonlocal ok
             global ARMS
             ARMS += 1
@@ -639,6 +1006,8 @@ def selftest() -> None:
                 (root / REL_NAV).write_text(nav_text, encoding="utf-8")
             if cat_text is not None:
                 (root / REL_CAT).write_text(cat_text, encoding="utf-8")
+            if screen_text is not None:
+                (root / REL_SCREEN).write_text(screen_text, encoding="utf-8")
             VIOLATIONS.clear()
             check(root)
             if not any(needle in v for v in VIOLATIONS):
@@ -647,7 +1016,8 @@ def selftest() -> None:
             else:
                 print(f"SELFTEST {label} RED as expected")
 
-        def expect_green(label: str, nav_text: str = None, cat_text: str = None):
+        def expect_green(label: str, nav_text: str = None, cat_text: str = None,
+                         screen_text: str = None):
             nonlocal ok
             global ARMS
             ARMS += 1
@@ -656,6 +1026,8 @@ def selftest() -> None:
                 (root / REL_NAV).write_text(nav_text, encoding="utf-8")
             if cat_text is not None:
                 (root / REL_CAT).write_text(cat_text, encoding="utf-8")
+            if screen_text is not None:
+                (root / REL_SCREEN).write_text(screen_text, encoding="utf-8")
             VIOLATIONS.clear()
             check(root)
             if VIOLATIONS:
@@ -783,6 +1155,78 @@ def selftest() -> None:
                 "            ?.let { MirrorCategory.fromKey(it) }\n        var category = category\n        category = null",
             ),
             needle="re-assigned",
+        )
+
+        # ---- round-3 dual-gate witnesses --------------------------------
+        # 15-1: the row hands the tap a constant instead of its own category,
+        # so every row opens ALPINE while both ends of the chain stay perfect.
+        expect_red(
+            "R1 (row tap ignores the row's own category)",
+            screen_text=FIXTURE_SCREEN.replace(
+                "MirrorCategoryRow(category = category, onClick = { onNavigate(category) })",
+                "MirrorCategoryRow(category = category, "
+                "onClick = { onNavigate(MirrorCategory.ALPINE) })"),
+            needle="does not carry the row's own category",
+        )
+
+        # R1b: the row builds but never invokes the category callback.
+        expect_red(
+            "R1b (row tap calls nothing)",
+            screen_text=FIXTURE_SCREEN.replace(
+                "onClick = { onNavigate(category) })", "onClick = { Unit })"),
+            needle="does not carry the row's own category",
+        )
+
+        # R1c: a legal spelling — the row forwards through a local binding.
+        expect_green(
+            "R1c (row forwards through a local binding)",
+            screen_text=FIXTURE_SCREEN.replace(
+                "onClick = { onNavigate(category) })",
+                "onClick = { val rowCategory = category; onNavigate(rowCategory) })"),
+        )
+
+        # 15-2: the detail screen reads ALPINE under a "Python pip" title.
+        expect_red(
+            "R2 (detail screen reads another category)",
+            screen_text=FIXTURE_SCREEN.replace(
+                "MirrorSpeedTestViewModel.results[category]",
+                "MirrorSpeedTestViewModel.results[MirrorCategory.ALPINE]").replace(
+                "MirrorCatalog.mirrors(category)",
+                "MirrorCatalog.mirrors(MirrorCategory.ALPINE)"),
+            needle="instead of its",
+        )
+
+        # R2b: same for a single read — the list must follow the parameter.
+        expect_red(
+            "R2b (detail screen mirrors another category)",
+            screen_text=FIXTURE_SCREEN.replace(
+                "MirrorCatalog.mirrors(category)",
+                "MirrorCatalog.mirrors(MirrorCategory.PIP)"),
+            needle="instead of its",
+        )
+
+        # 15-3: fromKey keeps `firstOrNull` (so it is still fail-closed) and
+        # flips the comparison — every key resolves to a NON-matching entry.
+        expect_red(
+            "R3 (fromKey predicate `!=`)",
+            cat_text=FIXTURE_CAT.replace("it.key == key }", "it.key != key }"),
+            needle="REJECTS",
+        )
+
+        # R3b: a legal case-insensitive resolver must stay GREEN.
+        expect_green(
+            "R3b (fromKey `equals(key, ignoreCase = true)`)",
+            cat_text=FIXTURE_CAT.replace(
+                "it.key == key }", "it.key.equals(key, ignoreCase = true) }"),
+        )
+
+        # R3c: the entry parameter may be named — polarity still graded.
+        expect_red(
+            "R3c (named entry param, inverted)",
+            cat_text=FIXTURE_CAT.replace(
+                "entries.firstOrNull { it.key == key }",
+                "entries.firstOrNull { c -> c.key != key }"),
+            needle="REJECTS",
         )
 
     if not ok:

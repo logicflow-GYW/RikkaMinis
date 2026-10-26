@@ -45,6 +45,24 @@ or trip a criterion):
      block holding the settlement tests the owning slot (or liveness), the
      check's condition is FEASIBLE (folds to neither `true` nor `false`), and
      its guarded branch actually leaves the block.
+
+Round-3 (dual-gate) hardening — the SEAM between the call sites and the callee
+------------------------------------------------------------------------------
+Arms 1-7 graded call sites by function name and never looked at the two things
+between them, so a patch that sat in that gap kept both gates green:
+
+  8. EVERY entry point that auto-selects a mirror is graded, derived from the
+     tree (`useCustomMirror[...] = true`) instead of from a hard-coded name
+     list: the single-category test (`runTest`) is a structural twin of the
+     all-category test, and the old arm only knew the twin somebody remembered.
+     Dropping its `applyMirror` loop left the UI convinced and the container
+     untouched.
+  9. `selectMirror` — the row's onClick, i.e. the UI thread — must DISPATCH its
+     rootfs write (`launch` / `withContext`), not perform `copyTo`/`writeText`
+     inline; and it must still apply the mirror it selected.
+ 10. `applyMirror` itself must reach a real write. Every caller can be
+     perfectly wired and the callee can still drop the write (or write a
+     constant) and log "Applied mirror".
 """
 import re
 import sys
@@ -54,11 +72,13 @@ from pathlib import Path
 from _kotlin_ast import (
     const_bool,
     function_body,
+    is_pure_literal,
     match_bracket,
     split_top,
 )
 from _kotlin_lexer import KotlinLexError
 from _kotlin_valueflow import (
+    call_args,
     code_view,
     contains_ident,
     expr_end,
@@ -193,6 +213,152 @@ def main_blocks(body: str):
 
 def in_spans(pos: int, spans) -> bool:
     return any(a <= pos < b for a, b in spans)
+
+BUILDER_RE = re.compile(r"\b(launch|async|withContext|coroutineScope)\s*(?=[({])")
+
+
+def builder_spans(text: str):
+    """[(start, end, arg)] — interior of every coroutine-builder trailing lambda.
+
+    `arg` is the call's argument text ('' for a bare `launch`), so a
+    `withContext(Dispatchers.Main)` hop can be told apart from a background
+    one. Derived from the coroutine primitives instead of a dispatch list: the
+    question is "is this rootfs IO dispatched off the calling thread", and the
+    answer has to come from the code that actually dispatches it.
+    """
+    out = []
+    for m in BUILDER_RE.finditer(text):
+        j = m.end()
+        arg = ''
+        if j < len(text) and text[j] == '(':
+            close = match_bracket(text, j)
+            if close < 0:
+                continue
+            arg = text[j + 1:close]
+            j = close + 1
+        while j < len(text) and text[j] in ' \t\r\n':
+            j += 1
+        if j >= len(text) or text[j] != '{':
+            continue
+        end = match_bracket(text, j)
+        if end < 0:
+            continue
+        out.append((j + 1, end, arg))
+    return out
+
+
+def io_thread_problem(body: str, label: str) -> str:
+    """Rootfs IO in `body` must be dispatched off the calling thread.
+
+    `selectMirror` is the row's onClick, so it runs on the UI thread while
+    `applyMirror` does `copyTo` + `writeText` on files under the rootfs — the
+    [T10-L7] defect the call sites were fixed for. A call site inside
+    `launch {}` / `withContext(Dispatchers.IO)` is dispatched; a call site at
+    the body's top level is on the UI thread.
+    """
+    sites = [m.start() for m in re.finditer(r"\b(?:applyMirror|restoreOfficial)\s*\(", body)]
+    if not sites:
+        return ("%s never writes the container config (no applyMirror/restoreOfficial "
+                "call) — the selection changes the UI and the prefs but not the rootfs"
+                % label)
+    builders = builder_spans(body)
+    mains = main_blocks(body)
+    for pos in sites:
+        dead = dead_context(body, pos)
+        if dead:
+            return "%s's config write is unreachable (`%s`)" % (label, dead[:60])
+        if in_spans(pos, mains) or any(
+                a <= pos < b and 'Dispatchers.Main' in arg for a, b, arg in builders):
+            return ("%s writes the container config on the main thread — the caller is the "
+                    "row's onClick, so applyMirror's copyTo/writeText block the UI" % label)
+        if not any(a <= pos < b for a, b, arg in builders):
+            return ("%s writes the container config inline (no launch/withContext dispatch) "
+                    "— the row's onClick performs copyTo/writeText on the UI thread" % label)
+    return ''
+
+
+def auto_select_bodies(src: str):
+    """[(name, body)] for EVERY function that auto-selects a mirror.
+
+    Derived from the tree (`useCustomMirror[...] = true`), because the defect
+    is a family: the all-category test and the single-category test are
+    structural twins, and a name list grades only the twin somebody remembered.
+    """
+    out, seen = [], set()
+    for m in re.finditer(
+            r"\bfun\s+(?:<[^>]*>\s*)?(?:[A-Za-z_][\w.]*\.)?([A-Za-z_]\w*)\s*\(", src):
+        name = m.group(1)
+        if name in seen:
+            continue
+        seen.add(name)
+        b = fn_body(src, name)
+        if b and re.search(r"\buseCustomMirror\s*\[[^\]\n]*\]\s*=\s*true", b):
+            out.append((name, b))
+    return out
+
+
+SAFE_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+
+
+def _decl_rhs(body: str, name: str):
+    m = re.search(r"\b(?:val|var)\s+" + re.escape(name) + r"\s*(?::[^=\n]*)?=\s*", body)
+    if not m:
+        return None
+    return body[m.end():expr_end(body, m.end())]
+
+
+def derived_from(body: str, expr: str, roots, depth: int = 2) -> bool:
+    """Does `expr` derive from any of `roots` within `depth` local binding hops?
+
+    Deliberately name-agnostic: the criterion is "the bytes written carry the
+    selected source", not "the local holding them is called `content`".
+    """
+    for item in value_sources(expr):
+        item = item.strip()
+        if not item:
+            continue
+        if any(item == r or contains_ident(item, r) for r in roots):
+            return True
+        # `content.trim()` / `payload[0]` / `uri.host` still carry the
+        # receiver's value — peel the receiver WITHOUT spending a hop (peeling
+        # is not a binding, it is the same value flowing through a call).
+        cur = item
+        for _ in range(4):
+            m = re.match(r"([A-Za-z_]\w*)\s*[.\[!(]", cur)
+            if not m or m.group(1) == cur:
+                break
+            cur = m.group(1)
+        if any(cur == r or contains_ident(cur, r) for r in roots):
+            return True
+        if depth >= 1 and SAFE_IDENT_RE.fullmatch(cur):
+            rhs = _decl_rhs(body, cur)
+            if rhs and derived_from(body, rhs, roots, depth - 1):
+                return True
+    return False
+
+
+def apply_write_problem(body: str) -> str:
+    """`applyMirror` must actually WRITE the source it selected.
+
+    Arms 2/3/5/7 grade the call sites; the callee can still drop the write and
+    log success. The criterion is the EFFECT: a reachable `writeText(...)`
+    whose value derives from `mirror`/`category` (a constant does not count).
+    """
+    for m in re.finditer(r"\bwriteText\s*\(", body):
+        if dead_context(body, m.start()):
+            continue
+        args = call_args(body, m.end() - 1)
+        if not args:
+            continue
+        a, b = args[0]
+        arg = body[a:b]
+        if is_pure_literal(arg):
+            continue
+        if derived_from(body, arg, ('mirror', 'category'), 2):
+            return ''
+    return ("applyMirror never writes the selected source to the config file (no reachable "
+            "writeText(...) whose value derives from mirror/category) — every entry point "
+            "logs \"Applied mirror\" while the container keeps the old source")
 
 
 def iterable_dead(expr: str) -> bool:
@@ -577,6 +743,56 @@ def check(root: Path) -> None:
         snapshot_atomic(body, "retryApkWorldWithMirrorFallback",
                         [("selectedMirrorId", "ALPINE"), ("useCustomMirror", "ALPINE")])
 
+    # --- arms 8-10 (round 3): the seam between the auto-select call sites
+    # --- and the callee that owns the actual rootfs write -------------------
+    for name, b in auto_select_bodies(src):
+        if "persist(" not in b:
+            fail(REL_SCREEN, f"{name} auto-select does not persist the selection")
+        sites = [m.start() for m in re.finditer(r"\bapplyMirror\s*\(", b)]
+        if not sites:
+            fail(REL_SCREEN,
+                 f"{name} auto-select never applies the mirror it selected (no "
+                 "applyMirror call) — the UI shows the new source, the container keeps "
+                 "the old one")
+        else:
+            mains = main_blocks(b)
+            for pos in sites:
+                if in_spans(pos, mains):
+                    fail(REL_SCREEN,
+                         f"{name} calls applyMirror inside withContext(Dispatchers.Main) "
+                         "— disk IO on the main thread")
+                    break
+            for pos in sites:
+                dead = dead_context(b, pos)
+                if dead:
+                    fail(REL_SCREEN,
+                         f"{name}'s applyMirror call is unreachable (`{dead}`) — the "
+                         "auto-selected mirror is persisted but never written")
+                    break
+        problem = apply_wiring_problem(b)
+        if problem:
+            fail(REL_SCREEN, f"{name}: " + problem)
+
+    sel = fn_body(src, "selectMirror")
+    if sel is None:
+        fail(REL_SCREEN,
+             "selectMirror function not found — the row's tap is a UI-thread entry "
+             "point and its rootfs write cannot be graded (fail-closed)")
+    else:
+        problem = io_thread_problem(sel, "selectMirror")
+        if problem:
+            fail(REL_SCREEN, problem)
+
+    app = fn_body(src, "applyMirror")
+    if app is None:
+        fail(REL_SCREEN,
+             "applyMirror function not found — the function every entry point relies "
+             "on for the container write cannot be graded (fail-closed)")
+    else:
+        problem = apply_write_problem(app)
+        if problem:
+            fail(REL_SCREEN, problem)
+
     # --- arm 5: the settlement preserves a user selection ---
     if detect is not None:
         reason = settlement_guard_ok(src, detect)
@@ -741,6 +957,22 @@ object MirrorSpeedTestViewModel {
         }
     }
 
+    fun selectMirror(context: Context, mirror: MirrorEntry) {
+        selectedMirrorId[mirror.category] = mirror.id
+        persist(context, mirror.category)
+        if (useCustomMirror[mirror.category] == true) {
+            scope.launch { applyMirror(context, mirror.category) }
+        }
+    }
+
+    fun setUseCustom(context: Context, category: MirrorCategory, enabled: Boolean) {
+        useCustomMirror[category] = enabled
+        persist(context, category)
+        scope.launch {
+            if (enabled) applyMirror(context, category) else restoreOfficial(context, category)
+        }
+    }
+
     fun autoDetectOnceIfNeeded(context: Context) {
         ensureLoaded(context)
         autoDetectJob?.cancel()
@@ -763,6 +995,32 @@ object MirrorSpeedTestViewModel {
         }
         autoDetectJob = job
         job.start()
+    }
+
+    private fun rootfsDataDir(context: Context): File =
+        File(context.applicationContext.filesDir, "alpine-rootfs")
+
+    private fun applyMirror(context: Context, category: MirrorCategory) {
+        val mirror = selectedMirror(category) ?: return
+        val configFile = File(rootfsDataDir(context), category.configPath)
+        val content = when (category) {
+            MirrorCategory.ALPINE -> mirror.baseURL + " (alpine)"
+            MirrorCategory.PIP -> "index-url = " + mirror.baseURL
+            MirrorCategory.NPM -> "registry=" + mirror.baseURL
+        }
+        try {
+            configFile.parentFile?.mkdirs()
+            configFile.writeText(content)
+            Log.i(TAG, "Applied mirror " + mirror.name)
+        } catch (e: Exception) {
+            Log.e(TAG, e.message ?: "")
+        }
+    }
+
+    private fun restoreOfficial(context: Context, category: MirrorCategory) {
+        val configFile = File(rootfsDataDir(context), category.configPath)
+        val bakFile = File(rootfsDataDir(context), category.configPath + ".bak")
+        if (bakFile.exists()) configFile.writeText(bakFile.readText())
     }
 
     suspend fun retryApkWorldWithMirrorFallback(
@@ -1105,6 +1363,81 @@ def selftest() -> int:
             "            val toApply = mutableListOf<MirrorCategory>()", "N9"),
             ())
 
+        # ---- round-3 dual-gate witnesses (16-1 ... 16-3) ------------------
+        # R4 [16-1]: selectMirror performs the rootfs write inline. The row's
+        # onClick IS the UI thread; arms 2/3/5/7 grade other call sites by
+        # function name and never looked at this one.
+        run("R4 (selectMirror writes inline)", mutate(
+            FIXTURE_SCREEN,
+            "            scope.launch { applyMirror(context, mirror.category) }",
+            "            applyMirror(context, mirror.category)", "R4"),
+            ("writes the container config inline",))
+
+        # R4b: same family with the write deleted outright (the witness's own
+        # self-doubt: both gates green, nothing on disk).
+        run("R4b (selectMirror drops the write)", mutate(
+            FIXTURE_SCREEN,
+            "            scope.launch { applyMirror(context, mirror.category) }",
+            "            Unit", "R4b"),
+            ("never writes the container config",))
+
+        # R4c: a legal dispatch spelling must stay GREEN.
+        run("R4c (selectMirror dispatches via withContext(IO))", mutate(
+            FIXTURE_SCREEN,
+            "            scope.launch { applyMirror(context, mirror.category) }",
+            "            scope.launch { withContext(Dispatchers.IO) { "
+            "applyMirror(context, mirror.category) } }", "R4c"),
+            ())
+
+        # R5 [16-2]: the single-category test loses its apply loop. Its
+        # structural twin (startAllTests) keeps the loop, and the old arm only
+        # knew the twin's name.
+        run("R5 (runTest never applies)", mutate(
+            FIXTURE_SCREEN,
+            "            for (cat in autoApplied) applyMirror(context, cat)\n        }\n    }",
+            "        }\n    }", "R5"),
+            ("never applies the mirror it selected",))
+
+        # R5b: the twin's loop goes dead instead — same family, same arm.
+        run("R5b (runTest apply behind if (false))", mutate(
+            FIXTURE_SCREEN,
+            "            for (cat in autoApplied) applyMirror(context, cat)\n        }\n    }",
+            "            if (false) { for (cat in autoApplied) applyMirror(context, cat) }\n"
+            "        }\n    }", "R5b"),
+            ("unreachable",))
+
+        # R6 [16-3]: every caller is wired and the callee still drops the
+        # write — applyMirror logs "Applied mirror" and writes nothing.
+        run("R6 (applyMirror drops writeText)", mutate(
+            FIXTURE_SCREEN,
+            "            configFile.parentFile?.mkdirs()\n            configFile.writeText(content)",
+            "            configFile.parentFile?.mkdirs()", "R6"),
+            ("never writes the selected source",))
+
+        # R6b: the write survives, re-spelled — must stay GREEN.
+        run("R6b (writeText via content.trim())", mutate(
+            FIXTURE_SCREEN,
+            "            configFile.writeText(content)",
+            "            configFile.writeText(content.trim())", "R6b"),
+            ())
+
+        # R6c: a RENAMED local through two hops must stay GREEN — the
+        # criterion is the flow, not the identifier.
+        run("R6c (renamed local, two hops)",
+            FIXTURE_SCREEN.replace(
+                "        val content = when (category) {",
+                "        val payload = when (category) {").replace(
+                "            configFile.writeText(content)",
+                "            val text = payload.trim()\n"
+                "            configFile.writeText(text)"),
+            ())
+
+        # R6d: writing a constant is as good as not writing at all.
+        run("R6d (writeText with a constant)", mutate(
+            FIXTURE_SCREEN,
+            "            configFile.writeText(content)",
+            '            configFile.writeText("")', "R6d"),
+            ("never writes the selected source",))
 
     if not ok:
         sys.exit("MIRROR_VM_THREAD_SELFTEST=FAIL")
