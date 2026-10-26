@@ -172,19 +172,27 @@ Function not implemented        → 0（本 runner 未出现 S28）
 `KOTLIN_AST_SELFTEST` / `KOTLIN_VALUEFLOW_SELFTEST` 在 CI 日志里 0 命中 —— 与既往
 「门自证 stdout 不进 CI 日志」同族）。34/29 臂的见证在本报告的 L1/L1b（本地实跑 +
 变异负控），CI 见证的是 112 门 + 344 夹具两侧不回归。要补也简单（在 `test_scan.py`
-注册两条原语 selftest），但本轮 `test_scan.py` 是冻结面（任务书 §5），登记为 R4。
+注册两条原语 selftest），但本轮 `test_scan.py` 是冻结面（任务书 §5），见 §6 注册项。
 
 
-## 6. 未验证项与残留（带三件套）
+## 6. `test_scan.py` 注册项（交主会话，本支未改冻结文件）
+
+| 项 | 内容 |
+|---|---|
+| 缺什么 | 两个原语的 `--selftest`（`_kotlin_ast` 34 臂 / `_kotlin_valueflow` 29 臂）不在 CI 见证面内 |
+| 证据 | CI 日志 `KOTLIN_AST_SELFTEST` / `KOTLIN_VALUEFLOW_SELFTEST` **各 0 命中**（`test_scan.py` 只拉起各门脚本） |
+| 建议注册 | 在 `test_scan.py` 加两条：跑 `python3 scripts/scan/_kotlin_ast.py --selftest` / `_kotlin_valueflow.py --selftest`，断言输出含 `KOTLIN_AST_SELFTEST=PASS` / `KOTLIN_VALUEFLOW_SELFTEST=PASS` 且 rc=0。**故意不断言臂数**（`(34 arms)` 一变就得同步改断言 = 自指脆弱断言） |
+| 为什么本支不改 | 任务书 §5 明令 `test_scan.py` 冻结（并发批只见一个 owner 改注册文件），注册归并集收口的主会话 |
+
+## 7. 残留（登记不修，各带三件）+ 未验证边界
 
 | # | 残留 | 触发条件 | 触发后方案 | 搁置理由 |
 |---|---|---|---|---|
 | R1 | `mirror_category_route_check.reachable()` / `browser_destroy_wakeup_check.reachable()` 的**本地 workaround**（各自复制了 `if_blocks` + `guard_feasible(f"!({cond})")` 的判定） | 下一次因共享原语变更需要改这两处之一；或两者行为与本原语出现分歧 | 顺路收敛为委托 `_kotlin_valueflow.path_feasible`，删掉本地 `reachable()` 与对应 KDoc 的「shared primitive gap」段；收敛前先确认两门的现有臂在新路径上全绿 | 半径纪律（任务书 §2.3）：它们正确且自带臂，本轮只做原语层根治，不顺手扩大改动面 |
 | R2 | `filepreview_print_bounded_check._reachable()` 的几何折叠（`const_bool(cond)` + 分支区间自己判死） | 该门下一次改判据，或 `path_feasible` 支持 branch-extent 语义 | 同上评估委托 | 它弃用 `path_feasible` 的动机（R3-t02 §6 登记）就是本缺陷；缺陷已修，但它的本地折叠在语义上等价且更严，本轮不动 |
 | R3 | 本地未跑全量 `scan.sh` / `test_scan.py` | 分支 CI 已跑全套（`build-apk.yml:47,51`）；沙箱 S28 风暴 + 并发负载纪律 | 收口期由主会话在并集树上跑 `--full` | 施工期本地全量对分支零新增证据（skill §6.8） |
-| R4 | 两个原语的 `--selftest`（34 / 29 臂）**不在 CI 见证面内** —— CI 日志 `KOTLIN_AST_SELFTEST` / `KOTLIN_VALUEFLOW_SELFTEST` 0 命中，`test_scan.py` 只跑各门 | 下一次有人只信 CI 判「原语臂是否成立」，或原语再被改而无人本地跑 `--selftest` | 在 `test_scan.py` 注册两条：拉起来跑 `_kotlin_ast.py --selftest` / `_kotlin_valueflow.py --selftest` 并断言 `SELFTEST=PASS (34 arms)` / `(29 arms)` 标记；**臂数一变就得同步改断言**，所以建议断言前缀而非全串 | 任务书 §5 明令 `test_scan.py` 冻结；本轮只做原语层根治，注册归并集收口的主会话 |
 
-## 7. 未验证边界
+未验证边界：
 
 - `enclosing_conditions` 的 `when` 分支未涉及取反，本轮未动；
 - 真实树上唯一一处字面量复合条件（`ui/chat/ChatAssistantMessageUI.kt:819` 的
