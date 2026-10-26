@@ -99,6 +99,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _kotlin_lexer import KotlinLexError, mask_comments  # noqa: E402
 from _kotlin_ast import (  # noqa: E402
+    const_value,
     function_body,
     match_bracket,
 )
@@ -534,6 +535,256 @@ def check_arm6(screen_code):
     return None
 
 
+# ── arm7 (R3-t18) — the document must actually LAND where it is claimed ────
+#
+# Two witnesses passed this gate unchanged:
+#   * r19 #9 — `payload = tempFile.readBytes()` → `payload = ByteArray(0)`: the
+#     WebDAV "backup" PUTs an empty body and reports success, so the offsite
+#     copy the user relies on is worthless. The gate pinned the fetch / rotate /
+#     flag surface of this screen but never the one hand-off that carries the
+#     document to the server.
+#   * r19 #10 — the local SAF export's `ConfigBackup.exportToWriter(...)` call
+#     short-circuited behind a constant: the file stays 0 bytes while the
+#     success toast still fires.
+# Both ask the same question — is the document this run wrote the document that
+# lands? — so the criterion is derived from the WRITE SINK, not from a call's
+# spelling: every sink the screen opens must be fed by an export call on a
+# reachable path (through a real `OutputStreamWriter(...).use { w -> }` chain),
+# and any upload of a file sink must carry THAT file's bytes.
+OPEN_SINK = re.compile(r"\b(?:openOutputStream|FileOutputStream)\s*\(")
+UPLOAD_CALL = re.compile(r"WebDavSync\s*\.\s*backup\s*\(")
+READ_VERB = re.compile(
+    r"\b(?:readBytes|readText|inputStream|openInputStream|readAllBytes|"
+    r"toByteArray|bufferedReader|bufferedInputStream)\b")
+FILE_BIND = re.compile(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*=\s*(?:java\.io\.)?File\s*\(")
+
+
+def _enclosing_block_open(code, pos):
+    """Index of the `{` opening the innermost block that contains `pos`."""
+    depth = 0
+    for i in range(pos, -1, -1):
+        ch = code[i]
+        if ch == "}":
+            depth += 1
+        elif ch == "{":
+            if depth == 0:
+                return i
+            depth -= 1
+    return -1
+
+
+def _writer_for_sink(code, sink_pos):
+    """(writer_var, export_call_pos) for a write sink, or (None, None).
+
+    Walks the real chain: `…OutputStream(v)?.use { out -> OutputStreamWriter(out,
+    …).use { w -> ConfigBackup.exportToWriter(… writer = w) } }`. A sink without
+    that chain is red: the target is opened and nothing is streamed into it.
+    The `use { … }` scope sits AFTER the sink call (`sink(...)?.use { … }`), so
+    the chain is read left-to-right from the sink's closing paren.
+    """
+    p_open = code.find("(", sink_pos)
+    if p_open < 0:
+        return None, None
+    p_close = match_bracket(code, p_open)
+    if p_close < 0:
+        return None, None
+    m = re.match(r"\s*\??\s*\.\s*use\s*\{\s*([A-Za-z_]\w*)\s*->",
+                 code[p_close + 1:p_close + 120])
+    if not m:
+        return None, None
+    out_var = m.group(1)
+    window = code[p_close:min(len(code), p_close + 1200)]
+    ow = re.search(r"OutputStreamWriter\s*\(\s*" + re.escape(out_var) + r"\b", window)
+    if not ow:
+        return None, None
+    ow_open = p_close + ow.start()
+    while ow_open < len(code) and code[ow_open] != "(":
+        ow_open += 1
+    ow_close = match_bracket(code, ow_open)
+    if ow_close < 0:
+        return None, None
+    w = re.match(r"\s*\??\s*\.\s*use\s*\{\s*([A-Za-z_]\w*)\s*->",
+                 code[ow_close + 1:ow_close + 120])
+    if not w:
+        return None, None
+    w_open = ow_close + 1 + w.start()
+    while w_open < len(code) and code[w_open] != "{":
+        w_open += 1
+    w_close = match_bracket(code, w_open)
+    seg_end = w_close if w_close > 0 else len(code)
+    call = STREAM_CALL.search(code, w_open, seg_end)
+    if not call:
+        return w.group(1), None
+    return w.group(1), call.start()
+
+
+def _file_sinks(code):
+    """Variables bound to a File that the export writer streams into."""
+    out = set()
+    for m in FILE_BIND.finditer(code):
+        name = m.group(1)
+        if re.search(
+            r"\bFileOutputStream\s*\(\s*" + re.escape(name) + r"\b"
+            r"|\b" + re.escape(name) + r"\s*\.\s*(?:bufferedWriter|outputStream|sink)\b",
+            code,
+        ):
+            out.add(name)
+    return out
+
+
+def _named_args(code, args):
+    named = {}
+    for a, b in args:
+        seg = code[a:b]
+        m = re.match(r"\s*([A-Za-z_]\w*)\s*=(?!=)", seg)
+        if m:
+            named[m.group(1)] = seg[m.end():]
+    return named
+
+
+def _constant_bytes(expr):
+    """True when the value is a literal payload, not a read off a stream."""
+    e = squash(expr)
+    if not e:
+        return True
+    if const_value(expr.strip()) is not None:
+        return True
+    return re.match(r"^(?:ByteArray\s*\(\s*\d*\s*\)|byteArrayOf\s*\([^()]*\)|"
+                    r"emptyBytes\s*\(\s*\))$", e) is not None
+
+
+def check_arm7(screen_code):
+    """Every export sink is fed on a live path, and the upload carries the file.
+
+    Fail-closed: a screen with no sink at all is RED (both export paths moved —
+    re-anchor the arm), and an unparseable writer chain is RED.
+    """
+    if screen_code is None:
+        return "BackupSettingsScreen.kt not found"
+    sinks = [m.start() for m in OPEN_SINK.finditer(screen_code)]
+    if not sinks:
+        return (
+            "BackupSettingsScreen opens no export sink (openOutputStream / "
+            "FileOutputStream) — both export paths (SAF file + WebDAV upload) are gone; "
+            "re-anchor this criterion instead of reading a zero count as a pass"
+        )
+    problems = []
+    for pos in sinks:
+        line = screen_code.count("\n", 0, pos) + 1
+        w_var, call_pos = _writer_for_sink(screen_code, pos)
+        if w_var is None:
+            problems.append(
+                "line %d: the export sink is opened but no `OutputStreamWriter(...).use "
+                "{ w -> }` chain feeds it — the target file is created and left empty"
+                % line)
+            continue
+        if call_pos is None:
+            problems.append(
+                "line %d: the writer is never handed to ConfigBackup.exportToWriter( — "
+                "the target is opened, the document is never streamed into it, and the "
+                "success toast still fires (0-byte backup)" % line)
+            continue
+        if not path_feasible(screen_code, call_pos):
+            problems.append(
+                "line %d: ConfigBackup.exportToWriter( sits behind a constant condition "
+                "(DEAD-GUARDED) — the call never runs, the file stays 0 bytes and the "
+                "user is told the backup succeeded" % line)
+            continue
+        args = call_args(screen_code, screen_code.index("(", call_pos))
+        named = _named_args(screen_code, args)
+        w_arg = named.get("writer")
+        if w_arg is None or not contains_ident(w_arg, w_var):
+            problems.append(
+                "line %d: exportToWriter( is not handed the writer bound to this sink "
+                "(`writer = %s`) — the document is streamed into a different stream "
+                "than the one this sink opened" % (line, w_var))
+    if problems:
+        return " | ".join(problems[:3])
+
+    # r19 #9 — an upload of a file sink must carry THAT file's bytes.
+    for m in UPLOAD_CALL.finditer(screen_code):
+        args = call_args(screen_code, m.end() - 1)
+        named = _named_args(screen_code, args)
+        payload = named.get("payload")
+        if payload is None:
+            return (
+                "WebDavSync.backup( is called without a `payload =` argument — "
+                "fail-closed, the uploaded body cannot be traced")
+        if _constant_bytes(payload):
+            return (
+                "the WebDAV upload's payload is a CONSTANT (`%s`) — the document "
+                "exportToWriter streamed into the temp file never reaches the server, "
+                "so the backup that is reported as uploaded restores to nothing"
+                % squash(payload)[:60])
+        file_sinks = _file_sinks(screen_code)
+        if not file_sinks:
+            return (
+                "the WebDAV upload exists but no File is written by "
+                "ConfigBackup.exportToWriter( — re-anchor this criterion")
+        if not any(contains_ident(src, s) and READ_VERB.search(src)
+                   for src in value_sources(payload) for s in file_sinks):
+            return (
+                "the WebDAV upload's payload is not read off the file exportToWriter( "
+                "streamed into (%s) — the upload ships something other than this run's "
+                "backup document" % ", ".join(sorted(file_sinks)))
+    return None
+
+
+AUTO_PUSH = re.compile(r"WebDavSync\s*\.\s*backupAuto\s*\(")
+
+
+def check_arm8(auto_code):
+    """r19 #11 — runLocked must actually push the file it just wrote.
+
+    The gate pinned the local write (arm1: `exportToWriter` + `rotateLocalAuto
+    Backups`) and the WebDavSync surface (arm2), but never the one call that
+    makes the run an OFFSITE backup: deleting `WebDavSync.backupAuto(cfg, local)`
+    left every arm green — `KEY_LAST_RUN` still gets stamped, so the daily run
+    reports success forever while the remote `auto/` directory never receives a
+    byte (and a device loss has no offsite copy to restore from).
+    """
+    if auto_code is None:
+        return "AutoBackupManager.kt not found"
+    span = function_body(auto_code, "runLocked")
+    if span is None:
+        return ("AutoBackupManager.runLocked not found (anchor drift) — re-point this "
+                "arm at the renamed writer; do not delete it")
+    body_start, body_end, kind = span
+    if kind != "block":
+        return ("AutoBackupManager.runLocked is no longer block-bodied — its remote "
+                "push cannot be audited (fail-closed)")
+    region = auto_code[body_start:body_end]
+    calls = [m.start() for m in AUTO_PUSH.finditer(region)]
+    if not calls:
+        return (
+            "AutoBackupManager.runLocked never calls WebDavSync.backupAuto( — the "
+            "local copy is written and KEY_LAST_RUN is stamped anyway, so every daily "
+            "run reports success while the remote WebDAV copy stays empty (a device "
+            "loss has nothing offsite to restore from)")
+    live = [pos for pos in calls if path_feasible(region, pos)]
+    if not live:
+        return (
+            "runLocked's WebDavSync.backupAuto( is DEAD-GUARDED (a constant condition "
+            "can never hold) — the push is there, the offsite copy is never refreshed, "
+            "and KEY_LAST_RUN still advances")
+    sinks = _file_sinks(region)
+    for pos in live:
+        args = call_args(region, region.index("(", pos))
+        if len(args) < 2:
+            return ("WebDavSync.backupAuto( is called without its file argument — "
+                    "fail-closed, the uploaded bytes cannot be traced")
+        file_arg = region[args[1][0]:args[1][1]]
+        if not sinks:
+            return ("runLocked has no File bound to the export writer — re-anchor this "
+                    "criterion, the uploaded file cannot be identified")
+        if not any(contains_ident(src, s) for src in value_sources(file_arg) for s in sinks):
+            return (
+                "runLocked uploads `%s` instead of the file ConfigBackup.exportToWriter( "
+                "streamed into (%s) — the offsite copy is not the document this run wrote"
+                % (file_arg.strip(), ", ".join(sorted(sinks))))
+    return None
+
+
 def check_all(root):
     try:
         auto, _auto_lit = read_views(root, AUTO_MGR_REL)
@@ -549,6 +800,8 @@ def check_all(root):
         ("arm4", check_arm4(screen)),
         ("arm5", check_arm5(screen)),
         ("arm6", check_arm6(screen)),
+        ("arm7", check_arm7(screen)),
+        ("arm8", check_arm8(auto)),
     ):
         if err:
             failures.append(f"{name}: {err}")
@@ -570,7 +823,11 @@ object AutoBackupManager {
             )
         }
         rotateLocalAutoBackups(app)
-        WebDavSync.backupAuto(cfg, local)
+        val cfg = WebDavConfigStore(app).load()
+        if (cfg != null) {
+            WebDavSync.backupAuto(cfg, local)
+            WebDavSync.pruneAutoBackups(cfg, keep = WebDavSync.AUTO_BACKUP_KEEP)
+        }
     }
 }
 """
@@ -635,6 +892,49 @@ fun BackupSettingsScreen(context: Context) {
                 webDavUploadPending = false
             },
         )
+    }
+    val exportLauncher = rememberLauncherForActivityResult(
+        onResult = { uri ->
+            application.applicationScope.launch {
+                var readFailures = 0
+                withContext(Dispatchers.IO) {
+                    context.contentResolver.openOutputStream(uri)?.use { out ->
+                        java.io.OutputStreamWriter(out, Charsets.UTF_8).use { w ->
+                            readFailures = ConfigBackup.exportToWriter(
+                                providerRepo = providerRepository,
+                                includeSecrets = exportWithSecrets,
+                                writer = w,
+                            )
+                        }
+                    }
+                }
+                Toast.makeText(context, "saved $readFailures", Toast.LENGTH_SHORT).show()
+            }
+        },
+    )
+    suspend fun uploadRemote() {
+        val tempFile = java.io.File(context.cacheDir, "webdav-upload.json")
+        var readFailures = 0
+        try {
+            withContext(Dispatchers.IO) {
+                java.io.FileOutputStream(tempFile).use { fos ->
+                    java.io.OutputStreamWriter(fos, Charsets.UTF_8).use { w ->
+                        readFailures = ConfigBackup.exportToWriter(
+                            providerRepo = providerRepository,
+                            includeSecrets = withSecrets,
+                            writer = w,
+                        )
+                    }
+                }
+            }
+            WebDavSync.backup(
+                config = cfg,
+                payload = tempFile.readBytes(),
+                client = webDavHttpClient,
+            )
+        } finally {
+            tempFile.delete()
+        }
     }
     fun onFetch(entry: WebDavSync.AutoBackupEntry) {
         if (!operationBusy) {
@@ -791,6 +1091,49 @@ VIOLATION_FETCH_GATE_RECLAIM = COMPLIANT_SCREEN.replace(
 )
 
 
+# ── r19 #9 / #10 / #11 (round-3 dual-gate witnesses) ──────────────────────
+# #9: the WebDAV upload PUTs a literal empty body — the document written into
+#     tempFile never leaves the device, yet the run reports "uploaded".
+VIOLATION_UPLOAD_CONSTANT = COMPLIANT_SCREEN.replace(
+    "                payload = tempFile.readBytes(),\n",
+    "                payload = ByteArray(0),\n",
+)
+
+# #10a: the local SAF export's export call is short-circuited behind a constant
+#      (the sink is opened, the document is never streamed, the toast fires).
+VIOLATION_LOCAL_EXPORT_DEAD = COMPLIANT_SCREEN.replace(
+    "                            readFailures = ConfigBackup.exportToWriter(\n"
+    "                                providerRepo = providerRepository,\n",
+    "                            if (false) readFailures = ConfigBackup.exportToWriter(\n"
+    "                                providerRepo = providerRepository,\n",
+)
+
+# #10b: the call is deleted outright — the sink is still opened and closed.
+VIOLATION_LOCAL_EXPORT_GONE = COMPLIANT_SCREEN.replace(
+    "                            readFailures = ConfigBackup.exportToWriter(\n"
+    "                                providerRepo = providerRepository,\n"
+    "                                includeSecrets = exportWithSecrets,\n"
+    "                                writer = w,\n"
+    "                            )\n",
+    "                            readFailures = 0\n",
+)
+
+# #11: runLocked never pushes — KEY_LAST_RUN still advances.
+VIOLATION_AUTO_NO_PUSH = COMPLIANT_AUTO.replace(
+    "            WebDavSync.backupAuto(cfg, local)\n", "")
+
+# #11b: the push survives but uploads a different file than the one written.
+VIOLATION_AUTO_PUSH_OTHER = COMPLIANT_AUTO.replace(
+    "WebDavSync.backupAuto(cfg, local)",
+    'WebDavSync.backupAuto(cfg, File(app.cacheDir, "other.json"))')
+
+# A legal spelling: the payload is read through a stream wrapper.
+COMPLIANT_UPLOAD_STREAMED = COMPLIANT_SCREEN.replace(
+    "                payload = tempFile.readBytes(),\n",
+    "                payload = tempFile.inputStream().use { it.readBytes() },\n",
+)
+
+
 # A correctly WRAPPED sanitize call is a legal spelling: the arms must anchor on
 # structure (call/argument identity), not on a single-line style.
 COMPLIANT_SANITIZER_WRAPPED = COMPLIANT_SCREEN.replace(
@@ -935,6 +1278,21 @@ def selftest():
     # a wrapped-but-correct call / a wrapped File build is a legal spelling
     ok &= run_fixture("compliant-sanitizer-wrapped", expect_ok=True,
                       screen=COMPLIANT_SANITIZER_WRAPPED)
+    # r19 #9 / #10 / #11: each witness must trip the arm it was written against.
+    ok &= run_fixture("violation-upload-constant-payload", expect_ok=False,
+                      screen=VIOLATION_UPLOAD_CONSTANT, contains="is a CONSTANT")
+    ok &= run_fixture("violation-local-export-dead-guard", expect_ok=False,
+                      screen=VIOLATION_LOCAL_EXPORT_DEAD, contains="DEAD-GUARDED")
+    ok &= run_fixture("violation-local-export-gone", expect_ok=False,
+                      screen=VIOLATION_LOCAL_EXPORT_GONE,
+                      contains="never handed to ConfigBackup.exportToWriter")
+    ok &= run_fixture("violation-auto-no-push", expect_ok=False,
+                      auto=VIOLATION_AUTO_NO_PUSH,
+                      contains="never calls WebDavSync.backupAuto")
+    ok &= run_fixture("violation-auto-push-other-file", expect_ok=False,
+                      auto=VIOLATION_AUTO_PUSH_OTHER, contains="uploads `")
+    ok &= run_fixture("compliant-upload-streamed", expect_ok=True,
+                      screen=COMPLIANT_UPLOAD_STREAMED)
     print("BACKUP_STREAMING_EXPORT_SELFTEST=" + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 
@@ -951,7 +1309,7 @@ def main():
         for f in failures:
             print("FAIL:", f)
         sys.exit(1)
-    print("backup_streaming_export_check: OK (arm1 + arm2 + arm3 + arm4 + arm5 + arm6 green)")
+    print("backup_streaming_export_check: OK (arm1 + arm2 + arm3 + arm4 + arm5 + arm6 + arm7 + arm8 green)")
 
 
 if __name__ == "__main__":
