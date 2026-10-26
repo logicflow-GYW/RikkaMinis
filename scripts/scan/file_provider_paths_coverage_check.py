@@ -76,8 +76,13 @@ import tempfile
 from pathlib import Path
 
 from _kotlin_lexer import KotlinLexError
-from _kotlin_ast import const_value, function_body, match_bracket
-from _kotlin_valueflow import code_view, literal_view, path_feasible
+from _kotlin_ast import (
+    const_value, function_body, match_bracket, split_top,
+    when_branches as ast_when_branches,
+)
+from _kotlin_valueflow import (
+    call_args, code_view, literal_view, path_feasible,
+)
 
 XML_REL = "src/android/app/src/main/res/xml/file_provider_paths.xml"
 KT_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/LargeContentGuard.kt"
@@ -87,6 +92,15 @@ PHOTOS_REL = "src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/P
 # ChatViewModel.kt and is drained from ChatScreen.kt.
 CHATVM_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatViewModel.kt"
 SCREEN_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatScreen.kt"
+# [R3-t22] the two ends the provider criteria never looked at: the SHARE ENTRY
+# (which intents ever reach a staged file) and the buffer KIND list (which
+# buffered items the drain actually delivers).
+SHARE_REL = "src/android/app/src/main/java/com/rikkaminis/app/share/ShareReceiverActivity.kt"
+PENDING_REL = "src/android/app/src/main/java/com/rikkaminis/app/share/PendingShare.kt"
+MANIFEST_REL = "src/android/app/src/main/AndroidManifest.xml"
+# A log line reads the value without delivering it — passing the shared text to
+# AppLogger is exactly the witness shape, so a logger is not a sink.
+LOG_SINK_RE = re.compile(r"^(?:AppLogger|AppLog|Log|Logger|Timber|println|print)$")
 
 # (registry id, writer file, regex proving the dir is written, provider tag,
 #  declared path). This list IS the coverage contract: a new dir handed to
@@ -274,6 +288,113 @@ def _fn_spans(code: str, name: str):
     cannot steal the body start."""
     fb = function_body(code, name)
     return None if fb is None else (fb[0], fb[1])
+
+
+def _block_after_in(code: str, span, anchor_re: str):
+    """`{ … }` following the first [anchor_re] match INSIDE [span]."""
+    m = re.search(anchor_re, code[span[0]:span[1]])
+    if not m:
+        return None
+    k = span[0] + m.end()
+    while k < len(code) and code[k] in " \t\r\n":
+        k += 1
+    if k >= len(code) or code[k] != "{":
+        return None
+    close = match_bracket(code, k)
+    return None if close < 0 else (k + 1, close)
+
+
+def _when_branches(code: str, block):
+    """[(label, body_span)] for the branches of the when-block [block].
+
+    Delegates the enumeration to the shared `_kotlin_ast.when_branches` (no
+    self-written scanner) and only tightens each span to the `{ … }` body when
+    the branch is block-shaped — the shared primitive reports the segment up to
+    the next top-level newline, which truncates a multi-line arm.
+    """
+    out = []
+    for _subject, cond, bstart, bend in ast_when_branches(code):
+        if not (block[0] - 1 <= bstart <= block[1]):
+            continue
+        k = bstart
+        while k < len(code) and code[k] in " \t\r\n":
+            k += 1
+        if k < len(code) and code[k] == "{":
+            close = match_bracket(code, k)
+            span = (k + 1, close) if close > 0 else (k, bend)
+        else:
+            span = (k, bend)
+        out.append((cond, span))
+    return out
+
+
+def _delivery_calls(code: str, span, needle: str):
+    """Live calls inside [span] whose arguments read [needle] AND that are not a
+    logger — handing a value to a log line is the defect, not the delivery."""
+    out = []
+    for m in re.finditer(r"([A-Za-z_][\w.]*)\s*\(", code[span[0]:span[1]]):
+        callee = m.group(1)
+        if LOG_SINK_RE.match(callee.split(".")[0]):
+            continue
+        pos = span[0] + m.end() - 1
+        if not path_feasible(code, pos):
+            continue
+        args = call_args(code, pos)
+        if any(needle in code[a:b] for a, b in args):
+            out.append((callee, pos))
+    return out
+
+
+def _handler_fills_list(code: str, handler: str, list_name: str):
+    """(ok, reason) — does [handler] actually PUT something into the list it was
+    handed? The parameter is located by the position of [list_name] in the call,
+    so a rename (`out`, `into`, …) cannot keep the criterion green."""
+    fb = function_body(code, handler)
+    if fb is None:
+        return False, "handler `%s` is not defined in the file" % handler
+    m = re.search(r"\bfun\s+%s\s*\(" % re.escape(handler), code)
+    if not m:
+        return False, "handler `%s` has no declaration the gate can read" % handler
+    open_at = m.end() - 1
+    close = match_bracket(code, open_at)
+    if close < 0:
+        return False, "handler `%s`'s parameter list does not close" % handler
+    inner = code[open_at + 1:close]
+    params = []
+    for a, b in split_top(inner, (",",)):
+        part = inner[a:b].strip()
+        if ":" in part:
+            params.append(part.split(":", 1)[0].strip())
+    # which argument position carried the list?
+    call = re.search(r"\b%s\s*\(" % re.escape(handler), code[:fb[0]])
+    slot = None
+    if call:
+        args = call_args(code, call.end() - 1)
+        for i, (a, b) in enumerate(args):
+            if list_name in code[a:b]:
+                slot = i
+                break
+    if slot is None or slot >= len(params):
+        return False, ("handler `%s` does not receive the item list the caller fills"
+                       % handler)
+    param = params[slot]
+    body = code[fb[0]:fb[1]]
+    for m2 in re.finditer(r"\b%s\b\s*(?:\+=|\.\s*(?:add|addAll)\s*\()" % re.escape(param), body):
+        if path_feasible(body, m2.start()):
+            return True, ""
+    return False, ("handler `%s` never appends to its `%s` list on a reachable path — the "
+                   "shared file is dropped on the floor" % (handler, param))
+
+
+def activity_actions(xml: str, activity: str):
+    """Actions the manifest registers for [activity] (by simple class name)."""
+    m = re.search(r"<activity\b[^>]*android:name=\"(?:[\w.]*\.)?%s\"" % re.escape(activity), xml)
+    if not m:
+        return None
+    end = xml.find("</activity>", m.end())
+    block = xml[m.start():end if end > 0 else len(xml)]
+    return sorted(set(re.findall(
+        r"<action\s+android:name=\"android\.intent\.action\.(\w+)\"", block)))
 
 
 def _block_after(code: str, anchor_re: str):
@@ -636,7 +757,123 @@ def check(root: Path) -> list:
                                   "`withContext(Dispatchers.IO)` in the ChatScreen share drain — "
                                   "listFiles() + per-file delete() on the UI thread")
 
+        # ── C9b [R3-t22 witness 25] every buffered KIND must be DELIVERED ───
+        #     The criteria above are satisfied by the ATTACHMENT arm alone: a
+        #     `INLINE_TEXT -> { }` branch keeps "the drain runs on IO and calls
+        #     addAttachmentFromStagedShare" true while the text the user shared
+        #     is dropped on the floor. The seam is between "the buffer was
+        #     consumed" and "each item reached the composer".
+        violations += _drain_delivers_every_kind(scr_code, root)
+
+    # ── C12 [R3-t22 witness 26] the share ENTRY must route every action the
+    #     manifest declares. The provider criteria above guard the files that
+    #     leave the app; an unwired entry point never gets that far — an
+    #     ACTION_VIEW falling into `else` finishes the activity with an empty
+    #     share, so "Open with → RikkaMinis" silently does nothing.
+    violations += _entry_routes_manifest_actions(root)
+
     return violations
+
+
+def _drain_delivers_every_kind(scr_code: str, root: Path):
+    """C9b — each `PendingShare.Item.Kind` arm of the share drain must hand the
+    item's value to a real sink; the kind list comes from the enum itself."""
+    out = []
+    loop = _block_after(scr_code, r'for\s*\(\s*([A-Za-z_]\w*)\s+in\s+pending\.items\s*\)')
+    if loop is None:
+        return ["C9b ChatScreen's share drain no longer iterates `pending.items` — a buffered "
+                "share would never be injected"]
+    var = re.search(r'for\s*\(\s*([A-Za-z_]\w*)\s+in\s+pending\.items\s*\)',
+                    scr_code[:loop[0]]).group(1)
+    when_block = _block_after_in(scr_code, loop, r"when\s*\([^)]*\.\s*kind\s*\)")
+    if when_block is None:
+        return ["C9b the share drain has no `when (…kind)` over the buffered items — the "
+                "composer would receive nothing"]
+    present = {}
+    for label, span in _when_branches(scr_code, when_block):
+        km = re.search(r"Kind\s*\.\s*([A-Z][A-Z0-9_]*)", label)
+        if not km:
+            continue
+        kind = km.group(1)
+        present[kind] = True
+        if not scr_code[span[0]:span[1]].strip():
+            out.append(f"C9b the share drain's `{kind}` arm is EMPTY — the item is consumed "
+                       "from the buffer and then dropped; the user's share never reaches the "
+                       "composer (R3 witness 25)")
+            continue
+        needle = "%s.value" % var
+        if not _delivery_calls(scr_code, span, needle):
+            out.append(f"C9b the share drain's `{kind}` arm never hands `{needle}` to anything "
+                       "but a log line — the item is read and thrown away")
+    # the enum is the contract: a Kind with no arm (and an `else` swallowing it)
+    # is the same defect one step further.
+    pending = root / PENDING_REL
+    if pending.exists():
+        try:
+            m = re.search(r"enum\s+class\s+Kind\b[^{]*\{([^}]*)\}", code_view(pending.read_text()))
+        except KotlinLexError:
+            m = None
+        if m:
+            for name in re.findall(r"\b([A-Z][A-Z0-9_]*)\s*(?:\(|,|;)", m.group(1)):
+                if name not in present:
+                    out.append(f"C9b `PendingShare.Item.Kind.{name}` has no arm in the share "
+                               "drain — the buffer accepts it and the composer never sees it")
+    return out
+
+
+def _entry_routes_manifest_actions(root: Path):
+    """C12 — every intent action the manifest registers for the share activity
+    must have a branch in `extractItems()`, and that branch's handler must fill
+    the item list."""
+    out = []
+    share_path = root / SHARE_REL
+    manifest_path = root / MANIFEST_REL
+    if not share_path.exists():
+        return [f"C12 {SHARE_REL} MISSING — the share entry the provider criteria stage "
+                "files for cannot be checked"]
+    if not manifest_path.exists():
+        return [f"C12 {MANIFEST_REL} MISSING — the registered entry actions are unknowable"]
+    actions = activity_actions(manifest_path.read_text(), "ShareReceiverActivity")
+    if actions is None:
+        return ["C12 ShareReceiverActivity is not declared in the manifest — the intent filters "
+                "that make the app a share target are gone (fail-closed)"]
+    try:
+        share = code_view(share_path.read_text())
+    except KotlinLexError as exc:
+        return [f"C12 LEXER could not parse {SHARE_REL} ({exc}) — fail closed"]
+    fb = function_body(share, "extractItems")
+    if fb is None:
+        return ["C12 extractItems() is gone from ShareReceiverActivity — the incoming intent is "
+                "never turned into items (fail-closed)"]
+    when_block = _block_after_in(share, fb, r"when\s*\(\s*intent\s*(?:\?\.)?\s*\.?\s*action\s*\)")
+    if when_block is None:
+        return ["C12 extractItems() no longer switches on `intent?.action` — every action would "
+                "take the same path"]
+    branched = {}
+    list_name = re.search(r"\bval\s+([A-Za-z_]\w*)\s*=\s*mutableListOf", share[fb[0]:fb[1]])
+    list_name = list_name.group(1) if list_name else "items"
+    for label, span in _when_branches(share, when_block):
+        am = re.search(r"ACTION_([A-Z_]+)", label)
+        if not am:
+            continue
+        act = am.group(1)
+        branched[act] = True
+        calls = _delivery_calls(share, span, list_name)
+        if not calls:
+            out.append(f"C12 the `ACTION_{act}` branch never hands the `{list_name}` list to a "
+                       "handler — a share on that path produces no item at all")
+            continue
+        handler = calls[0][0].split(".")[-1]
+        ok, why = _handler_fills_list(share, handler, list_name)
+        if not ok:
+            out.append(f"C12 the `ACTION_{act}` branch routes to `{handler}`, but {why}")
+    for act in actions:
+        if act not in branched:
+            out.append(f"C12 the manifest registers `android.intent.action.{act}` for "
+                       "ShareReceiverActivity, but extractItems() has no branch for it — the "
+                       "intent falls into `else`, the activity finishes with an empty share and "
+                       "the user sees nothing (R3 witness 26)")
+    return out
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -831,7 +1068,76 @@ fun ChatScreen(sessionId: String, viewModel: ChatViewModel) {
 '''
 
 
-def write_fixture(base: Path, xml=None, kt=None, media=None, photos=None, chatvm=None, screen=None):
+CLEAN_SHARE = '''package com.rikkaminis.app.share
+
+import android.content.Intent
+
+class ShareReceiverActivity {
+    private suspend fun extractItems(): List<PendingShare.Item> {
+        val items = mutableListOf<PendingShare.Item>()
+        try {
+            when (intent?.action) {
+                Intent.ACTION_SEND -> handleSingleSend(intent, items)
+                Intent.ACTION_SEND_MULTIPLE -> handleMultipleSend(intent, items)
+                Intent.ACTION_VIEW -> handleView(intent, items)
+                else -> AppLogger.warning(TAG, "unhandled action: ${intent?.action}")
+            }
+        } catch (e: Throwable) {
+            AppLogger.error(TAG, "extraction failed: ${e.message}")
+        }
+        return items
+    }
+
+    private fun handleSingleSend(intent: Intent, out: MutableList<PendingShare.Item>) {
+        out += PendingShare.Item(PendingShare.Item.Kind.INLINE_TEXT, "text")
+    }
+
+    private fun handleMultipleSend(intent: Intent, out: MutableList<PendingShare.Item>) {
+        out += PendingShare.Item(PendingShare.Item.Kind.ATTACHMENT, "file")
+    }
+
+    private fun handleView(intent: Intent, out: MutableList<PendingShare.Item>) {
+        out += PendingShare.Item(PendingShare.Item.Kind.ATTACHMENT, "view")
+    }
+}
+'''
+
+CLEAN_MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity
+            android:name=".share.ShareReceiverActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+'''
+
+CLEAN_PENDING = '''package com.rikkaminis.app.share
+
+data class PendingShare(val items: List<Item>, val timestampMs: Long) {
+    data class Item(val kind: Kind, val value: String) {
+        enum class Kind(val wire: String) {
+            INLINE_TEXT("inlineText"),
+            ATTACHMENT("attachment"),
+        }
+    }
+}
+'''
+
+
+def write_fixture(base: Path, xml=None, kt=None, media=None, photos=None, chatvm=None,
+                  screen=None, share=None, manifest=None, pending=None):
     def put(rel, text):
         p = base / rel
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -842,6 +1148,9 @@ def write_fixture(base: Path, xml=None, kt=None, media=None, photos=None, chatvm
     put(PHOTOS_REL, photos if photos is not None else CLEAN_PHOTOS)
     put(CHATVM_REL, chatvm if chatvm is not None else CLEAN_CHATVM)
     put(SCREEN_REL, screen if screen is not None else CLEAN_SCREEN)
+    put(SHARE_REL, share if share is not None else CLEAN_SHARE)
+    put(MANIFEST_REL, manifest if manifest is not None else CLEAN_MANIFEST)
+    put(PENDING_REL, pending if pending is not None else CLEAN_PENDING)
 
 
 def selftest() -> int:
@@ -1165,6 +1474,75 @@ def selftest() -> int:
             '            SharedShareStore.cleanSharedFiles(context)\n'
             '        }\n',
             '        SharedShareStore.cleanSharedFiles(context)\n'),
+    )
+
+    # ── [R3-t22] the two witnesses of the third round ───────────────────────
+    # 25: the drain still runs on IO and still attaches staged files (both old
+    #     C9 rules are satisfied by the ATTACHMENT arm) while the INLINE_TEXT
+    #     arm was emptied — the shared text is consumed and dropped.
+    run(
+        "WITNESS share drain INLINE_TEXT arm emptied",
+        expect_red=True,
+        screen=CLEAN_SCREEN.replace(
+            '''                PendingShare.Item.Kind.INLINE_TEXT -> {
+                    viewModel.setInputText(item.value)
+                }''',
+            '''                PendingShare.Item.Kind.INLINE_TEXT -> {
+                }'''),
+    )
+    # Same arm, second face: the value reaches a LOG LINE only.
+    run(
+        "WITNESS share drain arm only logs the text",
+        expect_red=True,
+        screen=CLEAN_SCREEN.replace(
+            "                    viewModel.setInputText(item.value)",
+            "                    AppLogger.info(\"ChatScreen\", \"share text: \" + item.value)"),
+    )
+    # Third face: the arm is deleted and an `else` swallows the kind.
+    run(
+        "WITNESS share drain arm deleted, else swallows it",
+        expect_red=True,
+        screen=CLEAN_SCREEN.replace(
+            '''                PendingShare.Item.Kind.INLINE_TEXT -> {
+                    viewModel.setInputText(item.value)
+                }''',
+            '''                else -> Unit'''),
+    )
+
+    # 26: the manifest registers ACTION_VIEW (the whole "Open with" surface) and
+    #     extractItems has no branch — the activity finishes with an empty share.
+    run(
+        "WITNESS extractItems drops ACTION_VIEW",
+        expect_red=True,
+        share=CLEAN_SHARE.replace(
+            "                Intent.ACTION_VIEW -> handleView(intent, items)\n", ""),
+    )
+    # Second face: the branch exists but its handler fills nothing.
+    run(
+        "WITNESS ACTION_VIEW routed to a handler that fills nothing",
+        expect_red=True,
+        share=CLEAN_SHARE.replace(
+            "    private fun handleView(intent: Intent, out: MutableList<PendingShare.Item>) {\n"
+            "        out += PendingShare.Item(PendingShare.Item.Kind.ATTACHMENT, \"view\")\n"
+            "    }",
+            "    private fun handleView(intent: Intent, out: MutableList<PendingShare.Item>) {\n"
+            "        AppLogger.info(TAG, \"view: ${intent?.data}\")\n"
+            "    }"),
+    )
+    # Third face: the manifest gains an action nobody routed.
+    run(
+        "WITNESS manifest registers an action extractItems never routes",
+        expect_red=True,
+        manifest=CLEAN_MANIFEST.replace(
+            "            <intent-filter>\n"
+            "                <action android:name=\"android.intent.action.VIEW\" />\n"
+            "            </intent-filter>",
+            "            <intent-filter>\n"
+            "                <action android:name=\"android.intent.action.VIEW\" />\n"
+            "            </intent-filter>\n"
+            "            <intent-filter>\n"
+            "                <action android:name=\"android.intent.action.OPEN_DOCUMENT\" />\n"
+            "            </intent-filter>"),
     )
 
     print("=== file_provider_paths_coverage --selftest ===")
