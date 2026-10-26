@@ -10,6 +10,7 @@ import androidx.core.graphics.drawable.IconCompat
 import com.rikkaminis.app.MainActivity
 import com.rikkaminis.app.R
 import com.rikkaminis.app.logging.AppLogger
+import com.rikkaminis.app.ui.chat.decodeUriPath
 import com.rikkaminis.app.webapp.ShortcutPinOutcome
 import com.rikkaminis.app.webapp.pinOutcome
 
@@ -47,7 +48,16 @@ object WebPreviewShortcut {
             return
         }
 
-        val absPath = Uri.parse(url).path.orEmpty()
+        // [debt-1026 #2 / backlog §1023-H] `Uri.parse(url).path` re-applies generic
+        // URI delimiter semantics to a URL the host built by plain concatenation
+        // (`"file://" + absolutePath`): a literal `#` or `?` in the file NAME became
+        // a fragment / query, so `file:///var/minis/browser/report#1.html` pinned a
+        // deep link to `/var/minis/browser/report` — a path that does not exist, and
+        // the shortcut silently opened nothing. Same fix as the two sibling sites
+        // (StreamingMarkdownText.resolveMdMediaFile, WebPreviewBottomSheet
+        // .openExternalFromSheet): route through the single URI-path exit, which
+        // decodes %XX only and has no delimiter semantics.
+        val absPath = decodeUriPath(url.removePrefix("file://"))
         if (absPath.isBlank()) {
             AppLogger.warning(TAG, "pin: empty path in $url")
             return

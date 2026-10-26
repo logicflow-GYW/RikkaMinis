@@ -26,6 +26,8 @@ import com.rikkaminis.app.tools.SandboxDefectRegistry
 import com.rikkaminis.app.tools.SubagentSkill
 import com.rikkaminis.app.tools.ToolExecutionResult
 import com.rikkaminis.app.tools.UnknownToolMessage
+import com.rikkaminis.app.ui.settings.SafRead
+import com.rikkaminis.app.ui.settings.readSafBytes
 import com.rikkaminis.app.util.ImageDecodeSizing
 import com.rikkaminis.app.util.ImageDecoding
 import com.rikkaminis.app.util.Utf16Sanitizer
@@ -43,6 +45,19 @@ import java.util.Locale
 // [FE-5 batch 6] Tool dispatch / prompt assembly / attachment prep /
 // title generation cluster extracted verbatim from ChatViewModel as
 // extension functions (same pattern as ChatSessionLifecycle / ChatToolExecutors).
+
+/**
+ * Cap for the ORIGINAL bytes of one image attachment, applied before anything
+ * decodes or copies them (debt-1026 #3, backlog B-07).
+ *
+ * 64 MiB is far above any camera original — a 48 MP RAW plus EXIF is well under
+ * a fifth of this — so the cap never touches a real photo. It only rejects the
+ * one shape this branch can OOM on: a file that claims an image MIME type and
+ * carries a multi-hundred-MB payload. Over the cap the attachment is REFUSED
+ * (logged, skipped), never truncated: a half image in the transcript is worse
+ * than none.
+ */
+private const val MAX_RAW_IMAGE_ATTACHMENT_BYTES = 64L * 1024 * 1024
 
 internal fun ChatViewModel.streamFlushThrottleMs(len: Int): Long = when {
     len < 500 -> 200L
@@ -1632,12 +1647,39 @@ internal fun ChatViewModel.prepareUserAttachments(
             // shell tools (read_image / cat) saw a 1024px JPEG instead
             // of the user's original picture. Matches iOS canonical
             // (AIChatViewModel.swift L1595-1617).
-            val rawBytes = try {
-                context.contentResolver.openInputStream(attachment.uri)?.use { it.readBytes() }
-            } catch (e: Exception) {
-                Log.w(ChatViewModel.TAG, "image read failed for ${attachment.fileName}: ${e.message}")
-                null
-            } ?: continue
+            //
+            // [debt-1026 #3 / backlog B-07] The read is BOUNDED: a raw
+            // `readBytes()` on a file that merely claims an image MIME
+            // type materialised the whole payload before any resize ran —
+            // the same OOM the non-image branch below streams around. The
+            // shared SAF helper gives both halves of the bound: a
+            // declared-size pre-check before the first byte, and a hard
+            // stop one byte past the cap on the stream. An over-cap pick
+            // is REFUSED with a log line, never truncated.
+            val rawBytes = when (
+                val read = readSafBytes(
+                    context.contentResolver,
+                    attachment.uri,
+                    MAX_RAW_IMAGE_ATTACHMENT_BYTES,
+                )
+            ) {
+                is SafRead.Ok -> read.bytes
+                SafRead.TooLarge -> {
+                    Log.w(
+                        ChatViewModel.TAG,
+                        "image attachment ${attachment.fileName} is over the " +
+                            "$MAX_RAW_IMAGE_ATTACHMENT_BYTES-byte cap; skipped",
+                    )
+                    continue
+                }
+                SafRead.Failed -> {
+                    Log.w(
+                        ChatViewModel.TAG,
+                        "image read failed for ${attachment.fileName}; skipped",
+                    )
+                    continue
+                }
+            }
             val ref = try {
                 mediaStore.saveMedia(
                     data = rawBytes,

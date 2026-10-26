@@ -36,11 +36,11 @@ Criteria (all must hold):
   F3  WebViewHolder.fromAssetLoaderUrl cuts `#` and `?` INSIDE the
       decodeUriPath(…) argument (before decoding) and never after the call —
       round-trip symmetry with toAssetLoaderUrl;
-  F4  ui/** sweep: `Uri.parse(...).path` is banned outside the allowlist —
-      allowlist: ui/preview/WebPreviewShortcut.kt, exactly 1 occurrence
-      (same-family site OUTSIDE this branch's file set, radius discipline:
-      registered in backlog §1023-H; when it is fixed, REMOVE the allowlist
-      entry — a stale entry is RED so the exemption cannot outlive the debt).
+  F4  ui/** sweep: `Uri.parse(...).path` is banned under ui/** — the
+      allowlist is EMPTY. The last exempted site (ui/preview/
+      WebPreviewShortcut.kt, backlog §1023-H) was fixed in fix/debt-sweep-1026
+      and its entry removed; a stale entry is RED, so the exemption cannot
+      outlive the debt it names.
   F5  one media decision point (extension table / classifier / `#`-cut scope /
       absolute-path guard on every minis:// decode).
 
@@ -93,15 +93,24 @@ MEDIA_MODEL_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/Mark
 MEDIA_PARSER_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/markdown/MarkdownParser.kt"
 CHAT_SCREEN_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatScreen.kt"
 
-# relpath (repo-root-relative, forward slashes) -> max allowed occurrences
-ALLOWLIST = {
+# relpath (repo-root-relative, forward slashes) -> max allowed occurrences.
+# EMPTY by design: every `Uri.parse(…).path` site under ui/** now resolves
+# through ui/chat/UriPathDecode.decodeUriPath. The last one (WebPreviewShortcut,
+# backlog §1023-H) was fixed in fix/debt-sweep-1026 (#2) — it pinned a deep link
+# to a path truncated at a literal `#`/`?` in the file name. F4's "exact" rule
+# makes a leftover entry RED, so an exemption cannot outlive its debt; do not
+# re-add entries here for new sites, fix them.
+ALLOWLIST = {}
+
+# The staleness rule still needs a live probe allowlist: the "entry kept but the
+# site is gone" arm has nothing to be stale about otherwise. SELFTEST ONLY —
+# the real-tree run never consults it (analyse() defaults to ALLOWLIST).
+SELFTEST_ALLOWLIST = {
     "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebPreviewShortcut.kt": 1,
 }
-ALLOWLIST_REASON = (
-    "ui/preview/WebPreviewShortcut.kt — same-family `Uri.parse(url).path` site "
-    "outside fix/da1023-file-uri-decode's file set (radius discipline); "
-    "registered in backlog §1023-H. Remove this entry in the same branch "
-    "that fixes it."
+SELFTEST_ALLOWLIST_REASON = (
+    "selftest probe: stands in for the historical WebPreviewShortcut exemption so "
+    "the stale-entry arm keeps a subject."
 )
 
 # `Uri.parse` followed by `.path` — counted with paren matching (see
@@ -451,7 +460,7 @@ def _dead_guard(cond):
     return "the guard folds to `%s`" % ("true" if folded else "false")
 
 
-def analyse(sheet_src, md_src, holder_src, ui_srcs):
+def analyse(sheet_src, md_src, holder_src, ui_srcs, allowlist=None):
     """ui_srcs: {repo_root_relpath: RAW source} for EVERY .kt under ui/**.
 
     Returns the criteria list [(name, ok, detail, line)]. A source the lexer
@@ -513,11 +522,12 @@ def analyse(sheet_src, md_src, holder_src, ui_srcs):
                     problem6 == "", problem6 or "assetRootDir = <parent of the stripped path>", None))
 
     # --- F4: ui/** sweep with allowlist --------------------------------
+    allowlist = ALLOWLIST if allowlist is None else allowlist
     for rel in sorted(ui_views):
         code = ui_views[rel][0]
         n = count_uri_parse_path(code)
-        limit = ALLOWLIST.get(rel, 0)
-        if rel in ALLOWLIST:
+        limit = allowlist.get(rel, 0)
+        if rel in allowlist:
             if n != limit:
                 results.append(
                     ("F4 allowlist exact for %s" % os.path.basename(rel), False,
@@ -527,7 +537,7 @@ def analyse(sheet_src, md_src, holder_src, ui_srcs):
                          else "raise the entry count consciously or fix the site")), None))
             else:
                 results.append(("F4 allowlist exact for %s" % os.path.basename(rel), True,
-                                 "exempted occurrence: %s" % ALLOWLIST_REASON, None))
+                                 "exempted occurrence: %s" % SELFTEST_ALLOWLIST_REASON, None))
         elif n > 0:
             results.append(
                 ("F4 no Uri.parse(...).path in %s" % os.path.basename(rel), False,
@@ -920,7 +930,7 @@ BREAKER_FETCHER_DEAD_AND_RIGHT = IMAGE_FETCHER_CLEAN.replace(
     'val linuxPath = if (decoded.startsWith("/") && false) decoded else "/var/minis/$decoded"')
 assert BREAKER_FETCHER_DEAD_AND_RIGHT != IMAGE_FETCHER_CLEAN
 
-ALLOWLIST_REL = next(iter(ALLOWLIST))
+ALLOWLIST_REL = next(iter(SELFTEST_ALLOWLIST))
 ALLOWLISTED_FILE = """package probe
 internal fun requestPinWebPreviewShortcut(
     context: Context,
@@ -987,7 +997,7 @@ def selftest():
     def run(sheet, md, holder, ui):
         nonlocal arms
         arms += 1
-        return analyse(sheet, md, holder, ui)
+        return analyse(sheet, md, holder, ui, SELFTEST_ALLOWLIST)
 
     def crit(results, name):
         for c, ok, _d, _l in results:

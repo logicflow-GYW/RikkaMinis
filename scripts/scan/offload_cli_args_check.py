@@ -3471,14 +3471,14 @@ OFFLOAD_SOURCE_DIRS = (
 )
 
 # Handler basename → why it still ships a prose payload from another file.
-PAYLOAD_DELEGATE_EXEMPT = {
-    "WeatherOffloadHandler.kt": (
-        "registered P2 (backlog 1045-A07): WeatherManager.fetchWeather() renders a "
-        "human weather report; the structured sibling fetchWeatherJson() already "
-        "exists, so this is a straightforward follow-up — deliberately not fixed in "
-        "the android-player branch."
-    ),
-}
+# EMPTY by design. The only entry ever registered here (WeatherOffloadHandler.kt
+# taking WeatherManager.fetchWeather()'s composed sentence block) was fixed in
+# fix/debt-sweep-1026 (#5, backlog 1045-A07): the legacy positional form now
+# fetches the raw JSON and renders it through reportBlock + formatBody like every
+# subcommand, so no handler hands a foreign file's sentence to the payload any
+# more and the entry rotted (Z3). Do not re-add entries — bind the payload to a
+# structured envelope.
+PAYLOAD_DELEGATE_EXEMPT = {}
 
 _PCS_FUN_RE = re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?(\w+)\s*\(")
 _PCS_STR_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"')
