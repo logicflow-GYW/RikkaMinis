@@ -150,6 +150,24 @@ FLIP_CONTENT_CALL = "ToolPassTransitionPolicy.contentAtDispatchFlip("
 
 CONTINUE_STMT = re.compile(r"\n[ \t]*continue[ \t]*\n")
 
+# ── round-3 additions (dual-gate seams, witnesses #124 / #125 / #126) ────
+# T7  Pass 3's confluence must map every outcome to a TERMINAL status. Both
+#     gates read the flip INTO RUNNING (T2/T5) and the publish paths (T1/T8),
+#     but nothing read the flip OUT of it: `result.success -> RUNNING` keeps
+#     every finished card spinning and sends ToolOutcome.Unknown to the overlay.
+# T8  every Pass-1 refusal must PUBLISH. T1 only pinned the CRITICAL branch, so
+#     deleting the sibling `preflightError` publish left a blocked call stuck on
+#     whatever the stream last published (PENDING).
+# T9  `sequentialQueueCueIndices` must DECIDE. T3 pins the call site, T5/T6 pin
+#     the sibling policy functions' bodies — the cue-index body itself was never
+#     read, so `= emptyList()` silently removed the waiting cue.
+TERMINAL_STATUSES = ("SUCCESS", "TIMEOUT", "FAILED")
+NON_TERMINAL_STATUSES = ("RUNNING", "PENDING")
+EMPTY_COLLECTION_RE = re.compile(
+    r"^(?:emptyList|emptySet|emptyArray|emptySequence|listOf|setOf|arrayListOf|mutableListOf|"
+    r"mutableSetOf|arrayOf)\s*(?:<[^<>]*>)?\s*\(\s*\)$")
+FINAL_STATUS_DECL = re.compile(r"\bval\s+finalStatus\s*=\s*when\s*\{")
+
 SELFTEST_MARKER = "LOOP_TOOL_STATUS_SELFTEST=PASS"
 
 
@@ -431,6 +449,25 @@ def policy_sig_params(masked, name):
     return [p.group(1) for p in re.finditer(r"\b([A-Za-z_]\w*)\s*:", masked[m.end():close])]
 
 
+def refusal_branch(ifs, masked, at):
+    """(body_start, body_end) of the innermost `if` that contains `at` AND
+    terminates after it — the refusal branch a block edit belongs to.
+
+    Deriving the branch instead of naming it is what makes a SIBLING refusal
+    path visible: the old T1 was anchored on the CRITICAL guard, so a fourth
+    refusal gate added (or emptied) next to it was never read.
+    """
+    best = None
+    for _p, _close, b_start, b_end, _cond in ifs:
+        if not (b_start <= at < b_end):
+            continue
+        if not re.search(r"\b(?:continue|break|return|throw)\b", masked[at:b_end]):
+            continue
+        if best is None or (b_end - b_start) < (best[1] - best[0]):
+            best = (b_start, b_end)
+    return best
+
+
 def check(src: str, label: str):
     """Return (violations, notes). violations empty = PASS."""
     code = blank_comments(src)
@@ -663,6 +700,129 @@ def check(src: str, label: str):
     else:
         notes.append("T6 dispatch flip retires the queue cue")
 
+    # ── T7: the Pass-3 confluence yields TERMINAL states only ───────────────
+    fm = FINAL_STATUS_DECL.search(masked)
+    if fm is None:
+        bad.append("%s:1: `val finalStatus = when { … }` not found — Pass 3 must collapse the "
+                   "execution result into a terminal block status (fail-closed)" % label)
+    else:
+        open_i = masked.index("{", fm.end() - 1)
+        close_i = match_close(masked, open_i, "{", "}")
+        if close_i < 0:
+            bad.append("%s:%d: the finalStatus when-block is unbalanced — cannot audit the Pass-3 "
+                       "status mapping" % (label, line_of(src, fm.start())))
+        else:
+            seg_code = code[fm.start():close_i + 1]
+            branches = when_branches(masked[fm.start():close_i + 1])
+            if not branches:
+                bad.append("%s:%d: the finalStatus when-block has no readable branch — cannot audit "
+                           "the Pass-3 status mapping (fail-closed)"
+                           % (label, line_of(src, fm.start())))
+            seen = []
+            for _subject, cond, b_start, b_end in branches:
+                cnorm = " ".join(cond.split())
+                val = branch_value(seg_code[b_start:b_end])
+                seen.append((cnorm, val))
+                at_line = line_of(src, fm.start() + b_start)
+                if not val.startswith("ToolBlockStatus."):
+                    bad.append("%s:%d: the finalStatus branch `%s` yields '%s' — Pass 3 must map "
+                               "each outcome to a ToolBlockStatus constant (fail-closed)"
+                               % (label, at_line, cnorm, val))
+                    continue
+                status = val.split(".")[-1]
+                if status in NON_TERMINAL_STATUSES:
+                    bad.append("%s:%d: a finished tool is mapped back to %s — Pass 3 is the only "
+                               "place a call stops being RUNNING; the block, the persisted turn "
+                               "parts and every card then keep the spinner forever, and the overlay "
+                               "receives ToolOutcome.Unknown" % (label, at_line, val))
+                if cnorm != "else" and always_false(cond):
+                    bad.append("%s:%d: the finalStatus branch `%s` can never be taken — that outcome "
+                               "falls through to the next branch" % (label, at_line, cnorm))
+            if not any("success" in c and v.endswith("SUCCESS") for c, v in seen):
+                bad.append("%s:%d: no `result.success -> …SUCCESS` branch — a call that succeeded "
+                           "never reaches the terminal SUCCESS state"
+                           % (label, line_of(src, fm.start())))
+            if not any("timedOut" in c and v.endswith("TIMEOUT") for c, v in seen):
+                bad.append("%s:%d: no `result.timedOut -> …TIMEOUT` branch — a timed-out call is "
+                           "reported as some other outcome" % (label, line_of(src, fm.start())))
+            if not any(c == "else" and v.endswith("FAILED") for c, v in seen):
+                bad.append("%s:%d: the finalStatus when has no `else -> …FAILED` fallback — an "
+                           "unexpected result leaves the block non-terminal"
+                           % (label, line_of(src, fm.start())))
+
+    # ── T8: EVERY Pass-1 refusal publishes its flip ─────────────────────────
+    refusal_writes = [header_at + m.start()
+                      for m in re.finditer(re.escape("ToolBlockStatus.FAILED"), pass1)]
+    if not refusal_writes:
+        bad.append("%s:1: Pass 1 records no FAILED refusal at all — the refusal gates (truncation / "
+                   "loop detector / preflight) are gone (fail-closed)" % label)
+    for at in refusal_writes:
+        line = line_of(src, at)
+        branch = refusal_branch(ifs, masked, at)
+        if branch is None:
+            bad.append("%s:%d: a Pass-1 refusal sets FAILED outside a terminating branch — the "
+                       "refusal would fall through into dispatch" % (label, line))
+            continue
+        b_start, b_end = branch
+        term = re.search(r"\b(?:continue|break|return|throw)\b", masked[at:b_end])
+        limit = at + term.start() if term else b_end
+        pushes = [b_start + m.start()
+                  for m in re.finditer(re.escape(UI_PUSH), code[b_start:b_end])]
+        live = [p for p in pushes if p < limit
+                and not any(always_false(g) for g in enclosing(ifs, whens, p))]
+        if not live:
+            bad.append("%s:%d: a Pass-1 refusal marks the block FAILED but never publishes it "
+                       "before its terminator (no live `%s`) — the card keeps whatever the stream "
+                       "last published (PENDING), so a blocked call shows no error and spins until "
+                       "the next turn" % (label, line, UI_PUSH))
+    if refusal_writes:
+        notes.append("T8 every Pass-1 refusal publishes before it continues")
+
+    # ── T9: the cue-index policy DECIDES ────────────────────────────────────
+    span = fun_body(masked, "sequentialQueueCueIndices")
+    params = policy_sig_params(masked, "sequentialQueueCueIndices")
+    if span is None or not params:
+        bad.append("%s:1: `fun sequentialQueueCueIndices(` body not found — anchor moved or "
+                   "unbalanced (fail-closed)" % label)
+    else:
+        body = masked[span[0]:span[1]]
+        parts = policy_if(masked, code, span)
+        why = None
+        if parts is None:
+            why = ("its body `%s` has no branching `if` — a constant list queues nobody, so the "
+                   "second..Nth serial calls show a blank card instead of the waiting cue"
+                   % short_body(body))
+        elif not re.search(r"\b" + re.escape(params[0]) + r"\b", body):
+            why = "it never reads its `%s` parameter" % params[0]
+        else:
+            cond, then_v, else_v = parts
+            if always_true(cond) or always_false(cond):
+                why = "its condition `%s` is decided by literals" % cond
+            elif params[0] not in cond:
+                why = "its condition `%s` never looks at %s" % (cond, params[0])
+            elif not re.search(r"[<>]=?|==", cond):
+                why = "its condition `%s` does not compare the pending count" % cond
+            elif then_v == else_v:
+                why = "both branches yield `%s` — the count decides nothing" % then_v
+            else:
+                vals = (then_v, else_v)
+                empties = [v for v in vals if EMPTY_COLLECTION_RE.match(v)]
+                if len(empties) != 1:
+                    why = ("its branches yield `%s` / `%s` — exactly one must be the empty list and "
+                           "the other the queued-index range" % vals)
+                else:
+                    other = [v for v in vals if not EMPTY_COLLECTION_RE.match(v)][0]
+                    if params[0] not in other:
+                        why = ("its non-empty branch yields `%s` — it must derive the range from "
+                               "%s" % (other, params[0]))
+        if why:
+            bad.append("%s:%d: `sequentialQueueCueIndices` no longer decides which calls are "
+                       "queued — %s; Pass 2 still calls it and still writes the cue, but the index "
+                       "list is empty, so no card ever shows the waiting cue"
+                       % (label, line_of(src, span[0]), why))
+        else:
+            notes.append("T9 cue-index policy decides on the pending count")
+
     return bad, notes
 
 
@@ -881,6 +1041,64 @@ FIXTURES = [
         if (current == queueCue) "" else current""",
          """    fun contentAtDispatchFlip(current: String, queueCue: String): String =
         if (current == queueCue) current else "" """, 1)),
+    # ── round-3 witnesses (#124 / #125 / #126) ─────────────────────────────
+    # #124 (dual-gate seam): Pass 3 maps a SUCCESSFUL call back to RUNNING.
+    # Nothing used to read the flip OUT of RUNNING.
+    ("r3_pass3_success_running", "mapped back to ToolBlockStatus.RUNNING",
+     lambda s: s.replace(
+         "                        result.success -> ToolBlockStatus.SUCCESS",
+         "                        result.success -> ToolBlockStatus.RUNNING", 1)),
+    # #124b (family-hole): the success branch keeps its value and can never fire.
+    ("r3_pass3_success_dead", "can never be taken",
+     lambda s: s.replace(
+         "                        result.success -> ToolBlockStatus.SUCCESS",
+         "                        !true -> ToolBlockStatus.SUCCESS", 1)),
+    # #125 (dual-gate seam): the sibling preflight refusal stops publishing.
+    # T1 only ever pinned the CRITICAL branch.
+    ("r3_preflight_push_gone", "never publishes it",
+     lambda s: s.replace(
+         """                    resultParts.add(AgentContentPart.ToolResult(
+                        id = id, name = name,
+                        content = modelMessage,
+                        isError = true,
+                    ))
+                    withContext(Dispatchers.Main) {
+                        host.updateAssistantMessage(loopState.assistantId, loopState.accumulatedText, true, loopState.allToolBlocks)
+                    }
+                    continue""",
+         """                    resultParts.add(AgentContentPart.ToolResult(
+                        id = id, name = name,
+                        content = modelMessage,
+                        isError = true,
+                    ))
+                    continue""", 1)),
+    # #125b (order): the push survives but lands after the terminator.
+    ("r3_preflight_push_after_continue", "before its terminator",
+     lambda s: s.replace(
+         """                    withContext(Dispatchers.Main) {
+                        host.updateAssistantMessage(loopState.assistantId, loopState.accumulatedText, true, loopState.allToolBlocks)
+                    }
+                    continue
+                }
+
+                pending.add(PendingTool(id, name, args, argsStr, paramsMap))""",
+         """                    continue
+                    withContext(Dispatchers.Main) {
+                        host.updateAssistantMessage(loopState.assistantId, loopState.accumulatedText, true, loopState.allToolBlocks)
+                    }
+                }
+
+                pending.add(PendingTool(id, name, args, argsStr, paramsMap))""", 1)),
+    # #126 (symmetric axis): the cue-index body becomes a constant.
+    ("r3_cue_indices_body_empty", "no longer decides which calls are queued",
+     lambda s: s.replace(
+         "        if (pendingCount > 1) (1 until pendingCount).toList() else emptyList()",
+         "        emptyList()", 1)),
+    # #126b (family-hole): the branch survives, both arms are empty.
+    ("r3_cue_indices_both_empty", "both branches yield",
+     lambda s: s.replace(
+         "        if (pendingCount > 1) (1 until pendingCount).toList() else emptyList()",
+         "        if (pendingCount > 1) emptyList() else emptyList()", 1)),
 ]
 
 
@@ -930,7 +1148,7 @@ def selftest(repo: str) -> int:
     if failures:
         print("SELFTEST FAIL (%d)" % failures)
         return 1
-    print(SELFTEST_MARKER)
+    print("%s (%d arms)" % (SELFTEST_MARKER, len(FIXTURES)))
     return 0
 
 
