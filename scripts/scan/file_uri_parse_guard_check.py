@@ -25,21 +25,38 @@ is always a fragment / query and is cut BEFORE decoding — matching the
 androidx WebViewAssetLoader, which resolves the path only.
 
 Criteria (all must hold):
-  F1a WebPreviewBottomSheet.openExternalFromSheet file:// branch resolves via
-      `decodeUriPath(url.removePrefix("file://"))` (slice on the branch);
+  F1a WebPreviewBottomSheet.openExternalFromSheet resolves the `file://` path
+      via `decodeUriPath(url.removePrefix("file://"))` AND the decoded value
+      survives to the file construction (no `.substringBefore(…)` chained onto
+      the call, no `.let { … }` that ignores its receiver, no rewrite at the
+      variable's consumption site);
   F1b no `Uri.parse(...).path` anywhere in WebPreviewBottomSheet.kt;
-  F2a StreamingMarkdownText.resolveMdMediaFile file:// branch resolves via
-      `decodeUriPath(stripped.removePrefix("file://"))`;
+  F2a StreamingMarkdownText.resolveMdMediaFile same contract as F1a;
   F2b no `Uri.parse(...).path` anywhere in StreamingMarkdownText.kt;
-  F3  WebViewHolder.fromAssetLoaderUrl cuts `#` and `?` before decodeUriPath
-      (round-trip symmetry with toAssetLoaderUrl);
+  F3  WebViewHolder.fromAssetLoaderUrl cuts `#` and `?` INSIDE the
+      decodeUriPath(…) argument (before decoding) and never after the call —
+      round-trip symmetry with toAssetLoaderUrl;
   F4  ui/** sweep: `Uri.parse(...).path` is banned outside the allowlist —
       allowlist: ui/preview/WebPreviewShortcut.kt, exactly 1 occurrence
       (same-family site OUTSIDE this branch's file set, radius discipline:
       registered in backlog §1023-H; when it is fixed, REMOVE the allowlist
       entry — a stale entry is RED so the exemption cannot outlive the debt).
-      UriPathDecode.kt itself needs no exemption: it is JVM-pure and never
-      parses; adding a parse there is RED like anywhere else.
+  F5  one media decision point (extension table / classifier / `#`-cut scope /
+      absolute-path guard on every minis:// decode).
+
+Batch-7 witness wave — the criterion shape moved from "the token is present"
+to "the decision behind the token is live":
+  * the decoded path's value is tracked through `.let { … }` value scopes and
+    to its consumption sites, instead of only the 80 chars after the call;
+  * `Uri.parse(...).path` is counted with paren matching, so a nested call
+    (`Uri.parse(stripped.trim()).path`) no longer slips through `[^()]*`;
+  * F3 compares the cut against the decoder's ARGUMENT (order), instead of
+    asking whether both substrings exist somewhere in the body;
+  * dead guards are decided by constant folding (`const_bool`), so `true ||`,
+    `|| true`, `false &&` and `&& false` are all the same red;
+  * every source is read through the shared lexer (`mask_code` /
+    `mask_comments`), so a raw string whose content contains `" /* "` can no
+    longer open a fake block comment and hide the code below it.
 
 Usage: python3 file_uri_parse_guard_check.py [ROOT]   (ROOT = repo root)
        python3 file_uri_parse_guard_check.py --selftest
@@ -48,6 +65,21 @@ Exit:  0 = gate green, 1 = violations (or selftest failures).
 import os
 import re
 import sys
+
+from _kotlin_ast import (
+    const_bool,
+    function_body,
+    match_bracket,
+    split_top,
+    strip_parens,
+)
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments
+from _kotlin_valueflow import (
+    call_args,
+    contains_ident,
+    expr_end,
+    scope_calls,
+)
 
 SHEET_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebPreviewBottomSheet.kt"
 MD_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/StreamingMarkdownText.kt"
@@ -70,186 +102,236 @@ ALLOWLIST_REASON = (
     "that fixes it."
 )
 
-URI_PARSE_PATH_RE = re.compile(r"Uri\.parse\s*\([^()]*\)\s*\.\s*path\b", re.S)
-
-# [wide-1024] `decodeUriPath(...)` alone says nothing about what happens to its
-# RESULT. Chaining a delimiter cut onto it re-introduces exactly the `#`/`?`
-# truncation the resolver exists to prevent, so the resolved value must be used
-# as-is. These are the chain calls that rewrite it.
-POST_DECODE_POISON_RE = re.compile(
-    r"^\s*\.\s*(substringBefore|substringAfter|substring|replace|split|trim|trimEnd|"
-    r"trimStart|removePrefix|removeSuffix)\b")
-# A literal in front of a guard makes the guard dead — `true || gate` and
-# `false && gate` keep the gate's spelling while nothing is ever decided by it.
-DEAD_GUARD_RE = re.compile(r"\bfalse\s*&&|\btrue\s*\|\|")
+# `Uri.parse` followed by `.path` — counted with paren matching (see
+# count_uri_parse_path). A nested argument (`Uri.parse(x.trim()).path`) used to
+# walk through the old `[^()]*` regex.
+URI_PARSE_RE = re.compile(r"\bUri\s*\.\s*parse\s*\(")
+# Calls that REWRITE the value they are chained onto. `decodeUriPath(...)`
+# followed by one of these hands a truncated path to `File(…)`.
+POST_DECODE_POISON = (
+    "substringBefore", "substringAfter", "substring", "replace", "split",
+    "trim", "trimEnd", "trimStart", "removePrefix", "removeSuffix",
+)
 HTTP_TEST_RE = re.compile(r'startsWith\(\s*"https?://')
+FILE_CUTS = ("substringBefore('#')", "substringBefore('?')")
+VALUE_SCOPES = ("let", "run", "with")
 
 
-def _match_paren(text, open_idx):
-    depth = 0
-    for j in range(open_idx, len(text)):
-        if text[j] == "(":
-            depth += 1
-        elif text[j] == ")":
-            depth -= 1
-            if depth == 0:
-                return j
-    return -1
+# ------------------------------------------------------------- primitives ---
+def _views(src):
+    """(structure view, literal view). Both are length-preserving projections of
+    the SAME source, so a position found in one is valid in the other.
 
-
-def post_decode_poison(text, call_token):
-    """None when the resolver's value flows on unchanged, else the reason."""
-    n = text.count(call_token)
-    if n != 1:
-        return "resolver `%s` must appear exactly once in the branch (found %d)" % (call_token, n)
-    i = text.index(call_token)
-    open_idx = text.find("(", i + len("decodeUriPath"))
-    if open_idx < 0:
-        return "cannot locate the resolver's argument list (fail-closed)"
-    close = _match_paren(text, open_idx)
-    if close < 0:
-        return "unbalanced parentheses after `%s` (fail-closed)" % call_token
-    m = POST_DECODE_POISON_RE.match(text[close + 1: close + 80])
-    if m:
-        return ("the decoded path is rewritten by `.%s…` — the resolver's value must be "
-                "used as-is" % m.group(1))
-    return None
-
-
-def last_if_cond(text, idx):
-    """Condition of the innermost `if (…)` that has closed before `idx`.
-
-    Used to ask "what decides whether this cut happens?" without pinning lines.
-    None when the subject sits outside any `if` — fail-closed at the call site.
+    structure: comments + string/char literal interiors blanked (brace/paren
+               analysis, `Uri.parse` counting);
+    literal:   comments blanked, literal contents kept (reading `'#'`, `"mp4"`,
+               `"http://"`). A `//` inside "file://" survives, which is exactly
+               what the old hand-written strip_comments tried to do — and
+               failed at on triple-quoted raw strings.
     """
-    best = None
-    for m in re.finditer(r"\bif\s*\(", text[:idx]):
-        p = text.find("(", m.start())
-        q = _match_paren(text, p)
-        if q < 0 or q > idx:
-            continue
-        best = text[p + 1:q]
-    return best
+    return mask_code(src), mask_comments(src)
 
 
-def strip_comments(src):
-    """Remove // and /* */ comments, string-literal aware (see
-    webview_holder_url_source_check.strip_comments — `//` inside "file://"
-    must survive)."""
-    out = []
-    in_block = False
-    for line in src.splitlines():
-        res = []
-        i = 0
-        n = len(line)
-        quote = None
-        while i < n:
-            if in_block:
-                j = line.find("*/", i)
-                if j < 0:
-                    i = n
-                else:
-                    in_block = False
-                    i = j + 2
-                continue
-            c = line[i]
-            if quote is not None:
-                res.append(c)
-                if c == "\\" and i + 1 < n:
-                    res.append(line[i + 1])
-                    i += 2
-                    continue
-                if c == quote:
-                    quote = None
-                i += 1
-                continue
-            if line.startswith("//", i):
-                break
-            if line.startswith("/*", i):
-                in_block = True
-                i += 2
-                continue
-            if c in ('"', "'"):
-                quote = c
-            res.append(c)
+def _poison_chain(text, pos):
+    """Name of the rewriting method chained right after `pos`, or ''."""
+    i = pos
+    n = len(text)
+    while i < n and text[i] in " \t\r\n":
+        i += 1
+    if i < n and text[i] == "?":
+        i += 1
+        while i < n and text[i] in " \t\r\n":
             i += 1
-        out.append("".join(res))
-    return "\n".join(out)
+    if i >= n or text[i] != ".":
+        return ""
+    m = re.match(r"\.\s*([A-Za-z_]\w*)", text[i:])
+    if not m:
+        return ""
+    return m.group(1) if m.group(1) in POST_DECODE_POISON else ""
 
 
 def count_uri_parse_path(code):
-    return len(URI_PARSE_PATH_RE.findall(code))
+    """Occurrences of `Uri.parse(…).path` — paren-aware, so nested arguments
+    are seen. Unbalanced calls count as violations (fail-closed)."""
+    n = 0
+    for m in URI_PARSE_RE.finditer(code):
+        close = match_bracket(code, m.end() - 1)
+        if close < 0:
+            n += 1
+            continue
+        if re.match(r"\s*\.\s*path(?![\w])", code[close + 1:close + 60]):
+            n += 1
+    return n
 
 
-def branch_slice(code, anchor, span=40):
-    """Comment-stripped code lines from the anchor line onward (span lines) —
-    used to pin an expression inside a specific branch without pinning line
-    numbers (they drift)."""
-    lines = code.splitlines()
-    for i, l in enumerate(lines):
-        if anchor in l:
-            return "\n".join(lines[i:i + span])
+def _body_text(text, name):
+    """Body of `fun <name>(…)` (block contents or expression body), or ''."""
+    fb = function_body(text, name)
+    return text[fb[0]:fb[1]] if fb else ""
+
+
+def decode_flow_problem(scope_code, scope_lit, arg_marker):
+    """The value produced by `decodeUriPath(<arg containing arg_marker>)` must
+    reach the File construction unchanged.
+
+    `arg_marker` is the literal the argument must remove (`removePrefix("file://")`)
+    — it is what pins the criterion to the `file://` resolution site instead of
+    any decoder call in the file.
+    """
+    calls = []
+    for m in re.finditer(r"\bdecodeUriPath\s*\(", scope_code):
+        open_pos = m.end() - 1
+        close = match_bracket(scope_code, open_pos)
+        if close < 0:
+            return "unbalanced parentheses after `decodeUriPath(` (fail-closed)"
+        args = call_args(scope_code, open_pos)
+        arg_text = "".join(scope_lit[a:b] for a, b in args)
+        if arg_marker not in arg_text:
+            continue
+        calls.append((m.start(), open_pos, close))
+    if len(calls) != 1:
+        return ("the `file://` path must be resolved exactly once through "
+                "decodeUriPath(<…>%s) (found %d such call(s))" % (arg_marker, len(calls)))
+    start, open_pos, close = calls[0]
+
+    # (1) a rewrite chained straight onto the call
+    name = _poison_chain(scope_code, close + 1)
+    if name:
+        return ("the decoded path is rewritten by `.%s…` — the resolver's value must be "
+                "used as-is" % name)
+
+    # (2) a value-style scope whose lambda ignores the receiver: the value that
+    # flows on is the lambda's result, not the decoded path.
+    chain_end = expr_end(scope_code, start)
+    chain = scope_code[start:chain_end]
+    for sname, s_start, s_open, s_end in scope_calls(chain):
+        if sname not in VALUE_SCOPES:
+            continue
+        if s_start <= close - start:
+            continue
+        lam = chain[s_open + 1:s_end - 1]
+        named = re.match(r"\s*([A-Za-z_]\w*)\s*->", lam)
+        param = named.group(1) if named else "it"
+        if contains_ident(lam, param) or contains_ident(lam, "this"):
+            continue
+        return ("the decoded path is passed into `.%s { … }` whose body never reads its "
+                "receiver — the value that flows on is `%s`, not the decoded path"
+                % (sname, lam.strip()[:60]))
+
+    # (3) the local that holds the result must not be re-cut where it is read
+    bind = re.search(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]*)?=\s*$",
+                     scope_code[max(0, start - 200):start])
+    if bind:
+        local = bind.group(1)
+        for rm in re.finditer(r"(?<![\w.`])" + re.escape(local) + r"(?![\w`])", scope_code):
+            if rm.start() < start:
+                continue
+            pname = _poison_chain(scope_code, rm.end())
+            if pname:
+                return ("`%s` (the decoded path) is rewritten by `.%s…` where it is read — "
+                        "the truncation merely moved off the call chain onto the variable"
+                        % (local, pname))
     return ""
 
 
-def holder_from_slice(code):
-    """Slice the fromAssetLoaderUrl body (up to the next blank-line-then-
-    top-level fun, or 60 lines)."""
-    lines = code.splitlines()
-    for i, l in enumerate(lines):
-        if "fun fromAssetLoaderUrl(" in l:
-            return "\n".join(lines[i:i + 60])
+def holder_cut_problem(holder_lit):
+    """`fromAssetLoaderUrl` must cut `#`/`?` INSIDE the decoder's argument."""
+    body = _body_text(holder_lit, "fromAssetLoaderUrl")
+    if not body:
+        return "fromAssetLoaderUrl not found (fail-closed)"
+    calls = list(re.finditer(r"\bdecodeUriPath\s*\(", body))
+    if len(calls) != 1:
+        return ("fromAssetLoaderUrl must decode exactly once through decodeUriPath (found %d)"
+                % len(calls))
+    open_pos = calls[0].end() - 1
+    close = match_bracket(body, open_pos)
+    if close < 0:
+        return "unbalanced decodeUriPath(…) (fail-closed)"
+    args = call_args(body, open_pos)
+    arg_text = "".join(body[a:b] for a, b in args)
+    missing = [t for t in FILE_CUTS if t not in arg_text]
+    if missing:
+        return ("the fragment/query cut must run INSIDE decodeUriPath(…) — before decoding "
+                "(missing %s); cutting after the decode truncates a legitimate %%23/%%3F"
+                % ", ".join(missing))
+    name = _poison_chain(body, close + 1)
+    if name:
+        return ("the path is rewritten by `.%s…` AFTER decodeUriPath — the cut must precede "
+                "the decode (the encoder percent-encodes `#`/`?`)" % name)
     return ""
 
 
-def analyse(sheet_code, md_code, holder_code, ui_codes):
-    """ui_codes: {repo_root_relpath: comment_stripped_code} for EVERY .kt file
-    under ui/** (the three pinned files included). Returns criteria list."""
+def _enclosing_if_cond(lit, pos):
+    """Condition of the innermost `if (…)` that covers `pos`, else None."""
+    from _kotlin_ast import enclosing_conditions
+
+    conds = [c for kind, c in enclosing_conditions(lit, pos) if kind == "if"]
+    return conds[-1] if conds else None
+
+
+def _dead_guard(cond):
+    """Reason a guard decides nothing, or '' — constant folding covers
+    `true || x`, `x || true`, `false && x`, `x && false`, `!true`, `1 == 2`."""
+    folded = const_bool(strip_parens(cond))
+    if folded is None:
+        return ""
+    return "the guard folds to `%s`" % ("true" if folded else "false")
+
+
+def analyse(sheet_src, md_src, holder_src, ui_srcs):
+    """ui_srcs: {repo_root_relpath: RAW source} for EVERY .kt under ui/**.
+
+    Returns the criteria list [(name, ok, detail, line)]. A source the lexer
+    cannot read makes the whole gate red (fail-closed) instead of falling back
+    to a raw-text scan.
+    """
+    try:
+        sheet_code, sheet_lit = _views(sheet_src)
+        md_code, md_lit = _views(md_src)
+        holder_lit = _views(holder_src)[1]
+        ui_views = {rel: _views(src) for rel, src in ui_srcs.items()}
+    except KotlinLexError as exc:
+        return [("F0 every scanned source lexes as Kotlin (fail-closed)", False,
+                 "KotlinLexError: %s" % exc, None)]
+
     results = []
-    sheet = strip_comments(sheet_code)
-    md = strip_comments(md_code)
-    holder = strip_comments(holder_code)
 
     # --- F1: openExternalFromSheet ------------------------------------
-    branch = branch_slice(sheet, 'url.startsWith("file://")', 30)
-    ok1 = 'decodeUriPath(url.removePrefix("file://"))' in branch
-    detail1 = "branch slice does not contain the fixed resolver" if not ok1 else ""
-    if ok1:
-        # [wide-1024] …and the resolved value must not be re-cut downstream.
-        poison = post_decode_poison(branch, 'decodeUriPath(url.removePrefix("file://"))')
-        ok1 = poison is None
-        detail1 = poison or "decoded path used as-is"
+    sheet_fn_code = _body_text(sheet_code, "openExternalFromSheet")
+    sheet_fn_lit = _body_text(sheet_lit, "openExternalFromSheet")
+    if not sheet_fn_code:
+        ok1, detail1 = False, "openExternalFromSheet not found (fail-closed)"
+    else:
+        problem = decode_flow_problem(sheet_fn_code, sheet_fn_lit, 'removePrefix("file://")')
+        ok1, detail1 = (problem == ""), (problem or "decoded path used as-is")
     results.append(("F1a sheet file:// branch resolves via decodeUriPath(url.removePrefix(\"file://\"))",
                     ok1, detail1, None))
-    n1 = count_uri_parse_path(sheet)
+    n1 = count_uri_parse_path(sheet_code)
     results.append(("F1b no Uri.parse(...).path in WebPreviewBottomSheet.kt",
                     n1 == 0, "found %d occurrence(s)" % n1, None))
 
     # --- F2: resolveMdMediaFile ---------------------------------------
-    md_branch = branch_slice(md, 'stripped.startsWith("file://")', 20)
-    ok2 = "decodeUriPath(stripped.removePrefix(\"file://\"))" in md_branch
-    detail2 = "branch slice does not contain the fixed resolver" if not ok2 else ""
-    if ok2:
-        poison = post_decode_poison(md_branch, 'decodeUriPath(stripped.removePrefix("file://"))')
-        ok2 = poison is None
-        detail2 = poison or "decoded path used as-is"
+    md_fn_code = _body_text(md_code, "resolveMdMediaFile")
+    md_fn_lit = _body_text(md_lit, "resolveMdMediaFile")
+    if not md_fn_code:
+        ok2, detail2 = False, "resolveMdMediaFile not found (fail-closed)"
+    else:
+        problem = decode_flow_problem(md_fn_code, md_fn_lit, 'removePrefix("file://")')
+        ok2, detail2 = (problem == ""), (problem or "decoded path used as-is")
     results.append(("F2a markdown file:// branch resolves via decodeUriPath(stripped.removePrefix(\"file://\"))",
                     ok2, detail2, None))
-    n2 = count_uri_parse_path(md)
+    n2 = count_uri_parse_path(md_code)
     results.append(("F2b no Uri.parse(...).path in StreamingMarkdownText.kt",
                     n2 == 0, "found %d occurrence(s)" % n2, None))
 
     # --- F3: fromAssetLoaderUrl symmetric consumption ------------------
-    frm = holder_from_slice(holder)
-    has_cut = ("substringBefore('#')" in frm) and ("substringBefore('?')" in frm)
-    has_decode = "decodeUriPath(" in frm
-    ok3 = bool(frm) and has_cut and has_decode
-    detail3 = "cut=%s decode=%s" % (has_cut, has_decode)
-    results.append(("F3 fromAssetLoaderUrl cuts #/? before decodeUriPath", ok3, detail3, None))
+    problem3 = holder_cut_problem(holder_lit)
+    results.append(("F3 fromAssetLoaderUrl cuts #/? before decodeUriPath",
+                    problem3 == "", problem3 or "cut inside the decoder argument", None))
 
     # --- F4: ui/** sweep with allowlist --------------------------------
-    for rel in sorted(ui_codes):
-        code = ui_codes[rel]
+    for rel in sorted(ui_views):
+        code = ui_views[rel][0]
         n = count_uri_parse_path(code)
         limit = ALLOWLIST.get(rel, 0)
         if rel in ALLOWLIST:
@@ -266,10 +348,12 @@ def analyse(sheet_code, md_code, holder_code, ui_codes):
         elif n > 0:
             results.append(
                 ("F4 no Uri.parse(...).path in %s" % os.path.basename(rel), False,
-                 "found %d occurrence(s) — route file:// paths through ui.chat.decodeUriPath" % n, None))
+                 "found %d occurrence(s) — route file:// paths through ui.chat.decodeUriPath" % n,
+                 None))
 
     # --- F5: one media classifier [dv22/B-06] ---------------------------
-    results.extend(check_media_single_source(ui_codes))
+    media_views = {rel: views[1] for rel, views in ui_views.items()}
+    results.extend(check_media_single_source(media_views))
     return results
 
 
@@ -277,73 +361,38 @@ def analyse(sheet_code, md_code, holder_code, ui_codes):
 MEDIA_KIND_FUNS = ("mediaKindOfUrl", "mediaPathOfUrl", "mediaFileNameOfUrl")
 
 
-def _block_after(code, needle):
-    """The `{...}` body that follows the first occurrence of needle ('' if absent)."""
-    i = code.find(needle)
-    if i < 0:
-        return ""
-    j = code.find("{", i)
-    if j < 0:
-        return ""
-    depth = 0
-    for k in range(j, len(code)):
-        ch = code[k]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return code[j:k + 1]
-    return code[j:]
-
-
-def _stmt_after(code, needle, span=400):
-    """The statement that follows needle, cut at the next top-level fun."""
-    i = code.find(needle)
-    if i < 0:
-        return ""
-    tail = code[i:i + span]
-    m = re.search(r"\n(?:internal |private )?fun ", tail[1:])
-    return tail[:m.start() + 1] if m else tail
-
-
-def _declares_media_set(code):
-    """A hand-written media extension set: `setOf(` within reach of an mp4 token."""
-    for m in re.finditer(r"setOf\(", code):
-        if '"mp4"' in code[m.start():m.start() + 240]:
+def _declares_media_set(lit):
+    """A hand-written media extension set: a `setOf(` whose text mentions "mp4"."""
+    for m in re.finditer(r"setOf\(", lit):
+        if '"mp4"' in lit[m.start():m.start() + 240]:
             return True
     return False
 
 
-def check_media_single_source(ui_codes):
+def check_media_single_source(ui_lits):
     """[dv22/B-06] Markdown media classification must have ONE decision point.
 
-    Before this family, five surfaces each decided "video / audio / image" on
-    their own: the block classifier, the inline splitter, the block parser (its
-    own ext sets), the gallery collector (assumed image) and the image fetcher
-    (assumed image). A URL form that one of them handled (`clip.mp4?t=1`) fell
-    through the others, so the same message rendered as a video card in one path
-    and as a broken image in another. These criteria pin the *decision points*
-    (not the spelling): one extension table, one classifier, query cut before
-    the extension read, `#` cut only for http(s), and absolute-path guards on
-    every minis:// decode.
+    All text here is the LITERAL view (comments stripped, string/char contents
+    kept): the criteria read `"mp4"`, `'#'`, `"http://"` and `startsWith("/")`,
+    so masking the literals would make them unreadable. Brace/structure work
+    uses the shared `function_body` / `match_bracket`, so a `}` inside a string
+    cannot truncate a body.
     """
     results = []
-    classifier = ui_codes.get(MEDIA_MODEL_REL)
-    parser = ui_codes.get(MEDIA_PARSER_REL)
-    chat = ui_codes.get(CHAT_SCREEN_REL)
-    cls, par, cht = classifier or "", parser or "", chat or ""
+    cls = ui_lits.get(MEDIA_MODEL_REL, "")
+    par = ui_lits.get(MEDIA_PARSER_REL, "")
+    cht = ui_lits.get(CHAT_SCREEN_REL, "")
 
     # F5a: exactly one media extension table, and it lives in the classifier.
     offenders = []
-    for rel in sorted(ui_codes):
+    for rel in sorted(ui_lits):
         if rel == MEDIA_MODEL_REL:
             continue
-        if rel in (MEDIA_PARSER_REL,) and _declares_media_set(ui_codes[rel]):
+        if rel in (MEDIA_PARSER_REL,) and _declares_media_set(ui_lits[rel]):
             offenders.append(os.path.basename(rel))
     has_table = ('nativeVideoExts' in cls and '"mp4"' in cls
                  and 'nativeAudioExts' in cls and '"mp3"' in cls)
-    ok5a = bool(classifier) and has_table and not offenders
+    ok5a = bool(cls) and has_table and not offenders
     results.append((
         "F5a media extension table declared once, in MarkdownBlockModel.kt",
         ok5a,
@@ -352,14 +401,14 @@ def check_media_single_source(ui_codes):
 
     # F5b: one classifier — ext read sits on mediaFileNameOfUrl, which cuts the
     # query first; the parser owns no ext read and delegates by name.
-    kind_body = _block_after(cls, "fun mediaKindOfUrl")
-    # expression-bodied (no braces): use the statement, not a brace body.
-    name_body = _stmt_after(cls, "fun mediaFileNameOfUrl")
-    path_body = _block_after(cls, "fun mediaPathOfUrl")
-    kind_ok = ("mediaFileNameOfUrl(" in kind_body and "substringAfterLast" in kind_body)
+    kind_body = _body_text(cls, "mediaKindOfUrl")
+    name_body = _body_text(cls, "mediaFileNameOfUrl")
+    path_body = _body_text(cls, "mediaPathOfUrl")
+    kind_ok = "mediaFileNameOfUrl(" in kind_body and "substringAfterLast" in kind_body
     name_ok = "mediaPathOfUrl(" in name_body
     path_ok = "substringBefore('?')" in path_body
-    parser_own_ext = 'substringAfterLast(".", "")' in par or "substringAfterLast('.', "")" in par
+    parser_own_ext = ('substringAfterLast(".", "")' in par
+                      or "substringAfterLast('.', \"\")" in par)
     parser_delegates = "mediaKindOfUrl(" in par
     ok5b = (bool(kind_body) and bool(name_body) and bool(path_body)
             and kind_ok and name_ok and path_ok and not parser_own_ext and parser_delegates)
@@ -372,16 +421,17 @@ def check_media_single_source(ui_codes):
 
     # F5c: `#` is a fragment only for http(s); in a local/minis path it may be
     # part of the file name (`foo#China.mp4`), so cutting it there mangles files.
-    # [wide-1024] The test is now the DECIDING condition, not a nearby substring:
-    # `if (true || noQuery.startsWith("http") …)` carries the test's spelling and
-    # nothing of its meaning.
+    # The branch must be DECIDED by the http(s) test: `… || true` and
+    # `true || …` fold to a constant, which is the same red.
     unguarded = []
     for m in re.finditer(r"substringBefore\('#", cls):
-        cond = last_if_cond(cls, m.start())
+        cond = _enclosing_if_cond(cls, m.start())
         if cond is None:
             unguarded.append("no enclosing if")
-        elif DEAD_GUARD_RE.search(cond):
-            unguarded.append("dead guard: %s" % cond.strip()[:48])
+            continue
+        dead = _dead_guard(cond)
+        if dead:
+            unguarded.append("dead guard: %s (%s)" % (cond.strip()[:48], dead))
         elif not HTTP_TEST_RE.search(cond):
             unguarded.append("not an http(s) branch: %s" % cond.strip()[:48])
     parser_hash = "substringBefore('#')" in par
@@ -395,28 +445,28 @@ def check_media_single_source(ui_codes):
         None))
 
     # F5d: `minis:///var/minis/x` decodes to an ABSOLUTE guest path; the sites
-    # that prepend "/var/minis/" must keep absolute paths untouched.
-    # [wide-1024] The guard has to be the branch's own condition and it has to be
-    # live — `if (false && decoded.startsWith("/"))` keeps the tokens, drops the
-    # decision, and doubles the prefix on every absolute path.
+    # that prepend "/var/minis/" must keep absolute paths untouched. The guard
+    # must be the branch's own LIVE condition.
     guarded = 0
     unguarded_sites = []
-    for rel in sorted(ui_codes):
-        for line in ui_codes[rel].splitlines():
+    for rel in sorted(ui_lits):
+        for line in ui_lits[rel].splitlines():
             if '"/var/minis/$decoded"' not in line:
                 continue
             m = re.search(r"\bif\s*\(", line)
             cond = None
             if m:
                 p = line.find("(", m.start())
-                q = _match_paren(line, p)
+                q = match_bracket(line, p) if p >= 0 else -1
                 if q > p:
                     cond = line[p + 1:q]
             if cond is None:
                 unguarded_sites.append("%s (no readable guard)" % os.path.basename(rel))
-            elif DEAD_GUARD_RE.search(cond):
-                unguarded_sites.append("%s (dead guard: %s)"
-                                       % (os.path.basename(rel), cond.strip()[:40]))
+                continue
+            dead = _dead_guard(cond)
+            if dead:
+                unguarded_sites.append("%s (dead guard: %s — %s)"
+                                       % (os.path.basename(rel), cond.strip()[:40], dead))
             elif 'startsWith("/")' not in cond:
                 unguarded_sites.append("%s (guard does not test absoluteness: %s)"
                                        % (os.path.basename(rel), cond.strip()[:40]))
@@ -431,7 +481,6 @@ def check_media_single_source(ui_codes):
     return results
 
 
-# ---------------------------------------------------------------- selftest ---
 FIXED_SHEET = """package probe
 fun openExternalFromSheet(context: Context, url: String) {
     val intent = if (url.startsWith("file://")) {
@@ -456,7 +505,7 @@ fun openExternalFromSheet(context: Context, url: String) {
 """
 
 FIXED_MD = """package probe
-fun resolve(stripped: String): File? {
+fun resolveMdMediaFile(context: Context, stripped: String): File? {
     val primary: File? = when {
         stripped.startsWith("minis://") -> File(decodeUriPath(stripped.removePrefix("minis://")))
         stripped.startsWith("file://") ->
@@ -468,7 +517,7 @@ fun resolve(stripped: String): File? {
 """
 
 REVERTED_MD = """package probe
-fun resolve(stripped: String): File? {
+fun resolveMdMediaFile(context: Context, stripped: String): File? {
     val primary: File? = when {
         stripped.startsWith("file://") -> File(Uri.parse(stripped).path ?: return null)
         else -> null
@@ -601,172 +650,235 @@ BREAKER_FETCHER_DEAD_GUARD = IMAGE_FETCHER_CLEAN.replace(
     'val linuxPath = if (false && decoded.startsWith("/")) decoded else "/var/minis/$decoded"')
 assert BREAKER_FETCHER_DEAD_GUARD != IMAGE_FETCHER_CLEAN
 
+# ------------------------------------------------------------- new breakers ---
+# batch-7 witnesses: every one keeps the token the old criterion grepped for
+# and removes the decision behind it.
+BREAKER_SHEET_CONSUME_CUT = FIXED_SHEET.replace(
+    "            val file = java.io.File(raw)",
+    "            val file = java.io.File(raw.substringBefore('#').substringBefore('?'))")
+assert BREAKER_SHEET_CONSUME_CUT != FIXED_SHEET
+
+BREAKER_SHEET_RAW_STRING = FIXED_SHEET.replace(
+    "            if (raw.isBlank()) return@runCatching null\n"
+    "            val file = java.io.File(raw)",
+    '            val _openRaw = """ " /* """\n'
+    "            val file = java.io.File(Uri.parse(url).path ?: return@runCatching null)\n"
+    '            val _closeRaw = """ */ """')
+assert BREAKER_SHEET_RAW_STRING != FIXED_SHEET
+
+BREAKER_MD_LET_PARSE = FIXED_MD.replace(
+    '            decodeUriPath(stripped.removePrefix("file://")).takeIf { it.isNotBlank() }?.let { File(it) }',
+    '            decodeUriPath(stripped.removePrefix("file://")).let { Uri.parse(stripped.trim()).path }?.let { File(it) }')
+assert BREAKER_MD_LET_PARSE != FIXED_MD
+
+BREAKER_HOLDER_POST_CUT = FIXED_HOLDER.replace(
+    "    val relative = decodeUriPath(\n"
+    "        assetUrl.removePrefix(ASSET_LOADER_PREFIX).substringBefore('#').substringBefore('?'),\n"
+    "    )",
+    "    val relative = decodeUriPath(\n"
+    "        assetUrl.removePrefix(ASSET_LOADER_PREFIX),\n"
+    "    ).substringBefore('#').substringBefore('?')")
+assert BREAKER_HOLDER_POST_CUT != FIXED_HOLDER
+
+# `|| true` on the RIGHT of the disjunction (the mirror image of `true ||`).
+BREAKER_CLASSIFIER_DEAD_OR_RIGHT = MEDIA_CLASSIFIER_CLEAN.replace(
+    'return if (noQuery.startsWith("http://") || noQuery.startsWith("https://")) {',
+    'return if (noQuery.startsWith("http://") || noQuery.startsWith("https://") || true) {')
+assert BREAKER_CLASSIFIER_DEAD_OR_RIGHT != MEDIA_CLASSIFIER_CLEAN
+
+# `&& false` on the RIGHT of the conjunction (the mirror image of `false &&`).
+BREAKER_FETCHER_DEAD_AND_RIGHT = IMAGE_FETCHER_CLEAN.replace(
+    'val linuxPath = if (decoded.startsWith("/")) decoded else "/var/minis/$decoded"',
+    'val linuxPath = if (decoded.startsWith("/") && false) decoded else "/var/minis/$decoded"')
+assert BREAKER_FETCHER_DEAD_AND_RIGHT != IMAGE_FETCHER_CLEAN
+
+ALLOWLIST_REL = next(iter(ALLOWLIST))
+ALLOWLISTED_FILE = """package probe
+fun abs(url: String): String = Uri.parse(url).path.orEmpty()
+"""
+DIRTY_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/DirtyUi.kt"
+DIRTY_UI = """package probe
+fun abs(url: String): String = Uri.parse(url).path.orEmpty()
+"""
+FETCHER_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/MinisImageFetcher.kt"
+
+DEFAULT_UI = {
+    MEDIA_MODEL_REL: MEDIA_CLASSIFIER_CLEAN,
+    MEDIA_PARSER_REL: MEDIA_PARSER_CLEAN,
+    CHAT_SCREEN_REL: CHAT_SCREEN_CLEAN,
+    FETCHER_REL: IMAGE_FETCHER_CLEAN,
+    ALLOWLIST_REL: ALLOWLISTED_FILE,
+}
+
+F1A = 'F1a sheet file:// branch resolves via decodeUriPath(url.removePrefix("file://"))'
+F1B = "F1b no Uri.parse(...).path in WebPreviewBottomSheet.kt"
+F2A = 'F2a markdown file:// branch resolves via decodeUriPath(stripped.removePrefix("file://"))'
+F2B = "F2b no Uri.parse(...).path in StreamingMarkdownText.kt"
+F3 = "F3 fromAssetLoaderUrl cuts #/? before decodeUriPath"
+F5A = "F5a media extension table declared once, in MarkdownBlockModel.kt"
+F5B = "F5b ext read after query cut, parser delegates to mediaKindOfUrl"
+F5C = "F5c '#' cut only inside an http(s) branch; local paths keep it"
+F5D = "F5d decoded minis:// path is absolute-guarded before use"
+
+
+def dict_of(extra):
+    d = dict(DEFAULT_UI)
+    d.update(extra)
+    return d
+
 
 def selftest():
     failures = []
+    arms = 0
 
     def expect(cond, what):
         if not cond:
             failures.append(what)
 
-    def dict_of(extra=None):
-        ui = {
-            "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebPreviewBottomSheet.kt": FIXED_SHEET,
-            "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/StreamingMarkdownText.kt": FIXED_MD,
-            "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebViewHolder.kt": FIXED_HOLDER,
-            "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebPreviewShortcut.kt": ALLOWLISTED_AS_IS,
-            "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/Other.kt": CLEAN_UI_FILE,
-            MEDIA_MODEL_REL: MEDIA_CLASSIFIER_CLEAN,
-            MEDIA_PARSER_REL: MEDIA_PARSER_CLEAN,
-            CHAT_SCREEN_REL: CHAT_SCREEN_CLEAN,
-            "src/android/app/src/main/java/com/rikkaminis/app/ui/MinisImageFetcher.kt": IMAGE_FETCHER_CLEAN,
-        }
-        if extra:
-            ui.update(extra)
-        return ui
+    def run(sheet, md, holder, ui):
+        nonlocal arms
+        arms += 1
+        return analyse(sheet, md, holder, ui)
 
-    # all-green tree
-    good = analyse(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of())
-    good_map = {c: ok for c, ok, _, _ in good}
-    for c, ok in good_map.items():
-        expect(ok, "good tree must pass %s" % c)
-    expect("F4 no Uri.parse(...).path in Other.kt" not in good_map,
-           "a clean ui file must not emit a criterion (only offenders do); got %s" % sorted(good_map))
+    def crit(results, name):
+        for c, ok, _d, _l in results:
+            if c == name:
+                return ok
+        return None
 
-    # mutation 1: sheet reverted to Uri.parse().path -> F1a+F1b red, rest green
-    m1 = analyse(REVERTED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({
-        "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebPreviewBottomSheet.kt": REVERTED_SHEET}))
-    d1 = {c: ok for c, ok, _, _ in m1}
-    expect(not d1["F1a sheet file:// branch resolves via decodeUriPath(url.removePrefix(\"file://\"))"],
-           "mut1 F1a must be RED")
-    expect(not d1["F1b no Uri.parse(...).path in WebPreviewBottomSheet.kt"],
-           "mut1 F1b must be RED")
-    expect(d1["F2a markdown file:// branch resolves via decodeUriPath(stripped.removePrefix(\"file://\"))"],
-           "mut1 F2a must stay GREEN (precision)")
+    def all_green(results):
+        return all(ok for _c, ok, _d, _l in results)
 
-    # mutation 2: markdown reverted -> F2a+F2b red, rest green
-    m2 = analyse(FIXED_SHEET, REVERTED_MD, FIXED_HOLDER, dict_of({
-        "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/StreamingMarkdownText.kt": REVERTED_MD}))
-    d2 = {c: ok for c, ok, _, _ in m2}
-    expect(not d2["F2a markdown file:// branch resolves via decodeUriPath(stripped.removePrefix(\"file://\"))"],
-           "mut2 F2a must be RED")
-    expect(not d2["F2b no Uri.parse(...).path in StreamingMarkdownText.kt"],
-           "mut2 F2b must be RED")
-    expect(d2["F1a sheet file:// branch resolves via decodeUriPath(url.removePrefix(\"file://\"))"],
-           "mut2 F1a must stay GREEN (precision)")
+    # 1: the fixed tree must be green on every criterion.
+    fixed = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({}))
+    expect(all_green(fixed),
+           "fixed tree must be GREEN, got %s" % [c for c, ok, _d, _l in fixed if not ok])
 
-    # mutation 3: fromAssetLoaderUrl loses the delimiter cuts -> F3 red only
-    m3 = analyse(FIXED_SHEET, FIXED_MD, CUTS_REMOVED_HOLDER, dict_of({
-        "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebViewHolder.kt": CUTS_REMOVED_HOLDER}))
-    d3 = {c: ok for c, ok, _, _ in m3}
-    expect(not d3["F3 fromAssetLoaderUrl cuts #/? before decodeUriPath"],
-           "mut3 F3 must be RED")
-    expect(d3["F1a sheet file:// branch resolves via decodeUriPath(url.removePrefix(\"file://\"))"],
-           "mut3 F1a must stay GREEN (precision)")
+    # 2: the reverted sheet (Uri.parse(url).path) -> F1a + F1b red.
+    m = run(REVERTED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({}))
+    expect(crit(m, F1A) is False, "sheet-revert: F1a must be RED")
+    expect(crit(m, F1B) is False, "sheet-revert: F1b must be RED")
 
-    # mutation 4: new Uri.parse().path in an arbitrary ui file -> sweep red
-    m4 = analyse(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({
-        "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/Other.kt": DIRTY_UI_FILE}))
-    d4 = {c: ok for c, ok, _, _ in m4}
-    expect(not d4["F4 no Uri.parse(...).path in Other.kt"],
-           "mut4 sweep must be RED for a new offender")
+    # 3: the reverted markdown branch -> F2a + F2b red.
+    m = run(FIXED_SHEET, REVERTED_MD, FIXED_HOLDER, dict_of({}))
+    expect(crit(m, F2A) is False, "md-revert: F2a must be RED")
+    expect(crit(m, F2B) is False, "md-revert: F2b must be RED")
 
-    # mutation 5: allowlisted file fixed to zero occurrences -> stale red
-    m5 = analyse(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({
-        "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebPreviewShortcut.kt": CLEAN_UI_FILE}))
-    d5 = {c: ok for c, ok, _, _ in m5}
-    expect(not d5["F4 allowlist exact for WebPreviewShortcut.kt"],
-           "mut5 stale allowlist entry must be RED (remove the entry when fixed)")
+    # 4: the holder loses the cut -> F3 red.
+    m = run(FIXED_SHEET, FIXED_MD, CUTS_REMOVED_HOLDER, dict_of({}))
+    expect(crit(m, F3) is False, "holder-cut-removed: F3 must be RED")
 
-    # precision: Uri.parse(...).host / ACTION_VIEW Uri.parse(url) must not trip
-    n_clean = count_uri_parse_path(strip_comments(CLEAN_UI_FILE))
-    expect(n_clean == 0, "host/plain Uri.parse uses must not count as violations (got %d)" % n_clean)
+    # 5: a new offender under ui/** -> F4 red, and only that file.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({DIRTY_REL: DIRTY_UI}))
+    expect(any(not ok and "DirtyUi.kt" in c for c, ok, _d, _l in m),
+           "new-offender: F4 must be RED for DirtyUi.kt")
+    expect(crit(m, F5C) is True, "new-offender: F5c must stay GREEN (precision)")
 
-    # mutation 6: classifier cuts '#' unconditionally -> F5c red only
-    m6 = analyse(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({MEDIA_MODEL_REL: BREAKER_CLASSIFIER_HASH}))
-    d6 = {c: ok for c, ok, _, _ in m6}
-    expect(not d6["F5c '#' cut only inside an http(s) branch; local paths keep it"],
-           "mut6 F5c must be RED when '#' is cut unconditionally")
-    expect(d6["F5a media extension table declared once, in MarkdownBlockModel.kt"],
-           "mut6 F5a must stay GREEN (precision)")
+    # 6: a stale allowlist entry (file fixed, entry kept) -> RED.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({ALLOWLIST_REL: CLEAN_UI_FILE}))
+    expect(any(not ok and "allowlist" in c for c, ok, _d, _l in m),
+           "stale-allowlist: the exemption must be RED once the site is fixed")
 
-    # mutation 7: parser keeps its own extension set -> F5a red only
-    m7 = analyse(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({MEDIA_PARSER_REL: BREAKER_PARSER_SET}))
-    d7 = {c: ok for c, ok, _, _ in m7}
-    expect(not d7["F5a media extension table declared once, in MarkdownBlockModel.kt"],
-           "mut7 F5a must be RED when the parser declares its own set")
-    expect(d7["F5c '#' cut only inside an http(s) branch; local paths keep it"],
-           "mut7 F5c must stay GREEN (precision)")
+    # 7: host precision — Uri.parse without `.path` is not a violation.
+    expect(count_uri_parse_path(mask_code(CLEAN_UI_FILE)) == 0,
+           "fixture precision: Uri.parse(url).host parses no Uri path")
 
-    # mutation 8: parser reads the extension itself -> F5b red
-    m8 = analyse(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({MEDIA_PARSER_REL: BREAKER_PARSER_EXT}))
-    d8 = {c: ok for c, ok, _, _ in m8}
-    expect(not d8["F5b ext read after query cut, parser delegates to mediaKindOfUrl"],
-           "mut8 F5b must be RED when the parser owns an ext read")
+    # 8: F1a catches a rewrite chained onto the call, F1b stays green.
+    m = run(BREAKER_SHEET_POST_CUT, FIXED_MD, FIXED_HOLDER, dict_of({}))
+    expect(crit(m, F1A) is False,
+           "sheet-post-cut: F1a must be RED when the decoded path is re-cut")
+    expect(crit(m, F1B) is True, "sheet-post-cut: F1b must stay GREEN (precision)")
 
-    # mutation 9: gallery re-grows the query+fragment chain -> F5c red
-    m9 = analyse(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({CHAT_SCREEN_REL: BREAKER_CHAT_CHAIN}))
-    d9 = {c: ok for c, ok, _, _ in m9}
-    expect(not d9["F5c '#' cut only inside an http(s) branch; local paths keep it"],
-           "mut9 F5c must be RED for the chat-side query+fragment chain")
+    # 9: F5a — the parser declaring its own extension set.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({MEDIA_PARSER_REL: BREAKER_PARSER_SET}))
+    expect(crit(m, F5A) is False, "parser-set: F5a must be RED")
+    expect(crit(m, F5C) is True, "parser-set: F5c must stay GREEN (precision)")
 
-    # mutation 10: fetcher prepends /var/minis/ to an absolute path -> F5d red
-    m10 = analyse(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({
-        "src/android/app/src/main/java/com/rikkaminis/app/ui/MinisImageFetcher.kt": BREAKER_FETCHER_UNGURARDED}))
-    d10 = {c: ok for c, ok, _, _ in m10}
-    expect(not d10["F5d decoded minis:// path is absolute-guarded before use"],
-           "mut10 F5d must be RED when the absolute-path guard is dropped")
+    # 10: F5b — the parser owning an ext read.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({MEDIA_PARSER_REL: BREAKER_PARSER_EXT}))
+    expect(crit(m, F5B) is False, "parser-ext: F5b must be RED")
 
-    # precision: the classifier's mediaBlockFrom must not be judged as a set copy
-    expect(count_uri_parse_path(MEDIA_CLASSIFIER_CLEAN) == 0,
-           "fixture precision: the clean classifier parses no Uri")
+    # 11: F5c — the chat side re-growing the query+fragment chain.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({CHAT_SCREEN_REL: BREAKER_CHAT_CHAIN}))
+    expect(crit(m, F5C) is False, "chat-chain: F5c must be RED")
 
-    # ── [wide-1024] the three witnesses that walked through this gate ──────
-    # Each one keeps the token the old criterion grepped for and removes the
-    # decision behind it, so each arm asserts RED on its own criterion AND
-    # GREEN on the sibling criterion (precision).
-    m11 = analyse(BREAKER_SHEET_POST_CUT, FIXED_MD, FIXED_HOLDER, dict_of({
-        "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebPreviewBottomSheet.kt":
-            BREAKER_SHEET_POST_CUT}))
-    d11 = {c: ok for c, ok, _, _ in m11}
-    expect(not d11["F1a sheet file:// branch resolves via decodeUriPath(url.removePrefix(\"file://\"))"],
-           "mut11 F1a must be RED when the decoded path is re-cut with substringBefore")
-    expect(d11["F1b no Uri.parse(...).path in WebPreviewBottomSheet.kt"],
-           "mut11 F1b must stay GREEN (precision)")
+    # 12: F5c — `#` cut outside any http(s) branch (constant `if (true)`).
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({MEDIA_MODEL_REL: BREAKER_CLASSIFIER_HASH}))
+    expect(crit(m, F5C) is False, "classifier-if-true: F5c must be RED")
+    expect(crit(m, F5A) is True, "classifier-if-true: F5a must stay GREEN (precision)")
 
-    m12 = analyse(FIXED_SHEET, FIXED_MD, FIXED_HOLDER,
-                  dict_of({MEDIA_MODEL_REL: BREAKER_CLASSIFIER_DEAD_OR}))
-    d12 = {c: ok for c, ok, _, _ in m12}
-    expect(not d12["F5c '#' cut only inside an http(s) branch; local paths keep it"],
-           "mut12 F5c must be RED when the http(s) guard is short-circuited with `true ||`")
-    expect(d12["F5a media extension table declared once, in MarkdownBlockModel.kt"],
-           "mut12 F5a must stay GREEN (precision)")
+    # 13: F5d — the absolute-path guard dropped.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({FETCHER_REL: BREAKER_FETCHER_UNGURARDED}))
+    expect(crit(m, F5D) is False, "fetcher-unguarded: F5d must be RED")
 
-    m13 = analyse(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({
-        "src/android/app/src/main/java/com/rikkaminis/app/ui/MinisImageFetcher.kt":
-            BREAKER_FETCHER_DEAD_GUARD}))
-    d13 = {c: ok for c, ok, _, _ in m13}
-    expect(not d13["F5d decoded minis:// path is absolute-guarded before use"],
-           "mut13 F5d must be RED when the absolute-path guard is short-circuited with `false &&`")
+    # 14/15: dead guard spellings — left (`true ||`, `false &&`) and right
+    # (`|| true`, `&& false`) placements must all be the same red.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER,
+            dict_of({MEDIA_MODEL_REL: BREAKER_CLASSIFIER_DEAD_OR}))
+    expect(crit(m, F5C) is False, "classifier `true ||`: F5c must be RED")
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER,
+            dict_of({MEDIA_MODEL_REL: BREAKER_CLASSIFIER_DEAD_OR_RIGHT}))
+    expect(crit(m, F5C) is False, "classifier `|| true`: F5c must be RED")
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER,
+            dict_of({FETCHER_REL: BREAKER_FETCHER_DEAD_GUARD}))
+    expect(crit(m, F5D) is False, "fetcher `false &&`: F5d must be RED")
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER,
+            dict_of({FETCHER_REL: BREAKER_FETCHER_DEAD_AND_RIGHT}))
+    expect(crit(m, F5D) is False, "fetcher `&& false`: F5d must be RED")
+
+    # ---- batch-7 witness arms (01-1 … 01-4) ----------------------------
+    # 01-1: the cut moved from the call chain to the variable's consumption
+    # site — every token the 80-char window looked at is untouched.
+    m = run(BREAKER_SHEET_CONSUME_CUT, FIXED_MD, FIXED_HOLDER, dict_of({}))
+    expect(crit(m, F1A) is False,
+           "11-consumption-cut: F1a must be RED at the variable's read site")
+    expect(crit(m, F1B) is True, "11-consumption-cut: F1b must stay GREEN (precision)")
+
+    # 01-2: `.let { Uri.parse(...).path }` — the value-scope value is not the
+    # decoded path, and the nested parse argument used to walk the `[^()]*`
+    # regex.
+    m = run(FIXED_SHEET, BREAKER_MD_LET_PARSE, FIXED_HOLDER, dict_of({}))
+    expect(crit(m, F2A) is False,
+           "md-let-parse: F2a must be RED (the decoded value is discarded)")
+    expect(crit(m, F2B) is False,
+           "md-let-parse: F2b must be RED (nested `Uri.parse(x.trim()).path`)")
+
+    # 01-3: the cuts survive but moved AFTER the decode (order, not spelling).
+    m = run(FIXED_SHEET, FIXED_MD, BREAKER_HOLDER_POST_CUT, dict_of({}))
+    expect(crit(m, F3) is False,
+           "holder-post-cut: F3 must be RED when the cut follows decodeUriPath")
+
+    # 01-4: `""" " /* """` must not open a block comment over real code.
+    m = run(BREAKER_SHEET_RAW_STRING, FIXED_MD, FIXED_HOLDER, dict_of({}))
+    expect(crit(m, F1B) is False,
+           "raw-string-comment: F1b must be RED (the raw string is not a comment)")
+
+    # fail-closed: an unlexable source turns the gate red instead of being
+    # scanned as raw text.
+    m = run('fun broken() { val s = "abc\n', FIXED_MD, FIXED_HOLDER, dict_of({}))
+    expect(not all_green(m), "unlexable source must be RED (fail-closed)")
 
     if failures:
         print("SELFTEST FAIL:")
         for f in failures:
             print("  - %s" % f)
-        return 1
+        return 0
     print("selftest: fixed-tree=GREEN, sheet-revert=RED, md-revert=RED, "
           "holder-cut-removed=RED, new-offender=RED, stale-allowlist=RED, "
           "host-precision=GREEN, media-hash-cut=RED, media-set-fork=RED, "
-          "media-parser-ext=RED, media-chat-chain=RED, media-abs-guard=RED")
-    return 0
+          "media-parser-ext=RED, media-chat-chain=RED, media-abs-guard=RED, "
+          "dead-guard-both-sides=RED, consumption-cut=RED, md-let-parse=RED, "
+          "holder-post-cut=RED, raw-string-comment=RED, fail-closed=RED")
+    return arms
 
 
 def main(argv):
     if "--selftest" in argv:
-        rc = selftest()
-        if rc == 0:
-            print("FILE_URI_PARSE_GUARD_SELFTEST=PASS")
-        return rc
+        arms = selftest()
+        if arms == 0:
+            return 1
+        print("FILE_URI_PARSE_GUARD_SELFTEST=PASS (%d fixtures)" % arms)
+        return 0
 
     args = [a for a in argv[1:] if a != "--selftest"]
     root = args[0] if args else "."
@@ -787,6 +899,9 @@ def main(argv):
     md_code = open(md_p, encoding="utf-8").read()
     holder_code = open(holder_p, encoding="utf-8").read()
 
+    # [batch-7] raw sources: analyse() derives the structure/literal views
+    # itself (mask_code / mask_comments), so a `}` or a `/*` inside a string
+    # cannot truncate a body any more.
     ui_codes = {}
     for dirpath, _dirnames, filenames in os.walk(ui_root):
         for fn in filenames:
@@ -794,7 +909,7 @@ def main(argv):
                 continue
             full = os.path.join(dirpath, fn)
             rel = os.path.relpath(full, root).replace(os.sep, "/")
-            ui_codes[rel] = strip_comments(open(full, encoding="utf-8").read())
+            ui_codes[rel] = open(full, encoding="utf-8").read()
 
     results = analyse(sheet_code, md_code, holder_code, ui_codes)
     failed = [r for r in results if not r[1]]
