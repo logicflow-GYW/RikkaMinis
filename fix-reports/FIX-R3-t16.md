@@ -1,7 +1,7 @@
 # FIX-R3-t16 — 第三轮 dual-gate bypass：`xproc_boundary_check` + `exec_gate_release_check`
 
-- 支线：`fix/r3-xproc-execgate`（基线 `base/batch5-shared` @ `e145ec961`）
-- 门提交：`5cbb92105`（两门判据）+ 打印改动 commit（见 §5）
+- 支线：`fix/r3-xproc-execgate`（基线 `main` @ `f0f14d46d`；共享原语经 `base/batch5-shared` 已并入 main）
+- 门提交：`5cbb92105`（两门判据）+ `081244e5f`（门红时打印每条判据）；报告提交：`e46e3078e`
 - 生产 `.kt` 改动：**0 行**；`scan.sh` / `test_scan.py` / `_kotlin_lexer/ast/valueflow` 触碰：**0**；门数 112 / 夹具 344 不变
 
 ---
@@ -148,7 +148,7 @@ xproc 此前只打印 `== N problem(s) ==` + 通用尾注，四族判据（缺�
 | RED 检查 | 隔离复跑 | 证据 |
 |---|---|---|
 | `auto_approve_bypass_check selftest has teeth (AUTO_APPROVE_BYPASS_SELFTEST: PASS)` | **两个检查全 ✅**（`selftest has teeth` + `real tree green`） | `python3 scripts/scan/auto_approve_bypass_check.py --selftest` → rc=0、标记恰 1 次；`test_scan` 同款 `subprocess.run` 复现 rc=0、`marker=True` |
-| `compact_decision_gate_check selftest has teeth (COMPACT_DECISION_GATE_SELFTEST=PASS)` | **`test_da1016_gates` 重跑 17 项全 ✅**（含 compact_decision 两条） | 同上：`--selftest` rc=0、标记恰 1 次、`len(out)=109`；`git diff --name-only e145ec961..HEAD` 不含这两个门 |
+| `compact_decision_gate_check selftest has teeth (COMPACT_DECISION_GATE_SELFTEST=PASS)` | **`test_da1016_gates` 重跑 17 项全 ✅**（含 compact_decision 两条） | 同上：`--selftest` rc=0、标记恰 1 次、`len(out)=109`；`git diff --name-only f0f14d46d..HEAD` 不含这两个门 |
 
 两门均**不在本支改动面**（本支只改 `xproc_boundary_check.py` + `exec_gate_release_check.py`），失败形态是并发重负载下夹具进程输出被截断/临时树被剪，和 09-16 起的 `function not implemented` / 整壳打断同族。
 
@@ -188,7 +188,7 @@ python3 scripts/scan/exec_gate_release_check.py --selftest
 python3 scripts/scan/xproc_boundary_check.py .
 python3 scripts/scan/exec_gate_release_check.py .
 
-# L2 见证反攻（pre 需先把门回滚到 e145ec961 版本才复现 BLIND）
+# L2 见证反攻（pre 需先把门回滚到 `f0f14d46d` 版本才复现 BLIND）
 python3 probe/t16_replay.py pre     # → probe/t16-pre.json
 python3 probe/t16_replay.py post    # → probe/t16-post.json（7/7 CAUGHT）
 
