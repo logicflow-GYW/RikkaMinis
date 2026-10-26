@@ -4504,14 +4504,32 @@ class ChatViewModel(
         buildChatMessagesTranscript(parsed, mediaStore.mediaBaseDir) { msg ->
             Log.w(TAG, msg)
         }
+    /**
+     * [debt-1026 B1] `resizeForInference` makes the RELOAD path apply the same
+     * downscale the composer applies before the first send (`resizeImageBytes`,
+     * max edge 2000). Without it the original full-resolution bytes were
+     * re-inlined on every reload, so a session with historical photos re-sent
+     * megabytes of base64 per turn that the composer had deliberately shrunk.
+     * The resizer is injected here rather than called from the builder because
+     * `ChatStreamToolHelpers` is deliberately Android-free (and JVM-covered);
+     * every caller of these two entry points is already on
+     * `Dispatchers.IO` (verified: `sendShellJob`/rerun/retry launches and
+     * `truncateBeforeEdit`), so the decode does not run on Main.
+     */
+    private fun inferenceImageResizer(rawBytes: ByteArray, mimeType: String): ByteArray? =
+        resizeImageBytes(rawBytes, mimeType, maxEdge = 2000)
+
     internal fun MessageEntity.toLLMMessage(): LLMMessage {
         val parts = parsePartsJson(partsJson).stripOrphanThinkClosersForRole(role)
         val malformed = parts.isEmpty() && partsJson.isNotBlank()
-        return buildSingleLlmMessage(this, partsJson, parts, malformed, mediaStore.mediaBaseDir)
+        return buildSingleLlmMessage(
+            this, partsJson, parts, malformed, mediaStore.mediaBaseDir,
+            ::inferenceImageResizer,
+        )
     }
 
     internal fun buildLlmMessages(parsed: List<ParsedRow>): List<LLMMessage> =
-        buildLlmMessagesFromParsed(parsed, mediaStore.mediaBaseDir)
+        buildLlmMessagesFromParsed(parsed, mediaStore.mediaBaseDir, ::inferenceImageResizer)
 
 }
 

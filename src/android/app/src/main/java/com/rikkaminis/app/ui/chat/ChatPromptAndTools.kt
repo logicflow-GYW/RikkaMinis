@@ -146,6 +146,7 @@ internal fun ChatViewModel.applyRequestImageBudget(messages: List<LLMMessage>): 
     for ((mi, refs) in byMsg) {
         val msg = mutated[mi]
         val newParts = msg.contentParts.toMutableList()
+        val droppedHere = HashSet<ImageBudget.ImagePartId>()
         for (ref in refs) {
             val id = ImageBudget.ImagePartId.of(ref.image.data)
             if (id !in plan.droppedIds) continue
@@ -168,8 +169,23 @@ internal fun ChatViewModel.applyRequestImageBudget(messages: List<LLMMessage>): 
                 )
                 else -> originalPart
             }
+            // [debt-1026 B1] Only synch the second carrier when the FIRST one
+            // really lost the bytes (`else` above keeps the original part on an
+            // index/kind mismatch, and that part still reaches the wire through
+            // `contentParts`). Identity works: both replacements above build a
+            // new instance, the fallback returns the same one.
+            if (newParts[ref.partIdx] !== originalPart) droppedHere.add(id)
         }
-        mutated[mi] = msg.copy(contentParts = newParts)
+        // [debt-1026 B1] `contentParts` is not the only carrier of these
+        // bytes: every provider also emits `+ msg.imageParts` (OpenAI :2277 /
+        // :3246, Gemini :515, Anthropic :917), so filtering contentParts alone
+        // left the budget's "elided" images riding the wire at full size on
+        // every turn — the elision was a no-op for exactly the history it was
+        // meant to protect. Both lists are filtered by the same identity set.
+        mutated[mi] = msg.copy(
+            contentParts = newParts,
+            imageParts = filterElidedImageParts(msg.imageParts, droppedHere),
+        )
     }
 
     _requestBudgetEvent.tryEmit(plan)
@@ -178,6 +194,27 @@ internal fun ChatViewModel.applyRequestImageBudget(messages: List<LLMMessage>): 
         "applyRequestImageBudget: dropped=${plan.droppedCount}/${plan.totalCount} keptBytes=${plan.keptBytes}B elidedBytes=${plan.elidedBytes}B",
     )
     return mutated
+}
+
+/**
+ * [debt-1026 B1] Drop the [LLMMessage.ImagePart]s whose bytes were elided from
+ * [ImageBudget.planRequestBudget].
+ *
+ * Identity, not content: `planRequestBudget` identifies a part by
+ * `System.identityHashCode` of its `ByteArray`, and the reload path hands the
+ * SAME array to both `imageParts` and `contentParts` — so the ids computed for
+ * a part in one list are exactly the ids to remove from the other. Parts that
+ * were not elided are returned in order, untouched (an empty [dropped] list
+ * returns the original list instance, so a turn with no drops allocates
+ * nothing).
+ */
+internal fun filterElidedImageParts(
+    parts: List<LLMMessage.ImagePart>,
+    dropped: Set<ImageBudget.ImagePartId>,
+): List<LLMMessage.ImagePart> {
+    if (parts.isEmpty() || dropped.isEmpty()) return parts
+    val kept = parts.filter { ImageBudget.ImagePartId.of(it.data) !in dropped }
+    return if (kept.size == parts.size) parts else kept
 }
 
 /**
@@ -1455,8 +1492,13 @@ Sub-agent routing: the in-session sub-agent feature (spawn_agent) and cross-sess
     // MemoryRepository.loadRollupFragment() (tail-preferring byte cap)
     // instead of a verbatim readText() — the rollup grows monotonically
     // and previously inflated the send/retry prompt prefix unboundedly.
-    val rollupSizeHint = if (memoryOn) memoryRepository?.dailyLogSizeSummary() else null
-    val rollupBytes = if (memoryOn) memoryRepository?.largestDailyLogBytes() ?: 0L else 0L
+    // [debt-1026 B5] ONE snapshot for both values. `dailyLogSizeSummary()` and
+    // `largestDailyLogBytes()` each re-walked `dailyLogSizes()` — which reads
+    // MEMORY-ROLLUP.md plus every candidate daily log in full — so each
+    // system-prompt build paid that walk twice.
+    val rollupMetrics = if (memoryOn) memoryRepository?.dailyLogRollupMetrics() else null
+    val rollupSizeHint = rollupMetrics?.summary
+    val rollupBytes = rollupMetrics?.largestBytes ?: 0L
     val rollupFragment = if (memoryOn) memoryRepository?.loadRollupFragment() else null
 
     return buildString {

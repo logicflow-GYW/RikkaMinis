@@ -114,26 +114,50 @@ class MemoryRepository(private val memoryDir: File) {
     fun memoryDirectory(): File = memoryDir
 
     /**
+     * [debt-1026 B5] Everything the system prompt needs about daily logs, from
+     * ONE walk of [dailyLogSizes].
+     *
+     * [dailyLogSizeSummary] and [largestDailyLogBytes] each walked that list,
+     * and the walk is not cheap: it reads MEMORY-ROLLUP.md in full plus EVERY
+     * candidate daily log in full ([dv28-A3] — judging "still holds something
+     * distillable" needs the content, not the byte length). The prompt
+     * assembler called both, so every system-prompt build read the whole memory
+     * directory twice and re-ran the rollup classification regexes twice over
+     * the same bytes. Both fields are derived from a single walk here; the two
+     * public accessors below are kept (other callers exist) and now delegate,
+     * so their output is byte-identical to before.
+     */
+    data class DailyLogRollupMetrics(
+        /** Same text [dailyLogSizeSummary] returns; null when nothing is pending. */
+        val summary: String?,
+        /** Same value [largestDailyLogBytes] returns; 0 when nothing is pending. */
+        val largestBytes: Long,
+    )
+
+    fun dailyLogRollupMetrics(): DailyLogRollupMetrics {
+        val sizes = dailyLogSizes()
+        if (sizes.isEmpty()) return DailyLogRollupMetrics(null, 0L)  // F-9: maxOf on empty throws
+        val total = sizes.sumOf { it.second }
+        val largest = sizes.first()  // list is sorted by size desc — first IS largest
+        return DailyLogRollupMetrics(
+            summary = "largest daily log ${largest.first} (${formatFileSize(largest.second)}), " +
+                "total ${sizes.size} logs ${formatFileSize(total)}",
+            largestBytes = largest.second,
+        )
+    }
+
+    /**
      * Compact per-file size summary of daily logs, used by the system prompt
      * to decide whether a memory_rollup is worth triggering. Returns the
      * largest daily log (name + size) plus the total, or null when empty.
      */
-    fun dailyLogSizeSummary(): String? {
-        val sizes = dailyLogSizes()
-        if (sizes.isEmpty()) return null  // F-9: maxOf on empty throws
-        val total = sizes.sumOf { it.second }
-        val largest = sizes.first()  // list is sorted by size desc — first IS largest
-        return "largest daily log ${largest.first} (${formatFileSize(largest.second)}), " +
-            "total ${sizes.size} logs ${formatFileSize(total)}"
-    }
+    fun dailyLogSizeSummary(): String? = dailyLogRollupMetrics().summary
 
     /**
      * Largest daily log size in bytes (0 when no daily logs exist). Used by
      * the system prompt to decide whether to suggest memory_rollup.
      */
-    fun largestDailyLogBytes(): Long {
-        return dailyLogSizes().firstOrNull()?.second ?: 0L
-    }
+    fun largestDailyLogBytes(): Long = dailyLogRollupMetrics().largestBytes
 
     private fun dailyLogSizes(): List<Pair<String, Long>> {
         // [dv15-A4] The candidate口径 must match the rollup executor

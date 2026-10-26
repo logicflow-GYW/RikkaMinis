@@ -1,9 +1,10 @@
 package com.rikkaminis.app.provider
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import com.rikkaminis.app.logging.AppLogger
+import com.rikkaminis.app.util.ImageDecoding
+import com.rikkaminis.app.util.saveOutcome
 import java.io.ByteArrayOutputStream
 
 /**
@@ -80,43 +81,36 @@ object ImageBudget {
     fun compressBytes(input: ByteArray, maxEdge: Int = maxEdgePx(), q: Int = jpegQuality()): ByteArray {
         if (input.isEmpty()) return input
         return try {
-            // Two-pass decode mirroring PhotosOffloadHandler.copyResized — sampled
-            // bounds first to keep the in-memory bitmap proportional to maxEdge,
-            // then scaled to the exact target after decode.
-            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(input, 0, input.size, boundsOpts)
-            val w0 = boundsOpts.outWidth
-            val h0 = boundsOpts.outHeight
-            if (w0 <= 0 || h0 <= 0) return input
-            var sample = 1
-            while (w0 / sample > maxEdge * 2 || h0 / sample > maxEdge * 2) sample *= 2
-            val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
-            val decoded = BitmapFactory.decodeByteArray(input, 0, input.size, decodeOpts)
-                ?: return input
-            val scale = minOf(
-                maxEdge.toFloat() / decoded.width,
-                maxEdge.toFloat() / decoded.height,
-                1f,
-            )
-            val out = if (scale < 1f) {
-                Bitmap.createScaledBitmap(
-                    decoded,
-                    (decoded.width * scale).toInt().coerceAtLeast(1),
-                    (decoded.height * scale).toInt().coerceAtLeast(1),
-                    true,
-                )
-            } else decoded
-            val baos = ByteArrayOutputStream()
-            // record-ok: deep-audit-1048 A-02 — OUT OF SCOPE BY TICKET ORDER
-            // ("ImageBudget.kt 属另一族，不在本条半径内不许动"). Verified on the
-            // shipped tree: the verdict is NOT read, so a failed encode makes
-            // compressBytes return an EMPTY ByteArray while its KDoc above
-            // promises "the original bytes on decode/encode failure". Deferred as
-            // §1048-A2 R2 (trigger: the next change to the compression chain).
-            out.compress(Bitmap.CompressFormat.JPEG, q.coerceIn(1, 100), baos)
-            if (out !== decoded) out.recycle()
-            decoded.recycle()
-            baos.toByteArray()
+            // [debt-1026 B3] The decode is the shared bounded one, not a
+            // hand-rolled `maxEdge * 2` sampling loop: that window left
+            // `sample` at 1 for a 4000x3000 source (12000x9000 is the first
+            // size that samples), i.e. it materialised the FULL-resolution
+            // bitmap (~48 MB ARGB_8888) on the network path and only shrank it
+            // afterwards. `ImageDecoding` probes the header first and bounds the
+            // decode at (2 * maxEdge)^2; it returns null on any decode failure.
+            val decoded = ImageDecoding.decodeBytesBounded(input, maxEdge) ?: return input
+            try {
+                val baos = ByteArrayOutputStream()
+                // [debt-1026 B2] `Bitmap.compress` answers FALSE when the encoder
+                // wrote no pixels — it does NOT throw. Dropped, `baos.toByteArray()`
+                // was an EMPTY array, `compressUnderBudget` then saw `0 <= target`
+                // as a fit and provisioned the empty image to the provider (HTTP 400
+                // image-decode). The KDoc above promises the ORIGINAL bytes on an
+                // encode failure; that is what the false branch returns.
+                val encoded = decoded.bitmap.compress(Bitmap.CompressFormat.JPEG, q.coerceIn(1, 100), baos)
+                if (!saveOutcome(streamOpened = true, compressed = encoded)) {
+                    AppLogger.warning(
+                        TAG,
+                        "compressBytes: JPEG encoder wrote no bytes (edge=$maxEdge q=$q, ${input.size}B → keeping original)",
+                    )
+                    return input
+                }
+                return baos.toByteArray()
+            } finally {
+                // One bitmap to release, on both the success and the encode-throw
+                // path (the old shape leaked it when `compress` threw).
+                decoded.bitmap.recycle()
+            }
         } catch (t: Throwable) {
             AppLogger.warning(TAG, "compressBytes failed (${input.size}B → keeping original): ${t.message}")
             input
