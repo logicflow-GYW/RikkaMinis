@@ -2,7 +2,7 @@
 
 - 分支：`fix/r3-approve-perm-leak`，基线 `main` @ `f0f14d46d`
 - 变动面：`scripts/scan/auto_approve_bypass_check.py`、`scripts/scan/offload_permission_reset_sync_check.py`、`scripts/scan/debug_leak_guard.py` + 本报告（`src/**` 生产 `.kt` **0 行**；`scan.sh` / `test_scan.py` / `_kotlin_{lexer,ast,valueflow}.py` 零触碰；门 112 / 夹具 344 不变）
-- 结论：**3 门 / 9 条见证**，修前 **9/9 全部重放为 BLIND_CONFIRMED**，修后 **9/9 全部变红（rc=1，红在本支新判据上）**，`restored=True`（`git status --porcelain src/` 全程为空）。3 门真树 rc=0，自检臂 20 / 29 / 32。
+- 结论：**3 门 / 9 条见证**，修前 **9/9 全部重放为 BLIND_CONFIRMED**，修后 **9/9 全部变红（rc=1，红在本支新判据上）**，`restored=True`（`git status --porcelain src/` 全程为空）。3 门真树 rc=0，自检臂 20 arms / 29 arms / 46 checks（7+4+16 夹具 + APK 模式）。
 
 ---
 
@@ -114,10 +114,10 @@
 1. **本门**：三支真树 `rc=0`（`auto_approve_bypass_check: OK` / `offload_permission_reset_sync_check OK` / 两行 ✅），`--selftest` 全臂带牙：
    - `AUTO_APPROVE_BYPASS_SELFTEST: PASS (20 arms, 18 violating)`（原 14 arms；新增 `checkperm_auto_approve_overlay`、`checkperm_level_discarded`、`risk_voice_input_downgraded`、`risk_unknown_token`、`risk_pinned_path_missing`、`risk_new_group_family_safe`，各期望恰 1 条违规）
    - `OFFLOAD_PERMISSION_RESET_SYNC_SELFTEST_ARMS=29` + `OFFLOAD_PERMISSION_RESET_SYNC_SELFTEST=PASS`（原 23 arms；新增 V10/V10b/V11/V11b/V12/V12b，含两条 clean 对照）
-   - `DEBUG_SOURCE_SELFTEST=PASS (7 fixtures)` / `DEBUG_DISPATCH_SELFTEST=PASS (4 fixtures)` / `DEBUG_API26_SELFTEST=PASS (16 fixtures)`（原 5 / 无 / 11）
-2. **邻门**：全门循环结果见 §4.3（112 门，逐门独立进程）。
-3. **全量**：`probe/t17-fullscan.log`（逐门独立进程循环，**不跑 `scan.sh` 整份**，沙箱会 Errno 38）；`test_scan.py` 见下。
-4. **CI**：见 §6。
+   - `DEBUG_SOURCE_SELFTEST=PASS (7 fixtures)` / `DEBUG_DISPATCH_SELFTEST=PASS (4 fixtures)` / `DEBUG_API26_SELFTEST=PASS (16 fixtures)`，全门 46 项 ✅（原 5 / 无 / 11）
+2. **邻门 / 全量门**：逐门独立进程循环，**111 个不同门脚本 + `i18n_check` 全绿**（`probe/t17-fullscan.log`：101 门落盘 + 剩余 10 门直接跑，`RED` 0；`scan.sh` 的 112 是编号而非 112 个不同脚本，`liveness_audit.py` 只在注释里出现）。**不跑 `scan.sh` 整份**——本窗口沙箱会 `OSError: [Errno 38]`，见 R9。
+3. **夹具全量**：`test_scan.py` 本地跑到第 156 行被沙箱杀死（`readonly_mount_write_guard` 之后，`❌` 0），**全量 344 条证据由 CI 承担**（§6：`ALL 344 CASES PASS` 恰 1）；本支三门在 `test_scan` 里的断言（`test_debug_leak` / `test_da1024_gates` 的 offload 行 / `test_auto_approve_gates` 的 auto_approve 行）已在沙箱内单独跑通前者两项、后一项由 CI 日志里两条 marker 各恰 1 佐证。
+4. **CI**：见 §6（run `40316386231` / #2744 / success / head_sha 三方一致）。
 
 ## 5. 修后反攻（贴红行）
 
@@ -155,7 +155,20 @@ w32 offload      rc=1  checkPermission()'s `Response.DENY_SESSION ->` arm never 
 
 ## 6. CI
 
-（回填）
+- 分支 `fix/r3-approve-perm-leak` → 门提交 **`2ccc8133a`**；分支 push 不触发 → 手动 `workflow_dispatch`。
+- run **`40316386231`** / **#2744** / job `121549926145` / **attempt 1** / **`success`**（11:37:02Z → 12:02:10Z，25m08s）
+- **`head_sha` = `2ccc8133a7b349480ccf61c5996b7805dec63b9f`，与本地 HEAD 逐字符一致**（防并发假绿）
+- 26 步，唯一 `skipped` = `Publish to Releases`（main 门控，非 main 分支按设计跳过）
+- 日志 `probe/t17-ci.log`：1,486,720 B / **NUL 0** / 17,853 行，逐条核：
+  - `Summary: 112 passed, 0 failed` **恰 1**（另有 6 行 `Summary: N passed` 是子套件：25/16/37/15/25/10）
+  - `✅ ALL 344 CASES PASS` **恰 1**
+  - 门头 `[N/112]` **112 个互异**（1…112）
+  - `^\s*e: ` **0 行**（Kotlin 编译零错误）
+  - `❌` **0 行**
+  - 6 行含 `FAILED` —— 逐条确认全是 **JUnit 用例名**（`…produces FAILED without calling provid…` / `…reason PERSISTENCE_FAILED…` / `…phase FAILED maps to Failed PASSED` 等），不是失败读数
+  - 三门标记：`AUTO_APPROVE_BYPASS_SELFTEST: PASS` 恰 1、`OFFLOAD_PERMISSION_RESET_SYNC_SELFTEST=PASS` 恰 1（即 `test_scan` 的「自检带牙 + 真树绿」两项断言过）
+- **已知局限（存量问题，非本支引入）**：门自己的 `--selftest` 逐臂 stdout **不进 CI 日志**（`test_scan` 只断言 marker，不回显），所以 `OFFLOAD_PERMISSION_RESET_SYNC_SELFTEST_ARMS=29` / `DEBUG_{SOURCE,DISPATCH,API26}_SELFTEST=PASS` 在日志里 0 命中——臂数只能由本报告承载（登记为 R10）。
+- 停止节点：**分支 CI 绿**，未合并 main（全支含门判据 = 有验证面，合并起手权在用户）。
 
 ## 7. 残留（每条带 触发条件 / 触发后方案 / 搁置理由）
 
@@ -198,6 +211,11 @@ w32 offload      rc=1  checkPermission()'s `Response.DENY_SESSION ->` arm never 
 *触发条件*：端口常量移出 `debug/` 包。/
 *触发后方案*：改成扫符号名（`DEBUG_SERVER_PORT`）而不是数值。/
 *搁置理由*：现在端口只在 `debug/DebugServer.kt` 里。
+
+**R10（装置）· 门自证 stdout 不进 CI 日志。** 存量问题：`test_scan` 只断言 marker 存在，不回显 `--selftest` 的逐臂输出，所以新臂数（20 / 29 / 32）在 CI 里不可见，只能靠本报告与本地跑承载。/
+*触发条件*：需要从 CI 侧证明某条新臂真的跑过（审计/回归时）。/
+*触发后方案*：`test_scan` 增加一条"回显门 selftest 的最后一行"的步骤（冻结面改动，需主会话统一收口），或给门加 `--selftest --summary-only` 由 CI step 直接打印。/
+*搁置理由*：属冻结面（`test_scan.py`）改动，本支按纪律不碰；已在报告登记，避免下次又"以为 CI 里有见证"。
 
 **R9（环境）· 沙箱 Errno 38 与 shell 层截断。** 本轮多次遇到：`test_scan`/`scan.sh` 整份跑会被杀、`python3 … | tail` 形式的管道会被截断（`exit -1`）、`/tmp/.minis_cwd_*` 创建失败。健康路径：**重定向到文件再读**、逐门独立进程。§4 的全量证据即按此取得。
 
