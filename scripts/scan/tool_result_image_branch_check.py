@@ -53,6 +53,17 @@ import shutil
 import sys
 import tempfile
 
+# [batch6] structural analysis comes from the shared layer; this file keeps
+# no lexer of its own (see the criteria helpers below).
+from _kotlin_lexer import KotlinLexError
+from _kotlin_ast import (match_bracket, split_top, strip_parens, const_bool,
+                         const_value, stmt_spans, function_body, tail_expr,
+                         if_blocks as shared_if_blocks, enclosing_conditions,
+                         when_branches)
+from _kotlin_valueflow import (code_view, literal_view, value_sources,
+                               peel_discarding, contains_ident, guard_feasible,
+                               path_feasible, call_args, expr_end)
+
 PROVIDER_REL = os.path.join(
     "src", "android", "app", "src", "main", "java", "com", "rikkaminis", "app", "provider"
 )
@@ -89,260 +100,440 @@ EXEMPTIONS = {
 }
 
 
-def strip_comments_and_strings(text):
-    """Blank out comments and string contents so prose cannot fake a match and
-    braces inside literals cannot unbalance a count."""
+# ── [batch6] shared analysis layer ──────────────────────────────────────────
+# Every structural question (braces / statements / constant folding / value
+# flow / reachability) comes from `_kotlin_lexer` / `_kotlin_ast` /
+# `_kotlin_valueflow`. This file no longer carries its own comment+string
+# stripper, its own brace counter, or its own literal-whitelist dead-branch
+# regex: the sixth-batch witnesses walked through all three
+# (`(1 == 2) && …`, a wrapped `if (false)` that never mentions the needle,
+# `?.let { if (true) return@let … }`).
+
+EXIT_RE = re.compile(r"^(?:return|throw|break|continue)\b")
+IF_KW = re.compile(r"\bif\s*\(")
+FOR_RE = re.compile(r"\bfor\s*\(")
+BIND_RE = re.compile(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)")
+IMAGE_IDENT_HINT = re.compile(r"[A-Za-z_]\w*[Ii]mage\w*")
+SCOPE_LAMBDA_RE = re.compile(
+    r"^(?:\?\.|\.)\s*(?:let|run|also|apply|takeIf|takeUnless|forEach|onEach|ifEmpty)\s*\{")
+CONST_EMPTY_RE = re.compile(
+    r"^(?:emptyList|emptySet|emptySequence|emptyArray|listOf|setOf|sequenceOf)"
+    r"\s*(?:<[^<>]*>)?\s*\(\s*\)$")
+FLIP_OP = {"==": "==", "!=": "!=", "<": ">", ">": "<", "<=": ">=", ">=": "<="}
+INT_CMP_RE = re.compile(r"^([A-Za-z_]\w*)\s*(==|!=|<=|>=|<|>)\s*(-?\d+)$")
+INT_CMP_REV_RE = re.compile(r"^(-?\d+)\s*(==|!=|<=|>=|<|>)\s*([A-Za-z_]\w*)$")
+
+
+def _lex(text):
+    """Structure view + fail-closed policy. A lex failure must surface as a
+    violation (the callers translate KotlinLexError), never fall back to
+    scanning raw text where comments and string contents can fake a match."""
+    return code_view(text)
+
+
+def _brace_enclosures(code, pos):
+    """Innermost-first [(open, close)] for every brace block containing `pos`.
+    None = unbalanced (fail-closed)."""
+    stack = []
+    for i, ch in enumerate(code[:pos]):
+        if ch == "{":
+            stack.append(i)
+        elif ch == "}" and stack:
+            stack.pop()
     out = []
-    i = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if c == "/" and i + 1 < n and text[i + 1] == "/":
-            while i < n and text[i] != "\n":
-                i += 1
-            continue
-        if c == "/" and i + 1 < n and text[i + 1] == "*":
-            i += 2
-            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
-                i += 1
-            i += 2
-            continue
-        if text.startswith('"""', i):
-            i += 3
-            while i < n and not text.startswith('"""', i):
-                i += 1
-            i += 3
-            continue
-        if c == '"':
-            i += 1
-            while i < n:
-                if text[i] == "\\":
-                    i += 2
-                    continue
-                if text[i] == '"':
-                    i += 1
-                    break
-                i += 1
-            continue
-        out.append((i, c))
-        i += 1
+    for i in reversed(stack):
+        j = match_bracket(code, i)
+        if j < 0:
+            return None
+        out.append((i, j))
     return out
 
 
-BOOL_OP_LITERAL = re.compile(
-    r"(?:&&|\|\|)\s*(?:true|false)(?![\w])"
-    r"|(?<![\w.\"'])(?:true|false)\s*(?:&&|\|\|)")
-IF_RE = re.compile(r"\bif\s*\(")
-CONTINUATION_CHARS = "||&&,.+-*/?:=(<["
+def stmt_is_exit(code, start, end):
+    """Does [start,end) leave its enclosing block unconditionally?
+
+    `return` / `throw` / `break` / `continue` at statement head, and
+    `if (<const true>) <exit>` — the shape a witness uses to cut a block short
+    without deleting anything (`if (true) return@let`). A non-constant `if`
+    never counts: only something the compiler can fold is proof."""
+    raw = code[start:end]
+    stmt = raw.strip()
+    if not stmt:
+        return False
+    lead = len(raw) - len(raw.lstrip())
+    if EXIT_RE.match(stmt):
+        return True
+    m = re.match(r"if\s*\(", stmt)
+    if not m:
+        return False
+    op = start + lead + m.end() - 1
+    cp = match_bracket(code, op)
+    if cp < 0 or cp >= end:
+        return False
+    if const_bool(code[op + 1:cp]) is not True:
+        return False
+    return bool(re.search(r"\b(?:return|throw|break|continue)\b", code[cp + 1:end]))
 
 
-def _skip_string(text, i):
-    if text.startswith('"""', i):
-        j = text.find('"""', i + 3)
-        return len(text) if j < 0 else j + 3
-    q = text[i]
-    i += 1
-    while i < len(text) and text[i] != q:
-        if text[i] == "\\":
-            i += 2
-        elif text.startswith("${", i):
-            depth = 1
-            i += 2
-            while i < len(text) and depth:
-                if text[i] == "{":
-                    depth += 1
-                elif text[i] == "}":
-                    depth -= 1
-                i += 1
-        else:
-            i += 1
-    return i + 1
+def live_path(code, pos):
+    """`pos` can actually run: every enclosing condition is feasible AND no
+    unconditional exit sits before it inside any enclosing block."""
+    try:
+        if not path_feasible(code, pos):
+            return False
+        enc = _brace_enclosures(code, pos)
+    except KotlinLexError:
+        return False
+    if enc is None:
+        return False
+    for open_i, close_i in enc:
+        body_start, body_end = open_i + 1, close_i
+        for a, b in stmt_spans(code[body_start:body_end]):
+            s, e = body_start + a, body_start + b
+            if e > pos:
+                break
+            if stmt_is_exit(code, s, e):
+                return False
+    return True
 
 
-def _close_of(text, k, open_ch, close_ch):
-    depth = 0
-    i = k
-    while i < len(text):
-        c = text[i]
-        if c == '"' or c == "'":
-            i = _skip_string(text, i)
-            continue
-        if c == open_ch:
-            depth += 1
-        elif c == close_ch:
-            depth -= 1
-            if depth == 0:
-                return i
-        i += 1
-    return -1
+def _following_scope_lambda(code, pos):
+    """(open, close) of the lambda a reference at `pos` hands its value to
+    (`x?.let {`, `x.ifEmpty {`, …), or None."""
+    m = SCOPE_LAMBDA_RE.match(code[pos + len(IMAGE_FIELD):])
+    if not m:
+        return None
+    brace = pos + len(IMAGE_FIELD) + m.end() - 1
+    close = match_bracket(code, brace)
+    return (brace, close) if close > 0 else None
 
 
-def _expr_span(text, start):
-    """Expression text up to the statement end. A newline only ends it when the
-    last non-space character is not a continuation operator, so a BLANK LINE in
-    the middle of an expression does not truncate it."""
-    depth = 0
-    i = start
-    last = ""
-    while i < len(text):
-        c = text[i]
-        if c == '"' or c == "'":
-            j = _skip_string(text, i)
-            last = text[j - 1]
-            i = j
-            continue
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            if depth == 0:
-                return text[start:i]
-            depth -= 1
-        if c == "\n" and depth == 0 and last not in CONTINUATION_CHARS:
-            return text[start:i]
-        if not c.isspace():
-            last = c
-        i += 1
-    return text[start:]
+def _lambda_live_work(code, brace, close):
+    """How many statements of the lambda can actually run (0 = fully dead).
+
+    The `params ->` header is cut first: it ends with `->`, which the statement
+    splitter treats as a continuation, so otherwise the first statement reads
+    `img -> if (true) return@let …` and the exit hides inside it (the same
+    block-header trap that hid a dead arm in the i18n gate)."""
+    body = _filter_lambda_body(code, brace, close)[0]
+    live = 0
+    for a, b in stmt_spans(code[body:close]):
+        s, e = body + a, body + b
+        if stmt_is_exit(code, s, e):
+            break  # everything after the exit is unreachable
+        live += 1
+    return live
 
 
-def _if_conditions(text):
-    """-> [(cond_start, cond_text)] for every brace- or bracket-bodied `if (`."""
-    out = []
-    for m in IF_RE.finditer(text):
-        op = text.find("(", m.end() - 1)
-        cp = _close_of(text, op, "(", ")")
-        if cp < 0:
-            continue
-        out.append((op, text[op:cp + 1]))
-    return out
+def _inside_condition(code, pos):
+    """A reference inside an `if`/`when` condition is a TEST, not a consumption:
+    `if (part.imageData != null && …)` keeps the token while the bytes go
+    unused, which is how a witness hides a dropped image behind the guard that
+    is supposed to protect it."""
+    for m in IF_KW.finditer(code):
+        p_open = m.end() - 1
+        p_close = match_bracket(code, p_open)
+        if p_close > 0 and p_open < pos < p_close:
+            return True
+    for m in re.finditer(r"\bwhen\s*\(", code):
+        p_open = m.end() - 1
+        p_close = match_bracket(code, p_open)
+        if p_close > 0 and p_open < pos < p_close:
+            return True
+    return False
 
 
-def dead_guard_in(text, needle):
-    """-> offending condition text when `needle` is only guarded by a condition a
-    boolean literal short-circuits (`if (false && part.imageData != null)`).
+def dead_guard_in(text):
+    """Reason text when the image reference inside `text` can never reach the
+    wire. Three shapes, one question — "can this reference run?":
 
-    Presence of the token is not a decision: the branch stays textually intact
-    and never runs, so the payload is silently dropped.
+      1. every reference sits under a condition that can never hold
+         (`if (false && …)`, `if ((1 == 2) && …)`, an outer `if (false)`
+         wrapper that never mentions the needle, `when (false) { … }`);
+      2. every live reference hands its value to a lambda that can never do
+         work (`?.let { if (true) return@let … }`);
+      3. an unconditional exit precedes the reference in its own block.
     """
-    for _pos, cond in _if_conditions(text):
-        if needle not in cond:
+    try:
+        code = _lex(text)
+    except KotlinLexError as exc:
+        return ("unparsable ToolResult branch (%s) — refusing to report green"
+                % exc)
+    positions = [m.start() for m in re.finditer(r"\b%s\b" % IMAGE_FIELD, code)]
+    if not positions:
+        return None
+    dead_conditions = []
+    live = []
+    unbalanced = False
+    for p in positions:
+        if _brace_enclosures(code, p) is None:
+            unbalanced = True
             continue
-        inner = cond[1:-1] if cond.startswith("(") and cond.endswith(")") else cond
-        if BOOL_OP_LITERAL.search(inner) or re.match(r"\s*(?:true|false)\b", inner):
-            return re.sub(r"\s+", " ", inner).strip()[:80]
+        if not live_path(code, p) or _inside_condition(code, p):
+            if not live_path(code, p):
+                for _kind, cond in enclosing_conditions(code, p):
+                    c = strip_parens(cond)
+                    if const_bool(c) is False or not guard_feasible(cond):
+                        dead_conditions.append(re.sub(r"\s+", " ", cond).strip()[:80])
+            else:
+                dead_conditions.append(re.sub(r"\s+", " ", code[p:p + 40]).strip()[:60])
+            continue
+        live.append(p)
+    if unbalanced:
+        return "unbalanced braces in the ToolResult branch — refusing to report green"
+    if not live:
+        detail = ("`%s`" % dead_conditions[0]) if dead_conditions else "an exit before it"
+        return ("every `%s` reference sits where it can never run (%s) — the image "
+                "path is dead code" % (IMAGE_FIELD, detail))
+    consuming = 0
+    for p in live:
+        rng = _following_scope_lambda(code, p)
+        if rng is None or _lambda_live_work(code, rng[0], rng[1]) > 0:
+            consuming += 1
+    if consuming == 0:
+        return ("`%s` is read and then handed to a block that can never do work — "
+                "the image path is dead code" % IMAGE_FIELD)
     return None
 
 
 def payload_predicate_body(text):
-    """Body of the shared payload predicate, bounded by the EXPRESSION itself.
+    """Body of the shared payload predicate — block or expression form, braces
+    and strings handled by the shared lexer, so a literal `}` inside the body
+    cannot truncate the slice and a blank line cannot hide an arm."""
+    try:
+        code = _lex(text)
+    except KotlinLexError:
+        return None
+    fb = function_body(code, "hasWirePayload")
+    if fb is None:
+        return None
+    start, end, _kind = fb
+    body = code[start:end]
+    return body if body.strip() else None
 
-    The old slice ended at the first blank line (`find("\n\n")`): a carrier arm
-    written after a blank line — or after a blank line inside the multi-line
-    `||` chain — vanished from C-IMG-1, so the declaration could promise a
-    payload no serializer consumes.
-    """
-    blanked = blank_comments(text)
-    idx = blanked.find(PAYLOAD_PREDICATE_DECL)
-    if idx < 0:
-        return None
-    op = blanked.find("(", idx)
-    cp = _close_of(blanked, op, "(", ")")
+
+def chain_feasible(expr):
+    """Can this `&&` chain ever be true? Constant folding (shared `const_bool`)
+    plus same-variable integer range intersection — `x > 0 && x < 0` is dead
+    even though no literal is involved."""
+    lo, hi = {}, {}
+    spans = split_top(expr, ("&&",)) or [(0, len(expr))]
+    for a, b in spans:
+        part = strip_parens(expr[a:b].strip())
+        if not part:
+            continue
+        folded = const_bool(part)
+        if folded is False:
+            return False
+        if folded is True:
+            continue
+        m = INT_CMP_RE.match(part)
+        if m:
+            name, op, num = m.group(1), m.group(2), int(m.group(3))
+        else:
+            m = INT_CMP_REV_RE.match(part)
+            if not m:
+                continue  # unknown / disjunctive operand: cannot prove infeasible
+            num, op, name = int(m.group(1)), FLIP_OP[m.group(2)], m.group(3)
+        if op == ">=":
+            lo[name] = max(lo.get(name, num), num)
+        elif op == ">":
+            lo[name] = max(lo.get(name, num + 1), num + 1)
+        elif op == "<=":
+            hi[name] = min(hi.get(name, num), num)
+        elif op == "<":
+            hi[name] = min(hi.get(name, num - 1), num - 1)
+        elif op == "==":
+            lo[name] = max(lo.get(name, num), num)
+            hi[name] = min(hi.get(name, num), num)
+        else:  # !=
+            if name in lo and name in hi and lo[name] == hi[name] == num:
+                return False
+    for name in set(lo) & set(hi):
+        if lo[name] > hi[name]:
+            return False
+    return True
+
+
+def dead_media_arms(body):
+    """-> [(marks, arm_text)] for every top-level `||` arm of the predicate that
+    can never hold. `false &&` and `(1 == 2) &&` both fold to false here; the
+    arms stay in the text either way, which is exactly why presence alone was
+    blind."""
+    try:
+        code = _lex(body)
+    except KotlinLexError:
+        return [((), "<unparsable predicate body>")]  # fail-closed
+    out = []
+    spans = split_top(code, ("||",)) or [(0, len(code))]
+    for a, b in spans:
+        arm = code[a:b]
+        if chain_feasible(strip_parens(arm.strip())):
+            continue
+        marks = tuple(mk for mk in PAYLOAD_MEDIA_ARMS + (PAYLOAD_TURN_IMAGE_ARM,)
+                      if mk in arm)
+        out.append((marks, re.sub(r"\s+", " ", arm).strip()[:90]))
+    return out
+
+
+def predicate_param_names(predicate_text):
+    """Parameter names of the shared predicate, derived from its declaration."""
+    try:
+        code = _lex(predicate_text)
+    except KotlinLexError:
+        return []
+    m = re.search(r"\bfun\s+[\w.]*\bhasWirePayload\s*\(", code)
+    if not m:
+        return []
+    op = m.end() - 1
+    cp = match_bracket(code, op)
     if cp < 0:
-        return None
-    k = cp + 1
-    while k < len(blanked) and blanked[k] not in "={":
-        k += 1
-    if k >= len(blanked):
-        return None
-    if blanked[k] == "{":
-        end = _close_of(blanked, k, "{", "}")
-        return blanked[k + 1:end] if end > 0 else blanked[k + 1:]
-    return _expr_span(blanked, k + 1)
+        return []
+    names = []
+    for a, b in split_top(code[op + 1:cp], (",")):
+        decl = code[op + 1 + a:op + 1 + b].strip()
+        if not decl:
+            continue
+        nm = re.match(r"([A-Za-z_]\w*)\s*:", decl)
+        if nm:
+            names.append(nm.group(1))
+    return names
+
+
+def _filter_lambda_body(code, brace, close):
+    """Interior start after the lambda's `params ->` header, if one is present."""
+    seg = code[brace + 1:close]
+    depth = 0
+    i = 0
+    while i < len(seg):
+        ch = seg[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and seg.startswith("->", i):
+            return brace + 1 + i + 2, close
+        i += 1
+    return brace + 1, close
+
+
+def predicate_call_problems(code, brace, close, params, rel, line):
+    """A delegating site must delegate the DECISION. The predicate call has to
+    be the whole filter decision, and every argument must be derived —
+    `hasWirePayload(isLastUserTurn = false, turnImageCount = 0)` keeps the call
+    spelled and still deletes the media-only turn."""
+    problems = []
+    body_start, body_end = _filter_lambda_body(code, brace, close)
+    spans = stmt_spans(code[body_start:body_end])
+    if not spans:
+        return ["%s:%d the empty-message filter body is empty — no decision at all"
+                % (rel, line)]
+    s, e = body_start + spans[-1][0], body_start + spans[-1][1]
+    decision = code[s:e].strip()
+    decision = re.sub(r"^return@[A-Za-z_]\w*\s*", "", decision)
+    vague = ("%s:%d the filter's decision is not the shared predicate call alone "
+             "(`%s`) — an extra conjunct re-drops media-only turns the predicate "
+             "just kept" % (rel, line, re.sub(r"\s+", " ", decision)[:80]))
+    m = re.match(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*\.\s*hasWirePayload\s*\(",
+                 decision)
+    if not m:
+        problems.append(vague)
+        return problems
+    op = m.end() - 1
+    cp = match_bracket(decision, op)
+    if cp != len(decision) - 1:
+        problems.append(vague)
+        return problems
+    named, positional = {}, []
+    for a, b in split_top(decision[op + 1:cp], (",")):
+        raw = decision[op + 1 + a:op + 1 + b].strip()
+        if not raw:
+            continue
+        nm = re.match(r"([A-Za-z_]\w*)\s*=(?!=)\s*(.*)$", raw, re.S)
+        if nm:
+            named[nm.group(1)] = nm.group(2).strip()
+        else:
+            positional.append(raw)
+    provided = set(named) | set(params[:len(positional)])
+    missing = [p for p in params if p not in provided]
+    if missing:
+        problems.append(
+            "%s:%d the predicate call omits %s — the filter cannot weigh a payload "
+            "it is never told about" % (rel, line, ", ".join(missing)))
+    for name, val in list(named.items()) + list(zip(params, positional)):
+        if val and (const_value(val) is not None or const_bool(val) is not None):
+            problems.append(
+                "%s:%d the predicate is called with the constant `%s = %s` — the "
+                "call is spelled but the decision is pinned, so a media-only turn "
+                "is deleted" % (rel, line, name, re.sub(r"\s+", " ", val)[:40]))
+    return problems
+
 
 
 def branch_block(text, start):
-    """Return the text of the block opened at/after `start` (first `{` reached),
-    brace-balanced over code only."""
-    code = strip_comments_and_strings(text)
-    depth = 0
-    opened = False
-    end = None
-    for idx, ch in code:
-        if idx < start:
-            continue
-        if ch == "{":
-            depth += 1
-            opened = True
-        elif ch == "}":
-            depth -= 1
-            if opened and depth == 0:
-                end = idx + 1
-                break
-    if end is None:
-        return None
-    return text[start:end]
+    """The ToolResult branch body opened at/after `start`: the brace-balanced
+    block when the branch is brace-bodied, or the single statement when it is
+    braceless (`is AgentContentPart.ToolResult -> put(...)`)."""
+    code = _lex(text)  # KotlinLexError propagates: callers report, never guess
+    arrow = code.find("->", start)
+    brace = code.find("{", start)
+    if brace >= 0 and (arrow < 0 or arrow < brace):
+        close = match_bracket(code, brace)
+        return text[start:close + 1] if close > 0 else None
+    if arrow >= 0:
+        return text[start:expr_end(code, arrow + 2)]
+    return None
 
 
-def enclosing_block(text, target):
-    """Return (start, block) of the innermost brace block containing [target],
-    or (None, None). Braces inside comments/strings are ignored."""
-    code = strip_comments_and_strings(text)
-    stack = []
-    for idx, ch in code:
-        if idx >= target:
-            break
-        if ch == "{":
-            stack.append(idx)
-        elif ch == "}" and stack:
-            stack.pop()
-    if not stack:
-        return (None, None)
-    start = stack[-1]
-    depth = 0
-    opened = False
-    for idx, ch in code:
-        if idx < start:
-            continue
-        if ch == "{":
-            depth += 1
-            opened = True
-        elif ch == "}":
-            depth -= 1
-            if opened and depth == 0:
-                return (start, text[start:idx + 1])
-    return (None, None)
-
-
-def payload_filter_sites(text):
+def payload_filter_sites(code):
     """Derive the empty-message filter sites in one file: every brace block that
     opens a `.filter` / `.filterIndexed` lambda and either delegates to the
     shared predicate or still carries the legacy inline marker. No line numbers
     and no file list, so a new provider call site is covered the day it lands,
-    and a site reverted to the inline predicate is caught by the same pass."""
+    and a site reverted to the inline predicate is caught by the same pass.
+
+    -> [(line, brace_open, brace_close)]
+    """
     sites = []
     seen = set()
     for mark in EMPTY_FILTER_SITE_MARKS:
-        for m in re.finditer(re.escape(mark), text):
-            start, block = enclosing_block(text, m.start())
-            if start is None or start in seen:
+        for m in re.finditer(re.escape(mark), code):
+            enc = _brace_enclosures(code, m.start())
+            if not enc:
                 continue
-            head = text[max(0, start - 40):start]
-            if not re.search(r"\.filter(Indexed)?\s*$", head):
+            brace, close = enc[0]  # innermost block = the filter lambda
+            if brace in seen:
                 continue
-            seen.add(start)
-            sites.append((text[:start].count("\n") + 1, block))
+            if not re.search(r"\.filter(Indexed)?\s*$", code[max(0, brace - 40):brace]):
+                continue
+            seen.add(brace)
+            sites.append((code[:brace].count("\n") + 1, brace, close))
     return sites
 
 
 def check_payload_filters(root, provider_dir, texts):
     """[deep-audit-1045 A-03] Empty-message filters must keep media-only turns,
-    through the one shared predicate."""
+    through the one shared predicate — and a site that spells the call while
+    feeding it constants (or dropping a payload argument, or ANDing an extra
+    text-only conjunct onto the decision) is the same defect wearing the fix's
+    clothes."""
     violations = []
     total = 0
+    predicate = texts.get(PAYLOAD_PREDICATE_FILE)
+    params = predicate_param_names(predicate) if predicate is not None else []
     for rel, text in texts.items():
-        for line, block in payload_filter_sites(text):
+        try:
+            code = _lex(text)
+        except KotlinLexError as exc:
+            violations.append("%s: cannot be parsed (%s) — refusing to report green"
+                              % (rel, exc))
+            continue
+        for line, brace, close in payload_filter_sites(code):
             total += 1
+            block = code[brace:close + 1]
             if PAYLOAD_PREDICATE_CALL in block:
+                violations.extend(predicate_call_problems(
+                    code, brace, close, params, rel, line))
                 continue
             missing = [arm for arm in PAYLOAD_MEDIA_ARMS if arm not in block]
             violations.append(
@@ -358,14 +549,13 @@ def check_payload_filters(root, provider_dir, texts):
             "sanitizer defense or hides the media arm from this gate"
             % (total, MIN_EMPTY_FILTER_SITES)
         )
-    predicate = texts.get(PAYLOAD_PREDICATE_FILE)
     if predicate is None:
         violations.append(
             "%s: the shared payload predicate file is gone — the three serializers are "
             "free to drift apart again" % PAYLOAD_PREDICATE_FILE
         )
         return violations, total
-    if PAYLOAD_PREDICATE_DECL not in predicate:
+    if PAYLOAD_PREDICATE_DECL not in _lex(predicate):
         violations.append(
             "%s: '%s' declaration not found (the predicate was inlined or renamed)"
             % (PAYLOAD_PREDICATE_FILE, PAYLOAD_PREDICATE_DECL)
@@ -377,15 +567,21 @@ def check_payload_filters(root, provider_dir, texts):
             "%s: the payload predicate's body could not be derived — refusing to report "
             "green (the declaration shape moved)" % PAYLOAD_PREDICATE_FILE)
         return violations, total
-    dead = BOOL_OP_LITERAL.search(body)
-    if dead is not None:
-        window = body[max(0, dead.start() - 60):dead.end() + 60]
-        violations.append(
-            "%s: the payload predicate's decision is short-circuited by a boolean literal "
-            "(`%s`) — every media arm is still present as text and none of them is weighed, "
-            "so a media-only turn is deleted and its bytes never reach the model"
-            % (PAYLOAD_PREDICATE_FILE, re.sub(r"\s+", " ", window).strip()))
-    alive = [arm for arm in PAYLOAD_MEDIA_ARMS + (PAYLOAD_TURN_IMAGE_ARM,) if arm not in body]
+    for marks, arm in dead_media_arms(body):
+        if marks:
+            violations.append(
+                "%s: %s can never be weighed — the arm sits behind a condition that can "
+                "never hold (`%s`), so a media-only turn is deleted and its bytes never "
+                "reach the model"
+                % (PAYLOAD_PREDICATE_FILE, ", ".join("`%s`" % mk for mk in marks), arm))
+        else:
+            violations.append(
+                "%s: the payload predicate's decision is short-circuited by a condition "
+                "that can never hold (`%s`) — every media arm is still present as text "
+                "and none of them is weighed, so a media-only turn is deleted and its "
+                "bytes never reach the model" % (PAYLOAD_PREDICATE_FILE, arm))
+    alive = [arm for arm in PAYLOAD_MEDIA_ARMS + (PAYLOAD_TURN_IMAGE_ARM,)
+             if arm not in body]
     if alive:
         violations.append(
             "%s: the payload predicate no longer weighs %s — that payload can only come "
@@ -407,11 +603,14 @@ def check_payload_filters(root, provider_dir, texts):
 #     predicate BODY (`<carrier>.isNotEmpty()` arms) and require `.<carrier>`
 #     reads in the files that actually write media wire parts. Byte-estimate
 #     readers (`LLMProvider.approxInputBytes`) do NOT count — that is exactly
-#     the read that made the old gate blind.
-# C-IMG-2 (images and audio must not be mutually exclusive): inside a file that
-#     writes both, the `input_audio` write may not sit in a sibling branch of
-#     the chain that serializes `imageParts` — a turn carrying both would lose
-#     one of them silently.
+#     the read that made the old gate blind. A read that cannot affect the wire
+#     does not count either: dead-path reads, a binding nobody uses, and a loop
+#     over a constant-empty list are all "read and dropped".
+# C-IMG-2 (images and audio must not be mutually exclusive): the `input_audio`
+#     write may not sit in a branch that the image carrier can close — neither
+#     an `else` sibling of an image branch nor a brace-less `if
+#     (images.isEmpty())` wrapper — because a turn carrying both would lose one
+#     of them silently.
 #
 # Both derive from the tree: no carrier list, no file list, no line numbers.
 
@@ -428,186 +627,15 @@ MEDIA_WIRE_MARKS = (
 )
 AUDIO_WRITE_RE = re.compile(r'put\(\s*"type"\s*,\s*"input_audio"')
 MIN_MEDIA_SERIALIZER_FILES = 2
-IF_KW = re.compile(r"\bif\s*\(")
 
 
-def blank_comments(text):
-    """Same length as `text`: comment bodies become spaces (newlines kept),
-    literals INTACT — the media markers are string literals."""
-    out = list(text)
-    i = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if c == '"' or c == "'":
-            q = text[i:i + 3] if text.startswith('"""', i) else c
-            i += len(q)
-            while i < n:
-                if text[i] == "\\":
-                    i += 2
-                    continue
-                if text.startswith(q, i) if len(q) == 3 else text[i] == q:
-                    i += len(q)
-                    break
-                i += 1
-            continue
-        if text.startswith("//", i):
-            while i < n and text[i] != "\n":
-                out[i] = " "
-                i += 1
-            continue
-        if text.startswith("/*", i):
-            while i < n and not text.startswith("*/", i):
-                if text[i] != "\n":
-                    out[i] = " "
-                i += 1
-            if i < n:
-                out[i] = " "
-                out[i + 1] = " "
-                i += 2
-            continue
-        i += 1
-    return "".join(out)
+def has_media_image_mark(text):
+    return any(mark.search(text) for mark in MEDIA_WIRE_MARKS)
 
 
-def blank_comments_and_strings(text):
-    """Same length as `text`: comments AND literal contents become spaces,
-    newlines kept — so brace/paren matching can never be fooled by a literal,
-    and every index still lines up with the original."""
-    out = list(text)
-    i = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if text.startswith('"""', i):
-            for k in range(i, min(i + 3, n)):
-                out[k] = " "
-            i += 3
-            while i < n and not text.startswith('"""', i):
-                if text[i] != "\n":
-                    out[i] = " "
-                i += 1
-            for k in range(i, min(i + 3, n)):
-                out[k] = " "
-            i += 3
-            continue
-        if text.startswith("//", i):
-            while i < n and text[i] != "\n":
-                out[i] = " "
-                i += 1
-            continue
-        if text.startswith("/*", i):
-            while i < n and not text.startswith("*/", i):
-                if text[i] != "\n":
-                    out[i] = " "
-                i += 1
-            if i < n:
-                out[i] = " "
-                out[i + 1] = " "
-                i += 2
-            continue
-        if c == '"' or c == "'":
-            q = c
-            out[i] = " "
-            i += 1
-            while i < n:
-                if text[i] == "\\":
-                    out[i] = " "
-                    if i + 1 < n and text[i + 1] != "\n":
-                        out[i + 1] = " "
-                    i += 2
-                    continue
-                if text[i] == q:
-                    out[i] = " "
-                    i += 1
-                    break
-                if text[i] != "\n":
-                    out[i] = " "
-                i += 1
-            continue
-        i += 1
-    return "".join(out)
-
-
-def matching(text, i):
-    """Index of the delimiter closing the one at `i` (`(`/`{`), or -1."""
-    opener = text[i]
-    closer = ")" if opener == "(" else "}"
-    depth = 0
-    k = i
-    while k < len(text):
-        if text[k] == opener:
-            depth += 1
-        elif text[k] == closer:
-            depth -= 1
-            if depth == 0:
-                return k
-        k += 1
-    return -1
-
-
-def if_blocks(structure):
-    """-> [(if_start, cond, body_start, body_end)] for every brace-bodied `if`
-    in a comment/string-blanked text."""
-    out = []
-    for m in IF_KW.finditer(structure):
-        paren_at = structure.find("(", m.start())
-        if paren_at < 0:
-            continue
-        paren_end = matching(structure, paren_at)
-        if paren_end < 0:
-            continue
-        brace_at = structure.find("{", paren_end)
-        if brace_at < 0:
-            continue
-        brace_end = matching(structure, brace_at)
-        if brace_end < 0:
-            continue
-        out.append((m.start(), structure[paren_at + 1:paren_end], brace_at, brace_end))
-    return out
-
-
-def innermost_if(blocks, index):
-    """The smallest `if` body containing `index`, or None."""
-    best = None
-    for blk in blocks:
-        if blk[2] <= index < blk[3]:
-            if best is None or (blk[3] - blk[2]) < (best[3] - best[2]):
-                best = blk
-    return best
-
-
-def is_else_chained(structure, if_start):
-    """True when the `if` at `if_start` opens an `else` / `else if` branch."""
-    i = if_start - 1
-    while i >= 0 and structure[i] in " \t\r\n":
-        i -= 1
-    return structure[max(0, i - 3):i + 1].endswith("else")
-
-
-def preceding_sibling(structure, if_start):
-    """(start, end) of the sibling block that the `else` at `if_start` continues,
-    or None."""
-    i = if_start - 1
-    while i >= 0 and structure[i] in " \t\r\n":
-        i -= 1
-    if not structure[max(0, i - 3):i + 1].endswith("else"):
-        return None
-    k = i - 4
-    while k >= 0 and structure[k] in " \t\r\n":
-        k -= 1
-    if k < 0 or structure[k] != "}":
-        return None
-    depth = 0
-    while k >= 0:
-        if structure[k] == "}":
-            depth += 1
-        elif structure[k] == "{":
-            depth -= 1
-            if depth == 0:
-                return (k, i)
-        k -= 1
-    return None
+def _is_media_carrier(carrier):
+    low = carrier.lower()
+    return "audio" in low or "image" in low
 
 
 def predicate_carrier_arms(predicate_text):
@@ -618,8 +646,53 @@ def predicate_carrier_arms(predicate_text):
     return {m.group(1) for m in CARRIER_ARM_RE.finditer(span)}
 
 
+def _dead_binding(code, pos):
+    """Name of the local a read at `pos` is bound to when that local is never
+    used again (the value is read and thrown away), else None."""
+    for m in BIND_RE.finditer(code):
+        rhs_start = m.end()
+        if rhs_start > pos:
+            break
+        end = expr_end(code, rhs_start)
+        if not (rhs_start <= pos < end):
+            continue
+        name = m.group(1)
+        uses = len(re.findall(r"(?<![\w`])%s(?![\w`])" % re.escape(name), code))
+        return name if uses <= 1 else None
+    return None
+
+
+def _empty_media_loops(code, flat):
+    """-> [(line, iterable)] for `for (x in <constant empty>)` whose body still
+    writes a media wire part: the loop is a no-op wearing the serialization."""
+    out = []
+    for m in FOR_RE.finditer(code):
+        op = m.end() - 1
+        cp = match_bracket(code, op)
+        if cp < 0:
+            continue
+        header = code[op + 1:cp].strip()
+        h = re.match(r"^([A-Za-z_]\w*)\s*(?::[^,]+)?\s+in\s+(.*)$", header, re.S)
+        if not h:
+            continue
+        iterable = re.sub(r"\s+", " ", h.group(2)).strip()
+        if not CONST_EMPTY_RE.match(iterable):
+            continue
+        brace = code.find("{", cp)
+        if brace < 0:
+            continue
+        close = match_bracket(code, brace)
+        if close < 0:
+            continue
+        body = flat[brace:close + 1]
+        if has_media_image_mark(body) or AUDIO_WRITE_RE.search(body):
+            out.append((code[:m.start()].count("\n") + 1, iterable))
+    return out
+
+
 def check_carrier_consumption(texts):
-    """C-IMG-1."""
+    """C-IMG-1: a carrier the predicate weighs must be READ by a serializer, on
+    a live path, into something that reaches the wire."""
     violations = []
     predicate = texts.get(PAYLOAD_PREDICATE_FILE)
     arms = predicate_carrier_arms(predicate) if predicate is not None else None
@@ -630,9 +703,15 @@ def check_carrier_consumption(texts):
         return violations
     serializers = {}
     for rel, text in texts.items():
-        flat = blank_comments(text)
-        if any(mark.search(flat) for mark in MEDIA_WIRE_MARKS):
-            serializers[rel] = flat
+        try:
+            code = _lex(text)
+        except KotlinLexError as exc:
+            violations.append("%s: cannot be parsed (%s) — refusing to report green"
+                              % (rel, exc))
+            continue
+        flat = literal_view(text)
+        if has_media_image_mark(flat):
+            serializers[rel] = (code, flat)
     if len(serializers) < MIN_MEDIA_SERIALIZER_FILES:
         violations.append(
             "only %d file(s) under the provider package write a media wire part "
@@ -642,69 +721,181 @@ def check_carrier_consumption(texts):
         return violations
     for carrier in sorted(arms):
         read = re.compile(r"\.%s\b" % re.escape(carrier))
-        if not any(read.search(body) for body in serializers.values()):
+        if not any(read.search(flat) for _code, flat in serializers.values()):
             violations.append(
                 "%s: the payload predicate keeps a turn alive for `%s.isNotEmpty()`, but "
                 "no media serializer under the provider package ever reads `.%s` — those "
                 "bytes are dropped and a text-less turn goes out as `content: \"\"`"
                 % (PAYLOAD_PREDICATE_FILE, carrier, carrier))
+    for carrier in sorted(arms):
+        if not _is_media_carrier(carrier):
+            continue  # text carriers are not serialized by a media loop
+        read = re.compile(r"\.%s\b" % re.escape(carrier))
+        for rel in sorted(serializers):
+            code, flat = serializers[rel]
+            for m in read.finditer(code):
+                pos = m.start()
+                line = code[:pos].count("\n") + 1
+                if not live_path(code, pos):
+                    violations.append(
+                        "%s:%d the `.%s` read sits on a path that can never run — the "
+                        "serializer reads the carrier only in dead code, so a media-only "
+                        "turn still goes out empty" % (rel, line, carrier))
+                    continue
+                dead = _dead_binding(code, pos)
+                if dead is not None:
+                    violations.append(
+                        "%s:%d the `.%s` read is bound to `%s`, which nothing ever uses — "
+                        "the bytes are read and dropped, so the turn goes out empty"
+                        % (rel, line, carrier, dead))
+            for line, iterable in _empty_media_loops(code, flat):
+                violations.append(
+                    "%s:%d iterates the constant-empty list `%s` while still writing media "
+                    "parts — the serialization loop is a no-op and those bytes are dropped "
+                    "even though the payload predicate kept the turn"
+                    % (rel, line, iterable))
     return violations
 
 
-def has_media_image_mark(text):
-    return any(mark.search(text) for mark in MEDIA_WIRE_MARKS)
+def if_sites(code):
+    """(if_start, cond, then_start, then_end, else_start, else_end) for every
+    `if`, brace-bodied or not — the branch spans come from the shared
+    `if_blocks`, so a brace-less `if (cond) for (...) { … }` is not invisible."""
+    by_then = {}
+    for cond, t_start, t_end, e_start, e_end in shared_if_blocks(code):
+        by_then.setdefault(t_start, (cond, t_start, t_end, e_start, e_end))
+    out = []
+    for m in IF_KW.finditer(code):
+        p_open = m.end() - 1
+        p_close = match_bracket(code, p_open)
+        if p_close < 0:
+            continue
+        b = by_then.get(p_close + 1)
+        if b is None:
+            continue
+        out.append((m.start(),) + b)
+    return out
+
+
+EMPTY_CALL_RE = re.compile(
+    r"^([A-Za-z_][\w.]*)\s*\.\s*(isEmpty|isNotEmpty|size|count|length)\s*\(\s*\)$")
+EMPTY_ZERO_RE = re.compile(r"^(.+?)\s*(==|<|<=)\s*0$")
+ZERO_EMPTY_RE = re.compile(r"^0\s*(==|>|>=)\s*(.+)$")
+
+
+def _asserts_no_images(conjunct):
+    """Does this conjunct claim the turn carries no image bytes?"""
+    c = strip_parens(conjunct.strip())
+    if not c:
+        return False
+    if c.startswith("!"):
+        inner = strip_parens(c[1:].strip())
+        m = EMPTY_CALL_RE.match(inner)
+        return bool(m and m.group(2) == "isNotEmpty"
+                    and IMAGE_IDENT_HINT.search(m.group(1)))
+    m = EMPTY_CALL_RE.match(c)
+    if m and m.group(2) == "isEmpty" and IMAGE_IDENT_HINT.search(m.group(1)):
+        return True
+    m = EMPTY_ZERO_RE.match(c)
+    if m and IMAGE_IDENT_HINT.search(m.group(1)):
+        return True
+    m = ZERO_EMPTY_RE.match(c)
+    if m and IMAGE_IDENT_HINT.search(m.group(2)):
+        return True
+    return False
+
+
+def _infeasible_when_images(cond):
+    """True when the condition can only hold while the turn carries no images:
+    every top-level `||` arm then has an image-emptiness conjunct."""
+    try:
+        code = _lex(cond)
+    except KotlinLexError:
+        return False
+    arms = split_top(code, ("||",)) or [(0, len(code))]
+    if not arms:
+        return False
+    for a, b in arms:
+        conj = split_top(code[a:b], ("&&",)) or [(0, b - a)]
+        base = a
+        if not any(_asserts_no_images(code[base + x:base + y]) for x, y in conj):
+            return False
+    return True
+
+
+def _exclusive_media_split(flat, sites):
+    """The `if` whose two branches hold the two carriers *and nothing else* —
+    the exclusive-sibling shape (`if (images…) { image parts } else if
+    (audio…) { input_audio }`).
+
+    Deliberately narrow: an `if` whose branches merely CONTAIN the writes deep
+    inside (a whole serialization path in one arm) is not a media-exclusivity
+    decision, and flagging it would red the merged tree for a shape that drops
+    nothing."""
+    out = []
+    for if_start, cond, t_start, t_end, e_start, e_end in sites:
+        if e_start is None or e_end is None:
+            continue
+        then_txt = flat[t_start:t_end]
+        else_txt = flat[e_start:e_end]
+        then_img = has_media_image_mark(then_txt)
+        else_img = has_media_image_mark(else_txt)
+        then_aud = bool(AUDIO_WRITE_RE.search(then_txt))
+        else_aud = bool(AUDIO_WRITE_RE.search(else_txt))
+        if then_img and not then_aud and else_aud and not else_img:
+            out.append((if_start, cond))
+        elif then_aud and not then_img and else_img and not else_aud:
+            out.append((if_start, cond))
+    return out
 
 
 def check_image_audio_not_exclusive(texts):
     """C-IMG-2.
 
     Anchored on the two WRITES, not on a carrier name: whatever feeds the image
-    parts, an `input_audio` write that lives in an `else`/`else if` branch of the
-    same chain as an image write is unreachable whenever images are attached —
-    and vice versa. The merged shape (both writes reachable in one block) is the
-    only compliant one."""
+    parts, an `input_audio` write that the image carrier can close — an `else`
+    sibling of an image branch, or a guard such as `if (msg.imageParts.isEmpty()
+    && turnImages.isEmpty())` (brace-less or not) — is unreachable whenever
+    images are attached. The merged shape (both writes reachable in one branch)
+    is the only compliant one."""
     violations = []
     audio_sites = 0
     for rel in sorted(texts):
         text = texts[rel]
-        structure = blank_comments_and_strings(text)
-        flat = blank_comments(text)
+        try:
+            code = _lex(text)
+        except KotlinLexError as exc:
+            violations.append("%s: cannot be parsed (%s) — refusing to report green"
+                              % (rel, exc))
+            continue
+        flat = literal_view(text)
         audio_positions = [m.start() for m in AUDIO_WRITE_RE.finditer(flat)]
         if not audio_positions:
             continue
-        blocks = if_blocks(structure)
-        image_blocks = [blk for blk in blocks if has_media_image_mark(flat[blk[2]:blk[3]])]
+        sites = if_sites(code)
         for apos in audio_positions:
             audio_sites += 1
             line = flat[:apos].count("\n") + 1
-            ablk = innermost_if(blocks, apos)
-            if ablk is None:
-                continue
-            if has_media_image_mark(flat[ablk[2]:ablk[3]]):
-                continue  # both carriers reachable from one block — the fix shape
-            sibling = preceding_sibling(structure, ablk[0]) if is_else_chained(structure, ablk[0]) else None
-            if sibling is not None and has_media_image_mark(flat[sibling[0]:sibling[1]]):
-                violations.append(
-                    "%s:%d writes `input_audio` in an `else` branch whose sibling writes "
-                    "an image part — a turn carrying both loses its audio silently (the "
-                    "two carriers must share one branch)" % (rel, line))
-                continue
-            flagged = False
-            for iblk in image_blocks:
-                if not is_else_chained(structure, iblk[0]):
-                    continue
-                sib = preceding_sibling(structure, iblk[0])
-                if sib is None:
-                    continue
-                if any(sib[0] <= p < sib[1] for p in audio_positions):
-                    violations.append(
-                        "%s:%d writes an image part in an `else` branch whose sibling "
-                        "writes `input_audio` — same exclusive chain, the audio is dropped "
-                        "whenever images are attached" % (rel, line))
-                    flagged = True
+            guarded = None
+            for _kind, cond in enclosing_conditions(code, apos):
+                if _infeasible_when_images(cond):
+                    guarded = cond
                     break
-            if flagged:
+            if guarded is not None:
+                violations.append(
+                    "%s:%d writes `input_audio` behind `%s` — that condition is false "
+                    "whenever the turn also carries images, so the audio is dropped "
+                    "silently (the two carriers must share one branch)"
+                    % (rel, line, re.sub(r"\s+", " ", guarded).strip()[:80]))
                 continue
+        for if_start, cond in _exclusive_media_split(flat, sites):
+            apos = AUDIO_WRITE_RE.search(flat).start()
+            line = flat[:apos].count("\n") + 1
+            violations.append(
+                "%s:%d writes the two carriers (`input_audio` and the image parts) in "
+                "exclusive branches of `%s` — a turn carrying both loses one of them "
+                "silently (the two carriers must share one branch)"
+                % (rel, line, re.sub(r"\s+", " ", cond).strip()[:60]))
     if audio_sites == 0:
         violations.append(
             "no `input_audio` write site found under the provider package — refusing to "
@@ -762,8 +953,15 @@ def scan_root(root, exemptions=None):
 
             bad_branch = False
             for start in when_hits:
-                block = branch_block(text, start)
                 line = text[:start].count("\n") + 1
+                try:
+                    block = branch_block(text, start)
+                except KotlinLexError as exc:
+                    violations.append(
+                        "%s:%d the ToolResult branch cannot be parsed (%s) — refusing "
+                        "to report green" % (rel, line, exc))
+                    bad_branch = True
+                    continue
                 if block is None:
                     violations.append("%s:%d unbalanced ToolResult branch" % (rel, line))
                     bad_branch = True
@@ -775,15 +973,14 @@ def scan_root(root, exemptions=None):
                     )
                     bad_branch = True
                 else:
-                    dead = dead_guard_in(block, IMAGE_FIELD)
+                    dead = dead_guard_in(block)
                     if dead is not None:
                         violations.append(
-                            "%s:%d the ToolResult branch reads %s only inside a condition a "
-                            "boolean literal short-circuits (`%s`) — the image path is dead "
-                            "code, so every tool-result image is silently dropped"
-                            % (rel, line, IMAGE_FIELD, dead)
+                            "%s:%d %s"
+                            % (rel, line, dead)
                         )
                         bad_branch = True
+
             report.append((rel, "branch-without-imageData" if bad_branch else "ok"))
 
     # An exemption that no longer matches any scanned file is dead weight and
@@ -869,9 +1066,11 @@ def selftest():
 
         violations, scanned, report = scan_root(tmp)
         ok = True
+        arms = [0]
 
         def check(label, condition, detail=""):
             nonlocal ok
+            arms[0] += 1
             mark = "OK" if condition else "FAIL"
             print("  [%s] %s%s" % (mark, label, (" — " + detail) if detail and not condition else ""))
             if not condition:
@@ -915,6 +1114,85 @@ def selftest():
                   str(v_dead_guard[:2]))
         finally:
             shutil.rmtree(d_root, ignore_errors=True)
+
+        # [batch6 A03-1/A03-2] The branch keeps `imageData` and keeps the guard
+        # head; only the VALUE path died. Each shape below was a green witness
+        # against the literal-whitelist version of this criterion.
+        b6_root = tempfile.mkdtemp(prefix="trimg-batch6-")
+        try:
+            b6_pkg = os.path.join(b6_root, PROVIDER_REL)
+            shapes = {
+                # (A03-1) an outer `if (false)` wrapper that never mentions the
+                # needle: the old criterion only read conditions CONTAINING it.
+                "anthropic/OuterDeadProvider.kt": (
+                    "class O {\n"
+                    "    fun f(part: Any) = when (part) {\n"
+                    "        is AgentContentPart.ToolResult -> {\n"
+                    "            if (false) {\n"
+                    "                if (part.imageData != null) {\n"
+                    '                    put("image", part.imageData)\n'
+                    "                }\n"
+                    "            }\n"
+                    "        }\n"
+                    "        else -> Unit\n"
+                    "    }\n"
+                    "}\n"),
+                # (A03-1) same family, constant that needs folding (`1 == 2`).
+                "anthropic/FoldedDeadProvider.kt": (
+                    "class F {\n"
+                    "    fun f(part: Any) = when (part) {\n"
+                    "        is AgentContentPart.ToolResult -> {\n"
+                    "            if ((1 == 2) && part.imageData != null) {\n"
+                    '                put("image", part.imageData)\n'
+                    "            }\n"
+                    "        }\n"
+                    "        else -> Unit\n"
+                    "    }\n"
+                    "}\n"),
+                # (A03-2) the guard is live, the block is cut short inside the
+                # `?.let` — no `if (___)` around imageData at all.
+                "anthropic/LetDeadProvider.kt": (
+                    "class L {\n"
+                    "    fun f(part: Any) = when (part) {\n"
+                    "        is AgentContentPart.ToolResult -> {\n"
+                    "            part.imageData?.let { img ->\n"
+                    "                if (true) return@let\n"
+                    '                put("inlineData", img)\n'
+                    "            }\n"
+                    "        }\n"
+                    "        else -> Unit\n"
+                    "    }\n"
+                    "}\n"),
+                # Control: the same let shape, alive.
+                "anthropic/LetLiveProvider.kt": (
+                    "class LL {\n"
+                    "    fun f(part: Any) = when (part) {\n"
+                    "        is AgentContentPart.ToolResult -> {\n"
+                    "            part.imageData?.let { img ->\n"
+                    "                if (img.isEmpty()) return@let\n"
+                    '                put("inlineData", img)\n'
+                    "            }\n"
+                    "        }\n"
+                    "        else -> Unit\n"
+                    "    }\n"
+                    "}\n"),
+            }
+            for rel, body in shapes.items():
+                write_fixture(os.path.join(b6_pkg, rel), body)
+            v_b6, _, _ = scan_root(b6_root)
+            for rel, label in (
+                    ("OuterDeadProvider.kt", "an outer `if (false)` wrapper that never names imageData"),
+                    ("FoldedDeadProvider.kt", "a folded `(1 == 2) &&` guard"),
+                    ("LetDeadProvider.kt", "`if (true) return@let` cutting the let block short"),
+            ):
+                check("[batch6] %s is dead-code red" % label,
+                      any(rel in v and "dead code" in v for v in v_b6),
+                      str([x for x in v_b6 if rel in x][:1]))
+            check("[batch6] a live `?.let` with a real guard stays green",
+                  not any("LetLiveProvider.kt" in v for v in v_b6),
+                  str([x for x in v_b6 if "LetLiveProvider" in x][:1]))
+        finally:
+            shutil.rmtree(b6_root, ignore_errors=True)
 
         # Exemption with a live symbol is honoured; a dead one is rot.
         write(
@@ -1055,8 +1333,67 @@ def selftest():
                           "(isLastUserTurn && turnImageCount > 0)))\n")
             v_dead, _sc, _rp = scan_root(p_root)
             check("a payload predicate short-circuited by `false &&` is red",
-                  any("short-circuited by a boolean literal" in v for v in v_dead),
+                  any("can never be weighed" in v and "false &&" in v for v in v_dead),
                   str(v_dead[:2]))
+
+            # [batch6 A03-3] Folding, not literal matching: `(1 == 2) &&` and a
+            # self-contradicting integer range are both dead, and neither spells
+            # `false`.
+            write_fixture(os.path.join(p_pkg, PAYLOAD_PREDICATE_FILE),
+                          PREDICATE_BODY.replace(
+                              "        (isLastUserTurn && turnImageCount > 0)\n",
+                              "        ((1 == 2) && (audioParts.isNotEmpty() || "
+                              "imageParts.isNotEmpty() || "
+                              "(isLastUserTurn && turnImageCount > 0)))\n"))
+            v_fold, _sc, _rp = scan_root(p_root)
+            check("[batch6] a folded `(1 == 2) &&` payload arm is red",
+                  any("can never be weighed" in v for v in v_fold), str(v_fold[:2]))
+            write_fixture(os.path.join(p_pkg, PAYLOAD_PREDICATE_FILE),
+                          PREDICATE_BODY.replace(
+                              "        (isLastUserTurn && turnImageCount > 0)\n",
+                              "        (isLastUserTurn && turnImageCount > 0 "
+                              "&& turnImageCount < 0)\n"))
+            v_range, _sc, _rp = scan_root(p_root)
+            check("[batch6] a self-contradicting turn-image range is red",
+                  any("turnImageCount > 0 && turnImageCount < 0" in v for v in v_range),
+                  str(v_range[:2]))
+            write_fixture(os.path.join(p_pkg, PAYLOAD_PREDICATE_FILE), PREDICATE_BODY)
+
+            # [batch6 A03-4] The site still SPELLS the shared call; every tooth
+            # here is about the decision the call actually makes.
+            site_raw = ("            .filterIndexed { index, m ->\n"
+                        "                m.hasWirePayload(\n"
+                        "                    isLastUserTurn = index == 0,\n"
+                        "                    turnImageCount = images.size,\n"
+                        "                )\n"
+                        "            }\n")
+            for tag, new_site, want in (
+                    ("constant arguments",
+                     site_raw.replace("isLastUserTurn = index == 0",
+                                      "isLastUserTurn = false")
+                             .replace("turnImageCount = images.size",
+                                      "turnImageCount = 0"),
+                     "pinned"),
+                    ("a dropped argument",
+                     site_raw.replace("                    turnImageCount = images.size,\n", ""),
+                     "omits"),
+                    ("an extra text-only conjunct",
+                     site_raw.replace("                )\n            }\n",
+                                      "                ) && m.content.isNotEmpty()\n            }\n"),
+                     "not the shared predicate call alone"),
+            ):
+                write_fixture(os.path.join(p_pkg, "openai/A.kt"),
+                              ("class PA {\n    fun f(raw: List<LLMMessage>, images: List<Any>) {\n"
+                               "        val sites = raw\n" + new_site + "    }\n}\n"))
+                v_site, _sc, _rp = scan_root(p_root)
+                check("[batch6] a delegating site with %s is red" % tag,
+                      any(want in v for v in v_site), str(v_site[:2]))
+            write_fixture(os.path.join(p_pkg, "openai/A.kt"),
+                          ("class PA {\n    fun f(raw: List<LLMMessage>, images: List<Any>) {\n"
+                           "        val sites = raw\n" + site_raw + "    }\n}\n"))
+            v_site_ok, _sc, _rp = scan_root(p_root)
+            check("[batch6] the unmodified delegating site stays green",
+                  not any("openai/A.kt" in v for v in v_site_ok), str(v_site_ok[:2]))
 
             # (4) the shared predicate file disappears
             os.remove(os.path.join(p_pkg, PAYLOAD_PREDICATE_FILE))
@@ -1099,6 +1436,49 @@ def selftest():
             v_back, _, _ = scan_root(m_root)
             check("restoring the merged branch clears the C-IMG-2 arm",
                   not media_crit_codes(v_back), str(sorted(media_crit_codes(v_back))))
+            # [batch6 A03-5] An image-emptiness guard closes the audio write: a
+            # turn carrying both loses the audio. Brace-less and braced.
+            for tag, guard in (
+                    ("brace-less", '            if (msg.imageParts.isEmpty() && '
+                                   'turnImages.isEmpty()) '),
+                    ("braced", '            if (msg.imageParts.isEmpty() && '
+                               'turnImages.isEmpty()) {\n'),
+            ):
+                mutated = MEDIA_MERGED.replace(
+                    "                for (audio in msg.audioParts) {\n",
+                    guard + "for (audio in msg.audioParts) {\n")
+                if tag == "braced":
+                    mutated = mutated.replace(
+                        "                }\n                if (msg.content.isNotEmpty()) {\n",
+                        "                }\n            }\n                if (msg.content.isNotEmpty()) {\n", 1)
+                write_fixture(os.path.join(m_pkg, "openai/A.kt"),
+                              m_snapshot["openai/A.kt"].replace(MEDIA_MERGED, mutated))
+                v_guard, _, _ = scan_root(m_root)
+                check("[batch6] audio behind an %s image-emptiness guard is C-IMG-2 red" % tag,
+                      "C-IMG-2" in media_crit_codes(v_guard), str(v_guard[:2]))
+            write_fixture(os.path.join(m_pkg, "openai/A.kt"), m_snapshot["openai/A.kt"])
+
+            # [batch6 A03-6] A read that cannot affect the wire is not a
+            # consumption: a binding nobody uses plus a loop over an empty list
+            # still spell `.audioParts` and `input_audio`.
+            dropped = MEDIA_MERGED.replace(
+                "                for (audio in msg.audioParts) {\n"
+                '                    contentArray.put(JSONObject().put("type", "input_audio"))\n'
+                "                }\n",
+                "                val _droppedAudio = msg.audioParts\n"
+                "                for (audio in emptyList<Any>()) {\n"
+                '                    contentArray.put(JSONObject().put("type", "input_audio"))\n'
+                "                }\n")
+            write_fixture(os.path.join(m_pkg, "openai/A.kt"),
+                          m_snapshot["openai/A.kt"].replace(MEDIA_MERGED, dropped))
+            v_drop, _, _ = scan_root(m_root)
+            check("[batch6] a dead carrier binding / empty serialization loop is C-IMG-1 red",
+                  "C-IMG-1" in media_crit_codes(v_drop), str(v_drop[:2]))
+            write_fixture(os.path.join(m_pkg, "openai/A.kt"), m_snapshot["openai/A.kt"])
+            v_restored, _, _ = scan_root(m_root)
+            check("[batch6] restoring the real loop clears both carrier arms",
+                  not media_crit_codes(v_restored), str(v_restored[:2]))
+
             # (3) wide3-01: a carrier arm added after a BLANK LINE must still be
             #     derived — the old slice ended at the first `\n\n`.
             write_fixture(os.path.join(m_pkg, PAYLOAD_PREDICATE_FILE),
@@ -1122,6 +1502,9 @@ def selftest():
             "missing provider package is a hard failure, not a green skip",
             bool(missing_dir) and scanned_missing == 0,
         )
+        if ok:
+            # stable summary line for CI-side witness (test_scan registration)
+            print("TOOL_RESULT_IMAGE_BRANCH_SELFTEST=PASS (%d arms)" % arms[0])
         return 0 if ok else 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -1176,7 +1559,8 @@ MEDIA_EXCLUSIVE = (
     "                for (part in images) {\n"
     '                    contentArray.put(JSONObject().put("type", "image_url"))\n'
     "                }\n"
-    "                val alt = msg.imageParts\n"
+    "                val alt = msg.imageParts.count { it != null }\n"
+    '                contentArray.put(JSONObject().put("alt", alt))\n'
     "            } else if (msg.audioParts.isNotEmpty()) {\n"
     "                val contentArray = JSONArray()\n"
     "                for (audio in msg.audioParts) {\n"
@@ -1243,7 +1627,10 @@ def media_crit_codes(violations):
     """-> the C-IMG criteria a violation list actually fails."""
     codes = set()
     for v in violations:
-        if "no media serializer under the provider package ever reads" in v:
+        if ("no media serializer under the provider package ever reads" in v
+                or "read and dropped" in v
+                or "reads the carrier only in dead code" in v
+                or "iterates the constant-empty list" in v):
             codes.add("C-IMG-1")
         if "input_audio" in v:
             codes.add("C-IMG-2")
