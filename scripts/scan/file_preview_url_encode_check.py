@@ -61,6 +61,7 @@ Selftest markers: FILE_PREVIEW_URL_ENCODE_SELFTEST=PASS
                  FILE_PREVIEW_URL_ENCODE_SELFTEST_ARMS=<n>
 """
 
+import operator
 import os
 import re
 import sys
@@ -78,7 +79,13 @@ from _kotlin_ast import (                                      # noqa: E402
     strip_parens,
 )
 from _kotlin_lexer import analyse                              # noqa: E402
-from _kotlin_valueflow import call_args, contains_ident, expr_end  # noqa: E402
+from _kotlin_valueflow import (                                # noqa: E402
+    call_args,
+    contains_ident,
+    expr_end,
+    is_single_assignment,
+    path_feasible,
+)
 
 SCREEN_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/sandbox/FilePreviewScreen.kt"
 
@@ -196,6 +203,228 @@ def _first_param(code, name):
     return pm.group(1) if pm else None
 
 
+# --- arm2c: the byte set the non-escaping branch accepts -------------------
+#
+# arm2 asks whether an escape EMISSION exists and is reachable. Witness 04-3
+# (round 3, dual-gate) widened the *passthrough* arm instead —
+# `safe = … || c == '#' || c == '?'` — so the emission stayed intact and
+# reachable, every arm above stayed green, and `a#b.html` went into the URL as a
+# fragment start again: the exact defect this gate exists for, restored without
+# touching anything the gate looked at.
+#
+# The criterion is now the SET: the branch that appends a raw character may only
+# accept RFC 3986 unreserved bytes plus `/` (the semantics the encoder's own KDoc
+# pins). The branch predicate is followed through the `val` that names it and
+# evaluated over the whole byte domain, so a whitelist (`c in 'A'..'Z' || …`) and
+# the equivalent blacklist (`v < 0x21 || v > 0x7E`) are judged by what they LET
+# THROUGH, not by how they are spelled. A predicate this module cannot fold is a
+# violation (fail-closed), never a pass.
+
+ENCODER_SAFE_BYTES = (
+    set(range(ord("A"), ord("Z") + 1))
+    | set(range(ord("a"), ord("z") + 1))
+    | set(range(ord("0"), ord("9") + 1))
+    | {ord(c) for c in "-._~/"}
+)
+_BYTE_DOMAIN = frozenset(range(256))
+_CHAR_ESCAPES = {"n": 10, "t": 9, "r": 13, "b": 8, "f": 12, "0": 0,
+                 "\\": 92, "'": 39, '"': 34}
+_CMP_OPS = ("==", "!=", "<=", ">=", "<", ">")
+_CMP_FLIP = {"==": "==", "!=": "!=", "<": ">", ">": "<", "<=": ">=", ">=": "<="}
+_CMP_FN = {"==": operator.eq, "!=": operator.ne, "<": operator.lt,
+           ">": operator.gt, "<=": operator.le, ">=": operator.ge}
+
+
+def _char_code(text):
+    """Code point of a Kotlin char literal (`'#'`, `'\\u00e9'`), else None."""
+    m = re.fullmatch(r"'(\\u[0-9a-fA-F]{4}|\\.|[^'\\])'", text.strip(), re.S)
+    if not m:
+        return None
+    body = m.group(1)
+    if body.startswith("\\u"):
+        return int(body[2:], 16)
+    if body.startswith("\\"):
+        return _CHAR_ESCAPES.get(body[1])
+    return ord(body)
+
+
+def _int_code(text):
+    """Value of an integer literal (`0x21`, `1_000`), else None."""
+    t = text.strip().replace("_", "")
+    if re.fullmatch(r"0[xX][0-9a-fA-F]+", t):
+        return int(t, 16)
+    if re.fullmatch(r"\d+", t):
+        return int(t)
+    return None
+
+
+def _compare_bytes(op, value):
+    fn = _CMP_FN[op]
+    return {b for b in _BYTE_DOMAIN if fn(b, value)}
+
+
+def _cmp_split(t):
+    """Top-level comparison: (left, op, right), or None."""
+    depth = 0
+    for i, ch in enumerate(t):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and ch in "=!<>":
+            for op in _CMP_OPS:
+                if t.startswith(op, i):
+                    return t[:i], op, t[i + len(op):]
+    return None
+
+
+def _literal_code(text):
+    code = _char_code(text)
+    return code if code is not None else _int_code(text)
+
+
+def _atom_bytes(t, ident):
+    """Bytes accepted by one comparison atom over [ident], or None."""
+    m = re.fullmatch(r"([A-Za-z_]\w*)\s+in\s+(.+?)\s*\.\.\s*(.+)", t, re.S)
+    if m and m.group(1) == ident:
+        lo = _literal_code(m.group(2))
+        hi = _literal_code(m.group(3))
+        if lo is None or hi is None:
+            return None
+        return {b for b in _BYTE_DOMAIN if lo <= b <= hi}
+    parts = _cmp_split(t)
+    if parts is None:
+        return None
+    left, op, right = (p.strip() for p in parts)
+    if left == ident:
+        val = _literal_code(right)
+        return None if val is None else _compare_bytes(op, val)
+    if right == ident:
+        val = _literal_code(left)
+        return None if val is None else _compare_bytes(_CMP_FLIP[op], val)
+    return None
+
+
+def _pred_bytes(t, ident):
+    """Bytes accepted by a predicate over [ident] (`||` / `&&` / `!` / parens)."""
+    t = t.strip()
+    if not t:
+        return None
+    inner = strip_parens(t)
+    if inner != t:
+        return _pred_bytes(inner, ident)
+    if t.startswith("!") and _cmp_split(t) is None:
+        rest = _pred_bytes(t[1:], ident)
+        return None if rest is None else set(_BYTE_DOMAIN) - rest
+    parts = split_top(t, ("||",))
+    if len(parts) > 1:
+        out = set()
+        for a, b in parts:
+            got = _pred_bytes(t[a:b], ident)
+            if got is None:
+                return None
+            out |= got
+        return out
+    parts = split_top(t, ("&&",))
+    if len(parts) > 1:
+        out = set(_BYTE_DOMAIN)
+        for a, b in parts:
+            got = _pred_bytes(t[a:b], ident)
+            if got is None:
+                return None
+            out &= got
+        return out
+    if t == "true":
+        return set(_BYTE_DOMAIN)
+    if t == "false":
+        return set()
+    return _atom_bytes(t, ident)
+
+
+def _resolve_predicate(text, cond, before, depth=0):
+    """`if (safe)` → `val safe = …`, up to six hops. Keeps a leading `!`."""
+    c = strip_parens(cond.strip())
+    if depth > 5:
+        return c
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", c):
+        m = None
+        for cand in re.finditer(r"\b(?:val|var)\s+" + re.escape(c) + r"\s*"
+                                r"(?::[^=\n]+?)?=(?!=)", text[:before]):
+            m = cand
+        if m is None:
+            return c
+        rhs = text[m.end():expr_end(text, m.end())].strip()
+        return _resolve_predicate(text, rhs, m.start(), depth + 1)
+    rest = c
+    neg = ""
+    while rest.startswith("!"):
+        neg += "!"
+        rest = strip_parens(rest[1:])
+    if neg and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", rest):
+        return neg + _resolve_predicate(text, rest, before, depth + 1)
+    return c
+
+
+def _passthrough_problems(view, lit):
+    """Violations for the bytes the non-escaping branch of an `if` lets through.
+
+    `view` is the structure channel (bracket/`if` geometry), `lit` the
+    comment-stripped channel (char literals readable); both are the same length,
+    so a span found in one can be read from the other."""
+    problems = []
+    for cond, t0, t1, e0, e1 in if_blocks(view):
+        then_emit = bool(ESCAPE_EMIT_RE.search(lit[t0:t1]))
+        else_emit = e0 is not None and bool(ESCAPE_EMIT_RE.search(lit[e0:e1]))
+        if then_emit == else_emit:
+            continue
+        if then_emit:
+            if e0 is None:
+                continue            # nothing survives raw: no passthrough branch
+            span, negate = (e0, e1), True
+        else:
+            span, negate = (t0, t1), False
+        if not re.search(r"\bappend\s*\(", view[span[0]:span[1]]):
+            continue                # the branch appends nothing: no byte leaks
+        pred = _resolve_predicate(lit, cond, span[0])
+        if negate:
+            pred = "!(" + pred + ")"
+        pool = re.findall(
+            r"[A-Za-z_]\w*",
+            re.sub(r"'(?:\\.|[^'\\])'|\"(?:\\.|[^\"\\])*\"", "''", pred),
+        )
+        accepted = None
+        for cand in pool:
+            if cand in ("true", "false", "in"):
+                continue
+            got = _pred_bytes(pred, cand)
+            if got is not None:
+                accepted = got
+                break
+        if accepted is None:
+            problems.append(
+                "%s: the branch that appends the raw character is guarded by %r, which this "
+                "criterion cannot read as a byte set — fail-closed: state the safe set as "
+                "character comparisons (`c == '-'`, `c in 'A'..'Z'`), otherwise nobody can "
+                "prove which bytes reach the file:// URL unescaped"
+                % (ENCODER_FN, pred[:80])
+            )
+            continue
+        leaked = sorted(accepted - ENCODER_SAFE_BYTES)
+        if leaked:
+            shown = ", ".join(
+                "U+%04X '%s'" % (b, chr(b)) if 32 <= b < 127 else "U+%04X" % b
+                for b in leaked[:8]
+            )
+            problems.append(
+                "%s: the raw-append branch accepts %d byte(s) outside RFC 3986 unreserved + "
+                "'/' (%s%s) — they reach the file:// URL unescaped, so `a#b.html` is parsed "
+                "as a fragment again while the escape loop stays intact and reachable"
+                % (ENCODER_FN, len(leaked), shown,
+                   " …" if len(leaked) > 8 else "")
+            )
+    return problems
+
+
 def check_encoder(code):
     """arm2 — the single encoder must exist AND really escape, on every path."""
     problems = []
@@ -267,6 +496,10 @@ def check_encoder(code):
             "%s returns a value that carries no escaping (fail-closed: no escape "
             "carrier found in any return expression)" % ENCODER_FN
         )
+    # (d) dual-gate 04-3 — the symmetric half: what the passthrough branch lets
+    #     through. A perfect, reachable emission is useless when `safe` admits a
+    #     URI delimiter (`#` / `?`), because that byte never reaches the loop.
+    problems.extend(_passthrough_problems(view, body))
     return problems
 
 
@@ -364,6 +597,24 @@ def check_file_url_for(code):
     return problems
 
 
+def _enclosing_fn(view, pos):
+    """Innermost `fun … { … }` region around [pos] in a code view, or None."""
+    best = None
+    for m in re.finditer(r"\bfun\s+(?:<[^>]*>\s*)?[A-Za-z_]\w*\s*\(", view):
+        close = match_bracket(view, m.end() - 1)
+        if close < 0:
+            continue
+        brace = view.find("{", close)
+        if brace < 0:
+            continue
+        end = match_bracket(view, brace)
+        if end < 0 or not (brace < pos < end):
+            continue
+        if best is None or brace > best[0]:
+            best = (brace, end)
+    return best
+
+
 def check_load_sites(code):
     """arm3b — every load site must CONSUME the encoder's value."""
     problems = []
@@ -374,11 +625,43 @@ def check_load_sites(code):
             "expected 2 load sites through %s(item.file) (preview + print), got %d"
             % (BUILDER_FN, len(loads))
         )
+    # (a) dual-gate 04-1 — the site must be REACHABLE. Counting the call and
+    #     reading its argument says nothing about whether it ever runs:
+    #     `if (preRenderedHtml == null && false) { webView.loadUrl(fileUrlFor(…)) }`
+    #     keeps the count at 2, keeps the argument clean, and loads nothing —
+    #     every HTML print rendered a blank document.
+    for m in loads:
+        if not path_feasible(view, m.start()):
+            problems.append(
+                "the print/preview load site at line %d sits in a branch that can never "
+                "run (its enclosing `if`/`when` folds to a constant) — the encoded URL is "
+                "computed and never loaded"
+                % (code.count("\n", 0, m.start()) + 1)
+            )
+    for lm in LOAD_CALL_RE.finditer(view):
+        if not path_feasible(view, lm.start()):
+            problems.append(
+                "loadUrl(…) at line %d is unreachable (its enclosing condition folds to a "
+                "constant) — the URL is assembled and thrown away"
+                % (code.count("\n", 0, lm.start()) + 1)
+            )
     # names bound to the encoder's value (`val targetUrl = fileUrlFor(item.file)`)
     bound = {}
     for m in BINDING_RE.finditer(view):
         bound[m.group(1)] = m.start()
     for name, pos in bound.items():
+        # (b) dual-gate 04-2 — the binding must BE the value at the load site.
+        #     `var targetUrl = fileUrlFor(item.file)` followed by
+        #     `targetUrl = targetUrl.replace("%23", "#")` keeps name, spelling
+        #     and consumption intact while handing the raw path to loadUrl.
+        region = _enclosing_fn(view, pos)
+        scope = view[region[0]:region[1]] if region else view
+        if not is_single_assignment(scope, name):
+            problems.append(
+                "`%s` is bound to %s(item.file) and then reassigned or re-declared — the "
+                "value the load site receives is whatever the later assignment put there, "
+                "not necessarily the encoded URL" % (name, BUILDER_FN)
+            )
         used = False
         for lm in LOAD_CALL_RE.finditer(view):
             for a, b in call_args(view, lm.end() - 1):
@@ -455,10 +738,13 @@ ENCODER_BLOCK = """internal fun encodeFileUrlPath(path: String): String {
     val sb = StringBuilder(path.length)
     for (b in path.toByteArray(Charsets.UTF_8)) {
         val v = b.toInt() and 0xFF
-        if (v < 0x21 || v > 0x7E) {
-            sb.append('%').append(Integer.toHexString(v shr 4)).append(Integer.toHexString(v and 0x0F))
+        val c = v.toChar()
+        val safe = c in 'A'..'Z' || c in 'a'..'z' || c in '0'..'9' ||
+            c == '-' || c == '.' || c == '_' || c == '~' || c == '/'
+        if (safe) {
+            sb.append(c)
         } else {
-            sb.append(v.toChar())
+            sb.append('%').append(Integer.toHexString(v shr 4)).append(Integer.toHexString(v and 0x0F))
         }
     }
     return sb.toString()
@@ -525,17 +811,9 @@ VIOLATION_ENCODER_EARLY_CARRIER = COMPLIANT.replace(
 
 # 08-2: `safe` is constant-true, so the `%XX` branch is unreachable dead code.
 VIOLATION_ENCODER_SAFE_CONST = COMPLIANT.replace(
-    """        if (v < 0x21 || v > 0x7E) {
-            sb.append('%').append(Integer.toHexString(v shr 4)).append(Integer.toHexString(v and 0x0F))
-        } else {
-            sb.append(v.toChar())
-        }""",
-    """        val safe = true || v < 0x21
-        if (safe) {
-            sb.append(v.toChar())
-        } else {
-            sb.append('%').append(Integer.toHexString(v shr 4)).append(Integer.toHexString(v and 0x0F))
-        }""",
+    """        val safe = c in 'A'..'Z' || c in 'a'..'z' || c in '0'..'9' ||
+            c == '-' || c == '.' || c == '_' || c == '~' || c == '/'""",
+    """        val safe = true || c in 'A'..'Z'""",
 )
 
 # 08-3: the encoded value is rewritten one chain call later (not a scope fn).
@@ -568,6 +846,50 @@ VIOLATION_CHAR_LITERAL_SWALLOW = COMPLIANT.replace(
         val q = '"' // " fileUrlFor(item.file)
         webView.loadUrl("file:" + "//" + item.file.path)
     }""",
+)
+
+
+# --- round 3 (R3-t02, dual-gate bypass): each of these passed this gate ---
+
+# 04-1: the print load site sits behind a constant-false guard, so the URL is
+# computed (count intact, argument clean) and never loaded.
+VIOLATION_LOAD_SITE_DEAD_BRANCH = COMPLIANT.replace(
+    """    private fun printFile(context: Context, item: Item) {
+        webView.loadUrl(fileUrlFor(item.file))
+    }""",
+    """    private fun printFile(context: Context, item: Item, preRenderedHtml: String? = null) {
+        if (preRenderedHtml == null && false) {
+            webView.loadUrl(fileUrlFor(item.file))
+        } else {
+            webView.loadDataWithBaseURL(null, preRenderedHtml ?: "", "text/html", "utf-8", null)
+        }
+    }""",
+)
+
+# 04-2: the binding is `var` and is overwritten with the raw path one line later.
+VIOLATION_LOAD_SITE_REBOUND = COMPLIANT.replace(
+    """        val targetUrl = fileUrlFor(item.file)
+        post { loadUrl(targetUrl) }""",
+    """        var targetUrl = fileUrlFor(item.file)
+        targetUrl = targetUrl.replace("%23", "#")
+        post { loadUrl(targetUrl) }""",
+)
+
+# 04-3: the `safe` set is widened with two URI delimiters — the escape loop stays
+# intact and reachable, so only the byte set can tell.
+VIOLATION_ENCODER_SAFE_WIDENED = COMPLIANT.replace(
+    "            c == '-' || c == '.' || c == '_' || c == '~' || c == '/'",
+    "            c == '-' || c == '.' || c == '_' || c == '~' || c == '/' || c == '#' || c == '?'",
+)
+
+# The same whitelist written with range comparisons must stay green: the
+# criterion judges the byte set, not the spelling.
+COMPLIANT_ENCODER_RANGE_FORM = COMPLIANT.replace(
+    """        val safe = c in 'A'..'Z' || c in 'a'..'z' || c in '0'..'9' ||
+            c == '-' || c == '.' || c == '_' || c == '~' || c == '/'""",
+    """        val safe = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' ||
+            c == '~' || c == '/'""",
 )
 
 
@@ -617,6 +939,16 @@ def selftest():
          "computed but never handed to loadUrl"),
         ("violation-char-literal-swallows-comment", VIOLATION_CHAR_LITERAL_SWALLOW, False,
          "bypasses the encoder"),
+        # round 3 (R3-t02)
+        ("compliant encoder written with range comparisons", COMPLIANT_ENCODER_RANGE_FORM,
+         True, None),
+        ("violation-load-site-dead-branch", VIOLATION_LOAD_SITE_DEAD_BRANCH, False,
+         "sits in a branch that can never run"),
+        ("violation-load-site-rebound", VIOLATION_LOAD_SITE_REBOUND, False,
+         "is bound to fileUrlFor(item.file) and then reassigned"),
+        ("violation-encoder-safe-widened-with-uri-delimiters",
+         VIOLATION_ENCODER_SAFE_WIDENED, False,
+         "outside RFC 3986 unreserved"),
     ]
     ok = True
     for name, content, expect_ok, msg in arms:

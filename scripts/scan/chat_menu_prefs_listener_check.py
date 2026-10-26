@@ -41,6 +41,21 @@ leave them out):
   9. anchors missing (store member / effect / listener block) -> red, never a
      silent skip.
 
+[r3-t05 / dual-gate + symmetric seams] Three properties that live BETWEEN
+this gate's arms and its neighbours' — each one passes every spelling check
+while the user-visible effect is gone:
+  10. arm2 -- the listener's re-read must carry the SAME projection as the
+      first-composition read (`resolveOrder(...).filter { defaultMenuVisible }`):
+      a bare `resolveOrder(prefs)` reassigns a list a fresh open would never
+      render, so two footer-only entries turn into dead switches (witness #99).
+  11. arm7 -- after `SoulStore.load`, the editor publications must not sit
+      behind `if (!loaded)`: on a re-run that latch is already true, the whole
+      block is dead code and the next Save rolls the external write back (#98).
+  12. arm8 -- the listener's `AppLogger.isEnabled(…)` result must BECOME the
+      Switch's State (derived from the `remember { mutableStateOf(...) }`
+      initialiser), not just be called: a discarded read leaves the Switch on
+      the value captured at open time (#97).
+
 Judgements are made on comment-stripped code (comment anchors rot); raw text
 is also accepted for arm 1 so a string-literal form is not silently missed.
 """
@@ -53,6 +68,7 @@ from _kotlin_lexer import KotlinLexError, mask_code, mask_comments
 from _kotlin_ast import (
     const_bool,
     const_value,
+    enclosing_conditions,
     if_blocks,
     match_bracket,
     split_top,
@@ -213,6 +229,138 @@ def guarded_reads(body: str) -> bool:
     return False
 
 
+def _state_decls(code: str) -> set:
+    """文件里由 `remember { mutableStateOf(...) }` 托管的 Compose 状态名。
+
+    缝判据要判「重读的结果真的落到屏幕上那个 State」，所以目标名必须从树里
+    派生（`var <name> by remember`），不能写死 —— 写死一个名字，改名/换屏
+    就静默失明。
+    """
+    return set(re.findall(r"\bvar\s+([A-Za-z_]\w*)\s+by\s+remember\s*\{", code))
+
+
+def _init_read_expr(code: str, target: str):
+    """`var <target> by remember { mutableStateOf( <expr> ) }` 的初始表达式。
+
+    这是「首次渲染读什么」的唯一权威副本；listener 的重读必须与它对称。
+    """
+    m = re.search(r"\bvar\s+" + re.escape(target) +
+                  r"\s+by\s+remember\s*\{\s*mutableStateOf\s*\(", code)
+    if not m:
+        return None
+    close = match_bracket(code, m.end() - 1)
+    if close < 0:
+        return None
+    return code[m.end():close]
+
+
+def _chain_suffix(expr: str, read: str):
+    """`read(…)` 调用闭合之后的后缀链（`.filter { … }` 之类），空白归一。
+
+    返回 None 表示这个表达式里根本没有 `read(` 调用。
+    """
+    pos = expr.find(read)
+    if pos < 0:
+        return None
+    open_paren = expr.find("(", pos + len(read) - 1)
+    if open_paren < 0:
+        return None
+    close = match_bracket(expr, open_paren)
+    if close < 0:
+        return None
+    return re.sub(r"[,\s]+$", "", re.sub(r"\s+", "", expr[close + 1:]))
+
+
+def _suffix_through(val: str, read: str, locals_map):
+    """赋值右值相对 `read` 的后缀：直接调用，或经一跳局部绑定拼接。
+
+    `val r = resolveOrder(prefs)` + `menuOrder = r.filter { … }` 与
+    `menuOrder = resolveOrder(prefs).filter { … }` 是同一件事，必须同判。
+    """
+    direct = _chain_suffix(val, read)
+    if direct is not None:
+        return direct
+    for name, rhs in locals_map.items():
+        if not contains_ident(val, name):
+            continue
+        inner = _chain_suffix(rhs, read)
+        if inner is None:
+            continue
+        idx = val.find(name)
+        tail = re.sub(r"\s+", "", val[idx + len(name):])
+        return inner + tail
+    return None
+
+
+def projection_mismatch(body: str, code: str):
+    """listener 的重读是否丢掉了首次渲染的投影（`.filter { … }`）。
+
+    W99 的缝：arm2 只问「`resolveOrder(prefs)` 有没有被赋给 `menuOrder`」，
+    于是 `menuOrder = ChatMenuPrefs.resolveOrder(prefs)`（无 `defaultMenuVisible`
+    过滤）全绿 —— 一次外部写入后列表里冒出两个底栏专属的幽灵项。判据 =
+    把初始 `remember` 里的投影链当权威副本，listener 的右值必须带上同一条链。
+    """
+    out = []
+    locals_map = _locals_map(body)
+    for read in ORDER_READS:
+        target = ORDER_TARGETS[read]
+        init = _init_read_expr(code, target)
+        if init is None:
+            continue
+        want = _chain_suffix(init, read)
+        if not want:
+            continue          # 初始读取就没有投影 → 无对称约束
+        seen = []
+        for m in re.finditer(re.escape(read), body):
+            stmt = body[_stmt_start(body, m.start()):expr_end(body, m.start())]
+            d = re.search(r"(?<![\w.])" + re.escape(target) + r"\s*=(?!=)", stmt)
+            if not d:
+                continue
+            seen.append(_suffix_through(stmt[d.end():], read, locals_map))
+        if seen and all(s != want for s in seen):
+            out.append((read, target, want, seen[0]))
+    return out
+
+
+def _truth_under(cond: str, env):
+    """把已知取值代进条件再折叠：None = 未知，False = 该分支走不到。"""
+    c = cond
+    for name, val in env.items():
+        c = re.sub(r"(?<![\w`])" + re.escape(name) + r"(?![\w`])",
+                   "true" if val else "false", c)
+    return const_bool(c)
+
+
+def blocked_publications(code: str, effect_body: str, load_at: int):
+    """reload 之后的状态赋值，是否被「已经 loaded 了」的闩锁挡在门外。
+
+    W98 的缝：arm7 只查 `SoulStore.load` 之前有没有早退，于是
+    `load(…); if (!loaded) { name = …; body = … }` 全绿 —— 首次打开正常，
+    外部写入触发 effect 重跑时整块赋值变成死代码，输入框永远停在旧值，
+    下一次 Save 把外部更新覆盖回去。判据 = 把闩锁代入已知值（重跑时已为
+    true）后，包裹赋值的那条条件折叠为假。
+    """
+    states = _state_decls(code)
+    if not states:
+        return []
+    name_re = "|".join(sorted((re.escape(s) for s in states), key=len, reverse=True))
+    out = []
+    for latch in sorted(n for n in states
+                        if re.search(r"(?<![\w.])" + re.escape(n) + r"\s*=\s*true\b",
+                                     effect_body)):
+        env = {latch: True}
+        for m in re.finditer(r"(?<![\w.])(" + name_re + r")\s*=(?!=)", effect_body):
+            name = m.group(1)
+            if name == latch or m.start() < load_at:
+                continue
+            conds = [c for _k, c in enclosing_conditions(effect_body, m.start())]
+            if any(_truth_under(c, env) is False for c in conds):
+                out.append((name, latch,
+                            next(c for c in conds if _truth_under(c, env) is False)))
+                break
+    return out
+
+
 def prune_bool(expr: str) -> str:
     """把恒假分支从布尔表达式里剪掉：`A || (false && (B || C))` → `A`。
 
@@ -249,6 +397,18 @@ def prune_bool(expr: str) -> str:
     if b is False:
         return "false"
     return e
+
+
+def _enabled_state(code: str):
+    """LogManagementScreen 里由初始 `AppLogger.isEnabled(…)` 托管的开关状态名。"""
+    for m in re.finditer(r"\bvar\s+([A-Za-z_]\w*)\s+by\s+remember\s*\{\s*mutableStateOf\s*\(",
+                         code):
+        close = match_bracket(code, m.end() - 1)
+        if close < 0:
+            continue
+        if "AppLogger.isEnabled(" in code[m.end():close]:
+            return m.group(1)
+    return None
 
 
 def listener_predicate(body: str, lit_body: str):
@@ -447,8 +607,23 @@ def check_stale_write_arms(soul_store_text: str, soul_screen_text: str,
                         "stays invisible to the editor"
                         % body[early[0].start():early[0].start() + 40].replace("\n", " ")
                     )
+                # 对称轴（W98）：早退之外还有一条更安静的路 —— 读完文件后把状态
+                # 发布整块塞进 `if (!loaded)`。重跑时 loaded 已为 true，赋值全成
+                # 死代码：界面不刷新，下一次 Save 还把外部更新覆盖回去。
+                for name, latch, cond in blocked_publications(soul_clean, body, load_at):
+                    problems.append(
+                        "arm7: the reloaded editor state `%s` is published behind `%s` -- "
+                        "on a re-run `%s` is already true, so that publication block is dead "
+                        "code and external writes never reach the editor"
+                        % (name, cond.strip()[:50], latch)
+                    )
 
     # ---- arm 8: the Logs screen listener ---------------------------------
+    log_clean, _log_raw = views(log_screen_text)
+    if log_clean is None:
+        problems.append("arm8: KotlinLexError while reading LogManagementScreen.kt "
+                        "(fail-closed)")
+        return problems
     body, raw_body = listener_body(log_screen_text)
     if not body:
         problems.append(
@@ -474,6 +649,27 @@ def check_stale_write_arms(soul_store_text: str, soul_screen_text: str,
                 'arm8: the logs listener re-spells the prefs name literal '
                 '"logging_prefs" instead of AppLogger.PREF_NAME'
             )
+        # dataflow（缝 X/Y/Z 之间的空白）：调用到了 ≠ 开关会变。重读的返回值
+        # 必须成为那个 State 的新值 —— `AppLogger.isEnabled(context)` 单独立在
+        # 回调里，子串检查全过，Switch 却停在旧状态（W97）。
+        switch_state = _enabled_state(log_clean)
+        if switch_state is None:
+            problems.append(
+                "arm8: no `var X by remember { mutableStateOf(AppLogger.isEnabled(…)) }` "
+                "declaration found in LogManagementScreen -- re-point this guard so it "
+                "knows which State the listener has to publish into"
+            )
+        elif not re.search(r"AppLogger\s*\.\s*isEnabled\s*\(", body):
+            problems.append(
+                "arm8: the logs listener never re-reads AppLogger.isEnabled(…) -- an "
+                "external `minis-config set logs.enabled …` can never move the Switch"
+            )
+        elif not result_consumed(body, "isEnabled(", switch_state):
+            problems.append(
+                "arm8: the logs listener calls AppLogger.isEnabled(…) but its result does "
+                "not become `" + switch_state + "` -- the callback fires, the Switch keeps "
+                "rendering the value captured at open time (called != consumed)"
+            )
 
     return problems
 
@@ -489,6 +685,10 @@ def check_arms(screen_text: str, prefs_text: str,
     all three (and main() fails closed when a file is missing).
     """
     problems = []
+    screen_code, _screen_raw = views(screen_text)
+    if screen_code is None:
+        problems.append("KotlinLexError while reading " + SCREEN_REL + " (fail-closed)")
+        screen_code = ""
     body, raw_body = listener_body(screen_text)
     if not body:
         problems.append("could not locate the DisposableEffect listener block in "
@@ -545,6 +745,18 @@ def check_arms(screen_text: str, prefs_text: str,
             + ") -- the calls fire, the States stay stale (called != consumed)"
         )
 
+    # arm2b: ... AND the re-read is the same projection as the first
+    # composition's. `menuOrder = resolveOrder(prefs)` without the
+    # `defaultMenuVisible` filter reassigns a list that a fresh open would
+    # never render: two footer-only entries turn into dead switches (W99).
+    for read, target, want, got in projection_mismatch(body, screen_code):
+        problems.append(
+            "arm2: the listener re-read of " + read.strip("(") + " for `" + target
+            + "` drops the first-composition projection (initial `" + want[:60]
+            + "`, listener `" + (got if got is not None else "<no read>")[:60]
+            + "`) -- one external write re-surfaces entries a fresh open filters out"
+        )
+
     # arm 3: re-reads inside an EFFECTIVE draggingEntry == null guard
     if not guarded_reads(body):
         problems.append(
@@ -584,6 +796,24 @@ def run_selftest() -> bool:
     COMPLIANT_SCREEN = '''
 @Composable
 fun Screen() {
+    var menuOrder by remember {
+        mutableStateOf(
+            ChatMenuPrefs.resolveOrder(prefs)
+                .filter { ChatActionCatalog.spec(it)?.defaultMenuVisible != false },
+        )
+    }
+    var footerOrder by remember {
+        mutableStateOf(
+            ChatMenuPrefs.settingsPinOrder(prefs),
+        )
+    }
+    var attachOrder by remember {
+        mutableStateOf(
+            ChatMenuPrefs.resolveAttachOrder(prefs),
+        )
+    }
+    var draggingEntry by remember { mutableStateOf<String?>(null) }
+    var prefsTick by remember { mutableStateOf(0) }
     DisposableEffect(context) {
         val prefs = context.applicationContext
             .getSharedPreferences(P, MODE_PRIVATE)
@@ -682,8 +912,12 @@ object SoulStore {
 fun SoulSettingsScreen(onBack: () -> Unit) {
     val writeVersion by SoulStore.writeVersion.collectAsState()
     var loaded by remember { mutableStateOf(false) }
+    var name by remember { mutableStateOf("") }
+    var body by remember { mutableStateOf("") }
     LaunchedEffect(writeVersion) {
         val parsed = SoulStore.load(context) ?: SoulFile.defaults()
+        name = parsed.metadata.name
+        body = parsed.body
         loaded = true
     }
 }
@@ -829,8 +1063,8 @@ fun LogManagementScreen(context: Context) {
         "        val _q1 = '\"'; if (loaded) return@LaunchedEffect; val _q2 = '\"'\n")
 
     def arm_expect(name, want_red_prefixes, s_store, s_screen, l_screen,
-                   screen=COMPLIANT_SCREEN, prefs=COMPLIANT_PREFS):
-        problems, _ = check_arms(screen, prefs, s_store, s_screen, l_screen)
+                   screen=COMPLIANT_SCREEN, prefs=COMPLIANT_PREFS, log=None):
+        problems, _ = check_arms(screen, prefs, s_store, s_screen, log or l_screen)
         reds = sorted(p.split(":")[0] for p in problems)
         ok_case = True
         if want_red_prefixes is None:
@@ -863,6 +1097,52 @@ fun LogManagementScreen(context: Context) {
     ok &= arm_expect("06-5 char literal hides the early return", ["arm7"],
                      COMPLIANT_STORE, T5_SCREEN, COMPLIANT_LOG_SCREEN)
 
+    # ── r3-t05：三条「缝上的见证」（dual-gate #97 / 对称轴 #98 #99） ────────
+    # 每条都是判据只能看见自己那一半时的空白：调用到了却没赋值、读过文件却把
+    # 发布挡在闩锁后面、重读了却没带首次渲染的投影。
+    R3_LOG_DISCARDED = COMPLIANT_LOG_SCREEN.replace(
+        "                    loggingEnabled = AppLogger.isEnabled(context)\n",
+        "                    AppLogger.isEnabled(context)\n")
+    R3_LOG_ONE_HOP = COMPLIANT_LOG_SCREEN.replace(
+        "                    loggingEnabled = AppLogger.isEnabled(context)\n",
+        "                    val nowEnabled = AppLogger.isEnabled(context)\n"
+        "                    loggingEnabled = nowEnabled\n")
+    R3_SOUL_GUARDED = COMPLIANT_SOUL_SCREEN.replace(
+        "        name = parsed.metadata.name\n"
+        "        body = parsed.body\n"
+        "        loaded = true\n",
+        "        if (!loaded) {\n"
+        "            name = parsed.metadata.name\n"
+        "            body = parsed.body\n"
+        "            loaded = true\n"
+        "        }\n")
+    R3_MENU_NO_FILTER = COMPLIANT_SCREEN.replace(
+        "                        menuOrder = ChatMenuPrefs.resolveOrder(prefs)\n"
+        "                            .filter { ChatActionCatalog.spec(it)?.defaultMenuVisible != false }\n",
+        "                        menuOrder = ChatMenuPrefs.resolveOrder(prefs)\n")
+    R3_MENU_HOISTED = COMPLIANT_SCREEN.replace(
+        "                        menuOrder = ChatMenuPrefs.resolveOrder(prefs)\n"
+        "                            .filter { ChatActionCatalog.spec(it)?.defaultMenuVisible != false }\n",
+        "                        val resolvedOrder = ChatMenuPrefs.resolveOrder(prefs)\n"
+        "                        menuOrder = resolvedOrder.filter {\n"
+        "                            ChatActionCatalog.spec(it)?.defaultMenuVisible != false\n"
+        "                        }\n")
+
+    ok &= arm_expect("r3-97 listener re-reads isEnabled but discards it", ["arm8"],
+                     COMPLIANT_STORE, COMPLIANT_SOUL_SCREEN, COMPLIANT_LOG_SCREEN,
+                     log=R3_LOG_DISCARDED)
+    ok &= arm_expect("r3-97 control one-hop binding still publishes", None,
+                     COMPLIANT_STORE, COMPLIANT_SOUL_SCREEN, COMPLIANT_LOG_SCREEN,
+                     log=R3_LOG_ONE_HOP)
+    ok &= arm_expect("r3-98 editor publications gated behind `if (!loaded)`", ["arm7"],
+                     COMPLIANT_STORE, R3_SOUL_GUARDED, COMPLIANT_LOG_SCREEN)
+    ok &= arm_expect("r3-99 listener re-read drops the first-composition filter",
+                     ["arm2"], COMPLIANT_STORE, COMPLIANT_SOUL_SCREEN,
+                     COMPLIANT_LOG_SCREEN, screen=R3_MENU_NO_FILTER)
+    ok &= arm_expect("r3-99 control filter hoisted to a local keeps symmetry", None,
+                     COMPLIANT_STORE, COMPLIANT_SOUL_SCREEN, COMPLIANT_LOG_SCREEN,
+                     screen=R3_MENU_HOISTED)
+
     # 对照臂：等价且合法的写法必须仍然 GREEN
     ok &= arm_expect("control identity `.let { it }` stays consumed", None,
                      COMPLIANT_STORE, COMPLIANT_SOUL_SCREEN, COMPLIANT_LOG_SCREEN,
@@ -891,7 +1171,7 @@ def main() -> int:
             print("FAIL: selftest")
             return 1
         print(MARKER)
-        print("CHAT_MENU_PREFS_LISTENER_SELFTEST_ARMS=26")
+        print("CHAT_MENU_PREFS_LISTENER_SELFTEST_ARMS=31")
         return 0
 
     screen_path = ROOT / SCREEN_REL

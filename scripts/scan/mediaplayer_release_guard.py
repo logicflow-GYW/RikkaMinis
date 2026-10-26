@@ -183,6 +183,185 @@ def inside_any(spans, idx: int) -> bool:
     return any(s < idx < e for s, e in spans)
 
 
+# ── [R3-t04] 第三轮（dual-gate bypass）缝判据的公用原语 ──────────────────────
+# 三条见证都是「中间那一步没人判」：
+#   11-1 FileProvider uri 解析出来了，但没挂到 Intent 上（分享面板照开、
+#        既有 flag/判定/反馈判据全绿，接收方拿到空 ACTION_SEND）。
+#   11-2 rememberMdMediaFile 解析出来的 file 被丢掉，Coil 拿裸 url 去取
+#        （缝还挂着、request 还 build，只有数据源换了）。
+#   11-3 pause() 把 state 设成它刚要求过的那个成员（幂等空转）：暂停后 UI
+#        仍显示播放中、resume 拒绝、播放器保持暂停。
+def _enclosing_fun_span(text: str, idx: int):
+    """(start, end) of the innermost `fun …` block containing idx, or None."""
+    best = None
+    for m in re.finditer(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?([A-Za-z_]\w*)\s*\(", text):
+        if m.start() > idx:
+            break
+        rp = matching_paren(text, m.end() - 1)
+        if rp < 0:
+            continue
+        brace = text.find("{", rp + 1)
+        if brace < 0:
+            continue
+        s, e = brace_span(text, brace)
+        if s <= idx < e:
+            best = (s, e)
+    return best
+
+
+def _bound_name(body: str, idx: int):
+    """`val X = <含 idx 的表达式>` 里的 X；内联形态返回 None。
+
+    只要求「最后一条声明与 idx 之间的换行都是续行」——`val uri = try {` 这种
+    值表达式带块、调用在块内的形态也要认得出来。
+    """
+    decls = [(m.start(), m.group(1)) for m in
+             re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)", body)
+             if m.start() < idx]
+    if not decls:
+        return None
+    start, name = decls[-1]
+    seg = body[start:idx]
+    newlines = [m.start() for m in re.finditer(r"\n", seg)]
+    for p in newlines[:-1]:
+        if not re.search(r"(=|->|\btry|\belse|\bdo|\(|,|\{|\+|-|\*|/|%|\?|:|&|\|)\s*$",
+                         seg[:p].rstrip()):
+            return None
+    return name
+
+
+def _in_call_args(text: str, pos: int) -> bool:
+    depth = 0
+    i = pos - 1
+    while i >= 0:
+        ch = text[i]
+        if ch in ")]":
+            depth += 1
+        elif ch in "([":
+            if depth == 0:
+                return ch == "("
+            depth -= 1
+        elif depth == 0 and ch in ";}":
+            return False
+        elif depth == 0 and ch == "\n":
+            # 续行（行尾是 `,` / `(` / 运算符）才算同一条语句 —— 否则上一行的
+            # 括号会被误当成这一行的实参表。
+            j = i - 1
+            while j >= 0 and text[j] in " \t\r":
+                j -= 1
+            if j < 0 or text[j] not in ",(+-*/%?:&|=<>!":
+                return False
+        i -= 1
+    return False
+
+
+def _handed_on(body: str, name: str) -> bool:
+    """这个值有没有离开本函数：作为调用实参 / 被 return / 当尾值输出。"""
+    n = re.escape(name)
+    decl = re.search(r"\b(?:val|var)\s+%s\s*(?::[^=\n]+)?=(?!=)" % n, body)
+    start = decl.end() if decl else 0
+    for m in re.finditer(r"(?<![\w.])%s\b" % n, body[start:]):
+        if _in_call_args(body, start + m.start()):
+            return True
+    return bool(re.search(r"\breturn\s+%s\b" % n, body)
+                or re.search(r"(?m)^\s*%s\s*$" % n, body))
+
+
+def check_share_handoff(clean):
+    """Arm 11 [R3-t04 11-1]: 解析出来的 FileProvider uri 必须真的交出去。
+
+    `getUriForFile` 成功只说明 uri 能构造；分享面板里另一个进程能否拿到文件，
+    取决于它有没有被放进 EXTRA_STREAM / clipData / data，或者被交给启动器。
+    把 putExtra 删掉之后，arm5/arm6 的每一条判据（onRelease / onDismiss /
+    ExternalIntent.share 的失败反馈）都还是绿的。
+    """
+    problems = []
+    if clean is None:
+        return problems
+    sites = list(re.finditer(r"(?:[\w.]*\.)?FileProvider\s*\.\s*getUriForFile\s*\(", clean))
+    if not sites:
+        return ["arm11: found 0 `FileProvider.getUriForFile(` sites in "
+                "InlineMediaPlayer.kt -- the share hand-off moved, fail-closed (R3-t04)"]
+    for m in sites:
+        span = _enclosing_fun_span(clean, m.start())
+        body = clean[span[0]:span[1]] if span else clean
+        rel_idx = m.start() - (span[0] if span else 0)
+        name = _bound_name(body, rel_idx)
+        if name is None:
+            continue                  # 内联形态：解析即挂载，由构造保证
+        if _handed_on(body, name):
+            continue
+        problems.append(
+            "arm11: the FileProvider uri `%s` (offset %d) is resolved but never handed "
+            "on -- no EXTRA_STREAM / clipData / setData and no launcher argument, so the "
+            "share sheet opens with an empty ACTION_SEND while every flag/verdict guard "
+            "around it still reports success (R3-t04)" % (name, m.start()))
+    return problems
+
+
+def check_player_state_machine(clean: str):
+    """Arm 9 [R3-t04 11-3]: 播放状态机必须是**真的转换**，不是幂等空转。
+
+    三条判据全部从树里派生（成员名不写死）：
+      S1 先查状态再改状态的命令，改出来的成员不能等于它刚要求的成员 ——
+         `pause` 里 `state != PLAYING → state = PLAYING` 是空操作：UI 仍显示
+         播放中、`resume` 拒绝（它要求 PAUSED）、播放器保持暂停。
+      S2 `pause` 落到的成员必须是 `resume` 要求的成员，反之亦然（互为逆）。
+      S3 上报的 `state = PlayerState.X.name` 必须是真正赋给 session 的那个成员
+         （否则 CLI 的输出与真实状态不一致）。
+    """
+    problems = []
+    em = re.search(r"enum\s+class\s+PlayerState\s*\{([^}]*)\}", clean)
+    members = set(re.findall(r"[A-Za-z_]\w*", em.group(1))) if em else set()
+    if not members:
+        return ["arm9: cannot derive the PlayerState members -- the state-machine "
+                "criterion refuses to judge, fail-closed (R3-t04)"]
+    cmds = {}
+    for name in ("pause", "resume"):
+        body = function_body(clean, r"\bfun\s+%s\s*\(" % name)
+        if not body:
+            return ["arm9: `fun %s(...)` is gone -- the state-machine criterion lost its "
+                    "anchor, fail-closed (R3-t04)" % name]
+        guard = re.search(r"session\s*\.\s*state\s*!=\s*PlayerState\s*\.\s*([A-Za-z_]\w*)",
+                          body)
+        assigned = re.findall(
+            r"session\s*\.\s*state\s*=(?!=)\s*PlayerState\s*\.\s*([A-Za-z_]\w*)", body)
+        reported = re.findall(
+            r"\bstate\s*=\s*PlayerState\s*\.\s*([A-Za-z_]\w*)\s*\.\s*name", body)
+        for ref in ([guard.group(1)] if guard else []) + assigned + reported:
+            if ref not in members:
+                return ["arm9: %s() references PlayerState.%s, which the enum does not "
+                        "declare -- fail-closed (R3-t04)" % (name, ref)]
+        if not guard or not assigned:
+            return ["arm9: %s() no longer both guards on and assigns session.state -- "
+                    "the transition cannot be judged, fail-closed (R3-t04)" % name]
+        cmds[name] = dict(guard=guard.group(1), assigned=assigned, reported=reported)
+
+    for name, rec in cmds.items():
+        if rec["assigned"][-1] == rec["guard"]:
+            problems.append(
+                "arm9: %s() requires state == %s and then assigns state = %s -- an "
+                "idempotent no-op instead of a transition, so the reported state never "
+                "changes (pause after pause, resume refuses, playback stays put) "
+                "(R3-t04)" % (name, rec["guard"], rec["assigned"][-1]))
+        if rec["reported"] and rec["reported"][-1] != rec["assigned"][-1]:
+            problems.append(
+                "arm9: %s() assigns state = %s but reports state = %s -- the CLI output "
+                "and the session disagree (R3-t04)"
+                % (name, rec["assigned"][-1], rec["reported"][-1]))
+    if cmds["pause"]["assigned"][-1] != cmds["resume"]["guard"]:
+        problems.append(
+            "arm9: pause() lands on %s while resume() requires %s -- the pair is not "
+            "mutually inverse, so one of the two always refuses (R3-t04)"
+            % (cmds["pause"]["assigned"][-1], cmds["resume"]["guard"]))
+    if cmds["resume"]["assigned"][-1] != cmds["pause"]["guard"]:
+        problems.append(
+            "arm9: resume() lands on %s while pause() requires %s -- the pair is not "
+            "mutually inverse (R3-t04)"
+            % (cmds["resume"]["assigned"][-1], cmds["pause"]["guard"]))
+    return problems
+
+
 def check_arms(clean: str):
     """Four arms on the comment-stripped file text. Returns problem list."""
     problems = []
@@ -923,6 +1102,7 @@ object MediaPlayerManager {
     ok = run_inline_player_guards_selftest() and ok
     ok = run_fullscreen_video_window_selftest() and ok
     ok = run_media_host_keys_selftest() and ok
+    ok = run_seam_selftest() and ok
     return ok
 
 
@@ -1631,8 +1811,180 @@ def check_media_host_keys(sources):
                 "(minis:// fetcher, mtime keyer), and its executor is never "
                 "shut down; resolve the process singleton through "
                 "Coil.imageLoader( instead" % name)
+
+    # 8g [R3-t04 11-2]: 解析出来的 file 必须真的进 ImageRequest 的 .data(…) ——
+    # 「解析出来」和「用上」是两件事：`file ?: block.url` 改成 `block.url` 后，
+    # 会话作用域的解析结果被丢掉、Coil 拿裸 url 去取，而 arm8d（缝挂着）与
+    # arm8f（model= 是 build 出来的 request、有 size 天花板）都还是绿的。
+    for rel in (_MARKDOWN_REL, _STREAM_REL):
+        clean = sources.get(rel)
+        if clean is None:
+            continue
+        name = rel.rsplit("/", 1)[-1]
+        for m in re.finditer(r"\b([A-Za-z_]\w*)\s*=\s*rememberMdMediaFile\s*\(", clean):
+            var = m.group(1)
+            span = _enclosing_fun_span(clean, m.start())
+            body = clean[span[0]:span[1]] if span else clean
+            builders = list(re.finditer(r"ImageRequest\s*\.\s*Builder\s*\(", body))
+            if not builders:
+                continue          # 视频/音频块走 setDataSource(file.path)，不属本判据
+            data_args = []
+            for b in builders:
+                nxt = re.search(r"\.build\s*\(", body[b.start():])
+                chain = body[b.start(): b.start() + (nxt.end() if nxt else 1200)]
+                for d in re.finditer(r"\.\s*data\s*\(", chain):
+                    args = _paren_args(chain, d.start())
+                    if args is not None:
+                        data_args.append(args)
+            if not data_args:
+                problems.append(
+                    "arm8g: %s resolves `%s` through rememberMdMediaFile but the "
+                    "ImageRequest in that function never calls .data(...) -- the "
+                    "session-scoped file is dropped while the seam call and the built "
+                    "request both still look right" % (name, var))
+            elif not any(re.search(r"(?<![\w.])%s\b" % re.escape(var), a) for a in data_args):
+                problems.append(
+                    "arm8g: the ImageRequest in %s does not take the resolved file `%s` "
+                    "as its .data(...) source -- the resolver result is discarded and the "
+                    "raw url (no session path, no mtime key) is fetched instead"
+                    % (name, var))
     return problems
 
+
+def run_seam_selftest() -> bool:
+    """[R3-t04] 第三轮（dual-gate）缝臂：11-1 uri 交出 / 11-3 状态机转换。
+
+    11-2（arm8g）的臂放在 run_media_host_keys_selftest 里，跟着那棵媒体树一起判
+    —— 它只在「同一函数既有 rememberMdMediaFile 又有 ImageRequest」时生效。
+    """
+    ok = True
+    MANAGER = '''
+object MediaPlayerManager {
+    enum class PlayerState { IDLE, PLAYING, PAUSED, STOPPED }
+    private data class Session(val player: MediaPlayer, @Volatile var state: PlayerState)
+
+    fun pause(sessionId: String): PlayerOutcome {
+        val session = sessions[sessionId]
+            ?: return PlayerOutcome.failure("no_session", "no session")
+        if (session.state != PlayerState.PLAYING) {
+            return PlayerOutcome.failure("not_playing", "not playing")
+        }
+        return try {
+            session.player.pause()
+            session.state = PlayerState.PAUSED
+            PlayerOutcome.ok(state = PlayerState.PAUSED.name)
+        } catch (e: Exception) {
+            PlayerOutcome.failure("player_failed", e.message ?: "unknown")
+        }
+    }
+
+    fun resume(sessionId: String): PlayerOutcome {
+        val session = sessions[sessionId]
+            ?: return PlayerOutcome.failure("no_session", "no session")
+        if (session.state != PlayerState.PAUSED) {
+            return PlayerOutcome.failure("not_paused", "not paused")
+        }
+        return try {
+            session.player.start()
+            session.state = PlayerState.PLAYING
+            PlayerOutcome.ok(state = PlayerState.PLAYING.name)
+        } catch (e: Exception) {
+            PlayerOutcome.failure("player_failed", e.message ?: "unknown")
+        }
+    }
+}
+'''
+    INLINE = '''
+private fun shareMediaFile(context: android.content.Context, file: File, mime: String) {
+    val authority = context.packageName + ".fileprovider"
+    val uri = try {
+        androidx.core.content.FileProvider.getUriForFile(context, authority, file)
+    } catch (_: Throwable) {
+        Toast.makeText(context, "failed", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = mime
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    com.rikkaminis.app.util.ExternalIntent.share(context, intent, file.name) { t ->
+        Toast.makeText(context, "failed", Toast.LENGTH_SHORT).show()
+    }
+}
+'''
+    # 11-3 pause() 变成幂等空转（把 state 设成它刚要求过的那个成员）
+    pause_noop = MANAGER.replace(
+        "            session.state = PlayerState.PAUSED",
+        "            session.state = PlayerState.PLAYING")
+    # 11-3 上报的状态与真正赋给 session 的不一致
+    pause_lies = MANAGER.replace(
+        "PlayerOutcome.ok(state = PlayerState.PAUSED.name)",
+        "PlayerOutcome.ok(state = PlayerState.PLAYING.name)")
+    # 11-3 互为逆被破坏：resume 要求它自己刚设的那个成员
+    resume_wrong_guard = MANAGER.replace(
+        "if (session.state != PlayerState.PAUSED) {",
+        "if (session.state != PlayerState.PLAYING) {")
+    for name, sample, want in (
+        ("r3-state compliant (pause PLAYING→PAUSED, resume PAUSED→PLAYING)", MANAGER, None),
+        ("r3-state pause is an idempotent no-op (11-3)", pause_noop, "idempotent"),
+        ("r3-state pause reports the wrong member", pause_lies, "reports state"),
+        ("r3-state resume guards its own target member", resume_wrong_guard,
+         "not mutually inverse"),
+    ):
+        got = check_player_state_machine(sample)
+        if want is None:
+            mark = "ok" if not got else "FAIL"
+            print("  selftest %s: %s (expect GREEN) %s"
+                  % (name, "RED" if got else "GREEN", mark))
+            if got:
+                ok = False
+        else:
+            hit = any(want in p for p in got) and all(p.startswith("arm9:") for p in got)
+            print("  selftest %s: %s (expect arm9 / %r) %s"
+                  % (name, "RED" if got else "GREEN", want, "ok" if hit else "FAIL"))
+            if not hit:
+                ok = False
+        for p in got:
+            print("      - " + p)
+
+    # 11-1：uri 解析出来却不交给任何人
+    detached = INLINE.replace("        putExtra(Intent.EXTRA_STREAM, uri)\n", "")
+    # 精确度：换一种载体（setDataAndType）也必须算交出去了
+    other_carrier = INLINE.replace(
+        "        putExtra(Intent.EXTRA_STREAM, uri)",
+        "        setDataAndType(uri, mime)")
+    for name, sample, want in (
+        ("r3-share compliant (EXTRA_STREAM)", INLINE, None),
+        ("r3-share precision (setDataAndType carrier)", other_carrier, None),
+        ("r3-share uri detached (11-1)", detached, "never handed on"),
+    ):
+        got = check_share_handoff(sample)
+        if want is None:
+            mark = "ok" if not got else "FAIL"
+            print("  selftest %s: %s (expect GREEN) %s"
+                  % (name, "RED" if got else "GREEN", mark))
+            if got:
+                ok = False
+        else:
+            hit = any(want in p for p in got) and all(p.startswith("arm11:") for p in got)
+            print("  selftest %s: %s (expect arm11 / %r) %s"
+                  % (name, "RED" if got else "GREEN", want, "ok" if hit else "FAIL"))
+            if not hit:
+                ok = False
+        for p in got:
+            print("      - " + p)
+
+    # 形态边界：整份文件里没有 FileProvider 站点 = 显式红（不是静默通过）
+    if not check_share_handoff("private fun nothing() { }"):
+        print("  selftest r3-share fail-closed (no getUriForFile): expected RED -- FAIL")
+        ok = False
+    else:
+        print("  selftest r3-share fail-closed (no getUriForFile): RED ok")
+    print("MEDIAPLAYER_SEAM_SELFTEST=" + ("PASS" if ok else "FAIL")
+          + " (3 seams: 11-1 uri handed on / 11-2 arm8g resolved file is the data "
+            "source / 11-3 pause↔resume are mutually inverse; 7 arms + 1 fail-closed)")
+    return ok
 
 def run_media_host_keys_selftest() -> bool:
     """Arm 8 fixtures (dv19-B02/B06). Each dirty case must go red through
@@ -1956,6 +2308,21 @@ private fun GalleryPage(item: GalleryItem) {
     M8f2 = COMPLIANT_MARKDOWN.replace(
         "AsyncImage(model = imageRequest)", "AsyncImage(model = block.url)")
     M8f3 = COMPLIANT_STREAM.replace("            .limitDisplaySize()\n", "")
+    # 11-2：解析出来的 file 被丢掉，Coil 拿裸 url
+    M8g1 = COMPLIANT_MARKDOWN.replace(
+        ".data(file ?: block.url)", ".data(block.url)")
+    # 精确度：绑定改名不影响判据（判据不认名字，认「谁被消费」）
+    M8g_renamed = COMPLIANT_MARKDOWN.replace(
+        "    val file = rememberMdMediaFile(block.url, sessionId)\n"
+        "    val imageRequest = remember(file, block.url) {\n"
+        "        ImageRequest.Builder(context)\n"
+        "            .data(file ?: block.url)",
+        "    val resolved = rememberMdMediaFile(block.url, sessionId)\n"
+        "    val imageRequest = remember(resolved, block.url) {\n"
+        "        ImageRequest.Builder(context)\n"
+        "            .data(resolved ?: block.url)")
+    assert M8g_renamed != COMPLIANT_MARKDOWN
+    assert M8g1 != COMPLIANT_MARKDOWN
     P2 = COMPLIANT_MARKDOWN.replace(
         "fun MinisImageBlock(block: MdBlock.Image) {",
         "// NEVER: model = block.url with no ImageRequest -- decode ceiling gone\n"
@@ -1987,7 +2354,11 @@ private fun GalleryPage(item: GalleryItem) {
         ("arm8e M8e1 update{} block removed", tree(chat=M8e1), "arm8e"),
         ("arm8e M8e2 viewer keyed on its content", tree(chat=M8e2), "arm8e"),
         ("arm8e M8e3 update{} stops syncing the colour", tree(chat=M8e3), "arm8e"),
+        ("arm8g M8g1 the resolved file is dropped from .data() (11-2)",
+         tree(markdown=M8g1), "arm8g"),
         ("arm8 precision P1 comments mention the shapes", tree(player=P1), None),
+        ("arm8g precision P4 the resolved file is renamed, still consumed",
+         tree(markdown=M8g_renamed), None),
     ]
     ok = True
     for name, src, want_arm in cases:
@@ -2044,6 +2415,9 @@ def main() -> int:
         if inline.exists() else None)
     problems += check_inline_player(inline_clean)
     problems += check_inline_player_guards(inline_clean)
+    problems += check_share_handoff(inline_clean)
+    problems += check_player_state_machine(strip_comments_and_strings(
+        target.read_text(encoding="utf-8", errors="replace")))
     problems += check_fullscreen_video_window(inline_clean)
     media_sources = {}
     for rel in (INLINE_PLAYER_REL, _STREAM_REL, _MARKDOWN_REL,

@@ -592,6 +592,235 @@ def photos_invalid_arm_falls_through(cv, lv, label):
     return out
 
 
+# ── [R3-t22] the photo date window must reach the SQL ───────────────────────
+# Two falsifying witnesses from the dual-gate round:
+#   42 (dual-gate) `handleList`/`handleAlbum` thread the resolved window into
+#      `queryMedia(…, startMs, endMs, …)` and the gate was satisfied by the
+#      CALL: `queryMedia`'s body could ignore both bounds (`if (startMs != null
+#      && false)`) and ContentResolver answered the whole library — every
+#      `--start`/`--end`/`--days` silently a no-op.
+#   43 (symmetric) the gate required the inverted-window REFUSAL to be consumed
+#      by `handleList`, never that `resolvePhotoRange` actually PRODUCES it:
+#      returning `Window(endMs, startMs)` served a back-to-front window as a
+#      successful (empty) answer, exit 0.
+# The judgements are anchored on the effect (feasible guard → SQL predicate /
+# args → the selection argument of `query(…)`, and a refundable window that
+# keeps the caller's bound order) and the field names come from the tree
+# (`PhotoRange.Window`'s declaration), never from a spelling list.
+SQL_PREDICATE_RE = re.compile(r"(?:>=|<=|BETWEEN|LIKE)\s*\?")
+
+
+def _block_after_in(code, span, anchor_re):
+    """`{ … }` following the first [anchor_re] match inside [span]."""
+    m = re.search(anchor_re, code[span[0]:span[1]])
+    if not m:
+        return None
+    k = span[0] + m.end()
+    while k < len(code) and code[k] in " \t\n\r":
+        k += 1
+    if k >= len(code) or code[k] != "{":
+        return None
+    close = match_bracket(code, k)
+    return None if close < 0 else (k + 1, close)
+
+
+def _sig_params(code, name):
+    """[(name, type)] of the fun named [name] (declaration, not a call site)."""
+    m = re.search(r"\bfun\s+%s\s*\(" % re.escape(name), code)
+    if not m:
+        return []
+    open_at = m.end() - 1
+    close = match_bracket(code, open_at)
+    if close < 0:
+        return []
+    inner = code[open_at + 1:close]
+    out = []
+    for a, b in split_top(inner, (",",)):
+        part = inner[a:b].strip()
+        if ":" not in part:
+            continue
+        nm, ty = part.split(":", 1)
+        out.append((nm.strip(), ty.strip()))
+    return out
+
+
+def _window_fields(code):
+    """Parameter names of `PhotoRange.Window(...)`, in declaration order.
+
+    Derived, not spelled: a rename in the carrier must move this with it, and
+    the ORDER is what tells a swapped window from a correct one.
+    """
+    m = re.search(r"data\s+class\s+Window\s*\(([^)]*)\)", code)
+    if not m:
+        return []
+    out = []
+    for a, b in split_top(m.group(1), (",",)):
+        part = m.group(1)[a:b].strip()
+        nm = re.sub(r"^(?:val|var)\s+", "", part).split(":")[0].strip()
+        if IDENT_RE.fullmatch(nm):
+            out.append(nm)
+    return out
+
+
+def _one_hop_bindings(code, text):
+    """[text] plus the RHS of every `val <id> =` binding it names (one hop)."""
+    out = [text]
+    for ident in set(IDENT_RE.findall(text)):
+        m = re.search(r"\bval\s+%s\b[^\n=]*=\s*([^\n]*)" % re.escape(ident), code)
+        if m:
+            out.append(m.group(1))
+    return out
+
+
+def photos_window_reaches_sql(cv, lv, label):
+    """[R3-t22 witness 42] the window must land in the query, not just in a call."""
+    bad = []
+    sl = fun_slice(cv, "private fun queryMedia(")
+    if sl is None:
+        return ["%s:1: queryMedia(…) is gone (rename => update this gate) — the date window has "
+                "no way into the MediaStore query" % label]
+    body = cv[sl[0]:sl[1]]
+    params = _sig_params(cv, "queryMedia")
+    bounds = [n for n, t in params if "Long?" in t]
+    if len(bounds) < 2:
+        return ["%s:1: queryMedia(…) no longer takes two nullable Long bounds (params: %s) — "
+                "a --start/--end has nowhere to enter the query" % (label, params)]
+
+    # the SQL channel: the selection / selection-args arguments of query(…)
+    qm = re.search(r"\.\s*query\s*\(", body)
+    channels = set()
+    if qm is None:
+        bad.append("%s:1: queryMedia(…) never calls ContentResolver.query( — the MediaStore is "
+                   "not queried at all (fail-closed)" % label)
+    else:
+        qargs = vf_call_args(body, qm.end() - 1)
+        channels = set()
+        for idx in (2, 3):
+            if idx < len(qargs):
+                a, b = qargs[idx]
+                for piece in _one_hop_bindings(body, body[a:b]):
+                    channels |= set(IDENT_RE.findall(piece))
+
+    for pname in bounds:
+        ok = False
+        for cond, ts, te, _es, _ee in if_blocks(body):
+            if not contains_ident(cond, pname):
+                continue
+            if not path_feasible(body, ts):
+                continue                        # dead guard (`&& false`) — the witness
+            if not contains_ident(body[ts:te], pname):
+                continue
+            # the SQL predicate lives INSIDE a string literal ⇒ read it on the
+            # literal view at the same offsets (both projections are equal-length)
+            block_lit = lv[sl[0] + ts:sl[0] + te]
+            pred = SQL_PREDICATE_RE.search(block_lit)
+            feed = re.search(r"([A-Za-z_]\w*)\s*(?:\.\s*add\s*\(|\.\s*addAll\s*\(|\+=)",
+                             body[ts:te])
+            if not (pred and feed):
+                continue
+            if channels and feed.group(1) not in channels:
+                continue                        # fills a list nobody queries with
+            ok = True
+            break
+        if not ok:
+            bad.append(
+                "%s:1: queryMedia(…) never applies the `%s` bound on a reachable path — the "
+                "guard is dead, the predicate is not added, or the list it fills is not the "
+                "selection handed to query(…); every --start/--end/--days answers the whole "
+                "library (R3 witness 42)" % (label, pname))
+
+    # call sites: the window must arrive, and in bound order.
+    fields = _window_fields(cv)
+    idx_of = [params.index((n, t)) for n, t in params if n in bounds]
+    for m in re.finditer(r"\bqueryMedia\s*\(", cv):
+        cargs = vf_call_args(cv, m.end() - 1)
+        for slot, pname in enumerate(bounds):
+            pos = idx_of[slot] if slot < len(idx_of) else None
+            if pos is None or pos >= len(cargs):
+                continue
+            a, b = cargs[pos]
+            text = cv[a:b].strip()
+            if text in ("null", ""):
+                bad.append(
+                    "%s:%d: queryMedia(…) passes `null` for the `%s` bound — the resolved "
+                    "window is dropped at the call site and the query returns every row"
+                    % (label, line_of(cv, a), pname))
+                continue
+            carried = " ".join(_one_hop_bindings(cv, text))
+            want = fields[slot] if slot < len(fields) else None
+            if want and not re.search(r"\.\s*%s\b" % re.escape(want), carried):
+                bad.append(
+                    "%s:%d: queryMedia(…) receives `%s` for the `%s` bound, which does not "
+                    "trace to `%s` on the resolved window — the bound positions are swapped "
+                    "or the window was rebuilt" % (label, line_of(cv, a), text, pname, want))
+    return bad
+
+
+def photos_inverted_refusal_produced(cv, lv, label):
+    """[R3-t22 witness 43] the refusal must be PRODUCED, and the window in order.
+
+    Presence of `endMs < startMs` and of `PhotoRange.Invalid(` used to be the
+    whole criterion. A guard that returns `Window(endMs, startMs)` on the
+    inverted branch keeps both substrings AND serves the caller a back-to-front
+    window as a successful empty answer (exit 0) instead of exit 2.
+    """
+    bad = []
+    sl = fun_slice(cv, "internal fun resolvePhotoRange(")
+    if sl is None:
+        return ["%s:1: resolvePhotoRange is gone" % label]
+    pure = cv[sl[0]:sl[1]]
+    fields = _window_fields(cv)
+    guard = None
+    for cond, ts, te, _es, _ee in if_blocks(pure):
+        if not re.search(r"[<>]", cond):
+            continue
+        if not all(contains_ident(cond, f) for f in fields):
+            continue
+        if not path_feasible(pure, ts):
+            continue
+        guard = (ts, te)
+        break
+    if guard is None:
+        bad.append("%s:1: resolvePhotoRange has no REACHABLE inverted-window guard comparing the "
+                   "two bounds — an inverted --start/--end is served instead of refused "
+                   "(R3 witness 43)" % label)
+        return bad
+    ts, te = guard
+    block = pure[ts:te]
+    refunds = []
+    for r in re.finditer(r"\breturn\b", block):
+        e = expr_end(block, r.end())
+        refunds.append(block[r.end():e].strip())
+    if not refunds:
+        bad.append("%s:1: the inverted-window guard does not RETURN anything — execution falls "
+                   "through to the Window result, so --start after --end is served as a "
+                   "back-to-front window (R3 witness 43)" % label)
+    elif any("Window" in expr for expr in refunds):
+        bad.append("%s:1: the inverted-window guard returns a WINDOW (%s) — the caller gets "
+                   "exit 0 for a range it spelled wrong instead of the refusal"
+                   % (label, refunds[0][:60]))
+    # the window that IS returned must keep the caller's order.
+    # the window that IS returned must keep the caller's order (EVERY window
+    # return — the days branch carries an unrelated pair and simply won't match).
+    wms = list(re.finditer(r"return\s+PhotoRange\.Window\s*\(", pure))
+    if not wms:
+        bad.append("%s:1: resolvePhotoRange no longer returns PhotoRange.Window(…) — the "
+                   "successful outcome has no carrier (fail-closed)" % label)
+    elif len(fields) >= 2:
+        for wm in wms:
+            wargs = vf_call_args(pure, wm.end() - 1)
+            if len(wargs) < 2:
+                continue
+            first = pure[wargs[0][0]:wargs[0][1]].strip()
+            second = pure[wargs[1][0]:wargs[1][1]].strip()
+            if contains_ident(first, fields[1]) and contains_ident(second, fields[0]):
+                bad.append("%s:1: resolvePhotoRange returns Window(%s, %s) — the two bounds are "
+                           "SWAPPED, so an inverted range becomes a silently empty (exit 0) "
+                           "answer instead of a refusal (R3 witness 43)"
+                           % (label, first, second))
+    return bad
+
+
 def violations_photos(cv, lv, label):
     """ISSUE-04(B) rules for PhotosOffloadHandler.kt: a --start/--end that decides a
     day must REFUSE a value the caller spelled wrong, never silently widen the window
@@ -660,6 +889,9 @@ def violations_photos(cv, lv, label):
                        "album row answers 0x0 and the caller cannot pick a size" % label)
         if 'put("width"' not in alb_lv or 'put("height"' not in alb_lv:
             bad.append("%s:1: handleAlbum no longer emits width/height in its JSON" % label)
+    # [R3-t22] the window must reach the SQL, and an inverted one must be refused.
+    bad.extend(photos_window_reaches_sql(cv, lv, label))
+    bad.extend(photos_inverted_refusal_produced(cv, lv, label))
     return bad
 
 
@@ -969,7 +1201,34 @@ GOOD_PHOTOS = """
             is PhotoRange.Invalid ->
                 return NativeOffloadResult(2, "android-photos list: invalid ${r.flag} '${r.raw}'")
         }
-        return NativeOffloadResult(0, "${range.startMs}..${range.endMs}")
+        val startMs = range.startMs
+        val endMs = range.endMs
+        val media = queryMedia(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "photo", startMs, endMs, 20)
+        return NativeOffloadResult(0, "${range.startMs}..${range.endMs} ${media.size}")
+    }
+
+    private fun queryMedia(uri: Uri, kind: String, startMs: Long?, endMs: Long?, max: Int): List<MediaEntry> {
+        if (max <= 0) return emptyList()
+        val projection = arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DATE_TAKEN)
+        val selectionParts = mutableListOf<String>()
+        val selectionArgs = mutableListOf<String>()
+        if (startMs != null) {
+            selectionParts.add("${MediaStore.Images.Media.DATE_TAKEN} >= ?")
+            selectionArgs.add(startMs.toString())
+        }
+        if (endMs != null) {
+            selectionParts.add("${MediaStore.Images.Media.DATE_TAKEN} <= ?")
+            selectionArgs.add(endMs.toString())
+        }
+        val selection = if (selectionParts.isEmpty()) null else selectionParts.joinToString(" AND ")
+        val selArgs = if (selectionArgs.isEmpty()) null else selectionArgs.toTypedArray()
+        val out = mutableListOf<MediaEntry>()
+        context.contentResolver.query(uri, projection, selection, selArgs, "${MediaStore.Images.Media.DATE_TAKEN} DESC")?.use { c ->
+            while (c.moveToNext() && out.size < max) {
+                out.add(MediaEntry())
+            }
+        }
+        return out
     }
 
     private fun handleAlbum(args: OffloadArgs): NativeOffloadResult {
@@ -1058,6 +1317,44 @@ BAD_PHOTOS_LIST_NO_BRANCH = GOOD_PHOTOS.replace(
         }""",
     "        val range = resolveDateRange(args) as PhotoRange.Window",
 )
+
+# ── [R3-t22] the two falsifying witnesses of the third round ────────────────
+# 42: the CALL still carries the window, queryMedia's body ignores both bounds —
+#     ContentResolver answers the whole library and every --start/--end is a
+#     silent no-op while the gate reported "the range is threaded".
+BAD_PHOTOS_WINDOW_GUARD_DEAD = GOOD_PHOTOS.replace(
+    "        if (startMs != null) {", "        if (startMs != null && false) {").replace(
+    "        if (endMs != null) {", "        if (endMs != null && false) {")
+
+# Same seam, second face: the guard is live and the arg is fed, but the PREDICATE
+# never reaches the SQL (the filled list is not the one handed to query()).
+BAD_PHOTOS_PREDICATE_DANGLING = GOOD_PHOTOS.replace(
+    '            selectionParts.add("${MediaStore.Images.Media.DATE_TAKEN} >= ?")',
+    '            unusedParts.add("${MediaStore.Images.Media.DATE_TAKEN} >= ?")').replace(
+    "        val selectionParts = mutableListOf<String>()",
+    "        val selectionParts = mutableListOf<String>()\n"
+    "        val unusedParts = mutableListOf<String>()")
+
+# Third face: the window is dropped at the CALL SITE.
+BAD_PHOTOS_CALL_SITE_NULL = GOOD_PHOTOS.replace(
+    'queryMedia(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "photo", startMs, endMs, 20)',
+    'queryMedia(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "photo", null, null, 20)')
+
+# Fourth face: the two bounds arrive swapped at the call site.
+BAD_PHOTOS_CALL_SITE_SWAPPED = GOOD_PHOTOS.replace(
+    'queryMedia(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "photo", startMs, endMs, 20)',
+    'queryMedia(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "photo", endMs, startMs, 20)')
+
+# Fifth face: the resolved window itself is built swapped.
+BAD_PHOTOS_WINDOW_ARGS_SWAPPED = GOOD_PHOTOS.replace(
+    "    return PhotoRange.Window(startMs, endMs)",
+    "    return PhotoRange.Window(endMs, startMs)")
+
+# 43: the guard, the substring and the Invalid() call all survive — the branch
+#     just returns a (back-to-front) WINDOW instead of refusing.
+BAD_PHOTOS_INVERT_RETURNS_WINDOW = GOOD_PHOTOS.replace(
+    '        return PhotoRange.Invalid("--end", endRaw.orEmpty())',
+    "        return PhotoRange.Window(endMs, startMs)")
 
 SELFTEST_MARK = "SELFTEST=PASS (schedule-date-source: 2 files x 2 arms, teeth on every criterion)"
 
@@ -1225,6 +1522,13 @@ def run_selftest():
         ("parsers/lenient-not-literal", _v(violations_strict_date_parser, BAD_PARSER_LENIENT_NOT_LITERAL,
                                            "private fun parseDate(", "--start/--end"), ">0"),
         ("photos/list-dead-refusal", _v(violations_photos, BAD_PHOTOS_LIST_DEAD_REFUSAL), ">0"),
+        # ── [R3-t22] window-reaches-SQL + refusal-produced arms ──
+        ("photos/window-guard-dead", _v(violations_photos, BAD_PHOTOS_WINDOW_GUARD_DEAD), ">0"),
+        ("photos/predicate-dangling", _v(violations_photos, BAD_PHOTOS_PREDICATE_DANGLING), ">0"),
+        ("photos/call-site-null", _v(violations_photos, BAD_PHOTOS_CALL_SITE_NULL), ">0"),
+        ("photos/call-site-swapped", _v(violations_photos, BAD_PHOTOS_CALL_SITE_SWAPPED), ">0"),
+        ("photos/window-args-swapped", _v(violations_photos, BAD_PHOTOS_WINDOW_ARGS_SWAPPED), ">0"),
+        ("photos/invert-returns-window", _v(violations_photos, BAD_PHOTOS_INVERT_RETURNS_WINDOW), ">0"),
     ]
     problems = []
     for name, bad, expected in cases:
@@ -1293,6 +1597,39 @@ def run_selftest():
     if not any("reports which bound was invalid" in b
                for b in _v(violations_photos, BAD_PHOTOS_LIST_NO_BRANCH)):
         problems.append("photos/list-loses-branch: the refusal-message rule did not fire")
+
+    # [R3-t22] each witness arm must be red for ITS OWN rule — a neighbour
+    # criterion firing by accident would leave the seam just as open.
+    if not any("never applies the `startMs` bound" in b
+               for b in _v(violations_photos, BAD_PHOTOS_WINDOW_GUARD_DEAD)):
+        problems.append("photos/window-guard-dead: the dead-bound rule did not fire")
+    if not any("never applies the `endMs` bound" in b
+               for b in _v(violations_photos, BAD_PHOTOS_WINDOW_GUARD_DEAD)):
+        problems.append("photos/window-guard-dead: the second bound was not reported")
+    if not any("never applies the `startMs` bound" in b
+               for b in _v(violations_photos, BAD_PHOTOS_PREDICATE_DANGLING)):
+        problems.append("photos/predicate-dangling: the SQL-channel rule did not fire")
+    if not any("passes `null` for the `startMs` bound" in b
+               for b in _v(violations_photos, BAD_PHOTOS_CALL_SITE_NULL)):
+        problems.append("photos/call-site-null: the call-site rule did not fire")
+    if not any("receives `endMs` for the `startMs` bound" in b
+               for b in _v(violations_photos, BAD_PHOTOS_CALL_SITE_SWAPPED)):
+        problems.append("photos/call-site-swapped: the bound-order rule did not fire")
+    if not any("the two bounds are" in b and "SWAPPED" in b
+               for b in _v(violations_photos, BAD_PHOTOS_WINDOW_ARGS_SWAPPED)):
+        problems.append("photos/window-args-swapped: the swapped-window rule did not fire")
+    if not any("returns a WINDOW" in b
+               for b in _v(violations_photos, BAD_PHOTOS_INVERT_RETURNS_WINDOW)):
+        problems.append("photos/invert-returns-window: the refusal-production rule did not fire")
+    if not any("no REACHABLE inverted-window guard" in b
+               for b in _v(violations_photos, BAD_PHOTOS_NO_INVERT)):
+        problems.append("photos/no-inversion-refusal: the reachable-guard rule did not fire")
+    # precision: a correct window must not be flagged as swapped, and a passing
+    # fixture must not be accused of dropping the SQL channel.
+    if any("SWAPPED" in b for b in _v(violations_photos, GOOD_PHOTOS)):
+        problems.append("photos/compliant: the swapped-window rule fired on an ordered window")
+    if any("never applies" in b for b in _v(violations_photos, BAD_PHOTOS_ALBUM_NO_SIZE)):
+        problems.append("photos/album-drops-size: the window rule fired on an intact window")
 
     # [dv16-A A-01] each branch of the strict-parser criterion proves itself,
     # and precise failure modes are distinguished (lenient vs rewritten vs

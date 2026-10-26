@@ -77,21 +77,26 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _kotlin_lexer import KotlinLexError, mask_comments  # noqa: E402
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments  # noqa: E402
 from _kotlin_ast import (  # noqa: E402
     const_bool,
+    const_value,
     enclosing_conditions as shared_enclosing_conditions,
     if_blocks,
     match_bracket,
     split_top,
+    stmt_spans,
     strip_parens,
     when_branches,
 )
 from _kotlin_valueflow import (  # noqa: E402
     call_args,
+    contains_ident,
+    expr_end,
     guard_feasible,
     is_single_assignment,
     path_feasible,
+    value_sources,
 )
 
 REL = "src/android/app/src/main/java/com/rikkaminis/app/provider/anthropic/AnthropicProvider.kt"
@@ -610,6 +615,302 @@ def check_resolver_guard(src):
             "green (the clamp moved; update this criterion deliberately)")
     return violations
 
+
+# ── [R3-t15] the three seams the pair contract stopped at ────────────────────
+# Round 3 attacked the GAPS between gates. All three criteria below are the same
+# family as C1/C-OAI-1 — "the value on the wire and the value the budget is
+# derived from" — one hop further along the data flow than the earlier rounds
+# looked:
+#
+#   C-OAI-3  C-OAI-1 ties the wire `max_tokens` to `injectThinkingParams`'s 3rd
+#            argument. What the injector then DOES with it was unpoliced: the
+#            resolver derives the budget from `ThinkingResolveContext.maxTokens`,
+#            so the argument has to arrive there unchanged. A literal (or a
+#            nearer re-binding of the same name) keeps every anchor on the call
+#            site intact and ships `thinking_budget > max_tokens`.
+#   C4       C1/C2 police the CALLER (`thinkingBudget(cappedMaxTokens, …)` and
+#            the `> 0 && < max` guard) but never the helper's own body: `return
+#            cap` keeps the call legal, makes the guard's `< capped` half
+#            always-false and silently drops the whole thinking block.
+#   C5       Extended thinking also requires `temperature == 1`. The block that
+#            writes `budget_tokens` therefore has a paired constant: writing any
+#            other temperature next to it is a deterministic 400 that no budget
+#            criterion can see.
+INJECT_DEF_RE = re.compile(r"\bfun\s+injectThinkingParams\s*\(")
+CTX_CALL_RE = re.compile(r"(?<![\w.])ThinkingResolveContext\s*\(")
+CTX_MAX_FIELD_RE = re.compile(r"^\s*maxTokens\s*=")
+BUDGET_DEF_RE = re.compile(r"\bfun\s+thinkingBudget\s*\(")
+TEMPERATURE_CALL = re.compile(r"\bput\(\s*\"temperature\"")
+BOUND_CALLS = ("minOf", "min", "coerceAtMost", "coerceIn")
+
+
+def _param_names(sig_inner):
+    """Parameter names of a Kotlin parameter list, positionally."""
+    out = []
+    for a, b in split_top(sig_inner, (",",)):
+        part = sig_inner[a:b].strip()
+        if not part:
+            continue
+        out.append(part.split(":")[0].strip())
+    return out
+
+
+def _body_of(text, after):
+    """(inner body, brace position, ok) for the block that follows `after`."""
+    brace = text.find("{", after)
+    if brace < 0:
+        return "", -1, False
+    body, end = brace_body(text, brace)
+    if end < 0:
+        return "", brace, False
+    return body[1:-1], brace, True
+
+
+def _rebindings(code, name):
+    """Positions where `name` stops denoting the same value.
+
+    `code` MUST be the code view (string contents blanked): the injector logs
+    `"… maxTokens=$maxTokens"`, and reading that as an assignment would make the
+    criterion red on the pristine tree. A named argument (`maxTokens = …` inside
+    a constructor call, preceded by `,`) is not an assignment either.
+    """
+    out = [m.start() for m in
+           re.finditer(r"\b(?:val|var)\s+%s(?![\w`])" % re.escape(name), code)]
+    for m in re.finditer(r"(?<![\w`])%s(?![\w`])\s*=(?!=)" % re.escape(name), code):
+        k = m.start() - 1
+        while k >= 0 and code[k] in " \t\r\n":
+            k -= 1
+        if k >= 0 and code[k] == ",":
+            continue
+        out.append(m.start())
+    return sorted(set(out))
+
+
+def check_inject_forwarding(src):
+    """C-OAI-3 — the injector must hand ITS OWN wire argument to the resolver."""
+    visible = strip_comments(src)                 # literals intact
+    try:
+        code = mask_code(src)                     # literals blanked
+    except KotlinLexError as e:
+        return ["OpenAIProvider.kt: the injector's body does not lex (%s) — fail-closed, a "
+                "shape this criterion cannot read must never read green" % e]
+    m = INJECT_DEF_RE.search(visible)
+    if not m:
+        return ["OpenAIProvider.kt: no `fun injectThinkingParams(` found — the injector that "
+                "carries the wire max_tokens into the rule engine cannot be read (fail-closed)"]
+    p_open = m.end() - 1
+    p_close = match_bracket(visible, p_open)
+    if p_close < 0:
+        return ["OpenAIProvider.kt: `injectThinkingParams` signature is unbalanced "
+                "(fail-closed)"]
+    params = _param_names(visible[p_open + 1:p_close])
+    if len(params) < 3:
+        return ["OpenAIProvider.kt: `injectThinkingParams` takes %d parameter(s) — the value "
+                "written as max_tokens cannot be its 3rd argument (fail-closed)"
+                % len(params)]
+    wire = params[2]
+    body, brace, ok = _body_of(visible, p_close + 1)
+    if not ok:
+        return ["OpenAIProvider.kt: `injectThinkingParams` body is unbalanced (fail-closed)"]
+    body_code = code[brace + 1:brace + 1 + len(body)]
+    out = []
+    ctxs = find_calls(body, CTX_CALL_RE)
+    if not ctxs:
+        return ["OpenAIProvider.kt: `injectThinkingParams` builds no ThinkingResolveContext — "
+                "the rule engine never learns the wire max_tokens, so `thinking_budget` is "
+                "derived from nothing (fail-closed)"]
+    for _pos, args in ctxs:
+        rhs = None
+        for a in args:
+            if CTX_MAX_FIELD_RE.match(a):
+                rhs = a.split("=", 1)[1].strip()
+        if rhs is None:
+            out.append("OpenAIProvider.kt: ThinkingResolveContext is built without a "
+                       "`maxTokens =` ceiling — the budget is computed without the wire value")
+            continue
+        if norm(rhs) != norm(wire):
+            out.append(
+                "OpenAIProvider.kt: `injectThinkingParams` forwards `%s` as the budget "
+                "ceiling, but the wire max_tokens comes from its 3rd argument `%s` — the "
+                "pair's two readers disagree, so a budget above the wire max_tokens is a "
+                "deterministic 400" % (re.sub(r"\s+", " ", rhs), wire))
+            continue
+        sites = _rebindings(body_code, wire)
+        if sites:
+            out.append(
+                "OpenAIProvider.kt: `%s` is re-declared / re-assigned inside "
+                "`injectThinkingParams` — the ceiling prints the parameter's name but no "
+                "longer resolves to the wire value" % wire)
+    return out
+
+
+def _single_bindings(body):
+    """name -> initializer for every `val`/`var` that provably has one binding."""
+    out = {}
+    for m in re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+?)?\s*=(?!=)", body):
+        name = m.group(1)
+        end = expr_end(body, m.end())
+        expr = body[m.end():end].strip()
+        if name in out:
+            out[name] = None            # ambiguous: never followed
+        else:
+            out[name] = expr
+    for name in [k for k, v in out.items() if v is None]:
+        del out[name]
+    for name in list(out):
+        if not is_single_assignment(body, name):
+            del out[name]
+    return out
+
+
+def _split_else(text):
+    """(then_part, else_part) at bracket depth 0; else (text, None)."""
+    depth = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and text.startswith("else", i):
+            before = text[i - 1] if i else ""
+            after = text[i + 4] if i + 4 < n else ""
+            if not (before.isalnum() or before == "_") and \
+                    not (after.isalnum() or after == "_"):
+                return text[:i], text[i + 4:]
+        i += 1
+    return text, None
+
+
+def _depth_at(text, pos):
+    """Bracket depth at `pos` — a clamp nested in a `when` arm is not a clamp."""
+    depth = 0
+    for ch in text[:pos]:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+    return depth
+
+
+def _bounded_by(expr, cap, bindings, depth=0):
+    """Is `expr` provably at or below `cap` for the returned value?
+
+    Accepted shapes (each one is a binding the compiler enforces):
+      * `cap - <k>` (k >= 1)                    — the strict-less tighten
+      * `minOf(<anything>, cap)` / `min(…)` / `x.coerceAtMost(cap)` / `coerceIn`
+      * `if (<cond mentioning cap>) <bounded> else <bounded>`
+      * an identifier whose ONE initializer is one of the above
+    A `when`/literal/`cap` alone is not bounded — that is the witness's shape.
+    """
+    e = strip_parens(expr.strip())
+    if not e or depth > 5:
+        return False
+    m = re.match(r"if\s*\(", e)
+    if m:
+        close = match_bracket(e, m.end() - 1)
+        if not (0 <= close < len(e)):
+            return False
+        cond = e[m.end():close]
+        then_part, else_part = _split_else(e[close + 1:].strip())
+        if else_part is None:
+            return False
+        return (contains_ident(cond, cap)
+                and _bounded_by(then_part, cap, bindings, depth + 1)
+                and _bounded_by(else_part, cap, bindings, depth + 1))
+    for src in value_sources(e):
+        s = strip_parens(src.strip())
+        if not s:
+            continue
+        mm = re.fullmatch(r"%s\s*-\s*(\d+)" % re.escape(cap), s)
+        if mm and int(mm.group(1)) >= 1:
+            return True
+        if re.fullmatch(r"[A-Za-z_]\w*", s) and s in bindings:
+            if _bounded_by(bindings[s], cap, bindings, depth + 1):
+                return True
+        for cname in BOUND_CALLS:
+            for cm in re.finditer(r"(?<![\w.])%s\s*\(" % cname, s):
+                if _depth_at(s, cm.start()) != 0:
+                    continue    # a clamp inside a `when` arm bounds one arm only
+                for a, b in call_args(s, cm.end() - 1):
+                    if contains_ident(s[a:b], cap):
+                        return True
+    return False
+
+
+def check_budget_helper(src):
+    """C4 — the budget helper must clamp below ITS OWN max argument."""
+    stripped = strip_comments(src)
+    m = BUDGET_DEF_RE.search(stripped)
+    if not m:
+        return ["AnthropicProvider.kt: no `fun thinkingBudget(` found — the helper that must "
+                "keep budget_tokens below max_tokens cannot be read (fail-closed)"]
+    p_open = m.end() - 1
+    p_close = match_bracket(stripped, p_open)
+    if p_close < 0:
+        return ["AnthropicProvider.kt: `thinkingBudget` signature is unbalanced (fail-closed)"]
+    params = _param_names(stripped[p_open + 1:p_close])
+    if not params:
+        return ["AnthropicProvider.kt: `thinkingBudget` takes no parameter — the wire max is "
+                "not reachable from inside it (fail-closed)"]
+    cap = params[0]
+    body, _brace, ok = _body_of(stripped, p_close + 1)
+    if not ok:
+        return ["AnthropicProvider.kt: `thinkingBudget` body is unbalanced (fail-closed)"]
+    bindings = _single_bindings(body)
+    returns = []
+    for s, e in stmt_spans(body):
+        stmt = body[s:e].strip()
+        if stmt.startswith("return"):
+            returns.append(stmt[len("return"):].strip())
+    if not returns:                      # expression-bodied helper
+        returns = [body.strip()]
+    out = []
+    for r in returns:
+        if not _bounded_by(r, cap, bindings):
+            out.append(
+                "AnthropicProvider.kt: `thinkingBudget` returns `%s` without clamping it below "
+                "its own `%s` — the caller's `< %s` guard then never holds for the high tiers, "
+                "so the whole thinking block is silently dropped while the picker says ON"
+                % (re.sub(r"\s+", " ", r)[:60], cap, cap))
+    return out
+
+
+def check_temperature_pair(src):
+    """C5 — a temperature written beside `budget_tokens` must be exactly 1."""
+    stripped = strip_comments(src)
+    out = []
+    seen = False
+    for name, _start, body in iter_functions(stripped):
+        for pos, _args in find_calls(body, BUDGET_CALL):
+            seen = True
+            # Innermost brace-bodied if that encloses the write: the thinking
+            # block the pairing applies to.
+            block = None
+            for _cond, t_start, t_end, _es, _ee in if_blocks(body):
+                if t_start <= pos < t_end and (block is None or t_start > block[0]):
+                    block = (t_start, t_end)
+            if block is None:
+                out.append("AnthropicProvider.kt: `budget_tokens` in %s is written outside any "
+                           "brace-bodied if — the temperature pairing cannot be judged "
+                           "(fail-closed)" % name)
+                continue
+            span = body[block[0]:block[1]]
+            for _tpos, targs in find_calls(span, TEMPERATURE_CALL):
+                value = targs[-1].strip() if len(targs) > 1 else ""
+                if const_value(value) != ("num", 1.0):
+                    out.append(
+                        "AnthropicProvider.kt: `temperature` is written as `%s` next to "
+                        "`budget_tokens` — extended thinking requires temperature == 1, any "
+                        "other value is a deterministic 400 (%s)"
+                        % (re.sub(r"\s+", " ", value)[:40], name))
+    if not seen:
+        out.append("AnthropicProvider.kt: no `budget_tokens` write site found (fail-closed)")
+    return out
+
+
 # ── selftest: one arm per criterion, each red exactly once ──────────────────
 
 GREEN_BODY = '''
@@ -824,6 +1125,7 @@ def _crit_set(src):
 
 _ARM_COUNT = 0
 _OAI_ARMS = 0
+_R3_ARMS = 0
 
 
 def selftest():
@@ -877,6 +1179,9 @@ def selftest():
             fails.append("arm '%s' did not apply (string replace missed)" % label)
     fails.extend(_selftest_oai())
     _ARM_COUNT += _OAI_ARMS
+    r3_fails, r3_arms = _selftest_r3()
+    fails.extend(r3_fails)
+    _ARM_COUNT += r3_arms
     return fails
 
 
@@ -1074,6 +1379,206 @@ def _selftest_oai():
     return fails
 
 
+# ── [R3-t15] arms for the three seam criteria (`--selftest`) ────────────────
+# Each fixture targets ONE criterion, so an arm can never be satisfied by a
+# neighbouring criterion firing (that would hide a dead check).
+
+FWD_GREEN = '''
+class OpenAIProvider {
+    private fun injectThinkingParams(
+        body: JSONObject,
+        level: ThinkingLevel,
+        maxTokens: Int,
+    ): ReasoningEchoPolicy? {
+        val ctx = ThinkingResolveContext(
+            modelId = model.id,
+            level = level,
+            maxTokens = maxTokens,
+        )
+        AppLogger.info("Thinking", "[resolve.in] maxTokens=$maxTokens")
+        return ThinkingRuleResolver.apply(body, ctx)
+    }
+}
+'''
+
+# Witness #0: the injector discards its own argument and hands the resolver a
+# literal ceiling. Every anchor C-OAI-1 checks (the call site) is untouched.
+FWD_LITERAL = FWD_GREEN.replace("maxTokens = maxTokens,", "maxTokens = 65536,")
+# Same discard, laundered through a scope call so the text still says `maxTokens`.
+FWD_LAUNDERED = FWD_GREEN.replace(
+    "maxTokens = maxTokens,", "maxTokens = maxTokens.let { 65536 },")
+# Same discard, laundered through a nearer binding of the same name.
+FWD_SHADOW = FWD_GREEN.replace(
+    "        val ctx = ThinkingResolveContext(",
+    "        val maxTokens = 65536\n        val ctx = ThinkingResolveContext(")
+# Derivation probe: renaming the parameter must not change the verdict.
+FWD_RENAMED = FWD_GREEN.replace("maxTokens: Int,", "wireMax: Int,").replace(
+    "maxTokens = maxTokens,", "maxTokens = wireMax,")
+# Fail-closed: the ceiling field disappears / the ctx disappears / the third
+# parameter disappears.
+FWD_NO_FIELD = FWD_GREEN.replace("            maxTokens = maxTokens,\n", "")
+FWD_NO_CTX = FWD_GREEN.replace(
+    '''        val ctx = ThinkingResolveContext(
+            modelId = model.id,
+            level = level,
+            maxTokens = maxTokens,
+        )
+''', "")
+FWD_TWO_PARAMS = FWD_GREEN.replace("        maxTokens: Int,\n", "").replace(
+    "            maxTokens = maxTokens,\n", "").replace(
+    "ThinkingResolveContext(\n            modelId = model.id,",
+    "ThinkingResolveContext(\n            modelId = model.id,")
+
+HELPER_GREEN = '''
+class AnthropicProvider {
+    companion object {
+        fun thinkingBudget(maxTokens: Int, level: ThinkingLevel): Int {
+            val cap = when (level) {
+                ThinkingLevel.OFF -> 0
+                ThinkingLevel.LOW -> 8192
+                ThinkingLevel.MEDIUM -> 32768
+                ThinkingLevel.HIGH -> minOf(maxTokens, 65536)
+                ThinkingLevel.XHIGH,
+                ThinkingLevel.MAX -> maxTokens
+                ThinkingLevel.AUTO -> 0
+            }
+            // Anthropic requires budget_tokens STRICTLY LESS THAN max_tokens.
+            val clamped = minOf(cap, maxTokens)
+            return if (clamped >= maxTokens && maxTokens > 1) maxTokens - 1 else clamped
+        }
+    }
+}
+'''
+
+# Witness #1: the caller stays legal, the helper stops clamping. `:660`'s
+# `budgetTokens < cappedMaxTokens` is then false for every high tier and the
+# thinking block is silently omitted.
+HELPER_RETURN_CAP = HELPER_GREEN.replace(
+    "            val clamped = minOf(cap, maxTokens)\n"
+    "            return if (clamped >= maxTokens && maxTokens > 1) maxTokens - 1 else clamped\n",
+    "            return cap\n")
+# Precision: clamping at the return site is the same guarantee in another shape.
+HELPER_MIN_RETURN = HELPER_GREEN.replace(
+    "            val clamped = minOf(cap, maxTokens)\n"
+    "            return if (clamped >= maxTokens && maxTokens > 1) maxTokens - 1 else clamped\n",
+    "            return minOf(cap, maxTokens)\n")
+# Same discard, two hops: the local is named `clamped` but bound to the cap.
+HELPER_DEAD_CLAMP = HELPER_GREEN.replace(
+    "            val clamped = minOf(cap, maxTokens)\n"
+    "            return if (clamped >= maxTokens && maxTokens > 1) maxTokens - 1 else clamped\n",
+    "            val clamped = cap\n            return clamped\n")
+# Returning the ceiling itself is the illegal pair (budget == max_tokens).
+HELPER_RETURN_MAX = HELPER_GREEN.replace(
+    "            val clamped = minOf(cap, maxTokens)\n"
+    "            return if (clamped >= maxTokens && maxTokens > 1) maxTokens - 1 else clamped\n",
+    "            return maxTokens\n")
+
+TEMP_GREEN = '''
+class AnthropicProvider {
+    private fun buildRequestBody(maxTokens: Int, cappedMaxTokens: Int, body: JSONObject) {
+        val budgetTokens = thinkingBudget(cappedMaxTokens, thinkingLevel)
+        if (budgetTokens > 0 && budgetTokens < cappedMaxTokens) {
+            body.put("thinking", JSONObject().apply {
+                put("type", "enabled")
+                put("budget_tokens", budgetTokens)
+            })
+            if (!modelRejectsTemperature(model.id)) {
+                body.put("temperature", 1)
+            }
+        }
+    }
+}
+'''
+
+# Witness #2: the budget pair is legal, the temperature half of the same
+# contract is not — Anthropic 400s any temperature != 1 with extended thinking.
+TEMP_0_2 = TEMP_GREEN.replace('body.put("temperature", 1)', 'body.put("temperature", 0.2)')
+TEMP_ZERO = TEMP_GREEN.replace('body.put("temperature", 1)', 'body.put("temperature", 0)')
+# Precision: `1f` / `1.0` are the same value to the compiler.
+TEMP_ONE_FLOAT = TEMP_GREEN.replace('body.put("temperature", 1)', 'body.put("temperature", 1.0f)')
+# Precision: omitting the field keeps the API default of 1.
+TEMP_ABSENT = TEMP_GREEN.replace(
+    '''            if (!modelRejectsTemperature(model.id)) {
+                body.put("temperature", 1)
+            }
+''', "")
+# Precision: a temperature outside the thinking block is not this contract's.
+TEMP_OUTSIDE = TEMP_GREEN.replace(
+    '''            if (!modelRejectsTemperature(model.id)) {
+                body.put("temperature", 1)
+            }
+        }
+''', '''        }
+        body.put("temperature", 0.2)
+''')
+
+
+def _selftest_r3():
+    global _R3_ARMS
+    fails = []
+    arms = [
+        ("injector forwards its own wire value", check_inject_forwarding, FWD_GREEN, False),
+        ("injector hands the resolver a literal ceiling (witness #0)",
+         check_inject_forwarding, FWD_LITERAL, True),
+        ("injector launders the ceiling through `.let { literal }`",
+         check_inject_forwarding, FWD_LAUNDERED, True),
+        ("injector re-binds the parameter name to a literal",
+         check_inject_forwarding, FWD_SHADOW, True),
+        ("renamed parameter still forwards the wire value",
+         check_inject_forwarding, FWD_RENAMED, False),
+        ("ctx built without a ceiling field", check_inject_forwarding, FWD_NO_FIELD, True),
+        ("injector builds no ctx at all", check_inject_forwarding, FWD_NO_CTX, True),
+        ("injector signature has no wire argument", check_inject_forwarding, FWD_TWO_PARAMS, True),
+        ("budget helper clamps below its own max", check_budget_helper, HELPER_GREEN, False),
+        ("budget helper returns the unclamped cap (witness #1)",
+         check_budget_helper, HELPER_RETURN_CAP, True),
+        ("budget helper clamps at the return site", check_budget_helper, HELPER_MIN_RETURN, False),
+        ("budget helper binds the cap but calls it `clamped`",
+         check_budget_helper, HELPER_DEAD_CLAMP, True),
+        ("budget helper returns the ceiling itself", check_budget_helper, HELPER_RETURN_MAX, True),
+        ("temperature 1 inside the thinking block", check_temperature_pair, TEMP_GREEN, False),
+        ("temperature 0.2 beside budget_tokens (witness #2)",
+         check_temperature_pair, TEMP_0_2, True),
+        ("temperature 0 beside budget_tokens", check_temperature_pair, TEMP_ZERO, True),
+        ("temperature written as `1.0f`", check_temperature_pair, TEMP_ONE_FLOAT, False),
+        ("temperature omitted entirely", check_temperature_pair, TEMP_ABSENT, False),
+        ("temperature written outside the thinking block", check_temperature_pair, TEMP_OUTSIDE, False),
+    ]
+    _R3_ARMS = len(arms)
+    for label, fn, src, expect_red in arms:
+        try:
+            got = bool(fn(src))
+        except Exception as e:                     # a crash is red, never green
+            fails.append("arm '%s' raised %s: %s" % (label, type(e).__name__, e))
+            continue
+        if got != expect_red:
+            fails.append("arm '%s': expected %s, got %s" % (
+                label,
+                "RED" if expect_red else "GREEN",
+                "RED" if got else "GREEN"))
+    for label, mutated, base in (
+        ("FWD_LITERAL", FWD_LITERAL, FWD_GREEN),
+        ("FWD_LAUNDERED", FWD_LAUNDERED, FWD_GREEN),
+        ("FWD_SHADOW", FWD_SHADOW, FWD_GREEN),
+        ("FWD_RENAMED", FWD_RENAMED, FWD_GREEN),
+        ("FWD_NO_FIELD", FWD_NO_FIELD, FWD_GREEN),
+        ("FWD_NO_CTX", FWD_NO_CTX, FWD_GREEN),
+        ("FWD_TWO_PARAMS", FWD_TWO_PARAMS, FWD_GREEN),
+        ("HELPER_RETURN_CAP", HELPER_RETURN_CAP, HELPER_GREEN),
+        ("HELPER_MIN_RETURN", HELPER_MIN_RETURN, HELPER_GREEN),
+        ("HELPER_DEAD_CLAMP", HELPER_DEAD_CLAMP, HELPER_GREEN),
+        ("HELPER_RETURN_MAX", HELPER_RETURN_MAX, HELPER_GREEN),
+        ("TEMP_0_2", TEMP_0_2, TEMP_GREEN),
+        ("TEMP_ZERO", TEMP_ZERO, TEMP_GREEN),
+        ("TEMP_ONE_FLOAT", TEMP_ONE_FLOAT, TEMP_GREEN),
+        ("TEMP_ABSENT", TEMP_ABSENT, TEMP_GREEN),
+        ("TEMP_OUTSIDE", TEMP_OUTSIDE, TEMP_GREEN),
+    ):
+        if mutated == base:
+            fails.append("arm '%s' did not apply (string replace missed)" % label)
+    return fails, _R3_ARMS
+
+
 def main():
     if "--selftest" in sys.argv:
         fails = selftest()
@@ -1097,6 +1602,15 @@ def main():
         return 2
 
     results = check_source(src)
+    # [R3-t15] The two Anthropic-side seams: the helper's own body (C4) and the
+    # temperature half of the same pairing contract (C5).
+    for crit, viols in (
+        ("C4 thinkingBudget clamps below its own max argument",
+         check_budget_helper(src)),
+        ("C5 temperature == 1 next to budget_tokens",
+         check_temperature_pair(src)),
+    ):
+        results.append((crit, not viols, " / ".join(viols)))
     # [deep-audit-1047 A-01] Two more readers of the same pair contract, in the
     # files the Anthropic-shaped criteria above cannot see. Fail-closed on a
     # missing file: a moved path must read as ROT, never as green.
@@ -1114,6 +1628,13 @@ def main():
             results.append((
                 "C-OAI-1 max_tokens and the thinking budget read the same value",
                 not oai_v, " / ".join(oai_v),
+            ))
+            # [R3-t15] The OpenAI-side seam: what the injector DOES with the
+            # argument C-OAI-1 checked.
+            fwd_v = check_inject_forwarding(extra)
+            results.append((
+                "C-OAI-3 injectThinkingParams forwards its own wire max_tokens",
+                not fwd_v, " / ".join(fwd_v),
             ))
         else:
             res_v = check_resolver_guard(extra)

@@ -97,8 +97,11 @@ GUARD_RE = re.compile(r"\bif\s*\(\s*ok\s*\)")
 # fallback to the raw text.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _kotlin_lexer import analyse                                    # noqa: E402
-from _kotlin_ast import (const_bool, match_bracket, stmt_spans,      # noqa: E402
-                         strip_parens)
+from _kotlin_ast import (const_bool, enclosing_conditions,           # noqa: E402
+                         if_blocks, match_bracket, stmt_spans,
+                         strip_parens, when_branches)
+from _kotlin_valueflow import (call_args, expr_end,                  # noqa: E402
+                               value_sources)
 
 
 class Unparseable(Exception):
@@ -351,6 +354,13 @@ def screen_segment(repo_root):
     # judged the raw text is exactly how `"${"}"}"` promoted a dead `onBack()`.
     seg = mask_strings(src[idx:])
     return seg
+
+
+def screen_source(repo_root):
+    """Raw file text — the arms that need both projections (arm7-arm10)."""
+    path = os.path.join(repo_root, TARGET_REL)
+    with open(path, encoding="utf-8") as f:
+        return f.read()
 
 
 def balanced_block(text, after_idx, opener="{"):
@@ -653,6 +663,340 @@ def run_checks(seg):
     return failures
 
 
+# ── [R3-t19] round-3 (dual-gate bypass) arms ───────────────────────────────
+# The round-3 audit attacked the SEAMS around this gate instead of its arms:
+# every mutation below kept all eight arms above green while the user-visible
+# outcome flipped. Each hole is answered by a criterion that follows the value
+# or the decision, never the spelling.
+#
+#   arm7  `skillRepository.update(…)` must carry the PARSED document's
+#         name/description/body. Witness 47: passing the record being replaced
+#         writes the old text back and still reports `UpdateStatus.Done`.
+#   arm8  `updateFromURL(…)`'s result must drive the status through a branch
+#         that still has a reachable failure path. Witness 46: an
+#         unconditional `Done` turns a 404 into a green check.
+#   arm9  the viewer's async-load early exit must not skip SIBLING files.
+#         Witness 48: `if (!isSkillMd) return@LaunchedEffect` (inverted
+#         polarity) never reads the disk for a script, so the viewer is blank
+#         and Edit stays disabled forever.
+#   arm10 the Edit button must SEED the draft from the loaded base. Witness
+#         45's second half: `editContent = ""` opens a blank editor on a
+#         loaded file, and Save writes the blank back over the real file.
+#
+# arm9/arm10 are the dataflow siblings of arm6: arm6 proves the read lands,
+# these prove the landed value is reachable (arm9) and actually used (arm10).
+
+PARSE_CALL = "parseSkillMdPublic("
+UPDATE_CALL = "skillRepository.update("
+UPDATE_FIELDS = ("name", "description", "body")
+URL_CALL = "updateFromURL("
+SEED_SOURCES = ("initialContent", "loadedDiskBase", "skillFileViewerBase")
+MD_LITERAL = "SKILL.md"
+DONE = "UpdateStatus.Done"
+FAILED = "UpdateStatus.Failed"
+SUCCESS_WORDS = ("Success",)
+FAILURE_WORDS = ("Failure", "PartialSuccess")
+
+
+def _mentions(text, ident):
+    """True when `ident` appears in `text` as a whole identifier."""
+    return re.search(r"(?<![\w.`])" + re.escape(ident) + r"(?![\w`])",
+                     text) is not None
+
+
+def _fold_with(cond, env):
+    """Boolean value of `cond` with boolean identifiers substituted from env.
+
+    The viewer's "is this SKILL.md" flag is a local whose initialiser names the
+    literal; substituting it is how the gate asks the question that matters —
+    *what happens for a sibling file* — instead of "is the string present".
+    Returns None when the condition still cannot be decided (caller is
+    fail-closed).
+    """
+    c = cond
+    for name, val in env.items():
+        c = re.sub(r"(?<![\w.`])" + re.escape(name) + r"(?![\w`])",
+                   "true" if val else "false", c)
+    return _fold_bool(strip_parens(c))
+
+
+def _named_args(code, open_idx):
+    """{name: expr} of the named arguments of the call whose '(' is open_idx."""
+    out = {}
+    for a, b in call_args(code, open_idx):
+        seg = code[a:b]
+        m = re.match(r"\s*([A-Za-z_]\w*)\s*=(?![=>])\s*", seg)
+        if m:
+            out.setdefault(m.group(1), seg[m.end():].strip())
+    return out
+
+
+def _binding_before(code, idx):
+    """Name bound by the `val/var <name> = <receiver>.` immediately before idx.
+
+    Used to recover the identifier a call's result was bound to, whether the
+    binding is a plain `val r = …` or Kotlin's `when (val r = …)`.
+    """
+    if idx < 0:
+        return None
+    for m in reversed(list(re.finditer(
+            r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]{0,60})?=(?!=)",
+            code[:idx]))):
+        between = code[m.end():idx]
+        if "\n" in between.strip():
+            return None
+        if RECEIVER_PREFIX.match(between.strip()):
+            return m.group(1)
+    return None
+
+
+def _enclosing_block(code, pos):
+    """(start, end) of the innermost {...} block containing pos."""
+    depth = 0
+    i = min(pos, len(code) - 1)
+    while i >= 0:
+        ch = code[i]
+        if ch == "}":
+            depth += 1
+        elif ch == "{":
+            if depth == 0:
+                close = match_bracket(code, i)
+                return i, (close if close > 0 else len(code) - 1)
+            depth -= 1
+        i -= 1
+    return 0, len(code) - 1
+
+
+def run_update_carry_checks(code):
+    """arm7: a file update must carry the parsed document, not the old record.
+
+    The judged subject is derived, not listed: the `skillRepository.update(`
+    call that lives in the same block as the `parseSkillMdPublic(` binding. The
+    rename dialog's `update(skill.id, name = trimmed)` is a different decision
+    (it never claims to apply a picked document) and stays out of scope.
+    """
+    failures = []
+    sites = [m.start() for m in re.finditer(re.escape(UPDATE_CALL), code)]
+    if not sites or PARSE_CALL not in code:
+        return failures
+    binding = _binding_before(code, code.find(PARSE_CALL))
+    if binding is None:
+        return [
+            "arm7: `parseSkillMdPublic(` is called but its result is not bound "
+            "(`val <name> = …`) — the picked document cannot be traced into the "
+            "update (fail-closed)"
+        ]
+    b_start, b_end = _enclosing_block(code, code.find(PARSE_CALL))
+    in_block = [s for s in sites if b_start < s < b_end]
+    if not in_block:
+        return [
+            "arm7: no `skillRepository.update(` call in the block that parses the "
+            "picked SKILL.md — the parsed document never reaches the record "
+            "(the file update would report Done and change nothing)"
+        ]
+    for site in in_block:
+        args = _named_args(code, site + len(UPDATE_CALL) - 1)
+        for field in UPDATE_FIELDS:
+            expr = args.get(field)
+            if not expr:
+                failures.append(
+                    "arm7: skillRepository.update( is called without `%s = …` — the "
+                    "parsed %s never reaches the record, so a file update rewrites "
+                    "the old text and still reports Done" % (field, field))
+                continue
+            srcs = value_sources(expr)
+            if not any(_mentions(s, binding) or PARSE_CALL in s for s in srcs):
+                failures.append(
+                    "arm7: skillRepository.update(%s = %s) does not carry the parsed "
+                    "document (expected a value derived from `%s`) — the picked "
+                    "SKILL.md would be discarded behind a green UpdateStatus.Done"
+                    % (field, _norm(expr)[:90], binding))
+    return failures
+
+
+def run_url_result_checks(code):
+    """arm8: the URL update's UpdateResult must drive the status mapping."""
+    failures = []
+    idx = code.find(URL_CALL)
+    if idx < 0:
+        return [
+            "arm8: no `…updateFromURL(` call site in the screen — the 'update from "
+            "URL' entry point lost its subject (fail-closed; swapping the API is a "
+            "deliberate gate edit)"
+        ]
+
+    def _branches(pairs):
+        ok_done = any(any(w in c for w in SUCCESS_WORDS) and DONE in b
+                      for c, b in pairs)
+        ok_fail = any(any(w in c for w in FAILURE_WORDS) and FAILED in b
+                      for c, b in pairs)
+        return ok_done, ok_fail
+
+    direct = [(cond.strip(), code[bs:be])
+              for subject, cond, bs, be in when_branches(code)
+              if URL_CALL in subject and bs > 0]
+    if direct:
+        ok_done, ok_fail = _branches(direct)
+    else:
+        binding = _binding_before(code, idx)
+        if binding is None:
+            return [
+                "arm8: the result of updateFromURL( is discarded — neither "
+                "`when (val r = …)` nor a `val r = …` binding follows, so the "
+                "status cannot depend on Success / PartialSuccess / Failure "
+                "(a 404 would render as a green check)"
+            ]
+        pairs = []
+        for subject, cond, bs, be in when_branches(code):
+            if _mentions(subject, binding) and bs > 0:
+                pairs.append((cond.strip(), code[bs:be]))
+        for cond, t_start, t_end, e_start, e_end in if_blocks(code):
+            if not _mentions(cond, binding):
+                continue
+            pairs.append((cond, code[t_start:t_end]))
+            if e_start is not None:
+                pairs.append(("!" + cond, code[e_start:e_end]))
+        ok_done, ok_fail = _branches(pairs)
+    if not ok_done:
+        failures.append(
+            "arm8: no branch keyed on %s maps to %s — the completion check is not "
+            "tied to the repository's verdict" % ("Success", DONE))
+    if not ok_fail:
+        failures.append(
+            "arm8: no branch keyed on %s maps to %s — a 404 / rate limit / broken "
+            "remote SKILL.md would render as a green 'updated' check"
+            % (" / ".join(FAILURE_WORDS), FAILED))
+    # the same defect in one line: `updateStatus = UpdateStatus.Done` outside any
+    # Success branch is an unconditional success report
+    for m in re.finditer(r"updateStatus\s*=\s*" + re.escape(DONE), code):
+        conds = [c for _kind, c in enclosing_conditions(code, m.start())]
+        if not any(any(w in c for w in SUCCESS_WORDS) for c in conds):
+            failures.append(
+                "arm8: `updateStatus = UpdateStatus.Done` sits outside any Success "
+                "branch — the green check is unconditional (the update result is "
+                "ignored)")
+            break
+    return failures
+
+
+def _enclosing_call(code, name, pos):
+    """(start, close) of the innermost `name(…)` call enclosing pos.
+
+    The span includes a trailing lambda (`Button(…) { … }`), because a Compose
+    label usually lives in the lambda, not in the parenthesised arguments.
+    """
+    start = code.rfind(name, 0, pos)
+    while start >= 0:
+        close = match_bracket(code, start + len(name) - 1)
+        if close > 0:
+            j = skip_ws(code, close + 1)
+            if j < len(code) and code[j] == "{":
+                brace = match_bracket(code, j)
+                if brace > pos:
+                    return start, brace
+        if close > pos:
+            return start, close
+        start = code.rfind(name, 0, start)
+    return None
+
+
+def _one_hop(code, expr):
+    """The initialiser when `expr` is a bare local identifier (one hop)."""
+    ident = expr.strip()
+    if not re.fullmatch(r"[A-Za-z_]\w*", ident):
+        return None
+    m = None
+    for m2 in re.finditer(r"\b(?:val|var)\s+" + re.escape(ident)
+                          + r"\s*(?::[^=\n]{0,60})?=(?!=)", code):
+        m = m2
+    if m is None:
+        return None
+    return code[m.end():expr_end(code, m.end())].strip()
+
+
+def _derives_from_base(code, expr):
+    """True when `expr` (or the local it names) is built from the loaded base."""
+    sources = value_sources(expr)
+    if any(_mentions(s, name) for s in sources for name in SEED_SOURCES):
+        return True
+    hop = _one_hop(code, expr)
+    if hop is None:
+        return False
+    return any(_mentions(s, name) for s in value_sources(hop)
+               for name in SEED_SOURCES)
+
+
+def run_seed_checks(text):
+    """arm9 (sibling path reaches the read) + arm10 (draft seeded from base)."""
+    views = _views(text)
+    code, nc = views["code"], views["comments"]
+    idx = code.find(SCREEN_ANCHOR)
+    if idx < 0:
+        return ["arm9/arm10: %s not found in the screen — fail-closed"
+                % SCREEN_ANCHOR]
+    seg, nc_seg = code[idx:], nc[idx:]
+    failures = []
+
+    # arm9: what does this screen mean by "this file is SKILL.md"?
+    md_m = re.search(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]{0,40})?=\s*[^\n]*"
+                     + re.escape(MD_LITERAL), nc_seg)
+    if md_m is None:
+        failures.append(
+            "arm9: the screen no longer binds a `… = <expr naming \"SKILL.md\">` flag "
+            "— the sibling-file path cannot be decided (fail-closed)")
+    else:
+        md = md_m.group(1)
+        for cond, t_start, t_end, e_start, e_end in if_blocks(seg):
+            if "return@LaunchedEffect" not in seg[t_start:t_end]:
+                continue
+            val = _fold_with(cond, {md: False})
+            if val is None:
+                failures.append(
+                    "arm9: the LaunchedEffect early exit `if (%s) "
+                    "return@LaunchedEffect` cannot be decided for a SIBLING file "
+                    "(fail-closed)" % _norm(cond))
+            elif val is True:
+                failures.append(
+                    "arm9: `if (%s) return@LaunchedEffect` takes the early exit when "
+                    "`%s` is false — a sibling file never reaches the disk read, so "
+                    "`isLoaded` never flips, the viewer stays blank and Edit stays "
+                    "disabled for every script/reference file" % (_norm(cond), md))
+
+    # arm10: the Edit button must seed the draft from the loaded base.
+    label = seg.find("R.string.skill_file_edit")
+    if label < 0:
+        failures.append("arm10: no Edit button (`R.string.skill_file_edit`) found in "
+                        "the viewer — fail-closed")
+    else:
+        span = _enclosing_call(seg, "MinisTextButton(", label)
+        if span is None:
+            failures.append("arm10: the Edit label is not inside a MinisTextButton( "
+                            "call — fail-closed")
+        else:
+            btn = seg[span[0]:span[1] + 1]
+            writes = list(re.finditer(r"\beditContent\s*=(?!=)", btn))
+            if not writes:
+                failures.append(
+                    "arm10: the Edit button never seeds `editContent` — the editor "
+                    "opens on whatever the draft held last time")
+            for m in writes:
+                rhs = btn[m.end():expr_end(btn, m.end())].strip()
+                if not _derives_from_base(seg, rhs):
+                    failures.append(
+                        "arm10: the Edit button seeds `editContent = %s`, which does "
+                        "not come from the loaded base (%s) — the editor opens "
+                        "blank/stale and Save writes that back over the real file"
+                        % (_norm(rhs)[:70], " / ".join(SEED_SOURCES)))
+    return failures
+
+
+def run_round3_checks(text):
+    """Every round-3 arm on one raw file text (arm7-arm10)."""
+    code = _views(text)["code"]
+    return (run_update_carry_checks(code) + run_url_result_checks(code)
+            + run_seed_checks(text))
+
+
 # -- selftest fixtures (trimmed mirror of the fixed screen) --
 
 COMPLIANT = """fun SkillFileViewerScreen(skillId: String, relativePath: String, onBack: () -> Unit) {
@@ -778,7 +1122,7 @@ OFFMAIN_COMPLIANT = """fun SkillFileViewerScreen(skillId: String, relativePath: 
                     MinisTextButton(
                         enabled = isLoaded,
                         onClick = {
-                            editContent = displayContent
+                            editContent = initialContent
                             isEditing = true
                         },
                     ) { Text(stringResource(R.string.skill_file_edit)) }
@@ -922,6 +1266,101 @@ assert SAVE_W4_CONST_COMPARE != OFFMAIN_COMPLIANT, "wide4 arm6c fixture anchor m
 assert SAVE_W4_FLAG_NEVER_FLIPPED != OFFMAIN_COMPLIANT, "wide4 arm6c flip fixture anchor missing"
 assert SAVE_W4_OK_SAVED != COMPLIANT, "wide4 saved-indirection fixture anchor missing"
 
+# ── [R3-t19] round-3 (dual-gate) fixtures ────────────────────────────────
+# Trimmed mirror of `SkillDetailScreen`'s two writers (picked file + URL) plus
+# the viewer scene above. Every fixture carries BOTH scenes so each arm keeps a
+# subject, and each lambda asserts its own splice before the gate sees it.
+DETAIL_OK = """fun SkillDetailScreen(skill: Skill) {
+    val fileUpdateLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    val content = String(bytes, Charsets.UTF_8)
+                    if (content.isBlank()) {
+                        false
+                    } else {
+                        val parsed = skillRepository.parseSkillMdPublic(content)
+                        if (parsed == null) {
+                            false
+                        } else {
+                            skillRepository.update(
+                                id = skill.id,
+                                name = parsed.name,
+                                description = parsed.description,
+                                body = parsed.body,
+                            )
+                        }
+                    }
+                } catch (e: Exception) {
+                    false
+                }
+            }
+            updateStatus = if (ok) UpdateStatus.Done else UpdateStatus.Failed("x")
+        }
+    }
+    DetailRow(clickable = !isBusy, onClick = {
+        scope.launch {
+            updateStatus = when (val r = skillRepository.updateFromURL(skill.id)) {
+                is SkillRepository.UpdateResult.Success -> UpdateStatus.Done
+                is SkillRepository.UpdateResult.PartialSuccess -> UpdateStatus.Failed("Updated, but: ${r.reason}")
+                is SkillRepository.UpdateResult.Failure -> UpdateStatus.Failed(r.reason)
+            }
+        }
+    })
+}
+"""
+URL_WHEN_BLOCK = """            updateStatus = when (val r = skillRepository.updateFromURL(skill.id)) {
+                is SkillRepository.UpdateResult.Success -> UpdateStatus.Done
+                is SkillRepository.UpdateResult.PartialSuccess -> UpdateStatus.Failed("Updated, but: ${r.reason}")
+                is SkillRepository.UpdateResult.Failure -> UpdateStatus.Failed(r.reason)
+            }"""
+
+
+def _detail(replace=None):
+    """The round-3 scene: the detail screen's two writers + the viewer screen.
+
+    Both scenes are always present so every arm keeps its subject; a fixture
+    that dropped the viewer would turn arm9/arm10 into fail-closed noise.
+    """
+    text = DETAIL_OK
+    if replace:
+        old, new = replace
+        assert old in text, "detail fixture lost its anchor: %r" % (old,)
+        text = text.replace(old, new)
+    return text + "\n" + OFFMAIN_COMPLIANT
+
+
+R3_SCENE = _detail()
+R3_POLARITY = _detail().replace(
+    "if (isSkillMd) return@LaunchedEffect",
+    "if (!isSkillMd) return@LaunchedEffect")
+R3_BLANK_SEED = _detail().replace(
+    "editContent = initialContent", 'editContent = ""')
+R3_FIXTURES = [
+    ("round3 scene is fully compliant", R3_SCENE, []),
+    ("arm7 update carries the OLD record", _detail((
+        "name = parsed.name,\n                                description = parsed.description,\n"
+        "                                body = parsed.body,",
+        "name = skill.name,\n                                description = skill.description,\n"
+        "                                body = skill.body,")), ["arm7"]),
+    ("arm7 update drops the body field", _detail((
+        "                                body = parsed.body,\n", "")), ["arm7"]),
+    ("arm8 URL result discarded (unconditional Done)", _detail((
+        URL_WHEN_BLOCK,
+        "            updateStatus = UpdateStatus.Done\n"
+        "            skillRepository.updateFromURL(skill.id)")), ["arm8"]),
+    ("arm8 failure branch removed", _detail((
+        '                is SkillRepository.UpdateResult.PartialSuccess -> UpdateStatus.Failed("Updated, but: ${r.reason}")\n'
+        "                is SkillRepository.UpdateResult.Failure -> UpdateStatus.Failed(r.reason)\n",
+        "")), ["arm8"]),
+    ("arm9 polarity inverted (sibling never read)", R3_POLARITY, ["arm9"]),
+    ("arm10 editor seeded with a blank draft", R3_BLANK_SEED, ["arm10"]),
+]
+
+
 def selftest():
     failures = []
     # compliant fixture: all arms green
@@ -971,6 +1410,15 @@ def selftest():
         red = [a for a in ["arm6a", "arm6b", "arm6c"] if any(a in x for x in got)]
         if red != arms:
             failures.append("%s: expected exactly %s red, got %s" % (name, arms, red))
+    # [R3-t19] round-3 dual-gate arms: each dirty fixture must go red on its own
+    # arm only (a fixture that trips a neighbouring arm is a fake witness).
+    for name, text, arms in R3_FIXTURES:
+        got = run_round3_checks(text)
+        red = [a for a in ("arm7", "arm8", "arm9", "arm10")
+               if any(x.startswith(a + ":") for x in got)]
+        if red != arms:
+            failures.append("%s: expected exactly %s red, got %s (%s)"
+                            % (name, arms, red, got[:2]))
     if failures:
         for x in failures:
             print("SELFTEST FAIL: " + x)
@@ -982,7 +1430,10 @@ def selftest():
         "+ the allowed indirection stays green "
         "(incl. the wide3-08 and wide4 re-attacks: arm2 trailing constant / "
         "short-circuit / scope suffix, arm3 literal pop / `onBack.invoke()` / "
-        "template-brace, arm6c literal-short-circuited and never-flipped gate)"
+        "template-brace, arm6c literal-short-circuited and never-flipped gate) "
+        "+ round3 re-attacks: arm7 old-record carry / dropped field, arm8 dropped "
+        "or fail-open UpdateResult, arm9 inverted sibling early exit, arm10 blank "
+        "draft seed (each flips exactly its own arm)"
     )
     print("SKILL_FILE_SAVE_RESULT_SELFTEST=PASS")
     return 0
@@ -995,19 +1446,22 @@ def main():
     root = args[0] if args else "."
     try:
         seg = screen_segment(root)
+        src = screen_source(root)
+        failures = (run_checks(seg) + run_offmain_checks(seg)
+                    + run_round3_checks(src))
     except Unparseable as exc:
         # fail-closed: an unviewable screen is a violation, never a pass
         print("skill_file_save_result_check: 1 violation(s) in %s" % TARGET_REL)
         print("  - lex: the screen cannot be lexed (%s) — the gate refuses to judge "
               "a broken lexical projection" % exc)
         return 1
-    failures = run_checks(seg) + run_offmain_checks(seg)
     if failures:
         print("skill_file_save_result_check: %d violation(s) in %s" % (len(failures), TARGET_REL))
         for x in failures:
             print("  - " + x)
         return 1
-    print("skill_file_save_result_check: OK (5/5 arms + offmain 3/3) on %s" % TARGET_REL)
+    print("skill_file_save_result_check: OK (5/5 arms + offmain 3/3 + "
+          "round3 4/4) on %s" % TARGET_REL)
     return 0
 
 

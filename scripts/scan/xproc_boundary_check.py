@@ -45,6 +45,39 @@ and each has a negative arm in `--selftest`:
      **every** construction site must carry the key (the worker reconstructs
      LLMModel twice: streaming and non-streaming; one silently-degraded path is
      the defect).
+
+## Judgement, third wave (2026-10-26, round 3 "dual-gate bypass")
+
+Round 3 attacked the seams BETWEEN gates: one edit, every gate green, defect
+live inside the gap. Four of those edits landed in this gate's file set. Each is
+now a criterion of its own (`--selftest` arm named `r3-…`):
+
+  5. A *derived projection* on a boundary model was pinned to a constant
+     (`val supportsAzureMode: Boolean get() = false`). This gate only enumerated
+     the constructor parameters, the write-face gate only pinned
+     `effectiveBaseURL`, and the projection sat in between: every consumer (the
+     UI affordance, the write face that would let `azureMode` become true, the
+     worker's read of `azure_mode`) now sees a fixed answer, so a field that IS
+     carried across the boundary can never take a non-default value. Every
+     Boolean projection declared on a boundary model is now constant-folded; a
+     projection that folds to one value for all inputs is a violation.
+  6. The worker READ the key and then threw the value away
+     (`req.getInt("max_output_tokens").takeIf { false }`). The sender side has
+     judged `_chain_kills` since wide4; the receiver only asked whether a read
+     call existed. The same kill analysis now runs on the worker's read.
+  7. One of the two worker entry points stopped restoring the session state that
+     travels in the same request (`executeRun` dropped
+     `restoreThinkingRules(req)` while the streaming entry kept it), so the
+     global "this key is read somewhere" set stayed non-empty. Restore helpers
+     are now derived from the tree (a worker function taking one
+     `JSONObject`) and **every** entry point that rebuilds a boundary model must
+     call every one of them — the same per-site rule the constructions already
+     have, applied to the session-level half of the request.
+  8. A key read gated a block, and the block then assigned the *neutral*
+     constant (`if (req.optBoolean("enhanced_cache", false)) { …enhancedCache =
+     false }`). The read call and the assignment were both there; the feature was
+     off. A guard on a key's truth value may not be followed by a constant
+     assignment that contradicts it — that block is a no-op.
 """
 import os
 import re
@@ -58,10 +91,15 @@ from _kotlin_ast import (  # noqa: E402
     const_bool,
     const_value,
     enclosing_conditions,
+    function_body,
+    if_blocks,
     match_bracket,
     split_top,
+    stmt_spans,
+    tail_expr,
     when_branches,
 )
+from _kotlin_valueflow import expr_end  # noqa: E402
 
 REPO = sys.argv[1] if len(sys.argv) > 1 else "."
 
@@ -525,19 +563,212 @@ def named_args(st, span):
 READ_CALL_RE = re.compile(r"\b(?:get|opt)[A-Za-z]*\s*\(\s*\"([^\"]+)\"")
 
 
-def key_read_in(rhs, key):
-    """True when this expression actually EXTRACTS the key's value.
+def key_read_problem(rhs, key, base=None, full=None):
+    """None when this expression really CARRIES the key's value, else why not.
 
     [wide4 / construction_spans] `if (req.has("max_output_tokens")) null else
-    null` mentions the key, calls the bundle, and returns a constant: the
-    `has()` probe satisfied the old "the key is read somewhere" test while both
-    branches dropped it. Only `get*`/`opt*` with the key as the first string
-    argument count as extraction; a probe is not a value.
+    null` mentions the key, calls the bundle, and returns a constant: the `has()`
+    probe satisfied the old "the key is read somewhere" test while both branches
+    dropped it. Only `get*`/`opt*` with the key as the first string argument count
+    as extraction; a probe is not a value.
+
+    [r3 / witness #55] Extraction is not enough either.
+    `req.getInt("max_output_tokens").takeIf { false }` extracts the value and
+    then throws it away — the exact shape this gate already refuses on the
+    SENDER side (`_chain_kills`), one hop away. The receiver was judged only by
+    "is there a read call", so the sender/receiver pair disagreed about the same
+    key. The kill analysis now runs with the same code path on both sides, and a
+    read inside dead code (`if (false) …`, an unreachable `when` arm) does not
+    count as a read at all.
     """
     for m in READ_CALL_RE.finditer(rhs):
-        if m.group(1) == key:
+        if m.group(1) != key:
+            continue
+        if base is not None and full is not None and dead_guarded(full, base + m.start()):
+            return ("the key is extracted in dead code (`if (false)` / an "
+                    "unreachable branch), so the value never arrives")
+        kill = _chain_kills(rhs[m.start():])
+        if kill:
+            return "the extracted value is thrown away: " + kill
+        return None
+    return ("the key is never extracted (`has()` is a probe, not a value; a "
+            "constant assignment carries nothing)")
+
+
+def key_read_in(rhs, key):
+    """Backwards-compatible boolean form (see `key_read_problem`)."""
+    return key_read_problem(rhs, key) is None
+
+
+# ── r3 #54: derived projections on a boundary model ──────────────────────────
+DERIVED_BOOL_RE = re.compile(
+    r"\bval\s+(\w+)\s*:\s*Boolean\s*(?:\r?\n\s*)?get\s*\(\s*\)\s*(=|\{)")
+
+
+def _enum_spans(text):
+    out = []
+    for m in re.finditer(r"\benum\s+class\s+\w+[^{]*\{", text):
+        j = match_bracket(text, m.end() - 1)
+        if j > 0:
+            out.append((m.start(), j))
+    return out
+
+
+def derived_boolean_getters(text):
+    """[(name, offset, body-or-None)] for every `val x: Boolean` with a getter.
+
+    `body` is the value expression (expression body) or the concatenation of the
+    block's top-level `return` expressions (block body) — the set of values the
+    property can actually take. Enum entries are skipped: `val isEnabled: Boolean
+    get() = this != OFF` inside an `enum class` is a per-constant predicate, not a
+    projection of a boundary model.
+    """
+    enums = _enum_spans(text)
+    out = []
+    for m in DERIVED_BOOL_RE.finditer(text):
+        if any(a <= m.start() < b for a, b in enums):
+            continue
+        if m.group(2) == "=":
+            start = m.end()
+            out.append((m.group(1), m.start(), text[start:expr_end(text, start)]))
+            continue
+        ob = m.end() - 1
+        cb = match_bracket(text, ob)
+        if cb < 0:
+            out.append((m.group(1), m.start(), None))
+            continue
+        inner = text[ob + 1:cb]
+        exits = [inner[a:b].strip()[len("return"):].strip()
+                 for a, b in stmt_spans(inner)
+                 if inner[a:b].strip().startswith("return")]
+        if not exits:
+            t = tail_expr(inner)
+            if t:
+                exits = [t]
+        out.append((m.group(1), m.start(), "\n".join(exits) if exits else None))
+    return out
+
+
+def constant_projection(body):
+    """The single constant a projection always evaluates to, or None.
+
+    `get() = false` and `get() { return false }` both fold; `get() = if (x)
+    return true else return false` (i.e. the property IS `x`) folds per-exit to
+    two different values and is therefore not constant. `None` means "the value
+    depends on something".
+    """
+    if body is None:
+        return None
+    vals = {const_bool(seg.strip()) for seg in body.split("\n") if seg.strip()}
+    if len(vals) == 1:
+        v = vals.pop()
+        if v is not None:
+            return v
+    return None
+
+
+# ── r3 #56: session-level restores must run on EVERY worker entry point ──────
+FUN_DECL_RE = re.compile(r"\bfun\s+(\w+)\s*\(")
+
+
+def _first_param(params):
+    """(name, type) of a declaration's first parameter, or (None, None)."""
+    parts = split_top(params, (",",))
+    if not parts:
+        return None, None
+    seg = params[parts[0][0]:parts[0][1]].strip()
+    m = re.match(r"(?:@\w+\s+)*(?:\w+\s*:\s*)?(\w+)\s*:\s*([\w<>.? ]+)$", seg)
+    return (m.group(1), m.group(2).strip()) if m else (None, None)
+
+
+def worker_functions(full):
+    """[(name, param_count, first_param_name, first_param_type, body, body_start)].
+
+    Bodies come from the shared `function_body` (it handles expression bodies and
+    default-argument lambdas); a declaration it cannot read is reported with an
+    empty body so the caller's completeness rules fail closed rather than skip.
+    """
+    out = []
+    for m in FUN_DECL_RE.finditer(full):
+        op = m.end() - 1
+        cl = match_bracket(full, op)
+        if cl < 0:
+            continue
+        params = full[op + 1:cl]
+        pname, ptype = _first_param(params)
+        fb = function_body(full, m.group(1))
+        body, bstart = ("", 0) if fb is None else (full[fb[0]:fb[1]], fb[0])
+        out.append((m.group(1), len(split_top(params, (",",))), pname, ptype,
+                    body, bstart))
+    return out
+
+
+def worker_entry_points(full, code):
+    """Worker functions that take the request JSON and rebuild a boundary model.
+
+    Derived, not name-pinned: `executeRun` and `executeStreamingRun` are the two
+    sites today, but the set is whatever the tree says it is — a renamed or newly
+    added entry is caught by the same rule.
+    """
+    names = [g["name"] for g in BOUNDARY_MODELS]
+    out = []
+    for name, pcount, pname, ptype, body, bstart in worker_functions(code):
+        if ptype != "JSONObject" or pcount < 1 or not body:
+            continue
+        if not any(re.search(r"\b%s\s*\(" % re.escape(n), body) for n in names):
+            continue
+        out.append((name, pname, body, bstart))
+    return out
+
+
+def session_restores(full):
+    """Worker helpers that take the request JSON and nothing else."""
+    out = []
+    for name, pcount, pname, ptype, body, bstart in worker_functions(full):
+        if ptype == "JSONObject" and pcount == 1 and body:
+            out.append((name, pname))
+    return out
+
+
+def calls_live(code, entry, callee, pname):
+    """Does `entry` call `callee` on its request argument, in live code?"""
+    _name, _p, body, bstart = entry
+    for m in re.finditer(r"\b%s\s*\(\s*%s\b" % (re.escape(callee), re.escape(pname or "req")),
+                         body):
+        if not dead_guarded(code, bstart + m.start()):
             return True
     return False
+
+
+def guard_contradiction(code, ks):
+    """`if (read(key)) { … x = <neutral constant> }` — the block is a no-op.
+
+    [r3 / witness #59] `if (req.optBoolean("enhanced_cache", false)) {
+    (provider as? AnthropicProvider)?.enhancedCache = false }` reads the key,
+    takes the branch, and then pins the effect to the value that means "off".
+    Both the read call and the assignment are present, so every presence test is
+    satisfied while the feature is dead on that path. The polarity of the guard
+    is what makes the assignment decidable: a positive guard (the key says ON)
+    followed by `= false` (or a `!`-guarded key followed by `= true`) undoes
+    itself, and the whole block collapses to nothing.
+
+    Returns [(key, offset, detail)].
+    """
+    out = []
+    for cond, t_start, t_end, _e_start, _e_end in if_blocks(ks):
+        keys = [m.group(1) for m in READ_CALL_RE.finditer(cond)]
+        if not keys:
+            continue
+        negated = bool(re.search(r"!\s*[\w.]*\s*$", cond[:max(
+            [m.start() for m in READ_CALL_RE.finditer(cond)])]))
+        body = ks[t_start:t_end]
+        for a in re.finditer(r"(?:\?\.|\.)?\s*\b(\w+)\s*=(?!=)\s*(true|false)\b", body):
+            assigned = a.group(2) == "true"
+            if assigned == negated:
+                out.append((keys[0], t_start + a.start(),
+                            "%s = %s under `if (%s)`" % (a.group(1), a.group(2),
+                                                          " ".join(cond.split())[:70])))
+    return out
 
 
 def to_snake(name):
@@ -621,6 +852,30 @@ def evaluate(root):
                 continue
             model_keys[name][f] = want
 
+        # r3 #54: the model's derived PROJECTIONS, not just its fields. A
+        # projection folded to a constant answers the same for every instance,
+        # so the field it gates can never take a non-default value — and it is
+        # exactly the shape that falls in the gap between "the ctor list is
+        # complete" (this gate) and "the read side trims" (the write-face gate).
+        _mks, mst, merr = views_of(src)
+        if mst is None:
+            problems.append("%s: cannot lex the model file (%s) — its projections "
+                            "cannot be judged" % (name, merr))
+        else:
+            for pname, poff, pbody in derived_boolean_getters(mst):
+                folded = constant_projection(pbody)
+                if folded is None:
+                    continue
+                pline = mst.count("\n", 0, poff) + 1
+                problems.append(
+                    "%s.%s folds to `%s` (line %d)" %
+                    (name, pname, "true" if folded else "false", pline))
+                lines.append(
+                    "    FROZEN   %s.%s (line %d) always evaluates to %s — a "
+                    "projection that stops deriving from the instance gates every "
+                    "consumer to one answer" %
+                    (name, pname, pline, "true" if folded else "false"))
+
         status = "OK" if not missing else "GAP"
         lines.append("%-18s %2d fields  ->  %s" % (name, len(fields), status))
         for f, why in missing:
@@ -665,9 +920,10 @@ def evaluate(root):
                 rhs = wks[rs:re_]
                 if ('"%s"' % k) not in rhs:
                     bad.append((k, "`%s` is built without the %r key" % (f, k)))
-                elif not key_read_in(rhs, k):
-                    bad.append((k, "`%s` mentions %r but only probes it (`has`) or "
-                                   "assigns a constant — the value never arrives" % (f, k)))
+                else:
+                    why = key_read_problem(rhs, k, rs, wks)
+                    if why:
+                        bad.append((k, "`%s` mentions %r but %s" % (f, k, why)))
             if bad:
                 line = wst.count("\n", 0, span[0]) + 1
                 lines.append("    SITE     %s(...) at line %d drops %s"
@@ -675,6 +931,49 @@ def evaluate(root):
                 problems.extend("%s site@%d drops %s (%s)" % (name, line, k, why)
                                 for k, why in bad)
                 break
+
+    # ── r3 #56: session-level restores, per entry point ──────────────────────
+    # The ctor arguments are the per-field half of the request; the other half is
+    # process-level state that also travels in the same JSON (`thinking_rules`
+    # restores the worker's resolver cache). The set of keys "read somewhere" in
+    # the worker is therefore satisfied by ONE entry point doing the restore, and
+    # the entry that forgot it degrades silently — the T-worker-thinking-rules
+    # defect, one hop away from the ctor sites this gate already judges per-site.
+    entries = worker_entry_points(wks, wst)
+    if re.search(r":\s*JSONObject\b", wks):
+        if len(entries) < 2:
+            problems.append(
+                "worker: found %d entry point(s) that take the request JSON and "
+                "rebuild a boundary model (%s) — the per-entry restore symmetry "
+                "cannot be judged (parser death or a renamed entry, never a "
+                "silent pass)" %
+                (len(entries), ", ".join(e[0] for e in entries) or "none"))
+        else:
+            for hname, hparam in session_restores(wks):
+                have = [e for e in entries if calls_live(wst, e, hname, hparam)]
+                if not have:
+                    continue
+                for e in entries:
+                    if e in have:
+                        continue
+                    problems.append(
+                        "worker entry %s(%s) never calls %s(%s) while %s does" %
+                        (e[0], e[1], hname, hparam, have[0][0]))
+                    lines.append(
+                        "    ENTRY    %s(...) skips %s(...) — the state that "
+                        "travels in the same request is restored on the other "
+                        "entry and left empty here" % (e[0], hname))
+
+    # ── r3 #59: a key read that gates a block, undone inside it ──────────────
+    for key, off, detail in guard_contradiction(wst, wks):
+        wline = wst.count("\n", 0, off) + 1
+        problems.append(
+            "worker: the guard on %r is undone inside its own block (%s, line %d)" %
+            (key, detail, wline))
+        lines.append(
+            "    UNDONE   `%s` guards a block that assigns the neutral constant "
+            "(%s) at line %d — the branch is a no-op, the feature is off" %
+            (key, detail, wline))
     return problems, lines
 
 
@@ -686,9 +985,14 @@ def main():
     if problems:
         print("== %d cross-process boundary problem(s) ==" % len(problems))
         print("")
-        print("A field on a boundary model that the dispatcher never writes will")
-        print("silently fall back to its default inside the worker. Fix by adding it")
-        print("to ModelExecutionDispatcher, or list it under BENIGN with a reason.")
+        for p in problems:
+            print("   ❌ " + p)
+        print("")
+        print("A field on a boundary model that the dispatcher never writes, a key the")
+        print("worker reads but throws away, a projection that stopped deriving from the")
+        print("instance, or an entry point that skips a restore: all four fall back to a")
+        print("default inside the worker without a single compile error. Fix the carrier")
+        print("(dispatcher / worker / model) or list the field under BENIGN with a reason.")
         return 1
     print("== cross-process boundary OK ==")
     return 0
@@ -752,11 +1056,55 @@ def _fixture(model=MODEL, puts="", worker_tail=WORKER_TAIL, worker_extra=""):
     }
 
 
+def _fixture_json(drop_restore_in=None):
+    """Worker with JSONObject entry points — the real worker's request shape.
+
+    `drop_restore_in` names the entry that forgets the session-level restore
+    (witness #56). Both entries otherwise rebuild LLMModel with every key, so the
+    only difference between the green and the red arm is that one call.
+    """
+    def entry(fname):
+        restore = ("" if drop_restore_in == fname
+                   else "        restoreThinkingRules(req)\n")
+        return (
+            "    private fun %s(req: JSONObject, dir: File): String {\n"
+            "%s"
+            "        val instanceId = req.getString(\"instance_id\")\n"
+            "        val model = LLMModel(\n"
+            "            id = req.getString(\"model_id\"),\n"
+            "            maxOutputTokens = req.getInt(\"max_output_tokens\"),\n"
+            "        )\n"
+            "        return model.id\n"
+            "    }\n" % (fname, restore)
+        )
+
+    worker = (
+        "package com.rikkaminis.app.sandbox.offload\n\n"
+        "class ModelExecutionService {\n"
+        "    private var restored: String = \"\"\n\n"
+        "    private fun restoreThinkingRules(req: JSONObject) {\n"
+        "        restored = req.optString(\"thinking_rules\", \"\")\n"
+        "    }\n\n"
+        + entry("executeRun")
+        + "\n"
+        + entry("executeStreamingRun")
+        + "}\n"
+    )
+    return dict(_fixture(puts='            model.maxOutputTokens?.let '
+                              '{ put("max_output_tokens", it) }\n'),
+                **{B + "sandbox/offload/ModelExecutionService.kt": worker})
+
+
 def selftest():
     import shutil
+
+
+
     failures = []
+    count = [0]
 
     def arm(name, files, want_rc, needle=None):
+        count[0] += 1
         root = _tree(files)
         try:
             problems, lines = evaluate(root)
@@ -849,6 +1197,60 @@ def selftest():
     arm("w4-blank: `)` inside a ${…} template cannot hide later fields",
         _fixture(model=template_model, puts=live_put), 1, "unbridgedNewField")
 
+    # ── r3 witnesses: the four edits that landed in this gate's seams ────────
+    # r3 #54: a derived projection pinned to a constant (the `supportsAzureMode`
+    # shape). Both the ctor list and the read side stay perfect; the answer is
+    # fixed for every instance, so the carried field can never become true.
+    pinned_provider = (
+        "package com.rikkaminis.app.data.model\n\n"
+        "data class ProviderInstance(\n"
+        "    val id: String,\n"
+        ") {\n"
+        "    val supportsAzureMode: Boolean\n"
+        "        get() = false\n"
+        "}\n"
+    )
+    arm("r3-frozen-projection: `get() = false` on a boundary model is red",
+        dict(_fixture(puts=live_put), **{B + "data/model/ProviderConfig.kt": pinned_provider}),
+        1, "supportsAzureMode")
+    # …and the control: a projection that really derives stays green.
+    live_provider = pinned_provider.replace("        get() = false\n",
+                                            "        get() = id.isNotEmpty()\n")
+    arm("r3-frozen-projection: a deriving projection stays green",
+        dict(_fixture(puts=live_put), **{B + "data/model/ProviderConfig.kt": live_provider}),
+        0)
+
+    # r3 #55: the value is READ and then thrown away on the receiving side.
+    arm("r3-read-discarded: `req.getInt(k).takeIf { false }` is red",
+        _fixture(puts=live_put,
+                 worker_tail='            maxOutputTokens = b.getInt("max_output_tokens")'
+                             '.takeIf { false },\n        )\n    }\n}\n'),
+        1, "thrown away")
+
+    # r3 #56: one of two JSON entry points skips the session-level restore.
+    arm("r3-entry-restore: one entry skipping a restore is red",
+        _fixture_json(drop_restore_in="executeRun"), 1, "executeRun")
+    arm("r3-entry-restore: both entries restoring is green",
+        _fixture_json(), 0)
+
+    # r3 #59: the guard on a key is undone inside its own block.
+    arm("r3-guard-undone: `if (optBoolean(k)) { x = false }` is red",
+        _fixture(puts=live_put,
+                 worker_extra='    fun applyCache(b: Bundle, p: Any) {\n'
+                              '        if (b.optBoolean("enhanced_cache", false)) {\n'
+                              '            p.enhancedCache = false\n'
+                              '        }\n'
+                              '    }\n'),
+        1, "enhanced_cache")
+    arm("r3-guard-undone: the honest `= true` stays green",
+        _fixture(puts=live_put,
+                 worker_extra='    fun applyCache(b: Bundle, p: Any) {\n'
+                              '        if (b.optBoolean("enhanced_cache", false)) {\n'
+                              '            p.enhancedCache = true\n'
+                              '        }\n'
+                              '    }\n'),
+        0)
+
     # 7. fail-closed: a missing worker file is a violation, not a clean tree.
     files = _fixture(puts=live_put)
     del files[B + "sandbox/offload/ModelExecutionService.kt"]
@@ -859,7 +1261,7 @@ def selftest():
             print("FAIL  " + f)
         print("XPROC-BOUNDARY SELFTEST=FAIL")
         return 1
-    print(SELFTEST_MARKER)
+    print("%s (%d arms)" % (SELFTEST_MARKER, count[0]))
     return 0
 
 

@@ -87,6 +87,21 @@ carries its own fixtures; all run on the real tree, not on samples.
 Code anchors only — comments are stripped before judgment, so a KDoc that
 mentions `removeAllCookies(null)` does not trip the gate.
 
+[R3-t03] Third-round witness attack (dual-gate seams + one symmetry axis):
+  * W82 every `BrowserUseManager(` construction site must inject the pool-level
+    UA: the `setUserAgent(` on that manager has to derive from the very profile
+    expression the manager was constructed with, and the custom-UA argument
+    must not be a constant (witness: `UserAgentProfile.MOBILE_CHROME, null` —
+    the user's typed UA never reaches a new/restored tab);
+  * W83 the replay must have an EFFECT: `applyViewportToAllTabs` has to loop the
+    live tabs and, inside that loop, reachably apply AND reload each one
+    (witness: loop kept, both calls deleted — five entry points still "call"
+    the replay and nothing changes on screen);
+  * W84 a per-domain delete must carry an expiry instruction in the cookie
+    literal itself (`Max-Age ≤ 0` or a past `Expires`). Witness:
+    `"$it=1; Path=/"` — the call, the flush and the refresh tick are all still
+    there, and the cookie is never expired, so the domain stays listed.
+
 Usage: python3 browser_cookie_ui_refresh_check.py <repo_root>
        python3 browser_cookie_ui_refresh_check.py --root <repo_root>
        python3 browser_cookie_ui_refresh_check.py --selftest
@@ -98,8 +113,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _kotlin_lexer import KotlinLexError, mask_code, mask_comments
-from _kotlin_ast import match_bracket
-from _kotlin_valueflow import expr_end, path_feasible
+from _kotlin_ast import const_value, match_bracket
+from _kotlin_valueflow import (call_args, contains_ident, expr_end, path_feasible,
+                               value_sources)
 
 TARGET = "src/android/app/src/main/java/com/rikkaminis/app/ui/browser/BrowserSettingsSheet.kt"
 POOL_TARGET = "src/android/app/src/main/java/com/rikkaminis/app/browser/BrowserTabPool.kt"
@@ -808,7 +824,215 @@ def check_pool_ua(source: str) -> list:
             "override is clobbered (V7)" % (handler, REPLAY_CALL)
         )
 
+    # ── [R3-t03 W83] 调用存在 ≠ 重放发生 ─────────────────────────────────
+    # 由独立的 check_replay_effect() 负责（它的判据要看整个函数的循环体，
+    # 而本函数的夹具是切片；混在一起会让「合规切片」因为函数体不在切片里
+    # 而被误红）。
     return errs
+
+
+def check_replay_effect(pool_src: str) -> list:
+    """[R3-t03 W83] 五个入口「调用了」重放，不等于重放真的驱动了每个标签页。
+
+    V7 只判 handler 里出现了 `applyViewportToAllTabs()`。把该函数体的
+    `for (tab in _tabs.value) { … }` 掏空（循环保留、两个调用删掉），五个入口
+    仍然全部「调用」了它 —— 体验上是「改了视口设置，所有已开标签页的排版与
+    window.innerWidth 一点没变」。
+    """
+    try:
+        code = mask_code(pool_src)
+    except KotlinLexError as exc:
+        return ["replay-effect: lexer failed (%s) — fail-closed" % exc]
+    return _replay_effect(code)
+
+
+
+def _replay_effect(code: str) -> list:
+    """[R3-t03 W83] `applyViewportToAllTabs` 必须真的驱动每一个活跃标签页。"""
+    target = REPLAY_CALL[:-2]                       # `applyViewportToAllTabs`
+    member = None
+    for m in _pool_members(code):
+        if m["name"] == target:
+            member = m
+            break
+    if member is None:
+        return ["the viewport replay `%s(…)` has no body in %s — five entry points "
+                "call a function that does not exist (fail-closed)"
+                % (target, POOL_TARGET)]
+    body = member["body"]
+    loops = []
+    for m in re.finditer(r"\bfor\s*\(([^)]*)\)\s*\{", body):
+        close = match_bracket(body, m.end() - 1)
+        if close > 0:
+            var = m.group(1).split(" in ", 1)[0].strip()
+            iterable = m.group(1).split(" in ", 1)[1].strip() if " in " in m.group(1) else ""
+            loops.append((var, iterable, m.end() - 1, close))
+    if not loops:
+        return ["`%s` no longer iterates the live tabs — the replay has no loop, so no "
+                "tab's layout is ever re-applied (W83)" % target]
+    out = []
+    for var, iterable, lo, hi in loops:
+        if not iterable:
+            out.append("`%s`'s loop header supplies no collection — fail-closed" % target)
+            continue
+        inner = body[lo:hi]
+        # 循环变量的哪些名字指向它（`val manager = tab.manager` 是正当重构）
+        holders = {var} | set(re.findall(
+            r"(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]*)?=\s*%s\s*\." % re.escape(var),
+            inner))
+        applies = []
+        for name in sorted(holders):
+            applies.extend(_live_hits(inner, r"\b%s\s*\.\s*" % re.escape(name)))
+        applied = [p for p in applies
+                   if re.search(r"\bapplyViewport\s*\(", inner[p:p + 240])]
+        reloads = [p for p in applies
+                   if re.search(r"\breload\w*\s*\(", inner[p:p + 240])]
+        if not applied:
+            out.append(
+                "`%s` loops over the tabs but never calls `%s.….applyViewport(` inside "
+                "the loop — every live tab keeps the old layout (W83)" % (target, var))
+        if not reloads:
+            out.append(
+                "`%s` never reloads `%s` inside the loop — a resize alone does not "
+                "refresh `window.innerWidth/Height` (WebView snapshots the CSS viewport "
+                "at load time), so the new size never reaches the page (W83)"
+                % (target, var))
+    return out
+
+
+MANAGER_CTOR = re.compile(r"\bBrowserUseManager\s*\(")
+
+
+def _member_body(code: str, pos: int):
+    """覆盖 [pos] 的那个成员（`_pool_members` 派生）-> (member, start) 或 (None, -1)。
+
+    返回 start 是该成员体在 [code] 里的起点，调用方用它把全局位置换算成
+    成员体内的局部位置。
+    """
+    offset = 0
+    for m in _pool_members(code):
+        start = code.find(m["body"], offset)
+        if start < 0:
+            continue
+        end = start + len(m["body"])
+        offset = end
+        if start <= pos < end:
+            return m, start
+    return None, -1
+
+
+def check_tab_ua_injection(pool_src: str) -> list:
+    """[R3-t03 W82] 新建 / 恢复的标签页必须继承**池级**的 User-Agent。
+
+    V8 判的是「自定义 UA 有一个单一来源」，而建标签页时的注入点谁都不管：
+    把 `createTab` 里 `manager.setUserAgent(userAgentProfile, customUserAgentString)`
+    改成写死的 `UserAgentProfile.MOBILE_CHROME, null`，用户开了自定义 UA，每
+    新开一个标签页 / 每次会话恢复重建标签，网页收到的又变回默认移动 Chrome。
+
+    判据从树派生：每个 `BrowserUseManager(…)` 构造点 → 取它绑定的变量名和
+    构造时用的 profile 表达式 → 该变量随后的 `setUserAgent(` 必须由同一个
+    profile 派生，且自定义 UA 实参不能是常量 null。
+    """
+    try:
+        code = mask_code(pool_src)
+    except KotlinLexError as exc:
+        return ["tab-ua: lexer failed (%s) — fail-closed" % exc]
+    errs = []
+    ctors = list(MANAGER_CTOR.finditer(code))
+    if not ctors:
+        errs.append(
+            "no `BrowserUseManager(` construction exists in %s — the tab-creation "
+            "surface this criterion pins is gone (ROT: re-pin it)" % POOL_TARGET)
+        return errs
+    for ctor in ctors:
+        line = code.count("\n", 0, ctor.start()) + 1
+        window, member_start = _member_body(code, ctor.start())
+        if window is None:
+            errs.append("the `BrowserUseManager(` at line %d is not inside a member — "
+                        "fail-closed" % line)
+            continue
+        body = window["body"]
+        local = ctor.start() - member_start
+        args = call_args(code, ctor.end() - 1)
+        if len(args) < 2:
+            errs.append("a `BrowserUseManager(` construction has no profile argument "
+                        "(fail-closed)")
+            continue
+        profile = code[args[1][0]:args[1][1]].strip()
+        name = _ctor_variable(body, local)
+        if not name:
+            errs.append("the `BrowserUseManager(` at line %d is not bound to a variable "
+                        "(fail-closed)" % line)
+            continue
+        calls = list(re.finditer(r"\b%s\s*\.\s*setUserAgent\s*\(" % re.escape(name), body))
+        if not calls:
+            errs.append(
+                "`%s` is constructed but never given the pool's User-Agent "
+                "(`%s.setUserAgent(…)`) — a new/restored tab silently runs on the "
+                "webview default instead of the pool's profile (W82)" % (name, name))
+            continue
+        for call in calls:
+            if not _live_hits(body, r"\b%s\s*\.\s*setUserAgent\s*\(" % re.escape(name),
+                              call.start(), call.end()):
+                errs.append(
+                    "`%s.setUserAgent(…)` sits on a statically-dead path — the tab "
+                    "keeps whatever UA the webview was born with (W82)" % name)
+                continue
+            ua_args = call_args(body, call.end() - 1)
+            if not ua_args:
+                errs.append("`%s.setUserAgent(` has no arguments (fail-closed)" % name)
+                continue
+            got_profile = body[ua_args[0][0]:ua_args[0][1]].strip()
+            if not _derives_from(got_profile, profile, body):
+                errs.append(
+                    "`%s.setUserAgent(%s, …)` does not derive from the pool's own "
+                    "profile `%s` (the value the manager was constructed with) — every "
+                    "new or restored tab drops the user's chosen UA (W82)"
+                    % (name, got_profile[:40], profile[:40]))
+            if len(ua_args) > 1:
+                custom = body[ua_args[1][0]:ua_args[1][1]].strip()
+                if const_value(custom) is not None:
+                    errs.append(
+                        "`%s.setUserAgent(…, %s)` passes a constant as the custom UA — "
+                        "a CUSTOM profile can never reach the tab, so the user's typed "
+                        "string is ignored (W82)" % (name, custom[:40]))
+    return errs
+
+
+def _ctor_variable(body: str, ctor_pos: int) -> str:
+    """`val NAME = BrowserUseManager(` 的 NAME（取不到返回 ''）。"""
+    m = re.search(r"([A-Za-z_]\w*)\s*=\s*$", body[max(0, ctor_pos - 200):ctor_pos])
+    return m.group(1) if m else ""
+
+
+def _derives_from(expr: str, source: str, body: str = "") -> bool:
+    """`expr` 的求值是否来自 `source`（裸常量/写死的枚举成员不算）。
+
+    [body] 用来跟一跳局部别名（`val profileForTab = userAgentProfile`）——
+    别名是正当重构，判据必须跟到那一跳，否则「加一行中间变量」就会误红。
+    """
+    e = expr.strip()
+    if const_value(e) is not None:
+        return False
+    if const_value(source) is not None:
+        return False                      # 池级 profile 自己是常量 → 无从派生
+    base = source.split(".")[-1]
+    for _ in range(3):
+        if any(contains_ident(s, base) for s in value_sources(e)):
+            return True
+        if not re.fullmatch(r"[A-Za-z_]\w*", e) or not body:
+            return False
+        m = re.search(r"(?:val|var)\s+%s\s*(?::[^=\n]*)?=\s*" % re.escape(e), body)
+        if not m:
+            return False
+        nxt = body[m.end():expr_end(body, m.end())].strip()
+        if not nxt or nxt == e:
+            return False
+        e = nxt
+        if const_value(e) is not None:
+            return False
+    return False
+
 
 
 def _remember_key_list(code: str, decl_marker: str):
@@ -1005,8 +1229,88 @@ def check(source: str) -> list:
                 "the per-domain delete never bumps cookieRefreshTick inside its own action "
                 "block on a reachable path — hasCookies/allDomains keep their pre-delete "
                 "values, so the removed domain stays on the list (F4)")
+        # ── [R3-t03 W84] 「调了 setCookie」不等于「Cookie 被删掉」──────────
+        # 判据此前只数 setCookie( 的出现与周边 flush/tick。把
+        # `"$it=; Max-Age=0; Path=/"` 改成 `"$it=1; Path=/"`（丢掉过期指令）
+        # 后，调用、flush、tick 全在，UI 也会重组 —— 但 CookieManager 里那条
+        # Cookie 从未过期，域名原封不动留在列表里。判据必须落到**字面量里的
+        # 过期语义**：动作块内的每个 setCookie 都要带 Max-Age ≤ 0 或过去的
+        # Expires。
+        m2 = SET_COOKIE.match(code, pos)
+        if m2 is None:
+            continue
+        value_arg = _cookie_value_arg(lit, m2.end() - 1)
+        if value_arg is None:
+            errs.append(
+                "the per-domain `setCookie(` call has no value argument — it cannot "
+                "carry an expiry instruction (fail-closed)")
+        elif not _expiry_instruction(value_arg):
+            errs.append(
+                "the per-domain `setCookie(url, %s)` carries no expiry instruction "
+                "(Max-Age ≤ 0 or a past Expires) — it writes/refreshes the cookie "
+                "instead of deleting it, so the domain and its cookies stay in the "
+                "list and are served again on the next load (W84)"
+                % value_arg.strip()[:60])
 
     return errs
+
+
+SET_COOKIE = re.compile(r"\bsetCookie\s*\(")
+
+
+def _cookie_value_arg(view: str, open_paren: int):
+    """`setCookie(` 的第 2 个实参（引号感知的顶层逗号切分），或 None。
+
+    不能用 `call_args`：它在**注释视图**上按顶层逗号切，而 `Expires=Thu, 01
+    Jan 1970` 里的逗号在字符串内部 —— 切完只剩 `Expires=Thu`，合法的过期
+    写法会被误判成「没有过期指令」。
+    """
+    close = match_bracket(view, open_paren)
+    if close < 0:
+        return None
+    text = view[open_paren + 1:close]
+    parts, depth, quote, start, i = [], 0, None, 0, 0
+    while i < len(text):
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in "\"'":
+            quote = c
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+        i += 1
+    parts.append(text[start:])
+    return parts[1].strip() if len(parts) > 1 else None
+
+
+def _expiry_instruction(value: str) -> bool:
+    """Cookie 串里是否带「让它过期」的指令。
+
+    `Max-Age` 的数值 ≤ 0，或 `Expires=` 的年份 ≤ 1970（删除 cookie 的两种
+    标准写法）。只认字面量：拼进变量的过期指令无法从树里判定 → 视为没有
+    （fail-closed，让门红而不是静默放行）。
+    """
+    low = value.lower()
+    m = re.search(r"max-age\s*=\s*([+-]?\d+)", low)
+    if m:
+        try:
+            return int(m.group(1)) <= 0
+        except ValueError:
+            return False
+    m = re.search(r"expires\s*=\s*([^;\"]+)", low)
+    if m:
+        ym = re.search(r"\b(19\d\d|20\d\d)\b", m.group(1))
+        return bool(ym) and int(ym.group(1)) <= 1970
+    return False
 
 
 def selftest() -> int:
@@ -1541,6 +1845,111 @@ def selftest() -> int:
          ["does not subscribe to `historyStore.revision`"]),
     ]
 
+    # ── [R3-t03 W82] tab creation must inherit the pool-level UA ───────────
+    good_tab_ua = """
+    private fun createTab(tabs: MutableList<Tab>, url: String? = null): Tab? {
+        val webView = WebView(context)
+        val manager = BrowserUseManager(webView, userAgentProfile)
+        manager.minisSessionId = sessionId
+        if (userAgentProfile == UserAgentProfile.CUSTOM && !customUserAgentString.isNullOrEmpty()) {
+            manager.setUserAgent(userAgentProfile, customUserAgentString)
+        }
+        val (vpW, vpH) = resolvedViewportSize()
+        manager.applyViewport(vpW, vpH)
+        val tab = Tab(id = nextTabId++, manager = manager)
+        tabs.add(tab)
+        return tab
+    }
+    """
+    tab_ua_arms = [
+        ("W82 compliant tab UA inheritance", good_tab_ua, []),
+        # 见证原文：池级 profile 与自定义串双双写死
+        ("W82 witness: hardcoded profile + null custom UA",
+         good_tab_ua.replace("manager.setUserAgent(userAgentProfile, customUserAgentString)",
+                             "manager.setUserAgent(UserAgentProfile.MOBILE_CHROME, null)"),
+         ["does not derive from the pool's own profile",
+          "passes a constant as the custom UA"]),
+        ("W82 profile argument is a hardcoded preset",
+         good_tab_ua.replace("manager.setUserAgent(userAgentProfile, customUserAgentString)",
+                             "manager.setUserAgent(UserAgentProfile.DESKTOP_CHROME, customUserAgentString)"),
+         ["does not derive from the pool's own profile"]),
+        ("W82 custom UA argument is a constant",
+         good_tab_ua.replace("manager.setUserAgent(userAgentProfile, customUserAgentString)",
+                             "manager.setUserAgent(userAgentProfile, \"\")"),
+         ["passes a constant as the custom UA"]),
+        ("W82 the injection is gone entirely",
+         good_tab_ua.replace(
+             "        if (userAgentProfile == UserAgentProfile.CUSTOM && !customUserAgentString.isNullOrEmpty()) {\n"
+             "            manager.setUserAgent(userAgentProfile, customUserAgentString)\n"
+             "        }\n", ""),
+         ["never given the pool's User-Agent"]),
+        ("W82 the injection is dead-wrapped",
+         good_tab_ua.replace(
+             "        if (userAgentProfile == UserAgentProfile.CUSTOM",
+             "        if (false) if (userAgentProfile == UserAgentProfile.CUSTOM"),
+         ["statically-dead path"]),
+        # clean：一跳局部别名是正当重构，判据要跟到别名的那一跳
+        ("clean: pool UA reaches the manager through a local alias",
+         good_tab_ua.replace(
+             "        val manager = BrowserUseManager(webView, userAgentProfile)",
+             "        val manager = BrowserUseManager(webView, userAgentProfile)\n"
+             "        val profileForTab = userAgentProfile\n"
+             "        val customForTab = customUserAgentString").replace(
+             "manager.setUserAgent(userAgentProfile, customUserAgentString)",
+             "manager.setUserAgent(profileForTab, customForTab)"),
+         []),
+    ]
+
+    # ── [R3-t03 W83] the replay must actually drive every live tab ─────────
+    good_replay = """
+    private suspend fun applyViewportToAllTabs() {
+        val (w, h) = resolvedViewportSize()
+        withContext(Dispatchers.Main) {
+            for (tab in _tabs.value) {
+                tab.manager.applyViewport(w, h)
+                tab.manager.reloadAndWait()
+            }
+        }
+    }
+    """
+    replay_arms = [
+        ("W83 compliant replay drives every tab", good_replay, []),
+        # 见证原文：循环留下、效果删掉
+        ("W83 witness: loop body emptied",
+         good_replay.replace("""            for (tab in _tabs.value) {
+                tab.manager.applyViewport(w, h)
+                tab.manager.reloadAndWait()
+            }
+""", """            for (tab in _tabs.value) {
+                // emptied by the witness
+            }
+"""),
+         ["never calls `tab.….applyViewport(`", "never reloads `tab`"]),
+        ("W83 apply without the reload",
+         good_replay.replace("                tab.manager.reloadAndWait()\n", ""),
+         ["never reloads `tab`"]),
+        ("W83 reload without the apply",
+         good_replay.replace("                tab.manager.applyViewport(w, h)\n", ""),
+         ["never calls `tab.….applyViewport(`"]),
+        ("W83 the loop is gone",
+         good_replay.replace("""            for (tab in _tabs.value) {
+                tab.manager.applyViewport(w, h)
+                tab.manager.reloadAndWait()
+            }
+""", ""), ["no longer iterates the live tabs"]),
+        ("W83 the apply is dead-wrapped",
+         good_replay.replace("                tab.manager.applyViewport(w, h)",
+                             "                if (false) tab.manager.applyViewport(w, h)"),
+         ["never calls `tab.….applyViewport(`"]),
+        # clean：循环里先 apply 再 await 的等价写法（用局部 manager）
+        ("clean: per-tab manager bound to a local", good_replay.replace(
+            "                tab.manager.applyViewport(w, h)\n"
+            "                tab.manager.reloadAndWait()",
+            "                val manager = tab.manager\n"
+            "                manager.applyViewport(w, h)\n"
+            "                manager.reloadAndWait()"), []),
+    ]
+
     arms = [
         ("compliant", good_with_comment, []),
         ("V1 callback-less removeAllCookies(null)", bad_nocallback, 1),
@@ -1555,6 +1964,18 @@ def selftest() -> int:
         # [batch5-t05 G07-A5] statically-dead wrapper, same outcome.
         ("F4 per-domain flush+bump dead-wrapped by `if (false)`",
          good_with_comment.replace(good_delete, dead_wrapped_delete[len(compliant):]), 1),
+        # [R3-t03 W84] 调用在、flush 在、tick 在，但过期指令没了 ——
+        # CookieManager 里那条 Cookie 从未失效，域名原封不动留在列表里。
+        ("W84 per-domain delete loses the expiry instruction",
+         good_with_comment.replace('"$it=; Max-Age=0; Path=/"', '"$it=1; Path=/"'), 1),
+        ("W84 per-domain delete only refreshes the value",
+         good_with_comment.replace('"$it=; Max-Age=0; Path=/"',
+                                   '"$it=; Max-Age=3600; Path=/"'), 1),
+        # clean：删除 cookie 的另一种标准写法（过去的 Expires）必须仍绿
+        ("clean: expiry spelled as a past Expires",
+         good_with_comment.replace('"$it=; Max-Age=0; Path=/"',
+                                   '"$it=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/"'),
+         []),
     ]
     failures = 0
     arms_run = 0
@@ -1650,6 +2071,39 @@ def selftest() -> int:
             failures += 1
         else:
             print(f"  OK {name}: {errs}")
+    # ── [R3-t03] 第三轮两条 dual-gate 缝 ───────────────────────────────────
+    for name, sample, needles in tab_ua_arms:
+        arms_run += 1
+        errs = check_tab_ua_injection(sample)
+        if not needles:
+            if errs:
+                print(f"  FAIL {name}: expected green, got {errs}")
+                failures += 1
+            else:
+                print(f"  OK {name}: green")
+            continue
+        hit = [n for n in needles if not any(n in e for e in errs)]
+        if hit or not errs:
+            print(f"  FAIL {name}: expected {needles}, got {errs}")
+            failures += 1
+        else:
+            print(f"  OK {name}: {errs}")
+    for name, sample, needles in replay_arms:
+        arms_run += 1
+        errs = check_replay_effect(sample)
+        if not needles:
+            if errs:
+                print(f"  FAIL {name}: expected green, got {errs}")
+                failures += 1
+            else:
+                print(f"  OK {name}: green")
+            continue
+        hit = [n for n in needles if not any(n in e for e in errs)]
+        if hit or not errs:
+            print(f"  FAIL {name}: expected {needles}, got {errs}")
+            failures += 1
+        else:
+            print(f"  OK {name}: {errs}")
     if failures:
         print(f"SELFTEST FAILED ({failures} arms)")
         return 1
@@ -1694,9 +2148,14 @@ def main() -> int:
     pool_errs = check_pool_ua(pool_src)
     domain_errs = check_domain_refresh(src)
     reset_errs = check_pool_viewport_reset(pool_src)
+    # [R3-t03 W82] tab creation must inherit the pool-level UA.
+    tab_ua_errs = check_tab_ua_injection(pool_src)
+    # [R3-t03 W83] the replay must actually drive every live tab.
+    replay_errs = check_replay_effect(pool_src)
     # [dv23-B4 B-05] V8 — the stored custom UA has one source (pool + sheet).
     ua_errs = check_custom_ua_single_source(pool_src, src)
-    if errs or vp_errs or pool_errs or domain_errs or ua_errs or reset_errs:
+    if (errs or vp_errs or pool_errs or domain_errs or ua_errs or reset_errs
+            or tab_ua_errs or replay_errs):
         print("browser_cookie_ui_refresh_check RED on %s (+ %s):" % (TARGET, POOL_TARGET))
         for e in errs:
             print(f"  - {e}")
@@ -1710,10 +2169,15 @@ def main() -> int:
             print(f"  - [custom-ua] {e}")
         for e in reset_errs:
             print(f"  - [pool-viewport-reset] {e}")
+        for e in tab_ua_errs:
+            print(f"  - [tab-ua] {e}")
+        for e in replay_errs:
+            print(f"  - [replay-effect] {e}")
         return 1
     print(f"browser_cookie_ui_refresh_check OK ({TARGET}; cookie refresh + "
           f"domain-refresh/store-revision + viewport/session-override + UA-pool "
-          f"wiring + custom-UA single source + pool session-viewport reset; "
+          f"wiring + custom-UA single source + pool session-viewport reset + tab-UA "
+          f"inheritance + viewport-replay effect + per-domain cookie expiry; "
           f"{POOL_TARGET} checked too)")
     return 0
 

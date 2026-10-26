@@ -83,6 +83,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _kotlin_lexer import analyse as _analyse  # noqa: E402 (shared lexer)
+from _kotlin_ast import (const_bool, enclosing_conditions,          # noqa: E402
+                         function_body, match_bracket, split_top,
+                         strip_parens)
+from _kotlin_valueflow import (call_args, expr_end, value_sources)  # noqa: E402
 
 SM_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/settings/SkillsManagementScreen.kt"
 CALL = "skillRepository.importFromContent(pasteContent)"
@@ -344,57 +348,28 @@ def _io_wrapped_at(text_nc, text_masked, idx, openers=(OPENER,)):
 IO_OPENERS = (OPENER, "launch(Dispatchers.IO)")
 
 def _match_paren(text, open_idx):
-    """Index of the `)` matching the `(` at open_idx (-1 if none)."""
-    masked = mask_strings(text)
-    depth = 0
-    for i in range(open_idx, len(masked)):
-        if masked[i] == "(":
-            depth += 1
-        elif masked[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
+    """Index of the `)` matching the `(` at open_idx (-1 if none).
+
+    Delegates to the shared bracket matcher (single conforming scanner) — the
+    hand-rolled depth loop this used to carry was the third copy of it.
+    """
+    return match_bracket(mask_strings(text), open_idx)
 
 def _split_top(s, op):
     """Split at depth-0 occurrences of `op` (string literals masked)."""
     masked = mask_strings(s)
-    parts, depth, start, i = [], 0, 0, 0
-    while i < len(masked):
-        c = masked[i]
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        elif depth == 0 and masked.startswith(op, i):
-            parts.append(s[start:i])
-            i += len(op)
-            start = i
-            continue
-        i += 1
-    parts.append(s[start:])
-    return parts
+    return [s[a:b] for a, b in split_top(masked, (op,))]
 
 def _unparen(p):
-    p = p.strip()
-    while p.startswith("(") and p.endswith(")") and _match_paren(p, 0) == len(p) - 1:
-        p = p[1:-1].strip()
-    return p
+    return strip_parens(p)
 
 def _lit_value(part):
-    """True/False when `part` is a bare boolean literal (optionally negated)."""
-    p = _unparen(part)
-    neg = False
-    while p.startswith("!"):
-        neg = not neg
-        p = _unparen(p[1:])
-    if p == "true":
-        v = True
-    elif p == "false":
-        v = False
-    else:
-        return None
-    return (not v) if neg else v
+    """True/False when `part` is decided by literals alone (else None).
+
+    Was a bare `true`/`false` (optionally negated) matcher; now the shared
+    const folder, so `1 == 1` / `"a" == "a"` / `!true` are the same question.
+    """
+    return const_bool(_unparen(part))
 
 def _const_truth(cond):
     """True/False when the condition is decided by literals alone, else None.
@@ -620,17 +595,8 @@ def all_calls_offline(text_nc, text_masked, call):
 
 def _match_brace(masked, j):
     """Index just past the `}` matching the `{` at `j` (masked text)."""
-    depth = 0
-    i = j
-    while i < len(masked):
-        if masked[i] == "{":
-            depth += 1
-        elif masked[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return len(masked)
+    close = match_bracket(masked, j)
+    return len(masked) if close < 0 else close + 1
 
 
 def repo_method_wraps_io(text, name, hops=1):
@@ -1281,6 +1247,221 @@ def check_editor_key_alignment(files):
     return []
 
 
+# ── [R3-t19] round-3 (dual-gate) arms ─────────────────────────────────────
+# The round-3 audit attacked the seams AROUND this gate, not its arms: two
+# mutations kept all fifteen arms green while the user-visible outcome flipped.
+#
+#   arm10  the viewer's base value must BE the loaded disk base on the
+#          sibling-file path (witness 50). This gate already asserts that both
+#          `remember(...)` blocks carry `loadedDiskBase` in their keys; it never
+#          asserted that the value built from those keys is consumed. A
+#          `skillFileViewerBase` that returns "" on the sibling branch keeps
+#          every key green while the viewer is blank AND Save writes the blank
+#          back over the real script.
+#   arm11  the form's assembled OAuth config must carry the custom redirect URI
+#          the user typed (witness 49). The draft state's `remember(editServer)`
+#          re-seed is asserted by mcp_oauth_lifecycle_check C4; the assembly
+#          step that decides whether that value ever leaves the form is not —
+#          `redirectUri = null` silently wipes it on every save.
+#
+# Both follow the value (`value_sources` / const folding on the branch a
+# sibling file takes), never the spelling.
+
+VIEWER_BASE_FUN = "skillFileViewerBase"
+LOADED_PARAM = "loadedDiskBase"
+MCP_CFG_CALL = "MCPOAuthConfig("
+REDIRECT_FIELD = "redirectUri"
+REDIRECT_DRAFT = "oauthRedirectUri"
+MD_FLAG_RE = re.compile(
+    r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]{0,40})?=\s*[^\n]*SKILL\.md")
+
+
+def _named_args(code, open_idx):
+    """{name: expr} of the named arguments of the call whose '(' is open_idx."""
+    out = {}
+    for a, b in call_args(code, open_idx):
+        seg = code[a:b]
+        m = re.match(r"\s*([A-Za-z_]\w*)\s*=(?![=>])\s*", seg)
+        if m:
+            out.setdefault(m.group(1), seg[m.end():].strip())
+    return out
+
+
+def _mentions(text, ident):
+    """True when `ident` appears in `text` as a whole identifier."""
+    return re.search(r"(?<![\w.`])" + re.escape(ident) + r"(?![\w`])",
+                     text) is not None
+
+
+def _subst_fold(cond, env):
+    """Boolean value of `cond` with boolean identifiers substituted from env.
+
+    Substituting the caller-derived "this file is SKILL.md" flag is how the
+    gate asks the only question that matters for a viewer: *what does a
+    sibling file get?* None = undecidable (caller is fail-closed).
+    """
+    c = cond
+    for name, val in env.items():
+        c = re.sub(r"(?<![\w.`])" + re.escape(name) + r"(?![\w`])",
+                   "true" if val else "false", c)
+    return const_bool(strip_parens(c))
+
+
+def _split_else_expr(rest):
+    """then / else halves of `A else B` at depth 0."""
+    masked = mask_strings(rest)
+    depth = 0
+    i = 0
+    while i < len(masked):
+        c = masked[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and re.match(r"\belse\b", masked[i:]):
+            return rest[:i], rest[i + 4:]
+        i += 1
+    return rest, ""
+
+
+def _value_on_path(expr, env, depth=0):
+    """The value expression on the path where `env` holds (if/else folded)."""
+    e = strip_parens(expr.strip())
+    if not e or depth > 4:
+        return e
+    m = re.match(r"if\s*\(", e)
+    if not m:
+        return e
+    close = match_bracket(e, m.end() - 1)
+    if close < 0:
+        return e
+    cond = e[m.end():close]
+    then_part, else_part = _split_else_expr(e[close + 1:].strip())
+    v = _subst_fold(cond, env)
+    if v is True:
+        return _value_on_path(then_part, env, depth + 1)
+    if v is False:
+        return _value_on_path(else_part, env, depth + 1) if else_part.strip() else "Unit"
+    return e
+
+
+def check_viewer_base_carry(files):
+    """arm10: on the sibling path the viewer base must BE the loaded disk base."""
+    text = files.get(EDITOR_REL)
+    if text is None:
+        return ["missing file %s" % EDITOR_REL]
+    nc = strip_comments(text)
+    masked = mask_strings(nc)
+    sig = re.search(r"\bfun\s+" + VIEWER_BASE_FUN + r"\s*\(", masked)
+    if sig is None:
+        return ["%s: `fun %s(` not found — the viewer base lost its subject "
+                "(fail-closed)" % (EDITOR_REL, VIEWER_BASE_FUN)]
+    popen = sig.end() - 1
+    pclose = match_bracket(masked, popen)
+    if pclose < 0:
+        return ["%s: `%s` parameter list is unbalanced — fail-closed"
+                % (EDITOR_REL, VIEWER_BASE_FUN)]
+    params = masked[popen + 1:pclose]
+
+    # Which parameter receives the SKILL.md flag / the loaded base? Derived
+    # from the CALLERS, so a rename of either parameter is not a gate failure.
+    md_flag = MD_FLAG_RE.search(nc)
+    md_param = loaded_param = None
+    for call_m in re.finditer(r"\b" + VIEWER_BASE_FUN + r"\s*\(", masked):
+        if call_m.start() == sig.start():
+            continue
+        for name, expr in _named_args(masked, call_m.end() - 1).items():
+            if md_flag is not None and _mentions(expr, md_flag.group(1)):
+                md_param = md_param or name
+            if _mentions(expr, LOADED_PARAM):
+                loaded_param = loaded_param or name
+    if md_flag is None or md_param is None:
+        return ["%s: no caller passes a `… = <expr naming \"SKILL.md\">` flag into "
+                "`%s` — the sibling path cannot be decided (fail-closed)"
+                % (EDITOR_REL, VIEWER_BASE_FUN)]
+    if loaded_param is None or not re.search(r"\b" + re.escape(loaded_param) + r"\s*:",
+                                             params):
+        return ["%s: no caller passes the loaded disk base into `%s` — fail-closed"
+                % (EDITOR_REL, VIEWER_BASE_FUN)]
+
+    body = function_body(masked, VIEWER_BASE_FUN)
+    if body is None:
+        return ["%s: `%s` body cannot be delimited — fail-closed"
+                % (EDITOR_REL, VIEWER_BASE_FUN)]
+    b_start, b_end, kind = body
+    seg = masked[b_start:b_end]
+    env = {md_param: False}
+
+    def _carries(expr):
+        return any(_mentions(s, loaded_param) for s in value_sources(expr))
+
+    if kind == "expr":
+        value = _value_on_path(seg, env)
+        if not _carries(value):
+            return ["%s: `%s` returns `%s` for a SIBLING file, which does not read "
+                    "`%s` — the viewer renders blank (and Save writes the blank "
+                    "back over the real file)" % (EDITOR_REL, VIEWER_BASE_FUN,
+                                                 " ".join(value.split())[:70],
+                                                 loaded_param)]
+        return []
+
+    reachable = []
+    for rm in re.finditer(r"\breturn\b", seg):
+        live = True
+        for _kind, cond in enclosing_conditions(seg, rm.start()):
+            if _subst_fold(cond, env) is False:
+                live = False
+                break
+        if live:
+            reachable.append(seg[rm.end():expr_end(seg, rm.end())].strip())
+    if not reachable:
+        return ["%s: no `return` in `%s` is reachable for a SIBLING file — "
+                "fail-closed" % (EDITOR_REL, VIEWER_BASE_FUN)]
+    for value in reachable:
+        if not _carries(value):
+            return ["%s: `%s` returns `%s` on a reachable sibling path, which does "
+                    "not read `%s` — the viewer renders blank (and Save writes the "
+                    "blank back over the real file)"
+                    % (EDITOR_REL, VIEWER_BASE_FUN,
+                       " ".join(value.split())[:70], loaded_param)]
+    return []
+
+
+def check_oauth_config_assembly(files):
+    """arm11: the assembled OAuth config must carry the typed redirect URI."""
+    text = files.get(MCP_REL)
+    if text is None:
+        return ["missing file %s" % MCP_REL]
+    nc = strip_comments(text)
+    masked = mask_strings(nc)
+    body = function_body(masked, "currentOAuthConfig")
+    if body is None:
+        return ["%s: `fun currentOAuthConfig()` not found — the form's OAuth "
+                "assembly lost its subject (fail-closed)" % MCP_REL]
+    start, end, _kind = body
+    seg = masked[start:end]
+    cfg = re.search(re.escape(MCP_CFG_CALL), seg)
+    if cfg is None:
+        return ["%s: currentOAuthConfig() no longer builds MCPOAuthConfig( — "
+                "fail-closed" % MCP_REL]
+    args = _named_args(seg, cfg.end() - 1)
+    expr = args.get(REDIRECT_FIELD)
+    if not expr:
+        return ["%s: MCPOAuthConfig( is built without `%s = …` — a custom "
+                "redirect_uri is dropped instead of round-tripped"
+                % (MCP_REL, REDIRECT_FIELD)]
+    if not any(_mentions(s, REDIRECT_DRAFT) for s in value_sources(expr)):
+        return ["%s: MCPOAuthConfig(%s = %s) does not come from the form's draft "
+                "state `%s` — a typed custom redirect_uri never leaves the form, so "
+                "it evaporates on save" % (MCP_REL, REDIRECT_FIELD,
+                                           " ".join(expr.split())[:70],
+                                           REDIRECT_DRAFT)]
+    if not re.search(r"\bvar\s+" + re.escape(REDIRECT_DRAFT) + r"\b", nc):
+        return ["%s: no `var %s` draft state — fail-closed"
+                % (MCP_REL, REDIRECT_DRAFT)]
+    return []
+
+
 def _read(root, rel):
     with open(os.path.join(root, rel), encoding="utf-8") as fh:
         return fh.read()
@@ -1302,6 +1483,8 @@ def run_checks_map(files):
     failures.extend(check_b04_offmain(files))
     failures.extend(check_b03_offmain(files))
     failures.extend(check_seed_effect_keys(files))
+    failures.extend("arm10: " + m for m in check_viewer_base_carry(files))
+    failures.extend("arm11: " + m for m in check_oauth_config_assembly(files))
     for msg in dict.fromkeys(LEX_FAILURES):
         failures.append(msg)
     return failures
@@ -1373,7 +1556,9 @@ def _sm_text(
     initial_keys="skillId, relativePath, skill.updatedAt, loadedDiskBase",
     initial_literal=True,
     extra="",
+    viewer=None,
 ):
+    viewer = DEFAULT_VIEWER if viewer is None else viewer
     paste = (
         "            val r = withContext(Dispatchers.IO) {\n"
         "                skillRepository.importFromContent(pasteContent)\n"
@@ -1407,11 +1592,45 @@ def _sm_text(
         + initial + "\n"
         "    var editContent by remember(" + edit_content_keys + ") { mutableStateOf(initialContent) }\n"
         "    var unrelatedDialog by remember { mutableStateOf(false) }\n"
-        + extra + "}\n"
+        + extra + "}\n" + viewer
     )
 
+# [R3-t19] arm10 fixture scene: the viewer's pure base value + a caller, so the
+# gate derives which parameter carries the SKILL.md flag and which carries the
+# loaded disk base (renaming either is not a gate failure).
+VIEWER_CALLER = (
+    "\nfun viewerCaller(relativePath: String, loadedDiskBase: String?) {\n"
+    "    val isSkillMd = relativePath.equals(\"SKILL.md\", ignoreCase = true)\n"
+    "    val base = skillFileViewerBase(\n"
+    "        isSkillMd = isSkillMd,\n"
+    "        mergedFrontmatter = { \"\" },\n"
+    "        loadedDiskBase = loadedDiskBase,\n"
+    "    )\n"
+    "}\n"
+)
+VIEWER_SIG = ("\nfun skillFileViewerBase(isSkillMd: Boolean, mergedFrontmatter: () -> String, "
+              "loadedDiskBase: String?): String")
+VIEWER_BASE_EXPR = (VIEWER_SIG + " =\n"
+                    '    if (isSkillMd) mergedFrontmatter() else loadedDiskBase ?: ""\n')
+VIEWER_BASE_BLANK = (VIEWER_SIG + " =\n"
+                     '    if (isSkillMd) mergedFrontmatter() else ""\n')
+VIEWER_BASE_POLARITY = (VIEWER_SIG + " =\n"
+                        '    if (!isSkillMd) mergedFrontmatter() else loadedDiskBase ?: ""\n')
+VIEWER_BLOCK_SIG = VIEWER_SIG + " {\n"
+VIEWER_BASE_BLOCK_CLEAN = (VIEWER_BLOCK_SIG
+                           + "    if (isSkillMd) return mergedFrontmatter()\n"
+                           + '    return loadedDiskBase ?: ""\n}\n')
+VIEWER_BASE_BLOCK_BLANK = (VIEWER_BLOCK_SIG
+                           + "    if (isSkillMd) return mergedFrontmatter()\n"
+                           + '    return ""\n}\n')
+VIEWER_BASE_BLOCK_NO_RETURN = (VIEWER_BLOCK_SIG
+                               + "    if (isSkillMd) return mergedFrontmatter()\n}\n")
+DEFAULT_VIEWER = VIEWER_BASE_EXPR + VIEWER_CALLER
 
-def _mcp_text(reload_io=True, oauth_io=True, seed_aligned=True, extra=""):
+
+def _mcp_text(reload_io=True, oauth_io=True, seed_aligned=True, extra="",
+              redirect_uri='oauthRedirectUri.trim().ifBlank { null }',
+              with_redirect_arg=True):
     body = (
         "        withContext(Dispatchers.IO) {\n"
         "            mcpRepository.reloadFromDisk()\n"
@@ -1425,6 +1644,21 @@ def _mcp_text(reload_io=True, oauth_io=True, seed_aligned=True, extra=""):
         "    }\n"
     ) if oauth_io else "    MCPOAuthStore.setClientSecret(context, id, \"\")\n"
     effect_key = "editServer" if seed_aligned else "editServer?.id"
+    # [R3-t19] arm11 scene: the draft state + the assembly step that decides
+    # whether the typed redirect URI ever leaves the form.
+    redirect = ("            redirectUri = " + redirect_uri + ",\n") \
+        if with_redirect_arg else ""
+    oauth_cfg = (
+        "    var oauthRedirectUri by remember(editServer) "
+        "{ mutableStateOf(editServer?.oauth?.redirectUri ?: \"\") }\n"
+        "    fun currentOAuthConfig(): MCPOAuthConfig? {\n"
+        "        val cfg = MCPOAuthConfig(\n"
+        "            clientId = oauthClientId,\n"
+        + redirect +
+        "        )\n"
+        "        return cfg.takeIf { it.isConfigured }\n"
+        "    }\n"
+    )
     return (
         "package com.rikkaminis.app.ui.settings\n\n"
         "fun sample() {\n    LaunchedEffect(Unit) {\n" + body + "    }\n"
@@ -1436,6 +1670,7 @@ def _mcp_text(reload_io=True, oauth_io=True, seed_aligned=True, extra=""):
         + "        }\n"
         + "        oauthClientSecret = s ?: \"\"\n"
         + "    }\n"
+        + oauth_cfg
         + extra
         + "}\n"
     )
@@ -2210,6 +2445,45 @@ W4_FIXTURES = [
 ]
 
 
+# ── [R3-t19] round-3 (dual-gate) fixtures ────────────────────────────────
+# arm10 = viewer base carry, arm11 = OAuth config assembly. Anchor drift is a
+# real hazard here (the fixtures are hand-written mirrors), so each lambda
+# asserts its own splice before handing the text to the gate.
+def _r3_viewer(block):
+    """Attach the caller to a viewer-base variant (asserting the splice)."""
+    assert VIEWER_SIG in block, "viewer-base fixture lost its signature"
+    return _files(sm=_sm_text(viewer=block + VIEWER_CALLER))
+
+
+R3_FIXTURES = [
+    ("arm10 sibling path reads loadedDiskBase (expr)",
+     lambda: _r3_viewer(VIEWER_BASE_EXPR), False, None),
+    ("arm10 sibling path returns \"\" instead",
+     lambda: _r3_viewer(VIEWER_BASE_BLANK), True, "arm10:"),
+    ("arm10 polarity: !isSkillMd takes the md branch",
+     lambda: _r3_viewer(VIEWER_BASE_POLARITY), True, "arm10:"),
+    ("arm10 block body returns loadedDiskBase (clean control)",
+     lambda: _r3_viewer(VIEWER_BASE_BLOCK_CLEAN), False, None),
+    ("arm10 block body returns \"\" on the sibling path",
+     lambda: _r3_viewer(VIEWER_BASE_BLOCK_BLANK), True, "arm10:"),
+    ("arm10 block body has no sibling return (fail-closed)",
+     lambda: _r3_viewer(VIEWER_BASE_BLOCK_NO_RETURN), True, "no `return`"),
+    ("arm10 no caller passes the SKILL.md flag (fail-closed)",
+     lambda: _files(sm=_sm_text(viewer=VIEWER_BASE_EXPR)), True,
+     "no caller passes"),
+    ("arm11 redirectUri comes from the draft (clean)",
+     lambda: _files(), False, None),
+    ("arm11 redirectUri = null wipes the typed value",
+     lambda: _files(mcp=_mcp_text(redirect_uri="null")), True, "arm11:"),
+    ("arm11 redirectUri argument dropped entirely",
+     lambda: _files(mcp=_mcp_text(with_redirect_arg=False)), True, "arm11:"),
+    ("arm11 redirectUri via the draft chain stays legal",
+     lambda: _files(mcp=_mcp_text(
+         redirect_uri="oauthRedirectUri.takeIf { it.isNotBlank() }")),
+     False, None),
+]
+
+
 def selftest():
     ok = True
     f = run_checks_text(GOOD_SM)
@@ -2300,6 +2574,20 @@ def selftest():
             "" if good else "  UNEXPECTED %s" % f[:2]))
         ok &= good
 
+    # [R3-t19] round-3 dual-gate arms: the seam criteria follow values, so each
+    # dirty fixture must go red ON ITS OWN needle (a fixture that trips a
+    # neighbouring arm is a fake witness).
+    for label, make, expect_red, needle in R3_FIXTURES:
+        f = run_checks_map(make())
+        red = len(f) > 0
+        good = (red == expect_red)
+        if good and expect_red and needle:
+            good = any(needle in x for x in f)
+        print("selftest r3-t19 %-46s: %s%s" % (
+            label, "RED" if red else "CLEAN",
+            "" if good else "  UNEXPECTED %s" % f[:2]))
+        ok &= good
+
     # [dv27-A3] A-06 parser arms: the expression-body extractor must take the
     # whole expression and must stop at the next declaration.
     for label, good, detail in _expr_parser_arms():
@@ -2329,10 +2617,11 @@ def main():
         for f in failures:
             print("  - %s" % f)
         sys.exit(1)
-    print("OK %s (15 arms: paste x2, reload-off-main x2, all-repo-calls-off-main x1, "
+    print("OK %s (17 arms: paste x2, reload-off-main x2, all-repo-calls-off-main x1, "
           "editor-keys x3, editor-key-alignment x1, B-04 io-call-off-main x1 "
           "(MCP screen + both sheets), B-04 seed-effect-keys x1, "
-          "B-03 io-call-off-main x1 (env-var screen), fixture gates)"
+          "B-03 io-call-off-main x1 (env-var screen), R3 viewer-base-carry x1, "
+          "R3 oauth-config-assembly x1, fixture gates)"
           % SM_REL)
     sys.exit(0)
 

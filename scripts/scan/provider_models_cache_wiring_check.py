@@ -50,8 +50,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _kotlin_lexer import KotlinLexError
 from _kotlin_ast import (
     const_bool,
+    const_value,
     enclosing_conditions,
     function_body,
+    if_blocks,
     match_bracket,
     split_top,
     stmt_spans,
@@ -59,9 +61,13 @@ from _kotlin_ast import (
 )
 from _kotlin_valueflow import (
     brace_depth,
+    call_args,
     code_view,
+    contains_ident,
     decl_sites,
+    expr_end,
     path_feasible,
+    value_sources,
 )
 
 REPO_REL = "src/android/app/src/main/java/com/rikkaminis/app/data/repository/ProviderRepository.kt"
@@ -244,6 +250,192 @@ def dead_body_reason(body, patterns, verb):
     return None
 
 
+def _registry_params(reg_code):
+    """Parameter names of `ModelListProviderRegistry.fetchModels` (declaration order)."""
+    m = re.search(r"\bfun\s+fetchModels\s*\(", reg_code or "")
+    if m is None:
+        return []
+    close = match_bracket(reg_code, m.end() - 1)
+    if close < 0:
+        return []
+    names = []
+    for a, b in split_top(reg_code[m.end():close], (",",)):
+        nm = re.match(r"\s*([A-Za-z_]\w*)\s*:", reg_code[m.end() + a:m.end() + b])
+        if nm:
+            names.append(nm.group(1))
+    return names
+
+
+def _map_args(code, spans, params):
+    """{param_name: value_text} — positional args consume `params` in order,
+    named args bind by name (and do not consume a position)."""
+    out, idx = {}, 0
+    for a, b in spans:
+        seg = code[a:b].strip()
+        nm = re.match(r"^([A-Za-z_]\w*)\s*=(?!=)\s*(.*)$", seg, re.S)
+        if nm:
+            out[nm.group(1)] = nm.group(2).strip()
+            continue
+        if idx < len(params):
+            out[params[idx]] = seg
+        idx += 1
+    return out
+
+
+def forwarded_value_problems(args, params):
+    """[R3-t20 w36] The call site must forward the CALLER's credential and
+    refresh flag, not constants.
+
+    The gate pinned only the last argument (`context`) — the cache-read door.
+    `forceRefresh = true` closes the SAME door from the other side (every read
+    short-circuits past `cache.load`), and `apiKey = ""` makes the fetch 401 and
+    invalidate the on-disk cache. Both are constants where a caller value is
+    required, so the judgement is "does this argument fold to a constant?".
+    """
+    out = []
+    if not args:
+        return out
+    for name, value in args.items():
+        if name not in ("apiKey", "forceRefresh"):
+            continue
+        cv = const_value(strip_parens(value))
+        if name == "apiKey" and cv is not None:
+            out.append("`apiKey` is the constant `%s` — the per-instance credential the "
+                       "caller loaded is dropped (a hard-coded / empty key makes every "
+                       "fetch fail and invalidate the cache)" % re.sub(r"\s+", " ", value)[:40])
+        if name == "forceRefresh" and cv is not None:
+            out.append("`forceRefresh` is the constant `%s` — the caller's flag is "
+                       "discarded, and `true` skips the 7-day disk-cache read on every "
+                       "call exactly like a dropped context" % re.sub(r"\s+", " ", value)[:40])
+    return out
+
+
+def _comparisons(expr):
+    """[(lhs, op, rhs)] for top-level comparisons (bracket aware)."""
+    out = []
+    i, depth = 0, 0
+    while i < len(expr):
+        ch = expr[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0:
+            op = next((o for o in (">=", "<=", "==", "!=", ">", "<") if expr.startswith(o, i)), None)
+            if op:
+                lhs = expr[:i].strip()
+                rest = expr[i + len(op):]
+                j, d2 = 0, 0
+                while j < len(rest):
+                    c = rest[j]
+                    if c in "([{":
+                        d2 += 1
+                    elif c in ")]}":
+                        d2 -= 1
+                    elif d2 == 0 and (rest.startswith("&&", j) or rest.startswith("||", j)):
+                        break
+                    j += 1
+                out.append((lhs, op, rest[:j].strip()))
+                i += len(op)
+                continue
+        i += 1
+    return out
+
+
+def ttl_decision_problems(body):
+    """[R3-t20 w37] The expiry test must be a DECISION about the entry's age.
+
+    `if (now - savedAt >= 0L) return null` keeps the read call, the decode and
+    the return, and pins the cache to "always expired" by comparing the entry
+    age against a non-positive constant. The threshold has to be a duration
+    (the TTL), not a literal that decides the outcome on its own.
+    """
+    out = []
+    if body is None:
+        return out
+    for cond, ts, te, _es, _ee in if_blocks(body):
+        then = body[ts:te]
+        if not re.search(r"\breturn\b", then):
+            continue
+        for lhs, op, rhs in _comparisons(cond):
+            if "savedAt" not in lhs and "savedAt" not in rhs:
+                continue
+            other = rhs if "savedAt" in lhs else lhs
+            cv = const_value(strip_parens(other))
+            if cv is not None and cv[0] == "num" and cv[1] <= 0:
+                out.append("the cache-expiry guard compares the entry age against the "
+                           "constant `%s` (`%s %s %s`) — the outcome does not depend on "
+                           "when the entry was saved, so every read expires the cache"
+                           % (other.strip(), lhs.strip()[:40], op, rhs.strip()[:20]))
+    return out
+
+
+_EMPTY_HIT_RE = re.compile(
+    r"^(?:empty(?:List|Set|Sequence|Array)(?:<[^>]*>)?|listOf|setOf|arrayOf|sequenceOf)"
+    r"\s*\(\s*\)$")
+
+
+def payload_return_problems(body):
+    """[R3-t20 w38] On a hit, `load` must return what it read.
+
+    A cache that reads, decodes and then returns `emptyList()` (or a constant)
+    is inert in the opposite direction from a dropped context: callers see a
+    non-null miss forever. The gate pinned the read/write/delete calls, never
+    the value that leaves `load`.
+    """
+    if body is None:
+        return []
+    payload = set()
+    for m in re.finditer(r"(?<![\w.])val\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)", body):
+        start = m.end()
+        rhs = body[start:expr_end(body, start)]
+        if any(tok in rhs for tok in READ_CALLS):
+            payload.add(m.group(1))
+    for m in re.finditer(r"\breturn\b(?!@)", body):
+        if not path_feasible(body, m.start()):
+            continue
+        val = body[m.end():expr_end(body, m.end())].strip()
+        if not val:
+            continue
+        if any(tok in val for tok in READ_CALLS):
+            return []
+        flat = re.sub(r"\s+", "", val)
+        if _EMPTY_HIT_RE.match(flat):
+            continue
+        for src in value_sources(val):
+            if any(contains_ident(src, p) for p in payload):
+                return []
+    return ["`load` never returns the value it read: no reachable `return` names the "
+            "decoded payload (only null / an empty collection) — a hit is indistinguishable "
+            "from a miss"]
+
+
+def fetch_reaches_store(code, call_pos):
+    """[R3-t20 w13] The list the fetch returned must reach the model store.
+
+    `replaceEntries(instance.id, emptyList())` keeps the fetch, the cache write
+    and the success result green while deleting every entry of the instance
+    (and the compact pin with it). Same Rail as the arguments above: the value
+    the chain produces has to be the value the next hop consumes.
+    """
+    name = None
+    for m in re.finditer(r"(?<![\w.])val\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)", code[:call_pos]):
+        name = m.group(1)
+    for m in re.finditer(r"(?<![\w.])replaceEntries\s*\(", code):
+        if re.search(r"\bfun\s+$", code[:m.start()]):
+            continue
+        for a, b in call_args(code, m.end() - 1):
+            val = code[a:b].strip()
+            flat = re.sub(r"\s+", "", val)
+            if _EMPTY_HIT_RE.match(flat):
+                continue
+            if name and contains_ident(val, name):
+                return True, name
+            if "fetchModels(" in val:
+                return True, val
+    return False, name or "?"
+
+
 def analyse(repo, registry, adapters, cache):
     """Returns list of (criterion, ok, detail, file, line). ok=True = held."""
     res = []
@@ -284,6 +476,28 @@ def analyse(repo, registry, adapters, cache):
             "the production call site forwards `context` as its last argument",
             ok,
             detail,
+            REPO_REL,
+            line,
+        ))
+        # [R3-t20 w36] …and the OTHER arguments must be the caller's values.
+        reg_names = _registry_params(view(registry) or "")
+        amap = _map_args(clean, args, reg_names)
+        reaches, src = fetch_reaches_store(clean, open_paren)
+        res.append((
+            "the fetched model list is handed to the store (replaceEntries)",
+            reaches,
+            "fetch result `%s` never reaches replaceEntries( — the store gets a "
+            "constant instead" % src if not reaches else "handoff source `%s`" % src,
+            REPO_REL,
+            line,
+        ))
+        fwd = forwarded_value_problems(amap, reg_names)
+        res.append((
+            "the production call site forwards the caller's `apiKey` and "
+            "`forceRefresh` (not constants)",
+            not fwd,
+            "; ".join(fwd) if fwd else "argument map=%s" % (
+                {k: v[:24] for k, v in amap.items()},),
             REPO_REL,
             line,
         ))
@@ -443,6 +657,27 @@ def analyse(repo, registry, adapters, cache):
             0,
         ))
 
+    # ── 4c. [R3-t20 w37/w38] the read path's DECISIONS ──
+    load_span = function_body(cache_code, "load")
+    load_body = cache_code[load_span[0]:load_span[1]] if load_span else None
+    ttl = ttl_decision_problems(load_body)
+    res.append((
+        "ProviderModelsCache.load's expiry test is a decision about the entry age "
+        "(threshold is the TTL, not a constant)",
+        not ttl,
+        "; ".join(ttl) if ttl else "expiry compares the age against a duration",
+        CACHE_REL,
+        0,
+    ))
+    payload = payload_return_problems(load_body)
+    res.append((
+        "ProviderModelsCache.load returns the decoded payload on a hit",
+        not payload,
+        "; ".join(payload) if payload else "payload returned",
+        CACHE_REL,
+        0,
+    ))
+
     span = function_body(cache_code, "cacheDir")
     cachedir = cache_code[span[0]:span[1]] if span else None
     res.append((
@@ -465,6 +700,9 @@ class Repo(private val context: android.content.Context) {
             ModelListProviderRegistry.fetchModels(instance, apiKey, false, forceRefresh, context)
         } catch (e: Exception) {
             emptyList<Any>()
+        }
+        if (models.isNotEmpty()) {
+            replaceEntries(instance.id, models)
         }
     }
 }
@@ -500,7 +738,10 @@ object Adapters {
 
 COMPLIANT_CACHE = '''package probe
 
-class ProviderModelsCache(private val namespace: String) {
+class ProviderModelsCache(
+    private val namespace: String,
+    private val ttlMs: Long = 604800000L,
+) {
     private fun cacheDir(context: android.content.Context) = java.io.File(context.cacheDir, "models-cache/$namespace")
 
     private fun keyFile(context: android.content.Context, key: String) = java.io.File(cacheDir(context), "$key.json")
@@ -508,7 +749,9 @@ class ProviderModelsCache(private val namespace: String) {
     fun load(context: android.content.Context, key: String): List<Any>? {
         val file = keyFile(context, key)
         if (!file.isFile) return null
-        return runCatching { file.readText() }.getOrNull()
+        val entry = runCatching { decodeFromString<Entry>(file.readText()) }.getOrNull() ?: return null
+        if (System.currentTimeMillis() - entry.savedAt > ttlMs) return null
+        return entry.models
     }
 
     fun save(context: android.content.Context, key: String, models: List<Any>) {
@@ -606,6 +849,32 @@ _breaker(13, "cache", [(
     "        runCatching { keyFile(context, key).delete() }\n",
     "        if (0 == 1) runCatching { keyFile(context, key).delete() }\n")],
          "ProviderModelsCache.invalidate actually deletes the cache file")
+
+
+# ── R3-t20 witnesses: the three values this revision did not look at ──────
+# 14) w36 — the call keeps `context` and forwards a hard-coded key + forced
+# refresh: the cache read door is closed from the other side.
+_breaker(14, "repo", [("fetchModels(instance, apiKey, false, forceRefresh, context)",
+                       'fetchModels(instance, "", false, true, context)')],
+         "the production call site forwards the caller's `apiKey` and "
+         "`forceRefresh` (not constants)")
+
+# 15) w37 — the expiry test folds to "always expired" while every read/decode
+# call stays reachable.
+_breaker(15, "cache", [("entry.savedAt > ttlMs) return null",
+                       "entry.savedAt >= 0L) return null")],
+         "ProviderModelsCache.load's expiry test is a decision about the entry age "
+         "(threshold is the TTL, not a constant)")
+
+# 16) w38 — load reads, decodes and returns nothing: a hit looks like a miss.
+_breaker(16, "cache", [("        return entry.models\n", "        return emptyList()\n")],
+         "ProviderModelsCache.load returns the decoded payload on a hit")
+
+
+# 17) w13 — the fetch stays green and the store is handed a constant empty list.
+_breaker(17, "repo", [("            replaceEntries(instance.id, models)\n",
+                       "            replaceEntries(instance.id, emptyList())\n")],
+         "the fetched model list is handed to the store (replaceEntries)")
 
 
 def selftest():

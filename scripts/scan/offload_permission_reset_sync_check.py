@@ -17,6 +17,21 @@ level after such a change.
      keyless `remember { mutableStateOf(OffloadPermissionManager.getLevel(...)) }`
      (which froze the first-composition value, so "Reset All" left the whole
      page showing the old levels), and both rows subscribe to the signal.
+  5. [R3-t17] setLevel must WRITE the key getLevel READS, and resetAll must
+     clear it (templates compared with the interpolation normalised, so a
+     consistent rename stays green while write/read drift does not);
+  6. [R3-t17] checkPermission's ASK_ONCE decision must consult the session
+     caches with the right polarity (`x in grants ⇒ true`,
+     `x in denials ⇒ false`);
+  7. [R3-t17] the dialog's answer must be applied in the direction the user
+     chose (`ALLOW_SESSION ⇒ grants.add + true`, `DENY_SESSION ⇒ denials.add
+     + false`).
+
+Criteria 5-7 close the WRITE side of the same contract: criteria 1-4 pin where
+a change must LAND, 5-7 pin that it lands in the place the reader looks and
+that the session verdicts it feeds point the right way. They were witnessed
+individually green by dual-gate bypasses (#30/#31 lie between this gate and
+auto_approve_bypass_check; #32 is a symmetric gap inside this gate).
 
 Bodies are followed through the helpers they call (depth-capped), so an
 implementation that extracts `clearAllSessionGrants()` / `clearToolSessionState()`
@@ -38,6 +53,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _kotlin_ast as _ast          # noqa: E402  (shared Kotlin primitives)
 import _kotlin_lexer as _lex        # noqa: E402  (shared Kotlin lexer)
+import _kotlin_valueflow as _vf     # noqa: E402  (shared value flow)
 
 MANAGER = "src/android/app/src/main/java/com/rikkaminis/app/offload/OffloadPermissionManager.kt"
 SCREEN = "src/android/app/src/main/java/com/rikkaminis/app/ui/settings/OffloadPermissionScreen.kt"
@@ -68,50 +84,22 @@ def strip_comments(src: str) -> str:
 
 
 def _match_paren(text: str, open_idx: int):
-    """Index of the `)` matching the `(` at [open_idx] (literal-aware)."""
-    depth = 0
-    i, n = open_idx, len(text)
-    while i < n:
-        ch = text[i]
-        if ch in "\"'":
-            j = i + 1
-            while j < n and text[j] != ch and text[j] != "\n":
-                if text[j] == "\\":
-                    j += 1
-                j += 1
-            i = j + 1
-            continue
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-        i += 1
-    return None
+    """Index of the `)` matching the `(` at [open_idx]; None when unbalanced.
+
+    [R3-t17] This used to be a hand-written quote/brace state machine — the same
+    machinery every other gate in this repo was forced to delete because the
+    witnesses broke it in the same three ways (raw strings, nested block
+    comments, `${…}` templates). It now delegates to the shared Kotlin matcher;
+    an unbalanced source yields None and the caller fails closed.
+    """
+    j = _ast.match_bracket(text, open_idx)
+    return j if j >= 0 else None
 
 
 def _match_brace(text: str, open_idx: int):
-    depth = 0
-    i, n = open_idx, len(text)
-    while i < n:
-        ch = text[i]
-        if ch in "\"'":
-            j = i + 1
-            while j < n and text[j] != ch and text[j] != "\n":
-                if text[j] == "\\":
-                    j += 1
-                j += 1
-            i = j + 1
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return i
-        i += 1
-    return None
+    """Index of the `}` matching the `{` at [open_idx]; None when unbalanced."""
+    j = _ast.match_bracket(text, open_idx)
+    return j if j >= 0 else None
 
 
 def _body_span_of(src: str, header: str):
@@ -189,28 +177,13 @@ def fold_bool(expr: str):
 
 
 def _stmt_span(src: str, i: int):
-    """End offset (exclusive) of the statement starting at [i]."""
-    n = len(src)
-    while i < n and src[i] in " \t\r\n":
-        i += 1
-    if i >= n:
-        return n
-    if src[i] == "{":
-        end = _match_brace(src, i)
-        return (end + 1) if end is not None else n
-    depth = 0
-    while i < n:
-        ch = src[i]
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            depth -= 1
-            if depth < 0:
-                return i
-        elif ch == "\n" and depth == 0:
-            return i + 1
-        i += 1
-    return n
+    """End offset (exclusive) of the statement starting at [i].
+
+    Delegates to the shared `_branch_extent` (brace block, or a single statement
+    up to the first depth-0 newline that is not a continuation) instead of the
+    local depth counter this gate used to carry.
+    """
+    return _ast._branch_extent(src, i)
 
 
 def _blank_region(src: str, start: int, end: int) -> str:
@@ -486,20 +459,241 @@ def bumps_revision(text: str) -> bool:
     return False
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# [R3-t17] The WRITE side of the same contract (the criteria above pin where a
+# change must land; these pin that it lands in the same place the reader looks,
+# and that the session verdicts it feeds point the right way).
+# ────────────────────────────────────────────────────────────────────────────
+
+KEY_READ_RE = re.compile(r'\bgetString\s*\(\s*"((?:[^"\\]|\\.)*)"')
+KEY_WRITE_RE = re.compile(r'\bputString\s*\(\s*"((?:[^"\\]|\\.)*)"')
+KEY_REMOVE_RE = re.compile(r'\bremove\s*\(\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _norm_key(literal: str) -> str:
+    """A prefs key template with its interpolation NORMALISED.
+
+    `"level_$toolName"` (read/write) and `"level_${tool.toolName}"` (resetAll's
+    per-tool remove) are the same key; the gate compares TEMPLATES, so renaming
+    the key everywhere stays green while the two sides drifting apart does not.
+    """
+    out = re.sub(r"\$\{[^}]*\}", "$", literal)
+    return re.sub(r"\$[A-Za-z_][A-Za-z0-9_]*", "$", out)
+
+
+def _fun_views(code: str, lit: str, header: str):
+    """(code_view, literal_view) of `header`'s block body, or (None, "")."""
+    open_b, close_b = _body_span_of(code, header)
+    if open_b is None:
+        return None, ""
+    return code[open_b:close_b + 1], lit[open_b:close_b + 1]
+
+
+def live_keys_problem(code: str, lit: str) -> list:
+    """Is the level STORED where it is READ?
+
+    [R3-t17] #30 · dual-gate with auto_approve_bypass_check (both rc=0). The
+    seam sat between `getLevel` (which auto_approve_bypass_check C3 pins) and
+    `setLevel` (which this gate pins): both functions were individually intact,
+    and the KEY they agreed on was nobody's business. `putString("level_
+    override_$toolName", …)` therefore kept nine green criteria while every
+    user-level change became a no-op — the row and the decision both kept
+    reading `level_$toolName` and falling back to `info.defaultLevel`.
+    """
+    out = []
+    _, read_lit = _fun_views(code, lit, "fun getLevel(")
+    _, write_lit = _fun_views(code, lit, "fun setLevel(")
+    _, reset_lit = _fun_views(code, lit, "fun resetAll(")
+    if not read_lit:
+        return ["getLevel() not found — the key it reads cannot be judged (fail-closed)"]
+    reads = {_norm_key(k) for k in KEY_READ_RE.findall(read_lit)}
+    if not reads:
+        out.append("getLevel() reads no stored level key — a saved level could never "
+                   "be honoured (fail-closed: expected `<prefs>.getString(…)`)")
+    for key in sorted(reads):
+        if "$" not in key:
+            out.append("getLevel() reads the CONSTANT key %r — every tool would share "
+                       "one stored level" % key)
+    if not write_lit:
+        out.append("setLevel() not found — the key it writes cannot be judged (fail-closed)")
+    else:
+        writes = {_norm_key(k) for k in KEY_WRITE_RE.findall(write_lit)}
+        if not writes:
+            out.append("setLevel() writes no level key at all — the change is dropped")
+        elif reads and writes != reads:
+            out.append(
+                "setLevel() writes %s but getLevel() reads %s — the change is stored "
+                "where nothing looks, so every level edit silently reverts to the "
+                "default (the row and checkPermission both re-read the reader's key)"
+                % (sorted(writes), sorted(reads)))
+    if not reset_lit:
+        out.append("resetAll() not found — the key it clears cannot be judged (fail-closed)")
+    else:
+        removes = {_norm_key(k) for k in KEY_REMOVE_RE.findall(reset_lit)}
+        stale = reads - removes
+        if stale:
+            out.append(
+                "resetAll() does not clear the stored level key(s) %s — 'Reset All' "
+                "leaves a level the reader still honours" % sorted(stale))
+    return out
+
+
+_MEMBERSHIP_RE = re.compile(r"^\s*([A-Za-z_]\w*(?:\s*\.\s*\w+)*)\s+(in|!in)\s+"
+                            r"([A-Za-z_]\w*)\s*$")
+_CONTAINS_RE = re.compile(r"^\s*([A-Za-z_]\w*(?:\s*\.\s*\w+)*)\s*\.\s*contains\s*\("
+                          r"\s*([A-Za-z_]\w*)\s*\)\s*$")
+_SESSION_STORES = ("grants", "denials")
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _unwrap_block(text: str) -> str:
+    """`{ a(); b() }` (with a possibly trailing newline) -> `a(); b()`."""
+    t = text.strip()
+    if t.startswith("{"):
+        close = _ast.match_bracket(t, 0)
+        if close > 0:
+            return t[1:close]
+    return t
+
+
+def _strip_block(text: str) -> str:
+    """`{ a(); b() }` -> `a(); b()`; whitespace squashed."""
+    t = _squash(text)
+    if t.startswith("{") and t.endswith("}"):
+        t = _squash(t[1:-1])
+    return t
+
+
+def _membership_problems(body: str) -> list:
+    """The ASK_ONCE decision must READ the session caches, the right way round.
+
+    [R3-t17] #31 · dual-gate with auto_approve_bypass_check (both rc=0). Both
+    gates pinned how the caches are CLEARED and what the resolved level is;
+    the test that consumes them (`if (toolName in grants) return true`) was
+    outside every criterion, so inverting it (`!in`) made every ASK_ONCE tool
+    run without a dialog — no auto-approve switch, default install.
+    """
+    out = []
+    seen = {"grants": 0, "denials": 0}
+    for cond, t_start, t_end, _e_start, _e_end in _ast.if_blocks(body):
+        if not any(store in cond for store in _SESSION_STORES):
+            continue
+        m = _MEMBERSHIP_RE.match(_squash(cond))
+        if m is not None:
+            _subject, op, store = m.group(1), m.group(2), m.group(3)
+        else:
+            c = _CONTAINS_RE.match(_squash(cond))
+            if c is None or c.group(1) not in _SESSION_STORES:
+                out.append(
+                    "checkPermission() decides on `%s`, which is not a plain "
+                    "membership test over the session caches — the gate cannot tell "
+                    "which way the verdict points (fail-closed)" % _squash(cond)[:70])
+                continue
+            store, op = c.group(1), "in"
+        seen[store] += 1
+        then = _strip_block(body[t_start:t_end])
+        want_value = "true" if store == "grants" else "false"
+        if op == "!in":
+            out.append(
+                "checkPermission()'s %s test is INVERTED (`%s`): a tool that was "
+                "NEVER %s returns %s — every ASK_ONCE tool runs without the dialog"
+                % (store, _squash(cond)[:60], "granted" if store == "grants" else "denied",
+                   want_value))
+        elif then != "return " + want_value:
+            out.append(
+                "checkPermission()'s %s test answers `%s`, expected `return %s` — the "
+                "session verdict is applied backwards"
+                % (store, then[:60], want_value))
+    for store, count in sorted(seen.items()):
+        if count == 0:
+            out.append(
+                "checkPermission() never consults `%s` — a %s verdict recorded for "
+                "this session is ignored (the decision moved out of the reader, or the "
+                "short-circuit was removed)" % (store, store[:-1]))
+    return out
+
+
+# The two arms whose ANSWER is a security decision: ALLOW_SESSION must record a
+# grant and answer true; DENY_SESSION must record a denial and answer false.
+_RESPONSE_ARMS = {
+    "Response.ALLOW_SESSION": (("grants",), ("denials",), "true"),
+    "Response.DENY_SESSION": (("denials",), ("grants",), "false"),
+}
+
+
+def _response_arm_problems(body: str) -> list:
+    """The dialog's answer must be applied in the direction the user chose.
+
+    [R3-t17] #32 · single-gate symmetric gap. Every criterion above watches the
+    caches being cleared and the level being resolved; none watched what the
+    Response arm WRITES. `Response.DENY_SESSION -> { grants.add(toolName); true }`
+    runs the call the user just refused and auto-allows the rest of the session.
+    """
+    out = []
+    arms = {}
+    for _subject, cond, b_start, b_end in _ast.when_branches(body):
+        label = re.sub(r"\s+", "", cond)
+        if label in _RESPONSE_ARMS:
+            arms[label] = body[b_start:b_end]
+    for label in sorted(_RESPONSE_ARMS):
+        want_add, forbid_add, want_value = _RESPONSE_ARMS[label]
+        arm = arms.get(label)
+        if arm is None:
+            out.append("checkPermission() has no `%s ->` arm — the user's answer is "
+                       "not handled (fail-closed: anchor drift)" % label)
+            continue
+        adds = set(re.findall(r"\b([A-Za-z_]\w*)\s*\.\s*add\s*\(", arm))
+        tail = _strip_block(_ast.tail_expr(_unwrap_block(arm)))
+        problems = []
+        if want_add[0] not in adds:
+            problems.append("never records the verdict in `%s`" % want_add[0])
+        for store in forbid_add:
+            if store in adds:
+                problems.append("records the verdict in the OPPOSITE store `%s`" % store)
+        if tail != want_value:
+            problems.append("evaluates to `%s` instead of `%s`" % (tail[:40], want_value))
+        if problems:
+            out.append(
+                "checkPermission()'s `%s ->` arm %s — the user's explicit choice is "
+                "applied BACKWARDS (the call they answered is decided the other way, "
+                "and the session cache remembers the wrong verdict)"
+                % (label, " and ".join(problems)))
+    return out
+
+
+def permission_decision_problems(code: str, defined) -> list:
+    """Criteria 6+7 over checkPermission's block body (helpers followed)."""
+    body = body_of(code, "fun checkPermission(")
+    if not body.strip():
+        return ["checkPermission() not found — the permission DECISION cannot be "
+                "judged (fail-closed)"]
+    expanded = expand(code, body, defined)
+    return _membership_problems(expanded) + _response_arm_problems(expanded)
+
+
 def check(manager_raw: str, screen_raw: str) -> list:
     # [wide4 parser-death] Lex first, and refuse to judge a file whose strings /
     # comments we could not follow: `mask_code()` raises on an unterminated
     # literal, and a gate that silently fell back to the raw text would read
     # prose as code. Fail-closed = a violation, never a green.
     views = {}
+    lits = {}
     for label, raw in ((MANAGER, manager_raw), (SCREEN, screen_raw)):
         ok, reason, v = _lex.analyse(raw)
         if not ok:
             return [f"{label}: cannot be lexed ({reason}) — the gate refuses to judge "
                     f"a file whose strings/comments it cannot follow"]
         views[label] = v["code"]
+        # [R3-t17] the SharedPreferences KEY lives inside a string literal, which
+        # the code view blanks — the key-agreement criterion needs the
+        # literal-kept view (same length, so one offset indexes both).
+        lits[label] = v["comments"]
     mgr = views[MANAGER]
     screen = views[SCREEN]
+    mgr_lit = lits[MANAGER]
     defined = set(FUN_RE.findall(mgr))
     errs = []
 
@@ -566,6 +760,26 @@ def check(manager_raw: str, screen_raw: str) -> list:
                 f"{SCREEN} keys only {len(keys)} remember(...) on revision, expected >= 2 "
                 "(AgentPolicyRow and PermissionRow each own their level state)"
             )
+    # ── 5. a level change must be stored where the reader READS ──────────────
+    # [R3-t17] #30 (dual-gate with auto_approve_bypass_check, both green): every
+    # criterion above anchors the PLACES a change must reach; nobody checked
+    # that the key setLevel WRITES and the key getLevel READS are the same key.
+    # Writing `level_override_$toolName` kept "setLevel persists the level" and
+    # "setLevel clears the cache" green while every user choice fell back to the
+    # default (the row and checkPermission both re-read `level_$toolName`).
+    errs.extend(live_keys_problem(mgr, mgr_lit))
+
+    # ── 6. the session verdicts point the RIGHT WAY ──────────────────────────
+    # [R3-t17] #31: the gate policed the CLEARING of sessionGrants/sessionDenials
+    # but never the DECISION that fills them, so an inverted membership test
+    # (`if (toolName !in grants) return true`) admitted every tool that had
+    # never been granted — no auto-approve switch needed.
+    # ── 7. …and so does the dialog's answer ─────────────────────────────────
+    # [R3-t17] #32: `Response.DENY_SESSION -> { grants.add(toolName); true }`
+    # runs the call the user just refused and auto-allows the rest of the
+    # session; the clearing-side criteria cannot see the write side.
+    errs.extend(permission_decision_problems(mgr, defined))
+
     return errs
 
 
@@ -599,6 +813,47 @@ _HELPERS = """
     private fun bumpRevision() {
         _revision.update { it + 1 }
     }
+
+    // [R3-t17] the READER and the DECISION the write-side criteria judge. The
+    // fixture used to stop at setLevel/resetAll, which is exactly why the
+    // witnesses #30-#32 could sit in the gap with every arm green.
+    fun getLevel(toolName: String): PermissionLevel {
+        val stored = prefs.getString("level_$toolName", null)?.let {
+            try { PermissionLevel.valueOf(it) } catch (_: Exception) { null }
+        }
+        return stored ?: PermissionLevel.ASK_ONCE
+    }
+
+    enum class Response { ALLOW_SESSION, ALLOW_ONCE, DENY_SESSION }
+
+    suspend fun checkPermission(toolName: String, toolTitle: String, sessionId: String): Boolean {
+        val level = getLevel(toolName)
+        return when (level) {
+            PermissionLevel.BYPASS -> true
+            PermissionLevel.NOT_ALLOWED -> false
+            PermissionLevel.ASK_ONCE -> {
+                val denials = sessionDenials.computeIfAbsent(sessionId) { java.util.concurrent.ConcurrentHashMap.newKeySet() }
+                if (toolName in denials) return false
+                val grants = sessionGrants.computeIfAbsent(sessionId) { java.util.concurrent.ConcurrentHashMap.newKeySet() }
+                if (toolName in grants) return true
+                val allowed = when (respond(toolName)) {
+                    Response.ALLOW_SESSION -> {
+                        grants.add(toolName)
+                        true
+                    }
+                    Response.ALLOW_ONCE -> true
+                    Response.DENY_SESSION -> {
+                        denials.add(toolName)
+                        false
+                    }
+                    null -> false
+                }
+                allowed
+            }
+        }
+    }
+
+    private suspend fun respond(toolName: String): Response? = null
 """
 
 _GOOD_RESET = """
@@ -946,6 +1201,58 @@ private fun RegressionRow(toolName: String) {
         "does not clear the in-memory session caches",
     ))
 
+    # ── [R3-t17] the WRITE side: key agreement + verdict direction ─────────
+    arms.append((
+        "t17-V10 setLevel writes a key nothing reads (witness #30)",
+        _manager(set_level=_GOOD_SET.replace('"level_$toolName"',
+                                             '"level_override_$toolName"')),
+        _GOOD_SCREEN, 1,
+        "setLevel() writes",
+    ))
+    arms.append((
+        "t17-V10b the reader spells the SAME key with braces (control)",
+        _manager(helpers=_HELPERS.replace('prefs.getString("level_$toolName"',
+                                          'prefs.getString("level_${toolName}"')),
+        _GOOD_SCREEN, 0,
+    ))
+    arms.append((
+        "t17-V11 the ASK_ONCE grant test is inverted (witness #31)",
+        _manager(helpers=_HELPERS.replace(
+            "if (toolName in grants) return true",
+            "if (toolName !in grants) return true")),
+        _GOOD_SCREEN, 1,
+        "INVERTED",
+    ))
+    arms.append((
+        "t17-V11b the denial test answers true (verdict reversed)",
+        _manager(helpers=_HELPERS.replace(
+            "if (toolName in denials) return false",
+            "if (toolName in denials) return true")),
+        _GOOD_SCREEN, 1,
+        "applied backwards",
+    ))
+    arms.append((
+        "t17-V12 DENY_SESSION grants and answers true (witness #32)",
+        _manager(helpers=_HELPERS.replace(
+            "                    Response.DENY_SESSION -> {\n"
+            "                        denials.add(toolName)\n"
+            "                        false\n"
+            "                    }",
+            "                    Response.DENY_SESSION -> {\n"
+            "                        grants.add(toolName)\n"
+            "                        true\n"
+            "                    }")),
+        _GOOD_SCREEN, 1,
+        "applied BACKWARDS",
+    ))
+    arms.append((
+        "t17-V12b the session-cache test removed from the decision (fail-closed)",
+        _manager(helpers=_HELPERS.replace(
+            "                if (toolName in grants) return true\n", "")),
+        _GOOD_SCREEN, 1,
+        "never consults `grants`",
+    ))
+
     failures = 0
     for arm in arms:
         name, mgr, screen, expect = arm[:4]
@@ -964,6 +1271,7 @@ private fun RegressionRow(toolName: String) {
     if failures:
         print(f"SELFTEST FAILED ({failures} arms)")
         return 1
+    print("OFFLOAD_PERMISSION_RESET_SYNC_SELFTEST_ARMS=%d" % len(arms))
     print(MARKER)
     return 0
 

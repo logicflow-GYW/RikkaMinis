@@ -124,7 +124,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _kotlin_ast import const_bool, if_blocks, match_bracket  # noqa: E402
+from _kotlin_ast import const_bool, if_blocks, match_bracket, split_top  # noqa: E402
 from _kotlin_lexer import KotlinLexError  # noqa: E402
 from _kotlin_valueflow import (  # noqa: E402
     call_args,
@@ -146,6 +146,9 @@ PREVIEW_SHORTCUT_REL = (
 RESOLVER_REL = "src/android/app/src/main/java/com/rikkaminis/app/webapp/WebAppPathResolver.kt"
 
 # --- compliant / violation fixture snippets (code-level, not comments) ---
+
+SHEET_CREATE_BLOCK = ('                    val entity = when (source) {\n                        is WebAppSource.ChatAttachment -> {\n                            val htmlPath = "$shortcutId/${target.name}"\n                            app.webAppShortcutRepository.create(htmlPath = htmlPath)\n                        }\n                        is WebAppSource.HostFile -> {\n                            app.webAppShortcutRepository.create(htmlPath = source.linuxPath)\n                        }\n                    }\n')
+
 
 COMPLIANT_ACTIVITY = """package com.rikkaminis.app.webapp
 
@@ -226,6 +229,50 @@ class WebAppActivity {
     }
     private fun isAssetHost(url: Uri): Boolean =
         url.host == ASSET_LOADER_HOST
+
+    // [R3-t02 06-1] the staged payload: one staging function, two consumers.
+    private fun openInExternalBrowser(context: android.content.Context, file: File) {
+        lifecycleScope.launch {
+            val uri = stagedShareUri(context, file) ?: run {
+                toastBrowserMissing()
+                return@launch
+            }
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "text/html")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        }
+    }
+
+    private fun shareWebAppFile(context: android.content.Context, file: File) {
+        lifecycleScope.launch {
+            val uri = stagedShareUri(context, file) ?: run {
+                toastBrowserMissing()
+                return@launch
+            }
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "text/html"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            ExternalIntent.share(context, send, chooserTitle)
+        }
+    }
+
+    private suspend fun stagedShareUri(context: android.content.Context, file: File): Uri? {
+        return try {
+            val staged = withContext(Dispatchers.IO) {
+                val shareDir = File(context.cacheDir, "share").apply { mkdirs() }
+                val s = File(shareDir, "${file.nameWithoutExtension}.html")
+                file.copyTo(s, overwrite = true)
+                s
+            }
+            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", staged)
+        } catch (t: Throwable) {
+            null
+        }
+    }
 }
 """
 
@@ -271,6 +318,9 @@ COMPLIANT_SHEET = """package com.rikkaminis.app.webapp
 
 @Composable
 fun AddToHomeSheet(source: WebAppSource, onDismiss: () -> Unit) {
+    // [R3-t02 06-2] the copied attachment lives at
+    // <attachmentsDir>/<shortcutId>/<fileName>; htmlPath stays relative to it.
+    val attachmentsDir = File(context.filesDir, "webapp-attachments/$shortcutId").apply { mkdirs() }
     val cleanupCopiedAttachment = {
         if (!pinned) f.delete()
         Unit
@@ -316,7 +366,15 @@ fun AddToHomeSheet(source: WebAppSource, onDismiss: () -> Unit) {
                         cleanupCopiedAttachment()
                         return@launch
                     }
-                    val entity = app.webAppShortcutRepository.create(htmlPath = "x")
+                    val entity = when (source) {
+                        is WebAppSource.ChatAttachment -> {
+                            val htmlPath = "$shortcutId/${target.name}"
+                            app.webAppShortcutRepository.create(htmlPath = htmlPath)
+                        }
+                        is WebAppSource.HostFile -> {
+                            app.webAppShortcutRepository.create(htmlPath = source.linuxPath)
+                        }
+                    }
                     val ok = ShortcutPinner.pin(context, entity, iconBitmap)
                     if (ok) {
                         pinned = true
@@ -1255,6 +1313,119 @@ def enclosing_live_io(code: str, idx: int) -> bool:
 
 
 
+# --- [R3-t02 06-x] the seams between the staged file and its consumers -----
+#
+# Round 3 attacked the places where two arms meet:
+#   06-1  `stagedShareUri` copies the file and `shareWebAppFile` attaches the
+#         uri — two halves in two functions, one subject. Deleting
+#         `putExtra(Intent.EXTRA_STREAM, uri)` (or staging an empty file) left
+#         both arms' criteria intact while the recipient got nothing.
+#   06-2  `htmlPath` must name a file INSIDE the directory that was staged:
+#         `"$shortcutId/${target.name}"` → `target.name` publishes a shortcut
+#         whose html sits one directory up, so the WebApp shows the missing
+#         source page while the sheet's own cleanup arms stay green.
+#   06-3  every `SCOPE_*` arm of `resolve` must delegate: `SCOPE_SESSION_
+#         ATTACHMENT -> null` keeps the when exhaustive and the function shape
+#         identical, and every attachment-scoped WebApp silently dies.
+
+STAGE_FN = "stagedShareUri"
+SHARE_FN = "shareWebAppFile"
+BROWSER_FN = "openInExternalBrowser"
+EXTRA_STREAM_RE = re.compile(r"\bputExtra\s*\(\s*Intent\.EXTRA_STREAM\s*,")
+SET_DATA_RE = re.compile(r"\bsetData(?:AndType)?\s*\(")
+SCOPE_ARM_RE = re.compile(r"\bSCOPE_[A-Z_]+\s*->")
+
+
+def _bound_to(code: str, fn: str):
+    """Names bound to `fn( … )` anywhere in [code]."""
+    pat = r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+?)?=\s*" + re.escape(fn) + r"\s*\("
+    return {m.group(1) for m in re.finditer(pat, code)}
+
+
+def _hands_over(code: str, bound, sink_re):
+    """Does some [sink_re] call receive a WHOLE argument from [bound]?"""
+    for m in sink_re.finditer(code):
+        open_paren = code.index("(", m.start())
+        for a, b in call_args(code, open_paren):
+            if code[a:b].strip() in bound:
+                return True
+    return False
+
+
+def check_activity_arm15(src: str) -> bool:
+    """arm15 — the shared / previewed payload IS the file that was staged."""
+    code = code_view(src)
+    bodies = fun_spans(code)
+    stage = bodies.get(STAGE_FN)
+    if not stage or not re.search(r"\bcopyTo\s*\(", stage):
+        return False                    # staging no longer copies the content
+    if re.search(r"\bwriteText\s*\(", stage):
+        return False                    # …but writes a placeholder instead
+    share = bodies.get(SHARE_FN)
+    browser = bodies.get(BROWSER_FN)
+    if not share or not browser:
+        return False                    # an anchor moved → fail-closed
+    if not _hands_over(share, _bound_to(share, STAGE_FN), EXTRA_STREAM_RE):
+        return False
+    return _hands_over(browser, _bound_to(browser, STAGE_FN), SET_DATA_RE)
+
+
+CHAT_ATTACHMENT_RE = re.compile(r"\bChatAttachment\b")
+BRANCH_BOUNDARY_RE = re.compile(r"\bis\s+WebAppSource\.|\belse\s*->")
+
+
+def check_sheet_arm16(src: str) -> bool:
+    """arm16 — a copied attachment's `htmlPath` must live inside its staging dir."""
+    code = code_view(src)
+    lit = literal_view(src)
+    prefixes = set()
+    for m in re.finditer(r"\bFile\s*\(", code):
+        for a, b in call_args(code, code.index("(", m.start())):
+            # a templated path SEGMENT (`…/attachments/$shortcutId`), not a bare
+            # file name (`$stem.html`) — only the former says where the file lives
+            prefixes.update(re.findall(r"/[^/\"$]*\$([A-Za-z_]\w*)", lit[a:b]))
+    if not prefixes:
+        return False                    # no templated staging directory → fail-closed
+    judged = 0
+    for m in CHAT_ATTACHMENT_RE.finditer(code):
+        end = len(code)
+        for boundary in BRANCH_BOUNDARY_RE.finditer(code, m.end()):
+            end = boundary.start()
+            break
+        for h in re.finditer(r"\bhtmlPath\s*=(?!=)", code[m.end():end]):
+            judged += 1
+            start = m.end() + h.end()
+            # `expr_end` is measured from a position INSIDE the call, so a named
+            # argument runs past its own comma; cut at the first top-level comma.
+            pieces = split_top(code[start:expr_end(code, start)], (",",))
+            stop = start + (pieces[0][1] if pieces else 0)
+            value = lit[start:stop].strip()
+            if re.fullmatch(r"[A-Za-z_]\w*", value):
+                value = _local_rhs(lit, value, start) or ""
+            if not any(re.search(r'"\$' + re.escape(p) + r"/", value) for p in prefixes):
+                return False
+    return judged > 0
+
+
+def check_resolver_arm17(src: str) -> bool:
+    """arm17 — every `SCOPE_*` arm of `resolve` must delegate somewhere."""
+    code = code_view(src)
+    body = fun_spans(code).get("resolve")
+    if not body:
+        return False
+    arms = list(SCOPE_ARM_RE.finditer(body))
+    if len(arms) < 2:
+        return False                    # the when collapsed → fail-closed
+    for i, m in enumerate(arms):
+        end = arms[i + 1].start() if i + 1 < len(arms) else len(body)
+        arm_body = body[m.end():end]
+        if not re.search(r"[A-Za-z_]\w*\s*\(", arm_body):
+            return False                # `-> null` / `-> Unit` / empty arm
+        if re.fullmatch(r"\s*(null|Unit)\s*[}\n]*", arm_body):
+            return False
+    return True
+
+
 def check_activity_failure_guard(src: str) -> bool:
     """arm11 — `renderSourceMissing(` is the guarded failure of the resolve."""
     code = code_view(src)
@@ -1350,6 +1521,14 @@ def _evaluate_sources(act, sheet, pinner, preview, resolver):
         failures.append("arm11")
     if not check_activity_resolve_offmain(act):
         failures.append("arm12")
+    # [R3-t02] the staged file ↔ its two consumers, the htmlPath prefix, and the
+    # scope-arm delegation (each was green while its half was gutted).
+    if not check_activity_arm15(act):
+        failures.append("arm15")
+    if not check_sheet_arm16(sheet):
+        failures.append("arm16")
+    if not check_resolver_arm17(resolver):
+        failures.append("arm17")
     return failures
 
 
@@ -1358,11 +1537,12 @@ def run_on_tree(root: str) -> int:
     if failures:
         print(f"[webapp-asset-url] FAIL arms={','.join(failures)}")
         return 1
-    print("[webapp-asset-url] PASS all 15 arms "
+    print("[webapp-asset-url] PASS all 18 arms "
           "(asset-url single source ×2, sheet cleanup ×2, fullscreen single source ×2, "
           "title seed + user-edit guard ×1, pin verdict ×2, decode off the "
           "composition thread ×1, sheet in-flight guard ×1, sheet close latch ×1, "
-          "mount cold-start snapshot retry ×3)")
+          "mount cold-start snapshot retry ×3, staged payload ×1, htmlPath prefix ×1, "
+          "scope-arm delegation ×1)")
     return 0
 
 def selftest() -> int:
@@ -1414,6 +1594,48 @@ def selftest() -> int:
                 ok = False
             else:
                 print(f"[webapp-asset-url] selftest ok case={name} ({'pass' if passed else 'fail'})")
+        # [R3-t02] the three round-3 seams: each violation must trip its OWN arm
+        # and leave the other two green (a seam arm that fires together with
+        # everything else tells us nothing about which half broke).
+        for name, act, sheet, resolver, want in (
+            ("r3-drop-extra-stream",
+             COMPLIANT_ACTIVITY.replace(
+                 "                putExtra(Intent.EXTRA_STREAM, uri)\n", ""),
+             COMPLIANT_SHEET, COMPLIANT_RESOLVER, (True, False, False)),
+            ("r3-empty-staging",
+             COMPLIANT_ACTIVITY.replace(
+                 "                file.copyTo(s, overwrite = true)\n",
+                 '                s.writeText("")\n'),
+             COMPLIANT_SHEET, COMPLIANT_RESOLVER, (True, False, False)),
+            ("r3-htmlpath-bare-name", COMPLIANT_ACTIVITY,
+             COMPLIANT_SHEET.replace(
+                 'val htmlPath = "$shortcutId/${target.name}"',
+                 "val htmlPath = target.name"),
+             COMPLIANT_RESOLVER, (False, True, False)),
+            ("r3-scope-arm-returns-null", COMPLIANT_ACTIVITY, COMPLIANT_SHEET,
+             COMPLIANT_RESOLVER.replace(
+                 "SCOPE_SESSION_ATTACHMENT -> resolveSession(context, shortcut)",
+                 "SCOPE_SESSION_ATTACHMENT -> null"), (False, False, True)),
+        ):
+            tree = os.path.join(tmp, name)
+            for rel in (ACTIVITY_REL, SHEET_REL, PINNER_REL, PREVIEW_SHORTCUT_REL, RESOLVER_REL):
+                os.makedirs(os.path.join(tree, os.path.dirname(rel)), exist_ok=True)
+            open(os.path.join(tree, ACTIVITY_REL), "w", encoding="utf-8").write(act)
+            open(os.path.join(tree, SHEET_REL), "w", encoding="utf-8").write(
+                sheet + SHEET_DECODE_TILE)
+            open(os.path.join(tree, PINNER_REL), "w", encoding="utf-8").write(COMPLIANT_PINNER)
+            open(os.path.join(tree, PREVIEW_SHORTCUT_REL), "w", encoding="utf-8").write(
+                COMPLIANT_PREVIEW_SHORTCUT)
+            open(os.path.join(tree, RESOLVER_REL), "w", encoding="utf-8").write(resolver)
+            got = (not check_activity_arm15(act), not check_sheet_arm16(sheet),
+                   not check_resolver_arm17(resolver))
+            if got != want:
+                print(f"[webapp-asset-url] SELFTEST FAIL case={name} "
+                      f"want={want} got={got}")
+                ok = False
+            else:
+                print(f"[webapp-asset-url] selftest ok case={name} (arms tripped {got})")
+
         # [dv21-B04 B-08] each targeted violation trips its OWN arm only.
         for name, pinner, preview, sheet_extra, want in (
             ("b08-pin-silent-decline", VIOLATION_ARM8_SILENT_DECLINE,
@@ -1539,11 +1761,9 @@ def selftest() -> int:
                 "                        cleanupCopiedAttachment()\n"
                 "                        return@launch\n"
                 "                    }\n"
-                "                    val entity = app.webAppShortcutRepository.create("
-                "htmlPath = \"x\")\n",
-                "                    val entity = app.webAppShortcutRepository.create("
-                "htmlPath = \"x\")\n"
-                "                    if (!pinShouldCommit(closed = sheetClosed, "
+                + SHEET_CREATE_BLOCK,
+                SHEET_CREATE_BLOCK
+                + "                    if (!pinShouldCommit(closed = sheetClosed, "
                 "inFlight = isPinning)) {\n"
                 "                        cleanupCopiedAttachment()\n"
                 "                        return@launch\n"

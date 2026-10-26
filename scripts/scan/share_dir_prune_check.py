@@ -442,6 +442,14 @@ def pruner_consts_of(root):
 def check_arm3(root):
     """[da1024-G] cacheDir/shared writers: suspend + IO context + prune first."""
     problems = []
+    # [R3-t04] 12-3：同一批导出函数里为「中间产物」建的暂存目录（完整明文
+    # transcript）必须 finally 删掉 —— arm1/arm3 只判产物目录的 prune，暂存
+    # 目录此前没有任何判据。放在最前面，避免下面 的 early return 把它跳过。
+    for rel in (PROVIDER_REL, MCP_REL, EXPORTER_REL):
+        pv = read_views(root, rel)
+        if pv is None:
+            continue
+        problems.extend(_staging_cleanup_problem(pv[1], rel))
     consts = pruner_consts_of(root)
     for rel, marker in UI_WRITERS:
         name = marker.rsplit("fun ", 1)[-1].strip()
@@ -929,6 +937,188 @@ def verdict_saturating_operand(expr):
     return None
 
 
+# ── [R3-t04] 第三轮（dual-gate bypass）：share 面「解析出来了，但没交出去」──
+#
+# 三条见证都落在 arm6 判据的空档里 —— arm6 判的是「chooser 有没有 NEW_TASK /
+# 启动函数有没有判定 / catch 有没有反馈」，而**中间那一步**（uri 挂到 Intent 上、
+# chooser 真的被 startActivity、暂存目录真的被删）谁都不判：
+#
+#   12-1 `buildLogShareChooser` 里 `putExtra(EXTRA_STREAM, uri)` + `clipData` 被删：
+#        FileProvider 仍在 IO 线程解析（Y 绿）、chooser 仍带 NEW_TASK 并被启动
+#        （X 绿）→ 接收方拿到的是空 ACTION_SEND。
+#   12-2 `shareImage` 里 `context.startActivity(chooser)` 被注释：派生判据对
+#        START_ACTIVITY_CALL 的循环 0 次即通过（量词空真）→ 点分享毫无反应。
+#   12-3 `ChatExporter` 的 `finally { workDir.deleteRecursively() }` 被注释：
+#        arm1/arm3 只盯 cacheDir/shared 的 prune，同一函数里 export-staging 的
+#        明文暂存目录无人回收。
+URI_RESOLVER = re.compile(r"(?:\w+\s*\.\s*)*FileProvider\s*\.\s*getUriForFile\s*\(")
+HANDOFF_DELEGATE = re.compile(r"\bExternalIntent\s*\.\s*share\s*\(")
+
+
+def _home_val(body, idx):
+    """`val X = <含 idx 的表达式>` 里的 X（body 相对位置）；内联形态返回 None。
+
+    只要求「最后一条声明与 idx 之间的换行都是续行」——`val uri = try {` 这种
+    值表达式带块、调用在块内的形态也要认得出来（旧版按语句起点切，认不出它，
+    于是整条缝在 InlineMediaPlayer 上静默跳过）。
+    """
+    decls = [(m.start(), m.group(1)) for m in
+             re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)", body)
+             if m.start() < idx]
+    if not decls:
+        return None
+    start, name = decls[-1]
+    seg = body[start:idx]
+    newlines = [m.start() for m in re.finditer(r"\n", seg)]
+    for p in newlines[:-1]:
+        if not re.search(r"(=|->|\btry|\belse|\bdo|\(|,|\{|\+|-|\*|/|%|\?|:|&|\|)\s*$",
+                         seg[:p].rstrip()):
+            return None
+    return name
+
+
+def _in_call_args(text, pos):
+    """标识符在 pos 处是否落在某个调用的实参表里（而非只当接收者/被访问）。"""
+    depth = 0
+    i = pos - 1
+    while i >= 0:
+        ch = text[i]
+        if ch in ")]":
+            depth += 1
+        elif ch in "([":
+            if depth == 0:
+                return ch == "("
+            depth -= 1
+        elif depth == 0 and ch in ";}":
+            return False
+        elif depth == 0 and ch == "\n":
+            # 续行（行尾是 `,` / `(` / 运算符）才继续：否则上一行的调用括号
+            # 与本语句无关，跨过去就会把「只当接收者」误判成交出去的实参。
+            j = i - 1
+            while j >= 0 and text[j] in " \t\r":
+                j -= 1
+            if j < 0 or text[j] not in ",(+-*/%?:&|=<>!":
+                return False
+        i -= 1
+    return False
+
+
+def _value_consumed(body, name):
+    """这个值有没有被「交出去」：作为调用实参，或被 return / 当尾值输出。
+
+    判据刻意停在「离开本函数」这一层：`uri.addFlags(…)` 这种只当接收者的用法
+    不算交出，`launch(ctx, chooser, …)` / `putExtra(EXTRA_STREAM, uri)` /
+    `return chooser` 算 —— 再往下就跨函数了（残留已登记）。
+    """
+    n = re.escape(name)
+    decl = re.search(r"\b(?:val|var)\s+%s\s*(?::[^=\n]+)?=(?!=)" % n, body)
+    start = decl.end() if decl else 0
+    for m in re.finditer(r"(?<![\w.])%s\b" % n, body[start:]):
+        pos = start + m.start()
+        if _in_call_args(body, pos):
+            return True
+        if re.search(r"\breturn\s+%s\b" % n, body):
+            return True
+        if re.search(r"(?m)^\s*%s\s*$" % n, body):
+            return True
+    return False
+
+
+def _attach_problem(code, rel):
+    """C-STREAM：解析出来的 content:// uri 必须真的交出去。
+
+    `getUriForFile` 成功只说明 uri 能构造；分享面板里另一个进程能否拿到文件，
+    取决于它有没有被挂进 EXTRA_STREAM / clipData / data / ClipData / 显式授权，
+    或者被交给一个启动器。删掉这一步，所有既有判据（IO 线程、NEW_TASK、判定、
+    反馈）仍然全绿。
+    """
+    problems = []
+    for m in URI_RESOLVER.finditer(code):
+        fn = _enclosing_fun(code, m.start())
+        base = fn[1] if fn else 0
+        body = code[fn[1]: fn[2]] if fn else code
+        name = _home_val(body, m.start() - base)
+        if name is None:
+            continue
+        if _value_consumed(body, name):
+            continue
+        problems.append(
+            "[C-STREAM] %s:%d: the FileProvider uri `%s` is resolved but never handed to "
+            "anything (no EXTRA_STREAM / clipData / setData / ClipData / grant / launcher "
+            "argument) — the share sheet still opens and the receiver gets an empty "
+            "ACTION_SEND (R3-t04)" % (rel, code.count("\n", 0, m.start()) + 1, name))
+    return problems
+
+
+def _launch_problem(code, rel):
+    """C-LAUNCH：构造出来的 chooser 必须被启动、被交给启动器、或被返回。
+
+    旧派生判据遍历 `startActivity` 站点来判 catch 覆盖；站点数为 0 时循环一次
+    都不跑（量词空真），于是「chooser 建好了但从不启动」是全绿的。
+    """
+    problems = []
+    for m in HANDOFF_CHOOSER.finditer(code):
+        fn = _enclosing_fun(code, m.start())
+        base = fn[1] if fn else 0
+        body = code[fn[1]: fn[2]] if fn else code
+        name = _home_val(body, m.start() - base)
+        if name is None:
+            continue          # 内联 / 直接 return 的 chooser：由构造交给调用方
+        if _value_consumed(body, name):
+            continue
+        problems.append(
+            "[C-LAUNCH] %s:%d: the share chooser `%s` is built but never started or handed "
+            "on — every flag/verdict/feedback guard around it still passes while the share "
+            "tap silently does nothing (R3-t04)"
+            % (rel, code.count("\n", 0, m.start()) + 1, name))
+    return problems
+
+
+def _finally_spans(cv):
+    spans = []
+    for m in re.finditer(r"\bfinally\s*\{", cv):
+        cb = _brace_end(cv, cv.find("{", m.end() - 1))
+        if cb is not None:
+            spans.append((cv.find("{", m.end() - 1), cb))
+    return spans
+
+
+def _staging_cleanup_problem(cv, where):
+    """C-STAGING：建出来并往里写文件的暂存目录，必须在 finally 里删掉。
+
+    arm1/arm3 只判「产物目录（cacheDir/share[ d ]）在写之前 prune」；同一个函数
+    里为导出而建的临时目录（完整明文 transcript）不在任何判据里 —— 删掉
+    `finally { workDir.deleteRecursively() }` 之后仍然全绿。
+    """
+    problems = []
+    fins = _finally_spans(cv)
+    for m in re.finditer(r"(?<![\w.])([A-Za-z_]\w*)\s*\.\s*mkdirs\s*\(\s*\)", cv):
+        ident = m.group(1)
+        n = re.escape(ident)
+        if not re.search(r"\b(?:val|var)\s+%s\s*(?::[^=\n]+)?=\s*(?:[\w.]+\.)?File\s*\("
+                         % n, cv):
+            continue
+        if not re.search(r"(?:[\w.]+\.)?File\s*\(\s*%s\s*," % n, cv):
+            continue                      # 只建目录、不往里写的不属本判据
+        cleaned = []
+        for a, b in fins:
+            for dm in re.finditer(r"(?<![\w.])%s\s*\.\s*(?:deleteRecursively|delete)\s*\(" % n,
+                                  cv[a:b]):
+                cleaned.append(a + dm.start())
+        line = cv.count("\n", 0, m.start()) + 1
+        if not cleaned:
+            problems.append(
+                "[C-STAGING] %s:%d: the staging directory `%s` is created and written into "
+                "but never removed — a `finally { … deleteRecursively() }` is what keeps the "
+                "plaintext transcript out of the cache after every export (R3-t04)"
+                % (where, line, ident))
+        elif not any(path_feasible(cv, c) for c in cleaned):
+            problems.append(
+                "[C-STAGING] %s:%d: the cleanup of `%s` is unreachable — the staging "
+                "directory survives every export (R3-t04)" % (where, line, ident))
+    return problems
+
+
 def check_handoff_src(rel, text):
     """[deep-audit-1048 B-04] C-NT + C-SILENT for one share-bearing source.
 
@@ -1042,6 +1232,9 @@ def check_handoff_src(rel, text):
     if chooser_sites == 0 and starters == 0:
         problems.append("[C-NT/C-SILENT] %s: no chooser / startActivity found — the share "
                         "path moved, so this criterion saw nothing to check" % rel)
+    # [R3-t04] 「解析出来了」和「交出去了」是两件事，中间那一步单独判。
+    problems.extend(_attach_problem(code, rel))
+    problems.extend(_launch_problem(code, rel))
     return problems
 
 
@@ -1116,9 +1309,14 @@ def derive_handoff_files(root):
             # some Kotlin shapes (BrowserDownloadsSheet.kt came out 2.5 KB short
             # with every `createChooser` gone), which silently shrank this set.
             code = _strip_comments_keep_offsets(text)
-            if HANDOFF_CHOOSER.search(code) or (
-                HANDOFF_START.search(code) and HANDOFF_GRANT in code
-            ):
+            # [R3-t04] 委派给共享启动器（`ExternalIntent.share(...)`）也是一次
+            # 「把文件交给另一个应用」：这种文件自己没有 startActivity 站点，
+            # 于是旧派生条件看不见它 —— 12-1 的夹缝正好落在这里（FileProvider
+            # 解析在 InlineMediaPlayer，启动在 ExternalIntent，两边都不判 uri
+            # 有没有挂上去）。
+            if (HANDOFF_CHOOSER.search(code)
+                    or (HANDOFF_START.search(code) and HANDOFF_GRANT in code)
+                    or HANDOFF_DELEGATE.search(code)):
                 out.append(os.path.relpath(path, root).replace(os.sep, "/"))
     return out
 
@@ -1268,6 +1466,10 @@ def check_derived_handoff_src(rel, text):
                 "visible (no Toast / Snackbar / AppLogger / Log)"
                 % (rel, code.count("\n", 0, m.start()) + 1)
             )
+    # [R3-t04] 派生面同样要判「挂上去了没有」与「真的启动了没有」：
+    #   12-2 的见证正是靠「startActivity 站点数 0 → 循环不跑」蒙过去的。
+    problems.extend(_attach_problem(code, rel))
+    problems.extend(_launch_problem(code, rel))
     return problems, chooser_sites, len(launches)
 
 
@@ -1786,7 +1988,12 @@ def selftest():
         '    } catch (_: Throwable) {',
         '        return false',
         '    }',
-        '    val chooser = Intent.createChooser(Intent(Intent.ACTION_SEND), "t").apply {',
+        # [R3-t04] 合规夹具必须真的把 uri 挂上去 —— 否则它自己是 C-STREAM 的反例。
+        '    val chooser = Intent.createChooser(Intent(Intent.ACTION_SEND).apply {',
+        '        type = "application/json"',
+        '        putExtra(Intent.EXTRA_STREAM, uri)',
+        '        clipData = ClipData.newRawUri("shared", uri)',
+        '    }, "t").apply {',
         '        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)',
         '    }',
         '    return runCatching { context.startActivity(chooser) }.isSuccess',
@@ -1947,6 +2154,94 @@ def selftest():
           "05-2 dead-guarded prune / 05-3 wrong-dir at arm3 / 05-4 TTL behind a local alias / "
           "05-5 verdict saturated with || true / 05-6 TTL magic number / "
           "+2 precision arms: named-TTL-const accepted, unknown-boolean-or green)")
+
+    # ── [R3-t04] 第三轮（dual-gate）缝臂：C-STREAM / C-LAUNCH / C-STAGING ────
+    ok_seam = True
+    stream_base = "\n".join([
+        'package fixture',
+        '',
+        'private fun shareFile(context: Context, file: java.io.File) {',
+        '    val uri = androidx.core.content.FileProvider.getUriForFile(',
+        '        context, "authority", file,',
+        '    )',
+        '    val intent = Intent(Intent.ACTION_SEND).apply {',
+        '        type = "text/plain"',
+        '        putExtra(Intent.EXTRA_STREAM, uri)',
+        '        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)',
+        '    }',
+        '    val chooser = Intent.createChooser(intent, "share")',
+        '    chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)',
+        '    try {',
+        '        context.startActivity(chooser)',
+        '    } catch (t: Throwable) {',
+        '        Toast.makeText(context, "share failed", Toast.LENGTH_SHORT).show()',
+        '    }',
+        '}',
+        '',
+    ])
+    # 12-1：uri 解析出来了，但没有任何载体
+    stream_detached = stream_base.replace(
+        "        putExtra(Intent.EXTRA_STREAM, uri)\n", "")
+    # 精确度：把 uri 交给共享启动器同样是「交出去了」
+    stream_delegated = stream_detached.replace(
+        "    chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)",
+        "    chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)\n"
+        "    ExternalIntent.share(context, intent, uri)")
+    # 12-2：chooser 建好了但从不启动（startActivity 站点数 0）
+    chooser_never_launched = stream_base.replace(
+        "        context.startActivity(chooser)\n", "")
+    for arm_name, sample, want in (
+        ("r3-stream compliant", stream_base, set()),
+        ("r3-stream delegated to launcher", stream_delegated, set()),
+        ("r3-stream uri detached", stream_detached, {"[C-STREAM]"}),
+        ("r3-chooser never launched", chooser_never_launched, {"[C-LAUNCH]"}),
+    ):
+        got = check_derived_handoff_src("Fixture.kt", sample)[0]
+        codes = {g.split("]")[0] + "]" for g in got}
+        if codes == want:
+            print("  SELFTEST %s: OK (%s)" % (arm_name, sorted(codes) or "green"))
+        else:
+            print("  SELFTEST %s: FAIL (want %s, got %s)" % (arm_name, sorted(want), got))
+            ok_seam = False
+
+    staging_base = "\n".join([
+        'private fun exportToZip(context: Context, name: String): java.io.File? {',
+        '    val stagingRoot = java.io.File(context.cacheDir, "export-staging")',
+        '    val workDir = java.io.File(stagingRoot, "run-1")',
+        '    workDir.mkdirs()',
+        '    try {',
+        '        java.io.File(workDir, "messages.txt").writeText("hi")',
+        '        return zipOf(workDir, name)',
+        '    } finally {',
+        '        runCatching { workDir.deleteRecursively() }',
+        '    }',
+        '}',
+        '',
+    ])
+    staging_no_cleanup = staging_base.replace(
+        "        runCatching { workDir.deleteRecursively() }\n", "")
+    staging_cleanup_outside_finally = staging_base.replace(
+        "    } finally {\n        runCatching { workDir.deleteRecursively() }\n    }",
+        "    } finally {\n        runCatching { }\n    }\n"
+        "    workDir.deleteRecursively()")
+    for arm_name, sample, want in (
+        ("r3-staging compliant", staging_base, set()),
+        ("r3-staging never removed", staging_no_cleanup, {"[C-STAGING]"}),
+        ("r3-staging cleanup outside finally", staging_cleanup_outside_finally,
+         {"[C-STAGING]"}),
+    ):
+        got = _staging_cleanup_problem(sample, "Fixture.kt")
+        codes = {g.split("]")[0] + "]" for g in got}
+        if codes == want:
+            print("  SELFTEST %s: OK (%s)" % (arm_name, sorted(codes) or "green"))
+        else:
+            print("  SELFTEST %s: FAIL (want %s, got %s)" % (arm_name, sorted(want), got))
+            ok_seam = False
+    print("SHARE_HANDOFF_SEAM_SELFTEST=" + ("PASS" if ok_seam else "FAIL")
+          + " (3 seams: 12-1 uri handed on / 12-2 chooser launched / 12-3 staging dir "
+            "removed in finally; 7 arms)")
+    ok = ok and ok_seam
+
     print("SHARE_DIR_PRUNE_SELFTEST=" + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 

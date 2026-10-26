@@ -68,7 +68,9 @@ if _HERE not in sys.path:
 
 from _kotlin_lexer import KotlinLexError, mask_code
 from _kotlin_ast import (
+    const_bool,
     const_value,
+    enclosing_conditions,
     function_body,
     if_blocks,
     match_bracket,
@@ -76,6 +78,7 @@ from _kotlin_ast import (
     strip_parens,
 )
 from _kotlin_valueflow import (
+    brace_depth,
     call_args,
     contains_ident,
     expr_end,
@@ -437,6 +440,11 @@ def check_skill_repo(src):
                     "'%s' — a bundled skill may land under a slug other than its "
                     "assets dirName (payload lives in <dirName>/)" % PREFERRED_ID
                 )
+    # Arm 2b [third adversarial round 04-2]: the replace-existing branch is
+    # reachable and it really replaces — `false &&` used to satisfy Arm 2 alone.
+    _code = structure(src)
+    if _code is not None:
+        v.extend(check_skill_replace_branch(_code, src))
     return v
 
 
@@ -550,6 +558,265 @@ def _session_id_names(code, start, end, params):
     return allowed
 
 
+def _membership(cond, idents, coll):
+    """True / False when `cond` states `ident ∈ coll` / `ident ∉ coll`, else None.
+
+    Judged on the VALUE relationship, not the operator spelling: `in`, `!in`,
+    `contains(…)`, `any { it == x }` and `none { it == x }` are the four forms
+    this codebase uses. Anything else is unknown — and the caller treats an
+    unknown guard as NO protection (fail-closed), because a guard it cannot read
+    is a guard it cannot vouch for.
+    """
+    c = re.sub(r"\s+", "", strip_parens(cond.strip()))
+    if not c:
+        return None
+    neg = False
+    while c.startswith("!"):
+        neg = not neg
+        c = c[1:]
+    while c.startswith("(") and c.endswith(")"):
+        c = c[1:-1]
+    ids = "(?:%s)" % "|".join(re.escape(n) for n in idents if n)
+    col = re.escape(coll)
+    if not ids or not coll:
+        return None
+    if re.fullmatch(r"%s!in%s" % (ids, col), c):
+        return neg
+    if re.fullmatch(r"%sin%s" % (ids, col), c):
+        return not neg
+    if re.fullmatch(r"%s\.contains\(%s\)" % (col, ids), c):
+        return not neg
+    m = re.fullmatch(r"%s\.(any|none)\{it(?:===?|!==?)%s\}" % (col, ids), c)
+    if m:
+        return (m.group(1) == "any") != neg
+    return None
+
+
+def check_survivor_polarity(code, src):
+    """Arm 5 [third adversarial round 04-1, dual-gate with parts_json_funnel]:
+    the survivor filter keeps the sessions that SURVIVED.
+
+    `deleteEmptySessions` snapshots the candidate ids, deletes them, then asks
+    which candidates still exist — the ones that got their first message in the
+    window. The shipped filter is `if (id in survivors) continue`: skip the
+    survivor, notify the really-deleted. Inverted to `!in` nothing reds: every
+    LIVE session's listeners fire (`SkillRepository` / `MCPRepository` /
+    `OffloadPermissionBroker` drop their overrides and grants on a session the
+    user is chatting in) and every deleted session keeps its orphan rows
+    forever.
+
+    Two accepted protection shapes, both judged on the membership VALUE:
+      (a) wrapped — `if (id !in survivors) { … onSessionDeleted?.invoke(id) … }`
+      (b) guarded — `if (id in survivors) continue|return` before the hook.
+    A guard whose membership cannot be read is not accepted as protection.
+    """
+    v = []
+    start, end = body_of(code, "deleteEmptySessions")
+    if start is None:
+        return ["ChatRepository.kt: 'deleteEmptySessions' not found (ROT — update this gate)"]
+    body = code[start:end]
+    del_at = body.find("dao.deleteEmptySessions(")
+    if del_at < 0:
+        return v  # Arm 2 already reports the missing delete
+    surv = None
+    for m in re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+?)?=\s*([^\n]+)", body):
+        if m.start() < del_at:
+            continue
+        if re.search(r"\bdao\s*\.", m.group(2)):
+            surv = m.group(1)
+            break
+    if surv is None:
+        v.append("ChatRepository.kt: deleteEmptySessions no longer asks the DAO which candidates "
+                 "SURVIVED the delete — every candidate gets 'deleted' notified, including the "
+                 "ones that acquired their first message inside the window (their skills/mcp "
+                 "overrides and offload grants are cleared on a live session)")
+        return v
+    hooks = [m.start() for m in re.finditer(re.escape(INVOKE_HOOK), body)]
+    if not hooks:
+        return v  # Arm 3 covers the missing hook
+    loop = re.search(r"\bfor\s*\(\s*([A-Za-z_]\w*)\s+in\s+[A-Za-z_]\w*\s*\)", body)
+    ids = [loop.group(1)] if loop else []
+    if not ids:
+        for pos in hooks:
+            spans = call_args(body, pos + len(INVOKE_HOOK) - 1)
+            if spans:
+                a, b = spans[0]
+                ids.extend(re.findall(r"[A-Za-z_]\w*", body[a:b]))
+    if not ids:
+        v.append("ChatRepository.kt: deleteEmptySessions hands the hook an argument it cannot "
+                 "trace to a candidate id (fail-closed)")
+        return v
+    guards = []
+    for cond, t_start, _t_end, _es, _ee in if_blocks(body):
+        stmt = body[t_start:t_start + 40].lstrip()
+        if re.match(r"(?:continue|return|break)\b", stmt):
+            guards.append((cond, t_start))
+    loops = []
+    for m in re.finditer(r"\bfor\s*\([^)]*\)\s*\{", body):
+        ob = m.end() - 1
+        cb = match_bracket(body, ob)
+        if cb > 0:
+            loops.append((ob, cb))
+
+    def same_loop(a, b):
+        """Both positions sit inside the SAME loop body (or, without a `for`
+        in sight, at the same brace depth — `.forEach { }` shape)."""
+        for ob, cb in loops:
+            if ob < a < cb and ob < b < cb:
+                return True
+        return not loops and brace_depth(body, a) == brace_depth(body, b)
+
+    for pos in hooks:
+        protected = False
+        for _kind, cond in enclosing_conditions(body, pos):
+            if _membership(cond, ids, surv) is False:
+                protected = True
+        for cond, g_start in guards:
+            if g_start > pos or not same_loop(g_start, pos):
+                continue
+            mem = _membership(cond, ids, surv)
+            if mem is True:
+                protected = True
+            elif mem is False:
+                protected = True
+                v.append(
+                    "ChatRepository.kt: deleteEmptySessions skips the sessions that are NOT "
+                    "survivors (`if (%s) continue|return`) — the polarity is inverted: the live "
+                    "sessions in the window get their skills/mcp overrides and offload grants "
+                    "cleared, and every really-deleted session's rows leak"
+                    % re.sub(r"\s+", " ", cond.strip())[:60])
+                break
+        if not protected:
+            v.append("ChatRepository.kt: deleteEmptySessions notifies '%s' without any survivor "
+                     "filter — a candidate that acquired its first message inside the window is "
+                     "reported as deleted" % INVOKE_HOOK)
+    return v
+
+
+def check_skill_replace_branch(code, src):
+    """Arm 2b [third adversarial round 04-2]: the replace-existing branch is
+    REACHABLE and it really replaces.
+
+    Arm 2 proves the fall-through `return add(... preferredId)` still carries the
+    id; it never looks at the branch that handles an EXISTING skill. `false &&`
+    in front of that guard leaves the whole spelling intact and sends every
+    re-import into `add()`, which refuses a duplicate id and returns null — so a
+    backup restore / paste-update of an existing skill fails silently while the
+    old content stays.
+    """
+    v = []
+    start, end = body_of(code, "importFromContent")
+    if start is None:
+        return []
+    body = code[start:end]
+    add_at = body.find(RETURN_ADD)
+    branches = []
+    for cond, t_start, t_end, _es, _ee in if_blocks(body):
+        if not contains_ident(cond, "id"):
+            continue
+        if not re.search(r"\b(?:any|contains|firstOrNull|find)\b", cond):
+            continue
+        if add_at >= 0 and t_start > add_at:
+            continue
+        branches.append((cond, t_start, t_end))
+    if not branches:
+        v.append("SkillRepository.kt: importFromContent no longer branches on an existing skill "
+                 "with the resolved id — every import falls through to add(), which refuses a "
+                 "duplicate id and returns null")
+        return v
+    for cond, t_start, t_end in branches:
+        if not guard_feasible(cond):
+            v.append(
+                "SkillRepository.kt: importFromContent's replace-existing guard `%s` is "
+                "constant-false — the branch can never run, so every restore / paste-update of "
+                "an existing skill falls into add(), returns null and silently keeps the old "
+                "content" % re.sub(r"\s+", " ", cond.strip())[:70])
+            continue
+        branch = body[t_start:t_end]
+        # The branch must DO something. A branch that only returns is a paper
+        # replace; `_skills.value = …`, a DB write or a delegated writer all
+        # qualify (the real tree does all three).
+        if not re.search(r"_skills\s*\.\s*value\s*=(?!=)", branch) and \
+                not re.search(r"\b(?:db|dao)\s*\.\s*\w+\s*\(", branch) and \
+                not re.search(r"\bwriteSkillMd\s*\(|\breplace\s*\(", branch) and \
+                not re.search(r"=(?!=)", branch.replace("==", "")):
+            v.append(
+                "SkillRepository.kt: importFromContent's replace-existing branch mutates "
+                "nothing — the in-memory mirror would keep serving the old body")
+        rets = [branch[m.end():expr_end(branch, m.end())].strip()
+                for m in re.finditer(r"\breturn\b(?!@)", branch)]
+        if not rets:
+            v.append("SkillRepository.kt: importFromContent's replace-existing branch returns "
+                     "no value — a successful replace is reported to the caller as null")
+        else:
+            for r in rets:
+                cv = const_value(r)
+                if cv is not None and cv[0] == "null":
+                    v.append("SkillRepository.kt: importFromContent's replace-existing branch "
+                             "returns null — the replace reads as a failure to every caller")
+                    break
+    return v
+
+
+def check_promote_persisted(code, src):
+    """Arm 9b [third adversarial round 04-3, symmetric axis]: the success path
+    must actually flip the flag the `finally` consults.
+
+    `promoteDraftIfNeeded` guards its restore with `if (!persisted)` — the bit
+    says "the durable write landed". Change the success path's `persisted = true`
+    to `false` and every existing arm stays green (the declaration, the restore
+    call and the clear-after-write ordering are untouched) while each promotion
+    writes the already-persisted text back into the NEXT draft slot: the user's
+    fresh New Chat opens pre-filled with the previous draft.
+    """
+    v = []
+    start, end = body_of(code, "promoteDraftIfNeeded")
+    if start is None:
+        return []
+    body = code[start:end]
+    m = re.search(r"\bvar\s+([A-Za-z_]\w*)\s*(?::\s*Boolean\s*)?=\s*false\b", body)
+    if m is None:
+        return v  # no such flag: the restore-side judgment owns that shape
+    flag = m.group(1)
+    if not re.search(r"\bif\s*\(\s*!\s*" + re.escape(flag) + r"\s*\)", body):
+        return v  # the flag is not consulted: another arm owns it
+    writes = []
+    for mm in re.finditer(r"(?<![\w.`])" + re.escape(flag) + r"\s*=(?!=)", body):
+        if mm.start() < m.end():
+            continue  # the declaration's own initialiser
+        rhs = body[mm.end():expr_end(body, mm.end())].strip()
+        writes.append((mm.start(), rhs))
+    if not writes:
+        v.append("ChatSessionEntryExt.kt: promoteDraftIfNeeded declares '%s = false' and consults "
+                 "it in `finally`, but never flips it — every promotion restores the text it "
+                 "just persisted" % flag)
+        return v
+    flips = [p for p, rhs in writes if const_bool(rhs) is True]
+    false_write = None
+    for p, rhs in writes:
+        if const_bool(rhs) is False:
+            false_write = (p, rhs)
+            v.append(
+                "ChatSessionEntryExt.kt: promoteDraftIfNeeded writes `%s = %s` on the promotion "
+                "path — the durable write lands, `finally` still treats it as failed, and "
+                "ComposerDraftStore gets the already-persisted text back: the next New Chat "
+                "opens pre-filled with the previous draft" % (flag, rhs.strip()[:30]))
+            break
+    if false_write is not None:
+        return v
+    if not flips:
+        v.append("ChatSessionEntryExt.kt: promoteDraftIfNeeded never sets '%s = true' on the "
+                 "success path — the restore branch runs after every successful promotion"
+                 % flag)
+        return v
+    durable = [body.find(t) for t in DURABLE_WRITES if body.find(t) >= 0]
+    if durable and min(flips) < min(durable):
+        v.append("ChatSessionEntryExt.kt: promoteDraftIfNeeded flips '%s' before the durable "
+                 "write — a failed write is then reported as persisted and the text is lost"
+                 % flag)
+    return v
+
+
 def check_chat_repo(src):
     """Arms 1–3 [fix/da1021-A, widened by dv21-a2]: EVERY `sessions`-row delete
     entry point runs the cross-db cleanup, and that cleanup is handed the id
@@ -650,6 +917,8 @@ def check_chat_repo(src):
                 )
     if INVOKE_HOOK not in src:
         v.append("ChatRepository.kt: onSessionDeleted hook declaration missing")
+    # Arm 5 [third adversarial round 04-1]: the survivor filter's POLARITY.
+    v.extend(check_survivor_polarity(code, src))
     return v
 
 
@@ -953,6 +1222,9 @@ def check_promote_draft(src):
                     "of the draft text"
                 )
                 break
+    # Arm 9b [third adversarial round 04-3]: the flag the `finally` consults must
+    # really be flipped on the success path.
+    v.extend(check_promote_persisted(code, src))
     return v
 
 
@@ -1479,6 +1751,13 @@ BAD_SKILL_DROP_ID = GOOD_SKILL.replace(
 
 BAD_SKILL_BUNDLED = GOOD_SKILL.replace("preferredId = dirName,", "")
 
+# [third adversarial round 04-2] the replace-existing guard, neutralised by a
+# constant: Arm 2 (the fall-through `return add(preferredId = id)`) still holds,
+# and every re-import now falls into add(), which refuses the duplicate id.
+BAD_SKILL_REPLACE_UNREACHABLE = GOOD_SKILL.replace(
+    "if (id.isNotBlank() && _skills.value.any { it.id == id }) {",
+    "if (false && id.isNotBlank() && _skills.value.any { it.id == id }) {")
+
 # [da1029-C / I04] the pre-fix shape: `mapped` computed under the lock, then
 # published after the release — exactly what the KDoc above it used to claim
 # was already impossible.
@@ -1609,6 +1888,12 @@ BAD_CHAT_NO_HOOK = GOOD_CHAT.replace(HOOK_LINE, "")
 
 # The dv21-a2 regression itself: a two-entry-point gate was blind to the sweep.
 BAD_CHAT_SWEEP_NO_HOOK = GOOD_CHAT.replace(SWEEP_HOOK_LINE, "")
+
+# [third adversarial round 04-1] the sweep's survivor filter, inverted: every
+# LIVE session is notified as deleted and every really-deleted one is skipped.
+BAD_CHAT_SURVIVOR_POLARITY = GOOD_CHAT.replace(
+    "            if (id in survivors) continue\n",
+    "            if (id !in survivors) continue\n")
 
 # A FOURTH entry point that drops `sessions` rows without the cleanup: the gate
 # must derive the entry set from the tree, not from a list someone forgot.
@@ -1779,6 +2064,40 @@ BAD_PROMOTE_PERSIST_BEFORE_ENSURE = GOOD_PROMOTE.replace(
     "        chatRepository.appendMessage(realSessionId, \"user\", buildUserPartsJson(text, emptyList()))\n"
     "        val sid = ensureSession()").replace(
     PERSIST_TWO_LINES, "")
+
+# [third adversarial round 04-3] the shipped `persisted` shape: the bit is
+# declared false, flipped on the success path, and consulted in `finally`.
+PROMOTE_PERSISTED_GOOD = '''
+fun ChatViewModel.promoteDraftIfNeeded(): Boolean {
+    if (!isDraft || realSessionId.isNotEmpty()) return false
+    val text = _inputText.value
+    if (text.isBlank()) return false
+    promoteInFlight = true
+    com.rikkaminis.app.data.ComposerDraftStore.clearDraft(context, sessionId)
+    viewModelScope.launch {
+        var persisted = false
+        try {
+            val sid = ensureSession()
+            if (sid.isEmpty()) return@launch
+            val promoted = chatRepository.appendMessage(sid, "user", buildUserPartsJson(text, emptyList()))
+            _messages.value = _messages.value + ChatMessage(id = promoted.id, role = "user", content = text)
+            persisted = true
+            _inputText.value = ""
+        } finally {
+            promoteInFlight = false
+            if (!persisted) {
+                com.rikkaminis.app.data.ComposerDraftStore.saveText(context, currentOwner, text)
+            }
+        }
+    }
+    return true
+}
+'''
+
+# The witness: the success path writes `false`, so `finally` restores the text it
+# just persisted. Every other anchor still holds.
+BAD_PROMOTE_FLAG_NOT_FLIPPED = PROMOTE_PERSISTED_GOOD.replace(
+    "            persisted = true\n", "            persisted = false\n")
 
 # [dv25-B08 / deep-audit-1045 B-08] promotion-ownership fixtures.
 GOOD_VM = """
@@ -2127,6 +2446,9 @@ def selftest():
     expect_trip("rmw-outside-lock fixture (wide-1024 W2)", bad_rmw, "OUTSIDE the", failures)
     if any("publishes" in v for v in bad_rmw):
         failures.append("rmw-outside-lock fixture tripped an UNRELATED arm: %r" % bad_rmw)
+    # [third adversarial round 04-2] `false &&` on the replace-existing guard.
+    bad_replace = check_skill_repo(BAD_SKILL_REPLACE_UNREACHABLE)
+    expect_trip("replace-unreachable fixture (04-2)", bad_replace, "constant-false", failures)
     # [dv16-A05] the pinned-override pre-fix shape fires ONLY the new arm.
     expect_trip("pinned-override fixture (dv16-A05)", bad_pin, "does not DELETE the override row", failures)
     expect_trip("pinned-override fixture (dv16-A05)", bad_pin, "shouldDeleteSessionSkillOverride", failures)
@@ -2151,6 +2473,15 @@ def selftest():
     if len(bad_sweep) != 1:
         failures.append("unhooked-sweep fixture tripped %d arms, expected exactly 1: %r"
                         % (len(bad_sweep), bad_sweep))
+
+    # [third adversarial round 04-1, dual-gate with parts_json_funnel] the
+    # sweep's survivor filter with its polarity inverted: the hook is wired, the
+    # id is real, and the wrong sessions get notified.
+    bad_polarity = check_chat_repo(BAD_CHAT_SURVIVOR_POLARITY)
+    expect_trip("survivor-polarity fixture (04-1)", bad_polarity, "polarity is inverted", failures)
+    if len(bad_polarity) != 1:
+        failures.append("survivor-polarity fixture tripped %d arms, expected exactly 1: %r"
+                        % (len(bad_polarity), bad_polarity))
 
     # A fourth `sessions`-row delete entry point that nobody registered.
     bad_unregistered = check_chat_repo(BAD_CHAT_UNREGISTERED_ENTRY)
@@ -2266,6 +2597,19 @@ def selftest():
     bad_persist_early = check_promote_draft(BAD_PROMOTE_PERSIST_BEFORE_ENSURE)
     expect_trip("persist-before-ensure promotion (B-06)", bad_persist_early, "BEFORE 'ensureSession('",
                 failures)
+
+    # [third adversarial round 04-3, symmetric axis] the success path must flip
+    # the flag its `finally` consults.
+    good_flag = check_promote_persisted(structure(PROMOTE_PERSISTED_GOOD), PROMOTE_PERSISTED_GOOD)
+    if good_flag:
+        failures.append("compliant persisted-flag fixture is not clean: %r" % good_flag)
+    bad_flag = check_promote_persisted(structure(BAD_PROMOTE_FLAG_NOT_FLIPPED),
+                                       BAD_PROMOTE_FLAG_NOT_FLIPPED)
+    expect_trip("flag-not-flipped promotion (04-3)", bad_flag, "writes `persisted = false`",
+                failures)
+    if len(bad_flag) != 1:
+        failures.append("flag-not-flipped fixture tripped %d arms, expected exactly 1: %r"
+                        % (len(bad_flag), bad_flag))
 
     # [dv25-B08 / deep-audit-1045 B-08] the promotion owns its session.
     good_own = check_promote_ownership(GOOD_VM, GOOD_PROMOTE_OWNED)

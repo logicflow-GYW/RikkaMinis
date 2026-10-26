@@ -268,6 +268,188 @@ def _derives_from(value, target):
     return hit
 
 
+# ---------------------------------------------------------------------------
+# [R3-t07] 第三轮 dual-gate 见证 112 / 113 / 114
+#
+# 三条缝是同一个形状：「门证明了这一层被接上，没证明接上去的是哪个值」。
+#   112 每会话写点 `setSessionOverride(<sid>, …)` 的第一个实参。门已经判过读点
+#       (`isEnabledForSession(…, <sid>)`)，却没判写点 —— `setSessionOverride("", …)`
+#       把开关写进孤儿行，而本地 map 是乐观更新，Switch 在面板关闭前看着是对的。
+#   113 编辑面板的 live row 查找 `liveSessions.firstOrNull { it.id == session.id }`。
+#       判据只把「实参」与 `session` 比，于是 `it.id == ""` 这种永远匹配不上的
+#       查找原样通过：新生成的标题永远回填不到输入框。
+#   114 merge 辅助函数的 `lookup` 闭包。门判了 `liveIds` 和种子读的实参，没判
+#       `lookup` 产出什么 —— `lookup = { false }` 把会话已存的开关全部丢弃。
+#
+# 三条都在**值**上判定（`_derives_only_from` / `value_sources`），不看拼写。
+
+SESSION_WRITE_FAMILY = re.compile(
+    r"\b(?:set|update|save|write|persist)[A-Za-z0-9_]*Session[A-Za-z0-9_]*\s*\(")
+LIVE_LOOKUP_RE = re.compile(
+    r"\.\s*(?:firstOrNull|first|find|singleOrNull|single)\s*\{")
+
+
+def _lambda_tail(body):
+    """尾表达式（块体最后一个非空语句）——`lookup` 闭包真正产出的值。"""
+    text = body.strip()
+    last = text
+    while text:
+        end = expr_end(text, 0)
+        if end <= 0:
+            break
+        last = text[:end].strip()
+        text = text[end:].strip()
+    return last
+
+
+def _judge_session_writes(code, label, findings):
+    """[R3-t07 112] every per-session WRITE must carry the sheet's own id.
+
+    Judged on the session argument's VALUE, so `sessionId` passes while `""`,
+    `sessionId.let { "" }` and a different id do not. Fail-closed when the family
+    has no call site at all: "the toggle stopped persisting" is exactly what a
+    green gate must not be able to hide.
+    """
+    seen = 0
+    for m in SESSION_WRITE_FAMILY.finditer(code):
+        # a declaration (`fun setSessionOverride(`) is not a call site
+        if re.search(r"\bfun\s+$", code[max(0, m.start() - 12):m.start()]):
+            continue
+        args = _call_args(code, m.end() - 1)
+        if not args:
+            continue
+        seen += 1
+        named = dict((n, v) for n, v in args if n)
+        value = named.get("sessionId")
+        if value is None and args[0][0] is None:
+            value = args[0][1]
+        line = code.count("\n", 0, m.start()) + 1
+        if value is None:
+            findings.append(
+                f"{label}:{line}: the per-session write `{m.group(0).strip()}` no longer "
+                f"names the session (`sessionId = …` missing) — the toggle lands on whatever "
+                f"row the receiver defaults to"
+            )
+        elif not _derives_only_from(value, SESSION_ID_TOKEN):
+            findings.append(
+                f"{label}:{line}: the per-session write is handed `{_pretty(value)}` instead "
+                f"of the sheet's own `{SESSION_ID_TOKEN}` — the Switch flips locally (the map "
+                f"is updated optimistically) while the stored row belongs to an empty / "
+                f"orphan session, so the choice is gone the moment the sheet is reopened"
+            )
+    if not seen:
+        findings.append(
+            f"{label}: no per-session write call (`setSessionOverride(`-family) is left — the "
+            f"toggle no longer persists and this criterion cannot see the write "
+            f"(re-anchor it, do not drop it)"
+        )
+    return findings
+
+
+def _row_id_compare(body, param):
+    """The value compared with `<param>.id` inside a row lookup, or None."""
+    m = re.search(re.escape(param) + r"\s*\.\s*id\s*(?:==|!=)\s*", body)
+    if m:
+        return body[m.end():expr_end(body, m.end())].strip()
+    m = re.search(r"([A-Za-z_][\w.?]*)\s*(?:==|!=)\s*" + re.escape(param) + r"\s*\.\s*id",
+                  body)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _judge_live_row(code, value, findings):
+    """[R3-t07 113] the edit sheet's live row must be THIS row.
+
+    One hop is followed when the argument is a local (`liveSession = liveSession`
+    is the shipped spelling) — the `val liveSession = …` initialiser is what gets
+    judged. Inside the lookup the id comparison has to be against `session.id`:
+    `it.id == ""` can never match, so the sheet keeps the stale snapshot forever.
+    """
+    expr = value.strip()
+    norm = _snorm(expr)
+    if re.fullmatch(r"[A-Za-z_]\w*", norm):
+        decl = re.search(r"\bval\s+" + re.escape(norm) + r"\s*=(?!=)", code)
+        if decl:
+            expr = code[decl.end():expr_end(code, decl.end())].strip()
+    if _snorm(expr) == "session":
+        return  # already reported by the caller (the parameter default)
+    bodies = []
+    for m in LIVE_LOOKUP_RE.finditer(expr):
+        brace = m.end() - 1
+        close = match_bracket(expr, brace)
+        if close < 0:
+            findings.append(
+                "ChatScreen.kt: the `SessionEditSheet` live-row lookup does not balance "
+                "(fail-closed) — the criterion cannot see which row it selects"
+            )
+            return
+        bodies.append(expr[brace + 1:close])
+    if not bodies:
+        return  # a non-lookup value (a passed-in row) is outside this criterion — R2
+    for body in bodies:
+        m = re.match(r"\s*([A-Za-z_]\w*)\s*->", body)
+        param = m.group(1) if m else "it"
+        cmp = _row_id_compare(body, param)
+        if cmp is None:
+            findings.append(
+                "ChatScreen.kt: `SessionEditSheet` live row is looked up without comparing "
+                "`%s.id` to `session.id` — the criterion cannot prove the selected row is "
+                "THIS session (fail-closed)" % param
+            )
+            return
+        if not _derives_only_from(cmp, "session.id"):
+            findings.append(
+                "ChatScreen.kt: `SessionEditSheet` live row is looked up with "
+                "`{ %s.id == %s }` — the comparison is not against `session.id`, so the "
+                "lookup can never match and the sheet keeps the stale snapshot: a regenerated "
+                "title never reaches the field (Save then writes the old text back over it)"
+                % (param, _pretty(cmp))
+            )
+            return
+
+
+def _judge_merge_lookup(body, value, label, findings):
+    """[R3-t07 114] the merge's `lookup` closure must PRODUCE the stored value.
+
+    Judged on the closure's value: it has to call the per-session read itself, or
+    read a map this effect bound from one. `{ false }` (and
+    `{ seeds[it].let { false } }`) keep every token of the compliant shape and
+    drop the value, so the merge seeds nothing and every stored toggle is lost.
+    """
+    v = value.strip()
+    if not v.startswith("{"):
+        return  # a named function reference — out of this criterion (R3)
+    close = match_bracket(v, 0)
+    if close < 0:
+        findings.append(
+            f"{label}: the merge helper's `lookup` closure does not balance (fail-closed) — "
+            f"the seed value it produces is unverifiable"
+        )
+        return
+    tail = _lambda_tail(v[1:close])
+    if "isEnabledForSession(" in re.sub(r"\s+", "", v[1:close]):
+        # the closure performs the per-session read itself; the ARGUMENTS it
+        # passes are judged by `_judge_seed_read_args` (one defect, one owner)
+        return
+    names = set()
+    for src in _sources(tail):
+        names.update(re.findall(r"[A-Za-z_]\w*", re.sub(r"\s+", "", src)))
+    hits = False
+    for name in names:
+        decl = re.search(r"\b(?:val|var)\s+" + re.escape(name) + r"\s*=(?!=)", body)
+        if decl and "isEnabledForSession(" in body[decl.end():expr_end(body, decl.end())]:
+            hits = True
+            break
+    if not hits:
+        findings.append(
+            f"{label}: the merge helper's `lookup` produces `{_pretty(tail)}` — it reads no "
+            f"per-session seed (neither `isEnabledForSession(…)` nor a map this effect bound "
+            f"from it), so every stored toggle is discarded: the sheet seeds nothing and each "
+            f"Switch renders off until the user flips it again"
+        )
+
+
 def _assignments(text, state):
     """[(pos, rhs_text)] of every `state = <expr>` in text."""
     out = []
@@ -475,6 +657,12 @@ def check_seeding_guard(code, label, findings):
                     live_ids = named.get("liveIds", args[0][1] if args[0][0] is None else None)
                     if live_ids is not None:
                         _judge_merge_live_ids(body, live_ids, label, findings)
+                    # [R3-t07 114] `liveIds` is the id list; `lookup` is the
+                    # VALUE. `{ false }` kept the argument name and dropped the
+                    # stored toggle entirely.
+                    lookup = named.get("lookup")
+                    if lookup is not None:
+                        _judge_merge_lookup(body, lookup, label, findings)
             _judge_seed_read_args(body, label, findings)
             if not writes and not helper_ok:
                 findings.append(
@@ -689,6 +877,11 @@ def check_chatscreen(code, findings):
                 f"IS the parameter default (the stale snapshot), so a regenerated title never "
                 f"reaches the field"
             )
+        elif live is not None:
+            # [R3-t07 113] the argument is not `session` — but is the row it selects
+            # THIS row? `firstOrNull { it.id == "" }` never matches and the sheet
+            # silently keeps the snapshot.
+            _judge_live_row(code, live, findings)
     return findings
 
 
@@ -786,6 +979,10 @@ def check_skills_sheet(code, findings):
     # [da1045-B6] the same membership-guard criterion the Mcps sheet is now held
     # to — the two files claim one contract, so one gate judges both.
     check_seeding_guard(code, "SessionSkillsSheet.kt", findings)
+    # [R3-t07 112] the per-session WRITE (the read was already judged above):
+    # `setSessionOverride("", …)` persisted against an orphan row while the local
+    # map kept looking right.
+    _judge_session_writes(code, "SessionSkillsSheet.kt", findings)
     return findings
 
 
@@ -807,6 +1004,8 @@ def check_mcps_sheet(code, findings):
     # back unguarded, so an in-flight toggle was overwritten by its own
     # pre-toggle stored value.
     check_seeding_guard(code, "SessionMcpsSheet.kt", findings)
+    # [R3-t07 112] same write criterion, twin sheet (one contract, one gate).
+    _judge_session_writes(code, "SessionMcpsSheet.kt", findings)
     return findings
 
 
@@ -1304,14 +1503,73 @@ FIX_CHATSCEEN_REGEN_EMPTY = FIX_CHATSCEEN_OK.replace(
     "            onRegenerate = { viewModel.regenerateSessionTitle() },",
     "            onRegenerate = {},", 1)
 
+def _with_toggle(src):
+    """[R3-t07 112] give the sheet fixtures the per-session WRITE anchor.
+
+    The fixtures predate the write criterion (`setSessionOverride(` had no
+    judgement of its own), so without an anchor every arm would read as "the
+    write vanished". The toggle inserted here is the COMPLIANT one — an arm that
+    proves the criterion has teeth supplies its own dirty write and is passed
+    through untouched.
+    """
+    if "setSessionOverride(" in src:
+        return src
+    m = re.search(r"\b([A-Za-z_]\w*)\s*\.\s*isEnabledForSession\s*\(", src)
+    recv = m.group(1) if m else "repo"
+    idx = src.rstrip().rfind("}")
+    head = src[:idx].rstrip("\n")
+    tail = (
+        "\n    // [R3-t07] per-session toggle write (the compliant anchor)\n"
+        "    val toggleScope = rememberCoroutineScope()\n"
+        "    fun onToggle(id: String, enabled: Boolean) {\n"
+        "        toggleScope.launch {\n"
+        "            %s.setSessionOverride(sessionId, id, enabled)\n"
+        "        }\n"
+        "    }\n" % recv
+    )
+    return head + tail + "}\n"
+
+
 def make_tree(chatscreen, skills, mcps, sessions=FIX_SESSIONS_OK):
     root = tempfile.mkdtemp(prefix="ssib-selftest-")
     base = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat"
     write_fixture(root, os.path.join(base, "ChatScreen.kt"), chatscreen)
-    write_fixture(root, os.path.join(base, "SessionSkillsSheet.kt"), skills)
-    write_fixture(root, os.path.join(base, "SessionMcpsSheet.kt"), mcps)
+    write_fixture(root, os.path.join(base, "SessionSkillsSheet.kt"), _with_toggle(skills))
+    write_fixture(root, os.path.join(base, "SessionMcpsSheet.kt"), _with_toggle(mcps))
     write_fixture(root, os.path.join(SESSIONS_DIR, "SessionsShared.kt"), sessions)
     return root
+
+
+# [R3-t07] the three seam arms' fixtures. `_with_toggle` injects the compliant
+# write; an arm that proves a criterion has teeth carries its OWN (dirty) write
+# and is therefore passed through untouched.
+def _with_write(src, line):
+    idx = src.rstrip().rfind("}")
+    return src[:idx].rstrip("\n") + "\n" + line + "}\n"
+
+
+FIX_MCPS_WRITE_EMPTY = _with_write(
+    FIX_MCPS_MERGE, "    mcpRepository.setSessionOverride(\"\", serverId, true)\n")
+FIX_MCPS_WRITE_LET = _with_write(
+    FIX_MCPS_MERGE, "    mcpRepository.setSessionOverride(sessionId.let { \"\" }, serverId, true)\n")
+FIX_MCPS_WRITE_OK = _with_write(
+    FIX_MCPS_MERGE, "    mcpRepository.setSessionOverride(sessionId, serverId, true)\n")
+FIX_MCPS_LOOKUP_DROP = FIX_MCPS_MERGE.replace(
+    "lookup = { seeds[it] ?: false }", "lookup = { false }")
+FIX_MCPS_LOOKUP_DISCARD = FIX_MCPS_MERGE.replace(
+    "lookup = { seeds[it] ?: false }", "lookup = { seeds[it].let { false } }")
+FIX_CHATSCEEN_LIVE_EMPTY = FIX_CHATSCEEN_OK.replace(
+    "liveSession = liveSessions.firstOrNull { it.id == session.id } ?: session",
+    'liveSession = liveSessions.firstOrNull { it.id == "" } ?: session')
+FIX_CHATSCEEN_LIVE_HOP = FIX_CHATSCEEN_OK.replace(
+    "    editingSession?.let { session ->",
+    "    val liveRow = liveSessions.firstOrNull { it.id == session.id } ?: session\n"
+    "    editingSession?.let { session ->").replace(
+    "liveSession = liveSessions.firstOrNull { it.id == session.id } ?: session",
+    "liveSession = liveRow")
+FIX_CHATSCEEN_LIVE_NOID = FIX_CHATSCEEN_OK.replace(
+    "liveSession = liveSessions.firstOrNull { it.id == session.id } ?: session",
+    "liveSession = liveSessions.firstOrNull { it.title != null } ?: session")
 
 
 def selftest():
@@ -1572,6 +1830,48 @@ def selftest():
                 print(f"[selftest ok] batch7 {name}: exactly {want_count} finding(s)")
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+    # ── [R3-t07] 第三轮 dual-gate 见证：缝上的「值」──────────────��──────────
+    # 每条都断言「恰好 N 条 + 命中自己那条判据」，撞错判据 = 假臂。
+    r3_arms = 0
+    for name, cs, sk, mp, must, want in (
+        ("R3 01-4 per-session write carries an empty id (112, dataflow)",
+         FIX_CHATSCEEN_OK, FIX_SKILLS_OK, FIX_MCPS_WRITE_EMPTY,
+         ["SessionMcpsSheet.kt", "instead of the sheet's own `sessionId`"], 1),
+        ("R3 01-4b per-session write rewritten through `.let { \"\" }` (112, dataflow)",
+         FIX_CHATSCEEN_OK, FIX_SKILLS_OK, FIX_MCPS_WRITE_LET,
+         ["SessionMcpsSheet.kt", "instead of the sheet's own `sessionId`"], 1),
+        ("R3 01-4ok per-session write with the sheet id stays clean (112, precision)",
+         FIX_CHATSCEEN_OK, FIX_SKILLS_OK, FIX_MCPS_WRITE_OK, [], 0),
+        ("R3 01-5 edit-sheet live row can never match (113, dataflow)",
+         FIX_CHATSCEEN_LIVE_EMPTY, FIX_SKILLS_OK, FIX_MCPS_OK,
+         ["ChatScreen.kt", "is not against `session.id`"], 1),
+        ("R3 01-5b edit-sheet lookup without an id test (113, fail-closed)",
+         FIX_CHATSCEEN_LIVE_NOID, FIX_SKILLS_OK, FIX_MCPS_OK,
+         ["ChatScreen.kt", "without comparing"], 1),
+        ("R3 01-5ok live row through one local hop stays clean (113, precision)",
+         FIX_CHATSCEEN_LIVE_HOP, FIX_SKILLS_OK, FIX_MCPS_OK, [], 0),
+        ("R3 01-6 mcps merge lookup discards the seeds (114, dataflow)",
+         FIX_CHATSCEEN_OK, FIX_SKILLS_OK, FIX_MCPS_LOOKUP_DROP,
+         ["SessionMcpsSheet.kt", "lookup` produces"], 1),
+        ("R3 01-6b mcps merge lookup drops the value via `.let` (114, dataflow)",
+         FIX_CHATSCEEN_OK, FIX_SKILLS_OK, FIX_MCPS_LOOKUP_DISCARD,
+         ["SessionMcpsSheet.kt", "lookup` produces"], 1),
+    ):
+        root = make_tree(cs, sk, mp)
+        try:
+            findings = check(root)
+            joined = " | ".join(findings)
+            if len(findings) != want or any(hit not in joined for hit in must):
+                ok = False
+                print(f"[selftest FAIL] {name}: expected {want} finding(s), "
+                      f"got {len(findings)}: {findings}")
+            else:
+                print(f"[selftest ok] {name}: exactly {want} finding(s)")
+                r3_arms += 1
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+    print(f"[selftest] R3 seam arms = {r3_arms}")
 
     print(SELFTEST_MARKER if ok else "SESSION_SHEET_ID_BINDING_SELFTEST=FAIL")
     return 0 if ok else 1

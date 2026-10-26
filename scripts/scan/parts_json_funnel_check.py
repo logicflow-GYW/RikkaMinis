@@ -75,6 +75,7 @@ from _kotlin_ast import (  # noqa: E402
     const_bool,
     split_top,
     const_value,
+    enclosing_conditions,
     function_body,
     if_blocks,
     match_bracket,
@@ -103,9 +104,18 @@ MUTATION_DEBUG_REL = "src/android/app/src/main/java/com/rikkaminis/app/debug/Cha
 DAO_REL = "src/android/app/src/main/java/com/rikkaminis/app/data/db/ChatDao.kt"
 CHATREPO_REL = "src/android/app/src/main/java/com/rikkaminis/app/data/repository/ChatRepository.kt"
 
-# The @SerialName set of data/model/ContentPart.kt — the only three keys that
-# a real persisted parts_json row can carry besides "text".
-PART_SERIAL_NAMES = ('"toolUse"', '"toolResult"', '"mediaRef"')
+# The @SerialName set of data/model/ContentPart.kt. [R7] DERIVES it from the
+# model (see `derive_part_serial_names`); this tuple is only the fixture
+# fallback for selftest trees, which lay out two debug files and no model.
+#
+# The hand-list used to be the witness's lever: it named toolUse / toolResult /
+# mediaRef and omitted `"text"`, so `"text" -> Unit` (a matched-but-discarded
+# branch) dropped every user and assistant message from `chat.messages.list`
+# while all three listed parts stayed classified. Deriving the set from
+# `@SerialName` closes that class: a new part type lands in the judgment the
+# same day it lands in the model.
+PART_SERIAL_NAMES = ('"text"', '"toolUse"', '"toolResult"', '"mediaRef"')
+CONTENT_PART_REL = "src/android/app/src/main/java/com/rikkaminis/app/data/model/ContentPart.kt"
 SESSION_PARITY_FIELDS = ('put("pinnedAt"', 'put("lastMessagePreview"')
 SHARED_SESSION_MAPPER = "sessionCoreJson("
 COMPOSITE_MODEL_PREDICATE = "it.id == modelId"
@@ -197,6 +207,101 @@ def region_between(text, start_sig, end_sig_regex):
     return text[start:]
 
 
+
+def row_by_row_proxy_violations(code_region):
+    """[R3] The degradation path must RETURN the proxy row it builds.
+
+    The old judgment was negative only — "loadPageRowByRow never calls the DAO
+    directly". A witness added
+    `if (row != null && !row.id.startsWith("oversized-")) result.add(row)` and
+    stayed green: the proxy row (the entire point of the [fix/audit-s5h2]
+    degradation) was built and then filtered out of the page, so the transcript
+    got its hole back and the `out.size < total` invariants broke again
+    downstream (compaction / fork / rerun / regenerate-title).
+
+    Judged on the VALUE FLOW, not on a spelling:  a proxy built on a reachable
+    path must be bound to a local, that local (directly, via `!!`, or through a
+    `?.let { add(it) }` hand-off) must reach the accumulator, and no guard
+    between the two may test the row's projection — a null check is the only
+    accepted filter, because the row's own id is exactly how the proxy is told
+    apart from a materialised row.
+    """
+    out = []
+    proxy = [m.start() for m in re.finditer(r"\boversizedProxyRow\s*\(", code_region)]
+    if not proxy:
+        return ["the row-by-row fallback no longer builds an oversizedProxyRow() — an "
+                "un-materialisable row is dropped again and the transcript gets a hole"]
+    if not any(path_feasible(code_region, p) for p in proxy):
+        out.append("every oversizedProxyRow() call sits on a dead branch — the fallback "
+                   "can never run")
+    holders = []
+    for m in re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+?)?=(?!=)",
+                         code_region):
+        if any(m.end() <= p < expr_end(code_region, m.end()) for p in proxy):
+            holders.append(m.group(1))
+    if not holders:
+        out.append("the proxy row is built but never bound to a local — nothing carries it "
+                   "into the page result")
+        return out
+    acc = re.search(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+?)?=\s*"
+                    r"(?:ArrayList|MutableList|mutableListOf|arrayListOf)\b", code_region)
+    if acc is None:
+        return out + ["loadPageRowByRow no longer accumulates into a list "
+                      "(ROT — update this gate)"]
+    acc_name = acc.group(1)
+    sites = []
+    for m in re.finditer(r"\b" + re.escape(acc_name) + r"\s*\.\s*add\s*\(", code_region):
+        sites.extend((m.start(), a, b) for a, b in call_args(code_region, m.end() - 1))
+    for m in re.finditer(r"\b" + re.escape(acc_name) + r"\s*\+=", code_region):
+        sites.append((m.start(), m.end(), expr_end(code_region, m.end())))
+    kept = []
+    for pos, a, b in sites:
+        arg = code_region[a:b]
+        if any(contains_ident(arg, h) for h in holders):
+            kept.append((pos, arg))
+            continue
+        # `holder?.let { acc.add(it) }` — the part is handed to a lambda whose
+        # receiver is the proxy; `it` then carries it.
+        if contains_ident(arg, "it"):
+            for h in holders:
+                for lm in re.finditer(r"\b" + re.escape(h) + r"\s*\?\.\s*(?:let|also)\s*\{",
+                                      code_region):
+                    close = match_bracket(code_region, lm.end() - 1)
+                    if close > 0 and lm.end() <= pos < close:
+                        kept.append((pos, arg))
+                        break
+    if not kept:
+        return out + ["no %s.add(...) receives the proxy row (%s) — the fallback materialises "
+                      "the row and then drops it, so a page still reports fewer rows than the "
+                      "table holds" % (acc_name, ", ".join(holders))]
+    for pos, arg in kept:
+        # The row must ARRIVE, not merely be mentioned: an elvis whose other arm
+        # is `continue` / `return` / anything else hands the accumulator a
+        # different value (or no value), and `takeIf`/`filterNot` is a guard by
+        # another name.
+        for h in holders:
+            if not contains_ident(arg, h):
+                continue
+            arms = [arg[x:y] for x, y in split_top(arg, ("?:",))]
+            if len(arms) > 1 and not all(contains_ident(x, h) for x in arms):
+                out.append(
+                    "`%s` hands the accumulator an elvis whose other arm is not the proxy row — "
+                    "the degradation still drops it on that path"
+                    % re.sub(r"\s+", " ", arg.strip())[:80])
+            if re.search(r"\b" + re.escape(h) + r"\s*\?\.\s*(?:takeIf|takeUnless|filter|"
+                         r"filterNot)\s*[\({]", arg):
+                out.append(
+                    "`%s` filters the proxy row before it reaches the page — a filter is the "
+                    "same drop as a guard" % re.sub(r"\s+", " ", arg.strip())[:80])
+        for _kind, cond in enclosing_conditions(code_region, pos):
+            for h in holders:
+                if re.search(r"\b" + re.escape(h) + r"\s*(\?\.\s*|!{0,2}\s*)\.\s*[A-Za-z_]",
+                             cond):
+                    out.append(
+                        "the guard `%s` filters the proxy row by its own fields — the "
+                        "degradation path builds a proxy row and then throws it away, which is "
+                        "the [fix/audit-s5h2] hole again" % re.sub(r"\s+", " ", cond.strip())[:80])
+    return out
 
 # ── [B7-t03] value-flow helpers shared by [R5] / [R6] ─────────────────────
 FUNNEL_SPECS = (
@@ -500,6 +605,29 @@ def call_receiver(code, pos):
     return code[j + 1:end]
 
 
+def derive_part_serial_names(root):
+    """[R7] The real serial-name set: every `@SerialName("…")` in ContentPart.
+
+    Returns `(names, status)` where status is "derived" | "fallback" | "broken".
+    A tree WITHOUT the model (the selftest fixtures) falls back to the built-in
+    tuple; a model that exists but cannot be lexed, or carries no @SerialName at
+    all, is "broken" and the caller fails closed — a silently empty set would
+    make every arm trivially green.
+    """
+    path = os.path.join(root, CONTENT_PART_REL)
+    if not os.path.exists(path):
+        return list(PART_SERIAL_NAMES), "fallback"
+    try:
+        lit = strip_kotlin_comments(read(path))
+    except KotlinLexError:
+        return None, "broken"
+    names = sorted({"\"%s\"" % n for n in
+                    re.findall(r"@SerialName\s*\(\s*\"([^\"]+)\"\s*\)", lit)})
+    if not names:
+        return None, "broken"
+    return names, "derived"
+
+
 def check_debug_surface(root):
     """[R7]-[R9] — the read-side debug RPC view of the same persisted rows.
 
@@ -535,7 +663,14 @@ def check_debug_surface(root):
                 part_var = vm.group(1)
                 break
         missing, silent = [], []
-        for name in PART_SERIAL_NAMES:
+        serial_names, status = derive_part_serial_names(root)
+        if serial_names is None:
+            findings.append(
+                "[R7] FAIL cannot derive the ContentPart @SerialName set from "
+                f"{CONTENT_PART_REL} (unlexable or no @SerialName) — fail-closed: a set that "
+                "cannot be read cannot be judged, and an empty set would pass every arm")
+            serial_names = []
+        for name in serial_names:
             key = name.strip('"')
             hits = [a for a in arms if contains_ident(a[1], key)]
             if not hits:
@@ -565,8 +700,9 @@ def check_debug_surface(root):
                 "the part is classified on paper and dropped in fact")
         else:
             findings.append(
-                "[R7] PASS messageToJson classifies toolUse / toolResult / mediaRef "
-                "and hands each part on")
+                "[R7] PASS messageToJson classifies "
+                + " / ".join(n.strip('"') for n in serial_names)
+                + f" ({status} set) and hands each part on")
 
     # [R8] one session shape, reached from both RPCs through one mapper.
     list_body = extract_function(dbg, "fun sessionsList(")
@@ -1233,13 +1369,25 @@ def check(root):
         else:
             findings.append(f"[R2] FAIL missing routing: `{site}`")
 
-    # [R3] row-by-row fallback also funnels
+    # [R3] row-by-row fallback also funnels — AND the proxy row it builds on
+    # the degraded path actually reaches the page. The negative half alone let
+    # `!row.id.startsWith("oversized-")` drop the proxy while the gate stayed
+    # green (attempt 03-2 of the third adversarial round).
     if rbr_region is None:
         findings.append("[R3] FAIL loadPageRowByRow not found")
     elif PARTS_RE.search(rbr_region) or RANGE_RE.search(rbr_region):
         findings.append("[R3] FAIL loadPageRowByRow calls the DAO directly")
     else:
-        findings.append("[R3] PASS loadPageRowByRow routes through the funnel")
+        rbr_at = chatrepo.find("private suspend fun loadPageRowByRow(")
+        rbr_code = chatrepo_code[rbr_at:rbr_at + len(rbr_region)]
+        proxy_bad = row_by_row_proxy_violations(rbr_code)
+        if proxy_bad:
+            for why in proxy_bad:
+                findings.append("[R3] FAIL " + why)
+        else:
+            findings.append(
+                "[R3] PASS loadPageRowByRow routes through the funnel and returns the "
+                "oversizedProxyRow() it builds")
 
     # [R4] updateMessageParts writes through the ceiling
     upd_region = region_between(
@@ -1278,17 +1426,25 @@ def check(root):
         inline = len(re.findall(r"toByteArray\s*\(\s*Charsets\.UTF_8\s*\)", append_body))
         wiring = funnel_bypasses(
             append_body, append_lit, "reasoningContent", "capReasoningContentForRow")
+        # [R5] the OTHER column of the same row goes through the same shape: the
+        # witness passed the raw `partsJson` parameter into MessageEntity while
+        # `val capped = capPartsJsonForRow(partsJson)` sat right above it, and
+        # this arm only ever looked at reasoningContent — attempt 03-1 of the
+        # third adversarial round.
+        wiring += funnel_bypasses(
+            append_body, append_lit, "partsJson", "capPartsJsonForRow")
         if inline:
             findings.append(
                 "[R5] FAIL appendMessage re-derives the reasoning byte ceiling inline "
                 "(the comparison must live only in the companion funnel)")
         elif wiring:
             findings.append(
-                "[R5] FAIL appendMessage binds reasoningContent without the funnel — "
+                "[R5] FAIL appendMessage binds a payload without the ceiling funnel — "
                 + "; ".join("line %d: %s" % w for w in wiring[:3]))
         else:
             findings.append(
-                "[R5] PASS appendMessage routes reasoning through the funnel")
+                "[R5] PASS appendMessage routes partsJson and reasoningContent through "
+                "their funnels")
 
     # [R6] import caps both columns
     # [R6] import caps both columns — judged on the VALUE that reaches the row,
@@ -1964,6 +2120,13 @@ DEBUG_MEDIA_REF_UNIT = DEBUG_GREEN.replace(
     '"mediaRef", "image", "file", "attachment" -> Unit',
 )
 
+# 03-3 (third adversarial round): the TEXT arm survives as a matched branch and
+# drops the part — every user/assistant message becomes "" in chat.messages.list.
+DEBUG_TEXT_UNIT = DEBUG_GREEN.replace(
+    '"text" -> sb.append(p.optString("value", ""))',
+    '"text" -> Unit',
+)
+
 # 10-4: the DAO is reached through a local binding instead of `.dao`.
 DEBUG_DAO_ALIAS = DEBUG_GREEN.replace(
     "if (!includeEmpty && repo.messageCount(session.id) == 0) continue",
@@ -1980,9 +2143,123 @@ MEDIA_ZERO_DELTA = MEDIA_GREEN.replace(
     "if (isVideoMediaRef(media)) vid += 0 else img += 0",
 )
 
+# The @SerialName model the derived [R7] set is judged against in selftest
+# arms (shape mirrors data/model/ContentPart.kt).
+CONTENT_PART_FIXTURE = '''package com.rikkaminis.app.data.model
+
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+
+@Serializable
+sealed class ContentPart {
+    @Serializable
+    @SerialName("text")
+    data class Text(val value: String) : ContentPart()
+
+    @Serializable
+    @SerialName("mediaRef")
+    data class Media(val value: String) : ContentPart()
+
+    @Serializable
+    @SerialName("toolUse")
+    data class Tool(val value: String) : ContentPart()
+
+    @Serializable
+    @SerialName("toolResult")
+    data class Result(val value: String) : ContentPart()
+}
+'''
+
+# A model that grew a fifth part the RPC view has not been taught. [R7] must go
+# RED on the DERIVED set — that is the whole point of deriving it (the hand-list
+# this replaced could only ever judge the names someone remembered to list).
+CONTENT_PART_FIXTURE_EXTRA = CONTENT_PART_FIXTURE.replace(
+    '''    @Serializable
+    @SerialName("toolResult")
+    data class Result(val value: String) : ContentPart()
+}''',
+    '''    @Serializable
+    @SerialName("toolResult")
+    data class Result(val value: String) : ContentPart()
+
+    @Serializable
+    @SerialName("thinking")
+    data class Thinking(val value: String) : ContentPart()
+}''')
+
+# --- [R3] row-by-row degradation fixtures (third adversarial round 03-2) -----
+# The funnel routing is unchanged; the proxy row the degradation builds is
+# silently filtered out of the page.
+R3_REPO_GOOD_BODY = """    private suspend fun loadPageRowByRow(
+        sessionId: String,
+        baseOffset: Int,
+        limit: Int,
+    ): List<MessageEntity> {
+        val result = ArrayList<MessageEntity>(limit)
+        for (i in 0 until limit) {
+            val row = try {
+                loadPageSlice(sessionId, baseOffset + i, 1, null, null).firstOrNull()
+            } catch (e: SQLiteBlobTooBigException) {
+                oversizedProxyRow(sessionId, baseOffset + i)
+            }
+            if (row != null) result.add(row)
+        }
+        return result
+    }
+
+    private fun oversizedProxyRow(sessionId: String, sortOrder: Int): MessageEntity {
+        return MessageEntity(id = "oversized-$sessionId-$sortOrder", sessionId = sessionId)
+    }
+
+    private suspend fun loadPageSlice(sessionId: String, offset: Int, limit: Int,
+                                      startMs: Long?, endMs: Long?): List<MessageEntity> =
+        dao.loadMessagesPage(sessionId, offset, limit)
+"""
+R3_REPO_GOOD = "class Repo {\n" + R3_REPO_GOOD_BODY + "}\n"
+R3_REPO_FILTERED = ("class Repo {\n" + R3_REPO_GOOD_BODY.replace(
+    "            if (row != null) result.add(row)",
+    '            if (row != null && !row.id.startsWith("oversized-")) result.add(row)',
+) + "}\n")
+# The proxy is dropped with an elvis — the binding keeps the name, the value is gone.
+R3_REPO_ELVIS = ("class Repo {\n" + R3_REPO_GOOD_BODY.replace(
+    "            if (row != null) result.add(row)",
+    "            result.add(row ?: continue)",
+) + "}\n")
+
+_ARMS_TOTAL = 0
+
+
+class _ArmCounter:
+    """Counts the `SELFTEST <name>` lines the run emits.
+
+    The closing marker's arm count has to come from the RUN — a hand-maintained
+    number drifts the first time an arm is added or dropped (and a stale "49"
+    would hide a deleted arm behind a passing marker).
+    """
+
+    def __init__(self, real):
+        self.real = real
+        self.lines = []
+
+    def write(self, s):
+        self.real.write(s)
+        self.lines.append(s)
+
+    def flush(self):
+        self.real.flush()
+
+    @property
+    def arms(self):
+        return sum(1 for ln in "".join(self.lines).splitlines()
+                   if ln.lstrip().startswith("SELFTEST "))
+
+
 def selftest():
     import tempfile
     import shutil
+    global _ARMS_TOTAL
+    _tee = _ArmCounter(sys.stdout)
+    sys.stdout = _tee
     bad = 0
 
     def expect(root, name, wanted, verdict_wanted):
@@ -2009,12 +2286,23 @@ def selftest():
         shutil.rmtree(tmp, ignore_errors=True)
 
     # --- [R7]-[R9]: the debug RPC read surface -------------------------------
-    def debug_arm(name, debug_body, mutation_body, tag, want, dao_body=None):
-        """Grade ONE read-side arm on an isolated fixture tree."""
+    def debug_arm(name, debug_body, mutation_body, tag, want, dao_body=None,
+                  content_part=False):
+        """Grade ONE read-side arm on an isolated fixture tree.
+
+        `content_part=True` also lays out the model file, so [R7] runs on the
+        DERIVED serial-name set instead of the built-in fallback — the shape the
+        production tree uses.
+        """
         nonlocal bad
         tmp = tempfile.mkdtemp(prefix="debug-arm-")
         try:
             build_debug_fixture(tmp, debug_body, mutation_body, dao_body)
+            if content_part:
+                cp = os.path.join(tmp, CONTENT_PART_REL)
+                os.makedirs(os.path.dirname(cp), exist_ok=True)
+                with open(cp, "w", encoding="utf-8") as f:
+                    f.write(CONTENT_PART_FIXTURE if content_part is True else content_part)
             hits = [f for f in check_debug_surface(tmp) if f.startswith(tag)]
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -2034,6 +2322,17 @@ def selftest():
     debug_arm("r7-missing-toolUse", DEBUG_MISSING_TOOLUSE, MUTATION_GREEN, "[R7]", "FAIL")
     debug_arm("r7-name-only-in-line-comment", DEBUG_LINE_COMMENT_ONLY, MUTATION_GREEN, "[R7]", "FAIL")
     debug_arm("r7-name-only-in-block-comment", DEBUG_BLOCK_COMMENT_ONLY, MUTATION_GREEN, "[R7]", "FAIL")
+    # third adversarial round 03-3: the dispatch keeps its arms and the text arm
+    # stops handing the part on. Judged on the DERIVED @SerialName set, which is
+    # why `"text"` is in it at all.
+    debug_arm("r7-text-branch-dropped", DEBUG_TEXT_UNIT, MUTATION_GREEN, "[R7]", "FAIL",
+              content_part=True)
+    debug_arm("r7-derived-set-live", DEBUG_GREEN, MUTATION_GREEN, "[R7]", "PASS",
+              content_part=True)
+    # ... and a part the model gained but the RPC view was never taught goes RED
+    # on its own, without anyone editing the gate.
+    debug_arm("r7-new-part-not-dispatched", DEBUG_GREEN, MUTATION_GREEN, "[R7]", "FAIL",
+              content_part=CONTENT_PART_FIXTURE_EXTRA)
 
     # [R8] one shape, one mapper, no re-inlined field
     debug_arm("r8-shared-mapper", DEBUG_GREEN, MUTATION_GREEN, "[R8]", "PASS")
@@ -2090,6 +2389,40 @@ def selftest():
             bad += 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+    # --- [R3]/[R5]: third adversarial round 03-1 / 03-2 ----------------------
+    def tag_arm(name, chatrepo_body, tag, want):
+        """Grade ONE finding line on an isolated fixture tree.
+
+        The minimal fixture is deliberately RED on several other criteria; this
+        arm asserts the verdict of the ONE line it exists for, so a new arm
+        cannot be satisfied by noise from a neighbouring judgment.
+        """
+        nonlocal bad
+        tmp = tempfile.mkdtemp(prefix="tag-arm-")
+        try:
+            build_fixture(tmp, chatrepo_body, IMPORT_GOOD)
+            findings = [f for f in check(tmp)[1] if f.startswith(tag)]
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        states = [f.split()[1] for f in findings if len(f.split()) > 1]
+        if want not in states:
+            print(f"  SELFTEST {name}: FAIL ({tag} produced {states or 'nothing'}, "
+                  f"wanted {want})")
+            bad += 1
+        else:
+            print(f"  SELFTEST {name}: OK ({tag} {want})")
+
+    # [R3] the degradation path must RETURN the proxy row it builds
+    tag_arm("r3-proxy-row-kept", R3_REPO_GOOD, "[R3]", "PASS")
+    tag_arm("r3-proxy-row-filtered-out", R3_REPO_FILTERED, "[R3]", "FAIL")
+    tag_arm("r3-proxy-row-elvis-dropped", R3_REPO_ELVIS, "[R3]", "FAIL")
+
+    # [R5] the parts_json column of the same row goes through its funnel too
+    FUNNEL_REPO_PARTS_BYPASS = FUNNEL_REPO_GOOD.replace(
+        "            partsJson = capped,", "            partsJson = partsJson,")
+    tag_arm("r5-partsjson-through-funnel", FUNNEL_REPO_GOOD, "[R5]", "PASS")
+    tag_arm("r5-partsjson-bypasses-funnel", FUNNEL_REPO_PARTS_BYPASS, "[R5]", "FAIL")
 
     # --- [R11 / C-EXP]: the mediaRef dispatch judgment ------------------------
     def media_arm(name, body, extra, want, tag="[R11]"):
@@ -2234,6 +2567,8 @@ def selftest():
         bad += 1
     else:
         print("  SELFTEST empty-tree: OK (fails closed)")
+    sys.stdout = _tee.real
+    _ARMS_TOTAL = _tee.arms
     return 1 if bad else 0
 
 
@@ -2241,7 +2576,8 @@ def main():
     argv = sys.argv[1:]
     if "--selftest" in argv:
         n = selftest()
-        print("PARTSJSON_FUNNEL_SELFTEST=" + ("PASS" if n == 0 else "FAIL"))
+        print("PARTSJSON_FUNNEL_SELFTEST=%s (%d arms)"
+              % ("PASS" if n == 0 else "FAIL", _ARMS_TOTAL))
         sys.exit(n)
     root = argv[0] if argv else "."
     verdict, findings = check(root)

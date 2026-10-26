@@ -57,9 +57,9 @@ import tempfile
 # witnesses that broke this gate did it by putting a `}` or a `readBytes()`
 # exactly where a text scan could not see it.
 from _kotlin_lexer import KotlinLexError, mask_code
-from _kotlin_ast import (const_bool, match_bracket, split_top, stmt_spans,
-                         strip_parens, tail_expr)
-from _kotlin_valueflow import (brace_depth, contains_ident, expr_end,
+from _kotlin_ast import (const_bool, enclosing_conditions, if_blocks, match_bracket,
+                         split_top, stmt_spans, strip_parens, tail_expr)
+from _kotlin_valueflow import (brace_depth, call_args, contains_ident, expr_end,
                                path_feasible, returns_exiting, value_sources)
 
 TARGET_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/sandbox/FilePreviewScreen.kt"
@@ -540,6 +540,152 @@ def check_print_slot(src):
     return problems
 
 
+# ── [R3-t02] the two seams around the print path ────────────────────────────
+#
+# Round-3 witness 05-1: this gate pins `buildPrintHtml`'s bounded read, and
+# never asked whether a non-HTML file ever REACHES it. `if (item.isHtmlFile ||
+# true)` widened the HTML bypass to every file, so a 200 MB `.log` went straight
+# into `webView.loadUrl(file://…)` with `readCapped`'s 500 KB cap still perfectly
+# intact — the criterion measured a function nothing called.
+#
+# Round-3 witness 04-1 (shared with file_preview_url_encode_check): the print
+# WebView's page load can also be killed one level down, `if (preRenderedHtml ==
+# null && false)`, which leaves the slot, the releaser and the identity guard
+# untouched while every print renders an empty document.
+#
+# Both criteria are about the decision, not the spelling: which branch a print
+# call sits in (const-folded), and whether the load site is on a reachable path.
+
+PRINT_ENTRY_RE = re.compile(r"\bprintFile\s*\(")
+HTML_TEST_RE = re.compile(r"\bisHtmlFile\b|\bisHtml\b")
+
+
+def _local_rhs(code, name, before):
+    """RHS of the nearest `val/var name =` declared before [before]."""
+    rhs = None
+    for m in re.finditer(r"\b(?:val|var)\s+" + re.escape(name) + r"\b[^=\n]*=(?!=)", code):
+        if m.start() >= before:
+            break
+        rhs = code[m.end():expr_end(code, m.end())].strip()
+    return rhs
+
+
+def _origins(code, expr, before):
+    """"The call exists" is not "the call's result is the value" (one hop)."""
+    out = []
+    for src in value_sources(expr):
+        out.append(src)
+        name = src.strip()
+        if re.fullmatch(r"[A-Za-z_]\w*", name):
+            rhs = _local_rhs(code, name, before)
+            if rhs:
+                out.extend(value_sources(rhs))
+    return out
+
+
+def _reachable(code, pos):
+    """Is [pos] on a reachable path? Enclosing `if`s folded from the geometry.
+
+    NOTE (shared-primitive gap, registered in FIX-R3-t02 §6): `path_feasible`
+    takes its branch conditions from `enclosing_conditions`, which negates an
+    `else` arm as `'!' + cond` — so `!a || true` parses as `(!a) || true` and a
+    constant-TRUE guard in front of the else arm reads as reachable. The fold is
+    therefore done here on the branch extents: then-arm of a constant-false
+    guard and else-arm of a constant-true guard are both dead.
+    """
+    for cond, t_start, t_end, e_start, e_end in if_blocks(code):
+        val = const_bool(cond)
+        if val is None:
+            continue
+        if val is False and t_start <= pos < t_end:
+            return False
+        if val is True and e_start is not None and e_start <= pos < e_end:
+            return False
+    return True
+
+
+def check_print_routing(code):
+    """05-1 — non-HTML files must actually reach the bounded render."""
+    if "printFile(" not in code:
+        return []                     # no print path here (presence enforced in run())
+    problems = []
+    sites = []
+    for m in PRINT_ENTRY_RE.finditer(code):
+        if re.search(r"\bfun\s+$", code[max(0, m.start() - 16):m.start()]):
+            continue                      # the declaration
+        args = call_args(code, m.end() - 1)
+        if not args:
+            continue
+        pre = None
+        for a, b in args:
+            nm = re.match(r"\s*preRenderedHtml\s*=\s*", code[a:b])
+            if nm:
+                pre = (a + nm.end(), b)
+        if pre is None:
+            continue
+        sites.append((m.start(), pre))
+    if not sites:
+        return ["no printFile( … ) call with an explicit preRenderedHtml argument — the print "
+                "entry point moved, re-point this criterion"]
+    unbounded, rendered = [], []
+    for at, (a, b) in sites:
+        expr = code[a:b].strip()
+        if expr == "null":
+            unbounded.append(at)
+        elif any("buildPrintHtml(" in src for src in _origins(code, expr, at)):
+            rendered.append(at)
+        else:
+            problems.append(
+                "printFile( …, preRenderedHtml = %r ) comes from neither the HTML bypass nor "
+                "buildPrintHtml( … ) — a third print source appeared and its bound cannot be "
+                "judged" % expr[:40])
+    if not rendered:
+        problems.append(
+            "no printFile( … ) call receives buildPrintHtml(item)'s output — the bounded text "
+            "render is not wired to the print entry point")
+    for at in unbounded:
+        conds = [cond for kind, cond in enclosing_conditions(code, at) if kind == "if"]
+        html_conds = [c for c in conds if HTML_TEST_RE.search(c)]
+        if not html_conds:
+            problems.append(
+                "the printFile( … preRenderedHtml = null ) path (the unbounded file:// load) is "
+                "not guarded by the HTML-file discriminator — text / log / json files would "
+                "load their whole content through the WebView and bypass readCapped")
+            continue
+        dead = [c for c in html_conds if const_bool(c) is not None]
+        if dead:
+            problems.append(
+                "the HTML/text split in front of printFile(...) folds to a constant (%r) — both "
+                "kinds take the same branch, so a multi-hundred-MB log either goes through the "
+                "unbounded file:// load or never prints at all"
+                % dead[0].strip()[:60])
+    for at in rendered:
+        if not _reachable(code, at):
+            problems.append(
+                "the buildPrintHtml(...) print call sits in a branch that can never run — the "
+                "500 KB readCapped bound is decorative while the raw load takes over")
+    return problems
+
+
+def check_print_file_load(code):
+    """04-1 — the print WebView's own page load must be on a reachable path."""
+    if "printFile(" not in code:
+        return []                     # no print path here (presence enforced in run())
+    body = decl_body(code, "private fun printFile(")
+    if body is None:
+        return ["`private fun printFile(` must exist exactly once — the print path moved, "
+                "re-point this criterion"]
+    problems = []
+    for m in re.finditer(r"\bloadUrl\s*\(", body):
+        if _reachable(body, m.start()):
+            continue
+        problems.append(
+            "the print WebView's loadUrl( … ) sits behind a condition that folds to a constant "
+            "— the WebView never loads the file it was created for, so every print renders an "
+            "empty document while the slot/releaser contract stays intact")
+    return problems
+
+
 def _read_statement_for(body, spans, pos):
     """(start, end) of the top-level statement that contains [pos]."""
     for a, b in spans:
@@ -693,6 +839,12 @@ def check(src):
             v.append("%s (required token missing)" % why)
     # [deep-audit-1049 B-05] the print slot's lifecycle (see check_print_slot).
     v.extend(check_print_slot(src))
+    # [R3-t02] the decision in front of the print path and the print WebView's
+    # own load. Both are silent when the source has no print entry at all, so
+    # the buildPrintHtml-only fixtures stay judgeable; the real tree's presence
+    # requirement is enforced in run().
+    v.extend(check_print_routing(code))
+    v.extend(check_print_file_load(code))
     return v
 
 
@@ -851,6 +1003,35 @@ def check_log_share(root):
             if msg:
                 violations.append(msg)
             sites += 1
+
+    # [R3-t02 05-2] …and the bounded text must be the text that actually gets
+    # shared. `putExtra(Intent.EXTRA_TEXT, "")` left the reader, its cap, the IO
+    # hop and the chooser flags exactly as every criterion above measures them,
+    # while the recipient of the fallback share received an empty body: the cap
+    # guarded a value nobody sent. The last hop is judged by ORIGIN.
+    extra_sites = 0
+    for m in re.finditer(r"\bputExtra\s*\(\s*Intent\.EXTRA_TEXT\s*,", code):
+        extra_sites += 1
+        sites += 1
+        args = call_args(code, code.index("(", m.start()))
+        if len(args) < 2:
+            violations.append(
+                "%s: cannot read the EXTRA_TEXT argument (fail-closed) — the shared body is the "
+                "whole point of the fallback branch" % LOG_SCREEN_REL)
+            continue
+        expr = code[args[1][0]:args[1][1]].strip()
+        origins = _origins(code, expr, m.start())
+        if not any(re.search(r"\b" + re.escape(name) + r"\s*\(", src)
+                   for name in readers for src in origins):
+            violations.append(
+                "%s: the fallback chooser's EXTRA_TEXT carries %r, which does not derive from "
+                "the bounded reader (%s) — the cap is enforced on a value nobody sends, so the "
+                "shared body is empty"
+                % (LOG_SCREEN_REL, expr[:40], ", ".join(readers) or "none"))
+    if not extra_sites:
+        violations.append(
+            "%s: the share fallback carries no EXTRA_TEXT at all — a chooser with no body and "
+            "no stream shares nothing (the criterion lost its subject)" % LOG_SCREEN_REL)
 
     prep = None
     launch = None
@@ -1652,6 +1833,88 @@ _SAF_WEBAPP_UNBOUNDED = _SAF_WEBAPP_BOUNDED.replace(
     "    return resolver.openInputStream(uri)?.use { it.readBytes() }\n",
 )
 
+# [R3-t02 05-3] the capped array is bound and then thrown away: the decode gets a
+# constant, so the pick can never load while every boundedness arm stays green.
+_SAF_WEBAPP_ICON_DROPPED = _SAF_WEBAPP_BOUNDED + (
+    "\n"
+    "fun loadBitmapFromUri(resolver: ContentResolver, uri: Uri): ByteArray? = runCatching {\n"
+    "    val bytes = resolver.openInputStream(uri)?.use { input ->\n"
+    "        readAtMost(input, MAX_ICON_SOURCE_BYTES)\n"
+    "    } ?: return@runCatching null\n"
+    "    ImageDecoding.decodeBytesBounded(ByteArray(0), ICON_MAX_EDGE_PX)\n"
+    "}.getOrNull()\n"
+)
+
+def _binding_at(code, pos):
+    """Name of the enclosing `val NAME = …` whose right-hand side contains [pos]."""
+    best = None
+    for m in re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+?)?=(?!=)", code[:pos]):
+        start = m.end()
+        if start <= pos < expr_end(code, start):
+            best = m.group(1)
+    return best
+
+
+def _consumed_as_value(code, pos, name):
+    """Is [name] handed over as a WHOLE argument of some call after [pos]?"""
+    for m in re.finditer(r"\b[A-Za-z_][\w.]*\s*\(", code[pos:]):
+        for a, b in call_args(code, pos + m.end() - 1):
+            if name in [s.strip() for s in value_sources(code[a:b].strip())]:
+                return True
+    return False
+
+
+def check_saf_read_consumed(root):
+    """(violations, sites, notes) — [R3-t02 05-3] the capped bytes must be used.
+
+    `readAtMost(input, MAX_ICON_SOURCE_BYTES)` bounds the READ; nothing asked
+    what happens to the array afterwards. The witness binds the capped bytes and
+    then decodes `ByteArray(0)`: the streaming helper, the named cap constant,
+    the off-the-composition-thread decode and the sweep's "bounded helper"
+    verdict all stay exactly as the criteria above measure them, while a picked
+    icon can never load — the cap guarded a value the caller throws away.
+
+    The criterion follows the value: the name the read is bound to has to be
+    handed over as a whole call argument (a whole-argument match, not "the
+    identifier appears somewhere"), otherwise the capped array is dead.
+    """
+    violations, notes = [], []
+    sites = 0
+    for scan_dir in SAF_SCAN_DIRS:
+        abs_dir = os.path.join(root, scan_dir)
+        if not os.path.isdir(abs_dir):
+            continue
+        for base, _dirs, files in os.walk(abs_dir):
+            for name in sorted(files):
+                if not name.endswith(".kt"):
+                    continue
+                full = os.path.join(base, name)
+                with open(full, encoding="utf-8", errors="replace") as fh:
+                    code = strip_comments(fh.read())
+                if not code or "readAtMost(" not in code:
+                    continue
+                rel = _saf_short(os.path.relpath(full, root))
+                for m in re.finditer(r"\breadAtMost\s*\(", code):
+                    if re.search(r"\bfun\s+$", code[max(0, m.start() - 12):m.start()]):
+                        continue
+                    sites += 1
+                    bound = _binding_at(code, m.start())
+                    if bound is None:
+                        notes.append("[B-07 inline] %s — readAtMost( … ) feeds a value directly"
+                                     % rel)
+                        continue
+                    if _consumed_as_value(code, m.start(), bound):
+                        continue
+                    violations.append(
+                        "%s:%d the bytes read through readAtMost( … ) are bound to `%s` and "
+                        "then dropped — the name never reaches another call as an argument, so "
+                        "the cap protects a value the caller replaces or ignores"
+                        % (rel, code.count("\n", 0, m.start()) + 1, bound))
+    if sites == 0:
+        notes.append("[PARTIAL] no readAtMost( … ) call site anywhere in the SAF domain")
+    return violations, sites, notes
+
+
 def _saf_fixture(shape="fixed"):
     """A minimal ui/** tree carrying one shape per B-07 criterion."""
     root = tempfile.mkdtemp(prefix="safimport_")
@@ -1664,6 +1927,8 @@ def _saf_fixture(shape="fixed"):
 
     if shape == "webapp_unbounded":
         webapp_src = _SAF_WEBAPP_UNBOUNDED
+    elif shape == "icon_bytes_dropped":
+        webapp_src = _SAF_WEBAPP_ICON_DROPPED
     elif shape == "no_helper":
         helper = None
     elif shape == "helper_nocap":
@@ -1741,6 +2006,24 @@ def selftest_saf_imports():
         arm("domain shrunk back to ui/ only", "outside the sweep domain")
     finally:
         globals()["SAF_SCAN_DIRS"] = saved
+
+    # [R3-t02 05-3] the capped array must be the array that gets used.
+    for shape, needle in (("fixed", None), ("icon_bytes_dropped", "then dropped")):
+        root = _saf_fixture(shape)
+        try:
+            v, sites, _notes = check_saf_read_consumed(root)
+            if needle is None:
+                if v:
+                    failures.append("SAF capped-byte consumption must be clean, got %s" % (v,))
+                else:
+                    print("[ok] SAF capped bytes consumed -> clean (%d site(s))" % sites)
+            elif not any(needle in item for item in v):
+                failures.append("SAF capped-bytes-dropped did not trip %r (got %s)"
+                                % (needle, v))
+            else:
+                print("[ok] SAF capped bytes dropped before the decode -> caught")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
     return failures
 
 
@@ -1797,6 +2080,11 @@ def _log_share_screen(shape="fixed"):
     else:
         fallback = "            val text = readLogShareText(file) ?: return\n"
 
+    if shape == "empty_text":
+        extra = '                putExtra(Intent.EXTRA_TEXT, "")\n'
+    else:
+        extra = "                putExtra(Intent.EXTRA_TEXT, text)\n"
+
     inner = (
         "        if (!file.exists()) return null\n"
         "        try {\n"
@@ -1804,7 +2092,11 @@ def _log_share_screen(shape="fixed"):
         "            Intent.createChooser(Intent(Intent.ACTION_SEND), \"share\")\n"
         "        } catch (e: Exception) {\n"
         + fallback +
-        "            Intent.createChooser(Intent(Intent.ACTION_SEND), \"share\")\n"
+        "            val send = Intent(Intent.ACTION_SEND).apply {\n"
+        "                type = \"text/plain\"\n"
+        + extra +
+        "            }\n"
+        "            Intent.createChooser(send, \"share\")\n"
         "        }\n"
     )
 
@@ -1892,6 +2184,9 @@ def selftest_log_share():
         "no bounded reader", shape="no_bounded_reader")
     arm("a call site that overrides the cap is caught", True,
         "cap the reader cannot honour", shape="huge_cap_arg")
+    # [R3-t02 05-2] the bounded text dropped at the last hop.
+    arm("a chooser that carries an empty body is caught", True,
+        "does not derive from the bounded reader", shape="empty_text")
     arm("a file that lost its share anchor is a rot failure", True,
         "lost its anchor", drop=True)
     arm("a tree that never shipped ui/settings is skipped, not failed", False,
@@ -2065,6 +2360,43 @@ BAD_PDF_KEY_OPAQUE = GOOD_SRC.replace(
     "initialValue = null, key1 = idx, key2 = item.file.let { 0 }) {",
 )
 assert BAD_PDF_KEY_OPAQUE != GOOD_SRC
+
+# [R3-t02] The print entry: the fixture GOOD_SRC deliberately stops at
+# buildPrintHtml, so the two round-3 criteria (which one file only judges when
+# the file actually has a print path) get their own subject. Faithful to
+# FilePreviewScreen: an HTML bypass and a bounded buildPrintHtml branch, with the
+# print WebView's page load in `printFile`.
+PRINT_ENTRY_SRC = GOOD_SRC + """
+private fun fileUrlFor(file: File): String = "file://" + encodeFileUrlPath(file.absolutePath)
+
+private fun printFile(context: Context, item: FileItem, preRenderedHtml: String? = null) {
+    val webView = WebView(context)
+    printWebView = webView
+    if (preRenderedHtml == null) {
+        webView.loadUrl(fileUrlFor(item.file))
+    } else {
+        webView.loadDataWithBaseURL(null, preRenderedHtml, "text/html", "utf-8", null)
+    }
+}
+
+@Composable
+private fun PrintBar(item: FileItem, scope: CoroutineScope) {
+    IconButton(onClick = {
+        if (item.isHtmlFile) {
+            printFile(context, item, preRenderedHtml = null)
+        } else {
+            scope.launch {
+                val html = withContext(Dispatchers.IO) { buildPrintHtml(item) }
+                printFile(context, item, preRenderedHtml = html)
+            }
+        }
+    }) {
+        Icon(Icons.Default.Print, contentDescription = "print")
+    }
+}
+"""
+
+
 def selftest():
     failures = []
 
@@ -2194,6 +2526,30 @@ def selftest():
             "    val raw = java.nio.file.Files.readString(item.file.toPath())"),
         ("whole-file Files.readString",),
     )
+
+    # ── [R3-t02] print routing + print-load reachability ───────────────────
+    entry = strip_comments(PRINT_ENTRY_SRC)
+    expect_clean("print entry fixture (routing + load)",
+                 check_print_routing(entry) + check_print_file_load(entry))
+    widened = strip_comments(PRINT_ENTRY_SRC.replace(
+        "if (item.isHtmlFile) {", "if (item.isHtmlFile || true) {"))
+    routing_widened = check_print_routing(widened)
+    expect_trip("print routing widened (|| true)", routing_widened, "folds to a constant")
+    expect_trip("print routing widened (|| true)", routing_widened,
+                "sits in a branch that can never run")
+    dead_load = strip_comments(PRINT_ENTRY_SRC.replace(
+        "if (preRenderedHtml == null) {", "if (preRenderedHtml == null && false) {"))
+    expect_trip("print load behind a constant guard", check_print_file_load(dead_load),
+                "folds to a constant")
+    third_source = strip_comments(PRINT_ENTRY_SRC.replace(
+        "printFile(context, item, preRenderedHtml = html)",
+        'printFile(context, item, preRenderedHtml = "")'))
+    expect_trip("a third print source", check_print_routing(third_source), "third print source")
+    # A source with no print path at all stays silent here; the real tree's
+    # presence requirement is enforced in run().
+    expect_clean("source without a print path",
+                 check_print_routing(strip_comments(GOOD_SRC))
+                 + check_print_file_load(strip_comments(GOOD_SRC)))
 
     # [deep-audit-1041 B-07] the second target's arms.
     failures.append("B-07 arms misbehaved" if selftest_log_share() else None)
@@ -2345,6 +2701,9 @@ def run(root):
     if view is None or "printWebView" not in view:
         v.append("the print WebView slot (printWebView) is gone from the preview — the "
                  "lifecycle criteria below have lost their subject (fail-closed)")
+    if view is not None and "printFile(" not in view:
+        v.append("the print entry point (printFile) is gone from the preview — the print "
+                 "routing criteria have lost their subject (fail-closed)")
     rc = 0
     if v:
         for item in v:
@@ -2382,6 +2741,16 @@ def run(root):
     if not (sv or srot):
         print("PASS %s: picked SAF documents are read through the bounded helper (%d decision(s) checked)"
               % (_saf_short(SAF_HELPER_REL), ssites))
+    # [R3-t02 05-3] …and the capped array must be the array that gets used.
+    cv, csites, cnotes = check_saf_read_consumed(root)
+    for n in cnotes:
+        print("  %s" % n)
+    if cv:
+        for item in cv:
+            print("FAIL %s" % item)
+        rc = 1
+    else:
+        print("PASS capped SAF reads reach their consumer (%d read site(s) checked)" % csites)
     return rc
 
 

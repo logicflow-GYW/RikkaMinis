@@ -94,6 +94,22 @@ import shutil
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    enclosing_conditions,
+    function_body,
+    if_blocks,
+    match_bracket,
+    split_top,
+    stmt_spans,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    expr_end,
+    value_sources,
+)
+
 LINE_COMMENT_RE = re.compile(r"//.*$")
 ESCAPE_RE = re.compile(r"thinking-wiring-ok\s*:")
 EFFORT_ESCAPE_RE = re.compile(r"thinking-effort-ok\s*:")
@@ -157,48 +173,32 @@ PICKER_SIG = "internal fun ThinkingLevelPicker("
 
 
 def strip_comments(text: str) -> str:
-    """Drop // line comments so a commented-out line never satisfies a check."""
-    out = []
-    for line in text.splitlines():
-        out.append(LINE_COMMENT_RE.sub("", line))
-    return "\n".join(out)
+    """Literal view: comments blanked, strings intact, LENGTH PRESERVED.
+
+    [R3-t15] This used to be a hand-written `//` stripper. It could not see a
+    `/* … */` block, a `//` inside a string, or a `}` inside a literal — the
+    three constructions that move a brace counter and the three that decided
+    whether an anchor was code. The shared lexer is length- and line-preserving,
+    so every offset this gate reports is a real offset in the raw file.
+    """
+    return mask_comments(text)
+
+
+def code_view(text: str) -> str:
+    """Structural view: comments AND string literals blanked, length preserved."""
+    return mask_code(text)
 
 
 def initializer_text(src: str, start: int, limit: int = EXPR_MAX) -> str:
     """The initializer expression at `start` — bracket- and continuation-aware.
 
-    A single-line capture is what made the provenance table a spelling check:
-    `val req = run {\\n viewModel.thinkingLevel.value\\n }` read as `run {` and
-    resolved to nothing (witness C1's second shape), while the argument name
-    still looked legitimate. Depth tracking keeps a brace/paren body whole, and a
-    depth-0 newline ends the expression unless the next line continues it.
+    [R3-t15] The hand-written depth walker is gone; the end comes from the shared
+    `expr_end` (same depth-0-newline-with-continuation semantics, minus a second
+    copy that could drift). A single-line capture is what made the provenance
+    table a spelling check: `val req = run {` followed by lines inside the brace
+    read as `run {` and resolved to nothing.
     """
-    depth = 0
-    i = start
-    out = []
-    while i < len(src) and len(out) < limit:
-        ch = src[i]
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            if depth == 0:
-                break
-            depth -= 1
-        if ch == "\n" and depth == 0:
-            j = i + 1
-            while j < len(src) and src[j] in " \t":
-                j += 1
-            nxt = src[j] if j < len(src) else ""
-            if nxt not in CONTINUATION_CHARS:
-                break
-            out.append(" ")
-            i += 1
-            continue
-        if ch == ";" and depth == 0:
-            break
-        out.append(ch)
-        i += 1
-    return "".join(out).strip()
+    return src[start:min(expr_end(src, start), start + limit)].strip()
 
 
 def binding_map(src: str):
@@ -269,79 +269,252 @@ def resolve_provenance(expr: str, bindings, depth: int = 0) -> str:
 
 
 def split_top_level_args(arglist: str):
-    """Split a Kotlin argument list on top-level commas (depth-aware)."""
-    args, depth, cur = [], 0, ""
-    for ch in arglist:
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            depth -= 1
-        if ch == "," and depth == 0:
-            args.append(cur)
-            cur = ""
-        else:
-            cur += ch
-    if cur.strip():
-        args.append(cur)
-    return args
+    """Split a Kotlin argument list on top-level commas (shared `split_top`)."""
+    return [arglist[a:b] for a, b in split_top(arglist, (",",))]
 
 
 def find_call_args(src: str, call: str):
-    """Yield the argument-list text of every `call(` in src, depth-aware."""
+    """Yield the argument-list text of every `call(` in src (shared matcher)."""
     idx = 0
     while True:
         i = src.find(call, idx)
         if i < 0:
             return
-        j = i + len(call)
-        depth = 1
-        while j < len(src) and depth:
-            if src[j] == "(":
-                depth += 1
-            elif src[j] == ")":
-                depth -= 1
-            j += 1
-        yield i, src[i + len(call):j - 1]
-        idx = j
+        paren = i + len(call) - 1
+        close = match_bracket(src, paren)
+        if close < 0:
+            return
+        yield i, src[paren + 1:close]
+        idx = close + 1
 
 
-def raw_call_span(raw: str, anchor: int, call: str) -> str:
+def raw_call_span(raw: str, src: str, anchor: int, call: str) -> str:
     """The call's source span taken from the ORIGINAL text.
 
-    `find_call_args` works on comment-stripped source, so its arglist length is
-    shorter than the real text — using it to slice `raw` for an inline escape
-    comment falls short of the marker. Walk the parens on `raw` instead.
+    [R3-t15] The shared views are length-preserving, so the span is the masked
+    view's bracket match sliced out of `raw` — same output, one walker fewer.
     """
-    i = raw.find(call, anchor)
-    if i < 0:
+    paren = anchor + len(call) - 1
+    close = match_bracket(src, paren)
+    if close < 0:
         return ""
-    j = i + len(call)
-    depth = 1
-    while j < len(raw) and depth:
-        if raw[j] == "(":
-            depth += 1
-        elif raw[j] == ")":
-            depth -= 1
-        j += 1
-    return raw[i:j]
+    return raw[anchor:close + 1]
 
 
 def find_function_body(src: str, signature: str):
-    """Return the body text of the function starting at `signature`."""
-    i = src.find(signature)
-    if i < 0:
+    """(body text, signature offset) of the function at `signature`.
+
+    [R3-t15] The body span comes from the shared `function_body`, so expression
+    bodies and default-argument lambdas cannot hand the body brace a wrong start.
+    """
+    nm = re.search(r"fun\s+([A-Za-z_]\w*)\s*\(", signature)
+    if not nm:
         return None, None
-    depth = 0
-    started = False
-    for j in range(i, len(src)):
-        if src[j] == "{":
-            depth += 1
-            started = True
-        elif src[j] == "}":
-            depth -= 1
-            if started and depth == 0:
-                return src[i:j + 1], i
-    return None, None
+    fb = function_body(src, nm.group(1))
+    if fb is None:
+        return None, None
+    start, end, kind = fb
+    text = src[start:end]
+    at = src.find(signature)
+    if kind == "expr":
+        return text, (at if at >= 0 else start)
+    return text, (at if at >= 0 else start)
+
+
+# ── [R3-t15] criteria 8..11: what the consumers DO with the table's answer ───
+# Round 3 attacked the seams BETWEEN gates. Criteria 4-7 pin the table and the
+# host set; they never asked whether the provider consumes the answer, whether a
+# whole-model rule engine is reachable, whether an AUTO guard has the right
+# polarity, or whether the precedence chain the KDoc promises is the one the code
+# implements. Every one of those can be broken with the table untouched.
+LEVEL_KEY = "reasoning_effort"
+FUN_HEAD_RE = re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[A-Za-z_][\w.]*\.)?([A-Za-z_]\w*)\s*\(")
+MEASURED_BRANCH_RE = re.compile(r"GatewayEffortTruth\.isMeasuredHost\s*\(")
+RULE_ENGINE_RE = re.compile(r"ThinkingRuleResolver\.(?:apply|resolve)\s*\(")
+AUTO_CMP_RE = re.compile(
+    r"([A-Za-z_][\w.]*)\s*(==|!=)\s*ThinkingLevel\.AUTO\b"
+    r"|ThinkingLevel\.AUTO\s*(==|!=)\s*([A-Za-z_][\w.]*)")
+OFF_GUARD_RE = re.compile(r"!\s*[A-Za-z_][\w.]*\.?isEnabled\b")
+TIER_SOURCES = (
+    (re.compile(r"EffortTierLearner\.learned"), 0),
+    (re.compile(r"\btiersFor\s*\("), 1),
+    (re.compile(r"\bdeclaredTiers\b"), 2),
+    (re.compile(r"_FALLBACK_TIERS\b|\bfallbackTiersFor\s*\("), 3),
+)
+
+
+def iter_functions(text):
+    """[(name, inner_start, inner_end)] for every block-bodied `fun` in `text`."""
+    out, seen = [], set()
+    for m in FUN_HEAD_RE.finditer(text):
+        fb = function_body(text, m.group(1))
+        if fb is None:
+            continue
+        start, end, kind = fb
+        if kind != "block" or start < m.end() or start in seen:
+            continue
+        seen.add(start)
+        out.append((m.group(1), start, end))
+    return out
+
+
+def _writes_visible(text, key):
+    """[(pos, value_start, value_end)] for BOTH write spellings of `key`."""
+    out = []
+    put_re = re.compile(r'\bput\(\s*"%s"\s*,' % re.escape(key))
+    idx_re = re.compile(r'\[\s*"%s"\s*\]\s*=(?!=)' % re.escape(key))
+    for m in put_re.finditer(text):
+        args = call_args(text, text.find("(", m.start()))
+        if len(args) >= 2:
+            out.append((m.start(), args[1][0], args[1][1]))
+    for m in idx_re.finditer(text):
+        out.append((m.start(), m.end(), expr_end(text, m.end())))
+    out.sort()
+    return out
+
+
+def _is_resolve_value(expr):
+    """Is the value ITSELF the clamp call (not a string that mentions it)?
+
+    Anchored at the START of the expression: `"medium".also { resolveTier(…) }`
+    mentions the call and ships the literal, so a substring test is exactly the
+    hole this criterion exists to close.
+    """
+    return re.match(r"^GatewayEffortTruth\.resolveTier\s*\(", re.sub(r"\s+", "", expr)) is not None
+
+
+def _carries_resolve(value_code, bindings):
+    """Does the written value RESOLVE to the `resolveTier` call?"""
+    for src in value_sources(value_code):
+        s = src.strip()
+        if _is_resolve_value(s):
+            return True
+        if re.fullmatch(r"[A-Za-z_]\w*", s) and s in bindings:
+            if _is_resolve_value(bindings[s]):
+                return True
+    return False
+
+
+def check_effort_write(prov_lv, prov_cv, violations):
+    """8 — the measured-gateway branch must PUT the clamp result."""
+    for name, start, end in iter_functions(prov_lv):
+        body_lv = prov_lv[start:end]
+        if not MEASURED_BRANCH_RE.search(body_lv):
+            continue
+        body_cv = prov_cv[start:end]
+        bindings = binding_map(body_cv)
+        live = 0
+        for pos, a, b in _writes_visible(body_lv, LEVEL_KEY):
+            conds = " ".join(c for _k, c in enclosing_conditions(body_cv, pos))
+            if OFF_GUARD_RE.search(conds):
+                continue        # the OFF path: a constant off-tier IS the contract
+            live += 1
+            raw_val = re.sub(r"\s+", " ", body_lv[a:b]).strip()
+            if not _carries_resolve(body_cv[a:b], bindings):
+                violations.append(
+                    f"{PROVIDER_REL}: `{name}` puts {LEVEL_KEY}={raw_val!r} in the "
+                    "measured-gateway branch instead of the GatewayEffortTruth.resolveTier(...) "
+                    "result — the table is consulted and its answer discarded, so the gateway "
+                    "receives a tier its own enum rejects (seen: api.senseaudio.cn 400s "
+                    "`medium`). (thinking-effort-ok: <reason> to override.)")
+        if live == 0:
+            violations.append(
+                f"{PROVIDER_REL}: `{name}` never puts an enabled {LEVEL_KEY} taken from "
+                "resolveTier in the measured-gateway branch — an enabled level then reaches "
+                "the gateway unclamped (fail-closed)")
+
+
+def check_auto_polarity(prov_cv, violations):
+    """9 — a guard keyed on ThinkingLevel.AUTO must fire when the level IS auto."""
+    for name, start, end in iter_functions(prov_cv):
+        body = prov_cv[start:end]
+        for cond, t_start, t_end, _es, _ee in if_blocks(body):
+            if "ThinkingLevel.AUTO" not in cond:
+                continue
+            m = AUTO_CMP_RE.search(cond)
+            if not m:
+                continue
+            inverted = (m.group(2) or m.group(3)) == "!="
+            lead = cond[:m.start()].strip()
+            if lead.endswith("!(") or lead.endswith("! ("):
+                inverted = True
+            if not inverted:
+                continue
+            if not re.search(r"\b(?:return|throw)\b", body[t_start:t_end]):
+                continue
+            shown = re.sub(r"\s+", " ", cond).strip()[:70]
+            violations.append(
+                f"{PROVIDER_REL}: `{name}` exits on `{shown}` — the polarity is inverted, so "
+                "thinking is injected for AUTO (which the resolver already owns) and skipped "
+                "for every explicit level, i.e. exactly when the user asked for it")
+
+
+def check_rule_engine_reachable(prov_cv, violations):
+    """10 — the rule engine call must not sit behind an unconditional exit."""
+    for name, start, end in iter_functions(prov_cv):
+        body = prov_cv[start:end]
+        m = RULE_ENGINE_RE.search(body)
+        if not m:
+            continue
+        for s, e in stmt_spans(body):
+            if s >= m.start():
+                break
+            stmt = re.sub(r"\s+", " ", body[s:e]).strip()
+            if re.match(r"(?:return|throw)\b", stmt):
+                violations.append(
+                    f"{PROVIDER_REL}: `{name}` exits with `{stmt[:50]}` before it reaches "
+                    "ThinkingRuleResolver — every model without a hand-written host rule "
+                    "(official OpenAI / DeepSeek / Qwen / Grok, plus every user-authored "
+                    "thinking rule) then ships with no thinking parameters at all")
+                break
+
+
+def check_tier_precedence(truth_cv, violations):
+    """11 — learned > measured > declared > fallback (the KDoc's own order)."""
+    fb = function_body(truth_cv, "resolveTier")
+    if fb is None:
+        violations.append(
+            f"{TRUTH_REL}: no `fun resolveTier(` — the tier precedence cannot be read "
+            "(fail-closed)")
+        return
+    body = truth_cv[fb[0]:fb[1]]
+    chain = None
+    for s, e in stmt_spans(body):
+        stmt = body[s:e]
+        if "?:" not in stmt:
+            continue
+        mm = re.match(r"\s*(?:val|var)\s+[A-Za-z_]\w*\s*(?::[^=\n]+)?\s*=\s*", stmt)
+        rhs = stmt[mm.end():] if mm else stmt
+        if any(rx.search(rhs) for rx, _rank in TIER_SOURCES):
+            chain = rhs
+            break
+    if chain is None:
+        violations.append(
+            f"{TRUTH_REL}: resolveTier has no `?:` chain over the tier sources — the "
+            "precedence cannot be read (fail-closed)")
+        return
+    ranks = []
+    for a, b in split_top(chain, ("?:",)):
+        part = chain[a:b]
+        rank = None
+        for rx, r in TIER_SOURCES:
+            if rx.search(part):
+                rank = r
+                break
+        if rank is None:
+            shown = re.sub(r"\s+", " ", part).strip()[:50]
+            violations.append(
+                f"{TRUTH_REL}: resolveTier's precedence chain contains `{shown}` — no known "
+                "tier source can be ranked there (fail-closed: a new source must declare its "
+                "rank before it may shadow the measured table)")
+            return
+        ranks.append(rank)
+    if any(ranks[i] >= ranks[i + 1] for i in range(len(ranks) - 1)):
+        violations.append(
+            f"{TRUTH_REL}: resolveTier's precedence must be learned < measured < declared < "
+            f"fallback, but the chain ranks {ranks} — a lower-ranked source shadows a higher "
+            "one (a stale catalog declaration then overrides both the hand-measured table and "
+            "the gateway's own 400 feedback, so a level the gateway accepts is clamped away)")
 
 
 def check_measured_gateway_effort(root: str, violations: list) -> int:
@@ -454,6 +627,25 @@ def check_measured_gateway_effort(root: str, violations: list) -> int:
                 "without its own last resort silently inherits the previous "
                 "gateway's enum (the two disagree on `medium`)."
             )
+
+    # ── 8..11: the consumers of the table's answer (R3 seams) ────────────
+    if not EFFORT_ESCAPE_RE.search(prov):
+        try:
+            prov_cv = code_view(prov_raw)
+            check_effort_write(prov, prov_cv, violations)
+            check_auto_polarity(prov_cv, violations)
+            check_rule_engine_reachable(prov_cv, violations)
+        except KotlinLexError as e:
+            violations.append(
+                f"{PROVIDER_REL}: does not lex ({e}) — the dispatch criteria cannot run "
+                "(fail-closed)")
+    if not EFFORT_ESCAPE_RE.search(truth):
+        try:
+            check_tier_precedence(code_view(truth_raw), violations)
+        except KotlinLexError as e:
+            violations.append(
+                f"{TRUTH_REL}: does not lex ({e}) — the precedence criterion cannot run "
+                "(fail-closed)")
     return len(families)
 
 
@@ -567,6 +759,36 @@ def _caller_with(binding: str, arg: str) -> str:
     )
 
 
+# ── [R3-t15] dispatch fixtures: the consumers the table's answer feeds ──────
+DISPATCH_PROVIDER = """package com.rikkaminis.app.provider.openai
+
+class OpenAIProvider {
+    private fun injectThinkingParams(
+        body: JSONObject,
+        level: ThinkingLevel,
+        maxTokens: Int,
+    ): Echo? {
+        var echo: Echo? = null
+        if (!level.isEnabled) {
+            body.put("reasoning_effort", "none")
+            return echo
+        }
+        if (level == ThinkingLevel.AUTO) return echo
+        if (GatewayEffortTruth.isMeasuredHost(host)) {
+            body.put(
+                "reasoning_effort",
+                GatewayEffortTruth.resolveTier(host, model.id, level, model.reasoningEffortValues),
+            )
+        }
+        val trace = ThinkingRuleResolver.apply(body, ctx)
+        return echo
+    }
+}
+"""
+
+def _dispatch_tree(provider=DISPATCH_PROVIDER, truth=EFFORT_TRUTH_CLEAN):
+    return _effort_tree(provider=provider, truth=truth)
+
 def selftest(root: str | None = None) -> int:
     """Negative arms; each must red on ITS criterion only."""
     cases = [
@@ -638,6 +860,80 @@ def selftest(root: str | None = None) -> int:
              "?: fallbackTiersFor(host)",
              "?: run { val ignored = host; SENSENOVA_FALLBACK_TIERS }")),
          1, "last resort does not depend on `host`"),
+        # ── round-3 seam arms (external adversarial audit, 2026-10-26) ──
+        ("measured branch throws the clamp away (witness #51)",
+         _dispatch_tree(provider=DISPATCH_PROVIDER.replace(
+             '            body.put(\n'
+             '                "reasoning_effort",\n'
+             '                GatewayEffortTruth.resolveTier(host, model.id, level, model.reasoningEffortValues),\n'
+             '            )\n',
+             '            body.put("reasoning_effort", "medium")\n')),
+         1, "instead of the GatewayEffortTruth.resolveTier"),
+        ("measured branch binds the clamp and ships a literal (witness #51)",
+         _dispatch_tree(provider=DISPATCH_PROVIDER.replace(
+             '            body.put(\n'
+             '                "reasoning_effort",\n'
+             '                GatewayEffortTruth.resolveTier(host, model.id, level, model.reasoningEffortValues),\n'
+             '            )\n',
+             '            val _unused = GatewayEffortTruth.resolveTier(host, model.id, level, model.reasoningEffortValues)\n'
+             '            body.put("reasoning_effort", "medium")\n')),
+         1, "instead of the GatewayEffortTruth.resolveTier"),
+        ("measured branch mentions the clamp in a discarded lambda (witness #51)",
+         _dispatch_tree(provider=DISPATCH_PROVIDER.replace(
+             '            body.put(\n'
+             '                "reasoning_effort",\n'
+             '                GatewayEffortTruth.resolveTier(host, model.id, level, model.reasoningEffortValues),\n'
+             '            )\n',
+             '            body.put("reasoning_effort", "medium".also {\n'
+             '                GatewayEffortTruth.resolveTier(host, model.id, level, model.reasoningEffortValues)\n'
+             '            })\n')),
+         1, "instead of the GatewayEffortTruth.resolveTier"),
+        ("measured branch writes the clamp through a single binding (precision)",
+         _dispatch_tree(provider=DISPATCH_PROVIDER.replace(
+             '            body.put(\n'
+             '                "reasoning_effort",\n'
+             '                GatewayEffortTruth.resolveTier(host, model.id, level, model.reasoningEffortValues),\n'
+             '            )\n',
+             '            val tier = GatewayEffortTruth.resolveTier(host, model.id, level, model.reasoningEffortValues)\n'
+             '            body.put("reasoning_effort", tier)\n')),
+         0, None),
+        ("AUTO guard polarity inverted (witness #52)",
+         _dispatch_tree(provider=DISPATCH_PROVIDER.replace(
+             "if (level == ThinkingLevel.AUTO) return echo",
+             "if (level != ThinkingLevel.AUTO) return echo")),
+         1, "the polarity is inverted"),
+        ("AUTO guard written as `!(level == AUTO)` (witness #52, negative shape)",
+         _dispatch_tree(provider=DISPATCH_PROVIDER.replace(
+             "if (level == ThinkingLevel.AUTO) return echo",
+             "if (!(level == ThinkingLevel.AUTO)) return echo")),
+         1, "the polarity is inverted"),
+        ("unconditional exit above the rule engine (witness #60)",
+         _dispatch_tree(provider=DISPATCH_PROVIDER.replace(
+             "        val trace = ThinkingRuleResolver.apply(body, ctx)\n",
+             "        return echo\n        val trace = ThinkingRuleResolver.apply(body, ctx)\n")),
+         1, "before it reaches ThinkingRuleResolver"),
+        ("rule engine guarded by an if (precision)",
+         _dispatch_tree(provider=DISPATCH_PROVIDER.replace(
+             "        val trace = ThinkingRuleResolver.apply(body, ctx)\n",
+             "        if (level.isEnabled) {\n"
+             "            val trace = ThinkingRuleResolver.apply(body, ctx)\n"
+             "        }\n")),
+         0, None),
+        ("catalog declaration promoted above the measurement (witness #53)",
+         _dispatch_tree(truth=EFFORT_TRUTH_CLEAN.replace(
+             "        val tiers = tiersFor(host, modelId)\n"
+             "            ?: declaredTiers?.takeIf { it.isNotEmpty() }\n"
+             "            ?: fallbackTiersFor(host)\n",
+             "        val tiers = declaredTiers?.takeIf { it.isNotEmpty() }\n"
+             "            ?: tiersFor(host, modelId)\n"
+             "            ?: fallbackTiersFor(host)\n")),
+         1, "precedence must be learned < measured"),
+        ("learned tier promoted above the measurement (precision)",
+         _dispatch_tree(truth=EFFORT_TRUTH_CLEAN.replace(
+             "        val tiers = tiersFor(host, modelId)\n",
+             "        val tiers = EffortTierLearner.learned(host, modelId)\n"
+             "            ?: tiersFor(host, modelId)\n")),
+         0, None),
     ]
     failures = []
     for label, tree, want_rc, want_text in cases:
@@ -721,7 +1017,7 @@ def scan(root: str):
                 # The escape hatch may sit on the offending argument's own line,
                 # which is well below the call's opening paren — so scan the whole
                 # call span, taken from the ORIGINAL text (see raw_call_span).
-                call_span = raw_call_span(raw, offset, "ThinkingLevelPicker(")
+                call_span = raw_call_span(raw, src, offset, "ThinkingLevelPicker(")
                 if escaped(offset, call_span):
                     continue
                 named = {}

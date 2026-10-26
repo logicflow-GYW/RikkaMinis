@@ -68,6 +68,7 @@ import sys
 
 from _kotlin_ast import (
     const_bool,
+    const_value,
     function_body,
     match_bracket,
     split_top,
@@ -79,6 +80,7 @@ from _kotlin_valueflow import (
     contains_ident,
     expr_end,
     scope_calls,
+    value_sources,
 )
 
 SHEET_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebPreviewBottomSheet.kt"
@@ -269,6 +271,177 @@ def _enclosing_if_cond(lit, pos):
     return conds[-1] if conds else None
 
 
+# ---------------------------------------------- r3 round-3b (dual-gate) ----
+# Four seams the third-round attack landed on, each one "every token the old
+# criteria grep for survives, the decision behind it is gone":
+#   F2c  01-3  the cross-session `minis://` fallback stopped decoding (the
+#              file:// branch F2a anchors still does, so F2a stayed green);
+#   F3b  02-1  `toAssetLoaderUrl`'s NAME became a constant — the encoder's
+#              round-trip partner (F3) and the call-site accountancy (W2/W3a)
+#              are untouched by that;
+#   F4b  01-2  the pinned-shortcut deep link stopped stripping `/var/minis`
+#              (F4's allowlist only counts `Uri.parse(…).path`);
+#   F6   01-1  the holder's asset ROOT was built from the un-stripped URL, so
+#              the loader serves nothing (F3 only reads fromAssetLoaderUrl).
+FILE_STRIP = 'removePrefix("file://")'
+MINIS_STRIP = 'removePrefix("minis://")'
+SHORTCUT_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebPreviewShortcut.kt"
+ROOT_PREFIX_TESTS = ("removePrefix", "substringAfter", "replaceFirst", "replace(")
+
+
+def _binding_rhs(body, ident, lit=None):
+    """RHS of the LAST `val|var <ident> = …` in `body` (one hop), or ''.
+
+    `body` is the STRUCTURE view (spans are derived from it); `lit` is the
+    length-preserving LITERAL view the text is read from, so `removePrefix(
+    "/var/minis")` keeps its argument.
+    """
+    rhs, src = "", lit if lit is not None else body
+    for m in re.finditer(r"\b(?:val|var)\s+" + re.escape(ident) + r"\s*(?::[^=\n]*)?=\s*",
+                         body):
+        rhs = src[m.end():expr_end(body, m.end())]
+    return rhs.strip()
+
+
+def _decoder_spans(code):
+    """[(open_paren_pos, close_paren_pos)] of every `decodeUriPath(` call."""
+    spans = []
+    for d in re.finditer(r"\bdecodeUriPath\s*\(", code):
+        close = match_bracket(code, d.end() - 1)
+        spans.append((d.end() - 1, close))
+    return spans
+
+
+def undecoded_strip_problem(md_fn_code, md_fn_lit):
+    """F2c — every `minis://` prefix strip in resolveMdMediaFile is decoded.
+
+    Witness 01-3 dropped `decodeUriPath(…)` from the cross-session fallback
+    only: the primary branch and the `file://` branch F2a anchors were left
+    verbatim, so the gate kept saying "the file:// path is resolved once and
+    used as-is" while `minis://workspace/my%20chart.png` started being searched
+    as the literal `my%20chart.png` under every session directory.
+
+    The strip marker lives in the LITERAL view (the structure view blanks the
+    string), the call spans in the structure view — both are length-preserving.
+    """
+    sites = [m.start() for m in re.finditer(re.escape(MINIS_STRIP), md_fn_lit)]
+    if not sites:
+        return ('no `%s` in resolveMdMediaFile (the minis:// branch moved — '
+                "re-point this guard, fail-closed)" % MINIS_STRIP)
+    spans = _decoder_spans(md_fn_code)
+    if any(close < 0 for _o, close in spans):
+        return "unbalanced decodeUriPath(…) (fail-closed)"
+    loose = [p for p in sites if not any(o < p < c for o, c in spans)]
+    if loose:
+        return ("%d `minis://` prefix strip(s) bypass decodeUriPath — a percent-encoded "
+                "name (`my%%20chart.png`) is then matched literally, so every "
+                "cross-session / multi-session media lookup misses" % len(loose))
+    return ""
+
+
+def encoder_name_problem(holder_code, holder_lit):
+    """F3b — the name `toAssetLoaderUrl` encodes is derived from the file URL.
+
+    Witness 02-1 set `val name = ""`: the forward mapping still exists, still
+    returns the asset-loader prefix, and `startIfNeeded`'s `?: currentUrl`
+    fallback still satisfies W2 — but the encoder now encodes nothing, so the
+    `%XX` round-trip F3 pins (and its inverse) is vacuous and every local HTML
+    preview silently degrades to a raw file:// load.
+    """
+    body = _body_text(holder_code, "toAssetLoaderUrl")
+    lit_body = _body_text(holder_lit, "toAssetLoaderUrl")
+    if not body:
+        return "toAssetLoaderUrl not found (fail-closed)"
+    enc = list(re.finditer(r"\bencodePathSegment\s*\(", body))
+    if len(enc) != 1:
+        return ("toAssetLoaderUrl must encode exactly one name segment (found %d) — the "
+                "asset-loader URL carries the segment the loader resolves" % len(enc))
+    spans = call_args(body, enc[0].end() - 1)
+    if not spans:
+        return "encodePathSegment(…) has no readable argument (fail-closed)"
+    arg = "".join(lit_body[a:b] for a, b in spans).strip()
+    if re.fullmatch(r"[A-Za-z_]\w*", arg):
+        arg = _binding_rhs(body, arg, lit_body) or arg
+    forms = value_sources(arg)
+    consts = [f for f in forms if const_value(f) is not None]
+    if consts:
+        return ("the encoded name is the constant %r — the segment must come from the "
+                "file URL, or the loader URL names no file at all" % consts[0].strip()[:40])
+    if not any("substringAfterLast" in f for f in forms):
+        return ("the encoded name (%r) is not the URL's last path segment — the forward "
+                "mapping no longer derives the name from the file URL" % arg[:80])
+    return ""
+
+
+def shortcut_strip_problem(code, lit):
+    """F4b — the pinned shortcut's deep link strips the `/var/minis` root.
+
+    Witness 01-2 removed `absPath.removePrefix("/var/minis")` from the
+    resource-path assembly: `Uri.parse(url).path` is still counted (F4's
+    allowlist entry still matches exactly) and the pin still succeeds, but the
+    deep link becomes `minis://session/<sid>/var/minis/browser/x.html`, which
+    the session resolver looks up as `/var/minis/var/minis/…` and never finds.
+
+    Derived from the `.path(…)` call of the Uri.Builder chain — no function
+    name, no local name: every identifier feeding the deep-link path must have
+    a binding that removes the sandbox root (or the argument itself must be a
+    prefix-stripped expression). A constant path with no bindings is RED
+    (fail-closed): the pinned shortcut would point nowhere.
+    """
+    calls = list(re.finditer(r"\.\s*path\s*\(", code))
+    if not calls:
+        return "no `.path(…)` in the pin's Uri.Builder chain (fail-closed)"
+    for m in calls:
+        spans = call_args(code, m.end() - 1)
+        if not spans:
+            continue
+        arg = "".join(lit[a:b] for a, b in spans)
+        if "/var/minis" in arg and any(t in arg for t in ROOT_PREFIX_TESTS):
+            return ""
+        for ident in sorted(set(re.findall(r"[A-Za-z_]\w*", arg))):
+            rhs = _binding_rhs(code, ident, lit)
+            if not rhs or "/var/minis" not in rhs:
+                continue
+            if any(t in rhs for t in ROOT_PREFIX_TESTS):
+                return ""
+    return ("the deep-link path is assembled from an unstripped sandbox path — the "
+            "`/var/minis` root must be removed before the resource is appended to "
+            "`minis://session/<sid>`, otherwise the pinned shortcut resolves to "
+            "`/var/minis/var/minis/…` and never opens")
+
+
+def holder_root_problem(holder_code, holder_lit):
+    """F6 — the loader root is built from the `file://` URL with the prefix stripped.
+
+    Witness 01-1 changed `File(initialUrl.removePrefix("file://"))` into
+    `File(initialUrl)` inside `init`: `assetRootDir` becomes `file:/…` (a
+    relative directory), the InternalStoragePathHandler root resolves nowhere,
+    and every local HTML preview 404s while the mapping pair F3/W1 pin still
+    looks complete.
+    """
+    args, unbalanced = [], False
+    for m in re.finditer(r"\bFile\s*\(", holder_code):
+        open_pos = m.end() - 1
+        close = match_bracket(holder_code, open_pos)
+        if close < 0:
+            unbalanced = True
+            continue
+        for a, b in call_args(holder_code, open_pos):
+            if "initialUrl" in holder_lit[a:b]:
+                args.append(holder_lit[a:b].strip())
+    if unbalanced:
+        return "unbalanced File(…) in the holder (fail-closed)"
+    if not args:
+        return ("no `File(<initial URL>)` construction in the holder — the asset root is "
+                "no longer derived from the initial file:// URL (fail-closed)")
+    bad = [a for a in args if FILE_STRIP not in a]
+    if bad:
+        return ("the asset root is built from %r — the `file://` prefix must be stripped "
+                "BEFORE File(…): otherwise the root is `file:/…`, the loader serves no "
+                "directory and every local HTML preview 404s" % bad[0][:80])
+    return ""
+
+
 def _dead_guard(cond):
     """Reason a guard decides nothing, or '' — constant folding covers
     `true || x`, `x || true`, `false && x`, `x && false`, `!true`, `1 == 2`."""
@@ -288,7 +461,7 @@ def analyse(sheet_src, md_src, holder_src, ui_srcs):
     try:
         sheet_code, sheet_lit = _views(sheet_src)
         md_code, md_lit = _views(md_src)
-        holder_lit = _views(holder_src)[1]
+        holder_code, holder_lit = _views(holder_src)
         ui_views = {rel: _views(src) for rel, src in ui_srcs.items()}
     except KotlinLexError as exc:
         return [("F0 every scanned source lexes as Kotlin (fail-closed)", False,
@@ -323,11 +496,21 @@ def analyse(sheet_src, md_src, holder_src, ui_srcs):
     n2 = count_uri_parse_path(md_code)
     results.append(("F2b no Uri.parse(...).path in StreamingMarkdownText.kt",
                     n2 == 0, "found %d occurrence(s)" % n2, None))
+    problem2c = undecoded_strip_problem(md_fn_code, md_fn_lit) if md_fn_code else \
+        "resolveMdMediaFile not found (fail-closed)"
+    results.append(("F2c every minis:// strip in resolveMdMediaFile is decoded by decodeUriPath",
+                    problem2c == "", problem2c or "all minis:// strips pass through the decoder", None))
 
     # --- F3: fromAssetLoaderUrl symmetric consumption ------------------
     problem3 = holder_cut_problem(holder_lit)
     results.append(("F3 fromAssetLoaderUrl cuts #/? before decodeUriPath",
                     problem3 == "", problem3 or "cut inside the decoder argument", None))
+    problem3b = encoder_name_problem(holder_code, holder_lit)
+    results.append(("F3b toAssetLoaderUrl encodes a name derived from the file URL",
+                    problem3b == "", problem3b or "the encoded segment comes from the URL", None))
+    problem6 = holder_root_problem(holder_code, holder_lit)
+    results.append(("F6 holder asset root is derived from the prefix-stripped file:// URL",
+                    problem6 == "", problem6 or "assetRootDir = <parent of the stripped path>", None))
 
     # --- F4: ui/** sweep with allowlist --------------------------------
     for rel in sorted(ui_views):
@@ -350,6 +533,19 @@ def analyse(sheet_src, md_src, holder_src, ui_srcs):
                 ("F4 no Uri.parse(...).path in %s" % os.path.basename(rel), False,
                  "found %d occurrence(s) — route file:// paths through ui.chat.decodeUriPath" % n,
                  None))
+
+    # --- F4b: the exempted pin site still builds a resolvable deep link --
+    shortcut = ui_views.get(SHORTCUT_REL)
+    if shortcut is None:
+        results.append(("F4b WebPreviewShortcut strips the /var/minis root from the pinned path",
+                        False,
+                        "%s is not under the swept ui/** tree (fail-closed)" % SHORTCUT_REL, None))
+    else:
+        problem4b = shortcut_strip_problem(shortcut[0], shortcut[1])
+        results.append(("F4b WebPreviewShortcut strips the /var/minis root from the pinned path",
+                        problem4b == "",
+                        problem4b or "deep-link path built from the stripped sandbox path",
+                        None))
 
     # --- F5: one media classifier [dv22/B-06] ---------------------------
     media_views = {rel: views[1] for rel, views in ui_views.items()}
@@ -513,8 +709,18 @@ fun resolveMdMediaFile(context: Context, stripped: String): File? {
         stripped.startsWith("/") -> File(stripped)
         else -> null
     }
+    if (!stripped.startsWith("minis://")) return null
+    val decoded = decodeUriPath(stripped.removePrefix("minis://"))
+    val basename = decoded.substringAfterLast('/')
+    return File(basename)
 }
 """
+
+# 01-3: only the cross-session fallback stops decoding
+BREAKER_MD_FALLBACK_UNDECODED = FIXED_MD.replace(
+    'val decoded = decodeUriPath(stripped.removePrefix("minis://"))',
+    'val decoded = stripped.removePrefix("minis://")')
+assert BREAKER_MD_FALLBACK_UNDECODED != FIXED_MD
 
 REVERTED_MD = """package probe
 fun resolveMdMediaFile(context: Context, stripped: String): File? {
@@ -526,6 +732,16 @@ fun resolveMdMediaFile(context: Context, stripped: String): File? {
 """
 
 FIXED_HOLDER = """package probe
+class Holder(private val initialUrl: String) {
+    private val parentDir = java.io.File(initialUrl.removePrefix("file://")).parentFile
+    private val assetRootDir: String? = parentDir?.absolutePath
+}
+internal fun toAssetLoaderUrl(fileUrl: String): String? {
+    if (!fileUrl.startsWith(FILE_URL_PREFIX)) return null
+    val name = fileUrl.removePrefix(FILE_URL_PREFIX).substringAfterLast('/')
+    if (name.isEmpty()) return null
+    return ASSET_LOADER_PREFIX + encodePathSegment(name)
+}
 internal fun fromAssetLoaderUrl(assetUrl: String, rootDir: String?): String? {
     val relative = decodeUriPath(
         assetUrl.removePrefix(ASSET_LOADER_PREFIX).substringBefore('#').substringBefore('?'),
@@ -533,6 +749,18 @@ internal fun fromAssetLoaderUrl(assetUrl: String, rootDir: String?): String? {
     return FILE_URL_PREFIX + resolved
 }
 """
+
+# 01-1: the init block drops the `file://` strip — the root becomes `file:/…`
+BREAKER_HOLDER_ROOT = FIXED_HOLDER.replace(
+    'java.io.File(initialUrl.removePrefix("file://")).parentFile',
+    "java.io.File(initialUrl).parentFile")
+assert BREAKER_HOLDER_ROOT != FIXED_HOLDER
+
+# 02-1: the forward mapping's name becomes a constant
+BREAKER_HOLDER_NAME = FIXED_HOLDER.replace(
+    "val name = fileUrl.removePrefix(FILE_URL_PREFIX).substringAfterLast('/')",
+    'val name = ""')
+assert BREAKER_HOLDER_NAME != FIXED_HOLDER
 
 CUTS_REMOVED_HOLDER = """package probe
 internal fun fromAssetLoaderUrl(assetUrl: String, rootDir: String?): String? {
@@ -694,8 +922,29 @@ assert BREAKER_FETCHER_DEAD_AND_RIGHT != IMAGE_FETCHER_CLEAN
 
 ALLOWLIST_REL = next(iter(ALLOWLIST))
 ALLOWLISTED_FILE = """package probe
-fun abs(url: String): String = Uri.parse(url).path.orEmpty()
+internal fun requestPinWebPreviewShortcut(
+    context: Context,
+    url: String,
+    sessionId: String,
+    title: String,
+) {
+    val absPath = Uri.parse(url).path.orEmpty()
+    if (absPath.isBlank()) return
+    val resourcePath = absPath.removePrefix("/var/minis").let {
+        if (it.startsWith("/")) it else "/$it"
+    }
+    val deepLink = Uri.Builder()
+        .scheme("minis")
+        .authority("session")
+        .path("/$sessionId$resourcePath")
+        .build()
+}
 """
+
+# 01-2: the deep link stops stripping the sandbox root
+BREAKER_SHORTCUT_UNSTRIPPED = ALLOWLISTED_FILE.replace(
+    'absPath.removePrefix("/var/minis").let {', "absPath.let {")
+assert BREAKER_SHORTCUT_UNSTRIPPED != ALLOWLISTED_FILE
 DIRTY_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/DirtyUi.kt"
 DIRTY_UI = """package probe
 fun abs(url: String): String = Uri.parse(url).path.orEmpty()
@@ -857,6 +1106,32 @@ def selftest():
     # scanned as raw text.
     m = run('fun broken() { val s = "abc\n', FIXED_MD, FIXED_HOLDER, dict_of({}))
     expect(not all_green(m), "unlexable source must be RED (fail-closed)")
+
+    # ---- r3 round-3b witness arms (01-1 / 01-2 / 01-3 / 02-1) -----------
+    # 01-1: the loader root loses the file:// strip (F6 only).
+    m = run(FIXED_SHEET, FIXED_MD, BREAKER_HOLDER_ROOT, dict_of({}))
+    reds = sorted(c for c, ok, _d, _l in m if not ok)
+    expect(reds == ["F6 holder asset root is derived from the prefix-stripped file:// URL"],
+           "r3-01-1 holder-root: exactly F6 must be RED, got %s" % reds)
+
+    # 01-2: the pinned deep link stops stripping /var/minis (F4b only).
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER,
+            dict_of({ALLOWLIST_REL: BREAKER_SHORTCUT_UNSTRIPPED}))
+    reds = sorted(c for c, ok, _d, _l in m if not ok)
+    expect(reds == ["F4b WebPreviewShortcut strips the /var/minis root from the pinned path"],
+           "r3-01-2 shortcut-unstripped: exactly F4b must be RED, got %s" % reds)
+
+    # 01-3: only the cross-session minis:// fallback stops decoding (F2c only).
+    m = run(FIXED_SHEET, BREAKER_MD_FALLBACK_UNDECODED, FIXED_HOLDER, dict_of({}))
+    reds = sorted(c for c, ok, _d, _l in m if not ok)
+    expect(reds == ["F2c every minis:// strip in resolveMdMediaFile is decoded by decodeUriPath"],
+           "r3-01-3 fallback-undecoded: exactly F2c must be RED, got %s" % reds)
+
+    # 02-1: the forward mapping encodes a constant name (F3b only).
+    m = run(FIXED_SHEET, FIXED_MD, BREAKER_HOLDER_NAME, dict_of({}))
+    reds = sorted(c for c, ok, _d, _l in m if not ok)
+    expect(reds == ["F3b toAssetLoaderUrl encodes a name derived from the file URL"],
+           "r3-02-1 constant-name: exactly F3b must be RED, got %s" % reds)
 
     if failures:
         print("SELFTEST FAIL:")
