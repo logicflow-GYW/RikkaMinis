@@ -56,6 +56,29 @@ import os
 import re
 import sys
 
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments
+from _kotlin_ast import (
+    const_bool,
+    const_value,
+    function_body,
+    if_blocks,
+    match_bracket,
+    split_top,
+    stmt_spans,
+    strip_parens,
+)
+from _kotlin_valueflow import (
+    call_args,
+    code_view,
+    contains_ident,
+    expr_end,
+    is_single_assignment,
+    literal_view,
+    path_feasible,
+    scope_calls,
+    value_sources,
+)
+
 HOLDER_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebViewHolder.kt"
 SHEET_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebPreviewBottomSheet.kt"
 GALLERY_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/components/ImageGalleryViewer.kt"
@@ -70,228 +93,337 @@ KEY_CALL_RE = re.compile(r"\bkey\s*\(")
 ASSIGN_RE = re.compile(r"^\s*currentUrl\s*=\s*(.+?)\s*$")
 
 
-def strip_comments(src):
-    """Remove // line comments and /* */ block comments (KDoc included).
-
-    String-literal aware: `//` inside a string (e.g. "file://") must NOT be
-    treated as a comment — the pin gate literal `holder.currentUrl.startsWith(
-    "file://")` lives on a code line and would otherwise be truncated.
-    """
-    out = []
-    in_block = False
-    for line in src.splitlines():
-        res = []
-        i = 0
-        n = len(line)
-        quote = None
-        while i < n:
-            if in_block:
-                j = line.find("*/", i)
-                if j < 0:
-                    i = n
-                else:
-                    in_block = False
-                    i = j + 2
-                continue
-            c = line[i]
-            if quote is not None:
-                res.append(c)
-                if c == "\\" and i + 1 < n:
-                    res.append(line[i + 1])
-                    i += 2
-                    continue
-                if c == quote:
-                    quote = None
-                i += 1
-                continue
-            if line.startswith("//", i):
-                break
-            if line.startswith("/*", i):
-                in_block = True
-                i += 2
-                continue
-            if c in ('"', "'"):
-                quote = c
-            res.append(c)
-            i += 1
-        out.append("".join(res))
-    return "\n".join(out)
+# ---------------------------------------------------------------------------
+# 共享原语封装（禁止自写词法器：所有结构分析都走 _kotlin_lexer / _kotlin_ast /
+# _kotlin_valueflow，位置等长可回投原文，解析失败一律 fail-closed）
+# ---------------------------------------------------------------------------
 
 
-def slice_balanced_body(code, header_marker):
-    """Return the brace-balanced body of the function/effect whose header line
-    contains `header_marker` (first match), or None.
-
-    Runs on comment-stripped code; string-aware (braces inside string
-    literals are skipped). An unterminated block returns everything scanned —
-    callers must treat a missing marker (None) as RED, not skip.
-    """
-    lines = code.splitlines()
-    start = None
-    for idx, line in enumerate(lines):
-        if header_marker in line:
-            start = idx
-            break
-    if start is None:
+def code_of(src):
+    """mask_code 视图；解析失败返回 None（调用方报违规，不回退原文扫描）。"""
+    try:
+        return code_view(src)
+    except KotlinLexError:
         return None
-    depth = 0
-    opened = False
-    buf = []
-    quote = None
-    for line in lines[start:]:
-        i = 0
-        n = len(line)
-        while i < n:
-            c = line[i]
-            if quote is not None:
-                if c == "\\":
-                    i += 2
-                    continue
-                if c == quote:
-                    quote = None
-                i += 1
-                continue
-            if c in ('"', "'"):
-                quote = c
-            elif c == '{':
-                depth += 1
-                opened = True
-            elif c == '}':
-                depth -= 1
-            i += 1
-        buf.append(line)
-        if opened and depth <= 0:
-            return "\n".join(buf)
-    return "\n".join(buf)
 
 
-def block_from(text, open_idx):
-    """Balanced `{ … }` starting at [open_idx], or None when unterminated."""
-    depth = 0
-    quote = None
-    for j in range(open_idx, len(text)):
-        c = text[j]
-        if quote is not None:
-            if c == quote:
-                quote = None
-            continue
-        if c in ('"', "'"):
-            quote = c
-        elif c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[open_idx:j + 1]
-    return None
+def _tail_stmt(body):
+    spans = stmt_spans(body)
+    return body[spans[-1][0]:spans[-1][1]].strip() if spans else body.strip()
 
 
-def enclosing_heads(src, idx):
-    """Heads of every `{ … }` block enclosing [idx], innermost first. The head
-    is the text on the line before the brace (`if (…)`, `x.also`, `?.let`)."""
-    heads = []
-    depth = 0
-    i = idx
-    while i >= 0:
-        c = src[i]
-        if c == "}":
-            depth += 1
-        elif c == "{":
-            if depth == 0:
-                j = i - 1
-                while j >= 0 and src[j] in " \t\n":
-                    j -= 1
-                end = j + 1
-                while j >= 0 and src[j] not in "\n;{}":
-                    j -= 1
-                heads.append(src[j + 1:end].strip())
-            else:
-                depth -= 1
-        i -= 1
-    return heads
+def strip_casts(expr):
+    """剥掉尾部的 `as T` / `as? T`（`(null as Window?)` 与 `null` 同值）。"""
+    e = strip_parens(expr.strip())
+    for _ in range(4):
+        m = re.search(r"\s+as\s*\??\s*[A-Za-z_][\w.]*(?:\s*<[^<>]*>)?\s*$", e)
+        if not m:
+            break
+        e = strip_parens(e[:m.start()])
+    return e
 
 
-def in_discarded_lambda(src, idx):
-    """True when the expression at [idx] sits inside a `.also { … }` /
-    `.apply { … }` lambda — those return their RECEIVER, so the value computed
-    inside is thrown away. [wide-1024] `url.also { fromAssetLoaderUrl(url, root) }`
-    is exactly how the reverse mapping got called and discarded at once."""
-    for head in enclosing_heads(src, idx):
-        if head.endswith(".also") or head.endswith(".apply"):
-            return True
+def provably_null(expr, depth=0):
+    """表达式是否**不可能**产生非 null 值。
+
+    折叠三类"值被架空"的形态，它们都让映射/守卫的产物变成 null 而拼写齐全：
+      * 恒拒过滤器：`x?.takeIf { false }` / `x?.takeUnless { true }`
+      * 恒死分支：`if (1 == 2) a else null`
+      * 值被换成 null：`x?.let { null }`
+    """
+    if depth > 6:
+        return False
+    e = strip_casts(expr)
+    if not e:
+        return False
+    if e == "null":
+        return True
+    parts = split_top(e, ("?:",))
+    if len(parts) == 2:
+        return (provably_null(e[parts[0][0]:parts[0][1]], depth + 1)
+                and provably_null(e[parts[1][0]:parts[1][1]], depth + 1))
+    m = re.match(r"if\s*\(", e)
+    if m:
+        close = match_bracket(e, m.end() - 1)
+        if close > 0:
+            b = const_bool(e[m.end():close])
+            rest = e[close + 1:]
+            k = rest.find("else")
+            if k >= 0 and b is not None:
+                return provably_null(rest[k + 4:] if b is False else rest[:k], depth + 1)
+    sc = [s for s in scope_calls(e) if not e[s[3]:].strip()]
+    if sc:
+        name, start, open_pos, end = sc[-1]
+        if name in ("also", "apply"):
+            return provably_null(e[:start], depth + 1)
+        if name in ("let", "run", "with"):
+            return provably_null(_tail_stmt(e[open_pos + 1:end - 1]), depth + 1)
+        if name == "takeIf":
+            if const_bool(e[open_pos + 1:end - 1]) is False:
+                return True
+            return provably_null(e[:start], depth + 1)
+        if name == "takeUnless":
+            if const_bool(e[open_pos + 1:end - 1]) is True:
+                return True
+            return provably_null(e[:start], depth + 1)
     return False
 
 
-def window_after(code, marker, size):
-    """Bounded text window starting at `marker` (first match) — for pinning
-    expression-bodied declarations whose body has no braces to slice."""
+def value_forms(expr, depth=0):
+    """该位置**真正可能成为值**的所有形式（保守：多算不漏算）。
+
+    区别于点名"某调用出现过"：elvis 左臂被证成恒 null 时不算数（`?: url` 的
+    回退臂才是发布出去的东西），丢弃型作用域只留接收者，值型作用域 LAMBDA
+    尾表达式才是结果 —— 后两者交给共享的 `value_sources`。
+    """
+    if depth > 6:
+        return [expr]
+    e = strip_parens(expr.strip())
+    if not e:
+        return [expr]
+    parts = split_top(e, ("?:",))
+    if len(parts) == 2:
+        left = e[parts[0][0]:parts[0][1]]
+        right = e[parts[1][0]:parts[1][1]]
+        out = []
+        if not provably_null(left):
+            out += value_forms(left, depth + 1)
+        return out + value_forms(right, depth + 1)
+    for name, start, open_pos, end in scope_calls(e):
+        if not e[end:].strip() and name in ("let", "run", "with"):
+            if e[open_pos + 1:end - 1].strip() in ("it", "this"):
+                return value_forms(e[:start], depth + 1)
+    forms = [f for f in value_sources(e) if f.strip()]
+    return forms or [e]
+
+
+def call_site_args(text, pattern):
+    """`pattern` 每个调用的实参文本列表：[(pos, [arg_text, ...])]。"""
+    out = []
+    for m in re.finditer(pattern, text):
+        open_pos = m.end() - 1
+        if open_pos < 0 or text[open_pos] != "(":
+            continue
+        out.append((m.start(),
+                    [text[a:b].strip() for a, b in call_args(text, open_pos)]))
+    return out
+
+
+def effect_body(code, marker):
+    """`marker(...) { … }` 的体（trailing lambda），配平失败 None。"""
     idx = code.find(marker)
     if idx < 0:
         return None
-    return code[idx:idx + size]
+    open_paren = code.find("(", idx)
+    if open_paren < 0:
+        return None
+    close_paren = match_bracket(code, open_paren)
+    if close_paren < 0:
+        return None
+    k = close_paren + 1
+    while k < len(code) and code[k] in " \t\r\n":
+        k += 1
+    if k >= len(code) or code[k] != "{":
+        return None
+    close = match_bracket(code, k)
+    return code[k + 1:close] if close > 0 else None
+
+
+def function_text(code, name):
+    """函数体文本（block / expr 体都支持），找不到 None。"""
+    fb = function_body(code, name)
+    return code[fb[0]:fb[1]] if fb else None
+
+
+def w1_published_rhs(rhs):
+    """(ok, detail)：onPageStarted 发布的 RHS 是否真的携带反向映射结果。"""
+    forms = value_forms(rhs)
+    carries = any("fromAssetLoaderUrl(" in f for f in forms)
+    tokens = "url" in rhs and "assetRootDir" in rhs and "?:" in rhs
+    detail = "RHS = %r; value forms = %r" % (rhs, forms)
+    if not tokens:
+        detail += " — the mapper call / webview url / assetRootDir / elvis fallback is missing"
+    elif not carries:
+        detail += (" — the mapper's result never reaches the published value: it is "
+                   "called inside a discarding scope (.also/.apply), swallowed by a "
+                   "value-replacing scope (.let { other }), or filtered out by a "
+                   "provably-rejecting predicate so the `?:` fallback always wins")
+    return (tokens and carries), detail
+
+
+def w2_load_path(holder):
+    """(ok, detail)：startIfNeeded 里每个 webView.loadUrl(…) 是否消费映射后的值。"""
+    body = function_text(holder, "startIfNeeded")
+    if body is None:
+        return False, "startIfNeeded(…) not found (the load path moved — re-point this guard)"
+    mapped, mapped_rhs = None, ""
+    for m in re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*=\s*", body):
+        rhs = body[m.end():expr_end(body, m.end())]
+        if any("toAssetLoaderUrl(" in f for f in value_forms(rhs)):
+            mapped, mapped_rhs = m.group(1), rhs.strip()
+            break
+    if mapped is None:
+        return False, ("no local bound to toAssetLoaderUrl(…) inside startIfNeeded — the "
+                       "forward mapping is no longer computed on the load path")
+    if not is_single_assignment(body, mapped):
+        return False, ("`%s` is re-assigned / shadowed inside startIfNeeded, so the value "
+                       "the load site consumes is not provably the mapped one" % mapped)
+    sites = call_site_args(body, r"\.\s*loadUrl\s*\(")
+    if not sites:
+        return False, "no webView.loadUrl(…) call inside startIfNeeded (re-point this guard)"
+    bad = []
+    for _pos, args in sites:
+        arg = ", ".join(args).strip()
+        forms = value_forms(arg)
+        if not any(f.strip() == mapped or "toAssetLoaderUrl(" in f for f in forms):
+            bad.append(arg)
+    if bad:
+        return False, ("a load site passes %r instead of the mapped local `%s` (= %r) — "
+                       "loading the raw file:// URL is refused by the WebView "
+                       "(allowFileAccess = false)"
+                       % (bad[0], mapped, mapped_rhs))
+    return True, "%d load site(s) all consume `%s`" % (len(sites), mapped)
+
+
+def w4a_external_call(sheet):
+    """(ok, detail)：openExternalFromSheet(context, holder.currentUrl) 有活调用点。"""
+    required = ["context", "holder.currentUrl"]
+    matching = [(p, a) for p, a in call_site_args(sheet, r"\bopenExternalFromSheet\s*\(")
+                if a == required]
+    live = [p for p, _a in matching if path_feasible(sheet, p)]
+    if live:
+        return True, "%d reachable openExternalFromSheet(context, holder.currentUrl) site(s)" % len(live)
+    if matching:
+        return False, ("the call is spelled correctly but sits on an infeasible path "
+                       "(dead branch: if (false) / && false / 1 == 2) — the toolbar "
+                       "button does nothing")
+    return False, ("no openExternalFromSheet(context, holder.currentUrl) call — downstream "
+                   "must keep reading the single source")
+
+
+_VIEWPORT_FIELDS = ("useWideViewPort", "loadWithOverviewMode")
+
+
+def viewport_writes(text):
+    """[(pos, field, rhs)]：对两个视口字段的所有写入。
+
+    覆盖点号形态（`webView.settings.useWideViewPort = …`）**与**接收者作用域里的
+    裸写（`with(webView.settings) { useWideViewPort = … }` / `apply { … }`）——
+    只认前导点号会让 `with` 整段隐身。
+    """
+    out = []
+    for field in _VIEWPORT_FIELDS:
+        for m in re.finditer(r"(?<![\w`])" + field + r"\s*=(?!=)", text):
+            rhs = text[m.end():expr_end(text, m.end())]
+            # 共享 expr_end 不在顶层 `;` 截断（R 项已登记）：这里自己切，避免把
+            # 下一条语句卷进 RHS 让值判定看到不属于自己的文本。
+            semi = rhs.find(";")
+            if semi >= 0:
+                rhs = rhs[:semi]
+            out.append((m.start(), field, rhs.strip()))
+    out.sort()
+    return out
+
+
+def controller_receiver(outer, win_name):
+    """(ok, detail)：外层效果里构建 WindowInsetsControllerCompat 的接收者链。"""
+    for m in re.finditer(r"\bval\s+([A-Za-z_]\w*)\s*=\s*", outer):
+        rhs = outer[m.end():expr_end(outer, m.end())]
+        ctor = rhs.find("WindowInsetsControllerCompat")
+        if ctor < 0:
+            continue
+        receiver = rhs[:ctor]
+        opener = re.search(r"\?*\s*\.\s*(?:let|run|map)\s*\{?\s*$", receiver)
+        if opener:
+            receiver = receiver[:opener.start()]
+        receiver = strip_parens(receiver.strip())
+        detail = "`%s` is built from `%s` (window local `%s`)" % (
+            m.group(1), " ".join(receiver.split())[:90], win_name)
+        if provably_null(receiver):
+            return False, (detail + " — that receiver chain is provably null (always-rejecting "
+                                     "filter / always-dead branch / null cast), so the "
+                                     "controller never hides the system bars")
+        if not contains_ident(receiver, win_name):
+            return False, detail + " — that is not the host-activity window"
+        return True, detail
+    return False, "no `val <controller> = …WindowInsetsControllerCompat(…)` binding in the outer effect"
 
 
 def key_wrapped_blocks(code, callee="AndroidView"):
-    """[(args_text, body_text)] for every `key(...) { … }` whose trailing lambda
-    block calls `callee(`.
-
-    The block lives OUTSIDE the key's paren list (`key(a, b) { … }` is a trailing
-    lambda), so we cannot stop at the matching `)`: we slice the brace-balanced
-    body starting at the `key(` line with the gate's own slicer, which is already
-    string-aware and nesting-aware. Matching is on the CALL SHAPE throughout —
-    never on a bare identifier sitting on a line (a comment or a log string that
-    merely names `AndroidView` must not move the gate).
-    """
+    """[(args_text, body_text)]：trailing lambda 里调用 `callee(` 的每个 `key(...)`。"""
     out = []
-    lines = code.splitlines()
-    for idx, line in enumerate(lines):
-        if not KEY_CALL_RE.search(line):
+    for m in KEY_CALL_RE.finditer(code):
+        open_paren = m.end() - 1
+        close_paren = match_bracket(code, open_paren)
+        if close_paren < 0:
             continue
-        body = slice_balanced_body("\n".join(lines[idx:]), line.strip())
-        if body is None:
+        k = close_paren + 1
+        while k < len(code) and code[k] in " \t\r\n":
+            k += 1
+        if k >= len(code) or code[k] != "{":
             continue
+        close = match_bracket(code, k)
+        if close < 0:
+            continue
+        body = code[k:close + 1]
         if not ANDROIDVIEW_CALL_RE.search(body):
             continue
-        args = body.split("{", 1)[0]
-        out.append((args, body))
+        out.append((code[open_paren + 1:close_paren], body))
     return out
 
 
 def androidview_key_criterion(label, code, required_tokens, site):
-    """Criterion tuple: every `AndroidView(` call site in `code` must sit inside a
-    `key(...)` block whose key arguments carry all of `required_tokens`.
+    """判定：每个 `AndroidView(` 调用点都必须落在 `key(...)` 块里，且 key 的**值**
+    携带数据源（不只是参数文本里出现过这个名字）。
 
-    Decision point (not a spelling): the AndroidView node is re-created exactly
-    when the enclosing `key` value changes, so the key must carry the *data
-    source* the factory closes over. Counting the call sites and requiring
-    `wrapped == total` also fails closed when the preview is removed from the
-    file altogether (0 sites ⇒ RED), which a "must contain key(" style pin
-    would silently accept.
+    `key(holder.let { 0 })` 保留了 `holder` 这个 token，但 Compose 拿到的键恒为
+    `0`，节点永不重建 —— 判据必须看值，不看拼写。
     """
-    stripped = strip_comments(code)
-    total = len(ANDROIDVIEW_CALL_RE.findall(stripped))
-    blocks = key_wrapped_blocks(stripped)
+    masked = code_of(code)
+    if masked is None:
+        return (label, False, "KotlinLexError in %s (fail-closed)" % site, None)
+    total = len(ANDROIDVIEW_CALL_RE.findall(masked))
+    blocks = key_wrapped_blocks(masked)
     wrapped = sum(len(ANDROIDVIEW_CALL_RE.findall(b)) for _a, b in blocks)
-    bad_args = [a.strip() for a, _b in blocks
-                if not all(re.search(r"\b" + re.escape(t) + r"\b", a) for t in required_tokens)]
-    ok = total >= 1 and wrapped == total and not bad_args
-    detail = ("%s: %d AndroidView site(s), %d outside key(...); key(...) args %s; "
-              "required key tokens %s"
-              % (site, total, total - wrapped,
-                 ("missing %r" % bad_args[:1]) if bad_args else "carry them",
-                 list(required_tokens)))
+    bad = []
+    for args, _body in blocks:
+        forms = []
+        for a, b in split_top(args, (",",)):
+            forms += value_forms(args[a:b])
+        missing = [t for t in required_tokens
+                   if not any(re.search(r"\b" + re.escape(t) + r"\b", f) for f in forms)]
+        consts = [f for f in forms if const_value(f) is not None]
+        if missing or consts:
+            bad.append((args.strip(), missing, forms, consts))
+    ok = total >= 1 and wrapped == total and not bad
+    if bad:
+        args, missing, forms, consts = bad[0]
+        detail = ("%s: key(%s) resolves to %r" % (site, args, forms))
+        if consts:
+            detail += (" — the key value is a constant, so the AndroidView node is "
+                       "never re-created when the data source changes")
+        else:
+            detail += " — the key value does not carry %r" % (missing,)
+    else:
+        detail = ("%s: %d AndroidView site(s), %d outside key(...); key(...) values carry %s"
+                  % (site, total, total - wrapped, list(required_tokens)))
     return (label, ok, detail, None)
 
 
 def analyse(holder_code, sheet_code, gallery_code=None, filepreview_code=None,
             katex_code=None, fullscreen_code=None):
     """Return [(criterion, ok, detail, line_no_or_None)]."""
-    code = strip_comments(holder_code)
-    code_lines = code.splitlines()
+    holder = code_of(holder_code)
+    sheet = code_of(sheet_code)
+    if holder is None or sheet is None:
+        return [("Kotlin source parse", False,
+                 "KotlinLexError — the lexer refused the source (fail-closed)", None)]
+
     results = []
 
-    # --- W1: the onPageStarted assignment goes through the reverse mapper ---
-    assigns = [(i, m.group(1)) for i, l in enumerate(code_lines)
+    # --- W1: the onPageStarted assignment publishes the reverse-mapped value ---
+    holder_lines = holder.splitlines()
+    assigns = [(i, m.group(1)) for i, l in enumerate(holder_lines)
                if (m := ASSIGN_RE.match(l))]
     if len(assigns) != 1:
         results.append(("W1 currentUrl assignment present and unique",
@@ -300,73 +432,66 @@ def analyse(holder_code, sheet_code, gallery_code=None, filepreview_code=None,
                         % len(assigns), None))
     else:
         line_no, rhs = assigns[0]
-        # [wide-1024 W1] "calls the mapper" is not "publishes the mapped value".
-        # `url.also { fromAssetLoaderUrl(url, assetRootDir) }` calls it, throws
-        # the result away and publishes the raw asset-loader URL — the exact
-        # three-consumer breakage this gate exists for.
-        pos = rhs.find("fromAssetLoaderUrl(")
-        discarded = pos >= 0 and in_discarded_lambda(rhs, pos)
-        ok = (pos >= 0 and "url" in rhs and "assetRootDir" in rhs
-              and "?:" in rhs and not discarded)
-        detail = "RHS = %r" % rhs
-        if discarded:
-            detail += (" — the mapper is called inside .also/.apply, so the published "
-                       "value is the receiver (the raw webview URL), not the mapped "
-                       "file:// URL")
+        ok, detail = w1_published_rhs(rhs)
         results.append(("W1 onPageStarted publishes via fromAssetLoaderUrl(url, assetRootDir)",
-                        ok,
-                        detail, line_no + 1))
+                        ok, detail, line_no + 1))
 
-    # --- W2: the load path uses the forward mapper (single source) ---
-    ok2 = "toAssetLoaderUrl(currentUrl) ?: currentUrl" in code
+    # --- W2: the load path consumes the forward-mapped value ---
+    ok2, d2 = w2_load_path(holder)
     results.append(("W2 load path uses toAssetLoaderUrl(currentUrl) ?: currentUrl",
-                    ok2, "load site must reuse the same mapping", None))
+                    ok2, d2, None))
 
     # --- W3: single source for the mapping pair / origin / decode ---
-    n_to = len(re.findall(r"\bfun\s+toAssetLoaderUrl\(", code))
-    n_from = len(re.findall(r"\bfun\s+fromAssetLoaderUrl\(", code))
+    n_to = len(re.findall(r"\bfun\s+toAssetLoaderUrl\(", holder))
+    n_from = len(re.findall(r"\bfun\s+fromAssetLoaderUrl\(", holder))
     results.append(("W3a toAssetLoaderUrl defined exactly once", n_to == 1,
                     "found %d definitions" % n_to, None))
     results.append(("W3b fromAssetLoaderUrl defined exactly once", n_from == 1,
                     "found %d definitions" % n_from, None))
-    n_host = len(re.findall(r"\bconst\s+val\s+ASSET_LOADER_HOST\b", code))
+    n_host = len(re.findall(r"\bconst\s+val\s+ASSET_LOADER_HOST\b", holder))
     results.append(("W3c origin host constant declared exactly once", n_host == 1,
                     "found %d declarations" % n_host, None))
-    legacy = "file.name" in code
+    try:
+        legacy = "file.name" in literal_view(holder_code)
+    except KotlinLexError:
+        legacy = True
     results.append(("W3d legacy inline file.name derivation removed", not legacy,
                     "file.name still present in code", None))
-    n_decode = len(re.findall(r"import\s+com\.rikkaminis\.app\.ui\.chat\.decodeUriPath", code))
+    n_decode = len(re.findall(r"import\s+com\.rikkaminis\.app\.ui\.chat\.decodeUriPath", holder))
     results.append(("W3e percent-decode reuses ui.chat.decodeUriPath", n_decode == 1,
                     "found %d imports" % n_decode, None))
 
-    # --- W4: downstream still reads the single source ---
-    sheet = strip_comments(sheet_code)
-    ok_ext = "openExternalFromSheet(context, holder.currentUrl)" in sheet
+    # --- W4: downstream still reads the single source, on a live path ---
+    ok_ext, d_ext = w4a_external_call(sheet)
     results.append(("W4a openExternalFromSheet still reads holder.currentUrl", ok_ext,
-                    "downstream must keep reading the single source", None))
-    ok_pin = 'holder.currentUrl.startsWith("file://")' in sheet
+                    d_ext, None))
+    try:
+        ok_pin = 'holder.currentUrl.startsWith("file://")' in literal_view(sheet_code)
+    except KotlinLexError:
+        ok_pin = False
     results.append(("W4b pin entry still gates on holder.currentUrl", ok_pin,
                     "downstream must keep reading the single source", None))
 
     # --- W5: mobile-mode viewport policy in toggleDesktopMode (dv14-B1) ---
-    # Decision point: the mobile `else` branch must keep the wide viewport +
-    # overview mode ON (exact polarity of the init defaults :127-128).
-    holder_stripped = strip_comments(holder_code)
-    if "fun toggleDesktopMode(" in holder_stripped:
-        body = slice_balanced_body(holder_stripped, "fun toggleDesktopMode(")
+    if "fun toggleDesktopMode(" in holder:
+        body = function_text(holder, "toggleDesktopMode")
         if body is None:
             results.append(("W5 toggleDesktopMode body sliceable", False,
                             "toggleDesktopMode body not found / unterminated", None))
         else:
-            no_false = ("useWideViewPort = false" not in body
-                        and "loadWithOverviewMode = false" not in body)
-            results.append(("W5a toggleDesktopMode never turns the mobile viewport off", no_false,
-                            "a `useWideViewPort = false` / `loadWithOverviewMode = false` "
-                            "revert in the body is RED", None))
-            n_policy = len(re.findall(r"\bfun\s+mobileViewportSettings\(", holder_stripped))
+            writes = viewport_writes(body)
+            off = [w for w in writes
+                   if const_bool(w[2]) is False and path_feasible(body, w[0])]
+            results.append((
+                "W5a toggleDesktopMode never turns the mobile viewport off", not off,
+                ("constant-false write `%s = %s` in the body flips the mobile viewport off "
+                 "(spelling-independent: `false`, `1 == 2`, `!true` all fold here)"
+                 % (off[0][1], off[0][2])) if off else
+                "no provably-false viewport write in the body", None))
+            n_policy = len(re.findall(r"\bfun\s+mobileViewportSettings\(", holder))
             results.append(("W5b mobileViewportSettings defined exactly once", n_policy == 1,
                             "found %d definitions" % n_policy, None))
-            pin_win = window_after(holder_stripped, "fun mobileViewportSettings", 300)
+            pin_win = window_after(holder, "fun mobileViewportSettings", 300)
             pinned = (pin_win is not None
                       and "useWideViewPort = true" in pin_win
                       and "loadWithOverviewMode = true" in pin_win)
@@ -378,38 +503,27 @@ def analyse(holder_code, sheet_code, gallery_code=None, filepreview_code=None,
             results.append(("W5d mobile else branch consumes mobileViewportSettings()", consumes,
                             "deleting the restore is RED (body must go through the "
                             "single-sourced policy)", None))
-            # A negation at the consumption site flips the polarity just as
-            # hard as a `false` literal did, and the policy value itself stays
-            # green — this arm is what catches it (m7 mutation). Scope: the
-            # two viewport fields only; `desktopMode = !desktopMode` is the
-            # toggle itself and must not trip it.
-            neg = re.search(r"(useWideViewPort|loadWithOverviewMode)\s*=\s*!", body)
-            results.append(("W5e toggleDesktopMode assigns the policy without negation",
-                            neg is None,
-                            "negated assignment (%r) inverts the mobile viewport "
-                            "again" % (neg.group(0) if neg else ""), None))
-            # [wide-1024 W5] the mobile branch must COPY the policy's field, not
-            # derive a new predicate from another one: `mobile.initialScale > 0`
-            # is false (initialScale is 0) and silently turns BOTH flags off,
-            # which is the polarity revert the gate exists for, spelled so that
-            # `= false` never appears.
+            neg = [w for w in writes
+                   if w[2].lstrip().startswith("!") and path_feasible(body, w[0])]
+            results.append((
+                "W5e toggleDesktopMode assigns the policy without negation", not neg,
+                ("negated assignment (%r) inverts the mobile viewport again"
+                 % (neg[0][2] if neg else "")), None))
+
             mobile_branch = None
-            m_else = re.search(r"\belse\s*\{", body)
-            if m_else:
-                # slice from the else's OWN brace: the `}` that closes the
-                # desktop branch sits before it and would make a
-                # header-marker slicer return just the header line (a silently
-                # vacuous arm — measured on the DESKTOP_FALSE fixture).
-                mobile_branch = block_from(body, body.find("{", m_else.start()))
-            policy_local = re.search(r"val\s+([A-Za-z_]\w*)\s*=\s*mobileViewportSettings\s*\(\s*\)",
-                                     body)
-            recv = [re.escape(policy_local.group(1))] if policy_local else []
-            recv.append(r"mobileViewportSettings\s*\(\s*\)")
-            recv_re = "(?:" + "|".join(recv) + ")"
-            if mobile_branch:
-                for field in ("useWideViewPort", "loadWithOverviewMode"):
-                    assigned = [a.strip() for a in re.findall(
-                        r"\.\s*" + field + r"\s*=\s*([^\n]+)", mobile_branch)]
+            for cond, _ts, _te, e_start, e_end in if_blocks(body):
+                if e_start is not None and "desktopMode" in cond:
+                    mobile_branch = body[e_start:e_end]
+                    break
+            if mobile_branch is not None:
+                policy_local = re.search(
+                    r"val\s+([A-Za-z_]\w*)\s*=\s*mobileViewportSettings\s*\(\s*\)", body)
+                recv = [re.escape(policy_local.group(1))] if policy_local else []
+                recv.append(r"mobileViewportSettings\s*\(\s*\)")
+                recv_re = "(?:" + "|".join(recv) + ")"
+                mwrites = viewport_writes(mobile_branch)
+                for field in _VIEWPORT_FIELDS:
+                    assigned = [w[2] for w in mwrites if w[1] == field]
                     bad = [a for a in assigned
                            if not re.fullmatch(r"!?\s*\(?\s*" + recv_re
                                                + r"\s*\.\s*" + field + r"\s*\)?", a)]
@@ -417,14 +531,19 @@ def analyse(holder_code, sheet_code, gallery_code=None, filepreview_code=None,
                         "W5f mobile branch copies the policy's own %s field" % field,
                         not bad,
                         "assigned %r -- the mobile branch must copy the policy field "
-                        "(a derived predicate such as `mobile.initialScale > 0` flips "
-                        "the viewport off because initialScale is 0)"
-                        % (bad[0] if bad else ""), None))
+                        "(a constant / a derived predicate such as "
+                        "`mobile.initialScale > 0` flips the viewport off because "
+                        "initialScale is 0)" % (bad[0] if bad else ""), None))
 
     # --- W6: gallery window contract (dv14-B1) ---
     if gallery_code is not None:
-        gallery_stripped = strip_comments(gallery_code)
-        outer = slice_balanced_body(gallery_stripped, "DisposableEffect(Unit)")
+        gallery = code_of(gallery_code)
+        if gallery is None:
+            results.append(("W6 gallery source parse", False,
+                            "KotlinLexError in ImageGalleryViewer.kt (fail-closed)", None))
+            gallery = None
+    if gallery_code is not None and gallery is not None:
+        outer = effect_body(gallery, "DisposableEffect(Unit)")
         if outer is None:
             results.append(("W6 gallery outer DisposableEffect(Unit) sliceable", False,
                             "outer effect not found / unterminated", None))
@@ -437,44 +556,29 @@ def analyse(holder_code, sheet_code, gallery_code=None, filepreview_code=None,
             results.append(("W6b outer effect must not call findDialogWindow(view)", ok_no_walk,
                             "findDialogWindow(view) on the host view walks a chain "
                             "with no DialogWindowProvider (always null)", None))
-        # [wide-1024 W6] the window local may be correct while the controller is
-        # built from something else: `(null as android.view.Window?)?.let { … }`
-        # keeps every token (the cast, the constructor) and yields a null
-        # controller, so immersive mode silently stops hiding the system bars.
-        win_local = re.search(
-            r"\bval\s+([A-Za-z_]\w*)\s*=\s*[^\n]*as\?\s+android\.app\.Activity[^\n]*",
-            outer)
-        # the prefix must belong to THIS binding: stop the search at any other
-        # declaration, otherwise a correct `val window = …` above satisfies it
-        ctl = re.search(
-            r"\bval\s+([A-Za-z_]\w*)\s*=\s*"
-            r"((?:(?!\n\s*(?:val|var|fun|internal|private|public)\b)[\s\S])*?)"
-            r"WindowInsetsControllerCompat\s*\(", outer)
-        ok_ctl = False
-        ctl_detail = "controller binding not found"
-        if win_local is None:
-            ctl_detail = "the host-activity window is not bound to a local"
-        elif ctl is None:
-            ctl_detail = "no `val <controller> = …WindowInsetsControllerCompat(…)` binding"
-        else:
-            ctl_detail = ("`%s` is built from `%s`, not from the window local `%s`"
-                          % (ctl.group(1), " ".join(ctl.group(2).split())[:70],
-                             win_local.group(1)))
-            ok_ctl = re.search(r"\b" + re.escape(win_local.group(1)) + r"\b",
-                               ctl.group(2)) is not None
-        results.append(("W6e gallery outer effect builds the controller from that window",
-                        ok_ctl, ctl_detail, None))
-        inner = slice_balanced_body(gallery_stripped, "DisposableEffect(dialogView)")
+            win_local = re.search(
+                r"\bval\s+([A-Za-z_]\w*)\s*=\s*[^\n]*as\?\s+android\.app\.Activity[^\n]*",
+                outer)
+            if win_local is None:
+                results.append(("W6e gallery outer effect builds the controller from that window",
+                                False,
+                                "the host-activity window is not bound to a local", None))
+            else:
+                ok_ctl, ctl_detail = controller_receiver(outer, win_local.group(1))
+                results.append(("W6e gallery outer effect builds the controller from that window",
+                                ok_ctl, ctl_detail, None))
+        inner = effect_body(gallery, "DisposableEffect(dialogView)")
         if inner is None:
             results.append(("W6 gallery inner DisposableEffect(dialogView) sliceable", False,
                             "inner effect not found / unterminated", None))
         else:
             ok_flags_call = "galleryDialogWindowFlags()" in inner
-            results.append(("W6c inner dialog effect applies galleryDialogWindowFlags()", ok_flags_call,
+            results.append(("W6c inner dialog effect applies galleryDialogWindowFlags()",
+                            ok_flags_call,
                             "the dialog window must get FLAG_LAYOUT_NO_LIMITS | "
                             "FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS", None))
-        n_flags = len(re.findall(r"\bfun\s+galleryDialogWindowFlags\(", gallery_stripped))
-        flags_win = window_after(gallery_stripped, "fun galleryDialogWindowFlags", 300)
+        n_flags = len(re.findall(r"\bfun\s+galleryDialogWindowFlags\(", gallery))
+        flags_win = window_after(gallery, "fun galleryDialogWindowFlags", 300)
         ok_flags_def = (n_flags == 1 and flags_win is not None
                         and "FLAG_LAYOUT_NO_LIMITS" in flags_win
                         and "FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS" in flags_win)
@@ -483,17 +587,6 @@ def analyse(holder_code, sheet_code, gallery_code=None, filepreview_code=None,
                         "composition" % n_flags, None))
 
     # --- W7: preview WebView hosts must key the AndroidView on its data source (dv17-3) ---
-    # `AndroidView(factory = …)` runs `factory` only on first composition, or when
-    # the enclosing `key(...)` value changes. Without a key the node keeps the
-    # WebView it built first while its owner moves on:
-    #   * sheet + fullscreen: the holder is replaceable (rememberWebViewHolder(url)
-    #     rebuilds it on a URL change) while the node keeps its slot ⇒ the screen
-    #     keeps showing the *destroyed* WebView of the old holder;
-    #   * FilePreviewScreen / KaTeXView: `rendererEpoch` is `remember(dataSource)`,
-    #     so on a data-source change it resets to 0 — a bare `key(rendererEpoch)`
-    #     never changes value (0→0) and the factory keeps its stale closure.
-    # The key must therefore carry the data source AND keep the renderer-death
-    # rebuild (`rendererEpoch`) — that path stays live for both hosts.
     if fullscreen_code is not None:
         results.append(androidview_key_criterion(
             "W7a WebPreviewBottomSheet AndroidView is keyed on the holder",
@@ -512,6 +605,14 @@ def analyse(holder_code, sheet_code, gallery_code=None, filepreview_code=None,
     return results
 
 
+def window_after(code, marker, size):
+    """Bounded text window starting at `marker` (first match) — for pinning
+    expression-bodied declarations whose body has no braces to slice."""
+    idx = code.find(marker)
+    if idx < 0:
+        return None
+    return code[idx:idx + size]
+
 # ---------------------------------------------------------------- selftest ---
 GOOD_HOLDER = """package probe
 class H {
@@ -520,8 +621,10 @@ class H {
     fun onPageStarted(url: String) {
         currentUrl = fromAssetLoaderUrl(url, assetRootDir) ?: url
     }
-    fun load() {
+    fun startIfNeeded() {
         val loadUrl = toAssetLoaderUrl(currentUrl) ?: currentUrl
+        webView.loadUrl(loadUrl)
+        webView.post { webView.loadUrl(loadUrl) }
     }
     internal const val ASSET_LOADER_HOST = "appassets.androidplatform.net"
 }
@@ -537,8 +640,10 @@ class H {
     fun onPageStarted(url: String) {
         currentUrl = url
     }
-    fun load() {
+    fun startIfNeeded() {
         val loadUrl = toAssetLoaderUrl(currentUrl) ?: currentUrl
+        webView.loadUrl(loadUrl)
+        webView.post { webView.loadUrl(loadUrl) }
     }
     internal const val ASSET_LOADER_HOST = "appassets.androidplatform.net"
 }
@@ -553,8 +658,10 @@ class H {
     fun onPageStarted(url: String) {
         currentUrl = "https://$ASSET_LOADER_HOST/${file.name}"
     }
-    fun load() {
+    fun startIfNeeded() {
         val loadUrl = toAssetLoaderUrl(currentUrl) ?: currentUrl
+        webView.loadUrl(loadUrl)
+        webView.post { webView.loadUrl(loadUrl) }
     }
 }
 internal const val ASSET_LOADER_HOST = "appassets.androidplatform.net"
@@ -774,6 +881,53 @@ W7_BAD_KATEX = W7_GOOD_KATEX.replace("key(cacheKey, rendererEpoch) {", "key(rend
 W7_KATEX_NO_EPOCH = W7_GOOD_KATEX.replace("key(cacheKey, rendererEpoch) {", "key(cacheKey) {")
 
 
+# ---- batch7-t12 witnesses: 值被架空 / 解析器死亡 / 死分支 ----------------
+# 06-1: 反向映射的产物被恒拒过滤器架空，`?: url` 的回退臂永远是答案
+W1_TAKEIF_HOLDER = GOOD_HOLDER.replace(
+    "currentUrl = fromAssetLoaderUrl(url, assetRootDir) ?: url",
+    "currentUrl = fromAssetLoaderUrl(url, assetRootDir)?.takeIf { false } ?: url")
+
+# 06-2: 映射结果算出来了，加载点却传裸 currentUrl
+W2_RAW_URL_HOLDER = GOOD_HOLDER.replace(
+    "        webView.loadUrl(loadUrl)\n        webView.post",
+    "        webView.loadUrl(currentUrl)\n        webView.post")
+
+# 06-3: 视口策略字段在 with(receiver) 作用域里裸写成常量（无前导点号）
+DESKTOP_WITH_SCOPE_HOLDER = GOOD_HOLDER + """
+class DesktopHolder {
+    fun toggleDesktopMode() {
+        webView.settings.userAgentString = desktopUserAgent
+        if (desktopMode) {
+            webView.settings.useWideViewPort = true
+            webView.settings.loadWithOverviewMode = true
+        } else {
+            val mobile = mobileViewportSettings()
+            with(webView.settings) {
+                useWideViewPort = 1 == 2
+                loadWithOverviewMode = 1 == 2
+            }
+            webView.setInitialScale(mobile.initialScale)
+        }
+    }
+}
+internal fun mobileViewportSettings(): MobileViewportSettings =
+    MobileViewportSettings(useWideViewPort = true, loadWithOverviewMode = true, initialScale = 0)
+"""
+
+# 06-4: 外部打开调用被搬进恒死分支
+SHEET_DEAD_CALL = GOOD_SHEET.replace(
+    "onOpenExternal = { openExternalFromSheet(context, holder.currentUrl) }",
+    "onOpenExternal = { if (false) openExternalFromSheet(context, holder.currentUrl) }")
+
+# 06-5: window 仍是链首接收者，但被恒拒过滤器过滤成 null
+GALLERY_TAKEIF_REJECT = GALLERY_GOOD.replace(
+    "val controller = window?.let {",
+    "val controller = window?.takeIf { false }?.let {")
+
+# 06-6: key(...) 参数文本里留着 holder，值恒为 0
+W7_LET_KEY_SHEET = W7_GOOD_SHEET.replace("key(holder) {", "key(holder.let { 0 }) {")
+
+
 def selftest():
     failures = []
 
@@ -967,6 +1121,62 @@ def selftest():
         elif c.startswith("W6"):
             expect(ok, "wide-1024 W6 witness must not disturb %s" % c)
 
+    # ---- batch7-t12 witnesses ------------------------------------------
+    d = dict((c, ok) for c, ok, _, _ in analyse(W1_TAKEIF_HOLDER, GOOD_SHEET))
+    reds = sorted(c for c in d if c.startswith("W1") and not d[c])
+    expect(len(reds) == 1, "t12-06-1: exactly W1 must be RED, got %s" % reds)
+    expect(not [c for c, ok in d.items() if not c.startswith("W1") and not ok],
+           "t12-06-1 must not disturb other criteria")
+
+    d = dict((c, ok) for c, ok, _, _ in analyse(W2_RAW_URL_HOLDER, GOOD_SHEET))
+    reds = sorted(c for c in d if c.startswith("W2") and not d[c])
+    expect(reds == ["W2 load path uses toAssetLoaderUrl(currentUrl) ?: currentUrl"],
+           "t12-06-2: exactly W2 must be RED, got %s" % reds)
+    expect(not [c for c, ok in d.items() if not c.startswith("W2") and not ok],
+           "t12-06-2 must not disturb other criteria")
+
+    d = dict((c, ok) for c, ok, _, _ in analyse(DESKTOP_WITH_SCOPE_HOLDER, GOOD_SHEET))
+    reds = sorted(c for c in d if c.startswith("W5") and not d[c])
+    expect("W5a toggleDesktopMode never turns the mobile viewport off" in reds,
+           "t12-06-3: W5a must be RED (with(receiver) scope hides the write), got %s" % reds)
+    expect(any(c.startswith("W5f") for c in reds),
+           "t12-06-3: a W5f arm must be RED, got %s" % reds)
+    expect(not [c for c, ok in d.items() if not c.startswith("W5") and not ok],
+           "t12-06-3 must not disturb non-W5 criteria")
+
+    d = dict((c, ok) for c, ok, _, _ in analyse(GOOD_HOLDER, SHEET_DEAD_CALL))
+    reds = sorted(c for c in d if not d[c])
+    expect(reds == ["W4a openExternalFromSheet still reads holder.currentUrl"],
+           "t12-06-4: exactly W4a must be RED, got %s" % reds)
+
+    d = dict((c, ok) for c, ok, _, _ in analyse(GOOD_HOLDER, GOOD_SHEET,
+                                               GALLERY_TAKEIF_REJECT))
+    reds = sorted(c for c in d if c.startswith("W6") and not d[c])
+    expect(reds == ["W6e gallery outer effect builds the controller from that window"],
+           "t12-06-5: exactly W6e must be RED, got %s" % reds)
+    expect(not [c for c, ok in d.items() if not c.startswith("W6") and not ok],
+           "t12-06-5 must not disturb non-W6 criteria")
+
+    d = w7(W7_LET_KEY_SHEET, W7_GOOD_PREVIEW, W7_GOOD_KATEX, W7_GOOD_FULLSCREEN)
+    reds = sorted(c for c in d if c.startswith("W7") and not d[c])
+    expect(len(reds) == 1 and reds[0].startswith("W7a"),
+           "t12-06-6: exactly W7a must be RED, got %s" % reds)
+
+    # 对照臂：`.let { it }` 这种值不变的写法必须仍然 GREEN（不误伤）
+    id_key_sheet = W7_GOOD_SHEET.replace("key(holder) {", "key(holder.let { it }) {")
+    d = w7(id_key_sheet, W7_GOOD_PREVIEW, W7_GOOD_KATEX, W7_GOOD_FULLSCREEN)
+    expect(all(d[c] for c in d if c.startswith("W7")),
+           "t12-06-6 control: key(holder.let { it }) must stay GREEN, reds=%s"
+           % sorted(c for c in d if c.startswith("W7") and not d[c]))
+
+    # 对照臂：合法的恒真过滤器（`takeIf { it.isNotBlank() }`）必须仍然 GREEN
+    blank_filter = GOOD_HOLDER.replace(
+        "currentUrl = fromAssetLoaderUrl(url, assetRootDir) ?: url",
+        "currentUrl = fromAssetLoaderUrl(url, assetRootDir)?.takeIf { it.isNotBlank() } ?: url")
+    d = dict((c, ok) for c, ok, _, _ in analyse(blank_filter, GOOD_SHEET))
+    expect(d["W1 onPageStarted publishes via fromAssetLoaderUrl(url, assetRootDir)"],
+           "t12-06-1 control: a real predicate must stay GREEN")
+
     if failures:
         print("SELFTEST FAIL:")
         for f in failures:
@@ -977,7 +1187,9 @@ def selftest():
           "policy flip=RED, restore delete=RED, gallery walker revert=RED, "
           "gallery flags missing=RED, androidview key removed=RED (4 sites), "
           "androidview rendererEpoch dropped=RED, mapper discarded via .also=RED, "
-          "viewport derived from initialScale=RED, controller built from null window=RED")
+          "viewport derived from initialScale=RED, controller built from null window=RED; "
+          "batch7-t12: 6 witnesses RED + 2 controls GREEN")
+    print("WEBVIEW_HOLDER_URL_SOURCE_SELFTEST_ARMS=%d" % 16)
     return 0
 
 
