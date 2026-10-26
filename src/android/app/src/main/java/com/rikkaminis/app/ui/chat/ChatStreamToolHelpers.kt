@@ -3,6 +3,7 @@ package com.rikkaminis.app.ui.chat
 import com.rikkaminis.app.data.db.MessageEntity
 import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.LLMMessage
+import com.rikkaminis.app.ui.settings.readAtMost
 import java.io.File
 
 /**
@@ -38,14 +39,29 @@ internal fun stripDisplayOnlyArtifacts(text: String): String {
  * @param mediaBaseDir base dir used to re-inline persisted image mediaRefs
  *   (T128/T150: only image files are re-inlined; non-image attachments are
  *   streamed to disk and never re-inlined into contentParts).
+ * @param resizeForInference [debt-1026 B1] what the model may actually be
+ *   sent for a restored image: `(rawBytes, mimeType) -> downscaledBytes?`
+ *   (null = "this source already fits / could not be re-encoded, keep the raw
+ *   bytes"). Injected instead of called so this file stays Android-free — the
+ *   composer's own `resizeImageBytes` is the production implementation, and a
+ *   JVM arm can pass a plain transform. Before the parameter existed the
+ *   reload path inlined the ORIGINAL bytes: the composer downscales the model
+ *   payload, so the first reload re-sent every historical photo at full
+ *   resolution (a 12 MP JPEG is ~4 MB of base64 per turn, per image).
  */
 internal fun buildLlmMessagesFromParsed(
     parsed: List<ParsedRow>,
     mediaBaseDir: File,
+    resizeForInference: (ByteArray, String) -> ByteArray? = { _, _ -> null },
 ): List<LLMMessage> {
     val result = ArrayList<LLMMessage>(parsed.size)
     for (row in parsed) {
-        result.add(buildSingleLlmMessage(row.entity, row.entity.partsJson, row.parts, row.malformed, mediaBaseDir))
+        result.add(
+            buildSingleLlmMessage(
+                row.entity, row.entity.partsJson, row.parts, row.malformed, mediaBaseDir,
+                resizeForInference,
+            )
+        )
     }
     return result
 }
@@ -56,6 +72,7 @@ internal fun buildSingleLlmMessage(
     parts: List<ParsedPart>,
     malformed: Boolean,
     mediaBaseDir: File,
+    resizeForInference: (ByteArray, String) -> ByteArray? = { _, _ -> null },
 ): LLMMessage {
     val r = if (entity.role == "user") LLMMessage.Role.USER else LLMMessage.Role.ASSISTANT
     val contentParts = mutableListOf<AgentContentPart>()
@@ -108,7 +125,14 @@ internal fun buildSingleLlmMessage(
                     if (!mime.startsWith("image/")) continue
                     val file = File(mediaBaseDir, rel)
                     if (!file.exists()) continue
-                    val bytes = try { file.readBytes() } catch (_: Exception) { continue }
+                    // [debt-1026 B1] Bounded read: the previous bare
+                    // `file.readBytes()` materialised the ORIGINAL asset with
+                    // no ceiling, and the bytes then went straight to the
+                    // provider.
+                    val raw = try { readRestoredImageBytes(file) } catch (_: Exception) { null } ?: continue
+                    // Downscale for the model payload only; the original stays
+                    // on disk for the UI viewer / shell tools / re-fetch.
+                    val bytes = resizeForInference(raw, mime) ?: raw
                     val restoredPath = part.linuxPath
                     imageParts.add(LLMMessage.ImagePart(bytes, mime, linuxPath = restoredPath))
                     contentParts.add(AgentContentPart.ImageData(bytes, mime, linuxPath = restoredPath))
@@ -126,3 +150,23 @@ internal fun buildSingleLlmMessage(
         reasoningContent = entity.reasoningContent,
     )
 }
+
+/**
+ * [debt-1026 B1] Ceiling on the raw bytes a restored mediaRef may hand to the
+ * model path.
+ *
+ * Same order as the SAF import caps and the home-icon picker: far above a real
+ * photo (a 200 MP JPEG is ~30 MB) but low enough that a corrupt / mis-typed
+ * asset in the attachments dir cannot OOM the heap before the bounded DECODE
+ * runs — that bound only limits the bitmap, not the encoded array feeding it.
+ */
+internal const val MAX_RESTORED_IMAGE_BYTES = 64L * 1024 * 1024
+
+/**
+ * Read [file] but refuse anything above [cap] bytes (null = too large / read
+ * failure). Thin wrapper over the shared [readAtMost] so the session-reload
+ * path and the SAF imports enforce their ceiling with the same primitive, and
+ * so a JVM arm can exercise the boundary with a small cap.
+ */
+internal fun readRestoredImageBytes(file: File, cap: Long = MAX_RESTORED_IMAGE_BYTES): ByteArray? =
+    file.inputStream().use { readAtMost(it, cap) }

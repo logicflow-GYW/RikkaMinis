@@ -2422,6 +2422,22 @@ def test_auto_approve_gates():
         check("%s real tree green" % script, rc == 0, out[-280:])
 
 
+PRIMITIVE_SELFTESTS = [
+    # U1 收口注册（2026-10-27）：只断言标记前缀，不 pin 臂数——臂数是自指脆弱断言（加减臂就要改门）
+    ("_kotlin_lexer", "KOTLIN_LEXER_SELFTEST=PASS"),
+    ("_kotlin_ast", "KOTLIN_AST_SELFTEST=PASS"),
+    ("_kotlin_valueflow", "KOTLIN_VALUEFLOW_SELFTEST=PASS"),
+]
+
+def test_primitive_selftests():
+    print("━━━ shared Kotlin primitives (selftest teeth; arm counts not pinned) ━━━")
+    for script, marker in PRIMITIVE_SELFTESTS:
+        argv = [sys.executable, os.path.join(SCRIPT_DIR, script + ".py"), "--selftest"]
+        proc = subprocess.run(argv, capture_output=True, text=True)
+        out = (proc.stdout or "") + (proc.stderr or "")
+        check("%s selftest has teeth (%s)" % (script, marker),
+              proc.returncode == 0 and marker in out, out[-280:])
+
 def test_real_repo():
     print("━━━ real repo tree (must be clean) ━━━")
     for script in (
@@ -3263,6 +3279,7 @@ def main():
     test_da1025_gates()
     test_da1026_gates()
     test_auto_approve_gates()
+    test_primitive_selftests()
     test_da1026_arch_gates()
     test_trace_step_tag()
     test_dv16_chat_ui_interaction()

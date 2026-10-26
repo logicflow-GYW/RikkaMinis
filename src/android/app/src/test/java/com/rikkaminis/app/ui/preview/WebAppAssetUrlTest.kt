@@ -65,10 +65,17 @@ class WebAppAssetUrlTest {
         root.delete()
         assertTrue(root.mkdirs())
         val html = File(root, "我的 报告.html").apply { writeText("<html></html>") }
-        val url = toAssetLoaderUrl("file://" + html.absolutePath)
+        // [fix/fileurl-contract] The URL that goes in is the ENCODED form
+        // (`fileUrlFor`), and what comes back out is byte-identical to it.
+        val requested = com.rikkaminis.app.ui.sandbox.fileUrlFor(html)
+        val url = toAssetLoaderUrl(requested)
+        assertEquals(requested, fromAssetLoaderUrl(url!!, root.absolutePath))
+        // and the consumer decodes back to the real path
         assertEquals(
-            "file://" + html.absolutePath,
-            fromAssetLoaderUrl(url!!, root.absolutePath),
+            html.absolutePath,
+            com.rikkaminis.app.ui.chat.decodeUriPath(
+                requireNotNull(fromAssetLoaderUrl(url, root.absolutePath)).removePrefix("file://"),
+            ),
         )
         root.deleteRecursively()
     }
@@ -82,7 +89,7 @@ class WebAppAssetUrlTest {
         )
         assertTrue(
             "the WebApp loader URL must be built by the shared single source",
-            src.contains("toAssetLoaderUrl(\"file://\" + file.absolutePath)"),
+            src.contains("toAssetLoaderUrl(fileUrlFor(file))"),
         )
         // Pre-fix shape, restored verbatim, must be gone.
         assertFalse(

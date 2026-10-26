@@ -72,6 +72,7 @@ import com.rikkaminis.app.browser.SafeWebViewClient
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.ui.preview.ASSET_LOADER_HOST
 import com.rikkaminis.app.ui.preview.toAssetLoaderUrl
+import com.rikkaminis.app.ui.sandbox.fileUrlFor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -668,7 +669,14 @@ class WebAppActivity : ComponentActivity() {
         // is unreachable for an existing File (the input is always a well-
         // formed file:// URL) but fails closed into the source-missing state
         // rather than a doomed 404.
-        val url = toAssetLoaderUrl("file://" + file.absolutePath)
+        //
+        // [fix/fileurl-contract] The file URL is built by the shared encoder
+        // (`ui.sandbox.fileUrlFor`), not `"file://" + file.absolutePath`:
+        // `toAssetLoaderUrl` consumes the URL contract (encoded path), and a raw
+        // concatenation made a file literally named `50%23.html` decode to
+        // `50#.html` inside the mapping — the shortcut then pointed at a
+        // non-existent sibling.
+        val url = toAssetLoaderUrl(fileUrlFor(file))
             ?: run {
                 renderSourceMissing(sourceSessionId = null)
                 return

@@ -26,8 +26,11 @@ import java.util.Locale
  *   android-weather report    --lat L --lon N [--hours N] [--days N]
  *
  * Backwards compatibility:
- *   - Legacy positional `android-weather <lat> <lon>` still works and
- *     emits the pre-T63 plain-text report.
+ *   - Legacy positional `android-weather <lat> <lon>` still works: same
+ *     argument shape, but it now emits the SAME structured JSON body as
+ *     `report` (24 h / 7 d) instead of the pre-T63 plain-text block. The
+ *     plain-text renderer and its duplicate WMO table are gone
+ *     (debt-1026 #5) — one exit, one code table.
  *   - `--lng` is accepted as an alias for `--lon` (apple-weather naming).
  *
  * Open-Meteo hosts in the EU — mainland-China users on China Mobile/
@@ -101,7 +104,7 @@ class WeatherOffloadHandler(private val context: Context) : NativeOffloadHandler
             .put("wind_speed_unit", windUnit)
             .put("wind_direction", current.optInt("wind_direction_10m"))
             .put("weather_code", current.optInt("weather_code"))
-            .put("conditions", weatherCodeToDescription(current.optInt("weather_code")))
+            .put("conditions", WeatherManager.weatherCodeToDescription(current.optInt("weather_code")))
     }
 
     /** Slice the hourly arrays into a list of per-hour records, capped at
@@ -122,7 +125,7 @@ class WeatherOffloadHandler(private val context: Context) : NativeOffloadHandler
                 .put("precipitation_probability", precips?.optInt(i, 0) ?: 0)
                 .put("wind_speed", winds?.optDouble(i, 0.0) ?: 0.0)
                 .put("weather_code", codes?.optInt(i, 0) ?: 0)
-                .put("conditions", weatherCodeToDescription(codes?.optInt(i, 0) ?: 0))
+                .put("conditions", WeatherManager.weatherCodeToDescription(codes?.optInt(i, 0) ?: 0))
             arr.put(item)
         }
         return JSONObject().put("hourly", arr).put("count", arr.length())
@@ -151,7 +154,7 @@ class WeatherOffloadHandler(private val context: Context) : NativeOffloadHandler
                 .put("sunrise", sunrises?.optString(i, "") ?: "")
                 .put("sunset", sunsets?.optString(i, "") ?: "")
                 .put("weather_code", codes?.optInt(i, 0) ?: 0)
-                .put("conditions", weatherCodeToDescription(codes?.optInt(i, 0) ?: 0))
+                .put("conditions", WeatherManager.weatherCodeToDescription(codes?.optInt(i, 0) ?: 0))
             arr.put(item)
         }
         return JSONObject().put("daily", arr).put("count", arr.length())
@@ -182,7 +185,7 @@ class WeatherOffloadHandler(private val context: Context) : NativeOffloadHandler
             .put("location", JSONObject().put("latitude", lat).put("longitude", lon).put("timezone", timezone))
     }
 
-    // ── Legacy plain-text path (pre-T63) ─────────────────────────────────
+    // ── Legacy positional path: same JSON exit as `report` ───────────────
 
     private fun handleLegacy(args: OffloadArgs): NativeOffloadResult {
         if (args.positional.size < 2) {
@@ -195,17 +198,23 @@ class WeatherOffloadHandler(private val context: Context) : NativeOffloadHandler
         }
         if (lat !in -90.0..90.0) return NativeOffloadResult(2, "android-weather: latitude out of range\n")
         if (lon !in -180.0..180.0) return NativeOffloadResult(2, "android-weather: longitude out of range\n")
-        return try {
-            val text = WeatherManager.fetchWeather(lat, lon)
-            val err = text.startsWith("Error")
-            if (err) {
-                NativeOffloadResult(1, augmentedError(text, args))
-            } else {
-                NativeOffloadResult(0, OffloadOutput.formatBody(text.trimEnd('\n'), args) + "\n")
-            }
+        // [debt-1026 #5 / backlog 1045-A07] The legacy form used to hand back
+        // WeatherManager.fetchWeather()'s human sentence block — a SECOND exit
+        // that bypassed the JSON envelope every other subcommand speaks through
+        // `OffloadOutput.formatBody`, kept alive only by a formatter (and a
+        // duplicate WMO table) in another file. It now runs the same tail as
+        // `report`: raw Open-Meteo JSON → reportBlock → formatBody. The command
+        // shape (<lat> <lon>) is unchanged; the body is JSON now.
+        val json = try {
+            WeatherManager.fetchWeatherJson(lat, lon)
         } catch (e: Throwable) {
-            NativeOffloadResult(1, augmentedError("Error: ${e.message}", args))
-        }
+            AppLogger.warning(TAG, "fetchWeatherJson uncaught: ${e.message}")
+            null
+        } ?: return NativeOffloadResult(1, augmentedError(WeatherManager.lastError, args))
+
+        AppLogger.info(TAG, "legacy: lat=$lat lon=$lon hours=$LEGACY_MAX_HOURS days=$LEGACY_MAX_DAYS")
+        val data = reportBlock(json, LEGACY_MAX_HOURS, LEGACY_MAX_DAYS, lat, lon)
+        return NativeOffloadResult(0, OffloadOutput.formatBody(data.toString(2), args) + "\n")
     }
 
     // ── Errors / helpers ─────────────────────────────────────────────────
@@ -239,46 +248,17 @@ class WeatherOffloadHandler(private val context: Context) : NativeOffloadHandler
         } catch (_: Throwable) { false }
     }
 
-    /**
-     * WMO Weather interpretation codes to human-readable descriptions.
-     * Duplicated from WeatherManager so the JSON path doesn't need to
-     * round-trip through plain-text formatting just to get descriptions.
-     */
-    private fun weatherCodeToDescription(code: Int): String = when (code) {
-        0 -> "Clear sky"
-        1 -> "Mainly clear"
-        2 -> "Partly cloudy"
-        3 -> "Overcast"
-        45 -> "Foggy"
-        48 -> "Depositing rime fog"
-        51 -> "Light drizzle"
-        53 -> "Moderate drizzle"
-        55 -> "Dense drizzle"
-        56 -> "Light freezing drizzle"
-        57 -> "Dense freezing drizzle"
-        61 -> "Slight rain"
-        63 -> "Moderate rain"
-        65 -> "Heavy rain"
-        66 -> "Light freezing rain"
-        67 -> "Heavy freezing rain"
-        71 -> "Slight snow"
-        73 -> "Moderate snow"
-        75 -> "Heavy snow"
-        77 -> "Snow grains"
-        80 -> "Slight rain showers"
-        81 -> "Moderate rain showers"
-        82 -> "Violent rain showers"
-        85 -> "Slight snow showers"
-        86 -> "Heavy snow showers"
-        95 -> "Thunderstorm"
-        96 -> "Thunderstorm with slight hail"
-        99 -> "Thunderstorm with heavy hail"
-        else -> "Unknown (code $code)"
-    }
-
     companion object {
         private const val TAG = "WeatherOffload"
         private val SUBCOMMANDS = setOf("current", "hourly", "daily", "alerts", "report")
+
+        /**
+         * Slices for the legacy positional form, which has no --hours/--days
+         * flags. These are the same defaults the subcommands use, so the legacy
+         * body is literally `report`'s default body.
+         */
+        private const val LEGACY_MAX_HOURS = 24
+        private const val LEGACY_MAX_DAYS = 7
         private const val HELP = """android-weather — current, hourly, daily forecast, alerts, combined report
                               (mirrors apple-weather, Open-Meteo backend, no API key)
 
@@ -290,7 +270,7 @@ Usage:
   android-weather report    --lat L --lon N [--hours N] [--days N]
 
 Legacy form (kept for backwards compatibility):
-  android-weather <lat> <lon>           Plain-text combined report
+  android-weather <lat> <lon>           Combined report, JSON body (same as `report`)
 
 Aliases:
   --lng                                 Apple-weather naming alias for --lon

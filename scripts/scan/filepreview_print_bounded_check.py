@@ -1181,14 +1181,24 @@ def _args_of(text, open_idx):
     return [p.strip() for p in parts]
 SAF_WHOLE_READS = (".readBytes()", ".readText()", "bufferedReader(", ".readLines()")
 
-# Sites this batch deliberately does not touch (radius: FIX-11 owns the two
-# import screens). Key = (relative path, needle the site's own chain must
-# contain); an entry whose file ships but whose needle no longer matches is ROT.
-SAF_EXEMPTIONS = {
+# Key = (relative path, needle the site's own chain must contain); an entry
+# whose file ships but whose needle no longer matches is ROT.
+#
+# EMPTY by design. The last entry (chat/ChatPromptAndTools.kt reading an image
+# attachment with a bare `readBytes()`) was fixed in fix/debt-sweep-1026 (#3,
+# backlog B-07): the branch now routes through readSafBytes() under a named cap,
+# so the file carries no `openInputStream(` site at all and the entry rotted. Do
+# not re-add entries for new sites — bound them.
+SAF_EXEMPTIONS = {}
+
+# The ROT rule still needs a live probe entry: the "exemption outlived its site"
+# arm has nothing to go stale otherwise. SELFTEST ONLY — the real-tree run never
+# consults it (check_saf_imports() defaults to SAF_EXEMPTIONS).
+SELFTEST_SAF_EXEMPTIONS = {
     (os.path.join(SAF_UI_DIR, "chat", "ChatPromptAndTools.kt"),
      "openInputStream(attachment.uri)?.use { it.readBytes()"):
-        "chat image attachment read with no cap — registered, not fixed (FIX-11 radius; "
-        "trigger = an OOM report on a multi-hundred-MB image share)",
+        "selftest probe: stands in for the historical chat image-attachment "
+        "exemption so the stale-entry arm keeps a subject",
 }
 
 
@@ -1444,8 +1454,13 @@ def _saf_short(rel):
     return rel.split(os.sep + "rikkaminis" + os.sep)[-1]
 
 
-def check_saf_imports(root):
-    """(violations, rot, sites, notes) — criterion B-07."""
+def check_saf_imports(root, exemptions=None):
+    """(violations, rot, sites, notes) — criterion B-07.
+
+    `exemptions` defaults to the production table (empty); the selftest passes
+    SELFTEST_SAF_EXEMPTIONS so the staleness rule keeps a live subject.
+    """
+    exemptions = SAF_EXEMPTIONS if exemptions is None else exemptions
     violations, rot, notes = [], [], []
     sites = 0
 
@@ -1626,13 +1641,13 @@ def check_saf_imports(root):
                     notes.append("[B-07 bounded] %s — %s" % (_saf_short(rel), reason))
                     continue
                 hit = None
-                for key in SAF_EXEMPTIONS:
+                for key in exemptions:
                     if key[0] == rel and key[1] in snippet:
                         hit = key
                         break
                 if hit is not None:
                     resolved.add(hit)
-                    notes.append("[B-07 exempt] %s — %s" % (_saf_short(rel), SAF_EXEMPTIONS[hit]))
+                    notes.append("[B-07 exempt] %s — %s" % (_saf_short(rel), exemptions[hit]))
                     continue
                 line = code.count("\n", 0, idx) + 1
                 violations.append(
@@ -1647,7 +1662,7 @@ def check_saf_imports(root):
             % _saf_short(rel)
         )
 
-    for rel, needle in SAF_EXEMPTIONS:
+    for rel, needle in exemptions:
         if (rel, needle) in resolved:
             continue
         if rel not in present_files:
@@ -1968,7 +1983,7 @@ def selftest_saf_imports():
 
     def arm(name, expect, shape="fixed"):
         root = _saf_fixture(shape)
-        v, r, sites, _notes = check_saf_imports(root)
+        v, r, sites, _notes = check_saf_imports(root, SELFTEST_SAF_EXEMPTIONS)
         blob = v + r
         if expect is None:
             if blob:

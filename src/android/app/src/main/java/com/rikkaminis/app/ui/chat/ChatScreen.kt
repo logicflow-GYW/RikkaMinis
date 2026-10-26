@@ -1708,7 +1708,15 @@ fun ChatScreen(
             // Reuse the same WebViewHolder as long as the file path doesn't
             // change. Tapping the same html link twice should pick up wherever
             // the user left off rather than reloading from scratch.
-            val url = "file://${file.absolutePath}"
+            //
+            // [fix/fileurl-contract] Construct through the shared builder, not
+            // `"file://${file.absolutePath}"`: this URL crosses to the WebView /
+            // asset loader (system components), so its path must be percent-
+            // encoded. Every consumer of the resulting string decodes it back
+            // (`openExternalFromSheet`, `WebPreviewShortcut.pin`,
+            // `WebViewHolder`'s File root); a raw concatenation made a file
+            // literally named `50%23.html` arrive at them as `50#.html`.
+            val url = com.rikkaminis.app.ui.sandbox.fileUrlFor(file)
             val existing = htmlPreviewHolder
             if (existing == null || existing.currentUrl != url) {
                 existing?.destroy()
@@ -1772,7 +1780,12 @@ fun ChatScreen(
             )
             return@LaunchedEffect
         }
-        val url = "file://${file.absolutePath}"
+        // [fix/fileurl-contract] Same construction contract as openHtmlPreview:
+        // the pinned-shortcut deep link resolves to a host File whose URL then
+        // crosses to the WebView / asset loader, so it is built through the
+        // shared encoder (the pin path decodes it again in
+        // `WebPreviewShortcut.pin`).
+        val url = com.rikkaminis.app.ui.sandbox.fileUrlFor(file)
         htmlPreviewHolder?.destroy()
         htmlPreviewHolder = com.rikkaminis.app.ui.preview.WebViewHolder(appCtx, url)
         htmlPreviewFallbackTitle = pending.title
