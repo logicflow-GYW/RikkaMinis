@@ -437,6 +437,21 @@ ARMS = [
     ("path_feasible_live_branch",
      lambda V: V["path_feasible"](V["code_view"]("if (ready) {\n  boom()\n}\n"),
                                  V["code_view"]("if (ready) {\n  boom()\n}\n").index("boom")) is True),
+    # else 分支端到端（enclosing_conditions 的 `!(cond)` 括号化修复）：
+    # `|| true` 的 else 是死分支（False），`&& false` 的 else 是活分支（True），
+    # 简单条件 else 不回归（True）。期望值写死字面量。
+    ("path_feasible_else_dead_or_true",
+     lambda V: V["path_feasible"](
+         V["code_view"]("if (a == null || true) {\n  ok()\n} else {\n  boom()\n}\n"),
+         V["code_view"]("if (a == null || true) {\n  ok()\n} else {\n  boom()\n}\n").index("boom")) is False),
+    ("path_feasible_else_live_and_false",
+     lambda V: V["path_feasible"](
+         V["code_view"]("if (x == null && false) {\n  ok()\n} else {\n  boom()\n}\n"),
+         V["code_view"]("if (x == null && false) {\n  ok()\n} else {\n  boom()\n}\n").index("boom")) is True),
+    ("path_feasible_else_simple_not_regressed",
+     lambda V: V["path_feasible"](
+         V["code_view"]("if (a == null) {\n  ok()\n} else {\n  boom()\n}\n"),
+         V["code_view"]("if (a == null) {\n  ok()\n} else {\n  boom()\n}\n").index("boom")) is True),
     ("returns_exiting_plain",
      lambda V: V["returns_exiting"](V["code_view"]("fun f() {\n  if (x) return\n  y()\n}\n"),
                                     V["code_view"]("fun f() {\n  if (x) return\n  y()\n}\n").index("if"),

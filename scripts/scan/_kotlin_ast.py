@@ -375,13 +375,20 @@ def when_branches(text):
 
 
 def enclosing_conditions(text, pos):
-    '''覆盖 pos 的所有条件：[(kind, cond_text)]，kind ∈ {'if', 'when'}。'''
+    '''覆盖 pos 的所有条件：[(kind, cond_text)]，kind ∈ {'if', 'when'}。
+
+    `else` 分支的条件返回**括号化的取反** `!(<cond>)`，不是裸 `!<cond>`：裸前缀
+    在复合条件上会重绑定优先级（`!a == null || true` 读作 `(!a) == null || true`），
+    于是 `if (a == null || true) … else …` 的死 else 判活、`if (x == null && false)
+    … else …` 的活 else 判死（后者是静默放行方向）。括号化后语义与源码一致，
+    消费方（`path_feasible` / `guard_feasible` / 各门）无需再做本地补丁。
+    '''
     out = []
     for cond, t_start, t_end, e_start, e_end in if_blocks(text):
         if t_start <= pos < t_end:
             out.append(('if', cond))
         elif e_start is not None and e_start <= pos < e_end:
-            out.append(('if', '!' + cond))
+            out.append(('if', '!(' + cond + ')'))
     for subject, cond, b_start, b_end in when_branches(text):
         if b_start <= pos < b_end:
             out.append(('when', cond))
@@ -439,6 +446,19 @@ ARMS = [
     ('if_blocks_else_present', lambda A: A['if_blocks']('if (a) x()\nelse y()\n')[0][3] is not None),
     ('enclosing_if_for_braceless',
      lambda A: [c for k, c in A['enclosing_conditions']('if (a) if (b) x()\n', 15)] == ['a', 'b']),
+    # else 侧必须是**括号化**取反：裸 `!` 在复合条件上重绑定优先级
+    # （`!a == null || true` 恒真 → 死 else 判活；`!x == null && false` 恒假 →
+    #   活 else 判死）。期望值是字面量，不从被测实现推导。
+    ('enclosing_else_compound_parenthesised',
+     lambda A: [c for k, c in A['enclosing_conditions'](
+         'if (a == null || true) {\n  x()\n} else {\n  y()\n}\n',
+         'if (a == null || true) {\n  x()\n} else {\n  y()\n}\n'.index('y()'))]
+     == ['!(a == null || true)']),
+    ('enclosing_else_simple_parenthesised',
+     lambda A: [c for k, c in A['enclosing_conditions'](
+         'if (a == null) {\n  x()\n} else {\n  y()\n}\n',
+         'if (a == null) {\n  x()\n} else {\n  y()\n}\n'.index('y()'))]
+     == ['!(a == null)']),
     ('when_branch_cond',
      lambda A: A['when_branches']('when (v) {\n  false -> 1\n  else -> 2\n}')[0][1] == 'false'),
     ('last_write_second',
