@@ -181,7 +181,7 @@ python3 scripts/scan/memory_ui_wiring_check.py .          → OK (MemoryManageme
 | 项 | 值 |
 |---|---|
 | workflow | `build-apk.yml`（手动 dispatch，分支不触发 push CI） |
-| run | `40254147183` · attempt 1 · **success** |
+| run | **#2701** · run_id `40254147183` · attempt 1 · **success**（先前提交信息里误写 #2699，以本行 run_number 为准） |
 | job | `121352264125`（`build`）· 26 步 · 唯一 skipped = **Publish to Releases**（main 门控），non-success = 0 |
 | head_sha | `2a237ae91828ded4ca37362f4229bd2d9ed7d1e1` 与本地 HEAD 逐字符一致 |
 | 分支 | `fix/b6-sessionprov-memoryui` · 起于 `2026-10-26T01:25:30Z`，`01:47:46Z` 出结论 |
