@@ -7,84 +7,65 @@ single `isSupportedScheme` whitelist before anything lands in `_pendingUrl`.
 
 Bug context (audit-0917 half-fix): `offer(uri: Uri)` published whatever a
 caller handed it — no scheme check — while the `[audit-0917]` comment sitting
-on `offer(uriString: String)` claimed "Same scheme gate as offer(Uri)" and
-described the Uri overload accepting file:// / javascript: payloads. The
-guard described by the comment had been added to neither overload's call
-path as written: the comment described a defect that did not exist on the
-String overload (which always had its own gate) and the Uri overload itself
-stayed bare.
+on `offer(uriString: String)` claimed "Same scheme gate as offer(Uri)". The
+comment described a defect that did not exist on the String overload (which
+always had its own gate) and the Uri overload itself stayed bare.
 
-The fix delegates offer(String) → offer(Uri) so the whitelist is consulted
-exactly once. The gate enforces:
+Criteria
+  U1  the `offer(uri: Uri)` body has a REACHABLE `isSupportedScheme(` call
+      (a bare `_pendingUrl.value = uri` revert, or a gate parked in a dead
+      `if (false) { … }`, is RED);
+  U2a the String overload either delegates to `offer(parsed)` on a reachable
+      path or gates on a scheme derived from `parsed` (a delegation parked in
+      `if (false) offer(parsed)` is RED), and
+  U2b the file has exactly ONE non-null publish point — counted across ALL
+      StateFlow publish spellings (`.value =`, `compareAndSet`, `tryEmit`,
+      `emit`, `update`, `setValue`), not just `.value =`;
+  U3  inside `offer(uri: Uri)` the scheme check precedes the publish;
+  U4  the whitelist is neither weakened nor widened: it lowercases,
+      fail-closes on null, and the string literals in its return value are
+      EXACTLY {http, https, about, minis} (an extra `|| s == "javascript"`
+      arm is RED — subset checks cannot see a widened whitelist);
+  U8  the guard TERMINATES control flow (or wraps the publish) and EVERY
+      publish site is protected by it — `if (!isSupportedScheme(…)) Unit`,
+      an empty block, an inverted arm that publishes, and a second
+      unprotected publish point are all RED;
+  U8b the guard judges the CALLER's Uri: the argument handed to
+      `isSupportedScheme(…)` must derive from the overload's own parameter
+      (directly or through one local hop). A constant (`"http"`, `"minis"`)
+      makes the guard a no-op while leaving every other criterion green.
 
-  U1  the `offer(uri: Uri)` body consults `isSupportedScheme(` (a bare
-      `_pendingUrl.value = uri` revert is RED);
-  U2  single gate: the String overload either still gates on
-      `isSupportedScheme(parsed.scheme)` or delegates via `offer(parsed)`,
-      AND the file contains exactly ONE non-null `_pendingUrl.value =`
-      write point (a second inline copy is the next drift site);
-  U3  ordering: inside the `offer(uri: Uri)` body the scheme check appears
-      BEFORE the `_pendingUrl.value = uri` assignment (an order mutation
-      that publishes first is RED);
-  U4  the whitelist itself is not weakened: `isSupportedScheme` still
-      lowercases, fail-closes on null, and still lists http/https/about/minis.
-
-deep-audit-1027 FIX-G (ISSUE-07, P2) added the consumer half of the same
-contract, which lives in a different file:
-
+Consumer half (deep-audit-1027 FIX-G, ISSUE-07):
   U5  `ui/terminal/TerminalScreen.kt`, inside its `LaunchedEffect(pendingUrl)`
-      block, must call `MinisOpenUrlBroker.consume()` ONLY inside the
-      `if (MinisOpenUrlBroker.isWebScheme(...))` branch. The fullscreen
-      terminal only *presents* web schemes; consuming unconditionally ate
-      `minis://` deep links / local-file previews before they could sit in
-      the broker for the underlying ChatScreen (whose observer deliberately
-      defers while `terminalVisible` is true and re-runs when it flips back
-      to false). Anchors are fail-closed: a missing/ambiguous block is RED.
-      The criterion is skipped when TerminalScreen.kt is absent (mini-tree
-      fixtures that only stage the broker file).
+      block, must call `MinisOpenUrlBroker.consume()` ONLY inside a
+      `if (MinisOpenUrlBroker.isWebScheme(<the pending Uri>))` branch whose
+      condition is neither constantly true nor constantly false, and the
+      branch body must stay MODELLED: only presentation assignments,
+      `consume()`, logging and control flow — no local declarations, and no
+      string/char literal whose content carries `{`, `}`, `"` or `'`
+      (U5d, fail-closed: the gate refuses to vouch for an anchor region whose
+      brace accounting depends on literal content, which is exactly the
+      surface every parser-death witness used to smuggle `consume()` out of
+      the branch).
+  Anchors are fail-closed; U5 is skipped when TerminalScreen.kt is absent.
 
-deep-audit-1032 FIX-D (ISSUE-05, P1) added the two terminal deep-link entries,
-which live in a third and fourth file:
+Terminal deep-link entries (deep-audit-1032 FIX-D, ISSUE-05):
+  U6  `MainActivity.kt` hot deep link and
+  U7  `AppNavigation.kt` cold-start deep link
+      must hand `Routes.terminal(…)` a session id that came out of the alias
+      table (`ChatViewModelStore.resolveSessionId(…)` / `.activeSessionId`,
+      directly or through a local val). The VALUE is what is judged — the
+      argument expression is folded through `value_sources`, so
+      `ChatViewModelStore.activeSessionId.let { null }` (text present, value
+      discarded) and `<id>.also { … }` are RED.
 
-  U6  `MainActivity.kt` — the runtime deep-link dispatcher's
-      `is DeepLinkAction.OpenTerminal ->` branch must hand
-      `Routes.terminal(…)` a session id that came out of the alias table
-      (`ChatViewModelStore.resolveSessionId(…)` / `.activeSessionId`, directly
-      or through a local val). A terminal session is not cosmetic: the id
-      selects `minis-sessions/<sid>/` bind mounts and `MINIS_CHAT_SESSION_ID`,
-      so a bare/absent id binds the terminal to the global workspace (or to the
-      orphan `__new__<uuid>` draft key) while the chat it was opened from lives
-      under the promoted id. The criterion is anchored on the branch and the
-      `Routes.terminal(` call inside it, never on a specific argument spelling:
-      `sessionId = <resolved>` and positional `<resolved>` both count.
-  U7  `AppNavigation.kt` — same rule for the cold-start dispatcher's
-      `is DeepLinkAction.OpenTerminal ->` branch (the same user action's second
-      entry point; asymmetry here was the reported "cold has, hot hasn't" gap —
-      in the tree both were missing). `.activeSessionId` is accepted because its
-      getter already resolves through the alias table.
+Implementation note: every structural read goes through the shared lexer
+(`_kotlin_lexer.analyse`) and the shared AST/value-flow primitives. No local
+comment stripper, brace matcher or constant folding — those are per-gate
+copies of the same three bugs this wave is fixing. A source that fails to lex
+is a violation (fail-closed), never a fallback to raw text.
 
-Both are skipped when their file is absent (mini-tree fixtures).
-
-meta-audit-1024 FIX-M1 (external witness, axis=dataflow) added the *effect*
-half of the U1/U3 pair, which U1+U3 alone could not see:
-
-  U8  the `isSupportedScheme(` guard inside `offer(uri: Uri)` must TERMINATE
-      control flow, not merely be mentioned. Two accepted shapes:
-        (a) negative early exit — an `if (!isSupportedScheme(…))` /
-            `isSupportedScheme(…).not()` / `… == false` arm whose body ends
-            the function (a `return`, a labelled `return@offer`, or a
-            `throw`); negation may also come from a `!` wrapping parentheses.
-        (b) positive wrapping — the `_pendingUrl.value = uri` publish sits
-            inside the body of an `if (isSupportedScheme(…)) { … }`.
-      A negative arm whose consequence is `Unit` / an empty block / any
-      non-terminating statement is RED even though `idx_gate < idx_write`
-      (U3) and `"isSupportedScheme(" in body` (U1) both still hold — that
-      exact patch was externally witnessed keeping this gate green while
-      republishing `file://` / `javascript:` / `content://` Uris.
-      Fail-closed: unparseable braces/parens or a guard with no `if` at all
-      is a violation, never a skip.
-
-Usage: python3 open_url_broker_scheme_check.py [ROOT]   (ROOT = repo root)
+Usage: python3 open_url_broker_scheme_check.py [ROOT] [--root ROOT]
        python3 open_url_broker_scheme_check.py --selftest
 Exit:  0 = gate green, 1 = violations found (or selftest failures).
 """
@@ -92,112 +73,147 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_ast import (const_value, if_blocks, is_pure_literal, match_bracket,
+                         split_top, stmt_spans, strip_parens)
+from _kotlin_lexer import KotlinLexError
+from _kotlin_lexer import analyse as lex_kotlin
+from _kotlin_valueflow import (brace_depth, contains_ident, expr_end,
+                               live_positions, path_feasible, returns_exiting,
+                               value_sources)
+
 BROKER_REL = "src/android/app/src/main/java/com/rikkaminis/app/terminal/MinisOpenUrlBroker.kt"
 TERMINAL_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/terminal/TerminalScreen.kt"
 
 
-def strip_comments(src):
-    """Remove // line comments and /* */ block comments (KDoc included).
-
-    String-literal aware: `//` inside a string (e.g. "file://") must NOT be
-    treated as a comment — the whitelist literals live on code lines and
-    would otherwise be truncated.
-    """
-    out = []
-    in_block = False
-    for line in src.splitlines():
-        res = []
-        i = 0
-        n = len(line)
-        quote = None
-        while i < n:
-            if in_block:
-                j = line.find("*/", i)
-                if j < 0:
-                    i = n
-                else:
-                    in_block = False
-                    i = j + 2
-                continue
-            c = line[i]
-            if quote is not None:
-                res.append(c)
-                if c == "\\" and i + 1 < n:
-                    res.append(line[i + 1])
-                    i += 2
-                    continue
-                if c == quote:
-                    quote = None
-                i += 1
-                continue
-            if line.startswith("//", i):
-                break
-            if line.startswith("/*", i):
-                in_block = True
-                i += 2
-                continue
-            if c in ('"', "'"):
-                quote = c
-            res.append(c)
-            i += 1
-        out.append("".join(res))
-    return "\n".join(out)
+# --------------------------------------------------------------------------
+# 视图 / 结构提取（全部走共享层）
+# --------------------------------------------------------------------------
 
 
-def extract_fun(code, decl_re):
-    """Extract the body (incl. braces) of the function matching decl_re.
+def views(src):
+    """(code, literal) —— 两个等长视图；解析失败抛 KotlinLexError（fail-closed）。"""
+    ok, reason, v = lex_kotlin(src)
+    if not ok:
+        raise KotlinLexError(reason)
+    return v["code"], v["comments"]
 
-    Fail-closed: returns None when the declaration is missing or ambiguous
-    (multiple matches) — the caller reports a violation instead of guessing.
-    Brace matching is string-aware via the comment-stripped code.
-    """
+
+def extract_span(code, decl_re):
+    """函数声明（含体外花括号）的 [start, end)；缺失/歧义 → None（fail-closed）。"""
     m = decl_re.search(code)
     if not m:
         return None
     if decl_re.search(code, m.end()):
         return None  # ambiguous
-    # The declaration regex ends with `{` (the function's opening brace) —
-    # start brace matching AT it, not at the next `{` (which would live
-    # inside the body or a later function and truncate the extract).
     i = m.end() - 1
-    if code[i] != "{":
-        i = code.find("{", m.end())
-        if i < 0:
-            return None
-    depth = 0
-    quote = None
-    n = len(code)
-    while i < n:
-        c = code[i]
-        if quote is not None:
-            if c == "\\":
-                i += 2
-                continue
-            if c == quote:
-                quote = None
-            i += 1
+    if i < 0 or i >= len(code) or code[i] != "{":
+        return None
+    close = match_bracket(code, i)
+    if close < 0:
+        return None
+    return (m.start(), close + 1)
+
+
+def extract_fun(code, decl_re):
+    span = extract_span(code, decl_re)
+    return None if span is None else code[span[0]:span[1]]
+
+
+def param_names(code, decl_re):
+    """声明里的形参名（`fun offer(uri: Uri)` → ['uri']）。"""
+    m = decl_re.search(code)
+    if not m:
+        return []
+    p_open = code.index("(", m.start())
+    p_close = match_bracket(code, p_open)
+    if p_close < 0:
+        return []
+    out = []
+    for a, b in split_top(code[p_open + 1:p_close], (",",)):
+        piece = code[p_open + 1 + a:p_open + 1 + b].split(":")[0].strip()
+        piece = re.sub(r"^(?:vararg|noinline|crossinline)\s+", "", piece).strip()
+        if re.fullmatch(r"[A-Za-z_]\w*", piece):
+            out.append(piece)
+    return out
+
+
+def call_arg(text, open_paren_end):
+    """单个实参切片（`(` 之后的位置 → 配对 `)` 之前）。配平失败返回 ""。"""
+    close = match_bracket(text, open_paren_end - 1)
+    if close < 0:
+        return ""
+    return text[open_paren_end:close].strip()
+
+
+def _local_init(text, ident):
+    """`val <ident> = <rhs>` 的 rhs（一跳局部绑定；找不到 → None）。"""
+    m = re.search(r"(?m)^[ \t]*(?:val|var)\s+%s\s*(?::[^=\n]+)?=(?!=)"
+                  % re.escape(ident), text)
+    if not m:
+        return None
+    return text[m.end():expr_end(text, m.end())]
+
+
+def derives_from(text, arg, roots):
+    """实参是否由 roots 中的某个名字派生（含一跳局部 val）。
+
+    常量实参（`"http"` / `"minis"` / 任何可折叠表达式）一律 False —— 那是
+    「守卫还在、但判的不是调用方给的 Uri」的形态。
+    """
+    a = strip_parens(arg or "")
+    if not a:
+        return False
+    if is_pure_literal(a):
+        return False
+    for src in value_sources(a):
+        if any(contains_ident(src, r) for r in roots):
+            return True
+    for ident in sorted(set(re.findall(r"[A-Za-z_]\w*", a))):
+        if ident in ("true", "false", "null", "it"):
             continue
-        if c in ('"', "'"):
-            quote = c
-        elif c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return code[m.start():i + 1]
-        i += 1
-    return None
+        if ident in roots:
+            return True
+        rhs = _local_init(text, ident)
+        if rhs is None:
+            continue
+        for src in value_sources(rhs):
+            if any(contains_ident(src, r) for r in roots):
+                return True
+    return False
 
 
 RE_OFFER_URI = re.compile(r"\bfun\s+offer\(\s*uri:\s*Uri\s*\)\s*\{")
 RE_OFFER_STR = re.compile(r"\bfun\s+offer\(\s*uriString:\s*String\s*\)\s*\{")
 RE_IS_SUP = re.compile(r"\bfun\s+isSupportedScheme\(\s*scheme:\s*String\?\s*\)\s*:\s*Boolean\s*\{")
-RE_WRITE = re.compile(r"_pendingUrl\.value\s*=\s*(?=\S)(?!null\b)")
+
+GUARD_CALL_RE = re.compile(r"(?<![\w])isSupportedScheme\s*\(")
+# Every StateFlow publish spelling. `.value = null` (consume) is not a publish.
+RE_PUBLISH = re.compile(
+    r"_pendingUrl\s*\.\s*(?:value\s*=\s*(?!null\b)(?=\S)"
+    r"|(?:compareAndSet|tryEmit|emit|update|setValue)\s*\()")
+WHITELIST_SCHEMES = ("http", "https", "about", "minis")
+
+
+def return_literals(code_text, lit_text):
+    """`return` 表达式里出现的字符串/字符字面量集合（值通道读内容）。"""
+    out = set()
+    for m in re.finditer(r"(?<![\w])return\b", code_text):
+        end = expr_end(code_text, m.end())
+        expr = lit_text[m.end():end]
+        out |= set(re.findall(r'"([^"\\]*)"', expr))
+        out |= set(re.findall(r"'([^'\\]*)'", expr))
+    return out
 
 
 def analyse(code_raw):
     """Return [(criterion, ok, detail)]."""
-    code = strip_comments(code_raw)
+    try:
+        code, lit = views(code_raw)
+    except KotlinLexError as exc:
+        return [("U0 Kotlin source is lexable", False,
+                 "lexer failure: %s — fail-closed" % exc)]
     results = []
 
     body_uri = extract_fun(code, RE_OFFER_URI)
@@ -206,68 +222,76 @@ def analyse(code_raw):
                         "declaration missing or ambiguous — fail-closed"))
         return results
 
-    # --- U1: the Uri overload consults the whitelist ---
-    ok1 = "isSupportedScheme(" in body_uri
-    results.append(("U1 offer(uri: Uri) consults isSupportedScheme", ok1,
-                    "scheme gate missing from the Uri overload" if not ok1 else "gate present"))
+    # --- U1: the Uri overload consults the whitelist (reachable) ---
+    guard_pos = live_positions(body_uri, GUARD_CALL_RE)
+    results.append(("U1 offer(uri: Uri) consults isSupportedScheme on a reachable path",
+                    bool(guard_pos),
+                    "no reachable scheme gate in the Uri overload "
+                    "(missing, or parked in a dead branch)"))
 
-    # --- U2: single gate, exactly one non-null publish point ---
+    # --- U2a: the String overload funnels through the same gate ---
     body_str = extract_fun(code, RE_OFFER_STR)
     if body_str is None:
         results.append(("U2a offer(uriString: String) present and unambiguous", False,
                         "declaration missing or ambiguous — fail-closed"))
         return results
-    gated = "isSupportedScheme(parsed.scheme)" in body_str
-    delegates = re.search(r"\boffer\(\s*parsed\s*\)", body_str) is not None
+    gated = any(derives_from(body_str, call_arg(body_str, m.end()), ["parsed"])
+                for m in GUARD_CALL_RE.finditer(body_str)
+                if path_feasible(body_str, m.start()))
+    delegates = bool(live_positions(body_str, re.compile(r"\boffer\(\s*parsed\s*\)")))
     results.append(("U2a offer(String) funnels through the same gate",
                     gated or delegates,
-                    "must gate on isSupportedScheme(parsed.scheme) or delegate to offer(parsed)"))
-    n_writes = len(RE_WRITE.findall(code))
-    results.append(("U2b exactly one non-null _pendingUrl.value write point", n_writes == 1,
-                    "found %d (single shared gate requires exactly 1)" % n_writes))
+                    "must gate on the scheme of `parsed` or delegate to offer(parsed) "
+                    "on a reachable path"))
+
+    # --- U2b: exactly one publish point, whatever the spelling ---
+    n_writes = len(RE_PUBLISH.findall(code))
+    results.append(("U2b exactly one non-null _pendingUrl publish point",
+                    n_writes == 1,
+                    "found %d publish site(s) (.value=/compareAndSet/tryEmit/emit/update); "
+                    "a single shared gate requires exactly 1" % n_writes))
 
     # --- U3: publish must come after the check ---
-    idx_gate = body_uri.find("isSupportedScheme(")
-    m_write = RE_WRITE.search(body_uri)
+    idx_gate = guard_pos[0] if guard_pos else -1
+    m_write = RE_PUBLISH.search(body_uri)
     idx_write = m_write.start() if m_write else -1
     ok3 = idx_gate >= 0 and idx_write >= 0 and idx_gate < idx_write
     results.append(("U3 scheme check precedes the _pendingUrl publish", ok3,
                     "gate idx=%d write idx=%d" % (idx_gate, idx_write)))
 
-    # --- U4: whitelist itself not weakened ---
-    body_sup = extract_fun(code, RE_IS_SUP)
-    if body_sup is None:
+    # --- U4: whitelist neither weakened nor widened ---
+    span_sup = extract_span(code, RE_IS_SUP)
+    if span_sup is None:
         results.append(("U4 isSupportedScheme present and unambiguous", False,
                         "whitelist missing or ambiguous — fail-closed"))
         return results
+    s, e = span_sup
+    body_sup, lit_sup = code[s:e], lit[s:e]
     ok_lower = ".lowercase()" in body_sup
     ok_null = re.search(r"\?\s*:\s*return\s+false", body_sup) is not None
-    ok_list = all(s in body_sup for s in ('"http"', '"https"', '"about"', '"minis"'))
-    ok4 = ok_lower and ok_null and ok_list
-    results.append(("U4 whitelist not weakened (lowercase + null fail-close + 4 schemes)", ok4,
-                    "lowercase=%s null-close=%s schemes=%s" % (ok_lower, ok_null, ok_list)))
+    lits = return_literals(body_sup, lit_sup)
+    ok_list = all(x in lits for x in WHITELIST_SCHEMES)
+    extra = sorted(lits - set(WHITELIST_SCHEMES))
+    ok_exact = not extra
+    results.append(
+        ("U4 whitelist is exactly http/https/about/minis (not weakened, not widened)",
+         ok_lower and ok_null and ok_list and ok_exact,
+         "lowercase=%s null-close=%s required=%s extra=%s"
+         % (ok_lower, ok_null, ok_list, extra or "none")))
 
-    # --- U8: the guard must terminate control flow, not merely be mentioned ---
-    results.extend(analyse_guard_termination(body_uri, RE_WRITE.search(body_uri)))
+    # --- U8 / U8b ---
+    results.extend(analyse_guard_termination(
+        body_uri, [m.start() for m in RE_PUBLISH.finditer(body_uri)],
+        param_names(code, RE_OFFER_URI)))
     return results
 
 
 RE_IF = re.compile(r"\bif\s*\(")
-# A terminator: `return`, a labelled `return@x`, or `throw` — as the head of a
-# statement. Deliberately not a bare `Unit` / assignment / other call.
-RE_TERMINATOR = re.compile(r"\b(?:return(?:@[A-Za-z_][A-Za-z0-9_]*)?|throw)\b")
 # Negation spellings accepted on the guard call: `!…`, `!(…)`, `….not()`,
 # `… == false` (the common Kotlin equivalents; keep the list narrow — the
 # point is to accept real code, not to enumerate every exotic form).
 RE_NOT_SUFFIX = re.compile(r"\.not\s*\(")
 RE_FALSE_SUFFIX = re.compile(r"==\s*false|!=\s*true")
-
-
-def _skip_ws(text, i):
-    n = len(text)
-    while i < n and text[i] in " \t\r\n":
-        i += 1
-    return i
 
 
 def _preceded_by_not(cond, call_start):
@@ -278,234 +302,236 @@ def _preceded_by_not(cond, call_start):
         j -= 1
     if j >= 0 and cond[j] == "!":
         return True
-    close = -1
     op = call_start + len("isSupportedScheme")
     while op < len(cond) and cond[op] in " \t\r\n":
         op += 1
-    if op < len(cond) and cond[op] == "(":
-        close = match_delim(cond, op, "(", ")")
+    if op >= len(cond) or cond[op] != "(":
+        return False
+    close = match_bracket(cond, op)
     if close < 0:
         return False
-    tail = cond[close + 1:]
-    if RE_NOT_SUFFIX.match(tail.lstrip()):
+    tail = cond[close + 1:].lstrip()
+    return bool(RE_NOT_SUFFIX.match(tail) or RE_FALSE_SUFFIX.match(tail))
+
+
+def _arm_terminates(inner):
+    """守卫臂是否真的退出外层函数（`return` / `throw`，且不在嵌套 lambda 里）。"""
+    if returns_exiting(inner, 0, len(inner), 0):
         return True
-    if RE_FALSE_SUFFIX.match(tail.lstrip()):
-        return True
+    for m in re.finditer(r"(?<![\w])throw\b", inner):
+        if brace_depth(inner, m.start()) == 0:
+            return True
     return False
-
-
-def _body_terminates(text):
-    """True when the branch text contains a top-level `return` / `return@x` /
-    `throw` (a guard arm that ends the function). String-aware, depth-aware:
-    a `return` nested inside a lambda of the arm does not count."""
-    depth = 0
-    quote = None
-    i = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if quote is not None:
-            if c == "\\":
-                i += 2
-                continue
-            if c == quote:
-                quote = None
-            i += 1
-            continue
-        if c in ('"', "'"):
-            quote = c
-        elif c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-        elif depth == 0:
-            prev = text[i - 1] if i > 0 else ""
-            if (c == "r" and text.startswith("return", i)
-                    and not (prev.isalnum() or prev == "_")):
-                return True
-            if (c == "t" and text.startswith("throw", i)
-                    and not (prev.isalnum() or prev == "_")):
-                return True
-        i += 1
-    return False
-
-
-def _consequent_span(body, close_idx):
-    """Span (start, end_exclusive) of the `if` consequence after the closing
-    paren at close_idx — a braced block or a single statement. Returns
-    (start, end) or None when there is no consequence (fail-closed at the
-    caller)."""
-    k = _skip_ws(body, close_idx + 1)
-    if k >= len(body):
-        return None
-    if body[k] == "{":
-        e = match_brace(body, k)
-        if e < 0:
-            return None
-        return (k, e + 1)
-    e = k
-    while e < len(body) and body[e] not in "\n;":
-        e += 1
-    return (k, e)
 
 
 def _arm_inner(consequent):
-    """The statements of a guard arm: the braced block's interior, or the bare
-    single-statement arm as-is."""
+    """守卫臂的语句文本：花括号块取内部，裸单语句原样。"""
     text = consequent.strip()
     if text.startswith("{") and text.endswith("}"):
         return text[1:-1]
     return text
 
 
-def analyse_guard_termination(body, m_write):
-    """U8 — the isSupportedScheme guard must terminate control flow.
-
-    Green iff at least one guard `if` exists and it either
-      (a) negates the call and its consequence terminates (`return`/`throw`),
-          with the publish NOT inside that (dead) consequence, or
-      (b) keeps the call positive and the publish sits inside its block.
-    Anything else (Unit / empty block / call not under any `if` / unbalanced
-    braces) is a violation — fail-closed.
-    """
-    label = "U8 isSupportedScheme guard terminates control flow (no Unit/no-op arm)"
-    sites = list(re.finditer(r"isSupportedScheme\s*\(", body))
-    if not sites:
+def analyse_guard_termination(body, publishes, roots):
+    """U8 — the guard must terminate control flow / wrap every publish site.
+    U8b — the guard must judge the caller's Uri, not a constant."""
+    label8 = "U8 isSupportedScheme guard terminates control flow (no Unit/no-op arm)"
+    label8b = "U8b the guard judges the caller's Uri (no constant argument)"
+    if not GUARD_CALL_RE.search(body):
         # No guard call at all: U1 already owns that shape; keep the criterion
         # list stable so fail-closed fixtures cannot double-count it.
         return []
-    idx_write = m_write.start() if m_write else -1
     problems = []
-    protected = False
-    for m in RE_IF.finditer(body):
-        open_idx = m.end() - 1
-        close_idx = match_delim(body, open_idx, "(", ")")
-        if close_idx < 0:
-            problems.append("unbalanced guard condition at offset %d — fail-closed" % open_idx)
+    protected = set()
+    for cond, t_start, t_end, _e_start, _e_end in if_blocks(body):
+        m = GUARD_CALL_RE.search(cond)
+        if not m:
             continue
-        cond = body[open_idx:close_idx + 1]
-        cm = re.search(r"isSupportedScheme\s*\(", cond)
-        if not cm:
-            continue
-        negated = _preceded_by_not(cond, cm.start())
-        span = _consequent_span(body, close_idx)
-        if span is None:
-            problems.append("guard at offset %d has no parsable consequence — fail-closed"
-                            % open_idx)
-            continue
-        bs, be = span
-        consequent = body[bs:be]
+        negated = _preceded_by_not(cond, m.start())
+        inside = [p for p in publishes if t_start <= p < t_end]
         if negated:
-            # The dead arm must end the function; a publish inside it would be
-            # reachable exactly when the scheme is NOT supported.
-            inner = _arm_inner(consequent)
-            terminates = _body_terminates(inner)
-            publish_inside = idx_write >= 0 and bs <= idx_write < be
-            if terminates and not publish_inside:
-                protected = True
-            elif publish_inside:
-                problems.append("negated guard arm (offset %d) PUBLISHES instead of "
-                                "rejecting — inverted guard" % open_idx)
+            if _arm_terminates(_arm_inner(body[t_start:t_end])):
+                protected.update(p for p in publishes if p >= t_end)
+            elif inside:
+                problems.append("negated guard arm PUBLISHES instead of rejecting "
+                                "— inverted guard")
             else:
-                problems.append("negated guard arm (offset %d) does not terminate control "
-                                "flow (Unit/no-op/other statement)" % open_idx)
+                problems.append("negated guard arm does not terminate control flow "
+                                "(Unit/no-op/other statement)")
         else:
-            wraps = idx_write >= 0 and bs <= idx_write < be
-            if wraps:
-                protected = True
+            if inside:
+                protected.update(inside)
             else:
-                problems.append("positive guard arm (offset %d) neither wraps the publish "
-                                "nor terminates — publish reachable without the gate"
-                                % open_idx)
+                problems.append("positive guard arm neither wraps the publish nor "
+                                "terminates — publish reachable without the gate")
+    if publishes and any(p not in protected for p in publishes):
+        problems.append("a publish site is reachable without a terminating guard "
+                        "(unprotected %d of %d)"
+                        % (len([p for p in publishes if p not in protected]),
+                           len(publishes)))
     if not problems and not protected:
-        problems.append("no isSupportedScheme guard terminates control flow or wraps the "
-                        "publish — fail-closed")
-    return [(label, not problems, "; ".join(problems) if problems
-             else "guard arm terminates / wraps the publish")]
+        problems.append("no isSupportedScheme guard terminates control flow or wraps "
+                        "the publish — fail-closed")
+    out = [(label8, not problems, "; ".join(sorted(set(problems))) if problems
+            else "guard arm terminates / wraps the publish")]
+
+    arg_problems = []
+    for m in GUARD_CALL_RE.finditer(body):
+        if not path_feasible(body, m.start()):
+            continue
+        if match_bracket(body, m.end() - 1) < 0:
+            arg_problems.append("unbalanced guard call at offset %d — fail-closed"
+                                % m.start())
+            continue
+        arg = call_arg(body, m.end())
+        if not derives_from(body, arg, roots):
+            arg_problems.append(
+                "guard argument %r is not derived from the caller's Uri (%s) — a "
+                "constant scheme makes the whitelist a no-op while every other "
+                "criterion stays green" % (arg[:60], ", ".join(roots) or "?"))
+    if not arg_problems and not live_positions(body, GUARD_CALL_RE):
+        arg_problems.append("no reachable isSupportedScheme call to inspect "
+                            "— fail-closed")
+    out.append((label8b, not arg_problems,
+                "; ".join(arg_problems) if arg_problems
+                else "guard judges the caller's Uri"))
+    return out
+
 
 # ------------------------------------------------------- TerminalScreen (U5) ---
 RE_LAUNCHED_PENDING = re.compile(r"LaunchedEffect\(\s*pendingUrl\s*\)\s*\{")
-RE_WEB_SCHEME_IF = re.compile(r"if\s*\(\s*MinisOpenUrlBroker\.isWebScheme\(")
-CONSUME_CALL = "MinisOpenUrlBroker.consume()"
+RE_WEB_SCHEME_IF = re.compile(r"if\s*\(\s*MinisOpenUrlBroker\s*\.\s*isWebScheme\s*\(")
+RE_WEB_SCHEME_CALL = re.compile(r"isWebScheme\s*\(")
+CONSUME_CALL = re.compile(r"MinisOpenUrlBroker\s*\.\s*consume\s*\(\s*\)")
+_ASSIGN_STMT = re.compile(r"^[A-Za-z_][\w.]*(?:\s*\[[^\]]*\])?\s*=(?!=)")
+_CTRL_STMT = re.compile(r"^(?:if|when|for|while|do|return|throw|try)\b")
+_UNMODELLED_LITERAL = re.compile(r'(?s)"""(.*?)"""|"((?:[^"\\]|\\.)*)"'
+                                 r"|'((?:[^'\\]|\\.)*)'")
 
-def match_delim(code, open_idx, open_ch, close_ch):
-    """Index of the close_ch matching the open_ch at open_idx (string-aware)."""
-    depth = 0
-    i = open_idx
-    n = len(code)
-    quote = None
-    while i < n:
-        c = code[i]
-        if quote is not None:
-            if c == "\\":
-                i += 2
-                continue
-            if c == quote:
-                quote = None
-            i += 1
-            continue
-        if c in ('"', "'"):
-            quote = c
-        elif c == open_ch:
-            depth += 1
-        elif c == close_ch:
-            depth -= 1
-            if depth == 0:
-                return i
-        i += 1
-    return -1
 
-def match_brace(code, open_idx):
-    """Index of the '}' matching the '{' at open_idx (string-aware), else -1."""
-    return match_delim(code, open_idx, "{", "}")
+def _modelled_statement(stmt):
+    """锚点区间里的语句是否被本门建模（fail-closed：不建模的一律不认）。"""
+    s = stmt.strip()
+    if not s:
+        return True
+    if re.match(r"^(?:val|var)\b", s):
+        return False  # 局部声明：锚点区间是契约（展示 + claim），不是计算场
+    if _ASSIGN_STMT.match(s):
+        return True
+    if CONSUME_CALL.match(s):
+        return True
+    if _CTRL_STMT.match(s):
+        return True
+    if re.match(r"^Log\s*\.", s):
+        return True
+    return False
+
+
+def _hostile_literals(lit_text):
+    """字面量内容里带定界符（`{ } " '`）—— 花括号账目穿过字符串的形态。"""
+    out = []
+    for m in _UNMODELLED_LITERAL.finditer(lit_text):
+        content = next((g for g in m.groups() if g is not None), "")
+        if any(ch in content for ch in '{}"\''):
+            out.append(content[:24])
+    return out
+
 
 def analyse_terminal(code_raw):
     """U5 — the fullscreen terminal may only consume URLs it actually presents."""
-    code = strip_comments(code_raw)
+    try:
+        code, lit = views(code_raw)
+    except KotlinLexError as exc:
+        return [("U5a LaunchedEffect(pendingUrl) block present", False,
+                 "lexer failure: %s — fail-closed" % exc)]
 
     m = RE_LAUNCHED_PENDING.search(code)
     if not m:
         return [("U5a LaunchedEffect(pendingUrl) block present", False,
                  "anchor block missing — fail-closed")]
-    end_idx = match_brace(code, m.end() - 1)
+    open_idx = m.end() - 1
+    end_idx = match_bracket(code, open_idx)
     if end_idx < 0:
         return [("U5a LaunchedEffect(pendingUrl) block present", False,
                  "unbalanced block braces — fail-closed")]
-    block = code[m.end() - 1:end_idx + 1]
+    block = code[open_idx:end_idx + 1]
+    blit = lit[open_idx:end_idx + 1]
     results = [("U5a LaunchedEffect(pendingUrl) block present", True, "block found")]
 
     mi = RE_WEB_SCHEME_IF.search(block)
     if not mi:
-        results.append(("U5b isWebScheme branch inside the block", False,
+        results.append(("U5b isWebScheme branch present and screens the pending Uri",
+                        False,
                         "no `if (MinisOpenUrlBroker.isWebScheme(` anchor — fail-closed"))
         return results
-    oi = block.find("{", mi.end())
-    if oi < 0:
-        results.append(("U5b isWebScheme branch inside the block", False,
-                        "gate without a body — fail-closed"))
+    mi_if = RE_IF.search(block, mi.start())
+    if not mi_if:
+        results.append(("U5b isWebScheme branch present and screens the pending Uri",
+                        False, "gate anchor without an `if (` — fail-closed"))
         return results
-    ei = match_brace(block, oi)
-    if ei < 0:
-        results.append(("U5b isWebScheme branch inside the block", False,
-                        "unbalanced gate braces — fail-closed"))
+    cond_open = mi_if.end() - 1
+    cond_close = match_bracket(block, cond_open)
+    if cond_close < 0:
+        results.append(("U5b isWebScheme branch present and screens the pending Uri",
+                        False, "unbalanced condition parens — fail-closed"))
         return results
-    results.append(("U5b isWebScheme branch inside the block", True, "gate body found"))
-
-    sites = []
-    start = 0
-    while True:
-        j = block.find(CONSUME_CALL, start)
-        if j < 0:
-            break
-        sites.append(j)
-        start = j + 1
-    if not sites:
-        results.append(("U5c consume() only inside the isWebScheme branch", False,
-                        "no consume() call in the LaunchedEffect(pendingUrl) block"))
+    cond_code = block[mi_if.end():cond_close]
+    cond_fold = const_value(cond_code)
+    problems = []
+    if cond_fold == ("bool", True):
+        problems.append("the branch condition is CONSTANTLY TRUE — the branch no "
+                        "longer screens schemes, so non-web deep links are consumed")
+    elif cond_fold == ("bool", False):
+        problems.append("the branch condition is CONSTANTLY FALSE — dead gate")
+    cm = RE_WEB_SCHEME_CALL.search(cond_code)
+    if not cm:
+        problems.append("the condition holds no isWebScheme(…) call — fail-closed")
     else:
-        outside = [j for j in sites if not (oi < j < ei)]
-        results.append(("U5c consume() only inside the isWebScheme branch", not outside,
-                        "consume() sites=%d outside-gate=%d" % (len(sites), len(outside))))
+        arg = call_arg(cond_code, cm.end())
+        locals_ = set(re.findall(r"(?:val|var)\s+([A-Za-z_]\w*)\s*=", block))
+        roots = sorted(locals_ | {"pendingUrl"})
+        if not derives_from(cond_code, arg, roots):
+            problems.append("the branch tests %r, not the pending Uri (%s) — a "
+                            "constant scheme is constantly true"
+                            % (arg[:60], ", ".join(roots)))
+    results.append(("U5b isWebScheme branch present and screens the pending Uri",
+                    not problems, "; ".join(problems) if problems
+                    else "branch condition screens the pending Uri"))
+
+    if cond_close + 1 <= len(block):
+        k = cond_close + 1
+        while k < len(block) and block[k] in " \t\r\n":
+            k += 1
+        body_end = match_bracket(block, k) if (k < len(block) and block[k] == "{") else -1
+    else:
+        k, body_end = -1, -1
+    sites = [mm.start() for mm in CONSUME_CALL.finditer(block)]
+    if body_end < 0:
+        results.append(("U5c consume() only inside the isWebScheme branch", False,
+                        "gate body not parsable — fail-closed"))
+        return results
+    outside = [j for j in sites if not (k < j < body_end)]
+    results.append(("U5c consume() only inside the isWebScheme branch",
+                    bool(sites) and not outside,
+                    "no consume() call in the LaunchedEffect(pendingUrl) block"
+                    if not sites else
+                    "consume() sites=%d outside-gate=%d" % (len(sites), len(outside))))
+
+    inner_code = block[k + 1:body_end]
+    inner_lit = blit[k + 1:body_end]
+    stmts = [inner_code[a:b] for a, b in stmt_spans(inner_code)]
+    unmodelled = [s.strip()[:48] for s in stmts if not _modelled_statement(s)]
+    hostile = _hostile_literals(inner_lit)
+    detail = []
+    if unmodelled:
+        detail.append("unmodelled statement(s) in the anchor region: %s"
+                      % unmodelled[:3])
+    if hostile:
+        detail.append("literal content carries delimiters (%s) — the region's brace "
+                      "accounting would depend on lexer luck" % hostile[:3])
+    results.append(("U5d the consume anchor region stays modelled and unambiguous",
+                    not detail, "; ".join(detail) if detail
+                    else "region modelled"))
     return results
 
 
@@ -523,51 +549,32 @@ RE_OPEN_TERMINAL_BRANCH = re.compile(r"is\s+DeepLinkAction\.OpenTerminal\s*->\s*
 RE_RESOLVED_EXPR = re.compile(
     r"ChatViewModelStore\s*\.\s*resolveSessionId\s*\(|ChatViewModelStore\s*\.\s*activeSessionId"
 )
-RE_VAL_BIND = re.compile(r"^\s*(?:val|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=")
-# Continuation heuristics for a multi-line binding (`val id = a\n    ?.let { … }`).
-# Same rule as the 1031-C extractor: keep reading while the previous line ends
-# with an operator or the next line starts with one.
-_CONT_SUFFIX = ("=", "?.", ".", ",", "&&", "||", "?:", "+")
-_CONT_PREFIX = ("?.", ".", "?:", "&&", "||", "->", "+")
+RE_VAL_BIND = re.compile(r"(?m)^[ \t]*(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)")
 
 
-def _binding_statement(lines, i):
-    """`lines[i]` plus its continuation lines, joined (comment-free input)."""
-    out = [lines[i]]
-    while i + 1 < len(lines):
-        cur = out[-1].rstrip()
-        nxt = lines[i + 1].strip()
-        if not nxt:
-            break
-        if cur.endswith(_CONT_SUFFIX) or nxt.startswith(_CONT_PREFIX):
-            out.append(nxt)
-            i += 1
-            continue
-        break
-    return " ".join(out)
+def resolved_local_names(branch_code):
+    """Local vals whose VALUE (not whose text) came out of the alias table.
 
-
-def resolved_local_names(branch):
-    """Local vals bound from a resolved-session expression inside `branch`."""
+    `value_sources` peels `.also { … }` (value discarded) and folds
+    `?.let { … }` to the lambda's tail, so `<x>.also { resolve(it) }` no longer
+    counts as resolved while `x?.let { resolve(it) }` still does.
+    """
     names = set()
-    lines = branch.splitlines()
-    for i, line in enumerate(lines):
-        m = RE_VAL_BIND.match(line)
-        if not m:
-            continue
-        if RE_RESOLVED_EXPR.search(_binding_statement(lines, i)):
+    for m in RE_VAL_BIND.finditer(branch_code):
+        end = expr_end(branch_code, m.end())
+        rhs = branch_code[m.end():end]
+        if any(RE_RESOLVED_EXPR.search(src) for src in value_sources(rhs)):
             names.add(m.group(1))
     return names
 
 
 def analyse_terminal_deeplink(code_raw, label):
-    """U6/U7 — a terminal deep-link arm must pass a RESOLVED session id.
-
-    Bound to the decision point (which value the terminal route receives), not
-    to one argument spelling: the resolved id may be passed by name
-    (`sessionId = <id>`) or positionally, and may be a local val.
-    """
-    code = strip_comments(code_raw)
+    """U6/U7 — a terminal deep-link arm must pass a RESOLVED session id."""
+    try:
+        code, lit = views(code_raw)
+    except KotlinLexError as exc:
+        return [("%sa OpenTerminal branch present" % label, False,
+                 "lexer failure: %s — fail-closed" % exc)]
     matches = list(RE_OPEN_TERMINAL_BRANCH.finditer(code))
     if len(matches) > 1:
         return [("%sa OpenTerminal branch present" % label, False,
@@ -576,11 +583,12 @@ def analyse_terminal_deeplink(code_raw, label):
         return [("%sa OpenTerminal branch present" % label, False,
                  "`is DeepLinkAction.OpenTerminal ->` not found — fail-closed")]
     m = matches[0]
-    end = match_brace(code, m.end() - 1)
+    end = match_bracket(code, m.end() - 1)
     if end < 0:
         return [("%sa OpenTerminal branch present" % label, False,
                  "unbalanced branch braces — fail-closed")]
     branch = code[m.end() - 1:end + 1]
+    blit = lit[m.end() - 1:end + 1]
     results = [("%sa OpenTerminal branch present" % label, True, "branch found")]
 
     idx = branch.find(RE_TERMINAL_CALL)
@@ -589,31 +597,33 @@ def analyse_terminal_deeplink(code_raw, label):
                         "no `Routes.terminal(` call inside the branch"))
         return results
     open_idx = idx + len(RE_TERMINAL_CALL) - 1
-    close_idx = match_delim(branch, open_idx, "(", ")")
+    close_idx = match_bracket(branch, open_idx)
     if close_idx < 0:
         results.append(("%sb branch navigates to the terminal route" % label, False,
                         "unbalanced `Routes.terminal(` call — fail-closed"))
         return results
-    args = branch[open_idx:close_idx + 1]
+    args = branch[open_idx + 1:close_idx]
     results.append(("%sb branch navigates to the terminal route" % label, True, "call found"))
 
     names = resolved_local_names(branch)
-    via_call = RE_RESOLVED_EXPR.search(args) is not None
-    via_name = False
-    if names:
-        via_name = re.search(r"\b(?:%s)\b" % "|".join(re.escape(n) for n in sorted(names)), args) is not None
-    ok = via_call or via_name
+    hit = None
+    for a, b in split_top(args, (",",)):
+        piece = args[a:b]
+        nm = re.match(r"\s*([A-Za-z_]\w*)\s*=(?!=)", piece)
+        value = piece[nm.end():] if nm else piece
+        if any(RE_RESOLVED_EXPR.search(src) for src in value_sources(value)):
+            hit = "resolve call"
+            break
+        if any(contains_ident(value, n) for n in names):
+            hit = "local %s" % sorted(n for n in names if contains_ident(value, n))[0]
+            break
     results.append((
-        "%sc terminal sessionId comes from a resolved source" % label, ok,
-        "`Routes.terminal(...)` args carry neither a ChatViewModelStore resolve call "
-        "(alias hop / activeSessionId) nor a local val bound from one — a bare or "
-        "absent id binds the terminal to the draft key / global workspace. args=%r"
-        % args.strip()[:160]
-    ))
+        "%sc terminal sessionId comes from a resolved source" % label, bool(hit),
+        ("`Routes.terminal(...)` args carry neither a ChatViewModelStore resolve call "
+         "(alias hop / activeSessionId) whose VALUE survives, nor a local val bound "
+         "from one — a bare, absent or discarded id binds the terminal to the draft "
+         "key / global workspace. args=%r" % args.strip()[:160])))
     return results
-
-
-
 GOOD = """package probe
 class B {
     private val _pendingUrl = MutableStateFlow<Uri?>(null)
@@ -994,21 +1004,96 @@ fun AppNavigation(initialDeepLink: DeepLinkAction) {
 }
 """
 
+
+# ---- meta-audit 1024-B 02-1..02-7 witness arms -------------------------------
+# Each fixture keeps every token the OLD criteria looked for. Only the EFFECT
+# moves: a constant argument, a dead delegation, a widened whitelist, a
+# constant-true branch, a discarded resolve, a delimiter-carrying literal.
+BAD_GUARD_CONST_ARG = GOOD.replace(
+    "        if (!isSupportedScheme(uri.scheme)) return",
+    '        if (!isSupportedScheme("http")) return')
+
+BAD_WHITELIST_WIDENED = GOOD.replace(
+    '        return s == "http" || s == "https" || s == "about" || s == "minis"',
+    '        return s == "http" || s == "https" || s == "about" || s == "minis"'
+    ' || s == "javascript" || s == "file"')
+
+# Precision: a one-hop local scheme must stay green (the check is about the
+# VALUE's origin, not about spelling the parameter at the call site).
+GOOD_GUARD_LOCAL_SCHEME = GOOD.replace(
+    "        if (!isSupportedScheme(uri.scheme)) return",
+    "        val scheme = uri.scheme\n"
+    "        if (!isSupportedScheme(scheme)) return")
+
+# The delegation is parked in a dead branch and the publish moved to a second
+# spelling (`compareAndSet`) — U2a + U2b must both speak.
+BAD_DEAD_DELEGATE = GOOD.replace(
+    "        offer(parsed)\n",
+    "        if (false) offer(parsed)\n"
+    "        _pendingUrl.compareAndSet(_pendingUrl.value, parsed)\n")
+
+BAD_TERMINAL_CONST_COND = GOOD_TERMINAL.replace(
+    "MinisOpenUrlBroker.isWebScheme(uri.scheme)",
+    'MinisOpenUrlBroker.isWebScheme("http") || true')
+
+# A raw string whose content carries a brace: every predecessor lexer shifted
+# its brace accounting here (parser-death). U5d refuses to certify the region.
+BAD_TERMINAL_RAW_STRING = GOOD_TERMINAL.replace(
+    "            previewUrl = uri.toString()\n",
+    '            val raw = """\\"}"""\n            previewUrl = uri.toString()\n')
+
+# Precision: a log line inside the anchor region is allowed.
+GOOD_TERMINAL_LOG = GOOD_TERMINAL.replace(
+    "            previewUrl = uri.toString()\n",
+    '            Log.d(TAG, "terminal presenting a web uri")\n'
+    "            previewUrl = uri.toString()\n")
+
+# `.also { }` discards the receiver: the resolve call runs, its value is thrown
+# away, and the draft id is what actually gets bound.
+BAD_ACTIVITY_ALSO = GOOD_ACTIVITY_TERMINAL.replace(
+    "                val terminalSessionId = currentChatSessionId\n"
+    "                    ?.let { ChatViewModelStore.resolveSessionId(it) }",
+    "                val terminalSessionId = currentChatSessionId\n"
+    '                    .also { ChatViewModelStore.resolveSessionId(it ?: "") }')
+
+BAD_NAV_LET_NULL = GOOD_NAV_TERMINAL.replace(
+    "                    sessionId = ChatViewModelStore.activeSessionId,",
+    "                    sessionId = ChatViewModelStore.activeSessionId.let { null },")
+
+
 def selftest():
     failures = []
+    arms = [0]
 
     def expect(cond, what):
+        arms[0] += 1
         if not cond:
             failures.append(what)
 
     def as_dict(res):
         return dict((c, ok) for c, ok, _ in res)
 
+    U1 = "U1 offer(uri: Uri) consults isSupportedScheme on a reachable path"
+    U2A = "U2a offer(String) funnels through the same gate"
+    U2B = "U2b exactly one non-null _pendingUrl publish point"
+    U3 = "U3 scheme check precedes the _pendingUrl publish"
+    U4 = "U4 whitelist is exactly http/https/about/minis (not weakened, not widened)"
+    U8 = "U8 isSupportedScheme guard terminates control flow (no Unit/no-op arm)"
+    U8B = "U8b the guard judges the caller's Uri (no constant argument)"
+    ALL_A = (U1, U2A, U2B, U3, U4, U8, U8B)
+
+    U5A = "U5a LaunchedEffect(pendingUrl) block present"
+    U5B = "U5b isWebScheme branch present and screens the pending Uri"
+    U5C = "U5c consume() only inside the isWebScheme branch"
+    U5D = "U5d the consume anchor region stays modelled and unambiguous"
+    ALL_T = (U5A, U5B, U5C, U5D)
+
     # good fixture: everything green
     good = as_dict(analyse(GOOD))
-    expect(len(good) == 6, "good fixture should produce 6 criteria, got %d" % len(good))
-    for c, ok in good.items():
-        expect(ok, "good fixture must pass %s" % c)
+    expect(len(good) == len(ALL_A),
+           "good fixture should produce %d criteria, got %d" % (len(ALL_A), len(good)))
+    for c in ALL_A:
+        expect(good.get(c), "good fixture must pass %s" % c)
 
     # bad1: gate removed from offer(Uri) (the original bug) — U1+U3 red, rest OK
     d = as_dict(analyse(BAD_NO_GATE))
@@ -1018,92 +1103,112 @@ def selftest():
         else:
             expect(ok, "BAD_NO_GATE %s must stay OK" % c)
 
-    # bad2: publish before the check (order mutation) — U3 red, U1/U2 stay OK
+    # bad2: publish before the check (order mutation) — U3 red, U1/U2b stay OK
     d = as_dict(analyse(BAD_ORDER))
-    expect(not d["U3 scheme check precedes the _pendingUrl publish"],
-           "BAD_ORDER U3 must be RED")
-    expect(d["U1 offer(uri: Uri) consults isSupportedScheme"],
-           "BAD_ORDER U1 must stay OK (gate text still present)")
-    expect(d["U2b exactly one non-null _pendingUrl.value write point"],
-           "BAD_ORDER U2b must stay OK")
+    expect(not d[U3], "BAD_ORDER U3 must be RED")
+    expect(d[U1], "BAD_ORDER U1 must stay OK (gate still reachable)")
+    expect(d[U2B], "BAD_ORDER U2b must stay OK")
 
     # bad3: second inline gate + second publish point — U2b red (drift catcher)
     d = as_dict(analyse(BAD_SECOND_GATE))
-    expect(not d["U2b exactly one non-null _pendingUrl.value write point"],
-           "BAD_SECOND_GATE U2b must be RED (two publish points)")
+    expect(not d[U2B], "BAD_SECOND_GATE U2b must be RED (two publish points)")
 
     # fail-closed: missing file / garbage input must NOT read as green
     d = as_dict(analyse("class B { }"))
-    expect(len(d) == 1 and not d["U1 offer(uri: Uri) present and unambiguous"],
+    expect(len(d) == 1 and not list(d.values())[0]
+           and list(d)[0].startswith("U1"),
            "garbage input must fail-closed on U1")
 
-    # ---- U8 (guard must TERMINATE control flow) — the external witness ----
-    U8 = "U8 isSupportedScheme guard terminates control flow (no Unit/no-op arm)"
-
+    # ---- U8 (guard must TERMINATE control flow) ----
     d = as_dict(analyse(BAD_GUARD_UNIT))
     expect(not d[U8], "BAD_GUARD_UNIT U8 must be RED (return mutated to Unit: the "
                       "guard is a no-op, every scheme reaches _pendingUrl)")
-    # ...and the OLD criteria must stay green — that is precisely why the old
-    # gate was blind to this patch.
-    for c, ok in d.items():
+    for c in ALL_A:
         if c == U8:
             continue
-        expect(ok, "BAD_GUARD_UNIT %s must stay OK (old criteria cannot see it)" % c)
+        expect(d[c], "BAD_GUARD_UNIT %s must stay OK (old criteria cannot see it)" % c)
 
     d = as_dict(analyse(BAD_GUARD_EMPTY_BLOCK))
     expect(not d[U8], "BAD_GUARD_EMPTY_BLOCK U8 must be RED (empty guard arm)")
-    expect(d["U3 scheme check precedes the _pendingUrl publish"],
-           "BAD_GUARD_EMPTY_BLOCK U3 must stay OK (order is unchanged)")
+    expect(d[U3], "BAD_GUARD_EMPTY_BLOCK U3 must stay OK (order is unchanged)")
 
     d = as_dict(analyse(BAD_GUARD_INVERTED))
     expect(not d[U8], "BAD_GUARD_INVERTED U8 must be RED (rejected arm publishes)")
 
-    g = as_dict(analyse(GOOD_GUARD_BLOCK_MULTI))
-    expect(len(g) == 6 and all(g.values()),
-           "GOOD_GUARD_BLOCK_MULTI must be fully green (log + return arm): %s"
-           % [c for c, ok in g.items() if not ok])
+    for name, fixture in (("GOOD_GUARD_BLOCK_MULTI", GOOD_GUARD_BLOCK_MULTI),
+                          ("GOOD_GUARD_THROW", GOOD_GUARD_THROW),
+                          ("GOOD_GUARD_POSITIVE_WRAP", GOOD_GUARD_POSITIVE_WRAP),
+                          ("GOOD_GUARD_NOT_CALL", GOOD_GUARD_NOT_CALL),
+                          ("GOOD_GUARD_LOCAL_SCHEME", GOOD_GUARD_LOCAL_SCHEME)):
+        g = as_dict(analyse(fixture))
+        expect(len(g) == len(ALL_A) and all(g.values()),
+               "%s must be fully green: %s" % (name, [c for c, ok in g.items() if not ok]))
 
-    g = as_dict(analyse(GOOD_GUARD_THROW))
-    expect(len(g) == 6 and all(g.values()),
-           "GOOD_GUARD_THROW must be fully green (throw arm): %s"
-           % [c for c, ok in g.items() if not ok])
+    # ---- U8b (guard must judge the caller's Uri, not a constant) ----
+    d = as_dict(analyse(BAD_GUARD_CONST_ARG))
+    expect(not d[U8B], "BAD_GUARD_CONST_ARG U8b must be RED (guard argument is the "
+                       "constant \"http\": the whitelist is never consulted)")
+    for c in ALL_A:
+        if c == U8B:
+            continue
+        expect(d[c], "BAD_GUARD_CONST_ARG %s must stay OK (this is the blind shape)" % c)
 
-    g = as_dict(analyse(GOOD_GUARD_POSITIVE_WRAP))
-    expect(len(g) == 6 and all(g.values()),
-           "GOOD_GUARD_POSITIVE_WRAP must be fully green (publish inside the gate): %s"
-           % [c for c, ok in g.items() if not ok])
+    # ---- U4 completeness (whitelist widened, not weakened) ----
+    d = as_dict(analyse(BAD_WHITELIST_WIDENED))
+    expect(not d[U4], "BAD_WHITELIST_WIDENED U4 must be RED (javascript/file smuggled "
+                      "into the accepted set)")
+    for c in ALL_A:
+        if c == U4:
+            continue
+        expect(d[c], "BAD_WHITELIST_WIDENED %s must stay OK" % c)
 
-    g = as_dict(analyse(GOOD_GUARD_NOT_CALL))
-    expect(len(g) == 6 and all(g.values()),
-           "GOOD_GUARD_NOT_CALL must be fully green (.not() negation): %s"
-           % [c for c, ok in g.items() if not ok])
+    # ---- U2a/U2b (dead delegation + alternate publish spelling) ----
+    d = as_dict(analyse(BAD_DEAD_DELEGATE))
+    expect(not d[U2A], "BAD_DEAD_DELEGATE U2a must be RED (delegation parked in a dead "
+                       "if (false) branch)")
+    expect(not d[U2B], "BAD_DEAD_DELEGATE U2b must be RED (compareAndSet is a publish "
+                       "spelling the old counter ignored)")
 
     # ---- U5 (TerminalScreen consumer placement) ----
     tgood = as_dict(analyse_terminal(GOOD_TERMINAL))
-    expect(len(tgood) == 3, "U5 good fixture should produce 3 criteria, got %d" % len(tgood))
-    for c, ok in tgood.items():
-        expect(ok, "U5 good fixture must pass %s" % c)
+    expect(len(tgood) == len(ALL_T),
+           "U5 good fixture should produce %d criteria, got %d" % (len(ALL_T), len(tgood)))
+    for c in ALL_T:
+        expect(tgood.get(c), "U5 good fixture must pass %s" % c)
 
     d = as_dict(analyse_terminal(BAD_TERMINAL_OUTSIDE))
-    expect(not d["U5c consume() only inside the isWebScheme branch"],
-           "BAD_TERMINAL_OUTSIDE U5c must be RED (consume outside the gate)")
-    expect(d["U5a LaunchedEffect(pendingUrl) block present"],
-           "BAD_TERMINAL_OUTSIDE U5a must stay OK")
-    expect(d["U5b isWebScheme branch inside the block"],
-           "BAD_TERMINAL_OUTSIDE U5b must stay OK")
+    expect(not d[U5C], "BAD_TERMINAL_OUTSIDE U5c must be RED (consume outside the gate)")
+    expect(d[U5A], "BAD_TERMINAL_OUTSIDE U5a must stay OK")
+    expect(d[U5B], "BAD_TERMINAL_OUTSIDE U5b must stay OK")
 
     d = as_dict(analyse_terminal(BAD_TERMINAL_NO_CONSUME))
-    expect(not d["U5c consume() only inside the isWebScheme branch"],
-           "BAD_TERMINAL_NO_CONSUME U5c must be RED (nothing consumes)")
+    expect(not d[U5C], "BAD_TERMINAL_NO_CONSUME U5c must be RED (nothing consumes)")
 
     d = as_dict(analyse_terminal(BAD_TERMINAL_NO_ANCHOR))
-    expect(len(d) == 1 and not d["U5a LaunchedEffect(pendingUrl) block present"],
+    expect(len(d) == 1 and not list(d.values())[0] and list(d)[0].startswith("U5a"),
            "BAD_TERMINAL_NO_ANCHOR must fail-closed on U5a")
 
     # KDoc quoting the anchor must not satisfy the criterion (comments stripped)
     d = as_dict(analyse_terminal(GOOD_TERMINAL_COMMENT_ONLY))
-    expect(not d["U5a LaunchedEffect(pendingUrl) block present"],
-           "comment-only anchor must NOT read as green (comments must be stripped)")
+    expect(len(d) == 1 and not list(d.values())[0] and list(d)[0].startswith("U5a"),
+           "comment-only anchor must NOT read as green (comments masked)")
+
+    # U5b: constant-true condition (anchor shape intact, screening gone)
+    d = as_dict(analyse_terminal(BAD_TERMINAL_CONST_COND))
+    expect(not d[U5B], "BAD_TERMINAL_CONST_COND U5b must be RED (constant-true branch: "
+                       "non-web deep links get consumed)")
+    expect(d[U5C], "BAD_TERMINAL_CONST_COND U5c must stay OK (placement unchanged)")
+
+    # U5d: raw string with a brace inside the anchor region
+    d = as_dict(analyse_terminal(BAD_TERMINAL_RAW_STRING))
+    expect(not d[U5D], "BAD_TERMINAL_RAW_STRING U5d must be RED (literal content carries "
+                       "a brace; the region is not modelled)")
+    expect(d[U5C], "BAD_TERMINAL_RAW_STRING U5c must stay OK (consume placement intact)")
+
+    d = as_dict(analyse_terminal(GOOD_TERMINAL_LOG))
+    expect(len(d) == len(ALL_T) and all(d.values()),
+           "GOOD_TERMINAL_LOG must be fully green (a log line is modelled): %s"
+           % [c for c, ok in d.items() if not ok])
 
     # ---- U6/U7 (terminal deep-link arm carries a resolved session id) ----
     a = as_dict(analyse_terminal_deeplink(GOOD_ACTIVITY_TERMINAL, "U6"))
@@ -1113,7 +1218,7 @@ def selftest():
 
     # precision: positional + local val + an unrelated terminal call elsewhere
     a = as_dict(analyse_terminal_deeplink(GOOD_ACTIVITY_TERMINAL_OTHER_FORM, "U6"))
-    expect(len(a) == 3, "U6 precision fixture should produce 3 criteria, got %d" % len(a))
+    expect(len(a) == 3, "U6 precision fixture produced %d criteria" % len(a))
     for c, ok in a.items():
         expect(ok, "U6 precision fixture must pass %s (call form must not matter)" % c)
 
@@ -1130,6 +1235,12 @@ def selftest():
     expect(not a["U6c terminal sessionId comes from a resolved source"],
            "BAD_ACTIVITY_TERMINAL_UNUSED_RESOLVE U6c must be RED (resolve call is not the "
            "value handed to Routes.terminal)")
+
+    # `.also { resolve(…) }` runs the resolve and throws the value away
+    a = as_dict(analyse_terminal_deeplink(BAD_ACTIVITY_ALSO, "U6"))
+    expect(not a["U6c terminal sessionId comes from a resolved source"],
+           "BAD_ACTIVITY_ALSO U6c must be RED (.also discards the resolved value; the "
+           "draft id is what gets bound)")
 
     # two OpenTerminal arms = ambiguous → fail-closed on U6a
     a = as_dict(analyse_terminal_deeplink(BAD_ACTIVITY_TERMINAL_AMBIGUOUS, "U6"))
@@ -1150,20 +1261,31 @@ def selftest():
     for c, ok in a.items():
         expect(ok, "U7 good fixture must pass %s" % c)
 
+    # `.let { null }` keeps the token, discards the value
+    a = as_dict(analyse_terminal_deeplink(BAD_NAV_LET_NULL, "U7"))
+    expect(not a["U7c terminal sessionId comes from a resolved source"],
+           "BAD_NAV_LET_NULL U7c must be RED (activeSessionId.let { null } discards the "
+           "resolved value)")
+
     if failures:
         print("OPEN_URL_BROKER_SCHEME_SELFTEST=FAIL")
         for f in failures:
             print("  selftest: %s" % f)
         return 1
-    print("OPEN_URL_BROKER_SCHEME_SELFTEST=PASS")
+    print("OPEN_URL_BROKER_SCHEME_SELFTEST=PASS (%d arms)" % arms[0])
     return 0
 
 
+def _root(argv):
+    args = [a for a in argv if a != "--root"]
+    return args[0] if args else "."
+
+
 def main():
-    argv = [a for a in sys.argv[1:]]
+    argv = list(sys.argv[1:])
     if "--selftest" in argv:
         sys.exit(selftest())
-    root = argv[0] if argv else "."
+    root = _root(argv)
     path = os.path.join(root, BROKER_REL)
     if not os.path.isfile(path):
         print("gate: broker file missing: %s" % path)

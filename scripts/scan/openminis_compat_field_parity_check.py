@@ -19,9 +19,14 @@ Arms
      feeding a write-when-true — is forbidden. A default-false read is correct
      for useResponsesAPI (whose import default IS false) and was copy-pasted onto
      this opposite-polarity field, inverting explicit `false` into `true` (every
-     request then gained a spurious /v1 suffix).
-  2  provider/model key parity: every key exportInstanceJSON writes must appear in
-     convertProviders (exemptions listed with reasons below).
+     request then gained a spurious /v1 suffix). The write must also be
+     REACHABLE (a guard short-circuited by a constant writes nothing) and must
+     not be guarded by the field's own value.
+  2  provider/model key parity: every key exportInstanceJSON writes must appear
+     in convertProviders (exemptions listed with reasons below), and every
+     run-config constant the repository defines must still be WRITTEN by
+     writeRunConfigFields (a dead/`if (false)` write drops the key silently —
+     the exporter keeps defining it, so key-set parity alone cannot see it).
   3  chat-session key parity: every key ConfigBackup's session export block writes
      must appear in convertChats (exemptions listed with reasons below).
   4  [deep-audit-1039 A-07] model-group key parity: every key ConfigBackup's
@@ -31,6 +36,28 @@ Arms
      (readGroupRunConfig / applyGroupRunConfig, [fix/dv18-4 A-07]) with no
      export-side guard: a group key dropped from buildSections would silently
      stop reaching the importer that now knows how to read it.
+
+What counts as a WRITE (deep-audit-1024 B 12-1..12-6)
+  A `put("<key>", …)` call is only a write when it can actually carry the value:
+    * it sits on a REACHABLE path (`path_feasible`; `if (false && has(k))` hides
+      it from every literal-presence criterion);
+    * its receiver is a NAMED object (`obj.put`), not a throwaway
+      (`JSONObject().put(…)` writes into garbage);
+    * its value is not a bare constant — unless the guarding condition READS the
+      key's value with a default (`if (optBoolean("k", false)) put("k", true)`),
+      which is a legitimate polarity write. `!true`, `1 == 2` and friends fold to
+      a constant, so the old literal whitelist cannot smuggle one past;
+    * it is not gated by a predicate that can never hold for the field's domain
+      (`takeIf { it < 0 }` on a timestamp drops every real value — the integer
+      domain is modelled as non-negative);
+    * the same function does not `remove("<key>")` afterwards.
+
+Implementation note (fail-closed): all structural reads go through the shared
+lexer (`_kotlin_lexer.analyse`, so nested block comments / raw strings /
+char literals are masked by the one implementation that has tests) plus the
+shared AST/value-flow primitives. Key literals are read from the literal view
+and positions are shared with the code view, which is why a commented-out write
+(`/* obj.put("azureMode", …) */`) now disappears instead of counting.
 
 Usage:
     python3 scripts/scan/openminis_compat_field_parity_check.py <repo_root>
@@ -43,6 +70,13 @@ import os
 import re
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_ast import const_value, match_bracket, strip_parens
+from _kotlin_lexer import KotlinLexError
+from _kotlin_lexer import analyse as lex_kotlin
+from _kotlin_valueflow import expr_end, guard_feasible, path_feasible
 
 APP = "src/android/app/src/main/java/com/rikkaminis/app"
 BM_REL = APP + "/backup/OpenMinisBackupCompat.kt"
@@ -80,48 +114,51 @@ PROVIDER_EXEMPT = {
 SESSION_EXEMPT = {}
 GROUP_EXEMPT = {}
 
-PUT_KEY = re.compile(r'put\("(\w+)"')
+PUT_KEY = re.compile(r'put\(\s*"(\w+)"')
+# 非负整数域：时间戳 / 计数 / token 上限都落在这里，用来判「谓词是否把整段域排除」。
+POSITIVE_DOMAIN = {"it": (1, None)}
+# 链式谓词与写入之间只允许出现链式语法（`?.let { ` / `.filter { … }?.` …）。
+_CHAIN_GAP = re.compile(r"^[\s?.,{}()]*(?:[A-Za-z_]\w*[\s?.,{}()]*)*$")
 
 
-def code_only(text):
-    """Text with line comments (//…) removed — key presence must not be
-    satisfiable from prose."""
-    return "\n".join(line.split("//")[0] for line in text.split("\n"))
+def views(src):
+    """(code, literal) —— 两个等长视图；解析失败抛 KotlinLexError（fail-closed）。"""
+    ok, reason, v = lex_kotlin(src)
+    if not ok:
+        raise KotlinLexError(reason)
+    return v["code"], v["comments"]
 
 
-def _balanced(src, open_idx, opener="{", closer="}"):
-    depth = 0
-    for i in range(open_idx, len(src)):
-        if src[i] == opener:
-            depth += 1
-        elif src[i] == closer:
-            depth -= 1
-            if depth == 0:
-                return i + 1
-    return -1
-
-
-def function_text(src, header):
-    i = src.find(header)
+def function_slice(code, lit, header):
+    """`[header … ]` 所在函数（含体外花括号）的两个视图切片；缺失 → None。"""
+    i = code.find(header)
     if i < 0:
         return None
-    brace = src.find("{", i)
+    open_paren = i + len(header) - 1
+    close_paren = match_bracket(code, open_paren)
+    if close_paren < 0:
+        return None
+    brace = code.find("{", close_paren)
     if brace < 0:
         return None
-    end = _balanced(src, brace)
-    return None if end < 0 else src[i:end]
+    end = match_bracket(code, brace)
+    if end < 0:
+        return None
+    return code[i:end + 1], lit[i:end + 1]
 
 
-def block_text(src, anchor):
-    """Text of the enclosing brace block opened right after [anchor]."""
-    i = src.find(anchor)
+def block_slice(code, lit, anchor):
+    """[anchor] 之后紧跟的花括号块（含 anchor 前缀）的两个视图切片。"""
+    i = code.find(anchor)
     if i < 0:
         return None
-    brace = src.find("{", i)
+    brace = code.find("{", i)
     if brace < 0:
         return None
-    end = _balanced(src, brace)
-    return None if end < 0 else src[i:end]
+    end = match_bracket(code, brace)
+    if end < 0:
+        return None
+    return code[i:end + 1], lit[i:end + 1]
 
 
 def read(rel, root):
@@ -132,68 +169,37 @@ def read(rel, root):
         return f.read()
 
 
-def write_values(body, key):
-    """The value expression of every `put("<key>", <expr>)` call in body.
-
-    [wide-1024 12-misc-b] The old parity test was "does the literal appear
-    anywhere in the converter body". Reading the source key (`inst.optString(
-    "customUserAgent", "")`) keeps that literal present while writing NOTHING,
-    so the whole field evaporated and the gate stayed green. A write is a call,
-    so the criterion now reads the call and its argument.
-    """
-    out = []
-    for m in re.finditer(r'put\(\s*"%s"\s*,' % re.escape(key), body):
-        depth = 0
-        j = m.end()
-        while j < len(body):
-            c = body[j]
-            if c in "([{":
-                depth += 1
-            elif c in ")]}":
-                if depth == 0:
-                    break
-                depth -= 1
-            elif c == "," and depth == 0:
-                break
-            elif c == "\n" and depth == 0:
-                break
-            j += 1
-        out.append(body[m.end(): j].strip())
-    return out
-
-def is_bare_literal(expr):
-    return bool(re.match(
-        r'^(?:true|false|null|-?\d+(?:\.\d+)?|"(?:[^"\\]|\\.)*")$', expr.strip()))
-
-def guarded_by_self(body, pos, key):
-    """True when the statement that contains pos tests `"<key>"` itself —
-    the only shape in which writing a constant is not a dropped field
-    (`if (inst.optBoolean("useResponsesAPI", false)) obj.put("useResponsesAPI", true)`)."""
-    depth = 0
+def receiver_ident(code, pos):
+    """`put(` 前面的接收者标识符；临时对象（`JSONObject()`、链式结果）→ ""。"""
     i = pos - 1
-    limit = max(0, pos - 300)
-    while i >= limit:
-        c = body[i]
-        if c in ")]":
-            depth += 1
-        elif c in "([":
-            depth -= 1
-        elif depth == 0 and c in ";\n{}":
-            return '"%s"' % key in body[i + 1: pos]
+    while i >= 0 and code[i] in " \t\r\n":
         i -= 1
-    return False
+    if i < 0 or code[i] != ".":
+        return ""
+    i -= 1
+    while i >= 0 and code[i] in " \t\r\n":
+        i -= 1
+    if i < 0 or code[i] in ")]}":
+        return ""
+    j = i
+    while j >= 0 and (code[j].isalnum() or code[j] == "_"):
+        j -= 1
+    name = code[j + 1:i + 1]
+    return name if (name and not name[0].isdigit()) else ""
 
-def guard_condition(body, pos):
-    """Condition of the `if (…)` that guards pos.
 
-    Two shapes: a same-line / statement prefix (`if (c) obj.put(…)`) and an
-    enclosing block header (`if (c) { … put(…) … }`). The first walk must not
-    stop at the statement's own newline while looking for the second.
-    """
+def value_expr(lit, code, pos):
+    """写入值表达式（结构边界取自 code 视图，内容取自 lit 视图）。"""
+    return lit[pos:expr_end(code, pos)].strip()
+
+
+def guard_condition_span(code, pos):
+    """守护 pos 的 `if (…)` 条件区间（两种形态：同语句前缀 / 外层块头）。"""
     depth = 0
     i = pos - 1
-    while i >= 0 and pos - i < 400:
-        c = body[i]
+    limit = max(0, pos - 400)
+    while i >= limit:
+        c = code[i]
         if c in ")]":
             depth += 1
         elif c in "([":
@@ -201,26 +207,80 @@ def guard_condition(body, pos):
         elif depth == 0 and c in ";\n{}":
             break
         i -= 1
-    m = re.search(r"if\s*\(([\s\S]*)\)\s*[\w.\[\]]*$", body[i + 1: pos])
-    if m:
-        return m.group(1)
+    prefix_start = i + 1
+    prefix = code[prefix_start:pos]
+    last = None
+    for m in re.finditer(r"if\s*\(", prefix):
+        o = m.end() - 1
+        c = match_bracket(prefix, o)
+        if c < 0:
+            continue
+        last = (o + 1, c)
+    if last:
+        return (prefix_start + last[0], prefix_start + last[1])
     depth = 0
     i = pos - 1
     while i >= 0 and pos - i < 800:
-        c = body[i]
+        c = code[i]
         if c in "}]":
             depth += 1
         elif c in "[{":
             if depth > 0:
                 depth -= 1
             else:
-                hdr = body[max(0, i - 300): i]
-                m = re.search(r"if\s*\(([\s\S]*)\)\s*$", hdr)
-                return m.group(1) if m else ""
+                hdr_start = max(0, i - 300)
+                hdr = code[hdr_start:i]
+                found = None
+                for m in re.finditer(r"if\s*\(", hdr):
+                    o = m.end() - 1
+                    c2 = match_bracket(hdr, o)
+                    if c2 < 0:
+                        continue
+                    if hdr[c2 + 1:].strip() == "":
+                        found = (o + 1, c2)
+                if found:
+                    return (hdr_start + found[0], hdr_start + found[1])
+                return None
         i -= 1
-    return ""
+    return None
 
-def identifier_written_keys(body):
+
+def guard_reads_key_value(code, lit, pos, key):
+    """守卫条件是否读了这个键的**值**（不是只 `has(key)`）。
+
+    `if (optBoolean("useResponsesAPI", false)) put("useResponsesAPI", true)`
+    是正当的极性写入；`if (has("pinned")) put("pinned", true)` 不是 —— 后者把
+    所有实例都钉成同一个常量。
+    """
+    span = guard_condition_span(code, pos)
+    if span is None:
+        return False
+    cond = lit[span[0]:span[1]]
+    return re.search(r'(?:opt|get)Boolean\s*\(\s*"%s"' % re.escape(key), cond) is not None
+
+
+def chain_predicate_dead(code, pos):
+    """写入是否挂在一条「对非负整数域永不成立」的 takeIf/filter 谓词后面。"""
+    start = max(0, pos - 400)
+    win = code[start:pos]
+    for m in re.finditer(r"\b(takeIf|takeUnless|filter|filterNot)\s*\{", win):
+        o = start + m.end() - 1
+        c = match_bracket(code, o)
+        if c < 0 or c >= pos:
+            continue
+        if not _CHAIN_GAP.match(code[c + 1:pos]):
+            continue
+        pred = code[o + 1:c].strip()
+        if not pred:
+            continue
+        negate = m.group(1) in ("takeUnless", "filterNot")
+        ok = guard_feasible("!(%s)" % pred if negate else pred, POSITIVE_DOMAIN)
+        if not ok:
+            return True
+    return False
+
+
+def identifier_written_keys(lit):
     """Keys written through a VARIABLE whose value set is a literal allow-list in
     the same body — the wholesale-copy shape
     (`for (k in arrayOf("a","b")) { …put(k, …) }`).
@@ -230,37 +290,51 @@ def identifier_written_keys(body):
     loop writes every key correctly and never spells `put("maxThinkingLevel"`.
     """
     out = set()
-    for m in re.finditer(r"put\(\s*([A-Za-z_]\w*)\s*,", body):
+    for m in re.finditer(r"put\(\s*([A-Za-z_]\w*)\s*,", lit):
         var = m.group(1)
         for lm in re.finditer(
                 r"for\s*\(\s*%s\s+in\s+(?:arrayOf|listOf|setOf)\s*\(([^)]*)\)"
-                % re.escape(var), body):
+                % re.escape(var), lit):
             out |= set(re.findall(r'"([A-Za-z_]\w*)"', lm.group(1)))
     return out
 
-def missing_writes(required, body):
-    """Keys the converter READS but never WRITES — the field-evap shape.
 
-    A write whose value is a bare literal is only accepted when the statement
-    itself tests the key (a polarity write: `if (has(k)) put(k, false)`); any
-    other constant writes a value that has nothing to do with the source.
+def missing_writes(required, pair):
+    """Keys the converter READS but never really WRITES — the field-evap shape.
+
+    A key is gone when EVERY live write site for it is ineffective (dead branch,
+    temporary receiver, unrelated constant value, unsatisfiable predicate, or the
+    key is removed afterwards). One effective write keeps the key alive.
     """
+    code, lit = pair
     gone = []
+    ident_written = identifier_written_keys(lit)
     for k in sorted(required):
-        vals = write_values(body, k)
-        if not vals:
-            if k in identifier_written_keys(body):
+        sites = [m for m in re.finditer(r'put\(\s*"%s"\s*,' % re.escape(k), lit)]
+        if not sites:
+            if k in ident_written:
                 continue
             gone.append(k)
             continue
-        if all(is_bare_literal(v) for v in vals):
-            pos = None
-            for m in re.finditer(r'put\(\s*"%s"\s*,' % re.escape(k), body):
-                if is_bare_literal(body[m.end(): m.end() + 80].split(")")[0].strip()):
-                    pos = m.start()
-                    break
-            if pos is None or not guarded_by_self(body, pos, k):
-                gone.append(k + " (constant value)")
+        live = [m for m in sites if path_feasible(code, m.start())]
+        if not live:
+            gone.append(k + " (dead write)")
+            continue
+        bad = []
+        for m in live:
+            val = value_expr(lit, code, m.end())
+            if re.search(r'remove\(\s*"%s"\s*\)' % re.escape(k), lit):
+                bad.append("removed after the write")
+            elif not receiver_ident(code, m.start()):
+                bad.append("written into a temporary receiver")
+            elif (const_value(strip_parens(val)) is not None
+                  and not guard_reads_key_value(code, lit, m.start(), k)):
+                bad.append("constant value %r (nothing to do with the source)"
+                           % val[:40])
+            elif chain_predicate_dead(code, m.start()):
+                bad.append("gated by a predicate that never holds for the field")
+        if len(bad) == len(live):
+            gone.append("%s (%s)" % (k, bad[0]))
     return gone
 
 
@@ -271,23 +345,35 @@ def rcf_const_table(pr_src):
     return {name: key for name, key in RCF_CONST_RE.findall(pr_src)}
 
 
-def write_run_config_keys(pr_src):
-    """Wire keys written by writeRunConfigFields: the literal puts plus every
-    RCF_* identifier put mapped through the derived constant table. Raises
-    KeyError on an identifier the table cannot resolve — the caller turns that
-    into a fail-closed ROT, because an unmapped identifier is exactly the shape
-    that used to make this arm blind. Returns an empty set when the seam is
-    absent (a tree that never had the delegation has nothing to lose)."""
-    body = function_text(pr_src, RCF_HEADER)
-    if body is None:
-        return set()
-    table = rcf_const_table(pr_src)
-    keys = set(PUT_KEY.findall(body))
-    for ident in RCF_PUT_RE.findall(body):
+def write_run_config_keys(rcf, pr_lit):
+    """(keys, dead_constants) for writeRunConfigFields.
+
+    keys  = literal puts + RCF_* puts that are on a REACHABLE path
+    dead  = RCF_* constants the repository defines but the seam never writes
+            (guarded by `if (false)` / deleted outright) — the exporter keeps
+            defining the key so key-set parity alone stays green, which is
+            exactly how a pinned flag can vanish from every cross-platform
+            restore.
+    Raises KeyError on an identifier the table cannot resolve; the caller turns
+    that into a fail-closed ROT.
+    """
+    if rcf is None:
+        return set(), []
+    code, lit = rcf
+    table = rcf_const_table(pr_lit)
+    keys, live_idents = set(), set()
+    for m in RCF_PUT_RE.finditer(lit):
+        ident = m.group(1)
+        if not path_feasible(code, m.start()):
+            continue
         if ident not in table:
             raise KeyError(ident)
+        live_idents.add(ident)
         keys.add(table[ident])
-    return keys
+    for m in PUT_KEY.finditer(lit):
+        if path_feasible(code, m.start()):
+            keys.add(m.group(1))
+    return keys, sorted(set(table) - live_idents)
 
 
 def run(root):
@@ -299,13 +385,21 @@ def run(root):
     if bm is None or pr is None or cb is None:
         return ["ROT: source file missing (bm=%s pr=%s cb=%s)"
                 % (bm is not None, pr is not None, cb is not None)], 0
+    try:
+        bm_code, bm_lit = views(bm)
+        pr_code, pr_lit = views(pr)
+        cb_code, cb_lit = views(cb)
+    except KotlinLexError as exc:
+        return ["ROT: Kotlin source is not lexable (%s) — fail-closed"
+                % exc], 0
 
-    conv = function_text(bm, CONV_HEADER)
-    groups_conv = function_text(bm, GROUP_HEADER)
-    chat = function_text(bm, CHAT_HEADER)
-    exp = function_text(pr, EXPORT_HEADER)
-    sess = block_text(cb, SESSIONS_ANCHOR)
-    grp = block_text(cb, GROUPS_ANCHOR)
+    conv = function_slice(bm_code, bm_lit, CONV_HEADER)
+    groups_conv = function_slice(bm_code, bm_lit, GROUP_HEADER)
+    chat = function_slice(bm_code, bm_lit, CHAT_HEADER)
+    exp = function_slice(pr_code, pr_lit, EXPORT_HEADER)
+    rcf = function_slice(pr_code, pr_lit, RCF_HEADER)
+    sess = block_slice(cb_code, cb_lit, SESSIONS_ANCHOR)
+    grp = block_slice(cb_code, cb_lit, GROUPS_ANCHOR)
     for name, txt in (("convertProviders", conv), ("convertGroups", groups_conv),
                       ("convertChats", chat), ("exportInstanceJSON", exp),
                       ("sessionJsons", sess), ("modelGroups block", grp)):
@@ -314,32 +408,44 @@ def run(root):
     if problems:
         return problems, 0
 
-    conv_code = code_only(conv)
-    chat_code = code_only(chat)
-    groups_code = code_only(groups_conv)
+    conv_code, conv_lit = conv
+    exp_lit = exp[1]
 
     # Arm 1 — appendV1Suffix three-state polarity.
-    if V1_REQUIRED_GUARD not in conv_code:
+    if V1_REQUIRED_GUARD not in conv_lit:
         problems.append(
             "arm1: convertProviders lost the 3-state guard %s"
             % V1_REQUIRED_GUARD)
-    if V1_REQUIRED_WRITE not in conv_code:
+    if V1_REQUIRED_WRITE not in conv_lit:
         problems.append(
             "arm1: convertProviders lost the passthrough write %s"
             % V1_REQUIRED_WRITE)
-    if V1_FORBIDDEN.search(conv_code):
+    if V1_FORBIDDEN.search(conv_lit):
         problems.append(
             "arm1: default-false read on a default-true field "
             "(optBoolean(\"appendV1Suffix\", false)) — explicit false would be "
             "dropped and re-imported as true")
+    # [1024-B 12-1] The passthrough must be REACHABLE: `if (false && has(k))`
+    # keeps the guard text, the write text and the default-true polarity while
+    # writing the key for no instance at all.
+    v1_sites = [m for m in re.finditer(r'put\(\s*"appendV1Suffix"\s*,', conv_lit)]
+    v1_live = [m for m in v1_sites if path_feasible(conv_code, m.start())]
+    if v1_sites and not v1_live:
+        problems.append(
+            "arm1: the appendV1Suffix passthrough sits in an unreachable branch "
+            "(guard short-circuited by a constant) — the key is written for no "
+            "instance, so every restore re-imports the default")
     # [wide-1024 12-misc-b] The 3-state passthrough also has to be UNCONDITIONAL
     # on the value: `if (has(k) && optBoolean(k)) { put(k, optBoolean(k)) }` keeps
     # the guard, the write and the round-trip, and skips the write for an explicit
     # `false` — the importer's default-true then flips it back to true. Judge the
     # guarding condition, not the spelling of the call.
-    for m in re.finditer(r'put\(\s*"appendV1Suffix"\s*,', conv_code):
-        cond = guard_condition(conv_code, m.start())
-        if re.search(r'optBoolean\s*\(\s*"appendV1Suffix"', cond):
+    for m in v1_live:
+        span = guard_condition_span(conv_code, m.start())
+        if span is None:
+            continue
+        if re.search(r'optBoolean\s*\(\s*"appendV1Suffix"',
+                     conv_lit[span[0]:span[1]]):
             problems.append(
                 "arm1: the passthrough write is guarded by the VALUE "
                 "(optBoolean(\"appendV1Suffix\") in the `if`) — an explicit false is "
@@ -352,30 +458,37 @@ def run(root):
     # (RCF_* identifiers mapped through the constants table). Fail-closed: a
     # delegation that cannot be resolved is reported, never silently skipped.
     try:
-        run_config_keys = write_run_config_keys(pr)
+        run_config_keys, dead_rcf = write_run_config_keys(rcf, pr_lit)
     except KeyError as exc:
         problems.append(
             "ROT: exportInstanceJSON's run-config delegation is unreadable (%s) "
             "— the five RCF_* keys would silently drop out of arm2" % exc)
-        run_config_keys = set()
-    if "writeRunConfigFields(" in exp and not run_config_keys:
+        run_config_keys, dead_rcf = set(), []
+    if dead_rcf:
+        problems.append(
+            "arm2: run-config key(s) defined but never written by "
+            "writeRunConfigFields (dead/guarded write or deleted put): %s — the "
+            "export keeps the constant, the converter keeps writing it for old "
+            "backups, and the key silently stops being exported"
+            % ", ".join(dead_rcf))
+    if "writeRunConfigFields(" in exp_lit and not run_config_keys:
         problems.append(
             "ROT: exportInstanceJSON delegates to writeRunConfigFields but no "
             "run-config keys could be derived from it — arm2 lost its blind spot")
-    if "writeRunConfigFields(" in pr and "writeRunConfigFields(" not in exp:
+    if "writeRunConfigFields(" in pr_lit and "writeRunConfigFields(" not in exp_lit:
         problems.append(
             "arm2: exportInstanceJSON no longer calls writeRunConfigFields — the "
             "five run-config keys would stop being exported (converter keeps "
             "them for old backups, so parity alone cannot see the drop)")
-    provider_keys = (set(PUT_KEY.findall(exp)) | run_config_keys) - set(PROVIDER_EXEMPT)
-    gone = missing_writes(provider_keys, conv_code)
+    provider_keys = (set(PUT_KEY.findall(exp_lit)) | run_config_keys) - set(PROVIDER_EXEMPT)
+    gone = missing_writes(provider_keys, conv)
     if gone:
         problems.append("arm2: convertProviders dropped export key(s): %s"
                         % ", ".join(gone))
 
     # Arm 3 — chat-session key parity (derived from ConfigBackup's export block).
-    session_keys = set(PUT_KEY.findall(sess)) - set(SESSION_EXEMPT)
-    gone_s = missing_writes(session_keys, chat_code)
+    session_keys = set(PUT_KEY.findall(sess[1])) - set(SESSION_EXEMPT)
+    gone_s = missing_writes(session_keys, chat)
     if gone_s:
         problems.append("arm3: convertChats dropped session export key(s): %s"
                         % ", ".join(gone_s))
@@ -383,18 +496,16 @@ def run(root):
     # Arm 4 [deep-audit-1039 A-07] — model-group key parity. Exported from
     # ConfigBackup's modelGroups block; the OpenMinis side reads the same
     # provider_config.json shape, so the two key sets must agree.
-    group_keys = set(PUT_KEY.findall(grp)) - set(GROUP_EXEMPT)
-    gone_g = missing_writes(group_keys, groups_code)
+    group_keys = set(PUT_KEY.findall(grp[1])) - set(GROUP_EXEMPT)
+    gone_g = missing_writes(group_keys, groups_conv)
     if gone_g:
-        problems.append("arm4: convertGroups dropped modelGroups export key(s): %s"
+        problems.append("arm4: convertGroups dropped group export key(s): %s"
                         % ", ".join(gone_g))
 
-    return problems, len(provider_keys) + len(session_keys) + len(group_keys)
-
-
-# --------------------------------------------------------------------------
-# Self-test fixtures
-# --------------------------------------------------------------------------
+    checked = len(provider_keys) + len(session_keys) + len(group_keys)
+    if checked == 0:
+        problems.append("ROT: derived 0 keys — the extraction anchors went stale")
+    return problems, checked
 
 FIX_EXPORT = """fun exportInstanceJSON(instance: ProviderInstance): JSONObject {
     return JSONObject().apply {
@@ -644,6 +755,40 @@ def build_fixture_tree(tmp, conv_src, chat_src, export_src=FIX_EXPORT,
         f.write(sessions_src + "\n" + groups_export_src)
     return tmp
 
+# --------------------------------------------------------------------------
+# [deep-audit-1024 B 12-1..12-6] witness fixtures. Every one of them keeps the
+# tokens the previous criteria looked for; only the EFFECT moves.
+# --------------------------------------------------------------------------
+
+# 12-1: guard, write and polarity all intact — the branch is simply unreachable.
+FIX_CONV_V1_DEAD_GUARD = FIX_CONV_OK.replace(
+    'if (inst.has("appendV1Suffix")) {',
+    'if (false && inst.has("appendV1Suffix")) {')
+
+# 12-2: `!true` folds to a constant; the guard only tests `has(key)`, so the
+# constant has nothing to do with the source value.
+FIX_CONV_PINNED_CONST = FIX_CONV_OK.replace(
+    'obj.put("pinned", inst.optBoolean("pinned", false))',
+    'obj.put("pinned", !true)')
+
+# 12-3: the constant and the seam both stay, the write goes dead.
+FIX_EXPORT_DEAD_RCF_PINNED = FIX_EXPORT_DELEGATING.replace(
+    '    obj.put(RCF_PINNED, instance.pinned)',
+    '    if (false) obj.put(RCF_PINNED, instance.pinned)')
+
+# 12-4: the write is present but no real timestamp satisfies the predicate.
+FIX_CHAT_INVERTED_PIN = FIX_CHAT_OK.replace(
+    'takeIf { it > 0 }', 'takeIf { it < 0 }')
+
+# 12-5: the write lands in a throwaway object.
+FIX_GROUPS_TEMP_RECEIVER = FIX_GROUPS_CONV_OK.replace(
+    'obj.put("fallbackStrategy", g.optString("fallbackStrategy", "default"))',
+    'JSONObject().put("fallbackStrategy", g.optString("fallbackStrategy", "default"))')
+
+# 12-6: block comment (the old `//`-only stripper left it in the code view).
+FIX_CONV_BLOCK_COMMENTED = FIX_CONV_OK.replace(
+    '    obj.put("label", inst.optString("label", ""))\n',
+    '    /* obj.put("label", inst.optString("label", "")) */\n')
 
 def selftest():
     ok = True
@@ -799,6 +944,28 @@ def selftest():
                  "RED" if problems else "GREEN"))
         if not red:
             ok = False
+
+
+    # ── [deep-audit-1024 B 12-1..12-6] witness arms ───────────────────────
+    # Every token the old criteria looked for is still there; only the EFFECT
+    # is gone. Each arm names the criterion that has to speak.
+    arm("appendV1Suffix pass-through unreachable",
+        FIX_CONV_V1_DEAD_GUARD, FIX_CHAT_OK, True, needle="arm1")
+    arm("pinned written as a folded constant (!true)",
+        FIX_CONV_PINNED_CONST, FIX_CHAT_OK, True,
+        export_src=FIX_EXPORT_DELEGATING, needle="arm2: convertProviders dropped")
+    arm("RCF constant written only in a dead branch",
+        FIX_CONV_OK, FIX_CHAT_OK, True,
+        export_src=FIX_EXPORT_DEAD_RCF_PINNED,
+        needle="arm2: run-config key(s) defined but never written")
+    arm("pinnedAt write gated by takeIf { it < 0 }",
+        FIX_CONV_OK, FIX_CHAT_INVERTED_PIN, True, needle="arm3: convertChats dropped")
+    arm("group key written into a throwaway JSONObject()",
+        FIX_CONV_OK, FIX_CHAT_OK, True, groups_conv_src=FIX_GROUPS_TEMP_RECEIVER,
+        needle="arm4: convertGroups dropped")
+    arm("provider key commented out with /* */",
+        FIX_CONV_BLOCK_COMMENTED, FIX_CHAT_OK, True,
+        needle="arm2: convertProviders dropped")
 
     # ping-pong: green fixture stays green after the dirty fixture (no state leak)
     arm("re-green after dirty", FIX_CONV_OK, FIX_CHAT_OK, False)
