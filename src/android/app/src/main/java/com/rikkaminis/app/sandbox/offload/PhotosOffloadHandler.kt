@@ -18,6 +18,8 @@ import com.rikkaminis.app.sandbox.NativeOffloadHandler
 import com.rikkaminis.app.sandbox.NativeOffloadRequest
 import com.rikkaminis.app.sandbox.NativeOffloadResult
 import com.rikkaminis.app.sandbox.PRootKernel
+import com.rikkaminis.app.ui.settings.readAtMost
+import com.rikkaminis.app.util.ImageDecoding
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -737,45 +739,56 @@ class PhotosOffloadHandler(private val context: Context) : NativeOffloadHandler 
         return written
     }
 
-    /** Re-encode an image asset to JPEG with max edge [maxEdge]. */
+    /**
+     * Re-encode an image asset to JPEG with max edge [maxEdge].
+     *
+     * [debt-1026 B3] Both halves of the SOURCE side were unbounded:
+     *
+     *  * `openInputStream(src)?.use { it.readBytes() }` materialised the whole
+     *    asset with no ceiling, so a user-picked multi-hundred-MB file OOM'd
+     *    before any decode ran. The read now stops one byte past
+     *    [MAX_RESIZE_SOURCE_BYTES] (`readAtMost` — the same bounded primitive the
+     *    SAF imports and the home-icon picker use) and an oversized source is
+     *    refused loudly instead of silently exported at a bogus size.
+     *  * the hand-rolled `maxEdge * 2` sampling loop left `sample` at 1 for
+     *    anything below 2x the target (a 4000x3000 photo is ~48 MB of
+     *    ARGB_8888), then `createScaledBitmap` shrank it afterwards. The decode
+     *    now goes through the shared [ImageDecoding.decodeBytesBounded], which
+     *    probes the header first and bounds the bitmap at (2 * maxEdge)^2.
+     *
+     * The encode half is unchanged on purpose: [deep-audit-1048 A-02] already
+     * routes the `compress` verdict through `saveOutcome`, and the export caller
+     * answers `export_failed` when this throws.
+     */
     private fun copyResized(src: Uri, dst: File, maxEdge: Int): Long {
-        val bytes = context.contentResolver.openInputStream(src)?.use { it.readBytes() }
-            ?: throw java.io.IOException("Could not read source bytes")
-        val opts = android.graphics.BitmapFactory.Options()
-        opts.inJustDecodeBounds = true
-        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-        val w = opts.outWidth; val h = opts.outHeight
-        var sample = 1
-        while (w / sample > maxEdge * 2 || h / sample > maxEdge * 2) sample *= 2
-        val decodeOpts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
-        val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOpts)
+        val bytes = context.contentResolver.openInputStream(src)?.use { input ->
+            readAtMost(input, MAX_RESIZE_SOURCE_BYTES)
+                ?: throw java.io.IOException(
+                    "Source image exceeds the ${MAX_RESIZE_SOURCE_BYTES / (1024 * 1024)} MB resize-read cap"
+                )
+        } ?: throw java.io.IOException("Could not read source bytes")
+        val decoded = ImageDecoding.decodeBytesBounded(bytes, maxEdge)
             ?: throw java.io.IOException("Failed to decode source image")
-        val scale = minOf(maxEdge.toFloat() / bmp.width, maxEdge.toFloat() / bmp.height, 1f)
+        val bmp = decoded.bitmap
         try {
-            val out = if (scale < 1f) {
-                android.graphics.Bitmap.createScaledBitmap(bmp, (bmp.width * scale).toInt(), (bmp.height * scale).toInt(), true)
-            } else bmp
-            try {
-                // [deep-audit-1048 A-02] `Bitmap.compress(...)` returns FALSE when
-                // the JPEG encoder could not write the pixels — it does not throw.
-                // Dropped, `export` answered `size_bytes: 0` with success and left
-                // a 0-byte file in the export dir. This helper already reports
-                // failure by throwing (see copyStream's IOException): the export
-                // caller catches it and answers `export_failed`.
-                val encoded = dst.outputStream().use { os ->
-                    out.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, os)
-                }
-                if (!com.rikkaminis.app.util.saveOutcome(streamOpened = true, compressed = encoded)) {
-                    throw java.io.IOException("JPEG encoder wrote no bytes (compress returned false)")
-                }
-            } finally {
-                // [sweep1014-P8] Recycle the intermediate scaled bitmap.
-                if (out !== bmp) out.recycle()
+            val encoded = dst.outputStream().use { os ->
+                bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, os)
             }
-            return dst.length()
+            // [deep-audit-1048 A-02] `Bitmap.compress(...)` returns FALSE when
+            // the JPEG encoder could not write the pixels — it does not throw.
+            // Dropped, `export` answered `size_bytes: 0` with success and left
+            // a 0-byte file in the export dir. This helper already reports
+            // failure by throwing (see copyStream's IOException): the export
+            // caller catches it and answers `export_failed`.
+            if (!com.rikkaminis.app.util.saveOutcome(streamOpened = true, compressed = encoded)) {
+                throw java.io.IOException("JPEG encoder wrote no bytes (compress returned false)")
+            }
         } finally {
+            // [sweep1014-P8] The decode bound no longer hands back a second
+            // (scaled) bitmap, so there is exactly one to release.
             bmp.recycle()
         }
+        return dst.length()
     }
 
     // ── import (T64) ─────────────────────────────────────────────────────
@@ -1296,6 +1309,15 @@ class PhotosOffloadHandler(private val context: Context) : NativeOffloadHandler 
 
     companion object {
         private const val TAG = "PhotosOffload"
+
+        /**
+         * [debt-1026 B3] Ceiling on the source bytes [copyResized] reads before
+         * decoding. Far above any real photo (a 200 MP JPEG is ~30 MB) yet low
+         * enough to refuse the multi-hundred-MB file that OOMs the heap BEFORE
+         * the decode bound can help: that bound limits the BITMAP, not the
+         * encoded array that has to be materialised to build it.
+         */
+        private const val MAX_RESIZE_SOURCE_BYTES = 64L * 1024 * 1024
 
         /** [sweep1014-B22a] One queried media row: raw sort key + output JSON. */
         data class MediaEntry(val ts: Long, val json: JSONObject)
