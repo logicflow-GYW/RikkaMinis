@@ -61,6 +61,28 @@ import os
 import re
 import sys
 
+from _kotlin_lexer import KotlinLexError
+from _kotlin_ast import (
+    const_bool,
+    const_value,
+    match_bracket,
+    split_top,
+    strip_parens,
+    when_branches,
+    if_blocks,
+)
+from _kotlin_valueflow import (
+    brace_depth,
+    call_args,
+    code_view,
+    contains_ident,
+    expr_end,
+    guard_feasible,
+    literal_view,
+    path_feasible,
+    returns_exiting,
+)
+
 PKG = "src/android/app/src/main/java/com/rikkaminis/app"
 SERVICE = f"{PKG}/accessibility/MinisAccessibilityService.kt"
 HANDLER = f"{PKG}/sandbox/offload/AccessibilityOffloadHandler.kt"
@@ -79,16 +101,98 @@ MAP_ANCHOR = "val %s: Map<String, String> = mapOf("
 MEMBER_STOPS = ("\n    private fun ", "\n    internal fun ", "\n    fun ", "\n}")
 
 
-def code_only(text):
-    """Blank comment lines (offsets preserved) so a mention in prose cannot
-    satisfy a shape check — the KDoc here names `tearDown()`/`isCallerWaiting()`
-    while explaining why they exist, and the first version of the unit probe was
-    fooled by exactly that."""
+def views(raw):
+    """(structural, literal) — 两个等长视图，位置可直接互投。
+
+    * structural = `_kotlin_lexer.mask_code`：注释与字符串/字符字面量内部抹成
+      空格。所有结构分析（括号配平、条件、函数体）都走这一路，因此字符串里的
+      `}` / `"` / `//` 再也不能伪造锚点（parser-death）。
+    * literal = `_kotlin_lexer.mask_comments`：只抹注释，字符串内容保留 ——
+      `"visible-only"` 这类契约字面量要从这里读。
+
+    词法失败抛 `KotlinLexError`，调用方一律 fail-closed 报违规，不回退原文扫描。
+    """
+    return code_view(raw), literal_view(raw)
+
+
+def member_span(text, signature):
+    """[signature] 到下一个成员声明（或类闭合括号）的区间；None = 锚点缺失。"""
+    start = text.find(signature)
+    if start < 0:
+        return None
+    rest = text[start + len(signature):]
+    ends = [i for i in (rest.find(s) for s in MEMBER_STOPS) if i >= 0]
+    if not ends:
+        return None
+    return (start, start + len(signature) + min(ends))
+
+
+def exits_like(text, start, end):
+    """[start, end) 里是否有真正退出外层函数的 `return` / `throw`。
+
+    带块的分支要看块内那一层（`if (x) { return }` 的 return 深度比 if 语句深
+    一层），否则 `returns_exiting` 会把它当成 lambda 内的裸 return 而漏判。
+    """
+    k = start
+    while k < len(text) and text[k] in " \t\r\n":
+        k += 1
+    braced = k < len(text) and text[k] == "{"
+    depth = brace_depth(text, k) + (1 if braced else 0)
+    if returns_exiting(text, k, end, depth):
+        return True
+    for m in re.finditer(r"(?<![\w.])throw\b", text[k:end]):
+        if brace_depth(text, k + m.start()) == depth:
+            return True
+    return False
+
+
+def sole_call(expr, name):
+    """[expr] 是否**就是**一次 `….name(...)` 调用（不带任何后缀运算）。
+
+    `n.performAction(ACTION_CLICK) || true` 与 `parsed.take(0)` 都过不了这一关：
+    它们的值不再是那个调用的返回值。
+    """
+    e = strip_parens(expr)
+    m = re.search(re.escape(name) + r"\s*\(", e)
+    if m is None:
+        return False
+    return match_bracket(e, m.end() - 1) == len(e) - 1
+
+
+def guard_decided_by_literal(cond):
+    """条件是否被一个常量操作数决定（`false &&` / `|| true` / `1 == 2` / `!true`）。
+
+    与旧版的四元组白名单（`true/false/!true/!false`）不同：这里对每个顶层
+    `&&` / `||` 操作数做**常量折叠**，所以任何等价拼写（`1 == 2`、`! true`、
+    `0 > 1`、`"a" == "b"`）都折成常量，族洞不再存在。
+    """
+    c = strip_parens(cond)
+    if not c:
+        return False
+    if const_value(c) is not None:
+        return True
+    for a, b in split_top(c, ("&&", "||")):
+        if const_value(strip_parens(c[a:b])) is not None:
+            return True
+    return False
+
+
+def branch_values(text, marker):
+    """when 分支里条件含 [marker] 的那些：[(subject, cond, value_expr, pos)]。
+
+    value_expr 是 `->` 之后那条表达式的完整文本（`expr_end` 定界，因此
+    `read.value || true`、跨行的 `return err(...)` 都能整段取到）。
+    """
     out = []
-    for line in text.split("\n"):
-        t = line.strip()
-        out.append(" " * len(line) if t.startswith("//") or t.startswith("*") or t.startswith("/*") else line)
-    return "\n".join(out)
+    for subject, cond, b0, b1 in when_branches(text):
+        if marker not in cond:
+            continue
+        seg = text[b0:b1]
+        k = 0
+        while k < len(seg) and seg[k] in " \t\r\n":
+            k += 1
+        out.append((subject, cond, seg[k:expr_end(seg, k)].strip(), b0 + k))
+    return out
 
 
 def slice_body(text, anchor, stop_patterns=("    fun ", "    private fun ", "    internal fun ", "    @")):
@@ -127,7 +231,10 @@ def balanced_call(text, anchor):
 
 def scan_service(raw):
     """Findings for MinisAccessibilityService.kt (empty list = clean)."""
-    text = code_only(raw)
+    try:
+        text, _lv = views(raw)
+    except KotlinLexError as exc:
+        return [f"MinisAccessibilityService.kt could not be lexed ({exc}) — fail-closed"]
     bad = []
     body = slice_body(text, "fun captureScreenshot(")
     if body is None:
@@ -137,13 +244,32 @@ def scan_service(raw):
                    "(a late callback parks a screen-sized bitmap nothing will recycle)")
     if "LateValueSlot(" not in body:
         bad.append("captureScreenshot does not hand the result over through LateValueSlot")
-    guard = body.find("isCallerWaiting()")
     copy = body.find(".copy(Bitmap.Config.ARGB_8888")
+    # [B7 13-1 parser-death / family-hole] 判据锚"这个守卫真的活着"，不锚"某处出现过
+    # isCallerWaiting() 这几个字"。旧版在 code_only() 上只涂行首注释，于是
+    # `if (false) { // !slot.isCallerWaiting()` 把锚点藏在行尾注释里就过关。
+    guard = -1
+    for cond, t0, t1, _e0, _e1 in if_blocks(body):
+        if "isCallerWaiting()" not in cond:
+            continue
+        c = strip_parens(cond)
+        if const_bool(c) is not None:
+            continue            # 常量条件 = 死守卫
+        if not c.startswith("!"):
+            continue            # 极性：等待者还在 → 提前放掉 buffer
+        if not exits_like(body, t0, t1):
+            continue            # 守卫体必须真的退出
+        guard = t0
+        break
     if guard < 0:
-        bad.append("the screenshot callback never asks whether the caller is still waiting")
+        bad.append("the caller-waiting check is not a LIVE `if (!slot.isCallerWaiting()) { … return }` "
+                   "guard any more (missing, decided by a constant, inverted, or its body no longer "
+                   "returns) — a late callback then allocates the whole-screen software copy the "
+                   "guard exists to avoid")
     elif copy > 0 and guard > copy:
         bad.append("isCallerWaiting() is checked after the software copy is allocated "
                    "(the 10-15 MB allocation it exists to avoid has already happened)")
+
     timeout = body.find("if (!done.await(")
     if timeout < 0:
         bad.append("the await(timeout) branch is gone — cannot tell whether the slot is closed")
@@ -210,7 +336,10 @@ def scan_flag_value_split(raw):
     caller's spelling becomes a stray positional, the reader sees "not given",
     and a `?: <default>` folds the request into its own opposite — the one
     combination that cannot fail loudly."""
-    text = code_only(raw)
+    try:
+        _cv, text = views(raw)
+    except KotlinLexError as exc:
+        return [f"AccessibilityOffloadHandler.kt could not be lexed ({exc}) — fail-closed"]
     bad = []
     declared = declared_flags(text)
     if declared is None:
@@ -233,32 +362,56 @@ def scan_visible_only_read(raw):
     three-way classifier: absent/bare keeps the documented default, a spelled
     boolean is honoured, and garbage is REFUSED as a usage error instead of
     being folded into the default (which is what inverted the request)."""
-    text = code_only(raw)
+    try:
+        cv, lv = views(raw)
+    except KotlinLexError as exc:
+        return [f"AccessibilityOffloadHandler.kt could not be lexed ({exc}) — fail-closed"]
     bad = []
-    body = member_body(text, "private fun uiDump(")
-    if body is None:
+    span = member_span(lv, "private fun uiDump(")
+    if span is None:
         return ["uiDump() not found — the probe lost its subject"]
+    body, body_cv = lv[span[0]:span[1]], cv[span[0]:span[1]]
     if 'VisibleOnlyFlag.resolve(args.get("visible-only"))' not in body:
         bad.append("uiDump no longer reads --visible-only as a value through VisibleOnlyFlag.resolve")
-    if "VisibleOnlyFlag.Read.Absent -> true" not in body:
-        bad.append("the absent/bare case no longer keeps the documented default (true)")
-    if "is VisibleOnlyFlag.Read.Value -> read.value" not in body:
-        bad.append("a spelled boolean is no longer honoured")
+    # [B7 13-2 dataflow] 判据锚"三分支的**值**"，不锚一行拼写。旧版查子串
+    # `is VisibleOnlyFlag.Read.Value -> read.value`，于是 `read.value || true`
+    # 靠前缀命中就过关，`--visible-only=false` 变成 no-op。
+    subj = None
+    sm = re.search(r"when\s*\(\s*val\s+(\w+)\s*=\s*VisibleOnlyFlag\.resolve\(", body)
+    if sm:
+        subj = sm.group(1)
+    flag_var = None
+    fm = re.search(r"val\s+(\w+)\s*=\s*when\s*\(\s*val\s+\w+\s*=\s*VisibleOnlyFlag\.resolve\(", body)
+    if fm:
+        flag_var = fm.group(1)
+    armed = branch_values(body, "VisibleOnlyFlag.Read.Absent")
+    valued = branch_values(body, "VisibleOnlyFlag.Read.Value")
+    invalid = branch_values(body, "VisibleOnlyFlag.Read.Invalid")
+    if not armed:
+        bad.append("the absent/bare case is gone — cannot tell whether the documented default (true) survives")
+    for _s, _c, expr, _pos in armed:
+        if const_bool(expr) is not True:
+            bad.append(f"the absent/bare case no longer yields the documented default (true) — it evaluates "
+                       f"to `{expr[:40]}`, so a bare `--visible-only` no longer keeps the dump unfiltered")
+    if not valued:
+        bad.append("a spelled boolean is no longer honoured (the Read.Value branch is gone)")
+    for _s, _c, expr, _pos in valued:
+        want = f"{subj}.value" if subj else None
+        if want is None or strip_parens(expr) != want:
+            bad.append(f"the Read.Value branch does not yield the caller's spelling — it evaluates to "
+                       f"`{expr[:40]}` instead of `{want or '<resolve-local>.value'}`, so a spelled "
+                       f"`--visible-only` value can be overridden in place (dataflow)")
     # [wide-1024 dataflow] The flag is RESOLVED into a local; the walker is what
     # actually consumes it. `walkNode(…, true, …)` keeps the resolve call, the
     # three-way classifier and every other anchor intact while making
     # `--visible-only=false` a no-op.
-    vm = re.search(
-        r"val\s+(\w+)\s*=\s*when\s*\(\s*val\s+\w+\s*=\s*VisibleOnlyFlag\.resolve\(", body
-    )
-    flag_var = vm.group(1) if vm else None
     if flag_var is None:
         at = body.find("VisibleOnlyFlag.resolve(")
         if at >= 0:
             head = body[max(0, at - 200):at]
             names = re.findall(r"val\s+(\w+)\s*=", head)
             flag_var = names[-1] if names else None
-    walks = call_args_of(body, "walkNode")
+    walks = call_args_of(body_cv, "walkNode")
     if not walks:
         bad.append("uiDump no longer walks the tree through walkNode() — the --visible-only "
                    "consumer cannot be read (fail-closed)")
@@ -271,30 +424,31 @@ def scan_visible_only_read(raw):
                 bad.append("walkNode() lost its (registry, node, depth, maxDepth, visibleOnly, "
                            "compact, out) shape — re-anchor this criterion (fail-closed)")
                 break
-            passed = pargs[4].split("=")[-1].strip()
+            passed = strip_parens(pargs[4].split("=")[-1])
             if passed != flag_var:
                 bad.append(f"uiDump passes `{passed}` as walkNode's visibleOnly argument while "
                            f"the flag was resolved into `{flag_var}` — --visible-only is read "
                            f"and then ignored, so the caller's request has no effect")
                 break
-    marker = "is VisibleOnlyFlag.Read.Invalid -> "
-    at = body.find(marker)
-    if at < 0:
+    if not invalid:
         bad.append("uiDump no longer refuses a malformed --visible-only")
-    else:
-        tail = body[at + len(marker):]
-        if not tail.startswith("return err("):
+    for _s, _c, expr, _pos in invalid:
+        if not expr.startswith("return err("):
             bad.append("a malformed --visible-only no longer returns an error — it is folded into the default again")
-        elif "${read.raw}" not in tail:
+        elif "${read.raw}" not in expr:
             bad.append("the refusal no longer echoes the caller's spelling")
-        elif "exit = 2" not in tail:
+        elif "exit = 2" not in expr:
             bad.append("the refusal is no longer a usage error (exit 2)")
     return bad
 
 
 def scan_handler(raw):
     """Findings for AccessibilityOffloadHandler.kt (empty list = clean)."""
-    text = code_only(raw)
+    try:
+        cv, lv = views(raw)
+    except KotlinLexError as exc:
+        return [f"AccessibilityOffloadHandler.kt could not be lexed ({exc}) — fail-closed"]
+    text = lv
     bad = []
     declared = declared_flags(text)
     if declared is None:
@@ -310,11 +464,14 @@ def scan_handler(raw):
     bad += scan_flag_value_split(raw)
     bad += scan_visible_only_read(raw)
 
-    body = slice_body(text, "private fun tapText(")
+    body = slice_body(lv, "private fun tapText(")
     if body is None:
         bad.append("tapText() not found — the probe lost its subject")
         return bad
-    plans = call_args_of(body, "TapTextFlow.plan")
+    # 结构面（字符串已抹空）上取实参，字面量面（字符串保留）上读契约串。
+    span = (lv.find("private fun tapText("), lv.find("private fun tapText(") + len(body))
+    body_cv = cv[span[0]:span[1]]
+    plans = call_args_of(body_cv, "TapTextFlow.plan")
     if not plans:
         bad.append("tapText no longer decides through TapTextFlow.plan "
                    "(the performAction result is discarded again)")
@@ -322,24 +479,26 @@ def scan_handler(raw):
         # [wide-1024 dataflow] `TapTextFlow.plan(n.isClickable, true)` keeps the
         # seam and throws away the only observation it was built to carry: the
         # stage machine then reports CLICKED for a node that refused the click.
+        # [B7 13-3] 只查 `"performAction(" in pargs[1]` 还不够：把调用留住再
+        # `|| true` 恒真化，值同样被伪造 —— 实参必须**就是**那次调用的返回值。
         if len(pargs) < 2:
             bad.append("TapTextFlow.plan() lost its (isClickable, selfClickSucceeded) shape — "
                        "cannot tell whether the click outcome is observed (fail-closed)")
-        elif "performAction(" not in pargs[1]:
+        elif not sole_call(pargs[1], "performAction"):
             bad.append(f"tapText feeds TapTextFlow.plan() a FABRICATED self-click outcome "
-                       f"(`{pargs[1][:40]}`) — the ACTION_CLICK result must be the value the "
-                       f"stage machine consumes, not an assumed `true`")
-    for m in re.finditer(r"\bperformAction\s*\(", body):
-        line_start = body.rfind("\n", 0, m.start()) + 1
-        prefix = body[line_start:m.start()].strip()
+                       f"(`{pargs[1][:40]}`) — the ACTION_CLICK result must BE the value the "
+                       f"stage machine consumes, not a constant or an absorbed/replaced form of it")
+    for m in re.finditer(r"\bperformAction\s*\(", body_cv):
+        line_start = body_cv.rfind("\n", 0, m.start()) + 1
+        prefix = body_cv[line_start:m.start()].strip()
         if prefix == "" or re.fullmatch(r"(?:else|try|\}|\{)", prefix):
             bad.append("tapText performs ACTION_CLICK as a bare statement — its Boolean return "
                        "is discarded, so a refused click is indistinguishable from a landed one")
-    if "TapTextFlow.fallbackSucceeded(" not in body:
+    if "TapTextFlow.fallbackSucceeded(" not in body_cv:
         bad.append("tapText no longer reads the coordinate tap's own outcome")
     if 'err(args, "ACTION_FAILED"' not in body:
         bad.append("tapText cannot report a failed tap — success is assumed again")
-    if "if (n.isClickable) n.performAction(" in body:
+    if "if (n.isClickable) n.performAction(" in body_cv:
         bad.append("tapText discards performAction()'s return value again")
     return bad
 
@@ -347,68 +506,26 @@ def scan_handler(raw):
 def call_args_of(text, name):
     """[(offset, [top-level argument texts])] for every `name(...)` call.
 
-    Paren-balanced with string-aware scanning already applied by code_only, so
-    a nested call (`n.performAction(ACTION_CLICK)`) stays ONE argument instead
-    of being cut at its own `)`."""
+    配平与切片走共享原语（`match_bracket` + `split_top`），因此字符串里的
+    `)`（结构视图中已被抹空）与嵌套调用都不会把实参切错。"""
     out = []
     for m in re.finditer(re.escape(name) + r"\s*\(", text):
-        i = text.index("(", m.end() - 1)
-        depth = 0
-        for k in range(i, len(text)):
-            ch = text[k]
-            if ch in "([{":
-                depth += 1
-            elif ch in ")]}":
-                depth -= 1
-                if depth == 0:
-                    out.append((m.start(), split_top_level(text[i + 1:k])))
-                    break
+        open_at = m.end() - 1
+        if match_bracket(text, open_at) < 0:
+            continue
+        spans = call_args(text, open_at)
+        if not spans:
+            continue
+        out.append((m.start(), [text[a:b].strip() for a, b in spans]))
     return out
-
-
-def split_top_level(argtext):
-    """Split a call's argument text on top-level commas."""
-    parts, depth, cur = [], 0, []
-    for ch in argtext:
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            depth -= 1
-        if ch == "," and depth == 0:
-            parts.append("".join(cur).strip())
-            cur = []
-        else:
-            cur.append(ch)
-    if "".join(cur).strip():
-        parts.append("".join(cur).strip())
-    return parts
-
-
-def literal_decides(cond):
-    """True when a literal operand decides [cond].
-
-    [wide-1024] `if (false && promptToken != token) return null` mentions the
-    token comparison and still contains the early return, so a substring
-    criterion cannot tell it from the real guard — but the comparison can never
-    reject a late teardown."""
-    for part in re.split(r"&&|\|\|", cond):
-        t = part.strip().strip("()").strip()
-        if t in ("true", "false", "!true", "!false"):
-            return True
-    return False
 
 
 def member_body(text, signature):
     """Slice from [signature] to the next member declaration or the class's
     closing brace. None when either anchor is missing (fail-closed)."""
-    start = text.find(signature)
-    if start < 0:
-        return None
-    rest = text[start + len(signature):]
-    ends = [i for i in (rest.find(s) for s in MEMBER_STOPS) if i >= 0]
-    if not ends:
-        return None
-    return text[start:start + len(signature) + min(ends)]
+    span = member_span(text, signature)
+    return text[span[0]:span[1]] if span else None
+
 
 
 def dispatched_verbs(text, sub_fn):
@@ -448,7 +565,10 @@ def table_keys(text, table):
 
 def scan_status_tables(raw):
     """Findings for the a11y status labels vs the verbs each group dispatches."""
-    text = code_only(raw)
+    try:
+        _cv, text = views(raw)
+    except KotlinLexError as exc:
+        return [f"AccessibilityOffloadHandler.kt could not be lexed ({exc}) — fail-closed"]
     bad = []
     for group, sub_fn, table in STATUS_GROUPS:
         dispatched = dispatched_verbs(text, sub_fn)
@@ -517,15 +637,37 @@ SLOT_STOPS = ("    suspend fun ", "    fun ", "    private fun ", "    internal 
 def scan_judge_single_source(state_raw, recovery_raw):
     """Findings for the listing predicate being single-sourced (empty = clean)."""
     bad = []
-    state = code_only(state_raw)
-    body = slice_body(state, "fun isServiceEnabled(")
+    try:
+        state_cv, state_lv = views(state_raw)
+        _rcv, recovery_lv = views(recovery_raw)
+    except KotlinLexError as exc:
+        return [f"accessibility listing sources could not be lexed ({exc}) — fail-closed"]
+    body = slice_body(state_lv, "fun isServiceEnabled(")
     if body is None:
         bad.append("A11yState.isServiceEnabled() not found — the probe lost its subject")
     else:
+        span = (state_lv.find("fun isServiceEnabled("),
+                state_lv.find("fun isServiceEnabled(") + len(body))
+        body_cv = state_cv[span[0]:span[1]]
         if SHARED_JUDGE not in body:
             bad.append("A11yState.isServiceEnabled no longer routes through "
                        "AccessibilityRecoveryManager.isRevokedIn — the listing predicate is "
                        "implemented a second time, which is exactly the shape that drifted")
+        # [B7 13-4 family-hole] 判据锚"返回值的极性"，不锚"某个函数名出现过"。
+        # isGrantRevoked 回答的是 "被吊销了吗"，isServiceEnabled 回答的是 "启用了吗"：
+        # 少了 `!` 就是语义反转，而 `SHARED_JUDGE` 子串命中完全看不出来。
+        polarity_ok = False
+        for m in re.finditer(r"(?<![\w.])return\b", body_cv):
+            e = strip_parens(body_cv[m.end():expr_end(body_cv, m.end())]).strip()
+            if not contains_ident(e, "isRevokedIn"):
+                continue
+            if e.startswith("!") and sole_call(e[1:].strip(), "isRevokedIn"):
+                polarity_ok = True
+        if SHARED_JUDGE in body and not polarity_ok:
+            bad.append("A11yState.isServiceEnabled does not RETURN the negation of "
+                       "AccessibilityRecoveryManager.isRevokedIn — the predicate answers "
+                       "`revoked`, so without the `!` (or with the value absorbed into `||`/`&&`) "
+                       "a healthy, bound service reads as disabled and an ungranted one as enabled")
         for anchor in LOCAL_MATCH_ANCHORS:
             if anchor in body:
                 bad.append(f"A11yState.isServiceEnabled carries a local entry matcher ({anchor!r}) "
@@ -535,7 +677,7 @@ def scan_judge_single_source(state_raw, recovery_raw):
             bad.append("A11yState.isServiceEnabled no longer consults the accessibility master "
                        "switch (a service bound with accessibility globally off receives nothing)")
 
-    recovery = code_only(recovery_raw)
+    recovery = recovery_lv
     body = slice_body(recovery, "fun isGrantRevoked(")
     if body is None:
         bad.append("AccessibilityRecoveryManager.isGrantRevoked() not found — the probe lost its subject")
@@ -547,41 +689,74 @@ def scan_judge_single_source(state_raw, recovery_raw):
 
 
 def release_guard_gaps(text):
-    """Every release of the prompt slot must sit under a token comparison.
+    """Every release of the prompt slot must sit under a LIVE token comparison.
 
     Decomposition-independent on purpose: the family lesson (see
     `claim_release_guard`) is that a shared run-state flag loses its ownership
     guard the moment a SECOND release path is written without one, so the
     criterion is attached to the write itself, wherever it lives.
+
+    `text` must be the structural view (comments/strings masked).
+
+    [B7 13-5 family-hole] 旧版只用四元组字面量白名单（`true/false/!true/!false`）
+    判"守卫是否被常量决定"，于是 `1 == 2 && promptToken != token` 整条守卫恒假却
+    仍是绿的。现在每个顶层 `&&`/`||` 操作数都做常量折叠，并且要求守卫体**真的
+    退出**（`if (promptToken != token) Unit` 保留了比较却什么也不拒绝）。
     """
     lines = text.split("\n")
-    hits = [i for i, line in enumerate(lines) if SLOT_RELEASE in line]
+    hits = [m.start() for m in re.finditer(re.escape(SLOT_RELEASE), text)]
     if not hits:
         return [f"the prompt slot has no release site (`{SLOT_RELEASE}` is gone) — the probe "
                 "lost its subject"]
     bad = []
-    for i in hits:
-        window = "\n".join(lines[max(0, i - SLOT_RELEASE_WINDOW):i + 1])
-        if "promptToken != " not in window:
-            bad.append(f"the slot release (`{SLOT_RELEASE}`, line {i + 1}) is not "
+    for pos in hits:
+        line_no = text.count("\n", 0, pos) + 1
+        line_start = text.rfind("\n", 0, pos) + 1
+        starts = [line_start]
+        for _ in range(SLOT_RELEASE_WINDOW):
+            k = text.rfind("\n", 0, starts[-1] - 1)
+            if k < 0:
+                break
+            starts.append(k + 1)
+        win_start = starts[-1]
+        win = text[win_start:pos]
+        here = pos - win_start
+        candidates = []
+        for cond, t0, t1, _e0, _e1 in if_blocks(win):
+            if "promptToken" not in cond:
+                continue
+            if t1 > here:
+                continue                      # 必须在该释放点之前结束
+            if brace_depth(win, t0) != brace_depth(win, here):
+                continue                      # 同块层：早退守卫，不是别的块里的
+            candidates.append((t0, cond, t0, t1))
+        if not candidates:
+            bad.append(f"the slot release (`{SLOT_RELEASE}`, line {line_no}) is not "
                        "ownership-guarded — a late teardown can dismiss the prompt a NEWER "
                        "waiter is showing")
             continue
-        # [wide-1024 dataflow] The comparison must be able to REJECT: a literal
-        # operand (`false &&`, `|| true`, `!true`) keeps the substring and kills
-        # the guard, which is the whole generation-counter mechanism.
-        for m in re.finditer(r"if\s*\(([^\n]*promptToken[^\n]*)\)", window):
-            if literal_decides(m.group(1)):
-                bad.append(f"the slot release's ownership guard is decided by a literal "
-                           f"(`{m.group(1).strip()}`, line {i + 1}) — the token comparison can "
-                           f"never reject a late teardown, so a stale watcher clears the slot a "
-                           f"NEWER waiter owns")
+        t0, cond, b0, b1 = max(candidates, key=lambda c: c[0])
+        if guard_decided_by_literal(cond):
+            bad.append(f"the slot release's ownership guard is decided by a literal "
+                       f"(`{cond.strip()}`, line {line_no}) — the token comparison can "
+                       f"never reject a late teardown, so a stale watcher clears the slot a "
+                       f"NEWER waiter owns")
+            continue
+        if not exits_like(win, b0, b1):
+            bad.append(f"the slot release's ownership guard does not EXIT "
+                       f"(`if ({cond.strip()})` at line {line_no}) — the comparison is there but "
+                       f"nothing is rejected, so a stale teardown still clears the slot a NEWER "
+                       f"waiter owns")
     return bad
+
 
 
 def scan_slot_identity(recovery_raw):
     """Findings for the repair-prompt slot's identity + lock (empty = clean)."""
-    text = code_only(recovery_raw)
+    try:
+        text, _lv = views(recovery_raw)
+    except KotlinLexError as exc:
+        return [f"AccessibilityRecoveryManager.kt could not be lexed ({exc}) — fail-closed"]
     bad = []
     decl = next((l for l in text.split("\n") if SLOT_DECL in l), None)
     if decl is None:
@@ -989,10 +1164,81 @@ def selftest():
           if a02_ok else f"  ❌ conflict arm did not isolate --visible-only → {found}")
     if not a02_ok:
         failures += 1
+
+    # ── B7 见证臂：每条变异都必须恰好摔在自己那条判据上 ────────────────────
+    # (名字, fixture, 扫描函数, 期望出现在报错里的判据片段)
+    witness_arms = [
+        # 13-1: 锚点藏在行尾注释里（parse") 缺陷：旧 code_only 只涂行首注释。
+        ("b7/service guard hidden in a trailing comment",
+         clean_service.replace(
+             "                if (!slot.isCallerWaiting()) return\n",
+             "                if (false) { // !slot.isCallerWaiting()\n"),
+         scan_service, "LIVE"),
+        ("b7/service guard absorbed by a constant",
+         clean_service.replace(
+             "                if (!slot.isCallerWaiting()) return\n",
+             "                if (!slot.isCallerWaiting() || true) return\n"),
+         scan_service, "LIVE"),
+        ("b7/service guard body no longer returns",
+         clean_service.replace(
+             "                if (!slot.isCallerWaiting()) return\n",
+             "                if (!slot.isCallerWaiting()) { }\n"),
+         scan_service, "LIVE"),
+        # 13-2: 三分支的**值**被改写（`|| true`），拼写全对。
+        ("b7/handler Read.Value absorbed",
+         clean_handler.replace(
+             "is VisibleOnlyFlag.Read.Value -> read.value",
+             "is VisibleOnlyFlag.Read.Value -> read.value || true"),
+         scan_handler, "Read.Value branch does not yield the caller's spelling"),
+        ("b7/handler Absent default inverted",
+         clean_handler.replace(
+             "VisibleOnlyFlag.Read.Absent -> true",
+             "VisibleOnlyFlag.Read.Absent -> false"),
+         scan_handler, "documented default"),
+        # 13-3: 调用还在，值被恒真化。
+        ("b7/handler plan() outcome absorbed",
+         clean_handler.replace(
+             "TapTextFlow.plan(n.isClickable, n.performAction(ACTION_CLICK))",
+             "TapTextFlow.plan(n.isClickable, n.performAction(ACTION_CLICK) || true)"),
+         scan_handler, "FABRICATED self-click outcome"),
+        # 13-4: 共享谓词还在，极性被反转。
+        ("b7/judge polarity dropped",
+         (clean_judge_state.replace(
+             "        return !AccessibilityRecoveryManager.isRevokedIn(\n",
+             "        return AccessibilityRecoveryManager.isRevokedIn(\n"), clean_judge_recovery),
+         lambda t: scan_judge_single_source(*t), "does not RETURN the negation"),
+        # 13-5 / 自疑：非白名单的恒假字面量、以及"比较还在但什么也不拒绝"。
+        ("b7/slot guard decided by `1 == 2`",
+         clean_slot.replace(
+             "        if (promptToken != token) return null\n",
+             "        if (1 == 2 && promptToken != token) return null\n"),
+         scan_slot_identity, "decided by a literal"),
+        ("b7/slot guard decided by `! true`",
+         clean_slot.replace(
+             "        if (promptToken != token) return null\n",
+             "        if (! true && promptToken != token) return null\n"),
+         scan_slot_identity, "decided by a literal"),
+        ("b7/slot guard keeps the comparison but rejects nothing",
+         clean_slot.replace(
+             "        if (promptToken != token) return null\n",
+             "        if (promptToken != token) Unit\n"),
+         scan_slot_identity, "does not EXIT"),
+    ]
+    witness_failures = 0
+    for name, fixture, fn, needle in witness_arms:
+        got = fn(fixture)
+        ok = any(needle in item for item in got)
+        print(f"  {'✅' if ok else '❌'} {name} → {'; '.join(got)[:90] if got else 'CLEAN (arm is dead)'}")
+        if not ok:
+            witness_failures += 1
+    failures += witness_failures
+
     print(f"A11Y_STATUS_SELFTEST={'PASS' if status_failures == 0 else 'FAIL'}")
     print(f"A11Y_JUDGE_SINGLE_SOURCE_SELFTEST={'PASS' if judge_failures == 0 else 'FAIL'}")
     print(f"A11Y_SLOT_IDENTITY_SELFTEST={'PASS' if slot_failures == 0 else 'FAIL'}")
     print(f"A11Y_VALUE_FLAG_SELFTEST={'PASS' if a02_ok else 'FAIL'}")
+    print(f"A11Y_HANDLER_CONTRACT_SELFTEST={'PASS' if failures == 0 else 'FAIL'} "
+          f"({len(cases) + len(witness_arms)} arms)")
     return 1 if failures else 0
 
 
