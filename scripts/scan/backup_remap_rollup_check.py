@@ -73,7 +73,19 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _kotlin_lexer import analyse, mask_code, mask_comments, KotlinLexError  # noqa: E402
-from _kotlin_ast import const_bool, stmt_spans  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    if_blocks,
+    match_bracket,
+    stmt_spans,
+    strip_parens,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    contains_ident,
+    expr_end,
+    value_sources,
+)
 
 CFG_REL = "src/android/app/src/main/java/com/rikkaminis/app/backup/ConfigBackup.kt"
 MEM_REL = "src/android/app/src/main/java/com/rikkaminis/app/data/repository/MemoryRepository.kt"
@@ -276,24 +288,21 @@ def _mask(text):
 def _balanced(src, open_idx, opener="(", closer=")"):
     """Index just past the closer matching the opener at [open_idx] (-1 if none).
 
-    Runs on masked text: a brace/paren inside a string literal or a comment is
-    not structure.
+    [R3-t18] the hand-rolled counter is gone — the shared `match_bracket` runs
+    on the shared masked view, so the repo has ONE bracket-matching
+    implementation (a divergence between two of them is how parser-death
+    witnesses land).
     """
     masked = _mask(src)
-    depth = 0
-    for i in range(open_idx, len(masked)):
-        if masked[i] == opener:
-            depth += 1
-        elif masked[i] == closer:
-            depth -= 1
-            if depth == 0:
-                return i + 1
-    return -1
+    if open_idx < 0 or open_idx >= len(masked) or masked[open_idx] != opener:
+        return -1
+    close = match_bracket(masked, open_idx)
+    return -1 if close < 0 else close + 1
 
 def _match_paren(text, open_idx):
     """Index of the `)` matching the `(` at open_idx (-1 if none)."""
-    end = _balanced(text, open_idx, "(", ")")
-    return -1 if end < 0 else end - 1
+    close = match_bracket(_mask(text), open_idx)
+    return close
 
 def _split_top(s, op):
     """Split at depth-0 occurrences of `op` (literals/comments masked)."""
@@ -315,25 +324,18 @@ def _split_top(s, op):
     return parts
 
 def _unparen(p):
-    p = p.strip()
-    while p.startswith("(") and p.endswith(")") and _match_paren(p, 0) == len(p) - 1:
-        p = p[1:-1].strip()
-    return p
+    return strip_parens(p)
 
 def _lit_value(part):
-    """True/False when `part` is a bare boolean literal (optionally negated)."""
-    p = _unparen(part)
-    neg = False
-    while p.startswith("!"):
-        neg = not neg
-        p = _unparen(p[1:])
-    if p == "true":
-        v = True
-    elif p == "false":
-        v = False
-    else:
-        return None
-    return (not v) if neg else v
+    """True/False when `part` folds to a boolean constant, else None.
+
+    [R3-t18] the old version whitelisted the two literal spellings (`true` /
+    `false`, optionally negated), so `if (1 == 2) …` read as "a real runtime
+    condition" and both branches stayed live. The shared `const_bool` folds the
+    whole constant-precedence grammar (comparisons, `!`, `&&` / `||`
+    short-circuit), which is the direction that keeps a dead branch dead.
+    """
+    return const_bool(_unparen(part))
 
 def _truth(cond):
     """True/False when a condition is DECIDED by a constant, else None.
@@ -738,7 +740,71 @@ def check_delete_guard(src):
     return []
 
 
-def check_voice_group_remap(src):
+# ── [R3-t18] the group-id binding family is DERIVED, not enumerated ───────
+#
+# Three witnesses passed this gate unchanged, all on the same seam: the gate
+# carried a hand-written list of field paths and looked only at the READER half
+# of each binding, so
+#   * r19 #8 deleted the `"defaults.subGroup"` arm from remapDefaultsIds — the
+#     enumerated pair (voice in/out) was untouched, so nothing fired;
+#   * r19 #7 stored `null` instead of the validated id in the writer — the path
+#     + reader assertions were still satisfied;
+#   * r19 #6 handed `decoded` (the pre-remap value) to `field.write(` in
+#     Stage 3 — no arm looked at that hand-off at all.
+# The family is now derived from the REGISTRY (a field is a group-id binding
+# iff its writer validates the id against `modelGroups`), and every binding is
+# checked end to end: registry → remapDefaultsIds → the writer stores the value
+# it validated → Stage 3 writes what remapDefaultsIds returned.
+GROUP_ID_GUARD = "modelGroups.none { it.id =="
+CLOSURE_FIELD = re.compile(r"\bClosureField\s*\(")
+FIELD_PATH = re.compile(r'path\s*=\s*"([^"]+)"')
+READER_PROP = re.compile(r"\brepo\.([A-Za-z_]\w*)\s*\?:")
+WRITER_LAMBDA = re.compile(r"\bwriter\s*=\s*\{")
+CHECKED_VAL = re.compile(
+    r"\bval\s+([A-Za-z_]\w*)\s*=\s*\(\s*([A-Za-z_]\w*)\s+as\?\s+ConfigValue\.Str\s*\)"
+    r"\s*\?\.\s*value\b")
+REPO_WRITE = re.compile(r"\brepo\.([A-Za-z_]\w*)\s*=(?!=)")
+
+
+def _closure_fields(src):
+    """[(path, field_body, decl_pos)] for every `ClosureField(` registration."""
+    out = []
+    for m in CLOSURE_FIELD.finditer(src):
+        close = match_bracket(src, m.end() - 1)
+        if close < 0:
+            continue
+        body = src[m.end():close]
+        pm = FIELD_PATH.search(body)
+        if not pm:
+            continue
+        out.append((pm.group(1), body, m.start()))
+    return out
+
+
+def group_id_defaults_paths(src_builtins):
+    """`defaults.*` paths whose writer validates the value against modelGroups.
+
+    Derived from the registry, never enumerated: a group-id default added
+    tomorrow is covered the moment it is registered, and an arm deleted from
+    remapDefaultsIds' `when (path)` is red without anyone extending a list.
+    """
+    return sorted({
+        path for path, body, _pos in _closure_fields(src_builtins)
+        if path.startswith("defaults.") and GROUP_ID_GUARD in body
+    })
+
+
+def _writer_body(field_body):
+    """Text inside the `writer = { v -> … }` lambda, or None."""
+    m = WRITER_LAMBDA.search(field_body)
+    if not m:
+        return None
+    open_i = m.end() - 1
+    close = match_bracket(field_body, open_i)
+    return None if close < 0 else field_body[open_i + 1:close]
+
+
+def check_voice_group_remap(src, src_builtins=None):
     """D2: remapDefaultsIds must route both voice group paths to groupIdMap.
 
     [wide4-11 D2, family-hole] this criterion judged the group arm with the OLD
@@ -748,12 +814,27 @@ def check_voice_group_remap(src):
     groupIdMap else emptyMap()` stayed green: only the branch that got attacked
     was fixed, its neighbour was not. Both arms now go through the same helper
     (`_routes_to_map`), so the judgement cannot diverge per path again.
+    [R3-t18, symmetric] the path list used to be hand-written
+    (`defaults.voiceInputGroup` / `defaults.voiceOutputGroup`), so deleting the
+    sibling `"defaults.subGroup"` arm from the very same `when (path)` block —
+    the arm right next to them — left the gate green while a cross-device
+    restore dropped the sub-group binding. Given the registry, the family is
+    DERIVED (every `defaults.*` field whose writer validates the id against
+    `modelGroups`), so an arm deleted from ANY of them is red.
     """
     branch, rot = _when_path_branch(src)
     if rot:
         return [(CFG_REL, 0, rot)]
+    if src_builtins is None:
+        paths = list(VOICE_GROUP_PATHS)
+    else:
+        paths = group_id_defaults_paths(src_builtins)
+        if not paths:
+            return [(BUILTINS_REL, 0,
+                     "no `defaults.*` field validates its value against modelGroups — "
+                     "the group-id binding family cannot be derived (re-anchor this gate)")]
     out = []
-    for path in VOICE_GROUP_PATHS:
+    for path in paths:
         ok, value = _routes_to_map(branch, '"%s"' % path, "groupIdMap")
         if ok:
             continue
@@ -796,6 +877,134 @@ def check_voice_defaults_registered(src_builtins):
                 "exports a constant instead of the live binding" % (path, reader.split(" ?:")[0].strip()),
             ))
     return out
+
+
+def check_defaults_writer_lands_value(src_builtins):
+    """A group-id writer must STORE the id it validated (r19 #7).
+
+    The gate used to assert `path = "defaults.voiceInputGroup"` and
+    `reader = { … repo.voiceInputGroupId … }` — both survive a writer whose
+    non-empty branch stores `null`, so a backup restore / `minis-config set`
+    reports `applied++` while the binding is silently cleared and the voice
+    panel falls back to the System engine. The criterion is the EFFECT: some
+    `repo.<prop> = <expr>` whose live value IS the checked variable, storing
+    into the same property the reader reads, on a path that is not the
+    "empty ⇒ clear" arm.
+    """
+    paths = set(group_id_defaults_paths(src_builtins))
+    if not paths:
+        return [(BUILTINS_REL, 0,
+                 "no `defaults.*` field validates its value against modelGroups — "
+                 "the group-id binding family cannot be derived (re-anchor this gate)")]
+    out = []
+    for path, body, pos in _closure_fields(src_builtins):
+        if path not in paths:
+            continue
+        line = line_of(src_builtins, pos)
+        wb = _writer_body(body)
+        if wb is None:
+            out.append((BUILTINS_REL, line,
+                        '"%s" has no `writer = { … }` lambda — the field reads a value '
+                        'it can never store' % path))
+            continue
+        cm = CHECKED_VAL.search(wb)
+        if cm is None:
+            out.append((BUILTINS_REL, line,
+                        '"%s" writer does not bind the validated string (`val <s> = '
+                        '(v as? ConfigValue.Str)?.value`) — what it stores cannot be '
+                        'traced (fail-closed)' % path))
+            continue
+        checked = cm.group(1)
+        reader = READER_PROP.search(body)
+        reader_prop = reader.group(1) if reader else None
+        stores = []
+        for m in REPO_WRITE.finditer(wb):
+            rhs = wb[m.end():expr_end(wb, m.end())]
+            srcs = value_sources(rhs)
+            if srcs and all(contains_ident(s, checked) for s in srcs):
+                stores.append((m.group(1), m.start()))
+        if not stores:
+            out.append((BUILTINS_REL, line,
+                        '"%s" writer validates `%s` and then stores something else '
+                        '(no `repo.<prop> = %s` on any arm) — the guard passes and the '
+                        'binding is written away, so the restore reports it as applied '
+                        'while the id is gone' % (path, checked, checked)))
+            continue
+        props = {p for p, _ in stores}
+        if reader_prop and reader_prop not in props:
+            out.append((BUILTINS_REL, line,
+                        '"%s" reads `repo.%s` but stores the checked id into %s — the '
+                        'field round-trips through two different properties'
+                        % (path, reader_prop,
+                           ", ".join("repo." + p for p in sorted(props)))))
+            continue
+        for cond, t_start, t_end, _e_start, _e_end in if_blocks(wb):
+            if "isEmpty" not in cond or not contains_ident(cond, checked):
+                continue
+            on_empty_arm = [p for p, store_pos in stores if t_start <= store_pos < t_end]
+            if on_empty_arm:
+                out.append((BUILTINS_REL, line,
+                            '"%s" stores the validated `%s` inside the `%s.isEmpty()` '
+                            'branch — that arm only runs for an empty value, so a real '
+                            'id is never persisted' % (path, checked, checked)))
+                break
+    return out
+
+
+REMAP_CALL = re.compile(r"(?<![\w.])remapDefaultsIds\s*\(")
+FIELD_WRITE_CALL = re.compile(r"\bfield\s*\.\s*write\s*\(")
+FIELD_VALIDATE_CALL = re.compile(r"\bfield\s*\.\s*valueSchema\s*\.\s*validate\s*\(")
+
+
+def check_stage3_remap_consumed(src):
+    """Stage 3 must WRITE what remapDefaultsIds returned (r19 #6).
+
+    The gate pinned the remap function's own body and the Stage 1/2/6/8 restore
+    stages, but never the one hand-off between them: the `fields` loop that
+    computes `val value = remapDefaultsIds(…)` and then stores it. Swapping the
+    argument back to the pre-remap `decoded` keeps every existing arm green —
+    and a cross-device restore then skips every `defaults.*Group` binding
+    (`InvalidValue("No group with id …")` → `skipped`), so the install wakes up
+    with no default primary / sub / voice group at all.
+    """
+    code = _mask(src)
+    calls = [m for m in REMAP_CALL.finditer(code)
+             if not re.search(r"\bfun\s+$", code[max(0, m.start() - 40):m.start()])]
+    if not calls:
+        return [(CFG_REL, 0,
+                 "Stage 3 no longer calls remapDefaultsIds( — every defaults.*Group "
+                 "binding a restored backup carries keeps the source install's id")]
+    m = calls[0]
+    line = line_of(src, m.start())
+    head = code[max(0, m.start() - 160):m.start()]
+    bm = re.search(r"\bval\s+([A-Za-z_]\w*)\s*=\s*$", head)
+    if bm is None:
+        return [(CFG_REL, line,
+                 "the remapDefaultsIds( result is not bound to a local — the remapped "
+                 "value cannot be traced to the field write (fail-closed); re-anchor "
+                 "this gate")]
+    var = bm.group(1)
+    for pat, label in ((FIELD_VALIDATE_CALL, "field.valueSchema.validate("),
+                       (FIELD_WRITE_CALL, "field.write(")):
+        hits = list(pat.finditer(code))
+        if not hits:
+            return [(CFG_REL, line,
+                     "no `%s` follows the remap call — the restore hand-off moved "
+                     "(re-anchor this gate); fail-closed" % label)]
+        h = hits[0]
+        args = call_args(code, h.end() - 1)
+        if not args:
+            return [(CFG_REL, line_of(src, h.start()),
+                     "`%s` arguments cannot be delimited (fail-closed)" % label)]
+        got = " ".join(code[args[0][0]:args[0][1]].split())[:48]
+        arg_srcs = value_sources(code[args[0][0]:args[0][1]])
+        if not arg_srcs or not all(contains_ident(s, var) for s in arg_srcs):
+            return [(CFG_REL, line_of(src, h.start()),
+                     "Stage 3 keeps `val %s = remapDefaultsIds(…)` but hands `%s` to "
+                     "`%s` — the remapped id is computed and thrown away, so a "
+                     "cross-device restore skips every defaults.*Group binding "
+                     "(`No group with id …` → skipped)" % (var, got, label))]
+    return []
 
 
 def _provider_key_assignment(src):
@@ -1119,8 +1328,10 @@ def check(root, raw_cfg=None, raw_mem=None, raw_builtins=None, raw_engine=None,
     if out:
         return out
     out += check_remap_defaults(raw_cfg)
-    out += check_voice_group_remap(raw_cfg)
+    out += check_voice_group_remap(raw_cfg, raw_builtins)
     out += check_voice_defaults_registered(raw_builtins)
+    out += check_defaults_writer_lands_value(raw_builtins)
+    out += check_stage3_remap_consumed(raw_cfg)
     out += check_thinking_rule_key(raw_cfg)
     out += check_import_chat_sections(raw_cfg)
     out += check_memory_pack(raw_cfg)
@@ -1152,6 +1363,9 @@ def selftest(root):
 
     def on_cfg(fn):
         return lambda c, m, b, e, r, _fn=fn: _fn(c)
+
+    def on_cfg_bi(fn):
+        return lambda c, m, b, e, r, _fn=fn: _fn(c, b)
 
     def on_mem(fn):
         return lambda c, m, b, e, r, _fn=fn: _fn(m)
@@ -1258,21 +1472,25 @@ def selftest(root):
     # 9. voice group binding dropped from remapDefaultsIds' group branch.
     arm(
         "M9 voiceInputGroup not routed",
-        on_cfg(check_voice_group_remap),
+        on_cfg_bi(check_voice_group_remap),
         cfg=sub_once(cfg, '"defaults.voiceInputGroup", ', ""),
     )
     # 9b. routed to the WRONG map.
     arm(
         "M9b voiceOutputGroup routed to entryIdMap",
-        on_cfg(check_voice_group_remap),
+        on_cfg_bi(check_voice_group_remap),
         cfg=sub_once(cfg,
                      '"defaults.voiceOutputGroup", "defaults.agentLoopGroups" -> groupIdMap',
                      '"defaults.agentLoopGroups" -> groupIdMap\n        "defaults.voiceOutputGroup" -> entryIdMap'),
     )
     # 10. registration dropped (path re-spelled → resolveField/exportJSON miss).
+    #     [R3-t18] the re-spelled field is still a group-id binding as far as the
+    #     registry-derived family is concerned, so the remap criterion fires on it
+    #     too — the arm now expects both halves (unregistered + un-routed).
     arm(
         "M10 voiceOutputGroup unregistered",
-        on_bui(check_voice_defaults_registered),
+        lambda c, m, b, e, r: (check_voice_defaults_registered(b)
+                               + check_voice_group_remap(c, b)),
         bui=sub_once(bui, 'path = "defaults.voiceOutputGroup",', 'path = "defaults.voiceOutputGroupUnused",'),
     )
     # 10b. registered but reading a constant instead of the repo property.
@@ -1571,11 +1789,11 @@ def selftest(root):
         return sub_once(cfg, anchor_voice,
                         anchor_voice.replace("-> groupIdMap", "-> " + value))
 
-    arm("w4-D2 group arm dead branch", on_cfg(check_voice_group_remap),
+    arm("w4-D2 group arm dead branch", on_cfg_bi(check_voice_group_remap),
         cfg=voice_as("if (false) groupIdMap else emptyMap()"))
-    arm("w4-D2 group arm filtered empty", on_cfg(check_voice_group_remap),
+    arm("w4-D2 group arm filtered empty", on_cfg_bi(check_voice_group_remap),
         cfg=voice_as("groupIdMap.filter { false }"))
-    arm("w4-D2 group arm lambda empty", on_cfg(check_voice_group_remap),
+    arm("w4-D2 group arm lambda empty", on_cfg_bi(check_voice_group_remap),
         cfg=voice_as("{ groupIdMap.let { emptyMap() } }"))
 
     # C3: the guard survives in the spelling, a dead branch swallows it.
@@ -1606,6 +1824,36 @@ def selftest(root):
         on_mem(check_delete_guard),
         mem=sub_once(mem, anchor_guard + "        return File(memoryDir, name).delete()\n",
                      "        return File(memoryDir, name).delete()\n" + anchor_guard))
+
+    # ── [R3-t18] round-3 witnesses: the group-id binding family ─────────
+    # w8 (symmetric): the sibling arm of the SAME `when (path)` block is
+    #    deleted — the enumerated voice pair is untouched, so only a DERIVED
+    #    family can fire.
+    arm(
+        "w8 subGroup routing arm deleted",
+        on_cfg_bi(check_voice_group_remap),
+        cfg=sub_once(cfg, '"defaults.primaryGroup", "defaults.subGroup", ',
+                     '"defaults.primaryGroup", '),
+    )
+    # w7 (dual-gate): the writer validates the id and stores `null` instead.
+    arm(
+        "w7 voiceInputGroup writer stores null",
+        on_bui(check_defaults_writer_lands_value),
+        bui=sub_once(bui, "                        repo.voiceInputGroupId = s\n",
+                     "                        repo.voiceInputGroupId = null\n"),
+    )
+    # w6 (dual-gate): Stage 3 keeps the remap call and hands `decoded` over.
+    arm(
+        "w6 stage3 writes the pre-remap value",
+        on_cfg(check_stage3_remap_consumed),
+        cfg=sub_once(
+            cfg,
+            "                    field.valueSchema.validate(value)\n"
+            "                    field.write(value)\n",
+            "                    field.valueSchema.validate(decoded)\n"
+            "                    field.write(decoded)\n",
+        ),
+    )
 
     failures = []
     for name, crit, c, m, b, e, r in arms:

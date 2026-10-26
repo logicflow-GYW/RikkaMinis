@@ -207,7 +207,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _kotlin_lexer import KotlinLexError, mask_code, mask_comments  # noqa: E402
 from _kotlin_ast import (  # noqa: E402
-    const_value, function_body, if_blocks, match_bracket, split_top, tail_expr,
+    const_value, enclosing_conditions, function_body, if_blocks, match_bracket,
+    split_top, tail_expr,
 )
 from _kotlin_valueflow import (  # noqa: E402
     call_args, contains_ident, guard_feasible, path_feasible, value_sources,
@@ -1104,6 +1105,44 @@ def _transport_decision(code, value):
                    % v.strip()[:60])
 
 
+def _reconcile_payload_problem(args):
+    """[R3-t18 #28] `oauth` / `serverUrl` must describe the server being saved.
+
+    C2 pinned `urlTransport` (the transport decision) but nothing looked at the
+    two OTHER inputs that decision is made from. A witness replaced
+    `oauth = server.oauth` with `oauth = null`: `reconcileForServer` reads that
+    as "the user dropped the OAuth config" and immediately purges the client
+    secret, the tokens and the guest bridge file — so every save of an
+    authorized server silently destroys its own credentials, while the token
+    looks reconciled and every existing arm stays green. The same holds for a
+    literal `serverUrl`, which reads as an endpoint change.
+    """
+    oauth = _named_value(args, "oauth")
+    partner = _named_value(args, "server")
+    url = _named_value(args, "serverUrl")
+    if oauth is None:
+        return ("`oauth = …` is not passed — reconcileForServer cannot tell whether the "
+                "server still carries an OAuth config, and a missing answer purges the "
+                "live credentials")
+    if partner is None or url is None:
+        return ("`server` / `serverUrl` are not passed — the reconcile payload cannot be "
+                "attributed to the server being saved (fail-closed)")
+    m = re.match(r"([A-Za-z_]\w*)", partner.strip())
+    host = m.group(1) if m else None
+    for label, expr in (("oauth", oauth), ("serverUrl", url)):
+        if re.fullmatch(r"null", expr.strip()) or const_value(expr.strip()) is not None:
+            return ("`%s = %s` is a literal — reconcileForServer decides the server "
+                    "cancelled its OAuth config / changed endpoint and PURGES the live "
+                    "tokens and the guest bridge file on every save"
+                    % (label, expr.strip()[:40]))
+        srcs = value_sources(expr)
+        if host is None or not any(contains_ident(s, host) for s in srcs):
+            return ("`%s` is not derived from the server being saved (it reads `%s`) — "
+                    "the reconcile decision is then made about a different server"
+                    % (label, expr.strip()[:48]))
+    return None
+
+
 def check_repo(code):
     v = []
     for path in WRITE_PATHS:
@@ -1149,6 +1188,10 @@ def check_repo(code):
                 "survives the switch (crack 1)"
                 % (line_of(code, idx), REPO_FULL_CALL, TRANSPORT_ARG, note)
             )
+        payload = _reconcile_payload_problem(args)
+        if payload:
+            v.append("MCPRepository.kt:%d: `%s` — %s"
+                     % (line_of(code, idx), REPO_FULL_CALL, payload))
     if SECRET_ONLY_VERB in code:
         v.append(
             "MCPRepository.kt:%d: uses `%s` as credential handling — that verb "
@@ -2084,6 +2127,139 @@ def check_artifact_redaction(scoped, masked, archiver_masked):
     return r1, r2, r3
 
 
+# ── [R3-t18] witness #27: the credential-free export hand-off ─────────────
+def check_export_secret_strip(scoped, masked):
+    """The ONE production caller of `stripExportedMcpSecrets` must actually run.
+
+    C7 pins the sanitiser's BODY (directly and through
+    `redactMcpArtifactEntry`) and C8 pins the artifact archive — but nothing
+    looked at the `mcpServers` hand-off in `buildSections`, the only place the
+    *manual / auto* export strips credentials. A witness ANDed `&& false` into
+    that single `if (!includeSecrets)` and every arm stayed green: a
+    "without secrets" export — and every unattended auto backup, which is
+    pushed to WebDAV with no prompt at all — then ships plaintext
+    `Authorization: Bearer …` headers, env tokens and inline credentials.
+
+    Judged on the EFFECT, not the call: reachable, gated on `!includeSecrets`,
+    and scrubbing the very object that `mcpServers.put(…)` writes.
+    """
+    body = body_of(masked, "buildSections")
+    if body is None:
+        return ["ConfigBackup.kt: no `fun buildSections(` body — the export hand-off "
+                "this criterion pins is gone (re-anchor it; a missing body must not "
+                "read as green)"]
+    calls = [m for m in re.finditer(re.escape(MCP_SECRET_STRIP) + r"\s*\(", body)]
+    if not calls:
+        return ["ConfigBackup.kt: buildSections never calls `" + MCP_SECRET_STRIP +
+                "(` — a credentials-free export writes mcpRepo.exportServerJSON(…) "
+                "verbatim, so every Authorization header / env token / inline "
+                "credential rides into the manual export and into every unattended "
+                "WebDAV auto backup"]
+    v = []
+    for m in calls:
+        if not path_feasible(body, m.start()):
+            v.append(
+                "ConfigBackup.kt: the `" + MCP_SECRET_STRIP + "(` call in buildSections "
+                "is DEAD-GUARDED (a constant condition can never hold) — the sanitiser "
+                "exists, the export never runs it, and the \"without secrets\" payload "
+                "carries the plaintext tokens anyway")
+            continue
+        conds = [c for _kind, c in enclosing_conditions(body, m.start())]
+        if not any(re.search(r"!\s*includeSecrets|includeSecrets\s*==\s*false", c)
+                   for c in conds):
+            v.append(
+                "ConfigBackup.kt: `" + MCP_SECRET_STRIP + "(` is not gated on "
+                "`!includeSecrets` — the strip must run exactly on the "
+                "credentials-free path (unguarded, an explicit with-secrets export is "
+                "redacted too, which is the opposite defect)")
+            continue
+        args = call_args(body, m.end() - 1)
+        if not args:
+            v.append("ConfigBackup.kt: the `" + MCP_SECRET_STRIP +
+                     "(` call cannot be delimited (fail-closed)")
+            continue
+        obj = body[args[0][0]:args[0][1]].strip()
+        if not re.match(r"^[A-Za-z_]\w*$", obj):
+            v.append("ConfigBackup.kt: `" + MCP_SECRET_STRIP + "(` scrubs `%s` instead "
+                     "of the server entry — the sanitised copy is not the thing that "
+                     "reaches mcpServers" % obj[:48])
+            continue
+        if not re.search(r"\bput\s*\(\s*" + re.escape(obj) + r"\s*\)", body):
+            v.append("ConfigBackup.kt: `" + MCP_SECRET_STRIP + "(%s)` scrubs a copy, but a "
+                     "different object is what `mcpServers.put(…)` writes — the "
+                     "sanitised value is computed and thrown away" % obj)
+    return v
+
+
+# ── [R3-t18] witness #29: the save path must carry the form's OAuth config ─
+FORM_BUILDER = "buildServerFromForm"
+CONFIG_CTOR = "MCPServerConfig("
+
+
+def check_form_oauth_persisted(code):
+    """`buildServerFromForm()` must hand the real OAuth config to the repository.
+
+    C4/C5 pin the field states (`remember(editServer)`) and the live-entry
+    resolution; C1/C2 pin the repository's write paths. The construction in
+    between — the only place the form's OAuth block becomes an
+    `MCPServerConfig` — was nobody's: a witness replaced
+    `oauth = currentOAuthConfig()` with `oauth = null`, so every server saved
+    through the UI loses its OAuth config AND `reconcileOAuth` reads the null as
+    "OAuth removed" and purges the tokens the user just authorized.
+    """
+    body = body_of(code, FORM_BUILDER)
+    if body is None:
+        return ["MCPIntegrationsScreen.kt: no `fun " + FORM_BUILDER + "(` — the save "
+                "path this criterion pins is gone (re-anchor it; an absent builder must "
+                "not read as green)"]
+    ctors = [m.start() for m in re.finditer(re.escape(CONFIG_CTOR), body)]
+    if not ctors:
+        return ["MCPIntegrationsScreen.kt: `" + FORM_BUILDER + "(` builds no " +
+                CONFIG_CTOR + " — the form no longer produces a server config "
+                "(re-anchor this gate)"]
+    v = []
+    url_branch = 0
+    for pos in ctors:
+        lp = body.find("(", pos)
+        args = call_args(body, lp)
+        if not args:
+            v.append("MCPIntegrationsScreen.kt: a " + CONFIG_CTOR + " call cannot be "
+                     "delimited (fail-closed)")
+            continue
+        named = {}
+        for a, b in args:
+            seg = body[a:b]
+            m = re.match(r"\s*([A-Za-z_]\w*)\s*=(?!=)", seg)
+            if m:
+                named[m.group(1)] = seg[m.end():]
+        if "url" not in named:
+            continue  # the STDIO branch carries no OAuth config
+        url_branch += 1
+        oauth = named.get("oauth")
+        if oauth is None:
+            v.append(
+                "MCPIntegrationsScreen.kt: the url-transport " + CONFIG_CTOR + " is built "
+                "without `oauth = …` — every MCP server saved through the form loses its "
+                "OAuth config, and reconcileOAuth then treats it as OAuth-free and purges "
+                "the tokens the user just authorized")
+            continue
+        if re.fullmatch(r"null", oauth.strip()) or const_value(oauth.strip()) is not None:
+            v.append(
+                "MCPIntegrationsScreen.kt: `oauth = %s` — a literal, so the form's OAuth "
+                "Client ID / endpoints / redirect URI never reach the repository, and the "
+                "reconcile purges any live token on save" % oauth.strip()[:40])
+            continue
+        if not any("currentOAuthConfig" in s for s in value_sources(oauth)):
+            v.append(
+                "MCPIntegrationsScreen.kt: `oauth = %s` is not built from "
+                "currentOAuthConfig() — the persisted config is detached from the fields "
+                "the user edited" % oauth.strip()[:48])
+    if not url_branch:
+        v.append("MCPIntegrationsScreen.kt: `" + FORM_BUILDER + "(` has no url-transport "
+                 "branch (no " + CONFIG_CTOR + " with `url =`) — re-anchor this criterion")
+    return v
+
+
 def read(root, rel):
     with open(os.path.join(root, rel), "r", encoding="utf-8") as fh:
         return fh.read()
@@ -2160,11 +2336,16 @@ def _run(root):
         v_pack, v_rule, v_arch = check_artifact_redaction(
             mask_comments(backup_raw), mask(backup_raw), mask(archiver_raw))
         violations += v_pack + v_rule + v_arch
+        # [R3-t18 #27] the credentials-free export hand-off (buildSections).
+        violations += check_export_secret_strip(
+            mask_comments(backup_raw), mask(backup_raw))
     ui_path = os.path.join(root, UI_REL)
     ui_keyed = None
     if os.path.exists(ui_path):
         ui_v, ui_keyed = check_ui(mask(read(root, UI_REL)))
         violations += ui_v
+        # [R3-t18 #29] the form's OAuth config must reach the repository.
+        violations += check_form_oauth_persisted(mask(read(root, UI_REL)))
     else:
         # Drift-detector convention: gates in this suite may be run against a
         # mini tree holding only the files a fixture is about. The UI criteria
@@ -2740,6 +2921,20 @@ object ConfigBackup {
         return segs.size >= 2 && segs[0] == "mcp" && segs[1] == "oauth"
     }
 
+    suspend fun buildSections(artifactRoots: java.io.File?, includeSecrets: Boolean, mcpRepo: MCPRepository?) {
+        val mcpServers = JSONArray()
+        for (server in mcpRepo.servers.value) {
+            val raw = mcpRepo.exportServerJSON(server) ?: continue
+            val obj = JSONObject(raw)
+            if (!includeSecrets) stripExportedMcpSecrets(obj)
+            mcpServers.put(obj)
+        }
+    }
+
+    internal fun stripExportedMcpSecrets(obj: JSONObject) {
+        obj.remove("headers")
+    }
+
     internal fun isMcpServerListEntryName(name: String): Boolean {
         val segs = ArrayList<String>(4)
         for (seg in name.split('/')) {
@@ -2793,6 +2988,47 @@ BAD_BACKUP_EXTRACT_RAW = GOOD_BACKUP.replace(
 STAGE9_PREDICATE_BRANCH = (
     "        if (dropPrestagedServerList && isMcpServerListEntryName(src.name)) dropped++\n")
 # the drop is gone entirely (a restore overwrites what Stage 7 merged)
+# ── [R3-t18 #27] the credentials-free export hand-off (buildSections) ─────
+BAD_BACKUP_STRIP_DEAD = GOOD_BACKUP.replace(
+    "            if (!includeSecrets) stripExportedMcpSecrets(obj)",
+    "            if (!includeSecrets && false) stripExportedMcpSecrets(obj)")
+BAD_BACKUP_STRIP_ABSENT = GOOD_BACKUP.replace(
+    "            if (!includeSecrets) stripExportedMcpSecrets(obj)\n", "")
+BAD_BACKUP_STRIP_COPY = GOOD_BACKUP.replace(
+    "stripExportedMcpSecrets(obj)", "stripExportedMcpSecrets(obj.copy())")
+BAD_BACKUP_STRIP_UNGATED = GOOD_BACKUP.replace(
+    "            if (!includeSecrets) stripExportedMcpSecrets(obj)",
+    "            stripExportedMcpSecrets(obj)")
+
+# ── [R3-t18 #28] the reconcile payload (oauth / serverUrl) ────────────────
+BAD_REPO_OAUTH_NULL = GOOD_REPO.replace("oauth = server.oauth,", "oauth = null,")
+BAD_REPO_URL_LITERAL = GOOD_REPO.replace("serverUrl = server.url,", 'serverUrl = "",')
+
+# ── [R3-t18 #29] the form's OAuth config must reach the repository ────────
+GOOD_FORM = """
+class Screen {
+    fun buildServerFromForm(): MCPServerConfig? {
+        return if (isUrlTransport) {
+            MCPServerConfig(
+                id = name.trim(),
+                url = url.trim(),
+                oauth = currentOAuthConfig(),
+            )
+        } else {
+            MCPServerConfig(
+                id = name.trim(),
+                command = command.trim(),
+            )
+        }
+    }
+}
+"""
+BAD_FORM_OAUTH_NULL = GOOD_FORM.replace("oauth = currentOAuthConfig(),", "oauth = null,")
+BAD_FORM_OAUTH_DROPPED = GOOD_FORM.replace("                oauth = currentOAuthConfig(),\n", "")
+BAD_FORM_OAUTH_DETACHED = GOOD_FORM.replace(
+    "oauth = currentOAuthConfig(),", "oauth = rememberedLastSaveOauth,")
+
+
 BAD_STAGE9_NO_DROP = GOOD_BACKUP.replace(STAGE9_PREDICATE_BRANCH, "")
 # the skip is only DESCRIBED — a comment cannot satisfy a criterion
 BAD_STAGE9_COMMENT_ONLY = GOOD_BACKUP.replace(
@@ -3522,6 +3758,49 @@ def selftest():
           % (len(p_noread), len(p_nofile), len(p_nopersist), len(p_endpoint),
              len(p_noorder), len(p_noacc), len(p_norefresh), len(p_nomerge)))
 
+
+    # ── [R3-t18] round-3 dual-gate witnesses (#27 export hand-off / #28
+    # reconcile payload / #29 form OAuth plumbing) ─────────────────────────
+    expect_clean("compliant export strip fixture",
+                 check_export_secret_strip(mask_comments(GOOD_BACKUP), mask(GOOD_BACKUP)))
+    b_strip_dead = check_export_secret_strip(
+        mask_comments(BAD_BACKUP_STRIP_DEAD), mask(BAD_BACKUP_STRIP_DEAD))
+    expect_trip("export strip behind a dead guard", b_strip_dead, "DEAD-GUARDED")
+    b_strip_absent = check_export_secret_strip(
+        mask_comments(BAD_BACKUP_STRIP_ABSENT), mask(BAD_BACKUP_STRIP_ABSENT))
+    expect_trip("export strip call removed", b_strip_absent, "never calls")
+    b_strip_copy = check_export_secret_strip(
+        mask_comments(BAD_BACKUP_STRIP_COPY), mask(BAD_BACKUP_STRIP_COPY))
+    expect_trip("export strip scrubs a throwaway copy", b_strip_copy,
+                "instead of the server entry")
+    b_strip_ungated = check_export_secret_strip(
+        mask_comments(BAD_BACKUP_STRIP_UNGATED), mask(BAD_BACKUP_STRIP_UNGATED))
+    expect_trip("export strip ungated", b_strip_ungated, "not gated on `!includeSecrets`")
+
+    expect_clean("compliant reconcile payload fixture", check_repo(mask(GOOD_REPO)))
+    r_oauthnull = check_repo(mask(BAD_REPO_OAUTH_NULL))
+    expect_trip("reconcile with `oauth = null`", r_oauthnull, "PURGES the live tokens")
+    for item in r_oauthnull:
+        if "a literal" not in item:
+            failures.append("oauth-null fixture tripped something else: %s" % item)
+    r_urlliteral = check_repo(mask(BAD_REPO_URL_LITERAL))
+    expect_trip("reconcile with a literal serverUrl", r_urlliteral, "PURGES the live tokens")
+
+    expect_clean("compliant form builder fixture",
+                 check_form_oauth_persisted(mask(GOOD_FORM)))
+    f_null = check_form_oauth_persisted(mask(BAD_FORM_OAUTH_NULL))
+    expect_trip("form stores a literal oauth", f_null, "a literal")
+    f_dropped = check_form_oauth_persisted(mask(BAD_FORM_OAUTH_DROPPED))
+    expect_trip("form omits the oauth argument", f_dropped, "without `oauth =")
+    f_detached = check_form_oauth_persisted(mask(BAD_FORM_OAUTH_DETACHED))
+    expect_trip("form persists a detached oauth value", f_detached, "currentOAuthConfig()")
+
+    print("selftest r3-t18 arms (export-strip dead/absent/copy/ungated + "
+          "reconcile oauth-null/url-literal + form null/dropped/detached) -> "
+          "%d/%d/%d/%d + %d/%d + %d/%d/%d violation(s)"
+          % (len(b_strip_dead), len(b_strip_absent), len(b_strip_copy),
+             len(b_strip_ungated), len(r_oauthnull), len(r_urlliteral),
+             len(f_null), len(f_dropped), len(f_detached)))
 
     if failures:
         for item in failures:
