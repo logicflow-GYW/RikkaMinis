@@ -51,6 +51,25 @@ import re
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import KotlinLexError          # noqa: E402
+from _kotlin_lexer import mask_comments           # noqa: E402  (comments out, literals kept)
+from _kotlin_ast import (                         # noqa: E402
+    if_blocks,
+    match_bracket,
+    split_top,
+    strip_parens,
+)
+from _kotlin_valueflow import (                   # noqa: E402
+    call_args,
+    expr_end,
+    guard_feasible,
+    live_positions,
+    path_feasible,
+    value_sources,
+)
+
 APP = "src/android/app/src/main/java/com/rikkaminis/app"
 PR_REL = APP + "/data/repository/ProviderRepository.kt"
 MC_REL = APP + "/config/collections/ModelsCollection.kt"
@@ -96,117 +115,97 @@ ARM5_ANCHORS = (
 
 
 def code_only(text):
-    """Text with comments removed — presence checks must not be satisfiable
-    from prose in a comment or a KDoc block.
+    """Length-preserving code view from the shared lexer (`mask_comments`).
 
-    Block comments matter here: the fix's own KDoc quotes the pre-fix idiom
-    (`split('.', limit = 3)`) to explain why it was wrong, and a gate that
-    reads prose would red on its own documentation.
-
-    Newlines inside removed comments are PRESERVED (replaced by a space per
-    non-newline char) so every character offset still maps to the same line in
-    the original text — findings report real line numbers.
+    Comments are blanked (their newlines kept, so offsets still map to real
+    line numbers) and string/char literal interiors are KEPT — the
+    dot-truncation patterns below need the literal `'.'` text, and the fix's
+    own KDoc quotes the pre-fix idiom (`split('.', limit = 3)`), which a gate
+    that read prose would red on. The hand-written comment scanner this
+    replaces only knew `/* … */` and `//`; the shared lexer also handles
+    nesting, char literals, triple-quoted strings and `${}` templates.
     """
-    out = []
-    i, n = 0, len(text)
-    while i < n:
-        two = text[i:i + 2]
-        if two == "/*":
-            j = text.find("*/", i + 2)
-            end = n if j < 0 else j + 2
-            out.append("".join("\n" if c == "\n" else " " for c in text[i:end]))
-            i = end
-        elif two == "//":
-            j = text.find("\n", i)
-            end = n if j < 0 else j
-            out.append(" " * (end - i))
-            i = end
-        else:
-            out.append(text[i])
-            i += 1
-    return "".join(out)
-
-
-def _balanced(src, open_idx, opener="(", closer=")"):
-    depth = 0
-    for i in range(open_idx, len(src)):
-        if src[i] == opener:
-            depth += 1
-        elif src[i] == closer:
-            depth -= 1
-            if depth == 0:
-                return i + 1
-    return -1
+    return mask_comments(text)
 
 
 def function_text(src, header):
+    """`header` … through the end of its brace body (shared bracket matcher)."""
     i = src.find(header)
     if i < 0:
         return None
     brace = src.find("{", i)
     if brace < 0:
         return None
-    end = _balanced(src, brace, "{", "}")
-    return None if end < 0 else src[i:end]
+    close = match_bracket(src, brace)
+    return None if close < 0 else src[i:close + 1]
+
+
+def _decl_body(text, m):
+    """(body_start, body_text) of the `fun` whose regex match is [m], or None.
+
+    Handles both body forms: `{ … }` (block, shared bracket matcher) and
+    `= <expr>` (expression body, from the `=` up to the first following
+    non-blank line indented at or below the `fun`'s own indentation, or a
+    depth-0 non-continued newline). After the fix the two routers in
+    ConfigRegistry are exactly one of each, so a matcher that only understood
+    block bodies would silently drop the delegating half.
+    """
+    indent = len(m.group(1).expandtabs(4))
+    params_end = match_bracket(text, m.end() - 1)
+    if params_end < 0:
+        return None
+    i = params_end + 1
+    while i < len(text) and text[i] in " \t":
+        i += 1
+    if i < len(text) and text[i] == ":":
+        while i < len(text) and text[i] not in "{=":
+            i += 1
+    if i >= len(text):
+        return None
+    if text[i] == "{":
+        close = match_bracket(text, i)
+        if close < 0:
+            return None
+        return (i, text[i:close + 1])
+    if text[i] != "=":
+        return None
+    pos = i
+    while True:
+        nl = text.find("\n", pos)
+        if nl < 0:
+            return (i, text[i:])
+        j = nl + 1
+        while j < len(text) and text[j] in " \t":
+            j += 1
+        if j >= len(text):
+            return (i, text[i:])
+        if text[j] == "\n":
+            pos = j
+            continue
+        if len(text[nl + 1:j].expandtabs(4)) <= indent:
+            return (i, text[i:nl])
+        pos = j
+    return None
 
 
 def kotlin_functions(text):
     """Yield (name, signature, body) for every `fun` in [text].
 
-    Handles both body forms: `{ … }` (brace-balanced) and `= <expr>` (from the
-    `=` up to the first following non-blank line indented at or below the
-    `fun`'s own indentation, or EOF). After the fix the two routers in
-    ConfigRegistry are exactly one of each, so a matcher that only understood
-    block bodies would silently drop the delegating half.
+    Both body forms are understood (see `_decl_body`): after the fix the two
+    routers in ConfigRegistry are exactly one of each, so a matcher that only
+    understood block bodies would silently drop the delegating half.
     """
-    import re
     out = []
     pat = re.compile(
         r"^([ \t]*)(?:@\w+\s+)?"
         r"(?:(?:private|internal|public|protected|override|suspend|inline|open|final)\s+)*"
         r"fun\s+(?:<[^>]*>\s*)?(\w+)\s*\(", re.M)
     for m in pat.finditer(text):
-        indent = len(m.group(1).expandtabs(4))
-        params_end = _balanced(text, text.index("(", m.end() - 1), "(", ")")
-        if params_end < 0:
-            continue
-        i = params_end
-        while i < len(text) and text[i] in " \t":
-            i += 1
-        if i < len(text) and text[i] == ":":
-            while i < len(text) and text[i] not in "{=":
-                i += 1
-        if i >= len(text):
-            continue
-        if text[i] == "{":
-            end = _balanced(text, i, "{", "}")
-            if end < 0:
-                continue
-            body = text[i:end]
-        elif text[i] == "=":
-            pos = i
-            while True:
-                nl = text.find("\n", pos)
-                if nl < 0:
-                    body = text[i:]
-                    break
-                j = nl + 1
-                while j < len(text) and text[j] in " \t":
-                    j += 1
-                if j >= len(text):
-                    body = text[i:]
-                    break
-                if text[j] == "\n":
-                    pos = j
-                    continue
-                if len(text[nl + 1:j].expandtabs(4)) <= indent:
-                    body = text[i:nl]
-                    break
-                pos = j
-        else:
+        body = _decl_body(text, m)
+        if body is None:
             continue
         # the signature must include the return type: callers filter on it
-        out.append((m.group(2), text[m.start():i], body))
+        out.append((m.group(2), text[m.start():body[0]], body[1]))
     return out
 
 
@@ -235,6 +234,41 @@ def path_router_bodies(src):
 
 def line_of(src, idx):
     return src.count("\n", 0, idx) + 1
+
+
+# ── value-flow helpers (shared primitives) ──────────────────────────────────
+def _init_expr(code, start):
+    """The initialiser expression that begins at [start] (spans continuations)."""
+    return code[start:expr_end(code, start)]
+
+
+def _binding_expr(code, name):
+    """RHS of the first `val|var name =` in [code] (spans continuation lines)."""
+    m = re.search(r"\b(?:val|var)\s+%s\s*(?::[^=\n]*)?=" % re.escape(name), code)
+    if not m:
+        return None
+    return _init_expr(code, m.end())
+
+
+def _traces_to(code, expr, pattern, depth=2):
+    """Does the VALUE of [expr] trace (through local val bindings) to something
+    matching [pattern]?
+
+    Reads the expression as dataflow (`value_sources`): elvis / if-else arms
+    both count, and a discarding scope (`.also {}` / `.apply {}`) keeps its
+    RECEIVER — so a resolver call glued onto a raw value inside `.also {}` does
+    not make the value clean, and a bare identifier is followed to its binding.
+    """
+    for s in value_sources(expr):
+        if re.search(pattern, s):
+            return True
+        t = strip_parens(s.strip())
+        if depth and re.fullmatch(r"[A-Za-z_]\w*", t):
+            rhs = _binding_expr(code, t)
+            if rhs is not None and _traces_to(code, rhs, pattern, depth - 1):
+                return True
+    return False
+
 
 
 def read(rel, root):
@@ -274,6 +308,170 @@ def check_absent(src, rel, header, arm, forbidden, what):
         if token in code:
             out.append((rel, line_of(src, base), arm,
                         "%s must not be type-conditional: found `%s`" % (what, token)))
+    return out
+
+
+def check_arm1_guard_live(src, rel, header, what):
+    """Arm 1 — the dedupe guard must be a LIVE decision.
+
+    `if (false && !decision.allowed)` keeps every anchor of the guard
+    (`decideEntryAdd(`, `decision.persistedId`, `?: compositeEntryKey(`) and the
+    forbidden `!entry.isCustom` stays away, yet the duplicate check can never
+    fire. So the conditional that returns the duplicate's persisted id is read
+    as CONTROL FLOW: at least one such guard must exist, and its condition must
+    be feasible (`guard_feasible`, i.e. the shared constant folder over `&&` /
+    `||` / `!` / int comparisons / null tests).
+    """
+    body = function_text(src, header)
+    if body is None:
+        return [(rel, 0, "1", header + " not found — gate ROT")]
+    code = code_only(body)
+    base = src.find(header)
+    out = []
+    seen = False
+    for cond, t_start, t_end, _e_start, _e_end in if_blocks(code):
+        if "persistedId" not in code[t_start:t_end]:
+            continue
+        seen = True
+        if not guard_feasible(cond):
+            out.append((rel, line_of(src, base + t_start), "1",
+                        "%s: the duplicate guard is DEAD (`%s` can never be true) — a repeat add "
+                        "falls through to the write and collides on the composite key"
+                        % (what, " ".join(cond.split()))))
+    if not seen:
+        out.append((rel, line_of(src, base) if base >= 0 else 0, "1",
+                    "%s: no conditional returns the duplicate's persisted id — the dedupe guard "
+                    "is gone (fail-closed)" % what))
+    return out
+
+
+def check_decide_entry_add(src, rel):
+    """Arm 2 — the pure helper must actually DECIDE.
+
+    `check_anchors` only proves the signature `internal fun decideEntryAdd(`
+    exists; a body that returns `EntryAddDecision(true, …)` unconditionally
+    satisfies every anchor while minting the collision. The body is therefore
+    read on its own: it must query the existing table, and it must return a
+    NEGATIVE decision on a reachable path.
+    """
+    header = "internal fun decideEntryAdd("
+    body = function_text(src, header)
+    if body is None:
+        return [(rel, 0, "2", header + " not found — gate ROT")]
+    code = code_only(body)
+    # Drop the parameter list: `existing: List<…>` in the signature is not a
+    # consultation of the table.
+    impl = code[code.find("{"):] if "{" in code else code
+    base = src.find(header)
+    out = []
+    if not re.search(r"\b(?:firstOrNull|any|none|find|indexOf|contains|filter|count|"
+                     r"singleOrNull|first|last)\b", impl):
+        out.append((rel, line_of(src, base), "2",
+                    "decideEntryAdd never queries the existing entries — the collision lookup "
+                    "is gone (a duplicate is always allowed)"))
+    if not live_positions(impl, r"EntryAddDecision\s*\(\s*false"):
+        out.append((rel, line_of(src, base), "2",
+                    "decideEntryAdd never returns a negative decision on a reachable path — "
+                    "`allowed` is a constant true, so `addEntry` writes every duplicate"))
+    return out
+
+
+def check_canonical_return(src, rel, header, arm, what):
+    """Arm 3 — the persisted id must be what comes back, on a REACHABLE path.
+
+    `if (false) return repo.addEntry(entry)` satisfies the old substring anchor
+    while the executed `return entry.id` hands back the pre-persist uuid, which
+    `saveConfig` has already rewritten to the composite key — the caller then
+    holds a dangling id. So: a live `return repo.addEntry(...)` must exist, and
+    the function must not return the in-memory object's own id.
+    """
+    body = function_text(src, header)
+    if body is None:
+        return [(rel, 0, arm, header + " not found — gate ROT")]
+    code = code_only(body)
+    base = src.find(header)
+    out = []
+    if not live_positions(code, r"\breturn\s+repo\s*\.\s*addEntry\s*\("):
+        out.append((rel, line_of(src, base), arm,
+                    "%s never returns `repo.addEntry(...)` on a reachable path — the canonical "
+                    "persisted id is not what comes back" % what))
+    for m in re.finditer(r"\breturn\s+([A-Za-z_]\w*)\s*\.\s*id\b", code):
+        if not path_feasible(code, m.start()):
+            continue
+        out.append((rel, line_of(src, base + m.start()), arm,
+                    "%s returns the pre-persist id `%s.id` — the composite key is minted by "
+                    "saveConfig's canonicalize pass, not by the in-memory object"
+                    % (what, m.group(1))))
+    return out
+
+
+def check_response_persisted(src, rel, header, arm, what):
+    """Arms 4 / 5 — the RPC response must report the PERSISTED entry.
+
+    `return entryToJson(entry)` (or any other pre-persist copy) keeps the
+    `persistedId` anchor while handing the client the uuid the store already
+    rewrote. The `entryToJson(...)` argument is therefore traced as DATAFLOW:
+    its value must come out of the persisted-id lookup.
+    """
+    body = function_text(src, header)
+    if body is None:
+        return [(rel, 0, arm, header + " not found — gate ROT")]
+    code = code_only(body)
+    base = src.find(header)
+    out = []
+    calls = list(re.finditer(r"\bentryToJson\s*\(", code))
+    if not calls:
+        out.append((rel, line_of(src, base), arm,
+                    "%s never builds a response with entryToJson(...) — gate ROT" % what))
+    for m in calls:
+        args = call_args(code, m.end() - 1)
+        if not args:
+            out.append((rel, line_of(src, base + m.start()), arm,
+                        "%s: entryToJson(...) could not be delimited — fail-closed" % what))
+            continue
+        arg = code[args[0][0]:args[0][1]].strip()
+        if _traces_to(code, arg, r"\bpersistedId\b"):
+            continue
+        out.append((rel, line_of(src, base + m.start()), arm,
+                    "%s reports `%s` — the response must carry the persisted entry (traced from "
+                    "the persistedId lookup), not the pre-persist copy"
+                    % (what, arg or "<empty>")))
+    return out
+
+
+def check_elvis_throws(src, rel, header, arm, what, call="repo.updateEntry(updated)"):
+    """Arm 5 — a rejected rename must THROW.
+
+    `?: current.id.also { if (false) (null ?: throw RPCException(…)) }` keeps
+    the `?: throw RPCException` substring while falling back to the stale id, so
+    a colliding rename is reported as success. The elvis fallback is therefore
+    read as a VALUE: every value source of the fallback must be a `throw`.
+    """
+    body = function_text(src, header)
+    if body is None:
+        return [(rel, 0, arm, header + " not found — gate ROT")]
+    code = code_only(body)
+    base = src.find(header)
+    out = []
+    sites = list(re.finditer(re.escape(call), code))
+    if not sites:
+        out.append((rel, line_of(src, base), arm,
+                    "%s no longer resolves the write through `%s` — gate ROT" % (what, call)))
+    for m in sites:
+        expr = code[m.start():expr_end(code, m.start())]
+        parts = split_top(expr, ("?:",))
+        if len(parts) != 2:
+            out.append((rel, line_of(src, base + m.start()), arm,
+                        "%s: `%s` has no fail-closed elvis — a rejected write is not refused"
+                        % (what, call)))
+            continue
+        rhs = expr[parts[1][0]:parts[1][1]].strip()
+        sources = value_sources(rhs)
+        if not sources or not all(strip_parens(s).startswith("throw") for s in sources):
+            out.append((rel, line_of(src, base + m.start()), arm,
+                        "%s: the elvis fallback of `%s` is not a throw (`%s`) — a rejected rename "
+                        "falls back to the stale id and is reported as success"
+                        % (what, call, " ".join(rhs.split())[:80])))
     return out
 
 
@@ -474,10 +672,32 @@ def check_resolver(src, rel):
             out.append((rel, 0, "7",
                         "resolver reads childIds() but never prefix-tests it against the "
                         "remainder (`rest.startsWith(\"$id.\")`)"))
+        # …and the membership test must be LIVE. `false && rest.startsWith("$it.")`
+        # keeps the `childIds()` data source AND the `startsWith("$id.")` spelling
+        # while the selection can never pass — the audited witness. Every
+        # id-table lambda is therefore judged as CONTROL FLOW: its predicate must
+        # be feasible under the shared constant folder.
+        for m in re.finditer(r"childIds\(\)\s*\.\s*(?:filter|filterNot|firstOrNull|first|"
+                             r"any|none|find|singleOrNull|mapNotNull|maxByOrNull|minByOrNull)"
+                             r"\s*\{", whole):
+            brace = m.end() - 1
+            close = match_bracket(whole, brace)
+            if close < 0:
+                continue
+            pred = whole[brace + 1:close].strip()
+            pred = re.sub(r"^[A-Za-z_]\w*\s*->\s*", "", pred)
+            if guard_feasible(pred):
+                continue
+            idx = src_index(m.start())
+            out.append((rel, line_of(src, idx) if idx is not None else 0, "7",
+                        "the childIds() membership test is DEAD (`%s` can never be true) — "
+                        "selection over the id table never matches, so every collection "
+                        "sub-field resolves to unknown_path"
+                        % " ".join(whole[m.start():close + 1].split())[:90]))
         # POSITIVE criterion: the child id is a MEMBER of the id table, not just
         # some string the resolver happened to pass on. Judged on the producing
         # expression, so `childIds().contains(x)` counts but `x` alone does not.
-        elif not any(from_table for _expr, from_table in sources):
+        if not any(from_table for _expr, from_table in sources):
             out.append((rel, 0, "7",
                         "child id does not come from the collection's id table — no "
                         "producing expression consults childIds()"))
@@ -506,19 +726,37 @@ def run_checks(root, rels=None):
                for k, rel in rels.items() if srcs[k] is None]
     if missing:
         return missing
+    try:
+        return _run_checks(srcs, rels)
+    except KotlinLexError as exc:
+        # fail-closed: an unterminated literal/comment must not read as "clean"
+        return [(rels["pr"], 0, "?", "KotlinLexError: %s — fail-closed" % exc)]
+
+
+def _run_checks(srcs, rels):
     checks = []
     checks += check_anchors(srcs["pr"], rels["pr"], "fun addEntry(", "1",
                             ARM1_ANCHORS, "addEntry")
     checks += check_absent(srcs["pr"], rels["pr"], "fun addEntry(", "1",
                            ARM1_FORBIDDEN, "addEntry guard")
+    checks += check_arm1_guard_live(srcs["pr"], rels["pr"], "fun addEntry(", "addEntry")
     checks += check_anchors(srcs["pr"], rels["pr"], None, "2",
                             ARM2_ANCHORS, "ProviderRepository helpers")
+    checks += check_decide_entry_add(srcs["pr"], rels["pr"])
     checks += check_anchors(srcs["mc"], rels["mc"], "override fun add(", "3",
                             ARM3_ANCHORS, "ModelsCollection.add")
+    checks += check_canonical_return(srcs["mc"], rels["mc"], "override fun add(", "3",
+                                     "ModelsCollection.add")
     checks += check_anchors(srcs["pm"], rels["pm"], "fun modelsAdd(", "4",
                             ARM4_ANCHORS, "modelsAdd RPC")
+    checks += check_response_persisted(srcs["pm"], rels["pm"], "fun modelsAdd(", "4",
+                                       "modelsAdd RPC")
     checks += check_anchors(srcs["pm"], rels["pm"], "fun modelsUpdate(", "5",
                             ARM5_ANCHORS, "modelsUpdate RPC")
+    checks += check_elvis_throws(srcs["pm"], rels["pm"], "fun modelsUpdate(", "5",
+                                 "modelsUpdate RPC")
+    checks += check_response_persisted(srcs["pm"], rels["pm"], "fun modelsUpdate(", "5",
+                                       "modelsUpdate RPC")
     checks += check_resolver(srcs["reg"], rels["reg"])
     return checks
 
@@ -539,7 +777,11 @@ FIX_PR_OK = """fun addEntry(entry: ModelEntry): String = synchronized(configLock
         ?: compositeEntryKey(entry.providerInstanceId, entry.baseModel.id)
 }
 
-internal fun decideEntryAdd(a: String, b: String, c: List<Pair<String, String>>): EntryAddDecision = TODO()
+internal fun decideEntryAdd(a: String, b: String, c: List<Pair<String, String>>): EntryAddDecision {
+    val newKey = "$a/$b"
+    val hit = c.firstOrNull { it.second == newKey }
+    return if (hit != null) EntryAddDecision(false, hit.first) else EntryAddDecision(true, newKey)
+}
 
 internal fun decideCompactPinMigration(p: String, o: String, n: String): String? = TODO()
 
@@ -556,7 +798,11 @@ FIX_PR_BAD_TYPECONDITIONAL = """fun addEntry(entry: ModelEntry) = synchronized(c
     saveConfig(config)
 }
 
-internal fun decideEntryAdd(a: String, b: String, c: List<Pair<String, String>>): EntryAddDecision = TODO()
+internal fun decideEntryAdd(a: String, b: String, c: List<Pair<String, String>>): EntryAddDecision {
+    val newKey = "$a/$b"
+    val hit = c.firstOrNull { it.second == newKey }
+    return if (hit != null) EntryAddDecision(false, hit.first) else EntryAddDecision(true, newKey)
+}
 
 internal fun decideCompactPinMigration(p: String, o: String, n: String): String? = TODO()
 
@@ -804,6 +1050,85 @@ def selftest():
         else:
             print("  [OK]   stale-response fixture trips arms 4/5 (%d findings)" % len(got))
         write("pm", FIX_PM_OK)
+
+        # ── batch5 / B5-t10 witnesses: each mutant keeps EVERY anchor the old
+        # substring checks looked for, so only a value/control-flow criterion
+        # can catch it. Each must red its OWN arm and no sibling.
+        def _mutate(base, needle, replacement, label):
+            if needle not in base:
+                print("  [FAIL] %s: fixture needle missing — harness drift" % label)
+                return None
+            return base.replace(needle, replacement, 1)
+
+        def _arm_only(label, key, text, arm, needle):
+            nonlocal ok
+            if text is None:
+                ok = False
+                return
+            write(key, text)
+            checks = run_checks(tmp, rels)
+            got = [c for c in checks if c[2] == arm and needle in c[3]]
+            stray = [c for c in checks if c[2] != arm]
+            if not got:
+                print("  [FAIL] %s did not trip arm %s (%r)" % (label, arm, needle))
+                ok = False
+            elif stray:
+                print("  [FAIL] %s also trips arms %s" % (label, sorted({c[2] for c in stray})))
+                ok = False
+            else:
+                print("  [OK]   %s trips arm %s only" % (label, arm))
+            write(key, {"pr": FIX_PR_OK, "mc": FIX_MC_OK,
+                        "pm": FIX_PM_OK, "reg": FIX_REG_OK}[key])
+
+        # W1: the dedupe guard is constant-folded dead but keeps every anchor.
+        _arm_only("G08-A1 dead duplicate guard", "pr",
+                  _mutate(FIX_PR_OK, "if (!decision.allowed) {",
+                          "if (false && !decision.allowed) {", "G08-A1"),
+                  "1", "DEAD")
+
+        # W2: the pure helper always allows, so the collision is always minted.
+        _arm_only("G08-A2 gutted decideEntryAdd", "pr",
+                  _mutate(FIX_PR_OK,
+                          '    val newKey = "$a/$b"\n'
+                          '    val hit = c.firstOrNull { it.second == newKey }\n'
+                          '    return if (hit != null) EntryAddDecision(false, hit.first) '
+                          'else EntryAddDecision(true, newKey)\n',
+                          '    return EntryAddDecision(true, "$a/$b")\n', "G08-A2"),
+                  "2", "never queries the existing entries")
+
+        # W3: the canonical return sits behind a dead guard, the executed return
+        # hands back the pre-persist uuid.
+        _arm_only("G08-A3 dead canonical return", "mc",
+                  _mutate(FIX_MC_OK, "    return repo.addEntry(entry)\n",
+                          "    if (false) return repo.addEntry(entry)\n    return entry.id\n",
+                          "G08-A3"),
+                  "3", "pre-persist id")
+
+        # W4: the RPC reports the pre-persist copy while the persisted-id
+        # lookup stays in place.
+        _arm_only("G08-A4 stale response copy", "pm",
+                  _mutate(FIX_PM_OK, "return entryToJson(persisted)\n}\n\nfun modelsUpdate",
+                          "return entryToJson(entry)\n}\n\nfun modelsUpdate", "G08-A4"),
+                  "4", "pre-persist copy")
+
+        # W5: the fail-closed elvis keeps its `?: throw RPCException` spelling
+        # inside a discarding scope and falls back to the stale id.
+        _arm_only("G08-A5 dead fail-closed elvis", "pm",
+                  _mutate(FIX_PM_OK,
+                          '        ?: throw RPCException(-32602, "Entry update rejected")\n',
+                          '        ?: current.id.also {\n'
+                          '            if (false) {\n'
+                          '                null ?: throw RPCException(-32602, "Entry update rejected")\n'
+                          '            }\n'
+                          '        }\n', "G08-A5"),
+                  "5", "not a throw")
+
+        # W7: the id-table membership test is dead-guarded — childIds() and
+        # `startsWith("$it.")` both survive, nothing ever matches.
+        _arm_only("G08-A6 dead id-table predicate", "reg",
+                  _mutate(FIX_REG_OK, '.filter { rest.startsWith("$it.") }',
+                          '.filter { false && rest.startsWith("$it.") }', "G08-A6"),
+                  "7", "membership test is DEAD")
 
         # Dirty 4–8: the resolver arms. Each fixture must red its OWN arm and
         # only that arm — a fixture that also trips a sibling proves the arms

@@ -222,6 +222,32 @@ import shutil
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# [batch5] Shared Kotlin primitives. This gate used to carry its own lexer /
+# brace scanner / pass-through peeler; the batch-5 sweep proved each of those
+# copies blind in a different way (a `}` inside a string truncated a body, a
+# dead `false &&` guard passed as a guard, `.also { live }` counted as the live
+# value). Structure now goes through one shared implementation only.
+import _kotlin_ast as kast                                              # noqa: E402
+import _kotlin_lexer as klex                                            # noqa: E402
+import _kotlin_valueflow as kflow                                       # noqa: E402
+from _kotlin_ast import (                                              # noqa: E402
+    const_bool,
+    function_body,
+    match_bracket,
+    split_top,
+    strip_parens,
+)
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments      # noqa: E402
+from _kotlin_valueflow import (                                         # noqa: E402
+    contains_ident,
+    guard_feasible,
+    path_feasible,
+    peel_discarding,
+    returns_exiting,
+    value_sources,
+)
+
 REL_PROVIDER_LIST = "src/android/app/src/main/java/com/rikkaminis/app/ui/settings/ProviderListScreen.kt"
 REL_SHEET = "src/android/app/src/main/java/com/rikkaminis/app/ui/settings/ManageProviderModelsSheet.kt"
 REL_PROVIDER_DETAIL = "src/android/app/src/main/java/com/rikkaminis/app/ui/settings/ProviderDetailScreen.kt"
@@ -430,52 +456,17 @@ INITIAL_FIELD_RE = re.compile(r"\binitial\?\.[A-Za-z_][A-Za-z0-9_]*")
 WEBCONFIG_DIALOG = "WebDavConfigDialog"
 
 
-def strip_comments(text):
-    """Remove // line comments and /* */ block comments. Keep string literals
-    (and everything inside them) intact so anchors inside quotes survive."""
-    out = []
-    i = 0
-    n = len(text)
-    in_block = False
-    in_string = False
-    quote = None
-    while i < n:
-        c = text[i]
-        if in_block:
-            if c == "*" and i + 1 < n and text[i + 1] == "/":
-                in_block = False
-                i += 2
-                continue
-            i += 1
-            continue
-        if in_string:
-            out.append(c)
-            if c == "\\" and i + 1 < n:
-                out.append(text[i + 1])
-                i += 2
-                continue
-            if c == quote:
-                in_string = False
-            i += 1
-            continue
-        if c == '"' or c == "'":
-            in_string = True
-            quote = c
-            out.append(c)
-            i += 1
-            continue
-        if c == "/" and i + 1 < n and text[i + 1] == "/":
-            while i < n and text[i] != "\n":
-                i += 1
-            continue
-        if c == "/" and i + 1 < n and text[i + 1] == "*":
-            in_block = True
-            i += 2
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
+def code_of(text):
+    """Structure view for every criterion: comments AND string interiors blanked
+    out, length preserved (positions project back onto the source). Raises
+    KotlinLexError when the source cannot be lexed — callers must report that as
+    a finding, never fall back to scanning raw text."""
+    return mask_code(text)
 
+def literal_of(text):
+    """Literal view: comments blanked, string contents kept — only for anchors
+    that genuinely live inside a string (XML / JSON names)."""
+    return mask_comments(text)
 
 def remember_keys(line):
     """Extract the key list from a `remember(...)` call on this line, or None
@@ -486,7 +477,7 @@ def remember_keys(line):
     return m.group(1)
 
 
-def iter_remember_calls(code, call="remember"):
+def _iter_remember_raw(code, call="remember"):
     """Every `remember(...)` / `remember { ... }` call site in `code`.
 
     Returns a list of (line_no, keys_text, span, init_text). keys_text is None
@@ -510,18 +501,11 @@ def iter_remember_calls(code, call="remember"):
         if i < len(code) and code[i] == "{":
             brace = i
         elif i < len(code) and code[i] == "(":
-            depth = 0
-            j = i
-            while j < len(code):
-                if code[j] == "(":
-                    depth += 1
-                elif code[j] == ")":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                j += 1
-            keys = code[i + 1:j]
-            k = j + 1
+            close = match_bracket(code, i)          # [batch5] shared bracket scan
+            if close < 0:
+                continue
+            keys = code[i + 1:close]
+            k = close + 1
             while k < len(code) and code[k] in " \t":
                 k += 1
             if k < len(code) and code[k] == "{":
@@ -530,23 +514,26 @@ def iter_remember_calls(code, call="remember"):
             continue
         end = start
         if brace >= 0:
-            depth = 0
-            k = brace
-            while k < len(code):
-                if code[k] == "{":
-                    depth += 1
-                elif code[k] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        end = k + 1
-                        break
-                k += 1
+            close = match_bracket(code, brace)      # [batch5] shared bracket scan
+            if close > 0:
+                end = close + 1
         if end <= start:
             nl = code.find("\n", start)
             end = len(code) if nl < 0 else nl
         init = code[brace:end] if brace >= 0 else ""
-        out.append((code.count("\n", 0, start) + 1, keys, code[start:end], init))
+        out.append((code.count("\n", 0, start) + 1, keys, code[start:end], init, start))
     return out
+
+def iter_remember_calls_pos(code, call="remember"):
+    """Same scan as [iter_remember_calls] plus the absolute offset of the call
+    site — criteria that must ask WHERE a statement sits (is this clear inside a
+    branch that can actually run?) need positions, not just text."""
+    return _iter_remember_raw(code, call)
+
+def iter_remember_calls(code, call="remember"):
+    """Every remember call site: (line_no, keys_text, span, init_text)."""
+    return [(ln, keys, span, init) for ln, keys, span, init, _pos in _iter_remember_raw(code, call)]
+
 
 
 def derived_state_calls(code):
@@ -566,23 +553,13 @@ def derived_state_calls(code):
 
 
 def call_args(code, pos):
-    """Text between the parentheses of the call whose `(` is the first one at
-    or after `pos`, or None if there is no balanced paren pair."""
+    """Arguments of the call whose `(` is the first one at or after [pos], or
+    None when the parens do not balance. [batch5] shared match_bracket."""
     j = code.find("(", pos)
     if j < 0:
         return None
-    depth = 0
-    k = j
-    while k < len(code):
-        if code[k] == "(":
-            depth += 1
-        elif code[k] == ")":
-            depth -= 1
-            if depth == 0:
-                return code[j + 1:k]
-        k += 1
-    return None
-
+    close = match_bracket(code, j)
+    return None if close < 0 else code[j + 1:close]
 
 def find_call_site(code, name):
     """Index of the first `name(` that is a CALL, not a declaration
@@ -596,38 +573,18 @@ def find_call_site(code, name):
             return idx
 
 def func_body(code, name):
-    """Balanced-brace body of `fun <name>(...) { … }` (string-aware), or None
-    (fail-closed) when the declaration or its closing brace cannot be found.
-    Called with comment-stripped code."""
-    m = re.search(r"\bfun\s+" + re.escape(name) + r"\s*\(", code)
-    if not m:
-        return None
-    start = code.find("{", m.end())
-    if start < 0:
-        return None
-    depth = 0
-    i, n = start, len(code)
-    in_str = False
-    while i < n:
-        c = code[i]
-        if in_str:
-            if c == "\\":
-                i += 2
-                continue
-            if c == '"':
-                in_str = False
-        else:
-            if c == '"':
-                in_str = True
-            elif c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    return code[start:i + 1]
-        i += 1
-    return None
+    """Body text of `fun <name>(…)`, or None (fail-closed) when the declaration
+    or its extent cannot be derived.
 
+    [batch5] Shared `function_body` handles both the block form and the
+    expression form (`fun f(…) = expr`); the local copy only knew the block
+    form, so an expression-bodied decision helper was invisible to every arm
+    that graded it."""
+    span = function_body(code, name)
+    if span is None:
+        return None
+    start, end, _kind = span
+    return code[start:end]
 
 # ---- [wide-1024] grade the VALUE, not the spelling ------------------------
 # The wide sweep proved this family blind in one direction: every criterion here
@@ -681,26 +638,6 @@ def composition_snapshots(code):
     return set(_SNAPSHOT_DECL_RE.findall(code))
 
 
-def _strip_passthrough(expr):
-    """[expr] with every `.also { … }` / `.apply { … }` block removed.
-
-    Both return their RECEIVER, so whatever they compute is discarded by value:
-    `allEntries.size.also { entriesFor(id) }` still evaluates to the stale
-    count. Treating the two as "the value" is the spelling axis this gate was
-    blind on."""
-    out = expr
-    for name in ("also", "apply"):
-        while True:
-            m = re.search(r"\.\s*%s\s*\{" % name, out)
-            if not m:
-                break
-            close = _balanced_span(out, out.index("{", m.start()), "{", "}")
-            if close < 0:
-                break  # unparseable → leave it in place, the caller stays red
-            out = out[:m.start()] + out[close:]
-    return out
-
-
 def local_value_decls(code):
     """name -> initializer / delegate expression for file-local `val` / `var`
     declarations. Functions are excluded on purpose: a callee's body is not a
@@ -714,32 +651,6 @@ def local_value_decls(code):
 FRESH_ENTRIES_RE = re.compile(r"\b(?:entriesFor|entries|visibleEntries)\s*\(")
 
 
-def _balanced_span(text, open_idx, opener, closer):
-    """Index just past the [closer] matching [open_idx], or -1 (string-aware:
-    braces inside literals do not count)."""
-    depth = 0
-    quote = None
-    i = open_idx
-    while i < len(text):
-        ch = text[i]
-        if quote:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-        elif ch in "\"'":
-            quote = ch
-        elif ch == opener:
-            depth += 1
-        elif ch == closer:
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return -1
-
-
 def expression_value_chain(expr, decls, depth=0, seen=None):
     """[expr] plus the initializer chain of the file-local names it uses, with
     pass-through scope functions removed at every level.
@@ -747,7 +658,7 @@ def expression_value_chain(expr, decls, depth=0, seen=None):
     A decision expressed through a local must be graded as one expression:
     `val total = allEntries.size` then `refreshResultMessage(result, total, ctx)`
     reads the snapshot just as surely as the inline spelling did."""
-    out = [_strip_passthrough(expr or "")]
+    out = [peel_discarding(expr or "")]
     if depth >= 3:
         return out
     seen = seen or set()
@@ -759,39 +670,6 @@ def expression_value_chain(expr, decls, depth=0, seen=None):
             continue
         out.extend(expression_value_chain(sub, decls, depth + 1, seen | {name}))
     return out
-
-
-def _top_level_split(text, sep=","):
-    """Split [text] on [sep] at zero (), [], {} depth (string-aware)."""
-    parts, buf, depth, quote = [], [], 0, None
-    i = 0
-    while i < len(text):
-        ch = text[i]
-        if quote:
-            buf.append(ch)
-            if ch == "\\" and i + 1 < len(text):
-                buf.append(text[i + 1])
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-        elif ch in "\"'":
-            quote = ch
-            buf.append(ch)
-        elif ch in "([{":
-            depth += 1
-            buf.append(ch)
-        elif ch in ")]}":
-            depth -= 1
-            buf.append(ch)
-        elif ch == sep and depth == 0:
-            parts.append("".join(buf))
-            buf = []
-        else:
-            buf.append(ch)
-        i += 1
-    parts.append("".join(buf))
-    return [p.strip() for p in parts]
 
 
 def check_provider_list(code):
@@ -920,7 +798,8 @@ def check_provider_detail(code):
         n for n in carriers
         if re.search(r"(?m)^[ \t]*%s\s*=[^=]" % re.escape(n), path))
     stale, fresh = [], []
-    for arg in _top_level_split(args):
+    for _a, _b in split_top(args, (",",)):      # [batch5] shared top-level split
+        arg = args[_a:_b].strip()
         if not arg:
             continue
         chain = expression_value_chain(arg, decls)
@@ -931,13 +810,13 @@ def check_provider_detail(code):
             stale.append("%r still carries the pre-refresh snapshot %s"
                          % (arg, ", ".join(dead)))
         # (a) a re-read evaluated at the call site itself
-        site_fresh = bool(FRESH_ENTRIES_RE.search(_strip_passthrough(arg)))
+        site_fresh = bool(FRESH_ENTRIES_RE.search(peel_discarding(arg)))
         # (b) a local bound ON the refresh path from a re-read
         if not site_fresh:
             for name in set(IDENT_RE.findall(arg)):
                 for m in re.finditer(r"(?m)^[ \t]*(?:(?:val|var)\s+)?%s\s*(?::[^=\n]*)?=[^=]"
                                      % re.escape(name), path):
-                    if FRESH_ENTRIES_RE.search(_strip_passthrough(statement_tail(path, m.end()))):
+                    if FRESH_ENTRIES_RE.search(peel_discarding(statement_tail(path, m.end()))):
                         site_fresh = True
                         break
                 if site_fresh:
@@ -1451,20 +1330,50 @@ def check_thinking_dialog_seed(code):
     return results
 
 
-def _close_condition_tests_vanished(code, span):
-    """C16 arm — does this close-effect's condition test the edit target for
-    existence? Graded on the decision, not the spelling: an inline collection /
-    index test counts, and so does a call to a file-local helper whose own body
-    carries such a test (the helper is the decision point, kept pure for the JVM
-    test). Closing unconditionally counts as NO."""
-    if VANISHED_EXISTS_RE.search(span):
-        return True, "inline existence test"
-    for name in IDENT_CALL_RE.findall(span):
-        body = func_body(code, name)
-        if body is not None and VANISHED_EXISTS_RE.search(body):
-            return True, "via helper %s()" % name
-    return False, "close path carries no existence test"
+def _condition_tests_vanished(code, cond):
+    """Does [cond] really ask "is the edit target still there"?
 
+    Inline collection / index tests count, and so does a call to a file-local
+    helper whose own body carries one — but only when that body is not a
+    CONSTANT. [batch5] `entryDeleteTargetVanished(…) = false` keeps every name
+    the old criterion looked for and decides nothing."""
+    if VANISHED_EXISTS_RE.search(cond):
+        return True, "inline existence test"
+    for name in IDENT_CALL_RE.findall(cond):
+        body = func_body(code, name)
+        if body is None:
+            continue
+        if const_bool(body) is not None:
+            continue  # `= false` / `= true`: a constant wears the name, not the test
+        if VANISHED_EXISTS_RE.search(body):
+            return True, "via helper %s()" % name
+    return False, "no existence test"
+
+def _clear_guarded_by_vanished(code, start, end, clear_name):
+    """Is the `<clear_name> = null` inside [start, end) gated on a LIVE test?
+
+    Returns (ok, why). Two things a spelling check cannot see:
+      * the assignment must sit on a reachable path — `if (false && …)` is a dead
+        branch, so the state is never cleared (batch-5 witness G07-A1);
+      * the test has to govern THAT assignment and be evaluated for real
+        (a constant helper is a name, not a decision).
+    """
+    seg = code[start:end]
+    m = re.search(r"\b" + re.escape(clear_name) + r"\s*=\s*null", seg)
+    if not m:
+        return False, "no `%s = null` assignment" % clear_name
+    pos = start + m.start()
+    conds = [cond for _kind, cond in kast.enclosing_conditions(code, pos)]
+    if not conds:
+        return False, "closes unconditionally (nothing decides whether the target is gone)"
+    if not path_feasible(code, pos):
+        return False, ("the clear sits in a branch that can never run (constant-false "
+                       "guard) — the state is never cleared")
+    for cond in conds:
+        tested, why = _condition_tests_vanished(code, cond)
+        if tested:
+            return True, why
+    return False, "close path carries no existence test"
 
 def check_envvar_screen(code):
     """C16 [da1034-B4] — the env-var edit sheet must close when its target vanishes.
@@ -1495,13 +1404,14 @@ def check_envvar_screen(code):
     ok = False
     for m in ENVVAR_CLOSE_EFFECT_RE.finditer(code):
         keys = m.group(1)
-        span = m.group(0)
         if "editEntryId" not in keys or "entries" not in keys:
             best = best or ("no close effect keyed on (editEntryId, entries) — the "
                             "deep-link effect also writes `editEntryId = null` but derives "
                             "from the pending request")
             continue
-        tested, why = _close_condition_tests_vanished(code, span)
+        # [batch5 G07-A1] graded at the assignment's own position: `if (false && …)`
+        # keeps the call and the helper while never closing the sheet.
+        tested, why = _clear_guarded_by_vanished(code, m.start(), m.end(), "editEntryId")
         if tested:
             ok = True
             best = ("a LaunchedEffect keyed on (editEntryId, entries) closes the sheet "
@@ -1828,6 +1738,47 @@ def _resolver_window(code, name, limit=220):
     return w if cut < 0 else w[:cut]
 
 
+def _live_test_names(code):
+    """File-local names bound to an existence test over the live instance list —
+    `val parentStillThere = providerRepository.config.value.instances.any { … }`."""
+    names = set()
+    for m in re.finditer(r"\bval\s+([A-Za-z_]\w*)\s*=", code):
+        tail = statement_tail(code, m.end())
+        if ADD_CUSTOM_LIVE_GUARD_RE.search(tail):
+            names.add(m.group(1))
+    return names
+
+_DIVERT_RE = re.compile(r"\b(?:return|throw)\b")
+
+def _guard_blocks_the_write(code, call_pos, window=900):
+    """[batch5 G07-A2] Is the write at [call_pos] preceded by a guard that can
+    actually block it? Three things the old "exists in the window" search
+    ignored:
+
+      * the guard must be FEASIBLE — `if (false && !parentStillThere)` keeps the
+        test and the call in the window while never blocking anything;
+      * the guard must DIVERT control (return / throw) before the write — a
+        guard that only logs does not stop an orphan ModelEntry;
+      * the test must be over the LIVE instance list (inline, or through a
+        file-local name bound to it).
+    """
+    live_names = _live_test_names(code)
+    for cond, t_start, t_end, _es, _ee in kast.if_blocks(code):
+        if t_end > call_pos or t_start < call_pos - window:
+            continue
+        tests_live = bool(ADD_CUSTOM_LIVE_GUARD_RE.search(cond)) or any(
+            contains_ident(cond, n) for n in live_names)
+        if not tests_live:
+            continue
+        if not guard_feasible(cond):
+            continue  # dead guard: it never blocks the write
+        if not _DIVERT_RE.search(code[t_start:t_end]):
+            continue  # a guard that does not skip the write is not a guard
+        line = code.count("\n", 0, t_start) + 1
+        return True, ("a feasible guard at line %d re-resolves the parent and diverts "
+                      "before the write" % line)
+    return False, "no feasible guard diverts before the write"
+
 def check_add_custom_model(code):
     """C20 / C21 [da1039-B3 B-03] — AddCustomModelScreen must read its parent
     instance reactively and re-check it against the live list before it writes.
@@ -1861,14 +1812,33 @@ def check_add_custom_model(code):
                         "no `providerRepository.addEntry(` call in the save path (fail-closed: "
                         "re-derive this criterion)"))
         return results
-    window = code[max(0, entry.start() - 900):entry.start()]
-    guard = ADD_CUSTOM_LIVE_GUARD_RE.search(window)
-    results.append(("C21", bool(guard),
-                    "the save path re-checks the parent against the live instance list before it writes"
-                    if guard else
-                    "the write is not preceded by a live-instance existence test — a delete landing "
-                    "between the click and the IO hop still persists an orphan ModelEntry"))
+    guarded, why = _guard_blocks_the_write(code, entry.start())
+    results.append(("C21", guarded,
+                    ("the save path re-checks the parent against the live instance list "
+                     "before it writes (%s)" % why) if guarded else
+                    ("the write is not preceded by a live-instance existence test that "
+                     "can block it (%s) — a delete landing between the click and the IO "
+                     "hop still persists an orphan ModelEntry" % why)))
     return results
+
+
+def _live_write_arg(args, live_locals):
+    """Does the VALUE handed to this write come from the live resolver?
+
+    [batch5 G07-A3] The old test looked for a live name anywhere in the argument
+    TEXT — but `.also { … }` / `.apply { … }`／`onEach { … }` return their
+    RECEIVER, so `instance.copy(…).also { live }` evaluates to the render-frame
+    snapshot while reading as if it had resolved the live instance. Grade the
+    value sources (shared value_sources / peel_discarding), not the spelling.
+    Note: the file-local `value_sources(code)` is the declaration map for C30;
+    the expression-level one lives in the shared module as `kflow.value_sources`."""
+    for src in kflow.value_sources(peel_discarding(args or "")):
+        cur = strip_parens(src.strip())
+        if LIVE_RESOLVER_NAME + "(" in cur:
+            return True
+        if any(contains_ident(cur, v) for v in live_locals):
+            return True
+    return False
 
 
 def check_connection_write_path(code):
@@ -1902,9 +1872,7 @@ def check_connection_write_path(code):
         bad = []
         for m in calls:
             args = call_args(code, m.end() - 1) or ""
-            if LIVE_RESOLVER_NAME + "(" in args:
-                continue
-            if any(re.search(r"\b" + re.escape(v) + r"\b", args) for v in live_locals):
+            if _live_write_arg(args, live_locals):
                 continue
             bad.append("L%d: `%s` is the composition-time snapshot"
                        % (code.count("\n", 0, m.start()) + 1, " ".join(args.split())[:70]))
@@ -2082,20 +2050,38 @@ def check_provider_detail_live_state(code):
                     else "; ".join(problems)))
 
     # --- C28: the dialog closes when the target vanishes --------------------
-    close = []
-    for line_no, keys, _span, init in iter_remember_calls(code, "LaunchedEffect"):
+    close, close_why, close_problems = [], "", []
+    for line_no, keys, span, init, pos in _iter_remember_raw(code, "LaunchedEffect"):
         if PD_DELETE_VANISHED_NAME not in init or "entryToDeleteId = null" not in init:
             continue
         flat = keys or ""
         if "entryToDeleteId" not in flat or not PD_LIVE_LIST_RE.search(flat):
             continue
-        close.append(line_no)
-    results.append(("C28", bool(close),
-                    "the dialog closes through a LaunchedEffect keyed on the pending id AND the "
-                    "live catalog (L%s)" % ",".join(str(x) for x in close) if close else
-                    "no `LaunchedEffect(<pending id>, <catalog>)` that clears the state when "
-                    "`%s(` says the target is gone — a model deleted externally leaves the dialog "
-                    "naming a now-dead id" % PD_DELETE_VANISHED_NAME))
+        # [batch5 G07-A4] The close must be a LIVE decision, not a decision-shaped
+        # spelling: the assignment has to sit on a reachable path AND the vanished
+        # helper's own body must still test for real — `entryDeleteTargetVanished(…) = false`
+        # keeps every name this criterion used to look for and decides nothing
+        # (the same family-hole C16 closed on the env-var sheet).
+        ok, why = _clear_guarded_by_vanished(code, pos, pos + len(span), "entryToDeleteId")
+        if ok:
+            close.append(line_no)
+            close_why = why
+        else:
+            close_problems.append("L%d: %s" % (line_no, why))
+    if close:
+        results.append(("C28", True,
+                        "the dialog closes through a LaunchedEffect keyed on the pending id AND the "
+                        "live catalog, gated on a live existence test (%s) (L%s)"
+                        % (close_why, ",".join(str(x) for x in close))))
+    elif close_problems:
+        results.append(("C28", False,
+                        "the close-on-vanished effect is decision-shaped but decides nothing — "
+                        + "; ".join(close_problems)))
+    else:
+        results.append(("C28", False,
+                        "no `LaunchedEffect(<pending id>, <catalog>)` that clears the state when "
+                        "`%s(` says the target is gone — a model deleted externally leaves the dialog "
+                        "naming a now-dead id" % PD_DELETE_VANISHED_NAME))
 
     # --- C29: the masked key re-reads when the revision moves ---------------
     subs = []
@@ -2111,6 +2097,14 @@ def check_provider_detail_live_state(code):
                     "no `LaunchedEffect(instanceId, <x>.revision)` assigning `%s` — an external "
                     "key write leaves the previous key masked on screen" % PD_STORED_KEY))
     return results
+
+
+def _subscript_key(text, open_pos):
+    """Text of the key inside `map[…]` given the `[` index, or None."""
+    close = match_bracket(text, open_pos)
+    if close < 0:
+        return None
+    return text[open_pos + 1:close].strip()
 
 
 def check_credential_live_source_list(code):
@@ -2171,7 +2165,7 @@ def check_credential_live_source_list(code):
     # providerRows block, but dropped the map from the remember keys — a
     # producer whose output is never a key is a snapshot nobody re-derives, and
     # the row badges / masked keys stay at their first value.
-    consumers, unkeyed = [], []
+    consumers, unkeyed, constant_key = [], [], []
     for line_no, keys, _span, init in iter_remember_calls(code, "remember"):
         read = sorted(t for t in targets if re.search(r"\b%s\b" % re.escape(t), init))
         if not read:
@@ -2181,7 +2175,17 @@ def check_credential_live_source_list(code):
             if t not in (keys or ""):
                 unkeyed.append("L%d reads %s but keys=[%s]"
                                % (line_no, t, " ".join((keys or "").split())))
-    ok = bool(producers) and bool(targets) and bool(consumers) and not unkeyed
+            # [batch5 G07-A5] A read of the snapshot with a CONSTANT subscript
+            # (`apiKeyByInstanceId[""]`) still names the map and still keys on it,
+            # but resolves to the same (empty) entry for every row — every spelling
+            # this criterion used to look for is intact while every badge is off.
+            # The key must be an expression that can vary with the row identity.
+            for sm in re.finditer(r"\b%s\s*\[" % re.escape(t), init):
+                key = _subscript_key(init, sm.end() - 1)
+                if key is not None and kast.is_pure_literal(key):
+                    constant_key.append("L%d reads %s[%s] — a constant key resolves to the same "
+                                        "entry for every row" % (line_no, t, key))
+    ok = bool(producers) and bool(targets) and bool(consumers) and not unkeyed and not constant_key
     if not producers:
         detail = ("no producer effect keyed on (instance list, <x>.revision) that reads the "
                   "credentials through an IO hop — an external key write changes neither "
@@ -2193,10 +2197,11 @@ def check_credential_live_source_list(code):
         detail = ("the credential snapshot is produced but never consumed — an external key "
                   "write re-reads the credentials into a value no derivation depends on, so "
                   "the surface keeps showing the old key")
-    elif unkeyed:
-        detail = ("the credential snapshot is consumed without being keyed: %s — the "
-                  "derivation that reads it never re-runs when the producer republishes"
-                  % "; ".join(unkeyed))
+    elif unkeyed or constant_key:
+        detail = ("the credential snapshot is consumed without being re-derived per row: %s — "
+                  "the derivation either never re-runs when the producer republishes or reads "
+                  "a key that cannot vary with the row identity"
+                  % "; ".join(unkeyed + constant_key))
     else:
         detail = ("the credential snapshot is produced by an effect keyed on the instance "
                   "list + config revision, reading through an IO hop (L%s), and consumed by "
@@ -2680,69 +2685,31 @@ _QUICK_TEST_ENRICHED_RE = re.compile(
     r"\b(?:effectiveModel|enrichedModel)\b"
     r"|ModelsDevApi\s*\.\s*(?:effectiveModel|enrichModel)\s*\("
     r"|providerModelFor\s*\(")
+# [batch5 G07-A6] The enriched value must BE the value that crosses the process
+# boundary. `effectiveModel.copy(outputModalities = null)` still names the
+# enrichment (so the positive regex above matches) while handing the worker a
+# model whose modality declaration was stripped — exactly the state the worker
+# cannot re-derive (no ModelsDevApi.init there).
+_QUICK_TEST_DEENRICH_RE = re.compile(r"\.\s*copy\s*\(")
+_QUICK_TEST_NULL_FIELD_RE = re.compile(
+    r"\b\w*(?:Modalit\w*|capabilit\w*)\s*=\s*null\b")
 
 
 def _argument_expression(text, start):
-    """Text of the argument starting at [start], up to the comma / closing
-    bracket at zero depth (string- and bracket-aware)."""
-    depth, quote, i = 0, None, start
-    while i < len(text):
-        ch = text[i]
-        if quote:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-        elif ch in "\"'":
-            quote = ch
-        elif ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            if depth == 0:
-                break
-            depth -= 1
-        elif ch == "," and depth == 0:
-            break
-        i += 1
-    return text[start:i].strip()
+    """Text of the argument starting at [start], up to the top-level comma /
+    closing bracket. [batch5] shared bracket-aware boundary scan."""
+    end = kflow.expr_end(text, start)
+    seg = text[start:end]
+    parts = split_top(seg, (",",))          # [batch5] shared top-level split
+    return (seg[parts[0][0]:parts[0][1]] if parts else seg).strip()
 
-def _function_body(code, marker):
-    """Body of the function introduced by [marker] — paren-matched signature,
-    then a brace-matched body. `fun performTest(...): T = withContext(…) { … }`
-    is an expression body, so the first `{` after the signature IS the body and
-    its matching `}` is the end of the function."""
-    i = code.find(marker)
-    if i < 0:
-        return None
-    j = code.find("(", i)
-    if j < 0:
-        return None
-    depth = 0
-    while j < len(code):
-        ch = code[j]
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                break
-        j += 1
-    ob = code.find("{", j)
-    if ob < 0:
-        return None
-    depth = 0
-    k = ob
-    while k < len(code):
-        ch = code[k]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return code[ob + 1:k]
-        k += 1
-    return None
+def _perform_test_span(code):
+    """(start, end) of `fun performTest(…)`, or None.
+
+    [batch5] Shared `function_body`; the local copy only knew the brace form, so
+    a body expressed as `= withContext(…) { … }` was graded from the signature
+    paren onwards (its first `{` was the lambda's, not the body's)."""
+    return function_body(code, "performTest")
 
 def check_quick_test_execution(code):
     """C33 [dv24/B-01] — the quick test EXECUTES the model it advertised.
@@ -2764,7 +2731,8 @@ def check_quick_test_execution(code):
 
     Fail-closed: a file with no `performTest` means the structure was reworked —
     RED, re-derive the criterion."""
-    body = _function_body(code, "fun performTest(")
+    span = _perform_test_span(code)
+    body = code[span[0]:span[1]] if span else None
     if body is None:
         return [("C33", False,
                  "no `fun performTest(` in this surface — fail-closed, re-derive the "
@@ -2789,6 +2757,11 @@ def check_quick_test_execution(code):
         sites += 1
         if _QUICK_TEST_STRING_ID_RE.match(expr):
             continue  # a String id the voice adapters take as model/voice name
+        if _QUICK_TEST_DEENRICH_RE.search(expr) and _QUICK_TEST_NULL_FIELD_RE.search(expr):
+            # [batch5 G07-A6] naming the enrichment is not carrying it: the copy
+            # hands the worker the same un-enriched model the raw carrier did.
+            bad_args.append("%r (enrichment stripped by a derived copy)" % expr[:70])
+            continue
         if _QUICK_TEST_ENRICHED_RE.search(expr):
             continue
         bad_args.append("%r" % expr[:70])
@@ -3086,7 +3059,7 @@ def run_tree(root):
             results.append(("FILE", False, "target file missing: %s (fail-closed)" % rel))
             continue
         with open(path, "r", encoding="utf-8") as f:
-            results.extend(fn(strip_comments(f.read())))
+            results.extend(fn(code_of(f.read())))
     all_ok = all(ok for _, ok, _ in results)
     print("provider_remember_key_check — real tree: %s" % ("GREEN" if all_ok else "RED"))
     for cid, ok, detail in results:
@@ -3212,6 +3185,8 @@ val entryToDelete = liveEntryToDelete(entryToDeleteId, allEntries)
 LaunchedEffect(entryToDeleteId, allEntries) {
     if (entryDeleteTargetVanished(entryToDeleteId, allEntries)) entryToDeleteId = null
 }
+internal fun entryDeleteTargetVanished(pendingId: String?, entries: List<ModelEntry>): Boolean =
+    pendingId != null && liveEntryToDelete(pendingId, entries) == null
 LaunchedEffect(instanceId, config.revision) {
     storedKey = withContext(Dispatchers.IO) { providerRepository.loadApiKey(instanceId) }
 }
@@ -4715,6 +4690,51 @@ FIX_QUICK_TEST_RAW_CARRIER_COPY = _replace_exactly(
     "ProviderExecutionGateway.generateImage(model = effectiveModel)",
     "ProviderExecutionGateway.generateImage(model = entry.model.copy())")
 
+# --- batch5: the fifth sweep's witness shapes ------------------------------
+# Each one walked through this gate because every NAME the criterion looked for
+# was still there while the DECISION was gone.
+
+# 07-1: the guard survives but is short-circuited by a constant — the sheet never
+# closes when the variable being edited is deleted elsewhere.
+FIX_ENVVAR_DEAD_GUARD = _replace_exactly(
+    FIX_ENVVAR_CLEAN,
+    "if (editTargetVanished(entries, editEntryId)) {",
+    "if (false && editTargetVanished(entries, editEntryId)) {")
+
+# 07-2: same shape on the parent re-check — the orphan ModelEntry write is reachable.
+FIX_ADD_CUSTOM_MODEL_DEAD_GUARD = _replace_exactly(
+    FIX_ADD_CUSTOM_MODEL_CLEAN,
+    "if (!parentStillThere) {",
+    "if (false && !parentStillThere) {")
+
+# 07-3: the write argument NAMES the live resolver inside a discarding scope, so the
+# snapshot is what actually reaches updateInstance.
+FIX_CONNECTION_ALSO_LIVE = _replace_exactly(
+    FIX_CONNECTION_CLEAN,
+    "providerRepository.updateInstance(live.copy(customBaseURL = pending))",
+    "providerRepository.updateInstance(instance.copy(customBaseURL = pending).also { live })")
+
+# 07-4: every name of the close-on-vanished decision is intact; the helper body
+# decides nothing (`= false`).
+FIX_PROVIDER_DETAIL_HELPER_CONSTANT = _replace_exactly(
+    FIX_PROVIDER_DETAIL_CLEAN,
+    "pendingId != null && liveEntryToDelete(pendingId, entries) == null",
+    "false")
+
+# 07-5: the snapshot is still keyed and still read — with a constant subscript, so
+# every row resolves the same (empty) entry.
+FIX_PROVIDER_LIST_CONSTANT_KEY = _replace_exactly(
+    FIX_PROVIDER_LIST_CLEAN,
+    "instance to apiKeyByInstanceId[instance.id]",
+    'instance to apiKeyByInstanceId[""]')
+
+# 07-6: the enriched value is derived away — the copy nulls the very field the
+# worker cannot re-derive.
+FIX_QUICK_TEST_ENRICHED_COPY_NULL = _replace_exactly(
+    FIX_QUICK_TEST_CLEAN,
+    "ProviderExecutionGateway.generateImage(model = effectiveModel)",
+    "ProviderExecutionGateway.generateImage(model = effectiveModel.copy(outputModalities = null))")
+
 CLEAN_TREE = {
     REL_PROVIDER_LIST: FIX_PROVIDER_LIST_CLEAN,
     REL_SHEET: FIX_SHEET_CLEAN,
@@ -4763,11 +4783,15 @@ def write_tree(tmpdir, files):
             f.write(text)
 
 
+_ARM_COUNT = [0]
+
+
 def run_case(name, expect_rc, files, failures, expect_fail=()):
     """Run the gate on a fixture tree. A red fixture must red for EXACTLY the
     criteria in expect_fail (no more, no less): a fixture that turns red for
     the wrong reason is a MISMATCH, not a pass — otherwise a criterion that
     quietly broke would still look "covered" by some unrelated redness."""
+    _ARM_COUNT[0] += 1
     tmp = tempfile.mkdtemp(prefix="prk-selftest-")
     try:
         write_tree(tmp, files)
@@ -4780,7 +4804,7 @@ def run_case(name, expect_rc, files, failures, expect_fail=()):
                 results.append(("FILE", False, "missing"))
                 continue
             with open(path, encoding="utf-8") as f:
-                results.extend(fn(strip_comments(f.read())))
+                results.extend(fn(code_of(f.read())))
         rc = 0 if all(ok for _, ok, _ in results) else 1
         failed = set(cid for cid, ok, _ in results if not ok)
         ok = (rc == expect_rc) and (failed == set(expect_fail))
@@ -4859,6 +4883,22 @@ def run_selftest():
     # --- wide-1024: the raw carrier with a member access is still the carrier
     run_case("c33-quick-test-raw-carrier-copy", 1,
              variant(REL_QUICK_TEST, FIX_QUICK_TEST_RAW_CARRIER_COPY), failures, ("C33",))
+
+    # --- batch5: the fifth sweep's witness shapes -------------------------
+    # Every name the criterion used to look for is still in place; only the
+    # decision is gone. Each arm must red on exactly its own criterion.
+    run_case("c16-envvar-dead-guard", 1,
+             variant(REL_ENVVAR_SCREEN, FIX_ENVVAR_DEAD_GUARD), failures, ("C16",))
+    run_case("c21-custom-model-dead-guard", 1,
+             variant(REL_ADD_CUSTOM_MODEL, FIX_ADD_CUSTOM_MODEL_DEAD_GUARD), failures, ("C21",))
+    run_case("c22-conn-also-live", 1,
+             variant(REL_CONNECTION, FIX_CONNECTION_ALSO_LIVE), failures, ("C22",))
+    run_case("c28-detail-helper-constant", 1,
+             variant(REL_PROVIDER_DETAIL, FIX_PROVIDER_DETAIL_HELPER_CONSTANT), failures, ("C28",))
+    run_case("c30-list-constant-subscript", 1,
+             variant(REL_PROVIDER_LIST, FIX_PROVIDER_LIST_CONSTANT_KEY), failures, ("C30b",))
+    run_case("c33-quick-test-enriched-copy-null", 1,
+             variant(REL_QUICK_TEST, FIX_QUICK_TEST_ENRICHED_COPY_NULL), failures, ("C33",))
 
     # --- da1026-C: C5 (connection screen) ---------------------------------
     run_case("c5-conn-no-baseurl-key", 1,
@@ -5156,7 +5196,7 @@ def run_selftest():
             print("  " + f)
         print("PROVIDER_REMEMBER_SELFTEST=FAIL")
         return 1
-    print("PROVIDER_REMEMBER_SELFTEST=PASS")
+    print("PROVIDER_REMEMBER_SELFTEST=PASS (%d arms)" % _ARM_COUNT[0])
     return 0
 
 

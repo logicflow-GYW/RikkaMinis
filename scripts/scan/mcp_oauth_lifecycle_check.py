@@ -204,6 +204,15 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_value, function_body, if_blocks, match_bracket, split_top, tail_expr,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args, contains_ident, guard_feasible, path_feasible, value_sources,
+)
+
 STORE_REL = "src/android/app/src/main/java/com/rikkaminis/app/mcp/oauth/MCPOAuthStore.kt"
 REPO_REL = "src/android/app/src/main/java/com/rikkaminis/app/data/repository/MCPRepository.kt"
 UI_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/settings/MCPIntegrationsScreen.kt"
@@ -306,93 +315,11 @@ ORDERING_OPS = (">=", "<=", ">", "<")
 INEQUALITY_OPS = ("!=", "==")
 
 
-def mask(src):
-    """Length-preserving mask of comments and string-literal CONTENTS.
-
-    Tokens are searched on the result, so a mention inside a comment or a log
-    message can neither satisfy a check nor trip one, and offsets still map 1:1
-    onto the original file for line reporting.
-    """
-    out = list(src)
-    i, n = 0, len(src)
-    while i < n:
-        c = src[i]
-        if c == "/" and i + 1 < n and src[i + 1] == "/":
-            while i < n and src[i] != "\n":
-                out[i] = " "
-                i += 1
-        elif c == "/" and i + 1 < n and src[i + 1] == "*":
-            out[i] = out[i + 1] = " "
-            i += 2
-            while i < n and not (src[i] == "*" and i + 1 < n and src[i + 1] == "/"):
-                if src[i] != "\n":
-                    out[i] = " "
-                i += 1
-            if i < n:
-                out[i] = " "
-                if i + 1 < n:
-                    out[i + 1] = " "
-                i += 2
-        elif c == '"':
-            # Keep quotes, blank the contents (a log string is not a call site).
-            if src.startswith('"""', i):
-                j = src.find('"""', i + 3)
-                end = n if j < 0 else j + 3
-                for k in range(i + 3, end):
-                    if out[k] != "\n":
-                        out[k] = " "
-                i = end
-            else:
-                i += 1
-                while i < n and src[i] != '"':
-                    if src[i] == "\\":
-                        if out[i] != "\n":
-                            out[i] = " "
-                        i += 1
-                        if i < n and out[i] != "\n":
-                            out[i] = " "
-                        i += 1
-                        continue
-                    if src[i] != "\n":
-                        out[i] = " "
-                    i += 1
-                i += 1
-        else:
-            i += 1
-    return "".join(out)
-
-
-def mask_comments(src):
-    """Like [mask] but KEEPS string-literal contents (comments only).
-
-    The [da1034-A1] criteria are anchored on real string literals
-    (`setOf("oauth")`, "mcp", "oauth"), which [mask] blanks out — so those two
-    checks mask comments only, while structural checks that must ignore log
-    text keep using [mask].
-    """
-    out = list(src)
-    i, n = 0, len(src)
-    while i < n:
-        c = src[i]
-        if c == "/" and i + 1 < n and src[i + 1] == "/":
-            while i < n and src[i] != "\n":
-                out[i] = " "
-                i += 1
-        elif c == "/" and i + 1 < n and src[i + 1] == "*":
-            out[i] = out[i + 1] = " "
-            i += 2
-            while i < n and not (src[i] == "*" and i + 1 < n and src[i + 1] == "/"):
-                if src[i] != "\n":
-                    out[i] = " "
-                i += 1
-            if i < n:
-                out[i] = " "
-                if i + 1 < n:
-                    out[i + 1] = " "
-                i += 2
-        else:
-            i += 1
-    return "".join(out)
+# [batch5-t11] 词法一律走共享原语 `_kotlin_lexer`。本门曾经自写 `mask` /
+# `mask_comments`：字符串里的 `}` 能提前闭合函数体、注释里的写法能骗过判据、
+# 嵌套块注释遇到第一个 `*/` 就退出。`mask` 这个名字保留为结构视图别名，
+# 免得上百个调用点重命名（实现来自共享模块，解析失败抛 KotlinLexError）。
+mask = mask_code
 
 def line_of(code, index):
     return code.count("\n", 0, index) + 1
@@ -465,15 +392,70 @@ def _first_pos(body, needle):
     return i
 
 
-def _imports_pending_secret(code, name, hops=1):
-    """True when `fun <name>` (or a callee ONE hop down) calls the handoff
-    import. Derived from the call graph, not from the spelling of the body:
-    the import may sit in a helper the function delegates to."""
+def _live_matches(text, needle, domains=None):
+    """Start offsets of [needle] that sit on a REACHABLE path.
+
+    [batch5-t11] 本门所有"某调用存在/某调用在前"的判据都走这一个入口：
+    `if (false) purge(...)`、`if (1 == 2) purge(...)`、`!true && ...` 折叠后
+    都是同一件事（调用永不执行），只是拼写不同。死分支里的匹配不算数。
+    """
+    return [m.start() for m in re.finditer(re.escape(needle), text)
+            if path_feasible(text, m.start(), domains)]
+
+
+def _blank_literal_arg(text, open_idx):
+    """调用的最后一个实参是不是空字符串字面量。
+
+    `importPendingClientSecret(context, "")` 会把 server 名交给
+    `validateServerName` 直接拒掉 —— 调用等于没发生，但调用名还在，
+    正是"锚拼写、不锚效果"的破口。
+    """
+    args = call_args(text, open_idx)
+    if not args:
+        return False
+    s, e = args[-1]
+    return text[s:e].strip() in ('""', "''")
+
+
+def _value_consumed(text, start, close):
+    """调用结果是否被使用（return / 赋值 / 实参 / 取值链）。裸语句调用不算。"""
+    head = text[:start].rstrip()
+    if re.search(r"(?:\breturn|\bthrow|=(?!=)|\?:|\(|,|->|&&|\|\|)$", head):
+        return True
+    tail = text[close + 1:].lstrip()
+    return tail.startswith(("?.", ".", "?:", "!!", ")")) or tail.startswith(",")
+
+
+def _import_sites(body, require_value=False):
+    """可达路径上、指向真实 server、且（按需）结果被消费的导入调用位置。"""
+    out = []
+    for m in re.finditer(re.escape(SECRET_IMPORT_CALL), body):
+        pos = m.start()
+        if not path_feasible(body, pos):
+            continue
+        open_idx = m.end() - 1
+        close = match_bracket(body, open_idx)
+        if close < 0:
+            continue
+        if _blank_literal_arg(body, open_idx):
+            continue
+        if require_value and not _value_consumed(body, pos, close):
+            continue
+        out.append(pos)
+    return out
+
+
+def _imports_pending_secret(code, name, hops=1, require_value=False):
+    """True when `fun <name>` (or a callee ONE hop down) ACTUALLY imports the
+    handoff. Derived from the call graph + control flow + value flow, not from
+    the spelling of the body: the import may sit in a helper the function
+    delegates to, and it must not sit behind a dead guard, aim at an empty
+    server name, or throw its result away."""
     bodies = {n: b for n, b, _l in functions(code) if b is not None}
     body = bodies.get(name)
     if body is None:
         return False
-    if SECRET_IMPORT_CALL in body:
+    if _import_sites(body, require_value):
         return True
     if hops <= 0:
         return False
@@ -482,7 +464,7 @@ def _imports_pending_secret(code, name, hops=1):
         if callee == name:
             continue
         cb = bodies.get(callee)
-        if cb is not None and SECRET_IMPORT_CALL in cb:
+        if cb is not None and _import_sites(cb):
             return True
     return False
 
@@ -518,7 +500,7 @@ def check_secret_handoff(code):
             "back to the stored value and ignore the CLI's `.secret` handoff "
             "(ROT: update this gate if it was renamed)"
         )
-    elif not _imports_pending_secret(code, "clientSecret"):
+    elif not _imports_pending_secret(code, "clientSecret", require_value=True):
         v.append(
             "MCPOAuthStore.kt: `clientSecret` does not import the pending "
             "`.secret` handoff — the in-guest CLI seeds a client secret into "
@@ -536,9 +518,9 @@ def check_secret_handoff(code):
             "(ROT: update this gate if it was renamed)"
         )
     else:
-        imp = _first_pos(signout, SECRET_IMPORT_CALL)
-        dele = _first_pos(signout, BRIDGE_DELETE)
-        if imp < 0:
+        imp = _import_sites(signout)
+        dele = _live_matches(signout, BRIDGE_DELETE)
+        if not imp:
             v.append(
                 "MCPOAuthStore.kt: `signOut` does not import the pending "
                 "`.secret` handoff — it deletes the bridge file, and with it "
@@ -546,7 +528,7 @@ def check_secret_handoff(code):
                 "cannot be re-derived. `signOut` promises to KEEP the client "
                 "secret; a credential loss is not a cleanup gap"
             )
-        elif dele >= 0 and imp > dele:
+        elif dele and min(imp) > min(dele):
             v.append(
                 "MCPOAuthStore.kt: `signOut` deletes the bridge file BEFORE it "
                 "imports the pending `.secret` handoff — the handoff file is "
@@ -576,17 +558,26 @@ def check_store(code):
             "this gate if it was renamed)"
         )
     else:
-        if PURGE_CALL not in converge:
+        # [batch5-t11] "calls purge(" is not the invariant — "purge RUNS" is.
+        # `if (false) purge(context, server)` keeps the spelling, drops the
+        # cleanup, and the STDIO-switched server keeps its tokens + plaintext
+        # bridge file forever (ISSUE-04 crack 1). Same judgement for the
+        # materialize half, so neither arm can be satisfied by a dead call.
+        purge_at = _live_matches(converge, PURGE_CALL)
+        if not purge_at:
             v.append(
-                "MCPOAuthStore.kt: reconcileForServer does not call `%s` — a "
-                "server that is no longer a configured URL-transport OAuth "
-                "server must not keep tokens/secret/bridge" % PURGE_CALL
+                "MCPOAuthStore.kt: reconcileForServer does not call `%s` on a "
+                "reachable path — a server that is no longer a configured "
+                "URL-transport OAuth server must not keep tokens/secret/bridge "
+                "(a call behind a dead guard such as `if (false)` never runs)"
+                % PURGE_CALL
             )
-        if MATERIALIZE_CALL not in converge:
+        if not _live_matches(converge, MATERIALIZE_CALL):
             v.append(
-                "MCPOAuthStore.kt: reconcileForServer does not call `%s` — an "
-                "authorized server whose endpoints changed keeps a bridge file "
-                "that points at the OLD token endpoint" % MATERIALIZE_CALL
+                "MCPOAuthStore.kt: reconcileForServer does not call `%s` on a "
+                "reachable path — an authorized server whose endpoints changed "
+                "keeps a bridge file that points at the OLD token endpoint"
+                % MATERIALIZE_CALL
             )
     decide = body_of(code, "decideReconcileAction")
     if decide is None:
@@ -735,6 +726,74 @@ def _ordering_direction(cond, consequent, bridge_left, op):
     return True, ""
 
 
+TOKEN_FIELD_PATTERNS = (
+    ("access_token", re.compile(r"([A-Za-z_]\w*)\s*=\s*\w+\.optString\(\s*\"access_token\"")),
+    ("refresh_token", re.compile(r"([A-Za-z_]\w*)\s*=\s*\w+\.optString\(\s*\"refresh_token\"")),
+    ("expires_at", re.compile(r"([A-Za-z_]\w*)\s*=\s*\w+\.optLong\(\s*\"expires_at\"")),
+)
+
+
+def _derive_token_fields(readers_scoped):
+    """{bridge key: snapshot field name} 从桥接读取器派生（本门不拼字段名）。"""
+    derived = {}
+    for key, pat in TOKEN_FIELD_PATTERNS:
+        for rbody in readers_scoped.values():
+            m = pat.search(rbody)
+            if m:
+                derived[key] = m.group(1)
+                break
+    return derived
+
+
+def _payload_feeds_from_promotion(body, persisted, token_fields):
+    """(ok, why) —— 桥接载荷的 token 字段是否由"提升后的令牌"供值。
+
+    C1 原本只要求"读了桥接 + 持久化了提升"。把
+    `BridgePayload(accessToken = t.accessToken, …)` 改回
+    `stored.accessToken` 同时满足这两条，却把刚提升的新令牌换回被它取代的
+    旧值写进桥接文件：沙箱里的 CLI 立刻拿到过期 token，refresh_token 轮换后
+    直接 invalid_grant。判据锚"载荷的值从哪来"，不锚"promote 被调用过"。
+    """
+    ident = None
+    for fname in sorted(persisted):
+        for m in re.finditer(r"(?<![\w.])" + re.escape(fname) + r"\s*\(", body):
+            vm = re.search(r"\bval\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=\s*$",
+                           body[:m.start()])
+            if vm:
+                ident = vm.group(1)
+                break
+        if ident:
+            break
+    m_payload = re.search(r"\bBridgePayload\s*\(", body)
+    if not m_payload:
+        return False, ("builds no `BridgePayload(` — the materialized payload cannot "
+                       "be traced back to the promotion (re-anchor this criterion)")
+    args = call_args(body, m_payload.end() - 1)
+    named = {}
+    for s, e in args:
+        piece = body[s:e]
+        nm = re.match(r"\s*([A-Za-z_]\w*)\s*=(?!=)", piece)
+        if nm:
+            named[nm.group(1)] = piece[nm.end():].strip()
+    if not named:
+        return False, ("builds `BridgePayload(` positionally — the token fields "
+                       "cannot be traced (re-anchor this criterion)")
+    if ident is None:
+        return False, ("calls the promotion but never binds its result, so the "
+                       "materialized payload cannot be sourced from it")
+    fields = [f for f in token_fields.values() if f in named]
+    if not fields:
+        return False, ("names none of the promoted token fields on the payload — "
+                       "the bridge is rewritten from something else")
+    for f in fields:
+        if not any(contains_ident(s, ident) for s in value_sources(named[f])):
+            return False, ("materializes `%s` from a value that is not the promoted "
+                           "token (`%s`) — the guest gets the superseded copy back "
+                           "(invalid_grant after a refresh-token rotation)"
+                           % (f, ident))
+    return True, ""
+
+
 def check_bridge_promotion(store, store_scoped, merge):
     """[dv26-A2] C1-C3 — the guest's refreshed token must survive a config save.
 
@@ -818,6 +877,11 @@ def check_bridge_promotion(store, store_scoped, merge):
             red("C1", "`%s` (line %d) reads the bridge but never persists the "
                       "promotion (`setTokens(`) — the promotion is lost on the "
                       "next save, which reads the superseded triple back" % (name, line))
+        else:
+            feeds, why = _payload_feeds_from_promotion(
+                bodies.get(name, ""), persisted, _derive_token_fields(readers_scoped))
+            if not feeds:
+                red("C1", "`%s` (line %d) %s" % (name, line, why))
 
     # -- C3: the reader must not lift configuration out of the guest file ----
     payload_body = body_of(store_scoped, MATERIALIZE_CALL.rstrip("("))
@@ -882,17 +946,7 @@ def check_bridge_promotion(store, store_scoped, merge):
     # assigned from one of those fields is resolved back to its bridge field, so
     # `val a = bridge.accessToken.trim()` followed by `a != stored.accessToken`
     # still counts as "the access token is compared".
-    derived = {}
-    for key, pat in (
-        ("access_token", re.compile(r"([A-Za-z_]\w*)\s*=\s*\w+\.optString\(\s*\"access_token\"")),
-        ("refresh_token", re.compile(r"([A-Za-z_]\w*)\s*=\s*\w+\.optString\(\s*\"refresh_token\"")),
-        ("expires_at", re.compile(r"([A-Za-z_]\w*)\s*=\s*\w+\.optLong\(\s*\"expires_at\"")),
-    ):
-        for rbody in readers_scoped.values():
-            m = pat.search(rbody)
-            if m:
-                derived[key] = m.group(1)
-                break
+    derived = _derive_token_fields(readers_scoped)
     if len(derived) != 3:
         red("C2", "cannot derive the token / expiry field names from the bridge "
                   "reader — the comparisons below have nothing to be checked "
@@ -957,19 +1011,12 @@ def check_bridge_promotion(store, store_scoped, merge):
     return v
 
 def _paren_end(text, open_idx):
-    """Index of the ')' closing the '(' at [open_idx], or -1."""
-    depth = 0
-    i = open_idx
-    while i < len(text):
-        c = text[i]
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-            if depth == 0:
-                return i
-        i += 1
-    return -1
+    """Index of the ')' closing the '(' at [open_idx], or -1.
+
+    [batch5-t11] 配平一律走共享 `match_bracket`（自写扫描循环是本轮被
+    见证击穿的一类缺陷：`${}` 模板与字符串里的括号会让深度错位）。
+    """
+    return match_bracket(text, open_idx) if text[open_idx:open_idx + 1] == "(" else -1
 
 
 def _paren_args(text, open_idx):
@@ -979,21 +1026,8 @@ def _paren_args(text, open_idx):
 
 
 def _top_level_parts(args):
-    """Split an argument list on top-level commas."""
-    parts, depth, cur = [], 0, []
-    for c in args:
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        if c == "," and depth == 0:
-            parts.append("".join(cur))
-            cur = []
-            continue
-        cur.append(c)
-    if "".join(cur).strip():
-        parts.append("".join(cur))
-    return parts
+    """Split an argument list on top-level commas (shared splitter)."""
+    return [args[a:b] for a, b in split_top(args, (",",))]
 
 
 def _named_value(args, name):
@@ -1137,18 +1171,8 @@ def camel_to_snake(name):
 
 def brace_block(code, open_idx):
     """The `{...}` block starting at [open_idx] (index of the `{`), or None."""
-    depth = 0
-    j = open_idx
-    while j < len(code):
-        c = code[j]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return code[open_idx:j + 1]
-        j += 1
-    return None
+    close = match_bracket(code, open_idx)
+    return None if close < 0 else code[open_idx:close + 1]
 
 def cli_oauth_keys(cli):
     """Keys the in-guest CLI writes into a server's `oauth` object, in order."""
@@ -1295,17 +1319,9 @@ def check_config(code, cli):
 
 def balanced(code, start, open_ch, close_ch):
     """Index of the char closing the group opened at [start], or -1."""
-    depth = 0
-    j = start
-    while j < len(code):
-        if code[j] == open_ch:
-            depth += 1
-        elif code[j] == close_ch:
-            depth -= 1
-            if depth == 0:
-                return j
-        j += 1
-    return -1
+    if code[start:start + 1] != open_ch:
+        return -1
+    return match_bracket(code, start)
 
 
 def remember_sites(body):
@@ -1517,11 +1533,35 @@ def _guard_compares_captured_id(predicate, id_expr):
     )
 
 
+def _skip_sites(code, guard):
+    """(live, dead) condition texts of the guards that skip on [guard].
+
+    [batch5-t11] 判谓词，不判拼写。`false && x in DENY`、`(1 == 2) && x in DENY`、
+    `!true && x in DENY` 都经共享常量折叠成"永不成立"，`if (dead) { if (x in
+    DENY) continue }` 的外层死分支同样让内层不可达 —— 三种拼写同一种缺陷，
+    所以走同一个 [guard_feasible] + [path_feasible] 判定，不再各自白名单。
+    """
+    live, dead = [], []
+    for cond, t_start, t_end, _e_start, _e_end in if_blocks(code):
+        if guard not in cond:
+            continue
+        if "continue" not in code[t_start:t_end]:
+            continue
+        if guard_feasible(cond) and path_feasible(code, t_start):
+            live.append(cond.strip())
+        else:
+            dead.append(cond.strip())
+    return live, dead
+
+
 def check_backup_scope(code):
     """[da1034-A1] A1 — the artifact walk must drop the MCP oauth bridge dir.
 
     [code] is comment-masked: the deny-set literal and the skip must both be
-    real code, so a comment cannot satisfy them.
+    real code, so a comment cannot satisfy them. The skip must also be able to
+    RUN: a guard that constant-folds to false keeps the `child.name in …`
+    spelling while the walk descends into `oauth/` anyway, and a credentials-free
+    export then ships every live bearer token in the archive.
     """
     v = []
     m = DENIED_SET_RE.search(code)
@@ -1537,12 +1577,23 @@ def check_backup_scope(code):
     name = m.group(1)
     guard = "child.name in %s" % name
     at = code.find(guard)
+    live, dead = _skip_sites(code, guard)
+    if live:
+        return v
     if at < 0:
         v.append(
             "ArtifactBackupScope.kt: %s is declared but the walk never skips on it "
             "(no `%s`) — the deny-set is inert" % (name, guard)
         )
-    elif "continue" not in code[at:at + 120]:
+    elif dead:
+        v.append(
+            "ArtifactBackupScope.kt: `%s` (line %d) is only consulted behind a guard "
+            "that can never be true (`%s`) — the deny-set is inert, so "
+            "mcp-servers/oauth/<server>.json (live access_token / refresh_token / "
+            "client_secret in plaintext) rides into every archive"
+            % (guard, line_of(code, at), dead[0])
+        )
+    else:
         v.append(
             "ArtifactBackupScope.kt: `%s` (line %d) is not a `continue` skip — the "
             "walk still descends into the credential directory"
@@ -1645,15 +1696,8 @@ def argument_text(code, call_start):
     lp = code.find("(", call_start)
     if lp < 0:
         return ""
-    depth = 0
-    for j in range(lp, len(code)):
-        if code[j] == "(":
-            depth += 1
-        elif code[j] == ")":
-            depth -= 1
-            if depth == 0:
-                return code[lp:j + 1]
-    return code[lp:]
+    close = match_bracket(code, lp)
+    return code[lp:] if close < 0 else code[lp:close + 1]
 
 
 # [dv28-a5 A-05] One file, two restore stages. Stage 7 merges the backup's
@@ -1677,15 +1721,7 @@ KOTLIN_NOISE_TOKENS = frozenset((
 
 def _match_paren(code, lp):
     """Index of the `)` that closes the `(` at [lp], or -1."""
-    depth = 0
-    for j in range(lp, len(code)):
-        if code[j] == "(":
-            depth += 1
-        elif code[j] == ")":
-            depth -= 1
-            if depth == 0:
-                return j
-    return -1
+    return match_bracket(code, lp)
 
 
 def _top_level_args(call_text):
@@ -1693,21 +1729,7 @@ def _top_level_args(call_text):
     if not call_text.startswith("(") or not call_text.endswith(")"):
         return []
     inner = call_text[1:-1]
-    args, depth, cur = [], 0, []
-    for ch in inner:
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            depth -= 1
-        if ch == "," and depth == 0:
-            args.append("".join(cur).strip())
-            cur = []
-            continue
-        cur.append(ch)
-    tail = "".join(cur).strip()
-    if tail:
-        args.append(tail)
-    return args
+    return [inner[a:b].strip() for a, b in split_top(inner, (",",))]
 
 
 def _enclosing_guard_identifiers(body, pos):
@@ -1872,6 +1894,40 @@ def check_stage9_premerged(scoped, masked):
     return v
 
 
+def _redacted_return(body):
+    """("ok"|"raw"|"unbound"|"no-return", detail) —— 返回值是否来自脱敏后的对象。
+
+    [batch5-t11] `stripExportedMcpSecrets(obj)` 之后 `return bytes` 把内存里的
+    脱敏结果整个丢掉：调用在、解析成功路径在、null 失败路径也在，只有 EFFECT
+    不在。入参名从 `JSONObject(String(<ident>, …))` 派生、脱敏对象从
+    `stripExportedMcpSecrets(<ident>)` 派生，两处都不许本门自己拼。
+    """
+    m_raw = re.search(r"JSONObject\s*\(\s*(?:String\s*\(\s*)?([A-Za-z_]\w*)", body)
+    m_strip = re.search(re.escape(MCP_SECRET_STRIP) + r"\s*\(\s*([A-Za-z_]\w*)", body)
+    if not m_raw or not m_strip:
+        return "unbound", None
+    raw, obj = m_raw.group(1), m_strip.group(1)
+    if raw == obj:
+        return "unbound", None
+    m_try = re.search(r"\btry\s*\{", body)
+    if not m_try:
+        return "no-return", None
+    open_idx = m_try.end() - 1
+    close = match_bracket(body, open_idx)
+    if close < 0:
+        return "no-return", None
+    tail = tail_expr(body[open_idx + 1:close])
+    tail = re.sub(r"^return\b", "", tail).strip()
+    if not tail:
+        return "no-return", None
+    srcs = value_sources(tail)
+    if any(contains_ident(s, raw) for s in srcs):
+        return "raw", raw
+    if not any(contains_ident(s, obj) for s in srcs):
+        return "unbound", obj
+    return "ok", None
+
+
 def check_artifact_redaction(scoped, masked, archiver_masked):
     """[dv20-a1 A-01] The artifact face of a credentials-free backup.
 
@@ -1959,6 +2015,29 @@ def check_artifact_redaction(scoped, masked, archiver_masked):
                 "path returning null — unredactable bytes are written into a "
                 "credentials-free archive verbatim; it must fail closed"
             )
+        # [batch5-t11] 脱敏必须作用在"被返回的那份数据"上：`stripExportedMcpSecrets(obj)`
+        # 之后 `return bytes` 保留了调用与 null 路径，却把脱敏结果丢掉 ——
+        # 与"消毒后用了未消毒的那份"一字不差。
+        prov, detail = _redacted_return(body)
+        if prov == "raw":
+            r2.append(
+                "ConfigBackup.kt: `" + MCP_ARTIFACT_REDACTOR + "` returns the raw "
+                "`" + str(detail) + "` after stripping the parsed object — the "
+                "scrubbed copy is computed and thrown away, so the archive still "
+                "carries headers/env/--token= args/url query keys"
+            )
+        elif prov == "unbound":
+            r2.append(
+                "ConfigBackup.kt: `" + MCP_ARTIFACT_REDACTOR + "` returns a value that "
+                "is not derived from the object it stripped (%s) — re-anchor this "
+                "criterion instead of leaving the encryption unverified" % (detail,)
+            )
+        elif prov == "no-return":
+            r2.append(
+                "ConfigBackup.kt: `" + MCP_ARTIFACT_REDACTOR + "` has no readable "
+                "`try { … }` return — the redacted value cannot be traced "
+                "(re-anchor this criterion)"
+            )
 
     # -- R3: the archiver drops a rejected entry and says so.
     wb = body_of(archiver_masked, "writeEntries")
@@ -2011,6 +2090,19 @@ def read(root, rel):
 
 
 def run(root):
+    """Fail-closed wrapper: a source the shared lexer cannot parse leaves every
+    criterion on it unjudgeable, which is a violation — never a silent pass."""
+    try:
+        return _run(root)
+    except KotlinLexError as exc:
+        print("FAIL mcp_oauth_lifecycle_check")
+        print("  KotlinLexError: %s" % exc)
+        print("  the source cannot be lexed, so no criterion on it can be judged "
+              "(fail-closed; a source this gate cannot read must not read as green)")
+        return 1
+
+
+def _run(root):
     if not os.path.isdir(root):
         print("mcp_oauth_lifecycle_check: not a directory: %s" % root)
         return 2
@@ -2779,6 +2871,11 @@ BAD_PACK_NO_FAILCLOSED = GOOD_PACK.replace(
     "        } catch (t: Throwable) {\n            null\n        }",
     "        } catch (t: Throwable) {\n            bytes\n        }")
 BAD_PACK_NO_ROOT = GOOD_PACK.replace('val isMcpRoot = root.name == "mcp-servers"', 'val isMcp = 1')
+# [batch5-t11] 脱敏调用在、null 路径在，只有返回值换成了未脱敏的原始入参。
+BAD_PACK_RETURNS_RAW = GOOD_PACK.replace(
+    "            obj.toString(2).toByteArray()",
+    "            bytes",
+)
 
 GOOD_ARCHIVER = """
 object ArtifactArchiver {
@@ -3072,6 +3169,11 @@ def selftest():
     b_nodeny = check_backup_scope(mask_comments(BAD_SCOPE_NO_DENY))
     expect_trip("scope without deny-set", b_nodeny, 'no `<val> = setOf("oauth")` deny-set')
 
+    b_deadguard = check_backup_scope(mask_comments(GOOD_SCOPE.replace(
+        "                if (child.name in DENIED_DIRS) continue",
+        "                if (false && child.name in DENIED_DIRS) continue")))
+    expect_trip("deny-set behind a dead guard", b_deadguard, "can never be true")
+
     b_dead = check_backup_scope(mask_comments(BAD_SCOPE_DEAD_DENY))
     expect_trip("scope with an inert deny-set", b_dead, "the walk never skips on it")
 
@@ -3248,6 +3350,8 @@ def selftest():
                 "droppedSink")
     expect_only("archiver that ignores its transform fixture",
                 art(archiver=BAD_ARCHIVER_NO_TRANSFORM), 2, "never applies its transform")
+    expect_only("redactor returning the unstripped bytes fixture",
+                art(BAD_PACK_RETURNS_RAW), 1, "returns the raw")
     expect_only("archiver anchor drift fixture", art(archiver=BAD_ARCHIVER_NO_FUN), 2,
                 "re-anchor this gate")
 
@@ -3261,6 +3365,10 @@ def selftest():
              len(art(archiver=BAD_ARCHIVER_NO_SINK)[2]),
              len(art(archiver=BAD_ARCHIVER_NO_TRANSFORM)[2]),
              len(art(archiver=BAD_ARCHIVER_NO_FUN)[2])))
+
+    # [batch5-t11] 脱敏结果必须是被返回的那份：返回值换回原始入参
+    print("selftest batch5-t11 redactor arm (returns the unstripped bytes) -> "
+          "%d violation(s)" % len(art(BAD_PACK_RETURNS_RAW)[1]))
 
 
 
@@ -3349,6 +3457,51 @@ def selftest():
     p_norefresh = promo(merge=BAD_MERGE_NO_REFRESH_CMP)
     expect_only_tag("promotion without a refresh-token comparison fixture", p_norefresh, "C2")
 
+    # ── [batch5-t11] 外部见证击穿的六条臂：拼写在、效果不在 ─────────────
+    # A1 死守卫：PURGE 分支里的 `purge(` 永不执行 —— 删掉服务器/切 STDIO 后
+    # tokens::<id> 与明文桥接文件永久残留（ISSUE-04 crack 1 的原样回归）。
+    s_deadpurge = check_store(mask(GOOD_STORE.replace(
+        "ReconcileAction.PURGE -> purge(context, server)",
+        "ReconcileAction.PURGE -> if (false) purge(context, server)")))
+    expect_trip("purge behind a dead guard", s_deadpurge, "on a reachable path")
+
+    # C5a 结果被丢弃 / 空 server 名：调用名还在，导入从未发生。
+    s_importdiscard = check_secret_handoff(mask(GOOD_STORE.replace(
+        "        importPendingClientSecret(context, server)?.let { return it }\n"
+        "        return prefs(context).getString(secretKey(server), null)?.takeIf { it.isNotEmpty() }",
+        "        importPendingClientSecret(context, server)\n"
+        "        return prefs(context).getString(secretKey(server), null)?.takeIf { it.isNotEmpty() }")))
+    expect_trip("handoff import whose result is dropped", s_importdiscard,
+                "does not import the pending")
+
+    s_importdead = check_secret_handoff(mask(GOOD_STORE.replace(
+        "importPendingClientSecret(context, server)?.let { return it }",
+        'if (false) importPendingClientSecret(context, "")?.let { return it }')))
+    expect_trip("handoff import behind a dead guard with an empty server", s_importdead,
+                "does not import the pending")
+
+    # C5b：死分支里的导入排在删除前，真正生效的导入排在删除后。
+    s_orderdead = check_secret_handoff(mask(GOOD_STORE.replace(
+        "    fun signOut(context: Context, server: String) {\n"
+        "        importPendingClientSecret(context, server)\n"
+        "        prefs(context).edit().remove(tokensKey(server)).apply()\n"
+        "        deleteBridgeFile(context, server)\n",
+        "    fun signOut(context: Context, server: String) {\n"
+        "        if (false) importPendingClientSecret(context, server)\n"
+        "        prefs(context).edit().remove(tokensKey(server)).apply()\n"
+        "        deleteBridgeFile(context, server)\n"
+        "        importPendingClientSecret(context, server)\n")))
+    expect_trip("handoff import split around the bridge delete", s_orderdead,
+                "BEFORE it imports")
+
+    # C1 载荷：promote 被调用、结果也持久化了，但 materialize 的 accessToken
+    # 仍取自被取代的 stored 快照 —— 沙箱里的 CLI 立刻拿到过期 token。
+    p_payload = promo(store=GOOD_STORE.replace(
+        "accessToken = t.accessToken", "accessToken = stored.accessToken"))
+    expect_only_tag("payload materializing the superseded token", p_payload, "C1")
+    expect_trip("payload materializing the superseded token", p_payload,
+                "not the promoted token")
+
     # [wide-1024 C2] the flipped ordering: comparison present, direction wrong
     p_flipped = promo(merge=BAD_MERGE_FLIPPED_ORDERING)
     expect_only_tag("flipped ordering guard fixture", p_flipped, "C2")
@@ -3357,6 +3510,11 @@ def selftest():
     p_nomerge = promo(merge="")
     expect_only_tag("missing bridge-merge policy fixture", p_nomerge, "C2")
 
+    print("selftest batch5-t11 arms (dead-purge/dropped-import/empty-server/"
+          "import-order/payload-superseded/dead-deny-guard) -> "
+          "%d/%d/%d/%d/%d/%d violation(s)"
+          % (len(s_deadpurge), len(s_importdiscard), len(s_importdead),
+             len(s_orderdead), len(p_payload), len(b_deadguard)))
     print("selftest dv26-A2 bridge-promotion arms (no-read/no-file-read/"
           "not-persisted/reader-endpoint/no-ordering/no-access-cmp/"
           "no-refresh-cmp/no-policy) -> "

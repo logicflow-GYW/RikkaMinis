@@ -82,6 +82,33 @@ A probe that cannot find its subject FAILS (exit 1) instead of reporting success
 a missing class means the convergence point was deleted, not that the tree is
 clean.
 
+[batch-5] Five blind axes closed, and the hand-written scanners behind them are
+gone. Every structural view now comes from the shared primitives
+(`_kotlin_lexer.mask_code`, `_kotlin_ast.match_bracket / const_bool /
+function_body`, `_kotlin_valueflow.path_feasible / value_sources`); a lex failure
+is a violation, never a fallback to raw text. Each item below is one arm of this
+wave:
+
+  * C — the MONITOR's identity is part of "under the lock". `synchronized(Any())`
+    allocates a monitor per call, so no two threads ever meet on it; the
+    acceptable monitor names are derived from the class (`private val x = Any()`),
+    never from a hard-coded `lock` (witness G06-A1).
+  * D — "copied" and "not yet drained" are two facts. The copy must be READ
+    before the live list is cleared; ordering is decided by offset inside the
+    same member, so moving `blocks.clear()` above the `Window(...)` — every line
+    still shaped correctly — is red (witness G06-A2).
+  * E — a call is dead when an infeasible condition governs its POSITION
+    (`path_feasible`), not when one of a few `false` spellings sits on the line:
+    `if (1 == 2) { … }`, `when (false) { … }` and `while (false) { … }` all
+    count (witness G06-A3).
+  * F — the assignment is found by OFFSET, not by `^` against a stripped line.
+    `run { sharing = false }` — the write left behind when a coroutine hop
+    collapses — is on an otherwise non-empty line and used to be invisible
+    (witness G06-A4).
+  * C-INV — the invalidation must be LIVE. A substring inside dead code is not a
+    drop: `if (false) invalidateStorageSnapshot()` kept the token and skipped the
+    effect (witness G06-A5).
+
 Usage:
     python3 scripts/scan/sysinfo_state_thread_check.py <repo_root>
     python3 scripts/scan/sysinfo_state_thread_check.py --selftest
@@ -93,77 +120,48 @@ import re
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import KotlinLexError  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    function_body,
+    match_bracket,
+    split_top,
+    strip_parens,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    code_view,
+    live_positions,
+    path_feasible,
+    peel_discarding,
+    value_sources,
+)
+
 PKG = "src/android/app/src/main/java/com/rikkaminis/app"
 CHAT = PKG + "/ui/chat"
 CLASS_NAME = "SysInfoCoalescer"
 SELFTEST_MARKER = "SYSINFO-STATE SELFTEST=PASS"
 
-# Words that mark a line as a comment rather than code (KDoc/line/block).
-def blank_comments(text):
-    """Replace comment, string- and char-literal *contents* with spaces, keeping
-    every newline and every code character in place (line numbers stay valid).
 
-    Char literals matter for brace counting: a `'{'` in a `when` arm was counted
-    as an opening brace, so the enclosing `withContext(…) { … }` block never
-    closed and every statement after it — including the `fold` that publishes to
-    Compose state — was reported as living on the IO thread.
+class GateParseError(RuntimeError):
+    """Structural view failed — fail CLOSED instead of scanning raw text."""
+
+
+def view(text):
+    """Structural view: comments and string/char-literal contents blanked,
+    length unchanged, so every offset maps back onto the source line.
+
+    [batch-5] This replaced the gate's own blanker. The shared lexer is the one
+    implementation in this wave: it also knows char literals, backtick
+    identifiers and `${}` templates, so a `'{'` inside a literal can no longer
+    shift brace counting, and a `"}"` inside a template cannot close a block
+    early. A lex failure is a violation, never a fallback to raw text.
     """
-    out = []
-    i, n = 0, len(text)
-    in_line, in_block, in_str, in_chr = False, False, False, False
-    while i < n:
-        ch = text[i]
-        nxt = text[i + 1] if i + 1 < n else ""
-        if in_line:
-            if ch == "\n":
-                in_line = False
-                out.append(ch)
-            else:
-                out.append(" ")
-        elif in_block:
-            if ch == "*" and nxt == "/":
-                in_block = False
-                out.append("  ")
-                i += 1
-            else:
-                out.append("\n" if ch == "\n" else " ")
-        elif in_str:
-            if ch == "\\":
-                out.append("  ")
-                i += 1
-            elif ch == '"':
-                in_str = False
-                out.append(ch)
-            else:
-                out.append("\n" if ch == "\n" else " ")
-        elif in_chr:
-            if ch == "\\":
-                out.append("  ")
-                i += 1
-            elif ch == "'":
-                in_chr = False
-                out.append(ch)
-            else:
-                out.append("\n" if ch == "\n" else " ")
-        else:
-            if ch == "/" and nxt == "/":
-                in_line = True
-                out.append("  ")
-                i += 1
-            elif ch == "/" and nxt == "*":
-                in_block = True
-                out.append("  ")
-                i += 1
-            elif ch == '"':
-                in_str = True
-                out.append(ch)
-            elif ch == "'":
-                in_chr = True
-                out.append(ch)
-            else:
-                out.append(ch)
-        i += 1
-    return "".join(out)
+    try:
+        return code_view(text)
+    except KotlinLexError as exc:
+        raise GateParseError(str(exc))
 
 
 def read(path):
@@ -176,72 +174,50 @@ def read(path):
 
 def find_class_span(text, name):
     """(start_line, end_line) 0-based inclusive for `class <name>` (brace balanced)."""
-    code = blank_comments(text)
+    code = view(text)
     m = re.search(r"^\s*(?:internal |private |public )?class\s+%s\b" % re.escape(name),
                   code, re.M)
     if not m:
         return None
-    start = code[: m.start()].count("\n")
-    depth, opened = 0, False
-    for idx, ch in enumerate(code[m.start():]):
-        if ch == "{":
-            depth += 1
-            opened = True
-        elif ch == "}":
-            depth -= 1
-        if opened and depth == 0:
-            end = code[: m.start() + idx].count("\n")
-            return start, end
-    return None
+    brace = code.find("{", m.end())
+    if brace < 0:
+        return None
+    close = match_bracket(code, brace)
+    if close < 0:
+        return None
+    return code[: m.start()].count("\n"), code[:close].count("\n")
 
 
-def sync_regions(code):
-    """Set of line numbers inside a `synchronized(...)` brace region (1-based)."""
-    inside = set()
-    stack = []  # (depth_owner_bool) per open brace
-    pending_sync = False
-    line = 1
-    i, n = 0, len(code)
-    while i < n:
-        ch = code[i]
-        if ch == "\n":
-            line += 1
-        elif ch == "(":
-            pending_sync = False
-        elif ch == "s":
-            m = re.match(r"synchronized\s*\(", code[i:])
-            if m:
-                pending_sync = True
-                i += m.end() - 1
-        elif ch == "{":
-            stack.append(pending_sync)
-            pending_sync = False
-        elif ch == "}":
-            if stack:
-                stack.pop()
-        if any(stack):
-            inside.add(line)
-        i += 1
-    return inside
+FUN_DECL = re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[A-Za-z_][\w.]*\.)?([A-Za-z_]\w*)\s*\(")
 
 
-def fun_spans(code, *, class_lo, class_hi):
-    """{name: (lo, hi)} 1-based inclusive spans of class-level `fun`s."""
-    spans, lines = {}, code.split("\n")
-    for idx in range(class_lo - 1, min(class_hi, len(lines))):
-        m = re.match(r"^    (?:private |internal |public |override )*fun\s+(\w+)", lines[idx])
-        if not m:
+def member_table(code):
+    """{name: (body_start, body_end, kind)} for every `fun name(` in [code].
+
+    [batch-5] Body extents come from the shared `_kotlin_ast.function_body`; the
+    hand-written brace counter it replaces could hand back the NEXT member's
+    braces (default-argument lambda / expression body), which is how a read-only
+    member was once classified as mutating.
+    """
+    out = {}
+    for m in FUN_DECL.finditer(code):
+        name = m.group(1)
+        got = function_body(code[m.start():], name)
+        if not got:
             continue
-        depth, opened, end = 0, False, idx
-        for j in range(idx, min(class_hi, len(lines))):
-            depth += lines[j].count("{") - lines[j].count("}")
-            if "{" in lines[j]:
-                opened = True
-            if opened and depth == 0:
-                end = j
-                break
-        spans[m.group(1)] = (idx + 1, end + 1)
-    return spans
+        start, end, kind = got
+        out.setdefault(name, (m.start() + start, m.start() + end, kind))
+    return out
+
+
+def member_bodies(code):
+    """{name: ((first_line, last_line), body_text)} — 1-based inclusive lines."""
+    out = {}
+    for name, (start, end, _kind) in member_table(code).items():
+        span = (code.count("\n", 0, start) + 1, code.count("\n", 0, end) + 1)
+        out[name] = (span, code[start:end])
+    return out
+
 
 
 def iter_prod_kt(repo_root):
@@ -286,11 +262,6 @@ def rule_single_home(repo_root, class_file, class_span):
 
 
 # ── structural helpers: "under the lock" is a POSITION, not a substring ──────
-DEAD_COND_RE = re.compile(
-    r"(?:\bif\s*\(\s*|\bwhile\s*\(\s*)"
-    r"(?:false\b|!\s*true\b|0\s*==\s*1\b|true\s*\|\||false\s*&&)"
-    r"|\bfalse\s*&&|\btrue\s*\|\|")
-
 
 def _line_starts(code):
     starts = [0]
@@ -300,74 +271,89 @@ def _line_starts(code):
     return starts
 
 
-def _stmt_start(code, off):
-    """Offset just after the last statement boundary before `off`.
+def is_dead(code, pos):
+    """True when a constant-false condition governs `pos` (dead code).
 
-    A newline at bracket depth 0 is a boundary — Kotlin almost never uses
-    semicolons here, so without it a guard belonging to the previous statement
-    would be attributed to this one.
+    [batch-5] One judgment for every arm of this gate. It used to be a token
+    blacklist (`false` / `!true` / `0 == 1`), so `if (1 == 2)`, `if (x) { if
+    (false) … }`, `when (false)` and `while (false)` all kept a call "present"
+    while removing its effect. The condition is folded by the shared constant
+    evaluator instead of matched as a spelling.
     """
-    depth = 0
-    i = off - 1
-    while i >= 0:
-        ch = code[i]
-        if ch in ")]":
-            depth += 1
-        elif ch in "([":
-            if depth == 0:
-                break
-            depth -= 1
-        elif depth == 0 and ch in "\n;{}":
-            return i + 1
-        i -= 1
-    return i + 1
-
-
-def dead_guarded(code, off):
-    """True when a constant condition governs `off` (dead code, not a guard)."""
-    if DEAD_COND_RE.search(code[_stmt_start(code, off):off]):
+    if not path_feasible(code, pos):
         return True
-    depth = 0
-    i = off
-    while i > 0:
-        i -= 1
-        ch = code[i]
-        if ch in "})":
-            depth += 1
-        elif ch in "({":
-            if depth == 0:
-                if ch == "{" and DEAD_COND_RE.search(code[_stmt_start(code, i):i]):
-                    return True
-            else:
-                depth -= 1
+    for m in re.finditer(r"\bwhile\s*\(", code):
+        op = m.end() - 1
+        cl = match_bracket(code, op)
+        if cl < 0 or pos <= cl:
+            continue
+        if const_bool(code[op + 1:cl]) is not False:
+            continue
+        k = cl + 1
+        while k < len(code) and code[k] in " \t\r\n":
+            k += 1
+        if k < len(code) and code[k] == "{":
+            end = match_bracket(code, k)
+            if 0 < end and k < pos < end:
+                return True
+        else:
+            eol = code.find("\n", k)
+            if k <= pos < (eol if eol >= 0 else len(code)):
+                return True
     return False
 
 
 def _brace_end(code, open_idx):
-    depth = 0
-    for j in range(open_idx, len(code)):
-        if code[j] == "{":
-            depth += 1
-        elif code[j] == "}":
-            depth -= 1
-            if depth == 0:
-                return j
-    return -1
+    """Offset of the `}` matching the `{` at [open_idx]; -1 when unbalanced."""
+    j = match_bracket(code, open_idx)
+    return j if j > 0 else -1
 
 
-def live_sync_bodies(code):
-    """(start, end) offsets of every LIVE, NON-EMPTY `synchronized(...) { … }` body.
+LOCK_INIT = re.compile(
+    r"^    (?:private|internal|protected) (?:val|var) (\w+)\s*(?::\s*[^=\n]+)?=\s*"
+    r"(?:Any|Object|java\.lang\.Object)\s*\(\s*\)")
 
-    [wide3/10] A block that is empty guards nothing, and a block behind a
-    constant-false condition never runs: `if (false) synchronized(lock) {}` keeps
-    the word and drops the mutual exclusion. Membership in this list — not the
-    presence of the substring `"synchronized"` on the line — is what makes an
-    access "locked".
+
+def class_lock_names(lines, lo, hi):
+    """Class-level fields that hold a fresh monitor object — derived, not named."""
+    out = set()
+    for idx in range(lo, min(hi + 1, len(lines))):
+        m = LOCK_INIT.match(lines[idx])
+        if m:
+            out.add(m.group(1))
+    return out
+
+
+def stable_monitors(expr, lock_names):
+    """A monitor only excludes threads when it is a STABLE field.
+
+    `synchronized(Any())` allocates a monitor per call, so two threads never
+    meet on it — the bare-call shape with extra typing. Acceptable names are
+    derived from the class (`private val x = Any()`), never from a hard-coded
+    `lock` literal; with no such field the criterion still refuses a constructor
+    call and accepts any plain field name.
+    """
+    e = strip_parens(expr.strip())
+    if not re.fullmatch(r"[A-Za-z_]\w*", e):
+        return False
+    return (not lock_names) or (e in lock_names)
+
+
+def live_sync_bodies(code, lock_names=()):
+    """(start, end) offsets of every LIVE, NON-EMPTY `synchronized(…) { … }` body.
+
+    [wide3/10] An empty block guards nothing; a block behind a constant-false
+    condition never runs.
+    [batch-5] A block whose MONITOR is a fresh object (`synchronized(Any())`)
+    excludes nobody either — same family, one dimension over. Membership in this
+    list, not the substring `"synchronized"`, is what makes an access locked.
     """
     out = []
     for m in re.finditer(r"\bsynchronized\s*\(", code):
         op = code.find("(", m.start())
-        cl = _paren_end(code, op)
+        cl = match_bracket(code, op)
+        if cl < 0:
+            continue
         j = cl + 1
         while j < len(code) and code[j] in " \t\r\n":
             j += 1
@@ -377,9 +363,11 @@ def live_sync_bodies(code):
         if k < 0:
             continue
         if not code[j + 1:k].strip():
-            continue  # empty critical section: no mutual exclusion at all
-        if dead_guarded(code, m.start()):
-            continue  # `if (false) synchronized(…) { … }`
+            continue
+        if is_dead(code, m.start()):
+            continue
+        if not stable_monitors(code[op + 1:cl], lock_names):
+            continue
         out.append((j + 1, k))
     return out
 
@@ -387,14 +375,14 @@ def live_sync_bodies(code):
 def in_live_sync(bodies, off):
     return any(a <= off < b for (a, b) in bodies)
 
-
 def rule_guarded_access(class_text, class_span, code):
     """B + C + D on the coalescer source."""
     problems = []
     lo, hi = class_span
     lines = class_text.split("\n")
-    spans = fun_spans(code, class_lo=lo + 1, class_hi=hi + 1)
-    bodies = live_sync_bodies(code)
+    lock_names = class_lock_names(lines, lo, hi)
+    members = member_table(code)
+    bodies = live_sync_bodies(code, lock_names)
     # The monitor expression itself (`synchronized(lock) {`) is a read of `lock`
     # — it is the lock, not state accessed outside it.
     monitor_spans = []
@@ -402,13 +390,34 @@ def rule_guarded_access(class_text, class_span, code):
         op = code.find("(", m.start())
         monitor_spans.append((op, _paren_end(code, op)))
     starts = _line_starts(code)
-    locked_lines = set()
-    for name, (a, b) in spans.items():
-        if name.endswith("Locked"):
-            locked_lines.update(range(a, b + 1))
 
     def line_of(off):
         return bisect.bisect_right(starts, off)
+
+    # [batch-5] The monitor's IDENTITY is part of "under the lock": a
+    # `synchronized(Any())` block allocates a fresh monitor per call and
+    # therefore excludes nobody, so every access it wraps is unsynchronised no
+    # matter how the block reads. Same family as the empty-block and
+    # dead-condition arms, one dimension over.
+    for m in re.finditer(r"\bsynchronized\s*\(", code):
+        op = code.find("(", m.start())
+        cl = _paren_end(code, op)
+        expr = code[op + 1:cl].strip() if cl > op else ""
+        line_no = line_of(m.start())
+        if line_no < lo + 1 or line_no > hi + 1:
+            continue
+        if is_dead(code, m.start()) or stable_monitors(expr, lock_names):
+            continue
+        problems.append(
+            "[C publish-under-lock] line %d locks `%s`, not the class lock — every call "
+            "builds a fresh monitor, so no two threads ever exclude each other: %s"
+            % (line_no, expr, lines[line_no - 1].strip()))
+
+    locked_lines = set()
+    for name, (start, end, _kind) in members.items():
+        if name.endswith("Locked"):
+            locked_lines.update(range(code.count("\n", 0, start) + 1,
+                                      code.count("\n", 0, end) + 2))
 
     # mutable state = the class's own private var/val declarations
     state = []
@@ -470,21 +479,27 @@ def rule_guarded_access(class_text, class_span, code):
     args_list = window_ctor_args(code)
     if not args_list:
         problems.append("[D no-raw-handout] no Window(...) construction found")
-    for args in args_list:
-        val = _named_arg(args, "blocks")
-        if val is None:
+    for args, base in args_list:
+        span = _named_arg_span(args, "blocks")
+        if span is None:
             problems.append("[D no-raw-handout] Window(...) without blocks: %s" % args.strip())
             continue
-        if _is_copy_of_blocks(val):
+        val = args[span[0]:span[1]]
+        if not _is_copy_of_blocks(val):
+            # [wide3/10] `blocks = blocks.also { blocks.toList() }` CONTAINS the
+            # copy call and still hands out the live list: `.also`/`.apply` return
+            # the receiver, and `blocks.clear()` runs two lines later. The
+            # criterion is the whole value expression, not a search inside it.
+            lossy = re.search(r"\.\s*(also|apply|let|run)\s*\{", val)
+            hint = " (copy result discarded by `.%s { … }`)" % lossy.group(1) if lossy else ""
+            problems.append("[D no-raw-handout] window built with a live list%s: %s"
+                            % (hint, val.strip()))
             continue
-        # [wide3/10] `blocks = blocks.also { blocks.toList() }` CONTAINS the copy
-        # call and still hands out the live list: `.also`/`.apply` return the
-        # receiver, and `blocks.clear()` runs two lines later. The criterion is
-        # now the whole value expression, not a search inside it.
-        lossy = re.search(r"\.\s*(also|apply|let|run)\s*\{", val)
-        hint = " (copy result discarded by `.%s { … }`)" % lossy.group(1) if lossy else ""
-        problems.append("[D no-raw-handout] window built with a live list%s: %s"
-                        % (hint, val.strip()))
+        # [batch-5] "copied" and "not yet drained" are different facts. Clearing
+        # the live list BEFORE the window copies it rebuilds the window from an
+        # emptied list while the copy criterion still passes — an ordering
+        # defect, invisible to any judgement that only asks WHAT the value is.
+        problems += _order_problems(code, members, base + span[0], lines, line_of)
     return problems
 
 
@@ -505,31 +520,20 @@ def window_ctor_args(code):
         end = _paren_end(code, op)
         if end is None:
             continue
-        out.append(code[op + 1:end])
+        # (argument text, absolute offset of its first character) — the offset is
+        # what makes the ORDER between "copy the list" and "clear the list"
+        # decidable, instead of guessing from line order.
+        out.append((code[op + 1:end], op + 1))
     return out
 
 
-def _split_args(args):
-    parts, depth, cur = [], 0, ""
-    for ch in args:
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            depth -= 1
-        if ch == "," and depth == 0:
-            parts.append(cur)
-            cur = ""
-        else:
-            cur += ch
-    parts.append(cur)
-    return parts
-
-
-def _named_arg(args, name):
-    for part in _split_args(args):
-        m = re.match(r"\s*%s\s*=(?!=)\s*(.*)$" % re.escape(name), part, re.S)
+def _named_arg_span(args, name):
+    """(start, end) of `name = <value>` inside a top-level argument list."""
+    for start, end in split_top(args, (",",)):
+        seg = args[start:end]
+        m = re.match(r"\s*%s\s*=(?!=)\s*" % re.escape(name), seg)
         if m:
-            return m.group(1)
+            return (start + m.end(), end)
     return None
 
 
@@ -538,8 +542,55 @@ COPY_OF_BLOCKS_RE = re.compile(
 
 
 def _is_copy_of_blocks(val):
-    """The value must BE `blocks.toList()` — not merely contain that call."""
-    return bool(COPY_OF_BLOCKS_RE.match(val or ""))
+    """The value must BE `blocks.toList()` — not merely contain that call.
+
+    [batch-5] `value_sources` peels the discarding scope calls (`.also`,
+    `.apply`, `.onEach`, `.forEach`) and follows `let` / `run` / elvis: those
+    wrappers hand out the RECEIVER or another value, so a copy call buried in
+    one still leaves the window pointing at the live list.
+    """
+    for src in value_sources(val):
+        if COPY_OF_BLOCKS_RE.match(src.strip()):
+            return True
+    return False
+
+
+DESTRUCTIVE = re.compile(
+    r"\bblocks\s*\.\s*(?:clear|remove|removeAt|removeAll|removeIf|retainAll)\s*\("
+    r"|\bblocks\s*=(?!=)")
+
+
+def innermost_bracket_at(code, pos):
+    """The innermost bracket still open at [pos] (`(` = argument list)."""
+    stack = []
+    for ch in code[:pos]:
+        if ch in "({[":
+            stack.append(ch)
+        elif ch in ")}]" and stack:
+            stack.pop()
+    return stack[-1] if stack else ""
+
+
+def _order_problems(code, members, copy_pos, lines, line_of):
+    """D-order: the copy must be READ before the live list is emptied.
+
+    "The list is copied" and "the list is cleared" are two events. Draining
+    first and copying afterwards builds the window from an emptied list while
+    every line still satisfies the copy criterion.
+    """
+    lo_off, hi_off = 0, len(code)
+    for _name, (start, end, _kind) in members.items():
+        if start <= copy_pos < end:
+            lo_off, hi_off = start, end
+            break
+    before = [m.start() for m in DESTRUCTIVE.finditer(code, lo_off, hi_off)
+              if m.start() < copy_pos and innermost_bracket_at(code, m.start()) != "("]
+    if not before:
+        return []
+    ln = line_of(copy_pos)
+    return ["[D no-raw-handout] line %d drains `blocks` BEFORE the window copies it — "
+            "the window is built from an emptied list (copy first, then clear): %s"
+            % (ln, lines[ln - 1].strip())]
 
 
 def rule_convergence(repo_root, class_file):
@@ -548,8 +599,9 @@ def rule_convergence(repo_root, class_file):
     [wide3/10] The old criterion asked whether the body CONTAINED
     `…Coalescer.method(`. `if (false) sysInfoCoalescer.append(…)` keeps that
     substring and drops every system notice, so the call must now be LIVE
-    (`dead_guarded()`): a constant-false condition on the statement or in an
-    enclosing block makes it a no-op, which is exactly the incident shape.
+    (`is_dead()`): an infeasible condition governing the call — on the statement
+    or on any enclosing block, folded by the shared constant evaluator — makes it
+    a no-op, which is exactly the incident shape.
     """
     problems = []
     for path in iter_prod_kt(repo_root):
@@ -557,32 +609,22 @@ def rule_convergence(repo_root, class_file):
         if text is None:
             continue
         rel = os.path.relpath(path, repo_root)
-        code = blank_comments(text)
-        for m in re.finditer(r"fun\s+\w*appendSystemInfo\s*\(", code):
-            start_off = m.start()
+        code = view(text)
+        for name, (start_off, end_off, _kind) in member_table(code).items():
+            if not re.search(r"appendSystemInfo$", name):
+                continue
             line_no = code.count("\n", 0, start_off) + 1
-            op = code.find("(", m.end() - 1)
-            cl = _paren_end(code, op)
-            brace = code.find("{", cl)
-            head = code[cl + 1:brace] if brace > cl else ""
-            if brace < 0 or re.search(r"(?<![=!<>+\-*/])=(?!=)", head):
-                # expression body (`fun f() = expr`) — judge the expression, never
-                # the next declaration's block.
-                eol = code.find("\n", brace if brace > 0 else cl)
-                end_off = (eol if eol >= 0 else len(code)) - 1
-            else:
-                end_off = _brace_end(code, brace)
-                if end_off < 0:
-                    problems.append("%s:%d [E convergence] unbalanced body — cannot "
-                                    "judge the route" % (rel, line_no))
-                    continue
-            body = code[start_off:end_off + 1]
+            body = code[start_off:end_off]
+            # [batch-5] LIVENESS, not spelling. The old shape judged a call dead
+            # only when a constant-false condition sat on the SAME statement —
+            # `if (1 == 2) { append(…) }`, `when (false) { … }` and
+            # `while (false) { … }` all kept the substring and dropped the
+            # effect. `is_dead` derives the governing condition from POSITION.
             calls = list(re.finditer(r"\b\w*[Cc]oalescer\s*\.\s*\w+\s*\(", body))
-            live = [c for c in calls
-                    if not dead_guarded(code, start_off + c.start())]
+            live = [c for c in calls if not is_dead(code, start_off + c.start())]
             if not live:
-                why = ("only in dead code (constant-false guard)" if calls
-                       else "no coalescer call at all")
+                why = ("only in dead code (infeasible branch / constant-false guard)"
+                       if calls else "no coalescer call at all")
                 problems.append("%s:%d [E convergence] appendSystemInfo does not route "
                                 "through a coalescer instance — %s" % (rel, line_no, why))
             if "pendingSysInfo" in body:
@@ -609,7 +651,7 @@ def run(repo_root):
         return 1
     print("state home: %s:%d-%d" % (class_file, class_span[0] + 1, class_span[1] + 1))
     problems += rule_single_home(repo_root, class_file, class_span)
-    problems += rule_guarded_access(class_text, class_span, blank_comments(class_text))
+    problems += rule_guarded_access(class_text, class_span, view(class_text))
     problems += rule_convergence(repo_root, class_file)
     problems += rule_storage_state_off_io(repo_root)
     problems += rule_storage_cache_invalidation(repo_root)
@@ -710,61 +752,11 @@ MUTATE_SIGNS = (
 
 
 def brace_span(code, brace_idx):
-    """(first line, last line) 1-based of the `{`-block at [brace_idx]."""
-    depth = 0
-    for j in range(brace_idx, len(code)):
-        ch = code[j]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return (code.count("\n", 0, brace_idx) + 1, code.count("\n", 0, j) + 1)
-    return None
-
-
-def fun_body_span(code, after_params_idx):
-    """Span of a member's `{`-body, or None for an expression / abstract body.
-
-    Scanning from just after the parameter list's `(`: the first `=` at paren
-    depth 0 means `fun f(): T = expr`, which has no body to inspect. Assuming
-    the next `{` is the body instead would make such a member swallow the NEXT
-    member's body — and a read-only member that swallowed a mutating one would
-    be classified as mutating.
-    """
-    depth, i = 1, after_params_idx
-    while i < len(code):
-        ch = code[i]
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                j = i + 1
-                while j < len(code) and code[j] not in "={":
-                    j += 1
-                if j >= len(code):
-                    return None
-                if code[j] == "{":
-                    return brace_span(code, j)
-                # `= expr`. The house shape for a suspend member is
-                # `= withContext(Dispatchers.IO) { … }`, so the mutation lives in
-                # that trailing lambda — take its span. A genuinely bodiless
-                # expression (`= true`) gets just its own line, and a member that
-                # starts before any `{` ends the search (otherwise this would
-                # swallow the NEXT member's body, which is how a read-only
-                # member would be mistaken for a mutating one).
-                k = code.find("{", j)
-                eq_line = code.count("\n", 0, j)
-                if k < 0:
-                    return (eq_line + 1, eq_line + 1)
-                seg = code[j:k]
-                if re.search(r"\n\s{0,4}(?:(?:private|internal|public|override|suspend|inline)\s+)*"
-                             r"(?:fun|val|var|class|object)\s+\w+", seg):
-                    return (eq_line + 1, eq_line + 1)
-                return brace_span(code, k)
-        i += 1
-    return None
+    """(first_line, last_line) 1-based of the `{`-block at [brace_idx]."""
+    close = match_bracket(code, brace_idx)
+    if close < 0:
+        return None
+    return code.count("\n", 0, brace_idx) + 1, code.count("\n", 0, close) + 1
 
 
 def innermost_brackets(code):
@@ -880,15 +872,10 @@ def file_scope_names(code, roots):
     return (roots | local_off) - local_main, local_main
 
 def _paren_end(code, open_paren):
-    depth = 0
-    for j in range(open_paren, len(code)):
-        if code[j] == "(":
-            depth += 1
-        elif code[j] == ")":
-            depth -= 1
-            if depth == 0:
-                return j
-    return len(code) - 1
+    """Matching `)` for the `(` at [open_paren] (shared bracket matcher)."""
+    j = match_bracket(code, open_paren)
+    return j if j >= 0 else len(code) - 1
+
 
 def _arg_text(code, open_paren):
     return code[open_paren + 1:_paren_end(code, open_paren)]
@@ -973,7 +960,7 @@ def prod_sources(repo_root):
         text = read(path)
         if text is None:
             continue
-        out[os.path.relpath(path, repo_root)] = (text, blank_comments(text))
+        out[os.path.relpath(path, repo_root)] = (text, view(text))
     return out
 
 def off_main_state_files(sources, roots):
@@ -1010,10 +997,20 @@ def rule_storage_state_off_io(repo_root):
     return problems
 
 def off_main_writes(rel, raw, code, roots):
-    """State assignments that land on a background thread."""
+    """State assignments that land on a background thread.
+
+    [batch-5] The assignment is found by OFFSET, not by matching `^` against a
+    stripped line. The line-anchored version only saw a write that was the
+    FIRST thing on its line, so `run { sharing = false }` — a write on an
+    otherwise non-empty line, which is exactly what a coroutine hop collapses
+    to — walked straight past it. Position also decides the statement/argument
+    question: inside a call's `(` the text is a named argument, inside a block
+    `{` it is an assignment.
+    """
     delegated = set(REMEMBER_VAR.findall(code))
     holders = set(REMEMBER_HOLDER.findall(code))
-    if not delegated and not holders:
+    names = sorted(delegated | holders)
+    if not names:
         return []
     off_names, main_names = file_scope_names(code, roots)
     blocks = dispatcher_blocks(code, off_names, main_names)
@@ -1021,57 +1018,55 @@ def off_main_writes(rel, raw, code, roots):
         return []
     lines = code.split("\n")
     raw_lines = raw.split("\n")
-    brackets = innermost_brackets(code)
-    problems = []
-    for ln in range(1, len(lines) + 1):
-        inner = _innermost_block(blocks, ln)
-        if not inner or inner[2] != "off":
-            continue
-        stripped = lines[ln - 1].strip()
-        if brackets[ln - 1] == "(":
-            continue  # in a call's argument list: `name = value` is an argument
-        m = STATE_ASSIGN.match(stripped)
-        if not m:
-            continue
-        name, on_value, rhs = m.group(1), bool(m.group(2)), m.group(3)
+    pattern = re.compile(
+        r"(?<![\w.])(" + "|".join(re.escape(n) for n in names) + r")"
+        r"(\s*\.\s*value)?\s*(?:\+=|-=|=)(?!=)")
+    problems, seen = [], set()
+    for m in pattern.finditer(code):
+        name, on_value = m.group(1), bool(m.group(2))
         if on_value:
             if name not in holders:
                 continue
         elif name not in delegated:
             continue
+        off = m.start()
+        line_no = code.count("\n", 0, off) + 1
+        if line_no in seen:
+            continue
+        inner = _innermost_block(blocks, line_no)
+        if not inner or inner[2] != "off":
+            continue
+        if innermost_bracket_at(code, off) != "{":
+            continue  # argument list (named argument) or top level: not a statement
+        eol = code.find("\n", m.end())
+        rhs = code[m.end():eol if eol >= 0 else len(code)].strip()
         if rhs.startswith("withContext(") or rhs.startswith("kotlinx.coroutines.withContext("):
             continue  # the value IS the call: the write lands on the caller's thread
-        if STATE_ESCAPE in (raw_lines[ln - 1] if ln - 1 < len(raw_lines) else ""):
+        if STATE_ESCAPE in (raw_lines[line_no - 1] if line_no - 1 < len(raw_lines) else ""):
             continue
+        seen.add(line_no)
         problems.append("[F off-main-state] %s:%d assigns Compose state `%s` on a "
-                        "background dispatcher: %s" % (rel, ln, name, stripped))
+                        "background dispatcher: %s"
+                        % (rel, line_no, name, lines[line_no - 1].strip()))
     return problems
 
-def member_bodies(code):
-    """{name: (first_line, body)} for every `fun name(` in [code]."""
-    out = {}
-    for m in re.finditer(r"^\s*(?:(?:private|internal|public|override|open|inline|suspend)\s+)*"
-                         r"fun\s+(\w+)\s*\(", code, re.M):
-        span = fun_body_span(code, m.end())
-        if not span:
-            continue
-        out[m.group(1)] = (span, "\n".join(code.split("\n")[span[0] - 1: span[1]]))
-    return out
-
 def _block_end(code, open_idx):
-    """Character index just past the `{`-block at [open_idx]."""
-    depth = 0
-    for j in range(open_idx, len(code)):
-        if code[j] == "{":
-            depth += 1
-        elif code[j] == "}":
-            depth -= 1
-            if depth == 0:
-                return j
-    return None
+    """Matching `}` for the `{` at [open_idx] (shared bracket matcher)."""
+    j = match_bracket(code, open_idx)
+    return j if j > 0 else -1
+
 
 def rule_delete_invalidation(repo_root):
-    """C-INV: an entry that removes files must drop the cached storage scan."""
+    """C-INV: an entry that removes files must drop the cached storage scan.
+
+    [batch-5] "Invalidated" is an EFFECT, not a spelling. The call used to be
+    found with `body.find(...)`, so `if (false) invalidateStorageSnapshot()`
+    kept the substring and dropped the drop — the Storage page then shows the
+    pre-delete sizes for the rest of the process. Liveness is derived from
+    position (`is_dead`), and the failure-path checks below judge the LIVE
+    occurrence: an invalidation that never runs is not a placement defect, it is
+    a missing invalidation.
+    """
     problems, checked = [], 0
 
     text = read(os.path.join(repo_root, FILE_BROWSER_VM))
@@ -1079,19 +1074,25 @@ def rule_delete_invalidation(repo_root):
         problems.append("[C-INV] %s missing — the subject of this criterion was "
                         "moved or deleted" % FILE_BROWSER_VM)
     else:
-        code = blank_comments(text)
+        code = view(text)
         for name, (span, body) in member_bodies(code).items():
             if not any(re.search(s, body) for s in DELETE_SIGNS):
                 continue
             if "loadItems(" not in body:
                 continue  # only the entries that re-list what they just removed
             checked += 1
-            inval = body.find(INVAL_CALL)
-            if inval < 0:
+            live = [m.start() for m in re.finditer(re.escape(INVAL_CALL), body)
+                    if not is_dead(body, m.start())]
+            if not live:
+                dead = INVAL_CALL in body
                 problems.append("[C-INV] %s:%d (%s) deletes a file/dir and then re-lists, "
-                                "but never invalidates the cached storage scan"
-                                % (FILE_BROWSER_VM, span[0], name))
+                                "but %s" % (FILE_BROWSER_VM, span[0], name,
+                                            "the cached-scan invalidation sits in dead code "
+                                            "(infeasible branch) — it never runs"
+                                            if dead else
+                                            "never invalidates the cached storage scan"))
                 continue
+            inval = live[0]
             guard = re.search(r"if\s*\(\s*!\s*deleted\s*\)\s*\{", body)
             if guard:
                 end = _block_end(body, guard.end() - 1)
@@ -1116,16 +1117,22 @@ def rule_delete_invalidation(repo_root):
         problems.append("[C-INV] %s missing — the subject of this criterion was "
                         "moved or deleted" % HISTORY_DRAWER)
     else:
-        code = blank_comments(text)
+        code = view(text)
         found = 0
         for name, (span, body) in member_bodies(code).items():
             if not re.search(r"\bdeleteSession\s*\(", body):
                 continue
             found += 1
-            if INVAL_CALL not in body:
+            live = [m.start() for m in re.finditer(re.escape(INVAL_CALL), body)
+                    if not is_dead(body, m.start())]
+            if not live:
+                dead = INVAL_CALL in body
                 problems.append("[C-INV] %s:%d (%s) deletes a session (and its on-disk tree, "
-                                "which the Storage page sizes) without invalidating the cached "
-                                "scan" % (HISTORY_DRAWER, span[0], name))
+                                "which the Storage page sizes) and %s"
+                                % (HISTORY_DRAWER, span[0], name,
+                                   "invalidates the cached scan only from dead code"
+                                   if dead else
+                                   "never invalidates the cached scan"))
         if found == 0:
             problems.append("[C-INV] no %s entry calls deleteSession — the delete path moved, "
                             "so this criterion saw nothing to check" % HISTORY_DRAWER)
@@ -1133,7 +1140,7 @@ def rule_delete_invalidation(repo_root):
 
 def invalidation_entry(text):
     """(name, span) of the file-level non-private cache-clearing entry."""
-    code = blank_comments(text)
+    code = view(text)
     for m in re.finditer(r"^(?:internal |public )?fun\s+(\w+)\s*\(\s*\)\s*\{", code, re.M):
         span = brace_span(code, m.end() - 1)
         if not span:
@@ -1143,22 +1150,22 @@ def invalidation_entry(text):
             return m.group(1), span
     return None
 
-
 def mutating_manager_members(manager_text):
     """RootfsManager's non-private members that mutate disk / published state.
 
     Transitive: a member that only calls a mutating one (e.g. `autoRepair` →
     `reset`) is mutating too, so a new lifecycle op cannot slip past the gate
     by delegating.
+
+    [batch-5] Member bodies come from the shared `member_table` — the previous
+    hand-written span could swallow a following member's brace block, which
+    turned a read-only member into a "mutating" one (and vice versa).
     """
-    code = blank_comments(manager_text)
-    bodies = {}
-    for m in re.finditer(r"^    (?!private )(?:internal |public )?(?:suspend )?fun\s+(\w+)\s*\(",
-                         code, re.M):
-        span = fun_body_span(code, m.end())
-        if not span:
-            continue
-        bodies[m.group(1)] = "\n".join(code.split("\n")[span[0] - 1: span[1]])
+    code = view(manager_text)
+    public = {m.group(1) for m in re.finditer(
+        r"^    (?!private )(?:internal |public )?(?:suspend )?fun\s+(\w+)\s*\(", code, re.M)}
+    bodies = {name: text for name, (_span, text) in member_bodies(code).items()
+              if name in public}
     mut = {n for n, b in bodies.items() if any(re.search(s, b) for s in MUTATE_SIGNS)}
     changed = True
     while changed:
@@ -1171,40 +1178,32 @@ def mutating_manager_members(manager_text):
                 changed = True
     return mut
 
-
 def lifecycle_invalidation_problems(vm_text, entry_name, mutators):
-    code = blank_comments(vm_text)
-    lines = code.split("\n")
+    code = view(vm_text)
     problems, seen = [], []
-    for m in re.finditer(r"^    (?:private |internal |public |override )?fun\s+(\w+)\s*\(",
-                         code, re.M):
-        span = fun_body_span(code, m.end())
-        if not span:
-            continue
-        name = m.group(1)
-        body = lines[span[0] - 1: span[1]]
-        calls = [(idx, c.group(1)) for idx, ln in enumerate(body)
-                 for c in re.finditer(r"\bmanager\.(\w+)\s*\(", ln)]
-        mut = [(idx, c) for idx, c in calls if c in mutators]
+    for name, (span, body) in member_bodies(code).items():
+        calls = [c.group(1) for c in re.finditer(r"\bmanager\.(\w+)\s*\(", body)]
+        mut = [c for c in calls if c in mutators]
         if not mut:
             continue
         seen.append(name)
-        inval = [idx for idx, ln in enumerate(body)
-                 if re.search(r"\b%s\s*\(" % re.escape(entry_name), ln)]
-        if not inval:
+        mut_pos = next(m.start() for m in re.finditer(r"\bmanager\.(\w+)\s*\(", body)
+                       if m.group(1) in mutators)
+        invals = [m.start() for m in re.finditer(r"\b%s\s*\(" % re.escape(entry_name), body)]
+        if not invals:
             problems.append("[G cache-invalidation] %s:%d (%s) mutates the rootfs but never "
                             "invalidates the cached storage scan"
                             % (ROOTFS_VM, span[0], name))
-        elif inval[0] > mut[0][0]:
+        elif invals[0] > mut_pos:
             problems.append("[G cache-invalidation] %s:%d (%s) invalidates the cached storage "
-                            "scan only AFTER %s() — an interruption between the two would leave "
-                            "the stale total pinned" % (ROOTFS_VM, span[0], name, mut[0][1]))
+                            "scan only AFTER manager.%s() — an interruption between the two "
+                            "would leave the stale total pinned"
+                            % (ROOTFS_VM, span[0], name, mut[0]))
     if not seen:
         problems.append("[G cache-invalidation] no ViewModel entry drives a mutating "
                         "RootfsManager call — the lifecycle moved, so this criterion saw "
                         "nothing to check")
     return problems
-
 
 def rule_storage_cache_invalidation(repo_root):
     """G: one clearing entry, called before every rootfs mutation."""
@@ -1958,6 +1957,82 @@ def selftest():
     bad.pop(PKG + "/ui/components/ImageGalleryViewer.kt", None)
     root = make_tree(bad)
     arms.append(("deleting a launch-shaped anchor file is red", run(root) == 1))
+    _rm(root)
+
+    # ── [batch-5] the five blind axes of this wave, one arm each ───────────
+    # (a) monitor identity: a monitor allocated per call excludes nobody.
+    bad = dict(good)
+    bad[CHAT + "/ChatViewModel.kt"] = (GOOD_VM + "\n" + GOOD_COALESCER).replace(
+        "    fun flush(publish: (Window<T>) -> Unit) {\n"
+        "        synchronized(lock) {\n"
+        "            publishLocked(publish)\n"
+        "        }\n"
+        "    }",
+        "    fun flush(publish: (Window<T>) -> Unit) {\n"
+        "        synchronized(Any()) {\n"
+        "            publishLocked(publish)\n"
+        "        }\n"
+        "    }")
+    root = make_tree(bad)
+    probs = [p for p in rule_guarded_access(
+        read(os.path.join(root, CHAT + "/ChatViewModel.kt")),
+        find_class_span(read(os.path.join(root, CHAT + "/ChatViewModel.kt")), CLASS_NAME),
+        view(read(os.path.join(root, CHAT + "/ChatViewModel.kt"))))
+        if "publish-under-lock" in p]
+    arms.append(("a per-call monitor is not the class lock",
+                 run(root) == 1 and any("not the class lock" in p for p in probs)))
+    _rm(root)
+
+    # (b) order: draining the list BEFORE the window copies it.
+    bad = dict(good)
+    bad[CHAT + "/ChatViewModel.kt"] = (GOOD_VM + "\n" + GOOD_COALESCER).replace(
+        "        val drained = Window(firstId = state.firstId, blocks = blocks.toList())\n"
+        "        current = null\n"
+        "        blocks.clear()",
+        "        current = null\n"
+        "        blocks.clear()\n"
+        "        val drained = Window(firstId = state.firstId, blocks = blocks.toList())")
+    root = make_tree(bad)
+    probs = [p for p in rule_guarded_access(
+        read(os.path.join(root, CHAT + "/ChatViewModel.kt")),
+        find_class_span(read(os.path.join(root, CHAT + "/ChatViewModel.kt")), CLASS_NAME),
+        view(read(os.path.join(root, CHAT + "/ChatViewModel.kt"))))
+        if "no-raw-handout" in p]
+    arms.append(("draining before the copy is red",
+                 run(root) == 1 and any("BEFORE the window copies it" in p for p in probs)))
+    _rm(root)
+
+    # (c) dead branch decided by ARITHMETIC, not by the `false` token.
+    bad = dict(good)
+    bad[CHAT + "/ChatViewModel.kt"] = (GOOD_VM + "\n" + GOOD_COALESCER).replace(
+        "        sysInfoCoalescer.append(text, iconKind) { window -> publish(window) }",
+        "        if (1 == 2) { sysInfoCoalescer.append(text, iconKind)"
+        " { window -> publish(window) } }")
+    root = make_tree(bad)
+    arms.append(("a dead coalescer call decided by arithmetic routes nowhere",
+                 run(root) == 1))
+    _rm(root)
+
+    # (d) the coroutine hop collapses to `run { sharing = false }` — a write on
+    # an otherwise non-empty line, invisible to a line-anchored criterion.
+    bad = dict(good)
+    bad[PKG + "/ui/components/ImageGalleryViewer.kt"] = GOOD_GALLERY.replace(
+        SHARE_HOP, "                run { sharing = false }\n")
+    root = make_tree(bad)
+    probs = f_problems(root)
+    arms.append(("a collapsed coroutine hop still writes off-main",
+                 len(probs) == 1 and "`sharing`" in probs[0]))
+    _rm(root)
+
+    # (e) the invalidation call sits in dead code — substring present, drop gone.
+    bad = dict(good)
+    bad[FILE_BROWSER_VM] = GOOD_FILE_BROWSER.replace(
+        "                invalidateStorageSnapshot()\n",
+        "                if (false) invalidateStorageSnapshot()\n")
+    root = make_tree(bad)
+    probs = [p for p in rule_delete_invalidation(root) if "C-INV" in p]
+    arms.append(("a delete whose invalidation sits in dead code is red",
+                 run(root) == 1 and any("sits in dead code" in p for p in probs)))
     _rm(root)
 
     print("")

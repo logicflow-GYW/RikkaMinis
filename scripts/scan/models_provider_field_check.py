@@ -79,6 +79,27 @@ import re
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    if_blocks,
+    is_pure_literal,
+    match_bracket,
+    split_top,
+    strip_parens,
+    when_branches,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    code_view,
+    expr_end,
+    guard_feasible,
+    literal_view,
+    path_feasible,
+    peel_discarding,
+    value_sources,
+)
+
 APP = "src/android/app/src/main/java/com/rikkaminis/app"
 MC_REL = APP + "/config/collections/ModelsCollection.kt"
 MD_REL = APP + "/provider/ModelsDevApi.kt"
@@ -105,81 +126,99 @@ MAP_SHORT_KEYS = ("Anthropic", "Google", "OpenAI", "OpenRouter",
                  "Antigravity", "xAI", "Kimi")
 
 
-def code_only(text):
-    """Text with line comments (//…) removed — presence checks must not be
-    satisfiable from prose in a comment."""
-    return "\n".join(line.split("//")[0] for line in text.split("\n"))
+def _end_after(text, open_idx):
+    """Index just past the bracket matching the opener at [open_idx] (-1: none).
+
+    [batch5] One implementation — `_kotlin_ast.match_bracket` over the masked
+    view, so a bracket inside a string literal cannot end a declaration early.
+    """
+    close = match_bracket(text, open_idx)
+    return -1 if close < 0 else close + 1
 
 
-def _balanced(src, open_idx, opener="(", closer=")"):
-    depth = 0
-    for i in range(open_idx, len(src)):
-        if src[i] == opener:
-            depth += 1
-        elif src[i] == closer:
-            depth -= 1
-            if depth == 0:
-                return i + 1
-    return -1
-
-
-# ── [wide-1024] value-flow helpers ─────────────────────────────────────────
+# ── value-flow helpers ─────────────────────────────────────────────────────
 # Two spellings of the same defect must not need two arms: what matters is
 # WHICH EXPRESSION PRODUCES THE VALUE, not whether a token appears somewhere
-# nearby. `.also { … }` / `.apply { … }` / `.onEach { … }` / `.forEach { … }`
-# keep the RECEIVER's value (whatever the lambda references is discarded),
-# while `.let { … }` / `.run { … }` take the lambda's LAST expression.
-_DISCARD_SCOPE_RE = re.compile(r"\.\s*(?:also|apply|onEach|forEach)\s*\{")
-_VALUE_SCOPE_RE = re.compile(r"\.\s*(?:let|run)\s*\{")
-DEAD_GUARD_RE = re.compile(r"\b(?:if|while)\s*\(\s*!?\s*(?:true|false)\b")
+# nearby. The value-flow judgements live in the shared
+# `scripts/scan/_kotlin_valueflow.py` (`.also`/`.apply` discard the lambda,
+# `.let`/`.run` return it, `?:` / `if` have two possible sources, `takeIf`
+# drops the value).
 INSTANCE_ID_RE = re.compile(r"\binstance\s*\.\s*id\b|\binstanceId\b")
 
 
-def _scope_body(expr, pattern):
-    """Body of the first `<pattern> { … }` block in [expr], or None."""
-    m = pattern.search(expr)
+def value_expression(expr):
+    """The expression that determines the value of [expr].
+
+    Value-discarding scopes are peeled; a value-defining scope (`let`/`run`) is
+    left to [value_sources], which returns every possible source.
+    """
+    return peel_discarding(expr.strip()).strip()
+
+
+def _const_guard_kills(expr):
+    """Reason [expr] can never produce a real value at run time, or None.
+
+    [batch5 G06-1 / G06-2] Covers `.takeIf { false }` / `.takeUnless { true }`
+    (the value is dropped) and `.filter { false }` / `.filterNot { true }` (the
+    collection is emptied). Judged with the shared constant folder, so
+    `1 == 2`, `!true` and `x && false` fold too — the two-literal whitelist
+    (`if (true)` / `if (false)`) this replaces saw none of them.
+    """
+    for m in re.finditer(r"\.\s*(takeIf|takeUnless|filter|filterNot)\s*\{", expr):
+        brace = m.end() - 1
+        close = match_bracket(expr, brace)
+        if close < 0:
+            return "an unreadable `.%s { … }` guard — fail-closed" % m.group(1)
+        cond = const_bool(expr[brace + 1:close])
+        if cond is None:
+            continue
+        dead = cond is False if m.group(1) in ("takeIf", "filter") else cond is True
+        if dead:
+            return ("`.%s { %s }` is decided at compile time, so the value is never "
+                    "produced" % (m.group(1),
+                                  strip_parens(expr[brace + 1:close]).strip()[:40]))
+    return None
+
+
+def _const_branch(code):
+    """A constant-folded `if` / `when` condition in [code] (as text), or None.
+
+    [batch5 G06-6] The two-literal whitelist this replaces matched only
+    `if (true)` / `if (false)`. The witness wrote `if (1 == 1) currentModel
+    else <the whole enrichment chain>` — the same dead branch one token
+    further away. Every real condition is folded with the shared constant
+    evaluator, so `1 == 1`, `!false`, `x && false` and `when (false)` count,
+    while any condition with a runtime input is left alone.
+    """
+    for cond, _ts, _te, _es, _ee in if_blocks(code):
+        if const_bool(cond) is not None:
+            return "`if (%s)`" % strip_parens(cond).strip()[:40]
+    for subject, cond_text, _bs, _be in when_branches(code):
+        if cond_text and const_bool(cond_text) is not None:
+            return "`when (%s) { %s ->`" % (subject.strip()[:20], cond_text.strip()[:20])
+    return None
+
+
+def _expr_body(fn_text):
+    """The expression after `fun … = ` of an expression-bodied function."""
+    if not fn_text:
+        return None
+    masked = code_view(fn_text)
+    m = re.search(r"\)\s*(?::\s*[^={\n]+)?=\s*", masked)
     if not m:
         return None
-    brace = m.end() - 1
-    end = _balanced(expr, brace, "{", "}")
-    return None if end < 0 else expr[brace + 1:end - 1]
-
-
-def _peel_discarding(expr, rounds=4):
-    """Remove value-discarding scope calls, keeping their receiver."""
-    for _ in range(rounds):
-        m = _DISCARD_SCOPE_RE.search(expr)
-        if not m:
-            break
-        brace = m.end() - 1
-        end = _balanced(expr, brace, "{", "}")
-        if end < 0:
-            break
-        expr = expr[:m.start()] + expr[end:]
-    return expr
-
-
-def value_expression(expr):
-    """The expression that actually determines the value of [expr].
-
-    Discarding scopes are peeled; a value-defining scope (`let`/`run`) is
-    replaced by its body, which is where the value really comes from.
-    """
-    core = _peel_discarding(expr.strip())
-    body = _scope_body(core, _VALUE_SCOPE_RE)
-    if body is not None:
-        return body.strip()
-    return core
+    return masked[m.end():expr_end(masked, m.end())].strip()
 
 
 def function_text(src, header):
     i = src.find(header)
     if i < 0:
         return None
-    brace = src.find("{", i)
+    masked = code_view(src)
+    brace = masked.find("{", i)
     if brace < 0:
         return None
-    end = _balanced(src, brace, "{", "}")
+    end = _end_after(masked, brace)
     return None if end < 0 else src[i:end]
 
 
@@ -201,37 +240,90 @@ def fn_text(src, header):
     i = src.find(header)
     if i < 0:
         return None
-    n = len(src)
+    masked = code_view(src)
+    n = len(masked)
     depth = 0
     j = i
     while j < n:
-        c = src[j]
+        c = masked[j]
         if c == "(":
             depth += 1
         elif c == ")":
             depth -= 1
         elif c == "{":
-            end = _balanced(src, j, "{", "}")
+            end = _end_after(masked, j)
             return src[i:end] if end > 0 else None
         elif c == "\n" and depth == 0:
             k = j + 1
-            while k < n and src[k] in " \t":
+            while k < n and masked[k] in " \t":
                 k += 1
-            if k >= n or src[k] == "}" or _DECL_OR_DOC.match(src, k):
+            if k >= n or masked[k] == "}" or _DECL_OR_DOC.match(masked, k):
                 return src[i:j]
         j += 1
     return src[i:]
 
 
 def map_literal_text(src):
-    """The `providerKeyMap = mapOf(...)` expression body (code-only)."""
-    i = code_only(src).find("providerKeyMap = mapOf(")
+    """The `providerKeyMap = mapOf(...)` expression body (literal view).
+
+    Comments are masked, string literals are kept — the keys ARE strings, so a
+    code-only view would hide everything this arm judges.
+    """
+    visible = literal_view(src)
+    i = visible.find("providerKeyMap = mapOf(")
     if i < 0:
         return None
-    code = code_only(src)
-    open_idx = code.find("mapOf(", i) + len("mapOf(") - 1
-    end = _balanced(code, open_idx)
-    return None if end < 0 else code[open_idx:end]
+    open_idx = visible.find("mapOf(", i) + len("mapOf(") - 1
+    end = _end_after(code_view(src), open_idx)
+    return None if end < 0 else visible[open_idx:end]
+
+
+def provider_map_tail(src, limit=700):
+    """Text right AFTER the `providerKeyMap = mapOf( … )` argument list.
+
+    This is the statement that merges the dynamically derived families
+    (`+ ProviderType.values()…`). Returned from the literal view, positions
+    aligned with the masked one.
+    """
+    masked = code_view(src)
+    i = masked.find("providerKeyMap = mapOf(")
+    if i < 0:
+        return None
+    open_idx = masked.find("mapOf(", i) + len("mapOf(") - 1
+    end = _end_after(masked, open_idx)
+    if end < 0:
+        return None
+    return literal_view(src)[end:end + limit].split("\n\n")[0]
+
+
+def _map_pairs(visible):
+    """[("Key", "value-text")] for every `"Key" to value` inside [visible].
+
+    The value ends at a depth-0 `,` or a depth-0 newline that starts a new
+    `"Key" to` pair — the fixtures and the real map are one entry per line.
+    """
+    out = []
+    for m in re.finditer(r'"([^"]+)"\s+to\s+', visible):
+        start = m.end()
+        depth = 0
+        i = start
+        while i < len(visible):
+            ch = visible[i]
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif ch == "," and depth == 0:
+                break
+            elif ch == "\n" and depth == 0:
+                nxt = visible[i + 1:].lstrip(" \t")
+                if nxt.startswith('"'):
+                    break
+            i += 1
+        out.append((m.group(1), visible[start:i].strip()))
+    return out
 
 
 def line_of(src, idx):
@@ -250,7 +342,7 @@ def check_arm1(src, rel):
     body = function_text(src, "override fun add(")
     if body is None:
         return [(rel, 0, "1", "override fun add( not found — gate ROT")]
-    code = code_only(body)
+    code = code_view(body)
     out = []
     for token in ARM1_FORBIDDEN:
         if token in code:
@@ -274,6 +366,7 @@ def check_arm1(src, rel):
     else:
         raw = m.group(1).strip().rstrip(",")
         val = value_expression(raw)
+        dead = _const_guard_kills(raw)
         if INSTANCE_ID_RE.search(val):
             if ("provider = " + raw) not in ARM1_FORBIDDEN:   # plain spelling already reported
                 out.append((rel, 0, "1",
@@ -282,13 +375,25 @@ def check_arm1(src, rel):
                             "keep out of LLMModel.provider (minis-model-use renders it "
                             "and ModelsDevApi.enrichModel can never resolve it)"
                             % (raw, val)))
-        elif "displayName" not in val:
+        elif dead:
             out.append((rel, 0, "1",
-                        "ModelsCollection.add assigns `provider = %s`, whose VALUE "
-                        "does not name the provider family (`…providerType."
-                        "displayName` absent from the value expression) — a "
-                        "same-looking call that yields something else is the "
-                        "defect with a new spelling" % raw))
+                        "ModelsCollection.add assigns `provider = %s`, whose value is "
+                        "never produced: %s — the family label is dropped and the model "
+                        "is persisted with whatever the other branch yields" % (raw, dead)))
+        else:
+            # [batch5 G06-1 · spelling] `…displayName.takeIf { false } ?: ""` keeps
+            # the anchor AND the assignment; only the VALUE is wrong. Every
+            # possible source of the assignment has to name the family, so a
+            # second `?:` / `if` branch cannot smuggle a placeholder in.
+            bad = [x.strip() for x in value_sources(raw)
+                   if not x.strip() or x.strip() == "null" or "displayName" not in x]
+            if bad:
+                out.append((rel, 0, "1",
+                            "ModelsCollection.add assigns `provider = %s`, which can "
+                            "also evaluate to `%s` — that does not name the provider "
+                            "family (`…providerType.displayName`), so the row is "
+                            "persisted with a placeholder and ModelsDevApi.enrichModel "
+                            "can never resolve it" % (raw, bad[0][:40])))
     # model_id gate must trim before validating. Anchor the declaration line
     # (plus the continuation line, Kotlin breaks after `?.value`) and demand
     # `.trim()` inside that statement. Fail-closed: no declaration ⇒ red.
@@ -315,17 +420,49 @@ def check_arm2(src, rel):
     if body is None:
         return [(rel, 0, "2", "providerKeyMap = mapOf( not found — gate ROT")]
     out = []
+    pairs = dict(_map_pairs(body))
     for key in MAP_NEW_KEYS:
-        if ('"%s"' % key) not in body:
+        if key not in pairs and ('"%s"' % key) not in body:
             out.append((rel, 0, "2",
                         "providerKeyMap missing displayName key `\"%s\"` "
                         "(custom-model adds persist displayName)" % key))
+            continue
+        # [batch5 G06-2 · dataflow] A present key is not a resolvable family:
+        # the witness kept all three displayName keys and pointed them at
+        # `emptyList()`, so every model added under "Google Gemini" /
+        # "xAI (Grok)" / "Kimi Code" resolved to zero api ids and
+        # enrichModel answered with no capabilities — the exact pre-fix
+        # behaviour while every key string is still in the file.
+        val = pairs.get(key)
+        if val is None:
+            continue
+        if re.fullmatch(r"(?:emptyList|emptySet|listOf|listOfNotNull|mutableListOf|"
+                        r"mutableSetOf|mutableListOf|setOf)\s*\(\s*\)", val.strip()) \
+                or val.strip() in ("null", "Unit", ""):
+            out.append((rel, 0, "2",
+                        "providerKeyMap maps `\"%s\"` to `%s` — an EMPTY collection, so "
+                        "a model whose provider is that displayName resolves to no api "
+                        "ids at all (enrichModel answers with no context window, no "
+                        "modalities, no effort tiers)" % (key, val.strip()[:40])))
     for key in MAP_SHORT_KEYS:
         if ('"%s"' % key) not in body:
             out.append((rel, 0, "2",
                         "providerKeyMap lost original short key `\"%s\"` "
                         "(built-in catalog rows and historical data still "
                         "carry it — idempotence broken)" % key))
+    # [batch5 G06-2 · dataflow] The map alone is not the answer: the dynamic
+    # merge `+ ProviderType.values()...` is what covers families added after
+    # the literal map. `.filter { false }` around it empties that half while
+    # every key above stays exactly as written.
+    tail = provider_map_tail(src)
+    if tail:
+        dead = _const_guard_kills(tail)
+        if dead:
+            out.append((rel, 0, "2",
+                        "the dynamic merge after providerKeyMap can never contribute: "
+                        "%s — providers that are not spelled out in the literal map "
+                        "resolve to no api ids (custom / self-hosted families lose "
+                        "every models.dev capability)" % dead))
     return out
 
 
@@ -337,10 +474,11 @@ def object_blocks(src):
     """
     out = []
     for m in re.finditer(r"\bobject\s+(\w+)\s*:\s*[\w.]+", src):
-        brace = src.find("{", m.end())
+        masked = code_view(src)
+        brace = masked.find("{", m.end())
         if brace < 0:
             continue
-        end = _balanced(src, brace, "{", "}")
+        end = _end_after(masked, brace)
         if end < 0:
             continue
         out.append((m.group(1), m.end(), src[m.end():end]))
@@ -359,7 +497,7 @@ def openai_call_sites(block):
     None => at least one call's argument list is unbalanced (gate ROT)."""
     out = []
     for m in re.finditer(r"OpenAIModelsApi\.fetchModels\s*\(", block):
-        end = _balanced(block, m.end() - 1)
+        end = _end_after(code_view(block), m.end() - 1)
         if end < 0:
             return None
         out.append((m.start(), end, block[m.end():end - 1]))
@@ -369,28 +507,47 @@ def openai_call_sites(block):
 def _names_family(expr, block):
     """Does [expr] evaluate to a provider FAMILY label?
 
-    Accepted: `…displayName` / `…name` of a ProviderType constant, a string
-    literal, or a local bound from one of those. Rejected: anything that
-    evaluates to the instance identity (`instance.id` / `instanceId` /
-    `instance.label`) — that is the UUID the whole 1026-ISSUE-04 fix exists to
-    keep out of `LLMModel.provider`, and it satisfies "non-null identifier"
-    just as well as the real label does.
+    Accepted: `…displayName` / `…name` of a ProviderType constant, a literal
+    that names a family, or a local bound from one of those. Rejected: anything
+    that evaluates to the instance identity (`instance.id` / `instanceId` /
+    `instance.label`) — the UUID the whole 1026-ISSUE-04 fix exists to keep out
+    of `LLMModel.provider`, which satisfies "non-null identifier" just as well
+    as the real label does — and the literal `"Custom"`, the API's
+    unknown-provider label (batch5 G06-3: `providerName = "Custom"` restored
+    the pre-fix stamping through the argument that was supposed to fix it).
+
+    Every possible source is judged (shared `value_sources`), so a second `?:`
+    branch cannot smuggle a placeholder past a correct first branch.
     """
-    val = value_expression(expr)
-    if INSTANCE_ID_RE.search(val) or re.search(r"\binstance\s*\.\s*label\b", val):
-        return "the value is the instance identity (`%s`), not a family label" % val.strip()
-    if re.search(r"\bdisplayName\b", val) or re.search(r"\.\s*name\b", val):
-        return None
-    if re.fullmatch(r'"[^"]*"', val.strip()):
-        return None
-    if block and re.fullmatch(r"[A-Za-z_]\w*", val.strip()):
-        decl = re.search(r"\b(?:val|var)\s+%s\s*=\s*([^\n]+)"
-                         % re.escape(val.strip()), block)
-        if decl is not None:
-            return _names_family(decl.group(1), "")
-    return ("the value `%s` is not a provider family label "
-            "(`ProviderType.<x>.displayName` / `.name` / a literal)"
-            % val.strip())
+    dead = _const_guard_kills(expr)
+    if dead:
+        return "the name expression can never be produced: %s" % dead
+    for src_expr in value_sources(expr):
+        val = value_expression(src_expr)
+        if INSTANCE_ID_RE.search(val) or re.search(r"\binstance\s*\.\s*label\b", val):
+            return "the value is the instance identity (`%s`), not a family label" % val.strip()
+        if re.search(r"\bdisplayName\b", val) or re.search(r"\.\s*name\b", val):
+            continue
+        m_lit = re.fullmatch(r'"([^"]*)"', val.strip())
+        if m_lit:
+            text = m_lit.group(1).strip()
+            if not text or text.lower() == "custom":
+                return ("the value is the literal `\"%s\"` — the API's "
+                        "unknown-provider label, so every model this adapter fetches "
+                        "is stamped `Custom` instead of its family" % text)
+            continue
+        if block and re.fullmatch(r"[A-Za-z_]\w*", val.strip()):
+            decl = re.search(r"\b(?:val|var)\s+%s\s*=\s*([^\n]+)"
+                             % re.escape(val.strip()), block)
+            if decl is not None:
+                reason = _names_family(decl.group(1), "")
+                if reason is not None:
+                    return reason
+                continue
+        return ("the value `%s` is not a provider family label "
+                "(`ProviderType.<x>.displayName` / `.name` / a real family name)"
+                % val.strip())
+    return None
 
 
 def adapter_delivers_name(block, call):
@@ -419,7 +576,7 @@ def adapter_delivers_name(block, call):
     if not m:
         return "neither a `providerName = …` argument nor a post-fetch relabel"
     brace = end + m.end() - 1
-    b_end = _balanced(block, brace, "{", "}")
+    b_end = _end_after(code_view(block), brace)
     if b_end < 0:
         return "the post-fetch relabel block is unbalanced (fail-closed)"
     if re.search(r"\bprovider\s*=", block[brace:b_end]) is None:
@@ -493,12 +650,12 @@ def check_arm4(src, rel):
       4d the cache path stops re-labelling rows read back from the
          48-hour cache (the parameter only reaches freshly parsed rows).
     """
-    code = code_only(src)
+    code = code_view(src)
     out = []
     head = code.find("suspend fun fetchModels(")
     if head < 0:
         return [(rel, 0, "4", "`suspend fun fetchModels(` not found — gate ROT")]
-    sig_end = _balanced(code, head + len("suspend fun fetchModels"))
+    sig_end = _end_after(code, head + len("suspend fun fetchModels"))
     if sig_end < 0:
         return [(rel, 0, "4", "fetchModels signature unbalanced — gate ROT")]
     sig = code[head:sig_end]
@@ -513,6 +670,9 @@ def check_arm4(src, rel):
         out.append((rel, 0, "4", "fetchModels body unbalanced — gate ROT"))
         return out
     helper = fn_text(code, "fun resolveProviderName(")
+    # The two label tokens are STRING LITERALS: absent from the masked view, so
+    # the helper is read through the literal view as well.
+    helper_lit = fn_text(literal_view(src), "fun resolveProviderName(") or ""
     if helper is None:
         out.append((rel, 0, "4",
                     "`fun resolveProviderName(...)` not found — the single "
@@ -522,11 +682,33 @@ def check_arm4(src, rel):
                            ("providerName", "the caller-supplied family name"),
                            ('"Custom"', "the legacy third-party label"),
                            ('"OpenAI"', "the legacy official label")):
-            if token not in helper:
+            if token not in helper and token not in helper_lit:
                 out.append((rel, 0, "4",
                             "resolveProviderName dropped %s (`%s`) — one of the two "
                             "decisions cannot be made any more (dv18-A-08)"
                             % (why, token)))
+        # [batch5 G06-4 · dataflow] Every token can be present and the decision
+        # still not be made: the witness returned
+        #   `(if (isCustomBase) "Custom" else "OpenAI").also { providerName }`
+        # — `providerName`, both labels and `isCustomBase` are all in the
+        # helper, while the caller-supplied family name is discarded into a
+        # `.also` lambda, so every adapter ends up stamped "Custom" again.
+        ret = _expr_body(helper_lit or helper)
+        if ret:
+            dead = _const_guard_kills(ret)
+            if dead:
+                out.append((rel, 0, "4",
+                            "resolveProviderName's value can never be produced: %s"
+                            % dead))
+            else:
+                srcs = [value_expression(x) for x in value_sources(ret)]
+                if not any("providerName" in x for x in srcs):
+                    out.append((rel, 0, "4",
+                                "resolveProviderName's returned value never depends on "
+                                "the caller-supplied `providerName` (value sources: %s) "
+                                "— a named adapter's family label is dropped and every "
+                                "row is stamped with the legacy default (dv18-A-08)"
+                                % " | ".join(x.strip()[:30] for x in srcs)))
     if "provider = resolveProviderName(" not in body:
         out.append((rel, 0, "4",
                     "the model row's `provider =` no longer calls "
@@ -560,7 +742,7 @@ def check_arm5_mc(src, rel):
     test is that the numeric readers read the ENRICHED model, and that the
     pre-fix `overrides ?: baseModel` chain is gone.
     """
-    code = code_only(src)
+    code = code_view(src)
     out = []
     if "effectiveModel(e).contextWindow" not in code:
         out.append((rel, 0, "5",
@@ -591,11 +773,41 @@ def check_arm5_mc(src, rel):
                     "test pins the same count); found %d. If a second call site is "
                     "genuinely needed, route it through the alias and update this gate."
                     % n))
+    # [batch5 G06-5 · dataflow] The reader must RETURN the enriched field, not
+    # merely mention it. The witness wrote
+    #   `ConfigValue.Int(0.also { effectiveModel(e).maxOutputTokens })`
+    # — every substring this arm looked for is present, the value is the
+    # constant 0, and `minis-config get models.<id>.maxOutputTokens` (and the
+    # harness view of it) answers 0 for every model.
+    for m in re.finditer(r"ConfigValue\s*\.\s*(?:Int|Long|Float|Double|Boolean|String)\s*\(",
+                         code):
+        open_paren = code.index("(", m.start())
+        args = call_args(code, open_paren)
+        if not args:
+            out.append((rel, 0, "5",
+                        "a `ConfigValue.…(…)` reader in ModelsCollection has no readable "
+                        "argument list — fail-closed"))
+            continue
+        arg = code[args[0][0]:args[0][1]].strip()
+        if "effectiveModel(e)" not in arg:
+            continue
+        core = peel_discarding(arg)
+        if "effectiveModel(e)" not in core:
+            out.append((rel, 0, "5",
+                        "the reader's value is `%s`; the `effectiveModel(e)` read sits "
+                        "inside a value-discarding scope (`.also` / `.apply` / `.onEach`), "
+                        "so the enriched number is thrown away and the reader answers a "
+                        "constant (dv22-A4)" % core[:40]))
+            continue
+        dead = _const_guard_kills(arg)
+        if dead:
+            out.append((rel, 0, "5",
+                        "the reader can never produce the enriched value: %s" % dead))
     return out
 
 def check_arm5_debug(src, rel, view):
     """A Debug RPC view must answer from the enriched effective model."""
-    code = code_only(src)
+    code = code_view(src)
     out = []
     n = _resolver_calls(code)
     if n != 1:
@@ -627,7 +839,7 @@ def check_arm5_tlc(src, rel):
     not the spelling: any shape that resolves the ceiling through the shared
     resolver passes, while a raw `model.catalogMaxThinkingLevel` read reds.
     """
-    code = code_only(src)
+    code = code_view(src)
     out = []
     n = _resolver_calls(code)
     if n == 0:
@@ -698,7 +910,7 @@ def _decl_block(code, name, max_lines=40):
 
 def check_arm6_chat(src, rel):
     """ChatViewModel: every capability / window reader through one live exit."""
-    code = code_only(src)
+    code = code_view(src)
     out = []
     if not re.search(r"(?:private|internal) fun liveEffectiveModel\(\)\s*:\s*LLMModel\?\s*=", code):
         out.append((rel, 0, "6",
@@ -712,12 +924,12 @@ def check_arm6_chat(src, rel):
     # dead behind a constant condition — `= if (true) currentModel else <the
     # whole enrichment chain>` keeps every token this arm looks for and returns
     # the raw snapshot to all four readers.
-    if body and DEAD_GUARD_RE.search(body):
+    dead = _const_branch(body) if body else None
+    if dead:
         out.append((rel, 0, "6",
-                    "liveEffectiveModel short-circuits on a constant condition "
-                    "(`if (true)` / `if (false)`) — the enrichment chain is "
-                    "unreachable and every reader gets the raw snapshot "
-                    "(dv23-B7)"))
+                    "liveEffectiveModel short-circuits on a constant condition (%s) — "
+                    "the enrichment chain is unreachable and every reader gets the raw "
+                    "snapshot (dv23-B7)" % dead))
     elif body and "_activeEntryId.value" not in body:
         out.append((rel, 0, "6",
                     "liveEffectiveModel no longer consults `_activeEntryId.value` "
@@ -774,11 +986,6 @@ EXT_READERS = {
     "cst": ("thinkingInfo", "Token Usage Thinking row"),
 }
 
-def _block_comment_free(text):
-    """[deep-audit-1044] KDoc is prose: it may neither satisfy nor trip a
-    judgement. `code_only` only drops `//` lines, so strip `/* … */` too."""
-    return re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-
 def _ext_fn(code, name):
     """Body of a top-level `fun ChatViewModel.<name>(…)` extension function."""
     return function_text(code, "fun ChatViewModel.%s(" % name)
@@ -787,7 +994,7 @@ def check_arm7_ext_readers(src, rel, key):
     """The out-of-class capability reader of THIS file answers through the live
     exit. Fail-closed per file: the reader disappearing is ROT."""
     name, label = EXT_READERS[key]
-    code = _block_comment_free(code_only(src))
+    code = code_view(src)
     out = []
     blk = _ext_fn(code, name)
     if blk is None:
@@ -900,7 +1107,9 @@ FIX_MD_OK = """object ModelsDevApi {
         "Google Gemini" to listOf("google", "google-vertex"),
         "xAI (Grok)" to listOf("xai"),
         "Kimi Code" to listOf("moonshotai", "moonshotai-cn"),
-    )
+    ) + ProviderType.values()
+        .filter { it != ProviderType.OPENAI_COMPATIBLE }
+        .flatMap { it.keyPrefixes }
 }
 """
 
@@ -1346,6 +1555,54 @@ fun ChatViewModel.thinkingInfo(): ThinkingInfo? {
 }
 """
 
+# ══════════════════════════════════════════════════════════════════════════
+# [batch5 t12] The six G12 witnesses of this gate, frozen as arms.
+# Every one of them kept the exact token the old criterion looked for.
+# ══════════════════════════════════════════════════════════════════════════
+
+# G12-A1 (arm 1): `…displayName.takeIf { false } ?: ""` — the anchor and the
+# assignment survive, the value is the empty string.
+MC_W_TAKEIF_EMPTY = FIX_MC_OK.replace(
+    "provider = instance.providerType.displayName,",
+    'provider = instance.providerType.displayName.takeIf { false } ?: "",')
+
+# G12-A2 (arm 2): all three displayName keys present, all three empty, and the
+# dynamic merge filtered to nothing.
+MD_W_EMPTY_LISTS = (FIX_MD_OK
+                    .replace('"Google Gemini" to listOf("google", "google-vertex"),',
+                             '"Google Gemini" to emptyList(),')
+                    .replace('"xAI (Grok)" to listOf("xai"),',
+                             '"xAI (Grok)" to emptyList(),')
+                    .replace('"Kimi Code" to listOf("moonshotai", "moonshotai-cn"),',
+                             '"Kimi Code" to emptyList(),')
+                    .replace(".filter { it != ProviderType.OPENAI_COMPATIBLE }",
+                             ".filter { false }"))
+
+# G12-A3 (arm 3): the adapter names its family through the API's unknown label.
+AD_W_CUSTOM_LITERAL = AD_FIX_OK.replace(
+    "providerName = ProviderType.kimiCode.displayName,",
+    'providerName = "Custom",')
+
+# G12-A4 (arm 4): every token present, the caller's family name discarded.
+OA_W_ALSO_DROP = OA_FIX_OK.replace(
+    'providerName ?: if (isCustomBase) "Custom" else "OpenAI"',
+    '(if (isCustomBase) "Custom" else "OpenAI").also { providerName }')
+
+# G12-A5 (arm 5): the enriched field is mentioned, the reader answers 0.
+MC_A5_CFG_OK = MC_A5_OK.replace(
+    "        val mot = effectiveModel(e).maxOutputTokens ?: 0",
+    "        val mot = ConfigValue.Int(effectiveModel(e).maxOutputTokens ?: 0)")
+MC_A5_CFG_ALSO = MC_A5_OK.replace(
+    "        val mot = effectiveModel(e).maxOutputTokens ?: 0",
+    "        val mot = ConfigValue.Int(0.also { effectiveModel(e).maxOutputTokens })")
+
+# G12-A6 (arm 6): the dead guard is spelled as a comparison, not a literal.
+CVM_A6_CONST_CMP = CVM_A6_OK.replace(
+    """    private fun liveEffectiveModel(): LLMModel? =
+        _activeEntryId.value""",
+    """    private fun liveEffectiveModel(): LLMModel? =
+        if (1 == 1) currentModel else _activeEntryId.value""")
+
 def selftest():
     ok = True
     with tempfile.TemporaryDirectory() as tmp:
@@ -1609,6 +1866,73 @@ def selftest():
         # W3: `if (true) currentModel else <chain>` ⇒ arm 6 alone.
         ok &= arm6_of("dead-chain", CVM_A6_DEAD_CHAIN, 1,
                       "a constant-condition shortcut reds the live exit")
+
+        # ── [batch5 t12] The six G12 witnesses, one arm each ──────────────
+        # Each of them kept every token the old criterion looked for, so the
+        # assertion is on the ARM that fires.
+
+        # G12-A1: the anchor and the assignment survive, the value is `""`.
+        write("mc", MC_W_TAKEIF_EMPTY)
+        w = [c for c in run_checks(tmp, rels) if c[2] == "1"]
+        write("mc", FIX_MC_OK)
+        if len(w) != 1 or "never produced" not in w[0][3]:
+            print("  [FAIL] g12-a1 takeIf-empty: expected 1 arm-1 finding about the "
+                  "value never being produced, got %s" % [c[3][:70] for c in w])
+            ok = False
+        else:
+            print("  [OK]   g12-a1 `displayName.takeIf { false } ?: \"\"` reds")
+
+        # G12-A2: three displayName keys → emptyList() + the merge filtered out.
+        write("md", MD_W_EMPTY_LISTS)
+        w = [c for c in run_checks(tmp, rels) if c[2] == "2"]
+        write("md", FIX_MD_OK)
+        empty = [c for c in w if "EMPTY collection" in c[3]]
+        dead = [c for c in w if "can never contribute" in c[3]]
+        if len(empty) != 3 or len(dead) != 1:
+            print("  [FAIL] g12-a2 empty-lists: expected 3 empty-key + 1 dead-merge "
+                  "findings, got %s" % [c[3][:60] for c in w])
+            ok = False
+        else:
+            print("  [OK]   g12-a2 displayName→emptyList + `.filter { false }` merge red")
+
+        # G12-A3: the adapter names its family with the unknown-provider label.
+        write("ad", AD_W_CUSTOM_LITERAL)
+        w = [c for c in run_checks(tmp, rels) if c[2] == "3"]
+        write("ad", AD_FIX_OK)
+        if not any("unknown-provider label" in c[3] for c in w):
+            print("  [FAIL] g12-a3 custom-literal: expected an arm-3 finding naming "
+                  "the literal \"Custom\", got %s" % [c[3][:70] for c in w])
+            ok = False
+        else:
+            print("  [OK]   g12-a3 `providerName = \"Custom\"` reds")
+
+        # G12-A4: every token present, the family name discarded into `.also`.
+        write("oa", OA_W_ALSO_DROP)
+        w = [c for c in run_checks(tmp, rels) if c[2] == "4"]
+        write("oa", OA_FIX_OK)
+        if not any("never depends on the caller-supplied" in c[3] for c in w):
+            print("  [FAIL] g12-a4 also-drop: expected an arm-4 finding about the "
+                  "returned value, got %s" % [c[3][:70] for c in w])
+            ok = False
+        else:
+            print("  [OK]   g12-a4 `(if …).also { providerName }` reds")
+
+        # G12-A5: the reader mentions the enriched field and answers 0.
+        write("mc", MC_A5_CFG_OK)
+        ok_cfg = [c for c in run_checks(tmp, rels) if c[2] == "5"]
+        write("mc", MC_A5_CFG_ALSO)
+        bad_cfg = [c for c in run_checks(tmp, rels) if c[2] == "5"]
+        write("mc", FIX_MC_OK)
+        if ok_cfg or len(bad_cfg) != 1:
+            print("  [FAIL] g12-a5 cfg-also: clean reader got %d findings, the "
+                  "`.also` reader got %s" % (len(ok_cfg), [c[3][:60] for c in bad_cfg]))
+            ok = False
+        else:
+            print("  [OK]   g12-a5 `ConfigValue.Int(0.also { effectiveModel(e)… })` reds")
+
+        # G12-A6: the dead guard is a comparison, not the literal `true`.
+        ok &= arm6_of("const-compare", CVM_A6_CONST_CMP, 1,
+                      "`if (1 == 1)` folds to a dead branch and reds alone")
 
     print("MODELS_PROVIDER_FIELD_SELFTEST=%s" % ("PASS" if ok else "FAIL"))
     return 0 if ok else 1

@@ -44,6 +44,28 @@ import re
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    const_value,
+    is_pure_literal,
+    match_bracket,
+    split_top,
+    stmt_spans,
+    strip_parens,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    code_view,
+    expr_end,
+    guard_feasible,
+    literal_view,
+    path_feasible,
+    returns_exiting,
+    value_sources,
+)
+
 APP = "src/android/app/src/main/java/com/rikkaminis/app"
 PR_REL = APP + "/data/repository/ProviderRepository.kt"
 BM_REL = APP + "/backup/OpenMinisBackupCompat.kt"
@@ -86,38 +108,37 @@ ECHO_KEY = "reasoningEchoJson"
 BARE_ENTRY_ID = re.compile(r"(?<![.\w])entry\.id(?![\w])")
 
 
-def code_only(text):
-    """Text with line comments (//…) removed — presence checks below must not
-    be satisfiable from prose in a comment."""
-    return "\n".join(line.split("//")[0] for line in text.split("\n"))
-
-
 def line_of(src, idx):
     return src.count("\n", 0, idx) + 1
 
 
-def _balanced(src, open_idx, opener="(", closer=")"):
-    """Index just past the closer matching the opener at [open_idx] (-1 if none)."""
-    depth = 0
-    for i in range(open_idx, len(src)):
-        if src[i] == opener:
-            depth += 1
-        elif src[i] == closer:
-            depth -= 1
-            if depth == 0:
-                return i + 1
-    return -1
+def _end_after(text, open_idx):
+    """Index just past the bracket matching the opener at [open_idx] (-1: none).
+
+    [batch5] One implementation: `_kotlin_ast.match_bracket` over the masked
+    view. The hand-rolled scanner this replaces counted braces inside string
+    literals, so a `}` in a message closed the function body early
+    (parser-death).
+    """
+    close = match_bracket(text, open_idx)
+    return -1 if close < 0 else close + 1
 
 
 def function_text(src, header):
-    """Text of the declaration starting at [header], up to its closing brace."""
+    """Text of the declaration starting at [header], up to its closing brace.
+
+    Braces are matched on the masked view (a string literal cannot close the
+    body early); the RETURNED slice is the original source so callers can read
+    literal contents (JSON keys) from it.
+    """
     i = src.find(header)
     if i < 0:
         return None
-    brace = src.find("{", i)
+    masked = code_view(src)
+    brace = masked.find("{", i)
     if brace < 0:
         return None
-    end = _balanced(src, brace, "{", "}")
+    end = _end_after(masked, brace)
     return None if end < 0 else src[i:end]
 
 
@@ -132,61 +153,26 @@ def read(rel, root):
 # ----------------------------------------------------------------------
 # Arm 1 — merge must not return the temp uuid
 # ----------------------------------------------------------------------
-def _top_level_find(text, needle):
-    """Index of [needle] at zero ()/[]/{} depth (string-aware), or -1."""
-    depth, quote, i = 0, None, 0
-    while i < len(text):
-        ch = text[i]
-        if quote:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-        elif ch in "\"'":
-            quote = ch
-        elif ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            depth -= 1
-        elif depth == 0 and text.startswith(needle, i):
-            return i
-        i += 1
-    return -1
+def _elvis_parts(expr):
+    """(left, right) of the TOP-LEVEL `?:` in [expr], or None.
 
-
-def _statement(text, start):
-    """The expression starting at [start] up to a zero-depth newline / `;`."""
-    depth, quote, i = 0, None, start
-    while i < len(text):
-        ch = text[i]
-        if quote:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-        elif ch in "\"'":
-            quote = ch
-        elif ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            if depth == 0:
-                break
-            depth -= 1
-        elif depth == 0 and ch in "\n;":
-            nxt = text[i + 1:].lstrip(" \t")
-            if not nxt.startswith((".", "?", ":", "&&", "||")):
-                break
-        i += 1
-    return text[start:i]
+    [batch5] Split via the shared `split_top` (masked view: a `?:` inside a
+    string or a nested lambda is not top-level) instead of the hand-rolled
+    depth/quote scanner this gate used to carry.
+    """
+    parts = split_top(expr, ("?:",))
+    if len(parts) != 2:
+        return None
+    a, b = parts
+    return expr[a[0]:a[1]].strip(), expr[b[0]:b[1]].strip()
 
 
 def check_merge_requery(src, rel=PR_REL):
     body = function_text(src, "fun mergeImportInstanceJSON(")
     if body is None:
         return [(rel, 0, "1", "mergeImportInstanceJSON( not found — gate ROT")]
-    code = code_only(body)
+    code = code_view(body)
+    lit = literal_view(body)
     add_idx = code.find("addEntry(entry)")
     add_m = re.search(r"addEntry\(\s*([A-Za-z_]\w*)\s*\)", code)
     if add_idx < 0:
@@ -194,7 +180,7 @@ def check_merge_requery(src, rel=PR_REL):
     # The run-block that follows addEntry must resolve the persisted id.
     tail_marker = code.find("entryMap[", add_idx)
     tail = code[add_idx: tail_marker if tail_marker > 0 else len(code)]
-    if "firstOrNull" not in tail and "compositeEntryKey(" not in tail:
+    if "firstOrNull" not in tail and "compositeEntryKey(" not in lit:
         return [(rel, line_of(src, src.find("fun mergeImportInstanceJSON(")), "1",
                  "addEntry(entry) branch returns without re-querying the persisted id "
                  "(no firstOrNull re-query, no compositeEntryKey) — entryIdMap receives "
@@ -205,11 +191,10 @@ def check_merge_requery(src, rel=PR_REL):
     # — `ModelEntry.id` is `get() = uuid`, so the temp uuid came back through a
     # different spelling while `firstOrNull`, `compositeEntryKey(` and the
     # absence of a bare `entry.id` all stayed true.
-    left = tail
-    elvis = _top_level_find(tail, "?:")
     problems = []
     imported = add_m.group(1) if add_m else "entry"
-    if elvis < 0:
+    elvis = _elvis_parts(tail)
+    if elvis is None:
         # No elvis: the branch may return the deterministic composite key
         # straight away (`compositeEntryKey(existing.id, entry.baseModel.id)`),
         # which is derived from STABLE inputs and needs no re-query. What it may
@@ -223,7 +208,7 @@ def check_merge_requery(src, rel=PR_REL):
                             "uuid/id that saveConfig canonicalizes away)" % imported)
         left_txt = whole
     else:
-        left_txt = tail[:elvis].strip()
+        left_txt = elvis[0]
         rq = re.search(r"firstOrNull\s*\{|\.\s*find\s*\{|firstOrNull\s*\(|singleOrNull", left_txt)
         if not rq:
             problems.append("the returned id is not produced by a re-query of the persisted list")
@@ -234,9 +219,21 @@ def check_merge_requery(src, rel=PR_REL):
             brace = left_txt.find("{", rq.start())
             projection = left_txt
             if brace >= 0:
-                close = _balanced(left_txt, brace, "{", "}")
+                close = match_bracket(left_txt, brace)
                 if close > 0:
-                    projection = left_txt[close:]
+                    projection = left_txt[close + 1:]
+                    # [batch5 G06-A1 · family-hole/dataflow] `firstOrNull { false }`
+                    # keeps every token this arm used to look for (`firstOrNull`,
+                    # `?.id`, `?: compositeEntryKey(`) and matches nothing, so the
+                    # callers get the fallback for every entry. The predicate has
+                    # to be SATISFIABLE — folded with the shared constant folder,
+                    # which covers `false`, `!true`, `1 == 2`, `x && false`.
+                    pred = left_txt[brace + 1:close]
+                    if guard_feasible(pred) is False:
+                        problems.append(
+                            "the re-query predicate `%s` is unsatisfiable (constant-folds "
+                            "to false) — firstOrNull never matches, so every imported entry "
+                            "is handed the fallback id" % strip_parens(pred).strip()[:60])
             projection = projection.strip()
             if re.search(r"(?<![.\w])%s\s*\." % re.escape(imported), projection):
                 problems.append("it is read off the imported entry `%s` itself (a temp uuid / "
@@ -245,6 +242,25 @@ def check_merge_requery(src, rel=PR_REL):
                              r"(?:id|uuid|key)\b\s*\}?\s*$", projection):
                 problems.append("it ends in no projection of the lookup result "
                                 "(`?.id` / `?.let { it.id }` / `?.key`) — fail-closed")
+    # [batch5 G06-A1] The deterministic fallback must be DERIVED, not typed in:
+    # `compositeEntryKey("", "")` answers the same constant for every entry, so
+    # phase-2/3 of ConfigBackup rewrite every model reference to a key that does
+    # not exist. Judged on the values (shared literal folder), not the spelling.
+    for m in re.finditer(r"\bcompositeEntryKey\s*\(", code):
+        open_idx = code.index("(", m.start())
+        args = call_args(code, open_idx)
+        if not args:
+            problems.append("`compositeEntryKey(…)` has no readable argument list — "
+                            "fail-closed")
+            continue
+        lits = [code[a:b].strip() for a, b in args if is_pure_literal(code[a:b])]
+        if lits:
+            problems.append(
+                "`compositeEntryKey(%s)` is built from literal constants (%s) — every "
+                "imported entry maps to the same key, so the caller rewrites all "
+                "model-group / default-model references to a key that does not exist"
+                % (", ".join(code[a:b].strip() for a, b in args), ", ".join(lits)))
+            break
     if problems:
         return [(rel, line_of(src, src.find("fun mergeImportInstanceJSON(") + add_idx),
                  "1",
@@ -265,7 +281,7 @@ def check_reasoning_keys(src, rel, header, arm, what, anchors):
     body = function_text(src, header)
     if body is None:
         return [(rel, 0, arm, header + " not found — gate ROT")]
-    code = code_only(body)
+    code = literal_view(body)
     out = []
     for anchor in anchors:
         if anchor not in code:
@@ -275,15 +291,109 @@ def check_reasoning_keys(src, rel, header, arm, what, anchors):
     return out
 
 
+def _dead_scope_guard(expr):
+    """Reason the value of [expr] is decided at compile time by an inline guard,
+    or None. Covers `.takeIf { false }` / `.takeUnless { true }`.
+
+    [batch5] `x.takeIf { false } ?: ""` keeps the whole outer AST shape of the
+    expression the arms look for (`optString(KEY)` / `displayName` / the read
+    call) and still evaluates to the other side. The guard is judged with the
+    shared constant folder, so `1 == 2` / `!true` / `x && false` fold too.
+    """
+    for m in re.finditer(r"\.\s*(takeIf|takeUnless)\s*\{", expr):
+        brace = expr.index("{", m.end() - 1)
+        close = match_bracket(expr, brace)
+        if close < 0:
+            return "an unreadable `.%s { … }` guard — fail-closed" % m.group(1)
+        cond = const_bool(expr[brace + 1:close])
+        if cond is None:
+            continue
+        dead = (cond is False) if m.group(1) == "takeIf" else (cond is True)
+        if dead:
+            return ("`.%s { %s }` is decided at compile time, so the value is never "
+                    "produced" % (m.group(1),
+                                  strip_parens(expr[brace + 1:close]).strip()[:40]))
+    return None
+
+
+def _stmt_at(code, pos):
+    """[start, end) of the top-level statement in [code] containing [pos]."""
+    spans = stmt_spans(code)
+    for a, b in spans:
+        if a <= pos < b:
+            return a, b
+    return 0, len(code)
+
+
 def check_convert_echo(src, rel=BM_REL):
+    """[batch5 G06-A2] The echo key must be READ *and WRITTEN* into the output.
+
+    The old criterion was a bare `KEY in body` presence test: the witness kept
+    `d.optString("reasoningEchoJson", "").takeIf { false }` — the read anchor is
+    still there, the `r.put(...)` is gone — and the gate stayed green while
+    every iOS restore dropped the field. The judgement now follows the value:
+    a `put(KEY, …)` must exist, its value must not be a constant, and the write
+    must be reachable (no compile-time-decided guard).
+    """
     body = function_text(src, "fun convertThinkingRules(")
     if body is None:
         return [(rel, 0, "4", "convertThinkingRules( not found — gate ROT")]
-    if ECHO_KEY not in code_only(body):
-        return [(rel, line_of(src, src.find("fun convertThinkingRules(")), "4",
-                 "convertThinkingRules drops " + ECHO_KEY +
-                 " — cross-device restore resets the reasoning-echo policy")]
-    return []
+    code, lit = code_view(body), literal_view(body)
+    dec_at = src.find("fun convertThinkingRules(")
+    out = []
+
+    def _at(pos):
+        return line_of(src, dec_at + pos)
+
+    read_re = re.compile(r"\bopt(?:String|)\s*\(\s*\"%s\"|\bhas\s*\(\s*\"%s\""
+                         % (ECHO_KEY, ECHO_KEY))
+    write_re = re.compile(r"\bput\s*\(\s*\"%s\"" % ECHO_KEY)
+    if not read_re.search(lit):
+        out.append((rel, _at(0), "4",
+                    "convertThinkingRules no longer reads " + ECHO_KEY +
+                    " — cross-device restore resets the reasoning-echo policy"))
+        return out
+    writes = list(write_re.finditer(lit))
+    if not writes:
+        out.append((rel, _at(0), "4",
+                    "convertThinkingRules READS " + ECHO_KEY + " but never writes it "
+                    "into the output object (`put(\"" + ECHO_KEY + "\", …)` absent) — the "
+                    "read value is dropped, so every iOS/OpenMinis restore loses the "
+                    "custom reasoning-echo setting (DeepSeek/Kimi multi-turn tool calls "
+                    "then re-send reasoning without the echo field)"))
+        return out
+    for w in writes:
+        open_paren = code.index("(", w.start())
+        args = call_args(code, open_paren)
+        if len(args) < 2:
+            out.append((rel, _at(w.start()), "4",
+                        "the `put(\"" + ECHO_KEY + "\", …)` write has no readable value "
+                        "argument — fail-closed"))
+            continue
+        val = code[args[1][0]:args[1][1]].strip()
+        if not val or is_pure_literal(val):
+            out.append((rel, _at(w.start()), "4",
+                        "the value written for " + ECHO_KEY + " is the constant `%s`, not "
+                        "the value that was read — the field is restored as a fixed "
+                        "placeholder" % val[:40]))
+            continue
+        if not path_feasible(code, w.start()):
+            out.append((rel, _at(w.start()), "4",
+                        "the `put(\"" + ECHO_KEY + "\", …)` write sits inside a branch "
+                        "that is constant-folded dead — the field is never emitted"))
+            continue
+        a, b = _stmt_at(code, w.start())
+        dead = _dead_scope_guard(code[a:b])
+        if dead:
+            out.append((rel, _at(w.start()), "4",
+                        "the " + ECHO_KEY + " write is unreachable: " + dead))
+            continue
+        if not read_re.search(lit[a:b]):
+            out.append((rel, _at(w.start()), "4",
+                        "the " + ECHO_KEY + " write does not consume the value read from "
+                        "the record (the read and the write are not in the same "
+                        "expression) — the field is written from something else"))
+    return out
 
 
 # ----------------------------------------------------------------------
@@ -294,11 +404,100 @@ def llm_model_properties(src, rel=LM_REL):
     if i < 0:
         return None
     open_paren = src.find("(", i)
-    end = _balanced(src, open_paren)
+    end = _end_after(code_view(src), open_paren)
     if end < 0:
         return None
     ctor = src[i:end]
     return re.findall(r"\bval\s+(\w+)\s*:", ctor)
+
+
+def _ctor_named_args(code, callee, lit=None):
+    """{parameter: value-text} of every `callee( … )` call in [code].
+
+    Structure (which arguments are named, where each one starts/ends) comes
+    from the masked [code]; the value TEXT comes from [lit] when given —
+    string literals (`optJSONArray("reasoningEffortValues")`) are blank in the
+    masked view and the callers judge on the key named. Both views are
+    length-preserving, so offsets are interchangeable.
+    """
+    out = {}
+    lit = code if lit is None else lit
+    for m in re.finditer(r"(?<![.\w])%s\s*\(" % re.escape(callee), code):
+        open_paren = code.index("(", m.start())
+        for a, b in call_args(code, open_paren):
+            kv = re.match(r"\s*([A-Za-z_]\w*)\s*=\s*(?![=>])", code[a:b])
+            if kv:
+                out.setdefault(kv.group(1), lit[a + kv.end():b].strip())
+    return out
+
+
+_ctor_args = _ctor_named_args
+
+
+def _decl_rhs(code, name, lit=None):
+    """RHS bound to [name] by its declaration in [code], or None.
+
+    The span is derived on the masked [code]; the text is taken from [lit] when
+    given, so a `"key"` inside the RHS is readable.
+    """
+    lit = code if lit is None else lit
+    m = re.search(r"\b(?:val|var)\s+%s\b\s*(?::[^=\n]*)?=\s*" % re.escape(name), code)
+    if m:
+        return lit[m.end():expr_end(code, m.end())].strip()
+    for m in re.finditer(r"\b(?:val|var)\s*\(([^)]*)\)\s*=\s*", code):
+        if re.search(r"(?<![\w])%s(?![\w])" % re.escape(name), m.group(1)):
+            return lit[m.end():expr_end(code, m.end())].strip()
+    return None
+
+
+def _ctor_value_findings(parse_shape, ctor_args, prop, key, rel, at_line, lit=None):
+    """[batch5 G06-A3] The value passed for [prop] must be the PARSED value.
+
+    Three false greens this replaces, all of which kept every anchor:
+      * `reasoningEffortValues = null` (the parsed local is discarded),
+      * `contextWindow = 0` / `= ""` (a constant re-introduces "no data"),
+      * `inputModalities = <something that never read the JSON>`.
+    Fail-closed: a property the constructor never receives is a violation too —
+    the field silently falls back to the data class default.
+    """
+    if prop not in ctor_args:
+        return [(rel, at_line, "5",
+                 "parseImportedModelEntries never passes `%s` to LLMModel(…) — the field "
+                 "falls back to the data-class default, so a restore drops it "
+                 "(add-a-field-sync-everywhere regression)" % prop)]
+    val = ctor_args[prop]
+    if not val or val == "null" or is_pure_literal(val):
+        return [(rel, at_line, "5",
+                 "LLMModel(%s = %s) in parseImportedModelEntries passes a constant — the "
+                 "value parsed out of the backup is computed and then discarded, so every "
+                 "restored model loses this field" % (prop, val[:40]))]
+    dead = _dead_scope_guard(val)
+    if dead:
+        return [(rel, at_line, "5",
+                 "LLMModel(%s = %s) — the value is never produced: %s"
+                 % (prop, val[:50], dead))]
+    sources = value_sources(val)
+    ok = False
+    for src_expr in sources:
+        s = src_expr.strip()
+        if not s or s == "null":
+            continue
+        if '"%s"' % key in s or PARSE_HELPER_CALL in s:
+            ok = True
+            break
+        if re.fullmatch(r"[A-Za-z_]\w*", s):
+            rhs = _decl_rhs(parse_shape, s, lit)
+            if rhs and ('"%s"' % key in rhs or PARSE_HELPER_CALL in rhs
+                        or (PARSE_HELPER_CALL.split("(")[0] + "(") in rhs):
+                ok = True
+                break
+    if not ok:
+        return [(rel, at_line, "5",
+                 "LLMModel(%s = %s) in parseImportedModelEntries — the argument does not "
+                 "derive from the backup's \"%s\" read, so the field is restored from "
+                 "something else (add-a-field-sync-everywhere regression)"
+                 % (prop, val[:50], key))]
+    return []
 
 
 def check_field_completeness(srcs, rels=None):
@@ -316,7 +515,9 @@ def check_field_completeness(srcs, rels=None):
         out.append((rels["pr"], 0, "5", "parseImportedModelEntries( not found — gate ROT"))
     if out:
         return out
-    export_code, parse_code = code_only(export_body), code_only(parse_body)
+    export_code, parse_code = literal_view(export_body), literal_view(parse_body)
+    parse_shape = code_view(parse_body)
+    ctor_args = _ctor_args(parse_shape, "LLMModel", parse_code)
     for prop in props:
         if prop in LLM_EXEMPT:
             continue
@@ -336,10 +537,21 @@ def check_field_completeness(srcs, rels=None):
                         "add-a-field-sync-everywhere regression" % (prop, key)))
         if not _has_call(parse_code, ("opt", "has(")):
             if prop in PARSE_HELPER_READ and PARSE_HELPER_CALL in parse_code:
-                continue  # helper-owned read (bitfield fallback contract)
-            out.append((rels["pr"], line_of(pr_src, pr_src.find("fun parseImportedModelEntries(")), "5",
-                        "parseImportedModelEntries does not read LLMModel.%s (key \"%s\") — "
-                        "add-a-field-sync-everywhere regression" % (prop, key)))
+                pass  # helper-owned read (bitfield fallback contract)
+            else:
+                out.append((rels["pr"], line_of(pr_src, pr_src.find("fun parseImportedModelEntries(")), "5",
+                            "parseImportedModelEntries does not read LLMModel.%s (key \"%s\") — "
+                            "add-a-field-sync-everywhere regression" % (prop, key)))
+        # [batch5 G06-A3 · dataflow] Reading the key is not restoring it: the
+        # witness kept `val reasoningEffortValues = m.optJSONArray(...)` and
+        # passed `reasoningEffortValues = null` to the constructor — every
+        # imported model lost its effort tiers / no-effort declaration while
+        # the read and the constructor argument both stayed in place. The value
+        # handed to LLMModel(…) must carry the parsed value.
+        out.extend(_ctor_value_findings(parse_shape, ctor_args, prop, key, rels["pr"],
+                                        line_of(pr_src,
+                                                pr_src.find("fun parseImportedModelEntries(")),
+                                        parse_code))
     return out
 
 
@@ -356,7 +568,7 @@ def check_merge_shares_instance_fields(src, rel=PR_REL):
     import_body = function_text(src, "fun importInstanceJSON(")
     if import_body is None:
         out.append((rel, 0, "6", "importInstanceJSON( not found — gate ROT"))
-    elif SHARED_FIELDS_READER not in code_only(import_body):
+    elif SHARED_FIELDS_READER not in code_view(import_body):
         out.append((rel, line_of(src, src.find("fun importInstanceJSON(")), "6",
                     "importInstanceJSON no longer decodes the instance-config fields via the "
                     "shared readImportInstanceFields seam — the append path drifted from the "
@@ -365,7 +577,7 @@ def check_merge_shares_instance_fields(src, rel=PR_REL):
     if merge_body is None:
         out.append((rel, 0, "6", "mergeImportInstanceJSON( not found — gate ROT"))
     else:
-        code = code_only(merge_body)
+        code = code_view(merge_body)
         if SHARED_FIELDS_READER not in code or SHARED_FIELDS_APPLIER not in code:
             out.append((rel, line_of(src, src.find("fun mergeImportInstanceJSON(")), "6",
                         "merge path does not apply the instance-config fields through the "
@@ -432,7 +644,7 @@ def check_merge_restores_entry_fields(src, rel=PR_REL):
     merge_body = function_text(src, "fun mergeImportInstanceJSON(")
     if merge_body is None:
         return [(rel, 0, "7", "mergeImportInstanceJSON( not found — gate ROT")]
-    code = code_only(merge_body)
+    code = code_view(merge_body)
     if MERGE_FIELDS_HELPER not in code:
         out.append((rel, line_of(src, src.find("fun mergeImportInstanceJSON(")), "7",
                     "merge hit branch takes the local entry's id and drops the rest — "
@@ -461,6 +673,34 @@ def check_merge_restores_entry_fields(src, rel=PR_REL):
         out.append((rel, line_of(src, src.find("fun mergeImportInstanceJSON(")), "7",
                     "merge hit branch restores fields but never writes them back — "
                     "%s absent from mergeImportInstanceJSON" % ENTRY_WRITE_FACE))
+    else:
+        # [batch5 G06-A4 · dataflow] Writing SOMETHING back is not enough: the
+        # witness kept `val updated = mergeImportedEntryOntoLocal(hit, entry)`
+        # and then called `updateEntry(hit, …)` — the merged value was computed
+        # and thrown away, so a restore of an existing model silently kept the
+        # old overrides. The argument written must BE the merged value.
+        merged = set(m.group(1) for m in re.finditer(
+            r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*=\s*mergeImportedEntryOntoLocal\s*\(", code))
+        for m in re.finditer(r"\bupdateEntry\s*\(", code):
+            args = call_args(code, code.index("(", m.start()))
+            if not args:
+                out.append((rel, line_of(src, src.find("fun mergeImportInstanceJSON(") + m.start()),
+                            "7",
+                            "updateEntry(…) call has no readable argument list — fail-closed"))
+                continue
+            first = code[args[0][0]:args[0][1]].strip()
+            if MERGE_FIELDS_HELPER in first:
+                continue
+            ok = any(s.strip() in merged for s in value_sources(first))
+            if not ok:
+                out.append((rel, line_of(src, src.find("fun mergeImportInstanceJSON(") + m.start()),
+                            "7",
+                            "updateEntry(%s, …) writes a value that is NOT the merge result "
+                            "(expected %s) — the restored overrides / isHidden / base-model "
+                            "metadata are computed and then dropped, so importing over an "
+                            "existing model keeps the local copy"
+                            % (first[:40], ", ".join(sorted(merged)) or
+                               "mergeImportedEntryOntoLocal(…)")))
     return out
 
 # ----------------------------------------------------------------------
@@ -482,7 +722,8 @@ def check_save_persists_published(src, rel=PR_REL):
     body = function_text(src, "fun saveConfig(")
     if body is None:
         return [(rel, 0, "8", "saveConfig( not found — gate ROT")]
-    code = code_only(body)
+    code = code_view(body)
+    lit = literal_view(body)
     calls = re.findall(r"persistToDbAndMirror\(\s*([A-Za-z_]\w*)\s*\)", code)
     if not calls:
         out.append((rel, line_of(src, src.find("fun saveConfig(")), "8",
@@ -529,7 +770,8 @@ def check_save_persists_published(src, rel=PR_REL):
                     "the published identifier %r has no readable declaration — fail-closed"
                     % published))
         return out
-    expr = _statement(code, dm.end()).strip()
+    pub_end = expr_end(code, dm.end())
+    expr = code[dm.end():pub_end].strip()
     root = re.match(r"([A-Za-z_]\w*)", expr)
     root = root.group(1) if root else ""
     if root not in canon:
@@ -538,6 +780,44 @@ def check_save_persists_published(src, rel=PR_REL):
                     "canonicalization runs and its result is discarded, so the published "
                     "store and the mirror keep the pre-canonical id shape"
                     % (published, expr[:60], ", ".join(sorted(canon)))))
+        return out
+    # [batch5 G06-A5 · dataflow] The published value must carry the CANONICAL
+    # collections. The witness kept `val published = canonical.copy(…)` and only
+    # swapped one named argument for `config.modelEntries.toMutableList()` —
+    # the declaration, the persist and the publish all name `published`, while
+    # the mirror + DB receive the pre-canonical list (legacy uuid / duplicate
+    # composite keys) and the running store keeps the canonical one. Judge the
+    # VALUES of the copy arguments, not the presence of the `.copy(` call.
+    raw_params = set()
+    for pm in re.finditer(r"fun\s+saveConfig\s*\(", code):
+        for a, b in call_args(code, code.index("(", pm.start())):
+            nm = re.match(r"\s*([A-Za-z_]\w*)\s*:", code[a:b])
+            if nm:
+                raw_params.add(nm.group(1))
+    raw_alt = "|".join(re.escape(n) for n in sorted(raw_params)) or "config"
+    for cm in re.finditer(r"\.\s*copy\s*\(", code[dm.end():pub_end]):
+        open_idx = dm.end() + cm.end() - 1
+        for a, b in call_args(code, open_idx):
+            kv = re.match(r"\s*([A-Za-z_]\w*)\s*=\s*(?![=>])", code[a:b])
+            if not kv:
+                continue
+            arg_name = kv.group(1)
+            val = code[a + kv.end():b].strip()
+            raw_srcs = [s.strip() for s in value_sources(val)
+                        if re.match(r"(?:%s)\s*\." % raw_alt, s.strip())]
+            if not raw_srcs:
+                continue
+            copied = [s for s in raw_srcs
+                      if re.search(r"\.\s*(?:toMutableList|toList|toMutableSet|toSet)\s*\(", s)]
+            bare = [s for s in raw_srcs
+                    if re.fullmatch(r"(?:%s)\s*\.\s*[A-Za-z_]\w*" % raw_alt, s)]
+            if copied or bare:
+                out.append((rel, line_of(src, src.find("fun saveConfig(") + a), "8",
+                            "saveConfig publishes `published` but builds `%s = %s` from the "
+                            "PRE-canonical argument, not from %s — the mirror + DB keep the "
+                            "legacy list (temp uuids / duplicate composite keys) while the "
+                            "running store is canonical, until the next save"
+                            % (arg_name, val[:50], "/".join(sorted(canon)))))
     return out
 
 # ----------------------------------------------------------------------
@@ -552,10 +832,10 @@ def _params_of(fn_text):
     open_paren = fn_text.find("(")
     if open_paren < 0:
         return None
-    end = _balanced(fn_text, open_paren)
-    if end < 0:
+    close = match_bracket(fn_text, open_paren)
+    if close < 0:
         return None
-    names = _split_top_level(fn_text[open_paren + 1:end - 1])
+    names = _split_top_level(fn_text[open_paren + 1:close])
     return [m.group(1) for m in (re.match(r"\s*(\w+)\s*:", p) for p in names) if m]
 
 def _assignment_statement(code, target):
@@ -603,12 +883,18 @@ def _split_top_level(text):
     return [p.strip() for p in parts]
 
 def _call_args(code, name):
-    """Argument lists of every `name( … )` call in [code] (None = unbalanced)."""
+    """Argument lists of every bare `name( … )` call in [code].
+
+    Each entry is the argument-list TEXT (the gate compares `hit.copy(…)` /
+    `flag = false` shapes), or None when the list cannot be balanced.
+    [batch5] Built on the shared `call_args` spans instead of the hand-rolled
+    bracket scanner.
+    """
     out = []
     for m in re.finditer(r"(?<![.\w])" + re.escape(name) + r"\s*\(", code):
         open_idx = code.index("(", m.start())
-        end = _balanced(code, open_idx)
-        out.append(None if end < 0 else code[open_idx + 1:end - 1])
+        close = match_bracket(code, open_idx)
+        out.append(None if close < 0 else code[open_idx + 1:close])
     return out
 
 def check_merge_preserves_entry_timestamp(src, rel=PR_REL):
@@ -636,7 +922,7 @@ def check_merge_preserves_entry_timestamp(src, rel=PR_REL):
     merge_body = function_text(src, "fun mergeImportInstanceJSON(")
     if merge_body is None:
         return [(rel, 0, "9", "mergeImportInstanceJSON( not found — gate ROT")]
-    code = code_only(merge_body)
+    code = code_view(merge_body)
     if MERGE_FIELDS_HELPER in code:
         calls = _call_args(code, "updateEntry")
         if len(calls) > 1:
@@ -672,7 +958,7 @@ def check_merge_preserves_entry_timestamp(src, rel=PR_REL):
     if fn is None:
         out.append((rel, line_of(src, decl), "9", ENTRY_UPDATE_DECL + " has no body — gate ROT"))
         return out
-    fn_code = code_only(fn)
+    fn_code = code_view(fn)
     params = _params_of(fn_code)
     if params is None:
         out.append((rel, line_of(src, decl), "9",
@@ -735,7 +1021,7 @@ def _envelope_containing(code, idx):
     best = None
     for m in re.finditer(r"\b(runCatching|try)\s*\{", code):
         open_idx = code.index("{", m.start())
-        end = _balanced(code, open_idx, "{", "}")
+        end = _end_after(code, open_idx)
         if end < 0:
             continue
         if open_idx < idx < end and (best is None or open_idx > best[0]):
@@ -764,7 +1050,7 @@ def check_persist_dao_wrapped(src, rel=PR_REL):
     if body is None:
         return [(rel, 0, "10", "persistToDbAndMirror( not found — gate ROT")]
     dec_at = src.find(PERSIST_DECL)
-    code = code_only(body)
+    code, lit = code_view(body), literal_view(body)
     dao_rel = code.find(DAO_SYNC_CALL)
     if dao_rel < 0:
         return [(rel, line_of(src, dec_at), "10",
@@ -776,7 +1062,9 @@ def check_persist_dao_wrapped(src, rel=PR_REL):
                     "the %s call is BARE — a provider.db that failed to open throws out "
                     "of persistToDbAndMirror before the mirror write, destroying the only "
                     "store that survives the DB being down" % DAO_SYNC_CALL))
-    mirror_rel = code.find(MIRROR_WRITE_CALL)
+    # The mirror anchor names a JSON key ("config"), which is blank in the
+    # masked view — positions still line up because both views keep length.
+    mirror_rel = lit.find(MIRROR_WRITE_CALL)
     if mirror_rel < 0:
         out.append((rel, line_of(src, dec_at), "10",
                     "the prefs mirror write is gone from persistToDbAndMirror — gate ROT "
@@ -787,6 +1075,33 @@ def check_persist_dao_wrapped(src, rel=PR_REL):
                     "the prefs mirror write sits INSIDE the DAO write's %s envelope — a DAO "
                     "throw still skips it (the wrapper must not swallow the mirror too)"
                     % env[2]))
+    else:
+        # [batch5 G06-A6 · order/termination] Between the envelope and the mirror
+        # write, the function must not give up. The witness kept the runCatching
+        # envelope, the onFailure handler AND the mirror write, and only inserted
+        # `dbWrite.getOrThrow()` after the handler: the DB failure is re-raised,
+        # the mirror never runs, and with provider.db down the change is destroyed
+        # — the exact loss this arm exists to prevent, now spelled as a rethrow.
+        dead_zone = env[1] if env is not None else 0
+        if mirror_rel > dead_zone:
+            zone = code[dead_zone:mirror_rel]
+            probs = []
+            if re.search(r"\.\s*getOrThrow\s*\(", zone):
+                probs.append("`.getOrThrow()` re-raises the DB failure")
+            if re.search(r"(?<![.\w])throw\b", zone):
+                probs.append("a `throw` sits between the DB write and the mirror write")
+            if returns_exiting(code, dead_zone, mirror_rel):
+                probs.append("an early `return` sits between the DB write and the mirror write")
+            if re.search(r"\b(?:require|check)\s*\([^)]*\b(?:isFailure|isSuccess|"
+                         r"exceptionOrNull|getOrNull)\b", zone):
+                probs.append("a `require`/`check` on the DB outcome aborts the function "
+                             "before the mirror write")
+            if probs:
+                out.append((rel, line_of(src, dec_at + dead_zone), "10",
+                            "persistToDbAndMirror still loses the mirror write when the DB "
+                            "write fails: %s — with provider.db down prefs is the only "
+                            "surviving store, so the caller's change is destroyed instead of "
+                            "degrading to mirror-only" % "; ".join(probs)))
     return out
 
 
@@ -805,7 +1120,7 @@ def check_restore_dao_wrapped(src, rel=PR_REL):
     if body is None:
         return [(rel, 0, "11", "restoreThinkingRules( not found — gate ROT")]
     dec_at = src.find(RESTORE_DECL)
-    code = code_only(body)
+    code = code_view(body)
     call_rel = code.find(DAO_RESTORE_CALL)
     if call_rel < 0:
         return [(rel, line_of(src, dec_at), "11",
@@ -870,7 +1185,7 @@ def _fun_bodies(src):
     decls = list(pat.finditer(src))
     for n, m in enumerate(decls):
         popen = src.index("(", m.end() - 1)
-        pend = _balanced(src, popen, "(", ")")
+        pend = _end_after(src, popen)
         if pend < 0:
             continue
         i = pend
@@ -882,7 +1197,7 @@ def _fun_bodies(src):
         if i >= len(src):
             continue
         if src[i] == "{":
-            end = _balanced(src, i, "{", "}")
+            end = _end_after(src, i)
             if end < 0:
                 continue
             body = src[i:end]
@@ -898,8 +1213,9 @@ def _fun_bodies(src):
 def _body_line(src, body_start, code, idx):
     """Absolute line number of an index inside a comment-stripped body.
 
-    code_only() keeps the line count but drops text after `//`, so the line
-    offset is the newline count, not the character offset.
+    The shared views keep the line count (comments become spaces, strings stay
+    blanked), so the line offset is the newline count, not the character
+    offset.
     """
     return line_of(src, body_start) + code.count("\n", 0, idx)
 
@@ -917,7 +1233,7 @@ def _failure_regions(code):
             brace = code.find("{", m.start())
             if brace < 0:
                 continue
-            end = _balanced(code, brace, "{", "}")
+            end = _end_after(code, brace)
             if end > 0:
                 regions.append((brace, end, "%s `%s`" % (label, m.group(0).strip())))
     return regions
@@ -942,7 +1258,7 @@ def check_thinking_rule_publish_order(src, rel=PR_REL):
     out = []
     seen = 0
     for name, body, start in _fun_bodies(src):
-        code = code_only(body)
+        code = code_view(body)
         pm = REPUBLISH_CALL.search(code)
         if not pm:
             continue
@@ -1003,7 +1319,7 @@ def check_agent_loop_load_guard(src, rel=PR_REL):
     out = []
     seen = 0
     for name, body, start in _fun_bodies(src):
-        code = code_only(body)
+        code = code_view(body)
         reads = [m.start() for m in AGENT_LOOP_READ.finditer(code)]
         if not reads:
             continue
@@ -1025,7 +1341,7 @@ def check_agent_loop_load_guard(src, rel=PR_REL):
         regions = []
         for m in re.finditer(r"synchronized\(\s*configLock\s*\)\s*\{", code):
             o = code.index("{", m.start())
-            e = _balanced(code, o, "{", "}")
+            e = _end_after(code, o)
             if e > 0:
                 regions.append((o, e))
         if not regions:
@@ -1775,6 +2091,58 @@ FIX_THINKING_ASSIGN_IN_FAILURE_BAD = FIX_THINKING_OK.replace(
         android.util.Log.e("ProviderRepo", "saveThinkingRule failed", e)""")
 
 
+# --- [batch5 t12] the 6 witnesses of G06, frozen as arms -------------------
+# G06-A1 (Arm 1): the re-query, its `?.id` projection and the
+# `?: compositeEntryKey(…)` fallback all stay — the predicate is made
+# constant-false and the fallback is typed as two empty literals, so every
+# imported entry gets the same non-existent key.
+FIX_MERGE_DEAD_REQUERY_BAD = FIX_MERGE_OK.replace(
+    """            _config.value.modelEntries.firstOrNull {
+                it.providerInstanceId == existing.id && it.baseModel.id == entry.baseModel.id
+            }?.id ?: compositeEntryKey(existing.id, entry.baseModel.id)""",
+    """            _config.value.modelEntries.firstOrNull {
+                false
+            }?.id ?: compositeEntryKey("", "")""")
+
+# G06-A2 (Arm 4): the read anchor stays, the write is gone.
+FIX_CONVERT_ECHO_DROPPED_BAD = FIX_CONVERT_OK.replace(
+    """        d.optString("reasoningEchoJson", "").takeIf { it.isNotEmpty() }
+            ?.let { r.put("reasoningEchoJson", it) }
+""",
+    """        d.optString("reasoningEchoJson", "").takeIf { false }
+""")
+
+# G06-A3 (Arm 5): the reads stay, the constructor receives `null`.
+FIX_PARSE_CTOR_NULL_BAD = (
+    FIX_PARSE_OK
+    .replace("            reasoningEffortValues = reasoningEffortValues,",
+             "            reasoningEffortValues = null,")
+    .replace("            declaresNoEffortTiers = declaresNoEffortTiers,",
+             "            declaresNoEffortTiers = null,"))
+
+# G06-A4 (Arm 7): the merge result is computed and the PRE-merge entry is
+# written back (the restore flag is still passed, so arm 9 stays quiet).
+FIX_MERGE_WRITES_PREMERGE_BAD = FIX_MERGE_OK.replace(
+    "updateEntry(restored, stampUserModified = false)",
+    "updateEntry(hit, stampUserModified = false)")
+
+# G06-A5 (Arm 8): `published` is still the canonical object, one named
+# argument is taken from the PRE-canonical argument instead.
+FIX_SAVE_COPY_RAW_LIST_BAD = FIX_SAVE_CANONICAL.replace(
+    "        val published = canonical.copy(revision = config.revision + 1)",
+    "        val published = canonical.copy(\n"
+    "            revision = config.revision + 1,\n"
+    "            modelEntries = config.modelEntries.toMutableList(),\n"
+    "        )")
+
+# G06-A6 (Arm 10): envelope + handler + mirror write all in place, and the
+# failure is re-raised between the handler and the mirror — the change is
+# destroyed exactly as in the bare-DAO baseline.
+FIX_PERSIST_RETHROW_BAD = FIX_PERSIST_OK.replace(
+    "    val mirrorWritten = prefs.edit()",
+    "    dbWrite.getOrThrow()\n    val mirrorWritten = prefs.edit()")
+
+
 def build_fixture_tree(tmp, merge_src, export_src, parse_src, convert_src,
                        update_entry_src=None, persist_src=None, restore_src=None,
                        thinking_src=None, agentloop_src=None,
@@ -2032,6 +2400,45 @@ def selftest():
             failures.append("agentloop-missing fixture arms=%r (want ['13'])" % (got,))
         elif not any("gate ROT" in x[3] for x in v):
             failures.append("agentloop-missing fixture did not report ROT: %r" % (v,))
+    # [batch5 t12] The six G06 witnesses, one arm each. Every one of them kept
+    # the anchor the old criterion looked for, so the assertion is on the ARM
+    # that fires — not merely "something is red".
+    with tempfile.TemporaryDirectory() as tmp:
+        build_fixture_tree(tmp, FIX_MERGE_DEAD_REQUERY_BAD, FIX_EXPORT_OK, FIX_PARSE_OK,
+                           FIX_CONVERT_OK)
+        got = _arm_set(tmp)
+        if got != ["1"]:
+            failures.append("g06-a1 dead-requery fixture arms=%r (want ['1'])" % (got,))
+    with tempfile.TemporaryDirectory() as tmp:
+        build_fixture_tree(tmp, FIX_MERGE_OK, FIX_EXPORT_OK, FIX_PARSE_OK,
+                           FIX_CONVERT_ECHO_DROPPED_BAD)
+        got = _arm_set(tmp)
+        if got != ["4"]:
+            failures.append("g06-a2 echo-write-dropped fixture arms=%r (want ['4'])" % (got,))
+    with tempfile.TemporaryDirectory() as tmp:
+        build_fixture_tree(tmp, FIX_MERGE_OK, FIX_EXPORT_OK, FIX_PARSE_CTOR_NULL_BAD,
+                           FIX_CONVERT_OK)
+        got = _arm_set(tmp)
+        if got != ["5"]:
+            failures.append("g06-a3 ctor-null fixture arms=%r (want ['5'])" % (got,))
+    with tempfile.TemporaryDirectory() as tmp:
+        build_fixture_tree(tmp, FIX_MERGE_WRITES_PREMERGE_BAD, FIX_EXPORT_OK, FIX_PARSE_OK,
+                           FIX_CONVERT_OK)
+        got = _arm_set(tmp)
+        if got != ["7"]:
+            failures.append("g06-a4 update-premerge fixture arms=%r (want ['7'])" % (got,))
+    with tempfile.TemporaryDirectory() as tmp:
+        build_fixture_tree(tmp, FIX_MERGE_OK, FIX_EXPORT_OK, FIX_PARSE_OK, FIX_CONVERT_OK,
+                           save_src=FIX_SAVE_COPY_RAW_LIST_BAD)
+        got = _arm_set(tmp)
+        if got != ["8"]:
+            failures.append("g06-a5 published-raw-list fixture arms=%r (want ['8'])" % (got,))
+    with tempfile.TemporaryDirectory() as tmp:
+        build_fixture_tree(tmp, FIX_MERGE_OK, FIX_EXPORT_OK, FIX_PARSE_OK, FIX_CONVERT_OK,
+                           persist_src=FIX_PERSIST_RETHROW_BAD)
+        got = _arm_set(tmp)
+        if got != ["10"]:
+            failures.append("g06-a6 persist-rethrow fixture arms=%r (want ['10'])" % (got,))
     if failures:
         for f in failures:
             print("SELFTEST-FAIL: " + f)

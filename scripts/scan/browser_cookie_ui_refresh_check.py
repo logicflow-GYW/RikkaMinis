@@ -92,8 +92,14 @@ Usage: python3 browser_cookie_ui_refresh_check.py <repo_root>
        python3 browser_cookie_ui_refresh_check.py --selftest
 Exit 0 = pass, 1 = violation, 2 = usage error.
 """
+import os
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments
+from _kotlin_ast import match_bracket
+from _kotlin_valueflow import expr_end, path_feasible
 
 TARGET = "src/android/app/src/main/java/com/rikkaminis/app/ui/browser/BrowserSettingsSheet.kt"
 POOL_TARGET = "src/android/app/src/main/java/com/rikkaminis/app/browser/BrowserTabPool.kt"
@@ -101,110 +107,55 @@ MARKER = "BROWSER_COOKIE_UI_REFRESH_SELFTEST=PASS"
 
 
 def strip_line_comments(src: str) -> str:
-    """Comment masker used by the cookie family.
+    """Comment-only masking used by the cookie family (strings PRESERVED).
 
-    [wide3-06 F4] This used to strip `//` lines ONLY (its own docstring said so),
-    so code wrapped in `/* … */` still counted: commenting out `cm.flush()` +
-    `cookieRefreshTick++` with a block comment kept `count(...) == 2` and the
-    gate green. It now delegates to the string-aware BLOCK-comment masker —
-    string literals survive (the `"https://$domain"` anchors need them), and a
-    mention inside either comment style can neither satisfy nor trip a
-    criterion.
+    [wide3-06 F4] This used to be a hand-written `//`-only masker; it now
+    delegates to the shared lexer's comment view — string literals survive (the
+    `"https://$domain"` anchors need them), and a mention inside either comment
+    style can neither satisfy nor trip a criterion.
+
+    [batch5-t05] The hand-written masker is gone entirely: `mask_comments` is
+    the single implementation, and it is length-preserving, so every position
+    this gate computes maps straight back onto the source.
     """
-    return strip_comments_only(src)
+    return mask_comments(src)
 
 
-def _match_paren(src: str, open_idx: int) -> int:
-    """Index of the `)` matching src[open_idx] == `(`, or -1."""
-    if open_idx < 0 or open_idx >= len(src) or src[open_idx] != "(":
-        return -1
-    depth = 0
-    i = open_idx
-    while i < len(src):
-        c = src[i]
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-        i += 1
-    return -1
+# ── shared-primitive helpers ────────────────────────────────────────────────
+# [batch5-t05] Everything below is built on `_kotlin_lexer` / `_kotlin_ast` /
+# `_kotlin_valueflow`: no hand-written brace counter, no literal whitelist.
+# `mask_code` and `mask_comments` are both length-preserving, so positions are
+# interchangeable between the two views (literals are read in the comment view,
+# structure/reachability in the code view).
 
 
-def _brace_end(src: str, open_idx: int) -> int:
-    """Index just past the `}` matching src[open_idx] == `{`, or -1."""
-    if open_idx < 0 or open_idx >= len(src) or src[open_idx] != "{":
-        return -1
-    depth = 0
-    i = open_idx
-    while i < len(src):
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return -1
+def _live_hits(code: str, pattern, start: int = 0, end: int = None) -> list:
+    """Match starts of [pattern] inside [start, end) that sit on a REACHABLE path.
 
-
-def _cond_dead_text(cond: str) -> bool:
-    """True when a literal operand decides the condition (`false && g`, `true || g`)."""
-    cond = cond.strip()
-    if cond.startswith("("):
-        close = _match_paren(cond, 0)
-        if close == len(cond) - 1:
-            cond = cond[1:-1]
-    parts, depth, buf, i = [], 0, "", 0
-    while i < len(cond):
-        c = cond[i]
-        two = cond[i:i + 2]
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        if depth == 0 and two in ("&&", "||"):
-            parts.append(buf)
-            buf = ""
-            i += 2
-            continue
-        buf += c
-        i += 1
-    parts.append(buf)
-    return any(p.strip() in ("true", "false") for p in parts)
-
-
-def _dead_spans(code: str) -> list:
-    """Spans of statically-unreachable `if (false …)` / `while (false)` bodies."""
-    spans = []
-    for m in re.finditer(r"\b(?:if|while)\s*\(", code):
-        open_idx = m.end() - 1
-        close_idx = _match_paren(code, open_idx)
-        if close_idx < 0 or not _cond_dead_text(code[open_idx + 1:close_idx]):
-            continue
-        j = close_idx + 1
-        while j < len(code) and code[j] in " \t":
-            j += 1
-        if j < len(code) and code[j] == "{":
-            end = _brace_end(code, j)
-            if end > 0:
-                spans.append((j, end))
-                continue
-        eol = code.find("\n", j)
-        spans.append((j, len(code) if eol < 0 else eol))
-    return spans
+    A statement inside a statically-dead branch is not a statement. All the
+    spellings that used to slip past the local whitelist — `if (false)`,
+    `if (!true)`, `if (1 == 2)`, `false && guard` — fold to "unreachable" in
+    `guard_feasible`, so the five `family-hole` witnesses of this batch all land
+    here instead of each needing its own regex.
+    """
+    if isinstance(pattern, str):
+        pattern = re.compile(pattern)
+    stop = len(code) if end is None else min(end, len(code))
+    return [
+        m.start()
+        for m in pattern.finditer(code, start, stop)
+        if path_feasible(code, m.start())
+    ]
 
 
 def _live_pos(code: str, needle: str, start: int = 0) -> int:
-    """First occurrence of [needle] at or after [start] that is NOT dead code."""
-    spans = _dead_spans(code)
-    idx = code.find(needle, start)
-    while idx >= 0:
-        if not any(a <= idx < b for a, b in spans):
-            return idx
-        idx = code.find(needle, idx + 1)
-    return -1
+    """First REACHABLE occurrence of the literal [needle] at/after [start]."""
+    hits = _live_hits(code, re.escape(needle), start)
+    return hits[0] if hits else -1
+
+
+def _live_any(code: str, needle: str, start: int = 0, end: int = None) -> bool:
+    return bool(_live_hits(code, re.escape(needle), start, end))
 
 
 def _inside_guard_body(text: str, guard_start: int, write_pos: int) -> bool:
@@ -213,132 +164,116 @@ def _inside_guard_body(text: str, guard_start: int, write_pos: int) -> bool:
     Body = the brace block following the condition, or — for a braceless
     `if (c) stmt` — the rest of that line. Position alone (`guard < write`) is
     not enough: `if (c) Unit` followed by an unconditional write satisfies it
-    while the write escapes the branch entirely (witness V8).
+    while the write escapes the branch entirely (witness V8). The same holds for
+    the complementary `else` branch: a write there runs exactly when the guard is
+    FALSE, which is what witness `G07-A3` does.
     """
     open_idx = text.find("(", guard_start)
-    close = _match_paren(text, open_idx)
+    close = match_bracket(text, open_idx) if open_idx >= 0 else -1
     if close < 0:
         return False
     j = close + 1
     while j < len(text) and text[j] in " \t":
         j += 1
     if j < len(text) and text[j] == "{":
-        end = _brace_end(text, j)
-        return end > 0 and j <= write_pos < end
+        end_b = match_bracket(text, j)
+        return end_b > 0 and j <= write_pos <= end_b
     eol = text.find("\n", j)
     end = len(text) if eol < 0 else eol
     return j <= write_pos < end
 
 
 def _brace_ranges(src: str):
-    """All matching `{ … }` spans as (start, end) — quote-aware, single pass."""
-    out, stack, quote, i = [], [], None, 0
-    while i < len(src):
-        c = src[i]
-        if quote:
-            if c == "\\":
-                i += 2
-                continue
-            if c == quote:
-                quote = None
-        elif c in "\"'":
-            quote = c
-        elif c == "{":
-            stack.append(i)
-        elif c == "}":
-            if stack:
-                out.append((stack.pop(), i + 1))
-        i += 1
-    return out
+    """Every balanced `{ … }` span as (start, end) — the shared matcher, one pass."""
+    out = []
+    i = 0
+    while True:
+        j = src.find("{", i)
+        if j < 0:
+            return out
+        k = match_bracket(src, j)
+        if k < 0:
+            return out
+        out.append((j, k + 1))
+        i = j + 1
 
 
-def _smallest_block_with(src: str, pos: int, needles) -> str:
-    """Smallest brace block containing [pos] that also contains every needle."""
-    ranges = sorted(
+def _smallest_block_with(src: str, pos: int, needles):
+    """Smallest brace block containing [pos] that also contains every needle.
+
+    -> (start, end); (-1, -1) when no block qualifies (the caller reports
+    fail-closed rather than assuming green).
+    """
+    for a, b in sorted(
         (r for r in _brace_ranges(src) if r[0] < pos < r[1]),
         key=lambda r: r[1] - r[0],
-    )
-    for a, b in ranges:
+    ):
         body = src[a:b]
         if all(n in body for n in needles):
-            return body
-    return ""
+            return (a, b)
+    return (-1, -1)
 
 
-def brace_slice(src: str, start_line_idx: int, open_line: str) -> str:
-    """From the line containing the first `{` of open_line, take lines until
-    the brace opened there is balanced (inclusive of the closing line)."""
-    lines = src.split("\n")
-    depth = 0
-    started = False
-    buf = []
-    i = start_line_idx
-    while i < len(lines):
-        for ch in lines[i]:
-            if ch == "{":
-                depth += 1
-                started = True
-            elif ch == "}":
-                depth -= 1
-        buf.append(lines[i])
-        if started and depth <= 0:
-            break
-        i += 1
-    return "\n".join(buf)
+def _block_from(src: str, marker: str):
+    """Span of the balanced `{ … }` that follows [marker] -> (start, end).
+
+    Replaces the old line-based brace counter: a `{`/`}` inside a string or a
+    regex literal used to move the depth and truncate (or over-extend) the
+    slice. `marker` may itself end in `{` (e.g. `onApply = {`).
+    """
+    at = src.find(marker)
+    if at < 0:
+        return (-1, -1)
+    j = at + marker.rfind("{")
+    if j < at or j >= len(src) or src[j] != "{":
+        j = src.find("{", at)
+    if j < 0:
+        return (-1, -1)
+    k = match_bracket(src, j)
+    return (-1, -1) if k < 0 else (j, k + 1)
 
 
 def slice_from_marker(src: str, marker: str) -> str:
-    lines = src.split("\n")
-    for idx, line in enumerate(lines):
-        if marker in line:
-            return brace_slice(src, idx, line)
-    return ""
+    """The balanced brace block after [marker] (empty string when absent)."""
+    a, b = _block_from(src, marker)
+    return "" if a < 0 else src[a:b]
 
 
-def mask_code(src: str) -> str:
-    """Comment + string masking for the viewport criteria family.
+def _decl_span(code: str, ident: str):
+    """`val|var ident … = <expr>` 的初始化表达式区间 -> (start, end)。
 
-    The cookie family must keep string literals (`"https://$domain"`), so this
-    is a separate pass: here a mention inside a comment OR a string can neither
-    satisfy a criterion nor trip one."""
-    out = list(src)
-    i, n = 0, len(src)
-    while i < n:
-        c = src[i]
-        if c == "/" and i + 1 < n and src[i + 1] == "/":
-            while i < n and src[i] != "\n":
-                out[i] = " "
-                i += 1
-        elif c == "/" and i + 1 < n and src[i + 1] == "*":
-            out[i] = out[i + 1] = " "
-            i += 2
-            while i < n and not (src[i] == "*" and i + 1 < n and src[i + 1] == "/"):
-                if src[i] != "\n":
-                    out[i] = " "
-                i += 1
-            if i < n:
-                out[i] = " "
-                if i + 1 < n:
-                    out[i + 1] = " "
-                i += 2
-        elif c == '"':
-            i += 1
-            while i < n and src[i] != '"':
-                if src[i] == "\\":
-                    if out[i] != "\n":
-                        out[i] = " "
-                    i += 1
-                    if i < n and out[i] != "\n":
-                        out[i] = " "
-                    i += 1
-                    continue
-                if src[i] != "\n":
-                    out[i] = " "
-                i += 1
-            i += 1
-        else:
-            i += 1
-    return "".join(out)
+    `by remember(…)` 这类委托声明没有 `=`，退回整条声明语句；两者都取不到时
+    返回 (-1, -1)，调用方 fail-closed。
+    """
+    m = re.search(r"^[ \t]*(?:val|var)\s+" + re.escape(ident) + r"\b", code, re.M)
+    if not m:
+        return (-1, -1)
+    line_end = code.find("\n", m.end())
+    if line_end < 0:
+        line_end = len(code)
+    eq = re.search(r"(?<![=!<>])=(?!=)", code[m.end():line_end])
+    if not eq:
+        win = _statement_window(code, ident)
+        at = code.find(win) if win else -1
+        return (-1, -1) if at < 0 else (at, at + len(win))
+    start = m.end() + eq.end()
+    return (start, expr_end(code, start))
+
+
+def _derives_live(code: str, ident: str, needle: str) -> bool:
+    """[ident] 的声明是否由 [needle] 派生，**且该派生点在可达路径上**。
+
+    [batch5-t05 G07-A1] `when { false && sessionViewportActive ->
+    sessionWidthFromPool }` still *contains* `sessionWidthFromPool`, and the old
+    criterion was a substring test on the declaration window — so a permanently
+    false prefix on the branch that supplies the session value kept it green
+    while the panel fell back to the global/UA width forever. Existence is not
+    evaluation: the occurrence has to be reachable.
+    """
+    a, b = _decl_span(code, ident)
+    if a < 0:
+        return False
+    return _live_any(code, needle, a, b)
 
 
 SESSION_SOURCES = {
@@ -392,12 +327,16 @@ def _statement_window(code, ident):
 
 def check_viewport(source: str) -> list:
     """[da1029-E] V1–V5 — the panel must show the viewport the pool resolves."""
-    code = mask_code(source)
+    try:
+        code = mask_code(source)
+    except KotlinLexError as exc:
+        return ["viewport: lexical analysis failed (%s) — refusing to fall back to "
+                "raw text (fail-closed)" % exc]
     errs = []
 
     for flow, other in (("sessionViewportWidth", "sessionViewportHeight"),
                         ("sessionViewportHeight", "sessionViewportWidth")):
-        if not re.search(r"\.%s\s*\.\s*collectAsState\s*\(\s*\)" % flow, code):
+        if not _live_hits(code, r"\.%s\s*\.\s*collectAsState\s*\(\s*\)" % flow):
             errs.append(
                 "does not subscribe to the %s flow — a session override (what an "
                 "agent set_viewport writes) stays invisible to this panel" % flow
@@ -419,14 +358,13 @@ def check_viewport(source: str) -> list:
         for key in keys:
             if not re.fullmatch(r"[A-Za-z_]\w*", key):
                 continue
-            window = _statement_window(code, key)
-            if window and session_flow in window:
+            if _derives_live(code, key, session_flow):
                 derived = True
         if not derived:
             errs.append(
-                "`%s` is keyed on %s, none of which is derived from `%s` — the "
-                "state cannot follow a session-override change (V2)"
-                % (state, keys, session_flow)
+                "`%s` is keyed on %s, none of which is derived from `%s` on a "
+                "reachable path — the state cannot follow a session-override change "
+                "(V2)" % (state, keys, session_flow)
             )
 
     m = re.search(r"var\s+showCustomViewportEditor\s+by\s+remember\s*\(([^)]*)\)", code)
@@ -447,9 +385,10 @@ def check_viewport(source: str) -> list:
         reset_at = _live_pos(block, RESET_CALL)
         if reset_at < 0:
             errs.append(
-                "`%s` never calls `%s` (a `false &&`-style dead wrapper does not "
-                "count) — a session override shadows the global value it writes, so "
-                "the action is a no-op for those tabs (V4)"
+                "`%s` never calls `%s` on a reachable path (`if (false)`, `!true`, "
+                "`1 == 2` — the whole statically-dead family does not count) — a "
+                "session override shadows the global value it writes, so the action "
+                "is a no-op for those tabs (V4)"
                 % (action, RESET_CALL)
             )
             continue
@@ -480,7 +419,7 @@ def check_viewport(source: str) -> list:
         )
 
     # ── V6 [da1030-B] the UA radio must follow the pool, not a prefs snapshot ──
-    if not re.search(r"\.%s\s*\.\s*collectAsState\s*\(\s*\)" % UA_POOL_FLOW, code):
+    if not _live_hits(code, r"\.%s\s*\.\s*collectAsState\s*\(\s*\)" % UA_POOL_FLOW):
         errs.append(
             "does not subscribe to `%s` — an agent `set_user_agent` (which now "
             "routes through the pool) leaves this panel on the old radio (V6)"
@@ -499,8 +438,7 @@ def check_viewport(source: str) -> list:
         for key in keys:
             if not re.fullmatch(r"[A-Za-z_]\w*", key):
                 continue
-            window = _statement_window(code, key)
-            if window and UA_POOL_FLOW in window:
+            if _derives_live(code, key, UA_POOL_FLOW):
                 backed = True
         if not backed:
             errs.append(
@@ -537,7 +475,13 @@ def _pool_members(code: str):
 
 
 def _calls(body: str, name: str) -> bool:
-    return re.search(r"\b" + re.escape(name) + r"\s*\(", body) is not None
+    """Is there a REACHABLE call of [name] in [body]?
+
+    [batch5-t05] A call wrapped in a statically-dead branch (`if (false)
+    replay()`) is not a call — that is witness `G07-A4`, where the write path
+    kept every token and dropped the effect.
+    """
+    return bool(_live_hits(body, r"\b" + re.escape(name) + r"\s*\("))
 
 
 def _replay_bearing(members):
@@ -552,11 +496,11 @@ def _replay_bearing(members):
 
 
 def _replay_positions(body: str, replaying) -> list:
-    return [
-        m.start()
-        for n in replaying
-        for m in re.finditer(r"\b" + re.escape(n) + r"\s*\(", body)
-    ]
+    """Positions of REACHABLE replay calls (dead-branch calls are skipped)."""
+    out = []
+    for n in replaying:
+        out.extend(_live_hits(body, r"\b" + re.escape(n) + r"\s*\("))
+    return out
 
 
 def _reaches(body_start, members, targets, max_depth):
@@ -604,7 +548,10 @@ def check_pool_viewport_reset(pool_src: str) -> list:
       R4  no writer may condition on `hasOverride`: the 0 × 0 direction is the
           leak.
     """
-    code = mask_code(pool_src)
+    try:
+        code = mask_code(pool_src)
+    except KotlinLexError as exc:
+        return ["pool-viewport-reset: lexical analysis failed (%s) — fail-closed" % exc]
     errs = []
     members = _pool_members(code)
     if not members:
@@ -630,9 +577,9 @@ def check_pool_viewport_reset(pool_src: str) -> list:
         last_replay = max(_replay_positions(m["body"], replaying) or [-1])
         if last_replay < last_write:
             errs.append(
-                "`%s` writes a session viewport but never replays it afterwards — the "
-                "surviving tabs keep the previous size in `lastAppliedViewport`"
-                % m["header"].strip()
+                "`%s` writes a session viewport but never replays it afterwards on a "
+                "reachable path — the surviving tabs keep the previous size in "
+                "`lastAppliedViewport`" % m["header"].strip()
             )
         if "hasOverride" in m["body"]:
             errs.append(
@@ -663,8 +610,9 @@ def check_pool_viewport_reset(pool_src: str) -> list:
                 )
         if not _replay_positions(point["body"], replaying):
             errs.append(
-                "the collection point `%s` zeroes the flows without replaying — that is "
-                "the pre-fix shape with a new name" % point["name"]
+                "the collection point `%s` zeroes the flows without replaying them on a "
+                "reachable path (`if (false) replay()` — the whole statically-dead "
+                "family) — that is the pre-fix shape with a new name" % point["name"]
             )
 
     targets = {m["name"] for m in clearers}
@@ -685,49 +633,6 @@ def check_pool_viewport_reset(pool_src: str) -> list:
     return errs
 
 
-def strip_comments_only(src: str) -> str:
-    """Comment-only masking: string literals are PRESERVED.
-
-    `mask_code` blanks string literals, which is right for the viewport family
-    (a mention inside a string must not count) but wrong for the pref-key
-    criteria: `"custom_user_agent"` IS the decision point there. Comments are
-    still blanked, so a KDoc mentioning a key cannot satisfy a criterion.
-    """
-    out = list(src)
-    i, n = 0, len(src)
-    while i < n:
-        c = src[i]
-        if c == "/" and i + 1 < n and src[i + 1] == "/":
-            while i < n and src[i] != "\n":
-                out[i] = " "
-                i += 1
-        elif c == "/" and i + 1 < n and src[i + 1] == "*":
-            out[i] = out[i + 1] = " "
-            i += 2
-            while i < n and not (src[i] == "*" and i + 1 < n and src[i + 1] == "/"):
-                if src[i] != "\n":
-                    out[i] = " "
-                i += 1
-            if i < n:
-                out[i] = " "
-                if i + 1 < n:
-                    out[i + 1] = " "
-                i += 2
-        elif c == '"':
-            # keep the literal, but skip over it so a "//" inside a string is
-            # not mistaken for a comment
-            i += 1
-            while i < n and src[i] != '"':
-                if src[i] == "\\":
-                    i += 2
-                    continue
-                i += 1
-            i += 1
-        else:
-            i += 1
-    return "".join(out)
-
-
 def check_custom_ua_single_source(pool_src: str, sheet_src: str) -> list:
     """[dv23-B4 B-05] V8 — the stored custom UA string has ONE source.
 
@@ -742,7 +647,10 @@ def check_custom_ua_single_source(pool_src: str, sheet_src: str) -> list:
     Anchored on the DECISION (a guarded write, and a resolution through the
     single source), not on spelling.
     """
-    code = strip_comments_only(pool_src)
+    try:
+        code = mask_comments(pool_src)
+    except KotlinLexError as exc:
+        return ["custom-ua: lexer failed (%s) — fail-closed" % exc]
     errs = []
 
     setter = slice_from_marker(code, "fun setUserAgentFromUI(")
@@ -754,7 +662,19 @@ def check_custom_ua_single_source(pool_src: str, sheet_src: str) -> list:
         return errs
 
     guard = setter.find("if (customUA != null)")
-    write = setter.find("customUserAgentString = customUA")
+    # [batch5-t05 G07-A3] EVERY write to the stored UA is judged, not just the
+    # first one: the old criterion took `setter.find(...)` (one hit) and asked
+    # "is there a guard before it, and is that hit inside the guard's body".
+    # Keeping the guarded write untouched and appending the complementary
+    # branch — `else { customUserAgentString = null }` — therefore stayed green
+    # although that branch runs exactly when `customUA == null`, i.e. on every
+    # non-CUSTOM preset tap (the very wipe V8 exists to prevent). A post-block
+    # overwrite (`settings.userAgentString = ""`) is the same shape.
+    writes = list(re.finditer(
+        r"\bcustomUserAgentString\s*=(?!=)"
+        r"|\bsettings\s*\.\s*userAgentString\s*=(?!=)",
+        setter,
+    ))
     if guard < 0:
         errs.append(
             "`setUserAgentFromUI` assigns the stored custom UA unconditionally — "
@@ -762,24 +682,46 @@ def check_custom_ua_single_source(pool_src: str, sheet_src: str) -> list:
             "user typed, and a later `set_user_agent --user-agent custom` falls "
             "back to the platform UA (V8)"
         )
-    elif write < 0:
+    elif not writes:
         errs.append(
             "`setUserAgentFromUI` no longer stores the custom UA at all (V8)"
         )
-    elif write < guard:
-        errs.append(
-            "`setUserAgentFromUI` writes the stored custom UA BEFORE the "
-            "`customUA != null` guard — the guard does not protect the write (V8)"
-        )
-    elif not _inside_guard_body(setter, guard, write):
-        # [wide3-06 V8] `if (customUA != null) Unit` + an unconditional write
-        # keeps `guard < write` true while the write escapes the guard's body:
-        # every non-CUSTOM preset tap then clears the user's typed UA.
-        errs.append(
-            "`setUserAgentFromUI` writes the stored custom UA OUTSIDE the "
-            "`customUA != null` branch — the guard is a no-op statement, so a "
-            "preset tap (customUA = null) still clears the string the user typed (V8)"
-        )
+    else:
+        for hit in writes:
+            pos = hit.start()
+            rhs = setter[hit.end():expr_end(setter, hit.end())]
+            lhs = re.sub(r"\s+", "", hit.group(0)[:-1])
+            if pos < guard:
+                errs.append(
+                    "`setUserAgentFromUI` writes the stored custom UA BEFORE the "
+                    "`customUA != null` guard — the guard does not protect the "
+                    "write (V8)"
+                )
+            elif not _inside_guard_body(setter, guard, pos):
+                # [wide3-06 V8] `if (customUA != null) Unit` + an unconditional
+                # write keeps `guard < write` true while the write escapes the
+                # guard's body; [batch5-t05] so does the complementary `else`
+                # branch — both run when `customUA == null`.
+                errs.append(
+                    "`setUserAgentFromUI` writes the stored custom UA OUTSIDE the "
+                    "`customUA != null` branch (`%s` — an `else` / post-block write "
+                    "runs exactly when the guard is false), so a preset tap "
+                    "(customUA = null) still clears the string the user typed (V8)"
+                    % lhs
+                )
+            elif not path_feasible(setter, pos):
+                errs.append(
+                    "`setUserAgentFromUI` stores the custom UA inside a "
+                    "statically-dead branch (`%s`) — the write never runs, so the "
+                    "typed string is lost on apply (V8)" % lhs
+                )
+            elif "customUA" not in rhs:
+                errs.append(
+                    "`setUserAgentFromUI` writes `%s` from `%s` inside the guard — "
+                    "not from `customUA`, so the guarded write stores a value the "
+                    "caller never supplied (V8)" % (lhs, re.sub(r"\s+", " ",
+                                                                 rhs.strip())[:40])
+                )
 
     if "storedCustomUserAgent()" not in code:
         errs.append(
@@ -800,7 +742,10 @@ def check_custom_ua_single_source(pool_src: str, sheet_src: str) -> list:
             "last keystroke (V8)"
         )
 
-    sheet = strip_comments_only(sheet_src)
+    try:
+        sheet = mask_comments(sheet_src)
+    except KotlinLexError as exc:
+        return ["custom-ua: lexer failed on the sheet (%s) — fail-closed" % exc]
     if "stageCustomUserAgent(" not in sheet:
         errs.append(
             "the settings sheet's UA field does not feed the pool's copy — the "
@@ -819,7 +764,10 @@ def check_pool_ua(source: str) -> list:
     the new profile's default; without the replay a session/global custom
     viewport is silently clobbered).
     """
-    code = mask_code(source)
+    try:
+        code = mask_code(source)
+    except KotlinLexError as exc:
+        return ["pool-ua: lexical analysis failed (%s) — fail-closed" % exc]
     errs = []
 
     block = slice_from_marker(code, "when (input.action)")
@@ -830,28 +778,34 @@ def check_pool_ua(source: str) -> list:
         )
         return errs
 
-    m = re.search(r"BrowserAction\.SET_USER_AGENT\s*->\s*([A-Za-z_]\w*)\s*\(", block)
-    if not m:
+    # Reachable branch: a branch that is present but sits behind a statically
+    # dead guard dispatches nothing, which is the same outcome as no branch.
+    live, handler = None, None
+    for hit in re.finditer(
+            r"BrowserAction\.SET_USER_AGENT\s*->\s*([A-Za-z_]\w*)\s*\(", block):
+        if path_feasible(block, hit.start()):
+            live, handler = hit, hit.group(1)
+            break
+    if live is None:
         errs.append(
             "`when (input.action)` has no explicit `BrowserAction.SET_USER_AGENT ->` "
-            "branch — the action falls into the per-tab `else`, so it hits ONE tab, "
-            "skips the viewport replay and leaves the panel/other tabs on the old "
-            "profile (V7)"
+            "branch on a reachable path — the action falls into the per-tab `else`, "
+            "so it hits ONE tab, skips the viewport replay and leaves the "
+            "panel/other tabs on the old profile (V7)"
         )
         return errs
 
-    handler = m.group(1)
     body = slice_from_marker(code, "fun %s(" % handler)
     if not body:
         errs.append(
             "`BrowserAction.SET_USER_AGENT ->` calls `%s(` but no such function body "
             "exists in %s (V7)" % (handler, POOL_TARGET)
         )
-    elif REPLAY_CALL not in body:
+    elif _live_pos(body, REPLAY_CALL) < 0:
         errs.append(
-            "`%s` never calls `%s` — `setUserAgent` resets each tab to the new "
-            "profile's default viewport, so a session/global custom override is "
-            "clobbered (V7)" % (handler, REPLAY_CALL)
+            "`%s` never calls `%s` on a reachable path — `setUserAgent` resets each "
+            "tab to the new profile's default viewport, so a session/global custom "
+            "override is clobbered (V7)" % (handler, REPLAY_CALL)
         )
 
     return errs
@@ -907,10 +861,13 @@ def check_domain_refresh(source: str) -> list:
     reloaded the tab, `record()` planted the new domain, and the list kept
     showing the pre-reload snapshot until the sheet was closed and reopened.
     """
-    code = strip_line_comments(source)
+    try:
+        code = strip_line_comments(source)
+    except KotlinLexError as exc:
+        return ["domain-refresh: lexical analysis failed (%s) — fail-closed" % exc]
     errs = []
 
-    if not re.search(r"\.revision\s*\.\s*collectAsState\s*\(\s*\)", code):
+    if not _live_hits(code, r"\.revision\s*\.\s*collectAsState\s*\(\s*\)"):
         errs.append(
             "does not subscribe to `historyStore.revision` — the domain list is "
             "keyed on panel-local state only, so a reload-driven record() (UA / "
@@ -947,25 +904,47 @@ def check_domain_refresh(source: str) -> list:
 
 
 def check(source: str) -> list:
-    src = strip_line_comments(source)
+    """Families 1–4 — the cookie section persists and refreshes itself.
+
+    [batch5-t05 G07-A5] Every "the call is there" test here is now a
+    reachability test. The witness wrapped the per-domain `cm.flush()` +
+    `cookieRefreshTick++` in `if (false) { … }`: both tokens survived every
+    substring test while the delete neither persisted nor reset the list —
+    exactly the pre-fix defect with a five-character prefix. `flush()` inside a
+    dead branch is not a flush.
+    """
+    try:
+        code = mask_code(source)
+        lit = mask_comments(source)
+    except KotlinLexError as exc:
+        return ["cookie family: lexical analysis failed (%s) — fail-closed" % exc]
     errs = []
 
     # 1. callback-less removeAllCookies(null) must be gone
-    if "removeAllCookies(null)" in src:
+    if _live_any(code, "removeAllCookies(null)"):
         errs.append("callback-less removeAllCookies(null) still present")
 
-    # 2. callback form with flush() inside
-    cb = slice_from_marker(src, "removeAllCookies {")
-    if not cb:
+    # 2. callback form with a reachable flush() inside
+    cb_start, cb_end = _block_from(code, "removeAllCookies {")
+    if cb_start < 0:
         errs.append("no callback form removeAllCookies { ... } found")
-    elif "flush()" not in cb:
+    elif not _live_hits(code, r"\bflush\s*\(\s*\)", cb_start, cb_end):
         errs.append("removeAllCookies callback does not flush()")
 
     # 3. per-domain delete covers both schemes
-    cand = slice_from_marker(src, "candidateUrls")
-    if not cand:
-        errs.append("per-domain delete has no candidateUrls block")
+    #    Anchored on the DECLARATION's initializer (both branches of the
+    #    if/else), not on a line-counted brace slice: the old slice happened to
+    #    include the else arm only because `} else {` closed and reopened the
+    #    depth on one line.
+    cand_start, cand_end = _decl_span(code, "candidateUrls")
+    if cand_start < 0:
+        errs.append("per-domain delete has no candidateUrls declaration")
+    elif not path_feasible(code, cand_start):
+        errs.append(
+            "the candidateUrls enumeration sits on a statically-dead path — the "
+            "per-domain delete never runs")
     else:
+        cand = lit[cand_start:cand_end]
         if '"https://$domain"' not in cand:
             errs.append("per-domain delete misses the https://$domain variant")
         if '"http://$domain"' not in cand:
@@ -977,52 +956,55 @@ def check(source: str) -> list:
     #    store's revision value. The decision is "the panel-local tick is still a
     #    remember key of the cookie-section derivations", judged via the same
     #    paren-matched key lists family 5 uses; the store-side half is B1/B2.
-    if "cookieRefreshTick" not in src:
+    if "cookieRefreshTick" not in code:
         errs.append("no cookieRefreshTick refresh signal")
     else:
         for decl_marker, label in (
             ("val hasCookies = remember", "hasCookies"),
             ("val allDomains = remember", "allDomains"),
         ):
-            keys = _remember_key_list(src, decl_marker)
+            keys = _remember_key_list(code, decl_marker)
             if keys is None:
                 errs.append("`%s` remember declaration not found (family 4)" % label)
             elif "cookieRefreshTick" not in keys:
                 errs.append(
                     "`%s` remember keys %s lack cookieRefreshTick" % (label, keys)
                 )
-        bumps = src.count("cookieRefreshTick++")
+        bumps = len(_live_hits(code, r"cookieRefreshTick\+\+"))
         if bumps < 2:
-            errs.append(f"cookieRefreshTick++ bumped {bumps} times, expected >= 2 (per-domain + clear-all)")
+            errs.append(f"cookieRefreshTick++ bumped {bumps} times on a reachable path, "
+                        f"expected >= 2 (per-domain + clear-all)")
 
     # 4b. [wide3-06 F4] the per-domain delete must persist AND refresh itself.
-    #     The global `bumps >= 2` count above let a sibling site stand in for
-    #     the per-domain one, and a `/* … */` wrapper kept the count while the
-    #     delete stopped persisting — the user deletes a domain, the list keeps
-    #     showing it and the expired cookies are served again on the next load.
-    deletes = list(re.finditer(r"\bsetCookie\s*\(", src))
+    #     The global bump count above let a sibling site stand in for the
+    #     per-domain one, a `/* … */` wrapper kept the count while the delete
+    #     stopped persisting, and [batch5-t05] an `if (false)` wrapper did the
+    #     same — the user deletes a domain, the list keeps showing it and the
+    #     expired cookies are served again on the next load.
+    deletes = _live_hits(code, r"\bsetCookie\s*\(")
     if not deletes:
         errs.append(
-            "per-domain delete no longer expires cookies (no setCookie( call) — "
-            "deleting a domain cannot remove its cookies at all (F4)")
-    for m in deletes:
-        block = _smallest_block_with(src, m.start(), ("candidateUrls",))
-        if not block:
+            "per-domain delete no longer expires cookies (no reachable setCookie( "
+            "call) — deleting a domain cannot remove its cookies at all (F4)")
+    for pos in deletes:
+        block_start, block_end = _smallest_block_with(code, pos, ("candidateUrls",))
+        if block_start < 0:
             errs.append(
                 "the cookie delete no longer sits in a per-domain action block that "
                 "enumerates candidateUrls (fail-closed: the delete site was found but "
                 "its block cannot be delimited)")
             continue
-        if "flush()" not in block:
+        if not _live_hits(code, r"\bflush\s*\(\s*\)", block_start, block_end):
             errs.append(
-                "the per-domain delete never flush()es inside its own action block — the "
-                "expiries stay in memory and the next page load serves the deleted "
-                "cookies again (F4)")
-        if "cookieRefreshTick++" not in block:
+                "the per-domain delete never flush()es inside its own action block on a "
+                "reachable path (`if (false) cm.flush()` — the whole statically-dead "
+                "family) — the expiries stay in memory and the next page load serves "
+                "the deleted cookies again (F4)")
+        if not _live_hits(code, r"cookieRefreshTick\+\+", block_start, block_end):
             errs.append(
                 "the per-domain delete never bumps cookieRefreshTick inside its own action "
-                "block — hasCookies/allDomains keep their pre-delete values, so the "
-                "removed domain stays on the list (F4)")
+                "block on a reachable path — hasCookies/allDomains keep their pre-delete "
+                "values, so the removed domain stays on the list (F4)")
 
     return errs
 
@@ -1174,6 +1156,30 @@ def selftest() -> int:
                 if (false) tabPool.resetSessionViewport()
                 tabPool.setGlobalViewport(w, h)"""),
          ["never calls `resetSessionViewport()`"]),
+        # [batch5-t05 G07-A2] same family, different spelling: the old whitelist
+        # only folded the literal `false`, so `!true` walked straight through.
+        ("V4 reset wrapped in a statically-dead if (`!true`)",
+         good_vp.replace("""            coroutineScope.launch {
+                tabPool.resetSessionViewport()
+                tabPool.setGlobalViewport(w, h)""",
+                         """            coroutineScope.launch {
+                if (!true) tabPool.resetSessionViewport()
+                tabPool.setGlobalViewport(w, h)"""),
+         ["never calls `resetSessionViewport()`"]),
+        # [batch5-t05 G07-A1] the branch that supplies the session value is the
+        # decision V2 anchors on; a constant-false conjunction keeps every token
+        # and deletes the branch.
+        ("V2 session branch dead-prefixed by `false &&`",
+         good_vp.replace(
+             "if (sessionViewportActive) sessionWidthFromPool else customWidthFromPool",
+             "if (false && sessionViewportActive) sessionWidthFromPool else customWidthFromPool"),
+         ["none of which is derived"]),
+        # [batch5-t05] same family, arithmetic spelling this time.
+        ("V2 session branch dead-prefixed by `1 == 2 &&`",
+         good_vp.replace(
+             "if (sessionViewportActive) sessionHeightFromPool else customHeightFromPool",
+             "if ((1 == 2) && sessionViewportActive) sessionHeightFromPool else customHeightFromPool"),
+         ["none of which is derived"]),
         ("V5 filter box keyed",
          good_vp.replace("var cookieFilterText by remember {",
                          "var cookieFilterText by remember(cookieRefreshTick) {"),
@@ -1289,6 +1295,21 @@ def selftest() -> int:
         ("V9 the replay is gone entirely",
          good_reset.replace("applyViewportToAllTabs(", "applyViewportNowhere("),
          ["no member calls `applyViewportToAllTabs(`"]),
+        # [batch5-t05 G07-A4] the same `if (false)` family, one member over: V4
+        # already judged the sheet's reset call on reachability, but V9's replay
+        # probe was a bare substring, so wrapping the replay kept every token.
+        ("V9 the collection point's replay is dead-wrapped",
+         good_reset.replace("""        _sessionViewportHeight.value = 0
+        replayViewportToLiveTabs()
+    }
+
+    private fun replayViewportToLiveTabs() {""",
+                            """        _sessionViewportHeight.value = 0
+        if (false) replayViewportToLiveTabs()
+    }
+
+    private fun replayViewportToLiveTabs() {"""),
+         ["without replaying"]),
     ]
 
     # ── [da1030-B] pool-side fixtures: set_user_agent must be pool-level (V7) ──
@@ -1392,6 +1413,37 @@ def selftest() -> int:
          good_ua_pool,
          good_ua_sheet.replace("                    tabPool.stageCustomUserAgent(it)\n", ""),
          ["does not feed the pool's copy"]),
+        # [batch5-t05 G07-A3] the guarded write is untouched; the defect lives in
+        # the complementary branch, which the one-hit `find()` never looked at.
+        ("V8 complementary else branch wipes the stored UA",
+         good_ua_pool.replace(
+             "            if (customUA != null) {\n"
+             "                customUserAgentString = customUA.ifEmpty { null }\n"
+             "            }\n",
+             "            if (customUA != null) {\n"
+             "                customUserAgentString = customUA.ifEmpty { null }\n"
+             "            } else {\n"
+             "                customUserAgentString = null\n"
+             "            }\n"),
+         good_ua_sheet,
+         ["OUTSIDE the"]),
+        ("V8 post-block write wipes the UA the guard just stored",
+         good_ua_pool.replace(
+             "            if (customUA != null) {\n"
+             "                customUserAgentString = customUA.ifEmpty { null }\n"
+             "            }\n",
+             "            if (customUA != null) {\n"
+             "                customUserAgentString = customUA.ifEmpty { null }\n"
+             "            }\n"
+             "            settings.userAgentString = \"\"\n"),
+         good_ua_sheet,
+         ["OUTSIDE the"]),
+        ("V8 guarded write stores a value the caller did not supply",
+         good_ua_pool.replace(
+             "                customUserAgentString = customUA.ifEmpty { null }\n",
+             "                customUserAgentString = null\n"),
+         good_ua_sheet,
+         ["never supplied"]),
         ("V8 guard reduced to a no-op statement beside an unconditional write",
          good_ua_pool.replace(
              "            if (customUA != null) {\n"
@@ -1431,6 +1483,19 @@ def selftest() -> int:
                 cookieRefreshTick++
             }
     """
+
+    # [batch5-t05 G07-A5] the per-domain flush + bump survive every substring
+    # test inside `if (false) { … }` — the delete neither persists nor resets
+    # the list, which is the pre-fix defect with a five-character prefix.
+    dead_wrapped_delete = compliant + good_delete.replace(
+        """                cm.flush()
+                cookieRefreshTick++
+            })""",
+        """                if (false) {
+                    cm.flush()
+                    cookieRefreshTick++
+                }
+            })""")
 
     # ── [deep-audit-1039 B-07] domain-refresh (B1–B2) fixtures ───────────────
     # Only-red-its-own-criterion: each dirty fixture below differs from the
@@ -1487,9 +1552,14 @@ def selftest() -> int:
         # (`bumps >= 2`) stayed satisfied while the delete stopped persisting.
         ("F4 per-domain flush+bump hidden in a block comment",
          block_commented_delete, 1),
+        # [batch5-t05 G07-A5] statically-dead wrapper, same outcome.
+        ("F4 per-domain flush+bump dead-wrapped by `if (false)`",
+         good_with_comment.replace(good_delete, dead_wrapped_delete[len(compliant):]), 1),
     ]
     failures = 0
+    arms_run = 0
     for name, sample, expect in arms:
+        arms_run += 1
         errs = check(sample)
         if expect == [] and errs:
             print(f"  FAIL {name}: expected green, got {errs}")
@@ -1501,6 +1571,7 @@ def selftest() -> int:
             print(f"  OK {name}: {errs if errs else 'green'}")
 
     for name, sample, needles in vp_arms:
+        arms_run += 1
         errs = check_viewport(sample)
         if not needles:
             if errs:
@@ -1516,6 +1587,7 @@ def selftest() -> int:
         else:
             print(f"  OK {name}: {errs}")
     for name, sample, needles in pool_arms:
+        arms_run += 1
         errs = check_pool_ua(sample)
         if not needles:
             if errs:
@@ -1531,6 +1603,7 @@ def selftest() -> int:
         else:
             print(f"  OK {name}: {errs}")
     for name, pool_sample, sheet_sample, needles in ua_arms:
+        arms_run += 1
         errs = check_custom_ua_single_source(pool_sample, sheet_sample)
         if not needles:
             if errs:
@@ -1546,6 +1619,7 @@ def selftest() -> int:
         else:
             print(f"  OK {name}: {errs}")
     for name, sample, needles in reset_arms:
+        arms_run += 1
         errs = check_pool_viewport_reset(sample)
         if not needles:
             if errs:
@@ -1561,6 +1635,7 @@ def selftest() -> int:
         else:
             print(f"  OK {name}: {errs}")
     for name, sample, needles in domain_arms:
+        arms_run += 1
         errs = check_domain_refresh(sample)
         if not needles:
             if errs:
@@ -1578,7 +1653,7 @@ def selftest() -> int:
     if failures:
         print(f"SELFTEST FAILED ({failures} arms)")
         return 1
-    print(MARKER)
+    print(f"{MARKER} ({arms_run} arms)")
     return 0
 
 
