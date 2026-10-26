@@ -189,11 +189,27 @@ clean 臂（防「只认一种拼写」）：
 
 ---
 
-## ⑤ CI（分支 `fix/r3-browser-tabs`）
+## ⑤ CI（分支 `fix/r3-browser-tabs`，门提交 `56e6c6429`）
 
-> 待回填（推送 → dispatch → 取 run 读数后填本节：run id / head_sha 逐字符比对 /
-> `Summary: 112 passed, 0 failed` 恰一条 / `ALL 344 CASES PASS` 恰一条 / `^ e: ` 0 条 /
-> 唯一 skipped = Publish / 新臂标记在日志里各恰一条）。
+`workflow_dispatch`（分支 push 不触发）→ run **`40308684655`** / **#2727** / job
+`121524100328` / attempt 1 **success**（10:36:11Z → 10:56:15Z，20m04s），
+`head_sha = 56e6c642985a3be1c3a1a2ac58116402212ec459` 与本支门提交**逐字符一致**。
+
+| 核查项 | 读数 | 判定 |
+|---|---|---|
+| 步骤 | 26 步 + 3 个 Post，**唯一 `skipped` = step 23 `Publish to Releases`** | ✅ main 门控生效 |
+| 日志 | 1,486,753 B / 裸 NUL 0 | ✅ 可机械检索 |
+| 门总账 | `Summary: 112 passed, 0 failed` **恰 1 条**（其余 Summary 是子套件：10/15/16/25×2/37） | ✅ |
+| 夹具 | `ALL 344 CASES PASS` **恰 1 条** | ✅ |
+| 编译 | `^ e: ` **0 条** | ✅ |
+| 门头 | `[N/112]` 门头 **112 个互异** | ✅ |
+| `FAILED` 行 | 6 条，**全部**是 `PASSED` 用例名的子串（不含 PASSED 的 = 0） | ✅ 判读陷阱复核 |
+| 本支三门在册 | `✅ browser_tab_exec_serial_check selftest has teeth (SELFTEST=PASS (browser_tab_exec_serial: 3 fixtures))` + `real tree green`；`✅ browser_cookie_ui_refresh_check … (BROWSER_COOKIE_UI_REFRESH_SELFTEST=PASS)` + real tree green；`✅ browser_tabs_lifecycle_check … (BROWSER_TABS_SELFTEST=PASS)` + real tree green | ✅ 各恰 1 对 |
+| **新判据真跑**（本轮独有证据） | 门真树 OK 行带着新判据标签：cookie 门 `… + tab-UA inheritance + viewport-replay effect + per-domain cookie expiry`；lifecycle 门 `+ C3b the orphan sweep deletes only non-live sessions (polarity) + C6b the remap callback writes the remapped path back + C6c loadSavedState actually dispatches the restore`；exec 门 `PASS browser_tab_exec_serial (…)` | ✅ 不是「只有本地跑过」 |
+
+**已知限制（非本支引入）**：门自己的 `--selftest` stdout 不进 CI 日志 ⇒ 新增臂的**计数**
+（20/76/68）只在本地与本报告里可见，CI 侧看到的是 `test_scan.py` 的 marker 断言（已注册
+的三条）。这是 §6 R8 记录的既知口径。
 
 ---
 
