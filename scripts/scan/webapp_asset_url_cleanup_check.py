@@ -123,6 +123,20 @@ import shutil
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_ast import const_bool, if_blocks, match_bracket  # noqa: E402
+from _kotlin_lexer import KotlinLexError  # noqa: E402
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    code_view,
+    contains_ident,
+    expr_end,
+    guard_feasible,
+    literal_view,
+    path_feasible,
+    value_sources,
+)
+
 ACTIVITY_REL = "src/android/app/src/main/java/com/rikkaminis/app/webapp/WebAppActivity.kt"
 SHEET_REL = "src/android/app/src/main/java/com/rikkaminis/app/webapp/AddToHomeSheet.kt"
 PINNER_REL = "src/android/app/src/main/java/com/rikkaminis/app/webapp/ShortcutPinner.kt"
@@ -534,50 +548,6 @@ VIOLATION_ARM12_MAIN_THREAD_SNAPSHOT = COMPLIANT_ACTIVITY.replace(
     private fun loadShortcut() {""",
 )
 
-def strip_comments(src: str) -> str:
-    """Remove //-comments, /* */ comments and KDoc, keeping line structure.
-
-    String-aware: this file carries string literals containing `//`
-    (`"file://" + file.absolutePath`) and template literals with embedded
-    quotes — a naive per-line `line.find("//")` truncation mangles them.
-    """
-    out = []
-    i = 0
-    n = len(src)
-    in_string = None
-    while i < n:
-        c = src[i]
-        if in_string is not None:
-            out.append(c)
-            if c == "\\" and i + 1 < n:
-                out.append(src[i + 1])
-                i += 2
-                continue
-            if c == in_string:
-                in_string = None
-            i += 1
-            continue
-        if c == '"':
-            in_string = c
-            out.append(c)
-            i += 1
-            continue
-        if c == "/" and i + 1 < n and src[i + 1] == "/":
-            j = src.find("\n", i)
-            if j == -1:
-                j = n
-            out.append("")
-            i = j
-            continue
-        if c == "/" and i + 1 < n and src[i + 1] == "*":
-            j = src.find("*/", i + 2)
-            end = n if j == -1 else j + 2
-            out.append("".join(ch if ch == "\n" else " " for ch in src[i:end]))
-            i = end
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
 
 
 # --- [da1032-A] fullscreen single-source patterns -------------------------
@@ -602,15 +572,180 @@ def _fullscreen_states(code: str):
 
 
 def _paren_block(code: str, open_idx: int) -> str:
+    """`(...)` slice. Bracket matching is the shared `match_bracket`: the local
+    counter it replaces walked past a `)` inside a masked literal."""
+    close = match_bracket(code, open_idx)
+    return code[open_idx:close + 1] if close > 0 else ""
+
+
+def _brace_block(code: str, open_idx: int) -> str:
+    """`{...}` slice (same contract as `_paren_block`; "" = fail-closed)."""
+    close = match_bracket(code, open_idx)
+    return code[open_idx:close + 1] if close > 0 else ""
+
+
+def _named_arg(code: str, args, name: str):
+    """(start, end) of the `name = …` argument inside `call_args` spans."""
+    for a, b in args:
+        m = re.match(r"\s*([A-Za-z_]\w*)\s*=(?!=)", code[a:b])
+        if m and m.group(1) == name:
+            return (a + m.end(), b)
+    return None
+
+
+def _local_rhs(code: str, name: str, before: int):
+    """Right-hand side of the nearest `val/var name =` declared before [before]."""
+    rhs = None
+    for m in re.finditer(r"\b(?:val|var)\s+" + re.escape(name) + r"\b[^=\n]*=(?!=)", code):
+        if m.start() >= before:
+            break
+        rhs = code[m.end():expr_end(code, m.end())].strip()
+    return rhs
+
+
+def _value_origins(code: str, expr: str, before: int):
+    """"The call exists" is not "the call's result is the value".
+
+    A02-6 keeps `toAssetLoaderUrl(…)` alive, binds its result to an unused local
+    and hands `loadUrl` a hand-built string. Following one local `val` hop is
+    what turns the criterion from a spelling search into a dataflow judgement.
+    """
+    out = []
+    for src_expr in value_sources(expr):
+        out.append(src_expr)
+        name = src_expr.strip()
+        if re.fullmatch(r"[A-Za-z_]\w*", name):
+            rhs = _local_rhs(code, name, before)
+            if rhs:
+                out.extend(value_sources(rhs))
+    return out
+
+
+LOAD_URL_RE = re.compile(r"\bloadUrl\s*\(")
+
+
+def _load_url_bound_to_single_source(code: str) -> bool:
+    """Every `loadUrl(x)` argument must evaluate to `toAssetLoaderUrl(…)`."""
+    sites = [m.start() for m in LOAD_URL_RE.finditer(code)]
+    if not sites:
+        return False                    # anchor moved → fail-closed
+    for at in sites:
+        args = call_args(code, code.index("(", at))
+        if len(args) != 1:
+            return False
+        arg = code[args[0][0]:args[0][1]]
+        if not any("toAssetLoaderUrl(" in o for o in _value_origins(code, arg, at)):
+            return False
+    return True
+
+
+def _branch_end(text: str, start: int) -> int:
+    """End of one branch body (block, or a single expression up to `else`/EOL)."""
+    n = len(text)
+    i = start
+    while i < n and text[i] in " \t":
+        i += 1
+    if i < n and text[i] == "{":
+        close = match_bracket(text, i)
+        return close + 1 if close > 0 else n
     depth = 0
-    for j in range(open_idx, len(code)):
-        if code[j] == "(":
+    while i < n:
+        ch = text[i]
+        if ch in "([{":
             depth += 1
-        elif code[j] == ")":
-            depth -= 1
+        elif ch in ")]}":
             if depth == 0:
-                return code[open_idx:j + 1]
-    return code[open_idx:]
+                return i
+            depth -= 1
+        elif depth == 0:
+            if text.startswith("else", i) and not re.match(r"\w", text[i + 4:i + 5] or " "):
+                return i
+            if ch == "\n":
+                return i
+        i += 1
+    return n
+
+
+def _else_extent(text: str, after_then: int):
+    """(start, end) of an `else` clause that follows, or (None, None)."""
+    n = len(text)
+    i = after_then
+    while i < n and text[i] in " \t\r\n":
+        i += 1
+    if not text.startswith("else", i):
+        return (None, None)
+    j = i + 4
+    while j < n and text[j] in " \t":
+        j += 1
+    if j < n and text[j] == "{":
+        close = match_bracket(text, j)
+        return (j, close + 1 if close > 0 else n)
+    return (j, _branch_end(text, j))
+
+
+def _dead_spans(text: str):
+    """Spans of branches a constant condition proves unreachable.
+
+    Shared `path_feasible` covers block-bodied `if`/`when`; it does NOT cover an
+    expression-shaped `if`, because `_branch_extent` ends a braceless branch at
+    the first depth-0 newline and therefore swallows a same-line `else` into the
+    then-branch. That is exactly A02-3's second shape
+    (`value = if (true) null else withContext(IO) { decode(…) }`), so the gap is
+    closed here and registered for the shared module in the report (§6).
+    """
+    spans = []
+    for m in re.finditer(r"\bif\s*\(", text):
+        p_close = match_bracket(text, m.end() - 1)
+        if p_close < 0:
+            continue
+        val = const_bool(text[m.end():p_close])
+        if val is None:
+            continue
+        then_end = _branch_end(text, p_close + 1)
+        else_start, else_end = _else_extent(text, then_end)
+        if val is False:
+            spans.append((p_close + 1, then_end))
+        elif else_start is not None:
+            spans.append((else_start, else_end))
+    return spans
+
+
+def _live_at(text: str, pos: int) -> bool:
+    """Is [pos] on a reachable path? `path_feasible` + the expression-`else` fix."""
+    if not path_feasible(text, pos):
+        return False
+    return not any(a <= pos < b for a, b in _dead_spans(text))
+
+
+_EXIT_RE = re.compile(r"\breturn\b(?:\s*@\s*[A-Za-z_]\w*)?|\bthrow\b")
+
+
+def _exits_block(text: str) -> bool:
+    """Does this branch body actually leave the lambda/function?
+
+    `return@Button` / `return@launch` / `throw` do; `{}` (A02-2's emptied guard)
+    and `Unit` do not.
+    """
+    return _EXIT_RE.search(text) is not None
+
+
+def _if_sites(text: str):
+    """`if` structures WITH the condition offset: [(at, cond, then, else)].
+
+    `if_blocks` yields extents but not the `if` position; the guard criteria need
+    the position (order vs the staging IO, path feasibility), so both iterators
+    walk the same text in the same order and are zipped.
+    """
+    out = []
+    sites = []
+    for m in re.finditer(r"\bif\s*\(", text):
+        p_close = match_bracket(text, m.end() - 1)
+        if p_close > 0:
+            sites.append(m.start())
+    for at, (cond, t_start, t_end, e_start, e_end) in zip(sites, if_blocks(text)):
+        out.append((at, cond, t_start, t_end, e_start, e_end))
+    return out
+
 
 
 def call_blocks(code: str, call_name: str):
@@ -633,22 +768,25 @@ def fun_signature(code: str, fun_name: str):
 
 
 def check_activity_arm1(src: str) -> bool:
-    """No bare `${file.name}` interpolation into the asset-loader URL, and
-    the loadUrl path routes through toAssetLoaderUrl."""
-    code = strip_comments(src)
-    if '"/${file.name}"' in code or "/${file.name}" in code:
+    """No raw file name in the asset-loader URL, and every `loadUrl` argument
+    must evaluate to `toAssetLoaderUrl(…)` (A02-6: an unused
+    `toAssetLoaderUrl(…)` call satisfied "the function appears")."""
+    code = code_view(src)
+    if re.search(r"\$\{\s*file\s*\.\s*name\s*\}", literal_view(src)):
         return False
-    return "toAssetLoaderUrl(" in code
+    return _load_url_bound_to_single_source(code)
+
 
 
 def check_activity_arm2(src: str) -> bool:
-    """No second implementation of the *asset path* encoding: the encoding
-    must come from the single source (toAssetLoaderUrl). A pre-existing
-    Uri.encode on a session deep link (minis://) is legitimate and stays."""
-    code = strip_comments(src)
-    if "URLEncoder.encode(" in code or "Uri.encode(file." in code:
+    """No second implementation of the *asset path* encoding: the value handed
+    to `loadUrl` must come from `toAssetLoaderUrl` (the single source), and no
+    URLEncoder/Uri.encode result may be pasted into it."""
+    code = code_view(src)
+    if "URLEncoder.encode(" in code or re.search(r"\bUri\s*\.\s*encode\s*\(\s*file\s*\.", code):
         return False
-    return "toAssetLoaderUrl(" in code
+    return _load_url_bound_to_single_source(code)
+
 
 
 def check_activity_arm5(src: str) -> bool:
@@ -656,7 +794,7 @@ def check_activity_arm5(src: str) -> bool:
     no plain `isFullscreen` boolean field, no residual `initialFullscreen`,
     no delegated `var <fullscreen-ish> by remember`, no remember keyed on
     fullscreen."""
-    code = strip_comments(src)
+    code = code_view(src)
     if PLAIN_BOOL_FIELD_RE.search(code):
         return False
     if "initialFullscreen" in code:
@@ -674,7 +812,7 @@ def check_activity_arm5(src: str) -> bool:
 def check_activity_arm6(src: str) -> bool:
     """[da1032-A] The host observes and the callback writes the SAME state
     object; the host signature carries no second fullscreen input."""
-    code = strip_comments(src)
+    code = code_view(src)
     names = _fullscreen_states(code)
     if len(names) != 1:
         return False
@@ -693,100 +831,47 @@ def check_activity_arm6(src: str) -> bool:
 
 
 def check_sheet_arm3(src: str) -> bool:
-    """The universal hook must funnel cleanup: a DisposableEffect whose
-    `onDispose` block reaches `cleanupCopiedAttachment()`; a file without any
-    DisposableEffect must clean up in the Cancel callback.
+    """The universal hook must funnel cleanup — LIVE.
 
-    [deep-audit-1048 B-06] The check used to require the single line
-    `onDispose { cleanupCopiedAttachment() }`. B-06 needs a second statement in
-    that block (the sheet-closed latch), so the anchor is now derived from the
-    block itself — same intent (the hook that every disappearance path funnels
-    through must clean up), no longer a spelling lock.
+    A02-5 kept `cleanupCopiedAttachment()` textually inside `onDispose` and
+    wrapped it in `if (false)`: the substring test passed while the copy leaked
+    on every teardown. Same for arm4 below (the self-doubt in the same witness).
     """
-    code = strip_comments(src)
+    code = code_view(src)
     if "cleanupCopiedAttachment()" not in code:
         return False
-    for m in re.finditer(r"onDispose\s*\{", code):
-        if "cleanupCopiedAttachment()" in _brace_block(code, m.end() - 1):
-            return True
-    return "DisposableEffect(" not in code and "onClick = { cleanupCopiedAttachment()" in code
+    hooks = [r"onDispose\s*\{"]
+    if "DisposableEffect(" not in code:
+        hooks.append(r"\bonClick\s*=\s*\{")
+    for header in hooks:
+        for m in re.finditer(header, code):
+            brace = code.index("{", m.end() - 1)
+            close = match_bracket(code, brace)
+            if close < 0:
+                continue
+            block = code[brace:close + 1]
+            for site in re.finditer(r"\bcleanupCopiedAttachment\s*\(\s*\)", block):
+                if _live_at(block, site.start()):
+                    return True
+    return False
+
 
 
 def check_sheet_arm4(src: str) -> bool:
-    """Pin-failure branch must delete the DB row."""
-    code = strip_comments(src)
-    return "webAppShortcutRepository.delete(entity.id)" in code
+    """Pin-failure branch must delete the DB row — and the delete must be on a
+    reachable path (`if (false) …delete(…)` is not a delete)."""
+    code = code_view(src)
+    for m in re.finditer(r"webAppShortcutRepository\s*\.\s*delete\s*\(", code):
+        if _live_at(code, m.start()):
+            return True
+    return False
 
 
-def _brace_block(code: str, open_idx: int) -> str:
-    depth = 0
-    for j in range(open_idx, len(code)):
-        if code[j] == "{":
-            depth += 1
-        elif code[j] == "}":
-            depth -= 1
-            if depth == 0:
-                return code[open_idx:j + 1]
-    return code[open_idx:]
 
 
-def _balanced_within(text: str, open_idx: int, opener: str, closer: str) -> int:
-    """Index of the bracket closing text[open_idx] (quote-aware), or -1."""
-    if open_idx < 0 or open_idx >= len(text) or text[open_idx] != opener:
-        return -1
-    depth = 0
-    i = open_idx
-    while i < len(text):
-        c = text[i]
-        if c == '"':
-            j = i + 1
-            while j < len(text):
-                if text[j] == "\\":
-                    j += 2
-                    continue
-                if text[j] == '"':
-                    break
-                j += 1
-            i = j + 1
-            continue
-        if c == opener:
-            depth += 1
-        elif c == closer:
-            depth -= 1
-            if depth == 0:
-                return i
-        i += 1
-    return -1
 
 
-def _cond_dead_text(cond: str) -> bool:
-    """True when a literal operand decides the condition.
 
-    `false && guard` / `true || guard` preserve the guard's exact spelling and
-    delete its decision — the dominant dataflow witness of this wave.
-    """
-    cond = cond.strip()
-    if cond.startswith("("):
-        close = _balanced_within(cond, 0, "(", ")")
-        if close == len(cond) - 1:
-            cond = cond[1:-1]
-    parts, depth, buf, i = [], 0, "", 0
-    while i < len(cond):
-        c = cond[i]
-        two = cond[i:i + 2]
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        if depth == 0 and two in ("&&", "||"):
-            parts.append(buf)
-            buf = ""
-            i += 2
-            continue
-        buf += c
-        i += 1
-    parts.append(buf)
-    return any(p.strip() in ("true", "false") for p in parts)
 
 
 def check_sheet_arm7(src: str) -> bool:
@@ -799,7 +884,7 @@ def check_sheet_arm7(src: str) -> bool:
       - the text-field writer flips the user-edited guard;
       - the `LaunchedEffect(parsedTitle)` body is guarded by that flag.
     Fail-closed on any missing anchor."""
-    code = strip_comments(src)
+    code = code_view(src)
     if "titleText" not in code or "parsedTitle" not in code:
         return False
     m = re.search(r"\bvar\s+titleText\s+by\s+remember\s*\(", code)
@@ -833,69 +918,53 @@ def _delegated_states(code: str):
     return set(DELEGATED_STATE_RE.findall(code))
 
 
-def _top_level_expr_after(block: str, key: str) -> str:
-    """Text after `key =` inside `block`, up to the first depth-0 comma."""
-    m = re.search(r"\b%s\s*=" % re.escape(key), block)
-    if not m:
-        return ""
-    depth = 0
-    out = []
-    for ch in block[m.end():]:
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            if depth == 0:
-                break
-            depth -= 1
-        elif ch == "," and depth == 0:
-            break
-        out.append(ch)
-    return "".join(out)
 
 
 def check_sheet_arm13(src: str) -> bool:
     """[deep-audit-1048 B-06] C-PIN: the CTA carries an in-flight state.
 
     Decision point (not the call spelling): the CTA's `enabled` expression
-    mentions a `remember` state, and the CTA's own `onClick` body tests that
-    state BEFORE assigning it true. Fail-closed when the sheet has no
-    `Button(enabled = ...)` at all — the anchor moved."""
-    code = strip_comments(src)
+    mentions a `remember` state, and the CTA's own `onClick` body GUARDS on that
+    state before assigning it true — and the guard must actually leave the
+    handler. Two witnesses:
+      * A02-1  `if (!true && isPinning) return@Button` — the dead-condition
+        whitelist compared operands to `true`/`false`, and `!true` is neither
+        (`guard_feasible` folds it, `(false) && …` too);
+      * A02-2  `if (isPinning) {}` — the old tail test accepted a bare `{`, so an
+        empty block counted as a guard.
+    Fail-closed when the sheet has no `Button(enabled = ...)` at all."""
+    code = code_view(src)
     states = _delegated_states(code)
     if not states:
         return False
     for m in BUTTON_CALL_RE.finditer(code):
-        block = _paren_block(code, m.end() - 1)
-        enabled_expr = _top_level_expr_after(block, "enabled")
-        if not enabled_expr:
+        args = call_args(code, code.index("(", m.end() - 1))
+        enabled = _named_arg(code, args, "enabled")
+        if enabled is None:
             continue
-        named = {w for w in re.findall(r"\b[A-Za-z_]\w*\b", enabled_expr)} & states
+        named = {w for w in re.findall(r"\b[A-Za-z_]\w*\b", code[enabled[0]:enabled[1]])} & states
         if not named:
             continue
-        click_at = block.find("onClick")
-        if click_at < 0:
+        click = _named_arg(code, args, "onClick")
+        if click is None:
             continue
-        brace = block.find("{", click_at)
-        click = _brace_block(block, brace) if brace >= 0 else ""
+        click_body = code[click[0]:click[1]]
         for name in named:
-            set_at = re.search(r"\b%s\s*=\s*true\b" % re.escape(name), click)
+            set_at = re.search(r"\b%s\s*=\s*true\b" % re.escape(name), click_body)
             if not set_at:
                 continue
-            head = click[:set_at.start()]
-            for cond in re.finditer(r"if\s*\(", head):
-                cond_text = _paren_block(head, cond.end() - 1)
-                if not re.search(r"\b%s\b" % re.escape(name), cond_text):
+            head = click_body[:set_at.start()]
+            for at, cond, t_start, t_end, _es, _ee in _if_sites(head):
+                if not contains_ident(cond, name):
                     continue
-                if _cond_dead_text(cond_text):
-                    # [wide3-06 arm13] `if (false && isPinning) return@Button`
-                    # keeps the guard's spelling; the frame gap the CTA relies
-                    # on is then unguarded again (double submit on a double tap).
+                if not guard_feasible(cond):
+                    continue          # `!true && guard` / `(false) && guard`
+                if not _live_at(head, at):
                     continue
-                close = cond.end() - 1 + len(cond_text)
-                tail = head[close:]
-                if re.match(r"\s*(?:\{|return\b|return@)", tail):
+                if _exits_block(head[t_start:t_end]):
                     return True
     return False
+
 
 
 def check_sheet_arm14(src: str) -> bool:
@@ -903,19 +972,21 @@ def check_sheet_arm14(src: str) -> bool:
 
     A `remember` boolean latched true by a teardown hook must be consumed, in
     the coroutine that calls `ShortcutPinner.pin(`, after the staging
-    `withContext(Dispatchers.IO)` and before both the row insert and the pin.
-    Fail-closed when there is no pin call or no teardown hook."""
-    code = strip_comments(src)
+    `withContext(Dispatchers.IO)` and before both the row insert and the pin —
+    and the guard must TERMINATE (A02-2 emptied its block: the condition stayed
+    live and correct, the `return@launch` was deleted, and the row was still
+    inserted for a sheet the user had already closed)."""
+    code = code_view(src)
     states = _delegated_states(code)
     if not states:
         return False
     hooks = []
     for m in re.finditer(r"onDismissRequest\s*=\s*\{", code):
-        hooks.append(_brace_block(code, m.end() - 1))
+        hooks.append(_brace_block(code, code.index("{", m.end() - 1)))
     for m in re.finditer(r"onDispose\s*\{", code):
-        hooks.append(_brace_block(code, m.end() - 1))
+        hooks.append(_brace_block(code, code.index("{", m.end() - 1)))
     for m in re.finditer(r"onClick\s*=\s*\{", code):
-        block = _brace_block(code, m.end() - 1)
+        block = _brace_block(code, code.index("{", m.end() - 1))
         # A CTA that runs the pin also ends with `onDismiss()`, but it is not a
         # teardown hook — its `isPinning = true` would otherwise masquerade as a
         # close latch (and make this arm green with the latch deleted).
@@ -928,7 +999,11 @@ def check_sheet_arm14(src: str) -> bool:
     if not latched:
         return False
     for m in re.finditer(r"\.launch\s*\{", code):
-        body = _brace_block(code, m.end() - 1)
+        brace = code.index("{", m.end() - 1)
+        close = match_bracket(code, brace)
+        if close < 0:
+            continue
+        body = code[brace:close + 1]
         pin_at = body.find("ShortcutPinner.pin(")
         if pin_at < 0:
             continue
@@ -938,20 +1013,29 @@ def check_sheet_arm14(src: str) -> bool:
         io_at = body.find("withContext(Dispatchers.IO)")
         if io_at < 0:
             return False
-        for cond in re.finditer(r"if\s*\(", body[:create_at]):
-            if cond.start() < io_at:
-                continue  # a guard about the target, not about the closed sheet
-            cond_text = _paren_block(body, cond.end() - 1)
-            if any(re.search(r"\b%s\b" % re.escape(n), cond_text) for n in latched):
-                if _cond_dead_text(cond_text):
-                    # [wide3-06 arm14] `if (false && !pinShouldCommit(...))`
-                    # spells the close latch and deletes its decision.
-                    continue
-                return cond.start() < pin_at
+        for at, cond, t_start, t_end, e_start, e_end in _if_sites(body):
+            if at >= create_at or at < io_at:
+                continue      # after the insert, or a guard about the target
+            if not any(contains_ident(cond, n) for n in latched):
+                continue
+            if not guard_feasible(cond):
+                continue          # `false && !pinShouldCommit(…)`
+            if not _live_at(body, at):
+                continue
+            then_body = body[t_start:t_end]
+            else_body = body[e_start:e_end] if e_start is not None else ""
+            if _exits_block(then_body) or _exits_block(else_body):
+                return at < pin_at
     return False
 
 
-DECODE_CALLS = ("decodeFileBounded", "loadBitmapFromUri")
+
+# The decode FAMILY, not one spelling: A02-3 hoisted the real work to
+# `BitmapFactory.decodeStream(…)` while leaving a dead `loadBitmapFromUri(…)`
+# call behind. Any of these decodes on the composition thread is the defect.
+DECODE_CALL_RE = re.compile(
+    r"\b(?:decodeFileBounded|loadBitmapFromUri|BitmapFactory\s*\.\s*decode\w+)\s*\("
+)
 
 
 def _call_sites(code: str, name: str):
@@ -968,18 +1052,49 @@ def _block_body(code: str, header_re: str):
     """(open_brace, body) for each `header_re` occurrence that opens a lambda."""
     out = []
     for m in re.finditer(header_re, code):
-        ob = code.find("(", m.end() - 1) if header_re.endswith(r"\(") else code.find("(", m.start())
-        if ob < 0:
+        open_paren = code.find("(", m.start())
+        if open_paren < 0:
             continue
-        pb = _paren_block(code, ob)
-        br = code.find("{", ob + len(pb))
-        if br < 0:
+        paren = _paren_block(code, open_paren)
+        if not paren:
             continue
-        body = _brace_block(code, br)
+        brace = code.find("{", open_paren + len(paren))
+        if brace < 0:
+            continue
+        body = _brace_block(code, brace)
         if not body.endswith("}"):
             continue
-        out.append((br, body))
+        out.append((brace, body))
     return out
+
+
+def check_sheet_arm9(src: str) -> bool:
+    """[dv21-B04 B-08] No decode on the composition thread.
+
+    Two decision points:
+      - nothing decodes inside a REACHABLE `remember(...) { }` body (that body
+        runs on the composition thread);
+      - any decode in a `produceState` body sits inside a `withContext(
+        Dispatchers.IO)` block that is itself on a reachable path — A02-3 parked
+        a dead `if (false) { withContext(IO) { loadBitmapFromUri(…) } }` next to
+        a real `BitmapFactory.decodeStream(…)` on the composition thread, and
+        the "decode is inside some IO block" test was satisfied by the dead one.
+    Fail-closed when the sheet carries no decode call at all (anchor moved)."""
+    code = code_view(src)
+    sites = [m.start() for m in DECODE_CALL_RE.finditer(code)]
+    if not sites:
+        return False
+    for brace, body in _block_body(code, r"\bremember\s*\("):
+        for s in sites:
+            if brace < s < brace + len(body) and _live_at(body, s - brace):
+                return False
+    for brace, body in _block_body(code, r"\bproduceState\s*(?:<[^>{]*>)?\s*\("):
+        for s in sites:
+            if brace < s < brace + len(body):
+                if not enclosing_live_io(code, s):
+                    return False
+    return True
+
 
 
 def check_pin_arm8(src: str) -> bool:
@@ -993,7 +1108,7 @@ def check_pin_arm8(src: str) -> bool:
         throw are the same answer to the user);
       - a non-REQUESTED answer is visible: the failure string is referenced.
     Fail-closed when the carrier no longer calls `requestPinShortcut`."""
-    code = strip_comments(src)
+    code = code_view(src)
     sites = _call_sites(code, "requestPinShortcut")
     if not sites:
         return False
@@ -1013,37 +1128,6 @@ def check_pin_arm8(src: str) -> bool:
     return "webapp_pin_failed" in code
 
 
-def check_sheet_arm9(src: str) -> bool:
-    """[dv21-B04 B-08] No decode on the composition thread.
-
-    Two decision points:
-      - nothing decodes inside a `remember(...) { }` body (that body runs on
-        the composition thread — the sheet used to block for the whole
-        read+sample of a 12 Mpx icon);
-      - any decode in a `produceState` body hops off it (`Dispatchers.IO` in
-        the same body; `produceState` otherwise still runs on the composition
-        dispatcher).
-    Fail-closed when the sheet carries no decode call at all (anchor moved)."""
-    code = strip_comments(src)
-    sites = []
-    for name in DECODE_CALLS:
-        sites.extend(_call_sites(code, name))
-    if not sites:
-        return False
-    for br, body in _block_body(code, r"\bremember\s*\("):
-        if any(br < s < br + len(body) for s in sites):
-            return False
-    for br, body in _block_body(code, r"\bproduceState\s*(?:<[^>{]*>)?\s*\("):
-        for s in sites:
-            if br < s < br + len(body):
-                # [wide3-06 arm9] "Dispatchers.IO appears somewhere in the body"
-                # was also true of
-                #   val decoded = decode(path); value = withContext(IO) { decoded }
-                # — the decode itself still ran on the composition thread. The
-                # decode call must sit INSIDE the IO block.
-                if not enclosing_io_block(code, s):
-                    return False
-    return True
 
 
 # --- [dv26-E8] S-08 mount-scope cold start --------------------------------
@@ -1054,97 +1138,77 @@ IDENT_CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
 RESOLVE_CALL = "WebAppPathResolver.resolve("
 
 
-def _expr_end(code: str, eq_idx: int) -> int:
-    """End offset of an expression body that starts after `=` at [eq_idx].
-
-    A depth-0 newline ends it unless the next line is a continuation
-    (`.foo()`, `?: x`, `+ x`, `&& x`, …). Deriving the end from the expression
-    itself — instead of `find("\\n    private fun ")` — is what stops a
-    one-line expression body (`= null`) from swallowing the NEXT declaration
-    and lending its calls to the wrong function (witness arm10).
-    """
-    depth = 0
-    i = eq_idx + 1
-    n = len(code)
-    while i < n:
-        c = code[i]
-        if c == '"':
-            j = i + 1
-            while j < n:
-                if code[j] == "\\":
-                    j += 2
-                    continue
-                if code[j] == '"':
-                    break
-                j += 1
-            i = j + 1
-            continue
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            if depth == 0:
-                return i
-            depth -= 1
-        elif c == "\n" and depth == 0:
-            j = i + 1
-            while j < n and code[j] in " \t":
-                j += 1
-            if j < n and code[j] in ".?:+-*/&|,":
-                i = j
-                continue
-            return i
-        i += 1
-    return n
 
 
 def fun_spans(code: str):
-    """{name: body} for every `fun` in [code] (comments already stripped).
+    """{name: body} for every `fun` in [code] (already `code_view`ed).
 
-    Block bodies become brace blocks; expression bodies run to the end of the
-    expression (see `_expr_end`). A body that cannot be delimited is skipped —
-    for arm10 that fails CLOSED (a missing edge only removes a reachable
-    function).
+    Block bodies become brace slices; expression bodies run to the end of the
+    expression (`expr_end`), so a one-line `= null` cannot swallow the NEXT
+    declaration and lend its calls to the wrong function (witness arm10).
+    A body that cannot be delimited is skipped — for arm10 that fails CLOSED (a
+    missing edge only removes a reachable function).
     """
     spans = {}
     for m in FUN_DECL_RE.finditer(code):
         name = m.group(1)
+        if name in spans:
+            continue
         open_paren = code.find("(", m.end() - 1)
-        if open_paren < 0:
+        p_close = match_bracket(code, open_paren) if open_paren >= 0 else -1
+        if p_close < 0:
             continue
-        paren = _paren_block(code, open_paren)
-        j = open_paren + len(paren)
-        brace = code.find("{", j)
-        eq = code.find("=", j)
-        if brace < 0 and eq < 0:
+        i = p_close + 1
+        n = len(code)
+        while i < n and code[i] not in "={":
+            if code[i] == "\n":
+                i = n
+                break
+            i += 1
+        if i >= n:
             continue
-        if 0 <= eq and (brace < 0 or eq < brace) and code[eq + 1:eq + 2] != "=":
-            # [wide3-06 arm10] stops at the end of THIS expression, so a
-            # sibling declaration's calls stay out of this body.
-            spans.setdefault(name, code[eq:_expr_end(code, eq)])
-        elif brace >= 0:
-            spans.setdefault(name, _brace_block(code, brace))
+        if code[i] == "=":
+            spans[name] = code[i:expr_end(code, i + 1)]
+        else:
+            body = _brace_block(code, i)
+            if body.endswith("}"):
+                spans[name] = body
     return spans
 
 
 def reachable_bodies(bodies, seeds):
-    """Body text of every function reachable from [seeds] by call name."""
-    seen = set()
+    """Names of every function reachable from [seeds] by call name."""
+    seen = []
     stack = [x for x in seeds if x in bodies]
     while stack:
         name = stack.pop()
         if name in seen:
             continue
-        seen.add(name)
+        seen.append(name)
         for m in IDENT_CALL_RE.finditer(bodies[name]):
             callee = m.group(1)
             if callee in bodies and callee not in seen:
                 stack.append(callee)
-    return "\n".join(bodies[n] for n in seen)
+    return seen
+
+
+def _has_live_call(body_texts, name):
+    """Is there a REACHABLE `name(` call across these bodies?
+
+    A02-4 kept the call and wrapped it in `if (false)`: the closure-string test
+    found `applyMountedFoldersSnapshot(` and the cold-start refresh stayed dead.
+    """
+    pat = re.compile(r"\b" + re.escape(name) + r"\s*\(")
+    for text in body_texts:
+        for m in pat.finditer(text):
+            if _live_at(text, m.start()):
+                return True
+    return False
 
 
 def check_mount_arm_snapshot_retry(src: str) -> bool:
     """arm10 — `SCOPE_MOUNT` reaches "refresh the snapshot, then resolve again"."""
-    code = strip_comments(src)
+    code = code_view(src)
     bodies = fun_spans(code)
     resolve_body = bodies.get("resolve")
     if not resolve_body:
@@ -1157,29 +1221,43 @@ def check_mount_arm_snapshot_retry(src: str) -> bool:
     seeds = [m.group(1) for m in IDENT_CALL_RE.finditer(arm) if m.group(1) in bodies]
     if not seeds:
         return False
-    closure = reachable_bodies(bodies, seeds)
-    return "resolveHostPath(" in closure and "applyMountedFoldersSnapshot(" in closure
+    closure = [bodies[n] for n in reachable_bodies(bodies, seeds)]
+    return (_has_live_call(closure, "resolveHostPath")
+            and _has_live_call(closure, "applyMountedFoldersSnapshot"))
+
+
+
+
+
 
 
 def enclosing_io_block(code: str, idx: int) -> bool:
     """Is [idx] inside a `withContext(Dispatchers.IO) { … }` block?"""
     for m in re.finditer(r"\bwithContext\s*\(", code):
-        open_paren = code.find("(", m.end() - 1)
+        open_paren = code.index("(", m.end() - 1)
         paren = _paren_block(code, open_paren)
         if "Dispatcher" not in paren or not re.search(r"\bIO\b", paren):
             continue
         brace = code.find("{", open_paren + len(paren))
         if brace < 0:
             continue
-        block = _brace_block(code, brace)
-        if brace < idx < brace + len(block):
+        close = match_bracket(code, brace)
+        if close < 0:
+            continue
+        if brace < idx < close:
             return True
     return False
 
 
+def enclosing_live_io(code: str, idx: int) -> bool:
+    """...and the IO hop itself is on a reachable path (not `if (false)`)."""
+    return _live_at(code, idx) and enclosing_io_block(code, idx)
+
+
+
 def check_activity_failure_guard(src: str) -> bool:
     """arm11 — `renderSourceMissing(` is the guarded failure of the resolve."""
-    code = strip_comments(src)
+    code = code_view(src)
     at = code.find(RESOLVE_CALL)
     if at < 0:
         return False
@@ -1201,7 +1279,7 @@ def check_activity_failure_guard(src: str) -> bool:
 
 def check_activity_resolve_offmain(src: str) -> bool:
     """arm12 — resolve (and any snapshot refresh) never runs on Main."""
-    code = strip_comments(src)
+    code = code_view(src)
     at = code.find(RESOLVE_CALL)
     if at < 0:
         return False
@@ -1231,6 +1309,16 @@ def evaluate_tree(root: str):
     preview = open(os.path.join(root, PREVIEW_SHORTCUT_REL), encoding="utf-8").read()
     resolver = open(os.path.join(root, RESOLVER_REL), encoding="utf-8").read()
 
+    failures = []
+    try:
+        return _evaluate_sources(act, sheet, pinner, preview, resolver)
+    except KotlinLexError as exc:
+        # Fail-closed: a tree the shared lexer cannot read must never pass.
+        return ["kotlin-lex:" + str(exc).replace(" ", "_")]
+
+
+def _evaluate_sources(act, sheet, pinner, preview, resolver):
+    """Arm body of `evaluate_tree`, split out so the lexer error is caught."""
     failures = []
     if not check_activity_arm1(act):
         failures.append("arm1")
@@ -1473,8 +1561,137 @@ def selftest() -> int:
                 print(f"[webapp-asset-url] SELFTEST FAIL {name}: "
                       f"arm13 red={bad13}, arm14 red={bad14} (want {want})")
                 ok = False
+        # [B6-t04] the six A02 witnesses. Every shape below passed this gate
+        # before the batch; each must now be red on the arm it attacks — and the
+        # precision checks must keep a live sibling green (no over-red).
+        a02_1 = COMPLIANT_SHEET.replace(
+            "            if (isPinning) return@Button\n",
+            "            if (!true && isPinning) return@Button\n")
+        a02_1b = COMPLIANT_SHEET.replace(
+            "            if (isPinning) return@Button\n",
+            "            if ((false) && isPinning) return@Button\n")
+        a02_2 = COMPLIANT_SHEET.replace(
+            "                    if (!pinShouldCommit(closed = sheetClosed, "
+            "inFlight = isPinning)) {\n"
+            "                        cleanupCopiedAttachment()\n"
+            "                        return@launch\n"
+            "                    }\n",
+            "                    if (!pinShouldCommit(closed = sheetClosed, "
+            "inFlight = isPinning)) {\n"
+            "                    }\n")
+        a02_2b = COMPLIANT_SHEET.replace(
+            "            if (isPinning) return@Button\n",
+            "            if (isPinning) { }\n")
+        for name, sheet, want in (
+            ("A02-1 `!true && isPinning` dead click guard", a02_1, (True, False)),
+            ("A02-1b `(false) && isPinning` dead click guard", a02_1b, (True, False)),
+            ("A02-2 emptied close-guard block", a02_2, (False, True)),
+            ("A02-2b `if (isPinning) { }` empty click guard", a02_2b, (True, False)),
+        ):
+            bad13 = not check_sheet_arm13(sheet)
+            bad14 = not check_sheet_arm14(sheet)
+            if (bad13, bad14) == want:
+                print(f"[webapp-asset-url] selftest ok {name}: "
+                      f"arm13 red={bad13}, arm14 red={bad14}")
+            else:
+                print(f"[webapp-asset-url] SELFTEST FAIL {name}: "
+                      f"arm13 red={bad13}, arm14 red={bad14} (want {want})")
+                ok = False
+        # A02-3: a dead IO block next to a real composition-thread decode.
+        a02_3 = """
+@Composable
+private fun GalleryTile(galleryUri: Uri) {
+    val bmp by produceState<Bitmap?>(initialValue = null, galleryUri) {
+        if (false) { withContext(Dispatchers.IO) { loadBitmapFromUri(context, galleryUri) } }
+        value = android.graphics.BitmapFactory.decodeStream(
+            context.contentResolver.openInputStream(galleryUri),
+        )
+    }
+}
+"""
+        # ...and the same defect spelled as a constant-dead else branch.
+        a02_3b = """
+@Composable
+private fun GalleryTile2(galleryUri: Uri) {
+    val bmp by produceState<Bitmap?>(initialValue = null, galleryUri) {
+        value = if (true) null else withContext(Dispatchers.IO) {
+            loadBitmapFromUri(context, galleryUri)
+        }
+    }
+}
+"""
+        for name, extra in (("A02-3 dead IO + BitmapFactory on composition thread", a02_3),
+                            ("A02-3b decode only in a constant-dead else", a02_3b)):
+            bad = not check_sheet_arm9(COMPLIANT_SHEET + SHEET_DECODE_TILE + extra)
+            clean = check_sheet_arm9(COMPLIANT_SHEET + SHEET_DECODE_TILE)
+            if bad and clean:
+                print(f"[webapp-asset-url] selftest ok {name}: arm9 red={bad}, "
+                      f"live-IO sibling green")
+            else:
+                print(f"[webapp-asset-url] SELFTEST FAIL {name}: arm9 red={bad}, "
+                      f"live-IO sibling green={clean}")
+                ok = False
+        # A02-4: the refresh call is present but behind `if (false)`.
+        a02_4 = COMPLIANT_RESOLVER.replace(
+            "            refresh = { PRootKernel.applyMountedFoldersSnapshot(context) },",
+            "            refresh = { if (false) "
+            "PRootKernel.applyMountedFoldersSnapshot(context) },")
+        for name, resolver, activity, want in (
+            ("A02-4 dead refresh closure", a02_4, COMPLIANT_ACTIVITY, ["arm10"]),
+        ):
+            tree = write_tree(name, activity, COMPLIANT_SHEET, COMPLIANT_PINNER,
+                              COMPLIANT_PREVIEW_SHORTCUT, resolver=resolver)
+            got = evaluate_tree(tree)
+            if sorted(got) == sorted(want):
+                print(f"[webapp-asset-url] selftest ok {name}: red={','.join(got)}")
+            else:
+                print(f"[webapp-asset-url] SELFTEST FAIL {name}: got={got} want={want}")
+                ok = False
+        # A02-5: cleanup / row-delete kept textually but wrapped in `if (false)`.
+        a02_5 = COMPLIANT_SHEET.replace(
+            "        onDispose {\n            sheetClosed = true\n"
+            "            cleanupCopiedAttachment()\n        }",
+            "        onDispose {\n            sheetClosed = true\n"
+            "            if (false) cleanupCopiedAttachment()\n        }")
+        a02_5b = COMPLIANT_SHEET.replace(
+            "runCatching { app.webAppShortcutRepository.delete(entity.id) }",
+            "runCatching { if (false) app.webAppShortcutRepository.delete(entity.id) }")
+        for name, sheet, want in (
+            ("A02-5 dead cleanup in onDispose", a02_5, (True, False)),
+            ("A02-5b dead row delete on pin failure", a02_5b, (False, True)),
+        ):
+            bad3 = not check_sheet_arm3(sheet)
+            bad4 = not check_sheet_arm4(sheet)
+            if (bad3, bad4) == want:
+                print(f"[webapp-asset-url] selftest ok {name}: "
+                      f"arm3 red={bad3}, arm4 red={bad4}")
+            else:
+                print(f"[webapp-asset-url] SELFTEST FAIL {name}: "
+                      f"arm3 red={bad3}, arm4 red={bad4} (want {want})")
+                ok = False
+        # A02-6: `toAssetLoaderUrl` result dropped, `loadUrl` fed a hand-built URL.
+        a02_6 = COMPLIANT_ACTIVITY.replace(
+            '        val url = toAssetLoaderUrl("file://" + file.absolutePath)\n'
+            "            ?: run {\n"
+            "                renderSourceMissing(sourceSessionId = null)\n"
+            "                return\n"
+            "            }\n",
+            '        val ignoredUrl = toAssetLoaderUrl("file://" + file.absolutePath)\n'
+            '        val url = "https://" + ASSET_LOADER_HOST + "/" + file.name\n')
+        bad1 = not check_activity_arm1(a02_6)
+        bad2 = not check_activity_arm2(a02_6)
+        clean = check_activity_arm1(COMPLIANT_ACTIVITY) and check_activity_arm2(COMPLIANT_ACTIVITY)
+        if bad1 and bad2 and clean:
+            print(f"[webapp-asset-url] selftest ok A02-6 dropped encoder result: "
+                  f"arm1/arm2 red={bad1, bad2}, bound sibling green")
+        else:
+            print(f"[webapp-asset-url] SELFTEST FAIL A02-6 dropped encoder result: "
+                  f"arm1 red={bad1} arm2 red={bad2} sibling green={clean}")
+            ok = False
         if ok:
             print("WEBAPP_ASSET_URL_CLEANUP_SELFTEST=PASS")
+            print("WEBAPP_ASSET_URL_CLEANUP_WITNESS_ARMS=PASS (10 arms: "
+                  "A02-1/1b/2/2b/3/3b/4/5/5b/6)")
             return 0
         print("WEBAPP_ASSET_URL_CLEANUP_SELFTEST=FAIL")
         return 1
