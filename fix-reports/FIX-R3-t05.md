@@ -59,16 +59,20 @@
 3. **全量**：逐门独立进程循环（`probe/t05_gate_run.py`，断点续跑版）**109/109 rc=0**（沙箱本窗口并发会话拥挤，循环被杀 3 次、断点续跑完成；进度台账 `probe/t05-gate-done.json`）。`test_scan.py` 结果见 §6（后台跑法，沙箱可能杀——跑了就贴，跑不动交 CI）。
 4. **CI**：分支 push + 手动 dispatch，读数回填 §6。
 
-## 6. CI（回填区）
+## 6. CI（已回填）
 
-- run id：**待回填**
-- head_sha 三方一致：待回填
-- `Summary: 112 passed, 0 failed` 恰一条 / `ALL 344 CASES PASS` 恰一条 / `^ e: ` 0 / 门头 112 互异 / 唯一 skipped = Publish：待回填
+- run：**#2728 / id `40308745022` / job `121524294640` / attempt 1 → success**（10:36:35Z → 11:01:37Z，25m02s）
+- head_sha：远端 `5eabfb51e29c8a4a761c606e53be084c613cc76d` = 本地 HEAD 逐字符一致
+- 26 步，唯一非 success = step 23 `Publish to Releases` skipped（main 门控）
+- 日志 1,486,758 B / NUL 0：
+  - `Summary: 112 passed, 0 failed` 恰 1 条
+  - `ALL 344 CASES PASS` 恰 1 条
+  - `^ e: ` 0 条
+  - 门头 `[N/112]` 112 条互异
+  - 6 条含 `FAILED` 的行逐条核对，全部是 PASSED 用例名子串（无真失败）
+  - `CHAT_MENU_PREFS_LISTENER_SELFTEST=PASS` 恰 1 / `KATEX_READY_RACE_SELFTEST=PASS` 恰 1 ⇒ 两门 `--selftest`（含本支全部新臂，31 + 27）在 CI 真跑通过；`*_SELFTEST_ARMS=N` 行不进 CI 日志（门自证 stdout 不回显，与此前各批一致）
 
-**test_scan 本地读数**（后台跑法，完成即贴；被沙箱杀则注明交 CI）：
-```
-（待回填）
-```
+**test_scan 本地读数**：后台跑法在并发会话拥挤窗口被沙箱反复整杀（多次 exit −1，0 输出），按负载纪律不再重试——**344 夹具全量证据由本 run 的 `ALL 344 CASES PASS` 承担**；本地侧证据 = 逐门循环 109/109（`probe/t05_gate_run.py` 断点续跑台账 `probe/t05-gate-done.json`）。
 
 ## 7. 残留（全部 P2 登记，未顺手改）
 
@@ -80,6 +84,7 @@
 | R4 | A5 不校验 `markRendererGone` 在 synchronized(lock) 块内复位（A3/A4 那样的锁一致性） | markRendererGone 被改成锁外翻转 | 复刻 A3 的 `val d = synchronized(lock){…}` 抽取判据 | 单写者（主线程回调）场景，锁竞态窗口极窄 |
 | R5 | B5 不校验 `SessionIdAliases.register` 与日志行的存在（生产 rename 还做两件外围事）；也不查 `stores[from]` 搬运 | rename 的搬运/注册语义变更 | 各加独立判据 | 本波只修「别名不写」这一条缝；外围是另一族缺陷 |
 | R6 | 双门见证的对侧门（filepreview_print_bounded / share_dir_prune / browser_destroy_wakeup）不承担这些缝——修后它们仍 rc=0。这不是漏洞：三门的锚点面（print 分页/分享目录/wakeup latch）与缝的落点（listener 回调体/gate 复位）不相交，缝应由锚点在 listener/池侧的门管。归档为「谁都不查 → 已查」而非「两门都红」 | 对侧门扩判据覆盖这些文件时 | 在对侧门的判据里显式跳过本支已覆盖面，避免双报 | 门数不变约束 + radius 纪律 |
+| R7 | `CHAT_MENU_PREFS_LISTENER_SELFTEST_ARMS=31` / `KATEX_READY_RACE_SELFTEST_ARMS=27` 不进 CI 日志（`test_scan.py` 只断言 PASS 标记、不回显门 stdout） | 主会话想从 CI 日志核臂数 | 在 `test_scan.py` 的 SELFTESTS 元组里加 ARMS 断言（冻结面，须主会话统一改） | 冻结面不得由本支触碰；PASS 标记已足以证明全部臂在 CI 真跑 |
 
 ## 8. 复现命令
 
