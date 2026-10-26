@@ -168,60 +168,104 @@ VOICE_RENAME_ARM = (
 )
 
 
-def code_only(text):
-    """Strip // line comments so no criterion can be satisfied from prose."""
-    return "\n".join(line.split("//")[0] for line in text.split("\n"))
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_lexer import KotlinLexError  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    const_value,
+    enclosing_conditions,
+    function_body,
+    if_blocks,
+    is_pure_literal,
+    match_bracket,
+    split_top,
+    strip_parens,
+    tail_expr,
+    when_branches,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    code_view,
+    contains_ident,
+    expr_end,
+    guard_feasible,
+    literal_view,
+    path_feasible,
+    value_sources,
+)
+
+SELFTEST_MARK = "COMPACT_ENTRY_PIN_MIGRATION_SELFTEST=PASS"
 
 
-def _balanced(src, open_idx, opener="{", closer="}"):
-    depth = 0
-    for i in range(open_idx, len(src)):
-        if src[i] == opener:
-            depth += 1
-        elif src[i] == closer:
-            depth -= 1
-            if depth == 0:
-                return i + 1
-    return -1
+# ── views ────────────────────────────────────────────────────────────────
+def views(src):
+    """(code, literal) — both length preserving, so offsets map 1:1.
+
+    [b6-t11 parser-death] This gate used to carry a hand-rolled `code_only`
+    that stripped `//` and nothing else. Wrapping a whole cascade in `/* … */`
+    therefore left every anchor alive in the scanned text: all nine arms were
+    blind to the cheapest possible kill (witness A12-6). The shared masker
+    covers line comments, NESTED block comments, `\"\"\"…\"\"\"`, `${…}`
+    templates and char literals; `KotlinLexError` is fail-closed at the caller.
+    """
+    return code_view(src), literal_view(src)
 
 
-def function_text(src, header):
-    i = src.find(header)
-    if i < 0:
-        return None
-    brace = src.find("{", i)
-    if brace < 0:
-        return None
-    end = _balanced(src, brace)
-    return None if end < 0 else src[i:end]
+def line_of(text, idx):
+    return text.count("\n", 0, max(0, idx)) + 1
 
 
-def line_of(src, idx):
-    return src.count("\n", 0, idx) + 1
+# ── declaration spans (shared function_body) ─────────────────────────────
+DECL_RE = re.compile(
+    r"\bfun\s+(?:<[^>]*>\s*)?(?:[A-Za-z_][\w.]*\s*\.\s*)?([A-Za-z_]\w*)\s*\(")
 
 
-# ── wide-1024: shared shape predicates for the body-level arms ────────────
-# A body that is one of these is a DECISION that was replaced by a constant.
-CONST_BODY_RE = re.compile(
-    r"^(?:null|true|false|0|-1|\"\"|''|"
-    r"(?:empty(?:List|Set|Map|Sequence)|listOf|setOf|mapOf|arrayOf)"
-    r"\s*(?:<[^()]*>)?\s*\(\s*\))$")
-# A condition that can never be true — the branch is dead code.
-DEAD_COND_RE = re.compile(r"(?<![\w.])false\b|!\s*true\b|\b0\s*!=\s*0\b|\b1\s*==\s*0\b|"
-                          r"\btrue\s*==\s*false\b")
-EMPTY_OR_CONST_COLL_RE = re.compile(
-    r"^(?:empty(?:List|Set|Sequence|Array)\s*(?:<[^()]*>)?\s*\(\s*\)|"
-    r"(?:listOf|setOf|arrayListOf|mutableListOf|sequenceOf)"
-    r"\s*(?:<[^()]*>)?\s*\(\s*\))$")
-# Any collection DERIVATION — the set is computed from something.
-DERIVE_CALL_RE = re.compile(
-    r"\.\s*(?:map|mapNotNull|filter|filterNot|asSequence|asIterable|drop|take|"
-    r"sortedBy|sortedByDescending|sortedWith|toList|toSet|distinct|plus|minus)\b")
+def decl_name(header):
+    m = DECL_RE.search(header)
+    return m.group(1) if m else None
 
 
-def _stmt_end(text, start):
-    """Index of the newline ending the statement at `start` (bracket depth
-    aware, so a lambda inside the expression does not cut it short)."""
+def decl_span(cc, header):
+    """(start, end) of the declaration's body in the code view, or (None, None)."""
+    name = decl_name(header)
+    if name is None:
+        return None, None
+    fb = function_body(cc, name)
+    if fb is None:
+        return None, None
+    return fb[0], fb[1]
+
+
+def decl_params(cc, header):
+    """Declared parameter names (used for "the body must read its inputs")."""
+    name = decl_name(header)
+    if name is None:
+        return []
+    m = re.search(
+        r"\bfun\s+(?:<[^>]*>\s*)?(?:[A-Za-z_][\w.]*\s*\.\s*)?%s\s*\(" % re.escape(name), cc)
+    if m is None:
+        return []
+    close = match_bracket(cc, m.end() - 1)
+    if close < 0:
+        return []
+    return re.findall(r"([A-Za-z_]\w*)\s*:", cc[m.end():close])
+
+
+def body_of(cc, header):
+    start, end = decl_span(cc, header)
+    if start is None:
+        return None, 0
+    return cc[start:end], start
+
+
+# ── constant folding of an expression's VALUE ────────────────────────────
+def depth0_token(text, token, start=0):
+    """Index of `token` at bracket depth 0 at/after start (-1 when absent)."""
     depth = 0
     i, n = start, len(text)
     while i < n:
@@ -230,300 +274,433 @@ def _stmt_end(text, start):
             depth += 1
         elif c in ")]}":
             depth -= 1
-        elif c == "\n" and depth <= 0:
-            # A chained call (`val x = list\n  .filter { … }\n  .map { … }`)
-            # continues on the next line — a naive newline cut would read the
-            # derivation as the bare receiver and lose every `.map`/`.filter`.
-            j = i + 1
-            while j < n and text[j] in " \t":
-                j += 1
-            if text[j:j + 1] == "." or text[start:i].rstrip().endswith(
-                    ("?:", "=", "&&", "||", ",", "+", "(")):
+        elif depth == 0 and text.startswith(token, i):
+            after = i + len(token)
+            if token[0].isalpha() and after < n and (text[after].isalnum() or text[after] == "_"):
                 i += 1
                 continue
             return i
         i += 1
-    return n
+    return -1
 
 
-def decl_body(src, header):
-    """(body_text, parameter_names) for the declaration at `header`.
+def split_if(text, start):
+    """(cond, then_span, else_span|None) for an `if (...)` starting at start.
 
-    Handles both shapes this file uses: an expression body (`… = if (x) a else
-    b`, possibly starting on the next line) and a block body (`…) { … }`).
-    Returns (None, params) when neither can be read — callers fail closed."""
-    i = src.find(header)
-    if i < 0:
-        return None, []
-    op = src.find("(", i)
-    if op < 0:
-        return None, []
-    cp = _balanced(src, op, "(", ")")
-    if cp < 0:
-        return None, []
-    inner = src[op + 1:cp - 1]
-    params = re.findall(r"([A-Za-z_]\w*)\s*:", inner)
-    k = cp
-    while k < len(src):
-        c = src[k]
-        if c == "{":
-            end = _balanced(src, k, "{", "}")
-            return (src[k:end] if end > k else None), params
-        if c == "=" and src[k + 1:k + 2] != "=":
-            start = k + 1
-            while start < len(src) and src[start] in " \t\r\n":
-                start += 1
-            return src[start:_stmt_end(src, start)], params
-        k += 1
-    return None, params
+    `else` is located at depth 0 from the then-branch, so a same-line
+    `if (c) a else b` is read as two branches — the shared `if_blocks` derives
+    the else from what FOLLOWS the then-branch extent, which swallows the
+    same-line spelling into the then-branch (registered as R1).
+    """
+    m = re.match(r"\s*if\s*\(", text[start:])
+    if m is None:
+        return None
+    op = start + m.end() - 1
+    close = match_bracket(text, op)
+    if close < 0:
+        return None
+    cond = text[op + 1:close]
+    k = depth0_token(text, "else", close + 1)
+    if k < 0:
+        return cond, (close + 1, len(text)), None
+    return cond, (close + 1, k), (k + 4, len(text))
 
 
-def check_body(src, rel, header, arm, anchors, what):
-    body = function_text(src, header)
+def when_parts(expr):
+    """(subject_text, [(pattern, body_text)]) for a `when (...) { … }` head."""
+    m = re.match(r"when\s*(\(|\{)", expr)
+    if m is None:
+        return None
+    k = m.end() - 1
+    if m.group(1) == "(":
+        close = match_bracket(expr, k)
+        if close < 0:
+            return None
+        subject = expr[m.end():close]
+        k = close + 1
+        while k < len(expr) and expr[k] in " \t\r\n":
+            k += 1
+    else:
+        subject = ""
+    if k >= len(expr) or expr[k] != "{":
+        return None
+    close = match_bracket(expr, k)
+    if close < 0:
+        return None
+    head = expr[:close + 1]
+    branches = [(cond.strip(), head[b_start:b_end])
+                for _subj, cond, b_start, b_end in when_branches(head)]
+    return subject, branches
+
+
+def branch_value(text):
+    """The value a branch yields: a `{ … }` block reads as its tail expression."""
+    t = text.strip()
+    if t.startswith("{"):
+        close = match_bracket(t, 0)
+        if close > 0:
+            return tail_expr(t[1:close])
+    return t
+
+
+def fold_value(expr, depth=0):
+    """('const', text) when every REACHABLE branch yields a literal.
+
+    Witness A12-1 keeps the helper declared, keeps all nine call sites and
+    writes `if (false && pinEntryId.isNotEmpty() && …) newKey else null` — the
+    old `CONST_BODY_RE` only rejected the bare `if (false)` spelling, so the
+    conjunction (and every arithmetic/`when` equivalent) read as "still
+    deciding". Folding the condition through the shared `const_bool` (which
+    implements Kotlin's short-circuit semantics) and then folding only the
+    reachable branch makes the whole family visible: `false && x`,
+    `(2 == 3) && x`, `!true`, `1 > 2`, `when (false) { … }`.
+    """
+    if depth > 6:
+        return ("open", "")
+    e = expr.strip().rstrip(";").strip()
+    if not e:
+        return ("open", "")
+    if e.startswith("return "):
+        return fold_value(e[len("return "):], depth + 1)
+    if is_pure_literal(e):
+        return ("const", e)
+    parts = split_if(e, 0)
+    if parts is not None:
+        cond, t_span, e_span = parts
+        cb = const_bool(cond)
+        if cb is True:
+            return fold_value(branch_value(e[t_span[0]:t_span[1]]), depth + 1)
+        if cb is False:
+            if e_span is None:
+                return ("open", "")
+            return fold_value(branch_value(e[e_span[0]:e_span[1]]), depth + 1)
+        if e_span is None:
+            return ("open", "")
+        then_kind, _ = fold_value(branch_value(e[t_span[0]:t_span[1]]), depth + 1)
+        else_kind, _ = fold_value(branch_value(e[e_span[0]:e_span[1]]), depth + 1)
+        if then_kind == "const" and else_kind == "const":
+            return ("const", e)
+        return ("open", "")
+    wp = when_parts(e)
+    if wp is not None:
+        subject, branches = wp
+        sv = const_value(subject) if subject.strip() else None
+        if sv is None:
+            return ("open", "")
+        for pattern, body_text in branches:
+            if pattern == "else" or const_value(pattern) == sv:
+                return fold_value(branch_value(body_text), depth + 1)
+        return ("open", "")
+    srcs = value_sources(e)
+    if len(srcs) > 1 and all(is_pure_literal(s) for s in srcs):
+        return ("const", e)
+    return ("open", "")
+
+
+# ── liveness ─────────────────────────────────────────────────────────────
+def dead_condition_at(cc, pos):
+    """The first enclosing `if` condition that cannot be true ('' when none)."""
+    for kind, cond in enclosing_conditions(cc, pos):
+        if kind != "if":
+            continue  # when(subject) is not modelled by the shared fold (R2)
+        if not guard_feasible(cond):
+            return re.sub(r"\s+", " ", cond).strip()
+    return ""
+
+
+def check_live(cc, rel, header, arm, needle, what):
+    """A write point under a DEAD condition is not a write.
+
+    Witnesses A12-1/2/4/5 all keep the anchor text and kill its effect by
+    making the enclosing condition a constant (`false && …`,
+    `(2 == 3) && …`, a bare `if (false)`). Presence checks cannot see that;
+    feasibility can, and it folds every spelling rather than the one constant
+    pair a blacklist happened to enumerate.
+    """
+    if header is None:
+        body, base = cc, 0
+    else:
+        body, base = body_of(cc, header)
+        if body is None:
+            return [(rel, 0, arm, header + " not found — gate ROT")]
+    pos = body.find(needle)
+    if pos < 0:
+        return []  # a missing anchor is check_body / check_inside's finding
+    cond = dead_condition_at(cc, base + pos)
+    if cond:
+        return [(rel, line_of(cc, base + pos), arm,
+                 "%s: `%s` sits under a DEAD condition (`%s`) — the branch can never "
+                 "run, so the anchor is decoration" % (what, needle, cond[:90]))]
+    return []
+
+
+# ── anchor / order / containment ─────────────────────────────────────────
+def check_body(cc, rel, header, arm, anchors, what):
+    body, base = body_of(cc, header)
     if body is None:
         return [(rel, 0, arm, header + " not found — gate ROT")]
-    code = code_only(body)
-    base = src.find(header)
-    out = []
-    for a in anchors:
-        if a not in code:
-            out.append((rel, line_of(src, base), arm,
-                        "%s is missing code anchor `%s`" % (what, a)))
-    return out
+    return [(rel, line_of(cc, base), arm,
+             "%s is missing code anchor `%s`" % (what, a))
+            for a in anchors if a not in body]
 
 
-def check_order(src, rel, header, arm, first, second, what):
-    """`first` must appear before `second` inside the function (code only)."""
-    body = function_text(src, header)
+def check_order(cc, rel, header, arm, first, second, what):
+    """`first` must appear before `second` inside the function (code view)."""
+    body, base = body_of(cc, header)
     if body is None:
         return [(rel, 0, arm, header + " not found — gate ROT")]
-    code = code_only(body)
-    base = src.find(header)
-    i, j = code.find(first), code.find(second)
+    i, j = body.find(first), body.find(second)
     if i < 0:
-        return [(rel, line_of(src, base), arm,
+        return [(rel, line_of(cc, base), arm,
                  "%s is missing code anchor `%s`" % (what, first))]
     if j >= 0 and j < i:
-        return [(rel, line_of(src, base), arm,
+        return [(rel, line_of(cc, base), arm,
                  "%s: `%s` must come AFTER `%s`" % (what, second, first))]
     return []
 
 
-def check_inside(src, rel, header, arm, guard, needle, what):
-    """`needle` must appear INSIDE the `guard { ... }` block of `header`.
-
-    An index-order check is too weak here: it passes whenever the needle
-    merely follows the guard opening, which is also true when the needle sits
-    after the guard's closing brace (the migration would then run on every
-    update, not just renames).
-    """
-    body = function_text(src, header)
+def check_inside(cc, rel, header, arm, guard, needle, what):
+    """`needle` must appear INSIDE the `guard { ... }` block of `header`."""
+    body, base = body_of(cc, header)
     if body is None:
         return [(rel, 0, arm, header + " not found — gate ROT")]
-    base = src.find(header)
     g = body.find(guard)
     if g < 0:
-        return [(rel, line_of(src, base), arm,
+        return [(rel, line_of(cc, base), arm,
                  "%s is missing guard `%s`" % (what, guard))]
     brace = body.find("{", g)
-    end = _balanced(body, brace) if brace >= 0 else -1
+    end = match_bracket(body, brace) if brace >= 0 else -1
     if brace < 0 or end < 0:
-        return [(rel, line_of(src, base), arm,
+        return [(rel, line_of(cc, base), arm,
                  "%s guard `%s` is not a braced block — gate ROT" % (what, guard))]
-    if needle not in code_only(body[brace:end]):
-        return [(rel, line_of(src, base), arm,
+    if needle not in body[brace:end]:
+        return [(rel, line_of(cc, base), arm,
                  "%s: `%s` must sit INSIDE `%s`" % (what, needle, guard))]
     return []
 
 
-def check_inside_else_of(src, rel, header, arm, guard, needles, what):
-    """`needles` must appear INSIDE the `else { ... }` of `guard`.
-
-    Used for arms 5: index order is too weak (a cleanup placed after the guard
-    block still passes), and `check_inside` cannot express "the else branch",
-    which is exactly the requirement — the cascade must NOT run when the
-    models list shrank suspiciously. The `else` is located by scanning FORWARD
-    from `guard`, so an earlier `else` block in the same function cannot
-    silently become the pinned one.
-    """
-    body = function_text(src, header)
+def check_inside_else_of(cc, rel, header, arm, guard, needles, what):
+    """`needles` must appear INSIDE the `else { ... }` of `guard`."""
+    body, base = body_of(cc, header)
     if body is None:
         return [(rel, 0, arm, header + " not found — gate ROT")]
-    base = src.find(header)
     g = body.find(guard)
     if g < 0:
-        return [(rel, line_of(src, base), arm,
+        return [(rel, line_of(cc, base), arm,
                  "%s is missing guard `%s`" % (what, guard))]
-    e = body.find("else", g)
+    brace = body.find("{", g)
+    block_end = match_bracket(body, brace) if brace >= 0 else -1
+    if brace < 0 or block_end < 0:
+        return [(rel, line_of(cc, base), arm,
+                 "%s guard `%s` is not a braced block — gate ROT" % (what, guard))]
+    e = body.find("else", block_end)
     if e < 0:
-        return [(rel, line_of(src, base), arm,
+        return [(rel, line_of(cc, base), arm,
                  "%s: `%s` has no `else` branch — gate ROT" % (what, guard))]
-    brace = body.find("{", e)
-    end = _balanced(body, brace) if brace >= 0 else -1
-    if brace < 0 or end < 0:
-        return [(rel, line_of(src, base), arm,
-                 "%s: the `else` of `%s` is not a braced block — gate ROT" % (what, guard))]
-    block = code_only(body[brace:end])
-    return [(rel, line_of(src, base), arm,
+    ebrace = body.find("{", e)
+    eend = match_bracket(body, ebrace) if ebrace >= 0 else -1
+    if ebrace < 0 or eend < 0:
+        return [(rel, line_of(cc, base), arm,
+                 "%s: the `else` of `%s` is not a braced block — gate ROT"
+                 % (what, guard))]
+    block = body[ebrace:eend]
+    return [(rel, line_of(cc, base), arm,
              "%s: `%s` must sit INSIDE the `else` of `%s`" % (what, n, guard))
             for n in needles if n not in block]
 
 
-def check_helper_bodies(src, rel):
-    """arm 4 (dataflow): the decision helpers must still DECIDE.
-
-    The pre-fix criterion only proved the three `internal fun decide…(`
-    declarations exist. Gutting the body — `= null` on
-    decideCompactPinMigration, `= false` on the two cleanups — keeps every
-    declaration, keeps all nine call sites, and silently disables all nine
-    cascades: the pin and the three per-device references dangle forever.
-
-    Criterion: each helper's BODY must be a real expression (not a constant)
-    and must read every parameter it declares (a body that ignores
-    `removedEntryIds` cannot be deciding on it). Unparseable body fail-closes."""
+# ── arm 4: the decision helpers must still DECIDE ────────────────────────
+def check_helper_bodies(cc, rel):
     out = []
     for header in HELPER_ARM + (DECIDE_STALE_ARM,):
-        body, params = decl_body(src, header)
-        name = header.split("fun ", 1)[-1].rstrip("(")
-        if body is None:
+        name = decl_name(header)
+        start, end = decl_span(cc, header)
+        if start is None:
             out.append((rel, 0, "4", "helper `%s` has no body this gate can read "
                                    "(fail-closed: re-point arm 4)" % name))
             continue
-        flat = re.sub(r"\s+", " ", body).strip()
-        if CONST_BODY_RE.match(flat):
-            out.append((rel, line_of(src, src.find(header)), "4",
-                        "helper `%s` returns a CONSTANT (`%s`) — the decision is gone "
-                        "while every call site still calls it" % (name, flat)))
+        raw = cc[start:end]
+        # Fold the RAW body: `when_branches` splits branches on top-level
+        # newlines, so a whitespace-collapsed copy loses every branch after the
+        # first and the `when` fold would silently read as "open".
+        kind, value = fold_value(raw)
+        if kind == "const":
+            out.append((rel, line_of(cc, start), "4",
+                        "helper `%s` can only return a CONSTANT (`%s`) — the decision "
+                        "is gone while every call site still calls it"
+                        % (name, value[:60])))
             continue
-        missing = [p for p in params if not re.search(r"(?<![.\w])%s(?![\w])" % re.escape(p), body)]
+        missing = [p for p in decl_params(cc, header) if not contains_ident(raw, p)]
         if missing:
-            out.append((rel, line_of(src, src.find(header)), "4",
+            out.append((rel, line_of(cc, start), "4",
                         "helper `%s` never reads %s — a parameter it declares cannot "
                         "influence the decision (fail-closed)"
                         % (name, ", ".join("`%s`" % p for p in missing))))
     return out
 
 
-def check_clear_applier(src, rel):
-    """arm 7 (dataflow, second half): the applier's branches must be LIVE.
+# ── arm 7: the convergence applier's branches must be LIVE ───────────────
+CLEAR_REFS = ("lastUsedEntryId", "voiceInputOverrideEntryId", "voiceOutputOverrideEntryId")
 
-    The pre-fix criterion matched six substrings in the body — the three
-    `decideStaleRefCleanup(<ref>` calls and the three `= null` writes. Wrapping
-    each condition in `false && …` (`if (false && decideStaleRefCleanup(
-    lastUsedEntryId, …))`) keeps every substring, and turns the single
-    convergence point that arms 2 / 3 / 5 / 6 funnel through into a no-op:
-    after a provider delete, `lastUsedEntryId` and both voice overrides keep
-    pointing at entry ids that no longer exist.
 
-    Criterion: every `if` condition in the body that mentions a cleanup
-    predicate must not be a dead constant, and each reference must actually be
-    assigned `null` somewhere in the body."""
-    out = []
-    body = function_text(src, CLEAR_HEADER)
+def check_clear_applier(cc, rel):
+    body, base = body_of(cc, CLEAR_HEADER)
     if body is None:
         return [(rel, 0, "7", CLEAR_HEADER + " not found — gate ROT")]
-    code = code_only(body)
-    base = src.find(CLEAR_HEADER)
-    for m in re.finditer(r"\bif\s*\(", code):
-        op = m.end() - 1
-        close = _balanced(code, op, "(", ")")
-        if close < 0:
-            out.append((rel, line_of(src, base), "7",
-                        "clearStaleSecondaryRefs: an `if (` condition does not balance "
-                        "(fail-closed)"))
-            continue
-        cond = code[op:close]
-        if DEAD_COND_RE.search(cond):
-            out.append((rel, line_of(src, base + m.start()), "7",
+    out = []
+    for cond, _ts, _te, _es, _ee in if_blocks(body):
+        if not guard_feasible(cond):
+            out.append((rel, line_of(cc, base), "7",
                         "clearStaleSecondaryRefs gates a cleanup on a DEAD condition "
                         "(`%s`) — the branch can never run, so the reference survives "
                         "the delete it was meant to heal"
                         % re.sub(r"\s+", " ", cond)[:90]))
-    for ref in ("lastUsedEntryId", "voiceInputOverrideEntryId", "voiceOutputOverrideEntryId"):
-        if not re.search(r"(?<![.\w])%s\s*=\s*null\b" % re.escape(ref), code):
-            out.append((rel, line_of(src, base), "7",
-                        "clearStaleSecondaryRefs never clears `%s` — the reference "
-                        "outlives the entries it points at" % ref))
+            break
+    for ref in CLEAR_REFS:
+        live = [m for m in re.finditer(r"(?<![.\w])%s\s*=\s*null\b" % re.escape(ref), body)
+                if path_feasible(cc, base + m.start())]
+        if not live:
+            out.append((rel, line_of(cc, base), "7",
+                        "clearStaleSecondaryRefs never clears `%s` on a reachable path — "
+                        "the reference outlives the entries it points at" % ref))
     return out
 
 
-def check_stale_entry_ids(src, rel):
-    """arm 6 (dataflow): the stale-entry-id set must be DERIVED from the tree.
+# ── arm 6: the stale-entry-id set must be DERIVED, and non-empty ─────────
+DERIVE_CALL_RE = re.compile(
+    r"\.\s*(?:map|mapNotNull|filter|filterNot|asSequence|asIterable|distinct|"
+    r"sortedBy|sortedByDescending|sortedWith|toList|toSet|plus|minus)\b")
+ZERO_TAKE = ("take", "takeLast")
+ZERO_PRED = ("filter", "filterNot", "takeWhile")
 
-    The pre-fix criterion matched the `val staleEntryIds` declaration and the
-    three consumers. Assigning `emptyList<String>()` keeps all four anchors and
-    makes the whole cascade a no-op: the seeds are dissolved from
-    `config.modelEntries`, but the pin / group members / agent-loop pins are
-    told that nothing was removed.
 
-    Criterion: the declaration is read as an EXPRESSION — it must compute the
-    set (a collection-derivation call) and must not be a constant."""
+def zeroing_reason(cc, expr):
+    """Reason when a call in the derivation chain forces the result to be EMPTY.
+
+    Witness A12-3 kept the whole `instanceEntries.filter{}.filter{}.map{}`
+    chain and appended `.take(0)` at the tail: every anchor (source ident,
+    `.filter`, `.map`) still matched, so the old criterion was satisfied while
+    the cascade was told "nothing was removed". The fix reads the CHAIN's
+    ARGUMENTS and folds them: a truncation with a constant 0 and a predicate
+    that folds to `false` both pin the result to the empty set — that is the
+    shape, not one spelling of it.
+    """
+    for m in re.finditer(r"\.\s*([A-Za-z_]\w*)\s*(?=[({])", expr):
+        name = m.group(1)
+        op = m.end()
+        if op >= len(expr):
+            continue
+        if expr[op] == "(":
+            args = call_args(expr, op)
+            if not args:
+                continue
+            v = const_value(expr[args[0][0]:args[0][1]])
+            if name in ZERO_TAKE and v == ("num", 0.0):
+                return "`.%s(0)` truncates the derived set to the empty list" % name
+        elif expr[op] == "{":
+            close = match_bracket(expr, op)
+            if close < 0:
+                continue
+            b = const_bool(strip_parens(tail_expr(expr[op + 1:close])))
+            if name == "filter" and b is False:
+                return "`.filter { false }` drops every element"
+            if name == "filterNot" and b is True:
+                return "`.filterNot { true }` drops every element"
+            if name == "takeWhile" and b is False:
+                return "`.takeWhile { false }` keeps nothing"
+    return ""
+
+
+def check_stale_entry_ids(cc, rel, source="instanceEntries"):
     out = []
-    body = function_text(src, "fun ensureVoiceTemplateModels(")
+    body, base = body_of(cc, "fun ensureVoiceTemplateModels(")
     if body is None:
         return [(rel, 0, "6", "fun ensureVoiceTemplateModels( not found — gate ROT")]
-    code = code_only(body)
-    base = src.find("fun ensureVoiceTemplateModels(")
-    m = re.search(r"\bval\s+staleEntryIds\s*=\s*", code)
+    m = re.search(r"\bval\s+staleEntryIds\s*=", body)
     if m is None:
         return out  # the anchor loop already reports the missing declaration
-    end = _stmt_end(code, m.end())
-    expr = code[m.end():end]
+    start = m.end()
+    end = expr_end(body, start)
+    expr = body[start:end]
     flat = re.sub(r"\s+", " ", expr).strip()
-    if EMPTY_OR_CONST_COLL_RE.match(flat):
-        out.append((rel, line_of(src, base + m.start()), "6",
-                    "`val staleEntryIds` is a CONSTANT (`%s`) — the cascade is told "
+    if not re.match(r"%s\b" % re.escape(source), flat):
+        out.append((rel, line_of(cc, base + start), "6",
+                    "`val staleEntryIds` no longer derives the set from `%s` (`%s`) — "
+                    "fail-closed: re-point this arm at the new derivation"
+                    % (source, flat[:70])))
+        return out
+    zero = zeroing_reason(body[start:end], flat)
+    if zero:
+        out.append((rel, line_of(cc, base + start), "6",
+                    "`val staleEntryIds` can only be EMPTY (%s) — the cascade is told "
                     "that nothing was removed while the seed entries are still "
-                    "dissolved, so pin / group members / agent-loop pins / per-device "
-                    "refs all dangle" % flat[:70]))
-    elif not DERIVE_CALL_RE.search(flat):
-        out.append((rel, line_of(src, base + m.start()), "6",
-                    "`val staleEntryIds` no longer derives the set from the entry list "
-                    "(`%s`) — fail-closed: re-point this arm at the new derivation"
-                    % flat[:70]))
+                    "dissolved" % zero))
+        return out
+    for s in value_sources(flat):
+        if not contains_ident(s, source) and not DERIVE_CALL_RE.search(s):
+            out.append((rel, line_of(cc, base + start), "6",
+                        "`val staleEntryIds` has a branch (`%s`) that does not produce "
+                        "the derived set — fail-closed" % re.sub(r"\s+", " ", s)[:60]))
+            break
     return out
 
 
+# ── entry points ─────────────────────────────────────────────────────────
 def run_checks(root, rel=REPO_REL):
     path = os.path.join(root, rel)
     if not os.path.isfile(path):
         return [(rel, 0, "?", "file not found — gate ROT")]
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         src = f.read()
+    try:
+        cc, _lc = views(src)
+    except KotlinLexError as exc:
+        return [(rel, 0, "?", "the repository file does not lex (%s) — fail-closed: "
+                              "a file this gate cannot read must never pass" % exc)]
 
     out = []
-    out += check_body(src, rel, "fun updateEntry(", "1", UPDATE_ARM, "updateEntry rename branch")
-    out += check_inside(src, rel, "fun updateEntry(", "1", UPDATE_AFTER,
+    out += check_body(cc, rel, "fun updateEntry(", "1", UPDATE_ARM, "updateEntry rename branch")
+    out += check_inside(cc, rel, "fun updateEntry(", "1", UPDATE_AFTER,
                         "decideCompactPinMigration(", "updateEntry rename branch")
-    out += check_body(src, rel, "fun removeEntry(", "2", REMOVE_ARM, "removeEntry")
-    out += check_order(src, rel, "fun removeEntry(", "2", REMOVE_AFTER,
+    out += check_live(cc, rel, "fun updateEntry(", "1", "decideCompactPinMigration(",
+                      "updateEntry rename branch")
+    out += check_live(cc, rel, "fun updateEntry(", "1",
+                      "compactModelEntryId = migrated", "updateEntry rename branch")
+    out += check_body(cc, rel, "fun removeEntry(", "2", REMOVE_ARM, "removeEntry")
+    out += check_order(cc, rel, "fun removeEntry(", "2", REMOVE_AFTER,
                        "decideCompactPinCleanup(", "removeEntry")
-    out += check_body(src, rel, "fun removeInstance(", "3", REMOVE_INSTANCE_ARM, "removeInstance")
-    body_all = code_only(src)
+    out += check_live(cc, rel, "fun removeEntry(", "2", PIN_RESET, "removeEntry")
+    out += check_body(cc, rel, "fun removeInstance(", "3", REMOVE_INSTANCE_ARM, "removeInstance")
+    out += check_live(cc, rel, "fun removeInstance(", "3", PIN_RESET, "removeInstance")
+
+    body_all = cc
     for a in HELPER_ARM:
         if a not in body_all:
             out.append((rel, 0, "4", "helper missing: `%s`" % a))
-    # arm 4 (dataflow): the helpers must still DECIDE — a gutted body keeps
-    # every declaration and call site while disabling all nine cascades.
-    out += check_helper_bodies(src, rel)
-    # ── [da1024-C] ──
-    out += check_inside_else_of(src, rel, "fun replaceEntries(", "5",
+    out += check_helper_bodies(cc, rel)
+
+    # ── [da1024-C] arms 5-8 ──
+    out += check_inside_else_of(cc, rel, "fun replaceEntries(", "5",
                                 REPLACE_SHRINK_GUARD, REPLACE_ARM, "replaceEntries prune branch")
+    out += check_live(cc, rel, "fun replaceEntries(", "5", PIN_RESET,
+                      "replaceEntries prune branch")
     for needle in VOICE_ARM:
-        out += check_inside(src, rel, "fun ensureVoiceTemplateModels(", "6", VOICE_GUARD,
+        out += check_inside(cc, rel, "fun ensureVoiceTemplateModels(", "6", VOICE_GUARD,
                             needle, "ensureVoiceTemplateModels stale-seed branch")
-    # arm 6 (dataflow): the set must be DERIVED — `emptyList<String>()` keeps
-    # every anchor above and turns the cascade into a no-op.
-    out += check_stale_entry_ids(src, rel)
-    out += check_body(src, rel, CLEAR_HEADER, "7", CLEAR_ARM, "clearStaleSecondaryRefs")
-    # arm 7 (dataflow): the applier's branches must be LIVE (`false && …` keeps
-    # all six anchors and disables the single convergence point).
-    out += check_clear_applier(src, rel)
+    out += check_live(cc, rel, "fun ensureVoiceTemplateModels(", "6", PIN_RESET,
+                      "ensureVoiceTemplateModels stale-seed branch")
+    out += check_live(cc, rel, "fun ensureVoiceTemplateModels(", "6", "val staleEntryIds",
+                      "ensureVoiceTemplateModels stale-seed branch")
+    out += check_stale_entry_ids(cc, rel)
+    out += check_body(cc, rel, CLEAR_HEADER, "7", CLEAR_ARM, "clearStaleSecondaryRefs")
+    out += check_clear_applier(cc, rel)
     if DECIDE_STALE_ARM not in body_all:
         out.append((rel, 0, "7", "helper missing: `%s`" % DECIDE_STALE_ARM))
     for needle in VOICE_RENAME_ARM:
-        out += check_inside(src, rel, "fun updateEntry(", "9", UPDATE_AFTER,
+        out += check_inside(cc, rel, "fun updateEntry(", "9", UPDATE_AFTER,
                             needle, "updateEntry rename branch voice overrides")
+        out += check_live(cc, rel, "fun updateEntry(", "9", needle,
+                          "updateEntry rename branch voice overrides")
     return out
 
 
@@ -535,10 +712,21 @@ def run_ui_checks(root, rel=UI_REL):
         return [(rel, 0, "8", "file not found — gate ROT")]
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         src = f.read()
-    code = code_only(src)
-    return [(rel, line_of(src, code.find("ModelGroupsScreen")), "8",
-             "ModelGroupsScreen compact-pin listener is missing code anchor `%s`" % a)
-            for a in UI_ARM if a not in code]
+    try:
+        cc, _lc = views(src)
+    except KotlinLexError as exc:
+        return [(rel, 0, "8", "the screen file does not lex (%s) — fail-closed" % exc)]
+    out = [(rel, line_of(cc, cc.find("ModelGroupsScreen")), "8",
+            "ModelGroupsScreen compact-pin listener is missing code anchor `%s`" % a)
+           for a in UI_ARM if a not in cc]
+    # A listener that is only REGISTERED inside `if (false)` is not registered:
+    # the row then never refreshes and the pin highlight keeps pointing at an
+    # entry id the repository already dropped (witness A12-5).
+    for needle in ("registerOnSharedPreferenceChangeListener(listener)",
+                   "unregisterOnSharedPreferenceChangeListener(listener)",
+                   "compactModelEntryId = AgentRuntimeLimitsPrefs.compactModelEntryId()"):
+        out += check_live(cc, rel, None, "8", needle, "ModelGroupsScreen compact-pin listener")
+    return out
 
 
 def run_all(root):
@@ -868,7 +1056,74 @@ UI_BAD_NO_REFRESH = UI_OK.replace(
 UI_BAD_WRONG_PREFS = UI_OK.replace("            AgentRuntimeLimitsPrefs.PREFS,", '            "provider_config",')
 
 
+# ── b6-t11 witnesses: each one was mechanically reproduced on the real tree
+# (pre-fix rc=0 = blind, post-fix rc=1 = caught) before this arm was written ──
+
+# A12-1 (family-hole): the condition is a CONJUNCTION with `false` — the old
+# `CONST_BODY_RE` only knew the bare `if (false)` spelling, and the body still
+# reads every parameter, so the helper looked like it was still deciding.
+PR_W_A121_DEAD_CONJ = PR_OK.replace(
+    _MIGRATION_BODY,
+    """internal fun decideCompactPinMigration(pinEntryId: String, oldKey: String, newKey: String): String? =
+    if (false && pinEntryId.isNotEmpty() && pinEntryId == oldKey && oldKey != newKey) newKey else null""")
+
+# A12-1' (family-hole, `when` spelling of the same hole): a constant subject
+# selects the dead branch; the enumerated literal blacklist saw neither.
+PR_W_A121_WHEN_DEAD = PR_OK.replace(
+    _MIGRATION_BODY,
+    """internal fun decideCompactPinMigration(pinEntryId: String, oldKey: String, newKey: String): String? =
+    when (false && pinEntryId.isNotEmpty()) {
+        true -> if (oldKey != newKey) newKey else null
+        else -> null
+    }""")
+
+# A12-2 (family-hole): `(2 == 3)` — the old `DEAD_COND_RE` enumerated the
+# constant pairs `0 != 0` / `1 == 0` / `0 == 1` and nothing else.
+PR_W_A122_ARITH_DEAD = PR_OK.replace(
+    "        if (decideStaleRefCleanup(lastUsedEntryId, removedEntryIds)) lastUsedEntryId = null",
+    "        if ((2 == 3) && decideStaleRefCleanup(lastUsedEntryId, removedEntryIds)) "
+    "lastUsedEntryId = null")
+
+# A12-3 (dataflow): the derivation chain is fully intact — `.take(0)` zeroes
+# its tail, so the cascade is told "nothing was removed".
+PR_W_A123_TAKE_ZERO = PR_OK.replace(
+    _STALE_IDS_DECL, _STALE_IDS_DECL.rstrip("\n") + "\n                .take(0)\n")
+
+# A12-3' (dataflow, predicate spelling of the same hole): the chain still
+# derives, and the predicate drops everything.
+PR_W_A123_FILTER_FALSE = PR_OK.replace(
+    _STALE_IDS_DECL, _STALE_IDS_DECL.rstrip("\n") + "\n                .filter { false }\n")
+
+# A12-4 (family-hole): both voice-override write points keep their `== oldKey`
+# comparison and their `= newUuid` rewrite, and neither can ever run.
+PR_W_A124_VOICE_DEAD = PR_OK.replace(
+    _VOICE_RENAME_BLOCK,
+    """            if (false && voiceInputOverrideEntryId == oldKey) voiceInputOverrideEntryId = newUuid
+            if (false && voiceOutputOverrideEntryId == oldKey) voiceOutputOverrideEntryId = newUuid
+""")
+
+# A12-5 (family-hole): the listener call is present, its registration is not.
+UI_W_A125_DEAD_REGISTER = UI_OK.replace(
+    "        pinPrefs.registerOnSharedPreferenceChangeListener(listener)",
+    "        if (false) pinPrefs.registerOnSharedPreferenceChangeListener(listener)")
+
+# A12-5' (family-hole): the callback runs, the refresh inside it never does.
+UI_W_A125_DEAD_REFRESH = UI_OK.replace(
+    "                compactModelEntryId = AgentRuntimeLimitsPrefs.compactModelEntryId()",
+    "                if (false) compactModelEntryId = AgentRuntimeLimitsPrefs.compactModelEntryId()")
+
+# A12-6 (parser-death): the cascade is wrapped in a BLOCK comment. The gate's
+# own `code_only` stripped `//` only, so every anchor inside `/* … */` counted.
+PR_W_A126_BLOCK_COMMENT = PR_OK.replace(
+    _REMOVE_ENTRY_PIN,
+    "        /*\n" + _REMOVE_ENTRY_PIN + "        */\n")
+
+
+FIXTURE_ARMS = []
+
+
 def _report(name, label, checks, want_arms, contains=None, exact=True):
+    FIXTURE_ARMS.append(name)
     hit = [c for c in checks
            if c[2] in want_arms and (contains is None or contains in c[3])]
     if not hit:
@@ -976,7 +1231,7 @@ def selftest():
         # 18) [wide-1024 W1] helper gutted to a constant → arm 4 fires.
         write(PR_W_BAD_HELPER_CONST)
         ok &= _report("helper-constant-body", "arm 4", run_all(tmp), ("4",),
-                      contains="returns a CONSTANT")
+                      contains="can only return a CONSTANT")
 
         # 19) [wide-1024 W2] applier branches dead-guarded → arm 7 fires.
         write(PR_W_BAD_DEAD_GUARD)
@@ -986,7 +1241,52 @@ def selftest():
         # 20) [wide-1024 W3] stale id set replaced by a constant → arm 6.
         write(PR_W_BAD_EMPTY_STALE_IDS)
         ok &= _report("stale-ids-constant", "arm 6", run_all(tmp), ("6",),
-                      contains="is a CONSTANT")
+                      contains="`val staleEntryIds`")
+
+        # ── b6-t11: the six witnesses this branch was handed ──────────────
+        # 21) A12-1 — `false && …` inside the helper's condition.
+        write(PR_W_A121_DEAD_CONJ)
+        ok &= _report("a12-1-helper-dead-conjunction", "arm 4", run_all(tmp), ("4",),
+                      contains="can only return a CONSTANT")
+
+        # 22) A12-1' — the `when` spelling of the same dead decision.
+        write(PR_W_A121_WHEN_DEAD)
+        ok &= _report("a12-1b-helper-dead-when", "arm 4", run_all(tmp), ("4",),
+                      contains="can only return a CONSTANT")
+
+        # 23) A12-2 — `(2 == 3) && …` in the applier (arithmetic constant pair).
+        write(PR_W_A122_ARITH_DEAD)
+        ok &= _report("a12-2-applier-arith-dead", "arm 7", run_all(tmp), ("7",),
+                      contains="DEAD condition")
+
+        # 24) A12-3 — the derived set keeps every operator and ends in `.take(0)`.
+        write(PR_W_A123_TAKE_ZERO)
+        ok &= _report("a12-3-stale-ids-take-zero", "arm 6", run_all(tmp), ("6",),
+                      contains="can only be EMPTY")
+
+        # 25) A12-3' — same hole, spelled as a predicate that drops everything.
+        write(PR_W_A123_FILTER_FALSE)
+        ok &= _report("a12-3b-stale-ids-filter-false", "arm 6", run_all(tmp), ("6",),
+                      contains="can only be EMPTY")
+
+        # 26) A12-4 — both voice-override migrations dead-guarded.
+        write(PR_W_A124_VOICE_DEAD)
+        ok &= _report("a12-4-voice-dead-guard", "arm 9", run_all(tmp), ("9",),
+                      contains="DEAD condition")
+
+        # 27) A12-5 — the prefs listener is registered inside `if (false)`.
+        write(PR_OK, UI_W_A125_DEAD_REGISTER)
+        ok &= _report("a12-5-ui-dead-register", "arm 8", run_all(tmp), ("8",),
+                      contains="DEAD condition")
+
+        # 28) A12-5' — the callback refreshes the pin inside `if (false)`.
+        write(PR_OK, UI_W_A125_DEAD_REFRESH)
+        ok &= _report("a12-5b-ui-dead-refresh", "arm 8", run_all(tmp), ("8",),
+                      contains="DEAD condition")
+
+        # 29) A12-6 — the removeEntry cascade wrapped in a BLOCK comment.
+        write(PR_W_A126_BLOCK_COMMENT)
+        ok &= _report("a12-6-block-comment", "arm 2", run_all(tmp), ("2",))
 
         # 17) ROT control (LAST: it wipes the fixture tree): both files missing
         # must be reported, never silently green (one finding per file, so a
@@ -1002,7 +1302,9 @@ def selftest():
         else:
             print("  [OK]   ROT control: both missing files reported")
 
-    print("COMPACT_ENTRY_PIN_MIGRATION_SELFTEST=%s" % ("PASS" if ok else "FAIL"))
+    # A stable marker the main session can assert in test_scan.py: the count
+    # makes an arm that quietly disappears visible in the CI log.
+    print("%s (%d arms)" % (SELFTEST_MARK, len(FIXTURE_ARMS)))
     return 0 if ok else 1
 
 

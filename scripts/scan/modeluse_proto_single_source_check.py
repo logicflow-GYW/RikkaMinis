@@ -103,74 +103,6 @@ PROVIDER_SEARCH_FLAG = 'args.get("provider")'
 PROVIDER_FILTER_GUARD = "if (providerFilter != null)"
 PROVIDER_HANDLER_REL = CALLER_RELS[1]
 
-
-def fun_body(text, name):
-    """Body of the first `fun <name>(` in [text] (brace-balanced), or None."""
-    m = re.search(r"\bfun\s+%s\s*\(" % re.escape(name), text)
-    if not m:
-        return None
-    open_brace = text.find("{", m.end())
-    if open_brace < 0:
-        return None
-    depth = 0
-    for i in range(open_brace, len(text)):
-        c = text[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[open_brace:i + 1]
-    return None
-
-
-def check_provider(root):
-    """[dv16-A04] Every `--provider` reader goes through one matcher.
-
-    Fail-closed: a body that cannot be delimited (member renamed / moved) is a
-    violation, not a silent pass.
-    """
-    v = []
-    path = os.path.join(root, PROVIDER_HANDLER_REL)
-    name = os.path.basename(PROVIDER_HANDLER_REL)
-    if not os.path.exists(path):
-        return ["%s: NOT FOUND at %s — cannot verify the --provider matcher" % (name, path)]
-    src = code_only(open(path, encoding="utf-8").read())
-
-    if src.count("fun %s" % PROVIDER_MATCHER) != 1:
-        v.append(
-            "%s: expected exactly ONE 'fun %s' definition — %d found (a second "
-            "--provider decision is the pre-fix shape)"
-            % (name, PROVIDER_MATCHER.rstrip("("), src.count("fun %s" % PROVIDER_MATCHER))
-        )
-    for subject in PROVIDER_SUBJECTS:
-        body = fun_body(src, subject)
-        if body is None:
-            v.append(
-                "%s: `%s` could not be delimited — fail-closed (member renamed or "
-                "moved?)" % (name, subject)
-            )
-            continue
-        if PROVIDER_MATCHER not in body:
-            v.append(
-                "%s: %s does not call the single %s — its own --provider opinion "
-                "is back (list/search/run drift)" % (name, subject, PROVIDER_MATCHER.rstrip("("))
-            )
-    search = fun_body(src, "cmdSearch")
-    if search is not None:
-        if PROVIDER_SEARCH_FLAG not in search:
-            v.append(
-                "%s: cmdSearch does not read %s — the flag is documented and "
-                "ignored again" % (name, PROVIDER_SEARCH_FLAG)
-            )
-        if PROVIDER_FILTER_GUARD not in search:
-            v.append(
-                "%s: cmdSearch has no provider filter decision point (%s) — the "
-                "read flag would be dropped" % (name, PROVIDER_FILTER_GUARD)
-            )
-    return v
-
-
 # ── [dv23-A03] the model that crosses into :modelservice must be ENRICHED ──
 # `cmdRun` resolves `effectiveModel` (models.dev base + overrides) and judges the
 # --output / input modality guards on it, but handed the RAW `entry.model` to
@@ -188,128 +120,293 @@ ALIAS_RE = re.compile(
 )
 # The raw hand-off shape the fix removed (`entry.model`, `x.model`, …).
 RAW_MODEL_ARG_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*\.model$")
-
-
-def _call_args(src, open_idx):
-    """Argument text between the '(' at [open_idx] and its matching ')'.
-
-    None when unbalanced (renamed / moved call) — fail-closed at the caller.
-    """
-    depth = 0
-    i = open_idx
-    while i < len(src):
-        c = src[i]
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return src[open_idx + 1:i]
-        i += 1
-    return None
-
-
-def _named_arg(args, name):
-    """Value text of the top-level named argument `name = …`, or None."""
-    parts, depth, cur = [], 0, []
-    for c in args:
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        if c == "," and depth == 0:
-            parts.append("".join(cur))
-            cur = []
-            continue
-        cur.append(c)
-    if "".join(cur).strip():
-        parts.append("".join(cur))
-    for part in parts:
-        m = re.match(r"\s*%s\s*=\s*(.+?)\s*$" % re.escape(name), part, re.S)
-        if m:
-            return m.group(1).strip()
-    return None
-
-
-def _call_end(text, open_idx):
-    """Index of the ')' closing the '(' at [open_idx], or -1 (fail-closed)."""
-    depth = 0
-    i = open_idx
-    while i < len(text):
-        c = text[i]
-        if c == '"':
-            i += 1
-            while i < len(text) and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-        elif c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-        i += 1
-    return -1
-
-
 # What may follow the enrichment call and still be "the enriched value":
 # closing delimiters of enclosing scopes and plain member reads. Anything else
 # (a combinator, an elvis, another call) hands over something derived from it.
 _PASSTHROUGH_TAIL_RE = re.compile(r"^[)\]\}]*(?:\s*\.\s*[A-Za-z_]\w*)*$")
+# [B6-t07 10-1] the field the parsed endpoint is written into.
+ENDPOINT_TARGET_RE = re.compile(r"\babsoluteEndpointOverride\s*=(?!=)")
+
+# ── [dv27-A02] the request body must reach the provider WHOLE on both paths ──
+# `buildRequestJson` wrote `thinking_level` for every non-OFF turn and the
+# STREAMING path parsed it, but `executeRun` — the non-streaming path — never
+# read the key at all. The worker then fell back to `LLMProvider.sendMessage`'s
+# default (`ThinkingLevel.OFF`), so every non-streamed offloaded request asked
+# the vendor NOT to reason: silently, and on exactly the families where the
+# level decides whether the model reasons at all (DeepSeek / Qwen3 / Claude 3.7+).
+#
+# Criteria, all DERIVED from the tree, never from a hand-written field list:
+#   C1  — no orphan request key. Every request-level key derived from
+#         `buildRequestJson`'s write points must be read SOMEWHERE in the worker
+#         service. A third field added to the dispatcher and consumed by nobody
+#         fails here.
+#   C1b — [B6-t07 10-4] the value READ from such a key is the value used: the
+#         binding's right-hand side must still derive from the read. A key whose
+#         read is post-processed into a constant keeps the key "consumed" while
+#         the user's value never reaches the provider.
+#   C2  — the level reaches both provider calls, bound to a live read of
+#         `thinking_level`; C2b — both paths hand over the same argument surface.
+#
+# Scope note: C1 is a *service-wide* read check on purpose. Three derived keys
+# are legitimately single-path — `input_json` / `passthrough_request` /
+# `output_ext` exist only for the non-streaming image & raw-passthrough routes,
+# and `streaming` decides the route before either body runs — so a literal
+# "consumed in BOTH bodies" rule would be red on a clean tree, i.e. a gate that
+# cannot be trusted. The per-path half of the contract is enforced by C2 at the
+# call sites, where a drop is unambiguous.
+SERVICE_REL = CALLER_RELS[0]
+EXEC_DISPATCH_REL = SRC + "/ModelExecutionDispatcher.kt"
+# (entry point, provider method) — the pair that must agree.
+EXEC_PATHS = (("executeRun", "sendMessage"), ("executeStreamingRun", "streamMessage"))
+LEVEL_KEY = "thinking_level"
+LEVEL_ARG = "thinkingLevel"
+READ_CALLS = (
+    "optString", "optInt", "optBoolean", "optLong", "optDouble",
+    "optJSONObject", "optJSONArray", "opt",
+    "has", "getString", "getInt", "getBoolean", "getLong", "getDouble",
+    "getJSONObject", "getJSONArray",
+)
+KEY_READ_RE = re.compile(
+    r'\b(?:%s)\(\s*"([A-Za-z_][A-Za-z0-9_]*)"' % "|".join(READ_CALLS)
+)
+LEVEL_READ_RE = re.compile(r'\b(?:%s)\(\s*"%s"' % ("|".join(READ_CALLS), LEVEL_KEY))
+NESTED_BUILDER_RE = re.compile(r"JSON(?:Object|Array)\(\)\s*\.apply\s*\{")
+IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+LEVEL_CONST_RE = re.compile(r"\bThinkingLevel\s*\.\s*[A-Za-z_]\w*")
 
 
-def _alias_discards(expr):
-    """(True, tail) when the `val x = … effectiveModel(…) …` binding keeps only
-    a DERIVED value.
 
-    [wide-1024 Rule 7] The alias name was collected from the whole line, so
-    `val effectiveModel = ModelsDevApi.effectiveModel(entry).let { entry.model }`
-    registered `effectiveModel` as an enrichment outlet while the value bound
-    to it is the raw entry again (type-compatible, so nothing complains) and
-    every models.dev capability field dies at the process boundary again.
+
+# ── shared lexer / ast / valueflow (batch-6 hard constraint #1) ────────────────
+# Everything structural reads the two shared projections of one file:
+#   code — comments AND string/char contents masked (length-preserving, so every
+#          position maps back onto the source);
+#   lit  — comments masked, string contents kept (the JSON keys / string anchors).
+# A token that lives only inside a string literal can no longer satisfy a code
+# anchor, and an anchor parked in `/* … */` can no longer read as live code — the
+# hand-rolled `code_only` saw neither (witness 10-6).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+from _kotlin_lexer import KotlinLexError  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    const_value,
+    function_body,
+    match_bracket,
+    split_top,
+    stmt_spans,
+    strip_parens,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    code_view,
+    contains_ident,
+    expr_end,
+    literal_view,
+    path_feasible,
+    value_sources,
+)
+
+
+class Views:
+    """Both shared projections of one file (equal length → positions agree)."""
+
+    __slots__ = ("code", "lit")
+
+    def __init__(self, text):
+        self.code = code_view(text)
+        self.lit = literal_view(text)
+
+
+def load(root, rel, name):
+    path = os.path.join(root, rel)
+    if not os.path.exists(path):
+        return None, ["%s: NOT FOUND at %s" % (name, path)]
+    try:
+        return Views(open(path, encoding="utf-8").read()), None
+    except KotlinLexError as exc:
+        return None, ["%s: cannot be lexed (%s) — fail-closed" % (name, exc)]
+
+
+def body_pair(views, fname):
+    """(code_body, lit_body, span) of `fun <fname>(`, or None (fail-closed)."""
+    sp = function_body(views.code, fname)
+    if sp is None:
+        return None
+    start, end, _kind = sp
+    return views.code[start:end], views.lit[start:end], sp
+
+
+def stmt_spans_at(code, pos):
+    """[(abs_start, abs_end)] top-level statements of the innermost `{…}` block
+    containing `pos` (or of the whole text when no block encloses it)."""
+    stack = []
+    for i, ch in enumerate(code[:max(0, pos)]):
+        if ch == "{":
+            stack.append(i)
+        elif ch == "}" and stack:
+            stack.pop()
+    if stack:
+        b = stack[-1]
+        close = match_bracket(code, b)
+        if close < 0:
+            return []
+        base = b + 1
+        return [(base + a, base + z) for a, z in stmt_spans(code[base:close])]
+    return [(a, z) for a, z in stmt_spans(code)]
+
+
+def stmt_of(code, pos):
+    """The innermost statement containing `pos`, as (start, end, text)."""
+    for a, z in stmt_spans_at(code, pos):
+        if a <= pos < z:
+            return a, z, code[a:z]
+    return None
+
+
+def _absorbed(expr):
+    """True when [expr]'s truth value is already decided without its call.
+
+    [B6-t07 10-2] `inst != null && (providerMatches(…) || true)` keeps the matcher
+    substring while the `|| true` arm fixes the value: the filter matches every
+    entry and `--provider` does nothing again. Any operand of an `&&`/`||` chain
+    (at any paren depth) that folds to a constant decides the whole expression.
     """
-    m = ENRICH_CALL_RE.search(expr)
+    e = strip_parens(expr)
+    if not e:
+        return False
+    val = const_value(e)
+    if val is not None and val[0] == "bool":
+        return True
+    for op in ("&&", "||"):
+        parts = split_top(e, (op,))
+        if len(parts) > 1:
+            return any(_absorbed(e[a:b]) for a, b in parts)
+    for m in re.finditer(r"[([{]", e):
+        close = match_bracket(e, m.start())
+        if close > 0 and _absorbed(e[m.start() + 1:close]):
+            return True
+    return False
+
+
+def check_provider(root):
+    """[dv16-A04] Every `--provider` reader goes through one matcher — and its
+    RESULT is the filter (not short-circuited into a constant)."""
+    v = []
+    views, err = load(root, PROVIDER_HANDLER_REL, os.path.basename(PROVIDER_HANDLER_REL))
+    if views is None:
+        return ["%s — cannot verify the --provider matcher" % err[0]]
+    name = os.path.basename(PROVIDER_HANDLER_REL)
+    if views.code.count("fun %s" % PROVIDER_MATCHER) != 1:
+        v.append(
+            "%s: expected exactly ONE 'fun %s' definition — %d found (a second "
+            "--provider decision is the pre-fix shape)"
+            % (name, PROVIDER_MATCHER.rstrip("("), views.code.count("fun %s" % PROVIDER_MATCHER))
+        )
+    for subject in PROVIDER_SUBJECTS:
+        pair = body_pair(views, subject)
+        if pair is None:
+            v.append(
+                "%s: `%s` could not be delimited — fail-closed (member renamed or "
+                "moved?)" % (name, subject)
+            )
+            continue
+        body_code, _body_lit, span = pair
+        hits = [m.start() for m in re.finditer(
+            r"(?<![\w`])%s\s*\(" % re.escape(PROVIDER_MATCHER.rstrip("(")), body_code)]
+        if not hits:
+            v.append(
+                "%s: %s does not call the single %s — its own --provider opinion "
+                "is back (list/search/run drift)"
+                % (name, subject, PROVIDER_MATCHER.rstrip("("))
+            )
+            continue
+        for off in hits:
+            stmt = stmt_of(views.code, span[0] + off)
+            if stmt is None:
+                v.append(
+                    "%s: %s's matcher call could not be placed in a statement — "
+                    "fail-closed" % (name, subject)
+                )
+                continue
+            if _absorbed(stmt[2]):
+                v.append(
+                    "%s: %s's `%s` call is not the filter any more — its statement "
+                    "`%s` is already decided (a constant `||` arm / fold), so the "
+                    "--provider filter matches everything (witness 10-2)"
+                    % (name, subject, PROVIDER_MATCHER.rstrip("("), " ".join(stmt[2].split())[:80])
+                )
+    search = body_pair(views, "cmdSearch")
+    if search is not None:
+        body_code, body_lit, _span = search
+        if PROVIDER_SEARCH_FLAG not in body_lit:
+            v.append(
+                "%s: cmdSearch does not read %s — the flag is documented and "
+                "ignored again" % (name, PROVIDER_SEARCH_FLAG)
+            )
+        if PROVIDER_FILTER_GUARD not in body_code:
+            v.append(
+                "%s: cmdSearch has no provider filter decision point (%s) — the "
+                "read flag would be dropped" % (name, PROVIDER_FILTER_GUARD)
+            )
+    return v
+
+
+def _alias_discards(binding):
+    """(True, why) when the `val x = … effectiveModel(…) …` binding keeps only a
+    DERIVED value.
+
+    [wide-1024 Rule 7 / B6-t07 10-3] The binding is delimited by the shared
+    expression-end scanner, so a continuation line (`.let { entry.model }` on the
+    NEXT line) is inside it — the old `rest.find('\\n')` cut the binding at the
+    first newline and the fix's own witness re-entered by inserting exactly one.
+    The final value is then traced with the shared `value_sources`: every
+    possible source must still be the enrichment call itself.
+    """
+    m = ENRICH_CALL_RE.search(binding)
     if not m:
         return False, ""
-    paren = expr.find("(", m.end() - 1)
-    if paren < 0:
+    open_pos = binding.find("(", m.end() - 1)
+    if open_pos < 0:
         return True, "the enrichment call has no argument list"
-    end = _call_end(expr, paren)
-    if end < 0:
+    close = match_bracket(binding, open_pos)
+    if close < 0:
         return True, "the enrichment call could not be delimited (fail-closed)"
-    tail = expr[end + 1:].strip()
-    if _PASSTHROUGH_TAIL_RE.match(tail):
-        return False, ""
-    return True, tail
+    expr = binding[m.start():].strip()
+    sources = value_sources(expr)
+    foreign = [s for s in sources
+               if not ENRICH_CALL_RE.search(s)]
+    if sources and foreign:
+        return True, foreign[0].strip()[:60]
+    return False, ""
 
 
 def check_enriched_dispatch(root):
-    """[dv23-A03] Every `buildRequestJson(` hand-off resolves the enriched model.
-
-    Derived per call site and counted: the number of compliant `model =`
-    arguments must equal the number of call sites, so a THIRD dispatch point
-    cannot quietly pass the raw entry again.
-    """
+    """[dv23-A03] Every `buildRequestJson(` hand-off resolves the enriched model."""
     v = []
-    path = os.path.join(root, DISPATCH_REL)
+    views, err = load(root, DISPATCH_REL, os.path.basename(DISPATCH_REL))
+    if views is None:
+        return err
     name = os.path.basename(DISPATCH_REL)
-    if not os.path.exists(path):
-        return ["%s: NOT FOUND at %s — cannot verify the dispatched model" % (name, path)]
-    src = code_only(open(path, encoding="utf-8").read())
+    code = views.code
 
     aliases = set()
-    for m in ALIAS_RE.finditer(src):
+    for m in ALIAS_RE.finditer(code):
         aliases.add(m.group(1))
-        line = src.count("\n", 0, m.start()) + 1
-        rest = src[m.end():]
-        line_end = rest.find("\n")
-        binding = src[m.start():m.end() + (line_end if line_end >= 0 else len(rest))]
+        line = code.count("\n", 0, m.start()) + 1
+        # [B6-t07 10-3] expression end, not line end: a chained `.let { … }` on
+        # the next line is part of the binding.
+        end = expr_end(code, m.end() - 1)
+        binding = code[m.start():end]
         discards, tail = _alias_discards(binding)
         if discards:
             v.append(
                 "%s:%d: `val %s = …%s` binds a DERIVED value, not the enriched model "
                 "(`%s`) — the hand-off looks enriched and every models.dev capability "
                 "field is dropped at the process boundary"
-                % (name, line, m.group(1), binding.strip()[:60], tail[:40])
+                % (name, line, m.group(1), " ".join(binding.strip().split())[:60], tail[:40])
             )
     if not aliases:
         v.append(
@@ -317,7 +414,7 @@ def check_enriched_dispatch(root):
             "resolved, so nothing can be handed over (fail-closed)" % name
         )
 
-    sites = [i for i in range(len(src)) if src.startswith(DISPATCH_CALL, i)]
+    sites = [i for i in range(len(code)) if code.startswith(DISPATCH_CALL, i)]
     if not sites:
         v.append(
             "%s: no '%s' call site — fail-closed (dispatch renamed or moved out of "
@@ -326,14 +423,15 @@ def check_enriched_dispatch(root):
 
     compliant = 0
     for idx in sites:
-        line = src.count("\n", 0, idx) + 1
-        args = _call_args(src, idx + len(DISPATCH_CALL) - 1)
-        if args is None:
+        line = code.count("\n", 0, idx) + 1
+        open_pos = idx + len(DISPATCH_CALL) - 1
+        arglist = call_args(code, open_pos)
+        if not arglist:
             v.append(
                 "%s:%d: '%s' could not be delimited — fail-closed" % (name, line, DISPATCH_CALL)
             )
             continue
-        value = _named_arg(args, "model")
+        value = _named_arg_value(code, arglist, "model")
         if value is None:
             v.append(
                 "%s:%d: '%s' carries no `model =` argument — the worker would be handed "
@@ -364,80 +462,142 @@ def check_enriched_dispatch(root):
     return v
 
 
+def _named_arg_value(code, arglist, arg):
+    """Value text of the named argument `arg` from a call_args() slice list."""
+    for a, b in arglist:
+        m = re.match(r"\s*%s\s*=(?!=)" % re.escape(arg), code[a:b])
+        if m:
+            return code[a + m.end():b].strip()
+    return None
+
+
 # ── [dv27-A02] the request body must reach the provider WHOLE on both paths ──
-# `buildRequestJson` wrote `thinking_level` for every non-OFF turn and the
-# STREAMING path parsed it, but `executeRun` — the non-streaming path — never
-# read the key at all. The worker then fell back to `LLMProvider.sendMessage`'s
-# default (`ThinkingLevel.OFF`), so every non-streamed offloaded request asked
-# the vendor NOT to reason: silently, and on exactly the families where the
-# level decides whether the model reasons at all (DeepSeek / Qwen3 / Claude 3.7+).
-#
-# Two criteria, both DERIVED from the tree, never from a hand-written field list:
-#   C1 — no orphan request key. Every request-level key derived from
-#        `buildRequestJson`'s write points must be read SOMEWHERE in the worker
-#        service. A third field added to the dispatcher and consumed by nobody
-#        fails here.
-#   C2 — the level reaches the provider call, and both paths hand over the same
-#        argument surface. At `executeRun`'s `provider.sendMessage(` and
-#        `executeStreamingRun`'s `provider.streamMessage(` the named-argument
-#        SETS must be equal, and the `thinkingLevel =` value must trace to a
-#        read of `thinking_level` in the same function body (one helper hop
-#        allowed). A constant (`thinkingLevel = ThinkingLevel.OFF`) has no such
-#        trace and fails; so does a path that drops an argument its sibling
-#        passes.
-#
-# Scope note: C1 is a *service-wide* read check on purpose. Three derived keys
-# are legitimately single-path — `input_json` / `passthrough_request` /
-# `output_ext` exist only for the non-streaming image & raw-passthrough routes,
-# and `streaming` decides the route before either body runs — so a literal
-# "consumed in BOTH bodies" rule would be red on a clean tree, i.e. a gate that
-# cannot be trusted. The per-path half of the contract is enforced by C2 at the
-# call sites, where a drop is unambiguous.
-SERVICE_REL = CALLER_RELS[0]
-EXEC_DISPATCH_REL = SRC + "/ModelExecutionDispatcher.kt"
-# (entry point, provider method) — the pair that must agree.
-EXEC_PATHS = (("executeRun", "sendMessage"), ("executeStreamingRun", "streamMessage"))
-LEVEL_KEY = "thinking_level"
-LEVEL_ARG = "thinkingLevel"
-READ_CALLS = (
-    "optString", "optInt", "optBoolean", "optLong", "optDouble",
-    "optJSONObject", "optJSONArray", "opt",
-    "has", "getString", "getInt", "getBoolean", "getLong", "getDouble",
-    "getJSONObject", "getJSONArray",
-)
-KEY_READ_RE = re.compile(
-    r'\b(?:%s)\(\s*"([A-Za-z_][A-Za-z0-9_]*)"' % "|".join(READ_CALLS)
-)
-LEVEL_READ_RE = re.compile(r'\b(?:%s)\(\s*"%s"' % ("|".join(READ_CALLS), LEVEL_KEY))
-NESTED_BUILDER_RE = re.compile(r"JSON(?:Object|Array)\(\)\s*\.apply\s*\{")
-IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# C1  — no orphan request key (every key the dispatcher writes is read).
+# C1b — the value READ from that key is the value used: a read that is then
+#       post-processed into something else (`req.optInt("max_tokens", 4096).let {
+#       4096 }`) keeps the key visible while the user's value never reaches the
+#       provider (witness 10-4).
+# C2  — the level reaches both provider calls, bound to a live read of
+#       `thinking_level`; a lossy member call on the read (`….take(0)` → "") makes
+#       `thinkingLevelFromWire` fall back to OFF with the read still in the text
+#       (witness 10-5), and both paths hand over the same argument surface.
+LOSSY_MEMBERS = {
+    "take", "takeLast", "drop", "dropLast", "substring", "subSequence",
+    "replace", "removePrefix", "removeSuffix", "takeWhile", "dropWhile",
+}
+VALUE_COMBINATOR_RE = re.compile(r"\.\s*(let|run|takeIf|takeUnless)\s*\{")
+READ_ANY_RE = re.compile(r"\b(?:%s)\s*\(" % "|".join(READ_CALLS))
 
-def _brace_end(text, open_idx):
-    depth = 0
-    for i in range(open_idx, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
 
-def _dispatch_request_keys(src):
+def _allowed_receivers(code):
+    """`it` plus every lambda parameter name declared in [code]."""
+    names = {"it", "this"}
+    for m in re.finditer(r"\{\s*([A-Za-z_]\w*)\s*(?::[^->{}]*)?->", code):
+        names.add(m.group(1))
+    return names
+
+
+def _derives_from_read(source, allowed):
+    """True when a value source still carries the read (or the lambda receiver)."""
+    if READ_ANY_RE.search(source):
+        return True
+    return any(contains_ident(source, n) for n in allowed)
+
+
+def _value_replaced(code, hint_re=None):
+    """(True, why) when the value read is no longer the value used.
+
+    Three shapes, all derived rather than spelled:
+      1. a lossy member call straight onto the read — `read(…).take(0)` keeps the
+         read in the text and hands on a different value (witness 10-5);
+      2. a value combinator (`let` / `run` / `takeIf` / `takeUnless`) whose block
+         never touches its receiver, or whose tail is a constant (witness 10-4);
+      3. value-flow: no possible final value still derives from the read
+         (`read(…).let { 4096 }`, `.let { entry.model }`).
+    """
+    allowed = _allowed_receivers(code)
+    # 1. lossy member call on the read result
+    for m in READ_ANY_RE.finditer(code):
+        close = match_bracket(code, m.end() - 1)
+        if close < 0:
+            return True, "a read call could not be delimited (fail-closed)"
+        lm = re.match(r"\s*\.\s*([A-Za-z_]\w*)\s*[({]", code[close + 1:])
+        if lm and lm.group(1) in LOSSY_MEMBERS:
+            return True, "the value read is mangled by `.%s(` before use" % lm.group(1)
+    # 2. combinator block that replaces the value
+    for m in VALUE_COMBINATOR_RE.finditer(code):
+        name = m.group(1)
+        brace = m.end() - 1
+        close = match_bracket(code, brace)
+        if close < 0:
+            return True, "a `.%s {` block could not be delimited (fail-closed)" % name
+        inner = code[brace + 1:close]
+        if hint_re is not None and hint_re.search(inner):
+            return True, "the `.%s {` block returns a hard-coded level" % name
+        tail = _tail_stmt(inner)
+        if tail and const_value(tail) is not None:
+            return True, "the `.%s {` block returns a constant (`%s`)" % (name, tail[:32])
+        if name != "run":
+            declared = re.match(r"\s*([A-Za-z_]\w*)\s*(?::[^->]*)?->", inner)
+            recv = declared.group(1) if declared else "it"
+            if not contains_ident(inner, recv):
+                return True, "the `.%s {` block ignores its receiver" % name
+    # 3. value flow
+    sources = value_sources(code)
+    if sources and not any(_derives_from_read(s, allowed) for s in sources):
+        return True, "no possible value still derives from the read (`%s`)" % (
+            " ".join(sources[0].split())[:40])
+    return False, ""
+
+
+def _tail_stmt(body):
+    spans = stmt_spans(body)
+    if not spans:
+        return body.strip()
+    a, z = spans[-1]
+    return body[a:z].strip()
+
+
+def _traces_to_level(value_code, value_lit, body_code, body_lit, svc):
+    """True when [value] is, or is bound in [body] to, a live read of `thinking_level`."""
+    if LEVEL_READ_RE.search(value_lit):
+        return not _value_replaced(value_code, LEVEL_CONST_RE)[0]
+    ident = value_code.strip()
+    if not IDENT_RE.match(ident):
+        return False
+    m = re.search(r"\bval\s+%s\b[^=\n]*=(?!=)" % re.escape(ident), body_lit)
+    if not m:
+        return False
+    start = m.end()
+    end = expr_end(body_code, start)
+    rhs_code = body_code[start:end]
+    rhs_lit = body_lit[start:end]
+    if _value_replaced(rhs_code, LEVEL_CONST_RE)[0]:
+        return False
+    if LEVEL_READ_RE.search(rhs_lit):
+        return True
+    # one helper hop: `val x = helper(…)` where helper() reads the key
+    for hm in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", rhs_code):
+        helper = function_body(svc.code, hm.group(1))
+        if helper and LEVEL_READ_RE.search(svc.lit[helper[0]:helper[1]]):
+            return True
+    return False
+
+
+def _dispatch_request_keys(views):
     """Request-level keys written by `buildRequestJson`, or None (fail-closed).
 
-    A key counts as request-level when its `put("…"` sits inside the function's
-    body but NOT inside a nested `JSONObject()/JSONArray().apply { }` builder —
-    the nested ones are message / content-part / tool-schema fields, not values
-    the worker reads off the request.
+    Structure is read off the code projection, the keys off the literal one — both
+    are length-preserving, so the nested-builder regions line up.
     """
-    body = fun_body(src, "buildRequestJson")
-    if body is None:
+    pair = body_pair(views, "buildRequestJson")
+    if pair is None:
         return None
+    body_code, body_lit, _span = pair
     regions = []
-    for m in NESTED_BUILDER_RE.finditer(body):
+    for m in NESTED_BUILDER_RE.finditer(body_code):
         b = m.end() - 1
-        e = _brace_end(body, b)
+        e = match_bracket(body_code, b)
         if e > b:
             regions.append((b, e))
     outer = None
@@ -447,7 +607,7 @@ def _dispatch_request_keys(src):
                 outer = (b, e)
     nested = [r for r in regions if r != outer]
     keys = []
-    for m in re.finditer(r'\bput\(\s*"([A-Za-z_][A-Za-z0-9_]*)"', body):
+    for m in re.finditer(r'\bput\(\s*"([A-Za-z_][A-Za-z0-9_]*)"', body_lit):
         pos = m.start()
         if any(b < pos < e for b, e in nested):
             continue
@@ -455,124 +615,28 @@ def _dispatch_request_keys(src):
             keys.append(m.group(1))
     return keys
 
-def _named_args(args):
-    """Top-level `name = value` pairs of a call's argument text."""
-    out = {}
-    parts, depth, cur = [], 0, []
-    for c in args:
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        if c == "," and depth == 0:
-            parts.append("".join(cur))
-            cur = []
-            continue
-        cur.append(c)
-    if "".join(cur).strip():
-        parts.append("".join(cur))
-    for part in parts:
-        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)\s*(.+?)\s*$", part, re.S)
-        if m:
-            out[m.group(1)] = m.group(2).strip()
-    return out
-
-LEVEL_CONST_RE = re.compile(r"\bThinkingLevel\s*\.\s*[A-Za-z_]\w*")
-# Value-returning combinators: what the block hands back is what the caller
-# gets, so a block that ignores its receiver (or returns a constant) has
-# replaced the traced value.
-VALUE_COMBINATOR_RE = re.compile(r"\.\s*(let|run|takeIf)\s*\{")
-
-
-def _block_at(text, open_idx):
-    """`{...}` starting at [open_idx] (brace-balanced, string literals skipped)."""
-    depth = 0
-    i = open_idx
-    while i < len(text):
-        c = text[i]
-        if c == '"':
-            i += 1
-            while i < len(text) and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-        elif c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[open_idx:i + 1]
-        i += 1
-    return None
-
-
-def _post_process_override(expr):
-    """(True, why) when [expr] REPLACES the value it post-processes.
-
-    [wide-1024 C2] Finding the wire read inside the expression only proves the
-    read is MENTIONED. `thinkingLevelFromWire(req.optString("thinking_level",
-    "")).let { ThinkingLevel.OFF }` keeps the read textually while the value
-    handed to the provider is a constant — every non-streamed offloaded turn
-    would ask the vendor not to reason, which is exactly the defect C2 exists
-    for. A value combinator whose block returns a hard-coded level, or ignores
-    its receiver entirely, discards the trace (fail-closed when the block
-    cannot be delimited).
-    """
-    for m in VALUE_COMBINATOR_RE.finditer(expr):
-        brace = expr.find("{", m.end() - 1)
-        blk = _block_at(expr, brace) if brace >= 0 else None
-        if blk is None:
-            return True, "a `.%s {` block could not be delimited (fail-closed)" % m.group(1)
-        inner = blk[1:-1]
-        if LEVEL_CONST_RE.search(inner):
-            return True, "the `.%s {` block returns a hard-coded level" % m.group(1)
-        declares = re.search(r"^\s*([A-Za-z_]\w*)\s*->", inner)
-        recv = declares.group(1) if declares else "it"
-        if not re.search(r"\b%s\b" % re.escape(recv), inner):
-            return True, "the `.%s {` block ignores its receiver" % m.group(1)
-    return False, ""
-
-
-def _traces_to_level(value, body, svc):
-    """True when [value] is, or is bound in [body] to, a read of `thinking_level`."""
-    if LEVEL_READ_RE.search(value):
-        return not _post_process_override(value)[0]
-    ident = value.strip()
-    if not IDENT_RE.match(ident):
-        return False
-    m = re.search(r"\bval\s+%s\b[^=\n]*=\s*([^\n]+)" % re.escape(ident), body)
-    if not m:
-        return False
-    rhs = m.group(1)
-    if _post_process_override(rhs)[0]:
-        return False
-    if LEVEL_READ_RE.search(rhs):
-        return True
-    # one helper hop: `val x = helper(…)` where helper() reads the key
-    for hm in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", rhs):
-        helper = fun_body(svc, hm.group(1))
-        if helper and LEVEL_READ_RE.search(helper):
-            return True
-    return False
 
 def check_service_wiring(root):
-    """[dv27-A02] C1 (no orphan key) + C2 (level reaches both provider calls)."""
+    """[dv27-A02] C1 (no orphan key) + C1b (the read is the value used) + C2."""
     v = []
-    svc_path = os.path.join(root, SERVICE_REL)
+    svc, err = load(root, SERVICE_REL, os.path.basename(SERVICE_REL))
+    if svc is None:
+        return err
     svc_name = os.path.basename(SERVICE_REL)
-    if not os.path.exists(svc_path):
-        return ["%s: NOT FOUND at %s" % (svc_name, svc_path)]
-    svc = code_only(open(svc_path, encoding="utf-8").read())
     disp_path = os.path.join(root, EXEC_DISPATCH_REL)
     if not os.path.exists(disp_path):
         # The dialect fixtures model only the protocol files; a tree that ships
         # the real service but no dispatcher is a different (bigger) breakage.
-        if "fun executeRun(" in svc:
+        if "fun executeRun(" in svc.code:
             return [
                 "%s: NOT FOUND at %s — the request body cannot be derived, so the "
                 "worker's coverage of it cannot be judged (fail-closed)"
                 % (os.path.basename(EXEC_DISPATCH_REL), disp_path)
             ]
         return v
-    disp = code_only(open(disp_path, encoding="utf-8").read())
+    disp, derr = load(root, EXEC_DISPATCH_REL, os.path.basename(EXEC_DISPATCH_REL))
+    if disp is None:
+        return derr
     keys = _dispatch_request_keys(disp)
     if keys is None:
         return [
@@ -587,7 +651,8 @@ def check_service_wiring(root):
         ]
 
     # ── C1: every key the dispatcher writes is read by the worker ──
-    read_keys = set(KEY_READ_RE.findall(svc))
+    read_sites = [(m.start(), m.group(1)) for m in KEY_READ_RE.finditer(svc.lit)]
+    read_keys = {k for _p, k in read_sites}
     for k in keys:
         if k not in read_keys:
             v.append(
@@ -595,34 +660,72 @@ def check_service_wiring(root):
                 "field dies at the process boundary" % (svc_name, k)
             )
 
-    # ── C2: the level reaches BOTH provider calls, bound to its read ──
+    # ── C1b: the value read from a key is the value that gets used ──
+    allowed = _allowed_receivers(svc.code)
+    for pos, k in read_sites:
+        if k not in keys:
+            continue
+        stmt = stmt_of(svc.code, pos)
+        if stmt is None:
+            continue
+        s_start, s_end, s_text = stmt
+        if not re.match(r"\s*(?:val|var)\b", s_text):
+            continue
+        # the binding's right-hand side (the read is the value being bound)
+        m = re.match(r"\s*(?:val|var)\s+[A-Za-z_]\w*\s*(?::[^=\n]+?)?=(?!=)", s_text)
+        if not m:
+            continue
+        rhs_start = s_start + m.end()
+        rhs_end = expr_end(svc.code, rhs_start)
+        rhs_end = min(max(rhs_end, rhs_start), s_end)
+        replaced, why = _value_replaced(svc.code[rhs_start:rhs_end])
+        if replaced:
+            line = svc.code.count("\n", 0, pos) + 1
+            v.append(
+                "%s:%d: the value read from '%s' is replaced before use — %s; the key "
+                "looks consumed while the provider receives something else (witness 10-4)"
+                % (svc_name, line, k, why)
+            )
+
+    # ── C2: the level reaches BOTH provider calls, bound to a live read ──
     surfaces = {}
     for entry, callee in EXEC_PATHS:
-        body = fun_body(svc, entry)
-        if body is None:
+        pair = body_pair(svc, entry)
+        if pair is None:
             v.append(
                 "%s: `fun %s(` could not be delimited — fail-closed (entry renamed "
                 "or moved?)" % (svc_name, entry)
             )
             continue
+        body_code, body_lit, _span = pair
         token = "provider.%s(" % callee
-        idx = body.find(token)
+        idx = body_code.find(token)
         if idx < 0:
             v.append(
                 "%s: `%s` makes no '%s' call — fail-closed"
                 % (svc_name, entry, token)
             )
             continue
-        args = _call_args(body, idx + len(token) - 1)
-        if args is None:
+        open_pos = idx + len(token) - 1
+        arglist = call_args(body_code, open_pos)
+        if not arglist:
             v.append(
                 "%s: the '%s' call in `%s` could not be delimited — fail-closed"
                 % (svc_name, token, entry)
             )
             continue
-        named = _named_args(args)
-        surfaces[entry] = (set(named), token)
-        if LEVEL_ARG not in named:
+        names = set()
+        level = None
+        for a, b in arglist:
+            m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)", body_code[a:b])
+            if not m:
+                continue
+            arg = m.group(1)
+            names.add(arg)
+            if arg == LEVEL_ARG:
+                level = (body_code[a + m.end():b], body_lit[a + m.end():b])
+        surfaces[entry] = (names, token)
+        if level is None:
             v.append(
                 "%s: `%s` calls %s without `%s =` — the level the dispatcher "
                 "serialized is dropped and the provider falls back to its OFF "
@@ -630,16 +733,17 @@ def check_service_wiring(root):
                 % (svc_name, entry, token.rstrip("("), LEVEL_ARG)
             )
             continue
-        if not _traces_to_level(named[LEVEL_ARG], body, svc):
+        if not _traces_to_level(level[0], level[1], body_code, body_lit, svc):
             v.append(
-                "%s: `%s` passes `%s = %s` — that value is not derived from reading "
-                "'%s' in this function body (constant or re-typed literal)"
-                % (svc_name, entry, LEVEL_ARG, named[LEVEL_ARG], LEVEL_KEY)
+                "%s: `%s` passes `%s = %s` — that value is not derived from a live "
+                "read of '%s' in this function body (constant, re-typed literal, or "
+                "the read is post-processed away)"
+                % (svc_name, entry, LEVEL_ARG, " ".join(level[0].split()), LEVEL_KEY)
             )
 
     # ── C2b: the two paths hand the provider the same argument surface ──
     if len(surfaces) == 2:
-        (a_name, (a_args, a_tok)) , (b_name, (b_args, b_tok)) = list(surfaces.items())
+        (a_name, (a_args, a_tok)), (b_name, (b_args, b_tok)) = list(surfaces.items())
         only_a = sorted(a_args - b_args)
         only_b = sorted(b_args - a_args)
         if only_a:
@@ -658,83 +762,25 @@ def check_service_wiring(root):
             )
     return v
 
-def code_only(text):
-    """Text with comments removed — presence checks must not be satisfiable
-    from prose. Block comments (KDoc) first, then line comments, keeping line
-    structure so violation reports still point at real lines."""
-    out_lines = []
-    in_block = False
-    for line in text.split("\n"):
-        res = []
-        i = 0
-        n = len(line)
-        while i < n:
-            if in_block:
-                end = line.find("*/", i)
-                if end < 0:
-                    i = n
-                else:
-                    in_block = False
-                    i = end + 2
-                continue
-            if line.startswith("/*", i):
-                in_block = True
-                i += 2
-                continue
-            if line.startswith("//", i):
-                break
-            res.append(line[i])
-            i += 1
-        out_lines.append("".join(res))
-    return "\n".join(out_lines)
+
+def lines_of(text, needle):
+    """1-based line numbers whose text contains `needle` (comment-free text)."""
+    return [i + 1 for i, line in enumerate(text.split("\n")) if needle in line]
 
 
-def lines_of(src, needle):
-    return [i + 1 for i, line in enumerate(src.split("\n")) if needle in line]
-
-
-def find_defs(src):
-    """Lines that declare either dialect function in a caller file."""
-    out = {}
-    for f in FUNCS:
-        pat = re.compile(r"(private |internal |public )?fun %s\s*\(" % f)
-        out[f] = [i + 1 for i, line in enumerate(src.split("\n")) if pat.search(line)]
+def _def_spans(code, fn):
+    """[(decl_pos, body_start, body_end)] for every `fun <fn>(` declaration."""
+    out = []
+    pat = re.compile(r"(?:private |internal |public |protected )?fun\s+%s\s*\(" % re.escape(fn))
+    for m in pat.finditer(code):
+        sp = function_body(code[m.start():], fn)
+        if sp is None:
+            continue
+        out.append((m.start(), m.start() + sp[0], m.start() + sp[1]))
     return out
 
 
-def _decl_body(src, fn, decl_line):
-    """The body of `fun <fn>(` declared on [decl_line]: brace body, else the
-    expression body (up to the following blank line or declaration)."""
-    for m in re.finditer(r"\bfun\s+%s\s*\(" % re.escape(fn), src):
-        if src.count("\n", 0, m.start()) + 1 != decl_line:
-            continue
-        rp = _call_end(src, m.end() - 1)
-        if rp < 0:
-            return None
-        k = rp + 1
-        while k < len(src) and src[k] in " \t\r\n":
-            k += 1
-        if k < len(src) and src[k] == ":":
-            while k < len(src) and src[k] not in "={":
-                k += 1
-        if k >= len(src):
-            return None
-        if src[k] == "{":
-            end = _brace_end(src, k)
-            return src[k:end + 1] if end > k else None
-        stops = []
-        blank = src.find("\n\n", k)
-        if blank >= 0:
-            stops.append(blank)
-        nxt = re.search(r"\n\s*(?:private |internal |public )?fun\s", src[k:])
-        if nxt:
-            stops.append(k + nxt.start())
-        stop = min(stops) if stops else len(src)
-        return src[k + 1:stop]
-    return None
-
-
-def is_delegate_def(src, decl_line, fn=None):
+def is_delegate_def(code, bstart, bend, fn):
     """A caller-file definition is legal only when its BODY is one delegating
     expression into ModelUseProtocol.
 
@@ -742,105 +788,170 @@ def is_delegate_def(src, decl_line, fn=None):
     `ModelUseProtocol.` and no `for (`/`while (` — so appending a fallback
     (`…parseCustomEndpointPath(inputJson) ?: JSONObject(inputJson)
     .optString("endpoint")`) stayed inside the window and read as a delegate
-    while it re-implemented the dialect decision at the call site: a symbolic
-    mode like `chat` would be written into `provider.absoluteEndpointOverride`
-    again. The body is now delimited and must be exactly one call (member reads
-    on the result are allowed, nothing else).
+    while it re-implemented the dialect decision at the call site.
+
+    [B6-t07 10-6] The body, the call and its tail are read off the shared
+    projections: a `"/*"` literal inside the expression can no longer open a
+    "block comment" that swallowed `.optString("endpoint").removePrefix("*/")`
+    from the hand-rolled stripper — the parser death the witness used to smuggle
+    the fallback past `code_only`.
     """
-    fn = fn or next((f for f in FUNCS if re.search(
-        r"\bfun\s+%s\s*\(" % re.escape(f), "\n".join(src.split("\n")[decl_line - 1:decl_line]))), None)
-    if fn is None:
+    body = code[bstart:bend]
+    if not body.strip():
         return False
-    body = _decl_body(src, fn, decl_line)
-    if body is None:
-        return False
-    token = PREFIX + fn + "("
+    token = "%s%s(" % (PREFIX, fn)
     if body.count(token) != 1:
         return False
     at = body.find(token)
-    end = _call_end(body, at + len(token) - 1)
-    if end < 0:
+    close = match_bracket(body, at + len(token) - 1)
+    if close < 0:
         return False
-    head = body[:at].strip()
-    if head not in ("", "return"):
+    if body[:at].strip() not in ("", "return"):
         return False
-    return _PASSTHROUGH_TAIL_RE.match(body[end + 1:].strip()) is not None
+    return _PASSTHROUGH_TAIL_RE.match(body[close + 1:].strip()) is not None
+
+
+def check_delegate_used(views, name):
+    """[B6-t07 10-1] A private delegate nobody CALLS is not the single source.
+
+    The witness kept `ModelUseProtocol.parseCustomEndpointPath` inside the private
+    helper and replaced the only call site with a direct
+    `JSONObject(inputJson).optString("endpoint")`. The delegation check still saw
+    one clean delegate while the decision had moved into the call site — so what
+    is checked now is direction: every private delegate must have at least one
+    LIVE caller in its own file (a dead helper proves the call site grew its own
+    read).
+    """
+    out = []
+    code = views.code
+    for fn in FUNCS:
+        for decl_pos, bstart, bend in _def_spans(code, fn):
+            live = 0
+            pat = re.compile(r"(?<![\w.`])%s\s*\(" % re.escape(fn))
+            for m in pat.finditer(code):
+                if decl_pos <= m.start() < bend:
+                    # the declaration itself (`fun name(`) is not a call
+                    continue
+                if not path_feasible(code, m.start()):
+                    continue
+                live += 1
+            if live == 0:
+                line = code.count("\n", 0, decl_pos) + 1
+                out.append(
+                    "%s:%d: the private delegate `fun %s(` has no live caller — a helper "
+                    "nobody calls is not the single source; the call site reads the raw "
+                    "key itself again (witness 10-1)"
+                    % (name, line, fn)
+                )
+    return out
+
+
+def check_endpoint_provenance(views, name):
+    """[B6-t07 10-1] `absoluteEndpointOverride` must be written from the parser.
+
+    The overridden field is what actually reaches the HTTP call: a value bound
+    from `JSONObject(inputJson).optString("endpoint")` re-introduces the symbolic
+    `chat`/`auto` mode the migration deleted. Only values bound out of
+    `parseCustomEndpointPath(…)` (or the call itself) are accepted.
+    """
+    out = []
+    code, lit = views.code, views.lit
+    bound = set()
+    for m in re.finditer(r"(?<![\w.`])parseCustomEndpointPath\s*\(", lit):
+        close = match_bracket(lit, m.end() - 1)
+        if close < 0:
+            continue
+        rest = code[close + 1:]
+        bm = re.match(r"\s*\??\.\s*(?:let|also|run)\s*\{\s*([A-Za-z_]\w*)\s*->", rest)
+        if bm:
+            bound.add(bm.group(1))
+    for m in ENDPOINT_TARGET_RE.finditer(code):
+        line = code.count("\n", 0, m.start()) + 1
+        rhs = code[m.end():expr_end(code, m.end())].strip()
+        inner = rhs.split(".")[-1].strip()
+        if inner in bound or "parseCustomEndpointPath(" in rhs:
+            continue
+        out.append(
+            "%s:%d: `absoluteEndpointOverride = %s` is not derived from "
+            "parseCustomEndpointPath( — the raw endpoint text (with its symbolic "
+            "`chat`/`auto` modes) is written into the request URL again "
+            "(witness 10-1)" % (name, line, " ".join(rhs.split())[:48] or "<empty>")
+        )
+    return out
 
 
 def check(root):
     v = []
-    proto_path = os.path.join(root, PROTO_REL)
-    if not os.path.exists(proto_path):
-        return ["ModelUseProtocol.kt: NOT FOUND at %s" % proto_path]
-    proto = code_only(open(proto_path, encoding="utf-8").read())
+    proto_views, err = load(root, PROTO_REL, "ModelUseProtocol.kt")
+    if proto_views is None:
+        return err
+    proto_code = proto_views.code
+    proto_lit = proto_views.lit
 
     for token in PROTO_TOKENS:
-        if token not in proto:
+        if token not in proto_lit:
             v.append("ModelUseProtocol.kt: the single dialect is missing '%s'" % token)
     for f in FUNCS:
-        for n in lines_of(proto, "fun %s(" % f):
+        for n in lines_of(proto_code, "fun %s(" % f):
             # definitions inside ModelUseProtocol are the single source; a
             # delegate to itself would be a collapse bug — flag it
-            window = "\n".join(proto.split("\n")[n - 1 : n + 2])
+            window = "\n".join(proto_code.split("\n")[n - 1: n + 2])
             if "ModelUseProtocol.%s(" % f in window:
                 v.append("ModelUseProtocol.kt:%d: the dialect delegates to itself" % n)
 
     for rel in CALLER_RELS:
-        path = os.path.join(root, rel)
-        if not os.path.exists(path):
-            v.append("%s: NOT FOUND at %s" % (os.path.basename(rel), path))
+        views, err = load(root, rel, os.path.basename(rel))
+        if views is None:
+            v += err
             continue
         name = os.path.basename(rel)
-        src = code_only(open(path, encoding="utf-8").read())
         for f in FUNCS:
-            if "ModelUseProtocol.%s(" % f not in src:
+            if "ModelUseProtocol.%s(" % f not in views.lit:
                 v.append(
                     "%s: no prefixed call 'ModelUseProtocol.%s(' — the call "
                     "site must go through the single dialect" % (name, f)
                 )
-        defs = find_defs(src)
-        for f, decls in defs.items():
-            for n in decls:
-                if not is_delegate_def(src, n, f):
+        for f in FUNCS:
+            for decl_pos, bstart, bend in _def_spans(views.code, f):
+                if not is_delegate_def(views.code, bstart, bend, f):
+                    line = views.code.count("\n", 0, decl_pos) + 1
                     v.append(
                         "%s:%d: 'fun %s(' is NOT a one-line delegate into "
                         "ModelUseProtocol — a second implementation body is "
-                        "back" % (name, n, f)
+                        "back" % (name, line, f)
                     )
-        for n in lines_of(src, SILENT_BRANCH):
+        v += check_delegate_used(views, name)
+        v += check_endpoint_provenance(views, name)
+        for n in lines_of(views.lit, SILENT_BRANCH):
             v.append(
                 "%s:%d: the silent branch '%s' is back — a "
                 "present-but-not-an-object value would be dropped with zero "
                 "warning" % (name, n, SILENT_BRANCH)
             )
-        for n in lines_of(src, SILENT_IMAGE_BRANCH):
+        for n in lines_of(views.lit, SILENT_IMAGE_BRANCH):
             v.append(
                 "%s:%d: the silent branch '%s' is back — a "
                 "present-but-not-an-object extra_body would be dropped with "
                 "zero warning" % (name, n, SILENT_IMAGE_BRANCH)
             )
-        for i, line in enumerate(src.split("\n")):
+        for n in lines_of(views.code, "imageReservedKeys"):
+            line = views.code.split("\n")[n - 1]
             if IMAGE_KEY_DEF_RE.search(line):
                 v.append(
                     "%s:%d: the reserved-key set is DEFINED here again — it "
                     "lives in ModelUseProtocol.kt, next to the single "
-                    "%s" % (name, i + 1, IMAGE_PARSER_CALL.rstrip("("))
+                    "%s" % (name, n, IMAGE_PARSER_CALL.rstrip("("))
                 )
     # [dv14-A4] ISSUE-08: the image path has ONE parser, and its caller uses it.
-    caller_path = os.path.join(root, IMAGE_CALLER_REL)
-    if not os.path.exists(caller_path):
+    views, err = load(root, IMAGE_CALLER_REL, os.path.basename(IMAGE_CALLER_REL))
+    if views is None:
+        v += err
+    elif IMAGE_PARSER_CALL not in views.lit:
         v.append(
-            "%s: NOT FOUND at %s"
-            % (os.path.basename(IMAGE_CALLER_REL), caller_path)
+            "%s: no '%s' — the image passthrough dialect must be parsed by "
+            "the single implementation in ModelUseProtocol"
+            % (os.path.basename(IMAGE_CALLER_REL), IMAGE_PARSER_CALL)
         )
-    else:
-        caller_src = code_only(open(caller_path, encoding="utf-8").read())
-        if IMAGE_PARSER_CALL not in caller_src:
-            v.append(
-                "%s: no '%s' — the image passthrough dialect must be parsed by "
-                "the single implementation in ModelUseProtocol"
-                % (os.path.basename(IMAGE_CALLER_REL), IMAGE_PARSER_CALL)
-            )
     return v
 
 
@@ -878,6 +989,13 @@ class C {
 
     private fun applyImagePassthrough(inputJson: String): Map<String, Any?> =
         ModelUseProtocol.parseImagePassthrough(inputJson).body
+
+    private fun applyDialect(inputJson: String, warnings: MutableList<String>, provider: MutableProvider) {
+        parseExtraHeaders(inputJson, warnings).let { headers -> provider.chatExtraHeaders = headers }
+        parseCustomEndpointPath(inputJson)?.let { path ->
+            provider.absoluteEndpointOverride = path
+        }
+    }
 
     // [dv23-A03] the enriched model is what crosses into :modelservice
     private fun cmdRun(args: OffloadArgs): NativeOffloadResult {
@@ -1048,6 +1166,52 @@ GOOD_CALLER_TWO_MATCHERS = GOOD_CALLER.replace(
 )
 
 
+# ── batch-6 witnesses (external adversarial audit, 2026-10-26) ──
+# 10-1: the single-endpoint parser survives inside its private delegate while the
+# only call site reads the raw key itself — and writes the raw value into the
+# field that actually reaches the HTTP call.
+GOOD_CALLER_DEAD_DELEGATE = GOOD_CALLER.replace(
+    """        parseCustomEndpointPath(inputJson)?.let { path ->
+            provider.absoluteEndpointOverride = path
+        }""",
+    """        JSONObject(inputJson).optString("endpoint").takeIf { it.isNotEmpty() }?.let { path ->
+            provider.absoluteEndpointOverride = path
+        }""",
+)
+
+# 10-2: the matcher is still called and its result is short-circuited into a
+# constant, so `--provider` filters nothing.
+GOOD_CALLER_ABSORBED = GOOD_CALLER.replace(
+    "            entries = entries.filter { providerMatches(providerFilter, it.label, it.id, it.typeName) }",
+    "            entries = entries.filter { it != null && "
+    "(providerMatches(providerFilter, it.label, it.id, it.typeName) || true) }",
+)
+
+# 10-2b: the only `providerMatches(` text is inside a string literal — a code
+# anchor must not be satisfiable from a literal (the code/lit split).
+GOOD_CALLER_MATCHER_IN_STRING = GOOD_CALLER.replace(
+    "            entries = entries.filter { providerMatches(providerFilter, it.label, it.id, it.typeName) }",
+    '            entries = entries.filter { log("providerMatches(providerFilter, it.label, it.id, it.typeName)") }',
+)
+
+# 10-3: the derivation moved onto the continuation line the old reader cut away.
+GOOD_CALLER_MULTILINE_ALIAS = GOOD_CALLER.replace(
+    "        val effectiveModel = com.rikkaminis.app.provider.ModelsDevApi.effectiveModel(entry)",
+    "        val effectiveModel = com.rikkaminis.app.provider.ModelsDevApi.effectiveModel(entry)\n"
+    "            .let { entry.model }",
+)
+
+# 10-6: a `"/*"` literal in the expression open-coded as a block comment used to
+# hide the elvis fallback from the hand-rolled stripper (parser death).
+GOOD_CALLER_STRING_COMMENT_DELEGATE = GOOD_CALLER.replace(
+    '    private fun parseCustomEndpointPath(inputJson: String): String? =\n'
+    '        ModelUseProtocol.parseCustomEndpointPath(inputJson)\n',
+    '    private fun parseCustomEndpointPath(inputJson: String): String? =\n'
+    '        ModelUseProtocol.parseCustomEndpointPath(inputJson + "/*") ?: '
+    'JSONObject(inputJson).optString("endpoint").removePrefix("*/")\n',
+)
+
+
 # ── [dv27-A02] fixtures: the request body must reach the provider whole ──
 # The delegate block keeps these fixtures legal for the dialect checks above, so
 # a wiring arm isolates check_service_wiring() instead of tripping four gates.
@@ -1065,7 +1229,8 @@ WIRING_DELEGATES = """\
 def wiring_service(parse_line=("        val thinkingLevel = "
                                "thinkingLevelFromWire(req.optString(\"thinking_level\", \"\"))\n"),
                    run_level="thinkingLevel",
-                   run_drop_max_tokens=False):
+                   run_drop_max_tokens=False,
+                   run_mt_line='        val maxTokens = req.optInt("max_tokens", 4096)\n'):
     """A worker service whose two execution paths mirror the shipped shape."""
     run_mt = "" if run_drop_max_tokens else "            maxTokens = maxTokens,\n"
     return (
@@ -1073,7 +1238,7 @@ def wiring_service(parse_line=("        val thinkingLevel = "
         + WIRING_DELEGATES
         + "\n    private fun executeRun(req: JSONObject): String {\n"
         + "        val messages = req.optJSONArray(\"messages\")\n"
-        + "        val maxTokens = req.optInt(\"max_tokens\", 4096)\n"
+        + run_mt_line
         + parse_line
         + "        provider.sendMessage(\n"
         + "            messages = messages,\n"
@@ -1302,7 +1467,7 @@ class C {
 
     # [dv27-A02] fixtures 16-20: thinking_level must reach BOTH provider calls,
     # and every key the dispatcher writes must have a reader.
-    def wiring_arm(label, service, dispatch, needle):
+    def wiring_arm(label, service, dispatch, needle, only=True):
         nonlocal ok
         with tempfile.TemporaryDirectory() as root:
             write(root, PROTO_REL, GOOD_PROTO)
@@ -1313,7 +1478,7 @@ class C {
             if not any(needle in b for b in bad):
                 ok = False
                 print("SELFTEST-FAIL %s must be caught:" % label, bad)
-            elif len(bad) != 1:
+            elif only and len(bad) != 1:
                 ok = False
                 print("SELFTEST-FAIL %s must be the ONLY violation:" % label, bad)
 
@@ -1331,13 +1496,13 @@ class C {
         "the non-streaming path parses nothing (pre-fix shape: value undefined)",
         wiring_service(parse_line=""),
         wiring_dispatch(),
-        "is not derived from reading 'thinking_level'",
+        "is not derived from a live read of 'thinking_level'",
     )
     wiring_arm(
         "the non-streaming path passes a constant level",
         wiring_service(run_level="ThinkingLevel.OFF"),
         wiring_dispatch(),
-        "is not derived from reading 'thinking_level'",
+        "is not derived from a live read of 'thinking_level'",
     )
     # [wide-1024] C2 witness: the wire read stays inside the binding and the
     # value handed to the provider is a constant.
@@ -1349,7 +1514,8 @@ class C {
                        '.let { ThinkingLevel.OFF }\n',
         ),
         wiring_dispatch(),
-        "is not derived from reading 'thinking_level'",
+        "is not derived from a live read of 'thinking_level'",
+        only=False,
     )
 
     wiring_arm(
@@ -1364,6 +1530,78 @@ class C {
         wiring_dispatch(),
         "one path drops an argument the other hands over",
     )
+
+
+    # ── batch-6 witness arms (external adversarial audit, 2026-10-26) ──
+    def dialect_arm(label, caller, needle):
+        nonlocal ok
+        with tempfile.TemporaryDirectory() as root:
+            write(root, PROTO_REL, GOOD_PROTO)
+            write(root, CALLER_RELS[0], GOOD_CALLER)
+            write(root, CALLER_RELS[1], caller)
+            bad = run(root)
+            if not any(needle in b for b in bad):
+                ok = False
+                print("SELFTEST-FAIL %s must be caught:" % label, bad)
+
+    dialect_arm(
+        "10-1 the private delegate nobody calls (the call site reads the raw key)",
+        GOOD_CALLER_DEAD_DELEGATE,
+        "has no live caller",
+    )
+    dialect_arm(
+        "10-1 the endpoint field written from a raw read instead of the parser",
+        GOOD_CALLER_DEAD_DELEGATE,
+        "is not derived from parseCustomEndpointPath(",
+    )
+    dialect_arm(
+        "10-2 the matcher result short-circuited by `|| true`",
+        GOOD_CALLER_ABSORBED,
+        "is not the filter any more",
+    )
+    dialect_arm(
+        "10-2b `providerMatches(` present only inside a string literal",
+        GOOD_CALLER_MATCHER_IN_STRING,
+        "does not call the single providerMatches",
+    )
+    dialect_arm(
+        "10-3 the alias derives on the continuation line",
+        GOOD_CALLER_MULTILINE_ALIAS,
+        "binds a DERIVED value",
+    )
+    dialect_arm(
+        "10-6 a `\"/*\"` literal smuggling an elvis fallback past the stripper",
+        GOOD_CALLER_STRING_COMMENT_DELEGATE,
+        "NOT a one-line delegate",
+    )
+
+    # 10-4 / 10-5: the read is present but the value is not the one used.
+    with tempfile.TemporaryDirectory() as root:
+        write(root, PROTO_REL, GOOD_PROTO)
+        write(root, CALLER_RELS[0],
+              wiring_service(run_mt_line='        val maxTokens = '
+                                          'req.optInt("max_tokens", 4096).let { 4096 }\n'))
+        write(root, CALLER_RELS[1], GOOD_CALLER)
+        write(root, EXEC_DISPATCH_REL, wiring_dispatch())
+        bad = check_service_wiring(root)
+        if not any("the value read from 'max_tokens' is replaced before use" in b for b in bad):
+            ok = False
+            print("SELFTEST-FAIL 10-4 a `max_tokens` read replaced by a constant must be caught:", bad)
+
+    with tempfile.TemporaryDirectory() as root:
+        write(root, PROTO_REL, GOOD_PROTO)
+        write(root, CALLER_RELS[0],
+              wiring_service(parse_line='        val thinkingLevel = '
+                                        'thinkingLevelFromWire(req.optString("thinking_level", "").take(0))\n'))
+        write(root, CALLER_RELS[1], GOOD_CALLER)
+        write(root, EXEC_DISPATCH_REL, wiring_dispatch())
+        bad = check_service_wiring(root)
+        if not any("mangled by `.take(`" in b for b in bad):
+            ok = False
+            print("SELFTEST-FAIL 10-5 a lossy `.take(0)` on the level read must be caught:", bad)
+        if not any("is not derived from a live read of 'thinking_level'" in b for b in bad):
+            ok = False
+            print("SELFTEST-FAIL 10-5 the mangled level must also fail the C2 trace:", bad)
 
     if ok:
         print("MODELUSE_PROTO_SELFTEST=PASS")

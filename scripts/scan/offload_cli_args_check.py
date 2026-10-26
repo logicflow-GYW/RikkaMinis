@@ -156,6 +156,33 @@ import re
 import sys
 from pathlib import Path
 
+# [batch6-t01] 共享词法/语法/值流原语（**唯一**实现）。本门不再自写词法器：
+# 注释剥离走 `mask_comments`（嵌套块注释 / 原始字符串 / 字符字面量 / `${}`
+# 插值全由状态机处理），结构分析走 `mask_code`（字符串内容抹空格、长度与
+# 源码严格相等，位置可回投），常量折叠走 `const_bool`，可达性走
+# `path_feasible`，退出判定走 `returns_exiting`。
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    function_body,
+    if_blocks,
+    last_write,
+    match_bracket,
+    split_top,
+    strip_parens,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    expr_end,
+    path_feasible,
+    returns_exiting,
+    value_sources,
+)
+
 CONTACTS = "src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/ContactsOffloadHandler.kt"
 CONFIG = "src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/ConfigOffloadHandler.kt"
 BROWSERUSE = "src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/BrowserUseOffloadHandler.kt"
@@ -379,11 +406,45 @@ SESSIONS_RULES = [
 
 
 def code_only(src: str) -> str:
-    """Strip block + line comments so prose quoting a pattern cannot trip a rule."""
-    src = re.sub(r"/\*.*?\*/", "", src, flags=re.DOTALL)
-    return "\n".join(line.split("//", 1)[0] for line in src.splitlines())
+    """Comments out, literals kept verbatim — the LITERAL channel.
+
+    [batch6-t01] 实现换成共享 `mask_comments`（`literal_view`）：嵌套块注释、
+    三引号原始字符串、字符字面量 `'"'`、`${…}` 模板插值都由同一个状态机处理，
+    长度与源码严格相等（位置可回投）。本门此前自写的正则版
+    （`re.sub(r"/\\*.*?\\*/") + 每行 split("//")`）在四类构造上系统性错位：
+    嵌套注释提前收尾、`"video/*"` 开出假注释、`'"'` 吞掉后文。
+
+    解析失败抛 `KotlinLexError`（fail-closed，由 `main()` 落成 GATE-FAIL）。
+
+    结构分析（括号配平 / 语句切分 / 函数体）必须走 `code_view()`。
+    """
+    return mask_comments(src)
+
+def code_view(src: str) -> str:
+    """Structural channel: comments AND string/char contents blanked, length equal."""
+    return mask_code(src)
+
+LEX_RULE_ID = "LEX"
+
+def _fail_closed(fn):
+    """共享词法器解析失败 ⇒ 一条违规（fail-closed），**不许**回退原文扫描。
+
+    [batch6-t01] 硬约束：`KotlinLexError` 不是"跳过这一处的理由"。一份读不出
+    词法结构的源码不能被判成合格，所以整门在这一份源上落一条 LEX 违规，
+    规则 id 固定，便于 `--selftest` 断言。
+    """
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except KotlinLexError as exc:  # pragma: no cover - exercised by selftest
+            return [(LEX_RULE_ID, "unlexable source",
+                     f"{fn.__name__}: {exc} — fail-closed (no fallback to raw text)")]
+    wrapper.__name__ = getattr(fn, "__name__", "check")
+    wrapper.__doc__ = fn.__doc__
+    return wrapper
 
 
+@_fail_closed
 def check_text(contacts_src: str, config_src: str, browseruse_src: str = "", fastio_src: str = "") -> list:
     """Return the list of violated rule ids (empty = compliant)."""
     findings = []
@@ -436,6 +497,7 @@ def check_text(contacts_src: str, config_src: str, browseruse_src: str = "", fas
     return findings
 
 
+@_fail_closed
 def check_flag_set(output_src: str, speak_src: str) -> list:
     """[da1026-B] Global boolean-flag set + the handler that forgot to declare.
 
@@ -465,6 +527,7 @@ def check_flag_set(output_src: str, speak_src: str) -> list:
     return findings
 
 
+@_fail_closed
 def check_debug(debug_src: str) -> list:
     """[da1028-A] ISSUE-08 rules, judged on comment-stripped text.
 
@@ -488,6 +551,7 @@ def check_debug(debug_src: str) -> list:
     return findings
 
 
+@_fail_closed
 def check_args(args_src: str) -> list:
     """[dv15-A1 A-01/A-02] rules for the shared OffloadArgs parser, on
     comment-stripped text.
@@ -578,6 +642,7 @@ def violations_dash_branch(args_src):
     return findings
 
 
+@_fail_closed
 def check_sessions(sessions_src: str) -> list:
     """[da1032-C] ISSUE-08 rules for SessionsOffloadHandler, on comment-stripped text.
 
@@ -714,41 +779,17 @@ def _is_json_literal(lit: str) -> bool:
 
 
 def _payload_helper_bodies(code: str, name: str):
-    """Body text of `fun <name>(…)`, or None (declared elsewhere / expression
-    body — an expression body has no `return` statement to judge)."""
-    m = re.search(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?" + re.escape(name) + r"\s*\(", code)
-    if not m:
-        return None
-    i, depth = m.end() - 1, 0
-    while i < len(code):
-        if code[i] == "(":
-            depth += 1
-        elif code[i] == ")":
-            depth -= 1
-            if depth == 0:
-                break
-        i += 1
-    j = code.find("{", i)
-    if j < 0:
-        return None
-    # An expression body (`fun f(...): T = expr`) has no `return` statement to
-    # judge — and the next `{` after its parameter list belongs to a LATER
-    # function, so without this the rule would read the neighbour's body and
-    # mislabel its findings as this function's.
-    eq = code.find("=", i)
-    if 0 <= eq < j:
-        return None
-    depth, k = 0, j
-    while k < len(code):
-        if code[k] == "{":
-            depth += 1
-        elif code[k] == "}":
-            depth -= 1
-            if depth == 0:
-                return code[j:k + 1]
-        k += 1
-    return None
+    """Body text of `fun <name>(…)`, or None (declared elsewhere / expression body).
 
+    [batch6-t01] 体区间由共享 `function_body` 派生：参数表里的默认 lambda
+    （`fun f(a: Int = { 1 })`）不再被当成函数体，表达式体也不会读到**下一个**
+    函数的块。结构判定在 `mask_code` 视图上做（字符串里的 `}` 无法截断体），
+    切片回投调用方给的文本（两视图严格等长，位置可互换）。
+    """
+    span = _fn_span(mask_code(code), name)
+    if span is None:
+        return None
+    return code[span[0]:span[1]]
 
 def _payload_helper_names(code: str) -> list:
     """Names of the functions whose result is fed to `formatBody(` — the N2
@@ -757,21 +798,117 @@ def _payload_helper_names(code: str) -> list:
     return sorted(names)
 
 
+_PAYLOAD_BIND_RE = re.compile(r"\b(?:val|var)\s+(\w+)\s*(?::[^=\n]+)?=(?!=)")
+
+def _fun_spans(struct: str) -> list:
+    """[(name, body_start, body_end)] — 每个 `fun` 声明自己的体区间（结构视图）。
+
+    [batch6-t01] 用共享 `match_bracket` / `expr_end` 走参数表和体，重载/默认
+    参数 lambda/表达式体都分开；不写第二个词法器。
+    """
+    out = []
+    for m in re.finditer(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?(\w+)\s*\(", struct):
+        p_close = match_bracket(struct, m.end() - 1)
+        if p_close < 0:
+            continue
+        i = p_close + 1
+        while i < len(struct) and struct[i] not in "={":
+            i += 1
+        if i >= len(struct):
+            continue
+        if struct[i] == "{":
+            j = match_bracket(struct, i)
+            if j > i:
+                out.append((m.group(1), i + 1, j))
+        else:
+            out.append((m.group(1), i + 1, expr_end(struct, i + 1)))
+    return out
+
+def _payload_binding(struct: str, name: str, pos: int):
+    """pos 之前、**同一函数体内**最近的一次 `val name =`，返回右值区间或 None。"""
+    f_start, f_end = 0, len(struct)
+    for _n, b_start, b_end in _fun_spans(struct):
+        if b_start <= pos <= b_end and b_start >= f_start:
+            f_start, f_end = b_start, b_end
+    last = None
+    for m in _PAYLOAD_BIND_RE.finditer(struct, f_start, f_end):
+        if m.group(1) == name and m.start() < pos:
+            last = m
+    if last is None:
+        return None
+    return last.end(), expr_end(struct, last.end())
+
+def _payload_sources(expr: str, lit: str, struct: str, pos: int, depth: int = 0) -> list:
+    """表达式的所有可能最终值：剥丢弃型作用域 + 展开同文件局部 val（≤3 跳）。
+
+    [batch6-t01] N1 曾经对一切**变量**放行（`continue  # variable / expression
+    / helper call → accepted`），只给 Z2 补了"跨文件 String 委托"，于是
+    `val body = "android-contacts: no contact with id=$id"` + `formatBody(body, …)`
+    落在 N1 / N2 / Z2 三者之间的真空带里。这里把"这个位置真正求值的是什么"
+    补上：绑定的右值同样要被判，1 跳不够就跟着链走（上限 3 跳，超出保守放行）。
+    """
+    if depth > 3:
+        return [expr]
+    e = strip_parens(expr.strip())
+    if not e:
+        return [expr]
+    if re.fullmatch(r"[A-Za-z_]\w*", e):
+        span = _payload_binding(struct, e, pos)
+        if span is None:
+            return [e]
+        return _payload_sources(lit[span[0]:span[1]], lit, struct, span[0], depth + 1)
+    out = []
+    for sub in value_sources(e):
+        s2 = sub.strip()
+        if s2 and s2 != e:
+            out += _payload_sources(s2, lit, struct, pos, depth + 1)
+        elif s2:
+            out.append(s2)
+    return out or [e]
+
+def _lone_literal(expr: str):
+    """表达式是否**只有一个**字符串字面量（拼接/运算一律不算），返回该字面量。"""
+    e = strip_parens(expr.strip())
+    if not e or e[0] != '"':
+        return None
+    lit = _literal_at(e, 0)
+    if lit is None or e[len(lit):].strip():
+        return None
+    return lit
+
 def payload_findings(label: str, src: str) -> list:
-    """N1 / N2 for one payload file (code-only text, comments stripped)."""
+    """N1 / N2 for one payload file.
+
+    [batch6-t01] 双视图：`code`（字面量通道）读载荷字符串本身，`struct`
+    （结构通道）切实参与函数体。N1 现在既判直接字面量，也判**局部变量绑定**
+    出来的字面量（同文件 `val body = "prose"`）。
+    """
     findings = []
     code = code_only(src)
-    for m in re.finditer(r"formatBody\(", code):
-        j = m.end()
-        while j < len(code) and code[j] in " \t\r\n":
+    struct = code_view(src)
+    for m in re.finditer(r"formatBody\(", struct):
+        args = call_args(struct, m.end() - 1)
+        if not args:
+            findings.append(("N1", "unreadable call", label))
+            continue
+        a, b = args[0]
+        j = a
+        while j < b and struct[j] in " \t\r\n":
             j += 1
-        if j >= len(code) or code[j] != '"':
-            continue  # variable / expression / helper call → accepted
-        lit = _literal_at(code, j)
-        if lit is None:
-            findings.append(("N1", "unreadable literal", label))
-        elif not _is_json_literal(lit):
-            findings.append(("N1", "bare non-JSON payload literal", label + ": " + lit[:70]))
+        if j < b and struct[j] == '"':
+            lit = _literal_at(code, j)
+            if lit is None:
+                findings.append(("N1", "unreadable literal", label))
+            elif not _is_json_literal(lit):
+                findings.append(("N1", "bare non-JSON payload literal", label + ": " + lit[:70]))
+            continue
+        for expr in _payload_sources(code[a:b], code, struct, a):
+            lit = _lone_literal(expr)
+            if lit is None or _is_json_literal(lit):
+                continue
+            findings.append(
+                ("N1", "bare non-JSON payload via a local binding",
+                 label + ": " + lit[:70]))
     for name in _payload_helper_names(code):
         body = _payload_helper_bodies(code, name)
         if body is None:
@@ -786,6 +923,7 @@ def payload_findings(label: str, src: str) -> list:
     return findings
 
 
+@_fail_closed
 def check_offload_json(*files) -> list:
     """[da1033-D] ISSUE-04 + [da1034-A4] ISSUE-08 rules for the payload files.
 
@@ -831,6 +969,7 @@ def check_offload_json(*files) -> list:
 # comment-stripped text (a comment quoting the wanted shape cannot pass) and the
 # bodies come from the same brace matcher the N2 arm uses — an expression body
 # has no owner body to judge and is itself a finding.
+@_fail_closed
 def check_offload_cli_bindings(contacts_src: str, notification_src: str,
                                fastio_src: str) -> list:
     """[dv14-A1] the alias-binding rules (V1 contacts, V2 notification, V3 fastio)."""
@@ -957,88 +1096,78 @@ def check_offload_cli_bindings(contacts_src: str, notification_src: str,
 #   S3a/S3b visitFile decides after grepFile returned (the file that filled the
 #       budget ends the walk) instead of continuing unconditionally
 def _brace_block(text: str, marker: str):
-    """Verbatim `{…}` block whose opening brace is the first one after `marker`."""
+    """`{…}` block whose opening brace is the first one after `marker`.
+
+    [batch6-t01] 配平走共享 `match_bracket`（`text` 是 `code_view()` 结果），
+    自写的裸括号计数器退役：字符串里的 `}` 曾让块体提前闭合（parser-death）。
+    """
     i = text.find(marker)
     if i < 0:
         return None
     j = text.find("{", i)
     if j < 0:
         return None
-    depth = 0
-    k = j
-    while k < len(text):
-        if text[k] == "{":
-            depth += 1
-        elif text[k] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[j:k + 1]
-        k += 1
-    return None
-
+    k = match_bracket(text, j)
+    return text[j:k + 1] if k > j else None
 
 def _paren_close(text: str, open_idx: int, opener: str = "(", closer: str = ")"):
     """Index of the [closer] matching text[open_idx], or -1 (fail-closed)."""
-    depth = 0
-    for i in range(open_idx, len(text)):
-        if text[i] == opener:
-            depth += 1
-        elif text[i] == closer:
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
-
+    if (opener, closer) != ("(", ")"):
+        depth = 0
+        for i in range(open_idx, len(text)):
+            if text[i] == opener:
+                depth += 1
+            elif text[i] == closer:
+                depth -= 1
+                if depth == 0:
+                    return i
+        return -1
+    return match_bracket(text, open_idx)
 
 def _dead_condition(cond: str) -> bool:
-    """Is this `if` condition constant-folded false (`false`, `!true`, `X && false`)?"""
-    c = cond.strip()
-    if re.match(r"^false\b", c) or re.match(r"^!\s*true\b", c):
-        return True
-    return any(part.strip() == "false" for part in c.split("&&"))
+    """Is this `if` condition constant-folded **false**?
 
+    [batch6-t01] 旧实现是字面量白名单：行首锚 `^false` / `^!\\s*true`，再
+    `any(part.strip() == "false" for part in c.split("&&"))`。于是同一族里所有
+    等价拼写都穿门（实证见证）：
+      `limit <= 0 && (1 == 2)`   ← `(1 == 2)` 不是裸 `false`
+      `limit <= 0 && !true`      ← `!true` 不在 `&&` 切分后检查
+      `(0 == 1) && !sendSucceeded(status)`
+    一个判据被门内多个臂（S1 / S2 …）共用，缺口同族放大。改为共享 `const_bool`：
+    Kotlin 优先级（`!` > 比较 > `&&` > `||`）、短路语义、括号与常量比较全折。
+    """
+    return const_bool(cond) is False
 
 def _if_site(text: str, cond_re: str):
-    """(condition, body) of the first `if (<cond matching cond_re>) …`, or None.
+    """(condition, then-branch text) of the first `if (<cond matching cond_re>)`.
 
-    [wide-1024] The rules used to ask "does the body mention X?" — a substring in
-    a condition or a branch. This answers the question the rule actually means:
-    where is the DECISION, and does the branch it guards terminate?
+    [batch6-t01] 结构改走共享 `if_blocks`（brace / braceless 两种形态、else
+    区间都给出），`text` 必须是 `code_view()` 结果。旧实现自带括号扫描 +
+    裸花括号计数，字符串里的括号能让它读错分支。
     """
-    for m in re.finditer(r"\bif\s*\(", text):
-        close = _paren_close(text, m.end() - 1)
-        if close < 0:
-            continue
-        cond = text[m.end():close]
-        if not re.search(cond_re, cond):
-            continue
-        j = close + 1
-        while j < len(text) and text[j] in " \t\n":
-            j += 1
-        if j < len(text) and text[j] == "{":
-            end = _paren_close(text, j, "{", "}")
-            body = text[j:end + 1] if end > 0 else text[j:]
-        else:
-            end, depth = j, 0
-            while end < len(text):
-                c = text[end]
-                if c in "([{":
-                    depth += 1
-                elif c in ")]}":
-                    if depth == 0:
-                        break
-                    depth -= 1
-                elif c == "\n" and depth == 0:
-                    break
-                end += 1
-            body = text[j:end]
-        return cond, body
+    for cond, t_start, t_end, _e_start, _e_end in if_blocks(text):
+        if re.search(cond_re, cond):
+            return cond, text[t_start:t_end]
     return None
 
+def _fn_span(struct: str, name: str):
+    """(start, end) of `fun <name>`'s BLOCK body in the structural view, or None.
 
+    [batch6-t01] 由共享 `function_body` 派生（参数表默认 lambda、返回类型、
+    表达式体都能正确跨过）。表达式体没有 `return` 语句可判，按 None 处理
+    （fail-closed 由调用方落成违规）。
+    """
+    span = function_body(struct, name)
+    if span is None or span[2] != "block":
+        return None
+    return span[0], span[1]
+
+@_fail_closed
 def check_fastio_search(fastio_search_src: str) -> list:
     findings = []
-    src = code_only(fastio_search_src)
+    # [batch6-t01] 结构分析走 `mask_code`：以下判据只读标识符/标点，不读字符串
+    # 内容，因此结构视图中"字符串已被抹平"对它们无影响，而括号配平从此可靠。
+    src = code_view(fastio_search_src)
     tree = _payload_helper_bodies(src, "grepTree")
     if tree is None:
         findings.append(
@@ -1117,6 +1246,7 @@ def check_fastio_search(fastio_search_src: str) -> list:
     return findings
 
 
+@_fail_closed
 def check_photos_album(photos_src: str) -> list:
     """[dv18-A A-03] the --album decision is ONE classification (Absent / ById /
     ByName / Unreadable): a non-numeric --id refuses (exit 2) instead of
@@ -1164,29 +1294,49 @@ SDK_Q_PREDICATE_RE = re.compile(
     r"Build\s*\.\s*VERSION\s*\.\s*SDK_INT\s*>=\s*Build\s*\.\s*VERSION_CODES\s*\.\s*Q")
 
 
-def _is_sdk_q_decision(arg: str, code: str) -> bool:
-    """Is this argument the API-29 predicate (or a local bound to it)?
+def _is_sdk_q_decision(arg: str, struct: str) -> bool:
+    """Is this argument **exactly** the API-29 predicate (or a local bound to it)?
 
     [wide-1024 L2] `clearAction(false)` compiles clean, keeps the platform call in
     the tree, and silently routes every Android 10+ device to the empty-string
-    arm — a clear that leaves an item behind."""
-    if SDK_Q_PREDICATE_RE.search(arg):
-        return True
-    if re.fullmatch(r"\w+", arg.strip()):
-        return re.search(r"(?:val|var)\s+" + re.escape(arg.strip()) +
-                         r"\b[^\n]*SDK_INT\s*>=\s*Build\s*\.\s*VERSION_CODES\s*\.\s*Q",
-                         code) is not None
-    return False
+    arm — a clear that leaves an item behind.
 
+    [batch6-t01] 旧判据问的是「这段文本里**出现过** `SDK_INT >= …Q` 吗」。于是
+    下列三种写法全被判成"就是那个谓词"，而 `clearAction` 收到的是恒假布尔：
+        `Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && false`
+        `!(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)`
+        `val isQ = <谓词> && false` → `clearAction(isQ)`
+    改为**值语义**：被求值的整个表达式（剥括号）必须 fullmatch 谓词本身；
+    局部变量跟随一次赋值（`last_write`），其右值同样必须整个是谓词。
+    多出来任何一元/二元运算、任何恒假拼接都判红（fail-closed）。
+    """
+    e = strip_parens(arg.strip())
+    if not e:
+        return False
+    if SDK_Q_PREDICATE_RE.fullmatch(e):
+        return True
+    if not re.fullmatch(r"[A-Za-z_]\w*", e):
+        return False
+    last = last_write(struct, e)
+    if last is None:
+        return False
+    return bool(SDK_Q_PREDICATE_RE.fullmatch(strip_parens(last[1].strip())))
+
+@_fail_closed
 def check_clipboard_clear(clipboard_src: str) -> list:
     """[dv22-A6 A-06] the L1–L4 rules above."""
+    # [batch6-t01] 双视图：`body`（字面量通道）给 `ClipData.newPlainText("", "")`
+    # 这类读字面量的判据；`body_c`（结构通道）给分支/实参结构判定。
     code = code_only(clipboard_src)
+    struct = code_view(clipboard_src)
     findings = []
-    body = _payload_helper_bodies(code, "doClear")
-    if body is None:
+    span = _fn_span(struct, "doClear")
+    if span is None:
         findings.append(("L1", "missing",
                          "doClear lost its owner body (renamed / inlined / deleted?)"))
         return findings
+    body = code[span[0]:span[1]]
+    body_c = struct[span[0]:span[1]]
     if "clearPrimaryClip(" not in body:
         findings.append(("L2", "missing",
                          "clear must reach the platform clearPrimaryClip() — an empty "
@@ -1197,21 +1347,21 @@ def check_clipboard_clear(clipboard_src: str) -> list:
         # without a warning — sends every API 29+ device down the empty-string
         # arm: the platform clear is never called, an empty item is written
         # instead (system "copied" banner, hasPrimaryClip() still true).
-        i = body.find("clearAction(")
+        i = body_c.find("clearAction(")
         if i >= 0:
-            arg = _first_call_arg(body, i + len("clearAction")).strip()
-            if not _is_sdk_q_decision(arg, code):
+            arg = _first_call_arg(body_c, i + len("clearAction")).strip()
+            if not _is_sdk_q_decision(arg, struct):
                 findings.append((
                     "L2", "unreachable",
                     "clearAction() is fed `%s` instead of "
                     "`Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q` — on API 29+ the "
                     "platform clearPrimaryClip() is never reached and `clear` writes an "
                     "empty item (itemCount stays 1)" % (arg or "<missing>")))
-    if re.search(BARE_FOREGROUND_RE, code):
+    if re.search(BARE_FOREGROUND_RE, struct):
         findings.append(("L3", "regressed",
                          "an isAppForeground() guard dropped its `&& SDK_INT >= Q` half "
                          "(pre-Q background clipboard access is legal; refusing it breaks clear)"))
-    if not re.search(FOREGROUND_Q_RE, body):
+    if not re.search(FOREGROUND_Q_RE, body_c):
         findings.append(("L3", "missing",
                          "doClear's background guard must be the exact get/set/status shape"))
     if 'setPrimaryClip(ClipData.newPlainText("", ""))' not in body:
@@ -1261,38 +1411,6 @@ def check_clipboard_clear(clipboard_src: str) -> list:
 # Judged on comment-stripped text, so a status literal quoted in a comment
 # cannot satisfy OR trip the rule.
 _SEND_STATUS_RE = re.compile(r'optString\(\s*"status"\s*\)')
-
-
-def _send_helper_body(code: str, name: str):
-    """Body of `fun <name>(…)` in [code], or None (expression body / absent)."""
-    m = re.search(r"\bfun\s+" + re.escape(name) + r"\s*\(", code)
-    if not m:
-        return None
-    i, depth = m.end() - 1, 0
-    while i < len(code):
-        if code[i] == "(":
-            depth += 1
-        elif code[i] == ")":
-            depth -= 1
-            if depth == 0:
-                break
-        i += 1
-    j = code.find("{", i)
-    if j < 0:
-        return None
-    eq = code.find("=", i)
-    if 0 <= eq < j:
-        return None
-    depth, k = 0, j
-    while k < len(code):
-        if code[k] == "{":
-            depth += 1
-        elif code[k] == "}":
-            depth -= 1
-            if depth == 0:
-                return code[j:k + 1]
-        k += 1
-    return None
 
 
 GREEN_SESSIONS_SEND = """
@@ -1388,15 +1506,22 @@ def _send_helper_region(code: str, name: str, span: int = 400) -> "str | None":
     return code[m.start(): m.start() + span]
 
 
+@_fail_closed
 def check_sessions_send_status(sessions_src: str) -> list:
     """[deep-audit-1044 A-04] — the `send` status → exit-code contract."""
+    # [batch6-t01] 双视图：`body`（字面量通道）给 `optString("status")` /
+    # `"Completed"` / `emit("send"` 这类**读字面量**的判据；`body_c`（结构通道）
+    # 给 if 决策与分支体判定 —— 字符串里的括号不再让分支读错。
     code = code_only(sessions_src)
+    struct = code_view(sessions_src)
     findings = []
-    body = _send_helper_body(code, "cmdSend")
-    if body is None:
+    span = _fn_span(struct, "cmdSend")
+    if span is None:
         findings.append(("S1", "missing",
                          "cmdSend lost its owner body (renamed / inlined / deleted?)"))
         return findings
+    body = code[span[0]:span[1]]
+    body_c = struct[span[0]:span[1]]
     if not _SEND_STATUS_RE.search(body):
         findings.append(("S1", "missing",
                          "cmdSend must read the RPC status (`optString(\"status\")`) — "
@@ -1410,7 +1535,7 @@ def check_sessions_send_status(sessions_src: str) -> list:
         # `if (false && !sendSucceeded(status))` keeps it, folds the condition to
         # false at compile time, and lets a dropped send fall through to
         # `emit("send", …)` at exit 0 — the caller believes the message landed.
-        site = _if_site(body, r"sendSucceeded\s*\(")
+        site = _if_site(body_c, r"sendSucceeded\s*\(")
         if site is None:
             findings.append(("S2", "missing",
                              "sendSucceeded(…) is called but no branch is decided by it — "
@@ -1530,79 +1655,60 @@ def check_sessions_send_status(sessions_src: str) -> list:
 # all come from their declarations — so renaming one keeps the rules pointing at
 # the same decision, and deleting one lands as a finding instead of a silently
 # narrower rule set (fail-closed).
-def _match_brace(code: str, open_idx: int):
-    """`{…}` text from `open_idx` (which must be a brace), or None."""
-    if open_idx >= len(code) or code[open_idx] != "{":
-        return None
-    depth = 0
-    k = open_idx
-    while k < len(code):
-        if code[k] == "{":
-            depth += 1
-        elif code[k] == "}":
-            depth -= 1
-            if depth == 0:
-                return code[open_idx:k + 1]
-        k += 1
-    return None
+def _fn_spans(struct: str) -> list:
+    """[(name, body_start, body_end)] for every `fun` — 共享原语实现的声明遍历。
 
-
-def _expr_body(code: str, eq_idx: int) -> str:
-    """Text of a single expression body, from the token after `=` up to the
-    newline that closes it (bracket depth 0). The expression may start on the
-    NEXT line, which is the house style for a long signature."""
-    k = eq_idx + 1
-    while k < len(code) and code[k] in " \t\r\n":
-        k += 1
-    start = k
-    depth = 0
-    while k < len(code):
-        c = code[k]
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-            if depth < 0:
-                break
-        elif c == "\n" and depth <= 0:
-            break
-        k += 1
-    return code[start:k]
-
+    [batch6-t01] 参数表用 `match_bracket` 配平（默认参数里的 lambda 不再被当成
+    体），表达式体用 `expr_end` 定界；两个自写的花括号/表达式扫描器
+    （`_match_brace` / `_expr_body`）退役。
+    """
+    out = []
+    for m in re.finditer(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?(\w+)\s*\(", struct):
+        p_close = match_bracket(struct, m.end() - 1)
+        if p_close < 0:
+            continue
+        i = p_close + 1
+        while i < len(struct) and struct[i] not in "{=":
+            i += 1
+        if i >= len(struct):
+            continue
+        if struct[i] == "{":
+            j = match_bracket(struct, i)
+            if j > i:
+                out.append((m.group(1), i + 1, j))
+        else:
+            out.append((m.group(1), i + 1, expr_end(struct, i + 1)))
+    return out
 
 def _fn_bodies_with_sigs(code: str):
     """[(name, params, return_type, body)] for every `fun` in `code`.
 
-    The body is the braced block, or the expression after `=` — an
-    expression-bodied helper (`fun f(): T = NativeOffloadResult(2, …)`) still
-    answers a usage error, so it must be readable like its braced twin.
+    [batch6-t01] 体内实现改走共享原语（`function_body` 的同族实现见 `_fn_spans`）：
+    体与签名都从 `mask_code` 视图派生，切片回投调用方的文本（等长视图）。
     """
+    struct = mask_code(code)
     out = []
-    for m in re.finditer(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?(\w+)\s*\(", code):
-        name = m.group(1)
-        i, depth = m.end() - 1, 0
-        while i < len(code):
-            if code[i] == "(":
-                depth += 1
-            elif code[i] == ")":
-                depth -= 1
-                if depth == 0:
-                    break
-            i += 1
-        params = code[m.end():i]
-        k = i + 1
-        rm = re.match(r"\s*:\s*([\w.<>?]+)", code[k:])
-        ret = rm.group(1) if rm else ""
+    for m in re.finditer(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?(\w+)\s*\(", struct):
+        p_close = match_bracket(struct, m.end() - 1)
+        if p_close < 0:
+            continue
+        params = code[m.end():p_close]
+        i = p_close + 1
+        rm = re.match(r"\s*:\s*([\w.<>?, ]+)", struct[i:])
+        ret = rm.group(1).strip() if rm else ""
         if rm:
-            k += rm.end()
-        body = ""
-        while k < len(code) and code[k] not in "{=":
-            k += 1
-        if k < len(code):
-            body = (_match_brace(code, k) or "") if code[k] == "{" else _expr_body(code, k)
-        out.append((name, params, ret, body))
+            i += rm.end()
+        while i < len(struct) and struct[i] not in "{=":
+            i += 1
+        if i >= len(struct):
+            continue
+        if struct[i] == "{":
+            j = match_bracket(struct, i)
+            body = code[i:j + 1] if j > i else ""
+        else:
+            body = code[i + 1:expr_end(struct, i + 1)]
+        out.append((m.group(1), params, ret, body))
     return out
-
 
 # ── [dv29-A3 A-05] the page-size contract, over EVERY registered surface ────
 #
@@ -1632,18 +1738,64 @@ PAGE_OUTCOME = "PageSizeOutcome"
 
 # Shapes that read a page size WITHOUT validating it. Ordered strongest first so
 # a finding names the site it was read at.
-_PAGE_RAW_READS = [
-    (re.compile(r'\bgetInt\s*\(\s*"(?:limit|max)"'), 'getInt on a page-size flag'),
-    (
-        re.compile(r'\bget\s*\(\s*"(?:limit|max)"\s*\)[^\n]*?toIntOrNull'),
-        'raw toIntOrNull on a page-size flag',
-    ),
-    (
-        re.compile(r'(?:limit|max)[^\n]{0,40}?\.coerce(?:In|AtLeast)\s*\(\s*1\s*[,)]'),
-        'a clamped page size',
-    ),
-]
+# [batch6-t01] 分页读取的判据从"拼写"搬到"被读取的**键值**"：
+#   旧形态是三条正则，要求 `getInt(` 后**紧跟**字面量 `"limit"` / `"max"`。
+#   于是同一处读取换个写法就隐形——`val limitKey = "limit"; args.getInt(limitKey)`、
+#   或把 `"limit"` 放进第二个实参（`getInt("day", "limit")`，OffloadArgs 的
+#   vararg 重载）都不匹配。新形态：解析每个实参表达式**求值出的字符串**
+#   （字面量 / 同文件局部 val 一点跳），再与门自己从 `PageSizeSurface.names`
+#   派生出来的名字集比对；实参位置无关。
+_PAGE_CLAMP_RE = re.compile(
+    r'(?:limit|max)[^\n]{0,40}?\.coerce(?:In|AtLeast)\s*\(\s*1\s*[,)]')
 
+_PAGE_READ_CALL_RE = re.compile(r"\b(getInt|get)\s*\(")
+
+def _page_key_values(expr: str, lit: str, struct: str, pos: int, depth: int = 0) -> list:
+    """表达式可能求值出的字符串键（无法确定 ⇒ 空列表：证明不了就不报）。"""
+    if depth > 3:
+        return []
+    e = strip_parens(expr.strip())
+    if not e:
+        return []
+    lit_expr = _lone_literal(e)
+    if lit_expr is not None:
+        inner = lit_expr[3:-3] if lit_expr.startswith('"""') else lit_expr[1:-1]
+        if "$" in inner or "\\" in inner:
+            return []
+        return [inner]
+    if re.fullmatch(r"[A-Za-z_]\w*", e):
+        span = _payload_binding(struct, e, pos)
+        if span is None:
+            return []
+        return _page_key_values(lit[span[0]:span[1]], lit, struct, span[0], depth + 1)
+    return []
+
+def _page_raw_reads(lit: str, struct: str, raw_for_line: str, names: set) -> list:
+    """[(rule_snippet, why)] for every page-size read/write this handler does itself."""
+    hits = []
+    for m in _PAGE_READ_CALL_RE.finditer(struct):
+        args = call_args(struct, m.end() - 1)
+        if not args:
+            continue
+        keys = []
+        for a, b in args:
+            keys += _page_key_values(lit[a:b], lit, struct, a)
+        hit = [k for k in keys if k in names]
+        if not hit:
+            continue
+        if m.group(1) != "getInt":
+            # `get(key)` only reads a page size when the value is parsed as an int
+            line_end = struct.find("\n", m.end())
+            line = struct[m.end():len(struct) if line_end < 0 else line_end]
+            if "toIntOrNull" not in line:
+                continue
+        hits.append((
+            raw_for_line[m.start():m.start() + 60].split("\n")[0].strip(),
+            "`%s(%s)` reads the page size raw" % (m.group(1), hit[0]),
+        ))
+    for m in _PAGE_CLAMP_RE.finditer(struct):
+        hits.append((m.group(0), "a clamped page size"))
+    return hits
 
 def _exit2_producers(code: str) -> set:
     """Names of helpers that answer the shared usage-error exit code."""
@@ -1663,29 +1815,33 @@ def _page_line(raw: str, snippet: str = "") -> str:
     return f" (line {raw[:idx].count(chr(10)) + 1})"
 
 
-def _page_declared_surfaces(code: str) -> list:
-    """[{name, file, legacy}] for every `val X = PageSizeSurface(…)` declaration."""
+def _page_declared_surfaces(struct: str, code: str) -> list:
+    """[{name, file, legacy, names}] for every `val X = PageSizeSurface(…)`.
+
+    [batch6-t01] 实参块用共享 `match_bracket` 定界（结构视图），字符串取值读
+    字面量视图 —— 位置等长可互换。`names` 是 **派生**的：PG2 用它判断"被读的
+    键是不是本 surface 的分页键"，不再靠正则里写死 `"limit"|"max"`。
+    """
     out = []
     for m in re.finditer(
-        r"\bval\s+(\w+)\s*(?::\s*[\w.]+\s*)?=\s*PageSizeSurface\s*\(", code
+        r"\bval\s+(\w+)\s*(?::\s*[\w.]+\s*)?=\s*PageSizeSurface\s*\(", struct
     ):
-        open_idx = code.index("(", m.end() - 1)
-        depth, k = 0, open_idx
-        while k < len(code):
-            if code[k] == "(":
-                depth += 1
-            elif code[k] == ")":
-                depth -= 1
-                if depth == 0:
-                    break
-            k += 1
+        open_idx = m.end() - 1
+        k = match_bracket(struct, open_idx)
+        if k < 0:
+            continue
         block = code[open_idx + 1:k]
         file_m = re.search(r'handlerFile\s*=\s*"([^"]+)"', block)
         legacy_m = re.search(r"legacyShortMax\s*=\s*(true|false)", block)
+        names_m = re.search(r"names\s*=\s*listOf\s*\(([^)]*)\)", block)
+        names = set()
+        if names_m:
+            names = {t for t in re.findall(r'"([^"$\\]*)"', names_m.group(1)) if t}
         out.append({
             "name": m.group(1),
             "file": file_m.group(1) if file_m else "",
             "legacy": bool(legacy_m and legacy_m.group(1) == "true"),
+            "names": names,
         })
     return out
 
@@ -1698,10 +1854,102 @@ def _page_registered(code: str):
     return [t.strip() for t in m.group(1).split(",") if t.strip()]
 
 
+def _when_arms(struct: str, open_brace: int) -> list:
+    """[(cond_text, body_start, body_end)] — `when` 块的顶层臂。
+
+    [batch6-t01] 共享 `when_branches` 按顶层**换行**切臂，`LABEL ->\n body`
+    形态会拿到空体（batch5-t06 报告 R6 已登记）。这里按顶层 `->` 切，臂体从
+    箭头后到**下一个臂的条件行首**，多行臂也完整。仅用于本门 PG3 的"拒绝被
+    消费"判据。
+    """
+    close = match_bracket(struct, open_brace)
+    if close < 0:
+        return []
+    inner_start, inner_end = open_brace + 1, close
+    arrows, depth, i = [], 0, inner_start
+    while i < inner_end:
+        ch = struct[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and struct.startswith("->", i):
+            arrows.append(i)
+            i += 2
+            continue
+        i += 1
+    arms = []
+    for idx, arrow in enumerate(arrows):
+        cond_start = struct.rfind("\n", inner_start, arrow) + 1
+        if cond_start < inner_start:
+            cond_start = inner_start
+        body_start = arrow + 2
+        if idx + 1 < len(arrows):
+            nxt = arrows[idx + 1]
+            body_end = struct.rfind("\n", body_start, nxt) + 1
+            if body_end <= body_start:
+                body_end = nxt
+        else:
+            body_end = inner_end
+        arms.append((struct[cond_start:arrow].strip(), body_start, body_end))
+    return arms
+
+def _resolve_consumption(struct: str, pos: int):
+    """承载 `pos` 处 resolve 调用的 `when`，其 `Invalid` 臂怎么消费拒绝。
+
+    'exit' = 在可达路径上 return/throw（用法错误）· 'face' = 构造拒绝值交回
+    调用方 · None = 没消费（含"臂体被恒假守卫包住"与"根本没有 Invalid 臂"）。
+    """
+    for m in re.finditer(r"\bwhen\s*\(", struct):
+        p_close = match_bracket(struct, m.end() - 1)
+        if p_close < 0 or not (m.end() <= pos <= p_close):
+            continue
+        k = p_close + 1
+        while k < len(struct) and struct[k] in " \t\r\n":
+            k += 1
+        if k >= len(struct) or struct[k] != "{":
+            return None
+        kind = None
+        for cond, bs, be in _when_arms(struct, k):
+            if not re.search(r"\bInvalid\b", cond):
+                continue
+            arm = struct[bs:be]
+            if any(path_feasible(struct, bs + r.start())
+                   for r in re.finditer(r"\b(?:return|throw)\b(?!@)", arm)):
+                return "exit"
+            if re.search(r"\b(?:Invalid|Refused)\s*\(", arm):
+                kind = "face"
+        return kind
+    return None
+
+def _invalid_arms(struct: str) -> list:
+    """Every `when` arm whose condition names `Invalid` — the refusal consumers."""
+    out = []
+    for m in re.finditer(r"\bwhen\s*(\(|\{)", struct):
+        if m.group(1) == "(":
+            p_close = match_bracket(struct, m.end() - 1)
+            if p_close < 0:
+                continue
+            k = p_close + 1
+            while k < len(struct) and struct[k] in " \t\r\n":
+                k += 1
+        else:
+            k = m.end() - 1
+        if k >= len(struct) or struct[k] != "{":
+            continue
+        for cond, bs, be in _when_arms(struct, k):
+            if re.search(r"\bInvalid\b", cond):
+                out.append((cond, bs, be))
+    return out
+
+@_fail_closed
 def check_offload_page_size(sources: dict) -> list:
     """PG0-PG5 — see the block comment above. `sources` maps file name → text."""
     findings = []
+    # [batch6-t01] 双视图：`codes`（字面量通道）读 handlerFile / names / SURFACES
+    # 这类字面量；`structs`（结构通道）做完括号与分支判定。
     codes = {name: code_only(src) for name, src in sources.items()}
+    structs = {name: code_view(src) for name, src in sources.items()}
 
     # ── PG0: derive the resolver and its scope, fail-closed ────────────────
     resolver_files = [
@@ -1718,6 +1966,7 @@ def check_offload_page_size(sources: dict) -> list:
         return findings
     resolver_name = resolver_files[0]
     rcode = codes[resolver_name]
+    rstruct = structs[resolver_name]
     raw_resolver = sources[resolver_name]
 
     bodies = [
@@ -1754,7 +2003,7 @@ def check_offload_page_size(sources: dict) -> list:
         if not added:
             break
 
-    surfaces = _page_declared_surfaces(rcode)
+    surfaces = _page_declared_surfaces(rstruct, rcode)
     if not surfaces:
         findings.append(
             ("PG0", "no declared surfaces",
@@ -1844,6 +2093,25 @@ def check_offload_page_size(sources: dict) -> list:
                 ("PG3", "default answered first",
                  "every refusal must be reached BEFORE the default answer"))
 
+    # [batch6-t01] 新增臂：拒绝**被消费**。旧 PG3 只问"构造过 Invalid 吗 / 默认
+    # 答案是不是最后一个"，于是
+    #     is Invalid -> if (false) return parsed        ← 拒绝照旧落空
+    # 全绿：`return` 在源码里存在，但被一个恒假守卫包住（编译器折叠）。
+    # 判据推到"位置 + 可达性"：每个提到 `Invalid` 的 when 臂，体内必须有一条
+    # **退出外层函数**的 `return`/`throw`，且该语句位于可达路径上。
+    for cond, arm_start, arm_end in _invalid_arms(rstruct):
+        live = False
+        for m in re.finditer(r"\b(?:return|throw)\b(?!@)", rstruct[arm_start:arm_end]):
+            if path_feasible(rstruct, arm_start + m.start()):
+                live = True
+                break
+        if not live:
+            findings.append(
+                ("PG3", "the refused page size is not acted on",
+                 "arm `%s` must terminate on a live path (a `return parsed` "
+                 "behind `if (false)` is a dead guard): the refusal would fall "
+                 "through to the default page" % _squash(cond)))
+
     variants = re.findall(
         r"(?:data\s+)?class\s+(\w+)\s*\([^)]*\)\s*:\s*" + PAGE_OUTCOME + r"\(",
         rcode,
@@ -1887,30 +2155,60 @@ def check_offload_page_size(sources: dict) -> list:
                 ("PG1", f"`{handler_file}` does not resolve its page size ({label})",
                  f"a registered surface must route through {call}…) — otherwise "
                  "it keeps whatever it does today"))
-        for pattern, what in _PAGE_RAW_READS:
-            m = pattern.search(hcode)
-            if m:
-                findings.append(
-                    ("PG2", f"`{handler_file}` reads its page size raw: {what}"
-                            f"{_page_line(raw_handler, m.group(0))}",
-                     "the whitelist is the EMPTY SET: a registered handler may "
-                     "not read, default or clamp a page size itself"))
+        page_names = set()
+        for surface in surfaces:
+            if surface["file"] == handler_file:
+                page_names |= surface["names"]
+        hits = _page_raw_reads(codes[handler_file], structs[handler_file],
+                               raw_handler, page_names)
+        for snippet, what in hits:
+            findings.append(
+                ("PG2", f"`{handler_file}` reads its page size raw: {what}"
+                        f"{_page_line(raw_handler, snippet)}",
+                 "the whitelist is the EMPTY SET: a registered handler may "
+                 "not read, default or clamp a page size itself"))
         # PG4 — a refusal must become a usage error, never a default page.
+        #
+        # [batch6-t01] 判据从"函数体里出现过 exit 2 / 构造过 Invalid"推到
+        # **"这个 resolve 调用的拒绝被它自己消费"**：旧形态是 `re.search` 一次
+        # 函数体，于是同一个函数里任何一处无关的 `NativeOffloadResult(2, …)`
+        # （比如 calendar doList 的日期区间拒绝）就能替分页拒绝盖章。见证形态：
+        #     val _unusedSize = when (val size = resolve(…)) {
+        #         is Invalid -> if (false) return NativeOffloadResult(2, …) else 50
+        #     }
+        #     val limit = args.getInt(limitKey) ?: 50
+        # 现在逐个调用点判：承载它的 `when` 里 `Invalid` 臂必须
+        #   (a) 在**可达路径**上退出（return/throw），或
+        #   (b) 把拒绝**交回调用方**（构造 Invalid/Refused 值 ⇒ face，由其调用
+        #       方负责 exit 2）。两者都不成立 = 这次解析的拒绝落空。
         producers = _exit2_producers(hcode)
         exit2 = "|".join([r"NativeOffloadResult\(\s*2"]
                          + [re.escape(p) + r"\s*\(" for p in sorted(producers)])
         refusal_re = r"(?:" + exit2 + r"|throw\s+InvalidPageSize\s*\()"
         covered = 0
         faces = []
-        for fn, _p, _r, fn_body in _fn_bodies_with_sigs(hcode):
-            if not fn_body or call not in fn_body:
+        hstruct = structs[handler_file]
+        for fn, b_start, b_end in _fn_spans(hstruct):
+            fn_body = hstruct[b_start:b_end]
+            if call not in fn_body:
                 continue
             covered += fn_body.count(call)
-            if re.search(refusal_re, fn_body):
-                continue
-            # A function that hands the outcome back is a 'face': its CALLERS
-            # must answer the refusal (this is the contacts delegation shape).
-            faces.append(fn)
+            for cm in re.finditer(re.escape(call), fn_body):
+                kind = _resolve_consumption(hstruct, b_start + cm.start())
+                if kind == "exit":
+                    continue
+                if kind == "face":
+                    if fn not in faces:
+                        faces.append(fn)
+                    continue
+                findings.append(
+                    ("PG4", f"`{fn}` does not act on the page-size refusal in "
+                            f"{handler_file}",
+                     "the resolve call must be consumed by an `Invalid` arm that "
+                     "either exits with a usage error on a live path or hands the "
+                     "refusal back to its caller — a refusal behind `if (false)` "
+                     "or an unrelated exit 2 elsewhere in the function is not an "
+                     "answer"))
         if covered != hcode.count(call):
             findings.append(
                 ("PG4", f"`{handler_file}` resolves a page size outside a function",
@@ -1918,9 +2216,10 @@ def check_offload_page_size(sources: dict) -> list:
                  "is judgeable"))
         for face in faces:
             callers = [
-                (fn, fn_body) for fn, _p, _r, fn_body in _fn_bodies_with_sigs(hcode)
-                if fn_body and fn != face
-                and re.search(re.escape(face) + r"\s*\(", fn_body)
+                (fn, hstruct[b_start:b_end])
+                for fn, b_start, b_end in _fn_spans(hstruct)
+                if fn != face
+                and re.search(r"(?<![\w.])" + re.escape(face) + r"\s*\(", hstruct[b_start:b_end])
             ]
             if not callers:
                 findings.append(
@@ -1937,7 +2236,7 @@ def check_offload_page_size(sources: dict) -> list:
 
 # ── selftest: every rule must have a tooth, and the green arm must pass ──────
 
-GREEN_CONTACTS = """
+GREEN_CONTACTS = r"""
     override fun handle(request: NativeOffloadRequest): NativeOffloadResult {
         val rawArgs = request.argv.drop(1)
         val cmd = parseContactsCommand(rawArgs)
@@ -1983,6 +2282,7 @@ GREEN_CONTACTS = """
             return PageSize.Ok(default)
         }
     }
+
 """
 
 # [dv29-A3 A-05] green fixtures for the SHARED page-size contract (PG0-PG5).
@@ -2959,6 +3259,7 @@ def _pcs_delegates(base: str, code: str, table: dict) -> list:
     return sorted(set(hits))
 
 
+@_fail_closed
 def check_payload_delegates(sources: dict, payload_files, exemptions=None) -> list:
     """Z1–Z4. `sources` maps basename → file text (both offload dirs)."""
     exemptions = PAYLOAD_DELEGATE_EXEMPT if exemptions is None else exemptions
@@ -3323,6 +3624,7 @@ def _help_exit_findings(file: str, guard: str, expr: str, consts: dict) -> list:
 HELP_EXIT_MIN_SITES = 15
 
 
+@_fail_closed
 def check_help_exit(sources: dict, min_sites: int = HELP_EXIT_MIN_SITES) -> list:
     """[dv27-A5 A-07] H1–H3 above, over every offload source file.
 
@@ -3914,10 +4216,13 @@ def selftest() -> int:
          GREEN_PAYLOAD_PHOTOS.replace("formatBody(nearPhotos(1.0, 2.0, 1.0, 20), args)",
                                       "formatBody(" + '"' * 3 + "No photos found within 1km." + '"' * 3 + ", args)"),
          GREEN_PAYLOAD_CONTACTS, {"N1"}),
+        # [batch6-t01] 共享词法器把"未闭合字面量"判在**整份源**上：一条 LEX
+        # 违规（fail-closed），而不是旧实现里"这一处跳过、其余照判"。语义更强：
+        # 读不出结构的源码不是合格源码。
         ("an unterminated literal fails closed",
          GREEN_PAYLOAD_PHOTOS.replace("formatBody(nearPhotos(1.0, 2.0, 1.0, 20), args)",
                                       'formatBody("No photos found within 1km.\n, args)'),
-         GREEN_PAYLOAD_CONTACTS, {"N1"}),
+         GREEN_PAYLOAD_CONTACTS, {"LEX"}),
         ("contacts no-match reverts to prose",
          GREEN_PAYLOAD_PHOTOS,
          GREEN_PAYLOAD_CONTACTS.replace("formatBody(searchArr.toString(2), parsedArgs)",
@@ -4501,6 +4806,106 @@ def selftest() -> int:
               f"{describe(clean_help)}")
         failures += 1
 
+    # ── [batch6-t01] 第六批 6 条见证的牙 ─────────────────────────────────────
+    # 每条见证都是"判据锚某物存在，缺陷动的是这个存在物的效果"。这里把每条
+    # 固化成一条**等价拼写**的臂：门必须在自己该红的那条判据上红（期望集合手写
+    # 自规则表，绝不由运行结果反推）。
+    PROSE_BINDING = (
+        'val body = JSONObject().put("error", "not_found").put("id", id)\n'
+        '                    .put("message", "No contact with id=$id.")\n'
+        '                    .toString()'
+    )
+    b6 = 0
+    b6_cases = [
+        ("batch6: fastio budget guard folds false via `(1 == 2)`",
+         lambda: {r for r, _k, _d in check_fastio_search(
+             GREEN_FASTIO_SEARCH.replace(
+                 "if (limit <= 0) {", "if (limit <= 0 && (1 == 2)) {"))},
+         {"S1"}),
+        ("batch6: fastio budget guard folds false via `!true`",
+         lambda: {r for r, _k, _d in check_fastio_search(
+             GREEN_FASTIO_SEARCH.replace(
+                 "if (limit <= 0) {", "if (limit <= 0 && !true) {"))},
+         {"S1"}),
+        ("batch6: the send success-set decision folds false via `(0 == 1)`",
+         lambda: {r for r, _k, _d in check_sessions_send_status(
+             GREEN_SESSIONS_SEND.replace(
+                 "if (!sendSucceeded(status)) {",
+                 "if ((0 == 1) && !sendSucceeded(status)) {"))},
+         {"S2"}),
+        ("batch6: clipboard's SDK-Q predicate is negated in place",
+         lambda: {r for r, _k, _d in check_clipboard_clear(
+             GREEN_CLIPBOARD_CLEAR.replace(
+                 "clearAction(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)",
+                 "clearAction(!(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q))"))},
+         {"L2"}),
+        ("batch6: clipboard's SDK-Q predicate is bound to an always-false local",
+         lambda: {r for r, _k, _d in check_clipboard_clear(
+             GREEN_CLIPBOARD_CLEAR.replace(
+                 "clearAction(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)",
+                 "clearAction(isQ)").replace(
+                 "    private fun doClear(cm: ClipboardManager, args: OffloadArgs): NativeOffloadResult {\n",
+                 "    private fun doClear(cm: ClipboardManager, args: OffloadArgs): NativeOffloadResult {\n"
+                 "        val isQ = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && false\n"))},
+         {"L2"}),
+        ("batch6: the payload literal is bound to a local first (N1 binding)",
+         lambda: {r for r, _k, _d in check_offload_json(
+             ("ContactsOffloadHandler.kt",
+              GREEN_PAYLOAD_CONTACTS.replace(
+                  PROSE_BINDING,
+                  'val body = "android-contacts: no contact with id=$id"')))},
+         {"N1"}),
+        ("batch6: the page-size `Invalid` arm folds its refusal behind `if (false)`",
+         lambda: {r for r, _k, _d in check_offload_page_size(_page_mut(
+             ("OffloadPageSize.kt", "is Invalid -> return parsed",
+              "is Invalid -> if (false) return parsed")))},
+         {"PG3"}),
+        ("batch6: the page-size key sits in another argument position",
+         lambda: {r for r, _k, _d in check_offload_page_size(_page_mut(
+             ("CalendarOffloadHandler.kt",
+              'return NativeOffloadResult(0, "$limit")',
+              'val spare = args.getInt("day", "limit")\n'
+              '        return NativeOffloadResult(0, "$limit")')))},
+         {"PG2"}),
+        ("batch6: the page-size key is bound to a local val first",
+         lambda: {r for r, _k, _d in check_offload_page_size(_page_mut(
+             ("CalendarOffloadHandler.kt",
+              'return NativeOffloadResult(0, "$limit")',
+              'val limitKey = "limit"\n'
+              '        val spare = args.getInt(limitKey)\n'
+              '        return NativeOffloadResult(0, "$limit")')))},
+         {"PG2"}),
+        ("batch6: the page-size refusal dies while an unrelated exit 2 stays in the function",
+         lambda: {r for r, _k, _d in check_offload_page_size(_page_mut(
+             ("CalendarOffloadHandler.kt",
+              '            is PageSizeOutcome.Invalid ->\n'
+              '                return NativeOffloadResult(2, "android-calendar list: ${size.message}")',
+              '            is PageSizeOutcome.Invalid ->\n'
+              '                if (false) return NativeOffloadResult(2, "android-calendar list: ${size.message}") else 50')))},
+         {"PG4"}),
+    ]
+    for label, run, want in b6_cases:
+        got = run()
+        if got != want:
+            print(f"SELFTEST-FAIL: {label}: got {sorted(got)}, want {sorted(want)}")
+            failures += 1
+        else:
+            b6 += 1
+    # 精度臂：绑到变量但从没进 formatBody 的散文不是载荷（N1 只判"被消费的值"）
+    if {r for r, _k, _d in check_offload_json(
+            ("ContactsOffloadHandler.kt", GREEN_PAYLOAD_CONTACTS.replace(
+                "    private fun doStrict(",
+                '    private fun noteFile(): String {\n'
+                '        val note = "no contacts matched"\n'
+                '        return JSONObject().put("note", note).toString()\n'
+                '    }\n\n'
+                "    private fun doStrict(")))}:
+        print("SELFTEST-FAIL: batch6: a prose local that never reaches formatBody tripped N1")
+        failures += 1
+    else:
+        b6 += 1
+    print(f"BATCH6_T01_ARMS={b6} checks passed")
+
     if clean or clean_flags or clean_debug or clean_sessions or clean_bindings \
             or clean_payload or clean_album or clean_search or clean_clipboard \
             or clean_send_status or clean_provenance or clean_help:
@@ -4557,39 +4962,45 @@ def main(argv):
             print(f"GATE-FAIL: payload source not found: {rel} under {root}")
             return 1
         payload_files.append((rel, (root / rel).read_text(encoding="utf-8")))
-    findings = check_text(contacts_path.read_text(encoding="utf-8"),
-                          config_path.read_text(encoding="utf-8"),
-                          browseruse_path.read_text(encoding="utf-8"),
-                          fastio_path.read_text(encoding="utf-8"))
-    findings += check_flag_set(output_path.read_text(encoding="utf-8"),
-                               speak_path.read_text(encoding="utf-8"))
-    findings += check_debug(debug_path.read_text(encoding="utf-8"))
-    findings += check_sessions(sessions_path.read_text(encoding="utf-8"))
-    findings += check_sessions_send_status(sessions_path.read_text(encoding="utf-8"))
-    findings += check_args(args_path.read_text(encoding="utf-8"))
-    findings += check_photos_album((root / PHOTOS).read_text(encoding="utf-8"))
-    findings += check_offload_cli_bindings(contacts_path.read_text(encoding="utf-8"),
-                                          notification_path.read_text(encoding="utf-8"),
-                                          fastio_path.read_text(encoding="utf-8"))
-    # [dv29-A3 A-05] the page-size contract runs over the whole offload dir —
-    # its scope is the registry inside OffloadPageSize.kt, so it needs every
-    # source (see check_offload_page_size below).
-    findings += check_offload_json(*payload_files)
-    findings += check_clipboard_clear((root / CLIPBOARD).read_text(encoding="utf-8"))
-    findings += check_fastio_search(search_path.read_text(encoding="utf-8"))
-    # [dv25-A4 A-07] payload provenance ACROSS files (see check_payload_delegates)
-    sources = {}
-    for _dir in OFFLOAD_SOURCE_DIRS:
-        _p = root / _dir
-        if not _p.is_dir():
-            print(f"GATE-FAIL: offload source dir not found: {_dir} under {root}")
-            return 1
-        for _f in sorted(_p.glob("*.kt")):
-            sources[_f.name] = _f.read_text(encoding="utf-8")
-    findings += check_offload_page_size(sources)
-    findings += check_payload_delegates(sources, PAYLOAD_FILES)
-    # [dv27-A5 A-07] the help / bare-invocation exit code, derived over the family
-    findings += check_help_exit(sources)
+    # [batch6-t01] 共享词法器解析失败一律 fail-closed（KotlinLexError → 违规），
+    # 不许回退成原文扫描：看不懂的源码不是合格的源码。
+    try:
+        findings = check_text(contacts_path.read_text(encoding="utf-8"),
+                              config_path.read_text(encoding="utf-8"),
+                              browseruse_path.read_text(encoding="utf-8"),
+                              fastio_path.read_text(encoding="utf-8"))
+        findings += check_flag_set(output_path.read_text(encoding="utf-8"),
+                                   speak_path.read_text(encoding="utf-8"))
+        findings += check_debug(debug_path.read_text(encoding="utf-8"))
+        findings += check_sessions(sessions_path.read_text(encoding="utf-8"))
+        findings += check_sessions_send_status(sessions_path.read_text(encoding="utf-8"))
+        findings += check_args(args_path.read_text(encoding="utf-8"))
+        findings += check_photos_album((root / PHOTOS).read_text(encoding="utf-8"))
+        findings += check_offload_cli_bindings(contacts_path.read_text(encoding="utf-8"),
+                                              notification_path.read_text(encoding="utf-8"),
+                                              fastio_path.read_text(encoding="utf-8"))
+        # [dv29-A3 A-05] the page-size contract runs over the whole offload dir —
+        # its scope is the registry inside OffloadPageSize.kt, so it needs every
+        # source (see check_offload_page_size below).
+        findings += check_offload_json(*payload_files)
+        findings += check_clipboard_clear((root / CLIPBOARD).read_text(encoding="utf-8"))
+        findings += check_fastio_search(search_path.read_text(encoding="utf-8"))
+        # [dv25-A4 A-07] payload provenance ACROSS files (see check_payload_delegates)
+        sources = {}
+        for _dir in OFFLOAD_SOURCE_DIRS:
+            _p = root / _dir
+            if not _p.is_dir():
+                print(f"GATE-FAIL: offload source dir not found: {_dir} under {root}")
+                return 1
+            for _f in sorted(_p.glob("*.kt")):
+                sources[_f.name] = _f.read_text(encoding="utf-8")
+        findings += check_offload_page_size(sources)
+        findings += check_payload_delegates(sources, PAYLOAD_FILES)
+        # [dv27-A5 A-07] the help / bare-invocation exit code, derived over the family
+        findings += check_help_exit(sources)
+    except KotlinLexError as exc:
+        print(f"GATE-FAIL: the Kotlin source did not lex ({exc}) — fail-closed")
+        return 1
     if findings:
         print("offload_cli_args_check: FAIL")
         print(describe(findings))
@@ -4614,7 +5025,9 @@ def main(argv):
           "four-guard shape and keeps the pre-Q empty-string fallback, "
           "every help-guarded early exit answers 0 for --help while a bare invocation "
           "still answers 2 (H1/H2 derived over the family, H3 fail-closed on the "
-          "derivation)")
+          "derivation), batch6 witnesses folded (dead conditions const-folded, "
+          "the SDK-Q decision value-checked, payload bindings resolved, page "
+          "refusals live on their own call)")
     return 0
 
 

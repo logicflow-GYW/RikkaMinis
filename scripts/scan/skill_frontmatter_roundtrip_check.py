@@ -46,6 +46,28 @@ Exit:  0 = clean, 1 = violation(s), 2 = usage
 import os
 import re
 import sys
+from pathlib import Path
+
+# [batch6 t12] Structure comes from the shared lexer/AST/value-flow primitives:
+# the gate-local `strip_comments` handled `"` but not `'`, so a `'"'` char
+# literal followed by `// "` opened a fake string that swallowed the `//` and
+# resurrected the commented-out call in the scanned text.
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments  # noqa: E402
+from _kotlin_ast import (  # noqa: E402
+    const_bool,
+    const_value,
+    match_bracket,
+    strip_parens,
+)
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    contains_ident,
+    path_feasible,
+)
 
 REPO_REL = "src/android/app/src/main/java/com/rikkaminis/app"
 SR_REL = REPO_REL + "/data/repository/SkillRepository.kt"
@@ -86,82 +108,6 @@ SB_IMPORT_CALL = "skillRepository.importFromGitHub("
 SB_NULL_GUARD = "if (skill != null)"
 SB_MSG_UPDATED = "R.string.skills_browser_success_updated"
 SB_MSG_IMPORTED = "R.string.skills_browser_success_imported"
-
-
-def strip_comments(text):
-    """Remove // and /* */ comments; strings are kept (length-preserving)."""
-    out = []
-    i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        if c == '"':
-            if text.startswith('"""', i):
-                j = text.find('"""', i + 3)
-                j = n if j < 0 else j + 3
-            else:
-                j = i + 1
-                while j < n:
-                    if text[j] == "\\":
-                        j += 2
-                        continue
-                    if text[j] in ('"', "\n"):
-                        j += 1
-                        break
-                    j += 1
-            out.append(text[i:j])
-            i = j
-        elif text.startswith("//", i):
-            j = text.find("\n", i)
-            i = n if j < 0 else j
-        elif text.startswith("/*", i):
-            j = text.find("*/", i)
-            i = n if j < 0 else j + 2
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
-
-
-def mask_strings(text):
-    """Replace string-literal CONTENTS with 'x' (length-preserving) so brace
-    matching survives `${...}` templates."""
-    out = []
-    i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        if c == '"':
-            if text.startswith('"""', i):
-                j = text.find('"""', i + 3)
-                j = n if j < 0 else j + 3
-                out.append('x' * (j - i))
-            else:
-                j = i + 1
-                while j < n:
-                    if text[j] == "\\":
-                        j += 2
-                        continue
-                    if text[j] in ('"', "\n"):
-                        j += 1
-                        break
-                    j += 1
-                out.append('x' * (j - i))
-            i = j
-        elif c == "'":
-            j = i + 1
-            while j < n:
-                if text[j] == "\\":
-                    j += 2
-                    continue
-                if text[j] in ("'", "\n"):
-                    j += 1
-                    break
-                j += 1
-            out.append('x' * (j - i))
-            i = j
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
 
 
 def function_body(text_nc, text_masked, signature):
@@ -315,6 +261,119 @@ def param_names(text_masked, sig_idx):
     return names
 
 
+_LAZY_WRAPPER_RE = re.compile(r"\.\s*(let|run|takeIf|takeUnless)\s*\{")
+
+
+def _lambda_tail(body):
+    """Last statement of a lambda body (`{ a; null }` -> `null`)."""
+    parts = [p.strip() for p in re.split(r"[;\n]", body) if p.strip()]
+    return parts[-1] if parts else ""
+
+
+def provably_null(expr):
+    """Why the expression can never be non-null, or None when it might be.
+
+    The pre-fix arm only asked whether the fresh-block parameter APPEARED on
+    the left of the top-level `?:`. `newFrontmatter?.takeIf { false } ?: …`
+    answers that question and is unconditionally null: the disk copy wins for
+    every skill that exists on disk — ISSUE-05 verbatim, one spelling later.
+    Same for `.let { null }` on the value handed to `update(frontmatter = …)`.
+
+    Deliberately narrow: `ifBlank { null }` / `getOrNull()` are CONDITIONAL
+    (they only null a blank value) and must not be judged null.
+    """
+    e = strip_parens(expr.strip())
+    if not e:
+        return None
+    const = const_value(e)
+    if const is not None and const[0] == "null":
+        return "literal null"
+    for m in _LAZY_WRAPPER_RE.finditer(e):
+        open_idx = m.end() - 1
+        close = match_bracket(e, open_idx)
+        if close < 0:
+            continue
+        body = e[open_idx + 1:close]
+        name = m.group(1)
+        if name in ("let", "run"):
+            if provably_null(_lambda_tail(body)) == "literal null":
+                return "`.%s { null }`" % name
+            continue
+        cond = body if name == "takeIf" else "!(" + body + ")"
+        folded = const_bool(strip_parens(cond))
+        if name == "takeIf" and folded is False:
+            return "`.takeIf { %s }` can never pass" % " ".join(body.split())[:40]
+        if name == "takeUnless" and folded is True:
+            return "`.takeUnless { %s }` always rejects" % " ".join(body.split())[:40]
+    return None
+
+
+def call_arg_value(text, call_at, arg_name):
+    """The expression bound to the named argument `arg_name =` of the call that
+    starts at `call_at`, or None when the call/argument cannot be read."""
+    if call_at < 0:
+        return None
+    op = text.find("(", call_at)
+    if op < 0:
+        return None
+    close = match_bracket(text, op)
+    if close < 0:
+        return None
+    inner = text[op + 1:close]
+    depth = 0
+    for part in split_top_level(inner):
+        m = re.match(r"\s*" + re.escape(arg_name) + r"\s*=(?!=)\s*", part)
+        if m:
+            return part[m.end():]
+    return None
+
+
+def provably_null_arg_problems(text, call_at, arg_name, label):
+    """The named argument is spelled as the call site expects but evaluates to
+    null — the callee's fallback then re-reads the on-disk block."""
+    val = call_arg_value(text, call_at, arg_name)
+    if val is None:
+        return []
+    why = provably_null(val)
+    if not why:
+        return []
+    return ["%s: the `%s =` argument is provably null (`%s` — %s) — the callee "
+            "re-seeds from the on-disk block, so the incoming subagent / max_turns "
+            "/ allowed_tools keys are shadowed exactly as before"
+            % (label, arg_name, " ".join(val.split())[:70], why)]
+
+
+def check_merge_base_flow(sr_nc, sr_masked):
+    """arm2 (dataflow): the resolved base must REACH mergeFrontmatter.
+
+    Pre-fix criterion: `resolveMergeBase(skill.frontmatter, existing)` appears.
+    Keeping the call and passing `existing = existing` to the merge satisfies
+    that substring while the helper's return value is silently discarded —
+    every landing of an existing skill merges against the disk copy again.
+    """
+    body = function_body(sr_nc, sr_masked, "fun writeSkillMd(")
+    if body is None:
+        return []  # the presence arm reports the missing function
+    m = re.search(r"\bval\s+([A-Za-z_]\w*)\s*=\s*resolveMergeBase\s*\(", body)
+    if m is None:
+        return []  # arm2's substring criterion owns that shape
+    var = m.group(1)
+    call_at = body.find("mergeFrontmatter(", m.end())
+    if call_at < 0:
+        return ["arm2 writeSkillMd no longer calls mergeFrontmatter(…) after resolving "
+                "the merge base (fail-closed: re-point this arm)"]
+    arg = call_arg_value(body, call_at, "existing")
+    if arg is None:
+        return ["arm2 writeSkillMd: mergeFrontmatter(…) has no readable `existing =` "
+                "argument (fail-closed)"]
+    if not contains_ident(arg, var) and not arg.strip().startswith("resolveMergeBase("):
+        return ["arm2 writeSkillMd computes `%s = resolveMergeBase(…)` and then hands "
+                "mergeFrontmatter `existing = %s` — the memory-first base is discarded, "
+                "so the disk copy still shadows the caller's block"
+                % (var, " ".join(arg.split())[:60])]
+    return []
+
+
 def check_resolve_polarity(sr_nc, sr_masked):
     """arm1 (dataflow): resolveMergeBase's BODY must read the fresh block first.
 
@@ -377,6 +436,14 @@ def check_resolve_polarity(sr_nc, sr_masked):
     left = expr[:elvis]
     right = expr[elvis + 2:]
     out = []
+    why = provably_null(left)
+    if why:
+        out.append(
+            "arm1 resolveMergeBase: the guarded (left) operand `%s` is PROVABLY NULL "
+            "(%s) — the fresh block is read and then always dropped, so every existing "
+            "skill keeps its on-disk subagent / max_turns / allowed_tools block "
+            "(body reads: %s)" % (" ".join(left.split())[:70], why,
+                                  " ".join(expr.split())[:120]))
     if names[0] not in left:
         out.append(
             "arm1 resolveMergeBase does not GUARD the fresh block — `%s` (the first "
@@ -446,12 +513,30 @@ def check_merge_seed(sr_nc, sr_masked):
             "arm7 mergeFrontmatter seeds `%s` with a delimiter literal (%s) — the emitted "
             "document opens with a doubled `---`, so the written SKILL.md no longer parses "
             "as frontmatter" % (var, " ".join(init.split())[:80]))
-    pre = body[:m.start()]
-    if re.search(r"\b%s\s*\+=\s*[^\n]*---" % re.escape(var), pre) or \
-            re.search(r"\b%s\s*\.\s*add(?:All)?\s*\([^)]*---" % re.escape(var), pre):
+    # [batch6 t12] "starts empty" is about the accumulator's STATE when the walk
+    # begins, not about the literal spelling of the initializer: `fm.add(src[0])`
+    # pushes the opening delimiter (`raw.startsWith("---")` already guarantees
+    # `src[0] == "---"`) without writing the three characters anywhere the old
+    # regexes looked.
+    flat_init = " ".join(init.split())
+    if not (EMPTY_COLL_RE.match(flat_init) or re.match(
+            r"^(?:ArrayList|LinkedHashSet|LinkedList|MutableList)\s*"
+            r"(?:<[^()]*>)?\s*\(\s*\)$", flat_init)):
         out.append(
-            "arm7 mergeFrontmatter adds a delimiter literal to `%s` before the walk — the "
-            "opening `---` would be emitted twice" % var)
+            "arm7 mergeFrontmatter: the accumulator `%s` is seeded with `%s` — the walk "
+            "has to fill a list that starts EMPTY, otherwise the emitted document opens "
+            "with a doubled `---` and the written SKILL.md stops parsing as frontmatter"
+            % (var, flat_init[:80]))
+    pre_start = d.end()
+    pre = body[pre_start:m.start()]
+    mut = re.search(r"(?<![\w])%s\s*(?:\.\s*(?:add|addAll|set)\s*\(|\+=|\bset\b)"
+                    % re.escape(var), pre)
+    if mut is not None and path_feasible(body_masked, pre_start + mut.start()):
+        out.append(
+            "arm7 mergeFrontmatter mutates `%s` before the walk (`%s`) — the walk must be "
+            "the only producer of the block's lines, so anything added up front is emitted "
+            "twice (the opening `---` included)"
+            % (var, " ".join(pre[mut.start():mut.start() + 40].split())))
     if '---' not in body:
         out.append("arm7 mergeFrontmatter never emits an opening `---` — the merged document "
                    "has no frontmatter delimiter at all")
@@ -464,6 +549,63 @@ EMPTY_COLL_RE = re.compile(
     r"sequenceOf|mapOf|mutableMapOf|arrayListOf)\s*(?:<[^()]*>)?\s*\(\s*\)$")
 LITERAL_COLL_RE = re.compile(
     r"^(?:listOf|mutableListOf|setOf|mutableSetOf|arrayListOf|sequenceOf)\s*(?:<[^()]*>)?\s*\(")
+
+
+_EMPTY_DERIVATION_RE = re.compile(
+    r"\.\s*(filter|filterNot|takeIf|takeUnless|takeWhile|dropWhile|take|takeLast|drop|slice)"
+    r"\s*([{(])")
+
+
+def provably_empty_collection(expr):
+    """Why the expression yields an empty collection, or None when it might not.
+
+    The pre-fix criterion rejected empty/literal CONSTRUCTORS (`emptyList()`,
+    `listOf()`). `skillRepository.skills.value.filter { false }.map { … }`
+    starts from the live snapshot and derives an empty list from it — the
+    resolver then never matches, so it is `emptyList()` with a live-looking
+    spelling (and `.take(0)` / `.drop(Int.MAX_VALUE)` are two more).
+    """
+    e = " ".join(expr.split())
+    if not e:
+        return "no candidate set"
+    if e == "null":
+        return "literal null"
+    if EMPTY_COLL_RE.match(strip_parens(e)):
+        return "an empty literal"
+    if re.search(r"\?:\s*(?:emptyList|emptySequence|emptyArray|listOf|mutableListOf|"
+                 r"arrayListOf)\s*\(", e):
+        return "an empty-literal fallback"
+    for m in _EMPTY_DERIVATION_RE.finditer(e):
+        name, opener = m.group(1), m.group(2)
+        if opener == "(":
+            args = call_args(e, m.end() - 1)
+            if not args:
+                continue
+            first = const_value(strip_parens(e[args[0][0]:args[0][1]]))
+            if first is None or first[0] != "num":
+                continue
+            n = first[1]
+            if name in ("take", "takeLast") and n == 0:
+                return "`.%s(%d)`" % (name, n)
+            if name == "drop" and n >= 2 ** 31 - 1:
+                return "`.drop(%d)`" % n
+            continue
+        close = match_bracket(e, m.end() - 1)
+        if close < 0:
+            continue
+        body = e[m.end():close]
+        cond = body if name != "filterNot" else "!(" + body + ")"
+        folded = const_bool(strip_parens(cond))
+        short = " ".join(body.split())[:30]
+        if name in ("filter", "takeWhile") and folded is False:
+            return "`.%s { %s }` can never pass" % (name, short)
+        if name == "filterNot" and folded is True:
+            return "`.filterNot { %s }` drops every candidate" % short
+        if name == "takeIf" and folded is False:
+            return "`.takeIf { %s }` can never pass" % short
+        if name == "takeUnless" and folded is True:
+            return "`.takeUnless { %s }` always rejects" % short
+    return None
 
 
 def resolve_target_first_arg_problems(sb_nc):
@@ -493,7 +635,13 @@ def resolve_target_first_arg_problems(sb_nc):
         args = split_top_level(inner)
         first = args[0] if args else ""
         flat = re.sub(r"\s+", " ", first).strip()
-        if not flat:
+        why = provably_empty_collection(flat)
+        if why:
+            out.append(
+                "arm10 resolveUpdateTargetId is fed a CONSTANT candidate set (`%s` — %s) — "
+                "the resolver can never match an installed skill, so the update path is "
+                "dead code and every refresh duplicates the skill" % (flat[:70], why))
+        elif not flat:
             out.append("arm10 resolveUpdateTargetId is called with no candidate set — the "
                        "dedup can never resolve an existing skill, so every update "
                        "duplicates it")
@@ -511,10 +659,20 @@ def resolve_target_first_arg_problems(sb_nc):
 
 
 def run_checks_text(sr_text, sm_text, sb_text=None):
-    sr_nc = strip_comments(sr_text)
-    sm_nc = strip_comments(sm_text)
-    sr_masked = mask_strings(sr_nc)
-    sm_masked = mask_strings(sm_nc)
+    # `*_nc` = comments dropped, literals KEPT (anchors that carry a string such
+    # as `appendLine("name: ` need the literal); `*_masked` = comments and
+    # string contents both masked (structure only). Both views are produced by
+    # the shared lexer and are offset-identical with each other and the source,
+    # so a position found in one can be read back in the other — the gate-local
+    # `strip_comments`/`mask_strings` pair disagreed on `'` and shifted the text.
+    try:
+        sr_nc = mask_comments(sr_text)
+        sm_nc = mask_comments(sm_text)
+        sr_masked = mask_code(sr_text)
+        sm_masked = mask_code(sm_text)
+    except KotlinLexError as exc:
+        return ["ROT: a scanned file does not lex (%s) — fail-closed: the frontmatter "
+                "contract cannot be judged on an unmasked view" % exc]
 
     failures = []
 
@@ -538,6 +696,10 @@ def run_checks_text(sr_text, sm_text, sb_text=None):
     # parameter order.
     failures.extend(check_resolve_polarity(sr_nc, sr_masked))
 
+    # arm2 (dataflow) — the call existing is not the contract; its RESULT has to
+    # reach mergeFrontmatter. `existing = existing` keeps every substring above.
+    failures.extend(check_merge_base_flow(sr_nc, sr_masked))
+
     # arm3: update() carries + re-seeds
     update_body = function_body(sr_nc, sr_masked, "fun update(")
     check("arm3 update() signature has frontmatter param",
@@ -551,6 +713,11 @@ def run_checks_text(sr_text, sm_text, sb_text=None):
         url_body = function_body(sr_nc, sr_masked, "fun updateFromURL(")
     check("arm4 updateFromURL passes parsed.frontmatter",
           url_body is not None and "frontmatter = parsed.frontmatter" in url_body)
+    # arm4 (dataflow) — `frontmatter = parsed.frontmatter.ifBlank { null }.let { null }`
+    # carries the anchor and hands update() a null, which then re-seeds from disk.
+    if url_body is not None:
+        failures.extend(provably_null_arg_problems(
+            url_body, url_body.find("update("), "frontmatter", "arm4 updateFromURL"))
 
     # arm5: ParsedSkill carries the block; parseSkillMd populates it
     check("arm5 ParsedSkill has the frontmatter field", PARSED_FIELD in sr_nc)
@@ -589,6 +756,12 @@ def run_checks_text(sr_text, sm_text, sb_text=None):
     # the detail "update from file" path passes the block too
     check("arm8 update-from-file passes parsed.frontmatter",
           DETAIL_PASSES in sm_nc)
+    # arm8 (dataflow) — same `.let { null }` bypass: spelled, then nulled.
+    detail_at = sm_nc.find("frontmatter = parsed.frontmatter")
+    if detail_at >= 0:
+        failures.extend(provably_null_arg_problems(
+            sm_nc, sm_nc.rfind("update(", 0, detail_at), "frontmatter",
+            "arm8 update-from-file"))
 
     # arm9 [da1030-A ISSUE-02]: the BROWSE-tab refresh path (re-parse of a
     # downloaded SKILL.md) must hand the parsed block over as well. Scoped to
@@ -596,7 +769,10 @@ def run_checks_text(sr_text, sm_text, sb_text=None):
     # the unrelated pure-rename call `update(skill.id, name = trimmed)` in the
     # settings list cannot satisfy (or shadow) the criterion, and so a second
     # update() call added later in the file cannot silently stand in for it.
-    sb_nc = strip_comments(sb_text if sb_text is not None else "")
+    try:
+        sb_nc = mask_comments(sb_text if sb_text is not None else "")
+    except KotlinLexError as exc:
+        return ["ROT: MinisSkillsBrowserScreen.kt does not lex (%s) — fail-closed" % exc]
     call_at = sb_nc.find(SB_UPDATE_CALL)
     call_block = call_arg_block(sb_nc, call_at) if call_at >= 0 else None
     if call_block is None:
@@ -613,6 +789,11 @@ def run_checks_text(sr_text, sm_text, sb_text=None):
               "update() re-seeds from the on-disk SKILL.md when no block is "
               "passed, so the incoming subagent / max_turns / allowed_tools are "
               "shadowed by the disk copy")
+
+    # arm9 (dataflow) — the resolved-id call must carry a non-null block, not the
+    # anchor plus `.let { null }`.
+    failures.extend(provably_null_arg_problems(
+        sb_nc, call_at, "frontmatter", "arm9 browser refresh"))
 
     # arm10 [dv22-B6 §1042-B-07]: the browser import judges duplication BEFORE
     # the full-fat import. The dedup variable name is derived from the
@@ -954,6 +1135,43 @@ DIRTY_SB_EMPTY_TARGETS = GOOD_SB.replace(
     "resolveUpdateTargetId(emptyList(), slug = slugify(parsed.name), incomingName = parsed.name)")
 
 
+# ── [batch6 t12] witnesses this wave added ────────────────────────────────
+# 04-1 (dataflow): the fresh block stays on the LEFT of `?:` and is nulled, so
+# the parameter-order criterion is satisfied while the disk copy always wins.
+DIRTY_SR_NULL_LEFT = GOOD_SR.replace(
+    "): String? = newFrontmatter?.ifBlank { null } ?: diskContent",
+    "): String? = newFrontmatter?.takeIf { false } ?: (diskContent ?: newFrontmatter)")
+
+# 04-2 (dataflow): the resolved base is computed and then not passed on.
+DIRTY_SR_DROP_BASE = GOOD_SR.replace(
+    "            existing = mergeBase,",
+    "            existing = existing,")
+
+# 04-3 (dataflow): the block is spelled out and then nulled at the call site.
+DIRTY_SR_NULL_ARG = GOOD_SR.replace(
+    "            frontmatter = parsed.frontmatter.ifBlank { null },\n        )\n        return ok",
+    "            frontmatter = parsed.frontmatter.ifBlank { null }.let { null },\n"
+    "        )\n        return ok")
+
+# 04-4 (family-hole): the accumulator is pre-filled through a NON-literal
+# expression (`src[0]` is the opening `---`, guaranteed by the guard above).
+DIRTY_SR_PREWALK_ADD = GOOD_SR.replace(
+    "            val fm = mutableListOf<String>()\n",
+    "            val fm = mutableListOf<String>()\n            fm.add(src[0])\n")
+
+# 04-5 (family-hole): a live-looking derivation of an empty candidate set.
+DIRTY_SB_EMPTY_FILTER = GOOD_SB.replace(
+    "resolveUpdateTargetId(rows, slug = slugify(parsed.name), incomingName = parsed.name)",
+    "resolveUpdateTargetId(rows.filter { false }, slug = slugify(parsed.name), "
+    "incomingName = parsed.name)")
+
+# 04-6 (parser-death): a `'"'` char literal opens a fake string that swallows the
+# `//`, so the commented-out call used to survive into the scanned text.
+DIRTY_SR_CHAR_TRICK = GOOD_SR.replace(
+    "        val mergeBase = resolveMergeBase(skill.frontmatter, existing)",
+    "        val q = '\"' // \" resolveMergeBase(skill.frontmatter, existing)\n"
+    "        val mergeBase = existing")
+
 def selftest():
     # tempfile.mkdtemp resolves through the guest-tmp translation (host-side
     # path the sandbox cannot reopen) — run the checks on in-memory text
@@ -986,6 +1204,19 @@ def selftest():
          "seeds `fm` with a delimiter literal"),
         ("dedup fed a constant candidate set", GOOD_SR, GOOD_SM, DIRTY_SB_EMPTY_TARGETS,
          "CONSTANT candidate set"),
+        # ── batch6 t12 ──
+        ("merge base operand nulled (takeIf { false })", DIRTY_SR_NULL_LEFT, GOOD_SM,
+         GOOD_SB, "PROVABLY NULL"),
+        ("resolved base computed then dropped", DIRTY_SR_DROP_BASE, GOOD_SM, GOOD_SB,
+         "memory-first base is discarded"),
+        ("updateFromURL passes a nulled block", DIRTY_SR_NULL_ARG, GOOD_SM, GOOD_SB,
+         "provably null"),
+        ("walk accumulator pre-filled before the walk", DIRTY_SR_PREWALK_ADD, GOOD_SM,
+         GOOD_SB, "mutates `fm` before the walk"),
+        ("dedup fed a filtered-empty candidate set", GOOD_SR, GOOD_SM,
+         DIRTY_SB_EMPTY_FILTER, "CONSTANT candidate set"),
+        ("char-literal parser death unmasks the call", DIRTY_SR_CHAR_TRICK, GOOD_SM,
+         GOOD_SB, "arm2 writeSkillMd uses the single exit"),
     ]:
         label, sr_t, sm_t, sb_t = entry[:4]
         needle = entry[4] if len(entry) > 4 else None
@@ -1010,7 +1241,7 @@ def main():
         for f in failures:
             print("  - %s" % f)
         sys.exit(1)
-    print("OK %s + %s + %s (17 arms)" % (SR_REL, SM_REL, SB_REL))
+    print("OK %s + %s + %s (23 arms)" % (SR_REL, SM_REL, SB_REL))
     sys.exit(0)
 
 
