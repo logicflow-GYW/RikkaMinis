@@ -121,9 +121,20 @@
 | 项 | 值 |
 |---|---|
 | workflow | `build-apk.yml`（`workflow_dispatch`，`--ref fix/r3-offload-fastio`） |
-| run | 见下（回填） |
+| run | **`40310333631`** / **#2735** |
+| job | **`121529639082`**（attempt 1） |
+| head_sha | **`17249bb848`**（与本地 HEAD 逐字符一致） |
+| 结论 | **success**（10:49:05Z → 11:13:49Z，24m44s） |
+| 步 | 26 步；唯一非 success = 第 23 步 `Publish to Releases` **skipped**（`if: github.ref == 'refs/heads/main'` 门控） |
+| 第 3 步 `Run pre-build scan gate` | success（`scan.sh` 112 门 + `test_scan.py` 344 夹具） |
+| 日志 | 1,486,498 B；`Summary: 112 passed, 0 failed` **恰 1**；`ALL 344 CASES PASS` **恰 1**；门头 `[N/112]` **112 个互异**；`^ e: ` **0**；6 条含 `FAILED` 的行**全部以 `PASSED` 结尾**（用例名子串，判读陷阱复核）；两门 selftest 标记各 1（`✅ fastio_tar_bounds_check selftest has teeth (FASTIO_TAR_BOUNDS_SELFTEST=PASS)` / `✅ offload_cli_args_check selftest has teeth (OFFLOAD_CLI_ARGS_SELFTEST=PASS)`） |
 
-（本节在 CI 出结论后回填 run id / job id / head_sha / 关键日志行。）
+**本地 `test_scan.py` 跑不动**：两次前台执行都被整壳杀（`probe/testscan.log` 0 字节，
+同 S28 的 Errno 38 家族）；344 夹具的读数由 **CI 第 3 步**承担（`ALL 344 CASES PASS`）。
+
+**臂数在 CI 里不可见**（既知缺口，本支再次实证）：`R3_T14_ARMS` / `71 arms` 在 CI
+日志 **0 命中** —— `test_scan.py` 只断言标记、不回显门的 `--selftest` stdout，
+所以新增臂的"带牙"证据只活在报告与本地跑（见 §7 R11）。
 
 ## 7. 残留（每条带触发条件 / 触发后方案 / 搁置理由）
 
@@ -139,6 +150,8 @@
 | R8 | #155 真值表只枚举 type ∈ {`f`,`d`,`l`,`o`}（`visitFile` 当前只产出这四种） | `visitFile` 引入新类型字符（如 `'p'`） | 同步扩 `TYPE_FILTER_CHARS`（扩了才有枚举保护） | 新增字符必须有新的 label 语义，属刻意编辑 |
 | R9 | #156 只认 `(>=|>) LINKNAME_LENGTH [± n]` 的字面算术；写成 `LINKNAME_LENGTH - 1 - 1` 或先算常量再比较会 fail-closed 红 | 重构该比较（抽常量） | 用 `const_value` 折叠右侧表达式后比较数值 | 当前实现是内联字面量；fail-closed 方向安全 |
 | R10 | #152 的 S4 假定 cap 在 `grepFile` 内、且 `grepTree` 的 S1/S2/S3 保持不变 | `grepFile` 被内联或改名 | 按「cap 写入点的**所有**位置」判（`live_positions` 枚举），不绑函数名 | 现在两段结构清晰；改名属刻意编辑 |
+| R11 | 门 `--selftest` 的逐臂 stdout 不进 CI 日志（`test_scan.py` 只断言标记），新增臂数在 CI 侧不可见 | 有人在 CI 里核对"臂是否真跑" | 让门把臂数以标记形态输出（`<GATE>_SELFTEST=PASS (N arms)` 已在 tar 门存在，可给其余门统一；并在 `test_scan.py` 注册处断言该行），或把 `--selftest` 输出写入 job log 的步骤级日志 | 需改冻结面 `test_scan.py`（本支不许）；装置比例对单支过重 |
+| R12 | 本地 `test_scan.py`（344 夹具）在本机当前窗口跑不起来（整壳杀 / Errno 38，两次尝试 0 字节输出） | 环境恢复后仍跑不动 | 按既有健康路径用小批次/错开启动；或维持"344 读数一律取 CI 第 3 步"的现状 | 已有 CI 承担，重复投入无收益 |
 
 ## 8. 复现命令
 
