@@ -77,6 +77,20 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments  # noqa: E402
+from _kotlin_ast import const_bool, match_bracket  # noqa: E402
+from _kotlin_valueflow import (  # noqa: E402
+    call_args,
+    code_view,
+    contains_ident,
+    expr_end,
+    path_feasible,
+    scope_calls,
+    value_sources,
+)
+
 MARKER = "CHAT_SESSION_ID_BINDING_SELFTEST=PASS"
 
 REL_SCREEN = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatScreen.kt"
@@ -115,92 +129,51 @@ SCREEN_CALL_SPECS = [
 errors: "list[str]" = []
 
 
+# ── 共享词法视图（B7-t01）────────────────────────────────────────────────
+# 本门自写的字符级词法器已删除：`_kotlin_lexer` 是全体门共用的单一掩码器，
+# 三个视图**严格等长**（位置可回投原文）。用途分工：
+#   · 对外文本 = `mask_comments`（注释抹白，字符串内容保留）——判据要读
+#     `"sessionId"` / `"Error"` / `"send_dropped_before_stream"` 这些字面量；
+#   · 结构分析 = `code_view` / `match_bracket`（字面量内部也抹白）——括号配平、
+#     条件覆盖、值流、可达性都在这条通道上做。
+_LEX_FAILS: "list[str]" = []
+_CV_CACHE: "dict[tuple[int, int], tuple[str, str]]" = {}
+
+
+def _cv(text: str) -> str:
+    """结构视图（注释 + 字面量内部 → 空格，长度不变）。
+
+    解析失败不抛给调用方：置位 `_LEX_FAILS` 后原样返回，由 `check()` 统一
+    fail-closed 报违规——「不许回退原文扫描」不等于「静默继续」。
+    """
+    key = (id(text), len(text))
+    hit = _CV_CACHE.get(key)
+    if hit is not None and hit[0] is text:
+        return hit[1]
+    try:
+        masked = code_view(text)
+    except KotlinLexError as exc:
+        _LEX_FAILS.append("KotlinLexError in the structural view: %s" % exc)
+        masked = text
+    if len(_CV_CACHE) > 8:
+        _CV_CACHE.clear()
+    _CV_CACHE[key] = (text, masked)
+    return masked
+
+
 def strip_comments(text: str) -> str:
-    """String-literal-aware comment stripper.
+    """注释抹白（共享掩码器；字符串内容保留，长度严格不变）。
 
-    The naive `re.sub(r"/\\*.*?\\*/", "", text, flags=re.S)` is unusable here:
-    a `/*` inside a string literal plus a later `*/` swallows the whole body of
-    the file (measured: 319,632 B -> 51,494 B on ChatScreen.kt), which silently
-    turns every criterion into a false RED. This scanner walks the text,
-    skipping string/char literals verbatim, so only real comments vanish.
+    [B7-t01] 旧实现是本门自写的字符扫描器。它确实避开了「字符串里出现 `/*`
+    把整段函数体吞掉」的老坑，但那是 parser-death 轴的病原体本身（各门各写
+    一套词法器，一套一个漏法）。改用 `mask_comments` 后与其余门同一套词法，
+    且位置与原文一一对应，下游所有切片/偏移都能直接复用。
     """
-    out = []
-    i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        if c == '"':
-            if text.startswith('"""', i):
-                j = text.find('"""', i + 3)
-                j = n if j == -1 else j + 3
-            else:
-                j = i + 1
-                while j < n:
-                    if text[j] == "\\":
-                        j += 2
-                        continue
-                    if text[j] == '"' or text[j] == "\n":
-                        j += 1
-                        break
-                    j += 1
-            out.append(text[i:j])
-            i = j
-            continue
-        if c == "'":
-            j = i + 1
-            while j < n:
-                if text[j] == "\\":
-                    j += 2
-                    continue
-                if text[j] == "'":
-                    j += 1
-                    break
-                if text[j] == "\n":
-                    break
-                j += 1
-            out.append(text[i:j])
-            i = j
-            continue
-        if text.startswith("//", i):
-            j = text.find("\n", i)
-            i = n if j == -1 else j
-            continue
-        if text.startswith("/*", i):
-            j = text.find("*/", i + 2)
-            i = n if j == -1 else j + 2
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
-
-
-def extract_call_block(code: str, start: str, end: str) -> str:
-    idx = code.find(start)
-    if idx == -1:
-        return ""
-    return code[idx : code.find(end, idx) + len(end)] if end else code[idx:]
-
-
-def _skip_string_literal(code: str, i: int) -> int:
-    """Index just past the string literal starting at `code[i]` (a quote).
-
-    Brace matching must not be fooled by `{`/`}` inside literals — the pinned
-    block legitimately contains `"${pending.resourcePath}"` and warning text
-    with interpolations. Mirrors the literal handling in [strip_comments].
-    """
-    quote = code[i]
-    if quote == '"' and code.startswith('"""', i):
-        j = code.find('"""', i + 3)
-        return len(code) if j == -1 else j + 3
-    j = i + 1
-    n = len(code)
-    while j < n:
-        if code[j] == "\\":
-            j += 2
-            continue
-        if code[j] == quote or code[j] == "\n":
-            return j + 1
-        j += 1
-    return n
+    try:
+        return mask_comments(text)
+    except KotlinLexError as exc:
+        _LEX_FAILS.append("KotlinLexError while stripping comments: %s" % exc)
+        return text
 
 
 def extract_braced_block(code: str, decl_re) -> "str | None":
@@ -216,22 +189,8 @@ def extract_braced_block(code: str, decl_re) -> "str | None":
     open_idx = m.end() - 1
     if code[open_idx] != "{":
         return None
-    depth = 0
-    i = open_idx
-    n = len(code)
-    while i < n:
-        c = code[i]
-        if c == '"' or c == "'":
-            i = _skip_string_literal(code, i)
-            continue
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return code[open_idx:i + 1]
-        i += 1
-    return None
+    end = match_bracket(_cv(code), open_idx)
+    return None if end < 0 else code[open_idx:end + 1]
 
 
 # [da1032-D] anchors for MainActivity criteria 10/11.
@@ -288,25 +247,13 @@ def extract_effect_block(code: str, marker: str) -> "tuple[str, str] | None":
     start = code.rfind("LaunchedEffect(", 0, idx)
     if start == -1:
         return None
-    brace = code.find("{", start)
+    brace = _cv(code).find("{", start)
     if brace == -1 or brace > idx:
         return None
-    depth = 0
-    i = brace
-    n = len(code)
-    while i < n:
-        c = code[i]
-        if c == '"' or c == "'":
-            i = _skip_string_literal(code, i)
-            continue
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return code[start + len("LaunchedEffect(") : brace], code[brace : i + 1]
-        i += 1
-    return None
+    end = _match_brace(code, brace)
+    if end is None:
+        return None
+    return code[start + len("LaunchedEffect("): brace], code[brace: end + 1]
 
 
 RE_START_DEST = re.compile(r"\bval\s+startDestination\s*=")
@@ -315,25 +262,16 @@ RE_IDENT = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def _match_brace(code: str, open_idx: int) -> "int | None":
-    """Index of the `}` closing the `{` at [open_idx] (string-literal aware)."""
+    """Index of the `}` closing the `{` at [open_idx] (shared `match_bracket`).
+
+    [B7-t01] Handing brace matching to the shared primitive is what kills the
+    parser-death family: the local scanner had to re-implement string/char/raw
+    literal skipping, and every copy of that logic leaked on some construct.
+    """
     if open_idx < 0 or open_idx >= len(code) or code[open_idx] != "{":
         return None
-    depth = 0
-    i = open_idx
-    n = len(code)
-    while i < n:
-        c = code[i]
-        if c == '"' or c == "'":
-            i = _skip_string_literal(code, i)
-            continue
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return i
-        i += 1
-    return None
+    end = match_bracket(_cv(code), open_idx)
+    return None if end < 0 else end
 
 
 # [deep-audit-1039 A-06] anchors for criterion 13 (the headless cancel path).
@@ -356,26 +294,14 @@ def _fn_body_after(code: str, decl_re) -> "str | None":
     i = code.find("(", m.end() - 1)
     if i == -1:
         return None
-    depth = 0
-    n = len(code)
-    while i < n:
-        c = code[i]
-        if c == '"' or c == "'":
-            i = _skip_string_literal(code, i)
-            continue
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                i += 1
-                break
-        i += 1
-    open_idx = code.find("{", i)
+    close = match_bracket(_cv(code), i)
+    if close < 0:
+        return None
+    open_idx = _cv(code).find("{", close + 1)
     if open_idx == -1:
         return None
     end = _match_brace(code, open_idx)
-    return None if end is None else code[open_idx : end + 1]
+    return None if end is None else code[open_idx: end + 1]
 
 
 # [deep-audit-1044 A-03] criterion 15 — a dropped headless send is an ERROR.
@@ -413,6 +339,19 @@ def _decl_region(code: str, name: str, span: int = 600) -> "str | None":
         return None
     return code[m.start(): m.start() + span]
 
+def _reachable_return_positions(block: str) -> "list[int]":
+    """Positions (relative to [block]) of the returns that actually execute.
+
+    [B7-t01] witness 10-5 keeps the `return` and the helper call but wraps them
+    in `if (false)`: every token the old criterion matched is still there and
+    the guard does nothing. Reachability is folded with the shared
+    `path_feasible`, so `if (false)` / `!true` / `1 == 2` all read as dead.
+    """
+    cv = _cv(block)
+    return [m.start() for m in re.finditer(r"\breturn\b", cv)
+            if path_feasible(cv, m.start())]
+
+
 def _yields_dropped_error(code: str, block: str) -> "bool":
     """Does this `if (!started) { … }` block RETURN the dropped-send envelope?
 
@@ -421,17 +360,25 @@ def _yields_dropped_error(code: str, block: str) -> "bool":
     call to a helper whose own declaration carries them. Both literals must be
     present, because together they ARE the contract the CLI reads (status
     decides the exit code, responseText is the machine reason).
+
+    [B7-t01] And the return has to be REACHABLE: a `return` inside a dead
+    branch keeps the spelling and settles nothing.
     """
-    text = strip_comments(block)
-    if "return" not in text:
+    positions = _reachable_return_positions(block)
+    if not positions:
         return False
-    hop = [text]
-    for name in sorted(set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", text))):
-        region = _decl_region(code, name)
-        if region is not None:
-            hop.append(region)
-    blob = "\n".join(hop)
-    return '"Error"' in blob and "send_dropped_before_stream" in blob
+    for pos in positions:
+        stmt = _stmt_text(block, pos)
+        hop = [stmt]
+        for name in sorted(set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", stmt))):
+            region = _decl_region(code, name)
+            if region is not None:
+                hop.append(region)
+        blob = "\n".join(hop)
+        if '"Error"' in blob and "send_dropped_before_stream" in blob:
+            return True
+    return False
+
 
 def _prompt_drop_violations(code: str) -> "list[str]":
     """Criterion 15 for one `debug/HeadlessChatRunner.kt` (comments stripped)."""
@@ -521,50 +468,22 @@ APPLY_OVERRIDE_VM_REFRESH = (
 
 
 def _matched_paren(code: str, open_idx: int) -> "str | None":
-    """`( … )` slice starting at [open_idx] (string-literal aware)."""
-    depth = 0
-    i = open_idx
-    n = len(code)
-    while i < n:
-        c = code[i]
-        if c == '"' or c == "'":
-            i = _skip_string_literal(code, i)
-            continue
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return code[open_idx : i + 1]
-        i += 1
-    return None
+    """`( … )` slice starting at [open_idx] (shared bracket matcher)."""
+    close = match_bracket(_cv(code), open_idx)
+    return None if close < 0 else code[open_idx: close + 1]
 
 
 def _stmt_text(code: str, start: int) -> str:
-    """Statement text beginning at [start], cut at a depth-0 `;` / newline / `}`.
+    """Statement text beginning at [start].
 
-    Kotlin rarely uses semicolons, so the depth-0 newline is load-bearing: the
-    alternative (`[^\\n]*`) would also truncate a chain that legitimately wraps
-    onto the next line, and a bracket-blind scan would run into the next
-    statement and judge a value that is not the bound one.
+    [B7-t01] The end comes from the shared `expr_end` (depth-0 newline that is
+    not a continuation), which is the same rule `stmt_spans`/`function_body`
+    use — the older hand-rolled loop had to know about literals *and*
+    continuation lines and got one of them wrong on every rewrite. Kotlin
+    rarely uses semicolons, so a trailing `;` is trimmed.
     """
-    depth = 0
-    i, n = start, len(code)
-    while i < n:
-        c = code[i]
-        if c == '"' or c == "'":
-            i = _skip_string_literal(code, i)
-            continue
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            if depth == 0:
-                break
-            depth -= 1
-        elif depth == 0 and c in ";\n":
-            break
-        i += 1
-    return code[start:i]
+    end = expr_end(_cv(code), start)
+    return code[start:end].rstrip().rstrip(";")
 
 
 def _named_arg_value(args_text: str, name: str) -> "str | None":
@@ -572,19 +491,19 @@ def _named_arg_value(args_text: str, name: str) -> "str | None":
 
     Bracket-aware so a scope function / nested call in the value does not
     truncate it — the whole point is to read the VALUE, not to see the name.
+    Depth counting runs on the shared code view (same length, so every index
+    maps onto `args_text`).
     """
     if not args_text:
         return None
-    m = re.search(r"\b" + re.escape(name) + r"\s*=(?!=)\s*", args_text)
+    cv = _cv(args_text)
+    m = re.search(r"\b" + re.escape(name) + r"\s*=(?!=)\s*", cv)
     if m is None:
         return None
     depth = 0
-    i, n = m.end(), len(args_text)
+    i, n = m.end(), len(cv)
     while i < n:
-        c = args_text[i]
-        if c == '"' or c == "'":
-            i = _skip_string_literal(args_text, i)
-            continue
+        c = cv[i]
         if c in "([{":
             depth += 1
         elif c in ")]}":
@@ -626,10 +545,31 @@ def _reaches(code: str, block: str, token: str, depth: int = 2, seen=None) -> bo
 # be the row read is the VALUE bound to `owner`, and nothing may filter it into
 # a constant: `ownerFor(...).getOrNull()?.takeIf { false }` reads the store,
 # throws the answer away, and reports "nothing to cancel" for every session.
+def _rejecting_filters(expr: str) -> "list[str]":
+    """Always-rejecting filters: `takeIf { <折叠为假> }` / `takeUnless { <折叠为真> }`.
+
+    [B7-t01] The old `RE_CONST_FALSE_FILTER` enumerated the literals
+    `false` / `!true` / `0 == 1`, so witness 10-3 only had to write `1 == 2`
+    (family hole). The predicate is folded with the shared `const_bool` instead:
+    ANY spelling that folds to a constant in the rejecting direction counts, and
+    an unfoldable predicate (a real condition on `it`) never does.
+    """
+    out = []
+    for name, _start, open_pos, end in scope_calls(expr):
+        if name not in ("takeIf", "takeUnless", "filter", "filterNot"):
+            continue
+        body = expr[open_pos + 1:end - 1]
+        folded = const_bool(body)
+        if folded is None:
+            continue
+        rejects = (name in ("takeIf", "filter") and folded is False) or (
+            name in ("takeUnless", "filterNot") and folded is True)
+        if rejects:
+            out.append("%s { %s }" % (name, body.strip()))
+    return out
+
+
 RE_OWNER_BIND = re.compile(r"\bval\s+owner\s*=\s*")
-RE_CONST_FALSE_FILTER = re.compile(
-    r"\btake(?:If|Unless)\s*\{\s*(?:false|!\s*true|0\s*==\s*1)\s*\}"
-)
 
 
 def _owner_binding_violations(body: str) -> "list[str]":
@@ -648,12 +588,13 @@ def _owner_binding_violations(body: str) -> "list[str]":
             "`ChatViewModelStore.ownerFor(…)` (`%s`) — the store lookup has to BE the "
             "value, not a mention inside it" % stmt.strip()
         )
-    if RE_CONST_FALSE_FILTER.search(stmt):
+    rejecting = _rejecting_filters(stmt)
+    if rejecting:
         errs.append(
             "HeadlessChatRunner.kt: the store fallback is filtered by a constant-false "
-            "predicate (`%s`) — owner is null for every session, so a UI-created "
+            "predicate (`%s` → %s) — owner is null for every session, so a UI-created "
             "ViewModel can never be cancelled and every `cancel` reports false"
-            % stmt.strip()
+            % (stmt.strip(), ", ".join(rejecting))
         )
     if not re.search(r"ViewModelProvider\s*\(\s*owner\b", body):
         errs.append(
@@ -673,13 +614,19 @@ RE_LIVE_ID_SOURCE = re.compile(
 
 
 def _active_session_binding_violations(effect_body: str) -> "list[str]":
-    """wide-1024 (dataflow): `activeSessionId` must BE the live id.
+    """wide-1024 + [B7-t01] (dataflow): `activeSessionId` must BE the live id.
 
     The old criterion asked whether the effect body MENTIONS
     `viewModel.currentSessionId` / `resolveSessionId(` somewhere and compares
     `pending.sessionId != activeSessionId` — so binding the route arg and
     tucking a resolver call into a nested lambda satisfied both. What the
     comparison needs is the value.
+
+    [B7-t01] Reading the right-hand side for a resolver call is not enough
+    either: witness 10-2 keeps `ChatViewModelStore.resolveSessionId(…)` as the
+    PREFIX and appends `.let { sessionId }`, which discards the resolver's
+    value. Judged on `value_sources` now — every possible value the binding can
+    take has to be a live-id source.
     """
     m = RE_ACTIVE_SESSION_BIND.search(effect_body)
     if m is None:
@@ -688,20 +635,22 @@ def _active_session_binding_violations(effect_body: str) -> "list[str]":
             "live session id (binding not found — re-anchor this criterion, do not drop it)"
         ]
     rhs = _stmt_text(effect_body, m.end())
-    norm = re.sub(r"\s+", "", rhs)
-    if re.match(r"sessionId(?![A-Za-z0-9_])", norm):
-        return [
-            "ChatScreen.kt: `activeSessionId` is bound to the bare route arg `sessionId` "
-            "(`%s`) — a resolver mentioned inside the expression does not produce the "
-            "value, so the stale `__new__<uuid>` key wins and the just-generated HTML "
-            "preview is dropped by `pending.sessionId != activeSessionId`" % rhs.strip()
-        ]
-    if not RE_LIVE_ID_SOURCE.search(rhs):
-        return [
-            "ChatScreen.kt: `activeSessionId` must be derived from the live id "
-            "(`ChatViewModelStore.resolveSessionId(viewModel.currentSessionId)`) — got `%s`"
-            % rhs.strip()
-        ]
+    sources = [s.strip() for s in value_sources(rhs)] or [rhs.strip()]
+    for src in sources:
+        norm = re.sub(r"\s+", "", src)
+        if norm == "sessionId":
+            return [
+                "ChatScreen.kt: `activeSessionId` is bound to the bare route arg `sessionId` "
+                "(`%s`) — a resolver mentioned inside the expression does not produce the "
+                "value, so the stale `__new__<uuid>` key wins and the just-generated HTML "
+                "preview is dropped by `pending.sessionId != activeSessionId`" % rhs.strip()
+            ]
+        if not RE_LIVE_ID_SOURCE.search(src):
+            return [
+                "ChatScreen.kt: `activeSessionId` must be derived from the live id "
+                "(`ChatViewModelStore.resolveSessionId(viewModel.currentSessionId)`) — got `%s`"
+                % rhs.strip()
+            ]
     return []
 
 
@@ -743,8 +692,26 @@ def _apply_override_violations(code: str) -> "list[str]":
             # contract — the value the name is bound to is. `existingBinding =
             # null.also { …getSession(…)?.modelBinding }` reads the row, throws
             # it away, and hands the decision a literal null.
-            norm = re.sub(r"\s+", "", row_val)
-            if re.match(r"(?:null|false|0)(?![A-Za-z0-9_])", norm):
+            #
+            # [B7-t01] And reading the row is not enough either: witness 10-6
+            # appends `?.takeIf { false }`, which keeps every token of the
+            # compliant expression and filters the answer to null. Judged on
+            # `value_sources` (the values the expression can actually produce)
+            # plus the always-rejecting filter fold.
+            sources = [s.strip() for s in value_sources(row_val)] or [row_val.strip()]
+            rejecting = _rejecting_filters(row_val)
+            literal = [s for s in sources
+                       if re.match(r"(?:null|false|0)(?![A-Za-z0-9_])",
+                                   re.sub(r"\s+", "", s))]
+            blind = [s for s in sources if not contains_ident(s, APPLY_OVERRIDE_ROW_TOKEN)]
+            if rejecting:
+                errs.append(
+                    "HeadlessChatRunner.kt: the row value is not what the decision is "
+                    "fed — `existingBinding` is bound to `%s`, whose value is filtered "
+                    "away by %s: every pinned session then reads as unbound and is "
+                    "rebound to the new-session default" % (row_val, ", ".join(rejecting))
+                )
+            elif literal:
                 errs.append(
                     "HeadlessChatRunner.kt: the row value is not what the decision is "
                     "fed — `existingBinding` is bound to `%s`, so the row read sits "
@@ -752,11 +719,11 @@ def _apply_override_violations(code: str) -> "list[str]":
                     "session then reads as unbound and is rebound to the new-session "
                     "default" % row_val
                 )
-            elif APPLY_OVERRIDE_ROW_TOKEN not in row_val:
+            elif blind:
                 errs.append(
                     "HeadlessChatRunner.kt: `existingBinding` is not the row read "
-                    "(got `%s`) — the decision has to be fed the persisted binding"
-                    % row_val
+                    "(got `%s` → `%s`) — the decision has to be fed the persisted binding"
+                    % (row_val, ", ".join(sources))
                 )
     if APPLY_OVERRIDE_DEFAULT_TOKEN not in body:
         errs.append(
@@ -895,24 +862,10 @@ def _body_span_after(code: str, paren_hint: int) -> "tuple[int, int] | None":
     i = code.find("(", paren_hint)
     if i == -1:
         return None
-    depth = 0
-    n = len(code)
-    while i < n:
-        c = code[i]
-        if c == '"' or c == "'":
-            i = _skip_string_literal(code, i)
-            continue
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                i += 1
-                break
-        i += 1
-    else:
+    close = match_bracket(_cv(code), i)
+    if close < 0:
         return None
-    open_idx = code.find("{", i)
+    open_idx = _cv(code).find("{", close + 1)
     if open_idx == -1:
         return None
     end = _match_brace(code, open_idx)
@@ -991,13 +944,33 @@ def _offmain_bounded_blocks(prefix: str) -> "list[tuple[int, int]]":
 RE_FIRST_LAMBDA = re.compile(r"\.\s*first\s*\{")
 
 
+def _predicate_ignores_value(body: str, param: str) -> "bool":
+    """Is the predicate's truth value independent of the awaited value?
+
+    [B7-t01] The old check only asked whether the lambda body MENTIONS the
+    parameter — `{ it || true }` does, and is satisfied by the initial `false`
+    just like `{ true }`. Folding the body with the parameter substituted by
+    `true` and by `false` answers the real question: if both runs are constant
+    and equal, the wait does not look at the latch.
+    """
+    folded = []
+    for repl in ("true", "false"):
+        inst = re.sub(r"(?<![\w.`])" + re.escape(param) + r"(?![\w`])", repl, body)
+        val = const_bool(inst)
+        if val is None:
+            return False
+        folded.append(val)
+    return folded[0] == folded[1]
+
+
 def _wait_predicate_violation(prefix: str, k: int) -> "str | None":
-    """wide-1024 (dataflow): the latch wait's predicate must READ the latch.
+    """wide-1024 + [B7-t01] (dataflow): the latch wait's predicate must READ the latch.
 
     `vm.sessionLoaded.first { true }` is a wait in name only — the initial
     `false` satisfies the predicate, so the call returns at once and the
-    mutation races the load. Judged on the lambda background's use of its
-    parameter (implicit `it` or a named one), not on the `.first {` prefix.
+    mutation races the load. Judged on what the lambda computes from its
+    parameter (implicit `it` or a named one), not on the `.first {` prefix and
+    not on the bare presence of the identifier.
     """
     m = RE_FIRST_LAMBDA.search(prefix, k)
     if m is None:
@@ -1012,10 +985,15 @@ def _wait_predicate_violation(prefix: str, k: int) -> "str | None":
     named = re.search(r"\(?\s*([A-Za-z_]\w*)\s*(?::\s*[A-Za-z_]\w*\s*)?\)?\s*->", body)
     param = named.group(1) if named else "it"
     rest = body[named.end():] if named else body
-    if not re.search(r"\b" + re.escape(param) + r"\b", rest):
+    if not contains_ident(rest, param):
         return ("uses a predicate that ignores the value it waits for (`{ %s }`) — the "
                 "initial `false` satisfies it, so the wait returns immediately and the "
                 "mutation races the load" % body.strip())
+    if _predicate_ignores_value(rest, param):
+        return ("uses a predicate that ignores the value it waits for (`{ %s }` folds to a "
+                "constant with `%s` set to both true and false) — the initial `false` "
+                "satisfies it, so the wait returns immediately and the mutation races "
+                "the load" % (body.strip(), param))
     return None
 
 
@@ -1193,38 +1171,15 @@ RE_ABSENCE_TEST = re.compile(r"(?:!=\s*null|==\s*null|\.isNotEmpty\(\)|\.isEmpty
 
 
 def _call_args_at(code: str, open_paren: int) -> "list[str]":
-    """Top-level arguments of the call whose `(` sits at [open_paren]."""
-    depth = 0
-    i = open_paren
-    n = len(code)
-    args: "list[str]" = []
-    cur: "list[str]" = []
-    while i < n:
-        c = code[i]
-        if c == '"' or c == "'":
-            j = _skip_string_literal(code, i)
-            cur.append(code[i:j])
-            i = j
-            continue
-        if c in "([{":
-            depth += 1
-            if depth == 1 and c == "(":
-                i += 1
-                continue
-        elif c in ")]}":
-            depth -= 1
-            if depth == 0:
-                args.append("".join(cur).strip())
-                return [a for a in args if a]
-        elif c == "," and depth == 1:
-            args.append("".join(cur).strip())
-            cur = []
-            i += 1
-            continue
-        cur.append(c)
-        i += 1
-    return []
+    """Top-level arguments of the call whose `(` sits at [open_paren].
 
+    [B7-t01] Shared `call_args` + `split_top` do the bracket-aware splitting
+    (the local scanner had to skip literals by hand and returned an empty
+    argument list on any construct it did not model).
+    """
+    cv = _cv(code)
+    out = [code[a:b].strip() for a, b in call_args(cv, open_paren)]
+    return [a for a in out if a]
 
 def _turn_answer_violations(code: str) -> "list[str]":
     """Criterion 17 for one `debug/HeadlessChatRunner.kt` (comments stripped)."""
@@ -1585,8 +1540,48 @@ def _insert_retry_violations_in(root: Path) -> "list[str]":
     return _insert_retry_violations(strip_comments(path.read_text(encoding="utf-8")))
 
 
+def _live_id_arg_violations(screen: str, callee: str, spec) -> "list[str]":
+    """C3/C4 (dataflow): `<callee>` must pass the LIVE id as `sessionId`'s value.
+
+    [B7-t01] The old form asked whether the compliant substring appeared inside
+    the call block — `sessionId = viewModel.currentSessionId.let { sessionId }`
+    contains it verbatim and hands the composer the stale draft key, so the
+    attachment lands in the orphan `__new__` directory. The value is read as an
+    argument (bracket-aware, via `_call_args_at`) and resolved with
+    `value_sources`: every value the expression can produce has to BE the live
+    id, so a discarding `.let {}` tail is red while a real `.also { log(it) }`
+    stays green.
+    """
+    required = "viewModel.currentSessionId"
+    label = spec["label"]
+    idx = screen.find(callee)
+    if idx == -1:
+        return ["ChatScreen.kt: call site `%s` not found" % callee]
+    value = None
+    for arg in _call_args_at(screen, idx + len(callee) - 1):
+        m = re.match(r"\s*sessionId\s*=(?!=)\s*", arg)
+        if m:
+            value = arg[m.end():].strip()
+            break
+    if value is None:
+        return [
+            "ChatScreen.kt: `%s` must pass `sessionId = viewModel.currentSessionId`" % label
+        ]
+    sources = [s.strip() for s in value_sources(value)] or [value]
+    off = [s for s in sources if re.sub(r"\s+", "", s) != required]
+    if off:
+        return [
+            "ChatScreen.kt: `%s` must pass `sessionId = viewModel.currentSessionId` — the "
+            "value it actually hands over is `%s` (the compliant call survives only as a "
+            "prefix of the expression)" % (label, value)
+        ]
+    return []
+
+
 def check(root: Path) -> int:
     del errors[:]
+    del _LEX_FAILS[:]
+    _CV_CACHE.clear()
     screen_path = root / REL_SCREEN
     nav_path = root / REL_NAV
     move_path = root / REL_MOVE
@@ -1627,15 +1622,11 @@ def check(root: Path) -> int:
             errors.append(f"ChatScreen.kt: expected drawer comparison `if (id {op} viewModel.currentSessionId)`")
 
     # --- 3/4. call-block arguments ---
-    for start, end, spec in SCREEN_CALL_SPECS:
-        block = extract_call_block(screen, start, end)
-        if not block:
-            errors.append(f"ChatScreen.kt: call site `{start}` not found")
-            continue
-        if spec["required"] not in block:
-            errors.append(
-                f"ChatScreen.kt: `{spec['label']}` must pass `sessionId = viewModel.currentSessionId`"
-            )
+    # [B7-t01] (dataflow) The argument has to BE the live id, not merely contain
+    # it: `sessionId = viewModel.currentSessionId.let { sessionId }` keeps the
+    # whole compliant substring and hands the composer the stale draft key.
+    for start, _end, spec in SCREEN_CALL_SPECS:
+        errors.extend(_live_id_arg_violations(screen, start, spec))
 
     # --- 5. AppNavigation route builders resolve through the alias table ---
     for label, needle in (
@@ -1991,6 +1982,11 @@ def check(root: Path) -> int:
     #     ChatViewModel-typed receiver), so a new entry — or a new file — is
     #     covered without editing this gate. ---
     errors.extend(_session_barrier_violations_in(root))
+
+    # [B7-t01] 词法解析失败 fail-closed（parser-death 轴）：结构视图不可信时
+    # 判据既不能静默放行，也不能回退成原文扫描，只能报违规。
+    for msg in sorted(set(_LEX_FAILS)):
+        errors.append("structural view failed (fail-closed): %s" % msg)
 
     if errors:
         for e in errors:
@@ -3398,13 +3394,132 @@ def selftest() -> int:
         else:
             print(f"selftest: {name} -> RED ({len(errs)} violation(s)) OK")
 
+    # ── [B7-t01] 第七批见证（10-1 .. 10-6）：判据从「拼写存在」推到「值真的
+    # 被消费」。每条都是报告里的 find→replace 原文，重放到绿夹具上；随后是
+    # 三条 precision 臂，证明加牙没有把合法的 `.also {}` / 命名参数 / 真谓词
+    # 一并判红。
+    C3_INPUT_LET = screen.replace(
+        "ChatInputArea(\n    viewModel = viewModel,\n"
+        "    sessionId = viewModel.currentSessionId,\n",
+        "ChatInputArea(\n    viewModel = viewModel,\n"
+        "    sessionId = viewModel.currentSessionId.let { sessionId },\n",
+    )
+    C3_WEBAPP_LET = screen.replace(
+        "    fileName = target.fileName,\n"
+        "    sessionId = viewModel.currentSessionId,\n",
+        "    fileName = target.fileName,\n"
+        "    sessionId = viewModel.currentSessionId.let { sessionId },\n",
+    )
+    C3_CLEAN_ALSO = screen.replace(
+        "ChatInputArea(\n    viewModel = viewModel,\n"
+        "    sessionId = viewModel.currentSessionId,\n",
+        "ChatInputArea(\n    viewModel = viewModel,\n"
+        "    sessionId = viewModel.currentSessionId.also { log(it) },\n",
+    )
+    C8_LET_TAIL = screen.replace(
+        "    val activeSessionId = ChatViewModelStore.resolveSessionId(viewModel.currentSessionId)\n",
+        "    val activeSessionId = ChatViewModelStore.resolveSessionId("
+        "viewModel.currentSessionId).let { sessionId }\n",
+    )
+    _OWNER_LINE = (
+        "val owner = runCatching { ChatViewModelStore.ownerFor(sessionId) }"
+        ".getOrNull() ?: return null")
+    C13_NUM_FOLD = FIXTURE_RUNNER.replace(
+        _OWNER_LINE,
+        "val owner = runCatching { ChatViewModelStore.ownerFor(sessionId) }"
+        ".getOrNull()?.takeIf { 1 == 2 } ?: return null",
+    )
+    C13_UNLESS_FOLD = FIXTURE_RUNNER.replace(
+        _OWNER_LINE,
+        "val owner = runCatching { ChatViewModelStore.ownerFor(sessionId) }"
+        ".getOrNull()?.takeUnless { !false } ?: return null",
+    )
+    C14_OR_TRUE = FIXTURE_RUNNER_BARRIER.replace(
+        "{ vm.sessionLoaded.first { it } }", "{ vm.sessionLoaded.first { it || true } }", 1)
+    C14_CLEAN_NAMED = FIXTURE_RUNNER_BARRIER.replace(
+        "{ vm.sessionLoaded.first { it } }",
+        "{ vm.sessionLoaded.first { loaded -> loaded } }", 1)
+    C15_DEAD_RETURN = FIXTURE_RUNNER_DROP_DELEGATED.replace(
+        "        if (!started) {\n            return@withContext droppedSendResult()\n        }\n",
+        "        if (!started) {\n"
+        "            if (false) return@withContext droppedSendResult()\n        }\n",
+    )
+    C16_TAKEIF = FIXTURE_RUNNER.replace(
+        "existingBinding = app.chatRepository.dao.getSession(sessionId)?.modelBinding,",
+        "existingBinding = app.chatRepository.dao.getSession(sessionId)"
+        "?.modelBinding?.takeIf { false },",
+    )
+
+    _C3_MSG = "must pass `sessionId = viewModel.currentSessionId`"
+    dirty_arms = (
+        ("B7 10-1 ChatInputArea hands over `.let { sessionId }` (dataflow)", _C3_MSG,
+         (C3_INPUT_LET, nav, move, FIXTURE_STORE, None, None, None, None),
+         C3_INPUT_LET != screen),
+        ("B7 10-1b WebApp attachment hands over `.let { sessionId }` (dataflow)", _C3_MSG,
+         (C3_WEBAPP_LET, nav, move, FIXTURE_STORE, None, None, None, None),
+         C3_WEBAPP_LET != screen),
+        ("B7 10-2 activeSessionId resolves then `.let { sessionId }` (dataflow)",
+         "bare route arg",
+         (C8_LET_TAIL, nav, move, FIXTURE_STORE, None, None, None, None),
+         C8_LET_TAIL != screen),
+        ("B7 10-3 store fallback filtered by `1 == 2` (family-hole)", "constant-false",
+         (screen, nav, move, FIXTURE_STORE, FIXTURE_ACTIVITY, C13_NUM_FOLD, None, None),
+         C13_NUM_FOLD != FIXTURE_RUNNER),
+        ("B7 10-3b store fallback filtered by `!false` (family-hole)", "constant-false",
+         (screen, nav, move, FIXTURE_STORE, FIXTURE_ACTIVITY, C13_UNLESS_FOLD, None, None),
+         C13_UNLESS_FOLD != FIXTURE_RUNNER),
+        ("B7 10-4 latch wait predicate `it || true` (dataflow)",
+         "ignores the value it waits for",
+         (screen, nav, move, FIXTURE_STORE, FIXTURE_ACTIVITY, C14_OR_TRUE, None, None),
+         C14_OR_TRUE != FIXTURE_RUNNER_BARRIER),
+        ("B7 10-5 `!started` guard's return sits in `if (false)` (family-hole)",
+         "does not return a structured error",
+         (screen, nav, move, FIXTURE_STORE, FIXTURE_ACTIVITY, C15_DEAD_RETURN, None, None),
+         C15_DEAD_RETURN != FIXTURE_RUNNER_DROP_DELEGATED),
+        ("B7 10-6 existingBinding filtered by `?.takeIf { false }` (dataflow)",
+         "not what the decision is fed",
+         (screen, nav, move, FIXTURE_STORE, FIXTURE_ACTIVITY, C16_TAKEIF, None, None),
+         C16_TAKEIF != FIXTURE_RUNNER),
+    )
+    clean_arms = (
+        ("B7 precision: `.also { log(it) }` on the passed id is still green",
+         (C3_CLEAN_ALSO, nav, move, FIXTURE_STORE, None, None, None, None),
+         C3_CLEAN_ALSO != screen),
+        ("B7 precision: a named latch parameter is still green",
+         (screen, nav, move, FIXTURE_STORE, FIXTURE_ACTIVITY, C14_CLEAN_NAMED, None, None),
+         C14_CLEAN_NAMED != FIXTURE_RUNNER_BARRIER),
+    )
+
+    for name, expect, tree, changed in dirty_arms:
+        if not changed:
+            failures.append(f"{name}: mutation is a no-op (anchor not found)")
+            continue
+        rc, errs = run_tree(*tree)
+        if rc == 0 or not [e for e in errs if expect in e]:
+            failures.append(f"{name}: expected a `{expect}` violation, got {errs}")
+        else:
+            print(f"selftest: {name} -> RED ({len(errs)} violation(s)) OK")
+
+    for name, tree, changed in clean_arms:
+        if not changed:
+            failures.append(f"{name}: mutation is a no-op (anchor not found)")
+            continue
+        rc, errs = run_tree(*tree)
+        if rc != 0:
+            failures.append(f"{name}: gate went RED on a legal shape: {errs}")
+        else:
+            print(f"selftest: {name} -> stays GREEN OK")
+
+    b7_arms = len(dirty_arms) + len(clean_arms)
+    print(f"selftest: B7 witness arms = {b7_arms} (dirty {len(dirty_arms)} / clean {len(clean_arms)})")
+
     if failures:
         print("\nselftest FAILURES:")
         for f in failures:
             print(f"  - {f}")
         print("CHAT_SESSION_ID_BINDING_SELFTEST=FAIL")
         return 1
-    print("CHAT_SESSION_ID_BINDING_SELFTEST=PASS")
+    print("CHAT_SESSION_ID_BINDING_SELFTEST=PASS (%d B7 arms)" % b7_arms)
     return 0
 
 
