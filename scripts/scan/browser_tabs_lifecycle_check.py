@@ -122,6 +122,23 @@ Hardening applied to every arm rather than to the one that was attacked:
     shared by C4f and C11 — an arm cannot be hardened while its sibling keeps
     matching on spelling.
 
+[R3-t03] Third-round witness attack (dual-gate seams + one symmetry axis).
+Three more "the tokens are all here, the effect is not" holes, each derived from
+the tree:
+  C3b the orphan sweep's delete must be gated on the stem being *absent* from
+      the derived live-set parameter (`… !in live` / `!live.contains(…)` / a
+      preceding `if (… in live) return/continue`). Witness 81 flips the
+      polarity to `stem in liveSessionIds`: every token C3 greps for is still
+      present, and one reclaim pass wipes every LIVE session's saved tabs.
+  C6b the `withPath = { entry, path -> … }` callback handed to
+      `remapDownloadDestinations(` must write the remapped path into the same
+      field `pathOf` reads (derived). Witness 79 returns the entry untouched —
+      downloads keep pointing at the deleted `__new__<uuid>` workspace.
+  C6c `loadSavedState` must dispatch the restore entry point (derived: the
+      member that both reads `savedURLs` and calls `createTab(`) on a reachable
+      path. Witness 80 rewrites the guard to `false && savedURLs.isNotEmpty()`:
+      the call is still spelled, and the tab strip comes back empty.
+
 Usage: python3 browser_tabs_lifecycle_check.py <repo_root>
        python3 browser_tabs_lifecycle_check.py --root <repo_root>
        python3 browser_tabs_lifecycle_check.py --selftest
@@ -135,10 +152,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Shared primitives (batch-5 discipline: this gate keeps its criteria but no
 # longer carries its own lexer / bracket matcher / dead-branch regex).
-from _kotlin_ast import const_bool, match_bracket, split_top, strip_parens
-from _kotlin_valueflow import (KotlinLexError, brace_depth, code_view,
+from _kotlin_ast import (const_bool, enclosing_conditions, if_blocks, match_bracket,
+                         split_top, strip_parens)
+from _kotlin_valueflow import (KotlinLexError, brace_depth, call_args, code_view,
                                contains_ident, expr_end, guard_feasible,
-                               literal_view, returns_exiting, value_sources)
+                               literal_view, path_feasible, returns_exiting,
+                               value_sources)
 
 PKG = "src/android/app/src/main/java/com/rikkaminis/app/data/storage"
 TARGET = "SessionFileStore.kt"
@@ -179,6 +198,105 @@ _MEMBER_HEAD_RE = re.compile(
     r"^(?:@|(?:public|private|internal|protected|override|suspend|inline|operator|"
     r"open|abstract|fun|val|var|class|object|init)\b)"
 )
+
+
+# ── [R3-t03 W81] 孤儿回收的布尔极性（对称轴：`!in live` vs `in live`）───────
+ORPHAN_DELETE = re.compile(r"\.\s*delete\s*\(\s*\)")
+LIVE_EXIT = re.compile(r"\breturn\b|\bcontinue\b|\bbreak\b")
+
+
+def _live_set_param(code: str, header: str):
+    """`fun deleteOrphanBrowserTabFiles(live: Set<String>)` 的集合形参名。
+
+    从签名派生，不写死 `liveSessionIds` —— 改名不该让判据失明，删掉这个形参
+    才该报红（fail-closed）。
+    """
+    idx = code.find(header)
+    if idx < 0:
+        return None
+    op = code.find("(", idx)
+    if op < 0:
+        return None
+    cp = match_bracket(code, op)
+    if cp < 0:
+        return None
+    for a, b in split_top(code[op + 1:cp], (",",)):
+        decl = code[op + 1 + a:op + 1 + b]
+        name, _, typ = decl.partition(":")
+        if re.search(r"\b(?:Set|Collection|MutableSet)\s*<", typ):
+            nm = name.strip().split()[-1] if name.strip() else ""
+            if re.fullmatch(r"[A-Za-z_]\w*", nm or ""):
+                return nm
+    return None
+
+
+def _membership_kind(conjunct: str, live: str):
+    """一个合取项对 live 集合的归属判定 -> 'pos' | 'neg' | None。
+
+    `neg` 表示「不在活集合里」。`else` 分支的条件由 `enclosing_conditions`
+    前置 `!`，所以先剥一层否定再看形态。
+    """
+    c = strip_parens(conjunct).strip()
+    neg = False
+    if c.startswith("!"):
+        neg = True
+        c = strip_parens(c[1:]).strip()
+    if re.search(r"!\s*in\s+%s\b" % re.escape(live), c):
+        return "neg"
+    if re.search(r"\bin\s+%s\b" % re.escape(live), c):
+        return "neg" if neg else "pos"
+    if re.search(r"%s\s*\??\s*\.\s*contains\s*\(" % re.escape(live), c):
+        return "neg" if neg else "pos"
+    return None
+
+
+def _preceding_live_exit(body: str, pos: int, live: str) -> bool:
+    """`if (stem in live) return/continue` 形态的早退守卫（等价写法）。
+
+    删除语句本身不带条件（`forEach` 体内），极性住在前面那条早退守卫里。
+    """
+    for cond, t_start, t_end, _, _ in if_blocks(body):
+        if t_end > pos:
+            continue
+        kinds = [_membership_kind(cond[a:b], live)
+                 for a, b in split_top(cond, ("&&",))]
+        if "pos" not in kinds:
+            continue
+        if LIVE_EXIT.search(body[t_start:t_end]):
+            return True
+    return False
+
+
+def _orphan_delete_gate(body: str, live: str) -> list:
+    """W81 — 删除必须发生在「不在活集合里」时，且必须真的发生。"""
+    sites = list(ORPHAN_DELETE.finditer(body))
+    if not sites:
+        return ["C3b: the orphan sweep no longer deletes anything (`file.delete()` is "
+                "gone from deleteOrphanBrowserTabFiles) — orphan browser_tabs state "
+                "accumulates on disk forever (fail-closed)"]
+    out = []
+    for m in sites:
+        kinds = []
+        conds = [c for _, c in enclosing_conditions(body, m.start())]
+        for cond in conds:
+            for a, b in split_top(cond, ("&&",)):
+                k = _membership_kind(cond[a:b], live)
+                if k:
+                    kinds.append(k)
+        if "pos" in kinds:
+            out.append(
+                "C3b: the orphan sweep deletes a tab-state file when the session IS live "
+                "(`%s` membership positively guards the delete) — the polarity is "
+                "inverted: one reclaim pass wipes every live session's saved tabs and "
+                "viewport, while the real orphans survive (W81)" % live)
+        elif not any(k == "neg" for k in kinds):
+            if _preceding_live_exit(body, m.start(), live):
+                continue
+            out.append(
+                "C3b: the delete is not gated on the live-set at all (no `… !in %s` / "
+                "`!%s.contains(…)` guard and no preceding `if (… in %s) return`) — a "
+                "reclaim pass cannot tell a live session from an orphan (W81)" % (live, live, live))
+    return out
 
 
 def slice_body(src: str, header: str) -> str:
@@ -383,6 +501,19 @@ def check_source(source: str) -> list:
         # callers never copied it. Draft coverage is now decided by the shape
         # predicate itself (C7) and is fail-closed there; a call-site literal
         # is rejected by C7's single-literal count.
+        # ── [R3-t03 W81] 删了 ≠ 删对了：布尔极性 ─────────────────────────
+        # C3 此前只问「函数体里有没有 looksLikeSessionId(」。把
+        # `stem !in liveSessionIds` 翻成 `stem in liveSessionIds`，谓词还在、
+        # 调用还在、门全绿 —— 而后果是**所有活会话**的 browser_tabs 状态与
+        # 视口设置被删光、孤儿反而留下。判据落到决定：deletes 必须只在
+        # 「stem 不在活集合里」时发生。
+        live_param = _live_set_param(src, "fun deleteOrphanBrowserTabFiles")
+        if not live_param:
+            errs.append(
+                "C3b: deleteOrphanBrowserTabFiles declares no `Set<…>` live-set parameter "
+                "(fail-closed: the sweep can no longer tell live from orphan)")
+        else:
+            errs.extend(_orphan_delete_gate(orphan_body, live_param))
 
     # --- [da1040-A3] C7: the session-shape predicate carries BOTH shapes ---
     if not re.search(r"const val DRAFT_ID_PREFIX\s*=\s*\"__new__\"", lit):
@@ -749,7 +880,159 @@ def check_pool_source(pool_src: str) -> list:
                 "C6: setSession never re-points download destinations onto the new session "
                 "workspace — the draft-promotion path leaves every record pointing at the "
                 "deleted __new__<uuid> directory and its open button dies silently")
+        # ── [R3-t03 W79] 重映射回调必须真的写回新路径 ────────────────────
+        # C6 只判「remapDownloadDestinations( 在这、_downloads.update 在这」。
+        # 把回调改成 `{ entry, _ -> entry }`，两边都在、`_downloads` 也确实
+        # 走了原子更新 —— 而每条记录的 destination 仍指向已被迁移删除的旧
+        # 草稿目录，下载面板的「打开」在 file.exists() 上静默失效。
+    errs.extend(_remap_callback_effect(code))
+
+    # ── [R3-t03 W80] 恢复标签页的派发必须真的发生 ─────────────────────────
+    # C4f 判的是 restoreSavedTabs 内部的处置闩；C6 判的是 loadSavedState 是
+    # setSession 的最后一步。中间那一步——loadSavedState 到底有没有把重建
+    # 派发出去——两门都不管：`if (false && savedURLs.isNotEmpty())` 保留了
+    # 全部 token，切回会话/重启后标签栏一片空白。
+    errs.extend(_restore_dispatch_effect(code))
     return errs
+
+
+# ── [R3-t03] W79 / W80 helpers ─────────────────────────────────────────────
+WITH_PATH = re.compile(r"\bwithPath\s*=\s*\{")
+PATH_OF = re.compile(r"\bpathOf\s*=\s*\{")
+
+
+def _lambda_parts(text: str, open_pos: int):
+    """`{ params -> body }` -> (params, body) 或 (None, None)。"""
+    close = match_bracket(text, open_pos)
+    if close < 0:
+        return None, None
+    inner = text[open_pos + 1:close]
+    arrow = inner.find("->")
+    if arrow < 0:
+        return None, None
+    params = [p.strip() for p in inner[:arrow].strip().split(",") if p.strip()]
+    return params, inner[arrow + 2:].strip()
+
+
+def _lambda_tail(body: str) -> str:
+    """lambda 的结果表达式（最后一个裸 return，或最后一条语句）。"""
+    rets = [m for m in re.finditer(r"\breturn\b(?!@)", body)]
+    if rets:
+        return body[rets[-1].end():expr_end(body, rets[-1].end())].strip()
+    parts = split_top(body, (";",))
+    if parts:
+        return body[parts[-1][0]:parts[-1][1]].strip()
+    return body.strip()
+
+
+def _remap_path_field(body: str) -> str:
+    """`pathOf = { entry -> entry.destination }` 读的字段名（取不到返回 ''）。"""
+    m = PATH_OF.search(body)
+    if not m:
+        return ""
+    _, lam = _lambda_parts(body, m.end() - 1)
+    if not lam:
+        return ""
+    tail = _lambda_tail(lam)
+    f = re.search(r"\.\s*([A-Za-z_]\w*)\s*$", tail)
+    return f.group(1) if f else ""
+
+
+def _enclosing_fun_body(code: str, pos: int) -> str:
+    """覆盖 [pos] 的函数体（按 `fun NAME(` 逐个切片派生，取不到返回 ''）。"""
+    for m in re.finditer(r"\bfun\s+([A-Za-z_]\w*)\s*\(", code):
+        if m.start() > pos:
+            break
+        body = slice_body(code, "fun " + m.group(1))
+        if not body:
+            continue
+        start = code.find(body, m.end())
+        if 0 <= start <= pos < start + len(body):
+            return body
+    return ""
+
+
+def _remap_callback_effect(code: str) -> list:
+    """W79 — `withPath` 必须把重映射后的新路径写进记录本身。
+
+    判据锚在**供出回调的那个函数**（`remapDownloadDestinations(` 的调用点
+    所在函数体），而不是写死 `setSession`：把重映射抽成 helper 是正当重构，
+    判据必须跟着回调走。
+    """
+    sites = [m.start() for m in re.finditer(r"\bremapDownloadDestinations\s*\(", code)]
+    if not sites:
+        return ["C6b: no `remapDownloadDestinations(` call site — the download re-point "
+                "moved to an API this criterion does not know (ROT: re-pin it on the new "
+                "path-writeback decision)"]
+    out = []
+    for pos in sites:
+        body = _enclosing_fun_body(code, pos)
+        if not body:
+            out.append("C6b: the `remapDownloadDestinations(` call at line %d is not "
+                       "inside a function body (fail-closed)"
+                       % (code.count("\n", 0, pos) + 1))
+            continue
+        out.extend(_remap_callback_effect_in(body))
+    return out
+
+
+def _remap_callback_effect_in(body: str) -> list:
+    m = WITH_PATH.search(body)
+    if not m:
+        return ["C6b: the remap call no longer supplies a `withPath = { entry, path -> … }` "
+                "callback — remapDownloadDestinations is handed no way to rewrite a "
+                "destination, so every record keeps the old path (fail-closed)"]
+    params, lam = _lambda_parts(body, m.end() - 1)
+    if not params or len(params) < 2:
+        return ["C6b: the `withPath` callback does not take the remapped path as its "
+                "second parameter (fail-closed: the write-back cannot be judged)"]
+    path_param = params[1]
+    field = _remap_path_field(body)
+    tail = _lambda_tail(lam or "")
+    if not tail:
+        return ["C6b: the `withPath` callback has no result expression (fail-closed)"]
+    writes_field = bool(field) and bool(
+        re.search(r"\b%s\s*=(?!=)" % re.escape(field), tail))
+    if not (contains_ident(tail, path_param) and writes_field):
+        return [
+            "C6b: the `withPath` callback returns `%s` without writing its own `%s` "
+            "parameter into `%s` — every download record keeps pointing at the deleted "
+            "`__new__<uuid>` workspace, so the panel's open button still dies on a path "
+            "that no longer exists while the file sits intact in the new directory (W79)"
+            % (tail[:70], path_param, field or "<destination>")]
+    return []
+
+
+def _restore_fn_name(code: str):
+    """既读 `savedURLs` 又调 `createTab(` 的那个成员（恢复入口，派生不写死）。"""
+    for m in re.finditer(r"\bfun\s+([A-Za-z_]\w*)\s*\(", code):
+        name = m.group(1)
+        body = slice_body(code, "fun " + name)
+        if body and "savedURLs" in body and re.search(r"\bcreateTab\s*\(", body):
+            return name
+    return None
+
+
+def _restore_dispatch_effect(code: str) -> list:
+    """W80 — `loadSavedState` 必须把标签页重建真的派发出去。"""
+    body = slice_body(code, "fun loadSavedState")
+    if not body:
+        return ["C6c: loadSavedState body not extractable (fail-closed)"]
+    restore = _restore_fn_name(code)
+    if not restore:
+        return ["C6c: no member both reads `savedURLs` and calls `createTab(` — the tab "
+                "restore entry point this criterion anchors on is gone (ROT: re-pin)"]
+    hits = [m.start() for m in re.finditer(r"\b%s\s*\(" % re.escape(restore), body)]
+    if not hits:
+        return ["C6c: loadSavedState never dispatches `%s(` — the saved URLs are parsed "
+                "and the viewport is replayed, but no tab is ever rebuilt: switching back "
+                "to a session (or restarting) shows an empty tab strip while the state "
+                "file still holds every URL (W80)" % restore]
+    if not any(not _pos_dead(body, p) for p in hits):
+        return ["C6c: every `%s(` in loadSavedState sits on a statically-dead path "
+                "(`if (false && savedURLs.isNotEmpty())` …) — the restore is never "
+                "dispatched, so the tab strip comes back empty (W80)" % restore]
+    return []
 
 
 # --- [fix/dv14-B2] C4 fixtures (pool teardown ordering) ---
@@ -908,6 +1191,39 @@ class BrowserTabPool(context: Context) {
         _tabs.value.forEach { it.manager.minisSessionId = sessionId }
         loadSavedState()
     }
+
+    // [R3-t03 W80] the restore dispatch the compliant shape must carry: the
+    // saved URLs are parsed, then the rebuild is dispatched (async on Main).
+    private fun loadSavedState() {
+        val sid = sessionId ?: return
+        val file = File(context.filesDir, "browser_tabs/$sid.json")
+        if (!file.exists()) return
+        val json = JSONObject(file.readText())
+        savedURLs.clear()
+        val urlsJson = json.optJSONObject("tabURLs")
+        if (urlsJson != null) {
+            val keys = urlsJson.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                savedURLs[key.toInt()] = urlsJson.getString(key)
+            }
+        }
+        if (savedURLs.isNotEmpty()) {
+            evictionScope.launch { withContext(Dispatchers.Main) { restoreSavedTabs() } }
+        }
+    }
+
+    private fun restoreSavedTabs() {
+        if (isDisposed) return
+        val currentTabs = _tabs.value.toMutableList()
+        for (id in plan.restoreIds) {
+            val url = savedURLs[id] ?: continue
+            createTab(currentTabs, url, explicitId = id) ?: break
+        }
+        if (restored > 0) {
+            saveState()
+        }
+    }
 }
 """
 
@@ -966,6 +1282,50 @@ POOL_V_SESSION_NO_REMAP = POOL_COMPLIANT.replace(
 POOL_V_SESSION_PLAIN_ASSIGN = POOL_COMPLIANT.replace(
     "            _downloads.update { current ->\n",
     "            _downloads.value = _downloads.value\n            _downloads.update { current ->\n",
+)
+
+# ── [R3-t03 W79] 重映射回调留下的三种「拼写都在、效果不在」─────────────
+# 见证原文：回调原样返回 entry（目的路径从不写回）。
+POOL_V_REMAP_ENTRY_ONLY = POOL_COMPLIANT.replace(
+    "                    withPath = { entry, path -> entry.copy(destination = path) },\n",
+    "                    withPath = { entry, path -> entry },\n",
+)
+# 见证原文的第二种拼写：参数名换成 `_`（连「看得见新路径」都不成立）
+POOL_V_REMAP_UNDERSCORE = POOL_COMPLIANT.replace(
+    "                    withPath = { entry, path -> entry.copy(destination = path) },\n",
+    "                    withPath = { entry, _ -> entry },\n",
+)
+# 看得见 path，却写进了别的字段（destination 仍是旧路径）
+POOL_V_REMAP_WRONG_FIELD = POOL_COMPLIANT.replace(
+    "                    withPath = { entry, path -> entry.copy(destination = path) },\n",
+    "                    withPath = { entry, path -> entry.copy(seen = path.isNotEmpty()) },\n",
+)
+# clean：参数改名 + 拆行（同一个决定的另一种拼写）
+POOL_C_REMAP_RENAMED = POOL_COMPLIANT.replace(
+    "                    withPath = { entry, path -> entry.copy(destination = path) },\n",
+    "                    withPath = { entry, dest ->\n"
+    "                        entry.copy(\n"
+    "                            destination = dest,\n"
+    "                        )\n"
+    "                    },\n",
+)
+
+# ── [R3-t03 W80] 恢复派发被摘掉 / 被恒假闸门吞掉 ──────────────────────────
+POOL_V_LOAD_NO_DISPATCH = POOL_COMPLIANT.replace(
+    "        if (savedURLs.isNotEmpty()) {\n"
+    "            evictionScope.launch { withContext(Dispatchers.Main) { restoreSavedTabs() } }\n"
+    "        }\n", "")
+# 见证原文：`if (false && savedURLs.isNotEmpty())`
+POOL_V_LOAD_DEAD_DISPATCH = POOL_COMPLIANT.replace(
+    "        if (savedURLs.isNotEmpty()) {\n"
+    "            evictionScope.launch { withContext(Dispatchers.Main) { restoreSavedTabs() } }",
+    "        if (false && savedURLs.isNotEmpty()) {\n"
+    "            evictionScope.launch { withContext(Dispatchers.Main) { restoreSavedTabs() } }",
+)
+# clean：多加一个条件（`&& !isDisposed`）不是同一个决定，必须仍绿
+POOL_C_LOAD_EXTRA_GUARD = POOL_COMPLIANT.replace(
+    "        if (savedURLs.isNotEmpty()) {",
+    "        if (savedURLs.isNotEmpty() && !isDisposed) {",
 )
 
 # C4a: the pre-fix dispose re-persisted the (possibly just-deleted) session.
@@ -1878,6 +2238,31 @@ class SessionFileStore internal constructor(
         "            val isSessionShaped = stem.isNotEmpty()",
     )
 
+    # ── [R3-t03 W81] 极性：谓词在、调用在、删除发生在反的那一侧 ──────────
+    # 见证原文逐字：`stem !in liveSessionIds` → `stem in liveSessionIds`。
+    # C3 只问「函数体里有没有 looksLikeSessionId(」，翻转布尔它毫无知觉 ——
+    # 后果是一次回收把**每个活会话**的浏览器状态与视口设置删光。
+    v11 = compliant.replace(
+        "if (isSessionShaped && stem !in liveSessionIds) file.delete()",
+        "if (isSessionShaped && stem in liveSessionIds) file.delete()",
+    )
+    # W81 self-doubt：`!in live` 整体删掉 —— 谓词与调用都在，永不删除
+    v12 = compliant.replace(
+        "            if (isSessionShaped && stem !in liveSessionIds) file.delete()\n",
+        "            if (isSessionShaped) Unit\n",
+    )
+    # clean：等价的极性写法 —— 守卫用正向成员测试 + 早退，删除留给其余分支
+    v13 = compliant.replace(
+        "            if (isSessionShaped && stem !in liveSessionIds) file.delete()\n",
+        "            if (isSessionShaped && stem in liveSessionIds) return@forEach\n"
+        "            if (isSessionShaped) file.delete()\n",
+    )
+    # clean：`!liveSessionIds.contains(stem)` 是同一个决定的另一种拼写
+    v14 = compliant.replace(
+        "if (isSessionShaped && stem !in liveSessionIds) file.delete()",
+        "if (isSessionShaped && !liveSessionIds.contains(stem)) file.delete()",
+    )
+
     arms = [
         ("compliant", compliant, []),
         ("V1 delete-path missing tab file", v1, ["C2"]),
@@ -1890,6 +2275,10 @@ class SessionFileStore internal constructor(
         ("V8 hardcoded draft provider", v8, ["C8"]),
         ("V9 widener stops consulting the provider", v9, ["C8"]),
         ("V10 orphan body bypasses the shape predicate", v10, ["C3"]),
+        ("W81 V11 orphan delete polarity inverted", v11, ["C3b"]),
+        ("W81 V12 orphan delete never runs (predicate kept)", v12, ["C3b"]),
+        ("W81 V13 clean: early-exit guard spelling", v13, []),
+        ("W81 V14 clean: !contains( spelling)", v14, []),
     ]
     failures = 0
     for name, sample, expect in arms:
@@ -1934,6 +2323,13 @@ class SessionFileStore internal constructor(
         ("C5 notice merged through one extra local stays green", POOL_OK_RISK_TWO_HOP, []),
         ("C6 setSession forgets to re-point downloads", POOL_V_SESSION_NO_REMAP, ["C6"]),
         ("C6 setSession rewrites _downloads by assignment", POOL_V_SESSION_PLAIN_ASSIGN, ["C6"]),
+        ("W79 remap callback returns the entry untouched", POOL_V_REMAP_ENTRY_ONLY, ["C6b"]),
+        ("W79 remap callback discards the new path (`_`)", POOL_V_REMAP_UNDERSCORE, ["C6b"]),
+        ("W79 remap callback writes a different field", POOL_V_REMAP_WRONG_FIELD, ["C6b"]),
+        ("W79 clean: renamed param + multi-line copy", POOL_C_REMAP_RENAMED, []),
+        ("W80 loadSavedState drops the restore dispatch", POOL_V_LOAD_NO_DISPATCH, ["C6c"]),
+        ("W80 restore dispatch dead-wrapped by `false &&`", POOL_V_LOAD_DEAD_DISPATCH, ["C6c"]),
+        ("W80 clean: an extra live guard on the dispatch", POOL_C_LOAD_EXTRA_GUARD, []),
     ]
     for name, sample, expect in pool_arms:
         errs = check_pool_source(sample)
@@ -2084,7 +2480,7 @@ def main() -> int:
         for e in errs:
             print(f"  - {e}")
         return 1
-    print("browser_tabs_lifecycle_check OK (criteria: C1-C3 store lifecycle + C4/C4d pool teardown + window.open/close persistence + C4e disposal cancels every pool-owned scope + C4f the disposal latch guards saveState/restoreSavedTabs + C5 risk notice reaches the agent text + C6 setSession re-points downloads atomically + C7 the session-shape predicate alone carries the draft alias + C8 every orphan entry folds the composer's active draft in + C9 the pool's busy signal is funnelled and observable + C10 every destroyTab caller re-derives it after settling the list)")
+    print("browser_tabs_lifecycle_check OK (criteria: C1-C3 store lifecycle + C4/C4d pool teardown + window.open/close persistence + C4e disposal cancels every pool-owned scope + C4f the disposal latch guards saveState/restoreSavedTabs + C5 risk notice reaches the agent text + C6 setSession re-points downloads atomically + C7 the session-shape predicate alone carries the draft alias + C8 every orphan entry folds the composer's active draft in + C9 the pool's busy signal is funnelled and observable + C10 every destroyTab caller re-derives it after settling the list + C3b the orphan sweep deletes only non-live sessions (polarity) + C6b the remap callback writes the remapped path back + C6c loadSavedState actually dispatches the restore)")
     return 0
 
 
