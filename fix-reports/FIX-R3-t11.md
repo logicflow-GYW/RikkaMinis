@@ -121,7 +121,25 @@ restore：六条全部 `git status --porcelain src` 干净、`sha256` 与原始�
 
 ## 6. CI
 
-（提交后回填）
+- run **`40314974547`** / **#2743** / job `121545175346` / attempt **1** / **success**
+  （workflow_dispatch，`2026-10-26T11:25:34Z` 创建，~18 min）
+- **head_sha `b181fe44cc14`** = 本地 HEAD 逐字符一致
+- 步骤：26 步，唯一 `skipped` = **step 23 Publish to Releases**（main 门控），其余全 success
+- job 日志 `probe/ci/job-2743.log`（1,482,954 B / NUL 0）逐条判读：
+
+| 判据 | 读数 |
+|---|---|
+| `Summary: 112 passed, 0 failed` | **恰 1 条**（11:28:40Z） |
+| `ALL 344 CASES PASS` | **恰 1 条**（11:33:15Z） |
+| `^ e: ` | **0 条** |
+| 含 `FAILED` 的行 | 6 条，**全部是以 `PASSED` 结尾的用例名子串**（`… produces FAILED without calling provider PASSED` 等） |
+| 门头 `[N/112]` | 112 条，编号互异 1..112 |
+| 本门见证行 | `✅ discarded_return_guard selftest has teeth (binary-write self-test has teeth)`、`✅ discarded_return_guard real tree green`、`✅ provider_remember_key_check selftest has teeth (PROVIDER_REMEMBER_SELFTEST=PASS)`、`✅ provider_remember_key_check real tree green` 各 1 |
+
+**注意**：`DISCARDED_RETURN_GUARD_SELFTEST=PASS (69 arms)` 只在本地可见（门自证 stdout 不进
+CI 日志，见 §7 R8）；CI 侧对 DRG 的见证是既有的 `binary-write self-test has teeth` 断言。
+
+**停止节点**：分支 CI 绿。**未合并 main**（起手权在用户 / 主会话）。
 
 ## 7. 残留（均带 触发条件 / 触发后方案 / 搁置理由）
 
