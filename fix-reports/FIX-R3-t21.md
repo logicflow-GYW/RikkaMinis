@@ -70,12 +70,20 @@ restore 后 `git status --porcelain src/` 逐变体 = 0（`probe/t21-post.log` 9
 1. **本门**：真树双 rc=0；`--selftest`：`DEEPLINK_SETTINGS_ROUTES_SELFTEST=PASS (51 arms)`、`OPEN_URL_BROKER_SCHEME_SELFTEST=PASS (100 arms)`（收尾标记稳定，供 test_scan 冻结断言）。
 2. **反攻复证**：pre 17/17 BLIND（stash 干净基线）→ post 9/9 CAUGHT，逐变体红在自家判据，restore 全 True；JSON：`probe/t21-pre.json` / `probe/t21-post.json`。
 3. **邻门**：8 个语义相邻门 rc=0（`log_url_redaction_guard` / `offload_cli_args_check` / `offload_host_path_check` / `session_provider_enabled_check` / `provider_write_rules_check` / `webview_holder_url_source_check` / `file_uri_parse_guard_check` / `mirror_category_route_check`）+ 反攻内 `file_provider_paths_coverage_check` / `chat_session_id_binding_check` rc=0。
-4. **全量**：逐门循环两次被沙箱 ENOSYS 风暴打断（S28 变体：第一次 `>/dev/null` 重定向间歇失败产生 90 假红、第二次命令替换形态跑到 30/111 全绿后死于 `four_way_sync_check` 的 `makedirs('/')` 沙箱交互）——按既定纪律**降级：全量证据由分支 CI 承担**（本仓 CI 跑 scan.sh + test_scan.py）。test_scan.py 本地后台尝试见 §6 回填。
-5. **CI**：见 §6。
+4. **全量**：逐门循环两次被沙箱 ENOSYS 风暴打断（S28 变体：第一次 `>/dev/null` 重定向间歇失败产生 90 假红、第二次命令替换形态跑到 30/111 全绿后死于 `four_way_sync_check` 的 `makedirs('/')` 沙箱交互）——按既定纪律**降级：全量证据由分支 CI 承担**（本仓 CI 跑 scan.sh + test_scan.py）。test_scan.py 本地后台尝试在 exec_gate_release 段停滞 40+ 分钟（同窗口 ENOSYS）→ 已终止；CI 侧 `ALL 344 CASES PASS` 恰一条为权威全量读数。
+5. **CI**：run `40314183278` **success**，head_sha 与本地 HEAD 逐字符一致（见 §6）。
 
-## 6. CI（回填区）
+## 6. CI（已回填）
 
-（push 后回填：run id / job / head_sha 三方一致 / `Summary: 112 passed, 0 failed` 恰一条 / `ALL 344 CASES PASS` 恰一条 / 门头 112 互异 / `^ e: ` 0 / 唯一 skipped=Publish。）
+- **run** `40314183278` / **#2740** / job `121542522653` / attempt 1 **success**（workflow_dispatch 2026-10-26T11:19:16Z，本地 HEAD `460b421e5753a36c381f7b96d773ff3534bebfd0` 与 CI head_sha **逐字符一致**）
+- 日志 `probe/t21-ci-job.log`（1,487,558 B / NUL 0）逐条核：
+  - `Summary: 112 passed, 0 failed` 恰 **1** 条
+  - `ALL 344 CASES PASS` 恰 **1** 条
+  - 门头 `[N/112]` 互异 = **112** 个
+  - `^ e: ` = **0** 条（Kotlin 编译零错误）
+  - 6 条含 FAILED 的行逐条确认全是 PASSED 用例名子串（RealAgentAdapterSkeletonTest slot-denied / ChatAgentTraceObserverSchemaTest ×4 / TerminalErrorSurfacedTest legal-FAILED-terminal）
+  - 两门 selftest 标记各 1（⇒ 51 臂 / 100 臂在 CI 真跑）
+- **停止节点达成：分支 CI 绿，未合并 main（起手权在用户）**
 
 ## 7. 残留（P2，各带三件）
 
