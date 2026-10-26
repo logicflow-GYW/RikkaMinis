@@ -2006,9 +2006,14 @@ def check_provider_detail_live_state(code):
         bad = []
         for m in calls:
             args = call_args(code, m.end() - 1) or ""
-            if LIVE_RESOLVER_NAME + "(" in args:
-                continue
-            if any(re.search(r"\b" + re.escape(v) + r"\b", args) for v in live_locals):
+            # [R3-t11 见证 #138] Same decision as C22 one screen over: grade the
+            # VALUE SOURCES, not the spelling. The old test here only asked
+            # whether the live name appeared somewhere in the argument text, so
+            # `instance.copy(isEnabled = it).also { live }` — whose value is the
+            # render-frame snapshot, with `live` merely mentioned inside a
+            # discarding lambda — passed. A toggle then wrote the stale record
+            # back over an external minis-config / RPC / restore update.
+            if _live_write_arg(args, live_locals):
                 continue
             bad.append("L%d: `%s` is the render-frame object"
                        % (code.count("\n", 0, m.start()) + 1, " ".join(args.split())[:70]))
@@ -3035,6 +3040,14 @@ CHECKERS = (
     (REL_MODEL_PICKER_SHEET, check_active_entry_single_source),
     (REL_MODEL_PICKER_SHEET, check_elvis_after_else_null),
     (REL_CHAT_SCREEN, check_group_member_resolution),
+    # [R3-t11 见证 #136] C35 was anchored on the picker / group-detail screens
+    # only. The chat screen resolves an entry id too — in the local helper
+    # `fun entryById(entryId)` that feeds the non-text-model confirmation — and
+    # nothing graded it: the surface kept passing C34 (its member block does
+    # consult the single source) while its OWN id lookup had degraded to
+    # `config.modelEntries.find { … }`, silently resolving a System voice
+    # sentinel to null so the confirmation never fired.
+    (REL_CHAT_SCREEN, check_active_entry_single_source),
     # dv27-B3 — the group detail screen resolves the same members the pickers
     # do, and C35/C36 were only ever mounted on the PICKER surface. 「The
     # criterion exists but was never wired to this file」 is exactly how three
@@ -3264,6 +3277,14 @@ FIX_PROVIDER_DETAIL_SNAPSHOT_WRITE = FIX_PROVIDER_DETAIL_CLEAN.replace(
     "    val live = currentInstance()\n"
     "    providerRepository.updateInstance(live.copy(isEnabled = true))",
     "    providerRepository.updateInstance(instance.copy(isEnabled = true))")
+
+# [R3-t11 见证 #138] C26's symmetric twin of C22's `.also { live }` arm: the live
+# name appears in the argument text, but the VALUE is the render-frame snapshot
+# (`also` returns its receiver). The old substring test let this through while
+# C22 — one screen over — already graded value sources.
+FIX_PROVIDER_DETAIL_LIVE_IN_ALSO = FIX_PROVIDER_DETAIL_CLEAN.replace(
+    "    providerRepository.updateInstance(live.copy(isEnabled = true))",
+    "    providerRepository.updateInstance(instance.copy(isEnabled = true).also { live })")
 
 # C26 — the export path serialises the render-frame object.
 FIX_PROVIDER_DETAIL_EXPORT_SNAPSHOT = FIX_PROVIDER_DETAIL_CLEAN.replace(
@@ -4586,6 +4607,12 @@ fun nonTextLabelFor(model: LLMModel): String? {
 
 fun usage(entry: ModelEntry?): String? =
     entry?.let { nonTextLabelFor(ModelsDevApi.effectiveModel(it)) }
+
+// [R3-t11 见证 #136] the id-keyed lookup the non-text confirmation uses — this
+// helper is the surface C35 must grade on the chat screen (the member block
+// above is C34's).
+fun entryById(entryId: String): ModelEntry? =
+    SystemVoiceEntries.resolveIn(config.modelEntries, entryId)
 """
 
 FIX_CHAT_SCREEN_RAW_LABEL = FIX_CHAT_SCREEN_CLEAN.replace(
@@ -4599,6 +4626,16 @@ FIX_MODEL_PICKER_SHEET_NO_SYSTEM_FALLBACK = FIX_MODEL_PICKER_SHEET_CLEAN.replace
 FIX_CHAT_SCREEN_NO_SYSTEM_FALLBACK = FIX_CHAT_SCREEN_CLEAN.replace(
     "SystemVoiceEntries.resolveIn(config.modelEntries, entryId)",
     "config.modelEntries.find { it.id == entryId }")
+
+# [R3-t11 见证 #136] the chat screen's OWN id-keyed lookup degraded to the
+# persisted list, while its member block (C34's site) still consults the single
+# source. Everything the old criteria grepped for is present; the resolution a
+# System voice sentinel needs is gone, so the non-text confirmation never fires.
+FIX_CHAT_SCREEN_ENTRY_BY_ID_BARE = FIX_CHAT_SCREEN_CLEAN.replace(
+    """fun entryById(entryId: String): ModelEntry? =
+    SystemVoiceEntries.resolveIn(config.modelEntries, entryId)""",
+    """fun entryById(entryId: String): ModelEntry? =
+    config.modelEntries.find { it.id == entryId }""")
 
 # [dv24/B-02] the method-reference indirection: `::entryById` is a member
 # resolution site even though the single source lives in another function, so
@@ -4871,10 +4908,17 @@ def run_selftest():
              variant(REL_MODEL_PICKER_SHEET, FIX_MODEL_PICKER_SHEET_NO_SYSTEM_FALLBACK),
              failures, ("C34", "C35"))
     run_case("c34-screen-no-system-fallback", 1,
-             variant(REL_CHAT_SCREEN, FIX_CHAT_SCREEN_NO_SYSTEM_FALLBACK), failures, ("C34",))
+             variant(REL_CHAT_SCREEN, FIX_CHAT_SCREEN_NO_SYSTEM_FALLBACK),
+             failures, ("C34", "C35"))
     run_case("c34-screen-entrybyid-indirection", 1,
              variant(REL_CHAT_SCREEN, FIX_CHAT_SCREEN_ENTRY_BY_ID_INDIRECTION),
              failures, ("C34",))
+    # [R3-t11 见证 #136] C35 on the chat screen: the member block still consults
+    # the single source (C34 green); the id lookup the confirmation helper uses
+    # does not. Only C35 may fire.
+    run_case("c35-screen-entrybyid-bare-find", 1,
+             variant(REL_CHAT_SCREEN, FIX_CHAT_SCREEN_ENTRY_BY_ID_BARE),
+             failures, ("C35",))
     # --- dv24-B1: the quick test must EXECUTE the effective model -------------
     run_case("c33-quick-test-raw-perform-model", 1,
              variant(REL_QUICK_TEST, FIX_QUICK_TEST_RAW_PERFORM_MODEL), failures, ("C33",))
@@ -4893,6 +4937,9 @@ def run_selftest():
              variant(REL_ADD_CUSTOM_MODEL, FIX_ADD_CUSTOM_MODEL_DEAD_GUARD), failures, ("C21",))
     run_case("c22-conn-also-live", 1,
              variant(REL_CONNECTION, FIX_CONNECTION_ALSO_LIVE), failures, ("C22",))
+    # [R3-t11 见证 #138] C26 must grade the VALUE, not the spelling.
+    run_case("c26-detail-live-mentioned-in-also", 1,
+             variant(REL_PROVIDER_DETAIL, FIX_PROVIDER_DETAIL_LIVE_IN_ALSO), failures, ("C26",))
     run_case("c28-detail-helper-constant", 1,
              variant(REL_PROVIDER_DETAIL, FIX_PROVIDER_DETAIL_HELPER_CONSTANT), failures, ("C28",))
     run_case("c30-list-constant-subscript", 1,
