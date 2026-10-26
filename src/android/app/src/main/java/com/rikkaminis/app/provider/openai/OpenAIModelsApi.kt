@@ -231,7 +231,7 @@ object OpenAIModelsApi {
      *   | ceiling: a user who fetched the Kimi list before this fix sees
      *   wrong context/effort numbers for at most 48h (forceRefresh re-fetches
      *   immediately and the live path enriches with the right key now).
-     *   | escalate: a report that a Kimi model's context window / effort
+     *   | upgrade trigger: a report that a Kimi model's context window / effort
      *   ladder disagrees with models.dev while its provider field is right —
      *   then the cache path needs `ModelsDevApi.enrichModels` too.
      */
