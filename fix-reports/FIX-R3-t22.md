@@ -105,7 +105,27 @@
 
 ## 5. CI 读数
 
-（见 §5 回填）
+分支 `fix/r3-filepaths-schedule` @ **`3719533377`**（本地 HEAD `3719533377712985e74a99f1e9fe99153cdb81f4` 与推送 tip、CI `head_sha` 三方逐字符一致）。
+run **`40317297444`** / **#2746** / attempt 1 / created `2026-10-26T11:44:25Z` / **completed success**（workflow_dispatch；分支 push 不触发，符合 `build-apk.yml` 只绑 main）。
+
+日志判读（`0_build.txt`，1,486,788 B，NUL 0 字节，37 个 step group 全部有输出）：
+
+| 读数 | 期望 | 实测 |
+|---|---|---|
+| `Summary: 112 passed, 0 failed` | 恰 1 | **1** ✓ |
+| `ALL 344 CASES PASS` | 恰 1 | **1** ✓ |
+| `^ e: `（Kotlin 编译错误行） | 0 | **0** ✓ |
+| 门头 `[N/112]` 编号去重 | 112 | **112** ✓ |
+| `FILE_PROVIDER_PATHS_SELFTEST=PASS` | ≥1 | **1** ✓ |
+| `SELFTEST=PASS (schedule-date-source: 2 files x 2 arms …)` | ≥1 | **1** ✓ |
+| `SCHEDULE_DATE_SOURCE_SELFTEST=PASS (35 arms)` | ≥1（新增臂数标记） | **0** ✗ → §7 R8 |
+| 含 `FAILED` 的行 | 全为 PASSED 用例名子串 | **6 行，逐条核对全以 `PASSED` 结尾** ✓ |
+
+**读法说明（第 N 次复核）**：`FAILED` 6 行分别是 `slot denied produces FAILED without calling provider` / `reason PERSISTENCE_FAILED maps to persistence_failed` / `phase FAILED maps to Failed` / `terminal FAILED maps to Failed` / `reason EXECUTION_FAILED maps to all_fallbacks_exhausted` / `the fixed tail still reaches a legal FAILED terminal` ——全是用例名里带 `FAILED` 而结果为 `PASSED`，不是失败。唯一的 `SKIPPED` 是 gradle 任务 `:app:checkKotlinGradlePluginConfigurationErrors`（正常的配置校验跳过），无 step 级跳过。分支 run 不产出 release 资产（发布面绑 main）。
+
+### 5.1 §5 附带发现：schedule 门的臂数标记在 CI 里没人见证
+
+`SCHEDULE_DATE_SOURCE_SELFTEST=PASS (35 arms)` 在 CI 日志 **0 命中**，而第一行 `SELFTEST=PASS (schedule-date-source: 2 files x 2 arms, teeth on every criterion)` 命中 1 次。原因：`test_scan.py:2700` 只断言**第一行**（冻结面，本轮未动），门第二行的臂数标记不进 CI 见证 ⇒ 「门被掏空成 `sys.exit(0)` 仍打印第一行」这一类静默洞在本门仍然敞着。已写进 §7 R8 的追加注册建议。
 
 ## 6. 残留（均 P2，各带触发条件 / 触发后方案 / 搁置理由）
 
