@@ -888,8 +888,10 @@ def check_find_type_filter(src):
     site = None
     for cond, t_start, t_end, _es, _ee in if_blocks(body):
         if re.search(r"\btypeFilter\b", cond):
+            # innermost wins: a nested `if (typeFilter != null) { if (…) return }`
+            # must be judged on the INNER decision, with the outer one as a
+            # conjunct (see below), not on the outer test alone.
             site = (cond, t_start, t_end)
-            break
     if site is None:
         return ["findTree.consider(…) no longer filters by `--type` — `-type f` lists every "
                 "entry, including the pipes and sockets visitFile just labelled 'o'"]
@@ -905,6 +907,20 @@ def check_find_type_filter(src):
         cond_eval = lit_body[p_open + 1:p_close]
     else:
         cond_eval = cond
+    # NESTED shape: `if (typeFilter != null) { if (typeFilter != type) return }`
+    # is the same decision as the flat conjunction. The effective predicate is
+    # the conjunction of every enclosing condition with the guard's own, so the
+    # truth table judges what actually decides the entry.
+    # `enclosing_conditions` includes the guard's OWN condition when the probe
+    # position sits at its then-start; that one is already in `cond_eval` (read
+    # from the literal channel), so only genuinely OUTER conditions are added.
+    enclosing = [c for _k, c in enclosing_conditions(body, t_start)
+                 if c.strip() != cond.strip()]
+    if any("' '" in c for c in enclosing):
+        return ["an enclosing condition carries a char literal the code view blanks — "
+                "re-point this rule at the literal channel (fail-closed)"]
+    if enclosing:
+        cond_eval = " && ".join("(%s)" % c.strip() for c in enclosing) + " && (%s)" % cond_eval
     if not re.search(r"\breturn\b", body[t_start:t_end]):
         return ["the `--type` filter does not stop the entry (no return in the branch) — the "
                 "label visitFile computes is ignored by the only consumer that could use it"]
@@ -2198,6 +2214,15 @@ def selftest():
                         "if (typeFilter != null && typeFilter != type) return",
                         "if (typeFilter != null && typeFilter != type && type != 'o') return")),
                 "admits the type 'o'")
+    # the SAME decision written as two nested guards must stay clean: the
+    # effective predicate is the conjunction of the enclosing condition and the
+    # inner one, so `if (typeFilter != null) { if (typeFilter != type) return }`
+    # is judged as the flat conjunction it means.
+    expect_clean("16-2d nested filter spelling stays clean",
+                 check_find_type_filter(
+                     GOOD_FIND_FILTER.replace(
+                         "                if (typeFilter != null && typeFilter != type) return",
+                         "                if (typeFilter != null) { if (typeFilter != type) return }")))
     expect_trip("16-2b inverted filter is red (hides what was asked for)",
                 check_find_type_filter(
                     GOOD_FIND_FILTER.replace(
