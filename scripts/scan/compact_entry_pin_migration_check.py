@@ -69,6 +69,24 @@ deep-audit-1031 ISSUE-01 (P1) added arm 9:
          the criterion alive as long as the write points stay inside the
          rename branch.
 
+[R3-t20 dual-gate round] Three witnesses walked between this gate and
+`provider_models_cache_wiring_check`. Each one kept every anchor this gate
+pins and moved a value the anchors never described:
+
+  Arm 10  `replaceEntries` builds the refreshed `ModelEntry` — when the `uuid`
+          argument stops carrying the PRIOR entry id forward, every model
+          refresh re-keys the surviving models; arm 5 then sees the old pin in
+          `prunedEntryIds` and clears it as "model removed upstream". The gate
+          used to read only the prune branch (the effect), never the identity
+          continuation that feeds it.
+  Arm 11  `refreshModels` hands the fetched list to `replaceEntries`. A constant
+          `emptyList()` there wipes the instance's entries (and the pin) while
+          the fetch itself is green everywhere.
+  Arm 12  the pin writer's VALUE must derive from `decideCompactPinMigration`
+          (the lambda parameter of the `?.let`), not from a re-bound local: the
+          old criterion accepted the spelling `compactModelEntryId = migrated`
+          and never asked where `migrated` came from.
+
 Usage: python3 scripts/scan/compact_entry_pin_migration_check.py [ROOT]
        python3 scripts/scan/compact_entry_pin_migration_check.py --root ROOT
        python3 scripts/scan/compact_entry_pin_migration_check.py --selftest
@@ -645,6 +663,215 @@ def check_stale_entry_ids(cc, rel, source="instanceEntries"):
     return out
 
 
+# ── [R3-t20] arms 10-12: the values on the pin's survival path ───────────
+EMPTY_LITERAL_RE = re.compile(
+    r"^(?:empty(?:List|Set|Sequence|Array|Map)(?:<[^>]*>)?|listOf|setOf|arrayOf|"
+    r"sequenceOf|mutableListOf|mutableSetOf)\s*\(\s*\)$")
+UUID_ARG_RE = re.compile(r"^uuid\s*=(?!=)")
+
+
+def _decl_rhs(body, name):
+    """Initializer text of `val/var name = …` (first depth-0 statement end)."""
+    m = re.search(r"(?<![\w.])val\s+%s\s*(?::[^=\n]+)?=(?!=)" % re.escape(name), body)
+    if m is None:
+        return None
+    return body[m.end():expr_end(body, m.end())]
+
+
+def _named_args_named(body, call_re, arg_re):
+    """[(pos, value_text)] for arguments of every `call_re` call whose text
+    matches `arg_re` (`name =` head). `call_args` splits on top-level commas, so
+    a multi-line named argument stays one span."""
+    out = []
+    for m in call_re.finditer(body):
+        # skip the declaration itself (`fun replaceEntries(`)
+        if re.search(r"\bfun\s+$", body[:m.start()]):
+            continue
+        open_paren = m.end() - 1
+        for a, b in call_args(body, open_paren):
+            seg = body[a:b]
+            am = arg_re.match(seg.strip())
+            if am is None:
+                continue
+            out.append((a + (len(seg) - len(seg.lstrip())) + am.end(), seg[am.end():].strip()))
+    return out
+
+
+def check_entry_id_continuity(cc, rel):
+    """Arm 10 — a refreshed entry must keep the id of the entry it replaces.
+
+    The pin, the model-group members and the agent-loop ids are all keyed by
+    entry id. `uuid = <fresh random>` makes every refresh look like "the model
+    was removed upstream", so the cascades (arms 5/6) legitimately clear the
+    user's configuration. The identity continuation is the precondition of
+    every cascade this gate pins.
+    """
+    out = []
+    body, base = body_of(cc, "fun replaceEntries(")
+    if body is None:
+        return [(rel, 0, "10", "fun replaceEntries( not found — gate ROT")]
+    sites = []
+    for m in re.finditer(r"(?<![\w.])ModelEntry\s*\(", body):
+        for a, b in call_args(body, m.end() - 1):
+            seg = body[a:b]
+            if UUID_ARG_RE.match(seg.strip()):
+                sites.append((base + a, seg[seg.index("=") + 1:].strip()))
+    if not sites:
+        return [(rel, line_of(cc, base), "10",
+                 "replaceEntries constructs no ModelEntry with a `uuid =` argument — "
+                 "re-anchor arm 10 (fail-closed)")]
+    prior_rhs = _decl_rhs(body, "prior")
+    if prior_rhs is not None and not (
+            contains_ident(prior_rhs, "existing") or "existingByModelId" in prior_rhs
+            or "modelEntries" in prior_rhs):
+        out.append((rel, line_of(cc, base), "10",
+                    "`val prior` no longer looks the previous entry up (`%s`) — the id "
+                    "continuation reads a value that is not the stored entry"
+                    % re.sub(r"\s+", " ", prior_rhs).strip()[:70]))
+    for pos, value in sites:
+        srcs = value_sources(value)
+        if not any(contains_ident(s, "prior") or "existingByModelId" in s for s in srcs):
+            out.append((rel, line_of(cc, pos), "10",
+                        "the refreshed entry is built with `uuid = %s` — the prior entry "
+                        "id is not carried forward, so a model refresh re-keys every "
+                        "surviving model and the pin / group refs are pruned as removed"
+                        % re.sub(r"\s+", " ", value)[:80]))
+    return out
+
+
+def check_refresh_handoff(cc, rel):
+    """Arm 11 — the list handed to `replaceEntries` must be the fetched list.
+
+    `replaceEntries(instance.id, emptyList())` is a successful refresh that
+    deletes every non-custom entry of the instance (and the pin with it). The
+    cache gate judges the fetch call; this arm judges the handoff.
+    """
+    out = []
+    body, base = body_of(cc, "fun refreshModels(")
+    if body is None:
+        return [(rel, 0, "11", "fun refreshModels( not found — gate ROT")]
+    call_re = re.compile(r"(?<![\w.])replaceEntries\s*\(")
+    calls = [m for m in call_re.finditer(body) if not re.search(r"\bfun\s+$", body[:m.start()])]
+    if not calls:
+        return [(rel, line_of(cc, base), "11",
+                 "refreshModels never stores the fetched models through "
+                 "replaceEntries( — re-anchor arm 11")]
+    for m in calls:
+        args = call_args(body, m.end() - 1)
+        if len(args) < 2:
+            out.append((rel, line_of(cc, m.start()), "11",
+                        "cannot read both arguments of replaceEntries( — fail-closed"))
+            continue
+        a, b = args[1]
+        value = body[a:b].strip()
+        flat = re.sub(r"\s+", "", value)
+        pos = line_of(cc, m.start())
+        if EMPTY_LITERAL_RE.match(flat):
+            out.append((rel, pos, "11",
+                        "refreshModels hands replaceEntries a constant EMPTY list (`%s`) — "
+                        "every successful refresh wipes the instance's entries and prunes "
+                        "the pin" % value[:60]))
+            continue
+        ok = False
+        for src in value_sources(value):
+            s = src.strip()
+            if re.search(r"fetchModels\s*\(", s):
+                ok = True
+                break
+            m2 = re.match(r"^([A-Za-z_]\w*)$", s)
+            if m2:
+                rhs = _decl_rhs(body, m2.group(1))
+                if rhs is not None and "fetchModels(" in rhs:
+                    ok = True
+                    break
+        if not ok:
+            out.append((rel, pos, "11",
+                        "the list handed to replaceEntries (`%s`) does not derive from the "
+                        "fetchModels result — fail-closed: re-anchor arm 11"
+                        % re.sub(r"\s+", " ", value).strip()[:70]))
+    return out
+
+
+def _pin_written_from_decision(body, pos, name):
+    """Is the identifier `name` at `pos` the lambda parameter of a scope call
+    whose receiver IS `decideCompactPinMigration(...)`?"""
+    for m in re.finditer(r"(?<![\w.])decideCompactPinMigration\s*\(", body):
+        close = match_bracket(body, m.end() - 1)
+        if close < 0:
+            continue
+        seg = body[close + 1:close + 48]
+        lm = re.match(r"\s*\??\s*\.\s*(?:let|also|run|apply)\s*[{(]", seg)
+        if lm is None:
+            continue
+        brace = close + 1 + lm.end() - 1
+        if body[brace] == "(":
+            inner_close = match_bracket(body, brace)
+            if inner_close < 0:
+                continue
+            brace = body.find("{", brace + 1, inner_close)
+            if brace < 0:
+                continue
+        end = match_bracket(body, brace)
+        if end < 0 or not (brace < pos < end):
+            continue
+        head = body[brace + 1:brace + 80]
+        hm = re.match(r"\s*([A-Za-z_]\w*)\s*(?::[^->\n]+)?->", head)
+        if hm is None:
+            if name == "it":
+                return True
+            continue
+        if hm.group(1) != name:
+            continue
+        inner = body[brace + 1:pos]
+        if re.search(r"(?<![\w.])val\s+%s\s*=" % re.escape(name), inner):
+            return False  # re-bound inside the lambda: the decision's value is gone
+        return True
+    return False
+
+
+def check_pin_writer_value(cc, rel):
+    """Arm 12 — the value written into `compactModelEntryId` must BE the
+    decision's output.
+
+    Witness #14 (R3) kept the whole migration block, the call and the
+    `compactModelEntryId = migrated` spelling, and re-bound `migrated` to the
+    CURRENT pin: the pin stayed on the dead key after the rename, which is the
+    exact defect the migration exists to prevent.
+    """
+    out = []
+    body, base = body_of(cc, "fun updateEntry(")
+    if body is None:
+        return [(rel, 0, "12", "fun updateEntry( not found — gate ROT")]
+    saves = _named_args_named(body, re.compile(r"(?<![\w.])AgentRuntimeLimitsPrefs\.save\s*\("),
+                              re.compile(r"compactModelEntryId\s*=(?!=)\s*"))
+    for off, value in saves:
+        pos = base + off
+        val = value.strip()
+        if "decideCompactPinMigration(" in val:
+            continue
+        name = val
+        if not re.match(r"^[A-Za-z_]\w*$", name):
+            out.append((rel, line_of(cc, pos), "12",
+                        "`compactModelEntryId` is written from an expression that does not "
+                        "derive from decideCompactPinMigration (`%s`)"
+                        % re.sub(r"\s+", " ", val)[:70]))
+            continue
+        rhs = _decl_rhs(body, name)
+        if rhs is not None:
+            if "decideCompactPinMigration(" not in rhs:
+                out.append((rel, line_of(cc, pos), "12",
+                            "the pin is written from `%s`, which is bound to `%s` — not to "
+                            "the migration decision, so the pin stays on the dead key"
+                            % (name, re.sub(r"\s+", " ", rhs).strip()[:70])))
+            continue
+        if not _pin_written_from_decision(body, pos - base, name):
+            out.append((rel, line_of(cc, pos), "12",
+                        "`%s` is not the parameter of a scope call on "
+                        "decideCompactPinMigration(...) — the written value cannot be "
+                        "traced to the decision" % name))
+    return out
+
+
 # ── entry points ─────────────────────────────────────────────────────────
 def run_checks(root, rel=REPO_REL):
     path = os.path.join(root, rel)
@@ -701,6 +928,10 @@ def run_checks(root, rel=REPO_REL):
                             needle, "updateEntry rename branch voice overrides")
         out += check_live(cc, rel, "fun updateEntry(", "9", needle,
                           "updateEntry rename branch voice overrides")
+    # ── [R3-t20] arms 10-12 ──
+    out += check_entry_id_continuity(cc, rel)
+    out += check_refresh_handoff(cc, rel)
+    out += check_pin_writer_value(cc, rel)
     return out
 
 
@@ -781,6 +1012,15 @@ PR_OK = """class ProviderRepository(private val context: Context) {
     }
 
     fun replaceEntries(instanceId: String, models: List<LLMModel>) = synchronized(configLock) {
+        val existingByModelId = existing.associateBy { it.baseModel.id }
+        val newEntries = models.map { model ->
+            val prior = existingByModelId[model.id]
+            ModelEntry(
+                providerInstanceId = instanceId,
+                baseModel = model,
+                uuid = prior?.id ?: java.util.UUID.randomUUID().toString(),
+            )
+        }
         val prunedEntryIds = existingEntryIds - survivingEntryIds
         if (prunedEntryIds.isNotEmpty()) {
             val suspiciousShrink = existing.size >= 4 && models.size * 2 < existing.size
@@ -798,6 +1038,15 @@ PR_OK = """class ProviderRepository(private val context: Context) {
             }
         }
         saveConfig(config)
+    }
+
+    suspend fun refreshModels(instance: ProviderInstance, forceRefresh: Boolean = false) {
+        val models = ModelListProviderRegistry.fetchModels(
+            instance, apiKey, isThirdParty, forceRefresh, context,
+        )
+        if (models.isNotEmpty()) {
+            replaceEntries(instance.id, models)
+        }
     }
 
     fun updateEntry(entry: ModelEntry): String? = synchronized(configLock) {
@@ -1119,6 +1368,33 @@ PR_W_A126_BLOCK_COMMENT = PR_OK.replace(
     "        /*\n" + _REMOVE_ENTRY_PIN + "        */\n")
 
 
+# ── [R3-t20] arms 10-12 witnesses (three dual-gate / symmetric attempts that
+# walked between this gate and provider_models_cache_wiring_check) ─────────
+
+# W12: the refreshed entry stops carrying `prior?.id` forward. Every anchor of
+# arms 5/6 stays; the prune branch then legitimately sees the old pin as gone.
+PR_W_R3_NO_PRIOR_ID = PR_OK.replace(
+    "                uuid = prior?.id ?: java.util.UUID.randomUUID().toString(),",
+    "                uuid = java.util.UUID.randomUUID().toString(),")
+
+# W13: the fetch is green everywhere and the handoff drops its result.
+PR_W_R3_EMPTY_HANDOFF = PR_OK.replace(
+    "            replaceEntries(instance.id, models)",
+    "            replaceEntries(instance.id, emptyList())")
+
+# W14: the migration call, the anchors and the `compactModelEntryId = migrated`
+# spelling all survive; `migrated` is re-bound to the CURRENT pin.
+PR_W_R3_OLD_PIN = PR_OK.replace(
+    """            )?.let { migrated ->
+                AgentRuntimeLimitsPrefs.save(context, compactModelEntryId = migrated)
+            }
+""",
+    """            )?.let { _unused ->
+                val migrated = AgentRuntimeLimitsPrefs.compactModelEntryId()
+                AgentRuntimeLimitsPrefs.save(context, compactModelEntryId = migrated)
+            }
+""")
+
 FIXTURE_ARMS = []
 
 
@@ -1288,6 +1564,22 @@ def selftest():
         write(PR_W_A126_BLOCK_COMMENT)
         ok &= _report("a12-6-block-comment", "arm 2", run_all(tmp), ("2",))
 
+        # ── [R3-t20] the three dual-gate / symmetric witnesses of round 3 ──
+        # 30) W12 — the refreshed entry id is no longer the prior id.
+        write(PR_W_R3_NO_PRIOR_ID)
+        ok &= _report("r3-w12-no-prior-id", "arm 10", run_all(tmp), ("10",),
+                      contains="prior entry id is not carried forward")
+
+        # 31) W13 — the fetched list is replaced by a constant empty list.
+        write(PR_W_R3_EMPTY_HANDOFF)
+        ok &= _report("r3-w13-empty-handoff", "arm 11", run_all(tmp), ("11",),
+                      contains="constant EMPTY list")
+
+        # 32) W14 — the pin writer persists the OLD pin (anchors all intact).
+        write(PR_W_R3_OLD_PIN)
+        ok &= _report("r3-w14-old-pin-written", "arm 12", run_all(tmp), ("12",),
+                      contains="not to the migration decision")
+
         # 17) ROT control (LAST: it wipes the fixture tree): both files missing
         # must be reported, never silently green (one finding per file, so a
         # half-populated tree cannot pass).
@@ -1329,7 +1621,7 @@ def main():
         return 2
     checks = run_all(root)
     if not checks:
-        print("compact_entry_pin_migration_check: OK (9 arms green)")
+        print("compact_entry_pin_migration_check: OK (12 arms green)")
         return 0
     for rel, line, arm, msg in checks:
         print("%s:%s [arm %s] %s" % (rel, line, arm, msg))
