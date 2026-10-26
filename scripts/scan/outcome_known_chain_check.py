@@ -59,6 +59,7 @@ from _kotlin_ast import (  # noqa: E402
 from _kotlin_valueflow import (  # noqa: E402
     code_view,
     contains_ident,
+    decl_sites,
     expr_end,
     path_feasible,
 )
@@ -71,11 +72,14 @@ PROMPT = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatPromptAnd
 CALL_ROOT = "src/android/app/src/main/java"
 MAP_CALL_RE = re.compile(r"\.\s*toToolExecutionResult\s*\(")
 
+CRIT_L0 = "L0 executeWithShellRetry stamps the retry decision's outcomeKnown"
 CRIT_L1 = "L1 execute() re-wrap carries the retry verdict's outcomeKnown"
 CRIT_L2 = "L2 ToolResultShell declares outcomeKnown and stamps it from the coordinator"
 CRIT_L3 = "L3 ToolExecutionResult declares outcomeKnown (data-class equality included)"
 CRIT_MAP = "L2->L3 the single mapping passes outcomeKnown"
 CRIT_L4 = "L4 T7 ToolFinished reads resultKnown from the result object"
+CRIT_L1B = "L1->L2 the coordinator's result carrier reaches ToolResultShell unmodified"
+CRIT_L4B = "L4b executeTool hands the carrier's outcomeKnown back unmodified"
 
 
 # --------------------------------------------------------------------------
@@ -199,6 +203,218 @@ def _absorbed(text, pos):
         if r < pos < end and _or_absorbed(text[r + len("return"):end]):
             return True
     return False
+
+
+# --------------------------------------------------------------------------
+# seam criteria [R3-t10] — the round-3 witness family: a patch that makes both
+# gates of a pair green by breaking the hop the pair straddles.
+#   * the SOURCE of the value (L0) was never judged, only the L1 re-wrap, so
+#     hardcoding `true` one function down left every downstream hop faithful
+#     and therefore green;
+#   * the local carrier between L1 and the L2 construction was not tracked, so
+#     `result = result.copy(outcomeKnown = true)` one line before
+#     `ToolResultShell(...)` reached the constructor with a clean spelling;
+#   * the value executeTool RETURNS (after the trace hop) was not judged, so
+#     `return result.copy(outcomeKnown = true)` split the trace from the value
+#     the agent loop receives.
+# All three are judged on the value flow (named argument -> expression ->
+# source identifiers), never on a token count.
+# --------------------------------------------------------------------------
+
+DECIDE_CALL_RE = re.compile(r"\b\w*[Dd]ecide\w*\s*\(")
+
+
+def _named_args(text, open_pos):
+    """[(field, value_expr)] of the call at `open_pos` (shared bracket/top-split).
+
+    The value expression stops at the top-level comma, so `outcomeKnown =
+    result.outcomeKnown || true` is read whole and cannot pass as its own
+    prefix.
+    """
+    close = match_bracket(text, open_pos)
+    if close < 0:
+        return None
+    inner = text[open_pos + 1:close]
+    out = []
+    for a, b in split_top(inner, (",",)):
+        seg = inner[a:b]
+        m = re.match(r"\s*([A-Za-z_]\w*)\s*=\s*(?!=)", seg)
+        if m:
+            out.append((m.group(1), seg[m.end():].strip()))
+    return out
+
+
+def _calls(text, name):
+    """[(start, open_pos, close_pos)] for every `name(` call (declaration skipped)."""
+    out = []
+    for m in re.finditer(r"\b%s\s*\(" % re.escape(name), text):
+        prefix = text[max(0, m.start() - 60):m.start()]
+        if re.search(r"\bclass\s*$", prefix):
+            continue
+        open_pos = m.end() - 1
+        close = match_bracket(text, open_pos)
+        if close < 0:
+            out.append((m.start(), open_pos, -1))
+            continue
+        out.append((m.start(), open_pos, close))
+    return out
+
+
+def _line_of(text, pos):
+    return text[:pos].count("\n") + 1
+
+
+def _l0(coord):
+    """L0: the retry source reads the decision's flag (not a constant).
+
+    [R3-t10 07-3] Every hop below L0 is a faithful forwarder, so a hardcoded
+    `outcomeKnown = true` in `executeWithShellRetry` makes the whole four-layer
+    chain green while the value is already a lie at its origin.
+    """
+    fb = function_body(coord, "executeWithShellRetry")
+    if fb is None:
+        return False, "executeWithShellRetry body not found (fail-closed)", -1
+    b_start, b_end, _kind = fb
+    body = coord[b_start:b_end]
+    sites = _calls(body, "CommandResult")
+    if not sites:
+        return False, "no CommandResult construction in executeWithShellRetry (fail-closed)", -1
+    for pos, open_pos, close in sites:
+        line = _line_of(coord, b_start + pos)
+        if close < 0:
+            return False, "CommandResult(...) could not be parsed (fail-closed)", line
+        named = _named_args(body, open_pos)
+        if named is None:
+            return False, "CommandResult(...) arguments could not be parsed (fail-closed)", line
+        vals = [v for f, v in named if f == "outcomeKnown"]
+        if not vals:
+            return (False,
+                    "a CommandResult in executeWithShellRetry omits outcomeKnown — "
+                    "the field defaults to known=true, so a withheld replay would "
+                    "be reported as a known outcome", line)
+        val = vals[0]
+        if const_bool(val) is not None or not (contains_ident(val, "verdict")
+                                               or DECIDE_CALL_RE.search(val)):
+            return (False,
+                    "the retry source hardcodes outcomeKnown = %r — it must be read "
+                    "from the retry decision (`verdict.outcomeKnown`)" % val[:80], line)
+        # [R3-t10 X1] the verdict is spelled but laundered one hop later
+        # (`.let { true }`): read the verdict's VALUE, not its spelling.
+        stamp = None
+        vm = re.search(r"\bverdict\.outcomeKnown\b", val)
+        if vm and not _is_passthrough(val, "verdict.outcomeKnown"):
+            stamp = val
+        if stamp is not None:
+            return (False,
+                    "the retry source wraps the verdict's flag (`%s`) — it must be "
+                    "handed over verbatim (`verdict.outcomeKnown`)" % " ".join(stamp.split())[:80],
+                    line)
+    return True, "", -1
+
+
+def _l1b(shell):
+    """L1->L2: the carrier bound to the coordinator's return is not re-stamped.
+
+    [R3-t10 07-1] The seam between the coordinator hop and the ToolResultShell
+    construction: `result = result.copy(outcomeKnown = true)` keeps the L2
+    argument spelling (`outcomeKnown = result.outcomeKnown`) compliant and
+    replaces the value on the way.
+    """
+    fb = function_body(shell, "executeShellCommandEngine")
+    if fb is None:
+        return False, "executeShellCommandEngine body not found (fail-closed)", -1
+    b_start, b_end, _kind = fb
+    body = shell[b_start:b_end]
+    m = re.search(r"(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+?)?=\s*"
+                  r"ExecutionCoordinator\s*\.\s*execute\s*\(", body)
+    if not m:
+        return (False,
+                "no local bound to `ExecutionCoordinator.execute(...)` in the shell "
+                "engine (fail-closed: the carrier cannot be tracked)", -1)
+    carrier = m.group(1)
+    expected = "%s.outcomeKnown" % carrier
+    for pos, kind in decl_sites(body, carrier):
+        if kind == "shadow":
+            continue  # a nested lambda's own binding is not this carrier
+        eq = body.find("=", pos)
+        if eq < 0:
+            continue
+        rhs = body[eq + 1:expr_end(body, eq + 1)]
+        line = _line_of(shell, b_start + pos)
+        if re.search(r"ExecutionCoordinator\s*\.\s*execute\s*\(", rhs):
+            continue  # a fresh coordinator result carries its own verdict
+        if contains_ident(rhs, "outcomeKnown") and not rhs_is_exact(rhs, "outcomeKnown", expected):
+            return (False,
+                    "the carrier `%s` is re-stamped on the way to ToolResultShell "
+                    "(`%s`) — a fresh execution or an exact `%s` passthrough only"
+                    % (carrier, " ".join(rhs.split())[:90], expected), line)
+        if re.search(r"\bCommandResult\s*\(", rhs) and not rhs_is_exact(rhs, "outcomeKnown", expected):
+            return (False,
+                    "the carrier `%s` is rebuilt from a CommandResult without the "
+                    "verdict's flag (`%s`) — the field then defaults to known=true"
+                    % (carrier, " ".join(rhs.split())[:90]), line)
+    return True, "", -1
+
+
+def _is_passthrough(rhs, expected):
+    """True when the RHS *is* the expected expression (a bare binding, no `field =`)."""
+    norm = " ".join(rhs.split()).rstrip(";").strip()
+    while norm.startswith("(") and norm.endswith(")") and match_bracket(norm, 0) == len(norm) - 1:
+        norm = norm[1:-1].strip()
+    return norm == expected
+
+
+def _l4b(prompt):
+    """L4b: what executeTool RETURNS still carries the result's own flag.
+
+    [R3-t10 07-2] The L4 criterion reads the ToolFinished site; the value the
+    agent loop receives leaves through the function's `return`s, one hop later.
+    `return result.copy(outcomeKnown = true)` keeps the trace honest and hands
+    the caller a lie.
+    """
+    fb = function_body(prompt, "executeTool")
+    if fb is None:
+        return False, "executeTool body not found (fail-closed)", -1
+    b_start, b_end, _kind = fb
+    body = prompt[b_start:b_end]
+    carrier = None
+    for cand in ("result",):
+        if contains_ident(body, cand):
+            carrier = cand
+    if carrier is None:
+        return False, "no executed-result carrier found in executeTool (fail-closed)", -1
+    expected = "%s.outcomeKnown" % carrier
+    rets = []
+    for m in re.finditer(r"\breturn\b(?!@)", body):
+        rets.append((m.start(), body[m.start():expr_end(body, m.end())].strip()))
+    if not rets:
+        return False, "no `return` in executeTool (fail-closed)", -1
+    if not [txt for _p, txt in rets if contains_ident(txt, carrier)]:
+        return (False,
+                "no executeTool return hands back the executed result (fail-closed: "
+                "the exit value cannot be tracked)", -1)
+    for pos, txt in rets:
+        if contains_ident(txt, "outcomeKnown") and not rhs_is_exact(txt, "outcomeKnown", expected):
+            return (False,
+                    "an executeTool return re-stamps the flag (`%s`) — the value the "
+                    "agent loop receives must keep `%s`" % (" ".join(txt.split())[:90], expected),
+                    _line_of(prompt, b_start + pos))
+    # [R3-t10] one hop further: a local that re-stamps the flag and is then
+    # handed back (`val out = result.copy(outcomeKnown = true); return out`).
+    # Every local binding is judged the same way, so aliasing the stamp cannot
+    # hide it — an alias of the field itself (`val k = result.outcomeKnown`) is
+    # an exact passthrough and stays green.
+    for m in re.finditer(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+?)?=(?!=)", body):
+        rhs = body[m.end():expr_end(body, m.end())]
+        if _is_passthrough(rhs, expected):
+            continue  # `val k = result.outcomeKnown` — the field, verbatim
+        if contains_ident(rhs, "outcomeKnown") and not rhs_is_exact(rhs, "outcomeKnown", expected):
+            return (False,
+                    "executeTool binds `%s` to a re-stamped flag (`%s`) — a local copy "
+                    "of the outcome must keep `%s` so the exit value cannot be laundered"
+                    % (m.group(1), " ".join(rhs.split())[:80], expected),
+                    _line_of(prompt, b_start + m.start()))
+    return True, "", -1
 
 
 # --------------------------------------------------------------------------
@@ -340,12 +556,18 @@ def analyse(text, sources=None):
     out = []
 
     coord = text[COORD]
+    ok, detail, line = _l0(coord)
+    out.append((CRIT_L0, ok, detail, line))
+
     ok, detail, line = _l1(coord)
     out.append((CRIT_L1, ok, detail, line))
 
     shell = text[SHELL]
     ok, detail, line = _l2(shell)
     out.append((CRIT_L2, ok, detail, line))
+
+    ok, detail, line = _l1b(shell)
+    out.append((CRIT_L1B, ok, detail, line))
 
     ok, detail, line = _l3(text[TOOLRES])
     out.append((CRIT_L3, ok, detail, line))
@@ -359,6 +581,9 @@ def analyse(text, sources=None):
 
     ok, detail, line = _l4(text[PROMPT])
     out.append((CRIT_L4, ok, detail, line))
+
+    ok, detail, line = _l4b(text[PROMPT])
+    out.append((CRIT_L4B, ok, detail, line))
     return out
 
 
@@ -385,8 +610,8 @@ COMPLIANT = {
         }
     ''',
     SHELL: '''
-        fun run(cmd: String, toolTitle: String, timedOut: Boolean): ToolResultShell {
-            val result = coordinator.execute(cmd)
+        fun executeShellCommandEngine(cmd: String, toolTitle: String, timedOut: Boolean): ToolResultShell {
+            val result = ExecutionCoordinator.execute(cmd)
             val withReminder = result.output
             return ToolResultShell(
                 output = withReminder,
@@ -431,10 +656,16 @@ COMPLIANT = {
         }
     ''',
     PROMPT: '''
+        fun executeTool(name: String): ToolExecutionResult {
+            val result = dispatch(name)
+            traceObserver.t7Reduce(AgentRunEvent.ToolFinished(name, resultKnown = result.outcomeKnown))
+            val defectHint = defectRegistryHintFor(result.output)
+            if (defectHint != null) return result.copy(output = result.output + defectHint)
+            return result
+        }
         fun executeShellCommand(): ToolExecutionResult {
             return result.toToolExecutionResult()
         }
-        traceObserver.t7Reduce(AgentRunEvent.ToolFinished(name, resultKnown = result.outcomeKnown))
     ''',
 }
 
@@ -531,6 +762,73 @@ BREAKERS[14] = (
       "return result.toToolExecutionResult().copy(outcomeKnown = true)")],
     CRIT_MAP,
 )
+# ── [R3-t10] the round-3 seam witnesses (report gates 07-1 .. 07-3): one patch
+# makes the pair green because the broken hop is the one NEITHER gate owns. ──
+# B15 (07-3): the SOURCE hardcodes the flag — every hop below it forwards
+# faithfully, so the whole four-layer chain stays green while the value is
+# already a lie at its origin.
+BREAKERS[15] = (
+    [(COORD, "outcomeKnown = verdict.outcomeKnown) to shell",
+      "outcomeKnown = true) to shell")],
+    CRIT_L0,
+)
+# B16 (07-1): the L1->L2 seam — the carrier is re-stamped between the
+# coordinator's return and the ToolResultShell construction, so L2 still reads
+# its compliant spelling off a variable that no longer holds the verdict.
+BREAKERS[16] = (
+    [(SHELL, "            val withReminder = result.output\n",
+      "            result = result.copy(outcomeKnown = true)\n"
+      "            val withReminder = result.output\n")],
+    CRIT_L1B,
+)
+# B17 (07-2): the L4 EXIT re-stamps after the trace hop — the trace sees the
+# verdict, the agent loop receives `true`.
+BREAKERS[17] = (
+    [(PROMPT,
+      "            if (defectHint != null) return result.copy(output = result.output + defectHint)\n"
+      "            return result\n",
+      "            if (defectHint != null) return result.copy(output = result.output + defectHint, outcomeKnown = true)\n"
+      "            return result.copy(outcomeKnown = true)\n")],
+    CRIT_L4B,
+)
+
+# B18 (07-2, one hop further): the re-stamp is bound to a local first, so the
+# `return` expression reads a clean identifier.
+BREAKERS[18] = (
+    [(PROMPT,
+      "            return result\n",
+      "            val handed = result.copy(outcomeKnown = true)\n            return handed\n")],
+    CRIT_L4B,
+)
+
+# B19 (X1, L0 one hop later): the verdict is spelled but laundered —
+# `verdict.outcomeKnown.let { true }`. Spelling checks stay green; the value is
+# a constant.
+BREAKERS[19] = (
+    [(COORD, "outcomeKnown = verdict.outcomeKnown) to shell",
+      "outcomeKnown = verdict.outcomeKnown.let { true }) to shell")],
+    CRIT_L0,
+)
+
+# [R3-t10] tolerant arms: legitimate refactors of the SAME hops stay green.
+# Without these a criterion can pass by forbidding every rewrite (the mistake
+# the report's 誤伤 check demonstrated on the previous revision).
+TOLERANT = [
+    ("carrier copy that preserves the flag", [(SHELL,
+      "            val withReminder = result.output\n",
+      "            result = result.copy(output = result.output.trim())\n"
+      "            val withReminder = result.output\n")]),
+    ("exit copy that preserves the flag", [(PROMPT,
+      "            return result\n",
+      "            return result.copy(output = result.output)\n")]),
+    ("exit value bound to a local then returned", [(PROMPT,
+      "            return result\n",
+      "            val handed = result\n            return handed\n")]),
+    ("the flag read into a local from the result", [(PROMPT,
+      "            val defectHint = defectRegistryHintFor(result.output)\n",
+      "            val isOutcomeKnown = result.outcomeKnown\n"
+      "            val defectHint = defectRegistryHintFor(result.output)\n")]),
+]
 
 
 def selftest():
@@ -562,6 +860,24 @@ def selftest():
         else:
             side = "" if len(red) == 1 else " (+%d side)" % (len(red) - 1)
             print("  [OK] breaker %d -> red on %r%s" % (idx, target, side))
+
+    # [R3-t10] tolerant arms — the same hops rewritten legitimately stay green.
+    for label, pairs in TOLERANT:
+        mutated = dict(COMPLIANT)
+        missing = [name for name, old, _ in pairs if old not in mutated[name]]
+        if missing:
+            failures.append("tolerant arm %r anchor missing in %s" % (label, missing))
+            print("  [FAIL] tolerant arm %r: anchor not found" % label)
+            continue
+        for name, old, new in pairs:
+            mutated[name] = mutated[name].replace(old, new, 1)
+        res = analyse(mutated)
+        red = [c for c, ok, _, _ in res if not ok]
+        if red:
+            failures.append("tolerant arm %r turned %s red" % (label, red))
+            print("  [FAIL] tolerant arm %r -> red on %s (a legitimate rewrite)" % (label, red))
+        else:
+            print("  [OK] tolerant arm %r stays green" % label)
     return failures
 
 
