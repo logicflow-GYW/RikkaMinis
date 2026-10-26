@@ -99,6 +99,25 @@ import json
 import shutil
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kotlin_ast import (                                        # noqa: E402
+    const_bool,
+    const_value,
+    function_body,
+    if_blocks,
+    match_bracket,
+    split_top,
+    strip_parens,
+)
+from _kotlin_lexer import analyse                                # noqa: E402
+from _kotlin_valueflow import (                                  # noqa: E402
+    call_args,
+    contains_ident,
+    live_positions,
+    value_sources,
+)
+
 DEBUG_FILE = "ProviderDebugMethods.kt"
 MUTATION_FILE = "ProviderMutationMethods.kt"
 PROVIDERS_COLLECTION_FILE = "ProvidersCollection.kt"
@@ -215,43 +234,95 @@ INSTANCE_OPTIONAL_KEYS = (
 IMAGE_KEYS = ("imageEndpointMode", "imageEndpointResolved")
 
 
-def strip_comments(text):
-    """Remove // and /* */ comments while respecting string literals and
-    char escapes (a naive `//` split would mangle "https://…" string bodies
-    and leave brace extraction unbalanced)."""
-    out = []
-    i, n = 0, len(text)
-    in_str = False
-    while i < n:
-        c = text[i]
-        if in_str:
-            out.append(c)
-            if c == "\\" and i + 1 < n:
-                out.append(text[i + 1])
-                i += 2
-                continue
-            if c == '"':
-                in_str = False
-            i += 1
-            continue
-        if c == '"':
-            in_str = True
-            out.append(c)
-            i += 1
-            continue
-        if c == "/" and i + 1 < n and text[i + 1] == "/":
-            while i < n and text[i] != "\n":
-                i += 1
-            continue
-        if c == "/" and i + 1 < n and text[i + 1] == "*":
-            i += 2
-            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
-                i += 1
-            i += 2
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
+# --------------------------------------------------------------------------
+# shared primitives (`_kotlin_lexer` / `_kotlin_ast` / `_kotlin_valueflow`)
+# --------------------------------------------------------------------------
+class LexFail(Exception):
+    """A file/snippet the shared lexer cannot read → fail-closed red."""
+
+
+def mask_source(src, what=None):
+    """Comment-stripped view with string/char contents preserved.
+
+    Length is strictly preserved, so offsets stay valid against the raw file.
+    A file the shared lexer rejects (unterminated string / comment / char
+    literal) raises [LexFail] instead of being scanned half-blind — the
+    hand-written stripper this replaces treated `val q = '"'` as the start of
+    a double-quoted string and swallowed the rest of the line.
+    """
+    ok, reason, views = analyse(src)
+    if not ok:
+        raise LexFail("%s: %s" % (what or "source", reason))
+    return views["comments"]
+
+
+def code_of(text, what=None):
+    """Structure channel: comments AND literal interiors blanked, length kept."""
+    ok, reason, views = analyse(text)
+    if not ok:
+        return None
+    return views["code"]
+
+
+def _fn_text(code, name):
+    """Body text of the first declaration named [name], or None.
+
+    Block bodies (`{ … }`) and expression bodies (`= …`) are both handled by
+    the shared `function_body`; the bracket matcher this replaces mis-sliced
+    expression-bodied helpers (it ran into the next declaration's braces).
+    """
+    fb = function_body(code, name)
+    if fb is None:
+        return None
+    start, end, _kind = fb
+    return code[start:end]
+
+
+def _fn_params(code, name):
+    """Parameter-list text of the first declaration named [name], or None."""
+    m = re.search(r"\bfun\s+(?:[A-Za-z_][\w.]*\.)?" + re.escape(name) + r"\s*\(", code)
+    if not m:
+        return None
+    close = match_bracket(code, m.end() - 1)
+    return None if close < 0 else code[m.end():close]
+
+
+def _brace_after(text, idx):
+    """The `{ … }` starting at the first `{` at/after [idx] (match_bracket)."""
+    start = text.find("{", idx)
+    if start < 0:
+        return None
+    end = match_bracket(text, start)
+    return None if end < 0 else text[start:end + 1]
+
+
+def _paren_after(text, idx):
+    """The `( … )` starting at the first `(` at/after [idx] (match_bracket)."""
+    start = text.find("(", idx)
+    if start < 0:
+        return None
+    end = match_bracket(text, start)
+    return None if end < 0 else text[start:end + 1]
+
+
+def _apply_block_after(block, marker):
+    """The `{ … }` of the `apply {` that follows [marker] (match_bracket).
+
+    None when the marker or its block is missing (callers fail-closed).
+    """
+    idx = block.find(marker)
+    if idx < 0:
+        return None
+    start = block.find("{", idx + len(marker) - 1)
+    if start < 0:
+        return None
+    end = match_bracket(block, start)
+    return None if end < 0 else block[start:end + 1]
+
+
+def _split_expr(expr, op):
+    """`split_top` string adapter (this gate's messages quote the split parts)."""
+    return [expr[a:b] for a, b in split_top(expr, (op,))]
 
 
 def find_files(root, name, skip=(".git", "build", "node_modules", "probe", "slice")):
@@ -263,73 +334,6 @@ def find_files(root, name, skip=(".git", "build", "node_modules", "probe", "slic
     return sorted(hits)
 
 
-def extract_function(code, name):
-    """Extract a block-body function's full text by balanced-brace matching
-    (code must already be comment-stripped). Returns None (fail-closed) if
-    the declaration or its closing brace cannot be located."""
-    m = re.search(r"\bfun\s+" + re.escape(name) + r"\s*\(", code)
-    if not m:
-        return None
-    start = code.find("{", m.end())
-    if start < 0:
-        return None
-    depth = 0
-    i, n = start, len(code)
-    in_str = False
-    while i < n:
-        c = code[i]
-        if in_str:
-            if c == "\\":
-                i += 2
-                continue
-            if c == '"':
-                in_str = False
-        else:
-            if c == '"':
-                in_str = True
-            elif c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    return code[start:i + 1]
-        i += 1
-    return None
-
-
-def extract_apply_block(block, marker):
-    """Extract the JSONObject().apply { … } block that follows `marker`
-    (brace-matched). fail-closed on absence."""
-    idx = block.find(marker)
-    if idx < 0:
-        return None
-    start = block.find("{", idx + len(marker) - 1)
-    if start < 0:
-        return None
-    depth = 0
-    i, n = start, len(block)
-    in_str = False
-    while i < n:
-        c = block[i]
-        if in_str:
-            if c == "\\":
-                i += 2
-                continue
-            if c == '"':
-                in_str = False
-        else:
-            if c == '"':
-                in_str = True
-            elif c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    return block[start:i + 1]
-        i += 1
-    return None
-
-
 PUT_KEY_PAT = re.compile(r'put\("([^"]+)"')
 
 
@@ -337,66 +341,6 @@ def put_keys(block):
     if block is None:
         return None
     return set(PUT_KEY_PAT.findall(block))
-
-
-def brace_block_after(code, idx):
-    """The `{ … }` body starting at the first `{` at or after [idx] (balanced,
-    string-aware). None when unbalanced/missing."""
-    start = code.find("{", idx)
-    if start < 0:
-        return None
-    depth = 0
-    i, n = start, len(code)
-    in_str = False
-    while i < n:
-        c = code[i]
-        if in_str:
-            if c == "\\":
-                i += 2
-                continue
-            if c == '"':
-                in_str = False
-        else:
-            if c == '"':
-                in_str = True
-            elif c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    return code[start:i + 1]
-        i += 1
-    return None
-
-
-def paren_block_after(code, idx):
-    """The `( … )` block starting at the first `(` at or after [idx] (balanced,
-    string-aware). None when unbalanced/missing."""
-    start = code.find("(", idx)
-    if start < 0:
-        return None
-    depth = 0
-    i, n = start, len(code)
-    in_str = False
-    while i < n:
-        c = code[i]
-        if in_str:
-            if c == "\\":
-                i += 2
-                continue
-            if c == '"':
-                in_str = False
-        else:
-            if c == '"':
-                in_str = True
-            elif c == "(":
-                depth += 1
-            elif c == ")":
-                depth -= 1
-                if depth == 0:
-                    return code[start:i + 1]
-        i += 1
-    return None
 
 
 def enclosing_function(code, pos):
@@ -417,38 +361,6 @@ TOP_DECL_PAT = re.compile(
 )
 
 
-def member_window(code, name):
-    """Text of a class-member declaration named [name], from its ``fun``
-    keyword to the next member declaration. Needed for C15's fields-list
-    check: ``fields(forId)`` may be an EXPRESSION-BODY function
-    (``= listOf(…)``) in fixtures and a block body on the real tree, so
-    ``extract_function`` (brace matcher) would run into the next reader
-    lambda's braces and return the wrong span."""
-    m = re.search(r"\bfun\s+" + re.escape(name) + r"\s*\(", code)
-    if not m:
-        return None
-    rest = code[m.end():]
-    nxt = re.search(r"\n    (?:private |internal |override |@)", rest)
-    return rest[: nxt.start()] if nxt else rest
-
-
-def decl_window(code, name):
-    """Text of a top-level declaration named [name], from its ``fun`` keyword to
-    the next top-level declaration. ``extract_function`` cannot serve here: the
-    auth single-source faces are EXPRESSION-BODY functions (``= …``), so a
-    brace matcher would run into the next block's braces and return the wrong
-    span. Extension receivers (``fun Request.Builder.applyOpenAIKeyAuth(``) are
-    matched too."""
-    m = re.search(
-        r"\bfun\s+(?:[A-Za-z_][\w.]*\.)?" + re.escape(name) + r"\s*\(", code
-    )
-    if not m:
-        return None
-    rest = code[m.end():]
-    nxt = TOP_DECL_PAT.search(rest)
-    return rest[: nxt.start()] if nxt else rest
-
-
 def base_url_write_offsets(code):
     """Sorted offsets of every customBaseURL write site (see BASE_URL_WRITE_PATS)."""
     offs = set()
@@ -459,81 +371,12 @@ def base_url_write_offsets(code):
 
 
 # ---- [wide-1024] C4: a guard is only a guard when it decides the branch ----
-def _strip_parens(expr):
-    """[expr] with redundant wrapping parentheses removed (`(false)` → `false`)."""
-    expr = expr.strip()
-    while len(expr) >= 2 and expr[0] == "(" and expr[-1] == ")":
-        depth, closes_last = 0, True
-        for i, ch in enumerate(expr):
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
-                if depth == 0 and i != len(expr) - 1:
-                    closes_last = False
-                    break
-        if not closes_last:
-            break
-        expr = expr[1:-1].strip()
-    return expr
-
-
-def _split_top(expr, op):
-    """Split [expr] at depth-0 occurrences of the boolean operator [op].
-    String literals are opaque so a `"a && b"` argument never splits."""
-    parts, depth, cur, i, quote = [], 0, [], 0, ""
-    while i < len(expr):
-        ch = expr[i]
-        if quote:
-            cur.append(ch)
-            if ch == "\\" and i + 1 < len(expr):
-                cur.append(expr[i + 1])
-                i += 2
-                continue
-            if ch == quote:
-                quote = ""
-            i += 1
-            continue
-        if ch in "\"'":
-            quote = ch
-            cur.append(ch)
-            i += 1
-            continue
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            depth -= 1
-        if depth == 0 and expr.startswith(op, i):
-            parts.append("".join(cur))
-            cur = []
-            i += len(op)
-            continue
-        cur.append(ch)
-        i += 1
-    parts.append("".join(cur))
-    return parts
-
-
-def _constant_condition(cond):
-    """'false' / 'true' when the literal decides [cond] at depth 0 — the shape
-    `false && <guard>` (dead) or `<guard> || true` (always taken). A guard that
-    only appears inside such an expression does not gate anything. '' otherwise."""
-    cond = _strip_parens(cond)
-    disjuncts = _split_top(cond, "||")
-    if any(_strip_parens(d) == "true" for d in disjuncts):
-        return "true"
-    if all(any(_strip_parens(c) == "false" for c in _split_top(d, "&&"))
-           for d in disjuncts):
-        return "false"
-    return ""
-
-
 def _decl_text(code, name):
     """Text of the [name] declaration — block body when present, else the
     expression body (`fun f() = …`) up to the next top-level declaration.
     `extract_function` only understands `{ … }` bodies, so an expression-bodied
     helper would come back as None and its dataflow would look absent."""
-    body = extract_function(code, name)
+    body = _fn_text(code, name)
     if body is not None:
         return body
     m = re.search(r"\bfun\s+(?:[A-Za-z_][\w.]*\.)?" + re.escape(name) + r"\s*\(", code)
@@ -566,7 +409,7 @@ def _guard_branches(body, aliases):
     delegation is a legitimate refactor, judging it red would punish it)."""
     out = []
     for m in re.finditer(r"\bif\s*\(", body):
-        cond = paren_block_after(body, m.end() - 1)
+        cond = _paren_after(body, m.end() - 1)
         if cond is None:
             continue  # unbalanced — the caller reports fail-closed
         bears = any(tok in cond for tok in BASE_URL_GUARD_TOKENS) or any(
@@ -576,7 +419,7 @@ def _guard_branches(body, aliases):
         tail = body[m.end() + len(cond):]
         dm = re.match(r"\s*\{", tail)
         if dm:
-            blk = brace_block_after(tail, dm.end() - 1)
+            blk = _brace_after(tail, dm.end() - 1)
             if_body = "" if blk is None else blk
         else:
             if_body = tail.split("\n", 1)[0]
@@ -601,7 +444,7 @@ def check_group_member_faces(mut_code, debug_code, groups_code):
     Returns (v16, v17, fail_closed).
     """
     v16, v17, vfc = [], [], []
-    helper = extract_function(groups_code, ENTRY_ID_HELPER)
+    helper = _fn_text(groups_code, ENTRY_ID_HELPER)
     if helper is None:
         vfc.append("%s: %s not found (fail-closed) — the single implementation moved"
                    % (GROUPS_COLLECTION_FILE, ENTRY_ID_HELPER))
@@ -613,7 +456,7 @@ def check_group_member_faces(mut_code, debug_code, groups_code):
             "SystemVoiceEntries.isKnownGroupMemberId (single source)"
             % (GROUPS_COLLECTION_FILE, ENTRY_ID_HELPER, ENTRY_ID_MSG))
     for fn in (GROUP_CREATE_FN, GROUP_UPDATE_FN):
-        body = extract_function(mut_code, fn)
+        body = _fn_text(mut_code, fn)
         if body is None:
             vfc.append("%s: %s not found (fail-closed)" % (MUTATION_FILE, fn))
         elif "SystemVoiceEntries.isKnownGroupMemberId" not in body:
@@ -622,7 +465,7 @@ def check_group_member_faces(mut_code, debug_code, groups_code):
                 "voice member is silently dropped from the group it was just handed; "
                 "consult SystemVoiceEntries.isKnownGroupMemberId"
                 % (MUTATION_FILE, fn))
-    members = extract_function(debug_code, GROUP_LIST_FN)
+    members = _fn_text(debug_code, GROUP_LIST_FN)
     if members is None:
         vfc.append("%s: %s not found (fail-closed)" % (DEBUG_FILE, GROUP_LIST_FN))
     elif "SystemVoiceEntries.resolve(" not in members:
@@ -650,7 +493,28 @@ def session_writer_block(code, path_marker):
     w = code.find("writer = {", at)
     if w < 0:
         return None
-    return brace_block_after(code, w)
+    return _brace_after(code, w)
+
+def _live_sites(text, pattern):
+    """Positions of [pattern] in [text] whose enclosing conditions are feasible.
+
+    Shared `live_positions` (path_feasible underneath): `if (false) call()` and
+    `if (1 == 2) call()` produce no live hit. A snippet the shared lexer cannot
+    read produces no live hit either — fail-closed, the caller reports red.
+    """
+    view = code_of(text)
+    if view is None:
+        return []
+    return live_positions(view, re.compile(pattern))
+
+
+def _live_refresh_call(branch):
+    """The first VM_REFRESH_TOKENS call that can actually RUN in [branch]."""
+    for tok in VM_REFRESH_TOKENS:
+        if _live_sites(branch, re.escape(tok)):
+            return tok
+    return None
+
 
 def check_session_write_through(cfg_code, store_code):
     """[dv24-A05] C18 — every `session.*` config write reaches BOTH surfaces.
@@ -679,7 +543,7 @@ def check_session_write_through(cfg_code, store_code):
             if name == "peekViewModel":
                 continue
             if name not in peek_cache:
-                body = extract_function(cfg_code, name)
+                body = _fn_text(cfg_code, name)
                 peek_cache[name] = bool(
                     body and any(t in body for t in VM_PEEK_TOKENS))
             if peek_cache[name]:
@@ -724,13 +588,17 @@ def check_session_write_through(cfg_code, store_code):
                     "non-creating lookup — the open chat keeps the OLD value and the next "
                     "in-app pick writes it back over the row"
                     % (CONFIG_BUILTINS_FILE, where))
-            elif not any(t in branch for t in VM_REFRESH_TOKENS):
+            elif _live_refresh_call(branch) is None:
+                # [batch6] the refresh call had to be *spelled*, not *reached*:
+                # `refresh = { vm -> if (false) vm.setThinkingLevel(v) }` kept the
+                # token and never ran it. liveness = shared path_feasible.
                 v18.append(
                     "%s: %s writer peeks but never applies the value to the live chat "
-                    "(none of %s)"
+                    "(no reachable call among %s — a dead branch around the refresh is "
+                    "the same silent drop)"
                     % (CONFIG_BUILTINS_FILE, where, "/".join(VM_REFRESH_TOKENS)))
 
-    peek = extract_function(store_code, "peekViewModel")
+    peek = _fn_text(store_code, "peekViewModel")
     if peek is None:
         vfc.append(
             "%s: peekViewModel not found (fail-closed) — the non-creating resident "
@@ -776,7 +644,7 @@ def session_reader_block(code, path_marker):
     r = code.find("reader = {", at)
     if r < 0:
         return None
-    return brace_block_after(code, r + len("reader = "))
+    return _brace_after(code, r + len("reader = "))
 
 
 def _reaches_token(code, block, tokens):
@@ -787,7 +655,7 @@ def _reaches_token(code, block, tokens):
         return True
     for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", block):
         name = m.group(1)
-        body = extract_function(code, name)
+        body = _fn_text(code, name)
         if body and any(t in body for t in tokens):
             return True
     return False
@@ -822,6 +690,40 @@ def _vm_handles(code, block):
     return names
 
 
+def _if_arm_parts(arm, view):
+    """The (then, else) spans of a brace-less `if (c) a else b` arm, [] otherwise."""
+    m = re.match(r"\s*if\s*\(", view)
+    if not m:
+        return []
+    close = match_bracket(view, m.end() - 1)
+    if close < 0:
+        return []
+    rest_start = close + 1
+    em = re.search(r"\belse\b", view[rest_start:])
+    if not em:
+        return []
+    return [(rest_start, rest_start + em.start()),
+            (rest_start + em.end(), len(view))]
+
+
+def _arm_sources(arm):
+    """Evaluation sources of a when-arm value — brace-less `if`/`else` included.
+
+    `value_sources` splits the block form (`if (c) { a } else { b }`) but not
+    `if (c) a else b`: its `else\\b` probe looks at the start of the remainder,
+    where a bare expression sits. Arms are written both ways in this repo, so
+    the arm's own `else` is located here and each side is handed back to
+    `value_sources` (which still peels `?:` / scope calls / nesting).
+    """
+    view = code_of(arm)
+    if view is None:
+        return [arm]
+    out = []
+    for start, end in _if_arm_parts(arm, view):
+        out.extend(value_sources(arm[start:end]))
+    return out or value_sources(arm)
+
+
 def _arm_derives_from_vm(code, block, arm):
     """[wide-1024] C19 — the resident arm's value must be READ from the VM.
 
@@ -829,11 +731,22 @@ def _arm_derives_from_vm(code, block, arm):
     accepted `(ThinkingLevel.OFF)`, i.e. a parenthesised constant, which is the
     row-only defect wearing a call's clothes. Require the arm to consume the
     identifier bound to the peek; when the peek is inlined (`peekViewModel(…)?.let
-    { … }`) accept the peek itself."""
+    { … }`) accept the peek itself.
+
+    [batch6] The identifier had to *appear* in the arm, and a null test is an
+    appearance: `if (vm != null) ThinkingLevel.OFF else ThinkingLevel.OFF`
+    answered a constant on both paths and stayed green. Judge the *evaluation
+    sources* instead (`value_sources` drops the if/else condition and keeps only
+    the branch values, peeling `.also {}` / `.let { … }` scope calls), so a
+    condition can no longer stand in for a read."""
     handles = _vm_handles(code, block)
+    srcs = [strip_parens(s.strip()) for s in _arm_sources(arm)]
+    srcs = [s for s in srcs if s]
+    if not srcs:
+        return False
     if handles:
-        return any(re.search(r"\b%s\b" % re.escape(h), arm) for h in handles)
-    return any(t in arm for t in VM_PEEK_TOKENS)
+        return any(contains_ident(s, h) for s in srcs for h in handles)
+    return any(any(t in s for t in VM_PEEK_TOKENS) for s in srcs)
 
 
 def check_session_read_through(cfg_code):
@@ -889,6 +802,12 @@ def _azure_value_flows(code, body):
     `azureMode = false` stayed green. Follow the value instead: the initialiser
     of the stored `azureMode` — through local aliases and one same-file helper —
     has to reach the parse.
+
+    [batch6] "reaches the parse" is now asked of the *evaluation sources*
+    (`value_sources`: elvis / if-else / scope-call both sides), and a source
+    that folds to a constant disqualifies the whole initialiser — the old
+    substring test accepted `params.optBoolean("azureMode", false) && false`
+    and `.let { false }` because the parse was still spelled inside the text.
     """
     binds = _bound_initialisers(code, body)
     roots = binds.get("azureMode")
@@ -897,18 +816,29 @@ def _azure_value_flows(code, body):
     seen, stack = set(), list(roots)
     while stack:
         expr = stack.pop()
-        if AZURE_MODE_PARSE.search(expr):
-            return True
-        for ident in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", expr):
-            if ident in seen:
+        srcs = [strip_parens(s.strip()) for s in value_sources(expr)]
+        if not srcs:
+            srcs = [strip_parens(expr.strip())]
+        for src in srcs:
+            if not src:
                 continue
-            seen.add(ident)
-            stack.extend(binds.get(ident, []))
-        for callee in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", expr):
-            helper = _decl_text(code, callee)
-            if helper is not None and AZURE_MODE_PARSE.search(helper):
+            if const_value(src) is not None:
+                # `… && false` / `.let { false }` / `if (…) false else false`:
+                # the stored value is a constant, the parse is decoration.
+                return False
+            if AZURE_MODE_PARSE.search(src):
                 return True
+            for ident in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", src):
+                if ident in seen:
+                    continue
+                seen.add(ident)
+                stack.extend(binds.get(ident, []))
+            for callee in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", src):
+                helper = _decl_text(code, callee)
+                if helper is not None and AZURE_MODE_PARSE.search(helper):
+                    return True
     return False
+
 
 
 def check_tree(root):
@@ -917,7 +847,17 @@ def check_tree(root):
               "c8": [], "c9": [], "c10": [], "c11": [], "c12": [], "c13": [],
               "c14": [], "c15": [], "c16": [], "c17": [], "c18": [], "c19": [],
               "fail_closed": []}
+    try:
+        return _check_tree(root, detail)
+    except LexFail as exc:
+        # [batch6] fail-closed: a file the shared lexer cannot read is a red,
+        # never a silent skip (the hand-written stripper used to swallow the
+        # rest of the line after `val q = '"'` and call the result green).
+        detail["fail_closed"].append(str(exc))
+        return 1, detail
 
+
+def _check_tree(root, detail):
     debug_paths = find_files(root, DEBUG_FILE)
     mut_paths = find_files(root, MUTATION_FILE)
     if len(debug_paths) != 1 or len(mut_paths) != 1:
@@ -928,9 +868,9 @@ def check_tree(root):
         return 1, detail
 
     with open(debug_paths[0], encoding="utf-8") as f:
-        debug_code = strip_comments(f.read())
+        debug_code = mask_source(f.read())
     with open(mut_paths[0], encoding="utf-8") as f:
-        mut_code = strip_comments(f.read())
+        mut_code = mask_source(f.read())
 
     # ---- C1 ----
     all_defs = []
@@ -941,7 +881,7 @@ def check_tree(root):
                 p = os.path.join(dirpath, fn)
                 try:
                     with open(p, encoding="utf-8", errors="replace") as f:
-                        code = strip_comments(f.read())
+                        code = mask_source(f.read())
                 except OSError:
                     continue
                 if PREDICATE_DEF_PAT.search(code):
@@ -959,20 +899,20 @@ def check_tree(root):
         if INLINE_HARDCODE in code:
             detail["c1"].append("inline openAI||anthropic hardcode present in %s file" % label)
 
-    type_spec = extract_function(debug_code, "typeSpec")
+    type_spec = _fn_text(debug_code, "typeSpec")
     if type_spec is None:
         detail["fail_closed"].append("typeSpec not found in %s" % DEBUG_FILE)
     elif "supportsCustomBaseURL" not in type_spec:
         detail["c1"].append("typeSpec does not reference supportsCustomBaseURL")
 
-    create_body = extract_function(mut_code, "instancesCreate")
+    create_body = _fn_text(mut_code, "instancesCreate")
     if create_body is None:
         detail["fail_closed"].append("instancesCreate not found in %s" % MUTATION_FILE)
     elif "supportsCustomBaseURL" not in create_body:
         detail["c1"].append("instancesCreate guard does not reference supportsCustomBaseURL")
 
     # ---- C2 ----
-    update_body = extract_function(mut_code, "instancesUpdate")
+    update_body = _fn_text(mut_code, "instancesUpdate")
     if update_body is None:
         detail["fail_closed"].append("instancesUpdate not found in %s" % MUTATION_FILE)
     else:
@@ -990,12 +930,12 @@ def check_tree(root):
     # ---- C3 ----
     per_inst_block = None
     core_block = None
-    list_body = extract_function(debug_code, "instancesList")
+    list_body = _fn_text(debug_code, "instancesList")
     if list_body is None:
         detail["fail_closed"].append("instancesList not found in %s" % DEBUG_FILE)
         per_instance_keys = None
     else:
-        per_inst_block = extract_apply_block(list_body, "arr.put(JSONObject().apply {")
+        per_inst_block = _apply_block_after(list_body, "arr.put(JSONObject().apply {")
         if per_inst_block is None:
             detail["fail_closed"].append("per-instance JSONObject().apply block not found in instancesList")
             per_instance_keys = None
@@ -1005,12 +945,12 @@ def check_tree(root):
                 detail["fail_closed"].append("no put( keys found in instancesList per-instance block")
                 per_instance_keys = None
 
-    to_json_body = extract_function(mut_code, "instanceToJson")
+    to_json_body = _fn_text(mut_code, "instanceToJson")
     if to_json_body is None:
         detail["fail_closed"].append("instanceToJson not found in %s" % MUTATION_FILE)
         mut_keys = None
     elif "instanceJsonCore(" in to_json_body:
-        core_body = extract_function(mut_code, "instanceJsonCore")
+        core_body = _fn_text(mut_code, "instanceJsonCore")
         if core_body is None:
             detail["fail_closed"].append(
                 "instanceToJson delegates to instanceJsonCore but its body was not found"
@@ -1020,7 +960,7 @@ def check_tree(root):
             marker = ("return JSONObject().apply {"
                       if "return JSONObject().apply {" in core_body
                       else "JSONObject().apply {")
-            core_block = extract_apply_block(core_body, marker)
+            core_block = _apply_block_after(core_body, marker)
             if core_block is None:
                 # Expression-body function: extract_function already returned
                 # exactly the JSONObject().apply { … } block.
@@ -1051,7 +991,7 @@ def check_tree(root):
         )
     else:
         with open(coll_paths[0], encoding="utf-8") as f:
-            coll_code = strip_comments(f.read())
+            coll_code = mask_source(f.read())
         write_offs = base_url_write_offsets(coll_code)
         if not write_offs:
             detail["fail_closed"].append(
@@ -1077,7 +1017,7 @@ def check_tree(root):
                 if any(tok in r for r in rhs for tok in BASE_URL_GUARD_TOKENS))
             branches = _guard_branches(body, aliases)
             live = [c for c, b in branches
-                    if not _constant_condition(c) and re.search(r"\b(?:throw|return)\b", b)]
+                    if const_bool(c) is None and re.search(r"\b(?:throw|return)\b", b)]
             if live:
                 continue
             stmt_end = coll_code.find("\n", off)
@@ -1089,14 +1029,18 @@ def check_tree(root):
             if derived:
                 continue
             if branches:
-                dead = [_constant_condition(c) for c, _ in branches if _constant_condition(c)]
+                # [batch6] constant folding now goes through the shared AST
+                # (`const_bool`): the hand-written `_constant_condition` only
+                # knew the literals `true`/`false`, so `!true && !guard(...)`
+                # — a guard that can never run — read as a live guard.
+                dead = [(c, const_bool(c)) for c, _ in branches if const_bool(c) is not None]
                 if dead:
                     detail["c4"].append(
                         "%s: customBaseURL write site in fun %s is guarded by a "
-                        "condition the literal '%s' decides ('%s') — the guard call "
-                        "is dead code and the write is ungated"
-                        % (PROVIDERS_COLLECTION_FILE, fn, dead[0],
-                           next(c for c, _ in branches if _constant_condition(c)).strip()))
+                        "condition that folds to %s ('%s') — the guard call is dead "
+                        "code and the write is ungated"
+                        % (PROVIDERS_COLLECTION_FILE, fn, str(dead[0][1]).lower(),
+                           dead[0][0].strip()))
                 else:
                     detail["c4"].append(
                         "%s: customBaseURL write site in fun %s has a guard that "
@@ -1160,7 +1104,7 @@ def check_tree(root):
         )
 
     # ---- C7 ---- [da1030-C ISSUE-04] probe auth-header fork
-    test_body = extract_function(mut_code, "instancesTest")
+    test_body = _fn_text(mut_code, "instancesTest")
     if test_body is None:
         detail["fail_closed"].append("instancesTest not found in %s" % MUTATION_FILE)
     else:
@@ -1182,7 +1126,7 @@ def check_tree(root):
         )
     else:
         with open(cfg_paths[0], encoding="utf-8") as f:
-            cfg_code = strip_comments(f.read())
+            cfg_code = mask_source(f.read())
         path_idx = cfg_code.find(PROVIDERS_PATH_MARKER)
         if path_idx < 0:
             detail["fail_closed"].append(
@@ -1190,7 +1134,7 @@ def check_tree(root):
             )
         else:
             dict_idx = cfg_code.find(INSTANCE_DICT_MARKER, path_idx)
-            instance_dict = None if dict_idx < 0 else paren_block_after(cfg_code, dict_idx)
+            instance_dict = None if dict_idx < 0 else _paren_after(cfg_code, dict_idx)
             if instance_dict is None:
                 detail["fail_closed"].append(
                     "%s: %s block after %s not found (fail-closed)"
@@ -1212,7 +1156,7 @@ def check_tree(root):
         )
     else:
         with open(conn_paths[0], encoding="utf-8") as f:
-            conn_code = strip_comments(f.read())
+            conn_code = mask_source(f.read())
         if UA_WRITABLE_TOKEN not in conn_code:
             detail["c9"].append(
                 "%s: %s not present (fail-closed: the UA visibility gate must stay "
@@ -1221,7 +1165,7 @@ def check_tree(root):
             )
         guard_spans = []
         for m in OPENROUTER_UI_GUARD.finditer(conn_code):
-            body = brace_block_after(conn_code, m.end())
+            body = _brace_after(conn_code, m.end())
             if body is not None:
                 guard_spans.append(body)
         if not guard_spans:
@@ -1250,13 +1194,13 @@ def check_tree(root):
         )
     else:
         with open(auth_paths[0], encoding="utf-8") as f:
-            auth_code = strip_comments(f.read())
+            auth_code = mask_source(f.read())
         if re.search(r"\bfun\s+" + AUTH_SINGLE_SOURCE_FN + r"\s*\(", auth_code) is None:
             detail["c10"].append(
                 "%s: %s(…) is not defined — callers cannot delegate to a missing "
                 "single source (fail-closed)" % (AUTH_HEADER_FILE, AUTH_SINGLE_SOURCE_FN)
             )
-        apply_win = decl_window(auth_code, APPLY_AUTH_FN)
+        apply_win = _fn_text(auth_code, APPLY_AUTH_FN)
         if apply_win is None:
             detail["fail_closed"].append(
                 "%s: %s not found (fail-closed)" % (AUTH_HEADER_FILE, APPLY_AUTH_FN)
@@ -1271,7 +1215,7 @@ def check_tree(root):
                 "%s: %s still inlines the azure/bearer literal(s) %s"
                 % (AUTH_HEADER_FILE, APPLY_AUTH_FN, AUTH_FORK_TOKENS)
             )
-    probe_win = decl_window(mut_code, PROBE_AUTH_FN)
+    probe_win = _fn_text(mut_code, PROBE_AUTH_FN)
     if probe_win is None:
         detail["fail_closed"].append(
             "%s: %s not found (fail-closed)" % (MUTATION_FILE, PROBE_AUTH_FN)
@@ -1286,6 +1230,43 @@ def check_tree(root):
             "%s: %s still inlines the azure/bearer literal(s) %s"
             % (MUTATION_FILE, PROBE_AUTH_FN, AUTH_FORK_TOKENS)
         )
+    else:
+        # [batch6] the delegation had to *exist*, not *carry the flag*:
+        # `openAIKeyAuthHeader(azure = false, token = key)` delegates and then
+        # ignores the azureMode the caller resolved — the fork decision is
+        # re-made one hop behind the value flow (C7 still sees the probe as the
+        # single face and C10's literal arm still sees one body).
+        probe_params = _fn_params(mut_code, PROBE_AUTH_FN)
+        pm = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)", probe_params or "")
+        first_param = pm.group(1) if pm else None
+        dm = re.search(r"\b" + re.escape(AUTH_SINGLE_SOURCE_FN) + r"\s*\(", probe_win)
+        if first_param and dm:
+            passed, seen_args = False, []
+            for pos, (a, b) in enumerate(call_args(probe_win, dm.end() - 1)):
+                arg = probe_win[a:b]
+                nm = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*", arg)
+                if nm:
+                    name, value, is_azure = nm.group(1), arg[nm.end():], nm.group(1) in (
+                        "azure", "azureMode")
+                else:
+                    name, value, is_azure = None, arg, pos == 0
+                if is_azure:
+                    seen_args.append(value.strip())
+                    if contains_ident(value, first_param):
+                        passed = True
+            if not passed:
+                detail["c10"].append(
+                    "%s: %s ignores its `%s` parameter — the azure argument passed to "
+                    "%s(…) is %r, not derived from the parameter the caller resolved "
+                    "(the fork is re-decided one hop behind the value flow)"
+                    % (MUTATION_FILE, PROBE_AUTH_FN, first_param, AUTH_SINGLE_SOURCE_FN,
+                       (seen_args or ["<none>"])[0])
+                )
+        elif first_param and not dm:
+            detail["fail_closed"].append(
+                "%s: %s does not call %s(…) in a readable shape (fail-closed)"
+                % (MUTATION_FILE, PROBE_AUTH_FN, AUTH_SINGLE_SOURCE_FN)
+            )
 
     # ---- C11 ---- [da1031-D ISSUE-06] the group session-default fields live on
     # every face that reads or writes a group. The config collection already
@@ -1293,7 +1274,7 @@ def check_tree(root):
     # and the write path (`groupsCreate`/`groupsUpdate`) did not — so a group's
     # thinking level / context limit was invisible and unsettable over RPC while
     # minis-config could set both. Field-set equality is what this arm pins.
-    group_list = extract_function(debug_code, GROUP_LIST_FN)
+    group_list = _fn_text(debug_code, GROUP_LIST_FN)
     if group_list is None:
         detail["fail_closed"].append(
             "%s: %s not found (fail-closed)" % (DEBUG_FILE, GROUP_LIST_FN)
@@ -1302,7 +1283,7 @@ def check_tree(root):
         missing = [t for t in GROUP_RPC_KEYS if t not in group_list]
         if missing:
             detail["c11"].append("%s: %s missing %s" % (DEBUG_FILE, GROUP_LIST_FN, missing))
-    to_json = extract_function(mut_code, GROUP_TO_JSON_FN)
+    to_json = _fn_text(mut_code, GROUP_TO_JSON_FN)
     if to_json is None:
         detail["fail_closed"].append(
             "%s: %s not found (fail-closed)" % (MUTATION_FILE, GROUP_TO_JSON_FN)
@@ -1312,7 +1293,7 @@ def check_tree(root):
         if missing:
             detail["c11"].append("%s: %s missing %s" % (MUTATION_FILE, GROUP_TO_JSON_FN, missing))
     for fn in (GROUP_CREATE_FN, GROUP_UPDATE_FN):
-        body = extract_function(mut_code, fn)
+        body = _fn_text(mut_code, fn)
         if body is None:
             detail["fail_closed"].append("%s: %s not found (fail-closed)" % (MUTATION_FILE, fn))
             continue
@@ -1340,7 +1321,7 @@ def check_tree(root):
     # a clear — the UI's OFF branch stashes rather than erases — so an update
     # that nulled it made the next OFF→ON toggle snap back to the 128K default
     # instead of the last value the user set.
-    groups_update = extract_function(mut_code, GROUP_UPDATE_FN)
+    groups_update = _fn_text(mut_code, GROUP_UPDATE_FN)
     if groups_update is None:
         detail["fail_closed"].append(
             "%s: %s not found (fail-closed)" % (MUTATION_FILE, GROUP_UPDATE_FN)
@@ -1353,11 +1334,16 @@ def check_tree(root):
                 "last-selected memory the UI restores on an OFF→ON toggle"
                 % (MUTATION_FILE, GROUP_UPDATE_FN)
             )
-        if "applyContextLimitWrite(" not in groups_update:
+        if not _live_sites(groups_update, r"applyContextLimitWrite\s*\("):
+            # [batch6] the canonical face had to be *named*, not *reached*:
+            # `mutatedGroupCopy(updated) { if (false) applyContextLimitWrite(it, v) }`
+            # kept the token and the write never ran.
             detail["c12"].append(
                 "%s: %s does not route the context-limit write through the canonical "
-                "applyContextLimitWrite face (single source for clear/seed semantics)"
-                % (MUTATION_FILE, GROUP_UPDATE_FN)
+                "applyContextLimitWrite face (single source for clear/seed semantics)%s"
+                % (MUTATION_FILE, GROUP_UPDATE_FN,
+                   "" if "applyContextLimitWrite(" not in groups_update
+                   else " — the call is present but sits on an unreachable path")
             )
 
     # ---- C13 ---- [fix/dv16-a A-06] the group write face's entry-id existence
@@ -1373,9 +1359,9 @@ def check_tree(root):
         )
     else:
         with open(groups_paths[0], encoding="utf-8") as f:
-            groups_code = strip_comments(f.read())
+            groups_code = mask_source(f.read())
         with open(rules_paths[0], encoding="utf-8") as f:
-            rules_code = strip_comments(f.read())
+            rules_code = mask_source(f.read())
         n_msg = groups_code.count(ENTRY_ID_MSG) + rules_code.count(ENTRY_ID_MSG)
         if n_msg == 0:
             detail["fail_closed"].append(
@@ -1395,7 +1381,7 @@ def check_tree(root):
                     "%s not found (fail-closed) — the single implementation moved; "
                     "update this gate" % ENTRY_ID_HELPER
                 )
-        coll_add = extract_function(groups_code, "add")
+        coll_add = _fn_text(groups_code, "add")
         if coll_add is None:
             detail["fail_closed"].append(
                 "%s: add not found (fail-closed)" % GROUPS_COLLECTION_FILE
@@ -1406,7 +1392,7 @@ def check_tree(root):
                 "accepts groups whose members reference nonexistent entry ids"
                 % (GROUPS_COLLECTION_FILE, ENTRY_ID_HELPER)
             )
-        entries_win = decl_window(groups_code, "entriesField")
+        entries_win = _fn_text(groups_code, "entriesField")
         if entries_win is None:
             detail["fail_closed"].append(
                 "%s: entriesField not found (fail-closed)" % GROUPS_COLLECTION_FILE
@@ -1454,8 +1440,8 @@ def check_tree(root):
         )
     else:
         with open(img_coll_paths[0], encoding="utf-8") as f:
-            img_coll_code = strip_comments(f.read())
-        img_fields = member_window(img_coll_code, "fields")
+            img_coll_code = mask_source(f.read())
+        img_fields = _fn_text(img_coll_code, "fields")
         if img_fields is None:
             detail["fail_closed"].append(
                 "%s: fields not found (fail-closed)" % PROVIDERS_COLLECTION_FILE
@@ -1467,7 +1453,7 @@ def check_tree(root):
                     "%s: fields does not register providers.<id>.%s"
                     % (PROVIDERS_COLLECTION_FILE, missing)
                 )
-        img_add = extract_function(img_coll_code, "add")
+        img_add = _fn_text(img_coll_code, "add")
         if img_add is None:
             detail["fail_closed"].append(
                 "%s: add not found (fail-closed)" % PROVIDERS_COLLECTION_FILE
@@ -1477,7 +1463,7 @@ def check_tree(root):
                 "%s: add does not decode %s — the write face must accept the same "
                 "keys the RPC create face does" % (PROVIDERS_COLLECTION_FILE, IMAGE_KEYS[0])
             )
-        resolved_win = decl_window(img_coll_code, "imageEndpointResolved")
+        resolved_win = _fn_text(img_coll_code, "imageEndpointResolved")
         if resolved_win is None or "ReadOnlyField" not in resolved_win:
             detail["c15"].append(
                 "%s: imageEndpointResolved must stay a derived read-only field on the "
@@ -1497,9 +1483,9 @@ def check_tree(root):
         pass
     else:
         with open(cfg18_paths[0], encoding="utf-8") as f:
-            cfg18 = strip_comments(f.read())
+            cfg18 = mask_source(f.read())
         with open(store_paths[0], encoding="utf-8") as f:
-            store18 = strip_comments(f.read())
+            store18 = mask_source(f.read())
         v18, vfc18 = check_session_write_through(cfg18, store18)
         detail["c18"].extend(v18)
         detail["fail_closed"].extend(vfc18)
@@ -2970,6 +2956,115 @@ def run_selftest():
 
     shutil.rmtree(root) if os.path.isdir(root) else None
 
+    # ------------------------------------------------------------------
+    # [batch6 B6-t02] six witnesses that used to leave this gate at rc=0.
+    # Each one is the *narrowest* edit that re-introduces the defect the
+    # criterion claims to stop, so a green here means the arm is blind again.
+    # ------------------------------------------------------------------
+
+    # A07-1 (family-hole): C4 guard spelled `!true && !guard(…)` — the
+    # condition can never be true, so the throw is dead and the write runs.
+    b6_col = GOOD_COLLECTION.replace(
+        "                if (!inst.providerType.supportsCustomBaseURL) {",
+        "                if (!true && !inst.providerType.supportsCustomBaseURL) {",
+    )
+    assert b6_col != GOOD_COLLECTION, "B6/A07-1 anchor missing"
+    root = write_fixture(GOOD_DEBUG, GOOD_MUTATION, b6_col)
+    rc, detail = check_tree(root)
+    results.append((
+        "F67-collection-guard-negated-true-C4",
+        rc == 1 and detail["c4"] and only(detail, "c4")
+        and "folds to false" in " ".join(detail["c4"]),
+        detail,
+    ))
+    shutil.rmtree(root)
+
+    # A07-2 (dataflow): C6 `azureMode` initialiser folded with `&& false` —
+    # the parse is still spelled inside the expression, the stored value is a
+    # constant.
+    b6_mut = GOOD_MUTATION.replace(
+        'val azureMode = params.optBoolean("azureMode", false)',
+        'val azureMode = params.optBoolean("azureMode", false) && false',
+    )
+    assert b6_mut != GOOD_MUTATION, "B6/A07-2 anchor missing"
+    root = write_fixture(GOOD_DEBUG, b6_mut)
+    rc, detail = check_tree(root)
+    results.append((
+        "F68-create-azureMode-folded-constant-C6",
+        rc == 1 and detail["c6"] and only(detail, "c6"),
+        detail,
+    ))
+    shutil.rmtree(root)
+
+    # A07-3 (dataflow): C19 resident arm answers a constant on both paths —
+    # `vm != null` is a mention of the handle, not a read of it.
+    b6_cfg = GOOD_CONFIG_BUILTINS.replace(
+        '                            SessionConfigReadSource.ResidentViewModel ->\n'
+        '                                vm!!.requestedThinkingLevel.value',
+        '                            SessionConfigReadSource.ResidentViewModel ->\n'
+        '                                if (vm != null) "off" else "off"',
+    )
+    assert b6_cfg != GOOD_CONFIG_BUILTINS, "B6/A07-3 anchor missing"
+    root = write_fixture(GOOD_DEBUG, GOOD_MUTATION, config_text=b6_cfg)
+    rc, detail = check_tree(root)
+    results.append((
+        "F69-session-think-reader-null-test-constant-C19",
+        rc == 1 and detail["c19"] and only(detail, "c19"),
+        detail,
+    ))
+    shutil.rmtree(root)
+
+    # A07-4 (family-hole): C18 refresh call parked behind `if (false)` — the
+    # call is spelled inside the writer and never runs.
+    b6_cfg = GOOD_CONFIG_BUILTINS.replace(
+        "refresh = { vm -> vm.setThinkingLevel(v) },",
+        "refresh = { vm -> if (false) vm.setThinkingLevel(v) },",
+    )
+    assert b6_cfg != GOOD_CONFIG_BUILTINS, "B6/A07-4 anchor missing"
+    root = write_fixture(GOOD_DEBUG, GOOD_MUTATION, config_text=b6_cfg)
+    rc, detail = check_tree(root)
+    results.append((
+        "F70-session-thinking-refresh-dead-branch-C18",
+        rc == 1 and detail["c18"] and only(detail, "c18"),
+        detail,
+    ))
+    shutil.rmtree(root)
+
+    # A07-5 (family-hole): C12 canonical write face parked behind `if (false)`.
+    b6_mut = GOOD_MUTATION.replace(
+        "mutatedGroupCopy(current) { applyContextLimitWrite(it, limitValue) }",
+        "mutatedGroupCopy(current) { if (false) applyContextLimitWrite(it, limitValue) }",
+    )
+    assert b6_mut != GOOD_MUTATION, "B6/A07-5 anchor missing"
+    root = write_fixture(GOOD_DEBUG, b6_mut)
+    rc, detail = check_tree(root)
+    results.append((
+        "F71-group-update-canonical-face-dead-branch-C12",
+        rc == 1 and detail["c12"] and only(detail, "c12"),
+        detail,
+    ))
+    shutil.rmtree(root)
+
+    # A07-6 (scope): C10 — the probe takes `azureMode` and delegates with
+    # `azure = false`: one body (C10's literal arm is happy), one caller-facing
+    # flag that is thrown away (the fork is re-decided behind the value flow).
+    b6_mut = GOOD_MUTATION.replace(
+        """internal fun probeAuthHeader(azureMode: Boolean, key: String): Pair<String, String> =
+    openAIKeyAuthHeader(azure = azureMode, token = key)""",
+        """internal fun probeAuthHeader(azureMode: Boolean, key: String): Pair<String, String> =
+    openAIKeyAuthHeader(azure = false, token = key)""",
+    )
+    assert b6_mut != GOOD_MUTATION, "B6/A07-6 anchor missing"
+    root = write_fixture(GOOD_DEBUG, b6_mut)
+    rc, detail = check_tree(root)
+    results.append((
+        "F72-probe-ignores-azure-parameter-C10",
+        rc == 1 and detail["c10"] and only(detail, "c10")
+        and "ignores its" in " ".join(detail["c10"]),
+        detail,
+    ))
+    shutil.rmtree(root)
+
     all_ok = True
     for name, ok, detail in results:
         print("%s %s" % ("PASS" if ok else "FAIL", name))
@@ -2978,6 +3073,9 @@ def run_selftest():
             print(json.dumps(detail, indent=2))
     if all_ok:
         print(SELFTEST_MARKER)
+        # [batch6 B6-t02] arm count is printed separately so the legacy marker
+        # string (asserted in scripts/scan/test_scan.py) stays byte-identical.
+        print("PROVIDER_RPC_SYMMETRY_SELFTEST_ARMS=%d" % len(results))
         return 0
     return 1
 
