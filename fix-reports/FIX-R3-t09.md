@@ -131,11 +131,14 @@ gates 109  logged 109  missing 0   FAIL 0
 
 ## 6. CI
 
-- 分支 `fix/r3-loop-persist`，HEAD（门提交）`__HEAD__`
-- run `__RUN__` / job `__JOB__` / attempt `__ATTEMPT__` → **`__CONCLUSION__`**
-- `head_sha` 三方核对：本地 `git rev-parse HEAD` = `__HEAD__`，API `/git/ref/heads/fix/r3-loop-persist` = `__REMOTE__`，run.head_sha = `__CIHEAD__`（逐字符一致 `__SAME__`）
-- 关键日志行：`Summary: 112 passed, 0 failed` 恰 __SUM__ 条 · `ALL 344 CASES PASS` 恰 __ALL__ 条 · `^ e: ` __ERR__ 条 · 门头 112 个互异 · 唯一 skipped = Publish（main 门控）· `LOOP_PERSIST_SLICE_SELFTEST=PASS` / `LOOP_TOOL_STATUS_SELFTEST=PASS` 各 __MARK__ 次
+- 分支 `fix/r3-loop-persist`，HEAD（门提交，两个 commit）`8e8f49424` → `fc4a2f2e28fb1196453037045ceaa3b6bfd3ece2`
+- run `40309111583`（**#2729**）/ job `121525653016` / attempt `1` → **`success`**（10:39:47Z → 11:05:56Z，26m09s）
+- `head_sha` 三方核对：本地 `git rev-parse HEAD` = `fc4a2f2e28fb1196453037045ceaa3b6bfd3ece2`，API `/git/ref/heads/fix/r3-loop-persist` = `fc4a2f2e28fb1196453037045ceaa3b6bfd3ece2`，run.head_sha = `fc4a2f2e28fb1196453037045ceaa3b6bfd3ece2`（逐字符一致 `True`）
+- 前一次 dispatch（run `40308529786`，#2726，head `8e8f49424`）在本支追加 span-clamp 提交后变 `cancelled`——该 run 跑的是旧 head，不作为证据，最终判据是 #2729。
+- 关键日志行（job 日志 1,487,375 B，NUL 0）：`Summary: 112 passed, 0 failed` 恰 **1** 条 · `ALL 344 CASES PASS` 恰 **1** 条 · ` e: ` **0** 条 · 门头 `[N/112]` 去重 **112** 个互异 · 6 条含 FAILED 的行逐条确认全是 PASSED 用例名子串 · step 级 26 步唯一 skipped = `Publish to Releases`（main 门控），failures 空
+- CI 见证行：`✅ loop_tool_status_transition_check selftest has teeth (LOOP_TOOL_STATUS_SELFTEST=PASS)` 恰 1 次；`SELFTEST=PASS loop_persist_slice_check (6 violating fixtures red, compliant fixture green)`（legacy 行，`test_scan.py:2695` 断言的形态）恰 1 次。`LOOP_PERSIST_SLICE_SELFTEST=PASS` 在 CI 日志 **0** 命中——`test_scan` 对第一门只断言/回显 legacy 形态，门自己的新 marker 不进 CI 日志（同族已知问题，见 §7 R8）。
 - 说明：`test_scan.py` 只回显 ✅ 行，门自己的 `--selftest` stdout 不进 CI 日志；新臂的见证由本报告 §4.3 承载（同族已登记为 P2 残留）。
+- CI 后源码树等价核对：`git diff --name-only fc4a2f2e2..HEAD -- . ':(exclude)fix-reports'` = **0 行**（后一次提交纯报告）。
 
 ## 7. 残留（每条三件：触发条件 / 触发后方案 / 搁置理由）
 
