@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -3418,10 +3419,12 @@ def _run_parallel(jobs, root_args):
                     return
                 name = queue.pop(0)
             try:
+                t0 = time.time()
                 proc = subprocess.run(
                     _child_argv(name, root_args),
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 )
+                elapsed = time.time() - t0
                 text = proc.stdout.decode("utf-8", "replace")
             except OSError as exc:
                 results[name] = (None, None, "scheduler: %s: %s" % (type(exc).__name__, exc))
@@ -3446,7 +3449,7 @@ def _run_parallel(jobs, root_args):
             results[name] = (body, (passed, failed), err)
             with lock:
                 done_count[0] += 1
-                print("(fixtures: %d/%d %s)" % (done_count[0], len(TEST_ORDER), name),
+                print("(fixtures: %d/%d %s %.1fs)" % (done_count[0], len(TEST_ORDER), name, elapsed),
                       file=sys.stderr, flush=True)
 
     threads = [threading.Thread(target=worker) for _ in range(jobs)]
