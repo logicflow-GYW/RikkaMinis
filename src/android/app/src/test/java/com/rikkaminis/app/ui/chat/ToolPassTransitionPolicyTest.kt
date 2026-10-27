@@ -206,7 +206,7 @@ class ToolPassTransitionPolicyTest {
 
     /** Walks up from user.dir so the test runs from the module dir or the repo root. */
     private fun readRepoFile(relative: String): String {
-        var dir = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
+        var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
             val f = java.io.File(dir, relative)
             if (f.exists()) return f.readText()
