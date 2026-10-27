@@ -2258,6 +2258,12 @@ def check_ui_tree(root):
             try:
                 with open(path, encoding="utf-8") as fh:
                     src = fh.read()
+                # Cheap pre-filter: lexing all 223 UI files costs ~2.4 s and the
+                # Kotlin lexer is pure Python. A file that never names the call
+                # cannot be a site (a mention inside a comment only costs one
+                # lex of that one file).
+                if SCAN_CALL not in src:
+                    continue
             except OSError as exc:
                 findings.append("C12: cannot read %s (%s) — fail closed"
                                 % (os.path.relpath(path, root), exc))
