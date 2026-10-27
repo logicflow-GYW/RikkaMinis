@@ -1,0 +1,42 @@
+name: Scan Gate (main push)
+
+# scripts/** is outside build-apk.yml's `on.push.paths`, so a commit that only
+# touches the static scanners used to land on main with NO automated witness:
+# the 112 gates and test_scan.py ran only when someone remembered a manual
+# workflow_dispatch, or when an unrelated src/ change happened to ride along
+# (registered as backlog §2604, measured 2026-10-27). This workflow is the
+# narrow fix: run the scanners and their fixture self-test, nothing else —
+# no Gradle, no NDK, no release assets. ~6 min instead of ~25.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'scripts/scan/**'
+      - 'scripts/diag/**'
+      - '.github/workflows/scan-gate-push.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: scan-gate-push-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Run static scan gate
+        run: |
+          python3 --version || (echo "::error::python3 is required for the scan gate" && exit 1)
+          sh scripts/scan/scan.sh
+
+      # Scanner self-test — fixtures assert each scanner actually CATCHES the
+      # bug class it was built for. A silently-regressed scanner fails open;
+      # this step makes it fail loud. ~5s: fixtures are tiny temp trees, plus
+      # one clean pass over this repo.
+      - name: Scan self-test (fixture ground truth)
+        run: python3 scripts/scan/test_scan.py

@@ -373,6 +373,20 @@ jobs:
       # build — exactly how the rolling release got polluted on 2026-08-05.
       # Feature-branch builds still surface the APK in the run's Artifacts
       # tab; only `main` may replace the official download asset.
+      # The rolling release only swaps its APK asset and title in place — the
+      # TAG never moved. Measured 2026-10-27: `android-latest` was still pinned
+      # at 91498d74 (2026-09-01) while the release page advertised v1.0.0+2766,
+      # so the "Source code" link under that tag served a months-old tree that
+      # has nothing to do with the APK next to it. Move the ref BEFORE the
+      # publish step so the release the user sees and the commit its tag points
+      # at are always the same thing. (Force is required: the whole point is
+      # that this tag is a moving pointer, unlike versioned tags.)
+      - name: Move the rolling tag android-latest to this commit
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git tag -f android-latest "${GITHUB_SHA}"
+          git push -f origin "refs/tags/android-latest"
+
       - name: Publish to Releases
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
