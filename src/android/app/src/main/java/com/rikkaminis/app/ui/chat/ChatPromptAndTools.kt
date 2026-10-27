@@ -1560,6 +1560,16 @@ Sub-agent routing: the in-session sub-agent feature (spawn_agent) and cross-sess
         append("\n\nRuntime context:\n")
         append("- Current date: ").append(dateStr).append(" (").append(tzId).append(")\n")
         append("- Device language: ").append(lang).append("\n")
+        // [feat/storage-budget-loop L6] Give the producer its own bill. The
+        // agent is what grows filesDir (apk add, builds, clone/fixture trees,
+        // big offloads) but it had no way to see that it was consuming the
+        // user's disk — the number only existed inside the Storage screen.
+        // No IO here: StorageBudget keeps the daily sample in memory, so this
+        // is a string build over a cached value and changes at most once a day
+        // (prompt prefix caching is unaffected within a day).
+        com.rikkaminis.app.data.storage.StorageBudget.promptLine()?.let {
+            append(it).append("\n")
+        }
         append("- minis-model-use models available: ").append(modelUseCount)
     }
 }

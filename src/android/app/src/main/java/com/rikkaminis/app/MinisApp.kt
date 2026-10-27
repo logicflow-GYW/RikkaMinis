@@ -342,6 +342,16 @@ class MinisApp : Application(), ImageLoaderFactory {
             Log.w("MinisApp", "NativeCrashHandler install failed: ${t.message}")
         }
 
+        // [feat/storage-budget-loop] The DECIDE edge. Everything this app owns
+        // lives in filesDir (rootfs + sessions + media + logs); until now the
+        // only reader of that number was the Storage screen, i.e. the user had
+        // to already suspect a problem. Sample at most once a day on IO, warn
+        // once past the budget, and expose the same sample to the system prompt
+        // so the agent (the producer) can see its own footprint.
+        applicationScope.launch {
+            com.rikkaminis.app.data.storage.StorageBudget.runDailyCheck(this@MinisApp)
+        }
+
         // [mem-spike-diag] 内存尖峰记录器。NativeCrashHandler 只记「崩的那一刻」，
         // 本记录器补上「一路上怎么涨的」：秒级采样 VmRSS / RssAnon / native heap /
         // Java heap / **PRoot 子进程聚合 RSS**（区分「涨在 app 自己」还是「涨在
