@@ -1085,7 +1085,7 @@
     <string name="common_loading">Laden…</string>
     <string name="rootfs_reset_button">Zurücksetzen</string>
     <string name="session_title_label">Titel</string>
-    <string name="backup_import_too_large">Backupdatei ist zu groß (%1$d MB, max. %2$d MB) – es wurde nichts importiert.</string>
+    <string name="backup_import_too_large">Backupdatei ist zu groß (%1$d MB, max. %2$d MB) – es wurde nichts importiert. Verkürze das Chat-Verlaufsfenster (oder schalte es ab), exportiere erneut und importiere die neue Datei.</string>
     <string name="backup_export_incomplete">Warnung: %1$d Feld(er) konnten nicht gelesen werden – dieses Backup ist möglicherweise unvollständig.</string>
     <string name="code_expand">%1$d Zeilen erweitern</string>
     <string name="code_collapse">Einklappen</string>

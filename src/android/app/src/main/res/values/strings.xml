@@ -1455,7 +1455,7 @@
     <string name="common_loading">Loading…</string>
     <string name="rootfs_reset_button">Reset</string>
     <string name="session_title_label">Title</string>
-    <string name="backup_import_too_large">Backup file is too large (%1$d MB, max %2$d MB) — nothing was imported.</string>
+    <string name="backup_import_too_large">Backup file is too large (%1$d MB, max %2$d MB) — nothing was imported. Shorten the chat history window (or turn it off) and export again, then import the new file.</string>
     <string name="backup_export_incomplete">Warning: %1$d field(s) failed to read — this backup may be incomplete.</string>
     <string name="code_expand">Expand %1$d lines</string>
     <string name="code_collapse">Collapse</string>
