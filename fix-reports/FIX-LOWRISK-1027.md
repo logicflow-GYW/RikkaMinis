@@ -163,4 +163,21 @@ java.lang.AssertionError: expected:<11> but was:<12>   (FastioTarTest.kt:382)
 
 修正不是改数字，而是**取消 skip**：改成「探针目录先探真/模拟 → 正式夹具按探测结果造真硬链接或同内容两份拷贝」，两种输入的档内成员形状相同，断言在每个文件系统上都真跑（已本地验证 35/35 全执行、0 skip）。教训入账：**`Assume` 跳过 = 没测**，任何一行只在 CI 才跑的断言都要当作未验证对待。
 
-：沙箱并发期 `OSError: Errno 38` 已知（`shared/sandbox-limits.md`），全量读数以分支 CI 日志为准。
+## 9. 分支 CI 收口（第二轮 run，attempt 1）
+
+**run `40439428585` / job `121975913449` / attempt 1 / success @ `5c46523ea76ff57d…`**（02:36:40→03:01:03Z，24m23s），head_sha 与本地 HEAD 逐字符一致。
+
+日志 1,466,069 B / NUL 0，逐项核验：
+
+| 判据 | 读数 |
+|---|---|
+| `Summary: 112 passed, 0 failed` | 恰 1 |
+| `ALL 347 CASES PASS` | 恰 1（基点分支的 test_scan = 347，不是 main 线的 344） |
+| `^ e: ` 编译错误 | 0 |
+| `FAILED` 行 | 6 行，全部是 PASSED 用例名的子串（已知判读陷阱） |
+| Publish 步骤 | skipped（分支门控，正确） |
+| 本支 7 条新/改测试逐名 | 全部 PASSED（硬链接往返 / 自我入档 + 对照臂 / 复制落地 / 缺 target 记 error / scanOrphans 折入合计 / 两半一致 / 既有 reclaim 断言升级） |
+
+首轮失败（§8）→ 修正 → 第二轮绿，**绿 sha 即修正后 sha**，无遗留红项。
+
+**本地未跑全量 `scan.sh` / `test_scan.py`**：沙箱并发期 `OSError: Errno 38` 已知（`shared/sandbox-limits.md`），全量读数以本节 CI 日志为准。
