@@ -30,7 +30,15 @@ OpenMinis 核心把领先的模型——Claude、GPT、Gemini 等——带进原
 
 每次推送到 `main` 的**代码改动**（`src/android/**`、`src/shared/**`、`deps/**`
 或 workflow 文件）都会构建一个发布版 APK 并重新发布到该链接——纯文档改动
-（README / 许可证等）不触发构建。所以这个 URL 始终指向最新构建。要求：
+（README / 许可证等）不触发构建。所以这个链接上的 APK 资产始终是最新构建。
+
+需要说清一个容易踩的点：`android-latest` 是**滚动 release**——每次构建就地
+替换其中的 APK 资产，release 的 tag 名固定不变（tag 指针停在首次创建 release
+时的提交）。**下载 APK 请点页面上的资产**；页面的 *Source code (zip/tar.gz)*
+是那个旧 tag 的快照，不是这一版构建对应的源码——要源码请从 `main` 拉取。
+
+另一个诚实的边界：`scripts/**`（含 112 道静态门）**不在**触发面内——只改门脚本
+不会自动构建，需要在 Actions 里 `workflow_dispatch` 手动跑一次。要求：
 
 - **arm64-v8a** 设备（任意现代手机），**Android 8.0+**
 - 设备提示时允许"安装未知来源应用"
@@ -64,7 +72,7 @@ SHA-256  FC:0C:40:0D:B7:7E:C1:81:A3:35:18:C2:E8:13:6A:AE
   通知反馈，并已防止在过程中被误触重复触发。
 - **每日自动备份。** 备份可以自动进行（设置 → 存储 → 备份与恢复，默认关闭）：
   应用当天首次进入前台时检查一次，把**能力资产**（配置/提供商/思考规则/技能/
-  环境变量/MCP）与**产出资产**（`shared/` 产出、知识图谱数据、持久记忆）打包，
+  环境变量/MCP）与**产出资产**（`shared/` 产出、持久记忆）打包，
   本地保留最近 7 份；配置了 WebDAV 时同时推送到独立的 `auto/` 目录（远端同样
   保留 7 份，另一台设备可在自己的自动备份区恢复/拉取/删除）。聊天记录**不进**
   自动备份——它是过程副产品，只在手动导出时携带。自动备份默认**不含密钥**
@@ -138,14 +146,20 @@ SHA-256  FC:0C:40:0D:B7:7E:C1:81:A3:35:18:C2:E8:13:6A:AE
   `libdatastore_shared_counter.so` 按原样提交；`libjieba_jni.so` 与
   `libminis_crash_handler.so` 由 CI 从 `src/main/cpp/` 重新编译——它们的 JNI
   符号内嵌 Kotlin 包名，上游二进制导出的仍是旧包名。
-- **单元测试在 CI 中运行。** 完整的 JVM 单元测试套件——含备份/恢复（ConfigBackupPayloadTest 等）、终端消毒、Provider 适配器、LLM 错误处理等全部测试——在 APK 构建之前执行，任何一条失败都会中止构建（无静默跳过）。
-- **构建前静态扫描门禁。** 每次 CI 构建在 Gradle 之前先跑 `scripts/scan/scan.sh`：
-  四处同步检查（数据类字段在 Model→Entity→toSnapshot→toProviderConfig 四层
-  必须同步，缺一层字段会静默蒸发）、i18n 孤儿键检查、枚举解析安全检查
-  （禁裸 `valueOf`）、provider 进程边界守护（app 进程不得直接调 provider 网络
-  入口，只能由 `:modelservice` 持有）、agent trace 回放评估（回放
-  `AgentTraceRecorder` 的 schema 2.0 JSONL，按 golden 断言工具序列 / 终态 /
-  禁用工具，schema 见 [docs/stability/trace-schema-v2.md](docs/stability/trace-schema-v2.md)）。
+- **单元测试与门禁夹具在 CI 中运行。** 完整的 JVM 单元测试套件——含备份/恢复（ConfigBackupPayloadTest 等）、终端消毒、Provider 适配器、LLM 错误处理，以及 agent loop 的 JVM 行为基线（上下文压缩触发 / turn 上限 / 预算停止 / 工具执行中取消）——在 APK 构建之前执行；同一步里还跑 `scripts/scan/test_scan.py` 的 **347 条夹具**，逐门验证「门真的会红」（门被掏空成恒过会被夹具抓住）。任何一条失败都会中止构建（无静默跳过）。
+- **构建前静态扫描门禁（112 道）。** 每次 CI 构建在 Gradle 之前跑 `scripts/scan/scan.sh`：112 道检查定义在数据文件 `scripts/scan/scan_blocks.sh`（每块一段自包含 shell），由 `scan_parallel.py` 并行执行（`--jobs N`，默认 `min(8, cpu)`；`MINIS_SCAN_JOBS=1` 强制串行），输出严格保持 1..112 顺序。覆盖四类：
+  - **数据与资源契约**——四处同步（数据类字段在 Model→Entity→toSnapshot→toProviderConfig
+    四层必须同步，缺一层字段会静默蒸发）、i18n 孤儿键（8 份 strings 的 key 集合与代码
+    引用必须一致）、备份流式导出、Room 迁移形状；
+  - **结构守卫**——枚举解析安全（禁裸 `valueOf`）、provider 进程边界（app 进程不得
+    直接调 provider 网络入口，只能由 `:modelservice` 持有）、接线门（日志脱敏 /
+    返回值必须被消费 / permit 必须归还）；
+  - **行为见证**——agent trace 回放（`AgentTraceRecorder` 的 schema 2.0 JSONL 按
+    golden 断言工具序列 / 终态 / 禁用工具，schema 见
+    [docs/stability/trace-schema-v2.md](docs/stability/trace-schema-v2.md)）、
+    压缩决策、UI 状态机 pin（标签页生命周期 / 浏览器销毁唤醒 / 抽屉状态）；
+  - **静态原语自测**——`_kotlin_lexer` / `_kotlin_ast` / `_kotlin_valueflow`
+    共 **125 条自测臂**（门共用的 Kotlin 解析原语，错一处会连带污染所有消费门）。
   任何一条硬失败都会中止构建。
 - **iOS 源码已移除。** `src/ios/` 已删除；本树仅限 Android。
 - **自动发布。** 成功构建会把 APK 发布到 `android-latest` release。
@@ -244,7 +258,9 @@ token 只用于这些显式请求的鉴权。
 |---|---|
 | **自带模型** | Claude、GPT、Gemini 及其他提供方，使用你自己的 API 密钥或账号登录。 |
 | **真正的 Linux Shell** | 设备上运行沙箱化的 Alpine Linux 环境——智能体可以安装软件包、运行脚本、操作真实文件。 |
-| **设备集成** | 日历、联系人、剪贴板、定位、媒体、闹钟、通知等，作为工具开放给智能体。 |
+| **设备集成** | 日历、联系人、剪贴板、定位、媒体、闹钟、通知等，作为工具开放给智能体。**无障碍服务**进一步提供读屏 / 点击 / 滑动级的 UI 自动化；**Shizuku** 授权后可执行 `pm` / `am` / `cmd` / `settings` 等特权命令（能力面等同 `adb shell`，需单独安装并授权）。 |
+| **定时任务** | 按计划自动唤起智能体：一次性 / 每天 / 工作日，到点执行预置 prompt，结果写回会话并通过通知告知——触发不要求应用停留在前台。 |
+| **大目录高速原语** | 沙箱里的 `rm` / `cp` / `tar` / `du` 有原生实现兜底（`minis-fastio`），绕开 PRoot 每次系统调用 100–200 µs 的翻译税：2 万条目删除实测 6.0 s → 0.84 s，复制 23.0 s → 3.2 s。内容搜索仍用 ripgrep。 |
 | **浏览器自动化** | 智能体可以代表你浏览并操作网页。 |
 | **技能与记忆** | 可扩展技能 + 跨会话的持久记忆。完整技能包与记忆文件包含在本地备份中。 |
 | **平台集成** | 内置 GitHub / Cloudflare / Hugging Face 三平台技能，按配置的 token 动态注入可用能力（详见上节）。 |
@@ -326,6 +342,11 @@ bump `deps/proot` 子模块。
 应用请求较宽泛的权限（存储、联系人、日历、麦克风、定位、无障碍），因为它们
 支撑智能体工具。这些权限在使用时按需请求——智能体只能使用你授予的能力。
 
+[Shizuku](https://shizuku.rikka.app/) 是可选的：需要你**单独安装 Shizuku 并在系统
+层面授权本应用**，授权后智能体才能执行 `pm` / `am` / `cmd` / `settings` 这一类
+等同于 `adb shell` 的命令。应用自身不请求 root，也不会在后台使用 Shizuku——
+未安装或未授权时，相关工具直接不可用。
+
 ---
 
 ## 仓库结构
@@ -336,10 +357,14 @@ src/android/      Android 应用（Kotlin / Compose）
                                     jieba / crash handler 由 CI 从源码重建，
                                     libproot.so 同样是 CI 构建产物）
   app/src/main/assets/              Alpine minirootfs + 内置平台技能（skills/）
-src/shared/       与上游 iOS 树共享的资源（bashism 规则）
+src/shared/       跨端共享的规则资源（bashism 规则）
 deps/             proot 源码（子模块）+ build_proot.sh（NDK r28 构建）
-docs/             同步流程与接口规范
 scripts/          二进制同步与开发者工具
+scripts/scan/     112 道静态门（scan_blocks.sh 数据文件 + scan_parallel.py 并行 runner）
+                  + 门自身夹具 test_scan.py（347 例）
+tests/            trace golden 等独立测试资产
+docs/             架构 / 生命周期 / 同步流程 / 稳定性规范 / 开发档案（dev-history/）
+fix-reports/      各批次修复报告（每批一份，含证据、变异负控与残留登记）
 ```
 
 ---

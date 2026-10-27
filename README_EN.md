@@ -35,8 +35,18 @@ persistent memory, and deep system integration.
 Every push to `main` with **code changes** (`src/android/**`,
 `src/shared/**`, `deps/**` or workflow files) builds a release APK and
 republishes it to that link — pure doc changes (README / licenses) do
-not trigger a build. So the URL always points at the latest build.
-Requirements:
+not trigger a build. So the APK asset on that page is always the newest
+build.
+
+One thing that trips people up: `android-latest` is a **rolling release** — each
+build replaces the APK asset in place, and the tag name never moves (its pointer
+stays on the commit that created the release back in 2026-09). **Download the
+asset**, not the page's *Source code (zip/tar.gz)* snapshot — that is the old tag,
+not the tree this build came from. For sources, pull `main`.
+
+Another honest boundary: `scripts/**` (including the 112 static gates) is **not**
+in the trigger paths — changing only gate scripts builds nothing; run
+`workflow_dispatch` manually to verify such a change. Requirements:
 
 - **arm64-v8a** device (any modern phone), **Android 8.0+**
 - Enable "install from unknown sources" when your device prompts
@@ -78,14 +88,17 @@ Android-specific product changes that are not present upstream.
   → Backup & Restore; off by default): on the first foreground transition of
   each calendar day the app packages its **capability assets** (config,
   providers, thinking rules, skills, environment variables, MCP) plus its
-  **output assets** (`shared/` artifacts, knowledge-graph data, persistent
-  memory), keeps the newest 7 copies locally, and — when WebDAV is configured
+  **output assets** (`shared/` artifacts, persistent memory), keeps the newest 7
+  copies locally, and — when WebDAV is configured
   — pushes them to a dedicated `auto/` folder (also rotated to 7, manageable
   from another device's own auto-backup section: restore / fetch / delete).
   Chat transcripts are **excluded**: they are process byproduct and only ride
-  along in a manual export. Credentials always travel with the payload — the
-  local copy stays in app-private storage and the remote is your own server,
-  because a backup without keys cannot restore anything.
+  along in a manual export. Automatic backups **exclude secrets by default**
+  (`includeSecrets = false`, product decision 2026-10-13): an unattended push to
+  WebDAV carries no plaintext API keys, OAuth tokens or environment-variable
+  values; restoring one means re-entering providers / envVars / MCP by hand
+  (or ticking "include secrets" on a manual export to keep a second copy).
+  [fix/sweep1014-debug-backup D3]
 - **Environment-variable groups.** Settings → Environment Variables lets you
   file variables under custom group labels: the list renders as sections
   (ungrouped last) instead of one long flat list, and groups travel through
@@ -179,20 +192,39 @@ See [docs/DEVELOPMENT_LIFECYCLE.md](docs/DEVELOPMENT_LIFECYCLE.md).
   `libjieba_jni.so` and `libminis_crash_handler.so` are rebuilt from
   `src/main/cpp/` by CI, because their JNI symbol names embed the Kotlin
   package and upstream's binaries still export the old one.
-- **Backup tests run in CI.** The full JVM unit-test suite — backup/restore
-  (ConfigBackupPayloadTest and friends), terminal sanitization, provider
-  adapters, LLM error handling and more — runs before the APK build, and any
-  failure aborts the build (no silent scoping).
-- **Pre-build static scan gate.** Every CI build runs `scripts/scan/scan.sh`
-  before Gradle: a four-way field-sync check (data-class fields must be synced
-  across Model → Entity → toSnapshot → toProviderConfig, or fields silently
-  evaporate), an i18n orphan-key check, an enum-parse safety check (no bare
-  `valueOf`), a provider process-boundary guard (the app process must
-  never call provider network entry points directly — only `:modelservice`
-  owns them), and an agent-trace replay eval (replays `AgentTraceRecorder`'s
-  schema 2.0 JSONL against goldens asserting tool sequence, terminal state and
-  forbidden tools — see
-  [docs/stability/trace-schema-v2.md](docs/stability/trace-schema-v2.md)).
+- **Unit tests and gate fixtures run in CI.** The full JVM unit-test suite —
+  backup/restore (ConfigBackupPayloadTest and friends), terminal sanitization,
+  provider adapters, LLM error handling, plus the agent loop's JVM behavioural
+  baseline (compaction trigger / turn ceiling / budget stop / cancel mid-tool) —
+  runs before the APK build. The same step runs the **347 fixtures** in
+  `scripts/scan/test_scan.py`, which verify gate by gate that the gates actually
+  go red (a gate hollowed out to a constant pass is caught). Any failure aborts
+  the build (no silent scoping).
+- **Pre-build static scan gate (112 checks).** Every CI build runs
+  `scripts/scan/scan.sh` before Gradle: the 112 checks live in the data file
+  `scripts/scan/scan_blocks.sh` (one self-contained shell block each) and are
+  executed in parallel by `scan_parallel.py` (`--jobs N`, default
+  `min(8, cpu)`; `MINIS_SCAN_JOBS=1` forces serial), with output kept strictly in
+  1..112 order. Four families:
+  - **Data and resource contracts** — four-way field sync (data-class fields must
+    be synced across Model → Entity → toSnapshot → toProviderConfig, or fields
+    silently evaporate), i18n orphan keys (the key set across the 8 `strings`
+    files must match code references), backup streaming export, Room migration
+    shape;
+  - **Structural guards** — enum-parse safety (no bare `valueOf`), provider
+    process boundary (the app process must never call provider network entry
+    points directly — only `:modelservice` owns them), wiring gates (log
+    redaction / return values must be consumed / permits must be released);
+  - **Behavioural witnesses** — agent-trace replay (`AgentTraceRecorder`'s schema
+    2.0 JSONL against goldens asserting tool sequence, terminal state and
+    forbidden tools — see
+    [docs/stability/trace-schema-v2.md](docs/stability/trace-schema-v2.md)),
+    compaction decisions, UI state-machine pins (tab lifecycle / browser destroy
+    wakeup / drawer state);
+  - **Static primitive self-tests** — **125 self-test arms** across
+    `_kotlin_lexer` / `_kotlin_ast` / `_kotlin_valueflow` (the shared Kotlin
+    parsing primitives; a mistake there poisons every consuming gate).
+
   Any hard failure aborts the build.
 - **iOS sources removed.** `src/ios/` is gone; this tree is Android only.
 - **Automatic releases.** Successful builds publish the APK to the
@@ -319,7 +351,9 @@ Tokens are only used for authenticating those explicit requests.
 |---|---|
 | **Bring your own model** | Claude, GPT, Gemini and other providers, via your own API keys or account sign-in. |
 | **A real Linux shell** | A sandboxed Alpine Linux environment runs on-device — the agent can install packages, run scripts, and work with real files. |
-| **Device integration** | Calendar, Contacts, Clipboard, Location, Media, Alarms, Notifications and more, exposed to the agent as tools. |
+| **Device integration** | Calendar, Contacts, Clipboard, Location, Media, Alarms, Notifications and more, exposed to the agent as tools. The **accessibility service** adds screen-reading / tap / swipe level UI automation; **Shizuku** (when installed and authorised by you) adds `pm` / `am` / `cmd` / `settings` privileged commands — the same surface as `adb shell`. |
+| **Scheduled tasks** | Wake the agent on a schedule — once, daily or on weekdays — running a preset prompt and writing the result back to the session with a notification. Firing does not require the app to stay in the foreground. |
+| **Fast primitives for big trees** | Sandbox `rm` / `cp` / `tar` / `du` fall back to a native implementation (`minis-fastio`) that skips PRoot's 100–200 µs per-syscall translation tax: deleting a 22k-entry tree measured 6.0 s → 0.84 s, copying 23.0 s → 3.2 s. Content search stays on ripgrep. |
 | **Browser automation** | The agent can browse and interact with the web on your behalf. |
 | **Skills & memory** | Extensible skills plus persistent memory across sessions. Complete skill bundles and memory files are included in local backups. |
 | **Platform integrations** | Built-in GitHub / Cloudflare / Hugging Face platform skills; available capability per platform is derived dynamically from the tokens you configure (see previous section). |
@@ -408,6 +442,12 @@ The app requests broad permissions (storage, contacts, calendar, microphone,
 location, accessibility) because they back agent tools. They are requested at
 the point of use — the agent can only use what you grant.
 
+[Shizuku](https://shizuku.rikka.app/) is optional: you install Shizuku separately
+and grant this app access at the system level. Only then can the agent run
+`pm` / `am` / `cmd` / `settings` commands — the `adb shell` surface. The app
+never asks for root and never touches Shizuku in the background; without the
+grant the related tools simply are not available.
+
 ---
 
 ## Repository layout
@@ -418,10 +458,14 @@ src/android/      Android app (Kotlin / Compose)
                                     jieba / crash handler are rebuilt from source
                                     in CI, as is libproot.so)
   app/src/main/assets/              Alpine minirootfs + bundled platform skills (skills/)
-src/shared/       Assets shared with upstream's iOS tree (bashism rules)
+src/shared/       Shared rule assets (bashism rules)
 deps/             proot source (submodule) + build_proot.sh (NDK r28 build)
-docs/             Sync procedure and interface specifications
 scripts/          Binary sync and developer tooling
+scripts/scan/     112 static gates (scan_blocks.sh data file + scan_parallel.py runner)
+                  + the gates' own fixtures, test_scan.py (347 cases)
+tests/            Standalone test assets (trace goldens)
+docs/             Architecture / lifecycle / sync procedure / stability specs / dev archive (dev-history/)
+fix-reports/      One report per batch (evidence, mutation negative controls, leftovers)
 ```
 
 ---
