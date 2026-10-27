@@ -121,25 +121,53 @@ android {
     // To change native code, restore this block (and install the NDK in CI),
     // or rebuild the .so files with the deps/build_*.sh scripts and re-commit.
 
-    // CI signing: point the `debug` signingConfig at an explicit keystore when
-    // MINIS_KEYSTORE_PATH is set (see .github/workflows/build-apk.yml).
+    // [signing-rotate 2026-10-27] Release builds are signed with a dedicated,
+    // private release keystore whose material lives ONLY in GitHub Actions
+    // secrets (RELEASE_KEYSTORE_B64 / RELEASE_STORE_PASSWORD /
+    // RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD) — never in this public repo.
+    // CI restores it to $RUNNER_TEMP and exports MINIS_RELEASE_* below.
+    //
+    // The previous setup pointed the `debug` signingConfig at the AOSP debug
+    // identity (public, well-known constants) for RELEASE builds: anyone could
+    // forge an "upgrade" APK with the same certificate. See backlog §43-11.
+    //
+    // Local builds without these env vars keep AGP's default debug signing and
+    // a release build falls back to the debug config so `assembleRelease` still
+    // works offline. CI hard-fails earlier when the secrets are missing, so a
+    // published APK can never silently fall back to the debug identity.
+    val releaseKeystorePath = System.getenv("MINIS_RELEASE_KEYSTORE_PATH")
+    val releaseStorePassword = System.getenv("MINIS_RELEASE_STORE_PASSWORD")
+    val releaseKeyAlias = System.getenv("MINIS_RELEASE_KEY_ALIAS")
+    val releaseKeyPassword = System.getenv("MINIS_RELEASE_KEY_PASSWORD")
+    val hasReleaseSigning = !releaseKeystorePath.isNullOrBlank() &&
+        !releaseStorePassword.isNullOrBlank() &&
+        !releaseKeyAlias.isNullOrBlank() &&
+        !releaseKeyPassword.isNullOrBlank()
+
+    // CI signing escape hatch for the legacy debug keystore: still honoured
+    // when MINIS_KEYSTORE_PATH is set, so an older workflow keeps working.
     //
     // Without this, AGP looks for $HOME/.android/debug.keystore — but
     // actions/checkout temporarily overrides HOME on the runner, so the
-    // keystore restored from the DEBUG_KEYSTORE_B64 secret would not be found
-    // and AGP would silently generate a fresh throwaway key. The published APK
-    // then fails to install over a previous one with
-    // INSTALL_FAILED_UPDATE_INCOMPATIBLE.
-    //
-    // Local builds leave the variable unset and keep AGP's default behaviour.
+    // keystore restored from a secret would not be found and AGP would
+    // silently generate a fresh throwaway key. The published APK then fails
+    // to install over a previous one with INSTALL_FAILED_UPDATE_INCOMPATIBLE.
     signingConfigs {
         getByName("debug") {
             val keystoreFromEnv = System.getenv("MINIS_KEYSTORE_PATH")
             if (!keystoreFromEnv.isNullOrBlank()) {
                 storeFile = file(keystoreFromEnv)
-                storePassword = "android"
-                keyAlias = "androiddebugkey"
-                keyPassword = "android"
+                storePassword = System.getenv("MINIS_DEBUG_STORE_PASSWORD") ?: "android"
+                keyAlias = System.getenv("MINIS_DEBUG_KEY_ALIAS") ?: "androiddebugkey"
+                keyPassword = System.getenv("MINIS_DEBUG_KEY_PASSWORD") ?: "android"
+            }
+        }
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(releaseKeystorePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
             }
         }
     }
@@ -151,7 +179,16 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (hasReleaseSigning) {
+                // CI (and any build with the release env vars) uses the private
+                // release identity.
+                signingConfigs.getByName("release")
+            } else {
+                // Local fallback only: no keystore available. CI fails earlier
+                // (Restore release signing keystore) when secrets are missing,
+                // so a *published* APK can never be signed with this identity.
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
