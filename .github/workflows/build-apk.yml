@@ -48,7 +48,7 @@ jobs:
           # Scanner self-test — same fixture ground truth as scan-gate.yml:
           # assert the scanners still catch what they claim to catch before
           # this build stamps its artifacts green.
-          python3 scripts/scan/test_scan.py
+          python3 scripts/scan/test_scan.py --jobs 4
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5

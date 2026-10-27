@@ -34,4 +34,4 @@ jobs:
       # this step makes it fail loud before the (fast) gate looks green.
       # ~5s: fixtures are tiny temp trees, plus one clean pass over this repo.
       - name: Scan self-test (fixture ground truth)
-        run: python3 scripts/scan/test_scan.py
+        run: python3 scripts/scan/test_scan.py --jobs 4
