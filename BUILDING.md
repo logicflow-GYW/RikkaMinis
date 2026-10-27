@@ -185,6 +185,31 @@ triggered manually from the Actions tab. It:
 7. Runs `assembleRelease`
 8. Publishes the APK to the `android-latest` release
 
+### Which channel to dispatch
+
+A branch fix has two possible gates. Dispatch the cheapest one that can
+actually fail on this diff:
+
+| Diff touches | Channel | Cost |
+|---|---|---|
+| `scripts/scan/**`, `scripts/diag/**`, `fix-reports/**`, `docs/**`, repo-root `*.md` | `scan-gate-push.yml` | ~7 min |
+| anything else (`src/**`, `deps/**`, `*.gradle.kts`, other workflows) | `build-apk.yml` | 18–27 min |
+
+`scan-gate-push.yml` self-guards: dispatched on a branch, it first runs
+`scripts/diag/cheap_gate_guard.py` and goes **red** if the diff is not
+apparatus-only (fails closed if it cannot prove it either). That way a green
+from the cheap channel can never be mistaken for build evidence: the branch
+simply cannot get one for code the cheap channel never compiled.
+
+```sh
+# apparatus-only fix (branch)
+gh workflow run scan-gate-push.yml --ref <branch>
+# -> ~7 min; red at the guard step means the diff is not apparatus-only
+
+# anything touching production source
+gh workflow run build-apk.yml --ref <branch>
+```
+
 ### Signing in CI
 
 Release builds are signed with a private release keystore that lives in **repo
