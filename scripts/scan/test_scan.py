@@ -17,16 +17,59 @@ silent in every future build.
 Usage: python3 scripts/scan/test_scan.py [repo_root]
 Exit:  0 = all scanners pass all cases, 1 = any failure
 """
+import base64
+import contextlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _parse_argv(argv):
+    """Split argv into (--jobs value, --single name, positional roots).
+
+    Positional semantics are unchanged (first positional arg = repo root, the
+    form gate_run.sh and the docs use); `--jobs N` selects the worker-pool size
+    and `--single NAME` is the child mode of that pool. Neither flag may be
+    mistaken for the repo root, which is why this parses instead of indexing.
+    Unknown flags are left in place so old positional callers behave as before.
+    """
+    jobs, single, roots = 1, None, []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--jobs" and i + 1 < len(argv):
+            try:
+                jobs = max(1, int(argv[i + 1]))
+            except ValueError:
+                sys.exit("test_scan.py: --jobs needs an integer, got %r" % argv[i + 1])
+            i += 2
+            continue
+        if a.startswith("--jobs="):
+            try:
+                jobs = max(1, int(a.split("=", 1)[1]))
+            except ValueError:
+                sys.exit("test_scan.py: --jobs needs an integer, got %r" % a)
+            i += 1
+            continue
+        if a == "--single" and i + 1 < len(argv):
+            single = argv[i + 1]
+            i += 2
+            continue
+        roots.append(a)
+        i += 1
+    return jobs, single, roots
+
+
+JOBS, SINGLE, _ROOTS = _parse_argv(sys.argv[1:])
 REPO_ROOT = os.path.abspath(
-    sys.argv[1] if len(sys.argv) > 1 else os.path.join(SCRIPT_DIR, "..", "..")
+    _ROOTS[0] if _ROOTS else os.path.join(SCRIPT_DIR, "..", "..")
 )
 
 # Relative roots the scanners expect inside a repo tree.
@@ -3234,61 +3277,218 @@ def test_dv27_gates():
         rc, out = run_scanner(script + ".py", *real_args)
         check(f"{script} real tree green", rc == 0, out[-280:])
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Fixture-run scheduling (2026-10-27, FIX-1027-SHARDED-FIXTURES)
+#
+# The suite was 5.25 min of a 7.18 min cheap-gate run and ~79% of the scan step
+# inside the full build: 344 fixtures, each a handful of tiny temp trees plus a
+# scanner subprocess, run one after another. The work is process-bound, so it
+# parallelises almost linearly — but only if the split is by *cost*, and cost
+# per fixture is not knowable up front (it drifts every time a gate gains an
+# arm). A static shard table would rot on the first added criterion, so the
+# split is a worker pool: `--jobs N` hands one test at a time to the next free
+# worker. Balance is automatic and nothing is pinned.
+#
+# Architecture (same blood as scan_parallel.py): each test function runs in its
+# own child interpreter (`test_scan.py --single NAME`), coordinated by J parent
+# threads. Deliberately NOT multiprocessing.Pool — pool semaphores are not
+# available in the PRoot sandbox, and the runner has to work identically in
+# CI, locally, and under proot. Isolation per child also means a hard-killed
+# test (OOM reaper) cannot poison module state for its neighbours; the parent
+# sees a missing result trailer and fails closed.
+#
+# Determinism is preserved on purpose: results are replayed in TEST_ORDER, so
+# the log of a parallel run is the log of a serial run (same lines, same order,
+# same summary). CI's judgment greps for `✅ ALL <n> CASES PASS` and per-gate
+# selftest markers; both survive. TEST_ORDER is the single source of truth for
+# what runs — serial and parallel share it, so there is no second list to rot.
+# ─────────────────────────────────────────────────────────────────────────────
+
+TEST_ORDER = (
+    "test_four_way",
+    "test_four_way_derived",
+    "test_four_way_entity_self",
+    "test_i18n",
+    "test_enum_parse",
+    "test_boundary",
+    "test_legacy",
+    "test_debug_leak",
+    "test_room_migration",
+    "test_process_logging",
+    "test_trace_eval",
+    "test_extra_days_container",
+    "test_stale_closure",
+    "test_ime_inset",
+    "test_stream_flow_dispatch",
+    "test_prefs_listener_holder",
+    "test_xproc_boundary",
+    "test_thinking_wiring",
+    "test_liveness_static",
+    "test_claim_release",
+    "test_loop_counter_reset",
+    "test_budget_stop_break",
+    "test_katex_bridge_arity",
+    "test_gemini_base_version",
+    "test_readonly_mount_write_guard",
+    "test_exec_gate",
+    "test_scheduled_store_release",
+    "test_da1017_gates",
+    "test_da1016_gates",
+    "test_da1046_gates",
+    "test_dv27_gates",
+    "test_da1018_gates",
+    "test_da1019_gates",
+    "test_da1020_gates",
+    "test_da1021_gates",
+    "test_da1022_gates",
+    "test_da1023_gates",
+    "test_da1024_gates",
+    "test_da1025_gates",
+    "test_da1026_gates",
+    "test_auto_approve_gates",
+    "test_primitive_selftests",
+    "test_da1026_arch_gates",
+    "test_trace_step_tag",
+    "test_dv16_chat_ui_interaction",
+    "test_da1017_external_fixtures",
+    "test_real_repo",
+)
+
+RESULT_TAG = "@@TEST_RESULT@@"
+
+
+def _resolve(name):
+    return getattr(sys.modules[__name__], name)
+
+
+def _run_single(name):
+    """Child mode: run ONE test in a fresh interpreter.
+
+    Prints the test's captured output verbatim (so a parent replay reads like
+    the serial run), then a machine-readable trailer carrying the pass/fail
+    deltas. Exit 0 whenever a trailer was produced — the parent judges by the
+    trailer, not the exit code; a child that dies hard (killed, OOM) produces
+    no trailer, which the parent treats as a failure.
+    """
+    if name not in TEST_ORDER:
+        print("test_scan.py: unknown test %r" % name)
+        return 2
+    pass_before, fail_before = PASS, FAIL
+    buf = io.StringIO()
+    err = ""
+    with contextlib.redirect_stdout(buf):
+        try:
+            _resolve(name)()
+        except BaseException as exc:  # a raising fixture is a failure, never a skip
+            err = "%s: %s" % (type(exc).__name__, exc)
+    out = buf.getvalue()
+    sys.stdout.write(out)
+    if out and not out.endswith("\n"):
+        sys.stdout.write("\n")
+    trailer = "%s %s %d %d" % (RESULT_TAG, name, PASS - pass_before, FAIL - fail_before)
+    if err:
+        trailer += " err:" + base64.b64encode(err.encode("utf-8")).decode("ascii")
+    print(trailer)
+    return 0
+
+
+def _child_argv(name, root_args):
+    return [sys.executable, os.path.abspath(__file__), "--single", name] + list(root_args)
+
+
+def _run_parallel(jobs, root_args):
+    """Run TEST_ORDER across `jobs` child interpreters; replay in order.
+
+    Progress goes to stderr (flushed per unit) so the caller sees liveness
+    even though stdout is replayed in full only at the end — that replay is
+    what keeps a parallel log byte-identical to a serial one.
+    """
+    global PASS, FAIL
+    print("(fixtures: %d workers; results replayed in declaration order)" % jobs,
+          file=sys.stderr, flush=True)
+    results = {}
+    lock = threading.Lock()
+    queue = list(TEST_ORDER)
+    done_count = [0]
+
+    def worker():
+        while True:
+            with lock:
+                if not queue:
+                    return
+                name = queue.pop(0)
+            try:
+                proc = subprocess.run(
+                    _child_argv(name, root_args),
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                )
+                text = proc.stdout.decode("utf-8", "replace")
+            except OSError as exc:
+                results[name] = (None, None, "scheduler: %s: %s" % (type(exc).__name__, exc))
+                continue
+            trailer = None
+            for line in reversed(text.splitlines()):
+                if line.startswith(RESULT_TAG + " "):
+                    trailer = line
+                    break
+            if trailer is None:
+                # Hard death (killed / OOM / interpreter crash): fail closed.
+                results[name] = (None, None,
+                                 "no result trailer (exit %s, tail: %r)"
+                                 % (proc.returncode, text[-160:]))
+                continue
+            parts = trailer.split(" ")
+            passed, failed = int(parts[2]), int(parts[3])
+            err = ""
+            if len(parts) > 4 and parts[4].startswith("err:"):
+                err = base64.b64decode(parts[4][4:]).decode("utf-8", "replace")
+            body = text[: text.rindex(trailer)]
+            results[name] = (body, (passed, failed), err)
+            with lock:
+                done_count[0] += 1
+                print("(fixtures: %d/%d %s)" % (done_count[0], len(TEST_ORDER), name),
+                      file=sys.stderr, flush=True)
+
+    threads = [threading.Thread(target=worker) for _ in range(jobs)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    missing = [n for n in TEST_ORDER if n not in results]
+    for name in TEST_ORDER:
+        body, deltas, err = results.get(name, (None, None, "scheduler: no result"))
+        if body:
+            sys.stdout.write(body)
+            if not body.endswith("\n"):
+                sys.stdout.write("\n")
+        if deltas is not None:
+            PASS += deltas[0]
+            FAIL += deltas[1]
+        if err:
+            FAIL += 1
+            print("  ❌ %s: %s" % (name, err))
+    if missing:
+        FAIL += len(missing)
+        for name in missing:
+            print("  ❌ %s: no result (worker lost)" % name)
+
+
 def main():
     print("╔══════════════════════════════════════════════════╗")
     print("║  Scan Self-Test (fixture ground truth)          ║")
     print("╚══════════════════════════════════════════════════╝")
-    test_four_way()
-    test_four_way_derived()
-    test_four_way_entity_self()
-    test_i18n()
-    test_enum_parse()
-    test_boundary()
-    test_legacy()
-    test_debug_leak()
-    test_room_migration()
-    test_process_logging()
-    test_trace_eval()
-    test_extra_days_container()
-    test_stale_closure()
-    test_ime_inset()
-    test_stream_flow_dispatch()
-    test_prefs_listener_holder()
-    test_xproc_boundary()
-    test_thinking_wiring()
-    test_liveness_static()
-    test_claim_release()
-    test_loop_counter_reset()
-    test_budget_stop_break()
-    test_katex_bridge_arity()
-    test_gemini_base_version()
-    test_readonly_mount_write_guard()
-    test_exec_gate()
-    test_scheduled_store_release()
-    test_da1017_gates()
-    test_da1016_gates()
-    test_da1046_gates()
-    test_dv27_gates()
-    test_da1018_gates()
-    test_da1019_gates()
-    test_da1020_gates()
-    test_da1021_gates()
-    test_da1022_gates()
-    test_da1023_gates()
-    test_da1024_gates()
-    test_da1025_gates()
-    test_da1026_gates()
-    test_auto_approve_gates()
-    test_primitive_selftests()
-    test_da1026_arch_gates()
-    test_trace_step_tag()
-    test_dv16_chat_ui_interaction()
-    test_da1017_external_fixtures()
-    test_real_repo()
+    if JOBS > 1:
+        _run_parallel(JOBS, _ROOTS)
+    else:
+        for name in TEST_ORDER:
+            _resolve(name)()
     print("")
     print(f"{'❌ FAILURES: ' + str(FAIL) if FAIL else '✅ ALL ' + str(PASS) + ' CASES PASS'}")
     return 1 if FAIL else 0
 
 
 if __name__ == "__main__":
+    if SINGLE:
+        sys.exit(_run_single(SINGLE))
     sys.exit(main())
