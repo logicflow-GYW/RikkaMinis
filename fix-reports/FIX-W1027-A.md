@@ -193,7 +193,7 @@ $ 47 functions ; PASS 347 FAIL 0   （零 ❌，零非零退出）
 
 - run：`40493992889` / job `122154687109` / **attempt 1** / `success`（11:09:21Z → 11:33:36Z，24m15s）
 - head_sha：`015ccace7ca97f79ae5480e560c004af1bccd6ba`（与本地 HEAD 逐字符一致）
-- 步骤：21 步 success（含 `Restore release signing keystore` / `Run unit tests (full suite)` /
+- 步骤：27 步中 **25 success**（含 `Restore release signing keystore` / `Run unit tests (full suite)` /
   `Compile instrumented tests` / `Build APK with Gradle` / `Verify APK signature`），
   仅 2 步 skipped = `Move the rolling tag android-latest` + `Publish to Releases`（两者均 main 门控）
 - 日志（1,473,071 B / NUL 0）逐条核：
