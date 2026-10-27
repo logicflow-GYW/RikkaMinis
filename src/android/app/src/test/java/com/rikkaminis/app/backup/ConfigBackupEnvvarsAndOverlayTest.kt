@@ -35,6 +35,9 @@ class ConfigBackupEnvvarsAndOverlayTest {
     private val builtinsRel =
         "src/android/app/src/main/java/com/rikkaminis/app/config/ConfigBuiltins.kt"
 
+    private val configBackupRel =
+        "src/android/app/src/main/java/com/rikkaminis/app/backup/ConfigBackup.kt"
+
     // ── 1. the scope whitelist (real JVM value) ──────────────────────────
 
     /** Literal copy of the eight scopes that predate this fix, plus the new one. */
@@ -108,6 +111,182 @@ class ConfigBackupEnvvarsAndOverlayTest {
     @Test
     fun `registerBackground wires the overlay switch to the repository constants`() {
         assertOverlayRegistered(registerBackgroundBody())
+    }
+
+    // ── 3. env var restore: the decision, run for real on the JVM ────────
+    //
+    // [T-envvar-restore-deadlock] Stage 4 skipped every key that already
+    // existed, which made the reinstall case unrecoverable (see the KDoc on
+    // EnvVarRestorePlan). These arms exercise `planEnvVarRestore` — the real
+    // production function, pure Kotlin, no Android types — and every expected
+    // value is a literal, never derived from the code under test.
+
+    /** Reinstall shape: the keystore re-bind left the entry with no value. */
+    @Test
+    fun `empty local value takes the backup value`() {
+        for (localValue in listOf<String?>(null, "")) {
+            val plan = planEnvVarRestore(
+                key = "OPENAI_API_KEY",
+                localValue = localValue,
+                localNote = "",
+                localGroup = "",
+                backupValue = "sk-live-0123456789",
+                backupNote = "",
+                backupGroup = "",
+            )
+            assertEquals("sk-live-0123456789", plan.value)
+            assertTrue("a restored value counts as imported", plan.writesValue)
+            assertTrue(plan.touchesAnything)
+            assertEquals(null, plan.report)
+        }
+    }
+
+    /** Two live values differ → the local one survives, visibly. */
+    @Test
+    fun `live local value is kept when the backup differs`() {
+        val plan = planEnvVarRestore(
+            key = "OPENAI_API_KEY",
+            localValue = "sk-current",
+            localNote = "",
+            localGroup = "",
+            backupValue = "sk-stale-from-backup",
+            backupNote = "",
+            backupGroup = "",
+        )
+        assertEquals("the masked local value must not be overwritten", null, plan.value)
+        assertFalse(plan.writesValue)
+        assertFalse("nothing else changed, so no repository write is needed", plan.touchesAnything)
+        assertEquals(
+            "env var \"OPENAI_API_KEY\": local value kept (backup differs) — " +
+                "replace it manually if the backup is right",
+            plan.report,
+        )
+    }
+
+    /** Same value on both sides → no write, and no skip noise either. */
+    @Test
+    fun `equal values are idempotent`() {
+        val plan = planEnvVarRestore(
+            key = "OPENAI_API_KEY",
+            localValue = "sk-same",
+            localNote = "",
+            localGroup = "",
+            backupValue = "sk-same",
+            backupNote = "",
+            backupGroup = "",
+        )
+        assertEquals(null, plan.value)
+        assertEquals(null, plan.report)
+        assertFalse(plan.touchesAnything)
+    }
+
+    /** Secret-free backup → no value anywhere; the entry is left alone. */
+    @Test
+    fun `secret free backup writes nothing`() {
+        for (localValue in listOf<String?>(null, "", "sk-kept")) {
+            val plan = planEnvVarRestore(
+                key = "OPENAI_API_KEY",
+                localValue = localValue,
+                localNote = "",
+                localGroup = "",
+                backupValue = "",
+                backupNote = "",
+                backupGroup = "",
+            )
+            assertEquals("a secret-free backup carries no value to write", null, plan.value)
+            assertFalse(plan.writesValue)
+            assertFalse(plan.touchesAnything)
+            assertEquals("no report line — the entry is unchanged", null, plan.report)
+        }
+    }
+
+    /** Metadata (never masked) is backfilled into blanks, never overwritten. */
+    @Test
+    fun `note and group are backfilled into blanks only`() {
+        val filled = planEnvVarRestore(
+            key = "OPENAI_API_KEY",
+            localValue = "",
+            localNote = "",
+            localGroup = "   ",
+            backupValue = "sk-live",
+            backupNote = "  primary key  ",
+            backupGroup = "Cloudflare",
+        )
+        assertEquals("primary key", filled.note)
+        assertEquals("Cloudflare", filled.group)
+
+        val kept = planEnvVarRestore(
+            key = "OPENAI_API_KEY",
+            localValue = "sk-current",
+            localNote = "local note",
+            localGroup = "Local Group",
+            backupValue = "sk-stale",
+            backupNote = "backup note",
+            backupGroup = "Backup Group",
+        )
+        assertEquals("a live note must not be overwritten", null, kept.note)
+        assertEquals("a live group must not be overwritten", null, kept.group)
+        assertEquals(
+            "env var \"OPENAI_API_KEY\": local value kept (backup differs) — " +
+                "replace it manually if the backup is right",
+            kept.report,
+        )
+    }
+
+    /**
+     * The fix must not regress the create path (a key that does NOT exist is
+     * still added, empty value included, with its "re-enter it" line) and must
+     * not come back as a wholesale skip. Source shape, because the create path
+     * runs inside `ConfigBackup.import`, which needs Android repositories.
+     */
+    @Test
+    fun `stage four routes existing keys through the planner and keeps the create path`() {
+        val body = stageFourBody()
+        assertStageFourShape(body)
+        // Negative control: the pre-fix line must be rejected by the probe.
+        assertStageFourRejects(body.replace("planEnvVarRestore(", "isDuplicateKey("))
+        assertStageFourRejects(body.replace("envVarRepo.add(key, value, note, group)", "Unit"))
+    }
+
+    private fun stageFourBody(): String {
+        val src = readRepoFile(configBackupRel)
+        val start = src.indexOf("// -- Stage 4: environment variables")
+        assertTrue("Stage 4 marker lost in $configBackupRel", start >= 0)
+        val end = src.indexOf("// -- Stage 5:", start)
+        assertTrue("Stage 5 must follow Stage 4 (probe anchor lost)", end > start)
+        return codeOnly(src.substring(start, end))
+    }
+
+    private fun assertStageFourShape(body: String) {
+        assertTrue(
+            "an existing key must go through planEnvVarRestore (an empty local value " +
+                "has to take the backup's value — the reinstall deadlock)",
+            body.contains("planEnvVarRestore("),
+        )
+        assertFalse(
+            "the wholesale skip is back: every restore onto an install that already " +
+                "has the key would drop the value again",
+            body.contains("already exists, left as-is"),
+        )
+        assertTrue(
+            "a key that does not exist yet must still be created (empty value included)",
+            body.contains("envVarRepo.add(key, value, note, group)"),
+        )
+        assertTrue(
+            "a secret-free restore must keep telling the user to re-enter the value",
+            body.contains("restored without value — re-enter it"),
+        )
+    }
+
+    private fun assertStageFourRejects(mutated: String) {
+        assertStageFourShape(stageFourBody()) // the probe accepts the real source
+        var rejected = false
+        try {
+            assertStageFourShape(mutated)
+        } catch (_: AssertionError) {
+            rejected = true
+        }
+        assertTrue("negative control: the Stage 4 probe still accepts a mutated body", rejected)
     }
 
     // ── negative controls ───────────────────────────────────────────────

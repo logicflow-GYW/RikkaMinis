@@ -1255,10 +1255,6 @@ object ConfigBackup {
                     skipped.add("env var #${i + 1}: missing key")
                     continue
                 }
-                if (envVarRepo.isDuplicateKey(key)) {
-                    skipped.add("env var \"$key\": already exists, left as-is")
-                    continue
-                }
                 // A backup taken without secrets carries no value; add the key
                 // with an empty value so the metadata/note survive and the user
                 // only has to refill the secret rather than recreate the entry.
@@ -1268,6 +1264,48 @@ object ConfigBackup {
                 // backup carries it; old backups fall back to "" (uncategorized)
                 // exactly like a fresh entry.
                 val group = ev.optString("group", "")
+                // [T-envvar-restore-deadlock] A key that already exists is no
+                // longer skipped wholesale — that made the reinstall case
+                // unrecoverable (secret-free restore creates empty shells, and
+                // every later restore with secrets was skipped, so the values
+                // could never come back). planEnvVarRestore() decides per
+                // branch: an empty local value takes the backup's, a live one
+                // that differs is kept and reported, and a secret-free backup
+                // writes no value at all.
+                val existing = envVarRepo.entries.value
+                    .firstOrNull { it.key.equals(key, ignoreCase = true) }
+                if (existing != null) {
+                    val localValue = envVarRepo.getValue(existing.key)
+                    val plan = planEnvVarRestore(
+                        key = existing.key,
+                        localValue = localValue,
+                        localNote = existing.note,
+                        localGroup = existing.group,
+                        backupValue = value,
+                        backupNote = note,
+                        backupGroup = group,
+                    )
+                    if (!plan.touchesAnything) {
+                        plan.report?.let { skipped.add(it) }
+                        continue
+                    }
+                    // update() always writes the value, so hand it the one that
+                    // must end up stored (the plan's, else the local one).
+                    val updated = envVarRepo.update(
+                        id = existing.id,
+                        newKey = existing.key,
+                        newValue = plan.value ?: localValue.orEmpty(),
+                        newNote = plan.note ?: existing.note,
+                        newGroup = plan.group ?: existing.group,
+                    )
+                    if (updated) {
+                        if (plan.writesValue) envVarsImported++
+                        plan.report?.let { skipped.add(it) }
+                    } else {
+                        skipped.add("env var \"$key\": rejected (invalid key)")
+                    }
+                    continue
+                }
                 if (envVarRepo.add(key, value, note, group)) {
                     envVarsImported++
                     if (value.isEmpty()) {
