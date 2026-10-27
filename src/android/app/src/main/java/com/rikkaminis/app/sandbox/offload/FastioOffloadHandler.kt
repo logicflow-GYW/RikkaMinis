@@ -752,7 +752,7 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
             Files.createDirectories(archivePath.parent)
             val raw = Files.newOutputStream(archivePath)
             val sink = if (gzip) java.util.zip.GZIPOutputStream(raw) else raw
-            sink.use { tarCreate(it, members, tarEntryBudget(args), outcome) }
+            sink.use { tarCreate(it, members, tarEntryBudget(args), outcome, archivePath) }
         } catch (e: Exception) {
             outcome.errors.add("${entry.getString("archive")}: ${e.message}")
         }
@@ -763,6 +763,13 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
         if (outcome.skippedSpecial > 0) {
             entry.put("skipped_special", outcome.skippedSpecial)
             entry.put("skipped_names", JSONArray(outcome.skippedNames))
+        }
+        // [§6 F8] The archive was inside the tree it packs, so the walk met it.
+        // Reported, not silent: the member list of the written archive genuinely
+        // does not contain `a.tar` even though `a.tar` was named by the root.
+        if (outcome.skippedSelf > 0) {
+            entry.put("skipped_self", outcome.skippedSelf)
+            entry.put("skipped_self_names", JSONArray(outcome.skippedSelfNames))
         }
         if (outcome.truncated) entry.put("truncated", true)
         val archiveBytes = try {
@@ -853,6 +860,12 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
             .put("dirs", outcome.dirs)
             .put("symlinks", outcome.symlinks)
             .put("bytes", outcome.bytes)
+        // [§6 F2] LNKTYPE members are materialised by copy, so `files` already
+        // counts them; `hard_links` says how many of those files came from a
+        // link rather than from a payload. `skipped_hardlink` now means "the
+        // target named by the link was never unpacked" (an error, not a
+        // limitation) and appears next to `errors`.
+        if (outcome.hardLinked > 0) entry.put("hard_links", outcome.hardLinked)
         if (outcome.skippedHardlink > 0) entry.put("skipped_hardlink", outcome.skippedHardlink)
         if (outcome.skippedSpecial > 0) entry.put("skipped_special", outcome.skippedSpecial)
         if (outcome.paxHeaders > 0) entry.put("pax_headers", outcome.paxHeaders)
@@ -1309,8 +1322,10 @@ Notes:
     directions (verified, including names too long for the 100-byte field: ustar prefix split,
     and GNU `L` long-name entries beyond 155+100). Symlinks are stored as links; device nodes,
     fifos and sockets cannot be represented and are SKIPPED — the count and up to 20 names are
-    reported under "skipped_special" so an archive that lacks them says so. Hard links are not
-    materialised on extract ("skipped_hardlink"): the file itself is still unpacked.
+    reported under "skipped_special" so an archive that lacks them says so. An archive that is
+    itself inside the packed tree is skipped and counted ("skipped_self"), never read while it
+    grows. Hard links are materialised on extract by COPYING the already-unpacked regular file
+    ("hard_links"): the target appears as an independent file, not a link.
     Member names follow the ARGUMENT as spelled (`-cf a.tar src` stores `src/...`, NOT the
     resolved `/var/minis/workspace/src/...`), exactly as GNU/busybox do — with a leading `/`
     and leading `../` dropped the way both of them drop them — so whoever extracts the archive

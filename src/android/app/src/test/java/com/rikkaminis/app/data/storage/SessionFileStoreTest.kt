@@ -203,9 +203,87 @@ class SessionFileStoreTest {
         val report = s.reclaimOrphans(setOf(live))
         assertTrue("live session's tab file must be kept", liveTabs.exists())
         assertFalse("orphaned tab file must be reclaimed", deadTabs.exists())
-        // Deliberate minimal radius: the report's byte counts still cover
-        // session dirs + media only (see deleteOrphanBrowserTabFiles KDoc).
+        // [§1025-D R1] Counted as well as deleted: the banner the user confirms
+        // must not promise less than the sweep frees.
+        assertEquals("orphaned tab file must be counted", 1, report.browserTabsDirs)
+        assertEquals(45L, report.browserTabsBytes)
+        assertEquals(1, report.totalDirs)
+        assertEquals(45L, report.totalBytes)
         assertEquals(0, report.mediaDirs)
+    }
+
+    @Test
+    fun `scanOrphans counts orphan browser tab files and folds them into the totals`() {
+        val s = store()
+        val live = sid()
+        val dead = sid()
+        write(s.browserTabFile(live), 30)
+        val deadTabs = write(s.browserTabFile(dead), 45)
+        // A session dir for the same dead id, so the two halves are visible in
+        // one report: 20 bytes of session files + 45 bytes of tab state.
+        write(File(s.sessionDir(dead), "w/a"), 20)
+
+        val report = s.scanOrphans(setOf(live))
+
+        assertEquals(1, report.sessionDirs)
+        assertEquals(20L, report.sessionBytes)
+        assertEquals(1, report.browserTabsDirs)
+        assertEquals(45L, report.browserTabsBytes)
+        assertEquals("both kinds count", 2, report.totalDirs)
+        assertEquals(65L, report.totalBytes)
+        // Scan is measure-only: nothing on disk moved.
+        assertTrue(deadTabs.exists())
+        assertTrue(s.sessionDir(dead).exists())
+    }
+
+    @Test
+    fun `the scan and the delete half of the reclaim agree on what is an orphan`() {
+        // The two halves spell the same rule out separately (the delete half's
+        // predicate is pinned inline by the browser_tabs_lifecycle_check gate),
+        // so the agreement has to be proven rather than assumed: same fixture
+        // matrix, measured set vs deleted set.
+        val dead = sid()
+        val live = sid()
+        val draftDead = "__new__${UUID.randomUUID()}"
+        // Fixed, so the expected survivor set stays a literal.
+        val shapedDir = "00000000-0000-4000-8000-000000000000"
+        val fixtures = linkedMapOf(
+            "dead.json" to "$dead.json",
+            "live.json" to "$live.json",
+            "draft-dead.json" to "$draftDead.json",
+            "not-a-session.json" to "not-a-session.json",
+            "no-json-suffix" to dead,
+            "subdir" to dead,
+        )
+        var built = 0
+        fun build(): SessionFileStore {
+            // One TemporaryFolder rule per test, so each tree needs its own dir.
+            val s = SessionFileStore(tmp.newFolder("filesDir-${built++}"))
+            fixtures.forEach { (_, name) -> write(File(s.browserTabsRootForTesting(), name), 7) }
+            // A DIRECTORY shaped like a tab file: session-shaped stem, `.json`
+            // suffix, but not a file — neither half may touch it.
+            File(s.browserTabsRootForTesting(), "$shapedDir.json").mkdirs()
+            return s
+        }
+
+        val measured = build()
+        val scanned = measured.scanOrphanBrowserTabFiles(setOf(live))
+        assertEquals(2, scanned.browserTabsDirs) // dead.json + draft-dead.json
+        assertEquals(14L, scanned.browserTabsBytes)
+
+        val swept = build()
+        swept.reclaimOrphans(setOf(live))
+        val survivors = swept.browserTabsRootForTesting().list()!!.toSortedSet()
+        assertEquals(
+            "every file the scan counted must be gone, every other entry must stay",
+            sortedSetOf(
+                "$live.json",
+                "not-a-session.json",
+                "$shapedDir.json", // a DIRECTORY, not a state file
+                dead, // the suffix-less spelling, kept as a non-state file
+            ),
+            survivors,
+        )
     }
 
     @Test

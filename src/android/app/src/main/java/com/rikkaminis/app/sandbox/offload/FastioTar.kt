@@ -59,6 +59,17 @@ internal class TarCreateOutcome : EntryBudget {
     /** Named pipes, sockets, devices: not representable, reported not dropped. */
     var skippedSpecial = 0L
     val skippedNames = ArrayList<String>()
+
+    /**
+     * [§6 F8] Members skipped because they ARE the archive being written
+     * (`tar -cf src/a.tar src`, `tar -cf a.tar a.tar`, or a hard link to it).
+     * Archiving a file that is still growing cannot work: the walk would read
+     * the bytes it has already written and then append them, so the member's
+     * declared size never matches its payload and every later member is
+     * garbage to a real reader. Skipped, counted, and NAMED — never silent.
+     */
+    var skippedSelf = 0L
+    val skippedSelfNames = ArrayList<String>()
     override var visited = 0L
     override var truncated = false
     val errors = ArrayList<String>()
@@ -81,12 +92,19 @@ internal class TarCreateOutcome : EntryBudget {
  * The entry budget covers the top-level roots too: once [TarCreateOutcome.visited]
  * reaches [maxEntries] no further root is written and
  * [TarCreateOutcome.truncated] is set — a root list is a walk like any other.
+ *
+ * [§6 F8] [archivePath] is the HOST path of the file [sink] writes (null when
+ * the caller has no file, which is the test-only case). Any member that turns
+ * out to be that same file — `tar -cf src/a.tar src`, or a hard link to it —
+ * is skipped and counted in [TarCreateOutcome.skippedSelf] instead of being
+ * read while it is still growing.
  */
 internal fun tarCreate(
     sink: OutputStream,
     roots: List<Pair<Path, String>>,
     maxEntries: Long,
     out: TarCreateOutcome,
+    archivePath: Path? = null,
 ) {
     for ((path, memberPrefix) in roots) {
         val name = tarMemberName(memberPrefix)
@@ -109,6 +127,17 @@ internal fun tarCreate(
             writeLink(sink, name, path, out)
             continue
         }
+        // [§6 F8] `tar -cf a.tar a.tar` — the root IS the archive under
+        // construction. Placed AFTER the symlink branch on purpose: a link is
+        // written as a link and never read, so "points at the archive" is not
+        // the same as "is the archive" for a member this writer only records.
+        // Checked before the write charges anything, so the skipped root does
+        // not eat a budget slot (it contributes no member).
+        if (isSelfArchive(path, archivePath)) {
+            out.skippedSelf++
+            if (out.skippedSelfNames.size < MAX_REPORTED_SKIPS) out.skippedSelfNames.add(name)
+            continue
+        }
         if (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
             // [dv22-A2 §1042-A-02] A top-level FIFO/socket/device is counted,
             // never read: writeRegular would open it with newInputStream, and a
@@ -125,7 +154,7 @@ internal fun tarCreate(
         try {
             // [dv22-A2 §1042-A-02] writeTree returns false when the budget ran
             // out mid-tree — the WHOLE traversal must stop, not just that tree.
-            if (!writeTree(sink, path, name, path, maxEntries, out)) break
+            if (!writeTree(sink, path, name, path, maxEntries, out, archivePath)) break
         } catch (e: Exception) {
             out.errors.add("$memberPrefix: ${e.message}")
         }
@@ -164,6 +193,8 @@ internal fun tarCreate(
  *     [MAX_REPORTED_SKIPS] name cap;
  *   - a single unreadable entry is recorded in [TarCreateOutcome.errors] and
  *     the rest of the tree is still archived (visitFileFailed's CONTINUE);
+ *   - [§6 F8] the archive being written, when it lives inside this tree, is
+ *     skipped into [TarCreateOutcome.skippedSelf] (see [isSelfArchive]);
  *   - [charge] is called at the same points, and `false` means "budget
  *     exhausted" — the caller must stop the WHOLE traversal, which is what
  *     the walker's `TERMINATE` did.
@@ -178,6 +209,7 @@ private fun writeTree(
     root: Path,
     maxEntries: Long,
     out: TarCreateOutcome,
+    archivePath: Path?,
 ): Boolean {
     // The walker's order, kept: read the attributes, open the directory
     // stream, and only then charge + write the header — so a directory that
@@ -213,11 +245,22 @@ private fun writeTree(
             continue
         }
         if (childAttrs.isDirectory) {
-            if (!writeTree(sink, child, rootName, root, maxEntries, out)) return false
+            if (!writeTree(sink, child, rootName, root, maxEntries, out, archivePath)) return false
+            continue
+        }
+        val childEntry = memberNameFor(rootName, root, child)
+        // [§6 F8] The archive itself, when the destination lives inside the
+        // tree being packed (`tar -cf src/a.tar src`). Archiving a file that
+        // is still being written reads a moving payload: the member's size
+        // field would be taken before the copy and the copy would then
+        // include bytes written after it. Skipped before charge() — it
+        // contributes no member, so it must not consume the entry budget.
+        if (isSelfArchive(child, archivePath)) {
+            out.skippedSelf++
+            if (out.skippedSelfNames.size < MAX_REPORTED_SKIPS) out.skippedSelfNames.add(childEntry)
             continue
         }
         if (charge(out, maxEntries)) return false
-        val childEntry = memberNameFor(rootName, root, child)
         if (childAttrs.isRegularFile) {
             writeRegular(sink, childEntry, child, out)
         } else {
@@ -226,6 +269,31 @@ private fun writeTree(
         }
     }
     return true
+}
+
+/**
+ * True when [candidate] and [archive] are the SAME file on disk — the archive
+ * being written, reached through the tree walk. [Files.isSameFile] is the only
+ * honest comparison here: it compares the actual file (device/inode), so a
+ * HARD LINK to the archive counts as the archive as well, and a path spelled
+ * differently (`./src/a.tar`, a symlinked parent directory) still matches.
+ *
+ * A null [archivePath] means "caller did not say" (the pure-engine tests, and
+ * any future caller with no file sink) and disables the check rather than
+ * guessing. Any exception (the file vanished mid-walk, an unreadable parent)
+ * is "not the archive": the ordinary not-found / unreadable branches of the
+ * walk already report those, and a false positive here would silently drop a
+ * legitimate member.
+ */
+private fun isSelfArchive(candidate: Path, archive: Path?): Boolean {
+    if (archive == null) return false
+    return try {
+        Files.exists(candidate, LinkOption.NOFOLLOW_LINKS) &&
+            Files.exists(archive, LinkOption.NOFOLLOW_LINKS) &&
+            Files.isSameFile(candidate, archive)
+    } catch (_: Exception) {
+        false
+    }
 }
 
 internal fun writeRegular(
@@ -413,6 +481,20 @@ internal class TarExtractOutcome : EntryBudget {
     var symlinks = 0L
     var bytes = 0L
     var skippedSpecial = 0L
+
+    /**
+     * [§6 F2] LNKTYPE members materialised by COPYING the already-unpacked
+     * target (`Files.copy`) — the target file appears on disk, as an
+     * independent regular file. A hard link cannot be created here anyway:
+     * the destination may be on a filesystem that has no links (FAT/exFAT
+     * SD card), so a copy is the only implementation that always lands.
+     *
+     * Counted in [files] (two real files landed) but NOT in [bytes]: the
+     * payload was already counted once, with the regular member it copies.
+     */
+    var hardLinked = 0L
+
+    /** LNKTYPE members whose target was NOT found in the archive (an error). */
     var skippedHardlink = 0L
     var paxHeaders = 0L
     var longNameHeaders = 0L
@@ -489,6 +571,12 @@ internal fun tarExtract(
 ) {
     val reader = TarReader(source)
     val declaredLinks = HashSet<String>()
+    // [§6 F2] normalized member name -> the regular file actually written for
+    // it, so an LNKTYPE member that follows can be materialised by copy.
+    // Keyed by the NORMALIZED name: the link target is spelled the way the
+    // archive was built (`./src/a.txt` vs `src/a.txt`) and both must resolve
+    // to the same member.
+    val extractedFiles = HashMap<String, Path>()
     try {
         Files.createDirectories(dest)
         while (true) {
@@ -536,11 +624,50 @@ internal fun tarExtract(
                         out.symlinks++
                     }
                     '1' -> {
-                        // Hard links are not materialized in v1: the file is
-                        // already in the archive as a regular member, so the
-                        // content is not lost — the sharing is. Counted, not silent.
-                        out.skippedHardlink++
-                        if (out.skippedNames.size < MAX_REPORTED_SKIPS) out.skippedNames.add(member.name)
+                        // [§6 F2] Materialised by COPY, not by link: the file
+                        // named by this member has to appear at `target`, and a
+                        // hard link cannot be created on every filesystem the
+                        // destination may live on. The source is the regular
+                        // member already unpacked under `linkName` — this is
+                        // the same content, written twice on disk (the sharing
+                        // is the one thing a copy cannot reproduce).
+                        // A link whose target is missing is a DEFECT in the
+                        // archive, not an unsupported feature: reported as an
+                        // error, never silently dropped (an empty file would
+                        // be invented content).
+                        val linkKey = tarNormalizeMember(member.linkName)?.joinToString("/")
+                        val linkSource = linkKey?.let { extractedFiles[it] }
+                        if (linkKey == null || linkSource == null ||
+                            !Files.isRegularFile(linkSource, LinkOption.NOFOLLOW_LINKS)
+                        ) {
+                            out.skippedHardlink++
+                            if (out.skippedNames.size < MAX_REPORTED_SKIPS) out.skippedNames.add(member.name)
+                            out.errors.add(
+                                "${member.name}: hard link target '${member.linkName}' is not a regular " +
+                                    "member extracted before this entry; refusing to invent its content",
+                            )
+                            reader.skipData()
+                            continue
+                        }
+                        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+                            if (!force) {
+                                out.errors.add("${member.name}: already_exists (pass --force to replace)")
+                                reader.skipData()
+                                continue
+                            }
+                            if (Files.isDirectory(target, LinkOption.NOFOLLOW_LINKS)) {
+                                out.errors.add("${member.name}: target is a directory; refusing to replace it")
+                                reader.skipData()
+                                continue
+                            }
+                            Files.delete(target)
+                        }
+                        Files.createDirectories(target.parent)
+                        Files.copy(linkSource, target)
+                        applyMetadata(target, member)
+                        normalized?.let { extractedFiles[it.joinToString("/")] = target }
+                        out.files++
+                        out.hardLinked++
                     }
                     '0', '\u0000', '7' -> {
                         if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
@@ -559,6 +686,7 @@ internal fun tarExtract(
                         Files.createDirectories(target.parent)
                         Files.newOutputStream(target).use { sink -> reader.copyData(sink, member.size) }
                         applyMetadata(target, member)
+                        normalized?.let { extractedFiles[it.joinToString("/")] = target }
                         out.files++
                         out.bytes += member.size
                     }

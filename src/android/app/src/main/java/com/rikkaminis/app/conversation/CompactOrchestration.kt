@@ -259,8 +259,13 @@ internal fun ChatViewModel.compactAll(
     // [fix/compact-cancel-on-stop-1002] Store the job so cancelStream can
     // kill the compact (see compactJob KDoc). CancellationException already
     // propagates cleanly through this launch: the catch rethrows, the
-    // finally resets _isCompacting + traces, and nothing is persisted
-    // before the commit block — a cancelled compact leaves zero trace.
+    // finally resets _isCompacting + traces, and nothing is persisted before
+    // the commit block — a cancelled compact leaves the transcript unfolded
+    // and writes no marker. [§47 N-2] The commit block BELOW is the boundary
+    // of that promise: a cancel landing on insertCompactMarker either keeps
+    // the row out (no trace) or leaves the row without its in-memory mirror
+    // (the next session load rebuilds the summary from it) — never a second
+    // write, and never "zero trace" once the insert has committed.
     compactJob = viewModelScope.launch(Dispatchers.IO) {
         // [T-android-compact-queued-drain] Only a SUCCESSFUL compact kicks
         // the queued-prompt drain below; failure/cancel/empty-summary paths

@@ -287,7 +287,11 @@ class FastioTarTest {
     }
 
     @Test
-    fun `hard links are reported instead of materialised`() {
+    fun `a hard link member is materialised by copying the unpacked target`() {
+        // [§6 F2] Before this, the '1' branch only counted the member: the tar
+        // was valid, the target file existed, and the file the archive SAYS it
+        // contains (`b.txt`) never appeared — `busybox tar xf` drops it in, we
+        // dropped nothing. Asserted on disk, not on the counters alone.
         val archive = ByteArrayOutputStream()
         archive.write(craftHeader("a.txt", '0', 2, 420, ""))
         archive.write("hi".toByteArray())
@@ -299,10 +303,177 @@ class FastioTarTest {
         val out = TarExtractOutcome()
         tarExtract(ByteArrayInputStream(archive.toByteArray()), dest, false, 100L, out)
 
-        assertEquals(1L, out.files)
+        assertTrue("no errors expected: ${out.errors}", out.errors.isEmpty())
+        assertEquals(0L, out.skippedHardlink)
+        assertEquals(1L, out.hardLinked)
+        // files counts REAL files on disk: the regular member plus its copy.
+        // bytes does not move — the payload was counted once, with a.txt.
+        assertEquals(2L, out.files)
+        assertEquals(2L, out.bytes)
+
+        val a = dest.resolve("a.txt")
+        val b = dest.resolve("b.txt")
+        assertTrue("the link member must exist", Files.exists(b, LinkOption.NOFOLLOW_LINKS))
+        assertTrue(Files.isRegularFile(b, LinkOption.NOFOLLOW_LINKS))
+        assertFalse("a copy, not a link", Files.isSymbolicLink(b))
+        assertEquals("hi", Files.readAllBytes(b).decodeToString())
+        // Independent files, not one inode: writing through one must not be
+        // visible in the other (a real hard link would share the content).
+        assertFalse(
+            "b.txt must be an independent copy, not the same inode as a.txt",
+            Files.isSameFile(a, b),
+        )
+        Files.write(b, "XX".toByteArray())
+        assertEquals("hi", Files.readAllBytes(a).decodeToString())
+    }
+
+    @Test
+    fun `a hard link whose target was never unpacked is an error, not an empty file`() {
+        // A missing target is an archive DEFECT. The old branch treated it as
+        // an unsupported feature and stayed quiet; silently inventing an empty
+        // file would be worse. Must land in errors AND be counted.
+        val archive = ByteArrayOutputStream()
+        archive.write(craftHeader("b.txt", '1', 0, 420, "nope.txt"))
+        archive.write(ByteArray(1024))
+
+        val dest = Files.createTempDirectory("fastio-tar-hard-missing").resolve("out")
+        val out = TarExtractOutcome()
+        tarExtract(ByteArrayInputStream(archive.toByteArray()), dest, false, 100L, out)
+
         assertEquals(1L, out.skippedHardlink)
-        assertEquals(listOf("b.txt"), out.skippedNames)
-        assertEquals("hi", Files.readAllBytes(dest.resolve("a.txt")).decodeToString())
+        assertEquals(0L, out.hardLinked)
+        assertEquals(1, out.errors.size)
+        assertTrue(
+            "error must name the missing target: ${out.errors}",
+            out.errors[0].contains("nope.txt"),
+        )
+        assertFalse(Files.exists(dest.resolve("b.txt"), LinkOption.NOFOLLOW_LINKS))
+    }
+
+    @Test
+    fun `a hard-linked tree round-trips as two independent files`() {
+        // The writer stores a hard-linked pair as two regular members (it does
+        // not dedupe, and must not: dedupe on write would need the same
+        // in-memory index a reader has and would break streaming). The pair
+        // therefore round-trips as two copies — the content is preserved, the
+        // sharing is not, which is the documented trade of a tar copy.
+        //
+        // The fixture STARTS from Files.createLink, but a filesystem that
+        // emulates hard links with side files (PRoot's `.l2s.` entries in the
+        // dev sandbox) is normalized down to a plain two-file copy first:
+        // the member shape this engine writes is IDENTICAL for both inputs
+        // (that is the point), so the assertions run for real on every
+        // filesystem instead of skipping. (First attempt at this test skipped
+        // on emulating filesystems — and a test that never runs locally ships
+        // its arithmetic errors straight to CI.)
+        val root = Files.createTempDirectory("fastio-tar-hard-round")
+        fun entries(dir: Path) = Files.list(dir).use { stream ->
+            stream.map { it.fileName.toString() }.sorted().toList()
+        }
+        // Probe first, in a throwaway directory: on a real filesystem the pair
+        // is one inode twice, on an emulating one `createLink` also drops side
+        // files into the directory (and deleting those breaks the "link"), so
+        // the probe tree is never reused either way.
+        val probe = Files.createDirectory(root.resolve("probe"))
+        Files.write(probe.resolve("a.txt"), "shared".toByteArray())
+        Files.createLink(probe.resolve("b.txt"), probe.resolve("a.txt"))
+        val realLinks = entries(probe) == listOf("a.txt", "b.txt")
+        Files.walk(probe).use { walk -> walk.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
+        val tree = Files.createDirectory(root.resolve("tree"))
+        Files.write(tree.resolve("a.txt"), "shared".toByteArray())
+        if (realLinks) {
+            Files.createLink(tree.resolve("b.txt"), tree.resolve("a.txt"))
+        } else {
+            Files.write(tree.resolve("b.txt"), "shared".toByteArray())
+        }
+        assertEquals(
+            "fixture must be exactly the two-file tree",
+            listOf("a.txt", "b.txt"),
+            entries(tree),
+        )
+        assertEquals(
+            "hard links are expected on a real filesystem",
+            realLinks,
+            Files.isSameFile(tree.resolve("a.txt"), tree.resolve("b.txt")),
+        )
+
+        val archive = ByteArrayOutputStream()
+        val created = TarCreateOutcome()
+        tarCreate(archive, listOf(tree to tree.toString()), 1000L, created)
+        assertEquals(2L, created.files)
+        // "shared" is 6 bytes; two members = 12. (Literal on purpose —
+        // derivable-looking-but-hardcoded is the mutation guard.)
+        assertEquals(12L, created.bytes)
+
+        val dest = root.resolve("out")
+        val out = TarExtractOutcome()
+        tarExtract(ByteArrayInputStream(archive.toByteArray()), dest, false, 1000L, out)
+
+        val extractedTree = dest.resolve(tree.toString().trimStart('/'))
+        val a = extractedTree.resolve("a.txt")
+        val b = extractedTree.resolve("b.txt")
+        assertEquals(2L, out.files)
+        assertEquals(12L, out.bytes)
+        assertEquals("shared", Files.readAllBytes(a).decodeToString())
+        assertEquals("shared", Files.readAllBytes(b).decodeToString())
+        // Independent files, not one inode: writing through one must not be
+        // visible in the other (a real hard link would share the content).
+        assertFalse("copies, not links", Files.isSameFile(a, b))
+        Files.write(b, "XX".toByteArray())
+        assertEquals("shared", Files.readAllBytes(a).decodeToString())
+    }
+
+    // ── the archive inside the tree it packs (F8) ───────────────────────────
+
+    @Test
+    fun `an archive written inside the packed tree does not contain itself`() {
+        // [§6 F8] `tar -cf src/a.tar src`: the file being written is walked
+        // like any other child. Archiving it while it grows makes the member's
+        // declared size disagree with its payload, which corrupts every member
+        // after it. It must be skipped and counted, not packed.
+        val root = Files.createTempDirectory("fastio-tar-self")
+        val tree = Files.createDirectory(root.resolve("tree"))
+        Files.write(tree.resolve("a.txt"), "hello".toByteArray())
+        // Stand in for the sink: production opens this file before the walk.
+        val archiveFile = Files.createFile(tree.resolve("pack.tar"))
+
+        val archive = ByteArrayOutputStream()
+        val created = TarCreateOutcome()
+        tarCreate(archive, listOf(tree to tree.toString()), 1000L, created, archiveFile)
+
+        assertEquals(1L, created.skippedSelf)
+        assertEquals(listOf("${tarMemberPrefix(tree.toString())}/pack.tar"), created.skippedSelfNames)
+        assertTrue(created.errors.isEmpty())
+        // a.txt only: the directory header, one file, and NO pack.tar member.
+        assertEquals(1L, created.files)
+
+        val dest = root.resolve("out")
+        val out = TarExtractOutcome()
+        tarExtract(ByteArrayInputStream(archive.toByteArray()), dest, false, 1000L, out)
+        val extractedTree = dest.resolve(tree.toString().trimStart('/'))
+        assertEquals("hello", Files.readAllBytes(extractedTree.resolve("a.txt")).decodeToString())
+        assertFalse(
+            "the archive must not archive itself",
+            Files.exists(extractedTree.resolve("pack.tar"), LinkOption.NOFOLLOW_LINKS),
+        )
+    }
+
+    @Test
+    fun `an archive outside the packed tree keeps every member and counts no self skips`() {
+        // The control arm: the same walk with the archive elsewhere must skip
+        // exactly nothing — otherwise "skipped_self" would just hide members.
+        val root = Files.createTempDirectory("fastio-tar-self-outside")
+        val tree = Files.createDirectory(root.resolve("tree"))
+        Files.write(tree.resolve("a.txt"), "hello".toByteArray())
+        val archiveFile = Files.createFile(root.resolve("pack.tar"))
+
+        val created = TarCreateOutcome()
+        tarCreate(ByteArrayOutputStream(), listOf(tree to tree.toString()), 1000L, created, archiveFile)
+
+        assertEquals(0L, created.skippedSelf)
+        assertTrue(created.skippedSelfNames.isEmpty())
+        assertEquals(1L, created.files)
+        assertEquals(1L, created.dirs)
     }
 
     // ── tar slip ────────────────────────────────────────────────────────────
