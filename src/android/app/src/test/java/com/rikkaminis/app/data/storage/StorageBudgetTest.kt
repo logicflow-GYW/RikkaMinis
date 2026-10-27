@@ -136,8 +136,10 @@ class StorageBudgetTest {
     @Test
     fun formatterSwitchesUnitsAtBinaryBoundaries() {
         assertEquals("1.0 GB", StorageBudget.fmt(gib))
-        assertEquals("0.5 GB", StorageBudget.fmt(gib / 2))
-        assertEquals("512 MB", StorageBudget.fmt(512 * mib))
+        // Sub-GB values deliberately print in MB: a 512 MiB footprint is far
+        // more readable as "512 MB" than "0.5 GB".
+        assertEquals("1.5 GB", StorageBudget.fmt(gib + gib / 2))
+        assertEquals("512 MB", StorageBudget.fmt(gib / 2))
         assertEquals("900 KB", StorageBudget.fmt(900 * 1024))
         assertEquals("42 B", StorageBudget.fmt(42))
     }
