@@ -6300,6 +6300,8 @@ restore OK (54) ... final health STILL missing 5  ← 死循环
 - Room 2.6.1 `RoomDatabase.kt` 全文**零** FK 代码（无 enableForeignKeyConstraints / 无 PRAGMA foreign_keys / 无 "foreign"/"constraint"/"pragma" 关键词）。
 - androidx.sqlite 2.4.0 `FrameworkSQLiteOpenHelper` 零 FK 设置代码，`setForeignKeyConstraintsEnabled` 只被定义无调用方传 true。
 - SQLite 原生默认 `PRAGMA foreign_keys = OFF`，Room 2.6.1 不覆盖 → **本 app 外键约束实际关闭，CASCADE 不生效**。
+
+> **⚠️ 2026-10-27 更正（由 `skills/dev-history-sync` 的 CORRECTIONS 覆盖层注入，整档重建不丢）**：上方「外键约束实际关闭 / CASCADE 不生效」**作废**。字节码取证 room-compiler **2.6.1**：`DatabaseProcessor.doProcess` 见任一实体 `foreignKeys` 非空即置 `enableForeignKeys=true`，`SQLiteOpenHelperWriter` 随即在 `onOpen` 执行 `PRAGMA foreign_keys = ON`；本仓 `MessageEntity` 带 `ON DELETE CASCADE` ⇒ **外键是开的，CASCADE 生效**。判据必须看 **room-compiler 生成的 `_Impl`**，在 room-runtime 里搜不到 PRAGMA 不构成证据。
 - 佐证：`ChatRepository.deleteSession` 显式 `deleteMessages` 再 `deleteSession`（若 CASCADE 生效这行冗余）；`ProviderConfigDao.replaceAll` 注释自认 "schema-without-FK test paths"。
 
 **修正后结论**：聊天还原真实问题是「非幂等覆盖」（会话 REPLACE 回退元数据 + 消息被截断版覆盖），降级为 🟡。备份模块**无 🔴 数据丢失 bug**，最严重是两个 🟠（同步静默上传密钥 P1-1、手动还原不更新凭据 P1-2）。
@@ -29945,7 +29947,7 @@ Pattern-Key: sandbox-l2s-pack-symlink-broken
 
 **提交**：4a92e67c9 扫描器v2.1（实体自家族 10/10+DAO钉+位置参数，三臂负控）/ 9e3f5dc45 F-9空集崩溃+D-2共享常量 / 555cbf889 api-key脱敏+**F-6误报结案** / 76a9a565d **FK纠正**（见下）/ 88a4e6b01 D-3 MCP args/url凭据 / 08f818f3c D-4七语言恢复提示。
 
-**★ 可复用经验 1——Room FK 判据（推翻两次修正）**：room-**runtime** jar 永远干净（FK 代码在 room-**compiler** 生成的 `_Impl.onOpen` 里）。判据：javap `DatabaseProcessor.doProcess`（任一实体 `foreignKeys` 非空 → `enableForeignKeys=true`）+ `SQLiteOpenHelperWriter`（`if(enableForeignKeys) execSQL("PRAGMA foreign_keys = ON")` 模板）。本仓 MessageEntity 带 CASCADE → **FK 开**。dev-history:6296 已留二次修正块。教训：核 Room 行为必须看 compiler 生成模板，"runtime 里搜不到 PRAGMA"不构成证据。
+**★ 可复用经验 1——Room FK 判据（推翻两次修正）**：room-**runtime** jar 永远干净（FK 代码在 room-**compiler** 生成的 `_Impl.onOpen` 里）。判据：javap `DatabaseProcessor.doProcess`（任一实体 `foreignKeys` 非空 → `enableForeignKeys=true`）+ `SQLiteOpenHelperWriter`（`if(enableForeignKeys) execSQL("PRAGMA foreign_keys = ON")` 模板）。本仓 MessageEntity 带 CASCADE → **FK 开**。该条目下已注入 2026-10-27 更正块（生成器 CORRECTIONS 覆盖层，整档重建不再丢失）。教训：核 Room 行为必须看 compiler 生成模板，"runtime 里搜不到 PRAGMA"不构成证据。
 
 **★ 可复用经验 2——变异负控纪律**：先 commit 本体，再做变异，恢复用 `git checkout -- <变异路径>` 且**绝不能把未提交的本体改动和变异混在同一文件**（第一版 v2.1 因此整个丢过，从 stash/reflog 救不回，靠笔记重写）。正则 `matches()` 是全串匹配——`^--token=\S` 之类部分锚定写法会静默不匹配，负控先红再修才是正常节奏。
 
