@@ -219,23 +219,8 @@ def _body_text(text, name):
     return text[fb[0]:fb[1]] if fb else ""
 
 
-def _chain_first_arg(code, lit, pos):
-    """Literal text of the first argument of the call chained at [pos].
-
-    [pos] is where `_poison_chain` starts looking (right after the identifier
-    that holds a value). Returns None when no call is chained there.
-    """
-    i, n = pos, len(code)
-    while i < n and code[i] in " \t\r\n":
-        i += 1
-    if i < n and code[i] == "?":
-        i += 1
-        while i < n and code[i] in " \t\r\n":
-            i += 1
-    m = re.match(r"\.\s*[A-Za-z_]\w*\s*\(", code[i:])
-    if not m:
-        return None
-    open_pos = i + m.end() - 1
+def _call_first_arg(code, lit, open_pos):
+    """Literal text of the first argument of the call whose `(` is [open_pos]."""
     if match_bracket(code, open_pos) < 0:
         return None
     spans = call_args(code, open_pos)
@@ -244,11 +229,48 @@ def _chain_first_arg(code, lit, pos):
     return "".join(lit[a:b] for a, b in spans).strip()
 
 
+def _chain_calls(code, pos):
+    """Every call chained onto the expression that ends at [pos].
+
+    Returns `[(method_name, open_paren_pos, close_pos)]` in chain order. A bare
+    property access (no argument list) ends the walk with open_paren_pos = -1:
+    a permit cannot bless what it cannot read.
+
+    Walking the WHOLE chain is what makes the permit safe: blessing the pin's
+    `removePrefix("/var/minis")` must not also bless a `substringBefore('#')`
+    that follows it — the first licensed step used to be the last step anyone
+    looked at.
+    """
+    i, n, out = pos, len(code), []
+    while True:
+        while i < n and code[i] in " \t\r\n":
+            i += 1
+        if i < n and code[i] == "?":
+            i += 1
+            continue
+        m = re.match(r"\.\s*([A-Za-z_]\w*)", code[i:])
+        if not m:
+            break
+        name = m.group(1)
+        j = i + m.end()
+        while j < n and code[j] in " \t\r\n":
+            j += 1
+        if j >= n or code[j] != "(":
+            out.append((name, -1, -1))
+            break
+        close = match_bracket(code, j)
+        out.append((name, j, close))
+        if close < 0:
+            break
+        i = close + 1
+    return out
+
+
 ROOT_STRIP_LITERAL = '"/var/minis"'
 EDGE_TRIMS = ("trim", "trimEnd", "trimStart")
 
 
-def _shortcut_chain_permit(code, lit, pos, name):
+def _shortcut_chain_permit(code, lit, open_pos, name):
     """Chains that are LEGAL on WebPreviewShortcut's decoded path (F4c permit).
 
     `pin` decodes the file URL and then does two things the URL-path resolver
@@ -264,7 +286,7 @@ def _shortcut_chain_permit(code, lit, pos, name):
         return True
     if name != "removePrefix":
         return False
-    return _chain_first_arg(code, lit, pos) == ROOT_STRIP_LITERAL
+    return _call_first_arg(code, lit, open_pos) == ROOT_STRIP_LITERAL
 
 
 def decode_flow_problem(scope_code, scope_lit, arg_marker, permit=None):
@@ -275,8 +297,8 @@ def decode_flow_problem(scope_code, scope_lit, arg_marker, permit=None):
     — it is what pins the criterion to the `file://` resolution site instead of
     any decoder call in the file.
 
-    [permit] is an optional `(code, lit, pos, method_name) -> bool` that can
-    bless a specific chained rewrite. F1a/F2a pass none: their decoded path is
+    [permit] is an optional `(code, lit, open_paren_pos, method_name) -> bool`
+    that can bless ONE chained rewrite (one call, not the rest of the chain). F1a/F2a pass none: their decoded path is
     used as-is. F4c passes `_shortcut_chain_permit` because the pin site
     legitimately strips the sandbox root off the decoded path — without the
     permit the criterion would be red on the FIXED tree, which is the failure
@@ -298,9 +320,13 @@ def decode_flow_problem(scope_code, scope_lit, arg_marker, permit=None):
                 "decodeUriPath(<…>%s) (found %d such call(s))" % (arg_marker, len(calls)))
     start, open_pos, close = calls[0]
 
-    # (1) a rewrite chained straight onto the call
-    name = _poison_chain(scope_code, close + 1)
-    if name and not (permit and permit(scope_code, scope_lit, close + 1, name)):
+    # (1) rewrites chained straight onto the call — EVERY rewriting step in the
+    # chain must be permitted, and a permit covers one step, not the rest.
+    for name, chain_open, _chain_close in _chain_calls(scope_code, close + 1):
+        if name not in POST_DECODE_POISON:
+            continue                      # navigation (`.isBlank()`), not a rewrite
+        if permit and chain_open >= 0 and permit(scope_code, scope_lit, chain_open, name):
+            continue
         return ("the decoded path is rewritten by `.%s…` — the resolver's value must be "
                 "used as-is" % name)
 
@@ -330,8 +356,12 @@ def decode_flow_problem(scope_code, scope_lit, arg_marker, permit=None):
         for rm in re.finditer(r"(?<![\w.`])" + re.escape(local) + r"(?![\w`])", scope_code):
             if rm.start() < start:
                 continue
-            pname = _poison_chain(scope_code, rm.end())
-            if pname and not (permit and permit(scope_code, scope_lit, rm.end(), pname)):
+            for pname, chain_open, _chain_close in _chain_calls(scope_code, rm.end()):
+                if pname not in POST_DECODE_POISON:
+                    continue
+                if permit and chain_open >= 0 and permit(scope_code, scope_lit,
+                                                         chain_open, pname):
+                    continue
                 return ("`%s` (the decoded path) is rewritten by `.%s…` where it is read — "
                         "the truncation merely moved off the call chain onto the variable"
                         % (local, pname))
@@ -1335,6 +1365,14 @@ BREAKER_SHORTCUT_NO_DECODE = ALLOWLISTED_FILE.replace(
     'val absPath = url.removePrefix("file://")')
 assert BREAKER_SHORTCUT_NO_DECODE != ALLOWLISTED_FILE
 
+# W-07 precision, sharp side: a PERMITTED step followed by a truncation. The
+# permit blesses `removePrefix("/var/minis")`; it must not bless what comes
+# after it, or "root strip stays legal" becomes "any rewrite stays legal".
+BREAKER_SHORTCUT_PERMIT_THEN_CUT = ALLOWLISTED_FILE.replace(
+    'absPath.removePrefix("/var/minis").let {',
+    'absPath.removePrefix("/var/minis").substringBefore(\'#\').let {')
+assert BREAKER_SHORTCUT_PERMIT_THEN_CUT != ALLOWLISTED_FILE
+
 # W-08: the construction site decodes the URL it just encoded. Every token F7
 # looks for is intact (`fileUrlFor(` is still the operand).
 BREAKER_CHAT_DECODE_WRAP = CHAT_SCREEN_CLEAN + """
@@ -1618,6 +1656,14 @@ def selftest():
            "w08-precision: a decode of a fileUrl parameter must stay GREEN, got %s"
            % [c for c, ok, _d, _l in m if not ok])
 
+    # W-07 precision, sharp side: a permitted step does not license the next one.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER,
+            dict_of({ALLOWLIST_REL: BREAKER_SHORTCUT_PERMIT_THEN_CUT}))
+    reds = sorted(c for c, ok, _d, _l in m if not ok)
+    expect(reds == [F4C],
+           "w07-permit-then-cut: a truncation AFTER the permitted root strip must be RED "
+           "on F4c only, got %s" % reds)
+
     # W-07 precision: the pin's root strip and edge trim are legal chains on the
     # decoded path (the fixture above exercises both and must stay green).
     m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({}))
@@ -1640,7 +1686,7 @@ def selftest():
           "fileurl-raw-dollar=RED, fileurl-encoded-dollar=GREEN, "
           "fileurl-encoded-operand=GREEN, w07-shortcut-no-decode=RED, "
           "w08-decode-after-encode=RED, w08-decoder-precision=GREEN, "
-          "w07-pin-permit=GREEN")
+          "w07-permit-then-cut=RED, w07-pin-permit=GREEN")
     return arms
 
 
