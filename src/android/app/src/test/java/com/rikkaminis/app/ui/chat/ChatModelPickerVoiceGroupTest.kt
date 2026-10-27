@@ -36,7 +36,7 @@ class ChatModelPickerVoiceGroupTest {
         "src/android/app/src/main/java/com/rikkaminis/app/data/repository/ProviderRepository.kt"
 
     private fun repoFile(rel: String): File {
-        var dir: File? = File(System.getProperty("user.dir"))
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
             val f = File(dir, rel)
             if (f.exists()) return f

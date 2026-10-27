@@ -50,7 +50,7 @@ class ProviderCredentialLiveSourceTest {
      * established; a root-relative read went red on CI when it did not).
      */
     private fun repoFile(rel: String): File {
-        var dir: File? = File(System.getProperty("user.dir"))
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
             val f = File(dir, rel)
             if (f.exists()) return f

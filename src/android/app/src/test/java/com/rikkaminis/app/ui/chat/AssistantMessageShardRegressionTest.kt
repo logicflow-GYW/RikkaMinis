@@ -32,7 +32,7 @@ class AssistantMessageShardRegressionTest {
             File("src/main/java"),
         )
         val root: File = candidates.firstOrNull { it.exists() }
-            ?: File(System.getProperty("user.dir"))
+            ?: File(System.getProperty("user.dir") ?: error("user.dir unset"))
         val file = File(
             root,
             "com/rikkaminis/app/ui/chat/ChatAssistantMessageUI.kt",

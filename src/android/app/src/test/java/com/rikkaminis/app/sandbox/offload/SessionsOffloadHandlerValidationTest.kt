@@ -173,7 +173,7 @@ class SessionsOffloadHandlerValidationTest {
     private fun readHandlerSource(): String = readRepoFile(HANDLER_REL)
 
     private fun readRepoFile(relative: String): String {
-        var dir: File? = File(System.getProperty("user.dir"))
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
             val f = File(dir, relative)
             if (f.exists()) return f.readText()

@@ -36,7 +36,7 @@ class SystemRowHeaderSuppressionTest {
             File("src/main/java"),
         )
         val root: File = candidates.firstOrNull { it.exists() }
-            ?: File(System.getProperty("user.dir"))
+            ?: File(System.getProperty("user.dir") ?: error("user.dir unset"))
         val file = File(root, tailPath)
         if (!file.exists()) {
             fail("cannot locate $tailPath (tried ${file.absolutePath})")

@@ -393,7 +393,7 @@ class ProviderEntryKeyAndPinTest {
      * can start anywhere under the repo — no fixed depth works.
      */
     private fun readRepoFile(relative: String): String {
-        var dir: java.io.File? = java.io.File(System.getProperty("user.dir"))
+        var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
             val f = java.io.File(dir, relative)
             if (f.exists()) return f.readText()
