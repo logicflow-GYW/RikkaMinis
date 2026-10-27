@@ -35,8 +35,19 @@
 默认值是 `{ _, _ -> null }`，即「不降采样」——漏传在编译、112 门、全部单测上都是绿的。
 
 生产调用点两处本来就显式传了 `::inferenceImageResizer`（`MessageEntity.toLLMMessage()` /
-`buildLlmMessages`），无需改；`ChatTurnPartsJsonTest` 四处依赖默认值的调用改为显式传
+`buildLlmMessages`，`ChatViewModel.kt:4506/:4514`），无需改；`ChatTurnPartsJsonTest` 四处依赖默认值的调用改为显式传
 `resizeForInference = { _, _ -> null }`（诚实标出「这几条测的确实不需要降采样」）。
+
+判据读数（本支 HEAD）：
+
+```
+$ rg -n "buildLlmMessagesFromParsed|buildSingleLlmMessage" src/android/app/src | grep -v /test
+ChatViewModel.kt:4509   buildSingleLlmMessage(…, ::inferenceImageResizer,)
+ChatViewModel.kt:4516   buildLlmMessagesFromParsed(parsed, mediaStore.mediaBaseDir, ::inferenceImageResizer)
+ChatStreamToolHelpers.kt:68   buildSingleLlmMessage(…, resizeForInference,)   # 内部透传
+$ rg -c "resizeForInference: \(ByteArray, String\) -> ByteArray\? =" src/android/app/src
+0
+```
 
 ### W-05（抽纯函数 + JVM 单测）
 
@@ -58,6 +69,9 @@ internal fun planImageElision(
 
 行为保持不变：占位文本仍由 `ImageBudget.elidedImagePlaceholder` 生成；`ToolResult` 保留
 结构、只清字节；未被淘汰的消息返回**同一实例**；`droppedIds` 为空时返回输入列表实例。
+
+附带效果：**W-05 的见证补丁从此打不上**（`rg -c "newParts\[ref\.partIdx\] !== originalPart" src` = 0）——
+判定点从「调用点内联的一行」变成「纯函数里带 KDoc 的那一行」，其等价形态由第 1/3/5/6 臂 + 变异 A 钉住。
 
 ### W-06（门新增 C-B4）
 
@@ -137,6 +151,16 @@ OK (6 tests)
 | HEAD（`git show HEAD:…`） | `rc=0`（全绿，看不见） |
 | 本支 | `rc=1`，`ImageBudget.kt:106 [B4] …` |
 | 本支（还原 `!`） | `rc=0`，`failure-polarity section green` |
+
+**e) 哪些文件被「沙箱实编」、哪些由 CI 真 Gradle 兜底（诚实边界）**
+
+| 改动文件 | 沙箱 kotlinc | 说明 |
+|---|---|---|
+| `ui/chat/ImageElisionPlan.kt` | 整文件编过 + 单测实跑 | 真源码，sha256 `5979ce19…fabbf4` |
+| `ui/chat/ChatStreamToolHelpers.kt` | 整文件编过（依赖打桩） | 三臂形状探针（见 c） |
+| `test/…/ImageElisionPlanTest.kt` | 整文件编过 + 6/6 实跑 | — |
+| `ui/chat/ChatPromptAndTools.kt` | 函数级切片编译（真 `ImageBudget` + 真 `ImageElisionPlan`） | 整个文件依赖 Android/Compose，沙箱不可编 |
+| `test/…/ChatTurnPartsJsonTest.kt` | 未编 | 依赖 `ChatViewModelMessageParser` 等 Android 面；由 CI `Run unit tests (full suite)` 编译通过（`BUILD SUCCESSFUL`） |
 
 ### L4 全量
 
