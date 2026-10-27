@@ -383,26 +383,132 @@ lang: "auto"
     }
 
     /**
-     * Read + parse the current SOUL.md. Returns null when the file is
-     * missing or unreadable; an empty body parses to default-meta with
-     * empty body and callers may treat that as "fall back to default".
+     * Distinct outcomes of reading SOUL.md.
+     *
+     * [load] collapses every failure to `null`. That is the right shape for
+     * its call sites (`?: default`), but it loses the difference between the
+     * two worlds that matter to a *write*:
+     *
+     *  - **Missing** — falling back to the default content is correct, the
+     *    next save legitimately creates the file.
+     *  - **Unreadable** — a SOUL.md is on disk and its bytes cannot be
+     *    decoded. Falling back to default and then saving overwrites the
+     *    user's persona with the app default (P0 F-4 / world W3: a chmod, a
+     *    truncated write, an external editor swapping the file mid-save).
+     *
+     * Exposed read-only so logs, diagnostics and tests can tell the two apart
+     * without changing [load]'s signature (zero call-site churn).
      */
-    fun load(context: Context): SoulFile? {
-        val file = fileLocation(context)
-        if (!file.exists()) return null
+    sealed class ReadState {
+        /** No SOUL.md on disk — the default content is the correct answer. */
+        object Missing : ReadState()
+
+        /** Bytes read and parsed. */
+        data class Loaded(val file: SoulFile) : ReadState()
+
+        /** The path exists but its bytes could not be read. */
+        data class Unreadable(val message: String) : ReadState()
+    }
+
+    /**
+     * What the pre-overwrite backup did. Returned (not just logged) so the JVM
+     * tests assert the branch that ran instead of asserting on log text.
+     */
+    internal enum class BackupOutcome {
+        /** No SOUL.md on disk — nothing to lose. */
+        Missing,
+
+        /** Disk already holds the exact bytes about to be written. */
+        Identical,
+
+        /** Previous bytes copied to `SOUL.md.recovered-<stamp>`. */
+        Written,
+
+        /** Present but unreadable — nothing to copy; the save proceeds. */
+        Unreadable,
+
+        /** The copy failed (disk full, permissions) — the save proceeds. */
+        Failed,
+    }
+
+    /** Backup siblings kept on disk; older ones are pruned per new backup. */
+    private const val RECOVERED_KEEP = 3
+    private const val RECOVERED_INFIX = ".recovered-"
+
+    /**
+     * Read + parse [target] without collapsing "missing" into "unreadable".
+     * Context-free so the JVM tests run this exact body on a real filesystem.
+     */
+    fun loadFrom(target: File): ReadState {
+        if (!target.exists()) return ReadState.Missing
         return try {
-            SoulMDParser.parse(file.readText())
+            ReadState.Loaded(SoulMDParser.parse(target.readText()))
         } catch (t: Throwable) {
             AppLogger.warning(TAG, "SOUL.md load failed: ${t.message}")
-            null
+            ReadState.Unreadable(t.message ?: t.javaClass.simpleName)
         }
     }
 
-    /** Atomic write through a `.tmp` sibling, then rename. */
+    /**
+     * Read + parse the current SOUL.md. Returns null when the file is
+     * missing or unreadable; an empty body parses to default-meta with
+     * empty body and callers may treat that as "fall back to default".
+     *
+     * Behaviour is unchanged on purpose (5 write points in
+     * [com.rikkaminis.app.config.ConfigBuiltins] plus the Settings screen
+     * depend on the `null` shape). The body now delegates to [loadFrom] so
+     * the two can never disagree about what "unreadable" means.
+     */
+    fun load(context: Context): SoulFile? =
+        (loadFrom(fileLocation(context)) as? ReadState.Loaded)?.file
+
+    /** Same question as [load], answered with the reason instead of `null`. */
+    fun readState(context: Context): ReadState = loadFrom(fileLocation(context))
+
+    /**
+     * Atomic write through a `.tmp` sibling, then rename.
+     *
+     * Overwrite guard (P0 F-4): before the rename, the bytes currently on disk
+     * are copied to a `SOUL.md.recovered-<epochMillis>` sibling when — and
+     * only when — they differ from what is about to be written. See
+     * [backupBeforeOverwrite] for why the trigger is a content comparison
+     * rather than "am I falling back to the default right now".
+     */
     fun save(context: Context, file: SoulFile) {
-        val target = fileLocation(context)
+        saveTo(fileLocation(context), file)
+        _cachedMetadata.value = file.metadata
+        // [da1028-B / ISSUE-04] Signal for UI surfaces that hold an editable
+        // copy of what is on disk. `cachedMetadata` cannot serve as that
+        // signal: StateFlow de-duplicates equal values, so a body-only rewrite
+        // (the common `minis-config set soul.body …`) leaves the metadata
+        // identical and never emits. A monotonic counter emits on every write
+        // regardless of what changed.
+        _writeVersion.value += 1
+    }
+
+    /**
+     * The write itself, Context-free: `.tmp` sibling + rename, preceded by
+     * [backupBeforeOverwrite]. [save] adds the in-process cache/version
+     * bookkeeping on top; this function is the seam that lets a JVM test run
+     * the production bytes on a real filesystem.
+     *
+     * [clock] and [readExisting] are injectable ONLY so the tests can (a) pin
+     * backup timestamps and (b) simulate a read that throws without needing a
+     * permission bit (the test runner is root, so `chmod 000` is still
+     * readable). Production call sites take both defaults.
+     */
+    fun saveTo(
+        target: File,
+        file: SoulFile,
+        clock: () -> Long = System::currentTimeMillis,
+        readExisting: (File) -> ByteArray? = { f -> if (f.isFile) f.readBytes() else null },
+    ) {
         target.parentFile?.mkdirs()
         val text = SoulMDParser.serialize(file)
+        // Backup first: the rename below is atomic, but it is atomic over the
+        // *new* bytes — without this copy the previous content is gone the
+        // instant rename succeeds.
+        backupBeforeOverwrite(target, text, clock, readExisting)
         val tmp = File(target.parentFile, "${target.name}.tmp")
         // [audit-0917] Delete the temp file if the write itself fails. The old
         // code only cleaned up on a rename failure, so a throwing writeText
@@ -421,14 +527,108 @@ lang: "auto"
             target.writeText(text)
             tmp.delete()
         }
-        _cachedMetadata.value = file.metadata
-        // [da1028-B / ISSUE-04] Signal for UI surfaces that hold an editable
-        // copy of what is on disk. `cachedMetadata` cannot serve as that
-        // signal: StateFlow de-duplicates equal values, so a body-only rewrite
-        // (the common `minis-config set soul.body …`) leaves the metadata
-        // identical and never emits. A monotonic counter emits on every write
-        // regardless of what changed.
-        _writeVersion.value += 1
+    }
+
+    /**
+     * Copy the bytes currently in [target] to a `SOUL.md.recovered-<stamp>`
+     * sibling before they are overwritten. Best effort by design: nothing here
+     * may turn a user's Save into a failure.
+     *
+     * **Why a content comparison instead of "is this write falling back to the
+     * default?"** — [saveTo]'s callers cannot tell us that. The fallback lives
+     * in `ConfigBuiltins.loadCurrent()` / `SoulSettingsScreen`
+     * (`load(context) ?: parse(DEFAULT_CONTENT)`), and threading a "this file
+     * is a fallback" flag through them means touching five writers that
+     * otherwise need no change. Comparing bytes is locally decidable, applies
+     * to every overwrite path (including ones added later), and costs one extra
+     * file of a few KB per *real* edit — capped at [RECOVERED_KEEP] files.
+     *
+     * Byte-for-byte copy, not read-text → write-text: a file the parser accepts
+     * but whose encoding we would round-trip differently must still be
+     * recoverable verbatim.
+     */
+    internal fun backupBeforeOverwrite(
+        target: File,
+        newText: String,
+        clock: () -> Long = System::currentTimeMillis,
+        readExisting: (File) -> ByteArray? = { f -> if (f.isFile) f.readBytes() else null },
+    ): BackupOutcome {
+        if (!target.exists()) return BackupOutcome.Missing
+
+        val existing = try {
+            readExisting(target)
+        } catch (t: Throwable) {
+            // Present but unreadable — exactly the W3 world. There is nothing
+            // to copy, so the only honest thing left is to make the overwrite
+            // audible: this line is the signal that the persona on disk was not
+            // what the app thought it was.
+            AppLogger.error(
+                TAG,
+                "SOUL.md at ${target.absolutePath} exists but cannot be read " +
+                    "(${t.message}) — overwriting it without a backup. The previous " +
+                    "content is not recoverable from this device.",
+            )
+            return BackupOutcome.Unreadable
+        }
+        if (existing == null) {
+            // Path exists but is not a regular file (a directory, a FIFO, a
+            // broken link): same "cannot read it" class as above.
+            AppLogger.error(
+                TAG,
+                "SOUL.md at ${target.absolutePath} exists but is not a readable file " +
+                    "— overwriting it without a backup.",
+            )
+            return BackupOutcome.Unreadable
+        }
+        if (String(existing, Charsets.UTF_8) == newText) return BackupOutcome.Identical
+
+        return try {
+            nextBackupFile(target, clock()).writeBytes(existing)
+            pruneBackups(target)
+            BackupOutcome.Written
+        } catch (t: Throwable) {
+            AppLogger.warning(
+                TAG,
+                "SOUL.md backup failed (${t.message}) — continuing with the save",
+            )
+            BackupOutcome.Failed
+        }
+    }
+
+    /**
+     * `SOUL.md.recovered-<epochMillis>` next to [target]. Two saves inside the
+     * same millisecond would otherwise collide and silently lose the first
+     * backup, so the stamp is bumped until the name is free (names stay
+     * lexicographically ordered, which [pruneBackups] relies on as a
+     * tie-break).
+     */
+    private fun nextBackupFile(target: File, stamp: Long): File {
+        val dir = target.parentFile ?: target.absoluteFile.parentFile ?: target.absoluteFile
+        var name = "${target.name}$RECOVERED_INFIX$stamp"
+        var bump = stamp
+        var candidate = File(dir, name)
+        while (candidate.exists()) {
+            bump += 1
+            name = "${target.name}$RECOVERED_INFIX$bump"
+            candidate = File(dir, name)
+        }
+        return candidate
+    }
+
+    /** Keep the [RECOVERED_KEEP] newest backups, delete the rest. */
+    private fun pruneBackups(target: File) {
+        val dir = target.parentFile ?: return
+        val prefix = target.name + RECOVERED_INFIX
+        val backups = dir.listFiles()
+            ?.filter { it.isFile && it.name.startsWith(prefix) }
+            ?: return
+        if (backups.size <= RECOVERED_KEEP) return
+        backups
+            // mtime is the documented order; the name carries a monotonic
+            // stamp, so it breaks same-millisecond ties.
+            .sortedWith(compareBy<File> { it.lastModified() }.thenBy { it.name })
+            .dropLast(RECOVERED_KEEP)
+            .forEach { runCatching { it.delete() } }
     }
 
     /**
