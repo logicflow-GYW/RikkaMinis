@@ -1284,10 +1284,27 @@ class ChatViewModel(
     // stored reference nothing could cancel it — a stop press left the
     // summary call burning tokens in the background for up to ~2 min
     // (2026-10-01 14:43:48 stop → 14:45:56 "11 UI bubbles folded"). The
-    // CancellationException path is safe by construction: the compact
-    // pipeline rethrows it everywhere and nothing is persisted before the
-    // commit block, so a cancelled compact leaves zero trace (no marker,
-    // no folded bubbles).
+    // CancellationException path is safe by construction up to the commit
+    // block: the compact pipeline rethrows it everywhere and nothing is
+    // persisted before that block, so a cancelled summary call leaves no
+    // marker and no folded bubbles.
+    //
+    // [§47 N-2] That claim stops exactly AT the commit block, not before it.
+    // The block — insertCompactMarker (a suspend DB write) →
+    // _compactSummary.value → _cachedLatestMarker → withContext(Dispatchers.
+    // Main) — has no suspension point BETWEEN the two in-memory writes, but a
+    // cancel can still land on the insert itself: either before the row
+    // commits (marker absent = the "no trace" half) or after the row landed
+    // while the coroutine never resumes. In that second window a cancelled
+    // compact leaves LESS text than it folded — a DB marker row without its
+    // in-memory mirror, which the next session load rebuilds from the row —
+    // and it never writes twice; it does not leave "zero trace". No
+    // ensureActive/isActive guard is added there on purpose: the writes in
+    // that window are finalize-only (one marker insert + two in-memory
+    // assignments; there is nothing for a guard to undo), while a guard on
+    // the normal cancel path would throw CancellationException out of the one
+    // block where the work is already done — a hard failure replacing a
+    // harmless "UI catches up on reload".
     @Volatile
     internal var compactJob: Job? = null
     // [fix/compact-cancel-on-stop-1002] sendMessage's outer shell job. The
@@ -2878,9 +2895,11 @@ class ChatViewModel(
         // _compactSummary/_cachedLatestMarker over the wiped session — the
         // deleted transcript's summary becomes the context of the fresh
         // chat (old messages "revived" as compacted history). Cancellation
-        // is safe by construction: see the compactJob KDoc — the pipeline
-        // rethrows CE and nothing is persisted before the commit block, so
-        // a cancelled compact leaves zero trace; the next turn re-evaluates
+        // is safe for the transcript: see the compactJob KDoc — the pipeline
+        // rethrows CE and nothing is persisted before the commit block (the
+        // one window inside it is finalize-only: worst case a marker row
+        // without its in-memory mirror, rebuilt on the next session load),
+        // so a cancelled compact never writes twice; the next turn re-evaluates
         // context pressure from live state and re-fires a fresh compact if
         // still needed.
         compactJob?.cancel()
@@ -4086,8 +4105,10 @@ class ChatViewModel(
         // ("zombie send"). Uniform across cancelStream callers: every caller
         // (stop button, notification onStop, mid-stream preempt, clearChat,
         // headless teardown) means "this turn's work stops NOW", and a
-        // killed compact is always safe (nothing persisted before the commit
-        // block) — the next turn re-evaluates context pressure from live
+        // killed compact is always safe for the transcript (nothing is
+        // persisted before the commit block; inside it the worst case is a
+        // marker row the next session load rebuilds from — see the
+        // compactJob KDoc) — the next turn re-evaluates context pressure from live
         // state and re-fires a fresh compact if still needed.
         compactJob?.cancel()
         sendShellJob?.cancel()
