@@ -386,13 +386,53 @@ class SessionFileStore internal constructor(
         val live = withActiveComposerOwner(liveSessionIds)
         val sessionPart = scanOrphanSessionDirs(live)
         val media = scanMediaOnce(live)
+        // [§1025-D R1] The tab-state half is part of the same number: it was
+        // being deleted without being counted, so "reclaimable" under-reported
+        // every session that ever opened the browser.
+        val tabs = scanOrphanBrowserTabFiles(live)
         return ReclaimReport(
             sessionIds = sessionPart.sessionIds,
             sessionDirs = sessionPart.sessionDirs,
             sessionBytes = sessionPart.sessionBytes,
             mediaDirs = media.orphanDirs,
             mediaBytes = media.orphanBytes,
+            browserTabsDirs = tabs.browserTabsDirs,
+            browserTabsBytes = tabs.browserTabsBytes,
         )
+    }
+
+    /**
+     * The `browser_tabs/<sid>.json` half of [scanOrphans] — measure only, no
+     * deletion. Public for the same reason [scanOrphanSessionDirs] is: the
+     * Storage page does ONE media walk and one tab walk and assembles the
+     * report itself, instead of triggering a full second scan on entry.
+     *
+     * Counts and sizes are for the SAME files [deleteOrphanBrowserTabFiles]
+     * removes. The rule is spelled out a second time rather than factored out:
+     * the delete half's predicate is pinned INLINE by the
+     * `browser_tabs_lifecycle_check` gate (see its KDoc), so a shared helper
+     * would either move the gate's anchor or leave the two disagreeing anyway.
+     * Drift is caught mechanically instead —
+     * `the scan and the delete half of the reclaim agree` runs both halves over
+     * the same fixture matrix and compares their sets.
+     */
+    fun scanOrphanBrowserTabFiles(liveSessionIds: Set<String>): ReclaimReport {
+        val live = withActiveComposerOwner(liveSessionIds)
+        var dirs = 0
+        var bytes = 0L
+        if (browserTabsRoot.exists()) {
+            browserTabsRoot.listFiles()?.forEach { file ->
+                if (!file.isFile) return@forEach
+                val stem = file.name.removeSuffix(".json")
+                if (stem == file.name) return@forEach // not a .json state file
+                val isSessionShaped = looksLikeSessionId(stem)
+                if (isSessionShaped && stem !in live) {
+                    dirs++
+                    bytes += file.length()
+                }
+            }
+        }
+        return ReclaimReport(browserTabsDirs = dirs, browserTabsBytes = bytes)
     }
 
     /**
@@ -458,10 +498,17 @@ class SessionFileStore internal constructor(
      * predicate the session-dir and media sweeps use. A local `startsWith`
      * copy is exactly how the other four callers missed it.
      *
-     * Deliberately NOT counted in [ReclaimReport] (minimal radius): the
-     * storage page's "orphan data" banner keeps reporting session+media bytes
-     * only — registered as backlog §1025-D rather than widening the report
-     * shape (which would drag UI text + existing test assertions along).
+     * [§1025-D R1] These files are now COUNTED too ([ReclaimReport.browserTabsDirs]);
+     * the original "deliberately not counted" call left the storage page's
+     * reclaimable figure smaller than what the sweep actually frees.
+     *
+     * The predicate below is deliberately spelled INLINE here: the
+     * `browser_tabs_lifecycle_check` gate anchors on this body's
+     * `looksLikeSessionId(` + "stem is not live" pair (C3/C3b), and that anchor
+     * is the thing stopping the polarity flip that once deleted every LIVE
+     * session's tab state. [scanOrphanBrowserTabFiles] measures the same set —
+     * the two halves must stay textually parallel, and
+     * `the scan and the delete half of the reclaim agree` fails if they drift.
      */
     private fun deleteOrphanBrowserTabFiles(liveSessionIds: Set<String>) {
         if (!browserTabsRoot.exists()) return
@@ -488,14 +535,32 @@ class SessionFileStore internal constructor(
         return scanMediaOnce(sessionIds).liveSizes
     }
 
+    /**
+     * What one orphan scan found. THREE kinds of leftover are measured, and all
+     * three are summed by [totalDirs] / [totalBytes] so the Storage page's
+     * "reclaimable" figure matches what [reclaimOrphans] actually deletes:
+     *
+     *   - [sessionDirs] — `minis-sessions/<sid>/` of a dead session;
+     *   - [mediaDirs] — media leaves `<sid>/` under `media/<date>/`;
+     *   - [browserTabsDirs] — `browser_tabs/<sid>.json` state files
+     *     ([§1025-D R1] previously reclaimed but NOT counted, so the banner
+     *     promised less than the sweep freed). The field name keeps the
+     *     report's `…Dirs` family; the value counts state FILES, one per
+     *     session, because that is the shape this store keeps tab state in.
+     *
+     * Adding a fourth kind means adding it here AND to [scanOrphans], so the
+     * number the user confirms is the number that gets deleted.
+     */
     data class ReclaimReport(
         val sessionIds: List<String> = emptyList(),
         val sessionDirs: Int = 0,
         val sessionBytes: Long = 0L,
         val mediaDirs: Int = 0,
         val mediaBytes: Long = 0L,
+        val browserTabsDirs: Int = 0,
+        val browserTabsBytes: Long = 0L,
     ) {
-        val totalBytes: Long get() = sessionBytes + mediaBytes
-        val totalDirs: Int get() = sessionDirs + mediaDirs
+        val totalBytes: Long get() = sessionBytes + mediaBytes + browserTabsBytes
+        val totalDirs: Int get() = sessionDirs + mediaDirs + browserTabsDirs
     }
 }

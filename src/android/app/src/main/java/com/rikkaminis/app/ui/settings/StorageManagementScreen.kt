@@ -277,12 +277,21 @@ fun StorageManagementScreen(
                 // Session-root part here; the media part came from the walk
                 // above.
                 val orphanSessionPart = sessionFiles.scanOrphanSessionDirs(liveIds)
+                // [§1025-D R1] Same three-kind scope as SessionFileStore.scanOrphans:
+                // session dirs + media leaves + browser_tabs/<sid>.json state files.
+                // Assembled here (not via scanOrphans) so the media tree is walked
+                // ONCE — the banner's count/bytes must still equal what
+                // reclaimOrphans() deletes, which is why the tab half is measured
+                // with the same predicate the delete path uses.
+                val orphanTabsPart = sessionFiles.scanOrphanBrowserTabFiles(liveIds)
                 val orphans = SessionFileStore.ReclaimReport(
                     sessionIds = orphanSessionPart.sessionIds,
                     sessionDirs = orphanSessionPart.sessionDirs,
                     sessionBytes = orphanSessionPart.sessionBytes,
                     mediaDirs = mediaScan.orphanDirs,
                     mediaBytes = mediaScan.orphanBytes,
+                    browserTabsDirs = orphanTabsPart.browserTabsDirs,
+                    browserTabsBytes = orphanTabsPart.browserTabsBytes,
                 )
 
                 // Size every session directory in parallel (async) instead of
