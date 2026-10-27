@@ -1,6 +1,7 @@
 # FIX-W1027-B — `file://` 契约 + fastio tar 守卫护栏（W-07 / W-08 / W-09 / W-10）
 
 分支 `fix/w1027-url-tar-wiring`｜基线 main `4a48a6be1`（`witness-1027` 第四轮对抗审的合并后树）｜标签 `[T-w1027-url-tar-wiring]`
+源码提交 `8e8f8870`（分支 CI **#2789** / run `40501673438` success，`head_sha` 与本地逐字符一致）；本报告随后续提交回填，源码树与之差异为 0。
 现场来源：`/var/minis/shared/work/witness-1027/report-witness-1027.md`（W-07/W-08/W-09/W-10 四条 witness patch）＋ `VERIFY-1027.md`（12/12 补丁机械复证）。
 
 ---
@@ -27,11 +28,11 @@
 - `W-09`：`check_handler` 只查 `finishTar(deniedEntry(...), true, …)` 的**退出码 flag**，从不读 `tarCreate(…)` 的实参个数；而第 5 参有 `= null` 默认值，漏传在语法上完全合法、在语义上把整条防护关掉。
 - `W-10`：门完全不扫 `tarExtract`。且「已存在时的行为」当时是**三份拷贝**（`'0'` / `'1'` / `'2'`），任何单点判据都只能盖住一份。
 
-## 3. 改动面（4 文件，+753 / −51）
+## 3. 改动面（源码 4 文件，合计 +999 / −54）
 
 | 文件 | 改动 | 说明 |
 |---|---|---|
-| `scripts/scan/file_uri_parse_guard_check.py` | +224 / −6 | 新增判据 **F4c**（W-07）与 **F7b**（W-08）；`decode_flow_problem()` 增可选 `permit` 钩子；夹具 +4，自测臂 32 → **36** |
+| `scripts/scan/file_uri_parse_guard_check.py` | +273 / −9 | 新增判据 **F4c**（W-07）与 **F7b**（W-08）；`decode_flow_problem()` 增可选 `permit` 钩子 + `_chain_calls()` 整链走查；夹具 +5，自测臂 32 → **37** |
 | `scripts/scan/fastio_tar_bounds_check.py` | +350 / −0 | 新增判据 `check_tar_create_archive_arg`（W-09）与 `check_extract_replace_decision`（W-10）；`GOOD_HANDLER` 夹具补上合规的 `tarCreate` 接线；夹具 +8，自测臂 71 → **81** |
 | `src/.../sandbox/offload/FastioTar.kt` | +59 / −45 | **抽共享 helper**（任务书 §2 W-10 明示优先项）：三份「已存在目标」逻辑合成 `clearOccupiedTarget(target, force, out, member, reader, replacedKind)`，三个写分支改为 `if (!clearOccupiedTarget(…)) continue`；行为等价（既有 35 用例 + 新增 4 用例全绿） |
 | `src/.../sandbox/offload/FastioTarTest.kt` | +120 / −0 | 新增 4 条：`'1'` 已存在文件 force=false 拒绝（字节不变）/ force=true 替换 / 已存在目录 force=true 仍拒绝 / 无 archivePath 时把正在写的归档打进去（W-09 负控） |
@@ -50,6 +51,7 @@ problem4c = decode_flow_problem(_body_text(shortcut[0], "pin"), _body_text(short
 - 复用既有 `decode_flow_problem` 的三条子规则（① 调用链不得紧跟改写 ② local 绑定 ③ 绑定的读点不得被改写），scope 收在 `pin` 体内（切不出即 fail-closed）。
 - **新增 `permit` 钩子是必须的，不是方便**：`pin` 解码之后合法地做两件事——`absPath.removePrefix("/var/minis")`（剥沙盒根）与 `absPath.trimEnd('/')`（与根比较前修剪）。不加 permit 时 F4c 在**修好的树上就是红的**，而「红在正确代码上的门」的唯一结局是被关掉。permit 只放行这两个形态：`trim*` 与参数**字面量为 `"/var/minis"` 的** `removePrefix`；截断族（`substringBefore('#')` / `split` / `replace` / 任意别的 `removePrefix`）照红。
 - `permit=None` 时 F1a/F2a 行为逐字节不变（这两处的解码值就是直接进 `File(...)`，没有任何合法链）。
+- **permit 只买一步，不买整条链**：`_chain_calls()` 沿链逐段走，每一个**改写**步骤（`POST_DECODE_POISON` 家族）都要单独被放行；`removePrefix("/var/minis")` 后面再跟 `substringBefore('#')` 一样红。初版只读第一个方法名 —— 那等于「放行第一步 = 放行整条链」，是加 permit 时自己挖的洞，自测臂 `w07-permit-then-cut` 专门钉它。`POST_DECODE_POISON` 之外的链步（`.isBlank()` 之类）是导航不是改写，不判。
 
 **F7b**（W-08）：
 ```python
@@ -96,7 +98,7 @@ FILE_URL_ENCODERS = ("fileUrlFor(", "encodeFileUrlPath(")
 
 ```
 file_uri_parse_guard_check.py  真树 rc=0  Summary: 18 passed, 0 failed   （原 16 → 18，新增 F4c/F7b）
-file_uri_parse_guard_check.py  --selftest  FILE_URI_PARSE_GUARD_SELFTEST=PASS (36 fixtures)   原 32
+file_uri_parse_guard_check.py  --selftest  FILE_URI_PARSE_GUARD_SELFTEST=PASS (37 fixtures)   原 32
 fastio_tar_bounds_check.py     真树 rc=0  GATE=GREEN fastio_tar_bounds
 fastio_tar_bounds_check.py     --selftest  FASTIO_TAR_BOUNDS_SELFTEST=PASS (81 arms)          原 71
 ```
@@ -114,7 +116,7 @@ fastio_tar_bounds_check.py     --selftest  FASTIO_TAR_BOUNDS_SELFTEST=PASS (81 a
 
 四次还原后 sha256 均 `BYTE-IDENTICAL`，门复查 `rc=0`。
 
-**自测臂里另有 5 条独立反攻**（不依赖真树）：极性反 / `delete` 移到 force 检查之前 / `delete` 挪进拒绝块 / 规则被内联回某分支 / 分支干脆不问 helper —— 每条都断言**红在对应判据上**（`expect_trip` 带 needle），不是「只要红了就算过」。
+**自测臂里另有 6 条独立反攻**（不依赖真树）：极性反 / `delete` 移到 force 检查之前 / `delete` 挪进拒绝块 / 规则被内联回某分支 / 分支干脆不问 helper / **permit 放行的那一步之后接一次截断** —— 每条都断言**红在对应判据上**（`expect_trip` 带 needle），不是「只要红了就算过」。反向还有两条**精度臂**（decode 的实参是 `fileUrl` 参数而非 `fileUrlFor(` 调用、pin 的根剥离 + 边缘 trim）必须**保持绿**，防「把正确代码判红」。
 
 ### 5.3 邻门 6 道（rc 全 0）
 
@@ -145,21 +147,48 @@ Tests run: 39,  Failures: 5
 ```
 新增的两条各自红在两个相反方向，另有三条老用例因共享 helper 一起变红——这正是「一分事实测三处」的收益。
 
-### 5.5 全量
+### 5.5 全量门 + 夹具（本地）
 
 ```
 sh scripts/scan/scan.sh --jobs 3     →  Summary: 112 passed, 0 failed
-python3 scripts/scan/test_scan.py    →  ✅ ALL 347 CASES PASS   (见 5.6 的运行方式说明)
+逐用例独立进程（见 5.6）             →  47/47 用例 OK，累计 pass=347 fail=0
 ```
 
-### 5.6 test_scan 的运行方式（环境记录）
+### 5.6 `test_scan.py` 的运行方式（环境记录）
 
-`test_scan.py` 全程不 print，跑满 ~6 分钟，在沙箱里会撞 180 s stall-guard；且本轮三个兄弟会话同时各跑一份 `test_scan.py`，第一次后台跑在第 41 个用例附近被整壳杀掉（`probe-b/fixtures.log` 停在 `[case] test_auto_approve_gates`，无 traceback = 被 kill 而非断言失败）。
-处置：`probe-b/run_fixtures.py`（**不改套件**：import 后 monkeypatch 每个 `test_*` 打印用例名 + 心跳线程），在兄弟会话空闲窗口后台跑并轮询日志。CANONICAL 读数（`Summary` / `ALL 347`）以分支 CI 日志为准。
+`test_scan.py` 全程不 print，单进程跑满 ~5–6 分钟，在沙箱里必然撞 180 s stall-guard；且本轮三个兄弟会话同时各跑一份 `test_scan.py`。三次尝试的结局：
+
+| 尝试 | 结果 |
+|---|---|
+| 1. `nice python3 scripts/scan/test_scan.py \| tail` | 180 s 后 stall-guard 杀（输出被 `tail` 吞掉，心跳也没用） |
+| 2. 后台 + 心跳包装（`probe-b/run_fixtures.py`，不改套件） | 跑到第 41 个用例被整壳杀（`[case] test_auto_approve_gates` 之后无任何输出，**无 traceback = 被 kill，不是断言失败**） |
+| 3. 同上，兄弟会话空闲窗口重跑 | 跑到第 33 个用例同样被 kill |
+| **最终**：逐用例独立进程（`probe-b/per_case.py`） | **47/47 OK，pass=347 fail=0**（1..38 pass=293 + 39..47 pass=54） |
+
+`per_case.py` 的用例顺序**从 `main()` 自己的调用列表里解析出来**（不会与套件漂移），套件本身零改动；每个用例一个进程 ⇒ 一次 kill 只损失一个用例。两个细节：① 任何 `| grep`/`| tail` 都会把心跳吃掉，从而重新触发 stall-guard（本轮踩过一次）；② 子进程要 `cwd=repo`，否则门按相对路径找不到树。
+本地读数合计 **pass=347** 与 CI 的 `ALL 347 CASES PASS` 完全吻合 —— 这也是「逐用例拆分没有漏跑用例」的交叉验证。
+
+### 5.7 分支 CI（确定性停止节点）
+
+`run 40501673438` / **#2789** / attempt 1 / **success**（2026-10-27T12:10:19Z → 12:34:52Z，24m33s）
+`head_sha = 8e8f88704192…` 与本地 `HEAD` **逐字符一致**（`git rev-parse HEAD` = `8e8f88704192115999ebad92c0c92a6dcbce7af1`）。
+
+| 读数 | 值 |
+|---|---|
+| 步骤 | 26 步；**仅 23 `Move the rolling tag android-latest`、24 `Publish to Releases` skipped**（均 main 门控），其余全 success |
+| 门 | `║ Summary: 112 passed, 0 failed` 恰 **1** 次 |
+| 夹具 | `✅ ALL 347 CASES PASS` 恰 **1** 次（无 `ALL 344`） |
+| 新判据在册 | `[OK] F7b …` / `[OK] F4c …` 各 1 行（`--jobs 3` 下顺序打乱，内容在） |
+| 自测带牙 | `✅ file_uri_parse_guard_check selftest has teeth (FILE_URI_PARSE_GUARD_SELFTEST=PASS)`、`✅ fastio_tar_bounds_check selftest has teeth (FASTIO_TAR_BOUNDS_SELFTEST=PASS)` |
+| 新单测 | `FastioTarTest > without the archive path the walk packs the file it is writing PASSED`、`> a hard link member refuses to replace an existing file without force PASSED`、`> a hard link member replaces an existing file with force PASSED`、`> a hard link member never replaces an existing directory even with force PASSED` |
+| 编译 | `^ e: ` **0** 行 |
+| 日志 | 1,469,129 B / NUL 0；含 `FAILED` 且不含 `PASSED` 的行 **0** |
+
+（#2787 是对前一提交 `3a39a7d5` 的 run，被 `concurrency: cancel-in-progress` 在 12:10:36 取消——gate 脚本随后又改了一次，所以作废是正确结果，不是失败。）
 
 ## 6. 残留（每条带触发条件 / 触发后方案 / 搁置理由）
 
-- **R1 `decode_flow_problem` 的 permit 只覆盖 shortcut 两形态**：`absPath.removePrefix("/var/minis")` 与 `trim*`。触发条件 = 下次有人给 `pin` 加减码后的第三种链（如 `substringAfterLast('/')`）。触发后方案 = 在那处的 KDoc 里写明「为什么这条链安全」，再把形态加进 `_shortcut_chain_permit`（判定仍要否掉截断族）。搁置理由 = 半径纪律，现在没有第三种形态。
+- **R1 shortcut 的 permit 只认两种形态**：`trim*` 与参数为 `"/var/minis"` 的 `removePrefix`（`_chain_calls` 保证 permit 只买一步，后续截断照红）。触发条件 = 有人给 `pin` 的解码后路径加第三种改写（如 `substringAfterLast('/')`）。触发后方案 = 先在该处 KDoc 写清「为什么这条改写不会动文件名」，再把形态加进 `_shortcut_chain_permit`，并补一条「permit 之后接截断仍红」的臂。搁置理由 = 半径纪律，现在没有第三种形态。
 - **R2 F7b 只看实参文本包含编码器调用**：`val u = fileUrlFor(f); decodeUriPath(u)` 这种「先落变量再解码」不红。触发条件 = 真出现这种两行写法。触发后方案 = 用 `_kotlin_valueflow.value_sources` 把 `u` 的来源追一层。搁置理由 = 现在两处构造点都是内联一表达式，加一层数据流是纯预留。
 - **R3 W-09 判据只覆盖 `tarCreateInto`**：`tarCreate(` 若将来在别处被调用（另一条 CLI 路径），那条不受此判据管。触发条件 = 新增第二个调用点。触发后方案 = 把判据改成「全树 `tarCreate(` 调用点派生集合，逐点要求 5 参」。搁置理由 = 现在全仓唯一调用点（`rg` 实测 1 处），派生集合会引入「本来合法」的噪声。
 - **R4 生产侧仍有一个「另一出口」**：`FastioOffloadHandler.kt` 里 `isSelfArchive` 的 `null → false` 默认语义没变（本支按硬约束只补门）。触发条件 = 有人再写一个新的 tar 调用点。搁置理由 = 改默认值会波及所有调用点的语义，属产品决策，且门已经挡住「漏传」这一具体形态。
@@ -180,7 +209,7 @@ P=/var/minis/shared/work/witness-1027/probe-b
 
 # 两门
 cd $R && python3 scripts/scan/file_uri_parse_guard_check.py .        # rc=0, 18 passed
-cd $R && python3 scripts/scan/file_uri_parse_guard_check.py --selftest   # 36 fixtures
+cd $R && python3 scripts/scan/file_uri_parse_guard_check.py --selftest   # 37 fixtures
 cd $R && python3 scripts/scan/fastio_tar_bounds_check.py .           # GATE=GREEN
 cd $R && python3 scripts/scan/fastio_tar_bounds_check.py --selftest  # 81 arms
 
@@ -193,5 +222,5 @@ cd $P && sh mutate_jvm.sh     # 极性变异 → Failures: 5
 
 # 全量
 cd $R && sh scripts/scan/scan.sh --jobs 3
-cd $R && python3 $P/run_fixtures.py "$PWD/scripts/scan"
+cd $R && python3 $P/per_case.py "$PWD/scripts/scan" "$PWD"        # 47/47, pass=347
 ```
