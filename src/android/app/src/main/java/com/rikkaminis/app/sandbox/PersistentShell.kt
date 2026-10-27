@@ -365,6 +365,22 @@ class PersistentShell(
 
         val env = processBuilder.environment()
         env["PROOT_TMP_DIR"] = PRootKernel.getProotTmpDir(context).absolutePath
+        // [feat/storage-budget-loop L0] TMPDIR/TMP must be a GUEST path.
+        //
+        // PROOT_TMP_DIR above is correct as a host path: proot itself runs on
+        // the host and needs a real directory. TMPDIR is NOT — it is read by
+        // the tools INSIDE the rootfs (python tempfile, mktemp, gcc, pip …).
+        // Inherited from the app process it resolved to
+        // `/data/user/0/<pkg>/cache`, which inside the rootfs happens to be a
+        // real (empty, app-created) directory tree — so every temp-write landed
+        // INSIDE `files/alpine-rootfs` as permanent junk instead of in the
+        // swept guest /tmp. Measured 2026-10-27: 17,213 stale fixture dirs /
+        // 3.26 GiB under `<rootfs>/data/user/0/<pkg>/cache`, i.e. ~25% of the
+        // app's whole "user data" footprint, invisible to the /tmp sweeper.
+        // The guest /tmp is tmpfs + age-swept (60 min, `.minis-keep` sentinel),
+        // which is exactly the lifecycle temp files want.
+        env["TMPDIR"] = "/tmp"
+        env["TMP"] = "/tmp"
         if (PRootKernel.nativeLibDir.isNotEmpty()) {
             env["LD_LIBRARY_PATH"] = PRootKernel.nativeLibDir
         }

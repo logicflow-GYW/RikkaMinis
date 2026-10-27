@@ -1776,4 +1776,11 @@
     <string name="perm_runtime_batch_sub">Calendar, contacts, location, photos, microphone, camera, notifications</string>
     <string name="perm_runtime_batch_all_granted">All system permissions already granted.</string>
     <string name="perm_runtime_batch_partial">%1$d permission(s) still not granted — Android declined or you skipped them.</string>
+    <!-- [feat/storage-budget-loop] Storage budget channel + warning. The app owns
+         a rootfs the agent grows (apk/build/fixture dirs); without this the only
+         place that number surfaced was Android Settings' "user data". -->
+    <string name="notif_storage_budget_channel_name">Storage budget</string>
+    <string name="notif_storage_budget_channel_description">Warns when this app\'s own data (sandbox shell, sessions, media) grows past its budget.</string>
+    <string name="notif_storage_budget_title">This app is using a lot of storage</string>
+    <string name="notif_storage_budget_body">%1$s used by this app (budget %2$s). Tap to see what is taking the space.</string>
 </resources>
