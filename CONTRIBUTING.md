@@ -45,8 +45,9 @@ and is easy to break by accident.
 
 Two things to be careful with:
 
-- **Do not commit a keystore.** Signing keys live in the `DEBUG_KEYSTORE_B64`
-  repo secret. A committed keystore is a leaked credential.
+- **Do not commit a keystore.** Signing keys live in the `RELEASE_KEYSTORE_B64` /
+  `RELEASE_STORE_PASSWORD` / `RELEASE_KEY_ALIAS` / `RELEASE_KEY_PASSWORD` repo
+  secrets. A committed keystore is a leaked credential.
 - **Do not re-enable `externalNativeBuild` casually.** It silently overwrites
   the vendored official binaries with CI-built ones, and the resulting APK fails
   only at runtime, on-device, in a way that looks unrelated.

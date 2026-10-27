@@ -136,57 +136,45 @@ jobs:
           ANTHROPIC_OAUTH_IDENTIFIER_PROMPT=CI_TEST_IDENTIFIER_PROMPT_NOT_FOR_PRODUCTION
           EOF
 
-      # Fixed signing key, so every CI build installs OVER the previous one
-      # instead of forcing an uninstall/reinstall.
-      # SHA-256: FC:0C:40:0D:B7:7E:C1:81:A3:35:18:C2:E8:13:6A:AE:
-      #          1A:3F:6C:79:4A:1A:A7:9F:DB:67:63:8F:C6:B1:61:13
-      #
-      # Do NOT write this to `~/.android/`: actions/checkout temporarily
-      # overrides HOME, so `~` here is a per-run temp dir that Gradle does not
-      # read back. It would silently fall back to generating a throwaway debug
-      # key, and the published APK would fail to install as an upgrade.
-      # Write to a fixed absolute path and point Gradle at it explicitly.
-      # Restore signing keystore. [audit-RC6] SIGNING-IDENTITY RISK: the release
-      # build is signed with the DEBUG keystore — alias `androiddebugkey`,
-      # store/key password `android`, and the key material shipped as the
-      # DEBUG_KEYSTORE_B64 secret. These are PUBLIC, well-known constants (the
-      # AOSP debug key format + the debug keystore is reproducible/guessable),
-      # so the resulting signature proves NOTHING about authorship: anyone can
-      # rebuild and re-sign an APK with the same identity. This is a deliberate
-      # trade-off so every CI build installs OVER the previous one without
-      # uninstall/reinstall, at the cost of NO origin trust. It also means a
-      # forged "RikkaMinis" APK signed with this same key would pass as a valid
-      # upgrade. [audit-RC6] Hard gate: production releases MUST use an
-      # independent, non-public release keystore (unique alias, non-trivial
-      # password, held privately) rather than the debug identity. TODO
-      # (separate follow-up): provision a dedicated release keystore and swap
-      # buildTypes.release.signingConfig off `debug` in build.gradle.kts.
-      # Until then, keep DEBUG_KEYSTORE_B64 set (gate below) and verify the APK
-      # digest post-build so at least the asset is byte-deterministic.
-      - name: Restore signing keystore
+      # [signing-rotate 2026-10-27] Release signing identity.
+      # The keystore is a private credential and lives ONLY in repository
+      # secrets — never in the repo (see backlog §43-11). Restore it to
+      # RUNNER_TEMP so it cannot leak into the workspace or an artifact.
+      # Do NOT write it to `~/.android/`: actions/checkout temporarily
+      # overrides HOME, so `~` is a per-run temp dir Gradle does not read back;
+      # AGP would silently generate a throwaway debug key and the published
+      # APK would fail to install as an upgrade.
+      - name: Restore release signing keystore
         env:
-          KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
+          KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_B64 }}
+          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
-          if [ -z "$KEYSTORE_B64" ]; then
-            echo "::error::DEBUG_KEYSTORE_B64 secret is not set. Builds would get a" \
-                 "random throwaway signing key and could not be installed as an upgrade."
+          set -euo pipefail
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "::error::Release signing secrets are incomplete (RELEASE_KEYSTORE_B64 / RELEASE_STORE_PASSWORD / RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD). Refusing to build: the release APK would otherwise fall back to the debug identity."
             exit 1
           fi
-          # RUNNER_TEMP, not the workspace: a keystore is a credential and must
-          # never risk ending up in a commit or an uploaded artifact.
-          KEYSTORE_PATH="$RUNNER_TEMP/ci-signing.keystore"
+          echo "::add-mask::$STORE_PASSWORD"
+          echo "::add-mask::$KEY_PASSWORD"
+          KEYSTORE_PATH="$RUNNER_TEMP/release-signing.keystore"
           printf '%s' "$KEYSTORE_B64" | base64 -d > "$KEYSTORE_PATH"
-          echo "MINIS_KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
-          keytool -list -v \
-            -keystore "$KEYSTORE_PATH" \
-            -storepass android -alias androiddebugkey \
-            | grep -E 'SHA256:|Valid from'
-          # Record the expected certificate digest so the post-build check can
-          # prove the APK was actually signed with THIS key. Derived from the
-          # keystore rather than hardcoded, so rotating the key needs no edit.
+          chmod 600 "$KEYSTORE_PATH"
+          {
+            echo "MINIS_RELEASE_KEYSTORE_PATH=$KEYSTORE_PATH"
+            echo "MINIS_RELEASE_STORE_PASSWORD=$STORE_PASSWORD"
+            echo "MINIS_RELEASE_KEY_ALIAS=$KEY_ALIAS"
+            echo "MINIS_RELEASE_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+          keytool -list -v -keystore "$KEYSTORE_PATH" -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS" \
+            | grep -E 'Alias name|SHA256:|Valid from'
+          # Expected certificate digest, derived from the keystore so rotating
+          # the key needs no edit here. The post-build step compares the APK's
+          # signer digest against it.
           EXPECTED_FP=$(
             keytool -exportcert -keystore "$KEYSTORE_PATH" \
-              -storepass android -alias androiddebugkey 2>/dev/null \
+              -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS" 2>/dev/null \
               | sha256sum | cut -d' ' -f1
           )
           echo "MINIS_EXPECTED_CERT_SHA256=$EXPECTED_FP" >> "$GITHUB_ENV"
@@ -304,7 +292,7 @@ jobs:
           echo "expected=$EXPECTED"
           echo "actual  =$ACTUAL"
           if [ -z "$ACTUAL" ] || [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "::error::APK is NOT signed with the DEBUG_KEYSTORE_B64 key." \
+            echo "::error::APK is NOT signed with the configured release keystore." \
                  "It would fail to install over an existing build."
             exit 1
           fi
