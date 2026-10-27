@@ -807,7 +807,7 @@
     <string name="common_loading">載入中…</string>
     <string name="rootfs_reset_button">重設</string>
     <string name="session_title_label">標題</string>
-    <string name="backup_import_too_large">備份檔案太大（%1$d MB，上限 %2$d MB）— 未匯入任何內容。</string>
+    <string name="backup_import_too_large">備份檔案太大（%1$d MB，上限 %2$d MB）— 未匯入任何內容。請縮短或關閉「聊天歷史視窗」後重新匯出，再匯入新檔案。</string>
     <string name="backup_export_incomplete">警告：有 %1$d 個欄位無法讀取 — 此備份可能不完整。</string>
     <string name="code_expand">展開 %1$d 行</string>
     <string name="code_collapse">收起</string>

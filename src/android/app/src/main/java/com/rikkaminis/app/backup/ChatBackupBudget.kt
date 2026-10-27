@@ -38,8 +38,19 @@ internal data class BudgetPackResult(
  * [T-backup-byte-budget] Linear byte-budget packing for chat history in a
  * backup document.
  *
+ * Units: EVERY charge in this file is **UTF-8 bytes** ([ConfigBackup.utf8Length]),
+ * never String.length. The cap it packs against
+ * ([ConfigBackup.MAX_PAYLOAD_BYTES]) is enforced on the import side by a
+ * *byte* read (SAF `readSafBytes`) and by the byte gate in
+ * [ConfigBackup.import], so a char-based budget under-counted every non-ASCII
+ * message — a document that "fit" at 64M chars could be 70MB on disk and was
+ * then unreservedly rejected on the way back in
+ * ([D-C fix/backup-bootstrap-size], 2026-10-27: 71,427,943 B vs 66,092,088
+ * chars). Measuring the same unit the reader enforces is what makes
+ * "exported ⇒ importable" a guarantee instead of a hope.
+ *
  * Design: the serialized non-chat skeleton (config / providers / skills /
- * memory) is measured once; whatever room is left under
+ * memory) is measured once, in UTF-8 bytes; whatever room is left under
  * [ConfigBackup.MAX_PAYLOAD_BYTES] minus [ConfigBackup.SAFETY_MARGIN_BYTES]
  * is handed to chat history. Eligible messages are then packed
  * **newest-first** — sessions arrive ordered by updatedAt DESC (the DAO's
@@ -69,8 +80,8 @@ internal data class BudgetPackResult(
  * [ConfigBackup.buildSections]).
  */
 internal class ChatBudgetState(
-    /** Chars still available for chat. Decremented as elements land. */
-    var budgetChars: Long,
+    /** UTF-8 bytes still available for chat. Decremented as elements land. */
+    var budgetBytes: Long,
     /** Set once an element did not fit: packing STOPS, nothing after the
      *  frontier is considered. */
     var exhausted: Boolean = false,
@@ -82,7 +93,7 @@ internal class ChatBudgetState(
 /**
  * Metadata-only frontier step, shared by both drivers so the charge
  * arithmetic stays in ONE place. Charges [sessionJson]'s serialized size
- * against [ChatBudgetState.budgetChars] when it fits; sets
+ * against [ChatBudgetState.budgetBytes] when it fits; sets
  * [ChatBudgetState.exhausted] and returns false when it does not.
  *
  * [T-backup-lazy-chat-load] The lazy driver MUST run this BEFORE pulling a
@@ -96,12 +107,12 @@ internal fun sessionMetadataFits(
     state: ChatBudgetState,
     sessionJson: JSONObject,
 ): Boolean {
-    val sessionChars = sessionJson.toString().length
-    if (sessionChars.toLong() > state.budgetChars) {
+    val sessionBytes = ConfigBackup.utf8Length(sessionJson.toString())
+    if (sessionBytes > state.budgetBytes) {
         state.exhausted = true
         return false
     }
-    state.budgetChars -= sessionChars
+    state.budgetBytes -= sessionBytes
     return true
 }
 
@@ -136,13 +147,13 @@ internal fun packMessagesIntoBudget(
             put("sortOrder", message.sortOrder)
             put("reasoningContent", capReasoning(message.reasoningContent))
         }
-        val messageChars = messageJson.toString().length
-        if (messageChars.toLong() > state.budgetChars) {
+        val messageBytes = ConfigBackup.utf8Length(messageJson.toString())
+        if (messageBytes > state.budgetBytes) {
             state.exhausted = true
             state.messagesDropped++
             break
         }
-        state.budgetChars -= messageChars
+        state.budgetBytes -= messageBytes
         keptMessages.add(messageJson)
     }
     keptSessions.add(sessionJson)
@@ -174,11 +185,11 @@ internal fun packSessionIntoBudget(
 }
 
 private fun newChatBudgetState(
-    skeletonChars: Int,
-    budgetTotalChars: Long,
+    skeletonBytes: Long,
+    budgetTotalBytes: Long,
 ): ChatBudgetState {
-    val remaining = budgetTotalChars - skeletonChars
-    return ChatBudgetState(budgetChars = if (remaining < 0) 0 else remaining)
+    val remaining = budgetTotalBytes - skeletonBytes
+    return ChatBudgetState(budgetBytes = if (remaining < 0) 0 else remaining)
 }
 
 /**
@@ -189,13 +200,13 @@ private fun newChatBudgetState(
  * both run the same metadata gate + message-packing step.
  */
 internal fun packChatHistoryWithBudget(
-    skeletonChars: Int,
-    budgetTotalChars: Long,
+    skeletonBytes: Long,
+    budgetTotalBytes: Long,
     sessionsInOrder: List<Pair<JSONObject, List<BudgetChatMessage>>>,
     sanitize: (String) -> String?,
     capReasoning: (String?) -> String?,
 ): BudgetPackResult {
-    val state = newChatBudgetState(skeletonChars, budgetTotalChars)
+    val state = newChatBudgetState(skeletonBytes, budgetTotalBytes)
     val keptSessions = mutableListOf<JSONObject>()
     val keptMessages = mutableListOf<JSONObject>()
     var sessionsDropped = 0
@@ -242,14 +253,14 @@ internal fun packChatHistoryWithBudget(
  * (budget-sized) output.
  */
 internal suspend fun packChatHistoryWithBudgetLazily(
-    skeletonChars: Int,
-    budgetTotalChars: Long,
+    skeletonBytes: Long,
+    budgetTotalBytes: Long,
     sessionJsons: List<JSONObject>,
     messagesAt: suspend (Int) -> List<BudgetChatMessage>,
     sanitize: (String) -> String?,
     capReasoning: (String?) -> String?,
 ): BudgetPackResult {
-    val state = newChatBudgetState(skeletonChars, budgetTotalChars)
+    val state = newChatBudgetState(skeletonBytes, budgetTotalBytes)
     val keptSessions = mutableListOf<JSONObject>()
     val keptMessages = mutableListOf<JSONObject>()
     var sessionsDropped = 0

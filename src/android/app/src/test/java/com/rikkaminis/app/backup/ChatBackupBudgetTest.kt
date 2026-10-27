@@ -55,8 +55,8 @@ class ChatBackupBudgetTest {
     @Test
     fun `everything fits when budget is generous`() {
         val result = packChatHistoryWithBudget(
-            skeletonChars = 100,
-            budgetTotalChars = 1_000_000,
+            skeletonBytes = 100L,
+            budgetTotalBytes = 1_000_000L,
             sessionsInOrder = listOf(
                 sessionJson("a") to listOf(msg("a1", "a", "hello", 1), msg("a2", "a", "world", 2)),
                 sessionJson("b") to listOf(msg("b1", "b", "hi", 1)),
@@ -82,15 +82,17 @@ class ChatBackupBudgetTest {
             .put("id", newest.id).put("sessionId", "a").put("role", "user")
             .put("partsJson", newest.partsJson).put("createdAt", newest.createdAt)
             .put("sortOrder", 2).put("reasoningContent", JSONObject.NULL)
-        // measure what one message costs serialized
-        val oneMsgChars = newestJson.toString().length
-        val sessionChars = session.toString().length
+        // measure what one message costs serialized — in UTF-8 BYTES, the
+        // unit the packer charges (bodies here are ASCII so the numbers match
+        // .length, but the ruler has to be the same one production uses)
+        val oneMsgBytes = ConfigBackup.utf8Length(newestJson.toString())
+        val sessionBytes = ConfigBackup.utf8Length(session.toString())
 
-        val budget = 100L + sessionChars + oneMsgChars // room for exactly ONE message
+        val budget = 100L + sessionBytes + oneMsgBytes // room for exactly ONE message
 
         val result = packChatHistoryWithBudget(
-            skeletonChars = 100,
-            budgetTotalChars = budget,
+            skeletonBytes = 100L,
+            budgetTotalBytes = budget,
             sessionsInOrder = listOf(
                 session to listOf(newest, older), // newest-first input order
             ),
@@ -109,11 +111,11 @@ class ChatBackupBudgetTest {
         // Two sessions; budget only covers the first session's metadata.
         val s1 = sessionJson("a")
         val s2 = sessionJson("b")
-        val budget = 50L + s1.toString().length
+        val budget = 50L + ConfigBackup.utf8Length(s1.toString())
 
         val result = packChatHistoryWithBudget(
-            skeletonChars = 50,
-            budgetTotalChars = budget,
+            skeletonBytes = 50L,
+            budgetTotalBytes = budget,
             sessionsInOrder = listOf(
                 s1 to listOf(msg("a1", "a", "x", 1)),
                 s2 to listOf(msg("b1", "b", "y", 1)),
@@ -132,8 +134,8 @@ class ChatBackupBudgetTest {
     fun `zero remaining budget carries no chat but never throws`() {
         // Skeleton alone eats the whole budget (pathological skills/memory).
         val result = packChatHistoryWithBudget(
-            skeletonChars = 10_000,
-            budgetTotalChars = 5_000,
+            skeletonBytes = 10_000L,
+            budgetTotalBytes = 5_000L,
             sessionsInOrder = listOf(
                 sessionJson("a") to listOf(msg("a1", "a", "x", 1)),
             ),
@@ -155,8 +157,8 @@ class ChatBackupBudgetTest {
             createdAt = 1L, sortOrder = 1,
         )
         val result = packChatHistoryWithBudget(
-            skeletonChars = 0,
-            budgetTotalChars = 10_000,
+            skeletonBytes = 0L,
+            budgetTotalBytes = 10_000L,
             sessionsInOrder = listOf(sessionJson("a") to listOf(mediaMsg)),
             sanitize = ::sanitize,
             capReasoning = ::capReasoning,
@@ -177,15 +179,15 @@ class ChatBackupBudgetTest {
             sessionJson("c") to listOf(msg("c1", "c", "four", 1)),
         )
         val eager = packChatHistoryWithBudget(
-            skeletonChars = 100,
-            budgetTotalChars = 1_000_000,
+            skeletonBytes = 100L,
+            budgetTotalBytes = 1_000_000L,
             sessionsInOrder = sessionsInOrder,
             sanitize = ::sanitize,
             capReasoning = ::capReasoning,
         )
         val lazyResult = packChatHistoryWithBudgetLazily(
-            skeletonChars = 100,
-            budgetTotalChars = 1_000_000,
+            skeletonBytes = 100L,
+            budgetTotalBytes = 1_000_000L,
             sessionJsons = sessionsInOrder.map { it.first },
             messagesAt = { sessionsInOrder[it].second },
             sanitize = ::sanitize,
@@ -207,8 +209,8 @@ class ChatBackupBudgetTest {
         val per = 20
         val loaded = mutableListOf<Int>()
         val result = packChatHistoryWithBudgetLazily(
-            skeletonChars = 0,
-            budgetTotalChars = 3_000,
+            skeletonBytes = 0L,
+            budgetTotalBytes = 3_000L,
             sessionJsons = (0 until total).map { sessionJson("s$it") },
             messagesAt = { index ->
                 loaded += index
@@ -228,8 +230,8 @@ class ChatBackupBudgetTest {
     fun `lazy driver reads no message body when the skeleton already fills the budget`() = runBlocking {
         val loaded = mutableListOf<Int>()
         val result = packChatHistoryWithBudgetLazily(
-            skeletonChars = 10_000,
-            budgetTotalChars = 5_000,
+            skeletonBytes = 10_000L,
+            budgetTotalBytes = 5_000L,
             sessionJsons = listOf(sessionJson("a")),
             messagesAt = { loaded += it; emptyList() },
             sanitize = ::sanitize,
