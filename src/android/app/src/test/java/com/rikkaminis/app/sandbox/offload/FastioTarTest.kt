@@ -305,6 +305,59 @@ class FastioTarTest {
         assertEquals("hi", Files.readAllBytes(dest.resolve("a.txt")).decodeToString())
     }
 
+    // ── the archive inside the tree it packs (F8) ───────────────────────────
+
+    @Test
+    fun `an archive written inside the packed tree does not contain itself`() {
+        // [§6 F8] `tar -cf src/a.tar src`: the file being written is walked
+        // like any other child. Archiving it while it grows makes the member's
+        // declared size disagree with its payload, which corrupts every member
+        // after it. It must be skipped and counted, not packed.
+        val root = Files.createTempDirectory("fastio-tar-self")
+        val tree = Files.createDirectory(root.resolve("tree"))
+        Files.write(tree.resolve("a.txt"), "hello".toByteArray())
+        // Stand in for the sink: production opens this file before the walk.
+        val archiveFile = Files.createFile(tree.resolve("pack.tar"))
+
+        val archive = ByteArrayOutputStream()
+        val created = TarCreateOutcome()
+        tarCreate(archive, listOf(tree to tree.toString()), 1000L, created, archiveFile)
+
+        assertEquals(1L, created.skippedSelf)
+        assertEquals(listOf("${tarMemberPrefix(tree.toString())}/pack.tar"), created.skippedSelfNames)
+        assertTrue(created.errors.isEmpty())
+        // a.txt only: the directory header, one file, and NO pack.tar member.
+        assertEquals(1L, created.files)
+
+        val dest = root.resolve("out")
+        val out = TarExtractOutcome()
+        tarExtract(ByteArrayInputStream(archive.toByteArray()), dest, false, 1000L, out)
+        val extractedTree = dest.resolve(tree.toString().trimStart('/'))
+        assertEquals("hello", Files.readAllBytes(extractedTree.resolve("a.txt")).decodeToString())
+        assertFalse(
+            "the archive must not archive itself",
+            Files.exists(extractedTree.resolve("pack.tar"), LinkOption.NOFOLLOW_LINKS),
+        )
+    }
+
+    @Test
+    fun `an archive outside the packed tree keeps every member and counts no self skips`() {
+        // The control arm: the same walk with the archive elsewhere must skip
+        // exactly nothing — otherwise "skipped_self" would just hide members.
+        val root = Files.createTempDirectory("fastio-tar-self-outside")
+        val tree = Files.createDirectory(root.resolve("tree"))
+        Files.write(tree.resolve("a.txt"), "hello".toByteArray())
+        val archiveFile = Files.createFile(root.resolve("pack.tar"))
+
+        val created = TarCreateOutcome()
+        tarCreate(ByteArrayOutputStream(), listOf(tree to tree.toString()), 1000L, created, archiveFile)
+
+        assertEquals(0L, created.skippedSelf)
+        assertTrue(created.skippedSelfNames.isEmpty())
+        assertEquals(1L, created.files)
+        assertEquals(1L, created.dirs)
+    }
+
     // ── tar slip ────────────────────────────────────────────────────────────
 
     @Test

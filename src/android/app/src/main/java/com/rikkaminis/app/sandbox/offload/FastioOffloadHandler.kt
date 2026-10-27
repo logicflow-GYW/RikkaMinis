@@ -752,7 +752,7 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
             Files.createDirectories(archivePath.parent)
             val raw = Files.newOutputStream(archivePath)
             val sink = if (gzip) java.util.zip.GZIPOutputStream(raw) else raw
-            sink.use { tarCreate(it, members, tarEntryBudget(args), outcome) }
+            sink.use { tarCreate(it, members, tarEntryBudget(args), outcome, archivePath) }
         } catch (e: Exception) {
             outcome.errors.add("${entry.getString("archive")}: ${e.message}")
         }
@@ -763,6 +763,13 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
         if (outcome.skippedSpecial > 0) {
             entry.put("skipped_special", outcome.skippedSpecial)
             entry.put("skipped_names", JSONArray(outcome.skippedNames))
+        }
+        // [§6 F8] The archive was inside the tree it packs, so the walk met it.
+        // Reported, not silent: the member list of the written archive genuinely
+        // does not contain `a.tar` even though `a.tar` was named by the root.
+        if (outcome.skippedSelf > 0) {
+            entry.put("skipped_self", outcome.skippedSelf)
+            entry.put("skipped_self_names", JSONArray(outcome.skippedSelfNames))
         }
         if (outcome.truncated) entry.put("truncated", true)
         val archiveBytes = try {
@@ -1309,7 +1316,9 @@ Notes:
     directions (verified, including names too long for the 100-byte field: ustar prefix split,
     and GNU `L` long-name entries beyond 155+100). Symlinks are stored as links; device nodes,
     fifos and sockets cannot be represented and are SKIPPED — the count and up to 20 names are
-    reported under "skipped_special" so an archive that lacks them says so. Hard links are not
+    reported under "skipped_special" so an archive that lacks them says so. An archive that is
+    itself inside the packed tree is skipped and counted ("skipped_self"), never read while it
+    grows. Hard links are not
     materialised on extract ("skipped_hardlink"): the file itself is still unpacked.
     Member names follow the ARGUMENT as spelled (`-cf a.tar src` stores `src/...`, NOT the
     resolved `/var/minis/workspace/src/...`), exactly as GNU/busybox do — with a leading `/`
