@@ -130,6 +130,23 @@
 - 探针与变异全部在 `/var/minis/shared/work/p0-fix-1027/probe-soul/`（`stubs/`、`jstub/`、`mutants/<name>/`、`SideEffectProbe.kt`），**仓库树只含两个被提交文件**。
 - 变异前后 `sha256sum src/.../SoulStore.kt` = `6a722da0b7ebb70c…`（前 16 字节，两次一致）。
 
-## 8. CI
+## 8. CI（分支 CI 绿 = 停止节点，已达成）
 
-见下方「CI 回填」段（网络恢复后追加）。当前状态：`git push` 失败 `TLS connect error: error:0A000126:SSL routines::unexpected eof while reading`；三分诊判据：经代理明文 HTTP `502`（15:58Z / 16:01Z 两次）、API `000`、直连 `000` ⇒ **代理活着、其上游断**（S35），与仓内配置无关（`git config --local` 的 proxy 与 `$HTTPS_PROXY` 逐字节相同）。
+**出口中断期间的两轮读数**（S35，如实记录，不假回填）：15:58Z / 16:01Z / 16:05:58Z / 16:09:45Z 四次三分诊——经代理明文 HTTP `502`、API `000`、直连 `000`，且内置浏览器同症（`net::ERR_CONNECTION_CLOSED`）⇒ 设备侧出口中断，与仓内配置无关。16:17:21Z 恢复（`204` / `200`）后立即推送。
+
+| 项 | 值 |
+|---|---|
+| run | **#2793** / id `40539485669` / attempt 1 / job `122313677661` |
+| head_sha | `4a75919ee9c1c22185e0a6fc40c48d16481d8e7b` —— 与本地 HEAD **逐字符一致** |
+| 结论 | `completed` / **`success`**（16:17:42Z → 16:34:45Z，16.9 min） |
+| 27 步 | 唯一 skipped = `Move the rolling tag android-latest` 与 `Publish to Releases`（main 门控，分支上本就该 skip），其余 25 步全 success（含 `Run pre-build scan gate`、`Run unit tests (full suite)`、`Build APK with Gradle`） |
+
+日志（1,481,141 B）逐条核：
+- `Summary: 113 passed, 0 failed` 恰 **1** 次；`ALL 349 CASES PASS` 恰 **1** 次（夹具数未变，本支不加门不加夹具）；
+- `^ e: `（Kotlin 编译错误）**0** 条；
+- 含 `FAILED` 的 6 行逐条确认**全是 PASSED 用例名子串**（`produces FAILED without calling provider` / `phase FAILED maps to Failed` 等），非真红；
+- 新增测试类 **10 例全部 `PASSED`**（`SoulStoreOverwriteBackupTest > …`，含 `world W3 …` / `a concurrent reader never sees a truncated SOUL md` / `a target larger than the backup cap …`）。
+
+回填本报告后 `git diff --name-only 4a75919e..HEAD -- . ':(exclude)fix-reports'` = **0**（源码树与绿 sha 无差异）。
+
+**停止节点达成，未合并 main**（合并起手权在用户）。
