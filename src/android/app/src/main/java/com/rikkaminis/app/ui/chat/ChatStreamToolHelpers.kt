@@ -48,11 +48,19 @@ internal fun stripDisplayOnlyArtifacts(text: String): String {
  *   reload path inlined the ORIGINAL bytes: the composer downscales the model
  *   payload, so the first reload re-sent every historical photo at full
  *   resolution (a 12 MP JPEG is ~4 MB of base64 per turn, per image).
+ *
+ *   [W-1027 W-04] REQUIRED, no default. The parameter used to default to
+ *   `{ _, _ -> null }`, i.e. "do not downscale": a call site that forgot the
+ *   third argument compiled, passed every gate and every unit test (the JVM
+ *   arms inject their own lambda, so they exercised the lambda they passed,
+ *   never the wiring), and silently re-inlined full-resolution originals after
+ *   a session reload. Removing the default turns that omission into a compile
+ *   error — the only gate that cannot be forgotten at a new call site.
  */
 internal fun buildLlmMessagesFromParsed(
     parsed: List<ParsedRow>,
     mediaBaseDir: File,
-    resizeForInference: (ByteArray, String) -> ByteArray? = { _, _ -> null },
+    resizeForInference: (ByteArray, String) -> ByteArray?,
 ): List<LLMMessage> {
     val result = ArrayList<LLMMessage>(parsed.size)
     for (row in parsed) {
@@ -72,7 +80,9 @@ internal fun buildSingleLlmMessage(
     parts: List<ParsedPart>,
     malformed: Boolean,
     mediaBaseDir: File,
-    resizeForInference: (ByteArray, String) -> ByteArray? = { _, _ -> null },
+    // [W-1027 W-04] Same contract as buildLlmMessagesFromParsed: no default,
+    // so a direct call site cannot silently opt out of inference downscaling.
+    resizeForInference: (ByteArray, String) -> ByteArray?,
 ): LLMMessage {
     val r = if (entity.role == "user") LLMMessage.Role.USER else LLMMessage.Role.ASSISTANT
     val contentParts = mutableListOf<AgentContentPart>()
