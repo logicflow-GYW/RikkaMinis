@@ -40,14 +40,16 @@
 
 （注：从 `scripts/scan/` 目录跑串行会有 4 个 selftest 红——它们按 cwd 读仓库文件；**必须从仓库根跑**，CI 一直如此，非本支引入。）
 
-**L2 云端（真实 4 核 runner）**
+**L2 云端（真实 4 核 runner，三次并行读数）**
 
-| 读数 | 串行（刀 1 run #2） | 并行（run #2788） |
-|---|---|---|
-| 夹具段 | 5.25 min | **3.33 min（1.58x）** |
-| scan step 整步 | ~6.8 min | **5.1 min** |
-| 全量构建总长 | 16.6–24.6 min（同周噪声带） | 21.4 min（Gradle 段不变） |
-| 判据 | — | `✅ ALL 347 CASES PASS` ×1、` e: ` 0、47/47 单元全完成、FAILED 行全为用例名、仅 Publish+tag skipped |
+| 读数 | 串行（刀 1 run #2） | 并行 run #2788 | 并行 run 40505804953（最终树） |
+|---|---|---|---|
+| 夹具段 | 5.25 min | 3.33 min | **3.12 min** |
+| scan step 整步 | ~6.8 min | 5.10 min | **4.87 min**（scan.sh 1.48 + 夹具 3.12） |
+| 全量构建总长 | 16.6–24.6 min（同周噪声带） | 21.4 min | **20.9 min**（Gradle 段不变） |
+| 判据 | — | `✅ ALL 347` ×1、` e: ` 0、仅 Publish+tag skipped | `✅ ALL 347` ×1、` e: ` 0、4 workers ×1、FAILED 行全为用例名、head_sha `fe9650363` 逐字符一致 |
+
+**最终树的单 run 见证**：run `40505804953` @ `fe9650363`（含诊断提交 + 报告）success 20.9 min；报告回填后 `git diff --name-only fe9650363..HEAD -- . ':(exclude)fix-reports'` = 0。
 
 **守卫路由（真实 diff 的负控）**：本支改了 `build-apk.yml` ⇒ 廉价门守卫**正确拒付**（16 秒，点名两条 workflow 越界）——改生产构建路径的改动只能由全量构建自证，这条支在 build-apk 上验证。同日探针支 `ci/fixture-timing-probe`（仅白名单文件）则被守卫放行，用于取每单元耗时。
 
