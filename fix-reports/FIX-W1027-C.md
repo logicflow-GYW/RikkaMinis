@@ -101,6 +101,13 @@ kotlinc(生产 SandboxDefectRegistry.kt + 测试) -> java JUnitCore
 
 **只有新臂红、其余 20 例绿** —— 正是"夹具宽度缺口"的形状。还原后 `git checkout --` → `OK (21 tests)`，生产文件 sha256 与提交态一致（`b800208d…`，`git diff --stat` 只剩测试文件 +30）。
 
+**fail-closed 路径（手工验证，未固化为臂 —— 见 R6）**：
+
+```
+三个函数各自改名  -> C1/C2/C3 各返回 "… not found with a block body … — fail closed"
+制造未闭合字符串   -> "C1: source not lexable (unterminated string literal at offset 7753) — refusing to fall back to raw scanning"
+```
+
 ### L3 邻门
 
 9 道 rc=0：`sysinfo_state_thread_check`（**只吃位置参数**，`--root` 会 rc=1 → 注册时注意形态）、`skill_restore_session_cleanup_check`、`i18n_check`（同上，位置参数）、`outcome_known_chain_check`、`deeplink_settings_routes_check`（同上）、`claim_release_guard`、`marker_boundary_check`、`four_way_sync_check`、`discarded_return_guard`。
@@ -113,7 +120,25 @@ kotlinc(生产 SandboxDefectRegistry.kt + 测试) -> java JUnitCore
 
 ## 6. CI 读数
 
-run 见文末 §8 回填（`build-apk.yml` @ `fix/w1027-storage-guards`，手动 dispatch —— 分支 push 不触发）。
+run **40499612598** / attempt **1** / **success**｜`build-apk.yml` @ `fix/w1027-storage-guards`｜窗口 `11:54:11Z → 12:10:45Z`（16m34s）
+`head_sha` = `4e94012caa26af153b4946a607ac806f5096744f`，与本地 HEAD **逐字符一致**。
+
+| 读数 | 值 |
+|---|---|
+| 步骤 | 27 步全部 success；唯一 2 个 skipped = `Move the rolling tag android-latest` + `Publish to Releases`（均 main 门控，分支上本就该跳） |
+| job 日志 | 1,472,449 B，NUL 0 |
+| `Summary: 112 passed, 0 failed` | **恰 1**（另有分批评测框线 25/16/44/19/30/16，scan 全量 = 112） |
+| `ALL 347 CASES PASS` | **恰 1** |
+| 编译错误 `^ e: ` | **0** |
+| `Function not implemented`（S28） | **0** |
+| 含 `FAILED` 的行 | 6 条，**逐条确认全是 PASSED 用例名的子串**（`… produces FAILED without calling provider PASSED` 之类） |
+| 门头 | 112 个 `[N/112]`，编号与门名互异、序列 1..112 |
+| W-11 的臂 | `SandboxDefectRegistryTest > parse_accepts_half_width_colon_field_lines PASSED` **恰 1**（新臂在 CI 有见证） |
+| C12 生效 | `browser_tabs_lifecycle_check OK (… + C12 the UI-side manual orphan assembly uses the live ids and the SAME source as the delete half)` 出现在「real repo tree」用例里 |
+| 全量单测 | 7,139 行 `PASSED` |
+| `storage_budget_check` | **0 命中** = 尚未注册（本支按任务书不改 `scan.sh` / `test_scan.py`，注册说明见 §9） |
+
+中间态另有一次 dispatch（run `40497206868`，sha `08192407`，C12 预过滤前）读数同形：`112 passed, 0 failed` ×1 / `ALL 347 CASES PASS` ×1 / `e: ` 0 / 6 条 FAILED 全为子串 / 门头 112 互异 —— 说明预过滤那笔性能改动没有改变门的判定面。
 
 ## 7. 残留（每条带触发条件 / 触发后方案 / 搁置理由）
 
@@ -122,6 +147,8 @@ run 见文末 §8 回填（`build-apk.yml` @ `fix/w1027-storage-guards`，手动
 - **R3（P2）C12 的 `_canonical` 只内联本地 `val`**：字段/参数/`by` 委托读不追。触发 = 有人把 live id 集合提到 ViewModel 字段；方案 = 接 `value_sources` 或补一层"字段初始化式"追踪；搁置理由 = 当前装配点在 composable 局部，跨层追踪属未触发路径。
 - **R4（P2）C1 的基线 key 靠 `putLong(<KEY>, <采样>)` 派生**：若回写挪进 helper 函数（跨函数），门会判红（fail-closed 方向安全，但会误红）。触发 = 真的这么重构；方案 = 允许"回写在同一文件另一函数、入参是采样"；搁置理由 = 无此形态。
 - **R5（P2）C2 不认识 `NotificationManagerCompat` 包装的等价写法**：触发 = 有人把 lookup 包一层；方案 = 放宽到"任一带 `getNotificationChannel` 的 wrapper 调用即视为 lookup"；搁置理由 = 现状直调。
+
+- **R6（P2）fail-closed 路径只有手工验证、没有臂**：改名（3 条）+ 未闭合字符串（1 条）都实测红，但没写进 `--selftest`（写进去要再来一轮 CI）。触发 = 下次动 `_view` / `function_body` 抽取逻辑；方案 = 把这 4 条补成臂（`--selftest` 29 臂）；搁置理由 = 装置比例（P1 门，行为已实测，只差钉死）。
 
 ## 8. 未验证
 
