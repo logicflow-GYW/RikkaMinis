@@ -122,7 +122,7 @@
 
 - **未跑真机**：本轮全部证据来自 JVM（真文件系统）+ 本地静态门；沙箱无 Android 运行时，`AppLogger` 是捕获桩，真实 `android.util.Log` 落盘/快照路径未实证。
 - **未跑 Gradle 单测/编译**：沙箱无 Android SDK；`SoulStore.kt` 是用 kotlinc 编译**真源码**验证的（桩只替 `Context`/`AppLogger`），真实 K2 + Android 插件的编译由分支 CI 承担。
-- **CI 状态**：见 §8。设备出口中断（sandbox-limits S35：代理上游 502 / 直连 000），推送与 dispatch 均未成功，**停止节点未达，绝不假回填**。
+- **CI 状态**：见 §8（本节写于出口中断期间：推送与 dispatch 均未成功、**停止节点当时未达，未做任何假回填**；16:17Z 出口恢复后补推并 dispatch，当日达成，读数在 §8）。
 - 并发窗口只测了同进程 20 次写 + 一个读线程；跨进程（Settings UI vs `minis-config` worker）交错未测。
 
 ## 7. 仓库树完整性
