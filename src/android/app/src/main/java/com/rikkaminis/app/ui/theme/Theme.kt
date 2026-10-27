@@ -13,7 +13,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 
-// Teal accent matching iOS visual appearance
+// Teal accent — fork brand color (kept after the iOS tree was removed)
 private val TealPrimary = Color(0xFF2E8B8B)
 private val TealOnPrimary = Color(0xFFFFFFFF)
 private val TealPrimaryContainer = Color(0xFFB2DFDB)
@@ -55,7 +55,7 @@ private val TealDarkSurfaceVariant = Color(0xFF3F4947)
 private val TealDarkOnSurfaceVariant = Color(0xFFC2C6C4)
 private val TealDarkOutline = Color(0xFF899390)
 
-// Neutral grouped-card surfaces (iOS-style system-grouped background).
+// Neutral grouped-card surfaces (system-grouped background, the fork's grouped-card look).
 // Override Material3's tonal `surfaceContainer*` so cards don't pick up the
 // teal primary tint.
 // Light: page = #F2F2F7 gray, card = white
@@ -122,7 +122,7 @@ private val DarkColorScheme = darkColorScheme(
     outlineVariant = NeutralDarkOutline,
 )
 
-// App-wide FAB accent color (warm beige, matching iOS New Chat button).
+// App-wide FAB accent color (warm beige — the fork's New Chat button accent).
 // Reads from ChatPalette so it follows the in-app theme override (theme_mode pref),
 // not android.isSystemInDarkTheme(), which only tracks the system setting.
 @Composable
