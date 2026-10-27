@@ -137,78 +137,41 @@ internal fun ChatViewModel.applyRequestImageBudget(messages: List<LLMMessage>): 
     val attachmentsRoot = activeSessionId?.let { sid ->
         java.io.File(context.filesDir, "minis-sessions/$sid/attachments")
     }
-    val resolvedPaths = HashMap<ImageBudget.ImagePartId, String?>()
+    val droppedHashes = plan.droppedIds.mapTo(HashSet<Int>()) { it.identityHash }
+    val resolvedPaths = HashMap<Int, String?>()
     for (ref in images) {
         val id = ImageBudget.ImagePartId.of(ref.image.data)
         if (id !in plan.droppedIds) continue
         val existing = ref.image.linuxPath
-        if (existing != null) {
-            resolvedPaths[id] = existing
-        } else if (attachmentsRoot != null) {
-            resolvedPaths[id] = ImageBudget.ensureSpillover(
+        resolvedPaths[id.identityHash] = when {
+            existing != null -> existing
+            attachmentsRoot != null -> ImageBudget.ensureSpillover(
                 attachmentsRoot, ref.image.data, ref.image.mimeType,
             )
-        } else {
-            resolvedPaths[id] = null
+            else -> null
         }
     }
 
-    // Build a new message list with dropped image parts replaced by
-    // text placeholders. Same-message multiple drops collapse cleanly
-    // because we never touch parts whose ids weren't in droppedIds.
-    val byMsg = images.groupBy { it.msgIdx }
-    val mutated = messages.toMutableList()
-    for ((mi, refs) in byMsg) {
-        val msg = mutated[mi]
-        val newParts = msg.contentParts.toMutableList()
-        val droppedHere = HashSet<ImageBudget.ImagePartId>()
-        for (ref in refs) {
-            val id = ImageBudget.ImagePartId.of(ref.image.data)
-            if (id !in plan.droppedIds) continue
-            val path = resolvedPaths[id]
-            val placeholder = AgentContentPart.Text(ImageBudget.elidedImagePlaceholder(path))
-            val originalPart = newParts[ref.partIdx]
-            newParts[ref.partIdx] = when (originalPart) {
-                is AgentContentPart.ImageData -> placeholder
-                is AgentContentPart.ToolResult -> originalPart.copy(
-                    // Strip the bytes but keep the structural ToolResult
-                    // role; append the elision marker into content so
-                    // the model sees it next to the rest of the tool
-                    // output. linux path remains in the part for any
-                    // subsequent diagnostic round-trip.
-                    imageData = null,
-                    imageMimeType = null,
-                    content = originalPart.content +
-                        (if (originalPart.content.isEmpty()) "" else "\n") +
-                        ImageBudget.elidedImagePlaceholder(path),
-                )
-                else -> originalPart
-            }
-            // [debt-1026 B1] Only synch the second carrier when the FIRST one
-            // really lost the bytes (`else` above keeps the original part on an
-            // index/kind mismatch, and that part still reaches the wire through
-            // `contentParts`). Identity works: both replacements above build a
-            // new instance, the fallback returns the same one.
-            if (newParts[ref.partIdx] !== originalPart) droppedHere.add(id)
-        }
-        // [debt-1026 B1] `contentParts` is not the only carrier of these
-        // bytes: every provider also emits `+ msg.imageParts` (OpenAI :2277 /
-        // :3246, Gemini :515, Anthropic :917), so filtering contentParts alone
-        // left the budget's "elided" images riding the wire at full size on
-        // every turn — the elision was a no-op for exactly the history it was
-        // meant to protect. Both lists are filtered by the same identity set.
-        mutated[mi] = msg.copy(
-            contentParts = newParts,
-            imageParts = filterElidedImageParts(msg.imageParts, droppedHere),
-        )
-    }
+    // [debt-1026 B1] / [W-1027 W-05] The rewrite itself lives in
+    // `ImageElisionPlan.planImageElision` (pure, JVM-covered): `contentParts`
+    // placeholders and the `imageParts` filter must be driven by the SAME
+    // "this message really lost those bytes" set. That set is the part no
+    // gate or unit test used to touch — flipping its identity test made the
+    // elision a no-op for `imageParts` while every provider kept appending
+    // `+ msg.imageParts` (OpenAI :2277 / :3246, Gemini :515, Anthropic :917).
+    val elision = planImageElision(
+        messages = messages,
+        droppedIds = droppedHashes,
+        placeholder = ImageBudget::elidedImagePlaceholder,
+        pathFor = { hash -> resolvedPaths[hash] },
+    )
 
     _requestBudgetEvent.tryEmit(plan)
     AppLogger.info(
         ChatViewModel.TAG,
         "applyRequestImageBudget: dropped=${plan.droppedCount}/${plan.totalCount} keptBytes=${plan.keptBytes}B elidedBytes=${plan.elidedBytes}B",
     )
-    return mutated
+    return elision.messages
 }
 
 /**
