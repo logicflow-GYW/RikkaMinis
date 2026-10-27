@@ -41,6 +41,14 @@ Criteria (all must hold):
       WebPreviewShortcut.kt, backlog §1023-H) was fixed in fix/debt-sweep-1026
       and its entry removed; a stale entry is RED, so the exemption cannot
       outlive the debt it names.
+  F4c WebPreviewShortcut.pin (the THIRD `file://` consumer) resolves the URL
+      through `decodeUriPath(url.removePrefix("file://"))` — the same
+      value-flow contract as F1a/F2a. Removing the decode survives F4 (no
+      `Uri.parse`) and F4b (the root strip is intact), and leaves
+      `Uri.Builder().path(absPath)` to re-encode `%`, so a pinned shortcut for
+      `我的 报告#1.html` names a file that does not exist. The pin's own
+      `removePrefix("/var/minis")` and trailing-slash trims are permitted
+      chains (they do not re-interpret URL delimiters);
   F5  one media decision point (extension table / classifier / `#`-cut scope /
       absolute-path guard on every minis:// decode).
   F6b the prefix-stripped path handed to `File(…)` is DECODED first — the root
@@ -51,6 +59,13 @@ Criteria (all must hold):
   F7  no raw path is concatenated into a `file://` URL anywhere under ui/** +
       webapp/** — the operand must be the path encoder (`encodeFileUrlPath(…)`)
       or its single builder (`fileUrlFor(…)`).
+  F7b no `decodeUriPath(` call takes an encoder result as its argument: the
+      encoded form belongs to the CONSUMERS, not to the site that built it.
+      `decodeUriPath(fileUrlFor(file))` passes F7 untouched (the operand is
+      still the builder) and breaks two things at once — the holder's
+      `currentUrl` equality never holds, so every click rebuilds the WebView,
+      and a literal `%XX` file name is decoded twice into a name that exists
+      nowhere. The sweep is derived (ui/** + webapp/** walk), never a file list.
 
 [fix/fileurl-contract] The contract these three criteria pin — **encoded at
 construction, decoded at every path-semantics consumer** — is what the first
@@ -204,13 +219,90 @@ def _body_text(text, name):
     return text[fb[0]:fb[1]] if fb else ""
 
 
-def decode_flow_problem(scope_code, scope_lit, arg_marker):
+def _call_first_arg(code, lit, open_pos):
+    """Literal text of the first argument of the call whose `(` is [open_pos]."""
+    if match_bracket(code, open_pos) < 0:
+        return None
+    spans = call_args(code, open_pos)
+    if not spans:
+        return ""
+    return "".join(lit[a:b] for a, b in spans).strip()
+
+
+def _chain_calls(code, pos):
+    """Every call chained onto the expression that ends at [pos].
+
+    Returns `[(method_name, open_paren_pos, close_pos)]` in chain order. A bare
+    property access (no argument list) ends the walk with open_paren_pos = -1:
+    a permit cannot bless what it cannot read.
+
+    Walking the WHOLE chain is what makes the permit safe: blessing the pin's
+    `removePrefix("/var/minis")` must not also bless a `substringBefore('#')`
+    that follows it — the first licensed step used to be the last step anyone
+    looked at.
+    """
+    i, n, out = pos, len(code), []
+    while True:
+        while i < n and code[i] in " \t\r\n":
+            i += 1
+        if i < n and code[i] == "?":
+            i += 1
+            continue
+        m = re.match(r"\.\s*([A-Za-z_]\w*)", code[i:])
+        if not m:
+            break
+        name = m.group(1)
+        j = i + m.end()
+        while j < n and code[j] in " \t\r\n":
+            j += 1
+        if j >= n or code[j] != "(":
+            out.append((name, -1, -1))
+            break
+        close = match_bracket(code, j)
+        out.append((name, j, close))
+        if close < 0:
+            break
+        i = close + 1
+    return out
+
+
+ROOT_STRIP_LITERAL = '"/var/minis"'
+EDGE_TRIMS = ("trim", "trimEnd", "trimStart")
+
+
+def _shortcut_chain_permit(code, lit, open_pos, name):
+    """Chains that are LEGAL on WebPreviewShortcut's decoded path (F4c permit).
+
+    `pin` decodes the file URL and then does two things the URL-path resolver
+    also does not mind: strips the sandbox root (`removePrefix("/var/minis")`)
+    to build `minis://session/<sid>/<resource>` and trims a trailing slash
+    before comparing the result against the root itself. Neither re-interprets
+    a URL delimiter, so neither can truncate a file name — the truncation
+    family this criterion exists for (`substringBefore('#')`, `split`,
+    `replace`, …) stays red, and so does a `removePrefix` of anything other
+    than the root literal.
+    """
+    if name in EDGE_TRIMS:
+        return True
+    if name != "removePrefix":
+        return False
+    return _call_first_arg(code, lit, open_pos) == ROOT_STRIP_LITERAL
+
+
+def decode_flow_problem(scope_code, scope_lit, arg_marker, permit=None):
     """The value produced by `decodeUriPath(<arg containing arg_marker>)` must
     reach the File construction unchanged.
 
     `arg_marker` is the literal the argument must remove (`removePrefix("file://")`)
     — it is what pins the criterion to the `file://` resolution site instead of
     any decoder call in the file.
+
+    [permit] is an optional `(code, lit, open_paren_pos, method_name) -> bool`
+    that can bless ONE chained rewrite (one call, not the rest of the chain). F1a/F2a pass none: their decoded path is
+    used as-is. F4c passes `_shortcut_chain_permit` because the pin site
+    legitimately strips the sandbox root off the decoded path — without the
+    permit the criterion would be red on the FIXED tree, which is the failure
+    mode that gets a gate disabled instead of trusted.
     """
     calls = []
     for m in re.finditer(r"\bdecodeUriPath\s*\(", scope_code):
@@ -228,9 +320,13 @@ def decode_flow_problem(scope_code, scope_lit, arg_marker):
                 "decodeUriPath(<…>%s) (found %d such call(s))" % (arg_marker, len(calls)))
     start, open_pos, close = calls[0]
 
-    # (1) a rewrite chained straight onto the call
-    name = _poison_chain(scope_code, close + 1)
-    if name:
+    # (1) rewrites chained straight onto the call — EVERY rewriting step in the
+    # chain must be permitted, and a permit covers one step, not the rest.
+    for name, chain_open, _chain_close in _chain_calls(scope_code, close + 1):
+        if name not in POST_DECODE_POISON:
+            continue                      # navigation (`.isBlank()`), not a rewrite
+        if permit and chain_open >= 0 and permit(scope_code, scope_lit, chain_open, name):
+            continue
         return ("the decoded path is rewritten by `.%s…` — the resolver's value must be "
                 "used as-is" % name)
 
@@ -260,8 +356,12 @@ def decode_flow_problem(scope_code, scope_lit, arg_marker):
         for rm in re.finditer(r"(?<![\w.`])" + re.escape(local) + r"(?![\w`])", scope_code):
             if rm.start() < start:
                 continue
-            pname = _poison_chain(scope_code, rm.end())
-            if pname:
+            for pname, chain_open, _chain_close in _chain_calls(scope_code, rm.end()):
+                if pname not in POST_DECODE_POISON:
+                    continue
+                if permit and chain_open >= 0 and permit(scope_code, scope_lit,
+                                                         chain_open, pname):
+                    continue
                 return ("`%s` (the decoded path) is rewritten by `.%s…` where it is read — "
                         "the truncation merely moved off the call chain onto the variable"
                         % (local, pname))
@@ -609,6 +709,56 @@ def file_url_construction_problem(ui_views):
     return "", encoded
 
 
+# [W-08] The construction contract has a second half that the token sweep cannot
+# see. F7 pins HOW a `file://` URL is built (through the encoder); it says
+# nothing about what the construction site does with the result one statement
+# later. `decodeUriPath(fileUrlFor(file))` keeps every token F7 looks for —
+# `fileUrlFor(` is still the operand — and throws the encoding away:
+#
+#   * the holder compares `existing.currentUrl` (encoded, republished by
+#     fromAssetLoaderUrl) against the RAW path this site passed in, so the
+#     equality never holds and every second click destroys and rebuilds the
+#     WebView (scroll position, form input: gone);
+#   * a file literally named `50%23.html` is decoded HERE (`50#.html`) and then
+#     decoded AGAIN by `toAssetLoaderUrl` → a name that exists nowhere.
+#
+# So the rule is directional, not lexical: an encoder's output may only be
+# decoded by a CONSUMER (WebViewHolder / the sheet / the markdown resolver),
+# never at the site that encoded it. The sweep is the derived ui/** + webapp/**
+# walk, not a file list — the same reason F4/F7 are sweeps.
+FILE_URL_ENCODERS = ("fileUrlFor(", "encodeFileUrlPath(")
+
+
+def decode_after_encode_problem(ui_views):
+    """F7b — no encoded `file://` URL is decoded back where it was built.
+
+    Returns `(problem, decoded_sites)`: [decoded_sites] is the positive anchor
+    (how many `decodeUriPath(` calls the sweep actually looked at), so a sweep
+    that stops finding the file entirely cannot read as green.
+    """
+    decoded = 0
+    for rel in sorted(ui_views):
+        code, lit = ui_views[rel][0], ui_views[rel][1]
+        for m in re.finditer(r"\bdecodeUriPath\s*\(", code):
+            open_pos = m.end() - 1
+            if match_bracket(code, open_pos) < 0:
+                return ("%s: unbalanced `decodeUriPath(` (fail-closed)"
+                        % os.path.basename(rel), decoded)
+            decoded += 1
+            spans = call_args(code, open_pos)
+            arg = "".join(lit[a:b] for a, b in spans)
+            for enc in FILE_URL_ENCODERS:
+                if enc in arg:
+                    return ("%s decodes the result of `%s` at the site that built it (%r) — an "
+                            "encoded URL is only decoded by its CONSUMERS: here it makes the "
+                            "holder's `currentUrl` equality never hold (the WebView is rebuilt "
+                            "on every click) and double-decodes a literal %%XX file name into a "
+                            "path that does not exist"
+                            % (os.path.basename(rel), enc.rstrip("("),
+                               " ".join(arg.split())[:80]), decoded)
+    return "", decoded
+
+
 def _dead_guard(cond):
     """Reason a guard decides nothing, or '' — constant folding covers
     `true || x`, `x || true`, `false && x`, `x && false`, `!true`, `1 == 2`."""
@@ -695,6 +845,14 @@ def analyse(sheet_src, md_src, holder_src, ui_srcs, allowlist=None):
                     problem7 or "%d encoded construction site(s), no raw concatenation"
                     % encoded7, None))
 
+    # --- F7b: the encoder's output is consumed, not decoded, where it is built --
+    problem7b, decoded7b = decode_after_encode_problem(ui_views)
+    results.append((
+        "F7b no encoded file:// URL is decoded back at the site that built it",
+        problem7b == "",
+        problem7b or "%d decodeUriPath(…) call(s) seen, none of them on an encoder result"
+        % decoded7b, None))
+
     # --- F4: ui/** sweep with allowlist --------------------------------
     allowlist = ALLOWLIST if allowlist is None else allowlist
     for rel in sorted(ui_views):
@@ -730,6 +888,28 @@ def analyse(sheet_src, md_src, holder_src, ui_srcs, allowlist=None):
                         problem4b == "",
                         problem4b or "deep-link path built from the stripped sandbox path",
                         None))
+        # --- F4c: the third file:// consumer decodes too ------------------
+        # [W-07] `pin` is the third consumer of the `file://` contract (after
+        # openExternalFromSheet and resolveMdMediaFile) and was the only one
+        # without a decode-flow criterion: deleting `decodeUriPath(…)` left
+        # `Uri.Builder().path(absPath)` to re-encode `%` — a pinned shortcut for
+        # `我的 报告#1.html` pointed at a literal `%E6%88%91…` name that exists
+        # nowhere. F4b stayed green through that, because the root strip it
+        # checks is a different property.
+        pin_code = _body_text(shortcut[0], "pin")
+        pin_lit = _body_text(shortcut[1], "pin")
+        if not pin_code:
+            problem4c = "WebPreviewShortcut.pin not found (fail-closed)"
+        else:
+            problem4c = decode_flow_problem(
+                pin_code, pin_lit, 'removePrefix("file://")',
+                permit=_shortcut_chain_permit)
+        results.append((
+            'F4c WebPreviewShortcut.pin resolves the file:// URL via '
+            'decodeUriPath(url.removePrefix("file://"))',
+            problem4c == "",
+            problem4c or "decoded path used as-is (root strip and edge trims permitted)",
+            None))
 
     # --- F5: one media classifier [dv22/B-06] ---------------------------
     media_views = {rel: views[1] for rel, views in ui_views.items()}
@@ -1152,15 +1332,21 @@ BREAKER_FETCHER_DEAD_AND_RIGHT = IMAGE_FETCHER_CLEAN.replace(
 assert BREAKER_FETCHER_DEAD_AND_RIGHT != IMAGE_FETCHER_CLEAN
 
 ALLOWLIST_REL = next(iter(SELFTEST_ALLOWLIST))
+# [W-07] The fixture keeps ONE `Uri.parse(url).path` so the F4 allowlist arms
+# still have a subject, and now also carries the decode the real `pin` performs
+# — otherwise F4c would be red on the selftest's own "fixed" tree and every arm
+# below would be measuring the fixture instead of its mutation.
 ALLOWLISTED_FILE = """package probe
-internal fun requestPinWebPreviewShortcut(
+internal fun pin(
     context: Context,
     url: String,
     sessionId: String,
     title: String,
 ) {
-    val absPath = Uri.parse(url).path.orEmpty()
+    val legacyPath = Uri.parse(url).path.orEmpty()
+    val absPath = decodeUriPath(url.removePrefix("file://"))
     if (absPath.isBlank()) return
+    if (absPath.trimEnd('/') == "/var/minis") return
     val resourcePath = absPath.removePrefix("/var/minis").let {
         if (it.startsWith("/")) it else "/$it"
     }
@@ -1169,6 +1355,41 @@ internal fun requestPinWebPreviewShortcut(
         .authority("session")
         .path("/$sessionId$resourcePath")
         .build()
+}
+"""
+
+# W-07: the third `file://` consumer loses the decode — F4b still sees the root
+# strip, so nothing but F4c can notice.
+BREAKER_SHORTCUT_NO_DECODE = ALLOWLISTED_FILE.replace(
+    'val absPath = decodeUriPath(url.removePrefix("file://"))',
+    'val absPath = url.removePrefix("file://")')
+assert BREAKER_SHORTCUT_NO_DECODE != ALLOWLISTED_FILE
+
+# W-07 precision, sharp side: a PERMITTED step followed by a truncation. The
+# permit blesses `removePrefix("/var/minis")`; it must not bless what comes
+# after it, or "root strip stays legal" becomes "any rewrite stays legal".
+BREAKER_SHORTCUT_PERMIT_THEN_CUT = ALLOWLISTED_FILE.replace(
+    'absPath.removePrefix("/var/minis").let {',
+    'absPath.removePrefix("/var/minis").substringBefore(\'#\').let {')
+assert BREAKER_SHORTCUT_PERMIT_THEN_CUT != ALLOWLISTED_FILE
+
+# W-08: the construction site decodes the URL it just encoded. Every token F7
+# looks for is intact (`fileUrlFor(` is still the operand).
+BREAKER_CHAT_DECODE_WRAP = CHAT_SCREEN_CLEAN + """
+internal fun openHtmlPreview(file: java.io.File): String {
+    val url = decodeUriPath(com.rikkaminis.app.ui.sandbox.fileUrlFor(file))
+    return url
+}
+"""
+
+# F7b precision: a decoder whose argument is a fileUrl-like PARAMETER (`fileUrl`,
+# not the builder call). WebViewHolder.fromAssetLoaderUrl has exactly this shape
+# and must never be flagged.
+DECODE_PARAM_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/preview/DecodedParamFixture.kt"
+DECODE_PARAM_FILE = """package probe
+internal fun forward(fileUrl: String): String {
+    val name = decodeUriPath(fileUrl.removePrefix(FILE_URL_PREFIX).substringAfterLast('/'))
+    return encodeFileUrlPath(name)
 }
 """
 
@@ -1199,6 +1420,9 @@ F5A = "F5a media extension table declared once, in MarkdownBlockModel.kt"
 F5B = "F5b ext read after query cut, parser delegates to mediaKindOfUrl"
 F5C = "F5c '#' cut only inside an http(s) branch; local paths keep it"
 F5D = "F5d decoded minis:// path is absolute-guarded before use"
+F4C = ('F4c WebPreviewShortcut.pin resolves the file:// URL via '
+       'decodeUriPath(url.removePrefix("file://"))')
+F7B = "F7b no encoded file:// URL is decoded back at the site that built it"
 
 
 def dict_of(extra):
@@ -1408,6 +1632,44 @@ def selftest():
     expect(reds == ["F3b toAssetLoaderUrl encodes a name derived from the file URL"],
            "r3-02-1 constant-name: exactly F3b must be RED, got %s" % reds)
 
+    # ---- 2026-10-27 witness wave (W-07 / W-08) ---------------------------
+    # W-07: the THIRD file:// consumer stops decoding. F4b still sees the root
+    # strip, F4 still sees no `Uri.parse(...).path`, so F4c is the only subject.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER,
+            dict_of({ALLOWLIST_REL: BREAKER_SHORTCUT_NO_DECODE}))
+    reds = sorted(c for c, ok, _d, _l in m if not ok)
+    expect(reds == [F4C],
+           "w07-shortcut-no-decode: exactly F4c must be RED, got %s" % reds)
+
+    # W-08: the construction site decodes its own encoder output. F7 stays green
+    # (the operand IS `fileUrlFor(...)`), F5c stays green — only F7b sees it.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER,
+            dict_of({CHAT_SCREEN_REL: BREAKER_CHAT_DECODE_WRAP}))
+    reds = sorted(c for c, ok, _d, _l in m if not ok)
+    expect(reds == [F7B],
+           "w08-decode-after-encode: exactly F7b must be RED, got %s" % reds)
+
+    # W-08 precision: a decoder fed a `fileUrl` PARAMETER is the real
+    # WebViewHolder shape — banning it would make the gate red on the fixed tree.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({DECODE_PARAM_REL: DECODE_PARAM_FILE}))
+    expect(all_green(m),
+           "w08-precision: a decode of a fileUrl parameter must stay GREEN, got %s"
+           % [c for c, ok, _d, _l in m if not ok])
+
+    # W-07 precision, sharp side: a permitted step does not license the next one.
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER,
+            dict_of({ALLOWLIST_REL: BREAKER_SHORTCUT_PERMIT_THEN_CUT}))
+    reds = sorted(c for c, ok, _d, _l in m if not ok)
+    expect(reds == [F4C],
+           "w07-permit-then-cut: a truncation AFTER the permitted root strip must be RED "
+           "on F4c only, got %s" % reds)
+
+    # W-07 precision: the pin's root strip and edge trim are legal chains on the
+    # decoded path (the fixture above exercises both and must stay green).
+    m = run(FIXED_SHEET, FIXED_MD, FIXED_HOLDER, dict_of({}))
+    expect(crit(m, F4C) is True,
+           "w07-precision: the fixed pin (root strip + trim) must stay GREEN")
+
     if failures:
         print("SELFTEST FAIL:")
         for f in failures:
@@ -1422,7 +1684,9 @@ def selftest():
           "fileurl-no-decode-root=RED, fileurl-publish-raw=RED, "
           "fileurl-raw-concat=RED, fileurl-raw-template=RED, "
           "fileurl-raw-dollar=RED, fileurl-encoded-dollar=GREEN, "
-          "fileurl-encoded-operand=GREEN")
+          "fileurl-encoded-operand=GREEN, w07-shortcut-no-decode=RED, "
+          "w08-decode-after-encode=RED, w08-decoder-precision=GREEN, "
+          "w07-permit-then-cut=RED, w07-pin-permit=GREEN")
     return arms
 
 

@@ -2718,6 +2718,188 @@ def scan_encode_verdict(root):
                 )
     return violations, sites
 
+# ── C-B4: the "keep the original bytes" exit must test the verdict NEGATED ──
+#
+# [W-1027 W-06] C-B2/C-B3 above answer "is the compress() verdict bound and
+# reportable". They do NOT answer "does the guard around the keep-the-original
+# exit fire on FAILURE". `ImageBudget.compressBytes` reads
+#
+#     if (!saveOutcome(streamOpened = true, compressed = encoded)) { …; return input }
+#
+# i.e. "encoder wrote nothing → keep the caller's original bytes". Drop the `!`
+# and the same line still binds the verdict (C-B2 green) and still mentions
+# saveOutcome (C-B3 green), but the branch now fires on SUCCESS: every encoded
+# image is thrown away and the 4-step JPEG ladder returns un-compressed input
+# forever (5 MB originals ride the wire, or the whole image is elided) — the
+# 413 shape `9a212e873` removed.
+#
+# The criterion is scoped to functions that can HAND BACK a ByteArray parameter
+# (`return input`, `else input`, `?: input`), because that is the only place a
+# polarity flip has a consequence a gate can name. Anything the parser cannot
+# read is reported (fail-closed), never defaulted to green.
+_B4_EXIT = re.compile(r"(?:\breturn\s+|\?\:\s+|\belse\s+)([A-Za-z_][A-Za-z0-9_]*)\b")
+_B4_BYTE_PARAMS = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*:\s*ByteArray\b")
+_B4_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_B4_BINDING = r"\bval\s+%s\s*(?::\s*Boolean\s*)?=\s*([^\n]*)"
+
+def _b4_bound_from_outcome(body, name):
+    """True when `val <name> … = <expr mentioning saveOutcome>` exists in [body]."""
+    pat = re.compile(_B4_BINDING % re.escape(name))
+    return any("saveOutcome" in m.group(1) for m in pat.finditer(body))
+
+def _b4_polarity(cond, body):
+    """`True` = guard fires on SUCCESS, `False` = on FAILURE, None = unknown.
+
+    `"none"` means the condition does not derive from the encode verdict at all
+    (a decode/empty-input guard), which is out of this criterion's scope.
+    """
+    c = cond.strip()
+    if re.search(r"&&|\|\|", c):
+        outcome_derived = "saveOutcome" in c or any(
+            _b4_bound_from_outcome(body, w) for w in _B4_IDENT.findall(c)
+        )
+        return None if outcome_derived else "none"
+    if "saveOutcome" in c:
+        # Single-term guard: a `!` on the call (bare or parenthesised) is the
+        # negation; there is nothing else to negate in a one-term condition.
+        return False if "!" in c else True
+    for w in _B4_IDENT.findall(c):
+        if _b4_bound_from_outcome(body, w):
+            neg = re.search(r"!\s*\(?\s*%s\b" % re.escape(w), c)
+            return False if neg else True
+    return "none"
+
+def _b4_header(code, start, li):
+    """(line index, stripped text) of the indentation-enclosing header above [li]."""
+    indent = len(code[li]) - len(code[li].lstrip())
+    for j in range(li - 1, start - 1, -1):
+        s = code[j].rstrip()
+        if not s.strip():
+            continue
+        ind = len(s) - len(s.lstrip())
+        if ind < indent:
+            return j, s.strip()
+    return -1, None
+
+def _b4_guard(code, start, li, prefix):
+    """(condition text, branch) governing an exit on [li], or (None, None).
+
+    [prefix] is the text before the exit token on the same line, so the inline
+    shapes `if (!saveOutcome(…)) return input` and `val b = if (ok) a else input`
+    resolve without any block walk. When the line carries no `if`, the enclosing
+    header is found by indentation (multi-line blocks).
+    """
+    k = None
+    for m in re.finditer(r"\bif\b", prefix):
+        k = m.end()
+    if k is not None:
+        rest = prefix[k:].lstrip()
+        if rest.startswith("("):
+            depth = 0
+            for idx, ch in enumerate(rest):
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        tail = rest[idx + 1:]
+                        branch = "else" if re.search(r"\belse\b", tail) else "then"
+                        return rest[1:idx], branch
+            return None, None
+    j, head = _b4_header(code, start, li)
+    if head is None:
+        return None, None
+    if re.match(r"\}?\s*else\b", head):
+        # Else branch: its `if` is a SIBLING at the same indentation, so the
+        # strictly-smaller-indent walk above would skip past it.
+        indent = len(code[j]) - len(code[j].lstrip())
+        for j2 in range(j - 1, start - 1, -1):
+            s2 = code[j2]
+            if not s2.strip():
+                continue
+            ind2 = len(s2) - len(s2.lstrip())
+            if ind2 <= indent and re.search(r"\bif\s*\(", s2):
+                return _b4_cond_text(s2.strip()), "else"
+        return None, None
+    if re.search(r"\bif\s*\(", head):
+        return _b4_cond_text(head), "then"
+    return None, None
+
+def _b4_cond_text(header):
+    """The parenthesised condition of an `if (…)` header (inline-safe)."""
+    k = header.find("if")
+    rest = header[k + 2:].lstrip()
+    if not rest.startswith("("):
+        return None
+    depth = 0
+    for idx, ch in enumerate(rest):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return rest[1:idx]
+    return None
+
+def scan_failure_polarity(root):
+    """(violations, sites) — C-B4: polarity of the keep-the-original guard."""
+    violations = []
+    sites = 0
+    base = os.path.join(root, SRC_SUBDIR)
+    for dirpath, _dirnames, filenames in os.walk(base):
+        for name in sorted(filenames):
+            if not name.endswith(".kt"):
+                continue
+            path = os.path.join(dirpath, name)
+            rel = os.path.relpath(path, root)
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                raw = fh.read().split("\n")
+            code = code_only("\n".join(raw)).split("\n")
+            for fname, start, end, body in _function_bodies(code):
+                if "saveOutcome" not in body:
+                    continue
+                params = set(_B4_BYTE_PARAMS.findall(body.split("{")[0]))
+                if not params:
+                    continue
+                seen = set()
+                for li in range(start, end + 1):
+                    for m in _B4_EXIT.finditer(code[li]):
+                        if m.group(1) not in params:
+                            continue
+                        if _enc_exempt(raw, li):
+                            continue
+                        sites += 1
+                        cond, branch = _b4_guard(code, start, li, code[li][:m.start()])
+                        if cond is None:
+                            continue  # not verdict-governed (decode/empty-input guard)
+                        pol = _b4_polarity(cond, body)
+                        if pol == "none":
+                            continue
+                        key = (li, m.group(1))
+                        if key in seen:
+                            continue
+                        if pol is None:
+                            seen.add(key)
+                            violations.append(
+                                "%s:%d  [B4] %s() exits with the original bytes (%s) behind a "
+                                "guard over saveOutcome(...) whose polarity this gate cannot read "
+                                "(`%s`) — rewrite it as `if (!saveOutcome(...))` or add "
+                                "`record-ok: <reason>`" % (rel, li + 1, fname, m.group(1), cond.strip())
+                            )
+                            continue
+                        failure_branch = "then" if pol is False else "else"
+                        if branch == failure_branch:
+                            continue
+                        seen.add(key)
+                        violations.append(
+                            "%s:%d  [B4] %s() keeps the ORIGINAL bytes (%s) on the SUCCESS path "
+                            "— `saveOutcome(...)` answers false only when the encoder wrote "
+                            "nothing, so the guard must be negated (`if (!saveOutcome(...))`). "
+                            "As written every successful encode is discarded and the caller gets "
+                            "un-compressed input" % (rel, li + 1, fname, m.group(1))
+                        )
+    return violations, sites
+
 # ── B-02 self-test: every arm flips exactly its own criterion ─────────────
 
 _ENC_PROBE_PKG = "package probe\n\n"
@@ -2829,6 +3011,156 @@ def encode_verdict_self_test():
           "`record-ok:` shapes stay green")
     return 0
 
+# ── C-B4 self-test: the keep-the-original guard must fire on FAILURE ──────
+
+# The shipped shape: negated verdict, original bytes only on an encode failure.
+_B4_CLEAN = (
+    _ENC_PROBE_PKG +
+    "internal fun compressBytes(input: ByteArray, quality: Int): ByteArray {\n"
+    "    val baos = ByteArrayOutputStream()\n"
+    "    val encoded = bitmap.compress(Bitmap.CompressFormat.JPEG, quality, baos)\n"
+    "    if (!saveOutcome(streamOpened = true, compressed = encoded)) {\n"
+    "        log(\"encoder wrote no bytes\")\n"
+    "        return input\n"
+    "    }\n"
+    "    return baos.toByteArray()\n"
+    "}\n"
+)
+
+# [W-1027 W-06] The witness patch: same binding, same saveOutcome(, one `!`
+# removed. C-B2 and C-B3 stay green — only C-B4 can see it.
+_B4_INVERTED = (
+    _ENC_PROBE_PKG +
+    "internal fun compressBytes(input: ByteArray, quality: Int): ByteArray {\n"
+    "    val baos = ByteArrayOutputStream()\n"
+    "    val encoded = bitmap.compress(Bitmap.CompressFormat.JPEG, quality, baos)\n"
+    "    if (saveOutcome(streamOpened = true, compressed = encoded)) {\n"
+    "        log(\"encoder wrote no bytes\")\n"
+    "        return input\n"
+    "    }\n"
+    "    return baos.toByteArray()\n"
+    "}\n"
+)
+
+# One-line short-circuit form of the clean shape.
+_B4_INLINE_CLEAN = (
+    _ENC_PROBE_PKG +
+    "internal fun compressBytes(input: ByteArray): ByteArray {\n"
+    "    val encoded = bitmap.compress(Bitmap.CompressFormat.JPEG, 80, baos)\n"
+    "    if (!saveOutcome(streamOpened = true, compressed = encoded)) return input\n"
+    "    return baos.toByteArray()\n"
+    "}\n"
+)
+
+# Verdict parked in a local, then tested without the negation.
+_B4_BOUND_POSITIVE = (
+    _ENC_PROBE_PKG +
+    "internal fun compressBytes(input: ByteArray): ByteArray {\n"
+    "    val encoded = bitmap.compress(Bitmap.CompressFormat.JPEG, 80, baos)\n"
+    "    val ok = saveOutcome(streamOpened = true, compressed = encoded)\n"
+    "    if (ok) {\n"
+    "        log(\"keep original\")\n"
+    "        return input\n"
+    "    }\n"
+    "    return baos.toByteArray()\n"
+    "}\n"
+)
+
+# Same, but negated — the local-variable form of the clean shape.
+_B4_BOUND_NEGATED = (
+    _ENC_PROBE_PKG +
+    "internal fun compressBytes(input: ByteArray): ByteArray {\n"
+    "    val encoded = bitmap.compress(Bitmap.CompressFormat.JPEG, 80, baos)\n"
+    "    val ok = saveOutcome(streamOpened = true, compressed = encoded)\n"
+    "    if (!ok) return input\n"
+    "    return baos.toByteArray()\n"
+    "}\n"
+)
+
+# Inverted through the else branch: original bytes on the SUCCESS path.
+_B4_ELSE_INVERTED = (
+    _ENC_PROBE_PKG +
+    "internal fun compressBytes(input: ByteArray): ByteArray {\n"
+    "    val encoded = bitmap.compress(Bitmap.CompressFormat.JPEG, 80, baos)\n"
+    "    if (!saveOutcome(streamOpened = true, compressed = encoded)) {\n"
+    "        log(\"failed\")\n"
+    "    } else {\n"
+    "        return input\n"
+    "    }\n"
+    "    return baos.toByteArray()\n"
+    "}\n"
+)
+
+# Compound guard: outcome-derived but the polarity is not readable → fail closed.
+_B4_COMPOUND = (
+    _ENC_PROBE_PKG +
+    "internal fun compressBytes(input: ByteArray, retry: Boolean): ByteArray {\n"
+    "    val encoded = bitmap.compress(Bitmap.CompressFormat.JPEG, 80, baos)\n"
+    "    if (saveOutcome(streamOpened = true, compressed = encoded) && retry) {\n"
+    "        return input\n"
+    "    }\n"
+    "    return baos.toByteArray()\n"
+    "}\n"
+)
+
+# A decode/empty-input guard is out of scope: it never mentions the verdict.
+_B4_UNRELATED_GUARD = (
+    _ENC_PROBE_PKG +
+    "internal fun compressBytes(input: ByteArray): ByteArray {\n"
+    "    if (input.isEmpty()) return input\n"
+    "    val encoded = bitmap.compress(Bitmap.CompressFormat.JPEG, 80, baos)\n"
+    "    if (!saveOutcome(streamOpened = true, compressed = encoded)) return input\n"
+    "}\n"
+)
+
+def failure_polarity_self_test():
+    """Every arm below flips exactly C-B4 (never cascades into B2/B3)."""
+    failures = []
+
+    def run(src):
+        root = _enc_fixture(src)
+        try:
+            violations, _sites = scan_failure_polarity(root)
+            return violations
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def arm(name, src, expect, forbid=()):
+        _ARM_COUNT[0] += 1
+        blob = " ".join(run(src))
+        ok = all(tok in blob for tok in expect) and not any(tok in blob for tok in forbid)
+        if not ok:
+            failures.append("C-B4 %s: want %s / forbid %s, got %s"
+                            % (name, list(expect), list(forbid), blob))
+        else:
+            print("[ok] C-B4 %s" % name)
+
+    arm("negated verdict guarding `return input` passes", _B4_CLEAN, (), ("[B4]",))
+    arm("the witness patch (polarity inverted) trips [B4]", _B4_INVERTED,
+        ("[B4]", "SUCCESS path"), ())
+    arm("the inline `if (!saveOutcome(...)) return input` passes", _B4_INLINE_CLEAN,
+        (), ("[B4]",))
+    arm("a positive guard through a local boolean trips [B4]", _B4_BOUND_POSITIVE,
+        ("[B4]", "SUCCESS path"), ())
+    arm("the same local boolean negated passes", _B4_BOUND_NEGATED, (), ("[B4]",))
+    arm("original bytes on the `else` (success) branch trips [B4]", _B4_ELSE_INVERTED,
+        ("[B4]", "SUCCESS path"), ())
+    arm("an unreadable (compound) outcome guard fails closed", _B4_COMPOUND,
+        ("[B4]", "cannot read"), ())
+    arm("a non-verdict guard (empty input) is out of scope", _B4_UNRELATED_GUARD,
+        (), ("[B4]",))
+
+    if failures:
+        for f in failures:
+            print("SELFTEST FAIL " + f)
+        return 1
+    print("✅ failure-polarity self-test has teeth: C-B4 (the keep-the-original "
+          "exit must hang off a NEGATED saveOutcome) flips red on the inverted "
+          "`if`, the inverted local and the inverted else branch, fails closed on "
+          "an unreadable compound guard, and stays green on the negated, inline, "
+          "local-negated and non-verdict shapes")
+    return 0
+
 def main():
     args = sys.argv[1:]
     if not args:
@@ -2841,9 +3173,11 @@ def main():
         rc4 = share_stream_self_test()
         rc5 = binary_write_self_test()
         rc6 = encode_verdict_self_test()
+        # [W-1027 W-06] C-B4 arms (counted into the same registration marker).
+        rc7 = failure_polarity_self_test()
         # [R3-t11] Registration marker: a stable tail the main session asserts on
         # (a gate gutted to `sys.exit(0)` cannot print it with a plausible count).
-        if (rc or rc2 or rc3 or rc4 or rc5 or rc6):
+        if (rc or rc2 or rc3 or rc4 or rc5 or rc6 or rc7):
             return 1
         print("DISCARDED_RETURN_GUARD_SELFTEST=PASS (%d arms)" % _ARM_COUNT[0])
         return 0
@@ -2868,6 +3202,9 @@ def main():
     # outbound destinations). Same pre-formatted `file:line [criterion] reason`
     # contract as the sections above.
     encode_violations, _encode_sites = scan_encode_verdict(args[0])
+    # [W-1027 W-06] C-B4: polarity of the keep-the-original guard around
+    # saveOutcome(…) — the `!` that decides which branch is the FAILURE one.
+    polarity_violations, _polarity_sites = scan_failure_polarity(args[0])
     if violations:
         print("❌ 丢弃了必须消费的返回值（看似接线，实则没生效）：")
         for rel, line, snippet, fn, why in violations:
@@ -2907,8 +3244,14 @@ def main():
             print("  %s" % msg)
         print("")
         print("  共 %d 处。" % len(encode_violations))
+    if polarity_violations:
+        print("❌ 失败极性段：保留原始字节的出口挂在了 saveOutcome 的 SUCCESS 分支（B-04）：")
+        for msg in polarity_violations:
+            print("  %s" % msg)
+        print("")
+        print("  共 %d 处。" % len(polarity_violations))
     if (violations or drain_violations or staged_violations or stream_violations
-            or binary_violations or encode_violations):
+            or binary_violations or encode_violations or polarity_violations):
         return 1
     print(
         "✅ discarded-return guard: no watchlisted return value is dropped "
@@ -2921,6 +3264,8 @@ def main():
           "no swallowed openOutputStream)")
     print("✅ discarded-return guard: encode verdict section green (every compress verdict reaches "
           "a failure exit)")
+    print("✅ discarded-return guard: failure-polarity section green (every keep-the-original "
+          "exit hangs off a NEGATED saveOutcome)")
     return 0
 
 

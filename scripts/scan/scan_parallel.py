@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Parallel driver for the 112 static CI checks.
+"""Parallel driver for the 113 static CI checks.
 
 The checks themselves live in `scripts/scan/scan_blocks.sh` (a data file, one
-block per check). This driver splits that file on the `echo "━━━ [N/112] … ━━━"`
+block per check). This driver splits that file on the `echo "━━━ [N/113] … ━━━"`
 header lines, runs every block in its own `sh -c` (cwd = repo root, ROOT
-exported), and prints the block output in the original 1..112 order.
+exported), and prints the block output in the original 1..113 order.
 
 Why a pool: the checks are independent single-file/small-tree analyses (each a
 python process, a few seconds of wall clock, mostly I/O + tree walks). Run
@@ -13,7 +13,7 @@ slowest check, so a bounded pool collapses the whole phase.
 
 Contract kept identical to the old serial scan.sh:
   * banner and summary box text,
-  * per-check `━━━ [N/112] title ━━━` header lines,
+  * per-check `━━━ [N/113] title ━━━` header lines,
   * exit 0 = all checks green, 1 = at least one red.
 
 A block's verdict is its RC variable (the block's failure branch sets RC=1).
@@ -39,7 +39,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BLOCKS = os.path.join(HERE, "scan_blocks.sh")
-HEADER_RE = re.compile(r'^echo "━━━ \[(\d+)/112\] (.*) ━━━"$', re.M)
+HEADER_RE = re.compile(r'^echo "━━━ \[(\d+)/113\] (.*) ━━━"$', re.M)
 
 BANNER = """╔══════════════════════════════════════════════════╗
 ║  RikkaMinis CI Scan Gate                        ║
@@ -101,8 +101,8 @@ def main(argv=None):
         jobs = max(1, int(jobs))
 
     blocks = parse_blocks()
-    if len(blocks) != 112:
-        print(f"note: {len(blocks)} check blocks (expected 112)")
+    if len(blocks) != 113:
+        print(f"note: {len(blocks)} check blocks (expected 113)")
     print(BANNER, flush=True)
     if jobs > 1:
         print(f"running {len(blocks)} checks with {jobs} workers", flush=True)
@@ -129,7 +129,7 @@ def main(argv=None):
         pending_q.put(None)
 
     # Print in block order as results complete, so CI logs read exactly like the
-    # serial transcript: [1/112] … [2/112] … no interleaving.
+    # serial transcript: [1/113] … [2/113] … no interleaving.
     buffered = {}
     next_num = blocks[0][0]
     passed = failed = 0
@@ -158,12 +158,12 @@ def main(argv=None):
         print("", flush=True)
         print("FAILED CHECKS:", flush=True)
         for num, title, rc in failures:
-            print(f"  [{num}/112] {title} (rc={rc})", flush=True)
+            print(f"  [{num}/113] {title} (rc={rc})", flush=True)
     if args.timings:
         print("", flush=True)
         print("SLOWEST CHECKS:", flush=True)
         for secs, num, title in sorted(timings, reverse=True)[:12]:
-            print(f"  {secs:6.1f}s  [{num}/112] {title}", flush=True)
+            print(f"  {secs:6.1f}s  [{num}/113] {title}", flush=True)
     return 1 if failures else 0
 
 

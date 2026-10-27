@@ -123,6 +123,36 @@ class SandboxDefectRegistryTest {
     }
 
     @Test
+    fun parse_accepts_half_width_colon_field_lines() {
+        // [witness-1027 W-11] The KDoc above FIELD_RE promises both colon
+        // widths (`- **症状**: …` is the third spelling it names), and real
+        // registry entries are written that way. Every fixture here used to
+        // feed the FULL-WIDTH `：` only, so narrowing `[:：]` to `：` kept this
+        // suite green while every half-width entry silently lost its symptom,
+        // its recovery path and its seeds — i.e. defect recall stopped firing
+        // exactly where it was needed and nothing failed.
+        val text = """
+            ### S28 ENOSYS 风暴
+            - **症状**: `Function not implemented`
+            - **健康路径**: 逐门独立进程循环跑
+            - **救不动**: 全量 scan.sh 整跑
+            ### S29 无粗体半角冒号
+            - 症状: `OSError: [Errno 38]`
+            - 健康路径: 同上（逐门跑）
+        """.trimIndent()
+        val defects = SandboxDefectRegistry.parse(text)
+        assertEquals(listOf("S28", "S29"), defects.map { it.id })
+        assertEquals(
+            listOf("function", "implemented"),
+            defects[0].seedGroups.single(),
+        )
+        assertTrue(defects[0].recovery!!.contains("逐门独立进程"))
+        assertTrue(defects[0].frozen!!.contains("scan.sh"))
+        assertEquals(listOf("oserror", "errno"), defects[1].seedGroups.single())
+        assertTrue(defects[1].recovery!!.contains("逐门跑"))
+    }
+
+    @Test
     fun generic_only_seed_groups_never_become_match_groups() {
         val text = """
             ### X9 t

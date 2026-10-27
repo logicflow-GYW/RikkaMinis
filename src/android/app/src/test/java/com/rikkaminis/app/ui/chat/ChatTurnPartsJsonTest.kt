@@ -246,7 +246,7 @@ class ChatTurnPartsJsonTest {
             parts = listOf(ParsedPart.Text("hi")),
             sourceChars = 30, malformed = false,
         )
-        val out = buildLlmMessagesFromParsed(listOf(row), File("/tmp"))
+        val out = buildLlmMessagesFromParsed(listOf(row), File("/tmp"), resizeForInference = { _, _ -> null })
         assertEquals(1, out.size)
         assertEquals(LLMMessage.Role.USER, out[0].role)
         assertEquals("hi", out[0].content)
@@ -255,7 +255,10 @@ class ChatTurnPartsJsonTest {
     @Test
     fun `malformed row falls back to raw partsJson as text`() {
         val e = entity("assistant", """[{"type":"text","value":"bro""")
-        val out = buildSingleLlmMessage(e, e.partsJson, emptyList(), malformed = true, mediaBaseDir = File("/tmp"))
+        val out = buildSingleLlmMessage(
+            e, e.partsJson, emptyList(), malformed = true, mediaBaseDir = File("/tmp"),
+            resizeForInference = { _, _ -> null },
+        )
         assertEquals(e.partsJson, out.content)
         assertEquals(LLMMessage.Role.ASSISTANT, out.role)
         assertEquals(e.id, out.dbMessageId)
@@ -269,11 +272,13 @@ class ChatTurnPartsJsonTest {
             ParsedPart.MediaRef(relativePath = "img.png", mimeType = "image/png", originalFileName = "", linuxPath = null),
         )
         val e = entity("user", "[]")
-        val out = buildSingleLlmMessage(e, "[]", parts, false, dir)
+        val out = buildSingleLlmMessage(e, "[]", parts, false, dir, resizeForInference = { _, _ -> null })
         assertEquals(1, out.imageParts.size)
         assertEquals(3, out.imageParts[0].data.size)
 
-        val outMissing = buildSingleLlmMessage(e, "[]", parts, false, dir.parentFile)
+        val outMissing = buildSingleLlmMessage(
+            e, "[]", parts, false, dir.parentFile, resizeForInference = { _, _ -> null },
+        )
         assertEquals(0, outMissing.imageParts.size)
     }
 
