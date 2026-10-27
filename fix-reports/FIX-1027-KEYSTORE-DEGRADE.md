@@ -142,6 +142,21 @@ OK (18 tests)
   没有到期清理（没有「备份已被用户确认无用」的信号可用，自动删反而制造新的静默丢失）。
   触发条件：备份占用的空间出现在存储统计异常里，或用户抱怨 `shared_prefs/` 里出现
   不明文件；那时加一个有上限的清理入口（只在 Settings 里显式触发）。
+- **R4 —— 实例注册表是全局一把锁，锁内跑完整恢复流程**（主会话复核时补登）：
+  `DegradeRegistry.resolve` 用单个 `synchronized(lock)` 同时守「缓存查表」与
+  `create()` 本身。正常路径下 `create()` 是首次读 XML（几十 ms），代价是冷启动时
+  两个 store 的 lazy 初始化被串行化；异常路径下 `create()` 要跑满 3 次 build + 退避
+  + 删文件重建（秒级），期间**所有** fileName 的 `safeCreate` 都阻塞。
+  判 **P2 不修**：触发条件 = keystore 已经在坏的场景（本来就慢），且最坏后果是启动
+  变慢而非 ANR 以外的失败；per-fileName 锁会引入第二层复杂度而收益不可测。
+  升级触发：真机日志出现「多 store 并发初始化且耗时 > 2s」的 trace，或 `safeCreate`
+  被搬到主线程热路径上。修法方向（届时）= `ConcurrentHashMap.computeIfAbsent`
+  按 fileName 分段，`create()` 在锁外跑、建好后再 put。
+  > 注：**不缓存加密实例不影响 `WorkerKeyFreshness` 的判据**——Android 的
+  > SharedPreferences 本来就是 `ContextImpl.sSharedPrefsCache` 的进程单例，
+  > 每次 `EncryptedSharedPreferences.create` 拿到的底层 prefs 都是同一份缓存，
+  > wrapper 复用与否都读不到别的进程刚写的新值；新鲜度靠 mtime + 进程死亡，
+  > 与本次改动正交（已在复核时逐行确认）。
 
 ## 7. 故意不做的事（半径纪律）
 
