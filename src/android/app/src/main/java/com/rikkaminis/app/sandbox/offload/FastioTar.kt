@@ -481,6 +481,20 @@ internal class TarExtractOutcome : EntryBudget {
     var symlinks = 0L
     var bytes = 0L
     var skippedSpecial = 0L
+
+    /**
+     * [§6 F2] LNKTYPE members materialised by COPYING the already-unpacked
+     * target (`Files.copy`) — the target file appears on disk, as an
+     * independent regular file. A hard link cannot be created here anyway:
+     * the destination may be on a filesystem that has no links (FAT/exFAT
+     * SD card), so a copy is the only implementation that always lands.
+     *
+     * Counted in [files] (two real files landed) but NOT in [bytes]: the
+     * payload was already counted once, with the regular member it copies.
+     */
+    var hardLinked = 0L
+
+    /** LNKTYPE members whose target was NOT found in the archive (an error). */
     var skippedHardlink = 0L
     var paxHeaders = 0L
     var longNameHeaders = 0L
@@ -557,6 +571,12 @@ internal fun tarExtract(
 ) {
     val reader = TarReader(source)
     val declaredLinks = HashSet<String>()
+    // [§6 F2] normalized member name -> the regular file actually written for
+    // it, so an LNKTYPE member that follows can be materialised by copy.
+    // Keyed by the NORMALIZED name: the link target is spelled the way the
+    // archive was built (`./src/a.txt` vs `src/a.txt`) and both must resolve
+    // to the same member.
+    val extractedFiles = HashMap<String, Path>()
     try {
         Files.createDirectories(dest)
         while (true) {
@@ -604,11 +624,50 @@ internal fun tarExtract(
                         out.symlinks++
                     }
                     '1' -> {
-                        // Hard links are not materialized in v1: the file is
-                        // already in the archive as a regular member, so the
-                        // content is not lost — the sharing is. Counted, not silent.
-                        out.skippedHardlink++
-                        if (out.skippedNames.size < MAX_REPORTED_SKIPS) out.skippedNames.add(member.name)
+                        // [§6 F2] Materialised by COPY, not by link: the file
+                        // named by this member has to appear at `target`, and a
+                        // hard link cannot be created on every filesystem the
+                        // destination may live on. The source is the regular
+                        // member already unpacked under `linkName` — this is
+                        // the same content, written twice on disk (the sharing
+                        // is the one thing a copy cannot reproduce).
+                        // A link whose target is missing is a DEFECT in the
+                        // archive, not an unsupported feature: reported as an
+                        // error, never silently dropped (an empty file would
+                        // be invented content).
+                        val linkKey = tarNormalizeMember(member.linkName)?.joinToString("/")
+                        val linkSource = linkKey?.let { extractedFiles[it] }
+                        if (linkKey == null || linkSource == null ||
+                            !Files.isRegularFile(linkSource, LinkOption.NOFOLLOW_LINKS)
+                        ) {
+                            out.skippedHardlink++
+                            if (out.skippedNames.size < MAX_REPORTED_SKIPS) out.skippedNames.add(member.name)
+                            out.errors.add(
+                                "${member.name}: hard link target '${member.linkName}' is not a regular " +
+                                    "member extracted before this entry; refusing to invent its content",
+                            )
+                            reader.skipData()
+                            continue
+                        }
+                        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+                            if (!force) {
+                                out.errors.add("${member.name}: already_exists (pass --force to replace)")
+                                reader.skipData()
+                                continue
+                            }
+                            if (Files.isDirectory(target, LinkOption.NOFOLLOW_LINKS)) {
+                                out.errors.add("${member.name}: target is a directory; refusing to replace it")
+                                reader.skipData()
+                                continue
+                            }
+                            Files.delete(target)
+                        }
+                        Files.createDirectories(target.parent)
+                        Files.copy(linkSource, target)
+                        applyMetadata(target, member)
+                        normalized?.let { extractedFiles[it.joinToString("/")] = target }
+                        out.files++
+                        out.hardLinked++
                     }
                     '0', '\u0000', '7' -> {
                         if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
@@ -627,6 +686,7 @@ internal fun tarExtract(
                         Files.createDirectories(target.parent)
                         Files.newOutputStream(target).use { sink -> reader.copyData(sink, member.size) }
                         applyMetadata(target, member)
+                        normalized?.let { extractedFiles[it.joinToString("/")] = target }
                         out.files++
                         out.bytes += member.size
                     }
