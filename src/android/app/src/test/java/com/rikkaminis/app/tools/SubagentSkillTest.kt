@@ -1,7 +1,6 @@
 package com.rikkaminis.app.tools
 
 import com.rikkaminis.app.data.model.AgentToolDefinition
-import com.rikkaminis.app.data.model.AgentToolParam
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull

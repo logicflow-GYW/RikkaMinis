@@ -5,7 +5,6 @@ import com.rikkaminis.app.data.repository.MCPRepository
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -187,7 +186,7 @@ class MCPOAuthLifecycleTest {
 
     private fun repoRoot(): File {
         System.getProperty("probe.repo")?.let { return File(it) }
-        var dir: File? = File(System.getProperty("user.dir"))
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
             if (File(dir, editSheet).exists()) return dir
             dir = dir.parentFile

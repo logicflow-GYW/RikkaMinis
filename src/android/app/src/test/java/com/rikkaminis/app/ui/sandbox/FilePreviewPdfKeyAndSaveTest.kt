@@ -1,6 +1,5 @@
 package com.rikkaminis.app.ui.sandbox
 
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -202,16 +201,6 @@ class FilePreviewPdfKeyAndSaveTest {
             rejected = true
         }
         assertTrue("negative control: the probe still accepts the pre-fix shape", rejected)
-    }
-
-    private fun countOccurrences(haystack: String, needle: String): Int {
-        var count = 0
-        var i = haystack.indexOf(needle)
-        while (i >= 0) {
-            count++
-            i = haystack.indexOf(needle, i + needle.length)
-        }
-        return count
     }
 
     private fun readRepoFile(relative: String): String {

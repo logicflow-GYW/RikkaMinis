@@ -167,7 +167,7 @@ class ModelExecutionSingleReadTest {
     // ---- 3) wiring: one read on disk, parsed body handed to both executors ----
 
     private fun readRepoFile(relative: String): String {
-        var dir: java.io.File? = java.io.File(System.getProperty("user.dir"))
+        var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
             val f = java.io.File(dir, relative)
             if (f.exists()) return f.readText()

@@ -1,6 +1,5 @@
 package com.rikkaminis.app.ui.media
 
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -188,7 +187,7 @@ class FullscreenVideoWindowContractTest {
      * can start anywhere under the repo — no fixed depth works.
      */
     private fun readRepoFile(relative: String): String {
-        var dir: java.io.File? = java.io.File(System.getProperty("user.dir"))
+        var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
             val f = java.io.File(dir, relative)
             if (f.exists()) return f.readText()

@@ -236,7 +236,7 @@ class DaoLoadMessagesConvergenceTest {
     // ------------------------------------------------------------------
 
     private fun repoFile(relative: String): String {
-        var dir: File? = File(System.getProperty("user.dir"))
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
             val f = File(dir, relative)
             if (f.exists()) return f.readText()
@@ -247,7 +247,7 @@ class DaoLoadMessagesConvergenceTest {
 
     /** `.../src/android` — the directory holding `app/src/main/java/...`. */
     private fun androidSrcRoot(): File {
-        var dir: File? = File(System.getProperty("user.dir"))
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
             if (File(dir, "app/src/main/java/com/rikkaminis/app").isDirectory) return dir
             dir = dir.parentFile

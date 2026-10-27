@@ -6,7 +6,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.LayoutCoordinates
@@ -551,11 +550,6 @@ class SelectionController {
         val de = within(end)
         val nearest = if (ds <= de) Handle.Start to ds else Handle.End to de
         return if (nearest.second <= hitSlopPx * 1.5f) nearest.first else null
-    }
-
-    private fun distance(a: Offset, b: Offset): Float {
-        val dx = a.x - b.x; val dy = a.y - b.y
-        return kotlin.math.sqrt(dx * dx + dy * dy)
     }
 
     /**

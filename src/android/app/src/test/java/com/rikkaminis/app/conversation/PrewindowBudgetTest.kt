@@ -6,7 +6,6 @@ import com.rikkaminis.app.data.model.AgentToolDefinition
 import com.rikkaminis.app.data.model.AgentToolParam
 import com.rikkaminis.app.data.model.LLMMessage
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 

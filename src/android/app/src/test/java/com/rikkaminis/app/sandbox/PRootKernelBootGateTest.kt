@@ -130,7 +130,7 @@ class PRootKernelBootGateTest {
 
     @Test
     fun `the critical section is not reachable except through boot`() {
-        var dir: File? = File(System.getProperty("user.dir"))
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
         var root: File? = null
         while (dir != null) {
             val candidate = File(dir, "src/android/app/src/main/java/com/rikkaminis/app")
@@ -150,7 +150,7 @@ class PRootKernelBootGateTest {
     }
 
     private fun readRepoFile(relative: String): String {
-        var dir: File? = File(System.getProperty("user.dir"))
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
             val f = File(dir, relative)
             if (f.exists()) return f.readText()

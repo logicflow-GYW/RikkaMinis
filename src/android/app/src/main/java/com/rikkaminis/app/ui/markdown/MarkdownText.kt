@@ -59,7 +59,6 @@ import com.rikkaminis.app.ui.DisplayBitmapLimits.limitDisplaySize
 import com.rikkaminis.app.ui.chat.LocalMarkdownSessionId
 import com.rikkaminis.app.ui.chat.rememberMdMediaFile
 import com.rikkaminis.app.ui.media.resolvedMediaSourceKey
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext

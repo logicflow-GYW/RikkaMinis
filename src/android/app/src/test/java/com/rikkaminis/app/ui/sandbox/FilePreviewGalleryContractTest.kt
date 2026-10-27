@@ -100,7 +100,7 @@ class FilePreviewGalleryContractTest {
     // ── helpers ─────────────────────────────────────────────────────────
 
     private fun readRepoFile(relative: String): String {
-        var dir: File? = File(System.getProperty("user.dir"))
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
             val f = File(dir, relative)
             if (f.exists()) return f.readText()
@@ -183,7 +183,7 @@ class FilePreviewGalleryContractTest {
 
     /** Counts [needle] occurrences across every production .kt file. */
     private fun countInProductionSrc(needle: String): Int {
-        var dir: File? = File(System.getProperty("user.dir"))
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
         var root: File? = null
         while (dir != null) {
             val f = File(dir, PROD_SRC)

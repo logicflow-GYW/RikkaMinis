@@ -2,7 +2,6 @@ package com.rikkaminis.app.sandbox.offload
 
 import java.io.File
 import java.io.FileNotFoundException
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -127,7 +126,7 @@ class ModelUseProviderFilterTest {
     // ── helpers ─────────────────────────────────────────────────────────────
 
     private fun readRepoFile(relative: String): String {
-        var dir: File? = File(System.getProperty("user.dir"))
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
             val f = File(dir, relative)
             if (f.exists()) return f.readText()

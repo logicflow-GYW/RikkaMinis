@@ -669,7 +669,7 @@ class BrowserSessionBindingTest {
     private fun readRepoFile(relative: String): String {
         // Gradle (CI) sets user.dir to the module dir; a sandbox JVM run may
         // start anywhere under the repo — walk up instead of assuming a depth.
-        var dir: File? = File(System.getProperty("user.dir"))
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
             val f = File(dir, relative)
             if (f.exists()) return f.readText()

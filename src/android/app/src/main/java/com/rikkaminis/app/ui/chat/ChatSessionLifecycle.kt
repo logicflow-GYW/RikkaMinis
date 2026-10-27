@@ -1,48 +1,30 @@
 package com.rikkaminis.app.ui.chat
 
-import android.os.SystemClock
 import android.util.Log
 import com.rikkaminis.app.conversation.ContextCompactor
-import com.rikkaminis.app.conversation.appendPinnedSection
-import com.rikkaminis.app.conversation.extractPinnedUserMessages
-import com.rikkaminis.app.conversation.pinnedSectionInner
-import com.rikkaminis.app.conversation.stripPinnedSection
-import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import com.rikkaminis.app.data.db.CompactMarkerEntity
 import com.rikkaminis.app.data.db.MessageEntity
 import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.LLMMessage
-import com.rikkaminis.app.data.model.LLMModel
-import com.rikkaminis.app.data.model.LLMResponse
 import com.rikkaminis.app.data.model.ModelEntry
 import com.rikkaminis.app.data.model.ProviderInstance
 import com.rikkaminis.app.data.model.ThinkingLevel
 import com.rikkaminis.app.data.model.RoutingStrategy
 import com.rikkaminis.app.diagnostics.SessionIdAliases
 import com.rikkaminis.app.logging.AppLogger
-import com.rikkaminis.app.provider.LLMProvider
-import com.rikkaminis.app.sandbox.offload.ProviderExecutionGateway
 import com.rikkaminis.app.provider.ProviderFactory
-import com.rikkaminis.app.sandbox.ExecutionCoordinator
 import com.rikkaminis.app.service.SessionActivityTracker
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import org.json.JSONArray
 import org.json.JSONObject
 import androidx.lifecycle.viewModelScope
-import com.rikkaminis.app.R
 import com.rikkaminis.app.agent.InterruptedTailDetector
 import com.rikkaminis.app.agent.InterruptedTailPartKind
 import com.rikkaminis.app.agent.InterruptedTailShape
 import com.rikkaminis.app.agent.InterruptedTailSnapshot
-import com.rikkaminis.app.agent.runtime.AgentRunEvent
-import com.rikkaminis.app.agent.runtime.AgentRunPhase
-import com.rikkaminis.app.tools.AgentTraceRecorder
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 
 // [FE-5 batch 5] Session lifecycle & compaction cluster extracted verbatim
 // from ChatViewModel as extension functions: session load/restore, context

@@ -33,7 +33,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.rikkaminis.app.R
 import com.rikkaminis.app.data.repository.MemoryRepository
-import com.rikkaminis.app.ui.components.MemoryFileViewerContent
 import com.rikkaminis.app.ui.components.MinisTextButton
 import com.rikkaminis.app.ui.theme.ChatColors
 

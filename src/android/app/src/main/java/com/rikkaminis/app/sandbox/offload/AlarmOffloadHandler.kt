@@ -409,12 +409,6 @@ class AlarmOffloadHandler(private val context: Context) : NativeOffloadHandler {
         return NativeOffloadResult(0, OffloadOutput.formatBody(envelope.toString(2), args) + "\n")
     }
 
-    private fun wrap(text: String, args: OffloadArgs): NativeOffloadResult {
-        val err = text.startsWith("Error")
-        val formatted = OffloadOutput.formatBody(text.trimEnd('\n'), args)
-        return NativeOffloadResult(if (err) 1 else 0, "$formatted\n")
-    }
-
     companion object {
         private const val TAG = "AlarmOffload"
         private const val VIEW_URL = "minis://views/alarm"

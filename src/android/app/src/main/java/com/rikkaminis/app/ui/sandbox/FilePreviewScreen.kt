@@ -7,8 +7,6 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
-import android.os.Build
-import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.print.PrintAttributes
 import android.print.PrintManager
@@ -86,7 +84,6 @@ import com.rikkaminis.app.browser.SafeWebViewClient
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.ui.components.ImageGalleryItem
 import com.rikkaminis.app.ui.components.rememberIosBounceOverscrollEffect
-import com.rikkaminis.app.ui.markdown.MarkdownText
 import com.rikkaminis.app.ui.media.InlineAudioPlayer
 import com.rikkaminis.app.ui.media.InlineVideoPlayer
 import com.rikkaminis.app.ui.preview.ReleaseStep
@@ -99,7 +96,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
-import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import com.rikkaminis.app.ui.components.MinisTextButton
 

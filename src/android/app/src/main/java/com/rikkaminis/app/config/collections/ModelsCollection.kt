@@ -10,7 +10,6 @@ import com.rikkaminis.app.config.fields.ClosureField
 import com.rikkaminis.app.config.fields.ReadOnlyField
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ModelEntry
-import com.rikkaminis.app.data.model.ModelOverrides
 import com.rikkaminis.app.data.model.directionalModalities
 import com.rikkaminis.app.data.model.expandDirectionalModalities
 import com.rikkaminis.app.data.model.modalityNamesInOrder

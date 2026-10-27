@@ -7,7 +7,6 @@ import android.content.Context
 import android.content.Intent
 import android.text.format.Formatter
 import android.widget.Toast
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer

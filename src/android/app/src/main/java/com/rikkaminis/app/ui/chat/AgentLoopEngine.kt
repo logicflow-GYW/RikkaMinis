@@ -1,10 +1,8 @@
 package com.rikkaminis.app.ui.chat
 
 import com.rikkaminis.app.agent.Level
-import com.rikkaminis.app.agent.ToolLoopDetector
 import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.AgentToolDefinition
-import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.provider.ToolJsonRepair
 import com.rikkaminis.app.service.SessionActivityTracker
 import com.rikkaminis.app.tools.ToolConcurrencyPolicy

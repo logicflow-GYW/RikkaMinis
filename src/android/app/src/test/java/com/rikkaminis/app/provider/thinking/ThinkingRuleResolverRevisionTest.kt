@@ -1,7 +1,6 @@
 package com.rikkaminis.app.provider.thinking
 
 import org.json.JSONArray
-import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue

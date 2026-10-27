@@ -666,12 +666,3 @@ private fun shizukuActionTitleRes(state: ShizukuManager.State): Int = when (stat
     ShizukuManager.State.NEED_PERMISSION -> R.string.shizuku_grant_btn
     ShizukuManager.State.READY -> 0  // never displayed (systemReady=true)
 }
-
-private fun performShizukuAction(context: Context, state: ShizukuManager.State) {
-    when (state) {
-        ShizukuManager.State.NOT_INSTALLED -> ShizukuManager.openInstallPage(context)
-        ShizukuManager.State.NOT_RUNNING -> ShizukuManager.openShizukuApp(context)
-        ShizukuManager.State.NEED_PERMISSION -> ShizukuManager.requestPermission()
-        ShizukuManager.State.READY -> {} // no-op; row never rendered
-    }
-}

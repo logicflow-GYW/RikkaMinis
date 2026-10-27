@@ -5,7 +5,6 @@ import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.rikkaminis.app.data.db.AppDatabase
-import com.rikkaminis.app.data.db.ChatSessionEntity
 import com.rikkaminis.app.data.db.MessageEntity
 import com.rikkaminis.app.data.repository.ChatRepository
 import kotlinx.coroutines.runBlocking

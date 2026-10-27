@@ -9,12 +9,10 @@ package com.rikkaminis.app.ui.chat
 
 import com.rikkaminis.app.data.BPETokenizer
 import com.rikkaminis.app.data.ContextOffload
-import com.rikkaminis.app.data.ContextPolicy
 import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.R
-import org.json.JSONObject
 
 /** Keep at least this many newest complete turns when hard-trimming (verbatim from VM companion). */
 internal const val MIN_CONTEXT_TURNS_TO_KEEP = 6

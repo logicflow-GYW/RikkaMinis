@@ -1,6 +1,5 @@
 package com.rikkaminis.app.backup
 
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.Writer
 

@@ -32,8 +32,6 @@ class ModelListProviderRegistryTest {
         credentialType = ProviderCredential.apiKey,
     )
 
-    private fun ok(key: String) = listOf(LLMModel(id = key, displayName = key, provider = "openai"))
-
     /** Records every credential string the fetcher was handed. */
     private class RecordingFetcher(private val alive: Set<String>) : ModelListProvider {
         val seen = mutableListOf<String?>()

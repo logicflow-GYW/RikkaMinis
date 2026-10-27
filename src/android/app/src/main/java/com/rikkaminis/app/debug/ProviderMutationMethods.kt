@@ -15,7 +15,6 @@ import com.rikkaminis.app.data.model.ImageEndpointMode
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ModelEntry
 import com.rikkaminis.app.data.model.ModelGroup
-import com.rikkaminis.app.data.model.ModelOverrides
 import com.rikkaminis.app.data.model.ProviderCredential
 import com.rikkaminis.app.data.model.ProviderInstance
 import com.rikkaminis.app.config.collections.canonicalModelProviderName

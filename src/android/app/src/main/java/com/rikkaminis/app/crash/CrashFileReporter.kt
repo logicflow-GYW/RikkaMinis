@@ -7,8 +7,6 @@ import org.acra.ReportField
 import org.acra.sender.ReportSender
 import org.acra.sender.ReportSenderFactory
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 
 /**
