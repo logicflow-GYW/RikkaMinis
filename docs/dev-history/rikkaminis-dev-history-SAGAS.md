@@ -3,15 +3,15 @@
 > **这是档案的「主题视角」**。同一批条目，换一根轴来读：
 > - `rikkaminis-dev-history.md` — 时间轴（这天发生了什么）
 > - `rikkaminis-dev-history-INDEX.md` — 按天索引（快速跳转）
-> - **本文件** — 主题轴（这件事的完整历史，跨 85 天）
+> - **本文件** — 主题轴（这件事的完整历史，跨 86 天）
 >
 > 由 `skills/dev-history-sync/scripts/build_sagas.py` 从档案自动生成，可重复执行。
 
-- 覆盖范围：2026-08-03 ～ 2026-10-26，共 85 天
-- 条目总数：2325（源文件：rikkaminis-dev-history.md）
+- 覆盖范围：2026-08-03 ～ 2026-10-27，共 86 天
+- 条目总数：2369（源文件：rikkaminis-dev-history.md）
 - 主题数：24
-- 未归入任何主题：197 条（8%，列在文末）
-- 归入 ≥4 个主题（说明规则偏松）：177 条
+- 未归入任何主题：201 条（8%，列在文末）
+- 归入 ≥4 个主题（说明规则偏松）：184 条
 - 标 `↳` 的条目是**推断归属**：标题里没有主题词（「X 完成 / X 收尾」这类收尾条目，主题词在**上一条**里），由「12 小时内最近一条有主题的条目」继承而来，共 141 条。
 
 ### 怎么读
@@ -29,27 +29,27 @@
 |---|------|------|------|------|
 | 1 | 滚动跟随 / 流式跳动 | 79 | 08-05 ～ 10-24 | 观察中 |
 | 2 | 输入框 / 键盘 / 粘贴 | 36 | 08-04 ～ 10-24 | 已闭环 |
-| 3 | native 内存 / OOM / 崩溃 | 161 | 08-03 ～ 10-24 | 持续跟踪 |
-| 4 | 沙箱 / rootfs / PRoot / 终端 | 148 | 08-03 ～ 10-25 | 稳定 |
-| 5 | fastio offload / syscall 税 | 40 | 08-20 ～ 10-26 | 已合并 main |
-| 6 | 流式回答中断 / 恢复 / 取消 | 185 | 08-03 ～ 10-26 | 已闭环 |
-| 7 | 思考 / 推理泄漏 | 97 | 08-08 ～ 10-26 | 已闭环 |
-| 8 | 上下文压缩 / 记忆 / 预算 | 210 | 08-06 ～ 10-26 | 稳定 |
-| 9 | Provider / 模型组 / 负载均衡 | 162 | 08-04 ～ 10-26 | 已闭环 |
-| 10 | 备份 / 多端同步 | 174 | 08-03 ～ 10-26 | 收敛 |
-| 11 | 渲染性能 / Markdown / 长会话卡顿 | 135 | 08-05 ～ 10-26 | 已闭环 + 持续加固 |
-| 12 | 审计 / 整改（多轮） | 373 | 08-03 ～ 10-26 | 常态机制 |
-| 13 | 多会话并行协作 / 派发 / 交接 | 696 | 08-04 ～ 10-26 | 成熟 |
-| 14 | CI / 构建 / 发布流水线 | 707 | 08-03 ～ 10-26 | 稳定 |
-| 15 | 开发档案 / 记忆 / 工具链 | 196 | 08-03 ～ 10-26 | 常态维护 |
-| 16 | 会话 / 导航 / 抽屉交互 | 167 | 08-03 ～ 10-25 | 已闭环 |
+| 3 | native 内存 / OOM / 崩溃 | 162 | 08-03 ～ 10-27 | 持续跟踪 |
+| 4 | 沙箱 / rootfs / PRoot / 终端 | 149 | 08-03 ～ 10-27 | 稳定 |
+| 5 | fastio offload / syscall 税 | 41 | 08-20 ～ 10-26 | 已合并 main |
+| 6 | 流式回答中断 / 恢复 / 取消 | 187 | 08-03 ～ 10-27 | 已闭环 |
+| 7 | 思考 / 推理泄漏 | 98 | 08-08 ～ 10-26 | 已闭环 |
+| 8 | 上下文压缩 / 记忆 / 预算 | 212 | 08-06 ～ 10-27 | 稳定 |
+| 9 | Provider / 模型组 / 负载均衡 | 164 | 08-04 ～ 10-26 | 已闭环 |
+| 10 | 备份 / 多端同步 | 176 | 08-03 ～ 10-26 | 收敛 |
+| 11 | 渲染性能 / Markdown / 长会话卡顿 | 136 | 08-05 ～ 10-26 | 已闭环 + 持续加固 |
+| 12 | 审计 / 整改（多轮） | 376 | 08-03 ～ 10-27 | 常态机制 |
+| 13 | 多会话并行协作 / 派发 / 交接 | 730 | 08-04 ～ 10-27 | 成熟 |
+| 14 | CI / 构建 / 发布流水线 | 736 | 08-03 ～ 10-27 | 稳定 |
+| 15 | 开发档案 / 记忆 / 工具链 | 200 | 08-03 ～ 10-27 | 常态维护 |
+| 16 | 会话 / 导航 / 抽屉交互 | 169 | 08-03 ～ 10-27 | 已闭环 |
 | 17 | 平台适配 / 通知 / 图标 / 权限 | 103 | 08-03 ～ 10-26 | 部分放弃 |
 | 18 | 国际化 / 文案 / 本地化 | 33 | 08-04 ～ 10-26 | 已闭环 |
 | 19 | 上游 / 生态吸收 / 开源 | 104 | 08-03 ～ 10-26 | 常态 |
 | 20 | UI 组件 / 设置页 / 交互微调 | 123 | 08-04 ～ 10-24 | 持续 |
 | 21 | Token 用量 / 成本统计 | 84 | 08-05 ～ 10-23 | 已闭环 |
-| 22 | 人格 / Soul / 提示词 / 技能体系 | 170 | 08-04 ～ 10-26 | 稳定 |
-| 23 | 语音 / 多模态输入 | 57 | 08-03 ～ 10-26 | 低优先级维护 |
+| 22 | 人格 / Soul / 提示词 / 技能体系 | 174 | 08-04 ～ 10-26 | 稳定 |
+| 23 | 语音 / 多模态输入 | 58 | 08-03 ～ 10-26 | 低优先级维护 |
 | 24 | 被否掉的方向（决策记录） | 51 | 08-04 ～ 10-18 | 持续累积 |
 
 ---
@@ -189,7 +189,7 @@
 
 ## 3. native 内存 / OOM / 崩溃
 
-**跨度** 2026-08-03 ～ 2026-10-24 · **161 条** · **状态** 持续跟踪（09-13 三件套已合并；SOFT 450 / HARD 1200 阈值待 1–2 周真实数据复核）
+**跨度** 2026-08-03 ～ 2026-10-27 · **162 条** · **状态** 持续跟踪（09-13 三件套已合并；SOFT 450 / HARD 1200 阈值待 1–2 周真实数据复核）
 
 **叙事**：08-09 Scudo OOM → 08-15 早三次 OOM → 08-17 native offload 泄漏实证 → 08-20~22 进程隔离五 Phase + 小号 TF-A..TF-J 十连修 → 08-25/26 「RSS 单调泄漏」被沙箱实测**推翻**（是 PRoot VSZ reserve 不是泄漏）→ 09-13 两次 SIGABRT / RSS 5.4–6.1GB，口径从 VmRSS 换 **RssAnon**（61% 信号是可回收页）+ 崩溃态取证 → 09-15 HangDetector 后台冻结假阳性。**这是全档案最长的 saga，也是唯一「调查被自己的实测推翻」的一条。**
 
@@ -356,10 +356,11 @@
 | 10-22 16:27 | F1 收口（COLLECT-R1 同族普查第 3 处）：`fix/verify-2476-rssprobe-finally` @ `3a740442`，CI #2477 success，停在分支 | 身份链：基线 main 5dd278da → 单提交 3a740442 → 本地 == ls-remote == CI head_sha = 3a7404421163fd8deef84e35e103fd00dd71a31… |
 | 10-23 11:54 | FIX-4 收口（deep-audit-1044 / v23 波 A-05 P1）：`fix/dv24-a4-config-session-writethrough` @ `90a0a064`，CI #2530 success（源码树 = `9a002abf`），停在分支 | 身份链：基线 main f94413f5 → 4 提交（b7979890 生产 / 0f5897e7 测试 / 2451a671 门 / 9a002abf→90a0a064 报告回填）。CI 绿于 9a002abf，HE… |
 | 10-24 13:11 | VERIFY-2597 第 3 轮验证（CLI/工具面）+ 崩溃缺陷登记 —— 2026-10-24 12:57–13:2x | ★ 新缺陷（P1，已登记 backlog §2597-VERIFY-3）：minis-sessions-cli send --session <不存在的 id> 两次把 app 进程打崩（12:57:02 / 12:57… |
+| 10-27 00:43 | U2 图像链收口：分支 `fix/image-chain-oob` @ `9d8d70f77`（绿 sha `db8c0b202`），CI #2759 绿，停分支（2026-10-27 凌晨） | 四笔全修，1 提交生产 6 文件 +231/−87 + 测试 2 文件（ChatImageRestoreTest 8 臂 + DailyLogRollupMetricsTest 3 臂）。 |
 
 ## 4. 沙箱 / rootfs / PRoot / 终端
 
-**跨度** 2026-08-03 ～ 2026-10-25 · **148 条** · **状态** 稳定（09-05 rootfs 事件日志 + apk 自动恢复已上线）
+**跨度** 2026-08-03 ～ 2026-10-27 · **149 条** · **状态** 稳定（09-05 rootfs 事件日志 + apk 自动恢复已上线）
 
 **叙事**：08-03 proot 源码构建（loader 必须独立打包）→ 08-09 终端死屏根治 + 反复开关 OOM → 08-13 PRoot 文件 IO 幽灵层 + apk 包持久化方案 3 + rootfs 占位 tar → 09-05 「沙箱重置、工具不见」三源取证（**不是重置，是 per-session 设计**）→ 09-13 apk 残留进程占锁误诊为「源慢」。**教训密度最高的一条**：沙箱里几乎每个「环境坏了」最后都归到「你误诊了现象」。
 
@@ -513,10 +514,11 @@
 | 10-24 09:56 | FIX-A1 收口（deep-audit-1048 / A-01+A-08 P1）：`fix/dv28-a1-openai-toolcall-eof` @ `c17f0200`，CI #40050571513 success，停在分支 | 身份链：基线 eea9f407 → 4 提交（生产 a6d5cd21 +127/−10 / 测试 1d9ac1cf +222 / 门 07159efe +231/−34 = CI 绿 sha / 报告 c17f0200）… |
 | 10-24 14:31 | VERIFY-2597 第 5 轮：CLI 可脚本化 6 条全部收尾 + 一个新发现 —— 2026-10-24 14:1x–14:4x | 总账（台账 ledger-1040-1048.json 已同步）：86 条中 CLEARED 9 / PARTIAL 11 / BLOCKED 8 / PENDING 58（84 口径：剩 58 条未动，全为 UI 35… |
 | 10-25 05:58 | wide-1024 支 09-browser-webview 收口：5 门见证加固，16/16 全抓住，CI #2632 绿（2026-10-25 早） | 分支 fix/meta-wide-09-browser-webview @ 5f384731（源码树），报告提交 1059156e（fix-reports/ 5 份，源码与绿 sha 等价：git diff --name… |
+| 10-27 06:41 | 沙箱缺陷召回修复收口（分支 `fix/defect-recall-seeds` @ `9d7c0c85b`，报告 `acdeae6b8`，CI `40409678884` 绿，停分支）—— 2026-10-27 | 用户说「修吧」→ 走分支隔离全流程收口。改动 2 文件 +187/−15（SandboxDefectRegistry.kt +96、测试臂 15→20）。 |
 
 ## 5. fastio offload / syscall 税
 
-**跨度** 2026-08-20 ～ 2026-10-26 · **40 条** · **状态** 已合并 main（三期原语 + du 口径 P1 + F1 全部合并；未验证面 = 真机高并发耗时与发热）
+**跨度** 2026-08-20 ～ 2026-10-26 · **41 条** · **状态** 已合并 main（三期原语 + du 口径 P1 + F1 全部合并；未验证面 = 真机高并发耗时与发热）
 
 **叙事**：09-18 syscall 税首次量化（~200µs/op，纯计算≈原生）→ 09-30 定案缓解分层（L0 行为约定 / L1 fastio offload 立项，Termux 方向被否）→ minis-fastio handler（du + rm + GuestPathMapper 前缀守卫）→ du 字节口径 P1（busybox vs GNU 两个 du 同名不同语义）→ gate 闭环（ASK_ONCE + 会话桶缓存）→ 第二期 find/grep/cp/mv → 第三期 tar（slip 三面 + 权限行）→ 10-01 分支审查 F1（tar 成员名用解析后绝对路径）修后合并。**主题：把文件密集原语从 proot 税里搬出去；每期都用「逐字节 parity + 双臂探针 + 变异负控」验收。**
 
@@ -562,10 +564,11 @@
 | 10-24 00:58 | FIX-A5 收口（deep-audit-1047 / A-07 P1）：5 个 offload handler 的 `--help` 恒 exit 2 | 身份链：基线 main 88ef9b27 → 5ec73d8f（生产 5 文件 +15/−5）→ 77248c41（测试 +78）→ dba13f46（门 +406/−2，CI 绿于此）→ f57111ce + 4199… |
 | 10-24 23:57 | fastio 不被调用诊断 + 提示词修复（fix/prompt-fastio-rg @ 27c951db，CI #2628 绿，停分支） | 用户问题：AI 不主动用 minis-fastio，总用慢的原生方式（场景：清理修过程积累的数据）。 |
 | 10-26 12:28 | B7-t06 收口：fastio_tar_bounds + marker_boundary 两门 12 条见证全 CAUGHT（分支 `fix/b7-fastiotar-marker`，门提交 `9101923ab`，报告 `fc5f728ac`，CI #2714 绿 @ 门提交，停分支） | 基线 base/batch5-shared @ e145ec961。改动面 = 2 个门脚本（+972/−481），生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_{lexer,ast,v… |
+| 10-26 19:20 | R3-t14 收口：offload_cli_args + fastio_tar_bounds 两门判据加固（6/6 见证反攻 CAUGHT，分支 `fix/r3-offload-fastio` @ `c0039db84`，CI #2735 绿，停分支） | 基线 main f0f14d46d。改动面 = 2 个门脚本（+1017/−2）+ 报告，生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门 112 / 夹具 344 不变。 |
 
 ## 6. 流式回答中断 / 恢复 / 取消
 
-**跨度** 2026-08-03 ～ 2026-10-26 · **185 条** · **状态** 已闭环（09-07 收口，含停止按钮竞态 + 多会话真并发真机验证）
+**跨度** 2026-08-03 ～ 2026-10-27 · **187 条** · **状态** 已闭环（09-07 收口，含停止按钮竞态 + 多会话真并发真机验证）
 
 **叙事**：08-18 「回答频繁断掉」诊断链（provider 层铁证健康）→ 08-24 首块超时 30000ms + retry 分类不对称 → 09-06 一天内连收四种形态：EOF 静默停、stream error 手动重试、content_filter→fallback、finish_reason=network_error 伪正常结束 → 09-07 预算墙第 4 形态 + provider-exec-concurrency。**「同一个用户现象 = 五种不同根因」的教科书案例**，每条都靠日志实证拆开。
 
@@ -756,10 +759,12 @@
 | 10-26 11:42 | B7-t01 收口：chat_session_id_binding + outcome_known_chain 两门 12 条见证全翻红（分支 `fix/b7-sessionbind-outcome` @ 报告 `1c2df293d`，CI #2710 绿，停分支） | 基线 base/batch7-shared（e145ec961）。门提交 926073cfc（2 文件 +795/−379，生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门 1… |
 | 10-26 12:07 | B7-t03 收口：parts_json_funnel + modelsvc_single_read 两门 12 条见证全 CAUGHT（分支 `fix/b7-t03-partsjson-modelsvc` @ `cc92f6e43`，CI #2711 绿，停分支） | 基线 e145ec961。改动面 = 2 个门脚本（parts_json +682/−276，modelsvc +449/−122），生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_{le… |
 | 10-26 13:10 | B7-t12 收口：webview_holder_url_source + chat_menu_prefs_listener 两门 12 条见证全翻红（分支 `fix/b7-webviewholder-chatmenu` @ `0dfb86e2b`，门提交 `378659481`，CI #2720 绿，停分支） | 基线 base/batch7-shared @ e145ec961。门提交 378659481（2 文件 +828/−437，生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门 … |
+| 10-27 00:30 | U4 收口：`file://` 契约「跨界编码 / 内部解码」（分支 `fix/fileurl-contract` @ `8ddb12e57`，绿 sha `621602d43`，CI #2757 绿，停分支） | 基点 T2 分支 8d00395af（含 T2 全部提交）。改动 8 文件 +450/−40：生产行为 4 文件（未越任务书白名单，全逐条登记）+ 3 测试 + 1 门脚本。 |
+| 10-27 01:25 | U1 收口：三原语第二轮 A1-A4 修复（分支 `fix/primitive-ast-round2` @ `5bdbc48ff`，CI #2761 绿，停分支） | 基线 1a4eff14d（T1 收口后，本支延续而非基于 main）。三个提交：47f988cfa（A1-A4）→ 626985db9（branch_value 补正）→ 5bdbc48ff（报告）。改动面 3 文件 +… |
 
 ## 7. 思考 / 推理泄漏
 
-**跨度** 2026-08-08 ～ 2026-10-26 · **97 条** · **状态** 已闭环（09-12 打包合并；同类新方言需重新进表）
+**跨度** 2026-08-08 ～ 2026-10-26 · **98 条** · **状态** 已闭环（09-12 打包合并；同类新方言需重新进表）
 
 **叙事**：08-14 思考折叠框缺失（模型组中转站场景）→ 08-18 「思考跑进正文」+ 断流诊断 → 08-20 thinking 级别无效 → 09-04 thinking-rules-port + 思考字段决策键 → 09-05 thinking-gap-close（审计出 2 HIGH）→ 09-11/12 **think 泄漏实锤：中转站 `<think>` 标签不在解析表**。核心难点：泄漏来自**上游 provider 的方言差异**，不是我们自己的解析 bug。
 
@@ -862,10 +867,11 @@
 | 10-23 20:12 | FIX-B3 收口（deep-audit-1046 / dv26 波 S-03 P1）：`fix/dv26-b3-anthropic-thinking-budget` @ `db3de4da`，CI #2559 success，停在分支 | 身份链：基线 main f7aba218 → 4 提交（8e3d361d 生产 / 22cb622a 测试 / c2c86207 门 = CI 验过的树 / db3de4da 报告）。git diff --name-on… |
 | 10-24 02:49 | FIX-A2 收口（deep-audit-1047 / A-02 P1）：`fix/dv27-a2-modelsvc-thinking-level` @ `2fc80db6`，CI #2578 success，停在分支 | 缺陷：ModelExecutionDispatcher.buildRequestJson 对非 OFF 档位无条件 put("thinking_level", level.name)，但 worker 只有流式路径解析；… |
 | 10-26 10:13 | B6-t07 收口：modeluse_proto_single_source + thinking_rule_editor_preserve 两门 13 条见证全 CAUGHT（分支 `fix/b6-modeluse-thinkrule` @ 门提交 `ae0cdce9c` + 报告 `12e879c00`，CI #2703 绿，停分支） | 基线 e145ec961（= main 6ac77c6b2 + 共享 _kotlin_valueflow）。门提交 ae0cdce9c（2 文件 +1237/−719，生产 .kt 0 行、scan.sh/test_sc… |
+| 10-26 19:06 | R3-t15 收口：anthropic_thinking_budget + thinking_wiring 两门补缝（7 条跨门缝见证全 CAUGHT，CI #2733 绿，停分支） | 支线 fix/r3-thinking-wiring @ 6bcb84cf4（门提交 3110d6e29），基线 main f0f14d46d。改动面 = 2 个门脚本 +912/−95，生产 .kt 0 行，scan.s… |
 
 ## 8. 上下文压缩 / 记忆 / 预算
 
-**跨度** 2026-08-06 ～ 2026-10-26 · **210 条** · **状态** 稳定（09-12 差距清单收敛：D1 攒着、D3/D4/D5 归档不吸收）
+**跨度** 2026-08-06 ～ 2026-10-27 · **212 条** · **状态** 稳定（09-12 差距清单收敛：D1 攒着、D3/D4/D5 归档不吸收）
 
 **叙事**：08-05 RAG v1 实验 → 08-06 经验记忆模块（实施→审查→修复→**08-07 整体摘除**）→ 08-12 上下文压缩引擎 T5 → 08-14 切片无清洗 + summary 注入 tool_result（400 报错）→ 08-16 动态预算 → 08-18 上下文窗口来源治理 → 08-31 memory facts + 语义索引 → 09-12 A1 Prompt Cache 调查（**结论：本地已是上游超集，无需移植**）。一条「先做、再摘、再重做」的螺旋线。
 
@@ -1081,10 +1087,12 @@
 | 10-25 19:39 | 第五批「门见证第二轮」材料已备好（基线 wide4 并集 1319cce7，未合并） | 产物：/var/minis/mounts/背景包/发送-A\|发送-B/（00 规则 8.9KB / 01 索引 22.8KB·20.8KB / 02 diff 190.7KB·176B / repo-1319cce7.z… |
 | 10-25 23:38 | B5-t02 收口：compact_decision + entry_id_rename 两门 12 条见证全 CAUGHT（分支 `fix/b5-compact-entryid` @ `c9ab770b4`，CI #40203205487 绿，停分支） | 基线 base/batch5-shared @ e145ec961（= main 6ac77c6b2 + 共享原语）。改动面 = 2 个门脚本（+720/−550），生产 .kt 0 行、scan.sh/test_sca… |
 | 10-26 10:00 | B6-t08 收口：session_provider_enabled + memory_ui_wiring 两门 13 条见证全翻红（分支 `fix/b6-sessionprov-memoryui` @ `72955761c`，CI #2700? 实为 run 40254147183 绿，停分支） | 基线 e145ec961（= main 6ac77c6b2 + 共享 _kotlin_valueflow）。门提交 2a237ae91（2 文件 +837/−640，生产 .kt 0 行、res/ 0 行、scan.sh… |
+| 10-27 06:41 | 沙箱缺陷召回修复收口（分支 `fix/defect-recall-seeds` @ `9d7c0c85b`，报告 `acdeae6b8`，CI `40409678884` 绿，停分支）—— 2026-10-27 | 用户说「修吧」→ 走分支隔离全流程收口。改动 2 文件 +187/−15（SandboxDefectRegistry.kt +96、测试臂 15→20）。 |
+| 10-27 07:02 | 两支合并 main + 发版 v1.0.0+2766（2026-10-27 07:0x） | 用户指令「检查云端的两个分支，没问题等他们跑完就合并」。核实到的两支 = 两个活动会话产出的分支（base/batch5-shared 是 main 祖先，无可合并内容，保留未动）。 |
 
 ## 9. Provider / 模型组 / 负载均衡
 
-**跨度** 2026-08-04 ～ 2026-10-26 · **162 条** · **状态** 已闭环（09-12 收尾；负载均衡语义已在代码级核实为「生效但语义与用户预期不同」）
+**跨度** 2026-08-04 ～ 2026-10-26 · **164 条** · **状态** 已闭环（09-12 收尾；负载均衡语义已在代码级核实为「生效但语义与用户预期不同」）
 
 **叙事**：08-04 loadBalance 轮转游标不前进 → 08-08 模型组 recovery 策略 → 08-14 模型组策略重构 P1–P4 + 思考折叠（中转站）→ 08-15 模型切换无缝（cancel+restart）→ 09-04 思考字段决策键（tokenrhythm 报错）→ 09-06 负载均衡请求级改造 → 09-11 多密钥轮换 + Groq 免费档不可用 → 09-12 「负载均衡像回退模式」**第二次**被报（08-04 同款问题）。**同一现象两次立项**，说明第一次的修法没解释清语义。
 
@@ -1252,10 +1260,12 @@
 | 10-26 10:12 | B6-t06 收口：deeplink_settings_routes + provider_type_registry 两门 12 条见证全翻红（分支 `fix/b6-deeplink-protype` @ 门提交 `92bc6ddbc`，CI #2705 绿，停分支） | 基线 base/batch5-shared @ e145ec961。门提交 92bc6ddbc（两文件 +974/−413，生产 .kt 0 行、scan.sh/test_scan.py/共享原语零触碰、门 112 / … |
 | 10-26 12:02 | B7-t04 收口：provider_ua_parity + auto_approve_bypass 两门 12 条见证全翻红（分支 `fix/b7-ua-autoapprove` @ 门提交 `579a99d86`，CI #2712 绿，停分支） | 基线 base/batch5-shared @ e145ec961。改动面 = 2 个门脚本（+992/−488，provider_ua_parity_check.py 1718→1960 行、auto_approve_… |
 | 10-26 12:30 | B7-t07 收口：session_sheet_id_binding + provider_models_cache_wiring 两门 12 条见证全 CAUGHT（分支 `fix/b7-sheetsession-provmodels`，门提交 `56617187e`，CI #2713 绿，报告 `11ee82526`，停分支） | 基线 base/batch5-shared @ e145ec961。改动面 = 2 个门脚本（+785/−436），生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_{lexer,ast,v… |
+| 10-26 19:57 | R3-t11 收口：discarded_return_guard + provider_remember_key 两门判据加固（第三轮 dual-gate · B 波） | 分支 fix/r3-discard-rememberkey（基线 main f0f14d46d）→ 门提交 b181fe44c（2 文件 +630/−116）→ 报告回填 79e4d781（源码树等价：git diff … |
+| 10-26 20:12 | R3-t22 收口：file_provider_paths + schedule_date_source 两门加固（分支 `fix/r3-filepaths-schedule` @ `990343cdd`，CI #2746 success，停分支） | 基线 main f0f14d46d，worktree round3b/wt/t22。改动面 = 2 个门脚本（+753/−4）+ 报告；生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零… |
 
 ## 10. 备份 / 多端同步
 
-**跨度** 2026-08-03 ～ 2026-10-26 · **174 条** · **状态** 收敛（多端同步已砍除，自动备份按「资产」语义保留）
+**跨度** 2026-08-03 ～ 2026-10-26 · **176 条** · **状态** 收敛（多端同步已砍除，自动备份按「资产」语义保留）
 
 **叙事**：08-04 WebDAV 备份把 main 编译弄坏 + 导入去重 → 08-09 备份并发 OOM → 08-10 多端自动同步 → 08-11 流量审计（用户发现方案欠考虑）→ 降本 + 合并守卫 → 08-13 备份模块审计 7 项 → 08-28 方案 C 重构 → 09-08 **产品哲学定调：资产 vs 副产品** + 自动备份 A+B + auto/ 目录分离 → 09-09 多端同步砍除。**从「做」到「砍」只用了一个月，中间靠一次流量审计转弯。**
 
@@ -1435,10 +1445,12 @@
 | 10-24 21:56 | 门见证第二批任务书 v3（材料自足 + 工作量配额 + 可导出报告）— 2026-10-24 夜 | 用户三条纠正（第一波 12/12 全证伪之后）：①没要求可导出 .md 报告；②任务量轻了 5~10 倍（参考上一环 mounts/笔记/RikkaMinis审计背景包/，单份报告 80–135KB）；③不确定外部模型能… |
 | 10-25 18:06 | wide4 支 12 收口：four_way + skill_import 两门判据加固（分支 `fix/wide4-12-fourway-skillimport`，CI #2671 绿，停分支） | 基线 19e70dab（worktree wt-12，基分支含共享 _kotlin_lexer/_kotlin_ast）。改动面：2 个门脚本（+1080/−166）+ 1 份报告；生产代码 0 行、scan.sh/te… |
 | 10-26 11:19 | B7-t02 收口：skill_restore_session_cleanup + speech_active_engine 两门 12 条见证全红（分支 `fix/b7-skillrestore-speech` @ `8b865532e`，CI #2708 绿，停分支） | 基线 base/batch5-shared @ e145ec961（= main 6ac77c6b2 + 共享 _kotlin_valueflow）。门提交 8b865532e（2 文件 +1124/−720，生产 .k… |
+| 10-26 19:14 | R3-t08 收口：parts_json_funnel + skill_restore 两门 6 条见证全 CAUGHT（分支 `fix/r3-partsjs-skillrestore` @ `a924214c2`，门提交 `1c3f9c497`，CI #2731 绿，停分支） | 基线 main @ f0f14d46d。改动面 = 2 个门脚本（+693/−13）+ 报告；生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰，门 112 / 夹具 344 不变。 |
+| 10-26 19:49 | R3-t18 收口：backup_remap_rollup / mcp_oauth_lifecycle / backup_streaming_export 三门 9 条见证全 CAUGHT（分支 `fix/r3-backup-mcp` @ `335faf435`，CI #2741 绿，停分支） | 基线 main f0f14d46d。改动面 = 3 个门脚本（+928/−43），生产 .kt 0 行、scan.sh/test_scan.py/共享原语零触碰、门 112 / 夹具 344 不变。绿 sha 9c17f… |
 
 ## 11. 渲染性能 / Markdown / 长会话卡顿
 
-**跨度** 2026-08-05 ～ 2026-10-26 · **135 条** · **状态** 已闭环 + 持续加固（09-15 七轴 sweep：纯逻辑层零新 bug，真发现全在接线/时序边界）
+**跨度** 2026-08-05 ～ 2026-10-26 · **136 条** · **状态** 已闭环 + 持续加固（09-15 七轴 sweep：纯逻辑层零新 bug，真发现全在接线/时序边界）
 
 **叙事**：08-12 文字渲染空白 → 08-20 工具卡「正在调用」+ CPU 80% → 08-21 长会话流式渲染 CPU 满载 → 08-25 rikkahub 流畅性吸收 A–E（消息级聚合 + @Stable/@Immutable 纪律）→ 08-26 聚合路径复制失效 → 09-14 census 接错渲染器（7 分支全死）→ 09-15 markdown 解析器死循环（`#196` 类行挂死，**用户报「大文件加载不出来」**）→ 七轴 fuzz sweep。
 
@@ -1579,10 +1591,11 @@
 | 10-25 12:48 | WIDE3-06 收口：浏览器/webapp/KaTeX 四门见证加固（分支 `fix/meta-wide3-06-browser-webapp` @ `687daa83`，CI #2656 绿，停分支） | 基线 main 6b6c918f。4 门 × 3~4 条外部见证，修复前 14/14 全绿（门瞎）→ 修复后 14/14 CAUGHT（shared/work/meta-wide3/reattack.py 逐条 appl… |
 | 10-25 18:31 | WIDE4-02 收口：katex/budget/liveness 三门见证加固（分支 `fix/wide4-02-katex-budget-liveness` @ `9697a52e`，CI #40183453003 绿，停分支） | 基线 dbab7a3e（= 19e70dab + 共享原语 _kotlin_lexer.py/_kotlin_ast.py）。门提交 c35d62a4（3 门 +919/−325，生产 .kt 0 行改动）+ 报告 96… |
 | 10-26 09:35 | B6-t05 收口：tts_voice_and_sanitizer + katex_ready_race 两门 13 条见证全翻红（分支 `fix/b6-tts-katex` @ 门 `c367faf6f`，CI #2700 绿，停分支） | 基线 base/batch5-shared @ e145ec961（= main 6ac77c6b2 + _kotlin_valueflow）。门提交 c367faf6f（生产 .kt 0 行、scan.sh/test_… |
+| 10-26 18:37 | R3-t05 施工：chat_menu_prefs_listener + katex_ready_race 两门缝判据加固（2026-10-26 18:3x） | 分支 fix/r3-menuprefs-katex @ 5eabfb51e（基线 main f0f14d46d）。改动面 = 2 个门脚本 +580/−3 + 报告，生产 .kt 0 行、冻结面零触碰、门 112/夹具 … |
 
 ## 12. 审计 / 整改（多轮）
 
-**跨度** 2026-08-03 ～ 2026-10-26 · **373 条** · **状态** 常态机制（已固化为 security-audit-checklist / four-way-sync-check 等 skill）
+**跨度** 2026-08-03 ～ 2026-10-27 · **376 条** · **状态** 常态机制（已固化为 security-audit-checklist / four-way-sync-check 等 skill）
 
 **叙事**：08-05 首次全量代码审查 → 08-16 系统性审计 → 08-18 RC1–RC17 两轮整改（多会话并行）→ 08-26/27 模块审计批 → 09-02 bug-hunt 四会话 → 09-04 diff 驱动定向审计 → 09-09 全局第二轮 T1–T12 → 09-13 完善度横向扫描 → 09-14 度量存活度 → 09-15 七轴 sweep。**审计是本项目最稳定的工程节奏**：每次改动后必有一次独立审计，且审计本身产出纪律（skill）。
 
@@ -1961,10 +1974,13 @@
 | 10-26 12:58 | TierFlow 第三批复查（2026-10-26 12:58）—— 18.3 小时烧掉 ¥64.80，1 家见底、1 家完全未动 | PHONE 剩 13,636,623（¥27.27）/ 235 次 ｜ PHONE 剩 11,190,975（¥22.38）/ 684 次 ｜ PHONE 剩 −901（已见底）/ 1,912 次 ｜ PHONE 剩 2… |
 | 10-26 13:03 | B7-t10 收口：schedule_date_source + overlay_show_hide_latch 两门 12 条见证全翻红（分支 `fix/b7-scheduledate-overlay` @ `626eee8bf`，CI #2718 绿，停分支） | 基线 base/batch5-shared @ e145ec961。门提交 626eee8bf（2 文件 +1052/−631，生产 .kt 0 行、scan.sh/test_scan.py/三个 _kotlin_ 零触… |
 | 10-26 13:10 | B7-t12 收口：webview_holder_url_source + chat_menu_prefs_listener 两门 12 条见证全翻红（分支 `fix/b7-webviewholder-chatmenu` @ `0dfb86e2b`，门提交 `378659481`，CI #2720 绿，停分支） | 基线 base/batch7-shared @ e145ec961。门提交 378659481（2 文件 +828/−437，生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门 … |
+| 10-26 20:12 | R3-t22 收口：file_provider_paths + schedule_date_source 两门加固（分支 `fix/r3-filepaths-schedule` @ `990343cdd`，CI #2746 success，停分支） | 基线 main f0f14d46d，worktree round3b/wt/t22。改动面 = 2 个门脚本（+753/−4）+ 报告；生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零… |
+| 10-26 20:30 | TierFlow 第三批二次复查（2026-10-26 20:29）—— 7.5 小时又烧 ¥52.61，只剩 2 家有量 | \| 手机号 \| 套餐剩余 \| 礼金 \| 7.5h 消耗 \| |
+| 10-27 05:57 | 终局：U 批五支并集合 main + 发版 v1.0.0+2763 + 清理（2026-10-27 05:5x） | 用户补入第五支 test/agentloop-behavior-baseline @ 74b1ba657（CI #2758 绿，+753 行 JVM 行为测试——AgentLoopBaselineScenariosTes… |
 
 ## 13. 多会话并行协作 / 派发 / 交接
 
-**跨度** 2026-08-04 ～ 2026-10-26 · **696 条** · **状态** 成熟（skill: task-dispatch / git-parallel-collaboration / rikkaminis-dev-methodology）
+**跨度** 2026-08-04 ～ 2026-10-27 · **730 条** · **状态** 成熟（skill: task-dispatch / git-parallel-collaboration / rikkaminis-dev-methodology）
 
 **叙事**：08-07 多对话框并发操作同一 worktree 翻车（native OOM 修复）→ 08-12 多任务并行推进模式确立 → 08-15 T1–T10 十会话派发（平衡点施工）→ 08-18 RC 整改凭编号领取 → 08-22 小号 TF-A..TF-J → 08-23 bug-hunt 五会话 → 09-13 两条纪律固化：**每会话独立 clone 绝不共享 .git** + **两分支同基各一 commit 时第二个必须 rebase**。
 
@@ -2666,10 +2682,44 @@
 | 10-26 13:38 | B7-t14 收口：mirror_vm_thread + file_uri_parse_guard 两门 12 条见证全 CAUGHT（分支 `fix/b7-mirrorvm-fileuri` @ `681bc2ac5`，门提交 `57a86390a`，CI #2722 绿，停分支） | 基线 base/batch5-shared @ e145ec961。改动面 = 2 个门脚本（+1035/−697），生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门 112 … |
 | 10-26 13:53 | B7-t13 收口：calendar_events_nullable_predicate + router_lock 两门 12 条见证全 CAUGHT（分支 `fix/b7-calendar-routerlock` @ `8c95fd6ca`，CI #2723 绿，停分支） | 基线 base/batch5-shared @ e145ec961。门提交 8c95fd6ca（2 文件 +799/−265），生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门… |
 | 10-26 14:20 | 第七批收口到并集（CI 绿）+ 三批全部到达停止节点（2026-10-26 14:2x） | 第七批 14/14 支 CI success + src_diff=0；并集 integration/b7 @ 2a42ab264c（base/batch5-shared 上 14 支 --no-ff 零冲突，42 文件… |
+| 10-26 14:53 | 第三轮 B 波（收口批 · 19 门）材料已备 —— 50/50 有缝门全覆盖（2026-10-26 14:55） | 回答用户的「这是最后一批了吧？」：是。109 门里 50 门有缝（出现在共享生产文件里）、59 门孤立（无共享文件，打第三轮只能门内变异=第二轮重复，按判据不打）。第三轮 A/B 波 32 门已发 + 本批 19 门 =… |
+| 10-26 14:59 | meta-audit v5 项目收口：文档重建 + 三批（b5/b6/b7）全部合 main + main CI 全绿（2026-10-26 15:0x） | 文档：dev-history-sync 三件套重建 → 2325 条 / 24 sagas（orphans 197、multi4 177）；sanitize_dev_history.py 双验证 Remaining se… |
+| 10-26 16:59 | 第三轮门见证收口：三份报告（157 条见证 / 51 门）解析 + 主会话预检 + 22 支派发（2026-10-26 17:0x） | 输入：Report.md（r19，19 门收口批 · 57 条 + 4 条跨批缝）、Report_A__6_.md（16 门 · 48 条）、Report_B__6_.md（16 门 · 48 条）→ 合计 157 条见… |
+| 10-26 18:58 | R3-t03 收口：浏览器 tab 三件套 9 条见证（W76-W84）修前 BLIND / 修后 CAUGHT，分支 CI #2727 绿（2026-10-26） | 支 fix/r3-browser-tabs，基线 main f0f14d46d。只改 3 门脚本 + 报告：browser_tab_exec_serial_check（+332，15→20 臂）、browser_tabs… |
+| 10-26 19:06 | R3-t05 收口：两门 6 条缝见证全 CAUGHT + 分支 CI #2728 绿（2026-10-26 19:1x） | 支 fix/r3-menuprefs-katex：门提交 5eabfb51e（CI 绿 sha）+ 报告回填 b32e88c36（git diff --name-only 5eabfb51e..HEAD = 仅 fix-… |
+| 10-26 19:06 | R3-t15 收口：anthropic_thinking_budget + thinking_wiring 两门补缝（7 条跨门缝见证全 CAUGHT，CI #2733 绿，停分支） | 支线 fix/r3-thinking-wiring @ 6bcb84cf4（门提交 3110d6e29），基线 main f0f14d46d。改动面 = 2 个门脚本 +912/−95，生产 .kt 0 行，scan.s… |
+| 10-26 19:14 | R3-t08 收口：parts_json_funnel + skill_restore 两门 6 条见证全 CAUGHT（分支 `fix/r3-partsjs-skillrestore` @ `a924214c2`，门提交 `1c3f9c497`，CI #2731 绿，停分支） | 基线 main @ f0f14d46d。改动面 = 2 个门脚本（+693/−13）+ 报告；生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰，门 112 / 夹具 344 不变。 |
+| 10-26 19:17 | R3-t10 收口：outcome_known_chain + stale_closure 两门跨门缝加固（6/6 BLIND→CAUGHT，CI #2732 绿，停分支） | 分支 fix/r3-outcome-stale @ 9820d8ac0（门提交 eec06ccf3，基线 main f0f14d46d）。改动面 = 2 个门脚本（+682/−110）+ 报告，生产 .kt 0 行、sc… |
+| 10-26 19:17 | R3-t09 收口：loop_persist + loop_tool_status 两门加固，6 条见证全 CAUGHT（分支 `fix/r3-loop-persist` @ `0060a759d`，CI #2729 绿，停分支） | 基线 main f0f14d46d（第七批收口后）。改动面 = 2 个门脚本（loop_persist_slice_check.py +273/−6、loop_tool_status_transition_check.p… |
+| 10-26 19:20 | R3-t14 收口：offload_cli_args + fastio_tar_bounds 两门判据加固（6/6 见证反攻 CAUGHT，分支 `fix/r3-offload-fastio` @ `c0039db84`，CI #2735 绿，停分支） | 基线 main f0f14d46d。改动面 = 2 个门脚本（+1017/−2）+ 报告，生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门 112 / 夹具 344 不变。 |
+| 10-26 19:21 | R3-t07 收口：chat_session_id_binding + session_sheet_id_binding 两门 6 条 dual-gate 见证全 CAUGHT（分支 `fix/r3-sessionbinding` @ `80aef69a1`，CI #2734 绿，停分支） | 基线 main f0f14d46d。只改 2 个门脚本（+610/−10），生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门 112/夹具 344 不变。报告 fix-repo… |
+| 10-26 19:32 | R3-t06 收口：mirror_category_route + mirror_vm_thread 两门（第三轮 B 波 · 6 条见证全 CAUGHT，分支 CI 绿，停分支）（2026-10-26 19:2x） | 支 fix/r3-mirror-route：门提交 3c1bd1cee + 报告回填 c82c1397f（已推远端），基线 main f0f14d46d。改动面 = 2 个门脚本（+449/−5、+333/−0）+ 报告… |
+| 10-26 19:38 | R3-t01（第三轮 B 波 · 跨门缝三件）收口：9/9 见证 BLIND→CAUGHT，分支 CI 绿（2026-10-26 19:3x） | 支 fix/r3-fileuri-webview（基线 main f0f14d46d，wt/t01）。三门：file_uri_parse_guard_check / webview_holder_url_source_c… |
+| 10-26 19:49 | R3-t18 收口：backup_remap_rollup / mcp_oauth_lifecycle / backup_streaming_export 三门 9 条见证全 CAUGHT（分支 `fix/r3-backup-mcp` @ `335faf435`，CI #2741 绿，停分支） | 基线 main f0f14d46d。改动面 = 3 个门脚本（+928/−43），生产 .kt 0 行、scan.sh/test_scan.py/共享原语零触碰、门 112 / 夹具 344 不变。绿 sha 9c17f… |
+| 10-26 19:52 | R3-t21 收口：deeplink_settings_routes + open_url_broker_scheme 两门判据加固（CI #2740 绿，停分支） | 任务：round3b 第三轮 B 波（dual-gate bypass 收口批 19 门）支线 — 修 2 个门脚本，基线 main f0f14d46d，分支 fix/r3-deeplink-openurl。 |
+| 10-26 19:57 | R3-t11 收口：discarded_return_guard + provider_remember_key 两门判据加固（第三轮 dual-gate · B 波） | 分支 fix/r3-discard-rememberkey（基线 main f0f14d46d）→ 门提交 b181fe44c（2 文件 +630/−116）→ 报告回填 79e4d781（源码树等价：git diff … |
+| 10-26 19:58 | R3-t12 收口：log_url redaction + UA parity 两门值流化，6/6 见证修前 BLIND → 修后全抓，CI #2742 绿（停分支） | 支：fix/r3-logredact-ua（wt/t12，基线 main f0f14d46d）→ 门提交 0c65e85f7（2 门脚本 +737/−207，臂 17→28 / 56→60）+ 报告 4bd421bc4；… |
+| 10-26 20:08 | R3-t17 收口：三门判据加固（auto_approve / offload_permission / debug_leak） | 任务：round3b/fix-tasks/R3-t17.md（第三轮 dual-gate bypass 收口的 3 门 / 9 条见证）。 |
+| 10-26 20:08 | R3-t02 收口：三门缝隙判据加固（9 条 dual-gate 见证 9/9 反攻成红，CI #2745 绿，停分支） | 分支 fix/r3-preview-asset（基线 main f0f14d46d）→ 源码绿 sha e66acd235，回填 33cef83fd，远端 tip = 本地 HEAD。改动面 3 个门脚本（+949/−2… |
+| 10-26 20:12 | R3-t22 收口：file_provider_paths + schedule_date_source 两门加固（分支 `fix/r3-filepaths-schedule` @ `990343cdd`，CI #2746 success，停分支） | 基线 main f0f14d46d，worktree round3b/wt/t22。改动面 = 2 个门脚本（+753/−4）+ 报告；生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零… |
+| 10-26 20:13 | R3-t19 收口：skill_file_save_result + skill_import_offmain 两门补 6 条 round-3 缝级判据（分支 `fix/r3-skillfilesave` @ `009916a26`，门提交 `f686031b5`，CI #2747 绿，停分支未合并） | 基线 main f0f14d46d。改动面 = 2 个门脚本（+808/−65），生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门 112 / 夹具 344 不变。 |
+| 10-26 20:28 | R3-t04 收口：第三轮双门缝（downloads / share / mediaplayer 三门）9 条见证全 CAUGHT（分支 `fix/r3-fileprune-media` @ `66f9a20f0`，CI #2749 绿，停分支） | 基线 main f0f14d46d；工作树 round3b/wt/t04。门提交 5922aef95（3 文件 +1047/−3，生产 .kt 0 行、scan.sh/test_scan.py/共享原语零触碰、门 112… |
+| 10-26 20:40 | R3-t16 收口：xproc_boundary + exec_gate_release 两门判据加固（7 见证 7/7 CAUGHT，分支 CI #2750 绿，停分支） | 分支 fix/r3-xproc-execgate（基线 main f0f14d46d）→ 门提交 5cbb92105 + 081244e5f（打印每条判据）→ 报告 e46e3078e/576765d41/81aba54… |
+| 10-26 21:15 | R3 收口 + P1 静态门禁并行化（2026-10-26 晚） | R3（第三轮收口批）：三份报告 51 门 / 157 条见证 → 22 支全部 CI success → 并集 integration/r3 @ 6d267d3aa，CI #2751 success（112 门头 / 1… |
+| 10-26 23:15 | T1 收口：`_kotlin_ast.enclosing_conditions` else 取反优先级缺陷根治（分支 `fix/primitive-else-negation` @ `1a4eff14d`，绿 sha `b51cd03cf`，CI #2754 绿，停分支） | 基线 main 627f23f2e（R3+P1 合并后）。工作树 debt-1026/wt/primitive。改动面 = 2 个原语脚本（实现 1 行 + KDoc 契约 + 5 条臂），生产 .kt 0 行、scan… |
+| 10-26 23:25 | T2 debt-sweep 收口：清三笔登记债务（#2 file:// 路径 / #3 图片附件有界读 / #5 weather 单出口），分支 `fix/debt-sweep-1026` @ `215c1d951`，CI #2755 绿，停分支（2026-10-26 夜） | 基线 main 627f23f2e。改动面 4 生产 .kt + 3 门脚本豁免表：+170/−194（7 文件，全部在任务书白名单内）。scan.sh/test_scan.py/_kotlin_ 零触碰。 |
+| 10-26 23:28 | T1/T2 债务批收口 + 第三方 12 条新报告核实（2026-10-26 夜） | T1 fix/primitive-else-negation @ 门提交 b51cd03cf（CI 40343477296 success）：_kotlin_ast.enclosing_conditions else 取… |
+| 10-27 00:13 | U3 收口：顺路清三笔登记债（分支 `fix/misc-debt-sweep`，绿 sha `b06bae548`，CI #2756 绿，停分支） | 基线 main 627f23f2e。工作树 debt-1026/wt/misc。改动面 2 生产 .kt + 1 门脚本（+49/−2），另 1 个脚本在仓库外。scan.sh/test_scan.py/_kotlin_… |
+| 10-27 00:30 | U4 收口：`file://` 契约「跨界编码 / 内部解码」（分支 `fix/fileurl-contract` @ `8ddb12e57`，绿 sha `621602d43`，CI #2757 绿，停分支） | 基点 T2 分支 8d00395af（含 T2 全部提交）。改动 8 文件 +450/−40：生产行为 4 文件（未越任务书白名单，全逐条登记）+ 3 测试 + 1 门脚本。 |
+| 10-27 00:43 | U2 图像链收口：分支 `fix/image-chain-oob` @ `9d8d70f77`（绿 sha `db8c0b202`），CI #2759 绿，停分支（2026-10-27 凌晨） | 四笔全修，1 提交生产 6 文件 +231/−87 + 测试 2 文件（ChatImageRestoreTest 8 臂 + DailyLogRollupMetricsTest 3 臂）。 |
+| 10-27 01:24 | U 批四支收口（U1-U4 全部 CI 绿，2026-10-27 01:0x） | 四支全部 success、停分支未合 main： |
+| 10-27 01:25 | U1 收口：三原语第二轮 A1-A4 修复（分支 `fix/primitive-ast-round2` @ `5bdbc48ff`，CI #2761 绿，停分支） | 基线 1a4eff14d（T1 收口后，本支延续而非基于 main）。三个提交：47f988cfa（A1-A4）→ 626985db9（branch_value 补正）→ 5bdbc48ff（报告）。改动面 3 文件 +… |
+| 10-27 06:13 | agentloop 基线补 t09-t13 收口（分支 `test/agentloop-behavior-baseline` @ `9b608a95`，CI #2764 绿，停分支） | 基线 74b1ba65（首版 8 场景）。新增 5 场景 + 3 处 fake 见证面，生产 .kt 0 行：改动 2 个测试文件 +267/−1（AgentLoopBaselineScenariosTest.kt +2… |
+| 10-27 06:41 | 沙箱缺陷召回修复收口（分支 `fix/defect-recall-seeds` @ `9d7c0c85b`，报告 `acdeae6b8`，CI `40409678884` 绿，停分支）—— 2026-10-27 | 用户说「修吧」→ 走分支隔离全流程收口。改动 2 文件 +187/−15（SandboxDefectRegistry.kt +96、测试臂 15→20）。 |
 
 ## 14. CI / 构建 / 发布流水线
 
-**跨度** 2026-08-03 ～ 2026-10-26 · **707 条** · **状态** 稳定（Publish 步骤已加 `if: refs/heads/main` 门控）
+**跨度** 2026-08-03 ～ 2026-10-27 · **736 条** · **状态** 稳定（Publish 步骤已加 `if: refs/heads/main` 门控）
 
 **叙事**：08-04 main 编译被 WebDAV 提交弄坏（连红 4 个 run）→ 08-05 android-latest 被分支构建污染 → workflow 门控修复 → 08-17 **CI 缓存恢复旧 native .so**（Tier 0 真 bug）→ 08-24 gh_ci_wait.sh 工具化 + 重复构建幂等守卫 → 09-10 语法门 grep 大小写坑 → 09-14 workflow_dispatch 并发竞态。**「CI 绿 ≠ 逻辑对」这条纪律就是从这条 saga 长出来的。**
 
@@ -3382,10 +3432,39 @@
 | 10-26 13:38 | B7-t14 收口：mirror_vm_thread + file_uri_parse_guard 两门 12 条见证全 CAUGHT（分支 `fix/b7-mirrorvm-fileuri` @ `681bc2ac5`，门提交 `57a86390a`，CI #2722 绿，停分支） | 基线 base/batch5-shared @ e145ec961。改动面 = 2 个门脚本（+1035/−697），生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门 112 … |
 | 10-26 13:53 | B7-t13 收口：calendar_events_nullable_predicate + router_lock 两门 12 条见证全 CAUGHT（分支 `fix/b7-calendar-routerlock` @ `8c95fd6ca`，CI #2723 绿，停分支） | 基线 base/batch5-shared @ e145ec961。门提交 8c95fd6ca（2 文件 +799/−265），生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门… |
 | 10-26 14:20 | 第七批收口到并集（CI 绿）+ 三批全部到达停止节点（2026-10-26 14:2x） | 第七批 14/14 支 CI success + src_diff=0；并集 integration/b7 @ 2a42ab264c（base/batch5-shared 上 14 支 --no-ff 零冲突，42 文件… |
+| 10-26 14:59 | meta-audit v5 项目收口：文档重建 + 三批（b5/b6/b7）全部合 main + main CI 全绿（2026-10-26 15:0x） | 文档：dev-history-sync 三件套重建 → 2325 条 / 24 sagas（orphans 197、multi4 177）；sanitize_dev_history.py 双验证 Remaining se… |
+| 10-26 18:58 | R3-t03 收口：浏览器 tab 三件套 9 条见证（W76-W84）修前 BLIND / 修后 CAUGHT，分支 CI #2727 绿（2026-10-26） | 支 fix/r3-browser-tabs，基线 main f0f14d46d。只改 3 门脚本 + 报告：browser_tab_exec_serial_check（+332，15→20 臂）、browser_tabs… |
+| 10-26 19:06 | R3-t05 收口：两门 6 条缝见证全 CAUGHT + 分支 CI #2728 绿（2026-10-26 19:1x） | 支 fix/r3-menuprefs-katex：门提交 5eabfb51e（CI 绿 sha）+ 报告回填 b32e88c36（git diff --name-only 5eabfb51e..HEAD = 仅 fix-… |
+| 10-26 19:06 | R3-t15 收口：anthropic_thinking_budget + thinking_wiring 两门补缝（7 条跨门缝见证全 CAUGHT，CI #2733 绿，停分支） | 支线 fix/r3-thinking-wiring @ 6bcb84cf4（门提交 3110d6e29），基线 main f0f14d46d。改动面 = 2 个门脚本 +912/−95，生产 .kt 0 行，scan.s… |
+| 10-26 19:14 | R3-t08 收口：parts_json_funnel + skill_restore 两门 6 条见证全 CAUGHT（分支 `fix/r3-partsjs-skillrestore` @ `a924214c2`，门提交 `1c3f9c497`，CI #2731 绿，停分支） | 基线 main @ f0f14d46d。改动面 = 2 个门脚本（+693/−13）+ 报告；生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰，门 112 / 夹具 344 不变。 |
+| 10-26 19:17 | R3-t10 收口：outcome_known_chain + stale_closure 两门跨门缝加固（6/6 BLIND→CAUGHT，CI #2732 绿，停分支） | 分支 fix/r3-outcome-stale @ 9820d8ac0（门提交 eec06ccf3，基线 main f0f14d46d）。改动面 = 2 个门脚本（+682/−110）+ 报告，生产 .kt 0 行、sc… |
+| 10-26 19:17 | R3-t09 收口：loop_persist + loop_tool_status 两门加固，6 条见证全 CAUGHT（分支 `fix/r3-loop-persist` @ `0060a759d`，CI #2729 绿，停分支） | 基线 main f0f14d46d（第七批收口后）。改动面 = 2 个门脚本（loop_persist_slice_check.py +273/−6、loop_tool_status_transition_check.p… |
+| 10-26 19:20 | R3-t14 收口：offload_cli_args + fastio_tar_bounds 两门判据加固（6/6 见证反攻 CAUGHT，分支 `fix/r3-offload-fastio` @ `c0039db84`，CI #2735 绿，停分支） | 基线 main f0f14d46d。改动面 = 2 个门脚本（+1017/−2）+ 报告，生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门 112 / 夹具 344 不变。 |
+| 10-26 19:21 | R3-t07 收口：chat_session_id_binding + session_sheet_id_binding 两门 6 条 dual-gate 见证全 CAUGHT（分支 `fix/r3-sessionbinding` @ `80aef69a1`，CI #2734 绿，停分支） | 基线 main f0f14d46d。只改 2 个门脚本（+610/−10），生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门 112/夹具 344 不变。报告 fix-repo… |
+| 10-26 19:32 | R3-t06 收口：mirror_category_route + mirror_vm_thread 两门（第三轮 B 波 · 6 条见证全 CAUGHT，分支 CI 绿，停分支）（2026-10-26 19:2x） | 支 fix/r3-mirror-route：门提交 3c1bd1cee + 报告回填 c82c1397f（已推远端），基线 main f0f14d46d。改动面 = 2 个门脚本（+449/−5、+333/−0）+ 报告… |
+| 10-26 19:38 | R3-t01（第三轮 B 波 · 跨门缝三件）收口：9/9 见证 BLIND→CAUGHT，分支 CI 绿（2026-10-26 19:3x） | 支 fix/r3-fileuri-webview（基线 main f0f14d46d，wt/t01）。三门：file_uri_parse_guard_check / webview_holder_url_source_c… |
+| 10-26 19:49 | R3-t18 收口：backup_remap_rollup / mcp_oauth_lifecycle / backup_streaming_export 三门 9 条见证全 CAUGHT（分支 `fix/r3-backup-mcp` @ `335faf435`，CI #2741 绿，停分支） | 基线 main f0f14d46d。改动面 = 3 个门脚本（+928/−43），生产 .kt 0 行、scan.sh/test_scan.py/共享原语零触碰、门 112 / 夹具 344 不变。绿 sha 9c17f… |
+| 10-26 19:52 | R3-t21 收口：deeplink_settings_routes + open_url_broker_scheme 两门判据加固（CI #2740 绿，停分支） | 任务：round3b 第三轮 B 波（dual-gate bypass 收口批 19 门）支线 — 修 2 个门脚本，基线 main f0f14d46d，分支 fix/r3-deeplink-openurl。 |
+| 10-26 19:58 | R3-t12 收口：log_url redaction + UA parity 两门值流化，6/6 见证修前 BLIND → 修后全抓，CI #2742 绿（停分支） | 支：fix/r3-logredact-ua（wt/t12，基线 main f0f14d46d）→ 门提交 0c65e85f7（2 门脚本 +737/−207，臂 17→28 / 56→60）+ 报告 4bd421bc4；… |
+| 10-26 20:08 | R3-t02 收口：三门缝隙判据加固（9 条 dual-gate 见证 9/9 反攻成红，CI #2745 绿，停分支） | 分支 fix/r3-preview-asset（基线 main f0f14d46d）→ 源码绿 sha e66acd235，回填 33cef83fd，远端 tip = 本地 HEAD。改动面 3 个门脚本（+949/−2… |
+| 10-26 20:12 | R3-t22 收口：file_provider_paths + schedule_date_source 两门加固（分支 `fix/r3-filepaths-schedule` @ `990343cdd`，CI #2746 success，停分支） | 基线 main f0f14d46d，worktree round3b/wt/t22。改动面 = 2 个门脚本（+753/−4）+ 报告；生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零… |
+| 10-26 20:13 | R3-t19 收口：skill_file_save_result + skill_import_offmain 两门补 6 条 round-3 缝级判据（分支 `fix/r3-skillfilesave` @ `009916a26`，门提交 `f686031b5`，CI #2747 绿，停分支未合并） | 基线 main f0f14d46d。改动面 = 2 个门脚本（+808/−65），生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门 112 / 夹具 344 不变。 |
+| 10-26 20:28 | R3-t04 收口：第三轮双门缝（downloads / share / mediaplayer 三门）9 条见证全 CAUGHT（分支 `fix/r3-fileprune-media` @ `66f9a20f0`，CI #2749 绿，停分支） | 基线 main f0f14d46d；工作树 round3b/wt/t04。门提交 5922aef95（3 文件 +1047/−3，生产 .kt 0 行、scan.sh/test_scan.py/共享原语零触碰、门 112… |
+| 10-26 20:40 | R3-t16 收口：xproc_boundary + exec_gate_release 两门判据加固（7 见证 7/7 CAUGHT，分支 CI #2750 绿，停分支） | 分支 fix/r3-xproc-execgate（基线 main f0f14d46d）→ 门提交 5cbb92105 + 081244e5f（打印每条判据）→ 报告 e46e3078e/576765d41/81aba54… |
+| 10-26 21:49 | R3 + P1 合并 main 完成，main CI #2753 绿，发版 v1.0.0+2753，分支清零（2026-10-26 21:4x） | 用户「合并」放行 → 三项核查 → --no-ff 合入 → 手动 dispatch → 清理。 |
+| 10-26 23:15 | T1 收口：`_kotlin_ast.enclosing_conditions` else 取反优先级缺陷根治（分支 `fix/primitive-else-negation` @ `1a4eff14d`，绿 sha `b51cd03cf`，CI #2754 绿，停分支） | 基线 main 627f23f2e（R3+P1 合并后）。工作树 debt-1026/wt/primitive。改动面 = 2 个原语脚本（实现 1 行 + KDoc 契约 + 5 条臂），生产 .kt 0 行、scan… |
+| 10-26 23:25 | T2 debt-sweep 收口：清三笔登记债务（#2 file:// 路径 / #3 图片附件有界读 / #5 weather 单出口），分支 `fix/debt-sweep-1026` @ `215c1d951`，CI #2755 绿，停分支（2026-10-26 夜） | 基线 main 627f23f2e。改动面 4 生产 .kt + 3 门脚本豁免表：+170/−194（7 文件，全部在任务书白名单内）。scan.sh/test_scan.py/_kotlin_ 零触碰。 |
+| 10-27 00:13 | U3 收口：顺路清三笔登记债（分支 `fix/misc-debt-sweep`，绿 sha `b06bae548`，CI #2756 绿，停分支） | 基线 main 627f23f2e。工作树 debt-1026/wt/misc。改动面 2 生产 .kt + 1 门脚本（+49/−2），另 1 个脚本在仓库外。scan.sh/test_scan.py/_kotlin_… |
+| 10-27 00:30 | U4 收口：`file://` 契约「跨界编码 / 内部解码」（分支 `fix/fileurl-contract` @ `8ddb12e57`，绿 sha `621602d43`，CI #2757 绿，停分支） | 基点 T2 分支 8d00395af（含 T2 全部提交）。改动 8 文件 +450/−40：生产行为 4 文件（未越任务书白名单，全逐条登记）+ 3 测试 + 1 门脚本。 |
+| 10-27 00:43 | U2 图像链收口：分支 `fix/image-chain-oob` @ `9d8d70f77`（绿 sha `db8c0b202`），CI #2759 绿，停分支（2026-10-27 凌晨） | 四笔全修，1 提交生产 6 文件 +231/−87 + 测试 2 文件（ChatImageRestoreTest 8 臂 + DailyLogRollupMetricsTest 3 臂）。 |
+| 10-27 01:24 | U 批四支收口（U1-U4 全部 CI 绿，2026-10-27 01:0x） | 四支全部 success、停分支未合 main： |
+| 10-27 01:25 | U1 收口：三原语第二轮 A1-A4 修复（分支 `fix/primitive-ast-round2` @ `5bdbc48ff`，CI #2761 绿，停分支） | 基线 1a4eff14d（T1 收口后，本支延续而非基于 main）。三个提交：47f988cfa（A1-A4）→ 626985db9（branch_value 补正）→ 5bdbc48ff（报告）。改动面 3 文件 +… |
+| 10-27 06:13 | agentloop 基线补 t09-t13 收口（分支 `test/agentloop-behavior-baseline` @ `9b608a95`，CI #2764 绿，停分支） | 基线 74b1ba65（首版 8 场景）。新增 5 场景 + 3 处 fake 见证面，生产 .kt 0 行：改动 2 个测试文件 +267/−1（AgentLoopBaselineScenariosTest.kt +2… |
+| 10-27 06:41 | 沙箱缺陷召回修复收口（分支 `fix/defect-recall-seeds` @ `9d7c0c85b`，报告 `acdeae6b8`，CI `40409678884` 绿，停分支）—— 2026-10-27 | 用户说「修吧」→ 走分支隔离全流程收口。改动 2 文件 +187/−15（SandboxDefectRegistry.kt +96、测试臂 15→20）。 |
 
 ## 15. 开发档案 / 记忆 / 工具链
 
-**跨度** 2026-08-03 ～ 2026-10-26 · **196 条** · **状态** 常态维护（skill: dev-history-sync，每次 dev 会话收尾同步）
+**跨度** 2026-08-03 ～ 2026-10-27 · **200 条** · **状态** 常态维护（skill: dev-history-sync，每次 dev 会话收尾同步）
 
 **叙事**：08-06 经验记忆引擎概念 → 08-08 三平台技能架构固化 → 08-14 档案首次从记忆重建 → 08-16/24/09-04/05/07/08/10/12/13/14 反复重建（**每次重建都在修解析器或脱敏规则**）→ 09-06 知识图谱 + MCP memory → 09-14 日志「可消费性」诊断 → 09-15 sanitize 头部刷新固化。**档案本身是被反复施工的产物，不是一次性导出。**
 
@@ -3587,10 +3666,14 @@
 | 10-26 01:09 | B5-t11 收口：mcp_oauth / envvar_group 两门 12 条见证效果化（分支 fix/b5-mcpoauth-envvar @ 716d14f15，CI #2693 绿） | 基线 e145ec961（= main 6ac77c6b2 + 共享原语 _kotlin_valueflow）。门提交 557c5b57f（两文件 +739/−461，生产 .kt 0 行，scan.sh/test_sc… |
 | 10-26 10:14 | B6-t12 收口：skill_frontmatter / offload_b64 / subagent_handback 三门 18 条见证全翻红（分支 `fix/b6-skillfm-b64-handback` @ `914e8f05d`，CI #2706 绿，停分支） | 基线 base/batch6-shared @ e145ec961。门提交 64c4f46ba（3 文件 +1157/−560，生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门… |
 | 10-26 11:19 | B7-t02 收口：skill_restore_session_cleanup + speech_active_engine 两门 12 条见证全红（分支 `fix/b7-skillrestore-speech` @ `8b865532e`，CI #2708 绿，停分支） | 基线 base/batch5-shared @ e145ec961（= main 6ac77c6b2 + 共享 _kotlin_valueflow）。门提交 8b865532e（2 文件 +1124/−720，生产 .k… |
+| 10-26 19:14 | R3-t08 收口：parts_json_funnel + skill_restore 两门 6 条见证全 CAUGHT（分支 `fix/r3-partsjs-skillrestore` @ `a924214c2`，门提交 `1c3f9c497`，CI #2731 绿，停分支） | 基线 main @ f0f14d46d。改动面 = 2 个门脚本（+693/−13）+ 报告；生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰，门 112 / 夹具 344 不变。 |
+| 10-26 19:49 | R3-t18 收口：backup_remap_rollup / mcp_oauth_lifecycle / backup_streaming_export 三门 9 条见证全 CAUGHT（分支 `fix/r3-backup-mcp` @ `335faf435`，CI #2741 绿，停分支） | 基线 main f0f14d46d。改动面 = 3 个门脚本（+928/−43），生产 .kt 0 行、scan.sh/test_scan.py/共享原语零触碰、门 112 / 夹具 344 不变。绿 sha 9c17f… |
+| 10-26 20:13 | R3-t19 收口：skill_file_save_result + skill_import_offmain 两门补 6 条 round-3 缝级判据（分支 `fix/r3-skillfilesave` @ `009916a26`，门提交 `f686031b5`，CI #2747 绿，停分支未合并） | 基线 main f0f14d46d。改动面 = 2 个门脚本（+808/−65），生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门 112 / 夹具 344 不变。 |
+| 10-27 00:36 | AgentLoopEngine 行为基线 harness 建成（方案 A 落地）—— 2026-10-27 | 分支 test/agentloop-behavior-baseline @ 74b1ba65（2 文件 +753 行，纯测试、生产 .kt 0 行）。CI #2758 / run 40356871948 success，… |
 
 ## 16. 会话 / 导航 / 抽屉交互
 
-**跨度** 2026-08-03 ～ 2026-10-25 · **167 条** · **状态** 已闭环（09-01 后未再复现）
+**跨度** 2026-08-03 ～ 2026-10-27 · **169 条** · **状态** 已闭环（09-01 后未再复现）
 
 **叙事**：08-03 空对话残留 → 08-04 左滑历史抽屉 + 新建对话弹窗 → 08-06 系统返回不进 SESSION_LIST + 双击返回 → 08-07 重启后进列表页而非新会话 → 08-18 RC10 深链路径穿越 → 09-01 launch-resume 导航修复 → 09-13 冷打开空白。**「打开应用后我在哪」这个问题被修了 6 次**，每次都是不同的入口（返回键 / 重启 / 深链 / 冷启）。
 
@@ -3763,6 +3846,8 @@
 | 10-25 05:32 | META-AUDIT wide-1024 第二波启动：50 门宽扫 157 条门瞎实锤，12 支派发（2026-10-25 凌晨） | 判决（机械复证 209 条尝试）：157 GATE_BLIND_CONFIRMED / 48 CAUGHT_VERIFIED / 3 GATE_CAUGHT_WITNESS（自称 FALSIFIED 却被门抓住 = 见证… |
 | 10-25 18:06 | wide4 支 12 收口：four_way + skill_import 两门判据加固（分支 `fix/wide4-12-fourway-skillimport`，CI #2671 绿，停分支） | 基线 19e70dab（worktree wt-12，基分支含共享 _kotlin_lexer/_kotlin_ast）。改动面：2 个门脚本（+1080/−166）+ 1 份报告；生产代码 0 行、scan.sh/te… |
 | 10-25 21:43 | META-B5 第五批门见证收口启动：144 条见证机械复证 132 实锤失明，共享层先行 + 13 支派发（2026-10-25 21:4x） | 输入：A/B 两份外部报告（221KB + 291KB，24 门 × 6 尝试 = 144 条见证，v7 格式无 === GATE: 块，自写解析器 parse_report.py 双格式支持）。声明基线 1319cce… |
+| 10-26 23:25 | T2 debt-sweep 收口：清三笔登记债务（#2 file:// 路径 / #3 图片附件有界读 / #5 weather 单出口），分支 `fix/debt-sweep-1026` @ `215c1d951`，CI #2755 绿，停分支（2026-10-26 夜） | 基线 main 627f23f2e。改动面 4 生产 .kt + 3 门脚本豁免表：+170/−194（7 文件，全部在任务书白名单内）。scan.sh/test_scan.py/_kotlin_ 零触碰。 |
+| 10-27 00:30 | U4 收口：`file://` 契约「跨界编码 / 内部解码」（分支 `fix/fileurl-contract` @ `8ddb12e57`，绿 sha `621602d43`，CI #2757 绿，停分支） | 基点 T2 分支 8d00395af（含 T2 全部提交）。改动 8 文件 +450/−40：生产行为 4 文件（未越任务书白名单，全逐条登记）+ 3 测试 + 1 门脚本。 |
 
 ## 17. 平台适配 / 通知 / 图标 / 权限
 
@@ -4258,7 +4343,7 @@
 
 ## 22. 人格 / Soul / 提示词 / 技能体系
 
-**跨度** 2026-08-04 ～ 2026-10-26 · **170 条** · **状态** 稳定（技能体系已固化为 12+ 个 skill，跨会话持久）
+**跨度** 2026-08-04 ～ 2026-10-26 · **174 条** · **状态** 稳定（技能体系已固化为 12+ 个 skill，跨会话持久）
 
 **叙事**：08-07 soul.lang 接线 → 08-08 三平台技能架构 + 内置集成显示修复 → 08-09 Soul 默认人格名对齐 → 08-18 RC 整改含技能模块 → 08-26 人格(Soul)模块审计加固 + 技能/权限模块审计 → 08-29/09-04 subagent 跨会话派发 → 09-07 规则体系对照复杂度五纪律。**「给 agent 定语言 + 定运行时 + 定验证框架」这条主线在应用内的投影。**
 
@@ -4434,10 +4519,14 @@
 | 10-26 01:09 | B5-t11 收口：mcp_oauth / envvar_group 两门 12 条见证效果化（分支 fix/b5-mcpoauth-envvar @ 716d14f15，CI #2693 绿） | 基线 e145ec961（= main 6ac77c6b2 + 共享原语 _kotlin_valueflow）。门提交 557c5b57f（两文件 +739/−461，生产 .kt 0 行，scan.sh/test_sc… |
 | 10-26 10:14 | B6-t12 收口：skill_frontmatter / offload_b64 / subagent_handback 三门 18 条见证全翻红（分支 `fix/b6-skillfm-b64-handback` @ `914e8f05d`，CI #2706 绿，停分支） | 基线 base/batch6-shared @ e145ec961。门提交 64c4f46ba（3 文件 +1157/−560，生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门… |
 | 10-26 11:19 | B7-t02 收口：skill_restore_session_cleanup + speech_active_engine 两门 12 条见证全红（分支 `fix/b7-skillrestore-speech` @ `8b865532e`，CI #2708 绿，停分支） | 基线 base/batch5-shared @ e145ec961（= main 6ac77c6b2 + 共享 _kotlin_valueflow）。门提交 8b865532e（2 文件 +1124/−720，生产 .k… |
+| 10-26 14:53 | 第三轮 B 波（收口批 · 19 门）材料已备 —— 50/50 有缝门全覆盖（2026-10-26 14:55） | 回答用户的「这是最后一批了吧？」：是。109 门里 50 门有缝（出现在共享生产文件里）、59 门孤立（无共享文件，打第三轮只能门内变异=第二轮重复，按判据不打）。第三轮 A/B 波 32 门已发 + 本批 19 门 =… |
+| 10-26 19:14 | R3-t08 收口：parts_json_funnel + skill_restore 两门 6 条见证全 CAUGHT（分支 `fix/r3-partsjs-skillrestore` @ `a924214c2`，门提交 `1c3f9c497`，CI #2731 绿，停分支） | 基线 main @ f0f14d46d。改动面 = 2 个门脚本（+693/−13）+ 报告；生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰，门 112 / 夹具 344 不变。 |
+| 10-26 19:49 | R3-t18 收口：backup_remap_rollup / mcp_oauth_lifecycle / backup_streaming_export 三门 9 条见证全 CAUGHT（分支 `fix/r3-backup-mcp` @ `335faf435`，CI #2741 绿，停分支） | 基线 main f0f14d46d。改动面 = 3 个门脚本（+928/−43），生产 .kt 0 行、scan.sh/test_scan.py/共享原语零触碰、门 112 / 夹具 344 不变。绿 sha 9c17f… |
+| 10-26 20:13 | R3-t19 收口：skill_file_save_result + skill_import_offmain 两门补 6 条 round-3 缝级判据（分支 `fix/r3-skillfilesave` @ `009916a26`，门提交 `f686031b5`，CI #2747 绿，停分支未合并） | 基线 main f0f14d46d。改动面 = 2 个门脚本（+808/−65），生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门 112 / 夹具 344 不变。 |
 
 ## 23. 语音 / 多模态输入
 
-**跨度** 2026-08-03 ～ 2026-10-26 · **57 条** · **状态** 低优先级维护（语音输入可用，未再重点投入）
+**跨度** 2026-08-03 ～ 2026-10-26 · **58 条** · **状态** 低优先级维护（语音输入可用，未再重点投入）
 
 **叙事**：08-04 语音 UI 移除 → 08-06 语音功能清理（合并 main）→ 08-27 语音输入顺滑度修复 + voice-ime 合并 → 09-12 senseaudio「系统繁忙」实测 + TTFB 30s 通用缺口。**两次「移除」后又两次「修回来」**——语音这条线反复横跳，最终落在「保留但降低优先级」。
 
@@ -4500,6 +4589,7 @@
 | 10-26 09:35 | B6-t05 收口：tts_voice_and_sanitizer + katex_ready_race 两门 13 条见证全翻红（分支 `fix/b6-tts-katex` @ 门 `c367faf6f`，CI #2700 绿，停分支） | 基线 base/batch5-shared @ e145ec961（= main 6ac77c6b2 + _kotlin_valueflow）。门提交 c367faf6f（生产 .kt 0 行、scan.sh/test_… |
 | 10-26 11:19 | B7-t02 收口：skill_restore_session_cleanup + speech_active_engine 两门 12 条见证全红（分支 `fix/b7-skillrestore-speech` @ `8b865532e`，CI #2708 绿，停分支） | 基线 base/batch5-shared @ e145ec961（= main 6ac77c6b2 + 共享 _kotlin_valueflow）。门提交 8b865532e（2 文件 +1124/−720，生产 .k… |
 | 10-26 13:19 | B7-t11 收口：a11y_handler_contract + voice_cancel_guard 两门 12 条见证全翻红（分支 `fix/b7-a11y-voicecancel` @ 门提交 `e90ca37f3`，CI #2721 绿，停分支） | 基线 base/batch5-shared @ e145ec961。门提交 e90ca37f3（2 文件 +781/−336，生产 .kt 0 行、scan.sh/test_scan.py/_kotlin_ 零触碰、门 … |
+| 10-26 23:25 | T2 debt-sweep 收口：清三笔登记债务（#2 file:// 路径 / #3 图片附件有界读 / #5 weather 单出口），分支 `fix/debt-sweep-1026` @ `215c1d951`，CI #2755 绿，停分支（2026-10-26 夜） | 基线 main 627f23f2e。改动面 4 生产 .kt + 3 门脚本豁免表：+170/−194（7 文件，全部在任务书白名单内）。scan.sh/test_scan.py/_kotlin_ 零触碰。 |
 
 ## 24. 被否掉的方向（决策记录）
 
@@ -4767,3 +4857,7 @@
 | 10-24 22:53 | 门见证第四轮定案：宽扫优先（25 门/席 × zip 形态）— 2026-10-24 深夜，用户两次纠正 |
 | 10-25 00:11 | 材料换新基线 564c8f3e + 第一波修复回归验证 12/12 通过（2026-10-25） |
 | 10-25 18:39 | TierFlow 第三批 5 账号（2026-10-25 18:38）—— 全部全新满额，5/5 入选 |
+| 10-26 14:39 | 第三轮（dual-gate bypass · 32 门）材料已备（2026-10-26 14:40） |
+| 10-26 15:01 | 第三轮 B 波改单席（2026-10-26 15:01，用户纠偏「教条」） |
+| 10-26 21:44 | 大文件拆分评估（2026-10-26，main @ 627f23f2） |
+| 10-27 05:44 | 红标志（exit≠0）与误召回的机械定案 + 注册表侧修复（2026-10-27 晨） |
