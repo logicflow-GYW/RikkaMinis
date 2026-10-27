@@ -2,7 +2,6 @@ package com.rikkaminis.app.ui.chat
 
 import android.util.Log
 import com.rikkaminis.app.R
-import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.provider.LLMProvider
 
 // [FE-5 batch 7] Error handling / token sizing cluster extracted verbatim from

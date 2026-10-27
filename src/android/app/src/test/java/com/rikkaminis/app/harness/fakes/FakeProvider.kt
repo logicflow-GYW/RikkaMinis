@@ -1,6 +1,5 @@
 package com.rikkaminis.app.harness.fakes
 
-import com.rikkaminis.app.harness.contract.CooldownRecord
 
 /**
  * 可脚本化的 FakeProvider。

@@ -3,7 +3,6 @@ package com.rikkaminis.app.debug
 import android.content.Context
 import com.rikkaminis.app.MinisApp
 import com.rikkaminis.app.data.model.LLMModel
-import com.rikkaminis.app.data.model.ProviderConfig
 import com.rikkaminis.app.data.model.ProviderType
 import com.rikkaminis.app.data.model.SystemVoiceEntries
 import com.rikkaminis.app.data.repository.ProviderRepository

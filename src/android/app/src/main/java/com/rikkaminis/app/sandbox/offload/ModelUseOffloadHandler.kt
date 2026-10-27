@@ -9,7 +9,6 @@ import com.rikkaminis.app.data.model.directionalModalities
 import com.rikkaminis.app.data.model.modalityNamesInOrder
 import com.rikkaminis.app.data.repository.ProviderRepository
 import com.rikkaminis.app.debug.LLMRequestLog
-import com.rikkaminis.app.provider.safeOptString
 import com.rikkaminis.app.sandbox.NativeOffloadHandler
 import com.rikkaminis.app.sandbox.NativeOffloadRequest
 import com.rikkaminis.app.sandbox.NativeOffloadResult

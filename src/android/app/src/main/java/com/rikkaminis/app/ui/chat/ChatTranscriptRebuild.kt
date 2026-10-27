@@ -1,7 +1,6 @@
 package com.rikkaminis.app.ui.chat
 
 import android.net.Uri
-import com.rikkaminis.app.data.db.MessageEntity
 import java.io.File
 
 /**

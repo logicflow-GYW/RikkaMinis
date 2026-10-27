@@ -9,8 +9,6 @@ import com.rikkaminis.app.data.model.effectiveEntryModel
 import com.rikkaminis.app.data.model.legacyProviderNames
 import com.rikkaminis.app.data.model.modelsDevProviderIds
 import com.rikkaminis.app.provider.thinking.GatewayEffortTruth
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject

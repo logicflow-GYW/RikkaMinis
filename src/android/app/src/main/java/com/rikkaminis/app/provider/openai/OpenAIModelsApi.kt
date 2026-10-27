@@ -3,7 +3,6 @@ package com.rikkaminis.app.provider.openai
 import android.content.Context
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.normalizeModalities
-import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.provider.ModelsDevApi
 import com.rikkaminis.app.provider.ProviderModelsCache
 import com.rikkaminis.app.provider.applyUserAgentOverride

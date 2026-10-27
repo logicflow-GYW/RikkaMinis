@@ -1,6 +1,5 @@
 package com.rikkaminis.app.harness.adapter.real
 
-import com.rikkaminis.app.harness.adapter.TraceBridge
 import com.rikkaminis.app.harness.contract.HarnessTraceEvent
 import com.rikkaminis.app.harness.contract.TraceEventType
 import com.rikkaminis.app.tools.AgentTraceRecorder

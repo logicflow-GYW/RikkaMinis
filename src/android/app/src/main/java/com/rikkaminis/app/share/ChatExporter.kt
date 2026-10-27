@@ -1,7 +1,6 @@
 package com.rikkaminis.app.share
 
 import android.content.Context
-import android.content.Intent
 import android.net.Uri
 import androidx.core.content.FileProvider
 import com.rikkaminis.app.data.db.ChatSessionEntity

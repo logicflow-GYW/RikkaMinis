@@ -1,6 +1,5 @@
 package com.rikkaminis.app.data.repository
 
-import com.rikkaminis.app.data.model.ImageEndpointMode
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ModelEntry
 import com.rikkaminis.app.data.model.ModelOverrides

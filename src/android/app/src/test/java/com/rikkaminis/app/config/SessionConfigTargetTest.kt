@@ -1,6 +1,5 @@
 package com.rikkaminis.app.config
 
-import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test

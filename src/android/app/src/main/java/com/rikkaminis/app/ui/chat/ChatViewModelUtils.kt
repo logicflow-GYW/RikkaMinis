@@ -1,7 +1,6 @@
 package com.rikkaminis.app.ui.chat
 
 import org.json.JSONObject
-import java.net.URLConnection
 
 /**
  * Stable same-turn identity for tool calls. UI-only fields are excluded using

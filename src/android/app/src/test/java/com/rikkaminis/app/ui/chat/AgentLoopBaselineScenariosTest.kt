@@ -9,8 +9,6 @@ import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.LLMStreamChunk
 import com.rikkaminis.app.data.model.LLMUsage
 import com.rikkaminis.app.data.model.ModelEntry
-import com.rikkaminis.app.data.model.ThinkingLevel
-import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.tools.ToolExecutionResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers

@@ -8,18 +8,6 @@ package com.rikkaminis.app.provider.openai
 // base-URL predicate helpers. OpenAIProvider now references the shared
 // network-package listener directly.
 
-import okhttp3.Call
-import okhttp3.EventListener
-import okhttp3.Handshake
-import okhttp3.HttpUrl
-import okhttp3.Protocol
-import okhttp3.Connection
-import okhttp3.Request
-import okhttp3.Response
-import java.io.IOException
-import java.net.InetAddress
-import java.net.Proxy
-import java.net.InetSocketAddress
 
 /**
  * [T-android-openai-codex-timeout]

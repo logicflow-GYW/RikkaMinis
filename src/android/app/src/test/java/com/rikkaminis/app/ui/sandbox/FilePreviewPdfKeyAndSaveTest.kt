@@ -1,6 +1,5 @@
 package com.rikkaminis.app.ui.sandbox
 
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 

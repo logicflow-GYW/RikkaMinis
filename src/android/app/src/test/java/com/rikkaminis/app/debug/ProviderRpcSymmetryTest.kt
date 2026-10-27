@@ -5,7 +5,6 @@ import com.rikkaminis.app.data.model.ProviderCredential
 import com.rikkaminis.app.data.model.ProviderInstance
 import com.rikkaminis.app.data.model.ProviderType
 import com.rikkaminis.app.provider.openai.openAIKeyAuthHeader
-import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

@@ -1,7 +1,6 @@
 package com.rikkaminis.app.provider.voice
 
 import android.util.Base64
-import android.util.Log
 import com.rikkaminis.app.provider.applyUserAgentOverride
 import com.rikkaminis.app.provider.gemini.GeminiBasePath
 import kotlinx.coroutines.suspendCancellableCoroutine

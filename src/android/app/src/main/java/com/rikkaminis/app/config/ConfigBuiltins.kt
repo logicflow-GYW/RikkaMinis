@@ -30,10 +30,7 @@ import com.rikkaminis.app.ui.chat.setThinkingLevel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
-import java.util.TimeZone
 
 /**
  * Built-in field registrations. Single place to add or remove a

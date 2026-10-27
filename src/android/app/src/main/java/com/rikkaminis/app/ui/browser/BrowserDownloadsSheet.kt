@@ -2,7 +2,6 @@ package com.rikkaminis.app.ui.browser
 
 import android.content.Context
 import android.content.Intent
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer

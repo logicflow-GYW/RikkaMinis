@@ -1,35 +1,17 @@
 package com.rikkaminis.app.ui.chat
 
 import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.net.Uri
-import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.compose.foundation.lazy.LazyListState
-import com.rikkaminis.app.agent.runtime.AgentExecutionBudget
 import com.rikkaminis.app.agent.runtime.AgentRunEvent
 import com.rikkaminis.app.agent.runtime.AgentRunPhase
-import com.rikkaminis.app.agent.runtime.AgentRunState
-import com.rikkaminis.app.agent.runtime.AgentTerminal
-import com.rikkaminis.app.agent.runtime.AgentTerminalReason
-import com.rikkaminis.app.agent.runtime.ProviderAttemptOutcome
-import com.rikkaminis.app.agent.Level
 import com.rikkaminis.app.agent.ToolLoopDetector
-import com.rikkaminis.app.browser.BrowserActionInput
 import com.rikkaminis.app.browser.BrowserTabPool
 import com.rikkaminis.app.data.db.MessageEntity
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.outlined.Build
-import androidx.compose.material.icons.outlined.Extension
-import com.rikkaminis.app.data.BPETokenizer
-import com.rikkaminis.app.data.ContextOffload
-import com.rikkaminis.app.data.ContextPolicy
 import com.rikkaminis.app.conversation.ContextCompactor
 import com.rikkaminis.app.conversation.ContextGrowthTracker
 import com.rikkaminis.app.conversation.compactAll
@@ -47,8 +29,6 @@ import com.rikkaminis.app.data.model.LLMUsage
 import com.rikkaminis.app.data.model.ModelEntry
 import com.rikkaminis.app.data.model.ModelGroup
 import com.rikkaminis.app.data.model.ThinkingLevel
-import com.rikkaminis.app.sandbox.offload.ModelStreamErrorException
-import com.rikkaminis.app.sandbox.offload.ProviderExecutionGateway
 import com.rikkaminis.app.R
 import com.rikkaminis.app.data.repository.ChatRepository
 import com.rikkaminis.app.data.repository.MemoryRepository
@@ -63,15 +43,6 @@ import com.rikkaminis.app.sandbox.ExecutionCoordinator
 import com.rikkaminis.app.sandbox.PRootKernel
 import com.rikkaminis.app.tools.AgentTraceRecorder
 import com.rikkaminis.app.tools.AgentTools
-import com.rikkaminis.app.tools.FileEditTool
-import com.rikkaminis.app.tools.FileReadTool
-import com.rikkaminis.app.tools.FileWriteTool
-import com.rikkaminis.app.tools.MemoryRollupTool
-import com.rikkaminis.app.tools.MemoryTools
-import com.rikkaminis.app.tools.ReadImageTool
-import com.rikkaminis.app.tools.SubagentSkill
-import com.rikkaminis.app.tools.SubagentToolCall
-import com.rikkaminis.app.tools.ToolConcurrencyPolicy
 import com.rikkaminis.app.tools.ToolExecutionResult
 import com.rikkaminis.app.tools.ToolFailureHook
 import com.rikkaminis.app.offload.OffloadPermissionManager
@@ -92,23 +63,15 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.toList
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.yield
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 // [T-android-split-chat] StreamingDelta / ChatMessage / QueuedPrompt /
 // ToolBlockStatus / SlashCommand / AssistantBlock moved verbatim to ChatModels.kt.

@@ -2,7 +2,6 @@ package com.rikkaminis.app.ui.chat
 
 import com.rikkaminis.app.agent.runtime.AgentExecutionBudget
 import com.rikkaminis.app.agent.runtime.BudgetSnapshot
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test

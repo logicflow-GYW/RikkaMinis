@@ -2,7 +2,6 @@ package com.rikkaminis.app.harness.adapter
 
 import com.rikkaminis.app.harness.contract.FaultScenario
 import com.rikkaminis.app.harness.contract.ScenarioReport
-import com.rikkaminis.app.harness.contract.TerminalState
 import com.rikkaminis.app.harness.runner.ScenarioVerifier
 import com.rikkaminis.app.harness.scenarios.FaultScenarios
 import kotlinx.coroutines.runBlocking
